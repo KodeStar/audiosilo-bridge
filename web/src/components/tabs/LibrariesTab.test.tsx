@@ -57,6 +57,8 @@ describe('LibrariesTab', () => {
     await userEvent.click(await screen.findByRole('button', { name: 'Check now' }));
     expect(await screen.findByText(/Checking/)).toBeInTheDocument();
     expect(lastCall(calls, 'POST', '/api/libraries/check')).toBeDefined();
+    // The check runs in the background: no reload of the old results.
+    expect(calls.filter((c) => c.url === '/api/libraries')).toHaveLength(1);
   });
 
   it('says why there are no libraries', async () => {

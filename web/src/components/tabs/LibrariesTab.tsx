@@ -1,12 +1,14 @@
-import { useCallback, useState, type FormEvent } from 'react';
+import { useState, type FormEvent } from 'react';
 import { errorText, type ApiClient } from '@/api/client';
 import type { Library } from '@/api/types';
-import { usePoll } from '@/lib/usePoll';
-import { dateTime, relativeTime } from '@/lib/time';
-import { checkBadges, checkMountPath, mountEditable, mountSource } from '@/lib/libraries';
+import { useLoad } from '@/lib/useLoad';
+import { checkBadges, checkMountPath, mountSource } from '@/lib/libraries';
+import { Ago } from '../ui/Ago';
 import { Card } from '../ui/Card';
 import { Badge } from '../ui/Badge';
+import { EmptyState } from '../ui/EmptyState';
 import { Field, inputClass } from '../ui/Field';
+import { Loading } from '../ui/Loading';
 import { Notice } from '../ui/Notice';
 import { Row } from '../ui/Row';
 import { primaryButton, secondaryButton } from '../ui/buttons';
@@ -14,41 +16,30 @@ import { primaryButton, secondaryButton } from '../ui/buttons';
 export const LIBRARIES_POLL_MS = 10000;
 
 export function LibrariesTab({ client }: { client: ApiClient }) {
-  const [libraries, setLibraries] = useState<Library[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const {
+    data: libraries,
+    setData: setLibraries,
+    error,
+    setError,
+  } = useLoad(async () => (await client.libraries()).libraries, LIBRARIES_POLL_MS);
   const [checking, setChecking] = useState(false);
   const [checkNote, setCheckNote] = useState<string | null>(null);
 
-  const load = useCallback(async () => {
-    try {
-      setLibraries((await client.libraries()).libraries);
-      setError(null);
-    } catch (err) {
-      setError(errorText(err, "Can't reach the Bridge."));
-    }
-  }, [client]);
-  usePoll(load, LIBRARIES_POLL_MS);
-
+  // The check runs in the background (a 202), so reloading now would show the
+  // old results: the poll picks the new ones up.
   async function checkNow() {
     setChecking(true);
     setCheckNote(null);
     try {
       await client.checkLibraries();
       setCheckNote('Checking. The results show here when they are in.');
-      await load();
     } catch (err) {
       setError(errorText(err, "Couldn't start the check."));
     }
     setChecking(false);
   }
 
-  if (libraries === null) {
-    return error ? (
-      <Notice kind="error">{error}</Notice>
-    ) : (
-      <p className="text-sm text-dim">Loading...</p>
-    );
-  }
+  if (libraries === null) return <Loading error={error} />;
 
   return (
     <div className="flex flex-col gap-5">
@@ -69,13 +60,10 @@ export function LibrariesTab({ client }: { client: ApiClient }) {
       {error && <Notice kind="error">{error}</Notice>}
       {checkNote && <Notice kind="info">{checkNote}</Notice>}
       {libraries.length === 0 ? (
-        <div className="rounded-xl border border-edge bg-surface p-8">
-          <h2 className="mb-2 text-lg font-medium text-hi">No libraries yet</h2>
-          <p className="max-w-prose text-sm text-dim">
-            The server lists its libraries in its answer to the Bridge&apos;s heartbeat. Pair the
-            Bridge on the Status tab, then wait for the first heartbeat.
-          </p>
-        </div>
+        <EmptyState title="No libraries yet">
+          The server lists its libraries in its answer to the Bridge&apos;s heartbeat. Pair the
+          Bridge on the Status tab, then wait for the first heartbeat.
+        </EmptyState>
       ) : (
         libraries.map((lib) => (
           <LibraryCard key={lib.library.id} client={client} lib={lib} onSaved={setLibraries} />
@@ -156,16 +144,10 @@ function LibraryCard({
             )}
           </>
         )}
-        <Row label="Checked">
-          {lib.checked_at ? (
-            <span title={dateTime(lib.checked_at)}>{relativeTime(lib.checked_at)}</span>
-          ) : (
-            'Not yet'
-          )}
-        </Row>
+        <Row label="Checked">{lib.checked_at ? <Ago at={lib.checked_at} /> : 'Not yet'}</Row>
       </dl>
       <div className="mt-4">
-        {!mountEditable(lib) ? (
+        {lib.locked ? (
           <p className="text-xs text-dim">
             AUDIOSILO_BRIDGE_LIBRARIES sets the folders, so they can&apos;t be changed here.
           </p>

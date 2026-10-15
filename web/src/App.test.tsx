@@ -44,11 +44,26 @@ describe('App', () => {
 
   it('shows the LAN guard message on a 403', async () => {
     localStorage.setItem(TOKEN_KEY, 'tok');
-    mockFetch({ 'GET /api/status': { status: 403, body: { error: 'lan only' } } });
+    mockFetch({
+      'GET /api/status': { status: 403, body: { error: 'lan only', code: 'lan_only' } },
+    });
     render(<App />);
     expect(await screen.findByRole('alert')).toHaveTextContent(
       'This page answers only the local network.',
     );
+  });
+
+  it('signs out from the header', async () => {
+    localStorage.setItem(TOKEN_KEY, 'tok');
+    const { calls } = mockFetch({
+      'GET /api/status': { body: pairedStatus() },
+      'POST /api/logout': { status: 204 },
+    });
+    render(<App />);
+    await userEvent.click(await screen.findByRole('button', { name: 'Sign out' }));
+    expect(await screen.findByLabelText('Password')).toBeInTheDocument();
+    expect(localStorage.getItem(TOKEN_KEY)).toBeNull();
+    expect(calls.some((c) => c.method === 'POST' && c.url === '/api/logout')).toBe(true);
   });
 
   it('opens the tab named in the hash and switches tabs', async () => {

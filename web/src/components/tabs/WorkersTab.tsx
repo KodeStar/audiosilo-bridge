@@ -1,37 +1,15 @@
-import { useEffect, useState } from 'react';
-import { errorText, type ApiClient } from '@/api/client';
-import type { Worker } from '@/api/types';
+import type { ApiClient } from '@/api/client';
+import { useLoad } from '@/lib/useLoad';
 import { relativeTime } from '@/lib/time';
-import { Notice } from '../ui/Notice';
+import { EmptyState } from '../ui/EmptyState';
+import { Loading } from '../ui/Loading';
 
 export function WorkersTab({ client }: { client: ApiClient }) {
-  const [workers, setWorkers] = useState<Worker[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const { data: workers, error } = useLoad(async () => (await client.workers()).workers, null);
 
-  useEffect(() => {
-    let cancelled = false;
-    client
-      .workers()
-      .then((r) => {
-        if (!cancelled) setWorkers(r.workers);
-      })
-      .catch((err: unknown) => {
-        if (!cancelled) setError(errorText(err, "Can't reach the Bridge."));
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [client]);
-
-  if (error) return <Notice kind="error">{error}</Notice>;
-  if (workers === null) return <p className="text-sm text-dim">Loading...</p>;
+  if (workers === null) return <Loading error={error} />;
   if (workers.length === 0) {
-    return (
-      <div className="rounded-xl border border-edge bg-surface p-8">
-        <h2 className="mb-2 text-lg font-medium text-hi">No workers</h2>
-        <p className="max-w-prose text-sm text-dim">ASR workers connect here in a later version.</p>
-      </div>
-    );
+    return <EmptyState title="No workers">ASR workers connect here in a later version.</EmptyState>;
   }
   return (
     <ul className="flex flex-col gap-3">

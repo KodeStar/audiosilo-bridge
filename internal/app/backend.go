@@ -95,7 +95,7 @@ func (b *Bridge) SetMount(ctx context.Context, id int64, path string) error {
 	if err != nil {
 		return err
 	}
-	b.CheckMappings(context.WithoutCancel(ctx))
+	b.CheckMappings(context.WithoutCancel(ctx), id)
 	return nil
 }
 

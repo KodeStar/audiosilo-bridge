@@ -67,7 +67,7 @@ images (`AUDIOSILO_BRIDGE_DATA`), else `~/.audiosilo-bridge`.
 | Setting | Environment | Default | |
 |---|---|---|---|
 | `listen` | `AUDIOSILO_BRIDGE_LISTEN` | `:8091` | the page's address |
-| `server.url` | `AUDIOSILO_BRIDGE_SERVER_URL` | | the server as the Bridge reaches it |
+| `server.url` | `AUDIOSILO_BRIDGE_SERVER_URL` | | the server as the Bridge reaches it: where a pairing code from the environment goes, and the pairing form's starting value |
 | `public_url` | `AUDIOSILO_BRIDGE_PUBLIC_URL` | | the page as your LAN reaches it; the console links to it |
 | `libraries` | `AUDIOSILO_BRIDGE_LIBRARIES` (`<id>=<path>;...`) | the server's own root path | where the Bridge sees each library |
 | `mapping.check_minutes` | `AUDIOSILO_BRIDGE_MAPPING_CHECK_MINUTES` | `10` | how often the mappings are checked |

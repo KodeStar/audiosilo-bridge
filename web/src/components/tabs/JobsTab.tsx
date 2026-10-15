@@ -1,12 +1,11 @@
-import { useCallback, useState } from 'react';
+import { useState } from 'react';
 import { ApiError, errorText, type ApiClient } from '@/api/client';
 import type { ServerJob, VerifyResult } from '@/api/types';
-import { usePoll } from '@/lib/usePoll';
-import { bytes, dateTime, elapsed, relativeTime } from '@/lib/time';
+import { useLoad } from '@/lib/useLoad';
+import { bytes, elapsed } from '@/lib/time';
 import {
   appendOlder,
   hasResult,
-  isCancellable,
   jobTarget,
   jobsPollInterval,
   mergeJobs,
@@ -18,32 +17,37 @@ import {
   stateTone,
 } from '@/lib/jobs';
 import { VERIFY_KIND, parseVerifyResult, prettyJSON } from '@/lib/verify';
+import { Ago } from '../ui/Ago';
 import { Badge } from '../ui/Badge';
+import { EmptyState } from '../ui/EmptyState';
+import { Loading } from '../ui/Loading';
 import { Notice } from '../ui/Notice';
 import { dangerButton, secondaryButton } from '../ui/buttons';
 
 export const JOBS_PAGE = 50;
 
 export function JobsTab({ client }: { client: ApiClient }) {
-  const [jobs, setJobs] = useState<ServerJob[] | null>(null);
   // The cursor for the next older page (undefined: no more).
   const [nextBefore, setNextBefore] = useState<number | undefined>(undefined);
   // Older pages were loaded: polling then keeps them and their cursor.
   const [pagedBack, setPagedBack] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const [loadingOlder, setLoadingOlder] = useState(false);
 
-  const load = useCallback(async () => {
-    try {
+  const {
+    data: jobs,
+    setData: setJobs,
+    error,
+    setError,
+    reload,
+  } = useLoad(
+    async () => {
       const res = await client.jobs(undefined, JOBS_PAGE);
-      setJobs((shown) => mergeJobs(res.jobs, shown ?? []));
       if (!pagedBack) setNextBefore(res.next_before);
-      setError(null);
-    } catch (err) {
-      setError(errorText(err, "Can't reach the Bridge."));
-    }
-  }, [client, pagedBack]);
-  usePoll(load, jobs === null ? jobsPollInterval([]) : jobsPollInterval(jobs));
+      return res.jobs;
+    },
+    (shown) => jobsPollInterval(shown ?? []),
+    { merge: (fresh, shown) => mergeJobs(fresh, shown ?? []) },
+  );
 
   async function older() {
     if (nextBefore === undefined) return;
@@ -59,13 +63,7 @@ export function JobsTab({ client }: { client: ApiClient }) {
     setLoadingOlder(false);
   }
 
-  if (jobs === null) {
-    return error ? (
-      <Notice kind="error">{error}</Notice>
-    ) : (
-      <p className="text-sm text-dim">Loading...</p>
-    );
-  }
+  if (jobs === null) return <Loading error={error} />;
 
   return (
     <div className="flex flex-col gap-4">
@@ -75,17 +73,14 @@ export function JobsTab({ client }: { client: ApiClient }) {
       </p>
       {error && <Notice kind="error">{error}</Notice>}
       {jobs.length === 0 ? (
-        <div className="rounded-xl border border-edge bg-surface p-8">
-          <h2 className="mb-2 text-lg font-medium text-hi">No jobs yet</h2>
-          <p className="max-w-prose text-sm text-dim">
-            When the server&apos;s console queues a job, this Bridge takes it and it shows here.
-          </p>
-        </div>
+        <EmptyState title="No jobs yet">
+          When the server&apos;s console queues a job, this Bridge takes it and it shows here.
+        </EmptyState>
       ) : (
         <ul className="flex flex-col gap-3">
           {jobs.map((job) => (
             <li key={job.id}>
-              <JobCard client={client} job={job} onChanged={load} />
+              <JobCard client={client} job={job} onChanged={reload} />
             </li>
           ))}
         </ul>
@@ -152,7 +147,7 @@ function JobCard({
             </span>
           )}
         </div>
-        {isCancellable(job) && (
+        {job.state === 'running' && (
           <button type="button" onClick={cancel} disabled={busy} className={dangerButton}>
             {busy ? 'Cancelling...' : 'Cancel'}
           </button>
@@ -183,12 +178,11 @@ function JobCard({
 
       <p className="mt-2 text-xs text-dim">
         Attempt {job.attempt}
-        {' - '}claimed <span title={dateTime(job.claimed_at)}>{relativeTime(job.claimed_at)}</span>
-        {' - '}updated <span title={dateTime(job.updated_at)}>{relativeTime(job.updated_at)}</span>
+        {' - '}claimed <Ago at={job.claimed_at} />
+        {' - '}updated <Ago at={job.updated_at} />
         {job.finished_at && (
           <>
-            {' - '}finished{' '}
-            <span title={dateTime(job.finished_at)}>{relativeTime(job.finished_at)}</span>
+            {' - '}finished <Ago at={job.finished_at} />
           </>
         )}
       </p>

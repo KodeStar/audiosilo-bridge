@@ -9,17 +9,15 @@ import {
   appendLogs,
   formatAttrs,
   lastLogId,
-  levelTone,
+  levelClass,
 } from '@/lib/logs';
 import { inputClass } from '../ui/Field';
 import { Notice } from '../ui/Notice';
 
-const TONE_TEXT = { bad: 'text-red-300', warn: 'text-amber-300' } as const;
-
 export function LogsTab({ client }: { client: ApiClient }) {
   const [level, setLevel] = useState<LogLevel>('INFO');
-  const [entries, setEntries] = useState<LogEntry[]>([]);
-  const [loaded, setLoaded] = useState(false);
+  // null: nothing fetched yet at this level.
+  const [entries, setEntries] = useState<LogEntry[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [follow, setFollow] = useState(true);
   // The newest id shown, read by the poll without restarting it.
@@ -34,11 +32,10 @@ export function LogsTab({ client }: { client: ApiClient }) {
       const res = await client.logs(lastId.current, level);
       if (gen !== generation.current) return;
       setEntries((shown) => {
-        const next = appendLogs(shown, res.entries);
+        const next = appendLogs(shown ?? [], res.entries);
         lastId.current = lastLogId(next);
         return next;
       });
-      setLoaded(true);
       setError(null);
     } catch (err) {
       if (gen === generation.current) setError(errorText(err, "Can't reach the Bridge."));
@@ -51,8 +48,7 @@ export function LogsTab({ client }: { client: ApiClient }) {
   function changeLevel(next: LogLevel) {
     generation.current++;
     lastId.current = 0;
-    setEntries([]);
-    setLoaded(false);
+    setEntries(null);
     setLevel(next);
   }
 
@@ -82,8 +78,8 @@ export function LogsTab({ client }: { client: ApiClient }) {
             className={inputClass}
           >
             {LOG_LEVELS.map((l) => (
-              <option key={l} value={l}>
-                {l === 'INFO' ? 'INFO and up' : l === 'WARN' ? 'WARN and up' : 'ERROR'}
+              <option key={l.level} value={l.level}>
+                {l.label}
               </option>
             ))}
           </select>
@@ -101,25 +97,18 @@ export function LogsTab({ client }: { client: ApiClient }) {
         aria-label="Bridge log"
         className="h-[60vh] overflow-y-auto rounded-xl border border-edge bg-deep p-3 font-mono text-xs"
       >
-        {!loaded ? (
+        {entries === null ? (
           <p className="text-dim">Loading...</p>
         ) : entries.length === 0 ? (
           <p className="text-dim">No log lines at this level yet.</p>
         ) : (
           <ol className="flex flex-col gap-0.5">
             {entries.map((e) => {
-              const tone = levelTone(e.level);
               const attrs = formatAttrs(e.attrs);
               return (
                 <li key={e.id} className="break-words whitespace-pre-wrap">
-                  <span className="text-dim" title={dateTime(e.time)}>
-                    {dateTime(e.time)}
-                  </span>{' '}
-                  <span
-                    className={tone === 'bad' || tone === 'warn' ? TONE_TEXT[tone] : 'text-dim'}
-                  >
-                    {e.level}
-                  </span>{' '}
+                  <span className="text-dim">{dateTime(e.time)}</span>{' '}
+                  <span className={levelClass(e.level)}>{e.level}</span>{' '}
                   <span className="text-hi">{e.message}</span>
                   {attrs && <span className="text-dim"> {attrs}</span>}
                 </li>

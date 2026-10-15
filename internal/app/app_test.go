@@ -174,27 +174,44 @@ func TestPairBeatMapAndRevoke(t *testing.T) {
 		t.Fatalf("a setting the environment sets = %v, want ErrLocked", err)
 	}
 
-	// The server revokes the token: the Bridge unpairs and says why.
+	// The server refuses the token: the Bridge stops (no client), says why, and
+	// keeps the token for its retries.
 	fs.mu.Lock()
 	fs.revoked = true
 	fs.mu.Unlock()
 	b.Kick()
-	waitFor(t, "the unpair", func() bool { return !b.conn.Pairing().Paired })
+	waitFor(t, "the refusal", func() bool { return !b.conn.Pairing().Paired })
 	if reason := b.conn.Pairing().UnpairedReason; !strings.Contains(reason, "refused") {
 		t.Fatalf("reason = %q", reason)
 	}
+	if b.conn.Client() != nil || b.conn.retryClient() != nil {
+		t.Fatal("a refused token is used before its retry is due")
+	}
+	// Once the server takes it again (the admin is an admin again), a due retry
+	// ends the refusal.
+	fs.mu.Lock()
+	fs.revoked = false
+	fs.mu.Unlock()
+	b.conn.mu.Lock()
+	b.conn.refusedAt = time.Now().Add(-RefusedRetry)
+	b.conn.mu.Unlock()
+	b.Kick()
+	waitFor(t, "the token to work again", func() bool { return b.conn.Pairing().Paired && b.conn.Client() != nil })
 	cancel()
 	if err := <-done; err != nil {
 		t.Fatalf("Run = %v", err)
 	}
 
-	// A restart stays unpaired and keeps the reason.
+	// A restart keeps the pairing (and the token).
 	b2, oneTime, err := New(context.Background(), Options{DataDir: data, Version: "0.1.0", Listen: "127.0.0.1:0", Logger: log})
 	if err != nil || oneTime != "" {
 		t.Fatalf("restart = %v, %q", err, oneTime)
 	}
-	if p := b2.conn.Pairing(); p.Paired || p.UnpairedReason == "" || p.ServerName != "Home" {
+	if p := b2.conn.Pairing(); !p.Paired || p.UnpairedReason != "" || p.ServerName != "Home" {
 		t.Fatalf("after a restart = %+v", p)
+	}
+	if err := b2.Unpair(context.Background()); err != nil || b2.conn.Client() != nil {
+		t.Fatalf("unpair from the page = %v", err)
 	}
 	_ = b2.db.Close()
 }

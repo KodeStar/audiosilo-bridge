@@ -30,10 +30,9 @@ const ClientHeader = "X-AudioSilo-Client"
 // ClientName is the app part of ClientHeader.
 const ClientName = "AudioSilo Bridge"
 
-// The server's job states (its migration 0047).
+// The server's job states the Bridge reports (its migration 0047); the
+// finished ones are the store's (store.JobDone, ...), the same words.
 const (
-	StateQueued         = "queued"
-	StateClaimed        = "claimed"
 	StateRunning        = "running"
 	StateDone           = "done"
 	StateFailed         = "failed"

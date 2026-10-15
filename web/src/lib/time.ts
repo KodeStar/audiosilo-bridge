@@ -30,18 +30,19 @@ export function relativeTime(s: string | null | undefined, now: Date = new Date(
   return future ? `in ${text}` : `${text} ago`;
 }
 
+const DATE_TIME = new Intl.DateTimeFormat(undefined, {
+  year: 'numeric',
+  month: 'short',
+  day: 'numeric',
+  hour: '2-digit',
+  minute: '2-digit',
+  second: '2-digit',
+});
+
 // dateTime is a short local date and time, or "" for no time.
 export function dateTime(s: string | null | undefined): string {
   const t = parseTime(s);
-  if (!t) return '';
-  return t.toLocaleString(undefined, {
-    year: 'numeric',
-    month: 'short',
-    day: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-  });
+  return t ? DATE_TIME.format(t) : '';
 }
 
 // bytes words a size: "512 B", "1.5 KB", "3.2 MB", "1.1 GB".

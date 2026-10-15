@@ -821,8 +821,11 @@ internal/
             book is NEVER mapped: with nothing to compare, a wrong mount would look
             right and a later write job would land in the wrong folder (Phase 2b's
             podcast libraries start empty: revisit there). Registry holds the
-            server's libraries from the last heartbeat and each check; CheckAll is
-            one library at a time and serialised.
+            server's libraries from the last heartbeat and each check; Check(ids...)
+            checks some or all, one library at a time, and never overlaps itself: a
+            check asked for while one runs is done right after it by that call (so a
+            mapping edited mid-check is never missed). A mapping edit re-checks only
+            its library (each check stats files and writes a probe).
   jobs/     the generic runner. Handlers declare a kind and a lane (lanes: light=2
             in Phase 0); the claim loop asks only for kinds whose lane has room, and
             waits (no claim) while unpaired or full. A running job reports at least
@@ -836,7 +839,11 @@ internal/
             handoff log). Recovery runs once the link is up: a kind no longer run is
             failed. The final report carries the last progress (a throttled step may
             never have been sent) and is retried every 30 s until the server takes it
-            or says it moved on. Cancel is the page's own cancel. LocalReporter is a
+            or says it moved on (only while one is owed: a flag, not a poll); old
+            finished jobs are pruned hourly. Progress only RECORDS: the job's
+            reporting goroutine sends (a new step at once, other changes within
+            ProgressEvery, a keepalive otherwise), so a handler never waits on the
+            network. Cancel is the page's own cancel. LocalReporter is a
             send-nothing Reporter for handler tests.
   verify/   bridge.verify: params {hold_seconds 0-600}; resolves the library from the
             registry, asks the server for the book's files (path "" = the sample
@@ -850,7 +857,11 @@ internal/
             every 30 s or when kicked, records the server's libraries and starts a
             mapping check (in the background, TryLock) when they changed or one is
             due, then beats again with the results; a 401 anywhere unpairs with a
-            reason the page shows. Run LISTENS BEFORE pairing from
+            reason the page shows. A 401 does NOT drop the token: Conn.Refuse keeps it
+            and the heartbeat retries it every RefusedRetry (5 min), since a demoted
+            admin's Bridge works again once they are an admin again (an unpair or a
+            new pairing revoked it for good, so a retry just fails); Client() is nil
+            while refused, so nothing else calls in. Run LISTENS BEFORE pairing from
             AUDIOSILO_BRIDGE_PAIR_CODE, so a start that can't serve doesn't spend the
             code. Edits go through config.SaveFile and reload the config.
   api/      transport-only HTTP of the Bridge's page (/api/*): login (rate limited),
@@ -864,8 +875,8 @@ internal/
             are typed (ErrInvalid 400, ErrRefused 422, ErrNotFound 404, ErrLocked 409
             code locked, ErrConflict 409, ErrUnreachable 502), anything else a 500
             that is logged and never echoed.
-  logring/  an slog.Handler that tees Info-and-up into a 2,000-line ring for the
-            page's log view; attributes whose key holds token/password/code/key/
+  logring/  an slog.Handler that tees Info-and-up into a 2,000-line circular buffer
+            for the page's log view (levels kept as slog.Level, encoded by name); attributes whose key holds token/password/code/key/
             secret/cookie/authorization are redacted.
   web/      go:embed of the page (build-tag selected) + SPA-fallback static serving
 web/          the Bridge's page: Vite + React 19 + TS + Tailwind v4 (npm, Node 24); dist/ is
@@ -883,13 +894,16 @@ web/          the Bridge's page: Vite + React 19 + TS + Tailwind v4 (npm, Node 2
               runs, else 15 s; a bridge.verify result renders as a file table.
 scripts/build-web.sh   build the SPA + embed it into bin/ (-tags embedui)
 Dockerfile             multi-stage: node build -> go build (embedui, cross-built on
-                       $BUILDPLATFORM) -> whisper-cli fetch (sidecars' pinned release
-                       asset, sha256-checked) -> three targets: `slim` (debian-slim +
+                       $BUILDPLATFORM, only cmd/ and internal/ copied, Go and npm cache
+                       mounts) -> whisper-cpu / whisper-cuda (docker/fetch-whisper.sh:
+                       sidecars' pinned release asset, sha256-checked; each target
+                       fetches only its own) -> three targets: `slim` (debian-slim +
                        ffmpeg), `cuda` (nvidia/cuda runtime + the CUDA whisper-cli,
                        amd64) and `full` (slim + the CPU whisper-cli; the last stage,
                        the default). No agent CLI in any (decision 15: the agent
                        container ships with Phase 1a). docker/entrypoint.sh starts as
-                       root only to own /bridge-data, sets umask 022 and drops to
+                       root only to own /bridge-data (a chown -R only when the
+                       folder isn't PUID:PGID's yet), sets umask 022 and drops to
                        PUID:PGID with setpriv. image.yml builds them on v* tags and
                        dispatch (amd64+arm64; cuda amd64).
 compose.example.yaml   the server (libraries :ro) and the Bridge (the same folders :rw)

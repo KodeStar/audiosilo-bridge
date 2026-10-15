@@ -36,12 +36,11 @@ type Handler struct {
 	libs  Libraries
 	mount mapping.MountFunc
 	books func() mapping.BookSource
-	now   func() time.Time
 }
 
 // New returns the handler. books returns the server link (nil while unpaired).
 func New(libs Libraries, mount mapping.MountFunc, books func() mapping.BookSource) *Handler {
-	return &Handler{libs: libs, mount: mount, books: books, now: time.Now}
+	return &Handler{libs: libs, mount: mount, books: books}
 }
 
 // Kind is bridge.verify.
@@ -69,7 +68,7 @@ type Result struct {
 
 // Run verifies the job's book through the mapping.
 func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (any, error) {
-	start := h.now()
+	start := time.Now()
 	var p Params
 	if len(job.Params) > 0 {
 		if err := json.Unmarshal(job.Params, &p); err != nil {
@@ -122,13 +121,13 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 	for i := 1; i <= p.HoldSeconds; i++ {
 		select {
 		case <-ctx.Done():
-			res.ElapsedMS = h.now().Sub(start).Milliseconds()
+			res.ElapsedMS = time.Since(start).Milliseconds()
 			return res, ctx.Err()
 		case <-time.After(time.Second):
 		}
 		rep.Progress(jobs.Progress{Step: "hold", Message: "Holding, as asked", Done: i, Total: p.HoldSeconds})
 	}
-	res.ElapsedMS = h.now().Sub(start).Milliseconds()
+	res.ElapsedMS = time.Since(start).Milliseconds()
 	if !ok {
 		return res, errors.New("the Bridge's copy doesn't match the server's: " + problem)
 	}

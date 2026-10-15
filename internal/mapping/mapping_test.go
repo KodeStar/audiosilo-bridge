@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -175,7 +176,7 @@ func TestRegistry(t *testing.T) {
 	}
 	mount := func(id int64, root string) (string, bool) { return root, false }
 	src := books{book: &link.Book{Path: "Author/Book", Files: files}}
-	r.CheckAll(context.Background(), src, mount, func() time.Time { return now })
+	r.Check(context.Background(), src, mount, func() time.Time { return now })
 	if r.Due(now.Add(30*time.Second), time.Minute) || !r.Due(now.Add(time.Minute), time.Minute) {
 		t.Fatal("Due ignores the interval")
 	}
@@ -190,10 +191,67 @@ func TestRegistry(t *testing.T) {
 	if !r.SetLibraries([]link.Library{{ID: 1, Name: "A renamed", Root: root}}) {
 		t.Fatal("a rename and a removal are a change")
 	}
-	if r.Status(2) != nil || r.Status(1) == nil {
-		t.Fatal("a removed library's check stayed, or a kept one's went")
+	if sts := r.Statuses(); len(sts) != 1 || sts[0].LibraryID != 1 {
+		t.Fatalf("a removed library's check stayed, or a kept one's went: %+v", sts)
 	}
 	if _, ok := r.Library(2); ok {
 		t.Fatal("a removed library is still listed")
 	}
+}
+
+// Check can check one library, and a check asked for while another runs is
+// done right after it, never at the same time.
+func TestCheckOneAndQueued(t *testing.T) {
+	t.Parallel()
+	r := NewRegistry()
+	root, files := library(t)
+	r.SetLibraries([]link.Library{{ID: 1, Root: root}, {ID: 2, Root: root}})
+	now := time.Date(2026, 10, 15, 10, 0, 0, 0, time.UTC)
+	release := make(chan struct{})
+	var mu sync.Mutex
+	inFlight, maxInFlight, calls := 0, 0, 0
+	src := slowBooks{book: &link.Book{Path: "Author/Book", Files: files}, before: func() {
+		mu.Lock()
+		inFlight++
+		calls++
+		maxInFlight = max(maxInFlight, inFlight)
+		first := calls == 1
+		mu.Unlock()
+		if first {
+			<-release
+		}
+	}, after: func() { mu.Lock(); inFlight--; mu.Unlock() }}
+	mount := func(id int64, root string) (string, bool) { return root, false }
+	done := make(chan struct{})
+	go func() { r.Check(context.Background(), src, mount, func() time.Time { return now }, 1); close(done) }()
+	for {
+		mu.Lock()
+		c := calls
+		mu.Unlock()
+		if c == 1 {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	// Asked for while the first check runs: queued, and this call returns at once.
+	r.Check(context.Background(), src, mount, func() time.Time { return now }, 2)
+	close(release)
+	<-done
+	if maxInFlight != 1 || calls != 2 {
+		t.Fatalf("checks in flight at once = %d, calls = %d; want 1 and 2", maxInFlight, calls)
+	}
+	if len(r.Statuses()) != 2 {
+		t.Fatalf("statuses = %+v", r.Statuses())
+	}
+}
+
+type slowBooks struct {
+	book          *link.Book
+	before, after func()
+}
+
+func (b slowBooks) Book(context.Context, int64, string) (*link.Book, error) {
+	b.before()
+	defer b.after()
+	return b.book, nil
 }

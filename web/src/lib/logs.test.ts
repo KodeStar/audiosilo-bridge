@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { appendLogs, formatAttrs, lastLogId, levelTone } from './logs';
+import { appendLogs, formatAttrs, lastLogId, levelClass } from './logs';
 import type { LogEntry } from '@/api/types';
 
 const e = (id: number): LogEntry => ({
@@ -34,10 +34,10 @@ describe('formatAttrs', () => {
   });
 });
 
-describe('levelTone', () => {
+describe('levelClass', () => {
   it('colours warnings and errors', () => {
-    expect(levelTone('ERROR')).toBe('bad');
-    expect(levelTone('WARN')).toBe('warn');
-    expect(levelTone('INFO')).toBe('muted');
+    expect(levelClass('ERROR')).toBe('text-red-300');
+    expect(levelClass('warn')).toBe('text-amber-300');
+    expect(levelClass('INFO')).toBe('text-dim');
   });
 });

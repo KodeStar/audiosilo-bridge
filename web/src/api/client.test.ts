@@ -61,10 +61,32 @@ describe('ApiClient', () => {
     await expect(c.status()).rejects.toMatchObject({ message: 'Request failed (500)' });
   });
 
-  it('maps a 403 to the LAN guard', async () => {
+  it("maps the LAN guard's 403 to the LAN-only screen", async () => {
+    mockFetch({ 'GET /api/status': { status: 403, body: { error: 'nope', code: 'lan_only' } } });
+    const { c, onLanBlocked } = client();
+    await expect(c.status()).rejects.toMatchObject({
+      status: 403,
+      message: LAN_ONLY_MESSAGE,
+      code: 'lan_only',
+    });
+    expect(onLanBlocked).toHaveBeenCalledOnce();
+  });
+
+  it('keeps a 403 without the lan_only code as the answer', async () => {
     mockFetch({ 'GET /api/status': { status: 403, body: { error: 'nope' } } });
     const { c, onLanBlocked } = client();
-    await expect(c.status()).rejects.toMatchObject({ status: 403, message: LAN_ONLY_MESSAGE });
+    await expect(c.status()).rejects.toMatchObject({ status: 403, message: 'nope' });
+    expect(onLanBlocked).not.toHaveBeenCalled();
+  });
+
+  it("lets the LAN guard's 403 win on the password route too", async () => {
+    mockFetch({
+      'POST /api/password': { status: 403, body: { error: 'nope', code: 'lan_only' } },
+    });
+    const { c, onLanBlocked } = client();
+    await expect(c.changePassword('old', 'newer-password')).rejects.toMatchObject({
+      message: LAN_ONLY_MESSAGE,
+    });
     expect(onLanBlocked).toHaveBeenCalledOnce();
   });
 

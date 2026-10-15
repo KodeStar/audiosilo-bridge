@@ -1,5 +1,5 @@
 import type { Library } from '@/api/types';
-import type { Tone } from './jobs';
+import type { Tone } from '@/components/ui/Badge';
 
 // mountSource words where a library's mount path comes from.
 export function mountSource(lib: Library): string {
@@ -23,9 +23,4 @@ export function checkMountPath(text: string): string | null {
   const t = text.trim();
   if (t === '' || t.startsWith('/')) return null;
   return 'The folder must be an absolute path, starting with /.';
-}
-
-// mountEditable: the environment (AUDIOSILO_BRIDGE_LIBRARIES) sets the mappings.
-export function mountEditable(lib: Library): boolean {
-  return !lib.locked;
 }

@@ -4,7 +4,6 @@ import {
   JOBS_POLL_IDLE_MS,
   appendOlder,
   hasResult,
-  isCancellable,
   jobTarget,
   jobsPollInterval,
   mergeJobs,
@@ -30,15 +29,6 @@ describe('state labels', () => {
   it('shows an unknown state as it is', () => {
     expect(stateLabel('paused')).toBe('paused');
     expect(stateTone('paused')).toBe('muted');
-  });
-});
-
-describe('isCancellable', () => {
-  it('is only a running job', () => {
-    expect(isCancellable(jobFixture())).toBe(true);
-    for (const state of ['done', 'failed', 'needs_attention', 'cancelled', 'lost']) {
-      expect(isCancellable(jobFixture({ state }))).toBe(false);
-    }
   });
 });
 

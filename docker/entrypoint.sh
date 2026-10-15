@@ -15,7 +15,11 @@ if [ "$(id -u)" = "0" ]; then
   PUID="${PUID:-1000}"
   PGID="${PGID:-1000}"
   mkdir -p /bridge-data
-  chown -R "${PUID}:${PGID}" /bridge-data 2>/dev/null || true
+  # Only when the folder isn't the user's yet (a first start, or a changed
+  # PUID/PGID): a walk of the whole data folder on every start grows with it.
+  if [ "$(stat -c %u:%g /bridge-data)" != "${PUID}:${PGID}" ]; then
+    chown -R "${PUID}:${PGID}" /bridge-data 2>/dev/null || true
+  fi
   exec setpriv --reuid="${PUID}" --regid="${PGID}" --clear-groups --inh-caps=-all "$@"
 fi
 

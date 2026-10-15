@@ -1,9 +1,8 @@
-import type { Settings } from '@/api/types';
+import type { SettingKey, Settings } from '@/api/types';
 
-// The settings keys as the Bridge names them in Settings.locked.
-export const KEY_PUBLIC_URL = 'public_url';
-export const KEY_CHECK_MINUTES = 'mapping.check_minutes';
-export const KEY_LIBRARIES = 'libraries';
+// The settings keys the form edits, as the Bridge names them in Settings.locked.
+export const KEY_PUBLIC_URL: SettingKey = 'public_url';
+export const KEY_CHECK_MINUTES: SettingKey = 'mapping.check_minutes';
 
 export const LOCKED_NOTE = 'Set by the environment';
 
@@ -11,7 +10,7 @@ export const MIN_CHECK_MINUTES = 1;
 export const MAX_CHECK_MINUTES = 1440;
 
 // isLocked: the environment sets this key, so the page can't change it.
-export function isLocked(s: Pick<Settings, 'locked'> | null | undefined, key: string): boolean {
+export function isLocked(s: Pick<Settings, 'locked'> | null | undefined, key: SettingKey): boolean {
   return !!s && Array.isArray(s.locked) && s.locked.includes(key);
 }
 

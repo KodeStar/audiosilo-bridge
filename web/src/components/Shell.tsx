@@ -59,9 +59,7 @@ export function Shell({ client, onSignedOut }: ShellProps) {
         {active === 'status' && <StatusTab client={client} />}
         {active === 'libraries' && <LibrariesTab client={client} />}
         {active === 'jobs' && <JobsTab client={client} />}
-        {active === 'settings' && (
-          <SettingsTab client={client} onSignOut={signOut} signingOut={signingOut} />
-        )}
+        {active === 'settings' && <SettingsTab client={client} />}
         {active === 'workers' && <WorkersTab client={client} />}
         {active === 'logs' && <LogsTab client={client} />}
       </main>

@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from 'react';
+import { useCallback, useMemo, useRef, useState } from 'react';
 import { ApiClient, LAN_ONLY_MESSAGE } from '@/api/client';
 import { clearToken, getToken, setToken } from '@/lib/token';
 import { Login } from '@/components/Login';
@@ -14,27 +14,24 @@ export function App() {
   const tokenRef = useRef(token);
   tokenRef.current = token;
 
+  const signedOut = useCallback(() => {
+    clearToken();
+    setTokenState(null);
+  }, []);
+
   const client = useMemo(
     () =>
       new ApiClient({
         getToken: () => tokenRef.current,
-        onSignedOut: () => {
-          clearToken();
-          setTokenState(null);
-        },
+        onSignedOut: signedOut,
         onLanBlocked: () => setBlocked(true),
       }),
-    [],
+    [signedOut],
   );
 
   function signedIn(t: string) {
     setToken(t);
     setTokenState(t);
-  }
-
-  function signedOut() {
-    clearToken();
-    setTokenState(null);
   }
 
   if (blocked) {

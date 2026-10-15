@@ -26,14 +26,16 @@ export class ApiError extends Error {
 // The message the LAN guard's 403 is shown as.
 export const LAN_ONLY_MESSAGE = 'This page answers only the local network.';
 
+// The code the LAN guard marks its 403 with (any other 403, like the password
+// change's wrong current password, is the call's own answer).
+export const LAN_ONLY_CODE = 'lan_only';
+
 export interface ApiClientOptions {
-  // Prepended to every path ("" = same origin).
-  baseUrl?: string;
   // The current session token, or null when signed out.
   getToken: () => string | null;
   // A 401 on an authed call: the session is gone.
   onSignedOut: () => void;
-  // A 403: the LAN guard refused this address.
+  // The LAN guard refused this address.
   onLanBlocked?: () => void;
 }
 
@@ -42,26 +44,21 @@ interface RequestOptions {
   body?: unknown;
   // false: no token is sent (sign in).
   auth?: boolean;
-  // true: a 403 is the call's own answer (the password change's wrong current
-  // password), not the LAN guard, so its {error} is shown as it is.
-  own403?: boolean;
 }
 
 export class ApiClient {
-  private readonly baseUrl: string;
   private readonly getToken: () => string | null;
   private readonly onSignedOut: () => void;
   private readonly onLanBlocked: () => void;
 
   constructor(opts: ApiClientOptions) {
-    this.baseUrl = (opts.baseUrl ?? '').replace(/\/+$/, '');
     this.getToken = opts.getToken;
     this.onSignedOut = opts.onSignedOut;
     this.onLanBlocked = opts.onLanBlocked ?? (() => {});
   }
 
   private async request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
-    const { method = 'GET', body, auth = true, own403 = false } = opts;
+    const { method = 'GET', body, auth = true } = opts;
     const headers: Record<string, string> = {};
     if (auth) {
       const token = this.getToken();
@@ -72,17 +69,17 @@ export class ApiClient {
       headers['Content-Type'] = 'application/json';
       payload = JSON.stringify(body);
     }
-    const res = await fetch(`${this.baseUrl}${path}`, { method, headers, body: payload });
+    const res = await fetch(path, { method, headers, body: payload });
     if (!res.ok) {
       const { error, code } = await readError(res);
       if (res.status === 401 && auth) this.onSignedOut();
-      if (res.status === 403 && !own403) {
+      if (res.status === 403 && code === LAN_ONLY_CODE) {
         this.onLanBlocked();
         throw new ApiError(403, LAN_ONLY_MESSAGE, code);
       }
       throw new ApiError(res.status, error, code);
     }
-    if (res.status === 204 || res.status === 202) return undefined as T;
+    // 202 and 204 carry no body.
     const text = await res.text();
     return (text === '' ? undefined : JSON.parse(text)) as T;
   }
@@ -98,11 +95,7 @@ export class ApiClient {
 
   // 403 = the current password is wrong; 400 = the new one is too short.
   changePassword(current: string, next: string): Promise<void> {
-    return this.request('/api/password', {
-      method: 'POST',
-      body: { current, new: next },
-      own403: true,
-    });
+    return this.request('/api/password', { method: 'POST', body: { current, new: next } });
   }
 
   // --- status and pairing ---
@@ -156,9 +149,8 @@ export class ApiClient {
   }
 
   // --- logs and workers ---
-  logs(after: number, level: LogLevel, limit?: number): Promise<LogsResponse> {
+  logs(after: number, level: LogLevel): Promise<LogsResponse> {
     const q = new URLSearchParams({ after: String(after), level });
-    if (limit) q.set('limit', String(limit));
     return this.request(`/api/logs?${q}`);
   }
 

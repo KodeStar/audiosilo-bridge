@@ -22,6 +22,8 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+
+	"github.com/kodestar/audiosilo-bridge/internal/fsutil"
 )
 
 // Named secrets recognized by the Bridge.
@@ -189,23 +191,7 @@ func (v *Vault) Set(name, value string) error {
 	if err := os.MkdirAll(v.dir, 0o700); err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(v.dir, "."+name+"-*.tmp")
-	if err != nil {
-		return err
-	}
-	defer func() { _ = os.Remove(tmp.Name()) }()
-	if _, err := tmp.Write(sealed); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmp.Name(), path)
+	return fsutil.WriteFileAtomic(path, sealed, 0o600)
 }
 
 // Get returns the value for name, ("", nil) when absent, or ErrWrongKey when

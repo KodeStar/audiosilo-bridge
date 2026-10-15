@@ -1,6 +1,5 @@
 import type { Progress, ServerJob } from '@/api/types';
-
-export type Tone = 'good' | 'bad' | 'warn' | 'busy' | 'muted';
+import type { Tone } from '@/components/ui/Badge';
 
 const STATES: Record<string, { label: string; tone: Tone; hint?: string }> = {
   running: { label: 'Running', tone: 'busy' },
@@ -25,21 +24,12 @@ export function stateHint(state: string): string {
   return STATES[state]?.hint ?? '';
 }
 
-// isCancellable: only a job running here can be stopped from this page.
-export function isCancellable(job: ServerJob): boolean {
-  return job.state === 'running';
-}
-
-export function anyRunning(jobs: ServerJob[]): boolean {
-  return jobs.some((j) => j.state === 'running');
-}
-
 export const JOBS_POLL_BUSY_MS = 3000;
 export const JOBS_POLL_IDLE_MS = 15000;
 
 // jobsPollInterval polls quickly while a job runs, slowly otherwise.
 export function jobsPollInterval(jobs: ServerJob[]): number {
-  return anyRunning(jobs) ? JOBS_POLL_BUSY_MS : JOBS_POLL_IDLE_MS;
+  return jobs.some((j) => j.state === 'running') ? JOBS_POLL_BUSY_MS : JOBS_POLL_IDLE_MS;
 }
 
 // reportText says whether the server has heard a finished job's outcome ("" for

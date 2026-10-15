@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"slices"
@@ -27,6 +28,7 @@ type fakeServer struct {
 	notHeld  map[int64]bool // answer 409 not_held for these
 	failing  bool           // every update fails with a network error
 	unauthed bool           // every call is a 401
+	hang     chan struct{}  // updates wait for it to close (nil: none)
 	changed  chan struct{}  // closed on every update
 }
 
@@ -64,6 +66,15 @@ func (f *fakeServer) Claim(ctx context.Context, kinds []string, wait time.Durati
 
 func (f *fakeServer) UpdateJob(ctx context.Context, id int64, u link.Update) (*link.Job, error) {
 	f.mu.Lock()
+	if hang := f.hang; hang != nil {
+		f.mu.Unlock()
+		select {
+		case <-hang:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		f.mu.Lock()
+	}
 	defer f.mu.Unlock()
 	if f.unauthed {
 		return nil, link.ErrUnauthorized
@@ -467,5 +478,32 @@ func waitFor(t *testing.T, cond func() bool) {
 			t.Fatal("timed out")
 		}
 		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// A handler's Progress never waits on the network: with the server hanging,
+// reporting steps returns at once.
+func TestProgressNeverBlocks(t *testing.T) {
+	t.Parallel()
+	db, srv := openStore(t), newFakeServer()
+	srv.add(&link.Job{ID: 1, Kind: "k.v", Attempts: 1})
+	hang := make(chan struct{})
+	took := make(chan time.Duration, 1)
+	h := handler{kind: "k.v", lane: LaneLight, fn: func(ctx context.Context, j Job, rep *Reporter) (any, error) {
+		srv.mu.Lock()
+		srv.hang = hang
+		srv.mu.Unlock()
+		start := time.Now()
+		for i := range 20 {
+			rep.Progress(Progress{Step: fmt.Sprintf("step-%d", i)})
+		}
+		took <- time.Since(start)
+		close(hang)
+		return nil, nil
+	}}
+	r := New(db, func() Server { return srv }, nil, testOpts(), h)
+	runFor(t, r, func() bool { s, _ := srv.finalState(1); return s == link.StateDone })
+	if d := <-took; d > 500*time.Millisecond {
+		t.Fatalf("20 progress steps took %v with the server hanging", d)
 	}
 }

@@ -2,6 +2,9 @@ package logring
 
 import (
 	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
 	"log/slog"
 	"strings"
 	"testing"
@@ -42,5 +45,24 @@ func TestRingKeepsRedactsAndPages(t *testing.T) {
 		if e.Attrs[k] != "[redacted]" {
 			t.Errorf("%s = %q, want redacted", k, e.Attrs[k])
 		}
+	}
+}
+
+// The ring keeps exactly the newest entries in order as it wraps, and a level
+// encodes as its name.
+func TestRingWraps(t *testing.T) {
+	t.Parallel()
+	ring := New(3)
+	log := slog.New(NewHandler(slog.NewTextHandler(io.Discard, nil), ring))
+	for i := range 7 {
+		log.Info(fmt.Sprint(i))
+	}
+	got := ring.Since(0, 0, slog.LevelInfo)
+	if len(got) != 3 || got[0].Message != "4" || got[2].Message != "6" || got[2].ID != 7 {
+		t.Fatalf("ring = %+v", got)
+	}
+	raw, _ := json.Marshal(got[0])
+	if !strings.Contains(string(raw), `"level":"INFO"`) {
+		t.Fatalf("entry JSON = %s", raw)
 	}
 }

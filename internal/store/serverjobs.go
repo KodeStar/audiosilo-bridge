@@ -175,9 +175,3 @@ func (db *DB) queryServerJobs(ctx context.Context, q string, args ...any) ([]Ser
 	}
 	return out, rows.Err()
 }
-
-// DeleteSetting removes a key/value setting (a no-op when absent).
-func (db *DB) DeleteSetting(ctx context.Context, key string) error {
-	_, err := db.sql.ExecContext(ctx, `DELETE FROM settings WHERE key = ?`, key)
-	return err
-}

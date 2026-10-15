@@ -1,12 +1,13 @@
-import { useCallback, useState, type FormEvent } from 'react';
+import { useState, type FormEvent } from 'react';
 import { errorText, type ApiClient } from '@/api/client';
 import type { Status } from '@/api/types';
-import { usePoll } from '@/lib/usePoll';
-import { dateTime, relativeTime } from '@/lib/time';
+import { useLoad } from '@/lib/useLoad';
 import { laneText, onlineText, secretKeyText } from '@/lib/status';
+import { Ago } from '../ui/Ago';
 import { Card } from '../ui/Card';
 import { Badge } from '../ui/Badge';
 import { Field, inputClass } from '../ui/Field';
+import { Loading } from '../ui/Loading';
 import { Notice } from '../ui/Notice';
 import { Row } from '../ui/Row';
 import { dangerButton, primaryButton, secondaryButton } from '../ui/buttons';
@@ -14,26 +15,13 @@ import { dangerButton, primaryButton, secondaryButton } from '../ui/buttons';
 export const STATUS_POLL_MS = 5000;
 
 export function StatusTab({ client }: { client: ApiClient }) {
-  const [status, setStatus] = useState<Status | null>(null);
-  const [loadError, setLoadError] = useState<string | null>(null);
+  const {
+    data: status,
+    setData: setStatus,
+    error: loadError,
+  } = useLoad(() => client.status(), STATUS_POLL_MS);
 
-  const load = useCallback(async () => {
-    try {
-      setStatus(await client.status());
-      setLoadError(null);
-    } catch (err) {
-      setLoadError(errorText(err, "Can't reach the Bridge."));
-    }
-  }, [client]);
-  usePoll(load, STATUS_POLL_MS);
-
-  if (!status) {
-    return loadError ? (
-      <Notice kind="error">{loadError}</Notice>
-    ) : (
-      <p className="text-sm text-dim">Loading...</p>
-    );
-  }
+  if (!status) return <Loading error={loadError} />;
 
   const { pairing } = status;
   return (
@@ -116,21 +104,9 @@ function PairedCard({
       <dl className="divide-y divide-edge">
         <Row label="Server">{pairing.server_name || 'Unnamed server'}</Row>
         <Row label="Address">{pairing.server_url}</Row>
-        <Row label="Paired">
-          {pairing.paired_at ? (
-            <span title={dateTime(pairing.paired_at)}>{relativeTime(pairing.paired_at)}</span>
-          ) : (
-            'Unknown'
-          )}
-        </Row>
+        <Row label="Paired">{pairing.paired_at ? <Ago at={pairing.paired_at} /> : 'Unknown'}</Row>
         <Row label="Last heartbeat">
-          {status.last_heartbeat ? (
-            <span title={dateTime(status.last_heartbeat)}>
-              {relativeTime(status.last_heartbeat)}
-            </span>
-          ) : (
-            'None yet'
-          )}
+          {status.last_heartbeat ? <Ago at={status.last_heartbeat} /> : 'None yet'}
         </Row>
         {status.last_error && (
           <Row label="Last error">

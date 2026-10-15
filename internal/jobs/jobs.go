@@ -14,10 +14,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log/slog"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/kodestar/audiosilo-bridge/internal/link"
@@ -122,8 +122,9 @@ type Runner struct {
 	// changed is closed (and replaced) when a lane frees up or the link
 	// changes, waking the claim loop.
 	changed chan struct{}
-	// recovered is set once the open jobs of the last run were picked up.
-	recovered bool
+	// retry is set when a final report didn't reach the server (or a start
+	// found unreported ones), so retryReports looks again.
+	retry atomic.Bool
 }
 
 // New returns a Runner over the handlers. server returns the server link (nil
@@ -229,6 +230,7 @@ func (r *Runner) Run(ctx context.Context) {
 	wg.Add(1)
 	go func() { defer wg.Done(); r.retryReports(ctx) }()
 	backoff := time.Second
+	recovered := false
 	for ctx.Err() == nil {
 		srv := r.server()
 		kinds, changed := r.freeKinds()
@@ -240,8 +242,8 @@ func (r *Runner) Run(ctx context.Context) {
 			}
 			continue
 		}
-		if !r.recoveredYet() {
-			r.recover(ctx, srv, &wg)
+		if !recovered {
+			recovered = r.recover(ctx, srv, &wg)
 			continue
 		}
 		start := time.Now()
@@ -273,44 +275,44 @@ func (r *Runner) Run(ctx context.Context) {
 	}
 }
 
-func (r *Runner) recoveredYet() bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.recovered
-}
-
 // recover picks up what the last run left: jobs still running are resumed
 // under their claim (a kind this Bridge no longer runs is failed), finished
-// jobs wait for retryReports.
-func (r *Runner) recover(ctx context.Context, srv Server, wg *sync.WaitGroup) {
+// jobs wait for retryReports. It reports whether it could read them.
+func (r *Runner) recover(ctx context.Context, srv Server, wg *sync.WaitGroup) bool {
 	open, err := r.store.OpenServerJobs(ctx)
 	if err != nil {
 		r.log.Warn("bridge: reading the open jobs failed", "err", err)
 		sleep(ctx, 5*time.Second)
-		return
+		return false
 	}
-	r.mu.Lock()
-	r.recovered = true
-	r.mu.Unlock()
 	for _, sj := range open {
 		if sj.State != store.JobRunning {
+			r.retry.Store(true)
 			continue
 		}
-		job := Job{ID: sj.ID, Kind: sj.Kind, LibraryID: sj.LibraryID, Path: sj.Path, Params: sj.Params, Attempt: sj.Attempt}
+		job := storedJob(sj)
 		if _, ok := r.handlers[job.Kind]; !ok {
 			msg := "the Bridge restarted and no longer runs " + job.Kind + " jobs"
 			if err := r.store.FinishServerJob(ctx, job.ID, job.Attempt, store.JobFailed, nil, msg); err != nil {
 				r.log.Warn("bridge: recording a job failed", "job", job.ID, "err", err)
 			}
+			r.retry.Store(true) // retryReports sends it
 			continue
 		}
 		r.log.Info("bridge: resuming a job after a restart", "job", job.ID, "kind", job.Kind, "attempt", job.Attempt)
 		r.start(ctx, srv, job, wg, true)
 	}
+	return true
 }
 
+// jobOf is a claimed job as a Handler sees it.
 func jobOf(j *link.Job) Job {
 	return Job{ID: j.ID, Kind: j.Kind, LibraryID: j.LibraryID, Path: j.Path, Params: j.Params, Attempt: j.Attempts}
+}
+
+// storedJob is a job the store recorded, as a Handler sees it.
+func storedJob(sj store.ServerJob) Job {
+	return Job{ID: sj.ID, Kind: sj.Kind, LibraryID: sj.LibraryID, Path: sj.Path, Params: sj.Params, Attempt: sj.Attempt}
 }
 
 // run is one running job.
@@ -325,8 +327,7 @@ type run struct {
 func (r *Runner) start(ctx context.Context, srv Server, job Job, wg *sync.WaitGroup, resumed bool) {
 	h, ok := r.handlers[job.Kind]
 	if !resumed {
-		lib, path := job.LibraryID, job.Path
-		if err := r.store.RecordClaim(ctx, store.ServerJob{ID: job.ID, Kind: job.Kind, LibraryID: lib, Path: path,
+		if err := r.store.RecordClaim(ctx, store.ServerJob{ID: job.ID, Kind: job.Kind, LibraryID: job.LibraryID, Path: job.Path,
 			Params: job.Params, Attempt: job.Attempt}); err != nil {
 			r.log.Warn("bridge: recording a claim failed", "job", job.ID, "err", err)
 		}
@@ -363,28 +364,20 @@ func (r *Runner) release(ru *run) {
 // reports how it ended. base is the runner's context (for the final report,
 // which must go out after the job's own context ended).
 func (r *Runner) execute(ctx, base context.Context, srv Server, h Handler, ru *run) {
-	rep := &Reporter{r: r, srv: srv, job: ru.job, cancel: ru.cancel, ctx: ctx}
-	if !rep.send(ctx, true) {
+	rep := &Reporter{r: r, srv: srv, job: ru.job, cancel: ru.cancel, ctx: ctx, nudge: make(chan struct{}, 1)}
+	if !rep.send() {
 		r.settle(base, srv, ru, rep, nil, context.Cause(ctx))
 		return
 	}
 	done := make(chan struct{})
+	reporting := make(chan struct{})
 	go func() {
-		t := time.NewTicker(r.opts.Keepalive)
-		defer t.Stop()
-		for {
-			select {
-			case <-done:
-				return
-			case <-ctx.Done():
-				return
-			case <-t.C:
-				rep.send(ctx, true)
-			}
-		}
+		defer close(reporting)
+		rep.loop(done)
 	}()
 	result, err := h.Run(ctx, ru.job, rep)
 	close(done)
+	<-reporting
 	r.settle(base, srv, ru, rep, result, firstErr(context.Cause(ctx), err))
 }
 
@@ -409,8 +402,8 @@ func (r *Runner) settle(base context.Context, srv Server, ru *run, rep *Reporter
 			raw = b
 		}
 	}
-	// The last progress goes with the final report (a throttled one may never
-	// have been sent).
+	// The last progress goes with the final report (one still waiting to be sent
+	// never was).
 	var progress json.RawMessage
 	if last := rep.Last(); last.Step != "" {
 		progress, _ = json.Marshal(last)
@@ -482,38 +475,48 @@ func (r *Runner) report(ctx context.Context, srv Server, sj store.ServerJob) {
 			r.log.Warn("bridge: recording a report failed", "job", sj.ID, "err", merr)
 		}
 	case errors.Is(err, link.ErrUnauthorized):
+		r.retry.Store(true)
 		r.onUnauthorized()
 	default:
+		r.retry.Store(true)
 		r.log.Warn("bridge: reporting a job failed; retrying", "job", sj.ID, "err", err)
 	}
 }
 
-// retryReports resends, every RetryEvery, the reports that didn't reach the
-// server, and prunes old finished jobs.
+// pruneEvery is how often old finished jobs are pruned.
+const pruneEvery = time.Hour
+
+// retryReports resends, every RetryEvery while one is owed, the reports that
+// didn't reach the server, and prunes old finished jobs hourly.
 func (r *Runner) retryReports(ctx context.Context) {
 	t := time.NewTicker(r.opts.RetryEvery)
 	defer t.Stop()
+	var pruned time.Time
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
 		}
+		if time.Since(pruned) >= pruneEvery {
+			pruned = time.Now()
+			if _, err := r.store.PruneServerJobs(ctx, r.opts.Keep); err != nil {
+				r.log.Warn("bridge: pruning old jobs failed", "err", err)
+			}
+		}
 		srv := r.server()
-		if srv == nil {
+		if srv == nil || !r.retry.Swap(false) {
 			continue
 		}
 		open, err := r.store.OpenServerJobs(ctx)
 		if err != nil {
+			r.retry.Store(true)
 			continue
 		}
 		for _, sj := range open {
 			if sj.State != store.JobRunning && !sj.Reported {
 				r.report(ctx, srv, sj)
 			}
-		}
-		if _, err := r.store.PruneServerJobs(ctx, r.opts.Keep); err != nil {
-			r.log.Warn("bridge: pruning old jobs failed", "err", err)
 		}
 	}
 }
@@ -540,15 +543,21 @@ type Progress struct {
 }
 
 // Reporter is how a Handler reports progress. It is safe for concurrent use.
+// Progress only records: the job's reporting goroutine (loop) sends, so a
+// handler never waits on the network.
 type Reporter struct {
 	r      *Runner
 	srv    Server
 	job    Job
 	cancel context.CancelCauseFunc
-	ctx    context.Context //nolint:containedctx // the job's own context, for its keepalive sends
+	ctx    context.Context //nolint:containedctx // the job's own context, for its sends
+	// nudge wakes loop when the step changed (nil for a LocalReporter).
+	nudge chan struct{}
 
 	mu       sync.Mutex
 	progress Progress
+	// dirty: progress changed since it was last sent (and stored).
+	dirty    bool
 	sentAt   time.Time
 	sentStep string
 }
@@ -564,38 +573,63 @@ func (p *Reporter) Last() Progress {
 	return p.progress
 }
 
-// Progress records the job's progress and sends it when its step changed or
-// ProgressEvery passed since the last report.
+// Progress records the job's progress; a new step is sent at once, anything
+// else within ProgressEvery.
 func (p *Reporter) Progress(pr Progress) {
 	p.mu.Lock()
-	p.progress = pr
-	if p.r == nil {
-		p.mu.Unlock()
-		return
-	}
-	due := pr.Step != p.sentStep || time.Since(p.sentAt) >= p.r.opts.ProgressEvery
+	newStep := pr.Step != p.progress.Step
+	p.progress, p.dirty = pr, true
 	p.mu.Unlock()
-	if due {
-		p.send(p.ctx, false)
+	if newStep && p.nudge != nil {
+		select {
+		case p.nudge <- struct{}{}:
+		default:
+		}
+	}
+}
+
+// loop sends the job's progress until done closes or the job's context ends: a
+// new step at once, other changes at most every ProgressEvery, and a keepalive
+// every Keepalive when nothing changed (renewing the lease).
+func (p *Reporter) loop(done <-chan struct{}) {
+	t := time.NewTicker(p.r.opts.ProgressEvery)
+	defer t.Stop()
+	for {
+		select {
+		case <-done:
+			return
+		case <-p.ctx.Done():
+			return
+		case <-p.nudge:
+		case <-t.C:
+			p.mu.Lock()
+			since, dirty := time.Since(p.sentAt), p.dirty
+			p.mu.Unlock()
+			changed := dirty && since >= p.r.opts.ProgressEvery
+			if !changed && since < p.r.opts.Keepalive {
+				continue
+			}
+		}
+		if !p.send() {
+			return
+		}
 	}
 }
 
 // send reports the job as running with its current progress (renewing the
 // lease) and acts on the answer: a cancel request or a lost claim ends the
-// job's context. force sends even when nothing changed (the keepalive). It
-// reports whether the job goes on.
-func (p *Reporter) send(ctx context.Context, force bool) bool {
+// job's context. It reports whether the job goes on.
+func (p *Reporter) send() bool {
+	ctx := p.ctx
 	p.mu.Lock()
-	pr := p.progress
-	if !force && pr.Step == p.sentStep && time.Since(p.sentAt) < p.r.opts.ProgressEvery {
-		p.mu.Unlock()
-		return true
-	}
-	p.sentAt, p.sentStep = time.Now(), pr.Step
+	pr, dirty := p.progress, p.dirty
+	p.sentAt, p.sentStep, p.dirty = time.Now(), pr.Step, false
 	p.mu.Unlock()
 	raw, _ := json.Marshal(pr)
-	if err := p.r.store.SetServerJobProgress(ctx, p.job.ID, p.job.Attempt, raw); err != nil && ctx.Err() == nil {
-		p.r.log.Warn("bridge: recording progress failed", "job", p.job.ID, "err", err)
+	if dirty {
+		if err := p.r.store.SetServerJobProgress(ctx, p.job.ID, p.job.Attempt, raw); err != nil && ctx.Err() == nil {
+			p.r.log.Warn("bridge: recording progress failed", "job", p.job.ID, "err", err)
+		}
 	}
 	state := link.StateRunning
 	u := link.Update{Attempt: p.job.Attempt, State: &state}
@@ -641,6 +675,3 @@ func sleep(ctx context.Context, d time.Duration) {
 	case <-t.C:
 	}
 }
-
-// String names a job in logs.
-func (j Job) String() string { return fmt.Sprintf("%s#%d", j.Kind, j.ID) }

@@ -1,4 +1,4 @@
-import type { Tone } from '@/lib/jobs';
+export type Tone = 'good' | 'bad' | 'warn' | 'busy' | 'muted';
 
 const TONES: Record<Tone, string> = {
   good: 'border-green-700 bg-green-950 text-green-300',

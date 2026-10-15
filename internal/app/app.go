@@ -68,9 +68,7 @@ type Bridge struct {
 	beatErr  string
 	// beatGen counts pairings, so a heartbeat answer from before an unpair or
 	// a new pairing isn't recorded as the current one.
-	beatGen   int
-	sawFirst  bool
-	checkLock sync.Mutex
+	beatGen int
 }
 
 // New opens the Bridge's state in opts.DataDir.
@@ -140,13 +138,15 @@ func (b *Bridge) server() jobs.Server {
 	return nil
 }
 
-// tokenRefused handles a 401 from the server: the token was revoked.
+// refusedReason is what the page says while the server refuses the token.
+const refusedReason = "the server refused the Bridge's token. If it was unpaired in the server's console or " +
+	"another Bridge was paired, pair it again; if the admin who paired it lost the role for a while, it " +
+	"comes back by itself (it tries again every 5 minutes)"
+
+// tokenRefused handles a 401 from the server.
 func (b *Bridge) tokenRefused() {
-	if b.conn.Client() == nil {
-		return
-	}
-	if err := b.conn.Unpair(context.Background(), "the server refused the Bridge's token: it was unpaired in the server's console, another Bridge was paired, or the admin who paired it is no longer an admin"); err != nil {
-		b.log.Warn("bridge: forgetting the token failed", "err", err)
+	if b.conn.Client() != nil {
+		b.conn.Refuse(context.Background(), refusedReason)
 	}
 }
 
@@ -156,7 +156,6 @@ func (b *Bridge) tokenRefused() {
 func (b *Bridge) linkChanged() {
 	b.mu.Lock()
 	b.beatGen++
-	b.sawFirst = false
 	b.lastBeat, b.beatErr = time.Time{}, ""
 	b.mu.Unlock()
 	b.libs.SetLibraries(nil)
@@ -242,6 +241,7 @@ func (b *Bridge) heartbeatLoop(ctx context.Context) {
 func (b *Bridge) beat(ctx context.Context) {
 	cl := b.conn.Client()
 	if cl == nil {
+		b.retryRefused(ctx)
 		return
 	}
 	b.mu.Lock()
@@ -260,8 +260,8 @@ func (b *Bridge) beat(ctx context.Context) {
 	}
 	first := false
 	if err == nil {
+		first = b.lastBeat.IsZero()
 		b.lastBeat, b.beatErr = time.Now(), ""
-		first, b.sawFirst = !b.sawFirst, true
 	} else {
 		b.beatErr = err.Error()
 	}
@@ -284,16 +284,36 @@ func (b *Bridge) beat(ctx context.Context) {
 	}
 }
 
-// CheckMappings checks every library's mapping in the background (one check at
-// a time; a check already running is enough) and beats once it is done.
-func (b *Bridge) CheckMappings(ctx context.Context) {
+// retryRefused tries a refused token again when its retry is due: a heartbeat
+// that goes through ends the refusal.
+func (b *Bridge) retryRefused(ctx context.Context) {
+	cl := b.conn.retryClient()
+	if cl == nil {
+		return
+	}
+	cfg := b.config()
+	_, err := cl.Heartbeat(ctx, link.Status{Version: b.version, Kinds: b.runner.Kinds(), Libraries: []link.LibraryStatus{},
+		Workers: []link.Worker{}, UIURL: cfg.PublicURL})
+	switch {
+	case err == nil:
+		b.conn.accept(ctx)
+	case errors.Is(err, link.ErrUnauthorized):
+		b.conn.Refuse(ctx, refusedReason) // still refused: the next retry in RefusedRetry
+	default:
+		b.log.Warn("bridge: retrying the refused token failed", "err", err)
+	}
+}
+
+// CheckMappings checks the libraries ids (every library with none) in the
+// background and beats once the check is done. A check asked for while one runs
+// follows it (mapping.Registry.Check).
+func (b *Bridge) CheckMappings(ctx context.Context, ids ...int64) {
 	cl := b.conn.Client()
-	if cl == nil || !b.checkLock.TryLock() {
+	if cl == nil {
 		return
 	}
 	go func() {
-		defer b.checkLock.Unlock()
-		b.libs.CheckAll(ctx, cl, b.mount, time.Now)
+		b.libs.Check(ctx, cl, b.mount, time.Now, ids...)
 		b.Kick()
 	}()
 }

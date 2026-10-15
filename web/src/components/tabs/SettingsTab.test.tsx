@@ -19,7 +19,7 @@ describe('SettingsTab', () => {
         body: { ...initial, ...(body as object) },
       }),
     });
-    render(<SettingsTab client={api()} onSignOut={vi.fn()} signingOut={false} />);
+    render(<SettingsTab client={api()} />);
 
     const url = await screen.findByLabelText('Public address');
     expect(url).toHaveValue('http://10.0.0.5:8091');
@@ -52,7 +52,7 @@ describe('SettingsTab', () => {
         body: { error: 'AUDIOSILO_BRIDGE_PUBLIC_URL sets public_url', code: 'locked' },
       },
     });
-    render(<SettingsTab client={api()} onSignOut={vi.fn()} signingOut={false} />);
+    render(<SettingsTab client={api()} />);
     await userEvent.type(await screen.findByLabelText('Public address'), 'http://bridge.lan');
     await userEvent.click(screen.getByRole('button', { name: 'Save settings' }));
     expect(await screen.findByRole('alert')).toHaveTextContent(
@@ -74,13 +74,7 @@ describe('SettingsTab', () => {
         return { status: 204 };
       },
     });
-    render(
-      <SettingsTab
-        client={api(onSignedOut, onLanBlocked)}
-        onSignOut={vi.fn()}
-        signingOut={false}
-      />,
-    );
+    render(<SettingsTab client={api(onSignedOut, onLanBlocked)} />);
     await userEvent.type(screen.getByLabelText('Current password'), 'old');
     await userEvent.type(screen.getByLabelText('New password'), 'a-long-new-one');
     await userEvent.click(screen.getByRole('button', { name: 'Change password' }));
@@ -94,13 +88,5 @@ describe('SettingsTab', () => {
       current: 'old',
       new: 'a-long-new-one',
     });
-  });
-
-  it('signs out', async () => {
-    mockFetch({ 'GET /api/settings': { body: settingsFixture() } });
-    const onSignOut = vi.fn();
-    render(<SettingsTab client={api()} onSignOut={onSignOut} signingOut={false} />);
-    await userEvent.click(screen.getByRole('button', { name: 'Sign out' }));
-    expect(onSignOut).toHaveBeenCalledOnce();
   });
 });

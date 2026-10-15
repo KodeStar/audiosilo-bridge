@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useState, type FormEvent } from 'react';
+import { useState, type FormEvent } from 'react';
 import { errorText, type ApiClient } from '@/api/client';
 import type { Settings } from '@/api/types';
+import { useLoad } from '@/lib/useLoad';
 import {
   KEY_CHECK_MINUTES,
   KEY_PUBLIC_URL,
@@ -14,67 +15,45 @@ import {
 } from '@/lib/settings';
 import { Card } from '../ui/Card';
 import { Field, inputClass } from '../ui/Field';
+import { Loading } from '../ui/Loading';
 import { Notice } from '../ui/Notice';
-import { primaryButton, secondaryButton } from '../ui/buttons';
+import { primaryButton } from '../ui/buttons';
 
-interface SettingsTabProps {
-  client: ApiClient;
-  onSignOut: () => void;
-  signingOut: boolean;
-}
-
-export function SettingsTab({ client, onSignOut, signingOut }: SettingsTabProps) {
+export function SettingsTab({ client }: { client: ApiClient }) {
   return (
     <div className="flex flex-col gap-5">
       <SettingsForm client={client} />
       <PasswordForm client={client} />
-      <Card title="Session">
-        <p className="mb-3 text-sm text-dim">Sign out of this page in this browser.</p>
-        <button type="button" onClick={onSignOut} disabled={signingOut} className={secondaryButton}>
-          {signingOut ? 'Signing out...' : 'Sign out'}
-        </button>
-      </Card>
     </div>
   );
 }
 
 function SettingsForm({ client }: { client: ApiClient }) {
-  const [settings, setSettings] = useState<Settings | null>(null);
   const [publicUrl, setPublicUrl] = useState('');
   const [minutes, setMinutes] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
 
-  const apply = useCallback((s: Settings) => {
-    setSettings(s);
+  // fill puts the Bridge's settings into the fields.
+  function fill(s: Settings) {
     setPublicUrl(s.public_url);
     setMinutes(String(s.mapping_check_minutes));
-  }, []);
+    return s;
+  }
 
-  useEffect(() => {
-    let cancelled = false;
-    client
-      .settings()
-      .then((s) => {
-        if (!cancelled) apply(s);
-      })
-      .catch((err: unknown) => {
-        if (!cancelled) setError(errorText(err, "Couldn't load the settings."));
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [client, apply]);
+  const {
+    data: settings,
+    setData: setSettings,
+    error: loadError,
+  } = useLoad(async () => fill(await client.settings()), null, {
+    fallback: "Couldn't load the settings.",
+  });
 
   if (!settings) {
     return (
       <Card title="Settings">
-        {error ? (
-          <Notice kind="error">{error}</Notice>
-        ) : (
-          <p className="text-sm text-dim">Loading...</p>
-        )}
+        <Loading error={loadError} />
       </Card>
     );
   }
@@ -102,11 +81,13 @@ function SettingsForm({ client }: { client: ApiClient }) {
     setError(null);
     try {
       // A locked field is sent with the value it has, which the Bridge accepts.
-      apply(
-        await client.saveSettings({
-          public_url: urlLocked ? settings.public_url : publicUrl.trim(),
-          mapping_check_minutes: parsed.value,
-        }),
+      setSettings(
+        fill(
+          await client.saveSettings({
+            public_url: urlLocked ? settings.public_url : publicUrl.trim(),
+            mapping_check_minutes: parsed.value,
+          }),
+        ),
       );
       setSaved(true);
     } catch (err) {

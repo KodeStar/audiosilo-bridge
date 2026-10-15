@@ -7,6 +7,7 @@
 package mapping
 
 import (
+	"cmp"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -16,11 +17,12 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/kodestar/audiosilo-bridge/internal/fsutil"
 	"github.com/kodestar/audiosilo-bridge/internal/link"
 )
 
@@ -45,10 +47,8 @@ func SafeJoin(root, rel string) (string, error) {
 			return "", ErrOutsideRoot
 		}
 	}
-	clean := path.Clean("/" + rel)
-	full := filepath.Join(root, filepath.FromSlash(clean))
-	r, err := filepath.Rel(root, full)
-	if err != nil || r == ".." || strings.HasPrefix(r, ".."+string(filepath.Separator)) || filepath.IsAbs(r) {
+	full := filepath.Join(root, filepath.FromSlash(path.Clean("/"+rel)))
+	if !fsutil.Within(root, full) {
 		return "", ErrOutsideRoot
 	}
 	return full, nil
@@ -203,8 +203,11 @@ type Registry struct {
 	mu      sync.Mutex
 	libs    []link.Library
 	results map[int64]result
-	// checking serialises CheckAll.
-	checking sync.Mutex
+	// checking: a Check is running; pendAll/pend are what was asked for
+	// meanwhile, which it checks right after.
+	checking bool
+	pendAll  bool
+	pend     map[int64]bool
 }
 
 type result struct {
@@ -213,33 +216,20 @@ type result struct {
 }
 
 // NewRegistry returns an empty Registry.
-func NewRegistry() *Registry { return &Registry{results: map[int64]result{}} }
+func NewRegistry() *Registry { return &Registry{results: map[int64]result{}, pend: map[int64]bool{}} }
 
 // SetLibraries records the server's libraries and reports whether they differ
 // from the last list (a library added, removed, renamed or moved). Checks of
 // libraries that are gone are dropped.
 func (r *Registry) SetLibraries(libs []link.Library) (changed bool) {
-	sorted := append([]link.Library(nil), libs...)
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i].ID < sorted[j].ID })
+	sorted := slices.Clone(libs)
+	slices.SortFunc(sorted, func(a, b link.Library) int { return cmp.Compare(a.ID, b.ID) })
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if len(sorted) != len(r.libs) {
-		changed = true
-	} else {
-		for i := range sorted {
-			if sorted[i] != r.libs[i] {
-				changed = true
-				break
-			}
-		}
-	}
+	changed = !slices.Equal(sorted, r.libs)
 	r.libs = sorted
-	keep := map[int64]bool{}
-	for _, l := range sorted {
-		keep[l.ID] = true
-	}
 	for id := range r.results {
-		if !keep[id] {
+		if !slices.ContainsFunc(sorted, func(l link.Library) bool { return l.ID == id }) {
 			delete(r.results, id)
 		}
 	}
@@ -304,33 +294,55 @@ func (r *Registry) Due(now time.Time, interval time.Duration) bool {
 	return false
 }
 
-// CheckAll checks every library now (one at a time, so a slow mount holds up
-// only the checks) and records the results.
-func (r *Registry) CheckAll(ctx context.Context, src BookSource, mount MountFunc, now func() time.Time) {
-	r.checking.Lock()
-	defer r.checking.Unlock()
+// Check checks the libraries ids (every library with none) now, one at a time,
+// and records the results. Checks never overlap: one asked for while another
+// runs is done right after it (by that call), so a mapping changed mid-check is
+// never missed. It returns once there is nothing left to check, or ctx ends.
+func (r *Registry) Check(ctx context.Context, src BookSource, mount MountFunc, now func() time.Time, ids ...int64) {
 	r.mu.Lock()
-	libs := append([]link.Library(nil), r.libs...)
-	r.mu.Unlock()
-	for _, l := range libs {
-		if ctx.Err() != nil {
+	if r.checking {
+		if len(ids) == 0 {
+			r.pendAll = true
+		}
+		for _, id := range ids {
+			r.pend[id] = true
+		}
+		r.mu.Unlock()
+		return
+	}
+	r.checking = true
+	for {
+		var libs []link.Library
+		for _, l := range r.libs {
+			if len(ids) == 0 || slices.Contains(ids, l.ID) {
+				libs = append(libs, l)
+			}
+		}
+		r.mu.Unlock()
+		for _, l := range libs {
+			if ctx.Err() != nil {
+				break
+			}
+			path, _ := mount(l.ID, l.Root)
+			st := Check(ctx, src, l, path)
+			r.mu.Lock()
+			r.results[l.ID] = result{status: st, at: now()}
+			r.mu.Unlock()
+		}
+		r.mu.Lock()
+		if ctx.Err() != nil || (!r.pendAll && len(r.pend) == 0) {
+			r.checking, r.pendAll = false, false
+			clear(r.pend)
+			r.mu.Unlock()
 			return
 		}
-		path, _ := mount(l.ID, l.Root)
-		st := Check(ctx, src, l, path)
-		r.mu.Lock()
-		r.results[l.ID] = result{status: st, at: now()}
-		r.mu.Unlock()
+		ids = nil
+		if !r.pendAll {
+			for id := range r.pend {
+				ids = append(ids, id)
+			}
+		}
+		r.pendAll = false
+		clear(r.pend)
 	}
-}
-
-// Status returns a library's last check (nil before the first).
-func (r *Registry) Status(id int64) *link.LibraryStatus {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if res, ok := r.results[id]; ok {
-		st := res.status
-		return &st
-	}
-	return nil
 }

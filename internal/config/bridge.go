@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/kodestar/audiosilo-bridge/internal/fsutil"
 	"gopkg.in/yaml.v3"
 )
 
@@ -27,7 +28,9 @@ const MaxMappingCheckMinutes = 24 * 60
 // ServerConfig is the AudioSilo server the Bridge pairs with.
 type ServerConfig struct {
 	// URL is the server's address as the Bridge reaches it (an absolute http(s)
-	// URL, e.g. http://audiosilo:8080 on a compose network). Pairing sets it.
+	// URL, e.g. http://audiosilo:8080 on a compose network): where pairing with
+	// AUDIOSILO_BRIDGE_PAIR_CODE goes, and the page's pairing form's starting
+	// value. A pairing keeps the address it used in the database.
 	URL string `yaml:"url"`
 }
 
@@ -207,21 +210,5 @@ func writeFile(dataDir string, cfg Config) error {
 	if err != nil {
 		return fmt.Errorf("marshal config: %w", err)
 	}
-	tmp, err := os.CreateTemp(dataDir, ".config-*.yaml")
-	if err != nil {
-		return err
-	}
-	defer func() { _ = os.Remove(tmp.Name()) }()
-	if _, err := tmp.Write(out); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Chmod(0o600); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmp.Name(), filepath.Join(dataDir, FileName))
+	return fsutil.WriteFileAtomic(filepath.Join(dataDir, FileName), out, 0o600)
 }

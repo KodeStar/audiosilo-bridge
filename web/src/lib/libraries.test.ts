@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { checkBadges, checkMountPath, mountEditable, mountSource } from './libraries';
+import { checkBadges, checkMountPath, mountSource } from './libraries';
 import { libraryFixture } from '@/test/fixtures';
 
 describe('libraries', () => {
@@ -20,9 +20,5 @@ describe('libraries', () => {
     expect(checkMountPath('')).toBeNull();
     expect(checkMountPath('/mnt/books')).toBeNull();
     expect(checkMountPath('books')).not.toBeNull();
-  });
-  it('is not editable when the environment sets the mappings', () => {
-    expect(mountEditable(libraryFixture())).toBe(true);
-    expect(mountEditable(libraryFixture({ locked: true }))).toBe(false);
   });
 });

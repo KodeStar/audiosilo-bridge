@@ -12,35 +12,35 @@ import (
 	"time"
 )
 
-// Entry is one log line.
+// Entry is one log line. Level encodes as its name ("INFO", "WARN", ...).
 type Entry struct {
 	ID      uint64            `json:"id"`
 	Time    time.Time         `json:"time"`
-	Level   string            `json:"level"`
+	Level   slog.Level        `json:"level"`
 	Message string            `json:"message"`
 	Attrs   map[string]string `json:"attrs,omitempty"`
 }
 
-// Ring holds the newest entries.
+// Ring holds the newest entries in a fixed circular buffer.
 type Ring struct {
-	mu      sync.Mutex
-	entries []Entry
-	next    uint64
-	size    int
+	mu   sync.Mutex
+	buf  []Entry
+	head int // where the next entry goes
+	n    int // how many entries are held
+	next uint64
 }
 
 // New returns a ring of size entries.
-func New(size int) *Ring { return &Ring{size: size} }
+func New(size int) *Ring { return &Ring{buf: make([]Entry, size)} }
 
 func (r *Ring) add(e Entry) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.next++
 	e.ID = r.next
-	r.entries = append(r.entries, e)
-	if len(r.entries) > r.size {
-		r.entries = append([]Entry(nil), r.entries[len(r.entries)-r.size:]...)
-	}
+	r.buf[r.head] = e
+	r.head = (r.head + 1) % len(r.buf)
+	r.n = min(r.n+1, len(r.buf))
 }
 
 // Since returns up to limit entries after the id after (0: the newest limit),
@@ -49,8 +49,9 @@ func (r *Ring) Since(after uint64, limit int, minLevel slog.Level) []Entry {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	out := []Entry{}
-	for _, e := range r.entries {
-		if e.ID > after && levelOf(e.Level) >= minLevel {
+	for i := range r.n {
+		e := r.buf[(r.head-r.n+i+len(r.buf))%len(r.buf)]
+		if e.ID > after && e.Level >= minLevel {
 			out = append(out, e)
 		}
 	}
@@ -62,12 +63,6 @@ func (r *Ring) Since(after uint64, limit int, minLevel slog.Level) []Entry {
 		}
 	}
 	return out
-}
-
-func levelOf(s string) slog.Level {
-	var l slog.Level
-	_ = l.UnmarshalText([]byte(s))
-	return l
 }
 
 // secretWords mark an attribute whose value is never kept.
@@ -102,7 +97,7 @@ func (h *Handler) Enabled(ctx context.Context, l slog.Level) bool {
 // Handle passes the record on and keeps a copy.
 func (h *Handler) Handle(ctx context.Context, rec slog.Record) error {
 	if rec.Level >= slog.LevelInfo {
-		e := Entry{Time: rec.Time, Level: rec.Level.String(), Message: rec.Message}
+		e := Entry{Time: rec.Time, Level: rec.Level, Message: rec.Message}
 		add := func(key string, a slog.Attr) {
 			if e.Attrs == nil {
 				e.Attrs = map[string]string{}

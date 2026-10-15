@@ -42,8 +42,7 @@ export interface Status {
   last_error: string;
   kinds: string[];
   lanes: Lane[];
-  // A SecretKeySource.
-  secret_key: string;
+  secret_key: SecretKeySource;
   public_url: string;
   server_url_default: string;
 }
@@ -90,8 +89,8 @@ export type SettingKey = 'public_url' | 'mapping.check_minutes' | 'libraries' | 
 export interface Settings {
   public_url: string;
   mapping_check_minutes: number;
-  // The SettingKey values the environment sets.
-  locked: string[];
+  // The keys the environment sets.
+  locked: SettingKey[];
 }
 
 export interface SettingsUpdate {
@@ -118,8 +117,8 @@ export interface ServerJob {
   path: string | null;
   params: unknown;
   attempt: number;
-  // A JobState; typed loosely so a state added later still renders.
-  state: string;
+  // Typed loosely (any string still fits) so a state added later still renders.
+  state: JobState | (string & {});
   progress: Progress | null;
   result: unknown;
   error: string;
@@ -183,10 +182,4 @@ export interface Worker {
 // GET /api/workers
 export interface WorkersResponse {
   workers: Worker[];
-}
-
-// Every error body: {error} (and code "locked" on a 409 from a locked setting).
-export interface ErrorBody {
-  error: string;
-  code?: string;
 }

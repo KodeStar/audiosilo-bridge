@@ -1,7 +1,11 @@
-import type { LogEntry } from '@/api/types';
-import type { Tone } from './jobs';
+import type { LogEntry, LogLevel } from '@/api/types';
 
-export const LOG_LEVELS = ['INFO', 'WARN', 'ERROR'] as const;
+// The level filter's choices: each shows its level and those above it.
+export const LOG_LEVELS: { level: LogLevel; label: string }[] = [
+  { level: 'INFO', label: 'INFO and up' },
+  { level: 'WARN', label: 'WARN and up' },
+  { level: 'ERROR', label: 'ERROR' },
+];
 
 // The most lines the page keeps.
 export const MAX_LOG_LINES = 1000;
@@ -41,13 +45,14 @@ export function formatAttrs(attrs: Record<string, string> | undefined): string {
     .join(' ');
 }
 
-export function levelTone(level: string): Tone {
+// levelClass is the text colour of a line's level: errors red, warnings amber.
+export function levelClass(level: string): string {
   switch (level.toUpperCase()) {
     case 'ERROR':
-      return 'bad';
+      return 'text-red-300';
     case 'WARN':
-      return 'warn';
+      return 'text-amber-300';
     default:
-      return 'muted';
+      return 'text-dim';
   }
 }
