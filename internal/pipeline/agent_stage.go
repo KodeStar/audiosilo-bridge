@@ -1018,7 +1018,7 @@ const autoAcceptTailReason = "already repaired via clip splice - splice present 
 // geometry, so a decoder-window upgrade can reopen legacy splices once. The ledger itself is
 // deliberately NOT cleared by the done==0 reset or a Retry (unlike the stall marker). A deleted
 // + re-enqueued book gets a fresh work dir, so it never inherits a stale ledger.
-const acceptedLedgerName = "qa_accepted.json"
+const acceptedLedgerName = qa.AcceptedFile
 
 // acceptedEntry records one accepted chapter's disposition: the round it was first accepted,
 // the argued reason, and whether the acceptance was the agent's or a mechanical auto-accept.

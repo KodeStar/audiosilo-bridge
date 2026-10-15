@@ -171,8 +171,13 @@ type run struct {
 	written  string
 	writeErr string
 	srv      Server
-	// poke is this run's wake-up channel (Retry).
-	poke chan struct{}
+	// poke is this run's wake-up channel (Retry); ownPark says the job's park is
+	// one of the Bridge's own (book_not_writable, library_not_writable), set by
+	// h.park; resuming says the job resumes an engine book (decided before
+	// prepare runs).
+	poke     chan struct{}
+	ownPark  bool
+	resuming bool
 }
 
 // bookKey is what changes on an engine book row when the scheduler moves it.
@@ -218,6 +223,7 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 	// following that would write another book's characters and recaps into this
 	// one. The path is the server's canonical one, known once prepare has asked.
 	resumed := merr == nil && mapped.BookID != nil && mapped.LibraryID == *job.LibraryID
+	r.resuming = resumed
 	if err := h.prepare(ctx, r, !resumed); err != nil {
 		if resumed && mapped.RelPath == r.rel {
 			r.bookID = *mapped.BookID // its own book: end() stops it
@@ -411,7 +417,7 @@ func (h *Handler) waitMapped(ctx context.Context, r *run, strict bool) error {
 		switch {
 		case checked && st.Mapped && st.Writable && st.MountPath == mount:
 			r.mount = mount
-			r.rep.Unpark()
+			r.unparkOwn()
 			return nil
 		case !checked || st.MountPath != mount:
 			r.rep.Progress(jobs.Progress{Step: stepWaiting, Message: "Waiting for the library's mapping check"})
@@ -440,7 +446,7 @@ func (h *Handler) waitWritable(ctx context.Context, r *run) error {
 	for {
 		err := mapping.ProbeWritable(r.place.dir)
 		if err == nil {
-			r.rep.Unpark()
+			r.unparkOwn()
 			return nil
 		}
 		h.park(r, parkBookNotWritable, "the Bridge can't write in the book's folder ("+writeProblem(err)+")")
@@ -476,6 +482,29 @@ func (h *Handler) park(r *run, code, msg string) {
 	r.rep.Progress(jobs.Progress{Step: stepWaiting, Message: "Needs attention: " + msg,
 		Extra: map[string]any{"source": r.source, "park": map[string]any{"code": code, "hint": ParkHint(code)}}})
 	r.rep.Park(code, msg)
+	r.ownPark = true
+}
+
+// unparkOwn lifts a park of the Bridge's own once its reason is gone, while the
+// job has no engine book to report on. A job that has one, or resumes one, stays
+// parked until step() reports the book's own state, and a park restored after a
+// restart (not the Bridge's own) stays too: the job never reports running between
+// two parks, which the server would hear as a new one.
+func (r *run) unparkOwn() {
+	if r.ownPark && r.bookID == 0 && !r.resuming {
+		r.rep.Unpark()
+		r.ownPark = false
+	}
+}
+
+// engineParked reports the engine book's park (or none) as the job's.
+func (r *run) engineParked(parked bool, code, msg string) {
+	if parked {
+		r.rep.Park(code, msg)
+	} else {
+		r.rep.Unpark()
+	}
+	r.ownPark = false
 }
 
 // create picks the source and makes the engine book for a new job: a book the
@@ -575,11 +604,13 @@ func (h *Handler) newBook(r *run, sourcePath, ebookPath string) store.NewBook {
 }
 
 // attach finds a resumed job's engine book again. One this job's own cancel
-// stopped (the server took the job back, then handed it out again) is re-admitted;
-// a book that is gone is created anew. The job's mapping is open again either way.
+// stopped (the server took the job back, then handed it out again) is re-admitted,
+// unless its transcripts went with that end (retention): the stages that wrote
+// them still count as done, so it starts over instead, as a book that is gone is.
+// The job's mapping is open again either way.
 func (h *Handler) attach(ctx context.Context, eng Engine, r *run, m store.GenerateBook) error {
 	b, err := h.o.DB.GetBook(ctx, r.bookID)
-	if errors.Is(err, store.ErrNotFound) {
+	if errors.Is(err, store.ErrNotFound) || (err == nil && scheduler.IsCancelled(b) && m.SweptAt != "") {
 		r.bookID = 0
 		return h.create(ctx, eng, r)
 	}
@@ -659,26 +690,23 @@ func (h *Handler) step(ctx context.Context, eng Engine, r *run, b store.Book) (a
 		return nil, true, fmt.Errorf("the engine failed the book at %s: %s", b.State, b.Error)
 	}
 	r.rep.Progress(describe(v))
-	if status == state.StatusNeedsAttention {
-		if st == state.Contributing {
-			_, err := h.write(ctx, r, b)
-			if msg := errText(err); msg != r.writeErr {
-				r.writeErr = msg
-				if err != nil {
-					h.o.Log.Warn("generate: writing the attachments at a contributing park failed", "job", r.job.ID, "err", err)
-				}
+	if status == state.StatusNeedsAttention && st == state.Contributing {
+		_, err := h.write(ctx, r, b)
+		if msg := errText(err); msg != r.writeErr {
+			r.writeErr = msg
+			if err != nil {
+				h.o.Log.Warn("generate: writing the attachments at a contributing park failed", "job", r.job.ID, "err", err)
 			}
 		}
-		r.rep.Park(b.ParkCode, b.Error)
-	} else {
-		r.rep.Unpark()
+		r.rep.Progress(describe(v)) // the park again, after the write's own steps
 	}
+	r.engineParked(status == state.StatusNeedsAttention, b.ParkCode, b.Error)
 	return nil, false, nil
 }
 
 // finish writes the attachments of a done book, rescans, and composes the result.
 func (h *Handler) finish(ctx context.Context, r *run, b store.Book, cost float64) (any, error) {
-	r.rep.Unpark()
+	r.engineParked(false, "", "")
 	s, err := h.write(ctx, r, b)
 	if err != nil {
 		return nil, err

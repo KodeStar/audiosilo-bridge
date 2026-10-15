@@ -259,8 +259,12 @@ func (b *Bridge) sweepTranscripts(ctx context.Context) {
 // and one goroutine does the writes. A full queue drops the event (the log is
 // best effort; the supervisor reads what is there).
 type eventPersister struct {
-	db      *store.DB
-	log     *slog.Logger
+	db  *store.DB
+	log *slog.Logger
+	// mu guards closed against the send on ch and its close: a publisher outside
+	// the engine (the page's Retry, a job ending) can still publish after Close.
+	mu      sync.Mutex
+	closed  bool
 	ch      chan events.Event
 	done    chan struct{}
 	dropped atomic.Uint64
@@ -274,6 +278,11 @@ func (p *eventPersister) start() { go p.drain() }
 
 // enqueue is called by the hub under its lock and never blocks.
 func (p *eventPersister) enqueue(ev events.Event) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed {
+		return // the engine stopped: dropped, like a full queue's
+	}
 	select {
 	case p.ch <- ev:
 	default:
@@ -290,10 +299,15 @@ func (p *eventPersister) drain() {
 	}
 }
 
-// Close stops taking events and waits for the queue to drain. Every publisher
-// must have stopped first.
+// Close stops taking events (a later one is dropped) and waits for the queue to
+// drain.
 func (p *eventPersister) Close() {
-	close(p.ch)
+	p.mu.Lock()
+	if !p.closed {
+		p.closed = true
+		close(p.ch)
+	}
+	p.mu.Unlock()
 	<-p.done
 }
 

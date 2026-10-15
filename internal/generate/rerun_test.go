@@ -233,3 +233,73 @@ func TestGenerateAbandonedJobStopsItsBook(t *testing.T) {
 		})
 	}
 }
+
+// With transcripts.retention_days 0 a job taken back deletes its book's
+// transcripts as it ends; handed out again, the job starts the book over rather
+// than re-admitting it onto inputs that are gone.
+func TestGenerateSweptBookStartsOver(t *testing.T) {
+	t.Parallel()
+	hr := newHarness(t)
+	h := New(Options{DB: hr.db, Engine: func() Engine { return hr.sched }, Libraries: hr.libs,
+		Mount:  func(int64, string) (string, bool) { return hr.libs.root, false },
+		Server: func() Server { return hr.cl }, WorkRoot: hr.work, Version: "0.2.0", RetentionDays: 0,
+		Poll: 10 * time.Millisecond, IdlePoll: 10 * time.Millisecond, Recheck: time.Hour, Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	gate := hr.exec.gate("asr")
+	hr.srv.add(43, "Author/Book", `{}`)
+	stop := hr.runner(h)
+	defer stop()
+	hr.waitFor("asr", func() bool {
+		return hr.srv.saw(43, func(_ link.Update, p map[string]any) bool { return p["stage"] == "asr" })
+	})
+	before := hr.engineBook(43)
+	hr.srv.set(func() { hr.srv.notHeld[43] = true })
+	hr.waitFor("the transcripts swept", func() bool {
+		g, _ := hr.db.GetGenerateBook(context.Background(), 43)
+		return g.SweptAt != ""
+	})
+	close(gate)
+	hr.srv.set(func() { hr.srv.notHeld[43], hr.srv.updates[43] = false, nil })
+	hr.requeue(43, "Author/Book", 2)
+	hr.waitFor("done", func() bool { s, _ := hr.srv.final(43); return s == link.StateDone })
+	after := hr.engineBook(43)
+	if after.ID == before.ID {
+		t.Fatal("the swept book was re-admitted")
+	}
+	if g, _ := hr.db.GetGenerateBook(context.Background(), 43); g.EndedAt == "" || *g.BookID != after.ID {
+		t.Fatalf("mapping = %+v", g)
+	}
+}
+
+// A job parked when the Bridge stopped stays parked through the restart: no
+// report says running before the engine book's park is reported again (the
+// server would hear a new park and tell an admin again).
+func TestGenerateResumedParkNeverReportsRunning(t *testing.T) {
+	t.Parallel()
+	hr := newHarness(t)
+	hr.exec.mu.Lock()
+	hr.exec.parks["fact_pass"] = 100
+	hr.exec.mu.Unlock()
+	hr.srv.add(44, "Author/Book", `{}`)
+	stop := hr.runner(hr.h)
+	hr.waitFor("parked", func() bool {
+		return hr.srv.saw(44, func(u link.Update, _ map[string]any) bool {
+			return u.State != nil && *u.State == link.StateNeedsAttention
+		})
+	})
+	stop()
+	hr.srv.set(func() { hr.srv.updates[44] = nil })
+	stop2 := hr.runner(hr.handler())
+	defer stop2()
+	hr.waitFor("a few reports after the restart", func() bool {
+		hr.srv.mu.Lock()
+		defer hr.srv.mu.Unlock()
+		return len(hr.srv.updates[44]) >= 5
+	})
+	hr.srv.mu.Lock()
+	defer hr.srv.mu.Unlock()
+	for i, u := range hr.srv.updates[44] {
+		if u.State == nil || *u.State != link.StateNeedsAttention {
+			t.Fatalf("report %d after the restart = %+v, want needs_attention throughout", i, u)
+		}
+	}
+}

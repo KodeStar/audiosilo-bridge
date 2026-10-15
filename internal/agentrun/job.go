@@ -195,6 +195,9 @@ func (r *Runner) spawn(ctx context.Context, job *os.Root, s spec) agentproto.Exi
 			kill = time.After(r.killDelay)
 		}
 	}
+	// The runner stopping is taken once: ctx.Done() stays ready once closed, and a
+	// select that kept taking it would spin until the CLI exits.
+	stopping := ctx.Done()
 	var werr error
 wait:
 	for {
@@ -211,7 +214,8 @@ wait:
 		case <-deadline.C:
 			exit.TimedOut = true
 			stop()
-		case <-ctx.Done():
+		case <-stopping:
+			stopping = nil
 			exit.Cancelled = true
 			stop()
 		case <-kill:

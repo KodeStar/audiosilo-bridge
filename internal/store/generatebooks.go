@@ -9,7 +9,8 @@ import (
 
 // GenerateBook maps a sidecars.generate server job to the engine book it created
 // (migration 0003). BookID is nil once that book was deleted (a regenerate of the
-// same book); EndedAt is when the job ended ("" while it is open).
+// same book); EndedAt is when the job ended ("" while it is open); SweptAt when
+// the book's transcripts were deleted ("" while they are kept).
 type GenerateBook struct {
 	ServerJobID int64
 	BookID      *int64
@@ -17,6 +18,7 @@ type GenerateBook struct {
 	RelPath     string
 	CreatedAt   string
 	EndedAt     string
+	SweptAt     string
 }
 
 // PutGenerateBook records (or replaces) the engine book of a server job. A job
@@ -38,9 +40,9 @@ func (db *DB) GetGenerateBook(ctx context.Context, serverJobID int64) (GenerateB
 		bookID sql.NullInt64
 	)
 	err := db.sql.QueryRowContext(ctx,
-		`SELECT server_job_id, book_id, library_id, rel_path, created_at, ended_at
+		`SELECT server_job_id, book_id, library_id, rel_path, created_at, ended_at, swept_at
 		   FROM generate_books WHERE server_job_id = ?`, serverJobID).
-		Scan(&g.ServerJobID, &bookID, &g.LibraryID, &g.RelPath, &g.CreatedAt, &g.EndedAt)
+		Scan(&g.ServerJobID, &bookID, &g.LibraryID, &g.RelPath, &g.CreatedAt, &g.EndedAt, &g.SweptAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return GenerateBook{}, ErrNotFound
 	}

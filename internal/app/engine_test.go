@@ -113,3 +113,31 @@ func TestSupervisorApplyLeavesALongTranscription(t *testing.T) {
 		}
 	}
 }
+
+// An event published after the engine stopped (the page's Retry in flight at a
+// stop, a job ending as the Bridge stops) is dropped, never a send on a closed
+// channel.
+func TestEventPersisterAfterClose(t *testing.T) {
+	t.Parallel()
+	db, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "bridge.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	p := newEventPersister(db, quiet(), 4)
+	p.start()
+	hub := events.NewHub(events.DefaultRingSize)
+	hub.SetPersister(p.enqueue)
+	if err := hub.Publish("before", map[string]int{"n": 1}); err != nil {
+		t.Fatal(err)
+	}
+	p.Close()
+	if err := hub.Publish("after", map[string]int{"n": 2}); err != nil {
+		t.Fatal(err)
+	}
+	p.Close() // twice is fine too
+	// The hub still works: its lock wasn't left held by a panic.
+	if err := hub.Publish("again", map[string]int{"n": 3}); err != nil {
+		t.Fatal(err)
+	}
+}

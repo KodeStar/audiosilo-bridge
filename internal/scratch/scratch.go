@@ -1,9 +1,9 @@
 // Package scratch tracks and reclaims the on-disk scratch a book's work dir
 // accumulates. The heavy artifacts are the split chapter FLACs and the local copy of
-// the source audio; the durables (transcripts, facts, sidecars) are kept. It
+// the source audio; Purge keeps the durables (transcripts, facts, sidecars). It
 // exposes disk-usage gauges (per book and daemon-total) and a manual purge of the
-// reclaimable artifacts. Auto-purge and startup GC arrive in M7; for now purge is
-// user-initiated from the UI.
+// reclaimable artifacts. PurgeTranscripts also deletes the transcript text (the
+// Bridge's transcript retention), keeping the facts and the sidecars.
 //
 // Every deletion is confined to the daemon's work root by Confined, mirroring the
 // scheduler's Delete guard, so a doctored or legacy WorkDir can never make a purge
@@ -241,9 +241,11 @@ var transcriptDirs = []string{
 
 // transcriptFiles quote the transcript at the work dir's root: the spelling
 // candidates' snippets, the reference matches, the QA reports' looped phrases,
-// and the correction and repair logs.
+// the QA plan's and its accepted ledger's reasons, the tail verdicts' looped
+// phrases, and the correction and repair logs.
 var transcriptFiles = []string{
 	spelling.CandidatesFile, spelling.ReferenceMatchesFile, qa.ReportJSONName, qa.ReportMDName,
+	qa.PlanFile, qa.AcceptedFile, repair.TailVerdictsName,
 	spelling.CorrectionsLogFile, repair.RepairsLogName,
 }
 

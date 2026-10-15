@@ -770,10 +770,10 @@ type Reporter struct {
 	dirty  bool
 	sentAt time.Time
 	// parked: the job reports needs_attention with parkMsg as its error, until
-	// Unpark; unparked: the next report clears the error the park left.
-	parked   bool
-	parkMsg  string
-	unparked bool
+	// Unpark. Unparked, every report clears the error (one a park left, even
+	// across a restart that came before the clear got through).
+	parked  bool
+	parkMsg string
 }
 
 // LocalReporter returns a Reporter that records progress and sends nothing (a
@@ -817,7 +817,7 @@ func (p *Reporter) Park(code, message string) {
 	}
 	p.mu.Lock()
 	changed := !p.parked || p.parkMsg != message
-	p.parked, p.parkMsg, p.unparked = true, message, false
+	p.parked, p.parkMsg = true, message
 	if changed {
 		p.dirty = true
 	}
@@ -833,7 +833,7 @@ func (p *Reporter) Unpark() {
 	p.mu.Lock()
 	was := p.parked
 	if was {
-		p.parked, p.parkMsg, p.unparked, p.dirty = false, "", true, true
+		p.parked, p.parkMsg, p.dirty = false, "", true
 	}
 	p.mu.Unlock()
 	if was {
@@ -902,7 +902,7 @@ func (p *Reporter) send() bool {
 	ctx := p.ctx
 	p.mu.Lock()
 	pr, dirty := p.progress, p.dirty
-	parked, parkMsg, unparked := p.parked, p.parkMsg, p.unparked
+	parked, parkMsg := p.parked, p.parkMsg
 	p.sentAt, p.dirty = time.Now(), false
 	p.mu.Unlock()
 	raw, _ := json.Marshal(pr)
@@ -911,28 +911,17 @@ func (p *Reporter) send() bool {
 			p.r.log.Warn("bridge: recording progress failed", "job", p.job.ID, "err", err)
 		}
 	}
+	// The error always goes out: the park's message while parked, else "", which
+	// clears the one a park left.
 	state := link.StateRunning
-	u := link.Update{Attempt: p.job.Attempt, State: &state}
-	switch {
-	case parked:
+	u := link.Update{Attempt: p.job.Attempt, State: &state, Error: &parkMsg}
+	if parked {
 		state = link.StateNeedsAttention
-		u.Error = &parkMsg
-	case unparked:
-		cleared := ""
-		u.Error = &cleared
 	}
 	if pr.Step != "" {
 		u.Progress = raw
 	}
 	got, err := p.srv.UpdateJob(ctx, p.job.ID, u)
-	if err == nil && unparked {
-		// The cleared error reached the server (a report that didn't sends it again).
-		p.mu.Lock()
-		if !p.parked {
-			p.unparked = false
-		}
-		p.mu.Unlock()
-	}
 	switch {
 	case err == nil && got.CancelRequested:
 		p.cancel(errCancelRequested)

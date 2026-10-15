@@ -322,3 +322,29 @@ func TestAbandonedJobs(t *testing.T) {
 		})
 	}
 }
+
+// Every report of a job that isn't parked clears the error: a clear a restart
+// interrupted (the store already cleared, the server not yet) still reaches the
+// server.
+func TestReportsClearTheErrorWhenNotParked(t *testing.T) {
+	t.Parallel()
+	db, srv := openStore(t), newFakeServer()
+	ctx := context.Background()
+	if err := db.RecordClaim(ctx, store.ServerJob{ID: 11, Kind: "k.v", Attempt: 1}); err != nil {
+		t.Fatal(err)
+	}
+	h := handler{kind: "k.v", lane: LaneLight, fn: func(_ context.Context, _ Job, rep *Reporter) (any, error) {
+		rep.Progress(Progress{Step: "asr"})
+		waitFor(t, func() bool { return countState(srv, 11, link.StateRunning) >= 2 })
+		return nil, nil
+	}}
+	r := New(db, func() Server { return srv }, nil, testOpts(), h)
+	runFor(t, r, func() bool { s, _ := srv.finalState(11); return s == link.StateDone })
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+	for _, u := range srv.updates[11] {
+		if u.State != nil && *u.State == link.StateRunning && (u.Error == nil || *u.Error != "") {
+			t.Fatalf("a running report without the cleared error: %+v", u)
+		}
+	}
+}
