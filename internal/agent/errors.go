@@ -120,3 +120,34 @@ func (e *NotAvailableError) Error() string {
 	}
 	return fmt.Sprintf("agent backend %q unavailable: %s", e.Backend, e.Detail)
 }
+
+// authFailureSignatures are the lower-cased markers of a credential the provider
+// refused (an expired or revoked subscription token, a wrong API key). That is
+// not something a retry of the stage fixes: re-running the agent with the same
+// credential burns the validation retries and parks the book as a bad answer.
+var authFailureSignatures = []string{
+	"failed to authenticate",
+	"oauth access token is invalid",
+	"invalid_api_key",
+	"invalid x-api-key",
+	`"api_error_status":401`,
+	"401 unauthorized",
+}
+
+// isAuthFailure reports whether s carries a refused-credential signature.
+func isAuthFailure(s string) bool {
+	low := strings.ToLower(s)
+	for _, sig := range authFailureSignatures {
+		if strings.Contains(low, sig) {
+			return true
+		}
+	}
+	return false
+}
+
+// credentialRefused is a refused credential as a NotAvailableError, so the
+// pipeline parks the book agent_unavailable (and looks again later, after the
+// credential may have been replaced) instead of counting it as a bad answer.
+func credentialRefused(backend, detail string) error {
+	return &NotAvailableError{Backend: backend, Detail: "the provider refused the credential: " + truncate(detail)}
+}

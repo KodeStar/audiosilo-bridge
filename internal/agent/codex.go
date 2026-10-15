@@ -173,10 +173,16 @@ func CodexResult(model string, o CLIOutcome) (Result, error) {
 		if isRateLimit(failDetail) {
 			return result, newRateLimitError(failDetail, time.Now())
 		}
+		if isAuthFailure(failDetail) {
+			return result, credentialRefused(IDCodex, failDetail)
+		}
 		return result, fmt.Errorf("codex turn failed: %s", truncate(failDetail))
 	}
 	if isRateLimit(o.Stderr) {
 		return result, newRateLimitError(firstNonEmpty(o.Stderr, o.Stdout), time.Now())
+	}
+	if isAuthFailure(o.Stderr) {
+		return result, credentialRefused(IDCodex, firstNonEmpty(o.Stderr, o.Stdout))
 	}
 	if o.ExitErr != nil {
 		return result, fmt.Errorf("codex exited: %w: %s", o.ExitErr, truncate(firstNonEmpty(o.Stderr, o.Stdout)))

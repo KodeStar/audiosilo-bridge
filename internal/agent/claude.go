@@ -157,6 +157,9 @@ func ClaudeResult(model string, o CLIOutcome) (Result, error) {
 	if isRateLimit(res.Result) || isRateLimit(o.Stderr) {
 		return result, newRateLimitError(detail, time.Now())
 	}
+	if isAuthFailure(o.Stdout) || isAuthFailure(o.Stderr) {
+		return result, credentialRefused(IDClaude, detail)
+	}
 
 	if o.ExitErr != nil {
 		return result, fmt.Errorf("claude exited: %w: %s", o.ExitErr, truncate(detail))

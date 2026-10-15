@@ -65,7 +65,8 @@ func TestResultsFromAnOutcome(t *testing.T) {
 		"codex timed out":    {codex: true, out: CLIOutcome{TimedOut: true, Timeout: time.Second}, want: "codex timed out after 1s"},
 		"codex turn failed":  {codex: true, out: CLIOutcome{Stdout: `{"type":"turn.failed","error":"bad"}`}, want: "codex turn failed: bad"},
 		"codex usage limit":  {codex: true, out: CLIOutcome{Stdout: `{"type":"turn.failed","error":"usage limit reached"}`}, rate: true},
-		"codex exit":         {codex: true, out: CLIOutcome{ExitErr: exit2, Stderr: "401 Unauthorized"}, want: "codex exited: exit status 2: 401 Unauthorized"},
+		"codex exit":         {codex: true, out: CLIOutcome{ExitErr: exit2, Stderr: "boom"}, want: "codex exited: exit status 2: boom"},
+		"codex refused key":  {codex: true, out: CLIOutcome{ExitErr: exit2, Stderr: "401 Unauthorized"}, want: "refused the credential"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -97,5 +98,36 @@ func TestCodexResultPrefersLastMessage(t *testing.T) {
 	res, _ = CodexResult("gpt", CLIOutcome{Stdout: stream})
 	if res.Text != "streamed" {
 		t.Fatalf("fallback text = %q", res.Text)
+	}
+}
+
+// A refused credential is the backend being unavailable, never a bad answer the
+// stage retries: both CLIs' shapes, as the agent container's proof run saw them.
+func TestRefusedCredentialIsNotAvailable(t *testing.T) {
+	t.Parallel()
+	exit := errors.New("exit status 1")
+	cases := map[string]func() error{
+		"claude oauth": func() error {
+			_, err := ClaudeResult("", CLIOutcome{ExitErr: exit,
+				Stdout: `{"type":"result","is_error":true,"api_error_status":401,"result":"Failed to authenticate. API Error: 401 OAuth access token is invalid."}`})
+			return err
+		},
+		"codex key": func() error {
+			_, err := CodexResult("", CLIOutcome{ExitErr: exit,
+				Stdout: `{"type":"turn.failed","error":"unexpected status 401 Unauthorized: invalid_api_key"}`})
+			return err
+		},
+	}
+	for name, run := range cases {
+		var na *NotAvailableError
+		if err := run(); !errors.As(err, &na) {
+			t.Errorf("%s: %v, want a NotAvailableError", name, err)
+		}
+	}
+	// An ordinary failure stays an ordinary error.
+	_, err := ClaudeResult("", CLIOutcome{ExitErr: exit, Stdout: `{"type":"result","is_error":true,"result":"the output didn't validate"}`})
+	var na *NotAvailableError
+	if errors.As(err, &na) {
+		t.Fatalf("an ordinary failure became unavailable: %v", err)
 	}
 }
