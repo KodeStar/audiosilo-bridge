@@ -70,7 +70,6 @@ func (s *engineState) generateEngine() generate.Engine {
 	return nil
 }
 
-
 // agentBackend is the CLI the agent container runs (claude unless codex is set).
 func agentBackend(cfg config.Config) string {
 	if cfg.Agent.Backend == config.AgentBackendCodex {
