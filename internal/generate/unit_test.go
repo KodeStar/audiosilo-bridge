@@ -72,7 +72,8 @@ func TestDescribe(t *testing.T) {
 // Every engine park code has a hint, so a park never reaches the console bare.
 func TestEveryParkCodeHasAHint(t *testing.T) {
 	t.Parallel()
-	for _, code := range []state.ParkCode{state.ParkAgentUnavailable, state.ParkAgentRateLimited, state.ParkAgentValidationExhausted,
+	for _, code := range []state.ParkCode{state.ParkAgentUnavailable, state.ParkAgentRateLimited, state.ParkAgentCredentialRefused,
+		state.ParkAgentValidationExhausted,
 		state.ParkMarkersNotConfident, state.ParkQANoConverge, state.ParkSpellingGateFailure, state.ParkMediaToolsUnavailable,
 		state.ParkASRUnavailable, state.ParkManifestChanged, state.ParkFixLoopExhausted, state.ParkASRDecodeTimeout,
 		state.ParkContribUnavailable, state.ParkCoreNeeded, state.ParkCorePending, state.ParkEbookUnreadable,
@@ -86,6 +87,26 @@ func TestEveryParkCodeHasAHint(t *testing.T) {
 		if stageLabels[s] == "" {
 			t.Errorf("stage %q has no label", s)
 		}
+	}
+}
+
+// No hint sends anyone to generate the book again without cancelling this job
+// first: the server's enqueue finds the open (parked) job again, so that request
+// would change nothing. Nor to the Bridge's "Settings" or `gh auth login`, which
+// the Bridge doesn't have.
+func TestParkHintsNameAnActionThatWorks(t *testing.T) {
+	t.Parallel()
+	for code, hint := range parkHints {
+		low := strings.ToLower(hint)
+		if strings.Contains(low, "generate") && !strings.Contains(low, "cancel this job") {
+			t.Errorf("%s: %q sends the admin to generate again without cancelling the job", code, hint)
+		}
+		if strings.Contains(hint, "Settings") || strings.Contains(hint, "gh auth login") {
+			t.Errorf("%s: %q names something the Bridge doesn't have", code, hint)
+		}
+	}
+	if h := ParkHint(string(state.ParkAgentCredentialRefused)); !strings.Contains(h, "claude setup-token / agent-login codex") {
+		t.Errorf("credential refused hint = %q", h)
 	}
 }
 

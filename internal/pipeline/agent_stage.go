@@ -122,6 +122,10 @@ const (
 	// enough that a CLI mid-reinstall is likely back, short enough to self-heal an
 	// overnight batch.
 	notAvailableReadmitDelay = 10 * time.Minute
+	// credentialRefusedReadmitDelay is the auto-readmit delay for a refused credential:
+	// someone has to replace it, which takes a while, and each look costs a refused
+	// call (no tokens), so a book looks again twice an hour.
+	credentialRefusedReadmitDelay = 30 * time.Minute
 )
 
 // rateLimitRetryAt computes the auto-readmit instant for a rate-limit park: the backend's
@@ -493,12 +497,10 @@ func (e *Executor) runAgent(ctx context.Context, book store.Book, stage state.St
 	// run independent chunk invocations in parallel. Share one executor-level
 	// semaphore across both shapes so the configured global limit remains a real cap,
 	// not a multiplier. Cancellation while queued spends nothing.
-	select {
-	case e.agentSlots <- struct{}{}:
-		defer func() { <-e.agentSlots }()
-	case <-ctx.Done():
-		return total, ctx.Err()
+	if err := e.agentSlots.acquire(ctx); err != nil {
+		return total, err
 	}
+	defer e.agentSlots.release()
 	// Queueing behind another invocation is capacity wait, not productive model
 	// time. Start the rate clock only after this invocation owns a slot.
 	start := time.Now()
@@ -526,6 +528,12 @@ func (e *Executor) runAgent(ctx context.Context, book store.Book, stage state.St
 				AgentRateLimitedPrefix+" ("+rl.Detail+") - retry later", rateLimitRetryAt(rl, time.Now()))
 		}
 		var na *agent.NotAvailableError
+		if errors.As(err, &na) && na.CredentialRefused {
+			// Its own park: a person has to replace the credential (the console says so),
+			// and the book still looks again by itself, so it goes on once they have.
+			return total, scheduler.ParkWithCodeAfter(state.ParkAgentCredentialRefused, agentUnavailableReason(na.Detail),
+				time.Now().Add(credentialRefusedReadmitDelay))
+		}
 		if errors.As(err, &na) {
 			// Reached only after the agent package rode out the transient LookPath blip, so a
 			// short auto-readmit window lets a CLI that finished (re)installing self-resume.
@@ -1422,7 +1430,7 @@ func (e *Executor) runQAAdjudicateAgent(ctx context.Context, book store.Book, r 
 			chapters = append(chapters, ch)
 		}
 	}
-	workers := min(e.agentWorkers, len(chapters))
+	workers := min(e.AgentMaxPerBook(), len(chapters))
 	parts := make([][]int, workers)
 	for i, ch := range chapters {
 		parts[i%workers] = append(parts[i%workers], ch)

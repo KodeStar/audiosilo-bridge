@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/kodestar/audiosilo-bridge/internal/agent"
@@ -68,6 +69,11 @@ type Runner struct {
 	beatCheck time.Duration
 	beatEvery time.Duration
 	cancelFor time.Duration
+
+	// mu guards refused: the credential the provider refused last, until a run
+	// goes through or the runner reports another (status.go).
+	mu      sync.Mutex
+	refused *refusedCredential
 }
 
 var _ agent.Runner = (*Runner)(nil)
@@ -174,10 +180,12 @@ func (r *Runner) EnforcesNoTools() bool { return r.backend == agent.IDClaude }
 // Detect maps Status onto the engine's Availability. RetryAfter is always set:
 // whatever makes the container unavailable (down, restarting, too busy to claim
 // a job in time) is expected to pass by itself, so a book parked on it looks
-// again after RetryAfter, with Status's Detail as the reason.
+// again after RetryAfter, with Status's Detail as the reason. A refused credential
+// counts as available here: the engine still runs (each run that's refused parks
+// its book agent_credential_refused, and the first one that works clears it).
 func (r *Runner) Detect(context.Context) agent.Availability {
 	st := r.Status()
-	av := agent.Availability{Backend: r.backend, Available: st.Available, Detail: st.Detail,
+	av := agent.Availability{Backend: r.backend, Available: st.Available || st.Refused, Detail: st.Detail,
 		Path: "agent container", RetryAfter: RetryAfter}
 	if c, ok := st.CLIs[r.backend]; ok {
 		av.Version = c.Version
@@ -189,8 +197,13 @@ func (r *Runner) Detect(context.Context) agent.Availability {
 // runner, read the outcome, harvest out/. See the package comment and contract
 // section 7. req.Process is never called: a pid in another container means
 // nothing here.
+//
+// The Bridge's own trouble with the staging dir (it can't write the job there, or
+// read back what the runner left) is the agent being unavailable, never a failed
+// stage: the book parks and looks again by itself.
 func (r *Runner) Run(ctx context.Context, req agent.Request) (agent.Result, error) {
-	if st := r.Status(); !st.Available {
+	st := r.Status()
+	if !st.Available && !st.Refused {
 		return agent.Result{}, &agent.NotAvailableError{Backend: r.backend, Detail: st.Detail}
 	}
 	if req.Dir == "" {
@@ -205,7 +218,7 @@ func (r *Runner) Run(ctx context.Context, req agent.Request) (agent.Result, erro
 	timeout := requestTimeout(req.Timeout)
 	root, err := stage(job, req, r.backend, timeout)
 	if err != nil {
-		return agent.Result{}, fmt.Errorf("agent container: stage the job: %w", err)
+		return agent.Result{}, r.stagingFailed("write the job into", err)
 	}
 	defer func() { _ = root.Close() }()
 
@@ -214,6 +227,7 @@ func (r *Runner) Run(ctx context.Context, req agent.Request) (agent.Result, erro
 		return agent.Result{}, waitErr
 	}
 	res, runErr := r.outcome(root, req.Model, time.Duration(timeout)*time.Second)
+	r.noteCredential(st, runErr)
 	if waitErr != nil {
 		// Cancelled: the runner stopped the CLI and finished the job, so the usage
 		// it reported is still worth recording; the outputs aren't harvested.
@@ -230,9 +244,49 @@ func (r *Runner) Run(ctx context.Context, req agent.Request) (agent.Result, erro
 			r.log.Warn("agent container: harvest after a failed run", "err", herr)
 			return res, runErr
 		}
+		var limit *harvestLimitError
+		if !errors.As(herr, &limit) {
+			return res, r.stagingFailed("read the outputs from", herr)
+		}
 		return res, herr
 	}
 	return res, runErr
+}
+
+// noteCredential remembers a credential the provider refused, and forgets one
+// once a run shows it works (an answer, or a rate limit: the provider took the
+// credential then). st is the runner's report when the run was handed over.
+func (r *Runner) noteCredential(st Status, runErr error) {
+	var na *agent.NotAvailableError
+	var rl *agent.RateLimitError
+	switch {
+	case errors.As(runErr, &na) && na.CredentialRefused:
+		r.noteRefusal(st.CLIs[r.backend], na.Detail)
+	case runErr == nil || errors.As(runErr, &rl):
+		r.clearRefusal()
+	}
+}
+
+// stagingFailed is the Bridge failing to use the staging dir (doing what) as the
+// agent being unavailable: a full or read-only volume, a dir the Bridge's user
+// can't write. The error is worded without the Bridge's own paths.
+func (r *Runner) stagingFailed(what string, err error) error {
+	r.log.Warn("agent container: the staging dir failed", "what", what, "err", err)
+	return &agent.NotAvailableError{Backend: r.backend,
+		Detail: "the Bridge can't " + what + " the staging dir it shares with the agent container (" + ioProblem(err) + ")"}
+}
+
+// ioProblem words a file error without its path.
+func ioProblem(err error) string {
+	var pe *fs.PathError
+	if errors.As(err, &pe) {
+		return pe.Op + ": " + pe.Err.Error()
+	}
+	var le *os.LinkError
+	if errors.As(err, &le) {
+		return le.Op + ": " + le.Err.Error()
+	}
+	return err.Error()
 }
 
 // requestTimeout is the request's timeout in whole seconds, rounded up; no
@@ -341,7 +395,7 @@ func (r *Runner) heartbeatAt(root *os.Root, claimedAt time.Time) time.Time {
 func (r *Runner) outcome(root *os.Root, model string, timeout time.Duration) (agent.Result, error) {
 	raw, err := agentproto.ReadRegular(root, agentproto.ExitFile, agentproto.MaxExitBytes)
 	if err != nil {
-		return agent.Result{}, fmt.Errorf("agent container: read exit.json: %w", err)
+		return agent.Result{}, r.stagingFailed("read the run's exit.json from", err)
 	}
 	var ex agentproto.Exit
 	if err := json.Unmarshal(raw, &ex); err != nil {

@@ -339,8 +339,9 @@ func TestHarvestLimits(t *testing.T) {
 			}}
 			fake.start(t, dir)
 			_, err := r.Run(context.Background(), agent.Request{Dir: staged, Prompt: "p", Timeout: time.Minute})
-			if err == nil || !strings.Contains(err.Error(), "harvest") {
-				t.Fatalf("err = %v", err)
+			var na *agent.NotAvailableError
+			if err == nil || !strings.Contains(err.Error(), "harvest") || errors.As(err, &na) {
+				t.Fatalf("err = %v, want the harvest's limit (the agent's outputs, not the agent unavailable)", err)
 			}
 			if !present(filepath.Join(staged, "out"), "prev.json") {
 				t.Error("a failed harvest changed the staged out/")
@@ -620,5 +621,116 @@ func TestStageThroughTheJobDirsRoot(t *testing.T) {
 	}
 	if entries, _ := os.ReadDir(elsewhere); len(entries) != 0 {
 		t.Fatalf("something was written through the link: %v", entries)
+	}
+}
+
+// The Bridge's own trouble with the staging dir is the agent being unavailable
+// (the book parks and looks again), never a failed stage, and its words carry no
+// Bridge path: here it can't write the job (a read-only staging dir), or can't
+// read back the outputs (work/out/ gone).
+func TestRunStagingTroubleIsUnavailable(t *testing.T) {
+	t.Parallel()
+	if os.Geteuid() == 0 {
+		t.Skip("root writes through 0555")
+	}
+	t.Run("write", func(t *testing.T) {
+		t.Parallel()
+		r, dir := newTestRunner(t, agent.IDClaude)
+		if err := os.Chmod(dir, 0o555); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+		_, err := r.Run(context.Background(), agent.Request{Dir: stagedDir(t), Prompt: "p", Timeout: time.Minute})
+		var na *agent.NotAvailableError
+		if !errors.As(err, &na) || na.CredentialRefused || !strings.Contains(err.Error(), "can't write the job into the staging dir") {
+			t.Fatalf("err = %v, want the agent unavailable", err)
+		}
+		if strings.Contains(err.Error(), dir) {
+			t.Fatalf("err = %v names the Bridge's staging path", err)
+		}
+	})
+	t.Run("read", func(t *testing.T) {
+		t.Parallel()
+		r, dir := newTestRunner(t, agent.IDClaude)
+		fake := &fakeRunner{fn: func(job string) agentproto.Exit {
+			_ = os.RemoveAll(filepath.Join(job, "work", "out"))
+			mustWrite(t, filepath.Join(job, agentproto.StdoutFile), claudeOK)
+			return agentproto.Exit{}
+		}}
+		fake.start(t, dir)
+		_, err := r.Run(context.Background(), agent.Request{Dir: stagedDir(t), Prompt: "p", Timeout: time.Minute})
+		var na *agent.NotAvailableError
+		if !errors.As(err, &na) || !strings.Contains(err.Error(), "can't read the outputs from the staging dir") {
+			t.Fatalf("err = %v, want the agent unavailable", err)
+		}
+	})
+}
+
+// A credential the provider refused is remembered: the agent isn't ready (the
+// page and the heartbeat say so) until the runner reports another credential, or
+// a run goes through. Runs still go to the container meanwhile (a refused call
+// costs nothing), so the engine still tries.
+func TestRefusedCredentialIsRemembered(t *testing.T) {
+	t.Parallel()
+	r, dir := newTestRunner(t, agent.IDClaude)
+	since := time.Now().Add(-time.Hour).UTC().Truncate(time.Second)
+	rj := func(at time.Time) agentproto.Runner {
+		return agentproto.Runner{Protocol: 1, Version: "0.2.0", HeartbeatAt: time.Now(), Slots: 1,
+			CLIs: map[string]agentproto.CLI{"claude": {Version: "2.1.300", Credential: "oauth_token", CredentialSince: at}}}
+	}
+	writeRunnerJSON(t, dir, rj(since))
+	var refuse atomic.Bool
+	refuse.Store(true)
+	fake := &fakeRunner{fn: func(job string) agentproto.Exit {
+		if refuse.Load() {
+			mustWrite(t, filepath.Join(job, agentproto.StdoutFile),
+				`{"type":"result","subtype":"success","is_error":true,"api_error_status":401,"result":"Invalid API key"}`)
+			return agentproto.Exit{ExitCode: 1}
+		}
+		mustWrite(t, filepath.Join(job, agentproto.StdoutFile), claudeOK)
+		return agentproto.Exit{}
+	}}
+	fake.start(t, dir)
+	run := func() error {
+		_, err := r.Run(context.Background(), agent.Request{Dir: stagedDir(t), Prompt: "p", Timeout: time.Minute})
+		return err
+	}
+	if st := r.Status(); !st.Available || st.Refused {
+		t.Fatalf("before a refusal: %+v", st)
+	}
+	var na *agent.NotAvailableError
+	if err := run(); !errors.As(err, &na) || !na.CredentialRefused {
+		t.Fatalf("err = %v, want a refused credential", err)
+	}
+	st := r.Status()
+	if st.Available || !st.Refused || !strings.Contains(st.Detail, CredentialRefusedDetail) {
+		t.Fatalf("after a refusal: %+v", st)
+	}
+	if !r.Detect(context.Background()).Available {
+		t.Fatal("a refused credential stopped the engine from trying")
+	}
+	// The same credential (runner.json rewritten, nothing changed) stays refused.
+	writeRunnerJSON(t, dir, rj(since))
+	if st := r.Status(); !st.Refused {
+		t.Fatalf("the same credential: %+v", st)
+	}
+	// Another credential clears it.
+	writeRunnerJSON(t, dir, rj(since.Add(time.Minute)))
+	if st := r.Status(); !st.Available || st.Refused {
+		t.Fatalf("a replaced credential: %+v", st)
+	}
+	// Refused again, then a run that goes through clears it too.
+	if err := run(); !errors.As(err, &na) {
+		t.Fatalf("err = %v", err)
+	}
+	if !r.Status().Refused {
+		t.Fatal("the second refusal wasn't remembered")
+	}
+	refuse.Store(false)
+	if err := run(); err != nil {
+		t.Fatal(err)
+	}
+	if st := r.Status(); !st.Available || st.Refused {
+		t.Fatalf("after a run that went through: %+v", st)
 	}
 }

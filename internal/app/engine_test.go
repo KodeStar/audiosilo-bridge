@@ -3,9 +3,12 @@ package app
 import (
 	"context"
 	"path/filepath"
+	"slices"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/kodestar/audiosilo-bridge/internal/agentbox"
 	"github.com/kodestar/audiosilo-bridge/internal/events"
 	"github.com/kodestar/audiosilo-bridge/internal/scheduler"
 	"github.com/kodestar/audiosilo-bridge/internal/store"
@@ -140,4 +143,46 @@ func TestEventPersisterAfterClose(t *testing.T) {
 	if err := hub.Publish("again", map[string]int{"n": 3}); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// The engine follows the agent container's slots: a container that starts after
+// the Bridge (no runner.json at the engine's start, so 1) or comes back with
+// another --slots sets the agent concurrency to what it reports, while one that
+// isn't running (a stale runner.json) changes nothing.
+func TestFollowAgentSlots(t *testing.T) {
+	t.Parallel()
+	var mu sync.Mutex
+	st := agentbox.Status{}
+	var got []int
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		followAgentSlots(ctx, func() agentbox.Status { mu.Lock(); defer mu.Unlock(); return st }, time.Millisecond, 1,
+			func(n int) { mu.Lock(); defer mu.Unlock(); got = append(got, n) })
+	}()
+	set := func(s agentbox.Status) { mu.Lock(); defer mu.Unlock(); st = s }
+	wait := func(want []int) {
+		t.Helper()
+		for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(time.Millisecond) {
+			mu.Lock()
+			ok := slices.Equal(got, want)
+			mu.Unlock()
+			if ok {
+				return
+			}
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		t.Fatalf("set = %v, want %v", got, want)
+	}
+	set(agentbox.Status{Live: false, Slots: 4}) // a stale runner.json
+	time.Sleep(20 * time.Millisecond)
+	wait(nil)
+	set(agentbox.Status{Live: true, Slots: 3}) // the container came up
+	wait([]int{3})
+	set(agentbox.Status{Live: true, Slots: 2}) // restarted with fewer
+	wait([]int{3, 2})
+	cancel()
+	<-done
 }

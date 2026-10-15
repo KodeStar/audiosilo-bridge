@@ -182,7 +182,7 @@ func writeAttachments(dir, prefix string, s sidecars, prov Provenance) error {
 	case err != nil:
 		return err
 	case info.Mode()&os.ModeSymlink != 0 || !info.IsDir():
-		return fmt.Errorf("%s exists and isn't a folder; the Bridge won't write through it", adir)
+		return fmt.Errorf("the book's %s exists and isn't a folder; the Bridge won't write through it", AttachDir)
 	}
 	provJSON, err := json.MarshalIndent(prov, "", "  ")
 	if err != nil {

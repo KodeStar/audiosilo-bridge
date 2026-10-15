@@ -628,8 +628,9 @@ func TestRunnerJSON(t *testing.T) {
 	if rj.Protocol != 1 || rj.Version != "0.2.0-test" || rj.Slots != 1 || time.Since(rj.HeartbeatAt) > time.Minute {
 		t.Fatalf("runner.json = %+v", rj)
 	}
-	if rj.CLIs["claude"] != (agentproto.CLI{Version: "9.9.9 (fake claude)", Credential: "oauth_token"}) ||
-		rj.CLIs["codex"] != (agentproto.CLI{Version: "9.9.9 (fake codex)"}) {
+	claude, codex := rj.CLIs["claude"], rj.CLIs["codex"]
+	if claude.Version != "9.9.9 (fake claude)" || claude.Credential != "oauth_token" || claude.CredentialSince.IsZero() ||
+		codex != (agentproto.CLI{Version: "9.9.9 (fake codex)"}) {
 		t.Fatalf("clis = %+v", rj.CLIs)
 	}
 	if info, err := os.Stat(filepath.Join(te.staging, agentproto.RunnerFile)); err != nil || info.Mode().Perm() != 0o644 {
@@ -689,5 +690,79 @@ func TestStopFinishesRunsAsUnavailable(t *testing.T) {
 	ex := waitDone(t, job, time.Second)
 	if !ex.Cancelled || !ex.Unavailable || !strings.Contains(ex.Error, "stopped") {
 		t.Fatalf("exit = %+v", ex)
+	}
+}
+
+// credential_since moves when the credential changes (and only then), so the
+// Bridge can tell a replaced credential from the one the provider refused; the
+// credential itself never reaches runner.json.
+func TestCredentialSinceFollowsTheCredential(t *testing.T) {
+	t.Parallel()
+	te := newTestEnv(t, map[string]string{"CLAUDE_CODE_OAUTH_TOKEN": "sk-ant-oat01-first"})
+	var shift atomic.Int64
+	te.r.now = func() time.Time { return time.Now().Add(time.Duration(shift.Load())) }
+	first := te.r.status().CLIs["claude"].CredentialSince
+	shift.Store(int64(time.Minute))
+	if again := te.r.status().CLIs["claude"].CredentialSince; first.IsZero() || !again.Equal(first) {
+		t.Fatalf("the same credential: since %v then %v", first, again)
+	}
+	te.env["CLAUDE_CODE_OAUTH_TOKEN"] = "sk-ant-oat01-second"
+	shift.Store(int64(2 * time.Minute))
+	st := te.r.status()
+	if replaced := st.CLIs["claude"].CredentialSince; !replaced.After(first) {
+		t.Fatalf("a replaced credential: since %v, was %v", replaced, first)
+	}
+	raw, _ := json.Marshal(st)
+	if strings.Contains(string(raw), "sk-ant") {
+		t.Fatalf("runner.json carries the credential: %s", raw)
+	}
+	delete(te.env, "CLAUDE_CODE_OAUTH_TOKEN")
+	if c := te.r.status().CLIs["claude"]; c.Credential != "" || !c.CredentialSince.IsZero() {
+		t.Fatalf("no credential: %+v", c)
+	}
+}
+
+// A CLI missing at the start (installed later, or too slow to answer --version
+// then) is found without a restart: a run that finds it missing asks for a look,
+// and the runner looks again now and then anyway.
+func TestRedetectFindsALateCLI(t *testing.T) {
+	t.Parallel()
+	te := newTestEnv(t, parentEnv())
+	late := filepath.Join(t.TempDir(), "claude")
+	te.r.opts.ClaudeBin = late
+	te.r.statusEvery = 5 * time.Millisecond
+	te.r.detectEvery = time.Hour // only the run's ask brings the look forward
+	te.start(t)
+	readClaude := func() agentproto.CLI {
+		var rj agentproto.Runner
+		raw, _ := os.ReadFile(filepath.Join(te.staging, agentproto.RunnerFile))
+		_ = json.Unmarshal(raw, &rj)
+		return rj.CLIs["claude"]
+	}
+	for deadline := time.Now().Add(30 * time.Second); readClaude().Credential == "" && time.Now().Before(deadline); {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if c := readClaude(); c.Version != "" {
+		t.Fatalf("claude before it was installed = %+v", c)
+	}
+	body, err := os.ReadFile(te.claudeBin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(late, body, 0o755); err != nil { //nolint:gosec // the test's own script
+		t.Fatal(err)
+	}
+	ex := waitDone(t, te.submit(t, claudeReq), 30*time.Second)
+	if !ex.Unavailable || !strings.Contains(ex.Error, "no claude CLI") {
+		t.Fatalf("the run before the look = %+v", ex)
+	}
+	for deadline := time.Now().Add(30 * time.Second); readClaude().Version == "" && time.Now().Before(deadline); {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if c := readClaude(); c.Version != "9.9.9 (fake claude)" {
+		t.Fatalf("claude after the look = %+v", c)
+	}
+	if ex := waitDone(t, te.submit(t, claudeReq), 30*time.Second); ex.Error != "" || ex.ExitCode != 0 {
+		t.Fatalf("a run after the look = %+v", ex)
 	}
 }

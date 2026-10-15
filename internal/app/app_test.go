@@ -17,6 +17,7 @@ import (
 
 	"github.com/kodestar/audiosilo-bridge/internal/api"
 	"github.com/kodestar/audiosilo-bridge/internal/link"
+	"github.com/kodestar/audiosilo-bridge/internal/secrets"
 	"github.com/kodestar/audiosilo-bridge/internal/store"
 )
 
@@ -280,3 +281,48 @@ func TestEngineViewAndJobRoutes(t *testing.T) {
 		t.Fatalf("kinds = %s", k)
 	}
 }
+
+// AUDIOSILO_BRIDGE_GITHUB_TOKEN is sealed into the vault as github_pat at the
+// start (where the contribution's token source looks first), the environment's
+// value winning over one stored before; a blank one leaves the vault alone, and
+// the token is never logged.
+func TestGitHubTokenFromTheEnvironment(t *testing.T) {
+	data := t.TempDir()
+	var logs strings.Builder
+	var mu sync.Mutex
+	log := slog.New(slog.NewTextHandler(writerFunc(func(p []byte) (int, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		return logs.Write(p)
+	}), nil))
+	t.Setenv(GitHubTokenEnv, "ghp_from_the_environment")
+	b, _, err := New(context.Background(), Options{DataDir: data, Version: "0.1.0", Listen: "127.0.0.1:0", Logger: log})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := b.vault.Get(secrets.GitHubPAT); got != "ghp_from_the_environment" {
+		t.Fatalf("vault github_pat = %q", got)
+	}
+	if !b.canContribute(context.Background()) {
+		t.Fatal("a stored token doesn't resolve")
+	}
+	_ = b.db.Close()
+	if err := storeGitHubToken(b.vault, "ghp_replaced", log); err != nil {
+		t.Fatal(err)
+	}
+	if err := storeGitHubToken(b.vault, "  ", log); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := b.vault.Get(secrets.GitHubPAT); got != "ghp_replaced" {
+		t.Fatalf("vault github_pat = %q, want the environment's latest, untouched by a blank one", got)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if strings.Contains(logs.String(), "ghp_") {
+		t.Fatalf("the token reached the log: %s", logs.String())
+	}
+}
+
+type writerFunc func([]byte) (int, error)
+
+func (f writerFunc) Write(p []byte) (int, error) { return f(p) }

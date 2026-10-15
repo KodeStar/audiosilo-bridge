@@ -23,11 +23,21 @@ const (
 	maxHarvestEntries = 2000
 )
 
+// harvestLimitError is an output that broke one of the harvest's limits: what the
+// agent wrote, not the Bridge's trouble reading it (every other harvest error).
+type harvestLimitError struct{ msg string }
+
+func (e *harvestLimitError) Error() string { return e.msg }
+
+func limitErr(format string, args ...any) error {
+	return &harvestLimitError{msg: fmt.Sprintf(format, args...)}
+}
+
 // harvest copies the job's work/out/ back into the staged dir's out/, replacing
 // it, so the pipeline finds the outputs where a local run leaves them. Regular
 // files only (a link or a device is skipped), every read inside the job dir's
 // os.Root, under depth, count and size limits; any limit broken fails the whole
-// harvest and leaves the staged out/ as it was.
+// harvest (a *harvestLimitError) and leaves the staged out/ as it was.
 func harvest(job *os.Root, reqDir string) error {
 	src, err := job.OpenRoot(path.Join(agentproto.WorkDir, agentproto.OutDir))
 	if err != nil {
@@ -50,10 +60,10 @@ func harvest(job *os.Root, reqDir string) error {
 			return nil
 		}
 		if entries++; entries > maxHarvestEntries {
-			return fmt.Errorf("more than %d entries", maxHarvestEntries)
+			return limitErr("more than %d entries", maxHarvestEntries)
 		}
 		if strings.Count(p, "/")+1 > maxHarvestDepth {
-			return fmt.Errorf("%s is more than %d levels deep", p, maxHarvestDepth)
+			return limitErr("%s is more than %d levels deep", p, maxHarvestDepth)
 		}
 		dst := filepath.Join(tmp, filepath.FromSlash(p))
 		switch {
@@ -65,7 +75,7 @@ func harvest(job *os.Root, reqDir string) error {
 				return err
 			}
 			if total += n; total > maxHarvestTotal {
-				return fmt.Errorf("the outputs are over %d bytes in all", maxHarvestTotal)
+				return limitErr("the outputs are over %d bytes in all", maxHarvestTotal)
 			}
 			return nil
 		default:
@@ -99,7 +109,7 @@ func copyOut(src *os.Root, name, dst string) (int64, error) {
 	if info, err := f.Stat(); err != nil {
 		return 0, err
 	} else if info.Size() > maxHarvestFile {
-		return 0, fmt.Errorf("%s is %d bytes, over the %d cap", name, info.Size(), maxHarvestFile)
+		return 0, limitErr("%s is %d bytes, over the %d cap", name, info.Size(), maxHarvestFile)
 	}
 	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644) //nolint:gosec // dst is inside the Bridge's own temp dir
 	if err != nil {
@@ -113,7 +123,7 @@ func copyOut(src *os.Root, name, dst string) (int64, error) {
 		return n, err
 	}
 	if n > maxHarvestFile {
-		return n, fmt.Errorf("%s grew over the %d cap", name, maxHarvestFile)
+		return n, limitErr("%s grew over the %d cap", name, maxHarvestFile)
 	}
 	return n, os.Chmod(dst, 0o644) //nolint:gosec // a normal artifact, as agent.Harvest writes them
 }

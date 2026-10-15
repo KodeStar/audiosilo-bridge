@@ -108,9 +108,14 @@ type Runner struct {
 
 // CLI is one CLI's entry in runner.json. Version is empty when the binary isn't
 // there; Credential is one of the Credential* kinds, or empty. Never a token.
+// CredentialSince is when the runner first saw the credential it has now (zero
+// with none): it moves when the credential is replaced (or the runner restarts),
+// which is how the Bridge knows a credential the provider refused may work again.
+// The runner compares the credentials in memory; nothing of one is written.
 type CLI struct {
-	Version    string `json:"version"`
-	Credential string `json:"credential"`
+	Version         string    `json:"version"`
+	Credential      string    `json:"credential"`
+	CredentialSince time.Time `json:"credential_since,omitzero"`
 }
 
 // Request is request.json: a typed request the runner turns into the CLI's argv

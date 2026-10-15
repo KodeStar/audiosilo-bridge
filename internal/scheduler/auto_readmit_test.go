@@ -48,6 +48,20 @@ func TestAutoReadmitDueReadmitsTransientPark(t *testing.T) {
 	}
 }
 
+// A refused agent credential self-resumes too: once its retry_at is due the book
+// looks again, so it goes on by itself after someone replaced the credential.
+func TestAutoReadmitDueReadmitsCredentialRefusedPark(t *testing.T) {
+	h := newHarness(t)
+	db := h.openDB(t)
+	b := h.addBook(t, db, "refused", "", "")
+	s := New(db, h.hub, NewStubExecutor(0, 0), 1, h.workRoot, false)
+	parkBook(t, s, b.ID, state.ParkAgentCredentialRefused, time.Now().Add(-time.Minute).UTC().Format(time.RFC3339))
+	s.autoReadmitDue(context.Background())
+	if cur, _ := db.GetBook(context.Background(), b.ID); cur.Status != "" || cur.ParkCode != "" {
+		t.Fatalf("after auto-readmit: status=%q park_code=%q, want readmitted", cur.Status, cur.ParkCode)
+	}
+}
+
 // TestAutoReadmitDueSkipsNotDueAndNonAuto: a future retry_at, an empty retry_at
 // (pre-migration park), and a non-auto park code are all left parked.
 func TestAutoReadmitDueSkipsNotDueAndNonAuto(t *testing.T) {

@@ -12,6 +12,7 @@ import (
 
 	"github.com/kodestar/audiosilo-bridge/internal/agent"
 	"github.com/kodestar/audiosilo-bridge/internal/agentbox"
+	"github.com/kodestar/audiosilo-bridge/internal/agentproto"
 	"github.com/kodestar/audiosilo-bridge/internal/asr"
 	"github.com/kodestar/audiosilo-bridge/internal/config"
 	"github.com/kodestar/audiosilo-bridge/internal/contrib"
@@ -103,12 +104,14 @@ func (b *Bridge) runEngine(ctx context.Context) {
 	}
 
 	// The agent container's slots are the agent concurrency: a book in an agent
-	// stage waits for a slot rather than piling CLI runs onto one container.
+	// stage waits for a slot rather than piling CLI runs onto one container. The
+	// container may start after the Bridge, or come back with another --slots, so
+	// followAgentSlots keeps the engine on what runner.json says now.
 	slots := max(b.box.Status().Slots, 1)
 	box := b.box
 	redetect := func(ctx context.Context) (agent.Runner, agent.Availability) { return box, box.Detect(ctx) }
 	metaClient := metaops.NewClient(cfg.Metadata.BaseURL)
-	tokens := contrib.NewTokenSource(b.vault)
+	tokens := b.tokens
 	workRoot := filepath.Join(b.dataDir, "work")
 	exec := pipeline.NewExecutor(pipeline.Config{
 		DB: b.db, FFmpeg: tools.FFmpeg, FFprobe: tools.FFprobe, DataDir: b.dataDir,
@@ -167,7 +170,15 @@ func (b *Bridge) runEngine(ctx context.Context) {
 	})
 
 	var wg sync.WaitGroup
-	wg.Add(5)
+	wg.Add(6)
+	go func() {
+		defer wg.Done()
+		followAgentSlots(ctx, box.Status, agentSlotsEvery, slots, func(n int) {
+			sched.SetAgentCapacity(n)
+			exec.SetAgentConcurrency(n)
+			log.Info("bridge: the agent container's slots changed; the engine follows", "agent_slots", n)
+		})
+	}()
 	go func() {
 		defer wg.Done()
 		if err := sched.Start(ctx); err != nil && ctx.Err() == nil {
@@ -186,6 +197,30 @@ func (b *Bridge) runEngine(ctx context.Context) {
 		"agent_backend", box.ID(), "agent_slots", slots, "staging", cfg.AgentStagingDir(b.dataDir))
 	b.runner.Wake()
 	wg.Wait()
+}
+
+// agentSlotsEvery is how often the agent container's slots are looked at: as
+// often as the runner rewrites runner.json.
+const agentSlotsEvery = agentproto.RunnerInterval
+
+// followAgentSlots sets the engine's agent concurrency (set) to the agent
+// container's slots whenever a live runner.json reports a number other than cur,
+// until ctx ends. A container that isn't running changes nothing: its slots come
+// back with it.
+func followAgentSlots(ctx context.Context, status func() agentbox.Status, every time.Duration, cur int, set func(int)) {
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		if st := status(); st.Live && st.Slots >= 1 && st.Slots != cur {
+			cur = st.Slots
+			set(cur)
+		}
+	}
 }
 
 // supervisorApply is the supervisor's hook for its automatic actions. Only a
@@ -323,7 +358,8 @@ func newAgentBox(cfg config.Config, dataDir string, log *slog.Logger) *agentbox.
 const estimatesEvery = 5 * time.Minute
 
 // estimatesCache is the last computed estimates, when, and how many jobs the
-// generate handler had finished then.
+// generate handler had finished then. CanContribute is computed with them (a
+// GitHub token resolving can shell out to gh).
 type estimatesCache struct {
 	mu   sync.Mutex
 	e    *link.SidecarEstimates
@@ -348,6 +384,7 @@ func (b *Bridge) estimates(ctx context.Context) *link.Estimates {
 		e, err := generate.Estimates(ctx, b.db, agentState, cfg.Agent.MonthlyBudgetUSD, time.Now())
 		switch {
 		case err == nil:
+			e.CanContribute = b.canContribute(ctx)
 			c.e, c.at, c.done = e, time.Now(), done
 		case ctx.Err() == nil:
 			b.log.Warn("bridge: computing the estimates failed", "err", err)

@@ -1919,3 +1919,66 @@ func TestAgentUnavailableReason(t *testing.T) {
 		t.Errorf("detail = %q", got)
 	}
 }
+
+// A credential the provider refused parks agent_credential_refused (not
+// agent_unavailable, which the server doesn't announce) with a timed self-resume,
+// after one run: the same credential isn't tried again.
+func TestCredentialRefusedParksItsOwnCode(t *testing.T) {
+	ctx := context.Background()
+	work := t.TempDir()
+	box := newFakeRunner()
+	box.act = func(*fakeRunner, agent.Request, int) (agent.Result, error) {
+		return agent.Result{}, &agent.NotAvailableError{Backend: agent.IDClaude,
+			Detail: "the provider refused the credential: 401", CredentialRefused: true}
+	}
+	_, exe, book := dbBackedQAExecutor(t, work, box)
+	st, err := agent.New(work, string(state.FactPass), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = exe.runAgent(ctx, book, state.FactPass, scheduler.StageReport{}, st, "adjudicate.md", map[string]any{"Title": "T", "Round": 1, "AutoAccepted": ""}, false,
+		func(agent.Result, *agent.Staging) error { return nil })
+	var pe *scheduler.ParkError
+	if !errors.As(err, &pe) || pe.Code != state.ParkAgentCredentialRefused {
+		t.Fatalf("err = %v, want an agent_credential_refused park", err)
+	}
+	if pe.RetryAfter.Before(time.Now().Add(29*time.Minute)) || pe.RetryAfter.After(time.Now().Add(31*time.Minute)) {
+		t.Fatalf("retry_at = %v, want about 30 minutes out", pe.RetryAfter)
+	}
+	if n := box.count(string(state.FactPass)); n != 1 {
+		t.Fatalf("the refused credential was tried %d times, want 1", n)
+	}
+}
+
+// The agent concurrency can change while the executor runs (the Bridge follows its
+// agent container's slots): a raised cap lets a waiting invocation through at once,
+// and the fan-out and the reported capacity follow.
+func TestSetAgentConcurrency(t *testing.T) {
+	e := NewExecutor(Config{AgentConcurrency: 1, MaxAgentsPerBook: 1})
+	ctx := context.Background()
+	if err := e.agentSlots.acquire(ctx); err != nil {
+		t.Fatal(err)
+	}
+	short, cancel := context.WithTimeout(ctx, 20*time.Millisecond)
+	defer cancel()
+	if err := e.agentSlots.acquire(short); err == nil {
+		t.Fatal("a second invocation got a slot past a cap of 1")
+	}
+	got := make(chan error, 1)
+	go func() { got <- e.agentSlots.acquire(ctx) }()
+	time.Sleep(10 * time.Millisecond)
+	e.SetAgentConcurrency(2)
+	select {
+	case err := <-got:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a raised cap didn't let the waiting invocation through")
+	}
+	if _, _, capacity := e.AgentInvocationRuntime(); capacity != 2 || e.AgentMaxPerBook() != 2 {
+		t.Fatalf("capacity = %d, fan-out = %d, want 2 and 2", capacity, e.AgentMaxPerBook())
+	}
+	e.agentSlots.release()
+	e.agentSlots.release()
+}

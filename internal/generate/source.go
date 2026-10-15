@@ -3,6 +3,7 @@ package generate
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -35,8 +36,11 @@ func locate(mount, rel string) (place, error) {
 		return place{}, err
 	}
 	info, err := os.Stat(full)
+	if errors.Is(err, fs.ErrNotExist) {
+		return place{}, fmt.Errorf("the book isn't at %s through the library's mapping", rel)
+	}
 	if err != nil {
-		return place{}, fmt.Errorf("the book isn't there through the mapping: %w", err)
+		return place{}, fmt.Errorf("the book at %s can't be read through the library's mapping (%s)", rel, writeProblem(err))
 	}
 	if info.IsDir() {
 		return place{full: full, dir: full}, nil

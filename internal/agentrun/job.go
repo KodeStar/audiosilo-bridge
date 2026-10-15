@@ -51,8 +51,9 @@ func (r *Runner) execute(ctx context.Context, job *os.Root, id string) agentprot
 	if err != nil {
 		return refused(err.Error())
 	}
-	cli, ok := r.clis[req.CLI]
+	cli, ok := r.cli(req.CLI)
 	if !ok {
+		r.redetect.Store(true) // it may have been installed since the last look
 		return unavailable("the agent container has no " + req.CLI + " CLI")
 	}
 	if r.credentialKind(req.CLI) == "" {
@@ -175,6 +176,12 @@ func (r *Runner) spawn(ctx context.Context, job *os.Root, s spec) agentproto.Exi
 	cmd.WaitDelay = 5 * time.Second
 	setProcGroup(cmd)
 	if err := cmd.Start(); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			// The binary went (an image updated in place): the CLI is looked for
+			// again, and the Bridge parks the book until it is back.
+			r.redetect.Store(true)
+			return unavailable("start " + filepath.Base(s.path) + ": " + err.Error())
+		}
 		return refused("start " + filepath.Base(s.path) + ": " + err.Error())
 	}
 	pid := cmd.Process.Pid

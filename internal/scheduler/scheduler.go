@@ -31,6 +31,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/kodestar/audiosilo-bridge/internal/eta"
@@ -55,10 +56,12 @@ const tickInterval = 5 * time.Second
 
 // Scheduler is the pipeline dispatcher.
 type Scheduler struct {
-	db       *store.DB
-	hub      *events.Hub
-	exec     Executor
-	agentCap int
+	db   *store.DB
+	hub  *events.Hub
+	exec Executor
+	// agentCap is the agent lane's book capacity; SetAgentCapacity changes it while
+	// the scheduler runs (the Bridge follows its agent container's slots).
+	agentCap atomic.Int64
 	// autoPurge reclaims a book's scratch automatically when it reaches done (and
 	// startup-GCs already-done books' scratch on reconcile). Set at construction from
 	// config.Contribution.AutoPurge (a New parameter, so it can never be silently
@@ -166,17 +169,30 @@ func New(db *store.DB, hub *events.Hub, exec Executor, agentCap int, workRoot st
 	if agentCap < 1 {
 		agentCap = 1
 	}
-	return &Scheduler{
+	s := &Scheduler{
 		db:        db,
 		hub:       hub,
 		exec:      exec,
-		agentCap:  agentCap,
 		autoPurge: autoPurge,
 		workRoot:  workRoot,
 		wake:      make(chan struct{}, 1),
 		inflight:  map[int64]*inflightBook{},
 		rates:     map[string]float64{},
 		bookETA:   map[int64]int64{},
+	}
+	s.agentCap.Store(int64(agentCap))
+	return s
+}
+
+// agentCapacity is the agent lane's book capacity now.
+func (s *Scheduler) agentCapacity() int { return int(s.agentCap.Load()) }
+
+// SetAgentCapacity changes the agent lane's book capacity (clamped to 1) while
+// the scheduler runs; a larger one fills at once. Books running past a smaller
+// one finish their stages.
+func (s *Scheduler) SetAgentCapacity(n int) {
+	if prev := s.agentCap.Swap(int64(max(n, 1))); prev != int64(max(n, 1)) {
+		s.notify()
 	}
 }
 
@@ -433,7 +449,7 @@ func (s *Scheduler) dispatch() {
 	// post-dispatch per-lane occupancy - the exact numbers queue.stats publishes,
 	// with no second scan of the inflight set.
 	counts[state.LaneASR] += s.fillLane(asr, state.LaneASR, asrCapacity-counts[state.LaneASR])
-	counts[state.LaneAgent] += s.fillLane(agent, state.LaneAgent, s.agentCap-counts[state.LaneAgent])
+	counts[state.LaneAgent] += s.fillLane(agent, state.LaneAgent, s.agentCapacity()-counts[state.LaneAgent])
 	counts[state.LaneMechanical] += s.fillMechanicalLane(
 		mech,
 		mechCapacity-counts[state.LaneMechanical],
@@ -974,11 +990,13 @@ func (s *Scheduler) advanceWaypoints(ctx context.Context) ([]store.Book, error) 
 
 // autoReadmitCodes are the park reasons the timed self-resume acts on: the transient
 // agent conditions a wait heals (the CLI symlink blip recovers, or the rate-limit
-// window elapses) and the monthly budget (a new month starts). Only a park that
-// carries a retry_at is ever re-admitted, so the per-book budget park (none) still
-// waits for a human, as does every other park (a not-confident marker verdict, a
-// spelling gate failure, ...).
-var autoReadmitCodes = []state.ParkCode{state.ParkAgentUnavailable, state.ParkAgentRateLimited, state.ParkBudgetExceeded}
+// window elapses), a refused agent credential (looked at again in case it was
+// replaced) and the monthly budget (a new month starts). Only a park that carries a
+// retry_at is ever re-admitted, so the per-book budget park (none) still waits for
+// a human, as does every other park (a not-confident marker verdict, a spelling
+// gate failure, ...).
+var autoReadmitCodes = []state.ParkCode{state.ParkAgentUnavailable, state.ParkAgentRateLimited,
+	state.ParkAgentCredentialRefused, state.ParkBudgetExceeded}
 
 var restartReadmitCodes = []state.ParkCode{
 	state.ParkAgentUnavailable, state.ParkAgentRateLimited,
@@ -1068,15 +1086,16 @@ func (s *Scheduler) autoReadmitDue(ctx context.Context) {
 // every seriesless book. CanStart consults this only for carryover-sensitive agent
 // stages; independent marker/QA agent work may continue around a parked predecessor.
 //
-// "Unfinished" is purely positional (HoldsSeriesLock tests state order, not
-// status), so a pre-Ready predecessor that is parked/failed still blocks only the
-// successor stages that consume series carryover. This preserves spoiler ordering
-// without idling independent work across the rest of the pipeline.
+// "Unfinished" is positional (HoldsSeriesLock tests state order), so a pre-Ready
+// predecessor that is parked or paused still blocks the successor stages that
+// consume series carryover; one that failed (or was cancelled) does not, since
+// nothing will finish it. This preserves spoiler ordering without idling
+// independent work across the rest of the pipeline.
 func lockHolders(books []store.Book) map[int64]bool {
 	holders := map[int64]bool{}
 	best := seriesLockOwners(books)
 	for _, b := range books {
-		if !state.HoldsSeriesLock(state.State(b.State)) {
+		if !state.HoldsSeriesLock(state.State(b.State), state.Status(b.Status)) {
 			continue // finished for lock purposes (ready or beyond)
 		}
 		if strings.TrimSpace(b.Series) == "" {
@@ -1126,7 +1145,7 @@ func SeriesBlockers(books []store.Book) map[int64]SeriesBlocker {
 func seriesLockOwners(books []store.Book) map[string]store.Book {
 	best := map[string]store.Book{}
 	for _, b := range books {
-		if !state.HoldsSeriesLock(state.State(b.State)) || strings.TrimSpace(b.Series) == "" {
+		if !state.HoldsSeriesLock(state.State(b.State), state.Status(b.Status)) || strings.TrimSpace(b.Series) == "" {
 			continue
 		}
 		cur, ok := best[b.Series]
@@ -1182,7 +1201,7 @@ func (s *Scheduler) publishQueueStats(books []store.Book, counts map[state.Lane]
 			queued++
 		}
 	}
-	invocations, invocationCap := 0, s.agentCap
+	invocations, invocationCap := 0, s.agentCapacity()
 	perBook := map[int64]int{}
 	if runtime, ok := s.exec.(agentInvocationRuntime); ok {
 		invocations, perBook, invocationCap = runtime.AgentInvocationRuntime()
@@ -1211,7 +1230,7 @@ func (s *Scheduler) publishQueueStats(books []store.Book, counts map[state.Lane]
 		"asr_active":                next.asr,
 		"agent_active":              next.agent,
 		"agent_books_active":        next.agent,
-		"agent_book_capacity":       s.agentCap,
+		"agent_book_capacity":       s.agentCapacity(),
 		"agent_invocations_active":  next.invocations,
 		"agent_invocation_capacity": next.invocationCap,
 		"agent_invocations_by_book": perBook,

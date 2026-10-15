@@ -774,11 +774,24 @@ type Reporter struct {
 	// across a restart that came before the clear got through).
 	parked  bool
 	parkMsg string
+	// path is the job's book path as the server's last answer gave it ("" until
+	// one did): the server moves an open job with its book (a rename the scan
+	// noticed), and the job hears it here.
+	path string
 }
 
 // LocalReporter returns a Reporter that records progress and sends nothing (a
 // handler's tests).
 func LocalReporter() *Reporter { return &Reporter{} }
+
+// Path is the job's book path as the server's last answer to a report gave it,
+// "" when no answer carried one: a book the server saw move since the claim is
+// at this path now.
+func (p *Reporter) Path() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.path
+}
 
 // Last is the progress last recorded.
 func (p *Reporter) Last() Progress {
@@ -922,6 +935,11 @@ func (p *Reporter) send() bool {
 		u.Progress = raw
 	}
 	got, err := p.srv.UpdateJob(ctx, p.job.ID, u)
+	if err == nil && got.Path != nil && *got.Path != "" {
+		p.mu.Lock()
+		p.path = *got.Path
+		p.mu.Unlock()
+	}
 	switch {
 	case err == nil && got.CancelRequested:
 		p.cancel(errCancelRequested)

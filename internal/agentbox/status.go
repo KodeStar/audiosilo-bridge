@@ -15,8 +15,16 @@ import (
 // Status is the agent container as runner.json describes it now.
 type Status struct {
 	// Available: a fresh heartbeat, the protocol matches, and the backend's CLI is
-	// there with a credential.
+	// there with a credential the provider hasn't refused.
 	Available bool
+	// Refused: all of that, except that the provider refused the credential on the
+	// last run and the runner reports the same credential still (Detail says so).
+	// Runs still go to the container (a refused call costs nothing, and the next one
+	// that works clears it); the page and the heartbeat say the agent isn't ready.
+	Refused bool
+	// Live: a fresh heartbeat in the protocol this Bridge speaks, whatever its CLIs
+	// (Slots is then the runner's own).
+	Live bool
 	// Detail says why not, in words for the page and the park hint.
 	Detail      string
 	Version     string // the runner's (the Bridge binary's) version
@@ -62,9 +70,61 @@ func (r *Runner) Status() Status {
 		return st
 	}
 	st.Version, st.Slots, st.HeartbeatAt, st.CLIs = rj.Version, rj.Slots, rj.HeartbeatAt, rj.CLIs
+	st.Live = rj.Protocol == agentproto.Protocol && r.now().Sub(rj.HeartbeatAt) <= agentproto.RunnerFreshFor
 	st.Detail = r.unavailableBecause(rj)
+	if st.Detail == "" {
+		if refused := r.refusal(rj.CLIs[r.backend]); refused != "" {
+			st.Refused, st.Detail = true, refused
+		}
+	}
 	st.Available = st.Detail == ""
 	return st
+}
+
+// CredentialRefusedDetail is the agent's state while the provider refuses its
+// credential.
+const CredentialRefusedDetail = "the agent's credential was refused by the provider: replace it in the agent " +
+	"container (claude setup-token / agent-login codex)"
+
+// refusedCredential is a credential the provider refused: the runner's report of
+// it then (its kind and since when the runner has had it), and the provider's
+// words.
+type refusedCredential struct {
+	kind   string
+	since  time.Time
+	detail string
+}
+
+// noteRefusal remembers that the provider refused the credential c (the backend's
+// entry in runner.json when the run was handed over).
+func (r *Runner) noteRefusal(c agentproto.CLI, detail string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.refused = &refusedCredential{kind: c.Credential, since: c.CredentialSince, detail: detail}
+}
+
+// clearRefusal forgets a refusal: a run went through, so the credential works.
+func (r *Runner) clearRefusal() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.refused = nil
+}
+
+// refusal is the agent's state while the provider refuses the credential the
+// runner reports now as c ("" when it doesn't): a credential the runner reports
+// as changed since (another kind, or seen since another time: replaced, or the
+// container restarted) clears it.
+func (r *Runner) refusal(c agentproto.CLI) string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.refused == nil {
+		return ""
+	}
+	if c.Credential != r.refused.kind || !c.CredentialSince.Equal(r.refused.since) {
+		r.refused = nil
+		return ""
+	}
+	return CredentialRefusedDetail + " (" + r.refused.detail + ")"
 }
 
 // unavailableBecause is why runs can't go to the container now, or "". Each

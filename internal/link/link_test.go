@@ -226,7 +226,7 @@ func TestHeartbeatEstimates(t *testing.T) {
 	perHour := 1.6
 	st := Status{Version: "0.2.0", Kinds: []string{"sidecars.generate"}, Estimates: &Estimates{Sidecars: &SidecarEstimates{
 		ASRSecondsPerAudioHour: 900, AgentUSDPerAudioHour: &perHour, Samples: 12, AgentBackend: "claude", AgentReady: true,
-		Subscription: true, MonthlyBudgetUSD: 100, MonthSpentUSD: 12.3}}}
+		Subscription: true, MonthlyBudgetUSD: 100, MonthSpentUSD: 12.3, CanContribute: true}}}
 	if _, err := c.Heartbeat(context.Background(), st); err != nil {
 		t.Fatal(err)
 	}
@@ -241,7 +241,7 @@ func TestHeartbeatEstimates(t *testing.T) {
 	s := sent.Estimates.Sidecars
 	for k, want := range map[string]any{"asr_seconds_per_audio_hour": 900.0, "agent_usd_per_audio_hour": 1.6, "agent_usd_per_ebook": nil,
 		"samples": 12.0, "agent_backend": "claude", "agent_ready": true, "subscription": true, "monthly_budget_usd": 100.0,
-		"month_spent_usd": 12.3} {
+		"month_spent_usd": 12.3, "can_contribute": true} {
 		if got, ok := s[k]; !ok || got != want {
 			t.Errorf("estimates.sidecars.%s = %v (present %v), want %v", k, got, ok, want)
 		}

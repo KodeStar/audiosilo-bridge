@@ -1,10 +1,13 @@
 package agentrun
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/kodestar/audiosilo-bridge/internal/agentproto"
 )
@@ -108,6 +111,51 @@ func (r *Runner) credentialKind(cli string) string {
 		}
 	}
 	return ""
+}
+
+// credentialSince is when the runner first saw the credential cli has now (kind
+// is its credentialKind; zero with none). The credential is compared by a
+// fingerprint kept in memory: a replaced token, key or login moves the time, so
+// the Bridge stops treating it as one the provider refused.
+func (r *Runner) credentialSince(cli, kind string) time.Time {
+	fp := ""
+	if kind != "" {
+		fp = r.credentialFingerprint(cli, kind)
+	}
+	r.credMu.Lock()
+	defer r.credMu.Unlock()
+	if fp == "" {
+		delete(r.creds, cli)
+		return time.Time{}
+	}
+	seen, ok := r.creds[cli]
+	if !ok || seen.fp != fp {
+		seen = credSeen{fp: fp, since: r.now().UTC()}
+		r.creds[cli] = seen
+	}
+	return seen.since
+}
+
+// credentialFingerprint hashes the credential a run of cli gets (kind and value):
+// the runner's own comparison, never written or logged.
+func (r *Runner) credentialFingerprint(cli, kind string) string {
+	var value string
+	switch {
+	case cli == agentproto.CLIClaude && kind == agentproto.CredentialOAuthToken:
+		value = r.secret(envClaudeToken)
+	case cli == agentproto.CLIClaude:
+		value = r.secret(envAnthropic)
+	case kind == agentproto.CredentialLogin:
+		if f, err := os.Open(filepath.Join(r.codexHome(), "auth.json")); err == nil {
+			b, _ := io.ReadAll(io.LimitReader(f, maxSecretBytes))
+			_ = f.Close()
+			value = string(b)
+		}
+	default:
+		value = r.openAIKey()
+	}
+	sum := sha256.Sum256([]byte(cli + "\x00" + kind + "\x00" + value))
+	return hex.EncodeToString(sum[:])
 }
 
 // openAIKey is OPENAI_API_KEY, else CODEX_API_KEY.

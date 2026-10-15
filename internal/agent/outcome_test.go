@@ -143,8 +143,8 @@ func TestRefusedCredentialIsNotAvailable(t *testing.T) {
 	}
 	for name, run := range cases {
 		var na *NotAvailableError
-		if err := run(); !errors.As(err, &na) {
-			t.Errorf("%s: %v, want a NotAvailableError", name, err)
+		if err := run(); !errors.As(err, &na) || !na.CredentialRefused {
+			t.Errorf("%s: %v, want a NotAvailableError marked CredentialRefused", name, err)
 		}
 	}
 	// An ordinary failure stays an ordinary error.

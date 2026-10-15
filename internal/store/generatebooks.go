@@ -55,6 +55,14 @@ func (db *DB) GetGenerateBook(ctx context.Context, serverJobID int64) (GenerateB
 	return g, nil
 }
 
+// SetGenerateBookPath records a server job's book at another path (the server
+// moved the job with its book), so a restart follows the same book there.
+func (db *DB) SetGenerateBookPath(ctx context.Context, serverJobID int64, relPath string) error {
+	_, err := db.sql.ExecContext(ctx,
+		`UPDATE generate_books SET rel_path = ? WHERE server_job_id = ?`, relPath, serverJobID)
+	return err
+}
+
 // EndGenerateBook records when a server job ended (done, failed or cancelled):
 // the transcript retention window counts from it.
 func (db *DB) EndGenerateBook(ctx context.Context, serverJobID int64, at time.Time) error {

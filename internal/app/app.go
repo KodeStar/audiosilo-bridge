@@ -22,6 +22,7 @@ import (
 	"github.com/kodestar/audiosilo-bridge/internal/api"
 	"github.com/kodestar/audiosilo-bridge/internal/auth"
 	"github.com/kodestar/audiosilo-bridge/internal/config"
+	"github.com/kodestar/audiosilo-bridge/internal/contrib"
 	"github.com/kodestar/audiosilo-bridge/internal/generate"
 	"github.com/kodestar/audiosilo-bridge/internal/jobs"
 	"github.com/kodestar/audiosilo-bridge/internal/link"
@@ -68,6 +69,9 @@ type Bridge struct {
 	box    *agentbox.Runner
 	gen    *generate.Handler
 	engine engineState
+	// tokens resolves the GitHub token a contribution files issues with (the
+	// vault's github_pat, which AUDIOSILO_BRIDGE_GITHUB_TOKEN sets).
+	tokens *contrib.TokenSource
 	// est caches the heartbeat's estimates (estimates.go of the engine wiring).
 	est estimatesCache
 
@@ -109,6 +113,10 @@ func New(ctx context.Context, opts Options) (*Bridge, string, error) {
 		_ = db.Close()
 		return nil, "", err
 	}
+	if err := storeGitHubToken(vault, os.Getenv(GitHubTokenEnv), opts.Logger); err != nil {
+		_ = db.Close()
+		return nil, "", err
+	}
 	conn, err := openConn(ctx, db, vault, opts.Version, opts.Logger)
 	if err != nil {
 		_ = db.Close()
@@ -126,7 +134,7 @@ func New(ctx context.Context, opts Options) (*Bridge, string, error) {
 	}
 	b := &Bridge{dataDir: opts.DataDir, version: opts.Version, log: opts.Logger, ring: opts.Ring, db: db, keySrc: keySrc,
 		vault: vault, conn: conn, libs: mapping.NewRegistry(), auth: am, kick: make(chan struct{}, 1),
-		box: newAgentBox(cfg, opts.DataDir, opts.Logger)}
+		box: newAgentBox(cfg, opts.DataDir, opts.Logger), tokens: contrib.NewTokenSource(vault)}
 	b.cfg.Store(&cfg)
 	verifier := verify.New(b.libs, b.mount, func() mapping.BookSource {
 		if cl := b.conn.Client(); cl != nil {
@@ -142,11 +150,41 @@ func New(ctx context.Context, opts Options) (*Bridge, string, error) {
 			return nil
 		},
 		WorkRoot: filepath.Join(opts.DataDir, "work"), Version: opts.Version, RetentionDays: cfg.Transcripts.RetentionDays,
-		Log: opts.Logger})
+		CanContribute: b.canContribute, Log: opts.Logger})
 	b.runner = jobs.New(db, b.server, b.tokenRefused, jobs.Options{Log: opts.Logger,
 		ServerID: func() string { return b.conn.Pairing().ServerID }}, verifier, b.gen)
 	conn.onChange = b.linkChanged
 	return b, oneTime, nil
+}
+
+// GitHubTokenEnv names the variable that gives the Bridge its GitHub token (a
+// contribution files the community intake issue with it).
+const GitHubTokenEnv = "AUDIOSILO_BRIDGE_GITHUB_TOKEN"
+
+// storeGitHubToken seals the token from the environment into the vault as
+// github_pat (where contrib.TokenSource looks first), replacing any other: the
+// environment's value wins, every start. Unset (or blank: compose's ${VAR} of an
+// unset variable) leaves the vault as it is. The token is never logged.
+func storeGitHubToken(vault secrets.Store, value string, log *slog.Logger) error {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	if cur, err := vault.Get(secrets.GitHubPAT); err == nil && cur == value {
+		return nil
+	}
+	if err := vault.Set(secrets.GitHubPAT, value); err != nil {
+		return fmt.Errorf("store %s in the secrets: %w", GitHubTokenEnv, err)
+	}
+	log.Info("bridge: stored the GitHub token from " + GitHubTokenEnv)
+	return nil
+}
+
+// canContribute reports whether a GitHub token resolves, which a job with
+// contribute=issue needs.
+func (b *Bridge) canContribute(ctx context.Context) bool {
+	_, _, err := b.tokens.Resolve(ctx)
+	return err == nil
 }
 
 // config is the current configuration.

@@ -60,8 +60,8 @@ func (s *Scheduler) publishETAs(ctx context.Context, books []store.Book) {
 	// prediction and the dispatch must share one capacity model.
 	queue := round10(eta.QueueETA(inputs, rates, eta.LaneCaps{
 		ASR: asrCapacity, Mechanical: mechCapacity, MechanicalSourceIO: sourceIOCapacity,
-		Agent:            s.agentCap,
-		AgentInvocations: agentInvocationCapacity(s.exec, s.agentCap),
+		Agent:            s.agentCapacity(),
+		AgentInvocations: agentInvocationCapacity(s.exec, s.agentCapacity()),
 	}))
 
 	s.etaMu.Lock()

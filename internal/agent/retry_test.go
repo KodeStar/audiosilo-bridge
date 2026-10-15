@@ -245,3 +245,21 @@ func TestRunWithRetryNotAvailableContextCancel(t *testing.T) {
 		t.Fatalf("want context.Canceled, got %v", err)
 	}
 }
+
+// A refused credential is returned at once: retrying the same credential only
+// gets it refused again (and the book should park saying so, not 75 s later).
+func TestRunWithRetryCredentialRefusedNotRetried(t *testing.T) {
+	withTinyNotAvailableBackoff(t)
+	r := &scriptRunner{steps: []step{
+		{err: credentialRefused(IDClaude, `{"api_error_status":401}`)},
+		{res: Result{Text: "ok"}},
+	}}
+	_, _, err := RunWithBackoff(context.Background(), r, Request{Prompt: "base"}, alwaysValid, func(Usage) {}, tinyBackoff(3))
+	var na *NotAvailableError
+	if !errors.As(err, &na) || !na.CredentialRefused {
+		t.Fatalf("want a refused-credential NotAvailableError, got %v", err)
+	}
+	if r.calls != 1 {
+		t.Errorf("calls=%d, want 1 (no retry of a refused credential)", r.calls)
+	}
+}

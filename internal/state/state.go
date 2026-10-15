@@ -256,11 +256,15 @@ func MainlineNext(kind Kind, s State) State {
 	return next[len(next)-1]
 }
 
-// HoldsSeriesLock reports whether a book at state s still holds its series lock:
-// true for every state before Ready. A book that has reached Ready (or beyond)
-// has finished authoring, so it no longer blocks its series' successors from the
-// agent lane. The scheduler uses this to pick each series' lock holder.
-func HoldsSeriesLock(s State) bool { return Order(s) < Order(Ready) }
+// HoldsSeriesLock reports whether a book at state s with status st still holds
+// its series lock: true for every state before Ready, unless the book failed. A
+// book that has reached Ready (or beyond) has finished authoring, so it no longer
+// blocks its series' successors from the agent lane. A failed book (a cancel is a
+// failure too) holds nothing either: the job that wanted it ended, so nothing will
+// finish it, and a later volume runs without its carryover, as the first book of a
+// series does. A parked or paused book still holds it: it resumes. The scheduler
+// and the ETA simulation both pick each series' lock holder with it.
+func HoldsSeriesLock(s State, st Status) bool { return st != StatusFailed && Order(s) < Order(Ready) }
 
 // RequiresSeriesOrder reports whether an agent stage consumes series carryover or
 // authors/validates spoiler-sensitive sidecars. Marker normalization and QA

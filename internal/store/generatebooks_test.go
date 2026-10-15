@@ -30,6 +30,16 @@ func TestGenerateBooksMapAJobToItsBook(t *testing.T) {
 	if err != nil || g.BookID == nil || *g.BookID != b.ID || g.LibraryID != 1 || g.RelPath != "A/Book" || g.EndedAt != "" {
 		t.Fatalf("mapping = %+v, %v", g, err)
 	}
+	// The server moved the job with its book: the mapping follows it.
+	if err := db.SetGenerateBookPath(ctx, 12, "A/Book (2026)"); err != nil {
+		t.Fatal(err)
+	}
+	if g, _ := db.GetGenerateBook(ctx, 12); g.RelPath != "A/Book (2026)" || g.BookID == nil || *g.BookID != b.ID {
+		t.Fatalf("moved mapping = %+v", g)
+	}
+	if err := db.SetGenerateBookPath(ctx, 12, "A/Book"); err != nil {
+		t.Fatal(err)
+	}
 
 	// Ended jobs are the retention sweep's work list, from the moment they ended.
 	end := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)

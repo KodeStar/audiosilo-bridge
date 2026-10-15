@@ -111,7 +111,8 @@ type SidecarEstimates struct {
 	Samples int `json:"samples"`
 	// AgentBackend is the agent CLI the Bridge uses ("" when none).
 	AgentBackend string `json:"agent_backend"`
-	// AgentReady: the agent container answers and has a credential.
+	// AgentReady: the agent container answers and has a credential the provider
+	// hasn't refused.
 	AgentReady bool `json:"agent_ready"`
 	// Subscription: the credential is a subscription login (the cost is notional).
 	Subscription bool `json:"subscription"`
@@ -119,6 +120,9 @@ type SidecarEstimates struct {
 	// calendar month's spend (UTC).
 	MonthlyBudgetUSD float64 `json:"monthly_budget_usd"`
 	MonthSpentUSD    float64 `json:"month_spent_usd"`
+	// CanContribute: a GitHub token resolves, so a job with contribute=issue can
+	// file its contribution (without one such a job fails at once).
+	CanContribute bool `json:"can_contribute"`
 }
 
 // LibraryStatus is one library's mapping as the Bridge checked it.

@@ -23,6 +23,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/kodestar/audiosilo-bridge/internal/agentproto"
@@ -34,6 +35,11 @@ const MaxSlots = 8
 
 // scanInterval is how often the staging dir is listed for new jobs.
 const scanInterval = time.Second
+
+// detectEvery is how often the CLIs are looked for again: an image updated in
+// place, or a CLI that answered --version too slowly at the start, is picked up
+// without a restart. A run that finds its CLI missing asks for a look at once.
+const detectEvery = 10 * time.Minute
 
 // orphanAfter is how old a claimed, unfinished job's heartbeat must be before the
 // runner treats it as a run an earlier runner left behind (it looks at start and
@@ -66,8 +72,22 @@ type Runner struct {
 	log   *slog.Logger
 	slots chan struct{}
 
-	// clis holds what detect found: the resolved binary and its --version.
-	clis map[string]cliInfo
+	// clis holds what detect found: the resolved binary and its --version
+	// (guarded by clisMu: a later detect replaces it while runs read it).
+	clisMu sync.RWMutex
+	clis   map[string]cliInfo
+	// detecting is set while a detect runs; redetect asks the next status tick
+	// for one (a run found its CLI missing); lastDetect is when one last started
+	// (the Run loop's own).
+	detecting  atomic.Bool
+	redetect   atomic.Bool
+	lastDetect time.Time
+
+	// creds holds, per CLI, a fingerprint of the credential it has and since when
+	// (guarded by credMu): runner.json's credential_since. The fingerprint stays in
+	// memory, never written anywhere.
+	credMu sync.Mutex
+	creds  map[string]credSeen
 
 	// codexMu guards codexActive, the codex runs in progress: CODEX_HOME is
 	// shared (the login lives there), so it's wiped only when no run uses it.
@@ -82,10 +102,17 @@ type Runner struct {
 	killDelay   time.Duration // TERM to KILL on a cancel or a timeout
 	scanEvery   time.Duration
 	statusEvery time.Duration // runner.json and the orphan recovery
+	detectEvery time.Duration
 	now         func() time.Time
 }
 
 type cliInfo struct{ path, version string }
+
+// credSeen is a credential's fingerprint and when the runner first saw it.
+type credSeen struct {
+	fp    string
+	since time.Time
+}
 
 // New checks the options and returns a Runner. It doesn't touch the staging dir
 // until Run.
@@ -120,12 +147,22 @@ func New(opts Options) (*Runner, error) {
 		log:         log,
 		slots:       make(chan struct{}, opts.Slots),
 		clis:        map[string]cliInfo{},
+		creds:       map[string]credSeen{},
 		active:      map[string]bool{},
 		killDelay:   10 * time.Second,
 		scanEvery:   scanInterval,
 		statusEvery: agentproto.RunnerInterval,
+		detectEvery: detectEvery,
 		now:         time.Now,
 	}, nil
+}
+
+// cli is what detect found for name.
+func (r *Runner) cli(name string) (cliInfo, bool) {
+	r.clisMu.RLock()
+	defer r.clisMu.RUnlock()
+	c, ok := r.clis[name]
+	return c, ok
 }
 
 // setActive records whether this runner is running the job id.
@@ -151,6 +188,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	if err := os.MkdirAll(filepath.Join(r.opts.Home, "codex"), 0o700); err != nil {
 		r.log.Warn("agent runner: create the codex home", "err", err)
 	}
+	r.lastDetect = r.now()
 	r.detect(ctx)
 	r.recoverOrphans()
 	r.writeStatus()
@@ -171,6 +209,7 @@ func (r *Runner) Run(ctx context.Context) error {
 			// An earlier runner's run (a crash and a quick restart) may only now be
 			// old enough to call orphaned.
 			r.recoverOrphans()
+			r.detectAgain(ctx, &wg)
 			r.writeStatus()
 		case <-scan.C:
 			r.scan(ctx, &wg)
@@ -178,23 +217,59 @@ func (r *Runner) Run(ctx context.Context) error {
 	}
 }
 
-// detect resolves each CLI and asks its version, once: the binaries are pinned
-// in the image.
+// detectAgain looks for the CLIs again in the background when a run asked for it
+// or detectEvery passed: --version can take seconds, and runner.json must not go
+// stale meanwhile.
+func (r *Runner) detectAgain(ctx context.Context, wg *sync.WaitGroup) {
+	asked := r.redetect.Load()
+	if !asked && r.now().Sub(r.lastDetect) < r.detectEvery {
+		return
+	}
+	if !r.detecting.CompareAndSwap(false, true) {
+		return
+	}
+	r.redetect.Store(false)
+	r.lastDetect = r.now()
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		defer r.detecting.Store(false)
+		r.detect(ctx)
+		r.writeStatus()
+	}()
+}
+
+// detect resolves each CLI and asks its version. It runs at the start, then again
+// now and then (detectAgain): a CLI whose binary is gone is dropped, one whose
+// --version failed this time keeps what an earlier look found.
 func (r *Runner) detect(ctx context.Context) {
+	found := map[string]cliInfo{}
 	for name, bin := range map[string]string{agentproto.CLIClaude: r.opts.ClaudeBin, agentproto.CLICodex: r.opts.CodexBin} {
 		path, err := r.lookPath(bin)
 		if err != nil {
-			r.log.Warn("agent runner: CLI not found", "cli", name, "err", err)
+			if _, had := r.cli(name); had {
+				r.log.Warn("agent runner: CLI not found", "cli", name, "err", err)
+			} else {
+				r.log.Debug("agent runner: CLI not found", "cli", name, "err", err)
+			}
 			continue
 		}
 		ver, err := r.version(ctx, path)
 		if err != nil {
 			r.log.Warn("agent runner: CLI --version failed", "cli", name, "err", err)
+			if prev, had := r.cli(name); had && prev.path == path {
+				found[name] = prev
+			}
 			continue
 		}
-		r.clis[name] = cliInfo{path: path, version: ver}
-		r.log.Info("agent runner: CLI found", "cli", name, "version", ver)
+		found[name] = cliInfo{path: path, version: ver}
+		if prev, had := r.cli(name); !had || prev != found[name] {
+			r.log.Info("agent runner: CLI found", "cli", name, "version", ver)
+		}
 	}
+	r.clisMu.Lock()
+	r.clis = found
+	r.clisMu.Unlock()
 }
 
 // lookPath resolves bin on the runner's PATH (an absolute or relative path is
@@ -242,7 +317,9 @@ func (r *Runner) status() agentproto.Runner {
 		CLIs:        map[string]agentproto.CLI{},
 	}
 	for _, name := range []string{agentproto.CLIClaude, agentproto.CLICodex} {
-		st.CLIs[name] = agentproto.CLI{Version: r.clis[name].version, Credential: r.credentialKind(name)}
+		c, _ := r.cli(name)
+		kind := r.credentialKind(name)
+		st.CLIs[name] = agentproto.CLI{Version: c.version, Credential: kind, CredentialSince: r.credentialSince(name, kind)}
 	}
 	return st
 }

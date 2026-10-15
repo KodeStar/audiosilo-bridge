@@ -68,7 +68,7 @@ const defaultContribBaseURL = "https://api.github.com"
 const (
 	// ContribUnavailableMsg parks a book in issue mode when no GitHub credential
 	// is available (no PAT in secrets, no `gh auth token`).
-	ContribUnavailableMsg = "GitHub credential unavailable - add a personal access token in Settings or run `gh auth login`, then Retry"
+	ContribUnavailableMsg = "GitHub credential unavailable - set AUDIOSILO_BRIDGE_GITHUB_TOKEN on the Bridge and restart it, then Retry"
 	// CoreNeededMsg parks a book whose work does not exist upstream: a core add-work
 	// proposal has been prefilled and awaits completion/confirmation in the UI.
 	CoreNeededMsg = "this book's work does not exist on AudioSilo Meta yet - complete the work proposal, then it contributes automatically"

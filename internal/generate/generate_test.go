@@ -37,6 +37,9 @@ type fakeServer struct {
 	notHeld map[int64]bool
 	books   map[string]link.Book
 	rescans []map[string]any
+	// paths is a job's path in the answers to its reports: the server moved the
+	// job with its book.
+	paths map[int64]string
 }
 
 func newFakeServer() *fakeServer {
@@ -68,7 +71,11 @@ func (f *fakeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			_, _ = io.WriteString(w, `{"error":"not held","code":"not_held"}`)
 			return
 		}
-		_ = json.NewEncoder(w).Encode(link.Job{ID: id, State: *u.State, CancelRequested: f.cancel[id]})
+		j := link.Job{ID: id, State: *u.State, CancelRequested: f.cancel[id]}
+		if p, ok := f.paths[id]; ok {
+			j.Path = &p
+		}
+		_ = json.NewEncoder(w).Encode(j)
 	case r.URL.Path == "/api/v1/bridge/libraries/1/book":
 		b, ok := f.books[r.URL.Query().Get("path")]
 		if !ok {
@@ -149,6 +156,9 @@ type hooks struct {
 	mu    sync.Mutex
 	parks map[string]int // stage -> how many times to park there
 	block map[string]chan struct{}
+	// estimated, when set, is the fact pass's spend as a codex run records it: a
+	// complete estimate from the pricing table, no reported cost.
+	estimated float64
 }
 
 func (e *hooks) Execute(ctx context.Context, b store.Book, st state.State, r scheduler.StageReport) (scheduler.StageResult, error) {
@@ -175,7 +185,14 @@ func (e *hooks) Execute(ctx context.Context, b store.Book, st state.State, r sch
 	switch st {
 	case state.FactPass:
 		// Spend, as an agent stage records it on its open run.
-		_ = e.db.AddOpenStageRunUsage(ctx, b.ID, string(st), "opus", 100, 100, 3.5)
+		e.mu.Lock()
+		estimated := e.estimated
+		e.mu.Unlock()
+		if estimated > 0 {
+			_ = e.db.AddOpenStageRunUsageDetailed(ctx, b.ID, string(st), "gpt-5", 100, 100, 0, 0, false, estimated, true)
+		} else {
+			_ = e.db.AddOpenStageRunUsage(ctx, b.ID, string(st), "opus", 100, 100, 3.5)
+		}
 	case state.Validating:
 		dir := filepath.Join(b.WorkDir, "sidecars")
 		_ = os.MkdirAll(dir, 0o750)
@@ -601,4 +618,181 @@ func TestGenerateCoreNeededStillWritesLocally(t *testing.T) {
 	if b := hr.engineBook(32); b.ContribMode != "issue" {
 		t.Fatalf("engine book mode = %q", b.ContribMode)
 	}
+}
+
+// An earlier volume whose job ended (here an admin's cancel) no longer holds its
+// series' lock: the next volume's job runs to the end, without that volume's
+// carryover, instead of waiting at its first carryover stage for ever.
+func TestGenerateSeriesGoesOnPastAnEndedVolume(t *testing.T) {
+	t.Parallel()
+	hr := newHarness(t)
+	mustWrite(t, filepath.Join(hr.root, "Author", "Book1", "01.mp3"), "vol-one")
+	hr.srv.set(func() {
+		hr.srv.books["Author/Book1"] = link.Book{LibraryID: 1, Path: "Author/Book1",
+			Files: []link.BookFile{{Path: "Author/Book1/01.mp3", Size: 7, ModTime: 1700000000}},
+			Info:  &link.BookInfo{Title: "Volume One", Series: "The Saga", SeriesIndex: "1"}}
+	})
+	asr := hr.exec.gate("asr")
+	hr.srv.add(81, "Author/Book1", `{}`)
+	stop := hr.runner(hr.h)
+	defer stop()
+	hr.waitFor("volume 1 at asr", func() bool {
+		return hr.srv.saw(81, func(_ link.Update, p map[string]any) bool { return p["stage"] == "asr" })
+	})
+	hr.srv.set(func() { hr.srv.cancel[81] = true })
+	hr.waitFor("volume 1 cancelled", func() bool { s, _ := hr.srv.final(81); return s == link.StateCancelled })
+	hr.waitFor("its engine book cancelled", func() bool { return scheduler.IsCancelled(hr.engineBook(81)) })
+	close(asr)
+
+	hr.srv.add(82, "Author/Book", `{}`) // The Saga #2
+	hr.waitFor("volume 2 done", func() bool { s, _ := hr.srv.final(82); return s == link.StateDone })
+}
+
+// A .audiosilo/ the Bridge can't write at the end (another user's, while the
+// book's folder itself is writable) parks the job book_not_writable instead of
+// failing it after the whole run; once it can, a Retry writes the files.
+func TestGenerateAttachDirNotWritableParks(t *testing.T) {
+	t.Parallel()
+	if os.Geteuid() == 0 {
+		t.Skip("root writes through 0555")
+	}
+	hr := newHarness(t)
+	adir := filepath.Join(hr.root, "Author", "Book", AttachDir)
+	if err := os.Mkdir(adir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(adir, 0o555); err != nil { //nolint:gosec // the test's own folder
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(adir, 0o755) }) //nolint:gosec // as above
+	hr.srv.add(91, "Author/Book", `{}`)
+	stop := hr.runner(hr.h)
+	defer stop()
+	hr.waitFor("the park", func() bool {
+		return hr.srv.saw(91, func(u link.Update, p map[string]any) bool {
+			park, _ := p["park"].(map[string]any)
+			return u.State != nil && *u.State == link.StateNeedsAttention && park["code"] == "book_not_writable" &&
+				u.Error != nil && strings.Contains(*u.Error, ".audiosilo folder can't be written")
+		})
+	})
+	if s, _ := hr.srv.final(91); s != "" {
+		t.Fatalf("the job ended %s instead of waiting", s)
+	}
+	if b := hr.engineBook(91); b.State != string(state.Done) {
+		t.Fatalf("engine book = %s", b.State)
+	}
+	if err := os.Chmod(adir, 0o755); err != nil { //nolint:gosec // as above
+		t.Fatal(err)
+	}
+	if err := hr.h.Retry(context.Background(), 91); err != nil {
+		t.Fatal(err)
+	}
+	hr.waitFor("done", func() bool { s, _ := hr.srv.final(91); return s == link.StateDone })
+	if _, err := os.Stat(filepath.Join(adir, "characters.json")); err != nil {
+		t.Fatal(err)
+	}
+	if _, u := hr.srv.final(91); u.Error == nil || *u.Error != "" {
+		t.Fatalf("the done report kept the park's error: %v", u.Error)
+	}
+}
+
+// A book the server moved mid-run (it carries the open job to the new path, which
+// the answers to the job's reports say) gets its attachments where it is now, and
+// the result and the rescan name the new path; before, the write failed at the end.
+func TestGenerateFollowsAMovedBook(t *testing.T) {
+	t.Parallel()
+	hr := newHarness(t)
+	gate := hr.exec.gate("auditing")
+	hr.srv.add(92, "Author/Book", `{}`)
+	// The write may come before a report's answer has carried the new path: the
+	// book isn't at the old one, so the job parks and looks again (every minute in
+	// earnest).
+	h := hr.handler()
+	h.o.Recheck = 20 * time.Millisecond
+	stop := hr.runner(h)
+	defer stop()
+	hr.waitFor("auditing", func() bool {
+		return hr.srv.saw(92, func(_ link.Update, p map[string]any) bool { return p["stage"] == "auditing" })
+	})
+	if err := os.Rename(filepath.Join(hr.root, "Author", "Book"), filepath.Join(hr.root, "Author", "Book (2026)")); err != nil {
+		t.Fatal(err)
+	}
+	hr.srv.set(func() {
+		hr.srv.books["Author/Book (2026)"] = link.Book{LibraryID: 1, Path: "Author/Book (2026)", Files: []link.BookFile{
+			{Path: "Author/Book (2026)/01.mp3", Size: 9}, {Path: "Author/Book (2026)/02.mp3", Size: 10}}}
+		delete(hr.srv.books, "Author/Book")
+		hr.srv.paths = map[int64]string{92: "Author/Book (2026)"}
+	})
+	close(gate)
+	hr.waitFor("done", func() bool { s, _ := hr.srv.final(92); return s == link.StateDone })
+	_, final := hr.srv.final(92)
+	var res Result
+	if err := json.Unmarshal(final.Result, &res); err != nil || res.Path != "Author/Book (2026)" {
+		t.Fatalf("result = %s, %v", final.Result, err)
+	}
+	moved := filepath.Join(hr.root, "Author", "Book (2026)", AttachDir)
+	var prov Provenance
+	raw, err := os.ReadFile(filepath.Join(moved, "bridge.json"))
+	if err != nil || json.Unmarshal(raw, &prov) != nil || prov.Inputs[0].Path != "Author/Book (2026)/01.mp3" {
+		t.Fatalf("bridge.json at the new path = %s, %v", raw, err)
+	}
+	if _, err := os.Stat(filepath.Join(moved, "characters.json")); err != nil {
+		t.Fatal(err)
+	}
+	hr.srv.mu.Lock()
+	rescans := slices.Clone(hr.srv.rescans)
+	hr.srv.mu.Unlock()
+	if len(rescans) != 1 || rescans[0]["path"] != "Author/Book (2026)" {
+		t.Fatalf("rescans = %+v", rescans)
+	}
+	if g, _ := hr.db.GetGenerateBook(context.Background(), 92); g.RelPath != "Author/Book (2026)" {
+		t.Fatalf("mapping = %+v, want the new path", g)
+	}
+}
+
+// The job's spend is on the budgets' basis: a run that reports no cost but a
+// complete estimate (codex priced from the table) counts its estimate, as the
+// per-book and monthly caps do; before, the job reported $0.
+func TestGenerateCostIsTheBudgetBasis(t *testing.T) {
+	t.Parallel()
+	hr := newHarness(t)
+	hr.exec.mu.Lock()
+	hr.exec.estimated = 2.25
+	hr.exec.mu.Unlock()
+	hr.srv.add(93, "Author/Book", `{}`)
+	stop := hr.runner(hr.h)
+	defer stop()
+	hr.waitFor("done", func() bool { s, _ := hr.srv.final(93); return s == link.StateDone })
+	_, final := hr.srv.final(93)
+	var res Result
+	if err := json.Unmarshal(final.Result, &res); err != nil || res.CostUSD != 2.25 {
+		t.Fatalf("result = %s, %v; want cost_usd 2.25", final.Result, err)
+	}
+}
+
+// contribute=issue on a Bridge with no GitHub token fails the job at once, before
+// the engine gets the book, instead of parking after the whole spend; with a
+// token it runs.
+func TestGenerateIssueNeedsAGitHubToken(t *testing.T) {
+	t.Parallel()
+	hr := newHarness(t)
+	var can atomic.Bool
+	h := hr.handler()
+	h.o.CanContribute = func(context.Context) bool { return can.Load() }
+	hr.srv.add(94, "Author/Book", `{"contribute":"issue"}`)
+	stop := hr.runner(h)
+	defer stop()
+	hr.waitFor("failed", func() bool { s, _ := hr.srv.final(94); return s == link.StateFailed })
+	if _, final := hr.srv.final(94); final.Error == nil || !strings.Contains(*final.Error, "AUDIOSILO_BRIDGE_GITHUB_TOKEN") {
+		t.Fatalf("error = %v", final.Error)
+	}
+	if _, err := hr.db.GetGenerateBook(context.Background(), 94); !errors.Is(err, store.ErrNotFound) {
+		t.Fatal("the engine got a book it couldn't contribute")
+	}
+	can.Store(true)
+	hr.srv.add(95, "Loose.m4b", `{"contribute":"issue"}`)
+	hr.waitFor("the second job runs", func() bool {
+		_, err := hr.db.GetGenerateBook(context.Background(), 95)
+		return err == nil
+	})
 }

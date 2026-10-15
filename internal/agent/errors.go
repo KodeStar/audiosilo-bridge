@@ -112,6 +112,10 @@ func ParseResetTime(detail string, now time.Time) (time.Time, bool) {
 type NotAvailableError struct {
 	Backend string
 	Detail  string
+	// CredentialRefused: the CLI ran, and the provider refused its credential. A
+	// retry with the same credential can't help, so it isn't retried; the book
+	// parks agent_credential_refused until someone replaces it.
+	CredentialRefused bool
 }
 
 func (e *NotAvailableError) Error() string {
@@ -146,9 +150,11 @@ func isAuthFailure(s string) bool {
 	return false
 }
 
-// credentialRefused is a refused credential as a NotAvailableError, so the
-// pipeline parks the book agent_unavailable (and looks again later, after the
-// credential may have been replaced) instead of counting it as a bad answer.
+// credentialRefused is a refused credential as a NotAvailableError marked
+// CredentialRefused, so the pipeline parks the book agent_credential_refused (and
+// looks again later, after the credential may have been replaced) instead of
+// counting it as a bad answer.
 func credentialRefused(backend, detail string) error {
-	return &NotAvailableError{Backend: backend, Detail: "the provider refused the credential: " + truncate(detail)}
+	return &NotAvailableError{Backend: backend, Detail: "the provider refused the credential: " + truncate(detail),
+		CredentialRefused: true}
 }

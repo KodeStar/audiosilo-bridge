@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/kodestar/audiosilo-bridge/internal/agent"
+	"github.com/kodestar/audiosilo-bridge/internal/fsutil"
 	"github.com/kodestar/audiosilo-bridge/internal/jobs"
 	"github.com/kodestar/audiosilo-bridge/internal/link"
 	"github.com/kodestar/audiosilo-bridge/internal/mapping"
@@ -74,6 +75,9 @@ type Options struct {
 	// RetentionDays is transcripts.retention_days: 0 deletes a finished book's
 	// transcripts when its job ends (else the daily sweep does, that much later).
 	RetentionDays int
+	// CanContribute reports whether a GitHub token resolves (contribute=issue
+	// needs one); nil counts as yes.
+	CanContribute func(context.Context) bool
 	// Poll is how often a working engine book is looked at (default 3 s);
 	// IdlePoll how often one that is queued, paused or parked is (default 30 s;
 	// a Retry looks at once); Recheck how often a book folder that couldn't be
@@ -171,6 +175,10 @@ type run struct {
 	written  string
 	writeErr string
 	srv      Server
+	// jobPath is the job's path as the server last gave it (the claim, then the
+	// answers to the job's reports): when it changes, the server moved the job with
+	// its book, and rel follows it.
+	jobPath string
 	// poke is this run's wake-up channel (Retry); ownPark says the job's park is
 	// one of the Bridge's own (book_not_writable, library_not_writable), set by
 	// h.park; resuming says the job resumes an engine book (decided before
@@ -202,7 +210,12 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 	if job.LibraryID == nil || job.Path == nil || strings.TrimSpace(*job.Path) == "" {
 		return nil, errors.New("sidecars.generate needs a library and a book path")
 	}
-	r := &run{job: job, rep: rep, params: params, rel: *job.Path, poke: make(chan struct{}, 1)}
+	r := &run{job: job, rep: rep, params: params, rel: *job.Path, jobPath: *job.Path, poke: make(chan struct{}, 1)}
+	if p := rep.Path(); p != "" {
+		// The server moved the job with its book since the claim (the first report's
+		// answer says where it is now).
+		r.rel, r.jobPath = p, p
+	}
 	// One wake-up channel for the whole run: a Retry reaches whichever park the
 	// job waits in. It is this run's own, so a later attempt of the same job
 	// keeps its channel when this one ends.
@@ -221,16 +234,27 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 	// are the server's, so another server (the Bridge paired anew) or a
 	// reinstalled one hands out an id an earlier job's mapping still holds, and
 	// following that would write another book's characters and recaps into this
-	// one. The path is the server's canonical one, known once prepare has asked.
+	// one. The path is the server's canonical one, known once prepare has asked;
+	// the claim's own path is the job's too (the server moved the job with its
+	// book since).
 	resumed := merr == nil && mapped.BookID != nil && mapped.LibraryID == *job.LibraryID
+	ownBook := func() bool { return mapped.RelPath == r.rel || mapped.RelPath == *job.Path }
+	if !resumed && params.Contribute == ContributeIssue && h.o.CanContribute != nil && !h.o.CanContribute(ctx) {
+		// Fail before any spend: the contribution is the last stage, and without a
+		// token it could only park there after the whole run was paid for.
+		return nil, errCantContribute
+	}
 	r.resuming = resumed
 	if err := h.prepare(ctx, r, !resumed); err != nil {
-		if resumed && mapped.RelPath == r.rel {
+		if resumed && ownBook() {
 			r.bookID = *mapped.BookID // its own book: end() stops it
 		}
 		return h.end(ctx, r, nil, err)
 	}
-	if resumed && mapped.RelPath != r.rel {
+	if resumed && ownBook() && mapped.RelPath != r.rel {
+		h.recordMove(ctx, r, mapped.RelPath)
+	}
+	if resumed && !ownBook() {
 		// That run's job is gone (its id is this job's now), so nothing follows it.
 		h.o.Log.Warn("generate: the job's id maps to another book's run; this job starts its own",
 			"job", job.ID, "mapped", mapped.RelPath, "path", r.rel)
@@ -248,6 +272,11 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 	res, err := h.follow(ctx, eng, r)
 	return h.end(ctx, r, res, err)
 }
+
+// errCantContribute is a contribute=issue job on a Bridge with no GitHub token.
+var errCantContribute = errors.New("this job asks to contribute the characters and recaps (contribute: issue), but " +
+	"the Bridge has no GitHub token: set AUDIOSILO_BRIDGE_GITHUB_TOKEN on the Bridge and restart it, or generate " +
+	"the book with contribute set to local")
 
 // end records how the job ended, unless it resumes later (the Bridge stopping or
 // its token refused). A job that ends any other way short of done (an admin
@@ -450,16 +479,24 @@ func (h *Handler) waitWritable(ctx context.Context, r *run) error {
 			return nil
 		}
 		h.park(r, parkBookNotWritable, "the Bridge can't write in the book's folder ("+writeProblem(err)+")")
-		t := time.NewTimer(h.o.Recheck)
-		select {
-		case <-ctx.Done():
-			t.Stop()
-			return ctx.Err()
-		case <-r.poke:
-		case <-t.C:
+		if err := h.recheckWait(ctx, r); err != nil {
+			return err
 		}
-		t.Stop()
 	}
+}
+
+// recheckWait waits for the next look at a park of the Bridge's own: Recheck, or
+// a Retry (which pokes).
+func (h *Handler) recheckWait(ctx context.Context, r *run) error {
+	t := time.NewTimer(h.o.Recheck)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-r.poke:
+	case <-t.C:
+	}
+	return nil
 }
 
 // writeProblem words a failed write probe without the Bridge's own paths.
@@ -677,7 +714,9 @@ func (h *Handler) step(ctx context.Context, eng Engine, r *run, b store.Book) (a
 	if k := keyOf(b); k != r.seen || working(b) {
 		r.seen = k
 		r.progress, _ = h.o.DB.ListProgress(ctx, b.ID)
-		r.costUSD, _ = h.o.DB.SumStageRunCost(ctx, b.ID)
+		// The budgets' basis (the provider's reported cost, else a complete
+		// estimate), so the job's spend is the one the caps count.
+		r.costUSD, _, _ = h.o.DB.SumStageRunBudgetCost(ctx, b.ID)
 	}
 	v := view{book: b, source: r.source, progress: r.progress, costUSD: r.costUSD}
 	v.eta, v.hasETA = eng.ETASeconds(b.ID)
@@ -691,7 +730,7 @@ func (h *Handler) step(ctx context.Context, eng Engine, r *run, b store.Book) (a
 	}
 	r.rep.Progress(describe(v))
 	if status == state.StatusNeedsAttention && st == state.Contributing {
-		_, err := h.write(ctx, r, b)
+		_, err := h.write(ctx, r, b, false)
 		if msg := errText(err); msg != r.writeErr {
 			r.writeErr = msg
 			if err != nil {
@@ -707,7 +746,7 @@ func (h *Handler) step(ctx context.Context, eng Engine, r *run, b store.Book) (a
 // finish writes the attachments of a done book, rescans, and composes the result.
 func (h *Handler) finish(ctx context.Context, r *run, b store.Book, cost float64) (any, error) {
 	r.engineParked(false, "", "")
-	s, err := h.write(ctx, r, b)
+	s, err := h.write(ctx, r, b, true)
 	if err != nil {
 		return nil, err
 	}
@@ -734,9 +773,13 @@ func (h *Handler) finish(ctx context.Context, r *run, b store.Book, cost float64
 
 // write writes the engine book's sidecars into the book's .audiosilo/ (once per
 // content) and asks the server to re-read them. The mapping must still be
-// checked mapped and writable at the mount the job uses, and the book's folder
-// writable (else the job parks until it is).
-func (h *Handler) write(ctx context.Context, r *run, b store.Book) (sidecars, error) {
+// checked mapped and writable at the mount the job uses, and the book is written
+// where it is now (the server moves the job with its book). With wait (the book
+// is done), a write that fails parks the job book_not_writable and tries again
+// every Recheck (or on Retry) until it goes through: the sidecars stay in the
+// engine's work dir meanwhile, never lost to a failed job. Without (a book parked
+// at contributing, looked at every poll) the failure is returned.
+func (h *Handler) write(ctx context.Context, r *run, b store.Book, wait bool) (sidecars, error) {
 	s, err := r.loadSidecars(b.WorkDir)
 	if err != nil {
 		return sidecars{}, err
@@ -744,29 +787,27 @@ func (h *Handler) write(ctx context.Context, r *run, b store.Book) (sidecars, er
 	if s.hash == r.written {
 		return s, nil
 	}
-	if err := h.waitMapped(ctx, r, false); err != nil {
-		return sidecars{}, err
-	}
-	p, err := locate(r.mount, r.rel)
-	if err != nil {
-		return sidecars{}, err
-	}
-	r.place = p
-	r.rep.Progress(jobs.Progress{Step: stepWriting, Message: "Saving the characters and recaps with the book",
-		Extra: map[string]any{"stage": b.State, "source": r.source}})
 	workID := cmp.Or(b.WorkID, s.workID)
 	for {
-		prov := provenance(h.o.Version, r.job.ID, h.now(), r.source, workID, inputsOf(r.mount, r.files, r.epub))
-		err := writeAttachments(r.place.dir, r.place.prefix, s, prov)
+		if err := h.waitMapped(ctx, r, false); err != nil {
+			return sidecars{}, err
+		}
+		h.followMove(ctx, r)
+		err := h.writeOnce(r, b, s, workID)
 		if err == nil {
 			break
 		}
-		if werr := mapping.ProbeWritable(r.place.dir); werr == nil {
-			return sidecars{}, fmt.Errorf("could not write the book's characters and recaps: %w", err)
-		}
-		if err := h.waitWritable(ctx, r); err != nil {
+		if !wait {
 			return sidecars{}, err
 		}
+		h.park(r, parkBookNotWritable, "the Bridge can't save the characters and recaps with the book: "+err.Error())
+		if err := h.recheckWait(ctx, r); err != nil {
+			return sidecars{}, err
+		}
+	}
+	if r.ownPark {
+		r.rep.Unpark()
+		r.ownPark = false
 	}
 	r.written = s.hash
 	h.o.Log.Info("generate: wrote the book's attachments", "job", r.job.ID, "path", r.rel, "files", attachmentNames(r.place.prefix, s))
@@ -774,6 +815,59 @@ func (h *Handler) write(ctx context.Context, r *run, b store.Book) (sidecars, er
 		Extra: map[string]any{"stage": b.State, "source": r.source}})
 	h.rescan(ctx, r)
 	return s, nil
+}
+
+// writeOnce locates the book through the mount and writes its attachments, its
+// error worded without the Bridge's own paths.
+func (h *Handler) writeOnce(r *run, b store.Book, s sidecars, workID string) error {
+	p, err := locate(r.mount, r.rel)
+	if err != nil {
+		return err
+	}
+	r.place = p
+	if r.epub != "" && !fsutil.IsFile(r.epub) {
+		// The book moved: its .epub went with it.
+		if moved := filepath.Join(p.dir, filepath.Base(r.epub)); fsutil.IsFile(moved) {
+			r.epub = moved
+		}
+	}
+	r.rep.Progress(jobs.Progress{Step: stepWriting, Message: "Saving the characters and recaps with the book",
+		Extra: map[string]any{"stage": b.State, "source": r.source}})
+	prov := provenance(h.o.Version, r.job.ID, h.now(), r.source, workID, inputsOf(r.mount, r.files, r.epub))
+	if err := writeAttachments(r.place.dir, r.place.prefix, s, prov); err != nil {
+		return fmt.Errorf("its %s folder can't be written (%s)", AttachDir, writeProblem(err))
+	}
+	return nil
+}
+
+// followMove adopts the job's path when the server moved the job with its book
+// (a rename its scan noticed; the answer to a report says so): the book's files
+// are asked for again there, and the mapping follows, so a restart finds the
+// same book.
+func (h *Handler) followMove(ctx context.Context, r *run) {
+	cur := r.rep.Path()
+	if cur == "" || cur == r.jobPath {
+		return
+	}
+	from := r.rel
+	r.jobPath, r.rel = cur, cur
+	if book, err := r.srv.Book(ctx, r.lib.ID, cur); err == nil {
+		r.files = book.Files
+		if book.Path != "" {
+			r.rel = book.Path
+		}
+	} else {
+		h.o.Log.Warn("generate: asking the server for the moved book failed", "job", r.job.ID, "err", err)
+	}
+	h.recordMove(ctx, r, from)
+}
+
+// recordMove records the job's book at r.rel (it was at from).
+func (h *Handler) recordMove(ctx context.Context, r *run, from string) {
+	if err := h.o.DB.SetGenerateBookPath(ctx, r.job.ID, r.rel); err != nil {
+		h.o.Log.Warn("generate: recording the book's new path failed", "job", r.job.ID, "err", err)
+	}
+	h.o.Log.Info("generate: the book moved; the job follows it", "job", r.job.ID, "from", from, "to", r.rel)
 }
 
 // loadSidecars reads the engine's sidecars, unless their files are unchanged

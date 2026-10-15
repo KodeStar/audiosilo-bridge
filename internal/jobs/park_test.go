@@ -348,3 +348,30 @@ func TestReportsClearTheErrorWhenNotParked(t *testing.T) {
 		}
 	}
 }
+
+// The job's path follows the server's answers: the server moves an open job with
+// its book (a rename the scan noticed), and the handler reads where it is now.
+func TestReporterPathFollowsTheServer(t *testing.T) {
+	t.Parallel()
+	db, srv := openStore(t), newFakeServer()
+	old := "Author/Old"
+	srv.add(&link.Job{ID: 1, Kind: "k.v", Attempts: 1, Path: &old})
+	var before, after string
+	h := handler{kind: "k.v", lane: LanePipeline, fn: func(ctx context.Context, j Job, rep *Reporter) (any, error) {
+		before = rep.Path() // the first report's answer carried none
+		srv.mu.Lock()
+		srv.paths = map[int64]string{1: "Author/New"}
+		srv.mu.Unlock()
+		waitFor(t, func() bool { return rep.Path() == "Author/New" })
+		after = rep.Path()
+		return map[string]int{"ok": 1}, nil
+	}}
+	r := New(db, func() Server { return srv }, nil, testOpts(), h)
+	runFor(t, r, func() bool { s, _ := srv.finalState(1); return s == link.StateDone })
+	if before != "" || after != "Author/New" {
+		t.Fatalf("Path() = %q then %q", before, after)
+	}
+	if LocalReporter().Path() != "" {
+		t.Fatal("a local reporter has a path")
+	}
+}

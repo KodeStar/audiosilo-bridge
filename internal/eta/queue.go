@@ -46,6 +46,10 @@ type simBook struct {
 	idx        int
 	running    bool
 	finishAt   float64
+	// held is a parked or paused book that still holds its series lock: it never
+	// runs here (nothing is predicted for it), but a later volume waits behind it,
+	// as the scheduler makes it.
+	held bool
 }
 
 // done reports whether the book has consumed all its segments.
@@ -56,22 +60,27 @@ func (sb *simBook) cur() segment { return sb.segs[sb.idx] }
 
 // holdsSeriesLock reports whether this book still holds its series lock, using the
 // SAME predicate as the real scheduler (state.HoldsSeriesLock: the book's current stage
-// is before Ready) rather than re-deriving it from "any remaining agent segment", so
-// the simulation's series gating cannot drift from the scheduler's. A book with no
-// remaining segments (done) holds nothing. Since every agent stage precedes Ready this
-// is equivalent to the old any-remaining-agent test today, but it is now the one shared
-// rule.
+// is before Ready and it hasn't failed) rather than re-deriving it from "any remaining
+// agent segment", so the simulation's series gating cannot drift from the scheduler's.
+// A held book (parked or paused) holds it; a book with no remaining segments (done)
+// holds nothing. Every simulated book runs (status none), so only the state counts.
 func (sb *simBook) holdsSeriesLock() bool {
+	if sb.held {
+		return true
+	}
 	if sb.done() {
 		return false
 	}
-	return state.HoldsSeriesLock(sb.cur().stage)
+	return state.HoldsSeriesLock(sb.cur().stage, state.StatusNone)
 }
 
 // QueueETA returns the wall-clock makespan (seconds) to drain the active queue: a
-// greedy, event-driven simulation over the three lanes. It considers only books with
+// greedy, event-driven simulation over the three lanes. It runs only books with
 // status none and a non-terminal state; each is a sequence of lane-bound segments
-// run strictly in order. Lane capacities come from caps (each clamped to >= 1). The
+// run strictly in order. A parked or paused book of a series runs nothing but keeps
+// its series lock, as in the scheduler, so a later volume's carryover stages wait
+// behind it (and what can't run is left out of the makespan); a failed one is left
+// out entirely. Lane capacities come from caps (each clamped to >= 1). The
 // ASR lane serves retranscribing before other work then breadth-first across series;
 // the agent lane
 // runs a book only while it holds its series lock (the lowest-position book with
@@ -96,6 +105,9 @@ func QueueETA(books []Book, rates map[string]float64, caps LaneCaps) float64 {
 		}
 		segs := remainingSegments(b, rates)
 		if len(segs) == 0 {
+			if b.Status != state.StatusNone && strings.TrimSpace(b.Series) != "" && state.HoldsSeriesLock(b.State, b.Status) {
+				sim = append(sim, &simBook{id: b.ID, series: strings.TrimSpace(b.Series), pos: state.ParseSeriesPos(b.SeriesPos), held: true})
+			}
 			continue
 		}
 		sim = append(sim, &simBook{
@@ -216,8 +228,8 @@ func sortLane(lane state.Lane, cands []*simBook) {
 }
 
 // lockHolders returns the set of book ids permitted to run agent work now: the
-// lowest-position book with agent work remaining in each series, plus every
-// seriesless book with agent work remaining. A book with no remaining agent work is
+// lowest-position book with agent work remaining (or held, parked or paused) in each
+// series, plus every seriesless book with agent work remaining. A book with no remaining agent work is
 // omitted (it needs no lock and blocks no one). Recomputed each scheduling pass, so
 // a series' lock passes to its next book as the current holder finishes its agent
 // work.
