@@ -1,84 +1,214 @@
 package secrets
 
 import (
+	"bytes"
+	"encoding/base64"
+	"encoding/hex"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
-func TestFileStoreLifecycle(t *testing.T) {
-	dir := t.TempDir()
-	fs, err := NewFileStore(dir)
+func openVault(t *testing.T, dir, envKey string) *Vault {
+	t.Helper()
+	v, _, err := Open(dir, envKey)
 	if err != nil {
-		t.Fatalf("NewFileStore: %v", err)
+		t.Fatalf("Open: %v", err)
 	}
+	return v
+}
 
-	// Absent -> "" and not present.
-	if v, _ := fs.Get(AnthropicAPIKey); v != "" {
-		t.Errorf("absent Get = %q, want empty", v)
-	}
-	if p, _ := fs.Present(AnthropicAPIKey); p {
-		t.Error("absent Present = true")
-	}
+func TestVaultLifecycle(t *testing.T) {
+	t.Parallel()
+	v := openVault(t, t.TempDir(), "")
 
-	// Set -> present, value stored.
-	if err := fs.Set(AnthropicAPIKey, "sk-secret"); err != nil {
-		t.Fatalf("Set: %v", err)
+	if s, err := v.Get(ServerToken); s != "" || err != nil {
+		t.Fatalf("absent Get = %q, %v", s, err)
 	}
-	if p, _ := fs.Present(AnthropicAPIKey); !p {
-		t.Error("after Set, Present = false")
+	if p, _ := v.Present(ServerToken); p {
+		t.Fatal("absent Present = true")
 	}
-	if v, _ := fs.Get(AnthropicAPIKey); v != "sk-secret" {
-		t.Errorf("Get = %q", v)
+	if err := v.Set(ServerToken, "tok-secret"); err != nil {
+		t.Fatal(err)
 	}
-
-	// Delete -> absent.
-	if err := fs.Delete(AnthropicAPIKey); err != nil {
-		t.Fatalf("Delete: %v", err)
+	if s, err := v.Get(ServerToken); s != "tok-secret" || err != nil {
+		t.Fatalf("Get = %q, %v", s, err)
 	}
-	if p, _ := fs.Present(AnthropicAPIKey); p {
-		t.Error("after Delete, Present = true")
+	if p, _ := v.Present(ServerToken); !p {
+		t.Fatal("after Set, Present = false")
+	}
+	if err := v.Set(ServerToken, "tok-2"); err != nil {
+		t.Fatal(err)
+	}
+	if s, _ := v.Get(ServerToken); s != "tok-2" {
+		t.Fatalf("overwrite: Get = %q", s)
+	}
+	if err := v.Delete(ServerToken); err != nil {
+		t.Fatal(err)
+	}
+	if p, _ := v.Present(ServerToken); p {
+		t.Fatal("after Delete, Present = true")
+	}
+	if err := v.Delete(ServerToken); err != nil {
+		t.Fatalf("deleting an absent secret: %v", err)
 	}
 }
 
-func TestFileStorePersistsAndMode0600(t *testing.T) {
+// The value is sealed on disk: the file holds neither the plaintext nor a copy
+// of it, and is owner-only, as are the folder and the key file.
+func TestVaultSealsAtRest(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
-	fs, err := NewFileStore(dir)
+	v := openVault(t, dir, "")
+	if err := v.Set(GitHubPAT, "ghp_plaintext_value"); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, "secrets", GitHubPAT+".enc"))
 	if err != nil {
-		t.Fatalf("NewFileStore: %v", err)
+		t.Fatal(err)
 	}
-	if err := fs.Set(GitHubPAT, "ghp_xyz"); err != nil {
-		t.Fatalf("Set: %v", err)
+	if bytes.Contains(raw, []byte("ghp_plaintext_value")) {
+		t.Fatal("the sealed file holds the plaintext")
 	}
-
-	// File must be 0600 (it holds plaintext secrets).
-	info, err := os.Stat(filepath.Join(dir, "secrets.json"))
-	if err != nil {
-		t.Fatalf("stat: %v", err)
-	}
-	if perm := info.Mode().Perm(); perm != 0o600 {
-		t.Errorf("secrets.json perm = %o, want 600", perm)
-	}
-
-	// Reopen: value survives.
-	fs2, err := NewFileStore(dir)
-	if err != nil {
-		t.Fatalf("reopen: %v", err)
-	}
-	if v, _ := fs2.Get(GitHubPAT); v != "ghp_xyz" {
-		t.Errorf("after reopen Get = %q", v)
-	}
-}
-
-func TestNamesStable(t *testing.T) {
-	got := Names()
-	want := []string{AnthropicAPIKey, OpenAIAPIKey, GitHubPAT}
-	if len(got) != len(want) {
-		t.Fatalf("Names len = %d, want %d", len(got), len(want))
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Errorf("Names[%d] = %q, want %q", i, got[i], want[i])
+	for path, want := range map[string]os.FileMode{
+		filepath.Join(dir, "secrets", GitHubPAT+".enc"): 0o600,
+		filepath.Join(dir, "secrets"):                   0o700,
+		filepath.Join(dir, KeyFileName):                 0o600,
+	} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
 		}
+		if got := info.Mode().Perm(); got != want {
+			t.Errorf("%s mode = %v, want %v", path, got, want)
+		}
+	}
+	entries, _ := os.ReadDir(filepath.Join(dir, "secrets"))
+	if len(entries) != 1 {
+		t.Errorf("secrets folder holds %d entries, want 1 (no temp file left)", len(entries))
+	}
+}
+
+// The key file made on the first start is the key of every later start.
+func TestVaultKeyFileReused(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	v, src, err := Open(dir, "")
+	if err != nil || src != KeyFromNewFile {
+		t.Fatalf("first Open: %v, %q", err, src)
+	}
+	if err := v.Set(OpenAIAPIKey, "sk-1"); err != nil {
+		t.Fatal(err)
+	}
+	again, src, err := Open(dir, "")
+	if err != nil || src != KeyFromFile {
+		t.Fatalf("second Open: %v, %q", err, src)
+	}
+	if s, err := again.Get(OpenAIAPIKey); s != "sk-1" || err != nil {
+		t.Fatalf("Get after reopen = %q, %v", s, err)
+	}
+}
+
+// Security: a value sealed with one key never opens with another (allowed with
+// the same env key, denied with a different one), and a file moved onto another
+// name doesn't open either.
+func TestVaultKeyAndNameBinding(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	keyA := strings.Repeat("ab", 32)
+	keyB := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{7}, 32))
+	a := openVault(t, dir, keyA)
+	if err := a.Set(AnthropicAPIKey, "sk-ant"); err != nil {
+		t.Fatal(err)
+	}
+	if s, err := openVault(t, dir, keyA).Get(AnthropicAPIKey); s != "sk-ant" || err != nil {
+		t.Fatalf("allowed: same key = %q, %v", s, err)
+	}
+	if _, err := openVault(t, dir, keyB).Get(AnthropicAPIKey); !errors.Is(err, ErrWrongKey) {
+		t.Fatalf("denied: other key = %v, want ErrWrongKey", err)
+	}
+	if _, err := openVault(t, dir, "").Get(AnthropicAPIKey); !errors.Is(err, ErrWrongKey) {
+		t.Fatalf("denied: the key file's key = %v, want ErrWrongKey", err)
+	}
+	src := filepath.Join(dir, "secrets", AnthropicAPIKey+".enc")
+	dst := filepath.Join(dir, "secrets", OpenAIAPIKey+".enc")
+	if err := os.Rename(src, dst); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.Get(OpenAIAPIKey); !errors.Is(err, ErrWrongKey) {
+		t.Fatalf("denied: a renamed file = %v, want ErrWrongKey", err)
+	}
+	if err := os.WriteFile(src, []byte("short"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.Get(AnthropicAPIKey); !errors.Is(err, ErrWrongKey) {
+		t.Fatalf("denied: a truncated file = %v, want ErrWrongKey", err)
+	}
+}
+
+func TestParseKey(t *testing.T) {
+	t.Parallel()
+	raw := bytes.Repeat([]byte{0x42}, 32)
+	for name, s := range map[string]string{
+		"hex":        hex.EncodeToString(raw),
+		"base64":     base64.StdEncoding.EncodeToString(raw),
+		"raw base64": base64.RawStdEncoding.EncodeToString(raw),
+		"url base64": base64.URLEncoding.EncodeToString(raw),
+	} {
+		key, err := parseKey(s)
+		if err != nil || !bytes.Equal(key, raw) {
+			t.Errorf("%s: parseKey = %x, %v", name, key, err)
+		}
+	}
+	for _, bad := range []string{"", "too-short", hex.EncodeToString(raw[:16]), base64.StdEncoding.EncodeToString(raw[:31])} {
+		if _, err := parseKey(bad); err == nil {
+			t.Errorf("parseKey(%q) accepted a bad key", bad)
+		}
+	}
+	if _, _, err := Open(t.TempDir(), "not-a-key"); err == nil || !strings.Contains(err.Error(), KeyEnv) {
+		t.Errorf("Open with a bad env key = %v, want an error naming %s", err, KeyEnv)
+	}
+}
+
+// Security: a secret's name becomes a file name, so only plain names are
+// accepted (allowed: the known names; denied: anything that could leave the
+// folder or hide a file).
+func TestVaultNames(t *testing.T) {
+	t.Parallel()
+	v := openVault(t, t.TempDir(), "")
+	for _, name := range append(Names(), ServerToken) {
+		if err := v.Set(name, "x"); err != nil {
+			t.Errorf("allowed: Set(%q) = %v", name, err)
+		}
+	}
+	for _, name := range []string{"", "../escape", "a/b", ".hidden", "UPPER", "with space", strings.Repeat("a", 65)} {
+		if err := v.Set(name, "x"); err == nil {
+			t.Errorf("denied: Set(%q) succeeded", name)
+		}
+		if _, err := v.Get(name); err == nil {
+			t.Errorf("denied: Get(%q) succeeded", name)
+		}
+		if err := v.Delete(name); err == nil {
+			t.Errorf("denied: Delete(%q) succeeded", name)
+		}
+	}
+}
+
+func TestMemStore(t *testing.T) {
+	t.Parallel()
+	var s Store = NewMemStore()
+	if err := s.Set(GitHubPAT, "p"); err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := s.Get(GitHubPAT); v != "p" {
+		t.Fatalf("Get = %q", v)
+	}
+	if err := s.Delete(GitHubPAT); err != nil {
+		t.Fatal(err)
+	}
+	if p, _ := s.Present(GitHubPAT); p {
+		t.Fatal("Present after Delete")
 	}
 }
