@@ -130,6 +130,22 @@ func TestCostSums(t *testing.T) {
 	if err != nil || month != 8 {
 		t.Fatalf("October spend = %v, %v; want 8 (the September run is out)", month, err)
 	}
+	// A deleted book's spend still counts (a regenerate deletes the earlier book):
+	// month by month, as its runs started.
+	gone, _ := db.CreateBook(ctx, NewBook{SourcePath: "/g", WorkDir: "/wg", Title: "G"})
+	at(time.Date(2026, 9, 29, 9, 0, 0, 0, time.UTC))
+	spend(gone.ID, "fact_pass", 5)
+	at(time.Date(2026, 10, 3, 9, 0, 0, 0, time.UTC))
+	spend(gone.ID, "synthesizing", 3)
+	if err := db.DeleteBook(ctx, gone.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.DeleteBook(ctx, gone.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("deleting it again = %v, want ErrNotFound", err)
+	}
+	if month, err := db.SumBudgetCostSince(ctx, time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)); err != nil || month != 11 {
+		t.Fatalf("October spend after a delete = %v, %v; want 11 (the deleted book's October run kept)", month, err)
+	}
 
 	if err := db.SetBookState(ctx, a.ID, "done", "", "", ""); err != nil {
 		t.Fatal(err)

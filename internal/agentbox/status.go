@@ -83,10 +83,18 @@ func (r *Runner) unavailableBecause(rj agentproto.Runner) string {
 		return "the agent container has no " + r.backend + " CLI"
 	}
 	if c.Credential == "" {
+		why := "codex has no credential: run `audiosilo-bridge agent-login codex` in the agent container, or set OPENAI_API_KEY"
+		other := agent.IDClaude
 		if r.backend == agent.IDClaude {
-			return "claude has no credential: run `claude setup-token` on any machine and give the token to the agent container as CLAUDE_CODE_OAUTH_TOKEN (or in /agent/secrets/claude_code_oauth_token), or set ANTHROPIC_API_KEY"
+			why = "claude has no credential: run `claude setup-token` on any machine and give the token to the agent container as CLAUDE_CODE_OAUTH_TOKEN (or in /agent/secrets/claude_code_oauth_token), or set ANTHROPIC_API_KEY"
+			other = agent.IDCodex
 		}
-		return "codex has no credential: run `audiosilo-bridge agent-login codex` in the agent container, or set OPENAI_API_KEY"
+		// The other CLI may be the one signed in: the Bridge runs the one its
+		// agent.backend names (claude unless codex is set), never both.
+		if o := rj.CLIs[other]; o.Version != "" && o.Credential != "" {
+			why += "; " + other + " is signed in: set agent.backend: " + other + " (AUDIOSILO_BRIDGE_AGENT_BACKEND=" + other + ") on the Bridge and restart it to use " + other
+		}
+		return why
 	}
 	return ""
 }

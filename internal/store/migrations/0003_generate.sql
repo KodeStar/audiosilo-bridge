@@ -32,3 +32,12 @@ CREATE INDEX idx_generate_books_book ON generate_books(book_id);
 -- The monthly budget, the page and the heartbeat's estimates sum this month's
 -- stage runs by started_at.
 CREATE INDEX idx_stage_runs_started ON stage_runs(started_at);
+
+-- deleted_stage_spend keeps the budget-basis spend of a deleted engine book's
+-- stage runs (a regenerate deletes the earlier book, and its stage_runs go with
+-- it), one row per run by started_at, so the monthly budget still counts it.
+CREATE TABLE deleted_stage_spend (
+    started_at TEXT NOT NULL,
+    cost_usd   REAL NOT NULL
+);
+CREATE INDEX idx_deleted_stage_spend_started ON deleted_stage_spend(started_at);

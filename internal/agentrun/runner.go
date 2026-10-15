@@ -35,8 +35,11 @@ const MaxSlots = 8
 // scanInterval is how often the staging dir is listed for new jobs.
 const scanInterval = time.Second
 
-// orphanAfter is how old a claimed, unfinished job's heartbeat must be before a
-// starting runner treats it as a run an earlier runner left behind.
+// orphanAfter is how old a claimed, unfinished job's heartbeat must be before the
+// runner treats it as a run an earlier runner left behind (it looks at start and
+// then with every runner.json write, so an orphan is finished within orphanAfter
+// + RunnerInterval of its last heartbeat: before the Bridge's 60 s stale limit
+// turns it into a failed stage).
 const orphanAfter = 30 * time.Second
 
 // Options configures the runner.
@@ -71,9 +74,15 @@ type Runner struct {
 	codexMu     sync.Mutex
 	codexActive int
 
-	killDelay time.Duration // TERM to KILL on a cancel or a timeout
-	scanEvery time.Duration
-	now       func() time.Time
+	// active holds the ids of the jobs this runner claimed and hasn't finished,
+	// which the orphan recovery never finishes (guarded by activeMu).
+	activeMu sync.Mutex
+	active   map[string]bool
+
+	killDelay   time.Duration // TERM to KILL on a cancel or a timeout
+	scanEvery   time.Duration
+	statusEvery time.Duration // runner.json and the orphan recovery
+	now         func() time.Time
 }
 
 type cliInfo struct{ path, version string }
@@ -107,14 +116,33 @@ func New(opts Options) (*Runner, error) {
 		log = slog.New(slog.DiscardHandler)
 	}
 	return &Runner{
-		opts:      opts,
-		log:       log,
-		slots:     make(chan struct{}, opts.Slots),
-		clis:      map[string]cliInfo{},
-		killDelay: 10 * time.Second,
-		scanEvery: scanInterval,
-		now:       time.Now,
+		opts:        opts,
+		log:         log,
+		slots:       make(chan struct{}, opts.Slots),
+		clis:        map[string]cliInfo{},
+		active:      map[string]bool{},
+		killDelay:   10 * time.Second,
+		scanEvery:   scanInterval,
+		statusEvery: agentproto.RunnerInterval,
+		now:         time.Now,
 	}, nil
+}
+
+// setActive records whether this runner is running the job id.
+func (r *Runner) setActive(id string, on bool) {
+	r.activeMu.Lock()
+	defer r.activeMu.Unlock()
+	if on {
+		r.active[id] = true
+	} else {
+		delete(r.active, id)
+	}
+}
+
+func (r *Runner) isActive(id string) bool {
+	r.activeMu.Lock()
+	defer r.activeMu.Unlock()
+	return r.active[id]
 }
 
 // Run serves the staging dir until ctx ends, then stops the runs in progress
@@ -128,7 +156,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	r.writeStatus()
 	r.log.Info("agent runner: started", "staging", r.opts.Staging, "slots", r.opts.Slots)
 
-	status := time.NewTicker(agentproto.RunnerInterval)
+	status := time.NewTicker(r.statusEvery)
 	defer status.Stop()
 	scan := time.NewTicker(r.scanEvery)
 	defer scan.Stop()
@@ -140,6 +168,9 @@ func (r *Runner) Run(ctx context.Context) error {
 			r.log.Info("agent runner: stopping")
 			return nil
 		case <-status.C:
+			// An earlier runner's run (a crash and a quick restart) may only now be
+			// old enough to call orphaned.
+			r.recoverOrphans()
 			r.writeStatus()
 		case <-scan.C:
 			r.scan(ctx, &wg)
@@ -260,10 +291,12 @@ func (r *Runner) scan(ctx context.Context, wg *sync.WaitGroup) {
 			<-r.slots
 			continue
 		}
+		r.setActive(id, true)
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			defer func() { <-r.slots }()
+			defer r.setActive(id, false)
 			defer func() { _ = job.Close() }()
 			r.handle(ctx, job)
 		}()
@@ -314,8 +347,9 @@ func (r *Runner) readyJobs(staging *os.Root) []string {
 }
 
 // recoverOrphans finishes the jobs an earlier runner claimed and never finished
-// (the container restarted mid-run), so the Bridge gets an answer at once
-// instead of waiting for the heartbeat to go stale.
+// (the container restarted mid-run), so the Bridge gets an answer (the agent
+// being unavailable) instead of waiting for the heartbeat to go stale. This
+// runner's own runs are never touched.
 func (r *Runner) recoverOrphans() {
 	staging, err := os.OpenRoot(r.opts.Staging)
 	if err != nil {
@@ -324,6 +358,9 @@ func (r *Runner) recoverOrphans() {
 	}
 	defer func() { _ = staging.Close() }()
 	for _, id := range r.jobDirs() {
+		if r.isActive(id) {
+			continue
+		}
 		job, err := staging.OpenRoot(id)
 		if err != nil {
 			continue

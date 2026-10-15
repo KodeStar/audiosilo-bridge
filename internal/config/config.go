@@ -74,9 +74,9 @@ const (
 	DefaultSupervisorBatchBudgetUSD  = 10.0
 )
 
-// Agent backend selector values. An empty backend means "auto" (claude when
-// detectable, else codex, else unavailable); the two explicit values force one
-// runner.
+// Agent backend selector values: the CLI the agent container runs. Empty is
+// claude (the Bridge's app maps it; the engine's own agent.Select reads it as
+// auto, which the Bridge never calls).
 const (
 	AgentBackendClaude = agent.IDClaude
 	AgentBackendCodex  = agent.IDCodex
@@ -163,7 +163,7 @@ type ASRConfig struct {
 // resolved once at startup, like asr.backend), unlike cors_origins which the API
 // re-reads live per request.
 type AgentConfig struct {
-	Backend string `yaml:"backend"` // "" (auto) | "claude" | "codex"
+	Backend string `yaml:"backend"` // "" (claude) | "claude" | "codex"
 	// Concurrency is deprecated. It remains readable/writable for compatibility and
 	// is used only by the explicit legacy normalization path. New configurations
 	// should set QueueConcurrency and MaxAgentsPerBook instead.
@@ -791,7 +791,7 @@ func (c Config) Validate() error {
 	switch c.Agent.Backend {
 	case "", AgentBackendClaude, AgentBackendCodex:
 	default:
-		return fmt.Errorf("agent.backend %q must be %q, %q, or empty (auto)",
+		return fmt.Errorf("agent.backend %q must be %q, %q, or empty (claude)",
 			c.Agent.Backend, AgentBackendClaude, AgentBackendCodex)
 	}
 	if c.Agent.TimeoutMinutes < 1 {

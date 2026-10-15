@@ -135,8 +135,9 @@ func (c *claudeRunner) Run(ctx context.Context, req Request) (Result, error) {
 // in the result or stderr a *RateLimitError (classified before anything else: it
 // can arrive as is_error with a rate-limit result, or as a nonzero exit with the
 // message on stderr); is_error, a nonzero exit, or an unparseable envelope an error
-// carrying truncated detail. The usage the envelope reports rides on the Result
-// even when the error is non-nil, so spend is captured on a failed run too.
+// carrying truncated detail, and a failed run that shows a refused credential a
+// *NotAvailableError. The usage the envelope reports rides on the Result even
+// when the error is non-nil, so spend is captured on a failed run too.
 func ClaudeResult(model string, o CLIOutcome) (Result, error) {
 	var res claudeResult
 	parseErr := json.Unmarshal([]byte(o.Stdout), &res)
@@ -159,7 +160,10 @@ func ClaudeResult(model string, o CLIOutcome) (Result, error) {
 	if isRateLimit(res.Result) || isRateLimit(o.Stderr) {
 		return result, newRateLimitError(detail, time.Now())
 	}
-	if isAuthFailure(o.Stdout) || isAuthFailure(o.Stderr) {
+	// A refused credential, only for a run that failed: a successful run's answer
+	// may well quote "401 Unauthorized" (a web source that refused it, a line of the
+	// book), and that run's outputs are good.
+	if (o.ExitErr != nil || parseErr != nil || res.IsError) && (isAuthFailure(o.Stdout) || isAuthFailure(o.Stderr)) {
 		return result, credentialRefused(IDClaude, detail)
 	}
 

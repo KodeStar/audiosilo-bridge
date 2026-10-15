@@ -53,7 +53,28 @@ type codexEvent struct {
 	Type  string      `json:"type"`
 	Usage *codexUsage `json:"usage"`
 	Item  *codexItem  `json:"item"`
-	Error string      `json:"error"`
+	// Error is a turn.failed event's error: codex exec sends {"message": ...}
+	// (the SDK's ThreadError); a bare string is read too.
+	Error json.RawMessage `json:"error"`
+	// Message is a top-level {"type":"error"} event's text. Codex sends those for
+	// retries it then gets past too ("Reconnecting... 2/5"), so one is never a
+	// failure on its own.
+	Message string `json:"message"`
+}
+
+// errorText is a turn.failed event's error detail, whichever shape it came in.
+func (e codexEvent) errorText() string {
+	var s string
+	if json.Unmarshal(e.Error, &s) == nil {
+		return s
+	}
+	var obj struct {
+		Message string `json:"message"`
+	}
+	if json.Unmarshal(e.Error, &obj) == nil && obj.Message != "" {
+		return obj.Message
+	}
+	return string(e.Error)
 }
 
 type codexUsage struct {
@@ -183,10 +204,12 @@ func CodexResult(model string, o CLIOutcome) (Result, error) {
 	if isRateLimit(o.Stderr) {
 		return result, newRateLimitError(firstNonEmpty(o.Stderr, o.Stdout), time.Now())
 	}
-	if isAuthFailure(o.Stderr) {
-		return result, credentialRefused(IDCodex, firstNonEmpty(o.Stderr, o.Stdout))
-	}
 	if o.ExitErr != nil {
+		// Only a failed run's stderr says a credential was refused: a clean run may
+		// log a 401 from a web source it then did without.
+		if isAuthFailure(o.Stderr) {
+			return result, credentialRefused(IDCodex, firstNonEmpty(o.Stderr, o.Stdout))
+		}
 		return result, fmt.Errorf("codex exited: %w: %s", o.ExitErr, truncate(firstNonEmpty(o.Stderr, o.Stdout)))
 	}
 
@@ -197,7 +220,8 @@ func CodexResult(model string, o CLIOutcome) (Result, error) {
 }
 
 // parseCodexStream reads the JSONL events, taking token usage from turn.completed
-// events and tracking the last agent_message text and any turn.failed detail.
+// events and tracking the last agent_message text and any turn.failed detail (the
+// last error event's text standing in when the turn.failed carries none).
 // Malformed lines are skipped.
 //
 // Token usage on codex turn.completed events is CUMULATIVE session totals, not
@@ -208,6 +232,7 @@ func CodexResult(model string, o CLIOutcome) (Result, error) {
 func parseCodexStream(stdout string) (usage Usage, lastAgentMsg, failDetail string) {
 	sc := bufio.NewScanner(strings.NewReader(stdout))
 	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
+	lastError := ""
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
 		if line == "" {
@@ -225,8 +250,10 @@ func parseCodexStream(stdout string) (usage Usage, lastAgentMsg, failDetail stri
 				usage.CacheRead = ev.Usage.CachedInputTokens
 				usage.Turns++
 			}
+		case "error":
+			lastError = ev.Message
 		case "turn.failed":
-			failDetail = firstNonEmpty(ev.Error, failDetail, "codex reported a failed turn")
+			failDetail = firstNonEmpty(ev.errorText(), lastError, failDetail, "codex reported a failed turn")
 		case "item.completed":
 			if ev.Item != nil && ev.Item.Type == "agent_message" && strings.TrimSpace(ev.Item.Text) != "" {
 				lastAgentMsg = strings.TrimSpace(ev.Item.Text)

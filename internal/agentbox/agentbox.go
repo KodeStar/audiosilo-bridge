@@ -74,7 +74,7 @@ var _ agent.Runner = (*Runner)(nil)
 
 // New returns a Runner over opts.Dir. It creates the staging dir when missing
 // (world-writable, so the agent uid can write runner.json and claim jobs) and
-// removes job dirs older than a day that an earlier run left behind.
+// ends the job dirs an earlier process left behind (see prepare).
 func New(opts Options) *Runner {
 	r := &Runner{
 		dir:          opts.Dir,
@@ -100,9 +100,12 @@ func New(opts Options) *Runner {
 	return r
 }
 
-// prepare makes the staging dir usable by both containers and sweeps old job
-// dirs. Best effort: a staging dir the Bridge doesn't own (a volume root created
-// by Docker) keeps its mode, and Status then explains a runner that can't write.
+// prepare makes the staging dir usable by both containers and deals with the job
+// dirs an earlier process left: one older than a day is removed; any other is a
+// run nothing waits for any more (one Bridge per staging dir, and this one has
+// just started), so it is withdrawn, or stopped if the runner has it. Best
+// effort: a staging dir the Bridge doesn't own (a volume root created by Docker)
+// keeps its mode, and Status then explains a runner that can't write.
 func (r *Runner) prepare() {
 	if r.dir == "" {
 		return
@@ -125,11 +128,35 @@ func (r *Runner) prepare() {
 		if !e.IsDir() || !agentproto.ValidJobID(e.Name()) {
 			continue
 		}
-		info, err := e.Info()
-		if err != nil || r.now().Sub(info.ModTime()) < sweepAge {
+		job := filepath.Join(r.dir, e.Name())
+		if info, err := e.Info(); err == nil && r.now().Sub(info.ModTime()) >= sweepAge {
+			r.remove(job)
 			continue
 		}
-		r.remove(filepath.Join(r.dir, e.Name()))
+		r.reclaim(job)
+	}
+}
+
+// reclaim ends a job dir a previous Bridge process left (it crashed or was
+// killed, so its Run never cancelled or removed it): a finished or unclaimed one
+// is removed at once (taking the claim first, so a runner can't start it
+// meanwhile); one the runner is running gets a cancel, so the CLI doesn't run on,
+// paid and holding a slot, for output nothing will read. It finishes the job and
+// the dir goes at a later start.
+func (r *Runner) reclaim(job string) {
+	root, err := os.OpenRoot(job)
+	if err != nil {
+		return
+	}
+	done := agentproto.Exists(root, agentproto.DoneFile) || r.unclaimable(root)
+	if !done {
+		if err := root.WriteFile(agentproto.CancelFile, nil, 0o644); err != nil {
+			r.log.Warn("agent container: cancel an earlier process's run", "dir", job, "err", err)
+		}
+	}
+	_ = root.Close()
+	if done {
+		r.remove(job)
 	}
 }
 
@@ -176,13 +203,9 @@ func (r *Runner) Run(ctx context.Context, req agent.Request) (agent.Result, erro
 	job := filepath.Join(r.dir, id)
 	defer r.remove(job)
 	timeout := requestTimeout(req.Timeout)
-	if err := stage(job, req, r.backend, timeout); err != nil {
-		return agent.Result{}, fmt.Errorf("agent container: stage the job: %w", err)
-	}
-
-	root, err := os.OpenRoot(job)
+	root, err := stage(job, req, r.backend, timeout)
 	if err != nil {
-		return agent.Result{}, fmt.Errorf("agent container: open the job dir: %w", err)
+		return agent.Result{}, fmt.Errorf("agent container: stage the job: %w", err)
 	}
 	defer func() { _ = root.Close() }()
 

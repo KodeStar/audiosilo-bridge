@@ -750,10 +750,13 @@ func (s *Scheduler) runStage(ctx context.Context, b store.Book) {
 	}
 
 	result, err := s.execute(ctx, b, stage)
-	if errors.Is(err, context.Canceled) {
+	if err != nil && (errors.Is(err, context.Canceled) || ctx.Err() != nil) {
 		// Paused/cancelled/shutting down: the worker ctx is already cancelled, so
 		// close the run on a fresh context (mirroring setStatus) - otherwise the
 		// row stays open forever and reconcile has to close it on the next boot.
+		// Whatever error the stage saw then (a killed ffmpeg is "signal: killed",
+		// not ctx.Err()) is the cancel's: whoever cancelled set the status
+		// already (Cancel's reason is what IsCancelled reads).
 		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = s.db.FinishStageRun(closeCtx, runID, false, json.RawMessage(`{"cancelled":true}`))

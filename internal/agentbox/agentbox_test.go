@@ -242,8 +242,11 @@ func TestRunFailures(t *testing.T) {
 			check: func(err error) bool { return strings.Contains(err.Error(), "claude timed out after 1m0s") }},
 		"rate limit": {exit: agentproto.Exit{ExitCode: 1}, stdout: `{"type":"result","is_error":true,"result":"rate limit reached|9999999999"}`,
 			check: func(err error) bool { var rl *agent.RateLimitError; return errors.As(err, &rl) }},
-		"401": {exit: agentproto.Exit{ExitCode: 1}, stdout: `{"type":"result","is_error":true,"result":"Invalid API key · Fix external API key"}`,
-			check: func(err error) bool { return strings.Contains(err.Error(), "Invalid API key") }},
+		"401": {exit: agentproto.Exit{ExitCode: 1}, stdout: `{"type":"result","subtype":"success","is_error":true,"api_error_status":401,"result":"Invalid API key · Fix external API key"}`,
+			check: func(err error) bool {
+				var na *agent.NotAvailableError
+				return errors.As(err, &na) && strings.Contains(err.Error(), "Invalid API key")
+			}},
 		"unavailable": {exit: agentproto.Exit{ExitCode: -1, Error: "claude has no credential in the agent container", Unavailable: true},
 			check: func(err error) bool { var na *agent.NotAvailableError; return errors.As(err, &na) }},
 		"refused": {exit: agentproto.Exit{ExitCode: -1, Error: "request cli \"x\" must be claude or codex"},
@@ -474,6 +477,9 @@ func TestStatus(t *testing.T) {
 		"wrong protocol": {backend: "claude", rj: &agentproto.Runner{Protocol: 2, HeartbeatAt: now, CLIs: full}, detail: "protocol 2"},
 		"no credential": {backend: "claude", rj: &agentproto.Runner{Protocol: 1, HeartbeatAt: now,
 			CLIs: map[string]agentproto.CLI{"claude": {Version: "2.1.300"}}}, detail: "claude has no credential"},
+		"codex signed in instead": {backend: "claude", rj: &agentproto.Runner{Protocol: 1, HeartbeatAt: now,
+			CLIs: map[string]agentproto.CLI{"claude": {Version: "2.1.300"}, "codex": {Version: "0.162.1", Credential: "login"}}},
+			detail: "codex is signed in: set agent.backend: codex"},
 		"no cli":  {backend: "codex", rj: &agentproto.Runner{Protocol: 1, HeartbeatAt: now, CLIs: map[string]agentproto.CLI{}}, detail: "no codex CLI"},
 		"missing": {backend: "claude", detail: "isn't running"},
 		"garbage": {backend: "claude", raw: "{not json", detail: "unreadable"},
@@ -521,16 +527,27 @@ func TestStatusSubscription(t *testing.T) {
 	}
 }
 
-// New removes job dirs older than a day and keeps everything else.
+// New deals with the job dirs an earlier process left: one older than a day,
+// a finished one and an unclaimed one go; one the runner is running gets a
+// cancel (its CLI must not run on for nothing) and stays until it is finished;
+// anything that isn't a job dir is kept.
 func TestNewSweepsOldJobDirs(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	old := filepath.Join(dir, "00000000000000aa")
-	recent := filepath.Join(dir, "00000000000000bb")
+	unclaimed := filepath.Join(dir, "00000000000000bb")
+	running := filepath.Join(dir, "00000000000000cc")
+	finished := filepath.Join(dir, "00000000000000dd")
 	other := filepath.Join(dir, "keep-me")
-	for _, d := range []string{old, recent, other} {
+	for _, d := range []string{old, unclaimed, running, finished, other} {
 		mustWrite(t, filepath.Join(d, "f"), "x")
 	}
+	for _, d := range []string{running, finished} {
+		if err := os.Mkdir(filepath.Join(d, agentproto.ClaimDir), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mustWrite(t, filepath.Join(finished, agentproto.DoneFile), "")
 	long := time.Now().Add(-48 * time.Hour)
 	for _, d := range []string{old, other} {
 		if err := os.Chtimes(d, long, long); err != nil {
@@ -538,8 +555,13 @@ func TestNewSweepsOldJobDirs(t *testing.T) {
 		}
 	}
 	New(Options{Dir: dir, Backend: "claude"})
-	if present(dir, filepath.Base(old)) || !present(dir, filepath.Base(recent)) || !present(dir, filepath.Base(other)) {
-		t.Fatal("the sweep removed the wrong dirs")
+	for _, d := range []string{old, unclaimed, finished} {
+		if present(dir, filepath.Base(d)) {
+			t.Errorf("%s was kept", filepath.Base(d))
+		}
+	}
+	if !present(dir, filepath.Base(other)) || !present(running, agentproto.CancelFile) {
+		t.Fatal("the dir that isn't a job's went, or the running job got no cancel")
 	}
 	if info, err := os.Stat(dir); err != nil || info.Mode().Perm() != 0o777 {
 		t.Fatalf("staging dir mode = %v, %v", info.Mode(), err)
@@ -560,5 +582,43 @@ func TestRequestTimeout(t *testing.T) {
 		if got := requestTimeout(d); got != want {
 			t.Errorf("requestTimeout(%s) = %d, want %d", d, got, want)
 		}
+	}
+}
+
+// The agent uid can rename the Bridge's entries in the shared staging dir and
+// put a link in their place: staging opens the dir it just made once, and
+// refuses a link swapped in for it, never following it (denied); the dir itself
+// opens (allowed), and is opened to the agent uid only once the job is whole.
+func TestStageThroughTheJobDirsRoot(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	job := filepath.Join(dir, "00000000000000aa")
+	root, err := stage(job, agent.Request{Dir: stagedDir(t), Prompt: "p"}, agent.IDClaude, 60)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = root.Close()
+	info, err := os.Stat(job)
+	if err != nil || info.Mode()&os.ModePerm != 0o777 || info.Mode()&os.ModeSticky == 0 || !present(job, agentproto.RequestFile) {
+		t.Fatalf("job dir = %v, %v (request.json %v)", info.Mode(), err, present(job, agentproto.RequestFile))
+	}
+
+	swapped := filepath.Join(dir, "00000000000000bb")
+	if err := os.Mkdir(swapped, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(swapped, swapped+"-aside"); err != nil {
+		t.Fatal(err)
+	}
+	elsewhere := t.TempDir()
+	if err := os.Symlink(elsewhere, swapped); err != nil {
+		t.Skip("no symlinks here:", err)
+	}
+	if r, err := openMadeDir(swapped); err == nil {
+		_ = r.Close()
+		t.Fatal("a link in the job dir's place was opened")
+	}
+	if entries, _ := os.ReadDir(elsewhere); len(entries) != 0 {
+		t.Fatalf("something was written through the link: %v", entries)
 	}
 }

@@ -21,6 +21,8 @@
 # CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`) in a .env file beside
 # this one, or sign codex in once with
 #   docker compose exec agent audiosilo-bridge agent-login codex
+# and set AUDIOSILO_BRIDGE_AGENT_BACKEND: codex on the bridge (it runs claude
+# unless told otherwise).
 name: audiosilo
 
 services:
@@ -56,6 +58,8 @@ services:
       # The folder shared with the agent container (below). Kept outside
       # /bridge-data, whose first-start ownership fix would otherwise reach it.
       AUDIOSILO_BRIDGE_AGENT_STAGING_DIR: /staging
+      # The CLI the agent container runs: claude (the default) or codex.
+      # AUDIOSILO_BRIDGE_AGENT_BACKEND: codex
     ports:
       - "8091:8091"
     volumes:

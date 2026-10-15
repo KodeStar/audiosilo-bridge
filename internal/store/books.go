@@ -584,9 +584,23 @@ func (db *DB) SumScratchBytes(ctx context.Context) (int64, error) {
 }
 
 // DeleteBook removes a book and (via ON DELETE CASCADE) its stage_runs/progress.
+// Its runs' spend is kept in deleted_stage_spend first, in the same transaction:
+// spend is spend, and the monthly budget must not forget a regenerated book's.
 func (db *DB) DeleteBook(ctx context.Context, id int64) error {
-	res, err := db.sql.ExecContext(ctx, `DELETE FROM books WHERE id = ?`, id)
-	return checkAffected(res, err)
+	tx, err := db.sql.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `INSERT INTO deleted_stage_spend (started_at, cost_usd)
+		SELECT started_at, `+budgetCostSQL+` FROM stage_runs WHERE book_id = ? AND (`+budgetCostSQL+`) > 0`, id); err != nil {
+		return err
+	}
+	res, err := tx.ExecContext(ctx, `DELETE FROM books WHERE id = ?`, id)
+	if err := checkAffected(res, err); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // checkAffected maps a zero-row UPDATE/DELETE to ErrNotFound.

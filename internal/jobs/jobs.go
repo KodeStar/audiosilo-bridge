@@ -94,6 +94,23 @@ var (
 	errUnpaired        = errors.New("the server refused the Bridge's token")
 )
 
+// Abandoner is a Handler whose jobs hold work beyond Run (sidecars.generate: an
+// engine book). The runner calls Abandon when it ends such a job without running
+// the handler (the first report of a resumed job answered with a cancel or a lost
+// claim, or another server's job dropped), so the work is released as the
+// handler's own end would.
+type Abandoner interface {
+	Abandon(ctx context.Context, job Job)
+}
+
+// abandon tells the job's handler, when it is an Abandoner, that the job ended
+// without it.
+func (r *Runner) abandon(ctx context.Context, job Job) {
+	if a, ok := r.handlers[job.Kind].(Abandoner); ok {
+		a.Abandon(ctx, job)
+	}
+}
+
 // Resumes reports whether a job whose context ended will run again under its
 // claim: the Bridge is stopping (the next start resumes it) or the server refused
 // the token (resumed once a link works again). False when an admin cancelled it
@@ -347,6 +364,7 @@ func (r *Runner) dropOtherServers(ctx context.Context, sj store.ServerJob) {
 	var err error
 	if sj.State == store.JobRunning {
 		err = r.store.FinishServerJob(ctx, sj.ID, sj.Attempt, store.JobLost, nil, "the Bridge was paired with another server")
+		r.abandon(ctx, storedJob(sj))
 	} else {
 		err = r.store.MarkServerJobReported(ctx, sj.ID, sj.Attempt)
 	}
@@ -380,6 +398,7 @@ func (r *Runner) resumeStranded(ctx context.Context, srv Server, wg *sync.WaitGr
 			if err := r.store.FinishServerJob(ctx, job.ID, job.Attempt, store.JobLost, nil, "the Bridge was paired with another server"); err != nil {
 				r.log.Warn("bridge: recording a job failed", "job", job.ID, "err", err)
 			}
+			r.abandon(ctx, job)
 			continue
 		}
 		r.log.Info("bridge: resuming a job its refused token stopped", "job", job.ID, "kind", job.Kind, "attempt", job.Attempt)
@@ -490,7 +509,13 @@ func (r *Runner) execute(ctx, base context.Context, srv Server, h Handler, ru *r
 		rep.parked, rep.parkMsg = true, ru.parked
 	}
 	if !rep.send() {
-		return r.settle(base, srv, ru, rep, nil, context.Cause(ctx))
+		// Ended before its handler ran: a cancel or a lost claim ends it for good,
+		// so what an earlier run of it left (an engine book) is released.
+		cause := context.Cause(ctx)
+		if errors.Is(cause, errCancelRequested) || errors.Is(cause, errLost) {
+			r.abandon(base, ru.job)
+		}
+		return r.settle(base, srv, ru, rep, nil, cause)
 	}
 	done := make(chan struct{})
 	reporting := make(chan struct{})

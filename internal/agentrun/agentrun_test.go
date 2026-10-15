@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -563,6 +564,54 @@ func TestRecoverOrphans(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	if _, err := os.Lstat(filepath.Join(fresh, agentproto.DoneFile)); err == nil {
 		t.Fatal("a job another runner is running was finished")
+	}
+}
+
+// An earlier runner's run that was still fresh when this one started (a crash
+// and a quick restart) is finished, as the agent being unavailable, once it is
+// old enough: the Bridge gets that answer instead of a stale heartbeat.
+func TestRecoverOrphansLater(t *testing.T) {
+	t.Parallel()
+	te := newTestEnv(t, parentEnv())
+	te.r.statusEvery = 10 * time.Millisecond
+	var shift atomic.Int64
+	te.r.now = func() time.Time { return time.Now().Add(time.Duration(shift.Load())) }
+	job := te.submit(t, claudeReq)
+	if err := os.Mkdir(filepath.Join(job, agentproto.ClaimDir), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	te.start(t)
+	time.Sleep(50 * time.Millisecond)
+	if _, err := os.Lstat(filepath.Join(job, agentproto.DoneFile)); err == nil {
+		t.Fatal("a fresh claim was finished")
+	}
+	shift.Store(int64(time.Hour)) // its last sign of life is an hour old now
+	ex := waitDone(t, job, 30*time.Second)
+	if !ex.Unavailable || !strings.Contains(ex.Error, "restarted") {
+		t.Fatalf("exit = %+v", ex)
+	}
+}
+
+// The recovery never finishes this runner's own run, however old its claim
+// looks (here: a clock an hour ahead while the CLI runs).
+func TestRecoverOrphansSkipsOwnRuns(t *testing.T) {
+	t.Parallel()
+	te := newTestEnv(t, parentEnv())
+	te.r.statusEvery = 5 * time.Millisecond
+	var shift atomic.Int64
+	te.r.now = func() time.Time { return time.Now().Add(time.Duration(shift.Load())) }
+	_ = os.WriteFile(filepath.Join(te.claudeCap, "behavior"), []byte(`sleep 0.3`), 0o644)
+	te.start(t)
+	job := te.submit(t, claudeReq)
+	for deadline := time.Now().Add(30 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+		if _, err := os.Stat(filepath.Join(te.claudeCap, "stdin")); err == nil {
+			break
+		}
+	}
+	shift.Store(int64(time.Hour))
+	ex := waitDone(t, job, 30*time.Second)
+	if ex.Error != "" || ex.ExitCode != 0 {
+		t.Fatalf("the runner's own run was finished as an orphan: %+v", ex)
 	}
 }
 

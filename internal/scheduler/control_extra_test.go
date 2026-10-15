@@ -3,6 +3,7 @@ package scheduler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -431,6 +432,52 @@ func TestFixLoopExhaustedParksWithCode(t *testing.T) {
 	}
 	if got.ParkCode != string(state.ParkFixLoopExhausted) {
 		t.Errorf("park_code = %q, want %q", got.ParkCode, state.ParkFixLoopExhausted)
+	}
+}
+
+// killedExecutor's inspect runs until its ctx ends and then fails the way a
+// killed child process does ("signal: killed", not ctx.Err()).
+type killedExecutor struct{ started, returned chan struct{} }
+
+func (e *killedExecutor) Execute(ctx context.Context, _ store.Book, _ state.State, _ StageReport) (StageResult, error) {
+	close(e.started)
+	<-ctx.Done()
+	defer close(e.returned)
+	return StageResult{}, errors.New("ffprobe: signal: killed")
+}
+
+// A stage interrupted by Cancel fails with whatever its killed child said; the
+// book keeps Cancel's reason (what IsCancelled, and so a sidecars.generate job
+// handed out again, reads) instead of that error.
+func TestCancelSurvivesAKilledStage(t *testing.T) {
+	h := newHarness(t)
+	db := h.openDB(t)
+	b := h.addBook(t, db, "killed", "", "")
+	exec := &killedExecutor{started: make(chan struct{}), returned: make(chan struct{})}
+	sched := New(db, h.hub, exec, 1, h.workRoot, false)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { _ = sched.Start(ctx); close(done) }()
+	sched.Notify()
+
+	select {
+	case <-exec.started:
+	case <-time.After(3 * time.Second):
+		cancel()
+		t.Fatal("the stage never started")
+	}
+	if err := sched.Cancel(context.Background(), b.ID); err != nil {
+		t.Fatalf("cancel: %v", err)
+	}
+	<-exec.returned
+	cancel()
+	<-done // Start returns once its workers have
+	got, _ := db.GetBook(context.Background(), b.ID)
+	if !IsCancelled(got) {
+		t.Fatalf("book = %s %q, want the cancel kept", got.Status, got.Error)
+	}
+	if runs, _ := db.ListStageRuns(context.Background(), b.ID); len(runs) != 1 || runs[0].FinishedAt == "" {
+		t.Fatalf("the run wasn't closed: %+v", runs)
 	}
 }
 

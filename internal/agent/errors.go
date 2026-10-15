@@ -125,6 +125,7 @@ func (e *NotAvailableError) Error() string {
 // refused (an expired or revoked subscription token, a wrong API key). That is
 // not something a retry of the stage fixes: re-running the agent with the same
 // credential burns the validation retries and parks the book as a bad answer.
+// They are looked for in a run that failed only (ClaudeResult, CodexResult).
 var authFailureSignatures = []string{
 	"failed to authenticate",
 	"oauth access token is invalid",

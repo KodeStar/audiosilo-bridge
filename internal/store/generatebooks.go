@@ -61,12 +61,31 @@ func (db *DB) EndGenerateBook(ctx context.Context, serverJobID int64, at time.Ti
 	return err
 }
 
+// ReopenGenerateBook marks a server job's mapping open again (a job the server
+// handed out again after its end was recorded follows its book once more).
+func (db *DB) ReopenGenerateBook(ctx context.Context, serverJobID int64) error {
+	_, err := db.sql.ExecContext(ctx,
+		`UPDATE generate_books SET ended_at = '' WHERE server_job_id = ?`, serverJobID)
+	return err
+}
+
+// GenerateBookFollowed reports whether an open sidecars.generate job (a mapping
+// whose end isn't recorded) follows the engine book bookID.
+func (db *DB) GenerateBookFollowed(ctx context.Context, bookID int64) (bool, error) {
+	var n int
+	err := db.sql.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM generate_books WHERE book_id = ? AND ended_at = ''`, bookID).Scan(&n)
+	return n > 0, err
+}
+
 // OpenGenerateJobsForBook returns the ids of the open server jobs (still running
-// here) other than exceptJob that follow the engine book bookID.
+// here, their mapping not ended) other than exceptJob that follow the engine book
+// bookID.
 func (db *DB) OpenGenerateJobsForBook(ctx context.Context, bookID, exceptJob int64) ([]int64, error) {
 	rows, err := db.sql.QueryContext(ctx,
 		`SELECT g.server_job_id FROM generate_books g JOIN server_jobs j ON j.id = g.server_job_id
-		  WHERE g.book_id = ? AND g.server_job_id != ? AND j.state = 'running' ORDER BY g.server_job_id`,
+		  WHERE g.book_id = ? AND g.server_job_id != ? AND g.ended_at = '' AND j.state = 'running'
+		  ORDER BY g.server_job_id`,
 		bookID, exceptJob)
 	if err != nil {
 		return nil, err
@@ -127,12 +146,14 @@ func (db *DB) MarkGenerateBookSwept(ctx context.Context, bookID int64, at time.T
 
 // SumBudgetCostSince returns the agent spend of every book's stage runs started at
 // or after since, on the same basis as SumStageRunBudgetCost (provider cost, else a
-// complete configured estimate) and, like it, superseded runs included: the
-// monthly budget's figure.
+// complete configured estimate) and, like it, superseded runs included, deleted
+// books' runs too (deleted_stage_spend): the monthly budget's figure.
 func (db *DB) SumBudgetCostSince(ctx context.Context, since time.Time) (float64, error) {
 	var cost float64
-	err := db.sql.QueryRowContext(ctx, `SELECT COALESCE(SUM(`+budgetCostSQL+`),0)
-		FROM stage_runs WHERE started_at >= ?`, timestamp(since)).Scan(&cost)
+	err := db.sql.QueryRowContext(ctx, `SELECT
+		COALESCE((SELECT SUM(`+budgetCostSQL+`) FROM stage_runs WHERE started_at >= ?1), 0) +
+		COALESCE((SELECT SUM(cost_usd) FROM deleted_stage_spend WHERE started_at >= ?1), 0)`,
+		timestamp(since)).Scan(&cost)
 	return cost, err
 }
 

@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -253,5 +255,70 @@ func TestUnchangedProgressIsNotSent(t *testing.T) {
 			msg = *u.Error
 		}
 		t.Fatalf("final = %q: %s", s, msg)
+	}
+}
+
+// abandoner is a handler that hears of the jobs the runner ends without it.
+type abandoner struct {
+	handler
+	mu  sync.Mutex
+	got []int64
+	ran atomic.Bool
+}
+
+func (a *abandoner) Run(ctx context.Context, j Job, rep *Reporter) (any, error) {
+	a.ran.Store(true)
+	return a.handler.Run(ctx, j, rep)
+}
+
+func (a *abandoner) Abandon(_ context.Context, j Job) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.got = append(a.got, j.ID)
+}
+
+func (a *abandoner) abandoned() []int64 {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return slices.Clone(a.got)
+}
+
+// A job the runner ends without running its handler (its first report after a
+// restart answered with a cancel or a 409, or another server's job dropped at a
+// start) is handed to the handler's Abandon, so what an earlier run left is
+// released. One that runs, or one that resumes later, is not.
+func TestAbandonedJobs(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	for name, tc := range map[string]struct {
+		serverID string
+		setup    func(srv *fakeServer)
+		abandon  bool
+	}{
+		"cancelled while down": {serverID: "srv", setup: func(srv *fakeServer) { srv.cancel[9] = true }, abandon: true},
+		"lost while down":      {serverID: "srv", setup: func(srv *fakeServer) { srv.notHeld[9] = true }, abandon: true},
+		"another server's":     {serverID: "srv-new", setup: func(*fakeServer) {}, abandon: true},
+		"resumed and run":      {serverID: "srv", setup: func(*fakeServer) {}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			db, srv := openStore(t), newFakeServer()
+			if err := db.RecordClaim(ctx, store.ServerJob{ID: 9, Kind: "k.v", Attempt: 1, ServerID: "srv"}); err != nil {
+				t.Fatal(err)
+			}
+			tc.setup(srv)
+			h := &abandoner{handler: handler{kind: "k.v", lane: LaneLight,
+				fn: func(context.Context, Job, *Reporter) (any, error) { return nil, nil }}}
+			opts := testOpts()
+			opts.ServerID = func() string { return tc.serverID }
+			r := New(db, func() Server { return srv }, nil, opts, h)
+			runFor(t, r, func() bool {
+				sj, err := db.GetServerJob(ctx, 9)
+				return err == nil && sj.State != store.JobRunning
+			})
+			if got := h.abandoned(); tc.abandon != (len(got) == 1 && got[0] == 9) || (tc.abandon && h.ran.Load()) {
+				t.Fatalf("abandoned %v (ran %v), want abandoned %v", got, h.ran.Load(), tc.abandon)
+			}
+		})
 	}
 }

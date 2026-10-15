@@ -91,7 +91,8 @@ type Handler struct {
 
 	mu sync.Mutex
 	// pokes wake a running job when its Retry is pressed (a park of the
-	// Bridge's own, book_not_writable, checks again at once).
+	// Bridge's own, book_not_writable, checks again at once): each job id's
+	// latest run's own channel.
 	pokes map[int64]chan struct{}
 	// doneJobs counts the jobs that finished done here (the heartbeat's
 	// estimates are computed again when it moves).
@@ -170,6 +171,8 @@ type run struct {
 	written  string
 	writeErr string
 	srv      Server
+	// poke is this run's wake-up channel (Retry).
+	poke chan struct{}
 }
 
 // bookKey is what changes on an engine book row when the scheduler moves it.
@@ -194,11 +197,12 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 	if job.LibraryID == nil || job.Path == nil || strings.TrimSpace(*job.Path) == "" {
 		return nil, errors.New("sidecars.generate needs a library and a book path")
 	}
-	r := &run{job: job, rep: rep, params: params, rel: *job.Path}
+	r := &run{job: job, rep: rep, params: params, rel: *job.Path, poke: make(chan struct{}, 1)}
 	// One wake-up channel for the whole run: a Retry reaches whichever park the
-	// job waits in.
-	h.pokeChan(job.ID)
-	defer h.dropPoke(job.ID)
+	// job waits in. It is this run's own, so a later attempt of the same job
+	// keeps its channel when this one ends.
+	h.setPoke(job.ID, r.poke)
+	defer h.dropPoke(job.ID, r.poke)
 	rep.Progress(jobs.Progress{Step: stepWaiting, Message: "Starting"})
 	eng, err := h.waitEngine(ctx, r)
 	if err != nil {
@@ -208,15 +212,28 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 	if merr != nil && !errors.Is(merr, store.ErrNotFound) {
 		return nil, merr
 	}
-	resumed := merr == nil && mapped.BookID != nil
-	if resumed {
-		r.bookID = *mapped.BookID
-	}
+	// A mapping is this job's own only for the same library and book: the ids
+	// are the server's, so another server (the Bridge paired anew) or a
+	// reinstalled one hands out an id an earlier job's mapping still holds, and
+	// following that would write another book's characters and recaps into this
+	// one. The path is the server's canonical one, known once prepare has asked.
+	resumed := merr == nil && mapped.BookID != nil && mapped.LibraryID == *job.LibraryID
 	if err := h.prepare(ctx, r, !resumed); err != nil {
+		if resumed && mapped.RelPath == r.rel {
+			r.bookID = *mapped.BookID // its own book: end() stops it
+		}
 		return h.end(ctx, r, nil, err)
 	}
+	if resumed && mapped.RelPath != r.rel {
+		// That run's job is gone (its id is this job's now), so nothing follows it.
+		h.o.Log.Warn("generate: the job's id maps to another book's run; this job starts its own",
+			"job", job.ID, "mapped", mapped.RelPath, "path", r.rel)
+		h.stopBook(context.WithoutCancel(ctx), job.ID, *mapped.BookID)
+		resumed = false
+	}
 	if resumed {
-		if err := h.attach(ctx, eng, r); err != nil {
+		r.bookID = *mapped.BookID
+		if err := h.attach(ctx, eng, r, mapped); err != nil {
 			return h.end(ctx, r, nil, err)
 		}
 	} else if err := h.create(ctx, eng, r); err != nil {
@@ -235,35 +252,75 @@ func (h *Handler) end(ctx context.Context, r *run, res any, err error) (any, err
 		return res, err
 	}
 	if r.bookID != 0 {
-		bg := context.WithoutCancel(ctx)
-		if err != nil {
-			h.stopBook(bg, r)
-		}
-		if eerr := h.o.DB.EndGenerateBook(bg, r.job.ID, h.now()); eerr != nil {
-			h.o.Log.Warn("generate: recording the job's end failed", "job", r.job.ID, "err", eerr)
-		}
-		if h.o.RetentionDays == 0 {
-			if serr := h.purgeEnded(bg, r.bookID); serr != nil {
-				h.o.Log.Warn("generate: deleting the transcripts failed", "job", r.job.ID, "err", serr)
-			}
-		}
+		h.release(context.WithoutCancel(ctx), r.job, r.bookID, err != nil)
 	}
 	return res, err
 }
 
-// stopBook cancels the job's engine book unless it already ended (done, or
+// Abandon is the jobs runner telling the handler it ended a job without running
+// it (the first report after a restart was answered with a cancel or a lost
+// claim, or the job was another server's): the engine book an earlier run of the
+// job created is released as end() would, or it would go on with nothing to
+// follow it.
+func (h *Handler) Abandon(ctx context.Context, job jobs.Job) {
+	m, err := h.o.DB.GetGenerateBook(ctx, job.ID)
+	if err != nil || m.BookID == nil || m.EndedAt != "" {
+		return
+	}
+	if h.o.Engine() != nil {
+		h.release(ctx, job, *m.BookID, true)
+		return
+	}
+	// A restart resumes its jobs at the first heartbeat, which can come before the
+	// engine has started (its first start may download ffmpeg): the book is
+	// released once it has.
+	go func() {
+		for h.o.Engine() == nil {
+			if agent.SleepCtx(ctx, h.o.Poll) != nil {
+				return
+			}
+		}
+		h.release(ctx, job, *m.BookID, true)
+	}()
+}
+
+// release ends a job's hold on its engine book: the end is recorded (the
+// transcript retention counts from it, and the supervisor leaves a book no job
+// follows alone), a job that didn't finish stops the book (nothing follows it
+// any more), and with retention_days 0 the transcripts go now. A later claim of
+// the same job may run here already (the server re-queued it after a lease ran
+// out and handed it out again before this attempt heard it was lost): that
+// attempt follows the book now, so it is left alone.
+func (h *Handler) release(ctx context.Context, job jobs.Job, bookID int64, stop bool) {
+	if sj, err := h.o.DB.GetServerJob(ctx, job.ID); err == nil && sj.Attempt > job.Attempt {
+		return
+	}
+	if err := h.o.DB.EndGenerateBook(ctx, job.ID, h.now()); err != nil {
+		h.o.Log.Warn("generate: recording the job's end failed", "job", job.ID, "err", err)
+	}
+	if stop {
+		h.stopBook(ctx, job.ID, bookID)
+	}
+	if h.o.RetentionDays == 0 {
+		if err := h.purgeEnded(ctx, bookID); err != nil {
+			h.o.Log.Warn("generate: deleting the transcripts failed", "job", job.ID, "err", err)
+		}
+	}
+}
+
+// stopBook cancels a job's engine book unless it already ended (done, or
 // failed: a cancel would overwrite its error).
-func (h *Handler) stopBook(ctx context.Context, r *run) {
+func (h *Handler) stopBook(ctx context.Context, jobID, bookID int64) {
 	eng := h.o.Engine()
 	if eng == nil {
 		return
 	}
-	b, err := h.o.DB.GetBook(ctx, r.bookID)
+	b, err := h.o.DB.GetBook(ctx, bookID)
 	if err != nil || finished(b.State, b.Status) {
 		return
 	}
-	if err := eng.Cancel(ctx, r.bookID); err != nil && !errors.Is(err, scheduler.ErrInvalidOp) {
-		h.o.Log.Warn("generate: cancelling the engine book failed", "job", r.job.ID, "book", r.bookID, "err", err)
+	if err := eng.Cancel(ctx, bookID); err != nil && !errors.Is(err, scheduler.ErrInvalidOp) {
+		h.o.Log.Warn("generate: cancelling the engine book failed", "job", jobID, "book", bookID, "err", err)
 	}
 }
 
@@ -380,7 +437,6 @@ func (h *Handler) waitMapped(ctx context.Context, r *run, strict bool) error {
 // is writable says nothing about a 0555 book folder, spike 3), parking
 // book_not_writable and checking again every Recheck (or on Retry) until it can.
 func (h *Handler) waitWritable(ctx context.Context, r *run) error {
-	poke := h.pokeChan(r.job.ID)
 	for {
 		err := mapping.ProbeWritable(r.place.dir)
 		if err == nil {
@@ -393,7 +449,7 @@ func (h *Handler) waitWritable(ctx context.Context, r *run) error {
 		case <-ctx.Done():
 			t.Stop()
 			return ctx.Err()
-		case <-poke:
+		case <-r.poke:
 		case <-t.C:
 		}
 		t.Stop()
@@ -520,8 +576,8 @@ func (h *Handler) newBook(r *run, sourcePath, ebookPath string) store.NewBook {
 
 // attach finds a resumed job's engine book again. One this job's own cancel
 // stopped (the server took the job back, then handed it out again) is re-admitted;
-// a book that is gone is created anew.
-func (h *Handler) attach(ctx context.Context, eng Engine, r *run) error {
+// a book that is gone is created anew. The job's mapping is open again either way.
+func (h *Handler) attach(ctx context.Context, eng Engine, r *run, m store.GenerateBook) error {
 	b, err := h.o.DB.GetBook(ctx, r.bookID)
 	if errors.Is(err, store.ErrNotFound) {
 		r.bookID = 0
@@ -529,6 +585,11 @@ func (h *Handler) attach(ctx context.Context, eng Engine, r *run) error {
 	}
 	if err != nil {
 		return err
+	}
+	if m.EndedAt != "" {
+		if err := h.o.DB.ReopenGenerateBook(ctx, r.job.ID); err != nil {
+			return err
+		}
 	}
 	if b.Kind == string(state.KindEbook) {
 		r.source, r.epub = SourceEbook, b.EbookPath
@@ -548,7 +609,6 @@ func (h *Handler) attach(ctx context.Context, eng Engine, r *run) error {
 // follow reports the engine book's progress until it is done (then writes and
 // rescans), fails, or the job's context ends.
 func (h *Handler) follow(ctx context.Context, eng Engine, r *run) (any, error) {
-	poke := h.pokeChan(r.job.ID)
 	for {
 		wait := h.o.Poll
 		b, err := h.o.DB.GetBook(ctx, r.bookID)
@@ -573,7 +633,7 @@ func (h *Handler) follow(ctx context.Context, eng Engine, r *run) (any, error) {
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
-		case <-poke:
+		case <-r.poke:
 		case <-time.After(wait):
 		}
 	}
@@ -792,21 +852,21 @@ func (h *Handler) Retry(ctx context.Context, jobID int64) error {
 	return nil
 }
 
-func (h *Handler) pokeChan(jobID int64) chan struct{} {
+// setPoke makes c the job's wake-up channel (its latest run's).
+func (h *Handler) setPoke(jobID int64, c chan struct{}) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	c, ok := h.pokes[jobID]
-	if !ok {
-		c = make(chan struct{}, 1)
-		h.pokes[jobID] = c
-	}
-	return c
+	h.pokes[jobID] = c
 }
 
-func (h *Handler) dropPoke(jobID int64) {
+// dropPoke removes the job's wake-up channel if it is still c (a later run of
+// the job may have its own by now).
+func (h *Handler) dropPoke(jobID int64, c chan struct{}) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	delete(h.pokes, jobID)
+	if h.pokes[jobID] == c {
+		delete(h.pokes, jobID)
+	}
 }
 
 // errText is err's message, "" for nil.

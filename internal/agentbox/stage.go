@@ -1,6 +1,7 @@
 package agentbox
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,7 +12,6 @@ import (
 
 	"github.com/kodestar/audiosilo-bridge/internal/agent"
 	"github.com/kodestar/audiosilo-bridge/internal/agentproto"
-	"github.com/kodestar/audiosilo-bridge/internal/fsutil"
 )
 
 // Modes in a job dir. The Bridge and the agent run as different uids sharing no
@@ -29,20 +29,58 @@ const (
 	requestMode = 0o644
 )
 
-// stage writes the job dir: work/ (a copy of the staged dir), prompt.txt, then
-// request.json renamed into place, the runner's ready signal.
-func stage(job string, req agent.Request, cli string, timeout int) error {
+// stage creates the job dir and writes it: work/ (a copy of the staged dir),
+// prompt.txt, then request.json renamed into place, the runner's ready signal.
+// The agent uid can write the staging dir too (runner.json), so it can remove or
+// rename the Bridge's entries there and put a link in their place, and it can
+// write work/out/. So every write goes through an os.Root opened on the dir just
+// made, never through its path, and the dir stays private (0700) until it is
+// whole: nothing the agent does meanwhile can lead a write, or a chmod, out of
+// it. The caller closes the returned Root.
+func stage(job string, req agent.Request, cli string, timeout int) (*os.Root, error) {
 	if err := os.Mkdir(job, 0o700); err != nil {
+		return nil, err
+	}
+	root, err := openMadeDir(job)
+	if err != nil {
+		return nil, err
+	}
+	if err := fill(root, req, cli, timeout); err != nil {
+		_ = root.Close()
+		return nil, err
+	}
+	return root, nil
+}
+
+// openMadeDir opens the dir just made at path as an os.Root, refusing it when
+// the entry at path is no longer that dir: a link put in its place would take
+// every write wherever it points.
+func openMadeDir(path string) (*os.Root, error) {
+	root, err := os.OpenRoot(path)
+	if err != nil {
+		return nil, err
+	}
+	opened, err := root.Stat(".")
+	if err == nil {
+		var entry os.FileInfo
+		if entry, err = os.Lstat(path); err == nil && (!entry.IsDir() || !os.SameFile(opened, entry)) {
+			err = fmt.Errorf("%s was replaced while it was staged", filepath.Base(path))
+		}
+	}
+	if err != nil {
+		_ = root.Close()
+		return nil, err
+	}
+	return root, nil
+}
+
+// fill writes the job into its (still private) dir, opens the dir to the agent
+// uid, and renames request.json into place.
+func fill(root *os.Root, req agent.Request, cli string, timeout int) error {
+	if err := copyTree(req.Dir, root, agentproto.WorkDir); err != nil {
 		return err
 	}
-	if err := os.Chmod(job, jobDirMode); err != nil { //nolint:gosec // shared with the agent uid by design (decision 15)
-		return err
-	}
-	work := filepath.Join(job, agentproto.WorkDir)
-	if err := copyTree(req.Dir, work); err != nil {
-		return err
-	}
-	if err := fsutil.WriteFileAtomic(filepath.Join(job, agentproto.PromptFile), []byte(req.Prompt), inputFile); err != nil {
+	if err := createFile(root, agentproto.PromptFile, strings.NewReader(req.Prompt), inputFile, true); err != nil {
 		return err
 	}
 	body, err := json.Marshal(agentproto.Request{
@@ -58,20 +96,23 @@ func stage(job string, req agent.Request, cli string, timeout int) error {
 	if err != nil {
 		return err
 	}
-	// request.json.tmp is the contract's name for the request in progress, so it
-	// keeps its own rename: WriteFileAtomic makes it whole and synced, then the
-	// rename to request.json is the ready signal.
-	tmp := filepath.Join(job, agentproto.RequestTmpFile)
-	if err := fsutil.WriteFileAtomic(tmp, body, requestMode); err != nil {
+	// request.json.tmp is the contract's name for the request in progress: it is
+	// written whole, then renamed to request.json, the ready signal, once the dir
+	// is open to the agent uid.
+	if err := createFile(root, agentproto.RequestTmpFile, bytes.NewReader(body), requestMode, true); err != nil {
 		return err
 	}
-	return os.Rename(tmp, filepath.Join(job, agentproto.RequestFile))
+	if err := root.Chmod(".", jobDirMode); err != nil { //nolint:gosec // shared with the agent uid by design (decision 15)
+		return err
+	}
+	return root.Rename(agentproto.RequestTmpFile, agentproto.RequestFile)
 }
 
-// copyTree copies the staged dir src into dst: regular files only (the staged dir
-// holds copies, never links), inputs read-only, out/ writable by the agent. dst's
-// out/ always exists, so the agent has somewhere to write on a first attempt.
-func copyTree(src, dst string) error {
+// copyTree copies the staged dir src into dst under root: regular files only
+// (the staged dir holds copies, never links), inputs read-only, out/ writable by
+// the agent. dst's out/ always exists, so the agent has somewhere to write on a
+// first attempt.
+func copyTree(src string, root *os.Root, dst string) error {
 	err := filepath.WalkDir(src, func(path string, d fs.DirEntry, werr error) error {
 		if werr != nil {
 			return werr
@@ -88,13 +129,13 @@ func copyTree(src, dst string) error {
 			if inOut {
 				mode = outDirMode
 			}
-			return mkdir(target, mode)
+			return mkdir(root, target, mode)
 		case d.Type().IsRegular():
 			mode := fs.FileMode(inputFile)
 			if inOut {
 				mode = outFileMode
 			}
-			return copyFile(path, target, mode)
+			return copyFile(path, root, target, mode)
 		default:
 			return nil // a link or a device has no place in a staged dir
 		}
@@ -103,37 +144,50 @@ func copyTree(src, dst string) error {
 		return err
 	}
 	out := filepath.Join(dst, agentproto.OutDir)
-	if _, err := os.Lstat(out); err == nil {
+	if _, err := root.Lstat(out); err == nil {
 		return nil
 	}
-	return mkdir(out, outDirMode)
+	return mkdir(root, out, outDirMode)
 }
 
-// mkdir creates dir with exactly mode (the Bridge's umask is 022).
-func mkdir(dir string, mode fs.FileMode) error {
-	if err := os.Mkdir(dir, 0o700); err != nil {
+// mkdir creates dir under root with exactly mode (the Bridge's umask is 022).
+func mkdir(root *os.Root, dir string, mode fs.FileMode) error {
+	if err := root.Mkdir(dir, 0o700); err != nil {
 		return err
 	}
-	return os.Chmod(dir, mode)
+	return root.Chmod(dir, mode)
 }
 
-// copyFile streams src into a new file dst with exactly mode.
-func copyFile(src, dst string, mode fs.FileMode) error {
+// copyFile streams src into a new file dst under root with exactly mode.
+func copyFile(src string, root *os.Root, dst string, mode fs.FileMode) error {
 	in, err := os.Open(src) //nolint:gosec // src is a file of the pipeline's own staged dir
 	if err != nil {
 		return err
 	}
 	defer func() { _ = in.Close() }()
-	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) //nolint:gosec // dst is inside the job dir the Bridge just created
+	if err := createFile(root, dst, in, mode, false); err != nil {
+		return fmt.Errorf("copy %s: %w", filepath.Base(src), err)
+	}
+	return nil
+}
+
+// createFile writes r into a new file name under root with exactly mode (set on
+// the open file, never through a path), synced when sync is set (the prompt and
+// the request; a copied input needs no more than the copy).
+func createFile(root *os.Root, name string, r io.Reader, mode fs.FileMode, sync bool) error {
+	f, err := root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return err
 	}
-	if _, err := io.Copy(out, in); err != nil {
-		_ = out.Close()
-		return fmt.Errorf("copy %s: %w", filepath.Base(src), err)
+	_, err = io.Copy(f, r)
+	if err == nil && sync {
+		err = f.Sync()
 	}
-	if err := out.Close(); err != nil {
-		return err
+	if err == nil {
+		err = f.Chmod(mode)
 	}
-	return os.Chmod(dst, mode)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	return err
 }

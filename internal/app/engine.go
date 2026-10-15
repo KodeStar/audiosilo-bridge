@@ -21,6 +21,7 @@ import (
 	"github.com/kodestar/audiosilo-bridge/internal/metaops"
 	"github.com/kodestar/audiosilo-bridge/internal/pipeline"
 	"github.com/kodestar/audiosilo-bridge/internal/scheduler"
+	"github.com/kodestar/audiosilo-bridge/internal/state"
 	"github.com/kodestar/audiosilo-bridge/internal/store"
 	"github.com/kodestar/audiosilo-bridge/internal/supervisor"
 	"github.com/kodestar/audiosilo-bridge/internal/toolfetch"
@@ -136,16 +137,7 @@ func (b *Bridge) runEngine(ctx context.Context) {
 				EligibleAgentBooks: r.EligibleAgentBooks, EligibleAgentIDs: r.EligibleAgentIDs, AgentInvocations: r.AgentInvocations,
 				InvocationCapacity: r.InvocationCapacity, InvocationsByBook: r.InvocationsByBook, MaxAgentsPerBook: r.MaxAgentsPerBook}
 		},
-		Apply: func(ctx context.Context, action supervisor.Action, inc supervisor.Incident) (string, error) {
-			if action == supervisor.ActionFallbackBackend {
-				return "", errors.New("the Bridge has no fallback agent backend")
-			}
-			detail := inc.Diagnosis
-			if len(inc.Evidence) > 0 {
-				detail += ": " + strings.Join(inc.Evidence, "; ")
-			}
-			return sched.SupervisorApply(ctx, string(action), inc.BookID, inc.Stage, detail)
-		},
+		Apply: supervisorApply(b.db, sched),
 		Publish: func(eventType string, bookID int64, payload any) {
 			if bookID > 0 {
 				_ = hub.PublishBook(eventType, bookID, payload)
@@ -194,6 +186,36 @@ func (b *Bridge) runEngine(ctx context.Context) {
 		"agent_backend", box.ID(), "agent_slots", slots, "staging", cfg.AgentStagingDir(b.dataDir))
 	b.runner.Wake()
 	wg.Wait()
+}
+
+// supervisorApply is the supervisor's hook for its automatic actions. Only a
+// book a sidecars.generate job still follows is acted on: one whose job ended
+// (done, failed, cancelled or lost) would run again, and spend, with nothing to
+// take its result. An ASR-lane stage (asr, retranscribing) isn't stopped for its
+// length: on a CPU it runs for hours on a long book, bounded chapter by chapter,
+// and a whole-stage time limit would stop it again and again. The Bridge has no
+// fallback agent backend.
+func supervisorApply(db *store.DB, sched *scheduler.Scheduler) func(context.Context, supervisor.Action, supervisor.Incident) (string, error) {
+	return func(ctx context.Context, action supervisor.Action, inc supervisor.Incident) (string, error) {
+		if action == supervisor.ActionFallbackBackend {
+			return "", errors.New("the Bridge has no fallback agent backend")
+		}
+		if action == supervisor.ActionStopBudget && state.LaneOf(state.State(inc.Stage)) == state.LaneASR {
+			return "", errors.New("a transcription stage bounds itself chapter by chapter, not by its length")
+		}
+		followed, err := db.GenerateBookFollowed(ctx, inc.BookID)
+		if err != nil {
+			return "", err
+		}
+		if !followed {
+			return "", errors.New("no sidecars.generate job follows this book any more")
+		}
+		detail := inc.Diagnosis
+		if len(inc.Evidence) > 0 {
+			detail += ": " + strings.Join(inc.Evidence, "; ")
+		}
+		return sched.SupervisorApply(ctx, string(action), inc.BookID, inc.Stage, detail)
+	}
 }
 
 // daily runs fn now and then every day until ctx ends.
