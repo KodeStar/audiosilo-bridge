@@ -172,7 +172,13 @@ func TestRunsAJobToDone(t *testing.T) {
 	if k := r.Kinds(); len(k) != 1 || k[0] != "bridge.verify" {
 		t.Fatalf("kinds = %v", k)
 	}
-	runFor(t, r, func() bool { s, _ := srv.finalState(1); return s == link.StateDone })
+	// Wait for the report to be recorded too: the server hears it a moment before
+	// the store marks it reported, and stopping in between would cut that short.
+	runFor(t, r, func() bool {
+		s, _ := srv.finalState(1)
+		sj, err := db.GetServerJob(context.Background(), 1)
+		return s == link.StateDone && err == nil && sj.Reported
+	})
 	if got.ID != 1 || got.Attempt != 1 || *got.LibraryID != 2 || string(got.Params) != `{"x":1}` {
 		t.Fatalf("the handler saw %+v", got)
 	}

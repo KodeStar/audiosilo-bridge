@@ -971,9 +971,11 @@ func (s *Scheduler) advanceWaypoints(ctx context.Context) ([]store.Book, error) 
 
 // autoReadmitCodes are the park reasons the timed self-resume acts on: the transient
 // agent conditions a wait heals (the CLI symlink blip recovers, or the rate-limit
-// window elapses). Every other park (a not-confident marker verdict, a spelling gate
-// failure, a budget stop, ...) needs a human and is never auto-readmitted.
-var autoReadmitCodes = []state.ParkCode{state.ParkAgentUnavailable, state.ParkAgentRateLimited}
+// window elapses) and the monthly budget (a new month starts). Only a park that
+// carries a retry_at is ever re-admitted, so the per-book budget park (none) still
+// waits for a human, as does every other park (a not-confident marker verdict, a
+// spelling gate failure, ...).
+var autoReadmitCodes = []state.ParkCode{state.ParkAgentUnavailable, state.ParkAgentRateLimited, state.ParkBudgetExceeded}
 
 var restartReadmitCodes = []state.ParkCode{
 	state.ParkAgentUnavailable, state.ParkAgentRateLimited,
@@ -1052,10 +1054,11 @@ func (s *Scheduler) autoReadmitDue(ctx context.Context) {
 			slog.Warn("auto-readmit: readmit failed", "book_id", b.ID, "err", err)
 			continue
 		}
-		_ = s.hub.PublishBook("stage.note", b.ID, map[string]any{
-			"book_id": b.ID, "stage": b.State,
-			"msg": "auto-retry: agent availability window elapsed",
-		})
+		msg := "auto-retry: agent availability window elapsed"
+		if b.ParkCode == string(state.ParkBudgetExceeded) {
+			msg = "auto-retry: a new month started under the monthly agent budget"
+		}
+		_ = s.hub.PublishBook("stage.note", b.ID, map[string]any{"book_id": b.ID, "stage": b.State, "msg": msg})
 	}
 }
 

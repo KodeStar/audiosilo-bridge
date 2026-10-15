@@ -185,6 +185,15 @@ func TestRegistry(t *testing.T) {
 	if len(sts) != 2 || sts[0].LibraryID != 1 || !sts[0].Mapped || sts[1].Mapped {
 		t.Fatalf("statuses = %+v", sts)
 	}
+	if st, ok := r.Status(1); !ok || !st.Mapped {
+		t.Fatalf("library 1's status = %+v, %v", st, ok)
+	}
+	if st, ok := r.Status(2); !ok || st.Mapped {
+		t.Fatalf("library 2's status = %+v, %v", st, ok)
+	}
+	if _, ok := r.Status(9); ok {
+		t.Fatal("an unknown library has a status")
+	}
 	entries := r.Entries(mount)
 	if len(entries) != 2 || entries[0].Status == nil || entries[0].CheckedAt == nil || entries[1].MountPath != "/b" {
 		t.Fatalf("entries = %+v", entries)

@@ -18,9 +18,11 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/kodestar/audiosilo-bridge/internal/agentbox"
 	"github.com/kodestar/audiosilo-bridge/internal/api"
 	"github.com/kodestar/audiosilo-bridge/internal/auth"
 	"github.com/kodestar/audiosilo-bridge/internal/config"
+	"github.com/kodestar/audiosilo-bridge/internal/generate"
 	"github.com/kodestar/audiosilo-bridge/internal/jobs"
 	"github.com/kodestar/audiosilo-bridge/internal/link"
 	"github.com/kodestar/audiosilo-bridge/internal/logring"
@@ -56,10 +58,16 @@ type Bridge struct {
 	cfg     atomic.Pointer[config.Config]
 	db      *store.DB
 	keySrc  secrets.KeySource
+	vault   secrets.Store
 	conn    *Conn
 	libs    *mapping.Registry
 	runner  *jobs.Runner
 	auth    *auth.Manager
+	// box is the agent container runner (decision 15), gen the sidecars.generate
+	// job, engine the sidecars engine once it has started.
+	box    *agentbox.Runner
+	gen    *generate.Handler
+	engine engineState
 
 	kick chan struct{}
 
@@ -115,7 +123,8 @@ func New(ctx context.Context, opts Options) (*Bridge, string, error) {
 		return nil, "", err
 	}
 	b := &Bridge{dataDir: opts.DataDir, version: opts.Version, log: opts.Logger, ring: opts.Ring, db: db, keySrc: keySrc,
-		conn: conn, libs: mapping.NewRegistry(), auth: am, kick: make(chan struct{}, 1)}
+		vault: vault, conn: conn, libs: mapping.NewRegistry(), auth: am, kick: make(chan struct{}, 1),
+		box: newAgentBox(cfg, opts.DataDir, opts.Logger)}
 	b.cfg.Store(&cfg)
 	verifier := verify.New(b.libs, b.mount, func() mapping.BookSource {
 		if cl := b.conn.Client(); cl != nil {
@@ -123,7 +132,17 @@ func New(ctx context.Context, opts Options) (*Bridge, string, error) {
 		}
 		return nil
 	})
-	b.runner = jobs.New(db, b.server, b.tokenRefused, jobs.Options{Log: opts.Logger}, verifier)
+	b.gen = generate.New(generate.Options{DB: db, Engine: b.engine.generateEngine, Libraries: b.libs, Mount: b.mount,
+		Server: func() generate.Server {
+			if cl := b.conn.Client(); cl != nil {
+				return cl
+			}
+			return nil
+		},
+		WorkRoot: filepath.Join(opts.DataDir, "work"), Version: opts.Version, RetentionDays: cfg.Transcripts.RetentionDays,
+		Log: opts.Logger})
+	b.runner = jobs.New(db, b.server, b.tokenRefused, jobs.Options{Log: opts.Logger,
+		ServerID: func() string { return b.conn.Pairing().ServerID }}, verifier, b.gen)
 	conn.onChange = b.linkChanged
 	return b, oneTime, nil
 }
@@ -223,7 +242,8 @@ func (b *Bridge) Run(ctx context.Context) error {
 		"key_source", string(b.keySrc), "paired", b.conn.Client() != nil)
 
 	var wg sync.WaitGroup
-	wg.Add(3)
+	wg.Add(4)
+	go func() { defer wg.Done(); b.runEngine(ctx) }()
 	go func() { defer wg.Done(); b.heartbeatLoop(ctx) }()
 	go func() { defer wg.Done(); b.runner.Run(ctx) }()
 	serveErr := make(chan error, 1)
@@ -275,7 +295,8 @@ func (b *Bridge) beat(ctx context.Context) {
 	gen := b.beatGen
 	b.mu.Unlock()
 	cfg := b.config()
-	st := link.Status{Version: b.version, Kinds: b.runner.Kinds(), Libraries: b.libs.Statuses(), Workers: []link.Worker{}, UIURL: cfg.PublicURL}
+	st := link.Status{Version: b.version, Kinds: b.runner.Kinds(), Libraries: b.libs.Statuses(), Workers: []link.Worker{},
+		UIURL: cfg.PublicURL, Estimates: b.estimates(ctx)}
 	reply, err := cl.Heartbeat(ctx, st)
 	if ctx.Err() != nil {
 		return

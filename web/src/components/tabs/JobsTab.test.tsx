@@ -4,7 +4,7 @@ import userEvent from '@testing-library/user-event';
 import { JobsTab } from './JobsTab';
 import { ApiClient } from '@/api/client';
 import { lastCall, mockFetch } from '@/test/fetchMock';
-import { jobFixture } from '@/test/fixtures';
+import { generateJobFixture, jobFixture } from '@/test/fixtures';
 
 const api = () => new ApiClient({ getToken: () => 't', onSignedOut: vi.fn() });
 
@@ -99,5 +99,117 @@ describe('JobsTab', () => {
     expect(await screen.findByText('boom')).toBeInTheDocument();
     expect(calls.some((c) => c.url === '/api/jobs?before=8&limit=50')).toBe(true);
     expect(screen.queryByRole('button', { name: 'Older' })).toBeNull();
+  });
+
+  it('shows a running sidecars job: stage, count, ETA, spend and source', async () => {
+    mockFetch({ 'GET /api/jobs': { body: { jobs: [generateJobFixture()] } } });
+    render(<JobsTab client={api()} />);
+    const card = await screen.findByRole('article', { name: 'Job 12' });
+    expect(within(card).getByText('Running')).toBeInTheDocument();
+    expect(within(card).getByText('Transcribing (12 of 40)')).toBeInTheDocument();
+    expect(
+      within(card).getByText('about 1 h 30 min left - $3.42 spent - from the audio'),
+    ).toBeInTheDocument();
+    expect(within(card).getByRole('progressbar', { name: 'Job 12 progress' })).toHaveAttribute(
+      'aria-valuenow',
+      '30',
+    );
+    expect(within(card).queryByRole('button', { name: 'Retry' })).toBeNull();
+    expect(within(card).getByRole('link', { name: '#12' })).toHaveAttribute('href', '#/jobs/12');
+  });
+
+  it('shows a parked sidecars job with its advice, and retries it', async () => {
+    let retried = false;
+    const parked = generateJobFixture({
+      error: 'agent backend unavailable',
+      progress: {
+        step: 'fact_pass',
+        message: 'Needs attention: Reading for the facts',
+        stage: 'fact_pass',
+        cost_usd: 1.5,
+        source: 'ebook',
+        park: {
+          code: 'agent_unavailable',
+          hint: 'Check the agent container is running and logged in.',
+        },
+      },
+    });
+    const { calls } = mockFetch({
+      'GET /api/jobs': () => ({ body: { jobs: [retried ? generateJobFixture() : parked] } }),
+      'POST /api/jobs/12/retry': () => {
+        retried = true;
+        return { status: 202 };
+      },
+    });
+    render(<JobsTab client={api()} />);
+    const card = await screen.findByRole('article', { name: 'Job 12' });
+    expect(within(card).getByText('Needs attention')).toBeInTheDocument();
+    expect(within(card).getByText('agent_unavailable')).toBeInTheDocument();
+    expect(within(card).getByText(/agent backend unavailable/)).toBeInTheDocument();
+    expect(
+      within(card).getByText('Check the agent container is running and logged in.'),
+    ).toBeInTheDocument();
+    expect(within(card).getByText('$1.50 spent - from the ebook')).toBeInTheDocument();
+
+    await userEvent.click(within(card).getByRole('button', { name: 'Retry' }));
+    expect(await within(card).findByText('Running')).toBeInTheDocument();
+    expect(within(card).queryByRole('button', { name: 'Retry' })).toBeNull();
+    expect(lastCall(calls, 'POST', '/api/jobs/12/retry')).toBeDefined();
+  });
+
+  it("shows a done sidecars job's result", async () => {
+    mockFetch({
+      'GET /api/jobs': {
+        body: {
+          jobs: [
+            generateJobFixture({
+              state: 'done',
+              reported: true,
+              finished_at: '2026-10-15T12:00:00Z',
+              result: {
+                library_id: 1,
+                path: 'Author/Book',
+                source: 'audio',
+                files: ['characters.json', 'recaps.json', 'bridge.json'],
+                characters: 41,
+                recaps: 38,
+                cost_usd: 12.5,
+                work_id: 'the-book',
+                contributed: {
+                  characters: 'https://github.com/KodeStar/audiosilo-meta-community/issues/12',
+                },
+              },
+            }),
+          ],
+        },
+      },
+    });
+    render(<JobsTab client={api()} />);
+    const card = await screen.findByRole('article', { name: 'Job 12' });
+    await userEvent.click(within(card).getByText('Details'));
+    expect(
+      within(card).getByText('41 characters and 38 recaps from the audio, $12.50'),
+    ).toBeInTheDocument();
+    expect(within(card).getByText(/characters.json, recaps.json, bridge.json/)).toBeInTheDocument();
+    expect(within(card).getByRole('link', { name: /issues\/12/ })).toBeInTheDocument();
+  });
+
+  it("opens one job from the console's link", async () => {
+    const { calls } = mockFetch({
+      'GET /api/jobs/12': { body: generateJobFixture() },
+      'GET /api/jobs': { body: { jobs: [] } },
+    });
+    render(<JobsTab client={api()} focusId={12} />);
+    expect(await screen.findByRole('article', { name: 'Job 12' })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'All jobs' })).toHaveAttribute('href', '#jobs');
+    expect(lastCall(calls, 'GET', '/api/jobs')).toBeUndefined();
+  });
+
+  it('says so when the linked job is not here', async () => {
+    mockFetch({
+      'GET /api/jobs/99': { status: 404, body: { error: 'this Bridge has no job 99' } },
+    });
+    render(<JobsTab client={api()} focusId={99} />);
+    expect(await screen.findByText('this Bridge has no job 99')).toBeInTheDocument();
   });
 });

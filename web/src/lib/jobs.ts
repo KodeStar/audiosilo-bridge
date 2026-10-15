@@ -1,5 +1,6 @@
 import type { Progress, ServerJob } from '@/api/types';
 import type { Tone } from '@/components/ui/Badge';
+import { effectiveState } from './generate';
 
 const STATES: Record<string, { label: string; tone: Tone; hint?: string }> = {
   running: { label: 'Running', tone: 'busy' },
@@ -27,9 +28,10 @@ export function stateHint(state: string): string {
 export const JOBS_POLL_BUSY_MS = 3000;
 export const JOBS_POLL_IDLE_MS = 15000;
 
-// jobsPollInterval polls quickly while a job runs, slowly otherwise.
+// jobsPollInterval polls quickly while a job runs, slowly otherwise (a parked
+// job may wait for days).
 export function jobsPollInterval(jobs: ServerJob[]): number {
-  return jobs.some((j) => j.state === 'running') ? JOBS_POLL_BUSY_MS : JOBS_POLL_IDLE_MS;
+  return jobs.some((j) => effectiveState(j) === 'running') ? JOBS_POLL_BUSY_MS : JOBS_POLL_IDLE_MS;
 }
 
 // reportText says whether the server has heard a finished job's outcome ("" for

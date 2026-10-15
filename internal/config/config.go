@@ -58,6 +58,17 @@ const DefaultTimeoutMinutes = 60
 // guard. Restart-to-apply, like the rest of agent.*.
 const DefaultBookBudgetUSD = 75.0
 
+// The agent container settings (decision 15) and the transcript retention
+// (decision 5). DefaultMonthlyBudgetUSD caps the agent spend of a calendar month
+// across every book (0 = no monthly cap); DefaultTranscriptRetentionDays keeps a
+// finished book's transcripts that long (0 = deleted when its job ends).
+const (
+	DefaultClaimTimeoutSeconds     = 120
+	DefaultMonthlyBudgetUSD        = 100.0
+	DefaultTranscriptRetentionDays = 30
+	MaxTranscriptRetentionDays     = 3650
+)
+
 const (
 	DefaultSupervisorIntervalSeconds = 30
 	DefaultSupervisorStaleMinutes    = 20
@@ -179,6 +190,22 @@ type AgentConfig struct {
 	BookBudgetUSD float64           `yaml:"book_budget_usd"`
 	Claude        map[string]string `yaml:"claude"` // agent-stage name -> model
 	OpenAI        map[string]string `yaml:"openai"` // agent-stage name -> model (empty = codex default)
+	// StagingDir is the folder shared with the agent container ("" = <data>/staging).
+	StagingDir string `yaml:"staging_dir"`
+	// ClaimTimeoutSeconds is how long an agent job may wait for the agent container
+	// to claim it before the book parks agent_unavailable (0 -> the default).
+	ClaimTimeoutSeconds int `yaml:"claim_timeout_seconds"`
+	// MonthlyBudgetUSD caps the agent spend of a calendar month (UTC) across every
+	// book: a run over it parks budget_exceeded until the 1st (0 = no monthly cap).
+	MonthlyBudgetUSD float64 `yaml:"monthly_budget_usd"`
+}
+
+// TranscriptsConfig is how long a finished book's transcripts are kept.
+type TranscriptsConfig struct {
+	// RetentionDays keeps a finished book's transcripts that many days after its
+	// job ended (0 = deleted when the job ends). Its knowledge, facts and
+	// sidecars are kept.
+	RetentionDays int `yaml:"retention_days"`
 }
 
 // AgentCapacity is the normalized runtime capacity model. Legacy is true only
@@ -317,6 +344,8 @@ type Config struct {
 	Supervisor SupervisorConfig `yaml:"supervisor"`
 	// Contribution configures the contributing stage + intake poller (M7).
 	Contribution ContributionConfig `yaml:"contribution"`
+	// Transcripts is the transcript retention (decision 5).
+	Transcripts TranscriptsConfig `yaml:"transcripts"`
 
 	// deprecations are notices about retired settings Load honoured (never saved;
 	// the server logs them at startup).
@@ -348,8 +377,12 @@ func Default() Config {
 			BookBudgetUSD:    DefaultBookBudgetUSD,
 			Claude:           defaultClaudeModels(),
 			OpenAI:           map[string]string{},
+			// StagingDir stays "": the app resolves it to <data>/staging.
+			ClaimTimeoutSeconds: DefaultClaimTimeoutSeconds,
+			MonthlyBudgetUSD:    DefaultMonthlyBudgetUSD,
 		},
-		Pricing: pricing.Table{Version: "unconfigured-v1", Rates: map[string]pricing.Rate{}},
+		Transcripts: TranscriptsConfig{RetentionDays: DefaultTranscriptRetentionDays},
+		Pricing:     pricing.Table{Version: "unconfigured-v1", Rates: map[string]pricing.Rate{}},
 		Supervisor: SupervisorConfig{
 			Enabled:               true,
 			IntervalSeconds:       DefaultSupervisorIntervalSeconds,
@@ -470,6 +503,10 @@ func load(dataDir string, withEnv bool) (Config, error) {
 	if cfg.Agent.BookBudgetUSD == 0 {
 		cfg.Agent.BookBudgetUSD = DefaultBookBudgetUSD
 	}
+	if cfg.Agent.ClaimTimeoutSeconds == 0 {
+		cfg.Agent.ClaimTimeoutSeconds = DefaultClaimTimeoutSeconds
+	}
+	cfg.Agent.StagingDir = strings.TrimSpace(cfg.Agent.StagingDir)
 	normalizeSupervisor(&cfg.Supervisor)
 	if cfg.Pricing.Rates == nil {
 		cfg.Pricing.Rates = map[string]pricing.Rate{}
@@ -590,6 +627,24 @@ func applyEnv(cfg *Config) (seen envSeen) {
 	if v, ok := os.LookupEnv("AUDIOSILO_BRIDGE_AGENT_BOOK_BUDGET_USD"); ok {
 		if f, err := strconv.ParseFloat(strings.TrimSpace(v), 64); err == nil {
 			cfg.Agent.BookBudgetUSD = f
+		}
+	}
+	if v, ok := os.LookupEnv("AUDIOSILO_BRIDGE_AGENT_STAGING_DIR"); ok {
+		cfg.Agent.StagingDir = strings.TrimSpace(v)
+	}
+	if v, ok := os.LookupEnv("AUDIOSILO_BRIDGE_AGENT_CLAIM_TIMEOUT_SECONDS"); ok {
+		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
+			cfg.Agent.ClaimTimeoutSeconds = n
+		}
+	}
+	if v, ok := os.LookupEnv("AUDIOSILO_BRIDGE_AGENT_MONTHLY_BUDGET_USD"); ok {
+		if f, err := strconv.ParseFloat(strings.TrimSpace(v), 64); err == nil {
+			cfg.Agent.MonthlyBudgetUSD = f
+		}
+	}
+	if v, ok := os.LookupEnv("AUDIOSILO_BRIDGE_TRANSCRIPTS_RETENTION_DAYS"); ok {
+		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
+			cfg.Transcripts.RetentionDays = n
 		}
 	}
 	if v, ok := os.LookupEnv("AUDIOSILO_BRIDGE_SUPERVISOR_ENABLED"); ok {
@@ -784,6 +839,18 @@ func (c Config) Validate() error {
 	}
 	if c.Agent.BookBudgetUSD < 0 {
 		return fmt.Errorf("agent.book_budget_usd must be >= 0, got %v", c.Agent.BookBudgetUSD)
+	}
+	if c.Agent.MonthlyBudgetUSD < 0 {
+		return fmt.Errorf("agent.monthly_budget_usd must be >= 0 (0 = no monthly cap), got %v", c.Agent.MonthlyBudgetUSD)
+	}
+	if c.Agent.ClaimTimeoutSeconds < 1 {
+		return fmt.Errorf("agent.claim_timeout_seconds must be >= 1, got %d", c.Agent.ClaimTimeoutSeconds)
+	}
+	if c.Agent.StagingDir != "" && !filepath.IsAbs(c.Agent.StagingDir) {
+		return fmt.Errorf("agent.staging_dir %q must be an absolute path", c.Agent.StagingDir)
+	}
+	if c.Transcripts.RetentionDays < 0 || c.Transcripts.RetentionDays > MaxTranscriptRetentionDays {
+		return fmt.Errorf("transcripts.retention_days must be between 0 and %d, got %d", MaxTranscriptRetentionDays, c.Transcripts.RetentionDays)
 	}
 	if err := validateSupervisor(c.Supervisor); err != nil {
 		return err

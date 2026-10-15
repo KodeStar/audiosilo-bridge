@@ -128,8 +128,24 @@ type Config struct {
 	// this, before spending more. 0 disables the guard (config seeds a large default; set
 	// a very large value to effectively disable). From config.agent.book_budget_usd.
 	BookBudgetUSD float64
-	Pricing       pricing.Table
-	Secrets       secrets.Store
+	// MonthlyBudgetUSD caps the agent spend of a calendar month (UTC) across every
+	// book, checked beside BookBudgetUSD before each agent run: a run over it parks
+	// budget_exceeded until the 1st of the next month (0 = no monthly cap). From
+	// config.agent.monthly_budget_usd.
+	MonthlyBudgetUSD float64
+	// AgentRedetect, when set, replaces agent.Select as the way an unavailable
+	// runner is looked for again: the Bridge re-detects its agent container and
+	// never a CLI of its own (decision 15).
+	AgentRedetect func(context.Context) (agent.Runner, agent.Availability)
+	// AgentPreflightRetry, when set, makes the park of a book whose agent runner
+	// is unavailable before a run self-resuming after that long (the Bridge's
+	// agent container may just be restarting); unset, it waits for a human, as
+	// a daemon with no CLI configured must. AgentUnavailableMsg replaces that
+	// park's message (the runner's detail is appended).
+	AgentPreflightRetry time.Duration
+	AgentUnavailableMsg string
+	Pricing             pricing.Table
+	Secrets             secrets.Store
 
 	// Contribution (M7) drives the contributing stage. Meta resolves a book's work
 	// slug and reads sidecar coverage (nil = metadata disabled); TokenSource resolves a
@@ -183,6 +199,9 @@ type Executor struct {
 	activeInvocations     map[int64]int
 	globalInvocationLimit int
 	bookBudgetUSD         float64
+	monthlyBudgetUSD      float64
+	agentPreflightRetry   time.Duration
+	agentUnavailableMsg   string
 	pricing               pricing.Table
 	secrets               secrets.Store
 	log                   *slog.Logger
@@ -249,6 +268,9 @@ func NewExecutor(cfg Config) *Executor {
 		activeInvocations:     make(map[int64]int),
 		globalInvocationLimit: globalWorkers,
 		bookBudgetUSD:         cfg.BookBudgetUSD,
+		monthlyBudgetUSD:      cfg.MonthlyBudgetUSD,
+		agentPreflightRetry:   cfg.AgentPreflightRetry,
+		agentUnavailableMsg:   cfg.AgentUnavailableMsg,
 		pricing:               cfg.Pricing,
 		secrets:               cfg.Secrets,
 		log:                   log,
@@ -263,6 +285,9 @@ func NewExecutor(cfg Config) *Executor {
 	}
 	e.redetectASR = e.defaultRedetectASR
 	e.redetectAgent = e.defaultRedetectAgent
+	if cfg.AgentRedetect != nil {
+		e.redetectAgent = cfg.AgentRedetect
+	}
 	return e
 }
 

@@ -1,4 +1,4 @@
-import type { Library, ServerJob, Settings, Status } from '@/api/types';
+import type { Engine, Library, ServerJob, Settings, Status } from '@/api/types';
 
 export function statusFixture(over: Partial<Status> = {}): Status {
   return {
@@ -58,6 +58,7 @@ export function jobFixture(over: Partial<ServerJob> = {}): ServerJob {
     path: 'Author/Book',
     params: {},
     attempt: 1,
+    server_id: 'srv-1',
     state: 'running',
     progress: { step: 'stat', message: 'Comparing the files', done: 1, total: 4 },
     result: {},
@@ -72,4 +73,47 @@ export function jobFixture(over: Partial<ServerJob> = {}): ServerJob {
 
 export function settingsFixture(over: Partial<Settings> = {}): Settings {
   return { public_url: '', mapping_check_minutes: 10, locked: [], ...over };
+}
+
+// A sidecars.generate job running in the engine's asr stage.
+export function generateJobFixture(over: Partial<ServerJob> = {}): ServerJob {
+  return jobFixture({
+    id: 12,
+    kind: 'sidecars.generate',
+    params: { source: 'auto', contribute: 'local' },
+    progress: {
+      step: 'asr',
+      message: 'Transcribing (12 of 40)',
+      done: 12,
+      total: 40,
+      stage: 'asr',
+      eta_seconds: 5400,
+      cost_usd: 3.42,
+      source: 'audio',
+    },
+    ...over,
+  });
+}
+
+export function engineFixture(over: Partial<Engine> = {}): Engine {
+  return {
+    started: true,
+    agent: {
+      backend: 'claude',
+      available: true,
+      detail: '',
+      version: '0.2.0',
+      slots: 1,
+      heartbeat_at: '2026-10-15T10:00:00Z',
+      clis: { claude: { version: '2.1.300', credential: 'oauth_token' } },
+      subscription: true,
+      staging_dir: '/bridge-data/staging',
+    },
+    asr: { backend: 'whisper-cpp', available: true, device: 'cpu', detail: '' },
+    monthly_budget_usd: 100,
+    month_spent_usd: 12.3,
+    book_budget_usd: 75,
+    transcript_retention_days: 30,
+    ...over,
+  };
 }

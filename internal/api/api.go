@@ -62,6 +62,53 @@ type Settings struct {
 	Locked              []string `json:"locked"`
 }
 
+// Engine is the sidecars engine's state for the page (GET /api/engine): the
+// agent container, the speech recognition, the budgets and this month's spend,
+// and the transcript retention.
+type Engine struct {
+	// Started: the engine is up (its first start may be downloading ffmpeg).
+	Started bool        `json:"started"`
+	Agent   EngineAgent `json:"agent"`
+	ASR     EngineASR   `json:"asr"`
+	// MonthlyBudgetUSD is the monthly agent cap (0 = none); MonthSpentUSD this
+	// calendar month's spend (UTC).
+	MonthlyBudgetUSD float64 `json:"monthly_budget_usd"`
+	MonthSpentUSD    float64 `json:"month_spent_usd"`
+	BookBudgetUSD    float64 `json:"book_budget_usd"`
+	// TranscriptRetentionDays: a finished book's transcripts are deleted that
+	// long after its job ended (0 = when it ends).
+	TranscriptRetentionDays int `json:"transcript_retention_days"`
+}
+
+// EngineAgent is the agent container as the Bridge last saw it.
+type EngineAgent struct {
+	Backend string `json:"backend"`
+	// Available: the container answers and the backend's CLI has a credential.
+	Available    bool                 `json:"available"`
+	Detail       string               `json:"detail"`
+	Version      string               `json:"version"`
+	Slots        int                  `json:"slots"`
+	HeartbeatAt  *time.Time           `json:"heartbeat_at"`
+	CLIs         map[string]EngineCLI `json:"clis"`
+	Subscription bool                 `json:"subscription"`
+	StagingDir   string               `json:"staging_dir"`
+}
+
+// EngineCLI is one agent CLI in the container: its version and the kind of
+// credential it has ("" for none), never the credential.
+type EngineCLI struct {
+	Version    string `json:"version"`
+	Credential string `json:"credential"`
+}
+
+// EngineASR is the speech recognition backend.
+type EngineASR struct {
+	Backend   string `json:"backend"`
+	Available bool   `json:"available"`
+	Device    string `json:"device"`
+	Detail    string `json:"detail"`
+}
+
 // Backend is what the page drives.
 type Backend interface {
 	Status() Status
@@ -73,7 +120,13 @@ type Backend interface {
 	Settings() Settings
 	SaveSettings(ctx context.Context, s Settings) error
 	Jobs(ctx context.Context, before int64, limit int) ([]store.ServerJob, error)
+	// Job is one job (ErrNotFound when the Bridge has no such job).
+	Job(ctx context.Context, id int64) (*store.ServerJob, error)
 	CancelJob(id int64) bool
+	// RetryJob retries a parked job's work (ErrNotFound: no such job here;
+	// ErrConflict: it isn't parked).
+	RetryJob(ctx context.Context, id int64) error
+	Engine(ctx context.Context) Engine
 	Logs(after uint64, limit int, level slog.Level) []logring.Entry
 	Workers() []link.Worker
 }
@@ -137,7 +190,10 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("GET /api/settings", a.requireAuth(a.handleSettings))
 	mux.HandleFunc("PUT /api/settings", a.requireAuth(a.handleSaveSettings))
 	mux.HandleFunc("GET /api/jobs", a.requireAuth(a.handleJobs))
+	mux.HandleFunc("GET /api/jobs/{id}", a.requireAuth(a.handleJob))
 	mux.HandleFunc("POST /api/jobs/{id}/cancel", a.requireAuth(a.handleCancel))
+	mux.HandleFunc("POST /api/jobs/{id}/retry", a.requireAuth(a.handleRetry))
+	mux.HandleFunc("GET /api/engine", a.requireAuth(a.handleEngine))
 	mux.HandleFunc("GET /api/logs", a.requireAuth(a.handleLogs))
 	mux.HandleFunc("GET /api/workers", a.requireAuth(a.handleWorkers))
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) { writeError(w, http.StatusNotFound, "not found") })
@@ -428,10 +484,49 @@ func (a *API) handleJobs(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
-func (a *API) handleCancel(w http.ResponseWriter, r *http.Request) {
+// jobID reads the {id} of a job route (false, with a 400 written, when it
+// isn't one).
+func jobID(w http.ResponseWriter, r *http.Request) (int64, bool) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil || id <= 0 {
 		writeError(w, http.StatusBadRequest, "invalid job id")
+		return 0, false
+	}
+	return id, true
+}
+
+func (a *API) handleJob(w http.ResponseWriter, r *http.Request) {
+	id, ok := jobID(w, r)
+	if !ok {
+		return
+	}
+	job, err := a.b.Job(r.Context(), id)
+	if err != nil {
+		a.writeBackendError(w, err, "read the job")
+		return
+	}
+	writeJSON(w, http.StatusOK, job)
+}
+
+func (a *API) handleRetry(w http.ResponseWriter, r *http.Request) {
+	id, ok := jobID(w, r)
+	if !ok {
+		return
+	}
+	if err := a.b.RetryJob(r.Context(), id); err != nil {
+		a.writeBackendError(w, err, "retry the job")
+		return
+	}
+	w.WriteHeader(http.StatusAccepted)
+}
+
+func (a *API) handleEngine(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, a.b.Engine(r.Context()))
+}
+
+func (a *API) handleCancel(w http.ResponseWriter, r *http.Request) {
+	id, ok := jobID(w, r)
+	if !ok {
 		return
 	}
 	if !a.b.CancelJob(id) {

@@ -1,0 +1,781 @@
+// Package generate is the sidecars.generate job (BRIDGE-PLAN.md Phase 1a): it
+// turns a server job into an engine book (the sidecars pipeline imported from
+// audiosilo-sidecars), follows that book to the end while reporting its stage,
+// ETA, spend and parks to the server, then writes the validated characters and
+// recaps into the book's .audiosilo/ folder and asks the server to re-read them.
+//
+// The engine's scheduler does the throttling: a job sits in the runner's
+// pipeline lane for as long as its book is queued, running or parked. The job's
+// server id maps to the engine book in generate_books, so a job resumed after a
+// restart follows the same book.
+package generate
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io/fs"
+	"log/slog"
+	"path/filepath"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/kodestar/audiosilo-bridge/internal/jobs"
+	"github.com/kodestar/audiosilo-bridge/internal/link"
+	"github.com/kodestar/audiosilo-bridge/internal/mapping"
+	"github.com/kodestar/audiosilo-bridge/internal/metaops"
+	"github.com/kodestar/audiosilo-bridge/internal/scheduler"
+	"github.com/kodestar/audiosilo-bridge/internal/state"
+	"github.com/kodestar/audiosilo-bridge/internal/store"
+)
+
+// Kind is the job kind.
+const Kind = "sidecars.generate"
+
+// Engine is the part of the engine's scheduler the job drives
+// (*scheduler.Scheduler).
+type Engine interface {
+	Notify()
+	Retry(ctx context.Context, id int64) error
+	Cancel(ctx context.Context, id int64) error
+	Delete(ctx context.Context, id int64) error
+	ETASeconds(id int64) (int64, bool)
+}
+
+// Server is the part of the server link the job calls.
+type Server interface {
+	Book(ctx context.Context, libraryID int64, path string) (*link.Book, error)
+	RescanAttachments(ctx context.Context, libraryID int64, path string) (*link.Attachments, error)
+}
+
+// Libraries are the server's libraries and their last mapping checks.
+type Libraries interface {
+	Library(id int64) (link.Library, bool)
+	Status(id int64) (link.LibraryStatus, bool)
+}
+
+// Options wire the handler.
+type Options struct {
+	DB *store.DB
+	// Engine is the scheduler, nil until the engine has started (the job waits).
+	Engine    func() Engine
+	Libraries Libraries
+	Mount     mapping.MountFunc
+	// Server is the server link, nil while unpaired.
+	Server func() Server
+	// WorkRoot is the engine's work folder (<data>/work).
+	WorkRoot string
+	// Version is the Bridge's, for bridge.json.
+	Version string
+	// RetentionDays is transcripts.retention_days: 0 deletes a finished book's
+	// transcripts when its job ends (else the daily sweep does, that much later).
+	RetentionDays int
+	// Poll is how often the engine book is looked at (default 3 s); Recheck how
+	// often a book folder that couldn't be written is tried again (default 1 min;
+	// a Retry tries at once).
+	Poll    time.Duration
+	Recheck time.Duration
+	Log     *slog.Logger
+	Now     func() time.Time
+}
+
+// Handler runs sidecars.generate.
+type Handler struct {
+	o Options
+
+	mu sync.Mutex
+	// pokes wake a running job when its Retry is pressed (a park of the
+	// Bridge's own, book_not_writable, checks again at once).
+	pokes map[int64]chan struct{}
+}
+
+// New returns the handler.
+func New(o Options) *Handler {
+	if o.Poll <= 0 {
+		o.Poll = 3 * time.Second
+	}
+	if o.Recheck <= 0 {
+		o.Recheck = time.Minute
+	}
+	if o.Log == nil {
+		o.Log = slog.Default()
+	}
+	if o.Now == nil {
+		o.Now = time.Now
+	}
+	return &Handler{o: o, pokes: map[int64]chan struct{}{}}
+}
+
+func (h *Handler) now() time.Time { return h.o.Now() }
+
+// Kind is sidecars.generate.
+func (h *Handler) Kind() string { return Kind }
+
+// Lane is the pipeline lane.
+func (h *Handler) Lane() string { return jobs.LanePipeline }
+
+// Result is what a done job reports (contract section 1).
+type Result struct {
+	LibraryID   int64             `json:"library_id"`
+	Path        string            `json:"path"`
+	Source      string            `json:"source"`
+	Files       []string          `json:"files"`
+	Characters  int               `json:"characters"`
+	Recaps      int               `json:"recaps"`
+	CostUSD     float64           `json:"cost_usd"`
+	WorkID      string            `json:"work_id"`
+	Contributed map[string]string `json:"contributed,omitempty"`
+}
+
+// run is one job's state as it goes.
+type run struct {
+	job    jobs.Job
+	rep    *jobs.Reporter
+	params Params
+	lib    link.Library
+	mount  string
+	rel    string
+	place  place
+	files  []link.BookFile
+	info   *link.BookInfo
+	source string
+	epub   string
+	bookID int64
+	// written is the hash of the sidecars last written ("" for none yet);
+	// writeErr the last failed write's error, logged once.
+	written  string
+	writeErr string
+	srv      Server
+}
+
+// Run does the job: check, create (or find again) the engine book, follow it,
+// write the attachments, rescan.
+func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (any, error) {
+	params, err := ParseParams(job.Params)
+	if err != nil {
+		return nil, err
+	}
+	if job.LibraryID == nil || job.Path == nil || strings.TrimSpace(*job.Path) == "" {
+		return nil, errors.New("sidecars.generate needs a library and a book path")
+	}
+	r := &run{job: job, rep: rep, params: params, rel: *job.Path}
+	// One wake-up channel for the whole run: a Retry reaches whichever park the
+	// job waits in.
+	h.pokeChan(job.ID)
+	defer h.dropPoke(job.ID)
+	rep.Progress(jobs.Progress{Step: stepWaiting, Message: "Starting"})
+	eng, err := h.waitEngine(ctx, r)
+	if err != nil {
+		return nil, err
+	}
+	mapped, merr := h.o.DB.GetGenerateBook(ctx, job.ID)
+	if merr != nil && !errors.Is(merr, store.ErrNotFound) {
+		return nil, merr
+	}
+	resumed := merr == nil && mapped.BookID != nil
+	if resumed {
+		r.bookID = *mapped.BookID
+	}
+	if err := h.prepare(ctx, r, !resumed); err != nil {
+		return h.end(ctx, r, nil, err)
+	}
+	if resumed {
+		if err := h.attach(ctx, eng, r); err != nil {
+			return h.end(ctx, r, nil, err)
+		}
+	} else if err := h.create(ctx, eng, r); err != nil {
+		return h.end(ctx, r, nil, err)
+	}
+	res, err := h.follow(ctx, eng, r)
+	return h.end(ctx, r, res, err)
+}
+
+// end records how the job ended, unless it resumes later (the Bridge stopping or
+// its token refused). A job that ends any other way short of done (an admin
+// cancelled it, the server took it back, it failed) stops its engine book, which
+// nothing would follow any more.
+func (h *Handler) end(ctx context.Context, r *run, res any, err error) (any, error) {
+	if ctx.Err() != nil && jobs.Resumes(ctx) {
+		return res, err
+	}
+	if r.bookID != 0 {
+		bg := context.WithoutCancel(ctx)
+		if err != nil {
+			h.stopBook(bg, r)
+		}
+		if eerr := h.o.DB.EndGenerateBook(bg, r.job.ID, h.now()); eerr != nil {
+			h.o.Log.Warn("generate: recording the job's end failed", "job", r.job.ID, "err", eerr)
+		}
+		if h.o.RetentionDays == 0 {
+			if _, serr := h.SweepTranscripts(bg, 0); serr != nil {
+				h.o.Log.Warn("generate: deleting the transcripts failed", "job", r.job.ID, "err", serr)
+			}
+		}
+	}
+	return res, err
+}
+
+// stopBook cancels the job's engine book unless it already ended (done, or
+// failed: a cancel would overwrite its error).
+func (h *Handler) stopBook(ctx context.Context, r *run) {
+	eng := h.o.Engine()
+	if eng == nil {
+		return
+	}
+	b, err := h.o.DB.GetBook(ctx, r.bookID)
+	if err != nil || finished(b) {
+		return
+	}
+	if err := eng.Cancel(ctx, r.bookID); err != nil && !errors.Is(err, scheduler.ErrInvalidOp) {
+		h.o.Log.Warn("generate: cancelling the engine book failed", "job", r.job.ID, "book", r.bookID, "err", err)
+	}
+}
+
+// waitEngine waits for the engine to have started.
+func (h *Handler) waitEngine(ctx context.Context, r *run) (Engine, error) {
+	for {
+		if eng := h.o.Engine(); eng != nil {
+			return eng, nil
+		}
+		r.rep.Progress(jobs.Progress{Step: stepWaiting, Message: "Waiting for the engine to start"})
+		if err := sleep(ctx, h.o.Poll); err != nil {
+			return nil, err
+		}
+	}
+}
+
+// prepare resolves the library and the book through the CHECKED mapping, fetches
+// the book from the server, compares its files and makes sure the book's own
+// folder can be written. strict (a new job) fails on a library that isn't mapped
+// and writable; a resumed one waits for it, parked.
+func (h *Handler) prepare(ctx context.Context, r *run, strict bool) error {
+	srv := h.o.Server()
+	if srv == nil {
+		return errors.New("the Bridge isn't paired")
+	}
+	r.srv = srv
+	lib, ok := h.o.Libraries.Library(*r.job.LibraryID)
+	if !ok {
+		return fmt.Errorf("library %d isn't one the server listed", *r.job.LibraryID)
+	}
+	r.lib = lib
+	if err := h.waitMapped(ctx, r, strict); err != nil {
+		return err
+	}
+	book, err := h.fetchBook(ctx, r)
+	if err != nil {
+		return err
+	}
+	r.files, r.info = book.Files, book.Info
+	if book.Path != "" {
+		r.rel = book.Path
+	}
+	if _, ok, problem := mapping.CompareFiles(r.mount, book.Files); !ok {
+		return errors.New("the Bridge's copy of the book doesn't match the server's: " + problem)
+	}
+	p, err := locate(r.mount, r.rel)
+	if err != nil {
+		return err
+	}
+	r.place = p
+	return h.waitWritable(ctx, r)
+}
+
+// fetchBook asks the server for the book, waiting out an answer that may change
+// (the server unreachable or restarting, a 5xx, a refused token the runner is
+// dealing with): only a definite answer (no such book, another 4xx) fails the job,
+// so a restart while the server is down doesn't end a long run.
+func (h *Handler) fetchBook(ctx context.Context, r *run) (*link.Book, error) {
+	wait := h.o.Poll
+	for {
+		r.rep.Progress(jobs.Progress{Step: stepWaiting, Message: "Asking the server for the book"})
+		book, err := r.srv.Book(ctx, r.lib.ID, r.rel)
+		var apiErr *link.APIError
+		switch {
+		case err == nil:
+			return book, nil
+		case errors.Is(err, link.ErrNoBook):
+			return nil, fmt.Errorf("the server has no indexed book at %s", r.rel)
+		case errors.As(err, &apiErr) && apiErr.Status < 500:
+			return nil, fmt.Errorf("could not get the book from the server: %w", err)
+		}
+		h.o.Log.Warn("generate: asking the server for the book failed; trying again", "job", r.job.ID, "err", err)
+		if err := sleep(ctx, wait); err != nil {
+			return nil, err
+		}
+		wait = min(wait*2, time.Minute)
+	}
+}
+
+// waitMapped waits for the library's mapping check (a start checks in the
+// background after the first heartbeat) and needs it mapped and writable at the
+// mount the Bridge uses now. A new job fails otherwise; a resumed one parks
+// library_not_writable and waits, its engine book going on meanwhile.
+func (h *Handler) waitMapped(ctx context.Context, r *run, strict bool) error {
+	for {
+		mount, _ := h.o.Mount(r.lib.ID, r.lib.Root)
+		st, checked := h.o.Libraries.Status(r.lib.ID)
+		switch {
+		case checked && st.Mapped && st.Writable && st.MountPath == mount:
+			r.mount = mount
+			r.rep.Unpark()
+			return nil
+		case !checked || st.MountPath != mount:
+			r.rep.Progress(jobs.Progress{Step: stepWaiting, Message: "Waiting for the library's mapping check"})
+		case strict:
+			why := "isn't mapped on the Bridge"
+			if st.Mapped {
+				why = "is mapped read-only on the Bridge"
+			}
+			if st.Error != "" {
+				why += " (" + st.Error + ")"
+			}
+			return fmt.Errorf("library %q %s, so the Bridge can't write the book's characters and recaps", r.lib.Name, why)
+		default:
+			h.park(r, parkLibraryNotWritable, "library "+r.lib.Name+" isn't mapped and writable on the Bridge any more")
+		}
+		if err := sleep(ctx, h.o.Poll); err != nil {
+			return err
+		}
+	}
+}
+
+// waitWritable checks the book's own folder can be written (a library root that
+// is writable says nothing about a 0555 book folder, spike 3), parking
+// book_not_writable and checking again every Recheck (or on Retry) until it can.
+func (h *Handler) waitWritable(ctx context.Context, r *run) error {
+	poke := h.pokeChan(r.job.ID)
+	for {
+		err := mapping.ProbeWritable(r.place.dir)
+		if err == nil {
+			r.rep.Unpark()
+			return nil
+		}
+		h.park(r, parkBookNotWritable, "the Bridge can't write in the book's folder ("+writeProblem(err)+")")
+		t := time.NewTimer(h.o.Recheck)
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			return ctx.Err()
+		case <-poke:
+		case <-t.C:
+		}
+		t.Stop()
+	}
+}
+
+// writeProblem words a failed write probe without the Bridge's own paths.
+func writeProblem(err error) string {
+	switch {
+	case errors.Is(err, fs.ErrPermission):
+		return "permission denied"
+	case errors.Is(err, fs.ErrNotExist):
+		return "the folder is gone"
+	}
+	var pe *fs.PathError
+	if errors.As(err, &pe) {
+		return pe.Err.Error()
+	}
+	return err.Error()
+}
+
+// park parks the job with one of the Bridge's own codes.
+func (h *Handler) park(r *run, code, msg string) {
+	r.rep.Progress(jobs.Progress{Step: stepWaiting, Message: "Needs attention: " + msg,
+		Extra: map[string]any{"source": r.source, "park": map[string]any{"code": code, "hint": ParkHint(code)}}})
+	r.rep.Park(code, msg)
+}
+
+// create picks the source and makes the engine book for a new job: a book the
+// engine already has from an earlier run (the same source path) is deleted
+// first, unless another open job follows it or a stage of it runs right now.
+func (h *Handler) create(ctx context.Context, eng Engine, r *run) error {
+	source, epub, note, err := chooseSource(r.place, r.params.Source)
+	if err != nil {
+		return err
+	}
+	r.source, r.epub = source, epub
+	if note != "" {
+		h.o.Log.Info("generate: "+note, "job", r.job.ID)
+	}
+	sp, ok, err := metaops.AllowedPath(r.place.full, []string{r.mount})
+	if err != nil || !ok {
+		return errors.New("the book's path leaves the library's folder")
+	}
+	ebookPath := ""
+	if r.epub != "" {
+		ep, ok, err := metaops.AllowedPath(r.epub, []string{r.mount})
+		if err != nil || !ok {
+			return errors.New("the book's .epub leaves the library's folder")
+		}
+		ebookPath = ep
+	}
+	if old, err := h.o.DB.GetBookBySourcePath(ctx, sp); err == nil {
+		open, err := h.o.DB.OpenGenerateJobsForBook(ctx, old.ID, r.job.ID)
+		if err != nil {
+			return err
+		}
+		if len(open) > 0 {
+			return fmt.Errorf("job %d is already generating this book; cancel it first", open[0])
+		}
+		if err := eng.Delete(ctx, old.ID); errors.Is(err, scheduler.ErrBusy) {
+			return errors.New("the engine is still running a stage of this book's earlier run; try again in a minute")
+		} else if err != nil && !errors.Is(err, store.ErrNotFound) {
+			return fmt.Errorf("could not clear the book's earlier run: %w", err)
+		}
+		h.o.Log.Info("generate: the book's earlier run was cleared", "job", r.job.ID, "old_book", old.ID)
+	} else if !errors.Is(err, store.ErrNotFound) {
+		return err
+	}
+	nb := h.newBook(r, sp, ebookPath)
+	batch, err := h.o.DB.CreateBatch(ctx)
+	if err != nil {
+		return err
+	}
+	nb.BatchID = batch.ID
+	b, err := h.o.DB.CreateBook(ctx, nb)
+	if err != nil {
+		return fmt.Errorf("could not queue the book in the engine: %w", err)
+	}
+	if err := h.o.DB.PutGenerateBook(ctx, store.GenerateBook{ServerJobID: r.job.ID, BookID: &b.ID, LibraryID: r.lib.ID, RelPath: r.rel}); err != nil {
+		_ = h.o.DB.DeleteBook(context.WithoutCancel(ctx), b.ID)
+		return err
+	}
+	r.bookID = b.ID
+	h.o.Log.Info("generate: queued in the engine", "job", r.job.ID, "book", b.ID, "source", r.source, "path", r.rel)
+	eng.Notify()
+	return nil
+}
+
+// newBook is the engine book for the job, as sidecars' intake built it from a
+// scanned candidate: the identity from the server's book block, the work id from
+// the params or else the server's metadata cache.
+func (h *Handler) newBook(r *run, sourcePath, ebookPath string) store.NewBook {
+	info := link.BookInfo{}
+	if r.info != nil {
+		info = *r.info
+	}
+	title := strings.TrimSpace(info.Title)
+	if title == "" {
+		title = strings.TrimSuffix(filepath.Base(r.rel), filepath.Ext(r.rel))
+		if !r.place.single {
+			title = filepath.Base(r.rel)
+		}
+	}
+	sources := map[string]string{"title": "server"}
+	for field, v := range map[string]string{"asin": info.ASIN, "isbn": info.ISBN, "series": info.Series} {
+		if strings.TrimSpace(v) != "" {
+			sources[field] = "server"
+		}
+	}
+	workID := r.params.WorkID
+	if workID == "" {
+		workID = strings.TrimSpace(info.WorkID)
+	}
+	kind := string(state.KindAudio)
+	if ebookPath != "" {
+		kind = string(state.KindEbook)
+	}
+	return store.NewBook{
+		SourcePath: sourcePath, WorkDir: store.DeriveWorkDir(h.o.WorkRoot, sourcePath, title),
+		Title: title, Authors: info.Authors, Narrators: info.Narrators,
+		Series: strings.TrimSpace(info.Series), SeriesPos: strings.TrimSpace(info.SeriesIndex),
+		ASIN: strings.TrimSpace(info.ASIN), ISBN: strings.TrimSpace(info.ISBN), IdentitySources: sources,
+		WorkID: workID, Kind: kind, EbookPath: ebookPath, ContribMode: r.params.Contribute,
+	}
+}
+
+// attach finds a resumed job's engine book again. One this job's own cancel
+// stopped (the server took the job back, then handed it out again) is re-admitted;
+// a book that is gone is created anew.
+func (h *Handler) attach(ctx context.Context, eng Engine, r *run) error {
+	b, err := h.o.DB.GetBook(ctx, r.bookID)
+	if errors.Is(err, store.ErrNotFound) {
+		r.bookID = 0
+		return h.create(ctx, eng, r)
+	}
+	if err != nil {
+		return err
+	}
+	if b.Kind == string(state.KindEbook) {
+		r.source, r.epub = SourceEbook, b.EbookPath
+	} else {
+		r.source, r.epub = SourceAudio, ""
+	}
+	if state.Status(b.Status) == state.StatusFailed && b.Error == scheduler.CancelledReason {
+		if err := eng.Retry(ctx, b.ID); err != nil && !errors.Is(err, scheduler.ErrInvalidOp) {
+			return err
+		}
+		h.o.Log.Info("generate: the job is back, so its engine book runs again", "job", r.job.ID, "book", b.ID)
+	}
+	h.o.Log.Info("generate: following the engine book again", "job", r.job.ID, "book", b.ID, "state", b.State)
+	return nil
+}
+
+// follow reports the engine book's progress until it is done (then writes and
+// rescans), fails, or the job's context ends.
+func (h *Handler) follow(ctx context.Context, eng Engine, r *run) (any, error) {
+	poke := h.pokeChan(r.job.ID)
+	for {
+		b, err := h.o.DB.GetBook(ctx, r.bookID)
+		switch {
+		case errors.Is(err, store.ErrNotFound):
+			return nil, errors.New("the engine book was deleted")
+		case err != nil && ctx.Err() != nil:
+			return nil, ctx.Err()
+		case err != nil:
+			h.o.Log.Warn("generate: reading the engine book failed", "job", r.job.ID, "err", err)
+		default:
+			res, done, err := h.step(ctx, eng, r, b)
+			if done || err != nil {
+				return res, err
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-poke:
+		case <-time.After(h.o.Poll):
+		}
+	}
+}
+
+// step reports one look at the engine book and acts on it: done writes and
+// finishes, failed fails, a contributing park (core_needed) still writes the
+// local files first.
+func (h *Handler) step(ctx context.Context, eng Engine, r *run, b store.Book) (any, bool, error) {
+	v := view{book: b, source: r.source}
+	v.progress, _ = h.o.DB.ListProgress(ctx, b.ID)
+	v.costUSD, _ = h.o.DB.SumStageRunCost(ctx, b.ID)
+	v.eta, v.hasETA = eng.ETASeconds(b.ID)
+	st, status := state.State(b.State), state.Status(b.Status)
+	switch {
+	case st == state.Done:
+		res, err := h.finish(ctx, r, b, v.costUSD)
+		return res, true, err
+	case status == state.StatusFailed:
+		return nil, true, fmt.Errorf("the engine failed the book at %s: %s", b.State, b.Error)
+	}
+	r.rep.Progress(describe(v))
+	if status == state.StatusNeedsAttention {
+		if st == state.Contributing {
+			_, _, err := h.write(ctx, r, b)
+			if msg := errText(err); msg != r.writeErr {
+				r.writeErr = msg
+				if err != nil {
+					h.o.Log.Warn("generate: writing the attachments at a contributing park failed", "job", r.job.ID, "err", err)
+				}
+			}
+		}
+		r.rep.Park(b.ParkCode, b.Error)
+	} else {
+		r.rep.Unpark()
+	}
+	return nil, false, nil
+}
+
+// finish writes the attachments of a done book, rescans, and composes the result.
+func (h *Handler) finish(ctx context.Context, r *run, b store.Book, cost float64) (any, error) {
+	r.rep.Unpark()
+	s, names, err := h.write(ctx, r, b)
+	if err != nil {
+		return nil, err
+	}
+	res := Result{LibraryID: r.lib.ID, Path: r.rel, Source: r.source, Files: names, Characters: s.nChars,
+		Recaps: s.nRecaps, CostUSD: cents(cost), WorkID: b.WorkID}
+	if res.WorkID == "" {
+		res.WorkID = s.workID
+	}
+	if r.params.Contribute == ContributeIssue {
+		rows, err := h.o.DB.ListContributionsByBook(ctx, b.ID)
+		if err == nil {
+			for _, c := range rows {
+				if c.URL != "" && (c.Kind == store.ContribKindCharacters || c.Kind == store.ContribKindRecaps) {
+					if res.Contributed == nil {
+						res.Contributed = map[string]string{}
+					}
+					res.Contributed[c.Kind] = c.URL
+				}
+			}
+		}
+	}
+	r.rep.Progress(jobs.Progress{Step: string(state.Done), Message: "Finished",
+		Extra: map[string]any{"stage": string(state.Done), "source": r.source, "cost_usd": res.CostUSD}})
+	return res, nil
+}
+
+// write writes the engine book's sidecars into the book's .audiosilo/ (once per
+// content) and asks the server to re-read them. The mapping must still be
+// checked mapped and writable at the mount the job uses, and the book's folder
+// writable (else the job parks until it is).
+func (h *Handler) write(ctx context.Context, r *run, b store.Book) (sidecars, []string, error) {
+	s, err := readSidecars(b.WorkDir)
+	if err != nil {
+		return sidecars{}, nil, err
+	}
+	names := attachmentNames(r.place.prefix, s)
+	if s.hash() == r.written {
+		return s, names, nil
+	}
+	if err := h.waitMapped(ctx, r, false); err != nil {
+		return sidecars{}, nil, err
+	}
+	p, err := locate(r.mount, r.rel)
+	if err != nil {
+		return sidecars{}, nil, err
+	}
+	r.place = p
+	r.rep.Progress(jobs.Progress{Step: stepWriting, Message: "Saving the characters and recaps with the book",
+		Extra: map[string]any{"stage": b.State, "source": r.source}})
+	for {
+		workID := b.WorkID
+		if workID == "" {
+			workID = s.workID
+		}
+		prov := provenance(h.o.Version, r.job.ID, h.now(), r.source, workID, inputsOf(r.mount, r.files, r.epub))
+		names, err = writeAttachments(r.place.dir, r.place.prefix, s, prov)
+		if err == nil {
+			break
+		}
+		if werr := mapping.ProbeWritable(r.place.dir); werr == nil {
+			return sidecars{}, nil, fmt.Errorf("could not write the book's characters and recaps: %w", err)
+		}
+		if err := h.waitWritable(ctx, r); err != nil {
+			return sidecars{}, nil, err
+		}
+	}
+	r.written = s.hash()
+	h.o.Log.Info("generate: wrote the book's attachments", "job", r.job.ID, "path", r.rel, "files", names)
+	r.rep.Progress(jobs.Progress{Step: stepRescanning, Message: "Asking the server to read them",
+		Extra: map[string]any{"stage": b.State, "source": r.source}})
+	h.rescan(ctx, r)
+	return s, names, nil
+}
+
+// attachmentNames are the names a write produces for s.
+func attachmentNames(prefix string, s sidecars) []string {
+	var out []string
+	if s.characters != nil {
+		out = append(out, prefix+charactersName)
+	}
+	if s.recaps != nil {
+		out = append(out, prefix+recapsName)
+	}
+	return append(out, prefix+provenanceName)
+}
+
+// rescanTries bounds the attachments rescan: the files are on disk either way,
+// and the server's next full scan reads them, so a rescan that keeps failing is
+// logged, never a failed job.
+const rescanTries = 3
+
+func (h *Handler) rescan(ctx context.Context, r *run) {
+	for i := 1; ; i++ {
+		got, err := r.srv.RescanAttachments(ctx, r.lib.ID, r.rel)
+		if err == nil {
+			h.o.Log.Info("generate: the server read the attachments", "job", r.job.ID, "characters", got.Characters, "recaps", got.Recaps)
+			return
+		}
+		if i == rescanTries || errors.Is(err, link.ErrNotIndexable) || ctx.Err() != nil {
+			h.o.Log.Warn("generate: the server didn't re-read the attachments (its next scan will)", "job", r.job.ID, "err", err)
+			return
+		}
+		if sleep(ctx, h.o.Poll) != nil {
+			return
+		}
+	}
+}
+
+// ErrNotParked is a Retry for a job that isn't parked.
+var ErrNotParked = errors.New("the job isn't waiting on anything a retry would help")
+
+// Retry re-admits a parked job's engine book (the engine's own Retry), or wakes a
+// job parked before the engine has its book (the book's folder wasn't writable)
+// to check again now. store.ErrNotFound when the job isn't one of this handler's.
+func (h *Handler) Retry(ctx context.Context, jobID int64) error {
+	h.mu.Lock()
+	poke, waiting := h.pokes[jobID]
+	h.mu.Unlock()
+	m, err := h.o.DB.GetGenerateBook(ctx, jobID)
+	if errors.Is(err, store.ErrNotFound) || (err == nil && m.BookID == nil) {
+		if waiting {
+			select {
+			case poke <- struct{}{}:
+			default:
+			}
+			return nil
+		}
+		return store.ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	eng := h.o.Engine()
+	if eng == nil {
+		return ErrNotParked
+	}
+	b, err := h.o.DB.GetBook(ctx, *m.BookID)
+	if err != nil {
+		return err
+	}
+	if state.Status(b.Status) != state.StatusNeedsAttention {
+		if waiting {
+			select {
+			case poke <- struct{}{}:
+			default:
+			}
+			return nil
+		}
+		return ErrNotParked
+	}
+	if err := eng.Retry(ctx, b.ID); err != nil {
+		if errors.Is(err, scheduler.ErrInvalidOp) {
+			return ErrNotParked
+		}
+		return err
+	}
+	if waiting {
+		select {
+		case poke <- struct{}{}:
+		default:
+		}
+	}
+	return nil
+}
+
+func (h *Handler) pokeChan(jobID int64) chan struct{} {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	c, ok := h.pokes[jobID]
+	if !ok {
+		c = make(chan struct{}, 1)
+		h.pokes[jobID] = c
+	}
+	return c
+}
+
+func (h *Handler) dropPoke(jobID int64) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	delete(h.pokes, jobID)
+}
+
+// errText is err's message, "" for nil.
+func errText(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
+func sleep(ctx context.Context, d time.Duration) error {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
+}
