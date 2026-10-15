@@ -1,0 +1,51 @@
+# The AudioSilo server and the Bridge side by side (BRIDGE-PLAN.md Phase 0).
+#
+# The server reads the libraries read-only; the Bridge mounts the SAME host
+# folders read-write. Mounting them at the same path in both containers means
+# the Bridge needs no mapping (it looks for each library at the server's own
+# root path). Mounted elsewhere, map it on the Bridge's page or with
+# AUDIOSILO_BRIDGE_LIBRARIES ("<library id>=<path>;...").
+#
+# Pair once: in the server's console, Settings > Bridge > Connect a bridge,
+# then paste the code on the Bridge's page (http://<host>:8091), or set
+# AUDIOSILO_BRIDGE_PAIR_CODE below for the first start and remove it after.
+#
+# PUID/PGID: use the owner of your library folders (Unraid: 99/100), the same
+# for both, so files the Bridge writes belong to the share's owner.
+name: audiosilo
+
+services:
+  audiosilo:
+    image: ghcr.io/kodestar/audiosilo-server:latest
+    restart: unless-stopped
+    environment:
+      PUID: "1000"
+      PGID: "1000"
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./server-data:/data
+      - /path/to/audiobooks:/audiobooks:ro
+
+  bridge:
+    # :latest is the full image (CPU transcription); :latest-slim has no
+    # whisper.cpp, :latest-cuda transcribes on an NVIDIA GPU (amd64).
+    image: ghcr.io/kodestar/audiosilo-bridge:latest
+    restart: unless-stopped
+    depends_on: [audiosilo]
+    environment:
+      PUID: "1000"
+      PGID: "1000"
+      # The server as the Bridge reaches it on this network.
+      AUDIOSILO_BRIDGE_SERVER_URL: http://audiosilo:8080
+      # The Bridge's page as your LAN reaches it (the console links to it).
+      AUDIOSILO_BRIDGE_PUBLIC_URL: http://192.168.1.10:8091
+      # First start only: a code from the server's console.
+      # AUDIOSILO_BRIDGE_PAIR_CODE: XXXX-XXXX-XXXX-XXXX
+      # Keep the secrets' key outside the data folder (32 bytes, hex or base64):
+      # AUDIOSILO_BRIDGE_SECRET_KEY: ...
+    ports:
+      - "8091:8091"
+    volumes:
+      - ./bridge-data:/bridge-data
+      - /path/to/audiobooks:/audiobooks:rw
