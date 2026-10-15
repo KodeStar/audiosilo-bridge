@@ -86,6 +86,39 @@ type Status struct {
 	Libraries []LibraryStatus `json:"libraries"`
 	Workers   []Worker        `json:"workers"`
 	UIURL     string          `json:"ui_url"`
+	// Estimates are what the console's confirmation dialog estimates a job from
+	// (Phase 1a; omitted when the engine isn't running yet).
+	Estimates *Estimates `json:"estimates,omitempty"`
+}
+
+// Estimates are the Bridge's figures for estimating jobs, by job family.
+type Estimates struct {
+	Sidecars *SidecarEstimates `json:"sidecars,omitempty"`
+}
+
+// SidecarEstimates estimate a sidecars.generate job: ASR time and agent cost per
+// hour of audio (or per ebook) from the books this Bridge finished, the agent
+// container's readiness, and the monthly budget with this month's spend.
+type SidecarEstimates struct {
+	// ASRSecondsPerAudioHour is ASR wall time per hour of audio (the learned rate,
+	// else a seed).
+	ASRSecondsPerAudioHour float64 `json:"asr_seconds_per_audio_hour"`
+	// AgentUSDPerAudioHour and AgentUSDPerEbook are agent spend per hour of audio
+	// and per ebook book, nil until a finished book gives one.
+	AgentUSDPerAudioHour *float64 `json:"agent_usd_per_audio_hour"`
+	AgentUSDPerEbook     *float64 `json:"agent_usd_per_ebook"`
+	// Samples is how many finished books the figures come from.
+	Samples int `json:"samples"`
+	// AgentBackend is the agent CLI the Bridge uses ("" when none).
+	AgentBackend string `json:"agent_backend"`
+	// AgentReady: the agent container answers and has a credential.
+	AgentReady bool `json:"agent_ready"`
+	// Subscription: the credential is a subscription login (the cost is notional).
+	Subscription bool `json:"subscription"`
+	// MonthlyBudgetUSD is the monthly agent cap (0 = none); MonthSpentUSD this
+	// calendar month's spend (UTC).
+	MonthlyBudgetUSD float64 `json:"monthly_budget_usd"`
+	MonthSpentUSD    float64 `json:"month_spent_usd"`
 }
 
 // LibraryStatus is one library's mapping as the Bridge checked it.
@@ -120,11 +153,37 @@ type StatusReply struct {
 }
 
 // Book is an indexed book's files with the size and modification time the
-// server sees now (GET /bridge/libraries/{id}/book).
+// server sees now (GET /bridge/libraries/{id}/book). Info is the book's identity,
+// present only when a path was asked for (never on the sample-book answer).
 type Book struct {
 	LibraryID int64      `json:"library_id"`
 	Path      string     `json:"path"`
 	Files     []BookFile `json:"files"`
+	Info      *BookInfo  `json:"book,omitempty"`
+}
+
+// BookInfo is an indexed book's identity as the server holds it: authors and
+// narrators split into credits, series_index as the server stores it ("" for
+// none), duration in seconds, and the community work id from the server's
+// metadata cache ("" when unknown).
+type BookInfo struct {
+	Title       string   `json:"title"`
+	Authors     []string `json:"authors"`
+	Narrators   []string `json:"narrators"`
+	Series      string   `json:"series"`
+	SeriesIndex string   `json:"series_index"`
+	ASIN        string   `json:"asin"`
+	ISBN        string   `json:"isbn"`
+	Duration    float64  `json:"duration"`
+	WorkID      string   `json:"work_id"`
+}
+
+// Attachments says which of a book's .audiosilo/ files the server indexed after
+// an attachments rescan.
+type Attachments struct {
+	Characters bool `json:"characters"`
+	Recaps     bool `json:"recaps"`
+	Bridge     bool `json:"bridge"`
 }
 
 // BookFile is one of a Book's files, its path relative to the library root.
@@ -151,6 +210,8 @@ var (
 	ErrNotHeld = errors.New("the job is no longer held by this claim")
 	// ErrNoBook is the book lookup's 404 no_book.
 	ErrNoBook = errors.New("no indexed book there")
+	// ErrNotIndexable is a rescan's 404 not_indexable: no indexed book there.
+	ErrNotIndexable = errors.New("no indexed book at that path")
 	// ErrNoHeartbeat is a claim before any heartbeat (409 no_heartbeat).
 	ErrNoHeartbeat = errors.New("the server has no heartbeat from this Bridge yet")
 	// ErrBadAddress is a server address that isn't an absolute http(s) URL.
@@ -313,6 +374,21 @@ func (c *Client) Rescan(ctx context.Context, libraryID int64, path string) (stri
 	return out.Path, nil
 }
 
+// RescanAttachments asks the server to re-read only the book's .audiosilo/ files
+// (POST /bridge/rescan, mode attachments), never its audio, and returns what is
+// now indexed. No indexed book at path is ErrNotIndexable.
+func (c *Client) RescanAttachments(ctx context.Context, libraryID int64, path string) (*Attachments, error) {
+	var out struct {
+		Path        string      `json:"path"`
+		Attachments Attachments `json:"attachments"`
+	}
+	body := map[string]any{"library_id": libraryID, "path": path, "mode": "attachments"}
+	if err := c.do(ctx, http.MethodPost, "/api/v1/bridge/rescan", nil, body, &out); err != nil {
+		return nil, err
+	}
+	return &out.Attachments, nil
+}
+
 // do is doFound for calls where 204 isn't an answer.
 func (c *Client) do(ctx context.Context, method, path string, q url.Values, body, out any) error {
 	_, err := c.doFound(ctx, method, path, q, body, out)
@@ -387,6 +463,8 @@ func answerError(status int, raw []byte) error {
 		return ErrNoHeartbeat
 	case status == http.StatusNotFound && e.Code == "no_book":
 		return ErrNoBook
+	case status == http.StatusNotFound && e.Code == "not_indexable":
+		return ErrNotIndexable
 	}
 	msg := e.Error
 	if msg == "" {

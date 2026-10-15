@@ -193,7 +193,7 @@ func (e *Executor) contribute(ctx context.Context, book store.Book, r scheduler.
 	}
 	result := scheduler.StageResult{
 		Metrics: metrics(map[string]any{
-			"mode":      e.contribModeOrDefault(),
+			"mode":      e.contribModeFor(book),
 			"work":      slug,
 			"submitted": submitted,
 			"covered":   covered,
@@ -254,7 +254,7 @@ func (e *Executor) resolveWorkSlug(ctx context.Context, book store.Book) (slug, 
 
 	// (c) No upstream match. Local mode proceeds on a placeholder; issue mode needs
 	// a core add-work proposal first.
-	if e.contribModeOrDefault() == contribModeLocal {
+	if e.contribModeFor(book) == contribModeLocal {
 		return ExportSlug(book), placeholderExportNote, nil, nil
 	}
 	park, err = e.needsCore(ctx, book)
@@ -436,7 +436,7 @@ func (e *Executor) coveredDimensions(ctx context.Context, slug string) (hasChars
 // non-empty "audit converged..." line when the sidecars were accepted on a converging
 // trajectory) is appended to each submitted row's note.
 func (e *Executor) submitContributions(ctx context.Context, book store.Book, slug string, artifacts []contribArtifact, placeholderNote, auditNote string) error {
-	if e.contribModeOrDefault() == contribModeLocal {
+	if e.contribModeFor(book) == contribModeLocal {
 		return e.submitLocal(ctx, book, slug, artifacts, placeholderNote, auditNote)
 	}
 	return e.submitIssue(ctx, book, slug, artifacts, auditNote)
@@ -599,6 +599,15 @@ func rowSettled(rows []store.Contribution, kind string) bool {
 		return r.URL != "" || r.Status == store.ContribStatusLocal || r.Status == store.ContribStatusAlreadyCovered
 	}
 	return false
+}
+
+// contribModeFor returns the book's own contribution mode (a sidecars.generate job
+// sets it per book), else the configured one.
+func (e *Executor) contribModeFor(book store.Book) string {
+	if book.ContribMode == contribModeLocal || book.ContribMode == contribModeIssue {
+		return book.ContribMode
+	}
+	return e.contribModeOrDefault()
 }
 
 // contribModeOrDefault returns the configured mode, defaulting an empty value to issue.

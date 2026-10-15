@@ -123,3 +123,39 @@ func TestDeleteSetting(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// A claim records the server it came from, and a running job's park message
+// lives in error until it runs again; a new attempt starts unparked.
+func TestServerJobServerAndPark(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	if err := db.RecordClaim(ctx, ServerJob{ID: 5, Kind: "sidecars.generate", Attempt: 1, ServerID: "srv-a"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetServerJobPark(ctx, 5, 1, "the agent container isn't answering"); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := db.GetServerJob(ctx, 5)
+	if got.ServerID != "srv-a" || got.State != JobRunning || got.Error != "the agent container isn't answering" {
+		t.Fatalf("parked = %+v", got)
+	}
+	if err := db.SetServerJobPark(ctx, 5, 1, ""); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := db.GetServerJob(ctx, 5); got.Error != "" {
+		t.Fatalf("unparked = %+v", got)
+	}
+	_ = db.SetServerJobPark(ctx, 5, 1, "parked again")
+	if err := db.RecordClaim(ctx, ServerJob{ID: 5, Kind: "sidecars.generate", Attempt: 2, ServerID: "srv-b"}); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := db.GetServerJob(ctx, 5); got.ServerID != "srv-b" || got.Error != "" || got.Attempt != 2 {
+		t.Fatalf("reclaimed = %+v", got)
+	}
+	// A finished job's park message can't be written over its error.
+	_ = db.FinishServerJob(ctx, 5, 2, JobFailed, nil, "boom")
+	_ = db.SetServerJobPark(ctx, 5, 2, "late park")
+	if got, _ := db.GetServerJob(ctx, 5); got.Error != "boom" {
+		t.Fatalf("a finished job's error = %q", got.Error)
+	}
+}

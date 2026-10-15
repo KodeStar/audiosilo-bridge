@@ -1,9 +1,11 @@
 import type {
+  Engine,
   JobsResponse,
   LibrariesResponse,
   LoginResponse,
   LogLevel,
   LogsResponse,
+  ServerJob,
   Settings,
   SettingsUpdate,
   Status,
@@ -143,9 +145,25 @@ export class ApiClient {
     return this.request(`/api/jobs${qs ? `?${qs}` : ''}`);
   }
 
+  // 404 = this Bridge has no such job.
+  job(id: number): Promise<ServerJob> {
+    return this.request(`/api/jobs/${id}`);
+  }
+
   // 404 = the job isn't running here.
   cancelJob(id: number): Promise<void> {
     return this.request(`/api/jobs/${id}/cancel`, { method: 'POST' });
+  }
+
+  // Retries a parked sidecars job. 404 = not a sidecars job here; 409 = it isn't
+  // parked.
+  retryJob(id: number): Promise<void> {
+    return this.request(`/api/jobs/${id}/retry`, { method: 'POST' });
+  }
+
+  // --- the engine ---
+  engine(): Promise<Engine> {
+    return this.request('/api/engine');
   }
 
   // --- logs and workers ---

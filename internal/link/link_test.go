@@ -195,3 +195,77 @@ func TestServerAddress(t *testing.T) {
 		}
 	}
 }
+
+// The book lookup's additive book block (Phase 1a) decodes; the sample-book
+// answer has none.
+func TestBookInfo(t *testing.T) {
+	t.Parallel()
+	f, c := newFake(t, http.StatusOK, `{"library_id":1,"path":"A/B","files":[],"book":{"title":"B","authors":["X","Y"],"narrators":["N"],`+
+		`"series":"S","series_index":"3","asin":"B0","isbn":"97","duration":36000.5,"work_id":"the-b"}}`)
+	b, err := c.Book(context.Background(), 1, "A/B")
+	if err != nil || b.Info == nil {
+		t.Fatalf("Book = %+v, %v", b, err)
+	}
+	want := BookInfo{Title: "B", Authors: []string{"X", "Y"}, Narrators: []string{"N"}, Series: "S", SeriesIndex: "3", ASIN: "B0",
+		ISBN: "97", Duration: 36000.5, WorkID: "the-b"}
+	if got := *b.Info; got.Title != want.Title || strings.Join(got.Authors, ",") != "X,Y" || got.Narrators[0] != "N" ||
+		got.SeriesIndex != "3" || got.Duration != want.Duration || got.WorkID != "the-b" || got.ASIN != "B0" || got.ISBN != "97" {
+		t.Fatalf("info = %+v", got)
+	}
+	f.body = `{"library_id":1,"path":"A/B","files":[]}`
+	if b, _ := c.Book(context.Background(), 1, ""); b.Info != nil {
+		t.Fatalf("the sample answer has a book block: %+v", b.Info)
+	}
+}
+
+// The heartbeat's estimates go out as the contract names them, a missing
+// figure as null; no estimates at all leaves the key out.
+func TestHeartbeatEstimates(t *testing.T) {
+	t.Parallel()
+	f, c := newFake(t, http.StatusOK, `{"server_time":"x","libraries":[]}`)
+	perHour := 1.6
+	st := Status{Version: "0.2.0", Kinds: []string{"sidecars.generate"}, Estimates: &Estimates{Sidecars: &SidecarEstimates{
+		ASRSecondsPerAudioHour: 900, AgentUSDPerAudioHour: &perHour, Samples: 12, AgentBackend: "claude", AgentReady: true,
+		Subscription: true, MonthlyBudgetUSD: 100, MonthSpentUSD: 12.3}}}
+	if _, err := c.Heartbeat(context.Background(), st); err != nil {
+		t.Fatal(err)
+	}
+	var sent struct {
+		Estimates struct {
+			Sidecars map[string]any `json:"sidecars"`
+		} `json:"estimates"`
+	}
+	if err := json.Unmarshal([]byte(f.sent), &sent); err != nil {
+		t.Fatal(err)
+	}
+	s := sent.Estimates.Sidecars
+	for k, want := range map[string]any{"asr_seconds_per_audio_hour": 900.0, "agent_usd_per_audio_hour": 1.6, "agent_usd_per_ebook": nil,
+		"samples": 12.0, "agent_backend": "claude", "agent_ready": true, "subscription": true, "monthly_budget_usd": 100.0,
+		"month_spent_usd": 12.3} {
+		if got, ok := s[k]; !ok || got != want {
+			t.Errorf("estimates.sidecars.%s = %v (present %v), want %v", k, got, ok, want)
+		}
+	}
+	if _, err := c.Heartbeat(context.Background(), Status{Version: "0.2.0"}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(f.sent, "estimates") {
+		t.Fatalf("a heartbeat with no estimates sent the key: %s", f.sent)
+	}
+}
+
+func TestRescanAttachments(t *testing.T) {
+	t.Parallel()
+	f, c := newFake(t, http.StatusOK, `{"path":"A/B","attachments":{"characters":true,"recaps":true,"bridge":false}}`)
+	got, err := c.RescanAttachments(context.Background(), 1, "A/B")
+	if err != nil || !got.Characters || !got.Recaps || got.Bridge {
+		t.Fatalf("RescanAttachments = %+v, %v", got, err)
+	}
+	if f.last.URL.Path != "/api/v1/bridge/rescan" || f.sent != `{"library_id":1,"mode":"attachments","path":"A/B"}` {
+		t.Fatalf("request = %s %s", f.last.URL.Path, f.sent)
+	}
+	f.status, f.body = http.StatusNotFound, `{"error":"no indexed book there","code":"not_indexable"}`
+	if _, err := c.RescanAttachments(context.Background(), 1, "A/B"); !errors.Is(err, ErrNotIndexable) {
+		t.Fatalf("404 not_indexable = %v", err)
+	}
+}

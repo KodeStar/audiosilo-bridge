@@ -147,9 +147,12 @@ type Book struct {
 	// it is meaningful only alongside needs_attention and is cleared whenever status
 	// clears. A book that predates migration 0008 (or a plain park) has '' and never
 	// auto-readmits - only a human Retry re-admits it.
-	RetryAt   string
-	CreatedAt string
-	UpdatedAt string
+	RetryAt string
+	// ContribMode is this book's contribution mode ("" = the executor's configured
+	// contribution.mode; "local" | "issue"): a sidecars.generate job sets it.
+	ContribMode string
+	CreatedAt   string
+	UpdatedAt   string
 }
 
 // BookTracking is the small, read-only projection needed to mark library-scan
@@ -193,6 +196,8 @@ type NewBook struct {
 	// (empty when unknown). It is stored as-is and returned on the book view.
 	Coverage json.RawMessage
 	State    string // "" defaults to queued
+	// ContribMode is the book's own contribution mode ("" = the configured one).
+	ContribMode string
 }
 
 // ErrInvalidKind reports a NewBook whose kind and ebook_path disagree: an unknown
@@ -300,10 +305,11 @@ func (db *DB) CreateBook(ctx context.Context, nb NewBook) (Book, error) {
 	res, err := db.sql.ExecContext(ctx,
 		`INSERT INTO books
 		 (batch_id, source_path, work_dir, title, authors, narrators, series, series_pos, asin, isbn,
-		  identity_sources, work_id, kind, ebook_path, state, status, error, coverage, created_at, updated_at)
-		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'','',?,?,?)`,
+		  identity_sources, work_id, kind, ebook_path, state, status, error, coverage, contrib_mode,
+		  created_at, updated_at)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'','',?,?,?,?)`,
 		batchID, nb.SourcePath, nb.WorkDir, nb.Title, authors, narrators, nb.Series, nb.SeriesPos,
-		nb.ASIN, nb.ISBN, idsrc, nb.WorkID, kind, nb.EbookPath, st, string(nb.Coverage), now, now)
+		nb.ASIN, nb.ISBN, idsrc, nb.WorkID, kind, nb.EbookPath, st, string(nb.Coverage), nb.ContribMode, now, now)
 	if err != nil {
 		if isUniqueViolation(err) {
 			return Book{}, ErrDuplicate
@@ -334,6 +340,7 @@ func (db *DB) CreateBook(ctx context.Context, nb NewBook) (Book, error) {
 		EbookPath:       nb.EbookPath,
 		State:           st,
 		Coverage:        nb.Coverage,
+		ContribMode:     nb.ContribMode,
 		CreatedAt:       now,
 		UpdatedAt:       now,
 	}, nil
@@ -341,7 +348,7 @@ func (db *DB) CreateBook(ctx context.Context, nb NewBook) (Book, error) {
 
 const bookCols = `id, batch_id, source_path, work_dir, title, authors, narrators, series, series_pos,
 	asin, isbn, identity_sources, work_id, kind, ebook_path, state, status, error, coverage,
-	scratch_bytes, chapters, duration_sec, words, park_code, retry_at, created_at, updated_at`
+	scratch_bytes, chapters, duration_sec, words, park_code, retry_at, contrib_mode, created_at, updated_at`
 
 func scanBook(sc interface{ Scan(...any) error }) (Book, error) {
 	var b Book
@@ -349,7 +356,7 @@ func scanBook(sc interface{ Scan(...any) error }) (Book, error) {
 	if err := sc.Scan(&b.ID, &b.BatchID, &b.SourcePath, &b.WorkDir, &b.Title, &authors, &narrators,
 		&b.Series, &b.SeriesPos, &b.ASIN, &b.ISBN, &idsrc, &b.WorkID, &b.Kind, &b.EbookPath,
 		&b.State, &b.Status, &b.Error, &coverage, &b.ScratchBytes, &b.Chapters, &b.DurationSec,
-		&b.Words, &b.ParkCode, &b.RetryAt, &b.CreatedAt, &b.UpdatedAt); err != nil {
+		&b.Words, &b.ParkCode, &b.RetryAt, &b.ContribMode, &b.CreatedAt, &b.UpdatedAt); err != nil {
 		return Book{}, err
 	}
 	if authors != "" {
@@ -376,6 +383,17 @@ func scanBook(sc interface{ Scan(...any) error }) (Book, error) {
 // GetBook returns the book with id, or ErrNotFound.
 func (db *DB) GetBook(ctx context.Context, id int64) (Book, error) {
 	row := db.sql.QueryRowContext(ctx, `SELECT `+bookCols+` FROM books WHERE id = ?`, id)
+	b, err := scanBook(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Book{}, ErrNotFound
+	}
+	return b, err
+}
+
+// GetBookBySourcePath returns the book whose source_path is path (the engine's
+// book identity), or ErrNotFound.
+func (db *DB) GetBookBySourcePath(ctx context.Context, path string) (Book, error) {
+	row := db.sql.QueryRowContext(ctx, `SELECT `+bookCols+` FROM books WHERE source_path = ?`, path)
 	b, err := scanBook(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Book{}, ErrNotFound

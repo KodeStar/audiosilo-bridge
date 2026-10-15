@@ -277,7 +277,7 @@ func TestDefaultSeedsClaudeModels(t *testing.T) {
 	}
 }
 
-func TestSupervisorDefaultsAreMonitorOnlyAndOldConfigsInheritThem(t *testing.T) {
+func TestSupervisorDefaultsActWithoutModelsAndOldConfigsInheritThem(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, FileName), []byte("listen: 127.0.0.1:8090\nagent:\n  concurrency: 2\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -286,8 +286,8 @@ func TestSupervisorDefaultsAreMonitorOnlyAndOldConfigsInheritThem(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !cfg.Supervisor.Enabled || cfg.Supervisor.AutomaticActions || cfg.Supervisor.ModelAssisted || cfg.Supervisor.ModelAutomaticActions || cfg.Supervisor.AllowBackendFailover {
-		t.Fatalf("supervisor defaults are not monitor-only: %+v", cfg.Supervisor)
+	if !cfg.Supervisor.Enabled || !cfg.Supervisor.AutomaticActions || cfg.Supervisor.ModelAssisted || cfg.Supervisor.ModelAutomaticActions || cfg.Supervisor.AllowBackendFailover {
+		t.Fatalf("supervisor defaults: want deterministic actions on, models and failover off: %+v", cfg.Supervisor)
 	}
 	if cfg.Pricing.Version == "" || cfg.Pricing.Rates == nil {
 		t.Fatalf("pricing defaults unavailable: %+v", cfg.Pricing)
@@ -702,5 +702,59 @@ func TestValidateRejectsBadNewFields(t *testing.T) {
 	off.Metadata.BaseURL = "" // disabled is valid
 	if err := off.Validate(); err != nil {
 		t.Errorf("empty metadata.base_url should be valid (disabled): %v", err)
+	}
+}
+
+// The agent container and retention settings: defaults, an explicit 0 kept (no
+// monthly cap; transcripts deleted when the job ends), the environment, and
+// validation.
+func TestAgentContainerAndRetention(t *testing.T) {
+	dir := t.TempDir()
+	cfg, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Agent.StagingDir != "" || cfg.Agent.ClaimTimeoutSeconds != DefaultClaimTimeoutSeconds ||
+		cfg.Agent.MonthlyBudgetUSD != DefaultMonthlyBudgetUSD || cfg.Transcripts.RetentionDays != DefaultTranscriptRetentionDays {
+		t.Fatalf("defaults = %+v %+v", cfg.Agent, cfg.Transcripts)
+	}
+	yaml := "agent:\n  monthly_budget_usd: 0\n  claim_timeout_seconds: 0\n  staging_dir: /staging\ntranscripts:\n  retention_days: 0\n"
+	if err := os.WriteFile(filepath.Join(dir, FileName), []byte(yaml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Agent.MonthlyBudgetUSD != 0 || cfg.Transcripts.RetentionDays != 0 || cfg.Agent.StagingDir != "/staging" ||
+		cfg.Agent.ClaimTimeoutSeconds != DefaultClaimTimeoutSeconds {
+		t.Fatalf("explicit zeros = %+v %+v", cfg.Agent, cfg.Transcripts)
+	}
+
+	t.Setenv("AUDIOSILO_BRIDGE_AGENT_MONTHLY_BUDGET_USD", "25.5")
+	t.Setenv("AUDIOSILO_BRIDGE_AGENT_CLAIM_TIMEOUT_SECONDS", "30")
+	t.Setenv("AUDIOSILO_BRIDGE_AGENT_STAGING_DIR", "/agent-staging")
+	t.Setenv("AUDIOSILO_BRIDGE_TRANSCRIPTS_RETENTION_DAYS", "7")
+	cfg, err = Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Agent.MonthlyBudgetUSD != 25.5 || cfg.Agent.ClaimTimeoutSeconds != 30 || cfg.Agent.StagingDir != "/agent-staging" ||
+		cfg.Transcripts.RetentionDays != 7 {
+		t.Fatalf("from the environment = %+v %+v", cfg.Agent, cfg.Transcripts)
+	}
+
+	for name, edit := range map[string]func(*Config){
+		"negative monthly budget": func(c *Config) { c.Agent.MonthlyBudgetUSD = -1 },
+		"no claim timeout":        func(c *Config) { c.Agent.ClaimTimeoutSeconds = 0 },
+		"relative staging dir":    func(c *Config) { c.Agent.StagingDir = "staging" },
+		"negative retention":      func(c *Config) { c.Transcripts.RetentionDays = -1 },
+		"retention too long":      func(c *Config) { c.Transcripts.RetentionDays = MaxTranscriptRetentionDays + 1 },
+	} {
+		c := Default()
+		edit(&c)
+		if c.Validate() == nil {
+			t.Errorf("%s: accepted", name)
+		}
 	}
 }

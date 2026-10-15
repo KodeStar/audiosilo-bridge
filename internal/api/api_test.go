@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -26,6 +27,8 @@ type backend struct {
 	jobs                           []store.ServerJob
 	cancelled                      int64
 	logsLevel                      slog.Level
+	retried                        int64
+	retryErr                       error
 }
 
 func (b *backend) Status() Status { return Status{Version: "0.1.0", Kinds: []string{"bridge.verify"}} }
@@ -54,6 +57,19 @@ func (b *backend) Jobs(_ context.Context, before int64, limit int) ([]store.Serv
 	return b.jobs, nil
 }
 func (b *backend) CancelJob(id int64) bool { b.cancelled = id; return id == 7 }
+func (b *backend) Job(_ context.Context, id int64) (*store.ServerJob, error) {
+	for i := range b.jobs {
+		if b.jobs[i].ID == id {
+			return &b.jobs[i], nil
+		}
+	}
+	return nil, Errorf(ErrNotFound, "this Bridge has no job %d", id)
+}
+func (b *backend) RetryJob(_ context.Context, id int64) error { b.retried = id; return b.retryErr }
+func (b *backend) Engine(context.Context) Engine {
+	return Engine{Started: true, Agent: EngineAgent{Backend: "claude", Slots: 1, CLIs: map[string]EngineCLI{"claude": {Version: "2.1", Credential: "oauth_token"}}},
+		MonthlyBudgetUSD: 100, MonthSpentUSD: 12.5, TranscriptRetentionDays: 30}
+}
 func (b *backend) Logs(_ uint64, _ int, level slog.Level) []logring.Entry {
 	b.logsLevel = level
 	return []logring.Entry{}
@@ -138,6 +154,7 @@ func TestEveryRouteNeedsASession(t *testing.T) {
 		{"POST", "/api/password"}, {"GET", "/api/status"}, {"POST", "/api/pair"},
 		{"POST", "/api/unpair"}, {"GET", "/api/libraries"}, {"PUT", "/api/libraries/1"}, {"POST", "/api/libraries/check"},
 		{"GET", "/api/settings"}, {"PUT", "/api/settings"}, {"GET", "/api/jobs"}, {"POST", "/api/jobs/1/cancel"},
+		{"GET", "/api/jobs/1"}, {"POST", "/api/jobs/1/retry"}, {"GET", "/api/engine"},
 		{"GET", "/api/logs"}, {"GET", "/api/workers"},
 		{"POST", "/api/logout"}, // last: it ends the session
 	}
@@ -268,5 +285,41 @@ func TestPassword(t *testing.T) {
 	e := newEnv(t)
 	if w := e.do("POST", "/api/password", e.token, `{"current":"wrong","new":"long enough pw"}`); w.Code != http.StatusForbidden {
 		t.Fatalf("wrong current = %d", w.Code)
+	}
+}
+
+// A job's detail (the console's deep link), its Retry, and the engine's state.
+func TestJobDetailRetryAndEngine(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	e.b.jobs = []store.ServerJob{{ID: 12, Kind: "sidecars.generate", State: "running", Error: "parked"}}
+	w := e.do(http.MethodGet, "/api/jobs/12", e.token, "")
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"kind":"sidecars.generate"`) {
+		t.Fatalf("job = %d %s", w.Code, w.Body.String())
+	}
+	if w := e.do(http.MethodGet, "/api/jobs/13", e.token, ""); w.Code != http.StatusNotFound {
+		t.Fatalf("an unknown job = %d", w.Code)
+	}
+	if w := e.do(http.MethodGet, "/api/jobs/x", e.token, ""); w.Code != http.StatusBadRequest {
+		t.Fatalf("a bad id = %d", w.Code)
+	}
+	if w := e.do(http.MethodPost, "/api/jobs/12/retry", e.token, ""); w.Code != http.StatusAccepted || e.b.retried != 12 {
+		t.Fatalf("retry = %d (retried %d)", w.Code, e.b.retried)
+	}
+	e.b.retryErr = Errorf(ErrConflict, "the job isn't waiting on anything a retry would help")
+	if w := e.do(http.MethodPost, "/api/jobs/12/retry", e.token, ""); w.Code != http.StatusConflict ||
+		!strings.Contains(w.Body.String(), "isn't waiting") {
+		t.Fatalf("a retry of a running job = %d %s", w.Code, w.Body.String())
+	}
+	e.b.retryErr = errors.New("database is locked")
+	if w := e.do(http.MethodPost, "/api/jobs/12/retry", e.token, ""); w.Code != http.StatusInternalServerError ||
+		strings.Contains(w.Body.String(), "locked") {
+		t.Fatalf("an internal error = %d %s (never echoed)", w.Code, w.Body.String())
+	}
+	w = e.do(http.MethodGet, "/api/engine", e.token, "")
+	var got Engine
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil || !got.Started || got.Agent.CLIs["claude"].Credential != "oauth_token" ||
+		got.MonthlyBudgetUSD != 100 || got.TranscriptRetentionDays != 30 {
+		t.Fatalf("engine = %d %s", w.Code, w.Body.String())
 	}
 }

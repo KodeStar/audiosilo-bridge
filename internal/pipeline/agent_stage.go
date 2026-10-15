@@ -69,6 +69,39 @@ func budgetExceededMsg(spent, budget float64) string {
 	return fmt.Sprintf("book agent cost $%.2f reached the budget $%.2f - raise agent.book_budget_usd in config.yaml (restart to apply), then Retry", spent, budget)
 }
 
+// monthlyBudgetExceededMsg is the park reason when this month's agent spend across
+// every book reached agent.monthly_budget_usd.
+func monthlyBudgetExceededMsg(spent, budget float64, resume time.Time) string {
+	return fmt.Sprintf("this month's agent cost $%.2f reached the monthly budget $%.2f - the book resumes on %s, "+
+		"or raise agent.monthly_budget_usd (restart to apply) and Retry", spent, budget, resume.Format("2 January 2006"))
+}
+
+// checkMonthlyBudget is the monthly half of runAgent's budget preflight: when this
+// calendar month's (UTC) agent spend across every book, superseded runs included,
+// has reached the monthly budget, the book parks budget_exceeded with an automatic
+// re-admit at the start of the next month. nil when there is no cap or room left.
+func (e *Executor) checkMonthlyBudget(ctx context.Context, stage state.State, now time.Time) error {
+	if e.db == nil || e.monthlyBudgetUSD <= 0 {
+		return nil
+	}
+	start, next := monthBounds(now)
+	spent, err := e.db.SumBudgetCostSince(ctx, start)
+	if err != nil {
+		return fmt.Errorf("%s: read this month's cost: %w", stage, err)
+	}
+	if spent < e.monthlyBudgetUSD {
+		return nil
+	}
+	return scheduler.ParkWithCodeAfter(state.ParkBudgetExceeded, monthlyBudgetExceededMsg(spent, e.monthlyBudgetUSD, next), next)
+}
+
+// monthBounds returns the start of now's calendar month and of the next one, UTC.
+func monthBounds(now time.Time) (start, next time.Time) {
+	u := now.UTC()
+	start = time.Date(u.Year(), u.Month(), 1, 0, 0, 0, 0, time.UTC)
+	return start, start.AddDate(0, 1, 0)
+}
+
 // Timed-park delays runAgent stamps on a transient agent park (see scheduler
 // auto-readmit): the scheduler re-admits the book once the instant passes.
 const (
@@ -111,6 +144,18 @@ func rateLimitRetryAt(rl *agent.RateLimitError, now time.Time) time.Time {
 // after ~2 rounds). Built from maxQARounds so the message can never drift from the cap.
 var QANoConvergeMsg = fmt.Sprintf("QA adjudication did not converge after %d rounds - see qa_report.md", maxQARounds)
 
+// preflightUnavailableMsg is the preflight park's message: the embedder's own
+// (with the runner's detail) when it gave one.
+func (e *Executor) preflightUnavailableMsg(av agent.Availability) string {
+	if e.agentUnavailableMsg == "" {
+		return AgentUnavailableMsg
+	}
+	if av.Detail != "" {
+		return e.agentUnavailableMsg + " (" + av.Detail + ")"
+	}
+	return e.agentUnavailableMsg
+}
+
 // ensureAgent re-selects an agent runner when the frozen one is unavailable, adopting
 // a now-available result for this and future runs (the operator installs a CLI, then
 // Retry). Detect is cheap (PATH/stat + a fast --version). It mirrors ensureASR.
@@ -122,6 +167,9 @@ func (e *Executor) ensureAgent(ctx context.Context) (agent.Runner, agent.Availab
 	}
 	if r, av := e.redetectAgent(ctx); r != nil && av.Available {
 		e.agentRun, e.agentAvail = r, av
+	} else if av.Detail != "" {
+		// Still unavailable: keep the freshest reason (a park message names it).
+		e.agentAvail = av
 	}
 	return e.agentRun, e.agentAvail
 }
@@ -379,6 +427,9 @@ func (e *Executor) runAgent(ctx context.Context, book store.Book, stage state.St
 			return agentUsage{}, scheduler.ParkWithCode(state.ParkBudgetExceeded, budgetExceededMsg(spent, e.bookBudgetUSD))
 		}
 	}
+	if err := e.checkMonthlyBudget(ctx, stage, time.Now()); err != nil {
+		return agentUsage{}, err
+	}
 	runner, av := e.ensureAgent(ctx)
 	if runner == nil || !av.Available {
 		// PREFLIGHT unavailability: no CLI is configured/resolvable at all (not a transient
@@ -387,6 +438,12 @@ func (e *Executor) runAgent(ctx context.Context, book store.Book, stage state.St
 		// forever. The operator installs/configures a CLI and clicks Retry. (The transient
 		// case - a CLI that existed and vanished mid-run - is the POST-invocation
 		// NotAvailableError branch below, which does schedule a short auto-readmit.)
+		// The Bridge's agent container is the exception: down now usually means
+		// restarting, so its embedder asks for a timed self-resume.
+		if e.agentPreflightRetry > 0 {
+			return agentUsage{}, scheduler.ParkWithCodeAfter(state.ParkAgentUnavailable, e.preflightUnavailableMsg(av),
+				time.Now().Add(e.agentPreflightRetry))
+		}
 		return agentUsage{}, scheduler.ParkWithCode(state.ParkAgentUnavailable, AgentUnavailableMsg)
 	}
 	e.mu.Lock()

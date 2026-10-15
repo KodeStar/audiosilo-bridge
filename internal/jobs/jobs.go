@@ -47,14 +47,17 @@ type Handler interface {
 	Run(ctx context.Context, job Job, rep *Reporter) (result any, err error)
 }
 
-// Lanes: how many jobs of a kind can run at once. Light jobs are quick checks;
-// the ASR and agent lanes arrive with Phase 1.
+// Lanes: how many jobs of a kind can run at once. Light jobs are quick checks.
+// The pipeline lane holds the jobs that follow an engine book (sidecars.generate):
+// the engine's own scheduler does the throttling, so a job waits there while its
+// book is queued or parked, and the lane only bounds how many are followed.
 const (
-	LaneLight = "light"
+	LaneLight    = "light"
+	LanePipeline = "pipeline"
 )
 
 // DefaultLanes are the lanes' capacities.
-func DefaultLanes() map[string]int { return map[string]int{LaneLight: 2} }
+func DefaultLanes() map[string]int { return map[string]int{LaneLight: 2, LanePipeline: 25} }
 
 // ParkError parks a job (needs_attention) with a typed code.
 type ParkError struct {
@@ -74,6 +77,7 @@ type Server interface {
 type Store interface {
 	RecordClaim(ctx context.Context, j store.ServerJob) error
 	SetServerJobProgress(ctx context.Context, id int64, attempt int, progress json.RawMessage) error
+	SetServerJobPark(ctx context.Context, id int64, attempt int, message string) error
 	FinishServerJob(ctx context.Context, id int64, attempt int, state string, result json.RawMessage, errText string) error
 	MarkServerJobReported(ctx context.Context, id int64, attempt int) error
 	OpenServerJobs(ctx context.Context) ([]store.ServerJob, error)
@@ -88,6 +92,15 @@ var (
 	errStopping        = errors.New("the Bridge is stopping")
 	errUnpaired        = errors.New("the server refused the Bridge's token")
 )
+
+// Resumes reports whether a job whose context ended will run again under its
+// claim: the Bridge is stopping (the next start resumes it) or the server refused
+// the token (resumed once a link works again). False when an admin cancelled it
+// or the server took it back, which end it here for good.
+func Resumes(ctx context.Context) bool {
+	cause := context.Cause(ctx)
+	return !errors.Is(cause, errCancelRequested) && !errors.Is(cause, errLost)
+}
 
 // Options tunes a Runner; zero values take the defaults.
 type Options struct {
@@ -104,7 +117,10 @@ type Options struct {
 	RetryEvery time.Duration
 	// Keep is how many finished jobs the store keeps.
 	Keep int
-	Log  *slog.Logger
+	// ServerID is the paired server's id ("" when unknown), recorded on every
+	// claim: a start treats an open job of another server as lost.
+	ServerID func() string
+	Log      *slog.Logger
 }
 
 // Runner claims and runs jobs.
@@ -158,6 +174,9 @@ func New(st Store, server func() Server, onUnauthorized func(Server), opts Optio
 	}
 	if opts.Log == nil {
 		opts.Log = slog.Default()
+	}
+	if opts.ServerID == nil {
+		opts.ServerID = func() string { return "" }
 	}
 	if onUnauthorized == nil {
 		onUnauthorized = func(Server) {}
@@ -294,7 +313,14 @@ func (r *Runner) recover(ctx context.Context, srv Server, wg *sync.WaitGroup) bo
 		sleep(ctx, 5*time.Second)
 		return false
 	}
+	current := r.opts.ServerID()
 	for _, sj := range open {
+		if sj.ServerID != "" && current != "" && sj.ServerID != current {
+			// Another server's job (the Bridge was paired with this one since):
+			// its id means nothing here, so nothing is reported for it.
+			r.dropOtherServers(ctx, sj)
+			continue
+		}
 		if sj.State != store.JobRunning {
 			r.retry.Store(true)
 			continue
@@ -309,9 +335,24 @@ func (r *Runner) recover(ctx context.Context, srv Server, wg *sync.WaitGroup) bo
 			continue
 		}
 		r.log.Info("bridge: resuming a job after a restart", "job", job.ID, "kind", job.Kind, "attempt", job.Attempt)
-		r.start(ctx, srv, job, wg, true)
+		r.startParked(ctx, srv, job, wg, sj.Error)
 	}
 	return true
+}
+
+// dropOtherServers ends what a start found open for another server: a running
+// job is lost, an unreported end is never sent.
+func (r *Runner) dropOtherServers(ctx context.Context, sj store.ServerJob) {
+	r.log.Info("bridge: a job of another server is dropped", "job", sj.ID, "server", sj.ServerID)
+	var err error
+	if sj.State == store.JobRunning {
+		err = r.store.FinishServerJob(ctx, sj.ID, sj.Attempt, store.JobLost, nil, "the Bridge was paired with another server")
+	} else {
+		err = r.store.MarkServerJobReported(ctx, sj.ID, sj.Attempt)
+	}
+	if err != nil {
+		r.log.Warn("bridge: recording a job failed", "job", sj.ID, "err", err)
+	}
 }
 
 // resumeStranded resumes, under their claim, the jobs a refused token stopped,
@@ -333,7 +374,7 @@ func (r *Runner) resumeStranded(ctx context.Context, srv Server, wg *sync.WaitGr
 		if running || err != nil || sj.State != store.JobRunning || sj.Attempt != job.Attempt {
 			continue // a later claim took its row, or it ended
 		}
-		if !sameServer(s.srv, srv) {
+		if cur := r.opts.ServerID(); !sameServer(s.srv, srv) || (sj.ServerID != "" && cur != "" && sj.ServerID != cur) {
 			// Paired with another server since: its job ids are another
 			// server's, and the claim can't be reported anywhere now.
 			if err := r.store.FinishServerJob(ctx, job.ID, job.Attempt, store.JobLost, nil, "the Bridge was paired with another server"); err != nil {
@@ -342,7 +383,7 @@ func (r *Runner) resumeStranded(ctx context.Context, srv Server, wg *sync.WaitGr
 			continue
 		}
 		r.log.Info("bridge: resuming a job its refused token stopped", "job", job.ID, "kind", job.Kind, "attempt", job.Attempt)
-		r.start(ctx, srv, job, wg, true)
+		r.startParked(ctx, srv, job, wg, sj.Error)
 	}
 }
 
@@ -367,12 +408,14 @@ func storedJob(sj store.ServerJob) Job {
 	return Job{ID: sj.ID, Kind: sj.Kind, LibraryID: sj.LibraryID, Path: sj.Path, Params: sj.Params, Attempt: sj.Attempt}
 }
 
-// run is one running job, and the link it runs on.
+// run is one running job, and the link it runs on. parked is the park message a
+// resumed job had (its first report keeps it parked).
 type run struct {
 	job    Job
 	srv    Server
 	lane   string
 	cancel context.CancelCauseFunc
+	parked string
 }
 
 // strandedJob is a job a refused token stopped, with the link it ran on.
@@ -384,10 +427,20 @@ type strandedJob struct {
 // start runs a job in its lane (resumed: picked up after a restart, already
 // recorded). A job of a kind the Bridge doesn't run is failed at once.
 func (r *Runner) start(ctx context.Context, srv Server, job Job, wg *sync.WaitGroup, resumed bool) {
+	r.launch(ctx, srv, job, wg, resumed, "")
+}
+
+// startParked resumes a recorded job, parked with message when it was ("" when
+// it wasn't).
+func (r *Runner) startParked(ctx context.Context, srv Server, job Job, wg *sync.WaitGroup, parked string) {
+	r.launch(ctx, srv, job, wg, true, parked)
+}
+
+func (r *Runner) launch(ctx context.Context, srv Server, job Job, wg *sync.WaitGroup, resumed bool, parked string) {
 	h, ok := r.handlers[job.Kind]
 	if !resumed {
 		if err := r.store.RecordClaim(ctx, store.ServerJob{ID: job.ID, Kind: job.Kind, LibraryID: job.LibraryID, Path: job.Path,
-			Params: job.Params, Attempt: job.Attempt}); err != nil {
+			Params: job.Params, Attempt: job.Attempt, ServerID: r.opts.ServerID()}); err != nil {
 			r.log.Warn("bridge: recording a claim failed", "job", job.ID, "err", err)
 		}
 	}
@@ -396,7 +449,7 @@ func (r *Runner) start(ctx context.Context, srv Server, job Job, wg *sync.WaitGr
 		return
 	}
 	rctx, cancel := context.WithCancelCause(ctx)
-	ru := &run{job: job, srv: srv, lane: h.Lane(), cancel: cancel}
+	ru := &run{job: job, srv: srv, lane: h.Lane(), cancel: cancel, parked: parked}
 	r.mu.Lock()
 	r.running[job.ID] = ru
 	r.use[ru.lane]++
@@ -432,6 +485,9 @@ func (r *Runner) release(ru *run, stranded bool) {
 // refused token stopped the job (left running, to resume under its claim).
 func (r *Runner) execute(ctx, base context.Context, srv Server, h Handler, ru *run) (stranded bool) {
 	rep := &Reporter{r: r, srv: srv, job: ru.job, cancel: ru.cancel, ctx: ctx, nudge: make(chan struct{}, 1)}
+	if ru.parked != "" {
+		rep.parked, rep.parkMsg = true, ru.parked
+	}
 	if !rep.send() {
 		return r.settle(base, srv, ru, rep, nil, context.Cause(ctx))
 	}
@@ -516,10 +572,11 @@ func (r *Runner) settle(base context.Context, srv Server, ru *run, rep *Reporter
 // 2 KiB, a progress object's 16 KiB and a result object's 64 KiB): a report it
 // refuses is refused for good.
 const (
-	maxErrorText   = 1024
-	maxStepText    = 128
-	maxMessageText = 1024
-	maxResultBytes = 64 << 10
+	maxErrorText     = 1024
+	maxStepText      = 128
+	maxMessageText   = 1024
+	maxResultBytes   = 64 << 10
+	maxProgressBytes = 16 << 10
 )
 
 // errUnreportable fails a job whose result the server would refuse.
@@ -552,10 +609,9 @@ func (r *Runner) report(ctx context.Context, srv Server, sj store.ServerJob) {
 	if len(sj.Result) > 0 && string(sj.Result) != "{}" {
 		u.Result = sj.Result
 	}
-	if sj.Error != "" {
-		e := sj.Error
-		u.Error = &e
-	}
+	// The error goes out even when empty: it clears the message a park left.
+	e := sj.Error
+	u.Error = &e
 	_, err := srv.UpdateJob(ctx, sj.ID, u)
 	switch {
 	case err == nil, errors.Is(err, link.ErrNotHeld):
@@ -625,12 +681,47 @@ func (r *Runner) Cancel(id int64) bool {
 }
 
 // Progress is a job's progress as the server shows it: a step, a sentence, and
-// a count where there is one.
+// a count where there is one. Extra carries a kind's own fields (sidecars.generate's
+// stage, eta_seconds, cost_usd, source, park), sent in the same object beside
+// them; the four fields above always win over an Extra key of the same name.
 type Progress struct {
-	Step    string `json:"step"`
-	Message string `json:"message,omitempty"`
-	Done    int    `json:"done,omitempty"`
-	Total   int    `json:"total,omitempty"`
+	Step    string         `json:"step"`
+	Message string         `json:"message,omitempty"`
+	Done    int            `json:"done,omitempty"`
+	Total   int            `json:"total,omitempty"`
+	Extra   map[string]any `json:"-"`
+}
+
+// MarshalJSON writes the progress as one flat object: Extra's keys beside step,
+// message, done and total. An object over the server's 16 KiB is sent without
+// Extra, which the server would otherwise refuse for good.
+func (p Progress) MarshalJSON() ([]byte, error) {
+	type base Progress
+	if len(p.Extra) == 0 {
+		return json.Marshal(base(p))
+	}
+	out := make(map[string]any, len(p.Extra)+4)
+	for k, v := range p.Extra {
+		out[k] = v
+	}
+	delete(out, "message")
+	delete(out, "done")
+	delete(out, "total")
+	out["step"] = p.Step
+	if p.Message != "" {
+		out["message"] = p.Message
+	}
+	if p.Done != 0 {
+		out["done"] = p.Done
+	}
+	if p.Total != 0 {
+		out["total"] = p.Total
+	}
+	b, err := json.Marshal(out)
+	if err != nil || len(b) > maxProgressBytes {
+		return json.Marshal(base(p))
+	}
+	return b, nil
 }
 
 // Reporter is how a Handler reports progress. It is safe for concurrent use.
@@ -650,6 +741,11 @@ type Reporter struct {
 	// dirty: progress changed since it was last sent (and stored).
 	dirty  bool
 	sentAt time.Time
+	// parked: the job reports needs_attention with parkMsg as its error, until
+	// Unpark; unparked: the next report clears the error the park left.
+	parked   bool
+	parkMsg  string
+	unparked bool
 }
 
 // LocalReporter returns a Reporter that records progress and sends nothing (a
@@ -671,11 +767,62 @@ func (p *Reporter) Progress(pr Progress) {
 	newStep := pr.Step != p.progress.Step
 	p.progress, p.dirty = pr, true
 	p.mu.Unlock()
-	if newStep && p.nudge != nil {
-		select {
-		case p.nudge <- struct{}{}:
-		default:
-		}
+	if newStep {
+		p.wake()
+	}
+}
+
+// Park reports the job as needs_attention with message as its error (code is
+// the park's typed reason, which the handler also puts in its progress) while it
+// keeps running here: it goes on reporting, so the lease holds and a cancel from
+// the server still reaches it. Unpark reports it running again. Both are sent at
+// once, and a job resumed after a restart keeps its park.
+func (p *Reporter) Park(code, message string) {
+	message = clip(strings.TrimSpace(message), maxErrorText)
+	if message == "" {
+		message = code
+	}
+	p.mu.Lock()
+	changed := !p.parked || p.parkMsg != message
+	p.parked, p.parkMsg, p.unparked = true, message, false
+	if changed {
+		p.dirty = true
+	}
+	p.mu.Unlock()
+	if changed {
+		p.wake()
+	}
+}
+
+// Unpark reports the job running again after a Park (nothing when it isn't
+// parked).
+func (p *Reporter) Unpark() {
+	p.mu.Lock()
+	was := p.parked
+	if was {
+		p.parked, p.parkMsg, p.unparked, p.dirty = false, "", true, true
+	}
+	p.mu.Unlock()
+	if was {
+		p.wake()
+	}
+}
+
+// Parked reports whether the job is parked, and with what message.
+func (p *Reporter) Parked() (bool, string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.parked, p.parkMsg
+}
+
+// wake asks the reporting goroutine to send now.
+func (p *Reporter) wake() {
+	if p.nudge == nil {
+		return
+	}
+	select {
+	case p.nudge <- struct{}{}:
+	default:
 	}
 }
 
@@ -722,6 +869,7 @@ func (p *Reporter) send() bool {
 	ctx := p.ctx
 	p.mu.Lock()
 	pr, dirty := p.progress, p.dirty
+	parked, parkMsg, unparked := p.parked, p.parkMsg, p.unparked
 	p.sentAt, p.dirty = time.Now(), false
 	p.mu.Unlock()
 	raw, _ := json.Marshal(pr)
@@ -729,13 +877,32 @@ func (p *Reporter) send() bool {
 		if err := p.r.store.SetServerJobProgress(ctx, p.job.ID, p.job.Attempt, raw); err != nil && ctx.Err() == nil {
 			p.r.log.Warn("bridge: recording progress failed", "job", p.job.ID, "err", err)
 		}
+		if err := p.r.store.SetServerJobPark(ctx, p.job.ID, p.job.Attempt, parkMsg); err != nil && ctx.Err() == nil {
+			p.r.log.Warn("bridge: recording a park failed", "job", p.job.ID, "err", err)
+		}
 	}
 	state := link.StateRunning
 	u := link.Update{Attempt: p.job.Attempt, State: &state}
+	switch {
+	case parked:
+		state = link.StateNeedsAttention
+		u.Error = &parkMsg
+	case unparked:
+		cleared := ""
+		u.Error = &cleared
+	}
 	if pr.Step != "" {
 		u.Progress = raw
 	}
 	got, err := p.srv.UpdateJob(ctx, p.job.ID, u)
+	if err == nil && unparked {
+		// The cleared error reached the server (a report that didn't sends it again).
+		p.mu.Lock()
+		if !p.parked {
+			p.unparked = false
+		}
+		p.mu.Unlock()
+	}
 	switch {
 	case err == nil && got.CancelRequested:
 		p.cancel(errCancelRequested)

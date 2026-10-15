@@ -1783,3 +1783,131 @@ func TestRepairedPhraseResolverReadsRepairedLayer(t *testing.T) {
 		t.Error("a chapter with no repaired file must resolve nothing")
 	}
 }
+
+// TestRunAgentParksOnMonthlyBudget: once this calendar month's agent spend across
+// every book reached the monthly budget, runAgent parks budget_exceeded before
+// invoking the agent, with an automatic re-admit at the start of the next month;
+// last month's spend doesn't count, and no cap (0) never parks.
+func TestRunAgentParksOnMonthlyBudget(t *testing.T) {
+	ctx := context.Background()
+	work := t.TempDir()
+	fake := newFakeRunner()
+	db, exe, book := dbBackedQAExecutor(t, work, fake)
+	exe.bookBudgetUSD = 1000
+	exe.monthlyBudgetUSD = 20
+
+	// $25 spent this month by ANOTHER book: the cap is across every book.
+	other, err := db.CreateBook(ctx, store.NewBook{SourcePath: filepath.Join(work, "other"), WorkDir: filepath.Join(work, "w-other"), Title: "Other"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runID, err := db.StartStageRun(ctx, other.ID, string(state.FactPass), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AddOpenStageRunUsage(ctx, other.ID, string(state.FactPass), "opus", 0, 0, 25); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.FinishStageRun(ctx, runID, true, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	err = exe.checkMonthlyBudget(ctx, state.FactPass, time.Now())
+	var pe *scheduler.ParkError
+	if !errors.As(err, &pe) || pe.Code != state.ParkBudgetExceeded {
+		t.Fatalf("err = %v, want a budget_exceeded park", err)
+	}
+	_, next := monthBounds(time.Now())
+	if !pe.RetryAfter.Equal(next) || next.Day() != 1 || next.Hour() != 0 {
+		t.Fatalf("retry after %v, want the 1st of next month (%v)", pe.RetryAfter, next)
+	}
+	if !strings.Contains(pe.Reason, "25.00") || !strings.Contains(pe.Reason, "20.00") {
+		t.Errorf("reason = %q, want it to name the spend and the budget", pe.Reason)
+	}
+
+	st, err := agent.New(work, string(state.FactPass), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := exe.runAgent(ctx, book, state.FactPass, scheduler.StageReport{}, st, "fact_pass.md", nil, false,
+		func(agent.Result, *agent.Staging) error { return nil }); !errors.As(err, &pe) || pe.Code != state.ParkBudgetExceeded {
+		t.Fatalf("runAgent over the monthly budget = %v, want the park", err)
+	}
+	if n := fake.count(string(state.FactPass)); n != 0 {
+		t.Errorf("agent invoked %d times over the monthly budget, want 0", n)
+	}
+
+	// Next month the spend above is last month's.
+	if err := exe.checkMonthlyBudget(ctx, state.FactPass, next.Add(time.Hour)); err != nil {
+		t.Fatalf("a new month = %v, want room", err)
+	}
+	exe.monthlyBudgetUSD = 0
+	if err := exe.checkMonthlyBudget(ctx, state.FactPass, time.Now()); err != nil {
+		t.Fatalf("no monthly cap = %v", err)
+	}
+}
+
+func TestMonthBounds(t *testing.T) {
+	start, next := monthBounds(time.Date(2026, 12, 31, 23, 30, 0, 0, time.FixedZone("x", -5*3600)))
+	if start != time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC) || next != time.Date(2027, 2, 1, 0, 0, 0, 0, time.UTC) {
+		t.Fatalf("bounds = %v %v (the month is UTC's)", start, next)
+	}
+}
+
+// TestAgentRedetectHook: an executor given AgentRedetect looks for an unavailable
+// runner through it (the Bridge's agent container), never through agent.Select.
+func TestAgentRedetectHook(t *testing.T) {
+	box := newFakeRunner()
+	calls := 0
+	e := NewExecutor(Config{AgentRedetect: func(context.Context) (agent.Runner, agent.Availability) {
+		calls++
+		return box, box.Detect(context.Background())
+	}})
+	r, av := e.ensureAgent(context.Background())
+	if calls != 1 || r != agent.Runner(box) || !av.Available {
+		t.Fatalf("ensureAgent = %v %+v after %d redetects, want the hook's runner", r, av, calls)
+	}
+	// Once available it is kept: no second look.
+	e.ensureAgent(context.Background())
+	if calls != 1 {
+		t.Fatalf("an available runner was looked for again (%d calls)", calls)
+	}
+}
+
+// TestPreflightUnavailableRetry: with AgentPreflightRetry set (the Bridge's
+// agent container), an unavailable runner parks agent_unavailable with a timed
+// self-resume and the embedder's message; unset, it waits for a human.
+func TestPreflightUnavailableRetry(t *testing.T) {
+	ctx := context.Background()
+	work := t.TempDir()
+	down := newFakeRunner()
+	down.available = false
+	_, exe, book := dbBackedQAExecutor(t, work, down)
+	exe.agentRun, exe.agentAvail = nil, agent.Availability{}
+	exe.redetectAgent = func(context.Context) (agent.Runner, agent.Availability) {
+		return down, agent.Availability{Backend: "claude", Detail: "no heartbeat from the agent container"}
+	}
+	st, err := agent.New(work, string(state.FactPass), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := func() *scheduler.ParkError {
+		t.Helper()
+		_, err := exe.runAgent(ctx, book, state.FactPass, scheduler.StageReport{}, st, "fact_pass.md", nil, false,
+			func(agent.Result, *agent.Staging) error { return nil })
+		var pe *scheduler.ParkError
+		if !errors.As(err, &pe) || pe.Code != state.ParkAgentUnavailable {
+			t.Fatalf("err = %v, want an agent_unavailable park", err)
+		}
+		return pe
+	}
+	if pe := run(); !pe.RetryAfter.IsZero() || pe.Reason != AgentUnavailableMsg {
+		t.Fatalf("without a preflight retry: %+v", pe)
+	}
+	exe.agentPreflightRetry = 10 * time.Minute
+	exe.agentUnavailableMsg = "the agent container isn't ready"
+	pe := run()
+	if pe.RetryAfter.Before(time.Now().Add(9*time.Minute)) || pe.Reason != "the agent container isn't ready (no heartbeat from the agent container)" {
+		t.Fatalf("with a preflight retry: %+v", pe)
+	}
+}

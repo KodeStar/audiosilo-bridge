@@ -207,9 +207,11 @@ func (c AgentConfig) Capacity() AgentCapacity {
 		GlobalInvocations: c.QueueConcurrency * c.MaxAgentsPerBook}
 }
 
-// SupervisorConfig controls the bounded orchestration monitor. Enabled defaults on,
-// but AutomaticActions, ModelAssisted and backend failover default off. Thus an old
-// config gains cheap incident visibility without changing production scheduling.
+// SupervisorConfig controls the bounded orchestration monitor. Enabled and
+// AutomaticActions default on: the Bridge's jobs are pressed in the console and
+// left to run, so its bounded recoveries (a retry, a readmit, a requeue, each
+// capped per book per day) are the point, not a risk (sidecars ran with them on).
+// ModelAssisted and backend failover default off.
 type SupervisorConfig struct {
 	Enabled               bool   `yaml:"enabled"`
 	AutomaticActions      bool   `yaml:"automatic_actions"`
@@ -364,6 +366,7 @@ func Default() Config {
 		Pricing:     pricing.Table{Version: "unconfigured-v1", Rates: map[string]pricing.Rate{}},
 		Supervisor: SupervisorConfig{
 			Enabled:               true,
+			AutomaticActions:      true,
 			IntervalSeconds:       DefaultSupervisorIntervalSeconds,
 			StaleMinutes:          DefaultSupervisorStaleMinutes,
 			NoProgressMinutes:     DefaultSupervisorNoProgressMins,

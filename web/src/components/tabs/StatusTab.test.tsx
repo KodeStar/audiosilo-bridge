@@ -1,16 +1,17 @@
 import { describe, expect, it, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { StatusTab } from './StatusTab';
 import { ApiClient } from '@/api/client';
 import { lastCall, mockFetch } from '@/test/fetchMock';
-import { pairedStatus, statusFixture } from '@/test/fixtures';
+import { engineFixture, pairedStatus, statusFixture } from '@/test/fixtures';
 
 const api = () => new ApiClient({ getToken: () => 't', onSignedOut: vi.fn() });
 
 describe('StatusTab', () => {
   it('pairs with the address and the code, and shows a 422 verbatim', async () => {
     const { calls } = mockFetch({
+      'GET /api/engine': { body: engineFixture() },
       'GET /api/status': {
         body: statusFixture({
           pairing: {
@@ -48,6 +49,7 @@ describe('StatusTab', () => {
 
   it('shows the pairing and lanes, and unpairs after a confirm', async () => {
     const { calls } = mockFetch({
+      'GET /api/engine': { body: engineFixture() },
       'GET /api/status': { body: pairedStatus({ public_url: '' }) },
       'POST /api/unpair': { body: statusFixture() },
     });
@@ -65,5 +67,36 @@ describe('StatusTab', () => {
 
     expect(await screen.findByLabelText('Pairing code')).toBeInTheDocument();
     expect(lastCall(calls, 'POST', '/api/unpair')).toBeDefined();
+  });
+
+  it('shows the engine: the agent container, the budget and the retention', async () => {
+    mockFetch({
+      'GET /api/status': { body: pairedStatus() },
+      'GET /api/engine': {
+        body: engineFixture({
+          agent: {
+            ...engineFixture().agent,
+            available: false,
+            detail: 'no heartbeat from the agent container',
+          },
+          month_spent_usd: 40,
+          transcript_retention_days: 0,
+        }),
+      },
+    });
+    render(<StatusTab client={api()} />);
+    const card = await screen.findByRole('region', { name: 'Characters and recaps' });
+    expect(await within(card).findByText('Agent not ready')).toBeInTheDocument();
+    expect(
+      within(card).getByText('Not ready: no heartbeat from the agent container'),
+    ).toBeInTheDocument();
+    expect(within(card).getByText('claude 2.1.300: subscription login')).toBeInTheDocument();
+    expect(within(card).getByText('$40.00 of $100.00 spent this month')).toBeInTheDocument();
+    expect(within(card).getByRole('progressbar', { name: 'Monthly budget spent' })).toHaveAttribute(
+      'aria-valuenow',
+      '40',
+    );
+    expect(within(card).getByText('Deleted as soon as the job ends')).toBeInTheDocument();
+    expect(within(card).getByText('whisper-cpp (cpu)')).toBeInTheDocument();
   });
 });

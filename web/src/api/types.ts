@@ -2,8 +2,9 @@
 // internal/api/api.go (the routes and envelopes), internal/app/conn.go (Pairing),
 // internal/mapping/mapping.go (Entry, FileCheck), internal/link/link.go
 // (Library, LibraryStatus, Worker), internal/store/serverjobs.go (ServerJob),
-// internal/jobs/jobs.go (Lane, Progress), internal/logring/logring.go (Entry)
-// and internal/verify/verify.go (Result). A change there is a change here.
+// internal/jobs/jobs.go (Lane, Progress), internal/logring/logring.go (Entry),
+// internal/verify/verify.go (Result) and internal/generate (the sidecars.generate
+// progress and Result). A change there is a change here.
 
 // POST /api/login
 export interface LoginResponse {
@@ -101,12 +102,49 @@ export interface SettingsUpdate {
 // The states a job can have on the Bridge (store.Job*).
 export type JobState = 'running' | 'done' | 'failed' | 'needs_attention' | 'cancelled' | 'lost';
 
-// jobs.Progress
+// A park (a job waiting on something: the engine's park codes, plus the
+// Bridge's own book_not_writable and library_not_writable).
+export interface Park {
+  code: string;
+  // What it needs, in words ("" for a code with no advice).
+  hint: string;
+  // RFC 3339: an availability park resumes by itself then.
+  retry_at?: string;
+}
+
+// The sources a sidecars.generate run reads.
+export type GenerateSource = 'audio' | 'ebook';
+
+// jobs.Progress, with the fields a kind adds beside them (Extra; sidecars.generate
+// sends stage, eta_seconds, cost_usd, source and, while parked, park).
 export interface Progress {
   step?: string;
   message?: string;
   done?: number;
   total?: number;
+  // The engine's stage (state.State).
+  stage?: string;
+  // The engine's whole-book ETA, in seconds.
+  eta_seconds?: number;
+  // Agent spend so far, in US dollars.
+  cost_usd?: number;
+  source?: GenerateSource;
+  park?: Park;
+}
+
+// generate.Result (a sidecars.generate job's result).
+export interface GenerateResult {
+  library_id: number;
+  path: string;
+  source: GenerateSource;
+  // The names written in the book's .audiosilo/ folder.
+  files: string[];
+  characters: number;
+  recaps: number;
+  cost_usd: number;
+  work_id: string;
+  // Intake issue links, with contribute = issue only.
+  contributed?: Record<string, string>;
 }
 
 // store.ServerJob
@@ -117,10 +155,13 @@ export interface ServerJob {
   path: string | null;
   params: unknown;
   attempt: number;
+  // The server that handed the job out ("" on jobs from before Phase 1a).
+  server_id: string;
   // Typed loosely (any string still fits) so a state added later still renders.
   state: JobState | (string & {});
   progress: Progress | null;
   result: unknown;
+  // A finished job's error, or, while it runs parked, the park's message.
   error: string;
   reported: boolean;
   claimed_at: string;
@@ -182,4 +223,49 @@ export interface Worker {
 // GET /api/workers
 export interface WorkersResponse {
   workers: Worker[];
+}
+
+// api.EngineCLI: one agent CLI in the agent container (the kind of credential,
+// never the credential).
+export interface EngineCLI {
+  version: string;
+  // "oauth_token" | "api_key" (claude), "login" | "api_key" (codex), "" for none.
+  credential: string;
+}
+
+// api.EngineAgent: the agent container as the Bridge last saw it.
+export interface EngineAgent {
+  backend: string;
+  // The container answers and the backend's CLI has a credential.
+  available: boolean;
+  detail: string;
+  version: string;
+  slots: number;
+  heartbeat_at: string | null;
+  clis: Record<string, EngineCLI>;
+  // The credential is a subscription login (costs are notional).
+  subscription: boolean;
+  staging_dir: string;
+}
+
+// api.EngineASR
+export interface EngineASR {
+  backend: string;
+  available: boolean;
+  device: string;
+  detail: string;
+}
+
+// GET /api/engine
+export interface Engine {
+  // The engine is up (its first start may be downloading ffmpeg).
+  started: boolean;
+  agent: EngineAgent;
+  asr: EngineASR;
+  // 0 = no monthly cap.
+  monthly_budget_usd: number;
+  month_spent_usd: number;
+  book_budget_usd: number;
+  // A finished book's transcripts are deleted this long after its job (0 = at once).
+  transcript_retention_days: number;
 }
