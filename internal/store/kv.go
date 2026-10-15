@@ -31,6 +31,12 @@ func (db *DB) SetSetting(ctx context.Context, key, value string) error {
 	return err
 }
 
+// DeleteSetting removes a key/value setting (a no-op when absent).
+func (db *DB) DeleteSetting(ctx context.Context, key string) error {
+	_, err := db.sql.ExecContext(ctx, `DELETE FROM settings WHERE key = ?`, key)
+	return err
+}
+
 // --- durable event log ---
 
 // InsertEvent appends a published event to the durable log. hubID is the SSE

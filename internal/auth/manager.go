@@ -1,5 +1,5 @@
 // Package auth manages the single admin password and opaque session tokens for
-// the audiosilo-sidecars daemon. The first-run password is generated once and
+// the Bridge's own page (its LAN UI). The first-run password is generated once and
 // printed once in the startup banner (never stored or logged in plaintext);
 // session tokens are stored only as SHA-256 hashes. The storage backend is
 // pluggable (Store) so M1 can swap the JSON file store for SQLite.
@@ -109,9 +109,10 @@ func (m *Manager) Logout(token string) error {
 }
 
 // ChangePassword verifies current and sets a new password hash. It enforces the
-// minimum length on the new password. The existing sessions are intentionally
-// left intact (the caller stays signed in).
-func (m *Manager) ChangePassword(current, newPassword string) error {
+// minimum length on the new password, and signs out every other session (a
+// password change is how a leaked session is cut off); the session keep (the
+// caller's token) stays signed in.
+func (m *Manager) ChangePassword(current, newPassword, keep string) error {
 	hash, err := m.store.LoadAuth()
 	if err != nil {
 		return err
@@ -133,5 +134,8 @@ func (m *Manager) ChangePassword(current, newPassword string) error {
 	if err != nil {
 		return err
 	}
-	return m.store.SaveAuth(enc)
+	if err := m.store.SaveAuth(enc); err != nil {
+		return err
+	}
+	return m.store.RemoveSessionsExcept(hashSecret(keep))
 }

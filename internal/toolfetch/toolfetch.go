@@ -258,7 +258,7 @@ func verified(ctx context.Context, path string, log *slog.Logger) string {
 
 // download fetches and extracts ffmpeg + ffprobe into dir per the platform spec.
 func download(ctx context.Context, s spec, dir string) error {
-	tmp, err := os.MkdirTemp("", "audiosilo-sidecars-ffmpeg-")
+	tmp, err := os.MkdirTemp("", "audiosilo-bridge-ffmpeg-")
 	if err != nil {
 		return err
 	}

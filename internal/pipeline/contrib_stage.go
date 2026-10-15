@@ -86,8 +86,9 @@ const (
 	contribDir       = "contrib"
 	coreProposalName = "core_proposal.json"
 	// coreProvenanceLine is the honest, short Sources line the prefilled core
-	// proposal carries (the folder scan is the origin of the factual fields).
-	coreProvenanceLine = "audiosilo-sidecars folder scan (embedded tags)"
+	// proposal carries (the server's index of the book's tags is the origin of the
+	// factual fields).
+	coreProvenanceLine = "AudioSilo Bridge (the server's library index: embedded tags)"
 )
 
 // contribArtifact is one sidecar dimension to contribute (characters or recaps): the

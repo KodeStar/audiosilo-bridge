@@ -837,7 +837,7 @@ func TestRetranscribeLoopsBackToQASweep(t *testing.T) {
 	}
 	seedPlan(t, work, qa.PlanEntry{Chapter: 1, Action: qa.ActionAccept, Reason: "benign"})
 
-	db, err := store.Open(context.Background(), filepath.Join(dir, "sidecars.db"))
+	db, err := store.Open(context.Background(), filepath.Join(dir, store.FileName))
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}

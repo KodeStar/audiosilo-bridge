@@ -1,10 +1,11 @@
-// Package config loads and validates the audiosilo-sidecars daemon configuration.
+// Package config loads and validates the AudioSilo Bridge configuration.
 //
 // Configuration is read from config.yaml inside the data directory and can be
-// overridden by environment variables prefixed AUDIOSILO_SIDECARS_. On first run
+// overridden by environment variables prefixed AUDIOSILO_BRIDGE_. On first run
 // the file does not exist and Load returns a Config populated with defaults;
-// callers persist it via Save. Secrets (API keys, PATs) are NEVER stored here -
-// they live in internal/secrets (OS keychain / 0600 fallback).
+// callers persist it via Save. Secrets (API keys, PATs, the server token) are
+// NEVER stored here - they live in internal/secrets (sealed files under
+// <data>/secrets).
 package config
 
 import (
@@ -26,9 +27,11 @@ import (
 // FileName is the config file inside the data directory.
 const FileName = "config.yaml"
 
-// DefaultListen is the default bind address: loopback only, so the daemon is not
-// exposed to the network unless the operator opts in.
-const DefaultListen = "127.0.0.1:8090"
+// DefaultListen is the default bind address of the Bridge's own page: every
+// interface, since the Bridge usually runs in a container that is reached from
+// the LAN. The page answers only loopback and private addresses, and always
+// asks for its password (internal/api).
+const DefaultListen = ":8091"
 
 // DefaultConcurrency is the deprecated legacy agent.concurrency default. Legacy
 // configurations keep using it as both the book-lane capacity and the global
@@ -286,17 +289,18 @@ type ToolsConfig struct {
 
 // Config is the daemon configuration.
 type Config struct {
-	// Listen is the HTTP bind address (host:port). Defaults to loopback.
+	// Listen is the HTTP bind address (host:port) of the Bridge's own page.
 	Listen string `yaml:"listen"`
-	// CORSOrigins is the allow-list of browser origins permitted to call the API
-	// cross-origin (for a separately-deployed UI container). Empty = same-origin
-	// only, which is the secure default.
-	CORSOrigins []string `yaml:"cors_origins"`
-	// LibraryRoots restricts which local directories a scan may target. Empty =
-	// allow any local path (the loopback trust model); when non-empty, a scan
-	// path must be inside one of these absolute roots. Each entry must be an
-	// absolute path.
-	LibraryRoots []string `yaml:"library_roots"`
+	// Server is the AudioSilo server the Bridge pairs with (bridge.go).
+	Server ServerConfig `yaml:"server"`
+	// PublicURL is the address of the Bridge's own page as the LAN reaches it,
+	// which the server's console links to ("" for no link).
+	PublicURL string `yaml:"public_url"`
+	// Libraries maps server libraries to where the Bridge sees them; a library
+	// with no entry is looked for at the server's own root path.
+	Libraries []LibraryMapping `yaml:"libraries"`
+	// Mapping is how often the mappings are checked.
+	Mapping MappingConfig `yaml:"mapping"`
 	// Metadata configures the community metadata API client.
 	Metadata MetadataConfig `yaml:"metadata"`
 	// Tools locates ffmpeg/ffprobe (resolved at startup, see internal/toolfetch).
@@ -320,6 +324,8 @@ type Config struct {
 	// legacyCustomRepo is a custom legacy contribution.repo loaded without an
 	// explicit community_repo; Validate refuses it (see foldLegacyContribution).
 	legacyCustomRepo string
+	// fromEnv names the Bridge settings the environment set (EnvSet).
+	fromEnv map[string]bool
 }
 
 // Deprecations returns the notices Load collected about deprecated settings it
@@ -329,12 +335,12 @@ func (c Config) Deprecations() []string { return append([]string(nil), c.depreca
 // Default returns a Config with secure defaults.
 func Default() Config {
 	return Config{
-		Listen:       DefaultListen,
-		CORSOrigins:  []string{},
-		LibraryRoots: []string{},
-		Metadata:     MetadataConfig{BaseURL: DefaultMetadataBaseURL},
-		Tools:        ToolsConfig{AutoDownload: DefaultAutoDownload},
-		ASR:          ASRConfig{Backend: DefaultASRBackend, Language: DefaultASRLanguage},
+		Listen:    DefaultListen,
+		Libraries: []LibraryMapping{},
+		Mapping:   MappingConfig{CheckMinutes: DefaultMappingCheckMinutes},
+		Metadata:  MetadataConfig{BaseURL: DefaultMetadataBaseURL},
+		Tools:     ToolsConfig{AutoDownload: DefaultAutoDownload},
+		ASR:       ASRConfig{Backend: DefaultASRBackend, Language: DefaultASRLanguage},
 		Agent: AgentConfig{
 			QueueConcurrency: DefaultAgentQueueConcurrency,
 			MaxAgentsPerBook: DefaultMaxAgentsPerBook,
@@ -390,7 +396,11 @@ func defaultClaudeModels() map[string]string {
 
 // Load reads config.yaml from dataDir, applies environment overrides, validates,
 // and returns the result. A missing file yields defaults (first run).
-func Load(dataDir string) (Config, error) {
+func Load(dataDir string) (Config, error) { return load(dataDir, true) }
+
+// load is Load, with or without the environment (SaveFile edits the file's own
+// values, never the environment's).
+func load(dataDir string, withEnv bool) (Config, error) {
 	cfg := Default()
 	path := filepath.Join(dataDir, FileName)
 	raw, err := os.ReadFile(path) //nolint:gosec // path is operator-controlled data dir
@@ -443,9 +453,12 @@ func Load(dataDir string) (Config, error) {
 		}
 	}
 	repoSource := "config.yaml contribution.repo"
-	env := applyEnv(&cfg)
+	var env envSeen
+	if withEnv {
+		env = applyEnv(&cfg)
+	}
 	if env.legacyRepo {
-		repoSource = "AUDIOSILO_SIDECARS_CONTRIBUTION_REPO"
+		repoSource = "AUDIOSILO_BRIDGE_CONTRIBUTION_REPO"
 	}
 	foldLegacyContribution(&cfg, capacityKeys.Contribution.CoreRepo != nil || env.coreRepo,
 		capacityKeys.Contribution.CommunityRepo != nil || env.communityRepo, repoSource)
@@ -469,12 +482,7 @@ func Load(dataDir string) (Config, error) {
 	if strings.TrimSpace(cfg.ASR.Language) == "" {
 		cfg.ASR.Language = DefaultASRLanguage
 	}
-	if cfg.CORSOrigins == nil {
-		cfg.CORSOrigins = []string{}
-	}
-	if cfg.LibraryRoots == nil {
-		cfg.LibraryRoots = []string{}
-	}
+	normalizeBridge(&cfg)
 	// Normalize contribution defaults so a config predating M7 (no contribution
 	// section) or with an empty mode/repo/interval resolves to working values. AutoPurge
 	// is a bool with no empty sentinel, so an explicit false is honored as-is.
@@ -503,47 +511,42 @@ func Load(dataDir string) (Config, error) {
 // legacy-repo fold.
 type envSeen struct{ coreRepo, communityRepo, legacyRepo bool }
 
-// applyEnv overlays AUDIOSILO_SIDECARS_* environment variables onto cfg.
+// applyEnv overlays AUDIOSILO_BRIDGE_* environment variables onto cfg.
 func applyEnv(cfg *Config) (seen envSeen) {
-	if v, ok := os.LookupEnv("AUDIOSILO_SIDECARS_LISTEN"); ok {
+	if v, ok := os.LookupEnv("AUDIOSILO_BRIDGE_LISTEN"); ok {
 		cfg.Listen = v
 	}
-	if v, ok := os.LookupEnv("AUDIOSILO_SIDECARS_CORS_ORIGINS"); ok {
-		cfg.CORSOrigins = splitList(v)
-	}
-	if v, ok := os.LookupEnv("AUDIOSILO_SIDECARS_LIBRARY_ROOTS"); ok {
-		cfg.LibraryRoots = splitList(v)
-	}
-	if v, ok := os.LookupEnv("AUDIOSILO_SIDECARS_METADATA_BASE_URL"); ok {
+	applyBridgeEnv(cfg)
+	if v, ok := os.LookupEnv("AUDIOSILO_BRIDGE_METADATA_BASE_URL"); ok {
 		cfg.Metadata.BaseURL = strings.TrimSpace(v)
 	}
-	if v, ok := os.LookupEnv("AUDIOSILO_SIDECARS_TOOLS_FFMPEG_PATH"); ok {
+	if v, ok := os.LookupEnv("AUDIOSILO_BRIDGE_TOOLS_FFMPEG_PATH"); ok {
 		cfg.Tools.FFmpegPath = v
 	}
-	if v, ok := os.LookupEnv("AUDIOSILO_SIDECARS_TOOLS_FFPROBE_PATH"); ok {
+	if v, ok := os.LookupEnv("AUDIOSILO_BRIDGE_TOOLS_FFPROBE_PATH"); ok {
 		cfg.Tools.FFprobePath = v
 	}
-	if v, ok := os.LookupEnv("AUDIOSILO_SIDECARS_TOOLS_AUTO_DOWNLOAD"); ok {
+	if v, ok := os.LookupEnv("AUDIOSILO_BRIDGE_TOOLS_AUTO_DOWNLOAD"); ok {
 		if b, err := strconv.ParseBool(strings.TrimSpace(v)); err == nil {
 			cfg.Tools.AutoDownload = b
 		}
 	}
-	if v, ok := os.LookupEnv("AUDIOSILO_SIDECARS_ASR_BACKEND"); ok {
+	if v, ok := os.LookupEnv("AUDIOSILO_BRIDGE_ASR_BACKEND"); ok {
 		cfg.ASR.Backend = strings.TrimSpace(v)
 	}
-	if v, ok := os.LookupEnv("AUDIOSILO_SIDECARS_ASR_MODEL"); ok {
+	if v, ok := os.LookupEnv("AUDIOSILO_BRIDGE_ASR_MODEL"); ok {
 		cfg.ASR.Model = strings.TrimSpace(v)
 	}
-	if v, ok := os.LookupEnv("AUDIOSILO_SIDECARS_ASR_LANGUAGE"); ok {
+	if v, ok := os.LookupEnv("AUDIOSILO_BRIDGE_ASR_LANGUAGE"); ok {
 		cfg.ASR.Language = strings.TrimSpace(v)
 	}
-	if v, ok := os.LookupEnv("AUDIOSILO_SIDECARS_ASR_WHISPER_CLI_PATH"); ok {
+	if v, ok := os.LookupEnv("AUDIOSILO_BRIDGE_ASR_WHISPER_CLI_PATH"); ok {
 		cfg.ASR.WhisperCLIPath = v
 	}
-	if v, ok := os.LookupEnv("AUDIOSILO_SIDECARS_AGENT_BACKEND"); ok {
+	if v, ok := os.LookupEnv("AUDIOSILO_BRIDGE_AGENT_BACKEND"); ok {
 		cfg.Agent.Backend = v
 	}
-	if v, ok := os.LookupEnv("AUDIOSILO_SIDECARS_AGENT_CONCURRENCY"); ok {
+	if v, ok := os.LookupEnv("AUDIOSILO_BRIDGE_AGENT_CONCURRENCY"); ok {
 		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
 			if n == 0 {
 				n = DefaultConcurrency
@@ -552,8 +555,8 @@ func applyEnv(cfg *Config) (seen envSeen) {
 			cfg.Agent.QueueConcurrency, cfg.Agent.MaxAgentsPerBook = 0, 0
 		}
 	}
-	queueRaw, queueSet := os.LookupEnv("AUDIOSILO_SIDECARS_AGENT_QUEUE_CONCURRENCY")
-	perBookRaw, perBookSet := os.LookupEnv("AUDIOSILO_SIDECARS_AGENT_MAX_AGENTS_PER_BOOK")
+	queueRaw, queueSet := os.LookupEnv("AUDIOSILO_BRIDGE_AGENT_QUEUE_CONCURRENCY")
+	perBookRaw, perBookSet := os.LookupEnv("AUDIOSILO_BRIDGE_AGENT_MAX_AGENTS_PER_BOOK")
 	queueValue, queueErr := strconv.Atoi(strings.TrimSpace(queueRaw))
 	perBookValue, perBookErr := strconv.Atoi(strings.TrimSpace(perBookRaw))
 	validQueue, validPerBook := queueSet && queueErr == nil, perBookSet && perBookErr == nil
@@ -573,63 +576,63 @@ func applyEnv(cfg *Config) (seen envSeen) {
 			cfg.Agent.MaxAgentsPerBook = perBookValue
 		}
 	}
-	if v, ok := os.LookupEnv("AUDIOSILO_SIDECARS_AGENT_CLAUDE_PATH"); ok {
+	if v, ok := os.LookupEnv("AUDIOSILO_BRIDGE_AGENT_CLAUDE_PATH"); ok {
 		cfg.Agent.ClaudePath = v
 	}
-	if v, ok := os.LookupEnv("AUDIOSILO_SIDECARS_AGENT_CODEX_PATH"); ok {
+	if v, ok := os.LookupEnv("AUDIOSILO_BRIDGE_AGENT_CODEX_PATH"); ok {
 		cfg.Agent.CodexPath = v
 	}
-	if v, ok := os.LookupEnv("AUDIOSILO_SIDECARS_AGENT_TIMEOUT_MINUTES"); ok {
+	if v, ok := os.LookupEnv("AUDIOSILO_BRIDGE_AGENT_TIMEOUT_MINUTES"); ok {
 		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
 			cfg.Agent.TimeoutMinutes = n
 		}
 	}
-	if v, ok := os.LookupEnv("AUDIOSILO_SIDECARS_AGENT_BOOK_BUDGET_USD"); ok {
+	if v, ok := os.LookupEnv("AUDIOSILO_BRIDGE_AGENT_BOOK_BUDGET_USD"); ok {
 		if f, err := strconv.ParseFloat(strings.TrimSpace(v), 64); err == nil {
 			cfg.Agent.BookBudgetUSD = f
 		}
 	}
-	if v, ok := os.LookupEnv("AUDIOSILO_SIDECARS_SUPERVISOR_ENABLED"); ok {
+	if v, ok := os.LookupEnv("AUDIOSILO_BRIDGE_SUPERVISOR_ENABLED"); ok {
 		if b, err := strconv.ParseBool(strings.TrimSpace(v)); err == nil {
 			cfg.Supervisor.Enabled = b
 		}
 	}
-	if v, ok := os.LookupEnv("AUDIOSILO_SIDECARS_SUPERVISOR_AUTOMATIC_ACTIONS"); ok {
+	if v, ok := os.LookupEnv("AUDIOSILO_BRIDGE_SUPERVISOR_AUTOMATIC_ACTIONS"); ok {
 		if b, err := strconv.ParseBool(strings.TrimSpace(v)); err == nil {
 			cfg.Supervisor.AutomaticActions = b
 		}
 	}
-	if v, ok := os.LookupEnv("AUDIOSILO_SIDECARS_SUPERVISOR_MODEL_ASSISTED"); ok {
+	if v, ok := os.LookupEnv("AUDIOSILO_BRIDGE_SUPERVISOR_MODEL_ASSISTED"); ok {
 		if b, err := strconv.ParseBool(strings.TrimSpace(v)); err == nil {
 			cfg.Supervisor.ModelAssisted = b
 		}
 	}
-	if v, ok := os.LookupEnv("AUDIOSILO_SIDECARS_CONTRIBUTION_MODE"); ok {
+	if v, ok := os.LookupEnv("AUDIOSILO_BRIDGE_CONTRIBUTION_MODE"); ok {
 		cfg.Contribution.Mode = strings.TrimSpace(v)
 	}
-	if v, ok := os.LookupEnv("AUDIOSILO_SIDECARS_CONTRIBUTION_CORE_REPO"); ok {
+	if v, ok := os.LookupEnv("AUDIOSILO_BRIDGE_CONTRIBUTION_CORE_REPO"); ok {
 		cfg.Contribution.CoreRepo = strings.TrimSpace(v)
 		seen.coreRepo = true
 	}
-	if v, ok := os.LookupEnv("AUDIOSILO_SIDECARS_CONTRIBUTION_REPO"); ok {
+	if v, ok := os.LookupEnv("AUDIOSILO_BRIDGE_CONTRIBUTION_REPO"); ok {
 		cfg.Contribution.Repo = strings.TrimSpace(v)
 		seen.legacyRepo = true
 	}
-	if v, ok := os.LookupEnv("AUDIOSILO_SIDECARS_CONTRIBUTION_COMMUNITY_REPO"); ok {
+	if v, ok := os.LookupEnv("AUDIOSILO_BRIDGE_CONTRIBUTION_COMMUNITY_REPO"); ok {
 		cfg.Contribution.CommunityRepo = strings.TrimSpace(v)
 		seen.communityRepo = true
 	}
-	if v, ok := os.LookupEnv("AUDIOSILO_SIDECARS_CONTRIBUTION_AUTO_PURGE"); ok {
+	if v, ok := os.LookupEnv("AUDIOSILO_BRIDGE_CONTRIBUTION_AUTO_PURGE"); ok {
 		if b, err := strconv.ParseBool(strings.TrimSpace(v)); err == nil {
 			cfg.Contribution.AutoPurge = b
 		}
 	}
-	if v, ok := os.LookupEnv("AUDIOSILO_SIDECARS_CONTRIBUTION_POLL_MINUTES"); ok {
+	if v, ok := os.LookupEnv("AUDIOSILO_BRIDGE_CONTRIBUTION_POLL_MINUTES"); ok {
 		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
 			cfg.Contribution.PollMinutes = n
 		}
 	}
-	if v, ok := os.LookupEnv("AUDIOSILO_SIDECARS_CONTRIBUTION_API_BASE_URL"); ok {
+	if v, ok := os.LookupEnv("AUDIOSILO_BRIDGE_CONTRIBUTION_API_BASE_URL"); ok {
 		cfg.Contribution.APIBaseURL = strings.TrimSpace(v)
 	}
 	return seen
@@ -663,18 +666,6 @@ func foldLegacyContribution(cfg *Config, explicitCore, explicitCommunity bool, r
 			"%s is deprecated: %q is used as contribution.core_repo (add-work proposals); "+
 				"characters/recaps go to contribution.community_repo", repoSource, legacy))
 	}
-}
-
-// splitList parses a comma-separated env value into a trimmed, non-empty slice.
-func splitList(v string) []string {
-	parts := strings.Split(v, ",")
-	out := make([]string, 0, len(parts))
-	for _, p := range parts {
-		if s := strings.TrimSpace(p); s != "" {
-			out = append(out, s)
-		}
-	}
-	return out
 }
 
 func normalizeSupervisor(c *SupervisorConfig) {
@@ -819,15 +810,8 @@ func (c Config) Validate() error {
 			return fmt.Errorf("agent.openai has key %q, which is not an agent stage", key)
 		}
 	}
-	for _, o := range c.CORSOrigins {
-		if err := validateOrigin(o); err != nil {
-			return err
-		}
-	}
-	for _, root := range c.LibraryRoots {
-		if !filepath.IsAbs(root) {
-			return fmt.Errorf("library_roots entry %q must be an absolute path", root)
-		}
+	if err := c.validateBridge(); err != nil {
+		return err
 	}
 	if c.Metadata.BaseURL != "" {
 		u, err := url.Parse(c.Metadata.BaseURL)
@@ -881,38 +865,7 @@ func validateRepo(field, repo string) error {
 	return nil
 }
 
-// validateOrigin rejects anything that is not a bare http(s) origin
-// (scheme://host[:port], no path/query/fragment) - the exact form a browser
-// sends in an Origin header and the CORS layer compares against.
-func validateOrigin(o string) error {
-	u, err := url.Parse(o)
-	if err != nil {
-		return fmt.Errorf("invalid cors origin %q: %w", o, err)
-	}
-	if u.Scheme != "http" && u.Scheme != "https" {
-		return fmt.Errorf("invalid cors origin %q: scheme must be http or https", o)
-	}
-	if u.Host == "" {
-		return fmt.Errorf("invalid cors origin %q: missing host", o)
-	}
-	if u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
-		return fmt.Errorf("invalid cors origin %q: must be scheme://host[:port] with no path", o)
-	}
-	return nil
-}
-
-// Save writes cfg to config.yaml in dataDir with 0600 permissions.
-func Save(dataDir string, cfg Config) error {
-	if err := os.MkdirAll(dataDir, 0o700); err != nil {
-		return fmt.Errorf("create data dir: %w", err)
-	}
-	out, err := yaml.Marshal(cfg)
-	if err != nil {
-		return fmt.Errorf("marshal config: %w", err)
-	}
-	path := filepath.Join(dataDir, FileName)
-	if err := os.WriteFile(path, out, 0o600); err != nil {
-		return fmt.Errorf("write %s: %w", path, err)
-	}
-	return nil
-}
+// Save writes cfg to config.yaml in dataDir with 0600 permissions, values the
+// environment set included (tests and tools; the Bridge itself edits the file
+// through SaveFile).
+func Save(dataDir string, cfg Config) error { return writeFile(dataDir, cfg) }

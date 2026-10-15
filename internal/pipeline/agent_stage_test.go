@@ -617,7 +617,7 @@ func TestQAAdjudicateInvalidPlanRetries(t *testing.T) {
 
 func TestQAAdjudicateRoundCapParks(t *testing.T) {
 	dir := t.TempDir()
-	db, err := store.Open(context.Background(), filepath.Join(dir, "sidecars.db"))
+	db, err := store.Open(context.Background(), filepath.Join(dir, store.FileName))
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
@@ -1251,7 +1251,7 @@ func TestAutoAcceptRepairedMidWindow(t *testing.T) {
 
 func TestQAAdjudicateRecordsUsage(t *testing.T) {
 	dir := t.TempDir()
-	db, err := store.Open(context.Background(), filepath.Join(dir, "sidecars.db"))
+	db, err := store.Open(context.Background(), filepath.Join(dir, store.FileName))
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
@@ -1300,7 +1300,7 @@ func TestQAAdjudicateRecordsUsage(t *testing.T) {
 
 func TestValidationRetryPersistsEachInvocationOutcome(t *testing.T) {
 	dir := t.TempDir()
-	db, err := store.Open(context.Background(), filepath.Join(dir, "sidecars.db"))
+	db, err := store.Open(context.Background(), filepath.Join(dir, store.FileName))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -648,6 +648,56 @@ func TestAuthStoreRoundTrip(t *testing.T) {
 	}
 }
 
+// Security: a password change signs out every other session through the
+// SQLite store too (denied: the others are gone), the caller's own staying
+// signed in (allowed).
+func TestAuthStoreRemoveSessionsExcept(t *testing.T) {
+	db := open(t)
+	as := db.AuthStore()
+	for _, h := range []string{"mine", "leaked", "other"} {
+		if err := as.AddSession(h, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := as.RemoveSessionsExcept("mine"); err != nil {
+		t.Fatal(err)
+	}
+	if ok, _ := as.HasSession("mine"); !ok {
+		t.Fatal("the caller's session was signed out")
+	}
+	for _, h := range []string{"leaked", "other"} {
+		if ok, _ := as.HasSession(h); ok {
+			t.Fatalf("session %q survived", h)
+		}
+	}
+}
+
+// The work a book was matched to when it was enqueued is persisted (the
+// pipeline and contribution stages read it back instead of resolving again).
+func TestBookWorkIDRoundTrip(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	b, err := db.CreateBook(ctx, NewBook{
+		SourcePath: "/b/w", WorkDir: "/w", Title: "W",
+		WorkID: "work-42", Coverage: json.RawMessage(`{"available":true}`),
+	})
+	if err != nil {
+		t.Fatalf("CreateBook: %v", err)
+	}
+	got, err := db.GetBook(ctx, b.ID)
+	if err != nil || got.WorkID != "work-42" {
+		t.Fatalf("GetBook work_id = %q err=%v", got.WorkID, err)
+	}
+	// A book with no match stores an empty work_id, not NULL.
+	b2, err := db.CreateBook(ctx, NewBook{SourcePath: "/b/none", WorkDir: "/w2", Title: "None"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := db.GetBook(ctx, b2.ID); err != nil || got.WorkID != "" {
+		t.Fatalf("unmatched work_id = %q err=%v, want empty", got.WorkID, err)
+	}
+}
+
 // TestAuthStoreReopenPersists is the real reopen regression: a file-backed store
 // keeps the provisioned admin, its sessions, and its password across a Close/Open
 // cycle (the durable-auth-in-SQLite guarantee the M1 migration off the JSON files

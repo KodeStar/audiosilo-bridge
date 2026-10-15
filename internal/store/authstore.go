@@ -67,3 +67,9 @@ func (a *AuthStore) RemoveSession(tokenHash string) error {
 	_, err := a.db.sql.ExecContext(a.ctx, `DELETE FROM sessions WHERE token_hash=?`, tokenHash)
 	return err
 }
+
+// RemoveSessionsExcept deletes every session but keepHash's.
+func (a *AuthStore) RemoveSessionsExcept(keepHash string) error {
+	_, err := a.db.sql.ExecContext(a.ctx, `DELETE FROM sessions WHERE token_hash != ?`, keepHash)
+	return err
+}

@@ -1,0 +1,9 @@
+bin/
+data/
+dist/
+web/node_modules/
+web/dist/
+internal/web/dist/
+benchmarks/private/
+benchmarks/results/
+.git/

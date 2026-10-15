@@ -149,6 +149,15 @@ type BookIdentity struct {
 	ParentDir  string
 }
 
+// IdentitySourceEpub is the Sources value recording that an identity field was read
+// from an epub's OPF rather than from the audiobook's tags.
+//
+// It is exported because the job that creates a pipeline book persists its sources
+// into books.identity_sources, and the contributing stage keys on it to tell a PRINT
+// ISBN (which an OPF states) from an audiobook one, which are different fields in
+// the community database's add-work form.
+const IdentitySourceEpub = "epub"
+
 // title is the trimmed tag title and author the primary author credit - the two
 // derivations searchMatch (the verdict key, the match query) and searchLadder
 // (the rung table) both need, spelled once.

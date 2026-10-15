@@ -92,18 +92,30 @@ func TestLogoutRevokes(t *testing.T) {
 func TestChangePassword(t *testing.T) {
 	m := New(NewMemStore())
 	pw, _ := m.EnsureAdmin()
+	mine, _ := m.Login(pw)
+	other, _ := m.Login(pw)
 
 	// Denied: wrong current password.
-	if err := m.ChangePassword("wrong", "a-new-strong-pass"); !errors.Is(err, ErrInvalidCreds) {
+	if err := m.ChangePassword("wrong", "a-new-strong-pass", mine); !errors.Is(err, ErrInvalidCreds) {
 		t.Errorf("wrong current err = %v, want ErrInvalidCreds", err)
 	}
 	// Denied: new password too short.
-	if err := m.ChangePassword(pw, "short"); !errors.Is(err, ErrPasswordTooShort) {
+	if err := m.ChangePassword(pw, "short", mine); !errors.Is(err, ErrPasswordTooShort) {
 		t.Errorf("short new err = %v, want ErrPasswordTooShort", err)
 	}
 	// Allowed.
-	if err := m.ChangePassword(pw, "a-new-strong-pass"); err != nil {
+	if ok, _ := m.Resolve(other); !ok {
+		t.Fatal("a refused change signed a session out")
+	}
+	if err := m.ChangePassword(pw, "a-new-strong-pass", mine); err != nil {
 		t.Fatalf("ChangePassword: %v", err)
+	}
+	// The caller stays signed in; every other session is signed out.
+	if ok, _ := m.Resolve(mine); !ok {
+		t.Error("the caller's session was signed out")
+	}
+	if ok, _ := m.Resolve(other); ok {
+		t.Error("another session survived a password change")
 	}
 	// Old password no longer works; new one does.
 	if _, err := m.Login(pw); !errors.Is(err, ErrInvalidCreds) {
