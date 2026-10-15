@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"path/filepath"
 
-	"github.com/kodestar/audiosilo-meta/pkg/model"
 	"github.com/kodestar/audiosilo-bridge/internal/fsutil"
+	"github.com/kodestar/audiosilo-meta/pkg/model"
 )
 
 // ErrNoSidecars is returned by SidecarsView when a book's work dir holds neither
