@@ -1,0 +1,364 @@
+// Package agentbox is the Bridge's side of the agent container (decision 15): an
+// agent.Runner that doesn't run a CLI itself but drops each invocation into the
+// staging dir the agent container shares, waits for the runner there
+// (internal/agentrun) to finish it, and harvests the outputs back into the
+// pipeline's staged dir. The protocol (file names, JSON shapes) is
+// internal/agentproto; the output parsing is internal/agent's own
+// (ClaudeResult/CodexResult), so a run in the container is classified exactly like
+// a local one.
+//
+// Everything the container writes is untrusted: files are read through an os.Root
+// (a symlink can't reach outside the job dir), with size caps, and the harvest
+// copies regular files only under count, depth and size limits.
+package agentbox
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"io/fs"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"time"
+
+	"github.com/kodestar/audiosilo-bridge/internal/agent"
+	"github.com/kodestar/audiosilo-bridge/internal/agentproto"
+)
+
+// DefaultClaimTimeout is how long a job may wait for the runner to claim it before
+// the run reports the agent unavailable (agent.claim_timeout_seconds).
+const DefaultClaimTimeout = 2 * time.Minute
+
+// Timings of the Bridge side (contract section 7). They are fields of Runner (set
+// by New) so a test can shorten them without a package-level race.
+const (
+	statusFreshFor   = 30 * time.Second // runner.json younger than this = the container is up
+	defaultStaleFor  = 60 * time.Second // a claimed job's heartbeat older than this = the runner died
+	defaultPoll      = time.Second      // polling, not inotify: shfs may not deliver events
+	defaultBeatEvery = 60 * time.Second // Request.Heartbeat cadence, as the local runners
+	defaultCancelFor = 30 * time.Second // how long a cancel waits for done
+	sweepAge         = 24 * time.Hour   // job dirs older than this are removed on New
+)
+
+// Options configures a Runner.
+type Options struct {
+	Dir          string        // the staging dir (agent.staging_dir)
+	Backend      string        // "claude" | "codex": which CLI the runs use
+	ClaimTimeout time.Duration // 0 = 2 minutes
+	Log          *slog.Logger
+}
+
+// Runner implements agent.Runner over the staging protocol.
+type Runner struct {
+	dir          string
+	backend      string
+	claimTimeout time.Duration
+	log          *slog.Logger
+
+	now       func() time.Time
+	poll      time.Duration
+	staleFor  time.Duration
+	beatEvery time.Duration
+	cancelFor time.Duration
+}
+
+var _ agent.Runner = (*Runner)(nil)
+
+// New returns a Runner over opts.Dir. It creates the staging dir when missing
+// (world-writable, so the agent uid can write runner.json and claim jobs) and
+// removes job dirs older than a day that an earlier run left behind.
+func New(opts Options) *Runner {
+	r := &Runner{
+		dir:          opts.Dir,
+		backend:      opts.Backend,
+		claimTimeout: opts.ClaimTimeout,
+		log:          opts.Log,
+		now:          time.Now,
+		poll:         defaultPoll,
+		staleFor:     defaultStaleFor,
+		beatEvery:    defaultBeatEvery,
+		cancelFor:    defaultCancelFor,
+	}
+	if r.claimTimeout <= 0 {
+		r.claimTimeout = DefaultClaimTimeout
+	}
+	if r.log == nil {
+		r.log = slog.New(slog.DiscardHandler)
+	}
+	r.prepare()
+	return r
+}
+
+// prepare makes the staging dir usable by both containers and sweeps old job
+// dirs. Best effort: a staging dir the Bridge doesn't own (a volume root created
+// by Docker) keeps its mode, and Status then explains a runner that can't write.
+func (r *Runner) prepare() {
+	if r.dir == "" {
+		return
+	}
+	if err := os.MkdirAll(r.dir, 0o750); err != nil {
+		r.log.Warn("agent container: create the staging dir", "dir", r.dir, "err", err)
+		return
+	}
+	// Not sticky, unlike a job dir: the Bridge image's entrypoint may chown this
+	// volume to PUID:PGID on a first start, and the runner must still replace a
+	// runner.json that changed owner that way.
+	if err := os.Chmod(r.dir, 0o777); err != nil { //nolint:gosec // shared with the agent uid by design (decision 15)
+		r.log.Debug("agent container: staging dir mode left as is", "dir", r.dir, "err", err)
+	}
+	entries, err := os.ReadDir(r.dir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if !e.IsDir() || !agentproto.ValidJobID(e.Name()) {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil || r.now().Sub(info.ModTime()) < sweepAge {
+			continue
+		}
+		r.remove(filepath.Join(r.dir, e.Name()))
+	}
+}
+
+// ID is the backend the runs use, so telemetry and model routing see the CLI.
+func (r *Runner) ID() string { return r.backend }
+
+// SupportsWeb is true: both CLIs can search the web, and the agent container
+// has its own internet-only network.
+func (r *Runner) SupportsWeb() bool { return true }
+
+// EnforcesNoTools reports what the fronted CLI does: claude removes its tool
+// catalogue for a NoTools run, codex can't (its read-only sandbox still reads).
+func (r *Runner) EnforcesNoTools() bool { return r.backend == agent.IDClaude }
+
+// Detect maps Status onto the engine's Availability.
+func (r *Runner) Detect(context.Context) agent.Availability {
+	st := r.Status()
+	av := agent.Availability{Backend: r.backend, Available: st.Available, Detail: st.Detail, Path: "agent container"}
+	if c, ok := st.CLIs[r.backend]; ok {
+		av.Version = c.Version
+	}
+	return av
+}
+
+// Run performs one invocation in the agent container: stage the job, wait for the
+// runner, read the outcome, harvest out/. See the package comment and contract
+// section 7. req.Process is never called: a pid in another container means
+// nothing here.
+func (r *Runner) Run(ctx context.Context, req agent.Request) (agent.Result, error) {
+	if st := r.Status(); !st.Available {
+		return agent.Result{}, &agent.NotAvailableError{Backend: r.backend, Detail: st.Detail}
+	}
+	if req.Dir == "" {
+		return agent.Result{}, errors.New("agent container: the request has no staged dir")
+	}
+	id, err := agentproto.NewJobID()
+	if err != nil {
+		return agent.Result{}, fmt.Errorf("agent container: job id: %w", err)
+	}
+	job := filepath.Join(r.dir, id)
+	defer r.remove(job)
+	timeout := requestTimeout(req.Timeout)
+	if err := stage(job, req, r.backend, timeout); err != nil {
+		return agent.Result{}, fmt.Errorf("agent container: stage the job: %w", err)
+	}
+
+	root, err := os.OpenRoot(job)
+	if err != nil {
+		return agent.Result{}, fmt.Errorf("agent container: open the job dir: %w", err)
+	}
+	defer func() { _ = root.Close() }()
+
+	done, waitErr := r.wait(ctx, root, req.Heartbeat)
+	if !done {
+		return agent.Result{}, waitErr
+	}
+	res, runErr := r.outcome(root, req.Model, time.Duration(timeout)*time.Second)
+	if waitErr != nil {
+		// Cancelled: the runner stopped the CLI and finished the job, so the usage
+		// it reported is still worth recording; the outputs aren't harvested.
+		return res, waitErr
+	}
+	var unavailable *agent.NotAvailableError
+	if errors.As(runErr, &unavailable) {
+		return res, runErr
+	}
+	// Harvest after any finished run, failed ones too: a validation retry patches
+	// the previous attempt's out/, exactly as a local run leaves it in place.
+	if herr := harvest(root, req.Dir); herr != nil {
+		if runErr != nil {
+			r.log.Warn("agent container: harvest after a failed run", "err", herr)
+			return res, runErr
+		}
+		return res, herr
+	}
+	return res, runErr
+}
+
+// requestTimeout is the request's timeout in whole seconds, rounded up; no
+// timeout becomes the protocol's ceiling, since a run in the container is always
+// bounded.
+func requestTimeout(d time.Duration) int {
+	if d <= 0 {
+		return agentproto.MaxTimeoutSeconds
+	}
+	s := int((d + time.Second - 1) / time.Second)
+	return min(max(s, 1), agentproto.MaxTimeoutSeconds)
+}
+
+// wait polls the job until done. It reports done=false with the reason when the
+// job never finished: the claim timeout (a NotAvailableError, so the pipeline
+// parks agent_unavailable and self-resumes), a stale heartbeat, or a cancel the
+// runner didn't finish in time. A cancel the runner did finish is done=true with
+// ctx's error.
+func (r *Runner) wait(ctx context.Context, root *os.Root, beat func(time.Duration)) (bool, error) {
+	start := r.now()
+	var claimedAt, lastBeat time.Time
+	tick := time.NewTicker(r.poll)
+	defer tick.Stop()
+	for {
+		if exists(root, agentproto.DoneFile) {
+			return true, nil
+		}
+		now := r.now()
+		if claimedAt.IsZero() {
+			if exists(root, agentproto.ClaimDir) {
+				claimedAt, lastBeat = now, now
+			} else if now.Sub(start) >= r.claimTimeout {
+				if r.unclaimable(root) {
+					return false, &agent.NotAvailableError{Backend: r.backend,
+						Detail: fmt.Sprintf("the agent container didn't pick the job up within %s", r.claimTimeout)}
+				}
+				claimedAt, lastBeat = now, now // the runner claimed it just now
+			}
+		}
+		if !claimedAt.IsZero() {
+			if hb := r.heartbeatAt(root, claimedAt); now.Sub(hb) > r.staleFor {
+				_ = root.WriteFile(agentproto.CancelFile, nil, 0o644)
+				return false, fmt.Errorf("agent container: the runner stopped answering (no heartbeat for %s)", now.Sub(hb).Round(time.Second))
+			}
+			if beat != nil && now.Sub(lastBeat) >= r.beatEvery {
+				lastBeat = now
+				beat(now.Sub(claimedAt))
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return r.cancel(root, claimedAt.IsZero(), ctx.Err())
+		case <-tick.C:
+		}
+	}
+}
+
+// unclaimable takes the job's claim itself, so a runner can't pick it up after
+// the Bridge gave up on it: mkdir is atomic, so exactly one side wins. false
+// means the runner won the race and the job is running after all.
+func (r *Runner) unclaimable(root *os.Root) bool {
+	err := root.Mkdir(agentproto.ClaimDir, 0o700)
+	return err == nil || !errors.Is(err, fs.ErrExist)
+}
+
+// cancel stops a job on a ctx cancel: an unclaimed one is taken back (it never
+// runs), a running one gets a cancel file and up to cancelFor to finish.
+func (r *Runner) cancel(root *os.Root, unclaimed bool, cause error) (bool, error) {
+	if unclaimed && r.unclaimable(root) {
+		return false, cause
+	}
+	if err := root.WriteFile(agentproto.CancelFile, nil, 0o644); err != nil {
+		r.log.Warn("agent container: write cancel", "err", err)
+	}
+	deadline := r.now().Add(r.cancelFor)
+	for r.now().Before(deadline) {
+		if exists(root, agentproto.DoneFile) {
+			return true, cause
+		}
+		time.Sleep(r.poll)
+	}
+	return false, cause
+}
+
+// heartbeatAt is the job's last sign of life: the heartbeat file's mtime, else the
+// claim's, else when the Bridge saw the claim.
+func (r *Runner) heartbeatAt(root *os.Root, claimedAt time.Time) time.Time {
+	latest := claimedAt
+	for _, name := range []string{agentproto.HeartbeatFile, agentproto.ClaimDir} {
+		if info, err := root.Lstat(name); err == nil && info.ModTime().After(latest) {
+			latest = info.ModTime()
+		}
+	}
+	return latest
+}
+
+// outcome reads exit.json and the CLI's output and interprets them with the same
+// code the local runners use.
+func (r *Runner) outcome(root *os.Root, model string, timeout time.Duration) (agent.Result, error) {
+	raw, err := readFile(root, agentproto.ExitFile, agentproto.MaxExitBytes)
+	if err != nil {
+		return agent.Result{}, fmt.Errorf("agent container: read exit.json: %w", err)
+	}
+	var ex agentproto.Exit
+	if err := json.Unmarshal(raw, &ex); err != nil {
+		return agent.Result{}, fmt.Errorf("agent container: parse exit.json: %w", err)
+	}
+	if ex.Error != "" {
+		if ex.Unavailable {
+			return agent.Result{}, &agent.NotAvailableError{Backend: r.backend, Detail: ex.Error}
+		}
+		return agent.Result{}, fmt.Errorf("agent container refused the job: %s", ex.Error)
+	}
+	out := agent.CLIOutcome{TimedOut: ex.TimedOut, Timeout: timeout}
+	switch {
+	case ex.TimedOut:
+	case ex.Cancelled:
+		out.ExitErr = errors.New("cancelled")
+	case ex.ExitCode != 0:
+		out.ExitErr = exitStatus(ex.ExitCode)
+	}
+	stdout, _ := readFile(root, agentproto.StdoutFile, agentproto.MaxStdoutBytes)
+	stderr, _ := readFile(root, agentproto.StderrFile, agentproto.MaxStderrBytes)
+	out.Stdout, out.Stderr = string(stdout), string(stderr)
+	if r.backend == agent.IDCodex {
+		last, _ := readFile(root, agentproto.LastMessageFile, agentproto.MaxStdoutBytes)
+		out.LastMessage = string(last)
+		return agent.CodexResult(model, out)
+	}
+	return agent.ClaudeResult(model, out)
+}
+
+// exitStatus is a nonzero exit code from the container, worded like the local
+// runners' *exec.ExitError.
+type exitStatus int
+
+func (e exitStatus) Error() string { return fmt.Sprintf("exit status %d", int(e)) }
+
+// remove deletes a job dir, best effort.
+func (r *Runner) remove(job string) {
+	if err := os.RemoveAll(job); err != nil {
+		r.log.Warn("agent container: remove a job dir", "dir", job, "err", err)
+	}
+}
+
+// exists reports whether name exists in the job dir (a link counts; nothing is
+// followed).
+func exists(root *os.Root, name string) bool {
+	_, err := root.Lstat(name)
+	return err == nil
+}
+
+// readFile reads a regular file from the job dir, at most limit bytes: the
+// container wrote it, so it may be anything (a link, a FIFO, huge). O_NONBLOCK
+// keeps a FIFO from blocking the open; the os.Root keeps a link inside the job
+// dir. A file over the limit is cut at the limit.
+func readFile(root *os.Root, name string, limit int64) ([]byte, error) {
+	f, err := openRegular(root, name)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	return io.ReadAll(io.LimitReader(f, limit))
+}

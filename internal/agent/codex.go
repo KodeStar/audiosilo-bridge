@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -68,10 +67,24 @@ type codexItem struct {
 	Text string `json:"text"`
 }
 
-// buildArgs assembles the codex argv. --model is omitted when empty (CLI default).
-// lastMsgFile receives the final assistant message. Web search is enabled via the
-// documented `-c web_search="live"` override.
-func (r *codexRunner) buildArgs(req Request, lastMsgFile string) []string {
+// Codex sandbox modes CodexArgs takes. CodexSandboxDefault keeps the local
+// runner's choice (read-only for a NoTools run, else workspace-write);
+// CodexSandboxOff is for the agent container, where codex's own sandbox can't
+// start under Docker's stock seccomp and isn't a read boundary anyway: the
+// container is the boundary there (decision 15).
+const (
+	CodexSandboxDefault = ""
+	CodexSandboxOff     = "danger-full-access"
+)
+
+// CodexArgs assembles the codex argv for req. --model is omitted when empty (CLI
+// default). lastMsgFile receives the final assistant message. Web search is
+// enabled via the documented `-c web_search="live"` override. Exported so the
+// agent container's runner (internal/agentrun) builds the very same flags.
+func CodexArgs(req Request, lastMsgFile, sandbox string) []string {
+	if sandbox == CodexSandboxDefault {
+		sandbox = map[bool]string{true: "read-only", false: "workspace-write"}[req.NoTools]
+	}
 	args := []string{
 		"exec",
 		"--json",
@@ -82,7 +95,7 @@ func (r *codexRunner) buildArgs(req Request, lastMsgFile string) []string {
 		"--ignore-user-config",
 		"--ignore-rules",
 		"--cd", req.Dir,
-		"--sandbox", map[bool]string{true: "read-only", false: "workspace-write"}[req.NoTools],
+		"--sandbox", sandbox,
 		"--skip-git-repo-check",
 		"--output-last-message", lastMsgFile,
 	}
@@ -98,11 +111,9 @@ func (r *codexRunner) buildArgs(req Request, lastMsgFile string) []string {
 	return args
 }
 
-// Run executes one codex invocation, reads usage from turn.completed events (last
-// event wins - see parseCodexStream), and takes the final text from the
-// --output-last-message file (falling back to the last agent_message item). A
-// turn.failed event or nonzero exit becomes an error; a rate-limit signature becomes
-// a *RateLimitError.
+// Run executes one codex invocation and interprets it with CodexResult, the
+// final text coming from the --output-last-message file. A parent cancel is
+// returned as ctx.Err() (with whatever usage the stream reported).
 func (r *codexRunner) Run(ctx context.Context, req Request) (Result, error) {
 	p, err := r.resolve()
 	if err != nil {
@@ -125,7 +136,7 @@ func (r *codexRunner) Run(ctx context.Context, req Request) (Result, error) {
 
 	stdout, stderr, runErr := runCLI(ctx, cliSpec{
 		path:      p,
-		args:      r.buildArgs(req, lastMsgPath),
+		args:      CodexArgs(req, lastMsgPath, CodexSandboxDefault),
 		dir:       req.Dir,
 		env:       env,
 		stdin:     req.Prompt,
@@ -133,15 +144,29 @@ func (r *codexRunner) Run(ctx context.Context, req Request) (Result, error) {
 		heartbeat: req.Heartbeat,
 		process:   req.Process,
 	})
-
-	usage, lastAgentMsg, failDetail := parseCodexStream(stdout)
-	usage.Model = req.Model
-	result := Result{Text: lastAgentMsg, Usage: usage}
-	if errors.Is(runErr, errTimeout) {
-		return result, fmt.Errorf("codex timed out after %s", req.Timeout)
+	out := outcomeOf(stdout, stderr, runErr, req.Timeout)
+	if fileText, rerr := os.ReadFile(lastMsgPath); rerr == nil { //nolint:gosec // lastMsgPath is our own os.CreateTemp file
+		out.LastMessage = string(fileText)
 	}
-	if runErr != nil && ctx.Err() != nil {
-		return result, ctx.Err()
+	res, err := CodexResult(req.Model, out)
+	if runErr != nil && !out.TimedOut && ctx.Err() != nil {
+		return res, ctx.Err()
+	}
+	return res, err
+}
+
+// CodexResult turns one codex run's outcome into a Result, wherever the CLI ran
+// (here, or in the agent container). Usage comes from turn.completed events (last
+// event wins - see parseCodexStream) and the text from o.LastMessage, falling back
+// to the last agent_message item. A timeout becomes "codex timed out"; a
+// turn.failed event or a nonzero exit an error; a rate-limit signature a
+// *RateLimitError. The usage rides on the Result even when the error is non-nil.
+func CodexResult(model string, o CLIOutcome) (Result, error) {
+	usage, lastAgentMsg, failDetail := parseCodexStream(o.Stdout)
+	usage.Model = model
+	result := Result{Text: lastAgentMsg, Usage: usage}
+	if o.TimedOut {
+		return result, fmt.Errorf("codex timed out after %s", o.Timeout)
 	}
 
 	if failDetail != "" {
@@ -150,19 +175,17 @@ func (r *codexRunner) Run(ctx context.Context, req Request) (Result, error) {
 		}
 		return result, fmt.Errorf("codex turn failed: %s", truncate(failDetail))
 	}
-	if isRateLimit(stderr) {
-		return result, newRateLimitError(firstNonEmpty(stderr, stdout), time.Now())
+	if isRateLimit(o.Stderr) {
+		return result, newRateLimitError(firstNonEmpty(o.Stderr, o.Stdout), time.Now())
 	}
-	if runErr != nil {
-		return result, fmt.Errorf("codex exited: %w: %s", runErr, truncate(firstNonEmpty(stderr, stdout)))
-	}
-
-	text := lastAgentMsg
-	if fileText, rerr := os.ReadFile(lastMsgPath); rerr == nil && strings.TrimSpace(string(fileText)) != "" { //nolint:gosec // lastMsgPath is our own os.CreateTemp file
-		text = strings.TrimSpace(string(fileText))
+	if o.ExitErr != nil {
+		return result, fmt.Errorf("codex exited: %w: %s", o.ExitErr, truncate(firstNonEmpty(o.Stderr, o.Stdout)))
 	}
 
-	return Result{Text: text, Usage: usage}, nil
+	if text := strings.TrimSpace(o.LastMessage); text != "" {
+		result.Text = text
+	}
+	return result, nil
 }
 
 // parseCodexStream reads the JSONL events, taking token usage from turn.completed

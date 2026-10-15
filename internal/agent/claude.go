@@ -3,7 +3,6 @@ package agent
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"time"
 
@@ -57,9 +56,11 @@ type claudeUsage struct {
 	CacheReadInputTokens int64 `json:"cache_read_input_tokens"`
 }
 
-// buildArgs assembles the argv (no prompt - that rides on stdin). --model is
-// omitted when empty so the CLI default applies.
-func (c *claudeRunner) buildArgs(req Request) []string {
+// ClaudeArgs assembles the claude argv for req (no prompt - that rides on stdin).
+// --model is omitted when empty so the CLI default applies. Exported so the agent
+// container's runner (internal/agentrun) builds the very same flags: one copy, so
+// the two paths can't drift.
+func ClaudeArgs(req Request) []string {
 	tools := baseAllowedTools
 	if req.NoTools {
 		tools = ""
@@ -94,10 +95,8 @@ func (c *claudeRunner) buildArgs(req Request) []string {
 	return args
 }
 
-// Run executes one claude invocation and parses its result envelope. A timeout or
-// parent cancel is returned as-is; is_error, a nonzero exit, or an unparseable
-// envelope becomes an error carrying truncated detail; a rate-limit signature in
-// the result or stderr becomes a *RateLimitError.
+// Run executes one claude invocation and interprets it with ClaudeResult. A
+// parent cancel is returned as ctx.Err() (with whatever usage the CLI reported).
 func (c *claudeRunner) Run(ctx context.Context, req Request) (Result, error) {
 	p, err := c.resolve()
 	if err != nil {
@@ -112,7 +111,7 @@ func (c *claudeRunner) Run(ctx context.Context, req Request) (Result, error) {
 
 	stdout, stderr, runErr := runCLI(ctx, cliSpec{
 		path:      p,
-		args:      c.buildArgs(req),
+		args:      ClaudeArgs(req),
 		dir:       req.Dir,
 		env:       env,
 		stdin:     req.Prompt,
@@ -120,12 +119,28 @@ func (c *claudeRunner) Run(ctx context.Context, req Request) (Result, error) {
 		heartbeat: req.Heartbeat,
 		process:   req.Process,
 	})
+	out := outcomeOf(stdout, stderr, runErr, req.Timeout)
+	res, err := ClaudeResult(req.Model, out)
+	if runErr != nil && !out.TimedOut && ctx.Err() != nil {
+		return res, ctx.Err()
+	}
+	return res, err
+}
 
+// ClaudeResult turns one claude run's outcome into a Result, wherever the CLI ran
+// (here, or in the agent container: internal/agentbox reads the outcome back from
+// the staging dir). A timeout becomes "claude timed out"; a rate-limit signature
+// in the result or stderr a *RateLimitError (classified before anything else: it
+// can arrive as is_error with a rate-limit result, or as a nonzero exit with the
+// message on stderr); is_error, a nonzero exit, or an unparseable envelope an error
+// carrying truncated detail. The usage the envelope reports rides on the Result
+// even when the error is non-nil, so spend is captured on a failed run too.
+func ClaudeResult(model string, o CLIOutcome) (Result, error) {
 	var res claudeResult
-	parseErr := json.Unmarshal([]byte(stdout), &res)
+	parseErr := json.Unmarshal([]byte(o.Stdout), &res)
 
 	usage := Usage{
-		Model:        req.Model,
+		Model:        model,
 		Input:        res.Usage.InputTokens,
 		Output:       res.Usage.OutputTokens,
 		CacheRead:    res.Usage.CacheReadInputTokens,
@@ -134,25 +149,20 @@ func (c *claudeRunner) Run(ctx context.Context, req Request) (Result, error) {
 		Turns:        res.NumTurns,
 	}
 	result := Result{Text: res.Result, Usage: usage}
-	if errors.Is(runErr, errTimeout) {
-		return result, fmt.Errorf("claude timed out after %s", req.Timeout)
-	}
-	if runErr != nil && ctx.Err() != nil {
-		return result, ctx.Err()
+	if o.TimedOut {
+		return result, fmt.Errorf("claude timed out after %s", o.Timeout)
 	}
 
-	// Classify a rate-limit before anything else: it can arrive as is_error with a
-	// rate-limit result, or as a nonzero exit with the message on stderr.
-	detail := firstNonEmpty(res.Result, stderr, stdout)
-	if isRateLimit(res.Result) || isRateLimit(stderr) {
+	detail := firstNonEmpty(res.Result, o.Stderr, o.Stdout)
+	if isRateLimit(res.Result) || isRateLimit(o.Stderr) {
 		return result, newRateLimitError(detail, time.Now())
 	}
 
-	if runErr != nil {
-		return result, fmt.Errorf("claude exited: %w: %s", runErr, truncate(detail))
+	if o.ExitErr != nil {
+		return result, fmt.Errorf("claude exited: %w: %s", o.ExitErr, truncate(detail))
 	}
 	if parseErr != nil {
-		return Result{}, fmt.Errorf("claude: parse result json: %w: %s", parseErr, truncate(stdout))
+		return Result{}, fmt.Errorf("claude: parse result json: %w: %s", parseErr, truncate(o.Stdout))
 	}
 	if res.IsError {
 		return result, fmt.Errorf("claude reported error: %s", truncate(firstNonEmpty(res.Result, res.Subtype)))

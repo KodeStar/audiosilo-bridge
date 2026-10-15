@@ -1,0 +1,142 @@
+package agentbox
+
+import (
+	"errors"
+	"fmt"
+	"io"
+	"io/fs"
+	"os"
+	"path"
+	"path/filepath"
+	"strings"
+	"syscall"
+
+	"github.com/kodestar/audiosilo-bridge/internal/agent"
+	"github.com/kodestar/audiosilo-bridge/internal/agentproto"
+)
+
+// The harvest's limits (contract section 7). The pipeline's own agent.Harvest
+// checks each declared output again, with its own caps, when it moves it on.
+const (
+	maxHarvestDepth   = 8
+	maxHarvestFile    = 8 << 20
+	maxHarvestTotal   = 64 << 20
+	maxHarvestEntries = 2000
+)
+
+// harvest copies the job's work/out/ back into the staged dir's out/, replacing
+// it, so the pipeline finds the outputs where a local run leaves them. Regular
+// files only (a link or a device is skipped), every read inside the job dir's
+// os.Root, under depth, count and size limits; any limit broken fails the whole
+// harvest and leaves the staged out/ as it was.
+func harvest(job *os.Root, reqDir string) error {
+	src, err := job.OpenRoot(path.Join(agentproto.WorkDir, agentproto.OutDir))
+	if err != nil {
+		return fmt.Errorf("agent container: open work/out: %w", err)
+	}
+	defer func() { _ = src.Close() }()
+	tmp, err := os.MkdirTemp(reqDir, ".out-harvest-*")
+	if err != nil {
+		return fmt.Errorf("agent container: harvest: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(tmp) }()
+
+	var entries int
+	var total int64
+	err = fs.WalkDir(src.FS(), ".", func(p string, d fs.DirEntry, werr error) error {
+		if werr != nil {
+			return werr
+		}
+		if p == "." {
+			return nil
+		}
+		if entries++; entries > maxHarvestEntries {
+			return fmt.Errorf("more than %d entries", maxHarvestEntries)
+		}
+		if strings.Count(p, "/")+1 > maxHarvestDepth {
+			return fmt.Errorf("%s is more than %d levels deep", p, maxHarvestDepth)
+		}
+		dst := filepath.Join(tmp, filepath.FromSlash(p))
+		switch {
+		case d.IsDir():
+			return os.Mkdir(dst, 0o750)
+		case d.Type().IsRegular():
+			n, err := copyOut(src, p, dst)
+			if err != nil {
+				return err
+			}
+			if total += n; total > maxHarvestTotal {
+				return fmt.Errorf("the outputs are over %d bytes in all", maxHarvestTotal)
+			}
+			return nil
+		default:
+			return nil // a link, a FIFO or a device is never harvested
+		}
+	})
+	if err != nil {
+		return fmt.Errorf("agent container: harvest out/: %w", err)
+	}
+	out := agent.OutPath(reqDir)
+	if err := os.RemoveAll(out); err != nil {
+		return fmt.Errorf("agent container: harvest: clear out/: %w", err)
+	}
+	if err := os.Rename(tmp, out); err != nil {
+		return fmt.Errorf("agent container: harvest: %w", err)
+	}
+	return nil
+}
+
+// copyOut copies one output file, re-checking it once open: the walk saw a
+// regular file, but the container could have swapped it since.
+func copyOut(src *os.Root, name, dst string) (int64, error) {
+	f, err := openRegular(src, name)
+	if err != nil {
+		if errors.Is(err, errNotRegular) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	defer func() { _ = f.Close() }()
+	if info, err := f.Stat(); err != nil {
+		return 0, err
+	} else if info.Size() > maxHarvestFile {
+		return 0, fmt.Errorf("%s is %d bytes, over the %d cap", name, info.Size(), maxHarvestFile)
+	}
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644) //nolint:gosec // dst is inside the Bridge's own temp dir
+	if err != nil {
+		return 0, err
+	}
+	n, err := io.Copy(out, io.LimitReader(f, maxHarvestFile+1))
+	if cerr := out.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		return n, err
+	}
+	if n > maxHarvestFile {
+		return n, fmt.Errorf("%s grew over the %d cap", name, maxHarvestFile)
+	}
+	return n, os.Chmod(dst, 0o644) //nolint:gosec // a normal artifact, as agent.Harvest writes them
+}
+
+// errNotRegular marks a name that isn't a regular file once opened.
+var errNotRegular = errors.New("not a regular file")
+
+// openRegular opens name read-only inside root and checks the open file is a
+// regular one. O_NONBLOCK keeps a FIFO from blocking the open.
+func openRegular(root *os.Root, name string) (*os.File, error) {
+	f, err := root.OpenFile(name, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, err
+	}
+	info, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		_ = f.Close()
+		return nil, fmt.Errorf("%s: %w", name, errNotRegular)
+	}
+	return f, nil
+}

@@ -176,9 +176,16 @@ type AgentConfig struct {
 	// BookBudgetUSD caps total agent spend per book: a stage parks the book
 	// budget_exceeded once its summed cost reaches this (0 -> the default; set a very
 	// large value to effectively disable). Restart-to-apply, like the rest of agent.*.
-	BookBudgetUSD float64           `yaml:"book_budget_usd"`
-	Claude        map[string]string `yaml:"claude"` // agent-stage name -> model
-	OpenAI        map[string]string `yaml:"openai"` // agent-stage name -> model (empty = codex default)
+	BookBudgetUSD float64 `yaml:"book_budget_usd"`
+	// The agent container (decision 15; bridge.go has the rules). StagingDir is
+	// the dir shared with it ("" = <data>/staging, see Config.AgentStagingDir);
+	// ClaimTimeoutSeconds how long a job waits for it to pick the job up;
+	// MonthlyBudgetUSD the monthly agent spend cap (0 = none).
+	StagingDir          string            `yaml:"staging_dir"`
+	ClaimTimeoutSeconds int               `yaml:"claim_timeout_seconds"`
+	MonthlyBudgetUSD    float64           `yaml:"monthly_budget_usd"`
+	Claude              map[string]string `yaml:"claude"` // agent-stage name -> model
+	OpenAI              map[string]string `yaml:"openai"` // agent-stage name -> model (empty = codex default)
 }
 
 // AgentCapacity is the normalized runtime capacity model. Legacy is true only
@@ -317,6 +324,8 @@ type Config struct {
 	Supervisor SupervisorConfig `yaml:"supervisor"`
 	// Contribution configures the contributing stage + intake poller (M7).
 	Contribution ContributionConfig `yaml:"contribution"`
+	// Transcripts controls the transcript cache (decision 5; bridge.go).
+	Transcripts TranscriptsConfig `yaml:"transcripts"`
 
 	// deprecations are notices about retired settings Load honoured (never saved;
 	// the server logs them at startup).
@@ -342,14 +351,17 @@ func Default() Config {
 		Tools:     ToolsConfig{AutoDownload: DefaultAutoDownload},
 		ASR:       ASRConfig{Backend: DefaultASRBackend, Language: DefaultASRLanguage},
 		Agent: AgentConfig{
-			QueueConcurrency: DefaultAgentQueueConcurrency,
-			MaxAgentsPerBook: DefaultMaxAgentsPerBook,
-			TimeoutMinutes:   DefaultTimeoutMinutes,
-			BookBudgetUSD:    DefaultBookBudgetUSD,
-			Claude:           defaultClaudeModels(),
-			OpenAI:           map[string]string{},
+			QueueConcurrency:    DefaultAgentQueueConcurrency,
+			MaxAgentsPerBook:    DefaultMaxAgentsPerBook,
+			TimeoutMinutes:      DefaultTimeoutMinutes,
+			BookBudgetUSD:       DefaultBookBudgetUSD,
+			ClaimTimeoutSeconds: DefaultClaimTimeoutSeconds,
+			MonthlyBudgetUSD:    DefaultMonthlyBudgetUSD,
+			Claude:              defaultClaudeModels(),
+			OpenAI:              map[string]string{},
 		},
-		Pricing: pricing.Table{Version: "unconfigured-v1", Rates: map[string]pricing.Rate{}},
+		Transcripts: TranscriptsConfig{RetentionDays: DefaultTranscriptRetentionDays},
+		Pricing:     pricing.Table{Version: "unconfigured-v1", Rates: map[string]pricing.Rate{}},
 		Supervisor: SupervisorConfig{
 			Enabled:               true,
 			IntervalSeconds:       DefaultSupervisorIntervalSeconds,
