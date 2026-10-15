@@ -53,14 +53,17 @@ services:
       # AUDIOSILO_BRIDGE_PAIR_CODE: XXXX-XXXX-XXXX-XXXX
       # Keep the secrets' key outside the data folder (32 bytes, hex or base64):
       # AUDIOSILO_BRIDGE_SECRET_KEY: ...
+      # The folder shared with the agent container (below). Kept outside
+      # /bridge-data, whose first-start ownership fix would otherwise reach it.
+      AUDIOSILO_BRIDGE_AGENT_STAGING_DIR: /staging
     ports:
       - "8091:8091"
     volumes:
       - ./bridge-data:/bridge-data
       - /path/to/audiobooks:/audiobooks:rw
-      # Shared with the agent container, at the Bridge's agent.staging_dir
-      # (default <data>/staging). The only volume both mount.
-      - staging:/bridge-data/staging
+      # Shared with the agent container, at the Bridge's agent.staging_dir.
+      # The only volume both mount.
+      - staging:/staging
 
   agent:
     image: ghcr.io/kodestar/audiosilo-bridge:latest-agent
