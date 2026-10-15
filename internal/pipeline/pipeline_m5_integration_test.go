@@ -131,7 +131,7 @@ func TestPipelineFullMachineToDone(t *testing.T) {
 	src := genNonContiguousM4B(t, ffmpeg, dir)
 	workRoot := filepath.Join(dir, "work")
 
-	db, err := store.Open(context.Background(), filepath.Join(dir, "sidecars.db"))
+	db, err := store.Open(context.Background(), filepath.Join(dir, store.FileName))
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}

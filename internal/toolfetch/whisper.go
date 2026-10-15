@@ -58,7 +58,11 @@ var maxWhisperArchiveBytes int64 = 2 << 30 // 2 GiB
 // far smaller ceiling catches a wrong/HTML body without reading a huge stream.
 const maxChecksumsBytes = 1 << 20 // 1 MiB
 
-// whisperReleaseBase is the GitHub Releases download root for this repo's assets.
+// whisperReleaseBase is the GitHub Releases download root of the whisper-cli
+// assets. They are audiosilo-sidecars' release assets: that repo is public, so
+// they download without a credential and stay downloadable once it is archived,
+// while the Bridge's own repo is private (its release assets would need a
+// token). Move them to the Bridge's releases when the Bridge goes public.
 // It is a package var (like platformSpec) so a test can point the download branch
 // at an httptest server. Production always uses the real GitHub host. The full URLs
 // are <base>/<tag>/<asset> and <base>/<tag>/checksums.txt.

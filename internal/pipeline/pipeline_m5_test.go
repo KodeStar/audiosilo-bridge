@@ -25,7 +25,7 @@ func TestPipelineSpellingToSynthesisFlow(t *testing.T) {
 	workRoot := filepath.Join(dir, "work")
 	work := filepath.Join(workRoot, "fixture")
 
-	db, err := store.Open(context.Background(), filepath.Join(dir, "sidecars.db"))
+	db, err := store.Open(context.Background(), filepath.Join(dir, store.FileName))
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}

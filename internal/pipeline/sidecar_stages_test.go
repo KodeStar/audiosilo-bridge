@@ -524,7 +524,7 @@ func TestAuditInconsistentPassOverridden(t *testing.T) {
 // burned the whole fix loop on a book that was actually fine.
 func TestValidateWarningRidesToAuditPass(t *testing.T) {
 	dir := t.TempDir()
-	db, err := store.Open(context.Background(), filepath.Join(dir, "sidecars.db"))
+	db, err := store.Open(context.Background(), filepath.Join(dir, store.FileName))
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
@@ -683,7 +683,7 @@ func startSidecarBook(t *testing.T, fake *fakeRunner) (store.Book, *store.DB, fu
 	seedFacts(t, work)
 	seedTranscriptsText(t, work, "clean narration alpha bravo", "distinct charlie delta echo")
 
-	db, err := store.Open(context.Background(), filepath.Join(dir, "sidecars.db"))
+	db, err := store.Open(context.Background(), filepath.Join(dir, store.FileName))
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}

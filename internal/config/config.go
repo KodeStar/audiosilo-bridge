@@ -1,7 +1,7 @@
-// Package config loads and validates the audiosilo-sidecars daemon configuration.
+// Package config loads and validates the AudioSilo Bridge configuration.
 //
 // Configuration is read from config.yaml inside the data directory and can be
-// overridden by environment variables prefixed AUDIOSILO_SIDECARS_. On first run
+// overridden by environment variables prefixed AUDIOSILO_BRIDGE_. On first run
 // the file does not exist and Load returns a Config populated with defaults;
 // callers persist it via Save. Secrets (API keys, PATs) are NEVER stored here -
 // they live in internal/secrets (OS keychain / 0600 fallback).
@@ -445,7 +445,7 @@ func Load(dataDir string) (Config, error) {
 	repoSource := "config.yaml contribution.repo"
 	env := applyEnv(&cfg)
 	if env.legacyRepo {
-		repoSource = "AUDIOSILO_SIDECARS_CONTRIBUTION_REPO"
+		repoSource = "AUDIOSILO_BRIDGE_CONTRIBUTION_REPO"
 	}
 	foldLegacyContribution(&cfg, capacityKeys.Contribution.CoreRepo != nil || env.coreRepo,
 		capacityKeys.Contribution.CommunityRepo != nil || env.communityRepo, repoSource)
@@ -503,47 +503,47 @@ func Load(dataDir string) (Config, error) {
 // legacy-repo fold.
 type envSeen struct{ coreRepo, communityRepo, legacyRepo bool }
 
-// applyEnv overlays AUDIOSILO_SIDECARS_* environment variables onto cfg.
+// applyEnv overlays AUDIOSILO_BRIDGE_* environment variables onto cfg.
 func applyEnv(cfg *Config) (seen envSeen) {
-	if v, ok := os.LookupEnv("AUDIOSILO_SIDECARS_LISTEN"); ok {
+	if v, ok := os.LookupEnv("AUDIOSILO_BRIDGE_LISTEN"); ok {
 		cfg.Listen = v
 	}
-	if v, ok := os.LookupEnv("AUDIOSILO_SIDECARS_CORS_ORIGINS"); ok {
+	if v, ok := os.LookupEnv("AUDIOSILO_BRIDGE_CORS_ORIGINS"); ok {
 		cfg.CORSOrigins = splitList(v)
 	}
-	if v, ok := os.LookupEnv("AUDIOSILO_SIDECARS_LIBRARY_ROOTS"); ok {
+	if v, ok := os.LookupEnv("AUDIOSILO_BRIDGE_LIBRARY_ROOTS"); ok {
 		cfg.LibraryRoots = splitList(v)
 	}
-	if v, ok := os.LookupEnv("AUDIOSILO_SIDECARS_METADATA_BASE_URL"); ok {
+	if v, ok := os.LookupEnv("AUDIOSILO_BRIDGE_METADATA_BASE_URL"); ok {
 		cfg.Metadata.BaseURL = strings.TrimSpace(v)
 	}
-	if v, ok := os.LookupEnv("AUDIOSILO_SIDECARS_TOOLS_FFMPEG_PATH"); ok {
+	if v, ok := os.LookupEnv("AUDIOSILO_BRIDGE_TOOLS_FFMPEG_PATH"); ok {
 		cfg.Tools.FFmpegPath = v
 	}
-	if v, ok := os.LookupEnv("AUDIOSILO_SIDECARS_TOOLS_FFPROBE_PATH"); ok {
+	if v, ok := os.LookupEnv("AUDIOSILO_BRIDGE_TOOLS_FFPROBE_PATH"); ok {
 		cfg.Tools.FFprobePath = v
 	}
-	if v, ok := os.LookupEnv("AUDIOSILO_SIDECARS_TOOLS_AUTO_DOWNLOAD"); ok {
+	if v, ok := os.LookupEnv("AUDIOSILO_BRIDGE_TOOLS_AUTO_DOWNLOAD"); ok {
 		if b, err := strconv.ParseBool(strings.TrimSpace(v)); err == nil {
 			cfg.Tools.AutoDownload = b
 		}
 	}
-	if v, ok := os.LookupEnv("AUDIOSILO_SIDECARS_ASR_BACKEND"); ok {
+	if v, ok := os.LookupEnv("AUDIOSILO_BRIDGE_ASR_BACKEND"); ok {
 		cfg.ASR.Backend = strings.TrimSpace(v)
 	}
-	if v, ok := os.LookupEnv("AUDIOSILO_SIDECARS_ASR_MODEL"); ok {
+	if v, ok := os.LookupEnv("AUDIOSILO_BRIDGE_ASR_MODEL"); ok {
 		cfg.ASR.Model = strings.TrimSpace(v)
 	}
-	if v, ok := os.LookupEnv("AUDIOSILO_SIDECARS_ASR_LANGUAGE"); ok {
+	if v, ok := os.LookupEnv("AUDIOSILO_BRIDGE_ASR_LANGUAGE"); ok {
 		cfg.ASR.Language = strings.TrimSpace(v)
 	}
-	if v, ok := os.LookupEnv("AUDIOSILO_SIDECARS_ASR_WHISPER_CLI_PATH"); ok {
+	if v, ok := os.LookupEnv("AUDIOSILO_BRIDGE_ASR_WHISPER_CLI_PATH"); ok {
 		cfg.ASR.WhisperCLIPath = v
 	}
-	if v, ok := os.LookupEnv("AUDIOSILO_SIDECARS_AGENT_BACKEND"); ok {
+	if v, ok := os.LookupEnv("AUDIOSILO_BRIDGE_AGENT_BACKEND"); ok {
 		cfg.Agent.Backend = v
 	}
-	if v, ok := os.LookupEnv("AUDIOSILO_SIDECARS_AGENT_CONCURRENCY"); ok {
+	if v, ok := os.LookupEnv("AUDIOSILO_BRIDGE_AGENT_CONCURRENCY"); ok {
 		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
 			if n == 0 {
 				n = DefaultConcurrency
@@ -552,8 +552,8 @@ func applyEnv(cfg *Config) (seen envSeen) {
 			cfg.Agent.QueueConcurrency, cfg.Agent.MaxAgentsPerBook = 0, 0
 		}
 	}
-	queueRaw, queueSet := os.LookupEnv("AUDIOSILO_SIDECARS_AGENT_QUEUE_CONCURRENCY")
-	perBookRaw, perBookSet := os.LookupEnv("AUDIOSILO_SIDECARS_AGENT_MAX_AGENTS_PER_BOOK")
+	queueRaw, queueSet := os.LookupEnv("AUDIOSILO_BRIDGE_AGENT_QUEUE_CONCURRENCY")
+	perBookRaw, perBookSet := os.LookupEnv("AUDIOSILO_BRIDGE_AGENT_MAX_AGENTS_PER_BOOK")
 	queueValue, queueErr := strconv.Atoi(strings.TrimSpace(queueRaw))
 	perBookValue, perBookErr := strconv.Atoi(strings.TrimSpace(perBookRaw))
 	validQueue, validPerBook := queueSet && queueErr == nil, perBookSet && perBookErr == nil
@@ -573,63 +573,63 @@ func applyEnv(cfg *Config) (seen envSeen) {
 			cfg.Agent.MaxAgentsPerBook = perBookValue
 		}
 	}
-	if v, ok := os.LookupEnv("AUDIOSILO_SIDECARS_AGENT_CLAUDE_PATH"); ok {
+	if v, ok := os.LookupEnv("AUDIOSILO_BRIDGE_AGENT_CLAUDE_PATH"); ok {
 		cfg.Agent.ClaudePath = v
 	}
-	if v, ok := os.LookupEnv("AUDIOSILO_SIDECARS_AGENT_CODEX_PATH"); ok {
+	if v, ok := os.LookupEnv("AUDIOSILO_BRIDGE_AGENT_CODEX_PATH"); ok {
 		cfg.Agent.CodexPath = v
 	}
-	if v, ok := os.LookupEnv("AUDIOSILO_SIDECARS_AGENT_TIMEOUT_MINUTES"); ok {
+	if v, ok := os.LookupEnv("AUDIOSILO_BRIDGE_AGENT_TIMEOUT_MINUTES"); ok {
 		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
 			cfg.Agent.TimeoutMinutes = n
 		}
 	}
-	if v, ok := os.LookupEnv("AUDIOSILO_SIDECARS_AGENT_BOOK_BUDGET_USD"); ok {
+	if v, ok := os.LookupEnv("AUDIOSILO_BRIDGE_AGENT_BOOK_BUDGET_USD"); ok {
 		if f, err := strconv.ParseFloat(strings.TrimSpace(v), 64); err == nil {
 			cfg.Agent.BookBudgetUSD = f
 		}
 	}
-	if v, ok := os.LookupEnv("AUDIOSILO_SIDECARS_SUPERVISOR_ENABLED"); ok {
+	if v, ok := os.LookupEnv("AUDIOSILO_BRIDGE_SUPERVISOR_ENABLED"); ok {
 		if b, err := strconv.ParseBool(strings.TrimSpace(v)); err == nil {
 			cfg.Supervisor.Enabled = b
 		}
 	}
-	if v, ok := os.LookupEnv("AUDIOSILO_SIDECARS_SUPERVISOR_AUTOMATIC_ACTIONS"); ok {
+	if v, ok := os.LookupEnv("AUDIOSILO_BRIDGE_SUPERVISOR_AUTOMATIC_ACTIONS"); ok {
 		if b, err := strconv.ParseBool(strings.TrimSpace(v)); err == nil {
 			cfg.Supervisor.AutomaticActions = b
 		}
 	}
-	if v, ok := os.LookupEnv("AUDIOSILO_SIDECARS_SUPERVISOR_MODEL_ASSISTED"); ok {
+	if v, ok := os.LookupEnv("AUDIOSILO_BRIDGE_SUPERVISOR_MODEL_ASSISTED"); ok {
 		if b, err := strconv.ParseBool(strings.TrimSpace(v)); err == nil {
 			cfg.Supervisor.ModelAssisted = b
 		}
 	}
-	if v, ok := os.LookupEnv("AUDIOSILO_SIDECARS_CONTRIBUTION_MODE"); ok {
+	if v, ok := os.LookupEnv("AUDIOSILO_BRIDGE_CONTRIBUTION_MODE"); ok {
 		cfg.Contribution.Mode = strings.TrimSpace(v)
 	}
-	if v, ok := os.LookupEnv("AUDIOSILO_SIDECARS_CONTRIBUTION_CORE_REPO"); ok {
+	if v, ok := os.LookupEnv("AUDIOSILO_BRIDGE_CONTRIBUTION_CORE_REPO"); ok {
 		cfg.Contribution.CoreRepo = strings.TrimSpace(v)
 		seen.coreRepo = true
 	}
-	if v, ok := os.LookupEnv("AUDIOSILO_SIDECARS_CONTRIBUTION_REPO"); ok {
+	if v, ok := os.LookupEnv("AUDIOSILO_BRIDGE_CONTRIBUTION_REPO"); ok {
 		cfg.Contribution.Repo = strings.TrimSpace(v)
 		seen.legacyRepo = true
 	}
-	if v, ok := os.LookupEnv("AUDIOSILO_SIDECARS_CONTRIBUTION_COMMUNITY_REPO"); ok {
+	if v, ok := os.LookupEnv("AUDIOSILO_BRIDGE_CONTRIBUTION_COMMUNITY_REPO"); ok {
 		cfg.Contribution.CommunityRepo = strings.TrimSpace(v)
 		seen.communityRepo = true
 	}
-	if v, ok := os.LookupEnv("AUDIOSILO_SIDECARS_CONTRIBUTION_AUTO_PURGE"); ok {
+	if v, ok := os.LookupEnv("AUDIOSILO_BRIDGE_CONTRIBUTION_AUTO_PURGE"); ok {
 		if b, err := strconv.ParseBool(strings.TrimSpace(v)); err == nil {
 			cfg.Contribution.AutoPurge = b
 		}
 	}
-	if v, ok := os.LookupEnv("AUDIOSILO_SIDECARS_CONTRIBUTION_POLL_MINUTES"); ok {
+	if v, ok := os.LookupEnv("AUDIOSILO_BRIDGE_CONTRIBUTION_POLL_MINUTES"); ok {
 		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
 			cfg.Contribution.PollMinutes = n
 		}
 	}
-	if v, ok := os.LookupEnv("AUDIOSILO_SIDECARS_CONTRIBUTION_API_BASE_URL"); ok {
+	if v, ok := os.LookupEnv("AUDIOSILO_BRIDGE_CONTRIBUTION_API_BASE_URL"); ok {
 		cfg.Contribution.APIBaseURL = strings.TrimSpace(v)
 	}
 	return seen

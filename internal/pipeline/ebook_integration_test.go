@@ -31,7 +31,7 @@ func TestEbookFullMachineToDone(t *testing.T) {
 	src := corpusEpubOrSynthetic(t, dir)
 	workRoot := filepath.Join(dir, "work")
 
-	db, err := store.Open(context.Background(), filepath.Join(dir, "sidecars.db"))
+	db, err := store.Open(context.Background(), filepath.Join(dir, store.FileName))
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}

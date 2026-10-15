@@ -1,4 +1,4 @@
-// Package store is the SQLite persistence layer for the sidecars daemon. It holds
+// Package store is the SQLite persistence layer for the Bridge. It holds
 // the scheduling truth: books and their pipeline state, the per-execution
 // stage_runs ledger, live progress counters, a durable event log, and the auth
 // password/session state (migrated off the M0 JSON files). The work-dir artifacts
@@ -29,7 +29,7 @@ import (
 var migrationsFS embed.FS
 
 // FileName is the database filename inside the data directory.
-const FileName = "sidecars.db"
+const FileName = "bridge.db"
 
 // DB is the sidecars database handle. A single writer connection serializes
 // writes (SQLite's model), which is ample for a single-user local daemon and

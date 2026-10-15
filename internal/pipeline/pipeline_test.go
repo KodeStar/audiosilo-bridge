@@ -174,7 +174,7 @@ func TestPipelineInspectSplitToDone(t *testing.T) {
 	book := genFixtureM4B(t, ffmpeg, dir)
 	workRoot := filepath.Join(dir, "work")
 
-	db, err := store.Open(context.Background(), filepath.Join(dir, "sidecars.db"))
+	db, err := store.Open(context.Background(), filepath.Join(dir, store.FileName))
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
@@ -351,7 +351,7 @@ func TestPipelineParksUnnormalizableMarkers(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
 			workRoot := filepath.Join(dir, "work")
-			db, err := store.Open(context.Background(), filepath.Join(dir, "sidecars.db"))
+			db, err := store.Open(context.Background(), filepath.Join(dir, store.FileName))
 			if err != nil {
 				t.Fatalf("open db: %v", err)
 			}
@@ -1029,7 +1029,7 @@ func TestPipelineCancelMidASRResumes(t *testing.T) {
 	workRoot := filepath.Join(dir, "work")
 	workDir := filepath.Join(workRoot, "fixture")
 
-	db, err := store.Open(context.Background(), filepath.Join(dir, "sidecars.db"))
+	db, err := store.Open(context.Background(), filepath.Join(dir, store.FileName))
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}

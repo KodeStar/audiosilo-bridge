@@ -59,7 +59,7 @@ func TestBookBudgetNormalizeAndOverride(t *testing.T) {
 		t.Errorf("explicit budget = %v, want 100000", out.Agent.BookBudgetUSD)
 	}
 	// The env override applies too.
-	t.Setenv("AUDIOSILO_SIDECARS_AGENT_BOOK_BUDGET_USD", "42.5")
+	t.Setenv("AUDIOSILO_BRIDGE_AGENT_BOOK_BUDGET_USD", "42.5")
 	out, err = Load(dir)
 	if err != nil {
 		t.Fatal(err)
@@ -185,9 +185,9 @@ func TestSaveWritesMode0600(t *testing.T) {
 
 func TestEnvOverrides(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("AUDIOSILO_SIDECARS_LISTEN", "127.0.0.1:7777")
-	t.Setenv("AUDIOSILO_SIDECARS_CORS_ORIGINS", "http://a.example, https://b.example ")
-	t.Setenv("AUDIOSILO_SIDECARS_AGENT_CONCURRENCY", "3")
+	t.Setenv("AUDIOSILO_BRIDGE_LISTEN", "127.0.0.1:7777")
+	t.Setenv("AUDIOSILO_BRIDGE_CORS_ORIGINS", "http://a.example, https://b.example ")
+	t.Setenv("AUDIOSILO_BRIDGE_AGENT_CONCURRENCY", "3")
 	cfg, err := Load(dir)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -325,12 +325,12 @@ func TestSupervisorRejectsUnsafeOrUnpriceableConfiguration(t *testing.T) {
 
 func TestAgentEnvOverrides(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("AUDIOSILO_SIDECARS_AGENT_BACKEND", "codex")
-	t.Setenv("AUDIOSILO_SIDECARS_AGENT_CLAUDE_PATH", "/usr/local/bin/claude")
-	t.Setenv("AUDIOSILO_SIDECARS_AGENT_CODEX_PATH", "/usr/local/bin/codex")
-	t.Setenv("AUDIOSILO_SIDECARS_AGENT_TIMEOUT_MINUTES", "45")
-	t.Setenv("AUDIOSILO_SIDECARS_AGENT_QUEUE_CONCURRENCY", "3")
-	t.Setenv("AUDIOSILO_SIDECARS_AGENT_MAX_AGENTS_PER_BOOK", "2")
+	t.Setenv("AUDIOSILO_BRIDGE_AGENT_BACKEND", "codex")
+	t.Setenv("AUDIOSILO_BRIDGE_AGENT_CLAUDE_PATH", "/usr/local/bin/claude")
+	t.Setenv("AUDIOSILO_BRIDGE_AGENT_CODEX_PATH", "/usr/local/bin/codex")
+	t.Setenv("AUDIOSILO_BRIDGE_AGENT_TIMEOUT_MINUTES", "45")
+	t.Setenv("AUDIOSILO_BRIDGE_AGENT_QUEUE_CONCURRENCY", "3")
+	t.Setenv("AUDIOSILO_BRIDGE_AGENT_MAX_AGENTS_PER_BOOK", "2")
 	cfg, err := Load(dir)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -449,12 +449,12 @@ func TestContributionEnvOverridesAndRoundTrip(t *testing.T) {
 
 	// Env overrides take precedence, including auto_purge=false and a new interval.
 	envDir := t.TempDir()
-	t.Setenv("AUDIOSILO_SIDECARS_CONTRIBUTION_MODE", "local")
-	t.Setenv("AUDIOSILO_SIDECARS_CONTRIBUTION_CORE_REPO", "org/repo")
-	t.Setenv("AUDIOSILO_SIDECARS_CONTRIBUTION_COMMUNITY_REPO", "org/community")
-	t.Setenv("AUDIOSILO_SIDECARS_CONTRIBUTION_AUTO_PURGE", "false")
-	t.Setenv("AUDIOSILO_SIDECARS_CONTRIBUTION_POLL_MINUTES", "25")
-	t.Setenv("AUDIOSILO_SIDECARS_CONTRIBUTION_API_BASE_URL", "http://127.0.0.1:9999")
+	t.Setenv("AUDIOSILO_BRIDGE_CONTRIBUTION_MODE", "local")
+	t.Setenv("AUDIOSILO_BRIDGE_CONTRIBUTION_CORE_REPO", "org/repo")
+	t.Setenv("AUDIOSILO_BRIDGE_CONTRIBUTION_COMMUNITY_REPO", "org/community")
+	t.Setenv("AUDIOSILO_BRIDGE_CONTRIBUTION_AUTO_PURGE", "false")
+	t.Setenv("AUDIOSILO_BRIDGE_CONTRIBUTION_POLL_MINUTES", "25")
+	t.Setenv("AUDIOSILO_BRIDGE_CONTRIBUTION_API_BASE_URL", "http://127.0.0.1:9999")
 	cfg, err := Load(envDir)
 	if err != nil {
 		t.Fatalf("Load env: %v", err)
@@ -515,13 +515,13 @@ func TestContributionLegacySettings(t *testing.T) {
 		{name: "file repo loses to file core_repo", file: "contribution:\n  repo: old/meta\n  core_repo: new/meta" + community,
 			wantCore: "new/meta", wantCommunity: "me/community-test", wantNotice: "ignored"},
 		{name: "env repo, custom, with env community_repo", env: map[string]string{
-			"AUDIOSILO_SIDECARS_CONTRIBUTION_REPO": "env/meta", "AUDIOSILO_SIDECARS_CONTRIBUTION_COMMUNITY_REPO": "env/community"},
-			wantCore: "env/meta", wantCommunity: "env/community", wantNotice: "AUDIOSILO_SIDECARS_CONTRIBUTION_REPO is deprecated"},
+			"AUDIOSILO_BRIDGE_CONTRIBUTION_REPO": "env/meta", "AUDIOSILO_BRIDGE_CONTRIBUTION_COMMUNITY_REPO": "env/community"},
+			wantCore: "env/meta", wantCommunity: "env/community", wantNotice: "AUDIOSILO_BRIDGE_CONTRIBUTION_REPO is deprecated"},
 		{name: "env repo loses to file core_repo", file: "contribution:\n  core_repo: file/core" + community,
-			env: map[string]string{"AUDIOSILO_SIDECARS_CONTRIBUTION_REPO": "env/meta"}, wantCore: "file/core",
+			env: map[string]string{"AUDIOSILO_BRIDGE_CONTRIBUTION_REPO": "env/meta"}, wantCore: "file/core",
 			wantCommunity: "me/community-test", wantNotice: "ignored"},
 		{name: "file repo loses to env core_repo", file: "contribution:\n  repo: file/meta" + community,
-			env: map[string]string{"AUDIOSILO_SIDECARS_CONTRIBUTION_CORE_REPO": "env/core"}, wantCore: "env/core",
+			env: map[string]string{"AUDIOSILO_BRIDGE_CONTRIBUTION_CORE_REPO": "env/core"}, wantCore: "env/core",
 			wantCommunity: "me/community-test", wantNotice: "ignored"},
 		{name: "mode pr", file: "contribution:\n  mode: pr\n",
 			wantCore: DefaultContributionCoreRepo, wantMode: ContributionModeIssue, wantNotice: `"pr" is retired`},
@@ -583,7 +583,7 @@ func TestContributionLegacyCustomRepoNeedsCommunity(t *testing.T) {
 		env  map[string]string
 	}{
 		"file":                {file: "contribution:\n  repo: me/audiosilo-meta-test\n"},
-		"env":                 {env: map[string]string{"AUDIOSILO_SIDECARS_CONTRIBUTION_REPO": "me/audiosilo-meta-test"}},
+		"env":                 {env: map[string]string{"AUDIOSILO_BRIDGE_CONTRIBUTION_REPO": "me/audiosilo-meta-test"}},
 		"file with core_repo": {file: "contribution:\n  repo: me/audiosilo-meta-test\n  core_repo: me/core\n"},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -648,10 +648,10 @@ func TestDefaultsForNewFields(t *testing.T) {
 
 func TestASRConfigEnvAndNormalization(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("AUDIOSILO_SIDECARS_ASR_BACKEND", "whisper-cpp")
-	t.Setenv("AUDIOSILO_SIDECARS_ASR_MODEL", "ggml-tiny.bin")
-	t.Setenv("AUDIOSILO_SIDECARS_ASR_LANGUAGE", "de")
-	t.Setenv("AUDIOSILO_SIDECARS_ASR_WHISPER_CLI_PATH", "/opt/whisper-cli")
+	t.Setenv("AUDIOSILO_BRIDGE_ASR_BACKEND", "whisper-cpp")
+	t.Setenv("AUDIOSILO_BRIDGE_ASR_MODEL", "ggml-tiny.bin")
+	t.Setenv("AUDIOSILO_BRIDGE_ASR_LANGUAGE", "de")
+	t.Setenv("AUDIOSILO_BRIDGE_ASR_WHISPER_CLI_PATH", "/opt/whisper-cli")
 	cfg, err := Load(dir)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -702,10 +702,10 @@ func TestNewFieldsRoundTripAndEnv(t *testing.T) {
 	}
 
 	// Env overrides.
-	t.Setenv("AUDIOSILO_SIDECARS_LIBRARY_ROOTS", "/a, /b ")
-	t.Setenv("AUDIOSILO_SIDECARS_METADATA_BASE_URL", "https://meta.example")
-	t.Setenv("AUDIOSILO_SIDECARS_TOOLS_FFPROBE_PATH", "/usr/bin/ffprobe")
-	t.Setenv("AUDIOSILO_SIDECARS_TOOLS_AUTO_DOWNLOAD", "true")
+	t.Setenv("AUDIOSILO_BRIDGE_LIBRARY_ROOTS", "/a, /b ")
+	t.Setenv("AUDIOSILO_BRIDGE_METADATA_BASE_URL", "https://meta.example")
+	t.Setenv("AUDIOSILO_BRIDGE_TOOLS_FFPROBE_PATH", "/usr/bin/ffprobe")
+	t.Setenv("AUDIOSILO_BRIDGE_TOOLS_AUTO_DOWNLOAD", "true")
 	env, err := Load(dir)
 	if err != nil {
 		t.Fatalf("Load env: %v", err)

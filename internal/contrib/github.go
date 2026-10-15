@@ -165,7 +165,7 @@ func (c *Client) doOnce(ctx context.Context, accept, method, path string, payloa
 func (c *Client) setHeaders(req *http.Request, hasBody bool) {
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-	req.Header.Set("User-Agent", "audiosilo-sidecars")
+	req.Header.Set("User-Agent", "audiosilo-bridge")
 	if c.token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.token)
 	}
