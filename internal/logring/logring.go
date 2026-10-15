@@ -30,8 +30,14 @@ type Ring struct {
 	next uint64
 }
 
-// New returns a ring of size entries.
-func New(size int) *Ring { return &Ring{buf: make([]Entry, size)} }
+// New returns a ring of size entries. Its ids start from the clock (Unix
+// microseconds, well inside a JavaScript number), not from 1, so they only
+// grow across restarts: a page still holding a cursor from the previous
+// process (its session survives a restart) gets the new lines, never an empty
+// answer until the new process has logged past it.
+func New(size int) *Ring {
+	return &Ring{buf: make([]Entry, size), next: uint64(max(time.Now().UnixMicro(), 0))}
+}
 
 func (r *Ring) add(e Entry) {
 	r.mu.Lock()
@@ -64,6 +70,10 @@ func (r *Ring) Since(after uint64, limit int, minLevel slog.Level) []Entry {
 	}
 	return out
 }
+
+// maxAttrText bounds an attribute's value as kept (cut at a character's
+// boundary).
+const maxAttrText = 500
 
 // secretWords mark an attribute whose value is never kept.
 var secretWords = []string{"token", "password", "code", "key", "secret", "cookie", "authorization"}
@@ -98,22 +108,38 @@ func (h *Handler) Enabled(ctx context.Context, l slog.Level) bool {
 func (h *Handler) Handle(ctx context.Context, rec slog.Record) error {
 	if rec.Level >= slog.LevelInfo {
 		e := Entry{Time: rec.Time, Level: rec.Level, Message: rec.Message}
-		add := func(key string, a slog.Attr) {
+		// add keeps one attribute under its full dotted key, a group (an
+		// slog.Group, a LogValuer resolving to one) as one entry per member, so
+		// redaction always judges the full key of a leaf value ("auth.token",
+		// "token.value"), never just the outermost one.
+		var add func(key string, v slog.Value)
+		add = func(key string, v slog.Value) {
+			v = v.Resolve()
+			if v.Kind() == slog.KindGroup {
+				for _, ga := range v.Group() {
+					k := ga.Key
+					if key != "" {
+						k = key + "." + k
+					}
+					add(k, ga.Value)
+				}
+				return
+			}
 			if e.Attrs == nil {
 				e.Attrs = map[string]string{}
 			}
-			if redact(a.Key) {
+			if redact(key) {
 				e.Attrs[key] = "[redacted]"
 				return
 			}
-			v := fmt.Sprint(a.Value.Resolve().Any())
-			if len(v) > 500 {
-				v = v[:500]
+			s := fmt.Sprint(v.Any())
+			if len(s) > maxAttrText {
+				s = strings.ToValidUTF8(s[:maxAttrText], "")
 			}
-			e.Attrs[key] = v
+			e.Attrs[key] = s
 		}
 		for _, a := range h.attrs {
-			add(a.Key, a)
+			add(a.Key, a.Value)
 		}
 		prefix := strings.Join(h.groups, ".")
 		rec.Attrs(func(a slog.Attr) bool {
@@ -121,7 +147,7 @@ func (h *Handler) Handle(ctx context.Context, rec slog.Record) error {
 			if prefix != "" {
 				key = prefix + "." + key
 			}
-			add(key, a)
+			add(key, a.Value)
 			return true
 		})
 		h.ring.add(e)

@@ -95,8 +95,9 @@ Dockerfile    slim | cuda | full; compose.example.yaml beside the server
 ```
 
 **Dependency direction:** `app -> {api, jobs, link, mapping, verify, store, secrets,
-config, auth, logring, web}`; `api` calls only the injected Backend (types from
-jobs/link/mapping/store/logring); `verify -> {jobs, link, mapping}`; `jobs -> {link,
+config, auth, logring, web}`; `api` calls the injected Backend and the injected
+`auth.Manager` (login, sessions, the password), with types from
+jobs/link/mapping/store/logring; `verify -> {jobs, link, mapping}`; `jobs -> {link,
 store}`; `mapping -> link`; `link` is a leaf. The engine's directions are in
 PACKAGES.md.
 
@@ -137,6 +138,8 @@ Operative caveats carried from sidecars (PACKAGES.md has the detail):
   (`internal/pipeline/schema_drift_test.go`) is strict.
 - **whisper.cpp binaries ship on their own cadence** from audiosilo-sidecars'
   releases (`toolfetch.WhisperCLIReleaseTag`; the images pin the same tag and
-  sha256). Move them to this repo's releases when it goes public.
+  check each asset's sha256 against that release's `checksums.txt`, which is
+  not a pin: a release replaced whole would pass). Move them to this repo's
+  releases when it goes public.
 - **The engine's book identity is `books.source_path`** (an absolute Bridge path),
   which Phase 1a maps from the server's `(library_id, rel_path)`.

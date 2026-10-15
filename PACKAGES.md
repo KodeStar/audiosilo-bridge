@@ -28,9 +28,13 @@ internal/
             keep Unraid array disks awake). AUDIOSILO_BRIDGE_LIBRARIES is
             "<id>=<path>;..." (a path may hold a comma). A value the environment sets
             is recorded (EnvSet) and locked on the page; SaveFile edits config.yaml's
-            OWN values (loaded without the environment), so a save never writes an
-            env value into the file. A malformed env value fails the start rather
-            than being ignored. The engine's settings below are restart-to-apply.
+            OWN values (loaded without the environment), and an edit (app's
+            SaveSettings) never assigns a locked setting, which the page sends back
+            unchanged, so a save never writes an env value into the file. A
+            malformed env value fails the start rather than being ignored; an EMPTY
+            one (compose's ${VAR} of an unset variable, a blank template field)
+            counts as unset: it neither locks the page nor fails the start. The
+            engine's settings below are restart-to-apply.
             Engine history: metadata.base_url; agent.queue_concurrency controls
             agent-lane books and
             agent.max_agents_per_book controls safe within-book fan-out; legacy
@@ -589,10 +593,12 @@ internal/
             another name doesn't open), keyed by ONE master key:
             AUDIOSILO_BRIDGE_SECRET_KEY (32 bytes, hex or base64; lets the key live
             outside the data volume) else <data>/secret.key (created 0600, O_EXCL, on
-            the first start). A changed key is ErrWrongKey, which the start reports
-            in words. No OS keychain: the Bridge runs headless in a container.
-            Names are ^[a-z][a-z0-9_]{0,63}$ (a name is a file name); the read API
-            is presence-only.
+            the first start, synced, and removed when it couldn't be written whole:
+            an empty key file would fail every later start). A changed key is
+            ErrWrongKey, which the start reports in words. No OS keychain: the
+            Bridge runs headless in a container. Names are ^[a-z][a-z0-9_]{0,63}$ (a
+            name is a file name); Get hands a secret to the code that uses it, and
+            nothing echoes one.
   store/    SQLite (modernc, pure Go; single writer + WAL) + append-only migrations,
             bridge.db. 0001 is sidecars' 13 migrations squashed at the import (the
             later columns folded into their tables; candidate_overrides and
@@ -823,23 +829,39 @@ internal/
             podcast libraries start empty: revisit there). Registry holds the
             server's libraries from the last heartbeat and each check; Check(ids...)
             checks some or all, one library at a time, and never overlaps itself: a
-            check asked for while one runs is done right after it by that call (so a
-            mapping edited mid-check is never missed). A mapping edit re-checks only
-            its library (each check stats files and writes a probe).
+            check asked for while one runs is done right after it by that call, with
+            the NEWEST caller's link (after a re-pair the old one is revoked), so a
+            mapping edited mid-check is never missed; that queued Check returns false
+            (its caller beats for nothing). Due is false while a check runs (it
+            refreshes what is due): a heartbeat during a long check (spun-down disks)
+            asking again and beating again was a tight loop of heartbeats. A mapping
+            edit re-checks only its library (each check stats files and writes a
+            probe).
   jobs/     the generic runner. Handlers declare a kind and a lane (lanes: light=2
             in Phase 0); the claim loop asks only for kinds whose lane has room, and
             waits (no claim) while unpaired or full. A running job reports at least
             every Keepalive (10 s), renewing the server's 2-minute lease; a reply
             with cancel_requested ends its context (errCancelRequested -> reported
-            cancelled), a 409 ends it as lost (nothing more sent), a 401 unpairs. A
-            stopping Bridge (base context ended) or a 401 leaves the row RUNNING, so
-            the next start resumes it under the same claim; if the lease ran out
-            meanwhile, the first report gets 409 and the row is lost, and the claim
-            loop takes the job again as the next attempt (the kill test in the
-            handoff log). Recovery runs once the link is up: a kind no longer run is
-            failed. The final report carries the last progress (a throttled step may
-            never have been sent) and is retried every 30 s until the server takes it
-            or says it moved on (only while one is owed: a flag, not a poll); old
+            cancelled), a 409 ends it as lost (nothing more sent), a 401 is handed to
+            the app WITH the link that got it (onUnauthorized(srv): a job of the
+            previous pairing still reporting with its revoked token must not refuse
+            a new pairing). A stopping Bridge (base context ended) leaves the row
+            RUNNING, so the next start resumes it under the same claim; a job a 401
+            stopped is left running too and resumed under its claim as soon as a
+            link to its server (the same address) works again, a refusal ending or
+            a re-pair (resumeStranded; another server's link records it lost, its
+            ids being the old server's). If the lease ran out meanwhile, the first
+            report gets 409 and the row is lost, and the claim loop takes the job
+            again as the next attempt (the kill test in the handoff log). release
+            frees only its own run (a later claim of the job may run under its id).
+            Recovery runs once the link is up: a kind no longer run is failed.
+            Nothing is sent that the server refuses for good: a result that isn't a
+            JSON object of at most 64 KiB fails the job (errUnreportable) and
+            progress text is clipped, since a refused report was retried until the
+            lease ran out and the job ran again. The final report carries the last
+            progress (a throttled step may never have been sent) and is retried
+            every 30 s until the server takes it or says it moved on (only while one
+            is owed: a flag, not a poll); old
             finished jobs are pruned hourly. Progress only RECORDS: the job's
             reporting goroutine sends (a new step at once, other changes within
             ProgressEvery, a keepalive otherwise), so a handler never waits on the
@@ -854,16 +876,25 @@ internal/
             writable, writable_error, elapsed_ms}: the server's console renders it.
   app/      the wiring and the page API's Backend: Conn holds the pairing (settings
             pairing.*, the token in the vault) and the link; the heartbeat loop beats
-            every 30 s or when kicked, records the server's libraries and starts a
-            mapping check (in the background, TryLock) when they changed or one is
-            due, then beats again with the results; a 401 anywhere unpairs with a
-            reason the page shows. A 401 does NOT drop the token: Conn.Refuse keeps it
-            and the heartbeat retries it every RefusedRetry (5 min), since a demoted
-            admin's Bridge works again once they are an admin again (an unpair or a
-            new pairing revoked it for good, so a retry just fails); Client() is nil
+            every 30 s or when kicked, records the server's libraries (under b.mu,
+            beatGen-checked, before the link counts as ready) and starts a mapping
+            check (in the background; one asked for while another runs is queued
+            and beaten once, by it) when they changed or one is due, then beats
+            again with the results. The runner sees the link (server()) only once a
+            heartbeat on it went through, so no job, a resumed one included, runs
+            before the server's libraries are known. A 401 on the CURRENT link
+            refuses it with a reason the page shows (Conn.Refuse(cl) and accept(cl)
+            ignore any other link: one a re-pair or an unpair replaced, still in use
+            by a job or a call that started before). A 401 does NOT drop the token:
+            Conn.Refuse keeps it and the heartbeat retries it every RefusedRetry (5
+            min), since a demoted admin's Bridge works again once they are an admin
+            again (an unpair or a new pairing revoked it for good, so a retry just
+            fails); Client() is nil
             while refused, so nothing else calls in. Run LISTENS BEFORE pairing from
             AUDIOSILO_BRIDGE_PAIR_CODE, so a start that can't serve doesn't spend the
-            code. Edits go through config.SaveFile and reload the config.
+            code; a page server that fails stops the heartbeat and the runner, and
+            Run returns its error. Edits go through config.SaveFile (one at a time:
+            each loads, edits and writes config.yaml) and reload the config.
   api/      transport-only HTTP of the Bridge's page (/api/*): login (rate limited),
             password (a wrong current one is 403, never 401, which signs the page
             out), status, pair/unpair, libraries + mount edits + check now, settings,
@@ -876,9 +907,15 @@ internal/
             code locked, ErrConflict 409, ErrUnreachable 502), anything else a 500
             that is logged and never echoed.
   logring/  an slog.Handler that tees Info-and-up into a 2,000-line circular buffer
-            for the page's log view (levels kept as slog.Level, encoded by name); attributes whose key holds token/password/code/key/
-            secret/cookie/authorization are redacted.
-  web/      go:embed of the page (build-tag selected) + SPA-fallback static serving
+            for the page's log view (levels kept as slog.Level, encoded by name);
+            ids start from the clock (Unix microseconds), so they grow across
+            restarts and a page still holding the previous process's cursor gets
+            the new lines. Attributes whose FULL dotted key holds
+            token/password/code/key/secret/cookie/authorization are redacted, groups
+            (slog.Group, a LogValuer resolving to one) flattened leaf by leaf first.
+  web/      go:embed of the page (build-tag selected) + SPA-fallback static serving;
+            the page itself (/, a client route, /index.html) always goes out with
+            its CSP
 web/          the Bridge's page: Vite + React 19 + TS + Tailwind v4 (npm, Node 24); dist/ is
               embedded with -tags embedui. Tooling, versions and the visual language are
               sidecars' web/ (the lock file is sidecars' with the name changed). No router:

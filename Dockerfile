@@ -14,7 +14,9 @@
 # one it needs into /bridge-data/tools on first use.
 #
 # The whisper-cli builds are audiosilo-sidecars' release assets (public; see
-# internal/toolfetch), pinned here by tag and sha256.
+# internal/toolfetch), pinned here by tag (the same as toolfetch's
+# WhisperCLIReleaseTag), each checked against the sha256 that release's
+# checksums.txt lists.
 
 ARG WHISPER_TAG=whisper-cpp-v1.9.1-1
 
@@ -69,6 +71,10 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /out/audiosilo-bridge /usr/local/bin/audiosilo-bridge
 COPY docker/entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+# The data folder belongs to the default PUID:PGID, so a start as that user
+# (docker --user 1000:1000) can write it too; the entrypoint owns it to any
+# other PUID:PGID when it starts as root.
+RUN install -d -o 1000 -g 1000 -m 0700 /bridge-data
 ENV AUDIOSILO_BRIDGE_DATA=/bridge-data \
     PUID=1000 \
     PGID=1000
@@ -88,6 +94,7 @@ RUN apt-get update \
 COPY --from=build /out/audiosilo-bridge /usr/local/bin/audiosilo-bridge
 COPY --from=whisper-cuda /w/out /opt/whisper
 COPY docker/entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN install -d -o 1000 -g 1000 -m 0700 /bridge-data
 ENV AUDIOSILO_BRIDGE_DATA=/bridge-data \
     AUDIOSILO_BRIDGE_ASR_BACKEND=whisper-cpp \
     AUDIOSILO_BRIDGE_ASR_WHISPER_CLI_PATH=/opt/whisper/whisper-cli \

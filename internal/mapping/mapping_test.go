@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -233,16 +234,68 @@ func TestCheckOneAndQueued(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
-	// Asked for while the first check runs: queued, and this call returns at once.
-	r.Check(context.Background(), src, mount, func() time.Time { return now }, 2)
+	// While a check runs nothing is due (it refreshes what is), so a heartbeat
+	// doesn't ask for another one.
+	if r.Due(now, time.Minute) {
+		t.Fatal("due while a check runs")
+	}
+	// Asked for while the first check runs: queued, and this call returns at once
+	// and says it didn't check (its caller doesn't beat for it).
+	fresh := books{book: &link.Book{Path: "Author/Book", Files: files}}
+	if r.Check(context.Background(), fresh, mount, func() time.Time { return now }, 2) {
+		t.Fatal("a queued check reported it checked")
+	}
 	close(release)
 	<-done
-	if maxInFlight != 1 || calls != 2 {
-		t.Fatalf("checks in flight at once = %d, calls = %d; want 1 and 2", maxInFlight, calls)
+	if maxInFlight != 1 || calls != 1 {
+		t.Fatalf("checks in flight at once = %d, calls on the first link = %d; want 1 and 1", maxInFlight, calls)
 	}
 	if len(r.Statuses()) != 2 {
 		t.Fatalf("statuses = %+v", r.Statuses())
 	}
+}
+
+// A check queued behind a running one is made with the link it was asked with,
+// never the running one's: after a re-pair the old link is revoked, so a
+// follow-up through it would record every library as refused (denied); through
+// the new link it maps (allowed).
+func TestQueuedCheckUsesItsOwnLink(t *testing.T) {
+	t.Parallel()
+	r := NewRegistry()
+	root, files := library(t)
+	r.SetLibraries([]link.Library{{ID: 1, Root: root}})
+	now := time.Date(2026, 10, 15, 10, 0, 0, 0, time.UTC)
+	book := &link.Book{Path: "Author/Book", Files: files}
+	old := &revokedAfterFirst{book: book, release: make(chan struct{}), started: make(chan struct{})}
+	mount := func(id int64, root string) (string, bool) { return root, false }
+	done := make(chan struct{})
+	go func() { r.Check(context.Background(), old, mount, func() time.Time { return now }); close(done) }()
+	<-old.started
+	r.Check(context.Background(), books{book: book}, mount, func() time.Time { return now })
+	close(old.release)
+	<-done
+	if sts := r.Statuses(); len(sts) != 1 || !sts[0].Mapped || sts[0].Error != "" {
+		t.Fatalf("the follow-up check = %+v, want mapped through the new link", sts)
+	}
+	if old.calls.Load() != 1 {
+		t.Fatalf("the old link was asked %d times, want once", old.calls.Load())
+	}
+}
+
+// revokedAfterFirst answers its first lookup (once released), then refuses.
+type revokedAfterFirst struct {
+	book             *link.Book
+	release, started chan struct{}
+	calls            atomic.Int32
+}
+
+func (b *revokedAfterFirst) Book(context.Context, int64, string) (*link.Book, error) {
+	if b.calls.Add(1) > 1 {
+		return nil, link.ErrUnauthorized
+	}
+	close(b.started)
+	<-b.release
+	return b.book, nil
 }
 
 type slowBooks struct {

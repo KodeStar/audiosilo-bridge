@@ -42,23 +42,31 @@ const (
 
 // Job is a server job (bridge_jobs) as the Bridge routes answer it.
 type Job struct {
-	ID              int64           `json:"id"`
-	Kind            string          `json:"kind"`
-	LibraryID       *int64          `json:"library_id"`
-	Path            *string         `json:"path"`
-	Params          json.RawMessage `json:"params"`
-	State           string          `json:"state"`
-	Progress        json.RawMessage `json:"progress"`
-	Result          json.RawMessage `json:"result"`
-	Error           string          `json:"error"`
-	Priority        int             `json:"priority"`
-	Attempts        int             `json:"attempts"`
-	LeaseUntil      *string         `json:"lease_until"`
-	CancelRequested bool            `json:"cancel_requested"`
-	CreatedAt       string          `json:"created_at"`
-	UpdatedAt       string          `json:"updated_at"`
-	ClaimedAt       *string         `json:"claimed_at"`
-	FinishedAt      *string         `json:"finished_at"`
+	ID        int64           `json:"id"`
+	Kind      string          `json:"kind"`
+	LibraryID *int64          `json:"library_id"`
+	Path      *string         `json:"path"`
+	Params    json.RawMessage `json:"params"`
+	State     string          `json:"state"`
+	Progress  json.RawMessage `json:"progress"`
+	Result    json.RawMessage `json:"result"`
+	Error     string          `json:"error"`
+	// RequestedBy is the admin who queued the job, nil once they are deleted.
+	RequestedBy     *Requester `json:"requested_by"`
+	Priority        int        `json:"priority"`
+	Attempts        int        `json:"attempts"`
+	LeaseUntil      *string    `json:"lease_until"`
+	CancelRequested bool       `json:"cancel_requested"`
+	CreatedAt       string     `json:"created_at"`
+	UpdatedAt       string     `json:"updated_at"`
+	ClaimedAt       *string    `json:"claimed_at"`
+	FinishedAt      *string    `json:"finished_at"`
+}
+
+// Requester names the admin who queued a job.
+type Requester struct {
+	ID       int64  `json:"id"`
+	Username string `json:"username"`
 }
 
 // Update is the Bridge's report on a job it holds (PATCH /bridge/jobs/{id}).
@@ -145,6 +153,8 @@ var (
 	ErrNoBook = errors.New("no indexed book there")
 	// ErrNoHeartbeat is a claim before any heartbeat (409 no_heartbeat).
 	ErrNoHeartbeat = errors.New("the server has no heartbeat from this Bridge yet")
+	// ErrBadAddress is a server address that isn't an absolute http(s) URL.
+	ErrBadAddress = errors.New("the server address must be an absolute http(s) URL")
 )
 
 // APIError is any other answer that isn't a success.
@@ -215,7 +225,7 @@ func clientValue(version string) string {
 func parseBase(raw string) (*url.URL, error) {
 	u, err := url.Parse(strings.TrimRight(strings.TrimSpace(raw), "/"))
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
-		return nil, fmt.Errorf("the server address %q must be an absolute http(s) URL", raw)
+		return nil, fmt.Errorf("%w (with no credentials, query or fragment): %q", ErrBadAddress, raw)
 	}
 	return u, nil
 }
@@ -383,7 +393,7 @@ func answerError(status int, raw []byte) error {
 		msg = http.StatusText(status)
 	}
 	if len(msg) > 300 {
-		msg = msg[:300]
+		msg = strings.ToValidUTF8(msg[:300], "") // cut at a character's boundary
 	}
 	return &APIError{Status: status, Code: e.Code, Message: msg}
 }

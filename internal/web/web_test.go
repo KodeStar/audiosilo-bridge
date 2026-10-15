@@ -21,6 +21,12 @@ func TestServesIndex(t *testing.T) {
 	if csp := rec.Header().Get("Content-Security-Policy"); csp == "" {
 		t.Error("index served without a CSP")
 	}
+	// The page asked for by its file name carries the same CSP.
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/index.html", nil))
+	if rec.Code != http.StatusOK || rec.Header().Get("Content-Security-Policy") == "" || rec.Header().Get("Cache-Control") != "no-cache" {
+		t.Errorf("GET /index.html = %d, CSP %q, Cache-Control %q", rec.Code, rec.Header().Get("Content-Security-Policy"), rec.Header().Get("Cache-Control"))
+	}
 }
 
 func TestClientRouteFallsBackToIndex(t *testing.T) {

@@ -3,8 +3,9 @@
 // Configuration is read from config.yaml inside the data directory and can be
 // overridden by environment variables prefixed AUDIOSILO_BRIDGE_. On first run
 // the file does not exist and Load returns a Config populated with defaults;
-// callers persist it via Save. Secrets (API keys, PATs) are NEVER stored here -
-// they live in internal/secrets (OS keychain / 0600 fallback).
+// callers persist it via Save. Secrets (API keys, PATs, the server token) are
+// NEVER stored here - they live in internal/secrets (sealed files under
+// <data>/secrets).
 package config
 
 import (

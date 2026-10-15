@@ -16,6 +16,7 @@ import (
 	"errors"
 	"log/slog"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -76,6 +77,7 @@ type Store interface {
 	FinishServerJob(ctx context.Context, id int64, attempt int, state string, result json.RawMessage, errText string) error
 	MarkServerJobReported(ctx context.Context, id int64, attempt int) error
 	OpenServerJobs(ctx context.Context) ([]store.ServerJob, error)
+	GetServerJob(ctx context.Context, id int64) (*store.ServerJob, error)
 	PruneServerJobs(ctx context.Context, keep int) (int64, error)
 }
 
@@ -112,13 +114,18 @@ type Runner struct {
 	handlers map[string]Handler
 	// server returns the current server link, nil while the Bridge is unpaired.
 	server func() Server
-	// onUnauthorized is called when the server refuses the token.
-	onUnauthorized func()
+	// onUnauthorized is called with the link whose token the server refused (a
+	// 401), which may be one a re-pair has since replaced.
+	onUnauthorized func(Server)
 	log            *slog.Logger
 
 	mu      sync.Mutex
 	running map[int64]*run
 	use     map[string]int
+	// stranded are the jobs a refused token stopped (errUnpaired): the claim
+	// loop resumes them under their claim once a link to their server works
+	// again.
+	stranded []strandedJob
 	// changed is closed (and replaced) when a lane frees up or the link
 	// changes, waking the claim loop.
 	changed chan struct{}
@@ -128,8 +135,9 @@ type Runner struct {
 }
 
 // New returns a Runner over the handlers. server returns the server link (nil
-// while unpaired); onUnauthorized is called when the server refuses the token.
-func New(st Store, server func() Server, onUnauthorized func(), opts Options, handlers ...Handler) *Runner {
+// while unpaired); onUnauthorized is called with the link whose token the
+// server refused.
+func New(st Store, server func() Server, onUnauthorized func(Server), opts Options, handlers ...Handler) *Runner {
 	if opts.Lanes == nil {
 		opts.Lanes = DefaultLanes()
 	}
@@ -152,7 +160,7 @@ func New(st Store, server func() Server, onUnauthorized func(), opts Options, ha
 		opts.Log = slog.Default()
 	}
 	if onUnauthorized == nil {
-		onUnauthorized = func() {}
+		onUnauthorized = func(Server) {}
 	}
 	r := &Runner{opts: opts, store: st, handlers: map[string]Handler{}, server: server, onUnauthorized: onUnauthorized,
 		log: opts.Log, running: map[int64]*run{}, use: map[string]int{}, changed: make(chan struct{})}
@@ -246,13 +254,14 @@ func (r *Runner) Run(ctx context.Context) {
 			recovered = r.recover(ctx, srv, &wg)
 			continue
 		}
+		r.resumeStranded(ctx, srv, &wg)
 		start := time.Now()
 		job, err := srv.Claim(ctx, kinds, r.opts.Wait)
 		switch {
 		case ctx.Err() != nil:
 			return
 		case errors.Is(err, link.ErrUnauthorized):
-			r.onUnauthorized()
+			r.onUnauthorized(srv)
 			continue
 		case errors.Is(err, link.ErrNoHeartbeat):
 			sleep(ctx, 2*time.Second)
@@ -305,6 +314,49 @@ func (r *Runner) recover(ctx context.Context, srv Server, wg *sync.WaitGroup) bo
 	return true
 }
 
+// resumeStranded resumes, under their claim, the jobs a refused token stopped,
+// now that a link works again (the refusal ended, or the Bridge was paired
+// again), as a restart would: when the server took one back meanwhile, its
+// first report is a 409 and it is lost. One a later claim already runs here is
+// left to that claim.
+func (r *Runner) resumeStranded(ctx context.Context, srv Server, wg *sync.WaitGroup) {
+	r.mu.Lock()
+	stranded := r.stranded
+	r.stranded = nil
+	r.mu.Unlock()
+	for _, s := range stranded {
+		job := s.job
+		r.mu.Lock()
+		_, running := r.running[job.ID]
+		r.mu.Unlock()
+		sj, err := r.store.GetServerJob(ctx, job.ID)
+		if running || err != nil || sj.State != store.JobRunning || sj.Attempt != job.Attempt {
+			continue // a later claim took its row, or it ended
+		}
+		if !sameServer(s.srv, srv) {
+			// Paired with another server since: its job ids are another
+			// server's, and the claim can't be reported anywhere now.
+			if err := r.store.FinishServerJob(ctx, job.ID, job.Attempt, store.JobLost, nil, "the Bridge was paired with another server"); err != nil {
+				r.log.Warn("bridge: recording a job failed", "job", job.ID, "err", err)
+			}
+			continue
+		}
+		r.log.Info("bridge: resuming a job its refused token stopped", "job", job.ID, "kind", job.Kind, "attempt", job.Attempt)
+		r.start(ctx, srv, job, wg, true)
+	}
+}
+
+// sameServer reports whether two links reach one server: the same link, or
+// links to one address (a new pairing with the same server makes a new link).
+func sameServer(a, b Server) bool {
+	if a == b {
+		return true
+	}
+	ab, aok := a.(interface{ BaseURL() string })
+	bb, bok := b.(interface{ BaseURL() string })
+	return aok && bok && ab.BaseURL() == bb.BaseURL()
+}
+
 // jobOf is a claimed job as a Handler sees it.
 func jobOf(j *link.Job) Job {
 	return Job{ID: j.ID, Kind: j.Kind, LibraryID: j.LibraryID, Path: j.Path, Params: j.Params, Attempt: j.Attempts}
@@ -315,11 +367,18 @@ func storedJob(sj store.ServerJob) Job {
 	return Job{ID: sj.ID, Kind: sj.Kind, LibraryID: sj.LibraryID, Path: sj.Path, Params: sj.Params, Attempt: sj.Attempt}
 }
 
-// run is one running job.
+// run is one running job, and the link it runs on.
 type run struct {
 	job    Job
+	srv    Server
 	lane   string
 	cancel context.CancelCauseFunc
+}
+
+// strandedJob is a job a refused token stopped, with the link it ran on.
+type strandedJob struct {
+	job Job
+	srv Server
 }
 
 // start runs a job in its lane (resumed: picked up after a restart, already
@@ -337,7 +396,7 @@ func (r *Runner) start(ctx context.Context, srv Server, job Job, wg *sync.WaitGr
 		return
 	}
 	rctx, cancel := context.WithCancelCause(ctx)
-	ru := &run{job: job, lane: h.Lane(), cancel: cancel}
+	ru := &run{job: job, srv: srv, lane: h.Lane(), cancel: cancel}
 	r.mu.Lock()
 	r.running[job.ID] = ru
 	r.use[ru.lane]++
@@ -345,29 +404,36 @@ func (r *Runner) start(ctx context.Context, srv Server, job Job, wg *sync.WaitGr
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		defer r.release(ru)
-		r.execute(rctx, ctx, srv, h, ru)
+		stranded := false
+		defer func() { r.release(ru, stranded) }()
+		stranded = r.execute(rctx, ctx, srv, h, ru)
 	}()
 }
 
-// release frees a job's lane slot and wakes the claim loop.
-func (r *Runner) release(ru *run) {
+// release frees a job's lane slot, keeps a job a refused token stopped for
+// resumeStranded, and wakes the claim loop.
+func (r *Runner) release(ru *run, stranded bool) {
 	ru.cancel(nil)
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	delete(r.running, ru.job.ID)
+	if r.running[ru.job.ID] == ru { // a later claim of the same job may run under its id
+		delete(r.running, ru.job.ID)
+	}
 	r.use[ru.lane]--
+	if stranded {
+		r.stranded = append(r.stranded, strandedJob{job: ru.job, srv: ru.srv})
+	}
 	r.wakeLocked()
 }
 
 // execute runs the handler, keeps the lease alive beside it, and records and
 // reports how it ended. base is the runner's context (for the final report,
-// which must go out after the job's own context ended).
-func (r *Runner) execute(ctx, base context.Context, srv Server, h Handler, ru *run) {
+// which must go out after the job's own context ended). It reports whether a
+// refused token stopped the job (left running, to resume under its claim).
+func (r *Runner) execute(ctx, base context.Context, srv Server, h Handler, ru *run) (stranded bool) {
 	rep := &Reporter{r: r, srv: srv, job: ru.job, cancel: ru.cancel, ctx: ctx, nudge: make(chan struct{}, 1)}
 	if !rep.send() {
-		r.settle(base, srv, ru, rep, nil, context.Cause(ctx))
-		return
+		return r.settle(base, srv, ru, rep, nil, context.Cause(ctx))
 	}
 	done := make(chan struct{})
 	reporting := make(chan struct{})
@@ -378,7 +444,7 @@ func (r *Runner) execute(ctx, base context.Context, srv Server, h Handler, ru *r
 	result, err := h.Run(ctx, ru.job, rep)
 	close(done)
 	<-reporting
-	r.settle(base, srv, ru, rep, result, firstErr(context.Cause(ctx), err))
+	return r.settle(base, srv, ru, rep, result, firstErr(context.Cause(ctx), err))
 }
 
 // firstErr prefers why the job's context ended over the handler's error (a
@@ -390,15 +456,26 @@ func firstErr(cause, err error) error {
 	return err
 }
 
-// settle records and reports a job's end.
-func (r *Runner) settle(base context.Context, srv Server, ru *run, rep *Reporter, result any, err error) {
+// settle records and reports a job's end. It reports whether a refused token
+// stopped the job (left running, for resumeStranded).
+func (r *Runner) settle(base context.Context, srv Server, ru *run, rep *Reporter, result any, err error) (stranded bool) {
 	job := ru.job
 	var raw json.RawMessage
 	if result != nil {
 		b, merr := json.Marshal(result)
-		if merr != nil {
+		switch {
+		case merr != nil:
 			r.log.Warn("bridge: a job's result isn't JSON", "job", job.ID, "err", merr)
-		} else {
+		case string(b) == "null":
+		case len(b) > maxResultBytes || b[0] != '{':
+			// The server takes a JSON object of at most 64 KiB and refuses any
+			// other report for good, which would be retried until the lease
+			// ran out and the job ran again: report none, and say why.
+			r.log.Warn("bridge: a job's result can't be reported", "job", job.ID, "bytes", len(b))
+			if err == nil {
+				err = errUnreportable
+			}
+		default:
 			raw = b
 		}
 	}
@@ -410,16 +487,19 @@ func (r *Runner) settle(base context.Context, srv Server, ru *run, rep *Reporter
 	}
 	var park *ParkError
 	switch {
-	case base.Err() != nil, errors.Is(err, errStopping), errors.Is(err, errUnpaired):
-		// Left running: the next start (or pairing) resumes it under its claim.
+	case base.Err() != nil, errors.Is(err, errStopping):
+		// Left running: the next start resumes it under its claim.
 		r.log.Info("bridge: a job was interrupted; it resumes at the next start", "job", job.ID, "why", err)
-		return
+	case errors.Is(err, errUnpaired):
+		// Left running: resumed under its claim once a link works again (or at
+		// the next start).
+		r.log.Info("bridge: the server refused a job's token; it resumes once the link works again", "job", job.ID)
+		return true
 	case errors.Is(err, errLost):
 		r.log.Info("bridge: the server took a job back", "job", job.ID, "kind", job.Kind)
 		if ferr := r.store.FinishServerJob(base, job.ID, job.Attempt, store.JobLost, raw, err.Error()); ferr != nil {
 			r.log.Warn("bridge: recording a job failed", "job", job.ID, "err", ferr)
 		}
-		return
 	case errors.Is(err, errCancelRequested):
 		r.finish(base, srv, job, store.JobCancelled, progress, raw, "")
 	case err == nil:
@@ -429,10 +509,21 @@ func (r *Runner) settle(base context.Context, srv Server, ru *run, rep *Reporter
 	default:
 		r.finish(base, srv, job, store.JobFailed, progress, raw, err.Error())
 	}
+	return false
 }
 
-// maxErrorText bounds an error sent to the server (its limit is 2 KiB).
-const maxErrorText = 1024
+// Bounds on what the Bridge reports, inside the server's (its error limit is
+// 2 KiB, a progress object's 16 KiB and a result object's 64 KiB): a report it
+// refuses is refused for good.
+const (
+	maxErrorText   = 1024
+	maxStepText    = 128
+	maxMessageText = 1024
+	maxResultBytes = 64 << 10
+)
+
+// errUnreportable fails a job whose result the server would refuse.
+var errUnreportable = errors.New("the job's result can't be reported: it must be a JSON object of at most 64 KiB")
 
 // finish records a job's end and reports it; retryReports resends a report
 // that didn't get through.
@@ -476,7 +567,7 @@ func (r *Runner) report(ctx context.Context, srv Server, sj store.ServerJob) {
 		}
 	case errors.Is(err, link.ErrUnauthorized):
 		r.retry.Store(true)
-		r.onUnauthorized()
+		r.onUnauthorized(srv)
 	default:
 		r.retry.Store(true)
 		r.log.Warn("bridge: reporting a job failed; retrying", "job", sj.ID, "err", err)
@@ -557,9 +648,8 @@ type Reporter struct {
 	mu       sync.Mutex
 	progress Progress
 	// dirty: progress changed since it was last sent (and stored).
-	dirty    bool
-	sentAt   time.Time
-	sentStep string
+	dirty  bool
+	sentAt time.Time
 }
 
 // LocalReporter returns a Reporter that records progress and sends nothing (a
@@ -576,6 +666,7 @@ func (p *Reporter) Last() Progress {
 // Progress records the job's progress; a new step is sent at once, anything
 // else within ProgressEvery.
 func (p *Reporter) Progress(pr Progress) {
+	pr.Step, pr.Message = clip(pr.Step, maxStepText), clip(pr.Message, maxMessageText)
 	p.mu.Lock()
 	newStep := pr.Step != p.progress.Step
 	p.progress, p.dirty = pr, true
@@ -601,6 +692,14 @@ func (p *Reporter) loop(done <-chan struct{}) {
 		case <-p.ctx.Done():
 			return
 		case <-p.nudge:
+			// A step the previous send already carried (it was recorded while
+			// that send was in flight) needs no second report.
+			p.mu.Lock()
+			dirty := p.dirty
+			p.mu.Unlock()
+			if !dirty {
+				continue
+			}
 		case <-t.C:
 			p.mu.Lock()
 			since, dirty := time.Since(p.sentAt), p.dirty
@@ -623,7 +722,7 @@ func (p *Reporter) send() bool {
 	ctx := p.ctx
 	p.mu.Lock()
 	pr, dirty := p.progress, p.dirty
-	p.sentAt, p.sentStep, p.dirty = time.Now(), pr.Step, false
+	p.sentAt, p.dirty = time.Now(), false
 	p.mu.Unlock()
 	raw, _ := json.Marshal(pr)
 	if dirty {
@@ -648,7 +747,7 @@ func (p *Reporter) send() bool {
 		return false
 	case errors.Is(err, link.ErrUnauthorized):
 		p.cancel(errUnpaired)
-		p.r.onUnauthorized()
+		p.r.onUnauthorized(p.srv)
 		return false
 	case ctx.Err() != nil:
 		return false
@@ -660,11 +759,12 @@ func (p *Reporter) send() bool {
 	}
 }
 
+// clip bounds s to n bytes, cut at a character's boundary.
 func clip(s string, n int) string {
 	if len(s) <= n {
 		return s
 	}
-	return s[:n]
+	return strings.ToValidUTF8(s[:n], "")
 }
 
 func sleep(ctx context.Context, d time.Duration) {

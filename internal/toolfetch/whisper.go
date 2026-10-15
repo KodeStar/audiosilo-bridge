@@ -20,8 +20,10 @@ import (
 	"time"
 )
 
-// WhisperCLIReleaseTag pins the GitHub release of THIS repo whose assets hold the
-// prebuilt whisper.cpp `whisper-cli` binaries (a sibling CI job publishes them).
+// WhisperCLIReleaseTag pins the GitHub release whose assets hold the prebuilt
+// whisper.cpp `whisper-cli` binaries: audiosilo-sidecars' (whisperReleaseBase),
+// whose CI publishes them, not this repo's. The Dockerfile's WHISPER_TAG pins the
+// same tag.
 // Bumping the tag is a deliberate upgrade: EnsureWhisperCLI treats a cached binary
 // stamped with a different tag as stale and re-downloads. The build variant is
 // baked into the pinned build, hence the trailing "-1" revision.

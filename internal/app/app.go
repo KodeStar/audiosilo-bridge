@@ -63,6 +63,10 @@ type Bridge struct {
 
 	kick chan struct{}
 
+	// saveMu serializes the page's config edits: each is a load, an edit and a
+	// write of config.yaml, so two at once would lose one.
+	saveMu sync.Mutex
+
 	mu       sync.Mutex
 	lastBeat time.Time
 	beatErr  string
@@ -130,8 +134,16 @@ func (b *Bridge) config() config.Config { return *b.cfg.Load() }
 // mount says where the Bridge sees a library (the current config's mapping).
 func (b *Bridge) mount(id int64, root string) (string, bool) { return b.config().MountFor(id, root) }
 
-// server is the runner's view of the link (nil while unpaired).
+// server is the runner's view of the link: nil while unpaired or refused, and
+// until a heartbeat on the current link has gone through, so no job (a resumed
+// one included) runs before the server's libraries are known.
 func (b *Bridge) server() jobs.Server {
+	b.mu.Lock()
+	ready := !b.lastBeat.IsZero()
+	b.mu.Unlock()
+	if !ready {
+		return nil
+	}
 	if cl := b.conn.Client(); cl != nil {
 		return cl
 	}
@@ -143,22 +155,25 @@ const refusedReason = "the server refused the Bridge's token. If it was unpaired
 	"another Bridge was paired, pair it again; if the admin who paired it lost the role for a while, it " +
 	"comes back by itself (it tries again every 5 minutes)"
 
-// tokenRefused handles a 401 from the server.
-func (b *Bridge) tokenRefused() {
-	if b.conn.Client() != nil {
-		b.conn.Refuse(context.Background(), refusedReason)
+// tokenRefused handles a 401 the runner got on srv: only a refusal of the
+// current link counts, never one of a link a re-pair has replaced (a job of
+// the previous pairing still reporting with its revoked token).
+func (b *Bridge) tokenRefused(srv jobs.Server) {
+	if cl, ok := srv.(*link.Client); ok {
+		b.conn.Refuse(context.Background(), cl, refusedReason)
 	}
 }
 
-// linkChanged runs after a pair or an unpair: a new pairing beats at once (so
-// the console sees it and the mappings are checked), and the runner looks
-// again.
+// linkChanged runs after a pair or an unpair, and when the server refuses the
+// token or takes it again: a new link beats at once (so the console sees it and
+// the mappings are checked), and the runner looks again once that heartbeat
+// has listed the libraries (server).
 func (b *Bridge) linkChanged() {
 	b.mu.Lock()
 	b.beatGen++
 	b.lastBeat, b.beatErr = time.Time{}, ""
-	b.mu.Unlock()
 	b.libs.SetLibraries(nil)
+	b.mu.Unlock()
 	b.Kick()
 	b.runner.Wake()
 }
@@ -171,12 +186,22 @@ func (b *Bridge) Kick() {
 	}
 }
 
-// Run serves the page and runs the heartbeat and the runner until ctx ends.
+// listen opens the page's listener (a test swaps in one that fails).
+var listen = func(ctx context.Context, addr string) (net.Listener, error) {
+	return (&net.ListenConfig{}).Listen(ctx, "tcp", addr)
+}
+
+// Run serves the page and runs the heartbeat and the runner until ctx ends,
+// or the page's server fails (its error is returned once everything stopped).
 func (b *Bridge) Run(ctx context.Context) error {
 	defer func() { _ = b.db.Close() }()
+	// The heartbeat and the runner stop with ctx: a failing page server must
+	// stop them too, or Run would wait for them for ever.
+	ctx, stop := context.WithCancel(ctx)
+	defer stop()
 	cfg := b.config()
 	// Listen before pairing: a start that can't serve must not use up the code.
-	ln, err := (&net.ListenConfig{}).Listen(ctx, "tcp", cfg.Listen)
+	ln, err := listen(ctx, cfg.Listen)
 	if err != nil {
 		return fmt.Errorf("listen on %s: %w", cfg.Listen, err)
 	}
@@ -211,7 +236,9 @@ func (b *Bridge) Run(ctx context.Context) error {
 	select {
 	case <-ctx.Done():
 	case err = <-serveErr:
+		b.log.Error("bridge: the page's server failed", "err", err)
 	}
+	stop()
 	shut, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	_ = srv.Shutdown(shut)
@@ -258,8 +285,12 @@ func (b *Bridge) beat(ctx context.Context) {
 		b.mu.Unlock()
 		return
 	}
-	first := false
+	first, changed := false, false
 	if err == nil {
+		// The libraries are recorded before the link counts as ready (server),
+		// and under the lock, so a reply from before a pair or an unpair can't
+		// land after it.
+		changed = b.libs.SetLibraries(reply.Libraries)
 		first = b.lastBeat.IsZero()
 		b.lastBeat, b.beatErr = time.Now(), ""
 	} else {
@@ -268,7 +299,7 @@ func (b *Bridge) beat(ctx context.Context) {
 	b.mu.Unlock()
 	switch {
 	case errors.Is(err, link.ErrUnauthorized):
-		b.tokenRefused()
+		b.conn.Refuse(ctx, cl, refusedReason)
 		return
 	case err != nil:
 		b.log.Warn("bridge: heartbeat failed", "err", err)
@@ -277,7 +308,6 @@ func (b *Bridge) beat(ctx context.Context) {
 	if first {
 		b.runner.Wake()
 	}
-	changed := b.libs.SetLibraries(reply.Libraries)
 	interval := time.Duration(cfg.Mapping.CheckMinutes) * time.Minute
 	if changed || b.libs.Due(time.Now(), interval) {
 		b.CheckMappings(ctx)
@@ -296,9 +326,9 @@ func (b *Bridge) retryRefused(ctx context.Context) {
 		Workers: []link.Worker{}, UIURL: cfg.PublicURL})
 	switch {
 	case err == nil:
-		b.conn.accept(ctx)
+		b.conn.accept(ctx, cl)
 	case errors.Is(err, link.ErrUnauthorized):
-		b.conn.Refuse(ctx, refusedReason) // still refused: the next retry in RefusedRetry
+		b.conn.Refuse(ctx, cl, refusedReason) // still refused: the next retry in RefusedRetry
 	default:
 		b.log.Warn("bridge: retrying the refused token failed", "err", err)
 	}
@@ -313,7 +343,10 @@ func (b *Bridge) CheckMappings(ctx context.Context, ids ...int64) {
 		return
 	}
 	go func() {
-		b.libs.Check(ctx, cl, b.mount, time.Now, ids...)
-		b.Kick()
+		// A check queued behind a running one is run (and beaten) by that one:
+		// beating here too would ask for it again while it is still due.
+		if b.libs.Check(ctx, cl, b.mount, time.Now, ids...) {
+			b.Kick()
+		}
 	}()
 }

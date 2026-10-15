@@ -8,6 +8,8 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+	"time"
+	"unicode/utf8"
 )
 
 func TestRingKeepsRedactsAndPages(t *testing.T) {
@@ -58,11 +60,83 @@ func TestRingWraps(t *testing.T) {
 		log.Info(fmt.Sprint(i))
 	}
 	got := ring.Since(0, 0, slog.LevelInfo)
-	if len(got) != 3 || got[0].Message != "4" || got[2].Message != "6" || got[2].ID != 7 {
+	if len(got) != 3 || got[0].Message != "4" || got[2].Message != "6" || got[2].ID-got[0].ID != 2 {
 		t.Fatalf("ring = %+v", got)
 	}
 	raw, _ := json.Marshal(got[0])
 	if !strings.Contains(string(raw), `"level":"INFO"`) {
 		t.Fatalf("entry JSON = %s", raw)
+	}
+}
+
+// A page keeps its cursor across a Bridge restart (its session is in the
+// database): the new process's ids are all above the old one's, so its lines
+// still come back (allowed), while a cursor of this process hides what it has
+// already shown (denied).
+func TestIDsGrowAcrossRestarts(t *testing.T) {
+	t.Parallel()
+	before := New(10)
+	logTo(before, "old", 5)
+	shown := before.Since(0, 0, slog.LevelInfo)
+	cursor := shown[len(shown)-1].ID
+	time.Sleep(2 * time.Millisecond) // a restart takes far longer than the lines logged meanwhile
+	after := New(10)
+	logTo(after, "new", 3)
+	if got := after.Since(cursor, 0, slog.LevelInfo); len(got) != 3 || got[0].Message != "new" {
+		t.Fatalf("after a restart, the old cursor %d gives %+v", cursor, got)
+	}
+	if got := after.Since(after.Since(0, 0, slog.LevelInfo)[2].ID, 0, slog.LevelInfo); len(got) != 0 {
+		t.Fatalf("this process's own cursor repeats lines: %+v", got)
+	}
+}
+
+func logTo(r *Ring, msg string, n int) {
+	log := slog.New(NewHandler(slog.NewTextHandler(io.Discard, nil), r))
+	for range n {
+		log.Info(msg)
+	}
+}
+
+type secretValue string
+
+func (s secretValue) LogValue() slog.Value {
+	return slog.GroupValue(slog.String("token", string(s)), slog.String("server", "http://audiosilo:8080"))
+}
+
+// Security: a secret inside a group (slog.Group, a LogValuer that resolves to
+// one, a record attr under a group named for a secret) is redacted like a
+// top-level one (denied), while its harmless siblings are kept (allowed).
+func TestRedactsInsideGroups(t *testing.T) {
+	t.Parallel()
+	ring := New(10)
+	log := slog.New(NewHandler(slog.NewTextHandler(io.Discard, nil), ring))
+	log.Info("group", slog.Group("auth", "token", "s3cret-1", "user", "admin"))
+	log.Info("valuer", "link", secretValue("s3cret-2"))
+	log.WithGroup("token").Info("named group", "value", "s3cret-3")
+	log.With(slog.Group("pairing", "code", "s3cret-4")).Info("with group")
+	for _, e := range ring.Since(0, 0, slog.LevelInfo) {
+		raw, _ := json.Marshal(e)
+		if strings.Contains(string(raw), "s3cret") {
+			t.Errorf("a secret was kept: %s", raw)
+		}
+	}
+	got := ring.Since(0, 0, slog.LevelInfo)
+	if got[0].Attrs["auth.token"] != "[redacted]" || got[0].Attrs["auth.user"] != "admin" {
+		t.Errorf("group attrs = %+v", got[0].Attrs)
+	}
+	if got[1].Attrs["link.token"] != "[redacted]" || got[1].Attrs["link.server"] != "http://audiosilo:8080" {
+		t.Errorf("valuer attrs = %+v", got[1].Attrs)
+	}
+}
+
+// An attribute is cut at a character's boundary, never inside one.
+func TestAttrCutKeepsUTF8(t *testing.T) {
+	t.Parallel()
+	ring := New(2)
+	log := slog.New(NewHandler(slog.NewTextHandler(io.Discard, nil), ring))
+	log.Info("long", "path", strings.Repeat("a", maxAttrText-1)+"é")
+	v := ring.Since(0, 0, slog.LevelInfo)[0].Attrs["path"]
+	if !utf8.ValidString(v) || len(v) != maxAttrText-1 {
+		t.Fatalf("cut to %d bytes, valid %v", len(v), utf8.ValidString(v))
 	}
 }

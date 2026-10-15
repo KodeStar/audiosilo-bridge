@@ -6,6 +6,8 @@ name: image
 #   - slim -> ghcr.io/kodestar/audiosilo-bridge:<tag>-slim, :latest-slim (amd64, arm64)
 #   - full -> ghcr.io/kodestar/audiosilo-bridge:<tag>, :latest           (amd64, arm64)
 #   - cuda -> ghcr.io/kodestar/audiosilo-bridge:<tag>-cuda, :latest-cuda (amd64 only)
+# latest* moves only for a release tag (not a pre-release like v1.2.0-rc.1); a
+# dispatch from a branch publishes under the branch's name (<branch>, -slim, -cuda).
 # The Go binary and the page cross-build on the runner ($BUILDPLATFORM); only the
 # final apt step of the arm64 legs runs under QEMU.
 on:
@@ -51,16 +53,24 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # latest=false: the "latest" metadata-action adds by itself for a tag push
+      # never carries the suffix, so every leg would push the bare :latest (and
+      # the last to finish, cuda's amd64-only image say, would own it). The raw
+      # latest below does carry it (latest, latest-slim, latest-cuda), and only
+      # for a release tag: a dispatch from a branch publishes under the branch's
+      # name, never over latest.
       - name: Compute tags
         id: meta
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/kodestar/audiosilo-bridge
           flavor: |
+            latest=false
             suffix=${{ matrix.suffix }}
           tags: |
             type=ref,event=tag
-            type=raw,value=latest
+            type=ref,event=branch
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-') }}
 
       - name: Build and push
         uses: docker/build-push-action@v6
@@ -69,8 +79,9 @@ jobs:
           target: ${{ matrix.target }}
           push: true
           platforms: ${{ matrix.platforms }}
+          # The tag itself (outputs.version carries the leg's suffix: v1.2.3-slim).
           build-args: |
-            VERSION=${{ startsWith(github.ref, 'refs/tags/') && steps.meta.outputs.version || format('dev-{0}', github.sha) }}
+            VERSION=${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('dev-{0}', github.sha) }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=${{ matrix.target }}

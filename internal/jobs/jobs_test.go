@@ -409,22 +409,147 @@ func TestLanes(t *testing.T) {
 	waitFor(t, func() bool { s, _ := srv.finalState(1); return s == link.StateDone })
 }
 
-// A 401 tells the app the Bridge was unpaired.
+// A 401 tells the app which link the server refused (it may be one a re-pair
+// replaced, which says nothing about the current pairing).
 func TestUnauthorized(t *testing.T) {
 	t.Parallel()
 	db, srv := openStore(t), newFakeServer()
 	srv.unauthed = true
 	var once sync.Once
-	called := make(chan struct{})
-	r := New(db, func() Server { return srv }, func() { once.Do(func() { close(called) }) }, testOpts(), handler{kind: "k.v", lane: LaneLight})
-	runFor(t, r, func() bool {
-		select {
-		case <-called:
-			return true
-		default:
-			return false
+	called := make(chan Server, 1)
+	r := New(db, func() Server { return srv }, func(s Server) { once.Do(func() { called <- s }) }, testOpts(), handler{kind: "k.v", lane: LaneLight})
+	runFor(t, r, func() bool { return len(called) == 1 })
+	if got := <-called; got != Server(srv) {
+		t.Fatalf("the refused link = %v, want the one that got the 401", got)
+	}
+}
+
+// A job a refused token stopped is resumed under its claim once a link to its
+// server works again (a refusal ending, a re-pair), not left "running" until
+// the next start.
+func TestRefusedJobResumes(t *testing.T) {
+	t.Parallel()
+	db, srv := openStore(t), newFakeServer()
+	srv.add(&link.Job{ID: 4, Kind: "k.v", Attempts: 1})
+	var paired atomic.Bool
+	paired.Store(true)
+	var runs atomic.Int32
+	h := handler{kind: "k.v", lane: LaneLight, fn: func(ctx context.Context, j Job, rep *Reporter) (any, error) {
+		if runs.Add(1) == 1 {
+			<-ctx.Done() // stopped by the refusal
+			return nil, ctx.Err()
 		}
+		return nil, nil
+	}}
+	r := New(db, func() Server {
+		if paired.Load() {
+			return srv
+		}
+		return nil
+	}, func(Server) { paired.Store(false) }, testOpts(), h)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { r.Run(ctx); close(done) }()
+	defer func() { cancel(); <-done }()
+	waitFor(t, func() bool { return runs.Load() == 1 })
+	srv.mu.Lock()
+	srv.unauthed = true
+	srv.mu.Unlock()
+	waitFor(t, func() bool { return !paired.Load() })
+	srv.mu.Lock()
+	srv.unauthed = false
+	srv.mu.Unlock()
+	paired.Store(true)
+	r.Wake()
+	waitFor(t, func() bool { s, _ := srv.finalState(4); return s == link.StateDone })
+	if _, final := srv.finalState(4); final.Attempt != 1 || runs.Load() != 2 {
+		t.Fatalf("resumed under attempt %d after %d runs, want attempt 1 and 2 runs", final.Attempt, runs.Load())
+	}
+}
+
+// A job a refused token stopped is never resumed through a link to another
+// server (its job ids are the old server's): it is recorded as lost.
+func TestRefusedJobOfAnotherServerIsLost(t *testing.T) {
+	t.Parallel()
+	db, a, b := openStore(t), newFakeServer(), newFakeServer()
+	a.add(&link.Job{ID: 6, Kind: "k.v", Attempts: 1})
+	var mu sync.Mutex
+	current := Server(a)
+	h := handler{kind: "k.v", lane: LaneLight, fn: func(ctx context.Context, j Job, rep *Reporter) (any, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}}
+	r := New(db, func() Server { mu.Lock(); defer mu.Unlock(); return current }, func(Server) {
+		mu.Lock()
+		current = b // paired with another server
+		mu.Unlock()
+	}, testOpts(), h)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { r.Run(ctx); close(done) }()
+	defer func() { cancel(); <-done }()
+	waitFor(t, func() bool {
+		sj, err := db.GetServerJob(context.Background(), 6)
+		return err == nil && sj.State == store.JobRunning
 	})
+	a.mu.Lock()
+	a.unauthed = true
+	a.mu.Unlock()
+	waitFor(t, func() bool {
+		sj, _ := db.GetServerJob(context.Background(), 6)
+		return sj != nil && sj.State == store.JobLost
+	})
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if len(b.updates[6]) != 0 {
+		t.Fatalf("the other server got the job's reports: %+v", b.updates[6])
+	}
+}
+
+// release frees only its own run: a later claim of the same job, already
+// running under its id, keeps its entry (and the page can cancel it).
+func TestReleaseKeepsALaterRun(t *testing.T) {
+	t.Parallel()
+	r := New(openStore(t), func() Server { return nil }, nil, testOpts())
+	_, c1 := context.WithCancelCause(context.Background())
+	_, c2 := context.WithCancelCause(context.Background())
+	old := &run{job: Job{ID: 5, Attempt: 1}, lane: LaneLight, cancel: c1}
+	later := &run{job: Job{ID: 5, Attempt: 2}, lane: LaneLight, cancel: c2}
+	r.mu.Lock()
+	r.running[5], r.use[LaneLight] = later, 2
+	r.mu.Unlock()
+	r.release(old, false)
+	if !r.Cancel(5) {
+		t.Fatal("the later run lost its entry")
+	}
+	r.release(later, false)
+	if r.Cancel(5) {
+		t.Fatal("a released run is still listed")
+	}
+}
+
+// A result the server would refuse for good (not a JSON object, or too large)
+// isn't reported: the job fails saying why, instead of a report retried until
+// its lease runs out.
+func TestUnreportableResultFails(t *testing.T) {
+	t.Parallel()
+	for name, result := range map[string]any{
+		"not an object": []int{1, 2},
+		"too large":     map[string]string{"x": strings.Repeat("a", maxResultBytes)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			db, srv := openStore(t), newFakeServer()
+			srv.add(&link.Job{ID: 2, Kind: "k.v", Attempts: 1})
+			r := New(db, func() Server { return srv }, nil, testOpts(), handler{kind: "k.v", lane: LaneLight,
+				fn: func(context.Context, Job, *Reporter) (any, error) { return result, nil }})
+			runFor(t, r, func() bool { s, _ := srv.finalState(2); return s != "" })
+			s, final := srv.finalState(2)
+			if s != link.StateFailed || final.Result != nil || final.Error == nil || *final.Error != errUnreportable.Error() {
+				t.Fatalf("final = %s %+v", s, final)
+			}
+		})
+	}
 }
 
 // Unpaired (no server), the runner waits without claiming until woken.

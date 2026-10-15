@@ -4,7 +4,7 @@ import { pairedStatus, statusFixture } from '@/test/fixtures';
 
 describe('secretKeyText', () => {
   it('words each source', () => {
-    expect(secretKeyText('environment')).toMatch(/environment/);
+    expect(secretKeyText('environment')).toMatch(/environment \(AUDIOSILO_BRIDGE_SECRET_KEY\)/);
     expect(secretKeyText('key file')).toMatch(/key file/);
     expect(secretKeyText('new key file')).toMatch(/Back it up/);
     expect(secretKeyText('vault')).toBe('vault');

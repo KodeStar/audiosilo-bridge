@@ -57,7 +57,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	clean := path.Clean(strings.TrimPrefix(r.URL.Path, "/"))
-	if clean == "" || clean == "." {
+	if clean == "" || clean == "." || clean == "index.html" {
+		// The page itself, however it is asked for, always carries its CSP.
 		h.serveIndex(w, r)
 		return
 	}

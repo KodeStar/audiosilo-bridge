@@ -111,9 +111,10 @@ func TestClaim(t *testing.T) {
 	if q.Get("wait") != "25" || strings.Join(q["kind"], ",") != "bridge.verify,sidecars.generate" {
 		t.Fatalf("query = %v", q)
 	}
-	f.status, f.body = http.StatusOK, `{"id":7,"kind":"bridge.verify","library_id":1,"path":null,"params":{"hold_seconds":3},"state":"claimed","attempts":2}`
+	f.status, f.body = http.StatusOK, `{"id":7,"kind":"bridge.verify","library_id":1,"path":null,"params":{"hold_seconds":3},"state":"claimed","attempts":2,"requested_by":{"id":3,"username":"admin"}}`
 	job, err = c.Claim(context.Background(), []string{"bridge.verify"}, time.Second)
-	if err != nil || job.ID != 7 || job.Attempts != 2 || job.Path != nil || *job.LibraryID != 1 || string(job.Params) != `{"hold_seconds":3}` {
+	if err != nil || job.ID != 7 || job.Attempts != 2 || job.Path != nil || *job.LibraryID != 1 || string(job.Params) != `{"hold_seconds":3}` ||
+		job.RequestedBy == nil || job.RequestedBy.Username != "admin" {
 		t.Fatalf("claim = %+v, %v", job, err)
 	}
 	f.status, f.body = http.StatusConflict, `{"error":"send a status first","code":"no_heartbeat"}`

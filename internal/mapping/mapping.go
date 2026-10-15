@@ -204,10 +204,12 @@ type Registry struct {
 	libs    []link.Library
 	results map[int64]result
 	// checking: a Check is running; pendAll/pend are what was asked for
-	// meanwhile, which it checks right after.
+	// meanwhile, which it checks right after, with pendSrc, the newest caller's
+	// link (a check asked for after a re-pair must not use the old one).
 	checking bool
 	pendAll  bool
 	pend     map[int64]bool
+	pendSrc  BookSource
 }
 
 type result struct {
@@ -281,10 +283,14 @@ func (r *Registry) Entries(mount MountFunc) []Entry {
 }
 
 // Due reports whether a check is due: a library with none, or one older than
-// interval.
+// interval, and no check running (it refreshes them, so asking again would
+// only queue a second pass).
 func (r *Registry) Due(now time.Time, interval time.Duration) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.checking {
+		return false
+	}
 	for _, l := range r.libs {
 		res, ok := r.results[l.ID]
 		if !ok || now.Sub(res.at) >= interval {
@@ -296,9 +302,11 @@ func (r *Registry) Due(now time.Time, interval time.Duration) bool {
 
 // Check checks the libraries ids (every library with none) now, one at a time,
 // and records the results. Checks never overlap: one asked for while another
-// runs is done right after it (by that call), so a mapping changed mid-check is
-// never missed. It returns once there is nothing left to check, or ctx ends.
-func (r *Registry) Check(ctx context.Context, src BookSource, mount MountFunc, now func() time.Time, ids ...int64) {
+// runs is done right after it (by that call, with this call's src), so a
+// mapping changed mid-check is never missed. It returns once there is nothing
+// left to check, or ctx ends, and reports whether it checked (false: queued
+// behind the running check).
+func (r *Registry) Check(ctx context.Context, src BookSource, mount MountFunc, now func() time.Time, ids ...int64) bool {
 	r.mu.Lock()
 	if r.checking {
 		if len(ids) == 0 {
@@ -307,8 +315,9 @@ func (r *Registry) Check(ctx context.Context, src BookSource, mount MountFunc, n
 		for _, id := range ids {
 			r.pend[id] = true
 		}
+		r.pendSrc = src
 		r.mu.Unlock()
-		return
+		return false
 	}
 	r.checking = true
 	for {
@@ -331,10 +340,10 @@ func (r *Registry) Check(ctx context.Context, src BookSource, mount MountFunc, n
 		}
 		r.mu.Lock()
 		if ctx.Err() != nil || (!r.pendAll && len(r.pend) == 0) {
-			r.checking, r.pendAll = false, false
+			r.checking, r.pendAll, r.pendSrc = false, false, nil
 			clear(r.pend)
 			r.mu.Unlock()
-			return
+			return true
 		}
 		ids = nil
 		if !r.pendAll {
@@ -342,7 +351,10 @@ func (r *Registry) Check(ctx context.Context, src BookSource, mount MountFunc, n
 				ids = append(ids, id)
 			}
 		}
-		r.pendAll = false
+		if r.pendSrc != nil {
+			src = r.pendSrc
+		}
+		r.pendAll, r.pendSrc = false, nil
 		clear(r.pend)
 	}
 }

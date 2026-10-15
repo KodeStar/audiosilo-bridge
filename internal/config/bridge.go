@@ -77,29 +77,37 @@ func (c Config) MountFor(libraryID int64, serverRoot string) (path string, confi
 
 // applyBridgeEnv overlays the Bridge's AUDIOSILO_BRIDGE_* variables. A value
 // that doesn't parse is kept as is for Validate to refuse, so a typo fails the
-// start instead of being ignored.
+// start instead of being ignored. An empty variable counts as unset (compose's
+// ${VAR} of an unset variable, a blank field of a container template): it
+// neither locks the setting on the page nor fails the start.
 func applyBridgeEnv(cfg *Config) {
 	cfg.fromEnv = map[string]bool{}
-	if v, ok := os.LookupEnv(envServerURL); ok {
-		cfg.Server.URL = strings.TrimSpace(v)
+	if v, ok := lookupEnv(envServerURL); ok {
+		cfg.Server.URL = v
 		cfg.fromEnv[KeyServerURL] = true
 	}
-	if v, ok := os.LookupEnv(envPublicURL); ok {
-		cfg.PublicURL = strings.TrimSpace(v)
+	if v, ok := lookupEnv(envPublicURL); ok {
+		cfg.PublicURL = v
 		cfg.fromEnv[KeyPublicURL] = true
 	}
-	if v, ok := os.LookupEnv(envLibraries); ok {
+	if v, ok := lookupEnv(envLibraries); ok {
 		cfg.Libraries = parseLibraries(v)
 		cfg.fromEnv[KeyLibraries] = true
 	}
-	if v, ok := os.LookupEnv(envMappingChecks); ok {
-		n, err := strconv.Atoi(strings.TrimSpace(v))
+	if v, ok := lookupEnv(envMappingChecks); ok {
+		n, err := strconv.Atoi(v)
 		if err != nil {
 			n = -1
 		}
 		cfg.Mapping.CheckMinutes = n
 		cfg.fromEnv[KeyMappingCheck] = true
 	}
+}
+
+// lookupEnv is a variable's trimmed value, ok only when it is set and not empty.
+func lookupEnv(name string) (string, bool) {
+	v := strings.TrimSpace(os.Getenv(name))
+	return v, v != ""
 }
 
 // parseLibraries reads AUDIOSILO_BRIDGE_LIBRARIES: "<id>=<path>" entries

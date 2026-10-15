@@ -5,7 +5,7 @@ import type { Lane, Status } from '@/api/types';
 export function secretKeyText(source: string): string {
   switch (source) {
     case 'environment':
-      return 'From the environment (BRIDGE_SECRET_KEY)';
+      return 'From the environment (AUDIOSILO_BRIDGE_SECRET_KEY)';
     case 'key file':
       return 'From the key file in the data folder';
     case 'new key file':

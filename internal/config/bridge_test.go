@@ -51,6 +51,31 @@ func TestBridgeEnvTyposFailTheStart(t *testing.T) {
 	}
 }
 
+// An empty variable (compose's ${VAR} of an unset one, a blank template
+// field) is no setting: the start doesn't fail and the page isn't locked,
+// while a set one still is (TestBridgeEnv) and a typo still fails the start.
+func TestBridgeEnvEmptyIsUnset(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, FileName), []byte("public_url: http://file.lan:8091\nlibraries:\n  - library_id: 1\n    mount_path: /books\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"AUDIOSILO_BRIDGE_SERVER_URL", "AUDIOSILO_BRIDGE_PUBLIC_URL", "AUDIOSILO_BRIDGE_LIBRARIES", "AUDIOSILO_BRIDGE_MAPPING_CHECK_MINUTES"} {
+		t.Setenv(name, " ")
+	}
+	cfg, err := Load(dir)
+	if err != nil {
+		t.Fatalf("empty variables failed the start: %v", err)
+	}
+	for _, k := range []string{KeyServerURL, KeyPublicURL, KeyLibraries, KeyMappingCheck} {
+		if cfg.EnvSet(k) {
+			t.Errorf("an empty variable locked %q", k)
+		}
+	}
+	if cfg.PublicURL != "http://file.lan:8091" || len(cfg.Libraries) != 1 || cfg.Mapping.CheckMinutes != DefaultMappingCheckMinutes {
+		t.Fatalf("config = %q %+v %+v", cfg.PublicURL, cfg.Libraries, cfg.Mapping)
+	}
+}
+
 func TestMountFor(t *testing.T) {
 	t.Parallel()
 	cfg := Default()

@@ -61,8 +61,9 @@ a staging folder (decision 15), which arrives with Phase 1a.
 ## Configuration
 
 `<data>/config.yaml`, with `AUDIOSILO_BRIDGE_*` environment overrides (a setting the
-environment sets is locked on the page). The data folder is `/bridge-data` in the
-images (`AUDIOSILO_BRIDGE_DATA`), else `~/.audiosilo-bridge`.
+environment sets is locked on the page; an empty variable counts as unset). The data
+folder is `/bridge-data` in the images (`AUDIOSILO_BRIDGE_DATA`), else
+`~/.audiosilo-bridge`.
 
 | Setting | Environment | Default | |
 |---|---|---|---|
@@ -73,7 +74,7 @@ images (`AUDIOSILO_BRIDGE_DATA`), else `~/.audiosilo-bridge`.
 | `mapping.check_minutes` | `AUDIOSILO_BRIDGE_MAPPING_CHECK_MINUTES` | `10` | how often the mappings are checked |
 | | `AUDIOSILO_BRIDGE_PAIR_CODE` | | pair on start (first start only) |
 | | `AUDIOSILO_BRIDGE_SECRET_KEY` | `<data>/secret.key` | the key that seals the stored secrets (32 bytes, hex or base64) |
-| | `PUID` / `PGID` | `1000` | the user the Bridge runs as (Unraid: 99/100) |
+| | `PUID` / `PGID` | `1000` | the user the Bridge runs as (Unraid: 99/100); a start as another user (`--user`) needs a data folder that user owns |
 
 The engine's settings (`tools`, `asr`, `agent`, `supervisor`, `contribution`,
 `metadata`) are carried over from audiosilo-sidecars and take effect with Phase 1a.

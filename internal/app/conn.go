@@ -48,8 +48,8 @@ type Conn struct {
 	// admin's Bridge works again once they are an admin again, so the heartbeat
 	// retries it every RefusedRetry.
 	refusedAt time.Time
-	// onChange is called after a pair or an unpair (the runner and the
-	// heartbeat wake).
+	// onChange is called after a pair or an unpair, and when a refusal starts
+	// or ends (the runner and the heartbeat wake).
 	onChange func()
 }
 
@@ -98,11 +98,17 @@ func (c *Conn) retryClient() *link.Client {
 	return c.client
 }
 
-// Refuse records that the server refused the token (a 401), keeping it for the
-// retries; reason is shown on the page.
-func (c *Conn) Refuse(ctx context.Context, reason string) {
+// Refuse records that the server refused cl's token (a 401), keeping it for
+// the retries; reason is shown on the page. A 401 on any other link (one a
+// re-pair or an unpair has replaced, still in use by a job or a call that
+// started before) says nothing about the current pairing and is ignored.
+func (c *Conn) Refuse(ctx context.Context, cl *link.Client, reason string) {
 	c.mu.Lock()
-	was := c.client != nil && c.refusedAt.IsZero()
+	if cl == nil || cl != c.client {
+		c.mu.Unlock()
+		return
+	}
+	was := c.refusedAt.IsZero()
 	c.refusedAt = time.Now()
 	c.pairing.Paired, c.pairing.UnpairedReason = false, reason
 	onChange := c.onChange
@@ -116,9 +122,14 @@ func (c *Conn) Refuse(ctx context.Context, reason string) {
 	}
 }
 
-// accept ends a refusal: the server took the token again.
-func (c *Conn) accept(ctx context.Context) {
+// accept ends a refusal: the server took cl's token again. A retry that
+// answers after an unpair or a new pairing ends nothing.
+func (c *Conn) accept(ctx context.Context, cl *link.Client) {
 	c.mu.Lock()
+	if cl != c.client || c.refusedAt.IsZero() {
+		c.mu.Unlock()
+		return
+	}
 	c.refusedAt = time.Time{}
 	c.pairing.Paired, c.pairing.UnpairedReason = true, ""
 	onChange := c.onChange

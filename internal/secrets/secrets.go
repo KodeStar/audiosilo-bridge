@@ -4,9 +4,9 @@
 // AES-256-GCM sealed file in <data>/secrets (0600), the manager's BlobStore
 // format, keyed by one master key: AUDIOSILO_BRIDGE_SECRET_KEY when set (so the
 // key can live outside the data volume), else <data>/secret.key, created 0600 on
-// first start. Values are write-only from the API's point of view: callers can
-// Set/Delete and probe Present, but the read API only ever exposes presence
-// booleans, never the secret itself.
+// first start. Get returns a secret to the code that uses it (the server link,
+// an agent backend); nothing echoes one: the page never shows or returns a
+// secret, and the log ring redacts secret-sounding attributes.
 package secrets
 
 import (
@@ -139,12 +139,19 @@ func masterKey(dataDir, envKey string) ([]byte, KeySource, error) {
 	if err != nil {
 		return nil, "", err
 	}
-	if _, err := f.WriteString(hex.EncodeToString(key) + "\n"); err != nil {
-		_ = f.Close()
-		return nil, "", err
+	// Synced before it is used to seal anything, and removed when it couldn't
+	// be written whole: an empty or partial key file would fail every later
+	// start.
+	_, werr := f.WriteString(hex.EncodeToString(key) + "\n")
+	if werr == nil {
+		werr = f.Sync()
 	}
-	if err := f.Close(); err != nil {
-		return nil, "", err
+	if cerr := f.Close(); werr == nil {
+		werr = cerr
+	}
+	if werr != nil {
+		_ = os.Remove(path)
+		return nil, "", werr
 	}
 	return key, KeyFromNewFile, nil
 }

@@ -2,9 +2,13 @@ package app
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"log/slog"
+	"net/http"
+	"net/url"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/kodestar/audiosilo-bridge/internal/api"
@@ -41,14 +45,39 @@ func (b *Bridge) Pair(ctx context.Context, serverURL, code string) error {
 		return api.Errorf(api.ErrRefused, "the code is wrong, used or expired; make a new one in the server's console")
 	case errors.Is(err, ErrAlreadyPaired):
 		return api.Errorf(api.ErrConflict, "%v", err)
+	case errors.Is(err, link.ErrBadAddress):
+		return api.Errorf(api.ErrInvalid, "%v", err)
 	case err != nil:
 		var apiErr *link.APIError
-		if errors.As(err, &apiErr) && apiErr.Status == 404 {
+		var certErr *tls.CertificateVerificationError
+		switch {
+		case errors.As(err, &apiErr) && (apiErr.Status == http.StatusNotFound || apiErr.Status == http.StatusMethodNotAllowed):
 			return api.Errorf(api.ErrRefused, "that server doesn't know about a Bridge (update it to a version with the Bridge)")
+		case errors.As(err, &apiErr) && apiErr.Status < http.StatusInternalServerError:
+			return api.Errorf(api.ErrRefused, "the server refused the pairing: %s", apiErr.Message)
+		case errors.As(err, &certErr):
+			// The server's default certificate is self-signed, which the Bridge
+			// can't trust: on the local network the server also answers plain
+			// HTTP on the same port.
+			return api.Errorf(api.ErrRefused, "the server's certificate isn't trusted (a self-signed one?): "+
+				"pair with its http:// address on your network, for example %s", plainAddress(serverURL))
 		}
 		return api.Errorf(api.ErrUnreachable, "could not reach the server: %v", err)
 	}
 	return nil
+}
+
+// plainAddress is an https server address as http (the same host and port).
+func plainAddress(serverURL string) string {
+	u, err := url.Parse(strings.TrimSpace(serverURL))
+	if err != nil || u.Scheme != "https" {
+		return "http://<server>:<port>"
+	}
+	if u.Port() == "" {
+		u.Host += ":443"
+	}
+	u.Scheme = "http"
+	return u.String()
 }
 
 // Unpair forgets the Bridge's token here.
@@ -124,7 +153,14 @@ func (b *Bridge) SaveSettings(ctx context.Context, s api.Settings) error {
 		return api.Errorf(api.ErrLocked, "AUDIOSILO_BRIDGE_MAPPING_CHECK_MINUTES sets mapping.check_minutes")
 	}
 	err := b.save(func(c *config.Config) error {
-		c.PublicURL, c.Mapping.CheckMinutes = s.PublicURL, s.MappingCheckMinutes
+		// A setting the environment sets keeps config.yaml's own value: the page
+		// sends it back unchanged, and it must never reach the file.
+		if !cur.EnvSet(config.KeyPublicURL) {
+			c.PublicURL = s.PublicURL
+		}
+		if !cur.EnvSet(config.KeyMappingCheck) {
+			c.Mapping.CheckMinutes = s.MappingCheckMinutes
+		}
 		return nil
 	})
 	if err != nil {
@@ -137,6 +173,8 @@ func (b *Bridge) SaveSettings(ctx context.Context, s api.Settings) error {
 // save edits config.yaml and reloads the configuration (environment included).
 // An edit that doesn't validate is api.ErrInvalid.
 func (b *Bridge) save(edit func(*config.Config) error) error {
+	b.saveMu.Lock()
+	defer b.saveMu.Unlock()
 	if err := config.SaveFile(b.dataDir, edit); err != nil {
 		return api.Errorf(api.ErrInvalid, "%v", err)
 	}

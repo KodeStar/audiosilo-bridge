@@ -1,7 +1,8 @@
 // Package api is the HTTP transport of the Bridge's own page (BRIDGE-PLAN.md
 // Phase 0): login, pairing, the library mappings, settings, the jobs it ran
 // and its recent log. It is transport only: every handler validates and calls
-// the Backend (internal/app).
+// the Backend (internal/app), or the injected auth.Manager for the login, the
+// sessions and the password.
 //
 // The page answers loopback and private (LAN) addresses only, and always asks
 // for its password, loopback included: an agent container sharing the Bridge's
