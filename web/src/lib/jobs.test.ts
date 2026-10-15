@@ -7,7 +7,7 @@ import {
   jobTarget,
   jobsPollInterval,
   mergeJobs,
-  progressFraction,
+  progressPercent,
   progressText,
   reportText,
   stateHint,
@@ -68,9 +68,9 @@ describe('progress', () => {
     expect(progressText({})).toBe('');
   });
   it('has a fraction only with a total', () => {
-    expect(progressFraction({ done: 1, total: 4 })).toBe(0.25);
-    expect(progressFraction({ done: 9, total: 4 })).toBe(1);
-    expect(progressFraction({ step: 'x' })).toBeNull();
+    expect(progressPercent({ done: 1, total: 4 })).toBe(25);
+    expect(progressPercent({ done: 9, total: 4 })).toBe(100);
+    expect(progressPercent({ step: 'x' })).toBeNull();
   });
 });
 

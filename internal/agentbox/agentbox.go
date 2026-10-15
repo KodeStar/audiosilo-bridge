@@ -7,9 +7,9 @@
 // (ClaudeResult/CodexResult), so a run in the container is classified exactly like
 // a local one.
 //
-// Everything the container writes is untrusted: files are read through an os.Root
-// (a symlink can't reach outside the job dir), with size caps, and the harvest
-// copies regular files only under count, depth and size limits.
+// Everything the container writes is untrusted: files are read with
+// agentproto.ReadRegular (inside an os.Root, regular files only, size-capped),
+// and the harvest copies regular files only under count, depth and size limits.
 package agentbox
 
 import (
@@ -17,7 +17,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"log/slog"
 	"os"
@@ -28,26 +27,31 @@ import (
 	"github.com/kodestar/audiosilo-bridge/internal/agentproto"
 )
 
-// DefaultClaimTimeout is how long a job may wait for the runner to claim it before
-// the run reports the agent unavailable (agent.claim_timeout_seconds).
-const DefaultClaimTimeout = 2 * time.Minute
+// RetryAfter is how long a book parked on the agent container waits before it
+// looks again by itself: the container is usually just restarting (an image
+// update, a host reboot), so it comes back without anyone pressing Retry.
+const RetryAfter = 10 * time.Minute
 
-// Timings of the Bridge side (contract section 7). They are fields of Runner (set
-// by New) so a test can shorten them without a package-level race.
+// Timings of the Bridge side (contract section 7). The default* ones are copied
+// into Runner's fields by New so a test can shorten them without a
+// package-level race; sweepAge stays a constant. The container counts as up
+// while runner.json is under agentproto.RunnerFreshFor old.
 const (
-	statusFreshFor   = 30 * time.Second // runner.json younger than this = the container is up
-	defaultStaleFor  = 60 * time.Second // a claimed job's heartbeat older than this = the runner died
-	defaultPoll      = time.Second      // polling, not inotify: shfs may not deliver events
-	defaultBeatEvery = 60 * time.Second // Request.Heartbeat cadence, as the local runners
-	defaultCancelFor = 30 * time.Second // how long a cancel waits for done
-	sweepAge         = 24 * time.Hour   // job dirs older than this are removed on New
+	defaultStaleFor  = 60 * time.Second             // a claimed job's heartbeat older than this = the runner died
+	defaultPoll      = time.Second                  // polling, not inotify: shfs may not deliver events
+	defaultBeatCheck = agentproto.HeartbeatInterval // the runner's heartbeat can't change faster than it touches it
+	defaultBeatEvery = 60 * time.Second             // Request.Heartbeat cadence, as the local runners
+	defaultCancelFor = 30 * time.Second             // how long a cancel waits for done
+	sweepAge         = 24 * time.Hour               // job dirs older than this are removed on New
 )
 
 // Options configures a Runner.
 type Options struct {
-	Dir          string        // the staging dir (agent.staging_dir)
-	Backend      string        // "claude" | "codex": which CLI the runs use
-	ClaimTimeout time.Duration // 0 = 2 minutes
+	Dir     string // the staging dir (agent.staging_dir)
+	Backend string // "claude" | "codex": which CLI the runs use
+	// ClaimTimeout is agent.claim_timeout_seconds, which config defaults and
+	// validates; the app always passes it.
+	ClaimTimeout time.Duration
 	Log          *slog.Logger
 }
 
@@ -61,6 +65,7 @@ type Runner struct {
 	now       func() time.Time
 	poll      time.Duration
 	staleFor  time.Duration
+	beatCheck time.Duration
 	beatEvery time.Duration
 	cancelFor time.Duration
 }
@@ -79,11 +84,14 @@ func New(opts Options) *Runner {
 		now:          time.Now,
 		poll:         defaultPoll,
 		staleFor:     defaultStaleFor,
+		beatCheck:    defaultBeatCheck,
 		beatEvery:    defaultBeatEvery,
 		cancelFor:    defaultCancelFor,
 	}
 	if r.claimTimeout <= 0 {
-		r.claimTimeout = DefaultClaimTimeout
+		// Only a caller that skipped config gets here: the same 2 minutes as
+		// config's default, rather than a job that waits for a claim forever.
+		r.claimTimeout = 2 * time.Minute
 	}
 	if r.log == nil {
 		r.log = slog.New(slog.DiscardHandler)
@@ -136,10 +144,14 @@ func (r *Runner) SupportsWeb() bool { return true }
 // catalogue for a NoTools run, codex can't (its read-only sandbox still reads).
 func (r *Runner) EnforcesNoTools() bool { return r.backend == agent.IDClaude }
 
-// Detect maps Status onto the engine's Availability.
+// Detect maps Status onto the engine's Availability. RetryAfter is always set:
+// whatever makes the container unavailable (down, restarting, too busy to claim
+// a job in time) is expected to pass by itself, so a book parked on it looks
+// again after RetryAfter, with Status's Detail as the reason.
 func (r *Runner) Detect(context.Context) agent.Availability {
 	st := r.Status()
-	av := agent.Availability{Backend: r.backend, Available: st.Available, Detail: st.Detail, Path: "agent container"}
+	av := agent.Availability{Backend: r.backend, Available: st.Available, Detail: st.Detail,
+		Path: "agent container", RetryAfter: RetryAfter}
 	if c, ok := st.CLIs[r.backend]; ok {
 		av.Version = c.Version
 	}
@@ -216,31 +228,38 @@ func requestTimeout(d time.Duration) int {
 // parks agent_unavailable and self-resumes), a stale heartbeat, or a cancel the
 // runner didn't finish in time. A cancel the runner did finish is done=true with
 // ctx's error.
+//
+// done is looked for every poll, so a finished run is picked up at once; the
+// runner's heartbeat only every beatCheck, as it can't change faster than the
+// runner touches it.
 func (r *Runner) wait(ctx context.Context, root *os.Root, beat func(time.Duration)) (bool, error) {
 	start := r.now()
-	var claimedAt, lastBeat time.Time
+	var claimedAt, lastBeat, lastCheck time.Time
 	tick := time.NewTicker(r.poll)
 	defer tick.Stop()
 	for {
-		if exists(root, agentproto.DoneFile) {
+		if agentproto.Exists(root, agentproto.DoneFile) {
 			return true, nil
 		}
 		now := r.now()
 		if claimedAt.IsZero() {
-			if exists(root, agentproto.ClaimDir) {
-				claimedAt, lastBeat = now, now
+			if agentproto.Exists(root, agentproto.ClaimDir) {
+				claimedAt, lastBeat, lastCheck = now, now, now
 			} else if now.Sub(start) >= r.claimTimeout {
 				if r.unclaimable(root) {
 					return false, &agent.NotAvailableError{Backend: r.backend,
 						Detail: fmt.Sprintf("the agent container didn't pick the job up within %s", r.claimTimeout)}
 				}
-				claimedAt, lastBeat = now, now // the runner claimed it just now
+				claimedAt, lastBeat, lastCheck = now, now, now // the runner claimed it just now
 			}
 		}
 		if !claimedAt.IsZero() {
-			if hb := r.heartbeatAt(root, claimedAt); now.Sub(hb) > r.staleFor {
-				_ = root.WriteFile(agentproto.CancelFile, nil, 0o644)
-				return false, fmt.Errorf("agent container: the runner stopped answering (no heartbeat for %s)", now.Sub(hb).Round(time.Second))
+			if now.Sub(lastCheck) >= r.beatCheck {
+				lastCheck = now
+				if hb := r.heartbeatAt(root, claimedAt); now.Sub(hb) > r.staleFor {
+					_ = root.WriteFile(agentproto.CancelFile, nil, 0o644)
+					return false, fmt.Errorf("agent container: the runner stopped answering (no heartbeat for %s)", now.Sub(hb).Round(time.Second))
+				}
 			}
 			if beat != nil && now.Sub(lastBeat) >= r.beatEvery {
 				lastBeat = now
@@ -274,7 +293,7 @@ func (r *Runner) cancel(root *os.Root, unclaimed bool, cause error) (bool, error
 	}
 	deadline := r.now().Add(r.cancelFor)
 	for r.now().Before(deadline) {
-		if exists(root, agentproto.DoneFile) {
+		if agentproto.Exists(root, agentproto.DoneFile) {
 			return true, cause
 		}
 		time.Sleep(r.poll)
@@ -297,7 +316,7 @@ func (r *Runner) heartbeatAt(root *os.Root, claimedAt time.Time) time.Time {
 // outcome reads exit.json and the CLI's output and interprets them with the same
 // code the local runners use.
 func (r *Runner) outcome(root *os.Root, model string, timeout time.Duration) (agent.Result, error) {
-	raw, err := readFile(root, agentproto.ExitFile, agentproto.MaxExitBytes)
+	raw, err := agentproto.ReadRegular(root, agentproto.ExitFile, agentproto.MaxExitBytes)
 	if err != nil {
 		return agent.Result{}, fmt.Errorf("agent container: read exit.json: %w", err)
 	}
@@ -319,11 +338,11 @@ func (r *Runner) outcome(root *os.Root, model string, timeout time.Duration) (ag
 	case ex.ExitCode != 0:
 		out.ExitErr = exitStatus(ex.ExitCode)
 	}
-	stdout, _ := readFile(root, agentproto.StdoutFile, agentproto.MaxStdoutBytes)
-	stderr, _ := readFile(root, agentproto.StderrFile, agentproto.MaxStderrBytes)
+	stdout, _ := agentproto.ReadRegular(root, agentproto.StdoutFile, agentproto.MaxStdoutBytes)
+	stderr, _ := agentproto.ReadRegular(root, agentproto.StderrFile, agentproto.MaxStderrBytes)
 	out.Stdout, out.Stderr = string(stdout), string(stderr)
 	if r.backend == agent.IDCodex {
-		last, _ := readFile(root, agentproto.LastMessageFile, agentproto.MaxStdoutBytes)
+		last, _ := agentproto.ReadRegular(root, agentproto.LastMessageFile, agentproto.MaxStdoutBytes)
 		out.LastMessage = string(last)
 		return agent.CodexResult(model, out)
 	}
@@ -341,24 +360,4 @@ func (r *Runner) remove(job string) {
 	if err := os.RemoveAll(job); err != nil {
 		r.log.Warn("agent container: remove a job dir", "dir", job, "err", err)
 	}
-}
-
-// exists reports whether name exists in the job dir (a link counts; nothing is
-// followed).
-func exists(root *os.Root, name string) bool {
-	_, err := root.Lstat(name)
-	return err == nil
-}
-
-// readFile reads a regular file from the job dir, at most limit bytes: the
-// container wrote it, so it may be anything (a link, a FIFO, huge). O_NONBLOCK
-// keeps a FIFO from blocking the open; the os.Root keeps a link inside the job
-// dir. A file over the limit is cut at the limit.
-func readFile(root *os.Root, name string, limit int64) ([]byte, error) {
-	f, err := openRegular(root, name)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = f.Close() }()
-	return io.ReadAll(io.LimitReader(f, limit))
 }

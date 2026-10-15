@@ -379,7 +379,6 @@ func (c *Client) Rescan(ctx context.Context, libraryID int64, path string) (stri
 // now indexed. No indexed book at path is ErrNotIndexable.
 func (c *Client) RescanAttachments(ctx context.Context, libraryID int64, path string) (*Attachments, error) {
 	var out struct {
-		Path        string      `json:"path"`
 		Attachments Attachments `json:"attachments"`
 	}
 	body := map[string]any{"library_id": libraryID, "path": path, "mode": "attachments"}

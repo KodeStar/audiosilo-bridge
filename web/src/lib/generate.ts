@@ -27,37 +27,6 @@ export function canRetry(job: ServerJob): boolean {
   return isGenerate(job) && parkOf(job) !== null;
 }
 
-// The engine stages in words, for a stage the message doesn't already name.
-const STAGES: Record<string, string> = {
-  queued: 'Waiting for its turn',
-  inspecting: 'Reading the audio files',
-  markers_normalizing: 'Working out the chapters',
-  splitting: 'Splitting the audio into chapters',
-  asr: 'Transcribing',
-  sanitizing: 'Tidying the transcripts',
-  qa_sweep: 'Checking the transcripts',
-  qa_adjudicating: 'Reviewing transcript problems',
-  retranscribing: 'Transcribing chapters again',
-  spelling_research: 'Researching the names',
-  correcting: 'Correcting the names',
-  extracting: 'Reading the ebook',
-  chapter_mapping: "Working out the ebook's chapters",
-  fact_pass: 'Reading for the facts',
-  synthesizing: 'Writing the characters and recaps',
-  validating: 'Checking the characters and recaps',
-  auditing: 'Checking for spoilers',
-  fixing: 'Fixing what the check found',
-  ready: 'Ready to save',
-  contributing: 'Saving the characters and recaps',
-  done: 'Finished',
-};
-
-// stageLabel words an engine stage; an unknown one is shown as it is.
-export function stageLabel(stage: string | undefined): string {
-  if (!stage) return '';
-  return STAGES[stage] ?? stage;
-}
-
 // etaText words the engine's ETA: "under a minute", "about 25 min",
 // "about 3 h 10 min", "about 2 days 4 h". "" with none.
 export function etaText(seconds: number | undefined): string {
@@ -89,8 +58,8 @@ export function sourceText(source: string | undefined): string {
   return '';
 }
 
-// generateFacts are the short facts under a running sidecars job: the stage,
-// the ETA, the spend and the source ("" entries left out).
+// generateFacts are the short facts under a running sidecars job's message: the
+// ETA, the spend and the source ("" entries left out).
 export function generateFacts(p: Progress | null | undefined, parked: boolean): string[] {
   if (!p) return [];
   const facts: string[] = [];

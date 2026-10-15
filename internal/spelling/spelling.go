@@ -83,6 +83,20 @@ const (
 	CorrectionsFile = "corrections.json"
 	// SpellingsFile is the per-book spelling-sheet data.
 	SpellingsFile = "spellings.json"
+	// CorrectionsLogFile is the human log of every replacement Apply made; it
+	// quotes the transcript.
+	CorrectionsLogFile = "corrections.log"
+	// RefsDir holds the series-predecessor carryover the daemon stages for the
+	// spelling agent (never the agent itself): the previous volume's corrected
+	// chapter texts plus its PriorPrefix ledger/rules/marker files, and the
+	// SeriesGlossaryFile. It is the ONLY attestation source, besides
+	// marker_titles.txt, a correction rule may cite.
+	RefsDir = "spelling-refs"
+	// PriorPrefix names the predecessor's carried files under RefsDir.
+	PriorPrefix = "prior-"
+	// SeriesGlossaryFile is the canonical-name list drawn from the community
+	// metadata database's OTHER volumes of this book's series, under RefsDir.
+	SeriesGlossaryFile = "series-glossary.txt"
 )
 
 // ruleTimeout bounds a single regexp2 match/replace so a pathological

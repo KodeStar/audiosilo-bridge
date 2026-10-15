@@ -23,11 +23,11 @@ func TestGenerateBooksMapAJobToItsBook(t *testing.T) {
 	if _, err := db.GetGenerateBook(ctx, 12); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("no mapping = %v, want ErrNotFound", err)
 	}
-	if err := db.PutGenerateBook(ctx, GenerateBook{ServerJobID: 12, BookID: &b.ID, ServerID: "srv", LibraryID: 1, RelPath: "A/Book"}); err != nil {
+	if err := db.PutGenerateBook(ctx, GenerateBook{ServerJobID: 12, BookID: &b.ID, LibraryID: 1, RelPath: "A/Book"}); err != nil {
 		t.Fatal(err)
 	}
 	g, err := db.GetGenerateBook(ctx, 12)
-	if err != nil || g.BookID == nil || *g.BookID != b.ID || g.ServerID != "srv" || g.LibraryID != 1 || g.RelPath != "A/Book" || g.EndedAt != "" {
+	if err != nil || g.BookID == nil || *g.BookID != b.ID || g.LibraryID != 1 || g.RelPath != "A/Book" || g.EndedAt != "" {
 		t.Fatalf("mapping = %+v, %v", g, err)
 	}
 
@@ -36,18 +36,32 @@ func TestGenerateBooksMapAJobToItsBook(t *testing.T) {
 	if err := db.EndGenerateBook(ctx, 12, end); err != nil {
 		t.Fatal(err)
 	}
-	if got, _ := db.EndedGenerateBooks(ctx, end.Add(-time.Second)); len(got) != 0 {
+	if got, _ := db.UnsweptGenerateBooks(ctx, end.Add(-time.Second)); len(got) != 0 {
 		t.Fatalf("a job that ended after the cutoff was listed: %+v", got)
 	}
-	if got, _ := db.EndedGenerateBooks(ctx, end); len(got) != 1 || got[0].ID != b.ID {
+	if got, _ := db.UnsweptGenerateBooks(ctx, end); len(got) != 1 || got[0].ID != b.ID || got[0].WorkDir != "/w/book" {
 		t.Fatalf("ended books = %+v", got)
 	}
-	// Mapping the job again (a resume that recreated its book) opens it again.
-	if err := db.PutGenerateBook(ctx, GenerateBook{ServerJobID: 12, BookID: &b.ID, ServerID: "srv", LibraryID: 1, RelPath: "A/Book"}); err != nil {
+	// A swept book is never listed again.
+	if err := db.MarkGenerateBookSwept(ctx, b.ID, end.Add(time.Minute)); err != nil {
 		t.Fatal(err)
 	}
-	if got, _ := db.EndedGenerateBooks(ctx, end.Add(time.Hour)); len(got) != 0 {
+	if got, _ := db.UnsweptGenerateBooks(ctx, end.Add(time.Hour)); len(got) != 0 {
+		t.Fatalf("a swept book was listed: %+v", got)
+	}
+	// Mapping the job again (a resume that recreated its book) opens it again.
+	if err := db.PutGenerateBook(ctx, GenerateBook{ServerJobID: 12, BookID: &b.ID, LibraryID: 1, RelPath: "A/Book"}); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := db.UnsweptGenerateBooks(ctx, end.Add(time.Hour)); len(got) != 0 {
 		t.Fatalf("a reopened job is still listed as ended: %+v", got)
+	}
+	// Once it ends again it is swept again (the mapping cleared swept_at).
+	if err := db.EndGenerateBook(ctx, 12, end); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := db.UnsweptGenerateBooks(ctx, end.Add(time.Hour)); len(got) != 1 {
+		t.Fatalf("a reopened then ended job wasn't listed: %+v", got)
 	}
 
 	// Deleting the engine book (a regenerate) keeps the mapping with no book.

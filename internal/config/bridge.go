@@ -216,6 +216,11 @@ func normalizeBridge(cfg *Config) {
 	if p := strings.TrimSpace(cfg.Agent.StagingDir); p != "" {
 		cfg.Agent.StagingDir = filepath.Clean(p)
 	}
+	// Decision 15: the Bridge never runs an agent CLI itself, and a model-assisted
+	// supervisor (or its automatic actions) or a backend failover would. They are
+	// off whatever the file or the environment says, so what the config shows is
+	// what runs.
+	cfg.Supervisor.ModelAssisted, cfg.Supervisor.ModelAutomaticActions, cfg.Supervisor.AllowBackendFailover = false, false, false
 	cfg.Server.URL = strings.TrimRight(strings.TrimSpace(cfg.Server.URL), "/")
 	for i := range cfg.Libraries {
 		if p := strings.TrimSpace(cfg.Libraries[i].MountPath); p != "" {

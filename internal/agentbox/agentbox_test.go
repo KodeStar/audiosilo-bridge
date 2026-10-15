@@ -31,6 +31,7 @@ func newTestRunner(t *testing.T, backend string) (*Runner, string) {
 	r := New(Options{Dir: dir, Backend: backend, ClaimTimeout: 300 * time.Millisecond})
 	r.poll = 5 * time.Millisecond
 	r.staleFor = 300 * time.Millisecond
+	r.beatCheck = 5 * time.Millisecond
 	r.beatEvery = 10 * time.Millisecond
 	r.cancelFor = 2 * time.Second
 	return r, dir
@@ -463,6 +464,7 @@ func TestStatus(t *testing.T) {
 		backend   string
 		rj        *agentproto.Runner
 		raw       string
+		link      bool // runner.json is a link to a fresh status elsewhere
 		available bool
 		detail    string
 	}{
@@ -472,10 +474,10 @@ func TestStatus(t *testing.T) {
 		"wrong protocol": {backend: "claude", rj: &agentproto.Runner{Protocol: 2, HeartbeatAt: now, CLIs: full}, detail: "protocol 2"},
 		"no credential": {backend: "claude", rj: &agentproto.Runner{Protocol: 1, HeartbeatAt: now,
 			CLIs: map[string]agentproto.CLI{"claude": {Version: "2.1.300"}}}, detail: "claude has no credential"},
-		"no cli":          {backend: "codex", rj: &agentproto.Runner{Protocol: 1, HeartbeatAt: now, CLIs: map[string]agentproto.CLI{}}, detail: "no codex CLI"},
-		"unknown backend": {backend: "bash", rj: &agentproto.Runner{Protocol: 1, HeartbeatAt: now, CLIs: full}, detail: "unknown agent backend"},
-		"missing":         {backend: "claude", detail: "isn't running"},
-		"garbage":         {backend: "claude", raw: "{not json", detail: "unreadable"},
+		"no cli":  {backend: "codex", rj: &agentproto.Runner{Protocol: 1, HeartbeatAt: now, CLIs: map[string]agentproto.CLI{}}, detail: "no codex CLI"},
+		"missing": {backend: "claude", detail: "isn't running"},
+		"garbage": {backend: "claude", raw: "{not json", detail: "unreadable"},
+		"a link":  {backend: "claude", link: true, detail: "can't be read"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -486,13 +488,21 @@ func TestStatus(t *testing.T) {
 			if tc.raw != "" {
 				mustWrite(t, filepath.Join(dir, agentproto.RunnerFile), tc.raw)
 			}
+			if tc.link {
+				elsewhere := t.TempDir()
+				writeRunnerJSON(t, elsewhere, agentproto.Runner{Protocol: 1, HeartbeatAt: now, CLIs: full})
+				if err := os.Symlink(filepath.Join(elsewhere, agentproto.RunnerFile), filepath.Join(dir, agentproto.RunnerFile)); err != nil {
+					t.Skip("no symlinks here:", err)
+				}
+			}
 			r := New(Options{Dir: dir, Backend: tc.backend})
 			st := r.Status()
 			if st.Available != tc.available || !strings.Contains(st.Detail, tc.detail) {
 				t.Fatalf("status = %+v", st)
 			}
 			av := r.Detect(context.Background())
-			if av.Available != tc.available || av.Detail != st.Detail {
+			// The container is expected back by itself, so a park on it retries.
+			if av.Available != tc.available || av.Detail != st.Detail || av.RetryAfter != RetryAfter {
 				t.Fatalf("detect = %+v", av)
 			}
 		})
@@ -501,11 +511,11 @@ func TestStatus(t *testing.T) {
 
 func TestStatusSubscription(t *testing.T) {
 	t.Parallel()
-	st := Status{CLIs: map[string]CLIStatus{"claude": {Credential: "oauth_token"}, "codex": {Credential: "api_key"}}}
+	st := Status{CLIs: map[string]agentproto.CLI{"claude": {Credential: "oauth_token"}, "codex": {Credential: "api_key"}}}
 	if !st.Subscription("claude") || st.Subscription("codex") || st.Subscription("other") {
 		t.Fatal("subscription")
 	}
-	st.CLIs["codex"] = CLIStatus{Credential: "login"}
+	st.CLIs["codex"] = agentproto.CLI{Credential: "login"}
 	if !st.Subscription("codex") {
 		t.Fatal("a codex login is a subscription")
 	}

@@ -46,6 +46,12 @@ printf '%s' '{"type":"result","is_error":false,"result":"ok"}'
 	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	// Run it once here: the first exec of a new file can be slow on a loaded
+	// machine (macOS checks it), and the runner's own --version is capped and
+	// some tests time the run.
+	if out, err := exec.Command(bin, "--version").CombinedOutput(); err != nil { //nolint:gosec // the test's own script
+		t.Fatalf("the fake %s doesn't run: %v: %s", name, err, out)
+	}
 	return bin, capture
 }
 
@@ -103,8 +109,14 @@ func (te *testEnv) stop() {
 // submit writes a job dir as the Bridge does and returns it.
 func (te *testEnv) submit(t *testing.T, request string) string {
 	t.Helper()
+	return writeJob(t, te.staging, request)
+}
+
+// writeJob writes a job dir under parent as the Bridge does and returns it.
+func writeJob(t *testing.T, parent, request string) string {
+	t.Helper()
 	id, _ := agentproto.NewJobID()
-	job := filepath.Join(te.staging, id)
+	job := filepath.Join(parent, id)
 	for _, d := range []string{job, filepath.Join(job, "work"), filepath.Join(job, "work", "out")} {
 		if err := os.Mkdir(d, 0o700); err != nil {
 			t.Fatal(err)
@@ -355,6 +367,28 @@ prev=''; for a in "$@"; do if [ "$prev" = "--output-last-message" ]; then printf
 	}
 }
 
+// codex's last message is the CLI's own output: a link where it should be (to a
+// credential, say) is never followed into last_message.txt for the Bridge.
+func TestCodexLastMessageLinkRefused(t *testing.T) {
+	t.Parallel()
+	te := newTestEnv(t, parentEnv())
+	secret := filepath.Join(t.TempDir(), "secret")
+	if err := os.WriteFile(secret, []byte("a credential"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	behavior := `prev=''; for a in "$@"; do if [ "$prev" = "--output-last-message" ]; then rm -f "$a"; ln -s '` + secret + `' "$a"; fi; prev="$a"; done
+`
+	_ = os.WriteFile(filepath.Join(te.codexCap, "behavior"), []byte(behavior), 0o644)
+	te.start(t)
+	job := te.submit(t, codexReq)
+	if ex := waitDone(t, job, 30*time.Second); ex.Error != "" || ex.ExitCode != 0 {
+		t.Fatalf("exit = %+v", ex)
+	}
+	if b, err := os.ReadFile(filepath.Join(job, agentproto.LastMessageFile)); err == nil {
+		t.Fatalf("last_message.txt = %q: the link was followed", b)
+	}
+}
+
 // A malformed request is finished with an error, never run and never a crash;
 // the runner goes on to the next job.
 func TestMalformedRequests(t *testing.T) {
@@ -378,6 +412,49 @@ func TestMalformedRequests(t *testing.T) {
 	}
 	if ex := waitDone(t, te.submit(t, claudeReq), 30*time.Second); ex.Error != "" {
 		t.Fatalf("the runner didn't go on: %+v", ex)
+	}
+}
+
+// The runner reads what the Bridge wrote through the job dir's os.Root: a
+// request.json or prompt.txt that is a link (here to a file outside the job dir,
+// one the runner's uid can read) fails the job, the CLI never runs, and the
+// link's target is never read into it.
+func TestLinkedInputsRefused(t *testing.T) {
+	t.Parallel()
+	te := newTestEnv(t, parentEnv())
+	te.start(t)
+	outside := t.TempDir()
+	secretPrompt := filepath.Join(outside, "prompt")
+	secretRequest := filepath.Join(outside, "request")
+	if err := os.WriteFile(secretPrompt, []byte("SECRET PROMPT"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(secretRequest, []byte(claudeReq), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for name, target := range map[string]string{agentproto.PromptFile: secretPrompt, agentproto.RequestFile: secretRequest} {
+		t.Run(name, func(t *testing.T) {
+			// Swapping a ready job's file would race the runner's claim, so the job
+			// is built beside the staging dir and moved in whole.
+			staged := writeJob(t, t.TempDir(), claudeReq)
+			if err := os.Remove(filepath.Join(staged, name)); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(target, filepath.Join(staged, name)); err != nil {
+				t.Fatal(err)
+			}
+			job := filepath.Join(te.staging, filepath.Base(staged))
+			if err := os.Rename(staged, job); err != nil {
+				t.Skip("can't move a job dir across these temp dirs:", err)
+			}
+			ex := waitDone(t, job, 30*time.Second)
+			if ex.Error == "" || ex.ExitCode != -1 || !strings.Contains(ex.Error, "not a regular file") {
+				t.Fatalf("exit = %+v", ex)
+			}
+		})
+	}
+	if _, err := os.Stat(filepath.Join(te.claudeCap, "argv")); err == nil {
+		t.Fatal("a job with a linked input ran the CLI")
 	}
 }
 

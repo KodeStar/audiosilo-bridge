@@ -1,5 +1,6 @@
 import type { Engine, EngineAgent } from '@/api/types';
 import { usd } from './generate';
+import { clampPercent } from './percent';
 
 // credentialText words the kind of credential an agent CLI has.
 export function credentialText(credential: string): string {
@@ -34,10 +35,10 @@ export function budgetText(e: Engine): string {
   return `${usd(e.month_spent_usd)} of ${usd(e.monthly_budget_usd)} spent this month`;
 }
 
-// budgetFraction is this month's spend against the cap, 0-1 (null with no cap).
-export function budgetFraction(e: Engine): number | null {
+// budgetPercent is this month's spend against the cap, 0-100 (null with no cap).
+export function budgetPercent(e: Engine): number | null {
   if (e.monthly_budget_usd <= 0) return null;
-  return Math.min(1, Math.max(0, e.month_spent_usd / e.monthly_budget_usd));
+  return clampPercent((e.month_spent_usd / e.monthly_budget_usd) * 100);
 }
 
 // retentionText words the transcript retention.

@@ -1,7 +1,6 @@
 package generate
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -15,7 +14,9 @@ import (
 
 	"github.com/kodestar/audiosilo-meta/pkg/model"
 
+	"github.com/kodestar/audiosilo-bridge/internal/fsutil"
 	"github.com/kodestar/audiosilo-bridge/internal/link"
+	"github.com/kodestar/audiosilo-bridge/internal/pipeline"
 )
 
 // AttachDir is the book's attachment folder the server reads (contract section 4).
@@ -33,32 +34,43 @@ const (
 const maxAttachment = 4 << 20
 
 // sidecars are a finished engine book's validated characters and recaps, as the
-// pipeline left them in <workDir>/sidecars/.
+// pipeline left them (pipeline.FinalSidecarsPaths).
 type sidecars struct {
 	characters, recaps []byte
 	nChars, nRecaps    int
 	// workID is the slug the files name (the resolved work, or the pipeline's
 	// placeholder).
 	workID string
+	// hash identifies the content, so the same files aren't written twice.
+	hash string
 }
 
-// hash identifies the content, so the same files aren't written twice.
-func (s sidecars) hash() string {
-	h := sha256.New()
-	_, _ = h.Write(s.characters)
-	_, _ = h.Write([]byte{0})
-	_, _ = h.Write(s.recaps)
-	return hex.EncodeToString(h.Sum(nil))
+// sidecarsSig is the size and modification time of the engine's sidecar files
+// ("" when neither is there): a book parked at contributing is looked at every
+// poll, and unchanged files needn't be read and decoded again.
+func sidecarsSig(workDir string) string {
+	chars, recaps := pipeline.FinalSidecarsPaths(workDir)
+	var b strings.Builder
+	for _, p := range []string{chars, recaps} {
+		if info, err := os.Stat(p); err == nil {
+			fmt.Fprintf(&b, "%d:%d;", info.Size(), info.ModTime().UnixNano())
+		} else {
+			b.WriteString("-;")
+		}
+	}
+	if sig := b.String(); sig != "-;-;" {
+		return sig
+	}
+	return ""
 }
 
-// readSidecars reads <workDir>/sidecars/{characters,recaps}.json: each must decode
-// into the community model and fit the server's size cap. A missing file is
-// skipped; neither present is an error.
+// readSidecars reads the engine's characters.json and recaps.json: each must
+// decode into the community model and fit the server's size cap. A missing file
+// is skipped; neither present is an error.
 func readSidecars(workDir string) (sidecars, error) {
 	var s sidecars
-	dir := filepath.Join(workDir, "sidecars")
-	read := func(name string) ([]byte, error) {
-		f, err := os.Open(filepath.Join(dir, name)) //nolint:gosec // the engine's own work dir
+	read := func(path string) ([]byte, error) {
+		f, err := os.Open(path) //nolint:gosec // the engine's own work dir
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil
 		}
@@ -71,15 +83,16 @@ func readSidecars(workDir string) (sidecars, error) {
 			return nil, err
 		}
 		if len(b) > maxAttachment {
-			return nil, fmt.Errorf("%s is larger than %d bytes, which the server won't read", name, maxAttachment)
+			return nil, fmt.Errorf("%s is larger than %d bytes, which the server won't read", filepath.Base(path), maxAttachment)
 		}
 		return b, nil
 	}
+	charsPath, recapsPath := pipeline.FinalSidecarsPaths(workDir)
 	var err error
-	if s.characters, err = read(charactersName); err != nil {
+	if s.characters, err = read(charsPath); err != nil {
 		return sidecars{}, err
 	}
-	if s.recaps, err = read(recapsName); err != nil {
+	if s.recaps, err = read(recapsPath); err != nil {
 		return sidecars{}, err
 	}
 	if s.characters == nil && s.recaps == nil {
@@ -102,6 +115,11 @@ func readSidecars(workDir string) (sidecars, error) {
 			s.workID = r.Work
 		}
 	}
+	h := sha256.New()
+	_, _ = h.Write(s.characters)
+	_, _ = h.Write([]byte{0})
+	_, _ = h.Write(s.recaps)
+	s.hash = hex.EncodeToString(h.Sum(nil))
 	return s, nil
 }
 
@@ -129,7 +147,7 @@ type InputFile struct {
 func inputsOf(mount string, files []link.BookFile, epub string) []InputFile {
 	if epub != "" {
 		in := InputFile{Path: filepath.Base(epub)}
-		if rel, err := filepath.Rel(mount, epub); err == nil && !strings.HasPrefix(rel, "..") {
+		if rel, err := filepath.Rel(mount, epub); err == nil && fsutil.Within(mount, epub) {
 			in.Path = filepath.ToSlash(rel)
 		}
 		if info, err := os.Stat(epub); err == nil {
@@ -145,32 +163,31 @@ func inputsOf(mount string, files []link.BookFile, epub string) []InputFile {
 }
 
 // writeAttachments writes the sidecars and the provenance into dir/.audiosilo/
-// (contract section 4) and returns the names written. The folder is made 0755 if
-// missing and refused when it is a link or not a folder; each file goes to a
-// temp file inside it, 0644, then is renamed into place, so the server never
+// (contract section 4); attachmentNames names what it writes. The folder is made
+// 0755 if missing and refused when it is a link or not a folder; each file goes
+// to a temp file inside it, 0644, then is renamed into place, so the server never
 // reads half a file. Only these JSON names are ever written there.
-func writeAttachments(dir, prefix string, s sidecars, prov Provenance) ([]string, error) {
+func writeAttachments(dir, prefix string, s sidecars, prov Provenance) error {
 	adir := filepath.Join(dir, AttachDir)
 	info, err := os.Lstat(adir)
 	switch {
 	case errors.Is(err, os.ErrNotExist):
 		if err := os.Mkdir(adir, 0o755); err != nil { //nolint:gosec // the server (another user) reads it
-			return nil, err
+			return err
 		}
 		// The umask may have narrowed it; the server must be able to list it.
 		if err := os.Chmod(adir, 0o755); err != nil { //nolint:gosec // as above
-			return nil, err
+			return err
 		}
 	case err != nil:
-		return nil, err
+		return err
 	case info.Mode()&os.ModeSymlink != 0 || !info.IsDir():
-		return nil, fmt.Errorf("%s exists and isn't a folder; the Bridge won't write through it", adir)
+		return fmt.Errorf("%s exists and isn't a folder; the Bridge won't write through it", adir)
 	}
 	provJSON, err := json.MarshalIndent(prov, "", "  ")
 	if err != nil {
-		return nil, err
+		return err
 	}
-	var names []string
 	for _, f := range []struct {
 		name string
 		data []byte
@@ -178,47 +195,11 @@ func writeAttachments(dir, prefix string, s sidecars, prov Provenance) ([]string
 		if f.data == nil {
 			continue
 		}
-		if err := writeFile(adir, prefix+f.name, f.data); err != nil {
-			return names, err
+		// 0644: the server (another user) reads it.
+		if err := fsutil.WriteFileAtomic(filepath.Join(adir, prefix+f.name), f.data, 0o644); err != nil {
+			return err
 		}
-		names = append(names, prefix+f.name)
 	}
-	return names, nil
-}
-
-// writeFile writes data to adir/name through a temp file in adir, renamed into
-// place (0644).
-func writeFile(adir, name string, data []byte) error {
-	tmp, err := os.CreateTemp(adir, ".bridge-*.tmp")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	done := false
-	defer func() {
-		if !done {
-			_ = os.Remove(tmpName)
-		}
-	}()
-	if _, err := io.Copy(tmp, bytes.NewReader(data)); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Chmod(0o644); err != nil { //nolint:gosec // the server (another user) reads it
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tmpName, filepath.Join(adir, name)); err != nil {
-		return err
-	}
-	done = true
 	return nil
 }
 

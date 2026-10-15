@@ -3,13 +3,14 @@ import { errorText, type ApiClient } from '@/api/client';
 import type { Status } from '@/api/types';
 import { useLoad } from '@/lib/useLoad';
 import { laneText, onlineText, secretKeyText } from '@/lib/status';
-import { agentText, budgetFraction, budgetText, credentialText, retentionText } from '@/lib/engine';
+import { agentText, budgetPercent, budgetText, credentialText, retentionText } from '@/lib/engine';
 import { usd } from '@/lib/generate';
 import { Ago } from '../ui/Ago';
 import { Card } from '../ui/Card';
 import { Badge } from '../ui/Badge';
 import { Field, inputClass } from '../ui/Field';
 import { Loading } from '../ui/Loading';
+import { ProgressBar } from '../ui/ProgressBar';
 import { Notice } from '../ui/Notice';
 import { Row } from '../ui/Row';
 import { dangerButton, primaryButton, secondaryButton } from '../ui/buttons';
@@ -87,7 +88,7 @@ function EngineCard({ client }: { client: ApiClient }) {
     );
   }
   const { agent } = engine;
-  const fraction = budgetFraction(engine);
+  const spent = budgetPercent(engine);
   return (
     <Card
       title="Characters and recaps"
@@ -132,20 +133,13 @@ function EngineCard({ client }: { client: ApiClient }) {
               A subscription login: the costs are what the same use would cost on an API key.
             </span>
           )}
-          {fraction !== null && (
-            <div
-              className="mt-1 h-1.5 w-full max-w-xs overflow-hidden rounded-full bg-raised"
-              role="progressbar"
-              aria-label="Monthly budget spent"
-              aria-valuemin={0}
-              aria-valuemax={100}
-              aria-valuenow={Math.round(fraction * 100)}
-            >
-              <div
-                className={fraction >= 1 ? 'h-full bg-red-600' : 'h-full bg-pink-600'}
-                style={{ width: `${fraction * 100}%` }}
-              />
-            </div>
+          {spent !== null && (
+            <ProgressBar
+              percent={spent}
+              label="Monthly budget spent"
+              tone={spent >= 100 ? 'red' : 'pink'}
+              className="mt-1 max-w-xs"
+            />
           )}
         </Row>
         <Row label="Per book">{`Up to ${usd(engine.book_budget_usd)} of agent use`}</Row>

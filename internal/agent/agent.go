@@ -54,6 +54,11 @@ type Availability struct {
 	Path      string
 	Version   string
 	Detail    string
+	// RetryAfter, when set, says an unavailable runner is expected to come back by
+	// itself (the Bridge's agent container restarting), so a book parked on it
+	// looks again after that long. Unset (a local CLI that isn't installed), the
+	// park waits for a human to fix it and press Retry.
+	RetryAfter time.Duration
 }
 
 // binResolver resolves an agent CLI binary by name, honoring an optional explicit

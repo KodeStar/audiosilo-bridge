@@ -11,8 +11,6 @@ import (
 // The agent runner runs in a Linux container; elsewhere it builds but refuses
 // to start (see supported).
 
-const noFollow = 0
-
 const supported = false
 
 func setProcGroup(*exec.Cmd) {}

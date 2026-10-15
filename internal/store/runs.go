@@ -208,6 +208,15 @@ func (db *DB) SumStageRunCost(ctx context.Context, bookID int64) (float64, error
 	return total, nil
 }
 
+// budgetCostSQL is one stage run's spend on the budget basis: the provider's
+// reported cost, else a complete configured API-equivalent estimate, else 0. The
+// per-book and monthly budgets and the estimates all sum it (unqualified columns:
+// it reads stage_runs wherever it is placed).
+const budgetCostSQL = `CASE
+	WHEN cost_reported=1 THEN cost_usd
+	WHEN estimate_complete=1 AND estimated_api_cost_usd IS NOT NULL THEN estimated_api_cost_usd
+	ELSE 0 END`
+
 // SumStageRunBudgetCost returns the best available expenditure basis for a book:
 // provider-reported cost when complete, otherwise a complete configured API-equivalent
 // estimate. complete=false means at least one token-bearing invocation had neither;
@@ -215,10 +224,7 @@ func (db *DB) SumStageRunCost(ctx context.Context, bookID int64) (float64, error
 func (db *DB) SumStageRunBudgetCost(ctx context.Context, bookID int64) (cost float64, complete bool, err error) {
 	var unknown int
 	err = db.sql.QueryRowContext(ctx, `SELECT
-		COALESCE(SUM(CASE
-			WHEN cost_reported=1 THEN cost_usd
-			WHEN estimate_complete=1 AND estimated_api_cost_usd IS NOT NULL THEN estimated_api_cost_usd
-			ELSE 0 END),0),
+		COALESCE(SUM(`+budgetCostSQL+`),0),
 		COALESCE(SUM(CASE WHEN
 			(input_tokens+output_tokens+cache_read_tokens)>0 AND cost_reported=0 AND
 			(estimate_complete=0 OR estimated_api_cost_usd IS NULL)

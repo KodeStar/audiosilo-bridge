@@ -116,7 +116,7 @@ func describe(v view) jobs.Progress {
 			pr.Message = fmt.Sprintf("%s (%d of %d)", pr.Message, p.Done, p.Total)
 		}
 	}
-	extra := map[string]any{"stage": b.State, "source": v.source, "cost_usd": cents(v.costUSD)}
+	extra := map[string]any{"stage": b.State, "source": v.source, "cost_usd": Cents(v.costUSD)}
 	switch state.Status(b.Status) {
 	case state.StatusNeedsAttention:
 		park := map[string]any{"code": b.ParkCode, "hint": ParkHint(b.ParkCode)}
@@ -136,5 +136,5 @@ func describe(v view) jobs.Progress {
 	return pr
 }
 
-// cents rounds a dollar figure to the cent.
-func cents(usd float64) float64 { return math.Round(usd*100) / 100 }
+// Cents rounds a dollar figure to the cent, as every figure the Bridge reports is.
+func Cents(usd float64) float64 { return math.Round(usd*100) / 100 }

@@ -11,6 +11,7 @@
 package generate
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -19,8 +20,10 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/kodestar/audiosilo-bridge/internal/agent"
 	"github.com/kodestar/audiosilo-bridge/internal/jobs"
 	"github.com/kodestar/audiosilo-bridge/internal/link"
 	"github.com/kodestar/audiosilo-bridge/internal/mapping"
@@ -71,13 +74,15 @@ type Options struct {
 	// RetentionDays is transcripts.retention_days: 0 deletes a finished book's
 	// transcripts when its job ends (else the daily sweep does, that much later).
 	RetentionDays int
-	// Poll is how often the engine book is looked at (default 3 s); Recheck how
-	// often a book folder that couldn't be written is tried again (default 1 min;
-	// a Retry tries at once).
-	Poll    time.Duration
-	Recheck time.Duration
-	Log     *slog.Logger
-	Now     func() time.Time
+	// Poll is how often a working engine book is looked at (default 3 s);
+	// IdlePoll how often one that is queued, paused or parked is (default 30 s;
+	// a Retry looks at once); Recheck how often a book folder that couldn't be
+	// written is tried again (default 1 min; a Retry tries at once).
+	Poll     time.Duration
+	IdlePoll time.Duration
+	Recheck  time.Duration
+	Log      *slog.Logger
+	Now      func() time.Time
 }
 
 // Handler runs sidecars.generate.
@@ -88,12 +93,21 @@ type Handler struct {
 	// pokes wake a running job when its Retry is pressed (a park of the
 	// Bridge's own, book_not_writable, checks again at once).
 	pokes map[int64]chan struct{}
+	// doneJobs counts the jobs that finished done here (the heartbeat's
+	// estimates are computed again when it moves).
+	doneJobs atomic.Int64
 }
+
+// Finished is how many jobs finished done since the start.
+func (h *Handler) Finished() int64 { return h.doneJobs.Load() }
 
 // New returns the handler.
 func New(o Options) *Handler {
 	if o.Poll <= 0 {
 		o.Poll = 3 * time.Second
+	}
+	if o.IdlePoll <= 0 {
+		o.IdlePoll = 30 * time.Second
 	}
 	if o.Recheck <= 0 {
 		o.Recheck = time.Minute
@@ -142,11 +156,32 @@ type run struct {
 	source string
 	epub   string
 	bookID int64
-	// written is the hash of the sidecars last written ("" for none yet);
-	// writeErr the last failed write's error, logged once.
+	// seen is the engine book row the progress and cost were last read for:
+	// they are read again only when it changed or the book is working.
+	seen     bookKey
+	progress []store.Progress
+	costUSD  float64
+	// side is the sidecars last read and sideSig their files' signature, so
+	// unchanged files aren't read again; written is the hash of the sidecars
+	// last written ("" for none yet); writeErr the last failed write's error,
+	// logged once.
+	side     sidecars
+	sideSig  string
 	written  string
 	writeErr string
 	srv      Server
+}
+
+// bookKey is what changes on an engine book row when the scheduler moves it.
+type bookKey struct{ updatedAt, state, status string }
+
+func keyOf(b store.Book) bookKey { return bookKey{b.UpdatedAt, b.State, b.Status} }
+
+// working reports whether the engine runs a stage of the book now (not queued,
+// paused or parked): its progress moves without its row changing, so it is
+// followed closely.
+func working(b store.Book) bool {
+	return b.Status == "" && state.State(b.State) != state.Queued
 }
 
 // Run does the job: check, create (or find again) the engine book, follow it,
@@ -208,7 +243,7 @@ func (h *Handler) end(ctx context.Context, r *run, res any, err error) (any, err
 			h.o.Log.Warn("generate: recording the job's end failed", "job", r.job.ID, "err", eerr)
 		}
 		if h.o.RetentionDays == 0 {
-			if _, serr := h.SweepTranscripts(bg, 0); serr != nil {
+			if serr := h.purgeEnded(bg, r.bookID); serr != nil {
 				h.o.Log.Warn("generate: deleting the transcripts failed", "job", r.job.ID, "err", serr)
 			}
 		}
@@ -224,7 +259,7 @@ func (h *Handler) stopBook(ctx context.Context, r *run) {
 		return
 	}
 	b, err := h.o.DB.GetBook(ctx, r.bookID)
-	if err != nil || finished(b) {
+	if err != nil || finished(b.State, b.Status) {
 		return
 	}
 	if err := eng.Cancel(ctx, r.bookID); err != nil && !errors.Is(err, scheduler.ErrInvalidOp) {
@@ -239,7 +274,7 @@ func (h *Handler) waitEngine(ctx context.Context, r *run) (Engine, error) {
 			return eng, nil
 		}
 		r.rep.Progress(jobs.Progress{Step: stepWaiting, Message: "Waiting for the engine to start"})
-		if err := sleep(ctx, h.o.Poll); err != nil {
+		if err := agent.SleepCtx(ctx, h.o.Poll); err != nil {
 			return nil, err
 		}
 	}
@@ -301,7 +336,7 @@ func (h *Handler) fetchBook(ctx context.Context, r *run) (*link.Book, error) {
 			return nil, fmt.Errorf("could not get the book from the server: %w", err)
 		}
 		h.o.Log.Warn("generate: asking the server for the book failed; trying again", "job", r.job.ID, "err", err)
-		if err := sleep(ctx, wait); err != nil {
+		if err := agent.SleepCtx(ctx, wait); err != nil {
 			return nil, err
 		}
 		wait = min(wait*2, time.Minute)
@@ -335,7 +370,7 @@ func (h *Handler) waitMapped(ctx context.Context, r *run, strict bool) error {
 		default:
 			h.park(r, parkLibraryNotWritable, "library "+r.lib.Name+" isn't mapped and writable on the Bridge any more")
 		}
-		if err := sleep(ctx, h.o.Poll); err != nil {
+		if err := agent.SleepCtx(ctx, h.o.Poll); err != nil {
 			return err
 		}
 	}
@@ -469,10 +504,7 @@ func (h *Handler) newBook(r *run, sourcePath, ebookPath string) store.NewBook {
 			sources[field] = "server"
 		}
 	}
-	workID := r.params.WorkID
-	if workID == "" {
-		workID = strings.TrimSpace(info.WorkID)
-	}
+	workID := cmp.Or(r.params.WorkID, strings.TrimSpace(info.WorkID))
 	kind := string(state.KindAudio)
 	if ebookPath != "" {
 		kind = string(state.KindEbook)
@@ -503,7 +535,7 @@ func (h *Handler) attach(ctx context.Context, eng Engine, r *run) error {
 	} else {
 		r.source, r.epub = SourceAudio, ""
 	}
-	if state.Status(b.Status) == state.StatusFailed && b.Error == scheduler.CancelledReason {
+	if scheduler.IsCancelled(b) {
 		if err := eng.Retry(ctx, b.ID); err != nil && !errors.Is(err, scheduler.ErrInvalidOp) {
 			return err
 		}
@@ -518,6 +550,7 @@ func (h *Handler) attach(ctx context.Context, eng Engine, r *run) error {
 func (h *Handler) follow(ctx context.Context, eng Engine, r *run) (any, error) {
 	poke := h.pokeChan(r.job.ID)
 	for {
+		wait := h.o.Poll
 		b, err := h.o.DB.GetBook(ctx, r.bookID)
 		switch {
 		case errors.Is(err, store.ErrNotFound):
@@ -531,12 +564,17 @@ func (h *Handler) follow(ctx context.Context, eng Engine, r *run) (any, error) {
 			if done || err != nil {
 				return res, err
 			}
+			if !working(b) {
+				// Queued, paused or parked: nothing moves until the scheduler
+				// (or a Retry, which pokes) moves the book.
+				wait = h.o.IdlePoll
+			}
 		}
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		case <-poke:
-		case <-time.After(h.o.Poll):
+		case <-time.After(wait):
 		}
 	}
 }
@@ -545,9 +583,12 @@ func (h *Handler) follow(ctx context.Context, eng Engine, r *run) (any, error) {
 // finishes, failed fails, a contributing park (core_needed) still writes the
 // local files first.
 func (h *Handler) step(ctx context.Context, eng Engine, r *run, b store.Book) (any, bool, error) {
-	v := view{book: b, source: r.source}
-	v.progress, _ = h.o.DB.ListProgress(ctx, b.ID)
-	v.costUSD, _ = h.o.DB.SumStageRunCost(ctx, b.ID)
+	if k := keyOf(b); k != r.seen || working(b) {
+		r.seen = k
+		r.progress, _ = h.o.DB.ListProgress(ctx, b.ID)
+		r.costUSD, _ = h.o.DB.SumStageRunCost(ctx, b.ID)
+	}
+	v := view{book: b, source: r.source, progress: r.progress, costUSD: r.costUSD}
 	v.eta, v.hasETA = eng.ETASeconds(b.ID)
 	st, status := state.State(b.State), state.Status(b.Status)
 	switch {
@@ -560,7 +601,7 @@ func (h *Handler) step(ctx context.Context, eng Engine, r *run, b store.Book) (a
 	r.rep.Progress(describe(v))
 	if status == state.StatusNeedsAttention {
 		if st == state.Contributing {
-			_, _, err := h.write(ctx, r, b)
+			_, err := h.write(ctx, r, b)
 			if msg := errText(err); msg != r.writeErr {
 				r.writeErr = msg
 				if err != nil {
@@ -578,15 +619,12 @@ func (h *Handler) step(ctx context.Context, eng Engine, r *run, b store.Book) (a
 // finish writes the attachments of a done book, rescans, and composes the result.
 func (h *Handler) finish(ctx context.Context, r *run, b store.Book, cost float64) (any, error) {
 	r.rep.Unpark()
-	s, names, err := h.write(ctx, r, b)
+	s, err := h.write(ctx, r, b)
 	if err != nil {
 		return nil, err
 	}
-	res := Result{LibraryID: r.lib.ID, Path: r.rel, Source: r.source, Files: names, Characters: s.nChars,
-		Recaps: s.nRecaps, CostUSD: cents(cost), WorkID: b.WorkID}
-	if res.WorkID == "" {
-		res.WorkID = s.workID
-	}
+	res := Result{LibraryID: r.lib.ID, Path: r.rel, Source: r.source, Files: attachmentNames(r.place.prefix, s),
+		Characters: s.nChars, Recaps: s.nRecaps, CostUSD: Cents(cost), WorkID: cmp.Or(b.WorkID, s.workID)}
 	if r.params.Contribute == ContributeIssue {
 		rows, err := h.o.DB.ListContributionsByBook(ctx, b.ID)
 		if err == nil {
@@ -600,6 +638,7 @@ func (h *Handler) finish(ctx context.Context, r *run, b store.Book, cost float64
 			}
 		}
 	}
+	h.doneJobs.Add(1)
 	r.rep.Progress(jobs.Progress{Step: string(state.Done), Message: "Finished",
 		Extra: map[string]any{"stage": string(state.Done), "source": r.source, "cost_usd": res.CostUSD}})
 	return res, nil
@@ -609,48 +648,59 @@ func (h *Handler) finish(ctx context.Context, r *run, b store.Book, cost float64
 // content) and asks the server to re-read them. The mapping must still be
 // checked mapped and writable at the mount the job uses, and the book's folder
 // writable (else the job parks until it is).
-func (h *Handler) write(ctx context.Context, r *run, b store.Book) (sidecars, []string, error) {
-	s, err := readSidecars(b.WorkDir)
+func (h *Handler) write(ctx context.Context, r *run, b store.Book) (sidecars, error) {
+	s, err := r.loadSidecars(b.WorkDir)
 	if err != nil {
-		return sidecars{}, nil, err
+		return sidecars{}, err
 	}
-	names := attachmentNames(r.place.prefix, s)
-	if s.hash() == r.written {
-		return s, names, nil
+	if s.hash == r.written {
+		return s, nil
 	}
 	if err := h.waitMapped(ctx, r, false); err != nil {
-		return sidecars{}, nil, err
+		return sidecars{}, err
 	}
 	p, err := locate(r.mount, r.rel)
 	if err != nil {
-		return sidecars{}, nil, err
+		return sidecars{}, err
 	}
 	r.place = p
 	r.rep.Progress(jobs.Progress{Step: stepWriting, Message: "Saving the characters and recaps with the book",
 		Extra: map[string]any{"stage": b.State, "source": r.source}})
+	workID := cmp.Or(b.WorkID, s.workID)
 	for {
-		workID := b.WorkID
-		if workID == "" {
-			workID = s.workID
-		}
 		prov := provenance(h.o.Version, r.job.ID, h.now(), r.source, workID, inputsOf(r.mount, r.files, r.epub))
-		names, err = writeAttachments(r.place.dir, r.place.prefix, s, prov)
+		err := writeAttachments(r.place.dir, r.place.prefix, s, prov)
 		if err == nil {
 			break
 		}
 		if werr := mapping.ProbeWritable(r.place.dir); werr == nil {
-			return sidecars{}, nil, fmt.Errorf("could not write the book's characters and recaps: %w", err)
+			return sidecars{}, fmt.Errorf("could not write the book's characters and recaps: %w", err)
 		}
 		if err := h.waitWritable(ctx, r); err != nil {
-			return sidecars{}, nil, err
+			return sidecars{}, err
 		}
 	}
-	r.written = s.hash()
-	h.o.Log.Info("generate: wrote the book's attachments", "job", r.job.ID, "path", r.rel, "files", names)
+	r.written = s.hash
+	h.o.Log.Info("generate: wrote the book's attachments", "job", r.job.ID, "path", r.rel, "files", attachmentNames(r.place.prefix, s))
 	r.rep.Progress(jobs.Progress{Step: stepRescanning, Message: "Asking the server to read them",
 		Extra: map[string]any{"stage": b.State, "source": r.source}})
 	h.rescan(ctx, r)
-	return s, names, nil
+	return s, nil
+}
+
+// loadSidecars reads the engine's sidecars, unless their files are unchanged
+// since the last read.
+func (r *run) loadSidecars(workDir string) (sidecars, error) {
+	sig := sidecarsSig(workDir)
+	if sig != "" && sig == r.sideSig {
+		return r.side, nil
+	}
+	s, err := readSidecars(workDir)
+	if err != nil {
+		return sidecars{}, err
+	}
+	r.side, r.sideSig = s, sig
+	return s, nil
 }
 
 // attachmentNames are the names a write produces for s.
@@ -681,7 +731,7 @@ func (h *Handler) rescan(ctx context.Context, r *run) {
 			h.o.Log.Warn("generate: the server didn't re-read the attachments (its next scan will)", "job", r.job.ID, "err", err)
 			return
 		}
-		if sleep(ctx, h.o.Poll) != nil {
+		if agent.SleepCtx(ctx, h.o.Poll) != nil {
 			return
 		}
 	}
@@ -695,15 +745,22 @@ var ErrNotParked = errors.New("the job isn't waiting on anything a retry would h
 // to check again now. store.ErrNotFound when the job isn't one of this handler's.
 func (h *Handler) Retry(ctx context.Context, jobID int64) error {
 	h.mu.Lock()
-	poke, waiting := h.pokes[jobID]
+	c, waiting := h.pokes[jobID]
 	h.mu.Unlock()
-	m, err := h.o.DB.GetGenerateBook(ctx, jobID)
-	if errors.Is(err, store.ErrNotFound) || (err == nil && m.BookID == nil) {
+	// poke wakes the running job (to look at its book, or at its folder, now),
+	// reporting whether one runs here.
+	poke := func() bool {
 		if waiting {
 			select {
-			case poke <- struct{}{}:
+			case c <- struct{}{}:
 			default:
 			}
+		}
+		return waiting
+	}
+	m, err := h.o.DB.GetGenerateBook(ctx, jobID)
+	if errors.Is(err, store.ErrNotFound) || (err == nil && m.BookID == nil) {
+		if poke() {
 			return nil
 		}
 		return store.ErrNotFound
@@ -720,11 +777,7 @@ func (h *Handler) Retry(ctx context.Context, jobID int64) error {
 		return err
 	}
 	if state.Status(b.Status) != state.StatusNeedsAttention {
-		if waiting {
-			select {
-			case poke <- struct{}{}:
-			default:
-			}
+		if poke() {
 			return nil
 		}
 		return ErrNotParked
@@ -735,12 +788,7 @@ func (h *Handler) Retry(ctx context.Context, jobID int64) error {
 		}
 		return err
 	}
-	if waiting {
-		select {
-		case poke <- struct{}{}:
-		default:
-		}
-	}
+	poke()
 	return nil
 }
 
@@ -767,15 +815,4 @@ func errText(err error) string {
 		return ""
 	}
 	return err.Error()
-}
-
-func sleep(ctx context.Context, d time.Duration) error {
-	t := time.NewTimer(d)
-	defer t.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-t.C:
-		return nil
-	}
 }

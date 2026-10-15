@@ -19,7 +19,7 @@ import (
 // a child's umask between fork and exec, and a wrapper would put a shell in front
 // of every run. The runner relies on no default mode itself: what the Bridge must
 // read (runner.json, stdout.txt, stderr.txt, exit.json, last_message.txt) is
-// fchmod'ed 0644 on the open file, the claim and the per-run dirs are 0700 on
+// chmod'ed 0644 explicitly, the claim and the per-run dirs are 0700 on
 // purpose, and work/out/ is opened explicitly after each run. So 077 costs the
 // runner nothing and makes everything a CLI or its helpers write private by
 // default (their config, caches, temp files and outputs).
@@ -57,7 +57,7 @@ func Login(ctx context.Context, opts Options, cli string, stdin io.Reader, stdou
        - as the environment variable CLAUDE_CODE_OAUTH_TOKEN (compose: in the
          agent service's environment, from your .env file), or
        - in the file %s (mode 0600).
-  3. The Bridge's page shows claude as ready within about 10 seconds.
+  3. The Bridge's page shows claude as ready within about 15 seconds.
 
 Or set ANTHROPIC_API_KEY instead (billed per token). Use the Bridge's own
 account, not a shared one.

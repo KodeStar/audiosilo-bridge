@@ -433,3 +433,21 @@ func TestFixLoopExhaustedParksWithCode(t *testing.T) {
 		t.Errorf("park_code = %q, want %q", got.ParkCode, state.ParkFixLoopExhausted)
 	}
 }
+
+// TestIsCancelled: only a failed book carrying Cancel's reason is a cancel; a
+// stage failure, or the reason on a book that runs again, is not.
+func TestIsCancelled(t *testing.T) {
+	failed := string(state.StatusFailed)
+	for _, tc := range []struct {
+		b    store.Book
+		want bool
+	}{
+		{store.Book{Status: failed, Error: cancelledReason}, true},
+		{store.Book{Status: failed, Error: "asr: decode failed"}, false},
+		{store.Book{Status: "", Error: cancelledReason}, false},
+	} {
+		if got := IsCancelled(tc.b); got != tc.want {
+			t.Errorf("IsCancelled(%+v) = %v, want %v", tc.b, got, tc.want)
+		}
+	}
+}

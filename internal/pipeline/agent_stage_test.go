@@ -1817,7 +1817,7 @@ func TestRunAgentParksOnMonthlyBudget(t *testing.T) {
 	if !errors.As(err, &pe) || pe.Code != state.ParkBudgetExceeded {
 		t.Fatalf("err = %v, want a budget_exceeded park", err)
 	}
-	_, next := monthBounds(time.Now())
+	_, next := MonthBounds(time.Now())
 	if !pe.RetryAfter.Equal(next) || next.Day() != 1 || next.Hour() != 0 {
 		t.Fatalf("retry after %v, want the 1st of next month (%v)", pe.RetryAfter, next)
 	}
@@ -1848,7 +1848,7 @@ func TestRunAgentParksOnMonthlyBudget(t *testing.T) {
 }
 
 func TestMonthBounds(t *testing.T) {
-	start, next := monthBounds(time.Date(2026, 12, 31, 23, 30, 0, 0, time.FixedZone("x", -5*3600)))
+	start, next := MonthBounds(time.Date(2026, 12, 31, 23, 30, 0, 0, time.FixedZone("x", -5*3600)))
 	if start != time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC) || next != time.Date(2027, 2, 1, 0, 0, 0, 0, time.UTC) {
 		t.Fatalf("bounds = %v %v (the month is UTC's)", start, next)
 	}
@@ -1874,9 +1874,10 @@ func TestAgentRedetectHook(t *testing.T) {
 	}
 }
 
-// TestPreflightUnavailableRetry: with AgentPreflightRetry set (the Bridge's
-// agent container), an unavailable runner parks agent_unavailable with a timed
-// self-resume and the embedder's message; unset, it waits for a human.
+// TestPreflightUnavailableRetry: a runner whose Availability carries a
+// RetryAfter (the Bridge's agent container) parks agent_unavailable with a timed
+// self-resume and a reason built from its own detail; without one (a local CLI
+// that isn't installed) the park keeps the install advice and waits for a human.
 func TestPreflightUnavailableRetry(t *testing.T) {
 	ctx := context.Background()
 	work := t.TempDir()
@@ -1884,9 +1885,8 @@ func TestPreflightUnavailableRetry(t *testing.T) {
 	down.available = false
 	_, exe, book := dbBackedQAExecutor(t, work, down)
 	exe.agentRun, exe.agentAvail = nil, agent.Availability{}
-	exe.redetectAgent = func(context.Context) (agent.Runner, agent.Availability) {
-		return down, agent.Availability{Backend: "claude", Detail: "no heartbeat from the agent container"}
-	}
+	av := agent.Availability{Backend: "claude", Detail: "no heartbeat from the agent container"}
+	exe.redetectAgent = func(context.Context) (agent.Runner, agent.Availability) { return down, av }
 	st, err := agent.New(work, string(state.FactPass), 1)
 	if err != nil {
 		t.Fatal(err)
@@ -1902,12 +1902,20 @@ func TestPreflightUnavailableRetry(t *testing.T) {
 		return pe
 	}
 	if pe := run(); !pe.RetryAfter.IsZero() || pe.Reason != AgentUnavailableMsg {
-		t.Fatalf("without a preflight retry: %+v", pe)
+		t.Fatalf("without a retry hint: %+v", pe)
 	}
-	exe.agentPreflightRetry = 10 * time.Minute
-	exe.agentUnavailableMsg = "the agent container isn't ready"
+	av.RetryAfter = 10 * time.Minute
 	pe := run()
-	if pe.RetryAfter.Before(time.Now().Add(9*time.Minute)) || pe.Reason != "the agent container isn't ready (no heartbeat from the agent container)" {
-		t.Fatalf("with a preflight retry: %+v", pe)
+	if pe.RetryAfter.Before(time.Now().Add(9*time.Minute)) || pe.Reason != "agent backend unavailable: no heartbeat from the agent container" {
+		t.Fatalf("with a retry hint: %+v", pe)
+	}
+}
+
+func TestAgentUnavailableReason(t *testing.T) {
+	if got := agentUnavailableReason("  "); got != AgentUnavailableMsg {
+		t.Errorf("no detail = %q, want the install advice", got)
+	}
+	if got := agentUnavailableReason("the provider refused the credential: 401"); got != "agent backend unavailable: the provider refused the credential: 401" {
+		t.Errorf("detail = %q", got)
 	}
 }

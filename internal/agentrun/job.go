@@ -21,16 +21,19 @@ import (
 const cancelPoll = time.Second
 
 // handle runs one claimed job to done. It never panics the runner: whatever goes
-// wrong becomes exit.json's error, and the job is always marked done.
-func (r *Runner) handle(ctx context.Context, job string) {
-	id := filepath.Base(job)
+// wrong becomes exit.json's error, and the job is always marked done. job is an
+// os.Root over the job dir: the runner's own reads and writes there go through
+// it (openForBridge's walk, which never follows a link, is the one exception),
+// so a link the Bridge or a CLI left in the job dir can't lead out of it.
+func (r *Runner) handle(ctx context.Context, job *os.Root) {
+	id := filepath.Base(job.Name())
 	defer func() {
 		if p := recover(); p != nil {
 			r.log.Error("agent runner: a job panicked", "job", id, "panic", p)
 			r.finish(job, agentproto.Exit{ExitCode: -1, Error: "the agent runner failed on this job"})
 		}
 	}()
-	touch(filepath.Join(job, agentproto.HeartbeatFile))
+	touch(job, agentproto.HeartbeatFile)
 	exit := r.execute(ctx, job, id)
 	r.log.Info("agent runner: job finished", "job", id, "exit_code", exit.ExitCode,
 		"timed_out", exit.TimedOut, "cancelled", exit.Cancelled, "duration_ms", exit.DurationMS, "error", exit.Error)
@@ -39,8 +42,8 @@ func (r *Runner) handle(ctx context.Context, job string) {
 
 // execute validates the request and runs the CLI. Only the run's outcome comes
 // back; stdout.txt and stderr.txt are written as it runs.
-func (r *Runner) execute(ctx context.Context, job, id string) agentproto.Exit {
-	raw, err := readRegular(filepath.Join(job, agentproto.RequestFile), agentproto.MaxRequestBytes+1)
+func (r *Runner) execute(ctx context.Context, job *os.Root, id string) agentproto.Exit {
+	raw, err := agentproto.ReadRegular(job, agentproto.RequestFile, agentproto.MaxRequestBytes)
 	if err != nil {
 		return refused("read request.json: " + err.Error())
 	}
@@ -55,7 +58,7 @@ func (r *Runner) execute(ctx context.Context, job, id string) agentproto.Exit {
 	if r.credentialKind(req.CLI) == "" {
 		return unavailable(req.CLI + " has no credential in the agent container")
 	}
-	prompt, err := openRegular(filepath.Join(job, agentproto.PromptFile))
+	prompt, err := agentproto.OpenRegular(job, agentproto.PromptFile)
 	if err != nil {
 		return refused("open prompt.txt: " + err.Error())
 	}
@@ -73,7 +76,7 @@ func (r *Runner) execute(ctx context.Context, job, id string) agentproto.Exit {
 		return refused("create the run's home: " + err.Error())
 	}
 
-	work := filepath.Join(job, agentproto.WorkDir)
+	work := filepath.Join(job.Name(), agentproto.WorkDir)
 	areq := agent.Request{Dir: work, Model: req.Model, Effort: req.Effort, Web: req.Web, NoTools: req.NoTools, MaxTurns: req.MaxTurns}
 	var args []string
 	lastMsg := filepath.Join(runDir, agentproto.LastMessageFile)
@@ -103,13 +106,27 @@ func (r *Runner) execute(ctx context.Context, job, id string) agentproto.Exit {
 		exit.Error, exit.Unavailable = "the agent container stopped during this run", true
 	}
 	if req.CLI == agentproto.CLICodex {
-		if b, err := readRegular(lastMsg, agentproto.MaxStdoutBytes); err == nil {
-			if err := writeNew(filepath.Join(job, agentproto.LastMessageFile), b); err != nil {
-				r.log.Warn("agent runner: write last_message.txt", "job", id, "err", err)
-			}
-		}
+		r.copyLastMessage(job, runDir, id)
 	}
 	return exit
+}
+
+// copyLastMessage copies codex's --output-last-message file from the run's temp
+// dir into the job dir. codex wrote it, so it is read like any untrusted file:
+// a link there (to a credential, say) is refused, never followed.
+func (r *Runner) copyLastMessage(job *os.Root, runDir, id string) {
+	run, err := os.OpenRoot(runDir)
+	if err != nil {
+		return
+	}
+	defer func() { _ = run.Close() }()
+	b, err := agentproto.ReadRegular(run, agentproto.LastMessageFile, agentproto.MaxStdoutBytes)
+	if err != nil {
+		return
+	}
+	if err := writeNew(job, agentproto.LastMessageFile, b); err != nil {
+		r.log.Warn("agent runner: write last_message.txt", "job", id, "err", err)
+	}
 }
 
 // refused is exit.json for a job the runner couldn't run.
@@ -136,14 +153,14 @@ type spec struct {
 // second. A cancel, the timeout or the runner stopping sends SIGTERM to the
 // group, SIGKILL killDelay later; whatever of the group is left when the CLI
 // exits is killed too, so no helper outlives its run.
-func (r *Runner) spawn(ctx context.Context, job string, s spec) agentproto.Exit {
+func (r *Runner) spawn(ctx context.Context, job *os.Root, s spec) agentproto.Exit {
 	start := r.now()
-	stdout, err := createOutput(filepath.Join(job, agentproto.StdoutFile), agentproto.MaxStdoutBytes)
+	stdout, err := createOutput(job, agentproto.StdoutFile, agentproto.MaxStdoutBytes)
 	if err != nil {
 		return refused("create stdout.txt: " + err.Error())
 	}
 	defer stdout.close()
-	stderr, err := createOutput(filepath.Join(job, agentproto.StderrFile), agentproto.MaxStderrBytes)
+	stderr, err := createOutput(job, agentproto.StderrFile, agentproto.MaxStderrBytes)
 	if err != nil {
 		return refused("create stderr.txt: " + err.Error())
 	}
@@ -185,9 +202,9 @@ wait:
 		case werr = <-done:
 			break wait
 		case <-beat.C:
-			touch(filepath.Join(job, agentproto.HeartbeatFile))
+			touch(job, agentproto.HeartbeatFile)
 		case <-poll.C:
-			if present(job, agentproto.CancelFile) {
+			if agentproto.Exists(job, agentproto.CancelFile) {
 				exit.Cancelled = true
 				stop()
 			}
@@ -209,28 +226,28 @@ wait:
 
 // finish writes exit.json, opens work/out/ for the Bridge, and marks the job done
 // (done.tmp renamed to done, so the Bridge never sees a half-finished job).
-func (r *Runner) finish(job string, exit agentproto.Exit) {
+func (r *Runner) finish(job *os.Root, exit agentproto.Exit) {
+	id := filepath.Base(job.Name())
 	body, err := json.Marshal(exit)
 	if err == nil {
-		err = writeNew(filepath.Join(job, agentproto.ExitFile), body)
+		err = writeNew(job, agentproto.ExitFile, body)
 	}
 	if err != nil {
-		r.log.Warn("agent runner: write exit.json", "job", filepath.Base(job), "err", err)
+		r.log.Warn("agent runner: write exit.json", "job", id, "err", err)
 	}
-	openForBridge(filepath.Join(job, agentproto.WorkDir, agentproto.OutDir))
+	openForBridge(filepath.Join(job.Name(), agentproto.WorkDir, agentproto.OutDir))
 	if err := markDone(job); err != nil {
-		r.log.Warn("agent runner: mark done", "job", filepath.Base(job), "err", err)
+		r.log.Warn("agent runner: mark done", "job", id, "err", err)
 	}
 }
 
 // markDone renames done.tmp to done.
-func markDone(job string) error {
-	tmp := filepath.Join(job, agentproto.DoneTmpFile)
-	_ = os.Remove(tmp)
-	if err := writeNew(tmp, nil); err != nil {
+func markDone(job *os.Root) error {
+	_ = job.Remove(agentproto.DoneTmpFile)
+	if err := writeNew(job, agentproto.DoneTmpFile, nil); err != nil {
 		return err
 	}
-	return os.Rename(tmp, filepath.Join(job, agentproto.DoneFile))
+	return job.Rename(agentproto.DoneTmpFile, agentproto.DoneFile)
 }
 
 // openForBridge makes the run's outputs readable by the Bridge's uid: regular
@@ -261,18 +278,19 @@ func openForBridge(out string) {
 	})
 }
 
-// touch bumps a file's mtime, creating it when missing.
-func touch(path string) {
+// touch bumps a file's mtime in the job dir, creating it when missing.
+func touch(job *os.Root, name string) {
 	now := time.Now()
-	if err := os.Chtimes(path, now, now); errors.Is(err, fs.ErrNotExist) {
-		_ = writeNew(path, nil)
+	if err := job.Chtimes(name, now, now); errors.Is(err, fs.ErrNotExist) {
+		_ = writeNew(job, name, nil)
 	}
 }
 
-// writeNew writes a file that must not exist yet (a link in its place fails it),
-// 0644 so the Bridge's uid can read it.
-func writeNew(path string, data []byte) error {
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) //nolint:gosec // a path in the job dir
+// writeNew writes a file in the job dir that must not exist yet (a link in its
+// place fails it), 0644 so the Bridge's uid can read it. O_EXCL, not a temp file
+// and a rename, on purpose: the runner never replaces a file in a job dir.
+func writeNew(job *os.Root, name string, data []byte) error {
+	f, err := job.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return err
 	}
@@ -286,31 +304,6 @@ func writeNew(path string, data []byte) error {
 	return werr
 }
 
-// openRegular opens a file for reading, refusing anything but a regular file
-// (O_NONBLOCK keeps a FIFO from blocking the open; O_NOFOLLOW refuses a link).
-func openRegular(path string) (*os.File, error) {
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK|noFollow, 0) //nolint:gosec // a path in the job dir
-	if err != nil {
-		return nil, err
-	}
-	info, err := f.Stat()
-	if err != nil || !info.Mode().IsRegular() {
-		_ = f.Close()
-		return nil, errors.New("not a regular file")
-	}
-	return f, nil
-}
-
-// readRegular reads at most limit bytes of a regular file.
-func readRegular(path string, limit int64) ([]byte, error) {
-	f, err := openRegular(path)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = f.Close() }()
-	return io.ReadAll(io.LimitReader(f, limit))
-}
-
 // cappedFile is an output file that keeps the first limit bytes and drops the
 // rest, so a runaway CLI can't fill the staging volume.
 type cappedFile struct {
@@ -318,8 +311,8 @@ type cappedFile struct {
 	left int64
 }
 
-func createOutput(path string, limit int64) (*cappedFile, error) {
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) //nolint:gosec // a path in the job dir
+func createOutput(job *os.Root, name string, limit int64) (*cappedFile, error) {
+	f, err := job.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return nil, err
 	}

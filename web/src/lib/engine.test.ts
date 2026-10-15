@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { agentText, budgetFraction, budgetText, credentialText, retentionText } from './engine';
+import { agentText, budgetPercent, budgetText, credentialText, retentionText } from './engine';
 import { engineFixture } from '@/test/fixtures';
 
 describe('engine wording', () => {
@@ -14,12 +14,12 @@ describe('engine wording', () => {
   });
   it('words the budget and the retention', () => {
     expect(budgetText(engineFixture())).toBe('$12.30 of $100.00 spent this month');
-    expect(budgetFraction(engineFixture())).toBeCloseTo(0.123);
+    expect(budgetPercent(engineFixture())).toBeCloseTo(12.3);
     expect(budgetText(engineFixture({ monthly_budget_usd: 0 }))).toBe(
       'No monthly cap ($12.30 spent this month)',
     );
-    expect(budgetFraction(engineFixture({ monthly_budget_usd: 0 }))).toBeNull();
-    expect(budgetFraction(engineFixture({ month_spent_usd: 500 }))).toBe(1);
+    expect(budgetPercent(engineFixture({ monthly_budget_usd: 0 }))).toBeNull();
+    expect(budgetPercent(engineFixture({ month_spent_usd: 500 }))).toBe(100);
     expect(retentionText(30)).toBe('Kept 30 days after the job ends, then deleted');
     expect(retentionText(1)).toBe('Kept 1 day after the job ends, then deleted');
     expect(retentionText(0)).toBe('Deleted as soon as the job ends');

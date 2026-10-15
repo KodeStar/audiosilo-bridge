@@ -1,6 +1,7 @@
 import type { Progress, ServerJob } from '@/api/types';
 import type { Tone } from '@/components/ui/Badge';
 import { effectiveState } from './generate';
+import { clampPercent } from './percent';
 
 const STATES: Record<string, { label: string; tone: Tone; hint?: string }> = {
   running: { label: 'Running', tone: 'busy' },
@@ -51,10 +52,10 @@ export function progressText(p: Progress | null | undefined): string {
   return parts.join(' ');
 }
 
-// progressFraction is done/total in 0-1, or null when there is no count.
-export function progressFraction(p: Progress | null | undefined): number | null {
+// progressPercent is done/total in 0-100, or null when there is no count.
+export function progressPercent(p: Progress | null | undefined): number | null {
   if (!p || typeof p.total !== 'number' || p.total <= 0) return null;
-  return Math.min(1, Math.max(0, (p.done ?? 0) / p.total));
+  return clampPercent(((p.done ?? 0) / p.total) * 100);
 }
 
 // jobTarget is "library 2: Author/Book", "library 2" or "".

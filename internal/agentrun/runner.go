@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/kodestar/audiosilo-bridge/internal/agentproto"
+	"github.com/kodestar/audiosilo-bridge/internal/fsutil"
 )
 
 // MaxSlots bounds --slots: each slot is a concurrent CLI run.
@@ -222,82 +223,92 @@ func (r *Runner) writeStatus() {
 	if err != nil {
 		return
 	}
-	tmp, err := os.CreateTemp(r.opts.Staging, "."+agentproto.RunnerFile+".tmp-*")
-	if err != nil {
+	if err := fsutil.WriteFileAtomic(filepath.Join(r.opts.Staging, agentproto.RunnerFile), body, 0o644); err != nil {
 		r.log.Warn("agent runner: can't write runner.json; can the agent uid write the staging dir?", "dir", r.opts.Staging, "err", err)
-		return
-	}
-	_, werr := tmp.Write(body)
-	if cerr := tmp.Chmod(0o644); werr == nil {
-		werr = cerr
-	}
-	if cerr := tmp.Close(); werr == nil {
-		werr = cerr
-	}
-	if werr == nil {
-		werr = os.Rename(tmp.Name(), filepath.Join(r.opts.Staging, agentproto.RunnerFile))
-	}
-	if werr != nil {
-		_ = os.Remove(tmp.Name())
-		r.log.Warn("agent runner: write runner.json", "err", werr)
 	}
 }
 
-// scan claims ready jobs while a slot is free, oldest request first.
+// scan claims ready jobs while a slot is free, oldest request first. Every
+// check and the claim go through an os.Root over the staging dir, and each job
+// is then run inside its own: the Bridge writes the job dirs, so a link in one
+// must not lead the runner out of it.
 func (r *Runner) scan(ctx context.Context, wg *sync.WaitGroup) {
-	if ctx.Err() != nil {
+	if ctx.Err() != nil || len(r.slots) == cap(r.slots) {
+		return // stopping, or every slot is busy: no use listing the jobs
+	}
+	staging, err := os.OpenRoot(r.opts.Staging)
+	if err != nil {
+		r.log.Warn("agent runner: open the staging dir", "err", err)
 		return
 	}
-	for _, job := range r.readyJobs() {
+	defer func() { _ = staging.Close() }()
+	for _, id := range r.readyJobs(staging) {
 		select {
 		case r.slots <- struct{}{}:
 		default:
 			return // every slot is busy
 		}
-		if err := os.Mkdir(filepath.Join(job, agentproto.ClaimDir), 0o700); err != nil {
+		if err := staging.Mkdir(filepath.Join(id, agentproto.ClaimDir), 0o700); err != nil {
 			<-r.slots // taken by another runner, or withdrawn by the Bridge
+			continue
+		}
+		job, err := staging.OpenRoot(id)
+		if err != nil {
+			// Claimed but can't be opened (most likely the Bridge removed it): with no
+			// heartbeat, the Bridge gives up on it by itself.
+			r.log.Warn("agent runner: open a claimed job", "job", id, "err", err)
+			<-r.slots
 			continue
 		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			defer func() { <-r.slots }()
+			defer func() { _ = job.Close() }()
 			r.handle(ctx, job)
 		}()
 	}
 }
 
-// readyJobs lists the job dirs with a request and no claim or done, oldest
-// request first.
-func (r *Runner) readyJobs() []string {
+// jobDirs lists the job dirs in the staging dir by id. Anything else there
+// (runner.json, a temp file, a link) is ignored.
+func (r *Runner) jobDirs() []string {
 	entries, err := os.ReadDir(r.opts.Staging)
 	if err != nil {
 		r.log.Warn("agent runner: list the staging dir", "err", err)
 		return nil
 	}
+	var ids []string
+	for _, e := range entries {
+		if agentproto.ValidJobID(e.Name()) && e.Type()&fs.ModeType == fs.ModeDir {
+			ids = append(ids, e.Name())
+		}
+	}
+	return ids
+}
+
+// readyJobs lists the jobs with a request and no claim or done, oldest request
+// first.
+func (r *Runner) readyJobs(staging *os.Root) []string {
 	type ready struct {
-		dir string
-		at  time.Time
+		id string
+		at time.Time
 	}
 	var jobs []ready
-	for _, e := range entries {
-		if !agentproto.ValidJobID(e.Name()) || e.Type()&fs.ModeType != fs.ModeDir {
+	for _, id := range r.jobDirs() {
+		if agentproto.Exists(staging, filepath.Join(id, agentproto.DoneFile)) || agentproto.Exists(staging, filepath.Join(id, agentproto.ClaimDir)) {
 			continue
 		}
-		dir := filepath.Join(r.opts.Staging, e.Name())
-		if present(dir, agentproto.DoneFile) || present(dir, agentproto.ClaimDir) {
-			continue
-		}
-		info, err := os.Lstat(filepath.Join(dir, agentproto.RequestFile))
+		info, err := staging.Lstat(filepath.Join(id, agentproto.RequestFile))
 		if err != nil {
 			continue
 		}
-		jobs = append(jobs, ready{dir, info.ModTime()})
+		jobs = append(jobs, ready{id, info.ModTime()})
 	}
 	sort.Slice(jobs, func(i, j int) bool { return jobs[i].at.Before(jobs[j].at) })
 	out := make([]string, len(jobs))
 	for i, j := range jobs {
-		out[i] = j.dir
+		out[i] = j.id
 	}
 	return out
 }
@@ -306,36 +317,38 @@ func (r *Runner) readyJobs() []string {
 // (the container restarted mid-run), so the Bridge gets an answer at once
 // instead of waiting for the heartbeat to go stale.
 func (r *Runner) recoverOrphans() {
-	entries, err := os.ReadDir(r.opts.Staging)
+	staging, err := os.OpenRoot(r.opts.Staging)
 	if err != nil {
+		r.log.Warn("agent runner: open the staging dir", "err", err)
 		return
 	}
-	for _, e := range entries {
-		if !agentproto.ValidJobID(e.Name()) || e.Type()&fs.ModeType != fs.ModeDir {
-			continue
-		}
-		dir := filepath.Join(r.opts.Staging, e.Name())
-		if present(dir, agentproto.DoneFile) || !present(dir, agentproto.RequestFile) {
-			continue
-		}
-		claim, err := os.Lstat(filepath.Join(dir, agentproto.ClaimDir))
+	defer func() { _ = staging.Close() }()
+	for _, id := range r.jobDirs() {
+		job, err := staging.OpenRoot(id)
 		if err != nil {
 			continue
 		}
-		last := claim.ModTime()
-		if hb, err := os.Lstat(filepath.Join(dir, agentproto.HeartbeatFile)); err == nil && hb.ModTime().After(last) {
-			last = hb.ModTime()
+		if r.orphaned(job) {
+			r.log.Warn("agent runner: finishing a run an earlier runner left", "job", id)
+			r.finish(job, agentproto.Exit{ExitCode: -1, Error: "the agent container restarted during this run", Unavailable: true})
 		}
-		if r.now().Sub(last) < orphanAfter {
-			continue
-		}
-		r.log.Warn("agent runner: finishing a run an earlier runner left", "job", e.Name())
-		r.finish(dir, agentproto.Exit{ExitCode: -1, Error: "the agent container restarted during this run", Unavailable: true})
+		_ = job.Close()
 	}
 }
 
-// present reports whether name exists in dir (nothing followed).
-func present(dir, name string) bool {
-	_, err := os.Lstat(filepath.Join(dir, name))
-	return err == nil
+// orphaned reports whether a job was claimed and never finished, with no sign of
+// life for orphanAfter.
+func (r *Runner) orphaned(job *os.Root) bool {
+	if agentproto.Exists(job, agentproto.DoneFile) || !agentproto.Exists(job, agentproto.RequestFile) {
+		return false
+	}
+	claim, err := job.Lstat(agentproto.ClaimDir)
+	if err != nil {
+		return false
+	}
+	last := claim.ModTime()
+	if hb, err := job.Lstat(agentproto.HeartbeatFile); err == nil && hb.ModTime().After(last) {
+		last = hb.ModTime()
+	}
+	return r.now().Sub(last) >= orphanAfter
 }

@@ -3,9 +3,11 @@ package jobs
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/kodestar/audiosilo-bridge/internal/link"
 	"github.com/kodestar/audiosilo-bridge/internal/store"
@@ -49,8 +51,8 @@ func TestParkAndUnpark(t *testing.T) {
 		rep.Progress(Progress{Step: "fact_pass", Extra: map[string]any{"park": map[string]string{"code": "agent_unavailable"}}})
 		rep.Park("agent_unavailable", "the agent container isn't answering")
 		waitFor(t, func() bool { return countState(srv, 1, link.StateNeedsAttention) >= 2 })
-		if parked, msg := rep.Parked(); !parked || msg != "the agent container isn't answering" {
-			t.Errorf("Parked() = %v %q", parked, msg)
+		if parked, msg := rep.parkState(); !parked || msg != "the agent container isn't answering" {
+			t.Errorf("parkState() = %v %q", parked, msg)
 		}
 		sj, _ := db.GetServerJob(ctx, 1)
 		if sj.State != store.JobRunning || sj.Error != "the agent container isn't answering" {
@@ -137,7 +139,7 @@ func TestParkSurvivesARestart(t *testing.T) {
 	srv.mu.Unlock()
 	var sawParked atomic.Bool
 	second := handler{kind: "k.v", lane: LanePipeline, fn: func(ctx context.Context, j Job, rep *Reporter) (any, error) {
-		parked, msg := rep.Parked()
+		parked, msg := rep.parkState()
 		sawParked.Store(parked && msg == "rate limited until 3pm")
 		rep.Unpark()
 		return nil, nil
@@ -213,4 +215,43 @@ func lastUpdate(f *fakeServer, id int64) link.Update {
 		return link.Update{}
 	}
 	return ups[len(ups)-1]
+}
+
+// A handler that reports the same progress on every poll sends nothing new: only
+// a change (Extra included) is a report, and the keepalive renews the lease.
+func TestUnchangedProgressIsNotSent(t *testing.T) {
+	t.Parallel()
+	db, srv := openStore(t), newFakeServer()
+	srv.add(&link.Job{ID: 8, Kind: "k.v", Attempts: 1})
+	opts := testOpts()
+	opts.Keepalive = time.Hour
+	same := func() Progress {
+		return Progress{Step: "asr", Message: "Transcribing", Extra: map[string]any{"park": map[string]any{"code": "x"}}}
+	}
+	r := New(db, func() Server { return srv }, nil, opts, handler{kind: "k.v", lane: LaneLight,
+		fn: func(_ context.Context, _ Job, rep *Reporter) (any, error) {
+			for range 30 {
+				rep.Progress(same())
+				time.Sleep(2 * time.Millisecond)
+			}
+			running := countState(srv, 8, link.StateRunning)
+			// Changed Extra only: a report again.
+			changed := same()
+			changed.Extra["eta_seconds"] = 60
+			rep.Progress(changed)
+			time.Sleep(20 * time.Millisecond)
+			if running != 2 || countState(srv, 8, link.StateRunning) != 3 {
+				return nil, fmt.Errorf("running reports = %d then %d, want 2 (the start and the first progress) then 3",
+					running, countState(srv, 8, link.StateRunning))
+			}
+			return nil, nil
+		}})
+	runFor(t, r, func() bool { s, _ := srv.finalState(8); return s != "" })
+	if s, u := srv.finalState(8); s != link.StateDone {
+		msg := ""
+		if u.Error != nil {
+			msg = *u.Error
+		}
+		t.Fatalf("final = %q: %s", s, msg)
+	}
 }

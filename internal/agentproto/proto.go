@@ -15,8 +15,12 @@
 //	Bridge:  cancel (to stop a run), harvest of work/out/ after done, then the
 //	         job dir is deleted
 //
+// The runner rewrites <staging>/runner.json every RunnerInterval (15 s); the
+// Bridge treats the container as up while it is under RunnerFreshFor (30 s) old.
+//
 // Nothing in a job dir is trusted by the side that didn't write it: the runner
-// validates the request, and the Bridge treats every output as untrusted.
+// validates the request, the Bridge treats every output as untrusted, and both
+// read the other's files with OpenRegular/ReadRegular (files.go).
 package agentproto
 
 import (
@@ -82,8 +86,15 @@ const (
 
 // Intervals both sides agree on.
 const (
-	RunnerInterval    = 10 * time.Second // runner.json is rewritten this often
-	HeartbeatInterval = 5 * time.Second  // a job's heartbeat file is touched this often
+	// RunnerInterval is how often the runner rewrites runner.json.
+	RunnerInterval = 15 * time.Second
+	// RunnerFreshFor is how young runner.json's heartbeat_at must be for the Bridge
+	// to treat the container as up. Two intervals, so one slow or missed rewrite
+	// doesn't flap the container to unavailable.
+	RunnerFreshFor = 2 * RunnerInterval
+	// HeartbeatInterval is how often the runner touches a running job's heartbeat
+	// file, and so how often the Bridge needs to look at it.
+	HeartbeatInterval = 5 * time.Second
 )
 
 // Runner is runner.json: the runner's liveness and what it can run.

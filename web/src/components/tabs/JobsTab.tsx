@@ -9,7 +9,7 @@ import {
   jobTarget,
   jobsPollInterval,
   mergeJobs,
-  progressFraction,
+  progressPercent,
   progressText,
   reportText,
   stateHint,
@@ -25,7 +25,6 @@ import {
   parkOf,
   parseGenerateResult,
   resultSummary,
-  stageLabel,
 } from '@/lib/generate';
 import { jobHash } from '@/lib/tabs';
 import { Ago } from '../ui/Ago';
@@ -33,6 +32,7 @@ import { Badge } from '../ui/Badge';
 import { EmptyState } from '../ui/EmptyState';
 import { Loading } from '../ui/Loading';
 import { Notice } from '../ui/Notice';
+import { ProgressBar } from '../ui/ProgressBar';
 import { dangerButton, primaryButton, secondaryButton } from '../ui/buttons';
 
 export const JOBS_PAGE = 50;
@@ -167,7 +167,7 @@ function JobCard({
   const generate = isGenerate(job);
   const shown = effectiveState(job);
   const progress = generate ? '' : progressText(job.progress);
-  const fraction = progressFraction(job.progress);
+  const percent = progressPercent(job.progress);
   const report = reportText(job);
   const hint = stateHint(shown);
   const target = jobTarget(job);
@@ -242,18 +242,7 @@ function JobCard({
       {job.state === 'running' && progress && (
         <div className="mt-2 flex flex-col gap-1">
           <p className="text-xs text-dim">{progress}</p>
-          {fraction !== null && (
-            <div
-              className="h-1.5 w-full overflow-hidden rounded-full bg-raised"
-              role="progressbar"
-              aria-label={`Job ${job.id} progress`}
-              aria-valuemin={0}
-              aria-valuemax={100}
-              aria-valuenow={Math.round(fraction * 100)}
-            >
-              <div className="h-full bg-pink-600" style={{ width: `${fraction * 100}%` }} />
-            </div>
-          )}
+          {percent !== null && <ProgressBar percent={percent} label={`Job ${job.id} progress`} />}
         </div>
       )}
 
@@ -288,32 +277,23 @@ function JobCard({
   );
 }
 
-// GenerateProgress is a running sidecars job: the engine's stage, its count,
-// the ETA, the spend and the source; while parked, the park and its advice.
+// GenerateProgress is a running sidecars job: the Bridge's message for the step,
+// its count, the ETA, the spend and the source; while parked, the park and its
+// advice.
 function GenerateProgress({ job }: { job: ServerJob }) {
   const p = job.progress;
   const park = parkOf(job);
-  const fraction = progressFraction(p);
+  const percent = progressPercent(p);
   const facts = generateFacts(p, park !== null);
-  const label = p?.message || stageLabel(p?.stage);
   return (
     <div className="mt-2 flex flex-col gap-1.5">
-      {label && <p className="text-sm text-body">{label}</p>}
-      {fraction !== null && !park && (
-        <div
-          className="h-1.5 w-full overflow-hidden rounded-full bg-raised"
-          role="progressbar"
-          aria-label={`Job ${job.id} progress`}
-          aria-valuemin={0}
-          aria-valuemax={100}
-          aria-valuenow={Math.round(fraction * 100)}
-        >
-          <div className="h-full bg-pink-600" style={{ width: `${fraction * 100}%` }} />
-        </div>
+      {p?.message && <p className="text-sm text-body">{p.message}</p>}
+      {percent !== null && !park && (
+        <ProgressBar percent={percent} label={`Job ${job.id} progress`} />
       )}
       {facts.length > 0 && <p className="text-xs text-dim">{facts.join(' - ')}</p>}
       {park && (
-        <div className="rounded-md border border-amber-700 bg-amber-950 p-3 text-sm text-amber-200">
+        <Notice kind="warn">
           <p>
             <code className="text-xs">{park.code}</code>
             {job.error && <>: {job.error}</>}
@@ -324,7 +304,7 @@ function GenerateProgress({ job }: { job: ServerJob }) {
               Resumes by itself <Ago at={park.retry_at} />.
             </p>
           )}
-        </div>
+        </Notice>
       )}
     </div>
   );

@@ -11,6 +11,7 @@ import (
 
 	"github.com/kodestar/audiosilo-bridge/internal/agent"
 	"github.com/kodestar/audiosilo-bridge/internal/agentproto"
+	"github.com/kodestar/audiosilo-bridge/internal/fsutil"
 )
 
 // Modes in a job dir. The Bridge and the agent run as different uids sharing no
@@ -41,7 +42,7 @@ func stage(job string, req agent.Request, cli string, timeout int) error {
 	if err := copyTree(req.Dir, work); err != nil {
 		return err
 	}
-	if err := writeFile(filepath.Join(job, agentproto.PromptFile), []byte(req.Prompt), inputFile); err != nil {
+	if err := fsutil.WriteFileAtomic(filepath.Join(job, agentproto.PromptFile), []byte(req.Prompt), inputFile); err != nil {
 		return err
 	}
 	body, err := json.Marshal(agentproto.Request{
@@ -57,8 +58,11 @@ func stage(job string, req agent.Request, cli string, timeout int) error {
 	if err != nil {
 		return err
 	}
+	// request.json.tmp is the contract's name for the request in progress, so it
+	// keeps its own rename: WriteFileAtomic makes it whole and synced, then the
+	// rename to request.json is the ready signal.
 	tmp := filepath.Join(job, agentproto.RequestTmpFile)
-	if err := writeFile(tmp, body, requestMode); err != nil {
+	if err := fsutil.WriteFileAtomic(tmp, body, requestMode); err != nil {
 		return err
 	}
 	return os.Rename(tmp, filepath.Join(job, agentproto.RequestFile))
@@ -132,12 +136,4 @@ func copyFile(src, dst string, mode fs.FileMode) error {
 		return err
 	}
 	return os.Chmod(dst, mode)
-}
-
-// writeFile writes a new file with exactly mode.
-func writeFile(path string, data []byte, mode fs.FileMode) error {
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		return err
-	}
-	return os.Chmod(path, mode)
 }

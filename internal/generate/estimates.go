@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/kodestar/audiosilo-bridge/internal/link"
+	"github.com/kodestar/audiosilo-bridge/internal/pipeline"
 	"github.com/kodestar/audiosilo-bridge/internal/state"
 	"github.com/kodestar/audiosilo-bridge/internal/store"
 )
@@ -32,21 +33,15 @@ func Estimates(ctx context.Context, db *store.DB, agent AgentState, monthlyBudge
 	if err != nil {
 		return nil, err
 	}
-	spent, err := db.SumBudgetCostSince(ctx, MonthStart(now))
+	start, _ := pipeline.MonthBounds(now)
+	spent, err := db.SumBudgetCostSince(ctx, start)
 	if err != nil {
 		return nil, err
 	}
 	e := estimateFrom(books, rate, hasRate)
 	e.AgentBackend, e.AgentReady, e.Subscription = agent.Backend, agent.Ready, agent.Subscription
-	e.MonthlyBudgetUSD, e.MonthSpentUSD = monthlyBudgetUSD, cents(spent)
+	e.MonthlyBudgetUSD, e.MonthSpentUSD = monthlyBudgetUSD, Cents(spent)
 	return e, nil
-}
-
-// MonthStart is the start of now's calendar month, UTC: the monthly budget's
-// month (the pipeline's runAgent counts the same one).
-func MonthStart(now time.Time) time.Time {
-	u := now.UTC()
-	return time.Date(u.Year(), u.Month(), 1, 0, 0, 0, 0, time.UTC)
 }
 
 // estimateFrom is the figures' arithmetic. The ASR stage's rate is seconds per
@@ -81,11 +76,11 @@ func estimateFrom(books []store.FinishedBook, asrRate float64, hasRate bool) *li
 	}
 	e.Samples = ebooks + audioBooks
 	if audioHours > 0 {
-		v := cents(audioCost / audioHours)
+		v := Cents(audioCost / audioHours)
 		e.AgentUSDPerAudioHour = &v
 	}
 	if ebooks > 0 {
-		v := cents(ebookCost / float64(ebooks))
+		v := Cents(ebookCost / float64(ebooks))
 		e.AgentUSDPerEbook = &v
 	}
 	if hasRate && asrRate > 0 && chapterHours > 0 {

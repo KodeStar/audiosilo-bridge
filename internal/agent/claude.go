@@ -121,7 +121,9 @@ func (c *claudeRunner) Run(ctx context.Context, req Request) (Result, error) {
 	})
 	out := outcomeOf(stdout, stderr, runErr, req.Timeout)
 	res, err := ClaudeResult(req.Model, out)
-	if runErr != nil && !out.TimedOut && ctx.Err() != nil {
+	// outcomeOf put every non-timeout runErr into ExitErr, so ExitErr alone says
+	// the run failed other than by its timeout.
+	if out.ExitErr != nil && ctx.Err() != nil {
 		return res, ctx.Err()
 	}
 	return res, err

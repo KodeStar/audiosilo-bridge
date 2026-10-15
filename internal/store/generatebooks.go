@@ -13,7 +13,6 @@ import (
 type GenerateBook struct {
 	ServerJobID int64
 	BookID      *int64
-	ServerID    string
 	LibraryID   int64
 	RelPath     string
 	CreatedAt   string
@@ -24,11 +23,11 @@ type GenerateBook struct {
 // that maps to a new book is open again, so its end is cleared.
 func (db *DB) PutGenerateBook(ctx context.Context, g GenerateBook) error {
 	_, err := db.sql.ExecContext(ctx,
-		`INSERT INTO generate_books (server_job_id, book_id, server_id, library_id, rel_path, created_at, ended_at)
-		 VALUES (?, ?, ?, ?, ?, ?, '')
-		 ON CONFLICT(server_job_id) DO UPDATE SET book_id = excluded.book_id, server_id = excluded.server_id,
-		     library_id = excluded.library_id, rel_path = excluded.rel_path, ended_at = ''`,
-		g.ServerJobID, g.BookID, g.ServerID, g.LibraryID, g.RelPath, timestamp(nowFn()))
+		`INSERT INTO generate_books (server_job_id, book_id, library_id, rel_path, created_at, ended_at, swept_at)
+		 VALUES (?, ?, ?, ?, ?, '', '')
+		 ON CONFLICT(server_job_id) DO UPDATE SET book_id = excluded.book_id, library_id = excluded.library_id,
+		     rel_path = excluded.rel_path, ended_at = '', swept_at = ''`,
+		g.ServerJobID, g.BookID, g.LibraryID, g.RelPath, timestamp(nowFn()))
 	return err
 }
 
@@ -39,9 +38,9 @@ func (db *DB) GetGenerateBook(ctx context.Context, serverJobID int64) (GenerateB
 		bookID sql.NullInt64
 	)
 	err := db.sql.QueryRowContext(ctx,
-		`SELECT server_job_id, book_id, server_id, library_id, rel_path, created_at, ended_at
+		`SELECT server_job_id, book_id, library_id, rel_path, created_at, ended_at
 		   FROM generate_books WHERE server_job_id = ?`, serverJobID).
-		Scan(&g.ServerJobID, &bookID, &g.ServerID, &g.LibraryID, &g.RelPath, &g.CreatedAt, &g.EndedAt)
+		Scan(&g.ServerJobID, &bookID, &g.LibraryID, &g.RelPath, &g.CreatedAt, &g.EndedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return GenerateBook{}, ErrNotFound
 	}
@@ -84,13 +83,46 @@ func (db *DB) OpenGenerateJobsForBook(ctx context.Context, bookID, exceptJob int
 	return out, rows.Err()
 }
 
-// EndedGenerateBooks returns the engine books of the jobs that ended at or before
-// cutoff (the transcript retention sweep's work list), each book once.
-func (db *DB) EndedGenerateBooks(ctx context.Context, cutoff time.Time) ([]Book, error) {
-	return db.queryBooks(ctx,
-		`SELECT `+bookCols+` FROM books WHERE id IN (
-		     SELECT book_id FROM generate_books WHERE book_id IS NOT NULL AND ended_at != '' AND ended_at <= ?)
+// SweepBook is an engine book whose transcripts the retention sweep may delete:
+// only what the sweep needs.
+type SweepBook struct {
+	ID      int64
+	WorkDir string
+	Kind    string
+	State   string
+	Status  string
+}
+
+// UnsweptGenerateBooks returns the engine books of the jobs that ended at or
+// before cutoff whose transcripts weren't swept yet (the retention sweep's work
+// list), each book once.
+func (db *DB) UnsweptGenerateBooks(ctx context.Context, cutoff time.Time) ([]SweepBook, error) {
+	rows, err := db.sql.QueryContext(ctx,
+		`SELECT id, work_dir, kind, state, status FROM books WHERE id IN (
+		     SELECT book_id FROM generate_books
+		      WHERE book_id IS NOT NULL AND ended_at != '' AND ended_at <= ? AND swept_at = '')
 		 ORDER BY id`, timestamp(cutoff))
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []SweepBook
+	for rows.Next() {
+		var b SweepBook
+		if err := rows.Scan(&b.ID, &b.WorkDir, &b.Kind, &b.State, &b.Status); err != nil {
+			return nil, err
+		}
+		out = append(out, b)
+	}
+	return out, rows.Err()
+}
+
+// MarkGenerateBookSwept records that an engine book's transcripts were deleted,
+// so the sweep skips it from now on.
+func (db *DB) MarkGenerateBookSwept(ctx context.Context, bookID int64, at time.Time) error {
+	_, err := db.sql.ExecContext(ctx,
+		`UPDATE generate_books SET swept_at = ? WHERE book_id = ?`, timestamp(at), bookID)
+	return err
 }
 
 // SumBudgetCostSince returns the agent spend of every book's stage runs started at
@@ -99,10 +131,7 @@ func (db *DB) EndedGenerateBooks(ctx context.Context, cutoff time.Time) ([]Book,
 // monthly budget's figure.
 func (db *DB) SumBudgetCostSince(ctx context.Context, since time.Time) (float64, error) {
 	var cost float64
-	err := db.sql.QueryRowContext(ctx, `SELECT COALESCE(SUM(CASE
-			WHEN cost_reported=1 THEN cost_usd
-			WHEN estimate_complete=1 AND estimated_api_cost_usd IS NOT NULL THEN estimated_api_cost_usd
-			ELSE 0 END),0)
+	err := db.sql.QueryRowContext(ctx, `SELECT COALESCE(SUM(`+budgetCostSQL+`),0)
 		FROM stage_runs WHERE started_at >= ?`, timestamp(since)).Scan(&cost)
 	return cost, err
 }
@@ -119,10 +148,8 @@ type FinishedBook struct {
 // agent spend (superseded runs included), oldest first.
 func (db *DB) FinishedBooks(ctx context.Context) ([]FinishedBook, error) {
 	rows, err := db.sql.QueryContext(ctx,
-		`SELECT b.kind, b.duration_sec, b.chapters, COALESCE((SELECT SUM(CASE
-			WHEN r.cost_reported=1 THEN r.cost_usd
-			WHEN r.estimate_complete=1 AND r.estimated_api_cost_usd IS NOT NULL THEN r.estimated_api_cost_usd
-			ELSE 0 END) FROM stage_runs r WHERE r.book_id = b.id), 0)
+		`SELECT b.kind, b.duration_sec, b.chapters, COALESCE((SELECT SUM(`+budgetCostSQL+`)
+		     FROM stage_runs WHERE stage_runs.book_id = b.id), 0)
 		   FROM books b WHERE b.state = 'done' ORDER BY b.id`)
 	if err != nil {
 		return nil, err

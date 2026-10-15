@@ -68,6 +68,8 @@ type Bridge struct {
 	box    *agentbox.Runner
 	gen    *generate.Handler
 	engine engineState
+	// est caches the heartbeat's estimates (estimates.go of the engine wiring).
+	est estimatesCache
 
 	kick chan struct{}
 

@@ -16,13 +16,19 @@ ALTER TABLE books ADD COLUMN contrib_mode TEXT NOT NULL DEFAULT '';
 -- set null when the engine book is deleted (a regenerate of the same book).
 -- ended_at is when the job ended (done, failed or cancelled; '' while open): the
 -- transcript retention window (transcripts.retention_days) counts from it.
+-- swept_at is when the book's transcripts were deleted ('' until then), so the
+-- daily sweep never looks at a swept book again.
 CREATE TABLE generate_books (
     server_job_id INTEGER PRIMARY KEY,
     book_id       INTEGER REFERENCES books(id) ON DELETE SET NULL,
-    server_id     TEXT NOT NULL,
     library_id    INTEGER NOT NULL,
     rel_path      TEXT NOT NULL,
     created_at    TEXT NOT NULL,
-    ended_at      TEXT NOT NULL DEFAULT ''
+    ended_at      TEXT NOT NULL DEFAULT '',
+    swept_at      TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX idx_generate_books_book ON generate_books(book_id);
+
+-- The monthly budget, the page and the heartbeat's estimates sum this month's
+-- stage runs by started_at.
+CREATE INDEX idx_stage_runs_started ON stage_runs(started_at);

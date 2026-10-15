@@ -9,7 +9,6 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
-	"syscall"
 
 	"github.com/kodestar/audiosilo-bridge/internal/agent"
 	"github.com/kodestar/audiosilo-bridge/internal/agentproto"
@@ -89,9 +88,9 @@ func harvest(job *os.Root, reqDir string) error {
 // copyOut copies one output file, re-checking it once open: the walk saw a
 // regular file, but the container could have swapped it since.
 func copyOut(src *os.Root, name, dst string) (int64, error) {
-	f, err := openRegular(src, name)
+	f, err := agentproto.OpenRegular(src, name)
 	if err != nil {
-		if errors.Is(err, errNotRegular) {
+		if errors.Is(err, agentproto.ErrNotRegular) {
 			return 0, nil
 		}
 		return 0, err
@@ -117,26 +116,4 @@ func copyOut(src *os.Root, name, dst string) (int64, error) {
 		return n, fmt.Errorf("%s grew over the %d cap", name, maxHarvestFile)
 	}
 	return n, os.Chmod(dst, 0o644) //nolint:gosec // a normal artifact, as agent.Harvest writes them
-}
-
-// errNotRegular marks a name that isn't a regular file once opened.
-var errNotRegular = errors.New("not a regular file")
-
-// openRegular opens name read-only inside root and checks the open file is a
-// regular one. O_NONBLOCK keeps a FIFO from blocking the open.
-func openRegular(root *os.Root, name string) (*os.File, error) {
-	f, err := root.OpenFile(name, os.O_RDONLY|syscall.O_NONBLOCK, 0)
-	if err != nil {
-		return nil, err
-	}
-	info, err := f.Stat()
-	if err != nil {
-		_ = f.Close()
-		return nil, err
-	}
-	if !info.Mode().IsRegular() {
-		_ = f.Close()
-		return nil, fmt.Errorf("%s: %w", name, errNotRegular)
-	}
-	return f, nil
 }

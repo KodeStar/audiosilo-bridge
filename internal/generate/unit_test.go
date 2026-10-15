@@ -166,9 +166,12 @@ func TestWriteAttachments(t *testing.T) {
 	s := sidecars{characters: []byte(`{"work":"w","characters":[]}`), recaps: []byte(`{"work":"w","recaps":[]}`)}
 	prov := provenance("0.2.0", 12, time.Date(2026, 10, 15, 9, 0, 0, 0, time.UTC), SourceAudio, "w",
 		[]InputFile{{Path: "A/B/01.mp3", Size: 3, ModTime: 1700000000}})
-	names, err := writeAttachments(dir, "", s, prov)
-	if err != nil || strings.Join(names, ",") != "characters.json,recaps.json,bridge.json" {
-		t.Fatalf("names = %v, %v", names, err)
+	if err := writeAttachments(dir, "", s, prov); err != nil {
+		t.Fatal(err)
+	}
+	names := attachmentNames("", s)
+	if strings.Join(names, ",") != "characters.json,recaps.json,bridge.json" {
+		t.Fatalf("names = %v", names)
 	}
 	adir := filepath.Join(dir, AttachDir)
 	if info, _ := os.Stat(adir); info.Mode().Perm() != 0o755 {
@@ -193,9 +196,16 @@ func TestWriteAttachments(t *testing.T) {
 
 	// A single-file book's names carry its stem; a recaps-less run writes no recaps.
 	only := sidecars{characters: s.characters}
-	names, err = writeAttachments(dir, "Loose.", only, prov)
-	if err != nil || strings.Join(names, ",") != "Loose.characters.json,Loose.bridge.json" {
-		t.Fatalf("single-file names = %v, %v", names, err)
+	if err := writeAttachments(dir, "Loose.", only, prov); err != nil {
+		t.Fatal(err)
+	}
+	if names := attachmentNames("Loose.", only); strings.Join(names, ",") != "Loose.characters.json,Loose.bridge.json" {
+		t.Fatalf("single-file names = %v", names)
+	}
+	for _, n := range []string{"Loose.characters.json", "Loose.bridge.json"} {
+		if _, err := os.Stat(filepath.Join(adir, n)); err != nil {
+			t.Fatalf("%s wasn't written: %v", n, err)
+		}
 	}
 
 	// Denied: a .audiosilo that is a link (or a file) is never written through.
@@ -204,7 +214,7 @@ func TestWriteAttachments(t *testing.T) {
 	if err := os.Symlink(elsewhere, filepath.Join(linked, AttachDir)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := writeAttachments(linked, "", s, prov); err == nil {
+	if err := writeAttachments(linked, "", s, prov); err == nil {
 		t.Fatal("wrote through a linked .audiosilo")
 	}
 	if entries, _ := os.ReadDir(elsewhere); len(entries) != 0 {
@@ -212,7 +222,7 @@ func TestWriteAttachments(t *testing.T) {
 	}
 	file := t.TempDir()
 	mustWrite(t, filepath.Join(file, AttachDir), "not a folder")
-	if _, err := writeAttachments(file, "", s, prov); err == nil {
+	if err := writeAttachments(file, "", s, prov); err == nil {
 		t.Fatal("wrote into a .audiosilo that is a file")
 	}
 }
@@ -235,52 +245,49 @@ func TestReadSidecars(t *testing.T) {
 	}
 }
 
-func TestPurgeTranscripts(t *testing.T) {
+// A book parked at contributing is looked at every poll: unchanged sidecar files
+// are not read again, changed ones are.
+func TestLoadSidecarsSkipsUnchangedFiles(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
-	wd := filepath.Join(root, "book-1234")
-	for _, f := range []string{
-		"transcripts-raw/ch001.json", "transcripts-json/ch001.json", "transcripts-text/ch001.txt",
-		"transcripts-repaired/ch001.json", "transcripts-corrected/ch001.txt", "chapters/ch001.flac", "_runs/x/in.txt",
-		"spelling_candidates.json", "qa_report.md", "qa_report.json", "corrections.log",
-		"spelling-refs/ch001.txt", "spelling-refs/prior-spellings.json", "spelling-refs/prior-marker_titles.txt",
-		"spelling-refs/series-glossary.txt",
-		"facts/knowledge-final.md", "sidecars/characters.json", "manifest.json", "spellings.json", "corrections.json",
-		"_done/asr.json",
-	} {
-		mustWrite(t, filepath.Join(wd, f), "x")
+	wd := t.TempDir()
+	chars := filepath.Join(wd, "sidecars", "characters.json")
+	mustWrite(t, chars, `{"work":"w","characters":[{"id":"a","name":"A"}]}`)
+	r := &run{}
+	s, err := r.loadSidecars(wd)
+	if err != nil || s.nChars != 1 || r.sideSig == "" {
+		t.Fatalf("first read = %+v, %v (sig %q)", s, err, r.sideSig)
 	}
-	if !hasTranscripts(wd) {
-		t.Fatal("hasTranscripts missed them")
-	}
-	if err := PurgeTranscripts(root, wd, state.KindAudio); err != nil {
+	// Same size and time, different bytes: proof the file wasn't read again.
+	info, _ := os.Stat(chars)
+	mustWrite(t, chars, `{"work":"w","characters":[{"id":"b","name":"B"}]}`)
+	if err := os.Chtimes(chars, info.ModTime(), info.ModTime()); err != nil {
 		t.Fatal(err)
 	}
-	for _, gone := range []string{"transcripts-raw", "transcripts-json", "transcripts-text", "transcripts-repaired",
-		"transcripts-corrected", "chapters", "_runs", "spelling_candidates.json", "qa_report.md", "qa_report.json",
-		"corrections.log", "spelling-refs/ch001.txt"} {
-		if _, err := os.Stat(filepath.Join(wd, gone)); err == nil {
-			t.Errorf("%s survived the purge", gone)
-		}
+	if s2, _ := r.loadSidecars(wd); s2.hash != s.hash {
+		t.Fatal("unchanged files were read again")
 	}
-	for _, kept := range []string{"facts/knowledge-final.md", "sidecars/characters.json", "manifest.json", "spellings.json",
-		"corrections.json", "spelling-refs/prior-spellings.json", "spelling-refs/prior-marker_titles.txt",
-		"spelling-refs/series-glossary.txt", "_done/asr.json"} {
-		if _, err := os.Stat(filepath.Join(wd, kept)); err != nil {
-			t.Errorf("%s was purged: it is carryover or the book's result", kept)
-		}
-	}
-	if hasTranscripts(wd) {
-		t.Fatal("hasTranscripts still finds some")
-	}
-	// Denied: a work dir outside the work root is never touched.
-	outside := t.TempDir()
-	mustWrite(t, filepath.Join(outside, "transcripts-raw", "x"), "x")
-	if err := PurgeTranscripts(root, outside, state.KindAudio); err != nil {
+	later := info.ModTime().Add(time.Second)
+	if err := os.Chtimes(chars, later, later); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(filepath.Join(outside, "transcripts-raw", "x")); err != nil {
-		t.Fatal("a purge reached outside the work root")
+	if s3, _ := r.loadSidecars(wd); s3.hash == s.hash {
+		t.Fatal("a changed file wasn't read again")
+	}
+}
+
+// The epub's path in bridge.json is relative to the mount only when it lies
+// inside it; a name that merely starts with ".." is inside.
+func TestInputsOfEpub(t *testing.T) {
+	t.Parallel()
+	mount := t.TempDir()
+	inside := filepath.Join(mount, "..foo.epub")
+	mustWrite(t, inside, "epub")
+	if in := inputsOf(mount, nil, inside); len(in) != 1 || in[0].Path != "..foo.epub" || in[0].Size != 4 {
+		t.Fatalf("inside = %+v", in)
+	}
+	outside := filepath.Join(t.TempDir(), "B.epub")
+	if in := inputsOf(mount, nil, outside); in[0].Path != "B.epub" {
+		t.Fatalf("outside = %+v, want the bare name", in)
 	}
 }
 
@@ -325,14 +332,67 @@ func TestSweepTranscripts(t *testing.T) {
 		b    store.Book
 		want bool
 	}{{old, false}, {recent, true}, {failed, false}, {parked, true}, {open, true}} {
-		if hasTranscripts(c.b.WorkDir) != c.want {
+		if present(c.b.WorkDir) != c.want {
 			t.Errorf("%s: transcripts present = %v, want %v", c.b.Title, !c.want, c.want)
 		}
 	}
+	// A swept book is never looked at again (swept_at), so the same sweep again
+	// finds nothing.
+	if n, err := h.SweepTranscripts(ctx, 30*24*time.Hour); err != nil || n != 0 {
+		t.Fatalf("a second sweep swept %d, %v", n, err)
+	}
 	// Retention 0: everything ended is due.
-	if n, _ := h.SweepTranscripts(ctx, 0); n != 1 || hasTranscripts(recent.WorkDir) {
+	if n, _ := h.SweepTranscripts(ctx, 0); n != 1 || present(recent.WorkDir) {
 		t.Fatalf("a zero retention swept %d", n)
 	}
+}
+
+// With retention 0, a job's end purges its own book only: another ended job's
+// book waits for the sweep, and a book still working is never purged.
+func TestPurgeEndedIsTheJobsBookOnly(t *testing.T) {
+	t.Parallel()
+	db, err := store.Open(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	ctx := context.Background()
+	root := t.TempDir()
+	h := New(Options{DB: db, WorkRoot: root})
+	mk := func(job int64, name, st string) store.Book {
+		wd := filepath.Join(root, name)
+		mustWrite(t, filepath.Join(wd, "transcripts-raw", "ch001.json"), "x")
+		b, err := db.CreateBook(ctx, store.NewBook{SourcePath: "/lib/" + name, WorkDir: wd, Title: name})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = db.SetBookState(ctx, b.ID, st, "", "", "")
+		_ = db.PutGenerateBook(ctx, store.GenerateBook{ServerJobID: job, BookID: &b.ID, LibraryID: 1, RelPath: name})
+		_ = db.EndGenerateBook(ctx, job, time.Now().Add(-time.Hour))
+		return b
+	}
+	own := mk(1, "own", "done")
+	other := mk(2, "other", "done")
+	working := mk(3, "working", "fact_pass")
+	if err := h.purgeEnded(ctx, own.ID); err != nil || present(own.WorkDir) {
+		t.Fatalf("the job's own book: %v, present %v", err, present(own.WorkDir))
+	}
+	if err := h.purgeEnded(ctx, working.ID); err != nil || !present(working.WorkDir) {
+		t.Fatalf("a working book was purged: %v", err)
+	}
+	if !present(other.WorkDir) {
+		t.Fatal("another job's book was purged at this job's end")
+	}
+	// The own book is recorded swept: the sweep finds only the other one.
+	if n, err := h.SweepTranscripts(ctx, 0); err != nil || n != 1 || present(other.WorkDir) {
+		t.Fatalf("sweep after = %d, %v", n, err)
+	}
+}
+
+// present reports whether a book's raw transcript layer is still on disk.
+func present(workDir string) bool {
+	_, err := os.Stat(filepath.Join(workDir, "transcripts-raw"))
+	return err == nil
 }
 
 func TestEstimateFrom(t *testing.T) {

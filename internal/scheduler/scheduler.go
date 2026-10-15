@@ -1054,11 +1054,8 @@ func (s *Scheduler) autoReadmitDue(ctx context.Context) {
 			slog.Warn("auto-readmit: readmit failed", "book_id", b.ID, "err", err)
 			continue
 		}
-		msg := "auto-retry: agent availability window elapsed"
-		if b.ParkCode == string(state.ParkBudgetExceeded) {
-			msg = "auto-retry: a new month started under the monthly agent budget"
-		}
-		_ = s.hub.PublishBook("stage.note", b.ID, map[string]any{"book_id": b.ID, "stage": b.State, "msg": msg})
+		_ = s.hub.PublishBook("stage.note", b.ID, map[string]any{"book_id": b.ID, "stage": b.State,
+			"msg": "auto-retry: the park's wait elapsed (" + b.ParkCode + ")"})
 	}
 }
 

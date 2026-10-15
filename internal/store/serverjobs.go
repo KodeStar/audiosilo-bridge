@@ -92,12 +92,13 @@ func (db *DB) RecordClaim(ctx context.Context, j ServerJob) error {
 	return err
 }
 
-// SetServerJobPark records the park message of a running job ("" when it runs
-// again), so a start resumes it parked instead of reporting it running first.
-func (db *DB) SetServerJobPark(ctx context.Context, id int64, attempt int, message string) error {
+// SetServerJobReport records a running job's progress and park message ("" when
+// it isn't parked) in one write: the park lives in error, so a start resumes the
+// job parked instead of reporting it running first.
+func (db *DB) SetServerJobReport(ctx context.Context, id int64, attempt int, progress json.RawMessage, parkMsg string) error {
 	_, err := db.sql.ExecContext(ctx,
-		`UPDATE server_jobs SET error = ?, updated_at = ? WHERE id = ? AND attempt = ? AND state = 'running'`,
-		message, timestamp(nowFn()), id, attempt)
+		`UPDATE server_jobs SET progress = ?, error = ?, updated_at = ? WHERE id = ? AND attempt = ? AND state = 'running'`,
+		jsonOr(progress), parkMsg, timestamp(nowFn()), id, attempt)
 	return err
 }
 

@@ -253,7 +253,7 @@ func (hr *harness) handler() *Handler {
 	return New(Options{DB: hr.db, Engine: func() Engine { return hr.sched }, Libraries: hr.libs,
 		Mount:  func(int64, string) (string, bool) { return hr.libs.root, false },
 		Server: func() Server { return hr.cl }, WorkRoot: hr.work, Version: "0.2.0", RetentionDays: 30,
-		Poll: 10 * time.Millisecond, Recheck: time.Hour, Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
+		Poll: 10 * time.Millisecond, IdlePoll: 10 * time.Millisecond, Recheck: time.Hour, Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
 }
 
 // runner runs h's jobs until stopped (the returned func), as the Bridge would.
@@ -433,7 +433,7 @@ func TestGenerateCancel(t *testing.T) {
 	hr.waitFor("cancelled", func() bool { s, _ := hr.srv.final(24); return s == link.StateCancelled })
 	hr.waitFor("the engine book cancelled", func() bool {
 		b := hr.engineBook(24)
-		return b.Status == string(state.StatusFailed) && b.Error == scheduler.CancelledReason
+		return scheduler.IsCancelled(b)
 	})
 }
 

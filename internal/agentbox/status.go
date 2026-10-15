@@ -22,12 +22,10 @@ type Status struct {
 	Version     string // the runner's (the Bridge binary's) version
 	Slots       int
 	HeartbeatAt time.Time
-	CLIs        map[string]CLIStatus
+	// CLIs is runner.json's clis as the runner reported them: each CLI's version
+	// ("" = not installed) and credential kind (agentproto.Credential*, or "").
+	CLIs map[string]agentproto.CLI
 }
-
-// CLIStatus is one CLI in the container: its version ("" = not installed) and the
-// kind of credential it has ("oauth_token", "login", "api_key" or "" for none).
-type CLIStatus struct{ Version, Credential string }
 
 // Subscription reports whether backend runs on a subscription credential (a
 // claude OAuth token or a codex login), which bills no tokens, rather than an
@@ -49,7 +47,7 @@ func (r *Runner) Status() Status {
 		return st
 	}
 	defer func() { _ = root.Close() }()
-	raw, err := readFile(root, agentproto.RunnerFile, agentproto.MaxRunnerBytes)
+	raw, err := agentproto.ReadRegular(root, agentproto.RunnerFile, agentproto.MaxRunnerBytes)
 	if errors.Is(err, fs.ErrNotExist) {
 		st.Detail = "the agent container isn't running (it hasn't written its status into the staging dir; check that both containers mount the same staging volume)"
 		return st
@@ -63,26 +61,22 @@ func (r *Runner) Status() Status {
 		st.Detail = "the agent container's status is unreadable: " + err.Error()
 		return st
 	}
-	st.Version, st.Slots, st.HeartbeatAt = rj.Version, rj.Slots, rj.HeartbeatAt
-	st.CLIs = make(map[string]CLIStatus, len(rj.CLIs))
-	for name, c := range rj.CLIs {
-		st.CLIs[name] = CLIStatus{Version: c.Version, Credential: c.Credential}
-	}
+	st.Version, st.Slots, st.HeartbeatAt, st.CLIs = rj.Version, rj.Slots, rj.HeartbeatAt, rj.CLIs
 	st.Detail = r.unavailableBecause(rj)
 	st.Available = st.Detail == ""
 	return st
 }
 
-// unavailableBecause is why runs can't go to the container now, or "".
+// unavailableBecause is why runs can't go to the container now, or "". Each
+// reason reads on its own: it is the page's status line and a parked book's
+// reason. The backend is always claude or codex (the app maps the config onto
+// one of them).
 func (r *Runner) unavailableBecause(rj agentproto.Runner) string {
 	if rj.Protocol != agentproto.Protocol {
 		return fmt.Sprintf("the agent container speaks protocol %d and this Bridge %d: run the same version of both images", rj.Protocol, agentproto.Protocol)
 	}
-	if age := r.now().Sub(rj.HeartbeatAt); age > statusFreshFor {
+	if age := r.now().Sub(rj.HeartbeatAt); age > agentproto.RunnerFreshFor {
 		return fmt.Sprintf("the agent container isn't running (its last heartbeat was %s ago)", age.Round(time.Second))
-	}
-	if r.backend != agent.IDClaude && r.backend != agent.IDCodex {
-		return fmt.Sprintf("unknown agent backend %q (want claude or codex)", r.backend)
 	}
 	c := rj.CLIs[r.backend]
 	if c.Version == "" {

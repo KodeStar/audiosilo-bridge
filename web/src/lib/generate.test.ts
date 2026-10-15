@@ -8,7 +8,6 @@ import {
   parseGenerateResult,
   resultSummary,
   sourceText,
-  stageLabel,
   usd,
 } from './generate';
 import { generateJobFixture, jobFixture } from '@/test/fixtures';
@@ -49,10 +48,7 @@ describe('parks', () => {
 });
 
 describe('wording', () => {
-  it('words stages, ETAs, money and sources', () => {
-    expect(stageLabel('asr')).toBe('Transcribing');
-    expect(stageLabel('something_new')).toBe('something_new');
-    expect(stageLabel(undefined)).toBe('');
+  it('words ETAs, money and sources', () => {
     expect(etaText(30)).toBe('under a minute');
     expect(etaText(25 * 60)).toBe('about 25 min');
     expect(etaText(3 * 3600)).toBe('about 3 h');

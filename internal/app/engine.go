@@ -34,14 +34,6 @@ import (
 // in the background once the Bridge runs (the first start may download ffmpeg),
 // and the sidecars.generate job waits for it.
 
-// agentRetry is when a book parked on an agent container that wasn't ready is
-// tried again by itself (the container is usually just restarting).
-const agentRetry = 10 * time.Minute
-
-// agentUnavailableMsg is that park's message.
-const agentUnavailableMsg = "the agent container isn't ready - check it is running and its CLI is logged in " +
-	"(the Bridge's page shows it); the book tries again by itself"
-
 // eventRetention is how long the durable event log is kept.
 const eventRetention = 30 * 24 * time.Hour
 
@@ -123,7 +115,6 @@ func (b *Bridge) runEngine(ctx context.Context) {
 		ASR:       pipeline.ASRSetup{Backend: asrBackend, Cap: asrCap, Model: asrModel, Language: cfg.ASR.Language},
 		ASRSelect: asrSelect,
 		Agent:     box, AgentAvail: box.Detect(ctx), AgentRedetect: redetect,
-		AgentPreflightRetry: agentRetry, AgentUnavailableMsg: agentUnavailableMsg,
 		AgentModels:      pipeline.AgentModels{Claude: cfg.Agent.Claude, OpenAI: cfg.Agent.OpenAI},
 		AgentTimeout:     time.Duration(cfg.Agent.TimeoutMinutes) * time.Minute,
 		AgentConcurrency: slots, MaxAgentsPerBook: slots,
@@ -136,12 +127,9 @@ func (b *Bridge) runEngine(ctx context.Context) {
 	})
 	sched := scheduler.New(b.db, hub, exec, slots, workRoot, cfg.Contribution.AutoPurge)
 
-	// The supervisor's deterministic lane only: a model-assisted lane would run an
-	// agent CLI here, which the Bridge never does (decision 15), and so would a
-	// backend failover.
-	supCfg := cfg.Supervisor
-	supCfg.ModelAssisted, supCfg.ModelAutomaticActions, supCfg.AllowBackendFailover = false, false, false
-	sup := supervisor.New(b.db, supCfg, cfg.Pricing, nil, supervisor.Hooks{
+	// The supervisor's deterministic lane only: config normalization keeps the
+	// model-assisted lane and the backend failover off (decision 15).
+	sup := supervisor.New(b.db, cfg.Supervisor, cfg.Pricing, nil, supervisor.Hooks{
 		Runtime: func(books []store.Book) supervisor.Runtime {
 			r := sched.SupervisorRuntime(books)
 			return supervisor.Runtime{ActiveBooks: r.ActiveBooks, AgentActive: r.AgentActive, AgentCapacity: r.AgentCapacity,
@@ -293,7 +281,22 @@ func newAgentBox(cfg config.Config, dataDir string, log *slog.Logger) *agentbox.
 		ClaimTimeout: time.Duration(cfg.Agent.ClaimTimeoutSeconds) * time.Second, Log: log})
 }
 
-// estimates are the heartbeat's figures (nil until the engine has started).
+// estimatesEvery is how often the heartbeat's estimates are computed again: they
+// read every finished book and this month's stage runs, and only move when a book
+// finishes (which recomputes them at once) or an agent run is paid for.
+const estimatesEvery = 5 * time.Minute
+
+// estimatesCache is the last computed estimates, when, and how many jobs the
+// generate handler had finished then.
+type estimatesCache struct {
+	mu   sync.Mutex
+	e    *link.SidecarEstimates
+	at   time.Time
+	done int64
+}
+
+// estimates are the heartbeat's figures (nil until the engine has started):
+// the cached figures, with the agent container's state and the budget read now.
 func (b *Bridge) estimates(ctx context.Context) *link.Estimates {
 	if b.engine.get() == nil {
 		return nil
@@ -301,13 +304,24 @@ func (b *Bridge) estimates(ctx context.Context) *link.Estimates {
 	cfg := b.config()
 	st := b.box.Status()
 	backend := b.box.ID()
-	e, err := generate.Estimates(ctx, b.db, generate.AgentState{Backend: backend, Ready: st.Available,
-		Subscription: st.Subscription(backend)}, cfg.Agent.MonthlyBudgetUSD, time.Now())
-	if err != nil {
-		if ctx.Err() == nil {
+	agentState := generate.AgentState{Backend: backend, Ready: st.Available, Subscription: st.Subscription(backend)}
+	c := &b.est
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if done := b.gen.Finished(); c.e == nil || time.Since(c.at) >= estimatesEvery || done != c.done {
+		e, err := generate.Estimates(ctx, b.db, agentState, cfg.Agent.MonthlyBudgetUSD, time.Now())
+		switch {
+		case err == nil:
+			c.e, c.at, c.done = e, time.Now(), done
+		case ctx.Err() == nil:
 			b.log.Warn("bridge: computing the estimates failed", "err", err)
 		}
-		return nil
+		if c.e == nil {
+			return nil
+		}
 	}
-	return &link.Estimates{Sidecars: e}
+	e := *c.e
+	e.AgentBackend, e.AgentReady, e.Subscription = agentState.Backend, agentState.Ready, agentState.Subscription
+	e.MonthlyBudgetUSD = cfg.Agent.MonthlyBudgetUSD
+	return &link.Estimates{Sidecars: &e}
 }

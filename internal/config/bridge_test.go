@@ -242,3 +242,24 @@ func TestAgentContainerSaveKeepsTheEnvironmentOut(t *testing.T) {
 		t.Fatalf("the file:\n%s", raw)
 	}
 }
+
+// Decision 15: no model-assisted supervisor and no backend failover on the
+// Bridge, whatever config.yaml or the environment asks for.
+func TestSupervisorModelsAreAlwaysOff(t *testing.T) {
+	dir := t.TempDir()
+	body := "supervisor:\n  model_assisted: true\n  model_automatic_actions: true\n  allow_backend_failover: true\n  fallback_backend: codex\n"
+	if err := os.WriteFile(filepath.Join(dir, FileName), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AUDIOSILO_BRIDGE_SUPERVISOR_MODEL_ASSISTED", "true")
+	cfg, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s := cfg.Supervisor; s.ModelAssisted || s.ModelAutomaticActions || s.AllowBackendFailover {
+		t.Fatalf("supervisor = %+v, want the model lanes and failover off", s)
+	}
+	if !cfg.Supervisor.Enabled || !cfg.Supervisor.AutomaticActions {
+		t.Fatalf("the deterministic supervisor went off too: %+v", cfg.Supervisor)
+	}
+}

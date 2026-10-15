@@ -132,20 +132,21 @@ func TestServerJobServerAndPark(t *testing.T) {
 	if err := db.RecordClaim(ctx, ServerJob{ID: 5, Kind: "sidecars.generate", Attempt: 1, ServerID: "srv-a"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.SetServerJobPark(ctx, 5, 1, "the agent container isn't answering"); err != nil {
+	if err := db.SetServerJobReport(ctx, 5, 1, json.RawMessage(`{"step":"waiting"}`), "the agent container isn't answering"); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := db.GetServerJob(ctx, 5)
-	if got.ServerID != "srv-a" || got.State != JobRunning || got.Error != "the agent container isn't answering" {
+	if got.ServerID != "srv-a" || got.State != JobRunning || got.Error != "the agent container isn't answering" ||
+		string(got.Progress) != `{"step":"waiting"}` {
 		t.Fatalf("parked = %+v", got)
 	}
-	if err := db.SetServerJobPark(ctx, 5, 1, ""); err != nil {
+	if err := db.SetServerJobReport(ctx, 5, 1, nil, ""); err != nil {
 		t.Fatal(err)
 	}
 	if got, _ := db.GetServerJob(ctx, 5); got.Error != "" {
 		t.Fatalf("unparked = %+v", got)
 	}
-	_ = db.SetServerJobPark(ctx, 5, 1, "parked again")
+	_ = db.SetServerJobReport(ctx, 5, 1, nil, "parked again")
 	if err := db.RecordClaim(ctx, ServerJob{ID: 5, Kind: "sidecars.generate", Attempt: 2, ServerID: "srv-b"}); err != nil {
 		t.Fatal(err)
 	}
@@ -154,7 +155,7 @@ func TestServerJobServerAndPark(t *testing.T) {
 	}
 	// A finished job's park message can't be written over its error.
 	_ = db.FinishServerJob(ctx, 5, 2, JobFailed, nil, "boom")
-	_ = db.SetServerJobPark(ctx, 5, 2, "late park")
+	_ = db.SetServerJobReport(ctx, 5, 2, nil, "late park")
 	if got, _ := db.GetServerJob(ctx, 5); got.Error != "boom" {
 		t.Fatalf("a finished job's error = %q", got.Error)
 	}

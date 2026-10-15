@@ -84,7 +84,7 @@ func (e *Executor) checkMonthlyBudget(ctx context.Context, stage state.State, no
 	if e.db == nil || e.monthlyBudgetUSD <= 0 {
 		return nil
 	}
-	start, next := monthBounds(now)
+	start, next := MonthBounds(now)
 	spent, err := e.db.SumBudgetCostSince(ctx, start)
 	if err != nil {
 		return fmt.Errorf("%s: read this month's cost: %w", stage, err)
@@ -95,8 +95,9 @@ func (e *Executor) checkMonthlyBudget(ctx context.Context, stage state.State, no
 	return scheduler.ParkWithCodeAfter(state.ParkBudgetExceeded, monthlyBudgetExceededMsg(spent, e.monthlyBudgetUSD, next), next)
 }
 
-// monthBounds returns the start of now's calendar month and of the next one, UTC.
-func monthBounds(now time.Time) (start, next time.Time) {
+// MonthBounds returns the start of now's calendar month and of the next one, UTC:
+// the monthly budget's month, which the Bridge's estimates and page count too.
+func MonthBounds(now time.Time) (start, next time.Time) {
 	u := now.UTC()
 	start = time.Date(u.Year(), u.Month(), 1, 0, 0, 0, 0, time.UTC)
 	return start, start.AddDate(0, 1, 0)
@@ -144,16 +145,15 @@ func rateLimitRetryAt(rl *agent.RateLimitError, now time.Time) time.Time {
 // after ~2 rounds). Built from maxQARounds so the message can never drift from the cap.
 var QANoConvergeMsg = fmt.Sprintf("QA adjudication did not converge after %d rounds - see qa_report.md", maxQARounds)
 
-// preflightUnavailableMsg is the preflight park's message: the embedder's own
-// (with the runner's detail) when it gave one.
-func (e *Executor) preflightUnavailableMsg(av agent.Availability) string {
-	if e.agentUnavailableMsg == "" {
+// agentUnavailableReason is an agent_unavailable park's reason: the runner's own
+// detail when it gave one (the Bridge's agent container says what is wrong with
+// it, a refused credential carries the provider's words), else the generic
+// advice to install or configure a CLI.
+func agentUnavailableReason(detail string) string {
+	if detail = strings.TrimSpace(detail); detail == "" {
 		return AgentUnavailableMsg
 	}
-	if av.Detail != "" {
-		return e.agentUnavailableMsg + " (" + av.Detail + ")"
-	}
-	return e.agentUnavailableMsg
+	return "agent backend unavailable: " + detail
 }
 
 // ensureAgent re-selects an agent runner when the frozen one is unavailable, adopting
@@ -438,11 +438,11 @@ func (e *Executor) runAgent(ctx context.Context, book store.Book, stage state.St
 		// forever. The operator installs/configures a CLI and clicks Retry. (The transient
 		// case - a CLI that existed and vanished mid-run - is the POST-invocation
 		// NotAvailableError branch below, which does schedule a short auto-readmit.)
-		// The Bridge's agent container is the exception: down now usually means
-		// restarting, so its embedder asks for a timed self-resume.
-		if e.agentPreflightRetry > 0 {
-			return agentUsage{}, scheduler.ParkWithCodeAfter(state.ParkAgentUnavailable, e.preflightUnavailableMsg(av),
-				time.Now().Add(e.agentPreflightRetry))
+		// A runner that describes itself as coming back by itself (the Bridge's agent
+		// container, usually just restarting) is the exception: a timed self-resume.
+		if av.RetryAfter > 0 {
+			return agentUsage{}, scheduler.ParkWithCodeAfter(state.ParkAgentUnavailable, agentUnavailableReason(av.Detail),
+				time.Now().Add(av.RetryAfter))
 		}
 		return agentUsage{}, scheduler.ParkWithCode(state.ParkAgentUnavailable, AgentUnavailableMsg)
 	}
@@ -529,7 +529,7 @@ func (e *Executor) runAgent(ctx context.Context, book store.Book, stage state.St
 		if errors.As(err, &na) {
 			// Reached only after the agent package rode out the transient LookPath blip, so a
 			// short auto-readmit window lets a CLI that finished (re)installing self-resume.
-			return total, scheduler.ParkWithCodeAfter(state.ParkAgentUnavailable, AgentUnavailableMsg,
+			return total, scheduler.ParkWithCodeAfter(state.ParkAgentUnavailable, agentUnavailableReason(na.Detail),
 				time.Now().Add(notAvailableReadmitDelay))
 		}
 		var ve *validationError

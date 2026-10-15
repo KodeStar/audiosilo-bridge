@@ -8,9 +8,6 @@ import (
 	"syscall"
 )
 
-// noFollow makes an open refuse a symlink in the last component.
-const noFollow = syscall.O_NOFOLLOW
-
 // supported reports whether the runner can run here (it needs process groups).
 const supported = true
 

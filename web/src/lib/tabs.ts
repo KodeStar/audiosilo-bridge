@@ -29,12 +29,6 @@ export function routeFromHash(hash: string): Route {
   return { tab, jobId };
 }
 
-// tabFromHash reads a tab from a location hash ("#jobs"); unknown or empty is
-// the default tab.
-export function tabFromHash(hash: string): TabId {
-  return routeFromHash(hash).tab;
-}
-
 // jobHash is the hash of one job's detail.
 export function jobHash(id: number): string {
   return `#/jobs/${id}`;

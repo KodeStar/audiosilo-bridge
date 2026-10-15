@@ -5,7 +5,6 @@ import (
 	"crypto/tls"
 	"errors"
 	"log/slog"
-	"math"
 	"net/http"
 	"net/url"
 	"path/filepath"
@@ -17,6 +16,7 @@ import (
 	"github.com/kodestar/audiosilo-bridge/internal/generate"
 	"github.com/kodestar/audiosilo-bridge/internal/link"
 	"github.com/kodestar/audiosilo-bridge/internal/logring"
+	"github.com/kodestar/audiosilo-bridge/internal/pipeline"
 	"github.com/kodestar/audiosilo-bridge/internal/store"
 )
 
@@ -249,8 +249,9 @@ func (b *Bridge) Engine(ctx context.Context) api.Engine {
 	for name, c := range st.CLIs {
 		out.Agent.CLIs[name] = api.EngineCLI{Version: c.Version, Credential: c.Credential}
 	}
-	if spent, err := b.db.SumBudgetCostSince(ctx, generate.MonthStart(time.Now())); err == nil {
-		out.MonthSpentUSD = math.Round(spent*100) / 100
+	start, _ := pipeline.MonthBounds(time.Now())
+	if spent, err := b.db.SumBudgetCostSince(ctx, start); err == nil {
+		out.MonthSpentUSD = generate.Cents(spent)
 	}
 	if e := b.engine.get(); e != nil {
 		out.Started = true

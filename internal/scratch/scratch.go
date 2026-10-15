@@ -11,17 +11,22 @@
 package scratch
 
 import (
+	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 
 	"github.com/kodestar/audiosilo-bridge/internal/agent"
 	"github.com/kodestar/audiosilo-bridge/internal/audio"
 	"github.com/kodestar/audiosilo-bridge/internal/ebook"
 	"github.com/kodestar/audiosilo-bridge/internal/fsutil"
+	"github.com/kodestar/audiosilo-bridge/internal/qa"
 	"github.com/kodestar/audiosilo-bridge/internal/repair"
+	"github.com/kodestar/audiosilo-bridge/internal/spelling"
 	"github.com/kodestar/audiosilo-bridge/internal/state"
+	"github.com/kodestar/audiosilo-bridge/internal/transcript"
 )
 
 // DirSize returns the total size in bytes of the regular files under path
@@ -221,4 +226,67 @@ func Purge(workRoot, workDir string, kind state.Kind) error {
 		return ebook.StripHeads(wd)
 	}
 	return nil
+}
+
+// The transcript tier (the Bridge's transcript retention, decision 5): what holds
+// a book's transcript text beyond the reclaimable scratch. A finished book keeps
+// its work dir, because series carryover reads a predecessor's knowledge files,
+// but this tier goes once the retention window passes.
+
+// transcriptDirs hold the transcript text, every layer of it. (Purge keeps an
+// audio book's transcripts-corrected/ as a durable; this tier is where it goes.)
+var transcriptDirs = []string{
+	transcript.RawDir, transcript.JSONDir, transcript.TextDir, transcript.RepairedDir, spelling.CorrectedDir,
+}
+
+// transcriptFiles quote the transcript at the work dir's root: the spelling
+// candidates' snippets, the reference matches, the QA reports' looped phrases,
+// and the correction and repair logs.
+var transcriptFiles = []string{
+	spelling.CandidatesFile, spelling.ReferenceMatchesFile, qa.ReportJSONName, qa.ReportMDName,
+	spelling.CorrectionsLogFile, repair.RepairsLogName,
+}
+
+// carriedTranscript reports whether a file under spelling.RefsDir is a copy of
+// the predecessor's corrected transcript (its *.txt chapters), not one of the
+// carried ledger, rules and marker titles or the series glossary, which are kept.
+func carriedTranscript(name string) bool {
+	return strings.HasSuffix(name, ".txt") && !strings.HasPrefix(name, spelling.PriorPrefix) &&
+		name != spelling.SeriesGlossaryFile
+}
+
+// PurgeTranscripts deletes a book's transcript text from its work dir: the
+// reclaimable scratch (Purge, the ebook's text included), every transcripts-*
+// layer, the predecessor transcript copies under spelling-refs/ and the root files
+// that quote it. It keeps the facts (knowledge-final.md, which a sequel's fact
+// pass inherits), the spelling ledger and rules, the manifest and the sidecars.
+// Confined to workRoot; a missing work dir is nothing to do.
+func PurgeTranscripts(workRoot, workDir string, kind state.Kind) error {
+	wd, ok := Confined(workRoot, workDir)
+	if !ok {
+		return nil
+	}
+	if err := Purge(workRoot, workDir, kind); err != nil {
+		return err
+	}
+	var errs []error
+	for _, d := range transcriptDirs {
+		errs = append(errs, os.RemoveAll(filepath.Join(wd, d)))
+	}
+	for _, f := range transcriptFiles {
+		if err := os.Remove(filepath.Join(wd, f)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			errs = append(errs, err)
+		}
+	}
+	refs := filepath.Join(wd, spelling.RefsDir)
+	entries, err := os.ReadDir(refs)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		errs = append(errs, err)
+	}
+	for _, e := range entries {
+		if !e.IsDir() && carriedTranscript(e.Name()) {
+			errs = append(errs, os.Remove(filepath.Join(refs, e.Name())))
+		}
+	}
+	return errors.Join(errs...)
 }
