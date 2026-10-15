@@ -1,30 +1,47 @@
-# PACKAGES.md - AudioSilo Sidecars per-package internals
+# PACKAGES.md - AudioSilo Bridge per-package internals
 
 The full annotated package map: per-package invariants, incident history, and
-load-bearing rules, moved verbatim from CLAUDE.md's "Package layout" section so
-the always-loaded guide stays lean. **Read the entry for any package you touch
-before changing it.** CLAUDE.md keeps the compact tree and the dependency
-direction; this file is the detail.
+load-bearing rules. **Read the entry for any package you touch before changing
+it.** CLAUDE.md keeps the compact tree and the dependency direction; this file is
+the detail.
+
+The engine packages (toolfetch through supervisor, metaops, events) came from
+audiosilo-sidecars with their history (`git log --follow` reaches it), and their
+entries keep sidecars' milestone names (M1-M9) and incident history: "the daemon"
+there is the Bridge now, and the folder scan, its overrides and the library
+sightings they mention were not carried over (the server's index is the library).
+The shell (link, mapping, jobs, verify, app, api, logring, web, cmd) is new.
 
 
 ```
-cmd/audiosilo-sidecars/   entrypoint: `serve` (default) + `version`; flags --data, --listen
-cmd/audiosilo-bench/      private corpus preparation, isolated model-matrix runs,
-                          aggregate reports, and snapshot-only historical telemetry
+cmd/audiosilo-bridge/     entrypoint: `serve` (default) + `version`; flags --data ($AUDIOSILO_BRIDGE_DATA,
+                          else ~/.audiosilo-bridge), --listen; prints the page's one-time password
+                          once on the first start (never logged)
 internal/
-  config/   config.yaml in <data>/ + AUDIOSILO_SIDECARS_* env overrides; Load/Save/Validate.
-            M1 added library_roots (scan allow-list), metadata.base_url;
-            agent.queue_concurrency controls agent-lane books and
+  config/   config.yaml in <data>/ + AUDIOSILO_BRIDGE_* env overrides; Load/Save/Validate.
+            The Bridge's own settings are bridge.go: server.url, public_url (the page
+            as the LAN reaches it, sent as the heartbeat's ui_url), libraries (library
+            id -> the folder the Bridge sees it at; MountFor falls back to the
+            server's own root path, so a compose stack mounting the libraries at the
+            same path needs none) and mapping.check_minutes (default 10: a check
+            stats files and writes a probe, so not every 30 s heartbeat, which would
+            keep Unraid array disks awake). AUDIOSILO_BRIDGE_LIBRARIES is
+            "<id>=<path>;..." (a path may hold a comma). A value the environment sets
+            is recorded (EnvSet) and locked on the page; SaveFile edits config.yaml's
+            OWN values (loaded without the environment), so a save never writes an
+            env value into the file. A malformed env value fails the start rather
+            than being ignored. The engine's settings below are restart-to-apply.
+            Engine history: metadata.base_url; agent.queue_concurrency controls
+            agent-lane books and
             agent.max_agents_per_book controls safe within-book fan-out; legacy
             agent.concurrency retains its historical global cap. M2 added tools.
             {ffmpeg_path,ffprobe_path,auto_download} - the SINGLE source of truth for
-            tool paths (the ffprobe knob lives under tools.*; the folder scan uses
-            the resolved path). M3a made asr.* live: backend
-            (auto|mlx-whisper|whisper-cpp), model, language, whisper_cli_path. There
-            is no asr.device knob (no backend honors an override yet; /system reports
-            the DETECTED device). Changing asr.backend or the tool paths takes effect
-            only on a daemon RESTART (the backend is resolved once at startup, unlike
-            cors_origins, which the API re-reads live per request). M5 made agent.*
+            tool paths. M3a made asr.* live: backend
+            (auto|mlx-whisper|whisper-cpp), model, language, whisper_cli_path (the
+            full and cuda images set it to their baked /opt/whisper/whisper-cli). There
+            is no asr.device knob (no backend honors an override yet). Changing
+            asr.backend or the tool paths takes effect only on a RESTART (the backend
+            is resolved once at startup). M5 made agent.*
             LIVE: backend (""|claude|codex), capacity, claude_path/codex_path,
             timeout_minutes, and the per-stage claude/openai model maps (keys are agent
             stage names). Validate rejects an unknown backend, an unknown model-map key,
@@ -36,7 +53,7 @@ internal/
             explicit core_repo wins), mode `pr` -> issue. The reliability round added
             agent.book_budget_usd (default 75; 0 in yaml normalizes to the default, so
             set a very large value to effectively disable; Validate rejects negative;
-            env AUDIOSILO_SIDECARS_AGENT_BOOK_BUDGET_USD; restart-to-apply like the
+            env AUDIOSILO_BRIDGE_AGENT_BOOK_BUDGET_USD; restart-to-apply like the
             rest of agent.*) - the per-book agent-spend cap runAgent enforces.
   toolfetch/ fetches the three external artifact families, all gated by
             tools.auto_download and confined to <data>/tools: ffmpeg/ffprobe static
@@ -566,44 +583,40 @@ internal/
             opaque SHA-256-hashed session tokens, a per-IP login rate limiter; the
             Store interface is storage-agnostic (MemStore for tests; the SQLite
             store.AuthStore in production - the M0 JSON store was removed in M1)
-  secrets/  named secrets (anthropic/openai keys, github PAT) in the OS keychain
-            (go-keyring) with a 0600 secrets.json fallback; read API is presence-only
-  store/    SQLite (modernc, pure Go; single writer + WAL) + append-only migrations:
-            books, stage_runs, progress, events (durable log, 30-day prune), rates
-            (per-stage EWMA unit rates - LIVE since M6), settings KV, sessions. M5's
-            migration 0004 added stage_runs.{model,input_tokens,output_tokens,cost_usd} +
-            AddOpenStageRunUsage (accumulates per agent invocation onto the open run) so
-            per-stage cost rides on the book view. M6's 0005 added books.{chapters,
-            park_code}; the park_code invariant (non-empty iff status is
-            needs_attention) is enforced INSIDE SetBookState/SetBookStatus, not by
-            caller discipline. M7's 0006 added the contributions table (one row per
-            (book_id, kind characters|recaps|core); UNIQUE index makes
-            UpsertContribution the crash-resume idempotency guard; status submitted|
-            pr_open|merged|closed|local|already_covered) + books.narrators (JSON
-            array like authors, feeds the core add-work proposal);
-            ContributionSummary folds rows into the one aggregate chip status.
-            Plain tested CRUD; AuthStore adapts it to auth.Store.
-            Holds the SCHEDULING truth. The reliability round's 0008 added
-            books.retry_at (RFC3339, '' = none; cleared with status, enforced like
-            park_code) + stage_runs.superseded - Retry/readmit now SUPERSEDES success
-            rows instead of deleting them, splitting the readers: SCHEDULING readers
-            (CountStageSuccesses, SucceededStages*) filter superseded=0, MONEY readers
-            (SumStageRunCost, StageRunTotals, ListStageRuns) include everything, so
-            round counters reset on Retry but spend history survives. The Library
-            New-view round's 0012 added library_sightings (source_path PRIMARY KEY,
-            first_seen_at, last_seen_at, acknowledged_at, baseline) - path-keyed
-            like candidate_overrides with no FK to the book index, so a sighting
-            survives an enqueue, a delete and a rescan. RecordSightings is
-            insert-or-bump: a known path keeps its first_seen_at AND its baseline
-            flag (a rescan must never reset when a folder appeared, nor promote a
-            pre-existing book into the New view) and only bumps last_seen_at;
-            AcknowledgeSightings ignores unknown paths, and HasSightings answers
-            the baseline question ("is this the first batch?") without reading the
-            table - that pair IS metaops.SightingRecorder, which the DB satisfies
-            directly (no adapter). Its timestamps are plain
-            RFC3339 seconds (SightingLayout), NOT the store's fixed-width
-            nanosecond layout, because first_seen_at is served verbatim on the
-            wire; all three columns share it, so compares stay chronological.
+  secrets/  named secrets (the server token, anthropic/openai keys, github PAT) as
+            AES-256-GCM sealed files in <data>/secrets (0600, the manager BlobStore's
+            format, each bound to its name as additional data so a file renamed onto
+            another name doesn't open), keyed by ONE master key:
+            AUDIOSILO_BRIDGE_SECRET_KEY (32 bytes, hex or base64; lets the key live
+            outside the data volume) else <data>/secret.key (created 0600, O_EXCL, on
+            the first start). A changed key is ErrWrongKey, which the start reports
+            in words. No OS keychain: the Bridge runs headless in a container.
+            Names are ^[a-z][a-z0-9_]{0,63}$ (a name is a file name); the read API
+            is presence-only.
+  store/    SQLite (modernc, pure Go; single writer + WAL) + append-only migrations,
+            bridge.db. 0001 is sidecars' 13 migrations squashed at the import (the
+            later columns folded into their tables; candidate_overrides and
+            library_sightings dropped; the 'legacy' batch row still seeded): books,
+            stage_runs, progress, events (durable log, 30-day prune), rates
+            (per-stage EWMA unit rates), settings KV, sessions, contributions,
+            batches, supervisor_runs, agent_invocations. The park_code invariant
+            (non-empty iff status is needs_attention) is enforced INSIDE
+            SetBookState/SetBookStatus, not by caller discipline; contributions'
+            UNIQUE (book_id, kind) makes UpsertContribution the crash-resume
+            idempotency guard; books.retry_at is cleared with status like park_code;
+            a Retry SUPERSEDES stage_runs success rows instead of deleting them, so
+            SCHEDULING readers (CountStageSuccesses, SucceededStages*) filter
+            superseded=0 while MONEY readers (SumStageRunCost, StageRunTotals,
+            ListStageRuns) include everything. Plain tested CRUD; AuthStore adapts it
+            to auth.Store. Holds the SCHEDULING truth.
+            0002 adds server_jobs (serverjobs.go): the server jobs this Bridge
+            claimed, keyed by the SERVER's job id, with attempt, state (running |
+            done | failed | needs_attention | cancelled | lost), progress, result,
+            error and reported. RecordClaim on a later attempt replaces the row;
+            OpenServerJobs (running, or finished and not reported) is what a start
+            picks up; a lost job needs no report (FinishServerJob marks it
+            reported). The pairing lives in settings (pairing.*; the token is a
+            secret).
   state/    per-book pipeline state machine: table-driven states/lanes/transitions,
             CanStart/NextState guards, the audit fix-loop cap. Pure, no I/O. M6 added
             ParkCode (typed park reasons - M7 added contrib_unavailable, core_needed,
@@ -730,8 +743,8 @@ internal/
             orphan. The occupancy/invocation/progress figures themselves stay as of
             the prologue by design; they are what the sample timestamp qualifies.
   metaops/  meta.audiosilo.app client (coverage/lookup, capped 1h TTL caches,
-            graceful degrade) + async folder-scan job manager over audiosilo-meta
-            pkg/scan + the library_roots PathAllowed check. glossary.go adds
+            graceful degrade) + the PathAllowed/AllowedPath containment checks
+            (Phase 1a passes the mapped mounts as the roots). glossary.go adds
             SeriesGlossary (work -> its series -> the OTHER volumes' contributed
             character names/aliases, <= 12 siblings, own TTL caches), the canonical
             spelling evidence the spelling stage checks a transcript against; it
@@ -781,130 +794,113 @@ internal/
             gate accepts author<->author, query-author<->card-narrator and
             query-narrator<->card-author in ONE Best call (a shelf routinely credits
             the narrator as the author). Coverage.ApplyContributed is
-            the read-time repair of a FROZEN verdict: it is resolved once per scan
-            and cached, so a work this daemon has since contributed kept reporting
-            "needed" - GET /scans folds the contributions table through
-            store.LandedCoverage (merged/already_covered only) and patches a KNOWN
-            verdict additively, and ONLY when the book's work_id agrees with the
-            verdict's (contributions made under another work - a core-flow slug, a
-            later manual match - must not stamp this work's badges); the book view
-            applies the same patch so the two endpoints cannot disagree. Scans STREAM:
-            the manager drives pkg/scan's OnProgress/OnBook hooks, books appear
-            incrementally (identity provisional until done - the corroborated,
-            sorted final list replaces the array), coverage resolves in a bounded
-            pool gated by precomputed identity fingerprints (a stale worker can
-            never clobber a fresh verdict), and List() serves job summaries
-            (running + last 10 finished) so a reloaded UI reattaches. The newest
-            successful result is atomically cached under the daemon data dir and
-            restored after restart (explicit stale-until-rescanned snapshot;
-            failed/incomplete scans never replace it). GET /scans dynamically
-            joins each candidate's canonical source_path to the store's lightweight
-            BookTracking projection, so cached results always identify active/done
-            pipeline books without baking volatile queue state into the scan cache.
-            Persisted
-            candidate_overrides (hide / manual work match, keyed by the CANONICAL
-            absolute source_path - scan roots and override paths are resolved via
-            the same helper) are applied at scan time and reflected live on
-            completed jobs via read-time patches; OverrideService owns the
-            validate -> resolve -> persist -> reflect workflow (store injected as
-            a PersistFunc, so metaops still never imports store). A patch's
-            HIDDEN flag is authoritative, but its COVERAGE is only the verdict as
-            of the match, so both it and every resolved verdict carry a monotonic
-            generation and snapshotLocked applies the NEWEST - a match reflects
-            instantly, and this job's (and every later scan's) resolution
-            supersedes it. Upstream gains sidecars over time, so an
-            unconditional patch froze a manual match's verdict forever: works
-            whose characters/recaps had since merged kept reporting "needed",
-            their badges never went green, and "exclude already covered" never
-            dropped them - through rescans AND restarts, since restoreCache
-            re-seeds the patch from the cached snapshot. LIBRARY SIGHTINGS back
-            the Library tab's New view: a completed scan records every candidate
-            source_path through an INJECTED SightingRecorder (WithSightings). That
-            interface is write-plus-one-question (RecordSightings + HasSightings),
-            nothing store-shaped crosses it, so *store.DB satisfies it DIRECTLY -
-            no adapter, and metaops still never imports store. The recording runs
-            BEFORE the job reports done: a client stops polling at done, so its
-            last poll must already see the flags. NOTHING sighting-shaped rides the
-            job snapshot or the cache - first_seen_at and is_new are attached by
-            the API on every read. The BASELINE rule is the upgrade guard: the
-            first batch ever recorded is stored as baseline (never new), seeded at
-            startup from the restored scan cache (stamped with the cached job's
-            started_at) and otherwise by the first completed scan - without it an
-            upgrade would report the user's entire library as new. is_new itself is
-            NOT stored: ComputeIsNew(book, baseline, acknowledged) is a read-time
-            predicate (not baseline, not acknowledged, no pipeline_book, not
-            hidden) because three of those four change without a rescan; the API
-            calls it only for a path that HAS a sighting row, since a path with
-            none is never new. Deps: stdlib
+            the read-time repair of a FROZEN verdict: it patches a KNOWN verdict
+            additively with what this Bridge has since contributed, and ONLY when the
+            book's work_id agrees with the verdict's. (sidecars' folder-scan job
+            manager, candidate overrides and library sightings were not imported.)
+            Deps: stdlib
             HTTP + the meta module + audiosilo-server/pkg/match.
   events/   SSE hub: Publish -> monotonic-id fan-out, ring-buffer replay from
             Last-Event-ID, ephemeral heartbeats, slow-subscriber eviction, optional
             durable-sink persister (feeds store.events)
-  api/      transport-only HTTP: auth/system/settings/events + M1 scans/books/control
-            handlers + middleware (bearer auth, allow-list CORS, security headers).
-            NO business logic here. M6 added GET /books/{id}/sidecars (the preview
-            envelope is composed in internal/pipeline.SidecarsView and INJECTED as a
-            loader func - api never imports pipeline; 404 via ErrNoSidecars when no
-            sidecar files exist) and GET /books/{id}/events (per-book durable log,
-            limit clamped 1..500); bookView carries eta_seconds/started_at/park_code.
-            M7 added GET /books/{id}/contrib/core (the prefilled proposal, 404
-            absent), POST /books/{id}/contribute/core (409 unless parked core_needed,
-            400 on Validate, 502 on rate limit), POST /books/{id}/work (manual slug
-            set + readmit), GET /books/{id}/export (zip via injected
-            pipeline.ExportArchive), bookView.contribution (aggregate chip) +
-            bookDetail.contributions (rows), and the contrib.update SSE event; all
-            new endpoints have allowed + denied auth tests. The Library New-view
-            round added POST /library/sightings/acknowledge (204; unknown paths
-            ignored) and made GET /scans/{id} attach first_seen_at + is_new beside
-            the pipeline_book join - one store.ListSightings read per poll (skipped
-            entirely for a job with no books, like the anyTracked guard beside it),
-            the predicate itself in metaops.ComputeIsNew (api stays
-            transport-only). The store is the ONLY home of that state: the scan
-            snapshot and its cache carry neither field.
-  web/      go:embed of the SPA (build-tag selected) + SPA-fallback static serving
-  server/   http.Server wiring, graceful shutdown, the startup banner
-web/          the SPA: Vite + React 19 + TS + Tailwind v4 (npm, Node 24); dist/ is embedded
-              src/lib/ holds pure, vitest-tested logic (apiClient, candidates, books,
-              pipelineState, recentRoots, tabNavigation, useEventStream, scanStore; M6 added timeline,
-              duration, bookLog, parkReasons, doneBoard, time, useLazyDetail, and
-              expressive.ts - VENDORED from audiosilo-meta site/src/lib/expressive.ts
-              with its tests, keep it tracking upstream; M7 added coreProposal,
-              contributionSettings, formNumbers, throttleTrailing, download);
-              src/components/ui/ holds the shared Modal + Field primitives
-              (extracted in M7 - new modals/forms use them, don't re-inline the
-              chrome); src/components/
-              {library,running,done}/ are the Library/Running/Done tab views; components
-              stay thin over src/lib. The timeline's stage graph is a hand-mirror of the
-              Go state table - a drift-guard test pins its stage set to the label maps. The Library tab's scan + selection state lives in
-              scanStore.ts - a module-level external store (useSyncExternalStore)
-              owning the 700ms poll loop, so tab switches (AppShell unmounts
-              panels) and reloads (GET /scans reattach) never lose a running scan;
-              `?tab=<id>` is the refresh-safe/deep-linkable active tab and follows
-              browser back/forward navigation;
-              sign-out calls scanStore.reset(). API calls key books by the
-              daemon-computed absolute source_path (NEVER a client-side join);
-              the relative path is display/selection only. Scan candidates with a
-              pipeline_book match stay visible with an In queue/Completed badge but
-              have no selection or rematch control; select-all skips them, and a
-              successful enqueue patches the row immediately before the next poll.
-              scanStore also holds a `view: 'new' | 'all'` filter DEFAULTING to
-              'new' (over the daemon's per-book is_new flag), with a "Dismiss" bulk
-              action posting the selected source paths to
-              POST /library/sightings/acknowledge.
+  link/     the client of the server's Bridge routes (pairing exchange, heartbeat,
+            long-poll claim narrowed by ?kind= to the kinds with room, job updates,
+            a book's files, targeted rescan). Every request sends X-AudioSilo-Client:
+            "AudioSilo Bridge/<version> (<os>)", inside the server's auth.ParseClient
+            grammar (a test holds the regex). Wire types mirror the server's
+            internal/bridge BY HAND (no codegen): a change there is a change here,
+            with a test on both sides. Answers map to ErrUnauthorized (401: the token
+            was revoked), ErrNotHeld (409 not_held/finished), ErrNoHeartbeat,
+            ErrNoBook, else *APIError (an HTML proxy page never becomes a message).
+  mapping/  where the Bridge sees each library, CHECKED (decision 13): Check stats the
+            server's sample book's files through the mount (SafeJoin: no absolute,
+            "..", NUL; a backslash is a name character except on Windows) and
+            compares SIZES (the only thing that catches a stale copy, spike 3), and
+            only then probes writability with an exclusive dot-named probe file (a
+            crash leaves nothing the server's scan walks). A library with no indexed
+            book is NEVER mapped: with nothing to compare, a wrong mount would look
+            right and a later write job would land in the wrong folder (Phase 2b's
+            podcast libraries start empty: revisit there). Registry holds the
+            server's libraries from the last heartbeat and each check; CheckAll is
+            one library at a time and serialised.
+  jobs/     the generic runner. Handlers declare a kind and a lane (lanes: light=2
+            in Phase 0); the claim loop asks only for kinds whose lane has room, and
+            waits (no claim) while unpaired or full. A running job reports at least
+            every Keepalive (10 s), renewing the server's 2-minute lease; a reply
+            with cancel_requested ends its context (errCancelRequested -> reported
+            cancelled), a 409 ends it as lost (nothing more sent), a 401 unpairs. A
+            stopping Bridge (base context ended) or a 401 leaves the row RUNNING, so
+            the next start resumes it under the same claim; if the lease ran out
+            meanwhile, the first report gets 409 and the row is lost, and the claim
+            loop takes the job again as the next attempt (the kill test in the
+            handoff log). Recovery runs once the link is up: a kind no longer run is
+            failed. The final report carries the last progress (a throttled step may
+            never have been sent) and is retried every 30 s until the server takes it
+            or says it moved on. Cancel is the page's own cancel. LocalReporter is a
+            send-nothing Reporter for handler tests.
+  verify/   bridge.verify: params {hold_seconds 0-600}; resolves the library from the
+            registry, asks the server for the book's files (path "" = the sample
+            book), CompareFiles through the mount, probes the BOOK's folder for
+            writing (spike 3: a root probe passed while a 0555 book folder refused),
+            then holds, reporting each second. A mismatch is a failure WITH a result.
+            Result {library_id, mount_path, path, files[{path,size,expected_size,ok}],
+            writable, writable_error, elapsed_ms}: the server's console renders it.
+  app/      the wiring and the page API's Backend: Conn holds the pairing (settings
+            pairing.*, the token in the vault) and the link; the heartbeat loop beats
+            every 30 s or when kicked, records the server's libraries and starts a
+            mapping check (in the background, TryLock) when they changed or one is
+            due, then beats again with the results; a 401 anywhere unpairs with a
+            reason the page shows. Run LISTENS BEFORE pairing from
+            AUDIOSILO_BRIDGE_PAIR_CODE, so a start that can't serve doesn't spend the
+            code. Edits go through config.SaveFile and reload the config.
+  api/      transport-only HTTP of the Bridge's page (/api/*): login (rate limited),
+            password (a wrong current one is 403, never 401, which signs the page
+            out), status, pair/unpair, libraries + mount edits + check now, settings,
+            jobs + cancel, logs, workers. lanOnly refuses any connection not from a
+            loopback, private (RFC 1918, ULA) or link-local address (RemoteAddr only,
+            never a forwarded header; CGNAT/Tailscale is NOT local); every route but
+            login and health needs a session, loopback included (an agent container
+            on the Bridge's network could otherwise reach it, spike 2). Backend errors
+            are typed (ErrInvalid 400, ErrRefused 422, ErrNotFound 404, ErrLocked 409
+            code locked, ErrConflict 409, ErrUnreachable 502), anything else a 500
+            that is logged and never echoed.
+  logring/  an slog.Handler that tees Info-and-up into a 2,000-line ring for the
+            page's log view; attributes whose key holds token/password/code/key/
+            secret/cookie/authorization are redacted.
+  web/      go:embed of the page (build-tag selected) + SPA-fallback static serving
+web/          the Bridge's page: Vite + React 19 + TS + Tailwind v4 (npm, Node 24); dist/ is
+              embedded with -tags embedui. Tooling, versions and the visual language are
+              sidecars' web/ (the lock file is sidecars' with the name changed). No router:
+              the tab rides the URL hash (src/lib/tabs.ts). src/api/types.ts mirrors the
+              page API (internal/api) by hand; client.ts sends the bearer token, turns a
+              401 into signed-out (never on login) and a 403 into the "local network
+              only" screen (the guard's code lan_only; a wrong current password is a
+              403 of its own route, shown as its {error}). src/lib holds the pure,
+              vitest-tested logic (time, tabs, status, jobs, verify, settings,
+              libraries, logs, token: localStorage audiosilo_bridge_token) plus the
+              usePoll hook; components/tabs/ are the six tabs (Status, Libraries, Jobs,
+              Settings, Workers, Logs), thin over src/lib. Jobs poll every 3 s while one
+              runs, else 15 s; a bridge.verify result renders as a file table.
 scripts/build-web.sh   build the SPA + embed it into bin/ (-tags embedui)
-Dockerfile             multi-stage: node build -> go build (embedui) -> two runtime
-                       targets from the SAME shared stages: `runtime` (debian-slim,
-                       CPU, the default) and `runtime-cuda` (nvidia/cuda, GPU - the
-                       CUDA whisper-cli is toolfetched at runtime, not baked in).
-                       Both apt-install ffmpeg (so toolfetch never downloads it) and
-                       run non-root with a chown'd /data. image.yml builds both via
-                       `--target`.
-.goreleaser.yml        M8: native-binary release config (draft, embedui, archives+checksums)
+Dockerfile             multi-stage: node build -> go build (embedui, cross-built on
+                       $BUILDPLATFORM) -> whisper-cli fetch (sidecars' pinned release
+                       asset, sha256-checked) -> three targets: `slim` (debian-slim +
+                       ffmpeg), `cuda` (nvidia/cuda runtime + the CUDA whisper-cli,
+                       amd64) and `full` (slim + the CPU whisper-cli; the last stage,
+                       the default). No agent CLI in any (decision 15: the agent
+                       container ships with Phase 1a). docker/entrypoint.sh starts as
+                       root only to own /bridge-data, sets umask 022 and drops to
+                       PUID:PGID with setpriv. image.yml builds them on v* tags and
+                       dispatch (amd64+arm64; cuda amd64).
+compose.example.yaml   the server (libraries :ro) and the Bridge (the same folders :rw)
 ```
 
-**Dependency direction** (transport-only rule): `server -> {api, auth, secrets,
-events, config, store, scheduler, metaops, pipeline, web}`; `api -> {auth, secrets,
-events, config, store, scheduler, metaops}`; `scheduler -> {store, state, eta, events}`; `eta -> state` (pure, imported BY
+**Dependency direction** (transport-only rule): `cmd -> {app, logring, config}`;
+`app -> {api, auth, config, jobs, link, logring, mapping, secrets, store, verify,
+web}`; `api -> {auth, jobs, link, logring, mapping, store}` (types only; it calls
+the injected Backend); `verify -> {jobs, link, mapping}`; `jobs -> {link, store}`;
+`mapping -> link`; `link` is a leaf. The engine (wired in Phase 1a):
+`scheduler -> {store, state, eta, events}`; `eta -> state` (pure, imported BY
 scheduler - never the reverse);
 `pipeline -> {audio, asr, transcript, ebook, qa, spelling, agent, repair, toolfetch,
 scratch, secrets, fsutil, metaops, store, state, scheduler}` (metaops since M7's

@@ -3,7 +3,6 @@ package app
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	"path/filepath"
 	"time"
@@ -39,15 +38,15 @@ func (b *Bridge) Pair(ctx context.Context, serverURL, code string) error {
 	err := b.conn.Pair(ctx, serverURL, code)
 	switch {
 	case errors.Is(err, link.ErrUnauthorized):
-		return fmt.Errorf("%w: the code is wrong, used or expired; make a new one in the server's console", api.ErrRefused)
+		return api.Errorf(api.ErrRefused, "the code is wrong, used or expired; make a new one in the server's console")
 	case errors.Is(err, ErrAlreadyPaired):
-		return fmt.Errorf("%w: %v", api.ErrConflict, err)
+		return api.Errorf(api.ErrConflict, "%v", err)
 	case err != nil:
 		var apiErr *link.APIError
 		if errors.As(err, &apiErr) && apiErr.Status == 404 {
-			return fmt.Errorf("%w: that server doesn't know about a Bridge (update it to a version with the Bridge)", api.ErrRefused)
+			return api.Errorf(api.ErrRefused, "that server doesn't know about a Bridge (update it to a version with the Bridge)")
 		}
-		return fmt.Errorf("%w: %v", api.ErrUnreachable, err)
+		return api.Errorf(api.ErrUnreachable, "could not reach the server: %v", err)
 	}
 	return nil
 }
@@ -72,13 +71,13 @@ func (b *Bridge) Libraries() []api.Library {
 // root path is used) and checks the mappings again.
 func (b *Bridge) SetMount(ctx context.Context, id int64, path string) error {
 	if b.config().EnvSet(config.KeyLibraries) {
-		return fmt.Errorf("%w: AUDIOSILO_BRIDGE_LIBRARIES sets the mappings", api.ErrLocked)
+		return api.Errorf(api.ErrLocked, "AUDIOSILO_BRIDGE_LIBRARIES sets the mappings")
 	}
 	if _, ok := b.libs.Library(id); !ok {
-		return fmt.Errorf("%w: no server library %d", api.ErrNotFound, id)
+		return api.Errorf(api.ErrNotFound, "no server library %d", id)
 	}
 	if path != "" && !filepath.IsAbs(path) {
-		return fmt.Errorf("%w: the folder must be an absolute path", api.ErrInvalid)
+		return api.Errorf(api.ErrInvalid, "the folder must be an absolute path")
 	}
 	err := b.save(func(c *config.Config) error {
 		kept := []config.LibraryMapping{}
@@ -119,10 +118,10 @@ func (b *Bridge) Settings() api.Settings {
 func (b *Bridge) SaveSettings(ctx context.Context, s api.Settings) error {
 	cur := b.config()
 	if cur.EnvSet(config.KeyPublicURL) && s.PublicURL != cur.PublicURL {
-		return fmt.Errorf("%w: AUDIOSILO_BRIDGE_PUBLIC_URL sets public_url", api.ErrLocked)
+		return api.Errorf(api.ErrLocked, "AUDIOSILO_BRIDGE_PUBLIC_URL sets public_url")
 	}
 	if cur.EnvSet(config.KeyMappingCheck) && s.MappingCheckMinutes != cur.Mapping.CheckMinutes {
-		return fmt.Errorf("%w: AUDIOSILO_BRIDGE_MAPPING_CHECK_MINUTES sets mapping.check_minutes", api.ErrLocked)
+		return api.Errorf(api.ErrLocked, "AUDIOSILO_BRIDGE_MAPPING_CHECK_MINUTES sets mapping.check_minutes")
 	}
 	err := b.save(func(c *config.Config) error {
 		c.PublicURL, c.Mapping.CheckMinutes = s.PublicURL, s.MappingCheckMinutes
@@ -139,7 +138,7 @@ func (b *Bridge) SaveSettings(ctx context.Context, s api.Settings) error {
 // An edit that doesn't validate is api.ErrInvalid.
 func (b *Bridge) save(edit func(*config.Config) error) error {
 	if err := config.SaveFile(b.dataDir, edit); err != nil {
-		return fmt.Errorf("%w: %v", api.ErrInvalid, err)
+		return api.Errorf(api.ErrInvalid, "%v", err)
 	}
 	cfg, err := config.Load(b.dataDir)
 	if err != nil {

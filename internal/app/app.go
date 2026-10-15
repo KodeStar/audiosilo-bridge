@@ -196,7 +196,7 @@ func (b *Bridge) Run(ctx context.Context) error {
 		IdleTimeout:       2 * time.Minute,
 	}
 	b.log.Info("bridge: started", "version", b.version, "page", "http://"+ln.Addr().String(), "data", b.dataDir,
-		"secret_key", string(b.keySrc), "paired", b.conn.Client() != nil)
+		"key_source", string(b.keySrc), "paired", b.conn.Client() != nil)
 
 	var wg sync.WaitGroup
 	wg.Add(3)

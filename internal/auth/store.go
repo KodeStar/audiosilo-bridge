@@ -24,6 +24,8 @@ type Store interface {
 	HasSession(tokenHash string) (bool, error)
 	// RemoveSession deletes a session by its token hash (no-op if absent).
 	RemoveSession(tokenHash string) error
+	// RemoveSessionsExcept deletes every session but keepHash's.
+	RemoveSessionsExcept(keepHash string) error
 }
 
 // MemStore is an in-memory Store for tests.
@@ -74,5 +76,17 @@ func (m *MemStore) RemoveSession(tokenHash string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	delete(m.sessions, tokenHash)
+	return nil
+}
+
+// RemoveSessionsExcept removes every session token hash but keepHash.
+func (m *MemStore) RemoveSessionsExcept(keepHash string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for h := range m.sessions {
+		if h != keepHash {
+			delete(m.sessions, h)
+		}
+	}
 	return nil
 }

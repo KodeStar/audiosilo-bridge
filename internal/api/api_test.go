@@ -120,8 +120,8 @@ func TestLocalAddress(t *testing.T) {
 		r.Header.Set("Authorization", "Bearer "+e.token)
 		w := httptest.NewRecorder()
 		e.h.ServeHTTP(w, r)
-		if w.Code != http.StatusForbidden {
-			t.Errorf("a public address on %s = %d, want 403", path, w.Code)
+		if w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), `"code":"lan_only"`) {
+			t.Errorf("a public address on %s = %d %s, want 403 lan_only", path, w.Code, w.Body.String())
 		}
 	}
 	if w := e.do(http.MethodGet, "/api/health", "", "", "127.0.0.1:9"); w.Code != http.StatusOK {
@@ -211,6 +211,9 @@ func TestPairAndErrors(t *testing.T) {
 		if want == http.StatusInternalServerError && strings.Contains(w.Body.String(), "secret") {
 			t.Errorf("an internal error was echoed: %s", w.Body.String())
 		}
+		if want != http.StatusInternalServerError && !strings.Contains(w.Body.String(), `"error":"`+err.Error()+`"`) {
+			t.Errorf("the message isn't the sentence alone: %s", w.Body.String())
+		}
 	}
 }
 
@@ -223,7 +226,7 @@ func TestMountsSettingsJobsLogs(t *testing.T) {
 	if w := e.do("PUT", "/api/libraries/3", e.token, `{"mount_path":" /books "}`); w.Code != http.StatusOK || e.b.mount != "3=/books" {
 		t.Fatalf("set mount = %d %q", w.Code, e.b.mount)
 	}
-	e.b.mountErr = fmt.Errorf("%w: AUDIOSILO_BRIDGE_LIBRARIES sets the mappings", ErrLocked)
+	e.b.mountErr = Errorf(ErrLocked, "AUDIOSILO_BRIDGE_LIBRARIES sets the mappings")
 	w := e.do("PUT", "/api/libraries/3", e.token, `{"mount_path":"/b"}`)
 	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), `"code":"locked"`) {
 		t.Fatalf("locked mount = %d %s", w.Code, w.Body.String())

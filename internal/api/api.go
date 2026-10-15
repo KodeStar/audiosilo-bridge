@@ -12,6 +12,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -86,6 +87,22 @@ var (
 	ErrUnreachable = errors.New("the server can't be reached") // 502
 )
 
+// kindError is a Backend error of one of the kinds above whose message is the
+// sentence the page shows (no kind prefix).
+type kindError struct {
+	kind error
+	msg  string
+}
+
+func (e *kindError) Error() string        { return e.msg }
+func (e *kindError) Is(target error) bool { return target == e.kind }
+
+// Errorf makes a Backend error of kind (ErrInvalid, ...) whose message is the
+// formatted sentence alone.
+func Errorf(kind error, format string, args ...any) error {
+	return &kindError{kind: kind, msg: fmt.Sprintf(format, args...)}
+}
+
 // API serves the page.
 type API struct {
 	b       Backend
@@ -135,7 +152,7 @@ func (a *API) Handler() http.Handler {
 func lanOnly(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !LocalAddress(r.RemoteAddr) {
-			writeError(w, http.StatusForbidden, "the Bridge's page answers only the local network")
+			writeErrorCode(w, http.StatusForbidden, "lan_only", "the Bridge's page answers only the local network")
 			return
 		}
 		next.ServeHTTP(w, r)
@@ -298,7 +315,7 @@ func (a *API) handlePassword(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	err := a.auth.ChangePassword(req.Current, req.New)
+	err := a.auth.ChangePassword(req.Current, req.New, bearerToken(r))
 	switch {
 	case err == nil:
 		w.WriteHeader(http.StatusNoContent)
