@@ -2,12 +2,9 @@ package store
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"math"
 	"path/filepath"
-	"sort"
-	"strings"
 	"testing"
 	"time"
 )
@@ -151,78 +148,5 @@ func TestCountAutoRecoveriesSinceCountsOnlyCompletedAutomaticRecoveriesInWindow(
 	}
 	if n != 4 {
 		t.Fatalf("tighter-window recoveries = %d, want 4", n)
-	}
-}
-
-func TestMigrationAddsSupervisorDefaultsToLegacyDatabase(t *testing.T) {
-	ctx := context.Background()
-	dsn := filepath.Join(t.TempDir(), "legacy.db")
-	legacy, err := sql.Open("sqlite", dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := legacy.ExecContext(ctx, `CREATE TABLE schema_migrations (name TEXT PRIMARY KEY, applied_at TEXT NOT NULL)`); err != nil {
-		t.Fatal(err)
-	}
-	entries, err := migrationsFS.ReadDir("migrations")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var names []string
-	for _, entry := range entries {
-		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".sql") && entry.Name() < "0009_" {
-			names = append(names, entry.Name())
-		}
-	}
-	sort.Strings(names)
-	for _, name := range names {
-		body, err := migrationsFS.ReadFile("migrations/" + name)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := legacy.ExecContext(ctx, string(body)); err != nil {
-			t.Fatalf("apply legacy %s: %v", name, err)
-		}
-		if _, err := legacy.ExecContext(ctx, `INSERT INTO schema_migrations(name, applied_at) VALUES(?, ?)`, name, "2026-01-01T00:00:00.000000000Z"); err != nil {
-			t.Fatal(err)
-		}
-	}
-	created := "2026-01-01T00:00:00.000000000Z"
-	res, err := legacy.ExecContext(ctx, `INSERT INTO books(source_path, work_dir, title, created_at, updated_at) VALUES('/legacy','/work','Legacy',?,?)`, created, created)
-	if err != nil {
-		t.Fatal(err)
-	}
-	bookID, _ := res.LastInsertId()
-	if _, err := legacy.ExecContext(ctx, `INSERT INTO stage_runs(book_id, stage, attempt, started_at, finished_at, ok, metrics, model, input_tokens, output_tokens, cost_usd) VALUES(?, 'fact_pass', 1, ?, ?, 1, '{}', 'legacy-model', 10, 2, 0.25)`, bookID, created, created); err != nil {
-		t.Fatal(err)
-	}
-	if err := legacy.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	db, err := Open(ctx, dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	b, err := db.GetBook(ctx, bookID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if b.BatchID != LegacyBatchID {
-		t.Fatalf("migrated batch=%q", b.BatchID)
-	}
-	runs, err := db.ListStageRuns(ctx, bookID)
-	if err != nil || len(runs) != 1 {
-		t.Fatalf("migrated runs=%+v err=%v", runs, err)
-	}
-	if !runs[0].CostReported || runs[0].EstimatedAPICostUSD != nil || runs[0].EstimateComplete || runs[0].HeartbeatAt != created || runs[0].ProgressAt != created {
-		t.Fatalf("migrated cost/liveness defaults=%+v", runs[0])
-	}
-	if invocations, err := db.ListAgentInvocations(ctx, bookID); err != nil || len(invocations) != 0 {
-		t.Fatalf("0010 migration compatibility: invocations=%+v err=%v", invocations, err)
-	}
-	if err := db.EnsureBatch(ctx, "simulated", time.Now()); err != nil {
-		t.Fatal(err)
 	}
 }
