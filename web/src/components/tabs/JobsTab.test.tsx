@@ -233,7 +233,7 @@ describe('JobsTab', () => {
     await userEvent.click(within(done).getByText('Details'));
     expect(
       within(done).getByText(
-        'A description, $0.25, not checked: the transcripts were already removed',
+        'A description, $0.25, not checked: the source text was already removed',
       ),
     ).toBeInTheDocument();
     expect(within(done).getByText(/description.json, bridge.json/)).toBeInTheDocument();

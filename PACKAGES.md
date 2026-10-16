@@ -57,8 +57,10 @@ internal/
             is resolved once at startup). M5 made agent.*
             LIVE: backend (""|claude|codex), capacity, claude_path/codex_path,
             timeout_minutes, and the per-stage claude/openai model maps (keys are agent
-            stage names). Validate rejects an unknown backend, an unknown model-map key,
-            or timeout_minutes < 1; Default() seeds the claude map. M7 added
+            stage names, and Phase 1c's description step, "describing":
+            state.RoutesModel). Validate rejects an unknown backend, an unknown model-map key,
+            or timeout_minutes < 1; Default() seeds the claude map ("describing":
+            sonnet). M7 added
             contribution.{mode [issue|local], core_repo (add-work), community_repo
             (sidecars), auto_purge, poll_minutes, api_base_url} (restart-to-apply;
             api_base_url for tests/GHE). Retired settings load via
@@ -674,43 +676,58 @@ internal/
             never run it): the Bridge's sidecars.generate (at its finish) and
             sidecars.describe call it, under the scheduler's Hold on the book. The
             SPOILER BOUND is the staging: the agent's dir holds ONLY opening.md (and
-            out/), built mechanically from the facts/facts-ch{from}-{to}.md chunks
-            covering the chosen files: the `## Chapter N` sections (file numbering kept,
-            never renumbered) of the files whose LOGICAL position (classifyBookEdges
-            -> PositionOf) is 0 (front matter) or 1..K, K = max(2, ceil(logical/4))
-            capped at the logical count; excluded edge files (an Audible intro,
-            credits) and end matter never. No transcript, no knowledge-final.md (it
+            out/), built mechanically from the fact pass's chunks (chunk_plan.json,
+            named by factsChunkName) covering the chosen files: the `## Chapter N` sections (file numbering kept,
+            never renumbered, a "Chapter 0" too) of the files whose LOGICAL position
+            (classifyBookEdges -> PositionOf) is 0 (front matter) or among the
+            book's first K story positions, K = max(2, ceil(n/4)) capped at n-1
+            (never the last chapter: a book of two gets its first, a book of one no
+            description, ErrOneChapter), n the count of distinct story positions the
+            files hold capped at the logical count (never LogicalCount alone: narrated numbering takes it from the
+            highest announcement believed, so a misheard "Forty." or a year, or a
+            sequel numbering on from 45, would widen or empty the window);
+            excluded edge files (an Audible intro, credits) and end matter never. No transcript, no knowledge-final.md (it
             carries FINAL/ENDING), no later chapter, no publisher text (a test lists
             the staged dir). The classification reads the transcripts, which the
-            retention deletes, so each one is kept as chapter_positions.json (with
-            the manifest's fingerprint, the manifest read once; an unchanged one isn't
-            rewritten; PurgeTranscripts leaves it) and a book whose
+            retention deletes, so each one is kept as chapter_positions.json (keyed
+            by manifestFingerprint; an unchanged one isn't rewritten;
+            PurgeTranscripts leaves it) and a book whose
             transcripts are gone uses it, else its FILE numbers with the logical count
             from the recaps' last through (a file's number is never below its story
             chapter, so that bound is safe, only less generous); an ebook classifies
             from its manifest alone. The run's characters.json supplies the work and
             sources (a run whose own work/sources can't make a valid description
             fails before any spend); the per-book and monthly budget preflight
-            (budgetPreflight, runAgentWith's own) runs before the preparation, so a
-            budget-parked retry costs nothing and opens no run. The validator (patch feedback on a retry):
+            (budgetPreflight, which runAgent runs for every other stage and
+            runAgentWith leaves to its caller) runs after the preparation (local
+            reads, which keep chapter_positions.json even for a call the budget
+            parks) and before the stage run, so a budget-parked retry costs nothing
+            and opens no run. The model is config's route for "describing"
+            (state.Describing, which agent.claude/agent.openai accept; agent.claude
+            defaults it to sonnet). The validator (patch feedback on a retry):
             strict {"text"} decode (decodeSidecarBytes) with a 64 KiB cap; trimmed text 200-1500 runes; no
-            control character but newline (the server refuses them); no em dash; at
-            most two paragraphs; no second person, no sentence ending in "?", no
-            sales words (descriptionProblems); then the composed model.Description
+            control character (nor U+2028/U+2029) but newline (the server refuses
+            control characters); no em dash; at most two paragraphs; no second
+            person, no sentence ending in "?", no sales words, with word edges by
+            Unicode letter and the book's own title and series exempt (a book may
+            be "Me Before You" or end in "?") (descriptionProblems); then the composed model.Description
             (license CC-BY-SA-4.0) against meta's description.schema.json
             (sidecarSchemas now compiles it too), then extract.NGram against the
             transcript text layers through ngramScan (ngramCheck's scan without its
-            "no layer" refusal): a hit is a retry naming the run; no layer at all
-            (retention purged them) skips the check and records checked_against
-            "none". Spend: the call opens its own stage_run (DescribeStage
+            "no layer" refusal): a hit is a retry naming the run; a local fault of
+            the check (the disk, a transcript that can't be read) is no agent
+            retry: the answer is taken and the run fails with a plain error; no layer at all
+            (the retention purged the transcripts; an ebook's text goes as the
+            book reaches done, so an ebook is checked only at a contributing park)
+            skips the check and records checked_against "none". Spend: the call opens its own stage_run (DescribeStage
             "describing", numbered store.NextStageAttempt as the scheduler's runs
             are, so each run has its own _runs/describing-aNN) on the book, so
             invocation tracking,
             SumStageRunBudgetCost, the monthly sum and the estimates see it, and
             finishes it ok/failed with {chapters, logical_chapters, basis,
-            checked_against, usage}; runAgentWith is runAgent with the rate-limit
-            backoff given (noWait passes an empty schedule: a rate limit parks at
-            once), stageMaxTurns gives it 10. Its parks come back
+            checked_against, usage}; runAgentWith is runAgent after the preflight with
+            the rate-limit backoff given (noWait passes an empty schedule: a rate
+            limit parks at once), stageMaxTurns gives it 10. Its parks come back
             as *scheduler.ParkError (the caller decides). The composed file is kept
             as sidecars/description.json (FinalDescriptionPath, canonical JSON); a
             later call reuses it (re-composed with the current work/sources, nothing
@@ -827,7 +844,11 @@ internal/
             takes the status - a FAILED book (a cancel is a failure) holds nothing,
             since the job that wanted it ended and nothing will finish it (a later
             volume runs without its carryover, like a series' first book), while a
-            parked or paused one still holds it.
+            parked or paused one still holds it. Phase 1c: Describing ("describing")
+            names the Bridge's description step's stage runs, NOT a state (no table
+            row: IsStage/IsAgent false, Order 0), declared here for the one spelling
+            pipeline and config share; RoutesModel (an agent stage, or Describing)
+            is the model maps' key rule.
   eta/      the PURE ETA engine (no I/O, no clock): per-stage unit kinds
             (chapter/chunk/book) + seed rates from the historical extraction metrics,
             EWMA Observe (alpha 0.3), book ETA = rate x remaining units over the
@@ -1112,6 +1133,9 @@ internal/
             report gets 409 and the row is lost, and the claim loop takes the job
             again as the next attempt (the kill test in the handoff log). release
             frees only its own run (a later claim of the job may run under its id).
+            Job.Resumed (Phase 1c) tells a handler the runner resumed the job under
+            its claim (a restart's recovery, resumeStranded) rather than claimed it
+            now, so an earlier run of it may have spent already.
             Recovery runs once the link is up: a kind no longer run is failed.
             Nothing is sent that the server refuses for good: a result that isn't a
             JSON object of at most 64 KiB fails the job (errUnreportable) and
@@ -1240,10 +1264,22 @@ internal/
             book (Engine.Hold, the scheduler's reservation); the sweep leaves a held
             book for the next one, and a job end's purge (retention_days 0) waits a
             few polls for it (a stage the end just stopped) before leaving it too.
+            Under the hold the book is looked at again (purgeHeld): one no longer
+            finished, or that an open job follows again (a later claim of its job
+            re-opened and re-admitted it while the purge waited), keeps its
+            transcripts and stays unswept.
             Phase 1c, DESCRIPTIONS (describejob.go): Options.Describer is the
             engine's description step (pipeline.Executor.Describe). A generate job's
-            write() runs it ONCE per run (describeOnce) when the sidecars are final
-            (done, or parked at contributing), with noWait, before reading them; the
+            write() saves the characters and recaps first, then runs it
+            (describeOnce, with noWait: the step can still wait for an agent slot
+            behind other books, so it never holds the files back) when the sidecars
+            are final (done, or parked at contributing; a contributing park is
+            reported before the write), and a description it got follows in a
+            second save. It asks once per run, and once more at done when it first
+            asked at a contributing park: the contributing stage may have resolved
+            the work and sources since, and the step's free re-compose makes the
+            description name the work the characters do; a try at the park that
+            failed without spending gets its second go there too. The
             description NEVER fails, parks or holds the job: any error (the engine
             keeping its hold, see below, included) is logged and
             the result says {"description": false, "description_error": "<short
@@ -1252,32 +1288,53 @@ internal/
             rules: known names only, once per content hash, at the book's current
             path, mapping re-checked) with bridge.json's description object
             {job_id, generated_at, from "opening_notes", chapters,
-            checked_against}. Only a description the run vouches for is written (a
-            file in the work dir it didn't get from Describe is ignored); the cost is
-            read again after it. The contribution never carries it.
+            checked_against}. Only the description the run's step read back under
+            the hold is written (the work dir's file is never read again for it);
+            the cost is read again after the step (a failed try's spend included).
+            The contribution never carries it. A regenerate whose step got none
+            leaves an earlier run's description.json in place (nothing deletes into
+            a library yet; bridge.json no longer names it).
             sidecars.describe (DescribeJob, DescribeKind, pipeline lane): params
-            decoded leniently (any JSON object). prepare as generate does but strict
-            (nothing spent yet); notesBook finds the engine book (the latest at the
-            book's source path, else LatestGenerateBookAt for library+path): none is
-            errDescribeNoNotes ("The Bridge has no notes for this book ..."), one an
+            decoded leniently (any JSON object). prepare as generate does, strict
+            when new (nothing spent yet) and not when resumed (jobs.Job.Resumed: an
+            earlier run may have paid; it parks library_not_writable like a
+            resumed generate job); notesBook finds the engine book (the latest at the
+            book's source path, else LatestGenerateBookAt for library+path, else the
+            generate run the book's own bridge.json names, for a book that moved
+            after its job ended (that file moved with it, the Bridge's records did
+            not; the job's mapping then follows the book); never a run whose source
+            lies outside this library's folder: library ids and paths repeat across
+            servers): none is
+            errDescribeNoNotes ("The Bridge has no notes for this book ..."), a
+            single-chapter book errDescribeOneChapter, one an
             open generate job follows or the engine still has queued/running is
             errDescribeGenerating. Both jobs describe through describeHeld: the
             scheduler's Hold on the engine book (holdBook tries every poll for
             holdTries polls, else errBookBusy, "The engine is busy with this book;
             try again in a minute.") for the call and the read-back of the file, so
             no stage, Retry's dispatch, Delete, purge, sweep or supervisor terminate
-            acts on the book meanwhile (a new generate job's Delete of a held earlier
-            run is ErrBusy: "try again in a minute"); a park waits with the hold let
-            go. describeParked runs it: an agent park
+            acts on the book meanwhile (a new generate job waits holdTries polls for
+            a held earlier run, deleteEarlier: the server asks a describe job to give
+            way to it, which it does at its next report; then "try again in a
+            minute"); a park waits with the hold let go (the job's in-process
+            rate-limit backoff, noWait false, does not). The job sets r.bookID once
+            it has its engine book, so its own parks are lifted by the save that
+            clears them, never between two tries. describeParked runs it: an agent park
             (rate limit, budget, credential, unavailable) is the job's park (code,
             hint, retry_at in progress) and it tries again at retry_at or on Retry
             (the shared pokes, so the page's Retry and Handler.Retry reach it),
             staying parked while it tries so a park that holds isn't announced
-            again; validation exhausted fails it ("Couldn't write a description that
-            passed the checks."). saveDescription writes description.json and
+            again (a Retry pressed during a try at a timed park is answered by that
+            try; the success lifts the park, one the runner restored after a restart
+            included); validation exhausted fails it ("Couldn't write a description
+            that passed the checks."). Handler.Retry only pokes a sidecars.describe
+            job (its id may map to another server's generate run in generate_books).
+            saveDescription writes description.json and
             bridge.json (describedProvenance: the existing file's fields kept, its
             description object added or replaced; a fresh one when there is none or
-            it isn't a regular file holding a JSON object) through save, the write
+            it isn't a regular file holding a JSON object; readProvenance reads it
+            inside the .audiosilo as an os.Root, the opened file the one looked at,
+            non-blocking and capped, as agentproto.ReadRegular does) through save, the write
             loop generate's write() uses too (saveSpec: the files composed once the
             book is located, relocate following a moved .epub, parking
             book_not_writable until it can, adoptMove following a move: no mapping

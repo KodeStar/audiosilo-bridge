@@ -170,10 +170,10 @@ function JobCard({
 }) {
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<{ kind: 'error' | 'info'; text: string } | null>(null);
-  const generate = isSidecars(job);
+  const sidecars = isSidecars(job);
   const label = kindLabel(job.kind);
   const shown = effectiveState(job);
-  const progress = generate ? '' : progressText(job.progress);
+  const progress = sidecars ? '' : progressText(job.progress);
   const percent = progressPercent(job.progress);
   const report = reportText(job);
   const hint = stateHint(shown);
@@ -245,7 +245,7 @@ function JobCard({
 
       {target && <p className="mt-2 text-sm break-all text-body">{target}</p>}
 
-      {generate && job.state === 'running' && <GenerateProgress job={job} />}
+      {sidecars && job.state === 'running' && <GenerateProgress job={job} />}
 
       {job.state === 'running' && progress && (
         <div className="mt-2 flex flex-col gap-1">

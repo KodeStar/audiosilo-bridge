@@ -28,20 +28,34 @@ func (h *Handler) purge(ctx context.Context, b store.SweepBook) (swept bool, err
 		return false, nil
 	}
 	defer release()
-	return true, h.purgeHeld(ctx, b)
+	return h.purgeHeld(ctx, b.ID)
 }
 
-// purgeHeld deletes one finished (and held) book's transcripts, updates its disk
-// gauge and records the sweep, so the daily sweep never looks at it again.
-func (h *Handler) purgeHeld(ctx context.Context, b store.SweepBook) error {
+// purgeHeld deletes one held book's transcripts, updates its disk gauge and records
+// the sweep, so the daily sweep never looks at it again. The book is looked at
+// again under the hold: one a job follows again since it was found finished (a
+// later claim of its job re-opening and re-admitting it while the purge waited
+// for the hold) runs on its transcripts, so it is left alone, and swept reports
+// false.
+func (h *Handler) purgeHeld(ctx context.Context, bookID int64) (swept bool, err error) {
+	b, err := h.o.DB.GetBook(ctx, bookID)
+	if errors.Is(err, store.ErrNotFound) {
+		return false, nil
+	}
+	if err != nil || !finished(b.State, b.Status) {
+		return false, err
+	}
+	if followed, err := h.o.DB.GenerateBookFollowed(ctx, bookID); err != nil || followed {
+		return false, err
+	}
 	if err := scratch.PurgeTranscripts(h.o.WorkRoot, b.WorkDir, state.ParseKind(b.Kind)); err != nil {
-		return err
+		return false, err
 	}
 	// The disk gauge follows what is left (the durables).
 	if size, err := scratch.DirSize(b.WorkDir); err == nil {
 		_ = h.o.DB.UpdateScratchBytes(ctx, b.ID, size)
 	}
-	return h.o.DB.MarkGenerateBookSwept(ctx, b.ID, h.now())
+	return true, h.o.DB.MarkGenerateBookSwept(ctx, b.ID, h.now())
 }
 
 // purgeEnded deletes the transcripts of the job's own engine book as its job
@@ -61,7 +75,8 @@ func (h *Handler) purgeEnded(ctx context.Context, bookID int64) error {
 		return err
 	}
 	defer release()
-	return h.purgeHeld(ctx, store.SweepBook{ID: b.ID, WorkDir: b.WorkDir, Kind: b.Kind, State: b.State, Status: b.Status})
+	_, err = h.purgeHeld(ctx, b.ID)
+	return err
 }
 
 // SweepTranscripts deletes the transcripts of every finished engine book whose

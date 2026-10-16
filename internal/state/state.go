@@ -91,6 +91,17 @@ const (
 	Done               State = "done"
 )
 
+// Describing names the stage runs of the Bridge's description step (Phase 1c).
+// It is NOT a state of this machine: it has no table row (IsStage, IsAgent and the
+// other predicates are false, Order is 0), since the step runs on a finished book
+// outside the scheduler. It is declared here so the packages that meet it (the
+// pipeline that runs it, config's model maps that route it) share one spelling.
+const Describing State = "describing"
+
+// RoutesModel reports whether a model map (agent.claude, agent.openai) may route
+// s: every agent stage, and the description step, an agent run outside the machine.
+func RoutesModel(s State) bool { return IsAgent(s) || s == Describing }
+
 // Lane is the executor pool a stage runs in. The three lanes have different
 // resource profiles (GPU-bound ASR, rate-limited agents, cheap mechanical work)
 // and independent capacities, so they run concurrently.

@@ -463,6 +463,70 @@ func TestSweepSkipsAHeldBook(t *testing.T) {
 	}
 }
 
+// readmitEngine is an engine that re-admits a book as it hands out the hold: the
+// Retry of a resumed job that landed while a purge waited for the hold.
+type readmitEngine struct {
+	Engine
+	readmit func(id int64)
+}
+
+func (e readmitEngine) Hold(id int64) (func(), bool) {
+	e.readmit(id)
+	return func() {}, true
+}
+
+// A purge reads the book again under the hold: one re-admitted while it waited
+// runs on its transcripts, so neither the job's end nor the sweep deletes them
+// (denied); a book still finished under the hold is purged (allowed).
+func TestPurgeRechecksTheBookUnderTheHold(t *testing.T) {
+	t.Parallel()
+	db, err := store.Open(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	ctx := context.Background()
+	root := t.TempDir()
+	readmitted := false
+	eng := readmitEngine{readmit: func(id int64) {
+		if readmitted {
+			_ = db.SetBookState(ctx, id, "fact_pass", "", "", "")
+		}
+	}}
+	h := New(Options{DB: db, WorkRoot: root, Engine: func() Engine { return eng }, Poll: time.Millisecond})
+	wd := filepath.Join(root, "readmitted")
+	mustWrite(t, filepath.Join(wd, "transcripts-raw", "ch001.json"), "x")
+	b, err := db.CreateBook(ctx, store.NewBook{SourcePath: "/lib/readmitted", WorkDir: wd, Title: "readmitted"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Cancelled by its job's end: failed, so finished when the purge looks.
+	_ = db.SetBookState(ctx, b.ID, "fact_pass", "failed", "cancelled", "")
+	_ = db.PutGenerateBook(ctx, store.GenerateBook{ServerJobID: 1, BookID: &b.ID, LibraryID: 1, RelPath: "readmitted"})
+	_ = db.EndGenerateBook(ctx, 1, time.Now().Add(-time.Hour))
+
+	readmitted = true
+	if err := h.purgeEnded(ctx, b.ID); err != nil || !present(wd) {
+		t.Fatalf("a book re-admitted under the job end's purge lost its transcripts: %v", err)
+	}
+	_ = db.SetBookState(ctx, b.ID, "fact_pass", "failed", "cancelled", "")
+	if n, err := h.SweepTranscripts(ctx, 0); err != nil || n != 0 || !present(wd) {
+		t.Fatalf("a book re-admitted under the sweep: swept %d, %v, present %v", n, err, present(wd))
+	}
+	readmitted = false
+	_ = db.SetBookState(ctx, b.ID, "fact_pass", "failed", "cancelled", "")
+	// Its job's mapping open again (the later claim re-opened it, its Retry not
+	// landed yet): still followed, so still not purged.
+	_ = db.ReopenGenerateBook(ctx, 1)
+	if err := h.purgeEnded(ctx, b.ID); err != nil || !present(wd) {
+		t.Fatalf("a book its job follows again lost its transcripts: %v", err)
+	}
+	_ = db.EndGenerateBook(ctx, 1, time.Now().Add(-time.Hour))
+	if n, err := h.SweepTranscripts(ctx, 0); err != nil || n != 1 || present(wd) {
+		t.Fatalf("a finished book: swept %d, %v, present %v", n, err, present(wd))
+	}
+}
+
 // present reports whether a book's raw transcript layer is still on disk.
 func present(workDir string) bool {
 	_, err := os.Stat(filepath.Join(workDir, "transcripts-raw"))

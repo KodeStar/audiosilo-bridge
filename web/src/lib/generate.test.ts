@@ -110,6 +110,8 @@ describe('descriptions', () => {
     expect(kindLabel('sidecars.describe')).toBe('Description');
     expect(kindLabel('sidecars.generate')).toBe('Characters and recaps');
     expect(kindLabel('bridge.verify')).toBe('');
+    expect(kindLabel('constructor')).toBe('');
+    expect(kindLabel('__proto__')).toBe('');
     expect(isSidecars(describeJobFixture())).toBe(true);
     expect(isSidecars(jobFixture())).toBe(false);
     expect(canRetry(describeJobFixture())).toBe(false);
@@ -149,7 +151,7 @@ describe('descriptions', () => {
       parseDescribeResult({ path: 'x', files: [], checked_against: 'nope' })?.checked_against,
     ).toBe('none');
     expect(checkedText('book text')).toBe('checked against the book text');
-    expect(checkedText('none')).toBe('not checked: the transcripts were already removed');
+    expect(checkedText('none')).toBe('not checked: the source text was already removed');
     expect(parseDescribeResult(null)).toBeNull();
     expect(parseDescribeResult({ files: [] })).toBeNull();
   });

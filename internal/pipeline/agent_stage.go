@@ -415,6 +415,9 @@ func (t *trackedAgentRunner) finish(res agent.Result, err error) {
 // (actionable, Retry-able); an exhausted output validator PARKS naming why; any other
 // error (render, transport, timeout) is returned as a plain error (StatusFailed).
 func (e *Executor) runAgent(ctx context.Context, book store.Book, stage state.State, r scheduler.StageReport, st *agent.Staging, promptName string, promptData any, web bool, validate func(agent.Result, *agent.Staging) error) (agentUsage, error) {
+	if err := e.budgetPreflight(ctx, book, stage); err != nil {
+		return agentUsage{}, err
+	}
 	return e.runAgentWith(ctx, book, stage, r, st, promptName, promptData, web, validate, e.backoff)
 }
 
@@ -425,7 +428,7 @@ func (e *Executor) runAgent(ctx context.Context, book store.Book, stage state.St
 // mid-flight. The budget sum prefers provider cost and falls back to complete
 // configured API-equivalent estimates, and includes superseded rows, so a Retry never
 // lowers the spend the guard sees. The monthly budget is checked after it. The
-// description step also calls it before its preparation.
+// description step calls it itself, before its preparation, then runAgentWith.
 func (e *Executor) budgetPreflight(ctx context.Context, book store.Book, stage state.State) error {
 	if e.db != nil && e.bookBudgetUSD > 0 {
 		spent, complete, serr := e.db.SumStageRunBudgetCost(ctx, book.ID)
@@ -443,14 +446,11 @@ func (e *Executor) budgetPreflight(ctx context.Context, book store.Book, stage s
 	return e.checkMonthlyBudget(ctx, stage, time.Now())
 }
 
-// runAgentWith is runAgent with the rate-limit backoff schedule given: nil is the
-// default (agent.DefaultBackoff), an empty schedule waits out no rate limit at all
-// (the limit parks at once, which the description step needs: it must never hold
-// the job that asked for it).
+// runAgentWith is runAgent after the budget preflight (its caller's), with the
+// rate-limit backoff schedule given: nil is the default (agent.DefaultBackoff), an
+// empty schedule waits out no rate limit at all (the limit parks at once, which
+// the description step needs: it must never hold the job that asked for it).
 func (e *Executor) runAgentWith(ctx context.Context, book store.Book, stage state.State, r scheduler.StageReport, st *agent.Staging, promptName string, promptData any, web bool, validate func(agent.Result, *agent.Staging) error, backoff []time.Duration) (agentUsage, error) {
-	if err := e.budgetPreflight(ctx, book, stage); err != nil {
-		return agentUsage{}, err
-	}
 	runner, av := e.ensureAgent(ctx)
 	if runner == nil || !av.Available {
 		// PREFLIGHT unavailability: no CLI is configured/resolvable at all (not a transient

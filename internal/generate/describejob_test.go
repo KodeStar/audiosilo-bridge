@@ -27,22 +27,28 @@ const testDescription = `{"license":"CC-BY-SA-4.0","sources":[{"type":"community
 
 // fakeDescriber stands in for the pipeline's description step: it writes the
 // composed file into the engine book's work dir, or returns fail's error for a
-// call (1-based).
+// call (1-based), having spent 0.01 unless freeFail. With fromWork the file names
+// the work characters.json names now, as the real step's re-compose does.
 type fakeDescriber struct {
-	db   *store.DB
-	mu   sync.Mutex
-	runs []bool // each call's noWait
-	fail func(call int) error
+	db       *store.DB
+	mu       sync.Mutex
+	runs     []bool // each call's noWait
+	fail     func(call int) error
+	freeFail bool
+	fromWork bool
 }
 
 func (f *fakeDescriber) Describe(ctx context.Context, bookID int64, noWait bool) (pipeline.DescribeResult, error) {
 	f.mu.Lock()
 	f.runs = append(f.runs, noWait)
 	call := len(f.runs)
-	fail := f.fail
+	fail, freeFail, fromWork := f.fail, f.freeFail, f.fromWork
 	f.mu.Unlock()
 	if fail != nil {
 		if err := fail(call); err != nil {
+			if freeFail {
+				return pipeline.DescribeResult{}, err
+			}
 			return pipeline.DescribeResult{CostUSD: 0.01}, err
 		}
 	}
@@ -51,7 +57,17 @@ func (f *fakeDescriber) Describe(ctx context.Context, bookID int64, noWait bool)
 		return pipeline.DescribeResult{}, err
 	}
 	path := pipeline.FinalDescriptionPath(b.WorkDir)
-	if err := os.WriteFile(path, []byte(testDescription), 0o600); err != nil {
+	desc := testDescription
+	if fromWork {
+		chars, _ := pipeline.FinalSidecarsPaths(b.WorkDir)
+		var c struct {
+			Work string `json:"work"`
+		}
+		raw, _ := os.ReadFile(chars) //nolint:gosec // the test's work dir
+		_ = json.Unmarshal(raw, &c)
+		desc = strings.Replace(testDescription, `"work":"the-book"`, `"work":"`+c.Work+`"`, 1)
+	}
+	if err := os.WriteFile(path, []byte(desc), 0o600); err != nil {
 		return pipeline.DescribeResult{}, err
 	}
 	return pipeline.DescribeResult{Path: path, Chapters: 2, CheckedAgainst: pipeline.CheckedTranscripts,
@@ -128,8 +144,10 @@ func TestGenerateWritesTheDescription(t *testing.T) {
 		strings.Join(res.Files, ",") != "characters.json,recaps.json,description.json,bridge.json" {
 		t.Fatalf("result = %+v", res)
 	}
-	if calls := d.calls(); len(calls) != 1 || !calls[0] {
-		t.Fatalf("describe calls = %+v, want one with noWait", calls)
+	// Asked at the park, and again at done (to re-compose it with the work the
+	// contributing stage resolved), never waiting out a rate limit.
+	if calls := d.calls(); len(calls) != 2 || !calls[0] || !calls[1] {
+		t.Fatalf("describe calls = %+v, want two with noWait", calls)
 	}
 	adir := filepath.Join(hr.root, "Author", "Book", AttachDir)
 	if raw, err := os.ReadFile(filepath.Join(adir, "description.json")); err != nil || string(raw) != testDescription {
@@ -500,7 +518,8 @@ func TestParseDescribeParams(t *testing.T) {
 func TestDescriptionErrorText(t *testing.T) {
 	t.Parallel()
 	cases := map[error]string{
-		pipeline.ErrNoNotes: "the Bridge has no notes for this book",
+		pipeline.ErrNoNotes:    "the Bridge has no notes for this book",
+		pipeline.ErrOneChapter: "the book has a single chapter, so no description leaves out its ending",
 		scheduler.ParkWithCode(state.ParkBudgetExceeded, "x"):           "the agent budget is spent",
 		scheduler.ParkWithCode(state.ParkAgentCredentialRefused, "x"):   "the agent's credential was refused",
 		scheduler.ParkWithCode(state.ParkAgentUnavailable, "x"):         "the agent isn't available",

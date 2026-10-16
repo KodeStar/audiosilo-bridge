@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/kodestar/audiosilo-meta/pkg/model"
@@ -35,8 +36,8 @@ const (
 const maxAttachment = 4 << 20
 
 // sidecars are a finished engine book's validated characters and recaps, as the
-// pipeline left them (pipeline.FinalSidecarsPaths), and its description when the
-// description step wrote one (pipeline.FinalDescriptionPath).
+// pipeline left them (pipeline.FinalSidecarsPaths), and the description the run's
+// description step read back (pipeline.FinalDescriptionPath), when it has one.
 type sidecars struct {
 	characters, recaps, description []byte
 	nChars, nRecaps                 int
@@ -56,19 +57,19 @@ func (s sidecars) hash() string {
 }
 
 // sidecarsSig is the size and modification time of the engine's sidecar files
-// ("" when none is there): a book parked at contributing is looked at every poll,
-// and unchanged files needn't be read and decoded again.
+// ("" when neither is there): a book parked at contributing is looked at every
+// poll, and unchanged files needn't be read and decoded again.
 func sidecarsSig(workDir string) string {
 	chars, recaps := pipeline.FinalSidecarsPaths(workDir)
 	var b strings.Builder
-	for _, p := range []string{chars, recaps, pipeline.FinalDescriptionPath(workDir)} {
+	for _, p := range []string{chars, recaps} {
 		if info, err := os.Stat(p); err == nil {
 			fmt.Fprintf(&b, "%d:%d;", info.Size(), info.ModTime().UnixNano())
 		} else {
 			b.WriteString("-;")
 		}
 	}
-	if sig := b.String(); sig != "-;-;-;" {
+	if sig := b.String(); sig != "-;-;" {
 		return sig
 	}
 	return ""
@@ -109,10 +110,10 @@ func readDescription(path string) ([]byte, model.Description, error) {
 	return b, d, nil
 }
 
-// readSidecars reads the engine's characters.json, recaps.json and
-// description.json: each must decode into the community model and fit the
-// server's size cap. A missing file is skipped; no characters and no recaps is an
-// error.
+// readSidecars reads the engine's characters.json and recaps.json: each must
+// decode into the community model and fit the server's size cap. A missing file is
+// skipped; neither present is an error. The description is never read here: the
+// run ships only the one its own step read back (write).
 func readSidecars(workDir string) (sidecars, error) {
 	var s sidecars
 	charsPath, recapsPath := pipeline.FinalSidecarsPaths(workDir)
@@ -125,9 +126,6 @@ func readSidecars(workDir string) (sidecars, error) {
 	}
 	if s.characters == nil && s.recaps == nil {
 		return sidecars{}, errors.New("the engine left no characters or recaps")
-	}
-	if s.description, _, err = readDescription(pipeline.FinalDescriptionPath(workDir)); err != nil {
-		return sidecars{}, err
 	}
 	if s.characters != nil {
 		var c model.Characters
@@ -289,8 +287,7 @@ const maxProvenance = 256 << 10
 // it is), or, when there is none (or it isn't a JSON object, or isn't a regular
 // file), fresh with the usual fields.
 func describedProvenance(dir, prefix string, fresh Provenance) ([]byte, error) {
-	path := filepath.Join(dir, AttachDir, prefix+provenanceName)
-	existing := readProvenance(path)
+	existing := readProvenance(filepath.Join(dir, AttachDir), prefix+provenanceName)
 	if existing == nil {
 		return indentJSON(fresh)
 	}
@@ -302,15 +299,35 @@ func describedProvenance(dir, prefix string, fresh Provenance) ([]byte, error) {
 	return indentJSON(existing)
 }
 
-// readProvenance reads a bridge.json as a JSON object, nil when there is none
-// fit to keep.
-func readProvenance(path string) map[string]json.RawMessage {
-	info, err := os.Lstat(path)
-	if err != nil || !info.Mode().IsRegular() || info.Size() > maxProvenance {
+// readProvenance reads adir/name (a bridge.json) as a JSON object, nil when there
+// is none fit to keep. The library is another program's folder, so the read is
+// the agent container's kind (agentproto.ReadRegular, which generate may not
+// import): inside adir as an os.Root, of the regular file that was looked at (a
+// link, FIFO or device swapped in after the look is refused, the open never
+// blocking), capped. A .audiosilo that is itself a link is not read through.
+func readProvenance(adir, name string) map[string]json.RawMessage {
+	if info, err := os.Lstat(adir); err != nil || !info.IsDir() {
 		return nil
 	}
-	raw, err := os.ReadFile(path) //nolint:gosec // the book's .audiosilo/ through the checked mapping
+	root, err := os.OpenRoot(adir)
 	if err != nil {
+		return nil
+	}
+	defer func() { _ = root.Close() }()
+	before, err := root.Lstat(name)
+	if err != nil || !before.Mode().IsRegular() || before.Size() > maxProvenance {
+		return nil
+	}
+	f, err := root.OpenFile(name, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil
+	}
+	defer func() { _ = f.Close() }()
+	if info, err := f.Stat(); err != nil || !os.SameFile(before, info) {
+		return nil
+	}
+	raw, err := io.ReadAll(io.LimitReader(f, maxProvenance+1))
+	if err != nil || len(raw) > maxProvenance {
 		return nil
 	}
 	var m map[string]json.RawMessage

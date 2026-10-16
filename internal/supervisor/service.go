@@ -333,21 +333,11 @@ func (s *Service) engineRunsAll(ctx context.Context) (map[int64][]store.StageRun
 // engineRuns drops the runs of a stage outside the engine's state machine (the
 // description step's "describing", which the Bridge's jobs run on a finished book):
 // the supervisor recovers engine stages only, and such a run, open with no
-// scheduler worker or done with no sentinel, would read as a broken one. With
-// nothing to drop it returns runs as it is.
+// scheduler worker or done with no sentinel, would read as a broken one. It
+// filters in place (each read's slice is its own) and returns runs as it is when
+// nothing is dropped.
 func engineRuns(runs []store.StageRun) []store.StageRun {
-	outside := func(r store.StageRun) bool { return !state.IsStage(state.State(r.Stage)) }
-	i := slices.IndexFunc(runs, outside)
-	if i < 0 {
-		return runs
-	}
-	out := slices.Clone(runs[:i])
-	for _, r := range runs[i+1:] {
-		if !outside(r) {
-			out = append(out, r)
-		}
-	}
-	return out
+	return slices.DeleteFunc(runs, func(r store.StageRun) bool { return !state.IsStage(state.State(r.Stage)) })
 }
 
 func primaryIncident(incidents []Incident) (Incident, bool) {

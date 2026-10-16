@@ -200,8 +200,9 @@ func ngramCheck(book store.Book, sidecars []string) ([]string, error) {
 
 // ngramScan is ngramCheck's scan: the findings, and the labels of the layers it
 // measured against (none when every layer is gone). The description step calls it
-// directly, since a book whose transcripts the retention purged still gets a
-// description (its agent never saw them) and says it wasn't checked.
+// directly, since a book whose source text is gone (the transcripts the retention
+// purged; an ebook's text, deleted at done) still gets a description (its agent
+// never saw it) and says it wasn't checked.
 func ngramScan(book store.Book, sidecars []string) (findings, checked []string, err error) {
 	workDir := book.WorkDir
 	sources := []ngramSource{

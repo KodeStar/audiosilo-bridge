@@ -353,14 +353,20 @@ func (s *Scheduler) reconcileBook(ctx context.Context, b store.Book, succeeded m
 	if state.IsTerminal(state.State(b.State)) {
 		return nil
 	}
+	// A run outside the state machine (the description step's "describing", called
+	// by the Bridge's jobs after the engine's stages) writes no sentinel and has no
+	// place in the order: rewinding to it would park the book in a state nothing
+	// runs, so only the machine's stages count.
+	var stages []string
+	for stage := range succeeded {
+		if state.IsStage(state.State(stage)) {
+			stages = append(stages, stage)
+		}
+	}
 	var rewind string
 	haveRewind := false
-	for stage := range succeeded {
-		// A run outside the state machine (the description step's "describing",
-		// called by the Bridge's jobs after the engine's stages) writes no sentinel
-		// and has no place in the order: rewinding to it would park the book in a
-		// state nothing runs.
-		if !state.IsStage(state.State(stage)) || SentinelExists(b.WorkDir, stage) {
+	for _, stage := range stages {
+		if SentinelExists(b.WorkDir, stage) {
 			continue
 		}
 		if !haveRewind || state.Order(state.State(stage)) < state.Order(state.State(rewind)) {
@@ -373,8 +379,8 @@ func (s *Scheduler) reconcileBook(ctx context.Context, b store.Book, succeeded m
 	// Supersede the DB success of the rewind stage and every later completed stage so
 	// their counts stay honest when the book re-advances (the rows - and their cost -
 	// are preserved, only their scheduling success is retired).
-	for stage := range succeeded {
-		if state.IsStage(state.State(stage)) && state.Order(state.State(stage)) >= state.Order(state.State(rewind)) {
+	for _, stage := range stages {
+		if state.Order(state.State(stage)) >= state.Order(state.State(rewind)) {
 			if err := s.db.SupersedeStageSuccesses(ctx, b.ID, stage); err != nil {
 				return err
 			}

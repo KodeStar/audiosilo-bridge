@@ -203,9 +203,12 @@ scheduler's `Hold` on the book) writes a spoiler-free
 description from the fact notes of the book's opening chapters ONLY (the staged dir
 holds `opening.md` and nothing else: no transcript, no `knowledge-final.md`, no later
 chapter), validated (shape, length, voice, meta's description schema, the n-gram
-check against whatever transcript layer is left) and composed with the run's work
-and sources. `sidecars.generate` runs it once at its finish and writes
-`description.json` with the others, but never fails, parks or holds for it (the
+check against whatever source text is left: the retention removes an audio book's
+transcripts, and an ebook's text goes as it reaches done, so an ebook is checked
+only when it is described at a contributing park) and composed with the run's work
+and sources. `sidecars.generate` runs it at its finish, after the characters and
+recaps are saved (once more at done when it first ran at a contributing park), and
+writes `description.json` with them, but never fails, parks or holds for it (the
 result says `description: false` and why); `sidecars.describe` (advertised beside
 `sidecars.generate`) writes one for a book already generated here, parking for the
 agent's parks. Local only: a contribution never carries it. See BRIDGE-PLAN.md's

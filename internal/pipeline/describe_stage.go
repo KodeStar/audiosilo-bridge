@@ -36,15 +36,19 @@ import (
 // sidecars.generate and sidecars.describe jobs and never by the scheduler, so the
 // readers of stage_runs that drive the state machine (reconcile, the supervisor)
 // skip it. Its runs count wherever spend is summed (the budgets, the estimates).
-const DescribeStage = "describing"
+// config's model maps route it under the same name (state.Describing).
+const DescribeStage = string(state.Describing)
 
 // What the description's no-verbatim check measured against
 // (DescribeResult.CheckedAgainst, bridge.json's description.checked_against).
 const (
 	CheckedTranscripts = "transcripts"
 	CheckedBookText    = "book text"
-	// CheckedNone: every source layer was gone (the transcript retention purged
-	// them), so nothing was checked. The agent never saw them either.
+	// CheckedNone: every source layer was gone, so nothing was checked: an audio
+	// book's transcripts after the retention purged them, and an ebook's text,
+	// which the engine deletes as the book reaches done (a licensing rule), so an
+	// ebook is only checked when its description is written at a contributing
+	// park. The agent never saw any of them either.
 	CheckedNone = "none"
 )
 
@@ -66,6 +70,11 @@ const (
 // validated characters.json (whose work and sources the description carries), no
 // manifest, or no fact notes for its opening chapters.
 var ErrNoNotes = errors.New("the book has no notes to describe it from")
+
+// ErrOneChapter is a book with a single story chapter: its opening is the whole
+// book, ending included, so the step writes no description for it (the window
+// never stages the last chapter).
+var ErrOneChapter = errors.New("the book has a single chapter, so no opening leaves out its ending")
 
 // DescribeResult is a written (or reused) description.
 type DescribeResult struct {
@@ -134,13 +143,15 @@ func (e *Executor) Describe(ctx context.Context, bookID int64, noWait bool) (Des
 	if err := checkComposable(chars); err != nil {
 		return DescribeResult{}, err
 	}
-	// The budgets before the preparation: a budget-parked retry costs nothing.
-	if err := e.budgetPreflight(ctx, book, state.State(DescribeStage)); err != nil {
-		return DescribeResult{}, err
-	}
+	// The preparation (local reads) before the budgets, so a call the budget parks
+	// still keeps the chapter positions while the transcripts are there; the budgets
+	// before the stage run and any spend: a budget-parked retry costs nothing.
 	sel, err := e.openingSelection(book)
 	if err != nil {
 		return DescribeResult{}, err
+	}
+	if sel.Logical == 1 {
+		return DescribeResult{}, ErrOneChapter
 	}
 	notes, err := buildOpeningNotes(book.WorkDir, sel.Files)
 	if err != nil {
@@ -148,6 +159,9 @@ func (e *Executor) Describe(ctx context.Context, bookID int64, noWait bool) (Des
 	}
 	if notes == "" {
 		return DescribeResult{}, fmt.Errorf("%w (no fact notes for the opening chapters)", ErrNoNotes)
+	}
+	if err := e.budgetPreflight(ctx, book, state.State(DescribeStage)); err != nil {
+		return DescribeResult{}, err
 	}
 
 	attempt, err := e.db.NextStageAttempt(ctx, book.ID, DescribeStage)
@@ -190,12 +204,17 @@ func (e *Executor) Describe(ctx context.Context, bookID int64, noWait bool) (Des
 
 	var composed []byte
 	var checked string
+	// checkErr is a local fault of the no-verbatim check (the disk, a transcript
+	// that can't be read): nothing the agent could fix, so the answer is taken and
+	// the run fails after it, never retried (and paid) with the Bridge's paths in
+	// the agent's prompt.
+	var checkErr error
 	validate := func(_ agent.Result, s *agent.Staging) error {
 		text, err := readDescriptionOut(s.OutDir())
 		if err != nil {
 			return err
 		}
-		if problems := descriptionProblems(text); len(problems) > 0 {
+		if problems := descriptionProblems(text, book.Title, book.Series); len(problems) > 0 {
 			return fmt.Errorf("out/%s: %s", descriptionFileName, strings.Join(problems, "; "))
 		}
 		raw, err := composedDescription(chars, text)
@@ -204,7 +223,8 @@ func (e *Executor) Describe(ctx context.Context, bookID int64, noWait bool) (Des
 		}
 		findings, layers, err := descriptionNGram(book, raw)
 		if err != nil {
-			return fmt.Errorf("the no-verbatim check could not run: %v", err)
+			checkErr = err
+			return nil
 		}
 		if len(findings) > 0 {
 			return fmt.Errorf("out/%s copies the book word for word; rewrite these runs in your own words: %s",
@@ -224,6 +244,9 @@ func (e *Executor) Describe(ctx context.Context, bookID int64, noWait bool) (Des
 	usage, err := e.runAgentWith(ctx, book, state.State(DescribeStage), scheduler.StageReport{}, st,
 		"description.md", data, false, validate, backoff)
 	usageMetrics := usage.metricsMap()
+	if err == nil && checkErr != nil {
+		err = fmt.Errorf("describe: the no-verbatim check could not run: %w", checkErr)
+	}
 	if err != nil {
 		return DescribeResult{CostUSD: fail(err, usageMetrics)}, err
 	}
@@ -297,7 +320,7 @@ func (e *Executor) reuseDescription(ctx context.Context, book store.Book, chars 
 		return DescribeResult{}, false
 	}
 	var d model.Description
-	if err := decodeSidecarBytes(cur, &d); err != nil || len(descriptionProblems(d.Text)) > 0 {
+	if err := decodeSidecarBytes(cur, &d); err != nil || len(descriptionProblems(d.Text, book.Title, book.Series)) > 0 {
 		return DescribeResult{}, false
 	}
 	run, err := e.db.LatestOkStageRun(ctx, book.ID, DescribeStage)
@@ -324,8 +347,10 @@ func (e *Executor) reuseDescription(ctx context.Context, book store.Book, chars 
 }
 
 // openingSelection is which audio files' (or ebook chapters') notes the agent
-// sees: the files whose LOGICAL position is 0 (front matter) or 1..K, with
-// K = max(2, ceil(logical/4)) capped at the logical count.
+// sees: the files whose LOGICAL position is 0 (front matter) or among the book's
+// first K story positions, K = max(2, ceil(logical/4)) capped at logical-1 (never
+// the last chapter), logical the count of story positions the files hold (capped
+// at the classifier's count).
 type openingSelection struct {
 	Files   []int // manifest chapter numbers, ascending
 	K       int
@@ -336,9 +361,11 @@ type openingSelection struct {
 	Basis string
 }
 
-// openingWindow is K for a book of logical story chapters.
+// openingWindow is K for a book of logical story chapters: a quarter of them,
+// two at least, and never the last one (its ending), so a book of two gets its
+// first only and a book of one none.
 func openingWindow(logical int) int {
-	return min(max(2, (logical+3)/4), logical)
+	return max(0, min(max(2, (logical+3)/4), logical-1))
 }
 
 // openingSelection classifies the book's chapters as the sidecar stages did
@@ -348,16 +375,16 @@ func openingWindow(logical int) int {
 // whose transcripts are gone uses those, else its file numbers (a file's number
 // is never below its story chapter, so that bound is safe, only less generous).
 func (e *Executor) openingSelection(book store.Book) (openingSelection, error) {
-	// One read: the chapters, and the fingerprint the kept positions are keyed by.
-	raw, err := os.ReadFile(filepath.Join(book.WorkDir, audio.ManifestName)) //nolint:gosec // the book's work dir
-	var m audio.Manifest
+	m, err := audio.ReadManifest(book.WorkDir)
+	var fp string
 	if err == nil {
-		err = json.Unmarshal(raw, &m)
+		// The kept positions are keyed by the pipeline's one meaning of "the
+		// chapter layout changed".
+		fp, err = manifestFingerprint(book.WorkDir)
 	}
 	if err != nil {
 		return openingSelection{}, fmt.Errorf("%w (no manifest: %v)", ErrNoNotes, err)
 	}
-	fp := hexSHA256(raw)
 	chapters := make([]int, 0, len(m.Chapters))
 	for _, c := range m.Chapters {
 		chapters = append(chapters, c.Chapter)
@@ -383,22 +410,42 @@ func (e *Executor) openingSelection(book store.Book) (openingSelection, error) {
 	}
 }
 
-// selectOpening picks the opening files from a classification. Excluded edge files
-// (an Audible intro, closing credits) are never story; end matter has no position.
+// selectOpening picks the opening files from a classification: front matter
+// (position 0) and the files at the book's first K story positions. Excluded edge
+// files (an Audible intro, closing credits) are never story; end matter has no
+// position. K counts the story positions the files hold, not the classifier's
+// LogicalCount alone: narrated numbering takes that from the highest announcement
+// it believed, so one late or misheard announcement ("Forty." opening the last of
+// twelve files) would widen the window far past the opening, and a sequel's
+// continued numbering (chapters 45 to 56) would leave no position inside 1..K. The
+// logical count still caps it: the "files" basis's positions are file numbers,
+// which can run past the story's count.
 func selectOpening(chapters []int, class edgeClassification, basis string) openingSelection {
-	sel := openingSelection{Logical: class.LogicalCount, K: openingWindow(class.LogicalCount), Basis: basis}
-	if sel.Logical < 1 {
-		return sel
-	}
 	excluded := map[int]bool{}
 	for _, c := range slices.Concat(class.ExcludedLeading, class.ExcludedTrailing) {
 		excluded[c] = true
 	}
+	positions := map[int]int{}
+	var story []int // the story positions (1 on) the retained files hold, distinct
 	for _, c := range chapters {
-		if excluded[c] {
+		pos, ok := class.PositionOf(c)
+		if excluded[c] || !ok || pos < 0 {
 			continue
 		}
-		if pos, ok := class.PositionOf(c); ok && pos >= 0 && pos <= sel.K {
+		positions[c] = pos
+		if pos >= 1 && !slices.Contains(story, pos) {
+			story = append(story, pos)
+		}
+	}
+	slices.Sort(story)
+	logical := min(len(story), class.LogicalCount)
+	sel := openingSelection{Logical: logical, K: openingWindow(logical), Basis: basis}
+	if sel.K < 1 {
+		return sel
+	}
+	last := story[sel.K-1]
+	for _, c := range chapters {
+		if pos, ok := positions[c]; ok && pos <= last {
 			sel.Files = append(sel.Files, c)
 		}
 	}
@@ -485,19 +532,17 @@ func fileClassification(workDir string, files int) edgeClassification {
 var sectionBreakRe = regexp.MustCompile(`^#{1,2}(\s|$)`)
 
 // buildOpeningNotes is opening.md: the `## Chapter N` sections of the chosen files,
-// copied mechanically from facts/facts-ch*.md with their file numbering kept, in
-// chapter order. Nothing else from facts/ (knowledge-final.md, the spelling
-// sheets, a chunk's preamble) is copied, and only the chunks covering one of the
-// files are read. "" when none of the files has notes.
+// copied mechanically from the fact chunks with their file numbering kept, in
+// chapter order. The chunks are the fact pass's own (chunk_plan.json, named by
+// factsChunkName), and only those covering one of the files are read; nothing
+// else from facts/ (knowledge-final.md, the spelling sheets, a chunk's preamble)
+// is copied. "" when none of the files has notes.
 func buildOpeningNotes(workDir string, files []int) (string, error) {
 	want := map[int]bool{}
 	for _, f := range files {
 		want[f] = true
 	}
-	covers := func(from, to int) bool {
-		return slices.ContainsFunc(files, func(f int) bool { return f >= from && f <= to })
-	}
-	entries, err := os.ReadDir(factsDirPath(workDir))
+	plan, err := loadChunkPlan(workDir)
 	if errors.Is(err, os.ErrNotExist) {
 		return "", nil
 	}
@@ -505,12 +550,14 @@ func buildOpeningNotes(workDir string, files []int) (string, error) {
 		return "", err
 	}
 	sections := map[int]string{}
-	for _, ent := range entries {
-		name := ent.Name()
-		if from, to, ok := factsChunkSpan(name); !ent.Type().IsRegular() || !ok || !covers(from, to) {
+	for _, c := range plan.Chunks {
+		if !slices.ContainsFunc(files, func(f int) bool { return f >= c.From && f <= c.To }) {
 			continue
 		}
-		raw, err := os.ReadFile(filepath.Join(factsDirPath(workDir), name)) //nolint:gosec // the book's work dir
+		raw, err := os.ReadFile(filepath.Join(factsDirPath(workDir), factsChunkName(c.From, c.To))) //nolint:gosec // the book's work dir
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
 		if err != nil {
 			return "", err
 		}
@@ -532,33 +579,21 @@ func buildOpeningNotes(workDir string, files []int) (string, error) {
 	return b.String(), nil
 }
 
-// factsChunkSpan is the inclusive file range a fact chunk's name
-// (facts-ch{from}-{to}.md, factsChunkName) covers; ok is false for any other name.
-func factsChunkSpan(name string) (from, to int, ok bool) {
-	rest, ok1 := strings.CutPrefix(name, factsChunkPrefix)
-	rest, ok2 := strings.CutSuffix(rest, ".md")
-	a, b, ok3 := strings.Cut(rest, "-")
-	if !ok1 || !ok2 || !ok3 {
-		return 0, 0, false
-	}
-	from, err1 := strconv.Atoi(a)
-	to, err2 := strconv.Atoi(b)
-	return from, to, err1 == nil && err2 == nil && from <= to
-}
-
 // factSections splits a fact chunk into its `## Chapter N` sections (heading
-// included), each running to the next level-1 or level-2 heading.
+// included), each running to the next level-1 or level-2 heading. A manifest may
+// number its files from 0 (a "Chapter 0" prologue), so 0 is a section like any
+// other; -1 is "in none".
 func factSections(text string) map[int]string {
 	out := map[int]string{}
-	cur := 0
+	cur := -1
 	var b strings.Builder
 	flush := func() {
-		if cur > 0 {
+		if cur >= 0 {
 			if s := strings.TrimRight(b.String(), " \t\r\n"); s != "" {
 				out[cur] = s + "\n"
 			}
 		}
-		cur = 0
+		cur = -1
 		b.Reset()
 	}
 	for _, line := range strings.SplitAfter(text, "\n") {
@@ -566,12 +601,12 @@ func factSections(text string) map[int]string {
 		if sectionBreakRe.MatchString(trimmed) {
 			flush()
 			if m := factsHeadingRe.FindStringSubmatch(trimmed); m != nil {
-				if n, err := strconv.Atoi(m[1]); err == nil && n > 0 {
+				if n, err := strconv.Atoi(m[1]); err == nil {
 					cur = n
 				}
 			}
 		}
-		if cur > 0 {
+		if cur >= 0 {
 			b.WriteString(line)
 		}
 	}
@@ -611,19 +646,28 @@ func readDescriptionOut(outDir string) (string, error) {
 // The voice rules a description is held to (AUTHORING.md's `description`
 // contract): no second person, no rhetorical question, no sales words.
 var (
-	secondPersonRe = regexp.MustCompile(`(?i)\b(you|your|yours|yourself|yourselves)\b`)
+	// Word edges by Unicode letter, mark and digit: RE2's \b is ASCII only, so
+	// "Xīyou" would hold a "you".
+	secondPersonRe = regexp.MustCompile(`(?i)(?:^|[^\p{L}\p{M}\p{N}_])(you|your|yours|yourself|yourselves)(?:[^\p{L}\p{M}\p{N}_]|$)`)
 	// A question mark ending a sentence: followed (after any closing quote or
 	// bracket) by a space or the end of the text.
-	questionRe       = regexp.MustCompile(`\?["'\x{201D}\x{2019})\]]*(\s|$)`)
-	salesWordRe      = regexp.MustCompile(`(?i)\b(gripping|unputdownable|page-turners?|must-reads?|masterpieces?|breathtaking|captivating|riveting|thrilling|unforgettable)\b`)
-	paragraphBreakRe = regexp.MustCompile(`\n\s*\n`)
+	questionRe  = regexp.MustCompile(`\?["'\x{201D}\x{2019})\]]*(\s|$)`)
+	salesWordRe = regexp.MustCompile(`(?i)\b(gripping|unputdownable|page-turners?|must-reads?|masterpieces?|breathtaking|captivating|riveting|thrilling|unforgettable)\b`)
+	// A blank line, a no-break space (\p{Zs}) on it included.
+	paragraphBreakRe = regexp.MustCompile(`\n[\s\p{Zs}]*\n`)
 )
 
 // descriptionProblems lists what is wrong with a (trimmed) description text, none
-// when it passes. Each is worded for the agent's retry.
-func descriptionProblems(text string) []string {
+// when it passes. Each is worded for the agent's retry. names are the book's own
+// (its title, its series), which the voice rules skip: "Me Before You" is no second
+// person, "Do Androids Dream of Electric Sheep?" no rhetorical question and "The
+// Masterpiece" no sales word, and a description may name its book.
+func descriptionProblems(text string, names ...string) []string {
 	var out []string
-	if strings.ContainsFunc(text, func(r rune) bool { return unicode.IsControl(r) && r != '\n' }) {
+	// The line and paragraph separators too: only a plain newline separates.
+	if strings.ContainsFunc(text, func(r rune) bool {
+		return unicode.IsControl(r) && r != '\n' || r == '\u2028' || r == '\u2029'
+	}) {
 		out = append(out, "the text holds a control character (only plain newlines between paragraphs are allowed)")
 	}
 	if hasEmDash(text) {
@@ -636,17 +680,46 @@ func descriptionProblems(text string) []string {
 	if n := len(paragraphBreakRe.Split(text, -1)); n > descriptionMaxParagraphs {
 		out = append(out, fmt.Sprintf("the text has %d paragraphs; write one, two at most", n))
 	}
-	if w := secondPersonRe.FindString(text); w != "" {
-		out = append(out, fmt.Sprintf("the text addresses the reader (%q); write in the third person", w))
+	voice := withoutNames(text, names)
+	if m := secondPersonRe.FindStringSubmatch(voice); m != nil {
+		out = append(out, fmt.Sprintf("the text addresses the reader (%q); write in the third person", m[1]))
 	}
-	if questionRe.MatchString(text) {
+	if questionRe.MatchString(voice) {
 		out = append(out, "a sentence ends in a question mark; state the premise instead of asking")
 	}
-	if words := salesWordRe.FindAllString(text, -1); len(words) > 0 {
+	if words := salesWordRe.FindAllString(voice, -1); len(words) > 0 {
 		out = append(out, fmt.Sprintf("the text uses sales language (%s); keep a neutral reference-guide voice",
 			strings.Join(words, ", ")))
 	}
 	return out
+}
+
+// withoutNames is text with each of names, and a name's part before a subtitle
+// colon ("Me Before You: A Novel"), replaced by a space (case-insensitively, as
+// whole words where a name starts or ends with one), for the voice rules.
+func withoutNames(text string, names []string) string {
+	for _, name := range names {
+		short, _, _ := strings.Cut(name, ":")
+		for _, n := range []string{name, short} {
+			if n = strings.TrimSpace(n); n == "" {
+				continue
+			}
+			pat := regexp.QuoteMeta(n)
+			if r, _ := utf8.DecodeRuneInString(n); isASCIIWordRune(r) {
+				pat = `\b` + pat
+			}
+			if r, _ := utf8.DecodeLastRuneInString(n); isASCIIWordRune(r) {
+				pat += `\b`
+			}
+			text = regexp.MustCompile(`(?i)`+pat).ReplaceAllString(text, " ")
+		}
+	}
+	return text
+}
+
+// isASCIIWordRune reports whether r is a word character to RE2's \b.
+func isASCIIWordRune(r rune) bool {
+	return r == '_' || r < utf8.RuneSelf && (unicode.IsLetter(r) || unicode.IsDigit(r))
 }
 
 // descriptionNGram runs the no-verbatim check over a composed description against

@@ -32,8 +32,9 @@ const KIND_LABELS: Record<string, string> = {
 };
 
 // kindLabel words a job kind ("" for one with no label: the kind shows as it is).
+// Own keys only: a kind like "constructor" must not find Object's.
 export function kindLabel(kind: string): string {
-  return KIND_LABELS[kind] ?? '';
+  return Object.hasOwn(KIND_LABELS, kind) ? KIND_LABELS[kind] : '';
 }
 
 // parkOf is a running job's park (null when it isn't parked). The Bridge keeps
@@ -164,7 +165,7 @@ export function descriptionText(r: GenerateResult): string {
 export function checkedText(c: CheckedAgainst): string {
   if (c === 'transcripts') return 'checked against the transcripts';
   if (c === 'book text') return 'checked against the book text';
-  return 'not checked: the transcripts were already removed';
+  return 'not checked: the source text was already removed';
 }
 
 // parseDescribeResult reads a done description-only job's result, or null when

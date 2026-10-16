@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 
 	"github.com/kodestar/audiosilo-bridge/internal/agent"
 	"github.com/kodestar/audiosilo-bridge/internal/jobs"
@@ -33,6 +34,7 @@ const (
 	errDescribeGenerating describeFailure = "A generate job is still running for this book; it writes the description when it finishes."
 	errDescribeChecks     describeFailure = "Couldn't write a description that passed the checks."
 	errBookBusy           describeFailure = "The engine is busy with this book; try again in a minute."
+	errDescribeOneChapter describeFailure = "This book has a single chapter, so no description could leave out its ending."
 )
 
 // holdTries bounds the wait for the engine's hold on a book (a stage just
@@ -98,15 +100,21 @@ func (d *DescribeJob) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter)
 	if desc == nil {
 		return nil, errors.New("the Bridge's engine can't write descriptions")
 	}
-	// Strict: nothing is spent yet, so a library that isn't mapped and writable
-	// fails the job at once instead of waiting.
-	if err := h.prepare(ctx, r, true); err != nil {
+	// Strict when new: nothing is spent yet, so a library that isn't mapped and
+	// writable fails the job at once. A resumed one (its description may be paid
+	// for already) parks library_not_writable and waits, as a resumed generate job
+	// does.
+	if err := h.prepare(ctx, r, !job.Resumed); err != nil {
 		return nil, err
 	}
 	b, err := h.notesBook(ctx, r)
 	if err != nil {
 		return nil, err
 	}
+	// The job has its engine book now: from here a park of its own is lifted by
+	// the step that clears it (the save that goes through), never between two tries
+	// (unparkOwn), which the server would hear as a new park each time.
+	r.bookID = b.ID
 	got, spent, err := h.describeParked(ctx, r, desc, b.ID)
 	if err != nil {
 		return nil, err
@@ -124,11 +132,15 @@ func (d *DescribeJob) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter)
 
 // notesBook is the engine book whose notes describe the book: the latest run at
 // its source path, else the latest generate job's book at its library path (a book
-// that moved since). None, or one still running, fails the job.
+// that moved while that job ran), else the run its own bridge.json names (a book
+// that moved after). None, or one still running, fails the job.
 func (h *Handler) notesBook(ctx context.Context, r *run) (store.Book, error) {
 	b, err := h.bookAtSource(ctx, r)
 	if errors.Is(err, store.ErrNotFound) {
 		b, err = h.latestGenerated(ctx, r)
+	}
+	if errors.Is(err, store.ErrNotFound) {
+		b, err = h.namedRun(ctx, r)
 	}
 	if errors.Is(err, store.ErrNotFound) {
 		return store.Book{}, errDescribeNoNotes
@@ -145,11 +157,7 @@ func (h *Handler) notesBook(ctx context.Context, r *run) (store.Book, error) {
 	if len(open) > 0 || (b.Status == "" && state.State(b.State) != state.Done) {
 		return store.Book{}, errDescribeGenerating
 	}
-	if b.Kind == string(state.KindEbook) {
-		r.source, r.epub = SourceEbook, b.EbookPath
-	} else {
-		r.source = SourceAudio
-	}
+	r.sourceOf(b)
 	return b, nil
 }
 
@@ -164,13 +172,55 @@ func (h *Handler) bookAtSource(ctx context.Context, r *run) (store.Book, error) 
 }
 
 // latestGenerated is the latest generate job's surviving engine book at the book's
-// library path (store.ErrNotFound for none).
+// library path (store.ErrNotFound for none). A library id and path are the
+// server's, and repeat across servers: a run made for another server's library
+// (the Bridge paired anew) lies outside this library's folder, so it is none.
 func (h *Handler) latestGenerated(ctx context.Context, r *run) (store.Book, error) {
 	id, err := h.o.DB.LatestGenerateBookAt(ctx, r.lib.ID, r.rel)
 	if err != nil {
 		return store.Book{}, err
 	}
-	return h.o.DB.GetBook(ctx, id)
+	b, err := h.o.DB.GetBook(ctx, id)
+	if err != nil {
+		return store.Book{}, err
+	}
+	if _, ok, err := metaops.AllowedPath(b.SourcePath, []string{r.mount}); err != nil || !ok {
+		return store.Book{}, store.ErrNotFound
+	}
+	return b, nil
+}
+
+// namedRun is the engine book of the generate job the book's own bridge.json
+// names (store.ErrNotFound for none): a book that moved after its job ended took
+// that file along, while the Bridge's records (the book's source path, the job's
+// mapping) stayed at the old place. Only this library's run, at a source inside its
+// folder, counts; the job's mapping follows the book from then on.
+func (h *Handler) namedRun(ctx context.Context, r *run) (store.Book, error) {
+	prov := readProvenance(filepath.Join(r.place.dir, AttachDir), r.place.prefix+provenanceName)
+	var kind string
+	var jobID int64
+	if prov == nil || json.Unmarshal(prov["kind"], &kind) != nil || json.Unmarshal(prov["job_id"], &jobID) != nil ||
+		kind != Kind || jobID == 0 {
+		return store.Book{}, store.ErrNotFound
+	}
+	m, err := h.o.DB.GetGenerateBook(ctx, jobID)
+	if err != nil {
+		return store.Book{}, err
+	}
+	if m.BookID == nil || m.LibraryID != r.lib.ID {
+		return store.Book{}, store.ErrNotFound
+	}
+	b, err := h.o.DB.GetBook(ctx, *m.BookID)
+	if err != nil {
+		return store.Book{}, err
+	}
+	if _, ok, err := metaops.AllowedPath(b.SourcePath, []string{r.mount}); err != nil || !ok {
+		return store.Book{}, store.ErrNotFound
+	}
+	if err := h.o.DB.SetGenerateBookPath(ctx, jobID, r.rel); err != nil {
+		h.o.Log.Warn("generate: recording the book's new path failed", "job", jobID, "err", err)
+	}
+	return b, nil
 }
 
 // described is a description the step wrote (or reused), read back from the
@@ -236,9 +286,9 @@ func (h *Handler) describeParked(ctx context.Context, r *run, d Describer, bookI
 		var park *scheduler.ParkError
 		switch {
 		case err == nil:
-			if parked {
-				r.rep.Unpark()
-			}
+			// Lifts this loop's park, and one the runner restored for a job that
+			// resumed after a restart (nothing when there is none).
+			r.rep.Unpark()
 			return got, spent, nil
 		case ctx.Err() != nil:
 			return described{}, spent, ctx.Err()
@@ -246,11 +296,23 @@ func (h *Handler) describeParked(ctx context.Context, r *run, d Describer, bookI
 			return described{}, spent, err
 		case errors.Is(err, pipeline.ErrNoNotes):
 			return described{}, spent, errDescribeNoNotes
+		case errors.Is(err, pipeline.ErrOneChapter):
+			return described{}, spent, errDescribeOneChapter
 		case errors.As(err, &park) && park.Code == state.ParkAgentValidationExhausted:
 			h.o.Log.Warn("generate: the description kept failing its checks", "job", r.job.ID, "err", err)
 			return described{}, spent, errDescribeChecks
 		case errors.As(err, &park):
 			parked = true
+			if !park.RetryAfter.IsZero() {
+				// A Retry pressed while that try ran was answered by it: only one
+				// pressed once this park is reported tries again before its
+				// retry_at. (A park without one waits for a press, so a press made
+				// meanwhile, after raising the budget say, is kept.)
+				select {
+				case <-r.poke:
+				default:
+				}
+			}
 			h.parkDescribe(r, park, spent)
 			if err := h.recheckWait(ctx, r, park.RetryAfter); err != nil {
 				return described{}, spent, err
@@ -307,7 +369,7 @@ func (h *Handler) saveDescription(ctx context.Context, r *run, got described, sp
 	r.rep.Progress(jobs.Progress{Step: stepRescanning, Message: "Asking the server to read it", Done: 1, Total: 1,
 		Extra: r.describeExtra(spent)})
 	h.rescan(ctx, r)
-	return []string{r.place.prefix + descriptionName, r.place.prefix + provenanceName}, nil
+	return attachmentNames(r.place.prefix, sidecars{description: got.raw}), nil
 }
 
 // describer is the engine's description step (nil until it started).
@@ -322,26 +384,40 @@ func (h *Handler) describer() Describer {
 // engine's sidecars are final (done, or parked at contributing). It never fails,
 // parks or holds the job: a rate limit is not waited out, an engine that keeps the
 // book (a few polls) is given up on, and any error leaves the job to finish with
-// its characters and recaps, its result saying why there is no description.
-func (h *Handler) describeOnce(ctx context.Context, r *run, b store.Book) {
-	if r.descTried {
-		return
+// its characters and recaps, its result saying why there is no description. A run
+// that asked at a contributing park asks once more at done: the contributing
+// stage may have resolved the work and sources since, and the step re-composes the
+// kept text with them (nothing spent), so the description never ships beside
+// characters and recaps that name another work; a try at the park that failed
+// without spending (a rate limit, the budget, a busy engine) gets its second go.
+// It reports whether it asked (the description may have changed).
+func (h *Handler) describeOnce(ctx context.Context, r *run, b store.Book) bool {
+	done := state.State(b.State) == state.Done
+	if r.descTried && (!done || r.descDone || (r.desc == nil && r.descPaid)) {
+		return false
 	}
-	r.descTried = true
+	r.descTried, r.descDone = true, done
 	d := h.describer()
 	if d == nil {
 		r.descErr = "the Bridge's engine can't write descriptions"
-		return
+		return false
 	}
 	r.rep.Progress(jobs.Progress{Step: pipeline.DescribeStage, Message: "Writing a description",
-		Extra: map[string]any{"stage": b.State, "source": r.source}})
+		Extra: r.bookExtra(b)})
 	got, err := h.describeHeld(ctx, d, b.ID, true)
-	if err != nil {
-		r.descErr = descriptionErrorText(err)
-		h.o.Log.Warn("generate: no description; the job finishes without one", "job", r.job.ID, "err", err)
-		return
+	if err != nil && r.desc != nil {
+		// The re-compose at done failed: the park's description stands (as the
+		// park had its work).
+		h.o.Log.Warn("generate: the description wasn't composed again at done; the park's stands", "job", r.job.ID, "err", err)
+		return false
 	}
-	r.desc = &got.res
+	if err != nil {
+		r.descErr, r.descPaid = descriptionErrorText(err), got.res.CostUSD > 0
+		h.o.Log.Warn("generate: no description; the job finishes without one", "job", r.job.ID, "err", err)
+		return true
+	}
+	r.desc, r.descRaw, r.descErr = &got.res, got.raw, ""
+	return true
 }
 
 // descriptionErrorText is a generate result's short plain reason for having no
@@ -351,6 +427,8 @@ func descriptionErrorText(err error) string {
 	switch {
 	case errors.Is(err, pipeline.ErrNoNotes):
 		return "the Bridge has no notes for this book"
+	case errors.Is(err, pipeline.ErrOneChapter):
+		return "the book has a single chapter, so no description leaves out its ending"
 	case errors.Is(err, errBookBusy):
 		return "the engine was busy with this book"
 	case errors.As(err, &park):

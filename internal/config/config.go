@@ -408,18 +408,21 @@ func Default() Config {
 
 // defaultClaudeModels seeds the claude model routing map: which model runs each
 // agent stage under the claude backend. Cheap stages get sonnet; the load-bearing
-// synthesis/audit/fix stages get opus. Model aliases ("sonnet"/"opus"/"haiku") are
-// what the claude CLI accepts - never a pinned vendor model id. The openai map is
-// intentionally empty (an unset codex model = the codex CLI's default model).
+// synthesis/audit/fix stages get opus. The description step (state.Describing, one
+// small notes file in, one paragraph out) is a cheap one too. Model aliases
+// ("sonnet"/"opus"/"haiku") are what the claude CLI accepts - never a pinned vendor
+// model id. The openai map is intentionally empty (an unset codex model = the codex
+// CLI's default model).
 func defaultClaudeModels() map[string]string {
 	return map[string]string{
-		"markers_normalizing": "sonnet",
-		"qa_adjudicating":     "sonnet",
-		"spelling_research":   "sonnet",
-		"fact_pass":           "sonnet",
-		"synthesizing":        "opus",
-		"auditing":            "opus",
-		"fixing":              "opus",
+		"markers_normalizing":    "sonnet",
+		"qa_adjudicating":        "sonnet",
+		"spelling_research":      "sonnet",
+		"fact_pass":              "sonnet",
+		"synthesizing":           "opus",
+		"auditing":               "opus",
+		"fixing":                 "opus",
+		string(state.Describing): "sonnet",
 	}
 }
 
@@ -837,14 +840,15 @@ func (c Config) Validate() error {
 			return fmt.Errorf("pricing.rates[%q] values must be >= 0", key)
 		}
 	}
-	// Model-map keys must name agent-lane stages; a typo would silently never route.
+	// Model-map keys must name agent-lane stages (or the description step); a typo
+	// would silently never route.
 	for key := range c.Agent.Claude {
-		if !state.IsAgent(state.State(key)) {
+		if !state.RoutesModel(state.State(key)) {
 			return fmt.Errorf("agent.claude has key %q, which is not an agent stage", key)
 		}
 	}
 	for key := range c.Agent.OpenAI {
-		if !state.IsAgent(state.State(key)) {
+		if !state.RoutesModel(state.State(key)) {
 			return fmt.Errorf("agent.openai has key %q, which is not an agent stage", key)
 		}
 	}

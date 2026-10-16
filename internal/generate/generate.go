@@ -184,17 +184,14 @@ type run struct {
 	progress []store.Progress
 	costUSD  float64
 	// side is the sidecars last read and sideSig their files' signature, so
-	// unchanged files aren't read again; sideHash is their content hash (with the
-	// description when sideHashDesc), so it isn't computed again either; written
-	// is the hash of the sidecars last written ("" for none yet); writeErr the
-	// last failed write's error, logged once.
-	side         sidecars
-	sideSig      string
-	sideHash     string
-	sideHashDesc bool
-	written      string
-	writeErr     string
-	srv          Server
+	// unchanged files aren't read again; written is the hash of the sidecars last
+	// written ("" for none yet); writeErr the last failed write's error, logged
+	// once.
+	side     sidecars
+	sideSig  string
+	written  string
+	writeErr string
+	srv      Server
 	// jobPath is the job's path as the server last gave it (the claim, then the
 	// answers to the job's reports): when it changes, the server moved the job with
 	// its book, and rel follows it.
@@ -206,11 +203,16 @@ type run struct {
 	poke     chan struct{}
 	ownPark  bool
 	resuming bool
-	// descTried says this run asked for the description (once per run); desc is
-	// the description it got, descErr why it got none.
+	// descTried says this run asked for the description, descDone that it asked
+	// with the book done (a run asks at most twice: at a contributing park, then at
+	// done); desc is the description it got and descRaw its file as read back,
+	// descErr why it got none and descPaid that the try which failed spent.
 	descTried bool
+	descDone  bool
 	desc      *pipeline.DescribeResult
+	descRaw   []byte
 	descErr   string
+	descPaid  bool
 }
 
 // bookKey is what changes on an engine book row when the scheduler moves it.
@@ -509,7 +511,7 @@ func (h *Handler) waitMapped(ctx context.Context, r *run, strict bool) error {
 			if st.Error != "" {
 				why += " (" + st.Error + ")"
 			}
-			return fmt.Errorf("library %q %s, so the Bridge can't write the book's characters and recaps", r.lib.Name, why)
+			return fmt.Errorf("library %q %s, so the Bridge can't write into the book's folder", r.lib.Name, why)
 		default:
 			h.park(r, parkLibraryNotWritable, "library "+r.lib.Name+" isn't mapped and writable on the Bridge any more")
 		}
@@ -633,9 +635,8 @@ func (h *Handler) create(ctx context.Context, eng Engine, r *run) error {
 		if len(open) > 0 {
 			return fmt.Errorf("job %d is already generating this book; cancel it first", open[0])
 		}
-		// A description reading the earlier run holds the book: Delete says busy.
-		if err := eng.Delete(ctx, old.ID); errors.Is(err, scheduler.ErrBusy) {
-			return errors.New("the engine is still running a stage of this book's earlier run; try again in a minute")
+		if err := h.deleteEarlier(ctx, eng, r, old.ID); errors.Is(err, scheduler.ErrBusy) {
+			return errors.New("the engine is still busy with this book's earlier run; try again in a minute")
 		} else if err != nil && !errors.Is(err, store.ErrNotFound) {
 			return fmt.Errorf("could not clear the book's earlier run: %w", err)
 		}
@@ -661,6 +662,24 @@ func (h *Handler) create(ctx context.Context, eng Engine, r *run) error {
 	h.o.Log.Info("generate: queued in the engine", "job", r.job.ID, "book", b.ID, "source", r.source, "path", r.rel)
 	eng.Notify()
 	return nil
+}
+
+// deleteEarlier deletes the engine book of the book's earlier run, waiting a few
+// polls (holdTries) while the engine is busy with it: a description reading it,
+// which the server asked to give way to this job and which lets go at its next
+// report, or a stage the earlier job's end just stopped. scheduler.ErrBusy when it
+// stays busy.
+func (h *Handler) deleteEarlier(ctx context.Context, eng Engine, r *run, id int64) error {
+	for i := 1; ; i++ {
+		err := eng.Delete(ctx, id)
+		if !errors.Is(err, scheduler.ErrBusy) || i == holdTries {
+			return err
+		}
+		r.rep.Progress(jobs.Progress{Step: stepWaiting, Message: "Waiting for the engine to let go of the book's earlier run"})
+		if err := agent.SleepCtx(ctx, h.o.Poll); err != nil {
+			return err
+		}
+	}
 }
 
 // newBook is the engine book for the job, as sidecars' intake built it from a
@@ -717,11 +736,7 @@ func (h *Handler) attach(ctx context.Context, eng Engine, r *run, m store.Genera
 			return err
 		}
 	}
-	if b.Kind == string(state.KindEbook) {
-		r.source, r.epub = SourceEbook, b.EbookPath
-	} else {
-		r.source, r.epub = SourceAudio, ""
-	}
+	r.sourceOf(b)
 	if scheduler.IsCancelled(b) {
 		if err := eng.Retry(ctx, b.ID); err != nil && !errors.Is(err, scheduler.ErrInvalidOp) {
 			return err
@@ -730,6 +745,27 @@ func (h *Handler) attach(ctx context.Context, eng Engine, r *run, m store.Genera
 	}
 	h.o.Log.Info("generate: following the engine book again", "job", r.job.ID, "book", b.ID, "state", b.State)
 	return nil
+}
+
+// bookExtra is a progress Extra for a step on the engine book b: its stage and
+// the run's source, and its park while it is parked (a write at a contributing
+// park keeps the park in what the job reports).
+func (r *run) bookExtra(b store.Book) map[string]any {
+	extra := map[string]any{"stage": b.State, "source": r.source}
+	if state.Status(b.Status) == state.StatusNeedsAttention {
+		extra["park"] = parkExtra(b.ParkCode, b.RetryAt)
+	}
+	return extra
+}
+
+// sourceOf takes the run's source (and its .epub) from the engine book whose notes
+// it follows: an ebook-kind book read its .epub, any other the audio.
+func (r *run) sourceOf(b store.Book) {
+	if b.Kind == string(state.KindEbook) {
+		r.source, r.epub = SourceEbook, b.EbookPath
+	} else {
+		r.source, r.epub = SourceAudio, ""
+	}
 }
 
 // follow reports the engine book's progress until it is done (then writes and
@@ -787,7 +823,11 @@ func (h *Handler) step(ctx context.Context, eng Engine, r *run, b store.Book) (a
 		return nil, true, fmt.Errorf("the engine failed the book at %s: %s", b.State, b.Error)
 	}
 	r.rep.Progress(describe(v))
-	if status == state.StatusNeedsAttention && st == state.Contributing {
+	parked := status == state.StatusNeedsAttention
+	// The park is the job's before the write below, which can take a while (the
+	// description step may wait for an agent slot): the server hears it at once.
+	r.engineParked(parked, b.ParkCode, b.Error)
+	if parked && st == state.Contributing {
 		_, err := h.write(ctx, r, b, false)
 		if msg := errText(err); msg != r.writeErr {
 			r.writeErr = msg
@@ -796,8 +836,10 @@ func (h *Handler) step(ctx context.Context, eng Engine, r *run, b store.Book) (a
 			}
 		}
 		r.rep.Progress(describe(v)) // the park again, after the write's own steps
+		// A park of the Bridge's own the write raised and lifted leaves the
+		// engine's to report again.
+		r.engineParked(true, b.ParkCode, b.Error)
 	}
-	r.engineParked(status == state.StatusNeedsAttention, b.ParkCode, b.Error)
 	return nil, false, nil
 }
 
@@ -808,8 +850,9 @@ func (h *Handler) finish(ctx context.Context, r *run, b store.Book, cost float64
 	if err != nil {
 		return nil, err
 	}
-	if r.desc != nil && !r.desc.Reused {
-		// The description was paid for after the cost was read.
+	if r.descTried {
+		// The description step may have spent after the cost was read (a try that
+		// failed its checks is paid for too), and the budgets count it.
 		if c, _, err := h.o.DB.SumStageRunBudgetCost(ctx, b.ID); err == nil {
 			cost = c
 		}
@@ -847,17 +890,30 @@ func (h *Handler) finish(ctx context.Context, r *run, b store.Book, cost float64
 // every Recheck (or on Retry) until it goes through: the sidecars stay in the
 // engine's work dir meanwhile, never lost to a failed job. Without (a book parked
 // at contributing, looked at every poll) the failure is returned.
+//
+// The characters and recaps go first, then the description step runs (once per
+// run, see describeOnce) and a description it got follows in a second save: the
+// step can wait a long time for an agent slot behind other books, and the
+// optional description never holds back the files the job exists for.
 func (h *Handler) write(ctx context.Context, r *run, b store.Book, wait bool) (sidecars, error) {
-	h.describeOnce(ctx, r, b)
+	s, err := h.writeSidecars(ctx, r, b, wait)
+	if err != nil || !h.describeOnce(ctx, r, b) {
+		return s, err
+	}
+	return h.writeSidecars(ctx, r, b, wait)
+}
+
+// writeSidecars is one write of the sidecars as they are now (the description the
+// run has so far with them), skipped when that content was written already.
+func (h *Handler) writeSidecars(ctx context.Context, r *run, b store.Book, wait bool) (sidecars, error) {
 	s, err := r.loadSidecars(b.WorkDir)
 	if err != nil {
 		return sidecars{}, err
 	}
-	if r.desc == nil {
-		// Only a description this run vouches for (and can say how it was made).
-		s.description = nil
-	}
-	sum := r.sidecarsHash(s)
+	// Only the description this run's step read back, under the engine's hold (it
+	// can say how that was made); none when it got none.
+	s.description = r.descRaw
+	sum := s.hash()
 	if sum == r.written {
 		return s, nil
 	}
@@ -867,7 +923,7 @@ func (h *Handler) write(ctx context.Context, r *run, b store.Book, wait bool) (s
 		wait:   wait,
 		record: true,
 		progress: jobs.Progress{Step: stepWriting, Message: "Saving the characters and recaps with the book",
-			Extra: map[string]any{"stage": b.State, "source": r.source}},
+			Extra: r.bookExtra(b)},
 		files: func(place) ([]attachFile, error) {
 			prov := provenance(h.o.Version, Kind, r.job.ID, h.now(), r.source, workID, inputsOf(r.mount, r.files, r.epub))
 			if s.description != nil {
@@ -882,7 +938,7 @@ func (h *Handler) write(ctx context.Context, r *run, b store.Book, wait bool) (s
 	r.written = sum
 	h.o.Log.Info("generate: wrote the book's attachments", "job", r.job.ID, "path", r.rel, "files", attachmentNames(r.place.prefix, s))
 	r.rep.Progress(jobs.Progress{Step: stepRescanning, Message: "Asking the server to read them",
-		Extra: map[string]any{"stage": b.State, "source": r.source}})
+		Extra: r.bookExtra(b)})
 	h.rescan(ctx, r)
 	return s, nil
 }
@@ -1011,17 +1067,8 @@ func (r *run) loadSidecars(workDir string) (sidecars, error) {
 	if err != nil {
 		return sidecars{}, err
 	}
-	r.side, r.sideSig, r.sideHash = s, sig, ""
+	r.side, r.sideSig = s, sig
 	return s, nil
-}
-
-// sidecarsHash is s's content hash: s is the sidecars last read, with or without
-// their description, and the hash is computed once per read for each.
-func (r *run) sidecarsHash(s sidecars) string {
-	if withDesc := s.description != nil; r.sideHash == "" || r.sideHashDesc != withDesc {
-		r.sideHash, r.sideHashDesc = s.hash(), withDesc
-	}
-	return r.sideHash
 }
 
 // attachmentNames are the names a write produces for s.
@@ -1082,6 +1129,15 @@ func (h *Handler) Retry(ctx context.Context, jobID int64) error {
 			}
 		}
 		return waiting
+	}
+	// A description-only job's parks are all its own (they wait for the poke); its
+	// id may still map to an engine book in generate_books, an earlier server's
+	// generate job under the same id, which is not this job's to re-admit.
+	if sj, err := h.o.DB.GetServerJob(ctx, jobID); err == nil && sj.Kind == DescribeKind {
+		if poke() {
+			return nil
+		}
+		return store.ErrNotFound
 	}
 	m, err := h.o.DB.GetGenerateBook(ctx, jobID)
 	if errors.Is(err, store.ErrNotFound) || (err == nil && m.BookID == nil) {

@@ -158,8 +158,8 @@ export interface GenerateResult {
   description_error?: string;
 }
 
-// What a description's no-verbatim check measured against ("none": the
-// transcripts were already removed).
+// What a description's no-verbatim check measured against ("none": the source
+// text was already removed: an audio book's transcripts, or an ebook's text).
 export type CheckedAgainst = 'transcripts' | 'book text' | 'none';
 
 // generate.DescribeJobResult (a sidecars.describe job's result).

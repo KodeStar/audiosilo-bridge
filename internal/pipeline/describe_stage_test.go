@@ -56,14 +56,42 @@ func TestSelectOpening(t *testing.T) {
 			want:  []int{2, 3, 4}, k: 3,
 		},
 		{
+			// Never the last chapter: a book of two gets its first.
 			name:  "end matter has no position",
 			class: edgeClassification{LogicalCount: 2, ExcludedTrailing: []int{10}, EndMatter: []int{3}, Positions: map[int]int{1: 1, 2: 2}},
-			want:  []int{1, 2}, k: 2,
+			want:  []int{1}, k: 1,
+		},
+		{
+			// A book of one has no opening that leaves out its ending.
+			name:  "a single chapter",
+			class: edgeClassification{LogicalCount: 1, FrontMatter: []int{1}, Positions: map[int]int{1: 0, 2: 1}},
+			want:  nil, k: 0,
 		},
 		{
 			name:  "a whole book of ten",
 			class: edgeClassification{LogicalCount: 10},
 			want:  []int{1, 2, 3}, k: 3,
+		},
+		{
+			// One late announcement believed ("Forty." opening the last file): the
+			// window counts the ten positions the files hold, not the forty.
+			name: "an inflated logical count",
+			class: edgeClassification{LogicalCount: 40,
+				Positions: map[int]int{1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6, 7: 7, 8: 8, 9: 9, 10: 40}},
+			want: []int{1, 2, 3}, k: 3,
+		},
+		{
+			// A sequel numbering its chapters on from the last book's (45 to 54).
+			name: "continued numbering",
+			class: edgeClassification{LogicalCount: 54,
+				Positions: map[int]int{1: 45, 2: 46, 3: 47, 4: 48, 5: 49, 6: 50, 7: 51, 8: 52, 9: 53, 10: 54}},
+			want: []int{1, 2, 3}, k: 3,
+		},
+		{
+			// The "files" basis: file numbers, the logical count from the recaps.
+			name:  "file numbers past the story's count",
+			class: edgeClassification{LogicalCount: 6},
+			want:  []int{1, 2}, k: 2,
 		},
 	}
 	for _, tc := range cases {
@@ -74,9 +102,62 @@ func TestSelectOpening(t *testing.T) {
 	}
 }
 
+// The window counts the story positions the files hold, whatever the narrated
+// numbering believed: one late or misheard announcement ("Forty." opening the last
+// of twelve files, a year, "Sixty" heard for "Sixteen", a slip in the middle)
+// never widens it past the opening, and a sequel numbering on (45 to 56) still
+// gets its opening files.
+func TestOpeningSelectionCountsTheFilesPositions(t *testing.T) {
+	t.Parallel()
+	ones := []string{"", "One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Nine", "Ten",
+		"Eleven", "Twelve", "Thirteen", "Fourteen", "Fifteen", "Sixteen", "Seventeen", "Eighteen", "Nineteen"}
+	tens := []string{"", "", "Twenty", "Thirty", "Forty", "Fifty", "Sixty"}
+	words := func(n int) string {
+		switch {
+		case n < 20:
+			return ones[n]
+		case n%10 == 0:
+			return tens[n/10]
+		}
+		return tens[n/10] + "-" + ones[n%10]
+	}
+	book := func(from, n int, swap map[int]string) []string {
+		var out []string
+		for i := range n {
+			o := "Chapter " + words(from+i) + ". The road went on and on and on."
+			if s, ok := swap[i+1]; ok {
+				o = s
+			}
+			out = append(out, o)
+		}
+		return out
+	}
+	for name, tc := range map[string]struct {
+		openings []string
+		want     []int
+	}{
+		"twelve chapters":         {book(1, 12, nil), []int{1, 2, 3}},
+		"a late Forty":            {book(1, 12, map[int]string{12: "Forty. That was how many had died."}), []int{1, 2, 3}},
+		"a year":                  {book(1, 12, map[int]string{12: "1944. The war had been over for a year."}), []int{1, 2, 3}},
+		"Sixty heard for Sixteen": {book(1, 16, map[int]string{16: "Chapter Sixty. The road went on and on and on."}), []int{1, 2, 3, 4}},
+		"a slip in the middle":    {book(1, 20, map[int]string{14: "Forty. The road went on and on and on."}), []int{1, 2, 3, 4, 5}},
+		"a sequel numbering on":   {book(45, 12, nil), []int{1, 2, 3}},
+	} {
+		var chs []edgeChapter
+		var chapters []int
+		for i, o := range tc.openings {
+			chs = append(chs, edgeChapter{Chapter: i + 1, Words: 4000, HasTranscript: true, Probed: true, DurationSec: 3000, Opening: o})
+			chapters = append(chapters, i+1)
+		}
+		if sel := selectOpening(chapters, classifyEdgeChapters(chs), "edges"); !reflect.DeepEqual(sel.Files, tc.want) {
+			t.Errorf("%s: files %v (K %d of %d), want %v", name, sel.Files, sel.K, sel.Logical, tc.want)
+		}
+	}
+}
+
 func TestOpeningWindow(t *testing.T) {
 	t.Parallel()
-	for logical, want := range map[int]int{1: 1, 2: 2, 3: 2, 8: 2, 9: 3, 12: 3, 13: 4, 40: 10, 49: 13} {
+	for logical, want := range map[int]int{1: 0, 2: 1, 3: 2, 4: 2, 8: 2, 9: 3, 12: 3, 13: 4, 40: 10, 49: 13} {
 		if got := openingWindow(logical); got != want {
 			t.Errorf("openingWindow(%d) = %d, want %d", logical, got, want)
 		}
@@ -95,10 +176,14 @@ func writeFacts(t *testing.T, work, name, text string) {
 	}
 }
 
-// seedDescribeFacts writes two fact chunks over files 1-6 (each section carrying a
-// marker naming its file), the whole-book sheet and a spelling sheet.
+// seedDescribeFacts writes the fact pass's chunk plan and its two chunks over
+// files 1-6 (each section carrying a marker naming its file), the whole-book sheet
+// and a spelling sheet.
 func seedDescribeFacts(t *testing.T, work string) {
 	t.Helper()
+	if err := writeChunkPlan(work, chunkPlan{Chunks: []chunkRange{{From: 1, To: 3}, {From: 4, To: 6}}, ChunkEnds: []int{3, 6}}); err != nil {
+		t.Fatal(err)
+	}
 	writeFacts(t, work, "facts-ch1-3.md", "# Facts, audio files 1-3\n\nNote: PREAMBLE-NOTE.\n\n"+
 		"## Chapter 1\n- Non-narrative file (opening announcement). MARK-F1\n\n"+
 		"## Chapter 2\nEVENTS\n- A miser refuses his nephew. MARK-F2\n### Sub\n- detail MARK-F2B\n\n"+
@@ -134,6 +219,19 @@ func TestBuildOpeningNotes(t *testing.T) {
 	}
 	if empty, err := buildOpeningNotes(t.TempDir(), []int{1}); err != nil || empty != "" {
 		t.Fatalf("no facts dir = %q, %v", empty, err)
+	}
+
+	// A manifest numbered from 0: its "Chapter 0" (a prologue) is a section too.
+	zero := t.TempDir()
+	if err := writeChunkPlan(zero, chunkPlan{Chunks: []chunkRange{{From: 0, To: 2}}, ChunkEnds: []int{2}}); err != nil {
+		t.Fatal(err)
+	}
+	writeFacts(t, zero, "facts-ch0-2.md", "# Facts, audio files 0-2\n\n## Chapter 0\n- The prologue. MARK-Z0\n\n"+
+		"## Chapter 1\n- MARK-Z1\n\n## Chapter 2\n- MARK-Z2\n")
+	notes, err = buildOpeningNotes(zero, []int{0, 1})
+	if err != nil || !strings.Contains(notes, "## Chapter 0\n- The prologue. MARK-Z0") || !strings.Contains(notes, "MARK-Z1") ||
+		strings.Contains(notes, "MARK-Z2") || strings.Index(notes, "MARK-Z0") > strings.Index(notes, "MARK-Z1") {
+		t.Fatalf("a chapter-0 book's notes = %q, %v", notes, err)
 	}
 }
 
@@ -262,6 +360,25 @@ func TestDescribeStagesOnlyTheOpeningNotes(t *testing.T) {
 	}
 }
 
+// The step runs on the model its stage name routes to (config's agent.claude
+// "describing"), never the CLI's default.
+func TestDescribeRoutesItsModel(t *testing.T) {
+	t.Parallel()
+	fake := newFakeRunner()
+	fake.act = func(_ *fakeRunner, req agent.Request, _ int) (agent.Result, error) {
+		writeDescription(t, req, cleanDescription)
+		return agent.Result{}, nil
+	}
+	e, book, _ := describeBook(t, fake, 0)
+	e.agentModels.Claude[DescribeStage] = "haiku"
+	if _, err := e.Describe(context.Background(), book.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	if req, ok := fake.lastRequest(DescribeStage); !ok || req.Model != "haiku" {
+		t.Fatalf("request = %+v", req)
+	}
+}
+
 // Each describing run takes the next attempt number, so a second run never reuses
 // (and wipes) the first one's staged dir; before, the first two were both attempt 1.
 func TestDescribeRunsTakeTheNextAttempt(t *testing.T) {
@@ -316,6 +433,34 @@ func TestDescribeNGramHitRetries(t *testing.T) {
 	}
 	if p := fake.lastPrompt(DescribeStage); !strings.Contains(p, "copies the book word for word") || !strings.Contains(p, "quick brown fox") {
 		t.Fatalf("retry prompt lacks the overlap:\n%s", p)
+	}
+}
+
+// A local fault in the no-verbatim check (a transcript that can't be read) is not
+// the agent's to fix: the step takes its one answer and fails with a plain error,
+// never re-prompting (and paying for) the agent, and keeps no description.
+func TestDescribeCheckFaultIsNotTheAgents(t *testing.T) {
+	t.Parallel()
+	fake := newFakeRunner()
+	fake.act = func(_ *fakeRunner, req agent.Request, _ int) (agent.Result, error) {
+		writeDescription(t, req, cleanDescription)
+		return agent.Result{}, nil
+	}
+	e, book, db := describeBook(t, fake, 0)
+	if err := os.Symlink(filepath.Join(t.TempDir(), "gone"), filepath.Join(book.WorkDir, transcript.TextDir, "ch099.txt")); err != nil {
+		t.Fatal(err)
+	}
+	_, err := e.Describe(context.Background(), book.ID, false)
+	var park *scheduler.ParkError
+	if err == nil || errors.As(err, &park) || !strings.Contains(err.Error(), "no-verbatim check could not run") ||
+		fake.count(DescribeStage) != 1 {
+		t.Fatalf("err = %v, calls %d", err, fake.count(DescribeStage))
+	}
+	if _, statErr := os.Stat(FinalDescriptionPath(book.WorkDir)); !os.IsNotExist(statErr) {
+		t.Fatal("a description the check couldn't measure was kept")
+	}
+	if runs, _ := db.ListStageRuns(context.Background(), book.ID); len(runs) != 1 || runs[0].Ok == nil || *runs[0].Ok {
+		t.Fatalf("runs = %+v", runs)
 	}
 }
 
@@ -394,6 +539,11 @@ func TestDescribeParks(t *testing.T) {
 		if !errors.As(err, &park) || park.Code != state.ParkBudgetExceeded || fake.count(DescribeStage) != 0 {
 			t.Fatalf("err = %v, calls %d", err, fake.count(DescribeStage))
 		}
+		// The (free) preparation ran first, so the positions are kept for a later
+		// try after the retention removed the transcripts.
+		if _, err := os.Stat(filepath.Join(book.WorkDir, chapterPositionsName)); err != nil {
+			t.Fatalf("a budget-parked call kept no positions: %v", err)
+		}
 	})
 	t.Run("rate limit, no wait", func(t *testing.T) {
 		t.Parallel()
@@ -430,6 +580,27 @@ func TestDescribeNoNotes(t *testing.T) {
 	}
 	if fake.count(DescribeStage) != 0 {
 		t.Fatal("the agent ran with nothing to read")
+	}
+}
+
+// A book of one story chapter gets no description: its opening is the whole book,
+// ending included. Refused before any spend.
+func TestDescribeRefusesASingleChapter(t *testing.T) {
+	t.Parallel()
+	fake := newFakeRunner()
+	e, book, _ := describeBook(t, fake, 0)
+	// No transcripts and no kept positions: the file numbers, the logical count
+	// from the recaps, which run through chapter 1 only.
+	if err := os.RemoveAll(filepath.Join(book.WorkDir, transcript.TextDir)); err != nil {
+		t.Fatal(err)
+	}
+	chars := baseChars("the-carol")
+	chars.Sources = []model.Source{{Type: sourceTypeCommunity, Ref: "audiosilo-meta:work:the-carol"}}
+	recs := baseRecaps("the-carol")
+	recs.Recaps[0].Through.Chapter = 1
+	seedWorkSidecars(t, book.WorkDir, chars, recs)
+	if _, err := e.Describe(context.Background(), book.ID, false); !errors.Is(err, ErrOneChapter) || fake.count(DescribeStage) != 0 {
+		t.Fatalf("err = %v, calls %d", err, fake.count(DescribeStage))
 	}
 }
 
@@ -480,6 +651,49 @@ func TestDescriptionProblems(t *testing.T) {
 	}
 	if p := descriptionProblems(strings.Repeat("word ", 400)); len(p) == 0 {
 		t.Error("an over-long text passed")
+	}
+
+	// The book's own names (its title, its series) are not the description's
+	// voice: naming the book is allowed, the rules still hold around it.
+	for title, rule := range map[string]string{
+		"Do Androids Dream of Electric Sheep?": "question mark",
+		"Me Before You":                        "addresses the reader",
+		"The Masterpiece":                      "sales language",
+	} {
+		named := title + " follows " + cleanDescription
+		if p := descriptionProblems(named); len(p) == 0 || !strings.Contains(strings.Join(p, "; "), rule) {
+			t.Errorf("%q without its names: problems %v, want one naming %q", title, p, rule)
+		}
+		if p := descriptionProblems(named, title, ""); len(p) != 0 {
+			t.Errorf("%q named in its own description: %v", title, p)
+		}
+		if p := descriptionProblems(named+" You will not forget it. Can he change?", title); len(p) < 2 {
+			t.Errorf("%q: the rules stopped holding beside the title: %v", title, p)
+		}
+	}
+	if p := descriptionProblems(cleanDescription+" The Gripping Hand is its sequel.", "", "The Gripping Hand"); len(p) != 0 {
+		t.Errorf("a series name refused: %v", p)
+	}
+	if p := descriptionProblems("Me Before You follows "+cleanDescription, "Me Before You: A Novel"); len(p) != 0 {
+		t.Errorf("a title without its subtitle refused: %v", p)
+	}
+
+	// Word edges are Unicode's: a "you" inside "Xīyou" is no second person, one
+	// after an apostrophe still is.
+	if p := descriptionProblems(cleanDescription + " The clerk reads Xīyou Ji by the fire."); len(p) != 0 {
+		t.Errorf("a non-ASCII word holding \"you\" refused: %v", p)
+	}
+	if p := descriptionProblems(cleanDescription + " D'you think so."); len(p) == 0 {
+		t.Error("an elided \"you\" passed")
+	}
+	// Only a plain newline separates: the Unicode separators are refused, and a
+	// line holding a no-break space still breaks a paragraph.
+	if p := descriptionProblems(strings.Replace(cleanDescription, ". On", ".\u2029On", 1)); len(p) == 0 {
+		t.Error("a paragraph separator passed")
+	}
+	nbsp := two + "\n\u00a0\nAnd a third paragraph, after a line holding a no-break space, is one too many."
+	if p := descriptionProblems(nbsp); len(p) == 0 || !strings.Contains(strings.Join(p, "; "), "paragraphs") {
+		t.Errorf("three paragraphs (one break a no-break space) passed: %v", p)
 	}
 }
 
