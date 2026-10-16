@@ -130,7 +130,12 @@ func workerInstall(args []string, stdout, stderr io.Writer, remove bool) error {
 		}
 		path, err := svc.Uninstall()
 		if err == nil {
-			_, _ = fmt.Fprintln(stdout, "Removed the worker's service ("+path+"). Its data dir stays: "+data)
+			// The service's own --data isn't known here: name the folder only when it was given.
+			note := "Its data dir (the --data it ran with, ~/.audiosilo-bridge-worker by default) stays."
+			if dataSet(fs) {
+				note = "Its data dir stays: " + data
+			}
+			_, _ = fmt.Fprintln(stdout, "Removed the worker's service ("+path+"). "+note)
 		}
 		return err
 	}
@@ -179,4 +184,11 @@ func (f workerFlags) tokenIn(dataDir string) string {
 		return t
 	}
 	return strings.TrimSpace(os.Getenv(workerTokenEnv))
+}
+
+// dataSet reports whether --data was given on the command line.
+func dataSet(fs *flag.FlagSet) bool {
+	set := false
+	fs.Visit(func(f *flag.Flag) { set = set || f.Name == "data" })
+	return set
 }
