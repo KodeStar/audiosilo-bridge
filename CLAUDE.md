@@ -159,7 +159,7 @@ replaced by the sealed vault), and the shell: config, store, the server link, th
 mapping checks, the generic runner, the page and its API, `bridge.verify`, and the
 slim/full/cuda images.
 
-**Phase 1a (generated characters and recaps), done, pending merge:** the engine
+**Phase 1a (generated characters and recaps), merged (spike 1 passed, 6 of 6 books):** the engine
 running behind `sidecars.generate` (the pipeline lane, parks reported to the server
 and retried from the page, the job following its book's moves, results written to
 `.audiosilo/` and an attachments rescan), the agent container (`agentproto`,
