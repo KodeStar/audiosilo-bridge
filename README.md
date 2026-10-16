@@ -19,23 +19,32 @@ server itself can stay read-only and safe to expose to the internet.
   book's file sizes through its own mount with what the server sees, and probes
   whether it can write there, before any job may write into that library.
 - **Its own page** (port 8091) handles pairing, the library mappings, settings, the
-  jobs it ran and its log. It answers only the local network and always asks for its
-  password.
+  jobs it ran (with Retry for a job that needs attention), the agent container's
+  state, the monthly budget, and its log. It answers only the local network and
+  always asks for its password.
+- **AI agents never run in the Bridge.** They run in a separate `agent` container
+  that sees only a shared staging folder and its own config: no library, none of the
+  Bridge's data, and a network of its own with internet access only.
 
-Status: **Phase 0** (foundations): pairing, the heartbeat and capability, the job
-queue with leases, the mapping checks and the proof job `bridge.verify`. The
-pipeline that generates characters and recaps (imported from audiosilo-sidecars with
-its history) is wired in Phase 1a. The plan lives in the workspace's
+Status: **Phase 1a** (pending merge): on top of Phase 0's pairing, heartbeat, job
+queue with leases, mapping checks and the proof job `bridge.verify`, the Bridge now
+**generates characters and recaps** (`sidecars.generate`). An admin presses
+Generate in the server's console or the player; the Bridge transcribes the book (or
+reads its .epub), runs the AI agents in a separate container, and saves the results
+with the book in its `.audiosilo/` folder, where the server picks them up. The
+pipeline came from audiosilo-sidecars with its history. Next is Phase 1b (a native
+transcription worker on another machine). The plan lives in the workspace's
 `BRIDGE-PLAN.md`.
 
 Code is licensed **AGPL-3.0** (see [LICENSE](LICENSE)).
 
 ## Run it beside a server (Docker)
 
-[compose.example.yaml](compose.example.yaml) runs the server and the Bridge
-together. The server mounts the library folders read-only, the Bridge mounts the
-same folders read-write. Mount them at the same path in both containers and the
-Bridge needs no mapping.
+[compose.example.yaml](compose.example.yaml) runs the server, the Bridge and the
+agent container together. The server mounts the library folders read-only, the
+Bridge mounts the same folders read-write. Mount them at the same path in both
+containers and the Bridge needs no mapping. The Bridge and the agent container share
+one `staging` volume, and nothing else.
 
 1. Start both containers. The Bridge prints the password for its page once, in its
    log, on the first start.
@@ -46,6 +55,16 @@ Bridge needs no mapping.
    `AUDIOSILO_BRIDGE_PAIR_CODE` for the first start.
 4. Back in the console, the Bridge shows as online with each library's mapping.
    **Verify** queues `bridge.verify` for a library to prove the loop.
+5. Give the agent container a credential, using an account of the Bridge's own:
+   put `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token` on any machine) in a
+   `.env` file beside the compose file, or sign codex in once with
+   `docker compose exec agent audiosilo-bridge agent-login codex` and set
+   `AUDIOSILO_BRIDGE_AGENT_BACKEND: codex` on the Bridge. An API key
+   (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`) works too, billed per token. The Bridge's
+   page shows the agent as ready within about 15 seconds.
+6. Generate characters and recaps from a book's page in the console (or the
+   player, as an admin). The console shows an estimate first, then the job's stage,
+   ETA and spend.
 
 Images (`ghcr.io/kodestar/audiosilo-bridge`, private while the repo is):
 
@@ -54,9 +73,11 @@ Images (`ghcr.io/kodestar/audiosilo-bridge`, private while the repo is):
 | `latest` | the full image: Go, ffmpeg and a CPU whisper.cpp for transcription | amd64, arm64 |
 | `latest-slim` | Go and ffmpeg only, for a Bridge that never transcribes | amd64, arm64 |
 | `latest-cuda` | transcription on an NVIDIA GPU (`--gpus all`) | amd64 |
+| `latest-agent` | the agent container: the claude and codex CLIs, run by `audiosilo-bridge agent-runner` | amd64, arm64 |
 
-No image carries an AI agent CLI: agents run in a separate container that sees only
-a staging folder (decision 15), which arrives with Phase 1a.
+Only `latest-agent` carries an AI agent CLI (decision 15). Run it as the compose
+example does: user 10002, all capabilities dropped, a read-only root, its own
+network.
 
 ## Configuration
 
@@ -75,9 +96,20 @@ folder is `/bridge-data` in the images (`AUDIOSILO_BRIDGE_DATA`), else
 | | `AUDIOSILO_BRIDGE_PAIR_CODE` | | pair on start (first start only) |
 | | `AUDIOSILO_BRIDGE_SECRET_KEY` | `<data>/secret.key` | the key that seals the stored secrets (32 bytes, hex or base64) |
 | | `PUID` / `PGID` | `1000` | the user the Bridge runs as (Unraid: 99/100); a start as another user (`--user`) needs a data folder that user owns |
+| `agent.backend` | `AUDIOSILO_BRIDGE_AGENT_BACKEND` | `claude` | the CLI the agent container runs: `claude` or `codex` |
+| `agent.staging_dir` | `AUDIOSILO_BRIDGE_AGENT_STAGING_DIR` | `<data>/staging` | the folder shared with the agent container (an absolute path; compose uses `/staging`) |
+| `agent.claim_timeout_seconds` | `AUDIOSILO_BRIDGE_AGENT_CLAIM_TIMEOUT_SECONDS` | `120` | how long a job waits for the agent container to pick it up before the book waits and tries again (10 to 3600) |
+| `agent.monthly_budget_usd` | `AUDIOSILO_BRIDGE_AGENT_MONTHLY_BUDGET_USD` | `100` | the agent spend cap for a calendar month (UTC), across every book; `0` is no cap. Over it, books wait until the 1st |
+| `agent.book_budget_usd` | `AUDIOSILO_BRIDGE_AGENT_BOOK_BUDGET_USD` | `75` | the agent spend cap for one book |
+| `transcripts.retention_days` | `AUDIOSILO_BRIDGE_TRANSCRIPTS_RETENTION_DAYS` | `30` | how long a finished book's transcripts are kept (`0`: deleted when its job ends); the facts and results stay |
+| | `AUDIOSILO_BRIDGE_GITHUB_TOKEN` | | a GitHub token that can open issues on the community repos, for jobs that contribute their results (`contribute: issue`); sealed into the secrets at every start |
 
-The engine's settings (`tools`, `asr`, `agent`, `supervisor`, `contribution`,
-`metadata`) are carried over from audiosilo-sidecars and take effect with Phase 1a.
+The engine's other settings (`tools`, `asr`, `supervisor`, `contribution`,
+`metadata`, the agent's models and timeout) are carried over from
+audiosilo-sidecars and apply at the next start. The supervisor's automatic
+recoveries are on by default; its model-assisted lane and backend failover are
+always off (they would run an agent in the Bridge). The agent concurrency is the
+agent container's `--slots` (default 1).
 
 ## Develop
 
@@ -89,5 +121,5 @@ go build ./... && go vet ./... && go test -race ./... && golangci-lint run
 cd web && npm run typecheck && npm run lint && npm run format && npm test
 scripts/build-web.sh                 # the page, embedded into bin/audiosilo-bridge
 ./bin/audiosilo-bridge --data ./data
-docker build --target slim -t audiosilo-bridge:slim .
+docker build --target slim -t audiosilo-bridge:slim .   # slim | cuda | agent | full
 ```

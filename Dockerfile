@@ -1,5 +1,5 @@
-# The AudioSilo Bridge images (BRIDGE-PLAN.md Phase 0), three targets from one
-# file so the web and Go build stages are defined once:
+# The AudioSilo Bridge images (BRIDGE-PLAN.md Phases 0 and 1a), four targets from
+# one file so the web and Go build stages are defined once:
 #
 #   - slim  : Go + ffmpeg. Enough for every job that doesn't transcribe (verify,
 #             and podcasts later): the cheap second container.
