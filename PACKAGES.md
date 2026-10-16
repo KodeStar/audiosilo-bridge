@@ -882,6 +882,15 @@ internal/
             book dispatched mid-pass would otherwise be terminate_requeued as an
             orphan. The occupancy/invocation/progress figures themselves stay as of
             the prologue by design; they are what the sample timestamp qualifies.
+            classifyFailures reads only a failed or parked book's last failed run:
+            every scheduler failure path sets one of the two, so any other book was
+            re-admitted since (perhaps then paused) and waits for its next attempt.
+            A cancelled book (scheduler.IsCancelled) is skipped as well: Cancel fails
+            a book without a run of its own, so one cancelled while it waited still
+            has that answered failure as its last run.
+            Spike 1 (2026-10-16): after a refused credential was replaced, the books
+            re-admitted but waiting for an agent slot were escalated from their old
+            401 (authentication_failure -> park_escalate) and needed a human Retry.
             On the Bridge (app/engine.go) only the deterministic lane runs (config
             forces model-assisted and backend failover off), automatic actions are on
             by default, and the Apply hook (supervisorApply) refuses three things: a

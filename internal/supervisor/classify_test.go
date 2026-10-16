@@ -220,7 +220,7 @@ func TestRepeatedErrorAndKnownBackendClasses(t *testing.T) {
 		m, _ := json.Marshal(map[string]string{"error": msg})
 		return store.StageRun{ID: id, Stage: "fact_pass", Attempt: int(id), FinishedAt: time.Now().Format(time.RFC3339Nano), Ok: &ok, Metrics: m}
 	}
-	base := Snapshot{Book: store.Book{ID: 1, BatchID: "b", State: "fact_pass"}}
+	base := Snapshot{Book: store.Book{ID: 1, BatchID: "b", State: "fact_pass", Status: string(state.StatusFailed)}}
 	base.Runs = []store.StageRun{makeRun(1, "open /tmp/a123 failed 99"), makeRun(2, "open /tmp/b456 failed 42")}
 	got := Classify(base, Policy{MaxErrorRepeats: 2})
 	if len(got) != 1 || got[0].Kind != IncidentRepeatedError {
@@ -237,6 +237,36 @@ func TestRepeatedErrorAndKnownBackendClasses(t *testing.T) {
 	got = Classify(base, Policy{MaxErrorRepeats: 2})
 	if len(got) != 1 || got[0].Kind != IncidentUnclassified || !got[0].Ambiguous {
 		t.Fatalf("unclassified=%+v", got)
+	}
+}
+
+// A re-admitted book (no status) waiting for an agent slot still has its last failed
+// run on record; the supervisor must not escalate it from that history (spike 1: a
+// replaced credential, six books re-admitted, the two waiting for a slot escalated
+// from their old 401 and needed a human Retry).
+func TestReadmittedBookIsNotClassifiedFromItsLastFailure(t *testing.T) {
+	ok := false
+	m := failedRunMetrics(t, "agent backend unavailable: the provider refused the credential: 401 Invalid bearer token")
+	runs := []store.StageRun{{ID: 252, Stage: "qa_adjudicating", Attempt: 42, FinishedAt: time.Now().Format(time.RFC3339Nano), Ok: &ok, Metrics: m}}
+	waiting := Snapshot{Book: store.Book{ID: 5, BatchID: "b", State: "qa_adjudicating"}, Runs: runs}
+	if got := Classify(waiting, Policy{MaxErrorRepeats: 2}); len(got) != 0 {
+		t.Fatalf("a re-admitted book was classified: %+v", got)
+	}
+	paused := waiting
+	paused.Book.Status = string(state.StatusPaused)
+	if got := Classify(paused, Policy{MaxErrorRepeats: 2}); len(got) != 0 {
+		t.Fatalf("a re-admitted book paused while waiting was classified: %+v", got)
+	}
+	// Cancel fails a book without a run of its own, so the 401 is still its last run.
+	cancelled := waiting
+	cancelled.Book.Status, cancelled.Book.Error = string(state.StatusFailed), "cancelled by user"
+	if got := Classify(cancelled, Policy{MaxErrorRepeats: 2}); len(got) != 0 {
+		t.Fatalf("a re-admitted book cancelled while waiting was classified: %+v", got)
+	}
+	failed := waiting
+	failed.Book.Status = string(state.StatusFailed)
+	if got := Classify(failed, Policy{MaxErrorRepeats: 2}); len(got) != 1 || got[0].Kind != IncidentAuthentication {
+		t.Fatalf("a failed book's 401 = %+v, want authentication_failure", got)
 	}
 }
 
@@ -267,11 +297,13 @@ func TestResolvedHistoricalFailuresAndLoopsAreIgnored(t *testing.T) {
 	ok, failed := true, false
 	failure := store.StageRun{ID: 1, Stage: "fact_pass", FinishedAt: "1", Ok: &failed, Metrics: json.RawMessage(`{"error":"not logged in"}`)}
 	success := store.StageRun{ID: 2, Stage: "fact_pass", FinishedAt: "2", Ok: &ok, Metrics: json.RawMessage(`{}`)}
-	if got := Classify(Snapshot{Book: store.Book{ID: 1, BatchID: "b", State: "fact_pass"}, Runs: []store.StageRun{failure, success}}, Policy{MaxErrorRepeats: 2}); len(got) != 0 {
+	// A failed book: one with no status never gets this far (it was re-admitted since).
+	failedBook := store.Book{ID: 1, BatchID: "b", State: "fact_pass", Status: string(state.StatusFailed)}
+	if got := Classify(Snapshot{Book: failedBook, Runs: []store.StageRun{failure, success}}, Policy{MaxErrorRepeats: 2}); len(got) != 0 {
 		t.Fatalf("resolved failure remained actionable: %+v", got)
 	}
 	open := store.StageRun{ID: 2, Stage: "fact_pass"}
-	if got := Classify(Snapshot{Book: store.Book{ID: 1, BatchID: "b", State: "fact_pass"}, Runs: []store.StageRun{failure, open}, RuntimeActive: true}, Policy{MaxErrorRepeats: 2}); len(got) != 0 {
+	if got := Classify(Snapshot{Book: failedBook, Runs: []store.StageRun{failure, open}, RuntimeActive: true}, Policy{MaxErrorRepeats: 2}); len(got) != 0 {
 		t.Fatalf("failure with retry in progress remained actionable: %+v", got)
 	}
 	audits := []store.StageRun{

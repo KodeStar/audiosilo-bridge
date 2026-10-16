@@ -339,6 +339,7 @@ func TestSimulatedMultiBookRecoveryAndEscalation(t *testing.T) {
 		id, _ := db.StartStageRun(ctx, b2.ID, "auditing", n)
 		_ = db.FinishStageRun(ctx, id, false, json.RawMessage(`{"error":"audit validation failed in the same way"}`))
 	}
+	_ = db.SetBookStatus(ctx, b2.ID, string(state.StatusFailed), "audit validation failed in the same way", "")
 	cfg := config.Default().Supervisor
 	cfg.AutomaticActions = true
 	cfg.StaleMinutes = 999
@@ -542,6 +543,9 @@ func TestAmbiguousIncidentInvokesModelOncePerEvent(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := db.FinishStageRun(ctx, runID, false, json.RawMessage(`{"error":"novel structured failure"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetBookStatus(ctx, b.ID, string(state.StatusFailed), "novel structured failure", ""); err != nil {
 		t.Fatal(err)
 	}
 	m := &fixedModel{decision: ModelDecision{Diagnosis: "observe the novel failure", Confidence: .7, Evidence: []string{"one bounded attempt"}, RecommendedAction: ActionObserve, SuggestedRetryLimit: 1}, usage: agent.Usage{Model: "supervisor-test", Input: 20, Output: 10, CostReported: true}}

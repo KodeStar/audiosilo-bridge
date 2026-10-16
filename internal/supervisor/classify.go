@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kodestar/audiosilo-bridge/internal/scheduler"
 	"github.com/kodestar/audiosilo-bridge/internal/state"
 	"github.com/kodestar/audiosilo-bridge/internal/store"
 )
@@ -368,6 +369,17 @@ func comparableCost(r store.StageRun) (float64, string, bool) {
 }
 
 func classifyFailures(s Snapshot, runs []store.StageRun, p Policy) []Incident {
+	// Every scheduler failure path sets failed or needs_attention; any other book was
+	// re-admitted since (and maybe paused), so its last failure is answered history
+	// (PACKAGES.md).
+	if s.Book.Status != string(state.StatusFailed) && s.Book.Status != string(state.StatusNeedsAttention) {
+		return nil
+	}
+	// Cancel fails a book without a run of its own: one cancelled while it waited after
+	// a re-admission still has that answered failure as its last run.
+	if scheduler.IsCancelled(s.Book) {
+		return nil
+	}
 	var stageRuns []store.StageRun
 	for _, r := range runs {
 		if r.Stage == s.Book.State && !r.Superseded {
