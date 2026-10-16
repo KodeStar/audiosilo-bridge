@@ -46,14 +46,20 @@ func (s Status) Subscription(backend string) bool {
 	return false
 }
 
-// Status reads runner.json now.
+// Status reads runner.json now. Detail never names a Bridge path: it becomes a
+// parked book's reason, which the server shows in its console. The path goes to
+// the log instead (once per outage, as Status runs on every heartbeat).
 func (r *Runner) Status() Status {
 	var st Status
 	root, err := os.OpenRoot(r.dir)
 	if err != nil {
-		st.Detail = "the agent container isn't running (the staging dir " + r.dir + " isn't there)"
+		if !r.dirMissing.Swap(true) {
+			r.log.Warn("agent container: the staging dir can't be opened", "dir", r.dir, "err", err)
+		}
+		st.Detail = "the agent container isn't running (the Bridge can't open its staging dir: check agent.staging_dir and the staging volume)"
 		return st
 	}
+	r.dirMissing.Store(false)
 	defer func() { _ = root.Close() }()
 	raw, err := agentproto.ReadRegular(root, agentproto.RunnerFile, agentproto.MaxRunnerBytes)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -61,7 +67,7 @@ func (r *Runner) Status() Status {
 		return st
 	}
 	if err != nil {
-		st.Detail = "the agent container's status can't be read: " + err.Error()
+		st.Detail = "the agent container's status can't be read (" + ioProblem(err) + ")"
 		return st
 	}
 	var rj agentproto.Runner

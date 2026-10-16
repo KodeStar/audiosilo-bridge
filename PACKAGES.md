@@ -88,6 +88,11 @@ internal/
             agent.concurrency/queue_concurrency/max_agents_per_book and
             claude_path/codex_path are read and validated but inert, and
             contribution.mode is overridden per book by the job's contribute param.
+            Each inert setting (those, the three forced-off supervisor switches and
+            the settings only the model lanes read) set to a non-default value is a
+            Config.Ignored notice ("<key> is ignored on the Bridge: <why>",
+            ignoredOnBridge, taken before normalizeBridge), which app logs once at
+            the start beside Config.Deprecations.
   toolfetch/ fetches the three external artifact families, all gated by
             tools.auto_download and confined to <data>/tools: ffmpeg/ffprobe static
             builds (explicit path -> next to the binary -> $PATH -> HTTPS download,
@@ -1024,9 +1029,11 @@ internal/
             network. Cancel is the page's own cancel. LocalReporter is a
             send-nothing Reporter for handler tests.
             Phase 1a: PARK/UNPARK. Reporter.Park(code, msg) reports the job
-            needs_attention with msg as its error while it KEEPS RUNNING here (it goes
-            on reporting under its claim, so a server cancel still reaches it; the
-            server drops a parked job's lease and renews it once it reports running);
+            needs_attention with msg as its error while it KEEPS RUNNING here (the
+            server drops a parked job's lease, as needs_attention has none, and renews
+            it once it reports running; the job goes on reporting under its claim, so
+            a server cancel still ends it; a Bridge gone for good leaves the job
+            needs_attention until an admin cancels it);
             Unpark reports it running again; both are sent at once. Every report
             carries the error, "" when unparked, which clears a park's message (even
             one a restart interrupted); the park message is stored with the progress
@@ -1174,7 +1181,10 @@ internal/
             by kind or credential_since, clears it too), Live (fresh, whatever its
             CLIs), each "why not" worded for the page and a park (claude: `claude
             setup-token` -> CLAUDE_CODE_OAUTH_TOKEN; codex: agent-login; and when the
-            OTHER CLI is signed in, how to switch agent.backend). Detect: Available =
+            OTHER CLI is signed in, how to switch agent.backend), never naming a
+            Bridge path (a Detail becomes a park reason the server's console and
+            bell show; a staging dir that can't be opened is logged with its path,
+            once per outage). Detect: Available =
             Available || Refused, RetryAfter ALWAYS 10 min (whatever makes the
             container unavailable is expected to pass by itself). Run: stage() makes
             the job dir 0700 and writes it ONLY through an os.Root opened on it
@@ -1189,7 +1199,11 @@ internal/
             stage; Request.Heartbeat beats every 60 s; req.Process is never called (a
             pid in another container means nothing). A ctx cancel takes back an
             unclaimed job, else writes cancel and waits up to 30 s for done (the
-            usage it reported is still returned, nothing harvested). The harvest follows ANY
+            usage it reported is still returned, nothing harvested). An exit.json
+            with unavailable: true (the container stopped or restarted mid-run) is a
+            NotAvailableError that still carries the usage its stdout shows (parsed
+            by ClaudeResult/CodexResult, nothing else kept), so a paid run cut short
+            counts toward the budgets. The harvest follows ANY
             finished run, failed ones too, into a temp dir then renamed over out/:
             regular files only, depth 8, 8 MiB a file, 64 MiB in all, 2,000 entries;
             a broken limit (harvestLimitError) fails the stage and leaves out/ as it

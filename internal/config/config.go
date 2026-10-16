@@ -332,6 +332,10 @@ type Config struct {
 	// deprecations are notices about retired settings Load honoured (never saved;
 	// the server logs them at startup).
 	deprecations []string
+	// ignored are notices about engine settings set to something the Bridge
+	// doesn't use (bridge.go, ignoredOnBridge; logged at startup like
+	// deprecations).
+	ignored []string
 	// legacyCustomRepo is a custom legacy contribution.repo loaded without an
 	// explicit community_repo; Validate refuses it (see foldLegacyContribution).
 	legacyCustomRepo string
@@ -342,6 +346,11 @@ type Config struct {
 // Deprecations returns the notices Load collected about deprecated settings it
 // honoured, for the caller to log once. Empty for a config that uses none.
 func (c Config) Deprecations() []string { return append([]string(nil), c.deprecations...) }
+
+// Ignored returns the notices Load collected about settings set to a non-default
+// value the Bridge doesn't use (ignoredOnBridge), for the caller to log once.
+// Empty for a config that sets none.
+func (c Config) Ignored() []string { return append([]string(nil), c.ignored...) }
 
 // Default returns a Config with secure defaults.
 func Default() Config {
@@ -497,6 +506,8 @@ func load(dataDir string, withEnv bool) (Config, error) {
 	if strings.TrimSpace(cfg.ASR.Language) == "" {
 		cfg.ASR.Language = DefaultASRLanguage
 	}
+	// Before normalizeBridge, which forces the supervisor's model lanes off.
+	cfg.ignored = ignoredOnBridge(cfg)
 	normalizeBridge(&cfg)
 	// Normalize contribution defaults so a config predating M7 (no contribution
 	// section) or with an empty mode/repo/interval resolves to working values. AutoPurge

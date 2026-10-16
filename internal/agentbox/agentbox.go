@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/kodestar/audiosilo-bridge/internal/agent"
@@ -74,6 +75,10 @@ type Runner struct {
 	// goes through or the runner reports another (status.go).
 	mu      sync.Mutex
 	refused *refusedCredential
+
+	// dirMissing is set while the staging dir can't be opened, so Status logs
+	// its path once per outage rather than on every call.
+	dirMissing atomic.Bool
 }
 
 var _ agent.Runner = (*Runner)(nil)
@@ -391,7 +396,8 @@ func (r *Runner) heartbeatAt(root *os.Root, claimedAt time.Time) time.Time {
 }
 
 // outcome reads exit.json and the CLI's output and interprets them with the same
-// code the local runners use.
+// code the local runners use. An unavailable exit still reports the usage the
+// CLI's output shows, so a paid run the container cut short is counted.
 func (r *Runner) outcome(root *os.Root, model string, timeout time.Duration) (agent.Result, error) {
 	raw, err := agentproto.ReadRegular(root, agentproto.ExitFile, agentproto.MaxExitBytes)
 	if err != nil {
@@ -403,7 +409,12 @@ func (r *Runner) outcome(root *os.Root, model string, timeout time.Duration) (ag
 	}
 	if ex.Error != "" {
 		if ex.Unavailable {
-			return agent.Result{}, &agent.NotAvailableError{Backend: r.backend, Detail: ex.Error}
+			// The container stopped or restarted mid-run (or couldn't start the CLI):
+			// a run that got going may have spent tokens, so whatever usage its
+			// stdout reports rides on the Result beside the error and the budgets
+			// count it. Nothing else of a cut-off run is trusted.
+			res, _ := r.parse(root, model, agent.CLIOutcome{ExitErr: errors.New(ex.Error), Timeout: timeout})
+			return agent.Result{Usage: res.Usage}, &agent.NotAvailableError{Backend: r.backend, Detail: ex.Error}
 		}
 		return agent.Result{}, fmt.Errorf("agent container refused the job: %s", ex.Error)
 	}
@@ -415,6 +426,13 @@ func (r *Runner) outcome(root *os.Root, model string, timeout time.Duration) (ag
 	case ex.ExitCode != 0:
 		out.ExitErr = exitStatus(ex.ExitCode)
 	}
+	return r.parse(root, model, out)
+}
+
+// parse reads the CLI's output files into out and interprets them with the
+// backend's shared result mapping (ClaudeResult/CodexResult). A missing or
+// unreadable file reads as empty.
+func (r *Runner) parse(root *os.Root, model string, out agent.CLIOutcome) (agent.Result, error) {
 	stdout, _ := agentproto.ReadRegular(root, agentproto.StdoutFile, agentproto.MaxStdoutBytes)
 	stderr, _ := agentproto.ReadRegular(root, agentproto.StderrFile, agentproto.MaxStderrBytes)
 	out.Stdout, out.Stderr = string(stdout), string(stderr)

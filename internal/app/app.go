@@ -101,7 +101,7 @@ func New(ctx context.Context, opts Options) (*Bridge, string, error) {
 	if opts.Listen != "" {
 		cfg.Listen = opts.Listen
 	}
-	for _, d := range cfg.Deprecations() {
+	for _, d := range append(cfg.Deprecations(), cfg.Ignored()...) {
 		opts.Logger.Warn("config: " + d)
 	}
 	db, err := store.Open(ctx, filepath.Join(opts.DataDir, store.FileName))

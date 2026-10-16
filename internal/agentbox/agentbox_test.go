@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -507,12 +508,41 @@ func TestStatus(t *testing.T) {
 			if st.Available != tc.available || !strings.Contains(st.Detail, tc.detail) {
 				t.Fatalf("status = %+v", st)
 			}
+			// Detail is a park reason the server shows: never a Bridge path.
+			if strings.Contains(st.Detail, dir) {
+				t.Fatalf("detail names the staging dir: %q", st.Detail)
+			}
 			av := r.Detect(context.Background())
 			// The container is expected back by itself, so a park on it retries.
 			if av.Available != tc.available || av.Detail != st.Detail || av.RetryAfter != RetryAfter {
 				t.Fatalf("detect = %+v", av)
 			}
 		})
+	}
+}
+
+// A staging dir that's gone is worded without its path (the Detail is a park
+// reason the server shows in its console); the path goes to the log.
+func TestStatusMissingStagingDirNamesNoPath(t *testing.T) {
+	t.Parallel()
+	dir := filepath.Join(t.TempDir(), "staging-dir-of-the-bridge")
+	var logged strings.Builder
+	r := New(Options{Dir: dir, Backend: agent.IDClaude, Log: slog.New(slog.NewTextHandler(&logged, nil))})
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		st := r.Status()
+		if st.Available || !strings.Contains(st.Detail, "isn't running") || strings.Contains(st.Detail, dir) ||
+			strings.Contains(st.Detail, "staging-dir-of-the-bridge") {
+			t.Fatalf("status = %+v", st)
+		}
+		if av := r.Detect(context.Background()); strings.Contains(av.Detail, dir) {
+			t.Fatalf("detect = %+v", av)
+		}
+	}
+	if n := strings.Count(logged.String(), "dir="+dir); n != 1 {
+		t.Fatalf("the path is logged %d times, want once per outage:\n%s", n, logged.String())
 	}
 }
 
@@ -732,5 +762,44 @@ func TestRefusedCredentialIsRemembered(t *testing.T) {
 	}
 	if st := r.Status(); !st.Available || st.Refused {
 		t.Fatalf("after a run that went through: %+v", st)
+	}
+}
+
+// A run the agent container stopped partway (unavailable: true) still reports
+// the usage its output shows beside the NotAvailableError, so a paid run cut
+// short counts toward the budgets; nothing else of it is trusted.
+func TestRunStoppedMidRunKeepsUsage(t *testing.T) {
+	t.Parallel()
+	stopped := agentproto.Exit{ExitCode: -1, Cancelled: true, Error: "the agent container stopped during this run", Unavailable: true}
+	for name, tc := range map[string]struct {
+		backend string
+		stdout  string
+		want    agent.Usage
+	}{
+		"codex": {backend: agent.IDCodex,
+			stdout: `{"type":"item.completed","item":{"type":"agent_message","text":"half"}}` + "\n" +
+				`{"type":"turn.completed","usage":{"input_tokens":700,"cached_input_tokens":20,"output_tokens":30}}` + "\n",
+			want: agent.Usage{Model: "gpt-5.1-codex", Input: 700, Output: 30, CacheRead: 20, Turns: 1}},
+		"claude": {backend: agent.IDClaude, stdout: claudeOK,
+			want: agent.Usage{Model: "gpt-5.1-codex", Input: 100, Output: 50, CacheRead: 10, CostUSD: 0.25, CostReported: true, Turns: 3}},
+		"claude, no output": {backend: agent.IDClaude, want: agent.Usage{Model: "gpt-5.1-codex"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			r, dir := newTestRunner(t, tc.backend)
+			fake := &fakeRunner{fn: func(job string) agentproto.Exit {
+				mustWrite(t, filepath.Join(job, agentproto.StdoutFile), tc.stdout)
+				return stopped
+			}}
+			fake.start(t, dir)
+			res, err := r.Run(context.Background(), agent.Request{Dir: stagedDir(t), Prompt: "p", Model: "gpt-5.1-codex", Timeout: time.Minute})
+			var na *agent.NotAvailableError
+			if !errors.As(err, &na) || na.CredentialRefused || na.Detail != stopped.Error {
+				t.Fatalf("err = %v", err)
+			}
+			if res.Usage != tc.want || res.Text != "" {
+				t.Fatalf("result = %+v, want usage %+v and no text", res, tc.want)
+			}
+		})
 	}
 }

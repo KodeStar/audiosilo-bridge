@@ -233,6 +233,30 @@ func TestRunWithRetryNotAvailableExhausted(t *testing.T) {
 	}
 }
 
+// A run the agent container stopped partway is a NotAvailableError carrying the
+// usage spent so far (internal/agentbox): it reaches onUsage and AttemptComplete,
+// so the budgets count it, on every attempt including the one returned.
+func TestRunWithRetryNotAvailableUsageRecorded(t *testing.T) {
+	withTinyNotAvailableBackoff(t)
+	stopped := step{res: Result{Usage: Usage{Input: 700, Output: 30}}, err: &NotAvailableError{Backend: "codex", Detail: "stopped"}}
+	r := &scriptRunner{steps: []step{stopped, stopped, stopped}}
+	var onUsage, completed int64
+	req := Request{Prompt: "base", AttemptComplete: func(res Result, err error) {
+		var na *NotAvailableError
+		if errors.As(err, &na) && res.Usage.Input == 700 {
+			completed += res.Usage.Input
+		}
+	}}
+	_, _, err := RunWithBackoff(context.Background(), r, req, alwaysValid, func(u Usage) { onUsage += u.Input }, tinyBackoff(3))
+	var na *NotAvailableError
+	if !errors.As(err, &na) {
+		t.Fatalf("want *NotAvailableError, got %v", err)
+	}
+	if onUsage != 2100 || completed != 2100 {
+		t.Errorf("usage recorded: onUsage %d, AttemptComplete %d, want 2100 each (3 attempts)", onUsage, completed)
+	}
+}
+
 func TestRunWithRetryNotAvailableContextCancel(t *testing.T) {
 	r := &scriptRunner{steps: []step{{err: &NotAvailableError{Backend: "claude", Detail: "blip"}}}}
 	ctx, cancel := context.WithCancel(context.Background())

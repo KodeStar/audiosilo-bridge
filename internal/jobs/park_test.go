@@ -43,8 +43,8 @@ func TestProgressExtra(t *testing.T) {
 }
 
 // A parked job reports needs_attention with the park message as its error and
-// goes on reporting (the lease holds, a cancel still reaches it); Unpark sends
-// running with the error cleared.
+// goes on reporting (the server drops its lease, but a cancel still reaches
+// it); Unpark sends running with the error cleared.
 func TestParkAndUnpark(t *testing.T) {
 	t.Parallel()
 	db, srv := openStore(t), newFakeServer()

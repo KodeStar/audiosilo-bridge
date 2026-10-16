@@ -263,3 +263,63 @@ func TestSupervisorModelsAreAlwaysOff(t *testing.T) {
 		t.Fatalf("the deterministic supervisor went off too: %+v", cfg.Supervisor)
 	}
 }
+
+// Engine settings the Bridge doesn't use are noticed at the start when set to
+// something other than their default (the agent container decides the agent
+// concurrency and runs the CLIs; the supervisor's model lanes are forced off);
+// a default or absent one says nothing.
+func TestIgnoredOnBridge(t *testing.T) {
+	for name, tc := range map[string]struct {
+		body string
+		env  map[string]string
+		want []string
+	}{
+		"fresh":                     {},
+		"defaults written out":      {body: "agent:\n  queue_concurrency: 2\n  max_agents_per_book: 3\n  claude_path: \"\"\nsupervisor:\n  model_assisted: false\n  max_model_calls: 1\n"},
+		"a pre-capacity file":       {body: "agent:\n  backend: claude\n"},
+		"legacy concurrency at 2":   {body: "agent:\n  concurrency: 2\n"},
+		"legacy concurrency":        {body: "agent:\n  concurrency: 4\n", want: []string{"agent.concurrency"}},
+		"legacy concurrency in env": {env: map[string]string{"AUDIOSILO_BRIDGE_AGENT_CONCURRENCY": "5"}, want: []string{"agent.concurrency"}},
+		"capacity": {body: "agent:\n  queue_concurrency: 4\n  max_agents_per_book: 1\n",
+			want: []string{"agent.queue_concurrency", "agent.max_agents_per_book"}},
+		"capacity in env": {env: map[string]string{"AUDIOSILO_BRIDGE_AGENT_MAX_AGENTS_PER_BOOK": "6"}, want: []string{"agent.max_agents_per_book"}},
+		"cli paths": {body: "agent:\n  claude_path: /usr/local/bin/claude\n",
+			env:  map[string]string{"AUDIOSILO_BRIDGE_AGENT_CODEX_PATH": "/opt/codex"},
+			want: []string{"agent.claude_path", "agent.codex_path"}},
+		"model lanes": {body: "supervisor:\n  model_automatic_actions: true\n  allow_backend_failover: true\n  fallback_backend: codex\n  model: opus\n  per_book_budget_usd: 5\n",
+			env: map[string]string{"AUDIOSILO_BRIDGE_SUPERVISOR_MODEL_ASSISTED": "true"},
+			want: []string{"supervisor.model_assisted", "supervisor.model_automatic_actions", "supervisor.allow_backend_failover",
+				"supervisor.fallback_backend", "supervisor.model", "supervisor.per_book_budget_usd"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			if tc.body != "" {
+				if err := os.WriteFile(filepath.Join(dir, FileName), []byte(tc.body), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+			cfg, err := Load(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := cfg.Ignored()
+			if len(got) != len(tc.want) {
+				t.Fatalf("ignored = %q, want %d notices for %q", got, len(tc.want), tc.want)
+			}
+			for i, key := range tc.want {
+				if !strings.HasPrefix(got[i], key+" is ignored on the Bridge: ") {
+					t.Errorf("notice %d = %q, want one for %s", i, got[i], key)
+				}
+			}
+			if len(cfg.Deprecations()) != 0 {
+				t.Errorf("an ignored setting is not a deprecation: %q", cfg.Deprecations())
+			}
+			if s := cfg.Supervisor; s.ModelAssisted || s.ModelAutomaticActions || s.AllowBackendFailover {
+				t.Fatalf("supervisor = %+v, want the model lanes still forced off", s)
+			}
+		})
+	}
+}

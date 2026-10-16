@@ -1,4 +1,12 @@
-# The AudioSilo server and the Bridge side by side (BRIDGE-PLAN.md Phase 0).
+# An AudioSilo server with its Bridge: three services.
+#
+#   audiosilo  the server: the libraries (read-only), the player and the
+#              console, where Bridge jobs are started and watched.
+#   bridge     the Bridge: pairs with the server, takes its jobs (generated
+#              characters and recaps for a book), transcribes the audio itself
+#              and writes the results into the book's .audiosilo/ folder.
+#   agent      the agent container: runs the AI CLIs the Bridge's jobs need,
+#              walled off from everything else (see below).
 #
 # The server reads the libraries read-only; the Bridge mounts the SAME host
 # folders read-write. Mounting them at the same path in both containers means

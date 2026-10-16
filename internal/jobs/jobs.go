@@ -820,9 +820,11 @@ func (p *Reporter) Progress(pr Progress) {
 
 // Park reports the job as needs_attention with message as its error (code is
 // the park's typed reason, which the handler also puts in its progress) while it
-// keeps running here: it goes on reporting, so the lease holds and a cancel from
-// the server still reaches it. Unpark reports it running again. Both are sent at
-// once, and a job resumed after a restart keeps its park.
+// keeps running here. The server drops a parked job's lease (needs_attention has
+// none) and renews it once Unpark reports it running again; meanwhile the job
+// goes on reporting, so a cancel from the server still ends it. If the Bridge
+// disappears for good, the job stays needs_attention until an admin cancels it.
+// Both are sent at once, and a job resumed after a restart keeps its park.
 func (p *Reporter) Park(code, message string) {
 	message = clip(strings.TrimSpace(message), maxErrorText)
 	if message == "" {
@@ -908,9 +910,10 @@ func (p *Reporter) loop(done <-chan struct{}) {
 	}
 }
 
-// send reports the job as running with its current progress (renewing the
-// lease) and acts on the answer: a cancel request or a lost claim ends the
-// job's context. It reports whether the job goes on.
+// send reports the job's state (running, renewing the lease, or needs_attention
+// while parked, which has none) with its current progress and acts on the
+// answer: a cancel request or a lost claim ends the job's context. It reports
+// whether the job goes on.
 func (p *Reporter) send() bool {
 	ctx := p.ctx
 	p.mu.Lock()
@@ -957,7 +960,8 @@ func (p *Reporter) send() bool {
 		return false
 	default:
 		// The server is unreachable for now: the job goes on, and its lease
-		// lasts two minutes from the last report that got through.
+		// (a running job's) lasts two minutes from the last report that got
+		// through.
 		p.r.log.Warn("bridge: reporting progress failed", "job", p.job.ID, "err", err)
 		return true
 	}

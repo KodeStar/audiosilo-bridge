@@ -229,6 +229,74 @@ func normalizeBridge(cfg *Config) {
 	}
 }
 
+// ignoredOnBridge words a notice for each engine setting cfg sets to a
+// non-default value that the Bridge doesn't use, so a setting carried over from
+// sidecars doesn't silently do nothing. cfg is as loaded (file and environment),
+// before normalizeBridge forces the supervisor's model lanes off. The agent
+// container decides the agent concurrency (its --slots) and runs the CLIs
+// (decision 15).
+func ignoredOnBridge(cfg Config) []string {
+	var out []string
+	note := func(key, why string) { out = append(out, key+" is ignored on the Bridge: "+why) }
+	const slots = "the agent container's --slots sets the agent concurrency"
+	if capacity := cfg.Agent.Capacity(); capacity.Legacy {
+		if cfg.Agent.Concurrency != DefaultConcurrency {
+			note("agent.concurrency", slots)
+		}
+	} else {
+		if cfg.Agent.QueueConcurrency != DefaultAgentQueueConcurrency {
+			note("agent.queue_concurrency", slots)
+		}
+		if cfg.Agent.MaxAgentsPerBook != DefaultMaxAgentsPerBook {
+			note("agent.max_agents_per_book", slots)
+		}
+	}
+	const clis = "the agent container runs the CLIs"
+	if strings.TrimSpace(cfg.Agent.ClaudePath) != "" {
+		note("agent.claude_path", clis)
+	}
+	if strings.TrimSpace(cfg.Agent.CodexPath) != "" {
+		note("agent.codex_path", clis)
+	}
+	const forcedOff = "it is always off, as it would run an agent CLI in the Bridge"
+	sup := cfg.Supervisor
+	for _, f := range []struct {
+		key string
+		on  bool
+	}{
+		{"supervisor.model_assisted", sup.ModelAssisted},
+		{"supervisor.model_automatic_actions", sup.ModelAutomaticActions},
+		{"supervisor.allow_backend_failover", sup.AllowBackendFailover},
+	} {
+		if f.on {
+			note(f.key, forcedOff)
+		}
+	}
+	// The settings only those lanes read (normalizeSupervisor has already
+	// defaulted the zero values).
+	const modelLane = "the supervisor's model-assisted lane and backend failover are always off"
+	for _, f := range []struct {
+		key string
+		set bool
+	}{
+		{"supervisor.fallback_backend", strings.TrimSpace(sup.FallbackBackend) != ""},
+		{"supervisor.fallback_model", strings.TrimSpace(sup.FallbackModel) != ""},
+		{"supervisor.model_backend", strings.TrimSpace(sup.ModelBackend) != ""},
+		{"supervisor.model", strings.TrimSpace(sup.Model) != ""},
+		{"supervisor.max_model_calls", sup.MaxModelCalls != DefaultSupervisorMaxModelCalls},
+		{"supervisor.max_turns", sup.MaxTurns != DefaultSupervisorMaxTurns},
+		{"supervisor.timeout_seconds", sup.TimeoutSeconds != DefaultSupervisorTimeoutSeconds},
+		{"supervisor.invocations_per_hour", sup.InvocationsPerHour != DefaultSupervisorCallsPerHour},
+		{"supervisor.per_book_budget_usd", sup.PerBookBudgetUSD != DefaultSupervisorBookBudgetUSD},
+		{"supervisor.overall_batch_budget_usd", sup.OverallBatchBudgetUSD != DefaultSupervisorBatchBudgetUSD},
+	} {
+		if f.set {
+			note(f.key, modelLane)
+		}
+	}
+	return out
+}
+
 // validateBridge checks the Bridge settings.
 func (c Config) validateBridge() error {
 	if c.Server.URL != "" {
