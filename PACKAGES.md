@@ -40,7 +40,10 @@ internal/
             malformed env value fails the start rather than being ignored; an EMPTY
             one (compose's ${VAR} of an unset variable, a blank template field)
             counts as unset: it neither locks the page nor fails the start. The
-            engine's settings below are restart-to-apply.
+            engine's settings below are restart-to-apply, except asr.worker_fallback
+            (Phase 1b, AUDIOSILO_BRIDGE_ASR_WORKER_FALLBACK, local|wait, default
+            local, normalized lower-case): the router reads it per segment and the
+            page edits it.
             Engine history: metadata.base_url; agent.queue_concurrency controls
             agent-lane books and
             agent.max_agents_per_book controls safe within-book fan-out; legacy
@@ -184,7 +187,9 @@ internal/
             whisper_cli_path that does not resolve is a loud error). One job at a
             time is the scheduler's job (Lane A cap 1); this package doesn't
             self-serialize. Never seeds the initial prompt with a guess. Gated live
-            smoke: -tags asrlive.
+            smoke: -tags asrlive. Phase 1b: Job.Start/Duration place the audio in
+            the book (informational for a local backend; a worker task carries them);
+            the Bridge's engine runs every Job through workers.Router.
   transcript/ the normalized transcript contract (audiosilo-transcript/v1) + Sanitize
             (NaN/Infinity->null, string-aware) + format-detecting adapters (openai-whisper
             /mlx AND whisper.cpp -ojf) + Complete (resume/skip test, ports
@@ -524,7 +529,8 @@ internal/
             daemon-staged carryover. Constructed in app/engine.go with the
             toolfetch-resolved paths, the asr.Select-chosen backend, and the agent
             container's runner (agentbox, never a local CLI: decision 15), with
-            Config.AgentRedetect replacing agent.Select as the re-detection. The sanitizing stage
+            Config.AgentRedetect replacing agent.Select as the re-detection (Phase 1b's
+            workers.Router always reports itself available, so ASR never re-detects). The sanitizing stage
             deliberately RE-DERIVES all chapters every run (cheap, idempotent, raw is the
             source of truth) rather than tracking per-chapter freshness. Missing tools or
             an unavailable agent backend PARK a book needs_attention (a human-fixable
@@ -720,6 +726,9 @@ internal/
             picks up; a lost job needs no report (FinishServerJob marks it
             reported). The pairing lives in settings (pairing.*; the token is a
             secret).
+            0004 (Phase 1b, workers.go): workers (name, token_hash UNIQUE, what it
+            last said, last_seen_at written at most once a minute, segments /
+            audio_seconds / decode_seconds); deleting a row revokes its token.
             0003 (Phase 1a, generatebooks.go): server_jobs.server_id (the server that
             handed the job out, from the pairing's server_id; '' on older rows) and,
             on a RUNNING row, error holds the park message of a parked job
@@ -828,6 +837,8 @@ internal/
             ended (a killed ffmpeg is "signal: killed", not ctx.Err()): whoever
             cancelled set the status already. lockHolders/seriesLockOwners pass the
             status to state.HoldsSeriesLock (a failed predecessor frees its series).
+            Phase 1b: ReadmitParked(msg, code) re-admits every book parked with code
+            (store.ListBooksParkedWith) through readmit: the Bridge's asr_worker_waiting.
             SetAgentCapacity(n) changes the agent lane's book capacity (atomic,
             clamped to 1, notifies on a change) while it runs: the Bridge follows the
             agent container's slots.
@@ -1266,6 +1277,65 @@ internal/
             to done. Login: codex runs `codex login --device-auth` with the
             allow-listed environment and CODEX_HOME on the volume; claude prints how
             to give the container a `claude setup-token` token.
+  workerproto/ Phase 1b: the worker wire protocol, a leaf (standard library only)
+            shared by api (the routes), workers (the dispatcher) and worker (the
+            worker), so the two sides can't drift. Version (1) rides every call in
+            X-AudioSilo-Worker-Protocol; another is 409 protocol_mismatch with the
+            Bridge's version. Bump it only for a change an installed worker can't
+            follow (it refuses every installed worker until it updates); a new field
+            isn't one (the routes decode leniently). The unit is a SEGMENT (a FLAC,
+            its start and duration in the book, the decode options, an opaque id,
+            the FLAC's size and sha256), so Phase 1d's duration windows need no bump.
+            The result's raw transcript is the request BODY with ResultMeta in the
+            query: mlx output may hold NaN, which isn't JSON. The errors
+            (ErrUnauthorized, ErrUnknownTask, ErrNotHeld, ErrInvalidResult) are the
+            dispatcher's and map to 401/404 unknown_task/409 not_held/422.
+  workers/  Phase 1b, the Bridge's side. Hub: the in-memory segment queue (the
+            engine's work dir is the truth), 60 s leases renewed by 15 s beats, and
+            the registry of workers heard from (connected = a call within 45 s).
+            Tokens: asw_ + 64 hex, kept as sha256 in the workers table, deleting the
+            row revokes (and requeues what it held); only Authenticate adds a worker
+            to the registry (revokeMu orders it against RevokeWorker), so a call in
+            flight when its worker is removed is refused, never brings it back. Run(seg) queues and waits;
+            ErrNoWorker as soon as the segment sits unclaimed with none connected
+            (none was, or the holder's lease ran out). The task id hashes the audio's
+            sha256 + options, so a restarted Bridge asks for the same task; a beat on
+            a QUEUED task ADOPTS it (a new attempt) for the worker still decoding it;
+            a result is taken whoever holds the task (same audio, same options); a
+            finished or cancelled id is remembered 10 min so a late beat hears
+            not_held (stop), not unknown (carry on). Results must pass
+            transcript.Complete. WhenConnected closes on a connection after none (the
+            edge is read from the state in touchLocked, never kept): a local decode
+            yields, app's followWaiting looks at once. Router: the engine's
+            asr.Backend. Remote while a worker is connected (writes the raw where a
+            local decode would, fsutil.WriteFileAtomic), else Wait() (asr.
+            worker_fallback == wait, read per segment) parks asr_worker_waiting, else
+            the Bridge's own backend (prepared lazily, stopped and re-routed when a
+            worker connects mid-decode); no usable local backend is a wait too.
+            Detect is always available (so the executor never re-detects), CanRun
+            says whether a segment would run now (followWaiting's condition). ID/
+            Detect report the route NOW (backend "worker", device "remote"), so
+            asr.json's provenance is the route the stage started on (per-segment
+            provenance is a follow-up).
+  worker/   Phase 1b, `audiosilo-bridge worker`: client (token + protocol header on
+            every call; the FLAC checked by size and sha256), Run (Select +
+            EnsureReady, ffmpeg checked for mlx-whisper; hello; then a loop: send
+            kept results, resume the segment in hand, claim), keepLease (beats every
+            HeartbeatEvery from the claim on, through the FLAC's download as well as
+            the decode, since a big FLAC on a slow link outlasts the 60 s lease; stops
+            both on not_held or a refused token, tolerates an unreachable or
+            restarting Bridge for unknownGrace = 30 min, follows an adopted attempt)
+            and the spool (<data>/spool: current.json + <id>.flac = the segment in
+            hand; results/<id>.json + .meta.json = transcripts not yet taken). A
+            refused token or another version is retried every 5/10 min and never
+            exits (a service manager would loop). install.go: Service renders a
+            launchd plist (KeepAlive, ProcessType Interactive, the install's PATH,
+            the log in <data>) or a systemd user unit (Restart=always, every word
+            quoted with % doubled), Install/Uninstall run launchctl/systemctl
+            through an injected Run; the token goes to <data>/worker.token (0600),
+            never into the service file. A decoder outlives a kill -9 of a worker
+            started by hand (spike 4); launchd and systemd end the job's process
+            group/cgroup, so an installed worker doesn't leave one.
   app/      the wiring and the page API's Backend: Conn holds the pairing (settings
             pairing.*, the token in the vault) and the link; the heartbeat loop beats
             every 30 s or when kicked, records the server's libraries (under b.mu,
@@ -1287,6 +1357,14 @@ internal/
             code; a page server that fails stops the heartbeat and the runner, and
             Run returns its error. Edits go through config.SaveFile (one at a time:
             each loads, edits and writes config.yaml) and reload the config.
+            Phase 1b: workers.go: the hub (made in New, behind the page server's
+            /worker/v1/*), the router (engine.go: the asr.Select backend becomes its
+            Local), Workers/CreateWorker/RevokeWorker for the page, linkWorkers for
+            the heartbeat (only workers that have connected; platform = GOOS/GOARCH
+            plus backend and device), and followWaiting: ONE level-triggered loop that
+            re-admits asr_worker_waiting books whenever router.CanRun(), looking
+            every 30 s, when a worker connects (hub.WhenConnected), at the engine's
+            start and after a settings save (kickWaiting).
             Phase 1a: engine.go wires the ENGINE the way sidecars' daemon did, minus
             the folder scan, and runs it in the background from Run (the first start
             may download ffmpeg; the generate job waits for it): the event hub with
@@ -1319,7 +1397,12 @@ internal/
             /api/jobs/{id}/retry: 202, 404 when it isn't a sidecars job here, 409
             when it isn't parked), engine (GET /api/engine: the agent container, its
             CLIs' versions and credential KINDS, never a credential; ASR; the budgets
-            and the month's spend; the transcript retention), logs, workers. lanOnly refuses any connection not from a
+            and the month's spend; the transcript retention), logs, workers (list,
+            POST add: the token in the answer only, DELETE revoke). Phase 1b:
+            workers.go serves /worker/v1/* to the injected WorkerHub: a worker token
+            only (a page session is 401, and the page's routes refuse a worker
+            token), then the protocol header; lenient JSON; a longer write deadline
+            for the audio and read deadline for the result. lanOnly refuses any connection not from a
             loopback, private (RFC 1918, ULA) or link-local address (RemoteAddr only,
             never a forwarded header; CGNAT/Tailscale is NOT local); every route but
             login and health needs a session, loopback included (an agent container

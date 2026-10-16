@@ -781,7 +781,7 @@ func (e *Executor) asrStage(ctx context.Context, book store.Book, r scheduler.St
 		if !fsutil.IsFile(flac) {
 			return scheduler.StageResult{}, fmt.Errorf("asr: chapter %d FLAC missing (%s); split must run first", ch.Chapter, flac)
 		}
-		empty, err := e.transcribeChapter(ctx, r, setup, flac, rawDir, rawPath, ch.Chapter, ch.Duration)
+		empty, err := e.transcribeChapter(ctx, r, setup, flac, rawDir, rawPath, ch)
 		if err != nil {
 			return scheduler.StageResult{}, err
 		}
@@ -865,8 +865,9 @@ func asrDecodeTimeoutMsg(chapter int, bound time.Duration) string {
 // The two retries are independent: an empty NoContext decode still gets its one empty-retry.
 // Every decode attempt starts from a clean rawPath. A genuine transcription/completeness
 // error is returned as-is.
-func (e *Executor) transcribeChapter(ctx context.Context, r scheduler.StageReport, setup ASRSetup, flac, rawDir, rawPath string, chapter int, audioDuration float64) (empty bool, err error) {
-	bound := asrChapterDecodeBound(audioDuration)
+func (e *Executor) transcribeChapter(ctx context.Context, r scheduler.StageReport, setup ASRSetup, flac, rawDir, rawPath string, ch audio.Chapter) (empty bool, err error) {
+	chapter := ch.Chapter
+	bound := asrChapterDecodeBound(ch.Duration)
 	// noContext escalates on a decode timeout (context-conditioning drives the collapse we
 	// are here to break); emptyRetried tracks the one allowed empty-transcript retry. Both
 	// are independent one-shot state, so the two failure modes compose cleanly.
@@ -879,7 +880,8 @@ func (e *Executor) transcribeChapter(ctx context.Context, r scheduler.StageRepor
 		_ = os.Remove(rawPath) // every attempt starts from a clean raw (partial/empty/timed-out output)
 		// InitialPrompt is intentionally empty: verified spellings come from the spelling
 		// stage. Seeding a guess would make a wrong spelling recur.
-		job := asr.Job{Audio: flac, OutDir: rawDir, Chapter: chapter, Language: setup.Language, NoContext: noContext}
+		job := asr.Job{Audio: flac, OutDir: rawDir, Chapter: chapter, Language: setup.Language, NoContext: noContext,
+			Start: ch.Start, Duration: ch.Duration}
 		// Bound this decode: a repetition-collapse decode would otherwise run for hours. A
 		// slow chapter has no mid-chapter progress to report, so the heartbeat ticker keeps
 		// the supervisor's stale-heartbeat/no_progress detectors from killing a healthy decode

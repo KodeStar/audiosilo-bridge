@@ -10,6 +10,7 @@ import type {
   SettingsUpdate,
   Status,
   WorkersResponse,
+  NewWorker,
 } from './types';
 
 // ApiError is any non-2xx answer; message is the server's {error} sentence when
@@ -174,6 +175,16 @@ export class ApiClient {
 
   workers(): Promise<WorkersResponse> {
     return this.request('/api/workers');
+  }
+
+  // 400 = no name. The answer's token is shown this once.
+  createWorker(name: string): Promise<NewWorker> {
+    return this.request('/api/workers', { method: 'POST', body: { name } });
+  }
+
+  // Revokes the worker's token. 404 = no such worker.
+  revokeWorker(id: number): Promise<void> {
+    return this.request(`/api/workers/${id}`, { method: 'DELETE' });
   }
 }
 

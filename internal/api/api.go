@@ -24,7 +24,6 @@ import (
 
 	"github.com/kodestar/audiosilo-bridge/internal/auth"
 	"github.com/kodestar/audiosilo-bridge/internal/jobs"
-	"github.com/kodestar/audiosilo-bridge/internal/link"
 	"github.com/kodestar/audiosilo-bridge/internal/logring"
 	"github.com/kodestar/audiosilo-bridge/internal/mapping"
 	"github.com/kodestar/audiosilo-bridge/internal/store"
@@ -57,9 +56,26 @@ type Library struct {
 // Settings are the page's editable settings; Locked names the ones the
 // environment sets.
 type Settings struct {
-	PublicURL           string   `json:"public_url"`
-	MappingCheckMinutes int      `json:"mapping_check_minutes"`
-	Locked              []string `json:"locked"`
+	PublicURL           string `json:"public_url"`
+	MappingCheckMinutes int    `json:"mapping_check_minutes"`
+	// ASRWorkerFallback is asr.worker_fallback: local or wait ("" on a save
+	// keeps it).
+	ASRWorkerFallback string   `json:"asr_worker_fallback"`
+	Locked            []string `json:"locked"`
+}
+
+// Worker is a paired ASR worker (GET /api/workers): what it last said, what it
+// did, and whether it is connected now and on which segment.
+type Worker struct {
+	store.Worker
+	Connected bool   `json:"connected"`
+	Task      string `json:"task"`
+}
+
+// NewWorker is a worker just paired: its token is shown this once.
+type NewWorker struct {
+	Worker Worker `json:"worker"`
+	Token  string `json:"token"`
 }
 
 // Engine is the sidecars engine's state for the page (GET /api/engine): the
@@ -101,12 +117,18 @@ type EngineCLI struct {
 	Credential string `json:"credential"`
 }
 
-// EngineASR is the speech recognition backend.
+// EngineASR is where speech recognition runs now: a connected worker
+// (backend "worker", device "remote"), else the Bridge's own backend, with the
+// fallback for when no worker is connected (local or wait).
 type EngineASR struct {
-	Backend   string `json:"backend"`
-	Available bool   `json:"available"`
-	Device    string `json:"device"`
-	Detail    string `json:"detail"`
+	Backend        string `json:"backend"`
+	Available      bool   `json:"available"`
+	Device         string `json:"device"`
+	Detail         string `json:"detail"`
+	WorkerFallback string `json:"worker_fallback"`
+	// Waiting: no segment can run now (no worker connected and the fallback is
+	// wait, or nothing local to fall back on), so books wait for a worker.
+	Waiting bool `json:"waiting"`
 }
 
 // Backend is what the page drives.
@@ -128,7 +150,11 @@ type Backend interface {
 	RetryJob(ctx context.Context, id int64) error
 	Engine(ctx context.Context) Engine
 	Logs(after uint64, limit int, level slog.Level) []logring.Entry
-	Workers() []link.Worker
+	Workers(ctx context.Context) ([]Worker, error)
+	// CreateWorker pairs a worker (ErrInvalid: no name); RevokeWorker
+	// deletes one, which revokes its token (ErrNotFound: no such worker).
+	CreateWorker(ctx context.Context, name string) (*NewWorker, error)
+	RevokeWorker(ctx context.Context, id int64) error
 }
 
 // The Backend's error kinds, mapped to statuses.
@@ -157,18 +183,20 @@ func Errorf(kind error, format string, args ...any) error {
 	return &kindError{kind: kind, msg: fmt.Sprintf(format, args...)}
 }
 
-// API serves the page.
+// API serves the page and the worker routes.
 type API struct {
 	b       Backend
 	auth    *auth.Manager
+	workers WorkerHub
 	web     http.Handler
 	log     *slog.Logger
 	limiter *auth.RateLimiter
 }
 
-// New returns the API over b, with web serving the page's files.
-func New(b Backend, am *auth.Manager, web http.Handler, log *slog.Logger) *API {
-	return &API{b: b, auth: am, web: web, log: log, limiter: auth.NewRateLimiter(10, 0.2)}
+// New returns the API over b, with hub behind the worker routes (nil: none)
+// and web serving the page's files.
+func New(b Backend, am *auth.Manager, hub WorkerHub, web http.Handler, log *slog.Logger) *API {
+	return &API{b: b, auth: am, workers: hub, web: web, log: log, limiter: auth.NewRateLimiter(10, 0.2)}
 }
 
 // Handler is the whole site: the API under /api, the page everywhere else,
@@ -196,6 +224,9 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("GET /api/engine", a.requireAuth(a.handleEngine))
 	mux.HandleFunc("GET /api/logs", a.requireAuth(a.handleLogs))
 	mux.HandleFunc("GET /api/workers", a.requireAuth(a.handleWorkers))
+	mux.HandleFunc("POST /api/workers", a.requireAuth(a.handleCreateWorker))
+	mux.HandleFunc("DELETE /api/workers/{id}", a.requireAuth(a.handleRevokeWorker))
+	a.workerRoutes(mux)
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) { writeError(w, http.StatusNotFound, "not found") })
 	mux.Handle("/", a.web)
 	return lanOnly(securityHeaders(mux))
@@ -453,11 +484,13 @@ func (a *API) handleSaveSettings(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		PublicURL           string `json:"public_url"`
 		MappingCheckMinutes int    `json:"mapping_check_minutes"`
+		ASRWorkerFallback   string `json:"asr_worker_fallback"`
 	}
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	s := Settings{PublicURL: strings.TrimSpace(req.PublicURL), MappingCheckMinutes: req.MappingCheckMinutes}
+	s := Settings{PublicURL: strings.TrimSpace(req.PublicURL), MappingCheckMinutes: req.MappingCheckMinutes,
+		ASRWorkerFallback: strings.TrimSpace(req.ASRWorkerFallback)}
 	if err := a.b.SaveSettings(r.Context(), s); err != nil {
 		a.writeBackendError(w, err, "save the settings")
 		return
@@ -554,5 +587,38 @@ func (a *API) handleLogs(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) handleWorkers(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"workers": a.b.Workers()})
+	ws, err := a.b.Workers(r.Context())
+	if err != nil {
+		a.writeBackendError(w, err, "list the workers")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"workers": ws})
+}
+
+func (a *API) handleCreateWorker(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Name string `json:"name"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	nw, err := a.b.CreateWorker(r.Context(), req.Name)
+	if err != nil {
+		a.writeBackendError(w, err, "add the worker")
+		return
+	}
+	writeJSON(w, http.StatusCreated, nw)
+}
+
+func (a *API) handleRevokeWorker(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || id <= 0 {
+		writeError(w, http.StatusBadRequest, "invalid worker id")
+		return
+	}
+	if err := a.b.RevokeWorker(r.Context(), id); err != nil {
+		a.writeBackendError(w, err, "remove the worker")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }

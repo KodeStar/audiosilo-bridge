@@ -136,8 +136,10 @@ func (b *Bridge) CheckNow(ctx context.Context) { b.CheckMappings(context.Without
 // Settings are the page's editable settings.
 func (b *Bridge) Settings() api.Settings {
 	cfg := b.config()
-	s := api.Settings{PublicURL: cfg.PublicURL, MappingCheckMinutes: cfg.Mapping.CheckMinutes, Locked: []string{}}
-	for _, k := range []string{config.KeyPublicURL, config.KeyMappingCheck, config.KeyLibraries, config.KeyServerURL} {
+	s := api.Settings{PublicURL: cfg.PublicURL, MappingCheckMinutes: cfg.Mapping.CheckMinutes,
+		ASRWorkerFallback: cfg.ASR.WorkerFallback, Locked: []string{}}
+	for _, k := range []string{config.KeyPublicURL, config.KeyMappingCheck, config.KeyLibraries, config.KeyServerURL,
+		config.KeyASRWorkerFallback} {
 		if cfg.EnvSet(k) {
 			s.Locked = append(s.Locked, k)
 		}
@@ -154,6 +156,12 @@ func (b *Bridge) SaveSettings(ctx context.Context, s api.Settings) error {
 	if cur.EnvSet(config.KeyMappingCheck) && s.MappingCheckMinutes != cur.Mapping.CheckMinutes {
 		return api.Errorf(api.ErrLocked, "AUDIOSILO_BRIDGE_MAPPING_CHECK_MINUTES sets mapping.check_minutes")
 	}
+	if s.ASRWorkerFallback == "" {
+		s.ASRWorkerFallback = cur.ASR.WorkerFallback
+	}
+	if cur.EnvSet(config.KeyASRWorkerFallback) && s.ASRWorkerFallback != cur.ASR.WorkerFallback {
+		return api.Errorf(api.ErrLocked, "AUDIOSILO_BRIDGE_ASR_WORKER_FALLBACK sets asr.worker_fallback")
+	}
 	err := b.save(func(c *config.Config) error {
 		// A setting the environment sets keeps config.yaml's own value: the page
 		// sends it back unchanged, and it must never reach the file.
@@ -163,11 +171,15 @@ func (b *Bridge) SaveSettings(ctx context.Context, s api.Settings) error {
 		if !cur.EnvSet(config.KeyMappingCheck) {
 			c.Mapping.CheckMinutes = s.MappingCheckMinutes
 		}
+		if !cur.EnvSet(config.KeyASRWorkerFallback) {
+			c.ASR.WorkerFallback = s.ASRWorkerFallback
+		}
 		return nil
 	})
 	if err != nil {
 		return err
 	}
+	b.kickWaiting() // a fallback that is no longer wait lets waiting books go on
 	b.Kick()
 	return nil
 }
@@ -204,9 +216,6 @@ func (b *Bridge) Logs(after uint64, limit int, level slog.Level) []logring.Entry
 	}
 	return b.ring.Since(after, limit, level)
 }
-
-// Workers lists the ASR workers (none until Phase 1b).
-func (b *Bridge) Workers() []link.Worker { return []link.Worker{} }
 
 // Job is one job this Bridge claimed.
 func (b *Bridge) Job(ctx context.Context, id int64) (*store.ServerJob, error) {
@@ -256,7 +265,13 @@ func (b *Bridge) Engine(ctx context.Context) api.Engine {
 	if e := b.engine.get(); e != nil {
 		out.Started = true
 		c := e.exec.ASRCapability()
-		out.ASR = api.EngineASR{Backend: c.Backend, Available: c.Available, Device: c.Device, Detail: c.Detail}
+		waiting := false
+		if r := b.router.Load(); r != nil {
+			c, _ = r.Detect(ctx)
+			waiting = !r.CanRun()
+		}
+		out.ASR = api.EngineASR{Backend: c.Backend, Available: c.Available, Device: c.Device, Detail: c.Detail, Waiting: waiting}
 	}
+	out.ASR.WorkerFallback = cfg.ASR.WorkerFallback
 	return out
 }

@@ -865,7 +865,7 @@ func TestTranscribeChapterDecodeTimeoutRetriesNoContext(t *testing.T) {
 
 	exe, rawDir := decodeTimeoutExec(t, fake)
 	rawPath := filepath.Join(rawDir, transcript.RawName(1))
-	empty, err := exe.transcribeChapter(context.Background(), scheduler.StageReport{}, fakeASR(fake), audio.ChapterFileName(1), rawDir, rawPath, 1, 0)
+	empty, err := exe.transcribeChapter(context.Background(), scheduler.StageReport{}, fakeASR(fake), audio.ChapterFileName(1), rawDir, rawPath, audio.Chapter{Chapter: 1})
 	if err != nil {
 		t.Fatalf("transcribeChapter after a NoContext retry: %v", err)
 	}
@@ -895,7 +895,7 @@ func TestTranscribeChapterDecodeTimeoutParks(t *testing.T) {
 
 	exe, rawDir := decodeTimeoutExec(t, fake)
 	rawPath := filepath.Join(rawDir, transcript.RawName(1))
-	_, err := exe.transcribeChapter(context.Background(), scheduler.StageReport{}, fakeASR(fake), audio.ChapterFileName(1), rawDir, rawPath, 1, 0)
+	_, err := exe.transcribeChapter(context.Background(), scheduler.StageReport{}, fakeASR(fake), audio.ChapterFileName(1), rawDir, rawPath, audio.Chapter{Chapter: 1})
 	var pe *scheduler.ParkError
 	if !errors.As(err, &pe) {
 		t.Fatalf("error = %v, want a ParkError (decode timeout after the NoContext retry)", err)
@@ -921,7 +921,7 @@ func TestTranscribeChapterFastAndEmpty(t *testing.T) {
 		fake := newFakeBackend()
 		exe, rawDir := decodeTimeoutExec(t, fake)
 		rawPath := filepath.Join(rawDir, transcript.RawName(1))
-		empty, err := exe.transcribeChapter(context.Background(), scheduler.StageReport{}, fakeASR(fake), audio.ChapterFileName(1), rawDir, rawPath, 1, 0)
+		empty, err := exe.transcribeChapter(context.Background(), scheduler.StageReport{}, fakeASR(fake), audio.ChapterFileName(1), rawDir, rawPath, audio.Chapter{Chapter: 1})
 		if err != nil || empty {
 			t.Fatalf("transcribeChapter = (empty=%v, %v), want (false, nil)", empty, err)
 		}
@@ -938,7 +938,7 @@ func TestTranscribeChapterFastAndEmpty(t *testing.T) {
 		fake.emptyMode = "always"
 		exe, rawDir := decodeTimeoutExec(t, fake)
 		rawPath := filepath.Join(rawDir, transcript.RawName(1))
-		empty, err := exe.transcribeChapter(context.Background(), scheduler.StageReport{}, fakeASR(fake), audio.ChapterFileName(1), rawDir, rawPath, 1, 0)
+		empty, err := exe.transcribeChapter(context.Background(), scheduler.StageReport{}, fakeASR(fake), audio.ChapterFileName(1), rawDir, rawPath, audio.Chapter{Chapter: 1})
 		if err != nil {
 			t.Fatalf("transcribeChapter: %v", err)
 		}

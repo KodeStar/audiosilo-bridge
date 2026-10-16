@@ -13,7 +13,6 @@ import (
 	"testing"
 
 	"github.com/kodestar/audiosilo-bridge/internal/auth"
-	"github.com/kodestar/audiosilo-bridge/internal/link"
 	"github.com/kodestar/audiosilo-bridge/internal/logring"
 	"github.com/kodestar/audiosilo-bridge/internal/store"
 )
@@ -29,6 +28,8 @@ type backend struct {
 	logsLevel                      slog.Level
 	retried                        int64
 	retryErr                       error
+	createdWorker                  string
+	revokedWorker                  int64
 }
 
 func (b *backend) Status() Status { return Status{Version: "0.1.0", Kinds: []string{"bridge.verify"}} }
@@ -74,11 +75,28 @@ func (b *backend) Logs(_ uint64, _ int, level slog.Level) []logring.Entry {
 	b.logsLevel = level
 	return []logring.Entry{}
 }
-func (b *backend) Workers() []link.Worker { return []link.Worker{} }
+func (b *backend) Workers(context.Context) ([]Worker, error) {
+	return []Worker{{Worker: store.Worker{ID: 1, Name: "studio"}, Connected: true}}, nil
+}
+func (b *backend) CreateWorker(_ context.Context, name string) (*NewWorker, error) {
+	if strings.TrimSpace(name) == "" {
+		return nil, Errorf(ErrInvalid, "give the worker a name")
+	}
+	b.createdWorker = name
+	return &NewWorker{Worker: Worker{Worker: store.Worker{ID: 2, Name: name}}, Token: "asw_secret"}, nil
+}
+func (b *backend) RevokeWorker(_ context.Context, id int64) error {
+	if id != 2 {
+		return Errorf(ErrNotFound, "no worker %d", id)
+	}
+	b.revokedWorker = id
+	return nil
+}
 
 type env struct {
 	h     http.Handler
 	b     *backend
+	hub   *fakeHub
 	token string
 }
 
@@ -95,7 +113,8 @@ func newEnv(t *testing.T) *env {
 	}
 	b := &backend{}
 	page := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = io.WriteString(w, "page") })
-	return &env{h: New(b, am, page, slog.New(slog.NewTextHandler(io.Discard, nil))).Handler(), b: b, token: tok}
+	hub := &fakeHub{}
+	return &env{h: New(b, am, hub, page, slog.New(slog.NewTextHandler(io.Discard, nil))).Handler(), b: b, hub: hub, token: tok}
 }
 
 // do sends a request from a LAN address unless remote is given.
@@ -155,7 +174,7 @@ func TestEveryRouteNeedsASession(t *testing.T) {
 		{"POST", "/api/unpair"}, {"GET", "/api/libraries"}, {"PUT", "/api/libraries/1"}, {"POST", "/api/libraries/check"},
 		{"GET", "/api/settings"}, {"PUT", "/api/settings"}, {"GET", "/api/jobs"}, {"POST", "/api/jobs/1/cancel"},
 		{"GET", "/api/jobs/1"}, {"POST", "/api/jobs/1/retry"}, {"GET", "/api/engine"},
-		{"GET", "/api/logs"}, {"GET", "/api/workers"},
+		{"GET", "/api/logs"}, {"GET", "/api/workers"}, {"POST", "/api/workers"}, {"DELETE", "/api/workers/2"},
 		{"POST", "/api/logout"}, // last: it ends the session
 	}
 	for _, rt := range routes {
@@ -163,6 +182,10 @@ func TestEveryRouteNeedsASession(t *testing.T) {
 			if w := e.do(rt[0], rt[1], tok, "{}", "127.0.0.1:5"); w.Code != http.StatusUnauthorized {
 				t.Errorf("denied: %s %s with %q = %d, want 401", rt[0], rt[1], tok, w.Code)
 			}
+		}
+		// A worker token is not a session (the worker routes take only it).
+		if w := e.do(rt[0], rt[1], fakeWorkerToken, "{}", "127.0.0.1:5"); w.Code != http.StatusUnauthorized {
+			t.Errorf("denied: %s %s with a worker token = %d, want 401", rt[0], rt[1], w.Code)
 		}
 		if w := e.do(rt[0], rt[1], e.token, "{}"); w.Code == http.StatusUnauthorized {
 			t.Errorf("allowed: %s %s with a session = 401", rt[0], rt[1])

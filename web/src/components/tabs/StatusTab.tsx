@@ -5,6 +5,7 @@ import { useLoad } from '@/lib/useLoad';
 import { laneText, onlineText, secretKeyText } from '@/lib/status';
 import { agentText, budgetPercent, budgetText, credentialText, retentionText } from '@/lib/engine';
 import { usd } from '@/lib/generate';
+import { asrText, fallbackText } from '@/lib/workers';
 import { Ago } from '../ui/Ago';
 import { Card } from '../ui/Card';
 import { Badge } from '../ui/Badge';
@@ -120,11 +121,12 @@ function EngineCard({ client }: { client: ApiClient }) {
           )}
         </Row>
         <Row label="Speech recognition">
-          {!engine.started
-            ? 'Starting'
-            : engine.asr.available
-              ? `${engine.asr.backend}${engine.asr.device ? ` (${engine.asr.device})` : ''}`
-              : `Not available${engine.asr.detail ? `: ${engine.asr.detail}` : ''}`}
+          {engine.started ? asrText(engine.asr) : 'Starting'}
+          {engine.started && (
+            <span className="block text-xs text-dim">
+              With no worker connected, {fallbackText(engine.asr.worker_fallback)}.
+            </span>
+          )}
         </Row>
         <Row label="Monthly budget">
           {budgetText(engine)}

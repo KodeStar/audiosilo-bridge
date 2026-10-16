@@ -32,6 +32,7 @@ import (
 	"github.com/kodestar/audiosilo-bridge/internal/store"
 	"github.com/kodestar/audiosilo-bridge/internal/verify"
 	"github.com/kodestar/audiosilo-bridge/internal/web"
+	"github.com/kodestar/audiosilo-bridge/internal/workers"
 )
 
 // HeartbeatEvery is how often the Bridge reports to the server; the server
@@ -69,6 +70,10 @@ type Bridge struct {
 	box    *agentbox.Runner
 	gen    *generate.Handler
 	engine engineState
+	// hub is the ASR workers' queue and registry (Phase 1b); router the
+	// engine's ASR backend over it, once the engine has started.
+	hub    *workers.Hub
+	router atomic.Pointer[workers.Router]
 	// tokens resolves the GitHub token a contribution files issues with (the
 	// vault's github_pat, which AUDIOSILO_BRIDGE_GITHUB_TOKEN sets).
 	tokens *contrib.TokenSource
@@ -76,6 +81,8 @@ type Bridge struct {
 	est estimatesCache
 
 	kick chan struct{}
+	// waitKick asks for a look at the books waiting for a worker now.
+	waitKick chan struct{}
 
 	// saveMu serializes the page's config edits: each is a load, an edit and a
 	// write of config.yaml, so two at once would lose one.
@@ -133,9 +140,10 @@ func New(ctx context.Context, opts Options) (*Bridge, string, error) {
 		return nil, "", err
 	}
 	b := &Bridge{dataDir: opts.DataDir, version: opts.Version, log: opts.Logger, ring: opts.Ring, db: db, keySrc: keySrc,
-		vault: vault, conn: conn, libs: mapping.NewRegistry(), auth: am, kick: make(chan struct{}, 1),
+		vault: vault, conn: conn, libs: mapping.NewRegistry(), auth: am, kick: make(chan struct{}, 1), waitKick: make(chan struct{}, 1),
 		box: newAgentBox(cfg, opts.DataDir, opts.Logger), tokens: contrib.NewTokenSource(vault)}
 	b.cfg.Store(&cfg)
+	b.hub = workers.New(workers.Options{DB: db, BridgeVersion: opts.Version, Log: opts.Logger})
 	verifier := verify.New(b.libs, b.mount, func() mapping.BookSource {
 		if cl := b.conn.Client(); cl != nil {
 			return cl
@@ -272,7 +280,7 @@ func (b *Bridge) Run(ctx context.Context) error {
 		}
 	}
 	srv := &http.Server{
-		Handler:           api.New(b, b.auth, web.New(), b.log).Handler(),
+		Handler:           api.New(b, b.auth, b.hub, web.New(), b.log).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      60 * time.Second,
@@ -335,7 +343,7 @@ func (b *Bridge) beat(ctx context.Context) {
 	gen := b.beatGen
 	b.mu.Unlock()
 	cfg := b.config()
-	st := link.Status{Version: b.version, Kinds: b.runner.Kinds(), Libraries: b.libs.Statuses(), Workers: []link.Worker{},
+	st := link.Status{Version: b.version, Kinds: b.runner.Kinds(), Libraries: b.libs.Statuses(), Workers: b.linkWorkers(ctx),
 		UIURL: cfg.PublicURL, Estimates: b.estimates(ctx)}
 	reply, err := cl.Heartbeat(ctx, st)
 	if ctx.Err() != nil {

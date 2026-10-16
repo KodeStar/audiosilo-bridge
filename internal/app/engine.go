@@ -26,6 +26,7 @@ import (
 	"github.com/kodestar/audiosilo-bridge/internal/store"
 	"github.com/kodestar/audiosilo-bridge/internal/supervisor"
 	"github.com/kodestar/audiosilo-bridge/internal/toolfetch"
+	"github.com/kodestar/audiosilo-bridge/internal/workers"
 )
 
 // The engine (the sidecars pipeline imported from audiosilo-sidecars), wired the
@@ -90,7 +91,7 @@ func (b *Bridge) runEngine(ctx context.Context) {
 		return
 	}
 	asrSelect := asr.SelectConfig{Backend: cfg.ASR.Backend, Model: cfg.ASR.Model, Language: cfg.ASR.Language,
-		WhisperCLIPath: cfg.ASR.WhisperCLIPath, AutoDownload: cfg.Tools.AutoDownload, DataDir: b.dataDir, Log: log}
+		WhisperCLIPath: cfg.ASR.WhisperCLIPath, Threads: cfg.ASR.Threads, AutoDownload: cfg.Tools.AutoDownload, DataDir: b.dataDir, Log: log}
 	asrBackend, asrCap, err := asr.Select(ctx, asrSelect)
 	if err != nil {
 		// A misconfiguration (an explicit whisper-cli that doesn't resolve): the
@@ -102,6 +103,15 @@ func (b *Bridge) runEngine(ctx context.Context) {
 	if asrModel == "" {
 		asrModel = asr.DefaultModelFor(asrCap.Backend)
 	}
+	// Phase 1b: the engine's ASR is the worker router, remote when a worker is
+	// connected, else the backend above or a wait (asr.worker_fallback, read
+	// for every segment). It always reports itself available (a book with
+	// nowhere to transcribe waits for a worker), so the executor never
+	// re-detects it.
+	router := &workers.Router{Hub: b.hub, Local: asrBackend, LocalCap: asrCap, Log: log,
+		Wait: func() bool { return b.config().ASR.WorkerFallback == config.ASRWorkerFallbackWait }}
+	b.router.Store(router)
+	routerCap, _ := router.Detect(ctx)
 
 	// The agent container's slots are the agent concurrency: a book in an agent
 	// stage waits for a slot rather than piling CLI runs onto one container. The
@@ -116,7 +126,7 @@ func (b *Bridge) runEngine(ctx context.Context) {
 	exec := pipeline.NewExecutor(pipeline.Config{
 		DB: b.db, FFmpeg: tools.FFmpeg, FFprobe: tools.FFprobe, DataDir: b.dataDir,
 		Tools:     pipeline.ToolConfig{FFmpegPath: cfg.Tools.FFmpegPath, FFprobePath: cfg.Tools.FFprobePath},
-		ASR:       pipeline.ASRSetup{Backend: asrBackend, Cap: asrCap, Model: asrModel, Language: cfg.ASR.Language},
+		ASR:       pipeline.ASRSetup{Backend: router, Cap: routerCap, Model: asrModel, Language: cfg.ASR.Language},
 		ASRSelect: asrSelect,
 		Agent:     box, AgentAvail: box.Detect(ctx), AgentRedetect: redetect,
 		AgentModels:      pipeline.AgentModels{Claude: cfg.Agent.Claude, OpenAI: cfg.Agent.OpenAI},
@@ -170,7 +180,8 @@ func (b *Bridge) runEngine(ctx context.Context) {
 	})
 
 	var wg sync.WaitGroup
-	wg.Add(6)
+	wg.Add(7)
+	go func() { defer wg.Done(); b.followWaiting(ctx, router, waitingEvery) }()
 	go func() {
 		defer wg.Done()
 		followAgentSlots(ctx, box.Status, agentSlotsEvery, slots, func(n int) {
@@ -193,7 +204,9 @@ func (b *Bridge) runEngine(ctx context.Context) {
 	go func() { defer wg.Done(); b.daily(ctx, b.pruneEvents) }()
 	go func() { defer wg.Done(); b.daily(ctx, b.sweepTranscripts) }()
 	b.engine.cur.Store(&engine{sched: sched, exec: exec})
+	b.kickWaiting() // a book parked waiting before this start may go on now
 	log.Info("bridge: the engine started", "ffmpeg", tools.FFmpeg != "", "asr", asrCap.Backend, "asr_available", asrCap.Available,
+		"asr_worker_fallback", cfg.ASR.WorkerFallback,
 		"agent_backend", box.ID(), "agent_slots", slots, "staging", cfg.AgentStagingDir(b.dataDir))
 	b.runner.Wake()
 	wg.Wait()

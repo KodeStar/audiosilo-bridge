@@ -2272,7 +2272,7 @@ func (e *Executor) retranscribeChapter(ctx context.Context, r scheduler.StageRep
 		// but NoContext-on: unlike asrStage, a repair re-transcription must vary the
 		// decode params - context-conditioning drives the deterministic repetition
 		// collapse we are here to fix, so an identical-params retry would just replay it.
-		job := asr.Job{Audio: flac, OutDir: freshDir, Chapter: chapter, Language: setup.Language, NoContext: true}
+		job := asr.Job{Audio: flac, OutDir: freshDir, Chapter: chapter, Language: setup.Language, NoContext: true, Duration: durationSec}
 		// A full-chapter re-transcription is as slow as the original decode, so keep the
 		// heartbeat fresh while it runs (no mid-chapter progress to report).
 		terr := transcribeWithHeartbeat(ctx, r, "retranscribing", chapter, func() error {

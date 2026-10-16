@@ -1,4 +1,6 @@
 bin/
+# `go build ./cmd/audiosilo-bridge` from the repo root.
+/audiosilo-bridge
 data/
 /dist/
 .DS_Store

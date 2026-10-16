@@ -3,6 +3,7 @@ import type { SettingKey, Settings } from '@/api/types';
 // The settings keys the form edits, as the Bridge names them in Settings.locked.
 export const KEY_PUBLIC_URL: SettingKey = 'public_url';
 export const KEY_CHECK_MINUTES: SettingKey = 'mapping.check_minutes';
+export const KEY_WORKER_FALLBACK: SettingKey = 'asr.worker_fallback';
 
 export const LOCKED_NOTE = 'Set by the environment';
 
@@ -16,7 +17,11 @@ export function isLocked(s: Pick<Settings, 'locked'> | null | undefined, key: Se
 
 // allLocked: every field the form edits is locked (nothing to save).
 export function allLocked(s: Settings): boolean {
-  return isLocked(s, KEY_PUBLIC_URL) && isLocked(s, KEY_CHECK_MINUTES);
+  return (
+    isLocked(s, KEY_PUBLIC_URL) &&
+    isLocked(s, KEY_CHECK_MINUTES) &&
+    isLocked(s, KEY_WORKER_FALLBACK)
+  );
 }
 
 // parseCheckMinutes reads the interval field: the number, or an error sentence.

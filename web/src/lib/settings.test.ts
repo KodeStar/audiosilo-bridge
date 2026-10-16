@@ -16,11 +16,16 @@ describe('isLocked', () => {
     expect(isLocked(s, KEY_CHECK_MINUTES)).toBe(false);
     expect(isLocked(null, KEY_PUBLIC_URL)).toBe(false);
   });
-  it('allLocked needs both fields locked', () => {
+  it('allLocked needs every field locked', () => {
     expect(allLocked(settingsFixture({ locked: ['public_url'] }))).toBe(false);
     expect(allLocked(settingsFixture({ locked: ['public_url', 'mapping.check_minutes'] }))).toBe(
-      true,
+      false,
     );
+    expect(
+      allLocked(
+        settingsFixture({ locked: ['public_url', 'mapping.check_minutes', 'asr.worker_fallback'] }),
+      ),
+    ).toBe(true);
   });
 });
 

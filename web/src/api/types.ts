@@ -84,12 +84,17 @@ export interface LibrariesResponse {
 }
 
 // The settings keys that can be locked by the environment (config.Key*).
-export type SettingKey = 'public_url' | 'mapping.check_minutes' | 'libraries' | 'server.url';
+export type SettingKey =
+  'public_url' | 'mapping.check_minutes' | 'libraries' | 'server.url' | 'asr.worker_fallback';
+
+// What a segment does when no ASR worker is connected (asr.worker_fallback).
+export type WorkerFallback = 'local' | 'wait';
 
 // GET/PUT /api/settings
 export interface Settings {
   public_url: string;
   mapping_check_minutes: number;
+  asr_worker_fallback: WorkerFallback;
   // The keys the environment sets.
   locked: SettingKey[];
 }
@@ -97,6 +102,7 @@ export interface Settings {
 export interface SettingsUpdate {
   public_url: string;
   mapping_check_minutes: number;
+  asr_worker_fallback: WorkerFallback;
 }
 
 // The states a job can have on the Bridge (store.Job*).
@@ -212,17 +218,38 @@ export interface LogsResponse {
   entries: LogEntry[];
 }
 
-// link.Worker
+// api.Worker (store.Worker + what the Bridge knows now): a paired ASR worker.
 export interface Worker {
+  id: number;
   name: string;
+  created_at: string;
+  // "" until it first connected.
+  last_seen_at: string;
   version: string;
+  // GOOS/GOARCH, e.g. darwin/arm64.
   platform: string;
-  last_seen: string;
+  // The speech recognition it runs (mlx-whisper on metal, whisper-cpp on cpu or cuda).
+  backend: string;
+  device: string;
+  model: string;
+  // The segments it finished, their audio and the time it took to decode them.
+  segments: number;
+  audio_seconds: number;
+  decode_seconds: number;
+  connected: boolean;
+  // The segment it decodes now ("" when idle).
+  task: string;
 }
 
 // GET /api/workers
 export interface WorkersResponse {
   workers: Worker[];
+}
+
+// POST /api/workers: the token is shown this once.
+export interface NewWorker {
+  worker: Worker;
+  token: string;
 }
 
 // api.EngineCLI: one agent CLI in the agent container (the kind of credential,
@@ -248,12 +275,16 @@ export interface EngineAgent {
   staging_dir: string;
 }
 
-// api.EngineASR
+// api.EngineASR: where speech recognition runs now (backend "worker" and
+// device "remote" while a worker is connected).
 export interface EngineASR {
   backend: string;
   available: boolean;
   device: string;
   detail: string;
+  worker_fallback: WorkerFallback;
+  // No segment can run now: books wait for a worker.
+  waiting: boolean;
 }
 
 // GET /api/engine

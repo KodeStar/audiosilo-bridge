@@ -149,6 +149,11 @@ type ASRConfig struct {
 	Model          string `yaml:"model"`            // "" defaults per backend
 	Language       string `yaml:"language"`         // "" defaults to "en"
 	WhisperCLIPath string `yaml:"whisper_cli_path"` // explicit whisper-cli location
+	Threads        int    `yaml:"threads"`          // whisper-cli -t; 0 = whisper.cpp's default (4)
+	// WorkerFallback (Phase 1b, bridge.go) is what a segment does when no ASR
+	// worker is connected: "local" (the Bridge's own ASR) or "wait". Unlike the
+	// rest of asr.*, it applies live (each segment reads it).
+	WorkerFallback string `yaml:"worker_fallback"`
 }
 
 // AgentConfig holds the agent-runner settings (live as of M5). Backend selects the
@@ -360,7 +365,7 @@ func Default() Config {
 		Mapping:   MappingConfig{CheckMinutes: DefaultMappingCheckMinutes},
 		Metadata:  MetadataConfig{BaseURL: DefaultMetadataBaseURL},
 		Tools:     ToolsConfig{AutoDownload: DefaultAutoDownload},
-		ASR:       ASRConfig{Backend: DefaultASRBackend, Language: DefaultASRLanguage},
+		ASR:       ASRConfig{Backend: DefaultASRBackend, Language: DefaultASRLanguage, WorkerFallback: DefaultASRWorkerFallback},
 		Agent: AgentConfig{
 			QueueConcurrency:    DefaultAgentQueueConcurrency,
 			MaxAgentsPerBook:    DefaultMaxAgentsPerBook,
@@ -568,6 +573,13 @@ func applyEnv(cfg *Config) (seen envSeen) {
 	}
 	if v, ok := os.LookupEnv("AUDIOSILO_BRIDGE_ASR_WHISPER_CLI_PATH"); ok {
 		cfg.ASR.WhisperCLIPath = v
+	}
+	if v, ok := os.LookupEnv("AUDIOSILO_BRIDGE_ASR_THREADS"); ok && strings.TrimSpace(v) != "" {
+		n, err := strconv.Atoi(strings.TrimSpace(v))
+		if err != nil {
+			n = -1 // Validate refuses it
+		}
+		cfg.ASR.Threads = n
 	}
 	if v, ok := os.LookupEnv("AUDIOSILO_BRIDGE_AGENT_BACKEND"); ok {
 		cfg.Agent.Backend = v
@@ -850,6 +862,9 @@ func (c Config) Validate() error {
 	default:
 		return fmt.Errorf("asr.backend %q must be one of %q, %q, or %q",
 			c.ASR.Backend, ASRBackendAuto, ASRBackendMLXWhisper, ASRBackendWhisperCpp)
+	}
+	if c.ASR.Threads < 0 || c.ASR.Threads > 256 {
+		return fmt.Errorf("asr.threads must be 0 (whisper.cpp's default) to 256, got %d", c.ASR.Threads)
 	}
 	switch c.Contribution.Mode {
 	case ContributionModeIssue, ContributionModeLocal:
