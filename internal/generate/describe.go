@@ -102,6 +102,16 @@ var parkHints = map[string]string{
 // ParkHint is the advice for a park code ("" for one with none).
 func ParkHint(code string) string { return parkHints[code] }
 
+// parkExtra is a park as a job's progress carries it: its code, its hint and,
+// when it tries again by itself, its retry_at ("" for none).
+func parkExtra(code, retryAt string) map[string]any {
+	p := map[string]any{"code": code, "hint": ParkHint(code)}
+	if retryAt != "" {
+		p["retry_at"] = retryAt
+	}
+	return p
+}
+
 // view is what a poll of the engine book found, for describe.
 type view struct {
 	book     store.Book
@@ -134,11 +144,7 @@ func describe(v view) jobs.Progress {
 	extra := map[string]any{"stage": b.State, "source": v.source, "cost_usd": Cents(v.costUSD)}
 	switch state.Status(b.Status) {
 	case state.StatusNeedsAttention:
-		park := map[string]any{"code": b.ParkCode, "hint": ParkHint(b.ParkCode)}
-		if b.RetryAt != "" {
-			park["retry_at"] = b.RetryAt
-		}
-		extra["park"] = park
+		extra["park"] = parkExtra(b.ParkCode, b.RetryAt)
 		pr.Message = "Needs attention: " + pr.Message
 	case state.StatusPaused:
 		pr.Message = "Paused: " + pr.Message

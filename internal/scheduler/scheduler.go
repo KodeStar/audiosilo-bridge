@@ -760,11 +760,11 @@ func (s *Scheduler) runStage(ctx context.Context, b store.Book) {
 		// An unreadable sentinel falls through to a fresh execution below.
 	}
 
-	n, err := s.db.CountStageRuns(ctx, b.ID, stageName)
+	attempt, err := s.db.NextStageAttempt(ctx, b.ID, stageName)
 	if err != nil {
 		return
 	}
-	runID, err := s.db.StartStageRun(ctx, b.ID, stageName, n+1)
+	runID, err := s.db.StartStageRun(ctx, b.ID, stageName, attempt)
 	if err != nil {
 		return
 	}

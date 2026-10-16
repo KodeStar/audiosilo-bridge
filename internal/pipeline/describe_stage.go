@@ -38,9 +38,6 @@ import (
 // skip it. Its runs count wherever spend is summed (the budgets, the estimates).
 const DescribeStage = "describing"
 
-// describeState is DescribeStage where the shared agent driver takes a state.
-const describeState = state.State(DescribeStage)
-
 // What the description's no-verbatim check measured against
 // (DescribeResult.CheckedAgainst, bridge.json's description.checked_against).
 const (
@@ -70,25 +67,14 @@ const (
 // manifest, or no fact notes for its opening chapters.
 var ErrNoNotes = errors.New("the book has no notes to describe it from")
 
-// DescribeReport is how the caller hears from the description step.
-type DescribeReport struct {
-	// Note receives the liveness notes while the agent runs (nil drops them).
-	Note func(msg string)
-	// NoWait parks a rate limit at once instead of waiting it out in-process:
-	// sidecars.generate's description must never hold its job.
-	NoWait bool
-}
-
 // DescribeResult is a written (or reused) description.
 type DescribeResult struct {
 	// Path is the composed model.Description in the work dir
 	// (FinalDescriptionPath), canonical JSON.
 	Path string
-	// Chapters is K, how many opening chapters' notes the agent saw;
-	// LogicalChapters the book's story-chapter count it was taken from.
-	Chapters        int
-	LogicalChapters int
-	CheckedAgainst  string
+	// Chapters is K, how many opening chapters' notes the agent saw.
+	Chapters       int
+	CheckedAgainst string
 	// CostUSD is this call's spend on the budget basis (0 for a reuse).
 	CostUSD     float64
 	GeneratedAt time.Time
@@ -125,8 +111,10 @@ type descriptionPromptData struct {
 // It is not an engine stage: it opens its own stage_run (DescribeStage) on the
 // book so the spend counts, and runs through the shared agent driver, whose parks
 // (rate limit, budget, credential, unavailable, validation exhausted) come back as
-// *scheduler.ParkError for the caller to handle.
-func (e *Executor) Describe(ctx context.Context, bookID int64, report DescribeReport) (DescribeResult, error) {
+// *scheduler.ParkError for the caller to handle. noWait parks a rate limit at once
+// instead of waiting it out in-process: sidecars.generate's description must never
+// hold its job.
+func (e *Executor) Describe(ctx context.Context, bookID int64, noWait bool) (DescribeResult, error) {
 	if e.db == nil {
 		return DescribeResult{}, errors.New("describe: no store")
 	}
@@ -146,6 +134,10 @@ func (e *Executor) Describe(ctx context.Context, bookID int64, report DescribeRe
 	if err := checkComposable(chars); err != nil {
 		return DescribeResult{}, err
 	}
+	// The budgets before the preparation: a budget-parked retry costs nothing.
+	if err := e.budgetPreflight(ctx, book, state.State(DescribeStage)); err != nil {
+		return DescribeResult{}, err
+	}
 	sel, err := e.openingSelection(book)
 	if err != nil {
 		return DescribeResult{}, err
@@ -158,7 +150,10 @@ func (e *Executor) Describe(ctx context.Context, bookID int64, report DescribeRe
 		return DescribeResult{}, fmt.Errorf("%w (no fact notes for the opening chapters)", ErrNoNotes)
 	}
 
-	attempt := e.stageAttempt(ctx, book, describeState)
+	attempt, err := e.db.NextStageAttempt(ctx, book.ID, DescribeStage)
+	if err != nil {
+		return DescribeResult{}, fmt.Errorf("describe: number its stage run: %w", err)
+	}
 	runID, err := e.db.StartStageRun(ctx, book.ID, DescribeStage, attempt)
 	if err != nil {
 		return DescribeResult{}, fmt.Errorf("describe: open its stage run: %w", err)
@@ -178,13 +173,18 @@ func (e *Executor) Describe(ctx context.Context, bookID int64, report DescribeRe
 		}
 		return cost
 	}
+	// fail finishes the run failed, err recorded with extra.
+	fail := func(err error, extra map[string]any) float64 {
+		m["error"] = err.Error()
+		return finish(false, extra)
+	}
 
 	st, err := agent.New(book.WorkDir, DescribeStage, attempt)
 	if err == nil {
 		err = st.WriteFile(openingNotesName, []byte(notes))
 	}
 	if err != nil {
-		finish(false, map[string]any{"error": err.Error()})
+		fail(err, nil)
 		return DescribeResult{}, fmt.Errorf("describe: stage the notes: %w", err)
 	}
 
@@ -218,25 +218,23 @@ func (e *Executor) Describe(ctx context.Context, bookID int64, report DescribeRe
 		Chapters: sel.K, ChapterCount: sel.Logical, IsEbook: state.ParseKind(book.Kind) == state.KindEbook,
 	}
 	backoff := e.backoff
-	if report.NoWait {
+	if noWait {
 		backoff = []time.Duration{}
 	}
-	usage, err := e.runAgentWith(ctx, book, describeState, scheduler.StageReport{Note: report.Note}, st,
+	usage, err := e.runAgentWith(ctx, book, state.State(DescribeStage), scheduler.StageReport{}, st,
 		"description.md", data, false, validate, backoff)
 	usageMetrics := usage.metricsMap()
 	if err != nil {
-		usageMetrics["error"] = err.Error()
-		return DescribeResult{CostUSD: finish(false, usageMetrics)}, err
+		return DescribeResult{CostUSD: fail(err, usageMetrics)}, err
 	}
 	path := FinalDescriptionPath(book.WorkDir)
 	if err := fsutil.WriteFileAtomic(path, composed, 0o644); err != nil {
-		usageMetrics["error"] = err.Error()
-		return DescribeResult{CostUSD: finish(false, usageMetrics)}, fmt.Errorf("describe: keep the description: %w", err)
+		return DescribeResult{CostUSD: fail(err, usageMetrics)}, fmt.Errorf("describe: keep the description: %w", err)
 	}
 	usageMetrics["checked_against"] = checked
 	cost := finish(true, usageMetrics)
-	return DescribeResult{Path: path, Chapters: sel.K, LogicalChapters: sel.Logical, CheckedAgainst: checked,
-		CostUSD: cost, GeneratedAt: time.Now().UTC()}, nil
+	return DescribeResult{Path: path, Chapters: sel.K, CheckedAgainst: checked, CostUSD: cost,
+		GeneratedAt: time.Now().UTC()}, nil
 }
 
 // describeBasis reads the run's validated characters.json: the description
@@ -294,46 +292,35 @@ func checkComposable(chars *model.Characters) error {
 // written again.
 func (e *Executor) reuseDescription(ctx context.Context, book store.Book, chars *model.Characters) (DescribeResult, bool) {
 	path := FinalDescriptionPath(book.WorkDir)
-	var d model.Description
-	if err := decodeSidecarFile(path, &d); err != nil {
+	cur, err := os.ReadFile(path) //nolint:gosec // the book's work dir
+	if err != nil {
 		return DescribeResult{}, false
 	}
-	run, ok := e.lastDescribeRun(ctx, book.ID)
-	if !ok || len(descriptionProblems(d.Text)) > 0 {
+	var d model.Description
+	if err := decodeSidecarBytes(cur, &d); err != nil || len(descriptionProblems(d.Text)) > 0 {
+		return DescribeResult{}, false
+	}
+	run, err := e.db.LatestOkStageRun(ctx, book.ID, DescribeStage)
+	if err != nil {
 		return DescribeResult{}, false
 	}
 	raw, err := composedDescription(chars, d.Text)
 	if err != nil {
 		return DescribeResult{}, false
 	}
-	if cur, err := os.ReadFile(path); err != nil || !bytes.Equal(cur, raw) { //nolint:gosec // the book's work dir
+	if !bytes.Equal(cur, raw) {
 		if err := fsutil.WriteFileAtomic(path, raw, 0o644); err != nil {
 			return DescribeResult{}, false
 		}
 	}
 	var m struct {
-		Chapters        int    `json:"chapters"`
-		LogicalChapters int    `json:"logical_chapters"`
-		CheckedAgainst  string `json:"checked_against"`
+		Chapters       int    `json:"chapters"`
+		CheckedAgainst string `json:"checked_against"`
 	}
 	_ = json.Unmarshal(run.Metrics, &m)
 	at, _ := time.Parse(time.RFC3339Nano, run.FinishedAt)
-	return DescribeResult{Path: path, Chapters: m.Chapters, LogicalChapters: m.LogicalChapters,
-		CheckedAgainst: cmp.Or(m.CheckedAgainst, CheckedNone), GeneratedAt: at.UTC(), Reused: true}, true
-}
-
-// lastDescribeRun is the book's latest successful describing run.
-func (e *Executor) lastDescribeRun(ctx context.Context, bookID int64) (store.StageRun, bool) {
-	runs, err := e.db.ListStageRuns(ctx, bookID)
-	if err != nil {
-		return store.StageRun{}, false
-	}
-	for i := len(runs) - 1; i >= 0; i-- {
-		if r := runs[i]; r.Stage == DescribeStage && r.Ok != nil && *r.Ok {
-			return r, true
-		}
-	}
-	return store.StageRun{}, false
+	return DescribeResult{Path: path, Chapters: m.Chapters, CheckedAgainst: cmp.Or(m.CheckedAgainst, CheckedNone),
+		GeneratedAt: at.UTC(), Reused: true}, true
 }
 
 // openingSelection is which audio files' (or ebook chapters') notes the agent
@@ -361,10 +348,16 @@ func openingWindow(logical int) int {
 // whose transcripts are gone uses those, else its file numbers (a file's number
 // is never below its story chapter, so that bound is safe, only less generous).
 func (e *Executor) openingSelection(book store.Book) (openingSelection, error) {
-	m, err := audio.ReadManifest(book.WorkDir)
+	// One read: the chapters, and the fingerprint the kept positions are keyed by.
+	raw, err := os.ReadFile(filepath.Join(book.WorkDir, audio.ManifestName)) //nolint:gosec // the book's work dir
+	var m audio.Manifest
+	if err == nil {
+		err = json.Unmarshal(raw, &m)
+	}
 	if err != nil {
 		return openingSelection{}, fmt.Errorf("%w (no manifest: %v)", ErrNoNotes, err)
 	}
+	fp := hexSHA256(raw)
 	chapters := make([]int, 0, len(m.Chapters))
 	for _, c := range m.Chapters {
 		chapters = append(chapters, c.Chapter)
@@ -377,13 +370,13 @@ func (e *Executor) openingSelection(book store.Book) (openingSelection, error) {
 			return openingSelection{}, err
 		}
 		if !ebook {
-			if err := savePositions(book.WorkDir, class); err != nil {
+			if err := savePositions(book.WorkDir, fp, class); err != nil {
 				e.log.Warn("describe: keeping the chapter positions failed", "book", book.ID, "err", err)
 			}
 		}
 		return selectOpening(chapters, class, "edges"), nil
 	default:
-		if class, ok := loadPositions(book.WorkDir); ok {
+		if class, ok := loadPositions(book.WorkDir, fp); ok {
 			return selectOpening(chapters, class, "saved"), nil
 		}
 		return selectOpening(chapters, fileClassification(book.WorkDir, len(chapters)), "files"), nil
@@ -434,25 +427,26 @@ type savedPositions struct {
 	Positions    map[int]int `json:"positions,omitempty"`
 }
 
-// savePositions keeps a classification beside the work dir's other durables (the
-// transcript retention leaves it).
-func savePositions(workDir string, class edgeClassification) error {
-	fp, err := manifestFingerprint(workDir)
-	if err != nil {
-		return err
-	}
+// savePositions keeps a classification of the manifest fingerprinted fp beside the
+// work dir's other durables (the transcript retention leaves it); an unchanged one
+// isn't written again.
+func savePositions(workDir, fp string, class edgeClassification) error {
 	raw, err := json.Marshal(savedPositions{Manifest: fp, LogicalCount: class.LogicalCount,
 		Excluded: slices.Concat(class.ExcludedLeading, class.ExcludedTrailing), Offset: class.ChapterOffset,
 		Positions: class.Positions})
 	if err != nil {
 		return err
 	}
-	return fsutil.WriteFileAtomic(filepath.Join(workDir, chapterPositionsName), raw, 0o644)
+	path := filepath.Join(workDir, chapterPositionsName)
+	if cur, err := os.ReadFile(path); err == nil && bytes.Equal(cur, raw) { //nolint:gosec // the book's work dir
+		return nil
+	}
+	return fsutil.WriteFileAtomic(path, raw, 0o644)
 }
 
 // loadPositions reads the kept classification, when it was made from the
-// manifest the work dir holds now.
-func loadPositions(workDir string) (edgeClassification, bool) {
+// manifest the work dir holds now (fingerprinted fp).
+func loadPositions(workDir, fp string) (edgeClassification, bool) {
 	raw, err := os.ReadFile(filepath.Join(workDir, chapterPositionsName)) //nolint:gosec // the book's work dir
 	if err != nil {
 		return edgeClassification{}, false
@@ -461,7 +455,7 @@ func loadPositions(workDir string) (edgeClassification, bool) {
 	if err := json.Unmarshal(raw, &s); err != nil || s.LogicalCount < 1 {
 		return edgeClassification{}, false
 	}
-	if fp, err := manifestFingerprint(workDir); err != nil || fp != s.Manifest {
+	if fp != s.Manifest {
 		return edgeClassification{}, false
 	}
 	return edgeClassification{LogicalCount: s.LogicalCount, ExcludedLeading: s.Excluded, ChapterOffset: s.Offset,
@@ -493,11 +487,15 @@ var sectionBreakRe = regexp.MustCompile(`^#{1,2}(\s|$)`)
 // buildOpeningNotes is opening.md: the `## Chapter N` sections of the chosen files,
 // copied mechanically from facts/facts-ch*.md with their file numbering kept, in
 // chapter order. Nothing else from facts/ (knowledge-final.md, the spelling
-// sheets, a chunk's preamble) is copied. "" when none of the files has notes.
+// sheets, a chunk's preamble) is copied, and only the chunks covering one of the
+// files are read. "" when none of the files has notes.
 func buildOpeningNotes(workDir string, files []int) (string, error) {
 	want := map[int]bool{}
 	for _, f := range files {
 		want[f] = true
+	}
+	covers := func(from, to int) bool {
+		return slices.ContainsFunc(files, func(f int) bool { return f >= from && f <= to })
 	}
 	entries, err := os.ReadDir(factsDirPath(workDir))
 	if errors.Is(err, os.ErrNotExist) {
@@ -509,7 +507,7 @@ func buildOpeningNotes(workDir string, files []int) (string, error) {
 	sections := map[int]string{}
 	for _, ent := range entries {
 		name := ent.Name()
-		if !ent.Type().IsRegular() || !strings.HasPrefix(name, factsChunkPrefix) || !strings.HasSuffix(name, ".md") {
+		if from, to, ok := factsChunkSpan(name); !ent.Type().IsRegular() || !ok || !covers(from, to) {
 			continue
 		}
 		raw, err := os.ReadFile(filepath.Join(factsDirPath(workDir), name)) //nolint:gosec // the book's work dir
@@ -532,6 +530,20 @@ func buildOpeningNotes(workDir string, files []int) (string, error) {
 		}
 	}
 	return b.String(), nil
+}
+
+// factsChunkSpan is the inclusive file range a fact chunk's name
+// (facts-ch{from}-{to}.md, factsChunkName) covers; ok is false for any other name.
+func factsChunkSpan(name string) (from, to int, ok bool) {
+	rest, ok1 := strings.CutPrefix(name, factsChunkPrefix)
+	rest, ok2 := strings.CutSuffix(rest, ".md")
+	a, b, ok3 := strings.Cut(rest, "-")
+	if !ok1 || !ok2 || !ok3 {
+		return 0, 0, false
+	}
+	from, err1 := strconv.Atoi(a)
+	to, err2 := strconv.Atoi(b)
+	return from, to, err1 == nil && err2 == nil && from <= to
 }
 
 // factSections splits a fact chunk into its `## Chapter N` sections (heading
@@ -586,14 +598,9 @@ func readDescriptionOut(outDir string) (string, error) {
 	var out struct {
 		Text *string `json:"text"`
 	}
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.DisallowUnknownFields()
 	shape := `write exactly {"text": "..."} and nothing else`
-	if err := dec.Decode(&out); err != nil {
+	if err := decodeSidecarBytes(raw, &out); err != nil {
 		return "", fmt.Errorf("out/%s: %v (%s)", descriptionFileName, err, shape)
-	}
-	if _, err := dec.Token(); err != io.EOF {
-		return "", fmt.Errorf("out/%s has content after the JSON object (%s)", descriptionFileName, shape)
 	}
 	if out.Text == nil {
 		return "", fmt.Errorf("out/%s has no text (%s)", descriptionFileName, shape)
@@ -619,7 +626,7 @@ func descriptionProblems(text string) []string {
 	if strings.ContainsFunc(text, func(r rune) bool { return unicode.IsControl(r) && r != '\n' }) {
 		out = append(out, "the text holds a control character (only plain newlines between paragraphs are allowed)")
 	}
-	if strings.ContainsRune(text, emDash) {
+	if hasEmDash(text) {
 		out = append(out, "the text uses an em dash; use a hyphen or restructure the sentence")
 	}
 	if n := utf8.RuneCountInString(text); n < descriptionMinRunes || n > descriptionMaxRunes {

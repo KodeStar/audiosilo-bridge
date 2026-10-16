@@ -46,12 +46,15 @@ type Engine interface {
 	Cancel(ctx context.Context, id int64) error
 	Delete(ctx context.Context, id int64) error
 	ETASeconds(id int64) (int64, bool)
+	// Hold reserves a book for work outside its stages (the description step, a
+	// transcript purge); ok is false while a stage runs on it or another holds it.
+	Hold(id int64) (release func(), ok bool)
 }
 
 // Describer writes a finished engine book's own-words description
 // (*pipeline.Executor's Describe, Phase 1c).
 type Describer interface {
-	Describe(ctx context.Context, bookID int64, report pipeline.DescribeReport) (pipeline.DescribeResult, error)
+	Describe(ctx context.Context, bookID int64, noWait bool) (pipeline.DescribeResult, error)
 }
 
 // Server is the part of the server link the job calls.
@@ -111,9 +114,6 @@ type Handler struct {
 	// doneJobs counts the jobs that finished done here (the heartbeat's
 	// estimates are computed again when it moves).
 	doneJobs atomic.Int64
-	// describing counts the description steps running on each engine book: a
-	// new generate job doesn't delete a book one of them is reading.
-	describing map[int64]int
 }
 
 // Finished is how many jobs finished done since the start.
@@ -136,7 +136,7 @@ func New(o Options) *Handler {
 	if o.Now == nil {
 		o.Now = time.Now
 	}
-	return &Handler{o: o, pokes: map[int64]chan struct{}{}, describing: map[int64]int{}}
+	return &Handler{o: o, pokes: map[int64]chan struct{}{}}
 }
 
 func (h *Handler) now() time.Time { return h.o.Now() }
@@ -184,14 +184,17 @@ type run struct {
 	progress []store.Progress
 	costUSD  float64
 	// side is the sidecars last read and sideSig their files' signature, so
-	// unchanged files aren't read again; written is the hash of the sidecars
-	// last written ("" for none yet); writeErr the last failed write's error,
-	// logged once.
-	side     sidecars
-	sideSig  string
-	written  string
-	writeErr string
-	srv      Server
+	// unchanged files aren't read again; sideHash is their content hash (with the
+	// description when sideHashDesc), so it isn't computed again either; written
+	// is the hash of the sidecars last written ("" for none yet); writeErr the
+	// last failed write's error, logged once.
+	side         sidecars
+	sideSig      string
+	sideHash     string
+	sideHashDesc bool
+	written      string
+	writeErr     string
+	srv          Server
 	// jobPath is the job's path as the server last gave it (the claim, then the
 	// answers to the job's reports): when it changes, the server moved the job with
 	// its book, and rel follows it.
@@ -229,21 +232,12 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 	if err != nil {
 		return nil, err
 	}
-	if job.LibraryID == nil || job.Path == nil || strings.TrimSpace(*job.Path) == "" {
-		return nil, errors.New("sidecars.generate needs a library and a book path")
+	r, stop, err := h.startRun(job, rep, Kind)
+	if err != nil {
+		return nil, err
 	}
-	r := &run{job: job, rep: rep, params: params, rel: *job.Path, jobPath: *job.Path, poke: make(chan struct{}, 1)}
-	if p := rep.Path(); p != "" {
-		// The server moved the job with its book since the claim (the first report's
-		// answer says where it is now).
-		r.rel, r.jobPath = p, p
-	}
-	// One wake-up channel for the whole run: a Retry reaches whichever park the
-	// job waits in. It is this run's own, so a later attempt of the same job
-	// keeps its channel when this one ends.
-	h.setPoke(job.ID, r.poke)
-	defer h.dropPoke(job.ID, r.poke)
-	rep.Progress(jobs.Progress{Step: stepWaiting, Message: "Starting"})
+	defer stop()
+	r.params = params
 	eng, err := h.waitEngine(ctx, r)
 	if err != nil {
 		return nil, err
@@ -274,7 +268,9 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 		return h.end(ctx, r, nil, err)
 	}
 	if resumed && ownBook() && mapped.RelPath != r.rel {
-		h.recordMove(ctx, r, mapped.RelPath)
+		h.o.Log.Info("generate: the book moved while the job was away; the job follows it", "job", job.ID,
+			"from", mapped.RelPath, "to", r.rel)
+		h.recordMove(ctx, r)
 	}
 	if resumed && !ownBook() {
 		// That run's job is gone (its id is this job's now), so nothing follows it.
@@ -293,6 +289,25 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 	}
 	res, err := h.follow(ctx, eng, r)
 	return h.end(ctx, r, res, err)
+}
+
+// startRun begins a run of either job kind: the run at the job's path (the server
+// may have moved the job with its book since the claim; the first report's answer
+// says where it is now), its wake-up channel registered and "Starting" reported.
+// One wake-up channel serves the whole run, so a Retry reaches whichever park the
+// job waits in; it is this run's own, so a later attempt of the same job keeps its
+// channel when this one ends. stop drops it.
+func (h *Handler) startRun(job jobs.Job, rep *jobs.Reporter, kind string) (r *run, stop func(), err error) {
+	if job.LibraryID == nil || job.Path == nil || strings.TrimSpace(*job.Path) == "" {
+		return nil, nil, fmt.Errorf("%s needs a library and a book path", kind)
+	}
+	r = &run{job: job, rep: rep, rel: *job.Path, jobPath: *job.Path, poke: make(chan struct{}, 1)}
+	if p := rep.Path(); p != "" {
+		r.rel, r.jobPath = p, p
+	}
+	h.setPoke(job.ID, r.poke)
+	rep.Progress(jobs.Progress{Step: stepWaiting, Message: "Starting"})
+	return r, func() { h.dropPoke(job.ID, r.poke) }, nil
 }
 
 // errCantContribute is a contribute=issue job on a Bridge with no GitHub token.
@@ -379,6 +394,20 @@ func (h *Handler) stopBook(ctx context.Context, jobID, bookID int64) {
 	if err := eng.Cancel(ctx, bookID); err != nil && !errors.Is(err, scheduler.ErrInvalidOp) {
 		h.o.Log.Warn("generate: cancelling the engine book failed", "job", jobID, "book", bookID, "err", err)
 	}
+}
+
+// hold takes the engine's hold on an engine book for work outside its stages (the
+// description step, a transcript purge): ok is false while a stage runs on it or
+// something else holds it. With no engine nothing runs on it, so it holds.
+func (h *Handler) hold(bookID int64) (release func(), ok bool) {
+	var eng Engine
+	if h.o.Engine != nil {
+		eng = h.o.Engine()
+	}
+	if eng == nil {
+		return func() {}, true
+	}
+	return eng.Hold(bookID)
 }
 
 // waitEngine waits for the engine to have started.
@@ -501,22 +530,28 @@ func (h *Handler) waitWritable(ctx context.Context, r *run) error {
 			return nil
 		}
 		h.park(r, parkBookNotWritable, "the Bridge can't write in the book's folder ("+writeProblem(err)+")")
-		if err := h.recheckWait(ctx, r); err != nil {
+		if err := h.recheckWait(ctx, r, time.Now().Add(h.o.Recheck)); err != nil {
 			return err
 		}
 	}
 }
 
-// recheckWait waits for the next look at a park of the Bridge's own: Recheck, or
-// a Retry (which pokes).
-func (h *Handler) recheckWait(ctx context.Context, r *run) error {
-	t := time.NewTimer(h.o.Recheck)
-	defer t.Stop()
+// recheckWait waits for the next look at a park: until at (the zero time: no
+// timer, only a Retry), a Retry (which pokes), or the job's end. A park of the
+// Bridge's own looks again every Recheck; a description's agent park at its
+// retry_at.
+func (h *Handler) recheckWait(ctx context.Context, r *run, at time.Time) error {
+	var timer <-chan time.Time
+	if !at.IsZero() {
+		t := time.NewTimer(max(time.Until(at), 0))
+		defer t.Stop()
+		timer = t.C
+	}
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-r.poke:
-	case <-t.C:
+	case <-timer:
 	}
 	return nil
 }
@@ -539,7 +574,7 @@ func writeProblem(err error) string {
 // park parks the job with one of the Bridge's own codes.
 func (h *Handler) park(r *run, code, msg string) {
 	r.rep.Progress(jobs.Progress{Step: stepWaiting, Message: "Needs attention: " + msg,
-		Extra: map[string]any{"source": r.source, "park": map[string]any{"code": code, "hint": ParkHint(code)}}})
+		Extra: map[string]any{"source": r.source, "park": parkExtra(code, "")}})
 	r.rep.Park(code, msg)
 	r.ownPark = true
 }
@@ -598,9 +633,7 @@ func (h *Handler) create(ctx context.Context, eng Engine, r *run) error {
 		if len(open) > 0 {
 			return fmt.Errorf("job %d is already generating this book; cancel it first", open[0])
 		}
-		if h.isDescribing(old.ID) {
-			return errors.New("the Bridge is still writing a description from this book's earlier run; try again in a minute")
-		}
+		// A description reading the earlier run holds the book: Delete says busy.
 		if err := eng.Delete(ctx, old.ID); errors.Is(err, scheduler.ErrBusy) {
 			return errors.New("the engine is still running a stage of this book's earlier run; try again in a minute")
 		} else if err != nil && !errors.Is(err, store.ErrNotFound) {
@@ -824,32 +857,29 @@ func (h *Handler) write(ctx context.Context, r *run, b store.Book, wait bool) (s
 		// Only a description this run vouches for (and can say how it was made).
 		s.description = nil
 	}
-	if s.hash() == r.written {
+	sum := r.sidecarsHash(s)
+	if sum == r.written {
 		return s, nil
 	}
 	workID := cmp.Or(b.WorkID, s.workID)
-	for {
-		if err := h.waitMapped(ctx, r, false); err != nil {
-			return sidecars{}, err
-		}
-		h.followMove(ctx, r)
-		err := h.writeOnce(r, b, s, workID)
-		if err == nil {
-			break
-		}
-		if !wait {
-			return sidecars{}, err
-		}
-		h.park(r, parkBookNotWritable, "the Bridge can't save the characters and recaps with the book: "+err.Error())
-		if err := h.recheckWait(ctx, r); err != nil {
-			return sidecars{}, err
-		}
+	err = h.save(ctx, r, saveSpec{
+		what:   "the characters and recaps",
+		wait:   wait,
+		record: true,
+		progress: jobs.Progress{Step: stepWriting, Message: "Saving the characters and recaps with the book",
+			Extra: map[string]any{"stage": b.State, "source": r.source}},
+		files: func(place) ([]attachFile, error) {
+			prov := provenance(h.o.Version, Kind, r.job.ID, h.now(), r.source, workID, inputsOf(r.mount, r.files, r.epub))
+			if s.description != nil {
+				prov.Description = descriptionProvenance(r.job.ID, *r.desc)
+			}
+			return attachmentFiles(s, prov)
+		},
+	})
+	if err != nil {
+		return sidecars{}, err
 	}
-	if r.ownPark {
-		r.rep.Unpark()
-		r.ownPark = false
-	}
-	r.written = s.hash()
+	r.written = sum
 	h.o.Log.Info("generate: wrote the book's attachments", "job", r.job.ID, "path", r.rel, "files", attachmentNames(r.place.prefix, s))
 	r.rep.Progress(jobs.Progress{Step: stepRescanning, Message: "Asking the server to read them",
 		Extra: map[string]any{"stage": b.State, "source": r.source}})
@@ -857,48 +887,96 @@ func (h *Handler) write(ctx context.Context, r *run, b store.Book, wait bool) (s
 	return s, nil
 }
 
-// writeOnce locates the book through the mount and writes its attachments, its
-// error worded without the Bridge's own paths.
-func (h *Handler) writeOnce(r *run, b store.Book, s sidecars, workID string) error {
+// saveSpec is one save into the book's .audiosilo/ (the generate job's
+// attachments, or a description-only job's two files).
+type saveSpec struct {
+	// what is what the save writes, as a park names it ("the description").
+	what string
+	// wait parks book_not_writable and tries again until the save goes through;
+	// without it the failure is returned.
+	wait bool
+	// record records a move in the job's mapping (a description-only job has
+	// none to record it in).
+	record bool
+	// progress is reported once the book is located, before the write.
+	progress jobs.Progress
+	// files composes what is written once the book is located (bridge.json names
+	// the inputs where the book is now).
+	files func(p place) ([]attachFile, error)
+}
+
+// save writes spec's files into the book's .audiosilo/ at the path it is at now
+// (the server moves the job with its book), through the mapping checked again
+// (mapped and writable at the mount the job uses). With spec.wait, a write that
+// fails parks the job book_not_writable and tries again every Recheck (or on
+// Retry) until it goes through.
+func (h *Handler) save(ctx context.Context, r *run, spec saveSpec) error {
+	for {
+		if err := h.waitMapped(ctx, r, false); err != nil {
+			return err
+		}
+		if h.adoptMove(ctx, r) && spec.record {
+			h.recordMove(ctx, r)
+		}
+		err := h.saveOnce(r, spec)
+		if err == nil {
+			break
+		}
+		if !spec.wait {
+			return err
+		}
+		h.park(r, parkBookNotWritable, "the Bridge can't save "+spec.what+" with the book: "+err.Error())
+		if err := h.recheckWait(ctx, r, time.Now().Add(h.o.Recheck)); err != nil {
+			return err
+		}
+	}
+	if r.ownPark {
+		r.rep.Unpark()
+		r.ownPark = false
+	}
+	return nil
+}
+
+// saveOnce locates the book through the mount and writes spec's files, its error
+// worded without the Bridge's own paths.
+func (h *Handler) saveOnce(r *run, spec saveSpec) error {
+	if err := r.relocate(); err != nil {
+		return err
+	}
+	r.rep.Progress(spec.progress)
+	files, err := spec.files(r.place)
+	if err == nil {
+		err = writeAttachFiles(r.place.dir, r.place.prefix, files)
+	}
+	if err != nil {
+		return fmt.Errorf("its %s folder can't be written (%s)", AttachDir, writeProblem(err))
+	}
+	return nil
+}
+
+// relocate locates the book where the job has it now (r.place), and its .epub
+// with it: a book that moved took its .epub along.
+func (r *run) relocate() error {
 	p, err := locate(r.mount, r.rel)
 	if err != nil {
 		return err
 	}
 	r.place = p
 	if r.epub != "" && !fsutil.IsFile(r.epub) {
-		// The book moved: its .epub went with it.
 		if moved := filepath.Join(p.dir, filepath.Base(r.epub)); fsutil.IsFile(moved) {
 			r.epub = moved
 		}
 	}
-	r.rep.Progress(jobs.Progress{Step: stepWriting, Message: "Saving the characters and recaps with the book",
-		Extra: map[string]any{"stage": b.State, "source": r.source}})
-	prov := provenance(h.o.Version, Kind, r.job.ID, h.now(), r.source, workID, inputsOf(r.mount, r.files, r.epub))
-	if s.description != nil {
-		prov.Description = descriptionProvenance(r.job.ID, *r.desc)
-	}
-	if err := writeAttachments(r.place.dir, r.place.prefix, s, prov); err != nil {
-		return fmt.Errorf("its %s folder can't be written (%s)", AttachDir, writeProblem(err))
-	}
 	return nil
 }
 
-// followMove adopts the job's path when the server moved the job with its book
-// (a rename its scan noticed; the answer to a report says so): the book's files
-// are asked for again there, and the mapping follows, so a restart finds the
-// same book.
-func (h *Handler) followMove(ctx context.Context, r *run) {
-	if from, moved := h.adoptMove(ctx, r); moved {
-		h.recordMove(ctx, r, from)
-	}
-}
-
-// adoptMove is followMove without recording the move (a description-only job has
-// no mapping to record it in): it reports where the book was, and whether it moved.
-func (h *Handler) adoptMove(ctx context.Context, r *run) (string, bool) {
+// adoptMove adopts the job's path when the server moved the job with its book (a
+// rename its scan noticed; the answer to a report says so): the book's files are
+// asked for again there. It reports whether the book moved.
+func (h *Handler) adoptMove(ctx context.Context, r *run) bool {
 	cur := r.rep.Path()
 	if cur == "" || cur == r.jobPath {
-		return "", false
+		return false
 	}
 	from := r.rel
 	r.jobPath, r.rel = cur, cur
@@ -910,15 +988,16 @@ func (h *Handler) adoptMove(ctx context.Context, r *run) (string, bool) {
 	} else {
 		h.o.Log.Warn("generate: asking the server for the moved book failed", "job", r.job.ID, "err", err)
 	}
-	return from, true
+	h.o.Log.Info("generate: the book moved; the job follows it", "job", r.job.ID, "from", from, "to", r.rel)
+	return true
 }
 
-// recordMove records the job's book at r.rel (it was at from).
-func (h *Handler) recordMove(ctx context.Context, r *run, from string) {
+// recordMove records the job's book at r.rel in its mapping, so a restart finds
+// the same book.
+func (h *Handler) recordMove(ctx context.Context, r *run) {
 	if err := h.o.DB.SetGenerateBookPath(ctx, r.job.ID, r.rel); err != nil {
 		h.o.Log.Warn("generate: recording the book's new path failed", "job", r.job.ID, "err", err)
 	}
-	h.o.Log.Info("generate: the book moved; the job follows it", "job", r.job.ID, "from", from, "to", r.rel)
 }
 
 // loadSidecars reads the engine's sidecars, unless their files are unchanged
@@ -932,8 +1011,17 @@ func (r *run) loadSidecars(workDir string) (sidecars, error) {
 	if err != nil {
 		return sidecars{}, err
 	}
-	r.side, r.sideSig = s, sig
+	r.side, r.sideSig, r.sideHash = s, sig, ""
 	return s, nil
+}
+
+// sidecarsHash is s's content hash: s is the sidecars last read, with or without
+// their description, and the hash is computed once per read for each.
+func (r *run) sidecarsHash(s sidecars) string {
+	if withDesc := s.description != nil; r.sideHash == "" || r.sideHashDesc != withDesc {
+		r.sideHash, r.sideHashDesc = s.hash(), withDesc
+	}
+	return r.sideHash
 }
 
 // attachmentNames are the names a write produces for s.

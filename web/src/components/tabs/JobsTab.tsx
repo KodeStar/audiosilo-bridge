@@ -339,10 +339,7 @@ function GenerateView({ result }: { result: GenerateResult }) {
     <div className="flex flex-col gap-2 text-xs text-dim">
       <p className="text-sm text-body">{resultSummary(result)}</p>
       {description && <p>{description}</p>}
-      <p>
-        Saved with <code className="break-all text-body">{result.path}</code> in its{' '}
-        <code>.audiosilo</code> folder: {result.files.join(', ')}
-      </p>
+      <SavedWith path={result.path} files={result.files} />
       {result.work_id && (
         <p>
           Work <code className="text-body">{result.work_id}</code>
@@ -368,11 +365,18 @@ function DescribeView({ result }: { result: DescribeResult }) {
   return (
     <div className="flex flex-col gap-2 text-xs text-dim">
       <p className="text-sm text-body">{describeSummary(result)}</p>
-      <p>
-        Saved with <code className="break-all text-body">{result.path}</code> in its{' '}
-        <code>.audiosilo</code> folder: {result.files.join(', ')}
-      </p>
+      <SavedWith path={result.path} files={result.files} />
     </div>
+  );
+}
+
+// SavedWith says where a sidecars job saved its files.
+function SavedWith({ path, files }: { path: string; files: string[] }) {
+  return (
+    <p>
+      Saved with <code className="break-all text-body">{path}</code> in its <code>.audiosilo</code>{' '}
+      folder: {files.join(', ')}
+    </p>
   );
 }
 

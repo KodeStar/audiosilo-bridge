@@ -95,18 +95,18 @@ func readAttachment(path string) ([]byte, error) {
 	return b, nil
 }
 
-// readDescription reads the engine's description.json (nil when there is none):
-// it must decode into the community model.
-func readDescription(workDir string) ([]byte, error) {
-	b, err := readAttachment(pipeline.FinalDescriptionPath(workDir))
-	if err != nil || b == nil {
-		return nil, err
-	}
+// readDescription reads the engine's description.json at path (nil when there is
+// none): it must decode into the community model, which it returns too.
+func readDescription(path string) ([]byte, model.Description, error) {
 	var d model.Description
-	if err := json.Unmarshal(b, &d); err != nil {
-		return nil, fmt.Errorf("the engine's description.json doesn't decode: %w", err)
+	b, err := readAttachment(path)
+	if err != nil || b == nil {
+		return nil, d, err
 	}
-	return b, nil
+	if err := json.Unmarshal(b, &d); err != nil {
+		return nil, d, fmt.Errorf("the engine's description.json doesn't decode: %w", err)
+	}
+	return b, d, nil
 }
 
 // readSidecars reads the engine's characters.json, recaps.json and
@@ -126,7 +126,7 @@ func readSidecars(workDir string) (sidecars, error) {
 	if s.characters == nil && s.recaps == nil {
 		return sidecars{}, errors.New("the engine left no characters or recaps")
 	}
-	if s.description, err = readDescription(workDir); err != nil {
+	if s.description, _, err = readDescription(pipeline.FinalDescriptionPath(workDir)); err != nil {
 		return sidecars{}, err
 	}
 	if s.characters != nil {
@@ -211,15 +211,24 @@ func inputsOf(mount string, files []link.BookFile, epub string) []InputFile {
 	return out
 }
 
-// writeAttachments writes the sidecars and the provenance into dir/.audiosilo/
-// (contract section 4); attachmentNames names what it writes.
-func writeAttachments(dir, prefix string, s sidecars, prov Provenance) error {
-	provJSON, err := json.MarshalIndent(prov, "", "  ")
+// attachmentFiles are the sidecars and the provenance as the files written into
+// the book's .audiosilo/ (contract section 4); attachmentNames names them.
+func attachmentFiles(s sidecars, prov Provenance) ([]attachFile, error) {
+	provJSON, err := indentJSON(prov)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return writeAttachFiles(dir, prefix, []attachFile{{charactersName, s.characters}, {recapsName, s.recaps},
-		{descriptionName, s.description}, {provenanceName, append(provJSON, '\n')}})
+	return []attachFile{{charactersName, s.characters}, {recapsName, s.recaps}, {descriptionName, s.description},
+		{provenanceName, provJSON}}, nil
+}
+
+// indentJSON is v as bridge.json is written: indented, a newline at the end.
+func indentJSON(v any) ([]byte, error) {
+	out, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	return append(out, '\n'), nil
 }
 
 // attachFile is one file for the book's .audiosilo/ (nil data: not written).
@@ -281,23 +290,16 @@ const maxProvenance = 256 << 10
 // file), fresh with the usual fields.
 func describedProvenance(dir, prefix string, fresh Provenance) ([]byte, error) {
 	path := filepath.Join(dir, AttachDir, prefix+provenanceName)
-	if existing := readProvenance(path); existing != nil {
-		desc, err := json.Marshal(fresh.Description)
-		if err != nil {
-			return nil, err
-		}
-		existing["description"] = desc
-		out, err := json.MarshalIndent(existing, "", "  ")
-		if err != nil {
-			return nil, err
-		}
-		return append(out, '\n'), nil
+	existing := readProvenance(path)
+	if existing == nil {
+		return indentJSON(fresh)
 	}
-	out, err := json.MarshalIndent(fresh, "", "  ")
+	desc, err := json.Marshal(fresh.Description)
 	if err != nil {
 		return nil, err
 	}
-	return append(out, '\n'), nil
+	existing["description"] = desc
+	return indentJSON(existing)
 }
 
 // readProvenance reads a bridge.json as a JSON object, nil when there is none

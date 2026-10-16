@@ -312,6 +312,15 @@ func TestInputsOfEpub(t *testing.T) {
 	}
 }
 
+// writeAttachments writes the attachments as a generate job's save does.
+func writeAttachments(dir, prefix string, s sidecars, prov Provenance) error {
+	files, err := attachmentFiles(s, prov)
+	if err != nil {
+		return err
+	}
+	return writeAttachFiles(dir, prefix, files)
+}
+
 // The sweep deletes the transcripts of finished books whose job ended at least
 // the retention ago, and leaves a recent one and an unfinished one alone.
 func TestSweepTranscripts(t *testing.T) {
@@ -407,6 +416,50 @@ func TestPurgeEndedIsTheJobsBookOnly(t *testing.T) {
 	// The own book is recorded swept: the sweep finds only the other one.
 	if n, err := h.SweepTranscripts(ctx, 0); err != nil || n != 1 || present(other.WorkDir) {
 		t.Fatalf("sweep after = %d, %v", n, err)
+	}
+}
+
+// holdEngine is an engine whose holds are refused for the books in held.
+type holdEngine struct {
+	Engine
+	held map[int64]bool
+}
+
+func (e holdEngine) Hold(id int64) (func(), bool) { return func() {}, !e.held[id] }
+
+// A book the engine holds (a description reading it) isn't swept: the sweep leaves
+// it, unmarked, for the next one.
+func TestSweepSkipsAHeldBook(t *testing.T) {
+	t.Parallel()
+	db, err := store.Open(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	ctx := context.Background()
+	root := t.TempDir()
+	eng := holdEngine{held: map[int64]bool{}}
+	h := New(Options{DB: db, WorkRoot: root, Engine: func() Engine { return eng }, Poll: time.Millisecond})
+	wd := filepath.Join(root, "held")
+	mustWrite(t, filepath.Join(wd, "transcripts-raw", "ch001.json"), "x")
+	b, err := db.CreateBook(ctx, store.NewBook{SourcePath: "/lib/held", WorkDir: wd, Title: "held"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = db.SetBookState(ctx, b.ID, "done", "", "", "")
+	_ = db.PutGenerateBook(ctx, store.GenerateBook{ServerJobID: 1, BookID: &b.ID, LibraryID: 1, RelPath: "held"})
+	_ = db.EndGenerateBook(ctx, 1, time.Now().Add(-time.Hour))
+
+	eng.held[b.ID] = true
+	if n, err := h.SweepTranscripts(ctx, 0); err != nil || n != 0 || !present(wd) {
+		t.Fatalf("a held book: swept %d, %v, present %v", n, err, present(wd))
+	}
+	if err := h.purgeEnded(ctx, b.ID); err != nil || !present(wd) {
+		t.Fatalf("a held book purged at its job's end: %v", err)
+	}
+	delete(eng.held, b.ID)
+	if n, err := h.SweepTranscripts(ctx, 0); err != nil || n != 1 || present(wd) {
+		t.Fatalf("once released: swept %d, %v", n, err)
 	}
 }
 

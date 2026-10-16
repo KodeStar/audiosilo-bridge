@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"github.com/kodestar/audiosilo-bridge/internal/scratch"
 	"github.com/kodestar/audiosilo-bridge/internal/state"
@@ -312,6 +313,21 @@ func (s *Scheduler) reserve(id int64) bool {
 	}
 	s.inflight[id] = &inflightBook{lane: state.LaneNone, cancel: func() {}}
 	return true
+}
+
+// Hold reserves a book for work outside the scheduler (the Bridge's description
+// step reads a finished book's notes and writes in its work dir) through the same
+// reservation PurgeScratch takes: while it is held no stage is dispatched for it,
+// Delete and PurgeScratch see it busy, the timed and parked re-admits and the
+// startup GC skip it, and a supervisor terminate finds no worker to stop. ok is
+// false when the book is busy already (a running stage, or another reservation).
+// release ends the hold; calling it again does nothing.
+func (s *Scheduler) Hold(id int64) (release func(), ok bool) {
+	if !s.reserve(id) {
+		return func() {}, false
+	}
+	var once sync.Once
+	return func() { once.Do(func() { s.unreserve(id) }) }, true
 }
 
 // unreserve drops a reservation and wakes the dispatch loop, so a book made

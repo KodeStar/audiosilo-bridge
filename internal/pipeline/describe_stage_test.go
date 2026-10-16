@@ -188,7 +188,7 @@ func TestDescribeStagesOnlyTheOpeningNotes(t *testing.T) {
 		return agent.Result{Usage: agent.Usage{Model: "sonnet", Input: 900, Output: 120, CostUSD: 0.07, CostReported: true}}, nil
 	}
 	e, book, db := describeBook(t, fake, 0)
-	res, err := e.Describe(context.Background(), book.ID, DescribeReport{})
+	res, err := e.Describe(context.Background(), book.ID, false)
 	if err != nil {
 		t.Fatalf("Describe: %v", err)
 	}
@@ -226,7 +226,7 @@ func TestDescribeStagesOnlyTheOpeningNotes(t *testing.T) {
 		t.Errorf("prompt doesn't state the bound:\n%s", req.Prompt)
 	}
 
-	if res.Chapters != 2 || res.LogicalChapters != 5 || res.CheckedAgainst != CheckedTranscripts || res.Reused || res.CostUSD != 0.07 {
+	if res.Chapters != 2 || res.CheckedAgainst != CheckedTranscripts || res.Reused || res.CostUSD != 0.07 {
 		t.Fatalf("result = %+v", res)
 	}
 	var d model.Description
@@ -242,6 +242,11 @@ func TestDescribeStagesOnlyTheOpeningNotes(t *testing.T) {
 	if len(runs) != 1 || runs[0].Stage != DescribeStage || runs[0].Ok == nil || !*runs[0].Ok || runs[0].CostUSD != 0.07 {
 		t.Fatalf("runs = %+v", runs)
 	}
+	var m map[string]any
+	if err := json.Unmarshal(runs[0].Metrics, &m); err != nil || m["chapters"] != float64(2) || m["logical_chapters"] != float64(5) ||
+		m["basis"] != "edges" || m["checked_against"] != CheckedTranscripts {
+		t.Fatalf("metrics = %s, %v", runs[0].Metrics, err)
+	}
 	if spent, _, _ := db.SumStageRunBudgetCost(context.Background(), book.ID); spent != 0.07 {
 		t.Fatalf("book spend = %v", spent)
 	}
@@ -250,10 +255,37 @@ func TestDescribeStagesOnlyTheOpeningNotes(t *testing.T) {
 	}
 
 	// Again: the description is reused, nothing is spent.
-	again, err := e.Describe(context.Background(), book.ID, DescribeReport{})
+	again, err := e.Describe(context.Background(), book.ID, false)
 	if err != nil || !again.Reused || again.CostUSD != 0 || again.Chapters != 2 || again.CheckedAgainst != CheckedTranscripts ||
 		fake.count(DescribeStage) != 1 || again.GeneratedAt.IsZero() {
 		t.Fatalf("again = %+v, %v (calls %d)", again, err, fake.count(DescribeStage))
+	}
+}
+
+// Each describing run takes the next attempt number, so a second run never reuses
+// (and wipes) the first one's staged dir; before, the first two were both attempt 1.
+func TestDescribeRunsTakeTheNextAttempt(t *testing.T) {
+	t.Parallel()
+	fake := newFakeRunner()
+	fake.act = func(_ *fakeRunner, req agent.Request, _ int) (agent.Result, error) {
+		writeDescription(t, req, "Too short.")
+		return agent.Result{}, nil
+	}
+	e, book, db := describeBook(t, fake, 0)
+	for range 2 {
+		var park *scheduler.ParkError
+		if _, err := e.Describe(context.Background(), book.ID, false); !errors.As(err, &park) {
+			t.Fatalf("err = %v", err)
+		}
+	}
+	runs, _ := db.ListStageRuns(context.Background(), book.ID)
+	if len(runs) != 2 || runs[0].Attempt != 1 || runs[1].Attempt != 2 {
+		t.Fatalf("runs = %+v", runs)
+	}
+	for _, dir := range []string{"describing-a01", "describing-a02"} {
+		if _, err := os.Stat(filepath.Join(book.WorkDir, agent.RunsDir, dir, openingNotesName)); err != nil {
+			t.Errorf("%s: %v", dir, err)
+		}
 	}
 }
 
@@ -275,7 +307,7 @@ func TestDescribeNGramHitRetries(t *testing.T) {
 		strings.Repeat("filler ", 200)+copied+strings.Repeat(" filler", 200)); err != nil {
 		t.Fatal(err)
 	}
-	res, err := e.Describe(context.Background(), book.ID, DescribeReport{})
+	res, err := e.Describe(context.Background(), book.ID, false)
 	if err != nil {
 		t.Fatalf("Describe: %v", err)
 	}
@@ -308,7 +340,7 @@ func TestDescribeAfterTheTranscriptsAreGone(t *testing.T) {
 	if err != nil || saved.Basis != "saved" || !reflect.DeepEqual(saved.Files, live.Files) || saved.K != live.K {
 		t.Fatalf("saved = %+v, %v", saved, err)
 	}
-	res, err := e.Describe(context.Background(), book.ID, DescribeReport{})
+	res, err := e.Describe(context.Background(), book.ID, false)
 	if err != nil || res.CheckedAgainst != CheckedNone {
 		t.Fatalf("Describe = %+v, %v", res, err)
 	}
@@ -336,7 +368,7 @@ func TestDescribeParks(t *testing.T) {
 			return agent.Result{}, nil
 		}
 		e, book, db := describeBook(t, fake, 0)
-		_, err := e.Describe(context.Background(), book.ID, DescribeReport{})
+		_, err := e.Describe(context.Background(), book.ID, false)
 		var park *scheduler.ParkError
 		if !errors.As(err, &park) || park.Code != state.ParkAgentValidationExhausted {
 			t.Fatalf("err = %v", err)
@@ -357,7 +389,7 @@ func TestDescribeParks(t *testing.T) {
 		id, _ := db.StartStageRun(ctx, book.ID, "fact_pass", 1)
 		_ = db.AddOpenStageRunUsage(ctx, book.ID, "fact_pass", "opus", 1, 1, 2)
 		_ = db.FinishStageRun(ctx, id, true, nil)
-		_, err := e.Describe(ctx, book.ID, DescribeReport{})
+		_, err := e.Describe(ctx, book.ID, false)
 		var park *scheduler.ParkError
 		if !errors.As(err, &park) || park.Code != state.ParkBudgetExceeded || fake.count(DescribeStage) != 0 {
 			t.Fatalf("err = %v, calls %d", err, fake.count(DescribeStage))
@@ -371,7 +403,7 @@ func TestDescribeParks(t *testing.T) {
 		}
 		e, book, _ := describeBook(t, fake, 0)
 		e.backoff = []time.Duration{time.Hour} // NoWait must not sleep it out
-		_, err := e.Describe(context.Background(), book.ID, DescribeReport{NoWait: true})
+		_, err := e.Describe(context.Background(), book.ID, true)
 		var park *scheduler.ParkError
 		if !errors.As(err, &park) || park.Code != state.ParkAgentRateLimited || park.RetryAfter.IsZero() || fake.count(DescribeStage) != 1 {
 			t.Fatalf("err = %v, calls %d", err, fake.count(DescribeStage))
@@ -387,13 +419,13 @@ func TestDescribeNoNotes(t *testing.T) {
 	if err := os.RemoveAll(filepath.Join(book.WorkDir, spelling.FactsDir)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := e.Describe(context.Background(), book.ID, DescribeReport{}); !errors.Is(err, ErrNoNotes) {
+	if _, err := e.Describe(context.Background(), book.ID, false); !errors.Is(err, ErrNoNotes) {
 		t.Fatalf("no facts: %v", err)
 	}
 	if err := os.RemoveAll(filepath.Join(book.WorkDir, sidecarsDir)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := e.Describe(context.Background(), book.ID, DescribeReport{}); !errors.Is(err, ErrNoNotes) {
+	if _, err := e.Describe(context.Background(), book.ID, false); !errors.Is(err, ErrNoNotes) {
 		t.Fatalf("no characters.json: %v", err)
 	}
 	if fake.count(DescribeStage) != 0 {
@@ -410,7 +442,7 @@ func TestDescribeRefusesAnUncomposableRun(t *testing.T) {
 	chars := baseChars("the-carol")
 	chars.Sources = nil
 	seedWorkSidecars(t, book.WorkDir, chars, baseRecaps("the-carol"))
-	_, err := e.Describe(context.Background(), book.ID, DescribeReport{})
+	_, err := e.Describe(context.Background(), book.ID, false)
 	if err == nil || errors.Is(err, ErrNoNotes) || !strings.Contains(err.Error(), "can't carry a description") || fake.count(DescribeStage) != 0 {
 		t.Fatalf("err = %v, calls %d", err, fake.count(DescribeStage))
 	}

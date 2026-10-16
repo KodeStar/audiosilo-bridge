@@ -100,20 +100,35 @@ export function generateFacts(p: Progress | null | undefined, parked: boolean): 
   return facts;
 }
 
-// parseGenerateResult reads a done sidecars job's result, or null when it isn't
-// one.
-export function parseGenerateResult(r: unknown): GenerateResult | null {
+// SavedFields are what every sidecars job's result carries: the library, the
+// book's path, the names written in its .audiosilo folder and the spend.
+type SavedFields = Pick<GenerateResult, 'library_id' | 'path' | 'files' | 'cost_usd'>;
+
+// parseSavedFields reads a done sidecars job's shared fields, or null when the
+// result isn't one.
+function parseSavedFields(r: unknown): SavedFields | null {
   if (!r || typeof r !== 'object') return null;
-  const o = r as Partial<GenerateResult>;
+  const o = r as Partial<SavedFields>;
   if (typeof o.path !== 'string' || !Array.isArray(o.files)) return null;
   return {
     library_id: typeof o.library_id === 'number' ? o.library_id : 0,
     path: o.path,
-    source: o.source === 'ebook' ? 'ebook' : 'audio',
     files: o.files.filter((f): f is string => typeof f === 'string'),
+    cost_usd: typeof o.cost_usd === 'number' ? o.cost_usd : 0,
+  };
+}
+
+// parseGenerateResult reads a done sidecars job's result, or null when it isn't
+// one.
+export function parseGenerateResult(r: unknown): GenerateResult | null {
+  const saved = parseSavedFields(r);
+  if (!saved) return null;
+  const o = r as Partial<GenerateResult>;
+  return {
+    ...saved,
+    source: o.source === 'ebook' ? 'ebook' : 'audio',
     characters: typeof o.characters === 'number' ? o.characters : 0,
     recaps: typeof o.recaps === 'number' ? o.recaps : 0,
-    cost_usd: typeof o.cost_usd === 'number' ? o.cost_usd : 0,
     work_id: typeof o.work_id === 'string' ? o.work_id : '',
     contributed:
       o.contributed && typeof o.contributed === 'object'
@@ -155,21 +170,14 @@ export function checkedText(c: CheckedAgainst): string {
 // parseDescribeResult reads a done description-only job's result, or null when
 // it isn't one.
 export function parseDescribeResult(r: unknown): DescribeResult | null {
-  if (!r || typeof r !== 'object') return null;
+  const saved = parseSavedFields(r);
+  if (!saved) return null;
   const o = r as Partial<DescribeResult>;
-  if (typeof o.path !== 'string' || !Array.isArray(o.files)) return null;
   const checked: CheckedAgainst =
     o.checked_against === 'transcripts' || o.checked_against === 'book text'
       ? o.checked_against
       : 'none';
-  return {
-    library_id: typeof o.library_id === 'number' ? o.library_id : 0,
-    path: o.path,
-    description: o.description === true,
-    files: o.files.filter((f): f is string => typeof f === 'string'),
-    cost_usd: typeof o.cost_usd === 'number' ? o.cost_usd : 0,
-    checked_against: checked,
-  };
+  return { ...saved, description: o.description === true, checked_against: checked };
 }
 
 // describeSummary is "A description, $0.25, checked against the transcripts".

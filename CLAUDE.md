@@ -198,7 +198,8 @@ until one connects).
 
 **Phase 1c (own-words descriptions):** the description step
 (`pipeline.Executor.Describe`, not an engine stage: its own `describing` stage run
-on the book, which the reconcile and the supervisor skip) writes a spoiler-free
+on the book, which the reconcile and the supervisor skip, run under the
+scheduler's `Hold` on the book) writes a spoiler-free
 description from the fact notes of the book's opening chapters ONLY (the staged dir
 holds `opening.md` and nothing else: no transcript, no `knowledge-final.md`, no later
 chapter), validated (shape, length, voice, meta's description schema, the n-gram

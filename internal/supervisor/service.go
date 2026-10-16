@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"time"
 
@@ -153,7 +154,7 @@ func (s *Service) check(ctx context.Context, trigger string) {
 		s.setCheck(err)
 		return
 	}
-	runsByBook, err := s.db.StageRunsAll(ctx)
+	runsByBook, err := s.engineRunsAll(ctx)
 	if err != nil {
 		s.setCheck(err)
 		return
@@ -236,7 +237,6 @@ type passReads struct {
 // fanned-out invocation roll-up. The batch pass and the per-incident confirmation share
 // it so both classify from identically-assembled data.
 func (s *Service) buildSnapshot(book store.Book, runs []store.StageRun, pass passReads) Snapshot {
-	runs = engineRuns(runs)
 	eligibleCount := 0
 	if len(pass.runtime.EligibleAgentIDs) > 0 && book.ID == pass.runtime.EligibleAgentIDs[0] {
 		eligibleCount = pass.runtime.EligibleAgentBooks
@@ -253,10 +253,11 @@ func (s *Service) buildSnapshot(book store.Book, runs []store.StageRun, pass pas
 		AgentInvocations: pass.runtime.AgentInvocations, InvocationCapacity: pass.runtime.InvocationCapacity, BookInvocations: pass.runtime.InvocationsByBook[book.ID],
 		MaxAgentsPerBook: pass.runtime.MaxAgentsPerBook, RemainingWorkUnits: remaining}
 	for i := range runs {
-		if runs[i].FinishedAt != "" {
+		run := &runs[i] // the roll-up below writes through to snap.Runs
+		if run.FinishedAt != "" {
 			continue
 		}
-		children := pass.invocationsByRun[runs[i].ID]
+		children := pass.invocationsByRun[run.ID]
 		if len(children) > 0 {
 			oldestHeartbeat := children[0].HeartbeatAt
 			for _, child := range children[1:] {
@@ -267,7 +268,7 @@ func (s *Service) buildSnapshot(book store.Book, runs []store.StageRun, pass pas
 			// A fresh sibling must not hide a stale child behind the compatible
 			// parent roll-up. Classification therefore uses the oldest active
 			// invocation heartbeat for this fanned-out run.
-			runs[i].HeartbeatAt = oldestHeartbeat
+			run.HeartbeatAt = oldestHeartbeat
 			alive := true
 			checked := false
 			for _, child := range children {
@@ -289,8 +290,8 @@ func (s *Service) buildSnapshot(book store.Book, runs []store.StageRun, pass pas
 			break
 		}
 		// Legacy/pre-migration active process fallback.
-		if runs[i].ProcessActive && runs[i].ProcessID > 0 {
-			alive := processAlive(runs[i].ProcessID)
+		if run.ProcessActive && run.ProcessID > 0 {
+			alive := processAlive(run.ProcessID)
 			snap.ProcessAlive = &alive
 			break
 		}
@@ -307,22 +308,42 @@ func (s *Service) freshSnapshot(ctx context.Context, bookID int64, pass passRead
 	if err != nil {
 		return Snapshot{}, nil, err
 	}
-	runs, err := s.db.ListStageRuns(ctx, bookID)
+	runs, err := s.engineRunsOf(ctx, bookID)
 	if err != nil {
 		return Snapshot{}, nil, err
 	}
-	runs = engineRuns(runs)
 	return s.buildSnapshot(book, runs, pass), runs, nil
+}
+
+// engineRunsOf and engineRunsAll are the supervisor's reads of the stage runs
+// (one book's, every book's), engine stages only: see engineRuns.
+func (s *Service) engineRunsOf(ctx context.Context, bookID int64) ([]store.StageRun, error) {
+	runs, err := s.db.ListStageRuns(ctx, bookID)
+	return engineRuns(runs), err
+}
+
+func (s *Service) engineRunsAll(ctx context.Context) (map[int64][]store.StageRun, error) {
+	byBook, err := s.db.StageRunsAll(ctx)
+	for id, runs := range byBook {
+		byBook[id] = engineRuns(runs)
+	}
+	return byBook, err
 }
 
 // engineRuns drops the runs of a stage outside the engine's state machine (the
 // description step's "describing", which the Bridge's jobs run on a finished book):
 // the supervisor recovers engine stages only, and such a run, open with no
-// scheduler worker or done with no sentinel, would read as a broken one.
+// scheduler worker or done with no sentinel, would read as a broken one. With
+// nothing to drop it returns runs as it is.
 func engineRuns(runs []store.StageRun) []store.StageRun {
-	out := runs[:0:0]
-	for _, r := range runs {
-		if state.IsStage(state.State(r.Stage)) {
+	outside := func(r store.StageRun) bool { return !state.IsStage(state.State(r.Stage)) }
+	i := slices.IndexFunc(runs, outside)
+	if i < 0 {
+		return runs
+	}
+	out := slices.Clone(runs[:i])
+	for _, r := range runs[i+1:] {
+		if !outside(r) {
 			out = append(out, r)
 		}
 	}
@@ -706,11 +727,10 @@ func (s *Service) Ask(ctx context.Context, bookID int64) (store.SupervisorRun, e
 	if err != nil {
 		return store.SupervisorRun{}, err
 	}
-	runs, err := s.db.ListStageRuns(ctx, bookID)
+	runs, err := s.engineRunsOf(ctx, bookID)
 	if err != nil {
 		return store.SupervisorRun{}, err
 	}
-	runs = engineRuns(runs)
 	runtime := Runtime{ActiveBooks: map[int64]bool{}}
 	if s.hooks.Runtime != nil {
 		books, listErr := s.db.ListBooks(ctx)

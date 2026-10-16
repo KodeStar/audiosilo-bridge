@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -28,16 +29,16 @@ const testDescription = `{"license":"CC-BY-SA-4.0","sources":[{"type":"community
 // composed file into the engine book's work dir, or returns fail's error for a
 // call (1-based).
 type fakeDescriber struct {
-	db      *store.DB
-	mu      sync.Mutex
-	reports []pipeline.DescribeReport
-	fail    func(call int) error
+	db   *store.DB
+	mu   sync.Mutex
+	runs []bool // each call's noWait
+	fail func(call int) error
 }
 
-func (f *fakeDescriber) Describe(ctx context.Context, bookID int64, rep pipeline.DescribeReport) (pipeline.DescribeResult, error) {
+func (f *fakeDescriber) Describe(ctx context.Context, bookID int64, noWait bool) (pipeline.DescribeResult, error) {
 	f.mu.Lock()
-	f.reports = append(f.reports, rep)
-	call := len(f.reports)
+	f.runs = append(f.runs, noWait)
+	call := len(f.runs)
 	fail := f.fail
 	f.mu.Unlock()
 	if fail != nil {
@@ -53,14 +54,15 @@ func (f *fakeDescriber) Describe(ctx context.Context, bookID int64, rep pipeline
 	if err := os.WriteFile(path, []byte(testDescription), 0o600); err != nil {
 		return pipeline.DescribeResult{}, err
 	}
-	return pipeline.DescribeResult{Path: path, Chapters: 2, LogicalChapters: 6, CheckedAgainst: pipeline.CheckedTranscripts,
+	return pipeline.DescribeResult{Path: path, Chapters: 2, CheckedAgainst: pipeline.CheckedTranscripts,
 		CostUSD: 0.25, GeneratedAt: time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC)}, nil
 }
 
-func (f *fakeDescriber) calls() []pipeline.DescribeReport {
+// calls is each call's noWait.
+func (f *fakeDescriber) calls() []bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return append([]pipeline.DescribeReport(nil), f.reports...)
+	return slices.Clone(f.runs)
 }
 
 // describeHandler is a handler whose engine writes descriptions with d.
@@ -126,8 +128,8 @@ func TestGenerateWritesTheDescription(t *testing.T) {
 		strings.Join(res.Files, ",") != "characters.json,recaps.json,description.json,bridge.json" {
 		t.Fatalf("result = %+v", res)
 	}
-	if calls := d.calls(); len(calls) != 1 || !calls[0].NoWait {
-		t.Fatalf("describe calls = %+v, want one with NoWait", calls)
+	if calls := d.calls(); len(calls) != 1 || !calls[0] {
+		t.Fatalf("describe calls = %+v, want one with noWait", calls)
 	}
 	adir := filepath.Join(hr.root, "Author", "Book", AttachDir)
 	if raw, err := os.ReadFile(filepath.Join(adir, "description.json")); err != nil || string(raw) != testDescription {
@@ -205,7 +207,7 @@ func TestDescribeJob(t *testing.T) {
 		strings.Join(res.Files, ",") != "description.json,bridge.json" {
 		t.Fatalf("result = %+v", res)
 	}
-	if calls := d.calls(); len(calls) != 1 || calls[0].NoWait {
+	if calls := d.calls(); len(calls) != 1 || calls[0] {
 		t.Fatalf("describe calls = %+v", calls)
 	}
 	if !hr.srv.saw(42, func(_ link.Update, p map[string]any) bool {
@@ -227,6 +229,47 @@ func TestDescribeJob(t *testing.T) {
 	defer hr.srv.mu.Unlock()
 	if n := len(hr.srv.rescans); n != 2 || hr.srv.rescans[1]["mode"] != "attachments" {
 		t.Fatalf("rescans = %+v", hr.srv.rescans)
+	}
+}
+
+// A description-only job for an ebook-sourced book that moved since its run: the
+// .epub went with it, and a fresh bridge.json names it where it is now (before,
+// the description's save didn't follow it and named the old, missing path).
+func TestDescribeJobFollowsAMovedEpub(t *testing.T) {
+	old := readEpub
+	readEpub = func(string) error { return nil }
+	t.Cleanup(func() { readEpub = old })
+	hr := newHarness(t)
+	mustWrite(t, filepath.Join(hr.root, "Author", "Book", "The Book.epub"), "epub!")
+	hr.srv.add(91, "Author/Book", `{"source":"auto"}`)
+	stop := hr.runner(hr.h)
+	hr.waitFor("generated", func() bool { s, _ := hr.srv.final(91); return s == link.StateDone })
+	stop()
+	if err := os.Rename(filepath.Join(hr.root, "Author", "Book"), filepath.Join(hr.root, "Author", "Book (2026)")); err != nil {
+		t.Fatal(err)
+	}
+	// No bridge.json to keep: the description writes a fresh one.
+	if err := os.Remove(filepath.Join(hr.root, "Author", "Book (2026)", AttachDir, "bridge.json")); err != nil {
+		t.Fatal(err)
+	}
+	hr.srv.set(func() {
+		hr.srv.books["Author/Book (2026)"] = link.Book{LibraryID: 1, Path: "Author/Book (2026)", Files: []link.BookFile{
+			{Path: "Author/Book (2026)/01.mp3", Size: 9}, {Path: "Author/Book (2026)/02.mp3", Size: 10}}}
+		delete(hr.srv.books, "Author/Book")
+	})
+	// The server followed the book; so did the generate job's mapping.
+	if err := hr.db.SetGenerateBookPath(context.Background(), 91, "Author/Book (2026)"); err != nil {
+		t.Fatal(err)
+	}
+	hr.srv.addDescribe(92, "Author/Book (2026)")
+	stopAll := hr.runAll(hr.describeHandler(&fakeDescriber{db: hr.db}))
+	defer stopAll()
+	hr.waitFor("done", func() bool { s, _ := hr.srv.final(92); return s == link.StateDone })
+	var prov Provenance
+	raw, _ := os.ReadFile(filepath.Join(hr.root, "Author", "Book (2026)", AttachDir, "bridge.json"))
+	if err := json.Unmarshal(raw, &prov); err != nil || prov.Source != SourceEbook || len(prov.Inputs) != 1 ||
+		prov.Inputs[0].Path != "Author/Book (2026)/The Book.epub" || prov.Inputs[0].Size != 5 {
+		t.Fatalf("bridge.json = %s, %v", raw, err)
 	}
 }
 
@@ -321,28 +364,73 @@ func TestDescribeJobParks(t *testing.T) {
 	}
 }
 
-// A new generate job doesn't delete the earlier run a description is reading.
+// A new generate job doesn't delete the earlier run a description holds: the
+// engine's Delete says busy, and the job asks to try again.
 func TestGenerateWaitsForADescription(t *testing.T) {
 	t.Parallel()
 	hr := newHarness(t)
 	hr.generated(71)
 	b := hr.engineBook(71)
-	hr.h.markDescribing(b.ID, 1)
+	release, ok := hr.sched.Hold(b.ID)
+	if !ok {
+		t.Fatal("the finished book couldn't be held")
+	}
+	defer release()
 	hr.srv.add(72, "Author/Book", `{}`)
 	stop := hr.runner(hr.h)
 	defer stop()
 	hr.waitFor("failed", func() bool { s, _ := hr.srv.final(72); return s == link.StateFailed })
-	if _, u := hr.srv.final(72); u.Error == nil || !strings.Contains(*u.Error, "still writing a description") {
+	if _, u := hr.srv.final(72); u.Error == nil || !strings.Contains(*u.Error, "try again in a minute") {
 		t.Fatalf("failed with %v", u.Error)
 	}
 	if _, err := hr.db.GetBook(context.Background(), b.ID); err != nil {
 		t.Fatalf("the earlier run was deleted: %v", err)
 	}
-	hr.h.markDescribing(b.ID, -1)
-	if hr.h.isDescribing(b.ID) {
-		t.Fatal("the count didn't drop")
+}
+
+// A description that can't get the engine's hold on the book: the description-only
+// job fails asking to try again, and a generate job finishes without one, saying
+// why. Neither describes.
+func TestDescriptionNeedsTheHold(t *testing.T) {
+	t.Parallel()
+	hr := newHarness(t)
+	hr.generated(81)
+	b := hr.engineBook(81)
+	release, ok := hr.sched.Hold(b.ID)
+	if !ok {
+		t.Fatal("the finished book couldn't be held")
+	}
+	d := &fakeDescriber{db: hr.db}
+	stop := hr.runAll(hr.describeHandler(d))
+	hr.srv.addDescribe(82, "Author/Book")
+	hr.waitFor("failed", func() bool { s, _ := hr.srv.final(82); return s == link.StateFailed })
+	if _, u := hr.srv.final(82); u.Error == nil || *u.Error != string(errBookBusy) {
+		t.Fatalf("failed with %v", u.Error)
+	}
+	stop()
+	release()
+
+	// The generate finish, its engine refusing every hold.
+	h := hr.describeHandler(d)
+	h.o.Engine = func() Engine { return refusingEngine{hr.sched} }
+	stopGen := hr.runAll(h)
+	defer stopGen()
+	hr.srv.add(83, "Loose.m4b", `{}`)
+	hr.waitFor("the job done", func() bool { s, _ := hr.srv.final(83); return s == link.StateDone })
+	var res Result
+	hr.result(83, &res)
+	if res.Description || res.DescriptionError != "the engine was busy with this book" {
+		t.Fatalf("result = %+v", res)
+	}
+	if len(d.calls()) != 0 {
+		t.Fatalf("described %d times without the hold", len(d.calls()))
 	}
 }
+
+// refusingEngine is the scheduler with every hold refused (a stage runs on the book).
+type refusingEngine struct{ Engine }
+
+func (refusingEngine) Hold(int64) (func(), bool) { return func() {}, false }
 
 // bridge.json after a description-only job keeps every field it had (unknown
 // ones included) and only adds or replaces description; with none fit to keep
