@@ -37,6 +37,12 @@ const (
 	// immediate retry would just time out again).
 	ParkASRDecodeTimeout ParkCode = "asr_decode_timeout"
 
+	// ParkASRWorkerWaiting (Phase 1b): no ASR worker is connected and the ASR
+	// fallback is wait (or the Bridge has no speech recognition of its own), so
+	// the book waits for one. Re-admitted when a worker connects (and once per
+	// start, in case the fallback changed).
+	ParkASRWorkerWaiting ParkCode = "asr_worker_waiting"
+
 	// ParkContribUnavailable: the contributing stage runs in issue mode but no
 	// GitHub credential is available (no PAT in secrets, no `gh auth token`). On the
 	// Bridge the token comes from AUDIOSILO_BRIDGE_GITHUB_TOKEN; then Retry.

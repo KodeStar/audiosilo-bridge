@@ -76,7 +76,8 @@ Compact map; the per-package rules and history live in [PACKAGES.md](PACKAGES.md
 **read a package's entry before changing it.**
 
 ```
-cmd/audiosilo-bridge/  serve (default; --data, --listen), version, agent-runner, agent-login
+cmd/audiosilo-bridge/  serve (default; --data, --listen), version, agent-runner, agent-login,
+                       worker [install|uninstall] (Phase 1b; worker.go)
 internal/
   -- the shell (Phase 0) --
   app/        wiring + the page API's Backend: pairing (Conn), heartbeat (+ estimates),
@@ -93,13 +94,19 @@ internal/
   secrets/    sealed-file secrets keyed by AUDIOSILO_BRIDGE_SECRET_KEY or secret.key
   config/     config.yaml + AUDIOSILO_BRIDGE_* (bridge.go: the Bridge's own settings)
   store/      SQLite, append-only migrations (0001 the engine, 0002 server_jobs,
-              0003 generate_books, contrib_mode, server_id, deleted_stage_spend)
+              0003 generate_books, contrib_mode, server_id, deleted_stage_spend,
+              0004 workers)
   auth/       the page's single password + hashed sessions + login limiter
   -- Phase 1a --
   generate/   sidecars.generate: server job -> engine book -> .audiosilo/ + rescan
   agentproto/ the staging protocol shared with the agent container (a leaf)
   agentbox/   the Bridge's side: an agent.Runner over the staging dir
   agentrun/   the agent container's side: `agent-runner` (claim, run, harvestable out/)
+  -- Phase 1b --
+  workerproto/ the worker wire protocol (routes, version, task/result shapes; a leaf)
+  workers/    the Bridge's side: the segment queue + leases + registry (Hub) and the
+              engine's ASR backend (Router: remote, else local or a wait)
+  worker/     `audiosilo-bridge worker`: client, run loop, spool, launchd/systemd install
   -- the engine (from audiosilo-sidecars; app/engine.go runs it) --
   toolfetch/ audio/ asr/ transcript/ ebook/ scratch/ qa/ spelling/ agent/ repair/
   pipeline/ contrib/ state/ eta/ scheduler/ supervisor/ metaops/ events/ pricing/ fsutil/
@@ -109,12 +116,15 @@ Dockerfile    slim | cuda | agent | full; compose.example.yaml: server, bridge, 
 ```
 
 **Dependency direction:** `app -> {api, jobs, link, mapping, verify, generate,
-agentbox, store, secrets, config, auth, logring, web}` plus the engine it wires;
+agentbox, workers, store, secrets, config, auth, logring, web}` plus the engine it wires;
 `api` calls the injected Backend and the injected `auth.Manager` (login, sessions,
 the password), with types from jobs/link/mapping/store/logring; `verify -> {jobs,
 link, mapping}`; `generate -> {jobs, link, mapping, store, scheduler, pipeline, ...}`
 through its own Engine/Server interfaces; `jobs -> {link, store}`; `mapping -> link`;
-`link` and `agentproto` are leaves; `agentbox` and `agentrun` each import only
+`link`, `agentproto` and `workerproto` are leaves; `workers -> {asr, fsutil,
+scheduler, state, store, transcript, workerproto}`; `worker -> {asr, fsutil, workerproto}`
+(never `workers`; its tests drive the real `api` + `workers` in-process); `api`
+reaches the hub through its own `WorkerHub` interface and `workerproto`; `agentbox` and `agentrun` each import only
 `agent` + `agentproto` (agentrun also `fsutil`), never each other, and the engine
 never knows either (agentbox is just an `agent.Runner`). The engine's directions are
 in PACKAGES.md.
@@ -146,6 +156,12 @@ in PACKAGES.md.
   credentials live only in the agent container.
 - **The page answers the local network only and always asks for its password**,
   loopback included (spike 2: an agent on the same network could reach it).
+- **The worker routes (`/worker/v1/*`, Phase 1b) take only a worker token**
+  (`asw_...`, made on the page, kept as its sha256 in `workers`) and the protocol
+  header; the page's routes never take a worker token. Both sides are tested
+  allowed and denied. A protocol change an installed worker can't follow bumps
+  `workerproto.Version`; an added field doesn't (the worker routes accept unknown
+  JSON fields).
 - **Every feature ships with a test**; security-critical code (the LAN guard, auth,
   SafeJoin, the vault, the claim/lease handling) has allowed AND denied tests.
 - **Hyphens, never em dashes**, in docs, comments, UI copy and generated text.
@@ -166,8 +182,16 @@ and retried from the page, the job following its book's moves, results written t
 `agentbox`, `agentrun`, the `agent` image and compose service, credential refusals
 parked as `agent_credential_refused`), the monthly budget, the transcript retention,
 supervisor recoveries on by default, the heartbeat's estimates, and the page's
-engine card and job view. Next: Phase 1b (the native ASR worker and the remote ASR
-lane). See BRIDGE-PLAN.md's Status table.
+engine card and job view.
+
+**Phase 1b (the native ASR worker):** `audiosilo-bridge worker` (connects out to the
+Bridge's page, long-polls SEGMENTS, downloads the FLAC, decodes with `internal/asr`,
+uploads the raw transcript; resumes per segment from its spool), `worker
+install`/`uninstall` (launchd agent, systemd user unit), worker tokens on the page,
+the protocol-version refusal, and the engine's ASR as `workers.Router`: remote when a
+worker is connected, else `asr.worker_fallback` (`local`, the default, which yields
+to a worker that connects mid-decode; or `wait`, which parks `asr_worker_waiting`
+until one connects). See BRIDGE-PLAN.md's Status table for what is next.
 
 Operative caveats carried from sidecars (PACKAGES.md has the detail):
 - **audiosilo-meta is pinned** and the schema drift guard

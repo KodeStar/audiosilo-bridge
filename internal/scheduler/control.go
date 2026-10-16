@@ -89,6 +89,33 @@ func (s *Scheduler) Retry(ctx context.Context, id int64) error {
 	}
 }
 
+// ReadmitParked re-admits every book parked with code (the Bridge: asr_worker_waiting
+// once a worker is connected or the ASR fallback isn't a wait) through the same path
+// as a manual Retry, and returns how many it re-admitted; a book busy elsewhere is
+// skipped.
+func (s *Scheduler) ReadmitParked(ctx context.Context, msg string, code state.ParkCode) int {
+	books, err := s.db.ListBooksParkedWith(ctx, string(code))
+	if err != nil {
+		slog.Warn("readmit-parked: list books failed", "err", err)
+		return 0
+	}
+	n := 0
+	for _, b := range books {
+		if !s.reserve(b.ID) {
+			continue
+		}
+		err := s.readmit(ctx, b)
+		s.unreserve(b.ID)
+		if err != nil {
+			slog.Warn("readmit-parked: readmit failed", "book_id", b.ID, "err", err)
+			continue
+		}
+		n++
+		_ = s.hub.PublishBook("stage.note", b.ID, map[string]any{"book_id": b.ID, "stage": b.State, "msg": msg})
+	}
+	return n
+}
+
 // readmit is the shared re-admission body: it forces the book's current stage to
 // re-run (drop its sentinel), clears the status/error/park_code (and the scheduled
 // retry_at, via SetBookStatus), and wakes the dispatch loop. Retry (the manual control)

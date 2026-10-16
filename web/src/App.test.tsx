@@ -74,9 +74,7 @@ describe('App', () => {
       'GET /api/jobs': { body: { jobs: [] } },
     });
     render(<App />);
-    expect(
-      await screen.findByText('ASR workers connect here in a later version.'),
-    ).toBeInTheDocument();
+    expect(await screen.findByText('No workers yet. Add one below.')).toBeInTheDocument();
     await userEvent.click(screen.getByRole('tab', { name: 'Jobs' }));
     expect(await screen.findByText('No jobs yet')).toBeInTheDocument();
     expect(window.location.hash).toBe('#jobs');

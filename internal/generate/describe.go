@@ -73,6 +73,9 @@ var parkHints = map[string]string{
 		"the book again to start over from the new files.",
 	string(state.ParkFixLoopExhausted): "The spoiler check kept finding problems. Press Retry on the Bridge's page for another round.",
 	string(state.ParkASRDecodeTimeout): "A chapter took too long to transcribe. Press Retry on the Bridge's page to try it again.",
+	string(state.ParkASRWorkerWaiting): "Speech recognition waits for an ASR worker: the Bridge's ASR fallback is wait, or " +
+		"the Bridge has no speech recognition of its own. Start a worker (see Workers on the Bridge's page), or, when " +
+		"the Bridge has its own, set the fallback to local there. The book goes on by itself once a worker connects.",
 	string(state.ParkContribUnavailable): "The contribution couldn't reach GitHub, or the Bridge has no GitHub token: set " +
 		"AUDIOSILO_BRIDGE_GITHUB_TOKEN on the Bridge and restart it, then press Retry on the Bridge's page. The " +
 		"characters and recaps are already saved with the book.",

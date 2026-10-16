@@ -323,3 +323,46 @@ func TestIgnoredOnBridge(t *testing.T) {
 		})
 	}
 }
+
+// asr.worker_fallback: local by default, wait from the file or the
+// environment (which locks it, case and spaces aside), nothing else.
+func TestASRWorkerFallback(t *testing.T) {
+	cfg, err := Load(t.TempDir())
+	if err != nil || cfg.ASR.WorkerFallback != ASRWorkerFallbackLocal || cfg.EnvSet(KeyASRWorkerFallback) {
+		t.Fatalf("default = %q, %v", cfg.ASR.WorkerFallback, err)
+	}
+	dir := t.TempDir()
+	if err := SaveFile(dir, func(c *Config) error { c.ASR.WorkerFallback = ASRWorkerFallbackWait; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if cfg, err := Load(dir); err != nil || cfg.ASR.WorkerFallback != ASRWorkerFallbackWait {
+		t.Fatalf("from the file = %q, %v", cfg.ASR.WorkerFallback, err)
+	}
+	t.Setenv("AUDIOSILO_BRIDGE_ASR_WORKER_FALLBACK", " Local ")
+	if cfg, err := Load(dir); err != nil || cfg.ASR.WorkerFallback != ASRWorkerFallbackLocal || !cfg.EnvSet(KeyASRWorkerFallback) {
+		t.Fatalf("from the environment = %q, %v", cfg.ASR.WorkerFallback, err)
+	}
+	t.Setenv("AUDIOSILO_BRIDGE_ASR_WORKER_FALLBACK", "cpu")
+	if _, err := Load(dir); err == nil {
+		t.Fatal("an unknown fallback loaded")
+	}
+}
+
+// asr.threads: 0 by default (whisper.cpp's own 4), from the environment, never
+// negative or absurd.
+func TestASRThreads(t *testing.T) {
+	cfg, err := Load(t.TempDir())
+	if err != nil || cfg.ASR.Threads != 0 {
+		t.Fatalf("default = %d, %v", cfg.ASR.Threads, err)
+	}
+	t.Setenv("AUDIOSILO_BRIDGE_ASR_THREADS", "16")
+	if cfg, err := Load(t.TempDir()); err != nil || cfg.ASR.Threads != 16 {
+		t.Fatalf("env = %d, %v", cfg.ASR.Threads, err)
+	}
+	for _, bad := range []string{"-2", "many", "999"} {
+		t.Setenv("AUDIOSILO_BRIDGE_ASR_THREADS", bad)
+		if _, err := Load(t.TempDir()); err == nil {
+			t.Errorf("%q loaded", bad)
+		}
+	}
+}

@@ -51,6 +51,8 @@ func run(args []string, stdout, stderr io.Writer) error {
 		return agentRunner(rest, stderr)
 	case "agent-login":
 		return agentLogin(rest, stdout, stderr)
+	case "worker":
+		return workerCmd(rest, stdout, stderr)
 	case "help":
 		usage(stdout)
 		return nil
@@ -119,15 +121,18 @@ func agentLogin(args []string, stdout, stderr io.Writer) error {
 }
 
 // defaultDataDir is $AUDIOSILO_BRIDGE_DATA, else ~/.audiosilo-bridge.
-func defaultDataDir() string {
-	if v := os.Getenv(dataEnv); v != "" {
+func defaultDataDir() string { return defaultDir(dataEnv, ".audiosilo-bridge") }
+
+// defaultDir is $env, else ~/<name> (else <name> with no home).
+func defaultDir(env, name string) string {
+	if v := os.Getenv(env); v != "" {
 		return v
 	}
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
-		return ".audiosilo-bridge"
+		return name
 	}
-	return filepath.Join(home, ".audiosilo-bridge")
+	return filepath.Join(home, name)
 }
 
 func usage(w io.Writer) {
@@ -138,6 +143,9 @@ Usage:
   audiosilo-bridge version
   audiosilo-bridge agent-runner [--staging DIR] [--home DIR] [--slots N]
   audiosilo-bridge agent-login [--home DIR] claude|codex
+  audiosilo-bridge worker --bridge URL [--token T] [--data DIR] [--backend B]
+  audiosilo-bridge worker install --bridge URL --token T [--data DIR] [--backend B] [--print]
+  audiosilo-bridge worker uninstall [--print]
 
 Commands:
   serve         Run the Bridge and its page (default).
@@ -146,6 +154,27 @@ Commands:
                 entrypoint; default --staging /staging --home /agent).
   agent-login   Sign a CLI in, inside the agent container: codex runs its
                 device login, claude prints how to provide a token.
+  worker        Run an ASR worker: transcribe the Bridge's audio here (a Mac's
+                Metal, a GPU). It connects out to the Bridge's page address.
+                Make its token on the Bridge's page (Workers).
+  worker install
+                Install the worker as a service that always runs (a launchd
+                agent on macOS, a systemd user unit on Linux) and start it.
+                The token is kept in the data dir, not in the service file.
+                --print shows the service file without installing it.
+  worker uninstall
+                Stop and remove the service (the data dir stays).
+
+Worker flags:
+  --bridge       The Bridge page's address, e.g. http://192.168.1.20:8091.
+  --token        The worker token (default: <data>/worker.token, which install
+                 writes, else $AUDIOSILO_WORKER_TOKEN).
+  --data         The worker's data dir: the speech recognition's tools and the
+                 spool (default $AUDIOSILO_WORKER_DATA, else ~/.audiosilo-bridge-worker).
+  --backend      auto (mlx-whisper on Apple Silicon, else whisper-cpp),
+                 mlx-whisper or whisper-cpp.
+  --model        The backend's model (default: large-v3-turbo).
+  --whisper-cli  An explicit whisper-cli binary (whisper-cpp).
 
 Serve flags:
   --data     Data directory (default $AUDIOSILO_BRIDGE_DATA, else ~/.audiosilo-bridge).

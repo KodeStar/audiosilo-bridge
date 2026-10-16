@@ -129,3 +129,17 @@ func TestIsFile(t *testing.T) {
 		t.Error("IsFile(missing) = true, want false")
 	}
 }
+
+func TestFileSHA256(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "f")
+	if err := os.WriteFile(p, []byte("abc"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	n, sum, err := FileSHA256(p)
+	if err != nil || n != 3 || sum != "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad" {
+		t.Fatalf("FileSHA256 = %d %s %v", n, sum, err)
+	}
+	if _, _, err := FileSHA256(p + "x"); err == nil {
+		t.Fatal("a missing file hashed")
+	}
+}

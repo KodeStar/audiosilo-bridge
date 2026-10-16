@@ -746,6 +746,33 @@ func TestWhisperCppNoContextArg(t *testing.T) {
 	}
 }
 
+// TestWhisperCppThreadsArg: asr.threads becomes whisper-cli's -t; 0 passes no -t
+// (whisper.cpp's own default).
+func TestWhisperCppThreadsArg(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script fake is unix-only")
+	}
+	for _, threads := range []int{0, 16} {
+		argsFile := filepath.Join(t.TempDir(), "args")
+		cli := recordingWhisperCLI(t, argsFile)
+		dataDir := t.TempDir()
+		b := newWhisperCpp(SelectConfig{WhisperCLIPath: cli, DataDir: dataDir, Threads: threads, Log: discardLogger()})
+		seedWhisperModel(t, b, dataDir)
+		audio := filepath.Join(dataDir, "ch001.flac")
+		if err := os.WriteFile(audio, []byte("flac"), 0o644); err != nil { //nolint:gosec // test artifact
+			t.Fatal(err)
+		}
+		if err := b.Transcribe(context.Background(), Job{Audio: audio, OutDir: filepath.Join(dataDir, "raw"), Language: "en"}); err != nil {
+			t.Fatal(err)
+		}
+		got, _ := os.ReadFile(argsFile)
+		has := strings.Contains(string(got), "-t\n16\n")
+		if hasT := hasLine(string(got), "-t"); hasT != (threads > 0) || (threads > 0 && !has) {
+			t.Errorf("threads %d: args %q", threads, got)
+		}
+	}
+}
+
 // TestMLXNoContextArg: the mlx-whisper backend appends
 // `--condition-on-previous-text False` exactly when Job.NoContext is set. Transcribe
 // runs the venv's python directly (no platform guard), so a fake python planted at

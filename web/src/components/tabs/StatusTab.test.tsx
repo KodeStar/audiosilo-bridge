@@ -97,6 +97,9 @@ describe('StatusTab', () => {
       '40',
     );
     expect(within(card).getByText('Deleted as soon as the job ends')).toBeInTheDocument();
-    expect(within(card).getByText('whisper-cpp (cpu)')).toBeInTheDocument();
+    expect(within(card).getByText(/^whisper-cpp \(cpu\) on the Bridge/)).toBeInTheDocument();
+    expect(
+      within(card).getByText('With no worker connected, the Bridge transcribes them itself.'),
+    ).toBeInTheDocument();
   });
 });

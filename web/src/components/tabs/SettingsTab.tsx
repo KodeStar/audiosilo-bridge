@@ -1,10 +1,11 @@
 import { useState, type FormEvent } from 'react';
 import { errorText, type ApiClient } from '@/api/client';
-import type { Settings } from '@/api/types';
+import type { Settings, WorkerFallback } from '@/api/types';
 import { useLoad } from '@/lib/useLoad';
 import {
   KEY_CHECK_MINUTES,
   KEY_PUBLIC_URL,
+  KEY_WORKER_FALLBACK,
   LOCKED_NOTE,
   MAX_CHECK_MINUTES,
   MIN_CHECK_MINUTES,
@@ -31,6 +32,7 @@ export function SettingsTab({ client }: { client: ApiClient }) {
 function SettingsForm({ client }: { client: ApiClient }) {
   const [publicUrl, setPublicUrl] = useState('');
   const [minutes, setMinutes] = useState('');
+  const [fallback, setFallback] = useState<WorkerFallback>('local');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
@@ -39,6 +41,7 @@ function SettingsForm({ client }: { client: ApiClient }) {
   function fill(s: Settings) {
     setPublicUrl(s.public_url);
     setMinutes(String(s.mapping_check_minutes));
+    setFallback(s.asr_worker_fallback);
     return s;
   }
 
@@ -60,6 +63,7 @@ function SettingsForm({ client }: { client: ApiClient }) {
 
   const urlLocked = isLocked(settings, KEY_PUBLIC_URL);
   const minutesLocked = isLocked(settings, KEY_CHECK_MINUTES);
+  const fallbackLocked = isLocked(settings, KEY_WORKER_FALLBACK);
 
   async function save(e: FormEvent) {
     e.preventDefault();
@@ -86,6 +90,7 @@ function SettingsForm({ client }: { client: ApiClient }) {
           await client.saveSettings({
             public_url: urlLocked ? settings.public_url : publicUrl.trim(),
             mapping_check_minutes: parsed.value,
+            asr_worker_fallback: fallbackLocked ? settings.asr_worker_fallback : fallback,
           }),
         ),
       );
@@ -140,6 +145,26 @@ function SettingsForm({ client }: { client: ApiClient }) {
             disabled={minutesLocked}
             className={inputClass}
           />
+        </Field>
+        <Field
+          label="When no ASR worker is connected"
+          htmlFor="worker-fallback"
+          note={
+            fallbackLocked
+              ? LOCKED_NOTE
+              : 'Wait suits a Bridge whose own speech recognition is slow (a CPU): the book carries on when a worker connects. It applies to the next segment.'
+          }
+        >
+          <select
+            id="worker-fallback"
+            value={fallback}
+            onChange={(e) => setFallback(e.target.value as WorkerFallback)}
+            disabled={fallbackLocked}
+            className={inputClass}
+          >
+            <option value="local">Transcribe on the Bridge</option>
+            <option value="wait">Wait for a worker</option>
+          </select>
         </Field>
         {error && <Notice kind="error">{error}</Notice>}
         {saved && <Notice kind="ok">Saved.</Notice>}

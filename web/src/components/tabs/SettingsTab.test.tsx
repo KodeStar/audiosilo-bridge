@@ -41,7 +41,33 @@ describe('SettingsTab', () => {
     expect(lastCall(calls, 'PUT', '/api/settings')?.body).toEqual({
       public_url: 'http://10.0.0.5:8091',
       mapping_check_minutes: 30,
+      asr_worker_fallback: 'local',
     });
+  });
+
+  it('saves the ASR fallback, and keeps a locked one', async () => {
+    const { calls } = mockFetch({
+      'GET /api/settings': { body: settingsFixture() },
+      'PUT /api/settings': { body: settingsFixture({ asr_worker_fallback: 'wait' }) },
+    });
+    render(<SettingsTab client={api()} />);
+    const select = await screen.findByLabelText('When no ASR worker is connected');
+    await userEvent.selectOptions(select, 'wait');
+    await userEvent.click(screen.getByRole('button', { name: 'Save settings' }));
+    expect(await screen.findByText('Saved.')).toBeInTheDocument();
+    expect(lastCall(calls, 'PUT', '/api/settings')?.body).toMatchObject({
+      asr_worker_fallback: 'wait',
+    });
+  });
+
+  it('shows a locked ASR fallback as locked', async () => {
+    mockFetch({
+      'GET /api/settings': {
+        body: settingsFixture({ asr_worker_fallback: 'wait', locked: ['asr.worker_fallback'] }),
+      },
+    });
+    render(<SettingsTab client={api()} />);
+    expect(await screen.findByLabelText('When no ASR worker is connected')).toBeDisabled();
   });
 
   it('shows a 409 from the Bridge verbatim', async () => {

@@ -458,6 +458,12 @@ func (db *DB) ListBooksDueForRetry(ctx context.Context, now string) ([]Book, err
 		statusNeedsAttention, now)
 }
 
+// ListBooksParkedWith returns the books parked (needs_attention) with code.
+func (db *DB) ListBooksParkedWith(ctx context.Context, code string) ([]Book, error) {
+	return db.queryBooks(ctx,
+		`SELECT `+bookCols+` FROM books WHERE status=? AND park_code=? ORDER BY id`, statusNeedsAttention, code)
+}
+
 // SetBookState updates a book's state, status, error, and typed park code together
 // (the fields the scheduler mutates on every transition) and bumps updated_at. The
 // park_code invariant is enforced here: a code is written only alongside a

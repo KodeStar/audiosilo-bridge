@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -48,6 +49,7 @@ type whisperCpp struct {
 	modelName    string // ggml model filename (default DefaultWhisperCppModel)
 	language     string
 	autoDownload bool // fetch a prebuilt whisper-cli when none resolves locally
+	threads      int  // -t; 0 leaves whisper.cpp's default
 	dataDir      string
 	log          *slog.Logger
 }
@@ -66,6 +68,7 @@ func newWhisperCpp(cfg SelectConfig) *whisperCpp {
 		modelName:    model,
 		language:     lang,
 		autoDownload: cfg.AutoDownload,
+		threads:      cfg.Threads,
 		dataDir:      cfg.DataDir,
 		log:          orDiscard(cfg.Log),
 	}
@@ -207,6 +210,11 @@ func (w *whisperCpp) Transcribe(ctx context.Context, job Job) error {
 	}
 	if strings.TrimSpace(job.InitialPrompt) != "" {
 		args = append(args, "--prompt", job.InitialPrompt)
+	}
+	if w.threads > 0 {
+		// whisper.cpp uses 4 threads by default: a 16-thread decode ran 3x faster
+		// on a 20-core Mac (spike 4).
+		args = append(args, "-t", strconv.Itoa(w.threads))
 	}
 	if job.NoContext {
 		// -nc/--no-context: do not use past transcription as the decoder's initial

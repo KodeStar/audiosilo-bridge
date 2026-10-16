@@ -95,6 +95,12 @@ type Job struct {
 	// repair-path re-transcription so a deterministic Whisper repetition collapse
 	// does not replay identically on every retry; first-pass ASR leaves it false.
 	NoContext bool
+	// Start and Duration place the audio in the book, in seconds (0 when not
+	// known, as for a repair clip). A local backend ignores them; a remote
+	// worker's task carries them (the transcript's times stay relative to the
+	// audio either way).
+	Start    float64
+	Duration float64
 }
 
 // Backend is one ASR implementation. Detect is cheap and side-effect-free (probe
@@ -125,9 +131,12 @@ type SelectConfig struct {
 	Model          string
 	Language       string
 	WhisperCLIPath string
-	AutoDownload   bool
-	DataDir        string
-	Log            *slog.Logger
+	// Threads is whisper-cli's -t (0 leaves whisper.cpp's own default, 4).
+	// mlx-whisper ignores it.
+	Threads      int
+	AutoDownload bool
+	DataDir      string
+	Log          *slog.Logger
 }
 
 // Select resolves the configured (or auto-detected) backend and reports its

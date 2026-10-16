@@ -52,7 +52,11 @@ describe('ApiClient', () => {
     });
     const { c } = client();
     await expect(
-      c.saveSettings({ public_url: 'http://x', mapping_check_minutes: 5 }),
+      c.saveSettings({
+        public_url: 'http://x',
+        mapping_check_minutes: 5,
+        asr_worker_fallback: 'wait',
+      }),
     ).rejects.toMatchObject({ status: 409, message: 'set by the environment', code: 'locked' });
   });
 

@@ -144,3 +144,27 @@ func TestAutoReadmitMonthlyBudgetPark(t *testing.T) {
 		t.Fatalf("the per-book budget park was readmitted: %+v", got)
 	}
 }
+
+// ReadmitParked (an ASR worker connecting) re-admits only the books parked with
+// the codes it names; any other park waits.
+func TestReadmitParked(t *testing.T) {
+	h := newHarness(t)
+	db := h.openDB(t)
+	waiting := h.addBook(t, db, "waiting", "", "")
+	other := h.addBook(t, db, "other", "", "")
+	s := New(db, h.hub, NewStubExecutor(0, 0), 1, h.workRoot, false)
+	parkBook(t, s, waiting.ID, state.ParkASRWorkerWaiting, "")
+	parkBook(t, s, other.ID, state.ParkMarkersNotConfident, "")
+	if n := s.ReadmitParked(context.Background(), "an ASR worker connected", state.ParkASRWorkerWaiting); n != 1 {
+		t.Fatalf("re-admitted %d, want 1", n)
+	}
+	if cur, _ := db.GetBook(context.Background(), waiting.ID); cur.Status != "" || cur.ParkCode != "" {
+		t.Fatalf("the waiting book: status=%q park_code=%q", cur.Status, cur.ParkCode)
+	}
+	if cur, _ := db.GetBook(context.Background(), other.ID); cur.ParkCode != string(state.ParkMarkersNotConfident) {
+		t.Fatalf("another park was re-admitted: %q", cur.ParkCode)
+	}
+	if n := s.ReadmitParked(context.Background(), "again", state.ParkASRWorkerWaiting); n != 0 {
+		t.Fatalf("re-admitted %d the second time", n)
+	}
+}

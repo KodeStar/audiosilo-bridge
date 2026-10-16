@@ -26,6 +26,14 @@ const DefaultMappingCheckMinutes = 10
 // MaxMappingCheckMinutes bounds mapping.check_minutes (a day).
 const MaxMappingCheckMinutes = 24 * 60
 
+// What a segment does when no ASR worker is connected (asr.worker_fallback,
+// Phase 1b): the Bridge's own ASR, or a wait for a worker.
+const (
+	ASRWorkerFallbackLocal   = "local"
+	ASRWorkerFallbackWait    = "wait"
+	DefaultASRWorkerFallback = ASRWorkerFallbackLocal
+)
+
 // The agent container's settings (decision 15) and the transcript cache's
 // (decision 5).
 const (
@@ -98,10 +106,12 @@ const (
 	KeyAgentClaimTimeout    = "agent.claim_timeout_seconds"
 	KeyAgentMonthlyBudget   = "agent.monthly_budget_usd"
 	KeyTranscriptsRetention = "transcripts.retention_days"
+	KeyASRWorkerFallback    = "asr.worker_fallback"
 	envAgentStagingDir      = "AUDIOSILO_BRIDGE_AGENT_STAGING_DIR"
 	envAgentClaimTimeout    = "AUDIOSILO_BRIDGE_AGENT_CLAIM_TIMEOUT_SECONDS"
 	envAgentMonthlyBudget   = "AUDIOSILO_BRIDGE_AGENT_MONTHLY_BUDGET_USD"
 	envTranscriptsRetention = "AUDIOSILO_BRIDGE_TRANSCRIPTS_RETENTION_DAYS"
+	envASRWorkerFallback    = "AUDIOSILO_BRIDGE_ASR_WORKER_FALLBACK"
 )
 
 // EnvSet reports whether the environment set a Bridge setting (KeyServerURL,
@@ -164,6 +174,10 @@ func applyBridgeEnv(cfg *Config) {
 		cfg.Transcripts.RetentionDays = envInt(v)
 		cfg.fromEnv[KeyTranscriptsRetention] = true
 	}
+	if v, ok := lookupEnv(envASRWorkerFallback); ok {
+		cfg.ASR.WorkerFallback = v
+		cfg.fromEnv[KeyASRWorkerFallback] = true
+	}
 }
 
 // envInt parses an integer variable; one that doesn't parse becomes -1, which
@@ -212,6 +226,10 @@ func normalizeBridge(cfg *Config) {
 	}
 	if cfg.Agent.ClaimTimeoutSeconds == 0 {
 		cfg.Agent.ClaimTimeoutSeconds = DefaultClaimTimeoutSeconds
+	}
+	cfg.ASR.WorkerFallback = strings.ToLower(strings.TrimSpace(cfg.ASR.WorkerFallback))
+	if cfg.ASR.WorkerFallback == "" {
+		cfg.ASR.WorkerFallback = DefaultASRWorkerFallback
 	}
 	if p := strings.TrimSpace(cfg.Agent.StagingDir); p != "" {
 		cfg.Agent.StagingDir = filepath.Clean(p)
@@ -336,6 +354,9 @@ func (c Config) validateBridge() error {
 	}
 	if d := c.Transcripts.RetentionDays; d < 0 || d > MaxTranscriptRetentionDays {
 		return fmt.Errorf("transcripts.retention_days must be between 0 and %d, got %d", MaxTranscriptRetentionDays, d)
+	}
+	if f := c.ASR.WorkerFallback; f != ASRWorkerFallbackLocal && f != ASRWorkerFallbackWait {
+		return fmt.Errorf("asr.worker_fallback must be %q or %q, got %q", ASRWorkerFallbackLocal, ASRWorkerFallbackWait, f)
 	}
 	return nil
 }
