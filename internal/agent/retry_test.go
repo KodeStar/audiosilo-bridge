@@ -233,6 +233,30 @@ func TestRunWithRetryNotAvailableExhausted(t *testing.T) {
 	}
 }
 
+// A run the agent container stopped partway is a NotAvailableError carrying the
+// usage spent so far (internal/agentbox): it reaches onUsage and AttemptComplete,
+// so the budgets count it, on every attempt including the one returned.
+func TestRunWithRetryNotAvailableUsageRecorded(t *testing.T) {
+	withTinyNotAvailableBackoff(t)
+	stopped := step{res: Result{Usage: Usage{Input: 700, Output: 30}}, err: &NotAvailableError{Backend: "codex", Detail: "stopped"}}
+	r := &scriptRunner{steps: []step{stopped, stopped, stopped}}
+	var onUsage, completed int64
+	req := Request{Prompt: "base", AttemptComplete: func(res Result, err error) {
+		var na *NotAvailableError
+		if errors.As(err, &na) && res.Usage.Input == 700 {
+			completed += res.Usage.Input
+		}
+	}}
+	_, _, err := RunWithBackoff(context.Background(), r, req, alwaysValid, func(u Usage) { onUsage += u.Input }, tinyBackoff(3))
+	var na *NotAvailableError
+	if !errors.As(err, &na) {
+		t.Fatalf("want *NotAvailableError, got %v", err)
+	}
+	if onUsage != 2100 || completed != 2100 {
+		t.Errorf("usage recorded: onUsage %d, AttemptComplete %d, want 2100 each (3 attempts)", onUsage, completed)
+	}
+}
+
 func TestRunWithRetryNotAvailableContextCancel(t *testing.T) {
 	r := &scriptRunner{steps: []step{{err: &NotAvailableError{Backend: "claude", Detail: "blip"}}}}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -243,5 +267,23 @@ func TestRunWithRetryNotAvailableContextCancel(t *testing.T) {
 	_, _, err := RunWithBackoff(ctx, r, Request{Prompt: "base"}, alwaysValid, func(Usage) {}, tinyBackoff(3))
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("want context.Canceled, got %v", err)
+	}
+}
+
+// A refused credential is returned at once: retrying the same credential only
+// gets it refused again (and the book should park saying so, not 75 s later).
+func TestRunWithRetryCredentialRefusedNotRetried(t *testing.T) {
+	withTinyNotAvailableBackoff(t)
+	r := &scriptRunner{steps: []step{
+		{err: credentialRefused(IDClaude, `{"api_error_status":401}`)},
+		{res: Result{Text: "ok"}},
+	}}
+	_, _, err := RunWithBackoff(context.Background(), r, Request{Prompt: "base"}, alwaysValid, func(Usage) {}, tinyBackoff(3))
+	var na *NotAvailableError
+	if !errors.As(err, &na) || !na.CredentialRefused {
+		t.Fatalf("want a refused-credential NotAvailableError, got %v", err)
+	}
+	if r.calls != 1 {
+		t.Errorf("calls=%d, want 1 (no retry of a refused credential)", r.calls)
 	}
 }

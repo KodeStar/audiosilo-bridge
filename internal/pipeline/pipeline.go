@@ -35,6 +35,7 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/kodestar/audiosilo-bridge/internal/agent"
@@ -128,6 +129,15 @@ type Config struct {
 	// this, before spending more. 0 disables the guard (config seeds a large default; set
 	// a very large value to effectively disable). From config.agent.book_budget_usd.
 	BookBudgetUSD float64
+	// MonthlyBudgetUSD caps the agent spend of a calendar month (UTC) across every
+	// book, checked beside BookBudgetUSD before each agent run: a run over it parks
+	// budget_exceeded until the 1st of the next month (0 = no monthly cap). From
+	// config.agent.monthly_budget_usd.
+	MonthlyBudgetUSD float64
+	// AgentRedetect, when set, replaces agent.Select as the way an unavailable
+	// runner is looked for again: the Bridge re-detects its agent container and
+	// never a CLI of its own (decision 15).
+	AgentRedetect func(context.Context) (agent.Runner, agent.Availability)
 	Pricing       pricing.Table
 	Secrets       secrets.Store
 
@@ -177,12 +187,13 @@ type Executor struct {
 	agentModels           AgentModels
 	agentEfforts          AgentEfforts
 	agentTimeout          time.Duration
-	agentWorkers          int // per-book fan-out ceiling
-	agentSlots            chan struct{}
+	agentWorkers          atomic.Int64 // per-book fan-out ceiling
+	agentSlots            *slotPool
 	invocationMu          sync.Mutex
 	activeInvocations     map[int64]int
 	globalInvocationLimit int
 	bookBudgetUSD         float64
+	monthlyBudgetUSD      float64
 	pricing               pricing.Table
 	secrets               secrets.Store
 	log                   *slog.Logger
@@ -244,11 +255,11 @@ func NewExecutor(cfg Config) *Executor {
 		agentModels:           cfg.AgentModels,
 		agentEfforts:          cfg.AgentEfforts,
 		agentTimeout:          cfg.AgentTimeout,
-		agentWorkers:          agentWorkers,
-		agentSlots:            make(chan struct{}, globalWorkers),
+		agentSlots:            newSlotPool(globalWorkers),
 		activeInvocations:     make(map[int64]int),
 		globalInvocationLimit: globalWorkers,
 		bookBudgetUSD:         cfg.BookBudgetUSD,
+		monthlyBudgetUSD:      cfg.MonthlyBudgetUSD,
 		pricing:               cfg.Pricing,
 		secrets:               cfg.Secrets,
 		log:                   log,
@@ -261,8 +272,12 @@ func NewExecutor(cfg Config) *Executor {
 		contribBaseURL:       cfg.ContribBaseURL,
 		exportRoot:           cfg.ExportRoot,
 	}
+	e.agentWorkers.Store(int64(agentWorkers))
 	e.redetectASR = e.defaultRedetectASR
 	e.redetectAgent = e.defaultRedetectAgent
+	if cfg.AgentRedetect != nil {
+		e.redetectAgent = cfg.AgentRedetect
+	}
 	return e
 }
 
@@ -278,7 +293,71 @@ func (e *Executor) AgentInvocationRuntime() (total int, byBook map[int64]int, ca
 	return total, byBook, e.globalInvocationLimit
 }
 
-func (e *Executor) AgentMaxPerBook() int { return e.agentWorkers }
+func (e *Executor) AgentMaxPerBook() int { return int(e.agentWorkers.Load()) }
+
+// SetAgentConcurrency changes the agent concurrency the executor was built with
+// (the global invocation cap and the per-book fan-out, both n) while it runs: the
+// Bridge follows its agent container's slots. Invocations running past a lower cap
+// finish; new ones wait until the count is under it.
+func (e *Executor) SetAgentConcurrency(n int) {
+	n = max(n, 1)
+	e.agentWorkers.Store(int64(n))
+	e.invocationMu.Lock()
+	e.globalInvocationLimit = n
+	e.invocationMu.Unlock()
+	e.agentSlots.setCap(n)
+}
+
+// slotPool is a counting semaphore whose size can change while it is held.
+type slotPool struct {
+	mu   sync.Mutex
+	cap  int
+	used int
+	// wake is closed (and replaced) whenever a slot frees or the size changes.
+	wake chan struct{}
+}
+
+func newSlotPool(n int) *slotPool { return &slotPool{cap: max(n, 1), wake: make(chan struct{})} }
+
+// acquire takes a slot, waiting for one; ctx ending first returns its error.
+func (p *slotPool) acquire(ctx context.Context) error {
+	for {
+		p.mu.Lock()
+		if p.used < p.cap {
+			p.used++
+			p.mu.Unlock()
+			return nil
+		}
+		wake := p.wake
+		p.mu.Unlock()
+		select {
+		case <-wake:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
+// release gives a slot back.
+func (p *slotPool) release() {
+	p.mu.Lock()
+	p.used--
+	p.broadcastLocked()
+	p.mu.Unlock()
+}
+
+// setCap resizes the pool.
+func (p *slotPool) setCap(n int) {
+	p.mu.Lock()
+	p.cap = max(n, 1)
+	p.broadcastLocked()
+	p.mu.Unlock()
+}
+
+func (p *slotPool) broadcastLocked() {
+	close(p.wake)
+	p.wake = make(chan struct{})
+}
 
 // ASRCapability returns the executor's current ASR capability (which a stage may
 // have re-detected after a retry). Safe for concurrent use.
@@ -414,7 +493,7 @@ const MediaToolsUnavailableMsg = "media tools unavailable: ffmpeg/ffprobe not fo
 // ManifestChangedMsg parks a book whose manifest fingerprint no longer matches the
 // one recorded when transcription began - the existing raw transcripts belong to a
 // different edition and must not be silently reused. Exported so tests/UI can assert it.
-const ManifestChangedMsg = "source audio or chapter layout changed since transcription - the existing transcripts belong to a different edition; delete this book and re-enqueue to re-transcribe"
+const ManifestChangedMsg = "source audio or chapter layout changed since transcription - the existing transcripts belong to a different edition; cancel the job, then generate the book again to re-transcribe"
 
 // asrInfoName is the provenance sidecar the asr stage writes (backend/model/
 // language + the manifest fingerprint and any accepted-empty chapters) and the

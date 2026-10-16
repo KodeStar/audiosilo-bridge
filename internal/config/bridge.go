@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"math"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -24,6 +25,42 @@ const DefaultMappingCheckMinutes = 10
 
 // MaxMappingCheckMinutes bounds mapping.check_minutes (a day).
 const MaxMappingCheckMinutes = 24 * 60
+
+// The agent container's settings (decision 15) and the transcript cache's
+// (decision 5).
+const (
+	// DefaultStagingDirName is agent.staging_dir's default, under the data dir.
+	DefaultStagingDirName = "staging"
+	// DefaultClaimTimeoutSeconds is how long an agent job waits for the agent
+	// container to pick it up before the book parks agent_unavailable.
+	DefaultClaimTimeoutSeconds = 120
+	MinClaimTimeoutSeconds     = 10
+	MaxClaimTimeoutSeconds     = 60 * 60
+	// DefaultMonthlyBudgetUSD is the monthly agent spend cap (decision 7: on by
+	// default). 0 is no cap, so unlike book_budget_usd a 0 is kept as written.
+	DefaultMonthlyBudgetUSD = 100.0
+	// DefaultTranscriptRetentionDays keeps a finished book's transcripts this
+	// long; 0 deletes them when the book's job ends.
+	DefaultTranscriptRetentionDays = 30
+	MaxTranscriptRetentionDays     = 10 * 365
+)
+
+// TranscriptsConfig is the transcript cache (decision 5).
+type TranscriptsConfig struct {
+	// RetentionDays keeps a finished book's transcripts in the data dir this many
+	// days (0 = deleted when its job ends).
+	RetentionDays int `yaml:"retention_days"`
+}
+
+// AgentStagingDir is the dir shared with the agent container: agent.staging_dir,
+// else <dataDir>/staging. Not normalized into the config, so a saved config.yaml
+// doesn't pin the data dir's path.
+func (c Config) AgentStagingDir(dataDir string) string {
+	if c.Agent.StagingDir != "" {
+		return c.Agent.StagingDir
+	}
+	return filepath.Join(dataDir, DefaultStagingDirName)
+}
 
 // ServerConfig is the AudioSilo server the Bridge pairs with.
 type ServerConfig struct {
@@ -56,6 +93,15 @@ const (
 	envPublicURL     = "AUDIOSILO_BRIDGE_PUBLIC_URL"
 	envLibraries     = "AUDIOSILO_BRIDGE_LIBRARIES"
 	envMappingChecks = "AUDIOSILO_BRIDGE_MAPPING_CHECK_MINUTES"
+
+	KeyAgentStagingDir      = "agent.staging_dir"
+	KeyAgentClaimTimeout    = "agent.claim_timeout_seconds"
+	KeyAgentMonthlyBudget   = "agent.monthly_budget_usd"
+	KeyTranscriptsRetention = "transcripts.retention_days"
+	envAgentStagingDir      = "AUDIOSILO_BRIDGE_AGENT_STAGING_DIR"
+	envAgentClaimTimeout    = "AUDIOSILO_BRIDGE_AGENT_CLAIM_TIMEOUT_SECONDS"
+	envAgentMonthlyBudget   = "AUDIOSILO_BRIDGE_AGENT_MONTHLY_BUDGET_USD"
+	envTranscriptsRetention = "AUDIOSILO_BRIDGE_TRANSCRIPTS_RETENTION_DAYS"
 )
 
 // EnvSet reports whether the environment set a Bridge setting (KeyServerURL,
@@ -95,13 +141,39 @@ func applyBridgeEnv(cfg *Config) {
 		cfg.fromEnv[KeyLibraries] = true
 	}
 	if v, ok := lookupEnv(envMappingChecks); ok {
-		n, err := strconv.Atoi(v)
-		if err != nil {
-			n = -1
-		}
-		cfg.Mapping.CheckMinutes = n
+		cfg.Mapping.CheckMinutes = envInt(v)
 		cfg.fromEnv[KeyMappingCheck] = true
 	}
+	if v, ok := lookupEnv(envAgentStagingDir); ok {
+		cfg.Agent.StagingDir = v
+		cfg.fromEnv[KeyAgentStagingDir] = true
+	}
+	if v, ok := lookupEnv(envAgentClaimTimeout); ok {
+		cfg.Agent.ClaimTimeoutSeconds = envInt(v)
+		cfg.fromEnv[KeyAgentClaimTimeout] = true
+	}
+	if v, ok := lookupEnv(envAgentMonthlyBudget); ok {
+		f, err := strconv.ParseFloat(v, 64)
+		if err != nil {
+			f = -1
+		}
+		cfg.Agent.MonthlyBudgetUSD = f
+		cfg.fromEnv[KeyAgentMonthlyBudget] = true
+	}
+	if v, ok := lookupEnv(envTranscriptsRetention); ok {
+		cfg.Transcripts.RetentionDays = envInt(v)
+		cfg.fromEnv[KeyTranscriptsRetention] = true
+	}
+}
+
+// envInt parses an integer variable; one that doesn't parse becomes -1, which
+// every Validate rule it reaches refuses.
+func envInt(v string) int {
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return -1
+	}
+	return n
 }
 
 // lookupEnv is a variable's trimmed value, ok only when it is set and not empty.
@@ -138,12 +210,91 @@ func normalizeBridge(cfg *Config) {
 	if cfg.Mapping.CheckMinutes == 0 {
 		cfg.Mapping.CheckMinutes = DefaultMappingCheckMinutes
 	}
+	if cfg.Agent.ClaimTimeoutSeconds == 0 {
+		cfg.Agent.ClaimTimeoutSeconds = DefaultClaimTimeoutSeconds
+	}
+	if p := strings.TrimSpace(cfg.Agent.StagingDir); p != "" {
+		cfg.Agent.StagingDir = filepath.Clean(p)
+	}
+	// Decision 15: the Bridge never runs an agent CLI itself, and a model-assisted
+	// supervisor (or its automatic actions) or a backend failover would. They are
+	// off whatever the file or the environment says, so what the config shows is
+	// what runs.
+	cfg.Supervisor.ModelAssisted, cfg.Supervisor.ModelAutomaticActions, cfg.Supervisor.AllowBackendFailover = false, false, false
 	cfg.Server.URL = strings.TrimRight(strings.TrimSpace(cfg.Server.URL), "/")
 	for i := range cfg.Libraries {
 		if p := strings.TrimSpace(cfg.Libraries[i].MountPath); p != "" {
 			cfg.Libraries[i].MountPath = filepath.Clean(p)
 		}
 	}
+}
+
+// ignoredOnBridge words a notice for each engine setting cfg sets to a
+// non-default value that the Bridge doesn't use, so a setting carried over from
+// sidecars doesn't silently do nothing. cfg is as loaded (file and environment),
+// before normalizeBridge forces the supervisor's model lanes off. The agent
+// container decides the agent concurrency (its --slots) and runs the CLIs
+// (decision 15).
+func ignoredOnBridge(cfg Config) []string {
+	var out []string
+	note := func(key, why string) { out = append(out, key+" is ignored on the Bridge: "+why) }
+	const slots = "the agent container's --slots sets the agent concurrency"
+	if capacity := cfg.Agent.Capacity(); capacity.Legacy {
+		if cfg.Agent.Concurrency != DefaultConcurrency {
+			note("agent.concurrency", slots)
+		}
+	} else {
+		if cfg.Agent.QueueConcurrency != DefaultAgentQueueConcurrency {
+			note("agent.queue_concurrency", slots)
+		}
+		if cfg.Agent.MaxAgentsPerBook != DefaultMaxAgentsPerBook {
+			note("agent.max_agents_per_book", slots)
+		}
+	}
+	const clis = "the agent container runs the CLIs"
+	if strings.TrimSpace(cfg.Agent.ClaudePath) != "" {
+		note("agent.claude_path", clis)
+	}
+	if strings.TrimSpace(cfg.Agent.CodexPath) != "" {
+		note("agent.codex_path", clis)
+	}
+	const forcedOff = "it is always off, as it would run an agent CLI in the Bridge"
+	sup := cfg.Supervisor
+	for _, f := range []struct {
+		key string
+		on  bool
+	}{
+		{"supervisor.model_assisted", sup.ModelAssisted},
+		{"supervisor.model_automatic_actions", sup.ModelAutomaticActions},
+		{"supervisor.allow_backend_failover", sup.AllowBackendFailover},
+	} {
+		if f.on {
+			note(f.key, forcedOff)
+		}
+	}
+	// The settings only those lanes read (normalizeSupervisor has already
+	// defaulted the zero values).
+	const modelLane = "the supervisor's model-assisted lane and backend failover are always off"
+	for _, f := range []struct {
+		key string
+		set bool
+	}{
+		{"supervisor.fallback_backend", strings.TrimSpace(sup.FallbackBackend) != ""},
+		{"supervisor.fallback_model", strings.TrimSpace(sup.FallbackModel) != ""},
+		{"supervisor.model_backend", strings.TrimSpace(sup.ModelBackend) != ""},
+		{"supervisor.model", strings.TrimSpace(sup.Model) != ""},
+		{"supervisor.max_model_calls", sup.MaxModelCalls != DefaultSupervisorMaxModelCalls},
+		{"supervisor.max_turns", sup.MaxTurns != DefaultSupervisorMaxTurns},
+		{"supervisor.timeout_seconds", sup.TimeoutSeconds != DefaultSupervisorTimeoutSeconds},
+		{"supervisor.invocations_per_hour", sup.InvocationsPerHour != DefaultSupervisorCallsPerHour},
+		{"supervisor.per_book_budget_usd", sup.PerBookBudgetUSD != DefaultSupervisorBookBudgetUSD},
+		{"supervisor.overall_batch_budget_usd", sup.OverallBatchBudgetUSD != DefaultSupervisorBatchBudgetUSD},
+	} {
+		if f.set {
+			note(f.key, modelLane)
+		}
+	}
+	return out
 }
 
 // validateBridge checks the Bridge settings.
@@ -173,6 +324,18 @@ func (c Config) validateBridge() error {
 	}
 	if c.Mapping.CheckMinutes < 1 || c.Mapping.CheckMinutes > MaxMappingCheckMinutes {
 		return fmt.Errorf("mapping.check_minutes must be between 1 and %d, got %d", MaxMappingCheckMinutes, c.Mapping.CheckMinutes)
+	}
+	if c.Agent.StagingDir != "" && !filepath.IsAbs(c.Agent.StagingDir) {
+		return fmt.Errorf("agent.staging_dir %q must be an absolute path", c.Agent.StagingDir)
+	}
+	if t := c.Agent.ClaimTimeoutSeconds; t < MinClaimTimeoutSeconds || t > MaxClaimTimeoutSeconds {
+		return fmt.Errorf("agent.claim_timeout_seconds must be between %d and %d, got %d", MinClaimTimeoutSeconds, MaxClaimTimeoutSeconds, t)
+	}
+	if b := c.Agent.MonthlyBudgetUSD; b < 0 || math.IsNaN(b) || math.IsInf(b, 0) {
+		return fmt.Errorf("agent.monthly_budget_usd must be 0 (no cap) or more, got %v", b)
+	}
+	if d := c.Transcripts.RetentionDays; d < 0 || d > MaxTranscriptRetentionDays {
+		return fmt.Errorf("transcripts.retention_days must be between 0 and %d, got %d", MaxTranscriptRetentionDays, d)
 	}
 	return nil
 }

@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { ApiError, errorText, type ApiClient } from '@/api/client';
-import type { ServerJob, VerifyResult } from '@/api/types';
+import type { GenerateResult, ServerJob, VerifyResult } from '@/api/types';
 import { useLoad } from '@/lib/useLoad';
 import { bytes, elapsed } from '@/lib/time';
 import {
@@ -9,7 +9,7 @@ import {
   jobTarget,
   jobsPollInterval,
   mergeJobs,
-  progressFraction,
+  progressPercent,
   progressText,
   reportText,
   stateHint,
@@ -17,16 +17,70 @@ import {
   stateTone,
 } from '@/lib/jobs';
 import { VERIFY_KIND, parseVerifyResult, prettyJSON } from '@/lib/verify';
+import {
+  canRetry,
+  effectiveState,
+  generateFacts,
+  isGenerate,
+  parkOf,
+  parseGenerateResult,
+  resultSummary,
+} from '@/lib/generate';
+import { jobHash } from '@/lib/tabs';
 import { Ago } from '../ui/Ago';
 import { Badge } from '../ui/Badge';
 import { EmptyState } from '../ui/EmptyState';
 import { Loading } from '../ui/Loading';
 import { Notice } from '../ui/Notice';
-import { dangerButton, secondaryButton } from '../ui/buttons';
+import { ProgressBar } from '../ui/ProgressBar';
+import { dangerButton, primaryButton, secondaryButton } from '../ui/buttons';
 
 export const JOBS_PAGE = 50;
 
-export function JobsTab({ client }: { client: ApiClient }) {
+// JobsTab lists the jobs; with focusId (the console's #/jobs/<id> link) it shows
+// that one job.
+export function JobsTab({
+  client,
+  focusId = null,
+}: {
+  client: ApiClient;
+  focusId?: number | null;
+}) {
+  if (focusId !== null) return <FocusedJob client={client} id={focusId} />;
+  return <JobList client={client} />;
+}
+
+// FocusedJob is one job's detail, polled like the list.
+function FocusedJob({ client, id }: { client: ApiClient; id: number }) {
+  const {
+    data: job,
+    error,
+    reload,
+  } = useLoad(
+    () => client.job(id),
+    (shown) => jobsPollInterval(shown ? [shown] : []),
+    { fallback: `This Bridge has no job ${id}.` },
+  );
+  return (
+    <div className="flex flex-col gap-4">
+      <p className="text-sm">
+        <a href="#jobs" className="text-pink-500 underline">
+          All jobs
+        </a>
+      </p>
+      {job === null ? (
+        <Loading error={error} />
+      ) : (
+        <>
+          {error && <Notice kind="error">{error}</Notice>}
+          <JobCard client={client} job={job} onChanged={reload} open />
+        </>
+      )}
+    </div>
+  );
+}
+
+function JobList({ client }: { client: ApiClient }) {
   // The cursor for the next older page (undefined: no more).
   const [nextBefore, setNextBefore] = useState<number | undefined>(undefined);
   // Older pages were loaded: polling then keeps them and their cursor.
@@ -100,18 +154,36 @@ function JobCard({
   client,
   job,
   onChanged,
+  open = false,
 }: {
   client: ApiClient;
   job: ServerJob;
   onChanged: () => Promise<void>;
+  // Show the details at once (the job's own page).
+  open?: boolean;
 }) {
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<{ kind: 'error' | 'info'; text: string } | null>(null);
-  const progress = progressText(job.progress);
-  const fraction = progressFraction(job.progress);
+  const generate = isGenerate(job);
+  const shown = effectiveState(job);
+  const progress = generate ? '' : progressText(job.progress);
+  const percent = progressPercent(job.progress);
   const report = reportText(job);
-  const hint = stateHint(job.state);
+  const hint = stateHint(shown);
   const target = jobTarget(job);
+
+  async function retry() {
+    setBusy(true);
+    setNote(null);
+    try {
+      await client.retryJob(job.id);
+      setNote({ kind: 'info', text: 'Retrying. It goes on in a few seconds.' });
+      await onChanged();
+    } catch (err) {
+      setNote({ kind: 'error', text: errorText(err, "Couldn't retry the job.") });
+    }
+    setBusy(false);
+  }
 
   async function cancel() {
     setBusy(true);
@@ -135,10 +207,12 @@ function JobCard({
     <article className="rounded-xl border border-edge bg-surface p-4" aria-label={`Job ${job.id}`}>
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex flex-wrap items-center gap-2">
-          <span className="text-sm font-medium text-hi">#{job.id}</span>
+          <a href={jobHash(job.id)} className="text-sm font-medium text-hi hover:underline">
+            #{job.id}
+          </a>
           <code className="text-xs text-body">{job.kind}</code>
-          <Badge tone={stateTone(job.state)} title={hint || undefined}>
-            {stateLabel(job.state)}
+          <Badge tone={stateTone(shown)} title={hint || undefined}>
+            {stateLabel(shown)}
           </Badge>
           {hint && <span className="text-xs text-dim">{hint}</span>}
           {report && (
@@ -148,33 +222,31 @@ function JobCard({
           )}
         </div>
         {job.state === 'running' && (
-          <button type="button" onClick={cancel} disabled={busy} className={dangerButton}>
-            {busy ? 'Cancelling...' : 'Cancel'}
-          </button>
+          <div className="flex gap-2">
+            {canRetry(job) && (
+              <button type="button" onClick={retry} disabled={busy} className={primaryButton}>
+                Retry
+              </button>
+            )}
+            <button type="button" onClick={cancel} disabled={busy} className={dangerButton}>
+              {busy ? 'Working...' : 'Cancel'}
+            </button>
+          </div>
         )}
       </div>
 
       {target && <p className="mt-2 text-sm break-all text-body">{target}</p>}
 
+      {generate && job.state === 'running' && <GenerateProgress job={job} />}
+
       {job.state === 'running' && progress && (
         <div className="mt-2 flex flex-col gap-1">
           <p className="text-xs text-dim">{progress}</p>
-          {fraction !== null && (
-            <div
-              className="h-1.5 w-full overflow-hidden rounded-full bg-raised"
-              role="progressbar"
-              aria-label={`Job ${job.id} progress`}
-              aria-valuemin={0}
-              aria-valuemax={100}
-              aria-valuenow={Math.round(fraction * 100)}
-            >
-              <div className="h-full bg-pink-600" style={{ width: `${fraction * 100}%` }} />
-            </div>
-          )}
+          {percent !== null && <ProgressBar percent={percent} label={`Job ${job.id} progress`} />}
         </div>
       )}
 
-      {job.error && <p className="mt-2 text-sm text-red-300">{job.error}</p>}
+      {job.error && !parkOf(job) && <p className="mt-2 text-sm text-red-300">{job.error}</p>}
 
       <p className="mt-2 text-xs text-dim">
         Attempt {job.attempt}
@@ -194,7 +266,7 @@ function JobCard({
       )}
 
       {hasResult(job) && (
-        <details className="mt-3">
+        <details className="mt-3" open={open || undefined}>
           <summary className="cursor-pointer text-sm text-pink-500">Details</summary>
           <div className="mt-2">
             <ResultView job={job} />
@@ -205,13 +277,78 @@ function JobCard({
   );
 }
 
+// GenerateProgress is a running sidecars job: the Bridge's message for the step,
+// its count, the ETA, the spend and the source; while parked, the park and its
+// advice.
+function GenerateProgress({ job }: { job: ServerJob }) {
+  const p = job.progress;
+  const park = parkOf(job);
+  const percent = progressPercent(p);
+  const facts = generateFacts(p, park !== null);
+  return (
+    <div className="mt-2 flex flex-col gap-1.5">
+      {p?.message && <p className="text-sm text-body">{p.message}</p>}
+      {percent !== null && !park && (
+        <ProgressBar percent={percent} label={`Job ${job.id} progress`} />
+      )}
+      {facts.length > 0 && <p className="text-xs text-dim">{facts.join(' - ')}</p>}
+      {park && (
+        <Notice kind="warn">
+          <p>
+            <code className="text-xs">{park.code}</code>
+            {job.error && <>: {job.error}</>}
+          </p>
+          {park.hint && <p className="mt-1">{park.hint}</p>}
+          {park.retry_at && (
+            <p className="mt-1 text-xs">
+              Resumes by itself <Ago at={park.retry_at} />.
+            </p>
+          )}
+        </Notice>
+      )}
+    </div>
+  );
+}
+
 function ResultView({ job }: { job: ServerJob }) {
   const verify = job.kind === VERIFY_KIND ? parseVerifyResult(job.result) : null;
   if (verify) return <VerifyView result={verify} />;
+  const generated = isGenerate(job) ? parseGenerateResult(job.result) : null;
+  if (generated) return <GenerateView result={generated} />;
   return (
     <pre className="overflow-x-auto rounded-md bg-deep p-3 text-xs text-body">
       {prettyJSON(job.result)}
     </pre>
+  );
+}
+
+function GenerateView({ result }: { result: GenerateResult }) {
+  const links = Object.entries(result.contributed ?? {});
+  return (
+    <div className="flex flex-col gap-2 text-xs text-dim">
+      <p className="text-sm text-body">{resultSummary(result)}</p>
+      <p>
+        Saved with <code className="break-all text-body">{result.path}</code> in its{' '}
+        <code>.audiosilo</code> folder: {result.files.join(', ')}
+      </p>
+      {result.work_id && (
+        <p>
+          Work <code className="text-body">{result.work_id}</code>
+        </p>
+      )}
+      {links.length > 0 && (
+        <ul className="flex flex-col gap-1">
+          {links.map(([kind, url]) => (
+            <li key={kind}>
+              Contributed {kind}:{' '}
+              <a href={url} target="_blank" rel="noreferrer" className="text-pink-500 underline">
+                {url}
+              </a>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
   );
 }
 

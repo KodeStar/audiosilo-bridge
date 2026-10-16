@@ -69,6 +69,40 @@ func budgetExceededMsg(spent, budget float64) string {
 	return fmt.Sprintf("book agent cost $%.2f reached the budget $%.2f - raise agent.book_budget_usd in config.yaml (restart to apply), then Retry", spent, budget)
 }
 
+// monthlyBudgetExceededMsg is the park reason when this month's agent spend across
+// every book reached agent.monthly_budget_usd.
+func monthlyBudgetExceededMsg(spent, budget float64, resume time.Time) string {
+	return fmt.Sprintf("this month's agent cost $%.2f reached the monthly budget $%.2f - the book resumes on %s, "+
+		"or raise agent.monthly_budget_usd (restart to apply) and Retry", spent, budget, resume.Format("2 January 2006"))
+}
+
+// checkMonthlyBudget is the monthly half of runAgent's budget preflight: when this
+// calendar month's (UTC) agent spend across every book, superseded runs included,
+// has reached the monthly budget, the book parks budget_exceeded with an automatic
+// re-admit at the start of the next month. nil when there is no cap or room left.
+func (e *Executor) checkMonthlyBudget(ctx context.Context, stage state.State, now time.Time) error {
+	if e.db == nil || e.monthlyBudgetUSD <= 0 {
+		return nil
+	}
+	start, next := MonthBounds(now)
+	spent, err := e.db.SumBudgetCostSince(ctx, start)
+	if err != nil {
+		return fmt.Errorf("%s: read this month's cost: %w", stage, err)
+	}
+	if spent < e.monthlyBudgetUSD {
+		return nil
+	}
+	return scheduler.ParkWithCodeAfter(state.ParkBudgetExceeded, monthlyBudgetExceededMsg(spent, e.monthlyBudgetUSD, next), next)
+}
+
+// MonthBounds returns the start of now's calendar month and of the next one, UTC:
+// the monthly budget's month, which the Bridge's estimates and page count too.
+func MonthBounds(now time.Time) (start, next time.Time) {
+	u := now.UTC()
+	start = time.Date(u.Year(), u.Month(), 1, 0, 0, 0, 0, time.UTC)
+	return start, start.AddDate(0, 1, 0)
+}
+
 // Timed-park delays runAgent stamps on a transient agent park (see scheduler
 // auto-readmit): the scheduler re-admits the book once the instant passes.
 const (
@@ -88,6 +122,10 @@ const (
 	// enough that a CLI mid-reinstall is likely back, short enough to self-heal an
 	// overnight batch.
 	notAvailableReadmitDelay = 10 * time.Minute
+	// credentialRefusedReadmitDelay is the auto-readmit delay for a refused credential:
+	// someone has to replace it, which takes a while, and each look costs a refused
+	// call (no tokens), so a book looks again twice an hour.
+	credentialRefusedReadmitDelay = 30 * time.Minute
 )
 
 // rateLimitRetryAt computes the auto-readmit instant for a rate-limit park: the backend's
@@ -111,6 +149,17 @@ func rateLimitRetryAt(rl *agent.RateLimitError, now time.Time) time.Time {
 // after ~2 rounds). Built from maxQARounds so the message can never drift from the cap.
 var QANoConvergeMsg = fmt.Sprintf("QA adjudication did not converge after %d rounds - see qa_report.md", maxQARounds)
 
+// agentUnavailableReason is an agent_unavailable park's reason: the runner's own
+// detail when it gave one (the Bridge's agent container says what is wrong with
+// it, a refused credential carries the provider's words), else the generic
+// advice to install or configure a CLI.
+func agentUnavailableReason(detail string) string {
+	if detail = strings.TrimSpace(detail); detail == "" {
+		return AgentUnavailableMsg
+	}
+	return "agent backend unavailable: " + detail
+}
+
 // ensureAgent re-selects an agent runner when the frozen one is unavailable, adopting
 // a now-available result for this and future runs (the operator installs a CLI, then
 // Retry). Detect is cheap (PATH/stat + a fast --version). It mirrors ensureASR.
@@ -122,6 +171,9 @@ func (e *Executor) ensureAgent(ctx context.Context) (agent.Runner, agent.Availab
 	}
 	if r, av := e.redetectAgent(ctx); r != nil && av.Available {
 		e.agentRun, e.agentAvail = r, av
+	} else if av.Detail != "" {
+		// Still unavailable: keep the freshest reason (a park message names it).
+		e.agentAvail = av
 	}
 	return e.agentRun, e.agentAvail
 }
@@ -379,6 +431,9 @@ func (e *Executor) runAgent(ctx context.Context, book store.Book, stage state.St
 			return agentUsage{}, scheduler.ParkWithCode(state.ParkBudgetExceeded, budgetExceededMsg(spent, e.bookBudgetUSD))
 		}
 	}
+	if err := e.checkMonthlyBudget(ctx, stage, time.Now()); err != nil {
+		return agentUsage{}, err
+	}
 	runner, av := e.ensureAgent(ctx)
 	if runner == nil || !av.Available {
 		// PREFLIGHT unavailability: no CLI is configured/resolvable at all (not a transient
@@ -387,6 +442,12 @@ func (e *Executor) runAgent(ctx context.Context, book store.Book, stage state.St
 		// forever. The operator installs/configures a CLI and clicks Retry. (The transient
 		// case - a CLI that existed and vanished mid-run - is the POST-invocation
 		// NotAvailableError branch below, which does schedule a short auto-readmit.)
+		// A runner that describes itself as coming back by itself (the Bridge's agent
+		// container, usually just restarting) is the exception: a timed self-resume.
+		if av.RetryAfter > 0 {
+			return agentUsage{}, scheduler.ParkWithCodeAfter(state.ParkAgentUnavailable, agentUnavailableReason(av.Detail),
+				time.Now().Add(av.RetryAfter))
+		}
 		return agentUsage{}, scheduler.ParkWithCode(state.ParkAgentUnavailable, AgentUnavailableMsg)
 	}
 	e.mu.Lock()
@@ -436,12 +497,10 @@ func (e *Executor) runAgent(ctx context.Context, book store.Book, stage state.St
 	// run independent chunk invocations in parallel. Share one executor-level
 	// semaphore across both shapes so the configured global limit remains a real cap,
 	// not a multiplier. Cancellation while queued spends nothing.
-	select {
-	case e.agentSlots <- struct{}{}:
-		defer func() { <-e.agentSlots }()
-	case <-ctx.Done():
-		return total, ctx.Err()
+	if err := e.agentSlots.acquire(ctx); err != nil {
+		return total, err
 	}
+	defer e.agentSlots.release()
 	// Queueing behind another invocation is capacity wait, not productive model
 	// time. Start the rate clock only after this invocation owns a slot.
 	start := time.Now()
@@ -469,10 +528,16 @@ func (e *Executor) runAgent(ctx context.Context, book store.Book, stage state.St
 				AgentRateLimitedPrefix+" ("+rl.Detail+") - retry later", rateLimitRetryAt(rl, time.Now()))
 		}
 		var na *agent.NotAvailableError
+		if errors.As(err, &na) && na.CredentialRefused {
+			// Its own park: a person has to replace the credential (the console says so),
+			// and the book still looks again by itself, so it goes on once they have.
+			return total, scheduler.ParkWithCodeAfter(state.ParkAgentCredentialRefused, agentUnavailableReason(na.Detail),
+				time.Now().Add(credentialRefusedReadmitDelay))
+		}
 		if errors.As(err, &na) {
 			// Reached only after the agent package rode out the transient LookPath blip, so a
 			// short auto-readmit window lets a CLI that finished (re)installing self-resume.
-			return total, scheduler.ParkWithCodeAfter(state.ParkAgentUnavailable, AgentUnavailableMsg,
+			return total, scheduler.ParkWithCodeAfter(state.ParkAgentUnavailable, agentUnavailableReason(na.Detail),
 				time.Now().Add(notAvailableReadmitDelay))
 		}
 		var ve *validationError
@@ -961,7 +1026,7 @@ const autoAcceptTailReason = "already repaired via clip splice - splice present 
 // geometry, so a decoder-window upgrade can reopen legacy splices once. The ledger itself is
 // deliberately NOT cleared by the done==0 reset or a Retry (unlike the stall marker). A deleted
 // + re-enqueued book gets a fresh work dir, so it never inherits a stale ledger.
-const acceptedLedgerName = "qa_accepted.json"
+const acceptedLedgerName = qa.AcceptedFile
 
 // acceptedEntry records one accepted chapter's disposition: the round it was first accepted,
 // the argued reason, and whether the acceptance was the agent's or a mechanical auto-accept.
@@ -1365,7 +1430,7 @@ func (e *Executor) runQAAdjudicateAgent(ctx context.Context, book store.Book, r 
 			chapters = append(chapters, ch)
 		}
 	}
-	workers := min(e.agentWorkers, len(chapters))
+	workers := min(e.AgentMaxPerBook(), len(chapters))
 	parts := make([][]int, workers)
 	for i, ch := range chapters {
 		parts[i%workers] = append(parts[i%workers], ch)

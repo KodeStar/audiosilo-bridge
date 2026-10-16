@@ -24,12 +24,13 @@ type fakeServer struct {
 	queue    []*link.Job
 	updates  map[int64][]link.Update
 	claims   [][]string
-	cancel   map[int64]bool // answer cancel_requested for these
-	notHeld  map[int64]bool // answer 409 not_held for these
-	failing  bool           // every update fails with a network error
-	unauthed bool           // every call is a 401
-	hang     chan struct{}  // updates wait for it to close (nil: none)
-	changed  chan struct{}  // closed on every update
+	cancel   map[int64]bool   // answer cancel_requested for these
+	notHeld  map[int64]bool   // answer 409 not_held for these
+	failing  bool             // every update fails with a network error
+	unauthed bool             // every call is a 401
+	hang     chan struct{}    // updates wait for it to close (nil: none)
+	changed  chan struct{}    // closed on every update
+	paths    map[int64]string // the job's path in an update's answer (a book that moved)
 }
 
 func newFakeServer() *fakeServer {
@@ -92,7 +93,11 @@ func (f *fakeServer) UpdateJob(ctx context.Context, id int64, u link.Update) (*l
 	if u.State != nil {
 		state = *u.State
 	}
-	return &link.Job{ID: id, State: state, CancelRequested: f.cancel[id]}, nil
+	j := &link.Job{ID: id, State: state, CancelRequested: f.cancel[id]}
+	if p, ok := f.paths[id]; ok {
+		j.Path = &p
+	}
+	return j, nil
 }
 
 // finalState is the last state reported for id ("" for none).
@@ -172,7 +177,13 @@ func TestRunsAJobToDone(t *testing.T) {
 	if k := r.Kinds(); len(k) != 1 || k[0] != "bridge.verify" {
 		t.Fatalf("kinds = %v", k)
 	}
-	runFor(t, r, func() bool { s, _ := srv.finalState(1); return s == link.StateDone })
+	// Wait for the report to be recorded too: the server hears it a moment before
+	// the store marks it reported, and stopping in between would cut that short.
+	runFor(t, r, func() bool {
+		s, _ := srv.finalState(1)
+		sj, err := db.GetServerJob(context.Background(), 1)
+		return s == link.StateDone && err == nil && sj.Reported
+	})
 	if got.ID != 1 || got.Attempt != 1 || *got.LibraryID != 2 || string(got.Params) != `{"x":1}` {
 		t.Fatalf("the handler saw %+v", got)
 	}

@@ -1,4 +1,12 @@
-# The AudioSilo server and the Bridge side by side (BRIDGE-PLAN.md Phase 0).
+# An AudioSilo server with its Bridge: three services.
+#
+#   audiosilo  the server: the libraries (read-only), the player and the
+#              console, where Bridge jobs are started and watched.
+#   bridge     the Bridge: pairs with the server, takes its jobs (generated
+#              characters and recaps for a book), transcribes the audio itself
+#              and writes the results into the book's .audiosilo/ folder.
+#   agent      the agent container: runs the AI CLIs the Bridge's jobs need,
+#              walled off from everything else (see below).
 #
 # The server reads the libraries read-only; the Bridge mounts the SAME host
 # folders read-write. Mounting them at the same path in both containers means
@@ -12,6 +20,17 @@
 #
 # PUID/PGID: use the owner of your library folders (Unraid: 99/100), the same
 # for both, so files the Bridge writes belong to the share's owner.
+#
+# The agent container runs the AI CLIs (claude, codex) for characters and
+# recaps. It sees only the staging volume it shares with the Bridge and its own
+# config volume: never a library, the Bridge's data or its secrets, and it is
+# on its own network (internet only), so it can't reach the Bridge or the
+# server. Give it the Bridge's own agent account, not a shared one: put
+# CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`) in a .env file beside
+# this one, or sign codex in once with
+#   docker compose exec agent audiosilo-bridge agent-login codex
+# and set AUDIOSILO_BRIDGE_AGENT_BACKEND: codex on the bridge (it runs claude
+# unless told otherwise).
 name: audiosilo
 
 services:
@@ -44,8 +63,49 @@ services:
       # AUDIOSILO_BRIDGE_PAIR_CODE: XXXX-XXXX-XXXX-XXXX
       # Keep the secrets' key outside the data folder (32 bytes, hex or base64):
       # AUDIOSILO_BRIDGE_SECRET_KEY: ...
+      # The folder shared with the agent container (below). Kept outside
+      # /bridge-data, whose first-start ownership fix would otherwise reach it.
+      AUDIOSILO_BRIDGE_AGENT_STAGING_DIR: /staging
+      # The CLI the agent container runs: claude (the default) or codex.
+      # AUDIOSILO_BRIDGE_AGENT_BACKEND: codex
+      # A GitHub token (a fine-grained one that can open issues on the community
+      # repos) lets a job contribute its characters and recaps (contribute: issue).
+      # Stored sealed at the start; this value replaces any stored before.
+      # AUDIOSILO_BRIDGE_GITHUB_TOKEN: ${AUDIOSILO_BRIDGE_GITHUB_TOKEN}
     ports:
       - "8091:8091"
     volumes:
       - ./bridge-data:/bridge-data
       - /path/to/audiobooks:/audiobooks:rw
+      # Shared with the agent container, at the Bridge's agent.staging_dir.
+      # The only volume both mount.
+      - staging:/staging
+
+  agent:
+    image: ghcr.io/kodestar/audiosilo-bridge:latest-agent
+    restart: unless-stopped
+    user: "10002:10002"
+    environment:
+      # By name only: the value comes from your shell or .env and is never
+      # written here. Set the one you use; the runner reports which it found.
+      - CLAUDE_CODE_OAUTH_TOKEN
+      # - ANTHROPIC_API_KEY
+      # - OPENAI_API_KEY
+    volumes:
+      - staging:/staging
+      - agent-config:/agent
+    networks: [agent]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    read_only: true
+    tmpfs: ["/tmp"]
+    # A stop cancels the runs in progress: SIGTERM, then SIGKILL 10 s later.
+    stop_grace_period: 20s
+
+networks:
+  # The agent's own network: internet access, and nothing else of this stack.
+  agent: {}
+
+volumes:
+  staging: {}
+  agent-config: {}

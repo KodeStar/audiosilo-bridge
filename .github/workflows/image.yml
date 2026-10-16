@@ -1,15 +1,18 @@
 name: image
 
 # Build and publish the Bridge images to GHCR (a private package while the repo
-# is private) on a v* tag and on manual dispatch. Three targets of one
+# is private) on a v* tag and on manual dispatch. Four targets of one
 # Dockerfile:
 #   - slim -> ghcr.io/kodestar/audiosilo-bridge:<tag>-slim, :latest-slim (amd64, arm64)
 #   - full -> ghcr.io/kodestar/audiosilo-bridge:<tag>, :latest           (amd64, arm64)
 #   - cuda -> ghcr.io/kodestar/audiosilo-bridge:<tag>-cuda, :latest-cuda (amd64 only)
+#   - agent -> ghcr.io/kodestar/audiosilo-bridge:<tag>-agent, :latest-agent (amd64, arm64;
+#             the agent container, decision 15)
 # latest* moves only for a release tag (not a pre-release like v1.2.0-rc.1); a
-# dispatch from a branch publishes under the branch's name (<branch>, -slim, -cuda).
+# dispatch from a branch publishes under the branch's name (<branch>, -slim, -cuda, -agent).
 # The Go binary and the page cross-build on the runner ($BUILDPLATFORM); only the
-# final apt step of the arm64 legs runs under QEMU.
+# final apt step of the arm64 legs runs under QEMU (the agent leg also runs the
+# CLIs' --version there).
 on:
   push:
     tags:
@@ -36,6 +39,9 @@ jobs:
           - target: cuda
             suffix: "-cuda"
             platforms: linux/amd64
+          - target: agent
+            suffix: "-agent"
+            platforms: linux/amd64,linux/arm64
     steps:
       - name: Checkout
         uses: actions/checkout@v4

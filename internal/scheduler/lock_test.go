@@ -252,7 +252,8 @@ func TestQueueStatsPublishesAndClearsSeriesBlockers(t *testing.T) {
 	hub := events.NewHub(8)
 	_, sub := hub.Subscribe(0)
 	defer sub.Close()
-	s := &Scheduler{hub: hub, agentCap: 2}
+	s := &Scheduler{hub: hub}
+	s.agentCap.Store(2)
 	books := []store.Book{
 		{ID: 1, Title: "Saga One", Series: "Saga", SeriesPos: "1", State: string(state.FactPass)},
 		{ID: 2, Title: "Saga Two", Series: "Saga", SeriesPos: "2", State: string(state.SpellingResearch)},
@@ -302,6 +303,68 @@ func TestLockHoldersParkedPredecessorHoldsSeries(t *testing.T) {
 	h := lockHolders(books)
 	if !h[1] || h[2] {
 		t.Fatalf("parked predecessor: holders = %v, want only book 1", h)
+	}
+}
+
+// A failed or cancelled predecessor holds nothing (its job ended, so nothing will
+// finish it): the next volume takes the lock. A paused one still holds it.
+func TestLockHoldersEndedPredecessorReleasesSeries(t *testing.T) {
+	for _, tc := range []struct {
+		status, err string
+		holds       bool
+	}{
+		{string(state.StatusFailed), "the fact pass failed", false},
+		{string(state.StatusFailed), cancelledReason, false},
+		{string(state.StatusPaused), "", true},
+		{string(state.StatusNeedsAttention), "parked", true},
+	} {
+		books := []store.Book{bk(1, "S", "1", string(state.ASR)), bk(2, "S", "2", string(state.SpellingResearch))}
+		books[0].Status, books[0].Error = tc.status, tc.err
+		h := lockHolders(books)
+		if h[1] != tc.holds || h[2] == tc.holds {
+			t.Errorf("predecessor %s (%q): holders = %v, want book 1 holding = %v", tc.status, tc.err, h, tc.holds)
+		}
+		if blocked := SeriesBlockers(books); (len(blocked) == 1) != tc.holds {
+			t.Errorf("predecessor %s (%q): blockers = %v", tc.status, tc.err, blocked)
+		}
+	}
+}
+
+// The scheduler runs a later volume whose earlier one was cancelled before its
+// carryover was ready (a sidecars.generate job cancelled mid-run): before, the
+// cancelled book kept the lock and the later one waited at its first carryover
+// stage for ever.
+func TestCancelledPredecessorDoesNotBlockLaterVolume(t *testing.T) {
+	h := newHarness(t)
+	db := h.openDB(t)
+	ctx := context.Background()
+	b1 := h.addBook(t, db, "vol-1", "Saga", "1")
+	b2 := h.addBook(t, db, "vol-2", "Saga", "2")
+	if err := db.SetBookState(ctx, b1.ID, string(state.ASR), "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	s := New(db, h.hub, NewStubExecutor(time.Millisecond, 2*time.Millisecond), 2, h.workRoot, false)
+	if err := s.Cancel(ctx, b1.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetBookState(ctx, b2.ID, string(state.SpellingResearch), "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	books := runUntil(t, db, h.hub, NewStubExecutor(time.Millisecond, 2*time.Millisecond), 2, func(bs []store.Book) bool {
+		for _, b := range bs {
+			if b.ID == b2.ID {
+				return b.State == string(state.Done)
+			}
+		}
+		return false
+	}, 10*time.Second)
+	for _, b := range books {
+		if b.ID == b2.ID && b.State != string(state.Done) {
+			t.Fatalf("vol-2 stuck behind the cancelled vol-1: state=%s status=%q", b.State, b.Status)
+		}
+		if b.ID == b1.ID && !IsCancelled(b) {
+			t.Fatalf("vol-1 = %s/%q, want it left cancelled", b.State, b.Status)
+		}
 	}
 }
 
@@ -484,5 +547,19 @@ func TestControlOpErrors(t *testing.T) {
 	// Delete works when not in-flight.
 	if err := sched.Delete(ctx, b.ID); err != nil {
 		t.Fatalf("delete: %v", err)
+	}
+}
+
+// The agent lane's capacity follows SetAgentCapacity while the scheduler runs:
+// the dispatch and the supervisor's view both see the new one.
+func TestSetAgentCapacity(t *testing.T) {
+	s := New(nil, events.NewHub(16), NewStubExecutor(0, 0), 1, "", false)
+	s.SetAgentCapacity(3)
+	if s.agentCapacity() != 3 || s.SupervisorRuntime(nil).AgentCapacity != 3 {
+		t.Fatalf("capacity = %d", s.agentCapacity())
+	}
+	s.SetAgentCapacity(0)
+	if s.agentCapacity() != 1 {
+		t.Fatalf("capacity = %d, want clamped to 1", s.agentCapacity())
 	}
 }

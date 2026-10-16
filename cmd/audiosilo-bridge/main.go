@@ -6,6 +6,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -15,6 +16,7 @@ import (
 	"path/filepath"
 	"syscall"
 
+	"github.com/kodestar/audiosilo-bridge/internal/agentrun"
 	"github.com/kodestar/audiosilo-bridge/internal/app"
 	"github.com/kodestar/audiosilo-bridge/internal/config"
 	"github.com/kodestar/audiosilo-bridge/internal/logring"
@@ -45,6 +47,10 @@ func run(args []string, stdout, stderr io.Writer) error {
 	case "version":
 		_, _ = fmt.Fprintln(stdout, version)
 		return nil
+	case "agent-runner":
+		return agentRunner(rest, stderr)
+	case "agent-login":
+		return agentLogin(rest, stdout, stderr)
 	case "help":
 		usage(stdout)
 		return nil
@@ -79,6 +85,39 @@ func serve(args []string, stderr io.Writer) error {
 	return b.Run(ctx)
 }
 
+// agentRunner is the agent container's entrypoint (decision 15): it runs the
+// agent jobs the Bridge drops into the shared staging dir.
+func agentRunner(args []string, stderr io.Writer) error {
+	fs := flag.NewFlagSet("agent-runner", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	staging := fs.String("staging", "/staging", "the staging dir shared with the Bridge")
+	home := fs.String("home", "/agent", "the agent home: secrets/ and codex/ (the agent-config volume)")
+	slots := fs.Int("slots", 1, "jobs run at once")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	log := slog.New(slog.NewTextHandler(stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	return agentrun.Main(ctx, agentrun.Options{Staging: *staging, Home: *home, Slots: *slots, Version: version, Log: log})
+}
+
+// agentLogin signs a CLI in, inside the agent container.
+func agentLogin(args []string, stdout, stderr io.Writer) error {
+	fs := flag.NewFlagSet("agent-login", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	home := fs.String("home", "/agent", "the agent home (the agent-config volume)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return errors.New("agent-login: name the CLI: agent-login claude | agent-login codex")
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	return agentrun.Login(ctx, agentrun.Options{Home: *home}, fs.Arg(0), os.Stdin, stdout, stderr)
+}
+
 // defaultDataDir is $AUDIOSILO_BRIDGE_DATA, else ~/.audiosilo-bridge.
 func defaultDataDir() string {
 	if v := os.Getenv(dataEnv); v != "" {
@@ -97,10 +136,16 @@ func usage(w io.Writer) {
 Usage:
   audiosilo-bridge [serve] [--data DIR] [--listen HOST:PORT]
   audiosilo-bridge version
+  audiosilo-bridge agent-runner [--staging DIR] [--home DIR] [--slots N]
+  audiosilo-bridge agent-login [--home DIR] claude|codex
 
 Commands:
-  serve      Run the Bridge and its page (default).
-  version    Print the build version.
+  serve         Run the Bridge and its page (default).
+  version       Print the build version.
+  agent-runner  Run agent jobs from the staging dir (the agent container's
+                entrypoint; default --staging /staging --home /agent).
+  agent-login   Sign a CLI in, inside the agent container: codex runs its
+                device login, claude prints how to provide a token.
 
 Serve flags:
   --data     Data directory (default $AUDIOSILO_BRIDGE_DATA, else ~/.audiosilo-bridge).

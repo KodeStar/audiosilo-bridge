@@ -148,3 +148,32 @@ func runVersion(ctx context.Context, path, arg string) (string, error) {
 	}
 	return strings.TrimSpace(out), nil
 }
+
+// CLIOutcome is what one agent CLI run left behind, wherever it ran: in this
+// process (runCLI) or in the agent container (internal/agentbox reads it back from
+// the staging dir). ClaudeResult and CodexResult interpret it, so both paths parse
+// the output, classify rate limits and shape their errors with one copy of the code.
+type CLIOutcome struct {
+	Stdout string
+	Stderr string
+	// ExitErr is why the CLI didn't exit cleanly (an *exec.ExitError here, the
+	// container's exit code across it); nil for a zero exit. A timeout is TimedOut,
+	// not an ExitErr.
+	ExitErr  error
+	TimedOut bool
+	Timeout  time.Duration // the cap that fired, for the message
+	// LastMessage is codex's --output-last-message file ("" when absent).
+	LastMessage string
+}
+
+// outcomeOf maps runCLI's return onto a CLIOutcome: its timeout error becomes
+// TimedOut, anything else (an exit error, a start failure, a parent cancel) ExitErr.
+func outcomeOf(stdout, stderr string, runErr error, timeout time.Duration) CLIOutcome {
+	out := CLIOutcome{Stdout: stdout, Stderr: stderr, Timeout: timeout}
+	if errors.Is(runErr, errTimeout) {
+		out.TimedOut = true
+	} else {
+		out.ExitErr = runErr
+	}
+	return out
+}

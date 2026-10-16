@@ -277,7 +277,7 @@ func TestDefaultSeedsClaudeModels(t *testing.T) {
 	}
 }
 
-func TestSupervisorDefaultsAreMonitorOnlyAndOldConfigsInheritThem(t *testing.T) {
+func TestSupervisorDefaultsActWithoutModelsAndOldConfigsInheritThem(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, FileName), []byte("listen: 127.0.0.1:8090\nagent:\n  concurrency: 2\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -286,8 +286,8 @@ func TestSupervisorDefaultsAreMonitorOnlyAndOldConfigsInheritThem(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !cfg.Supervisor.Enabled || cfg.Supervisor.AutomaticActions || cfg.Supervisor.ModelAssisted || cfg.Supervisor.ModelAutomaticActions || cfg.Supervisor.AllowBackendFailover {
-		t.Fatalf("supervisor defaults are not monitor-only: %+v", cfg.Supervisor)
+	if !cfg.Supervisor.Enabled || !cfg.Supervisor.AutomaticActions || cfg.Supervisor.ModelAssisted || cfg.Supervisor.ModelAutomaticActions || cfg.Supervisor.AllowBackendFailover {
+		t.Fatalf("supervisor defaults: want deterministic actions on, models and failover off: %+v", cfg.Supervisor)
 	}
 	if cfg.Pricing.Version == "" || cfg.Pricing.Rates == nil {
 		t.Fatalf("pricing defaults unavailable: %+v", cfg.Pricing)

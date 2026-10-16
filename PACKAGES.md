@@ -10,13 +10,19 @@ audiosilo-sidecars with their history (`git log --follow` reaches it), and their
 entries keep sidecars' milestone names (M1-M9) and incident history: "the daemon"
 there is the Bridge now, and the folder scan, its overrides and the library
 sightings they mention were not carried over (the server's index is the library).
-The shell (link, mapping, jobs, verify, app, api, logring, web, cmd) is new.
+The shell (link, mapping, jobs, verify, app, api, logring, web, cmd) is new, and so
+are Phase 1a's generate (the sidecars.generate job) and the agent container's three
+(agentproto, agentbox, agentrun).
 
 
 ```
-cmd/audiosilo-bridge/     entrypoint: `serve` (default) + `version`; flags --data ($AUDIOSILO_BRIDGE_DATA,
-                          else ~/.audiosilo-bridge), --listen; prints the page's one-time password
-                          once on the first start (never logged)
+cmd/audiosilo-bridge/     entrypoint, four subcommands: `serve` (the default; --data
+                          ($AUDIOSILO_BRIDGE_DATA, else ~/.audiosilo-bridge), --listen; prints the
+                          page's one-time password once on the first start, never logged),
+                          `version`, `agent-runner` (the agent container's entrypoint:
+                          agentrun.Main; --staging /staging, --home /agent, --slots 1) and
+                          `agent-login claude|codex` (agentrun.Login, run once inside the agent
+                          container; --home /agent). `help` prints the usage.
 internal/
   config/   config.yaml in <data>/ + AUDIOSILO_BRIDGE_* env overrides; Load/Save/Validate.
             The Bridge's own settings are bridge.go: server.url, public_url (the page
@@ -59,6 +65,34 @@ internal/
             set a very large value to effectively disable; Validate rejects negative;
             env AUDIOSILO_BRIDGE_AGENT_BOOK_BUDGET_USD; restart-to-apply like the
             rest of agent.*) - the per-book agent-spend cap runAgent enforces.
+            Phase 1a (bridge.go, each with an AUDIOSILO_BRIDGE_* variable that locks
+            it like the rest): agent.staging_dir (the dir shared with the agent
+            container; absolute or "", which AgentStagingDir reads as <data>/staging
+            without writing it into the config, so a saved file doesn't pin the data
+            dir), agent.claim_timeout_seconds (default 120, 10-3600: how long a run
+            waits for the container to claim it before the book parks
+            agent_unavailable), agent.monthly_budget_usd (default 100, decision 7; 0
+            is NO cap and is kept as written, unlike book_budget_usd; negative, NaN
+            and Inf refused) and transcripts.retention_days (default 30, 0-3650; 0
+            deletes a finished book's transcripts when its job ends). An env integer
+            that doesn't parse becomes -1, which Validate refuses (envInt).
+            agent.backend "" now means claude (the app maps it; the engine's own
+            agent.Select, which read "" as auto, is never called on the Bridge).
+            supervisor.automatic_actions defaults ON (the Bridge's jobs are pressed and
+            left to run; each recovery is capped per book per day), and
+            normalizeBridge forces supervisor.model_assisted,
+            model_automatic_actions and allow_backend_failover OFF whatever the file
+            or the environment says (decision 15: each would run an agent CLI in the
+            Bridge), so what the config shows is what runs. On the Bridge the agent
+            concurrency comes from the agent container's --slots (runner.json), so
+            agent.concurrency/queue_concurrency/max_agents_per_book and
+            claude_path/codex_path are read and validated but inert, and
+            contribution.mode is overridden per book by the job's contribute param.
+            Each inert setting (those, the three forced-off supervisor switches and
+            the settings only the model lanes read) set to a non-default value is a
+            Config.Ignored notice ("<key> is ignored on the Bridge: <why>",
+            ignoredOnBridge, taken before normalizeBridge), which app logs once at
+            the start beside Config.Deprecations.
   toolfetch/ fetches the three external artifact families, all gated by
             tools.auto_download and confined to <data>/tools: ffmpeg/ffprobe static
             builds (explicit path -> next to the binary -> $PATH -> HTTPS download,
@@ -174,6 +208,19 @@ internal/
             and by the startup GC (async, reservation-guarded, done books only).
             A purge also invalidates the split sentinel (scheduler.purgeInvalidatedStages)
             so a later retry re-splits rather than skipping into an empty chapters/.
+            Phase 1a: PurgeTranscripts is the transcript tier of the Bridge's retention
+            (decision 5; WHICH books and WHEN is generate's policy): Purge, plus every
+            transcripts-* layer (transcripts-corrected/ included, a durable to Purge),
+            the root files that quote the transcript (spelling candidates and reference
+            matches, the QA reports, qa_plan.json and qa_accepted.json, tail_verdicts,
+            corrections.log, repairs.log) and the predecessor's *.txt chapter copies
+            under spelling-refs/. It KEEPS knowledge-final.md (a sequel's fact pass
+            inherits it), the spelling ledger and rules, the prior-* carryover and the
+            series glossary, the manifest, the _done/ sentinels and the sidecars: a
+            finished book keeps its work dir because series carryover reads it.
+            Confined like Purge (the denied case is tested); the file names come from
+            the owning packages' constants (spelling.RefsDir/PriorPrefix/
+            SeriesGlossaryFile/CorrectionsLogFile, qa.AcceptedFile), never literals.
   qa/       M4: the mechanical transcript-QA degeneration sweep, a faithful Go port
             of the historical Python detectors (qa_sweep/cross_segment/
             within_segment/multi_loop/tail_rate scans - thresholds and per-detector
@@ -259,6 +306,33 @@ internal/
             stdout/stderr pipe cannot hang a finished stage; ErrWaitDelay after a
             successful exit is treated as success. SleepCtx is the shared
             ctx-aware backoff sleep (pipeline's split retry reuses it).
+            Phase 1a split each backend's Run into the CLI run and its
+            interpretation, so a run in the agent container is classified by the same
+            code: CLIOutcome {Stdout, Stderr, ExitErr, TimedOut, Timeout, LastMessage}
+            is what a run left behind wherever it ran (outcomeOf maps runCLI's return:
+            its timeout error is TimedOut, anything else ExitErr), and
+            ClaudeResult/CodexResult(model, outcome) parse it, classify a rate limit
+            first, and keep the reported usage on the Result even beside an error
+            (spend is captured on a failed run too); Run returns ctx.Err() for a
+            parent cancel. ClaudeArgs(req) and CodexArgs(req, lastMsgFile, sandbox)
+            are exported so agentrun builds the very same argv (CodexSandboxDefault
+            keeps read-only/workspace-write; CodexSandboxOff, danger-full-access, is
+            the container's, where codex's sandbox can't start under Docker's
+            seccomp and the container is the boundary). A REFUSED CREDENTIAL
+            (authFailureSignatures: "failed to authenticate", "oauth access token is
+            invalid", invalid_api_key, invalid x-api-key, "api_error_status":401, "401
+            unauthorized") is a *NotAvailableError with CredentialRefused set, looked
+            for ONLY in a run that failed (a clean run may quote a 401 from a web
+            source or the book); RunWithBackoff returns it at once (the same
+            credential is refused again) and the pipeline parks
+            agent_credential_refused. codex's turn.failed error is an OBJECT
+            {"message": ...} (the SDK's ThreadError), a bare string read too
+            (codexEvent.errorText); a top-level {"type":"error"} event's message
+            stands in when the turn.failed carries none, but is never a failure on
+            its own (codex sends them for reconnects it gets past).
+            Availability.RetryAfter marks an unavailable runner that comes back by
+            itself (the agent container restarting): the preflight park then gets a
+            retry_at instead of waiting for a human.
   benchmark/ private, provider-neutral post-ASR evaluation: allow-listed corpus
             preparation with input digests; fresh per-run work trees and databases;
             stage-specific model/effort routes; the real fact/synthesis/audit/fix
@@ -447,9 +521,10 @@ internal/
             behind the same executor-wide invocation semaphore. New capacity uses
             queue_concurrency * max_agents_per_book; legacy concurrency remains a
             non-multiplied global cap. Spelling reference_files are restricted to the
-            daemon-staged carryover. Constructed in server.go with the
-            toolfetch-resolved paths, the asr.Select-chosen backend, and the
-            agent.Select-chosen runner (nil when no CLI resolved). The sanitizing stage
+            daemon-staged carryover. Constructed in app/engine.go with the
+            toolfetch-resolved paths, the asr.Select-chosen backend, and the agent
+            container's runner (agentbox, never a local CLI: decision 15), with
+            Config.AgentRedetect replacing agent.Select as the re-detection. The sanitizing stage
             deliberately RE-DERIVES all chapters every run (cheap, idempotent, raw is the
             source of truth) rather than tracking per-chapter freshness. Missing tools or
             an unavailable agent backend PARK a book needs_attention (a human-fixable
@@ -558,6 +633,28 @@ internal/
             adjacent markers while the verdict schema asks for per-marker
             declarations, so requiring one coarse declaration rejected the more
             precise correct verdict.
+            Phase 1a: the contribution mode is PER BOOK (contribModeFor: books.contrib_mode,
+            which a sidecars.generate job always sets from its contribute param, else
+            the configured contribution.mode). runAgent's budget preflight gained the
+            MONTHLY half (checkMonthlyBudget, Config.MonthlyBudgetUSD): this calendar
+            month's (UTC, MonthBounds) spend across every book, superseded runs and
+            deleted books' runs included (store.SumBudgetCostSince), at or over the cap
+            parks budget_exceeded WITH a retry_at of the 1st of the next month; the
+            per-book park still carries none. MonthBounds is the one month the
+            estimates and the page count too. A preflight-unavailable runner whose
+            Availability carries RetryAfter (the agent container) parks
+            agent_unavailable with that retry_at and the runner's own Detail as the
+            reason (agentUnavailableReason; ensureAgent keeps the freshest Detail);
+            one without still parks for a human. A run's CredentialRefused
+            NotAvailableError parks agent_credential_refused with a retry_at 30 min
+            out (credentialRefusedReadmitDelay: each look costs one refused call, no
+            tokens). SetAgentConcurrency(n) resizes the global invocation cap and the
+            per-book fan-out while the executor runs (agentWorkers is atomic,
+            agentSlots a resizable slotPool: runs past a lower cap finish, new ones
+            wait), so the engine follows the container's slots. FinalSidecarsPaths(workDir)
+            names the validated characters.json/recaps.json generate copies into the
+            library (SidecarsView reads the same two). ManifestChangedMsg now says to
+            cancel the job and generate again.
   contrib/  M7: everything GitHub-facing for contribution. TokenSource (secrets
             GitHubPAT first, else `gh auth token` - the token NEVER enters argv/logs/
             errors, leak-canary tested), a stdlib REST client (injectable base URL; typed RateLimitError; APIError
@@ -623,13 +720,30 @@ internal/
             picks up; a lost job needs no report (FinishServerJob marks it
             reported). The pairing lives in settings (pairing.*; the token is a
             secret).
+            0003 (Phase 1a, generatebooks.go): server_jobs.server_id (the server that
+            handed the job out, from the pairing's server_id; '' on older rows) and,
+            on a RUNNING row, error holds the park message of a parked job
+            (SetServerJobReport writes progress and park message in one write, so a
+            start resumes the job parked); books.contrib_mode ('' = configured; local |
+            issue); generate_books (server_job_id PK -> book_id, ON DELETE SET NULL, +
+            library_id, rel_path, created_at, ended_at, swept_at): a resumed job
+            follows the same engine book, ended_at starts the transcript retention,
+            swept_at stops the sweep looking again; GenerateBookFollowed (an open
+            mapping) gates the supervisor's actions; idx_stage_runs_started for the
+            month's sum; and deleted_stage_spend (started_at, cost_usd): DeleteBook
+            copies a book's stage runs' budget-basis spend there IN THE SAME
+            TRANSACTION before the cascade, so a regenerated book's spend still counts
+            toward the month. budgetCostSQL is the one budget-basis expression (the
+            provider's cost, else a complete estimate, else 0) every sum shares.
+            GetBookBySourcePath finds an earlier run of the same book.
   state/    per-book pipeline state machine: table-driven states/lanes/transitions,
             CanStart/NextState guards, the audit fix-loop cap. Pure, no I/O. M6 added
             ParkCode (typed park reasons - M7 added contrib_unavailable, core_needed,
             core_pending; the reliability round added budget_exceeded; the ASR
             decode-timeout hotfix added asr_decode_timeout, and M9 added
             ebook_unreadable / ebook_no_chapters / ebook_chapters_not_confident,
-            so 20 now),
+            and Phase 1a agent_credential_refused, so 21 now; generate's own
+            book_not_writable and library_not_writable are job parks, not ParkCodes),
             MainlineNext (the optimistic mainline
             successor the ETA engine walks - the table's Next ordering is load-bearing:
             conditional/loop target first, mainline continuation LAST),
@@ -638,7 +752,11 @@ internal/
             instead of hand-rolling it). The post-M9 round added the SourceIO
             Def column + ReadsSource (the stages that open the original library
             item; the scheduler's mechanical-lane serialization and the ETA
-            simulation both consume it).
+            simulation both consume it). Phase 1a: HoldsSeriesLock(state, status)
+            takes the status - a FAILED book (a cancel is a failure) holds nothing,
+            since the job that wanted it ended and nothing will finish it (a later
+            volume runs without its carryover, like a series' first book), while a
+            parked or paused one still holds it.
   eta/      the PURE ETA engine (no I/O, no clock): per-stage unit kinds
             (chapter/chunk/book) + seed rates from the historical extraction metrics,
             EWMA Observe (alpha 0.3), book ETA = rate x remaining units over the
@@ -650,7 +768,10 @@ internal/
             with state.ReadsSource against that scarce sub-slot (continue, never
             break - a work-dir-only stage still overlaps a library read), so the
             queue ETA models the scheduler's source-IO serialization instead of
-            predicting 2x the real inspect/split parallelism.
+            predicting 2x the real inspect/split parallelism. Phase 1a: a parked or
+            paused SERIES book that still holds its lock enters the simulation as
+            `held` (it runs nothing, but a later volume's carryover stages wait behind
+            it, as in the scheduler); a failed one is left out.
   scheduler/ one wake-on-event goroutine over three lanes (ASR cap 1 / agent cap =
             config, series-locked / mechanical cap 2) over an injected Executor +
             _done/<stage>.json sentinels (the CONTENT truth) and crash reconcile.
@@ -697,6 +818,19 @@ internal/
             only, so an unconfigured daemon parks once instead of churning). retry_at
             rides bookView and the book.state SSE frame (the web patch clears it when
             absent); pre-migration parks (retry_at '') never auto-readmit.
+            Phase 1a: autoReadmitCodes adds agent_credential_refused (looked at again
+            every 30 min in case the credential was replaced) and budget_exceeded
+            (the monthly park's retry_at is the 1st; the per-book park has none, so it
+            still waits for a human) - ONLY a park carrying a retry_at is ever
+            re-admitted. IsCancelled(b) tells Cancel's failure from a stage's by its
+            reason (cancelledReason "cancelled by user"; the status enum has no
+            cancelled state). runStage closes a run on ANY error once the worker ctx
+            ended (a killed ffmpeg is "signal: killed", not ctx.Err()): whoever
+            cancelled set the status already. lockHolders/seriesLockOwners pass the
+            status to state.HoldsSeriesLock (a failed predecessor frees its series).
+            SetAgentCapacity(n) changes the agent lane's book capacity (atomic,
+            clamped to 1, notifies on a change) while it runs: the Bridge follows the
+            agent container's slots.
   supervisor/ the health-tick babysitter (config supervisor.*): classifies incidents
             over book/stage-run snapshots (deterministic classifiers + optional
             model-assisted lane), decides bounded recovery actions, and applies them
@@ -748,6 +882,23 @@ internal/
             book dispatched mid-pass would otherwise be terminate_requeued as an
             orphan. The occupancy/invocation/progress figures themselves stay as of
             the prologue by design; they are what the sample timestamp qualifies.
+            classifyFailures reads only a failed or parked book's last failed run:
+            every scheduler failure path sets one of the two, so any other book was
+            re-admitted since (perhaps then paused) and waits for its next attempt.
+            A cancelled book (scheduler.IsCancelled) is skipped as well: Cancel fails
+            a book without a run of its own, so one cancelled while it waited still
+            has that answered failure as its last run.
+            Spike 1 (2026-10-16): after a refused credential was replaced, the books
+            re-admitted but waiting for an agent slot were escalated from their old
+            401 (authentication_failure -> park_escalate) and needed a human Retry.
+            On the Bridge (app/engine.go) only the deterministic lane runs (config
+            forces model-assisted and backend failover off), automatic actions are on
+            by default, and the Apply hook (supervisorApply) refuses three things: a
+            fallback_backend (there is none), a stop_budget on an ASR-lane stage (asr
+            and retranscribing bound themselves chapter by chapter; a whole-stage
+            time limit would stop a long CPU transcription again and again), and any
+            action on a book no open sidecars.generate job follows
+            (store.GenerateBookFollowed: it would run, and spend, for nobody).
   metaops/  meta.audiosilo.app client (coverage/lookup, capped 1h TTL caches,
             graceful degrade) + the PathAllowed/AllowedPath containment checks
             (Phase 1a passes the mapped mounts as the roots). glossary.go adds
@@ -817,7 +968,22 @@ internal/
             internal/bridge BY HAND (no codegen): a change there is a change here,
             with a test on both sides. Answers map to ErrUnauthorized (401: the token
             was revoked), ErrNotHeld (409 not_held/finished), ErrNoHeartbeat,
-            ErrNoBook, else *APIError (an HTML proxy page never becomes a message).
+            ErrNoBook, ErrNotIndexable (a rescan's 404 not_indexable), else *APIError
+            (an HTML proxy page never becomes a message). Phase 1a: Paired carries
+            the server's server_id (the job runner's server identity); the book
+            lookup's answer carries a `book` block (BookInfo: title, authors and
+            narrators as credits, series, series_index, asin, isbn, duration, and the
+            work_id of the server's metadata cache) when a path was asked for, never
+            on the sample-book answer; the heartbeat's Status carries
+            estimates.sidecars (SidecarEstimates: asr_seconds_per_audio_hour,
+            agent_usd_per_audio_hour / agent_usd_per_ebook (null until a finished book
+            gives one), samples, agent_backend, agent_ready, subscription,
+            monthly_budget_usd, month_spent_usd and can_contribute; omitted until the
+            engine has started); RescanAttachments(library, path) is POST
+            /bridge/rescan with mode "attachments" (the book's .audiosilo/ only, never
+            its audio), answering which of characters/recaps/bridge are indexed; and
+            a job update's answer carries the job's current path, which the server
+            moves with its book.
   mapping/  where the Bridge sees each library, CHECKED (decision 13): Check stats the
             server's sample book's files through the mount (SafeJoin: no absolute,
             "..", NUL; a backslash is a name character except on Windows) and
@@ -836,9 +1002,13 @@ internal/
             refreshes what is due): a heartbeat during a long check (spun-down disks)
             asking again and beating again was a tight loop of heartbeats. A mapping
             edit re-checks only its library (each check stats files and writes a
-            probe).
-  jobs/     the generic runner. Handlers declare a kind and a lane (lanes: light=2
-            in Phase 0); the claim loop asks only for kinds whose lane has room, and
+            probe). Status(id) is one library's last check (a write job needs it
+            mapped AND writable at the mount it uses now).
+  jobs/     the generic runner. Handlers declare a kind and a lane (lanes: light=2,
+            and Phase 1a's pipeline=25 for the jobs that follow an engine book: the
+            engine's scheduler does the throttling, so such a job sits in its lane
+            while its book is queued or parked, and the lane only bounds how many
+            are followed); the claim loop asks only for kinds whose lane has room, and
             waits (no claim) while unpaired or full. A running job reports at least
             every Keepalive (10 s), renewing the server's 2-minute lease; a reply
             with cancel_requested ends its context (errCancelRequested -> reported
@@ -867,6 +1037,35 @@ internal/
             ProgressEvery, a keepalive otherwise), so a handler never waits on the
             network. Cancel is the page's own cancel. LocalReporter is a
             send-nothing Reporter for handler tests.
+            Phase 1a: PARK/UNPARK. Reporter.Park(code, msg) reports the job
+            needs_attention with msg as its error while it KEEPS RUNNING here (the
+            server drops a parked job's lease, as needs_attention has none, and renews
+            it once it reports running; the job goes on reporting under its claim, so
+            a server cancel still ends it; a Bridge gone for good leaves the job
+            needs_attention until an admin cancels it);
+            Unpark reports it running again; both are sent at once. Every report
+            carries the error, "" when unparked, which clears a park's message (even
+            one a restart interrupted); the park message is stored with the progress
+            (store.SetServerJobReport) and a resumed job starts parked with it, so it
+            never reports running between two parks. The same progress again changes
+            nothing (DeepEqual), so a handler may report on every poll. Progress.Extra
+            is a kind's own fields (sidecars.generate's stage, eta_seconds, cost_usd,
+            source, park), marshalled FLAT beside step/message/done/total (those four
+            win over an Extra key of the same name); an object over the server's 16
+            KiB is sent without Extra rather than refused for good. Reporter.Path()
+            is the job's path as the server's last answer gave it ("" until one did):
+            the server moves an open job with its book. SERVER IDENTITY:
+            Options.ServerID (the pairing's server_id) is recorded on every claim, and
+            a recorded job of ANOTHER server (unknown on either side counts as the
+            same) is dropped at recovery (a running one lost, an unreported end never
+            sent) and never retried by retryReports. ABANDONER: a handler whose jobs
+            hold work beyond Run (generate's engine book) implements Abandon(ctx,
+            job), which the runner calls when it ends a job WITHOUT running the
+            handler (a resumed job's first report answered with a cancel or a lost
+            claim, another server's job dropped), so that work is released as the
+            handler's own end would. Resumes(ctx) tells a handler whether its ended
+            context will run again under the claim (the Bridge stopping, a refused
+            token) or ended for good (errCancelRequested, errLost).
   verify/   bridge.verify: params {hold_seconds 0-600}; resolves the library from the
             registry, asks the server for the book's files (path "" = the sample
             book), CompareFiles through the mount, probes the BOOK's folder for
@@ -874,6 +1073,199 @@ internal/
             then holds, reporting each second. A mismatch is a failure WITH a result.
             Result {library_id, mount_path, path, files[{path,size,expected_size,ok}],
             writable, writable_error, elapsed_ms}: the server's console renders it.
+  generate/ sidecars.generate (Phase 1a): turns a server job into an ENGINE BOOK, follows
+            it to the end reporting its stage, ETA, spend and parks, then writes the
+            validated characters and recaps into the book's .audiosilo/ and asks the
+            server to re-read them. Pipeline lane: the engine's scheduler does the
+            throttling. Params {source auto|audio|ebook, contribute local (default) |
+            issue, work_id <= 200 bytes, no control characters} are decoded leniently
+            (a field a later server adds is ignored) but checked strictly. A NEW job
+            with contribute=issue fails BEFORE ANY SPEND when no GitHub token resolves
+            (the contribution is the last stage). prepare: the library from the
+            registry; waitMapped needs its check mapped AND writable at the mount the
+            Bridge uses NOW (a new job fails otherwise; a resumed one parks
+            library_not_writable and waits, its engine book going on); fetchBook waits
+            out an answer that may change (unreachable, 5xx) with a backoff to 1 min
+            and fails only on a definite one (no_book, another 4xx), so a restart
+            while the server is down doesn't end a long run; CompareFiles through the
+            mount must match; locate SafeJoins the path (a folder book, or a
+            single-file book whose attachments get a "<stem>." prefix); waitWritable
+            probes the BOOK's own folder (spike 3), parking book_not_writable and
+            checking again every minute or on Retry. create: chooseSource (auto takes
+            exactly one readable .epub directly in the book's folder, dot files
+            skipped, or "<stem>.epub" beside a single file; readable = its OPF parses,
+            so a DRM-wrapped file falls back to the audio with a note; several .epub
+            files fail an ebook job and make auto read the audio), both paths
+            contained by metaops.AllowedPath under the mount; an earlier engine book at
+            the same source_path is deleted first unless another open job follows it
+            (refused: cancel it first) or a stage of it runs (scheduler.ErrBusy: try
+            again in a minute); the new book takes its identity from the server's book
+            block (identity_sources "server"), its work id from params else the
+            server's metadata cache, kind ebook with an epub, contrib_mode from the
+            params; generate_books maps the job to it. RESUME: a mapping is the job's
+            own only for the same library AND path (the server's ids repeat across
+            servers and reinstalls, and following another book's run would write its
+            sidecars into this one); otherwise the old book is stopped and a new one
+            made. attach re-admits a book this job's own cancel stopped (engine
+            Retry), unless its transcripts were swept meanwhile, which starts over,
+            as a deleted book does. follow polls 3 s while a stage runs, 30 s while
+            queued/paused/parked, at once on Retry; describe() maps the book to the
+            job's progress: the stage as step ("waiting" while queued), a plain-words
+            label (stageLabels), the stage's done/total, and Extra {stage, source,
+            cost_usd (budget basis, rounded to the cent), eta_seconds (not while parked
+            or paused), park {code, hint, retry_at}}; an engine park is
+            Reporter.Park(code, error), its end Unpark. A book parked AT contributing
+            (core_needed and co.) still gets its local files written. FINISH: the
+            sidecars (pipeline.FinalSidecarsPaths) must decode into the meta model and
+            fit the server's 4 MiB cap; .audiosilo/ is made 0755 (refused when a link
+            or not a folder), and characters.json, recaps.json and bridge.json
+            (provenance: generator, version, kind, job_id, generated_at, source,
+            work_id, inputs [{path, size, mod_time}] relative to the library) are
+            written 0644 through fsutil.WriteFileAtomic, ONLY those names, once per
+            content hash, at the path the book is at NOW (Reporter.Path: the server
+            moves the job with its book; the move is recorded in generate_books). The
+            mapping is checked again before each write; a failed write on a done book
+            parks book_not_writable and tries again every minute or on Retry (the
+            sidecars stay in the work dir, never lost to a failed job). Then
+            RescanAttachments, 3 tries, a failure only logged (the server's next scan
+            reads them). Result {library_id, path, source, files, characters, recaps,
+            cost_usd, work_id, contributed {characters|recaps: issue url}}. END: unless
+            jobs.Resumes (the Bridge stopping, a refused token), the job's end is
+            recorded (ended_at), a book that didn't finish is cancelled (stopBook
+            leaves a done or failed one alone: a cancel would overwrite its error),
+            and retention 0 purges its transcripts now; a later attempt of the same
+            job running here (Attempt higher) is left alone. Abandon (jobs.Abandoner)
+            does the same for a job the runner ended without running it, waiting for
+            the engine to start when it hasn't. Retry(job): the engine's Retry for a
+            parked engine book, else a poke for a job waiting in its own park
+            (ErrNotParked, store.ErrNotFound otherwise). ParkHint words every park code
+            for the console and the page (a fresh start says to cancel this job first:
+            the server keeps one open job per book). Estimates (the heartbeat's): the
+            ASR rate (seconds per chapter) scaled by the finished audio books'
+            chapters per hour, else SeedASRSecondsPerAudioHour 900; agent spend per
+            audio hour summed over finished audio books, per ebook averaged, nil until
+            one finished; this month's spend (MonthBounds, deleted books included).
+            Retention (decision 5) is policy here: SweepTranscripts (daily) purges
+            each finished (done, or failed/cancelled) book whose job ended at least
+            retention_days ago and wasn't swept, through scratch.PurgeTranscripts,
+            then marks it swept.
+  agentproto/ the staging protocol between the Bridge and the agent container (decision
+            15), shared by both sides so they can't drift; a LEAF (standard library
+            only). Protocol 1 (both sides refuse another). A job dir <staging>/<16 hex>/:
+            the Bridge writes work/ (the staged copy, work/out/ writable by the agent
+            uid), prompt.txt, then request.json.tmp renamed to request.json (ready);
+            the runner takes `claim` (an atomic mkdir: whichever side makes it owns
+            the job), touches `heartbeat` every 5 s, writes stdout.txt, stderr.txt,
+            last_message.txt (codex) and exit.json, opens work/out/ for the Bridge,
+            and renames done.tmp to done; the Bridge may write `cancel`, harvests
+            after done and deletes the dir. runner.json {protocol, version,
+            heartbeat_at, slots, clis {claude|codex: {version, credential KIND
+            (oauth_token | login | api_key | ""), credential_since}}} is rewritten
+            every 15 s and counts as up while under 30 s old (two intervals, so one
+            slow write doesn't flap it); credential_since moves when the credential
+            is replaced, never a token. Request is TYPED {protocol, cli, model,
+            effort, web, no_tools, max_turns 0-1000, timeout_seconds 1-86400}: the
+            Bridge never sends argv; DecodeRequest refuses an unknown field, trailing
+            data and over 64 KiB; a model name can't start with a dash and an effort
+            is letters only (it lands in a codex -c override). Exit {exit_code,
+            timed_out, cancelled, duration_ms, error, unavailable}: error is a job
+            the runner couldn't run or stopped itself, unavailable the kinds the
+            Bridge treats as the agent unavailable rather than a failed run. Size
+            bounds for each file both sides read (prompt 32 MiB, stdout 64 MiB, stderr
+            8 MiB). Nothing is trusted by the side that didn't write it:
+            OpenRegular/ReadRegular read inside an os.Root, refuse a link (Lstat
+            first), open O_NONBLOCK (a FIFO swapped in never blocks), require the
+            opened file to be the one Lstat saw, and enforce the size limit on the
+            open file and again while reading; Exists Lstats a marker, never
+            following a link.
+  agentbox/ the Bridge's side of the agent container: an agent.Runner that runs no CLI,
+            drops each invocation into the staging dir, waits for agentrun, and
+            harvests the outputs back into the pipeline's staged dir; the outcome is
+            classified by agent.ClaudeResult/CodexResult, so a container run reads
+            exactly like a local one. Status reads runner.json: Available (fresh,
+            protocol match, the backend's CLI present WITH a credential not refused),
+            Refused (all that, but the provider refused the same credential on the
+            last run: runs still go through, a refused call costs nothing and the
+            first that works clears it; a credential the runner reports as changed,
+            by kind or credential_since, clears it too), Live (fresh, whatever its
+            CLIs), each "why not" worded for the page and a park (claude: `claude
+            setup-token` -> CLAUDE_CODE_OAUTH_TOKEN; codex: agent-login; and when the
+            OTHER CLI is signed in, how to switch agent.backend), never naming a
+            Bridge path (a Detail becomes a park reason the server's console and
+            bell show; a staging dir that can't be opened is logged with its path,
+            once per outage). Detect: Available =
+            Available || Refused, RetryAfter ALWAYS 10 min (whatever makes the
+            container unavailable is expected to pass by itself). Run: stage() makes
+            the job dir 0700 and writes it ONLY through an os.Root opened on it
+            (checked to be the dir just made: the agent uid can write the staging dir
+            and swap entries), inputs 0444, work/out/ 0777 with files 0666 (a
+            validation retry patches them), the dir opened to the agent (sticky 0777)
+            only when whole, request.json renamed last. wait polls done every 1 s
+            (polling: shfs may not deliver inotify), the heartbeat every 5 s; an
+            unclaimed job past claim_timeout is taken back by the Bridge's own claim
+            mkdir (if the runner won that race it runs after all) and is a
+            NotAvailableError; a heartbeat older than 60 s writes cancel and fails the
+            stage; Request.Heartbeat beats every 60 s; req.Process is never called (a
+            pid in another container means nothing). A ctx cancel takes back an
+            unclaimed job, else writes cancel and waits up to 30 s for done (the
+            usage it reported is still returned, nothing harvested). An exit.json
+            with unavailable: true (the container stopped or restarted mid-run) is a
+            NotAvailableError that still carries the usage its stdout shows (parsed
+            by ClaudeResult/CodexResult, nothing else kept), so a paid run cut short
+            counts toward the budgets. The harvest follows ANY
+            finished run, failed ones too, into a temp dir then renamed over out/:
+            regular files only, depth 8, 8 MiB a file, 64 MiB in all, 2,000 entries;
+            a broken limit (harvestLimitError) fails the stage and leaves out/ as it
+            was. The Bridge's own trouble with the staging dir (can't write the job,
+            can't read exit.json back) is NotAvailable, worded without its paths,
+            never a failed stage. A request timeout rounds up to whole seconds; none
+            is the protocol's 24 h ceiling. New makes the staging dir and chmods it
+            0777 (not sticky: the entrypoint's first-start chown must not stop the
+            runner replacing runner.json), removes job dirs older than a day and
+            RECLAIMS the rest (one Bridge per staging dir, and this one just started:
+            a finished or unclaimed dir is removed, its claim taken first; a running
+            one gets a cancel). EnforcesNoTools only for claude (codex's read-only
+            sandbox still reads); SupportsWeb true.
+  agentrun/ `audiosilo-bridge agent-runner`, the ONLY thing in the agent container (Linux
+            only). It sees the staging dir and /agent (secrets/, codex/), never a
+            library or the Bridge's data. Main sets umask 077 for the whole process
+            (os/exec can't set a child's, and nothing the runner writes relies on the
+            default: what the Bridge reads is chmod'ed 0644 explicitly), so whatever a
+            CLI or its helpers write is private. --slots 1-8 (each a concurrent CLI
+            run; the Bridge follows it as its agent concurrency). The loop: CLIs
+            detected at the start and again every 10 min or when a run finds its CLI
+            missing (in the background, so runner.json never goes stale); runner.json
+            rewritten every 15 s; ORPHANS (claimed, not running here, heartbeat older
+            than 30 s: an earlier runner's) finished at the start and with every
+            status write, before the Bridge's 60 s stale limit; the staging dir
+            scanned every 1 s while a slot is free, oldest request first, everything
+            through an os.Root. execute: request.json decoded strictly, a missing CLI
+            or credential is Exit unavailable, prompt.txt bounded, the argv built HERE
+            with agent.ClaudeArgs / agent.CodexArgs(CodexSandboxOff) (one copy of the
+            flags). The child's environment is an ALLOW-LIST: PATH, LANG, TZ, a
+            per-run TMPDIR and HOME, DISABLE_AUTOUPDATER=1, the CLI's own config dir
+            (a per-run CLAUDE_CONFIG_DIR; CODEX_HOME on /agent/codex, where the login
+            lives) and exactly ONE credential, a subscription first
+            (CLAUDE_CODE_OAUTH_TOKEN; codex's device login in auth.json), else the
+            API key (ANTHROPIC_API_KEY; OPENAI_API_KEY, also passed as
+            CODEX_API_KEY), each from the environment else
+            /agent/secrets/<lowercase name>; never the other CLI's, never argv, a log
+            or a file the Bridge reads. CODEX_HOME is wiped of everything but
+            auth.json and config.toml when the first concurrent codex run starts and
+            when the last ends (codex writes the whole environment into
+            shell_snapshots/, spike 2). credential_since comes from an in-memory
+            fingerprint of the credential, never written. spawn: its own process
+            group, stdout/stderr capped, the heartbeat touched every 5 s, cancel
+            checked every second; a cancel, the timeout or the runner stopping sends
+            SIGTERM to the group and SIGKILL 10 s later, and what is left of the group
+            when the CLI exits is killed. A run cut short by the container stopping
+            is Exit unavailable (the book parks and resumes). finish writes exit.json
+            (O_EXCL, never replacing a file), copies codex's last message (a link
+            refused), opens work/out/ for the Bridge (files 0644, dirs 0777 so the
+            Bridge can empty them, links skipped, never followed) and renames done.tmp
+            to done. Login: codex runs `codex login --device-auth` with the
+            allow-listed environment and CODEX_HOME on the volume; claude prints how
+            to give the container a `claude setup-token` token.
   app/      the wiring and the page API's Backend: Conn holds the pairing (settings
             pairing.*, the token in the vault) and the link; the heartbeat loop beats
             every 30 s or when kicked, records the server's libraries (under b.mu,
@@ -895,10 +1287,39 @@ internal/
             code; a page server that fails stops the heartbeat and the runner, and
             Run returns its error. Edits go through config.SaveFile (one at a time:
             each loads, edits and writes config.yaml) and reload the config.
+            Phase 1a: engine.go wires the ENGINE the way sidecars' daemon did, minus
+            the folder scan, and runs it in the background from Run (the first start
+            may download ffmpeg; the generate job waits for it): the event hub with
+            its durable persister (enqueue never blocks; a full or closed queue
+            drops), toolfetch, asr.Select, the agentbox runner as the ONLY agent
+            runner, the executor, the scheduler, the supervisor (deterministic lane;
+            supervisorApply, see supervisor/), the contribution poller, and two daily
+            jobs (prune the 30-day event log, sweep the transcripts past
+            transcripts.retention_days). The agent concurrency is the container's
+            --slots: read once at the start, then followAgentSlots (every
+            RunnerInterval) calls scheduler.SetAgentCapacity +
+            executor.SetAgentConcurrency when a live runner.json reports another
+            number. New wires generate.Handler into the runner (beside verify) with
+            ServerID = the pairing's server_id. AUDIOSILO_BRIDGE_GITHUB_TOKEN is
+            sealed into the vault as github_pat at every start (the environment wins
+            and replaces what was stored; blank leaves the vault alone; never
+            logged), where contrib.TokenSource looks first; canContribute is that
+            token resolving. The heartbeat carries estimates (nil until the engine
+            started): generate.Estimates, cached 5 min or until a job finishes done
+            (can_contribute computed with them, since resolving can shell out to
+            gh), with the agent's readiness and the budget read fresh each beat. The
+            Backend adds Job(id), RetryJob (generate.Retry: ErrNotFound -> 404,
+            ErrNotParked -> 409) and Engine (the agent container from
+            agentbox.Status, ASR capability, budgets and this month's spend, the
+            retention).
   api/      transport-only HTTP of the Bridge's page (/api/*): login (rate limited),
             password (a wrong current one is 403, never 401, which signs the page
             out), status, pair/unpair, libraries + mount edits + check now, settings,
-            jobs + cancel, logs, workers. lanOnly refuses any connection not from a
+            jobs + one job (GET /api/jobs/{id}) + cancel + retry (POST
+            /api/jobs/{id}/retry: 202, 404 when it isn't a sidecars job here, 409
+            when it isn't parked), engine (GET /api/engine: the agent container, its
+            CLIs' versions and credential KINDS, never a credential; ASR; the budgets
+            and the month's spend; the transcript retention), logs, workers. lanOnly refuses any connection not from a
             loopback, private (RFC 1918, ULA) or link-local address (RemoteAddr only,
             never a forwarded header; CGNAT/Tailscale is NOT local); every route but
             login and health needs a session, loopback included (an agent container
@@ -928,33 +1349,73 @@ web/          the Bridge's page: Vite + React 19 + TS + Tailwind v4 (npm, Node 2
               libraries, logs, token: localStorage audiosilo_bridge_token) plus the
               usePoll hook; components/tabs/ are the six tabs (Status, Libraries, Jobs,
               Settings, Workers, Logs), thin over src/lib. Jobs poll every 3 s while one
-              runs, else 15 s; a bridge.verify result renders as a file table.
+              runs (a PARKED job counts as needs attention, so it polls at 15 s: it may
+              wait for days), else 15 s; a bridge.verify result renders as a file table.
+              Phase 1a: the hash is a Route (routeFromHash: "#jobs", "#/logs", and
+              "#/jobs/<server job id>", the server console's link to one job, which
+              the Jobs tab shows alone as FocusedJob); src/lib/generate.ts reads a
+              sidecars.generate job (parkOf: a RUNNING job whose progress carries a
+              park; effectiveState shows it as needs_attention, as the server does;
+              canRetry; the ETA, spend and result wording), and a generate job shows
+              its stage, count bar, ETA, spend and source, while parked its park, its
+              hint and when it resumes by itself, a Retry button, and when done the
+              files written to .audiosilo/ with any contribution links.
+              src/lib/engine.ts words the Status tab's "Characters and recaps" card
+              (GET /api/engine every 10 s: the agent container and its CLIs'
+              credential kinds, speech recognition, the monthly budget bar, the
+              per-book budget and the transcript retention, all config.yaml).
 scripts/build-web.sh   build the SPA + embed it into bin/ (-tags embedui)
 Dockerfile             multi-stage: node build -> go build (embedui, cross-built on
                        $BUILDPLATFORM, only cmd/ and internal/ copied, Go and npm cache
                        mounts) -> whisper-cpu / whisper-cuda (docker/fetch-whisper.sh:
                        sidecars' pinned release asset, sha256-checked; each target
-                       fetches only its own) -> three targets: `slim` (debian-slim +
+                       fetches only its own) -> four targets: `slim` (debian-slim +
                        ffmpeg), `cuda` (nvidia/cuda runtime + the CUDA whisper-cli,
-                       amd64) and `full` (slim + the CPU whisper-cli; the last stage,
-                       the default). No agent CLI in any (decision 15: the agent
-                       container ships with Phase 1a). docker/entrypoint.sh starts as
-                       root only to own /bridge-data (a chown -R only when the
-                       folder isn't PUID:PGID's yet), sets umask 022 and drops to
-                       PUID:PGID with setpriv. image.yml builds them on v* tags and
-                       dispatch (amd64+arm64; cuda amd64).
-compose.example.yaml   the server (libraries :ro) and the Bridge (the same folders :rw)
+                       amd64), `agent` (see below) and `full` (slim + the CPU
+                       whisper-cli; the last stage, the default). None of slim, cuda
+                       and full carries an agent CLI (decision 15).
+                       docker/entrypoint.sh starts as root only to own /bridge-data (a
+                       chown -R only when the folder isn't PUID:PGID's yet), sets umask
+                       022 and drops to PUID:PGID with setpriv. `agent` (Phase 1a):
+                       debian-bookworm-slim + tini + the native claude and codex CLIs
+                       (pinned CLAUDE_VERSION/CODEX_VERSION ARGs, fetched by `npm pack`
+                       of the one platform package, integrity-checked, no install
+                       script, no Node at runtime; codex keeps its vendor layout minus
+                       the voice runtime) + this binary as `agent-runner`; uid/gid
+                       10002, setuid/setgid bits stripped, /agent (+ secrets/, codex/)
+                       0700 and /staging 0777, both volumes; the build runs each CLI's
+                       --version, so a release that doesn't install fails there.
+                       image.yml builds all four on v* tags and dispatch (amd64+arm64;
+                       cuda amd64; agent -> :<tag>-agent, :latest-agent).
+compose.example.yaml   three services: the server (libraries :ro), the Bridge (the same
+                       folders :rw, AUDIOSILO_BRIDGE_AGENT_STAGING_DIR=/staging, the
+                       optional AUDIOSILO_BRIDGE_AGENT_BACKEND and
+                       AUDIOSILO_BRIDGE_GITHUB_TOKEN) and `agent` (:latest-agent, user
+                       10002:10002, cap_drop ALL, no-new-privileges, read-only root,
+                       tmpfs /tmp, its own internet-only network, the credential
+                       variables by NAME only, stop_grace_period 20s). The `staging`
+                       volume is the only one both mount, outside /bridge-data (whose
+                       first-start chown would otherwise reach it); `agent-config` is
+                       the agent's /agent.
 ```
 
-**Dependency direction** (transport-only rule): `cmd -> {app, logring, config}`;
-`app -> {api, auth, config, jobs, link, logring, mapping, secrets, store, verify,
-web}`; `api -> {auth, jobs, link, logring, mapping, store}` (types only; it calls
-the injected Backend); `verify -> {jobs, link, mapping}`; `jobs -> {link, store}`;
-`mapping -> link`; `link` is a leaf. The engine (wired in Phase 1a):
-`scheduler -> {store, state, eta, events}`; `eta -> state` (pure, imported BY
+**Dependency direction** (transport-only rule): `cmd -> {app, agentrun, logring,
+config}`; `app -> {api, auth, config, jobs, link, logring, mapping, secrets, store,
+verify, web, generate, agentbox, agentproto, agent}` plus the engine it wires (asr,
+contrib, events, metaops, pipeline, scheduler, state, supervisor, toolfetch);
+`api -> {auth, jobs, link, logring, mapping, store}` (types only; it calls the
+injected Backend); `verify -> {jobs, link, mapping}`; `jobs -> {link, store}`;
+`mapping -> link`; `link` is a leaf. `generate -> {jobs, link, mapping, store,
+scheduler, state, pipeline, scratch, metaops, ebook, agent, fsutil}` (+ the meta
+module's extract/model), its engine and server reached through its own Engine and
+Server interfaces. The agent container: `agentproto` is a leaf (standard library
+only); `agentbox -> {agent, agentproto}`; `agentrun -> {agent, agentproto,
+fsutil}`; neither imports the other, and neither the pipeline nor the scheduler
+knows about either (agentbox is just an agent.Runner). The engine:
+`scheduler -> {store, state, eta, events, scratch}`; `eta -> state` (pure, imported BY
 scheduler - never the reverse);
 `pipeline -> {audio, asr, transcript, ebook, qa, spelling, agent, repair, toolfetch,
-scratch, secrets, fsutil, metaops, store, state, scheduler}` (metaops since M7's
+scratch, secrets, fsutil, metaops, contrib, pricing, store, state, scheduler}` (metaops since M7's
 contributing stage, and the spelling stage's series glossary); `agent`/`repair` are leaf helpers (no
 scheduler/store deps; `repair -> qa` for the shared Python-compat gram/repr helpers
 and the shared clip-floor predicate `qa.ClipStartInRange`/`qa.ClipStartFloorSec`);

@@ -138,6 +138,16 @@ func (s *Scheduler) readmit(ctx context.Context, b store.Book) error {
 	return nil
 }
 
+// cancelledReason is the error a cancelled book carries (the status enum has no
+// dedicated cancelled state); IsCancelled tells a cancel from a failure by it.
+const cancelledReason = "cancelled by user"
+
+// IsCancelled reports whether b was stopped by Cancel rather than failed by a
+// stage.
+func IsCancelled(b store.Book) bool {
+	return state.Status(b.Status) == state.StatusFailed && b.Error == cancelledReason
+}
+
 // Cancel stops a book: it interrupts any running stage and marks the book failed
 // with a "cancelled" reason (the status enum has no dedicated cancelled state).
 // A cancelled book can later be retried or deleted.
@@ -150,11 +160,11 @@ func (s *Scheduler) Cancel(ctx context.Context, id int64) error {
 		return ErrInvalidOp
 	}
 	// Cancel is not a park (no typed reason), so the park_code stays empty.
-	if err := s.db.SetBookStatus(ctx, id, string(state.StatusFailed), "cancelled by user", ""); err != nil {
+	if err := s.db.SetBookStatus(ctx, id, string(state.StatusFailed), cancelledReason, ""); err != nil {
 		return err
 	}
 	s.cancelInflight(id)
-	s.publishState(id, b.State, string(state.StatusFailed), "cancelled by user", "", "")
+	s.publishState(id, b.State, string(state.StatusFailed), cancelledReason, "", "")
 	return nil
 }
 

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { ApiClient, ApiError, LAN_ONLY_MESSAGE } from './client';
 import { mockFetch } from '@/test/fetchMock';
+import { engineFixture, generateJobFixture } from '@/test/fixtures';
 
 function client(token: string | null = 'tok') {
   const onSignedOut = vi.fn();
@@ -128,5 +129,33 @@ describe('ApiClient', () => {
     const { c } = client();
     await expect(c.cancelJob(7)).resolves.toBeUndefined();
     await expect(c.logout()).resolves.toBeUndefined();
+  });
+
+  it('reads one job, retries it, and reads the engine', async () => {
+    const { calls } = mockFetch({
+      'GET /api/jobs/12': { body: generateJobFixture() },
+      'POST /api/jobs/12/retry': { status: 202 },
+      'GET /api/engine': { body: engineFixture() },
+    });
+    const { c } = client();
+    const job = await c.job(12);
+    expect(job.progress?.stage).toBe('asr');
+    expect(job.server_id).toBe('srv-1');
+    await expect(c.retryJob(12)).resolves.toBeUndefined();
+    expect(calls[1]).toMatchObject({ method: 'POST', url: '/api/jobs/12/retry' });
+    const engine = await c.engine();
+    expect(engine.agent.clis.claude.credential).toBe('oauth_token');
+    expect(engine.transcript_retention_days).toBe(30);
+  });
+
+  it('surfaces a retry the Bridge refuses', async () => {
+    mockFetch({
+      'POST /api/jobs/12/retry': {
+        status: 409,
+        body: { error: "the job isn't waiting on anything a retry would help" },
+      },
+    });
+    const { c } = client();
+    await expect(c.retryJob(12)).rejects.toMatchObject({ status: 409 });
   });
 });

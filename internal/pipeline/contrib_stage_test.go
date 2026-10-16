@@ -933,3 +933,21 @@ func truncate(s string) string {
 	}
 	return s
 }
+
+// TestContribModeForBook: a book's own mode (a sidecars.generate job's
+// contribute) wins over the configured one; an empty or unknown one falls back.
+func TestContribModeForBook(t *testing.T) {
+	e := &Executor{contribMode: contribModeIssue}
+	for mode, want := range map[string]string{"local": "local", "issue": "issue", "": "issue", "pr": "issue"} {
+		if got := e.contribModeFor(store.Book{ContribMode: mode}); got != want {
+			t.Errorf("book mode %q = %q, want %q", mode, got, want)
+		}
+	}
+	e.contribMode = contribModeLocal
+	if got := e.contribModeFor(store.Book{ContribMode: "issue"}); got != "issue" {
+		t.Errorf("a book's issue under a local Bridge = %q", got)
+	}
+	if got := e.contribModeFor(store.Book{}); got != "local" {
+		t.Errorf("no book mode under a local Bridge = %q", got)
+	}
+}

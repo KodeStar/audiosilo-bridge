@@ -25,7 +25,7 @@ type SupervisorRuntimeSnapshot struct {
 }
 
 func (s *Scheduler) SupervisorRuntime(books []store.Book) SupervisorRuntimeSnapshot {
-	out := SupervisorRuntimeSnapshot{ActiveBooks: map[int64]bool{}, AgentCapacity: s.agentCap, InvocationsByBook: map[int64]int{}}
+	out := SupervisorRuntimeSnapshot{ActiveBooks: map[int64]bool{}, AgentCapacity: s.agentCapacity(), InvocationsByBook: map[int64]int{}}
 	if runtime, ok := s.exec.(agentInvocationRuntime); ok {
 		out.AgentInvocations, out.InvocationsByBook, out.InvocationCapacity = runtime.AgentInvocationRuntime()
 	}

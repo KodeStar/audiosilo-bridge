@@ -16,8 +16,12 @@ type ParkCode string
 // (internal/pipeline), except ParkFixLoopExhausted, which the scheduler sets when
 // the audit->fix loop is exhausted (state.NextState returns StatusNeedsAttention).
 const (
-	ParkAgentUnavailable         ParkCode = "agent_unavailable"
-	ParkAgentRateLimited         ParkCode = "agent_rate_limited"
+	ParkAgentUnavailable ParkCode = "agent_unavailable"
+	ParkAgentRateLimited ParkCode = "agent_rate_limited"
+	// ParkAgentCredentialRefused: the provider refused the agent CLI's credential
+	// (an expired or revoked token, a wrong API key). Someone has to replace it, but
+	// the park still carries a retry_at, so the book goes on by itself once they have.
+	ParkAgentCredentialRefused   ParkCode = "agent_credential_refused"
 	ParkAgentValidationExhausted ParkCode = "agent_validation_exhausted"
 	ParkMarkersNotConfident      ParkCode = "markers_not_confident"
 	ParkQANoConverge             ParkCode = "qa_no_converge"
@@ -34,8 +38,8 @@ const (
 	ParkASRDecodeTimeout ParkCode = "asr_decode_timeout"
 
 	// ParkContribUnavailable: the contributing stage runs in issue mode but no
-	// GitHub credential is available (no PAT in secrets, no `gh auth token`). The user
-	// adds a PAT in Settings or runs `gh auth login`, then Retry.
+	// GitHub credential is available (no PAT in secrets, no `gh auth token`). On the
+	// Bridge the token comes from AUDIOSILO_BRIDGE_GITHUB_TOKEN; then Retry.
 	ParkContribUnavailable ParkCode = "contrib_unavailable"
 	// ParkCoreNeeded: the book's work does not exist upstream, so an add-work (core)
 	// proposal awaits completion/confirmation in the UI before the sidecars can attach.

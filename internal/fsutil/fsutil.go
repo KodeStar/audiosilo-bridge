@@ -31,6 +31,13 @@ func WriteFileAtomic(path string, data []byte, perm fs.FileMode) error {
 		_ = os.Remove(tmpName)
 		return werr
 	}
+	// Flushed before the rename: without it a crash just after the rename can
+	// leave the new name pointing at an empty file on some filesystems.
+	if serr := tmp.Sync(); serr != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return serr
+	}
 	if cerr := tmp.Close(); cerr != nil {
 		_ = os.Remove(tmpName)
 		return cerr

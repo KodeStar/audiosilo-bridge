@@ -126,7 +126,7 @@ func Apply(workDir string, data *Corrections) (*ApplyResult, error) {
 	}
 
 	log := buildLog(data.Rules, counts, names, total, perChapter)
-	if err := fsutil.WriteFileAtomic(filepath.Join(workDir, "corrections.log"), []byte(log), 0o644); err != nil {
+	if err := fsutil.WriteFileAtomic(filepath.Join(workDir, CorrectionsLogFile), []byte(log), 0o644); err != nil {
 		return nil, fmt.Errorf("write corrections.log: %w", err)
 	}
 

@@ -13,8 +13,10 @@ import (
 
 	"github.com/kodestar/audiosilo-bridge/internal/api"
 	"github.com/kodestar/audiosilo-bridge/internal/config"
+	"github.com/kodestar/audiosilo-bridge/internal/generate"
 	"github.com/kodestar/audiosilo-bridge/internal/link"
 	"github.com/kodestar/audiosilo-bridge/internal/logring"
+	"github.com/kodestar/audiosilo-bridge/internal/pipeline"
 	"github.com/kodestar/audiosilo-bridge/internal/store"
 )
 
@@ -205,3 +207,56 @@ func (b *Bridge) Logs(after uint64, limit int, level slog.Level) []logring.Entry
 
 // Workers lists the ASR workers (none until Phase 1b).
 func (b *Bridge) Workers() []link.Worker { return []link.Worker{} }
+
+// Job is one job this Bridge claimed.
+func (b *Bridge) Job(ctx context.Context, id int64) (*store.ServerJob, error) {
+	job, err := b.db.GetServerJob(ctx, id)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil, api.Errorf(api.ErrNotFound, "this Bridge has no job %d", id)
+	}
+	return job, err
+}
+
+// RetryJob retries a parked sidecars.generate job: the engine re-admits its book,
+// or a job waiting for its book's folder to be writable checks again now.
+func (b *Bridge) RetryJob(ctx context.Context, id int64) error {
+	err := b.gen.Retry(ctx, id)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		return api.Errorf(api.ErrNotFound, "job %d isn't a sidecars job this Bridge runs", id)
+	case errors.Is(err, generate.ErrNotParked):
+		return api.Errorf(api.ErrConflict, "%v", err)
+	}
+	return err
+}
+
+// Engine is the sidecars engine's state: the agent container, the speech
+// recognition, the budgets and the transcript retention.
+func (b *Bridge) Engine(ctx context.Context) api.Engine {
+	cfg := b.config()
+	st := b.box.Status()
+	backend := b.box.ID()
+	out := api.Engine{
+		Agent: api.EngineAgent{Backend: backend, Available: st.Available, Detail: st.Detail, Version: st.Version, Slots: st.Slots,
+			CLIs: map[string]api.EngineCLI{}, Subscription: st.Subscription(backend), StagingDir: cfg.AgentStagingDir(b.dataDir)},
+		MonthlyBudgetUSD: cfg.Agent.MonthlyBudgetUSD, BookBudgetUSD: cfg.Agent.BookBudgetUSD,
+		TranscriptRetentionDays: cfg.Transcripts.RetentionDays,
+	}
+	if !st.HeartbeatAt.IsZero() {
+		at := st.HeartbeatAt.UTC()
+		out.Agent.HeartbeatAt = &at
+	}
+	for name, c := range st.CLIs {
+		out.Agent.CLIs[name] = api.EngineCLI{Version: c.Version, Credential: c.Credential}
+	}
+	start, _ := pipeline.MonthBounds(time.Now())
+	if spent, err := b.db.SumBudgetCostSince(ctx, start); err == nil {
+		out.MonthSpentUSD = generate.Cents(spent)
+	}
+	if e := b.engine.get(); e != nil {
+		out.Started = true
+		c := e.exec.ASRCapability()
+		out.ASR = api.EngineASR{Backend: c.Backend, Available: c.Available, Device: c.Device, Detail: c.Detail}
+	}
+	return out
+}

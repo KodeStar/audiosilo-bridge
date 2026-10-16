@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -47,14 +48,17 @@ type Handler interface {
 	Run(ctx context.Context, job Job, rep *Reporter) (result any, err error)
 }
 
-// Lanes: how many jobs of a kind can run at once. Light jobs are quick checks;
-// the ASR and agent lanes arrive with Phase 1.
+// Lanes: how many jobs of a kind can run at once. Light jobs are quick checks.
+// The pipeline lane holds the jobs that follow an engine book (sidecars.generate):
+// the engine's own scheduler does the throttling, so a job waits there while its
+// book is queued or parked, and the lane only bounds how many are followed.
 const (
-	LaneLight = "light"
+	LaneLight    = "light"
+	LanePipeline = "pipeline"
 )
 
 // DefaultLanes are the lanes' capacities.
-func DefaultLanes() map[string]int { return map[string]int{LaneLight: 2} }
+func DefaultLanes() map[string]int { return map[string]int{LaneLight: 2, LanePipeline: 25} }
 
 // ParkError parks a job (needs_attention) with a typed code.
 type ParkError struct {
@@ -74,6 +78,7 @@ type Server interface {
 type Store interface {
 	RecordClaim(ctx context.Context, j store.ServerJob) error
 	SetServerJobProgress(ctx context.Context, id int64, attempt int, progress json.RawMessage) error
+	SetServerJobReport(ctx context.Context, id int64, attempt int, progress json.RawMessage, parkMsg string) error
 	FinishServerJob(ctx context.Context, id int64, attempt int, state string, result json.RawMessage, errText string) error
 	MarkServerJobReported(ctx context.Context, id int64, attempt int) error
 	OpenServerJobs(ctx context.Context) ([]store.ServerJob, error)
@@ -88,6 +93,32 @@ var (
 	errStopping        = errors.New("the Bridge is stopping")
 	errUnpaired        = errors.New("the server refused the Bridge's token")
 )
+
+// Abandoner is a Handler whose jobs hold work beyond Run (sidecars.generate: an
+// engine book). The runner calls Abandon when it ends such a job without running
+// the handler (the first report of a resumed job answered with a cancel or a lost
+// claim, or another server's job dropped), so the work is released as the
+// handler's own end would.
+type Abandoner interface {
+	Abandon(ctx context.Context, job Job)
+}
+
+// abandon tells the job's handler, when it is an Abandoner, that the job ended
+// without it.
+func (r *Runner) abandon(ctx context.Context, job Job) {
+	if a, ok := r.handlers[job.Kind].(Abandoner); ok {
+		a.Abandon(ctx, job)
+	}
+}
+
+// Resumes reports whether a job whose context ended will run again under its
+// claim: the Bridge is stopping (the next start resumes it) or the server refused
+// the token (resumed once a link works again). False when an admin cancelled it
+// or the server took it back, which end it here for good.
+func Resumes(ctx context.Context) bool {
+	cause := context.Cause(ctx)
+	return !errors.Is(cause, errCancelRequested) && !errors.Is(cause, errLost)
+}
 
 // Options tunes a Runner; zero values take the defaults.
 type Options struct {
@@ -104,7 +135,10 @@ type Options struct {
 	RetryEvery time.Duration
 	// Keep is how many finished jobs the store keeps.
 	Keep int
-	Log  *slog.Logger
+	// ServerID is the paired server's id ("" when unknown), recorded on every
+	// claim: a start treats an open job of another server as lost.
+	ServerID func() string
+	Log      *slog.Logger
 }
 
 // Runner claims and runs jobs.
@@ -158,6 +192,9 @@ func New(st Store, server func() Server, onUnauthorized func(Server), opts Optio
 	}
 	if opts.Log == nil {
 		opts.Log = slog.Default()
+	}
+	if opts.ServerID == nil {
+		opts.ServerID = func() string { return "" }
 	}
 	if onUnauthorized == nil {
 		onUnauthorized = func(Server) {}
@@ -280,7 +317,7 @@ func (r *Runner) Run(ctx context.Context) {
 			}
 			continue
 		}
-		r.start(ctx, srv, jobOf(job), &wg, false)
+		r.start(ctx, srv, jobOf(job), &wg)
 	}
 }
 
@@ -295,6 +332,12 @@ func (r *Runner) recover(ctx context.Context, srv Server, wg *sync.WaitGroup) bo
 		return false
 	}
 	for _, sj := range open {
+		if r.otherServer(sj) {
+			// Another server's job (the Bridge was paired with this one since):
+			// its id means nothing here, so nothing is reported for it.
+			r.dropOtherServers(ctx, sj)
+			continue
+		}
 		if sj.State != store.JobRunning {
 			r.retry.Store(true)
 			continue
@@ -309,9 +352,25 @@ func (r *Runner) recover(ctx context.Context, srv Server, wg *sync.WaitGroup) bo
 			continue
 		}
 		r.log.Info("bridge: resuming a job after a restart", "job", job.ID, "kind", job.Kind, "attempt", job.Attempt)
-		r.start(ctx, srv, job, wg, true)
+		r.launch(ctx, srv, job, wg, sj.Error)
 	}
 	return true
+}
+
+// dropOtherServers ends what a start found open for another server: a running
+// job is lost, an unreported end is never sent.
+func (r *Runner) dropOtherServers(ctx context.Context, sj store.ServerJob) {
+	r.log.Info("bridge: a job of another server is dropped", "job", sj.ID, "server", sj.ServerID)
+	var err error
+	if sj.State == store.JobRunning {
+		err = r.store.FinishServerJob(ctx, sj.ID, sj.Attempt, store.JobLost, nil, "the Bridge was paired with another server")
+		r.abandon(ctx, storedJob(sj))
+	} else {
+		err = r.store.MarkServerJobReported(ctx, sj.ID, sj.Attempt)
+	}
+	if err != nil {
+		r.log.Warn("bridge: recording a job failed", "job", sj.ID, "err", err)
+	}
 }
 
 // resumeStranded resumes, under their claim, the jobs a refused token stopped,
@@ -333,17 +392,25 @@ func (r *Runner) resumeStranded(ctx context.Context, srv Server, wg *sync.WaitGr
 		if running || err != nil || sj.State != store.JobRunning || sj.Attempt != job.Attempt {
 			continue // a later claim took its row, or it ended
 		}
-		if !sameServer(s.srv, srv) {
+		if !sameServer(s.srv, srv) || r.otherServer(*sj) {
 			// Paired with another server since: its job ids are another
 			// server's, and the claim can't be reported anywhere now.
 			if err := r.store.FinishServerJob(ctx, job.ID, job.Attempt, store.JobLost, nil, "the Bridge was paired with another server"); err != nil {
 				r.log.Warn("bridge: recording a job failed", "job", job.ID, "err", err)
 			}
+			r.abandon(ctx, job)
 			continue
 		}
 		r.log.Info("bridge: resuming a job its refused token stopped", "job", job.ID, "kind", job.Kind, "attempt", job.Attempt)
-		r.start(ctx, srv, job, wg, true)
+		r.launch(ctx, srv, job, wg, sj.Error)
 	}
+}
+
+// otherServer reports whether a recorded job came from a server other than the
+// one the Bridge is paired with now (unknown on either side counts as the same).
+func (r *Runner) otherServer(sj store.ServerJob) bool {
+	cur := r.opts.ServerID()
+	return sj.ServerID != "" && cur != "" && sj.ServerID != cur
 }
 
 // sameServer reports whether two links reach one server: the same link, or
@@ -367,12 +434,14 @@ func storedJob(sj store.ServerJob) Job {
 	return Job{ID: sj.ID, Kind: sj.Kind, LibraryID: sj.LibraryID, Path: sj.Path, Params: sj.Params, Attempt: sj.Attempt}
 }
 
-// run is one running job, and the link it runs on.
+// run is one running job, and the link it runs on. parked is the park message a
+// resumed job had (its first report keeps it parked).
 type run struct {
 	job    Job
 	srv    Server
 	lane   string
 	cancel context.CancelCauseFunc
+	parked string
 }
 
 // strandedJob is a job a refused token stopped, with the link it ran on.
@@ -381,22 +450,26 @@ type strandedJob struct {
 	srv Server
 }
 
-// start runs a job in its lane (resumed: picked up after a restart, already
-// recorded). A job of a kind the Bridge doesn't run is failed at once.
-func (r *Runner) start(ctx context.Context, srv Server, job Job, wg *sync.WaitGroup, resumed bool) {
-	h, ok := r.handlers[job.Kind]
-	if !resumed {
-		if err := r.store.RecordClaim(ctx, store.ServerJob{ID: job.ID, Kind: job.Kind, LibraryID: job.LibraryID, Path: job.Path,
-			Params: job.Params, Attempt: job.Attempt}); err != nil {
-			r.log.Warn("bridge: recording a claim failed", "job", job.ID, "err", err)
-		}
+// start records a claimed job and runs it.
+func (r *Runner) start(ctx context.Context, srv Server, job Job, wg *sync.WaitGroup) {
+	if err := r.store.RecordClaim(ctx, store.ServerJob{ID: job.ID, Kind: job.Kind, LibraryID: job.LibraryID, Path: job.Path,
+		Params: job.Params, Attempt: job.Attempt, ServerID: r.opts.ServerID()}); err != nil {
+		r.log.Warn("bridge: recording a claim failed", "job", job.ID, "err", err)
 	}
+	r.launch(ctx, srv, job, wg, "")
+}
+
+// launch runs a recorded job in its lane, parked with message parked when a
+// resumed one was ("" when it wasn't). A job of a kind the Bridge doesn't run is
+// failed at once.
+func (r *Runner) launch(ctx context.Context, srv Server, job Job, wg *sync.WaitGroup, parked string) {
+	h, ok := r.handlers[job.Kind]
 	if !ok {
 		r.finish(ctx, srv, job, store.JobFailed, nil, nil, "this Bridge doesn't run "+job.Kind+" jobs")
 		return
 	}
 	rctx, cancel := context.WithCancelCause(ctx)
-	ru := &run{job: job, srv: srv, lane: h.Lane(), cancel: cancel}
+	ru := &run{job: job, srv: srv, lane: h.Lane(), cancel: cancel, parked: parked}
 	r.mu.Lock()
 	r.running[job.ID] = ru
 	r.use[ru.lane]++
@@ -432,8 +505,17 @@ func (r *Runner) release(ru *run, stranded bool) {
 // refused token stopped the job (left running, to resume under its claim).
 func (r *Runner) execute(ctx, base context.Context, srv Server, h Handler, ru *run) (stranded bool) {
 	rep := &Reporter{r: r, srv: srv, job: ru.job, cancel: ru.cancel, ctx: ctx, nudge: make(chan struct{}, 1)}
+	if ru.parked != "" {
+		rep.parked, rep.parkMsg = true, ru.parked
+	}
 	if !rep.send() {
-		return r.settle(base, srv, ru, rep, nil, context.Cause(ctx))
+		// Ended before its handler ran: a cancel or a lost claim ends it for good,
+		// so what an earlier run of it left (an engine book) is released.
+		cause := context.Cause(ctx)
+		if errors.Is(cause, errCancelRequested) || errors.Is(cause, errLost) {
+			r.abandon(base, ru.job)
+		}
+		return r.settle(base, srv, ru, rep, nil, cause)
 	}
 	done := make(chan struct{})
 	reporting := make(chan struct{})
@@ -516,10 +598,11 @@ func (r *Runner) settle(base context.Context, srv Server, ru *run, rep *Reporter
 // 2 KiB, a progress object's 16 KiB and a result object's 64 KiB): a report it
 // refuses is refused for good.
 const (
-	maxErrorText   = 1024
-	maxStepText    = 128
-	maxMessageText = 1024
-	maxResultBytes = 64 << 10
+	maxErrorText     = 1024
+	maxStepText      = 128
+	maxMessageText   = 1024
+	maxResultBytes   = 64 << 10
+	maxProgressBytes = 16 << 10
 )
 
 // errUnreportable fails a job whose result the server would refuse.
@@ -552,10 +635,9 @@ func (r *Runner) report(ctx context.Context, srv Server, sj store.ServerJob) {
 	if len(sj.Result) > 0 && string(sj.Result) != "{}" {
 		u.Result = sj.Result
 	}
-	if sj.Error != "" {
-		e := sj.Error
-		u.Error = &e
-	}
+	// The error goes out even when empty: it clears the message a park left.
+	e := sj.Error
+	u.Error = &e
 	_, err := srv.UpdateJob(ctx, sj.ID, u)
 	switch {
 	case err == nil, errors.Is(err, link.ErrNotHeld):
@@ -605,7 +687,9 @@ func (r *Runner) retryReports(ctx context.Context) {
 			continue
 		}
 		for _, sj := range open {
-			if sj.State != store.JobRunning && !sj.Reported {
+			// Another server's end is never sent here (recover drops it; it may
+			// not have yet when this looks).
+			if sj.State != store.JobRunning && !sj.Reported && !r.otherServer(sj) {
 				r.report(ctx, srv, sj)
 			}
 		}
@@ -625,12 +709,47 @@ func (r *Runner) Cancel(id int64) bool {
 }
 
 // Progress is a job's progress as the server shows it: a step, a sentence, and
-// a count where there is one.
+// a count where there is one. Extra carries a kind's own fields (sidecars.generate's
+// stage, eta_seconds, cost_usd, source, park), sent in the same object beside
+// them; the four fields above always win over an Extra key of the same name.
 type Progress struct {
-	Step    string `json:"step"`
-	Message string `json:"message,omitempty"`
-	Done    int    `json:"done,omitempty"`
-	Total   int    `json:"total,omitempty"`
+	Step    string         `json:"step"`
+	Message string         `json:"message,omitempty"`
+	Done    int            `json:"done,omitempty"`
+	Total   int            `json:"total,omitempty"`
+	Extra   map[string]any `json:"-"`
+}
+
+// MarshalJSON writes the progress as one flat object: Extra's keys beside step,
+// message, done and total. An object over the server's 16 KiB is sent without
+// Extra, which the server would otherwise refuse for good.
+func (p Progress) MarshalJSON() ([]byte, error) {
+	type base Progress
+	if len(p.Extra) == 0 {
+		return json.Marshal(base(p))
+	}
+	out := make(map[string]any, len(p.Extra)+4)
+	for k, v := range p.Extra {
+		out[k] = v
+	}
+	delete(out, "message")
+	delete(out, "done")
+	delete(out, "total")
+	out["step"] = p.Step
+	if p.Message != "" {
+		out["message"] = p.Message
+	}
+	if p.Done != 0 {
+		out["done"] = p.Done
+	}
+	if p.Total != 0 {
+		out["total"] = p.Total
+	}
+	b, err := json.Marshal(out)
+	if err != nil || len(b) > maxProgressBytes {
+		return json.Marshal(base(p))
+	}
+	return b, nil
 }
 
 // Reporter is how a Handler reports progress. It is safe for concurrent use.
@@ -650,11 +769,29 @@ type Reporter struct {
 	// dirty: progress changed since it was last sent (and stored).
 	dirty  bool
 	sentAt time.Time
+	// parked: the job reports needs_attention with parkMsg as its error, until
+	// Unpark. Unparked, every report clears the error (one a park left, even
+	// across a restart that came before the clear got through).
+	parked  bool
+	parkMsg string
+	// path is the job's book path as the server's last answer gave it ("" until
+	// one did): the server moves an open job with its book (a rename the scan
+	// noticed), and the job hears it here.
+	path string
 }
 
 // LocalReporter returns a Reporter that records progress and sends nothing (a
 // handler's tests).
 func LocalReporter() *Reporter { return &Reporter{} }
+
+// Path is the job's book path as the server's last answer to a report gave it,
+// "" when no answer carried one: a book the server saw move since the claim is
+// at this path now.
+func (p *Reporter) Path() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.path
+}
 
 // Last is the progress last recorded.
 func (p *Reporter) Last() Progress {
@@ -664,18 +801,76 @@ func (p *Reporter) Last() Progress {
 }
 
 // Progress records the job's progress; a new step is sent at once, anything
-// else within ProgressEvery.
+// else within ProgressEvery. The same progress again (a handler reporting on
+// every poll) changes nothing, so it is sent only with the keepalive.
 func (p *Reporter) Progress(pr Progress) {
 	pr.Step, pr.Message = clip(pr.Step, maxStepText), clip(pr.Message, maxMessageText)
 	p.mu.Lock()
+	if reflect.DeepEqual(pr, p.progress) {
+		p.mu.Unlock()
+		return
+	}
 	newStep := pr.Step != p.progress.Step
 	p.progress, p.dirty = pr, true
 	p.mu.Unlock()
-	if newStep && p.nudge != nil {
-		select {
-		case p.nudge <- struct{}{}:
-		default:
-		}
+	if newStep {
+		p.wake()
+	}
+}
+
+// Park reports the job as needs_attention with message as its error (code is
+// the park's typed reason, which the handler also puts in its progress) while it
+// keeps running here. The server drops a parked job's lease (needs_attention has
+// none) and renews it once Unpark reports it running again; meanwhile the job
+// goes on reporting, so a cancel from the server still ends it. If the Bridge
+// disappears for good, the job stays needs_attention until an admin cancels it.
+// Both are sent at once, and a job resumed after a restart keeps its park.
+func (p *Reporter) Park(code, message string) {
+	message = clip(strings.TrimSpace(message), maxErrorText)
+	if message == "" {
+		message = code
+	}
+	p.mu.Lock()
+	changed := !p.parked || p.parkMsg != message
+	p.parked, p.parkMsg = true, message
+	if changed {
+		p.dirty = true
+	}
+	p.mu.Unlock()
+	if changed {
+		p.wake()
+	}
+}
+
+// Unpark reports the job running again after a Park (nothing when it isn't
+// parked).
+func (p *Reporter) Unpark() {
+	p.mu.Lock()
+	was := p.parked
+	if was {
+		p.parked, p.parkMsg, p.dirty = false, "", true
+	}
+	p.mu.Unlock()
+	if was {
+		p.wake()
+	}
+}
+
+// parkState reports whether the job is parked, and with what message.
+func (p *Reporter) parkState() (bool, string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.parked, p.parkMsg
+}
+
+// wake asks the reporting goroutine to send now.
+func (p *Reporter) wake() {
+	if p.nudge == nil {
+		return
+	}
+	select {
+	case p.nudge <- struct{}{}:
+	default:
 	}
 }
 
@@ -715,27 +910,39 @@ func (p *Reporter) loop(done <-chan struct{}) {
 	}
 }
 
-// send reports the job as running with its current progress (renewing the
-// lease) and acts on the answer: a cancel request or a lost claim ends the
-// job's context. It reports whether the job goes on.
+// send reports the job's state (running, renewing the lease, or needs_attention
+// while parked, which has none) with its current progress and acts on the
+// answer: a cancel request or a lost claim ends the job's context. It reports
+// whether the job goes on.
 func (p *Reporter) send() bool {
 	ctx := p.ctx
 	p.mu.Lock()
 	pr, dirty := p.progress, p.dirty
+	parked, parkMsg := p.parked, p.parkMsg
 	p.sentAt, p.dirty = time.Now(), false
 	p.mu.Unlock()
 	raw, _ := json.Marshal(pr)
 	if dirty {
-		if err := p.r.store.SetServerJobProgress(ctx, p.job.ID, p.job.Attempt, raw); err != nil && ctx.Err() == nil {
+		if err := p.r.store.SetServerJobReport(ctx, p.job.ID, p.job.Attempt, raw, parkMsg); err != nil && ctx.Err() == nil {
 			p.r.log.Warn("bridge: recording progress failed", "job", p.job.ID, "err", err)
 		}
 	}
+	// The error always goes out: the park's message while parked, else "", which
+	// clears the one a park left.
 	state := link.StateRunning
-	u := link.Update{Attempt: p.job.Attempt, State: &state}
+	u := link.Update{Attempt: p.job.Attempt, State: &state, Error: &parkMsg}
+	if parked {
+		state = link.StateNeedsAttention
+	}
 	if pr.Step != "" {
 		u.Progress = raw
 	}
 	got, err := p.srv.UpdateJob(ctx, p.job.ID, u)
+	if err == nil && got.Path != nil && *got.Path != "" {
+		p.mu.Lock()
+		p.path = *got.Path
+		p.mu.Unlock()
+	}
 	switch {
 	case err == nil && got.CancelRequested:
 		p.cancel(errCancelRequested)
@@ -753,7 +960,8 @@ func (p *Reporter) send() bool {
 		return false
 	default:
 		// The server is unreachable for now: the job goes on, and its lease
-		// lasts two minutes from the last report that got through.
+		// (a running job's) lasts two minutes from the last report that got
+		// through.
 		p.r.log.Warn("bridge: reporting progress failed", "job", p.job.ID, "err", err)
 		return true
 	}

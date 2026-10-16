@@ -21,23 +21,28 @@ const (
 
 // ServerJob is one server job this Bridge claimed.
 type ServerJob struct {
-	ID         int64           `json:"id"`
-	Kind       string          `json:"kind"`
-	LibraryID  *int64          `json:"library_id"`
-	Path       *string         `json:"path"`
-	Params     json.RawMessage `json:"params"`
-	Attempt    int             `json:"attempt"`
-	State      string          `json:"state"`
-	Progress   json.RawMessage `json:"progress"`
-	Result     json.RawMessage `json:"result"`
-	Error      string          `json:"error"`
-	Reported   bool            `json:"reported"`
-	ClaimedAt  string          `json:"claimed_at"`
-	UpdatedAt  string          `json:"updated_at"`
-	FinishedAt *string         `json:"finished_at"`
+	ID        int64           `json:"id"`
+	Kind      string          `json:"kind"`
+	LibraryID *int64          `json:"library_id"`
+	Path      *string         `json:"path"`
+	Params    json.RawMessage `json:"params"`
+	Attempt   int             `json:"attempt"`
+	// ServerID is the id of the server that handed the job out ('' on rows from
+	// before migration 0003).
+	ServerID string          `json:"server_id"`
+	State    string          `json:"state"`
+	Progress json.RawMessage `json:"progress"`
+	Result   json.RawMessage `json:"result"`
+	// Error is a finished job's error, or, while the job runs, the message of
+	// the park it reports (needs_attention), "" when it isn't parked.
+	Error      string  `json:"error"`
+	Reported   bool    `json:"reported"`
+	ClaimedAt  string  `json:"claimed_at"`
+	UpdatedAt  string  `json:"updated_at"`
+	FinishedAt *string `json:"finished_at"`
 }
 
-const serverJobColumns = `id, kind, library_id, path, params, attempt, state, progress, result, error,
+const serverJobColumns = `id, kind, library_id, path, params, attempt, server_id, state, progress, result, error,
 	reported, claimed_at, updated_at, finished_at`
 
 func scanServerJob(row interface{ Scan(...any) error }) (*ServerJob, error) {
@@ -47,7 +52,7 @@ func scanServerJob(row interface{ Scan(...any) error }) (*ServerJob, error) {
 		path, finished           sql.NullString
 		params, progress, result string
 	)
-	if err := row.Scan(&j.ID, &j.Kind, &lib, &path, &params, &j.Attempt, &j.State, &progress, &result,
+	if err := row.Scan(&j.ID, &j.Kind, &lib, &path, &params, &j.Attempt, &j.ServerID, &j.State, &progress, &result,
 		&j.Error, &j.Reported, &j.ClaimedAt, &j.UpdatedAt, &finished); err != nil {
 		return nil, err
 	}
@@ -72,18 +77,28 @@ func jsonOr(raw json.RawMessage) string {
 	return string(raw)
 }
 
-// RecordClaim records a claimed job as running under attempt, replacing the
-// row of an earlier attempt of the same job.
+// RecordClaim records a claimed job as running under attempt (from the server
+// j.ServerID), replacing the row of an earlier attempt of the same job.
 func (db *DB) RecordClaim(ctx context.Context, j ServerJob) error {
 	now := timestamp(nowFn())
 	_, err := db.sql.ExecContext(ctx,
-		`INSERT INTO server_jobs (id, kind, library_id, path, params, attempt, state, claimed_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, 'running', ?, ?)
+		`INSERT INTO server_jobs (id, kind, library_id, path, params, attempt, server_id, state, claimed_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, 'running', ?, ?)
 		 ON CONFLICT(id) DO UPDATE SET kind = excluded.kind, library_id = excluded.library_id, path = excluded.path,
-		     params = excluded.params, attempt = excluded.attempt, state = 'running', progress = '{}', result = '{}',
-		     error = '', reported = 0, claimed_at = excluded.claimed_at, updated_at = excluded.updated_at,
-		     finished_at = NULL`,
-		j.ID, j.Kind, j.LibraryID, j.Path, jsonOr(j.Params), j.Attempt, now, now)
+		     params = excluded.params, attempt = excluded.attempt, server_id = excluded.server_id, state = 'running',
+		     progress = '{}', result = '{}', error = '', reported = 0, claimed_at = excluded.claimed_at,
+		     updated_at = excluded.updated_at, finished_at = NULL`,
+		j.ID, j.Kind, j.LibraryID, j.Path, jsonOr(j.Params), j.Attempt, j.ServerID, now, now)
+	return err
+}
+
+// SetServerJobReport records a running job's progress and park message ("" when
+// it isn't parked) in one write: the park lives in error, so a start resumes the
+// job parked instead of reporting it running first.
+func (db *DB) SetServerJobReport(ctx context.Context, id int64, attempt int, progress json.RawMessage, parkMsg string) error {
+	_, err := db.sql.ExecContext(ctx,
+		`UPDATE server_jobs SET progress = ?, error = ?, updated_at = ? WHERE id = ? AND attempt = ? AND state = 'running'`,
+		jsonOr(progress), parkMsg, timestamp(nowFn()), id, attempt)
 	return err
 }
 

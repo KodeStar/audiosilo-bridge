@@ -20,8 +20,12 @@ The **Bridge**: the optional, always-on companion to an AudioSilo server that
   repo's `server_jobs` row is the execution truth.
 - **No standalone mode** (decision 2): it always pairs with a server.
 - **Mappings are checked, never assumed** (decision 13): see `internal/mapping`.
-- **Agents never run in this container** (decision 15): the `agent` container (Phase
-  1a) sees only a staging volume. None of the images carries an agent CLI.
+- **Agents never run in this container** (decision 15): the `agent` image (the
+  native claude and codex CLIs, run by `audiosilo-bridge agent-runner`) sees only the
+  staging volume it shares with the Bridge and its own `/agent` volume. The Bridge
+  drops typed requests there (`internal/agentproto`), never argv; slim, full and
+  cuda carry no agent CLI, and config forces the supervisor's model-assisted lane
+  and backend failover off.
 - **Private, internal name** (decision 14): the repo stays private until the owner
   says otherwise; rename it with the product before any public release.
 
@@ -30,8 +34,9 @@ Module path: `github.com/kodestar/audiosilo-bridge`. Code is **AGPL-3.0**.
 The engine (ASR, the agent pipeline, QA, spelling, contribution, the scheduler and
 supervisor) came from **audiosilo-sidecars** with its history (`git log --follow`
 and `git blame` reach the reliability fixes). sidecars stays usable until Phase 4,
-then is archived with the manager. Phase 0 imports and tests the engine but doesn't
-run it; Phase 1a wires it behind the `sidecars.generate` job.
+then is archived with the manager. Phase 0 imported and tested the engine; Phase 1a
+runs it (`internal/app/engine.go`) behind the `sidecars.generate` job
+(`internal/generate`), which writes the results into the book's `.audiosilo/`.
 
 ## Build / test / gate
 
@@ -47,7 +52,7 @@ cd web && npm run typecheck && npm run lint && npm run format && npm test
 scripts/build-web.sh            # builds web/, syncs it into internal/web/dist, builds bin/ (-tags embedui)
 ./bin/audiosilo-bridge --data ./data   # first start prints the page's password ONCE
 
-docker build --target slim .    # slim | cuda | full (the default target)
+docker build --target slim .    # slim | cuda | agent | full (the default target)
 ```
 
 **Before a change is done, run the gate of each side you touched**, plus an image
@@ -71,35 +76,48 @@ Compact map; the per-package rules and history live in [PACKAGES.md](PACKAGES.md
 **read a package's entry before changing it.**
 
 ```
-cmd/audiosilo-bridge/  serve (default) + version; --data, --listen
+cmd/audiosilo-bridge/  serve (default; --data, --listen), version, agent-runner, agent-login
 internal/
   -- the shell (Phase 0) --
-  app/        wiring + the page API's Backend: pairing (Conn), heartbeat, mapping checks
-  api/        the page's HTTP API (transport only; LAN-only guard; password always)
+  app/        wiring + the page API's Backend: pairing (Conn), heartbeat (+ estimates),
+              mapping checks; engine.go runs the engine (Phase 1a)
+  api/        the page's HTTP API (transport only; LAN-only guard; password always;
+              Phase 1a: one job, retry, engine)
   link/       client of the server's Bridge routes; hand-mirrored wire types
   mapping/    library mappings: SafeJoin, size comparison, write probe, Registry
-  jobs/       generic runner: lanes, claim, lease keepalive, cancel, resume, reports
+  jobs/       generic runner: lanes (light, pipeline), claim, lease keepalive, cancel,
+              resume, park/unpark, server identity, Abandoner, reports
   verify/     bridge.verify, the proof job
   logring/    recent log lines for the page (secrets redacted)
   web/        go:embed of the page (build-tag selected)
   secrets/    sealed-file secrets keyed by AUDIOSILO_BRIDGE_SECRET_KEY or secret.key
   config/     config.yaml + AUDIOSILO_BRIDGE_* (bridge.go: the Bridge's own settings)
-  store/      SQLite, append-only migrations (0001 the engine, 0002 server_jobs)
+  store/      SQLite, append-only migrations (0001 the engine, 0002 server_jobs,
+              0003 generate_books, contrib_mode, server_id, deleted_stage_spend)
   auth/       the page's single password + hashed sessions + login limiter
-  -- the engine (from audiosilo-sidecars; wired in Phase 1a) --
+  -- Phase 1a --
+  generate/   sidecars.generate: server job -> engine book -> .audiosilo/ + rescan
+  agentproto/ the staging protocol shared with the agent container (a leaf)
+  agentbox/   the Bridge's side: an agent.Runner over the staging dir
+  agentrun/   the agent container's side: `agent-runner` (claim, run, harvestable out/)
+  -- the engine (from audiosilo-sidecars; app/engine.go runs it) --
   toolfetch/ audio/ asr/ transcript/ ebook/ scratch/ qa/ spelling/ agent/ repair/
   pipeline/ contrib/ state/ eta/ scheduler/ supervisor/ metaops/ events/ pricing/ fsutil/
 web/          the page: Vite + React 19 + TS + Tailwind v4; pure logic in src/lib
 docker/       entrypoint.sh (own /bridge-data, umask 022, drop to PUID:PGID)
-Dockerfile    slim | cuda | full; compose.example.yaml beside the server
+Dockerfile    slim | cuda | agent | full; compose.example.yaml: server, bridge, agent
 ```
 
-**Dependency direction:** `app -> {api, jobs, link, mapping, verify, store, secrets,
-config, auth, logring, web}`; `api` calls the injected Backend and the injected
-`auth.Manager` (login, sessions, the password), with types from
-jobs/link/mapping/store/logring; `verify -> {jobs, link, mapping}`; `jobs -> {link,
-store}`; `mapping -> link`; `link` is a leaf. The engine's directions are in
-PACKAGES.md.
+**Dependency direction:** `app -> {api, jobs, link, mapping, verify, generate,
+agentbox, store, secrets, config, auth, logring, web}` plus the engine it wires;
+`api` calls the injected Backend and the injected `auth.Manager` (login, sessions,
+the password), with types from jobs/link/mapping/store/logring; `verify -> {jobs,
+link, mapping}`; `generate -> {jobs, link, mapping, store, scheduler, pipeline, ...}`
+through its own Engine/Server interfaces; `jobs -> {link, store}`; `mapping -> link`;
+`link` and `agentproto` are leaves; `agentbox` and `agentrun` each import only
+`agent` + `agentproto` (agentrun also `fsutil`), never each other, and the engine
+never knows either (agentbox is just an `agent.Runner`). The engine's directions are
+in PACKAGES.md.
 
 ## Conventions
 
@@ -111,12 +129,21 @@ PACKAGES.md.
   `X-AudioSilo-Client` value must parse with the server's `auth.ParseClient` (a test
   holds its regex).
 - **Writes into a library** (Phase 1a on): only typed operations, every path through
-  `mapping.SafeJoin` against a CHECKED mapping, temp file then rename, umask 022,
-  a targeted rescan after, deletes to `.audiosilo-trash/`. A library that isn't
-  mapped and writable refuses write jobs.
+  `mapping.SafeJoin` against a CHECKED mapping (mapped AND writable at the mount in
+  use, checked again before each write), temp file then rename, umask 022, a
+  targeted rescan after, deletes to `.audiosilo-trash/`. A library that isn't mapped
+  and writable refuses a new write job (a resumed one parks and waits). Today the
+  only writer is `generate`: `characters.json`, `recaps.json` and `bridge.json` in the
+  book's `.audiosilo/` (a single-file book's prefixed `<stem>.`), nothing else.
+- **The agent container's files are untrusted** (and the Bridge's are to it): every
+  read goes through `agentproto.OpenRegular`/`ReadRegular` inside an `os.Root`, the
+  harvest is capped, and a credential never leaves the agent container (only its
+  kind is reported).
 - **Secrets are never logged or echoed.** The page's one-time password is printed
-  once at the first start; the server token and API keys are sealed in
-  `<data>/secrets`; the log ring redacts secret-sounding attributes.
+  once at the first start; the server token and the GitHub token
+  (`AUDIOSILO_BRIDGE_GITHUB_TOKEN`, sealed as `github_pat` at every start) are sealed
+  in `<data>/secrets`; the log ring redacts secret-sounding attributes. Agent
+  credentials live only in the agent container.
 - **The page answers the local network only and always asks for its password**,
   loopback included (spike 2: an agent on the same network could reach it).
 - **Every feature ships with a test**; security-critical code (the LAN guard, auth,
@@ -126,12 +153,21 @@ PACKAGES.md.
 
 ## Status
 
-**Phase 0 (foundations):** the engine import and its cleanup (the scan, overrides
-and sightings removed; migrations squashed; runtime renamed; the keychain replaced
-by the sealed vault), and the shell: config, store, the server link, the mapping
-checks, the generic runner, the page and its API, `bridge.verify`, and the
-slim/full/cuda images. Next: Phase 1a (`sidecars.generate`, the agent container,
-`.audiosilo/` attachments). See BRIDGE-PLAN.md's Status table.
+**Phase 0 (foundations), merged:** the engine import and its cleanup (the scan,
+overrides and sightings removed; migrations squashed; runtime renamed; the keychain
+replaced by the sealed vault), and the shell: config, store, the server link, the
+mapping checks, the generic runner, the page and its API, `bridge.verify`, and the
+slim/full/cuda images.
+
+**Phase 1a (generated characters and recaps), merged (spike 1 passed, 6 of 6 books):** the engine
+running behind `sidecars.generate` (the pipeline lane, parks reported to the server
+and retried from the page, the job following its book's moves, results written to
+`.audiosilo/` and an attachments rescan), the agent container (`agentproto`,
+`agentbox`, `agentrun`, the `agent` image and compose service, credential refusals
+parked as `agent_credential_refused`), the monthly budget, the transcript retention,
+supervisor recoveries on by default, the heartbeat's estimates, and the page's
+engine card and job view. Next: Phase 1b (the native ASR worker and the remote ASR
+lane). See BRIDGE-PLAN.md's Status table.
 
 Operative caveats carried from sidecars (PACKAGES.md has the detail):
 - **audiosilo-meta is pinned** and the schema drift guard
@@ -141,5 +177,10 @@ Operative caveats carried from sidecars (PACKAGES.md has the detail):
   check each asset's sha256 against that release's `checksums.txt`, which is
   not a pin: a release replaced whole would pass). Move them to this repo's
   releases when it goes public.
-- **The engine's book identity is `books.source_path`** (an absolute Bridge path),
-  which Phase 1a maps from the server's `(library_id, rel_path)`.
+- **The engine's book identity is `books.source_path`** (an absolute Bridge path):
+  `generate` maps the server's `(library_id, rel_path)` onto it through the checked
+  mount, and `generate_books` maps the server job to the engine book (a resumed job
+  follows the same one; a mapping is a job's own only for the same library and
+  path, since server job ids repeat across servers).
+- **Server job ids are only meaningful on their server:** every claim records the
+  pairing's `server_id`, and a start drops another server's open jobs.

@@ -48,6 +48,20 @@ func TestAutoReadmitDueReadmitsTransientPark(t *testing.T) {
 	}
 }
 
+// A refused agent credential self-resumes too: once its retry_at is due the book
+// looks again, so it goes on by itself after someone replaced the credential.
+func TestAutoReadmitDueReadmitsCredentialRefusedPark(t *testing.T) {
+	h := newHarness(t)
+	db := h.openDB(t)
+	b := h.addBook(t, db, "refused", "", "")
+	s := New(db, h.hub, NewStubExecutor(0, 0), 1, h.workRoot, false)
+	parkBook(t, s, b.ID, state.ParkAgentCredentialRefused, time.Now().Add(-time.Minute).UTC().Format(time.RFC3339))
+	s.autoReadmitDue(context.Background())
+	if cur, _ := db.GetBook(context.Background(), b.ID); cur.Status != "" || cur.ParkCode != "" {
+		t.Fatalf("after auto-readmit: status=%q park_code=%q, want readmitted", cur.Status, cur.ParkCode)
+	}
+}
+
 // TestAutoReadmitDueSkipsNotDueAndNonAuto: a future retry_at, an empty retry_at
 // (pre-migration park), and a non-auto park code are all left parked.
 func TestAutoReadmitDueSkipsNotDueAndNonAuto(t *testing.T) {
@@ -62,10 +76,10 @@ func TestAutoReadmitDueSkipsNotDueAndNonAuto(t *testing.T) {
 	legacy := h.addBook(t, db, "legacy", "", "") // parked before the feature: retry_at=''
 	parkBook(t, s, legacy.ID, state.ParkAgentRateLimited, "")
 
-	// A DUE retry_at but a code the timed resume does not own (defensive: budget parks
-	// never set retry_at, but the code filter must still exclude them).
+	// A DUE retry_at but a code the timed resume does not own (defensive: a human
+	// park never sets retry_at, but the code filter must still exclude it).
 	wrongCode := h.addBook(t, db, "wrong", "", "")
-	parkBook(t, s, wrongCode.ID, state.ParkBudgetExceeded, time.Now().Add(-time.Minute).UTC().Format(time.RFC3339))
+	parkBook(t, s, wrongCode.ID, state.ParkSpellingGateFailure, time.Now().Add(-time.Minute).UTC().Format(time.RFC3339))
 
 	s.autoReadmitDue(ctx)
 
@@ -104,5 +118,29 @@ func TestRestartReadmitsChangedAvailabilityParksOnce(t *testing.T) {
 	got, _ := db.GetBook(ctx, budget.ID)
 	if got.Status != string(state.StatusNeedsAttention) || got.ParkCode != string(state.ParkBudgetExceeded) {
 		t.Fatalf("budget park was incorrectly readmitted: %+v", got)
+	}
+}
+
+// TestAutoReadmitMonthlyBudgetPark: the monthly budget park carries retry_at (the
+// 1st of the next month) and is re-admitted once it passes; the per-book budget
+// park carries none and stays parked for a human.
+func TestAutoReadmitMonthlyBudgetPark(t *testing.T) {
+	h := newHarness(t)
+	db := h.openDB(t)
+	s := New(db, h.hub, NewStubExecutor(0, 0), 1, h.workRoot, false)
+	ctx := context.Background()
+
+	monthly := h.addBook(t, db, "monthly", "", "")
+	parkBook(t, s, monthly.ID, state.ParkBudgetExceeded, time.Now().Add(-time.Minute).UTC().Format(time.RFC3339))
+	perBook := h.addBook(t, db, "per book", "", "")
+	parkBook(t, s, perBook.ID, state.ParkBudgetExceeded, "")
+
+	s.autoReadmitDue(ctx)
+
+	if got, _ := db.GetBook(ctx, monthly.ID); got.Status != "" || got.ParkCode != "" {
+		t.Fatalf("a due monthly budget park stayed parked: %+v", got)
+	}
+	if got, _ := db.GetBook(ctx, perBook.ID); got.Status != string(state.StatusNeedsAttention) {
+		t.Fatalf("the per-book budget park was readmitted: %+v", got)
 	}
 }

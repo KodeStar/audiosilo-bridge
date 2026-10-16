@@ -29,11 +29,9 @@ import (
 // not.
 const markerTitlesFile = "marker_titles.txt"
 
-// spellingRefsDir holds the series-predecessor carryover the daemon stages for the
-// spelling agent (never the agent itself): the previous volume's corrected chapter
-// texts plus its prior-* ledger/rules/marker files. It is the ONLY attestation
-// source, besides marker_titles.txt, a correction rule may cite.
-const spellingRefsDir = "spelling-refs"
+// spellingRefsDir is spelling.RefsDir: the series-predecessor carryover (the only
+// attestation source, besides marker_titles.txt, a correction rule may cite).
+const spellingRefsDir = spelling.RefsDir
 
 // spellingCorpusFloor is the transcript word count above which zero extracted
 // candidates is treated as a broken extractor (a hard failure) rather than a
@@ -47,24 +45,23 @@ var spellingLedgerStatuses = map[string]bool{"verified": true, "probable": true,
 // spelling-refs/. The carryover-integrity validator reads it (via
 // spelling.PriorCanonicals) to confirm each carryover:true row names a canonical the
 // predecessor actually ledgered.
-const priorSpellingsFile = "prior-spellings.json"
+const priorSpellingsFile = spelling.PriorPrefix + "spellings.json"
 
 // priorRefNames maps each series-predecessor carryover file (src, named in the prior
 // book's work dir) to its prior-* staged name (dst). populateSpellingRefs writes them
 // by src into spelling-refs/; the spelling_research staging loop reads them back by
 // dst. A missing file is skipped silently by design (best-effort carryover).
 var priorRefNames = []struct{ src, dst string }{
-	{markerTitlesFile, "prior-marker_titles.txt"},
+	{markerTitlesFile, spelling.PriorPrefix + markerTitlesFile},
 	{spelling.SpellingsFile, priorSpellingsFile},
-	{spelling.CorrectionsFile, "prior-corrections.json"},
+	{spelling.CorrectionsFile, spelling.PriorPrefix + spelling.CorrectionsFile},
 }
 
-// seriesGlossaryFile is the canonical-name list drawn from the community metadata
-// database's OTHER volumes of this book's series. It lives under spelling-refs/, so
-// it is already an allowed reference_files citation and already lands in the
+// seriesGlossaryFile is spelling.SeriesGlossaryFile. It lives under spelling-refs/,
+// so it is already an allowed reference_files citation and already lands in the
 // correction gate's attestation corpus - no validator change was needed to let a
 // rule attest an upstream-canonical spelling.
-const seriesGlossaryFile = "series-glossary.txt"
+const seriesGlossaryFile = spelling.SeriesGlossaryFile
 
 // spellingPromptData feeds spelling.md. Field names MUST match the template (rendered
 // with missingkey=error).

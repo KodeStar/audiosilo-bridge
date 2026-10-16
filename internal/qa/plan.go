@@ -16,6 +16,10 @@ import (
 // every actionable QA finding.
 const PlanFile = "qa_plan.json"
 
+// AcceptedFile is the ledger of every chapter qa_adjudicating accepted, across
+// rounds (the pipeline keeps it). Like PlanFile, its reasons quote the transcript.
+const AcceptedFile = "qa_accepted.json"
+
 // PlanAction is how one flagged chapter is dispositioned. "retranscribe" re-runs ASR
 // on the whole chapter; "tail_clip" cuts and re-transcribes only the loop window at the
 // chapter END and splices it; "mid_clip" cuts and re-transcribes a bounded INTERIOR

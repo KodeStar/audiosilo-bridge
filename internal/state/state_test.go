@@ -260,20 +260,26 @@ func TestMainlineNextWalksMainlineToDone(t *testing.T) {
 }
 
 // TestHoldsSeriesLock asserts the predicate is true for every state before Ready
-// and false from Ready onward (the finished-for-lock-purposes boundary).
+// and false from Ready onward (the finished-for-lock-purposes boundary), and that a
+// failed (or cancelled) book holds nothing while a parked or paused one still does.
 func TestHoldsSeriesLock(t *testing.T) {
 	for _, s := range All() {
 		want := Order(s) < Order(Ready)
-		if HoldsSeriesLock(s) != want {
-			t.Errorf("HoldsSeriesLock(%q) = %v, want %v", s, HoldsSeriesLock(s), want)
+		for _, st := range []Status{StatusNone, StatusPaused, StatusNeedsAttention} {
+			if HoldsSeriesLock(s, st) != want {
+				t.Errorf("HoldsSeriesLock(%q, %q) = %v, want %v", s, st, HoldsSeriesLock(s, st), want)
+			}
+		}
+		if HoldsSeriesLock(s, StatusFailed) {
+			t.Errorf("a failed book at %q holds the series lock", s)
 		}
 	}
 	// Spot-check the boundary explicitly.
-	if !HoldsSeriesLock(Auditing) {
+	if !HoldsSeriesLock(Auditing, StatusNone) {
 		t.Error("Auditing (pre-Ready) should hold the series lock")
 	}
 	for _, s := range []State{Ready, Contributing, Done} {
-		if HoldsSeriesLock(s) {
+		if HoldsSeriesLock(s, StatusNone) {
 			t.Errorf("%q (Ready or later) must not hold the series lock", s)
 		}
 	}

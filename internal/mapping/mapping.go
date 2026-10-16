@@ -250,6 +250,15 @@ func (r *Registry) Library(id int64) (link.Library, bool) {
 	return link.Library{}, false
 }
 
+// Status returns a library's last check (false when it has none yet): a write
+// job needs it mapped AND writable.
+func (r *Registry) Status(id int64) (link.LibraryStatus, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	res, ok := r.results[id]
+	return res.status, ok
+}
+
 // Statuses returns the last check of every library that has one, for the
 // heartbeat.
 func (r *Registry) Statuses() []link.LibraryStatus {

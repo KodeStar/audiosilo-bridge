@@ -65,7 +65,9 @@ func RunWithRetry(ctx context.Context, r Runner, req Request, validate func(Resu
 //     (each retry re-runs the backend's per-invocation resolve(), so a transient
 //     LookPath blip - a CLI auto-updating its symlink - is ridden out); when that budget
 //     is spent the NotAvailableError is returned so the stage parks. Its sleep counts
-//     into the slept total (rate-sample exclusion), like the rate-limit backoff.
+//     into the slept total (rate-sample exclusion), like the rate-limit backoff. A
+//     refused credential (CredentialRefused) is returned at once: the same
+//     credential is refused again.
 //   - Any other error (a timeout, a render/transport failure) fails immediately.
 func RunWithBackoff(ctx context.Context, r Runner, req Request, validate func(Result) error, onUsage func(Usage), backoff []time.Duration) (Result, time.Duration, error) {
 	basePrompt := req.Prompt
@@ -107,7 +109,7 @@ func RunWithBackoff(ctx context.Context, r Runner, req Request, validate func(Re
 			}
 			var na *NotAvailableError
 			if errors.As(err, &na) {
-				if notAvailRetries >= len(notAvailableBackoff) {
+				if na.CredentialRefused || notAvailRetries >= len(notAvailableBackoff) {
 					return Result{}, slept, err
 				}
 				delay := notAvailableBackoff[notAvailRetries]

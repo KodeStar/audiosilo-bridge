@@ -37,6 +37,13 @@ type RecapSummary struct {
 	Ending  string `json:"ending,omitempty"`
 }
 
+// FinalSidecarsPaths are where a book's characters and recaps sidecars live in its
+// work dir once synthesis wrote them (validated and audited by the time the book
+// is done): what the Bridge copies into the library.
+func FinalSidecarsPaths(workDir string) (characters, recaps string) {
+	return filepath.Join(workDir, sidecarsDir, charactersFileName), filepath.Join(workDir, sidecarsDir, recapsFileName)
+}
+
 // SidecarsView loads a book's characters/recaps sidecars from its work dir and
 // composes the preview. It reads the two files independently (reusing the
 // sidecarsDir/*FileName constants and the strict decodeSidecarFile guard) rather
@@ -44,8 +51,7 @@ type RecapSummary struct {
 // neither file exists; a malformed file that DOES exist is a hard error (not a
 // 404). The api injects this as its SidecarLoader.
 func SidecarsView(workDir string) (SidecarPreview, error) {
-	charsPath := filepath.Join(workDir, sidecarsDir, charactersFileName)
-	recapsPath := filepath.Join(workDir, sidecarsDir, recapsFileName)
+	charsPath, recapsPath := FinalSidecarsPaths(workDir)
 
 	charsExists := fsutil.IsFile(charsPath)
 	recapsExists := fsutil.IsFile(recapsPath)

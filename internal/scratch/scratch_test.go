@@ -176,3 +176,61 @@ func TestPurgeRequiredIsEbookOnly(t *testing.T) {
 		t.Error("audio scratch is a preference, not an obligation")
 	}
 }
+
+// TestPurgeTranscripts: the transcript tier goes (every layer, the files that
+// quote it, the predecessor's transcript copies) while the carryover and the
+// book's results stay; a work dir outside the root is never touched.
+func TestPurgeTranscripts(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	wd := filepath.Join(root, "book-1234")
+	for _, f := range []string{
+		"transcripts-raw/ch001.json", "transcripts-json/ch001.json", "transcripts-text/ch001.txt",
+		"transcripts-repaired/ch001.json", "transcripts-corrected/ch001.txt", "chapters/ch001.flac", "_runs/x/in.txt",
+		"spelling_candidates.json", "spelling_reference_matches.json", "qa_report.md", "qa_report.json", "corrections.log", "repairs.log",
+		"qa_plan.json", "qa_accepted.json", "tail_verdicts.json",
+		"spelling-refs/ch001.txt", "spelling-refs/prior-spellings.json", "spelling-refs/prior-marker_titles.txt",
+		"spelling-refs/series-glossary.txt",
+		"facts/knowledge-final.md", "sidecars/characters.json", "manifest.json", "spellings.json", "corrections.json",
+		"_done/asr.json",
+	} {
+		writeText(t, filepath.Join(wd, f), "x")
+	}
+	if err := PurgeTranscripts(root, wd, state.KindAudio); err != nil {
+		t.Fatal(err)
+	}
+	for _, gone := range []string{"transcripts-raw", "transcripts-json", "transcripts-text", "transcripts-repaired",
+		"transcripts-corrected", "chapters", "_runs", "spelling_candidates.json", "qa_report.md", "qa_report.json",
+		"qa_plan.json", "qa_accepted.json", "tail_verdicts.json",
+		"corrections.log", "repairs.log", "spelling_reference_matches.json", "spelling-refs/ch001.txt"} {
+		if _, err := os.Stat(filepath.Join(wd, gone)); err == nil {
+			t.Errorf("%s survived the purge", gone)
+		}
+	}
+	for _, kept := range []string{"facts/knowledge-final.md", "sidecars/characters.json", "manifest.json", "spellings.json",
+		"corrections.json", "spelling-refs/prior-spellings.json", "spelling-refs/prior-marker_titles.txt",
+		"spelling-refs/series-glossary.txt", "_done/asr.json"} {
+		if _, err := os.Stat(filepath.Join(wd, kept)); err != nil {
+			t.Errorf("%s was purged: it is carryover or the book's result", kept)
+		}
+	}
+	// Denied: a work dir outside the work root is never touched.
+	outside := t.TempDir()
+	writeText(t, filepath.Join(outside, "transcripts-raw", "x"), "x")
+	if err := PurgeTranscripts(root, outside, state.KindAudio); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(outside, "transcripts-raw", "x")); err != nil {
+		t.Fatal("a purge reached outside the work root")
+	}
+}
+
+func writeText(t *testing.T, path, body string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}

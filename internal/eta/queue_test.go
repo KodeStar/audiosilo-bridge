@@ -251,3 +251,28 @@ func TestHoldsSeriesLock(t *testing.T) {
 		t.Error("post-Ready current stage -> want false (lock released)")
 	}
 }
+
+// The simulation keeps the scheduler's series lock: a parked or paused earlier
+// volume still holds it, so the later volume's carryover stages can't run (and
+// add nothing); a failed or cancelled one holds nothing, so the later volume runs.
+func TestQueueETAEndedPredecessorReleasesSeries(t *testing.T) {
+	later := Book{ID: 2, State: state.SpellingResearch, Series: "Saga", SeriesPos: "2", Chapters: 5}
+	alone, _ := BookETA(later, nil)
+	if alone <= 0 {
+		t.Fatal("the later volume has nothing left to estimate")
+	}
+	for _, tc := range []struct {
+		status state.Status
+		want   float64
+	}{
+		{state.StatusNeedsAttention, 0},
+		{state.StatusPaused, 0},
+		{state.StatusFailed, alone},
+	} {
+		earlier := Book{ID: 1, State: state.ASR, Status: tc.status, Series: "Saga", SeriesPos: "1", Chapters: 5}
+		got := QueueETA([]Book{earlier, later}, nil, caps(2))
+		if math.Abs(got-tc.want) > 1e-6 {
+			t.Errorf("earlier volume %q: makespan = %v, want %v", tc.status, got, tc.want)
+		}
+	}
+}

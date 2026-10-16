@@ -1783,3 +1783,202 @@ func TestRepairedPhraseResolverReadsRepairedLayer(t *testing.T) {
 		t.Error("a chapter with no repaired file must resolve nothing")
 	}
 }
+
+// TestRunAgentParksOnMonthlyBudget: once this calendar month's agent spend across
+// every book reached the monthly budget, runAgent parks budget_exceeded before
+// invoking the agent, with an automatic re-admit at the start of the next month;
+// last month's spend doesn't count, and no cap (0) never parks.
+func TestRunAgentParksOnMonthlyBudget(t *testing.T) {
+	ctx := context.Background()
+	work := t.TempDir()
+	fake := newFakeRunner()
+	db, exe, book := dbBackedQAExecutor(t, work, fake)
+	exe.bookBudgetUSD = 1000
+	exe.monthlyBudgetUSD = 20
+
+	// $25 spent this month by ANOTHER book: the cap is across every book.
+	other, err := db.CreateBook(ctx, store.NewBook{SourcePath: filepath.Join(work, "other"), WorkDir: filepath.Join(work, "w-other"), Title: "Other"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runID, err := db.StartStageRun(ctx, other.ID, string(state.FactPass), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AddOpenStageRunUsage(ctx, other.ID, string(state.FactPass), "opus", 0, 0, 25); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.FinishStageRun(ctx, runID, true, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	err = exe.checkMonthlyBudget(ctx, state.FactPass, time.Now())
+	var pe *scheduler.ParkError
+	if !errors.As(err, &pe) || pe.Code != state.ParkBudgetExceeded {
+		t.Fatalf("err = %v, want a budget_exceeded park", err)
+	}
+	_, next := MonthBounds(time.Now())
+	if !pe.RetryAfter.Equal(next) || next.Day() != 1 || next.Hour() != 0 {
+		t.Fatalf("retry after %v, want the 1st of next month (%v)", pe.RetryAfter, next)
+	}
+	if !strings.Contains(pe.Reason, "25.00") || !strings.Contains(pe.Reason, "20.00") {
+		t.Errorf("reason = %q, want it to name the spend and the budget", pe.Reason)
+	}
+
+	st, err := agent.New(work, string(state.FactPass), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := exe.runAgent(ctx, book, state.FactPass, scheduler.StageReport{}, st, "fact_pass.md", nil, false,
+		func(agent.Result, *agent.Staging) error { return nil }); !errors.As(err, &pe) || pe.Code != state.ParkBudgetExceeded {
+		t.Fatalf("runAgent over the monthly budget = %v, want the park", err)
+	}
+	if n := fake.count(string(state.FactPass)); n != 0 {
+		t.Errorf("agent invoked %d times over the monthly budget, want 0", n)
+	}
+
+	// Next month the spend above is last month's.
+	if err := exe.checkMonthlyBudget(ctx, state.FactPass, next.Add(time.Hour)); err != nil {
+		t.Fatalf("a new month = %v, want room", err)
+	}
+	exe.monthlyBudgetUSD = 0
+	if err := exe.checkMonthlyBudget(ctx, state.FactPass, time.Now()); err != nil {
+		t.Fatalf("no monthly cap = %v", err)
+	}
+}
+
+func TestMonthBounds(t *testing.T) {
+	start, next := MonthBounds(time.Date(2026, 12, 31, 23, 30, 0, 0, time.FixedZone("x", -5*3600)))
+	if start != time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC) || next != time.Date(2027, 2, 1, 0, 0, 0, 0, time.UTC) {
+		t.Fatalf("bounds = %v %v (the month is UTC's)", start, next)
+	}
+}
+
+// TestAgentRedetectHook: an executor given AgentRedetect looks for an unavailable
+// runner through it (the Bridge's agent container), never through agent.Select.
+func TestAgentRedetectHook(t *testing.T) {
+	box := newFakeRunner()
+	calls := 0
+	e := NewExecutor(Config{AgentRedetect: func(context.Context) (agent.Runner, agent.Availability) {
+		calls++
+		return box, box.Detect(context.Background())
+	}})
+	r, av := e.ensureAgent(context.Background())
+	if calls != 1 || r != agent.Runner(box) || !av.Available {
+		t.Fatalf("ensureAgent = %v %+v after %d redetects, want the hook's runner", r, av, calls)
+	}
+	// Once available it is kept: no second look.
+	e.ensureAgent(context.Background())
+	if calls != 1 {
+		t.Fatalf("an available runner was looked for again (%d calls)", calls)
+	}
+}
+
+// TestPreflightUnavailableRetry: a runner whose Availability carries a
+// RetryAfter (the Bridge's agent container) parks agent_unavailable with a timed
+// self-resume and a reason built from its own detail; without one (a local CLI
+// that isn't installed) the park keeps the install advice and waits for a human.
+func TestPreflightUnavailableRetry(t *testing.T) {
+	ctx := context.Background()
+	work := t.TempDir()
+	down := newFakeRunner()
+	down.available = false
+	_, exe, book := dbBackedQAExecutor(t, work, down)
+	exe.agentRun, exe.agentAvail = nil, agent.Availability{}
+	av := agent.Availability{Backend: "claude", Detail: "no heartbeat from the agent container"}
+	exe.redetectAgent = func(context.Context) (agent.Runner, agent.Availability) { return down, av }
+	st, err := agent.New(work, string(state.FactPass), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := func() *scheduler.ParkError {
+		t.Helper()
+		_, err := exe.runAgent(ctx, book, state.FactPass, scheduler.StageReport{}, st, "fact_pass.md", nil, false,
+			func(agent.Result, *agent.Staging) error { return nil })
+		var pe *scheduler.ParkError
+		if !errors.As(err, &pe) || pe.Code != state.ParkAgentUnavailable {
+			t.Fatalf("err = %v, want an agent_unavailable park", err)
+		}
+		return pe
+	}
+	if pe := run(); !pe.RetryAfter.IsZero() || pe.Reason != AgentUnavailableMsg {
+		t.Fatalf("without a retry hint: %+v", pe)
+	}
+	av.RetryAfter = 10 * time.Minute
+	pe := run()
+	if pe.RetryAfter.Before(time.Now().Add(9*time.Minute)) || pe.Reason != "agent backend unavailable: no heartbeat from the agent container" {
+		t.Fatalf("with a retry hint: %+v", pe)
+	}
+}
+
+func TestAgentUnavailableReason(t *testing.T) {
+	if got := agentUnavailableReason("  "); got != AgentUnavailableMsg {
+		t.Errorf("no detail = %q, want the install advice", got)
+	}
+	if got := agentUnavailableReason("the provider refused the credential: 401"); got != "agent backend unavailable: the provider refused the credential: 401" {
+		t.Errorf("detail = %q", got)
+	}
+}
+
+// A credential the provider refused parks agent_credential_refused (not
+// agent_unavailable, which the server doesn't announce) with a timed self-resume,
+// after one run: the same credential isn't tried again.
+func TestCredentialRefusedParksItsOwnCode(t *testing.T) {
+	ctx := context.Background()
+	work := t.TempDir()
+	box := newFakeRunner()
+	box.act = func(*fakeRunner, agent.Request, int) (agent.Result, error) {
+		return agent.Result{}, &agent.NotAvailableError{Backend: agent.IDClaude,
+			Detail: "the provider refused the credential: 401", CredentialRefused: true}
+	}
+	_, exe, book := dbBackedQAExecutor(t, work, box)
+	st, err := agent.New(work, string(state.FactPass), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = exe.runAgent(ctx, book, state.FactPass, scheduler.StageReport{}, st, "adjudicate.md", map[string]any{"Title": "T", "Round": 1, "AutoAccepted": ""}, false,
+		func(agent.Result, *agent.Staging) error { return nil })
+	var pe *scheduler.ParkError
+	if !errors.As(err, &pe) || pe.Code != state.ParkAgentCredentialRefused {
+		t.Fatalf("err = %v, want an agent_credential_refused park", err)
+	}
+	if pe.RetryAfter.Before(time.Now().Add(29*time.Minute)) || pe.RetryAfter.After(time.Now().Add(31*time.Minute)) {
+		t.Fatalf("retry_at = %v, want about 30 minutes out", pe.RetryAfter)
+	}
+	if n := box.count(string(state.FactPass)); n != 1 {
+		t.Fatalf("the refused credential was tried %d times, want 1", n)
+	}
+}
+
+// The agent concurrency can change while the executor runs (the Bridge follows its
+// agent container's slots): a raised cap lets a waiting invocation through at once,
+// and the fan-out and the reported capacity follow.
+func TestSetAgentConcurrency(t *testing.T) {
+	e := NewExecutor(Config{AgentConcurrency: 1, MaxAgentsPerBook: 1})
+	ctx := context.Background()
+	if err := e.agentSlots.acquire(ctx); err != nil {
+		t.Fatal(err)
+	}
+	short, cancel := context.WithTimeout(ctx, 20*time.Millisecond)
+	defer cancel()
+	if err := e.agentSlots.acquire(short); err == nil {
+		t.Fatal("a second invocation got a slot past a cap of 1")
+	}
+	got := make(chan error, 1)
+	go func() { got <- e.agentSlots.acquire(ctx) }()
+	time.Sleep(10 * time.Millisecond)
+	e.SetAgentConcurrency(2)
+	select {
+	case err := <-got:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a raised cap didn't let the waiting invocation through")
+	}
+	if _, _, capacity := e.AgentInvocationRuntime(); capacity != 2 || e.AgentMaxPerBook() != 2 {
+		t.Fatalf("capacity = %d, fan-out = %d, want 2 and 2", capacity, e.AgentMaxPerBook())
+	}
+	e.agentSlots.release()
+	e.agentSlots.release()
+}

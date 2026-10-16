@@ -3,16 +3,20 @@ import { errorText, type ApiClient } from '@/api/client';
 import type { Status } from '@/api/types';
 import { useLoad } from '@/lib/useLoad';
 import { laneText, onlineText, secretKeyText } from '@/lib/status';
+import { agentText, budgetPercent, budgetText, credentialText, retentionText } from '@/lib/engine';
+import { usd } from '@/lib/generate';
 import { Ago } from '../ui/Ago';
 import { Card } from '../ui/Card';
 import { Badge } from '../ui/Badge';
 import { Field, inputClass } from '../ui/Field';
 import { Loading } from '../ui/Loading';
+import { ProgressBar } from '../ui/ProgressBar';
 import { Notice } from '../ui/Notice';
 import { Row } from '../ui/Row';
 import { dangerButton, primaryButton, secondaryButton } from '../ui/buttons';
 
 export const STATUS_POLL_MS = 5000;
+export const ENGINE_POLL_MS = 10000;
 
 export function StatusTab({ client }: { client: ApiClient }) {
   const {
@@ -66,7 +70,86 @@ export function StatusTab({ client }: { client: ApiClient }) {
           </Row>
         </dl>
       </Card>
+
+      <EngineCard client={client} />
     </div>
+  );
+}
+
+// EngineCard shows the sidecars engine: the agent container, speech recognition,
+// the budgets and the transcript retention (all set in config.yaml).
+function EngineCard({ client }: { client: ApiClient }) {
+  const { data: engine, error } = useLoad(() => client.engine(), ENGINE_POLL_MS);
+  if (!engine) {
+    return (
+      <Card title="Characters and recaps">
+        <Loading error={error} />
+      </Card>
+    );
+  }
+  const { agent } = engine;
+  const spent = budgetPercent(engine);
+  return (
+    <Card
+      title="Characters and recaps"
+      actions={
+        <Badge tone={!engine.started ? 'muted' : agent.available ? 'good' : 'warn'}>
+          {!engine.started ? 'Starting' : agent.available ? 'Ready' : 'Agent not ready'}
+        </Badge>
+      }
+    >
+      {error && <Notice kind="error">{error}</Notice>}
+      <dl className="divide-y divide-edge">
+        <Row label="Agent container">
+          <span className={agent.available ? undefined : 'text-amber-300'}>{agentText(agent)}</span>
+          {agent.heartbeat_at && (
+            <span className="block text-xs text-dim">
+              Last heard from <Ago at={agent.heartbeat_at} />
+              {agent.slots > 0 &&
+                ` - ${agent.slots === 1 ? '1 job' : `${agent.slots} jobs`} at a time`}
+            </span>
+          )}
+          {Object.keys(agent.clis).length > 0 && (
+            <ul className="mt-1 text-xs text-dim">
+              {Object.entries(agent.clis).map(([name, cli]) => (
+                <li key={name}>
+                  {name} {cli.version || '(no version)'}: {credentialText(cli.credential)}
+                </li>
+              ))}
+            </ul>
+          )}
+        </Row>
+        <Row label="Speech recognition">
+          {!engine.started
+            ? 'Starting'
+            : engine.asr.available
+              ? `${engine.asr.backend}${engine.asr.device ? ` (${engine.asr.device})` : ''}`
+              : `Not available${engine.asr.detail ? `: ${engine.asr.detail}` : ''}`}
+        </Row>
+        <Row label="Monthly budget">
+          {budgetText(engine)}
+          {agent.subscription && (
+            <span className="block text-xs text-dim">
+              A subscription login: the costs are what the same use would cost on an API key.
+            </span>
+          )}
+          {spent !== null && (
+            <ProgressBar
+              percent={spent}
+              label="Monthly budget spent"
+              tone={spent >= 100 ? 'red' : 'pink'}
+              className="mt-1 max-w-xs"
+            />
+          )}
+        </Row>
+        <Row label="Per book">{`Up to ${usd(engine.book_budget_usd)} of agent use`}</Row>
+        <Row label="Transcripts">{retentionText(engine.transcript_retention_days)}</Row>
+      </dl>
+      <p className="mt-3 text-xs text-dim">
+        These are set in the Bridge&apos;s config.yaml (agent.monthly_budget_usd,
+        agent.book_budget_usd, transcripts.retention_days) and apply at the next start.
+      </p>
+    </Card>
   );
 }
 

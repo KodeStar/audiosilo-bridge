@@ -140,7 +140,7 @@ func (e *Executor) factPass(ctx context.Context, book store.Book, r scheduler.St
 		firstErr      error
 		wg            sync.WaitGroup
 	)
-	workers := min(e.agentWorkers, totalChunks-completed)
+	workers := min(e.AgentMaxPerBook(), totalChunks-completed)
 	workerSeconds := make([]float64, workers)
 	for workerID := range workers {
 		wg.Add(1)

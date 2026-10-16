@@ -17,6 +17,7 @@ import (
 
 	"github.com/kodestar/audiosilo-bridge/internal/api"
 	"github.com/kodestar/audiosilo-bridge/internal/link"
+	"github.com/kodestar/audiosilo-bridge/internal/secrets"
 	"github.com/kodestar/audiosilo-bridge/internal/store"
 )
 
@@ -137,8 +138,20 @@ func TestPairBeatMapAndRevoke(t *testing.T) {
 		return ok && len(st.Libraries) == 1 && st.Libraries[0].Mapped && st.Libraries[0].Writable
 	})
 	st, _ := fs.lastBeat()
-	if st.Version != "0.1.0" || len(st.Kinds) != 1 || st.Kinds[0] != "bridge.verify" || st.UIURL != "http://bridge.lan:8091" {
+	if st.Version != "0.1.0" || strings.Join(st.Kinds, ",") != "bridge.verify,sidecars.generate" || st.UIURL != "http://bridge.lan:8091" {
 		t.Fatalf("heartbeat = %+v", st)
+	}
+	// Once the engine runs, every heartbeat carries the estimates.
+	waitFor(t, "the engine", func() bool { return b.engine.get() != nil })
+	b.Kick()
+	waitFor(t, "a heartbeat with estimates", func() bool {
+		st, ok := fs.lastBeat()
+		return ok && st.Estimates != nil && st.Estimates.Sidecars != nil
+	})
+	st, _ = fs.lastBeat()
+	if e := st.Estimates.Sidecars; e.AgentBackend != "claude" || e.AgentReady || e.MonthlyBudgetUSD != 100 || e.Samples != 0 ||
+		e.ASRSecondsPerAudioHour == 0 || e.AgentUSDPerAudioHour != nil {
+		t.Fatalf("estimates = %+v", e)
 	}
 	if s := b.Status(); !s.Online || s.LastHeartbeat == nil {
 		t.Fatalf("status = %+v", s)
@@ -237,3 +250,79 @@ func TestPairCodeNotSpentWhenTheListenerFails(t *testing.T) {
 		t.Fatal("the code was exchanged before the listener failed")
 	}
 }
+
+// The page's engine view and job routes before the engine has started: the
+// configured budgets and retention show, a Retry of an unknown job is a 404 and
+// an unknown job's detail too.
+func TestEngineViewAndJobRoutes(t *testing.T) {
+	t.Parallel()
+	data := t.TempDir()
+	if err := os.WriteFile(filepath.Join(data, "config.yaml"),
+		[]byte("agent:\n  monthly_budget_usd: 40\n  backend: codex\ntranscripts:\n  retention_days: 7\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	b, _, err := New(context.Background(), Options{DataDir: data, Version: "0.1.0", Listen: "127.0.0.1:0", Logger: quiet()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = b.db.Close() })
+	e := b.Engine(context.Background())
+	if e.Started || e.Agent.Backend != "codex" || e.MonthlyBudgetUSD != 40 || e.TranscriptRetentionDays != 7 ||
+		e.Agent.StagingDir != filepath.Join(data, "staging") || e.Agent.Available {
+		t.Fatalf("engine = %+v", e)
+	}
+	if err := b.RetryJob(context.Background(), 5); !errors.Is(err, api.ErrNotFound) {
+		t.Fatalf("a retry of an unknown job = %v", err)
+	}
+	if _, err := b.Job(context.Background(), 5); !errors.Is(err, api.ErrNotFound) {
+		t.Fatalf("an unknown job = %v", err)
+	}
+	if k := strings.Join(b.runner.Kinds(), ","); k != "bridge.verify,sidecars.generate" {
+		t.Fatalf("kinds = %s", k)
+	}
+}
+
+// AUDIOSILO_BRIDGE_GITHUB_TOKEN is sealed into the vault as github_pat at the
+// start (where the contribution's token source looks first), the environment's
+// value winning over one stored before; a blank one leaves the vault alone, and
+// the token is never logged.
+func TestGitHubTokenFromTheEnvironment(t *testing.T) {
+	data := t.TempDir()
+	var logs strings.Builder
+	var mu sync.Mutex
+	log := slog.New(slog.NewTextHandler(writerFunc(func(p []byte) (int, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		return logs.Write(p)
+	}), nil))
+	t.Setenv(GitHubTokenEnv, "ghp_from_the_environment")
+	b, _, err := New(context.Background(), Options{DataDir: data, Version: "0.1.0", Listen: "127.0.0.1:0", Logger: log})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := b.vault.Get(secrets.GitHubPAT); got != "ghp_from_the_environment" {
+		t.Fatalf("vault github_pat = %q", got)
+	}
+	if !b.canContribute(context.Background()) {
+		t.Fatal("a stored token doesn't resolve")
+	}
+	_ = b.db.Close()
+	if err := storeGitHubToken(b.vault, "ghp_replaced", log); err != nil {
+		t.Fatal(err)
+	}
+	if err := storeGitHubToken(b.vault, "  ", log); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := b.vault.Get(secrets.GitHubPAT); got != "ghp_replaced" {
+		t.Fatalf("vault github_pat = %q, want the environment's latest, untouched by a blank one", got)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if strings.Contains(logs.String(), "ghp_") {
+		t.Fatalf("the token reached the log: %s", logs.String())
+	}
+}
+
+type writerFunc func([]byte) (int, error)
+
+func (f writerFunc) Write(p []byte) (int, error) { return f(p) }

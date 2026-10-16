@@ -7,14 +7,14 @@ import {
   jobTarget,
   jobsPollInterval,
   mergeJobs,
-  progressFraction,
+  progressPercent,
   progressText,
   reportText,
   stateHint,
   stateLabel,
   stateTone,
 } from './jobs';
-import { jobFixture } from '@/test/fixtures';
+import { generateJobFixture, jobFixture } from '@/test/fixtures';
 
 describe('state labels', () => {
   it('words every state', () => {
@@ -40,6 +40,12 @@ describe('jobsPollInterval', () => {
     expect(jobsPollInterval([jobFixture({ state: 'done' })])).toBe(JOBS_POLL_IDLE_MS);
     expect(jobsPollInterval([])).toBe(JOBS_POLL_IDLE_MS);
   });
+  it('is slow while the only running job is parked', () => {
+    const parked = generateJobFixture({
+      progress: { step: 'fact_pass', park: { code: 'core_needed', hint: '' } },
+    });
+    expect(jobsPollInterval([parked])).toBe(JOBS_POLL_IDLE_MS);
+  });
 });
 
 describe('reportText', () => {
@@ -62,9 +68,9 @@ describe('progress', () => {
     expect(progressText({})).toBe('');
   });
   it('has a fraction only with a total', () => {
-    expect(progressFraction({ done: 1, total: 4 })).toBe(0.25);
-    expect(progressFraction({ done: 9, total: 4 })).toBe(1);
-    expect(progressFraction({ step: 'x' })).toBeNull();
+    expect(progressPercent({ done: 1, total: 4 })).toBe(25);
+    expect(progressPercent({ done: 9, total: 4 })).toBe(100);
+    expect(progressPercent({ step: 'x' })).toBeNull();
   });
 });
 

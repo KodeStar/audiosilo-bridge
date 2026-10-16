@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import type { ApiClient } from '@/api/client';
-import { tabFromHash, type TabId } from '@/lib/tabs';
+import { routeFromHash, type Route, type TabId } from '@/lib/tabs';
 import { Wordmark } from './Wordmark';
 import { TabBar } from './TabBar';
 import { secondaryButton } from './ui/buttons';
@@ -17,17 +17,18 @@ interface ShellProps {
 }
 
 export function Shell({ client, onSignedOut }: ShellProps) {
-  const [active, setActive] = useState<TabId>(() => tabFromHash(window.location.hash));
+  const [route, setRoute] = useState<Route>(() => routeFromHash(window.location.hash));
   const [signingOut, setSigningOut] = useState(false);
+  const active = route.tab;
 
   useEffect(() => {
-    const onHash = () => setActive(tabFromHash(window.location.hash));
+    const onHash = () => setRoute(routeFromHash(window.location.hash));
     window.addEventListener('hashchange', onHash);
     return () => window.removeEventListener('hashchange', onHash);
   }, []);
 
   function select(id: TabId) {
-    setActive(id);
+    setRoute({ tab: id, jobId: null });
     if (window.location.hash !== `#${id}`) window.location.hash = id;
   }
 
@@ -58,7 +59,9 @@ export function Shell({ client, onSignedOut }: ShellProps) {
       >
         {active === 'status' && <StatusTab client={client} />}
         {active === 'libraries' && <LibrariesTab client={client} />}
-        {active === 'jobs' && <JobsTab client={client} />}
+        {active === 'jobs' && (
+          <JobsTab key={route.jobId ?? 'all'} client={client} focusId={route.jobId} />
+        )}
         {active === 'settings' && <SettingsTab client={client} />}
         {active === 'workers' && <WorkersTab client={client} />}
         {active === 'logs' && <LogsTab client={client} />}

@@ -74,9 +74,9 @@ const (
 	DefaultSupervisorBatchBudgetUSD  = 10.0
 )
 
-// Agent backend selector values. An empty backend means "auto" (claude when
-// detectable, else codex, else unavailable); the two explicit values force one
-// runner.
+// Agent backend selector values: the CLI the agent container runs. Empty is
+// claude (the Bridge's app maps it; the engine's own agent.Select reads it as
+// auto, which the Bridge never calls).
 const (
 	AgentBackendClaude = agent.IDClaude
 	AgentBackendCodex  = agent.IDCodex
@@ -163,7 +163,7 @@ type ASRConfig struct {
 // resolved once at startup, like asr.backend), unlike cors_origins which the API
 // re-reads live per request.
 type AgentConfig struct {
-	Backend string `yaml:"backend"` // "" (auto) | "claude" | "codex"
+	Backend string `yaml:"backend"` // "" (claude) | "claude" | "codex"
 	// Concurrency is deprecated. It remains readable/writable for compatibility and
 	// is used only by the explicit legacy normalization path. New configurations
 	// should set QueueConcurrency and MaxAgentsPerBook instead.
@@ -176,9 +176,16 @@ type AgentConfig struct {
 	// BookBudgetUSD caps total agent spend per book: a stage parks the book
 	// budget_exceeded once its summed cost reaches this (0 -> the default; set a very
 	// large value to effectively disable). Restart-to-apply, like the rest of agent.*.
-	BookBudgetUSD float64           `yaml:"book_budget_usd"`
-	Claude        map[string]string `yaml:"claude"` // agent-stage name -> model
-	OpenAI        map[string]string `yaml:"openai"` // agent-stage name -> model (empty = codex default)
+	BookBudgetUSD float64 `yaml:"book_budget_usd"`
+	// The agent container (decision 15; bridge.go has the rules). StagingDir is
+	// the dir shared with it ("" = <data>/staging, see Config.AgentStagingDir);
+	// ClaimTimeoutSeconds how long a job waits for it to pick the job up;
+	// MonthlyBudgetUSD the monthly agent spend cap (0 = none).
+	StagingDir          string            `yaml:"staging_dir"`
+	ClaimTimeoutSeconds int               `yaml:"claim_timeout_seconds"`
+	MonthlyBudgetUSD    float64           `yaml:"monthly_budget_usd"`
+	Claude              map[string]string `yaml:"claude"` // agent-stage name -> model
+	OpenAI              map[string]string `yaml:"openai"` // agent-stage name -> model (empty = codex default)
 }
 
 // AgentCapacity is the normalized runtime capacity model. Legacy is true only
@@ -200,9 +207,11 @@ func (c AgentConfig) Capacity() AgentCapacity {
 		GlobalInvocations: c.QueueConcurrency * c.MaxAgentsPerBook}
 }
 
-// SupervisorConfig controls the bounded orchestration monitor. Enabled defaults on,
-// but AutomaticActions, ModelAssisted and backend failover default off. Thus an old
-// config gains cheap incident visibility without changing production scheduling.
+// SupervisorConfig controls the bounded orchestration monitor. Enabled and
+// AutomaticActions default on: the Bridge's jobs are pressed in the console and
+// left to run, so its bounded recoveries (a retry, a readmit, a requeue, each
+// capped per book per day) are the point, not a risk (sidecars ran with them on).
+// ModelAssisted and backend failover default off.
 type SupervisorConfig struct {
 	Enabled               bool   `yaml:"enabled"`
 	AutomaticActions      bool   `yaml:"automatic_actions"`
@@ -317,10 +326,16 @@ type Config struct {
 	Supervisor SupervisorConfig `yaml:"supervisor"`
 	// Contribution configures the contributing stage + intake poller (M7).
 	Contribution ContributionConfig `yaml:"contribution"`
+	// Transcripts controls the transcript cache (decision 5; bridge.go).
+	Transcripts TranscriptsConfig `yaml:"transcripts"`
 
 	// deprecations are notices about retired settings Load honoured (never saved;
 	// the server logs them at startup).
 	deprecations []string
+	// ignored are notices about engine settings set to something the Bridge
+	// doesn't use (bridge.go, ignoredOnBridge; logged at startup like
+	// deprecations).
+	ignored []string
 	// legacyCustomRepo is a custom legacy contribution.repo loaded without an
 	// explicit community_repo; Validate refuses it (see foldLegacyContribution).
 	legacyCustomRepo string
@@ -332,6 +347,11 @@ type Config struct {
 // honoured, for the caller to log once. Empty for a config that uses none.
 func (c Config) Deprecations() []string { return append([]string(nil), c.deprecations...) }
 
+// Ignored returns the notices Load collected about settings set to a non-default
+// value the Bridge doesn't use (ignoredOnBridge), for the caller to log once.
+// Empty for a config that sets none.
+func (c Config) Ignored() []string { return append([]string(nil), c.ignored...) }
+
 // Default returns a Config with secure defaults.
 func Default() Config {
 	return Config{
@@ -342,16 +362,20 @@ func Default() Config {
 		Tools:     ToolsConfig{AutoDownload: DefaultAutoDownload},
 		ASR:       ASRConfig{Backend: DefaultASRBackend, Language: DefaultASRLanguage},
 		Agent: AgentConfig{
-			QueueConcurrency: DefaultAgentQueueConcurrency,
-			MaxAgentsPerBook: DefaultMaxAgentsPerBook,
-			TimeoutMinutes:   DefaultTimeoutMinutes,
-			BookBudgetUSD:    DefaultBookBudgetUSD,
-			Claude:           defaultClaudeModels(),
-			OpenAI:           map[string]string{},
+			QueueConcurrency:    DefaultAgentQueueConcurrency,
+			MaxAgentsPerBook:    DefaultMaxAgentsPerBook,
+			TimeoutMinutes:      DefaultTimeoutMinutes,
+			BookBudgetUSD:       DefaultBookBudgetUSD,
+			ClaimTimeoutSeconds: DefaultClaimTimeoutSeconds,
+			MonthlyBudgetUSD:    DefaultMonthlyBudgetUSD,
+			Claude:              defaultClaudeModels(),
+			OpenAI:              map[string]string{},
 		},
-		Pricing: pricing.Table{Version: "unconfigured-v1", Rates: map[string]pricing.Rate{}},
+		Transcripts: TranscriptsConfig{RetentionDays: DefaultTranscriptRetentionDays},
+		Pricing:     pricing.Table{Version: "unconfigured-v1", Rates: map[string]pricing.Rate{}},
 		Supervisor: SupervisorConfig{
 			Enabled:               true,
+			AutomaticActions:      true,
 			IntervalSeconds:       DefaultSupervisorIntervalSeconds,
 			StaleMinutes:          DefaultSupervisorStaleMinutes,
 			NoProgressMinutes:     DefaultSupervisorNoProgressMins,
@@ -482,6 +506,8 @@ func load(dataDir string, withEnv bool) (Config, error) {
 	if strings.TrimSpace(cfg.ASR.Language) == "" {
 		cfg.ASR.Language = DefaultASRLanguage
 	}
+	// Before normalizeBridge, which forces the supervisor's model lanes off.
+	cfg.ignored = ignoredOnBridge(cfg)
 	normalizeBridge(&cfg)
 	// Normalize contribution defaults so a config predating M7 (no contribution
 	// section) or with an empty mode/repo/interval resolves to working values. AutoPurge
@@ -776,7 +802,7 @@ func (c Config) Validate() error {
 	switch c.Agent.Backend {
 	case "", AgentBackendClaude, AgentBackendCodex:
 	default:
-		return fmt.Errorf("agent.backend %q must be %q, %q, or empty (auto)",
+		return fmt.Errorf("agent.backend %q must be %q, %q, or empty (claude)",
 			c.Agent.Backend, AgentBackendClaude, AgentBackendCodex)
 	}
 	if c.Agent.TimeoutMinutes < 1 {
