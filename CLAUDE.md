@@ -199,17 +199,20 @@ until one connects).
 **Phase 1c (own-words descriptions):** the description step
 (`pipeline.Executor.Describe`, not an engine stage: its own `describing` stage run
 on the book, which the reconcile and the supervisor skip, run under the
-scheduler's `Hold` on the book) writes a spoiler-free
+scheduler's `Hold` on the book, or inside the contributing stage) writes a spoiler-free
 description from the fact notes of the book's opening chapters ONLY (the staged dir
 holds `opening.md` and nothing else: no transcript, no `knowledge-final.md`, no later
 chapter), validated (shape, length, voice, meta's description schema, the n-gram
 check against whatever source text is left: the retention removes an audio book's
-transcripts, and an ebook's text goes as it reaches done, so an ebook is checked
-only when it is described at a contributing park) and composed with the run's work
+transcripts, and an ebook's text goes as it reaches done, so the contributing stage
+of a book a `sidecars.generate` job follows runs it first, best effort and once,
+while that text is there) and composed with the run's work
 and sources. `sidecars.generate` runs it at its finish, after the characters and
-recaps are saved (once more at done when it first ran at a contributing park), and
+recaps are saved (reusing the contributing stage's for free, its check kept; once
+more at done when it first ran at a contributing park), and
 writes `description.json` with them, but never fails, parks or holds for it (the
-result says `description: false` and why); `sidecars.describe` (advertised beside
+result says `description: false` and why; a regenerate that gets none keeps the
+earlier file vouched for in `bridge.json`); `sidecars.describe` (advertised beside
 `sidecars.generate`) writes one for a book already generated here, parking for the
 agent's parks. Local only: a contribution never carries it. See BRIDGE-PLAN.md's
 Status table for what is next.

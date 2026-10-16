@@ -114,6 +114,9 @@ func (e *Executor) contribute(ctx context.Context, book store.Book, r scheduler.
 	if r.Progress != nil {
 		r.Progress(0, 1)
 	}
+	// The description first, while the source text is still there (best effort,
+	// outside the stage's rate sample).
+	e.describeAtContributing(ctx, book, r)
 	start := time.Now()
 
 	// 1. Load which sidecars exist. At least one must be present (synthesis normally

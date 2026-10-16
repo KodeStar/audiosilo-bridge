@@ -674,7 +674,18 @@ internal/
             bookID, noWait) writes a finished book's own-words description.
             It is NOT an engine stage (the state machine, scheduler and supervisor
             never run it): the Bridge's sidecars.generate (at its finish) and
-            sidecars.describe call it, under the scheduler's Hold on the book. The
+            sidecars.describe call it, under the scheduler's Hold on the book, and
+            the contributing stage calls it first (describeAtContributing, at the
+            stage's start, outside its rate sample, under its heartbeat, no hold:
+            the book is the scheduler's in-flight book), while the source text is
+            still there: an ebook's text goes as the book reaches done, before the
+            job's pass can ask, so a description first written then is checked
+            against nothing (a 13-word run copied from the epub was accepted). Best
+            effort: only for a book an open sidecars.generate job follows
+            (store.GenerateBookFollowed), only when the book has no describing run
+            yet (ok or failed: a contributing park runs the stage again and again,
+            and never pays again), noWait, any error logged and never the stage's.
+            The job's pass then reuses it (below), keeping its checked_against. The
             SPOILER BOUND is the staging: the agent's dir holds ONLY opening.md (and
             out/), built mechanically from the fact pass's chunks (chunk_plan.json,
             named by factsChunkName) covering the chosen files: the `## Chapter N` sections (file numbering kept,
@@ -718,8 +729,8 @@ internal/
             the check (the disk, a transcript that can't be read) is no agent
             retry: the answer is taken and the run fails with a plain error; no layer at all
             (the retention purged the transcripts; an ebook's text goes as the
-            book reaches done, so an ebook is checked only at a contributing park)
-            skips the check and records checked_against "none". Spend: the call opens its own stage_run (DescribeStage
+            book reaches done, so only a later sidecars.describe meets an ebook
+            without it) skips the check and records checked_against "none". Spend: the call opens its own stage_run (DescribeStage
             "describing", numbered store.NextStageAttempt as the scheduler's runs
             are, so each run has its own _runs/describing-aNN) on the book, so
             invocation tracking,
@@ -732,7 +743,9 @@ internal/
             as sidecars/description.json (FinalDescriptionPath, canonical JSON); a
             later call reuses it (re-composed with the current work/sources, nothing
             spent) when a successful describing run recorded how it was made
-            (store.LatestOkStageRun). ErrNoNotes: no characters.json, no manifest, or no notes for the opening.
+            (store.LatestOkStageRun), its chapters and checked_against read from
+            that run's metrics (the check it was made with, never one run again
+            against layers since gone). ErrNoNotes: no characters.json, no manifest, or no notes for the opening.
   contrib/  M7: everything GitHub-facing for contribution. TokenSource (secrets
             GitHubPAT first, else `gh auth token` - the token NEVER enters argv/logs/
             errors, leak-canary tested), a stdlib REST client (injectable base URL; typed RateLimitError; APIError
@@ -1279,7 +1292,13 @@ internal/
             asked at a contributing park: the contributing stage may have resolved
             the work and sources since, and the step's free re-compose makes the
             description name the work the characters do; a try at the park that
-            failed without spending gets its second go there too. The
+            failed without spending gets its second go there too. The engine's own
+            try at the start of contributing is what it usually finds (reused,
+            nothing spent, its checked_against kept); when the book's latest
+            describing run failed after spending (that try's, or an earlier run of
+            this job's before a restart), it asks no more (describeFailedPaid: no
+            second payment, and an ebook's second try at done would be checked
+            against nothing). The
             description NEVER fails, parks or holds the job: any error (the engine
             keeping its hold, see below, included) is logged and
             the result says {"description": false, "description_error": "<short
@@ -1293,7 +1312,10 @@ internal/
             the cost is read again after the step (a failed try's spend included).
             The contribution never carries it. A regenerate whose step got none
             leaves an earlier run's description.json in place (nothing deletes into
-            a library yet; bridge.json no longer names it).
+            a library yet), and its bridge.json carries over the existing one's
+            description object (keptDescription: only beside a description.json
+            that is a regular file, read through readProvenance), so the kept file
+            stays vouched for.
             sidecars.describe (DescribeJob, DescribeKind, pipeline lane): params
             decoded leniently (any JSON object). prepare as generate does, strict
             when new (nothing spent yet) and not when resumed (jobs.Job.Resumed: an

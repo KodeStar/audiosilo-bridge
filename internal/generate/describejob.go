@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"slices"
 
 	"github.com/kodestar/audiosilo-bridge/internal/agent"
 	"github.com/kodestar/audiosilo-bridge/internal/jobs"
@@ -397,6 +398,13 @@ func (h *Handler) describeOnce(ctx context.Context, r *run, b store.Book) bool {
 		return false
 	}
 	r.descTried, r.descDone = true, done
+	if r.desc == nil && h.describeFailedPaid(ctx, b.ID) {
+		// The book's last try (the engine's at the start of contributing, or an
+		// earlier run of this job's) spent and failed: the run doesn't pay twice,
+		// and an ebook's second try at done would be checked against nothing.
+		r.descErr, r.descPaid = "an earlier try at the description failed (see the Bridge's log)", true
+		return false
+	}
 	d := h.describer()
 	if d == nil {
 		r.descErr = "the Bridge's engine can't write descriptions"
@@ -418,6 +426,26 @@ func (h *Handler) describeOnce(ctx context.Context, r *run, b store.Book) bool {
 	}
 	r.desc, r.descRaw, r.descErr = &got.res, got.raw, ""
 	return true
+}
+
+// describeFailedPaid reports whether the book's latest describing run failed
+// after it spent.
+func (h *Handler) describeFailedPaid(ctx context.Context, bookID int64) bool {
+	runs, err := h.o.DB.ListStageRuns(ctx, bookID)
+	if err != nil {
+		return false
+	}
+	for _, run := range slices.Backward(runs) {
+		if run.Stage != pipeline.DescribeStage {
+			continue
+		}
+		if run.Ok == nil || *run.Ok {
+			return false
+		}
+		cost, err := h.o.DB.StageRunBudgetCost(ctx, run.ID)
+		return err == nil && cost > 0
+	}
+	return false
 }
 
 // descriptionErrorText is a generate result's short plain reason for having no

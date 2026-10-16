@@ -528,3 +528,99 @@ func TestDescribeJobIgnoresAnotherServersRun(t *testing.T) {
 		t.Fatalf("failed with %v, calls %v", u.Error, d.calls())
 	}
 }
+
+// A regenerate whose own description fails leaves the earlier description.json in
+// place (nothing deletes into a library), and its bridge.json carries over the
+// earlier one's description object, so the file is still vouched for. With no
+// description.json in place there is nothing to vouch for (see
+// TestGenerateSurvivesADescriptionFailure).
+func TestARegenerateKeepsTheKeptDescriptionVouchedFor(t *testing.T) {
+	t.Parallel()
+	hr := newHarness(t)
+	adir := filepath.Join(hr.root, "Author", "Book", AttachDir)
+	hr.srv.add(45, "Author/Book", `{}`)
+	stop := hr.runAll(hr.describeHandler(&fakeDescriber{db: hr.db}))
+	hr.waitFor("the first run", func() bool { s, _ := hr.srv.final(45); return s == link.StateDone })
+	stop()
+
+	failing := &fakeDescriber{db: hr.db, fail: func(int) error {
+		return scheduler.ParkWithCode(state.ParkAgentValidationExhausted, "kept failing")
+	}}
+	hr.srv.add(46, "Author/Book", `{}`)
+	stop = hr.runAll(hr.describeHandler(failing))
+	defer stop()
+	hr.waitFor("the regenerate", func() bool { s, _ := hr.srv.final(46); return s == link.StateDone })
+	var res Result
+	hr.result(46, &res)
+	if res.Description || len(failing.calls()) != 1 {
+		t.Fatalf("result %+v, calls %v", res, failing.calls())
+	}
+	if raw, err := os.ReadFile(filepath.Join(adir, "description.json")); err != nil || string(raw) != testDescription {
+		t.Fatalf("description.json = %s, %v", raw, err)
+	}
+	var prov Provenance
+	raw, _ := os.ReadFile(filepath.Join(adir, "bridge.json"))
+	if err := json.Unmarshal(raw, &prov); err != nil || prov.JobID != 46 || prov.Description == nil ||
+		prov.Description.JobID != 45 || prov.Description.CheckedAgainst != pipeline.CheckedTranscripts ||
+		prov.Description.GeneratedAt != "2026-10-16T12:00:00Z" {
+		t.Fatalf("bridge.json = %s, %v", raw, err)
+	}
+}
+
+// keptDescription reads the description object only beside a description.json
+// that is a regular file, and only from a bridge.json that holds one.
+func TestKeptDescription(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	adir := filepath.Join(dir, AttachDir)
+	mustWrite(t, filepath.Join(adir, "bridge.json"),
+		`{"job_id":9,"description":{"job_id":8,"generated_at":"2026-10-16T12:00:00Z","from":"opening_notes","chapters":2,"checked_against":"book text"}}`)
+	if d := keptDescription(dir, ""); d != nil {
+		t.Fatalf("no description.json, kept %+v", d)
+	}
+	if err := os.Symlink(filepath.Join(t.TempDir(), "elsewhere.json"), filepath.Join(adir, "description.json")); err != nil {
+		t.Fatal(err)
+	}
+	if d := keptDescription(dir, ""); d != nil {
+		t.Fatalf("a linked description.json, kept %+v", d)
+	}
+	_ = os.Remove(filepath.Join(adir, "description.json"))
+	mustWrite(t, filepath.Join(adir, "description.json"), testDescription)
+	if d := keptDescription(dir, ""); d == nil || d.JobID != 8 || d.CheckedAgainst != "book text" {
+		t.Fatalf("kept %+v", d)
+	}
+	for _, prov := range []string{`{"job_id":9}`, `{"job_id":9,"description":null}`, `{"description":"x"}`, `not json`} {
+		mustWrite(t, filepath.Join(adir, "bridge.json"), prov)
+		if d := keptDescription(dir, ""); d != nil {
+			t.Fatalf("bridge.json %s, kept %+v", prov, d)
+		}
+	}
+}
+
+// The engine's try at the start of contributing spent and failed: the job's pass
+// at done doesn't pay for a second (for an ebook it would be checked against
+// nothing), and says why there is none.
+func TestGenerateDoesNotPayTwiceForADescription(t *testing.T) {
+	t.Parallel()
+	hr := newHarness(t)
+	d := &fakeDescriber{db: hr.db}
+	gate := hr.exec.gate("contributing")
+	hr.srv.add(47, "Author/Book", `{}`)
+	stop := hr.runAll(hr.describeHandler(d))
+	defer stop()
+	hr.waitFor("contributing", func() bool {
+		return hr.srv.saw(47, func(_ link.Update, p map[string]any) bool { return p["stage"] == "contributing" })
+	})
+	// The engine's own try, as the real step records one that failed its checks.
+	var park *scheduler.ParkError
+	if _, err := (&spendingDescriber{db: hr.db}).Describe(context.Background(), hr.engineBook(47).ID, true); !errors.As(err, &park) {
+		t.Fatalf("the engine's try = %v", err)
+	}
+	close(gate)
+	hr.waitFor("done", func() bool { s, _ := hr.srv.final(47); return s == link.StateDone })
+	var res Result
+	hr.result(47, &res)
+	if len(d.calls()) != 0 || res.Description || !strings.Contains(res.DescriptionError, "an earlier try") || res.CostUSD != 3.65 {
+		t.Fatalf("calls %v, result %+v", d.calls(), res)
+	}
+}

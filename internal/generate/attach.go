@@ -299,6 +299,27 @@ func describedProvenance(dir, prefix string, fresh Provenance) ([]byte, error) {
 	return indentJSON(existing)
 }
 
+// keptDescription is the description object of the book's bridge.json, when a
+// description.json is in place beside it: a run that writes no description of its
+// own leaves an earlier run's file there (nothing deletes into a library), and the
+// new bridge.json carries over what vouches for it. nil when either is missing,
+// isn't a regular file, or holds no description object.
+func keptDescription(dir, prefix string) *DescriptionProvenance {
+	adir := filepath.Join(dir, AttachDir)
+	if info, err := os.Lstat(filepath.Join(adir, prefix+descriptionName)); err != nil || !info.Mode().IsRegular() {
+		return nil
+	}
+	raw, ok := readProvenance(adir, prefix+provenanceName)["description"]
+	if !ok {
+		return nil
+	}
+	var d *DescriptionProvenance
+	if json.Unmarshal(raw, &d) != nil {
+		return nil
+	}
+	return d
+}
+
 // readProvenance reads adir/name (a bridge.json) as a JSON object, nil when there
 // is none fit to keep. The library is another program's folder, so the read is
 // the agent container's kind (agentproto.ReadRegular, which generate may not

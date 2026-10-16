@@ -32,10 +32,10 @@ import (
 
 // DescribeStage names the description step's stage_runs (BRIDGE-PLAN.md Phase 1c).
 // It is NOT a state of the engine's state machine: the step runs once a book's
-// sidecars are final (done, or parked at contributing), called by the Bridge's
-// sidecars.generate and sidecars.describe jobs and never by the scheduler, so the
-// readers of stage_runs that drive the state machine (reconcile, the supervisor)
-// skip it. Its runs count wherever spend is summed (the budgets, the estimates).
+// sidecars are final (at the start of contributing for a book a sidecars.generate
+// job follows, then called by the Bridge's sidecars.generate and sidecars.describe
+// jobs, never dispatched by the scheduler), so the readers of stage_runs that drive
+// the state machine (reconcile, the supervisor) skip it. Its runs count wherever spend is summed (the budgets, the estimates).
 // config's model maps route it under the same name (state.Describing).
 const DescribeStage = string(state.Describing)
 
@@ -46,9 +46,9 @@ const (
 	CheckedBookText    = "book text"
 	// CheckedNone: every source layer was gone, so nothing was checked: an audio
 	// book's transcripts after the retention purged them, and an ebook's text,
-	// which the engine deletes as the book reaches done (a licensing rule), so an
-	// ebook is only checked when its description is written at a contributing
-	// park. The agent never saw any of them either.
+	// which the engine deletes as the book reaches done (a licensing rule; the
+	// contributing stage describes a generated book before that, so only a later
+	// sidecars.describe meets it). The agent never saw any of them either.
 	CheckedNone = "none"
 )
 
@@ -258,6 +258,45 @@ func (e *Executor) Describe(ctx context.Context, bookID int64, noWait bool) (Des
 	cost := finish(true, usageMetrics)
 	return DescribeResult{Path: path, Chapters: sel.K, CheckedAgainst: checked, CostUSD: cost,
 		GeneratedAt: time.Now().UTC()}, nil
+}
+
+// describeAtContributing runs the description step at the start of the
+// contributing stage, while the book's source text is still there: an ebook's text
+// goes as the book reaches done, before the Bridge's job can ask, so a description
+// first written then is checked against nothing. The job's own pass later finds it
+// in the work dir and reuses it (re-composed with the work contributing resolved,
+// nothing spent), keeping this check's checked_against from the run's metrics.
+//
+// Best effort, and only for a book a sidecars.generate job follows (the one reader
+// of a description): once per book (a describing run already recorded, ok or not,
+// is never paid for again, since a contributing park runs the stage again), with no
+// rate-limit wait, under the stage's heartbeat, and any error only logged. The
+// book is the scheduler's in-flight book here, so no hold is taken.
+func (e *Executor) describeAtContributing(ctx context.Context, book store.Book, r scheduler.StageReport) {
+	if e.db == nil {
+		return
+	}
+	followed, err := e.db.GenerateBookFollowed(ctx, book.ID)
+	if err != nil || !followed {
+		if err != nil {
+			e.log.Warn("contributing: no description (the generate job couldn't be looked up)", "book", book.ID, "err", err)
+		}
+		return
+	}
+	if n, err := e.db.CountStageRuns(ctx, book.ID, DescribeStage); err != nil || n > 0 {
+		return
+	}
+	var res DescribeResult
+	err = runWithStageHeartbeat(ctx, r, nil, func() error {
+		var derr error
+		res, derr = e.Describe(ctx, book.ID, true)
+		return derr
+	})
+	if err != nil {
+		e.log.Warn("contributing: no description; the stage goes on without one", "book", book.ID, "err", err)
+		return
+	}
+	e.log.Info("contributing: wrote the description", "book", book.ID, "checked_against", res.CheckedAgainst)
 }
 
 // describeBasis reads the run's validated characters.json: the description

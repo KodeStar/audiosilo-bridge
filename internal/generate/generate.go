@@ -924,10 +924,14 @@ func (h *Handler) writeSidecars(ctx context.Context, r *run, b store.Book, wait 
 		record: true,
 		progress: jobs.Progress{Step: stepWriting, Message: "Saving the characters and recaps with the book",
 			Extra: r.bookExtra(b)},
-		files: func(place) ([]attachFile, error) {
+		files: func(p place) ([]attachFile, error) {
 			prov := provenance(h.o.Version, Kind, r.job.ID, h.now(), r.source, workID, inputsOf(r.mount, r.files, r.epub))
 			if s.description != nil {
 				prov.Description = descriptionProvenance(r.job.ID, *r.desc)
+			} else {
+				// An earlier run's description.json stays in place; what vouches
+				// for it stays with it.
+				prov.Description = keptDescription(p.dir, p.prefix)
 			}
 			return attachmentFiles(s, prov)
 		},
