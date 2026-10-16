@@ -185,7 +185,7 @@ func TestWriteAttachments(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	s := sidecars{characters: []byte(`{"work":"w","characters":[]}`), recaps: []byte(`{"work":"w","recaps":[]}`)}
-	prov := provenance("0.2.0", 12, time.Date(2026, 10, 15, 9, 0, 0, 0, time.UTC), SourceAudio, "w",
+	prov := provenance("0.2.0", Kind, 12, time.Date(2026, 10, 15, 9, 0, 0, 0, time.UTC), SourceAudio, "w",
 		[]InputFile{{Path: "A/B/01.mp3", Size: 3, ModTime: 1700000000}})
 	if err := writeAttachments(dir, "", s, prov); err != nil {
 		t.Fatal(err)
@@ -284,14 +284,14 @@ func TestLoadSidecarsSkipsUnchangedFiles(t *testing.T) {
 	if err := os.Chtimes(chars, info.ModTime(), info.ModTime()); err != nil {
 		t.Fatal(err)
 	}
-	if s2, _ := r.loadSidecars(wd); s2.hash != s.hash {
+	if s2, _ := r.loadSidecars(wd); s2.hash() != s.hash() {
 		t.Fatal("unchanged files were read again")
 	}
 	later := info.ModTime().Add(time.Second)
 	if err := os.Chtimes(chars, later, later); err != nil {
 		t.Fatal(err)
 	}
-	if s3, _ := r.loadSidecars(wd); s3.hash == s.hash {
+	if s3, _ := r.loadSidecars(wd); s3.hash() == s.hash() {
 		t.Fatal("a changed file wasn't read again")
 	}
 }

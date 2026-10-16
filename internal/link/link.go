@@ -187,7 +187,9 @@ type BookInfo struct {
 type Attachments struct {
 	Characters bool `json:"characters"`
 	Recaps     bool `json:"recaps"`
-	Bridge     bool `json:"bridge"`
+	// Description: description.json (Phase 1c; an older server sends none).
+	Description bool `json:"description"`
+	Bridge      bool `json:"bridge"`
 }
 
 // BookFile is one of a Book's files, its path relative to the library root.

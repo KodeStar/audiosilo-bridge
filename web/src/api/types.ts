@@ -122,7 +122,8 @@ export interface Park {
 export type GenerateSource = 'audio' | 'ebook';
 
 // jobs.Progress, with the fields a kind adds beside them (Extra; sidecars.generate
-// sends stage, eta_seconds, cost_usd, source and, while parked, park).
+// sends stage, eta_seconds, cost_usd, source and, while parked, park;
+// sidecars.describe the same but eta_seconds, its stage "describing").
 export interface Progress {
   step?: string;
   message?: string;
@@ -151,6 +152,25 @@ export interface GenerateResult {
   work_id: string;
   // Intake issue links, with contribute = issue only.
   contributed?: Record<string, string>;
+  // Whether description.json was written with the others (absent from a Bridge
+  // before Phase 1c); when it wasn't, why, in a few plain words.
+  description?: boolean;
+  description_error?: string;
+}
+
+// What a description's no-verbatim check measured against ("none": the
+// transcripts were already removed).
+export type CheckedAgainst = 'transcripts' | 'book text' | 'none';
+
+// generate.DescribeJobResult (a sidecars.describe job's result).
+export interface DescribeResult {
+  library_id: number;
+  path: string;
+  description: boolean;
+  // The names written in the book's .audiosilo/ folder.
+  files: string[];
+  cost_usd: number;
+  checked_against: CheckedAgainst;
 }
 
 // store.ServerJob

@@ -4,7 +4,7 @@ import userEvent from '@testing-library/user-event';
 import { JobsTab } from './JobsTab';
 import { ApiClient } from '@/api/client';
 import { lastCall, mockFetch } from '@/test/fetchMock';
-import { generateJobFixture, jobFixture } from '@/test/fixtures';
+import { describeJobFixture, generateJobFixture, jobFixture } from '@/test/fixtures';
 
 const api = () => new ApiClient({ getToken: () => 't', onSignedOut: vi.fn() });
 
@@ -178,6 +178,8 @@ describe('JobsTab', () => {
                 contributed: {
                   characters: 'https://github.com/KodeStar/audiosilo-meta-community/issues/12',
                 },
+                description: false,
+                description_error: 'the agent account hit its usage limit',
               },
             }),
           ],
@@ -192,6 +194,49 @@ describe('JobsTab', () => {
     ).toBeInTheDocument();
     expect(within(card).getByText(/characters.json, recaps.json, bridge.json/)).toBeInTheDocument();
     expect(within(card).getByRole('link', { name: /issues\/12/ })).toBeInTheDocument();
+    expect(
+      within(card).getByText('No description: the agent account hit its usage limit'),
+    ).toBeInTheDocument();
+  });
+
+  it('shows a description job running, then its result', async () => {
+    mockFetch({ 'GET /api/jobs': { body: { jobs: [describeJobFixture()] } } });
+    const { unmount } = render(<JobsTab client={api()} />);
+    const card = await screen.findByRole('article', { name: 'Job 14' });
+    expect(within(card).getByText('Description')).toBeInTheDocument();
+    expect(within(card).getByText('Writing a description')).toBeInTheDocument();
+    expect(within(card).getByText(/\$0.04 spent/)).toBeInTheDocument();
+    unmount();
+
+    mockFetch({
+      'GET /api/jobs': {
+        body: {
+          jobs: [
+            describeJobFixture({
+              state: 'done',
+              finished_at: '2026-10-16T12:00:00Z',
+              result: {
+                library_id: 1,
+                path: 'Author/Book',
+                description: true,
+                files: ['description.json', 'bridge.json'],
+                cost_usd: 0.25,
+                checked_against: 'none',
+              },
+            }),
+          ],
+        },
+      },
+    });
+    render(<JobsTab client={api()} />);
+    const done = await screen.findByRole('article', { name: 'Job 14' });
+    await userEvent.click(within(done).getByText('Details'));
+    expect(
+      within(done).getByText(
+        'A description, $0.25, not checked: the transcripts were already removed',
+      ),
+    ).toBeInTheDocument();
+    expect(within(done).getByText(/description.json, bridge.json/)).toBeInTheDocument();
   });
 
   it("opens one job from the console's link", async () => {

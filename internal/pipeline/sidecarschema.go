@@ -14,15 +14,16 @@ import (
 	meta "github.com/kodestar/audiosilo-meta"
 )
 
-// sidecarSchemas compiles meta's embedded characters/recaps schemas (plus the
-// common.schema.json they $ref) once per process, keyed by sidecar kind. Each is
-// registered under its own `$id`, which is what their `$ref`s resolve against.
+// sidecarSchemas compiles meta's embedded characters/recaps/description schemas
+// (plus the common.schema.json they $ref) once per process, keyed by sidecar kind.
+// Each is registered under its own `$id`, which is what their `$ref`s resolve
+// against.
 var sidecarSchemas = sync.OnceValues(func() (map[string]*jsonschema.Schema, error) {
 	c := jsonschema.NewCompiler()
 	// Assert "format" as metacheck does, so this gate and the intake agree.
 	c.AssertFormat()
 	ids := map[string]string{}
-	for _, f := range []string{"common", "characters", "recaps"} {
+	for _, f := range []string{"common", "characters", "recaps", "description"} {
 		name := f + ".schema.json"
 		raw, err := meta.SchemaFS.ReadFile("schema/" + name)
 		if err != nil {
@@ -43,7 +44,7 @@ var sidecarSchemas = sync.OnceValues(func() (map[string]*jsonschema.Schema, erro
 		ids[f] = id
 	}
 	out := map[string]*jsonschema.Schema{}
-	for _, k := range []string{"characters", "recaps"} {
+	for _, k := range []string{"characters", "recaps", "description"} {
 		sch, err := c.Compile(ids[k])
 		if err != nil {
 			return nil, fmt.Errorf("compile %s schema: %w", k, err)

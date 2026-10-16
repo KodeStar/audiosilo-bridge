@@ -1,11 +1,39 @@
-import type { GenerateResult, Park, Progress, ServerJob } from '@/api/types';
+import type {
+  CheckedAgainst,
+  DescribeResult,
+  GenerateResult,
+  Park,
+  Progress,
+  ServerJob,
+} from '@/api/types';
 
 // The sidecars.generate job (internal/generate): its progress carries the
 // engine's stage, ETA, spend, source and park beside the step and the count.
 export const GENERATE_KIND = 'sidecars.generate';
+// The description-only job: the same progress, without an ETA.
+export const DESCRIBE_KIND = 'sidecars.describe';
 
 export function isGenerate(job: ServerJob): boolean {
   return job.kind === GENERATE_KIND;
+}
+
+export function isDescribe(job: ServerJob): boolean {
+  return job.kind === DESCRIBE_KIND;
+}
+
+// isSidecars: a job that follows the engine (its progress and parks look alike).
+export function isSidecars(job: ServerJob): boolean {
+  return isGenerate(job) || isDescribe(job);
+}
+
+const KIND_LABELS: Record<string, string> = {
+  [GENERATE_KIND]: 'Characters and recaps',
+  [DESCRIBE_KIND]: 'Description',
+};
+
+// kindLabel words a job kind ("" for one with no label: the kind shows as it is).
+export function kindLabel(kind: string): string {
+  return KIND_LABELS[kind] ?? '';
 }
 
 // parkOf is a running job's park (null when it isn't parked). The Bridge keeps
@@ -24,7 +52,7 @@ export function effectiveState(job: ServerJob): string {
 
 // canRetry: a parked sidecars job can be retried from this page.
 export function canRetry(job: ServerJob): boolean {
-  return isGenerate(job) && parkOf(job) !== null;
+  return isSidecars(job) && parkOf(job) !== null;
 }
 
 // etaText words the engine's ETA: "under a minute", "about 25 min",
@@ -95,6 +123,8 @@ export function parseGenerateResult(r: unknown): GenerateResult | null {
             ),
           )
         : undefined,
+    description: typeof o.description === 'boolean' ? o.description : undefined,
+    description_error: typeof o.description_error === 'string' ? o.description_error : undefined,
   };
 }
 
@@ -103,4 +133,46 @@ export function resultSummary(r: GenerateResult): string {
   const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
   const what = `${plural(r.characters, 'character', 'characters')} and ${plural(r.recaps, 'recap', 'recaps')}`;
   return `${what} from ${sourceText(r.source)}, ${usd(r.cost_usd)}`;
+}
+
+// descriptionText words a generate result's description outcome ("" from a
+// Bridge before descriptions).
+export function descriptionText(r: GenerateResult): string {
+  if (r.description === true) return 'With a description';
+  if (r.description === false) {
+    return r.description_error ? `No description: ${r.description_error}` : 'No description';
+  }
+  return '';
+}
+
+// checkedText words what a description's no-verbatim check measured against.
+export function checkedText(c: CheckedAgainst): string {
+  if (c === 'transcripts') return 'checked against the transcripts';
+  if (c === 'book text') return 'checked against the book text';
+  return 'not checked: the transcripts were already removed';
+}
+
+// parseDescribeResult reads a done description-only job's result, or null when
+// it isn't one.
+export function parseDescribeResult(r: unknown): DescribeResult | null {
+  if (!r || typeof r !== 'object') return null;
+  const o = r as Partial<DescribeResult>;
+  if (typeof o.path !== 'string' || !Array.isArray(o.files)) return null;
+  const checked: CheckedAgainst =
+    o.checked_against === 'transcripts' || o.checked_against === 'book text'
+      ? o.checked_against
+      : 'none';
+  return {
+    library_id: typeof o.library_id === 'number' ? o.library_id : 0,
+    path: o.path,
+    description: o.description === true,
+    files: o.files.filter((f): f is string => typeof f === 'string'),
+    cost_usd: typeof o.cost_usd === 'number' ? o.cost_usd : 0,
+    checked_against: checked,
+  };
+}
+
+// describeSummary is "A description, $0.25, checked against the transcripts".
+export function describeSummary(r: DescribeResult): string {
+  return `A description, ${usd(r.cost_usd)}, ${checkedText(r.checked_against)}`;
 }

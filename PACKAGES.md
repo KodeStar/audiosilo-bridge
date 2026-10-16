@@ -226,6 +226,8 @@ internal/
             Confined like Purge (the denied case is tested); the file names come from
             the owning packages' constants (spelling.RefsDir/PriorPrefix/
             SeriesGlossaryFile/CorrectionsLogFile, qa.AcceptedFile), never literals.
+            Phase 1c: it keeps the description step's chapter_positions.json and
+            sidecars/description.json (neither quotes the transcript).
   qa/       M4: the mechanical transcript-QA degeneration sweep, a faithful Go port
             of the historical Python detectors (qa_sweep/cross_segment/
             within_segment/multi_loop/tail_rate scans - thresholds and per-detector
@@ -338,6 +340,11 @@ internal/
             Availability.RetryAfter marks an unavailable runner that comes back by
             itself (the agent container restarting): the preflight park then gets a
             retry_at instead of waiting for a human.
+            Phase 1c: prompts/description.md is the description step's prompt (the
+            AUTHORING.md `description` contract restated: setup only, grounded only
+            in opening.md, own words, neutral voice, 200-1500 characters, hyphens,
+            out/description.json as exactly {"text": ...}); a prompts test renders
+            both source branches and holds the output shape.
   benchmark/ private, provider-neutral post-ASR evaluation: allow-listed corpus
             preparation with input digests; fresh per-run work trees and databases;
             stage-specific model/effort routes; the real fact/synthesis/audit/fix
@@ -661,6 +668,48 @@ internal/
             names the validated characters.json/recaps.json generate copies into the
             library (SidecarsView reads the same two). ManifestChangedMsg now says to
             cancel the job and generate again.
+            Phase 1c, the DESCRIPTION STEP (describe_stage.go): Executor.Describe(ctx,
+            bookID, DescribeReport) writes a finished book's own-words description.
+            It is NOT an engine stage (the state machine, scheduler and supervisor
+            never run it): the Bridge's sidecars.generate (at its finish) and
+            sidecars.describe call it. The SPOILER BOUND is the staging: the agent's
+            dir holds ONLY opening.md (and out/), built mechanically from
+            facts/facts-ch*.md: the `## Chapter N` sections (file numbering kept,
+            never renumbered) of the files whose LOGICAL position (classifyBookEdges
+            -> PositionOf) is 0 (front matter) or 1..K, K = max(2, ceil(logical/4))
+            capped at the logical count; excluded edge files (an Audible intro,
+            credits) and end matter never. No transcript, no knowledge-final.md (it
+            carries FINAL/ENDING), no later chapter, no publisher text (a test lists
+            the staged dir). The classification reads the transcripts, which the
+            retention deletes, so each one is kept as chapter_positions.json (with
+            the manifest's fingerprint; PurgeTranscripts leaves it) and a book whose
+            transcripts are gone uses it, else its FILE numbers with the logical count
+            from the recaps' last through (a file's number is never below its story
+            chapter, so that bound is safe, only less generous); an ebook classifies
+            from its manifest alone. The run's characters.json supplies the work and
+            sources (a run whose own work/sources can't make a valid description
+            fails before any spend). The validator (patch feedback on a retry):
+            strict {"text"} decode with a 64 KiB cap; trimmed text 200-1500 runes; no
+            control character but newline (the server refuses them); no em dash; at
+            most two paragraphs; no second person, no sentence ending in "?", no
+            sales words (descriptionProblems); then the composed model.Description
+            (license CC-BY-SA-4.0) against meta's description.schema.json
+            (sidecarSchemas now compiles it too), then extract.NGram against the
+            transcript text layers through ngramScan (ngramCheck's scan without its
+            "no layer" refusal): a hit is a retry naming the run; no layer at all
+            (retention purged them) skips the check and records checked_against
+            "none". Spend: the call opens its own stage_run (DescribeStage
+            "describing", attempt-numbered) on the book, so invocation tracking,
+            SumStageRunBudgetCost, the monthly sum and the estimates see it, and
+            finishes it ok/failed with {chapters, logical_chapters, basis,
+            checked_against, usage}; runAgentWith is runAgent with the rate-limit
+            backoff given (DescribeReport.NoWait passes an empty schedule: a rate
+            limit parks at once), stageMaxTurns gives it 10. Its parks come back
+            as *scheduler.ParkError (the caller decides). The composed file is kept
+            as sidecars/description.json (FinalDescriptionPath, canonical JSON); a
+            later call reuses it (re-composed with the current work/sources, nothing
+            spent) when a successful describing run recorded how it was made.
+            ErrNoNotes: no characters.json, no manifest, or no notes for the opening.
   contrib/  M7: everything GitHub-facing for contribution. TokenSource (secrets
             GitHubPAT first, else `gh auth token` - the token NEVER enters argv/logs/
             errors, leak-canary tested), a stdlib REST client (injectable base URL; typed RateLimitError; APIError
@@ -745,6 +794,10 @@ internal/
             toward the month. budgetCostSQL is the one budget-basis expression (the
             provider's cost, else a complete estimate, else 0) every sum shares.
             GetBookBySourcePath finds an earlier run of the same book.
+            Phase 1c: StageRunBudgetCost(runID) is one run's budget-basis spend (the
+            description step reports its own); LatestGenerateBookAt(library, path)
+            is the newest generate job's surviving engine book at a path
+            (sidecars.describe finds a moved book's run with it).
   state/    per-book pipeline state machine: table-driven states/lanes/transitions,
             CanStart/NextState guards, the audit fix-loop cap. Pure, no I/O. M6 added
             ParkCode (typed park reasons - M7 added contrib_unavailable, core_needed,
@@ -842,6 +895,9 @@ internal/
             SetAgentCapacity(n) changes the agent lane's book capacity (atomic,
             clamped to 1, notifies on a change) while it runs: the Bridge follows the
             agent container's slots.
+            Phase 1c: reconcileBook skips a succeeded stage the state machine doesn't
+            know (the description step's "describing": no sentinel, state.Order 0,
+            so it would rewind a contributing-parked book to a state nothing runs).
   supervisor/ the health-tick babysitter (config supervisor.*): classifies incidents
             over book/stage-run snapshots (deterministic classifiers + optional
             model-assisted lane), decides bounded recovery actions, and applies them
@@ -910,6 +966,11 @@ internal/
             time limit would stop a long CPU transcription again and again), and any
             action on a book no open sidecars.generate job follows
             (store.GenerateBookFollowed: it would run, and spend, for nobody).
+            Phase 1c: engineRuns drops the runs of a stage outside the state machine
+            (the description step's "describing") from every snapshot (the tick, the
+            confirmation, Ask): an open one has no scheduler worker and a done one no
+            sentinel, so they read as a missing process or a broken artifact on a
+            finished book.
   metaops/  meta.audiosilo.app client (coverage/lookup, capped 1h TTL caches,
             graceful degrade) + the PathAllowed/AllowedPath containment checks
             (Phase 1a passes the mapped mounts as the roots). glossary.go adds
@@ -992,7 +1053,8 @@ internal/
             monthly_budget_usd, month_spent_usd and can_contribute; omitted until the
             engine has started); RescanAttachments(library, path) is POST
             /bridge/rescan with mode "attachments" (the book's .audiosilo/ only, never
-            its audio), answering which of characters/recaps/bridge are indexed; and
+            its audio), answering which of characters/recaps/description (Phase 1c;
+            false from an older server)/bridge are indexed; and
             a job update's answer carries the job's current path, which the server
             moves with its book.
   mapping/  where the Bridge sees each library, CHECKED (decision 13): Check stats the
@@ -1160,6 +1222,43 @@ internal/
             each finished (done, or failed/cancelled) book whose job ended at least
             retention_days ago and wasn't swept, through scratch.PurgeTranscripts,
             then marks it swept.
+            Phase 1c, DESCRIPTIONS (describejob.go): Options.Describer is the
+            engine's description step (pipeline.Executor.Describe). A generate job's
+            write() runs it ONCE per run (describeOnce) when the sidecars are final
+            (done, or parked at contributing), with NoWait, before reading them; the
+            description NEVER fails, parks or holds the job: any error is logged and
+            the result says {"description": false, "description_error": "<short
+            plain reason>"} (descriptionErrorText), else "description": true and
+            description.json is written beside the others in the same finish (same
+            rules: known names only, once per content hash, at the book's current
+            path, mapping re-checked) with bridge.json's description object
+            {job_id, generated_at, from "opening_notes", chapters,
+            checked_against}. Only a description the run vouches for is written (a
+            file in the work dir it didn't get from Describe is ignored); the cost is
+            read again after it. The contribution never carries it.
+            sidecars.describe (DescribeJob, DescribeKind, pipeline lane): params
+            decoded leniently (any JSON object). prepare as generate does but strict
+            (nothing spent yet); notesBook finds the engine book (the latest at the
+            book's source path, else LatestGenerateBookAt for library+path): none is
+            errDescribeNoNotes ("The Bridge has no notes for this book ..."), one an
+            open generate job follows or the engine still has queued/running is
+            errDescribeGenerating. describeParked runs Describe: an agent park
+            (rate limit, budget, credential, unavailable) is the job's park (code,
+            hint, retry_at in progress) and it tries again at retry_at or on Retry
+            (the shared pokes, so the page's Retry and Handler.Retry reach it),
+            staying parked while it tries so a park that holds isn't announced
+            again; validation exhausted fails it ("Couldn't write a description that
+            passed the checks."). saveDescription writes description.json and
+            bridge.json (describedProvenance: the existing file's fields kept, its
+            description object added or replaced; a fresh one when there is none or
+            it isn't a regular file holding a JSON object), parking
+            book_not_writable until it can, follows a move (adoptMove: no mapping to
+            record), then RescanAttachments. Progress {step describing|writing|
+            rescanning|done, message, done, total, stage "describing", source,
+            cost_usd}; result {library_id, path, description: true, files, cost_usd,
+            checked_against}. markDescribing/isDescribing count the descriptions
+            reading an engine book: create() refuses to delete one ("try again in a
+            minute").
   agentproto/ the staging protocol between the Bridge and the agent container (decision
             15), shared by both sides so they can't drift; a LEAF (standard library
             only). Protocol 1 (both sides refuse another). A job dir <staging>/<16 hex>/:

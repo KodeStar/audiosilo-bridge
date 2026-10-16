@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 )
 
@@ -231,6 +232,17 @@ func (db *DB) SumStageRunBudgetCost(ctx context.Context, bookID int64) (cost flo
 			THEN 1 ELSE 0 END),0)
 		FROM stage_runs WHERE book_id=?`, bookID).Scan(&cost, &unknown)
 	return cost, unknown == 0, err
+}
+
+// StageRunBudgetCost returns one stage run's spend on the budget basis (the
+// description step reports what its own run cost). ErrNotFound for no such run.
+func (db *DB) StageRunBudgetCost(ctx context.Context, runID int64) (float64, error) {
+	var cost float64
+	err := db.sql.QueryRowContext(ctx, `SELECT `+budgetCostSQL+` FROM stage_runs WHERE id=?`, runID).Scan(&cost)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, ErrNotFound
+	}
+	return cost, err
 }
 
 // StageRunStarts returns each book's earliest stage-run start (MIN(started_at))

@@ -112,6 +112,22 @@ func (db *DB) OpenGenerateJobsForBook(ctx context.Context, bookID, exceptJob int
 	return out, rows.Err()
 }
 
+// LatestGenerateBookAt returns the engine book of the newest sidecars.generate
+// job for the book at (libraryID, relPath) whose book still exists (the path the
+// job last followed it to), or ErrNotFound. sidecars.describe finds the run whose
+// notes it reads with it when the book's source path no longer leads there.
+func (db *DB) LatestGenerateBookAt(ctx context.Context, libraryID int64, relPath string) (int64, error) {
+	var id int64
+	err := db.sql.QueryRowContext(ctx,
+		`SELECT book_id FROM generate_books
+		  WHERE library_id = ? AND rel_path = ? AND book_id IS NOT NULL
+		  ORDER BY created_at DESC, server_job_id DESC LIMIT 1`, libraryID, relPath).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, ErrNotFound
+	}
+	return id, err
+}
+
 // SweepBook is an engine book whose transcripts the retention sweep may delete:
 // only what the sweep needs.
 type SweepBook struct {

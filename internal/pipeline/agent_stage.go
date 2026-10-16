@@ -302,6 +302,9 @@ func stageMaxTurns(stage state.State) int {
 		return 80
 	case state.FactPass, state.Synthesizing, state.Auditing, state.Fixing:
 		return 32
+	case describeState:
+		// One small notes file in, one paragraph out.
+		return 10
 	default:
 		return 32
 	}
@@ -412,6 +415,14 @@ func (t *trackedAgentRunner) finish(res agent.Result, err error) {
 // (actionable, Retry-able); an exhausted output validator PARKS naming why; any other
 // error (render, transport, timeout) is returned as a plain error (StatusFailed).
 func (e *Executor) runAgent(ctx context.Context, book store.Book, stage state.State, r scheduler.StageReport, st *agent.Staging, promptName string, promptData any, web bool, validate func(agent.Result, *agent.Staging) error) (agentUsage, error) {
+	return e.runAgentWith(ctx, book, stage, r, st, promptName, promptData, web, validate, e.backoff)
+}
+
+// runAgentWith is runAgent with the rate-limit backoff schedule given: nil is the
+// default (agent.DefaultBackoff), an empty schedule waits out no rate limit at all
+// (the limit parks at once, which the description step needs: it must never hold
+// the job that asked for it).
+func (e *Executor) runAgentWith(ctx context.Context, book store.Book, stage state.State, r scheduler.StageReport, st *agent.Staging, promptName string, promptData any, web bool, validate func(agent.Result, *agent.Staging) error, backoff []time.Duration) (agentUsage, error) {
 	// Per-book budget preflight: park (with everything already recorded) BEFORE spending
 	// another invocation once the book's summed agent cost has reached the budget. It runs
 	// per runAgent call, so fact_pass (one runAgent per chunk) naturally checks between
@@ -489,7 +500,6 @@ func (e *Executor) runAgent(ctx context.Context, book store.Book, stage state.St
 			}
 		},
 	}
-	backoff := e.backoff
 	if backoff == nil {
 		backoff = agent.DefaultBackoff()
 	}

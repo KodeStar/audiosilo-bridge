@@ -65,6 +65,15 @@ func (s *engineState) generateEngine() generate.Engine {
 	return nil
 }
 
+// describer is the engine's description step for the generate and describe
+// jobs (nil until it started: never a typed nil inside the interface).
+func (s *engineState) describer() generate.Describer {
+	if e := s.get(); e != nil {
+		return e.exec
+	}
+	return nil
+}
+
 // agentBackend is the CLI the agent container runs (claude unless codex is set).
 func agentBackend(cfg config.Config) string {
 	if cfg.Agent.Backend == config.AgentBackendCodex {

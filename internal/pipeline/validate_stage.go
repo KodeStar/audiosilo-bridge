@@ -181,10 +181,29 @@ func ngramGate(charsPath, recapsPath string) (scannable, findings []string, err 
 // both the transcripts-text/ and transcripts-corrected/ layers, per source file. Each
 // overlap is a finding naming the locus, the source layer, and the offending run. A
 // layer that does not exist (or holds no .txt files) is skipped; a genuine read
-// failure inside the check is returned as an error.
+// failure inside the check is returned as an error, and so is a check that found no
+// layer at all.
 func ngramCheck(book store.Book, sidecars []string) ([]string, error) {
+	findings, checked, err := ngramScan(book, sidecars)
+	if err != nil {
+		return nil, err
+	}
+	// A check that measured nothing is not a clean check. Silently skipping every
+	// layer would report "no verbatim overlap" for a book whose source text was never
+	// compared - exactly the reassuring-but-empty result the copyright rule cannot
+	// afford, since nothing downstream re-runs it.
+	if len(checked) == 0 {
+		return nil, fmt.Errorf("no source text layer to check the sidecars against; the n-gram check would pass vacuously")
+	}
+	return findings, nil
+}
+
+// ngramScan is ngramCheck's scan: the findings, and the labels of the layers it
+// measured against (none when every layer is gone). The description step calls it
+// directly, since a book whose transcripts the retention purged still gets a
+// description (its agent never saw them) and says it wasn't checked.
+func ngramScan(book store.Book, sidecars []string) (findings, checked []string, err error) {
 	workDir := book.WorkDir
-	var findings []string
 	sources := []ngramSource{
 		{"transcripts-text", filepath.Join(workDir, transcript.TextDir)},
 		{"transcripts-corrected", filepath.Join(workDir, spelling.CorrectedDir)},
@@ -198,17 +217,16 @@ func ngramCheck(book store.Book, sidecars []string) ([]string, error) {
 		// The directory comes from chapterTextDir, not a local join: that helper is
 		// the single answer to "where is this book's final chapter text", and a second
 		// spelling of it here would be the first place to drift.
-		sources = []ngramSource{{"book text", filepath.Join(workDir, chapterTextDir(book))}}
+		sources = []ngramSource{{CheckedBookText, filepath.Join(workDir, chapterTextDir(book))}}
 	}
-	checked := 0
 	for _, src := range sources {
 		if !hasTxtFiles(src.dir) {
 			continue
 		}
-		checked++
+		checked = append(checked, src.label)
 		hits, err := extract.NGram(src.dir, sidecars, ngramShingle)
 		if err != nil {
-			return nil, fmt.Errorf("%s: %w", src.label, err)
+			return nil, nil, fmt.Errorf("%s: %w", src.label, err)
 		}
 		for _, h := range hits {
 			findings = append(findings, fmt.Sprintf(
@@ -216,14 +234,7 @@ func ngramCheck(book store.Book, sidecars []string) ([]string, error) {
 				h.Words, h.Locus, filepath.Base(h.File), src.label, h.Text))
 		}
 	}
-	// A check that measured nothing is not a clean check. Silently skipping every
-	// layer would report "no verbatim overlap" for a book whose source text was never
-	// compared - exactly the reassuring-but-empty result the copyright rule cannot
-	// afford, since nothing downstream re-runs it.
-	if checked == 0 {
-		return nil, fmt.Errorf("no source text layer to check the sidecars against; the n-gram check would pass vacuously")
-	}
-	return findings, nil
+	return findings, checked, nil
 }
 
 // hasTxtFiles reports whether dir exists and contains at least one .txt file (the

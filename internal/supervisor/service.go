@@ -14,6 +14,7 @@ import (
 	"github.com/kodestar/audiosilo-bridge/internal/config"
 	"github.com/kodestar/audiosilo-bridge/internal/pricing"
 	"github.com/kodestar/audiosilo-bridge/internal/scheduler"
+	"github.com/kodestar/audiosilo-bridge/internal/state"
 	"github.com/kodestar/audiosilo-bridge/internal/store"
 )
 
@@ -235,6 +236,7 @@ type passReads struct {
 // fanned-out invocation roll-up. The batch pass and the per-incident confirmation share
 // it so both classify from identically-assembled data.
 func (s *Service) buildSnapshot(book store.Book, runs []store.StageRun, pass passReads) Snapshot {
+	runs = engineRuns(runs)
 	eligibleCount := 0
 	if len(pass.runtime.EligibleAgentIDs) > 0 && book.ID == pass.runtime.EligibleAgentIDs[0] {
 		eligibleCount = pass.runtime.EligibleAgentBooks
@@ -309,7 +311,22 @@ func (s *Service) freshSnapshot(ctx context.Context, bookID int64, pass passRead
 	if err != nil {
 		return Snapshot{}, nil, err
 	}
+	runs = engineRuns(runs)
 	return s.buildSnapshot(book, runs, pass), runs, nil
+}
+
+// engineRuns drops the runs of a stage outside the engine's state machine (the
+// description step's "describing", which the Bridge's jobs run on a finished book):
+// the supervisor recovers engine stages only, and such a run, open with no
+// scheduler worker or done with no sentinel, would read as a broken one.
+func engineRuns(runs []store.StageRun) []store.StageRun {
+	out := runs[:0:0]
+	for _, r := range runs {
+		if state.IsStage(state.State(r.Stage)) {
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 func primaryIncident(incidents []Incident) (Incident, bool) {
@@ -693,6 +710,7 @@ func (s *Service) Ask(ctx context.Context, bookID int64) (store.SupervisorRun, e
 	if err != nil {
 		return store.SupervisorRun{}, err
 	}
+	runs = engineRuns(runs)
 	runtime := Runtime{ActiveBooks: map[int64]bool{}}
 	if s.hooks.Runtime != nil {
 		books, listErr := s.db.ListBooks(ctx)

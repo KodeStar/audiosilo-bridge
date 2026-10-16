@@ -1,16 +1,22 @@
 import { describe, expect, it } from 'vitest';
 import {
   canRetry,
+  checkedText,
+  describeSummary,
+  descriptionText,
   effectiveState,
   etaText,
   generateFacts,
+  isSidecars,
+  kindLabel,
   parkOf,
+  parseDescribeResult,
   parseGenerateResult,
   resultSummary,
   sourceText,
   usd,
 } from './generate';
-import { generateJobFixture, jobFixture } from '@/test/fixtures';
+import { describeJobFixture, generateJobFixture, jobFixture } from '@/test/fixtures';
 
 const parked = () =>
   generateJobFixture({
@@ -96,5 +102,55 @@ describe('parseGenerateResult', () => {
     expect(parseGenerateResult(null)).toBeNull();
     expect(parseGenerateResult({ files: [] })).toBeNull();
     expect(parseGenerateResult('x')).toBeNull();
+  });
+});
+
+describe('descriptions', () => {
+  it('labels the kinds and retries a parked description job', () => {
+    expect(kindLabel('sidecars.describe')).toBe('Description');
+    expect(kindLabel('sidecars.generate')).toBe('Characters and recaps');
+    expect(kindLabel('bridge.verify')).toBe('');
+    expect(isSidecars(describeJobFixture())).toBe(true);
+    expect(isSidecars(jobFixture())).toBe(false);
+    expect(canRetry(describeJobFixture())).toBe(false);
+    const parked = describeJobFixture({
+      progress: { step: 'describing', park: { code: 'budget_exceeded', hint: 'Raise it.' } },
+    });
+    expect(canRetry(parked)).toBe(true);
+  });
+  it("words a generate result's description outcome", () => {
+    const base = parseGenerateResult({ path: 'A/B', files: [] })!;
+    expect(descriptionText(base)).toBe('');
+    expect(descriptionText({ ...base, description: true })).toBe('With a description');
+    expect(
+      descriptionText(
+        parseGenerateResult({
+          path: 'A/B',
+          files: [],
+          description: false,
+          description_error: 'the agent budget is spent',
+        })!,
+      ),
+    ).toBe('No description: the agent budget is spent');
+    expect(descriptionText({ ...base, description: false })).toBe('No description');
+  });
+  it('reads and words a description job result', () => {
+    const r = parseDescribeResult({
+      library_id: 1,
+      path: 'Author/Book',
+      description: true,
+      files: ['description.json', 'bridge.json', 2],
+      cost_usd: 0.25,
+      checked_against: 'transcripts',
+    });
+    expect(r?.files).toEqual(['description.json', 'bridge.json']);
+    expect(describeSummary(r!)).toBe('A description, $0.25, checked against the transcripts');
+    expect(
+      parseDescribeResult({ path: 'x', files: [], checked_against: 'nope' })?.checked_against,
+    ).toBe('none');
+    expect(checkedText('book text')).toBe('checked against the book text');
+    expect(checkedText('none')).toBe('not checked: the transcripts were already removed');
+    expect(parseDescribeResult(null)).toBeNull();
+    expect(parseDescribeResult({ files: [] })).toBeNull();
   });
 });

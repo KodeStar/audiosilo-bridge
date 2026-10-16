@@ -29,6 +29,7 @@ import (
 	"github.com/kodestar/audiosilo-bridge/internal/link"
 	"github.com/kodestar/audiosilo-bridge/internal/mapping"
 	"github.com/kodestar/audiosilo-bridge/internal/metaops"
+	"github.com/kodestar/audiosilo-bridge/internal/pipeline"
 	"github.com/kodestar/audiosilo-bridge/internal/scheduler"
 	"github.com/kodestar/audiosilo-bridge/internal/state"
 	"github.com/kodestar/audiosilo-bridge/internal/store"
@@ -47,6 +48,12 @@ type Engine interface {
 	ETASeconds(id int64) (int64, bool)
 }
 
+// Describer writes a finished engine book's own-words description
+// (*pipeline.Executor's Describe, Phase 1c).
+type Describer interface {
+	Describe(ctx context.Context, bookID int64, report pipeline.DescribeReport) (pipeline.DescribeResult, error)
+}
+
 // Server is the part of the server link the job calls.
 type Server interface {
 	Book(ctx context.Context, libraryID int64, path string) (*link.Book, error)
@@ -63,7 +70,10 @@ type Libraries interface {
 type Options struct {
 	DB *store.DB
 	// Engine is the scheduler, nil until the engine has started (the job waits).
-	Engine    func() Engine
+	Engine func() Engine
+	// Describer is the engine's description step, nil until the engine has
+	// started (a nil func: no descriptions).
+	Describer func() Describer
 	Libraries Libraries
 	Mount     mapping.MountFunc
 	// Server is the server link, nil while unpaired.
@@ -101,6 +111,9 @@ type Handler struct {
 	// doneJobs counts the jobs that finished done here (the heartbeat's
 	// estimates are computed again when it moves).
 	doneJobs atomic.Int64
+	// describing counts the description steps running on each engine book: a
+	// new generate job doesn't delete a book one of them is reading.
+	describing map[int64]int
 }
 
 // Finished is how many jobs finished done since the start.
@@ -123,7 +136,7 @@ func New(o Options) *Handler {
 	if o.Now == nil {
 		o.Now = time.Now
 	}
-	return &Handler{o: o, pokes: map[int64]chan struct{}{}}
+	return &Handler{o: o, pokes: map[int64]chan struct{}{}, describing: map[int64]int{}}
 }
 
 func (h *Handler) now() time.Time { return h.o.Now() }
@@ -134,17 +147,21 @@ func (h *Handler) Kind() string { return Kind }
 // Lane is the pipeline lane.
 func (h *Handler) Lane() string { return jobs.LanePipeline }
 
-// Result is what a done job reports (contract section 1).
+// Result is what a done job reports (contract section 1). Description says
+// whether description.json was written with the others (Phase 1c); when it
+// wasn't, DescriptionError says why in a few plain words.
 type Result struct {
-	LibraryID   int64             `json:"library_id"`
-	Path        string            `json:"path"`
-	Source      string            `json:"source"`
-	Files       []string          `json:"files"`
-	Characters  int               `json:"characters"`
-	Recaps      int               `json:"recaps"`
-	CostUSD     float64           `json:"cost_usd"`
-	WorkID      string            `json:"work_id"`
-	Contributed map[string]string `json:"contributed,omitempty"`
+	LibraryID        int64             `json:"library_id"`
+	Path             string            `json:"path"`
+	Source           string            `json:"source"`
+	Files            []string          `json:"files"`
+	Characters       int               `json:"characters"`
+	Recaps           int               `json:"recaps"`
+	CostUSD          float64           `json:"cost_usd"`
+	WorkID           string            `json:"work_id"`
+	Contributed      map[string]string `json:"contributed,omitempty"`
+	Description      bool              `json:"description"`
+	DescriptionError string            `json:"description_error,omitempty"`
 }
 
 // run is one job's state as it goes.
@@ -186,6 +203,11 @@ type run struct {
 	poke     chan struct{}
 	ownPark  bool
 	resuming bool
+	// descTried says this run asked for the description (once per run); desc is
+	// the description it got, descErr why it got none.
+	descTried bool
+	desc      *pipeline.DescribeResult
+	descErr   string
 }
 
 // bookKey is what changes on an engine book row when the scheduler moves it.
@@ -576,6 +598,9 @@ func (h *Handler) create(ctx context.Context, eng Engine, r *run) error {
 		if len(open) > 0 {
 			return fmt.Errorf("job %d is already generating this book; cancel it first", open[0])
 		}
+		if h.isDescribing(old.ID) {
+			return errors.New("the Bridge is still writing a description from this book's earlier run; try again in a minute")
+		}
 		if err := eng.Delete(ctx, old.ID); errors.Is(err, scheduler.ErrBusy) {
 			return errors.New("the engine is still running a stage of this book's earlier run; try again in a minute")
 		} else if err != nil && !errors.Is(err, store.ErrNotFound) {
@@ -750,8 +775,18 @@ func (h *Handler) finish(ctx context.Context, r *run, b store.Book, cost float64
 	if err != nil {
 		return nil, err
 	}
+	if r.desc != nil && !r.desc.Reused {
+		// The description was paid for after the cost was read.
+		if c, _, err := h.o.DB.SumStageRunBudgetCost(ctx, b.ID); err == nil {
+			cost = c
+		}
+	}
 	res := Result{LibraryID: r.lib.ID, Path: r.rel, Source: r.source, Files: attachmentNames(r.place.prefix, s),
-		Characters: s.nChars, Recaps: s.nRecaps, CostUSD: Cents(cost), WorkID: cmp.Or(b.WorkID, s.workID)}
+		Characters: s.nChars, Recaps: s.nRecaps, CostUSD: Cents(cost), WorkID: cmp.Or(b.WorkID, s.workID),
+		Description: s.description != nil}
+	if !res.Description {
+		res.DescriptionError = cmp.Or(r.descErr, "no description was written")
+	}
 	if r.params.Contribute == ContributeIssue {
 		rows, err := h.o.DB.ListContributionsByBook(ctx, b.ID)
 		if err == nil {
@@ -780,11 +815,16 @@ func (h *Handler) finish(ctx context.Context, r *run, b store.Book, cost float64
 // engine's work dir meanwhile, never lost to a failed job. Without (a book parked
 // at contributing, looked at every poll) the failure is returned.
 func (h *Handler) write(ctx context.Context, r *run, b store.Book, wait bool) (sidecars, error) {
+	h.describeOnce(ctx, r, b)
 	s, err := r.loadSidecars(b.WorkDir)
 	if err != nil {
 		return sidecars{}, err
 	}
-	if s.hash == r.written {
+	if r.desc == nil {
+		// Only a description this run vouches for (and can say how it was made).
+		s.description = nil
+	}
+	if s.hash() == r.written {
 		return s, nil
 	}
 	workID := cmp.Or(b.WorkID, s.workID)
@@ -809,7 +849,7 @@ func (h *Handler) write(ctx context.Context, r *run, b store.Book, wait bool) (s
 		r.rep.Unpark()
 		r.ownPark = false
 	}
-	r.written = s.hash
+	r.written = s.hash()
 	h.o.Log.Info("generate: wrote the book's attachments", "job", r.job.ID, "path", r.rel, "files", attachmentNames(r.place.prefix, s))
 	r.rep.Progress(jobs.Progress{Step: stepRescanning, Message: "Asking the server to read them",
 		Extra: map[string]any{"stage": b.State, "source": r.source}})
@@ -833,7 +873,10 @@ func (h *Handler) writeOnce(r *run, b store.Book, s sidecars, workID string) err
 	}
 	r.rep.Progress(jobs.Progress{Step: stepWriting, Message: "Saving the characters and recaps with the book",
 		Extra: map[string]any{"stage": b.State, "source": r.source}})
-	prov := provenance(h.o.Version, r.job.ID, h.now(), r.source, workID, inputsOf(r.mount, r.files, r.epub))
+	prov := provenance(h.o.Version, Kind, r.job.ID, h.now(), r.source, workID, inputsOf(r.mount, r.files, r.epub))
+	if s.description != nil {
+		prov.Description = descriptionProvenance(r.job.ID, *r.desc)
+	}
 	if err := writeAttachments(r.place.dir, r.place.prefix, s, prov); err != nil {
 		return fmt.Errorf("its %s folder can't be written (%s)", AttachDir, writeProblem(err))
 	}
@@ -845,9 +888,17 @@ func (h *Handler) writeOnce(r *run, b store.Book, s sidecars, workID string) err
 // are asked for again there, and the mapping follows, so a restart finds the
 // same book.
 func (h *Handler) followMove(ctx context.Context, r *run) {
+	if from, moved := h.adoptMove(ctx, r); moved {
+		h.recordMove(ctx, r, from)
+	}
+}
+
+// adoptMove is followMove without recording the move (a description-only job has
+// no mapping to record it in): it reports where the book was, and whether it moved.
+func (h *Handler) adoptMove(ctx context.Context, r *run) (string, bool) {
 	cur := r.rep.Path()
 	if cur == "" || cur == r.jobPath {
-		return
+		return "", false
 	}
 	from := r.rel
 	r.jobPath, r.rel = cur, cur
@@ -859,7 +910,7 @@ func (h *Handler) followMove(ctx context.Context, r *run) {
 	} else {
 		h.o.Log.Warn("generate: asking the server for the moved book failed", "job", r.job.ID, "err", err)
 	}
-	h.recordMove(ctx, r, from)
+	return from, true
 }
 
 // recordMove records the job's book at r.rel (it was at from).
@@ -894,6 +945,9 @@ func attachmentNames(prefix string, s sidecars) []string {
 	if s.recaps != nil {
 		out = append(out, prefix+recapsName)
 	}
+	if s.description != nil {
+		out = append(out, prefix+descriptionName)
+	}
 	return append(out, prefix+provenanceName)
 }
 
@@ -906,7 +960,8 @@ func (h *Handler) rescan(ctx context.Context, r *run) {
 	for i := 1; ; i++ {
 		got, err := r.srv.RescanAttachments(ctx, r.lib.ID, r.rel)
 		if err == nil {
-			h.o.Log.Info("generate: the server read the attachments", "job", r.job.ID, "characters", got.Characters, "recaps", got.Recaps)
+			h.o.Log.Info("generate: the server read the attachments", "job", r.job.ID, "characters", got.Characters, "recaps", got.Recaps,
+				"description", got.Description)
 			return
 		}
 		if i == rescanTries || errors.Is(err, link.ErrNotIndexable) || ctx.Err() != nil {
