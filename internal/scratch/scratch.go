@@ -235,8 +235,12 @@ func Purge(workRoot, workDir string, kind state.Kind) error {
 
 // transcriptDirs hold the transcript text, every layer of it. (Purge keeps an
 // audio book's transcripts-corrected/ as a durable; this tier is where it goes.)
+// windows/ is a chapterless book's window layer (Phase 1d: the windows' raw
+// transcripts and the detection); its chapters_detected.json (titles only) stays,
+// like the manifest.
 var transcriptDirs = []string{
 	transcript.RawDir, transcript.JSONDir, transcript.TextDir, transcript.RepairedDir, spelling.CorrectedDir,
+	audio.WindowsDir,
 }
 
 // transcriptFiles quote the transcript at the work dir's root: the spelling

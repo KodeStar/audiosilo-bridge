@@ -130,7 +130,7 @@ func Split(ctx context.Context, m Manifest, workDir, ffmpegPath string, report P
 			completed++
 		}
 	}
-	if m.Style == StyleMarkers && completed < total {
+	if (m.Style == StyleMarkers || m.Style == StyleWindows) && completed < total {
 		staged, err := stageMarkerSource(ctx, m.Source, workDir)
 		switch {
 		case err != nil && ctx.Err() != nil:

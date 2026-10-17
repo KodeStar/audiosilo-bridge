@@ -162,6 +162,15 @@ func (db *DB) UnsweptGenerateBooks(ctx context.Context, cutoff time.Time) ([]Swe
 	return out, rows.Err()
 }
 
+// GenerateBookSwept reports whether an engine book's transcripts were deleted by
+// the retention (a mapping of its job records it).
+func (db *DB) GenerateBookSwept(ctx context.Context, bookID int64) (bool, error) {
+	var n int
+	err := db.sql.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM generate_books WHERE book_id = ? AND swept_at != ''`, bookID).Scan(&n)
+	return n > 0, err
+}
+
 // MarkGenerateBookSwept records that an engine book's transcripts were deleted,
 // so the sweep skips it from now on.
 func (db *DB) MarkGenerateBookSwept(ctx context.Context, bookID int64, at time.Time) error {
@@ -192,12 +201,14 @@ type FinishedBook struct {
 }
 
 // FinishedBooks returns every done book's kind, duration, chapter count and
-// agent spend (superseded runs included), oldest first.
+// agent spend (superseded runs included), oldest first. A chapters-only book
+// (goal chapters) is left out: it is done without characters or recaps, so its
+// zero spend would drag the per-hour estimate down.
 func (db *DB) FinishedBooks(ctx context.Context) ([]FinishedBook, error) {
 	rows, err := db.sql.QueryContext(ctx,
 		`SELECT b.kind, b.duration_sec, b.chapters, COALESCE((SELECT SUM(`+budgetCostSQL+`)
 		     FROM stage_runs WHERE stage_runs.book_id = b.id), 0)
-		   FROM books b WHERE b.state = 'done' ORDER BY b.id`)
+		   FROM books b WHERE b.state = 'done' AND b.goal = '' ORDER BY b.id`)
 	if err != nil {
 		return nil, err
 	}

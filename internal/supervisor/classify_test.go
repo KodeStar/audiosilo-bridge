@@ -428,3 +428,15 @@ func TestPrimaryIncidentPreventsConflictingAutomaticPlaybooks(t *testing.T) {
 		t.Fatalf("primary=%+v ok=%v", got, ok)
 	}
 }
+
+// TestChaptersNotDetectedIsAHumanDecision: a chapterless book whose chapters
+// weren't found (Phase 1d) is a person's call, like an unreadable marker table: no
+// automatic retry, the deterministic lane escalates it for approval.
+func TestChaptersNotDetectedIsAHumanDecision(t *testing.T) {
+	for _, code := range []state.ParkCode{state.ParkMarkersNotConfident, state.ParkChaptersNotDetected} {
+		d := Decide(Incident{Kind: IncidentParkedRecovery, ParkCode: string(code)}, 0, 0, Policy{MaxAttempts: 3, AutomaticActions: true})
+		if d.Action != ActionParkEscalate || !d.ApprovalRequired {
+			t.Errorf("%s: %+v, want an escalation for approval", code, d)
+		}
+	}
+}

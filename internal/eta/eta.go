@@ -109,12 +109,15 @@ var stageUnits = map[state.State]stageUnit{
 	state.MarkersNormalizing: {unitBook, 180},
 	state.Splitting:          {unitChapter, 4},
 	state.ASR:                {unitChapter, 36},
-	state.Sanitizing:         {unitChapter, 1},
-	state.QASweep:            {unitBook, 10},
-	state.QAAdjudicating:     {unitBook, 300},
-	state.Retranscribing:     {unitChapter, 60},
-	state.SpellingResearch:   {unitBook, 600},
-	state.Correcting:         {unitBook, 15},
+	// ChapterDetecting reads a whole book's silences, finds its chapters and splits
+	// the source on them again: a minute is the spike's ballpark for a long book.
+	state.ChapterDetecting: {unitBook, 60},
+	state.Sanitizing:       {unitChapter, 1},
+	state.QASweep:          {unitBook, 10},
+	state.QAAdjudicating:   {unitBook, 300},
+	state.Retranscribing:   {unitChapter, 60},
+	state.SpellingResearch: {unitBook, 600},
+	state.Correcting:       {unitBook, 15},
 	// Extracting is a zip read plus HTML-to-text over a whole book: mechanical and
 	// fast, but not free on a 600-page novel. ChapterMapping mirrors
 	// MarkersNormalizing, the agent stage it is modelled on.
@@ -154,6 +157,9 @@ type Book struct {
 	// MaxAgentsPerBook is the fan-out width for supported stages. Zero preserves
 	// the historical serial assumption for direct callers.
 	MaxAgentsPerBook int
+	// GoalChapters: the book runs for its chapters only (Phase 1d), so its path
+	// goes from asr to chapter_detecting and ends there.
+	GoalChapters bool
 }
 
 // UnitIsBook reports whether a stage is measured in whole books (one unit per run)
@@ -266,7 +272,7 @@ func remainingSegments(b Book, rates map[string]float64) []segment {
 	// every fork (skipping the conditional stages and routing the off-mainline stages
 	// back onto the mainline), so following it from any start is finite - every fork
 	// moves toward done and no off-mainline stage is re-entered.
-	for cur := b.State; cur != "" && !state.IsTerminal(cur); cur = state.MainlineNext(b.Kind, cur) {
+	for cur := b.State; cur != "" && !state.IsTerminal(cur); cur = nextOnPath(b, cur) {
 		if state.IsWaypoint(cur) {
 			continue // no lane, no cost
 		}
@@ -291,6 +297,21 @@ func remainingSegments(b Book, rates map[string]float64) []segment {
 		})
 	}
 	return segs
+}
+
+// nextOnPath is the stage after cur on b's remaining path: the mainline, except
+// for a chapters-only book, which goes from asr to chapter_detecting and ends
+// there (the mainline skips chapter_detecting, a conditional stage).
+func nextOnPath(b Book, cur state.State) state.State {
+	if b.GoalChapters {
+		switch cur {
+		case state.ASR:
+			return state.ChapterDetecting
+		case state.ChapterDetecting:
+			return ""
+		}
+	}
+	return state.MainlineNext(b.Kind, cur)
 }
 
 // BookETA returns the estimated seconds a book still needs (the sum of its remaining

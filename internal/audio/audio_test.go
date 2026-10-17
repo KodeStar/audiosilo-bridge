@@ -661,7 +661,7 @@ func TestInspectAndSplitMarkers(t *testing.T) {
 		[]string{"Chapter 1: One", "Chapter 2. Two", "Chapter 3 - Three"}, 3)
 	work := filepath.Join(dir, "work")
 
-	m, markers, err := Inspect(context.Background(), book, work, ffprobe)
+	m, markers, err := Inspect(context.Background(), book, work, ffprobe, "")
 	if err != nil {
 		t.Fatalf("Inspect: %v", err)
 	}
@@ -701,7 +701,7 @@ func TestInspectWordNumberedMarkersExcludesExtras(t *testing.T) {
 		[]string{"Opening Credits", "Chapter One – Arrival", "Chapter Two — Departure", "Bloopers", "End Credits"}, 2)
 	work := filepath.Join(dir, "work")
 
-	m, markers, err := Inspect(context.Background(), book, work, ffprobe)
+	m, markers, err := Inspect(context.Background(), book, work, ffprobe, "")
 	if err != nil {
 		t.Fatalf("Inspect: %v", err)
 	}
@@ -722,7 +722,7 @@ func TestSplitResumesAfterDeletingOne(t *testing.T) {
 	book := genChapteredM4B(t, ffmpeg, dir,
 		[]string{"Chapter 1", "Chapter 2", "Chapter 3"}, 2)
 	work := filepath.Join(dir, "work")
-	m, _, err := Inspect(context.Background(), book, work, ffprobe)
+	m, _, err := Inspect(context.Background(), book, work, ffprobe, "")
 	if err != nil {
 		t.Fatalf("Inspect: %v", err)
 	}
@@ -1081,7 +1081,7 @@ func TestInspectMultiFileStyle(t *testing.T) {
 		}
 	}
 	work := filepath.Join(dir, "work")
-	m, markers, err := Inspect(context.Background(), bookDir, work, ffprobe)
+	m, markers, err := Inspect(context.Background(), bookDir, work, ffprobe, "")
 	if err != nil {
 		t.Fatalf("Inspect: %v", err)
 	}
@@ -1111,7 +1111,7 @@ func TestInspectNonContiguousWritesDraftManifest(t *testing.T) {
 	book := genChapteredM4B(t, ffmpeg, dir,
 		[]string{"Chapter 1", "Chapter 2", "Chapter 4"}, 2)
 	work := filepath.Join(dir, "work")
-	m, markers, err := Inspect(context.Background(), book, work, ffprobe)
+	m, markers, err := Inspect(context.Background(), book, work, ffprobe, "")
 	if err != nil {
 		t.Fatalf("Inspect: %v", err)
 	}
@@ -1147,7 +1147,7 @@ func TestInspectNumbersTitleOnlyTableEndToEnd(t *testing.T) {
 		[]string{"Track A", "Track B", "Track C"}, 2)
 	work := filepath.Join(dir, "work")
 
-	m, markers, err := Inspect(context.Background(), book, work, ffprobe)
+	m, markers, err := Inspect(context.Background(), book, work, ffprobe, "")
 	if err != nil {
 		t.Fatalf("Inspect: %v", err)
 	}

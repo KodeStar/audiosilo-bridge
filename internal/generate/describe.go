@@ -30,6 +30,7 @@ var stageLabels = map[state.State]string{
 	state.MarkersNormalizing: "Working out the chapters",
 	state.Splitting:          "Splitting the audio into chapters",
 	state.ASR:                "Transcribing",
+	state.ChapterDetecting:   "Finding the chapters in the narration",
 	state.Sanitizing:         "Tidying the transcripts",
 	state.QASweep:            "Checking the transcripts",
 	state.QAAdjudicating:     "Reviewing transcript problems",
@@ -65,6 +66,8 @@ var parkHints = map[string]string{
 	string(state.ParkAgentValidationExhausted): "The agent's answer kept failing the checks. Press Retry on the Bridge's page to give it another go.",
 	string(state.ParkMarkersNotConfident): "The chapter markers couldn't be read with confidence. Check the book's chapters, " +
 		"then press Retry on the Bridge's page.",
+	string(state.ParkChaptersNotDetected): "The Bridge couldn't find the chapters in the narration. Add chapter markers " +
+		"to the audio file, or match the book to a recording with a chapter list, then cancel this job and generate it again.",
 	string(state.ParkQANoConverge):          "The transcript checks didn't settle. Press Retry on the Bridge's page for another round.",
 	string(state.ParkSpellingGateFailure):   "The name corrections failed their checks. Press Retry on the Bridge's page for another go.",
 	string(state.ParkMediaToolsUnavailable): "ffmpeg or ffprobe is missing on the Bridge. Install them (or allow the download), then press Retry on the Bridge's page.",

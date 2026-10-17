@@ -192,7 +192,7 @@ func TestPurgeTranscripts(t *testing.T) {
 		"spelling-refs/ch001.txt", "spelling-refs/prior-spellings.json", "spelling-refs/prior-marker_titles.txt",
 		"spelling-refs/series-glossary.txt",
 		"facts/knowledge-final.md", "sidecars/characters.json", "manifest.json", "spellings.json", "corrections.json",
-		"_done/asr.json",
+		"_done/asr.json", "windows/transcripts-raw/ch001.json", "windows/detection.json", "chapters_detected.json",
 	} {
 		writeText(t, filepath.Join(wd, f), "x")
 	}
@@ -202,14 +202,14 @@ func TestPurgeTranscripts(t *testing.T) {
 	for _, gone := range []string{"transcripts-raw", "transcripts-json", "transcripts-text", "transcripts-repaired",
 		"transcripts-corrected", "chapters", "_runs", "spelling_candidates.json", "qa_report.md", "qa_report.json",
 		"qa_plan.json", "qa_accepted.json", "tail_verdicts.json",
-		"corrections.log", "repairs.log", "spelling_reference_matches.json", "spelling-refs/ch001.txt"} {
+		"corrections.log", "repairs.log", "spelling_reference_matches.json", "spelling-refs/ch001.txt", "windows"} {
 		if _, err := os.Stat(filepath.Join(wd, gone)); err == nil {
 			t.Errorf("%s survived the purge", gone)
 		}
 	}
 	for _, kept := range []string{"facts/knowledge-final.md", "sidecars/characters.json", "manifest.json", "spellings.json",
 		"corrections.json", "spelling-refs/prior-spellings.json", "spelling-refs/prior-marker_titles.txt",
-		"spelling-refs/series-glossary.txt", "_done/asr.json"} {
+		"spelling-refs/series-glossary.txt", "_done/asr.json", "chapters_detected.json"} {
 		if _, err := os.Stat(filepath.Join(wd, kept)); err != nil {
 			t.Errorf("%s was purged: it is carryover or the book's result", kept)
 		}

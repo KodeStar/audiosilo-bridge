@@ -1,0 +1,283 @@
+package pipeline
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"math"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/kodestar/audiosilo-bridge/internal/audio"
+	"github.com/kodestar/audiosilo-bridge/internal/scheduler"
+	"github.com/kodestar/audiosilo-bridge/internal/state"
+	"github.com/kodestar/audiosilo-bridge/internal/store"
+	"github.com/kodestar/audiosilo-bridge/internal/transcript"
+)
+
+// owJSON renders an openai-whisper raw transcript from segments of "word@start"
+// tokens (window-relative seconds; each word 0.3 s long).
+func owJSON(segs ...string) []byte {
+	doc := owRaw{Language: "en", Segments: []owRawSegm{}}
+	for i, seg := range segs {
+		s := owRawSegm{ID: i}
+		var text strings.Builder
+		for _, tok := range strings.Fields(seg) {
+			w, at, _ := strings.Cut(tok, "@")
+			var t float64
+			_, _ = fmt.Sscanf(at, "%g", &t)
+			w = strings.ReplaceAll(w, "_", " ")
+			s.Words = append(s.Words, owRawWord{Word: " " + w, Start: t, End: t + 0.3})
+			text.WriteString(" " + w)
+		}
+		s.Start, s.End, s.Text = s.Words[0].Start, s.Words[len(s.Words)-1].End, text.String()
+		doc.Segments = append(doc.Segments, s)
+	}
+	raw, _ := json.Marshal(doc)
+	return raw
+}
+
+func TestLoadWindowTimelineGluesTokensAndOffsets(t *testing.T) {
+	// whisper.cpp writes sub-word tokens; a token without a leading space continues
+	// the word before it.
+	wc := `{"transcription":[{"offsets":{"from":0,"to":2000},"text":" Chapter one","tokens":[
+		{"text":" Chap","offsets":{"from":0,"to":300}},{"text":"ter","offsets":{"from":300,"to":600}},
+		{"text":" one","offsets":{"from":700,"to":900}},{"text":".","offsets":{"from":900,"to":950}}]},
+		{"offsets":{"from":3000,"to":4000},"text":" no words","tokens":[]}]}`
+	windows := []audio.Chapter{{Chapter: 1, Start: 0, End: 50}, {Chapter: 2, Start: 50, End: 100}}
+	tl, err := loadWindowTimeline(windows, func(w audio.Chapter) ([]byte, error) {
+		if w.Chapter == 1 {
+			return owJSON("Hello@1"), nil
+		}
+		return []byte(wc), nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	words := tl.words()
+	got := make([]string, len(words))
+	for i, w := range words {
+		got[i] = fmt.Sprintf("%s@%g", strings.TrimSpace(w.Text), w.Start)
+	}
+	if want := "Hello@1|Chapter@50|one.@50.7|no words@53"; strings.Join(got, "|") != want {
+		t.Fatalf("words = %s, want %s", strings.Join(got, "|"), want)
+	}
+	if words[1].End != 50.6 || words[2].End != 50.95 {
+		t.Fatalf("glued ends = %v, %v", words[1].End, words[2].End)
+	}
+}
+
+func TestSplitTimelineAtBoundaries(t *testing.T) {
+	windows := []audio.Chapter{{Chapter: 1, Start: 0, End: 100}, {Chapter: 2, Start: 100, End: 200}}
+	tl, err := loadWindowTimeline(windows, func(w audio.Chapter) ([]byte, error) {
+		if w.Chapter == 1 {
+			// The second segment carries the end of chapter 1 and the start of chapter 2.
+			return owJSON("Chapter@0 One@0.4 the@1", "end.@59 Chapter@62 Two@62.4"), nil
+		}
+		return owJSON("more@10"), nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	docs := tl.split([]audio.Chapter{{Chapter: 1, Start: 0, End: 61.8}, {Chapter: 2, Start: 61.8, End: 200}})
+	if len(docs[0].Segments) != 2 || len(docs[1].Segments) != 2 {
+		t.Fatalf("segments = %d / %d, want 2 / 2", len(docs[0].Segments), len(docs[1].Segments))
+	}
+	tail, head := docs[0].Segments[1], docs[1].Segments[0]
+	if strings.TrimSpace(tail.Text) != "end." || strings.TrimSpace(head.Text) != "Chapter Two" {
+		t.Fatalf("split texts = %q / %q", tail.Text, head.Text)
+	}
+	near := func(a, b float64) bool { return math.Abs(a-b) < 1e-9 }
+	if !near(head.Start, 0.2) || head.Words[0].Start != head.Start || !near(docs[1].Segments[1].Start, 48.2) {
+		t.Fatalf("chapter 2 times not relative to its start: %+v", docs[1].Segments)
+	}
+	if head.ID != 0 || docs[1].Segments[1].ID != 1 || docs[0].Language != "en" {
+		t.Fatalf("ids / language = %d %d %q", head.ID, docs[1].Segments[1].ID, docs[0].Language)
+	}
+	// The synthesized raw reads as a complete openai-whisper transcript.
+	raw, _ := json.Marshal(docs[1])
+	if !transcript.Complete(raw) {
+		t.Fatal("synthesized raw is not a complete transcript")
+	}
+	if tr, err := transcript.Normalize(raw, transcript.Meta{Chapter: 2}); err != nil || len(tr.Segments) != 2 {
+		t.Fatalf("normalize: %v %+v", err, tr)
+	}
+}
+
+// TestGroupByPosition: the player's list is grouped by logical position, so a
+// front-matter Prologue shares chapter 1's entry and an Epilogue past the last
+// numbered chapter stays its own entry after it.
+func TestGroupByPosition(t *testing.T) {
+	long := strings.Repeat("words ", 200)
+	texts := []string{"Prologue. " + long, "Chapter One. " + long, "Chapter Two. " + long, "Chapter Three. " + long,
+		"Epilogue. " + long}
+	titles := []string{"Prologue", "Chapter One", "Chapter Two", "Chapter Three", "Epilogue"}
+	var m audio.Manifest
+	var tl windowTimeline
+	for i, text := range texts {
+		start := float64(i) * 600
+		m.Chapters = append(m.Chapters, audio.Chapter{Chapter: i + 1, Title: titles[i], Start: start, End: start + 600,
+			Duration: 600})
+		tl.segments = append(tl.segments, timedSegment{start: start + 1, end: start + 590, text: " " + text,
+			words: []timedWord{{text: " x", start: start + 1, end: start + 2}}})
+	}
+	m.Duration = 3000
+	got := groupByPosition(m, tl)
+	var desc []string
+	for _, e := range got {
+		desc = append(desc, fmt.Sprintf("%s@%d+%d", e.Title, e.StartMs, e.LengthMs))
+	}
+	want := "Prologue / Chapter One@0+1200000|Chapter Two@1200000+600000|Chapter Three@1800000+600000|Epilogue@2400000+600000"
+	if strings.Join(desc, "|") != want {
+		t.Fatalf("entries = %s\nwant      %s", strings.Join(desc, "|"), want)
+	}
+}
+
+// chapterlessFixture lays out a work dir as the asr stage leaves a windowed book:
+// a 20 s source, a windows manifest of two 10 s windows, their FLACs and raws.
+func chapterlessFixture(t *testing.T, ffmpeg string, duration float64, raws ...[]byte) store.Book {
+	t.Helper()
+	dir := t.TempDir()
+	src := filepath.Join(dir, "book.m4a")
+	if out, err := exec.Command(ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
+		"sine=frequency=220:duration=20", "-c:a", "aac", src).CombinedOutput(); err != nil {
+		t.Fatalf("generate source: %v: %s", err, out)
+	}
+	work := filepath.Join(dir, "work")
+	m := audio.Manifest{Source: src, Style: audio.StyleWindows, Duration: duration, ChapterCount: 2, Chapters: []audio.Chapter{
+		{Chapter: 1, Start: 0, End: 10, Duration: 10}, {Chapter: 2, Start: 10, End: 20, Duration: 10}}}
+	if err := os.MkdirAll(filepath.Join(work, transcript.RawDir), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := audio.WriteManifest(work, m); err != nil {
+		t.Fatal(err)
+	}
+	if err := audio.Split(context.Background(), m, work, ffmpeg, nil); err != nil {
+		t.Fatal(err)
+	}
+	for i, raw := range raws {
+		p := filepath.Join(work, transcript.RawDir, transcript.RawName(i+1))
+		if err := os.WriteFile(p, raw, 0o444); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := writeASRProvenance(work, asrProvenance{Backend: "fake", Model: "m", Language: "en"}); err != nil {
+		t.Fatal(err)
+	}
+	return store.Book{ID: 1, SourcePath: src, WorkDir: work}
+}
+
+func TestChapterDetectStage(t *testing.T) {
+	ffmpeg, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		t.Skip("ffmpeg not installed")
+	}
+	book := chapterlessFixture(t, ffmpeg, 20,
+		owJSON("Chapter@0.5 One@0.9 it_began@2.2", "and@4 on@4.5"),
+		owJSON("Chapter@2.5 Two@2.9 it_ended@4.2"))
+	e := NewExecutor(Config{FFmpeg: ffmpeg})
+	run := func() scheduler.StageResult {
+		t.Helper()
+		res, err := e.Execute(context.Background(), book, state.ChapterDetecting, scheduler.StageReport{})
+		if err != nil {
+			t.Fatalf("chapter_detecting: %v", err)
+		}
+		return res
+	}
+	run()
+	m, err := audio.ReadManifest(book.WorkDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Style != audio.StyleMarkers || !m.Detected || m.ChapterCount != 2 || m.Chapters[0].Title != "Chapter One" ||
+		m.Chapters[1].Start != 12.3 || m.Chapters[1].End != 20 {
+		t.Fatalf("detected manifest = %+v", m)
+	}
+	// The window layer moved aside; the raws are the chapters' own now, frozen.
+	for _, p := range []string{filepath.Join(audio.WindowsDir, audio.ManifestName), filepath.Join(audio.WindowsDir, windowsDetectionName),
+		filepath.Join(audio.WindowsDir, transcript.RawDir, transcript.RawName(1))} {
+		if _, err := os.Stat(filepath.Join(book.WorkDir, p)); err != nil {
+			t.Errorf("%s: %v", p, err)
+		}
+	}
+	raw2 := filepath.Join(book.WorkDir, transcript.RawDir, transcript.RawName(2))
+	info, err := os.Stat(raw2)
+	if err != nil || info.Mode().Perm() != 0o444 || !rawComplete(raw2) {
+		t.Fatalf("chapter 2 raw: %v %v", info, err)
+	}
+	b, _ := os.ReadFile(raw2) //nolint:gosec // test
+	if !strings.Contains(string(b), "Chapter Two") || strings.Contains(string(b), "began") {
+		t.Fatalf("chapter 2 raw holds the wrong words: %s", b)
+	}
+	fp, _ := manifestFingerprint(book.WorkDir)
+	if readASRProvenance(book.WorkDir).ManifestSHA != fp {
+		t.Fatal("asr.json doesn't carry the detected manifest's fingerprint")
+	}
+	for ch := 1; ch <= 2; ch++ {
+		if !audioComplete(filepath.Join(book.WorkDir, audio.ChaptersDir, audio.ChapterFileName(ch))) {
+			t.Errorf("chapter %d not split", ch)
+		}
+	}
+	list, err := ReadDetectedChapters(book.WorkDir)
+	if err != nil || len(list.Chapters) != 2 || list.Chapters[0].StartMs != 0 || list.Chapters[1].StartMs != 12300 ||
+		list.Chapters[1].LengthMs != 7700 || !list.CurrentFor(book.WorkDir) {
+		t.Fatalf("chapters_detected.json = %+v, %v", list, err)
+	}
+	if !scheduler.SentinelExists(book.WorkDir, string(state.ChapterDetecting)) {
+		t.Fatal("no sentinel")
+	}
+	// A crash after the move: the stage runs again from windows/ (the window FLACs
+	// are gone) and lands on the same book.
+	_ = os.Remove(scheduler.SentinelPath(book.WorkDir, string(state.ChapterDetecting)))
+	_ = os.Remove(DetectedChaptersPath(book.WorkDir))
+	_ = os.Remove(filepath.Join(book.WorkDir, audio.ChaptersDir, audio.ChapterFileName(2)))
+	run()
+	again, err := ReadDetectedChapters(book.WorkDir)
+	if err != nil || again.ManifestSHA != list.ManifestSHA || len(again.Chapters) != 2 {
+		t.Fatalf("after the re-run: %+v, %v", again, err)
+	}
+}
+
+func audioComplete(p string) bool {
+	info, err := os.Stat(p)
+	return err == nil && info.Size() > 0
+}
+
+func TestChapterDetectStageParksWhenNotConfident(t *testing.T) {
+	ffmpeg, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		t.Skip("ffmpeg not installed")
+	}
+	// The manifest says two hours (the confidence checks apply) and nothing is
+	// announced.
+	book := chapterlessFixture(t, ffmpeg, 7200, owJSON("and@1 so@2 on@3"), owJSON("and@1 more@2"))
+	_, err = NewExecutor(Config{FFmpeg: ffmpeg}).Execute(context.Background(), book, state.ChapterDetecting, scheduler.StageReport{})
+	var park *scheduler.ParkError
+	if !errors.As(err, &park) || park.Code != state.ParkChaptersNotDetected ||
+		park.Reason != ChaptersNotDetectedPrefix+": no chapter headings were heard in the narration" {
+		t.Fatalf("err = %v, want a chapters_not_detected park", err)
+	}
+	// Nothing moved: a Retry runs the detection again.
+	if m, _ := audio.ReadManifest(book.WorkDir); m.Style != audio.StyleWindows {
+		t.Fatalf("manifest = %q", m.Style)
+	}
+	if _, err := os.Stat(filepath.Join(book.WorkDir, audio.WindowsDir)); !os.IsNotExist(err) {
+		t.Fatalf("windows/ written on a park: %v", err)
+	}
+}
+
+func TestChapterDetectStageRefusesAChapteredManifest(t *testing.T) {
+	work := t.TempDir()
+	if err := audio.WriteManifest(work, audio.Manifest{Style: audio.StyleMarkers, Chapters: []audio.Chapter{{Chapter: 1}}}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := NewExecutor(Config{FFmpeg: "ffmpeg"}).Execute(context.Background(), store.Book{WorkDir: work},
+		state.ChapterDetecting, scheduler.StageReport{})
+	if err == nil || !strings.Contains(err.Error(), "not a windows manifest") {
+		t.Fatalf("err = %v", err)
+	}
+}

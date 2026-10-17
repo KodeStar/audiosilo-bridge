@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/kodestar/audiosilo-bridge/internal/audio"
 	"github.com/kodestar/audiosilo-bridge/internal/fsutil"
 	"github.com/kodestar/audiosilo-bridge/internal/metaops"
 	"github.com/kodestar/audiosilo-bridge/internal/spelling"
@@ -216,4 +217,21 @@ func TestReferenceSourcesToleratesMissingInputs(t *testing.T) {
 			t.Errorf("want one verified source, got %+v", srcs)
 		}
 	})
+}
+
+// TestReferenceSourcesSkipsDetectedTitles: chapter titles found in the narration
+// (a detected manifest, Phase 1d) are the transcript's own spelling, so they never
+// count as verified evidence; a publisher's marker titles still do.
+func TestReferenceSourcesSkipsDetectedTitles(t *testing.T) {
+	for _, detected := range []bool{false, true} {
+		dir := writeRefFixtures(t, "Chapter 9: Toren\n", "")
+		if err := audio.WriteManifest(dir, audio.Manifest{Style: audio.StyleMarkers, Detected: detected,
+			Chapters: []audio.Chapter{{Chapter: 1, Title: "Chapter 9: Toren"}}}); err != nil {
+			t.Fatal(err)
+		}
+		_, ok := sourceByName(referenceSources(dir, metaops.Glossary{}), markerTitlesFile)
+		if ok == detected {
+			t.Errorf("detected %v: marker titles used as evidence = %v", detected, ok)
+		}
+	}
 }

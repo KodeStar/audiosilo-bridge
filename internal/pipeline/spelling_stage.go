@@ -554,9 +554,14 @@ func referenceSources(workDir string, glossary metaops.Glossary) []spelling.Refe
 
 	// The publisher's own chapter titles. Rich for some books ("Chapter 9: Toren"),
 	// a bare number table for others - in which case this contributes nothing, which
-	// is exactly why it cannot be the only reference.
-	if b, err := os.ReadFile(filepath.Join(workDir, markerTitlesFile)); err == nil { //nolint:gosec // daemon-written path
-		add(markerTitlesFile, spelling.AuthorityVerified, spelling.NamesFromTitles(string(b)))
+	// is exactly why it cannot be the only reference. Titles found in the NARRATION
+	// (a detected manifest, Phase 1d) are not the publisher's: they are this very
+	// transcript, misheard names and all, and as verified evidence they would make
+	// a misheard name attest itself.
+	if m, err := audio.ReadManifest(workDir); err != nil || !m.Detected {
+		if b, err := os.ReadFile(filepath.Join(workDir, markerTitlesFile)); err == nil { //nolint:gosec // daemon-written path
+			add(markerTitlesFile, spelling.AuthorityVerified, spelling.NamesFromTitles(string(b)))
+		}
 	}
 
 	add(filepath.Join(spellingRefsDir, priorSpellingsFile), spelling.AuthorityCarryover, priorLedgerNames(workDir))

@@ -892,7 +892,9 @@ func (s *Scheduler) advance(ctx context.Context, b store.Book, stage state.State
 		}
 	}
 
-	next, status, err := state.NextState(state.ParseKind(b.Kind), stage, result.Outcome(fixes))
+	o := result.Outcome(fixes)
+	o.GoalChapters = b.Goal == state.GoalChapters
+	next, status, err := state.NextState(state.ParseKind(b.Kind), stage, o)
 	if err != nil {
 		s.setStatus(b.ID, state.StatusFailed, err.Error(), "", time.Time{})
 		return

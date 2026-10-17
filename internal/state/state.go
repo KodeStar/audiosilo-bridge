@@ -9,9 +9,15 @@
 //
 // Audio mirrors EXTRACTION-AUDIO.md (validated on 11+ books):
 //
-//	queued -> inspecting -> [markers_normalizing] -> splitting -> asr -> sanitizing
+//	queued -> inspecting -> [markers_normalizing] -> splitting -> asr
+//	-> [chapter_detecting] -> sanitizing
 //	-> qa_sweep -> [qa_adjudicating] -> [retranscribing -> qa_sweep]loop
 //	-> spelling_research -> correcting -> fact_pass -> ...
+//
+// chapter_detecting (Phase 1d) runs only for a single file with no chapter
+// markers, transcribed in windows: it finds the chapters in the narration and
+// re-maps the window transcripts onto them. A book whose goal is chapters (the
+// chapters.detect job, GoalChapters) stops there, done.
 //
 // Ebook mirrors EXTRACTION.md, whose whole point is that exact text needs none of
 // the machinery that reconstructs it from audio:
@@ -73,6 +79,7 @@ const (
 	MarkersNormalizing State = "markers_normalizing"
 	Splitting          State = "splitting"
 	ASR                State = "asr"
+	ChapterDetecting   State = "chapter_detecting"
 	Sanitizing         State = "sanitizing"
 	QASweep            State = "qa_sweep"
 	QAAdjudicating     State = "qa_adjudicating"
@@ -101,6 +108,11 @@ const Describing State = "describing"
 // RoutesModel reports whether a model map (agent.claude, agent.openai) may route
 // s: every agent stage, and the description step, an agent run outside the machine.
 func RoutesModel(s State) bool { return IsAgent(s) || s == Describing }
+
+// GoalChapters is a book's goal (books.goal) when it is run for its chapters
+// only (the chapters.detect job): it stops after chapter_detecting, done. The
+// empty goal is the whole pipeline.
+const GoalChapters = "chapters"
 
 // Lane is the executor pool a stage runs in. The three lanes have different
 // resource profiles (GPU-bound ASR, rate-limited agents, cheap mechanical work)
@@ -155,15 +167,15 @@ type Def struct {
 // index here so ordering is total).
 //
 // Conditional states (may be skipped by a branch, or loop back) are the ones
-// shown in [brackets] in the package doc: markers_normalizing, qa_adjudicating,
-// retranscribing, and fixing. The skip/loop routing is encoded directly in
+// shown in [brackets] in the package doc: markers_normalizing, chapter_detecting,
+// qa_adjudicating, retranscribing, and fixing. The skip/loop routing is encoded directly in
 // NextState's branch rules, so the classification needs no table column.
 //
 // Next ORDERING CONVENTION: when a state has more than one successor, the
 // conditional/loop target is listed FIRST and the mainline (happy-branch)
 // continuation LAST. MainlineNext depends on this ordering (it returns the last
 // successor), so keep the mainline entry last when editing a multi-successor row.
-// The ebook states sit at order 11/12, immediately before FactPass, rather than
+// The ebook states sit at order 12/13, immediately before FactPass, rather than
 // at the front beside Inspecting. Two reasons, both load-bearing:
 //
 //   - order is compared, not just ordered: scheduler.queueGroup buckets anything
@@ -180,23 +192,26 @@ var table = map[State]Def{
 	Inspecting:         {Lane: LaneMechanical, Next: []State{MarkersNormalizing, Splitting}, SourceIO: true, order: 1},
 	MarkersNormalizing: {Lane: LaneAgent, Next: []State{Splitting}, Agent: true, order: 2},
 	Splitting:          {Lane: LaneMechanical, Next: []State{ASR}, SourceIO: true, order: 3},
-	ASR:                {Lane: LaneASR, Next: []State{Sanitizing}, order: 4},
-	Sanitizing:         {Lane: LaneMechanical, Next: []State{QASweep}, order: 5},
-	QASweep:            {Lane: LaneMechanical, Next: []State{QAAdjudicating, SpellingResearch}, order: 6},
-	QAAdjudicating:     {Lane: LaneAgent, Next: []State{Retranscribing, SpellingResearch}, Agent: true, order: 7},
-	Retranscribing:     {Lane: LaneASR, Next: []State{QASweep}, order: 8},
-	SpellingResearch:   {Lane: LaneAgent, Next: []State{Correcting}, Agent: true, order: 9},
-	Correcting:         {Lane: LaneMechanical, Next: []State{FactPass}, order: 10},
-	Extracting:         {Lane: LaneMechanical, Next: []State{ChapterMapping, FactPass}, SourceIO: true, order: 11},
-	ChapterMapping:     {Lane: LaneAgent, Next: []State{FactPass}, Agent: true, order: 12},
-	FactPass:           {Lane: LaneAgent, Next: []State{Synthesizing}, Agent: true, order: 13},
-	Synthesizing:       {Lane: LaneAgent, Next: []State{Validating}, Agent: true, order: 14},
-	Validating:         {Lane: LaneMechanical, Next: []State{Auditing}, order: 15},
-	Auditing:           {Lane: LaneAgent, Next: []State{Fixing, Ready}, Agent: true, order: 16},
-	Fixing:             {Lane: LaneAgent, Next: []State{Validating}, Agent: true, order: 17},
-	Ready:              {Lane: LaneNone, Next: []State{Contributing}, order: 18},
-	Contributing:       {Lane: LaneMechanical, Next: []State{Done}, order: 19},
-	Done:               {Lane: LaneNone, Next: nil, Terminal: true, order: 20},
+	ASR:                {Lane: LaneASR, Next: []State{ChapterDetecting, Sanitizing}, order: 4},
+	// chapter_detecting re-splits the source on the detected chapters, so it reads
+	// the original file.
+	ChapterDetecting: {Lane: LaneMechanical, Next: []State{Done, Sanitizing}, SourceIO: true, order: 5},
+	Sanitizing:       {Lane: LaneMechanical, Next: []State{QASweep}, order: 6},
+	QASweep:          {Lane: LaneMechanical, Next: []State{QAAdjudicating, SpellingResearch}, order: 7},
+	QAAdjudicating:   {Lane: LaneAgent, Next: []State{Retranscribing, SpellingResearch}, Agent: true, order: 8},
+	Retranscribing:   {Lane: LaneASR, Next: []State{QASweep}, order: 9},
+	SpellingResearch: {Lane: LaneAgent, Next: []State{Correcting}, Agent: true, order: 10},
+	Correcting:       {Lane: LaneMechanical, Next: []State{FactPass}, order: 11},
+	Extracting:       {Lane: LaneMechanical, Next: []State{ChapterMapping, FactPass}, SourceIO: true, order: 12},
+	ChapterMapping:   {Lane: LaneAgent, Next: []State{FactPass}, Agent: true, order: 13},
+	FactPass:         {Lane: LaneAgent, Next: []State{Synthesizing}, Agent: true, order: 14},
+	Synthesizing:     {Lane: LaneAgent, Next: []State{Validating}, Agent: true, order: 15},
+	Validating:       {Lane: LaneMechanical, Next: []State{Auditing}, order: 16},
+	Auditing:         {Lane: LaneAgent, Next: []State{Fixing, Ready}, Agent: true, order: 17},
+	Fixing:           {Lane: LaneAgent, Next: []State{Validating}, Agent: true, order: 18},
+	Ready:            {Lane: LaneNone, Next: []State{Contributing}, order: 19},
+	Contributing:     {Lane: LaneMechanical, Next: []State{Done}, order: 20},
+	Done:             {Lane: LaneNone, Next: nil, Terminal: true, order: 21},
 }
 
 // All returns every state in canonical forward order.
@@ -322,6 +337,13 @@ type Outcome struct {
 	// written into the stage sentinel JSON a human reads when debugging a parked
 	// book, and "markers_contiguous" on an epub is a lie.
 	ChaptersMapped bool
+	// Windowed (asr): the transcripts are duration windows of a book with no
+	// chapter markers, so chapter_detecting finds the chapters before sanitizing.
+	Windowed bool
+	// GoalChapters (chapter_detecting): the book was run for its chapters only, so
+	// it is done once they are found. Filled from the book (books.goal), not by a
+	// stage.
+	GoalChapters bool
 }
 
 // NextState computes the forward transition from cur given a completed stage's
@@ -355,6 +377,18 @@ func NextState(kind Kind, cur State, o Outcome) (State, Status, error) {
 			next = FactPass // the toc already yields a contiguous chapter run
 		} else {
 			next = ChapterMapping
+		}
+	case ASR:
+		if o.Windowed {
+			next = ChapterDetecting
+		} else {
+			next = Sanitizing
+		}
+	case ChapterDetecting:
+		if o.GoalChapters {
+			next = Done
+		} else {
+			next = Sanitizing
 		}
 	case Inspecting:
 		if o.MarkersContiguous {

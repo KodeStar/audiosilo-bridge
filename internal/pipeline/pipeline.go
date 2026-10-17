@@ -450,6 +450,8 @@ func (e *Executor) Execute(ctx context.Context, book store.Book, stage state.Sta
 		return e.split(ctx, book, r)
 	case state.ASR:
 		return e.asrStage(ctx, book, r)
+	case state.ChapterDetecting:
+		return e.chapterDetect(ctx, book, r)
 	case state.Sanitizing:
 		return e.sanitize(ctx, book, r)
 	case state.QASweep:
@@ -495,6 +497,20 @@ const MediaToolsUnavailableMsg = "media tools unavailable: ffmpeg/ffprobe not fo
 // different edition and must not be silently reused. Exported so tests/UI can assert it.
 const ManifestChangedMsg = "source audio or chapter layout changed since transcription - the existing transcripts belong to a different edition; cancel the job, then generate the book again to re-transcribe"
 
+// HasMarkerChaptersMsg and HasFileChaptersMsg fail a chapters-only book whose
+// audio already has chapters (its inspect found markers, or a file per chapter).
+// The chapters.detect job reports them as they are, so they are sentences.
+const (
+	HasMarkerChaptersMsg = "The book already has chapters: its audio file carries chapter markers"
+	HasFileChaptersMsg   = "The book already has chapters: its chapters are its audio files"
+)
+
+// sentence is an error worded for a person, as it is (a stage error becomes the
+// book's error verbatim).
+type sentence string
+
+func (s sentence) Error() string { return string(s) }
+
 // asrInfoName is the provenance sidecar the asr stage writes (backend/model/
 // language + the manifest fingerprint and any accepted-empty chapters) and the
 // sanitize stage reads to stamp normalized transcripts.
@@ -515,17 +531,32 @@ type asrProvenance struct {
 // records whether the chapter markers are contiguous (drives the
 // markers_normalizing skip). It writes the stage sentinel as its final action.
 func (e *Executor) inspect(ctx context.Context, book store.Book, r scheduler.StageReport) (scheduler.StageResult, error) {
-	_, ffprobe := e.ensureTools()
+	ffmpeg, ffprobe := e.ensureTools()
 	if ffprobe == "" {
 		return scheduler.StageResult{}, scheduler.ParkWithCode(state.ParkMediaToolsUnavailable, MediaToolsUnavailableMsg)
 	}
 	// Time only the productive body (after the tool-availability check) for the rate.
 	start := time.Now()
-	manifest, markers, err := audio.Inspect(ctx, book.SourcePath, book.WorkDir, ffprobe)
+	// ffmpeg places a markerless file's window cuts in silences (Phase 1d); without
+	// it they fall at their targets, and split parks for the missing tool anyway.
+	manifest, markers, err := audio.Inspect(ctx, book.SourcePath, book.WorkDir, ffprobe, ffmpeg)
 	if err != nil {
 		return scheduler.StageResult{}, fmt.Errorf("inspect: %w", err)
 	}
+	// A chapters-only book (goal chapters, the chapters.detect job) exists to find
+	// chapters the book doesn't have. One that has them fails here, in words the job
+	// hands the console as they are: nothing would be found that isn't there already.
+	if book.Goal == state.GoalChapters && manifest.Style != audio.StyleWindows {
+		if manifest.Style == audio.StyleFiles {
+			return scheduler.StageResult{}, sentence(HasFileChaptersMsg)
+		}
+		return scheduler.StageResult{}, sentence(HasMarkerChaptersMsg)
+	}
 	if r.Note != nil {
+		if markers.Windowed {
+			r.Note(fmt.Sprintf("no chapter markers: transcribing in %s of about 25 minutes, then finding the chapters in the narration",
+				countNoun(manifest.ChapterCount, "window")))
+		}
 		// Name the vocabulary gap out loud. An empty manifest from a file that HAS a full
 		// marker table is a one-line parser gap with a free deterministic recovery, but in
 		// the log it used to be indistinguishable from a genuinely markerless file - so
@@ -572,6 +603,7 @@ func (e *Executor) inspect(ctx context.Context, book store.Book, r scheduler.Sta
 			"markers_seen":     markers.Seen,
 			"unmapped_spans":   len(markers.Unmapped),
 			"unmapped_summary": audio.DescribeSpans(markers.Unmapped),
+			"windowed":         markers.Windowed,
 		}),
 		RateSample: rateSample(1, time.Since(start).Seconds()),
 	}
@@ -811,6 +843,9 @@ func (e *Executor) asrStage(ctx context.Context, book store.Book, r scheduler.St
 	e.accountScratch(ctx, book)
 
 	result := scheduler.StageResult{
+		// A windows manifest's transcripts are windows, not chapters: the chapters
+		// are found in them next (chapter_detecting).
+		Windowed: manifest.Style == audio.StyleWindows,
 		Metrics: metrics(map[string]any{
 			"backend":       setup.Backend.ID(),
 			"model":         setup.Model,
