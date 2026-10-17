@@ -198,7 +198,10 @@ internal/
             parsed before the FLAC is published): chNNN.silences.json beside each
             window FLAC, on the file's timeline, keyed by the window's span.
             WindowSilences reads them (a span that differs is never used), else
-            hears the window FLAC once and keeps them the same way. CutFromWindows
+            hears the window FLAC once and keeps them the same way (WindowHeard:
+            whether either is there, without hearing anything). ProbedSize is the
+            size probe.json states for a single file (ffprobe's format.size; 0
+            unknown). CutFromWindows
             cuts a detected manifest's chapters from the window FLACs (moved to
             WindowAudioDir, windows/chapters/): a chapter inside one window a seek in
             it, one across window edges its trimmed parts joined by the concat filter
@@ -877,7 +880,11 @@ internal/
             moved every position off the list). DetectedChaptersPath /
             ReadDetectedChapters / CurrentFor (manifest fingerprint and source size) /
             DetectedStamp (local stats, so a poller re-reads only a changed list) are
-            generate's. The stage reports one progress unit, as every book stage (the
+            generate's, and DetectionRerunnable (a book stopped at chapter_detecting
+            can run it again from what it kept: the window layer in place with every
+            window's silences to be had, or moved aside with the confident detection
+            it was moved by; every window's raw complete; the file's size the one
+            probe.json states, which must be known), for its continue. The stage reports one progress unit, as every book stage (the
             ETA charges a unit its learned per-book time). inspect (its windows'
             silence probes under the stage heartbeat; the marker-format note only for a
             manifest that isn't windows) fails a goal-chapters book whose manifest
@@ -988,10 +995,13 @@ internal/
             ErrNotFound).
             0005 (Phase 1d): books.goal ('' the whole pipeline, 'chapters' stops after
             chapter_detecting; opaque here like State, so the store names no goal:
-            its SQL asks goal = '' or goal != ''). ContinueChapters (one statement:
-            only a done book with a goal, chapters being the one, whose transcripts
-            the retention didn't sweep, else ErrNotContinuable) makes it a whole-run
-            book at splitting with the new job's identity (title, authors, narrators,
+            its SQL asks goal = '' or goal != ''). ContinueChapters(id, from, ...) (one
+            statement: only a book with a goal, chapters being the one, still at from
+            (the state the caller checked), done there or failed there (a cancel is a
+            failure), whose transcripts the retention didn't sweep, else
+            ErrNotContinuable) makes it a whole-run book, a done one at splitting and
+            a failed one re-admitted at from (status, error, park and retry cleared),
+            with the new job's identity (title, authors, narrators,
             series and position, asin, isbn and their sources: the book may have been
             matched since), contrib_mode and work_id, and maps the new job to it in
             the same transaction. FinishedBooks leaves goal-chapters books out (no
@@ -1570,10 +1580,21 @@ internal/
             list. A run with none keeps an earlier chapters object beside a
             chapters.json in place (keptObject[T], the description's rule too; the
             merge, mergedProvenance, takes fresh's object by its key). create()
-            CONTINUES a done goal-chapters engine book at the same source path (not
-            swept, no open job, the audio read, its list CurrentFor the file on disk:
-            continueChapters -> store.ContinueChapters, under the engine's Hold, the
-            job's identity and mapping in one transaction). chapters.detect
+            CONTINUES a goal-chapters engine book at the same source path (not swept,
+            no open job, the audio read): a done one whose list is CurrentFor the file
+            on disk, from splitting; or one cancelled or failed at chapter_detecting
+            whose kept windows can run it again (pipeline.DetectionRerunnable), re-
+            admitted there (its sentinel removed, as a Retry does), so the detection
+            runs again from the window layer with the whole pipeline after it and
+            nothing is transcribed again (continueChapters -> store.ContinueChapters
+            with the state it checked, under the engine's Hold, the job's identity and
+            mapping in one transaction). The server cancels a PARKED chapters.detect
+            job as it queues a generate job for the book (a working one refuses it,
+            409 detect_open), and the Bridge hears that cancel at the chapters job's
+            next report, so create() first waits up to holdTries polls
+            (awaitChaptersGivingWay) while that parked job still follows the book, or
+            no job does but the book isn't stopped yet (its job's end is stopping it);
+            a job that stays open is refused as before. chapters.detect
             (ChaptersJob, ChaptersKind, pipeline lane, Abandoner; params any JSON
             object): the same resume and follow as generate (resumeMapping +
             runEngineBook: prepare strict when new, a resumed job's own book found

@@ -278,11 +278,8 @@ func (e *Executor) chapterDetect(ctx context.Context, book store.Book, r schedul
 // windows' silences (audio.WindowSilences: split heard them, else the window FLACs
 // are listened to once), which is kept there when confident.
 func (e *Executor) detection(ctx context.Context, workDir string, layer windowLayer, tl windowTimeline, ffmpeg string) (chapterdetect.Result, error) {
-	sha := windowsSHA(layer.manifest)
-	var kept windowDetection
-	if raw, err := os.ReadFile(filepath.Join(workDir, audio.WindowsDir, windowsDetectionName)); err == nil && //nolint:gosec // the book's work dir
-		json.Unmarshal(raw, &kept) == nil && kept.WindowsSHA == sha && kept.Result.Confident {
-		return kept.Result, nil
+	if kept, ok := keptDetection(workDir, layer.manifest); ok {
+		return kept, nil
 	}
 	if layer.moved {
 		return chapterdetect.Result{}, errors.New("the windows were moved aside without their detection; cancel the job and generate the book again")
@@ -300,7 +297,7 @@ func (e *Executor) detection(ctx context.Context, workDir string, layer windowLa
 	if !det.Confident {
 		return det, nil
 	}
-	out, err := json.MarshalIndent(windowDetection{WindowsSHA: sha, Result: det}, "", "  ")
+	out, err := json.MarshalIndent(windowDetection{WindowsSHA: windowsSHA(layer.manifest), Result: det}, "", "  ")
 	if err != nil {
 		return chapterdetect.Result{}, err
 	}
@@ -314,6 +311,47 @@ func (e *Executor) detection(ctx context.Context, workDir string, layer windowLa
 		return chapterdetect.Result{}, err
 	}
 	return det, fsutil.WriteFileAtomic(filepath.Join(wdir, windowsDetectionName), append(out, '\n'), 0o644)
+}
+
+// keptDetection is the confident detection kept for the windows of m
+// (windows/detection.json), ok false when there is none for them.
+func keptDetection(workDir string, m audio.Manifest) (chapterdetect.Result, bool) {
+	var kept windowDetection
+	raw, err := os.ReadFile(filepath.Join(workDir, audio.WindowsDir, windowsDetectionName)) //nolint:gosec // the book's work dir
+	if err != nil || json.Unmarshal(raw, &kept) != nil || kept.WindowsSHA != windowsSHA(m) || !kept.Result.Confident {
+		return chapterdetect.Result{}, false
+	}
+	return kept.Result, true
+}
+
+// DetectionRerunnable reports whether a book stopped at chapter_detecting (parked,
+// cancelled or failed there) can run the stage again from what it kept, its audio
+// never transcribed again: the window layer, either in place with every window's
+// silences to be had (kept, or its FLAC there to listen to) or moved aside with the
+// confident detection the move was made from; every window's raw transcript
+// complete; and the audio file the one inspected (the size probe.json states, which
+// must be known). A generate job continues such a chapters-only book.
+func DetectionRerunnable(workDir string) bool {
+	layer, err := readWindowLayer(workDir)
+	if err != nil || len(layer.manifest.Chapters) == 0 {
+		return false
+	}
+	if layer.moved {
+		if _, ok := keptDetection(workDir, layer.manifest); !ok {
+			return false
+		}
+	}
+	for _, w := range layer.manifest.Chapters {
+		if !rawComplete(filepath.Join(layer.rawDir, transcript.RawName(w.Chapter))) {
+			return false
+		}
+		if !layer.moved && !audio.WindowHeard(filepath.Join(workDir, audio.ChaptersDir), w) {
+			return false
+		}
+	}
+	size := audio.ProbedSize(workDir)
+	info, err := os.Stat(layer.manifest.Source)
+	return err == nil && size > 0 && info.Size() == size
 }
 
 // moveWindowLayer moves the window layer aside (a no-op once moved): chapters/ (the

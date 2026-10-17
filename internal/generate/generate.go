@@ -652,10 +652,12 @@ func (r *run) engineParked(parked bool, code, msg string) {
 }
 
 // create picks the source and makes the engine book for a new job (a chapters job's
-// is createChapters'): a finished chapters run of the book reading the same audio
-// is continued (continueChapters), keeping its transcription; any other book the
-// engine already has from an earlier run (the same source path) is deleted first,
-// unless another open job follows it or a stage of it runs right now.
+// is createChapters'): a chapters run of the book reading the same audio, finished
+// or stopped at chapter_detecting, is continued (continueChapters), keeping its
+// transcription, once a parked chapters job on it gave way
+// (awaitChaptersGivingWay); any other book the engine already has from an earlier
+// run (the same source path) is deleted first, unless another open job follows it
+// or a stage of it runs right now.
 func (h *Handler) create(ctx context.Context, eng Engine, r *run) error {
 	if r.kind == ChaptersKind {
 		return h.createChapters(ctx, eng, r)
@@ -680,7 +682,11 @@ func (h *Handler) create(ctx context.Context, eng Engine, r *run) error {
 		}
 		ebookPath = ep
 	}
-	if old, err := h.o.DB.GetBookBySourcePath(ctx, sp); err == nil {
+	old, err := h.o.DB.GetBookBySourcePath(ctx, sp)
+	if err == nil {
+		old, err = h.awaitChaptersGivingWay(ctx, r, old)
+	}
+	if err == nil {
 		open, err := h.o.DB.OpenGenerateJobsForBook(ctx, old.ID, r.job.ID)
 		if err != nil {
 			return err

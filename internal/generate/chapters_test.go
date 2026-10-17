@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,6 +20,7 @@ import (
 	"github.com/kodestar/audiosilo-bridge/internal/scheduler"
 	"github.com/kodestar/audiosilo-bridge/internal/state"
 	"github.com/kodestar/audiosilo-bridge/internal/store"
+	"github.com/kodestar/audiosilo-bridge/internal/transcript"
 )
 
 // detectChapters leaves what chapter_detecting leaves for a single-file book: the
@@ -374,6 +376,158 @@ func TestGenerateDoesNotContinueAReplacedFile(t *testing.T) {
 	hr.waitFor("the generate job done", func() bool { s, _ := hr.srv.final(41); return s == link.StateDone })
 	if b := hr.engineBook(41); b.ID == first.ID {
 		t.Fatalf("the generate job continued the old file's run (book %d)", b.ID)
+	}
+}
+
+// windowLayer leaves what a chapterless book's transcription leaves before
+// chapter_detecting: the probe (the file's size), the windows manifest, every
+// window's raw transcript and its FLAC.
+func windowLayer(t *testing.T, b store.Book) {
+	t.Helper()
+	info, err := os.Stat(b.SourcePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, filepath.Join(b.WorkDir, audio.ProbeName), fmt.Sprintf(`{"format":{"duration":"30","size":"%d"}}`, info.Size()))
+	m := audio.Manifest{Source: b.SourcePath, Style: audio.StyleWindows, Duration: 30, ChapterCount: 2, Chapters: []audio.Chapter{
+		{Chapter: 1, Start: 0, End: 15, Duration: 15}, {Chapter: 2, Start: 15, End: 30, Duration: 15}}}
+	if err := audio.WriteManifest(b.WorkDir, m); err != nil {
+		t.Fatal(err)
+	}
+	for w := 1; w <= 2; w++ {
+		mustWrite(t, filepath.Join(b.WorkDir, transcript.RawDir, transcript.RawName(w)), `{"text":"and on","segments":[]}`)
+		mustWrite(t, filepath.Join(b.WorkDir, audio.ChaptersDir, audio.ChapterFileName(w)), strings.Repeat("f", 512))
+	}
+}
+
+// parkChapters runs a chapters job (id) on Loose.m4b until it parks at
+// chapter_detecting (chapters_not_detected) with its window layer kept, and
+// returns its engine book.
+func parkChapters(hr *harness, id int64) store.Book {
+	hr.t.Helper()
+	hr.exec.windowed = true
+	hr.exec.parks[string(state.ChapterDetecting)] = 1
+	hr.srv.addKind(id, ChaptersKind, "Loose.m4b", `{}`)
+	hr.waitFor("the chapters job parked", func() bool {
+		return hr.srv.saw(id, func(u link.Update, p map[string]any) bool {
+			park, _ := p["park"].(map[string]any)
+			return u.State != nil && *u.State == link.StateNeedsAttention && park["code"] == string(state.ParkChaptersNotDetected)
+		})
+	})
+	b := hr.engineBook(id)
+	windowLayer(hr.t, b)
+	return b
+}
+
+// stageRuns counts the engine book's runs of stage, and the ones that succeeded.
+func stageRuns(hr *harness, bookID int64, stage state.State) (runs, ok int) {
+	hr.t.Helper()
+	all, err := hr.db.ListStageRuns(context.Background(), bookID)
+	if err != nil {
+		hr.t.Fatal(err)
+	}
+	for _, sr := range all {
+		if sr.Stage == string(stage) {
+			runs++
+			if sr.Ok != nil && *sr.Ok {
+				ok++
+			}
+		}
+	}
+	return runs, ok
+}
+
+// A generate job queued for a book whose chapters job parked at chapter_detecting
+// (the server cancels that job as it queues this one; the Bridge hears it at the
+// job's next report) waits for it to give way, then continues its engine book at
+// chapter_detecting: no new transcription, the detection run again, then the whole
+// pipeline with the job's identity.
+func TestGenerateContinuesACancelledChaptersRun(t *testing.T) {
+	t.Parallel()
+	hr := newHarness(t)
+	stop := hr.runner(hr.h, hr.h.ChaptersJob())
+	defer stop()
+	first := parkChapters(hr, 51)
+	if asr, _ := stageRuns(hr, first.ID, state.ASR); asr != 1 {
+		t.Fatalf("asr runs = %d", asr)
+	}
+	// The generate job is claimed before the chapters job hears its cancel: it waits.
+	hr.srv.set(func() {
+		hr.srv.books["Loose.m4b"] = link.Book{LibraryID: 1, Path: "Loose.m4b", Files: []link.BookFile{{Path: "Loose.m4b", Size: 6}},
+			Info: &link.BookInfo{Title: "The Loose One", Series: "The Saga", SeriesIndex: "3"}}
+		lib := int64(1)
+		path := "Loose.m4b"
+		hr.srv.queue = append(hr.srv.queue, link.Job{ID: 52, Kind: Kind, LibraryID: &lib, Path: &path, Params: json.RawMessage(`{}`),
+			Attempts: 1, State: "claimed"})
+	})
+	hr.waitFor("the generate job waiting for the chapters job", func() bool {
+		return hr.srv.saw(52, func(_ link.Update, p map[string]any) bool {
+			return p["message"] == "Waiting for the book's chapters job to give way"
+		})
+	})
+	hr.srv.set(func() { hr.srv.cancel[51] = true })
+	hr.waitFor("the chapters job cancelled", func() bool { s, _ := hr.srv.final(51); return s == link.StateCancelled })
+	hr.waitFor("the generate job done", func() bool { s, _ := hr.srv.final(52); return s == link.StateDone })
+	b := hr.engineBook(52)
+	if b.ID != first.ID || b.Goal != "" || b.Title != "The Loose One" || b.Series != "The Saga" || b.SeriesPos != "3" {
+		t.Fatalf("the generate job's book = %+v, want the chapters run (%d) continued", b, first.ID)
+	}
+	if asr, _ := stageRuns(hr, b.ID, state.ASR); asr != 1 {
+		t.Fatalf("asr runs = %d: the continue transcribed again", asr)
+	}
+	if runs, ok := stageRuns(hr, b.ID, state.ChapterDetecting); runs < 2 || ok != 1 {
+		t.Fatalf("chapter_detecting runs = %d (%d ok), want the detection run again", runs, ok)
+	}
+	if !scheduler.SentinelExists(b.WorkDir, string(state.Sanitizing)) {
+		t.Fatal("the continued book didn't run the whole pipeline")
+	}
+	_, final := hr.srv.final(52)
+	var res Result
+	if err := json.Unmarshal(final.Result, &res); err != nil ||
+		strings.Join(res.Files, ",") != "Loose.characters.json,Loose.recaps.json,Loose.chapters.json,Loose.bridge.json" {
+		t.Fatalf("result = %s", final.Result)
+	}
+}
+
+// A cancelled chapters run is never continued once its transcripts were swept or
+// its file replaced: the generate job starts its own run.
+func TestGenerateDoesNotContinueACancelledRunItCantTrust(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		spoil func(hr *harness, b store.Book)
+	}{
+		{"swept", func(hr *harness, b store.Book) {
+			if err := hr.db.MarkGenerateBookSwept(context.Background(), b.ID, time.Now()); err != nil {
+				hr.t.Fatal(err)
+			}
+		}},
+		{"replaced", func(hr *harness, _ store.Book) {
+			mustWrite(hr.t, filepath.Join(hr.root, "Loose.m4b"), "another encode")
+			hr.srv.set(func() {
+				hr.srv.books["Loose.m4b"] = link.Book{LibraryID: 1, Path: "Loose.m4b", Files: []link.BookFile{{Path: "Loose.m4b", Size: 14}},
+					Info: &link.BookInfo{Title: "Loose"}}
+			})
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			hr := newHarness(t)
+			stop := hr.runner(hr.h, hr.h.ChaptersJob())
+			defer stop()
+			first := parkChapters(hr, 53)
+			hr.srv.set(func() { hr.srv.cancel[53] = true })
+			hr.waitFor("the engine book cancelled", func() bool {
+				b, err := hr.db.GetBook(context.Background(), first.ID)
+				return err == nil && scheduler.IsCancelled(b)
+			})
+			tc.spoil(hr, first)
+			hr.srv.add(54, "Loose.m4b", `{}`)
+			hr.waitFor("the generate job done", func() bool { s, _ := hr.srv.final(54); return s == link.StateDone })
+			if b := hr.engineBook(54); b.ID == first.ID {
+				t.Fatalf("the generate job continued the chapters run (book %d)", b.ID)
+			}
+		})
 	}
 }
 

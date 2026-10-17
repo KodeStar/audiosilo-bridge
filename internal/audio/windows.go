@@ -263,6 +263,15 @@ func readWindowSilences(dir string, w Chapter) ([]Silence, bool) {
 	return ws.Silences, true
 }
 
+// WindowHeard reports whether window w's silences can be had from dir without the
+// source: kept there (WindowSilences' own), or its FLAC there whole to listen to.
+func WindowHeard(dir string, w Chapter) bool {
+	if _, ok := readWindowSilences(dir, w); ok {
+		return true
+	}
+	return complete(filepath.Join(dir, ChapterFileName(w.Chapter)), w.Duration)
+}
+
 // WindowSilences is window w's silences on the file's timeline: the ones split
 // heard while it cut the window's FLAC in dir, else heard now from that FLAC
 // (bounded by timeout) and kept beside it the same way, so a later look (a Retry

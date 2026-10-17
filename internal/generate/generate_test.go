@@ -188,6 +188,9 @@ func (e *hooks) Execute(ctx context.Context, b store.Book, st state.State, r sch
 		if st == state.Contributing {
 			return scheduler.StageResult{}, scheduler.ParkWithCode(state.ParkCoreNeeded, "the book needs a core record first")
 		}
+		if st == state.ChapterDetecting {
+			return scheduler.StageResult{}, scheduler.ParkWithCode(state.ParkChaptersNotDetected, "couldn't find the chapters")
+		}
 		return scheduler.StageResult{}, scheduler.ParkWithCode(state.ParkAgentValidationExhausted, "the fact pass kept failing its checks")
 	}
 	e.mu.Lock()

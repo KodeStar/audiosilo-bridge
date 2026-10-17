@@ -26,7 +26,7 @@ func TestChaptersGoal(t *testing.T) {
 	job := GenerateBook{ServerJobID: 7, LibraryID: 1, RelPath: "A/book.mp3"}
 	// Denied: a chapters book that isn't done yet doesn't continue, and no mapping
 	// is made for it.
-	if err := db.ContinueChapters(ctx, b.ID, NewBook{ContribMode: "local", WorkID: "w-1"}, job); !errors.Is(err, ErrNotContinuable) {
+	if err := db.ContinueChapters(ctx, b.ID, "done", NewBook{ContribMode: "local", WorkID: "w-1"}, job); !errors.Is(err, ErrNotContinuable) {
 		t.Fatalf("continue while queued = %v, want ErrNotContinuable", err)
 	}
 	if _, err := db.GetGenerateBook(ctx, 7); !errors.Is(err, ErrNotFound) {
@@ -43,7 +43,7 @@ func TestChaptersGoal(t *testing.T) {
 	nb := NewBook{Title: "The Book", Authors: []string{"An Author"}, Narrators: []string{"A Reader"}, Series: "The Saga",
 		SeriesPos: "2", ASIN: "B0MATCHED", ISBN: "978", IdentitySources: map[string]string{"title": "server"},
 		ContribMode: "issue", WorkID: "w-1"}
-	if err := db.ContinueChapters(ctx, b.ID, nb, job); err != nil {
+	if err := db.ContinueChapters(ctx, b.ID, "done", nb, job); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := db.GetBook(ctx, b.ID)
@@ -60,7 +60,7 @@ func TestChaptersGoal(t *testing.T) {
 	if err := db.SetBookState(ctx, b.ID, "done", "", "", ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.ContinueChapters(ctx, b.ID, NewBook{ContribMode: "local"}, GenerateBook{}); !errors.Is(err, ErrNotContinuable) {
+	if err := db.ContinueChapters(ctx, b.ID, "done", NewBook{ContribMode: "local"}, GenerateBook{}); !errors.Is(err, ErrNotContinuable) {
 		t.Fatalf("continue a whole book = %v, want ErrNotContinuable", err)
 	}
 	if got, err := db.FinishedBooks(ctx); err != nil || len(got) != 1 {
@@ -86,10 +86,75 @@ func TestContinueChaptersRefusesASweptBook(t *testing.T) {
 	if err := db.MarkGenerateBookSwept(ctx, b.ID, time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.ContinueChapters(ctx, b.ID, NewBook{}, GenerateBook{ServerJobID: 4, LibraryID: 1, RelPath: "B"}); !errors.Is(err, ErrNotContinuable) {
+	if err := db.ContinueChapters(ctx, b.ID, "done", NewBook{}, GenerateBook{ServerJobID: 4, LibraryID: 1, RelPath: "B"}); !errors.Is(err, ErrNotContinuable) {
 		t.Fatalf("continue a swept book = %v, want ErrNotContinuable", err)
 	}
 	if got, _ := db.GetBook(ctx, b.ID); got.State != "done" || got.Goal != state.GoalChapters {
+		t.Fatalf("the swept book was moved: %+v", got)
+	}
+}
+
+// A chapters book that stopped at chapter_detecting continues there only once it
+// failed (a cancel is a failure): re-admitted at the same state, status clear, with
+// the new job's identity and mapping. Parked (its job may still follow it), asked
+// for at another state, or swept, it doesn't, and its row is left as it is.
+func TestContinueChaptersAtDetection(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	b, err := db.CreateBook(ctx, NewBook{SourcePath: "/lib/D.m4b", WorkDir: "/w/d", Title: "D", Goal: state.GoalChapters})
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := string(state.ChapterDetecting)
+	if err := db.SetBookState(ctx, b.ID, at, string(state.StatusNeedsAttention), "no chapters", string(state.ParkChaptersNotDetected)); err != nil {
+		t.Fatal(err)
+	}
+	job := GenerateBook{ServerJobID: 9, LibraryID: 1, RelPath: "D.m4b"}
+	// Denied: parked, not stopped.
+	if err := db.ContinueChapters(ctx, b.ID, at, NewBook{Title: "D"}, job); !errors.Is(err, ErrNotContinuable) {
+		t.Fatalf("continue a parked book = %v, want ErrNotContinuable", err)
+	}
+	if err := db.SetBookStatus(ctx, b.ID, string(state.StatusFailed), "cancelled by user", ""); err != nil {
+		t.Fatal(err)
+	}
+	// Denied: not where the caller looked.
+	if err := db.ContinueChapters(ctx, b.ID, "done", NewBook{Title: "D"}, job); !errors.Is(err, ErrNotContinuable) {
+		t.Fatalf("continue from done = %v, want ErrNotContinuable", err)
+	}
+	if _, err := db.GetGenerateBook(ctx, 9); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("a refused continue mapped its job: %v", err)
+	}
+	// Allowed: stopped there, re-admitted there.
+	if err := db.ContinueChapters(ctx, b.ID, at, NewBook{Title: "The D", Series: "S", SeriesPos: "1", ContribMode: "local"}, job); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := db.GetBook(ctx, b.ID)
+	if got.Goal != "" || got.State != at || got.Status != "" || got.Error != "" || got.ParkCode != "" || got.Title != "The D" ||
+		got.Series != "S" || got.ContribMode != "local" {
+		t.Fatalf("continued = %+v", got)
+	}
+	if g, err := db.GetGenerateBook(ctx, 9); err != nil || g.BookID == nil || *g.BookID != b.ID {
+		t.Fatalf("the job's mapping = %+v, %v", g, err)
+	}
+
+	// Denied: swept.
+	c, err := db.CreateBook(ctx, NewBook{SourcePath: "/lib/E.m4b", WorkDir: "/w/e", Title: "E", Goal: state.GoalChapters})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetBookState(ctx, c.ID, at, string(state.StatusFailed), "cancelled by user", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.PutGenerateBook(ctx, GenerateBook{ServerJobID: 10, BookID: &c.ID, LibraryID: 1, RelPath: "E.m4b"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.MarkGenerateBookSwept(ctx, c.ID, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.ContinueChapters(ctx, c.ID, at, NewBook{}, GenerateBook{ServerJobID: 11, LibraryID: 1, RelPath: "E.m4b"}); !errors.Is(err, ErrNotContinuable) {
+		t.Fatalf("continue a swept book = %v, want ErrNotContinuable", err)
+	}
+	if got, _ := db.GetBook(ctx, c.ID); got.Goal != state.GoalChapters || got.Status != string(state.StatusFailed) {
 		t.Fatalf("the swept book was moved: %+v", got)
 	}
 }

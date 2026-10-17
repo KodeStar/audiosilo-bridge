@@ -470,3 +470,81 @@ func TestWindowTimelineStaysInItsWindow(t *testing.T) {
 		}
 	}
 }
+
+// DetectionRerunnable says a book stopped at chapter_detecting can run the stage
+// again from what it kept (a generate job continues it): the windows transcribed,
+// their silences to be had, the file the one inspected; or the layer moved aside
+// with its detection. Anything short of that is denied.
+func TestDetectionRerunnable(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "book.m4b")
+	mustWriteFile := func(p, body string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(p), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mustWriteFile(src, "the audio")
+	work := filepath.Join(dir, "work")
+	m := audio.Manifest{Source: src, Style: audio.StyleWindows, Duration: 20, ChapterCount: 2, Chapters: []audio.Chapter{
+		{Chapter: 1, Start: 0, End: 10, Duration: 10}, {Chapter: 2, Start: 10, End: 20, Duration: 10}}}
+	if err := os.MkdirAll(work, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := audio.WriteManifest(work, m); err != nil {
+		t.Fatal(err)
+	}
+	mustWriteFile(filepath.Join(work, audio.ProbeName), `{"format":{"duration":"20","size":"9"}}`)
+	for w := 1; w <= 2; w++ {
+		mustWriteFile(filepath.Join(work, transcript.RawDir, transcript.RawName(w)), string(owJSON("and@1 on@2")))
+		mustWriteFile(filepath.Join(work, audio.ChaptersDir, audio.ChapterFileName(w)), strings.Repeat("f", 512))
+	}
+	if !DetectionRerunnable(work) {
+		t.Fatal("a complete window layer isn't rerunnable")
+	}
+	// Denied: the file replaced since it was inspected.
+	mustWriteFile(src, "another encode")
+	if DetectionRerunnable(work) {
+		t.Fatal("rerunnable over a replaced file")
+	}
+	mustWriteFile(src, "the audio")
+	// Denied: a probe that states no size (unknown is no match).
+	mustWriteFile(filepath.Join(work, audio.ProbeName), `{"format":{"duration":"20"}}`)
+	if DetectionRerunnable(work) {
+		t.Fatal("rerunnable with the probed size unknown")
+	}
+	mustWriteFile(filepath.Join(work, audio.ProbeName), `{"format":{"duration":"20","size":"9"}}`)
+	// Denied: a window's audio gone with no silences kept (a purge).
+	flac := filepath.Join(work, audio.ChaptersDir, audio.ChapterFileName(2))
+	_ = os.Remove(flac)
+	if DetectionRerunnable(work) {
+		t.Fatal("rerunnable with a window's audio gone")
+	}
+	mustWriteFile(flac, strings.Repeat("f", 512))
+	// Denied: a window's transcript missing.
+	raw := filepath.Join(work, transcript.RawDir, transcript.RawName(2))
+	_ = os.Remove(raw)
+	if DetectionRerunnable(work) {
+		t.Fatal("rerunnable with a window untranscribed")
+	}
+	mustWriteFile(raw, string(owJSON("and@1 on@2")))
+	// The layer moved aside: rerunnable only with the detection it was moved by.
+	wdir := filepath.Join(work, audio.WindowsDir)
+	if err := audio.WriteManifest(wdir, m); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(filepath.Join(work, transcript.RawDir), filepath.Join(wdir, transcript.RawDir)); err != nil {
+		t.Fatal(err)
+	}
+	if DetectionRerunnable(work) {
+		t.Fatal("rerunnable after a move with no detection kept")
+	}
+	mustWriteFile(filepath.Join(wdir, windowsDetectionName),
+		fmt.Sprintf(`{"windows_sha":%q,"result":{"confident":true}}`, windowsSHA(m)))
+	if !DetectionRerunnable(work) {
+		t.Fatal("a moved layer with its detection isn't rerunnable")
+	}
+}

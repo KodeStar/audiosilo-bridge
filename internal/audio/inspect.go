@@ -381,6 +381,7 @@ type fileProbeEntry struct {
 type probeMeta struct {
 	Format struct {
 		Duration string            `json:"duration"`
+		Size     string            `json:"size"`
 		Tags     map[string]string `json:"tags"`
 	} `json:"format"`
 	Chapters []struct {
@@ -388,6 +389,22 @@ type probeMeta struct {
 		EndTime   string            `json:"end_time"`
 		Tags      map[string]string `json:"tags"`
 	} `json:"chapters"`
+}
+
+// ProbedSize is the size of the single file inspect probed, as its probe.json
+// states it (ffprobe's format.size); 0 when it states none or can't be read, which
+// is unknown. A caller compares it with the file on disk to tell a replaced file.
+func ProbedSize(workDir string) int64 {
+	raw, err := os.ReadFile(filepath.Join(workDir, ProbeName)) //nolint:gosec // workDir is the book's managed scratch directory
+	if err != nil {
+		return 0
+	}
+	var meta probeMeta
+	if json.Unmarshal(raw, &meta) != nil {
+		return 0
+	}
+	n, _ := strconv.ParseInt(meta.Format.Size, 10, 64)
+	return n
 }
 
 // probeFile runs `ffprobe -show_format [-show_chapters] -of json` and returns both
