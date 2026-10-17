@@ -213,6 +213,16 @@ type run struct {
 	descRaw   []byte
 	descErr   string
 	descPaid  bool
+	// kind is the run's job kind ("" for sidecars.generate, ChaptersKind).
+	kind string
+	// chapters are the run's own chapters.json (Phase 1d: the engine found the
+	// book's chapters in its narration; nil for none, or a one-chapter book) and
+	// chaptersProv its bridge.json object; chaptersSum identifies the detected list
+	// they were composed from and chaptersSaved the one last saved early.
+	chapters      []byte
+	chaptersProv  *ChaptersProvenance
+	chaptersSum   string
+	chaptersSaved string
 }
 
 // bookKey is what changes on an engine book row when the scheduler moves it.
@@ -607,6 +617,9 @@ func (r *run) engineParked(parked bool, code, msg string) {
 // engine already has from an earlier run (the same source path) is deleted
 // first, unless another open job follows it or a stage of it runs right now.
 func (h *Handler) create(ctx context.Context, eng Engine, r *run) error {
+	if r.kind == ChaptersKind {
+		return h.createChapters(ctx, eng, r)
+	}
 	source, epub, note, err := chooseSource(r.place, r.params.Source)
 	if err != nil {
 		return err
@@ -634,6 +647,9 @@ func (h *Handler) create(ctx context.Context, eng Engine, r *run) error {
 		}
 		if len(open) > 0 {
 			return fmt.Errorf("job %d is already generating this book; cancel it first", open[0])
+		}
+		if ok, err := h.continueChapters(ctx, eng, r, old); ok || err != nil {
+			return err
 		}
 		if err := h.deleteEarlier(ctx, eng, r, old.ID); errors.Is(err, scheduler.ErrBusy) {
 			return errors.New("the engine is still busy with this book's earlier run; try again in a minute")
@@ -816,13 +832,27 @@ func (h *Handler) step(ctx context.Context, eng Engine, r *run, b store.Book) (a
 	v.eta, v.hasETA = eng.ETASeconds(b.ID)
 	st, status := state.State(b.State), state.Status(b.Status)
 	switch {
+	case st == state.Done && r.kind == ChaptersKind:
+		res, err := h.finishChapters(ctx, r, b)
+		return res, true, err
 	case st == state.Done:
 		res, err := h.finish(ctx, r, b, v.costUSD)
 		return res, true, err
+	case status == state.StatusFailed && r.kind == ChaptersKind && hasChaptersAlready(b.Error):
+		return nil, true, describeFailure(b.Error)
 	case status == state.StatusFailed:
 		return nil, true, fmt.Errorf("the engine failed the book at %s: %s", b.State, b.Error)
 	}
-	r.rep.Progress(describe(v))
+	pr := describe(v)
+	if r.kind == ChaptersKind {
+		delete(pr.Extra, "cost_usd") // speech recognition and detection only: no agent spend
+	}
+	r.rep.Progress(pr)
+	if r.kind == "" {
+		// The chapters go into the library as soon as they are found, long before
+		// the characters and recaps.
+		h.saveChaptersEarly(ctx, r, b)
+	}
 	parked := status == state.StatusNeedsAttention
 	// The park is the job's before the write below, which can take a while (the
 	// description step may wait for an agent slot): the server hears it at once.
@@ -911,8 +941,11 @@ func (h *Handler) writeSidecars(ctx context.Context, r *run, b store.Book, wait 
 		return sidecars{}, err
 	}
 	// Only the description this run's step read back, under the engine's hold (it
-	// can say how that was made); none when it got none.
+	// can say how that was made); none when it got none. The chapters the run found
+	// go with them.
 	s.description = r.descRaw
+	h.refreshChapters(r, b)
+	s.chapters = r.chapters
 	sum := s.hash()
 	if sum == r.written {
 		return s, nil
@@ -932,6 +965,10 @@ func (h *Handler) writeSidecars(ctx context.Context, r *run, b store.Book, wait 
 				// An earlier run's description.json stays in place; what vouches
 				// for it stays with it.
 				prov.Description = keptDescription(p.dir, p.prefix)
+			}
+			prov.Chapters = r.chaptersProv
+			if prov.Chapters == nil {
+				prov.Chapters = keptChapters(p.dir, p.prefix)
 			}
 			return attachmentFiles(s, prov)
 		},
@@ -1087,6 +1124,9 @@ func attachmentNames(prefix string, s sidecars) []string {
 	if s.description != nil {
 		out = append(out, prefix+descriptionName)
 	}
+	if s.chapters != nil {
+		out = append(out, prefix+chaptersName)
+	}
 	return append(out, prefix+provenanceName)
 }
 
@@ -1100,7 +1140,7 @@ func (h *Handler) rescan(ctx context.Context, r *run) {
 		got, err := r.srv.RescanAttachments(ctx, r.lib.ID, r.rel)
 		if err == nil {
 			h.o.Log.Info("generate: the server read the attachments", "job", r.job.ID, "characters", got.Characters, "recaps", got.Recaps,
-				"description", got.Description)
+				"description", got.Description, "chapters", got.Chapters)
 			return
 		}
 		if i == rescanTries || errors.Is(err, link.ErrNotIndexable) || ctx.Err() != nil {

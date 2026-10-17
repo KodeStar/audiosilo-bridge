@@ -70,7 +70,11 @@ type DescribeJobResult struct {
 // ParseDescribeParams checks a description-only job's params: nothing is asked
 // for, and a field a later server adds is ignored, so anything but a JSON object
 // (or none) is refused.
-func ParseDescribeParams(raw json.RawMessage) error {
+func ParseDescribeParams(raw json.RawMessage) error { return parseObjectParams(raw) }
+
+// parseObjectParams accepts no params or any JSON object (a kind that asks for
+// nothing, read leniently so a field a later server adds is ignored).
+func parseObjectParams(raw json.RawMessage) error {
 	if len(raw) == 0 || string(raw) == "null" {
 		return nil
 	}

@@ -161,7 +161,7 @@ func New(ctx context.Context, opts Options) (*Bridge, string, error) {
 		WorkRoot: filepath.Join(opts.DataDir, "work"), Version: opts.Version, RetentionDays: cfg.Transcripts.RetentionDays,
 		CanContribute: b.canContribute, Log: opts.Logger})
 	b.runner = jobs.New(db, b.server, b.tokenRefused, jobs.Options{Log: opts.Logger,
-		ServerID: func() string { return b.conn.Pairing().ServerID }}, verifier, b.gen, b.gen.DescribeJob())
+		ServerID: func() string { return b.conn.Pairing().ServerID }}, verifier, b.gen, b.gen.DescribeJob(), b.gen.ChaptersJob())
 	conn.onChange = b.linkChanged
 	return b, oneTime, nil
 }

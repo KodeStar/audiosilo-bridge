@@ -28,6 +28,7 @@ const (
 	charactersName  = "characters.json"
 	recapsName      = "recaps.json"
 	descriptionName = "description.json"
+	chaptersName    = "chapters.json"
 	provenanceName  = "bridge.json"
 )
 
@@ -36,11 +37,12 @@ const (
 const maxAttachment = 4 << 20
 
 // sidecars are a finished engine book's validated characters and recaps, as the
-// pipeline left them (pipeline.FinalSidecarsPaths), and the description the run's
-// description step read back (pipeline.FinalDescriptionPath), when it has one.
+// pipeline left them (pipeline.FinalSidecarsPaths), the description the run's
+// description step read back (pipeline.FinalDescriptionPath), when it has one, and
+// the chapters the run found in the narration (Phase 1d), when it found them.
 type sidecars struct {
-	characters, recaps, description []byte
-	nChars, nRecaps                 int
+	characters, recaps, description, chapters []byte
+	nChars, nRecaps                           int
 	// workID is the slug the files name (the resolved work, or the pipeline's
 	// placeholder).
 	workID string
@@ -49,7 +51,7 @@ type sidecars struct {
 // hash identifies the content, so the same files aren't written twice.
 func (s sidecars) hash() string {
 	h := sha256.New()
-	for _, b := range [][]byte{s.characters, s.recaps, s.description} {
+	for _, b := range [][]byte{s.characters, s.recaps, s.description, s.chapters} {
 		_, _ = h.Write(b)
 		_, _ = h.Write([]byte{0})
 	}
@@ -160,6 +162,17 @@ type Provenance struct {
 	// Description is how description.json was made (Phase 1c; the server reads
 	// only the fields above). Absent when no description was written with these.
 	Description *DescriptionProvenance `json:"description,omitempty"`
+	// Chapters is how chapters.json was made (Phase 1d). Absent when there is none.
+	Chapters *ChaptersProvenance `json:"chapters,omitempty"`
+}
+
+// ChaptersProvenance is bridge.json's chapters object: which job wrote
+// chapters.json and when, from what (the narration), and how many chapters.
+type ChaptersProvenance struct {
+	JobID       int64  `json:"job_id"`
+	GeneratedAt string `json:"generated_at"`
+	From        string `json:"from"`
+	Chapters    int    `json:"chapters"`
 }
 
 // DescriptionProvenance is bridge.json's description object: which job wrote
@@ -217,7 +230,7 @@ func attachmentFiles(s sidecars, prov Provenance) ([]attachFile, error) {
 		return nil, err
 	}
 	return []attachFile{{charactersName, s.characters}, {recapsName, s.recaps}, {descriptionName, s.description},
-		{provenanceName, provJSON}}, nil
+		{chaptersName, s.chapters}, {provenanceName, provJSON}}, nil
 }
 
 // indentJSON is v as bridge.json is written: indented, a newline at the end.
@@ -287,16 +300,44 @@ const maxProvenance = 256 << 10
 // it is), or, when there is none (or it isn't a JSON object, or isn't a regular
 // file), fresh with the usual fields.
 func describedProvenance(dir, prefix string, fresh Provenance) ([]byte, error) {
+	return mergedProvenance(dir, prefix, fresh, "description", fresh.Description)
+}
+
+// mergedProvenance is the book's bridge.json with its key object set to value
+// (every other field kept as it is), or fresh when there is none fit to keep: a
+// job that writes one attachment (a description, the chapters) vouches for it
+// without unsaying what made the others.
+func mergedProvenance(dir, prefix string, fresh Provenance, key string, value any) ([]byte, error) {
 	existing := readProvenance(filepath.Join(dir, AttachDir), prefix+provenanceName)
 	if existing == nil {
 		return indentJSON(fresh)
 	}
-	desc, err := json.Marshal(fresh.Description)
+	raw, err := json.Marshal(value)
 	if err != nil {
 		return nil, err
 	}
-	existing["description"] = desc
+	existing[key] = raw
 	return indentJSON(existing)
+}
+
+// keptChapters is the chapters object of the book's bridge.json beside a
+// chapters.json in place, as keptDescription is for a description: a run that
+// finds no chapters of its own leaves an earlier one's file, and what vouches for it
+// stays with it.
+func keptChapters(dir, prefix string) *ChaptersProvenance {
+	adir := filepath.Join(dir, AttachDir)
+	if info, err := os.Lstat(filepath.Join(adir, prefix+chaptersName)); err != nil || !info.Mode().IsRegular() {
+		return nil
+	}
+	raw, ok := readProvenance(adir, prefix+provenanceName)["chapters"]
+	if !ok {
+		return nil
+	}
+	var c *ChaptersProvenance
+	if json.Unmarshal(raw, &c) != nil {
+		return nil
+	}
+	return c
 }
 
 // keptDescription is the description object of the book's bridge.json, when a
