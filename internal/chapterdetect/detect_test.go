@@ -107,6 +107,20 @@ func TestNumberForms(t *testing.T) {
 		{"Chapter 0", 0},
 		{"Chapter 1000", 0},
 		{"Chapter the", 0},
+		// The number ends where its phrase does, and words side by side are no number.
+		{"Chapter One. Two days later", 1},
+		{"Chapter One. One day", 1},
+		{"Chapter Twenty. One morning", 20},
+		{"Chapter Three, seven years", 3},
+		{"Chapter Seven. One hundred miles", 7},
+		{"Chapter one two", 1},
+		{"Chapter one hundred twenty-one", 121},
+		{"Chapter One Hundred and Five", 105},
+		{"Chapter one hundred and the night", 100},
+		{"Chapter one hundred twenty one", 121},
+		{"Chapter One Hundred and Twenty One", 121},
+		{"Chapter one hundred and twenty-one", 121},
+		{"Chapter twenty one hundred", 21},
 	} {
 		s := (&script{}).say(tc.say)
 		n, _ := numberAt(s.words, 1)
@@ -270,10 +284,78 @@ func TestNumberOfIsNotAHeading(t *testing.T) {
 		{"Chapter twenty one of it", 1},
 		{"Chapter 3. Of Mice and Men", 2}, // a title after a break may start with "Of"
 		{"Chapter 3 Off the road", 2},
+		{"Chapter Five. One of the guards", 2}, // "One" begins the prose, not the number
 	} {
 		s := (&script{}).say("Chapter 1").prose(600).pause(2).say(tc.say).prose(60)
 		if got := len(Detect(s.words, nil, s.t).Chapters); got != tc.want {
 			t.Errorf("%q: %d chapters, want %d", tc.say, got, tc.want)
 		}
+	}
+}
+
+// A pause a window cut splits in two (each window hears its half) is still one
+// pause: halves of 1.3 s, under MinPause each, make the 2.6 s pause before a heading.
+func TestPauseSplitAtAWindowCut(t *testing.T) {
+	s := (&script{}).say("Chapter One").prose(600)
+	cut := s.t + 1.3
+	s.words[len(s.words)-1].End = cut // whisper stretched window k's last word to its end
+	s.pause(2.6).say("Chapter Two").prose(600)
+	halves := []Silence{{Start: cut - 1.3, End: cut}, {Start: cut, End: cut + 1.3}}
+	if res := Detect(s.words, halves, s.t); len(res.Chapters) != 2 {
+		t.Fatalf("the split pause lost the heading: %v", titles(res.Chapters))
+	}
+	// Overlapping a little (the decoders' rounding) is one pause too.
+	overlap := []Silence{{Start: cut - 1.3, End: cut + 0.05}, {Start: cut, End: cut + 1.3}}
+	if res := Detect(s.words, overlap, s.t); len(res.Chapters) != 2 {
+		t.Fatalf("overlapping halves lost the heading: %v", titles(res.Chapters))
+	}
+	// Denied: two short silences far apart are no long pause.
+	apart := []Silence{{Start: cut - 1.3, End: cut - 0.6}, {Start: cut + 0.6, End: cut + 1.3}}
+	if res := Detect(s.words, apart, s.t); len(res.Chapters) != 1 {
+		t.Fatalf("silences apart made a heading: %v", titles(res.Chapters))
+	}
+}
+
+// Headings whose words start at the same time are taken in transcript order, the
+// same every run (the runs are a map).
+func TestEqualStartsAreDeterministic(t *testing.T) {
+	words := []Word{{" The", 0, 0.3}, {" end.", 0.4, 0.8},
+		{" Part", 400, 400}, {" One.", 400, 400}, {" Chapter", 400, 400}, {" One.", 400, 400.5},
+		{" It", 401.5, 401.8}, {" was", 401.9, 402.2}, {" dark.", 402.3, 402.6}}
+	sil := []Silence{{Start: 390, End: 399.9}}
+	want := Detect(words, sil, 500)
+	for range 200 {
+		got := Detect(words, sil, 500)
+		if len(got.Chapters) != len(want.Chapters) || got.Chapters[len(got.Chapters)-1] != want.Chapters[len(want.Chapters)-1] {
+			t.Fatalf("detections differ: %+v vs %+v", got.Chapters, want.Chapters)
+		}
+	}
+	if last := want.Chapters[len(want.Chapters)-1]; last.Title != "Part One. Chapter One" || last.Number != 1 {
+		t.Fatalf("title = %q (number %d), want the heading in transcript order, chapter 1", last.Title, last.Number)
+	}
+}
+
+// A chapter's number is its "chapter" heading's, whatever follows the number; a
+// heading of another kind numbers something else, and an unnumbered one none.
+func TestChapterNumbers(t *testing.T) {
+	s := (&script{}).say("Prologue.").prose(600)
+	s.pause(2).say("Chapter One.").prose(600)
+	s.pause(2).say("Chapter Two, The Storm.").prose(600)
+	s.pause(2).say("Chapter three: in which").prose(600)
+	s.pause(2).say("Part Two.").pause(1.6).say("Chapter Four.").prose(600)
+	s.pause(2).say("Epilogue.").prose(600)
+	res := Detect(s.words, nil, s.t)
+	var got []string
+	for _, c := range res.Chapters {
+		got = append(got, c.Heading+"="+strconv.Itoa(c.Number))
+	}
+	want := "Prologue.=0|Chapter One.=1|Chapter Two,=2|Chapter three:=3|Part Two. Chapter Four.=4|Epilogue.=0"
+	if strings.Join(got, "|") != want {
+		t.Fatalf("numbers = %s\nwant      %s", strings.Join(got, "|"), want)
+	}
+	d := (&script{}).say("Day two.").prose(600)
+	d.pause(2).say("Day three.").prose(600)
+	if res := Detect(d.words, nil, d.t); res.Chapters[0].Number != 0 || res.Chapters[1].Number != 0 {
+		t.Fatalf("a day heading numbered a chapter: %+v", res.Chapters)
 	}
 }

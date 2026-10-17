@@ -215,14 +215,18 @@ type run struct {
 	descPaid  bool
 	// kind is the run's job kind (Kind, ChaptersKind, DescribeKind).
 	kind string
-	// chapters are the run's own chapters.json (Phase 1d: the engine found the
-	// book's chapters in its narration; nil for none, or a one-chapter book) and
-	// chaptersProv its bridge.json object; chaptersSum identifies the detected list
-	// they were composed from and chaptersSaved the one last saved early.
-	chapters      []byte
-	chaptersProv  *ChaptersProvenance
-	chaptersSum   string
-	chaptersSaved string
+	// chaptersProv is bridge.json's chapters object for the run's own chapters.json
+	// (Phase 1d: the engine found the book's chapters in its narration; nil for no
+	// file to write: none found, or a one-chapter book), made at chaptersAt for the
+	// detected list chaptersSum identifies; the file itself is composed at each
+	// write (chaptersJSON) from the book's files and path as they are then.
+	// chaptersSaved is the list last saved early, chaptersRetryAt when an early save
+	// that failed is tried again.
+	chaptersProv    *ChaptersProvenance
+	chaptersSum     string
+	chaptersAt      time.Time
+	chaptersSaved   string
+	chaptersRetryAt time.Time
 	// detected is the detected list last read (pipeline.DetectedStamp says when;
 	// detectedOK that it was current then), so refreshChapters reads it again only
 	// once it changed.
@@ -647,9 +651,11 @@ func (r *run) engineParked(parked bool, code, msg string) {
 	r.ownPark = false
 }
 
-// create picks the source and makes the engine book for a new job: a book the
-// engine already has from an earlier run (the same source path) is deleted
-// first, unless another open job follows it or a stage of it runs right now.
+// create picks the source and makes the engine book for a new job (a chapters job's
+// is createChapters'): a finished chapters run of the book reading the same audio
+// is continued (continueChapters), keeping its transcription; any other book the
+// engine already has from an earlier run (the same source path) is deleted first,
+// unless another open job follows it or a stage of it runs right now.
 func (h *Handler) create(ctx context.Context, eng Engine, r *run) error {
 	if r.kind == ChaptersKind {
 		return h.createChapters(ctx, eng, r)
@@ -680,6 +686,9 @@ func (h *Handler) create(ctx context.Context, eng Engine, r *run) error {
 			return err
 		}
 		if len(open) > 0 {
+			if sj, err := h.o.DB.GetServerJob(ctx, open[0]); err == nil && sj.Kind == ChaptersKind {
+				return fmt.Errorf("job %d is finding this book's chapters; let it finish (this job can then go on from its transcription) or cancel it first", open[0])
+			}
 			return fmt.Errorf("job %d is already generating this book; cancel it first", open[0])
 		}
 		if ok, err := h.continueChapters(ctx, eng, r, old); ok || err != nil {
@@ -886,9 +895,17 @@ func (h *Handler) step(ctx context.Context, eng Engine, r *run, b store.Book) (a
 	case st == state.Done:
 		res, err := h.finish(ctx, r, b, v.costUSD)
 		return res, true, err
-	case status == state.StatusFailed && r.kind == ChaptersKind && hasChaptersAlready(b.Error):
-		return nil, true, describeFailure(b.Error)
-	case status == state.StatusFailed:
+	}
+	// A chapters-only book whose inspect found chapters of its own ends the job with
+	// that sentence, failed or (the supervisor may have escalated the failure since)
+	// parked.
+	if r.kind == ChaptersKind && st == state.Inspecting &&
+		(status == state.StatusFailed || status == state.StatusNeedsAttention) {
+		if msg, ok := h.hasChaptersFailure(ctx, b.ID); ok {
+			return nil, true, describeFailure(msg)
+		}
+	}
+	if status == state.StatusFailed {
 		return nil, true, fmt.Errorf("the engine failed the book at %s: %s", b.State, b.Error)
 	}
 	pr := describe(v)
@@ -896,10 +913,10 @@ func (h *Handler) step(ctx context.Context, eng Engine, r *run, b store.Book) (a
 		delete(pr.Extra, "cost_usd") // speech recognition and detection only: no agent spend
 	}
 	r.rep.Progress(pr)
-	if r.kind == Kind {
-		// The chapters go into the library as soon as they are found, long before
-		// the characters and recaps.
-		h.saveChaptersEarly(ctx, r, b)
+	// The chapters go into the library as soon as they are found, long before the
+	// characters and recaps; the stage is reported again after the save's own steps.
+	if r.kind == Kind && h.saveChaptersEarly(ctx, r, b) {
+		r.rep.Progress(pr)
 	}
 	parked := status == state.StatusNeedsAttention
 	// The park is the job's before the write below, which can take a while (the
@@ -990,10 +1007,12 @@ func (h *Handler) writeSidecars(ctx context.Context, r *run, b store.Book, wait 
 	}
 	// Only the description this run's step read back, under the engine's hold (it
 	// can say how that was made); none when it got none. The chapters the run found
-	// go with them.
+	// go with them, composed for the book where it is when it is written.
 	s.description = r.descRaw
 	h.refreshChapters(r, b)
-	s.chapters = r.chapters
+	if s.chapters, err = r.chaptersJSON(r.place.single); err != nil {
+		return sidecars{}, err
+	}
 	sum := s.hash()
 	if sum == r.written {
 		return s, nil
@@ -1014,6 +1033,11 @@ func (h *Handler) writeSidecars(ctx context.Context, r *run, b store.Book, wait 
 				// for it stays with it.
 				prov.Description = keptObject[DescriptionProvenance](p.dir, p.prefix, descriptionName, "description")
 			}
+			chapters, err := r.chaptersJSON(p.single)
+			if err != nil {
+				return nil, err
+			}
+			s.chapters = chapters
 			prov.Chapters = r.chaptersProv
 			if prov.Chapters == nil {
 				prov.Chapters = keptObject[ChaptersProvenance](p.dir, p.prefix, chaptersName, "chapters")

@@ -188,6 +188,9 @@ describe('chapters', () => {
     expect(chaptersSummary({ ...r!, chapters: 1, files: [] })).toBe(
       'One chapter: no chapter file was written',
     );
+    expect(chaptersSummary({ ...r!, chapters: 2001, files: [] })).toBe(
+      '2001 chapters found in the narration, but no chapter file was written',
+    );
     expect(parseChaptersResult({ path: 'x', files: [] })).toBeNull();
     expect(parseChaptersResult(null)).toBeNull();
   });

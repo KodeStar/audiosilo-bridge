@@ -232,12 +232,20 @@ position), cuts the chapter FLACs from the window FLACs (the source only for wha
 they can't give), and the book carries on as an ordinary chaptered one. A detection
 that isn't confident parks `chapters_not_detected` (human only).
 `books.goal = chapters` (migration 0005) stops a book there: the `chapters.detect`
-job (speech recognition and detection only, no agent) writes `chapters.json` at its
-done; `sidecars.generate` writes it as soon as the chapters are found and continues
-a finished chapters run (`store.ContinueChapters`) rather than transcribing again.
-Titles found in the narration are never verified spelling evidence (a detected
-manifest's `marker_titles.txt` is empty). See
-BRIDGE-PLAN.md's Status table for what is next.
+job (speech recognition and detection only, no agent, no series lock) writes
+`chapters.json` at its done; `sidecars.generate` writes it as soon as the chapters
+are found and continues a finished chapters run (`store.ContinueChapters`, with the
+job's identity) rather than transcribing again. **Entry k of the list is logical
+position k by construction**: the classification it is grouped by is kept
+(`positions_detected.json`) and is the one the later stages use, its positions the
+entries' ordinals. chapters.json is never written beside characters and recaps made
+without chapters found in the narration (their positions would move), and a
+chapters job never clears a finished whole run (nor runs on a file it can't window:
+it fails saying why, one marker over only part of it or no length). A chapter's
+heading number is the detector's, whatever follows it. Titles found in the
+narration are never verified spelling evidence (a detected manifest's
+`marker_titles.txt` is empty, and the manifest staged to the spelling agent goes
+without them). See BRIDGE-PLAN.md's Status table for what is next.
 
 Operative caveats carried from sidecars (PACKAGES.md has the detail):
 - **audiosilo-meta is pinned** and the schema drift guard

@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1597,7 +1598,7 @@ func TestPipelineChaptersGoal(t *testing.T) {
 	}
 	decodes := fake.count(1)
 
-	if err := db.ContinueChapters(context.Background(), b.ID, "local", ""); err != nil {
+	if err := db.ContinueChapters(context.Background(), b.ID, store.NewBook{Title: "Bare", ContribMode: "local"}, store.GenerateBook{}); err != nil {
 		t.Fatal(err)
 	}
 	sched.Notify()
@@ -1618,5 +1619,58 @@ func TestPipelineChaptersGoal(t *testing.T) {
 	failed := waitStatus(t, db, c.ID, string(state.StatusFailed), 30*time.Second)
 	if failed.Status != string(state.StatusFailed) || failed.Error != ErrHasMarkerChapters.Error() {
 		t.Fatalf("chaptered book: status %q err %q, want failed with %q", failed.Status, failed.Error, ErrHasMarkerChapters)
+	}
+}
+
+// A chapters-only book whose inspect made no windows fails with what is true of
+// its file: chapters it has, or why the narration can't be searched.
+func TestChaptersRefusal(t *testing.T) {
+	markers := audio.Manifest{Style: audio.StyleMarkers, Duration: 3600}
+	for _, tc := range []struct {
+		name  string
+		m     audio.Manifest
+		stats audio.MarkerStats
+		want  error
+	}{
+		{"files", audio.Manifest{Style: audio.StyleFiles, Duration: 3600}, audio.MarkerStats{}, ErrHasFileChapters},
+		{"markers", markers, audio.MarkerStats{Seen: 12, Recognized: 12, Contiguous: true, Complete: true}, ErrHasMarkerChapters},
+		{"broken markers", markers, audio.MarkerStats{Seen: 3}, ErrHasMarkerChapters},
+		{"one partial marker", markers, audio.MarkerStats{Seen: 1, Recognized: 1, Contiguous: true}, ErrPartialMarker},
+		{"no length, no marker", audio.Manifest{Style: audio.StyleMarkers}, audio.MarkerStats{}, ErrUnknownLength},
+		{"no length, one marker", audio.Manifest{Style: audio.StyleMarkers}, audio.MarkerStats{Seen: 1}, ErrUnknownLength},
+	} {
+		if got := chaptersRefusal(tc.m, tc.stats); !errors.Is(got, tc.want) {
+			t.Errorf("%s: %v, want %v", tc.name, got, tc.want)
+		}
+	}
+	for _, e := range []error{ErrHasMarkerChapters, ErrHasFileChapters, ErrPartialMarker, ErrUnknownLength} {
+		if !slices.Contains(ChaptersRefusals, e) {
+			t.Errorf("%q is not among the refusals the job reads", e)
+		}
+	}
+}
+
+// A file whose one marker covers it is transcribed in windows, and inspect's log
+// says so only: never that its marker went unread for marker normalization to map.
+func TestInspectNotesATitleMarkerAsWindows(t *testing.T) {
+	ffmpeg, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		t.Skip("ffmpeg not installed")
+	}
+	ffprobe, err := exec.LookPath("ffprobe")
+	if err != nil {
+		t.Skip("ffprobe not installed")
+	}
+	src := genM4BWithTitles(t, ffmpeg, t.TempDir(), []string{"The Book"})
+	var notes []string
+	_, err = NewExecutor(Config{FFmpeg: ffmpeg, FFprobe: ffprobe}).Execute(context.Background(),
+		store.Book{SourcePath: src, WorkDir: t.TempDir()}, state.Inspecting,
+		scheduler.StageReport{Note: func(s string) { notes = append(notes, s) }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := strings.Join(notes, "\n")
+	if !strings.Contains(log, "transcribing in 1 window") || strings.Contains(log, "marker normalization") {
+		t.Fatalf("notes = %q", notes)
 	}
 }

@@ -205,3 +205,71 @@ func TestWindowSilencesAndCutFromWindows(t *testing.T) {
 		t.Fatalf("with window 2 gone: %d left, %v; want 1", left, err)
 	}
 }
+
+// A probe that fails (its time bound ran out on a wedged mount) ends the probing:
+// the rest of a long book is cut at the targets, not probed once per cut.
+func TestWindowCutsStopProbingAfterAFailure(t *testing.T) {
+	calls := 0
+	probe := func(t float64) (float64, bool, error) {
+		calls++
+		return 0, false, context.DeadlineExceeded
+	}
+	cuts, err := windowCuts(context.Background(), 40*3600, probe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Fatalf("probed %d times after a failure, want once", calls)
+	}
+	for i, c := range cuts[:len(cuts)-1] {
+		if c != float64(i)*windowTarget {
+			t.Fatalf("cut %d at %v, want its target", i, c)
+		}
+	}
+	// A probe that answers keeps being asked, and its quiet points are used.
+	calls = 0
+	cuts, _ = windowCuts(context.Background(), 4000, func(t float64) (float64, bool, error) { calls++; return t + 30, true, nil })
+	if calls != 2 || cuts[1] != windowTarget+30 {
+		t.Fatalf("calls %d, cuts %v", calls, cuts)
+	}
+	// Cancelled: the probe's error is the context's.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := windowCuts(ctx, 4000, probe); err == nil {
+		t.Fatal("a cancelled probe was taken for a failed one")
+	}
+}
+
+// An ffmpeg before 7 prints a tiny silence time with an exponent.
+func TestParseSilencesExponent(t *testing.T) {
+	got := parseSilences([]byte("silence_start: 6.25e-05\nsilence_end: 1.40006 | silence_duration: 1.4\n"), 1500, 240)
+	if len(got) != 1 || math.Abs(got[0].Start-1500.0000625) > 1e-9 || math.Abs(got[0].End-1501.40006) > 1e-9 {
+		t.Fatalf("silences = %+v", got)
+	}
+}
+
+// A book an older parser parked at markers_normalizing with no chapters, whose file
+// has no markers, is recovered into windows (cut at the targets) with no agent round;
+// a draft with chapters, or a file with a table, keeps the old rules.
+func TestReparseMarkerlessIntoWindows(t *testing.T) {
+	work := t.TempDir()
+	writeProbe(t, work, `{"format":{"duration":"4000.000"},"chapters":[]}`)
+	m, stats, err := ReparseMarkerManifest(work, Manifest{Source: "/book.m4b", Style: StyleMarkers, Duration: 4000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Style != StyleWindows || m.ChapterCount != 3 || !stats.Usable() || m.Chapters[1].Start != windowTarget {
+		t.Fatalf("manifest %+v, stats %+v", m, stats)
+	}
+	if back, err := ReadManifest(work); err != nil || back.Style != StyleWindows {
+		t.Fatalf("written manifest %+v, %v", back, err)
+	}
+	// Denied: a draft that has chapters is the marker rules' (an agent maps them).
+	work2 := t.TempDir()
+	writeProbe(t, work2, `{"format":{"duration":"4000.000"},"chapters":[]}`)
+	m, _, err = ReparseMarkerManifest(work2, Manifest{Source: "/book.m4b", Style: StyleMarkers, Duration: 4000,
+		Chapters: []Chapter{{Chapter: 1, Start: 0, End: 4000, Duration: 4000}}})
+	if err != nil || m.Style != StyleMarkers {
+		t.Fatalf("a draft with chapters: %+v, %v", m, err)
+	}
+}

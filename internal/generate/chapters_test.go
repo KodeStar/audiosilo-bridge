@@ -14,6 +14,7 @@ import (
 	"github.com/kodestar/audiosilo-bridge/internal/audio"
 	"github.com/kodestar/audiosilo-bridge/internal/chapterdetect"
 	"github.com/kodestar/audiosilo-bridge/internal/link"
+	"github.com/kodestar/audiosilo-bridge/internal/metaops"
 	"github.com/kodestar/audiosilo-bridge/internal/pipeline"
 	"github.com/kodestar/audiosilo-bridge/internal/scheduler"
 	"github.com/kodestar/audiosilo-bridge/internal/state"
@@ -161,17 +162,33 @@ func TestGenerateContinuesAChaptersRun(t *testing.T) {
 	t.Parallel()
 	hr := newHarness(t)
 	hr.exec.windowed = true
+	hr.srv.set(func() {
+		hr.srv.books["Loose.m4b"] = link.Book{LibraryID: 1, Path: "Loose.m4b", Files: []link.BookFile{{Path: "Loose.m4b", Size: 6}},
+			Info: &link.BookInfo{Title: "Loose", Series: "The Saga", SeriesIndex: "1"}}
+	})
 	hr.srv.addKind(36, ChaptersKind, "Loose.m4b", `{}`)
 	stop := hr.runner(hr.h, hr.h.ChaptersJob())
 	defer stop()
 	hr.waitFor("the chapters job done", func() bool { s, _ := hr.srv.final(36); return s == link.StateDone })
 	first := hr.engineBook(36)
+	// A chapters-only run takes no series: it would hold the series' lock (later
+	// volumes' authoring stages wait for the lowest unfinished volume) for a run
+	// that makes nothing they carry on from.
+	if first.Series != "" || first.SeriesPos != "" {
+		t.Fatalf("the chapters book is in a series: %+v", first)
+	}
 
+	// The book was matched since: the continue takes the generate job's identity.
+	hr.srv.set(func() {
+		hr.srv.books["Loose.m4b"] = link.Book{LibraryID: 1, Path: "Loose.m4b", Files: []link.BookFile{{Path: "Loose.m4b", Size: 6}},
+			Info: &link.BookInfo{Title: "The Loose One", Authors: []string{"An Author"}, Series: "The Saga", SeriesIndex: "2", ASIN: "B0LOOSE"}}
+	})
 	hr.srv.add(37, "Loose.m4b", `{"contribute":"local","work_id":"loose-work"}`)
 	hr.waitFor("the generate job done", func() bool { s, _ := hr.srv.final(37); return s == link.StateDone })
 	b := hr.engineBook(37)
-	if b.ID != first.ID || b.Goal != "" || b.WorkID != "loose-work" || b.ContribMode != "local" {
-		t.Fatalf("the generate job's book = %+v, want the chapters run (%d) continued", b, first.ID)
+	if b.ID != first.ID || b.Goal != "" || b.WorkID != "loose-work" || b.ContribMode != "local" || b.Title != "The Loose One" ||
+		b.Series != "The Saga" || b.SeriesPos != "2" || b.ASIN != "B0LOOSE" || len(b.Authors) != 1 || b.WorkDir != first.WorkDir {
+		t.Fatalf("the generate job's book = %+v, want the chapters run (%d) continued with the job's identity", b, first.ID)
 	}
 	_, final := hr.srv.final(37)
 	var res Result
@@ -278,8 +295,8 @@ func TestRefreshChaptersOnlyWhenChanged(t *testing.T) {
 	h := New(Options{})
 	r := &run{files: []link.BookFile{{Path: "Loose.m4b", Size: 6}}, rel: "Loose.m4b", place: place{single: true}}
 	d, ok := h.refreshChapters(r, b)
-	if !ok || len(d.Chapters) != 3 || r.chapters == nil {
-		t.Fatalf("first look = %+v, %v (chapters %s)", d, ok, r.chapters)
+	if raw, err := r.chaptersJSON(true); !ok || len(d.Chapters) != 3 || raw == nil || err != nil {
+		t.Fatalf("first look = %+v, %v (chapters %s, %v)", d, ok, raw, err)
 	}
 	// Same size and time, different bytes: proof the list wasn't read again.
 	path := pipeline.DetectedChaptersPath(b.WorkDir)
@@ -332,5 +349,235 @@ func TestChaptersDetectFollowsABookMovedWhileAway(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(hr.root, AttachDir, "Moved.chapters.json")); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// A generate job continues a finished chapters run only while its list is current
+// for the audio on disk: a file replaced since is transcribed again, never sent on
+// with the old file's transcripts and chapters.
+func TestGenerateDoesNotContinueAReplacedFile(t *testing.T) {
+	t.Parallel()
+	hr := newHarness(t)
+	hr.exec.windowed = true
+	hr.srv.addKind(40, ChaptersKind, "Loose.m4b", `{}`)
+	stop := hr.runner(hr.h, hr.h.ChaptersJob())
+	defer stop()
+	hr.waitFor("the chapters job done", func() bool { s, _ := hr.srv.final(40); return s == link.StateDone })
+	first := hr.engineBook(40)
+
+	mustWrite(t, filepath.Join(hr.root, "Loose.m4b"), "another encode")
+	hr.srv.set(func() {
+		hr.srv.books["Loose.m4b"] = link.Book{LibraryID: 1, Path: "Loose.m4b", Files: []link.BookFile{{Path: "Loose.m4b", Size: 14}},
+			Info: &link.BookInfo{Title: "Loose"}}
+	})
+	hr.srv.add(41, "Loose.m4b", `{}`)
+	hr.waitFor("the generate job done", func() bool { s, _ := hr.srv.final(41); return s == link.StateDone })
+	if b := hr.engineBook(41); b.ID == first.ID {
+		t.Fatalf("the generate job continued the old file's run (book %d)", b.ID)
+	}
+}
+
+// chaptersJSON composes the file for the book where it is when it is written: the
+// server moves a job with its book (a rename during the run), and the list named the
+// old file's name would never be applied. The bytes stay the same for an unchanged
+// book (generated_at is when the run first composed them).
+func TestChaptersJSONFollowsTheBook(t *testing.T) {
+	t.Parallel()
+	b := store.Book{WorkDir: t.TempDir(), SourcePath: filepath.Join(t.TempDir(), "Loose.m4b")}
+	mustWrite(t, b.SourcePath, "single")
+	detectChapters(t, b)
+	now := time.Date(2026, 10, 17, 12, 0, 0, 0, time.UTC)
+	h := New(Options{Now: func() time.Time { return now }})
+	r := &run{files: []link.BookFile{{Path: "Loose.m4b", Size: 6}}, rel: "Loose.m4b", place: place{single: true}}
+	if _, ok := h.refreshChapters(r, b); !ok {
+		t.Fatal("no current list")
+	}
+	first, err := r.chaptersJSON(true)
+	if err != nil || first == nil {
+		t.Fatalf("first = %s, %v", first, err)
+	}
+	now = now.Add(time.Hour)
+	if again, _ := r.chaptersJSON(true); string(again) != string(first) {
+		t.Fatalf("an unchanged book composed new bytes:\n%s\n%s", first, again)
+	}
+	// The book is renamed; the server moved the job with it (adoptMove).
+	r.files, r.rel = []link.BookFile{{Path: "New.m4b", Size: 6}}, "New.m4b"
+	raw, err := r.chaptersJSON(true)
+	var f ChaptersFile
+	if err != nil || json.Unmarshal(raw, &f) != nil || len(f.Files) != 1 || f.Files[0].Path != "New.m4b" {
+		t.Fatalf("after the move = %s, %v", raw, err)
+	}
+}
+
+// A chapters job never writes chapters.json beside characters and recaps made
+// without chapters found in the narration (a run of the file as one chapter, the
+// ebook's chapters): the server would gate their positions by the new list, opening a
+// whole-book recap with the second chapter. Beside ones made with them, it does.
+func TestChaptersDetectRefusedBesideOtherSidecars(t *testing.T) {
+	t.Parallel()
+	hr := newHarness(t)
+	hr.exec.windowed = true
+	adir := filepath.Join(hr.root, AttachDir)
+	mustWrite(t, filepath.Join(adir, "Loose.characters.json"), `{}`)
+	mustWrite(t, filepath.Join(adir, "Loose.bridge.json"), `{"kind":"sidecars.generate","job_id":7}`)
+	hr.srv.addKind(42, ChaptersKind, "Loose.m4b", `{}`)
+	stop := hr.runner(hr.h, hr.h.ChaptersJob())
+	defer stop()
+	hr.waitFor("refused", func() bool { s, _ := hr.srv.final(42); return s == link.StateFailed })
+	if _, final := hr.srv.final(42); final.Error == nil || *final.Error != string(errChaptersBesideSidecars) {
+		t.Fatalf("error = %v", final.Error)
+	}
+	if _, err := hr.db.GetGenerateBook(context.Background(), 42); err == nil {
+		t.Fatal("the refused job started a run")
+	}
+	if _, err := os.Stat(filepath.Join(adir, "Loose.chapters.json")); err == nil {
+		t.Fatal("chapters.json written beside the other sidecars")
+	}
+	// Allowed: sidecars made with chapters found in the narration.
+	mustWrite(t, filepath.Join(adir, "Loose.bridge.json"), `{"kind":"sidecars.generate","job_id":7,"chapters":{"job_id":7,"from":"narration","chapters":3}}`)
+	hr.srv.addKind(43, ChaptersKind, "Loose.m4b", `{}`)
+	hr.waitFor("done", func() bool { s, _ := hr.srv.final(43); return s == link.StateDone })
+	if _, err := os.Stat(filepath.Join(adir, "Loose.chapters.json")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A finished whole run of the book is never cleared for a chapters run: its notes
+// carry a series on and describe the book.
+func TestChaptersDetectKeepsAFinishedRun(t *testing.T) {
+	t.Parallel()
+	hr := newHarness(t)
+	ctx := context.Background()
+	sp, ok, err := metaops.AllowedPath(filepath.Join(hr.root, "Loose.m4b"), []string{hr.root})
+	if err != nil || !ok {
+		t.Fatal(sp, ok, err)
+	}
+	old, err := hr.db.CreateBook(ctx, store.NewBook{SourcePath: sp, WorkDir: filepath.Join(hr.work, "loose"), Title: "Loose"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := hr.db.SetBookState(ctx, old.ID, string(state.Done), "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	hr.srv.addKind(44, ChaptersKind, "Loose.m4b", `{}`)
+	stop := hr.runner(hr.h, hr.h.ChaptersJob())
+	defer stop()
+	hr.waitFor("refused", func() bool { s, _ := hr.srv.final(44); return s == link.StateFailed })
+	if _, final := hr.srv.final(44); final.Error == nil || *final.Error != string(errChaptersKeepsRun) {
+		t.Fatalf("error = %v", final.Error)
+	}
+	if got, err := hr.db.GetBook(ctx, old.ID); err != nil || got.State != string(state.Done) {
+		t.Fatalf("the finished run = %+v, %v", got, err)
+	}
+}
+
+// The early save never waits: while the library isn't writable the job goes on
+// relaying the engine book, and the chapters go in once it is.
+func TestEarlySaveNeverWaitsForTheLibrary(t *testing.T) {
+	t.Parallel()
+	hr := newHarness(t)
+	hr.exec.windowed = true
+	asr := hr.exec.gate("asr")
+	facts := hr.exec.gate("fact_pass")
+	hr.srv.add(45, "Loose.m4b", `{}`)
+	stop := hr.runner(hr.h)
+	defer stop()
+	hr.waitFor("asr", func() bool {
+		return hr.srv.saw(45, func(_ link.Update, p map[string]any) bool { return p["stage"] == "asr" })
+	})
+	hr.libs.writable.Store(false)
+	close(asr)
+	hr.waitFor("fact_pass relayed while the library isn't writable", func() bool {
+		return hr.srv.saw(45, func(_ link.Update, p map[string]any) bool { return p["stage"] == "fact_pass" })
+	})
+	chapters := filepath.Join(hr.root, AttachDir, "Loose.chapters.json")
+	if _, err := os.Stat(chapters); err == nil {
+		t.Fatal("chapters.json written into a library that isn't writable")
+	}
+	hr.libs.writable.Store(true)
+	hr.waitFor("chapters.json once writable", func() bool { _, err := os.Stat(chapters); return err == nil })
+	close(facts)
+	hr.waitFor("done", func() bool { s, _ := hr.srv.final(45); return s == link.StateDone })
+}
+
+// hasChaptersFailure reads the inspecting run's own error: a failure the supervisor
+// escalated into a park (its own message on the book) still ends the job with it.
+func TestHasChaptersFailure(t *testing.T) {
+	t.Parallel()
+	db, err := store.Open(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	ctx := context.Background()
+	h := New(Options{DB: db})
+	b, err := db.CreateBook(ctx, store.NewBook{SourcePath: "/lib/x.m4b", WorkDir: "/w/x", Title: "X", Goal: state.GoalChapters})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fail := func(msg string) {
+		id, err := db.StartStageRun(ctx, b.ID, string(state.Inspecting), 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw, _ := json.Marshal(map[string]string{"error": msg})
+		if err := db.FinishStageRun(ctx, id, false, raw); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fail("inspect: ffprobe failed")
+	if _, ok := h.hasChaptersFailure(ctx, b.ID); ok {
+		t.Fatal("another failure read as the book having chapters")
+	}
+	for _, refusal := range pipeline.ChaptersRefusals {
+		fail(refusal.Error())
+		if msg, ok := h.hasChaptersFailure(ctx, b.ID); !ok || msg != refusal.Error() {
+			t.Fatalf("= %q, %v, want %q", msg, ok, refusal)
+		}
+	}
+}
+
+// Writing an earlier run's chapters, a job whose book's folder can't be written
+// parks once and stays parked until the save goes through: never lifted between two
+// tries, which the server would hear (and notify) as a new park every Recheck.
+func TestChaptersFromEarlierParksOnce(t *testing.T) {
+	t.Parallel()
+	hr := newHarness(t)
+	hr.exec.windowed = true
+	hr.srv.addKind(46, ChaptersKind, "Loose.m4b", `{}`)
+	stop := hr.runner(hr.h, hr.h.ChaptersJob())
+	hr.waitFor("the first job done", func() bool { s, _ := hr.srv.final(46); return s == link.StateDone })
+	stop()
+	// .audiosilo becomes a file: every save fails.
+	adir := filepath.Join(hr.root, AttachDir)
+	if err := os.RemoveAll(adir); err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, adir, "not a folder")
+	h := hr.handler()
+	h.o.Recheck = 5 * time.Millisecond
+	hr.srv.addKind(47, ChaptersKind, "Loose.m4b", `{}`)
+	stop2 := hr.runner(h, h.ChaptersJob())
+	defer stop2()
+	hr.waitFor("parked", func() bool {
+		return hr.srv.saw(47, func(u link.Update, _ map[string]any) bool {
+			return u.State != nil && *u.State == link.StateNeedsAttention
+		})
+	})
+	time.Sleep(100 * time.Millisecond) // many Rechecks
+	parks := 0
+	hr.srv.mu.Lock()
+	ups := hr.srv.updates[47]
+	for i, u := range ups {
+		if u.State != nil && *u.State == link.StateNeedsAttention && (i == 0 || ups[i-1].State == nil || *ups[i-1].State != link.StateNeedsAttention) {
+			parks++
+		}
+	}
+	hr.srv.mu.Unlock()
+	if parks != 1 {
+		t.Fatalf("parked %d times, want once", parks)
+	}
+	if _, err := hr.db.GetGenerateBook(context.Background(), 47); err == nil {
+		t.Fatal("the job mapped an engine book of its own")
 	}
 }

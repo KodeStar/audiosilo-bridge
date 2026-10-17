@@ -47,6 +47,14 @@ import (
 const (
 	detectedChaptersName = "chapters_detected.json"
 	windowsDetectionName = "detection.json"
+	// detectedPositionsName is the classification chapters_detected.json was grouped
+	// by (see detectedClassification). classifyBookEdges takes it for a detected
+	// manifest instead of classifying again from the text layer the later stages
+	// leave (QA can re-transcribe a chapter's opening, or shrink a looped one past the
+	// edge rule), so the list's entry k and the sidecars' logical position k come from
+	// one classification by construction. It quotes no transcript, so it stays with
+	// the durables.
+	detectedPositionsName = "positions_detected.json"
 )
 
 // silenceDetectFloor / silenceDetectPerAudioSec bound the silence pass over one
@@ -72,12 +80,13 @@ func DetectedChaptersPath(workDir string) string { return filepath.Join(workDir,
 // position (what the server and the player gate spoilers by: entry k is position
 // k), so a front-matter section shares the first story chapter's entry and an
 // unnumbered interior section the entry of the chapter it precedes (Parts names the
-// detected chapters an entry groups).
+// detected chapters an entry groups; rankPositions gives them its ordinal).
 type DetectedChapters struct {
 	// ManifestSHA is the fingerprint of the detected manifest the list was made
 	// from: a list for another manifest (the book was inspected again) is stale.
 	ManifestSHA string `json:"manifest_sha"`
-	// SourceSize is the audio file's size then: a replaced file makes it stale too.
+	// SourceSize is the audio file's size then: a replaced file makes it stale too
+	// (0 when it couldn't be looked at then: unknown, never compared).
 	SourceSize int64             `json:"source_size"`
 	DurationMs int64             `json:"duration_ms"`
 	Chapters   []DetectedChapter `json:"chapters"`
@@ -121,8 +130,8 @@ func DetectedStamp(workDir string) (string, bool) {
 }
 
 // CurrentFor reports whether d still describes the book in workDir: its manifest is
-// the one d was made from, and its audio file (when it can be looked at) has the
-// same size.
+// the one d was made from, and its audio file (when it can be looked at, and was
+// when d was written) has the same size.
 func (d DetectedChapters) CurrentFor(workDir string) bool {
 	fp, err := manifestFingerprint(workDir)
 	if err != nil || fp != d.ManifestSHA {
@@ -132,7 +141,7 @@ func (d DetectedChapters) CurrentFor(workDir string) bool {
 	if err != nil {
 		return false
 	}
-	if info, err := os.Stat(m.Source); err == nil && info.Size() != d.SourceSize {
+	if info, err := os.Stat(m.Source); err == nil && d.SourceSize > 0 && info.Size() != d.SourceSize {
 		return false
 	}
 	return true
@@ -199,8 +208,10 @@ func (e *Executor) chapterDetect(ctx context.Context, book store.Book, r schedul
 	if err != nil {
 		return scheduler.StageResult{}, fmt.Errorf("chapter_detecting: %w", err)
 	}
+	// One unit, as every book stage (the ETA charges a unit its learned per-book
+	// time): the cut after the detection says what it is doing on the heartbeat.
 	if r.Progress != nil {
-		r.Progress(0, 2)
+		r.Progress(0, 1)
 	}
 	var det chapterdetect.Result
 	err = runWithStageHeartbeat(ctx, r, func(elapsed time.Duration) string {
@@ -231,9 +242,6 @@ func (e *Executor) chapterDetect(ctx context.Context, book store.Book, r schedul
 	if e.db != nil {
 		_ = e.db.SetBookChapters(context.WithoutCancel(ctx), book.ID, manifest.ChapterCount)
 	}
-	if r.Progress != nil {
-		r.Progress(1, 2)
-	}
 	err = runWithStageHeartbeat(ctx, r, func(elapsed time.Duration) string {
 		return fmt.Sprintf("chapter_detecting: ffmpeg still cutting the chapters (%s elapsed)", humanDuration(elapsed))
 	}, func() error {
@@ -242,13 +250,13 @@ func (e *Executor) chapterDetect(ctx context.Context, book store.Book, r schedul
 	if err != nil {
 		return scheduler.StageResult{}, fmt.Errorf("chapter_detecting: cut the chapters: %w", err)
 	}
-	list, err := writeDetectedChapters(book, manifest, docs, fp)
+	list, err := writeDetectedChapters(book, manifest, docs, headingNumbers(det.Chapters), fp)
 	if err != nil {
 		return scheduler.StageResult{}, fmt.Errorf("chapter_detecting: %w", err)
 	}
 	e.accountScratch(ctx, book)
 	if r.Progress != nil {
-		r.Progress(2, 2)
+		r.Progress(1, 1)
 	}
 	result := scheduler.StageResult{
 		Metrics: metrics(map[string]any{
@@ -409,11 +417,31 @@ func (e *Executor) remapTranscripts(workDir string, m audio.Manifest, docs []tra
 	return fp, writeASRProvenance(workDir, prov)
 }
 
+// headingNumbers is the number each detected chapter's "chapter" heading says (0
+// for none), in the detected manifest's order.
+func headingNumbers(chs []chapterdetect.Chapter) []int {
+	out := make([]int, len(chs))
+	for i, c := range chs {
+		out[i] = c.Number
+	}
+	return out
+}
+
 // writeDetectedChapters writes chapters_detected.json for the detected manifest
-// (its fingerprint fp, its chapters' transcripts docs), grouped by logical position
-// (see groupByPosition).
-func writeDetectedChapters(book store.Book, m audio.Manifest, docs []transcript.Transcript, fp string) (DetectedChapters, error) {
-	d := DetectedChapters{ManifestSHA: fp, DurationMs: ms(m.Duration), Chapters: groupByPosition(m, docs)}
+// (its fingerprint fp, its chapters' transcripts docs and heading numbers said),
+// grouped by logical position (see detectedClassification), and, first, the
+// classification it was grouped by (positions_detected.json), which the later
+// stages take for the book.
+func writeDetectedChapters(book store.Book, m audio.Manifest, docs []transcript.Transcript, said []int, fp string) (DetectedChapters, error) {
+	class, list := detectedClassification(m, docs, said)
+	pos, err := json.Marshal(detectedPositions{ManifestSHA: fp, Classification: class})
+	if err != nil {
+		return DetectedChapters{}, err
+	}
+	if err := fsutil.WriteFileAtomic(filepath.Join(book.WorkDir, detectedPositionsName), append(pos, '\n'), 0o644); err != nil {
+		return DetectedChapters{}, err
+	}
+	d := DetectedChapters{ManifestSHA: fp, DurationMs: ms(m.Duration), Chapters: list}
 	if info, err := os.Stat(m.Source); err == nil {
 		d.SourceSize = info.Size()
 	}
@@ -424,26 +452,129 @@ func writeDetectedChapters(book store.Book, m audio.Manifest, docs []transcript.
 	return d, fsutil.WriteFileAtomic(DetectedChaptersPath(book.WorkDir), append(out, '\n'), 0o644)
 }
 
-// groupByPosition is the player's list: the detected chapters grouped by the
-// LOGICAL position classifyEdgeChapters gives them (the classification the later
-// stages make from the same transcripts, computed here from the synthesized ones in
-// memory, docs, through the same edgeChapters), so that entry k IS logical position
-// k (the server and the player gate spoilers by the list's ordinal). Front matter and excluded leading files join the
-// first story chapter; an interior unnumbered section joins the chapter whose
-// number it takes; excluded trailing files (credits) join the entry before them;
-// end matter past the last numbered chapter stays separate, after it. A merged
-// entry's titles are joined with " / ".
-func groupByPosition(m audio.Manifest, docs []transcript.Transcript) []DetectedChapter {
+// detectedPositions is positions_detected.json: a detected manifest's
+// classification (see detectedPositionsName), with the manifest it was made from.
+type detectedPositions struct {
+	ManifestSHA    string             `json:"manifest_sha"`
+	Classification edgeClassification `json:"classification"`
+}
+
+// loadDetectedPositions is the classification chapters_detected.json was grouped by,
+// when it was made from the manifest fingerprinted fp.
+func loadDetectedPositions(workDir, fp string) (edgeClassification, bool) {
+	raw, err := os.ReadFile(filepath.Join(workDir, detectedPositionsName)) //nolint:gosec // the book's work dir
+	if err != nil {
+		return edgeClassification{}, false
+	}
+	var p detectedPositions
+	if json.Unmarshal(raw, &p) != nil || p.ManifestSHA != fp {
+		return edgeClassification{}, false
+	}
+	return p.Classification, true
+}
+
+// groupByPosition is the player's list for the detected manifest m (see
+// detectedClassification).
+func groupByPosition(m audio.Manifest, docs []transcript.Transcript, said []int) []DetectedChapter {
+	_, list := detectedClassification(m, docs, said)
+	return list
+}
+
+// detectedClassification is the detected manifest m's classification and the
+// player's list grouped by it, from its chapters' synthesized transcripts in memory
+// (docs) through the same edgeChapters probe-window rule classifyBookEdges uses.
+// The list's entry k IS logical position k (the server and the player gate spoilers
+// by the list's ordinal), and the classification is made so (rankPositions): the
+// later stages take it for the book (positions_detected.json) rather than classify
+// it again.
+//
+// said is the number each chapter's "chapter" heading says (0 for none; nil when
+// not known). The classifier reads a chapter's number from its opening only when it
+// is announced bare ("Chapter Four."), and a numbered chapter it can't read ("Chapter
+// Four, The Storm.") would join the next one's entry as an unnumbered section; the
+// detector read the heading whatever follows it, so that chapter opens with its
+// number announced.
+func detectedClassification(m audio.Manifest, docs []transcript.Transcript, said []int) (edgeClassification, []DetectedChapter) {
 	text := make(map[int]string, len(m.Chapters))
+	number := make(map[int]int, len(m.Chapters))
 	for i, ch := range m.Chapters {
 		text[ch.Chapter] = transcript.PlainText(docs[i])
+		if i < len(said) {
+			number[ch.Chapter] = said[i]
+		}
 	}
 	edge, _ := edgeChapters(m.Chapters, func(ch audio.Chapter) (string, error) {
+		if n := number[ch.Chapter]; n > 0 {
+			return fmt.Sprintf("Chapter %d.", n), nil
+		}
 		return clipBytes(text[ch.Chapter], chapterOpeningBytes), nil
 	}, func(ch audio.Chapter) (int, bool, error) {
 		return len(strings.Fields(text[ch.Chapter])), true, nil
 	})
 	class := classifyEdgeChapters(edge)
+	list := groupEntries(m, class)
+	return rankPositions(class, list), list
+}
+
+// rankPositions makes class's positions the ordinals of the list grouped by it
+// (groupEntries). The list opens an entry at each position above the last, so its
+// ordinals count the positions; where the narration's numbering skips one (a heading
+// not heard, an announcement that doesn't read as a number) entry k would otherwise
+// hold position k+1 from there on, every later reveal and recap opening a chapter
+// late and the last never. Front matter keeps position 0, and a file with no position
+// (an excluded edge, end matter) none. A classification by file number (no narrated
+// numbering) counts the list already and is returned as it is, as is one whose
+// positions are the ordinals.
+func rankPositions(class edgeClassification, list []DetectedChapter) edgeClassification {
+	if len(class.Positions) == 0 {
+		return class
+	}
+	positions := make(map[int]int, len(class.Positions))
+	logical, changed := 0, false
+	for k, e := range list {
+		for _, ch := range e.Parts {
+			pos, ok := class.Positions[ch]
+			if !ok {
+				continue
+			}
+			if pos > 0 {
+				changed = changed || pos != k+1
+				pos = k + 1
+				logical = max(logical, pos)
+			}
+			positions[ch] = pos
+		}
+	}
+	if !changed {
+		return class
+	}
+	out := class
+	out.Positions, out.LogicalCount = positions, logical
+	for _, e := range list {
+		found := false
+		for _, ch := range e.Parts {
+			if pos := positions[ch]; pos > 0 {
+				out.ChapterOffset, found = ch-pos, true
+				break
+			}
+		}
+		if found {
+			break
+		}
+	}
+	out.EdgeNote = composeEdgeNote(out.LogicalCount, out.ExcludedLeading, out.ExcludedTrailing, out.FrontMatter, out.EndMatter)
+	out.ChunkNote = composeChunkNote(out.ExcludedLeading, out.ExcludedTrailing)
+	out.AssembleNote = composeAssembleNote(out)
+	return out
+}
+
+// groupEntries is the player's list: the detected chapters grouped by the LOGICAL
+// position class gives them. Front matter and excluded leading files join the first
+// story chapter; an interior unnumbered section joins the chapter whose number it
+// takes; excluded trailing files (credits) join the entry before them; end matter
+// past the last numbered chapter stays separate, after it. A merged entry's titles
+// are joined with " / ".
+func groupEntries(m audio.Manifest, class edgeClassification) []DetectedChapter {
 	set := func(chs []int) map[int]bool {
 		out := make(map[int]bool, len(chs))
 		for _, c := range chs {
@@ -522,11 +653,14 @@ type timedWord struct {
 	p          *float64
 }
 
-// timedSegment is one transcript segment on the whole-book timeline.
+// timedSegment is one transcript segment on the whole-book timeline. synthetic says
+// its one word is its text, made for the detection (whisper gave it no words): the
+// synthesized raw keeps it wordless, as whisper wrote it.
 type timedSegment struct {
 	start, end float64
 	text       string
 	words      []timedWord
+	synthetic  bool
 }
 
 // windowTimeline is the book's transcribed segments on the whole-book timeline, in
@@ -539,8 +673,12 @@ type windowTimeline struct {
 // loadWindowTimeline reads each window's raw transcript (read) and puts its
 // segments on the whole-book timeline (the window's start + whisper's times).
 // whisper.cpp's sub-word tokens are glued into words (a token not starting with a
-// space continues the word before it; mlx-whisper's words all start with one), and a
-// segment without words contributes its text as one word spanning it.
+// space continues the word before it, its probability the lowest of them;
+// mlx-whisper's words all start with one), and a segment without words contributes
+// its text as one word spanning it. Nothing is timed past the window's own audio: a
+// segment or word whisper put there (a hallucination after the window's last words)
+// is dropped, and an end there is clamped, so a window's words never interleave with
+// the next window's (a stray "!" between "Day" and "85." loses the heading).
 func loadWindowTimeline(windows []audio.Chapter, read func(audio.Chapter) ([]byte, error)) (windowTimeline, error) {
 	var tl windowTimeline
 	for _, w := range windows {
@@ -555,18 +693,39 @@ func loadWindowTimeline(windows []audio.Chapter, read func(audio.Chapter) ([]byt
 		if tl.language == "" {
 			tl.language = tr.Language
 		}
+		limit := w.Duration
+		if limit <= 0 {
+			limit = w.End - w.Start
+		}
+		within := func(t float64) bool { return limit <= 0 || t < limit }
+		clamp := func(t float64) float64 {
+			if limit > 0 && t > limit {
+				return limit
+			}
+			return t
+		}
 		for _, s := range tr.Segments {
-			seg := timedSegment{start: w.Start + s.Start, end: w.Start + s.End, text: s.Text}
+			if !within(s.Start) {
+				continue
+			}
+			seg := timedSegment{start: w.Start + s.Start, end: w.Start + clamp(s.End), text: s.Text}
 			for _, wd := range s.Words {
-				if n := len(seg.words); n > 0 && !strings.HasPrefix(wd.W, " ") {
-					seg.words[n-1].text += wd.W
-					seg.words[n-1].end = w.Start + wd.End
+				if !within(wd.Start) {
 					continue
 				}
-				seg.words = append(seg.words, timedWord{text: wd.W, start: w.Start + wd.Start, end: w.Start + wd.End, p: wd.P})
+				if n := len(seg.words); n > 0 && !strings.HasPrefix(wd.W, " ") {
+					last := &seg.words[n-1]
+					last.text += wd.W
+					last.end = w.Start + clamp(wd.End)
+					if wd.P != nil && (last.p == nil || *wd.P < *last.p) {
+						last.p = wd.P
+					}
+					continue
+				}
+				seg.words = append(seg.words, timedWord{text: wd.W, start: w.Start + wd.Start, end: w.Start + clamp(wd.End), p: wd.P})
 			}
 			if len(seg.words) == 0 && strings.TrimSpace(s.Text) != "" {
-				seg.words = []timedWord{{text: s.Text, start: seg.start, end: seg.end}}
+				seg.words, seg.synthetic = []timedWord{{text: s.Text, start: seg.start, end: seg.end}}, true
 			}
 			tl.segments = append(tl.segments, seg)
 		}
@@ -606,7 +765,7 @@ func (tl windowTimeline) split(chs []audio.Chapter) []transcript.Transcript {
 	}
 	rel := func(c int, t float64) float64 { return math.Max(0, t-chs[c].Start) }
 	for _, s := range tl.segments {
-		if len(s.words) == 0 {
+		if len(s.words) == 0 || s.synthetic {
 			c := at(s.start)
 			add(c, transcript.Segment{Start: rel(c, s.start), End: rel(c, s.end), Text: s.text, Words: []transcript.Word{}})
 			continue

@@ -11,7 +11,8 @@ import (
 
 // TestChaptersGoal: a chapters-only book keeps its goal, is left out of the
 // estimates' finished books, and ContinueChapters turns a done one (only a done one)
-// into a whole-pipeline book at splitting with the new job's mode and work.
+// into a whole-pipeline book at splitting with the new job's identity, mode and
+// work, mapped to the new job in the same transaction.
 func TestChaptersGoal(t *testing.T) {
 	db := open(t)
 	ctx := context.Background()
@@ -22,9 +23,14 @@ func TestChaptersGoal(t *testing.T) {
 	if got, _ := db.GetBook(ctx, b.ID); got.Goal != state.GoalChapters {
 		t.Fatalf("read back goal %q", got.Goal)
 	}
-	// Denied: a chapters book that isn't done yet doesn't continue.
-	if err := db.ContinueChapters(ctx, b.ID, "local", "w-1"); !errors.Is(err, ErrNotContinuable) {
+	job := GenerateBook{ServerJobID: 7, LibraryID: 1, RelPath: "A/book.mp3"}
+	// Denied: a chapters book that isn't done yet doesn't continue, and no mapping
+	// is made for it.
+	if err := db.ContinueChapters(ctx, b.ID, NewBook{ContribMode: "local", WorkID: "w-1"}, job); !errors.Is(err, ErrNotContinuable) {
 		t.Fatalf("continue while queued = %v, want ErrNotContinuable", err)
+	}
+	if _, err := db.GetGenerateBook(ctx, 7); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("a refused continue mapped its job: %v", err)
 	}
 	if err := db.SetBookState(ctx, b.ID, "done", "", "", ""); err != nil {
 		t.Fatal(err)
@@ -32,18 +38,29 @@ func TestChaptersGoal(t *testing.T) {
 	if got, err := db.FinishedBooks(ctx); err != nil || len(got) != 0 {
 		t.Fatalf("finished = %+v, %v; a chapters book has no characters to count", got, err)
 	}
-	if err := db.ContinueChapters(ctx, b.ID, "issue", "w-1"); err != nil {
+	// The book was matched since the chapters job made it: the continue takes the
+	// new job's identity.
+	nb := NewBook{Title: "The Book", Authors: []string{"An Author"}, Narrators: []string{"A Reader"}, Series: "The Saga",
+		SeriesPos: "2", ASIN: "B0MATCHED", ISBN: "978", IdentitySources: map[string]string{"title": "server"},
+		ContribMode: "issue", WorkID: "w-1"}
+	if err := db.ContinueChapters(ctx, b.ID, nb, job); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := db.GetBook(ctx, b.ID)
-	if got.Goal != "" || got.State != "splitting" || got.Status != "" || got.ContribMode != "issue" || got.WorkID != "w-1" {
+	if got.Goal != "" || got.State != "splitting" || got.Status != "" || got.ContribMode != "issue" || got.WorkID != "w-1" ||
+		got.Title != "The Book" || got.Series != "The Saga" || got.SeriesPos != "2" || got.ASIN != "B0MATCHED" ||
+		got.ISBN != "978" || len(got.Authors) != 1 || got.Authors[0] != "An Author" || got.WorkDir != "/w/a" ||
+		got.SourcePath != "/lib/A/book.mp3" {
 		t.Fatalf("continued = %+v", got)
+	}
+	if g, err := db.GetGenerateBook(ctx, 7); err != nil || g.BookID == nil || *g.BookID != b.ID || g.EndedAt != "" {
+		t.Fatalf("the job's mapping = %+v, %v", g, err)
 	}
 	// Denied: a whole-pipeline book (this one now) isn't a chapters book.
 	if err := db.SetBookState(ctx, b.ID, "done", "", "", ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.ContinueChapters(ctx, b.ID, "local", ""); !errors.Is(err, ErrNotContinuable) {
+	if err := db.ContinueChapters(ctx, b.ID, NewBook{ContribMode: "local"}, GenerateBook{}); !errors.Is(err, ErrNotContinuable) {
 		t.Fatalf("continue a whole book = %v, want ErrNotContinuable", err)
 	}
 	if got, err := db.FinishedBooks(ctx); err != nil || len(got) != 1 {
@@ -51,23 +68,65 @@ func TestChaptersGoal(t *testing.T) {
 	}
 }
 
-func TestGenerateBookSwept(t *testing.T) {
+// A chapters book the retention swept has no transcripts to continue on: it is not
+// continuable, and its row is left as it is.
+func TestContinueChaptersRefusesASweptBook(t *testing.T) {
 	db := open(t)
 	ctx := context.Background()
-	b, err := db.CreateBook(ctx, NewBook{SourcePath: "/lib/B", WorkDir: "/w/b", Title: "B"})
+	b, err := db.CreateBook(ctx, NewBook{SourcePath: "/lib/B", WorkDir: "/w/b", Title: "B", Goal: state.GoalChapters})
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetBookState(ctx, b.ID, "done", "", "", ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.PutGenerateBook(ctx, GenerateBook{ServerJobID: 3, BookID: &b.ID, LibraryID: 1, RelPath: "B"}); err != nil {
 		t.Fatal(err)
 	}
-	if swept, err := db.GenerateBookSwept(ctx, b.ID); err != nil || swept {
-		t.Fatalf("swept = %v, %v", swept, err)
-	}
 	if err := db.MarkGenerateBookSwept(ctx, b.ID, time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	if swept, err := db.GenerateBookSwept(ctx, b.ID); err != nil || !swept {
-		t.Fatalf("swept = %v, %v", swept, err)
+	if err := db.ContinueChapters(ctx, b.ID, NewBook{}, GenerateBook{ServerJobID: 4, LibraryID: 1, RelPath: "B"}); !errors.Is(err, ErrNotContinuable) {
+		t.Fatalf("continue a swept book = %v, want ErrNotContinuable", err)
+	}
+	if got, _ := db.GetBook(ctx, b.ID); got.State != "done" || got.Goal != state.GoalChapters {
+		t.Fatalf("the swept book was moved: %+v", got)
+	}
+}
+
+// A book a generate job continued has two jobs' mappings; its retention counts from
+// the later job's end, never the earlier chapters job's.
+func TestUnsweptCountsFromTheLatestJob(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	b, err := db.CreateBook(ctx, NewBook{SourcePath: "/lib/C", WorkDir: "/w/c", Title: "C"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	chaptersEnd := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	generateEnd := chaptersEnd.Add(34 * 24 * time.Hour)
+	for _, g := range []GenerateBook{{ServerJobID: 100, BookID: &b.ID, LibraryID: 1, RelPath: "C"},
+		{ServerJobID: 200, BookID: &b.ID, LibraryID: 1, RelPath: "C"}} {
+		if err := db.PutGenerateBook(ctx, g); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.EndGenerateBook(ctx, 100, chaptersEnd); err != nil {
+		t.Fatal(err)
+	}
+	// Denied while the later job is still open.
+	if got, _ := db.UnsweptGenerateBooks(ctx, chaptersEnd.Add(time.Hour)); len(got) != 0 {
+		t.Fatalf("a book a job still follows was listed: %+v", got)
+	}
+	if err := db.EndGenerateBook(ctx, 200, generateEnd); err != nil {
+		t.Fatal(err)
+	}
+	// Denied: a day after the generate job ended, with 30 days' retention.
+	if got, _ := db.UnsweptGenerateBooks(ctx, generateEnd.Add(24*time.Hour).Add(-30*24*time.Hour)); len(got) != 0 {
+		t.Fatalf("listed by the earlier job's end: %+v", got)
+	}
+	// Allowed: once the later job's end is past the cutoff.
+	if got, _ := db.UnsweptGenerateBooks(ctx, generateEnd); len(got) != 1 || got[0].ID != b.ID {
+		t.Fatalf("listed = %+v, want the book", got)
 	}
 }

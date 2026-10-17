@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // minFlacBytes is the size below which an existing chapter FLAC is treated as
@@ -326,7 +327,12 @@ func CutClip(ctx context.Context, ffmpegPath, srcFlac, dstFlac string, startSec,
 
 // flacEncodeTail is the shared ffmpeg output selection: mono/16 kHz FLAC with the
 // muxer forced (the temp .part extension gives ffmpeg no extension to infer from).
-var flacEncodeTail = []string{"-map", "0:a:0", "-vn", "-ac", "1", "-ar", "16000", "-c:a", "flac", "-f", "flac"}
+var flacEncodeTail = append([]string{"-map", "0:a:0", "-vn"}, flacOutputArgs...)
+
+// flacOutputArgs is the output format every chapter, clip and window FLAC shares:
+// mono/16 kHz FLAC, the muxer forced. (A chapter joined from window FLACs maps its
+// concat filter's output instead of flacEncodeTail's first audio stream.)
+var flacOutputArgs = []string{"-ac", "1", "-ar", "16000", "-c:a", "flac", "-f", "flac"}
 
 // encodeFLAC runs ffmpeg with the given input args (input selection + optional
 // -ss/-t seeking) and encodes to out as a mono/16 kHz FLAC via a temp file + atomic
@@ -366,7 +372,11 @@ func encode(ctx context.Context, ffmpegPath string, inputArgs, tail []string, ou
 		_ = os.Remove(tmp)
 		msg := strings.TrimSpace(stderr.String())
 		if len(msg) > maxEncodeLog {
-			msg = "..." + msg[len(msg)-maxEncodeLog:]
+			cut := len(msg) - maxEncodeLog
+			for cut < len(msg) && !utf8.RuneStart(msg[cut]) {
+				cut++ // never inside a character (the log carries tags and paths)
+			}
+			msg = "..." + msg[cut:]
 		}
 		return fmt.Errorf("ffmpeg %s: %w: %s", label, err, msg)
 	}

@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -161,7 +162,14 @@ func (e *Executor) spellingResearch(ctx context.Context, book store.Book, r sche
 	if err := st.WriteFile(spelling.CandidatesFile, candJSON); err != nil {
 		return scheduler.StageResult{}, fmt.Errorf("spelling_research: stage %s: %w", spelling.CandidatesFile, err)
 	}
-	for _, name := range []string{audio.ManifestName, markerTitlesFile, chunkPlanFile} {
+	manifest, err := stagedManifest(book.WorkDir)
+	if err == nil {
+		err = st.WriteFile(audio.ManifestName, manifest)
+	}
+	if err != nil {
+		return scheduler.StageResult{}, fmt.Errorf("spelling_research: stage %s: %w", audio.ManifestName, err)
+	}
+	for _, name := range []string{markerTitlesFile, chunkPlanFile} {
 		if err := st.CopyFile(filepath.Join(book.WorkDir, name), name); err != nil {
 			return scheduler.StageResult{}, fmt.Errorf("spelling_research: stage %s: %w", name, err)
 		}
@@ -272,7 +280,8 @@ func (e *Executor) spellingResearch(ctx context.Context, book store.Book, r sche
 // evidence and an attestation source (referenceSources, the dry-run corpus,
 // allowedReferenceFile) they would make a misheard name attest itself. Its file is
 // written empty (the publisher gave no titles), so the staging and the prompt that
-// name it stay as they are.
+// name it stay as they are; the manifest staged beside it goes without those titles
+// (stagedManifest).
 func ensureMarkerTitles(workDir string) error {
 	p := filepath.Join(workDir, markerTitlesFile)
 	m, err := audio.ReadManifest(workDir)
@@ -544,6 +553,30 @@ func evidencePriority(hasGlossary, hasCarryover bool) string {
 		lines[i] = fmt.Sprintf("%d. %s", i+1, it)
 	}
 	return strings.Join(lines, "\n")
+}
+
+// stagedManifest is manifest.json as the spelling agent gets it: the file itself, but
+// a detected manifest's (Phase 1d) chapter titles were heard in this very transcript,
+// misheard names and all, so it goes with them blanked. The logical map is all the
+// agent needs from it, and a heard title must never read to it as a chapter-marker
+// label, the spelling evidence it ranks just below the series glossary.
+func stagedManifest(workDir string) ([]byte, error) {
+	raw, err := os.ReadFile(filepath.Join(workDir, audio.ManifestName)) //nolint:gosec // the book's work dir
+	if err != nil {
+		return nil, err
+	}
+	var m audio.Manifest
+	if err := json.Unmarshal(raw, &m); err != nil || !m.Detected {
+		return raw, nil
+	}
+	for i := range m.Chapters {
+		m.Chapters[i].Title, m.Chapters[i].MarkerTitle = "", ""
+	}
+	out, err := json.MarshalIndent(m, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	return append(out, '\n'), nil
 }
 
 // referenceSources assembles the vocabularies BuildReferenceMatches compares the

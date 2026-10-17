@@ -57,6 +57,11 @@ type Chapter struct {
 	Heading   string  `json:"heading,omitempty"`
 	HeadingAt float64 `json:"heading_at,omitempty"`
 	Pause     float64 `json:"pause,omitempty"`
+	// Number is the number its "chapter" heading says, whatever follows it
+	// ("Chapter Four, The Storm" is 4; of a merged pair the chapter heading's: "Part
+	// One. Chapter Three" is 3), 0 for any other chapter (a part, a day or a stave
+	// numbers something else).
+	Number int `json:"number,omitempty"`
 }
 
 // Result is a detection: the chapters (contiguous from 0 to the duration) and the
@@ -135,7 +140,7 @@ type candidate struct {
 // Detect finds the chapters in words (sorted by start) with the silences heard
 // and the book's duration.
 func Detect(words []Word, silences []Silence, duration float64) Result {
-	sil := slices.Clone(silences)
+	sil := joinSilences(silences)
 	sort.Slice(sil, func(i, j int) bool { return sil[i].End < sil[j].End })
 	cands := candidates(words, sil)
 	runs := numberedRuns(cands)
@@ -144,6 +149,28 @@ func Detect(words []Word, silences []Silence, duration float64) Result {
 	res := Result{Chapters: chaptersFrom(words, heads, duration), Headings: len(heads)}
 	res.Confident, res.Reason = verdict(res.Chapters, len(heads), runs, duration)
 	return res
+}
+
+// silenceJoin is how close two silences may lie and still be one: silences heard
+// apart that touch (a window cut in the middle of a pause leaves one half at each
+// window's edge, a little apart or overlapping by the decoders' rounding).
+const silenceJoin = 0.05
+
+// joinSilences is silences (a copy) with those that touch or overlap joined into
+// one, in start order, so the pause test hears a pause split at a window cut whole,
+// as one listen over the book would.
+func joinSilences(silences []Silence) []Silence {
+	sil := slices.Clone(silences)
+	sort.Slice(sil, func(i, j int) bool { return sil[i].Start < sil[j].Start })
+	out := sil[:0]
+	for _, s := range sil {
+		if n := len(out); n > 0 && s.Start-out[n-1].End <= silenceJoin {
+			out[n-1].End = math.Max(out[n-1].End, s.End)
+			continue
+		}
+		out = append(out, s)
+	}
+	return out
 }
 
 // norm is a word as the vocabulary compares it: lower case, punctuation trimmed
@@ -204,9 +231,9 @@ func pauseBefore(words []Word, sil []Silence, i int) float64 {
 }
 
 // numberAt reads the number that starts at words[i]: digits 1-999, an ordinal
-// first..tenth, or a spelled-out cardinal of up to three words ("twenty one",
-// "one hundred four"), the longest that parses. It returns the number and how many
-// words it took, or 0, 0.
+// first..tenth, or a spelled-out cardinal of up to five words ("twenty one",
+// "one hundred four", "one hundred and twenty one"), the longest that parses as
+// one. It returns the number and how many words it took, or 0, 0.
 func numberAt(words []Word, i int) (n, used int) {
 	if i >= len(words) {
 		return 0, 0
@@ -225,7 +252,12 @@ func numberAt(words []Word, i int) (n, used int) {
 	if v, ok := ordinals[first]; ok {
 		return v, 1
 	}
-	for size := min(3, len(words)-i); size >= 1; size-- {
+	for size := min(5, len(words)-i); size >= 1; size-- {
+		// The number ends where its phrase does: whisper keeps the period on "One." in
+		// "Chapter One. Two days later", which is chapter 1, not 3.
+		if size > 1 && endsPhrase(words[i:i+size-1]) {
+			continue
+		}
 		toks := make([]string, size)
 		for k := range size {
 			toks[k] = norm(words[i+k].Text)
@@ -234,11 +266,63 @@ func numberAt(words []Word, i int) (n, used int) {
 		if toks[size-1] == "and" {
 			continue
 		}
+		// The marker parser adds number words up ("one two" is 3): several words are
+		// one number only as one English cardinal.
+		if size > 1 && !cardinal(toks) {
+			continue
+		}
 		if v, ok := audio.ParseNumberWords(strings.Join(toks, " ")); ok && v >= 1 && v <= maxNumber {
 			return v, size
 		}
 	}
 	return 0, 0
+}
+
+// endsPhrase reports whether any of ws ends in punctuation (a period, a comma, a
+// colon, ...; a hyphen joins): a spoken number never runs on past it.
+func endsPhrase(ws []Word) bool {
+	for _, w := range ws {
+		r, _ := utf8.DecodeLastRuneInString(strings.TrimSpace(w.Text))
+		if r != utf8.RuneError && !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '-' {
+			return true
+		}
+	}
+	return false
+}
+
+// cardinal reports whether toks (two to five normalized number words) read as ONE
+// English cardinal: one under a hundred ("twenty one"), or a unit and "hundred"
+// with one under a hundred after it, an "and" allowed between ("one hundred", "one
+// hundred four", "one hundred and twenty one"); never numbers side by side ("one
+// two", "seven one hundred"), which the marker parser would add up.
+func cardinal(toks []string) bool {
+	if len(toks) >= 2 && toks[1] == "hundred" && between(toks[0], 1, 9) {
+		rest := toks[2:]
+		if len(rest) > 1 && rest[0] == "and" {
+			rest = rest[1:]
+		}
+		return len(rest) == 0 || underHundred(rest)
+	}
+	return underHundred(toks)
+}
+
+// underHundred reports whether toks read as one number from 1 to 99: one word
+// ("seven", "twenty-one") or tens and a unit ("twenty one").
+func underHundred(toks []string) bool {
+	switch len(toks) {
+	case 1:
+		return between(toks[0], 1, 99)
+	case 2:
+		tens, _ := audio.ParseNumberWords(toks[0])
+		return tens >= 20 && tens <= 90 && tens%10 == 0 && between(toks[1], 1, 9)
+	}
+	return false
+}
+
+// between reports whether the number word s is within [lo, hi].
+func between(s string, lo, hi int) bool {
+	v, ok := audio.ParseNumberWords(s)
+	return ok && v >= lo && v <= hi
 }
 
 // numberRunsIntoOf reports whether the number ending at words[last] runs straight
@@ -314,7 +398,14 @@ func keepHeadings(cands []candidate, runs map[string][]candidate) []candidate {
 	for _, run := range runs {
 		kept = append(kept, run...)
 	}
-	sort.Slice(kept, func(i, j int) bool { return kept[i].t < kept[j].t })
+	// In transcript order: words that start at the same time (whisper.cpp's
+	// millisecond offsets) by their place, never the runs map's order.
+	sort.Slice(kept, func(i, j int) bool {
+		if kept[i].t != kept[j].t {
+			return kept[i].t < kept[j].t
+		}
+		return kept[i].idx < kept[j].idx
+	})
 	return kept
 }
 
@@ -324,6 +415,7 @@ type heading struct {
 	title   string
 	heard   string
 	spanEnd int // the last word index the title covers
+	chapter int // the number of its "chapter" heading (see Chapter.Number)
 }
 
 // mergeHeadings folds a heading into the one before it when it starts within
@@ -334,6 +426,10 @@ func mergeHeadings(words []Word, kept []candidate) []heading {
 	for _, c := range kept {
 		title, end := titleOf(words, c)
 		heard := spokenText(words[c.idx : c.idx+c.used+1])
+		chapter := 0
+		if c.kind == "chapter" {
+			chapter = c.num
+		}
 		if n := len(out); n > 0 && c.t-out[n-1].t < mergeWindow {
 			last := &out[n-1]
 			if c.idx > last.spanEnd {
@@ -341,9 +437,12 @@ func mergeHeadings(words []Word, kept []candidate) []heading {
 				last.spanEnd = end
 			}
 			last.heard += " " + heard
+			if last.chapter == 0 {
+				last.chapter = chapter
+			}
 			continue
 		}
-		out = append(out, heading{candidate: c, title: title, heard: heard, spanEnd: end})
+		out = append(out, heading{candidate: c, title: title, heard: heard, spanEnd: end, chapter: chapter})
 	}
 	return out
 }
@@ -428,7 +527,7 @@ func chaptersFrom(words []Word, heads []heading, duration float64) []Chapter {
 			continue // a boundary must move forward (whisper's times are not strictly increasing)
 		}
 		chs = append(chs, Chapter{Title: h.title, Start: start, Spoken: true, Heading: h.heard, HeadingAt: h.t,
-			Pause: math.Round(h.pause*100) / 100})
+			Pause: math.Round(h.pause*100) / 100, Number: h.chapter})
 	}
 	switch {
 	case len(chs) == 0:

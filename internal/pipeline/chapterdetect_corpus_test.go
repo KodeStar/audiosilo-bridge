@@ -121,7 +121,7 @@ func TestChapterDetectSpikeCorpus(t *testing.T) {
 				med, top = errs[len(errs)/2], errs[len(errs)-1]
 			}
 			dm := detectedManifest(audio.Manifest{Duration: duration}, res.Chapters)
-			entries := groupByPosition(dm, tl.split(dm.Chapters))
+			entries := groupByPosition(dm, tl.split(dm.Chapters), headingNumbers(res.Chapters))
 			t.Logf("%s: %.1f h, %d chapters (%d headings), %d story boundaries found, error median %.2f s max %.2f s; "+
 				"spoken headings the reference lacks: %v; %d list entries", book, duration/3600, len(res.Chapters),
 				res.Headings, len(errs), med, top, invented, len(entries))

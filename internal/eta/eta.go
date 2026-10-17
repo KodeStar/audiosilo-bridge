@@ -269,10 +269,12 @@ func remainingSegments(b Book, rates map[string]float64) []segment {
 		return nil
 	}
 	var segs []segment
-	// The remaining path is optimistic: state.MainlineNext takes the happy branch at
-	// every fork (skipping the conditional stages and routing the off-mainline stages
-	// back onto the mainline), so following it from any start is finite - every fork
-	// moves toward done and no off-mainline stage is re-entered.
+	// The remaining path is optimistic: state.PathNext takes the happy branch at every
+	// fork (state.MainlineNext: skipping the conditional stages and routing the
+	// off-mainline stages back onto the mainline), except that a chapters-only book
+	// (Goal) goes from asr through chapter_detecting to done, so following it from any
+	// start is finite - every fork moves toward done and no off-mainline stage is
+	// re-entered.
 	for cur := b.State; cur != "" && !state.IsTerminal(cur); cur = state.PathNext(b.Kind, b.Goal, cur) {
 		if state.IsWaypoint(cur) {
 			continue // no lane, no cost

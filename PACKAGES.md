@@ -182,12 +182,17 @@ internal/
             WINDOWS manifest (StyleWindows): windows of about 25 min (target 1500 s,
             each cut at the middle of the longest silence whose middle is within
             120 s of the target, one 240 s silencedetect probe per cut, time-bounded;
-            no silence or no ffmpeg cuts at the target; a file under 1800 s is one
-            window; a cut that would leave under 300 s isn't made). Inspect takes
+            no silence or no ffmpeg cuts at the target, and a probe that fails (its
+            bound ran out on a wedged mount) ends the probing, the rest at their
+            targets (windowCuts); a file under 1800 s is one window; a cut that
+            would leave under 300 s isn't made). Inspect takes
             ffmpegPath for the probes; its stats are Usable, so the book goes
             straight to splitting (the manifest's Style says windows; no stats flag).
             Several markers in an unknown dialect are still a vocabulary gap
-            (markers_normalizing). Split cuts a windows manifest like a markers one
+            (markers_normalizing); ReparseMarkerManifest recovers a book an older
+            parser parked there with no chapters and no usable markers into windows
+            (cut at the targets: the reparse reads no audio). Split cuts a windows
+            manifest like a markers one
             (staging: any style but files), and HEARS ITS SILENCES IN THE SAME DECODE
             (encode's listen: -af aformat 16 kHz mono + silencedetect, info-level log
             parsed before the FLAC is published): chNNN.silences.json beside each
@@ -201,7 +206,9 @@ internal/
             a chapter whose window is gone left (counted) for Split from the source.
             DetectSilences runs silencedetect (-40dB, 0.4 s) over a span of a file and
             returns silences on the FILE's timeline (ffmpeg reports them relative to
-            the seek). Manifest.Detected marks the markers-style manifest
+            the seek; an ffmpeg before 7 prints a tiny time with an exponent, which the
+            parser takes). Every chapter, clip and window FLAC shares flacOutputArgs.
+            Manifest.Detected marks the markers-style manifest
             chapter_detecting writes; WindowsDir ("windows") is where it moves the
             window layer. ParseNumberWords exports the marker parser's number words
             (chapterdetect reads spoken headings with it).
@@ -231,14 +238,21 @@ internal/
   chapterdetect/ Phase 1d: a chapterless book's chapters from its narration. PURE (no
             I/O, no clock), table-tested. Detect(words on the whole-book timeline,
             silences, duration) -> chapters (contiguous 0..duration, each with spoken,
-            heading, heading_at, pause) + a confidence verdict. The spike's rules:
+            heading, heading_at, pause, and number: what its "chapter" heading says,
+            of a merged pair the chapter one's, else 0) + a confidence verdict. The
+            spike's rules:
             a heading word (chapter/part/book/stave/day/volume/episode + a number in
-            the next 1-3 words: digits 1-999, ordinals first..tenth, audio's number
-            words; or prologue/epilogue/interlude/preface/introduction/afterword/
+            the next 1-5 words: digits 1-999, ordinals first..tenth, audio's number
+            words, never past a word that ends in punctuation ("Chapter One. Two days
+            later" is 1) and several words only as one English cardinal ("one hundred
+            and twenty one" is 121, "one two" no number: the marker parser would add
+            them up); or prologue/epilogue/interlude/preface/introduction/afterword/
             foreword/intermission alone; never "dedication") after a pause >= 1.5 s
             (the gap from the word before, or the longest silence ending within
-            [t-3, t+0.6]; the book's start counts); a number that runs straight on
-            into "of" is no heading ("Book 10 of The Messenger" in Cosmic Ride's
+            [t-3, t+0.6], silences that touch within 0.05 s joined first: a window
+            cut splits a pause in two; the book's start counts); headings at the
+            same time in transcript order; a number that runs straight on into
+            "of" is no heading ("Book 10 of The Messenger" in Cosmic Ride's
             credits, the spike's one invented boundary; "Chapter 3. Of Mice and Men"
             after a break still is); per numbered word the longest strictly
             increasing run (numbers may skip); headings within 6 s merged ("Epilogue.
@@ -817,7 +831,10 @@ internal/
             its StageResult says Windowed (the manifest is a windows manifest). It
             loads the window raws onto the whole-book timeline (loadWindowTimeline:
             window start + whisper's times, whisper.cpp sub-word tokens glued into
-            words, a wordless segment as one word), takes each window's silences
+            words at their lowest probability, a wordless segment as one word for
+            the detection only (its synthesized raw stays wordless), nothing timed
+            past the window's own audio: a hallucination there would interleave with
+            the next window's words), takes each window's silences
             (audio.WindowSilences: the ones split heard and kept beside the FLAC,
             else one bounded silencedetect over it, kept too, so a Retry decodes
             nothing) and runs chapterdetect.Detect. Not confident: parks
@@ -837,24 +854,44 @@ internal/
             FROM THE WINDOW FLACs (audio.CutFromWindows: local, decoded already; the
             source split only for a chapter whose window is gone, a crash after they
             went, with a note), windows/chapters/ removed, and chapters_detected.json
-            (DetectedChapters: manifest_sha, source_size, duration_ms, the entries).
-            groupByPosition builds the entries with classifyEdgeChapters over the
-            synthesized transcripts in memory through edgeChapters, the probe-window
-            rule classifyBookEdges uses too, so entry k IS logical position k: front
-            matter and an intro join the first story chapter, an interior unnumbered
-            section the chapter whose number it takes, credits the entry before them,
-            end matter stays its own ("Prologue / Chapter 1", bounded by
-            chapterdetect.MaxTitleBytes). DetectedChaptersPath / ReadDetectedChapters
-            / CurrentFor (manifest fingerprint and source size) / DetectedStamp (local
-            stats, so a poller re-reads only a changed list) are generate's. inspect
-            fails a goal-chapters book whose manifest isn't windows with
-            ErrHasMarkerChapters / ErrHasFileChapters (sentences the console shows as
-            they are; generate knows them by their text, the engine keeping no
-            failure code). marker_titles.txt only ever holds the publisher's titles:
-            ensureMarkerTitles writes a Detected manifest's EMPTY (titles heard in
-            this transcript would make a misheard name attest itself), so
-            referenceSources, the dry-run corpus and allowedReferenceFile never see
-            them, and the staging and prompt that name the file stay as they are.
+            (DetectedChapters: manifest_sha, source_size (0: it couldn't be looked
+            at, never compared), duration_ms, the entries), after the classification
+            it was grouped by (positions_detected.json, with the manifest's
+            fingerprint). detectedClassification classifies with classifyEdgeChapters
+            over the synthesized transcripts in memory through edgeChapters, the
+            probe-window rule classifyBookEdges uses too (a chapter whose "chapter"
+            heading the detector numbered, chapterdetect.Chapter.Number, opens with
+            that number announced: the classifier reads only a bare "Chapter Four.",
+            and "Chapter Four, The Storm." would join the next chapter's entry as an
+            unnumbered section), and groups the entries by it
+            (groupEntries): front matter and an intro join the first story chapter,
+            an interior unnumbered section the chapter whose number it takes, credits
+            the entry before them, end matter stays its own ("Prologue / Chapter 1",
+            bounded by chapterdetect.MaxTitleBytes). Entry k IS logical position k BY
+            CONSTRUCTION: rankPositions makes the classification's positions the
+            entries' ordinals (where the narration's numbering skips one, a heading
+            not heard, the entries would otherwise run a position behind), and
+            classifyBookEdges takes the kept classification for a Detected manifest
+            (loadDetectedPositions) instead of classifying again from the text layer
+            QA leaves (a re-transcribed opening, a loop repaired past the edge rule,
+            moved every position off the list). DetectedChaptersPath /
+            ReadDetectedChapters / CurrentFor (manifest fingerprint and source size) /
+            DetectedStamp (local stats, so a poller re-reads only a changed list) are
+            generate's. The stage reports one progress unit, as every book stage (the
+            ETA charges a unit its learned per-book time). inspect (its windows'
+            silence probes under the stage heartbeat; the marker-format note only for a
+            manifest that isn't windows) fails a goal-chapters book whose manifest
+            isn't windows with what is true of it (chaptersRefusal:
+            ErrHasMarkerChapters / ErrHasFileChapters, or for a file with no chapters
+            that can't be windowed ErrPartialMarker, one marker over part of it, /
+            ErrUnknownLength, no length to cut by; ChaptersRefusals, sentences the
+            console shows as they are; generate reads them from the inspecting run's
+            own error, which a supervisor escalation never rewrites). marker_titles.txt only ever holds
+            the publisher's titles: ensureMarkerTitles writes a Detected manifest's
+            EMPTY (titles heard in this transcript would make a misheard name attest
+            itself), so referenceSources, the dry-run corpus and allowedReferenceFile
+            never see them, and the manifest staged to the spelling agent goes without
+            them (stagedManifest).
             The env-gated corpus test (AUDIOSILO_CHAPTERS_SPIKE_DIR,
             chapterdetect_corpus_test.go) runs the detection through the stage's own
             loading on the spike's real raws.
@@ -952,11 +989,15 @@ internal/
             0005 (Phase 1d): books.goal ('' the whole pipeline, 'chapters' stops after
             chapter_detecting; opaque here like State, so the store names no goal:
             its SQL asks goal = '' or goal != ''). ContinueChapters (one statement:
-            only a done book with a goal, chapters being the one, else
-            ErrNotContinuable) makes it a whole-run book at splitting with
-            the new job's contrib_mode and work_id. FinishedBooks leaves goal-chapters
-            books out (no agent spend to average). GenerateBookSwept: the retention
-            deleted a book's transcripts (a continue needs them).
+            only a done book with a goal, chapters being the one, whose transcripts
+            the retention didn't sweep, else ErrNotContinuable) makes it a whole-run
+            book at splitting with the new job's identity (title, authors, narrators,
+            series and position, asin, isbn and their sources: the book may have been
+            matched since), contrib_mode and work_id, and maps the new job to it in
+            the same transaction. FinishedBooks leaves goal-chapters books out (no
+            agent spend to average). UnsweptGenerateBooks counts a book's retention
+            from its LAST job's end (a continued book has the chapters job's mapping
+            and the generate job's).
   state/    per-book pipeline state machine: table-driven states/lanes/transitions,
             CanStart/NextState guards, the audit fix-loop cap. Pure, no I/O. M6 added
             ParkCode (typed park reasons - M7 added contrib_unavailable, core_needed,
@@ -1512,33 +1553,52 @@ internal/
             is CurrentFor its manifest (composeChapters: no file for one chapter or
             over 2000; titles control-free, chapterdetect.ClipTitle's bound, "Chapter
             N" for none); bridge.json's chapters object {job_id, generated_at, from,
-            chapters}. refreshChapters composes them and returns (the list, current):
-            it reads and checks the list again only when pipeline.DetectedStamp (local
-            stats of chapters_detected.json and the manifest) changed since the last
-            look, so the poll it runs on costs a stat or two. sidecars.generate
-            (r.kind == Kind: startRun keeps every run's kind) saves them as soon as
-            the engine has them (saveChaptersEarly from step(), once per detected
-            list, a failure retried next look) and with the rest at the finish (files
-            lists it); a run with none keeps an earlier chapters object beside a
+            chapters}. refreshChapters reads the list and returns (the list, current):
+            it reads and checks it again only when pipeline.DetectedStamp (local stats
+            of chapters_detected.json and the manifest) changed since the last look,
+            so the poll it runs on costs a stat or two; chaptersJSON composes the file
+            at each write, from the book's files and path as they are then (the server
+            moves a job with its book: a list naming the old file would never apply),
+            at the time the run first noted the list. sidecars.generate (r.kind ==
+            Kind: startRun keeps every run's kind) saves them as soon as the engine
+            has them (saveChaptersEarly from step(), once per detected list; it never
+            waits: not while the library isn't checked mapped and writable (mappedNow),
+            a failure tried again a Recheck later) and with the rest at the finish
+            (files lists it); never beside characters and recaps made without
+            chapters found in the narration (sidecarsWithoutChapters: no chapters
+            object in bridge.json), whose positions the server would then gate by this
+            list. A run with none keeps an earlier chapters object beside a
             chapters.json in place (keptObject[T], the description's rule too; the
-            merge, mergedProvenance, takes fresh's object by its key). create() CONTINUES a done goal-chapters engine book at the
-            same source path (not swept, no open job, the audio read:
-            continueChapters -> store.ContinueChapters) and maps the job to it.
-            chapters.detect (ChaptersJob, ChaptersKind, pipeline lane, Abandoner;
-            params any JSON object): the same resume and follow as generate
-            (resumeMapping + runEngineBook: prepare strict when new, a resumed job's
-            own book found again, one that moved while the job was away followed and
-            recorded, another book's run stopped); new, an engine book at the source
-            path with a current list is written from (no run, runEngineBook's fresh
-            hook); one an open generate job follows is refused (errChaptersGenerating);
-            else an engine book with goal chapters (createChapters: clearEarlier and
-            queueBook, generate's create tail), followed like generate (progress
-            without cost_usd),
-            written at done (chapters.json + bridge.json merged: mergedProvenance
-            keeps every other field) and rescanned; an inspect that says the book has
-            chapters fails the job with that sentence. Result {library_id, path,
-            chapters, files, source: "audio"}. Retention as generate's (its mapping in
-            generate_books). ParkHint words chapters_not_detected; stageLabels
+            merge, mergedProvenance, takes fresh's object by its key). create()
+            CONTINUES a done goal-chapters engine book at the same source path (not
+            swept, no open job, the audio read, its list CurrentFor the file on disk:
+            continueChapters -> store.ContinueChapters, under the engine's Hold, the
+            job's identity and mapping in one transaction). chapters.detect
+            (ChaptersJob, ChaptersKind, pipeline lane, Abandoner; params any JSON
+            object): the same resume and follow as generate (resumeMapping +
+            runEngineBook: prepare strict when new, a resumed job's own book found
+            again, one that moved while the job was away followed and recorded,
+            another book's run stopped); new, refused beside characters and recaps
+            made without chapters (errChaptersBesideSidecars: generate it again), an
+            engine book at the source path with a current list is written from (no
+            run, runEngineBook's fresh hook; the job takes that book to report on, so
+            its own park is never lifted between two tries, and records no move); one
+            an open generate job follows is refused (errChaptersGenerating); a
+            finished whole run is never cleared for it (errChaptersKeepsRun); else an
+            engine book with goal chapters and no series (createChapters: clearEarlier
+            and queueBook, generate's create tail; a chapters-only run makes nothing
+            a later volume carries on from, so it never holds the series' lock),
+            followed like generate (progress without cost_usd), written at done
+            (chapters.json + bridge.json merged: mergedProvenance keeps every other
+            field) and rescanned; an inspect that refuses the run (the book
+            has chapters, or a file whose chapters can't be found in the narration:
+            pipeline.ChaptersRefusals) fails the job with that sentence, read from the
+            inspecting run's own error (hasChaptersFailure: a supervisor escalation
+            of the failure into a park ends it the same way). Result {library_id, path, chapters, files, source:
+            "audio"}. Retention as generate's (its mapping in generate_books).
+            ParkHint words chapters_not_detected (add chapter markers, then cancel:
+            the server reads them, a new generate job works from them; a recording's
+            chapter list reaches the server, never the Bridge); stageLabels
             chapter_detecting.
   agentproto/ the staging protocol between the Bridge and the agent container (decision
             15), shared by both sides so they can't drift; a LEAF (standard library

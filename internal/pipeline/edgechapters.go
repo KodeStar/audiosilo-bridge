@@ -619,6 +619,17 @@ func classifyBookEdges(book store.Book) (edgeClassification, error) {
 	if haveEbook {
 		return classifyEbookEdges(m)
 	}
+	// A detected manifest (Phase 1d) was classified once, at chapter_detecting, and
+	// its chapter list grouped by that classification: the stages after it take that
+	// one, never classify again from the text layer they leave (a re-transcribed or
+	// repaired opening would move every position off the list's ordinals).
+	if m.Detected {
+		if fp, err := manifestFingerprint(book.WorkDir); err == nil {
+			if class, ok := loadDetectedPositions(book.WorkDir, fp); ok {
+				return class, nil
+			}
+		}
+	}
 	chs, err := edgeChapters(m.Chapters, func(ch audio.Chapter) (string, error) {
 		opening, err := chapterOpening(book.WorkDir, ch.Chapter)
 		if err != nil {

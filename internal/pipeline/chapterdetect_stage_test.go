@@ -125,7 +125,7 @@ func TestGroupByPosition(t *testing.T) {
 			words: []timedWord{{text: " x", start: start + 1, end: start + 2}}})
 	}
 	m.Duration = 3000
-	got := groupByPosition(m, tl.split(m.Chapters))
+	got := groupByPosition(m, tl.split(m.Chapters), nil)
 	var desc []string
 	for _, e := range got {
 		desc = append(desc, fmt.Sprintf("%s@%d+%d", e.Title, e.StartMs, e.LengthMs))
@@ -302,5 +302,171 @@ func TestChapterDetectStageRefusesAChapteredManifest(t *testing.T) {
 		state.ChapterDetecting, scheduler.StageReport{})
 	if err == nil || !strings.Contains(err.Error(), "not a windows manifest") {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+// detectedFixture is a detected manifest of chapters announcing titles (each with
+// prose after it) and the timeline that says them.
+func detectedFixture(titles []string) (audio.Manifest, windowTimeline) {
+	long := strings.Repeat("words ", 200)
+	m := audio.Manifest{Style: audio.StyleMarkers, Detected: true}
+	var tl windowTimeline
+	for i, title := range titles {
+		start := float64(i) * 600
+		m.Chapters = append(m.Chapters, audio.Chapter{Chapter: i + 1, Title: title, Start: start, End: start + 600, Duration: 600})
+		tl.segments = append(tl.segments, timedSegment{start: start + 1, end: start + 590, text: " " + title + ". " + long,
+			words: []timedWord{{text: " x", start: start + 1, end: start + 2}}})
+	}
+	m.Duration = float64(len(titles)) * 600
+	m.ChapterCount = len(m.Chapters)
+	return m, tl
+}
+
+// The classification a detected list is grouped by puts every part at its entry's
+// ordinal, where the narration's numbering skips one (a heading not heard) too:
+// entry k is position k, and the last entry the last position.
+func TestDetectedPositionsAreTheListsOrdinals(t *testing.T) {
+	m, tl := detectedFixture([]string{"Chapter One", "Chapter Two", "Chapter Three", "Chapter Five", "Chapter Six", "Chapter Seven"})
+	class, list := detectedClassification(m, tl.split(m.Chapters), nil)
+	if len(list) != 6 || class.LogicalCount != 6 {
+		t.Fatalf("%d entries, logical %d", len(list), class.LogicalCount)
+	}
+	for k, e := range list {
+		for _, ch := range e.Parts {
+			if pos, ok := class.PositionOf(ch); !ok || pos != k+1 {
+				t.Fatalf("entry %d's chapter %d at position %d (%v)", k+1, ch, pos, ok)
+			}
+		}
+	}
+	// Numbering that doesn't skip keeps the narration's positions as they are.
+	m2, tl2 := detectedFixture([]string{"Prologue", "Chapter One", "Chapter Two", "Chapter Three"})
+	class2, list2 := detectedClassification(m2, tl2.split(m2.Chapters), nil)
+	edge, _ := edgeChapters(m2.Chapters, func(ch audio.Chapter) (string, error) {
+		return clipBytes(transcript.PlainText(tl2.split(m2.Chapters)[ch.Chapter-1]), chapterOpeningBytes), nil
+	}, func(audio.Chapter) (int, bool, error) { return 200, true, nil })
+	if raw := classifyEdgeChapters(edge); fmt.Sprint(raw.Positions) != fmt.Sprint(class2.Positions) || len(list2) != 3 {
+		t.Fatalf("an unskipped numbering was renumbered: %v vs %v (%d entries)", raw.Positions, class2.Positions, len(list2))
+	}
+}
+
+// A numbered chapter whose heading runs on into its title ("Chapter Four, The
+// Storm.") is its own entry at its own position: the classifier can't read that
+// opening as an announcement, so it takes the number the detector heard.
+func TestDetectedTitledHeadingKeepsItsEntry(t *testing.T) {
+	m, tl := detectedFixture([]string{"Chapter One", "Chapter Two", "Chapter Three", "Chapter Four, The Storm", "Chapter Five", "Chapter Six"})
+	docs := tl.split(m.Chapters)
+	// Without the heard numbers the opening reads as an unnumbered section, which
+	// joins the next chapter's entry (the fixture does exercise the case).
+	if _, list := detectedClassification(m, docs, nil); len(list) != 5 {
+		t.Fatalf("control: %d entries, want chapter 4 joined with 5", len(list))
+	}
+	class, list := detectedClassification(m, docs, []int{1, 2, 3, 4, 5, 6})
+	if len(list) != 6 || class.LogicalCount != 6 {
+		t.Fatalf("%d entries, logical %d, want 6", len(list), class.LogicalCount)
+	}
+	for k, e := range list {
+		if pos, ok := class.PositionOf(k + 1); len(e.Parts) != 1 || e.Parts[0] != k+1 || !ok || pos != k+1 {
+			t.Fatalf("entry %d = %+v, chapter %d at position %d", k+1, e, k+1, pos)
+		}
+	}
+	if list[3].Title != "Chapter Four, The Storm" {
+		t.Fatalf("entry 4 title = %q", list[3].Title)
+	}
+}
+
+// The stages after chapter_detecting classify a detected book with the
+// classification its list was grouped by, whatever the text layer says by then
+// (QA re-transcribed an opening): the sidecars' position k stays the list's entry k.
+func TestDetectedBookKeepsItsClassification(t *testing.T) {
+	work := t.TempDir()
+	m, tl := detectedFixture([]string{"Opening", "Chapter One", "Chapter two, in which the storm broke over the hills", "Chapter Three", "Chapter Four"})
+	if err := audio.WriteManifest(work, m); err != nil {
+		t.Fatal(err)
+	}
+	fp, err := manifestFingerprint(work)
+	if err != nil {
+		t.Fatal(err)
+	}
+	book := store.Book{WorkDir: work}
+	docs := tl.split(m.Chapters)
+	list, err := writeDetectedChapters(book, m, docs, nil, fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The text layer later reads chapter 3's heading as an announcement.
+	for i, d := range docs {
+		text := transcript.PlainText(d)
+		if i == 2 {
+			text = "Chapter Two. The storm broke over the hills. " + text
+		}
+		if err := os.MkdirAll(filepath.Join(work, transcript.TextDir), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(work, transcript.TextDir, transcript.TextName(i+1)), []byte(text), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	aligned := func(class edgeClassification) bool {
+		for k, e := range list.Chapters {
+			for _, ch := range e.Parts {
+				if pos, _ := class.PositionOf(ch); pos != k+1 && (k != 0 || pos != 0) {
+					return false
+				}
+			}
+		}
+		return true
+	}
+	class, err := classifyBookEdges(book)
+	if err != nil || !aligned(class) {
+		t.Fatalf("classification %+v (%v) is off the list's ordinals", class.Positions, err)
+	}
+	// The control: classified again from the text layer, the positions would move.
+	if err := os.Remove(filepath.Join(work, detectedPositionsName)); err != nil {
+		t.Fatal(err)
+	}
+	if again, err := classifyBookEdges(book); err != nil || aligned(again) {
+		t.Fatalf("the text layer's classification %+v (%v) agrees anyway: the test proves nothing", again.Positions, err)
+	}
+}
+
+// Nothing a window's transcript times past the window's own audio reaches the
+// timeline (a hallucinated "!" there sorted between the next window's "Day" and
+// "85." lost the heading); glued tokens keep their lowest probability; a segment
+// whisper gave no words stays wordless in the synthesized raw.
+func TestWindowTimelineStaysInItsWindow(t *testing.T) {
+	low, high := 0.3, 0.9
+	w1 := transcript.Transcript{Language: "en", Segments: []transcript.Segment{
+		{ID: 0, Start: 1, End: 2, Text: " Owalyn", Words: []transcript.Word{{W: " Ow", Start: 1, End: 1.3, P: &high}, {W: "alyn", Start: 1.3, End: 1.6, P: &low}}},
+		{ID: 1, Start: 3, End: 5, Text: " Thank you for listening.", Words: []transcript.Word{}},
+		{ID: 2, Start: 10.4, End: 10.8, Text: " !", Words: []transcript.Word{{W: " !", Start: 10.4, End: 10.8}}},
+	}}
+	w2 := transcript.Transcript{Language: "en", Segments: []transcript.Segment{
+		{ID: 0, Start: 0.2, End: 1.2, Text: " Day 85.", Words: []transcript.Word{{W: " Day", Start: 0.2, End: 0.5}, {W: " 85.", Start: 0.6, End: 1.0}}},
+	}}
+	windows := []audio.Chapter{{Chapter: 1, Start: 0, End: 10, Duration: 10}, {Chapter: 2, Start: 10, End: 20, Duration: 10}}
+	tl, err := loadWindowTimeline(windows, func(w audio.Chapter) ([]byte, error) {
+		if w.Chapter == 1 {
+			return transcript.EncodeOpenAI(w1)
+		}
+		return transcript.EncodeOpenAI(w2)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, w := range tl.words() {
+		got = append(got, strings.TrimSpace(w.Text))
+	}
+	if strings.Join(got, "|") != "Owalyn|Thank you for listening.|Day|85." {
+		t.Fatalf("words = %v", got)
+	}
+	if p := tl.segments[0].words[0].p; p == nil || *p != low {
+		t.Fatalf("glued probability = %v, want the lowest", p)
+	}
+	docs := tl.split([]audio.Chapter{{Chapter: 1, Start: 0, End: 20, Duration: 20}})
+	for _, s := range docs[0].Segments {
+		if strings.Contains(s.Text, "Thank you") && len(s.Words) != 0 {
+			t.Fatalf("a wordless segment got words: %+v", s.Words)
+		}
 	}
 }

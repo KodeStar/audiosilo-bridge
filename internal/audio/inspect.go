@@ -170,6 +170,17 @@ func ReparseMarkerManifest(workDir string, draft Manifest) (Manifest, MarkerStat
 	if m.Duration == 0 {
 		m.Duration = draft.Duration
 	}
+	// A book an older parser parked here with no chapters at all, whose file has no
+	// usable markers (Phase 1d's markerless rule), is transcribed in windows and gets
+	// its chapters from the narration, as inspect does now: no agent can map markers
+	// that aren't there. Cut at the targets: the reparse reads no audio.
+	if mk := probeMarkers(meta); len(draft.Chapters) == 0 && markerless(mk, m.Duration) && m.Duration > 0 {
+		wm, err := windowsManifest(context.Background(), draft.Source, m.Title, m.Duration, "")
+		if err != nil {
+			return Manifest{}, MarkerStats{}, err
+		}
+		m, stats = wm, MarkerStats{Seen: len(mk), Contiguous: true, Complete: true}
+	}
 	if err := WriteManifest(workDir, m); err != nil {
 		return Manifest{}, MarkerStats{}, err
 	}

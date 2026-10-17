@@ -207,8 +207,11 @@ export function parseChaptersResult(r: unknown): ChaptersResult | null {
 }
 
 // chaptersSummary is "18 chapters found in the narration" ("One chapter: ..." for a
-// book with no headings, which gets no chapters file).
+// book with no headings, which gets no chapters file; one written with no file says
+// so too: more chapters than the server reads).
 export function chaptersSummary(r: ChaptersResult): string {
   if (r.chapters <= 1) return 'One chapter: no chapter file was written';
+  if (r.files.length === 0)
+    return `${r.chapters} chapters found in the narration, but no chapter file was written`;
   return `${r.chapters} chapters found in the narration`;
 }

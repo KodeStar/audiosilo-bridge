@@ -76,16 +76,40 @@ func markerless(markers []Marker, duration float64) bool {
 // ffmpeg each cut sits in the longest silence near its target (one short probe per
 // cut); without it, or when a probe hears none, at the target itself.
 func windowsManifest(ctx context.Context, bookFile, title string, duration float64, ffmpegPath string) (Manifest, error) {
+	var probe func(t float64) (float64, bool, error)
+	if ffmpegPath != "" {
+		probe = func(t float64) (float64, bool, error) { return quietestNear(ctx, ffmpegPath, bookFile, t) }
+	}
+	cuts, err := windowCuts(ctx, duration, probe)
+	if err != nil {
+		return Manifest{}, err
+	}
+	chs := make([]Chapter, 0, len(cuts)-1)
+	for i := 0; i+1 < len(cuts); i++ {
+		chs = append(chs, Chapter{Chapter: i + 1, Start: cuts[i], End: cuts[i+1], Duration: cuts[i+1] - cuts[i]})
+	}
+	return Manifest{Source: bookFile, Title: title, Style: StyleWindows, Duration: duration, ChapterCount: len(chs),
+		Chapters: chs}, nil
+}
+
+// windowCuts is where the windows of a file of duration seconds start, and its end:
+// each cut at probe's quiet point near its target (none: at the target). A probe
+// that fails (it ran out its time bound on a wedged mount, or ffmpeg can't read the
+// file) ends the probing: the rest are cut at their targets, rather than a long book
+// waiting out the bound once per cut.
+func windowCuts(ctx context.Context, duration float64, probe func(t float64) (float64, bool, error)) ([]float64, error) {
 	cuts := []float64{0}
 	for pos := 0.0; duration-pos > windowMinSplit; {
 		t := pos + windowTarget
 		c := t
-		if ffmpegPath != "" {
-			mid, ok, err := quietestNear(ctx, ffmpegPath, bookFile, t)
-			if err != nil && ctx.Err() != nil {
-				return Manifest{}, ctx.Err()
-			}
-			if ok {
+		if probe != nil {
+			mid, ok, err := probe(t)
+			switch {
+			case err != nil && ctx.Err() != nil:
+				return nil, ctx.Err()
+			case err != nil:
+				probe = nil
+			case ok:
 				c = mid
 			}
 		}
@@ -96,13 +120,7 @@ func windowsManifest(ctx context.Context, bookFile, title string, duration float
 		cuts = append(cuts, c)
 		pos = c
 	}
-	cuts = append(cuts, duration)
-	chs := make([]Chapter, 0, len(cuts)-1)
-	for i := 0; i+1 < len(cuts); i++ {
-		chs = append(chs, Chapter{Chapter: i + 1, Start: cuts[i], End: cuts[i+1], Duration: cuts[i+1] - cuts[i]})
-	}
-	return Manifest{Source: bookFile, Title: title, Style: StyleWindows, Duration: duration, ChapterCount: len(chs),
-		Chapters: chs}, nil
+	return append(cuts, duration), nil
 }
 
 // quietestNear returns the middle of the longest silence whose middle lies within
@@ -144,9 +162,11 @@ func silenceFilter(asWindow bool) string {
 	return f
 }
 
+// The silencedetect log's times: an ffmpeg before 7 prints a tiny one with an
+// exponent ("6.25e-05").
 var (
-	reSilenceStart = regexp.MustCompile(`silence_start: (-?[0-9.]+)`)
-	reSilenceEnd   = regexp.MustCompile(`silence_end: (-?[0-9.]+)`)
+	reSilenceStart = regexp.MustCompile(`silence_start: (-?[0-9.]+(?:[eE][-+]?[0-9]+)?)`)
+	reSilenceEnd   = regexp.MustCompile(`silence_end: (-?[0-9.]+(?:[eE][-+]?[0-9]+)?)`)
 )
 
 // DetectSilences runs ffmpeg's silencedetect (silenceNoise, silenceMinSec) over
@@ -351,6 +371,6 @@ func cutParts(ctx context.Context, ffmpegPath string, parts []windowPart, out, l
 		fmt.Fprintf(&graph, "[%d:a]", i)
 	}
 	fmt.Fprintf(&graph, "concat=n=%d:v=0:a=1[a]", len(parts))
-	tail := []string{"-filter_complex", graph.String(), "-map", "[a]", "-ac", "1", "-ar", "16000", "-c:a", "flac", "-f", "flac"}
+	tail := append([]string{"-filter_complex", graph.String(), "-map", "[a]"}, flacOutputArgs...)
 	return encode(ctx, ffmpegPath, in, tail, out, label, nil)
 }

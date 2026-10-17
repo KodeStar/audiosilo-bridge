@@ -568,25 +568,58 @@ func (db *DB) SetBookStatusRetry(ctx context.Context, id int64, status, errMsg, 
 var ErrNotContinuable = errors.New("the book isn't a finished chapters book")
 
 // ContinueChapters turns a finished chapters-only book (goal chapters, done) into a
-// whole-pipeline one: goal empty, its contribution mode and work id the new job's,
-// state splitting, status clear. The done-time purge removed its chapter FLACs, so
-// splitting cuts them again (skipping any still there); asr then finds every
-// transcript complete (the detected chapters' own), and the manifest is a detected
-// one, so the book goes on to sanitizing and the rest. ErrNotContinuable when the
-// book isn't one (in one statement, so a book that changed meanwhile isn't moved).
-// The SQL asks for any goal short of the whole pipeline (chapters is the only one),
-// so the store names no goal of its own: it keeps the state's strings opaque.
-func (db *DB) ContinueChapters(ctx context.Context, id int64, contribMode, workID string) error {
-	res, err := db.sql.ExecContext(ctx,
-		`UPDATE books SET goal='', contrib_mode=?, work_id=?, state='splitting', status='', error='', park_code='',
-		 retry_at='', updated_at=? WHERE id=? AND goal!='' AND state='done'`,
-		contribMode, workID, timestamp(nowFn()), id)
+// whole-pipeline one for a new job: goal empty; the new job's identity (nb's title,
+// authors, narrators, series and position, asin, isbn and their sources: the book may
+// have been matched since the chapters job made it), contribution mode and work id;
+// state splitting, status clear. The work dir, source and kind stay the book's. The
+// done-time purge removed its chapter FLACs, so splitting cuts them again (skipping
+// any still there); asr then finds every transcript complete (the detected chapters'
+// own), and the manifest is a detected one, so the book goes on to sanitizing and
+// the rest. job (when it names a server job) is mapped to the book in the same
+// transaction, so a book is never continued with no job to follow it.
+// ErrNotContinuable when the book isn't one, or the retention swept its transcripts
+// (a continue needs them); checked in the one statement, so a book that changed
+// meanwhile isn't moved. The SQL asks for any goal short of the whole pipeline
+// (chapters is the only one), so the store names no goal of its own: it keeps the
+// state's strings opaque.
+func (db *DB) ContinueChapters(ctx context.Context, id int64, nb NewBook, job GenerateBook) error {
+	authors, err := marshalJSONDefault(nb.Authors, "[]")
+	if err != nil {
+		return err
+	}
+	narrators, err := marshalJSONDefault(nb.Narrators, "[]")
+	if err != nil {
+		return err
+	}
+	idsrc, err := marshalJSONDefault(nb.IdentitySources, "{}")
+	if err != nil {
+		return err
+	}
+	tx, err := db.sql.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	res, err := tx.ExecContext(ctx,
+		`UPDATE books SET goal='', title=?, authors=?, narrators=?, series=?, series_pos=?, asin=?, isbn=?,
+		     identity_sources=?, contrib_mode=?, work_id=?, state='splitting', status='', error='', park_code='',
+		     retry_at='', updated_at=?
+		  WHERE id=? AND goal!='' AND state='done'
+		    AND NOT EXISTS (SELECT 1 FROM generate_books WHERE book_id=? AND swept_at!='')`,
+		nb.Title, authors, narrators, nb.Series, nb.SeriesPos, nb.ASIN, nb.ISBN, idsrc, nb.ContribMode, nb.WorkID,
+		timestamp(nowFn()), id, id)
 	if err := checkAffected(res, err); errors.Is(err, ErrNotFound) {
 		return ErrNotContinuable
 	} else if err != nil {
 		return err
 	}
-	return nil
+	if job.ServerJobID != 0 {
+		job.BookID = &id
+		if err := putGenerateBook(ctx, tx, job); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 // SetBookCoverage stores the coverage JSON snapshot for a book.

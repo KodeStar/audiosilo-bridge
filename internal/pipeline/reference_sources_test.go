@@ -222,8 +222,9 @@ func TestReferenceSourcesToleratesMissingInputs(t *testing.T) {
 // TestDetectedTitlesAreNeverEvidence: chapter titles found in the narration (a
 // detected manifest, Phase 1d) are the transcript's own spelling, so
 // marker_titles.txt never holds them (an earlier one is emptied): not as verified
-// evidence, not in the dry-run corpus, not as a file a rule may cite. A publisher's
-// marker titles still are all three.
+// evidence, not in the dry-run corpus, not as a file a rule may cite, and the
+// manifest staged to the spelling agent goes without them. A publisher's marker
+// titles still are all of these.
 func TestDetectedTitlesAreNeverEvidence(t *testing.T) {
 	for _, detected := range []bool{false, true} {
 		dir := t.TempDir()
@@ -243,6 +244,13 @@ func TestDetectedTitlesAreNeverEvidence(t *testing.T) {
 		_, ok := sourceByName(referenceSources(dir, metaops.Glossary{}), markerTitlesFile)
 		if ok == detected {
 			t.Errorf("detected %v: marker titles used as evidence = %v", detected, ok)
+		}
+		staged, err := stagedManifest(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(staged), "Toren") == detected {
+			t.Errorf("detected %v: the manifest staged to the spelling agent = %s", detected, staged)
 		}
 		corpus, err := buildDryRunCorpus(dir)
 		if err != nil {
