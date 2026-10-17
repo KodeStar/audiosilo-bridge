@@ -238,6 +238,14 @@ func TestComposeChapters(t *testing.T) {
 		f.Chapters[0].Title != "One" || f.Chapters[1].Title != "Chapter 2" {
 		t.Fatalf("chapters.json = %s", raw)
 	}
+	// A folder book's paths are relative to its folder, subfolders kept, in the
+	// server's order (the server compares count, order, path and size).
+	raw, _ = composeChapters(d, []link.BookFile{{Path: "A/B/CD1/01.mp3", Size: 1}, {Path: "A/B/CD2/01.mp3", Size: 2}}, "A/B", false, now)
+	f = ChaptersFile{}
+	if err := json.Unmarshal(raw, &f); err != nil || len(f.Files) != 2 || f.Files[0].Path != "CD1/01.mp3" ||
+		f.Files[1] != (ChaptersFileItem{Path: "CD2/01.mp3", Size: 2}) {
+		t.Fatalf("folder files = %+v, %v", f.Files, err)
+	}
 	// A one-chapter book gets no file.
 	d.Chapters = d.Chapters[:1]
 	if raw, err := composeChapters(d, []link.BookFile{{Path: "x.mp3"}}, "x.mp3", true, now); raw != nil || err != nil {

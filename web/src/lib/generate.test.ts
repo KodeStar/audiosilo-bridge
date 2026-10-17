@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   canRetry,
+  chaptersSummary,
   checkedText,
   describeSummary,
   descriptionText,
@@ -10,6 +11,7 @@ import {
   isSidecars,
   kindLabel,
   parkOf,
+  parseChaptersResult,
   parseDescribeResult,
   parseGenerateResult,
   resultSummary,
@@ -154,5 +156,39 @@ describe('descriptions', () => {
     expect(checkedText('none')).toBe('not checked: the source text was already removed');
     expect(parseDescribeResult(null)).toBeNull();
     expect(parseDescribeResult({ files: [] })).toBeNull();
+  });
+});
+
+describe('chapters', () => {
+  it('labels the kind and retries a parked chapters job', () => {
+    const job = jobFixture({ kind: 'chapters.detect' });
+    expect(kindLabel('chapters.detect')).toBe('Chapters');
+    expect(isSidecars(job)).toBe(true);
+    expect(canRetry(job)).toBe(false);
+    const parked = jobFixture({
+      kind: 'chapters.detect',
+      state: 'running',
+      progress: {
+        step: 'chapter_detecting',
+        park: { code: 'chapters_not_detected', hint: 'Add markers.' },
+      },
+    });
+    expect(canRetry(parked)).toBe(true);
+  });
+  it('reads and words a chapters job result', () => {
+    const r = parseChaptersResult({
+      library_id: 1,
+      path: 'Loose.m4b',
+      chapters: 18,
+      files: ['Loose.chapters.json', 'Loose.bridge.json', 3],
+      source: 'audio',
+    });
+    expect(r?.files).toEqual(['Loose.chapters.json', 'Loose.bridge.json']);
+    expect(chaptersSummary(r!)).toBe('18 chapters found in the narration');
+    expect(chaptersSummary({ ...r!, chapters: 1, files: [] })).toBe(
+      'One chapter: no chapter file was written',
+    );
+    expect(parseChaptersResult({ path: 'x', files: [] })).toBeNull();
+    expect(parseChaptersResult(null)).toBeNull();
   });
 });

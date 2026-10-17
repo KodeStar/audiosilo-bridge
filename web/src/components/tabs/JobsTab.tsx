@@ -1,6 +1,12 @@
 import { useState } from 'react';
 import { ApiError, errorText, type ApiClient } from '@/api/client';
-import type { DescribeResult, GenerateResult, ServerJob, VerifyResult } from '@/api/types';
+import type {
+  ChaptersResult,
+  DescribeResult,
+  GenerateResult,
+  ServerJob,
+  VerifyResult,
+} from '@/api/types';
 import { useLoad } from '@/lib/useLoad';
 import { bytes, elapsed } from '@/lib/time';
 import {
@@ -20,14 +26,17 @@ import { VERIFY_KIND, parseVerifyResult, prettyJSON } from '@/lib/verify';
 import {
   canRetry,
   descriptionText,
+  chaptersSummary,
   describeSummary,
   effectiveState,
   generateFacts,
+  isChapters,
   isDescribe,
   isGenerate,
   isSidecars,
   kindLabel,
   parkOf,
+  parseChaptersResult,
   parseDescribeResult,
   parseGenerateResult,
   resultSummary,
@@ -325,6 +334,8 @@ function ResultView({ job }: { job: ServerJob }) {
   if (generated) return <GenerateView result={generated} />;
   const described = isDescribe(job) ? parseDescribeResult(job.result) : null;
   if (described) return <DescribeView result={described} />;
+  const chapters = isChapters(job) ? parseChaptersResult(job.result) : null;
+  if (chapters) return <ChaptersView result={chapters} />;
   return (
     <pre className="overflow-x-auto rounded-md bg-deep p-3 text-xs text-body">
       {prettyJSON(job.result)}
@@ -366,6 +377,15 @@ function DescribeView({ result }: { result: DescribeResult }) {
     <div className="flex flex-col gap-2 text-xs text-dim">
       <p className="text-sm text-body">{describeSummary(result)}</p>
       <SavedWith path={result.path} files={result.files} />
+    </div>
+  );
+}
+
+function ChaptersView({ result }: { result: ChaptersResult }) {
+  return (
+    <div className="flex flex-col gap-2 text-xs text-dim">
+      <p className="text-sm text-body">{chaptersSummary(result)}</p>
+      {result.files.length > 0 && <SavedWith path={result.path} files={result.files} />}
     </div>
   );
 }

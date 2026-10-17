@@ -1,4 +1,5 @@
 import type {
+  ChaptersResult,
   CheckedAgainst,
   DescribeResult,
   GenerateResult,
@@ -12,6 +13,9 @@ import type {
 export const GENERATE_KIND = 'sidecars.generate';
 // The description-only job: the same progress, without an ETA.
 export const DESCRIBE_KIND = 'sidecars.describe';
+// The chapters-only job (Phase 1d): speech recognition and chapter detection for a
+// book with no chapter markers; the same progress, without a spend.
+export const CHAPTERS_KIND = 'chapters.detect';
 
 export function isGenerate(job: ServerJob): boolean {
   return job.kind === GENERATE_KIND;
@@ -21,14 +25,19 @@ export function isDescribe(job: ServerJob): boolean {
   return job.kind === DESCRIBE_KIND;
 }
 
+export function isChapters(job: ServerJob): boolean {
+  return job.kind === CHAPTERS_KIND;
+}
+
 // isSidecars: a job that follows the engine (its progress and parks look alike).
 export function isSidecars(job: ServerJob): boolean {
-  return isGenerate(job) || isDescribe(job);
+  return isGenerate(job) || isDescribe(job) || isChapters(job);
 }
 
 const KIND_LABELS: Record<string, string> = {
   [GENERATE_KIND]: 'Characters and recaps',
   [DESCRIBE_KIND]: 'Description',
+  [CHAPTERS_KIND]: 'Chapters',
 };
 
 // kindLabel words a job kind ("" for one with no label: the kind shows as it is).
@@ -184,4 +193,27 @@ export function parseDescribeResult(r: unknown): DescribeResult | null {
 // describeSummary is "A description, $0.25, checked against the transcripts".
 export function describeSummary(r: DescribeResult): string {
   return `A description, ${usd(r.cost_usd)}, ${checkedText(r.checked_against)}`;
+}
+
+// parseChaptersResult reads a done chapters job's result, or null when it isn't
+// one.
+export function parseChaptersResult(r: unknown): ChaptersResult | null {
+  if (!r || typeof r !== 'object') return null;
+  const o = r as Partial<ChaptersResult>;
+  if (typeof o.path !== 'string' || typeof o.chapters !== 'number' || !Array.isArray(o.files))
+    return null;
+  return {
+    library_id: typeof o.library_id === 'number' ? o.library_id : 0,
+    path: o.path,
+    chapters: o.chapters,
+    files: o.files.filter((f): f is string => typeof f === 'string'),
+    source: 'audio',
+  };
+}
+
+// chaptersSummary is "18 chapters found in the narration" ("One chapter: ..." for a
+// book with no headings, which gets no chapters file).
+export function chaptersSummary(r: ChaptersResult): string {
+  if (r.chapters <= 1) return 'One chapter: no chapter file was written';
+  return `${r.chapters} chapters found in the narration`;
 }
