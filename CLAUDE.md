@@ -37,7 +37,9 @@ and `git blame` reach the reliability fixes). sidecars stays usable until Phase 
 then is archived with the manager. Phase 0 imported and tested the engine; Phase 1a
 runs it (`internal/app/engine.go`) behind the `sidecars.generate` job
 (`internal/generate`), which writes the results into the book's `.audiosilo/`;
-Phase 1c adds the description step and the `sidecars.describe` job beside it.
+Phase 1c adds the description step and the `sidecars.describe` job beside it;
+Phase 1d finds a chapterless book's chapters in its narration (`chapter_detecting`,
+`internal/chapterdetect`) and adds the `chapters.detect` job.
 
 ## Build / test / gate
 
@@ -96,11 +98,12 @@ internal/
   config/     config.yaml + AUDIOSILO_BRIDGE_* (bridge.go: the Bridge's own settings)
   store/      SQLite, append-only migrations (0001 the engine, 0002 server_jobs,
               0003 generate_books, contrib_mode, server_id, deleted_stage_spend,
-              0004 workers)
+              0004 workers, 0005 books.goal)
   auth/       the page's single password + hashed sessions + login limiter
   -- Phase 1a --
   generate/   sidecars.generate: server job -> engine book -> .audiosilo/ + rescan;
-              sidecars.describe (Phase 1c): a description from a finished run's notes
+              sidecars.describe (Phase 1c): a description from a finished run's notes;
+              chapters.detect (Phase 1d): a chapterless book's chapters, no agent
   agentproto/ the staging protocol shared with the agent container (a leaf)
   agentbox/   the Bridge's side: an agent.Runner over the staging dir
   agentrun/   the agent container's side: `agent-runner` (claim, run, harvestable out/)
@@ -112,6 +115,7 @@ internal/
   -- the engine (from audiosilo-sidecars; app/engine.go runs it) --
   toolfetch/ audio/ asr/ transcript/ ebook/ scratch/ qa/ spelling/ agent/ repair/
   pipeline/ contrib/ state/ eta/ scheduler/ supervisor/ metaops/ events/ pricing/ fsutil/
+  chapterdetect/ (Phase 1d: chapters from the narration; pure, imported by pipeline)
 web/          the page: Vite + React 19 + TS + Tailwind v4; pure logic in src/lib
 docker/       entrypoint.sh (own /bridge-data, umask 022, drop to PUID:PGID)
 Dockerfile    slim | cuda | agent | full; compose.example.yaml: server, bridge, agent
@@ -145,9 +149,9 @@ in PACKAGES.md.
   use, checked again before each write), temp file then rename, umask 022, a
   targeted rescan after, deletes to `.audiosilo-trash/`. A library that isn't mapped
   and writable refuses a new write job (a resumed one parks and waits). Today the
-  only writer is `generate` (its two jobs): `characters.json`, `recaps.json`,
-  `description.json` (Phase 1c) and `bridge.json` in the book's `.audiosilo/` (a
-  single-file book's prefixed `<stem>.`), nothing else.
+  only writer is `generate` (its three jobs): `characters.json`, `recaps.json`,
+  `description.json` (Phase 1c), `chapters.json` (Phase 1d) and `bridge.json` in the
+  book's `.audiosilo/` (a single-file book's prefixed `<stem>.`), nothing else.
 - **The agent container's files are untrusted** (and the Bridge's are to it): every
   read goes through `agentproto.OpenRegular`/`ReadRegular` inside an `os.Root`, the
   harvest is capped, and a credential never leaves the agent container (only its
@@ -214,8 +218,23 @@ writes `description.json` with them, but never fails, parks or holds for it (the
 result says `description: false` and why; a regenerate that gets none keeps the
 earlier file vouched for in `bridge.json`); `sidecars.describe` (advertised beside
 `sidecars.generate`) writes one for a book already generated here, parking for the
-agent's parks. Local only: a contribution never carries it. See BRIDGE-PLAN.md's
-Status table for what is next.
+agent's parks. Local only: a contribution never carries it.
+
+**Phase 1d (chapterless books):** a single file with no usable chapter markers (none,
+or one covering the whole file) gets a WINDOWS manifest at inspect (windows of about
+25 minutes cut in silences, straight to splitting), is transcribed window by window,
+then `chapter_detecting` (after asr, mechanical, source-reading) finds the chapters in
+the narration (`internal/chapterdetect`: spoken headings after a pause, the spike's
+rules), moves the window layer into `windows/`, writes the DETECTED manifest, one
+synthesized raw per chapter and `chapters_detected.json` (the player's list, grouped
+by logical position), and the book carries on as an ordinary chaptered one. A
+detection that isn't confident parks `chapters_not_detected` (human only).
+`books.goal = chapters` (migration 0005) stops a book there: the `chapters.detect`
+job (speech recognition and detection only, no agent) writes `chapters.json` at its
+done; `sidecars.generate` writes it as soon as the chapters are found and continues
+a finished chapters run (`store.ContinueChapters`) rather than transcribing again.
+Titles found in the narration are never verified spelling evidence. See
+BRIDGE-PLAN.md's Status table for what is next.
 
 Operative caveats carried from sidecars (PACKAGES.md has the detail):
 - **audiosilo-meta is pinned** and the schema drift guard
