@@ -185,7 +185,7 @@ func TestWriteAttachments(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	s := sidecars{characters: []byte(`{"work":"w","characters":[]}`), recaps: []byte(`{"work":"w","recaps":[]}`)}
-	prov := provenance("0.2.0", 12, time.Date(2026, 10, 15, 9, 0, 0, 0, time.UTC), SourceAudio, "w",
+	prov := provenance("0.2.0", Kind, 12, time.Date(2026, 10, 15, 9, 0, 0, 0, time.UTC), SourceAudio, "w",
 		[]InputFile{{Path: "A/B/01.mp3", Size: 3, ModTime: 1700000000}})
 	if err := writeAttachments(dir, "", s, prov); err != nil {
 		t.Fatal(err)
@@ -284,14 +284,14 @@ func TestLoadSidecarsSkipsUnchangedFiles(t *testing.T) {
 	if err := os.Chtimes(chars, info.ModTime(), info.ModTime()); err != nil {
 		t.Fatal(err)
 	}
-	if s2, _ := r.loadSidecars(wd); s2.hash != s.hash {
+	if s2, _ := r.loadSidecars(wd); s2.hash() != s.hash() {
 		t.Fatal("unchanged files were read again")
 	}
 	later := info.ModTime().Add(time.Second)
 	if err := os.Chtimes(chars, later, later); err != nil {
 		t.Fatal(err)
 	}
-	if s3, _ := r.loadSidecars(wd); s3.hash == s.hash {
+	if s3, _ := r.loadSidecars(wd); s3.hash() == s.hash() {
 		t.Fatal("a changed file wasn't read again")
 	}
 }
@@ -310,6 +310,15 @@ func TestInputsOfEpub(t *testing.T) {
 	if in := inputsOf(mount, nil, outside); in[0].Path != "B.epub" {
 		t.Fatalf("outside = %+v, want the bare name", in)
 	}
+}
+
+// writeAttachments writes the attachments as a generate job's save does.
+func writeAttachments(dir, prefix string, s sidecars, prov Provenance) error {
+	files, err := attachmentFiles(s, prov)
+	if err != nil {
+		return err
+	}
+	return writeAttachFiles(dir, prefix, files)
 }
 
 // The sweep deletes the transcripts of finished books whose job ended at least
@@ -407,6 +416,114 @@ func TestPurgeEndedIsTheJobsBookOnly(t *testing.T) {
 	// The own book is recorded swept: the sweep finds only the other one.
 	if n, err := h.SweepTranscripts(ctx, 0); err != nil || n != 1 || present(other.WorkDir) {
 		t.Fatalf("sweep after = %d, %v", n, err)
+	}
+}
+
+// holdEngine is an engine whose holds are refused for the books in held.
+type holdEngine struct {
+	Engine
+	held map[int64]bool
+}
+
+func (e holdEngine) Hold(id int64) (func(), bool) { return func() {}, !e.held[id] }
+
+// A book the engine holds (a description reading it) isn't swept: the sweep leaves
+// it, unmarked, for the next one.
+func TestSweepSkipsAHeldBook(t *testing.T) {
+	t.Parallel()
+	db, err := store.Open(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	ctx := context.Background()
+	root := t.TempDir()
+	eng := holdEngine{held: map[int64]bool{}}
+	h := New(Options{DB: db, WorkRoot: root, Engine: func() Engine { return eng }, Poll: time.Millisecond})
+	wd := filepath.Join(root, "held")
+	mustWrite(t, filepath.Join(wd, "transcripts-raw", "ch001.json"), "x")
+	b, err := db.CreateBook(ctx, store.NewBook{SourcePath: "/lib/held", WorkDir: wd, Title: "held"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = db.SetBookState(ctx, b.ID, "done", "", "", "")
+	_ = db.PutGenerateBook(ctx, store.GenerateBook{ServerJobID: 1, BookID: &b.ID, LibraryID: 1, RelPath: "held"})
+	_ = db.EndGenerateBook(ctx, 1, time.Now().Add(-time.Hour))
+
+	eng.held[b.ID] = true
+	if n, err := h.SweepTranscripts(ctx, 0); err != nil || n != 0 || !present(wd) {
+		t.Fatalf("a held book: swept %d, %v, present %v", n, err, present(wd))
+	}
+	if err := h.purgeEnded(ctx, b.ID); err != nil || !present(wd) {
+		t.Fatalf("a held book purged at its job's end: %v", err)
+	}
+	delete(eng.held, b.ID)
+	if n, err := h.SweepTranscripts(ctx, 0); err != nil || n != 1 || present(wd) {
+		t.Fatalf("once released: swept %d, %v", n, err)
+	}
+}
+
+// readmitEngine is an engine that re-admits a book as it hands out the hold: the
+// Retry of a resumed job that landed while a purge waited for the hold.
+type readmitEngine struct {
+	Engine
+	readmit func(id int64)
+}
+
+func (e readmitEngine) Hold(id int64) (func(), bool) {
+	e.readmit(id)
+	return func() {}, true
+}
+
+// A purge reads the book again under the hold: one re-admitted while it waited
+// runs on its transcripts, so neither the job's end nor the sweep deletes them
+// (denied); a book still finished under the hold is purged (allowed).
+func TestPurgeRechecksTheBookUnderTheHold(t *testing.T) {
+	t.Parallel()
+	db, err := store.Open(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	ctx := context.Background()
+	root := t.TempDir()
+	readmitted := false
+	eng := readmitEngine{readmit: func(id int64) {
+		if readmitted {
+			_ = db.SetBookState(ctx, id, "fact_pass", "", "", "")
+		}
+	}}
+	h := New(Options{DB: db, WorkRoot: root, Engine: func() Engine { return eng }, Poll: time.Millisecond})
+	wd := filepath.Join(root, "readmitted")
+	mustWrite(t, filepath.Join(wd, "transcripts-raw", "ch001.json"), "x")
+	b, err := db.CreateBook(ctx, store.NewBook{SourcePath: "/lib/readmitted", WorkDir: wd, Title: "readmitted"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Cancelled by its job's end: failed, so finished when the purge looks.
+	_ = db.SetBookState(ctx, b.ID, "fact_pass", "failed", "cancelled", "")
+	_ = db.PutGenerateBook(ctx, store.GenerateBook{ServerJobID: 1, BookID: &b.ID, LibraryID: 1, RelPath: "readmitted"})
+	_ = db.EndGenerateBook(ctx, 1, time.Now().Add(-time.Hour))
+
+	readmitted = true
+	if err := h.purgeEnded(ctx, b.ID); err != nil || !present(wd) {
+		t.Fatalf("a book re-admitted under the job end's purge lost its transcripts: %v", err)
+	}
+	_ = db.SetBookState(ctx, b.ID, "fact_pass", "failed", "cancelled", "")
+	if n, err := h.SweepTranscripts(ctx, 0); err != nil || n != 0 || !present(wd) {
+		t.Fatalf("a book re-admitted under the sweep: swept %d, %v, present %v", n, err, present(wd))
+	}
+	readmitted = false
+	_ = db.SetBookState(ctx, b.ID, "fact_pass", "failed", "cancelled", "")
+	// Its job's mapping open again (the later claim re-opened it, its Retry not
+	// landed yet): still followed, so still not purged.
+	_ = db.ReopenGenerateBook(ctx, 1)
+	if err := h.purgeEnded(ctx, b.ID); err != nil || !present(wd) {
+		t.Fatalf("a book its job follows again lost its transcripts: %v", err)
+	}
+	_ = db.EndGenerateBook(ctx, 1, time.Now().Add(-time.Hour))
+	if n, err := h.SweepTranscripts(ctx, 0); err != nil || n != 1 || present(wd) {
+		t.Fatalf("a finished book: swept %d, %v, present %v", n, err, present(wd))
 	}
 }
 

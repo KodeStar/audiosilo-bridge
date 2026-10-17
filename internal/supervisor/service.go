@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	"github.com/kodestar/audiosilo-bridge/internal/config"
 	"github.com/kodestar/audiosilo-bridge/internal/pricing"
 	"github.com/kodestar/audiosilo-bridge/internal/scheduler"
+	"github.com/kodestar/audiosilo-bridge/internal/state"
 	"github.com/kodestar/audiosilo-bridge/internal/store"
 )
 
@@ -152,7 +154,7 @@ func (s *Service) check(ctx context.Context, trigger string) {
 		s.setCheck(err)
 		return
 	}
-	runsByBook, err := s.db.StageRunsAll(ctx)
+	runsByBook, err := s.engineRunsAll(ctx)
 	if err != nil {
 		s.setCheck(err)
 		return
@@ -251,10 +253,11 @@ func (s *Service) buildSnapshot(book store.Book, runs []store.StageRun, pass pas
 		AgentInvocations: pass.runtime.AgentInvocations, InvocationCapacity: pass.runtime.InvocationCapacity, BookInvocations: pass.runtime.InvocationsByBook[book.ID],
 		MaxAgentsPerBook: pass.runtime.MaxAgentsPerBook, RemainingWorkUnits: remaining}
 	for i := range runs {
-		if runs[i].FinishedAt != "" {
+		run := &runs[i] // the roll-up below writes through to snap.Runs
+		if run.FinishedAt != "" {
 			continue
 		}
-		children := pass.invocationsByRun[runs[i].ID]
+		children := pass.invocationsByRun[run.ID]
 		if len(children) > 0 {
 			oldestHeartbeat := children[0].HeartbeatAt
 			for _, child := range children[1:] {
@@ -265,7 +268,7 @@ func (s *Service) buildSnapshot(book store.Book, runs []store.StageRun, pass pas
 			// A fresh sibling must not hide a stale child behind the compatible
 			// parent roll-up. Classification therefore uses the oldest active
 			// invocation heartbeat for this fanned-out run.
-			runs[i].HeartbeatAt = oldestHeartbeat
+			run.HeartbeatAt = oldestHeartbeat
 			alive := true
 			checked := false
 			for _, child := range children {
@@ -287,8 +290,8 @@ func (s *Service) buildSnapshot(book store.Book, runs []store.StageRun, pass pas
 			break
 		}
 		// Legacy/pre-migration active process fallback.
-		if runs[i].ProcessActive && runs[i].ProcessID > 0 {
-			alive := processAlive(runs[i].ProcessID)
+		if run.ProcessActive && run.ProcessID > 0 {
+			alive := processAlive(run.ProcessID)
 			snap.ProcessAlive = &alive
 			break
 		}
@@ -305,11 +308,36 @@ func (s *Service) freshSnapshot(ctx context.Context, bookID int64, pass passRead
 	if err != nil {
 		return Snapshot{}, nil, err
 	}
-	runs, err := s.db.ListStageRuns(ctx, bookID)
+	runs, err := s.engineRunsOf(ctx, bookID)
 	if err != nil {
 		return Snapshot{}, nil, err
 	}
 	return s.buildSnapshot(book, runs, pass), runs, nil
+}
+
+// engineRunsOf and engineRunsAll are the supervisor's reads of the stage runs
+// (one book's, every book's), engine stages only: see engineRuns.
+func (s *Service) engineRunsOf(ctx context.Context, bookID int64) ([]store.StageRun, error) {
+	runs, err := s.db.ListStageRuns(ctx, bookID)
+	return engineRuns(runs), err
+}
+
+func (s *Service) engineRunsAll(ctx context.Context) (map[int64][]store.StageRun, error) {
+	byBook, err := s.db.StageRunsAll(ctx)
+	for id, runs := range byBook {
+		byBook[id] = engineRuns(runs)
+	}
+	return byBook, err
+}
+
+// engineRuns drops the runs of a stage outside the engine's state machine (the
+// description step's "describing", which the Bridge's jobs run on a finished book):
+// the supervisor recovers engine stages only, and such a run, open with no
+// scheduler worker or done with no sentinel, would read as a broken one. It
+// filters in place (each read's slice is its own) and returns runs as it is when
+// nothing is dropped.
+func engineRuns(runs []store.StageRun) []store.StageRun {
+	return slices.DeleteFunc(runs, func(r store.StageRun) bool { return !state.IsStage(state.State(r.Stage)) })
 }
 
 func primaryIncident(incidents []Incident) (Incident, bool) {
@@ -689,7 +717,7 @@ func (s *Service) Ask(ctx context.Context, bookID int64) (store.SupervisorRun, e
 	if err != nil {
 		return store.SupervisorRun{}, err
 	}
-	runs, err := s.db.ListStageRuns(ctx, bookID)
+	runs, err := s.engineRunsOf(ctx, bookID)
 	if err != nil {
 		return store.SupervisorRun{}, err
 	}

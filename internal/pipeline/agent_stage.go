@@ -302,6 +302,9 @@ func stageMaxTurns(stage state.State) int {
 		return 80
 	case state.FactPass, state.Synthesizing, state.Auditing, state.Fixing:
 		return 32
+	case state.State(DescribeStage):
+		// One small notes file in, one paragraph out.
+		return 10
 	default:
 		return 32
 	}
@@ -412,28 +415,42 @@ func (t *trackedAgentRunner) finish(res agent.Result, err error) {
 // (actionable, Retry-able); an exhausted output validator PARKS naming why; any other
 // error (render, transport, timeout) is returned as a plain error (StatusFailed).
 func (e *Executor) runAgent(ctx context.Context, book store.Book, stage state.State, r scheduler.StageReport, st *agent.Staging, promptName string, promptData any, web bool, validate func(agent.Result, *agent.Staging) error) (agentUsage, error) {
-	// Per-book budget preflight: park (with everything already recorded) BEFORE spending
-	// another invocation once the book's summed agent cost has reached the budget. It runs
-	// per runAgent call, so fact_pass (one runAgent per chunk) naturally checks between
-	// chunks; a single invocation is never aborted mid-flight. The budget sum prefers
-	// provider cost and falls back to complete configured API-equivalent estimates, and
-	// includes superseded rows, so a Retry never lowers the spend the guard sees.
+	if err := e.budgetPreflight(ctx, book, stage); err != nil {
+		return agentUsage{}, err
+	}
+	return e.runAgentWith(ctx, book, stage, r, st, promptName, promptData, web, validate, e.backoff)
+}
+
+// budgetPreflight is the per-book budget preflight: park (with everything already
+// recorded) BEFORE spending another invocation once the book's summed agent cost has
+// reached the budget. It runs per runAgent call, so fact_pass (one runAgent per
+// chunk) naturally checks between chunks; a single invocation is never aborted
+// mid-flight. The budget sum prefers provider cost and falls back to complete
+// configured API-equivalent estimates, and includes superseded rows, so a Retry never
+// lowers the spend the guard sees. The monthly budget is checked after it. The
+// description step calls it itself, before its preparation, then runAgentWith.
+func (e *Executor) budgetPreflight(ctx context.Context, book store.Book, stage state.State) error {
 	if e.db != nil && e.bookBudgetUSD > 0 {
 		spent, complete, serr := e.db.SumStageRunBudgetCost(ctx, book.ID)
 		if serr != nil {
-			return agentUsage{}, fmt.Errorf("%s: read book cost: %w", stage, serr)
+			return fmt.Errorf("%s: read book cost: %w", stage, serr)
 		}
 		if !complete {
 			e.log.Warn("agent: book budget has unpriced usage; known subtotal is not treated as the complete cost",
 				"book", book.ID, "known_usd", spent, "pricing_version", e.pricing.Version)
 		}
 		if spent >= e.bookBudgetUSD {
-			return agentUsage{}, scheduler.ParkWithCode(state.ParkBudgetExceeded, budgetExceededMsg(spent, e.bookBudgetUSD))
+			return scheduler.ParkWithCode(state.ParkBudgetExceeded, budgetExceededMsg(spent, e.bookBudgetUSD))
 		}
 	}
-	if err := e.checkMonthlyBudget(ctx, stage, time.Now()); err != nil {
-		return agentUsage{}, err
-	}
+	return e.checkMonthlyBudget(ctx, stage, time.Now())
+}
+
+// runAgentWith is runAgent after the budget preflight (its caller's), with the
+// rate-limit backoff schedule given: nil is the default (agent.DefaultBackoff), an
+// empty schedule waits out no rate limit at all (the limit parks at once, which
+// the description step needs: it must never hold the job that asked for it).
+func (e *Executor) runAgentWith(ctx context.Context, book store.Book, stage state.State, r scheduler.StageReport, st *agent.Staging, promptName string, promptData any, web bool, validate func(agent.Result, *agent.Staging) error, backoff []time.Duration) (agentUsage, error) {
 	runner, av := e.ensureAgent(ctx)
 	if runner == nil || !av.Available {
 		// PREFLIGHT unavailability: no CLI is configured/resolvable at all (not a transient
@@ -489,7 +506,6 @@ func (e *Executor) runAgent(ctx context.Context, book store.Book, stage state.St
 			}
 		},
 	}
-	backoff := e.backoff
 	if backoff == nil {
 		backoff = agent.DefaultBackoff()
 	}

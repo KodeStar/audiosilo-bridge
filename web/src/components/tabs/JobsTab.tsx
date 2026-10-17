@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { ApiError, errorText, type ApiClient } from '@/api/client';
-import type { GenerateResult, ServerJob, VerifyResult } from '@/api/types';
+import type { DescribeResult, GenerateResult, ServerJob, VerifyResult } from '@/api/types';
 import { useLoad } from '@/lib/useLoad';
 import { bytes, elapsed } from '@/lib/time';
 import {
@@ -19,10 +19,16 @@ import {
 import { VERIFY_KIND, parseVerifyResult, prettyJSON } from '@/lib/verify';
 import {
   canRetry,
+  descriptionText,
+  describeSummary,
   effectiveState,
   generateFacts,
+  isDescribe,
   isGenerate,
+  isSidecars,
+  kindLabel,
   parkOf,
+  parseDescribeResult,
   parseGenerateResult,
   resultSummary,
 } from '@/lib/generate';
@@ -164,9 +170,10 @@ function JobCard({
 }) {
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<{ kind: 'error' | 'info'; text: string } | null>(null);
-  const generate = isGenerate(job);
+  const sidecars = isSidecars(job);
+  const label = kindLabel(job.kind);
   const shown = effectiveState(job);
-  const progress = generate ? '' : progressText(job.progress);
+  const progress = sidecars ? '' : progressText(job.progress);
   const percent = progressPercent(job.progress);
   const report = reportText(job);
   const hint = stateHint(shown);
@@ -210,6 +217,7 @@ function JobCard({
           <a href={jobHash(job.id)} className="text-sm font-medium text-hi hover:underline">
             #{job.id}
           </a>
+          {label && <span className="text-sm text-body">{label}</span>}
           <code className="text-xs text-body">{job.kind}</code>
           <Badge tone={stateTone(shown)} title={hint || undefined}>
             {stateLabel(shown)}
@@ -237,7 +245,7 @@ function JobCard({
 
       {target && <p className="mt-2 text-sm break-all text-body">{target}</p>}
 
-      {generate && job.state === 'running' && <GenerateProgress job={job} />}
+      {sidecars && job.state === 'running' && <GenerateProgress job={job} />}
 
       {job.state === 'running' && progress && (
         <div className="mt-2 flex flex-col gap-1">
@@ -315,6 +323,8 @@ function ResultView({ job }: { job: ServerJob }) {
   if (verify) return <VerifyView result={verify} />;
   const generated = isGenerate(job) ? parseGenerateResult(job.result) : null;
   if (generated) return <GenerateView result={generated} />;
+  const described = isDescribe(job) ? parseDescribeResult(job.result) : null;
+  if (described) return <DescribeView result={described} />;
   return (
     <pre className="overflow-x-auto rounded-md bg-deep p-3 text-xs text-body">
       {prettyJSON(job.result)}
@@ -324,13 +334,12 @@ function ResultView({ job }: { job: ServerJob }) {
 
 function GenerateView({ result }: { result: GenerateResult }) {
   const links = Object.entries(result.contributed ?? {});
+  const description = descriptionText(result);
   return (
     <div className="flex flex-col gap-2 text-xs text-dim">
       <p className="text-sm text-body">{resultSummary(result)}</p>
-      <p>
-        Saved with <code className="break-all text-body">{result.path}</code> in its{' '}
-        <code>.audiosilo</code> folder: {result.files.join(', ')}
-      </p>
+      {description && <p>{description}</p>}
+      <SavedWith path={result.path} files={result.files} />
       {result.work_id && (
         <p>
           Work <code className="text-body">{result.work_id}</code>
@@ -349,6 +358,25 @@ function GenerateView({ result }: { result: GenerateResult }) {
         </ul>
       )}
     </div>
+  );
+}
+
+function DescribeView({ result }: { result: DescribeResult }) {
+  return (
+    <div className="flex flex-col gap-2 text-xs text-dim">
+      <p className="text-sm text-body">{describeSummary(result)}</p>
+      <SavedWith path={result.path} files={result.files} />
+    </div>
+  );
+}
+
+// SavedWith says where a sidecars job saved its files.
+function SavedWith({ path, files }: { path: string; files: string[] }) {
+  return (
+    <p>
+      Saved with <code className="break-all text-body">{path}</code> in its <code>.audiosilo</code>{' '}
+      folder: {files.join(', ')}
+    </p>
   );
 }
 

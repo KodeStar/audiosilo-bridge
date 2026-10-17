@@ -88,7 +88,7 @@ func (f *fakeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		var body map[string]any
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		f.rescans = append(f.rescans, body)
-		_ = json.NewEncoder(w).Encode(map[string]any{"path": body["path"], "attachments": map[string]bool{"characters": true, "recaps": true, "bridge": true}})
+		_ = json.NewEncoder(w).Encode(map[string]any{"path": body["path"], "attachments": map[string]bool{"characters": true, "recaps": true, "description": true, "bridge": true}})
 	default:
 		http.NotFound(w, r)
 	}

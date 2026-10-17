@@ -150,7 +150,8 @@ func New(ctx context.Context, opts Options) (*Bridge, string, error) {
 		}
 		return nil
 	})
-	b.gen = generate.New(generate.Options{DB: db, Engine: b.engine.generateEngine, Libraries: b.libs, Mount: b.mount,
+	b.gen = generate.New(generate.Options{DB: db, Engine: b.engine.generateEngine, Describer: b.engine.describer,
+		Libraries: b.libs, Mount: b.mount,
 		Server: func() generate.Server {
 			if cl := b.conn.Client(); cl != nil {
 				return cl
@@ -160,7 +161,7 @@ func New(ctx context.Context, opts Options) (*Bridge, string, error) {
 		WorkRoot: filepath.Join(opts.DataDir, "work"), Version: opts.Version, RetentionDays: cfg.Transcripts.RetentionDays,
 		CanContribute: b.canContribute, Log: opts.Logger})
 	b.runner = jobs.New(db, b.server, b.tokenRefused, jobs.Options{Log: opts.Logger,
-		ServerID: func() string { return b.conn.Pairing().ServerID }}, verifier, b.gen)
+		ServerID: func() string { return b.conn.Pairing().ServerID }}, verifier, b.gen, b.gen.DescribeJob())
 	conn.onChange = b.linkChanged
 	return b, oneTime, nil
 }

@@ -213,3 +213,27 @@ func TestFactPassBranchesShareTheSpoilerContract(t *testing.T) {
 		t.Error("ebook branch names the wrong text directory")
 	}
 }
+
+// The description prompt renders both source branches, states the exact output
+// shape its strict reader enforces, and keeps to hyphens.
+func TestDescriptionPromptRenders(t *testing.T) {
+	type data struct {
+		Title, Authors, Series, SeriesPos string
+		Chapters, ChapterCount            int
+		IsEbook                           bool
+	}
+	for _, ebook := range []bool{false, true} {
+		out, err := Render("description.md", data{Title: "T", Authors: "A", Series: "S", SeriesPos: "2", Chapters: 3, ChapterCount: 12, IsEbook: ebook})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, want := range []string{"opening.md", `{"text": "The description paragraph."}`, "exactly one", "3 of 12 chapters", "S book 2", "skip over invent"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("ebook=%v: prompt lacks %q", ebook, want)
+			}
+		}
+		if strings.Contains(out, "\u2014") {
+			t.Error("the prompt has an em dash")
+		}
+	}
+}

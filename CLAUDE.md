@@ -36,7 +36,8 @@ supervisor) came from **audiosilo-sidecars** with its history (`git log --follow
 and `git blame` reach the reliability fixes). sidecars stays usable until Phase 4,
 then is archived with the manager. Phase 0 imported and tested the engine; Phase 1a
 runs it (`internal/app/engine.go`) behind the `sidecars.generate` job
-(`internal/generate`), which writes the results into the book's `.audiosilo/`.
+(`internal/generate`), which writes the results into the book's `.audiosilo/`;
+Phase 1c adds the description step and the `sidecars.describe` job beside it.
 
 ## Build / test / gate
 
@@ -98,7 +99,8 @@ internal/
               0004 workers)
   auth/       the page's single password + hashed sessions + login limiter
   -- Phase 1a --
-  generate/   sidecars.generate: server job -> engine book -> .audiosilo/ + rescan
+  generate/   sidecars.generate: server job -> engine book -> .audiosilo/ + rescan;
+              sidecars.describe (Phase 1c): a description from a finished run's notes
   agentproto/ the staging protocol shared with the agent container (a leaf)
   agentbox/   the Bridge's side: an agent.Runner over the staging dir
   agentrun/   the agent container's side: `agent-runner` (claim, run, harvestable out/)
@@ -143,8 +145,9 @@ in PACKAGES.md.
   use, checked again before each write), temp file then rename, umask 022, a
   targeted rescan after, deletes to `.audiosilo-trash/`. A library that isn't mapped
   and writable refuses a new write job (a resumed one parks and waits). Today the
-  only writer is `generate`: `characters.json`, `recaps.json` and `bridge.json` in the
-  book's `.audiosilo/` (a single-file book's prefixed `<stem>.`), nothing else.
+  only writer is `generate` (its two jobs): `characters.json`, `recaps.json`,
+  `description.json` (Phase 1c) and `bridge.json` in the book's `.audiosilo/` (a
+  single-file book's prefixed `<stem>.`), nothing else.
 - **The agent container's files are untrusted** (and the Bridge's are to it): every
   read goes through `agentproto.OpenRegular`/`ReadRegular` inside an `os.Root`, the
   harvest is capped, and a credential never leaves the agent container (only its
@@ -191,7 +194,28 @@ install`/`uninstall` (launchd agent, systemd user unit), worker tokens on the pa
 the protocol-version refusal, and the engine's ASR as `workers.Router`: remote when a
 worker is connected, else `asr.worker_fallback` (`local`, the default, which yields
 to a worker that connects mid-decode; or `wait`, which parks `asr_worker_waiting`
-until one connects). See BRIDGE-PLAN.md's Status table for what is next.
+until one connects).
+
+**Phase 1c (own-words descriptions):** the description step
+(`pipeline.Executor.Describe`, not an engine stage: its own `describing` stage run
+on the book, which the reconcile and the supervisor skip, run under the
+scheduler's `Hold` on the book, or inside the contributing stage) writes a spoiler-free
+description from the fact notes of the book's opening chapters ONLY (the staged dir
+holds `opening.md` and nothing else: no transcript, no `knowledge-final.md`, no later
+chapter), validated (shape, length, voice, meta's description schema, the n-gram
+check against whatever source text is left: the retention removes an audio book's
+transcripts, and an ebook's text goes as it reaches done, so the contributing stage
+of a book a `sidecars.generate` job follows runs it first, best effort and once,
+while that text is there) and composed with the run's work
+and sources. `sidecars.generate` runs it at its finish, after the characters and
+recaps are saved (reusing the contributing stage's for free, its check kept; once
+more at done when it first ran at a contributing park), and
+writes `description.json` with them, but never fails, parks or holds for it (the
+result says `description: false` and why; a regenerate that gets none keeps the
+earlier file vouched for in `bridge.json`); `sidecars.describe` (advertised beside
+`sidecars.generate`) writes one for a book already generated here, parking for the
+agent's parks. Local only: a contribution never carries it. See BRIDGE-PLAN.md's
+Status table for what is next.
 
 Operative caveats carried from sidecars (PACKAGES.md has the detail):
 - **audiosilo-meta is pinned** and the schema drift guard

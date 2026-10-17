@@ -29,6 +29,13 @@ func TestSidecarConstantsMatchUpstreamSchema(t *testing.T) {
 	assertMaxLength(t, "recaps.in_short", topProps(t, recaps)["in_short"], capInShort)
 	assertMaxLength(t, "recaps.ending", topProps(t, recaps)["ending"], capEnding)
 
+	// The description's bounds (both ends: the schema has a floor too).
+	descText := topProps(t, loadSchema(t, "schema/description.schema.json"))["text"]
+	assertMaxLength(t, "description.text", descText, descriptionMaxRunes)
+	if got, ok := asObj(t, descText)["minLength"].(float64); !ok || int(got) != descriptionMinRunes {
+		t.Errorf("description.text minLength = %v, local floor = %d", asObj(t, descText)["minLength"], descriptionMinRunes)
+	}
+
 	// Enums (schema enum <-> the local validRoles/validScopes sets).
 	assertEnumSet(t, "characters.role", charProps["role"], validRoles)
 	assertEnumSet(t, "recaps.scope", recapProps["scope"], validScopes)

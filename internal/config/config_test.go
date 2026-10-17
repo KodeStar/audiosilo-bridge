@@ -239,8 +239,8 @@ func TestValidateAgentFields(t *testing.T) {
 	good := Default()
 	good.Agent.Backend = AgentBackendClaude
 	good.Agent.TimeoutMinutes = 1
-	good.Agent.Claude = map[string]string{"fact_pass": "sonnet", "auditing": "opus"}
-	good.Agent.OpenAI = map[string]string{"synthesizing": "gpt-x"}
+	good.Agent.Claude = map[string]string{"fact_pass": "sonnet", "auditing": "opus", "describing": "haiku"}
+	good.Agent.OpenAI = map[string]string{"synthesizing": "gpt-x", "describing": "gpt-y"}
 	if err := good.Validate(); err != nil {
 		t.Errorf("Validate() = %v, want nil for valid agent config", err)
 	}
@@ -259,6 +259,7 @@ func TestDefaultSeedsClaudeModels(t *testing.T) {
 		"synthesizing":        "opus",
 		"auditing":            "opus",
 		"fixing":              "opus",
+		"describing":          "sonnet",
 	}
 	for k, v := range want {
 		if cfg.Agent.Claude[k] != v {

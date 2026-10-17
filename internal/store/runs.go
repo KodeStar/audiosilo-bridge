@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 )
 
@@ -233,6 +234,28 @@ func (db *DB) SumStageRunBudgetCost(ctx context.Context, bookID int64) (cost flo
 	return cost, unknown == 0, err
 }
 
+// StageRunBudgetCost returns one stage run's spend on the budget basis (the
+// description step reports what its own run cost). ErrNotFound for no such run.
+func (db *DB) StageRunBudgetCost(ctx context.Context, runID int64) (float64, error) {
+	var cost float64
+	err := db.sql.QueryRowContext(ctx, `SELECT `+budgetCostSQL+` FROM stage_runs WHERE id=?`, runID).Scan(&cost)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, ErrNotFound
+	}
+	return cost, err
+}
+
+// LatestOkStageRun returns the book's newest successful run of stage, or
+// ErrNotFound when there is none.
+func (db *DB) LatestOkStageRun(ctx context.Context, bookID int64, stage string) (StageRun, error) {
+	r, err := scanRun(db.sql.QueryRowContext(ctx,
+		`SELECT `+runCols+` FROM stage_runs WHERE book_id=? AND stage=? AND ok=1 ORDER BY id DESC LIMIT 1`, bookID, stage))
+	if errors.Is(err, sql.ErrNoRows) {
+		return StageRun{}, ErrNotFound
+	}
+	return r, err
+}
+
 // StageRunStarts returns each book's earliest stage-run start (MIN(started_at))
 // bucketed by book id, in ONE grouped query so the book-list endpoint attaches a
 // per-book "started at" without an N+1. started_at is the store's fixed-width UTC
@@ -280,6 +303,14 @@ func (db *DB) CountStageRuns(ctx context.Context, bookID int64, stage string) (i
 	err := db.sql.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM stage_runs WHERE book_id=? AND stage=?`, bookID, stage).Scan(&n)
 	return n, err
+}
+
+// NextStageAttempt is the attempt number a new run of stage on a book takes: one
+// past every run already recorded, so two runs never share one (an agent stage's
+// staging dir is named by it, and a new one wipes a dir of the same name).
+func (db *DB) NextStageAttempt(ctx context.Context, bookID int64, stage string) (int, error) {
+	n, err := db.CountStageRuns(ctx, bookID, stage)
+	return n + 1, err
 }
 
 // CountStageSuccesses returns how many runs of stage completed ok AND are not

@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/kodestar/audiosilo-meta/pkg/model"
@@ -24,9 +25,10 @@ const AttachDir = ".audiosilo"
 
 // The attachment names (a single-file book's get "<stem>." in front).
 const (
-	charactersName = "characters.json"
-	recapsName     = "recaps.json"
-	provenanceName = "bridge.json"
+	charactersName  = "characters.json"
+	recapsName      = "recaps.json"
+	descriptionName = "description.json"
+	provenanceName  = "bridge.json"
 )
 
 // maxAttachment is the largest attachment the server reads (4 MiB); a bigger one
@@ -34,15 +36,24 @@ const (
 const maxAttachment = 4 << 20
 
 // sidecars are a finished engine book's validated characters and recaps, as the
-// pipeline left them (pipeline.FinalSidecarsPaths).
+// pipeline left them (pipeline.FinalSidecarsPaths), and the description the run's
+// description step read back (pipeline.FinalDescriptionPath), when it has one.
 type sidecars struct {
-	characters, recaps []byte
-	nChars, nRecaps    int
+	characters, recaps, description []byte
+	nChars, nRecaps                 int
 	// workID is the slug the files name (the resolved work, or the pipeline's
 	// placeholder).
 	workID string
-	// hash identifies the content, so the same files aren't written twice.
-	hash string
+}
+
+// hash identifies the content, so the same files aren't written twice.
+func (s sidecars) hash() string {
+	h := sha256.New()
+	for _, b := range [][]byte{s.characters, s.recaps, s.description} {
+		_, _ = h.Write(b)
+		_, _ = h.Write([]byte{0})
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // sidecarsSig is the size and modification time of the engine's sidecar files
@@ -64,35 +75,53 @@ func sidecarsSig(workDir string) string {
 	return ""
 }
 
+// readAttachment reads one of the engine's files for the library: nil when it
+// isn't there, an error over the server's size cap.
+func readAttachment(path string) ([]byte, error) {
+	f, err := os.Open(path) //nolint:gosec // the engine's own work dir
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	b, err := io.ReadAll(io.LimitReader(f, maxAttachment+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(b) > maxAttachment {
+		return nil, fmt.Errorf("%s is larger than %d bytes, which the server won't read", filepath.Base(path), maxAttachment)
+	}
+	return b, nil
+}
+
+// readDescription reads the engine's description.json at path (nil when there is
+// none): it must decode into the community model, which it returns too.
+func readDescription(path string) ([]byte, model.Description, error) {
+	var d model.Description
+	b, err := readAttachment(path)
+	if err != nil || b == nil {
+		return nil, d, err
+	}
+	if err := json.Unmarshal(b, &d); err != nil {
+		return nil, d, fmt.Errorf("the engine's description.json doesn't decode: %w", err)
+	}
+	return b, d, nil
+}
+
 // readSidecars reads the engine's characters.json and recaps.json: each must
-// decode into the community model and fit the server's size cap. A missing file
-// is skipped; neither present is an error.
+// decode into the community model and fit the server's size cap. A missing file is
+// skipped; neither present is an error. The description is never read here: the
+// run ships only the one its own step read back (write).
 func readSidecars(workDir string) (sidecars, error) {
 	var s sidecars
-	read := func(path string) ([]byte, error) {
-		f, err := os.Open(path) //nolint:gosec // the engine's own work dir
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, nil
-		}
-		if err != nil {
-			return nil, err
-		}
-		defer func() { _ = f.Close() }()
-		b, err := io.ReadAll(io.LimitReader(f, maxAttachment+1))
-		if err != nil {
-			return nil, err
-		}
-		if len(b) > maxAttachment {
-			return nil, fmt.Errorf("%s is larger than %d bytes, which the server won't read", filepath.Base(path), maxAttachment)
-		}
-		return b, nil
-	}
 	charsPath, recapsPath := pipeline.FinalSidecarsPaths(workDir)
 	var err error
-	if s.characters, err = read(charsPath); err != nil {
+	if s.characters, err = readAttachment(charsPath); err != nil {
 		return sidecars{}, err
 	}
-	if s.recaps, err = read(recapsPath); err != nil {
+	if s.recaps, err = readAttachment(recapsPath); err != nil {
 		return sidecars{}, err
 	}
 	if s.characters == nil && s.recaps == nil {
@@ -115,11 +144,6 @@ func readSidecars(workDir string) (sidecars, error) {
 			s.workID = r.Work
 		}
 	}
-	h := sha256.New()
-	_, _ = h.Write(s.characters)
-	_, _ = h.Write([]byte{0})
-	_, _ = h.Write(s.recaps)
-	s.hash = hex.EncodeToString(h.Sum(nil))
 	return s, nil
 }
 
@@ -133,6 +157,29 @@ type Provenance struct {
 	Source      string      `json:"source"`
 	WorkID      string      `json:"work_id"`
 	Inputs      []InputFile `json:"inputs"`
+	// Description is how description.json was made (Phase 1c; the server reads
+	// only the fields above). Absent when no description was written with these.
+	Description *DescriptionProvenance `json:"description,omitempty"`
+}
+
+// DescriptionProvenance is bridge.json's description object: which job wrote
+// description.json and when, from what (the opening chapters' fact notes), and
+// what its no-verbatim check measured against.
+type DescriptionProvenance struct {
+	JobID          int64  `json:"job_id"`
+	GeneratedAt    string `json:"generated_at"`
+	From           string `json:"from"`
+	Chapters       int    `json:"chapters"`
+	CheckedAgainst string `json:"checked_against"`
+}
+
+// descriptionFrom is the only source a description is written from.
+const descriptionFrom = "opening_notes"
+
+// descriptionProvenance composes the description object for res, written by job.
+func descriptionProvenance(jobID int64, res pipeline.DescribeResult) *DescriptionProvenance {
+	return &DescriptionProvenance{JobID: jobID, GeneratedAt: res.GeneratedAt.UTC().Format(time.RFC3339), From: descriptionFrom,
+		Chapters: res.Chapters, CheckedAgainst: res.CheckedAgainst}
 }
 
 // InputFile is one file the run read, its path relative to the library root.
@@ -162,36 +209,42 @@ func inputsOf(mount string, files []link.BookFile, epub string) []InputFile {
 	return out
 }
 
-// writeAttachments writes the sidecars and the provenance into dir/.audiosilo/
-// (contract section 4); attachmentNames names what it writes. The folder is made
-// 0755 if missing and refused when it is a link or not a folder; each file goes
-// to a temp file inside it, 0644, then is renamed into place, so the server never
-// reads half a file. Only these JSON names are ever written there.
-func writeAttachments(dir, prefix string, s sidecars, prov Provenance) error {
-	adir := filepath.Join(dir, AttachDir)
-	info, err := os.Lstat(adir)
-	switch {
-	case errors.Is(err, os.ErrNotExist):
-		if err := os.Mkdir(adir, 0o755); err != nil { //nolint:gosec // the server (another user) reads it
-			return err
-		}
-		// The umask may have narrowed it; the server must be able to list it.
-		if err := os.Chmod(adir, 0o755); err != nil { //nolint:gosec // as above
-			return err
-		}
-	case err != nil:
-		return err
-	case info.Mode()&os.ModeSymlink != 0 || !info.IsDir():
-		return fmt.Errorf("the book's %s exists and isn't a folder; the Bridge won't write through it", AttachDir)
+// attachmentFiles are the sidecars and the provenance as the files written into
+// the book's .audiosilo/ (contract section 4); attachmentNames names them.
+func attachmentFiles(s sidecars, prov Provenance) ([]attachFile, error) {
+	provJSON, err := indentJSON(prov)
+	if err != nil {
+		return nil, err
 	}
-	provJSON, err := json.MarshalIndent(prov, "", "  ")
+	return []attachFile{{charactersName, s.characters}, {recapsName, s.recaps}, {descriptionName, s.description},
+		{provenanceName, provJSON}}, nil
+}
+
+// indentJSON is v as bridge.json is written: indented, a newline at the end.
+func indentJSON(v any) ([]byte, error) {
+	out, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	return append(out, '\n'), nil
+}
+
+// attachFile is one file for the book's .audiosilo/ (nil data: not written).
+type attachFile struct {
+	name string
+	data []byte
+}
+
+// writeAttachFiles writes files into dir/.audiosilo/. The folder is made 0755 if
+// missing and refused when it is a link or not a folder; each file goes to a temp
+// file inside it, 0644, then is renamed into place, so the server never reads half
+// a file. Only the known JSON names are ever written there.
+func writeAttachFiles(dir, prefix string, files []attachFile) error {
+	adir, err := attachFolder(dir)
 	if err != nil {
 		return err
 	}
-	for _, f := range []struct {
-		name string
-		data []byte
-	}{{charactersName, s.characters}, {recapsName, s.recaps}, {provenanceName, append(provJSON, '\n')}} {
+	for _, f := range files {
 		if f.data == nil {
 			continue
 		}
@@ -203,8 +256,110 @@ func writeAttachments(dir, prefix string, s sidecars, prov Provenance) error {
 	return nil
 }
 
-// provenance composes bridge.json.
-func provenance(version string, jobID int64, now time.Time, source, workID string, inputs []InputFile) Provenance {
-	return Provenance{Generator: "audiosilo-bridge", Version: version, Kind: Kind, JobID: jobID,
+// attachFolder is dir/.audiosilo/, made 0755 when missing; a link or a file
+// there is refused.
+func attachFolder(dir string) (string, error) {
+	adir := filepath.Join(dir, AttachDir)
+	info, err := os.Lstat(adir)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		if err := os.Mkdir(adir, 0o755); err != nil { //nolint:gosec // the server (another user) reads it
+			return "", err
+		}
+		// The umask may have narrowed it; the server must be able to list it.
+		if err := os.Chmod(adir, 0o755); err != nil { //nolint:gosec // as above
+			return "", err
+		}
+	case err != nil:
+		return "", err
+	case info.Mode()&os.ModeSymlink != 0 || !info.IsDir():
+		return "", fmt.Errorf("the book's %s exists and isn't a folder; the Bridge won't write through it", AttachDir)
+	}
+	return adir, nil
+}
+
+// maxProvenance bounds the read of an existing bridge.json (the Bridge's own,
+// a few hundred bytes).
+const maxProvenance = 256 << 10
+
+// describedProvenance is bridge.json after a description-only job: the existing
+// file with its description object added or replaced (every other field kept as
+// it is), or, when there is none (or it isn't a JSON object, or isn't a regular
+// file), fresh with the usual fields.
+func describedProvenance(dir, prefix string, fresh Provenance) ([]byte, error) {
+	existing := readProvenance(filepath.Join(dir, AttachDir), prefix+provenanceName)
+	if existing == nil {
+		return indentJSON(fresh)
+	}
+	desc, err := json.Marshal(fresh.Description)
+	if err != nil {
+		return nil, err
+	}
+	existing["description"] = desc
+	return indentJSON(existing)
+}
+
+// keptDescription is the description object of the book's bridge.json, when a
+// description.json is in place beside it: a run that writes no description of its
+// own leaves an earlier run's file there (nothing deletes into a library), and the
+// new bridge.json carries over what vouches for it. nil when either is missing,
+// isn't a regular file, or holds no description object.
+func keptDescription(dir, prefix string) *DescriptionProvenance {
+	adir := filepath.Join(dir, AttachDir)
+	if info, err := os.Lstat(filepath.Join(adir, prefix+descriptionName)); err != nil || !info.Mode().IsRegular() {
+		return nil
+	}
+	raw, ok := readProvenance(adir, prefix+provenanceName)["description"]
+	if !ok {
+		return nil
+	}
+	var d *DescriptionProvenance
+	if json.Unmarshal(raw, &d) != nil {
+		return nil
+	}
+	return d
+}
+
+// readProvenance reads adir/name (a bridge.json) as a JSON object, nil when there
+// is none fit to keep. The library is another program's folder, so the read is
+// the agent container's kind (agentproto.ReadRegular, which generate may not
+// import): inside adir as an os.Root, of the regular file that was looked at (a
+// link, FIFO or device swapped in after the look is refused, the open never
+// blocking), capped. A .audiosilo that is itself a link is not read through.
+func readProvenance(adir, name string) map[string]json.RawMessage {
+	if info, err := os.Lstat(adir); err != nil || !info.IsDir() {
+		return nil
+	}
+	root, err := os.OpenRoot(adir)
+	if err != nil {
+		return nil
+	}
+	defer func() { _ = root.Close() }()
+	before, err := root.Lstat(name)
+	if err != nil || !before.Mode().IsRegular() || before.Size() > maxProvenance {
+		return nil
+	}
+	f, err := root.OpenFile(name, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil
+	}
+	defer func() { _ = f.Close() }()
+	if info, err := f.Stat(); err != nil || !os.SameFile(before, info) {
+		return nil
+	}
+	raw, err := io.ReadAll(io.LimitReader(f, maxProvenance+1))
+	if err != nil || len(raw) > maxProvenance {
+		return nil
+	}
+	var m map[string]json.RawMessage
+	if json.Unmarshal(raw, &m) != nil || m == nil {
+		return nil
+	}
+	return m
+}
+
+// provenance composes bridge.json for a job of kind.
+func provenance(version, kind string, jobID int64, now time.Time, source, workID string, inputs []InputFile) Provenance {
+	return Provenance{Generator: "audiosilo-bridge", Version: version, Kind: kind, JobID: jobID,
 		GeneratedAt: now.UTC().Format(time.RFC3339), Source: source, WorkID: workID, Inputs: inputs}
 }

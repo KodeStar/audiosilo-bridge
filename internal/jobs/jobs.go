@@ -34,6 +34,10 @@ type Job struct {
 	Path      *string
 	Params    json.RawMessage
 	Attempt   int
+	// Resumed: the runner resumed the job under its claim (after a restart, or
+	// once a refused token works again) instead of claiming it now, so an earlier
+	// run of it may have spent already.
+	Resumed bool
 }
 
 // Handler runs one job kind.
@@ -352,6 +356,7 @@ func (r *Runner) recover(ctx context.Context, srv Server, wg *sync.WaitGroup) bo
 			continue
 		}
 		r.log.Info("bridge: resuming a job after a restart", "job", job.ID, "kind", job.Kind, "attempt", job.Attempt)
+		job.Resumed = true
 		r.launch(ctx, srv, job, wg, sj.Error)
 	}
 	return true
@@ -402,6 +407,7 @@ func (r *Runner) resumeStranded(ctx context.Context, srv Server, wg *sync.WaitGr
 			continue
 		}
 		r.log.Info("bridge: resuming a job its refused token stopped", "job", job.ID, "kind", job.Kind, "attempt", job.Attempt)
+		job.Resumed = true
 		r.launch(ctx, srv, job, wg, sj.Error)
 	}
 }

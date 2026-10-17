@@ -256,13 +256,18 @@ func TestHeartbeatEstimates(t *testing.T) {
 
 func TestRescanAttachments(t *testing.T) {
 	t.Parallel()
-	f, c := newFake(t, http.StatusOK, `{"path":"A/B","attachments":{"characters":true,"recaps":true,"bridge":false}}`)
+	f, c := newFake(t, http.StatusOK, `{"path":"A/B","attachments":{"characters":true,"recaps":true,"description":true,"bridge":false}}`)
 	got, err := c.RescanAttachments(context.Background(), 1, "A/B")
-	if err != nil || !got.Characters || !got.Recaps || got.Bridge {
+	if err != nil || !got.Characters || !got.Recaps || !got.Description || got.Bridge {
 		t.Fatalf("RescanAttachments = %+v, %v", got, err)
 	}
 	if f.last.URL.Path != "/api/v1/bridge/rescan" || f.sent != `{"library_id":1,"mode":"attachments","path":"A/B"}` {
 		t.Fatalf("request = %s %s", f.last.URL.Path, f.sent)
+	}
+	// An older server sends no description: it reads as not indexed.
+	f.body = `{"path":"A/B","attachments":{"characters":true,"recaps":true,"bridge":true}}`
+	if got, err := c.RescanAttachments(context.Background(), 1, "A/B"); err != nil || got.Description {
+		t.Fatalf("older server = %+v, %v", got, err)
 	}
 	f.status, f.body = http.StatusNotFound, `{"error":"no indexed book there","code":"not_indexable"}`
 	if _, err := c.RescanAttachments(context.Background(), 1, "A/B"); !errors.Is(err, ErrNotIndexable) {

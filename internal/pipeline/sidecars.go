@@ -81,6 +81,11 @@ func decodeSidecarFile(path string, v any) error {
 	if err != nil {
 		return err
 	}
+	return decodeSidecarBytes(raw, v)
+}
+
+// decodeSidecarBytes is decodeSidecarFile's strict decode, for bytes already read.
+func decodeSidecarBytes(raw []byte, v any) error {
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(v); err != nil {

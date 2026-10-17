@@ -1106,3 +1106,30 @@ func TestListBookTrackingCarriesWorkID(t *testing.T) {
 		t.Errorf("unresolved work id = %q, want empty", got)
 	}
 }
+
+// The next attempt is one past every recorded run (open, failed and done alike),
+// and the latest ok run is the newest success of that stage only.
+func TestNextStageAttemptAndLatestOkStageRun(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	b, _ := db.CreateBook(ctx, NewBook{SourcePath: "/x", WorkDir: "/w", Title: "X"})
+	if n, err := db.NextStageAttempt(ctx, b.ID, "describing"); err != nil || n != 1 {
+		t.Fatalf("first attempt = %d, %v", n, err)
+	}
+	if _, err := db.LatestOkStageRun(ctx, b.ID, "describing"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("no runs = %v", err)
+	}
+	first, _ := db.StartStageRun(ctx, b.ID, "describing", 1)
+	_ = db.FinishStageRun(ctx, first, true, json.RawMessage(`{"chapters":2}`))
+	failed, _ := db.StartStageRun(ctx, b.ID, "describing", 2)
+	_ = db.FinishStageRun(ctx, failed, false, nil)
+	other, _ := db.StartStageRun(ctx, b.ID, "asr", 1)
+	_ = db.FinishStageRun(ctx, other, true, nil)
+	if n, _ := db.NextStageAttempt(ctx, b.ID, "describing"); n != 3 {
+		t.Fatalf("next attempt = %d, want 3", n)
+	}
+	r, err := db.LatestOkStageRun(ctx, b.ID, "describing")
+	if err != nil || r.ID != first || string(r.Metrics) != `{"chapters":2}` {
+		t.Fatalf("latest ok = %+v, %v", r, err)
+	}
+}

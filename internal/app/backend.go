@@ -226,8 +226,9 @@ func (b *Bridge) Job(ctx context.Context, id int64) (*store.ServerJob, error) {
 	return job, err
 }
 
-// RetryJob retries a parked sidecars.generate job: the engine re-admits its book,
-// or a job waiting for its book's folder to be writable checks again now.
+// RetryJob retries a parked sidecars job: the engine re-admits a generate job's
+// book, or a job waiting in a park of its own (its book's folder not writable, a
+// description waiting out an agent park) tries again now.
 func (b *Bridge) RetryJob(ctx context.Context, id int64) error {
 	err := b.gen.Retry(ctx, id)
 	switch {

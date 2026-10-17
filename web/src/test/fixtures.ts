@@ -101,6 +101,23 @@ export function generateJobFixture(over: Partial<ServerJob> = {}): ServerJob {
   });
 }
 
+export function describeJobFixture(over: Partial<ServerJob> = {}): ServerJob {
+  return jobFixture({
+    id: 14,
+    kind: 'sidecars.describe',
+    params: {},
+    progress: {
+      step: 'describing',
+      message: 'Writing a description',
+      total: 1,
+      stage: 'describing',
+      cost_usd: 0.04,
+      source: 'audio',
+    },
+    ...over,
+  });
+}
+
 export function engineFixture(over: Partial<Engine> = {}): Engine {
   return {
     started: true,
