@@ -260,6 +260,26 @@ func adaptOpenAI(sanitized []byte, meta Meta) (Transcript, error) {
 	}, nil
 }
 
+// EncodeOpenAI renders t as a raw transcript in the openai-whisper shape (what
+// mlx-whisper writes): the inverse of the adapter above, through the same types, so
+// a raw made from a transcript (Phase 1d's re-timed chapters) reads back as one
+// (Complete, Normalize). The text is the segments' texts joined, as whisper writes
+// it; the segments and each segment's words are never null.
+func EncodeOpenAI(t Transcript) ([]byte, error) {
+	d := owDoc{Language: t.Language, Segments: make([]owSegment, 0, len(t.Segments))}
+	var text strings.Builder
+	for _, s := range t.Segments {
+		words := make([]owWord, 0, len(s.Words))
+		for _, w := range s.Words {
+			words = append(words, owWord{Word: w.W, Start: w.Start, End: w.End, Probability: finite(w.P)})
+		}
+		d.Segments = append(d.Segments, owSegment{ID: s.ID, Start: s.Start, End: s.End, Text: s.Text, Words: words})
+		text.WriteString(s.Text)
+	}
+	d.Text = text.String()
+	return json.Marshal(d)
+}
+
 // --- whisper.cpp -ojf adapter ---
 
 type wcOffsets struct {

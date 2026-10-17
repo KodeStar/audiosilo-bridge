@@ -266,14 +266,27 @@ func (e *Executor) spellingResearch(ctx context.Context, book store.Book, r sche
 
 // ensureMarkerTitles writes marker_titles.txt (one line per manifest chapter: the
 // marker title, falling back to the chapter title) if it is not already present.
+//
+// The file only ever holds the PUBLISHER's titles: a detected manifest's (Phase 1d)
+// were heard in this very transcript, misheard names and all, and as verified
+// evidence and an attestation source (referenceSources, the dry-run corpus,
+// allowedReferenceFile) they would make a misheard name attest itself. Its file is
+// written empty (the publisher gave no titles), so the staging and the prompt that
+// name it stay as they are.
 func ensureMarkerTitles(workDir string) error {
 	p := filepath.Join(workDir, markerTitlesFile)
-	if fsutil.IsFile(p) {
-		return nil
-	}
 	m, err := audio.ReadManifest(workDir)
 	if err != nil {
+		if fsutil.IsFile(p) {
+			return nil
+		}
 		return fmt.Errorf("read manifest (inspect must run first): %w", err)
+	}
+	if m.Detected {
+		return fsutil.WriteFileAtomic(p, nil, 0o644)
+	}
+	if fsutil.IsFile(p) {
+		return nil
 	}
 	var b strings.Builder
 	for _, ch := range m.Chapters {
@@ -554,14 +567,10 @@ func referenceSources(workDir string, glossary metaops.Glossary) []spelling.Refe
 
 	// The publisher's own chapter titles. Rich for some books ("Chapter 9: Toren"),
 	// a bare number table for others - in which case this contributes nothing, which
-	// is exactly why it cannot be the only reference. Titles found in the NARRATION
-	// (a detected manifest, Phase 1d) are not the publisher's: they are this very
-	// transcript, misheard names and all, and as verified evidence they would make
-	// a misheard name attest itself.
-	if m, err := audio.ReadManifest(workDir); err != nil || !m.Detected {
-		if b, err := os.ReadFile(filepath.Join(workDir, markerTitlesFile)); err == nil { //nolint:gosec // daemon-written path
-			add(markerTitlesFile, spelling.AuthorityVerified, spelling.NamesFromTitles(string(b)))
-		}
+	// is exactly why it cannot be the only reference. (Titles found in the narration
+	// never reach it: see ensureMarkerTitles.)
+	if b, err := os.ReadFile(filepath.Join(workDir, markerTitlesFile)); err == nil { //nolint:gosec // daemon-written path
+		add(markerTitlesFile, spelling.AuthorityVerified, spelling.NamesFromTitles(string(b)))
 	}
 
 	add(filepath.Join(spellingRefsDir, priorSpellingsFile), spelling.AuthorityCarryover, priorLedgerNames(workDir))

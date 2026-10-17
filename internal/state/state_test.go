@@ -63,7 +63,7 @@ func TestLanesAssigned(t *testing.T) {
 // mechanical lane, so a stage silently gaining or losing the flag either wedges an
 // SMB mount with concurrent reads or needlessly serializes work-dir-only work.
 func TestReadsSourcePinsLibrarySourceStages(t *testing.T) {
-	// chapter_detecting re-splits the source on the chapters it found.
+	// chapter_detecting splits from the source what the window FLACs can't give.
 	want := map[State]bool{Inspecting: true, Splitting: true, ChapterDetecting: true, Extracting: true}
 	for _, s := range All() {
 		if got := ReadsSource(s); got != want[s] {
@@ -88,7 +88,7 @@ func TestNextStateLegalPerTable(t *testing.T) {
 		{AuditPassed: true},
 		{FixAttempts: MaxFixAttempts},
 		{Windowed: true},
-		{GoalChapters: true},
+		{Goal: GoalChapters},
 	}
 	for _, s := range All() {
 		if IsTerminal(s) {
@@ -491,17 +491,22 @@ func TestChapterDetectingBranches(t *testing.T) {
 	}{
 		{ASR, Outcome{}, Sanitizing},
 		{ASR, Outcome{Windowed: true}, ChapterDetecting},
-		{ASR, Outcome{Windowed: true, GoalChapters: true}, ChapterDetecting},
+		{ASR, Outcome{Windowed: true, Goal: GoalChapters}, ChapterDetecting},
 		{ChapterDetecting, Outcome{}, Sanitizing},
-		{ChapterDetecting, Outcome{GoalChapters: true}, Done},
+		{ChapterDetecting, Outcome{Goal: GoalChapters}, Done},
 	} {
 		if n, _, err := NextState(KindAudio, tc.cur, tc.o); err != nil || n != tc.want {
 			t.Errorf("NextState(%s, %+v) = %q, %v; want %q", tc.cur, tc.o, n, err, tc.want)
 		}
 	}
-	// The optimistic mainline skips it, like the other conditional stages.
+	// The optimistic mainline skips it, like the other conditional stages; a
+	// chapters-only book's path goes through it to done.
 	if MainlineNext(KindAudio, ASR) != Sanitizing || MainlineNext(KindAudio, ChapterDetecting) != Sanitizing {
 		t.Errorf("mainline through chapter_detecting = %q / %q", MainlineNext(KindAudio, ASR),
 			MainlineNext(KindAudio, ChapterDetecting))
+	}
+	if PathNext(KindAudio, "", ASR) != Sanitizing || PathNext(KindAudio, GoalChapters, ASR) != ChapterDetecting ||
+		PathNext(KindAudio, GoalChapters, ChapterDetecting) != Done || PathNext(KindAudio, GoalChapters, Splitting) != ASR {
+		t.Error("PathNext doesn't route a chapters-only book through chapter_detecting to done")
 	}
 }

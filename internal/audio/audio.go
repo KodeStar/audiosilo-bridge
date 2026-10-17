@@ -94,9 +94,6 @@ type MarkerStats struct {
 	// that occupy it. Complete is the verdict over it (see Complete).
 	Unmapped []UnmappedSpan
 	Complete bool
-	// Windowed (Phase 1d): the file has no usable markers, so its manifest is a
-	// windows manifest (StyleWindows) and the chapters come from the narration.
-	Windowed bool
 }
 
 // NoneRecognized reports the vocabulary-gap condition: markers were present and the

@@ -1616,7 +1616,7 @@ func TestPipelineChaptersGoal(t *testing.T) {
 	}
 	sched.Notify()
 	failed := waitStatus(t, db, c.ID, string(state.StatusFailed), 30*time.Second)
-	if failed.Status != string(state.StatusFailed) || failed.Error != HasMarkerChaptersMsg {
-		t.Fatalf("chaptered book: status %q err %q, want failed with %q", failed.Status, failed.Error, HasMarkerChaptersMsg)
+	if failed.Status != string(state.StatusFailed) || failed.Error != ErrHasMarkerChapters.Error() {
+		t.Fatalf("chaptered book: status %q err %q, want failed with %q", failed.Status, failed.Error, ErrHasMarkerChapters)
 	}
 }

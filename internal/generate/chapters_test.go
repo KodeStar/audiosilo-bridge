@@ -12,17 +12,13 @@ import (
 	"time"
 
 	"github.com/kodestar/audiosilo-bridge/internal/audio"
+	"github.com/kodestar/audiosilo-bridge/internal/chapterdetect"
 	"github.com/kodestar/audiosilo-bridge/internal/link"
 	"github.com/kodestar/audiosilo-bridge/internal/pipeline"
 	"github.com/kodestar/audiosilo-bridge/internal/scheduler"
 	"github.com/kodestar/audiosilo-bridge/internal/state"
 	"github.com/kodestar/audiosilo-bridge/internal/store"
 )
-
-// sentenceErr is an engine error worded for a person (an inspect's).
-type sentenceErr string
-
-func (s sentenceErr) Error() string { return string(s) }
 
 // detectChapters leaves what chapter_detecting leaves for a single-file book: the
 // detected manifest and a list of three chapters current for it.
@@ -128,13 +124,13 @@ func TestChaptersDetectJob(t *testing.T) {
 func TestChaptersDetectBookWithChapters(t *testing.T) {
 	t.Parallel()
 	hr := newHarness(t)
-	hr.exec.inspectErr = pipeline.HasMarkerChaptersMsg
+	hr.exec.inspectErr = pipeline.ErrHasMarkerChapters
 	hr.srv.addKind(33, ChaptersKind, "Loose.m4b", `{}`)
 	stop := hr.runner(hr.h, hr.h.ChaptersJob())
 	defer stop()
 	hr.waitFor("failed", func() bool { s, _ := hr.srv.final(33); return s == link.StateFailed })
 	_, final := hr.srv.final(33)
-	if final.Error == nil || *final.Error != pipeline.HasMarkerChaptersMsg {
+	if final.Error == nil || *final.Error != pipeline.ErrHasMarkerChapters.Error() {
 		t.Fatalf("error = %v, want the sentence", final.Error)
 	}
 }
@@ -211,7 +207,7 @@ func TestGenerateWritesChaptersEarly(t *testing.T) {
 	}
 	var prov Provenance
 	readJSON(t, filepath.Join(hr.root, AttachDir, "Loose.bridge.json"), &prov)
-	if prov.Chapters == nil || prov.Chapters.JobID != 38 {
+	if prov.Kind != Kind || prov.Chapters == nil || prov.Chapters.JobID != 38 {
 		t.Fatalf("early bridge.json = %+v", prov)
 	}
 	close(gate)
@@ -251,21 +247,90 @@ func TestComposeChapters(t *testing.T) {
 	if raw, err := composeChapters(d, []link.BookFile{{Path: "x.mp3"}}, "x.mp3", true, now); raw != nil || err != nil {
 		t.Fatalf("one chapter: %s, %v", raw, err)
 	}
-	if got := chapterTitle(strings.Repeat("é", 150), 1); len(got) > maxChaptersTitle || !strings.HasPrefix(got, "é") {
+	if got := chapterTitle(strings.Repeat("é", 150), 1); len(got) > chapterdetect.MaxTitleBytes || !strings.HasPrefix(got, "é") {
 		t.Fatalf("long title %d bytes", len(got))
 	}
 }
 
-// keptChapters vouches only for a chapters.json in place beside the bridge.json
+// keptObject vouches only for a chapters.json in place beside the bridge.json
 // that names it.
 func TestKeptChapters(t *testing.T) {
 	dir := t.TempDir()
 	mustWrite(t, filepath.Join(dir, AttachDir, "bridge.json"), `{"kind":"sidecars.generate","chapters":{"job_id":4,"from":"narration","chapters":12}}`)
-	if c := keptChapters(dir, ""); c != nil {
+	if c := keptObject[ChaptersProvenance](dir, "", chaptersName, "chapters"); c != nil {
 		t.Fatalf("no chapters.json, but kept %+v", c)
 	}
 	mustWrite(t, filepath.Join(dir, AttachDir, "chapters.json"), `{}`)
-	if c := keptChapters(dir, ""); c == nil || c.JobID != 4 || c.Chapters != 12 {
+	if c := keptObject[ChaptersProvenance](dir, "", chaptersName, "chapters"); c == nil || c.JobID != 4 || c.Chapters != 12 {
 		t.Fatalf("kept = %+v", c)
+	}
+}
+
+// refreshChapters reads and checks the detected list again only once its files
+// changed: the generate job looks at every poll.
+func TestRefreshChaptersOnlyWhenChanged(t *testing.T) {
+	t.Parallel()
+	b := store.Book{WorkDir: t.TempDir(), SourcePath: filepath.Join(t.TempDir(), "Loose.m4b")}
+	if refreshed, ok := New(Options{}).refreshChapters(&run{}, b); ok || len(refreshed.Chapters) != 0 {
+		t.Fatal("a list before there is one")
+	}
+	detectChapters(t, b)
+	h := New(Options{})
+	r := &run{files: []link.BookFile{{Path: "Loose.m4b", Size: 6}}, rel: "Loose.m4b", place: place{single: true}}
+	d, ok := h.refreshChapters(r, b)
+	if !ok || len(d.Chapters) != 3 || r.chapters == nil {
+		t.Fatalf("first look = %+v, %v (chapters %s)", d, ok, r.chapters)
+	}
+	// Same size and time, different bytes: proof the list wasn't read again.
+	path := pipeline.DetectedChaptersPath(b.WorkDir)
+	info, _ := os.Stat(path)
+	raw, _ := os.ReadFile(path) //nolint:gosec // test
+	garbled := strings.Repeat("x", len(raw))
+	mustWrite(t, path, garbled)
+	if err := os.Chtimes(path, info.ModTime(), info.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	if again, ok := h.refreshChapters(r, b); !ok || len(again.Chapters) != 3 {
+		t.Fatalf("an unchanged list was read again: %+v, %v", again, ok)
+	}
+	later := info.ModTime().Add(time.Second)
+	if err := os.Chtimes(path, later, later); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := h.refreshChapters(r, b); ok {
+		t.Fatal("a changed list wasn't read again")
+	}
+}
+
+// A chapters job that comes back (the Bridge restarted) to a book that moved while
+// it was away follows the book and records the move, as a generate job does.
+func TestChaptersDetectFollowsABookMovedWhileAway(t *testing.T) {
+	t.Parallel()
+	hr := newHarness(t)
+	hr.exec.windowed = true
+	gate := hr.exec.gate("asr")
+	hr.srv.addKind(39, ChaptersKind, "Loose.m4b", `{}`)
+	stop := hr.runner(hr.h, hr.h.ChaptersJob())
+	hr.waitFor("asr", func() bool {
+		return hr.srv.saw(39, func(_ link.Update, p map[string]any) bool { return p["stage"] == "asr" })
+	})
+	stop()
+	if err := os.Rename(filepath.Join(hr.root, "Loose.m4b"), filepath.Join(hr.root, "Moved.m4b")); err != nil {
+		t.Fatal(err)
+	}
+	hr.srv.set(func() {
+		hr.srv.books["Loose.m4b"] = link.Book{LibraryID: 1, Path: "Moved.m4b", Files: []link.BookFile{{Path: "Moved.m4b", Size: 6}},
+			Info: &link.BookInfo{Title: "Loose"}}
+	})
+	close(gate)
+	h := hr.handler()
+	stop2 := hr.runner(h, h.ChaptersJob())
+	defer stop2()
+	hr.waitFor("done", func() bool { s, _ := hr.srv.final(39); return s == link.StateDone })
+	if g, _ := hr.db.GetGenerateBook(context.Background(), 39); g.RelPath != "Moved.m4b" {
+		t.Fatalf("mapping = %+v, want the new path", g)
+	}
+	if _, err := os.Stat(filepath.Join(hr.root, AttachDir, "Moved.chapters.json")); err != nil {
+		t.Fatal(err)
 	}
 }

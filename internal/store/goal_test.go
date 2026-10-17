@@ -5,6 +5,8 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/kodestar/audiosilo-bridge/internal/state"
 )
 
 // TestChaptersGoal: a chapters-only book keeps its goal, is left out of the
@@ -13,11 +15,11 @@ import (
 func TestChaptersGoal(t *testing.T) {
 	db := open(t)
 	ctx := context.Background()
-	b, err := db.CreateBook(ctx, NewBook{SourcePath: "/lib/A/book.mp3", WorkDir: "/w/a", Title: "A", Goal: goalChapters})
-	if err != nil || b.Goal != goalChapters {
+	b, err := db.CreateBook(ctx, NewBook{SourcePath: "/lib/A/book.mp3", WorkDir: "/w/a", Title: "A", Goal: state.GoalChapters})
+	if err != nil || b.Goal != state.GoalChapters {
 		t.Fatalf("created %+v, %v", b, err)
 	}
-	if got, _ := db.GetBook(ctx, b.ID); got.Goal != goalChapters {
+	if got, _ := db.GetBook(ctx, b.ID); got.Goal != state.GoalChapters {
 		t.Fatalf("read back goal %q", got.Goal)
 	}
 	// Denied: a chapters book that isn't done yet doesn't continue.

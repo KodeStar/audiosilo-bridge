@@ -1017,9 +1017,6 @@ func TestKindLiterals(t *testing.T) {
 	if kindEbook != string(state.KindEbook) {
 		t.Errorf("kindEbook = %q, want %q", kindEbook, string(state.KindEbook))
 	}
-	if goalChapters != state.GoalChapters {
-		t.Errorf("goalChapters = %q, want %q", goalChapters, state.GoalChapters)
-	}
 	if parkCodeCorePending != string(state.ParkCorePending) {
 		t.Errorf("parkCodeCorePending = %q, want %q", parkCodeCorePending, string(state.ParkCorePending))
 	}

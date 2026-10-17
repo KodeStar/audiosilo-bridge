@@ -166,7 +166,7 @@ type hooks struct {
 	// chapter_detecting runs and leaves a detected list (detectChapters);
 	// inspectErr fails inspect with that sentence.
 	windowed   bool
-	inspectErr string
+	inspectErr error
 }
 
 func (e *hooks) Execute(ctx context.Context, b store.Book, st state.State, r scheduler.StageReport) (scheduler.StageResult, error) {
@@ -194,8 +194,8 @@ func (e *hooks) Execute(ctx context.Context, b store.Book, st state.State, r sch
 	windowed, inspectErr := e.windowed, e.inspectErr
 	e.mu.Unlock()
 	switch {
-	case st == state.Inspecting && inspectErr != "":
-		return scheduler.StageResult{}, sentenceErr(inspectErr)
+	case st == state.Inspecting && inspectErr != nil:
+		return scheduler.StageResult{}, inspectErr
 	case st == state.ASR && windowed:
 		res := scheduler.StageResult{Windowed: true}
 		return res, scheduler.WriteSentinel(b.WorkDir, string(st), res)

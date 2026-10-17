@@ -28,6 +28,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -497,19 +498,15 @@ const MediaToolsUnavailableMsg = "media tools unavailable: ffmpeg/ffprobe not fo
 // different edition and must not be silently reused. Exported so tests/UI can assert it.
 const ManifestChangedMsg = "source audio or chapter layout changed since transcription - the existing transcripts belong to a different edition; cancel the job, then generate the book again to re-transcribe"
 
-// HasMarkerChaptersMsg and HasFileChaptersMsg fail a chapters-only book whose
+// ErrHasMarkerChapters and ErrHasFileChapters fail a chapters-only book whose
 // audio already has chapters (its inspect found markers, or a file per chapter).
-// The chapters.detect job reports them as they are, so they are sentences.
-const (
-	HasMarkerChaptersMsg = "The book already has chapters: its audio file carries chapter markers"
-	HasFileChaptersMsg   = "The book already has chapters: its chapters are its audio files"
+// The chapters.detect job reports them as they are, so they are sentences. A stage
+// error becomes the book's error verbatim, and the engine keeps no failure code
+// beside it, so the job knows them by their text (generate compares b.Error).
+var (
+	ErrHasMarkerChapters = errors.New("The book already has chapters: its audio file carries chapter markers") //nolint:staticcheck // ST1005: a sentence the console shows as it is
+	ErrHasFileChapters   = errors.New("The book already has chapters: its chapters are its audio files")       //nolint:staticcheck // ST1005: likewise
 )
-
-// sentence is an error worded for a person, as it is (a stage error becomes the
-// book's error verbatim).
-type sentence string
-
-func (s sentence) Error() string { return string(s) }
 
 // asrInfoName is the provenance sidecar the asr stage writes (backend/model/
 // language + the manifest fingerprint and any accepted-empty chapters) and the
@@ -548,12 +545,12 @@ func (e *Executor) inspect(ctx context.Context, book store.Book, r scheduler.Sta
 	// hands the console as they are: nothing would be found that isn't there already.
 	if book.Goal == state.GoalChapters && manifest.Style != audio.StyleWindows {
 		if manifest.Style == audio.StyleFiles {
-			return scheduler.StageResult{}, sentence(HasFileChaptersMsg)
+			return scheduler.StageResult{}, ErrHasFileChapters
 		}
-		return scheduler.StageResult{}, sentence(HasMarkerChaptersMsg)
+		return scheduler.StageResult{}, ErrHasMarkerChapters
 	}
 	if r.Note != nil {
-		if markers.Windowed {
+		if manifest.Style == audio.StyleWindows {
 			r.Note(fmt.Sprintf("no chapter markers: transcribing in %s of about 25 minutes, then finding the chapters in the narration",
 				countNoun(manifest.ChapterCount, "window")))
 		}
@@ -603,7 +600,7 @@ func (e *Executor) inspect(ctx context.Context, book store.Book, r scheduler.Sta
 			"markers_seen":     markers.Seen,
 			"unmapped_spans":   len(markers.Unmapped),
 			"unmapped_summary": audio.DescribeSpans(markers.Unmapped),
-			"windowed":         markers.Windowed,
+			"windowed":         manifest.Style == audio.StyleWindows,
 		}),
 		RateSample: rateSample(1, time.Since(start).Seconds()),
 	}

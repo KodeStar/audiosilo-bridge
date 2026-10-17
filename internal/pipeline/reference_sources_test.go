@@ -219,19 +219,39 @@ func TestReferenceSourcesToleratesMissingInputs(t *testing.T) {
 	})
 }
 
-// TestReferenceSourcesSkipsDetectedTitles: chapter titles found in the narration
-// (a detected manifest, Phase 1d) are the transcript's own spelling, so they never
-// count as verified evidence; a publisher's marker titles still do.
-func TestReferenceSourcesSkipsDetectedTitles(t *testing.T) {
+// TestDetectedTitlesAreNeverEvidence: chapter titles found in the narration (a
+// detected manifest, Phase 1d) are the transcript's own spelling, so
+// marker_titles.txt never holds them (an earlier one is emptied): not as verified
+// evidence, not in the dry-run corpus, not as a file a rule may cite. A publisher's
+// marker titles still are all three.
+func TestDetectedTitlesAreNeverEvidence(t *testing.T) {
 	for _, detected := range []bool{false, true} {
-		dir := writeRefFixtures(t, "Chapter 9: Toren\n", "")
+		dir := t.TempDir()
 		if err := audio.WriteManifest(dir, audio.Manifest{Style: audio.StyleMarkers, Detected: detected,
 			Chapters: []audio.Chapter{{Chapter: 1, Title: "Chapter 9: Toren"}}}); err != nil {
+			t.Fatal(err)
+		}
+		if detected {
+			// A file from before the chapters were found (or written by older code).
+			if err := os.WriteFile(filepath.Join(dir, markerTitlesFile), []byte("Chapter 9: Toren\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := ensureMarkerTitles(dir); err != nil {
 			t.Fatal(err)
 		}
 		_, ok := sourceByName(referenceSources(dir, metaops.Glossary{}), markerTitlesFile)
 		if ok == detected {
 			t.Errorf("detected %v: marker titles used as evidence = %v", detected, ok)
+		}
+		corpus, err := buildDryRunCorpus(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, _ := os.ReadFile(filepath.Join(corpus, markerTitlesFile)) //nolint:gosec // test
+		_ = os.RemoveAll(corpus)
+		if strings.Contains(string(got), "Toren") == detected {
+			t.Errorf("detected %v: the dry-run corpus's marker titles = %q", detected, got)
 		}
 	}
 }

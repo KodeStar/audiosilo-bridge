@@ -185,7 +185,7 @@ func toETABook(b store.Book, progress []store.Progress, fanout int) eta.Book {
 		SeriesPos:        b.SeriesPos,
 		Chapters:         chapters,
 		Progress:         pm,
-		GoalChapters:     b.Goal == state.GoalChapters,
+		Goal:             b.Goal,
 		MaxAgentsPerBook: max(1, fanout),
 	}
 }

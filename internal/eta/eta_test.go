@@ -285,7 +285,7 @@ func TestGoalChaptersPath(t *testing.T) {
 		}
 		return out
 	}
-	b := Book{State: state.Splitting, Chapters: 10, GoalChapters: true}
+	b := Book{State: state.Splitting, Chapters: 10, Goal: state.GoalChapters}
 	if got := stages(b); len(got) != 3 || got[1] != state.ASR || got[2] != state.ChapterDetecting {
 		t.Fatalf("chapters-only path = %v", got)
 	}
@@ -293,7 +293,7 @@ func TestGoalChaptersPath(t *testing.T) {
 	if want := 10*4.0 + 10*36 + 60; !ok || secs != want {
 		t.Fatalf("eta = %v %v, want %v", secs, ok, want)
 	}
-	b.GoalChapters = false
+	b.Goal = ""
 	for _, s := range stages(b) {
 		if s == state.ChapterDetecting {
 			t.Fatal("the whole pipeline's estimate predicts chapter_detecting")

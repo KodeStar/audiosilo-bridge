@@ -2,7 +2,6 @@ package pipeline
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -22,22 +21,22 @@ import (
 // owJSON renders an openai-whisper raw transcript from segments of "word@start"
 // tokens (window-relative seconds; each word 0.3 s long).
 func owJSON(segs ...string) []byte {
-	doc := owRaw{Language: "en", Segments: []owRawSegm{}}
+	doc := transcript.Transcript{Language: "en"}
 	for i, seg := range segs {
-		s := owRawSegm{ID: i}
+		s := transcript.Segment{ID: i}
 		var text strings.Builder
 		for _, tok := range strings.Fields(seg) {
 			w, at, _ := strings.Cut(tok, "@")
 			var t float64
 			_, _ = fmt.Sscanf(at, "%g", &t)
 			w = strings.ReplaceAll(w, "_", " ")
-			s.Words = append(s.Words, owRawWord{Word: " " + w, Start: t, End: t + 0.3})
+			s.Words = append(s.Words, transcript.Word{W: " " + w, Start: t, End: t + 0.3})
 			text.WriteString(" " + w)
 		}
 		s.Start, s.End, s.Text = s.Words[0].Start, s.Words[len(s.Words)-1].End, text.String()
 		doc.Segments = append(doc.Segments, s)
 	}
-	raw, _ := json.Marshal(doc)
+	raw, _ := transcript.EncodeOpenAI(doc)
 	return raw
 }
 
@@ -99,7 +98,7 @@ func TestSplitTimelineAtBoundaries(t *testing.T) {
 		t.Fatalf("ids / language = %d %d %q", head.ID, docs[1].Segments[1].ID, docs[0].Language)
 	}
 	// The synthesized raw reads as a complete openai-whisper transcript.
-	raw, _ := json.Marshal(docs[1])
+	raw, _ := transcript.EncodeOpenAI(docs[1])
 	if !transcript.Complete(raw) {
 		t.Fatal("synthesized raw is not a complete transcript")
 	}
@@ -126,7 +125,7 @@ func TestGroupByPosition(t *testing.T) {
 			words: []timedWord{{text: " x", start: start + 1, end: start + 2}}})
 	}
 	m.Duration = 3000
-	got := groupByPosition(m, tl)
+	got := groupByPosition(m, tl.split(m.Chapters))
 	var desc []string
 	for _, e := range got {
 		desc = append(desc, fmt.Sprintf("%s@%d+%d", e.Title, e.StartMs, e.LengthMs))
@@ -180,15 +179,21 @@ func TestChapterDetectStage(t *testing.T) {
 		owJSON("Chapter@0.5 One@0.9 it_began@2.2", "and@4 on@4.5"),
 		owJSON("Chapter@2.5 Two@2.9 it_ended@4.2"))
 	e := NewExecutor(Config{FFmpeg: ffmpeg})
-	run := func() scheduler.StageResult {
+	// fromSource says whether a run split chapters from the source (its note).
+	run := func() (fromSource bool) {
 		t.Helper()
-		res, err := e.Execute(context.Background(), book, state.ChapterDetecting, scheduler.StageReport{})
+		_, err := e.Execute(context.Background(), book, state.ChapterDetecting, scheduler.StageReport{Note: func(msg string) {
+			fromSource = fromSource || strings.Contains(msg, "from the source")
+		}})
 		if err != nil {
 			t.Fatalf("chapter_detecting: %v", err)
 		}
-		return res
+		return fromSource
 	}
-	run()
+	// The chapters are cut from the window FLACs, which hold the whole book already.
+	if run() {
+		t.Fatal("the chapters were split from the source, not cut from the windows")
+	}
 	m, err := audio.ReadManifest(book.WorkDir)
 	if err != nil {
 		t.Fatal(err)
@@ -222,6 +227,9 @@ func TestChapterDetectStage(t *testing.T) {
 			t.Errorf("chapter %d not split", ch)
 		}
 	}
+	if _, err := os.Stat(filepath.Join(book.WorkDir, audio.WindowAudioDir)); !os.IsNotExist(err) {
+		t.Errorf("the window FLACs outlived the cut: %v", err)
+	}
 	list, err := ReadDetectedChapters(book.WorkDir)
 	if err != nil || len(list.Chapters) != 2 || list.Chapters[0].StartMs != 0 || list.Chapters[1].StartMs != 12300 ||
 		list.Chapters[1].LengthMs != 7700 || !list.CurrentFor(book.WorkDir) {
@@ -231,14 +239,20 @@ func TestChapterDetectStage(t *testing.T) {
 		t.Fatal("no sentinel")
 	}
 	// A crash after the move: the stage runs again from windows/ (the window FLACs
-	// are gone) and lands on the same book.
+	// are gone, so the missing chapter is split from the source) and lands on the
+	// same book.
 	_ = os.Remove(scheduler.SentinelPath(book.WorkDir, string(state.ChapterDetecting)))
 	_ = os.Remove(DetectedChaptersPath(book.WorkDir))
 	_ = os.Remove(filepath.Join(book.WorkDir, audio.ChaptersDir, audio.ChapterFileName(2)))
-	run()
+	if !run() {
+		t.Fatal("the missing chapter wasn't split from the source")
+	}
 	again, err := ReadDetectedChapters(book.WorkDir)
 	if err != nil || again.ManifestSHA != list.ManifestSHA || len(again.Chapters) != 2 {
 		t.Fatalf("after the re-run: %+v, %v", again, err)
+	}
+	if !audioComplete(filepath.Join(book.WorkDir, audio.ChaptersDir, audio.ChapterFileName(2))) {
+		t.Error("chapter 2 not split again from the source")
 	}
 }
 
@@ -267,6 +281,15 @@ func TestChapterDetectStageParksWhenNotConfident(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(book.WorkDir, audio.WindowsDir)); !os.IsNotExist(err) {
 		t.Fatalf("windows/ written on a park: %v", err)
+	}
+	// The silences heard are kept whatever the verdict: a Retry decodes nothing (the
+	// window FLACs gone, it parks the same way rather than failing for them).
+	for w := 1; w <= 2; w++ {
+		_ = os.Remove(filepath.Join(book.WorkDir, audio.ChaptersDir, audio.ChapterFileName(w)))
+	}
+	_, err = NewExecutor(Config{FFmpeg: ffmpeg}).Execute(context.Background(), book, state.ChapterDetecting, scheduler.StageReport{})
+	if !errors.As(err, &park) || park.Code != state.ParkChaptersNotDetected {
+		t.Fatalf("retry: err = %v, want the same park without decoding", err)
 	}
 }
 

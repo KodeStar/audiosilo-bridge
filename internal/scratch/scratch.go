@@ -115,9 +115,15 @@ type artifact struct {
 // failed, was cancelled or parked leaves it behind deliberately, so that a retry can
 // resume without the remote mount. Nothing reclaims it if the book never reaches done,
 // so it must be on this table - and it is safe to drop, because Split re-stages it.
+//
+// windows/chapters/ is a chapterless book's window FLACs while chapter_detecting cuts
+// the detected chapters from them (Phase 1d): it removes them itself, so only a run
+// that stopped between the two leaves them, and a re-run splits from the source what
+// they would have given. No stage's resume depends on them.
 var audioArtifacts = []artifact{
 	{Dir: audio.ChaptersDir, Stage: state.Splitting},
 	{Dir: audio.SplitSourceDir, Stage: state.Splitting},
+	{Dir: audio.WindowAudioDir},
 	{Dir: agent.RunsDir},
 	{Dir: repair.ClipsDir},
 	{Dir: repair.RetranscribeDir},

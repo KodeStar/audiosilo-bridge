@@ -130,7 +130,7 @@ func Split(ctx context.Context, m Manifest, workDir, ffmpegPath string, report P
 			completed++
 		}
 	}
-	if (m.Style == StyleMarkers || m.Style == StyleWindows) && completed < total {
+	if m.Style != StyleFiles && completed < total {
 		staged, err := stageMarkerSource(ctx, m.Source, workDir)
 		switch {
 		case err != nil && ctx.Err() != nil:
@@ -292,10 +292,20 @@ func splitChapter(ctx context.Context, m Manifest, ch Chapter, ffmpegPath, out s
 		// Seek within the single book file (input seeking: -ss before -i).
 		inputArgs = []string{"-ss", ftoa(ch.Start), "-i", m.Source, "-t", ftoa(ch.Duration)}
 	}
+	tail := flacEncodeTail
+	var listen func([]byte) error
+	if m.Style == StyleWindows {
+		// A window's silences are heard in the same decode (chapter_detecting's pause
+		// test needs them) and kept beside its FLAC, on the file's timeline.
+		tail = append([]string{"-af", silenceFilter(true)}, flacEncodeTail...)
+		listen = func(log []byte) error {
+			return writeWindowSilences(filepath.Dir(out), ch, parseSilences(log, ch.Start, ch.Duration))
+		}
+	}
 	bound := splitChapterBound(ch.Duration)
 	cctx, cancel := context.WithTimeout(ctx, bound)
 	defer cancel()
-	err := encodeFLAC(cctx, ffmpegPath, inputArgs, out, fmt.Sprintf("chapter %d", ch.Chapter))
+	err := encode(cctx, ffmpegPath, inputArgs, tail, out, fmt.Sprintf("chapter %d", ch.Chapter), listen)
 	// The CHILD deadline fired while the parent is alive: a stalled conversion, not a
 	// pause/shutdown (which Split's caller reports as ctx.Err()).
 	if err != nil && cctx.Err() == context.DeadlineExceeded && ctx.Err() == nil {
@@ -323,14 +333,30 @@ var flacEncodeTail = []string{"-map", "0:a:0", "-vn", "-ac", "1", "-ar", "16000"
 // rename, capturing stderr for the error. label names the unit in the error message.
 // It is the single ffmpeg-to-FLAC path both chapter splitting and clip cutting share.
 func encodeFLAC(ctx context.Context, ffmpegPath string, inputArgs []string, out, label string) error {
+	return encode(ctx, ffmpegPath, inputArgs, flacEncodeTail, out, label, nil)
+}
+
+// maxEncodeLog bounds how much of ffmpeg's log an encode error quotes (the end of
+// it, where ffmpeg says what went wrong): an encode that listens logs every line.
+const maxEncodeLog = 2000
+
+// encode is encodeFLAC's body with the output args (tail) given. With listen,
+// ffmpeg logs at info level (where a filter such as silencedetect reports) and
+// listen reads the log after the encode, before the file is published: an error
+// from it publishes nothing.
+func encode(ctx context.Context, ffmpegPath string, inputArgs, tail []string, out, label string, listen func(log []byte) error) error {
 	if ffmpegPath == "" {
 		return fmt.Errorf("ffmpeg unavailable; cannot encode %s", label)
 	}
 	tmp := out + ".part"
 	_ = os.Remove(tmp) // clear any stale partial from a prior interrupted run
 
-	args := append([]string{"-hide_banner", "-loglevel", "error", "-y"}, inputArgs...)
-	args = append(args, flacEncodeTail...)
+	args := []string{"-hide_banner", "-loglevel", "error", "-y"}
+	if listen != nil {
+		args = []string{"-hide_banner", "-nostats", "-loglevel", "info", "-y"}
+	}
+	args = append(args, inputArgs...)
+	args = append(args, tail...)
 	args = append(args, tmp)
 
 	cmd := exec.CommandContext(ctx, ffmpegPath, args...) //nolint:gosec // ffmpegPath is operator-resolved (config -> $PATH -> cache); args are fixed flags + work-dir paths
@@ -338,7 +364,17 @@ func encodeFLAC(ctx context.Context, ffmpegPath string, inputArgs []string, out,
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		_ = os.Remove(tmp)
-		return fmt.Errorf("ffmpeg %s: %w: %s", label, err, strings.TrimSpace(stderr.String()))
+		msg := strings.TrimSpace(stderr.String())
+		if len(msg) > maxEncodeLog {
+			msg = "..." + msg[len(msg)-maxEncodeLog:]
+		}
+		return fmt.Errorf("ffmpeg %s: %w: %s", label, err, msg)
+	}
+	if listen != nil {
+		if err := listen(stderr.Bytes()); err != nil {
+			_ = os.Remove(tmp)
+			return err
+		}
 	}
 	return os.Rename(tmp, out)
 }

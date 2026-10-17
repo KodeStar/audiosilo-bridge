@@ -152,7 +152,8 @@ type Book struct {
 	// contribution.mode; "local" | "issue"): a sidecars.generate job sets it.
 	ContribMode string
 	// Goal is how far the book runs (migration 0005): "" the whole pipeline,
-	// "chapters" (state.GoalChapters) only until its chapters are found.
+	// "chapters" (state.GoalChapters) only until its chapters are found. Opaque
+	// here, as State is.
 	Goal      string
 	CreatedAt string
 	UpdatedAt string
@@ -562,26 +563,24 @@ func (db *DB) SetBookStatusRetry(ctx context.Context, id int64, status, errMsg, 
 	return checkAffected(res, err)
 }
 
-// goalChapters mirrors state.GoalChapters (the store keeps no state import; a test
-// holds the two equal).
-const goalChapters = "chapters"
-
 // ErrNotContinuable is ContinueChapters for a book that isn't a finished
 // chapters-only book (its row changed since the caller looked).
 var ErrNotContinuable = errors.New("the book isn't a finished chapters book")
 
 // ContinueChapters turns a finished chapters-only book (goal chapters, done) into a
-// whole-pipeline one: goal ”, its contribution mode and work id the new job's,
+// whole-pipeline one: goal empty, its contribution mode and work id the new job's,
 // state splitting, status clear. The done-time purge removed its chapter FLACs, so
 // splitting cuts them again (skipping any still there); asr then finds every
 // transcript complete (the detected chapters' own), and the manifest is a detected
 // one, so the book goes on to sanitizing and the rest. ErrNotContinuable when the
 // book isn't one (in one statement, so a book that changed meanwhile isn't moved).
+// The SQL asks for any goal short of the whole pipeline (chapters is the only one),
+// so the store names no goal of its own: it keeps the state's strings opaque.
 func (db *DB) ContinueChapters(ctx context.Context, id int64, contribMode, workID string) error {
 	res, err := db.sql.ExecContext(ctx,
 		`UPDATE books SET goal='', contrib_mode=?, work_id=?, state='splitting', status='', error='', park_code='',
-		 retry_at='', updated_at=? WHERE id=? AND goal=? AND state='done'`,
-		contribMode, workID, timestamp(nowFn()), id, goalChapters)
+		 retry_at='', updated_at=? WHERE id=? AND goal!='' AND state='done'`,
+		contribMode, workID, timestamp(nowFn()), id)
 	if err := checkAffected(res, err); errors.Is(err, ErrNotFound) {
 		return ErrNotContinuable
 	} else if err != nil {

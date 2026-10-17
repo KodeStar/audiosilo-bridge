@@ -43,7 +43,7 @@ type StageResult struct {
 // Outcome converts a completed stage result into the branch input consumed by
 // state.NextState. Keeping this mapping beside StageResult prevents alternate
 // pipeline drivers from drifting from the scheduler's transition semantics. The
-// book's goal (Outcome.GoalChapters) is the caller's to fill: it is the book's,
+// book's goal (Outcome.Goal) is the caller's to fill: it is the book's,
 // not the stage's.
 func (r StageResult) Outcome(fixAttempts int) state.Outcome {
 	return state.Outcome{

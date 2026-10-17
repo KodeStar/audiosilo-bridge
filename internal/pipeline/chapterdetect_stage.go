@@ -28,17 +28,20 @@ import (
 // had windows:
 //
 //   - the window layer is moved aside into windows/ (its manifest, its raw
-//     transcripts, the detection), the window FLACs deleted;
+//     transcripts, the detection, and the window FLACs into windows/chapters/);
 //   - manifest.json becomes the DETECTED manifest (StyleMarkers, Detected);
 //   - transcripts-raw/ gets one synthesized raw per detected chapter, re-timed
 //     from the windows' words (frozen 0444 like a real one), and asr.json the new
 //     manifest's fingerprint, so a later asr finds every chapter complete;
-//   - chapters/ is split again on the detected chapters;
+//   - chapters/ is cut on the detected chapters from the window FLACs (the whole
+//     book, decoded and local already; the source only for what they can't give),
+//     and the window FLACs go;
 //   - chapters_detected.json is the player's chapter list (DetectedChapters).
 //
 // A detection that isn't confident parks chapters_not_detected with everything in
-// place, so a Retry runs it again. Once the layer is moved it is the source of
-// truth: every step after that is redone safely after a crash, from windows/.
+// place (the silences heard kept beside the window FLACs), so a Retry runs it
+// again without decoding. Once the layer is moved it is the source of truth: every
+// step after that is redone safely after a crash, from windows/.
 
 // Names in the book's work dir.
 const (
@@ -47,8 +50,9 @@ const (
 )
 
 // silenceDetectFloor / silenceDetectPerAudioSec bound the silence pass over one
-// window's FLAC: a local 16 kHz mono file decodes hundreds of times faster than
-// real time, so a bound hit is a stall, not a slow machine.
+// window's FLAC (only when split didn't keep its silences): a local 16 kHz mono file
+// decodes hundreds of times faster than real time, so a bound hit is a stall, not a
+// slow machine.
 var (
 	silenceDetectFloor       = 2 * time.Minute
 	silenceDetectPerAudioSec = 0.1
@@ -98,6 +102,22 @@ func ReadDetectedChapters(workDir string) (DetectedChapters, error) {
 		return DetectedChapters{}, fmt.Errorf("parse %s: %w", detectedChaptersName, err)
 	}
 	return d, nil
+}
+
+// DetectedStamp identifies the book's chapters_detected.json and the manifest it is
+// checked against as they are now (sizes and modification times, from local stats),
+// so a caller that looks often reads and checks the list again only once either
+// changed; ok is false while there is no list.
+func DetectedStamp(workDir string) (string, bool) {
+	list, err := os.Stat(DetectedChaptersPath(workDir))
+	if err != nil {
+		return "", false
+	}
+	stamp := fmt.Sprintf("%s|%d|%d", workDir, list.Size(), list.ModTime().UnixNano())
+	if m, err := os.Stat(filepath.Join(workDir, audio.ManifestName)); err == nil {
+		stamp += fmt.Sprintf("|%d|%d", m.Size(), m.ModTime().UnixNano())
+	}
+	return stamp, true
 }
 
 // CurrentFor reports whether d still describes the book in workDir: its manifest is
@@ -203,7 +223,9 @@ func (e *Executor) chapterDetect(ctx context.Context, book store.Book, r schedul
 		return scheduler.StageResult{}, fmt.Errorf("chapter_detecting: move the windows aside: %w", err)
 	}
 	manifest := detectedManifest(layer.manifest, det.Chapters)
-	if err := e.remapTranscripts(book.WorkDir, manifest, tl); err != nil {
+	docs := tl.split(manifest.Chapters)
+	fp, err := e.remapTranscripts(book.WorkDir, manifest, docs)
+	if err != nil {
 		return scheduler.StageResult{}, fmt.Errorf("chapter_detecting: %w", err)
 	}
 	if e.db != nil {
@@ -213,15 +235,14 @@ func (e *Executor) chapterDetect(ctx context.Context, book store.Book, r schedul
 		r.Progress(1, 2)
 	}
 	err = runWithStageHeartbeat(ctx, r, func(elapsed time.Duration) string {
-		return fmt.Sprintf("chapter_detecting: ffmpeg still splitting the chapters (%s elapsed)", humanDuration(elapsed))
+		return fmt.Sprintf("chapter_detecting: ffmpeg still cutting the chapters (%s elapsed)", humanDuration(elapsed))
 	}, func() error {
-		_, serr := splitWithRetries(ctx, manifest, book.WorkDir, ffmpeg, r, nil)
-		return serr
+		return cutDetectedChapters(ctx, book.WorkDir, manifest, layer.manifest, ffmpeg, r)
 	})
 	if err != nil {
-		return scheduler.StageResult{}, fmt.Errorf("chapter_detecting: split the chapters: %w", err)
+		return scheduler.StageResult{}, fmt.Errorf("chapter_detecting: cut the chapters: %w", err)
 	}
-	list, err := writeDetectedChapters(book, manifest, tl)
+	list, err := writeDetectedChapters(book, manifest, docs, fp)
 	if err != nil {
 		return scheduler.StageResult{}, fmt.Errorf("chapter_detecting: %w", err)
 	}
@@ -245,8 +266,9 @@ func (e *Executor) chapterDetect(ctx context.Context, book store.Book, r schedul
 }
 
 // detection is the book's detection: the one a move was made from when there is
-// one for these windows (windows/detection.json), else a fresh one over the window
-// FLACs' silences, which is kept there when confident.
+// one for these windows (windows/detection.json), else a fresh one over the
+// windows' silences (audio.WindowSilences: split heard them, else the window FLACs
+// are listened to once), which is kept there when confident.
 func (e *Executor) detection(ctx context.Context, workDir string, layer windowLayer, tl windowTimeline, ffmpeg string) (chapterdetect.Result, error) {
 	sha := windowsSHA(layer.manifest)
 	var kept windowDetection
@@ -257,20 +279,14 @@ func (e *Executor) detection(ctx context.Context, workDir string, layer windowLa
 	if layer.moved {
 		return chapterdetect.Result{}, errors.New("the windows were moved aside without their detection; cancel the job and generate the book again")
 	}
-	var sil []chapterdetect.Silence
+	var sil []audio.Silence
 	for _, w := range layer.manifest.Chapters {
-		flac := filepath.Join(workDir, audio.ChaptersDir, audio.ChapterFileName(w.Chapter))
-		if !fsutil.IsFile(flac) {
-			return chapterdetect.Result{}, fmt.Errorf("window %d FLAC missing (%s); split must run first", w.Chapter, flac)
-		}
 		bound := max(silenceDetectFloor, time.Duration(silenceDetectPerAudioSec*w.Duration*float64(time.Second)))
-		got, err := audio.DetectSilences(ctx, ffmpeg, flac, 0, 0, bound)
+		got, err := audio.WindowSilences(ctx, ffmpeg, filepath.Join(workDir, audio.ChaptersDir), w, bound)
 		if err != nil {
 			return chapterdetect.Result{}, fmt.Errorf("window %d silences: %w", w.Chapter, err)
 		}
-		for _, s := range got {
-			sil = append(sil, chapterdetect.Silence{Start: w.Start + s.Start, End: w.Start + s.End})
-		}
+		sil = append(sil, got...)
 	}
 	det := chapterdetect.Detect(tl.words(), sil, layer.manifest.Duration)
 	if !det.Confident {
@@ -292,16 +308,22 @@ func (e *Executor) detection(ctx context.Context, workDir string, layer windowLa
 	return det, fsutil.WriteFileAtomic(filepath.Join(wdir, windowsDetectionName), append(out, '\n'), 0o644)
 }
 
-// moveWindowLayer moves the window layer aside (a no-op once moved): the window
-// FLACs go (their names are the detected chapters' too, and split would take them
-// for cut chapters), then transcripts-raw/ is renamed to windows/transcripts-raw/,
-// the step after which the move counts as done.
+// moveWindowLayer moves the window layer aside (a no-op once moved): chapters/ (the
+// window FLACs, whose names are the detected chapters' too, so split would take them
+// for cut chapters) becomes windows/chapters/, then transcripts-raw/ is renamed to
+// windows/transcripts-raw/, the step after which the move counts as done.
 func moveWindowLayer(workDir string, layer *windowLayer) error {
 	if layer.moved {
 		return nil
 	}
-	if err := os.RemoveAll(filepath.Join(workDir, audio.ChaptersDir)); err != nil {
-		return err
+	if chapters := filepath.Join(workDir, audio.ChaptersDir); isDir(chapters) {
+		audioDir := filepath.Join(workDir, audio.WindowAudioDir)
+		if err := os.RemoveAll(audioDir); err != nil { // a leftover: chapters/ is the newer
+			return err
+		}
+		if err := os.Rename(chapters, audioDir); err != nil {
+			return err
+		}
 	}
 	moved := filepath.Join(workDir, audio.WindowsDir, transcript.RawDir)
 	if err := os.Rename(layer.rawDir, moved); err != nil {
@@ -309,6 +331,26 @@ func moveWindowLayer(workDir string, layer *windowLayer) error {
 	}
 	layer.rawDir, layer.moved = moved, true
 	return nil
+}
+
+// cutDetectedChapters cuts the detected manifest's chapter FLACs from the window
+// FLACs in windows/chapters/, splits any they can't give from the source (a crash
+// after the window FLACs went), then lets the window FLACs go.
+func cutDetectedChapters(ctx context.Context, workDir string, m, windows audio.Manifest, ffmpeg string, r scheduler.StageReport) error {
+	audioDir := filepath.Join(workDir, audio.WindowAudioDir)
+	left, err := audio.CutFromWindows(ctx, m, windows.Chapters, audioDir, workDir, ffmpeg)
+	if err != nil {
+		return err
+	}
+	if left > 0 {
+		if r.Note != nil {
+			r.Note(fmt.Sprintf("the window audio is gone: splitting %s from the source", countNoun(left, "chapter")))
+		}
+		if _, err := splitWithRetries(ctx, m, workDir, ffmpeg, r, nil); err != nil {
+			return err
+		}
+	}
+	return os.RemoveAll(audioDir)
 }
 
 // detectedManifest is the windows manifest re-cut on the detected chapters: a
@@ -323,19 +365,20 @@ func detectedManifest(windows audio.Manifest, chs []chapterdetect.Chapter) audio
 }
 
 // remapTranscripts writes the detected manifest, one synthesized raw transcript per
-// detected chapter into transcripts-raw/ (a complete one already there is the same
-// and is kept), and asr.json with the new manifest's fingerprint and its empty
-// chapters, so the asr stage after a continue finds every chapter done.
-func (e *Executor) remapTranscripts(workDir string, m audio.Manifest, tl windowTimeline) error {
+// detected chapter (docs, tl.split's) into transcripts-raw/ (a complete one already
+// there is the same and is kept, never encoded again), and asr.json with the new
+// manifest's fingerprint and its empty chapters, so the asr stage after a continue
+// finds every chapter done. It returns the fingerprint.
+func (e *Executor) remapTranscripts(workDir string, m audio.Manifest, docs []transcript.Transcript) (string, error) {
 	if err := audio.WriteManifest(workDir, m); err != nil {
-		return fmt.Errorf("write the detected manifest: %w", err)
+		return "", fmt.Errorf("write the detected manifest: %w", err)
 	}
 	rawDir := filepath.Join(workDir, transcript.RawDir)
 	if err := os.MkdirAll(rawDir, 0o750); err != nil {
-		return err
+		return "", err
 	}
 	var empty []int
-	for i, doc := range tl.split(m.Chapters) {
+	for i, doc := range docs {
 		ch := m.Chapters[i].Chapter
 		if len(doc.Segments) == 0 {
 			empty = append(empty, ch)
@@ -344,13 +387,13 @@ func (e *Executor) remapTranscripts(workDir string, m audio.Manifest, tl windowT
 		if rawComplete(path) {
 			continue
 		}
-		raw, err := json.Marshal(doc)
+		raw, err := transcript.EncodeOpenAI(doc)
 		if err != nil {
-			return err
+			return "", err
 		}
 		_ = os.Remove(path)
 		if err := fsutil.WriteFileAtomic(path, raw, 0o644); err != nil {
-			return fmt.Errorf("write chapter %d transcript: %w", ch, err)
+			return "", fmt.Errorf("write chapter %d transcript: %w", ch, err)
 		}
 		// Frozen like a real raw: durable evidence the later stages only read.
 		if err := os.Chmod(path, 0o444); err != nil { //nolint:gosec // immutability guard on a non-secret artifact
@@ -359,21 +402,18 @@ func (e *Executor) remapTranscripts(workDir string, m audio.Manifest, tl windowT
 	}
 	fp, err := manifestFingerprint(workDir)
 	if err != nil {
-		return err
+		return "", err
 	}
 	prov := readASRProvenance(workDir)
 	prov.ManifestSHA, prov.EmptyChapters = fp, empty
-	return writeASRProvenance(workDir, prov)
+	return fp, writeASRProvenance(workDir, prov)
 }
 
-// writeDetectedChapters writes chapters_detected.json for the detected manifest,
-// grouped by logical position (see groupByPosition).
-func writeDetectedChapters(book store.Book, m audio.Manifest, tl windowTimeline) (DetectedChapters, error) {
-	fp, err := manifestFingerprint(book.WorkDir)
-	if err != nil {
-		return DetectedChapters{}, err
-	}
-	d := DetectedChapters{ManifestSHA: fp, DurationMs: ms(m.Duration), Chapters: groupByPosition(m, tl)}
+// writeDetectedChapters writes chapters_detected.json for the detected manifest
+// (its fingerprint fp, its chapters' transcripts docs), grouped by logical position
+// (see groupByPosition).
+func writeDetectedChapters(book store.Book, m audio.Manifest, docs []transcript.Transcript, fp string) (DetectedChapters, error) {
+	d := DetectedChapters{ManifestSHA: fp, DurationMs: ms(m.Duration), Chapters: groupByPosition(m, docs)}
 	if info, err := os.Stat(m.Source); err == nil {
 		d.SourceSize = info.Size()
 	}
@@ -387,24 +427,22 @@ func writeDetectedChapters(book store.Book, m audio.Manifest, tl windowTimeline)
 // groupByPosition is the player's list: the detected chapters grouped by the
 // LOGICAL position classifyEdgeChapters gives them (the classification the later
 // stages make from the same transcripts, computed here from the synthesized ones in
-// memory), so that entry k IS logical position k (the server and the player gate
-// spoilers by the list's ordinal). Front matter and excluded leading files join the
+// memory, docs, through the same edgeChapters), so that entry k IS logical position
+// k (the server and the player gate spoilers by the list's ordinal). Front matter and excluded leading files join the
 // first story chapter; an interior unnumbered section joins the chapter whose
 // number it takes; excluded trailing files (credits) join the entry before them;
 // end matter past the last numbered chapter stays separate, after it. A merged
 // entry's titles are joined with " / ".
-func groupByPosition(m audio.Manifest, tl windowTimeline) []DetectedChapter {
-	docs := tl.split(m.Chapters)
-	n := len(m.Chapters)
-	edge := make([]edgeChapter, n)
+func groupByPosition(m audio.Manifest, docs []transcript.Transcript) []DetectedChapter {
+	text := make(map[int]string, len(m.Chapters))
 	for i, ch := range m.Chapters {
-		text := strings.TrimSpace(docs[i].Text)
-		edge[i] = edgeChapter{Chapter: ch.Chapter, Opening: clipBytes(text, chapterOpeningBytes)}
-		// classifyBookEdges' probe window, so the two classify alike.
-		if n <= 2*edgeProbeDepth || i < edgeProbeDepth || i >= n-edgeProbeDepth {
-			edge[i].Words, edge[i].HasTranscript, edge[i].Probed, edge[i].DurationSec = len(strings.Fields(text)), true, true, ch.Duration
-		}
+		text[ch.Chapter] = transcript.PlainText(docs[i])
 	}
+	edge, _ := edgeChapters(m.Chapters, func(ch audio.Chapter) (string, error) {
+		return clipBytes(text[ch.Chapter], chapterOpeningBytes), nil
+	}, func(ch audio.Chapter) (int, bool, error) {
+		return len(strings.Fields(text[ch.Chapter])), true, nil
+	})
 	class := classifyEdgeChapters(edge)
 	set := func(chs []int) map[int]bool {
 		out := make(map[int]bool, len(chs))
@@ -458,7 +496,7 @@ func joinTitle(a, b string) string {
 		return b
 	}
 	t := a + " / " + b
-	if len(t) > 200 {
+	if len(t) > chapterdetect.MaxTitleBytes {
 		return a
 	}
 	return t
@@ -548,43 +586,21 @@ func (tl windowTimeline) words() []chapterdetect.Word {
 	return out
 }
 
-// owRaw is a synthesized raw transcript in the openai-whisper shape the transcript
-// adapters read (what mlx-whisper writes).
-type owRaw struct {
-	Text     string      `json:"text"`
-	Language string      `json:"language"`
-	Segments []owRawSegm `json:"segments"`
-}
-
-type owRawSegm struct {
-	ID    int         `json:"id"`
-	Start float64     `json:"start"`
-	End   float64     `json:"end"`
-	Text  string      `json:"text"`
-	Words []owRawWord `json:"words"`
-}
-
-type owRawWord struct {
-	Word        string   `json:"word"`
-	Start       float64  `json:"start"`
-	End         float64  `json:"end"`
-	Probability *float64 `json:"probability"`
-}
-
-// split re-maps the timeline onto chs: one raw document per chapter, times
-// relative to its start. A segment goes to the chapter that holds its first word,
-// and a boundary inside a segment splits it at the word (each part keeps the words
-// on its side, its text theirs); a segment with no words goes by its start.
-func (tl windowTimeline) split(chs []audio.Chapter) []owRaw {
-	docs := make([]owRaw, len(chs))
+// split re-maps the timeline onto chs: one transcript per chapter (its raw is
+// transcript.EncodeOpenAI's), times relative to its start. A segment goes to the
+// chapter that holds its first word, and a boundary inside a segment splits it at
+// the word (each part keeps the words on its side, its text theirs); a segment with
+// no words goes by its start.
+func (tl windowTimeline) split(chs []audio.Chapter) []transcript.Transcript {
+	docs := make([]transcript.Transcript, len(chs))
 	for i := range docs {
-		docs[i] = owRaw{Language: tl.language, Segments: []owRawSegm{}}
+		docs[i] = transcript.Transcript{Language: tl.language, Segments: []transcript.Segment{}}
 	}
 	at := func(t float64) int {
 		i := sort.Search(len(chs), func(i int) bool { return chs[i].Start > t }) - 1
 		return max(i, 0)
 	}
-	add := func(c int, s owRawSegm) {
+	add := func(c int, s transcript.Segment) {
 		s.ID = len(docs[c].Segments)
 		docs[c].Segments = append(docs[c].Segments, s)
 	}
@@ -592,7 +608,7 @@ func (tl windowTimeline) split(chs []audio.Chapter) []owRaw {
 	for _, s := range tl.segments {
 		if len(s.words) == 0 {
 			c := at(s.start)
-			add(c, owRawSegm{Start: rel(c, s.start), End: rel(c, s.end), Text: s.text, Words: []owRawWord{}})
+			add(c, transcript.Segment{Start: rel(c, s.start), End: rel(c, s.end), Text: s.text, Words: []transcript.Word{}})
 			continue
 		}
 		// Runs of consecutive words in one chapter; one run is the whole segment.
@@ -608,7 +624,7 @@ func (tl windowTimeline) split(chs []audio.Chapter) []owRaw {
 		}
 		for k, run := range runs {
 			c := runCh[k]
-			seg := owRawSegm{Text: s.text, Start: s.start, End: s.end}
+			seg := transcript.Segment{Text: s.text, Start: s.start, End: s.end}
 			if len(runs) > 1 {
 				parts := make([]string, len(run))
 				for i, w := range run {
@@ -625,17 +641,10 @@ func (tl windowTimeline) split(chs []audio.Chapter) []owRaw {
 			}
 			seg.Start, seg.End = rel(c, seg.Start), rel(c, seg.End)
 			for _, w := range run {
-				seg.Words = append(seg.Words, owRawWord{Word: w.text, Start: rel(c, w.start), End: rel(c, w.end), Probability: w.p})
+				seg.Words = append(seg.Words, transcript.Word{W: w.text, Start: rel(c, w.start), End: rel(c, w.end), P: w.p})
 			}
 			add(c, seg)
 		}
-	}
-	for i := range docs {
-		var b strings.Builder
-		for _, s := range docs[i].Segments {
-			b.WriteString(s.Text)
-		}
-		docs[i].Text = b.String()
 	}
 	return docs
 }

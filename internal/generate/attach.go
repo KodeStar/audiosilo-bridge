@@ -300,65 +300,52 @@ const maxProvenance = 256 << 10
 // it is), or, when there is none (or it isn't a JSON object, or isn't a regular
 // file), fresh with the usual fields.
 func describedProvenance(dir, prefix string, fresh Provenance) ([]byte, error) {
-	return mergedProvenance(dir, prefix, fresh, "description", fresh.Description)
+	return mergedProvenance(dir, prefix, fresh, "description")
 }
 
-// mergedProvenance is the book's bridge.json with its key object set to value
+// mergedProvenance is the book's bridge.json with its key object set to fresh's
 // (every other field kept as it is), or fresh when there is none fit to keep: a
 // job that writes one attachment (a description, the chapters) vouches for it
 // without unsaying what made the others.
-func mergedProvenance(dir, prefix string, fresh Provenance, key string, value any) ([]byte, error) {
+func mergedProvenance(dir, prefix string, fresh Provenance, key string) ([]byte, error) {
 	existing := readProvenance(filepath.Join(dir, AttachDir), prefix+provenanceName)
 	if existing == nil {
 		return indentJSON(fresh)
 	}
-	raw, err := json.Marshal(value)
+	all, err := json.Marshal(fresh)
 	if err != nil {
 		return nil, err
 	}
-	existing[key] = raw
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(all, &fields); err != nil {
+		return nil, err
+	}
+	existing[key] = json.RawMessage("null") // an object fresh omits is none
+	if v, ok := fields[key]; ok {
+		existing[key] = v
+	}
 	return indentJSON(existing)
 }
 
-// keptChapters is the chapters object of the book's bridge.json beside a
-// chapters.json in place, as keptDescription is for a description: a run that
-// finds no chapters of its own leaves an earlier one's file, and what vouches for it
-// stays with it.
-func keptChapters(dir, prefix string) *ChaptersProvenance {
+// keptObject is the key object (T) of the book's bridge.json, when the attachment
+// file it vouches for is in place beside it: a run that writes no such file of its
+// own (a description, the chapters) leaves an earlier run's there (nothing deletes
+// into a library), and the new bridge.json carries over what vouches for it. nil
+// when either is missing, isn't a regular file, or holds no such object.
+func keptObject[T any](dir, prefix, file, key string) *T {
 	adir := filepath.Join(dir, AttachDir)
-	if info, err := os.Lstat(filepath.Join(adir, prefix+chaptersName)); err != nil || !info.Mode().IsRegular() {
+	if info, err := os.Lstat(filepath.Join(adir, prefix+file)); err != nil || !info.Mode().IsRegular() {
 		return nil
 	}
-	raw, ok := readProvenance(adir, prefix+provenanceName)["chapters"]
+	raw, ok := readProvenance(adir, prefix+provenanceName)[key]
 	if !ok {
 		return nil
 	}
-	var c *ChaptersProvenance
-	if json.Unmarshal(raw, &c) != nil {
+	var v *T
+	if json.Unmarshal(raw, &v) != nil {
 		return nil
 	}
-	return c
-}
-
-// keptDescription is the description object of the book's bridge.json, when a
-// description.json is in place beside it: a run that writes no description of its
-// own leaves an earlier run's file there (nothing deletes into a library), and the
-// new bridge.json carries over what vouches for it. nil when either is missing,
-// isn't a regular file, or holds no description object.
-func keptDescription(dir, prefix string) *DescriptionProvenance {
-	adir := filepath.Join(dir, AttachDir)
-	if info, err := os.Lstat(filepath.Join(adir, prefix+descriptionName)); err != nil || !info.Mode().IsRegular() {
-		return nil
-	}
-	raw, ok := readProvenance(adir, prefix+provenanceName)["description"]
-	if !ok {
-		return nil
-	}
-	var d *DescriptionProvenance
-	if json.Unmarshal(raw, &d) != nil {
-		return nil
-	}
-	return d
+	return v
 }
 
 // readProvenance reads adir/name (a bridge.json) as a JSON object, nil when there

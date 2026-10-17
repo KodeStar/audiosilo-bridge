@@ -156,7 +156,7 @@ func TestTitles(t *testing.T) {
 	}
 	long := (&script{}).say("Chapter 1 " + strings.Repeat("Wordy ", 9)).pause(1).prose(10)
 	long.words[5].Text = " " + strings.Repeat("x", 300)
-	if got := Detect(long.words, nil, long.t).Chapters[0].Title; len(got) > maxTitleBytes {
+	if got := Detect(long.words, nil, long.t).Chapters[0].Title; len(got) > MaxTitleBytes {
 		t.Errorf("title of %d bytes", len(got))
 	}
 }

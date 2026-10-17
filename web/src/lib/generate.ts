@@ -198,17 +198,12 @@ export function describeSummary(r: DescribeResult): string {
 // parseChaptersResult reads a done chapters job's result, or null when it isn't
 // one.
 export function parseChaptersResult(r: unknown): ChaptersResult | null {
-  if (!r || typeof r !== 'object') return null;
+  const saved = parseSavedFields(r);
   const o = r as Partial<ChaptersResult>;
-  if (typeof o.path !== 'string' || typeof o.chapters !== 'number' || !Array.isArray(o.files))
-    return null;
-  return {
-    library_id: typeof o.library_id === 'number' ? o.library_id : 0,
-    path: o.path,
-    chapters: o.chapters,
-    files: o.files.filter((f): f is string => typeof f === 'string'),
-    source: 'audio',
-  };
+  if (!saved || typeof o.chapters !== 'number') return null;
+  // A chapters job spends nothing, so its result carries no cost.
+  const { library_id, path, files } = saved;
+  return { library_id, path, files, chapters: o.chapters, source: 'audio' };
 }
 
 // chaptersSummary is "18 chapters found in the narration" ("One chapter: ..." for a

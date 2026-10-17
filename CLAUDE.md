@@ -222,18 +222,21 @@ agent's parks. Local only: a contribution never carries it.
 
 **Phase 1d (chapterless books):** a single file with no usable chapter markers (none,
 or one covering the whole file) gets a WINDOWS manifest at inspect (windows of about
-25 minutes cut in silences, straight to splitting), is transcribed window by window,
-then `chapter_detecting` (after asr, mechanical, source-reading) finds the chapters in
-the narration (`internal/chapterdetect`: spoken headings after a pause, the spike's
-rules), moves the window layer into `windows/`, writes the DETECTED manifest, one
-synthesized raw per chapter and `chapters_detected.json` (the player's list, grouped
-by logical position), and the book carries on as an ordinary chaptered one. A
-detection that isn't confident parks `chapters_not_detected` (human only).
+25 minutes cut in silences, straight to splitting, which hears each window's
+silences in the same decode), is transcribed window by window, then
+`chapter_detecting` (after asr, mechanical) finds the chapters in the narration
+(`internal/chapterdetect`: spoken headings after a pause, the spike's rules), moves
+the window layer into `windows/`, writes the DETECTED manifest, one synthesized raw
+per chapter and `chapters_detected.json` (the player's list, grouped by logical
+position), cuts the chapter FLACs from the window FLACs (the source only for what
+they can't give), and the book carries on as an ordinary chaptered one. A detection
+that isn't confident parks `chapters_not_detected` (human only).
 `books.goal = chapters` (migration 0005) stops a book there: the `chapters.detect`
 job (speech recognition and detection only, no agent) writes `chapters.json` at its
 done; `sidecars.generate` writes it as soon as the chapters are found and continues
 a finished chapters run (`store.ContinueChapters`) rather than transcribing again.
-Titles found in the narration are never verified spelling evidence. See
+Titles found in the narration are never verified spelling evidence (a detected
+manifest's `marker_titles.txt` is empty). See
 BRIDGE-PLAN.md's Status table for what is next.
 
 Operative caveats carried from sidecars (PACKAGES.md has the detail):

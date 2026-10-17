@@ -41,9 +41,7 @@ type Word struct {
 }
 
 // Silence is one run of silence ffmpeg heard, on the whole-book timeline.
-type Silence struct {
-	Start, End float64
-}
+type Silence = audio.Silence
 
 // Chapter is one detected chapter on the whole-book timeline.
 type Chapter struct {
@@ -92,8 +90,6 @@ const (
 	titleGap = 0.8
 	// titleWords bounds how far past the heading word a title may run.
 	titleWords = 10
-	// maxTitleBytes is the longest title kept (the server's bound).
-	maxTitleBytes = 200
 	// maxFrontMatter: audio before the first heading shorter than this (credits,
 	// "This is Audible", a dedication) is part of the first chapter; a longer
 	// unheaded opening is a chapter of its own.
@@ -111,6 +107,10 @@ const (
 
 // OpeningTitle names an unheaded opening longer than maxFrontMatter.
 const OpeningTitle = "Opening"
+
+// MaxTitleBytes is the longest chapter title kept: the server's bound on a
+// chapters.json title, which every title the Bridge composes keeps to.
+const MaxTitleBytes = 200
 
 // numbered heading words take a number after them; alone ones don't.
 // "dedication" is deliberately absent: it is matter, and the spike heard it in
@@ -337,7 +337,7 @@ func mergeHeadings(words []Word, kept []candidate) []heading {
 		if n := len(out); n > 0 && c.t-out[n-1].t < mergeWindow {
 			last := &out[n-1]
 			if c.idx > last.spanEnd {
-				last.title = clipTitle(strings.TrimRight(last.title, ".") + ". " + title)
+				last.title = ClipTitle(strings.TrimRight(last.title, ".") + ". " + title)
 				last.spanEnd = end
 			}
 			last.heard += " " + heard
@@ -361,7 +361,7 @@ func titleOf(words []Word, c candidate) (string, int) {
 			break
 		}
 	}
-	return clipTitle(caseTitle(trimPunct(spokenText(words[c.idx : end+1])))), end
+	return ClipTitle(caseTitle(trimPunct(spokenText(words[c.idx : end+1])))), end
 }
 
 // spokenText joins words as heard.
@@ -400,12 +400,12 @@ func caseTitle(s string) string {
 	return strings.Join(fields, " ")
 }
 
-// clipTitle bounds a title to maxTitleBytes, at a rune boundary.
-func clipTitle(s string) string {
-	if len(s) <= maxTitleBytes {
+// ClipTitle bounds a title to MaxTitleBytes, at a rune boundary.
+func ClipTitle(s string) string {
+	if len(s) <= MaxTitleBytes {
 		return s
 	}
-	cut := maxTitleBytes
+	cut := MaxTitleBytes
 	for cut > 0 && !utf8.RuneStart(s[cut]) {
 		cut--
 	}

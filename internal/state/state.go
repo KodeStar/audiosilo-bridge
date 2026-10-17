@@ -111,7 +111,8 @@ func RoutesModel(s State) bool { return IsAgent(s) || s == Describing }
 
 // GoalChapters is a book's goal (books.goal) when it is run for its chapters
 // only (the chapters.detect job): it stops after chapter_detecting, done. The
-// empty goal is the whole pipeline.
+// empty goal is the whole pipeline. NextState (Outcome.Goal) and PathNext route
+// by it; the store's SQL names it too.
 const GoalChapters = "chapters"
 
 // Lane is the executor pool a stage runs in. The three lanes have different
@@ -193,8 +194,9 @@ var table = map[State]Def{
 	MarkersNormalizing: {Lane: LaneAgent, Next: []State{Splitting}, Agent: true, order: 2},
 	Splitting:          {Lane: LaneMechanical, Next: []State{ASR}, SourceIO: true, order: 3},
 	ASR:                {Lane: LaneASR, Next: []State{ChapterDetecting, Sanitizing}, order: 4},
-	// chapter_detecting re-splits the source on the detected chapters, so it reads
-	// the original file.
+	// chapter_detecting cuts the detected chapters from the window FLACs, but splits
+	// from the original file what they can't give (a crash after they went) and
+	// stats it, so it reads the source.
 	ChapterDetecting: {Lane: LaneMechanical, Next: []State{Done, Sanitizing}, SourceIO: true, order: 5},
 	Sanitizing:       {Lane: LaneMechanical, Next: []State{QASweep}, order: 6},
 	QASweep:          {Lane: LaneMechanical, Next: []State{QAAdjudicating, SpellingResearch}, order: 7},
@@ -282,6 +284,22 @@ func MainlineNext(kind Kind, s State) State {
 	return next[len(next)-1]
 }
 
+// PathNext is the stage after s on the remaining path of a book of kind with goal
+// (books.goal): the mainline (MainlineNext), except that a chapters-only book
+// (GoalChapters) goes from asr to chapter_detecting and is done after it, as
+// NextState routes it. The ETA engine follows it.
+func PathNext(kind Kind, goal string, s State) State {
+	if goal == GoalChapters {
+		switch s {
+		case ASR:
+			return ChapterDetecting
+		case ChapterDetecting:
+			return Done
+		}
+	}
+	return MainlineNext(kind, s)
+}
+
 // HoldsSeriesLock reports whether a book at state s with status st still holds
 // its series lock: true for every state before Ready, unless the book failed. A
 // book that has reached Ready (or beyond) has finished authoring, so it no longer
@@ -340,10 +358,9 @@ type Outcome struct {
 	// Windowed (asr): the transcripts are duration windows of a book with no
 	// chapter markers, so chapter_detecting finds the chapters before sanitizing.
 	Windowed bool
-	// GoalChapters (chapter_detecting): the book was run for its chapters only, so
-	// it is done once they are found. Filled from the book (books.goal), not by a
-	// stage.
-	GoalChapters bool
+	// Goal (chapter_detecting) is the book's goal (books.goal): GoalChapters is done
+	// once the chapters are found. Filled from the book, not by a stage.
+	Goal string
 }
 
 // NextState computes the forward transition from cur given a completed stage's
@@ -385,7 +402,7 @@ func NextState(kind Kind, cur State, o Outcome) (State, Status, error) {
 			next = Sanitizing
 		}
 	case ChapterDetecting:
-		if o.GoalChapters {
+		if o.Goal == GoalChapters {
 			next = Done
 		} else {
 			next = Sanitizing

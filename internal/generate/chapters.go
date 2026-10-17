@@ -12,13 +12,12 @@ import (
 	"strings"
 	"time"
 	"unicode"
-	"unicode/utf8"
 
+	"github.com/kodestar/audiosilo-bridge/internal/chapterdetect"
 	"github.com/kodestar/audiosilo-bridge/internal/jobs"
 	"github.com/kodestar/audiosilo-bridge/internal/link"
 	"github.com/kodestar/audiosilo-bridge/internal/metaops"
 	"github.com/kodestar/audiosilo-bridge/internal/pipeline"
-	"github.com/kodestar/audiosilo-bridge/internal/scheduler"
 	"github.com/kodestar/audiosilo-bridge/internal/state"
 	"github.com/kodestar/audiosilo-bridge/internal/store"
 )
@@ -65,9 +64,8 @@ const chaptersFrom = "narration"
 
 // The server's bounds on chapters.json (more would make it unusable there).
 const (
-	minFileChapters  = 2
-	maxFileChapters  = 2000
-	maxChaptersTitle = 200
+	minFileChapters = 2
+	maxFileChapters = 2000
 )
 
 // composeChapters renders chapters.json for the detected list d over the book's
@@ -97,21 +95,14 @@ func composeChapters(d pipeline.DetectedChapters, files []link.BookFile, rel str
 }
 
 // chapterTitle is a title as the server takes it: control characters out, at most
-// maxChaptersTitle bytes (at a character), "Chapter N" for one with none.
+// chapterdetect.MaxTitleBytes (at a character), "Chapter N" for one with none.
 func chapterTitle(t string, n int) string {
-	t = strings.TrimSpace(strings.Map(func(r rune) rune {
+	t = chapterdetect.ClipTitle(strings.TrimSpace(strings.Map(func(r rune) rune {
 		if unicode.IsControl(r) || r == ' ' || r == ' ' {
 			return ' '
 		}
 		return r
-	}, t))
-	if len(t) > maxChaptersTitle {
-		cut := maxChaptersTitle
-		for cut > 0 && !utf8.RuneStart(t[cut]) {
-			cut--
-		}
-		t = strings.TrimSpace(t[:cut])
-	}
+	}, t)))
 	if t == "" {
 		return "Chapter " + strconv.Itoa(n)
 	}
@@ -125,19 +116,34 @@ func detectedSum(d pipeline.DetectedChapters) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// refreshChapters composes the run's chapters.json from the engine book's detected
-// list, when it has one for its current manifest that wasn't composed yet. It
-// reports whether there are chapters to write.
-func (h *Handler) refreshChapters(r *run, b store.Book) bool {
+// refreshChapters composes the run's chapters.json (r.chapters, nil for none to
+// write) from the engine book's detected list, when it has one for its current
+// manifest that wasn't composed yet, and returns that list and whether it is
+// current. A generate job looks at every poll, so the list is read and checked
+// again only when its files changed since the last look (pipeline.DetectedStamp:
+// local stats; no list yet is one stat).
+func (h *Handler) refreshChapters(r *run, b store.Book) (pipeline.DetectedChapters, bool) {
+	stamp, ok := pipeline.DetectedStamp(b.WorkDir)
+	if !ok {
+		return pipeline.DetectedChapters{}, false
+	}
+	if stamp == r.detectedStamp {
+		return r.detected, r.detectedOK
+	}
 	d, err := pipeline.ReadDetectedChapters(b.WorkDir)
-	if err != nil || !d.CurrentFor(b.WorkDir) {
-		return r.chapters != nil
+	if err != nil {
+		return pipeline.DetectedChapters{}, false
+	}
+	r.detectedStamp, r.detected, r.detectedOK = stamp, d, d.CurrentFor(b.WorkDir)
+	if !r.detectedOK {
+		return d, false
 	}
 	if sum := detectedSum(d); sum != r.chaptersSum {
 		raw, err := composeChapters(d, r.files, r.rel, r.place.single, h.now())
 		if err != nil {
 			h.o.Log.Warn("generate: composing chapters.json failed", "job", r.job.ID, "err", err)
-			return r.chapters != nil
+			r.detectedStamp = "" // composed at the next look
+			return d, true
 		}
 		r.chapters, r.chaptersSum = raw, sum
 		r.chaptersProv = nil
@@ -146,7 +152,7 @@ func (h *Handler) refreshChapters(r *run, b store.Book) bool {
 				From: chaptersFrom, Chapters: len(d.Chapters)}
 		}
 	}
-	return r.chapters != nil
+	return d, true
 }
 
 // saveChapters writes the run's chapters.json and bridge.json (its chapters object
@@ -159,10 +165,10 @@ func (h *Handler) saveChapters(ctx context.Context, r *run, wait bool, extra map
 		record:   r.bookID != 0,
 		progress: jobs.Progress{Step: stepWriting, Message: "Saving the chapters with the book", Extra: extra},
 		files: func(p place) ([]attachFile, error) {
-			fresh := provenance(h.o.Version, provKind(r.kind), r.job.ID, h.now(), SourceAudio, "", inputsOf(r.mount, r.files, ""))
-			fresh.Description = keptDescription(p.dir, p.prefix)
+			fresh := provenance(h.o.Version, r.kind, r.job.ID, h.now(), SourceAudio, "", inputsOf(r.mount, r.files, ""))
+			fresh.Description = keptObject[DescriptionProvenance](p.dir, p.prefix, descriptionName, "description")
 			fresh.Chapters = r.chaptersProv
-			prov, err := mergedProvenance(p.dir, p.prefix, fresh, "chapters", r.chaptersProv)
+			prov, err := mergedProvenance(p.dir, p.prefix, fresh, "chapters")
 			if err != nil {
 				return nil, err
 			}
@@ -179,20 +185,13 @@ func (h *Handler) saveChapters(ctx context.Context, r *run, wait bool, extra map
 	return nil
 }
 
-// provKind is a run's job kind as bridge.json names it.
-func provKind(kind string) string {
-	if kind == "" {
-		return Kind
-	}
-	return kind
-}
-
 // saveChaptersEarly writes a generate run's chapters as soon as the engine found
 // them (once per detected list; a save that fails is logged and tried at the next
 // look), long before the characters and recaps: the listener has chapters while the
 // rest is still being written.
 func (h *Handler) saveChaptersEarly(ctx context.Context, r *run, b store.Book) {
-	if !h.refreshChapters(r, b) || r.chaptersSaved == r.chaptersSum {
+	h.refreshChapters(r, b)
+	if r.chapters == nil || r.chaptersSaved == r.chaptersSum {
 		return
 	}
 	if err := h.saveChapters(ctx, r, false, r.bookExtra(b)); err != nil {
@@ -232,9 +231,10 @@ func (h *Handler) continueChapters(ctx context.Context, eng Engine, r *run, old 
 }
 
 // hasChaptersAlready reports an engine failure that says the book has chapters of
-// its own (a chapters-only run's inspect).
+// its own (a chapters-only run's inspect). By its text: the engine keeps a failed
+// book's error, not a failure code.
 func hasChaptersAlready(msg string) bool {
-	return msg == pipeline.HasMarkerChaptersMsg || msg == pipeline.HasFileChaptersMsg
+	return msg == pipeline.ErrHasMarkerChapters.Error() || msg == pipeline.ErrHasFileChapters.Error()
 }
 
 // --- chapters.detect ---
@@ -274,16 +274,12 @@ type ChaptersJobResult struct {
 	Source    string   `json:"source"`
 }
 
-// ParseChaptersParams checks a chapters job's params: nothing is asked for (the
-// server sends {}), and a field a later server adds is ignored.
-func ParseChaptersParams(raw json.RawMessage) error { return parseObjectParams(raw) }
-
 // Run checks the book as a generate job does, then writes the chapters the engine
 // already found for it, or runs an engine book with goal chapters and follows it
-// to done.
+// to done. Its params ask for nothing (the server sends {}).
 func (c *ChaptersJob) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (any, error) {
 	h := c.h
-	if err := ParseChaptersParams(job.Params); err != nil {
+	if err := parseObjectParams(job.Params); err != nil {
 		return nil, err
 	}
 	r, stop, err := h.startRun(job, rep, ChaptersKind)
@@ -291,46 +287,16 @@ func (c *ChaptersJob) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter)
 		return nil, err
 	}
 	defer stop()
-	r.kind, r.source = ChaptersKind, SourceAudio
+	r.source = SourceAudio
 	eng, err := h.waitEngine(ctx, r)
 	if err != nil {
 		return nil, err
 	}
-	mapped, merr := h.o.DB.GetGenerateBook(ctx, job.ID)
-	if merr != nil && !errors.Is(merr, store.ErrNotFound) {
-		return nil, merr
+	mapped, resumed, err := h.resumeMapping(ctx, job)
+	if err != nil {
+		return nil, err
 	}
-	// As a generate job's: the mapping is this job's own only for the same library
-	// and book (server ids repeat across servers).
-	resumed := merr == nil && mapped.BookID != nil && mapped.LibraryID == *job.LibraryID
-	ownBook := func() bool { return mapped.RelPath == r.rel || mapped.RelPath == *job.Path }
-	r.resuming = resumed
-	if err := h.prepare(ctx, r, !resumed); err != nil {
-		if resumed && ownBook() {
-			r.bookID = *mapped.BookID
-		}
-		return h.end(ctx, r, nil, err)
-	}
-	if resumed && !ownBook() {
-		h.stopBook(context.WithoutCancel(ctx), job.ID, *mapped.BookID)
-		resumed = false
-	}
-	if resumed {
-		r.bookID = *mapped.BookID
-		if err := h.attach(ctx, eng, r, mapped); err != nil {
-			return h.end(ctx, r, nil, err)
-		}
-	} else {
-		res, done, err := h.chaptersFromEarlier(ctx, r)
-		if done || err != nil {
-			return res, err
-		}
-		if err := h.create(ctx, eng, r); err != nil {
-			return h.end(ctx, r, nil, err)
-		}
-	}
-	res, err := h.follow(ctx, eng, r)
-	return h.end(ctx, r, res, err)
+	return h.runEngineBook(ctx, eng, r, mapped, resumed, func() (any, bool, error) { return h.chaptersFromEarlier(ctx, r) })
 }
 
 // chaptersFromEarlier writes the chapters an earlier run here already found for the
@@ -348,8 +314,7 @@ func (h *Handler) chaptersFromEarlier(ctx context.Context, r *run) (any, bool, e
 	if err := h.openJobRefusal(ctx, r, old.ID); err != nil {
 		return nil, true, err
 	}
-	d, err := pipeline.ReadDetectedChapters(old.WorkDir)
-	if err != nil || !d.CurrentFor(old.WorkDir) {
+	if _, ok := h.refreshChapters(r, old); !ok {
 		return nil, false, nil
 	}
 	h.o.Log.Info("chapters: an earlier run found the book's chapters; writing them", "job", r.job.ID, "book", old.ID)
@@ -384,33 +349,15 @@ func (h *Handler) createChapters(ctx context.Context, eng Engine, r *run) error 
 		if err := h.openJobRefusal(ctx, r, old.ID); err != nil {
 			return err
 		}
-		if err := h.deleteEarlier(ctx, eng, r, old.ID); errors.Is(err, scheduler.ErrBusy) {
-			return errors.New("the engine is still busy with this book's earlier run; try again in a minute")
-		} else if err != nil && !errors.Is(err, store.ErrNotFound) {
-			return fmt.Errorf("could not clear the book's earlier run: %w", err)
+		if err := h.clearEarlier(ctx, eng, r, old.ID); err != nil {
+			return err
 		}
 	} else if !errors.Is(err, store.ErrNotFound) {
 		return err
 	}
 	nb := h.newBook(r, sp, "")
 	nb.Goal = state.GoalChapters
-	batch, err := h.o.DB.CreateBatch(ctx)
-	if err != nil {
-		return err
-	}
-	nb.BatchID = batch.ID
-	b, err := h.o.DB.CreateBook(ctx, nb)
-	if err != nil {
-		return fmt.Errorf("could not queue the book in the engine: %w", err)
-	}
-	if err := h.o.DB.PutGenerateBook(ctx, store.GenerateBook{ServerJobID: r.job.ID, BookID: &b.ID, LibraryID: r.lib.ID, RelPath: r.rel}); err != nil {
-		_ = h.o.DB.DeleteBook(context.WithoutCancel(ctx), b.ID)
-		return err
-	}
-	r.bookID = b.ID
-	h.o.Log.Info("chapters: queued in the engine", "job", r.job.ID, "book", b.ID, "path", r.rel)
-	eng.Notify()
-	return nil
+	return h.queueBook(ctx, eng, r, nb)
 }
 
 // finishChapters writes a done chapters book's chapters.
@@ -422,11 +369,10 @@ func (h *Handler) finishChapters(ctx context.Context, r *run, b store.Book) (any
 // writeDetected writes the engine book b's detected chapters into the library
 // (parking book_not_writable until it can) and composes the result.
 func (h *Handler) writeDetected(ctx context.Context, r *run, b store.Book) (any, error) {
-	d, err := pipeline.ReadDetectedChapters(b.WorkDir)
-	if err != nil || !d.CurrentFor(b.WorkDir) {
+	d, ok := h.refreshChapters(r, b)
+	if !ok {
 		return nil, errors.New("the engine kept no chapters for the book")
 	}
-	h.refreshChapters(r, b)
 	extra := map[string]any{"stage": string(state.Done), "source": r.source}
 	files := []string{}
 	if r.chapters != nil {

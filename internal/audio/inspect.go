@@ -94,7 +94,7 @@ func audioFilesIn(dir string) ([]string, error) {
 //
 // A single file with no usable markers at all (none, or one covering the whole
 // file) gets a WINDOWS manifest instead (Phase 1d): ffmpegPath places each window's
-// cut in a silence ("" cuts at the targets). Its stats are Usable and Windowed, so
+// cut in a silence ("" cuts at the targets). Its stats are Usable, so
 // the book goes straight to splitting, and the chapters are found in the narration
 // after transcription. A table of several markers in an unknown dialect is a
 // vocabulary gap, not a markerless file: it still goes to markers_normalizing.
@@ -134,7 +134,7 @@ func inspectMarkers(ctx context.Context, bookFile, workDir, ffprobePath, ffmpegP
 		if m, err = windowsManifest(ctx, bookFile, m.Title, m.Duration, ffmpegPath); err != nil {
 			return Manifest{}, MarkerStats{}, err
 		}
-		stats = MarkerStats{Seen: len(markers), Contiguous: true, Complete: true, Windowed: true}
+		stats = MarkerStats{Seen: len(markers), Contiguous: true, Complete: true}
 	}
 	if err := WriteManifest(workDir, m); err != nil {
 		return Manifest{}, MarkerStats{}, err

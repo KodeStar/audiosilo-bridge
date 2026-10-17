@@ -213,7 +213,7 @@ type run struct {
 	descRaw   []byte
 	descErr   string
 	descPaid  bool
-	// kind is the run's job kind ("" for sidecars.generate, ChaptersKind).
+	// kind is the run's job kind (Kind, ChaptersKind, DescribeKind).
 	kind string
 	// chapters are the run's own chapters.json (Phase 1d: the engine found the
 	// book's chapters in its narration; nil for none, or a one-chapter book) and
@@ -223,6 +223,12 @@ type run struct {
 	chaptersProv  *ChaptersProvenance
 	chaptersSum   string
 	chaptersSaved string
+	// detected is the detected list last read (pipeline.DetectedStamp says when;
+	// detectedOK that it was current then), so refreshChapters reads it again only
+	// once it changed.
+	detected      pipeline.DetectedChapters
+	detectedOK    bool
+	detectedStamp string
 }
 
 // bookKey is what changes on an engine book row when the scheduler moves it.
@@ -254,24 +260,45 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 	if err != nil {
 		return nil, err
 	}
-	mapped, merr := h.o.DB.GetGenerateBook(ctx, job.ID)
-	if merr != nil && !errors.Is(merr, store.ErrNotFound) {
-		return nil, merr
+	mapped, resumed, err := h.resumeMapping(ctx, job)
+	if err != nil {
+		return nil, err
 	}
-	// A mapping is this job's own only for the same library and book: the ids
-	// are the server's, so another server (the Bridge paired anew) or a
-	// reinstalled one hands out an id an earlier job's mapping still holds, and
-	// following that would write another book's characters and recaps into this
-	// one. The path is the server's canonical one, known once prepare has asked;
-	// the claim's own path is the job's too (the server moved the job with its
-	// book since).
-	resumed := merr == nil && mapped.BookID != nil && mapped.LibraryID == *job.LibraryID
-	ownBook := func() bool { return mapped.RelPath == r.rel || mapped.RelPath == *job.Path }
 	if !resumed && params.Contribute == ContributeIssue && h.o.CanContribute != nil && !h.o.CanContribute(ctx) {
 		// Fail before any spend: the contribution is the last stage, and without a
 		// token it could only park there after the whole run was paid for.
 		return nil, errCantContribute
 	}
+	return h.runEngineBook(ctx, eng, r, mapped, resumed, nil)
+}
+
+// resumeMapping is the job's mapping to an engine book and whether the job resumes
+// it. A mapping is this job's own only for the same library (and book, which
+// runEngineBook checks once prepare knows the path): the ids are the server's, so
+// another server (the Bridge paired anew) or a reinstalled one hands out an id an
+// earlier job's mapping still holds, and following that would write another book's
+// characters and recaps into this one.
+func (h *Handler) resumeMapping(ctx context.Context, job jobs.Job) (store.GenerateBook, bool, error) {
+	mapped, err := h.o.DB.GetGenerateBook(ctx, job.ID)
+	if errors.Is(err, store.ErrNotFound) {
+		return store.GenerateBook{}, false, nil
+	}
+	if err != nil {
+		return store.GenerateBook{}, false, err
+	}
+	return mapped, mapped.BookID != nil && mapped.LibraryID == *job.LibraryID, nil
+}
+
+// runEngineBook checks the book (prepare), finds a resumed job's engine book again
+// (following a book that moved while the job was away) or makes a new one, and
+// follows it to the end; both job kinds that run the engine share it. fresh, when
+// set, runs before a new book is made and may end the job without one (done).
+func (h *Handler) runEngineBook(ctx context.Context, eng Engine, r *run, mapped store.GenerateBook, resumed bool,
+	fresh func() (res any, done bool, err error)) (any, error) {
+	// The book is the mapping's when its path is the server's canonical one, known
+	// once prepare has asked; the claim's own path is the job's too (the server
+	// moved the job with its book since).
+	ownBook := func() bool { return mapped.RelPath == r.rel || mapped.RelPath == *r.job.Path }
 	r.resuming = resumed
 	if err := h.prepare(ctx, r, !resumed); err != nil {
 		if resumed && ownBook() {
@@ -280,15 +307,15 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 		return h.end(ctx, r, nil, err)
 	}
 	if resumed && ownBook() && mapped.RelPath != r.rel {
-		h.o.Log.Info("generate: the book moved while the job was away; the job follows it", "job", job.ID,
+		h.o.Log.Info("generate: the book moved while the job was away; the job follows it", "job", r.job.ID,
 			"from", mapped.RelPath, "to", r.rel)
 		h.recordMove(ctx, r)
 	}
 	if resumed && !ownBook() {
 		// That run's job is gone (its id is this job's now), so nothing follows it.
 		h.o.Log.Warn("generate: the job's id maps to another book's run; this job starts its own",
-			"job", job.ID, "mapped", mapped.RelPath, "path", r.rel)
-		h.stopBook(context.WithoutCancel(ctx), job.ID, *mapped.BookID)
+			"job", r.job.ID, "mapped", mapped.RelPath, "path", r.rel)
+		h.stopBook(context.WithoutCancel(ctx), r.job.ID, *mapped.BookID)
 		resumed = false
 	}
 	if resumed {
@@ -296,8 +323,15 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 		if err := h.attach(ctx, eng, r, mapped); err != nil {
 			return h.end(ctx, r, nil, err)
 		}
-	} else if err := h.create(ctx, eng, r); err != nil {
-		return h.end(ctx, r, nil, err)
+	} else {
+		if fresh != nil {
+			if res, done, err := fresh(); done || err != nil {
+				return res, err
+			}
+		}
+		if err := h.create(ctx, eng, r); err != nil {
+			return h.end(ctx, r, nil, err)
+		}
 	}
 	res, err := h.follow(ctx, eng, r)
 	return h.end(ctx, r, res, err)
@@ -313,7 +347,7 @@ func (h *Handler) startRun(job jobs.Job, rep *jobs.Reporter, kind string) (r *ru
 	if job.LibraryID == nil || job.Path == nil || strings.TrimSpace(*job.Path) == "" {
 		return nil, nil, fmt.Errorf("%s needs a library and a book path", kind)
 	}
-	r = &run{job: job, rep: rep, rel: *job.Path, jobPath: *job.Path, poke: make(chan struct{}, 1)}
+	r = &run{job: job, rep: rep, kind: kind, rel: *job.Path, jobPath: *job.Path, poke: make(chan struct{}, 1)}
 	if p := rep.Path(); p != "" {
 		r.rel, r.jobPath = p, p
 	}
@@ -651,16 +685,30 @@ func (h *Handler) create(ctx context.Context, eng Engine, r *run) error {
 		if ok, err := h.continueChapters(ctx, eng, r, old); ok || err != nil {
 			return err
 		}
-		if err := h.deleteEarlier(ctx, eng, r, old.ID); errors.Is(err, scheduler.ErrBusy) {
-			return errors.New("the engine is still busy with this book's earlier run; try again in a minute")
-		} else if err != nil && !errors.Is(err, store.ErrNotFound) {
-			return fmt.Errorf("could not clear the book's earlier run: %w", err)
+		if err := h.clearEarlier(ctx, eng, r, old.ID); err != nil {
+			return err
 		}
-		h.o.Log.Info("generate: the book's earlier run was cleared", "job", r.job.ID, "old_book", old.ID)
 	} else if !errors.Is(err, store.ErrNotFound) {
 		return err
 	}
-	nb := h.newBook(r, sp, ebookPath)
+	return h.queueBook(ctx, eng, r, h.newBook(r, sp, ebookPath))
+}
+
+// clearEarlier deletes the engine book of the book's earlier run (see
+// deleteEarlier), in words for a person when it can't.
+func (h *Handler) clearEarlier(ctx context.Context, eng Engine, r *run, id int64) error {
+	if err := h.deleteEarlier(ctx, eng, r, id); errors.Is(err, scheduler.ErrBusy) {
+		return errors.New("the engine is still busy with this book's earlier run; try again in a minute")
+	} else if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return fmt.Errorf("could not clear the book's earlier run: %w", err)
+	}
+	h.o.Log.Info("generate: the book's earlier run was cleared", "job", r.job.ID, "old_book", id)
+	return nil
+}
+
+// queueBook makes the job's engine book nb in a batch of its own, maps the job to
+// it and wakes the engine.
+func (h *Handler) queueBook(ctx context.Context, eng Engine, r *run, nb store.NewBook) error {
 	batch, err := h.o.DB.CreateBatch(ctx)
 	if err != nil {
 		return err
@@ -675,7 +723,7 @@ func (h *Handler) create(ctx context.Context, eng Engine, r *run) error {
 		return err
 	}
 	r.bookID = b.ID
-	h.o.Log.Info("generate: queued in the engine", "job", r.job.ID, "book", b.ID, "source", r.source, "path", r.rel)
+	h.o.Log.Info("generate: queued in the engine", "job", r.job.ID, "kind", r.kind, "book", b.ID, "source", r.source, "path", r.rel)
 	eng.Notify()
 	return nil
 }
@@ -848,7 +896,7 @@ func (h *Handler) step(ctx context.Context, eng Engine, r *run, b store.Book) (a
 		delete(pr.Extra, "cost_usd") // speech recognition and detection only: no agent spend
 	}
 	r.rep.Progress(pr)
-	if r.kind == "" {
+	if r.kind == Kind {
 		// The chapters go into the library as soon as they are found, long before
 		// the characters and recaps.
 		h.saveChaptersEarly(ctx, r, b)
@@ -964,11 +1012,11 @@ func (h *Handler) writeSidecars(ctx context.Context, r *run, b store.Book, wait 
 			} else {
 				// An earlier run's description.json stays in place; what vouches
 				// for it stays with it.
-				prov.Description = keptDescription(p.dir, p.prefix)
+				prov.Description = keptObject[DescriptionProvenance](p.dir, p.prefix, descriptionName, "description")
 			}
 			prov.Chapters = r.chaptersProv
 			if prov.Chapters == nil {
-				prov.Chapters = keptChapters(p.dir, p.prefix)
+				prov.Chapters = keptObject[ChaptersProvenance](p.dir, p.prefix, chaptersName, "chapters")
 			}
 			return attachmentFiles(s, prov)
 		},

@@ -619,32 +619,58 @@ func classifyBookEdges(book store.Book) (edgeClassification, error) {
 	if haveEbook {
 		return classifyEbookEdges(m)
 	}
-	n := len(m.Chapters)
+	chs, err := edgeChapters(m.Chapters, func(ch audio.Chapter) (string, error) {
+		opening, err := chapterOpening(book.WorkDir, ch.Chapter)
+		if err != nil {
+			return "", fmt.Errorf("edge classify: read chapter %d opening: %w", ch.Chapter, err)
+		}
+		return opening, nil
+	}, func(ch audio.Chapter) (int, bool, error) {
+		words, present, err := chapterWordCount(book.WorkDir, ch.Chapter)
+		if err != nil {
+			return 0, false, fmt.Errorf("edge classify: count chapter %d words: %w", ch.Chapter, err)
+		}
+		return words, present, nil
+	})
+	if err != nil {
+		return edgeClassification{}, err
+	}
+	return classifyEdgeChapters(chs), nil
+}
+
+// edgeChapters is classifyEdgeChapters' input for a manifest's chapters: every
+// chapter's opening, and the word count (words: the count and whether there is a
+// transcript) and duration of the chapters in the probe window. The one rule for
+// that window, so every caller classifies alike (classifyBookEdges from the work
+// dir, chapter_detecting from the transcripts it just made).
+func edgeChapters(chapters []audio.Chapter, opening func(audio.Chapter) (string, error),
+	words func(audio.Chapter) (int, bool, error)) ([]edgeChapter, error) {
+	n := len(chapters)
 	chs := make([]edgeChapter, 0, n)
-	for i, ch := range m.Chapters {
+	for i, ch := range chapters {
 		// The chapter's OPENING is read for EVERY chapter, not just the edges. Word counting
 		// reads a whole transcript, so it stays bounded to the edges where it is needed; an
 		// opening is 256 bytes, and the numbering derived from it is only as good as its
 		// coverage. Reading it at the edges alone left the entire interior of a long book
 		// unnumbered evidence-wise, so any unnumbered section in the middle had to be guessed
 		// around - and a book carrying interludes is exactly the shape that needs it.
-		opening, err := chapterOpening(book.WorkDir, ch.Chapter)
+		open, err := opening(ch)
 		if err != nil {
-			return edgeClassification{}, fmt.Errorf("edge classify: read chapter %d opening: %w", ch.Chapter, err)
+			return nil, err
 		}
 		if n > 2*edgeProbeDepth && i >= edgeProbeDepth && i < n-edgeProbeDepth {
 			// Unprobed interior narrative sentinel (Probed:false, so nonNarrative is false). It
 			// bounds any edge run before it can reach the interior without reading a transcript.
-			chs = append(chs, edgeChapter{Chapter: ch.Chapter, Opening: opening})
+			chs = append(chs, edgeChapter{Chapter: ch.Chapter, Opening: open})
 			continue
 		}
-		words, present, err := chapterWordCount(book.WorkDir, ch.Chapter)
+		count, present, err := words(ch)
 		if err != nil {
-			return edgeClassification{}, fmt.Errorf("edge classify: count chapter %d words: %w", ch.Chapter, err)
+			return nil, err
 		}
-		chs = append(chs, edgeChapter{Chapter: ch.Chapter, Words: words, HasTranscript: present, Probed: true, DurationSec: ch.Duration, Opening: opening})
+		chs = append(chs, edgeChapter{Chapter: ch.Chapter, Words: count, HasTranscript: present, Probed: true, DurationSec: ch.Duration, Opening: open})
 	}
-	return classifyEdgeChapters(chs), nil
+	return chs, nil
 }
 
 // chapterOpeningBytes is how much of a chapter transcript is read to find its announcement.

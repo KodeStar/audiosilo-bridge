@@ -39,6 +39,13 @@ func TestChapterDetectSpikeCorpus(t *testing.T) {
 	// and put a boundary (014) where no heading is spoken.
 	missedOK := map[string][]string{"emperors-soul": {"014"}}
 	inventedOK := map[string][]string{"emperors-soul": {"Prologue", "Day Five", "Day 70"}}
+	// Past Tense's reference is the chapter list of another master of the recording
+	// (6.5 s longer than the spike's file): its boundaries sit on a timeline about 4 s
+	// off the file's and drifting about 60 ppm, so they are mapped onto the file by
+	// the least-squares line through the boundaries found (within otherMasterNear)
+	// before the 1 s rule applies. A wrong or missed boundary still shows: two
+	// numbers fit 45 boundaries, not one each.
+	otherMaster := map[string]bool{"past-tense": true}
 	ran := 0
 	for _, book := range []string{"christmas-carol", "emperors-soul", "the-black-gate", "cosmic-ride", "past-tense"} {
 		t.Run(book, func(t *testing.T) {
@@ -57,16 +64,34 @@ func TestChapterDetectSpikeCorpus(t *testing.T) {
 			if !res.Confident {
 				t.Fatalf("not confident: %s", res.Reason)
 			}
-			truth := spikeTruth(t, dir, book)
-			var errs []float64
-			for _, tb := range truth {
-				if tb.at <= 1 || spikeMatter(tb.title) || slices.Contains(missedOK[book], tb.title) {
-					continue
+			all := spikeTruth(t, dir, book)
+			var truth []spikeBoundary // the story boundaries
+			for _, tb := range all {
+				if tb.at > 1 && !spikeMatter(tb.title) && !slices.Contains(missedOK[book], tb.title) {
+					truth = append(truth, tb)
 				}
+			}
+			// off is a boundary's signed distance to the nearest found one.
+			off := func(at float64) float64 {
 				best := math.Inf(1)
 				for _, c := range res.Chapters {
-					best = math.Min(best, math.Min(math.Abs(c.Start-tb.at), math.Abs(c.HeadingAt-tb.at)))
+					for _, x := range []float64{c.Start - at, c.HeadingAt - at} {
+						if math.Abs(x) < math.Abs(best) {
+							best = x
+						}
+					}
 				}
+				return best
+			}
+			align := func(float64) float64 { return 0 }
+			if otherMaster[book] {
+				a, b := spikeAlign(truth, off)
+				align = func(at float64) float64 { return a + b*at }
+				t.Logf("%s: the reference mapped onto the file by %+.2f s and %+.1f ppm", book, a, b*1e6)
+			}
+			var errs []float64
+			for _, tb := range truth {
+				best := math.Abs(off(tb.at) - align(tb.at))
 				if best > 1 {
 					t.Errorf("story boundary %q at %.1f s not found within 1 s (nearest %.2f s)", tb.title, tb.at, best)
 					continue
@@ -79,7 +104,7 @@ func TestChapterDetectSpikeCorpus(t *testing.T) {
 					continue
 				}
 				near := false
-				for _, tb := range truth {
+				for _, tb := range all {
 					near = near || math.Abs(c.HeadingAt-tb.at) <= 10
 				}
 				if near {
@@ -95,7 +120,8 @@ func TestChapterDetectSpikeCorpus(t *testing.T) {
 			if len(errs) > 0 {
 				med, top = errs[len(errs)/2], errs[len(errs)-1]
 			}
-			entries := groupByPosition(detectedManifest(audio.Manifest{Duration: duration}, res.Chapters), tl)
+			dm := detectedManifest(audio.Manifest{Duration: duration}, res.Chapters)
+			entries := groupByPosition(dm, tl.split(dm.Chapters))
 			t.Logf("%s: %.1f h, %d chapters (%d headings), %d story boundaries found, error median %.2f s max %.2f s; "+
 				"spoken headings the reference lacks: %v; %d list entries", book, duration/3600, len(res.Chapters),
 				res.Headings, len(errs), med, top, invented, len(entries))
@@ -148,6 +174,40 @@ var (
 	reSpikeSilStart = regexp.MustCompile(`silence_start: (-?[\d.]+)`)
 	reSpikeSilEnd   = regexp.MustCompile(`silence_end: ([\d.]+)`)
 )
+
+// otherMasterNear bounds how far a reference boundary on another master's timeline
+// may sit from the boundary found for it and still be fitted.
+const otherMasterNear = 10.0
+
+// spikeAlign is the least-squares line (offset a, drift b) through the signed
+// distances (off) of the reference boundaries from the ones found, those within
+// otherMasterNear.
+func spikeAlign(truth []spikeBoundary, off func(float64) float64) (a, b float64) {
+	var xs, ys []float64
+	for _, tb := range truth {
+		if d := off(tb.at); math.Abs(d) <= otherMasterNear {
+			xs, ys = append(xs, tb.at), append(ys, d)
+		}
+	}
+	if len(xs) < 2 {
+		return 0, 0
+	}
+	var mx, my float64
+	for i := range xs {
+		mx, my = mx+xs[i], my+ys[i]
+	}
+	mx, my = mx/float64(len(xs)), my/float64(len(xs))
+	var sxy, sxx float64
+	for i := range xs {
+		sxy += (xs[i] - mx) * (ys[i] - my)
+		sxx += (xs[i] - mx) * (xs[i] - mx)
+	}
+	if sxx == 0 {
+		return my, 0
+	}
+	b = sxy / sxx
+	return my - b*mx, b
+}
 
 // spikeSilences parses silence/<book>.log.
 func spikeSilences(t *testing.T, dir, book string) []chapterdetect.Silence {
