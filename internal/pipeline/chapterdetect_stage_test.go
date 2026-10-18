@@ -10,8 +10,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kodestar/audiosilo-bridge/internal/audio"
+	"github.com/kodestar/audiosilo-bridge/internal/chapterdetect"
 	"github.com/kodestar/audiosilo-bridge/internal/scheduler"
 	"github.com/kodestar/audiosilo-bridge/internal/state"
 	"github.com/kodestar/audiosilo-bridge/internal/store"
@@ -473,7 +475,8 @@ func TestWindowTimelineStaysInItsWindow(t *testing.T) {
 
 // DetectionRerunnable says a book stopped at chapter_detecting can run the stage
 // again from what it kept (a generate job continues it): the windows transcribed,
-// their silences to be had, the file the one inspected; or the layer moved aside
+// their silences to be had or the detection kept for them, the file the one
+// inspected (its size, and not written since the probe); or the layer moved aside
 // with its detection. Anything short of that is denied.
 func TestDetectionRerunnable(t *testing.T) {
 	dir := t.TempDir()
@@ -487,16 +490,23 @@ func TestDetectionRerunnable(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	mustWriteFile(src, "the audio")
+	// The audio file, last written well before inspect probed it (at mod).
+	writeSource := func(body string, mod time.Time) {
+		t.Helper()
+		mustWriteFile(src, body)
+		if err := os.Chtimes(src, mod, mod); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before := time.Now().Add(-time.Hour)
+	writeSource("the audio", before)
 	work := filepath.Join(dir, "work")
 	m := audio.Manifest{Source: src, Style: audio.StyleWindows, Duration: 20, ChapterCount: 2, Chapters: []audio.Chapter{
 		{Chapter: 1, Start: 0, End: 10, Duration: 10}, {Chapter: 2, Start: 10, End: 20, Duration: 10}}}
 	if err := os.MkdirAll(work, 0o750); err != nil {
 		t.Fatal(err)
 	}
-	if err := audio.WriteManifest(work, m); err != nil {
-		t.Fatal(err)
-	}
+	writeManifestStruct(t, work, m)
 	probe := `{"format":{"duration":"20","size":"9"}}`
 	writeProbeJSON(t, work, probe)
 	for w := 1; w <= 2; w++ {
@@ -513,7 +523,9 @@ func TestDetectionRerunnable(t *testing.T) {
 		spoil, restore func()
 	}{
 		{"the file replaced since it was inspected",
-			func() { mustWriteFile(src, "another encode") }, func() { mustWriteFile(src, "the audio") }},
+			func() { writeSource("another encode", before) }, func() { writeSource("the audio", before) }},
+		{"the file edited in place since it was inspected, its size kept (markers written into the tag's padding)",
+			func() { writeSource("the AUDIO", time.Now().Add(time.Hour)) }, func() { writeSource("the audio", before) }},
 		{"a probe that states no size (unknown is no match)",
 			func() { writeProbeJSON(t, work, `{"format":{"duration":"20"}}`) }, func() { writeProbeJSON(t, work, probe) }},
 		{"a window's audio gone with no silences kept (a purge)",
@@ -526,20 +538,39 @@ func TestDetectionRerunnable(t *testing.T) {
 			t.Fatalf("rerunnable with %s", tc.denied)
 		}
 		tc.restore()
+		if !DetectionRerunnable(work) {
+			t.Fatalf("not rerunnable once %s was undone", tc.denied)
+		}
 	}
-	// The layer moved aside: rerunnable only with the detection it was moved by.
+	// A file dated a little after the probe (a library on a clock running ahead of
+	// the Bridge's, the file copied in just before inspect) is still the one read.
+	writeSource("the audio", time.Now().Add(sourceClockSlack/2))
+	if !DetectionRerunnable(work) {
+		t.Fatal("a file dated within the clock slack of its probe isn't rerunnable")
+	}
+	writeSource("the audio", before)
+	// A window's audio gone with no silences kept, but the confident detection kept
+	// for the windows (the stage stopped between keeping it and the move): the
+	// stage takes it as it is and cuts from the source what the windows can't give.
 	wdir := filepath.Join(work, audio.WindowsDir)
-	if err := audio.WriteManifest(wdir, m); err != nil {
-		t.Fatal(err)
+	detection := filepath.Join(wdir, windowsDetectionName)
+	kept := windowDetection{WindowsSHA: windowsSHA(m), Result: chapterdetect.Result{Confident: true}}
+	_ = os.Remove(flac)
+	writeJSONFile(t, detection, kept)
+	if !DetectionRerunnable(work) {
+		t.Fatal("a layer in place with its confident detection kept isn't rerunnable")
 	}
+	_ = os.Remove(detection)
+	mustWriteFile(flac, strings.Repeat("f", 512))
+	// The layer moved aside: rerunnable only with the detection it was moved by.
+	writeManifestStruct(t, wdir, m)
 	if err := os.Rename(filepath.Join(work, transcript.RawDir), filepath.Join(wdir, transcript.RawDir)); err != nil {
 		t.Fatal(err)
 	}
 	if DetectionRerunnable(work) {
 		t.Fatal("rerunnable after a move with no detection kept")
 	}
-	mustWriteFile(filepath.Join(wdir, windowsDetectionName),
-		fmt.Sprintf(`{"windows_sha":%q,"result":{"confident":true}}`, windowsSHA(m)))
+	writeJSONFile(t, detection, kept)
 	if !DetectionRerunnable(work) {
 		t.Fatal("a moved layer with its detection isn't rerunnable")
 	}

@@ -881,10 +881,13 @@ internal/
             ReadDetectedChapters / CurrentFor (manifest fingerprint and source size) /
             DetectedStamp (local stats, so a poller re-reads only a changed list) are
             generate's, and DetectionRerunnable (a book stopped at chapter_detecting
-            can run it again from what it kept: the window layer in place with every
-            window's silences to be had, or moved aside with the confident detection
-            it was moved by; every window's raw complete; the file's size the one
-            probe.json states, which must be known), for its continue. The stage
+            can run it again from what it kept: the window layer with the confident
+            detection kept for it, or in place with every window's silences to be
+            had; every window's raw complete; the file the one inspected: the size
+            probe.json states, which must be known, and not modified since probe.json
+            was written (sourceClockSlack, 2 minutes, for a library on a clock a
+            little ahead), as a tag editor adding markers can keep the size), for its
+            continue. The stage
             reports one progress unit, as every book stage (the
             ETA charges a unit its learned per-book time). inspect (its windows'
             silence probes under the stage heartbeat; the marker-format note only for a
@@ -1000,8 +1003,9 @@ internal/
             (one statement: only a book with a goal, chapters being the one, still at
             from (the state the caller checked), done there or failed there (a cancel
             is a failure), whose transcripts the retention didn't sweep, else
-            ErrNotContinuable) makes it a whole-run book at to, its status left as it
-            is (the caller re-admits a failed one), with the new job's identity
+            ErrNotContinuable) makes it a whole-run book at to, its status cleared (a
+            done book's too: a cancel or a park landing as its last stage finished
+            leaves one), with the new job's identity
             (title, authors, narrators,
             series and position, asin, isbn and their sources: the book may have been
             matched since), contrib_mode and work_id, and maps the new job to it in
@@ -1584,19 +1588,30 @@ internal/
             CONTINUES a goal-chapters engine book at the same source path (not swept,
             no open job, the audio read): a done one whose list is CurrentFor the file
             on disk, from splitting; or one cancelled or failed at chapter_detecting
-            whose kept windows can run it again (pipeline.DetectionRerunnable), re-
-            admitted there by the engine's Retry, so the detection runs again from the
-            window layer with the whole pipeline after it and nothing is transcribed
-            again (continueChapters -> store.ContinueChapters with the state it
-            checked and the one to go on at, under the engine's Hold, the job's
-            identity and mapping in one transaction). The server cancels a PARKED chapters.detect
-            job as it queues a generate job for the book (a working one refuses it,
-            409 detect_open), and the Bridge hears that cancel at the chapters job's
-            next report, so create() first waits up to holdTries polls
-            (awaitChaptersGivingWay) while that parked job still follows the book, or
-            no job does but the book isn't stopped yet (its job's end is stopping it),
-            handing back the open job it last saw (firstOpenJob); a job that stays
-            open is refused as before. chapters.detect
+            whose kept windows can run it again (pipeline.DetectionRerunnable), going
+            on there, so the detection runs again from the window layer with the
+            whole pipeline after it and nothing is transcribed again; either only
+            while the book is still the one file it was (audio.ResolveSource: a
+            folder that gained an audio file is a multi-file book now)
+            (continueChapters -> store.ContinueChapters with the state it checked and
+            the one to go on at, under the engine's Hold, waited for as the delete
+            would (holdBook: a stage the cancel just stopped may still be finishing;
+            one that stays busy fails the job, errEarlierRunBusy, rather than the
+            run being deleted unseen) and the book read again once held (that stage
+            may have finished: done), the job's identity, the cleared status and the
+            mapping in one transaction on the job's context). The server queues a
+            generate job beside a chapters.detect
+            job only once that one is cancelled (a PARKED one it cancels as it queues
+            it; a working one refuses it, 409 detect_open, until an admin cancels
+            it), and the Bridge hears that cancel at the chapters job's next report,
+            so create() first waits up to holdTries polls (awaitChaptersGivingWay)
+            while that chapters job still follows the book, whatever the book is
+            doing, or no job does but the book isn't stopped yet (its job's end is
+            stopping it; one still not stopped when the wait runs out is stopped
+            there, stopBook), handing back the open job it last saw (firstOpenJob); a
+            job that stays open is refused as before. stopBook leaves alone a book
+            another open job follows (a late end of the chapters job, Abandon's once
+            the engine starts, would stop the continued run). chapters.detect
             (ChaptersJob, ChaptersKind, pipeline lane, Abandoner; params any JSON
             object): the same resume and follow as generate (resumeMapping +
             runEngineBook: prepare strict when new, a resumed job's own book found
@@ -1958,7 +1973,7 @@ contrib, events, metaops, pipeline, scheduler, state, supervisor, toolfetch);
 `api -> {auth, jobs, link, logring, mapping, store}` (types only; it calls the
 injected Backend); `verify -> {jobs, link, mapping}`; `jobs -> {link, store}`;
 `mapping -> link`; `link` is a leaf. `generate -> {jobs, link, mapping, store,
-scheduler, state, pipeline, chapterdetect, scratch, metaops, ebook, agent, fsutil}` (+ the meta
+scheduler, state, pipeline, chapterdetect, audio, scratch, metaops, ebook, agent, fsutil}` (+ the meta
 module's extract/model), its engine and server reached through its own Engine and
 Server interfaces. The agent container: `agentproto` is a leaf (standard library
 only); `agentbox -> {agent, agentproto}`; `agentrun -> {agent, agentproto,

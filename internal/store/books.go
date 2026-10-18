@@ -571,15 +571,16 @@ var ErrNotContinuable = errors.New("the book isn't a chapters book to continue")
 // (done, or failed there: a cancel is a failure) into a whole-pipeline one at to
 // for a new job: goal empty; the new job's identity (nb's title, authors,
 // narrators, series and position, asin, isbn and their sources: the book may have
-// been matched since the chapters job made it), contribution mode and work id. The
-// status is left as it is (a done book's is clear; a failed one is re-admitted by
-// the caller), as are the work dir, source and kind. job (when it names a server
-// job) is mapped to the book in the same transaction, so a book is never continued
-// with no job to follow it. ErrNotContinuable when the book isn't one stopped at
-// from, or the retention swept its transcripts (a continue needs them); checked in
-// the one statement, so a book that changed meanwhile isn't moved. The SQL asks for
-// any goal short of the whole pipeline (chapters is the only one) and takes both
-// states from the caller, so the store keeps the state's strings opaque.
+// been matched since the chapters job made it), contribution mode and work id;
+// status clear, so the scheduler takes it up at to (a done book too: a cancel or
+// a park landing as its last stage finished leaves its status on it). The work
+// dir, source and kind stay the book's. job (when it names a server job) is mapped
+// to the book in the same transaction, so a book is never continued with no job
+// to follow it, nor left stopped. ErrNotContinuable when the book isn't one
+// stopped at from, or the retention swept its transcripts (a continue needs them);
+// checked in the one statement, so a book that changed meanwhile isn't moved. The
+// SQL asks for any goal short of the whole pipeline (chapters is the only one) and
+// takes both states from the caller, which decides where a book goes on from.
 func (db *DB) ContinueChapters(ctx context.Context, id int64, from, to string, nb NewBook, job GenerateBook) error {
 	authors, err := marshalJSONDefault(nb.Authors, "[]")
 	if err != nil {
@@ -600,7 +601,8 @@ func (db *DB) ContinueChapters(ctx context.Context, id int64, from, to string, n
 	defer func() { _ = tx.Rollback() }()
 	res, err := tx.ExecContext(ctx,
 		`UPDATE books SET goal='', title=?, authors=?, narrators=?, series=?, series_pos=?, asin=?, isbn=?,
-		     identity_sources=?, contrib_mode=?, work_id=?, state=?, updated_at=?
+		     identity_sources=?, contrib_mode=?, work_id=?, state=?, status='', error='', park_code='', retry_at='',
+		     updated_at=?
 		  WHERE id=? AND goal!='' AND state=? AND (state='done' OR status='failed')
 		    AND NOT EXISTS (SELECT 1 FROM generate_books WHERE book_id=? AND swept_at!='')`,
 		nb.Title, authors, narrators, nb.Series, nb.SeriesPos, nb.ASIN, nb.ISBN, idsrc, nb.ContribMode, nb.WorkID,

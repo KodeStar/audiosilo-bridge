@@ -325,33 +325,45 @@ func keptDetection(workDir, sha string) (chapterdetect.Result, bool) {
 	return kept.Result, true
 }
 
+// sourceClockSlack is how much later than probe.json an audio file may be dated
+// and still be the file inspect read: the library can be another machine's, its
+// clock a little ahead of the Bridge's, so a file copied in just before inspect
+// is dated after it. An edit that matters (chapter markers added once a detection
+// parked) comes after the whole transcription, well past it.
+const sourceClockSlack = 2 * time.Minute
+
 // DetectionRerunnable reports whether a book stopped at chapter_detecting (parked,
 // cancelled or failed there) can run the stage again from what it kept, its audio
-// never transcribed again: the window layer, either in place with every window's
-// silences to be had (kept, or its FLAC there to listen to) or moved aside with the
-// confident detection the move was made from; every window's raw transcript
-// complete; and the audio file the one inspected (the size probe.json states, which
-// must be known). A generate job continues such a chapters-only book.
+// never transcribed again: the window layer, with the confident detection kept for
+// it (which the stage takes as it is) or, in place, every window's silences to be
+// had (kept, or its FLAC there to listen to); every window's raw transcript
+// complete; and the audio file the one inspected (the size probe.json states,
+// which must be known, and not modified since probe.json was written, give or
+// take sourceClockSlack: a tag editor adding chapter markers can keep the size). A
+// generate job continues such a chapters-only book.
 func DetectionRerunnable(workDir string) bool {
 	layer, err := readWindowLayer(workDir)
 	if err != nil || len(layer.manifest.Chapters) == 0 {
 		return false
 	}
-	// The cheap checks first: a replaced file refuses before any transcript is read.
+	// The cheap checks first: a replaced or edited file refuses before any
+	// transcript is read.
 	size := audio.ProbedSize(workDir)
-	if info, err := os.Stat(layer.manifest.Source); err != nil || size <= 0 || info.Size() != size {
+	info, err := os.Stat(layer.manifest.Source)
+	probe, perr := os.Stat(filepath.Join(workDir, audio.ProbeName))
+	if err != nil || perr != nil || size <= 0 || info.Size() != size ||
+		info.ModTime().After(probe.ModTime().Add(sourceClockSlack)) {
 		return false
 	}
-	if layer.moved {
-		if _, ok := keptDetection(workDir, windowsSHA(layer.manifest)); !ok {
-			return false
-		}
+	_, kept := keptDetection(workDir, windowsSHA(layer.manifest))
+	if layer.moved && !kept {
+		return false
 	}
 	for _, w := range layer.manifest.Chapters {
 		if !rawComplete(filepath.Join(layer.rawDir, transcript.RawName(w.Chapter))) {
 			return false
 		}
-		if !layer.moved && !audio.WindowHeard(filepath.Join(workDir, audio.ChaptersDir), w) {
+		if !kept && !audio.WindowHeard(filepath.Join(workDir, audio.ChaptersDir), w) {
 			return false
 		}
 	}

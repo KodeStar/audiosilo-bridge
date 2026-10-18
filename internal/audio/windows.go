@@ -263,13 +263,20 @@ func readWindowSilences(dir string, w Chapter) ([]Silence, bool) {
 	return ws.Silences, true
 }
 
-// WindowHeard reports whether window w's silences can be had from dir without the
-// source: kept there (WindowSilences' own), or its FLAC there whole to listen to.
+// windowFLAC is window w's FLAC in dir, ok when it is there whole.
+func windowFLAC(dir string, w Chapter) (string, bool) {
+	flac := filepath.Join(dir, ChapterFileName(w.Chapter))
+	return flac, complete(flac, w.Duration)
+}
+
+// WindowHeard reports whether WindowSilences can give window w's silences from
+// dir without the source: kept there, or its FLAC there whole to listen to.
 func WindowHeard(dir string, w Chapter) bool {
 	if _, ok := readWindowSilences(dir, w); ok {
 		return true
 	}
-	return complete(filepath.Join(dir, ChapterFileName(w.Chapter)), w.Duration)
+	_, ok := windowFLAC(dir, w)
+	return ok
 }
 
 // WindowSilences is window w's silences on the file's timeline: the ones split
@@ -280,8 +287,8 @@ func WindowSilences(ctx context.Context, ffmpegPath, dir string, w Chapter, time
 	if sil, ok := readWindowSilences(dir, w); ok {
 		return sil, nil
 	}
-	flac := filepath.Join(dir, ChapterFileName(w.Chapter))
-	if !complete(flac, w.Duration) {
+	flac, ok := windowFLAC(dir, w)
+	if !ok {
 		return nil, fmt.Errorf("window %d FLAC missing (%s); split must run first", w.Chapter, flac)
 	}
 	sil, err := DetectSilences(ctx, ffmpegPath, flac, 0, w.Duration, timeout)

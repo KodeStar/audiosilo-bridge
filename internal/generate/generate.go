@@ -431,7 +431,9 @@ func (h *Handler) release(ctx context.Context, job jobs.Job, bookID int64, stop 
 }
 
 // stopBook cancels a job's engine book unless it already ended (done, or
-// failed: a cancel would overwrite its error).
+// failed: a cancel would overwrite its error) or another open job follows it now
+// (a generate job continued the chapters run, so a late end of the chapters job,
+// one Abandon releases once the engine starts, leaves it to that job).
 func (h *Handler) stopBook(ctx context.Context, jobID, bookID int64) {
 	eng := h.o.Engine()
 	if eng == nil {
@@ -439,6 +441,9 @@ func (h *Handler) stopBook(ctx context.Context, jobID, bookID int64) {
 	}
 	b, err := h.o.DB.GetBook(ctx, bookID)
 	if err != nil || finished(b.State, b.Status) {
+		return
+	}
+	if open, err := h.o.DB.OpenGenerateJobsForBook(ctx, bookID, jobID); err != nil || len(open) > 0 {
 		return
 	}
 	if err := eng.Cancel(ctx, bookID); err != nil && !errors.Is(err, scheduler.ErrInvalidOp) {
@@ -707,11 +712,15 @@ func (h *Handler) create(ctx context.Context, eng Engine, r *run) error {
 	return h.queueBook(ctx, eng, r, h.newBook(r, sp, ebookPath))
 }
 
+// errEarlierRunBusy is a new job's refusal while the engine stays busy with the
+// book's earlier run, which it would continue or clear.
+var errEarlierRunBusy = errors.New("the engine is still busy with this book's earlier run; try again in a minute")
+
 // clearEarlier deletes the engine book of the book's earlier run (see
 // deleteEarlier), in words for a person when it can't.
 func (h *Handler) clearEarlier(ctx context.Context, eng Engine, r *run, id int64) error {
 	if err := h.deleteEarlier(ctx, eng, r, id); errors.Is(err, scheduler.ErrBusy) {
-		return errors.New("the engine is still busy with this book's earlier run; try again in a minute")
+		return errEarlierRunBusy
 	} else if err != nil && !errors.Is(err, store.ErrNotFound) {
 		return fmt.Errorf("could not clear the book's earlier run: %w", err)
 	}

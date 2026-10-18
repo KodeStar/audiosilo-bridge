@@ -296,11 +296,18 @@ func (hr *harness) handler() *Handler {
 		Poll: 10 * time.Millisecond, IdlePoll: 10 * time.Millisecond, Recheck: time.Hour, Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
 }
 
-// runner runs h's jobs until stopped (the returned func), as the Bridge would.
+// runner runs h's jobs (and more's) until stopped (the returned func), as the
+// Bridge would.
 func (hr *harness) runner(h *Handler, more ...jobs.Handler) (stop func()) {
+	return hr.runnerOf(append([]jobs.Handler{h}, more...)...)
+}
+
+// runnerOf runs the handlers' jobs until stopped (the returned func): it claims
+// only their kinds.
+func (hr *harness) runnerOf(handlers ...jobs.Handler) (stop func()) {
 	r := jobs.New(hr.db, func() jobs.Server { return hr.cl }, nil, jobs.Options{Keepalive: 30 * time.Millisecond,
 		ProgressEvery: 5 * time.Millisecond, Wait: 10 * time.Millisecond, RetryEvery: 20 * time.Millisecond,
-		ServerID: func() string { return "srv" }, Log: slog.New(slog.NewTextHandler(io.Discard, nil))}, append([]jobs.Handler{h}, more...)...)
+		ServerID: func() string { return "srv" }, Log: slog.New(slog.NewTextHandler(io.Discard, nil))}, handlers...)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { defer close(done); r.Run(ctx) }()

@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -95,10 +96,10 @@ func TestContinueChaptersRefusesASweptBook(t *testing.T) {
 }
 
 // A chapters book that stopped at chapter_detecting continues there only once it
-// failed (a cancel is a failure): at the same state, still failed (the caller
-// re-admits it), with the new job's identity and mapping. Parked (its job may
-// still follow it), asked for at another state, or swept, it doesn't, and its row
-// is left as it is.
+// failed (a cancel is a failure): at the same state, its status cleared in the
+// same statement (so a crash after it never leaves the book stopped), with the new
+// job's identity and mapping. Parked (its job may still follow it), asked for at
+// another state, or swept, it doesn't, and its row is left as it is.
 func TestContinueChaptersAtDetection(t *testing.T) {
 	db := open(t)
 	ctx := context.Background()
@@ -125,12 +126,12 @@ func TestContinueChaptersAtDetection(t *testing.T) {
 	if _, err := db.GetGenerateBook(ctx, 9); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("a refused continue mapped its job: %v", err)
 	}
-	// Allowed: stopped there, re-admitted there.
+	// Allowed: stopped there, going on there.
 	if err := db.ContinueChapters(ctx, b.ID, at, at, NewBook{Title: "The D", Series: "S", SeriesPos: "1", ContribMode: "local"}, job); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := db.GetBook(ctx, b.ID)
-	if got.Goal != "" || got.State != at || got.Status != string(state.StatusFailed) || got.Title != "The D" ||
+	if got.Goal != "" || got.State != at || got.Status != "" || got.Error != "" || got.Title != "The D" ||
 		got.Series != "S" || got.ContribMode != "local" {
 		t.Fatalf("continued = %+v", got)
 	}
@@ -194,5 +195,35 @@ func TestUnsweptCountsFromTheLatestJob(t *testing.T) {
 	// Allowed: once the later job's end is past the cutoff.
 	if got, _ := db.UnsweptGenerateBooks(ctx, generateEnd); len(got) != 1 || got[0].ID != b.ID {
 		t.Fatalf("listed = %+v, want the book", got)
+	}
+}
+
+// A done chapters book can carry a status: a cancel or a supervisor park landing
+// as its last stage finished keeps it (the advance writes only the state). The
+// continue clears it with the rest, so the book runs at splitting instead of
+// failing the new job there with the old run's stop.
+func TestContinueChaptersClearsADoneBooksStatus(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	for i, st := range []struct{ status, err, code string }{
+		{string(state.StatusFailed), "cancelled by user", ""},
+		{string(state.StatusNeedsAttention), "supervisor parked this book for operator review", string(state.ParkSupervisorEscalated)},
+	} {
+		b, err := db.CreateBook(ctx, NewBook{SourcePath: fmt.Sprintf("/lib/S%d.m4b", i), WorkDir: fmt.Sprintf("/w/s%d", i),
+			Title: "S", Goal: state.GoalChapters})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := db.SetBookState(ctx, b.ID, "done", st.status, st.err, st.code); err != nil {
+			t.Fatal(err)
+		}
+		job := GenerateBook{ServerJobID: int64(20 + i), LibraryID: 1, RelPath: "S.m4b"}
+		if err := db.ContinueChapters(ctx, b.ID, "done", "splitting", NewBook{Title: "S"}, job); err != nil {
+			t.Fatal(err)
+		}
+		got, _ := db.GetBook(ctx, b.ID)
+		if got.Goal != "" || got.State != "splitting" || got.Status != "" || got.Error != "" || got.ParkCode != "" {
+			t.Fatalf("continued a done book with status %q: %+v", st.status, got)
+		}
 	}
 }

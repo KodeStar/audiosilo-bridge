@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/kodestar/audiosilo-bridge/internal/audio"
 	"github.com/kodestar/audiosilo-bridge/internal/chapterdetect"
+	"github.com/kodestar/audiosilo-bridge/internal/jobs"
 	"github.com/kodestar/audiosilo-bridge/internal/link"
 	"github.com/kodestar/audiosilo-bridge/internal/metaops"
 	"github.com/kodestar/audiosilo-bridge/internal/pipeline"
@@ -408,31 +410,23 @@ func parkChapters(hr *harness, id int64) store.Book {
 	hr.exec.windowed = true
 	hr.exec.parks[string(state.ChapterDetecting)] = 1
 	hr.srv.addKind(id, ChaptersKind, "Loose.m4b", `{}`)
-	hr.waitFor("the chapters job parked", func() bool {
-		return hr.srv.saw(id, func(u link.Update, p map[string]any) bool {
-			park, _ := p["park"].(map[string]any)
-			return u.State != nil && *u.State == link.StateNeedsAttention && park["code"] == string(state.ParkChaptersNotDetected)
-		})
-	})
+	hr.waitFor("the chapters job parked", func() bool { return hr.srv.newParks(id, string(state.ParkChaptersNotDetected)) > 0 })
 	b := hr.engineBook(id)
 	windowLayer(hr.t, b)
 	return b
 }
 
-// stageRuns counts the engine book's runs of stage, and the ones that succeeded.
+// stageRuns counts the engine book's runs of stage, and its successes as the
+// scheduler counts them (a superseded one left out).
 func stageRuns(hr *harness, bookID int64, stage state.State) (runs, ok int) {
 	hr.t.Helper()
-	all, err := hr.db.ListStageRuns(context.Background(), bookID)
+	ctx := context.Background()
+	runs, err := hr.db.CountStageRuns(ctx, bookID, string(stage))
+	if err == nil {
+		ok, err = hr.db.CountStageSuccesses(ctx, bookID, string(stage))
+	}
 	if err != nil {
 		hr.t.Fatal(err)
-	}
-	for _, sr := range all {
-		if sr.Stage == string(stage) {
-			runs++
-			if sr.Ok != nil && *sr.Ok {
-				ok++
-			}
-		}
 	}
 	return runs, ok
 }
@@ -440,11 +434,14 @@ func stageRuns(hr *harness, bookID int64, stage state.State) (runs, ok int) {
 // A generate job queued for a book whose chapters job parked at chapter_detecting
 // (the server cancels that job as it queues this one; the Bridge hears it at the
 // job's next report) waits for it to give way, then continues its engine book at
-// chapter_detecting: no new transcription, the detection run again, then the whole
-// pipeline with the job's identity.
+// chapter_detecting: no new transcription, the detection run again (this test's
+// detection gets past the park the second time, as one does once what parked it
+// is fixed: TestGenerateContinuesAnUndetectedRunToItsPark has the detection that
+// still finds nothing), then the whole pipeline with the job's identity.
 func TestGenerateContinuesACancelledChaptersRun(t *testing.T) {
 	t.Parallel()
 	hr := newHarness(t)
+	hr.h.o.Poll = 250 * time.Millisecond // holdTries polls: five seconds to give way in
 	stop := hr.runner(hr.h, hr.h.ChaptersJob())
 	defer stop()
 	first := parkChapters(hr, 51)
@@ -483,6 +480,66 @@ func TestGenerateContinuesACancelledChaptersRun(t *testing.T) {
 	if err := json.Unmarshal(final.Result, &res); err != nil ||
 		strings.Join(res.Files, ",") != "Loose.characters.json,Loose.recaps.json,Loose.chapters.json,Loose.bridge.json" {
 		t.Fatalf("result = %s", final.Result)
+	}
+}
+
+// A run parked chapters_not_detected that a generate job continues runs the same
+// detection over the same windows, so it parks there again, now under the generate
+// job (with the hint to add chapter markers), nothing transcribed again.
+func TestGenerateContinuesAnUndetectedRunToItsPark(t *testing.T) {
+	t.Parallel()
+	hr := newHarness(t)
+	stop := hr.runner(hr.h, hr.h.ChaptersJob())
+	defer stop()
+	first := parkChapters(hr, 55)
+	hr.srv.set(func() { hr.srv.cancel[55] = true })
+	hr.waitFor("the engine book cancelled", func() bool {
+		b, err := hr.db.GetBook(context.Background(), first.ID)
+		return err == nil && scheduler.IsCancelled(b)
+	})
+	hr.exec.mu.Lock()
+	hr.exec.parks[string(state.ChapterDetecting)] = 1
+	hr.exec.mu.Unlock()
+	hr.srv.add(56, "Loose.m4b", `{}`)
+	hr.waitFor("the generate job parked chapters_not_detected", func() bool {
+		return hr.srv.newParks(56, string(state.ParkChaptersNotDetected)) > 0
+	})
+	b := hr.engineBook(56)
+	if b.ID != first.ID || b.Goal != "" {
+		t.Fatalf("the generate job's book = %+v, want the chapters run (%d) continued", b, first.ID)
+	}
+	if asr, _ := stageRuns(hr, b.ID, state.ASR); asr != 1 {
+		t.Fatalf("asr runs = %d: the continue transcribed again", asr)
+	}
+}
+
+// A generate job cancelled while it takes a chapters run over (reading its
+// transcripts) leaves the run as it was: the transaction is the job's, so the run
+// stays a chapters run the next job continues.
+func TestContinueChaptersForACancelledJobLeavesTheRun(t *testing.T) {
+	t.Parallel()
+	hr := newHarness(t)
+	stop := hr.runner(hr.h, hr.h.ChaptersJob())
+	defer stop()
+	first := parkChapters(hr, 57)
+	hr.srv.set(func() { hr.srv.cancel[57] = true })
+	var b store.Book
+	hr.waitFor("the engine book cancelled", func() bool {
+		var err error
+		b, err = hr.db.GetBook(context.Background(), first.ID)
+		return err == nil && scheduler.IsCancelled(b)
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	r := &run{job: jobs.Job{ID: 58}, lib: link.Library{ID: 1}, rel: "Loose.m4b", source: SourceAudio, place: place{single: true}}
+	if ok, err := hr.h.continueChapters(ctx, hr.sched, r, b); ok || err == nil {
+		t.Fatalf("continue for a cancelled job = %v, %v", ok, err)
+	}
+	if got, _ := hr.db.GetBook(context.Background(), b.ID); got.Goal != state.GoalChapters || !scheduler.IsCancelled(got) {
+		t.Fatalf("the run was taken over: %+v", got)
+	}
+	if _, err := hr.db.GetGenerateBook(context.Background(), 58); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("the cancelled job was mapped to the run: %v", err)
 	}
 }
 
@@ -525,6 +582,265 @@ func TestGenerateDoesNotContinueACancelledRunItCantTrust(t *testing.T) {
 				t.Fatalf("the generate job continued the chapters run (book %d)", b.ID)
 			}
 		})
+	}
+}
+
+// waitDone waits for job id to end and fails the test, with the job's error,
+// unless it ended done.
+func waitDone(hr *harness, id int64) {
+	hr.t.Helper()
+	hr.waitFor(fmt.Sprintf("job %d to end", id), func() bool { s, _ := hr.srv.final(id); return s != "" })
+	if s, u := hr.srv.final(id); s != link.StateDone {
+		msg := ""
+		if u.Error != nil {
+			msg = *u.Error
+		}
+		hr.t.Fatalf("job %d ended %s: %s", id, s, msg)
+	}
+}
+
+// orphanChapters parks a chapters job (id) at chapter_detecting, then ends it here
+// without its end running (cancelled while it waited for the engine after a
+// restart, say): the book stays as it was and its mapping open, with no job
+// following it. It returns the book and a new runner's stop. The first runner
+// claims only chapters jobs: a claim it had in flight as it stopped, which the
+// server can answer late, never takes the generate job the test queues next.
+func orphanChapters(hr *harness, id int64) (store.Book, func()) {
+	hr.t.Helper()
+	stop := hr.runnerOf(hr.h.ChaptersJob())
+	b := parkChapters(hr, id)
+	stop() // the Bridge stopping: the job would resume, so its end doesn't run
+	ctx := context.Background()
+	sj, err := hr.db.GetServerJob(ctx, id)
+	if err != nil {
+		hr.t.Fatal(err)
+	}
+	if err := hr.db.FinishServerJob(ctx, id, sj.Attempt, store.JobCancelled, nil, ""); err != nil {
+		hr.t.Fatal(err)
+	}
+	if err := hr.db.MarkServerJobReported(ctx, id, sj.Attempt); err != nil {
+		hr.t.Fatal(err)
+	}
+	return b, hr.runner(hr.h, hr.h.ChaptersJob())
+}
+
+// A generate job claimed beside a WORKING chapters job an admin just cancelled
+// (the server queues it at once: a job being cancelled refuses nothing) waits for
+// that job to hear its cancel and stop the book, then continues the run at
+// chapter_detecting, instead of refusing as if the chapters job still ran.
+func TestGenerateWaitsForACancelledWorkingChaptersJob(t *testing.T) {
+	t.Parallel()
+	hr := newHarness(t)
+	hr.h.o.Poll = 250 * time.Millisecond // holdTries polls: five seconds to give way in
+	hr.exec.windowed = true
+	gate := hr.exec.gate(string(state.ChapterDetecting))
+	stop := hr.runner(hr.h, hr.h.ChaptersJob())
+	defer stop()
+	hr.srv.addKind(61, ChaptersKind, "Loose.m4b", `{}`)
+	hr.waitFor("the chapters job detecting", func() bool {
+		return hr.srv.saw(61, func(_ link.Update, p map[string]any) bool { return p["stage"] == string(state.ChapterDetecting) })
+	})
+	first := hr.engineBook(61)
+	windowLayer(t, first)
+	hr.srv.add(62, "Loose.m4b", `{}`)
+	hr.waitFor("the generate job waiting for the chapters job", func() bool {
+		return hr.srv.saw(62, func(_ link.Update, p map[string]any) bool {
+			return p["message"] == "Waiting for the book's chapters job to give way"
+		})
+	})
+	hr.srv.set(func() { hr.srv.cancel[61] = true })
+	hr.waitFor("the chapters job cancelled", func() bool { s, _ := hr.srv.final(61); return s == link.StateCancelled })
+	close(gate)
+	waitDone(hr, 62)
+	b := hr.engineBook(62)
+	if b.ID != first.ID {
+		t.Fatalf("the generate job's book = %d, want the chapters run (%d) continued", b.ID, first.ID)
+	}
+	if asr, _ := stageRuns(hr, b.ID, state.ASR); asr != 1 {
+		t.Fatalf("asr runs = %d: the continue transcribed again", asr)
+	}
+}
+
+// A cancelled chapters run the engine still holds for a moment (the stage its
+// cancel stopped still finishing, a purge) is waited for and continued, never
+// deleted once the hold goes (the delete waits for the same hold).
+func TestGenerateContinuesABrieflyHeldChaptersRun(t *testing.T) {
+	t.Parallel()
+	hr := newHarness(t)
+	hr.h.o.Poll = 250 * time.Millisecond // holdTries polls: five seconds for the hold to go
+	stop := hr.runner(hr.h, hr.h.ChaptersJob())
+	defer stop()
+	first := parkChapters(hr, 63)
+	hr.srv.set(func() { hr.srv.cancel[63] = true })
+	hr.waitFor("the engine book cancelled", func() bool {
+		b, err := hr.db.GetBook(context.Background(), first.ID)
+		return err == nil && scheduler.IsCancelled(b)
+	})
+	release, ok := hr.sched.Hold(first.ID)
+	if !ok {
+		t.Fatal("the engine wouldn't hold the book")
+	}
+	hr.srv.add(64, "Loose.m4b", `{}`)
+	hr.waitFor("the generate job claimed", func() bool { return hr.srv.saw(64, func(link.Update, map[string]any) bool { return true }) })
+	time.Sleep(200 * time.Millisecond)
+	release()
+	waitDone(hr, 64)
+	if b := hr.engineBook(64); b.ID != first.ID {
+		t.Fatalf("the generate job's book = %d, want the briefly held chapters run (%d) continued", b.ID, first.ID)
+	}
+}
+
+// The stage a cancel stopped can finish before it lets go (its last steps don't
+// stop for a cancel): the run, done by the time the generate job holds it, is
+// continued from splitting, never deleted for no longer being where it was.
+func TestGenerateContinuesARunThatFinishedWhileHeld(t *testing.T) {
+	t.Parallel()
+	hr := newHarness(t)
+	hr.h.o.Poll = 250 * time.Millisecond // holdTries polls: five seconds for the hold to go
+	stop := hr.runner(hr.h, hr.h.ChaptersJob())
+	defer stop()
+	first := parkChapters(hr, 65)
+	hr.srv.set(func() { hr.srv.cancel[65] = true })
+	hr.waitFor("the engine book cancelled", func() bool {
+		b, err := hr.db.GetBook(context.Background(), first.ID)
+		return err == nil && scheduler.IsCancelled(b)
+	})
+	release, ok := hr.sched.Hold(first.ID)
+	if !ok {
+		t.Fatal("the engine wouldn't hold the book")
+	}
+	hr.srv.add(66, "Loose.m4b", `{}`)
+	hr.waitFor("the generate job claimed", func() bool { return hr.srv.saw(66, func(link.Update, map[string]any) bool { return true }) })
+	time.Sleep(200 * time.Millisecond)
+	// The stage finished after all: its list written and the book done, the
+	// cancel's status kept (the advance writes only the state).
+	detectChapters(t, first)
+	if err := hr.db.SetBookState(context.Background(), first.ID, string(state.Done), string(state.StatusFailed), "cancelled by user", ""); err != nil {
+		t.Fatal(err)
+	}
+	release()
+	waitDone(hr, 66)
+	if b := hr.engineBook(66); b.ID != first.ID {
+		t.Fatalf("the generate job's book = %d, want the run that finished (%d) continued", b.ID, first.ID)
+	}
+}
+
+// A run the engine stays busy with past the wait fails the generate job, to be
+// tried again, and is kept: it is never deleted unseen once the engine lets go.
+func TestGenerateKeepsARunTheEngineStaysBusyWith(t *testing.T) {
+	t.Parallel()
+	hr := newHarness(t)
+	stop := hr.runner(hr.h, hr.h.ChaptersJob())
+	defer stop()
+	first := parkChapters(hr, 67)
+	hr.srv.set(func() { hr.srv.cancel[67] = true })
+	hr.waitFor("the engine book cancelled", func() bool {
+		b, err := hr.db.GetBook(context.Background(), first.ID)
+		return err == nil && scheduler.IsCancelled(b)
+	})
+	release, ok := hr.sched.Hold(first.ID)
+	if !ok {
+		t.Fatal("the engine wouldn't hold the book")
+	}
+	hr.srv.add(68, "Loose.m4b", `{}`)
+	// The engine lets go once the job gave up, or once a delete waits for it.
+	hr.waitFor("the generate job to give up on the hold", func() bool {
+		s, _ := hr.srv.final(68)
+		return s != "" || hr.srv.saw(68, func(_ link.Update, p map[string]any) bool {
+			return p["message"] == "Waiting for the engine to let go of the book's earlier run"
+		})
+	})
+	release()
+	hr.waitFor("the generate job ended", func() bool { s, _ := hr.srv.final(68); return s != "" })
+	if s, u := hr.srv.final(68); s != link.StateFailed || u.Error == nil || *u.Error != errEarlierRunBusy.Error() {
+		t.Fatalf("the generate job ended %s (%+v), want failed with %q", s, u.Error, errEarlierRunBusy)
+	}
+	if b, err := hr.db.GetBook(context.Background(), first.ID); err != nil || b.Goal != state.GoalChapters {
+		t.Fatalf("the chapters run wasn't kept: %+v, %v", b, err)
+	}
+}
+
+// A folder book that has gained an audio file since its chapters run is a
+// multi-file book now: the run, which covers the one file it was, isn't continued
+// however rerunnable its windows are.
+func TestContinueChaptersRefusesAFolderThatGainedAFile(t *testing.T) {
+	t.Parallel()
+	hr := newHarness(t)
+	ctx := context.Background()
+	dir := filepath.Join(hr.root, "Solo")
+	mustWrite(t, filepath.Join(dir, "solo.m4b"), "single")
+	b, err := hr.db.CreateBook(ctx, store.NewBook{SourcePath: dir, WorkDir: filepath.Join(hr.work, "solo"), Title: "Solo", Goal: state.GoalChapters})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := hr.db.SetBookState(ctx, b.ID, string(state.ChapterDetecting), string(state.StatusFailed), "cancelled by user", ""); err != nil {
+		t.Fatal(err)
+	}
+	layer := b
+	layer.SourcePath = filepath.Join(dir, "solo.m4b") // the one file the windows were cut from
+	windowLayer(t, layer)
+	if !pipeline.DetectionRerunnable(b.WorkDir) {
+		t.Fatal("the fixture's windows aren't rerunnable")
+	}
+	mustWrite(t, filepath.Join(dir, "solo part 2.m4b"), "second")
+	if b, err = hr.db.GetBook(ctx, b.ID); err != nil {
+		t.Fatal(err)
+	}
+	r := &run{job: jobs.Job{ID: 59}, lib: link.Library{ID: 1}, rel: "Solo", source: SourceAudio}
+	if ok, err := hr.h.continueChapters(ctx, hr.sched, r, b); ok || err != nil {
+		t.Fatalf("continue a folder that gained a file = %v, %v", ok, err)
+	}
+	if got, _ := hr.db.GetBook(ctx, b.ID); got.Goal != state.GoalChapters {
+		t.Fatalf("the run was taken over: %+v", got)
+	}
+}
+
+// A chapters run its job ended without stopping (no job follows it, so nothing
+// else will): the generate job waits its budget for it to give way, then stops it
+// as that end would have, and continues it instead of deleting it.
+func TestGenerateStopsAChaptersRunNoJobFollows(t *testing.T) {
+	t.Parallel()
+	hr := newHarness(t)
+	first, stop := orphanChapters(hr, 71)
+	defer stop()
+	hr.srv.add(72, "Loose.m4b", `{}`)
+	waitDone(hr, 72)
+	b := hr.engineBook(72)
+	if b.ID != first.ID {
+		t.Fatalf("the generate job's book = %d, want the chapters run (%d) continued", b.ID, first.ID)
+	}
+	if asr, _ := stageRuns(hr, b.ID, state.ASR); asr != 1 {
+		t.Fatalf("asr runs = %d: the continue transcribed again", asr)
+	}
+}
+
+// The chapters job's end reaching its book late (Abandon releasing it once the
+// engine has started, after a restart) leaves the run a generate job continued
+// meanwhile to that job: another open job follows it now.
+func TestALateChaptersEndLeavesTheContinuedRunAlone(t *testing.T) {
+	t.Parallel()
+	hr := newHarness(t)
+	first, stop := orphanChapters(hr, 81)
+	defer stop()
+	ctx := context.Background()
+	if err := hr.sched.Cancel(ctx, first.ID); err != nil {
+		t.Fatal(err)
+	}
+	gate := hr.exec.gate(string(state.Sanitizing))
+	hr.srv.add(82, "Loose.m4b", `{}`)
+	hr.waitFor("the continued run working", func() bool {
+		return hr.srv.saw(82, func(_ link.Update, p map[string]any) bool { return p["stage"] == string(state.Sanitizing) })
+	})
+	sj, err := hr.db.GetServerJob(ctx, 81)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lib, path := int64(1), "Loose.m4b"
+	hr.h.ChaptersJob().Abandon(ctx, jobs.Job{ID: 81, Kind: ChaptersKind, LibraryID: &lib, Path: &path, Attempt: sj.Attempt})
+	close(gate)
+	waitDone(hr, 82)
+	if b := hr.engineBook(82); b.ID != first.ID {
+		t.Fatalf("the generate job's book = %d, want the chapters run (%d) continued", b.ID, first.ID)
 	}
 }
 
