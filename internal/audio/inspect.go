@@ -151,13 +151,9 @@ func ReparseMarkerManifest(workDir string, draft Manifest) (Manifest, MarkerStat
 	if draft.Style != StyleMarkers {
 		return Manifest{}, MarkerStats{}, fmt.Errorf("cannot reparse non-marker manifest style %q", draft.Style)
 	}
-	raw, err := os.ReadFile(filepath.Join(workDir, ProbeName)) //nolint:gosec // workDir is the book's managed scratch directory
+	meta, err := readProbeMeta(workDir)
 	if err != nil {
-		return Manifest{}, MarkerStats{}, fmt.Errorf("read %s: %w", ProbeName, err)
-	}
-	var meta probeMeta
-	if err := json.Unmarshal(raw, &meta); err != nil {
-		return Manifest{}, MarkerStats{}, fmt.Errorf("parse %s: %w", ProbeName, err)
+		return Manifest{}, MarkerStats{}, err
 	}
 	m, stats := markerManifestFromProbe(draft.Source, meta)
 	if draft.Title != "" {
@@ -192,13 +188,9 @@ func ReparseMarkerManifest(workDir string, draft Manifest) (Manifest, MarkerStat
 // validator) can ask what the recording ACTUALLY contains, rather than trusting a manifest
 // that may have dropped markers.
 func ReadProbeMarkers(workDir string) ([]Marker, float64, error) {
-	raw, err := os.ReadFile(filepath.Join(workDir, ProbeName)) //nolint:gosec // workDir is the book's managed scratch directory
+	meta, err := readProbeMeta(workDir)
 	if err != nil {
-		return nil, 0, fmt.Errorf("read %s: %w", ProbeName, err)
-	}
-	var meta probeMeta
-	if err := json.Unmarshal(raw, &meta); err != nil {
-		return nil, 0, fmt.Errorf("parse %s: %w", ProbeName, err)
+		return nil, 0, err
 	}
 	return probeMarkers(meta), parseFloat(meta.Format.Duration), nil
 }
@@ -395,16 +387,25 @@ type probeMeta struct {
 // states it (ffprobe's format.size); 0 when it states none or can't be read, which
 // is unknown. A caller compares it with the file on disk to tell a replaced file.
 func ProbedSize(workDir string) int64 {
-	raw, err := os.ReadFile(filepath.Join(workDir, ProbeName)) //nolint:gosec // workDir is the book's managed scratch directory
+	meta, err := readProbeMeta(workDir)
 	if err != nil {
-		return 0
-	}
-	var meta probeMeta
-	if json.Unmarshal(raw, &meta) != nil {
 		return 0
 	}
 	n, _ := strconv.ParseInt(meta.Format.Size, 10, 64)
 	return n
+}
+
+// readProbeMeta reads and parses the probe.json inspect wrote in workDir.
+func readProbeMeta(workDir string) (probeMeta, error) {
+	var meta probeMeta
+	raw, err := os.ReadFile(filepath.Join(workDir, ProbeName)) //nolint:gosec // workDir is the book's managed scratch directory
+	if err != nil {
+		return meta, fmt.Errorf("read %s: %w", ProbeName, err)
+	}
+	if err := json.Unmarshal(raw, &meta); err != nil {
+		return probeMeta{}, fmt.Errorf("parse %s: %w", ProbeName, err)
+	}
+	return meta, nil
 }
 
 // probeFile runs `ffprobe -show_format [-show_chapters] -of json` and returns both

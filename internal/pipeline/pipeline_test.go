@@ -1598,7 +1598,7 @@ func TestPipelineChaptersGoal(t *testing.T) {
 	}
 	decodes := fake.count(1)
 
-	if err := db.ContinueChapters(context.Background(), b.ID, string(state.Done), store.NewBook{Title: "Bare", ContribMode: "local"}, store.GenerateBook{}); err != nil {
+	if err := db.ContinueChapters(context.Background(), b.ID, string(state.Done), string(state.Splitting), store.NewBook{Title: "Bare", ContribMode: "local"}, store.GenerateBook{}); err != nil {
 		t.Fatal(err)
 	}
 	sched.Notify()

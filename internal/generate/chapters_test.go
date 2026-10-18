@@ -455,11 +455,8 @@ func TestGenerateContinuesACancelledChaptersRun(t *testing.T) {
 	hr.srv.set(func() {
 		hr.srv.books["Loose.m4b"] = link.Book{LibraryID: 1, Path: "Loose.m4b", Files: []link.BookFile{{Path: "Loose.m4b", Size: 6}},
 			Info: &link.BookInfo{Title: "The Loose One", Series: "The Saga", SeriesIndex: "3"}}
-		lib := int64(1)
-		path := "Loose.m4b"
-		hr.srv.queue = append(hr.srv.queue, link.Job{ID: 52, Kind: Kind, LibraryID: &lib, Path: &path, Params: json.RawMessage(`{}`),
-			Attempts: 1, State: "claimed"})
 	})
+	hr.srv.add(52, "Loose.m4b", `{}`)
 	hr.waitFor("the generate job waiting for the chapters job", func() bool {
 		return hr.srv.saw(52, func(_ link.Update, p map[string]any) bool {
 			return p["message"] == "Waiting for the book's chapters job to give way"

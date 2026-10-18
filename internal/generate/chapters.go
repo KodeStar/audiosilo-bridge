@@ -21,7 +21,6 @@ import (
 	"github.com/kodestar/audiosilo-bridge/internal/link"
 	"github.com/kodestar/audiosilo-bridge/internal/metaops"
 	"github.com/kodestar/audiosilo-bridge/internal/pipeline"
-	"github.com/kodestar/audiosilo-bridge/internal/scheduler"
 	"github.com/kodestar/audiosilo-bridge/internal/state"
 	"github.com/kodestar/audiosilo-bridge/internal/store"
 )
@@ -270,27 +269,30 @@ func sidecarsWithoutChapters(p place) bool {
 }
 
 // continueChapters takes over a chapters.detect run of the same book for a new
-// generate job reading the audio: its transcription is the expensive part, so the
-// book goes on (store.ContinueChapters) instead of being deleted and transcribed
-// again. Two runs continue: a done one made from the audio on disk now (its
-// detected list current for it: a file replaced since is transcribed again), which
-// goes on from splitting; and one that stopped at chapter_detecting, cancelled or
-// failed (the server cancels a parked chapters job as it queues a generate job for
-// the book), whose kept window layer can run the stage again
-// (pipeline.DetectionRerunnable: the windows transcribed, the file the one
-// inspected), re-admitted there to find the chapters again and go on. Either only
-// while its transcripts are still here (the retention didn't sweep them) and no
-// open job follows it (the caller checked); held while it is continued, so no
-// retention purge or stage starts on it in between (one busy is cleared as any
-// earlier run is). The book takes the job's identity and is mapped to the job in
-// one transaction, never cancelled half way: a continued book always has its job
-// to follow it. It reports whether it continued it.
+// generate job reading the audio, so its transcription (the expensive part) is
+// kept instead of deleted and done again (store.ContinueChapters). Two runs
+// continue:
+//   - a done one whose detected list is current for the audio on disk (a file
+//     replaced since is transcribed again) goes on from splitting, which cuts the
+//     chapter FLACs the done-time purge removed; asr then finds every transcript
+//     complete, so the book goes on to sanitizing and the rest;
+//   - one cancelled or failed at chapter_detecting (the server cancels a parked
+//     chapters job as it queues a generate job for the book) whose kept window
+//     layer can run the stage again (pipeline.DetectionRerunnable) is re-admitted
+//     there by the engine's Retry, as a person's Retry would.
+//
+// Either only while the retention hasn't swept its transcripts and no open job
+// follows it (the caller checked). It is held throughout, so no purge or stage
+// starts on it in between, and the identity swap and the job's mapping are one
+// transaction: a continued book always has its job to follow it. It reports
+// whether it continued it.
 func (h *Handler) continueChapters(ctx context.Context, eng Engine, r *run, old store.Book) (bool, error) {
 	if old.Goal != state.GoalChapters || r.source != SourceAudio {
 		return false, nil
 	}
-	atDetection := state.State(old.State) == state.ChapterDetecting && state.Status(old.Status) == state.StatusFailed
-	if state.State(old.State) != state.Done && !atDetection {
+	from := state.State(old.State)
+	atDetection := from == state.ChapterDetecting && state.Status(old.Status) == state.StatusFailed
+	if from != state.Done && !atDetection {
 		return false, nil
 	}
 	release, ok := h.hold(old.ID)
@@ -298,61 +300,79 @@ func (h *Handler) continueChapters(ctx context.Context, eng Engine, r *run, old 
 		return false, nil
 	}
 	defer release()
+	to := state.Splitting
 	if atDetection {
 		if !pipeline.DetectionRerunnable(old.WorkDir) {
 			return false, nil
 		}
+		to = from
 	} else if d, err := pipeline.ReadDetectedChapters(old.WorkDir); err != nil || !d.CurrentFor(old.WorkDir) {
 		return false, nil
 	}
-	err := h.o.DB.ContinueChapters(context.WithoutCancel(ctx), old.ID, old.State, h.newBook(r, old.SourcePath, ""),
+	err := h.o.DB.ContinueChapters(context.WithoutCancel(ctx), old.ID, old.State, string(to), h.newBook(r, old.SourcePath, ""),
 		store.GenerateBook{ServerJobID: r.job.ID, LibraryID: r.lib.ID, RelPath: r.rel})
 	if errors.Is(err, store.ErrNotContinuable) {
 		return false, nil
 	} else if err != nil {
 		return false, err
 	}
-	if atDetection {
-		// As a Retry re-admits a book: the stage runs again, never skipped by a
-		// sentinel a cancel overtook.
-		_ = os.Remove(scheduler.SentinelPath(old.WorkDir, old.State))
-	}
 	r.bookID = old.ID
 	h.o.Log.Info("generate: continuing the book's chapters run, its transcription kept", "job", r.job.ID, "book", old.ID,
 		"from", old.State)
+	if atDetection {
+		// The book is the job's now, so a failed re-admit ends the job with it.
+		return true, eng.Retry(context.WithoutCancel(ctx), old.ID)
+	}
 	eng.Notify()
 	return true, nil
 }
 
-// awaitChaptersGivingWay waits a few polls (holdTries) for the book's chapters run
-// to give way to this generate job: the server cancels a parked chapters.detect
-// job as it queues a generate job for the book, and the Bridge hears it at that
-// job's next report, whose end then stops the book (continueChapters takes it on
-// from there). It waits only while the book is a chapters run its parked chapters
-// job still follows, or one no job follows that isn't stopped yet (its job's end
-// is stopping it), and returns the book as it is then: the caller's checks refuse
-// a job that stays open, as before.
-func (h *Handler) awaitChaptersGivingWay(ctx context.Context, r *run, b store.Book) (store.Book, error) {
-	for i := 1; i < holdTries && b.Goal == state.GoalChapters && !finished(b.State, b.Status); i++ {
-		open, err := h.o.DB.OpenGenerateJobsForBook(ctx, b.ID, r.job.ID)
-		if err != nil {
-			return b, err
+// awaitChaptersGivingWay waits up to holdTries polls for the book's chapters run
+// to give way to this generate job (chaptersGivingWay): the server cancels a
+// parked chapters.detect job as it queues a generate job for the book, the Bridge
+// hears it at that job's next report, and the job's end stops the book
+// (continueChapters takes it on from there). It returns the book as it is then
+// and the first other open job following it (openID 0 when none, kind "" when
+// unknown), which the caller refuses.
+func (h *Handler) awaitChaptersGivingWay(ctx context.Context, r *run, b store.Book) (_ store.Book, openID int64, kind string, err error) {
+	for i := 1; ; i++ {
+		if openID, kind, err = h.firstOpenJob(ctx, b.ID, r.job.ID); err != nil {
+			return b, 0, "", err
 		}
-		if len(open) > 0 {
-			sj, err := h.o.DB.GetServerJob(ctx, open[0])
-			if err != nil || sj.Kind != ChaptersKind || state.Status(b.Status) != state.StatusNeedsAttention {
-				return b, nil
-			}
+		if i == holdTries || !chaptersGivingWay(b, openID, kind) {
+			return b, openID, kind, nil
 		}
 		r.rep.Progress(jobs.Progress{Step: stepWaiting, Message: "Waiting for the book's chapters job to give way"})
 		if err := agent.SleepCtx(ctx, h.o.Poll); err != nil {
-			return b, err
+			return b, 0, "", err
 		}
 		if b, err = h.o.DB.GetBook(ctx, b.ID); err != nil {
-			return b, err
+			return b, 0, "", err
 		}
 	}
-	return b, nil
+}
+
+// chaptersGivingWay reports whether book b is a chapters run on its way to giving
+// way: not stopped yet, and either parked with its chapters job still open, or
+// with no job following it (that job's end is stopping it).
+func chaptersGivingWay(b store.Book, openID int64, kind string) bool {
+	if b.Goal != state.GoalChapters || finished(b.State, b.Status) {
+		return false
+	}
+	return openID == 0 || (kind == ChaptersKind && state.Status(b.Status) == state.StatusNeedsAttention)
+}
+
+// firstOpenJob is the first open job other than exceptJob following engine book
+// bookID and its kind: id 0 when there is none, kind "" when the job can't be read.
+func (h *Handler) firstOpenJob(ctx context.Context, bookID, exceptJob int64) (id int64, kind string, err error) {
+	open, err := h.o.DB.OpenGenerateJobsForBook(ctx, bookID, exceptJob)
+	if err != nil || len(open) == 0 {
+		return 0, "", err
+	}
+	if sj, err := h.o.DB.GetServerJob(ctx, open[0]); err == nil {
+		kind = sj.Kind
+	}
+	return open[0], kind, nil
 }
 
 // hasChaptersFailure reports, with its sentence, that the engine book's last
@@ -496,14 +516,14 @@ func (h *Handler) chaptersFromEarlier(ctx context.Context, r *run) (any, bool, e
 // follows: a generate job's run brings the chapters; another chapters job is
 // already finding them.
 func (h *Handler) openJobRefusal(ctx context.Context, r *run, bookID int64) error {
-	open, err := h.o.DB.OpenGenerateJobsForBook(ctx, bookID, r.job.ID)
-	if err != nil || len(open) == 0 {
+	id, kind, err := h.firstOpenJob(ctx, bookID, r.job.ID)
+	if err != nil || id == 0 {
 		return err
 	}
-	if sj, err := h.o.DB.GetServerJob(ctx, open[0]); err == nil && sj.Kind == Kind {
+	if kind == Kind {
 		return errChaptersGenerating
 	}
-	return fmt.Errorf("job %d is already finding this book's chapters; cancel it first", open[0])
+	return fmt.Errorf("job %d is already finding this book's chapters; cancel it first", id)
 }
 
 // createChapters makes the engine book of a chapters job: goal chapters, the

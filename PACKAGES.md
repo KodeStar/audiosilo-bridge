@@ -884,7 +884,8 @@ internal/
             can run it again from what it kept: the window layer in place with every
             window's silences to be had, or moved aside with the confident detection
             it was moved by; every window's raw complete; the file's size the one
-            probe.json states, which must be known), for its continue. The stage reports one progress unit, as every book stage (the
+            probe.json states, which must be known), for its continue. The stage
+            reports one progress unit, as every book stage (the
             ETA charges a unit its learned per-book time). inspect (its windows'
             silence probes under the stage heartbeat; the marker-format note only for a
             manifest that isn't windows) fails a goal-chapters book whose manifest
@@ -995,13 +996,13 @@ internal/
             ErrNotFound).
             0005 (Phase 1d): books.goal ('' the whole pipeline, 'chapters' stops after
             chapter_detecting; opaque here like State, so the store names no goal:
-            its SQL asks goal = '' or goal != ''). ContinueChapters(id, from, ...) (one
-            statement: only a book with a goal, chapters being the one, still at from
-            (the state the caller checked), done there or failed there (a cancel is a
-            failure), whose transcripts the retention didn't sweep, else
-            ErrNotContinuable) makes it a whole-run book, a done one at splitting and
-            a failed one re-admitted at from (status, error, park and retry cleared),
-            with the new job's identity (title, authors, narrators,
+            its SQL asks goal = '' or goal != ''). ContinueChapters(id, from, to, ...)
+            (one statement: only a book with a goal, chapters being the one, still at
+            from (the state the caller checked), done there or failed there (a cancel
+            is a failure), whose transcripts the retention didn't sweep, else
+            ErrNotContinuable) makes it a whole-run book at to, its status left as it
+            is (the caller re-admits a failed one), with the new job's identity
+            (title, authors, narrators,
             series and position, asin, isbn and their sources: the book may have been
             matched since), contrib_mode and work_id, and maps the new job to it in
             the same transaction. FinishedBooks leaves goal-chapters books out (no
@@ -1584,17 +1585,18 @@ internal/
             no open job, the audio read): a done one whose list is CurrentFor the file
             on disk, from splitting; or one cancelled or failed at chapter_detecting
             whose kept windows can run it again (pipeline.DetectionRerunnable), re-
-            admitted there (its sentinel removed, as a Retry does), so the detection
-            runs again from the window layer with the whole pipeline after it and
-            nothing is transcribed again (continueChapters -> store.ContinueChapters
-            with the state it checked, under the engine's Hold, the job's identity and
-            mapping in one transaction). The server cancels a PARKED chapters.detect
+            admitted there by the engine's Retry, so the detection runs again from the
+            window layer with the whole pipeline after it and nothing is transcribed
+            again (continueChapters -> store.ContinueChapters with the state it
+            checked and the one to go on at, under the engine's Hold, the job's
+            identity and mapping in one transaction). The server cancels a PARKED chapters.detect
             job as it queues a generate job for the book (a working one refuses it,
             409 detect_open), and the Bridge hears that cancel at the chapters job's
             next report, so create() first waits up to holdTries polls
             (awaitChaptersGivingWay) while that parked job still follows the book, or
-            no job does but the book isn't stopped yet (its job's end is stopping it);
-            a job that stays open is refused as before. chapters.detect
+            no job does but the book isn't stopped yet (its job's end is stopping it),
+            handing back the open job it last saw (firstOpenJob); a job that stays
+            open is refused as before. chapters.detect
             (ChaptersJob, ChaptersKind, pipeline lane, Abandoner; params any JSON
             object): the same resume and follow as generate (resumeMapping +
             runEngineBook: prepare strict when new, a resumed job's own book found

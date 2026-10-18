@@ -278,7 +278,8 @@ func (e *Executor) chapterDetect(ctx context.Context, book store.Book, r schedul
 // windows' silences (audio.WindowSilences: split heard them, else the window FLACs
 // are listened to once), which is kept there when confident.
 func (e *Executor) detection(ctx context.Context, workDir string, layer windowLayer, tl windowTimeline, ffmpeg string) (chapterdetect.Result, error) {
-	if kept, ok := keptDetection(workDir, layer.manifest); ok {
+	sha := windowsSHA(layer.manifest)
+	if kept, ok := keptDetection(workDir, sha); ok {
 		return kept, nil
 	}
 	if layer.moved {
@@ -297,7 +298,7 @@ func (e *Executor) detection(ctx context.Context, workDir string, layer windowLa
 	if !det.Confident {
 		return det, nil
 	}
-	out, err := json.MarshalIndent(windowDetection{WindowsSHA: windowsSHA(layer.manifest), Result: det}, "", "  ")
+	out, err := json.MarshalIndent(windowDetection{WindowsSHA: sha, Result: det}, "", "  ")
 	if err != nil {
 		return chapterdetect.Result{}, err
 	}
@@ -313,12 +314,12 @@ func (e *Executor) detection(ctx context.Context, workDir string, layer windowLa
 	return det, fsutil.WriteFileAtomic(filepath.Join(wdir, windowsDetectionName), append(out, '\n'), 0o644)
 }
 
-// keptDetection is the confident detection kept for the windows of m
-// (windows/detection.json), ok false when there is none for them.
-func keptDetection(workDir string, m audio.Manifest) (chapterdetect.Result, bool) {
+// keptDetection is the confident detection kept for the windows whose manifest
+// hashes to sha (windows/detection.json), ok false when there is none for them.
+func keptDetection(workDir, sha string) (chapterdetect.Result, bool) {
 	var kept windowDetection
 	raw, err := os.ReadFile(filepath.Join(workDir, audio.WindowsDir, windowsDetectionName)) //nolint:gosec // the book's work dir
-	if err != nil || json.Unmarshal(raw, &kept) != nil || kept.WindowsSHA != windowsSHA(m) || !kept.Result.Confident {
+	if err != nil || json.Unmarshal(raw, &kept) != nil || kept.WindowsSHA != sha || !kept.Result.Confident {
 		return chapterdetect.Result{}, false
 	}
 	return kept.Result, true
@@ -336,8 +337,13 @@ func DetectionRerunnable(workDir string) bool {
 	if err != nil || len(layer.manifest.Chapters) == 0 {
 		return false
 	}
+	// The cheap checks first: a replaced file refuses before any transcript is read.
+	size := audio.ProbedSize(workDir)
+	if info, err := os.Stat(layer.manifest.Source); err != nil || size <= 0 || info.Size() != size {
+		return false
+	}
 	if layer.moved {
-		if _, ok := keptDetection(workDir, layer.manifest); !ok {
+		if _, ok := keptDetection(workDir, windowsSHA(layer.manifest)); !ok {
 			return false
 		}
 	}
@@ -349,9 +355,7 @@ func DetectionRerunnable(workDir string) bool {
 			return false
 		}
 	}
-	size := audio.ProbedSize(workDir)
-	info, err := os.Stat(layer.manifest.Source)
-	return err == nil && size > 0 && info.Size() == size
+	return true
 }
 
 // moveWindowLayer moves the window layer aside (a no-op once moved): chapters/ (the

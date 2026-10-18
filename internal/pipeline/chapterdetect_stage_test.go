@@ -497,7 +497,8 @@ func TestDetectionRerunnable(t *testing.T) {
 	if err := audio.WriteManifest(work, m); err != nil {
 		t.Fatal(err)
 	}
-	mustWriteFile(filepath.Join(work, audio.ProbeName), `{"format":{"duration":"20","size":"9"}}`)
+	probe := `{"format":{"duration":"20","size":"9"}}`
+	writeProbeJSON(t, work, probe)
 	for w := 1; w <= 2; w++ {
 		mustWriteFile(filepath.Join(work, transcript.RawDir, transcript.RawName(w)), string(owJSON("and@1 on@2")))
 		mustWriteFile(filepath.Join(work, audio.ChaptersDir, audio.ChapterFileName(w)), strings.Repeat("f", 512))
@@ -505,32 +506,27 @@ func TestDetectionRerunnable(t *testing.T) {
 	if !DetectionRerunnable(work) {
 		t.Fatal("a complete window layer isn't rerunnable")
 	}
-	// Denied: the file replaced since it was inspected.
-	mustWriteFile(src, "another encode")
-	if DetectionRerunnable(work) {
-		t.Fatal("rerunnable over a replaced file")
-	}
-	mustWriteFile(src, "the audio")
-	// Denied: a probe that states no size (unknown is no match).
-	mustWriteFile(filepath.Join(work, audio.ProbeName), `{"format":{"duration":"20"}}`)
-	if DetectionRerunnable(work) {
-		t.Fatal("rerunnable with the probed size unknown")
-	}
-	mustWriteFile(filepath.Join(work, audio.ProbeName), `{"format":{"duration":"20","size":"9"}}`)
-	// Denied: a window's audio gone with no silences kept (a purge).
 	flac := filepath.Join(work, audio.ChaptersDir, audio.ChapterFileName(2))
-	_ = os.Remove(flac)
-	if DetectionRerunnable(work) {
-		t.Fatal("rerunnable with a window's audio gone")
-	}
-	mustWriteFile(flac, strings.Repeat("f", 512))
-	// Denied: a window's transcript missing.
 	raw := filepath.Join(work, transcript.RawDir, transcript.RawName(2))
-	_ = os.Remove(raw)
-	if DetectionRerunnable(work) {
-		t.Fatal("rerunnable with a window untranscribed")
+	for _, tc := range []struct {
+		denied         string
+		spoil, restore func()
+	}{
+		{"the file replaced since it was inspected",
+			func() { mustWriteFile(src, "another encode") }, func() { mustWriteFile(src, "the audio") }},
+		{"a probe that states no size (unknown is no match)",
+			func() { writeProbeJSON(t, work, `{"format":{"duration":"20"}}`) }, func() { writeProbeJSON(t, work, probe) }},
+		{"a window's audio gone with no silences kept (a purge)",
+			func() { _ = os.Remove(flac) }, func() { mustWriteFile(flac, strings.Repeat("f", 512)) }},
+		{"a window's transcript missing",
+			func() { _ = os.Remove(raw) }, func() { mustWriteFile(raw, string(owJSON("and@1 on@2"))) }},
+	} {
+		tc.spoil()
+		if DetectionRerunnable(work) {
+			t.Fatalf("rerunnable with %s", tc.denied)
+		}
+		tc.restore()
 	}
-	mustWriteFile(raw, string(owJSON("and@1 on@2")))
 	// The layer moved aside: rerunnable only with the detection it was moved by.
 	wdir := filepath.Join(work, audio.WindowsDir)
 	if err := audio.WriteManifest(wdir, m); err != nil {

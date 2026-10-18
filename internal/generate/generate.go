@@ -652,10 +652,9 @@ func (r *run) engineParked(parked bool, code, msg string) {
 }
 
 // create picks the source and makes the engine book for a new job (a chapters job's
-// is createChapters'): a chapters run of the book reading the same audio, finished
-// or stopped at chapter_detecting, is continued (continueChapters), keeping its
-// transcription, once a parked chapters job on it gave way
-// (awaitChaptersGivingWay); any other book the engine already has from an earlier
+// is createChapters'): a chapters run of the book reading the same audio is
+// continued (continueChapters), keeping its transcription, once a parked chapters
+// job on it gave way (awaitChaptersGivingWay); any other book the engine already has from an earlier
 // run (the same source path) is deleted first, unless another open job follows it
 // or a stage of it runs right now.
 func (h *Handler) create(ctx context.Context, eng Engine, r *run) error {
@@ -683,28 +682,27 @@ func (h *Handler) create(ctx context.Context, eng Engine, r *run) error {
 		ebookPath = ep
 	}
 	old, err := h.o.DB.GetBookBySourcePath(ctx, sp)
+	var openID int64
+	var openKind string
 	if err == nil {
-		old, err = h.awaitChaptersGivingWay(ctx, r, old)
+		old, openID, openKind, err = h.awaitChaptersGivingWay(ctx, r, old)
 	}
-	if err == nil {
-		open, err := h.o.DB.OpenGenerateJobsForBook(ctx, old.ID, r.job.ID)
-		if err != nil {
-			return err
-		}
-		if len(open) > 0 {
-			if sj, err := h.o.DB.GetServerJob(ctx, open[0]); err == nil && sj.Kind == ChaptersKind {
-				return fmt.Errorf("job %d is finding this book's chapters; let it finish (this job can then go on from its transcription) or cancel it first", open[0])
-			}
-			return fmt.Errorf("job %d is already generating this book; cancel it first", open[0])
-		}
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		// No earlier run (or it went while this job waited): a book of its own.
+	case err != nil:
+		return err
+	case openID != 0 && openKind == ChaptersKind:
+		return fmt.Errorf("job %d is finding this book's chapters; let it finish (this job can then go on from its transcription) or cancel it first", openID)
+	case openID != 0:
+		return fmt.Errorf("job %d is already generating this book; cancel it first", openID)
+	default:
 		if ok, err := h.continueChapters(ctx, eng, r, old); ok || err != nil {
 			return err
 		}
 		if err := h.clearEarlier(ctx, eng, r, old.ID); err != nil {
 			return err
 		}
-	} else if !errors.Is(err, store.ErrNotFound) {
-		return err
 	}
 	return h.queueBook(ctx, eng, r, h.newBook(r, sp, ebookPath))
 }
