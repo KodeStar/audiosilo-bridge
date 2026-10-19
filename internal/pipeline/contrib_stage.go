@@ -67,7 +67,7 @@ const defaultContribBaseURL = "https://api.github.com"
 // exactly, mirroring AgentUnavailableMsg / MediaToolsUnavailableMsg).
 const (
 	// ContribUnavailableMsg parks a book in issue mode when no GitHub credential
-	// is available (no PAT in secrets, no `gh auth token`).
+	// resolves (contrib.TokenSource: no environment token, sign-in or `gh auth token`).
 	ContribUnavailableMsg = "GitHub credential unavailable - sign in to GitHub on the Bridge's Accounts tab, then Retry"
 	// CoreNeededMsg parks a book whose work does not exist upstream: a core add-work
 	// proposal has been prefilled and awaits completion/confirmation in the UI.
@@ -98,6 +98,24 @@ type contribArtifact struct {
 	kind    string // store.ContribKind{Characters,Recaps}
 	path    string
 	covered bool
+}
+
+// prepareArtifacts reconciles each artifact's sidecar file for slug (the work
+// rewritten to it, the source edition stamped) and marks the dimensions the work
+// already carries upstream as covered. ErrWorkNotFound, transport and disabled
+// degrade to "not covered" (metaissue's overwrite refusal is the backstop).
+func (e *Executor) prepareArtifacts(ctx context.Context, book store.Book, slug string, artifacts []contribArtifact) error {
+	sourceRef := e.contributionSourceRef(ctx, book, slug)
+	for _, a := range artifacts {
+		if err := reconcileSidecar(a.path, slug, sourceRef); err != nil {
+			return fmt.Errorf("reconcile %s: %w", filepath.Base(a.path), err)
+		}
+	}
+	hasChars, hasRecaps := e.coveredDimensions(ctx, slug)
+	for i, a := range artifacts {
+		artifacts[i].covered = (a.kind == store.ContribKindCharacters && hasChars) || (a.kind == store.ContribKindRecaps && hasRecaps)
+	}
+	return nil
 }
 
 // contribute is the M7 contributing stage: it reconciles the validated sidecars'
@@ -146,31 +164,17 @@ func (e *Executor) contribute(ctx context.Context, book store.Book, r scheduler.
 	// 3. Reconcile the durable sidecar files: rewrite "work" to the resolved slug and
 	// stamp the source audiobook edition, canonicalized in place, so what ships can be
 	// audited against the recording used for extraction.
-	sourceRef := e.contributionSourceRef(ctx, book, slug)
+	// 4. Skip-if-covered: a dimension the resolved work already carries upstream is
+	// recorded already_covered and never submitted (prepareArtifacts).
 	var artifacts []contribArtifact
 	if haveChars {
-		if err := reconcileSidecar(charsPath, slug, sourceRef); err != nil {
-			return scheduler.StageResult{}, fmt.Errorf("contributing: reconcile %s: %w", charactersFileName, err)
-		}
 		artifacts = append(artifacts, contribArtifact{kind: store.ContribKindCharacters, path: charsPath})
 	}
 	if haveRecaps {
-		if err := reconcileSidecar(recapsPath, slug, sourceRef); err != nil {
-			return scheduler.StageResult{}, fmt.Errorf("contributing: reconcile %s: %w", recapsFileName, err)
-		}
 		artifacts = append(artifacts, contribArtifact{kind: store.ContribKindRecaps, path: recapsPath})
 	}
-
-	// 4. Skip-if-covered: a dimension the resolved work already carries upstream is
-	// recorded already_covered and never submitted. ErrWorkNotFound/transport/disabled
-	// degrade to "not covered" (metaissue's overwrite refusal is the backstop).
-	hasChars, hasRecaps := e.coveredDimensions(ctx, slug)
-	for i := range artifacts {
-		if artifacts[i].kind == store.ContribKindCharacters {
-			artifacts[i].covered = hasChars
-		} else {
-			artifacts[i].covered = hasRecaps
-		}
+	if err := e.prepareArtifacts(ctx, book, slug, artifacts); err != nil {
+		return scheduler.StageResult{}, fmt.Errorf("contributing: %w", err)
 	}
 
 	// 5. Submit per mode (idempotent on resume). A book whose sidecars were accepted on a

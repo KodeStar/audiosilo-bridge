@@ -72,8 +72,14 @@ var correctionFields = map[string]correctionTarget{
 	CorrectNarrator:    {recording: true, field: "narrators"},
 }
 
-// ErrInvalidCorrection wraps every refusal of a correction batch.
+// ErrInvalidCorrection matches every refusal of a correction batch (errors.Is);
+// the refusal's text is the reason alone.
 var ErrInvalidCorrection = errors.New("invalid correction")
+
+type invalidCorrection struct{ reason string }
+
+func (e invalidCorrection) Error() string        { return e.reason }
+func (e invalidCorrection) Is(target error) bool { return target == ErrInvalidCorrection }
 
 // Correction is one server field's edit: what the community record says and what
 // the admin set.
@@ -120,7 +126,7 @@ func recordingRecord(workID, recID string) string {
 // its record, refusing the whole batch for any bad change (as meta does).
 func MapCorrections(b CorrectionBatch) ([]MappedChange, error) {
 	bad := func(format string, args ...any) error {
-		return fmt.Errorf("%w: %s", ErrInvalidCorrection, fmt.Sprintf(format, args...))
+		return invalidCorrection{fmt.Sprintf(format, args...)}
 	}
 	if !model.ValidSlug(b.WorkID) {
 		return nil, bad("work id %q is not a meta slug", b.WorkID)
@@ -207,14 +213,14 @@ func CorrectionBatchIssue(b CorrectionBatch) (title, body string, labels []strin
 	}
 	var sb strings.Builder
 	sb.WriteString(field(hRecord, workRecord(b.WorkID)))
-	sb.WriteString("### " + hChanges + "\n\n```json\n" + strings.TrimSuffix(doc.String(), "\n") + "\n```\n\n")
+	sb.WriteString(attachmentSection(hChanges, "", doc.Bytes(), ""))
 	sb.WriteString(field(hEvidence, escapeHeadings(strings.TrimSpace(b.Evidence))))
 	// The upper-case X is meta's golden body's; its parser takes either case.
 	sb.WriteString("### " + hPublicDedication + "\n\n- [X] " + itemCC0Corrections + "\n")
 	return correctionsTitleTag + name, sb.String(), cloneLabels(correctionLabels), changes, nil
 }
 
-func hasControl(s string) bool { return strings.IndexFunc(s, unicode.IsControl) >= 0 }
+func hasControl(s string) bool { return strings.ContainsFunc(s, unicode.IsControl) }
 
 // escapeHeadings escapes a line of free text that would start a form section
 // ("### ..."), so evidence can't add or shadow one of the form's fields.

@@ -83,10 +83,7 @@ func (b *Bridge) agentCredential(cli string) (kind, value string, since time.Tim
 
 // canContribute reports whether a GitHub token resolves, which a job with
 // contribute=issue needs.
-func (b *Bridge) canContribute(ctx context.Context) bool {
-	_, _, err := b.tokens.Resolve(ctx)
-	return err == nil
-}
+func (b *Bridge) canContribute(ctx context.Context) bool { return b.contributeFrom(ctx) != "" }
 
 // contributeFrom is where a contribution's token comes from now ("" for none).
 func (b *Bridge) contributeFrom(ctx context.Context) string {
@@ -95,14 +92,6 @@ func (b *Bridge) contributeFrom(ctx context.Context) string {
 		return ""
 	}
 	return from
-}
-
-// agentKinds are the credential kinds the backend's CLI takes, in its order.
-func agentKinds(backend string) []string {
-	if backend == config.AgentBackendCodex {
-		return []string{accounts.AgentOpenAIKey}
-	}
-	return []string{accounts.AgentClaudeToken, accounts.AgentAnthropicKey}
 }
 
 // Accounts is the Accounts tab's state.
@@ -119,7 +108,7 @@ func (b *Bridge) Accounts(ctx context.Context) api.Accounts {
 	as := b.agentCreds.State(ctx)
 	st := b.box.Status()
 	backend := b.box.ID()
-	ag := api.AgentAccount{Backend: backend, Kinds: agentKinds(backend), Set: as.Set, SetAt: as.SetAt,
+	ag := api.AgentAccount{Backend: backend, Kinds: accounts.KindsFor(backend), Set: as.Set, SetAt: as.SetAt,
 		Available: st.Available, Detail: st.Detail, Handoff: st.Handoff}
 	if !st.Handoff {
 		ag.ContainerCredential = st.CLIs[backend].Credential
@@ -161,7 +150,7 @@ func (b *Bridge) SetAgentCredential(ctx context.Context, kind, value string) err
 	err := b.agentCreds.Set(ctx, kind, value)
 	if errors.Is(err, accounts.ErrInvalidCredential) {
 		// The message names the kind and the problem, never the value.
-		return api.Errorf(api.ErrInvalid, "%s", strings.TrimPrefix(err.Error(), accounts.ErrInvalidCredential.Error()+": "))
+		return api.Errorf(api.ErrInvalid, "%v", err)
 	}
 	return err
 }
@@ -170,7 +159,7 @@ func (b *Bridge) SetAgentCredential(ctx context.Context, kind, value string) err
 func (b *Bridge) DeleteAgentCredential(ctx context.Context, kind string) error {
 	err := b.agentCreds.Delete(ctx, kind)
 	if errors.Is(err, accounts.ErrInvalidCredential) {
-		return api.Errorf(api.ErrInvalid, "%s", strings.TrimPrefix(err.Error(), accounts.ErrInvalidCredential.Error()+": "))
+		return api.Errorf(api.ErrInvalid, "%v", err)
 	}
 	return err
 }

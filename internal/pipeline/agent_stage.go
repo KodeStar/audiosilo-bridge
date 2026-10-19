@@ -81,10 +81,7 @@ func monthlyBudgetExceededMsg(spent, budget float64, resume time.Time) string {
 // has reached the monthly budget, the book parks budget_exceeded with an automatic
 // re-admit at the start of the next month. nil when there is no cap or room left.
 func (e *Executor) checkMonthlyBudget(ctx context.Context, stage state.State, now time.Time) error {
-	budget := e.monthlyBudgetUSD
-	if e.monthlyBudgetFn != nil {
-		budget = e.monthlyBudgetFn()
-	}
+	budget := e.monthlyBudget()
 	if e.db == nil || budget <= 0 {
 		return nil
 	}

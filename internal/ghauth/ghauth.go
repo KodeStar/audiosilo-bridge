@@ -223,7 +223,8 @@ func (c *Client) Poll(ctx context.Context, deviceCode string) (Token, time.Durat
 	default:
 		return Token{}, 0, out.err()
 	}
-	return out.token(c.now())
+	tok, err := out.token(c.now())
+	return tok, 0, err
 }
 
 // Wait polls until the admin approves the code (a Token), the code expires
@@ -275,7 +276,7 @@ func (c *Client) Refresh(ctx context.Context, refreshToken string) (Token, error
 		// good: the admin signs in again.
 		return Token{}, fmt.Errorf("%w (%s)", ErrBadRefresh, out.Error)
 	}
-	tok, _, err := out.token(c.now())
+	tok, err := out.token(c.now())
 	return tok, err
 }
 
@@ -375,9 +376,9 @@ type tokenAnswer struct {
 	oauthError
 }
 
-func (a tokenAnswer) token(now time.Time) (Token, time.Duration, error) {
+func (a tokenAnswer) token(now time.Time) (Token, error) {
 	if a.AccessToken == "" {
-		return Token{}, 0, errors.New("GitHub's token answer carried no token")
+		return Token{}, errors.New("GitHub's token answer carried no token")
 	}
 	t := Token{AccessToken: a.AccessToken, RefreshToken: a.RefreshToken}
 	if a.ExpiresIn > 0 {
@@ -386,7 +387,7 @@ func (a tokenAnswer) token(now time.Time) (Token, time.Duration, error) {
 	if a.RefreshTokenExpiresIn > 0 {
 		t.RefreshExpiresAt = now.Add(time.Duration(a.RefreshTokenExpiresIn) * time.Second)
 	}
-	return t, 0, nil
+	return t, nil
 }
 
 // postForm posts a form to an OAuth endpoint and decodes the JSON answer (GitHub

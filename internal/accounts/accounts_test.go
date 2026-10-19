@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kodestar/audiosilo-bridge/internal/agentproto"
 	"github.com/kodestar/audiosilo-bridge/internal/ghauth"
 	"github.com/kodestar/audiosilo-bridge/internal/secrets"
 	"github.com/kodestar/audiosilo-bridge/internal/store"
@@ -361,7 +362,7 @@ func TestAgentCredential(t *testing.T) {
 	}
 	for _, bad := range []struct{ kind, value string }{
 		{"github_user_token", "x"}, {AgentClaudeToken, ""}, {AgentClaudeToken, "two words"},
-		{AgentClaudeToken, "line\nbreak"}, {AgentClaudeToken, strings.Repeat("a", MaxCredentialBytes+1)},
+		{AgentClaudeToken, "line\nbreak"}, {AgentClaudeToken, strings.Repeat("a", agentproto.MaxCredentialValueBytes+1)},
 	} {
 		if err := a.Set(ctx, bad.kind, bad.value); !errors.Is(err, ErrInvalidCredential) {
 			t.Fatalf("Set(%q) = %v, want ErrInvalidCredential", bad.kind, err)
@@ -370,13 +371,13 @@ func TestAgentCredential(t *testing.T) {
 	if err := a.Set(ctx, AgentAnthropicKey, " sk-ant-api-1 "); err != nil {
 		t.Fatal(err)
 	}
-	if kind, v, since, ok := a.Credential(ctx, "claude"); !ok || kind != CredentialAPIKey || v != "sk-ant-api-1" || since.IsZero() {
+	if kind, v, since, ok := a.Credential(ctx, "claude"); !ok || kind != agentproto.CredentialAPIKey || v != "sk-ant-api-1" || since.IsZero() {
 		t.Fatalf("claude = %q %q %v %v", kind, v, since, ok)
 	}
 	if err := a.Set(ctx, AgentClaudeToken, "sk-ant-oat01-x"); err != nil {
 		t.Fatal(err)
 	}
-	if kind, v, _, _ := a.Credential(ctx, "claude"); kind != CredentialOAuthToken || v != "sk-ant-oat01-x" {
+	if kind, v, _, _ := a.Credential(ctx, "claude"); kind != agentproto.CredentialOAuthToken || v != "sk-ant-oat01-x" {
 		t.Fatalf("a subscription token comes first: %q %q", kind, v)
 	}
 	if _, _, _, ok := a.Credential(ctx, "codex"); ok {
@@ -389,7 +390,7 @@ func TestAgentCredential(t *testing.T) {
 	if err := a.Delete(ctx, AgentClaudeToken); err != nil {
 		t.Fatal(err)
 	}
-	if kind, _, _, _ := a.Credential(ctx, "claude"); kind != CredentialAPIKey {
+	if kind, _, _, _ := a.Credential(ctx, "claude"); kind != agentproto.CredentialAPIKey {
 		t.Fatal("the API key is left")
 	}
 	if err := a.Delete(ctx, ""); err != nil {

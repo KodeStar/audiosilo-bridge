@@ -58,11 +58,19 @@ func ParseParams(raw json.RawMessage) (Params, error) {
 	default:
 		return Params{}, fmt.Errorf("contribute %q must be local or issue", p.Contribute)
 	}
-	if len(p.WorkID) > maxWorkID {
-		return Params{}, fmt.Errorf("work_id is longer than %d bytes", maxWorkID)
-	}
-	if strings.ContainsFunc(p.WorkID, unicode.IsControl) {
-		return Params{}, errors.New("work_id holds a control character")
+	if err := checkWorkID(p.WorkID); err != nil {
+		return Params{}, err
 	}
 	return p, nil
+}
+
+// checkWorkID bounds a job's work id (trimmed) as the server does.
+func checkWorkID(id string) error {
+	if len(id) > maxWorkID {
+		return fmt.Errorf("work_id is longer than %d bytes", maxWorkID)
+	}
+	if strings.ContainsFunc(id, unicode.IsControl) {
+		return errors.New("work_id holds a control character")
+	}
+	return nil
 }

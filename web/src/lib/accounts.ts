@@ -1,4 +1,5 @@
 import type { AgentKind, GitHubAccount, TokenFrom } from '@/api/types';
+import { parseTime } from './time';
 
 // How often the Accounts tab looks again while a GitHub sign-in waits for its
 // code to be entered (the Bridge polls GitHub; the page polls the Bridge).
@@ -46,9 +47,9 @@ export function githubState(g: GitHubAccount): GitHubState {
 // minutesLeft is how long a sign-in code stays good, in whole minutes (0 when
 // it has run out).
 export function minutesLeft(expiresAt: string, now: number = Date.now()): number {
-  const t = Date.parse(expiresAt);
-  if (Number.isNaN(t)) return 0;
-  return Math.max(0, Math.ceil((t - now) / 60000));
+  const t = parseTime(expiresAt);
+  if (!t) return 0;
+  return Math.max(0, Math.ceil((t.getTime() - now) / 60000));
 }
 
 // checkCredential is the page's first look at a pasted credential: an error

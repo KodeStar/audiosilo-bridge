@@ -135,8 +135,8 @@ type Config struct {
 	// budget_exceeded until the 1st of the next month (0 = no monthly cap). From
 	// config.agent.monthly_budget_usd.
 	MonthlyBudgetUSD float64
-	// MonthlyBudget, when set, is read at every check instead (the Bridge's page
-	// edits the budget while the engine runs).
+	// MonthlyBudget, when set, is read at every check instead of MonthlyBudgetUSD
+	// (the Bridge's page edits the budget while the engine runs).
 	MonthlyBudget func() float64
 	// AgentRedetect, when set, replaces agent.Select as the way an unavailable
 	// runner is looked for again: the Bridge re-detects its agent container and
@@ -197,8 +197,7 @@ type Executor struct {
 	activeInvocations     map[int64]int
 	globalInvocationLimit int
 	bookBudgetUSD         float64
-	monthlyBudgetUSD      float64
-	monthlyBudgetFn       func() float64
+	monthlyBudget         func() float64
 	pricing               pricing.Table
 	secrets               secrets.Store
 	log                   *slog.Logger
@@ -245,6 +244,10 @@ func NewExecutor(cfg Config) *Executor {
 		// both the global semaphore and fact-pass worker count.
 		agentWorkers = globalWorkers
 	}
+	if cfg.MonthlyBudget == nil {
+		budget := cfg.MonthlyBudgetUSD
+		cfg.MonthlyBudget = func() float64 { return budget }
+	}
 	e := &Executor{
 		db:                    cfg.DB,
 		ffmpeg:                cfg.FFmpeg,
@@ -264,8 +267,7 @@ func NewExecutor(cfg Config) *Executor {
 		activeInvocations:     make(map[int64]int),
 		globalInvocationLimit: globalWorkers,
 		bookBudgetUSD:         cfg.BookBudgetUSD,
-		monthlyBudgetUSD:      cfg.MonthlyBudgetUSD,
-		monthlyBudgetFn:       cfg.MonthlyBudget,
+		monthlyBudget:         cfg.MonthlyBudget,
 		pricing:               cfg.Pricing,
 		secrets:               cfg.Secrets,
 		log:                   log,

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
-	"slices"
 	"strings"
 
 	"github.com/kodestar/audiosilo-meta/pkg/model"
@@ -23,10 +22,11 @@ import (
 // book): no agent, no spend. A local or covered row from an earlier run is filed
 // again; an issue already filed for a dimension is kept, and reported.
 
-// The dimensions a share files (the server's names).
+// The dimensions a share files (the server's names, which are the contribution
+// kinds).
 const (
-	ShareCharacters = "characters"
-	ShareRecaps     = "recaps"
+	ShareCharacters = store.ContribKindCharacters
+	ShareRecaps     = store.ContribKindRecaps
 )
 
 // ErrNotMatched is a book with no community work to file for.
@@ -54,50 +54,41 @@ func (e *Executor) Share(ctx context.Context, bookID int64, workID string, dims 
 	if len(dims) == 0 {
 		dims = []string{ShareCharacters, ShareRecaps}
 	}
-	type file struct{ dim, kind, path string }
-	var files []file
+	var artifacts []contribArtifact
 	for _, d := range dims {
-		f := file{dim: d, kind: store.ContribKindCharacters, path: filepath.Join(book.WorkDir, sidecarsDir, charactersFileName)}
-		if d == ShareRecaps {
-			f.kind, f.path = store.ContribKindRecaps, filepath.Join(book.WorkDir, sidecarsDir, recapsFileName)
-		} else if d != ShareCharacters {
+		if d != ShareCharacters && d != ShareRecaps {
 			return ShareResult{}, fmt.Errorf("share: unknown dimension %q", d)
 		}
-		if fsutil.IsFile(f.path) {
-			files = append(files, f)
+		// A dimension is its contribution kind (store.ContribKind*).
+		if path := filepath.Join(book.WorkDir, sidecarsDir, fileNameFor(d)); fsutil.IsFile(path) {
+			artifacts = append(artifacts, contribArtifact{kind: d, path: path})
 		}
 	}
-	if len(files) == 0 {
+	if len(artifacts) == 0 {
 		return ShareResult{}, ErrNoSidecars // the work dir keeps none of them
 	}
 	slug, err := e.shareWork(ctx, book, strings.TrimSpace(workID))
 	if err != nil {
 		return ShareResult{}, err
 	}
-	sourceRef := e.contributionSourceRef(ctx, book, slug)
-	var artifacts []contribArtifact
-	for _, f := range files {
-		if err := reconcileSidecar(f.path, slug, sourceRef); err != nil {
-			return ShareResult{}, fmt.Errorf("share: reconcile %s: %w", filepath.Base(f.path), err)
-		}
-		artifacts = append(artifacts, contribArtifact{kind: f.kind, path: f.path})
+	if err := e.prepareArtifacts(ctx, book, slug, artifacts); err != nil {
+		return ShareResult{}, fmt.Errorf("share: %w", err)
 	}
-	hasChars, hasRecaps := e.coveredDimensions(ctx, slug)
 	out := ShareResult{WorkID: slug, Contributed: map[string]string{}, Covered: []string{}}
-	for i, f := range files {
-		artifacts[i].covered = (f.kind == store.ContribKindCharacters && hasChars) || (f.kind == store.ContribKindRecaps && hasRecaps)
-		if artifacts[i].covered {
-			out.Covered = append(out.Covered, f.dim)
+	filed := map[string]bool{}
+	for _, a := range artifacts {
+		if a.covered {
+			out.Covered = append(out.Covered, a.kind)
+		} else {
+			filed[a.kind] = true
 		}
 	}
 	if err := e.submitIssueWith(ctx, book, slug, artifacts, auditAcceptanceNote(book.WorkDir), shareSettled); err != nil {
 		return ShareResult{}, err
 	}
 	for _, r := range e.bookContributions(ctx, book.ID) {
-		for _, f := range files {
-			if r.Kind == f.kind && r.URL != "" && !slices.Contains(out.Covered, f.dim) {
-				out.Contributed[f.dim] = r.URL
-			}
+		if filed[r.Kind] && r.URL != "" {
+			out.Contributed[r.Kind] = r.URL
 		}
 	}
 	return out, nil

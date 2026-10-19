@@ -1794,7 +1794,7 @@ func TestRunAgentParksOnMonthlyBudget(t *testing.T) {
 	fake := newFakeRunner()
 	db, exe, book := dbBackedQAExecutor(t, work, fake)
 	exe.bookBudgetUSD = 1000
-	exe.monthlyBudgetUSD = 20
+	exe.monthlyBudget = func() float64 { return 20 }
 
 	// $25 spent this month by ANOTHER book: the cap is across every book.
 	other, err := db.CreateBook(ctx, store.NewBook{SourcePath: filepath.Join(work, "other"), WorkDir: filepath.Join(work, "w-other"), Title: "Other"})
@@ -1841,13 +1841,13 @@ func TestRunAgentParksOnMonthlyBudget(t *testing.T) {
 	if err := exe.checkMonthlyBudget(ctx, state.FactPass, next.Add(time.Hour)); err != nil {
 		t.Fatalf("a new month = %v, want room", err)
 	}
-	exe.monthlyBudgetUSD = 0
+	exe.monthlyBudget = func() float64 { return 0 }
 	if err := exe.checkMonthlyBudget(ctx, state.FactPass, time.Now()); err != nil {
 		t.Fatalf("no monthly cap = %v", err)
 	}
-	// A live budget (the Bridge's page edits it) wins over the configured one.
+	// A live budget (the Bridge's page edits it) is read at every check.
 	live := 20.0
-	exe.monthlyBudgetFn = func() float64 { return live }
+	exe.monthlyBudget = func() float64 { return live }
 	if err := exe.checkMonthlyBudget(ctx, state.FactPass, time.Now()); !errors.As(err, &pe) {
 		t.Fatalf("live budget 20 = %v, want the park", err)
 	}

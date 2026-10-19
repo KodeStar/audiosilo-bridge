@@ -17,10 +17,12 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/kodestar/audiosilo-bridge/internal/agentproto"
 	"github.com/kodestar/audiosilo-bridge/internal/ghauth"
 	"github.com/kodestar/audiosilo-bridge/internal/secrets"
 	"github.com/kodestar/audiosilo-bridge/internal/store"
@@ -38,7 +40,6 @@ type Store interface {
 	SignInAccount(ctx context.Context, provider, login string, at time.Time) error
 	AccountOK(ctx context.Context, provider string, at time.Time) error
 	RefuseAccount(ctx context.Context, provider, why string, at time.Time) error
-	SetAccountError(ctx context.Context, provider, why string) error
 	DeleteAccount(ctx context.Context, provider string) error
 }
 
@@ -223,14 +224,19 @@ func flowErrorText(err error) string {
 
 // store seals a new sign-in and records it.
 func (g *GitHub) store(ctx context.Context, tok ghauth.Token, login string) error {
+	if err := g.seal(tok); err != nil {
+		return fmt.Errorf("store the sign-in: %w", err)
+	}
+	return g.o.DB.SignInAccount(context.WithoutCancel(ctx), ProviderGitHub, login, g.o.Now())
+}
+
+// seal writes the token pair into the vault in one write.
+func (g *GitHub) seal(tok ghauth.Token) error {
 	raw, err := json.Marshal(tok) //nolint:gosec // G117: the pair is sealed into the vault, its one home
 	if err != nil {
 		return err
 	}
-	if err := g.o.Vault.Set(secrets.GitHubUserToken, string(raw)); err != nil {
-		return fmt.Errorf("store the sign-in: %w", err)
-	}
-	return g.o.DB.SignInAccount(context.WithoutCancel(ctx), ProviderGitHub, login, g.o.Now())
+	return g.o.Vault.Set(secrets.GitHubUserToken, string(raw))
 }
 
 // Cancel ends the device flow in progress (none: nothing to do).
@@ -249,13 +255,8 @@ func (g *GitHub) Cancel() {
 // happens, for the page to mention.
 func (g *GitHub) SignOut(ctx context.Context) (revokeErr error, err error) {
 	g.Cancel()
-	g.refreshMu.Lock()
-	defer g.refreshMu.Unlock()
-	tok, _ := g.stored()
-	if err := g.o.Vault.Delete(secrets.GitHubUserToken); err != nil {
-		return nil, err
-	}
-	if err := g.o.DB.DeleteAccount(ctx, ProviderGitHub); err != nil {
+	tok, err := g.forget(ctx)
+	if err != nil {
 		return nil, err
 	}
 	g.mu.Lock()
@@ -270,6 +271,22 @@ func (g *GitHub) SignOut(ctx context.Context) (revokeErr error, err error) {
 	}
 	g.o.Log.Info("accounts: signed out of GitHub")
 	return revokeErr, nil
+}
+
+// forget deletes the sign-in here and returns the pair it held (for the revoke,
+// which runs after the refresh lock is let go: Token callers don't wait on
+// GitHub).
+func (g *GitHub) forget(ctx context.Context) (ghauth.Token, error) {
+	g.refreshMu.Lock()
+	defer g.refreshMu.Unlock()
+	tok, _ := g.stored()
+	if err := g.o.Vault.Delete(secrets.GitHubUserToken); err != nil {
+		return ghauth.Token{}, err
+	}
+	if err := g.o.DB.DeleteAccount(ctx, ProviderGitHub); err != nil {
+		return ghauth.Token{}, err
+	}
+	return tok, nil
 }
 
 // stored is the sealed sign-in (a zero Token for none).
@@ -326,12 +343,8 @@ func (g *GitHub) Token(ctx context.Context) (string, error) {
 		// GitHub turned expiry off for the App: the new token doesn't expire.
 		fresh.ExpiresAt, fresh.RefreshExpiresAt = time.Time{}, time.Time{}
 	}
-	raw, err := json.Marshal(fresh) //nolint:gosec // G117: the pair is sealed into the vault, its one home
-	if err != nil {
-		return "", err
-	}
 	// The old pair is dead now: the new one must be kept before it is used.
-	if err := g.o.Vault.Set(secrets.GitHubUserToken, string(raw)); err != nil {
+	if err := g.seal(fresh); err != nil {
 		g.o.Log.Error("accounts: the refreshed GitHub sign-in couldn't be stored; sign in again after a restart", "err", err)
 		return "", fmt.Errorf("store the refreshed sign-in: %w", err)
 	}
@@ -385,11 +398,18 @@ const (
 // AgentKinds are the agent credential kinds, in the page's order.
 var AgentKinds = []string{AgentClaudeToken, AgentAnthropicKey, AgentOpenAIKey}
 
-// MaxCredentialBytes bounds a credential's value (the hand-off file is 4 KiB).
-const MaxCredentialBytes = 2048
-
-// ErrInvalidCredential is a value or kind the page can't store.
+// ErrInvalidCredential is a value or kind the page can't store: errors.Is
+// matches it, and the error's text is the problem alone (never the value).
 var ErrInvalidCredential = errors.New("invalid credential")
+
+type invalidError struct{ reason string }
+
+func (e invalidError) Error() string        { return e.reason }
+func (e invalidError) Is(target error) bool { return target == ErrInvalidCredential }
+
+func invalid(format string, args ...any) error {
+	return invalidError{fmt.Sprintf(format, args...)}
+}
 
 // Agent is the agent's credential in the vault.
 type Agent struct {
@@ -431,19 +451,20 @@ func (a *Agent) State(ctx context.Context) AgentState {
 }
 
 // Set stores a credential of kind (one of AgentKinds). The value is checked
-// for shape only: one line of printable text, at most MaxCredentialBytes.
+// for shape only, by the rules the runner reads credential.json with: one line
+// of printable text, at most agentproto.MaxCredentialValueBytes.
 func (a *Agent) Set(ctx context.Context, kind, value string) error {
-	if !validKind(kind) {
-		return fmt.Errorf("%w: unknown credential kind %q", ErrInvalidCredential, kind)
+	if !slices.Contains(AgentKinds, kind) {
+		return invalid("unknown credential kind %q", kind)
 	}
 	value = strings.TrimSpace(value)
 	switch {
 	case value == "":
-		return fmt.Errorf("%w: the credential is empty", ErrInvalidCredential)
-	case len(value) > MaxCredentialBytes:
-		return fmt.Errorf("%w: the credential is longer than %d characters", ErrInvalidCredential, MaxCredentialBytes)
-	case strings.ContainsFunc(value, func(r rune) bool { return r <= ' ' || r > '~' }):
-		return fmt.Errorf("%w: the credential holds a space, a line break or a character a key never has (paste it as one line)", ErrInvalidCredential)
+		return invalid("the credential is empty")
+	case len(value) > agentproto.MaxCredentialValueBytes:
+		return invalid("the credential is longer than %d characters", agentproto.MaxCredentialValueBytes)
+	case !agentproto.PrintableLine(value):
+		return invalid("the credential holds a space, a line break or a character a key never has (paste it as one line)")
 	}
 	if err := a.vault.Set(kind, value); err != nil {
 		return err
@@ -459,8 +480,8 @@ func (a *Agent) Set(ctx context.Context, kind, value string) error {
 func (a *Agent) Delete(ctx context.Context, kind string) error {
 	kinds := AgentKinds
 	if kind != "" {
-		if !validKind(kind) {
-			return fmt.Errorf("%w: unknown credential kind %q", ErrInvalidCredential, kind)
+		if !slices.Contains(AgentKinds, kind) {
+			return invalid("unknown credential kind %q", kind)
 		}
 		kinds = []string{kind}
 	}
@@ -469,12 +490,7 @@ func (a *Agent) Delete(ctx context.Context, kind string) error {
 			return err
 		}
 	}
-	left := false
-	for _, k := range AgentKinds {
-		if ok, _ := a.vault.Present(k); ok {
-			left = true
-		}
-	}
+	left := slices.ContainsFunc(AgentKinds, func(k string) bool { ok, _ := a.vault.Present(k); return ok })
 	if !left {
 		if err := a.db.DeleteAccount(ctx, ProviderAgent); err != nil {
 			return err
@@ -486,28 +502,26 @@ func (a *Agent) Delete(ctx context.Context, kind string) error {
 	return nil
 }
 
-// The CLIs and the credential kinds the agent container knows (agentproto's
-// names, repeated so this package stays off the protocol).
-const (
-	cliClaude = "claude"
-	cliCodex  = "codex"
-	// CredentialOAuthToken and CredentialAPIKey are agentproto's kinds.
-	CredentialOAuthToken = "oauth_token"
-	CredentialAPIKey     = "api_key"
-)
+// cliKinds is which vault credentials each CLI takes, in the order it uses
+// them (a subscription token first for claude), with agentproto's kind for each.
+var cliKinds = map[string][]struct{ name, kind string }{
+	agentproto.CLIClaude: {{AgentClaudeToken, agentproto.CredentialOAuthToken}, {AgentAnthropicKey, agentproto.CredentialAPIKey}},
+	agentproto.CLICodex:  {{AgentOpenAIKey, agentproto.CredentialAPIKey}},
+}
 
-// Credential is the vault's credential for cli ("claude" or "codex"): its kind
-// (CredentialOAuthToken, CredentialAPIKey), its value and when it was set. A
-// subscription token comes first for claude. ok is false when there is none.
-func (a *Agent) Credential(ctx context.Context, cli string) (kind, value string, since time.Time, ok bool) {
-	var order []struct{ name, kind string }
-	switch cli {
-	case cliClaude:
-		order = []struct{ name, kind string }{{AgentClaudeToken, CredentialOAuthToken}, {AgentAnthropicKey, CredentialAPIKey}}
-	case cliCodex:
-		order = []struct{ name, kind string }{{AgentOpenAIKey, CredentialAPIKey}}
+// KindsFor are the vault credentials cli ("claude" or "codex") takes, in its order.
+func KindsFor(cli string) []string {
+	var names []string
+	for _, k := range cliKinds[cli] {
+		names = append(names, k.name)
 	}
-	for _, o := range order {
+	return names
+}
+
+// Credential is the vault's credential for cli ("claude" or "codex"): its
+// agentproto kind, its value and when it was set. ok is false when there is none.
+func (a *Agent) Credential(ctx context.Context, cli string) (kind, value string, since time.Time, ok bool) {
+	for _, o := range cliKinds[cli] {
 		v, err := a.vault.Get(o.name)
 		if err != nil || v == "" {
 			continue
@@ -518,13 +532,4 @@ func (a *Agent) Credential(ctx context.Context, cli string) (kind, value string,
 		return o.kind, v, since, true
 	}
 	return "", "", time.Time{}, false
-}
-
-func validKind(kind string) bool {
-	for _, k := range AgentKinds {
-		if k == kind {
-			return true
-		}
-	}
-	return false
 }

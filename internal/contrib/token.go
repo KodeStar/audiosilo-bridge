@@ -36,6 +36,11 @@ const (
 // ghTokenTimeout bounds the `gh auth token` shell-out.
 const ghTokenTimeout = 15 * time.Second
 
+// ghReuseFor is how long a `gh auth token` answer (a token, or none) is reused:
+// Resolve runs at every heartbeat and every Status poll of the page, and gh is a
+// process.
+const ghReuseFor = time.Minute
+
 // DeviceTokens is the Accounts tab's GitHub sign-in (*accounts.GitHub): its
 // access token (refreshed when it nears its expiry; an error when there is no
 // usable sign-in), and Refused to record a 401.
@@ -55,6 +60,7 @@ type TokenSource struct {
 	// Both are fields so tests can substitute fakes.
 	getenv  func(string) string
 	ghToken func(ctx context.Context) (string, error)
+	now     func() time.Time
 	// onChange runs after a refusal (the heartbeat's can_contribute drops).
 	onChange func()
 
@@ -62,6 +68,9 @@ type TokenSource struct {
 	// refused holds the fingerprints of the environment and gh tokens GitHub
 	// refused (the device sign-in records its own refusal).
 	refused map[string]bool
+	// gh is the last `gh auth token` answer ("" for none) and when it came.
+	gh   string
+	ghAt time.Time
 }
 
 // NewTokenSource returns a TokenSource over device (nil: no sign-in), calling
@@ -70,7 +79,7 @@ func NewTokenSource(device DeviceTokens, onChange func()) *TokenSource {
 	if onChange == nil {
 		onChange = func() {}
 	}
-	ts := &TokenSource{device: device, getenv: os.Getenv, onChange: onChange, refused: map[string]bool{}}
+	ts := &TokenSource{device: device, getenv: os.Getenv, now: time.Now, onChange: onChange, refused: map[string]bool{}}
 	ts.ghToken = func(ctx context.Context) (string, error) {
 		ghPath, err := exec.LookPath("gh")
 		if err != nil {
@@ -93,12 +102,35 @@ func (t *TokenSource) Resolve(ctx context.Context) (token, from string, err erro
 			return tok, FromDevice, nil
 		}
 	}
-	if t.ghToken != nil {
-		if tok, gerr := t.ghToken(ctx); gerr == nil && tok != "" && !t.isRefused(tok) {
-			return tok, FromGH, nil
-		}
+	if tok := t.ghCLIToken(ctx); tok != "" && !t.isRefused(tok) {
+		return tok, FromGH, nil
 	}
 	return "", "", ErrNoCredential
+}
+
+// ghCLIToken is `gh auth token`'s answer ("" for none), reused for ghReuseFor.
+// An answer cut short by ctx isn't kept.
+func (t *TokenSource) ghCLIToken(ctx context.Context) string {
+	if t.ghToken == nil {
+		return ""
+	}
+	t.mu.Lock()
+	if !t.ghAt.IsZero() && t.now().Sub(t.ghAt) < ghReuseFor {
+		tok := t.gh
+		t.mu.Unlock()
+		return tok
+	}
+	t.mu.Unlock()
+	tok, err := t.ghToken(ctx)
+	if err != nil {
+		tok = ""
+	}
+	if ctx.Err() == nil {
+		t.mu.Lock()
+		t.gh, t.ghAt = tok, t.now()
+		t.mu.Unlock()
+	}
+	return tok
 }
 
 // Refused records that GitHub refused token (resolved from from) with a 401:
@@ -113,6 +145,7 @@ func (t *TokenSource) Refused(ctx context.Context, from, token string) {
 	}
 	t.mu.Lock()
 	t.refused[fingerprint(token)] = true
+	t.ghAt = time.Time{} // ask gh again: it may hold a new token by now
 	t.mu.Unlock()
 	t.onChange()
 }

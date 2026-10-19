@@ -85,13 +85,9 @@ func (r *Runner) Status() Status {
 			// The vault's credential stands in for the container's: its kind is what
 			// the runs are billed as, and its time moves when the Accounts tab
 			// replaces it (which ends a refusal of the old one).
-			clis := make(map[string]agentproto.CLI, len(rj.CLIs))
-			for k, v := range rj.CLIs {
-				clis[k] = v
-			}
+			// (rj was decoded for this call alone, so its map is ours to change.)
 			c.Credential, c.CredentialSince = kind, since.UTC()
-			clis[r.backend] = c
-			rj.CLIs, st.Handoff = clis, true
+			rj.CLIs[r.backend], st.Handoff = c, true
 		}
 	}
 	st.Version, st.Slots, st.HeartbeatAt, st.CLIs = rj.Version, rj.Slots, rj.HeartbeatAt, rj.CLIs

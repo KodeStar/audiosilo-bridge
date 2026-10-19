@@ -166,6 +166,14 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 	if h.o.Meta == nil {
 		return nil, errMetaOff
 	}
+	// The credential first: without one there is nothing to fetch the record for.
+	token, from, err := h.o.Tokens.Resolve(ctx)
+	if errors.Is(err, contrib.ErrNoCredential) {
+		return nil, errNoCredential
+	}
+	if err != nil {
+		return nil, fmt.Errorf("resolve the GitHub credential: %w", err)
+	}
 	cov, err := h.o.Meta.FreshCoverageForWork(ctx, p.WorkID)
 	switch {
 	case errors.Is(err, metaops.ErrDisabled):
@@ -179,14 +187,7 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 		Changes: p.Changes, Evidence: p.Evidence, Source: p.Source}
 	title, body, labels, mapped, err := contrib.CorrectionBatchIssue(batch)
 	if err != nil {
-		return nil, failure("The corrections can't be filed: " + strings.TrimPrefix(err.Error(), contrib.ErrInvalidCorrection.Error()+": ") + ".")
-	}
-	token, from, err := h.o.Tokens.Resolve(ctx)
-	if errors.Is(err, contrib.ErrNoCredential) {
-		return nil, errNoCredential
-	}
-	if err != nil {
-		return nil, fmt.Errorf("resolve the GitHub credential: %w", err)
+		return nil, failure("The corrections can't be filed: " + err.Error() + ".")
 	}
 	cli := contrib.NewClientFor(h.o.BaseURL, token, from, h.o.Tokens)
 	rep.Progress(jobs.Progress{Step: "filing", Message: "Filing the corrections", Done: 1, Total: 2})

@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 // fakeDevice is a scripted device sign-in.
@@ -84,6 +85,33 @@ func TestResolveNoCredential(t *testing.T) {
 	ts.ghToken = func(context.Context) (string, error) { return "", nil }
 	if _, _, err := ts.Resolve(context.Background()); !errors.Is(err, ErrNoCredential) {
 		t.Fatalf("empty-token err = %v, want ErrNoCredential", err)
+	}
+}
+
+// TestResolveReusesGH: gh's answer (a token or none) is reused for a minute,
+// then asked again.
+func TestResolveReusesGH(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 10, 19, 10, 0, 0, 0, time.UTC)
+	calls, gh := 0, ""
+	ts := newSource("", nil, "")
+	ts.now = func() time.Time { return now }
+	ts.ghToken = func(context.Context) (string, error) { calls++; return gh, nil }
+	if _, _, err := ts.Resolve(ctx); !errors.Is(err, ErrNoCredential) {
+		t.Fatal(err)
+	}
+	gh = "gho_cli"
+	if _, _, err := ts.Resolve(ctx); !errors.Is(err, ErrNoCredential) || calls != 1 {
+		t.Fatalf("err %v, calls %d: a negative answer is reused too", err, calls)
+	}
+	now = now.Add(ghReuseFor)
+	if tok, from, _ := ts.Resolve(ctx); tok != "gho_cli" || from != FromGH || calls != 2 {
+		t.Fatalf("got (%q, %q), calls %d", tok, from, calls)
+	}
+	ts.Refused(ctx, FromGH, "gho_cli")
+	gh = "gho_new"
+	if tok, _, _ := ts.Resolve(ctx); tok != "gho_new" || calls != 3 {
+		t.Fatalf("got %q, calls %d: a refusal asks gh again", tok, calls)
 	}
 }
 

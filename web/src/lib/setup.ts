@@ -1,5 +1,5 @@
 import type { Setup, SetupItem, SetupItemId } from '@/api/types';
-import type { TabId } from './tabs';
+import { TABS, type TabId } from './tabs';
 
 // The setup checklist (the Bridge's internal/setup): what each item is called
 // and the tab where it is done. The server's console links to the same tabs
@@ -12,16 +12,6 @@ export const SETUP_ITEMS: Record<SetupItemId, { label: string; tab: TabId | null
   agent: { label: "Set the agent's credential", tab: 'accounts' },
   budget: { label: 'Review the monthly budget', tab: 'settings' },
   github: { label: 'Sign in to GitHub (optional, to share with the community)', tab: 'accounts' },
-};
-
-const TAB_NAMES: Record<TabId, string> = {
-  status: 'Status',
-  libraries: 'Libraries',
-  jobs: 'Jobs',
-  settings: 'Settings',
-  accounts: 'Accounts',
-  workers: 'Workers',
-  logs: 'Logs',
 };
 
 function known(id: string): id is SetupItemId {
@@ -43,5 +33,6 @@ export function remainingRequired(setup: Setup | null | undefined): number {
 // setupLink is where an item is done: its tab's hash and name (null: here).
 export function setupLink(id: SetupItemId): { hash: string; name: string } | null {
   const tab = SETUP_ITEMS[id].tab;
-  return tab ? { hash: `#/${tab}`, name: TAB_NAMES[tab] } : null;
+  const name = TABS.find((t) => t.id === tab)?.label;
+  return tab && name ? { hash: `#/${tab}`, name } : null;
 }

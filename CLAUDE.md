@@ -129,7 +129,7 @@ Dockerfile    slim | cuda | agent | full; compose.example.yaml: server, bridge, 
 
 **Dependency direction:** `app -> {api, jobs, link, mapping, verify, generate,
 agentbox, workers, accounts, setup, correct, store, secrets, config, auth, logring,
-web}` plus the engine it wires; `accounts -> {ghauth, secrets, store}`; `correct ->
+web}` plus the engine it wires; `accounts -> {agentproto, ghauth, secrets, store}`; `correct ->
 {contrib, jobs, metaops}`; `setup -> link`;
 `api` calls the injected Backend and the injected `auth.Manager` (login, sessions,
 the password), with types from jobs/link/mapping/store/logring; `verify -> {jobs,

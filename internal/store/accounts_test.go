@@ -40,14 +40,14 @@ func TestAccounts(t *testing.T) {
 	if a.Login != "hubot" || a.RefusedAt != "" || a.LastError != "" || a.LastOKAt != Timestamp(at.Add(2*time.Hour)) {
 		t.Fatalf("after sign-in: %+v", a)
 	}
-	if err := db.SetAccountError(ctx, "github", "couldn't reach GitHub"); err != nil {
+	if err := db.RefuseAccount(ctx, "github", "revoked", at.Add(150*time.Minute)); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.AccountOK(ctx, "github", at.Add(3*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	a, _ = db.GetAccount(ctx, "github")
-	if a.LastError != "" || a.LastOKAt != Timestamp(at.Add(3*time.Hour)) {
+	if a.LastError != "" || a.RefusedAt != "" || a.LastOKAt != Timestamp(at.Add(3*time.Hour)) {
 		t.Fatalf("after ok: %+v", a)
 	}
 	if err := db.DeleteAccount(ctx, "github"); err != nil {

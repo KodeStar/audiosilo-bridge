@@ -56,13 +56,6 @@ func (db *DB) RefuseAccount(ctx context.Context, provider, why string, at time.T
 	return err
 }
 
-// SetAccountError records a problem with provider's account that isn't a
-// refusal (a refresh that couldn't reach GitHub). No row: nothing to record.
-func (db *DB) SetAccountError(ctx context.Context, provider, why string) error {
-	_, err := db.sql.ExecContext(ctx, `UPDATE accounts SET last_error = ? WHERE provider = ?`, why, provider)
-	return err
-}
-
 // DeleteAccount forgets provider's account (sign-out).
 func (db *DB) DeleteAccount(ctx context.Context, provider string) error {
 	_, err := db.sql.ExecContext(ctx, `DELETE FROM accounts WHERE provider = ?`, provider)

@@ -27,7 +27,6 @@ export function AccountsTab({ client }: { client: ApiClient }) {
     data: accounts,
     setData,
     error: loadError,
-    reload,
   } = useLoad(
     () => client.accounts(),
     // Poll only while a sign-in waits for its code.
@@ -39,7 +38,7 @@ export function AccountsTab({ client }: { client: ApiClient }) {
   return (
     <div className="flex flex-col gap-5">
       {loadError && <Notice kind="error">{loadError}</Notice>}
-      <GitHubCard client={client} accounts={accounts} onChange={setData} reload={reload} />
+      <GitHubCard client={client} accounts={accounts} onChange={setData} />
       <AgentCard client={client} accounts={accounts} onChange={setData} />
     </div>
   );
@@ -51,12 +50,7 @@ interface CardProps {
   onChange: (a: Accounts) => void;
 }
 
-function GitHubCard({
-  client,
-  accounts,
-  onChange,
-  reload,
-}: CardProps & { reload: () => Promise<void> }) {
+function GitHubCard({ client, accounts, onChange }: CardProps) {
   const g = accounts.github;
   const state = githubState(g);
   const [busy, setBusy] = useState(false);
@@ -68,8 +62,9 @@ function GitHubCard({
     setError(null);
     setWarning(null);
     try {
-      await client.startGitHubSignIn();
-      await reload();
+      // The code is shown at once; the poll that starts with it does the rest.
+      const pending = await client.startGitHubSignIn();
+      onChange({ ...accounts, github: { ...accounts.github, pending, flow_error: '' } });
     } catch (err) {
       setError(errorText(err, "Couldn't start the GitHub sign-in."));
     }

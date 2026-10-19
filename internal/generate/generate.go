@@ -486,16 +486,9 @@ func (h *Handler) waitEngine(ctx context.Context, r *run) (Engine, error) {
 // folder can be written. strict (a new job) fails on a library that isn't mapped
 // and writable; a resumed one waits for it, parked.
 func (h *Handler) prepare(ctx context.Context, r *run, strict bool) error {
-	srv := h.o.Server()
-	if srv == nil {
-		return errors.New("the Bridge isn't paired")
+	if err := h.serverLibrary(r); err != nil {
+		return err
 	}
-	r.srv = srv
-	lib, ok := h.o.Libraries.Library(*r.job.LibraryID)
-	if !ok {
-		return fmt.Errorf("library %d isn't one the server listed", *r.job.LibraryID)
-	}
-	r.lib = lib
 	if err := h.waitMapped(ctx, r, strict); err != nil {
 		return err
 	}
@@ -516,6 +509,22 @@ func (h *Handler) prepare(ctx context.Context, r *run, strict bool) error {
 	}
 	r.place = p
 	return h.waitWritable(ctx, r)
+}
+
+// serverLibrary sets the run's server and the job's library as the server
+// listed it.
+func (h *Handler) serverLibrary(r *run) error {
+	srv := h.o.Server()
+	if srv == nil {
+		return errors.New("the Bridge isn't paired")
+	}
+	r.srv = srv
+	lib, ok := h.o.Libraries.Library(*r.job.LibraryID)
+	if !ok {
+		return fmt.Errorf("library %d isn't one the server listed", *r.job.LibraryID)
+	}
+	r.lib = lib
+	return nil
 }
 
 // fetchBook asks the server for the book, waiting out an answer that may change

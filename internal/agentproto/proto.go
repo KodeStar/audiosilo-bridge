@@ -158,14 +158,15 @@ func DecodeCredential(data []byte, cli string) (Credential, error) {
 	default:
 		return Credential{}, fmt.Errorf("credential.json's kind %q isn't one %s takes", c.Kind, cli)
 	}
-	if c.Value == "" || len(c.Value) > MaxCredentialValueBytes || !printableLine(c.Value) {
+	if c.Value == "" || len(c.Value) > MaxCredentialValueBytes || !PrintableLine(c.Value) {
 		return Credential{}, errors.New("credential.json's value isn't one line of printable text within the size limit")
 	}
 	return c, nil
 }
 
-// printableLine reports whether s is printable ASCII with no space.
-func printableLine(s string) bool {
+// PrintableLine reports whether s is printable ASCII with no space (a
+// credential's value; the Accounts tab checks a new one with it too).
+func PrintableLine(s string) bool {
 	for i := 0; i < len(s); i++ {
 		if s[i] <= ' ' || s[i] > '~' {
 			return false

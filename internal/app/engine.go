@@ -150,7 +150,7 @@ func (b *Bridge) runEngine(ctx context.Context) {
 		AgentModels:      pipeline.AgentModels{Claude: cfg.Agent.Claude, OpenAI: cfg.Agent.OpenAI},
 		AgentTimeout:     time.Duration(cfg.Agent.TimeoutMinutes) * time.Minute,
 		AgentConcurrency: slots, MaxAgentsPerBook: slots,
-		BookBudgetUSD: cfg.Agent.BookBudgetUSD, MonthlyBudgetUSD: cfg.Agent.MonthlyBudgetUSD,
+		BookBudgetUSD: cfg.Agent.BookBudgetUSD,
 		MonthlyBudget: func() float64 { return b.config().Agent.MonthlyBudgetUSD },
 		Pricing:       cfg.Pricing, Secrets: b.vault, Log: log,
 		Fallback: scheduler.NewStubExecutor(0, 0),
@@ -401,6 +401,27 @@ type estimatesCache struct {
 	done int64
 }
 
+// figures are the cached figures (recomputed when stale or a generate job has
+// finished since), copied out so the caller works without the lock (the token
+// it resolves next may refresh over the network).
+func (c *estimatesCache) figures(ctx context.Context, b *Bridge, agentState generate.AgentState, budget float64) (link.SidecarEstimates, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if done := b.gen.Finished(); c.e == nil || time.Since(c.at) >= estimatesEvery || done != c.done {
+		e, err := generate.Estimates(ctx, b.db, agentState, budget, time.Now())
+		switch {
+		case err == nil:
+			c.e, c.at, c.done = e, time.Now(), done
+		case ctx.Err() == nil:
+			b.log.Warn("bridge: computing the estimates failed", "err", err)
+		}
+		if c.e == nil {
+			return link.SidecarEstimates{}, false
+		}
+	}
+	return *c.e, true
+}
+
 // estimates are the heartbeat's figures (nil until the engine has started):
 // the cached figures, with the agent container's state and the budget read now.
 func (b *Bridge) estimates(ctx context.Context) *link.Estimates {
@@ -411,22 +432,10 @@ func (b *Bridge) estimates(ctx context.Context) *link.Estimates {
 	st := b.box.Status()
 	backend := b.box.ID()
 	agentState := generate.AgentState{Backend: backend, Ready: st.Available, Subscription: st.Subscription(backend)}
-	c := &b.est
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if done := b.gen.Finished(); c.e == nil || time.Since(c.at) >= estimatesEvery || done != c.done {
-		e, err := generate.Estimates(ctx, b.db, agentState, cfg.Agent.MonthlyBudgetUSD, time.Now())
-		switch {
-		case err == nil:
-			c.e, c.at, c.done = e, time.Now(), done
-		case ctx.Err() == nil:
-			b.log.Warn("bridge: computing the estimates failed", "err", err)
-		}
-		if c.e == nil {
-			return nil
-		}
+	e, ok := b.est.figures(ctx, b, agentState, cfg.Agent.MonthlyBudgetUSD)
+	if !ok {
+		return nil
 	}
-	e := *c.e
 	e.AgentBackend, e.AgentReady, e.Subscription = agentState.Backend, agentState.Ready, agentState.Subscription
 	e.MonthlyBudgetUSD = cfg.Agent.MonthlyBudgetUSD
 	e.CanContribute = b.canContribute(ctx)

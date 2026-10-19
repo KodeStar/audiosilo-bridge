@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"slices"
 	"strings"
-	"unicode/utf8"
 
 	"github.com/kodestar/audiosilo-bridge/internal/contrib"
 	"github.com/kodestar/audiosilo-bridge/internal/jobs"
@@ -40,9 +39,6 @@ const (
 	errShareNotMatched describeFailure = "Match the book first: it isn't matched to a work in the community database."
 )
 
-// maxWorkIDLen bounds a job's work id (the server's).
-const maxWorkIDLen = 200
-
 // ContributeParams are sidecars.contribute's params: the community work the
 // results are for (else the book's own match) and the dimensions to share
 // (both when none).
@@ -53,7 +49,7 @@ type ContributeParams struct {
 
 // ParseContributeParams checks the params: a field a later server adds is
 // ignored, a dimension is characters or recaps (each once), a work id one line
-// of at most 200 characters.
+// within checkWorkID's bounds.
 func ParseContributeParams(raw json.RawMessage) (ContributeParams, error) {
 	var p ContributeParams
 	if len(raw) == 0 || string(raw) == "null" {
@@ -63,8 +59,8 @@ func ParseContributeParams(raw json.RawMessage) (ContributeParams, error) {
 		return p, fmt.Errorf("bad params: %w", err)
 	}
 	p.WorkID = strings.TrimSpace(p.WorkID)
-	if utf8.RuneCountInString(p.WorkID) > maxWorkIDLen || strings.ContainsAny(p.WorkID, "\r\n") {
-		return p, errors.New("bad params: work_id is too long")
+	if err := checkWorkID(p.WorkID); err != nil {
+		return p, fmt.Errorf("bad params: %w", err)
 	}
 	for i, d := range p.Dimensions {
 		if (d != pipeline.ShareCharacters && d != pipeline.ShareRecaps) || slices.Contains(p.Dimensions[:i], d) {
@@ -172,19 +168,12 @@ func shareError(err error) error {
 // it, for a job that reads and writes nothing in the library: the mapping need
 // not be writable, only show the book.
 func (h *Handler) prepareRead(ctx context.Context, r *run) error {
-	srv := h.o.Server()
-	if srv == nil {
-		return errors.New("the Bridge isn't paired")
+	if err := h.serverLibrary(r); err != nil {
+		return err
 	}
-	r.srv = srv
-	lib, ok := h.o.Libraries.Library(*r.job.LibraryID)
-	if !ok {
-		return fmt.Errorf("library %d isn't one the server listed", *r.job.LibraryID)
-	}
-	r.lib = lib
 	// The mapping, else the server's own path (locate says when the book isn't
 	// there).
-	r.mount, _ = h.o.Mount(lib.ID, lib.Root)
+	r.mount, _ = h.o.Mount(r.lib.ID, r.lib.Root)
 	book, err := h.fetchBook(ctx, r)
 	if err != nil {
 		return err
