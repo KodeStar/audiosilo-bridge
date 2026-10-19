@@ -906,9 +906,38 @@ internal/
             The env-gated corpus test (AUDIOSILO_CHAPTERS_SPIKE_DIR,
             chapterdetect_corpus_test.go) runs the detection through the stage's own
             loading on the spike's real raws.
-  contrib/  M7: everything GitHub-facing for contribution. TokenSource (secrets
-            GitHubPAT first, else `gh auth token` - the token NEVER enters argv/logs/
-            errors, leak-canary tested), a stdlib REST client (injectable base URL; typed RateLimitError; APIError
+            Phase 2b: share.go, Executor.Share(bookID, workID, dims) is
+            sidecars.contribute's step, outside the engine's stages (the caller holds
+            the book; no agent, no spend): the book's kept characters/recaps filed as
+            intake issues the way the contributing stage files them in issue mode.
+            shareWork verifies the job's work id (a retired slug followed to its
+            survivor and recorded on the book), else the book's match, else its exact
+            identifiers; unmatched is ErrNotMatched (a share never proposes a new
+            work). shareSettled: only submitted, pr_open or merged rows count as
+            filed (a local export, a covered verdict or a closed issue is filed
+            again); a dimension already filed is kept and reported. Missing sidecars
+            is ErrNoSidecars. Config.MonthlyBudget (a func) is read live, so a budget
+            saved on the page applies without a restart.
+  contrib/  M7: everything GitHub-facing for contribution. TokenSource (Phase 2b:
+            NewTokenSource(device, onChange) resolves AUDIOSILO_BRIDGE_GITHUB_TOKEN
+            read LIVE from the environment first (never sealed any more), then the
+            Accounts tab's device sign-in, then `gh auth token`; From() says which
+            (FromEnv/FromDevice/FromGH) and a 401 on a device token marks it refused
+            - the token NEVER enters argv/logs/
+            errors, leak-canary tested). NewClientFor records where the token came
+            from: AppFiled() (a device token) skips the labels check, since meta's
+            routing workflow labels an issue the App filed. corrections.go (Phase
+            2b): CorrectionBatchIssue composes meta's correction-batch issue
+            ([corrections] <title>; labels data + data:correction-batch; Record,
+            Changes as fenced JSON {v:1, source, changes}, Evidence / source, the CC0
+            ticked box), the golden body being meta's TestBatchGoldenBody except that
+            every change names its record. MapCorrections maps the server's fields
+            (title, author, series, series_index, more_series on the work;
+            published -> release_date, isbn, narrator on the recording, addressed to
+            the work and left to a maintainer when no recording id is known);
+            anything else, a duplicate field (two distinct ISBNs excepted) or a value
+            past the bounds (25 changes, 500 characters, 2000 of evidence) is
+            ErrInvalidCorrection for the whole issue. A stdlib REST client (injectable base URL; typed RateLimitError; APIError
             carries status + trimmed body only), composers that render the meta repo's
             issue-form markdown VERBATIM to metaissue's parser contract (headings +
             ticked checkbox items pinned from the form YAML; env-gated round-trip test
@@ -935,7 +964,49 @@ internal/
             opaque SHA-256-hashed session tokens, a per-IP login rate limiter; the
             Store interface is storage-agnostic (MemStore for tests; the SQLite
             store.AuthStore in production - the M0 JSON store was removed in M1)
-  secrets/  named secrets (the server token, anthropic/openai keys, github PAT) as
+  ghauth/   Phase 2b: the GitHub App user sign-in (the audiosilo-contributions App,
+            DefaultClientID, AppID 5387686; the client ID overridable in config):
+            RequestCode / Poll / Wait (the device flow: pending and slow_down arrive
+            as a 200 with an error code; slow_down adds 5 s; expired and denied end
+            it), Refresh (client_id only; the old pair dies at once, so the caller
+            persists the new pair before using it, and ANY refresh error is a
+            refusal: a spent refresh token answers incorrect_client_credentials),
+            Revoke (POST /credentials/revoke, unauthenticated, 202) and User (/user).
+            Every base URL injectable; fake-server tests for each outcome.
+  accounts/ Phase 2b (decision 19): the Bridge's external accounts. GitHub: Start
+            runs one device flow at a time in the background (Pending shows the
+            code), the token pair sealed as ONE vault value (github_user_token) so
+            a refresh replaces it in one write; Token refreshes single-flight
+            before expiry and persists first; Refused marks the account refused (a
+            401 on a token a refresh has since replaced is ignored); SignOut
+            revokes, then forgets locally even when the revoke failed (its error
+            returned for the page). Agent: Set/Delete/Credential for the kinds
+            claude_oauth_token, anthropic_api_key, openai_api_key (one printable
+            line, sealed in the vault), handed to the agent container per run by
+            agentbox. The store's accounts table (migration 0006) keeps only what
+            the page shows (login, signed_in_at, last_ok_at, refused_at,
+            last_error), never a credential.
+  setup/    Phase 2b (FIRST-RUN-PLAN F2): Checklist(Inputs) is the setup checklist
+            (link.Setup) in its fixed order: paired, libraries, asr, agent, budget,
+            github, each {id, done, required, detail}; details cut to 200
+            characters and worded for the console (the budget's "$100 a month" or
+            "no monthly cap"); Complete is every required item done. The heartbeat
+            sends it and the page's Status tab shows it.
+  correct/  Phase 2b (plan D5): the meta.correct job (light lane). ParseParams is
+            STRICT (an unknown field refused, work_id required). It reads the
+            work's live coverage (FreshCoverageForWork: its title, the recording by
+            ASIN (and region) or ISBN when the server sent no recording id), maps
+            and composes the batch (contrib.CorrectionBatchIssue) and files ONE
+            issue on the core repo with the GitHub sign-in. Once per job: a
+            "filing" marker is written to the KV store (meta.correct/<server
+            id>/<job id>) before CreateIssue and cleared only when GitHub answered
+            with an API or rate-limit error; a resumed run with the result returns
+            it, one with only the marker fails asking the admin to look first (a
+            transport error after the request left is the one window where a retry
+            could file twice). A 401 is errRefused. Result {issue_url,
+            issue_number, changes, auto, maintainer}.
+  secrets/  named secrets (the server token, the agent credentials, the GitHub
+            sign-in; github_pat only to delete an earlier Bridge's copy) as
             AES-256-GCM sealed files in <data>/secrets (0600, the manager BlobStore's
             format, each bound to its name as additional data so a file renamed onto
             another name doesn't open), keyed by ONE master key:
@@ -1013,6 +1084,9 @@ internal/
             agent spend to average). UnsweptGenerateBooks counts a book's retention
             from its LAST job's end (a continued book has the chapters job's mapping
             and the generate job's).
+            0006 (Phase 2b, accounts.go): accounts (provider PK: github | agent;
+            login, signed_in_at, last_ok_at, refused_at, last_error), what the
+            Accounts tab shows; the credentials are in the vault.
   state/    per-book pipeline state machine: table-driven states/lanes/transitions,
             CanStart/NextState guards, the audit fix-loop cap. Pure, no I/O. M6 added
             ParkCode (typed park reasons - M7 added contrib_unavailable, core_needed,
@@ -1301,6 +1375,11 @@ internal/
             indexed; and
             a job update's answer carries the job's current path, which the server
             moves with its book.
+            Phase 2b: Status.Setup (the setup checklist, plan D1) is sent ONLY
+            after a reply's StatusReply.Accepts lists "setup" (Accepting; an older
+            server would refuse an unknown field); app kicks a beat when it first
+            appears, resends once without it on a 400, then ignores accepts for an
+            hour, and resets that on every pair or unpair.
   mapping/  where the Bridge sees each library, CHECKED (decision 13): Check stats the
             server's sample book's files through the mount (SafeJoin: no absolute,
             "..", NUL; a backslash is a name character except on Windows) and
@@ -1638,6 +1717,18 @@ internal/
             the server reads them, a new generate job works from them; a recording's
             chapter list reaches the server, never the Bridge); stageLabels
             chapter_detecting.
+            Phase 2b: contributejob.go, sidecars.contribute (light lane; "Share
+            with the community"): ParseContributeParams is LENIENT (a later
+            server's field ignored; dimensions characters/recaps, each once; a
+            work id one line of at most 200 characters). prepareRead resolves the
+            book without a writable mapping (it writes nothing into the library),
+            notesBook finds the engine book that keeps the results, holdBook holds
+            it, and Options.Sharer (pipeline.Executor.Share) files them. Failures
+            in words: not signed in, refused, nothing kept here, a generate job
+            still running, not matched. Result {library_id, path, work_id,
+            contributed, covered}. The hints for agent_unavailable,
+            agent_credential_refused and contrib_unavailable point at the Accounts
+            tab.
   agentproto/ the staging protocol between the Bridge and the agent container (decision
             15), shared by both sides so they can't drift; a LEAF (standard library
             only). Protocol 1 (both sides refuse another). A job dir <staging>/<16 hex>/:
@@ -1667,6 +1758,14 @@ internal/
             opened file to be the one Lstat saw, and enforce the size limit on the
             open file and again while reading; Exists Lstats a marker, never
             following a link.
+            Phase 2b (decision 19, plan D10): runner.json's handoff says the runner
+            takes the Bridge's credential; the Bridge then writes
+            credential/credential.json (Credential {cli, kind, value}) in the job
+            dir, in its own NON-sticky subdirectory so the runner (another uid) can
+            delete it, before request.json. DecodeCredential is strict (unknown
+            field, trailing data, over 4 KiB, another CLI, a kind that CLI doesn't
+            take, or a value that isn't one printable line all refused; the value
+            never in an error).
   agentbox/ the Bridge's side of the agent container: an agent.Runner that runs no CLI,
             drops each invocation into the staging dir, waits for agentrun, and
             harvests the outputs back into the pipeline's staged dir; the outcome is
@@ -1715,6 +1814,14 @@ internal/
             a finished or unclaimed dir is removed, its claim taken first; a running
             one gets a cancel). EnforcesNoTools only for claude (codex's read-only
             sandbox still reads); SupportsWeb true.
+            Phase 2b: Options.Credential (the vault's credential for a CLI, from
+            accounts.Agent) stands in for a container that has none of its own and
+            takes a hand-off: Status counts the agent available, billed as that
+            kind, its set time standing for credential_since (so replacing it on
+            the Accounts tab ends a refusal); stage() writes credential.json
+            (0444, synced) in credential/ (0777) before the request. A container
+            credential always wins; a runner that can't take a hand-off gets
+            nothing and is told to update.
   agentrun/ `audiosilo-bridge agent-runner`, the ONLY thing in the agent container (Linux
             only). It sees the staging dir and /agent (secrets/, codex/), never a
             library or the Bridge's data. Main sets umask 077 for the whole process
@@ -1755,6 +1862,11 @@ internal/
             to done. Login: codex runs `codex login --device-auth` with the
             allow-listed environment and CODEX_HOME on the volume; claude prints how
             to give the container a `claude setup-token` token.
+            Phase 2b: runner.json says handoff: true; execute reads the job's
+            credential.json (agentproto.DecodeCredential) and DELETES it before
+            the CLI starts, and childEnv uses it only when the container has no
+            credential of its own for the CLI (claude: the OAuth token or
+            ANTHROPIC_API_KEY; codex: OPENAI_API_KEY and CODEX_API_KEY).
   workerproto/ Phase 1b: the worker wire protocol, a leaf (standard library only)
             shared by api (the routes), workers (the dispatcher) and worker (the
             worker), so the two sides can't drift. Version (1) rides every call in
@@ -1820,7 +1932,21 @@ internal/
             beatGen-checked, before the link counts as ready) and starts a mapping
             check (in the background; one asked for while another runs is queued
             and beaten once, by it) when they changed or one is due, then beats
-            again with the results. The runner sees the link (server()) only once a
+            again with the results. Phase 2b: the beat carries the setup checklist
+            (setup(ctx), setup.Checklist) once the server accepts it (see link/).
+            accounts.go wires internal/accounts: newAccounts (the GitHub sign-in
+            with the token source's onChange, the agent vault), a start deletes an
+            earlier Bridge's sealed github_pat once (forgetSealedGitHubPAT; the
+            env token is read live), githubChanged kicks a beat and re-admits
+            contrib_unavailable books when the Bridge can contribute,
+            agentCredentialChanged re-admits agent_credential_refused and
+            agent_unavailable; the Backend adds Accounts, StartGitHubSignIn,
+            SignOutGitHub, SetAgentCredential, DeleteAgentCredential. A budget
+            saved on the page (SaveSettings, agent.monthly_budget_usd) records
+            BudgetReviewedAt (the checklist's budget item) and re-admits
+            budget_exceeded books. meta.correct (correct.New over
+            metaops.NewClient(metadata.base_url)) and sidecars.contribute (the
+            engine's sharer) are registered, so the heartbeat advertises them. The runner sees the link (server()) only once a
             heartbeat on it went through, so no job, a resumed one included, runs
             before the server's libraries are known. A 401 on the CURRENT link
             refuses it with a reason the page shows (Conn.Refuse(cl) and accept(cl)
@@ -1858,11 +1984,10 @@ internal/
             RunnerInterval) calls scheduler.SetAgentCapacity +
             executor.SetAgentConcurrency when a live runner.json reports another
             number. New wires generate.Handler into the runner (beside verify) with
-            ServerID = the pairing's server_id. AUDIOSILO_BRIDGE_GITHUB_TOKEN is
-            sealed into the vault as github_pat at every start (the environment wins
-            and replaces what was stored; blank leaves the vault alone; never
-            logged), where contrib.TokenSource looks first; canContribute is that
-            token resolving. The heartbeat carries estimates (nil until the engine
+            ServerID = the pairing's server_id. AUDIOSILO_BRIDGE_GITHUB_TOKEN was
+            sealed into the vault as github_pat at every start until Phase 2b; it
+            is read live now (contrib.TokenSource), and canContribute is the token
+            source resolving (env, device sign-in, gh) and not refused. The heartbeat carries estimates (nil until the engine
             started): generate.Estimates, cached 5 min or until a job finishes done
             (can_contribute computed with them, since resolving can shell out to
             gh), with the agent's readiness and the budget read fresh each beat. The
@@ -1878,7 +2003,16 @@ internal/
             when it isn't parked), engine (GET /api/engine: the agent container, its
             CLIs' versions and credential KINDS, never a credential; ASR; the budgets
             and the month's spend; the transcript retention), logs, workers (list,
-            POST add: the token in the answer only, DELETE revoke). Phase 1b:
+            POST add: the token in the answer only, DELETE revoke). Phase 2b:
+            accounts.go, GET /api/accounts (GitHub: signed in, login, refused,
+            the pending device code, env_token, from, can_contribute, manage_url;
+            the agent: each kind set or not and when, the container's own
+            credential; never a credential), POST /api/accounts/github/device
+            (starts a sign-in, answers the code), DELETE /api/accounts/github
+            ({accounts, revoke_error}), PUT /api/accounts/agent {kind, value},
+            DELETE /api/accounts/agent?kind=; status carries setup and
+            setup_complete, settings monthly_budget_usd and budget_reviewed.
+            Phase 1b:
             workers.go serves /worker/v1/* to the injected WorkerHub: a worker token
             only (a page session is 401, and the page's routes refuse a worker
             token), then the protocol header; lenient JSON; a longer write deadline
@@ -1910,8 +2044,8 @@ web/          the Bridge's page: Vite + React 19 + TS + Tailwind v4 (npm, Node 2
               403 of its own route, shown as its {error}). src/lib holds the pure,
               vitest-tested logic (time, tabs, status, jobs, verify, settings,
               libraries, logs, token: localStorage audiosilo_bridge_token) plus the
-              usePoll hook; components/tabs/ are the six tabs (Status, Libraries, Jobs,
-              Settings, Workers, Logs), thin over src/lib. Jobs poll every 3 s while one
+              usePoll hook; components/tabs/ are the seven tabs (Status, Libraries, Jobs,
+              Settings, Accounts, Workers, Logs), thin over src/lib. Jobs poll every 3 s while one
               runs (a PARKED job counts as needs attention, so it polls at 15 s: it may
               wait for days), else 15 s; a bridge.verify result renders as a file table.
               Phase 1a: the hash is a Route (routeFromHash: "#jobs", "#/logs", and
@@ -1931,6 +2065,15 @@ web/          the Bridge's page: Vite + React 19 + TS + Tailwind v4 (npm, Node 2
               (GET /api/engine every 10 s: the agent container and its CLIs'
               credential kinds, speech recognition, the monthly budget bar, the
               per-book budget and the transcript retention, all config.yaml).
+              Phase 2b: the Accounts tab (#/accounts, the console's link; after
+              Settings): GitHub sign-in with the device code shown and polled
+              every PENDING_POLL_MS while pending, sign out (a revoke_error shown),
+              refused and env-token states, the manage link; the agent card, one
+              password field per kind (src/lib/accounts.ts: KIND_LABELS,
+              githubState, checkCredential). The Status tab's "Get set up" card
+              (src/lib/setup.ts) shows until setup_complete, each step linking to
+              its tab (agent and github: accounts; asr and budget: settings;
+              libraries: libraries). Settings gains the monthly agent budget.
 scripts/build-web.sh   build the SPA + embed it into bin/ (-tags embedui)
 Dockerfile             multi-stage: node build -> go build (embedui, cross-built on
                        $BUILDPLATFORM, only cmd/ and internal/ copied, Go and npm cache
