@@ -545,7 +545,7 @@ func Decide(i Incident, attempts, recentAutoRecoveries int, p Policy) Decision {
 			} else {
 				d.Action = ActionRetry
 			}
-		case state.ParkMarkersNotConfident, state.ParkManifestChanged:
+		case state.ParkMarkersNotConfident, state.ParkChaptersNotDetected, state.ParkManifestChanged:
 			if p.ModelAssisted {
 				d.Action = ActionAskModel
 			} else {

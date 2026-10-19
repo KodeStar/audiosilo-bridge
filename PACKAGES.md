@@ -177,6 +177,44 @@ internal/
             sub-millisecond re-derivation of a stage whose real cost is the agent round
             it skipped, so observing it would collapse the markers_normalizing EWMA (the
             same rule as repair's free known-failed skip).
+            Phase 1d (windows.go): a single file with NO usable markers (none, or one
+            covering >= 95% of the file: a title, not a table; markerless) gets a
+            WINDOWS manifest (StyleWindows): windows of about 25 min (target 1500 s,
+            each cut at the middle of the longest silence whose middle is within
+            120 s of the target, one 240 s silencedetect probe per cut, time-bounded;
+            no silence or no ffmpeg cuts at the target, and a probe that fails (its
+            bound ran out on a wedged mount) ends the probing, the rest at their
+            targets (windowCuts); a file under 1800 s is one window; a cut that
+            would leave under 300 s isn't made). Inspect takes
+            ffmpegPath for the probes; its stats are Usable, so the book goes
+            straight to splitting (the manifest's Style says windows; no stats flag).
+            Several markers in an unknown dialect are still a vocabulary gap
+            (markers_normalizing); ReparseMarkerManifest recovers a book an older
+            parser parked there with no chapters and no usable markers into windows
+            (cut at the targets: the reparse reads no audio). Split cuts a windows
+            manifest like a markers one
+            (staging: any style but files), and HEARS ITS SILENCES IN THE SAME DECODE
+            (encode's listen: -af aformat 16 kHz mono + silencedetect, info-level log
+            parsed before the FLAC is published): chNNN.silences.json beside each
+            window FLAC, on the file's timeline, keyed by the window's span.
+            WindowSilences reads them (a span that differs is never used), else
+            hears the window FLAC once and keeps them the same way (WindowHeard:
+            whether either is there, without hearing anything). ProbedSize is the
+            size probe.json states for a single file (ffprobe's format.size; 0
+            unknown). CutFromWindows
+            cuts a detected manifest's chapters from the window FLACs (moved to
+            WindowAudioDir, windows/chapters/): a chapter inside one window a seek in
+            it, one across window edges its trimmed parts joined by the concat filter
+            (exact to the sample: tested to the millisecond), a complete FLAC skipped,
+            a chapter whose window is gone left (counted) for Split from the source.
+            DetectSilences runs silencedetect (-40dB, 0.4 s) over a span of a file and
+            returns silences on the FILE's timeline (ffmpeg reports them relative to
+            the seek; an ffmpeg before 7 prints a tiny time with an exponent, which the
+            parser takes). Every chapter, clip and window FLAC shares flacOutputArgs.
+            Manifest.Detected marks the markers-style manifest
+            chapter_detecting writes; WindowsDir ("windows") is where it moves the
+            window layer. ParseNumberWords exports the marker parser's number words
+            (chapterdetect reads spoken headings with it).
   asr/      the ASR backend abstraction (M3a/M3b): Backend{ID,Detect,EnsureReady,
             Transcribe} over a normalized Job (audio/outDir/chapter/prompt/language),
             producing RAW per-chapter output byte-for-byte. Two backends behind
@@ -197,6 +235,47 @@ internal/
             /mlx AND whisper.cpp -ojf) + Complete (resume/skip test, ports
             transcript_is_complete) + writers (transcripts-json/ normalized,
             transcripts-text/ concatenated text). NEVER writes transcripts-raw/.
+            Phase 1d: EncodeOpenAI, the openai adapter's inverse through its own
+            types (round-trip tested): chapter_detecting renders its re-timed raws
+            with it (the pipeline writes them, not this package).
+  chapterdetect/ Phase 1d: a chapterless book's chapters from its narration. PURE (no
+            I/O, no clock), table-tested. Detect(words on the whole-book timeline,
+            silences, duration) -> chapters (contiguous 0..duration, each with spoken,
+            heading, heading_at, pause, and number: what its "chapter" heading says,
+            of a merged pair the chapter one's, else 0) + a confidence verdict. The
+            spike's rules:
+            a heading word (chapter/part/book/stave/day/volume/episode + a number in
+            the next 1-5 words: digits 1-999, ordinals first..tenth, audio's number
+            words, never past a word that ends in punctuation ("Chapter One. Two days
+            later" is 1) and several words only as one English cardinal ("one hundred
+            and twenty one" is 121, "one two" no number: the marker parser would add
+            them up); or prologue/epilogue/interlude/preface/introduction/afterword/
+            foreword/intermission alone; never "dedication") after a pause >= 1.5 s
+            (the gap from the word before, or the longest silence ending within
+            [t-3, t+0.6], silences that touch within 0.05 s joined first: a window
+            cut splits a pause in two; the book's start counts); headings at the
+            same time in transcript order; a number that runs straight on into
+            "of" is no heading ("Book 10 of The Messenger" in Cosmic Ride's
+            credits, the spike's one invented boundary; "Chapter 3. Of Mice and Men"
+            after a break still is); per numbered word the longest strictly
+            increasing run (numbers may skip); headings within 6 s merged ("Epilogue.
+            Day 101"); boundary = the heading word's start - 0.2 s, never before the
+            word before; title = the words up to the first 0.8 s gap within 10 words
+            (never shorter than heading + number), punctuation trimmed, all-lower or
+            all-upper title-cased, <= 200 bytes; audio before the first heading under
+            180 s joins chapter 1, longer is "Opening". Not confident (books of 60 min
+            or more): under two headings, a chapter over max(90 min, 3 x median), or
+            a numbered run (not "day") missing over a quarter of its numbers; each
+            with a plain reason. A shorter book with no heading is one chapter.
+            Silence is audio.Silence (an alias); MaxTitleBytes / ClipTitle are the
+            one 200-byte title bound every composed title keeps to (generate's
+            chapterTitle, the pipeline's joined titles).
+            Corpus (the env-gated pipeline test, 2026-10-17): every spoken story
+            boundary of A Christmas Carol, The Emperor's Soul, The Black Gate,
+            Cosmic Ride and Past Tense within 0.66 s (median 0.06-0.14 s), nothing
+            invented but Emperor's Soul's spoken headings its publisher merges. Past
+            Tense's reference is another master's list (6.5 s longer): the test maps
+            it onto the file by a fitted line (about -3.8 s, +59 ppm) first.
   ebook/    M9: the epub front half. BuildUniverse turns audiosilo-meta pkg/extract's
             per-section split into the LOGICAL chapter universe the sidecars publish
             positions against, then WriteChapterText/WriteManifest materialize it.
@@ -229,7 +308,12 @@ internal/
             the owning packages' constants (spelling.RefsDir/PriorPrefix/
             SeriesGlossaryFile/CorrectionsLogFile, qa.AcceptedFile), never literals.
             Phase 1c: it keeps the description step's chapter_positions.json and
-            sidecars/description.json (neither quotes the transcript).
+            sidecars/description.json (neither quotes the transcript). Phase 1d: it
+            removes windows/ (a chapterless book's window raws and detection) and
+            keeps chapters_detected.json (titles only; chapters.detect reuses it).
+            Purge reclaims windows/chapters/ (audio.WindowAudioDir, no sentinel): the
+            window FLACs chapter_detecting removes itself once the chapters are cut,
+            left only by a run stopped in between (a re-run splits from the source).
   qa/       M4: the mechanical transcript-QA degeneration sweep, a faithful Go port
             of the historical Python detectors (qa_sweep/cross_segment/
             within_segment/multi_loop/tail_rate scans - thresholds and per-detector
@@ -746,6 +830,82 @@ internal/
             (store.LatestOkStageRun), its chapters and checked_against read from
             that run's metrics (the check it was made with, never one run again
             against layers since gone). ErrNoNotes: no characters.json, no manifest, or no notes for the opening.
+            Phase 1d, CHAPTER_DETECTING (chapterdetect_stage.go): runs after asr when
+            its StageResult says Windowed (the manifest is a windows manifest). It
+            loads the window raws onto the whole-book timeline (loadWindowTimeline:
+            window start + whisper's times, whisper.cpp sub-word tokens glued into
+            words at their lowest probability, a wordless segment as one word for
+            the detection only (its synthesized raw stays wordless), nothing timed
+            past the window's own audio: a hallucination there would interleave with
+            the next window's words), takes each window's silences
+            (audio.WindowSilences: the ones split heard and kept beside the FLAC,
+            else one bounded silencedetect over it, kept too, so a Retry decodes
+            nothing) and runs chapterdetect.Detect. Not confident: parks
+            chapters_not_detected (ChaptersNotDetectedPrefix + the reason) with
+            nothing moved, so a Retry detects again. Confident: the detection and a
+            copy of the windows manifest go to windows/ FIRST, then chapters/ (the
+            window FLACs, whose names are the detected chapters' too) is renamed to
+            windows/chapters/ and transcripts-raw/ to windows/transcripts-raw/, after
+            which the move counts as done and windows/ is the source of truth (a
+            re-entry reuses windows/detection.json, never needing the FLACs). Then
+            the DETECTED manifest (StyleMarkers, Detected), tl.split ONCE (a segment
+            goes to the chapter of its first word, a boundary inside one splits it at
+            the word, times chapter-relative) feeding both one raw per chapter
+            (transcript.EncodeOpenAI, frozen 0444, a complete one kept and never
+            encoded) and the list; asr.json with the new fingerprint (computed once,
+            passed on) and empty chapters, SetBookChapters, the chapter FLACs CUT
+            FROM THE WINDOW FLACs (audio.CutFromWindows: local, decoded already; the
+            source split only for a chapter whose window is gone, a crash after they
+            went, with a note), windows/chapters/ removed, and chapters_detected.json
+            (DetectedChapters: manifest_sha, source_size (0: it couldn't be looked
+            at, never compared), duration_ms, the entries), after the classification
+            it was grouped by (positions_detected.json, with the manifest's
+            fingerprint). detectedClassification classifies with classifyEdgeChapters
+            over the synthesized transcripts in memory through edgeChapters, the
+            probe-window rule classifyBookEdges uses too (a chapter whose "chapter"
+            heading the detector numbered, chapterdetect.Chapter.Number, opens with
+            that number announced: the classifier reads only a bare "Chapter Four.",
+            and "Chapter Four, The Storm." would join the next chapter's entry as an
+            unnumbered section), and groups the entries by it
+            (groupEntries): front matter and an intro join the first story chapter,
+            an interior unnumbered section the chapter whose number it takes, credits
+            the entry before them, end matter stays its own ("Prologue / Chapter 1",
+            bounded by chapterdetect.MaxTitleBytes). Entry k IS logical position k BY
+            CONSTRUCTION: rankPositions makes the classification's positions the
+            entries' ordinals (where the narration's numbering skips one, a heading
+            not heard, the entries would otherwise run a position behind), and
+            classifyBookEdges takes the kept classification for a Detected manifest
+            (loadDetectedPositions) instead of classifying again from the text layer
+            QA leaves (a re-transcribed opening, a loop repaired past the edge rule,
+            moved every position off the list). DetectedChaptersPath /
+            ReadDetectedChapters / CurrentFor (manifest fingerprint and source size) /
+            DetectedStamp (local stats, so a poller re-reads only a changed list) are
+            generate's, and DetectionRerunnable (a book stopped at chapter_detecting
+            can run it again from what it kept: the window layer with the confident
+            detection kept for it, or in place with every window's silences to be
+            had; every window's raw complete; the file the one inspected: the size
+            probe.json states, which must be known, and not modified since probe.json
+            was written (sourceClockSlack, 2 minutes, for a library on a clock a
+            little ahead), as a tag editor adding markers can keep the size), for its
+            continue. The stage
+            reports one progress unit, as every book stage (the
+            ETA charges a unit its learned per-book time). inspect (its windows'
+            silence probes under the stage heartbeat; the marker-format note only for a
+            manifest that isn't windows) fails a goal-chapters book whose manifest
+            isn't windows with what is true of it (chaptersRefusal:
+            ErrHasMarkerChapters / ErrHasFileChapters, or for a file with no chapters
+            that can't be windowed ErrPartialMarker, one marker over part of it, /
+            ErrUnknownLength, no length to cut by; ChaptersRefusals, sentences the
+            console shows as they are; generate reads them from the inspecting run's
+            own error, which a supervisor escalation never rewrites). marker_titles.txt only ever holds
+            the publisher's titles: ensureMarkerTitles writes a Detected manifest's
+            EMPTY (titles heard in this transcript would make a misheard name attest
+            itself), so referenceSources, the dry-run corpus and allowedReferenceFile
+            never see them, and the manifest staged to the spelling agent goes without
+            them (stagedManifest).
+            The env-gated corpus test (AUDIOSILO_CHAPTERS_SPIKE_DIR,
+            chapterdetect_corpus_test.go) runs the detection through the stage's own
+            loading on the spike's real raws.
   contrib/  M7: everything GitHub-facing for contribution. TokenSource (secrets
             GitHubPAT first, else `gh auth token` - the token NEVER enters argv/logs/
             errors, leak-canary tested), a stdlib REST client (injectable base URL; typed RateLimitError; APIError
@@ -837,6 +997,22 @@ internal/
             (one past every recorded run: the scheduler's and the description step's
             run numbers) and LatestOkStageRun (a stage's newest success, or
             ErrNotFound).
+            0005 (Phase 1d): books.goal ('' the whole pipeline, 'chapters' stops after
+            chapter_detecting; opaque here like State, so the store names no goal:
+            its SQL asks goal = '' or goal != ''). ContinueChapters(id, from, to, ...)
+            (one statement: only a book with a goal, chapters being the one, still at
+            from (the state the caller checked), done there or failed there (a cancel
+            is a failure), whose transcripts the retention didn't sweep, else
+            ErrNotContinuable) makes it a whole-run book at to, its status cleared (a
+            done book's too: a cancel or a park landing as its last stage finished
+            leaves one), with the new job's identity
+            (title, authors, narrators,
+            series and position, asin, isbn and their sources: the book may have been
+            matched since), contrib_mode and work_id, and maps the new job to it in
+            the same transaction. FinishedBooks leaves goal-chapters books out (no
+            agent spend to average). UnsweptGenerateBooks counts a book's retention
+            from its LAST job's end (a continued book has the chapters job's mapping
+            and the generate job's).
   state/    per-book pipeline state machine: table-driven states/lanes/transitions,
             CanStart/NextState guards, the audit fix-loop cap. Pure, no I/O. M6 added
             ParkCode (typed park reasons - M7 added contrib_unavailable, core_needed,
@@ -861,7 +1037,15 @@ internal/
             names the Bridge's description step's stage runs, NOT a state (no table
             row: IsStage/IsAgent false, Order 0), declared here for the one spelling
             pipeline and config share; RoutesModel (an agent stage, or Describing)
-            is the model maps' key rule.
+            is the model maps' key rule. Phase 1d: ChapterDetecting
+            ("chapter_detecting", order 5, mechanical, SourceIO: it stats the source
+            and splits from it what the window FLACs can't give) after asr: ASR.Next =
+            [ChapterDetecting, Sanitizing] on Outcome.Windowed, ChapterDetecting.Next
+            = [Done, Sanitizing] on Outcome.Goal == GoalChapters (the book's goal,
+            filled by the scheduler, never a stage). GoalChapters ("chapters") is
+            books.goal's one value; PathNext(kind, goal, cur) is the remaining path's
+            routing by it (the ETA follows it), so the goal routing lives here once.
+            ParkChaptersNotDetected (chapters_not_detected, human only).
   eta/      the PURE ETA engine (no I/O, no clock): per-stage unit kinds
             (chapter/chunk/book) + seed rates from the historical extraction metrics,
             EWMA Observe (alpha 0.3), book ETA = rate x remaining units over the
@@ -876,7 +1060,11 @@ internal/
             predicting 2x the real inspect/split parallelism. Phase 1a: a parked or
             paused SERIES book that still holds its lock enters the simulation as
             `held` (it runs nothing, but a later volume's carryover stages wait behind
-            it, as in the scheduler); a failed one is left out.
+            it, as in the scheduler); a failed one is left out. Phase 1d:
+            chapter_detecting's seed {book, 60 s}; the path follows state.PathNext
+            with Book.Goal (books.goal): a chapters-only book goes asr ->
+            chapter_detecting -> done; the mainline skips the stage like the other
+            conditional ones.
   scheduler/ one wake-on-event goroutine over three lanes (ASR cap 1 / agent cap =
             config, series-locked / mechanical cap 2) over an injected Executor +
             _done/<stage>.json sentinels (the CONTENT truth) and crash reconcile.
@@ -946,6 +1134,10 @@ internal/
             dispatched, Delete/PurgeScratch busy, the re-admits and startup GC skip
             it, a supervisor terminate finds no worker; ok false when busy already;
             release is idempotent. runStage numbers a run store.NextStageAttempt.
+            Phase 1d: StageResult.Windowed (asr) rides the sentinel into
+            Outcome; advance fills Outcome.Goal from books.goal, and the ETA input
+            carries it (eta.Book.Goal) as it is. A goal-chapters book reaching done is auto-purged like
+            any other (its chapter FLACs go; a continue re-splits).
   supervisor/ the health-tick babysitter (config supervisor.*): classifies incidents
             over book/stage-run snapshots (deterministic classifiers + optional
             model-assisted lane), decides bounded recovery actions, and applies them
@@ -1020,6 +1212,8 @@ internal/
             as it is when nothing is dropped): an open one has no scheduler worker
             and a done one no sentinel, so they read as a missing process or a
             broken artifact on a finished book.
+            Phase 1d: chapters_not_detected is decided like markers_not_confident (a
+            person's call: park_escalate for approval, never an automatic retry).
   metaops/  meta.audiosilo.app client (coverage/lookup, capped 1h TTL caches,
             graceful degrade) + the PathAllowed/AllowedPath containment checks
             (Phase 1a passes the mapped mounts as the roots). glossary.go adds
@@ -1103,7 +1297,8 @@ internal/
             engine has started); RescanAttachments(library, path) is POST
             /bridge/rescan with mode "attachments" (the book's .audiosilo/ only, never
             its audio), answering which of characters/recaps/description (Phase 1c;
-            false from an older server)/bridge are indexed; and
+            false from an older server)/chapters (Phase 1d, likewise)/bridge are
+            indexed; and
             a job update's answer carries the job's current path, which the server
             moves with its book.
   mapping/  where the Bridge sees each library, CHECKED (decision 13): Check stats the
@@ -1365,6 +1560,84 @@ internal/
             cost_usd}; result {library_id, path, description: true, files, cost_usd,
             checked_against} ("description" is always true; the server console's
             shared result parser reads it).
+            Phase 1d, CHAPTERS (chapters.go): .audiosilo/chapters.json (ChaptersFile:
+            version 1, generator, generated_at, from "narration", files [{path
+            relative to the book's folder (a single file's name), size, duration_ms}]
+            in the server's order, chapters [{title, start_ms, length_ms}] contiguous
+            from 0) composed from the engine book's pipeline.DetectedChapters when it
+            is CurrentFor its manifest (composeChapters: no file for one chapter or
+            over 2000; titles control-free, chapterdetect.ClipTitle's bound, "Chapter
+            N" for none); bridge.json's chapters object {job_id, generated_at, from,
+            chapters}. refreshChapters reads the list and returns (the list, current):
+            it reads and checks it again only when pipeline.DetectedStamp (local stats
+            of chapters_detected.json and the manifest) changed since the last look,
+            so the poll it runs on costs a stat or two; chaptersJSON composes the file
+            at each write, from the book's files and path as they are then (the server
+            moves a job with its book: a list naming the old file would never apply),
+            at the time the run first noted the list. sidecars.generate (r.kind ==
+            Kind: startRun keeps every run's kind) saves them as soon as the engine
+            has them (saveChaptersEarly from step(), once per detected list; it never
+            waits: not while the library isn't checked mapped and writable (mappedNow),
+            a failure tried again a Recheck later) and with the rest at the finish
+            (files lists it); never beside characters and recaps made without
+            chapters found in the narration (sidecarsWithoutChapters: no chapters
+            object in bridge.json), whose positions the server would then gate by this
+            list. A run with none keeps an earlier chapters object beside a
+            chapters.json in place (keptObject[T], the description's rule too; the
+            merge, mergedProvenance, takes fresh's object by its key). create()
+            CONTINUES a goal-chapters engine book at the same source path (not swept,
+            no open job, the audio read): a done one whose list is CurrentFor the file
+            on disk, from splitting; or one cancelled or failed at chapter_detecting
+            whose kept windows can run it again (pipeline.DetectionRerunnable), going
+            on there, so the detection runs again from the window layer with the
+            whole pipeline after it and nothing is transcribed again; either only
+            while the book is still the one file it was (audio.ResolveSource: a
+            folder that gained an audio file is a multi-file book now)
+            (continueChapters -> store.ContinueChapters with the state it checked and
+            the one to go on at, under the engine's Hold, waited for as the delete
+            would (holdBook: a stage the cancel just stopped may still be finishing;
+            one that stays busy fails the job, errEarlierRunBusy, rather than the
+            run being deleted unseen) and the book read again once held (that stage
+            may have finished: done), the job's identity, the cleared status and the
+            mapping in one transaction on the job's context). The server queues a
+            generate job beside a chapters.detect
+            job only once that one is cancelled (a PARKED one it cancels as it queues
+            it; a working one refuses it, 409 detect_open, until an admin cancels
+            it), and the Bridge hears that cancel at the chapters job's next report,
+            so create() first waits up to holdTries polls (awaitChaptersGivingWay)
+            while that chapters job still follows the book, whatever the book is
+            doing, or no job does but the book isn't stopped yet (its job's end is
+            stopping it; one still not stopped when the wait runs out is stopped
+            there, stopBook), handing back the open job it last saw (firstOpenJob); a
+            job that stays open is refused as before. stopBook leaves alone a book
+            another open job follows (a late end of the chapters job, Abandon's once
+            the engine starts, would stop the continued run). chapters.detect
+            (ChaptersJob, ChaptersKind, pipeline lane, Abandoner; params any JSON
+            object): the same resume and follow as generate (resumeMapping +
+            runEngineBook: prepare strict when new, a resumed job's own book found
+            again, one that moved while the job was away followed and recorded,
+            another book's run stopped); new, refused beside characters and recaps
+            made without chapters (errChaptersBesideSidecars: generate it again), an
+            engine book at the source path with a current list is written from (no
+            run, runEngineBook's fresh hook; the job takes that book to report on, so
+            its own park is never lifted between two tries, and records no move); one
+            an open generate job follows is refused (errChaptersGenerating); a
+            finished whole run is never cleared for it (errChaptersKeepsRun); else an
+            engine book with goal chapters and no series (createChapters: clearEarlier
+            and queueBook, generate's create tail; a chapters-only run makes nothing
+            a later volume carries on from, so it never holds the series' lock),
+            followed like generate (progress without cost_usd), written at done
+            (chapters.json + bridge.json merged: mergedProvenance keeps every other
+            field) and rescanned; an inspect that refuses the run (the book
+            has chapters, or a file whose chapters can't be found in the narration:
+            pipeline.ChaptersRefusals) fails the job with that sentence, read from the
+            inspecting run's own error (hasChaptersFailure: a supervisor escalation
+            of the failure into a park ends it the same way). Result {library_id, path, chapters, files, source:
+            "audio"}. Retention as generate's (its mapping in generate_books).
+            ParkHint words chapters_not_detected (add chapter markers, then cancel:
+            the server reads them, a new generate job works from them; a recording's
+            chapter list reaches the server, never the Bridge); stageLabels
+            chapter_detecting.
   agentproto/ the staging protocol between the Bridge and the agent container (decision
             15), shared by both sides so they can't drift; a LEAF (standard library
             only). Protocol 1 (both sides refuse another). A job dir <staging>/<16 hex>/:
@@ -1562,6 +1835,8 @@ internal/
             code; a page server that fails stops the heartbeat and the runner, and
             Run returns its error. Edits go through config.SaveFile (one at a time:
             each loads, edits and writes config.yaml) and reload the config.
+            Phase 1d: chapters.detect (b.gen.ChaptersJob()) is registered beside
+            sidecars.describe, so the heartbeat advertises it.
             Phase 1b: workers.go: the hub (made in New, behind the page server's
             /worker/v1/*), the router (engine.go: the asr.Select backend becomes its
             Local), Workers/CreateWorker/RevokeWorker for the page, linkWorkers for
@@ -1648,6 +1923,10 @@ web/          the Bridge's page: Vite + React 19 + TS + Tailwind v4 (npm, Node 2
               its stage, count bar, ETA, spend and source, while parked its park, its
               hint and when it resumes by itself, a Retry button, and when done the
               files written to .audiosilo/ with any contribution links.
+              Phase 1d: chapters.detect is a sidecars job too (kind label "Chapters",
+              its parks and Retry; parseChaptersResult / chaptersSummary word its
+              result). The page lists no stage or park names: the hint comes in the
+              progress.
               src/lib/engine.ts words the Status tab's "Characters and recaps" card
               (GET /api/engine every 10 s: the agent container and its CLIs'
               credential kinds, speech recognition, the monthly budget bar, the
@@ -1694,7 +1973,7 @@ contrib, events, metaops, pipeline, scheduler, state, supervisor, toolfetch);
 `api -> {auth, jobs, link, logring, mapping, store}` (types only; it calls the
 injected Backend); `verify -> {jobs, link, mapping}`; `jobs -> {link, store}`;
 `mapping -> link`; `link` is a leaf. `generate -> {jobs, link, mapping, store,
-scheduler, state, pipeline, scratch, metaops, ebook, agent, fsutil}` (+ the meta
+scheduler, state, pipeline, chapterdetect, audio, scratch, metaops, ebook, agent, fsutil}` (+ the meta
 module's extract/model), its engine and server reached through its own Engine and
 Server interfaces. The agent container: `agentproto` is a leaf (standard library
 only); `agentbox -> {agent, agentproto}`; `agentrun -> {agent, agentproto,
@@ -1702,7 +1981,7 @@ fsutil}`; neither imports the other, and neither the pipeline nor the scheduler
 knows about either (agentbox is just an agent.Runner). The engine:
 `scheduler -> {store, state, eta, events, scratch}`; `eta -> state` (pure, imported BY
 scheduler - never the reverse);
-`pipeline -> {audio, asr, transcript, ebook, qa, spelling, agent, repair, toolfetch,
+`chapterdetect -> audio` (its number words and Silence only); `pipeline -> {audio, asr, transcript, ebook, qa, spelling, agent, repair, toolfetch, chapterdetect,
 scratch, secrets, fsutil, metaops, contrib, pricing, store, state, scheduler}` (metaops since M7's
 contributing stage, and the spelling stage's series glossary); `agent`/`repair` are leaf helpers (no
 scheduler/store deps; `repair -> qa` for the shared Python-compat gram/repr helpers

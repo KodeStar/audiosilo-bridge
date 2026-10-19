@@ -123,7 +123,8 @@ export type GenerateSource = 'audio' | 'ebook';
 
 // jobs.Progress, with the fields a kind adds beside them (Extra; sidecars.generate
 // sends stage, eta_seconds, cost_usd, source and, while parked, park;
-// sidecars.describe the same but eta_seconds, its stage "describing").
+// sidecars.describe the same but eta_seconds, its stage "describing";
+// chapters.detect the same but cost_usd).
 export interface Progress {
   step?: string;
   message?: string;
@@ -171,6 +172,17 @@ export interface DescribeResult {
   files: string[];
   cost_usd: number;
   checked_against: CheckedAgainst;
+}
+
+// generate.ChaptersJobResult (a chapters.detect job's result).
+export interface ChaptersResult {
+  library_id: number;
+  path: string;
+  // How many chapters the narration gave the book.
+  chapters: number;
+  // The names written in the book's .audiosilo/ folder (none for one chapter).
+  files: string[];
+  source: 'audio';
 }
 
 // store.ServerJob

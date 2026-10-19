@@ -22,8 +22,11 @@ type StageResult struct {
 	// chapter universe, so chapter_mapping is skipped. Kept separate from
 	// MarkersContiguous despite the identical meaning: these values are read by a
 	// human debugging a parked book, and "markers_contiguous" on an epub is a lie.
-	ChaptersMapped bool            `json:"chapters_mapped,omitempty"`
-	Metrics        json.RawMessage `json:"metrics,omitempty"`
+	ChaptersMapped bool `json:"chapters_mapped,omitempty"`
+	// Windowed (asr, Phase 1d): the transcripts are a markerless book's duration
+	// windows, so chapter_detecting finds the chapters next.
+	Windowed bool            `json:"windowed,omitempty"`
+	Metrics  json.RawMessage `json:"metrics,omitempty"`
 	// RateSample is the stage's own report of how much work it did this run (see
 	// RateSample). nil = no rate observation, which the scheduler treats as "don't
 	// update the learned rate". It persists in the sentinel (additive, omitempty) but
@@ -39,7 +42,9 @@ type StageResult struct {
 
 // Outcome converts a completed stage result into the branch input consumed by
 // state.NextState. Keeping this mapping beside StageResult prevents alternate
-// pipeline drivers from drifting from the scheduler's transition semantics.
+// pipeline drivers from drifting from the scheduler's transition semantics. The
+// book's goal (Outcome.Goal) is the caller's to fill: it is the book's,
+// not the stage's.
 func (r StageResult) Outcome(fixAttempts int) state.Outcome {
 	return state.Outcome{
 		MarkersContiguous:  r.MarkersContiguous,
@@ -47,6 +52,7 @@ func (r StageResult) Outcome(fixAttempts int) state.Outcome {
 		RetranscribeNeeded: r.RetranscribeNeeded,
 		AuditPassed:        r.AuditPassed,
 		ChaptersMapped:     r.ChaptersMapped,
+		Windowed:           r.Windowed,
 		FixAttempts:        fixAttempts,
 	}
 }

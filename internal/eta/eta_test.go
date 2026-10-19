@@ -274,3 +274,29 @@ func TestObservedRateOverridesSeed(t *testing.T) {
 		t.Errorf("splitting seconds with zero rate = %v, want 20 (seed)", got)
 	}
 }
+
+// TestGoalChaptersPath: a chapters-only book's estimate goes from asr through
+// chapter_detecting and stops there; any other book's skips chapter_detecting.
+func TestGoalChaptersPath(t *testing.T) {
+	stages := func(b Book) []state.State {
+		var out []state.State
+		for _, s := range remainingSegments(b, nil) {
+			out = append(out, s.stage)
+		}
+		return out
+	}
+	b := Book{State: state.Splitting, Chapters: 10, Goal: state.GoalChapters}
+	if got := stages(b); len(got) != 3 || got[1] != state.ASR || got[2] != state.ChapterDetecting {
+		t.Fatalf("chapters-only path = %v", got)
+	}
+	secs, ok := BookETA(b, nil)
+	if want := 10*4.0 + 10*36 + 60; !ok || secs != want {
+		t.Fatalf("eta = %v %v, want %v", secs, ok, want)
+	}
+	b.Goal = ""
+	for _, s := range stages(b) {
+		if s == state.ChapterDetecting {
+			t.Fatal("the whole pipeline's estimate predicts chapter_detecting")
+		}
+	}
+}

@@ -91,7 +91,14 @@ func audioFilesIn(dir string) ([]string, error) {
 // DRAFT the M5 markers_normalizing stage corrects - but returns Contiguous=false so
 // the state machine routes there first. A multi-file book is always contiguous
 // (chapters are synthesized 1..N).
-func Inspect(ctx context.Context, sourcePath, workDir, ffprobePath string) (Manifest, MarkerStats, error) {
+//
+// A single file with no usable markers at all (none, or one covering the whole
+// file) gets a WINDOWS manifest instead (Phase 1d): ffmpegPath places each window's
+// cut in a silence ("" cuts at the targets). Its stats are Usable, so
+// the book goes straight to splitting, and the chapters are found in the narration
+// after transcription. A table of several markers in an unknown dialect is a
+// vocabulary gap, not a markerless file: it still goes to markers_normalizing.
+func Inspect(ctx context.Context, sourcePath, workDir, ffprobePath, ffmpegPath string) (Manifest, MarkerStats, error) {
 	if err := os.MkdirAll(workDir, 0o750); err != nil {
 		return Manifest{}, MarkerStats{}, err
 	}
@@ -102,12 +109,12 @@ func Inspect(ctx context.Context, sourcePath, workDir, ffprobePath string) (Mani
 	if src.Style == StyleFiles {
 		return inspectFiles(ctx, src.Files, workDir, ffprobePath)
 	}
-	return inspectMarkers(ctx, src.BookFile, workDir, ffprobePath)
+	return inspectMarkers(ctx, src.BookFile, workDir, ffprobePath, ffmpegPath)
 }
 
 // inspectMarkers probes a single chaptered file and builds a marker-derived
 // manifest.
-func inspectMarkers(ctx context.Context, bookFile, workDir, ffprobePath string) (Manifest, MarkerStats, error) {
+func inspectMarkers(ctx context.Context, bookFile, workDir, ffprobePath, ffmpegPath string) (Manifest, MarkerStats, error) {
 	if ffprobePath == "" {
 		return Manifest{}, MarkerStats{}, errors.New("ffprobe unavailable; cannot read chapter markers")
 	}
@@ -120,6 +127,15 @@ func inspectMarkers(ctx context.Context, bookFile, workDir, ffprobePath string) 
 	}
 
 	m, stats := markerManifestFromProbe(bookFile, meta)
+	if markers := probeMarkers(meta); markerless(markers, m.Duration) && m.Duration > 0 {
+		// Nothing to chapter by: transcribe in windows and find the chapters in the
+		// narration. (A file with no known duration can't be cut, so it keeps the
+		// draft and goes to markers_normalizing, as before.)
+		if m, err = windowsManifest(ctx, bookFile, m.Title, m.Duration, ffmpegPath); err != nil {
+			return Manifest{}, MarkerStats{}, err
+		}
+		stats = MarkerStats{Seen: len(markers), Contiguous: true, Complete: true}
+	}
 	if err := WriteManifest(workDir, m); err != nil {
 		return Manifest{}, MarkerStats{}, err
 	}
@@ -135,13 +151,9 @@ func ReparseMarkerManifest(workDir string, draft Manifest) (Manifest, MarkerStat
 	if draft.Style != StyleMarkers {
 		return Manifest{}, MarkerStats{}, fmt.Errorf("cannot reparse non-marker manifest style %q", draft.Style)
 	}
-	raw, err := os.ReadFile(filepath.Join(workDir, ProbeName)) //nolint:gosec // workDir is the book's managed scratch directory
+	meta, err := readProbeMeta(workDir)
 	if err != nil {
-		return Manifest{}, MarkerStats{}, fmt.Errorf("read %s: %w", ProbeName, err)
-	}
-	var meta probeMeta
-	if err := json.Unmarshal(raw, &meta); err != nil {
-		return Manifest{}, MarkerStats{}, fmt.Errorf("parse %s: %w", ProbeName, err)
+		return Manifest{}, MarkerStats{}, err
 	}
 	m, stats := markerManifestFromProbe(draft.Source, meta)
 	if draft.Title != "" {
@@ -154,6 +166,17 @@ func ReparseMarkerManifest(workDir string, draft Manifest) (Manifest, MarkerStat
 	if m.Duration == 0 {
 		m.Duration = draft.Duration
 	}
+	// A book an older parser parked here with no chapters at all, whose file has no
+	// usable markers (Phase 1d's markerless rule), is transcribed in windows and gets
+	// its chapters from the narration, as inspect does now: no agent can map markers
+	// that aren't there. Cut at the targets: the reparse reads no audio.
+	if mk := probeMarkers(meta); len(draft.Chapters) == 0 && markerless(mk, m.Duration) && m.Duration > 0 {
+		wm, err := windowsManifest(context.Background(), draft.Source, m.Title, m.Duration, "")
+		if err != nil {
+			return Manifest{}, MarkerStats{}, err
+		}
+		m, stats = wm, MarkerStats{Seen: len(mk), Contiguous: true, Complete: true}
+	}
 	if err := WriteManifest(workDir, m); err != nil {
 		return Manifest{}, MarkerStats{}, err
 	}
@@ -165,14 +188,15 @@ func ReparseMarkerManifest(workDir string, draft Manifest) (Manifest, MarkerStat
 // validator) can ask what the recording ACTUALLY contains, rather than trusting a manifest
 // that may have dropped markers.
 func ReadProbeMarkers(workDir string) ([]Marker, float64, error) {
-	raw, err := os.ReadFile(filepath.Join(workDir, ProbeName)) //nolint:gosec // workDir is the book's managed scratch directory
+	meta, err := readProbeMeta(workDir)
 	if err != nil {
-		return nil, 0, fmt.Errorf("read %s: %w", ProbeName, err)
+		return nil, 0, err
 	}
-	var meta probeMeta
-	if err := json.Unmarshal(raw, &meta); err != nil {
-		return nil, 0, fmt.Errorf("parse %s: %w", ProbeName, err)
-	}
+	return probeMarkers(meta), parseFloat(meta.Format.Duration), nil
+}
+
+// probeMarkers is a probe's raw marker table in time order.
+func probeMarkers(meta probeMeta) []Marker {
 	markers := make([]Marker, 0, len(meta.Chapters))
 	for _, ch := range meta.Chapters {
 		markers = append(markers, Marker{
@@ -182,19 +206,11 @@ func ReadProbeMarkers(workDir string) ([]Marker, float64, error) {
 		})
 	}
 	sort.SliceStable(markers, func(i, j int) bool { return markers[i].Start < markers[j].Start })
-	return markers, parseFloat(meta.Format.Duration), nil
+	return markers
 }
 
 func markerManifestFromProbe(source string, meta probeMeta) (Manifest, MarkerStats) {
-	markers := make([]Marker, 0, len(meta.Chapters))
-	for _, ch := range meta.Chapters {
-		markers = append(markers, Marker{
-			Title: ch.Tags["title"],
-			Start: parseFloat(ch.StartTime),
-			End:   parseFloat(ch.EndTime),
-		})
-	}
-	sort.SliceStable(markers, func(i, j int) bool { return markers[i].Start < markers[j].Start })
+	markers := probeMarkers(meta)
 
 	var chapters []Chapter
 	for _, mk := range markers {
@@ -357,6 +373,7 @@ type fileProbeEntry struct {
 type probeMeta struct {
 	Format struct {
 		Duration string            `json:"duration"`
+		Size     string            `json:"size"`
 		Tags     map[string]string `json:"tags"`
 	} `json:"format"`
 	Chapters []struct {
@@ -364,6 +381,31 @@ type probeMeta struct {
 		EndTime   string            `json:"end_time"`
 		Tags      map[string]string `json:"tags"`
 	} `json:"chapters"`
+}
+
+// ProbedSize is the size of the single file inspect probed, as its probe.json
+// states it (ffprobe's format.size); 0 when it states none or can't be read, which
+// is unknown. A caller compares it with the file on disk to tell a replaced file.
+func ProbedSize(workDir string) int64 {
+	meta, err := readProbeMeta(workDir)
+	if err != nil {
+		return 0
+	}
+	n, _ := strconv.ParseInt(meta.Format.Size, 10, 64)
+	return n
+}
+
+// readProbeMeta reads and parses the probe.json inspect wrote in workDir.
+func readProbeMeta(workDir string) (probeMeta, error) {
+	var meta probeMeta
+	raw, err := os.ReadFile(filepath.Join(workDir, ProbeName)) //nolint:gosec // workDir is the book's managed scratch directory
+	if err != nil {
+		return meta, fmt.Errorf("read %s: %w", ProbeName, err)
+	}
+	if err := json.Unmarshal(raw, &meta); err != nil {
+		return probeMeta{}, fmt.Errorf("parse %s: %w", ProbeName, err)
+	}
+	return meta, nil
 }
 
 // probeFile runs `ffprobe -show_format [-show_chapters] -of json` and returns both

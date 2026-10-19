@@ -70,6 +70,14 @@ const (
 	// number is a wrong spoiler position, which nothing downstream can detect.
 	ParkEbookChaptersNotConfident ParkCode = "ebook_chapters_not_confident"
 
+	// ParkChaptersNotDetected (Phase 1d): a book with no chapter markers was
+	// transcribed, but the chapters couldn't be found in the narration with
+	// confidence (no headings heard, a chapter so long headings were plainly missed,
+	// a numbered run with too many holes). Parked for the same reason as
+	// ParkMarkersNotConfident: a guessed chapter is a wrong spoiler position. Human
+	// only; everything stays in place, so a Retry runs the detection again.
+	ParkChaptersNotDetected ParkCode = "chapters_not_detected"
+
 	// ParkBudgetExceeded: the book's summed agent cost reached the configured per-book
 	// budget (agent.book_budget_usd), so an agent stage parked before spending more. A
 	// human decision: raise the budget in config.yaml (restart to apply), then Retry -

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/kodestar/audiosilo-bridge/internal/audio"
 	"github.com/kodestar/audiosilo-bridge/internal/fsutil"
 	"github.com/kodestar/audiosilo-bridge/internal/metaops"
 	"github.com/kodestar/audiosilo-bridge/internal/spelling"
@@ -216,4 +217,49 @@ func TestReferenceSourcesToleratesMissingInputs(t *testing.T) {
 			t.Errorf("want one verified source, got %+v", srcs)
 		}
 	})
+}
+
+// TestDetectedTitlesAreNeverEvidence: chapter titles found in the narration (a
+// detected manifest, Phase 1d) are the transcript's own spelling, so
+// marker_titles.txt never holds them (an earlier one is emptied): not as verified
+// evidence, not in the dry-run corpus, not as a file a rule may cite, and the
+// manifest staged to the spelling agent goes without them. A publisher's marker
+// titles still are all of these.
+func TestDetectedTitlesAreNeverEvidence(t *testing.T) {
+	for _, detected := range []bool{false, true} {
+		dir := t.TempDir()
+		if err := audio.WriteManifest(dir, audio.Manifest{Style: audio.StyleMarkers, Detected: detected,
+			Chapters: []audio.Chapter{{Chapter: 1, Title: "Chapter 9: Toren"}}}); err != nil {
+			t.Fatal(err)
+		}
+		if detected {
+			// A file from before the chapters were found (or written by older code).
+			if err := os.WriteFile(filepath.Join(dir, markerTitlesFile), []byte("Chapter 9: Toren\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := ensureMarkerTitles(dir); err != nil {
+			t.Fatal(err)
+		}
+		_, ok := sourceByName(referenceSources(dir, metaops.Glossary{}), markerTitlesFile)
+		if ok == detected {
+			t.Errorf("detected %v: marker titles used as evidence = %v", detected, ok)
+		}
+		staged, err := stagedManifest(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(staged), "Toren") == detected {
+			t.Errorf("detected %v: the manifest staged to the spelling agent = %s", detected, staged)
+		}
+		corpus, err := buildDryRunCorpus(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, _ := os.ReadFile(filepath.Join(corpus, markerTitlesFile)) //nolint:gosec // test
+		_ = os.RemoveAll(corpus)
+		if strings.Contains(string(got), "Toren") == detected {
+			t.Errorf("detected %v: the dry-run corpus's marker titles = %q", detected, got)
+		}
+	}
 }

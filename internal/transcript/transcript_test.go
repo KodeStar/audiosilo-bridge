@@ -5,6 +5,8 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -318,5 +320,33 @@ func TestChapterTextPath(t *testing.T) {
 	}
 	if p, ok := ChapterTextPath(work, 1); !ok || p != repPath {
 		t.Errorf("ChapterTextPath(both) = (%q, %v), want (%q, true) [repaired preferred]", p, ok, repPath)
+	}
+}
+
+// EncodeOpenAI is the openai-whisper adapter's inverse: what it writes is a
+// complete raw that normalizes back to the same transcript, an empty one included.
+func TestEncodeOpenAIRoundTrip(t *testing.T) {
+	p := 0.75
+	in := Transcript{Language: "en", Segments: []Segment{
+		{ID: 0, Start: 0.2, End: 1.4, Text: " Chapter One", Words: []Word{{W: " Chapter", Start: 0.2, End: 0.6, P: &p}, {W: " One", Start: 0.7, End: 1.4}}},
+		{ID: 1, Start: 2, End: 3, Text: " (music)", Words: []Word{}},
+	}}
+	for _, tr := range []Transcript{in, {Language: "en", Segments: []Segment{}}} {
+		raw, err := EncodeOpenAI(tr)
+		if err != nil || !Complete(raw) {
+			t.Fatalf("encode %+v: %s, %v (complete %v)", tr, raw, err, Complete(raw))
+		}
+		back, err := Normalize(raw, Meta{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		tr.Schema = Schema
+		if !reflect.DeepEqual(back, tr) {
+			t.Fatalf("round trip:\n got %+v\nwant %+v", back, tr)
+		}
+	}
+	raw, _ := EncodeOpenAI(in)
+	if !strings.Contains(string(raw), `"text":" Chapter One (music)"`) {
+		t.Fatalf("document text = %s", raw)
 	}
 }

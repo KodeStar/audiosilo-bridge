@@ -40,7 +40,9 @@ const (
 
 // holdTries bounds the wait for the engine's hold on a book (a stage just
 // finishing or re-admitted, a purge): that many polls, then the description (or a
-// job end's transcript purge) gives up.
+// job end's transcript purge, or a generate job's continue) gives up. It also
+// bounds a generate job's wait for a chapters job to give way (at its next
+// report, Keepalive at the most) and for an earlier run to be let go.
 const holdTries = 20
 
 // DescribeJob runs sidecars.describe. It shares the generate handler's parts:
@@ -70,7 +72,11 @@ type DescribeJobResult struct {
 // ParseDescribeParams checks a description-only job's params: nothing is asked
 // for, and a field a later server adds is ignored, so anything but a JSON object
 // (or none) is refused.
-func ParseDescribeParams(raw json.RawMessage) error {
+func ParseDescribeParams(raw json.RawMessage) error { return parseObjectParams(raw) }
+
+// parseObjectParams accepts no params or any JSON object (a kind that asks for
+// nothing, read leniently so a field a later server adds is ignored).
+func parseObjectParams(raw json.RawMessage) error {
 	if len(raw) == 0 || string(raw) == "null" {
 		return nil
 	}

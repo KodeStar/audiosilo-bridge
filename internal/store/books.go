@@ -151,8 +151,12 @@ type Book struct {
 	// ContribMode is this book's contribution mode ("" = the executor's configured
 	// contribution.mode; "local" | "issue"): a sidecars.generate job sets it.
 	ContribMode string
-	CreatedAt   string
-	UpdatedAt   string
+	// Goal is how far the book runs (migration 0005): "" the whole pipeline,
+	// "chapters" (state.GoalChapters) only until its chapters are found. Opaque
+	// here, as State is.
+	Goal      string
+	CreatedAt string
+	UpdatedAt string
 }
 
 // BookTracking is the small, read-only projection needed to mark library-scan
@@ -198,6 +202,8 @@ type NewBook struct {
 	State    string // "" defaults to queued
 	// ContribMode is the book's own contribution mode ("" = the configured one).
 	ContribMode string
+	// Goal is how far the book runs ("" the whole pipeline, "chapters").
+	Goal string
 }
 
 // ErrInvalidKind reports a NewBook whose kind and ebook_path disagree: an unknown
@@ -306,10 +312,11 @@ func (db *DB) CreateBook(ctx context.Context, nb NewBook) (Book, error) {
 		`INSERT INTO books
 		 (batch_id, source_path, work_dir, title, authors, narrators, series, series_pos, asin, isbn,
 		  identity_sources, work_id, kind, ebook_path, state, status, error, coverage, contrib_mode,
-		  created_at, updated_at)
-		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'','',?,?,?,?)`,
+		  goal, created_at, updated_at)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'','',?,?,?,?,?)`,
 		batchID, nb.SourcePath, nb.WorkDir, nb.Title, authors, narrators, nb.Series, nb.SeriesPos,
-		nb.ASIN, nb.ISBN, idsrc, nb.WorkID, kind, nb.EbookPath, st, string(nb.Coverage), nb.ContribMode, now, now)
+		nb.ASIN, nb.ISBN, idsrc, nb.WorkID, kind, nb.EbookPath, st, string(nb.Coverage), nb.ContribMode, nb.Goal,
+		now, now)
 	if err != nil {
 		if isUniqueViolation(err) {
 			return Book{}, ErrDuplicate
@@ -341,6 +348,7 @@ func (db *DB) CreateBook(ctx context.Context, nb NewBook) (Book, error) {
 		State:           st,
 		Coverage:        nb.Coverage,
 		ContribMode:     nb.ContribMode,
+		Goal:            nb.Goal,
 		CreatedAt:       now,
 		UpdatedAt:       now,
 	}, nil
@@ -348,7 +356,7 @@ func (db *DB) CreateBook(ctx context.Context, nb NewBook) (Book, error) {
 
 const bookCols = `id, batch_id, source_path, work_dir, title, authors, narrators, series, series_pos,
 	asin, isbn, identity_sources, work_id, kind, ebook_path, state, status, error, coverage,
-	scratch_bytes, chapters, duration_sec, words, park_code, retry_at, contrib_mode, created_at, updated_at`
+	scratch_bytes, chapters, duration_sec, words, park_code, retry_at, contrib_mode, goal, created_at, updated_at`
 
 func scanBook(sc interface{ Scan(...any) error }) (Book, error) {
 	var b Book
@@ -356,7 +364,7 @@ func scanBook(sc interface{ Scan(...any) error }) (Book, error) {
 	if err := sc.Scan(&b.ID, &b.BatchID, &b.SourcePath, &b.WorkDir, &b.Title, &authors, &narrators,
 		&b.Series, &b.SeriesPos, &b.ASIN, &b.ISBN, &idsrc, &b.WorkID, &b.Kind, &b.EbookPath,
 		&b.State, &b.Status, &b.Error, &coverage, &b.ScratchBytes, &b.Chapters, &b.DurationSec,
-		&b.Words, &b.ParkCode, &b.RetryAt, &b.ContribMode, &b.CreatedAt, &b.UpdatedAt); err != nil {
+		&b.Words, &b.ParkCode, &b.RetryAt, &b.ContribMode, &b.Goal, &b.CreatedAt, &b.UpdatedAt); err != nil {
 		return Book{}, err
 	}
 	if authors != "" {
@@ -553,6 +561,64 @@ func (db *DB) SetBookStatusRetry(ctx context.Context, id int64, status, errMsg, 
 		status, errMsg, enforceParkCode(status, parkCode), enforceRetryAt(status, retryAt),
 		timestamp(nowFn()), id)
 	return checkAffected(res, err)
+}
+
+// ErrNotContinuable is ContinueChapters for a book that isn't a chapters-only book
+// stopped where the caller looked (its row changed since).
+var ErrNotContinuable = errors.New("the book isn't a chapters book to continue")
+
+// ContinueChapters turns a chapters-only book (goal chapters) that stopped at from
+// (done, or failed there: a cancel is a failure) into a whole-pipeline one at to
+// for a new job: goal empty; the new job's identity (nb's title, authors,
+// narrators, series and position, asin, isbn and their sources: the book may have
+// been matched since the chapters job made it), contribution mode and work id;
+// status clear, so the scheduler takes it up at to (a done book too: a cancel or
+// a park landing as its last stage finished leaves its status on it). The work
+// dir, source and kind stay the book's. job (when it names a server job) is mapped
+// to the book in the same transaction, so a book is never continued with no job
+// to follow it, nor left stopped. ErrNotContinuable when the book isn't one
+// stopped at from, or the retention swept its transcripts (a continue needs them);
+// checked in the one statement, so a book that changed meanwhile isn't moved. The
+// SQL asks for any goal short of the whole pipeline (chapters is the only one) and
+// takes both states from the caller, which decides where a book goes on from.
+func (db *DB) ContinueChapters(ctx context.Context, id int64, from, to string, nb NewBook, job GenerateBook) error {
+	authors, err := marshalJSONDefault(nb.Authors, "[]")
+	if err != nil {
+		return err
+	}
+	narrators, err := marshalJSONDefault(nb.Narrators, "[]")
+	if err != nil {
+		return err
+	}
+	idsrc, err := marshalJSONDefault(nb.IdentitySources, "{}")
+	if err != nil {
+		return err
+	}
+	tx, err := db.sql.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	res, err := tx.ExecContext(ctx,
+		`UPDATE books SET goal='', title=?, authors=?, narrators=?, series=?, series_pos=?, asin=?, isbn=?,
+		     identity_sources=?, contrib_mode=?, work_id=?, state=?, status='', error='', park_code='', retry_at='',
+		     updated_at=?
+		  WHERE id=? AND goal!='' AND state=? AND (state='done' OR status='failed')
+		    AND NOT EXISTS (SELECT 1 FROM generate_books WHERE book_id=? AND swept_at!='')`,
+		nb.Title, authors, narrators, nb.Series, nb.SeriesPos, nb.ASIN, nb.ISBN, idsrc, nb.ContribMode, nb.WorkID,
+		to, timestamp(nowFn()), id, from, id)
+	if err := checkAffected(res, err); errors.Is(err, ErrNotFound) {
+		return ErrNotContinuable
+	} else if err != nil {
+		return err
+	}
+	if job.ServerJobID != 0 {
+		job.BookID = &id
+		if err := putGenerateBook(ctx, tx, job); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 // SetBookCoverage stores the coverage JSON snapshot for a book.

@@ -21,7 +21,7 @@ func TestTableCoversAllStatesWithLane(t *testing.T) {
 	}
 	stages := map[State]bool{
 		Inspecting: true, MarkersNormalizing: true, Splitting: true, ASR: true,
-		Sanitizing: true, QASweep: true, QAAdjudicating: true, Retranscribing: true,
+		ChapterDetecting: true, Sanitizing: true, QASweep: true, QAAdjudicating: true, Retranscribing: true,
 		SpellingResearch: true, Correcting: true, Extracting: true, ChapterMapping: true,
 		FactPass: true, Synthesizing: true, Validating: true, Auditing: true,
 		Fixing: true, Contributing: true,
@@ -44,7 +44,7 @@ func TestTableCoversAllStatesWithLane(t *testing.T) {
 func TestLanesAssigned(t *testing.T) {
 	want := map[State]Lane{
 		Inspecting: LaneMechanical, MarkersNormalizing: LaneAgent, Splitting: LaneMechanical,
-		ASR: LaneASR, Sanitizing: LaneMechanical, QASweep: LaneMechanical,
+		ASR: LaneASR, ChapterDetecting: LaneMechanical, Sanitizing: LaneMechanical, QASweep: LaneMechanical,
 		QAAdjudicating: LaneAgent, Retranscribing: LaneASR, SpellingResearch: LaneAgent,
 		Correcting: LaneMechanical, Extracting: LaneMechanical, ChapterMapping: LaneAgent,
 		FactPass: LaneAgent, Synthesizing: LaneAgent,
@@ -63,7 +63,8 @@ func TestLanesAssigned(t *testing.T) {
 // mechanical lane, so a stage silently gaining or losing the flag either wedges an
 // SMB mount with concurrent reads or needlessly serializes work-dir-only work.
 func TestReadsSourcePinsLibrarySourceStages(t *testing.T) {
-	want := map[State]bool{Inspecting: true, Splitting: true, Extracting: true}
+	// chapter_detecting splits from the source what the window FLACs can't give.
+	want := map[State]bool{Inspecting: true, Splitting: true, ChapterDetecting: true, Extracting: true}
 	for _, s := range All() {
 		if got := ReadsSource(s); got != want[s] {
 			t.Errorf("ReadsSource(%q) = %v, want %v", s, got, want[s])
@@ -86,6 +87,8 @@ func TestNextStateLegalPerTable(t *testing.T) {
 		{RetranscribeNeeded: true},
 		{AuditPassed: true},
 		{FixAttempts: MaxFixAttempts},
+		{Windowed: true},
+		{Goal: GoalChapters},
 	}
 	for _, s := range All() {
 		if IsTerminal(s) {
@@ -474,5 +477,36 @@ func TestParseKind(t *testing.T) {
 		if got := ValidKind(in); got != want {
 			t.Errorf("ValidKind(%q) = %v, want %v", in, got, want)
 		}
+	}
+}
+
+// TestChapterDetectingBranches: a windowed transcription goes to chapter_detecting
+// (else straight to sanitizing), which ends a chapters-only book and hands any
+// other on to sanitizing.
+func TestChapterDetectingBranches(t *testing.T) {
+	for _, tc := range []struct {
+		cur  State
+		o    Outcome
+		want State
+	}{
+		{ASR, Outcome{}, Sanitizing},
+		{ASR, Outcome{Windowed: true}, ChapterDetecting},
+		{ASR, Outcome{Windowed: true, Goal: GoalChapters}, ChapterDetecting},
+		{ChapterDetecting, Outcome{}, Sanitizing},
+		{ChapterDetecting, Outcome{Goal: GoalChapters}, Done},
+	} {
+		if n, _, err := NextState(KindAudio, tc.cur, tc.o); err != nil || n != tc.want {
+			t.Errorf("NextState(%s, %+v) = %q, %v; want %q", tc.cur, tc.o, n, err, tc.want)
+		}
+	}
+	// The optimistic mainline skips it, like the other conditional stages; a
+	// chapters-only book's path goes through it to done.
+	if MainlineNext(KindAudio, ASR) != Sanitizing || MainlineNext(KindAudio, ChapterDetecting) != Sanitizing {
+		t.Errorf("mainline through chapter_detecting = %q / %q", MainlineNext(KindAudio, ASR),
+			MainlineNext(KindAudio, ChapterDetecting))
+	}
+	if PathNext(KindAudio, "", ASR) != Sanitizing || PathNext(KindAudio, GoalChapters, ASR) != ChapterDetecting ||
+		PathNext(KindAudio, GoalChapters, ChapterDetecting) != Done || PathNext(KindAudio, GoalChapters, Splitting) != ASR {
+		t.Error("PathNext doesn't route a chapters-only book through chapter_detecting to done")
 	}
 }

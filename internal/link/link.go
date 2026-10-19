@@ -189,7 +189,9 @@ type Attachments struct {
 	Recaps     bool `json:"recaps"`
 	// Description: description.json (Phase 1c; an older server sends none).
 	Description bool `json:"description"`
-	Bridge      bool `json:"bridge"`
+	// Chapters: chapters.json (Phase 1d; an older server sends none).
+	Chapters bool `json:"chapters"`
+	Bridge   bool `json:"bridge"`
 }
 
 // BookFile is one of a Book's files, its path relative to the library root.

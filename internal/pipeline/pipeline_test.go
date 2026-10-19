@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -315,9 +316,11 @@ func genM4BWithTitles(t *testing.T, ffmpeg, dir string, titles []string) string 
 }
 
 // TestPipelineParksUnnormalizableMarkers is the routing guard: a book whose markers
-// are not a clean contiguous run (a gap), AND a markerless file (zero usable
-// markers), both route to markers_normalizing - rather than the stub advancing them
-// into a manifest-less split that fails misleadingly. With no agent backend available,
+// are not a clean contiguous run (a gap) routes to markers_normalizing - rather than
+// the stub advancing it into a manifest-less split that fails misleadingly - while a
+// markerless file (zero usable markers, Phase 1d) is transcribed in windows, gets
+// its chapters from chapter_detecting and reaches the first agent stage with a
+// detected manifest. With no agent backend available,
 // the stage parks needs_attention with AgentUnavailableMsg (an actionable,
 // Retry-able precondition); the marker-mapping itself is exercised by the agent-stage
 // tests with a fake runner.
@@ -344,9 +347,10 @@ func TestPipelineParksUnnormalizableMarkers(t *testing.T) {
 
 	for _, tc := range []struct {
 		name, src string
+		want      state.State
 	}{
-		{"non-contiguous markers", gapBook},
-		{"markerless file", bareBook},
+		{"non-contiguous markers", gapBook, state.MarkersNormalizing},
+		{"markerless file", bareBook, state.SpellingResearch},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -385,8 +389,11 @@ func TestPipelineParksUnnormalizableMarkers(t *testing.T) {
 			if final.Status != string(state.StatusNeedsAttention) {
 				t.Fatalf("status = %q (state %q, err %q), want needs_attention", final.Status, final.State, final.Error)
 			}
-			if final.State != string(state.MarkersNormalizing) {
-				t.Errorf("parked at state %q, want markers_normalizing", final.State)
+			if final.State != string(tc.want) {
+				t.Errorf("parked at state %q, want %s", final.State, tc.want)
+			}
+			if m, err := audio.ReadManifest(final.WorkDir); err != nil || m.Detected != (tc.want == state.SpellingResearch) {
+				t.Errorf("manifest detected = %v (%v)", m.Detected, err)
 			}
 			if final.Error != AgentUnavailableMsg {
 				t.Errorf("park reason = %q, want %q", final.Error, AgentUnavailableMsg)
@@ -1530,5 +1537,140 @@ func TestASRStageResumeProgressBaseline(t *testing.T) {
 		if i > 0 && d < reports[i-1] {
 			t.Errorf("report[%d] = %d < previous %d (progress not monotonic)", i, d, reports[i-1])
 		}
+	}
+}
+
+// TestPipelineChaptersGoal drives the chapters-only run (the chapters.detect job's
+// engine book) through the real scheduler: a markerless file stops done after
+// chapter_detecting with its list written; continued (ContinueChapters), it runs on
+// from splitting into the rest of the pipeline on the same transcripts; a file that
+// has chapter markers fails at inspect with the sentence the job reports.
+func TestPipelineChaptersGoal(t *testing.T) {
+	ffmpeg, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		t.Skip("ffmpeg not installed")
+	}
+	ffprobe, err := exec.LookPath("ffprobe")
+	if err != nil {
+		t.Skip("ffprobe not installed")
+	}
+	dir := t.TempDir()
+	bare := filepath.Join(dir, "bare.m4a")
+	if out, cerr := exec.Command(ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+		"-f", "lavfi", "-i", "sine=frequency=220:duration=3", "-c:a", "aac", bare).CombinedOutput(); cerr != nil {
+		t.Fatalf("generate markerless m4a: %v: %s", cerr, out)
+	}
+	chaptered := genFixtureM4B(t, ffmpeg, t.TempDir())
+	workRoot := filepath.Join(dir, "work")
+	db, err := store.Open(context.Background(), filepath.Join(dir, store.FileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	fake := newFakeBackend()
+	exe := NewExecutor(Config{DB: db, FFmpeg: ffmpeg, FFprobe: ffprobe, DataDir: dir, ASR: fakeASR(fake),
+		Fallback: scheduler.NewStubExecutor(time.Millisecond, 2*time.Millisecond)})
+	exe.redetectAgent = func(context.Context) (agent.Runner, agent.Availability) {
+		return nil, agent.Availability{Detail: "no agent CLI found"}
+	}
+	sched := scheduler.New(db, events.NewHub(1024), exe, 2, workRoot, true)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); _ = sched.Start(ctx) }()
+	defer func() { cancel(); <-done }()
+
+	b, err := db.CreateBook(context.Background(), store.NewBook{SourcePath: bare, WorkDir: filepath.Join(workRoot, "bare"),
+		Title: "Bare", Goal: state.GoalChapters})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sched.Notify()
+	final := waitState(t, db, b.ID, string(state.Done), 30*time.Second)
+	if final.State != string(state.Done) {
+		t.Fatalf("state %q status %q err %q, want done", final.State, final.Status, final.Error)
+	}
+	list, err := ReadDetectedChapters(final.WorkDir)
+	if err != nil || len(list.Chapters) != 1 || !list.CurrentFor(final.WorkDir) {
+		t.Fatalf("chapters_detected.json = %+v, %v", list, err)
+	}
+	if scheduler.SentinelExists(final.WorkDir, string(state.Sanitizing)) {
+		t.Fatal("a chapters-only book ran past chapter_detecting")
+	}
+	decodes := fake.count(1)
+
+	if err := db.ContinueChapters(context.Background(), b.ID, string(state.Done), string(state.Splitting), store.NewBook{Title: "Bare", ContribMode: "local"}, store.GenerateBook{}); err != nil {
+		t.Fatal(err)
+	}
+	sched.Notify()
+	cont := waitStatus(t, db, b.ID, string(state.StatusNeedsAttention), 30*time.Second)
+	if cont.State != string(state.SpellingResearch) {
+		t.Fatalf("continued book at %q (%s), want parked at spelling_research", cont.State, cont.Error)
+	}
+	if fake.count(1) != decodes {
+		t.Fatalf("the continue transcribed again (%d decodes, was %d)", fake.count(1), decodes)
+	}
+
+	c, err := db.CreateBook(context.Background(), store.NewBook{SourcePath: chaptered, WorkDir: filepath.Join(workRoot, "ch"),
+		Title: "Chaptered", Goal: state.GoalChapters})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sched.Notify()
+	failed := waitStatus(t, db, c.ID, string(state.StatusFailed), 30*time.Second)
+	if failed.Status != string(state.StatusFailed) || failed.Error != ErrHasMarkerChapters.Error() {
+		t.Fatalf("chaptered book: status %q err %q, want failed with %q", failed.Status, failed.Error, ErrHasMarkerChapters)
+	}
+}
+
+// A chapters-only book whose inspect made no windows fails with what is true of
+// its file: chapters it has, or why the narration can't be searched.
+func TestChaptersRefusal(t *testing.T) {
+	markers := audio.Manifest{Style: audio.StyleMarkers, Duration: 3600}
+	for _, tc := range []struct {
+		name  string
+		m     audio.Manifest
+		stats audio.MarkerStats
+		want  error
+	}{
+		{"files", audio.Manifest{Style: audio.StyleFiles, Duration: 3600}, audio.MarkerStats{}, ErrHasFileChapters},
+		{"markers", markers, audio.MarkerStats{Seen: 12, Recognized: 12, Contiguous: true, Complete: true}, ErrHasMarkerChapters},
+		{"broken markers", markers, audio.MarkerStats{Seen: 3}, ErrHasMarkerChapters},
+		{"one partial marker", markers, audio.MarkerStats{Seen: 1, Recognized: 1, Contiguous: true}, ErrPartialMarker},
+		{"no length, no marker", audio.Manifest{Style: audio.StyleMarkers}, audio.MarkerStats{}, ErrUnknownLength},
+		{"no length, one marker", audio.Manifest{Style: audio.StyleMarkers}, audio.MarkerStats{Seen: 1}, ErrUnknownLength},
+	} {
+		if got := chaptersRefusal(tc.m, tc.stats); !errors.Is(got, tc.want) {
+			t.Errorf("%s: %v, want %v", tc.name, got, tc.want)
+		}
+	}
+	for _, e := range []error{ErrHasMarkerChapters, ErrHasFileChapters, ErrPartialMarker, ErrUnknownLength} {
+		if !slices.Contains(ChaptersRefusals, e) {
+			t.Errorf("%q is not among the refusals the job reads", e)
+		}
+	}
+}
+
+// A file whose one marker covers it is transcribed in windows, and inspect's log
+// says so only: never that its marker went unread for marker normalization to map.
+func TestInspectNotesATitleMarkerAsWindows(t *testing.T) {
+	ffmpeg, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		t.Skip("ffmpeg not installed")
+	}
+	ffprobe, err := exec.LookPath("ffprobe")
+	if err != nil {
+		t.Skip("ffprobe not installed")
+	}
+	src := genM4BWithTitles(t, ffmpeg, t.TempDir(), []string{"The Book"})
+	var notes []string
+	_, err = NewExecutor(Config{FFmpeg: ffmpeg, FFprobe: ffprobe}).Execute(context.Background(),
+		store.Book{SourcePath: src, WorkDir: t.TempDir()}, state.Inspecting,
+		scheduler.StageReport{Note: func(s string) { notes = append(notes, s) }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := strings.Join(notes, "\n")
+	if !strings.Contains(log, "transcribing in 1 window") || strings.Contains(log, "marker normalization") {
+		t.Fatalf("notes = %q", notes)
 	}
 }

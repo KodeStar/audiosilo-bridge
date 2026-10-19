@@ -272,6 +272,9 @@ type Manifest struct {
 	Duration     float64   `json:"duration"`
 	ChapterCount int       `json:"chapter_count"`
 	Chapters     []Chapter `json:"chapters"`
+	// Detected (Phase 1d) marks a markers-style manifest whose chapters were found
+	// in the narration (chapter_detecting) rather than read from the file.
+	Detected bool `json:"detected,omitempty"`
 }
 
 // audioExts mirrors audiosilo-meta pkg/scan's recognized audiobook extensions, so
@@ -388,6 +391,12 @@ func splitWordChapterTitle(s string) (words, title string) {
 	}
 	return strings.TrimSpace(s[:cut]), strings.TrimSpace(s[cut+delimLen:])
 }
+
+// ParseNumberWords parses a spelled-out English cardinal ("twenty one",
+// "twenty-one", "one hundred and four") with the marker parser's vocabulary,
+// rejecting any word it doesn't know. Exported so the narration's chapter
+// headings (internal/chapterdetect) read numbers exactly as marker titles do.
+func ParseNumberWords(s string) (int, bool) { return parseChapterNumberWords(s) }
 
 // parseChapterNumberWords parses the conventional English cardinal form used by
 // audiobook chapter markers. It deliberately rejects unknown words rather than

@@ -88,17 +88,19 @@ func (f *fakeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		var body map[string]any
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		f.rescans = append(f.rescans, body)
-		_ = json.NewEncoder(w).Encode(map[string]any{"path": body["path"], "attachments": map[string]bool{"characters": true, "recaps": true, "description": true, "bridge": true}})
+		_ = json.NewEncoder(w).Encode(map[string]any{"path": body["path"], "attachments": map[string]bool{"characters": true, "recaps": true, "description": true, "chapters": true, "bridge": true}})
 	default:
 		http.NotFound(w, r)
 	}
 }
 
-func (f *fakeServer) add(id int64, path string, params string) {
+func (f *fakeServer) add(id int64, path string, params string) { f.addKind(id, Kind, path, params) }
+
+func (f *fakeServer) addKind(id int64, kind, path string, params string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	lib := int64(1)
-	f.queue = append(f.queue, link.Job{ID: id, Kind: Kind, LibraryID: &lib, Path: &path, Params: json.RawMessage(params), Attempts: 1, State: "claimed"})
+	f.queue = append(f.queue, link.Job{ID: id, Kind: kind, LibraryID: &lib, Path: &path, Params: json.RawMessage(params), Attempts: 1, State: "claimed"})
 }
 
 // final is the last non-running state reported for id ("" for none).
@@ -151,6 +153,7 @@ func (l *libraries) Status(id int64) (link.LibraryStatus, bool) {
 // hooks is a test executor: the scheduler's stub with a hook per stage, and the
 // validating stage leaving sidecars in the work dir as the real one does.
 type hooks struct {
+	t     *testing.T
 	stub  *scheduler.StubExecutor
 	db    *store.DB
 	mu    sync.Mutex
@@ -159,6 +162,11 @@ type hooks struct {
 	// estimated, when set, is the fact pass's spend as a codex run records it: a
 	// complete estimate from the pricing table, no reported cost.
 	estimated float64
+	// windowed makes asr report a windows transcription (Phase 1d), so
+	// chapter_detecting runs and leaves a detected list (detectChapters);
+	// inspectErr fails inspect with that sentence.
+	windowed   bool
+	inspectErr error
 }
 
 func (e *hooks) Execute(ctx context.Context, b store.Book, st state.State, r scheduler.StageReport) (scheduler.StageResult, error) {
@@ -180,7 +188,22 @@ func (e *hooks) Execute(ctx context.Context, b store.Book, st state.State, r sch
 		if st == state.Contributing {
 			return scheduler.StageResult{}, scheduler.ParkWithCode(state.ParkCoreNeeded, "the book needs a core record first")
 		}
+		if st == state.ChapterDetecting {
+			return scheduler.StageResult{}, scheduler.ParkWithCode(state.ParkChaptersNotDetected, "couldn't find the chapters")
+		}
 		return scheduler.StageResult{}, scheduler.ParkWithCode(state.ParkAgentValidationExhausted, "the fact pass kept failing its checks")
+	}
+	e.mu.Lock()
+	windowed, inspectErr := e.windowed, e.inspectErr
+	e.mu.Unlock()
+	switch {
+	case st == state.Inspecting && inspectErr != nil:
+		return scheduler.StageResult{}, inspectErr
+	case st == state.ASR && windowed:
+		res := scheduler.StageResult{Windowed: true}
+		return res, scheduler.WriteSentinel(b.WorkDir, string(st), res)
+	case st == state.ChapterDetecting:
+		detectChapters(e.t, b)
 	}
 	switch st {
 	case state.FactPass:
@@ -254,7 +277,7 @@ func newHarness(t *testing.T) *harness {
 	}
 	libs := &libraries{root: root}
 	libs.writable.Store(true)
-	exec := &hooks{stub: scheduler.NewStubExecutor(time.Millisecond, 2*time.Millisecond), db: db, parks: map[string]int{}, block: map[string]chan struct{}{}}
+	exec := &hooks{t: t, stub: scheduler.NewStubExecutor(time.Millisecond, 2*time.Millisecond), db: db, parks: map[string]int{}, block: map[string]chan struct{}{}}
 	work := filepath.Join(dir, "work")
 	sched := scheduler.New(db, events.NewHub(256), exec, 2, work, false)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -273,11 +296,18 @@ func (hr *harness) handler() *Handler {
 		Poll: 10 * time.Millisecond, IdlePoll: 10 * time.Millisecond, Recheck: time.Hour, Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
 }
 
-// runner runs h's jobs until stopped (the returned func), as the Bridge would.
-func (hr *harness) runner(h *Handler) (stop func()) {
+// runner runs h's jobs (and more's) until stopped (the returned func), as the
+// Bridge would.
+func (hr *harness) runner(h *Handler, more ...jobs.Handler) (stop func()) {
+	return hr.runnerOf(append([]jobs.Handler{h}, more...)...)
+}
+
+// runnerOf runs the handlers' jobs until stopped (the returned func): it claims
+// only their kinds.
+func (hr *harness) runnerOf(handlers ...jobs.Handler) (stop func()) {
 	r := jobs.New(hr.db, func() jobs.Server { return hr.cl }, nil, jobs.Options{Keepalive: 30 * time.Millisecond,
 		ProgressEvery: 5 * time.Millisecond, Wait: 10 * time.Millisecond, RetryEvery: 20 * time.Millisecond,
-		ServerID: func() string { return "srv" }, Log: slog.New(slog.NewTextHandler(io.Discard, nil))}, h)
+		ServerID: func() string { return "srv" }, Log: slog.New(slog.NewTextHandler(io.Discard, nil))}, handlers...)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { defer close(done); r.Run(ctx) }()

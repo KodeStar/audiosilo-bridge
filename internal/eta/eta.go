@@ -109,12 +109,15 @@ var stageUnits = map[state.State]stageUnit{
 	state.MarkersNormalizing: {unitBook, 180},
 	state.Splitting:          {unitChapter, 4},
 	state.ASR:                {unitChapter, 36},
-	state.Sanitizing:         {unitChapter, 1},
-	state.QASweep:            {unitBook, 10},
-	state.QAAdjudicating:     {unitBook, 300},
-	state.Retranscribing:     {unitChapter, 60},
-	state.SpellingResearch:   {unitBook, 600},
-	state.Correcting:         {unitBook, 15},
+	// ChapterDetecting finds a whole book's chapters and cuts them from the window
+	// FLACs: a minute is the spike's ballpark for a long book.
+	state.ChapterDetecting: {unitBook, 60},
+	state.Sanitizing:       {unitChapter, 1},
+	state.QASweep:          {unitBook, 10},
+	state.QAAdjudicating:   {unitBook, 300},
+	state.Retranscribing:   {unitChapter, 60},
+	state.SpellingResearch: {unitBook, 600},
+	state.Correcting:       {unitBook, 15},
 	// Extracting is a zip read plus HTML-to-text over a whole book: mechanical and
 	// fast, but not free on a 600-page novel. ChapterMapping mirrors
 	// MarkersNormalizing, the agent stage it is modelled on.
@@ -154,6 +157,10 @@ type Book struct {
 	// MaxAgentsPerBook is the fan-out width for supported stages. Zero preserves
 	// the historical serial assumption for direct callers.
 	MaxAgentsPerBook int
+	// Goal is the book's goal (books.goal): state.GoalChapters runs for its
+	// chapters only (Phase 1d), so its path goes from asr to chapter_detecting and
+	// ends there (state.PathNext).
+	Goal string
 }
 
 // UnitIsBook reports whether a stage is measured in whole books (one unit per run)
@@ -262,11 +269,13 @@ func remainingSegments(b Book, rates map[string]float64) []segment {
 		return nil
 	}
 	var segs []segment
-	// The remaining path is optimistic: state.MainlineNext takes the happy branch at
-	// every fork (skipping the conditional stages and routing the off-mainline stages
-	// back onto the mainline), so following it from any start is finite - every fork
-	// moves toward done and no off-mainline stage is re-entered.
-	for cur := b.State; cur != "" && !state.IsTerminal(cur); cur = state.MainlineNext(b.Kind, cur) {
+	// The remaining path is optimistic: state.PathNext takes the happy branch at every
+	// fork (state.MainlineNext: skipping the conditional stages and routing the
+	// off-mainline stages back onto the mainline), except that a chapters-only book
+	// (Goal) goes from asr through chapter_detecting to done, so following it from any
+	// start is finite - every fork moves toward done and no off-mainline stage is
+	// re-entered.
+	for cur := b.State; cur != "" && !state.IsTerminal(cur); cur = state.PathNext(b.Kind, b.Goal, cur) {
 		if state.IsWaypoint(cur) {
 			continue // no lane, no cost
 		}

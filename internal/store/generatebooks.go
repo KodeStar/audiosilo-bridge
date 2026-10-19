@@ -24,7 +24,16 @@ type GenerateBook struct {
 // PutGenerateBook records (or replaces) the engine book of a server job. A job
 // that maps to a new book is open again, so its end is cleared.
 func (db *DB) PutGenerateBook(ctx context.Context, g GenerateBook) error {
-	_, err := db.sql.ExecContext(ctx,
+	return putGenerateBook(ctx, db.sql, g)
+}
+
+// execer is what putGenerateBook writes through: the database or a transaction.
+type execer interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
+func putGenerateBook(ctx context.Context, ex execer, g GenerateBook) error {
+	_, err := ex.ExecContext(ctx,
 		`INSERT INTO generate_books (server_job_id, book_id, library_id, rel_path, created_at, ended_at, swept_at)
 		 VALUES (?, ?, ?, ?, ?, '', '')
 		 ON CONFLICT(server_job_id) DO UPDATE SET book_id = excluded.book_id, library_id = excluded.library_id,
@@ -138,14 +147,16 @@ type SweepBook struct {
 	Status  string
 }
 
-// UnsweptGenerateBooks returns the engine books of the jobs that ended at or
-// before cutoff whose transcripts weren't swept yet (the retention sweep's work
-// list), each book once.
+// UnsweptGenerateBooks returns the engine books whose jobs all ended, the last at or
+// before cutoff, and whose transcripts weren't swept yet (the retention sweep's work
+// list), each book once. A book a generate job continued (Phase 1d) has two jobs'
+// mappings: its retention counts from the later job's end, never the chapters job's.
 func (db *DB) UnsweptGenerateBooks(ctx context.Context, cutoff time.Time) ([]SweepBook, error) {
 	rows, err := db.sql.QueryContext(ctx,
 		`SELECT id, work_dir, kind, state, status FROM books WHERE id IN (
 		     SELECT book_id FROM generate_books
-		      WHERE book_id IS NOT NULL AND ended_at != '' AND ended_at <= ? AND swept_at = '')
+		      WHERE book_id IS NOT NULL AND swept_at = ''
+		      GROUP BY book_id HAVING MIN(ended_at) != '' AND MAX(ended_at) <= ?)
 		 ORDER BY id`, timestamp(cutoff))
 	if err != nil {
 		return nil, err
@@ -192,12 +203,14 @@ type FinishedBook struct {
 }
 
 // FinishedBooks returns every done book's kind, duration, chapter count and
-// agent spend (superseded runs included), oldest first.
+// agent spend (superseded runs included), oldest first. A chapters-only book
+// (goal chapters) is left out: it is done without characters or recaps, so its
+// zero spend would drag the per-hour estimate down.
 func (db *DB) FinishedBooks(ctx context.Context) ([]FinishedBook, error) {
 	rows, err := db.sql.QueryContext(ctx,
 		`SELECT b.kind, b.duration_sec, b.chapters, COALESCE((SELECT SUM(`+budgetCostSQL+`)
 		     FROM stage_runs WHERE stage_runs.book_id = b.id), 0)
-		   FROM books b WHERE b.state = 'done' ORDER BY b.id`)
+		   FROM books b WHERE b.state = 'done' AND b.goal = '' ORDER BY b.id`)
 	if err != nil {
 		return nil, err
 	}

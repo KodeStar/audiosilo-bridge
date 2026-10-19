@@ -567,7 +567,7 @@ func TestARegenerateKeepsTheKeptDescriptionVouchedFor(t *testing.T) {
 	}
 }
 
-// keptDescription reads the description object only beside a description.json
+// keptObject reads the description object only beside a description.json
 // that is a regular file, and only from a bridge.json that holds one.
 func TestKeptDescription(t *testing.T) {
 	t.Parallel()
@@ -575,23 +575,23 @@ func TestKeptDescription(t *testing.T) {
 	adir := filepath.Join(dir, AttachDir)
 	mustWrite(t, filepath.Join(adir, "bridge.json"),
 		`{"job_id":9,"description":{"job_id":8,"generated_at":"2026-10-16T12:00:00Z","from":"opening_notes","chapters":2,"checked_against":"book text"}}`)
-	if d := keptDescription(dir, ""); d != nil {
+	if d := keptObject[DescriptionProvenance](dir, "", descriptionName, "description"); d != nil {
 		t.Fatalf("no description.json, kept %+v", d)
 	}
 	if err := os.Symlink(filepath.Join(t.TempDir(), "elsewhere.json"), filepath.Join(adir, "description.json")); err != nil {
 		t.Fatal(err)
 	}
-	if d := keptDescription(dir, ""); d != nil {
+	if d := keptObject[DescriptionProvenance](dir, "", descriptionName, "description"); d != nil {
 		t.Fatalf("a linked description.json, kept %+v", d)
 	}
 	_ = os.Remove(filepath.Join(adir, "description.json"))
 	mustWrite(t, filepath.Join(adir, "description.json"), testDescription)
-	if d := keptDescription(dir, ""); d == nil || d.JobID != 8 || d.CheckedAgainst != "book text" {
+	if d := keptObject[DescriptionProvenance](dir, "", descriptionName, "description"); d == nil || d.JobID != 8 || d.CheckedAgainst != "book text" {
 		t.Fatalf("kept %+v", d)
 	}
 	for _, prov := range []string{`{"job_id":9}`, `{"job_id":9,"description":null}`, `{"description":"x"}`, `not json`} {
 		mustWrite(t, filepath.Join(adir, "bridge.json"), prov)
-		if d := keptDescription(dir, ""); d != nil {
+		if d := keptObject[DescriptionProvenance](dir, "", descriptionName, "description"); d != nil {
 			t.Fatalf("bridge.json %s, kept %+v", prov, d)
 		}
 	}
