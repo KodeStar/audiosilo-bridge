@@ -624,7 +624,7 @@ func TestStageThroughTheJobDirsRoot(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	job := filepath.Join(dir, "00000000000000aa")
-	root, err := stage(job, agent.Request{Dir: stagedDir(t), Prompt: "p"}, agent.IDClaude, 60)
+	root, err := stage(job, agent.Request{Dir: stagedDir(t), Prompt: "p"}, agent.IDClaude, 60, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -801,5 +801,127 @@ func TestRunStoppedMidRunKeepsUsage(t *testing.T) {
 				t.Fatalf("result = %+v, want usage %+v and no text", res, tc.want)
 			}
 		})
+	}
+}
+
+// handoffRunner is a runner.json of a container with no claude credential that
+// takes a hand-off (handoff) or not.
+func handoffRunner(handoff bool) agentproto.Runner {
+	return agentproto.Runner{Protocol: 1, Version: "0.3.0", HeartbeatAt: time.Now(), Slots: 1, Handoff: handoff,
+		CLIs: map[string]agentproto.CLI{"claude": {Version: "2.1.300"}, "codex": {Version: "0.162.1"}}}
+}
+
+// The vault's credential stands in for a container that has none and takes a
+// hand-off: the agent is available, billed as its kind, and each run gets a
+// credential.json the runner reads; the job dir is gone after the run.
+func TestHandoffCredentialIsStaged(t *testing.T) {
+	t.Parallel()
+	r, dir := newTestRunner(t, agent.IDClaude)
+	since := time.Date(2026, 10, 19, 9, 0, 0, 0, time.UTC)
+	vault := func(cli string) (string, string, time.Time, bool) {
+		if cli != "claude" {
+			return "", "", time.Time{}, false
+		}
+		return agentproto.CredentialOAuthToken, "sk-ant-oat01-vault", since, true
+	}
+	r.credential = vault
+	writeRunnerJSON(t, dir, handoffRunner(true))
+	st := r.Status()
+	if !st.Available || !st.Handoff || st.CLIs["claude"].Credential != agentproto.CredentialOAuthToken ||
+		!st.CLIs["claude"].CredentialSince.Equal(since) || !st.Subscription(agent.IDClaude) {
+		t.Fatalf("status = %+v", st)
+	}
+	var seen atomic.Value
+	fake := &fakeRunner{fn: func(job string) agentproto.Exit {
+		raw, err := os.ReadFile(filepath.Join(job, agentproto.CredentialDir, agentproto.CredentialFile))
+		if err == nil {
+			seen.Store(string(raw))
+		}
+		info, _ := os.Stat(filepath.Join(job, agentproto.CredentialDir))
+		if info != nil && info.Mode()&os.ModeSticky != 0 {
+			seen.Store("sticky credential dir")
+		}
+		mustWrite(t, filepath.Join(job, agentproto.StdoutFile), claudeOK)
+		return agentproto.Exit{}
+	}}
+	fake.start(t, dir)
+	if _, err := r.Run(context.Background(), agent.Request{Dir: stagedDir(t), Prompt: "p", Timeout: time.Minute}); err != nil {
+		t.Fatal(err)
+	}
+	c, err := agentproto.DecodeCredential([]byte(seen.Load().(string)), "claude")
+	if err != nil || c.Value != "sk-ant-oat01-vault" || c.Kind != agentproto.CredentialOAuthToken {
+		t.Fatalf("credential.json = %v, %+v", err, c)
+	}
+	assertNoJobDirs(t, dir)
+}
+
+// No hand-off: the container's own credential is used (nothing staged), a
+// runner that can't take one gets nothing (and says to update it), and no vault
+// credential leaves the agent unavailable.
+func TestHandoffNotStaged(t *testing.T) {
+	t.Parallel()
+	vault := func(string) (string, string, time.Time, bool) {
+		return agentproto.CredentialAPIKey, "sk-ant-api-vault", time.Now(), true
+	}
+	t.Run("container has its own", func(t *testing.T) {
+		t.Parallel()
+		r, dir := newTestRunner(t, agent.IDClaude) // oauth_token in the container
+		r.credential = vault
+		rj := handoffRunner(true)
+		rj.CLIs["claude"] = agentproto.CLI{Version: "2.1.300", Credential: "oauth_token"}
+		writeRunnerJSON(t, dir, rj)
+		var staged atomic.Bool
+		fake := &fakeRunner{fn: func(job string) agentproto.Exit {
+			staged.Store(present(job, agentproto.CredentialDir))
+			mustWrite(t, filepath.Join(job, agentproto.StdoutFile), claudeOK)
+			return agentproto.Exit{}
+		}}
+		fake.start(t, dir)
+		if _, err := r.Run(context.Background(), agent.Request{Dir: stagedDir(t), Prompt: "p", Timeout: time.Minute}); err != nil {
+			t.Fatal(err)
+		}
+		if staged.Load() || r.Status().Handoff {
+			t.Fatal("the container's own credential wins: nothing is handed over")
+		}
+	})
+	t.Run("old runner", func(t *testing.T) {
+		t.Parallel()
+		r, dir := newTestRunner(t, agent.IDClaude)
+		r.credential = vault
+		writeRunnerJSON(t, dir, handoffRunner(false))
+		st := r.Status()
+		if st.Available || !strings.Contains(st.Detail, "update the agent image") {
+			t.Fatalf("status = %+v", st)
+		}
+	})
+	t.Run("no vault credential", func(t *testing.T) {
+		t.Parallel()
+		r, dir := newTestRunner(t, agent.IDClaude)
+		writeRunnerJSON(t, dir, handoffRunner(true))
+		st := r.Status()
+		if st.Available || !strings.Contains(st.Detail, "Accounts tab") {
+			t.Fatalf("status = %+v", st)
+		}
+	})
+}
+
+// A refusal of the vault's credential ends when the Accounts tab replaces it
+// (its set time moves).
+func TestHandoffRefusalEndsOnReplace(t *testing.T) {
+	t.Parallel()
+	r, dir := newTestRunner(t, agent.IDClaude)
+	var since atomic.Value
+	since.Store(time.Date(2026, 10, 19, 9, 0, 0, 0, time.UTC))
+	r.credential = func(string) (string, string, time.Time, bool) {
+		return agentproto.CredentialAPIKey, "sk-ant-api-vault", since.Load().(time.Time), true
+	}
+	writeRunnerJSON(t, dir, handoffRunner(true))
+	r.noteRefusal(r.Status().CLIs["claude"], "invalid api key")
+	if !r.Status().Refused {
+		t.Fatal("refused")
+	}
+	since.Store(time.Date(2026, 10, 19, 10, 0, 0, 0, time.UTC))
+	if st := r.Status(); st.Refused || !st.Available {
+		t.Fatalf("a replaced credential: %+v", st)
 	}
 }

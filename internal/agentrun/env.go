@@ -68,22 +68,33 @@ func (r *Runner) baseEnv(runDir string) []string {
 
 // childEnv is the environment of one CLI run: baseEnv plus that CLI's own config
 // dir and its one credential, never the other CLI's.
-func (r *Runner) childEnv(cli, runDir string) []string {
+//
+// handed is the Bridge's credential for the run (credential.json), used only
+// when the container has none of its own for cli.
+func (r *Runner) childEnv(cli, runDir string, handed *agentproto.Credential) []string {
 	env := r.baseEnv(runDir)
+	own := r.credentialKind(cli)
 	switch cli {
 	case agentproto.CLIClaude:
 		env = append(env, "CLAUDE_CONFIG_DIR="+filepath.Join(runDir, "claude"))
-		switch r.credentialKind(cli) {
-		case agentproto.CredentialOAuthToken:
+		switch {
+		case own == agentproto.CredentialOAuthToken:
 			env = append(env, envClaudeToken+"="+r.secret(envClaudeToken))
-		case agentproto.CredentialAPIKey:
+		case own == agentproto.CredentialAPIKey:
 			env = append(env, envAnthropic+"="+r.secret(envAnthropic))
+		case handed != nil && handed.Kind == agentproto.CredentialOAuthToken:
+			env = append(env, envClaudeToken+"="+handed.Value)
+		case handed != nil && handed.Kind == agentproto.CredentialAPIKey:
+			env = append(env, envAnthropic+"="+handed.Value)
 		}
 	case agentproto.CLICodex:
 		env = append(env, "CODEX_HOME="+r.codexHome())
-		if r.credentialKind(cli) == agentproto.CredentialAPIKey {
+		switch {
+		case own == agentproto.CredentialAPIKey:
 			key := r.openAIKey()
 			env = append(env, envOpenAI+"="+key, envCodex+"="+key)
+		case own == "" && handed != nil && handed.Kind == agentproto.CredentialAPIKey:
+			env = append(env, envOpenAI+"="+handed.Value, envCodex+"="+handed.Value)
 		}
 	}
 	return env

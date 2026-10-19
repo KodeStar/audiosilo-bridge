@@ -56,8 +56,14 @@ func (r *Runner) execute(ctx context.Context, job *os.Root, id string) agentprot
 		r.redetect.Store(true) // it may have been installed since the last look
 		return unavailable("the agent container has no " + req.CLI + " CLI")
 	}
-	if r.credentialKind(req.CLI) == "" {
-		return unavailable(req.CLI + " has no credential in the agent container")
+	// The Bridge's credential is taken (and its file deleted) before anything
+	// else can run: the CLI never finds it on disk.
+	handed, err := r.takeCredential(job, req.CLI)
+	if err != nil {
+		return refused(err.Error())
+	}
+	if r.credentialKind(req.CLI) == "" && handed == nil {
+		return unavailable(req.CLI + " has no credential: set one on the Bridge's Accounts tab, or give one to the agent container")
 	}
 	prompt, err := agentproto.OpenRegular(job, agentproto.PromptFile)
 	if err != nil {
@@ -97,7 +103,7 @@ func (r *Runner) execute(ctx context.Context, job *os.Root, id string) agentprot
 		path:    cli.path,
 		args:    args,
 		dir:     work,
-		env:     r.childEnv(req.CLI, runDir),
+		env:     r.childEnv(req.CLI, runDir, handed),
 		stdin:   prompt,
 		timeout: time.Duration(req.TimeoutSeconds) * time.Second,
 	})
@@ -128,6 +134,33 @@ func (r *Runner) copyLastMessage(job *os.Root, runDir, id string) {
 	if err := writeNew(job, agentproto.LastMessageFile, b); err != nil {
 		r.log.Warn("agent runner: write last_message.txt", "job", id, "err", err)
 	}
+}
+
+// takeCredential reads the Bridge's credential.json for a run of cli and
+// deletes it (a failed delete refuses the job: the CLI must never find it). It
+// returns nil when there is none, or when the container has a credential of its
+// own for cli (the container's wins, decision 19: its environment and secrets
+// files are the headless override). The value is never logged.
+func (r *Runner) takeCredential(job *os.Root, cli string) (*agentproto.Credential, error) {
+	name := filepath.Join(agentproto.CredentialDir, agentproto.CredentialFile)
+	if _, err := job.Lstat(name); errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	raw, rerr := agentproto.ReadRegular(job, name, agentproto.MaxCredentialFileBytes)
+	if err := job.Remove(name); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return nil, errors.New("couldn't delete the Bridge's credential.json before the run: " + err.Error())
+	}
+	if r.credentialKind(cli) != "" {
+		return nil, nil
+	}
+	if rerr != nil {
+		return nil, errors.New("read the Bridge's credential.json: " + rerr.Error())
+	}
+	c, err := agentproto.DecodeCredential(raw, cli)
+	if err != nil {
+		return nil, err
+	}
+	return &c, nil
 }
 
 // refused is exit.json for a job the runner couldn't run.

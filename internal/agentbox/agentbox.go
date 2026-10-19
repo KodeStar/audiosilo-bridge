@@ -55,6 +55,11 @@ type Options struct {
 	// validates; the app always passes it.
 	ClaimTimeout time.Duration
 	Log          *slog.Logger
+	// Credential is the vault's agent credential for a CLI (the Accounts tab,
+	// decision 19): its kind (agentproto.Credential*), value and when it was set,
+	// ok false for none. nil: nothing to hand over. It is handed to a run only
+	// when the runner takes a hand-off and has no credential of its own.
+	Credential func(cli string) (kind, value string, since time.Time, ok bool)
 }
 
 // Runner implements agent.Runner over the staging protocol.
@@ -63,6 +68,7 @@ type Runner struct {
 	backend      string
 	claimTimeout time.Duration
 	log          *slog.Logger
+	credential   func(cli string) (kind, value string, since time.Time, ok bool)
 
 	now       func() time.Time
 	poll      time.Duration
@@ -92,6 +98,7 @@ func New(opts Options) *Runner {
 		backend:      opts.Backend,
 		claimTimeout: opts.ClaimTimeout,
 		log:          opts.Log,
+		credential:   opts.Credential,
 		now:          time.Now,
 		poll:         defaultPoll,
 		staleFor:     defaultStaleFor,
@@ -221,7 +228,13 @@ func (r *Runner) Run(ctx context.Context, req agent.Request) (agent.Result, erro
 	job := filepath.Join(r.dir, id)
 	defer r.remove(job)
 	timeout := requestTimeout(req.Timeout)
-	root, err := stage(job, req, r.backend, timeout)
+	var handed *agentproto.Credential
+	if st.Handoff {
+		if kind, value, _, ok := r.handoffCredential(); ok {
+			handed = &agentproto.Credential{CLI: r.backend, Kind: kind, Value: value}
+		}
+	}
+	root, err := stage(job, req, r.backend, timeout, handed)
 	if err != nil {
 		return agent.Result{}, r.stagingFailed("write the job into", err)
 	}

@@ -27,6 +27,10 @@ const (
 	outDirMode  = 0o777
 	outFileMode = 0o666
 	requestMode = 0o644
+	// credentialDirMode lets the runner (another uid) delete the handed
+	// credential.json; the agent could anyway put a file there, which the
+	// runner reads strictly and only ever as its own run's credential.
+	credentialDirMode = 0o777
 )
 
 // stage creates the job dir and writes it: work/ (a copy of the staged dir),
@@ -37,7 +41,10 @@ const (
 // made, never through its path, and the dir stays private (0700) until it is
 // whole: nothing the agent does meanwhile can lead a write, or a chmod, out of
 // it. The caller closes the returned Root.
-func stage(job string, req agent.Request, cli string, timeout int) (*os.Root, error) {
+//
+// handed, when set, is the vault's credential for the run: credential.json in
+// its own dir, written before the request so the runner finds it at the claim.
+func stage(job string, req agent.Request, cli string, timeout int, handed *agentproto.Credential) (*os.Root, error) {
 	if err := os.Mkdir(job, 0o700); err != nil {
 		return nil, err
 	}
@@ -45,7 +52,7 @@ func stage(job string, req agent.Request, cli string, timeout int) (*os.Root, er
 	if err != nil {
 		return nil, err
 	}
-	if err := fill(root, req, cli, timeout); err != nil {
+	if err := fill(root, req, cli, timeout, handed); err != nil {
 		_ = root.Close()
 		return nil, err
 	}
@@ -76,9 +83,14 @@ func openMadeDir(path string) (*os.Root, error) {
 
 // fill writes the job into its (still private) dir, opens the dir to the agent
 // uid, and renames request.json into place.
-func fill(root *os.Root, req agent.Request, cli string, timeout int) error {
+func fill(root *os.Root, req agent.Request, cli string, timeout int, handed *agentproto.Credential) error {
 	if err := copyTree(req.Dir, root, agentproto.WorkDir); err != nil {
 		return err
+	}
+	if handed != nil {
+		if err := writeCredential(root, *handed); err != nil {
+			return err
+		}
 	}
 	if err := createFile(root, agentproto.PromptFile, strings.NewReader(req.Prompt), inputFile, true); err != nil {
 		return err
@@ -106,6 +118,20 @@ func fill(root *os.Root, req agent.Request, cli string, timeout int) error {
 		return err
 	}
 	return root.Rename(agentproto.RequestTmpFile, agentproto.RequestFile)
+}
+
+// writeCredential writes credential.json into its own dir: the dir open to the
+// agent uid (not sticky, so the runner can delete the file before the CLI starts),
+// the file read-only and synced.
+func writeCredential(root *os.Root, c agentproto.Credential) error {
+	body, err := json.Marshal(c)
+	if err != nil {
+		return err
+	}
+	if err := mkdir(root, agentproto.CredentialDir, credentialDirMode); err != nil {
+		return err
+	}
+	return createFile(root, filepath.Join(agentproto.CredentialDir, agentproto.CredentialFile), bytes.NewReader(body), inputFile, true)
 }
 
 // copyTree copies the staged dir src into dst under root: regular files only

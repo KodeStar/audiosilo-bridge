@@ -8,8 +8,11 @@
 // A job dir <staging>/<id>/ goes through these steps:
 //
 //	Bridge:  work/ (the staged copy; work/out/ writable by the agent uid),
-//	         prompt.txt, then request.json.tmp renamed to request.json (ready)
-//	Runner:  mkdir claim (atomic), heartbeat touched every 5 s while the CLI runs,
+//	         prompt.txt, credential/credential.json (only when the runner takes a
+//	         hand-off and has no credential of its own for the CLI), then
+//	         request.json.tmp renamed to request.json (ready)
+//	Runner:  mkdir claim (atomic), credential.json read and deleted before the
+//	         CLI starts, heartbeat touched every 5 s while the CLI runs,
 //	         stdout.txt, stderr.txt, last_message.txt (codex), exit.json,
 //	         work/out/ opened for the Bridge to read, done.tmp renamed to done
 //	Bridge:  cancel (to stop a run), harvest of work/out/ after done, then the
@@ -56,6 +59,11 @@ const (
 	ExitFile        = "exit.json"
 	DoneFile        = "done"
 	DoneTmpFile     = "done.tmp"
+	// CredentialDir holds CredentialFile: its own dir (not sticky, unlike the job
+	// dir), so the runner, another uid, can delete the Bridge's file before the
+	// CLI starts.
+	CredentialDir  = "credential"
+	CredentialFile = "credential.json"
 )
 
 // The CLIs the runner runs.
@@ -82,6 +90,10 @@ const (
 	MaxExitBytes      = 64 << 10
 	MaxStdoutBytes    = 64 << 20
 	MaxStderrBytes    = 8 << 20
+	// MaxCredentialFileBytes bounds credential.json, MaxCredentialValueBytes the
+	// credential in it.
+	MaxCredentialFileBytes  = 4 << 10
+	MaxCredentialValueBytes = 2048
 )
 
 // Intervals both sides agree on.
@@ -104,6 +116,62 @@ type Runner struct {
 	HeartbeatAt time.Time      `json:"heartbeat_at"`
 	Slots       int            `json:"slots"`
 	CLIs        map[string]CLI `json:"clis"`
+	// Handoff: the runner takes the Bridge's credential.json for a CLI it has no
+	// credential of its own for (Phase 2b, decision 19). An older runner sends
+	// none, and the Bridge then hands nothing over.
+	Handoff bool `json:"handoff,omitempty"`
+}
+
+// Credential is credential.json: the agent credential the Bridge holds in its
+// vault (the Accounts tab), handed to one run. The runner reads it strictly
+// (DecodeCredential) and deletes it before the CLI starts; a credential the
+// container has itself (its environment or /agent/secrets) wins.
+type Credential struct {
+	CLI   string `json:"cli"`
+	Kind  string `json:"kind"`
+	Value string `json:"value"`
+}
+
+// DecodeCredential reads credential.json strictly for a run of cli: an unknown
+// field, trailing data, an oversized file, another CLI, a kind that CLI doesn't
+// take, or a value that isn't one line of printable text is refused. The value
+// never appears in an error.
+func DecodeCredential(data []byte, cli string) (Credential, error) {
+	if len(data) > MaxCredentialFileBytes {
+		return Credential{}, fmt.Errorf("credential.json is over %d bytes", MaxCredentialFileBytes)
+	}
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	var c Credential
+	if err := dec.Decode(&c); err != nil {
+		return Credential{}, errors.New("credential.json isn't a credential object")
+	}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return Credential{}, errors.New("credential.json: trailing data after the object")
+	}
+	if c.CLI != cli {
+		return Credential{}, fmt.Errorf("credential.json is for %q, the request runs %q", c.CLI, cli)
+	}
+	switch {
+	case cli == CLIClaude && (c.Kind == CredentialOAuthToken || c.Kind == CredentialAPIKey):
+	case cli == CLICodex && c.Kind == CredentialAPIKey:
+	default:
+		return Credential{}, fmt.Errorf("credential.json's kind %q isn't one %s takes", c.Kind, cli)
+	}
+	if c.Value == "" || len(c.Value) > MaxCredentialValueBytes || !printableLine(c.Value) {
+		return Credential{}, errors.New("credential.json's value isn't one line of printable text within the size limit")
+	}
+	return c, nil
+}
+
+// printableLine reports whether s is printable ASCII with no space.
+func printableLine(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] <= ' ' || s[i] > '~' {
+			return false
+		}
+	}
+	return true
 }
 
 // CLI is one CLI's entry in runner.json. Version is empty when the binary isn't
