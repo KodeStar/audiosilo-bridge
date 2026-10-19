@@ -29,6 +29,13 @@ type fakeGitHub struct {
 	badRefresh  bool
 	revokeFails bool
 	denied      bool
+	// refreshDown answers a refresh 502 (counted in downHits, never rotating);
+	// refreshGate, when set, holds a refresh until it is closed, after sending
+	// on refreshSeen.
+	refreshDown bool
+	downHits    int
+	refreshGate chan struct{}
+	refreshSeen chan struct{}
 }
 
 func (f *fakeGitHub) serve(t *testing.T) *httptest.Server {
@@ -40,9 +47,23 @@ func (f *fakeGitHub) serve(t *testing.T) *httptest.Server {
 	})
 	mux.HandleFunc("POST /login/oauth/access_token", func(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()
+		if r.PostForm.Get("grant_type") == "refresh_token" {
+			f.mu.Lock()
+			gate, seen := f.refreshGate, f.refreshSeen
+			f.mu.Unlock()
+			if gate != nil {
+				seen <- struct{}{}
+				<-gate
+			}
+		}
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		if r.PostForm.Get("grant_type") == "refresh_token" {
+			if f.refreshDown {
+				f.downHits++
+				w.WriteHeader(http.StatusBadGateway)
+				return
+			}
 			f.refreshes = append(f.refreshes, r.PostForm.Get("refresh_token"))
 			if f.badRefresh {
 				answer(w, http.StatusOK, map[string]any{"error": "bad_refresh_token"})
@@ -272,6 +293,83 @@ func TestBadRefreshRefuses(t *testing.T) {
 	}
 }
 
+// A refresh that gets no answer from GitHub (unreachable, a 502) never refuses
+// the sign-in: the access token serves until it expires, the refresh is tried
+// again a minute later, and it goes through once GitHub answers.
+func TestRefreshWithoutAnswerKeepsSignIn(t *testing.T) {
+	r := newRig(t)
+	ctx := context.Background()
+	r.signIn(t)
+	hits := func() int { r.fake.mu.Lock(); defer r.fake.mu.Unlock(); return r.fake.downHits }
+	r.fake.mu.Lock()
+	r.fake.refreshDown = true
+	r.fake.mu.Unlock()
+	r.clock.Add(8*time.Hour - time.Minute) // within refreshBefore of the expiry
+	if got, err := r.gh.Token(ctx); err != nil || got != "ghu_first" {
+		t.Fatalf("token = %q, %v (the access token still serves)", got, err)
+	}
+	if _, err := r.gh.Token(ctx); err != nil || hits() != 1 {
+		t.Fatalf("err = %v, refreshes tried = %d (one a minute)", err, hits())
+	}
+	r.clock.Add(2 * time.Minute) // expired, and a minute since the last try
+	if _, err := r.gh.Token(ctx); err == nil || errors.Is(err, ErrRefused) || hits() != 2 {
+		t.Fatalf("err = %v, refreshes tried = %d (an expired token without an answer is no refusal)", err, hits())
+	}
+	if st := r.gh.State(ctx); st.Refused || !st.SignedIn {
+		t.Fatalf("state = %+v", st)
+	}
+	r.fake.mu.Lock()
+	r.fake.refreshDown = false
+	r.fake.mu.Unlock()
+	r.clock.Add(time.Minute)
+	if got, err := r.gh.Token(ctx); err != nil || got != "ghu_r1" {
+		t.Fatalf("token = %q, %v (GitHub answers again)", got, err)
+	}
+}
+
+// A refresh outlives its caller: cut short after GitHub rotated the pair, the
+// new pair would be lost and the sign-in with it.
+func TestRefreshOutlivesItsCaller(t *testing.T) {
+	r := newRig(t)
+	r.signIn(t)
+	r.fake.mu.Lock()
+	r.fake.refreshGate, r.fake.refreshSeen = make(chan struct{}), make(chan struct{}, 1)
+	r.fake.mu.Unlock()
+	r.clock.Add(8 * time.Hour)
+	ctx, cancel := context.WithCancel(context.Background())
+	type answer struct {
+		tok string
+		err error
+	}
+	done := make(chan answer, 1)
+	go func() { tok, err := r.gh.Token(ctx); done <- answer{tok, err} }()
+	<-r.fake.refreshSeen
+	cancel() // the page request went away mid-refresh
+	close(r.fake.refreshGate)
+	got := <-done
+	if got.err != nil || got.tok != "ghu_r1" {
+		t.Fatalf("token = %q, %v", got.tok, got.err)
+	}
+	raw, _ := r.vault.Get(secrets.GitHubUserToken)
+	if !strings.Contains(raw, "ghr_r1") || r.gh.State(context.Background()).Refused {
+		t.Fatal("the rotated pair is kept and the sign-in works")
+	}
+}
+
+// A device flow ended (signed out, cancelled, or replaced by a newer one) while
+// it was finishing stores nothing.
+func TestEndedFlowIsNotKept(t *testing.T) {
+	r := newRig(t)
+	f := &deviceFlow{cancel: func() {}}
+	err := r.gh.keep(context.Background(), f, ghauth.Token{AccessToken: "ghu_late", RefreshToken: "ghr_late"}, "late")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v", err)
+	}
+	if v, _ := r.vault.Get(secrets.GitHubUserToken); v != "" || r.gh.State(context.Background()).SignedIn {
+		t.Fatal("an ended flow's sign-in was stored")
+	}
+}
+
 func TestRefusedUntilSignedInAgain(t *testing.T) {
 	r := newRig(t)
 	ctx := context.Background()
@@ -295,6 +393,29 @@ func TestRefusedUntilSignedInAgain(t *testing.T) {
 	r.fake.polls = 0
 	r.signIn(t)
 	waitFor(t, func() bool { _, err := r.gh.Token(ctx); return err == nil })
+}
+
+// TestOKRecordsWhenTheSignInWorked: a call that worked with the current token
+// moves last_ok_at; one with a replaced token doesn't, and none ends a refusal.
+func TestOKRecordsWhenTheSignInWorked(t *testing.T) {
+	r := newRig(t)
+	ctx := context.Background()
+	r.signIn(t)
+	signedIn := r.gh.State(ctx).LastOKAt
+	r.clock.Add(time.Hour)
+	r.gh.OK(ctx, "ghu_old_replaced")
+	if got := r.gh.State(ctx).LastOKAt; got != signedIn {
+		t.Fatalf("last_ok_at = %q, want %q: a replaced token's call says nothing", got, signedIn)
+	}
+	r.gh.OK(ctx, "ghu_first")
+	if got, want := r.gh.State(ctx).LastOKAt, store.Timestamp(r.clock.Now()); got != want {
+		t.Fatalf("last_ok_at = %q, want %q", got, want)
+	}
+	r.gh.Refused(ctx, "ghu_first")
+	r.gh.OK(ctx, "ghu_first")
+	if _, err := r.gh.Token(ctx); !errors.Is(err, ErrRefused) {
+		t.Fatalf("err = %v, want ErrRefused: a call that worked never ends a refusal", err)
+	}
 }
 
 func TestSignOutRevokesAndDeletes(t *testing.T) {
@@ -344,6 +465,44 @@ func TestSignOutCancelsAFlow(t *testing.T) {
 	}
 	if r.gh.State(context.Background()).Pending != nil {
 		t.Fatal("sign-out ends the flow")
+	}
+}
+
+// Setting or removing another kind never moves the time of the credential in
+// use (agentbox keeps a refusal of it until that time moves); replacing it does.
+func TestAgentCredentialSincePerKind(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	c := &clock{now: time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)}
+	a := NewAgent(secrets.NewMemStore(), db, c.Now, nil)
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	must(a.Set(ctx, AgentClaudeToken, "sk-ant-oat01-x"))
+	set := c.Now()
+	c.Add(time.Hour)
+	must(a.Set(ctx, AgentOpenAIKey, "sk-openai-1"))
+	must(a.Set(ctx, AgentAnthropicKey, "sk-ant-api-1"))
+	keySet := c.Now()
+	must(a.Delete(ctx, AgentOpenAIKey))
+	if kind, _, since, _ := a.Credential(ctx, "claude"); kind != agentproto.CredentialOAuthToken || !since.Equal(set) {
+		t.Fatalf("claude = %q since %v, want the token's own %v", kind, since, set)
+	}
+	c.Add(time.Hour)
+	must(a.Set(ctx, AgentClaudeToken, "sk-ant-oat01-y"))
+	if _, _, since, _ := a.Credential(ctx, "claude"); !since.Equal(c.Now()) {
+		t.Fatalf("a replaced token's time = %v, want %v", since, c.Now())
+	}
+	must(a.Delete(ctx, AgentClaudeToken))
+	if kind, _, since, _ := a.Credential(ctx, "claude"); kind != agentproto.CredentialAPIKey || !since.Equal(keySet) {
+		t.Fatalf("claude = %q since %v, want the key's own %v", kind, since, keySet)
 	}
 }
 

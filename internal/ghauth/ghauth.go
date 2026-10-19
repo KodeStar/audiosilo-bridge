@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -228,8 +229,11 @@ func (c *Client) Poll(ctx context.Context, deviceCode string) (Token, time.Durat
 }
 
 // Wait polls until the admin approves the code (a Token), the code expires
-// (ErrExpired), they cancel (ErrDenied), another error, or ctx ends. sleep
-// waits between polls (a test passes one that doesn't).
+// (ErrExpired), they cancel (ErrDenied), another error, or ctx ends. A poll that
+// gets no answer (GitHub unreachable, a server error, a rate limit) doesn't end
+// the flow: the code still stands, so it polls on, slower (RFC 8628 section
+// 3.5), until the code expires. sleep waits between polls (a test passes one
+// that doesn't).
 func (c *Client) Wait(ctx context.Context, dc DeviceCode, sleep func(context.Context, time.Duration) error) (Token, error) {
 	if sleep == nil {
 		sleep = sleepCtx
@@ -250,10 +254,24 @@ func (c *Client) Wait(ctx context.Context, dc DeviceCode, sleep func(context.Con
 		case errors.Is(err, ErrSlowDown):
 			// GitHub sends the new interval; a missing one is the old plus 5 s.
 			interval = max(next, interval+slowDownStep)
+		case ctx.Err() == nil && unanswered(err):
+			interval += slowDownStep
 		default:
 			return Token{}, err
 		}
 	}
+}
+
+// unanswered reports whether a poll's err is GitHub not answering it: it
+// couldn't be reached (or timed out), or answered a server error or a rate
+// limit without an OAuth error code.
+func unanswered(err error) bool {
+	var ge *Error
+	if errors.As(err, &ge) {
+		return ge.Code == "" && (ge.Status >= http.StatusInternalServerError || ge.Status == http.StatusTooManyRequests)
+	}
+	var ne net.Error
+	return errors.As(err, &ne)
 }
 
 // Refresh trades a refresh token for a new pair (grant_type refresh_token, the

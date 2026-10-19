@@ -46,6 +46,10 @@ type Store interface {
 // refreshBefore is how long before its expiry an access token is refreshed.
 const refreshBefore = 5 * time.Minute
 
+// refreshRetry spaces the refreshes after one that got no answer from GitHub:
+// Token runs at every heartbeat and page poll.
+const refreshRetry = time.Minute
+
 // Errors of the GitHub sign-in.
 var (
 	// ErrNotSignedIn: no GitHub sign-in on this Bridge.
@@ -83,8 +87,12 @@ type GitHub struct {
 	flow    *deviceFlow
 	flowErr string
 	// refreshMu makes the refresh single-flight: GitHub ends the old pair at the
-	// first, so callers wait here and then read the pair it stored.
-	refreshMu sync.Mutex
+	// first, so callers wait here and then read the pair it stored. It guards
+	// refreshErr, the last refresh's failure to get GitHub's answer, and when
+	// (nil and zero after a refresh that worked, a sign-in or a sign-out).
+	refreshMu       sync.Mutex
+	refreshErr      error
+	refreshFailedAt time.Time
 }
 
 type deviceFlow struct {
@@ -191,7 +199,7 @@ func (g *GitHub) wait(ctx context.Context, f *deviceFlow) {
 		}
 	}
 	if err == nil {
-		err = g.store(ctx, tok, login)
+		err = g.keep(ctx, f, tok, login)
 	}
 	g.mu.Lock()
 	current := g.flow == f
@@ -220,6 +228,23 @@ func flowErrorText(err error) string {
 		return err.Error()
 	}
 	return "The sign-in didn't complete: " + err.Error()
+}
+
+// keep stores flow f's sign-in unless f was ended meanwhile (a sign-out, a
+// cancel, a newer sign-in): under the refresh lock, so a sign-out that ends f
+// deletes the sign-in after it is stored, never before (context.Canceled when f
+// is no longer the flow in progress).
+func (g *GitHub) keep(ctx context.Context, f *deviceFlow, tok ghauth.Token, login string) error {
+	g.refreshMu.Lock()
+	defer g.refreshMu.Unlock()
+	g.mu.Lock()
+	current := g.flow == f
+	g.mu.Unlock()
+	if !current {
+		return context.Canceled
+	}
+	g.refreshErr, g.refreshFailedAt = nil, time.Time{}
+	return g.store(ctx, tok, login)
 }
 
 // store seals a new sign-in and records it.
@@ -279,6 +304,7 @@ func (g *GitHub) SignOut(ctx context.Context) (revokeErr error, err error) {
 func (g *GitHub) forget(ctx context.Context) (ghauth.Token, error) {
 	g.refreshMu.Lock()
 	defer g.refreshMu.Unlock()
+	g.refreshErr, g.refreshFailedAt = nil, time.Time{}
 	tok, _ := g.stored()
 	if err := g.o.Vault.Delete(secrets.GitHubUserToken); err != nil {
 		return ghauth.Token{}, err
@@ -304,7 +330,9 @@ func (g *GitHub) stored() (ghauth.Token, error) {
 
 // Token is the sign-in's access token for a REST call, refreshed first when it
 // expires within refreshBefore (the new pair sealed in one write before it is
-// used). ErrNotSignedIn for none, ErrRefused while GitHub refuses it.
+// used). ErrNotSignedIn for none, ErrRefused while GitHub refuses it. A refresh
+// that didn't get GitHub's answer keeps the pair and is tried again a minute
+// later; meanwhile the access token serves until it expires, then it is an error.
 func (g *GitHub) Token(ctx context.Context) (string, error) {
 	g.refreshMu.Lock()
 	defer g.refreshMu.Unlock()
@@ -315,8 +343,12 @@ func (g *GitHub) Token(ctx context.Context) (string, error) {
 	if tok.AccessToken == "" {
 		return "", ErrNotSignedIn
 	}
-	if a, err := g.o.DB.GetAccount(ctx, ProviderGitHub); err == nil && a.RefusedAt != "" {
+	switch a, err := g.o.DB.GetAccount(ctx, ProviderGitHub); {
+	case err == nil && a.RefusedAt != "":
 		return "", ErrRefused
+	case err != nil && !errors.Is(err, store.ErrNotFound):
+		// Unknown whether GitHub refused it: never hand out a refused token.
+		return "", fmt.Errorf("read the GitHub sign-in: %w", err)
 	}
 	now := g.o.Now()
 	if !tok.Expiring() || now.Before(tok.ExpiresAt.Add(-refreshBefore)) {
@@ -326,19 +358,29 @@ func (g *GitHub) Token(ctx context.Context) (string, error) {
 		g.refuse(ctx, "the GitHub sign-in expired (the Bridge was offline for months): sign in again")
 		return "", ErrRefused
 	}
-	fresh, err := g.o.Client.Refresh(ctx, tok.RefreshToken)
-	if err != nil {
-		// Never tried again: GitHub may have spent the refresh token even when the
-		// answer was lost, and a spent one is refused for good. The admin signs in
-		// again.
-		why := "couldn't refresh the GitHub sign-in: sign in again"
-		if errors.Is(err, ghauth.ErrBadRefresh) {
-			why = ghauth.ErrBadRefresh.Error()
-		}
-		g.o.Log.Warn("accounts: refreshing the GitHub sign-in failed", "err", err)
-		g.refuse(ctx, why)
+	if g.refreshErr != nil && now.Sub(g.refreshFailedAt) < refreshRetry {
+		return g.unrefreshed(tok, now, g.refreshErr)
+	}
+	// The refresh runs to its end whatever the caller does meanwhile (a page
+	// request that went away, the heartbeat stopping): cut short after GitHub took
+	// it, the new pair would be lost with the old one already spent.
+	fresh, err := g.o.Client.Refresh(context.WithoutCancel(ctx), tok.RefreshToken)
+	if errors.Is(err, ghauth.ErrBadRefresh) {
+		// GitHub answered: the refresh token is spent or revoked, for good.
+		g.o.Log.Warn("accounts: GitHub refused to refresh the sign-in", "err", err)
+		g.refreshErr, g.refreshFailedAt = nil, time.Time{}
+		g.refuse(ctx, ghauth.ErrBadRefresh.Error())
 		return "", ErrRefused
 	}
+	if err != nil {
+		// No answer from GitHub (unreachable, a server error): the pair is kept and
+		// tried again after refreshRetry. A refresh token GitHub did spend meanwhile
+		// answers bad_refresh_token then, which refuses the sign-in above.
+		g.o.Log.Warn("accounts: refreshing the GitHub sign-in failed; it is tried again in a minute", "err", err)
+		g.refreshErr, g.refreshFailedAt = err, now
+		return g.unrefreshed(tok, now, err)
+	}
+	g.refreshErr, g.refreshFailedAt = nil, time.Time{}
 	if fresh.RefreshToken == "" {
 		// GitHub turned expiry off for the App: the new token doesn't expire.
 		fresh.ExpiresAt, fresh.RefreshExpiresAt = time.Time{}, time.Time{}
@@ -353,19 +395,49 @@ func (g *GitHub) Token(ctx context.Context) (string, error) {
 	return fresh.AccessToken, nil
 }
 
+// unrefreshed is Token's answer while a refresh couldn't get GitHub's answer:
+// the access token until it expires, then why it couldn't be refreshed.
+func (g *GitHub) unrefreshed(tok ghauth.Token, now time.Time, err error) (string, error) {
+	if now.Before(tok.ExpiresAt) {
+		return tok.AccessToken, nil
+	}
+	return "", fmt.Errorf("refresh the GitHub sign-in: %w", err)
+}
+
 // Refused records that GitHub refused token (a 401 on a REST call made with it):
 // the sign-in is not used again until a new one, and the heartbeat says the
 // Bridge can't contribute. A 401 on a token a refresh has since replaced (a call
 // in flight while it refreshed: GitHub ends the old token at once) says nothing
 // about the sign-in and is ignored.
 func (g *GitHub) Refused(ctx context.Context, token string) {
-	g.refreshMu.Lock()
-	cur, _ := g.stored()
-	g.refreshMu.Unlock()
-	if cur.AccessToken == "" || cur.AccessToken != token {
+	if !g.current(token) {
 		return
 	}
 	g.refuse(ctx, RefusedText)
+}
+
+// OK records that a REST call made with token worked (last_ok_at), for the
+// sign-in's current token only, as Refused. It never ends a refusal: only a new
+// sign-in does (a call answered just before GitHub refused the token can land
+// after the refusal).
+func (g *GitHub) OK(ctx context.Context, token string) {
+	if !g.current(token) {
+		return
+	}
+	ctx = context.WithoutCancel(ctx)
+	if a, err := g.o.DB.GetAccount(ctx, ProviderGitHub); err != nil || a.RefusedAt != "" {
+		return
+	}
+	_ = g.o.DB.AccountOK(ctx, ProviderGitHub, g.o.Now())
+}
+
+// current reports whether token is the sign-in's access token, once a refresh
+// in progress is done.
+func (g *GitHub) current(token string) bool {
+	g.refreshMu.Lock()
+	cur, _ := g.stored()
+	g.refreshMu.Unlock()
+	return cur.AccessToken != "" && cur.AccessToken == token
 }
 
 func (g *GitHub) refuse(ctx context.Context, why string) {
@@ -377,11 +449,6 @@ func (g *GitHub) refuse(ctx context.Context, why string) {
 	}
 	g.o.Log.Warn("accounts: GitHub refused the sign-in", "why", why)
 	g.o.OnChange()
-}
-
-// OK records that the sign-in worked now.
-func (g *GitHub) OK(ctx context.Context) {
-	_ = g.o.DB.AccountOK(context.WithoutCancel(ctx), ProviderGitHub, g.o.Now())
 }
 
 // --- the agent's credential ---
@@ -469,12 +536,22 @@ func (a *Agent) Set(ctx context.Context, kind, value string) error {
 	if err := a.vault.Set(kind, value); err != nil {
 		return err
 	}
-	if err := a.db.SignInAccount(ctx, ProviderAgent, "", a.now()); err != nil {
+	now := a.now()
+	if err := a.db.SignInAccount(ctx, kindProvider(kind), "", now); err != nil {
+		return err
+	}
+	if err := a.db.SignInAccount(ctx, ProviderAgent, "", now); err != nil {
 		return err
 	}
 	a.onChange()
 	return nil
 }
+
+// kindProvider is the accounts row that keeps when an agent credential kind was
+// set (the agent's own row keeps when any was): the time Credential reports
+// moves only when that credential changes, so setting another kind never ends a
+// refusal of the one in use.
+func kindProvider(kind string) string { return ProviderAgent + "/" + kind }
 
 // Delete removes the credential of kind ("" removes every agent credential).
 func (a *Agent) Delete(ctx context.Context, kind string) error {
@@ -487,6 +564,9 @@ func (a *Agent) Delete(ctx context.Context, kind string) error {
 	}
 	for _, k := range kinds {
 		if err := a.vault.Delete(k); err != nil {
+			return err
+		}
+		if err := a.db.DeleteAccount(ctx, kindProvider(k)); err != nil {
 			return err
 		}
 	}
@@ -526,8 +606,12 @@ func (a *Agent) Credential(ctx context.Context, cli string) (kind, value string,
 		if err != nil || v == "" {
 			continue
 		}
-		if acc, err := a.db.GetAccount(ctx, ProviderAgent); err == nil {
-			since, _ = time.Parse(time.RFC3339Nano, acc.SignedInAt)
+		// Its own row, else the agent's (a credential set before the rows per kind).
+		for _, p := range []string{kindProvider(o.name), ProviderAgent} {
+			if acc, err := a.db.GetAccount(ctx, p); err == nil {
+				since, _ = time.Parse(time.RFC3339Nano, acc.SignedInAt)
+				break
+			}
 		}
 		return o.kind, v, since, true
 	}

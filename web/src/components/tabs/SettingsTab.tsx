@@ -86,7 +86,13 @@ function SettingsForm({ client }: { client: ApiClient }) {
       setError(parsed.error);
       return;
     }
-    const usd = budgetLocked ? null : parseBudget(budget);
+    // An untouched field sends the budget as loaded: config.yaml may hold one the
+    // field's dollars-and-cents rule refuses, which mustn't block every save.
+    const usd = budgetLocked
+      ? null
+      : budget === String(settings.monthly_budget_usd)
+        ? { value: settings.monthly_budget_usd }
+        : parseBudget(budget);
     if (usd && 'error' in usd) {
       setError(usd.error);
       return;

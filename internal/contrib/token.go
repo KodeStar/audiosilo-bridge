@@ -43,10 +43,11 @@ const ghReuseFor = time.Minute
 
 // DeviceTokens is the Accounts tab's GitHub sign-in (*accounts.GitHub): its
 // access token (refreshed when it nears its expiry; an error when there is no
-// usable sign-in), and Refused to record a 401.
+// usable sign-in), Refused to record a 401 and OK a call that worked.
 type DeviceTokens interface {
 	Token(ctx context.Context) (string, error)
 	Refused(ctx context.Context, token string)
+	OK(ctx context.Context, token string)
 }
 
 // TokenSource resolves a GitHub credential for the REST client: the
@@ -150,6 +151,15 @@ func (t *TokenSource) Refused(ctx context.Context, from, token string) {
 	t.onChange()
 }
 
+// OK records that a call made with token (resolved from from) worked: the
+// device sign-in keeps when it last did (the Accounts tab's last_ok_at); an
+// environment or gh token has no record.
+func (t *TokenSource) OK(ctx context.Context, from, token string) {
+	if from == FromDevice && t.device != nil {
+		t.device.OK(ctx, token)
+	}
+}
+
 func (t *TokenSource) isRefused(token string) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -167,13 +177,25 @@ type Refuser interface {
 	Refused(ctx context.Context, from, token string)
 }
 
+// Confirmer is a TokenResolver that records a call that worked (*TokenSource).
+type Confirmer interface {
+	OK(ctx context.Context, from, token string)
+}
+
 // NewClientFor is NewClient for a token resolved by r: when r records refusals,
-// a 401 on any call reports the token as refused (GitHub revoked or expired it).
+// a 401 on any call reports the token as refused (GitHub revoked or expired it);
+// when it records calls that worked, a call answered as wanted reports that.
 func NewClientFor(baseURL, token, from string, r TokenResolver) *Client {
 	c := NewClient(baseURL, token)
 	c.from = from
-	if rf, ok := r.(Refuser); ok && token != "" {
+	if token == "" {
+		return c
+	}
+	if rf, ok := r.(Refuser); ok {
 		c.onUnauthorized = func(ctx context.Context) { rf.Refused(ctx, from, token) }
+	}
+	if cf, ok := r.(Confirmer); ok {
+		c.onOK = func(ctx context.Context) { cf.OK(ctx, from, token) }
 	}
 	return c
 }

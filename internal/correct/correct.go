@@ -198,12 +198,13 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 	if err != nil {
 		var apiErr *contrib.APIError
 		var rateErr *contrib.RateLimitError
-		if errors.As(err, &apiErr) || errors.As(err, &rateErr) {
-			// GitHub answered and filed nothing: a later run may file them.
+		if (errors.As(err, &apiErr) && apiErr.Status < http.StatusInternalServerError) || errors.As(err, &rateErr) {
+			// GitHub refused the issue and filed nothing: a later run may file them.
 			_ = h.o.KV.SetSetting(context.WithoutCancel(ctx), key, "")
 		}
-		// Otherwise GitHub may have filed it before the answer was lost: the
-		// marker stays, and a later run says so rather than filing twice.
+		// Otherwise GitHub may have filed it (a server error can come after the
+		// issue is made, and an answer can be lost): the marker stays, and a later
+		// run says so rather than filing twice.
 		if apiErr != nil && apiErr.Status == http.StatusUnauthorized {
 			return nil, errRefused
 		}

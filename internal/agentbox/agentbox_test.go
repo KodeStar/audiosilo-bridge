@@ -733,8 +733,9 @@ func TestRefusedCredentialIsRemembered(t *testing.T) {
 		t.Fatalf("err = %v, want a refused credential", err)
 	}
 	st := r.Status()
-	if st.Available || !st.Refused || !strings.Contains(st.Detail, CredentialRefusedDetail) {
-		t.Fatalf("after a refusal: %+v", st)
+	if st.Available || !st.Refused || !strings.Contains(st.Detail, CredentialRefusedDetail) ||
+		!strings.Contains(st.Detail, "replace it in the agent container") {
+		t.Fatalf("after a refusal: %+v (the container's own credential, which wins, is replaced there)", st)
 	}
 	if !r.Detect(context.Background()).Available {
 		t.Fatal("a refused credential stopped the engine from trying")
@@ -917,8 +918,8 @@ func TestHandoffRefusalEndsOnReplace(t *testing.T) {
 	}
 	writeRunnerJSON(t, dir, handoffRunner(true))
 	r.noteRefusal(r.Status().CLIs["claude"], "invalid api key")
-	if !r.Status().Refused {
-		t.Fatal("refused")
+	if st := r.Status(); !st.Refused || !strings.Contains(st.Detail, "replace it on the Bridge's Accounts tab") {
+		t.Fatalf("refused: %+v (the handed credential is replaced on the Accounts tab)", st)
 	}
 	since.Store(time.Date(2026, 10, 19, 10, 0, 0, 0, time.UTC))
 	if st := r.Status(); st.Refused || !st.Available {

@@ -79,8 +79,10 @@ type Client struct {
 	token   string
 	http    *http.Client
 	// onUnauthorized runs on a 401 (NewClientFor: the token is recorded as
-	// refused, so the Bridge stops offering to contribute with it).
+	// refused, so the Bridge stops offering to contribute with it), onOK on a
+	// call answered as wanted (the token is recorded as working).
 	onUnauthorized func(ctx context.Context)
+	onOK           func(ctx context.Context)
 	// from is where the token came from (FromEnv, FromDevice, FromGH; "" when
 	// NewClient made it).
 	from string
@@ -139,6 +141,9 @@ func (c *Client) requestAccept(ctx context.Context, accept, method, path string,
 		}
 		if !statusWanted(status, want) {
 			return nil, header, newAPIError(status, respBody)
+		}
+		if c.onOK != nil {
+			c.onOK(ctx)
 		}
 		return respBody, header, nil
 	}

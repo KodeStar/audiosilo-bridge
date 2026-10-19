@@ -144,6 +144,11 @@ func MapCorrections(b CorrectionBatch) ([]MappedChange, error) {
 	if n := utf8.RuneCountInString(ev); n > MaxCorrectionEvidence {
 		return nil, bad("the evidence is %d characters long; the limit is %d", n, MaxCorrectionEvidence)
 	}
+	// Meta bounds the evidence as the issue carries it, its # lines escaped.
+	if n := utf8.RuneCountInString(escapeHeadings(ev)); n > MaxCorrectionEvidence {
+		return nil, bad("the evidence is %d characters long once its lines starting with # are escaped; the limit is %d",
+			n, MaxCorrectionEvidence)
+	}
 	if s := strings.TrimSpace(b.Source); s == "" || len(s) > maxSource || hasControl(s) {
 		return nil, bad("the source stamp is missing or malformed")
 	}

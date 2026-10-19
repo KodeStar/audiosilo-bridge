@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { checkCredential, fromText, githubState, minutesLeft } from './accounts';
+import { checkCredential, fromText, githubState, minutesLeft, savedText } from './accounts';
 import { accountsFixture } from '@/test/fixtures';
 
 describe('accounts', () => {
@@ -29,6 +29,32 @@ describe('accounts', () => {
     expect(minutesLeft('2026-10-19T12:14:01Z', now)).toBe(15);
     expect(minutesLeft('2026-10-19T11:00:00Z', now)).toBe(0);
     expect(minutesLeft('nonsense', now)).toBe(0);
+  });
+
+  it('says which credential the runs use once one is saved', () => {
+    const a = accountsFixture().agent;
+    expect(savedText({ ...a, set: { anthropic_api_key: true } }, 'anthropic_api_key')).toBe(
+      'Saved. The next agent run uses it.',
+    );
+    // A subscription token comes first for claude: a key saved beside it waits.
+    expect(
+      savedText(
+        { ...a, set: { claude_oauth_token: true, anthropic_api_key: true } },
+        'anthropic_api_key',
+      ),
+    ).toMatch(/Claude subscription token is used while it is set: remove it/);
+    expect(
+      savedText(
+        { ...a, set: { claude_oauth_token: true, anthropic_api_key: true } },
+        'claude_oauth_token',
+      ),
+    ).toBe('Saved. The next agent run uses it.');
+    expect(
+      savedText(
+        { ...a, set: { claude_oauth_token: true }, container_credential: 'api_key' },
+        'claude_oauth_token',
+      ),
+    ).toMatch(/container's own credential/);
   });
 
   it('checks a pasted credential', () => {

@@ -93,7 +93,7 @@ func (r *Runner) Status() Status {
 	st.Version, st.Slots, st.HeartbeatAt, st.CLIs = rj.Version, rj.Slots, rj.HeartbeatAt, rj.CLIs
 	st.Detail = r.unavailableBecause(rj)
 	if st.Detail == "" {
-		if refused := r.refusal(rj.CLIs[r.backend]); refused != "" {
+		if refused := r.refusal(rj.CLIs[r.backend], st.Handoff); refused != "" {
 			st.Refused, st.Detail = true, refused
 		}
 	}
@@ -110,10 +110,20 @@ func (r *Runner) handoffCredential() (kind, value string, since time.Time, ok bo
 	return r.credential(r.backend)
 }
 
-// CredentialRefusedDetail is the agent's state while the provider refuses its
-// credential.
-const CredentialRefusedDetail = "the agent's credential was refused by the provider: replace it on the Bridge's " +
-	"Accounts tab (or in the agent container)"
+// CredentialRefusedDetail starts the agent's state while the provider refuses
+// its credential; where to replace it follows (refusalAdvice).
+const CredentialRefusedDetail = "the agent's credential was refused by the provider"
+
+// refusalAdvice is where a refused credential is replaced: on the Accounts tab
+// when it is the one handed over, else in the agent container, whose own
+// credential wins over the Accounts tab's.
+func refusalAdvice(handoff bool) string {
+	if handoff {
+		return ": replace it on the Bridge's Accounts tab"
+	}
+	return ": replace it in the agent container (claude setup-token / agent-login codex), or remove it there " +
+		"and set one on the Bridge's Accounts tab"
+}
 
 // refusedCredential is a credential the provider refused: the runner's report of
 // it then (its kind and since when the runner has had it), and the provider's
@@ -142,8 +152,9 @@ func (r *Runner) clearRefusal() {
 // refusal is the agent's state while the provider refuses the credential the
 // runner reports now as c ("" when it doesn't): a credential the runner reports
 // as changed since (another kind, or seen since another time: replaced, or the
-// container restarted) clears it.
-func (r *Runner) refusal(c agentproto.CLI) string {
+// container restarted) clears it. handoff says c is the Accounts tab's
+// credential, handed over, rather than the container's own.
+func (r *Runner) refusal(c agentproto.CLI, handoff bool) string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.refused == nil {
@@ -153,7 +164,7 @@ func (r *Runner) refusal(c agentproto.CLI) string {
 		r.refused = nil
 		return ""
 	}
-	return CredentialRefusedDetail + " (" + r.refused.detail + ")"
+	return CredentialRefusedDetail + refusalAdvice(handoff) + " (" + r.refused.detail + ")"
 }
 
 // unavailableBecause is why runs can't go to the container now, or "". Each

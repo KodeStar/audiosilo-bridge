@@ -18,10 +18,12 @@ type fakeDevice struct {
 	token   string
 	err     error
 	refused int
+	ok      []string
 }
 
 func (f *fakeDevice) Token(context.Context) (string, error) { return f.token, f.err }
 func (f *fakeDevice) Refused(context.Context, string)       { f.refused++ }
+func (f *fakeDevice) OK(_ context.Context, token string)    { f.ok = append(f.ok, token) }
 
 func newSource(env string, dev DeviceTokens, gh string) *TokenSource {
 	ts := NewTokenSource(dev, nil)
@@ -167,6 +169,45 @@ func TestClientReportsUnauthorized(t *testing.T) {
 	}
 	if _, _, err := good.Resolve(ctx); err != nil {
 		t.Fatal("a working token stays")
+	}
+}
+
+// TestClientReportsOK: a call made with the device token and answered as wanted
+// records that the sign-in worked; a 401 doesn't, and an environment token's
+// call never reaches the sign-in.
+func TestClientReportsOK(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") == "Bearer ghu_bad" {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"message":"Bad credentials"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"number":1}`))
+	}))
+	defer srv.Close()
+	ctx := context.Background()
+	dev := &fakeDevice{token: "ghu_device"}
+	ts := newSource("", dev, "")
+	tok, from, _ := ts.Resolve(ctx)
+	if _, err := NewClientFor(srv.URL, tok, from, ts).GetIssue(ctx, "o/r", 1); err != nil {
+		t.Fatal(err)
+	}
+	if len(dev.ok) != 1 || dev.ok[0] != "ghu_device" {
+		t.Fatalf("ok = %v, want the device token recorded once", dev.ok)
+	}
+	if _, err := NewClientFor(srv.URL, "ghu_bad", FromDevice, ts).GetIssue(ctx, "o/r", 1); err == nil {
+		t.Fatal("a 401 is an error")
+	}
+	if len(dev.ok) != 1 || dev.refused != 1 {
+		t.Fatalf("ok = %v, refused %d: a 401 is a refusal, never OK", dev.ok, dev.refused)
+	}
+	env := newSource("ghp_env", dev, "")
+	tok, from, _ = env.Resolve(ctx)
+	if _, err := NewClientFor(srv.URL, tok, from, env).GetIssue(ctx, "o/r", 1); err != nil {
+		t.Fatal(err)
+	}
+	if len(dev.ok) != 1 {
+		t.Fatalf("ok = %v: an environment token's call isn't the sign-in's", dev.ok)
 	}
 }
 

@@ -66,6 +66,20 @@ describe('SettingsTab', () => {
     expect(screen.queryByText(/Save the settings to confirm it/)).not.toBeInTheDocument();
   });
 
+  it('saves an untouched budget as loaded, even one the field would refuse', async () => {
+    const { calls } = mockFetch({
+      'GET /api/settings': { body: settingsFixture({ monthly_budget_usd: 12.345 }) },
+      'PUT /api/settings': { body: settingsFixture({ monthly_budget_usd: 12.345 }) },
+    });
+    render(<SettingsTab client={api()} />);
+    expect(await screen.findByLabelText('Monthly agent budget (dollars)')).toHaveValue('12.345');
+    await userEvent.click(screen.getByRole('button', { name: 'Save settings' }));
+    expect(await screen.findByText('Saved.')).toBeInTheDocument();
+    expect(lastCall(calls, 'PUT', '/api/settings')?.body).toMatchObject({
+      monthly_budget_usd: 12.345,
+    });
+  });
+
   it('sends no budget the environment sets', async () => {
     const { calls } = mockFetch({
       'GET /api/settings': {

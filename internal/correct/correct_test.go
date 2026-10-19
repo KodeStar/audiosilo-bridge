@@ -163,6 +163,7 @@ func TestCorrectFailures(t *testing.T) {
 		"no sign-in":      {tok: &tokens{err: contrib.ErrNoCredential}, want: "Accounts tab"},
 		"refused sign-in": {status: http.StatusUnauthorized, want: "sign in again"},
 		"github says no":  {status: http.StatusUnprocessableEntity, want: "could not file"},
+		"github errors":   {status: http.StatusBadGateway, want: "could not file"},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -190,8 +191,12 @@ func TestCorrectFailures(t *testing.T) {
 			if c.status == http.StatusUnauthorized && (len(tok.refused) != 1 || tok.refused[0] != contrib.FromDevice) {
 				t.Fatalf("a 401 wasn't reported as a refusal: %v", tok.refused)
 			}
-			if c.status != 0 && kv.m["meta.correct/srv-1/1"] == filingMarker {
-				t.Fatal("GitHub's answer left the filing marker: a retry couldn't file")
+			marked := kv.m["meta.correct/srv-1/1"] == filingMarker
+			if c.status >= http.StatusInternalServerError && !marked {
+				t.Fatal("a server error may come after the issue is made: the filing marker must stay")
+			}
+			if c.status != 0 && c.status < http.StatusInternalServerError && marked {
+				t.Fatal("GitHub's refusal left the filing marker: a retry couldn't file")
 			}
 		})
 	}

@@ -1,4 +1,4 @@
-import type { AgentKind, GitHubAccount, TokenFrom } from '@/api/types';
+import type { AgentAccount, AgentKind, GitHubAccount, TokenFrom } from '@/api/types';
 import { parseTime } from './time';
 
 // How often the Accounts tab looks again while a GitHub sign-in waits for its
@@ -50,6 +50,20 @@ export function minutesLeft(expiresAt: string, now: number = Date.now()): number
   const t = parseTime(expiresAt);
   if (!t) return 0;
   return Math.max(0, Math.ceil((t.getTime() - now) / 60000));
+}
+
+// savedText says which credential the agent's runs use once kind is saved: the
+// agent container's own wins, then the first kind set in the CLI's order (a
+// subscription token before an API key for claude).
+export function savedText(a: AgentAccount, kind: AgentKind): string {
+  if (a.container_credential !== '') {
+    return "Saved. The agent container's own credential is used while it has one.";
+  }
+  const used = a.kinds.find((k) => a.set[k]);
+  if (used && used !== kind) {
+    return `Saved. The ${KIND_LABELS[used].label} is used while it is set: remove it to use this one.`;
+  }
+  return 'Saved. The next agent run uses it.';
 }
 
 // checkCredential is the page's first look at a pasted credential: an error

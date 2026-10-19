@@ -35,18 +35,19 @@ func (b *Bridge) newAccounts(cfg config.Config) {
 
 // forgetSealedGitHubPAT deletes the github_pat an earlier version sealed from
 // AUDIOSILO_BRIDGE_GITHUB_TOKEN at every start: the token source reads the
-// environment directly now, so a sealed copy would outlive its variable.
-func forgetSealedGitHubPAT(vault secrets.Store, log *slog.Logger) error {
-	ok, err := vault.Present(secrets.GitHubPAT)
-	if err != nil || !ok {
-		return err
+// environment directly now, so a sealed copy would outlive its variable. Best
+// effort: nothing reads that copy any more, so one that can't be opened (sealed
+// with another secret key) or deleted never stops the start.
+func forgetSealedGitHubPAT(vault secrets.Store, log *slog.Logger) {
+	if ok, err := vault.Present(secrets.GitHubPAT); err == nil && !ok {
+		return
 	}
 	if err := vault.Delete(secrets.GitHubPAT); err != nil {
-		return err
+		log.Warn("bridge: removing the sealed copy of "+contrib.GitHubTokenEnv+" failed (nothing reads it)", "err", err)
+		return
 	}
 	log.Info("bridge: removed the sealed copy of " + contrib.GitHubTokenEnv +
 		" (the environment is read directly now; sign in on the Accounts tab instead)")
-	return nil
 }
 
 // githubChanged runs after a GitHub sign-in, sign-out or refusal: the heartbeat

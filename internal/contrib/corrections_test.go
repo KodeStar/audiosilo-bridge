@@ -112,16 +112,20 @@ func TestCorrectionBatchRefusals(t *testing.T) {
 		many[i] = Correction{Field: "isbn", Corrected: strings.Repeat("9", i+1)}
 	}
 	cases := map[string]func(*CorrectionBatch){
-		"unknown field":     func(b *CorrectionBatch) { b.Changes[0].Field = "subtitle" },
-		"meta field name":   func(b *CorrectionBatch) { b.Changes[0].Field = "authors" },
-		"empty corrected":   func(b *CorrectionBatch) { b.Changes[0].Corrected = "  " },
-		"long value":        func(b *CorrectionBatch) { b.Changes[0].Corrected = long },
-		"long current":      func(b *CorrectionBatch) { b.Changes[0].Current = long },
-		"control char":      func(b *CorrectionBatch) { b.Changes[0].Corrected = "a\nb" },
-		"no changes":        func(b *CorrectionBatch) { b.Changes = nil },
-		"too many":          func(b *CorrectionBatch) { b.Changes = many },
-		"no evidence":       func(b *CorrectionBatch) { b.Evidence = " " },
-		"long evidence":     func(b *CorrectionBatch) { b.Evidence = strings.Repeat("e", MaxCorrectionEvidence+1) },
+		"unknown field":   func(b *CorrectionBatch) { b.Changes[0].Field = "subtitle" },
+		"meta field name": func(b *CorrectionBatch) { b.Changes[0].Field = "authors" },
+		"empty corrected": func(b *CorrectionBatch) { b.Changes[0].Corrected = "  " },
+		"long value":      func(b *CorrectionBatch) { b.Changes[0].Corrected = long },
+		"long current":    func(b *CorrectionBatch) { b.Changes[0].Current = long },
+		"control char":    func(b *CorrectionBatch) { b.Changes[0].Corrected = "a\nb" },
+		"no changes":      func(b *CorrectionBatch) { b.Changes = nil },
+		"too many":        func(b *CorrectionBatch) { b.Changes = many },
+		"no evidence":     func(b *CorrectionBatch) { b.Evidence = " " },
+		"long evidence":   func(b *CorrectionBatch) { b.Evidence = strings.Repeat("e", MaxCorrectionEvidence+1) },
+		// Within the bound as written, over it as filed (each # line gains a backslash).
+		"long escaped evidence": func(b *CorrectionBatch) {
+			b.Evidence = strings.Repeat("#a\n", 600) + strings.Repeat("e", MaxCorrectionEvidence-1800)
+		},
 		"no source":         func(b *CorrectionBatch) { b.Source = "" },
 		"bad work":          func(b *CorrectionBatch) { b.WorkID = "Not A Slug" },
 		"bad recording":     func(b *CorrectionBatch) { b.RecordingID = "../x" },

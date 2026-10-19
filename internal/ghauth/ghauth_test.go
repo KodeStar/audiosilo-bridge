@@ -47,6 +47,11 @@ func (f *fakeGitHub) server(t *testing.T) *httptest.Server {
 		next := f.polls[0]
 		f.polls = f.polls[1:]
 		status := f.status
+		if s, ok := next["_status"].(int); ok {
+			// A scripted answer without an OAuth error: GitHub's own error page.
+			writeJSON(w, s, map[string]any{"message": "Server Error"})
+			return
+		}
 		if status == 0 {
 			status = http.StatusOK
 		}
@@ -165,6 +170,49 @@ func TestWaitSlowDownWithoutIntervalAddsFive(t *testing.T) {
 	}
 	if waits[1] != 10*time.Second {
 		t.Fatalf("waits = %v", waits)
+	}
+}
+
+// A poll GitHub doesn't answer (a 502, a 429) leaves the code standing: Wait
+// polls on, slower, while a 4xx without an OAuth code ends it.
+func TestWaitOutlivesUnansweredPolls(t *testing.T) {
+	f := &fakeGitHub{polls: []map[string]any{
+		{"_status": http.StatusBadGateway},
+		{"_status": http.StatusTooManyRequests},
+		{"error": "authorization_pending"},
+		{"access_token": "ghu_new"},
+	}}
+	srv := f.server(t)
+	var waits []time.Duration
+	tok, err := newClient(srv, time.Now()).Wait(context.Background(), DeviceCode{DeviceCode: "d", Interval: 5 * time.Second},
+		func(_ context.Context, d time.Duration) error { waits = append(waits, d); return nil })
+	if err != nil || tok.AccessToken != "ghu_new" {
+		t.Fatalf("token = %+v, %v", tok, err)
+	}
+	if len(waits) != 4 || waits[1] != 10*time.Second || waits[2] != 15*time.Second || waits[3] != 15*time.Second {
+		t.Fatalf("waits = %v (each unanswered poll slows the next)", waits)
+	}
+
+	f = &fakeGitHub{polls: []map[string]any{{"_status": http.StatusNotFound}}}
+	srv = f.server(t)
+	_, err = newClient(srv, time.Now()).Wait(context.Background(), DeviceCode{DeviceCode: "d"}, noSleep)
+	var ge *Error
+	if !errors.As(err, &ge) || ge.Status != http.StatusNotFound {
+		t.Fatalf("err = %v (a 404 ends the flow)", err)
+	}
+
+	// GitHub unreachable: a closed server polls on until the code expires.
+	srv = (&fakeGitHub{}).server(t)
+	url := srv.URL
+	srv.Close()
+	now := time.Now()
+	c := &Client{ClientID: "Iv23test", WebBase: url, APIBase: url}
+	polls := 0
+	c.Now = func() time.Time { return now.Add(time.Duration(polls) * time.Minute) }
+	_, err = c.Wait(context.Background(), DeviceCode{DeviceCode: "d", ExpiresAt: now.Add(3 * time.Minute)},
+		func(context.Context, time.Duration) error { polls++; return nil })
+	if !errors.Is(err, ErrExpired) || polls != 3 {
+		t.Fatalf("err = %v after %d polls (an unreachable GitHub waits for the expiry)", err, polls)
 	}
 }
 

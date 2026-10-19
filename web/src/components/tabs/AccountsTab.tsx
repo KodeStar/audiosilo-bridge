@@ -9,6 +9,7 @@ import {
   fromText,
   githubState,
   minutesLeft,
+  savedText,
 } from '@/lib/accounts';
 import { Ago } from '../ui/Ago';
 import { Badge } from '../ui/Badge';
@@ -247,9 +248,10 @@ function CredentialForm({
     setBusy(true);
     setError(null);
     try {
-      onChange(await client.setAgentCredential(kind, value.trim()));
+      const next = await client.setAgentCredential(kind, value.trim());
+      onChange(next);
       setValue('');
-      setSaved('Saved. The next agent run uses it.');
+      setSaved(savedText(next.agent, kind));
     } catch (err) {
       setError(errorText(err, "Couldn't save the credential."));
     }

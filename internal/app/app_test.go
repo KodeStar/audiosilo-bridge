@@ -329,6 +329,31 @@ func TestGitHubTokenFromTheEnvironment(t *testing.T) {
 	}
 }
 
+// A github_pat sealed with another secret key (the key file replaced) can't be
+// opened, and nothing reads it: an unpaired Bridge still starts, and it goes.
+func TestUnreadableSealedGitHubPATNeverStopsTheStart(t *testing.T) {
+	data := t.TempDir()
+	vault, _, err := secrets.Open(data, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := vault.Set(secrets.GitHubPAT, "ghp_sealed_by_an_old_version"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(data, secrets.KeyFileName)); err != nil {
+		t.Fatal(err)
+	}
+	b, _, err := New(context.Background(), Options{DataDir: data, Version: "0.1.0", Listen: "127.0.0.1:0",
+		Logger: slog.New(slog.DiscardHandler)})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() { _ = b.db.Close() }()
+	if _, err := os.Stat(filepath.Join(data, "secrets", secrets.GitHubPAT+".enc")); !os.IsNotExist(err) {
+		t.Fatalf("the unreadable github_pat stayed: %v", err)
+	}
+}
+
 type writerFunc func([]byte) (int, error)
 
 func (f writerFunc) Write(p []byte) (int, error) { return f(p) }

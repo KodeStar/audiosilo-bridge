@@ -923,7 +923,8 @@ internal/
             read LIVE from the environment first (never sealed any more), then the
             Accounts tab's device sign-in, then `gh auth token`; From() says which
             (FromEnv/FromDevice/FromGH) and a 401 on a device token marks it refused
-            - the token NEVER enters argv/logs/
+            (a call that works with one moves the sign-in's last_ok_at: NewClientFor
+            wires both hooks) - the token NEVER enters argv/logs/
             errors, leak-canary tested). NewClientFor records where the token came
             from: AppFiled() (a device token) skips the labels check, since meta's
             routing workflow labels an issue the App filed. corrections.go (Phase
@@ -968,24 +969,35 @@ internal/
             DefaultClientID, AppID 5387686; the client ID overridable in config):
             RequestCode / Poll / Wait (the device flow: pending and slow_down arrive
             as a 200 with an error code; slow_down adds 5 s; expired and denied end
-            it), Refresh (client_id only; the old pair dies at once, so the caller
-            persists the new pair before using it, and ANY refresh error is a
-            refusal: a spent refresh token answers incorrect_client_credentials),
+            it; a poll GitHub doesn't answer, unreachable or a 5xx/429, adds 5 s and
+            polls on until the code expires), Refresh (client_id only; the old pair
+            dies at once, so the caller persists the new pair before using it, and
+            ANY error GitHub answers is ErrBadRefresh: a spent refresh token answers
+            incorrect_client_credentials),
             Revoke (POST /credentials/revoke, unauthenticated, 202) and User (/user).
             Every base URL injectable; fake-server tests for each outcome.
   accounts/ Phase 2b (decision 19): the Bridge's external accounts. GitHub: Start
             runs one device flow at a time in the background (Pending shows the
             code), the token pair sealed as ONE vault value (github_user_token) so
             a refresh replaces it in one write; Token refreshes single-flight
-            before expiry and persists first; Refused marks the account refused (a
-            401 on a token a refresh has since replaced is ignored); SignOut
-            revokes, then forgets locally even when the revoke failed (its error
-            returned for the page). Agent: Set/Delete/Credential for the kinds
+            before expiry and persists first, detached from its caller (a page
+            request that goes away mid-refresh would lose the rotated pair); only
+            ErrBadRefresh refuses the sign-in, a refresh without GitHub's answer
+            keeps the pair (the access token serves until it expires) and is tried
+            again a minute later; a device flow ended meanwhile (sign-out, a newer
+            one) stores nothing; Refused marks the account refused (a 401 on a
+            token a refresh has since replaced is ignored) and OK moves last_ok_at
+            (a REST call that worked with the current token; never ends a
+            refusal; a sign-in and a refresh move it too); SignOut revokes, then
+            forgets locally even when the revoke failed (its error returned for
+            the page). Agent: Set/Delete/Credential for the kinds
             claude_oauth_token, anthropic_api_key, openai_api_key (one printable
             line, sealed in the vault), handed to the agent container per run by
-            agentbox. The store's accounts table (migration 0006) keeps only what
-            the page shows (login, signed_in_at, last_ok_at, refused_at,
-            last_error), never a credential.
+            agentbox; Credential's set time is that kind's own (agent/<kind>), so
+            changing another kind never ends a refusal of the one in use. The
+            store's accounts table (migration 0006) keeps only what the page
+            shows (login, signed_in_at, last_ok_at, refused_at, last_error),
+            never a credential.
   setup/    Phase 2b (FIRST-RUN-PLAN F2): Checklist(Inputs) is the setup checklist
             (link.Setup) in its fixed order: paired, libraries, asr, agent, budget,
             github, each {id, done, required, detail}; details cut to 200
@@ -1084,7 +1096,8 @@ internal/
             agent spend to average). UnsweptGenerateBooks counts a book's retention
             from its LAST job's end (a continued book has the chapters job's mapping
             and the generate job's).
-            0006 (Phase 2b, accounts.go): accounts (provider PK: github | agent;
+            0006 (Phase 2b, accounts.go): accounts (provider PK: github | agent |
+            agent/<kind>, the last keeping when that agent credential was set;
             login, signed_in_at, last_ok_at, refused_at, last_error), what the
             Accounts tab shows; the credentials are in the vault.
   state/    per-book pipeline state machine: table-driven states/lanes/transitions,
@@ -1821,7 +1834,9 @@ internal/
             the Accounts tab ends a refusal); stage() writes credential.json
             (0444, synced) in credential/ (0777) before the request. A container
             credential always wins; a runner that can't take a hand-off gets
-            nothing and is told to update.
+            nothing and is told to update. A refusal's detail says where to
+            replace the credential: the Accounts tab for the handed one, the agent
+            container for its own.
   agentrun/ `audiosilo-bridge agent-runner`, the ONLY thing in the agent container (Linux
             only). It sees the staging dir and /agent (secrets/, codex/), never a
             library or the Bridge's data. Main sets umask 077 for the whole process
@@ -1936,9 +1951,10 @@ internal/
             (setup(ctx), setup.Checklist) once the server accepts it (see link/).
             accounts.go wires internal/accounts: newAccounts (the GitHub sign-in
             with the token source's onChange, the agent vault), a start deletes an
-            earlier Bridge's sealed github_pat once (forgetSealedGitHubPAT; the
-            env token is read live), githubChanged kicks a beat and re-admits
-            contrib_unavailable books when the Bridge can contribute,
+            earlier Bridge's sealed github_pat once (forgetSealedGitHubPAT, best
+            effort: one sealed with another key, or a failed delete, never stops
+            the start; the env token is read live), githubChanged kicks a beat
+            and re-admits contrib_unavailable books when the Bridge can contribute,
             agentCredentialChanged re-admits agent_credential_refused and
             agent_unavailable; the Backend adds Accounts, StartGitHubSignIn,
             SignOutGitHub, SetAgentCredential, DeleteAgentCredential. A budget

@@ -139,10 +139,7 @@ func New(ctx context.Context, opts Options) (*Bridge, string, error) {
 		_ = db.Close()
 		return nil, "", err
 	}
-	if err := forgetSealedGitHubPAT(vault, opts.Logger); err != nil {
-		_ = db.Close()
-		return nil, "", err
-	}
+	forgetSealedGitHubPAT(vault, opts.Logger)
 	conn, err := openConn(ctx, db, vault, opts.Version, opts.Logger)
 	if err != nil {
 		_ = db.Close()
