@@ -32,7 +32,7 @@ func (f fakeTokenResolver) Resolve(context.Context) (string, string, error) {
 	if f.err != nil {
 		return "", "", f.err
 	}
-	return f.token, FromPAT, nil
+	return f.token, FromEnv, nil
 }
 
 // capture records published contrib.update events for assertions.

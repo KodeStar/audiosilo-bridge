@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/kodestar/audiosilo-bridge/internal/api"
+	"github.com/kodestar/audiosilo-bridge/internal/contrib"
 	"github.com/kodestar/audiosilo-bridge/internal/link"
 	"github.com/kodestar/audiosilo-bridge/internal/secrets"
 	"github.com/kodestar/audiosilo-bridge/internal/store"
@@ -282,10 +283,10 @@ func TestEngineViewAndJobRoutes(t *testing.T) {
 	}
 }
 
-// AUDIOSILO_BRIDGE_GITHUB_TOKEN is sealed into the vault as github_pat at the
-// start (where the contribution's token source looks first), the environment's
-// value winning over one stored before; a blank one leaves the vault alone, and
-// the token is never logged.
+// AUDIOSILO_BRIDGE_GITHUB_TOKEN is read from the environment when a contribution
+// needs it, never sealed (Phase 2b): a github_pat an earlier version sealed is
+// deleted at the start, so a token outlives its variable no more; the token is
+// never logged.
 func TestGitHubTokenFromTheEnvironment(t *testing.T) {
 	data := t.TempDir()
 	var logs strings.Builder
@@ -295,31 +296,36 @@ func TestGitHubTokenFromTheEnvironment(t *testing.T) {
 		defer mu.Unlock()
 		return logs.Write(p)
 	}), nil))
-	t.Setenv(GitHubTokenEnv, "ghp_from_the_environment")
+	vault, _, err := secrets.Open(data, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := vault.Set(secrets.GitHubPAT, "ghp_sealed_by_an_old_version"); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(contrib.GitHubTokenEnv, "ghp_from_the_environment")
 	b, _, err := New(context.Background(), Options{DataDir: data, Version: "0.1.0", Listen: "127.0.0.1:0", Logger: log})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, _ := b.vault.Get(secrets.GitHubPAT); got != "ghp_from_the_environment" {
-		t.Fatalf("vault github_pat = %q", got)
+	defer func() { _ = b.db.Close() }()
+	if ok, _ := b.vault.Present(secrets.GitHubPAT); ok {
+		t.Fatal("the sealed github_pat survived the start")
 	}
-	if !b.canContribute(context.Background()) {
-		t.Fatal("a stored token doesn't resolve")
+	if !b.canContribute(context.Background()) || b.contributeFrom(context.Background()) != contrib.FromEnv {
+		t.Fatal("the environment's token doesn't resolve")
 	}
-	_ = b.db.Close()
-	if err := storeGitHubToken(b.vault, "ghp_replaced", log); err != nil {
-		t.Fatal(err)
-	}
-	if err := storeGitHubToken(b.vault, "  ", log); err != nil {
-		t.Fatal(err)
-	}
-	if got, _ := b.vault.Get(secrets.GitHubPAT); got != "ghp_replaced" {
-		t.Fatalf("vault github_pat = %q, want the environment's latest, untouched by a blank one", got)
+	acc := b.Accounts(context.Background())
+	if !acc.GitHub.EnvToken || acc.GitHub.From != contrib.FromEnv || !acc.GitHub.CanContribute {
+		t.Fatalf("accounts = %+v", acc.GitHub)
 	}
 	mu.Lock()
 	defer mu.Unlock()
 	if strings.Contains(logs.String(), "ghp_") {
 		t.Fatalf("the token reached the log: %s", logs.String())
+	}
+	if !strings.Contains(logs.String(), "removed the sealed copy") {
+		t.Fatalf("the removal wasn't logged: %s", logs.String())
 	}
 }
 

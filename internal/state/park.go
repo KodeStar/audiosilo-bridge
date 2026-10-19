@@ -44,8 +44,8 @@ const (
 	ParkASRWorkerWaiting ParkCode = "asr_worker_waiting"
 
 	// ParkContribUnavailable: the contributing stage runs in issue mode but no
-	// GitHub credential is available (no PAT in secrets, no `gh auth token`). On the
-	// Bridge the token comes from AUDIOSILO_BRIDGE_GITHUB_TOKEN; then Retry.
+	// GitHub credential is available (contrib.TokenSource: no AUDIOSILO_BRIDGE_GITHUB_TOKEN,
+	// no sign-in on the Accounts tab, no `gh auth token`). A sign-in re-admits it.
 	ParkContribUnavailable ParkCode = "contrib_unavailable"
 	// ParkCoreNeeded: the book's work does not exist upstream, so an add-work (core)
 	// proposal awaits completion/confirmation in the UI before the sidecars can attach.

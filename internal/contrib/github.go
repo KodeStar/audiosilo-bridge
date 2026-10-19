@@ -78,7 +78,18 @@ type Client struct {
 	baseURL string
 	token   string
 	http    *http.Client
+	// onUnauthorized runs on a 401 (NewClientFor: the token is recorded as
+	// refused, so the Bridge stops offering to contribute with it).
+	onUnauthorized func(ctx context.Context)
+	// from is where the token came from (FromEnv, FromDevice, FromGH; "" when
+	// NewClient made it).
+	from string
 }
+
+// AppFiled reports whether the Client's issues are filed through the GitHub App
+// (the Accounts tab's sign-in): the meta repo's route workflow labels those
+// itself, after the issue is opened.
+func (c *Client) AppFiled() bool { return c.from == FromDevice }
 
 // NewClient returns a Client for baseURL (e.g. https://api.github.com) carrying
 // token as a Bearer credential (empty token = unauthenticated).
@@ -115,6 +126,9 @@ func (c *Client) requestAccept(ctx context.Context, accept, method, path string,
 		respBody, header, status, err := c.doOnce(ctx, accept, method, path, payload)
 		if err != nil {
 			return nil, nil, err
+		}
+		if status == http.StatusUnauthorized && c.onUnauthorized != nil {
+			c.onUnauthorized(ctx)
 		}
 		if rl := rateLimitError(status, header, respBody); rl != nil {
 			return nil, header, rl

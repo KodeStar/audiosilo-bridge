@@ -813,7 +813,7 @@ func TestGenerateIssueNeedsAGitHubToken(t *testing.T) {
 	stop := hr.runner(h)
 	defer stop()
 	hr.waitFor("failed", func() bool { s, _ := hr.srv.final(94); return s == link.StateFailed })
-	if _, final := hr.srv.final(94); final.Error == nil || !strings.Contains(*final.Error, "AUDIOSILO_BRIDGE_GITHUB_TOKEN") {
+	if _, final := hr.srv.final(94); final.Error == nil || !strings.Contains(*final.Error, "Accounts tab") {
 		t.Fatalf("error = %v", final.Error)
 	}
 	if _, err := hr.db.GetGenerateBook(context.Background(), 94); !errors.Is(err, store.ErrNotFound) {

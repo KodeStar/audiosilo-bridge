@@ -142,7 +142,8 @@ func (b *Bridge) runEngine(ctx context.Context) {
 		AgentTimeout:     time.Duration(cfg.Agent.TimeoutMinutes) * time.Minute,
 		AgentConcurrency: slots, MaxAgentsPerBook: slots,
 		BookBudgetUSD: cfg.Agent.BookBudgetUSD, MonthlyBudgetUSD: cfg.Agent.MonthlyBudgetUSD,
-		Pricing: cfg.Pricing, Secrets: b.vault, Log: log,
+		MonthlyBudget: func() float64 { return b.config().Agent.MonthlyBudgetUSD },
+		Pricing:       cfg.Pricing, Secrets: b.vault, Log: log,
 		Fallback: scheduler.NewStubExecutor(0, 0),
 		Meta:     metaClient, TokenSource: tokens,
 		ContribMode: cfg.Contribution.Mode, ContribCommunityRepo: cfg.Contribution.CommunityRepo,
@@ -369,9 +370,11 @@ func (p *eventPersister) Close() {
 }
 
 // newAgentBox is the agent container runner for cfg.
-func newAgentBox(cfg config.Config, dataDir string, log *slog.Logger) *agentbox.Runner {
+// credential is the vault's agent credential for the hand-off (nil: none).
+func newAgentBox(cfg config.Config, dataDir string, log *slog.Logger,
+	credential func(cli string) (kind, value string, since time.Time, ok bool)) *agentbox.Runner {
 	return agentbox.New(agentbox.Options{Dir: cfg.AgentStagingDir(dataDir), Backend: agentBackend(cfg),
-		ClaimTimeout: time.Duration(cfg.Agent.ClaimTimeoutSeconds) * time.Second, Log: log})
+		ClaimTimeout: time.Duration(cfg.Agent.ClaimTimeoutSeconds) * time.Second, Log: log, Credential: credential})
 }
 
 // estimatesEvery is how often the heartbeat's estimates are computed again: they
@@ -380,8 +383,8 @@ func newAgentBox(cfg config.Config, dataDir string, log *slog.Logger) *agentbox.
 const estimatesEvery = 5 * time.Minute
 
 // estimatesCache is the last computed estimates, when, and how many jobs the
-// generate handler had finished then. CanContribute is computed with them (a
-// GitHub token resolving can shell out to gh).
+// generate handler had finished then. CanContribute is not cached (a sign-in or
+// a refusal must reach the server at the next beat).
 type estimatesCache struct {
 	mu   sync.Mutex
 	e    *link.SidecarEstimates
@@ -406,7 +409,6 @@ func (b *Bridge) estimates(ctx context.Context) *link.Estimates {
 		e, err := generate.Estimates(ctx, b.db, agentState, cfg.Agent.MonthlyBudgetUSD, time.Now())
 		switch {
 		case err == nil:
-			e.CanContribute = b.canContribute(ctx)
 			c.e, c.at, c.done = e, time.Now(), done
 		case ctx.Err() == nil:
 			b.log.Warn("bridge: computing the estimates failed", "err", err)
@@ -418,5 +420,6 @@ func (b *Bridge) estimates(ctx context.Context) *link.Estimates {
 	e := *c.e
 	e.AgentBackend, e.AgentReady, e.Subscription = agentState.Backend, agentState.Ready, agentState.Subscription
 	e.MonthlyBudgetUSD = cfg.Agent.MonthlyBudgetUSD
+	e.CanContribute = b.canContribute(ctx)
 	return &link.Estimates{Sidecars: &e}
 }

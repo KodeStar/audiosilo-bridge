@@ -32,13 +32,17 @@ import (
 type fakeTokenResolver struct {
 	token string
 	err   error
+	from  string // "" is contrib.FromEnv
 }
 
 func (f fakeTokenResolver) Resolve(context.Context) (string, string, error) {
 	if f.err != nil {
 		return "", "", f.err
 	}
-	return f.token, "pat", nil
+	if f.from != "" {
+		return f.token, f.from, nil
+	}
+	return f.token, contrib.FromEnv, nil
 }
 
 // createdIssue records an issue the fake GitHub server was asked to open.
@@ -430,6 +434,25 @@ func TestContributeIssueLabelsDropped(t *testing.T) {
 	rows := rowsByKind(t, db, b.ID)
 	if note := rows[store.ContribKindCharacters].Note; !strings.Contains(note, "labels missing") {
 		t.Errorf("characters note = %q, want a labels-missing note", note)
+	}
+}
+
+// An issue filed through the GitHub App (the Accounts tab's sign-in) is labelled
+// by meta's route workflow after it opens: no labels-missing note, no extra read.
+func TestContributeIssueAppFiledSkipsTheLabelCheck(t *testing.T) {
+	db := openContribDB(t)
+	gh := newFakeGitHub(t)
+	gh.dropLabels = true
+
+	b := contribBook(t, db, store.NewBook{WorkID: "reacher-01"}, baseChars("x"), baseRecaps("x"))
+	cfg := contribConfig(t, db, contribModeIssue, gh.srv.URL, "", "", fakeTokenResolver{token: "ghu_x", from: contrib.FromDevice})
+	if _, err := NewExecutor(cfg).Execute(context.Background(), b, state.Contributing, scheduler.StageReport{}); err != nil {
+		t.Fatalf("contribute: %v", err)
+	}
+	for kind, row := range rowsByKind(t, db, b.ID) {
+		if strings.Contains(row.Note, "labels missing") || row.Number == 0 {
+			t.Errorf("%s row = %+v, want filed with no labels-missing note", kind, row)
+		}
 	}
 }
 

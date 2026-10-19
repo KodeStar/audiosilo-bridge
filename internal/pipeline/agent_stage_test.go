@@ -1845,6 +1845,16 @@ func TestRunAgentParksOnMonthlyBudget(t *testing.T) {
 	if err := exe.checkMonthlyBudget(ctx, state.FactPass, time.Now()); err != nil {
 		t.Fatalf("no monthly cap = %v", err)
 	}
+	// A live budget (the Bridge's page edits it) wins over the configured one.
+	live := 20.0
+	exe.monthlyBudgetFn = func() float64 { return live }
+	if err := exe.checkMonthlyBudget(ctx, state.FactPass, time.Now()); !errors.As(err, &pe) {
+		t.Fatalf("live budget 20 = %v, want the park", err)
+	}
+	live = 30
+	if err := exe.checkMonthlyBudget(ctx, state.FactPass, time.Now()); err != nil {
+		t.Fatalf("live budget raised to 30 = %v, want room", err)
+	}
 }
 
 func TestMonthBounds(t *testing.T) {

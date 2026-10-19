@@ -81,7 +81,11 @@ func monthlyBudgetExceededMsg(spent, budget float64, resume time.Time) string {
 // has reached the monthly budget, the book parks budget_exceeded with an automatic
 // re-admit at the start of the next month. nil when there is no cap or room left.
 func (e *Executor) checkMonthlyBudget(ctx context.Context, stage state.State, now time.Time) error {
-	if e.db == nil || e.monthlyBudgetUSD <= 0 {
+	budget := e.monthlyBudgetUSD
+	if e.monthlyBudgetFn != nil {
+		budget = e.monthlyBudgetFn()
+	}
+	if e.db == nil || budget <= 0 {
 		return nil
 	}
 	start, next := MonthBounds(now)
@@ -89,10 +93,10 @@ func (e *Executor) checkMonthlyBudget(ctx context.Context, stage state.State, no
 	if err != nil {
 		return fmt.Errorf("%s: read this month's cost: %w", stage, err)
 	}
-	if spent < e.monthlyBudgetUSD {
+	if spent < budget {
 		return nil
 	}
-	return scheduler.ParkWithCodeAfter(state.ParkBudgetExceeded, monthlyBudgetExceededMsg(spent, e.monthlyBudgetUSD, next), next)
+	return scheduler.ParkWithCodeAfter(state.ParkBudgetExceeded, monthlyBudgetExceededMsg(spent, budget, next), next)
 }
 
 // MonthBounds returns the start of now's calendar month and of the next one, UTC:

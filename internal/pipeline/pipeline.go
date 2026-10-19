@@ -135,6 +135,9 @@ type Config struct {
 	// budget_exceeded until the 1st of the next month (0 = no monthly cap). From
 	// config.agent.monthly_budget_usd.
 	MonthlyBudgetUSD float64
+	// MonthlyBudget, when set, is read at every check instead (the Bridge's page
+	// edits the budget while the engine runs).
+	MonthlyBudget func() float64
 	// AgentRedetect, when set, replaces agent.Select as the way an unavailable
 	// runner is looked for again: the Bridge re-detects its agent container and
 	// never a CLI of its own (decision 15).
@@ -195,6 +198,7 @@ type Executor struct {
 	globalInvocationLimit int
 	bookBudgetUSD         float64
 	monthlyBudgetUSD      float64
+	monthlyBudgetFn       func() float64
 	pricing               pricing.Table
 	secrets               secrets.Store
 	log                   *slog.Logger
@@ -261,6 +265,7 @@ func NewExecutor(cfg Config) *Executor {
 		globalInvocationLimit: globalWorkers,
 		bookBudgetUSD:         cfg.BookBudgetUSD,
 		monthlyBudgetUSD:      cfg.MonthlyBudgetUSD,
+		monthlyBudgetFn:       cfg.MonthlyBudget,
 		pricing:               cfg.Pricing,
 		secrets:               cfg.Secrets,
 		log:                   log,

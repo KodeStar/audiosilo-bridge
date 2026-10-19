@@ -7,10 +7,12 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 
 	"github.com/kodestar/audiosilo-bridge/internal/fsutil"
+	"github.com/kodestar/audiosilo-bridge/internal/ghauth"
 	"gopkg.in/yaml.v3"
 )
 
@@ -52,6 +54,40 @@ const (
 	DefaultTranscriptRetentionDays = 30
 	MaxTranscriptRetentionDays     = 10 * 365
 )
+
+// GitHubConfig is the GitHub App the Accounts tab signs in to by device flow
+// (Phase 2b). Both values default when empty, at use (GitHubClientID,
+// GitHubWebBase), so a saved config.yaml never pins the defaults.
+type GitHubConfig struct {
+	// ClientID overrides the App's client ID (ghauth.DefaultClientID).
+	ClientID string `yaml:"client_id,omitempty"`
+	// WebBaseURL overrides https://github.com (the device code and token
+	// endpoints), for a test against a fake GitHub. The REST calls use
+	// contribution.api_base_url.
+	WebBaseURL string `yaml:"web_base_url,omitempty"`
+}
+
+// GitHubClientID is the App's client ID: github.client_id, else the built-in one.
+func (c Config) GitHubClientID() string {
+	if v := strings.TrimSpace(c.GitHub.ClientID); v != "" {
+		return v
+	}
+	return ghauth.DefaultClientID
+}
+
+// GitHubWebBase is github.web_base_url, else https://github.com.
+func (c Config) GitHubWebBase() string {
+	if v := strings.TrimSpace(c.GitHub.WebBaseURL); v != "" {
+		return strings.TrimRight(v, "/")
+	}
+	return ghauth.DefaultWebBase
+}
+
+// BudgetReviewed reports whether the monthly budget counts as reviewed: an admin
+// saved it on the page, or the environment sets it.
+func (c Config) BudgetReviewed() bool {
+	return strings.TrimSpace(c.Agent.BudgetReviewedAt) != "" || c.EnvSet(KeyAgentMonthlyBudget)
+}
 
 // TranscriptsConfig is the transcript cache (decision 5).
 type TranscriptsConfig struct {
@@ -107,6 +143,10 @@ const (
 	KeyAgentMonthlyBudget   = "agent.monthly_budget_usd"
 	KeyTranscriptsRetention = "transcripts.retention_days"
 	KeyASRWorkerFallback    = "asr.worker_fallback"
+	KeyGitHubClientID       = "github.client_id"
+	KeyGitHubWebBaseURL     = "github.web_base_url"
+	envGitHubClientID       = "AUDIOSILO_BRIDGE_GITHUB_CLIENT_ID"
+	envGitHubWebBaseURL     = "AUDIOSILO_BRIDGE_GITHUB_WEB_BASE_URL"
 	envAgentStagingDir      = "AUDIOSILO_BRIDGE_AGENT_STAGING_DIR"
 	envAgentClaimTimeout    = "AUDIOSILO_BRIDGE_AGENT_CLAIM_TIMEOUT_SECONDS"
 	envAgentMonthlyBudget   = "AUDIOSILO_BRIDGE_AGENT_MONTHLY_BUDGET_USD"
@@ -177,6 +217,14 @@ func applyBridgeEnv(cfg *Config) {
 	if v, ok := lookupEnv(envASRWorkerFallback); ok {
 		cfg.ASR.WorkerFallback = v
 		cfg.fromEnv[KeyASRWorkerFallback] = true
+	}
+	if v, ok := lookupEnv(envGitHubClientID); ok {
+		cfg.GitHub.ClientID = v
+		cfg.fromEnv[KeyGitHubClientID] = true
+	}
+	if v, ok := lookupEnv(envGitHubWebBaseURL); ok {
+		cfg.GitHub.WebBaseURL = v
+		cfg.fromEnv[KeyGitHubWebBaseURL] = true
 	}
 }
 
@@ -355,11 +403,23 @@ func (c Config) validateBridge() error {
 	if d := c.Transcripts.RetentionDays; d < 0 || d > MaxTranscriptRetentionDays {
 		return fmt.Errorf("transcripts.retention_days must be between 0 and %d, got %d", MaxTranscriptRetentionDays, d)
 	}
+	if c.GitHub.WebBaseURL != "" {
+		if err := checkHTTPURL(c.GitHub.WebBaseURL); err != nil {
+			return fmt.Errorf("github.web_base_url %q %w", c.GitHub.WebBaseURL, err)
+		}
+	}
+	if id := c.GitHub.ClientID; id != "" && !clientIDPattern.MatchString(id) {
+		return fmt.Errorf("github.client_id %q must be a GitHub App's client ID (letters and digits)", id)
+	}
 	if f := c.ASR.WorkerFallback; f != ASRWorkerFallbackLocal && f != ASRWorkerFallbackWait {
 		return fmt.Errorf("asr.worker_fallback must be %q or %q, got %q", ASRWorkerFallbackLocal, ASRWorkerFallbackWait, f)
 	}
 	return nil
 }
+
+// clientIDPattern bounds github.client_id (an App's client ID is "Iv23..."
+// letters and digits).
+var clientIDPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
 
 // checkHTTPURL accepts an absolute http(s) URL with a host and no credentials,
 // query or fragment.

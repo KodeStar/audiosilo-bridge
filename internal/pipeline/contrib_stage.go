@@ -68,7 +68,7 @@ const defaultContribBaseURL = "https://api.github.com"
 const (
 	// ContribUnavailableMsg parks a book in issue mode when no GitHub credential
 	// is available (no PAT in secrets, no `gh auth token`).
-	ContribUnavailableMsg = "GitHub credential unavailable - set AUDIOSILO_BRIDGE_GITHUB_TOKEN on the Bridge and restart it, then Retry"
+	ContribUnavailableMsg = "GitHub credential unavailable - sign in to GitHub on the Bridge's Accounts tab, then Retry"
 	// CoreNeededMsg parks a book whose work does not exist upstream: a core add-work
 	// proposal has been prefilled and awaits completion/confirmation in the UI.
 	CoreNeededMsg = "this book's work does not exist on AudioSilo Meta yet - complete the work proposal, then it contributes automatically"
@@ -487,8 +487,10 @@ func (e *Executor) submitIssue(ctx context.Context, book store.Book, slug string
 			return ierr
 		}
 		note := ""
-		if got, gerr := cli.GetIssue(ctx, e.contribCommunityRepo, issue.Number); gerr == nil {
-			if !labelStuck(got.Labels, routingLabel(a.kind)) {
+		// An issue filed through the GitHub App is labelled by the meta repo's
+		// route workflow once it is open (D3), so a label missing now says nothing.
+		if !cli.AppFiled() {
+			if got, gerr := cli.GetIssue(ctx, e.contribCommunityRepo, issue.Number); gerr == nil && !labelStuck(got.Labels, routingLabel(a.kind)) {
 				note = fmt.Sprintf("%s - a maintainer must apply %s for intake to run", store.ContribNoteLabelsMissingPrefix, routingLabel(a.kind))
 			}
 		}
@@ -539,7 +541,7 @@ func (e *Executor) contribClient(ctx context.Context) (*contrib.Client, error) {
 	if e.tokenSource == nil {
 		return nil, scheduler.ParkWithCode(state.ParkContribUnavailable, ContribUnavailableMsg)
 	}
-	token, _, err := e.tokenSource.Resolve(ctx)
+	token, from, err := e.tokenSource.Resolve(ctx)
 	if err != nil {
 		if errors.Is(err, contrib.ErrNoCredential) {
 			return nil, scheduler.ParkWithCode(state.ParkContribUnavailable, ContribUnavailableMsg)
@@ -550,7 +552,7 @@ func (e *Executor) contribClient(ctx context.Context) (*contrib.Client, error) {
 	if base == "" {
 		base = defaultContribBaseURL
 	}
-	return contrib.NewClient(base, token), nil
+	return contrib.NewClientFor(base, token, from, e.tokenSource), nil
 }
 
 // recordCovered records a dimension the resolved work already carries upstream as an

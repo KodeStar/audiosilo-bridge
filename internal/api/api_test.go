@@ -30,6 +30,7 @@ type backend struct {
 	retryErr                       error
 	createdWorker                  string
 	revokedWorker                  int64
+	acc                            fakeAccounts
 }
 
 func (b *backend) Status() Status { return Status{Version: "0.1.0", Kinds: []string{"bridge.verify"}} }
@@ -175,6 +176,8 @@ func TestEveryRouteNeedsASession(t *testing.T) {
 		{"GET", "/api/settings"}, {"PUT", "/api/settings"}, {"GET", "/api/jobs"}, {"POST", "/api/jobs/1/cancel"},
 		{"GET", "/api/jobs/1"}, {"POST", "/api/jobs/1/retry"}, {"GET", "/api/engine"},
 		{"GET", "/api/logs"}, {"GET", "/api/workers"}, {"POST", "/api/workers"}, {"DELETE", "/api/workers/2"},
+		{"GET", "/api/accounts"}, {"POST", "/api/accounts/github/device"}, {"DELETE", "/api/accounts/github"},
+		{"PUT", "/api/accounts/agent"}, {"DELETE", "/api/accounts/agent"},
 		{"POST", "/api/logout"}, // last: it ends the session
 	}
 	for _, rt := range routes {

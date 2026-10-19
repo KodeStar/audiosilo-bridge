@@ -360,10 +360,10 @@ func (h *Handler) startRun(job jobs.Job, rep *jobs.Reporter, kind string) (r *ru
 	return r, func() { h.dropPoke(job.ID, r.poke) }, nil
 }
 
-// errCantContribute is a contribute=issue job on a Bridge with no GitHub token.
+// errCantContribute is a contribute=issue job on a Bridge with no GitHub credential.
 var errCantContribute = errors.New("this job asks to contribute the characters and recaps (contribute: issue), but " +
-	"the Bridge has no GitHub token: set AUDIOSILO_BRIDGE_GITHUB_TOKEN on the Bridge and restart it, or generate " +
-	"the book with contribute set to local")
+	"the Bridge isn't signed in to GitHub: sign in on the Bridge's Accounts tab, or generate the book with " +
+	"contribute set to local")
 
 // end records how the job ended, unless it resumes later (the Bridge stopping or
 // its token refused). A job that ends any other way short of done (an admin

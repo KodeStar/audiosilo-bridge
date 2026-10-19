@@ -1,0 +1,530 @@
+// Package accounts holds the Bridge's external accounts (BRIDGE-PLAN.md
+// decision 19, Phase 2b): the GitHub sign-in a contribution files its issues
+// with (the device flow, the refresh of its expiring token, the sign-out that
+// revokes it) and the agent's credential the Bridge hands the agent container
+// per run. The credentials live in the sealed vault (internal/secrets); the
+// store's accounts table keeps what the Accounts page shows about them (the
+// login, when it was set, when it last worked, a refusal).
+//
+// Nothing here logs or returns a credential except to the code that uses it:
+// GitHub.Token for a contribution's REST client, Agent.Credential for the
+// agent container's hand-off file.
+package accounts
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/kodestar/audiosilo-bridge/internal/ghauth"
+	"github.com/kodestar/audiosilo-bridge/internal/secrets"
+	"github.com/kodestar/audiosilo-bridge/internal/store"
+)
+
+// Providers: the accounts table's keys.
+const (
+	ProviderGitHub = "github"
+	ProviderAgent  = "agent"
+)
+
+// Store is the part of the store the accounts write (*store.DB).
+type Store interface {
+	GetAccount(ctx context.Context, provider string) (store.Account, error)
+	SignInAccount(ctx context.Context, provider, login string, at time.Time) error
+	AccountOK(ctx context.Context, provider string, at time.Time) error
+	RefuseAccount(ctx context.Context, provider, why string, at time.Time) error
+	SetAccountError(ctx context.Context, provider, why string) error
+	DeleteAccount(ctx context.Context, provider string) error
+}
+
+// refreshBefore is how long before its expiry an access token is refreshed.
+const refreshBefore = 5 * time.Minute
+
+// Errors of the GitHub sign-in.
+var (
+	// ErrNotSignedIn: no GitHub sign-in on this Bridge.
+	ErrNotSignedIn = errors.New("the Bridge isn't signed in to GitHub")
+	// ErrRefused: GitHub refused the sign-in (revoked, or the refresh token
+	// expired); signing in again ends it.
+	ErrRefused = errors.New("GitHub refused the Bridge's sign-in: sign in again on the Accounts tab")
+)
+
+// RefusedText is the accounts row's last_error after a 401.
+const RefusedText = "GitHub refused the sign-in (it was revoked or expired): sign in again"
+
+// GitHubOptions wire a GitHub account.
+type GitHubOptions struct {
+	Vault secrets.Store
+	DB    Store
+	// Client is the App's GitHub client (its client ID and bases).
+	Client *ghauth.Client
+	Log    *slog.Logger
+	// OnChange runs after a sign-in, a sign-out or a refusal (the heartbeat's
+	// checklist and can_contribute move).
+	OnChange func()
+	// Now and Sleep are the clock and the device flow's wait (tests replace them).
+	Now   func() time.Time
+	Sleep func(context.Context, time.Duration) error
+}
+
+// GitHub is the Bridge's GitHub sign-in.
+type GitHub struct {
+	o GitHubOptions
+
+	mu sync.Mutex
+	// flow is the device flow in progress (nil for none); flowErr why the last
+	// one ended without a sign-in ("" when it signed in or none ran).
+	flow    *deviceFlow
+	flowErr string
+	// refreshMu makes the refresh single-flight: GitHub ends the old pair at the
+	// first, so callers wait here and then read the pair it stored.
+	refreshMu sync.Mutex
+}
+
+type deviceFlow struct {
+	code   ghauth.DeviceCode
+	cancel context.CancelFunc
+}
+
+// NewGitHub returns the GitHub account.
+func NewGitHub(o GitHubOptions) *GitHub {
+	if o.Log == nil {
+		o.Log = slog.New(slog.DiscardHandler)
+	}
+	if o.OnChange == nil {
+		o.OnChange = func() {}
+	}
+	if o.Now == nil {
+		o.Now = time.Now
+	}
+	return &GitHub{o: o}
+}
+
+// Pending is a device flow waiting for the admin: the code to type at
+// VerificationURI before ExpiresAt.
+type Pending struct {
+	UserCode        string    `json:"user_code"`
+	VerificationURI string    `json:"verification_uri"`
+	ExpiresAt       time.Time `json:"expires_at"`
+}
+
+// GitHubState is the GitHub sign-in as the Accounts page shows it.
+type GitHubState struct {
+	// Available: a client ID is configured, so sign-in can start.
+	Available bool `json:"available"`
+	// SignedIn: a sign-in is stored (Refused says whether GitHub still takes it).
+	SignedIn   bool   `json:"signed_in"`
+	Login      string `json:"login"`
+	SignedInAt string `json:"signed_in_at"`
+	LastOKAt   string `json:"last_ok_at"`
+	Refused    bool   `json:"refused"`
+	LastError  string `json:"last_error"`
+	// Pending is the device flow in progress; FlowError why the last one ended
+	// without a sign-in.
+	Pending   *Pending `json:"pending"`
+	FlowError string   `json:"flow_error"`
+}
+
+// State is the sign-in now.
+func (g *GitHub) State(ctx context.Context) GitHubState {
+	st := GitHubState{Available: strings.TrimSpace(g.o.Client.ClientID) != ""}
+	g.mu.Lock()
+	if g.flow != nil {
+		st.Pending = &Pending{UserCode: g.flow.code.UserCode, VerificationURI: g.flow.code.VerificationURI,
+			ExpiresAt: g.flow.code.ExpiresAt.UTC()}
+	}
+	st.FlowError = g.flowErr
+	g.mu.Unlock()
+	if tok, err := g.stored(); err == nil && tok.AccessToken != "" {
+		st.SignedIn = true
+	}
+	if a, err := g.o.DB.GetAccount(ctx, ProviderGitHub); err == nil && st.SignedIn {
+		st.Login, st.SignedInAt, st.LastOKAt, st.LastError = a.Login, a.SignedInAt, a.LastOKAt, a.LastError
+		st.Refused = a.RefusedAt != ""
+	}
+	return st
+}
+
+// Login is the signed-in user's login ("" for none, or while GitHub refuses it).
+func (g *GitHub) Login(ctx context.Context) string {
+	st := g.State(ctx)
+	if !st.SignedIn || st.Refused {
+		return ""
+	}
+	return st.Login
+}
+
+// Start begins a device flow (ending one in progress): the code is returned for
+// the page to show, and the Bridge polls GitHub in the background until the
+// admin approves it (the sign-in is stored), cancels, or the code expires.
+func (g *GitHub) Start(ctx context.Context) (Pending, error) {
+	code, err := g.o.Client.RequestCode(ctx)
+	if err != nil {
+		return Pending{}, err
+	}
+	fctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	f := &deviceFlow{code: code, cancel: cancel}
+	g.mu.Lock()
+	if g.flow != nil {
+		g.flow.cancel()
+	}
+	g.flow, g.flowErr = f, ""
+	g.mu.Unlock()
+	go g.wait(fctx, f)
+	return Pending{UserCode: code.UserCode, VerificationURI: code.VerificationURI, ExpiresAt: code.ExpiresAt.UTC()}, nil
+}
+
+// wait polls one device flow to its end.
+func (g *GitHub) wait(ctx context.Context, f *deviceFlow) {
+	tok, err := g.o.Client.Wait(ctx, f.code, g.o.Sleep)
+	var login string
+	if err == nil {
+		var u ghauth.User
+		if u, err = g.o.Client.User(ctx, tok.AccessToken); err == nil {
+			login = u.Login
+		}
+	}
+	if err == nil {
+		err = g.store(ctx, tok, login)
+	}
+	g.mu.Lock()
+	current := g.flow == f
+	if current {
+		g.flow = nil
+		if err != nil && !errors.Is(err, context.Canceled) {
+			g.flowErr = flowErrorText(err)
+		}
+	}
+	g.mu.Unlock()
+	f.cancel()
+	switch {
+	case err == nil:
+		g.o.Log.Info("accounts: signed in to GitHub", "login", login)
+		g.o.OnChange()
+	case errors.Is(err, context.Canceled):
+	default:
+		g.o.Log.Warn("accounts: the GitHub sign-in didn't complete", "err", err)
+	}
+}
+
+// flowErrorText is a failed device flow's reason for the page.
+func flowErrorText(err error) string {
+	switch {
+	case errors.Is(err, ghauth.ErrExpired), errors.Is(err, ghauth.ErrDenied):
+		return err.Error()
+	}
+	return "The sign-in didn't complete: " + err.Error()
+}
+
+// store seals a new sign-in and records it.
+func (g *GitHub) store(ctx context.Context, tok ghauth.Token, login string) error {
+	raw, err := json.Marshal(tok) //nolint:gosec // G117: the pair is sealed into the vault, its one home
+	if err != nil {
+		return err
+	}
+	if err := g.o.Vault.Set(secrets.GitHubUserToken, string(raw)); err != nil {
+		return fmt.Errorf("store the sign-in: %w", err)
+	}
+	return g.o.DB.SignInAccount(context.WithoutCancel(ctx), ProviderGitHub, login, g.o.Now())
+}
+
+// Cancel ends the device flow in progress (none: nothing to do).
+func (g *GitHub) Cancel() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.flow != nil {
+		g.flow.cancel()
+		g.flow = nil
+	}
+}
+
+// SignOut ends a device flow in progress, deletes the sign-in here and asks
+// GitHub to revoke both tokens. The revoke is best effort (GitHub may be
+// unreachable): its failure is returned beside the local delete that always
+// happens, for the page to mention.
+func (g *GitHub) SignOut(ctx context.Context) (revokeErr error, err error) {
+	g.Cancel()
+	g.refreshMu.Lock()
+	defer g.refreshMu.Unlock()
+	tok, _ := g.stored()
+	if err := g.o.Vault.Delete(secrets.GitHubUserToken); err != nil {
+		return nil, err
+	}
+	if err := g.o.DB.DeleteAccount(ctx, ProviderGitHub); err != nil {
+		return nil, err
+	}
+	g.mu.Lock()
+	g.flowErr = ""
+	g.mu.Unlock()
+	g.o.OnChange()
+	if tok.AccessToken != "" || tok.RefreshToken != "" {
+		if rerr := g.o.Client.Revoke(ctx, tok.AccessToken, tok.RefreshToken); rerr != nil {
+			g.o.Log.Warn("accounts: GitHub didn't revoke the signed-out tokens", "err", rerr)
+			revokeErr = rerr
+		}
+	}
+	g.o.Log.Info("accounts: signed out of GitHub")
+	return revokeErr, nil
+}
+
+// stored is the sealed sign-in (a zero Token for none).
+func (g *GitHub) stored() (ghauth.Token, error) {
+	raw, err := g.o.Vault.Get(secrets.GitHubUserToken)
+	if err != nil || raw == "" {
+		return ghauth.Token{}, err
+	}
+	var tok ghauth.Token
+	if err := json.Unmarshal([]byte(raw), &tok); err != nil {
+		return ghauth.Token{}, errors.New("the stored GitHub sign-in is unreadable: sign in again")
+	}
+	return tok, nil
+}
+
+// Token is the sign-in's access token for a REST call, refreshed first when it
+// expires within refreshBefore (the new pair sealed in one write before it is
+// used). ErrNotSignedIn for none, ErrRefused while GitHub refuses it.
+func (g *GitHub) Token(ctx context.Context) (string, error) {
+	g.refreshMu.Lock()
+	defer g.refreshMu.Unlock()
+	tok, err := g.stored()
+	if err != nil {
+		return "", err
+	}
+	if tok.AccessToken == "" {
+		return "", ErrNotSignedIn
+	}
+	if a, err := g.o.DB.GetAccount(ctx, ProviderGitHub); err == nil && a.RefusedAt != "" {
+		return "", ErrRefused
+	}
+	now := g.o.Now()
+	if !tok.Expiring() || now.Before(tok.ExpiresAt.Add(-refreshBefore)) {
+		return tok.AccessToken, nil
+	}
+	if !tok.RefreshExpiresAt.IsZero() && !now.Before(tok.RefreshExpiresAt) {
+		g.refuse(ctx, "the GitHub sign-in expired (the Bridge was offline for months): sign in again")
+		return "", ErrRefused
+	}
+	fresh, err := g.o.Client.Refresh(ctx, tok.RefreshToken)
+	if err != nil {
+		// Never tried again: GitHub may have spent the refresh token even when the
+		// answer was lost, and a spent one is refused for good. The admin signs in
+		// again.
+		why := "couldn't refresh the GitHub sign-in: sign in again"
+		if errors.Is(err, ghauth.ErrBadRefresh) {
+			why = ghauth.ErrBadRefresh.Error()
+		}
+		g.o.Log.Warn("accounts: refreshing the GitHub sign-in failed", "err", err)
+		g.refuse(ctx, why)
+		return "", ErrRefused
+	}
+	if fresh.RefreshToken == "" {
+		// GitHub turned expiry off for the App: the new token doesn't expire.
+		fresh.ExpiresAt, fresh.RefreshExpiresAt = time.Time{}, time.Time{}
+	}
+	raw, err := json.Marshal(fresh) //nolint:gosec // G117: the pair is sealed into the vault, its one home
+	if err != nil {
+		return "", err
+	}
+	// The old pair is dead now: the new one must be kept before it is used.
+	if err := g.o.Vault.Set(secrets.GitHubUserToken, string(raw)); err != nil {
+		g.o.Log.Error("accounts: the refreshed GitHub sign-in couldn't be stored; sign in again after a restart", "err", err)
+		return "", fmt.Errorf("store the refreshed sign-in: %w", err)
+	}
+	_ = g.o.DB.AccountOK(context.WithoutCancel(ctx), ProviderGitHub, now)
+	g.o.Log.Info("accounts: refreshed the GitHub sign-in")
+	return fresh.AccessToken, nil
+}
+
+// Refused records that GitHub refused token (a 401 on a REST call made with it):
+// the sign-in is not used again until a new one, and the heartbeat says the
+// Bridge can't contribute. A 401 on a token a refresh has since replaced (a call
+// in flight while it refreshed: GitHub ends the old token at once) says nothing
+// about the sign-in and is ignored.
+func (g *GitHub) Refused(ctx context.Context, token string) {
+	g.refreshMu.Lock()
+	cur, _ := g.stored()
+	g.refreshMu.Unlock()
+	if cur.AccessToken == "" || cur.AccessToken != token {
+		return
+	}
+	g.refuse(ctx, RefusedText)
+}
+
+func (g *GitHub) refuse(ctx context.Context, why string) {
+	if tok, _ := g.stored(); tok.AccessToken == "" {
+		return
+	}
+	if err := g.o.DB.RefuseAccount(context.WithoutCancel(ctx), ProviderGitHub, why, g.o.Now()); err != nil {
+		g.o.Log.Warn("accounts: recording GitHub's refusal failed", "err", err)
+	}
+	g.o.Log.Warn("accounts: GitHub refused the sign-in", "why", why)
+	g.o.OnChange()
+}
+
+// OK records that the sign-in worked now.
+func (g *GitHub) OK(ctx context.Context) {
+	_ = g.o.DB.AccountOK(context.WithoutCancel(ctx), ProviderGitHub, g.o.Now())
+}
+
+// --- the agent's credential ---
+
+// The agent credential kinds the page sets, as vault names: a claude
+// setup-token (a subscription), an Anthropic API key (claude, billed) or an
+// OpenAI API key (codex, billed).
+const (
+	AgentClaudeToken  = secrets.ClaudeOAuthToken
+	AgentAnthropicKey = secrets.AnthropicAPIKey
+	AgentOpenAIKey    = secrets.OpenAIAPIKey
+)
+
+// AgentKinds are the agent credential kinds, in the page's order.
+var AgentKinds = []string{AgentClaudeToken, AgentAnthropicKey, AgentOpenAIKey}
+
+// MaxCredentialBytes bounds a credential's value (the hand-off file is 4 KiB).
+const MaxCredentialBytes = 2048
+
+// ErrInvalidCredential is a value or kind the page can't store.
+var ErrInvalidCredential = errors.New("invalid credential")
+
+// Agent is the agent's credential in the vault.
+type Agent struct {
+	vault    secrets.Store
+	db       Store
+	now      func() time.Time
+	onChange func()
+}
+
+// NewAgent returns the agent's credential store; onChange runs after a change.
+func NewAgent(vault secrets.Store, db Store, now func() time.Time, onChange func()) *Agent {
+	if now == nil {
+		now = time.Now
+	}
+	if onChange == nil {
+		onChange = func() {}
+	}
+	return &Agent{vault: vault, db: db, now: now, onChange: onChange}
+}
+
+// AgentState is which agent credentials the vault holds (never a value) and
+// when the last one was set.
+type AgentState struct {
+	Set   map[string]bool `json:"set"`
+	SetAt string          `json:"set_at"`
+}
+
+// State is the agent's credentials now.
+func (a *Agent) State(ctx context.Context) AgentState {
+	st := AgentState{Set: map[string]bool{}}
+	for _, k := range AgentKinds {
+		ok, _ := a.vault.Present(k)
+		st.Set[k] = ok
+	}
+	if acc, err := a.db.GetAccount(ctx, ProviderAgent); err == nil {
+		st.SetAt = acc.SignedInAt
+	}
+	return st
+}
+
+// Set stores a credential of kind (one of AgentKinds). The value is checked
+// for shape only: one line of printable text, at most MaxCredentialBytes.
+func (a *Agent) Set(ctx context.Context, kind, value string) error {
+	if !validKind(kind) {
+		return fmt.Errorf("%w: unknown credential kind %q", ErrInvalidCredential, kind)
+	}
+	value = strings.TrimSpace(value)
+	switch {
+	case value == "":
+		return fmt.Errorf("%w: the credential is empty", ErrInvalidCredential)
+	case len(value) > MaxCredentialBytes:
+		return fmt.Errorf("%w: the credential is longer than %d characters", ErrInvalidCredential, MaxCredentialBytes)
+	case strings.ContainsFunc(value, func(r rune) bool { return r <= ' ' || r > '~' }):
+		return fmt.Errorf("%w: the credential holds a space, a line break or a character a key never has (paste it as one line)", ErrInvalidCredential)
+	}
+	if err := a.vault.Set(kind, value); err != nil {
+		return err
+	}
+	if err := a.db.SignInAccount(ctx, ProviderAgent, "", a.now()); err != nil {
+		return err
+	}
+	a.onChange()
+	return nil
+}
+
+// Delete removes the credential of kind ("" removes every agent credential).
+func (a *Agent) Delete(ctx context.Context, kind string) error {
+	kinds := AgentKinds
+	if kind != "" {
+		if !validKind(kind) {
+			return fmt.Errorf("%w: unknown credential kind %q", ErrInvalidCredential, kind)
+		}
+		kinds = []string{kind}
+	}
+	for _, k := range kinds {
+		if err := a.vault.Delete(k); err != nil {
+			return err
+		}
+	}
+	left := false
+	for _, k := range AgentKinds {
+		if ok, _ := a.vault.Present(k); ok {
+			left = true
+		}
+	}
+	if !left {
+		if err := a.db.DeleteAccount(ctx, ProviderAgent); err != nil {
+			return err
+		}
+	} else if err := a.db.SignInAccount(ctx, ProviderAgent, "", a.now()); err != nil {
+		return err
+	}
+	a.onChange()
+	return nil
+}
+
+// The CLIs and the credential kinds the agent container knows (agentproto's
+// names, repeated so this package stays off the protocol).
+const (
+	cliClaude = "claude"
+	cliCodex  = "codex"
+	// CredentialOAuthToken and CredentialAPIKey are agentproto's kinds.
+	CredentialOAuthToken = "oauth_token"
+	CredentialAPIKey     = "api_key"
+)
+
+// Credential is the vault's credential for cli ("claude" or "codex"): its kind
+// (CredentialOAuthToken, CredentialAPIKey), its value and when it was set. A
+// subscription token comes first for claude. ok is false when there is none.
+func (a *Agent) Credential(ctx context.Context, cli string) (kind, value string, since time.Time, ok bool) {
+	var order []struct{ name, kind string }
+	switch cli {
+	case cliClaude:
+		order = []struct{ name, kind string }{{AgentClaudeToken, CredentialOAuthToken}, {AgentAnthropicKey, CredentialAPIKey}}
+	case cliCodex:
+		order = []struct{ name, kind string }{{AgentOpenAIKey, CredentialAPIKey}}
+	}
+	for _, o := range order {
+		v, err := a.vault.Get(o.name)
+		if err != nil || v == "" {
+			continue
+		}
+		if acc, err := a.db.GetAccount(ctx, ProviderAgent); err == nil {
+			since, _ = time.Parse(time.RFC3339Nano, acc.SignedInAt)
+		}
+		return o.kind, v, since, true
+	}
+	return "", "", time.Time{}, false
+}
+
+func validKind(kind string) bool {
+	for _, k := range AgentKinds {
+		if k == kind {
+			return true
+		}
+	}
+	return false
+}

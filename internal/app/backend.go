@@ -17,6 +17,8 @@ import (
 	"github.com/kodestar/audiosilo-bridge/internal/link"
 	"github.com/kodestar/audiosilo-bridge/internal/logring"
 	"github.com/kodestar/audiosilo-bridge/internal/pipeline"
+	"github.com/kodestar/audiosilo-bridge/internal/setup"
+	"github.com/kodestar/audiosilo-bridge/internal/state"
 	"github.com/kodestar/audiosilo-bridge/internal/store"
 )
 
@@ -36,6 +38,8 @@ func (b *Bridge) Status() api.Status {
 		st.Online = time.Since(b.lastBeat) < 2*time.Minute && b.beatErr == ""
 	}
 	b.mu.Unlock()
+	st.Setup = b.setup(context.Background())
+	st.SetupComplete = setup.Complete(st.Setup)
 	return st
 }
 
@@ -136,10 +140,12 @@ func (b *Bridge) CheckNow(ctx context.Context) { b.CheckMappings(context.Without
 // Settings are the page's editable settings.
 func (b *Bridge) Settings() api.Settings {
 	cfg := b.config()
+	budget := cfg.Agent.MonthlyBudgetUSD
 	s := api.Settings{PublicURL: cfg.PublicURL, MappingCheckMinutes: cfg.Mapping.CheckMinutes,
-		ASRWorkerFallback: cfg.ASR.WorkerFallback, Locked: []string{}}
+		ASRWorkerFallback: cfg.ASR.WorkerFallback, MonthlyBudgetUSD: &budget, BudgetReviewed: cfg.BudgetReviewed(),
+		Locked: []string{}}
 	for _, k := range []string{config.KeyPublicURL, config.KeyMappingCheck, config.KeyLibraries, config.KeyServerURL,
-		config.KeyASRWorkerFallback} {
+		config.KeyASRWorkerFallback, config.KeyAgentMonthlyBudget} {
 		if cfg.EnvSet(k) {
 			s.Locked = append(s.Locked, k)
 		}
@@ -162,6 +168,13 @@ func (b *Bridge) SaveSettings(ctx context.Context, s api.Settings) error {
 	if cur.EnvSet(config.KeyASRWorkerFallback) && s.ASRWorkerFallback != cur.ASR.WorkerFallback {
 		return api.Errorf(api.ErrLocked, "AUDIOSILO_BRIDGE_ASR_WORKER_FALLBACK sets asr.worker_fallback")
 	}
+	budget := s.MonthlyBudgetUSD
+	if budget != nil && cur.EnvSet(config.KeyAgentMonthlyBudget) {
+		if *budget != cur.Agent.MonthlyBudgetUSD {
+			return api.Errorf(api.ErrLocked, "AUDIOSILO_BRIDGE_AGENT_MONTHLY_BUDGET_USD sets agent.monthly_budget_usd")
+		}
+		budget = nil // the environment's value stays out of the file
+	}
 	err := b.save(func(c *config.Config) error {
 		// A setting the environment sets keeps config.yaml's own value: the page
 		// sends it back unchanged, and it must never reach the file.
@@ -174,12 +187,23 @@ func (b *Bridge) SaveSettings(ctx context.Context, s api.Settings) error {
 		if !cur.EnvSet(config.KeyASRWorkerFallback) {
 			c.ASR.WorkerFallback = s.ASRWorkerFallback
 		}
+		if budget != nil {
+			// Saving the budget is reviewing it (the setup checklist's item),
+			// even when the value stays the same.
+			c.Agent.MonthlyBudgetUSD = *budget
+			c.Agent.BudgetReviewedAt = time.Now().UTC().Format(time.RFC3339)
+		}
 		return nil
 	})
 	if err != nil {
 		return err
 	}
 	b.kickWaiting() // a fallback that is no longer wait lets waiting books go on
+	if e := b.engine.get(); e != nil && budget != nil && *budget != cur.Agent.MonthlyBudgetUSD {
+		// A changed budget: the books parked on the old one look again (one
+		// still over it parks again until the next month).
+		go e.sched.ReadmitParked(context.WithoutCancel(ctx), "the monthly budget changed", state.ParkBudgetExceeded)
+	}
 	b.Kick()
 	return nil
 }
