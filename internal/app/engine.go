@@ -74,6 +74,15 @@ func (s *engineState) describer() generate.Describer {
 	return nil
 }
 
+// sharer is the engine's share step for sidecars.contribute (nil until it
+// started: never a typed nil inside the interface).
+func (s *engineState) sharer() generate.Sharer {
+	if e := s.get(); e != nil {
+		return e.exec
+	}
+	return nil
+}
+
 // agentBackend is the CLI the agent container runs (claude unless codex is set).
 func agentBackend(cfg config.Config) string {
 	if cfg.Agent.Backend == config.AgentBackendCodex {

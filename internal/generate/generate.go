@@ -77,6 +77,9 @@ type Options struct {
 	// Describer is the engine's description step, nil until the engine has
 	// started (a nil func: no descriptions).
 	Describer func() Describer
+	// Sharer is the engine's share step for sidecars.contribute (nil until the
+	// engine has started; a nil func: no shares).
+	Sharer    func() Sharer
 	Libraries Libraries
 	Mount     mapping.MountFunc
 	// Server is the server link, nil while unpaired.

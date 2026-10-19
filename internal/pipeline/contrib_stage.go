@@ -451,6 +451,13 @@ func (e *Executor) submitContributions(ctx context.Context, book store.Book, slu
 // propagates as a transient stage error (not a park); a resume with an already-recorded
 // row skips that dimension.
 func (e *Executor) submitIssue(ctx context.Context, book store.Book, slug string, artifacts []contribArtifact, auditNote string) error {
+	return e.submitIssueWith(ctx, book, slug, artifacts, auditNote, rowSettled)
+}
+
+// submitIssueWith is submitIssue with the rule for a row that is already settled
+// (sidecars.contribute files again over a local or covered one).
+func (e *Executor) submitIssueWith(ctx context.Context, book store.Book, slug string, artifacts []contribArtifact, auditNote string,
+	settled func([]store.Contribution, string) bool) error {
 	cli, err := e.contribClient(ctx)
 	if err != nil {
 		return err
@@ -460,7 +467,7 @@ func (e *Executor) submitIssue(ctx context.Context, book store.Book, slug string
 		// A settled row (submitted/merged/local/already_covered) is authoritative: skip
 		// it BEFORE the covered branch so a later upstream-covered verdict cannot
 		// overwrite a row that already recorded a real submission on a prior run.
-		if rowSettled(existing, a.kind) {
+		if settled(existing, a.kind) {
 			continue // resume: this dimension already posted
 		}
 		if a.covered {

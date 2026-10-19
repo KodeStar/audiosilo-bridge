@@ -24,11 +24,13 @@ import (
 	"github.com/kodestar/audiosilo-bridge/internal/auth"
 	"github.com/kodestar/audiosilo-bridge/internal/config"
 	"github.com/kodestar/audiosilo-bridge/internal/contrib"
+	"github.com/kodestar/audiosilo-bridge/internal/correct"
 	"github.com/kodestar/audiosilo-bridge/internal/generate"
 	"github.com/kodestar/audiosilo-bridge/internal/jobs"
 	"github.com/kodestar/audiosilo-bridge/internal/link"
 	"github.com/kodestar/audiosilo-bridge/internal/logring"
 	"github.com/kodestar/audiosilo-bridge/internal/mapping"
+	"github.com/kodestar/audiosilo-bridge/internal/metaops"
 	"github.com/kodestar/audiosilo-bridge/internal/secrets"
 	"github.com/kodestar/audiosilo-bridge/internal/store"
 	"github.com/kodestar/audiosilo-bridge/internal/verify"
@@ -170,6 +172,7 @@ func New(ctx context.Context, opts Options) (*Bridge, string, error) {
 		return nil
 	})
 	b.gen = generate.New(generate.Options{DB: db, Engine: b.engine.generateEngine, Describer: b.engine.describer,
+		Sharer:    b.engine.sharer,
 		Libraries: b.libs, Mount: b.mount,
 		Server: func() generate.Server {
 			if cl := b.conn.Client(); cl != nil {
@@ -179,8 +182,11 @@ func New(ctx context.Context, opts Options) (*Bridge, string, error) {
 		},
 		WorkRoot: filepath.Join(opts.DataDir, "work"), Version: opts.Version, RetentionDays: cfg.Transcripts.RetentionDays,
 		CanContribute: b.canContribute, Log: opts.Logger})
-	b.runner = jobs.New(db, b.server, b.tokenRefused, jobs.Options{Log: opts.Logger,
-		ServerID: func() string { return b.conn.Pairing().ServerID }}, verifier, b.gen, b.gen.DescribeJob(), b.gen.ChaptersJob())
+	serverID := func() string { return b.conn.Pairing().ServerID }
+	corrector := correct.New(correct.Options{Meta: metaops.NewClient(cfg.Metadata.BaseURL), Tokens: b.tokens,
+		BaseURL: cfg.Contribution.APIBaseURL, CoreRepo: cfg.Contribution.CoreRepo, KV: db, ServerID: serverID, Log: opts.Logger})
+	b.runner = jobs.New(db, b.server, b.tokenRefused, jobs.Options{Log: opts.Logger, ServerID: serverID},
+		verifier, b.gen, b.gen.DescribeJob(), b.gen.ChaptersJob(), b.gen.ContributeJob(), corrector)
 	conn.onChange = b.linkChanged
 	return b, oneTime, nil
 }
