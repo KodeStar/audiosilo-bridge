@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 const testRepo = "KodeStar/audiosilo-meta"
@@ -276,6 +277,54 @@ func TestRetryOn5xx(t *testing.T) {
 	}
 	if calls != 2 {
 		t.Fatalf("expected exactly one retry, calls=%d", calls)
+	}
+}
+
+// TestNoRetryOfPOSTOn5xx: a POST that 5xxs is sent once (GitHub may have made
+// the issue before it failed).
+func TestNoRetryOfPOSTOn5xx(t *testing.T) {
+	var calls int
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusBadGateway)
+		io.WriteString(w, `{"message":"boom"}`)
+	})
+	var apiErr *APIError
+	if _, err := c.CreateIssue(context.Background(), testRepo, "t", "b", nil); !errors.As(err, &apiErr) || apiErr.Status != http.StatusBadGateway {
+		t.Fatalf("err = %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("a POST was sent %d times", calls)
+	}
+}
+
+// TestIssuesSince: issues created since the time, pull requests and older ones
+// left out; a full page that doesn't reach back is incomplete.
+func TestIssuesSince(t *testing.T) {
+	since := time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)
+	var query string
+	rows := []map[string]any{
+		{"number": 9, "html_url": "u9", "title": "[corrections] A", "body": "b", "created_at": "2026-10-19T12:05:00Z"},
+		{"number": 8, "html_url": "u8", "title": "pr", "created_at": "2026-10-19T12:04:00Z", "pull_request": map[string]any{}},
+		{"number": 7, "html_url": "u7", "title": "old", "body": nil, "created_at": "2026-10-19T11:00:00Z"},
+	}
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		query = r.URL.RawQuery
+		_ = json.NewEncoder(w).Encode(rows)
+	})
+	got, complete, err := c.IssuesSince(context.Background(), testRepo, since)
+	if err != nil || !complete || len(got) != 1 || got[0].Number != 9 || got[0].Body != "b" {
+		t.Fatalf("got %+v complete %v err %v", got, complete, err)
+	}
+	if !strings.Contains(query, "sort=created") || !strings.Contains(query, "state=all") || !strings.Contains(query, "since=2026-10-19T12%3A00%3A00Z") {
+		t.Fatalf("query %s", query)
+	}
+	rows = nil
+	for i := range IssuesPage {
+		rows = append(rows, map[string]any{"number": 100 + i, "title": "x", "created_at": "2026-10-19T13:00:00Z"})
+	}
+	if _, complete, err := c.IssuesSince(context.Background(), testRepo, since); err != nil || complete {
+		t.Fatalf("a full page of newer issues: complete %v err %v", complete, err)
 	}
 }
 

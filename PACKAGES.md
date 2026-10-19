@@ -1010,13 +1010,19 @@ internal/
             ASIN (and region) or ISBN when the server sent no recording id), maps
             and composes the batch (contrib.CorrectionBatchIssue) and files ONE
             issue on the core repo with the GitHub sign-in. Once per job: a
-            "filing" marker is written to the KV store (meta.correct/<server
+            "filing <time>" marker is written to the KV store (meta.correct/<server
             id>/<job id>) before CreateIssue and cleared only when GitHub answered
-            with an API or rate-limit error; a resumed run with the result returns
-            it, one with only the marker fails asking the admin to look first (a
-            transport error after the request left is the one window where a retry
-            could file twice). A 401 is errRefused. Result {issue_url,
-            issue_number, changes, auto, maintainer}.
+            a 4xx or a rate limit (a 5xx can come after the issue was made, and the
+            client never resends a POST); a resumed run with the result returns
+            it; one with only the marker lists the core repo's issues made since
+            (contrib.IssuesSince: the list endpoint, not search, which lags) and
+            adopts a [corrections] issue with the same body, files when the list is
+            complete and has none, and otherwise (a same-record batch with another
+            body, an unreadable or incomplete list, a marker without a time) fails
+            asking the admin to look first. A 401 is errRefused. Result {issue_url,
+            issue_number, changes, auto, maintainer}: auto and maintainer as known
+            at filing; the Bridge doesn't follow the issue (a batch meta applies
+            only in part is not reported back, plan D8).
   secrets/  named secrets (the server token, the agent credentials, the GitHub
             sign-in; github_pat only to delete an earlier Bridge's copy) as
             AES-256-GCM sealed files in <data>/secrets (0600, the manager BlobStore's

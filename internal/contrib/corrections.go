@@ -18,11 +18,12 @@ import (
 // copied from the form and compose_batch.go VERBATIM; meta's TestBatchGoldenBody
 // pins the body this file renders (TestCorrectionBatchGoldenBody holds the twin).
 const (
-	hRecord             = "Record"
-	hChanges            = "Changes"
-	hEvidence           = "Evidence / source"
-	itemCC0Corrections  = "I dedicate these corrections to the public domain under CC0-1.0, and I have the right to do so."
-	correctionsTitleTag = "[corrections] "
+	hRecord            = "Record"
+	hChanges           = "Changes"
+	hEvidence          = "Evidence / source"
+	itemCC0Corrections = "I dedicate these corrections to the public domain under CC0-1.0, and I have the right to do so."
+	// CorrectionsTitleTag starts a correction batch's issue title.
+	CorrectionsTitleTag = "[corrections] "
 
 	// MaxCorrections is the most changes one issue carries (meta's maxBatchChanges).
 	MaxCorrections = 25
@@ -222,7 +223,7 @@ func CorrectionBatchIssue(b CorrectionBatch) (title, body string, labels []strin
 	sb.WriteString(field(hEvidence, escapeHeadings(strings.TrimSpace(b.Evidence))))
 	// The upper-case X is meta's golden body's; its parser takes either case.
 	sb.WriteString("### " + hPublicDedication + "\n\n- [X] " + itemCC0Corrections + "\n")
-	return correctionsTitleTag + name, sb.String(), cloneLabels(correctionLabels), changes, nil
+	return CorrectionsTitleTag + name, sb.String(), cloneLabels(correctionLabels), changes, nil
 }
 
 func hasControl(s string) bool { return strings.ContainsFunc(s, unicode.IsControl) }

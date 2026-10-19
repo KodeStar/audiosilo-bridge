@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -104,7 +105,8 @@ func NewClient(baseURL, token string) *Client {
 }
 
 // request performs one REST call with a per-request timeout and a single retry
-// on a 5xx. A 403/429 with x-ratelimit-remaining:0 becomes a *RateLimitError; a
+// on a 5xx for a GET (a POST is never sent twice: GitHub can answer a server
+// error after it made the issue or gist, and a resend would make a second). A 403/429 with x-ratelimit-remaining:0 becomes a *RateLimitError; a
 // non-want status becomes an *APIError. want lists the acceptable status codes
 // (empty = any 2xx).
 func (c *Client) request(ctx context.Context, method, path string, body any, want ...int) ([]byte, http.Header, error) {
@@ -135,7 +137,7 @@ func (c *Client) requestAccept(ctx context.Context, accept, method, path string,
 		if rl := rateLimitError(status, header, respBody); rl != nil {
 			return nil, header, rl
 		}
-		if status >= 500 && attempt == 0 {
+		if status >= 500 && attempt == 0 && method == http.MethodGet {
 			lastErr = newAPIError(status, respBody)
 			continue // retry once on a server error
 		}
@@ -299,6 +301,58 @@ func (c *Client) CreateIssue(ctx context.Context, repo, title, body string, labe
 		return Issue{}, fmt.Errorf("contrib: decode issue: %w", err)
 	}
 	return r.toIssue(), nil
+}
+
+// FiledIssue is an issue as the repo's issue list shows it.
+type FiledIssue struct {
+	Number    int
+	URL       string
+	Title     string
+	Body      string
+	CreatedAt time.Time
+}
+
+// IssuesPage is how many issues IssuesSince reads (one page).
+const IssuesPage = 50
+
+// IssuesSince lists repo's issues (pull requests left out) created at or after
+// since, newest first, from one page of IssuesPage: complete is false when that
+// page may not reach back to since. The list reads GitHub's own store, so an
+// issue made a moment ago is in it (search lags behind).
+func (c *Client) IssuesSince(ctx context.Context, repo string, since time.Time) (issues []FiledIssue, complete bool, err error) {
+	q := url.Values{"state": {"all"}, "sort": {"created"}, "direction": {"desc"},
+		"per_page": {strconv.Itoa(IssuesPage)}, "since": {since.UTC().Format(time.RFC3339)}}
+	respBody, _, err := c.request(ctx, http.MethodGet, "/repos/"+repo+"/issues?"+q.Encode(), nil, http.StatusOK)
+	if err != nil {
+		return nil, false, err
+	}
+	var rows []struct {
+		Number      int             `json:"number"`
+		HTMLURL     string          `json:"html_url"`
+		Title       string          `json:"title"`
+		Body        *string         `json:"body"`
+		CreatedAt   time.Time       `json:"created_at"`
+		PullRequest json.RawMessage `json:"pull_request"`
+	}
+	if err := json.Unmarshal(respBody, &rows); err != nil {
+		return nil, false, fmt.Errorf("contrib: decode issues: %w", err)
+	}
+	complete = len(rows) < IssuesPage
+	for _, r := range rows {
+		if r.CreatedAt.Before(since) {
+			complete = true // the page reaches back past since
+			continue
+		}
+		if len(r.PullRequest) > 0 {
+			continue
+		}
+		body := ""
+		if r.Body != nil {
+			body = *r.Body
+		}
+		issues = append(issues, FiledIssue{Number: r.Number, URL: r.HTMLURL, Title: r.Title, Body: body, CreatedAt: r.CreatedAt})
+	}
+	return issues, complete, nil
 }
 
 // GetIssue reads a single issue back (used to verify labels stuck).

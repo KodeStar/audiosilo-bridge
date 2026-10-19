@@ -6,9 +6,11 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/kodestar/audiosilo-bridge/internal/contrib"
 	"github.com/kodestar/audiosilo-bridge/internal/jobs"
@@ -52,19 +54,36 @@ type tokens struct {
 func (t *tokens) Resolve(context.Context) (string, string, error) { return t.token, t.from, t.err }
 func (t *tokens) Refused(_ context.Context, from, _ string)       { t.refused = append(t.refused, from) }
 
-// gh is a fake GitHub issues API.
+// gh is a fake GitHub issues API: POST files, GET lists (newest first).
 type gh struct {
-	mu     sync.Mutex
-	status int
-	issues []map[string]any
-	auth   []string
+	mu         sync.Mutex
+	status     int
+	listStatus int
+	issues     []map[string]any
+	auth       []string
 }
 
 func (g *gh) server(t *testing.T) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/repos/KodeStar/audiosilo-meta/issues" {
+		if r.URL.Path != "/repos/KodeStar/audiosilo-meta/issues" {
 			http.NotFound(w, r)
+			return
+		}
+		if r.Method == http.MethodGet {
+			g.mu.Lock()
+			defer g.mu.Unlock()
+			if g.listStatus != 0 {
+				w.WriteHeader(g.listStatus)
+				return
+			}
+			var rows []map[string]any
+			for i := len(g.issues) - 1; i >= 0; i-- {
+				is := g.issues[i]
+				rows = append(rows, map[string]any{"number": 42 + i, "html_url": "https://github.com/KodeStar/audiosilo-meta/issues/" + strconv.Itoa(42+i),
+					"title": is["title"], "body": is["body"], "created_at": is["created_at"]})
+			}
+			_ = json.NewEncoder(w).Encode(rows)
 			return
 		}
 		var body map[string]any
@@ -77,6 +96,7 @@ func (g *gh) server(t *testing.T) *httptest.Server {
 			_, _ = w.Write([]byte(`{"message":"nope"}`))
 			return
 		}
+		body["created_at"] = "2026-10-19T12:00:00Z"
 		g.issues = append(g.issues, body)
 		w.WriteHeader(http.StatusCreated)
 		_ = json.NewEncoder(w).Encode(map[string]any{"number": 41 + len(g.issues), "html_url": "https://github.com/KodeStar/audiosilo-meta/issues/42", "state": "open"})
@@ -191,7 +211,8 @@ func TestCorrectFailures(t *testing.T) {
 			if c.status == http.StatusUnauthorized && (len(tok.refused) != 1 || tok.refused[0] != contrib.FromDevice) {
 				t.Fatalf("a 401 wasn't reported as a refusal: %v", tok.refused)
 			}
-			marked := kv.m["meta.correct/srv-1/1"] == filingMarker
+			since, marked := filingSince(kv.m["meta.correct/srv-1/1"])
+			marked = marked && !since.IsZero()
 			if c.status >= http.StatusInternalServerError && !marked {
 				t.Fatal("a server error may come after the issue is made: the filing marker must stay")
 			}
@@ -203,13 +224,66 @@ func TestCorrectFailures(t *testing.T) {
 }
 
 // A run that stopped while filing (the marker left, no result) never files
-// again: the issue may be there.
+// twice: it adopts the issue it finds among those made since, files when there
+// is none, and leaves it to a person when it can't tell.
 func TestCorrectNeverFilesTwice(t *testing.T) {
-	g, kv := &gh{}, &memKV{m: map[string]string{"meta.correct/srv-1/3": filingMarker}}
-	h := newHandler(t, g, &tokens{token: "t", from: contrib.FromEnv}, kv, fakeMeta{cov: cov()})
-	_, err := h.Run(context.Background(), jobs.Job{ID: 3, Params: json.RawMessage(params), Resumed: true}, jobs.LocalReporter())
-	if !errors.Is(err, errFiledBefore) || g.count() != 0 {
-		t.Fatalf("err = %v, issues %d", err, g.count())
+	ctx := context.Background()
+	const key = "meta.correct/srv-1/3"
+	marker := filingMarker + " 2026-10-19T12:00:30Z"
+	job := jobs.Job{ID: 3, Params: json.RawMessage(params), Resumed: true}
+	run := func(g *gh, kv *memKV) (any, error) {
+		h := newHandler(t, g, &tokens{token: "t", from: contrib.FromEnv}, kv, fakeMeta{cov: cov()})
+		return h.Run(ctx, job, jobs.LocalReporter())
+	}
+
+	// A marker without a time (no way to look): a person decides.
+	g, kv := &gh{}, &memKV{m: map[string]string{key: filingMarker}}
+	if _, err := run(g, kv); !errors.Is(err, errFiledBefore) || g.count() != 0 {
+		t.Fatalf("no time: err = %v, issues %d", err, g.count())
+	}
+
+	// The interrupted run had filed it: adopted, nothing filed again.
+	g, kv = &gh{}, &memKV{m: map[string]string{}}
+	if _, err := run(g, kv); err != nil || g.count() != 1 {
+		t.Fatalf("first filing: %v, issues %d", err, g.count())
+	}
+	kv.m[key] = marker
+	out, err := run(g, kv)
+	if err != nil || g.count() != 1 || out.(Result).IssueNumber != 42 || out.(Result).Changes != 3 {
+		t.Fatalf("adopt: %+v %v, issues %d", out, err, g.count())
+	}
+	if !strings.Contains(kv.m[key], `"issue_number":42`) {
+		t.Fatalf("the adopted issue isn't recorded: %q", kv.m[key])
+	}
+
+	// It hadn't: filed once now.
+	g, kv = &gh{}, &memKV{m: map[string]string{key: marker}}
+	if _, err := run(g, kv); err != nil || g.count() != 1 {
+		t.Fatalf("refile: %v, issues %d", err, g.count())
+	}
+
+	// A batch for the same record with another body, or a list that can't be
+	// read: a person decides.
+	g, kv = &gh{}, &memKV{m: map[string]string{key: marker}}
+	g.issues = []map[string]any{{"title": "[corrections] Existing Work", "created_at": "2026-10-19T12:01:00Z",
+		"body": "### Record\n\nhttps://meta.audiosilo.app/works/existing-work\n\n### Changes\n\nother"}}
+	if _, err := run(g, kv); !errors.Is(err, errFiledBefore) || g.count() != 1 {
+		t.Fatalf("other body: err = %v, issues %d", err, g.count())
+	}
+	g, kv = &gh{listStatus: http.StatusBadGateway}, &memKV{m: map[string]string{key: marker}}
+	if _, err := run(g, kv); !errors.Is(err, errFiledBefore) || g.count() != 0 {
+		t.Fatalf("list fails: err = %v, issues %d", err, g.count())
+	}
+}
+
+func TestFilingSince(t *testing.T) {
+	for v, want := range map[string]bool{"filing": true, "filing 2026-10-19T12:00:00Z": true, "filings": false, "": false, "{}": false} {
+		if _, ok := filingSince(v); ok != want {
+			t.Errorf("filingSince(%q) ok = %v", v, ok)
+		}
+	}
+	if at, _ := filingSince("filing 2026-10-19T12:00:00.5Z"); !at.Equal(time.Date(2026, 10, 19, 12, 0, 0, 5e8, time.UTC)) {
+		t.Fatal(at)
 	}
 }
 
