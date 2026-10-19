@@ -79,6 +79,17 @@ func TestComposeRoundTrip(t *testing.T) {
 		}
 	})
 
+	// A correction batch (meta's correction-batch form): the three auto fields
+	// applied in one change set, the authors edit left for a maintainer.
+	t.Run("corrections", func(t *testing.T) {
+		_, body, labels, _, err := CorrectionBatchIssue(goldenBatch())
+		if err != nil {
+			t.Fatal(err)
+		}
+		v := runMetaissue(t, metaissue, labels, body, "--profile", "core", "--data", seedCoreTree(t))
+		assertFilesUnder(t, v, "works/")
+	})
+
 	t.Run("work", func(t *testing.T) {
 		p := CoreProposal{
 			Title:      "Brand New Roundtrip Book",
