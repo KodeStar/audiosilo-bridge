@@ -4,6 +4,7 @@ import type { SettingKey, Settings } from '@/api/types';
 export const KEY_PUBLIC_URL: SettingKey = 'public_url';
 export const KEY_CHECK_MINUTES: SettingKey = 'mapping.check_minutes';
 export const KEY_WORKER_FALLBACK: SettingKey = 'asr.worker_fallback';
+export const KEY_MONTHLY_BUDGET: SettingKey = 'agent.monthly_budget_usd';
 
 export const LOCKED_NOTE = 'Set by the environment';
 
@@ -20,7 +21,8 @@ export function allLocked(s: Settings): boolean {
   return (
     isLocked(s, KEY_PUBLIC_URL) &&
     isLocked(s, KEY_CHECK_MINUTES) &&
-    isLocked(s, KEY_WORKER_FALLBACK)
+    isLocked(s, KEY_WORKER_FALLBACK) &&
+    isLocked(s, KEY_MONTHLY_BUDGET)
   );
 }
 
@@ -49,4 +51,13 @@ export function checkPublicURL(text: string): string | null {
   } catch {
     return 'Enter a full address, like http://192.168.1.20:8091.';
   }
+}
+
+// parseBudget reads the monthly budget field: dollars (0 = no cap), or an error
+// sentence.
+export function parseBudget(text: string): { value: number } | { error: string } {
+  const t = text.trim();
+  if (!/^\d+(\.\d{1,2})?$/.test(t))
+    return { error: 'Enter the budget in dollars, like 100 or 12.50.' };
+  return { value: Number(t) };
 }

@@ -1,0 +1,62 @@
+import type { AgentKind, GitHubAccount, TokenFrom } from '@/api/types';
+
+// How often the Accounts tab looks again while a GitHub sign-in waits for its
+// code to be entered (the Bridge polls GitHub; the page polls the Bridge).
+export const PENDING_POLL_MS = 3000;
+
+// The agent credential kinds, as the page names them.
+export const KIND_LABELS: Record<AgentKind, { label: string; note: string }> = {
+  claude_oauth_token: {
+    label: 'Claude subscription token',
+    note: 'Run claude setup-token on any computer signed in to your Claude plan, and paste the token here.',
+  },
+  anthropic_api_key: {
+    label: 'Anthropic API key',
+    note: 'An API key from console.anthropic.com. Its use is billed to the key.',
+  },
+  openai_api_key: {
+    label: 'OpenAI API key',
+    note: 'An API key from platform.openai.com. Its use is billed to the key.',
+  },
+};
+
+// fromText says where a contribution's GitHub token comes from now.
+export function fromText(from: TokenFrom): string {
+  switch (from) {
+    case 'env':
+      return 'The AUDIOSILO_BRIDGE_GITHUB_TOKEN environment variable';
+    case 'device':
+      return 'This sign-in';
+    case 'gh':
+      return "The gh command's sign-in on the Bridge's computer";
+    default:
+      return "None: the Bridge can't share with the community";
+  }
+}
+
+// GitHubState is what the GitHub card shows.
+export type GitHubState = 'unavailable' | 'pending' | 'refused' | 'signed_in' | 'signed_out';
+
+export function githubState(g: GitHubAccount): GitHubState {
+  if (g.pending) return 'pending';
+  if (g.signed_in) return g.refused ? 'refused' : 'signed_in';
+  return g.available ? 'signed_out' : 'unavailable';
+}
+
+// minutesLeft is how long a sign-in code stays good, in whole minutes (0 when
+// it has run out).
+export function minutesLeft(expiresAt: string, now: number = Date.now()): number {
+  const t = Date.parse(expiresAt);
+  if (Number.isNaN(t)) return 0;
+  return Math.max(0, Math.ceil((t - now) / 60000));
+}
+
+// checkCredential is the page's first look at a pasted credential: an error
+// sentence, or null (the Bridge checks it again).
+export function checkCredential(value: string): string | null {
+  const v = value.trim();
+  if (v === '') return 'Paste the credential first.';
+  if (v.length > 2048) return 'That is longer than any credential (2048 characters at most).';
+  if (/[^\x21-\x7e]/.test(v)) return 'Paste it as one line, with no spaces.';
+  return null;
+}

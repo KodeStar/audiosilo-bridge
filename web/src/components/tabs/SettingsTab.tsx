@@ -4,6 +4,7 @@ import type { Settings, WorkerFallback } from '@/api/types';
 import { useLoad } from '@/lib/useLoad';
 import {
   KEY_CHECK_MINUTES,
+  KEY_MONTHLY_BUDGET,
   KEY_PUBLIC_URL,
   KEY_WORKER_FALLBACK,
   LOCKED_NOTE,
@@ -12,6 +13,7 @@ import {
   allLocked,
   checkPublicURL,
   isLocked,
+  parseBudget,
   parseCheckMinutes,
 } from '@/lib/settings';
 import { Card } from '../ui/Card';
@@ -33,6 +35,7 @@ function SettingsForm({ client }: { client: ApiClient }) {
   const [publicUrl, setPublicUrl] = useState('');
   const [minutes, setMinutes] = useState('');
   const [fallback, setFallback] = useState<WorkerFallback>('local');
+  const [budget, setBudget] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
@@ -42,6 +45,7 @@ function SettingsForm({ client }: { client: ApiClient }) {
     setPublicUrl(s.public_url);
     setMinutes(String(s.mapping_check_minutes));
     setFallback(s.asr_worker_fallback);
+    setBudget(String(s.monthly_budget_usd));
     return s;
   }
 
@@ -64,6 +68,7 @@ function SettingsForm({ client }: { client: ApiClient }) {
   const urlLocked = isLocked(settings, KEY_PUBLIC_URL);
   const minutesLocked = isLocked(settings, KEY_CHECK_MINUTES);
   const fallbackLocked = isLocked(settings, KEY_WORKER_FALLBACK);
+  const budgetLocked = isLocked(settings, KEY_MONTHLY_BUDGET);
 
   async function save(e: FormEvent) {
     e.preventDefault();
@@ -81,6 +86,11 @@ function SettingsForm({ client }: { client: ApiClient }) {
       setError(parsed.error);
       return;
     }
+    const usd = budgetLocked ? null : parseBudget(budget);
+    if (usd && 'error' in usd) {
+      setError(usd.error);
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
@@ -91,6 +101,8 @@ function SettingsForm({ client }: { client: ApiClient }) {
             public_url: urlLocked ? settings.public_url : publicUrl.trim(),
             mapping_check_minutes: parsed.value,
             asr_worker_fallback: fallbackLocked ? settings.asr_worker_fallback : fallback,
+            // Sent, the budget counts as reviewed (the setup checklist).
+            ...(usd ? { monthly_budget_usd: usd.value } : {}),
           }),
         ),
       );
@@ -165,6 +177,26 @@ function SettingsForm({ client }: { client: ApiClient }) {
             <option value="local">Transcribe on the Bridge</option>
             <option value="wait">Wait for a worker</option>
           </select>
+        </Field>
+        <Field
+          label="Monthly agent budget (dollars)"
+          htmlFor="monthly-budget"
+          note={
+            budgetLocked
+              ? LOCKED_NOTE
+              : `The most the agent may spend in a calendar month; 0 means no cap. A book over it waits for the next month.${settings.budget_reviewed ? '' : ' Save the settings to confirm it.'}`
+          }
+        >
+          <input
+            id="monthly-budget"
+            type="text"
+            inputMode="decimal"
+            value={budget}
+            onChange={(e) => setBudget(e.target.value)}
+            readOnly={budgetLocked}
+            disabled={budgetLocked}
+            className={inputClass}
+          />
         </Field>
         {error && <Notice kind="error">{error}</Notice>}
         {saved && <Notice kind="ok">Saved.</Notice>}

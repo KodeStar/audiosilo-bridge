@@ -6,6 +6,7 @@ import { laneText, onlineText, secretKeyText } from '@/lib/status';
 import { agentText, budgetPercent, budgetText, credentialText, retentionText } from '@/lib/engine';
 import { usd } from '@/lib/generate';
 import { asrText, fallbackText } from '@/lib/workers';
+import { SETUP_ITEMS, remainingRequired, setupItems, setupLink } from '@/lib/setup';
 import { Ago } from '../ui/Ago';
 import { Card } from '../ui/Card';
 import { Badge } from '../ui/Badge';
@@ -32,6 +33,7 @@ export function StatusTab({ client }: { client: ApiClient }) {
   return (
     <div className="flex flex-col gap-5">
       {loadError && <Notice kind="error">{loadError}</Notice>}
+      {!status.setup_complete && <SetupCard status={status} />}
       {pairing.paired ? (
         <PairedCard client={client} status={status} onChange={setStatus} />
       ) : (
@@ -74,6 +76,51 @@ export function StatusTab({ client }: { client: ApiClient }) {
 
       <EngineCard client={client} />
     </div>
+  );
+}
+
+// SetupCard leads the tab until every required setup item is done: each item,
+// done or not, with what is missing and a link to the tab where it is done.
+function SetupCard({ status }: { status: Status }) {
+  const items = setupItems(status.setup);
+  const left = remainingRequired(status.setup);
+  return (
+    <Card
+      title="Get set up"
+      actions={<Badge tone="warn">{left === 1 ? '1 step left' : `${left} steps left`}</Badge>}
+    >
+      <ul className="flex flex-col divide-y divide-edge">
+        {items.map((it) => {
+          const link = setupLink(it.id);
+          return (
+            <li key={it.id} className="flex flex-wrap items-start justify-between gap-2 py-2">
+              <div className="flex items-start gap-2">
+                <span
+                  aria-hidden="true"
+                  className={
+                    it.done ? 'text-green-300' : it.required ? 'text-amber-300' : 'text-dim'
+                  }
+                >
+                  {it.done ? '\u2713' : '\u2022'}
+                </span>
+                <div>
+                  <p className={`text-sm ${it.done ? 'text-dim' : 'text-hi'}`}>
+                    {SETUP_ITEMS[it.id].label}
+                    <span className="sr-only">{it.done ? ' (done)' : ' (to do)'}</span>
+                  </p>
+                  {it.detail && <p className="text-xs text-dim">{it.detail}</p>}
+                </div>
+              </div>
+              {!it.done && link && (
+                <a href={link.hash} className="text-sm text-pink-500 underline">
+                  Open {link.name}
+                </a>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+    </Card>
   );
 }
 

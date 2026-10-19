@@ -1,5 +1,9 @@
 import type {
+  Accounts,
+  AgentKind,
   Engine,
+  GitHubPending,
+  SignOutResponse,
   JobsResponse,
   LibrariesResponse,
   LoginResponse,
@@ -185,6 +189,34 @@ export class ApiClient {
   // Revokes the worker's token. 404 = no such worker.
   revokeWorker(id: number): Promise<void> {
     return this.request(`/api/workers/${id}`, { method: 'DELETE' });
+  }
+
+  // --- accounts ---
+  accounts(): Promise<Accounts> {
+    return this.request('/api/accounts');
+  }
+
+  // Starts the GitHub sign-in: the code to enter on GitHub. 422 = no GitHub App
+  // configured, or GitHub refused; 502 = GitHub can't be reached.
+  startGitHubSignIn(): Promise<GitHubPending> {
+    return this.request('/api/accounts/github/device', { method: 'POST' });
+  }
+
+  // Forgets the sign-in (and a sign-in in progress) and revokes it on GitHub.
+  signOutGitHub(): Promise<SignOutResponse> {
+    return this.request('/api/accounts/github', { method: 'DELETE' });
+  }
+
+  // Seals an agent credential; the answer never carries it. 400 = an unknown
+  // kind or a malformed value.
+  setAgentCredential(kind: AgentKind, value: string): Promise<Accounts> {
+    return this.request('/api/accounts/agent', { method: 'PUT', body: { kind, value } });
+  }
+
+  // Removes one kind (all when none is given).
+  deleteAgentCredential(kind?: AgentKind): Promise<Accounts> {
+    const qs = kind ? `?${new URLSearchParams({ kind })}` : '';
+    return this.request(`/api/accounts/agent${qs}`, { method: 'DELETE' });
   }
 }
 

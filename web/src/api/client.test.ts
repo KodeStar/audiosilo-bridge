@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { ApiClient, ApiError, LAN_ONLY_MESSAGE } from './client';
 import { mockFetch } from '@/test/fetchMock';
-import { engineFixture, generateJobFixture } from '@/test/fixtures';
+import { accountsFixture, engineFixture, generateJobFixture } from '@/test/fixtures';
 
 function client(token: string | null = 'tok') {
   const onSignedOut = vi.fn();
@@ -161,5 +161,37 @@ describe('ApiClient', () => {
     });
     const { c } = client();
     await expect(c.retryJob(12)).rejects.toMatchObject({ status: 409 });
+  });
+
+  it('calls the Accounts routes', async () => {
+    const { calls } = mockFetch({
+      'GET /api/accounts': { body: accountsFixture() },
+      'POST /api/accounts/github/device': {
+        body: {
+          user_code: 'AB-CD',
+          verification_uri: 'https://github.com/login/device',
+          expires_at: '',
+        },
+      },
+      'DELETE /api/accounts/github': { body: { accounts: accountsFixture(), revoke_error: '' } },
+      'PUT /api/accounts/agent': { body: accountsFixture() },
+      'DELETE /api/accounts/agent': { body: accountsFixture() },
+    });
+    const { c } = client();
+    expect((await c.accounts()).agent.backend).toBe('claude');
+    expect((await c.startGitHubSignIn()).user_code).toBe('AB-CD');
+    expect((await c.signOutGitHub()).revoke_error).toBe('');
+    await c.setAgentCredential('openai_api_key', 'sk-x');
+    await c.deleteAgentCredential('openai_api_key');
+    await c.deleteAgentCredential();
+    expect(calls.map((x) => `${x.method} ${x.url}`)).toEqual([
+      'GET /api/accounts',
+      'POST /api/accounts/github/device',
+      'DELETE /api/accounts/github',
+      'PUT /api/accounts/agent',
+      'DELETE /api/accounts/agent?kind=openai_api_key',
+      'DELETE /api/accounts/agent',
+    ]);
+    expect(calls[3].body).toEqual({ kind: 'openai_api_key', value: 'sk-x' });
   });
 });

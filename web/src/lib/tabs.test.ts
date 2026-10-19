@@ -6,6 +6,9 @@ describe('routeFromHash', () => {
     expect(routeFromHash('#jobs').tab).toBe('jobs');
     expect(routeFromHash('#/Logs').tab).toBe('logs');
   });
+  it("reads the console's Accounts link", () => {
+    expect(routeFromHash('#/accounts')).toEqual({ tab: 'accounts', jobId: null });
+  });
   it('falls back to the status tab', () => {
     expect(routeFromHash('').tab).toBe(DEFAULT_TAB);
     expect(routeFromHash('#nope').tab).toBe('status');

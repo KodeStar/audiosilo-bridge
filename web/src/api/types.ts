@@ -46,6 +46,30 @@ export interface Status {
   secret_key: SecretKeySource;
   public_url: string;
   server_url_default: string;
+  // The setup checklist (Phase 2b), the one the heartbeat carries; complete when
+  // every required item is done.
+  setup: Setup;
+  setup_complete: boolean;
+}
+
+// link.SetupItem ids, in the checklist's order (internal/setup).
+export type SetupItemId = 'paired' | 'libraries' | 'asr' | 'agent' | 'budget' | 'github';
+
+// link.SetupItem
+export interface SetupItem {
+  // A later Bridge may add ids; the page shows only the ones it knows.
+  id: SetupItemId | (string & {});
+  done: boolean;
+  required: boolean;
+  detail?: string;
+  library_ids?: number[];
+}
+
+// link.Setup
+export interface Setup {
+  items: SetupItem[];
+  can_contribute: boolean;
+  github_login?: string;
 }
 
 // link.Library
@@ -85,7 +109,12 @@ export interface LibrariesResponse {
 
 // The settings keys that can be locked by the environment (config.Key*).
 export type SettingKey =
-  'public_url' | 'mapping.check_minutes' | 'libraries' | 'server.url' | 'asr.worker_fallback';
+  | 'public_url'
+  | 'mapping.check_minutes'
+  | 'libraries'
+  | 'server.url'
+  | 'asr.worker_fallback'
+  | 'agent.monthly_budget_usd';
 
 // What a segment does when no ASR worker is connected (asr.worker_fallback).
 export type WorkerFallback = 'local' | 'wait';
@@ -95,6 +124,10 @@ export interface Settings {
   public_url: string;
   mapping_check_minutes: number;
   asr_worker_fallback: WorkerFallback;
+  // agent.monthly_budget_usd (0 = no cap); budget_reviewed: an admin saved it
+  // (or the environment sets it), the setup checklist's budget item.
+  monthly_budget_usd: number;
+  budget_reviewed: boolean;
   // The keys the environment sets.
   locked: SettingKey[];
 }
@@ -103,6 +136,8 @@ export interface SettingsUpdate {
   public_url: string;
   mapping_check_minutes: number;
   asr_worker_fallback: WorkerFallback;
+  // Omitted keeps it; sent, it marks the budget reviewed.
+  monthly_budget_usd?: number;
 }
 
 // The states a job can have on the Bridge (store.Job*).
@@ -331,4 +366,60 @@ export interface Engine {
   book_budget_usd: number;
   // A finished book's transcripts are deleted this long after its job (0 = at once).
   transcript_retention_days: number;
+}
+
+// --- the Accounts tab (internal/api/accounts.go) ---
+
+// api.GitHubPending
+export interface GitHubPending {
+  user_code: string;
+  verification_uri: string;
+  expires_at: string;
+}
+
+// Where a contribution's GitHub token comes from (contrib.From*), "" for none.
+export type TokenFrom = 'env' | 'device' | 'gh' | '';
+
+// api.GitHubAccount
+export interface GitHubAccount {
+  available: boolean;
+  signed_in: boolean;
+  refused: boolean;
+  login: string;
+  signed_in_at: string;
+  last_ok_at: string;
+  last_error: string;
+  pending: GitHubPending | null;
+  flow_error: string;
+  env_token: boolean;
+  from: TokenFrom;
+  can_contribute: boolean;
+  manage_url: string;
+}
+
+// The agent credential kinds (the vault's names).
+export type AgentKind = 'claude_oauth_token' | 'anthropic_api_key' | 'openai_api_key';
+
+// api.AgentAccount
+export interface AgentAccount {
+  backend: string;
+  kinds: AgentKind[];
+  set: Partial<Record<AgentKind, boolean>>;
+  set_at: string;
+  available: boolean;
+  detail: string;
+  handoff: boolean;
+  container_credential: string;
+}
+
+// GET /api/accounts
+export interface Accounts {
+  github: GitHubAccount;
+  agent: AgentAccount;
+}
+
+// DELETE /api/accounts/github
+export interface SignOutResponse {
+  accounts: Accounts;
+  revoke_error: string;
 }
