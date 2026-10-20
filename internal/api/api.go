@@ -48,8 +48,9 @@ type Status struct {
 	// Setup is the setup checklist (Phase 2b), the one the heartbeat carries;
 	// Complete: every required item is done (the Status tab's "Get set up" card
 	// shows until then).
-	Setup         link.Setup `json:"setup"`
-	SetupComplete bool       `json:"setup_complete"`
+	Setup                link.Setup `json:"setup"`
+	SetupComplete        bool       `json:"setup_complete"`
+	PodcastAllowNetworks []string   `json:"podcast_allow_networks"`
 }
 
 // Library is a server library with the Bridge's mapping and its last check.

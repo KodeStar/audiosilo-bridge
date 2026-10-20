@@ -52,6 +52,12 @@ type Handler interface {
 	Run(ctx context.Context, job Job, rep *Reporter) (result any, err error)
 }
 
+// ParamSealer removes sensitive claim params before any execution row is
+// written. A handler resumes from these stored params and its sealed secrets.
+type ParamSealer interface {
+	SealParams(job Job) (stored json.RawMessage, err error)
+}
+
 // Lanes: how many jobs of a kind can run at once. Light jobs are quick checks.
 // The pipeline lane holds the jobs that follow an engine book (sidecars.generate):
 // the engine's own scheduler does the throttling, so a job waits there while its
@@ -458,9 +464,23 @@ type strandedJob struct {
 
 // start records a claimed job and runs it.
 func (r *Runner) start(ctx context.Context, srv Server, job Job, wg *sync.WaitGroup) {
+	var sealErr error
+	if sealer, ok := r.handlers[job.Kind].(ParamSealer); ok {
+		job.Params, sealErr = sealer.SealParams(job)
+		if sealErr != nil {
+			job.Params = json.RawMessage(`{}`)
+		}
+	}
 	if err := r.store.RecordClaim(ctx, store.ServerJob{ID: job.ID, Kind: job.Kind, LibraryID: job.LibraryID, Path: job.Path,
 		Params: job.Params, Attempt: job.Attempt, ServerID: r.opts.ServerID()}); err != nil {
 		r.log.Warn("bridge: recording a claim failed", "job", job.ID, "err", err)
+		r.abandon(ctx, job)
+		return
+	}
+	if sealErr != nil {
+		r.abandon(ctx, job)
+		r.finish(ctx, srv, job, store.JobFailed, nil, json.RawMessage(`{"code":"write_failed","message":"The private feed credentials could not be sealed."}`), "The private feed credentials could not be sealed.")
+		return
 	}
 	r.launch(ctx, srv, job, wg, "")
 }

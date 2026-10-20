@@ -38,6 +38,8 @@ const KIND_LABELS: Record<string, string> = {
   [GENERATE_KIND]: 'Characters and recaps',
   [DESCRIBE_KIND]: 'Description',
   [CHAPTERS_KIND]: 'Chapters',
+  'podcast.subscribe': 'Following a show',
+  'podcast.poll': 'Checking a feed',
 };
 
 // kindLabel words a job kind ("" for one with no label: the kind shows as it is).

@@ -225,6 +225,11 @@ func NewRegistry() *Registry { return &Registry{results: map[int64]result{}, pen
 // libraries that are gone are dropped.
 func (r *Registry) SetLibraries(libs []link.Library) (changed bool) {
 	sorted := slices.Clone(libs)
+	for i := range sorted {
+		if sorted[i].Kind == "" {
+			sorted[i].Kind = "books"
+		}
+	}
 	slices.SortFunc(sorted, func(a, b link.Library) int { return cmp.Compare(a.ID, b.ID) })
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -342,7 +347,17 @@ func (r *Registry) Check(ctx context.Context, src BookSource, mount MountFunc, n
 				break
 			}
 			path, _ := mount(l.ID, l.Root)
-			st := Check(ctx, src, l, path)
+			var st link.LibraryStatus
+			if l.LibraryKind() == "podcasts" {
+				marker, ok := src.(MarkerSource)
+				if ok {
+					st = CheckPodcast(ctx, marker, l, path)
+				} else {
+					st = link.LibraryStatus{LibraryID: l.ID, MountPath: path, Error: "the server link cannot check a library marker"}
+				}
+			} else {
+				st = Check(ctx, src, l, path)
+			}
 			r.mu.Lock()
 			r.results[l.ID] = result{status: st, at: now()}
 			r.mu.Unlock()

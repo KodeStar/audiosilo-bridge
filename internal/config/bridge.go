@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -127,16 +128,35 @@ type MappingConfig struct {
 	CheckMinutes int `yaml:"check_minutes"`
 }
 
+type PodcastsConfig struct {
+	AllowNetworks []string `yaml:"allow_networks"`
+	MaxFeedMB     int      `yaml:"max_feed_mb"`
+}
+
+func (p PodcastsConfig) Networks() ([]netip.Prefix, error) {
+	out := make([]netip.Prefix, 0, len(p.AllowNetworks))
+	for _, raw := range p.AllowNetworks {
+		prefix, err := netip.ParsePrefix(strings.TrimSpace(raw))
+		if err != nil {
+			return nil, fmt.Errorf("podcasts.allow_networks contains an invalid CIDR: %q", raw)
+		}
+		out = append(out, prefix.Masked())
+	}
+	return out, nil
+}
+
 // The Bridge settings the environment can set, by the name EnvSet takes.
 const (
-	KeyServerURL     = "server.url"
-	KeyPublicURL     = "public_url"
-	KeyLibraries     = "libraries"
-	KeyMappingCheck  = "mapping.check_minutes"
-	envServerURL     = "AUDIOSILO_BRIDGE_SERVER_URL"
-	envPublicURL     = "AUDIOSILO_BRIDGE_PUBLIC_URL"
-	envLibraries     = "AUDIOSILO_BRIDGE_LIBRARIES"
-	envMappingChecks = "AUDIOSILO_BRIDGE_MAPPING_CHECK_MINUTES"
+	KeyServerURL             = "server.url"
+	KeyPublicURL             = "public_url"
+	KeyLibraries             = "libraries"
+	KeyMappingCheck          = "mapping.check_minutes"
+	KeyPodcastsAllowNetworks = "podcasts.allow_networks"
+	KeyPodcastsMaxFeedMB     = "podcasts.max_feed_mb"
+	envServerURL             = "AUDIOSILO_BRIDGE_SERVER_URL"
+	envPublicURL             = "AUDIOSILO_BRIDGE_PUBLIC_URL"
+	envLibraries             = "AUDIOSILO_BRIDGE_LIBRARIES"
+	envMappingChecks         = "AUDIOSILO_BRIDGE_MAPPING_CHECK_MINUTES"
 
 	KeyAgentStagingDir      = "agent.staging_dir"
 	KeyAgentClaimTimeout    = "agent.claim_timeout_seconds"
@@ -178,6 +198,14 @@ func (c Config) MountFor(libraryID int64, serverRoot string) (path string, confi
 // neither locks the setting on the page nor fails the start.
 func applyBridgeEnv(cfg *Config) {
 	cfg.fromEnv = map[string]bool{}
+	if v, ok := lookupEnv("AUDIOSILO_BRIDGE_PODCASTS_ALLOW_NETWORKS"); ok {
+		cfg.Podcasts.AllowNetworks = strings.Split(v, ",")
+		cfg.fromEnv[KeyPodcastsAllowNetworks] = true
+	}
+	if v, ok := lookupEnv("AUDIOSILO_BRIDGE_PODCASTS_MAX_FEED_MB"); ok {
+		cfg.Podcasts.MaxFeedMB = envInt(v)
+		cfg.fromEnv[KeyPodcastsMaxFeedMB] = true
+	}
 	if v, ok := lookupEnv(envServerURL); ok {
 		cfg.Server.URL = v
 		cfg.fromEnv[KeyServerURL] = true
@@ -266,6 +294,12 @@ func parseLibraries(v string) []LibraryMapping {
 
 // normalizeBridge fills the Bridge settings an older or partial file leaves out.
 func normalizeBridge(cfg *Config) {
+	if cfg.Podcasts.AllowNetworks == nil {
+		cfg.Podcasts.AllowNetworks = []string{}
+	}
+	for i := range cfg.Podcasts.AllowNetworks {
+		cfg.Podcasts.AllowNetworks[i] = strings.TrimSpace(cfg.Podcasts.AllowNetworks[i])
+	}
 	if cfg.Libraries == nil {
 		cfg.Libraries = []LibraryMapping{}
 	}
@@ -365,6 +399,12 @@ func ignoredOnBridge(cfg Config) []string {
 
 // validateBridge checks the Bridge settings.
 func (c Config) validateBridge() error {
+	if _, err := c.Podcasts.Networks(); err != nil {
+		return err
+	}
+	if c.Podcasts.MaxFeedMB < 1 || c.Podcasts.MaxFeedMB > 64 {
+		return errors.New("podcasts.max_feed_mb must be between 1 and 64")
+	}
 	if c.Server.URL != "" {
 		if err := checkHTTPURL(c.Server.URL); err != nil {
 			return fmt.Errorf("server.url %q %w", c.Server.URL, err)

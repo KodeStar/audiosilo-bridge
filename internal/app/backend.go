@@ -17,6 +17,7 @@ import (
 	"github.com/kodestar/audiosilo-bridge/internal/link"
 	"github.com/kodestar/audiosilo-bridge/internal/logring"
 	"github.com/kodestar/audiosilo-bridge/internal/pipeline"
+	"github.com/kodestar/audiosilo-bridge/internal/podcast"
 	"github.com/kodestar/audiosilo-bridge/internal/setup"
 	"github.com/kodestar/audiosilo-bridge/internal/state"
 	"github.com/kodestar/audiosilo-bridge/internal/store"
@@ -40,6 +41,7 @@ func (b *Bridge) Status() api.Status {
 	b.mu.Unlock()
 	st.Setup = b.setup(context.Background())
 	st.SetupComplete = setup.Complete(st.Setup)
+	st.PodcastAllowNetworks = append([]string{}, cfg.Podcasts.AllowNetworks...)
 	return st
 }
 
@@ -224,14 +226,29 @@ func (b *Bridge) save(edit func(*config.Config) error) error {
 	if err != nil {
 		return err
 	}
-	cfg.Listen = b.config().Listen // the listener in use; a new listen applies at the next start
+	cfg.Listen = b.config().Listen     // the listener in use; a new listen applies at the next start
+	cfg.Podcasts = b.config().Podcasts // the guarded client applies these at the next start too
 	b.cfg.Store(&cfg)
 	return nil
 }
 
 // Jobs lists the jobs this Bridge claimed, newest first.
 func (b *Bridge) Jobs(ctx context.Context, before int64, limit int) ([]store.ServerJob, error) {
-	return b.db.ListServerJobs(ctx, before, limit)
+	rows, err := b.db.ListServerJobs(ctx, before, limit)
+	for i := range rows {
+		redactPodcastJob(&rows[i])
+	}
+	return rows, err
+}
+
+func redactPodcastJob(job *store.ServerJob) {
+	if job == nil || !strings.HasPrefix(job.Kind, "podcast.") {
+		return
+	}
+	job.Params = podcast.RedactParams(job.Params)
+	job.Progress = podcast.RedactJSON(job.Progress)
+	job.Result = podcast.RedactJSON(job.Result)
+	job.Error = podcast.RedactText(job.Error)
 }
 
 // CancelJob stops a job running here (reported to the server as cancelled).
@@ -251,6 +268,7 @@ func (b *Bridge) Job(ctx context.Context, id int64) (*store.ServerJob, error) {
 	if errors.Is(err, store.ErrNotFound) {
 		return nil, api.Errorf(api.ErrNotFound, "this Bridge has no job %d", id)
 	}
+	redactPodcastJob(job)
 	return job, err
 }
 

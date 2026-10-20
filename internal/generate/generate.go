@@ -417,6 +417,11 @@ func (h *Handler) startRun(job jobs.Job, rep *jobs.Reporter, kind string) (r *ru
 	if job.LibraryID == nil || job.Path == nil || strings.TrimSpace(*job.Path) == "" {
 		return nil, nil, fmt.Errorf("%s needs a library and a book path", kind)
 	}
+	if h.o.Libraries != nil {
+		if lib, ok := h.o.Libraries.Library(*job.LibraryID); ok && lib.LibraryKind() != "books" {
+			return nil, nil, errors.New("not_book_library: this job requires a books library")
+		}
+	}
 	r = &run{job: job, rep: rep, kind: kind, rel: *job.Path, jobPath: *job.Path, poke: make(chan struct{}, 1)}
 	if p := rep.Path(); p != "" {
 		r.rel, r.jobPath = p, p
@@ -612,6 +617,9 @@ func (h *Handler) serverLibrary(r *run) error {
 	lib, ok := h.o.Libraries.Library(*r.job.LibraryID)
 	if !ok {
 		return fmt.Errorf("library %d isn't one the server listed", *r.job.LibraryID)
+	}
+	if lib.LibraryKind() != "books" {
+		return errors.New("not_book_library: this job requires a books library")
 	}
 	r.lib = lib
 	return nil

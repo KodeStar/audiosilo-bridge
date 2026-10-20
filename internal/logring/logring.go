@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/kodestar/audiosilo-bridge/internal/podcast"
 )
 
 // Entry is one log line. Level encodes as its name ("INFO", "WARN", ...).
@@ -106,6 +108,10 @@ func (h *Handler) Enabled(ctx context.Context, l slog.Level) bool {
 
 // Handle passes the record on and keeps a copy.
 func (h *Handler) Handle(ctx context.Context, rec slog.Record) error {
+	clean := slog.NewRecord(rec.Time, rec.Level, podcast.RedactText(rec.Message), rec.PC)
+	prefix := strings.Join(h.groups, ".")
+	rec.Attrs(func(a slog.Attr) bool { clean.AddAttrs(sanitize(prefix, a)); return true })
+	rec = clean
 	if rec.Level >= slog.LevelInfo {
 		e := Entry{Time: rec.Time, Level: rec.Level, Message: rec.Message}
 		// add keeps one attribute under its full dotted key, a group (an
@@ -163,13 +169,47 @@ func (h *Handler) Handle(ctx context.Context, rec slog.Record) error {
 func (h *Handler) WithAttrs(attrs []slog.Attr) slog.Handler {
 	kept := append([]slog.Attr(nil), h.attrs...)
 	prefix := strings.Join(h.groups, ".")
+	clean := make([]slog.Attr, 0, len(attrs))
 	for _, a := range attrs {
+		a = sanitize(prefix, a)
+		clean = append(clean, a)
 		if prefix != "" {
 			a.Key = prefix + "." + a.Key
 		}
 		kept = append(kept, a)
 	}
-	return &Handler{next: h.next.WithAttrs(attrs), ring: h.ring, attrs: kept, groups: h.groups}
+	return &Handler{next: h.next.WithAttrs(clean), ring: h.ring, attrs: kept, groups: h.groups}
+}
+
+// Sanitize before either sink sees a record, including attributes attached by
+// WithAttrs. Error values may themselves contain credential-bearing URLs.
+func sanitize(prefix string, a slog.Attr) slog.Attr {
+	key := a.Key
+	if prefix != "" {
+		key = prefix + "." + key
+	}
+	v := a.Value.Resolve()
+	if v.Kind() == slog.KindGroup {
+		group := v.Group()
+		out := make([]slog.Attr, 0, len(group))
+		for _, leaf := range group {
+			out = append(out, sanitize(key, leaf))
+		}
+		a.Value = slog.GroupValue(out...)
+		return a
+	}
+	if redact(key) {
+		a.Value = slog.StringValue("[redacted]")
+		return a
+	}
+	if strings.EqualFold(a.Key, "feed_url") {
+		a.Value = slog.StringValue(podcast.RedactURL(fmt.Sprint(v.Any())))
+		return a
+	}
+	if v.Kind() == slog.KindString || v.Kind() == slog.KindAny {
+		a.Value = slog.StringValue(podcast.RedactText(fmt.Sprint(v.Any())))
+	}
+	return a
 }
 
 // WithGroup returns a handler in group name.

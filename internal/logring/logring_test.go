@@ -97,6 +97,25 @@ func logTo(r *Ring, msg string, n int) {
 	}
 }
 
+func TestFeedURLsRedactedInBothSinks(t *testing.T) {
+	t.Parallel()
+	var captured bytes.Buffer
+	ring := New(10)
+	log := slog.New(NewHandler(slog.NewTextHandler(&captured, nil), ring))
+	url := "https://user:password@example.com/private/feed?auth=SECRET123"
+	log.With("feed_url", url).WithGroup("podcast").Warn("failed "+url, "err", fmt.Errorf("fetch %s: refused", url), "feed_url", url, "episodes", 12)
+	log.Info("nested", slog.Group("podcast", "feed_url", url, "title", "Allowed title"))
+	raw, _ := json.Marshal(ring.Since(0, 0, slog.LevelInfo))
+	for _, out := range []string{captured.String(), string(raw)} {
+		if strings.Contains(out, "SECRET123") || strings.Contains(out, "user:password") {
+			t.Fatalf("credential leaked: %s", out)
+		}
+		if !strings.Contains(out, "https://example.com/...") || !strings.Contains(out, "Allowed title") {
+			t.Fatalf("allowed fields lost: %s", out)
+		}
+	}
+}
+
 type secretValue string
 
 func (s secretValue) LogValue() slog.Value {
