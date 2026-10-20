@@ -46,6 +46,7 @@ export function accountsFixture(over: Partial<Accounts> = {}): Accounts {
       kinds: ['claude_oauth_token', 'anthropic_api_key'],
       set: {},
       set_at: '',
+      set_at_by_kind: {},
       available: false,
       detail: "claude has no credential: set one on the Bridge's Accounts tab",
       handoff: false,

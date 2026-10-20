@@ -125,6 +125,7 @@ describe('AccountsTab', () => {
             ...state.agent,
             set: { claude_oauth_token: true },
             set_at: new Date().toISOString(),
+            set_at_by_kind: { claude_oauth_token: new Date().toISOString() },
             available: true,
           },
         };
@@ -163,6 +164,30 @@ describe('AccountsTab', () => {
     expect(lastCall(calls, 'DELETE', '/api/accounts/agent')?.url).toBe(
       '/api/accounts/agent?kind=claude_oauth_token',
     );
+  });
+
+  it('shows each credential with the time it was saved', async () => {
+    const a = accountsFixture();
+    const ago = (secs: number) => new Date(Date.now() - secs * 1000).toISOString();
+    mockFetch({
+      'GET /api/accounts': {
+        body: {
+          ...a,
+          agent: {
+            ...a.agent,
+            set: { claude_oauth_token: true, anthropic_api_key: true },
+            set_at: ago(300),
+            set_at_by_kind: { claude_oauth_token: ago(3 * 3600), anthropic_api_key: ago(300) },
+          },
+        },
+      },
+    });
+    render(<AccountsTab client={api()} />);
+    const card = await screen.findByRole('region', { name: 'Agent' });
+    const form = (label: string) => within(card).getByLabelText(label).closest('form')!;
+    expect(form('Claude subscription token').textContent).toContain('Set (3 h ago).');
+    expect(form('Claude subscription token').textContent).not.toContain('5 min ago');
+    expect(form('Anthropic API key').textContent).toContain('Set (5 min ago).');
   });
 
   it("says the container's own credential wins", async () => {

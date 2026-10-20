@@ -264,7 +264,8 @@ func TestAgentCredentialOnTheAccountsTab(t *testing.T) {
 	}
 	acc := b.Accounts(ctx)
 	raw, _ := json.Marshal(acc)
-	if !acc.Agent.Set["claude_oauth_token"] || acc.Agent.SetAt == "" || strings.Contains(string(raw), "secret") {
+	if !acc.Agent.Set["claude_oauth_token"] || acc.Agent.SetAt == "" || acc.Agent.SetAtByKind["claude_oauth_token"] == "" ||
+		len(acc.Agent.SetAtByKind) != 1 || strings.Contains(string(raw), "secret") {
 		t.Fatalf("accounts = %s", raw)
 	}
 	if kind, value, _, ok := b.agentCredential("claude"); !ok || kind != "oauth_token" || value != "sk-ant-oat01-secret" {

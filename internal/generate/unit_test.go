@@ -92,8 +92,9 @@ func TestEveryParkCodeHasAHint(t *testing.T) {
 
 // No hint sends anyone to generate the book again without cancelling this job
 // first: the server's enqueue finds the open (parked) job again, so that request
-// would change nothing. Nor to the Bridge's "Settings" or `gh auth login`, which
-// the Bridge doesn't have.
+// would change nothing. Nor to a "Settings" other than the Bridge page's Settings
+// tab (where the monthly budget is set), or `gh auth login`, which the Bridge
+// doesn't have.
 func TestParkHintsNameAnActionThatWorks(t *testing.T) {
 	t.Parallel()
 	for code, hint := range parkHints {
@@ -101,7 +102,8 @@ func TestParkHintsNameAnActionThatWorks(t *testing.T) {
 		if strings.Contains(low, "generate") && !strings.Contains(low, "cancel this job") {
 			t.Errorf("%s: %q sends the admin to generate again without cancelling the job", code, hint)
 		}
-		if strings.Contains(hint, "Settings") || strings.Contains(hint, "gh auth login") {
+		if strings.Contains(strings.ReplaceAll(hint, "Bridge's Settings tab", ""), "Settings") ||
+			strings.Contains(hint, "gh auth login") {
 			t.Errorf("%s: %q names something the Bridge doesn't have", code, hint)
 		}
 	}

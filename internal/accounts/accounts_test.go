@@ -543,7 +543,8 @@ func TestAgentCredential(t *testing.T) {
 		t.Fatal("codex has no credential")
 	}
 	st := a.State(ctx)
-	if !st.Set[AgentClaudeToken] || !st.Set[AgentAnthropicKey] || st.Set[AgentOpenAIKey] || st.SetAt == "" {
+	if !st.Set[AgentClaudeToken] || !st.Set[AgentAnthropicKey] || st.Set[AgentOpenAIKey] || st.SetAt == "" ||
+		st.SetAtByKind[AgentClaudeToken] == "" || st.SetAtByKind[AgentAnthropicKey] == "" || len(st.SetAtByKind) != 2 {
 		t.Fatalf("state = %+v", st)
 	}
 	if err := a.Delete(ctx, AgentClaudeToken); err != nil {

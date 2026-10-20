@@ -266,7 +266,7 @@ without them).
 sign-in with the audiosilo-contributions App's device flow (`ghauth`, `accounts`;
 expiring tokens refreshed single-flight and persisted before use, sign-out revokes)
 that contributions file with (env, then the sign-in, then `gh`), and agent
-credentials handed to the agent container per run (D10). Two light jobs that write
+credentials handed to the agent container for each run. Two light jobs that write
 nothing into a library: `sidecars.contribute` (share a book's kept characters and
 recaps) and `meta.correct` (an admin's corrections as one meta correction-batch
 issue, filed at most once per job). The setup checklist (`setup`) on the Status

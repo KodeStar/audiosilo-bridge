@@ -110,7 +110,8 @@ func (b *Bridge) Accounts(ctx context.Context) api.Accounts {
 	st := b.box.Status()
 	backend := b.box.ID()
 	ag := api.AgentAccount{Backend: backend, Kinds: accounts.KindsFor(backend), Set: as.Set, SetAt: as.SetAt,
-		Available: st.Available, Detail: st.Detail, Handoff: st.Handoff}
+		SetAtByKind: as.SetAtByKind,
+		Available:   st.Available, Detail: st.Detail, Handoff: st.Handoff}
 	if !st.Handoff {
 		ag.ContainerCredential = st.CLIs[backend].Credential
 	}

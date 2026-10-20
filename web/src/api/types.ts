@@ -406,6 +406,8 @@ export interface AgentAccount {
   kinds: AgentKind[];
   set: Partial<Record<AgentKind, boolean>>;
   set_at: string;
+  // When each kind held was saved (a kind without its own time is left out).
+  set_at_by_kind: Partial<Record<AgentKind, string>>;
   available: boolean;
   detail: string;
   handoff: boolean;

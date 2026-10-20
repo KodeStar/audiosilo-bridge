@@ -934,15 +934,17 @@ internal/
             It adopts a match and creates again only when the list is complete,
             holds none and (for an issue) the marker is a minute old; else it
             fails with ErrFilingUnknown (the share job words it and logs the
-            cause). A refusal or a request that never left (contrib.NothingFiled:
+            cause), unless the marker is over a day old by GitHub's clock
+            (contrib.FilingStale, StaleFiling): then it files again (meta's intake
+            catches a duplicate, and nothing on the page clears a marker). A refusal or a request that never left (contrib.NothingFiled:
             a 4xx, a rate limit, a failed dial) clears the pending time; a made
             gist is kept for the next try; the marker goes once the row is
             recorded.
   contrib/  M7: everything GitHub-facing for contribution. TokenSource (Phase 2b:
             NewTokenSource(device, onChange) resolves AUDIOSILO_BRIDGE_GITHUB_TOKEN
             read LIVE from the environment first (never sealed any more), then the
-            Accounts tab's device sign-in, then `gh auth token`; From() says which
-            (FromEnv/FromDevice/FromGH) and a 401 on a device token marks it refused
+            Accounts tab's device sign-in, then `gh auth token`; Resolve returns the
+            token and where it came from (FromEnv/FromDevice/FromGH) and a 401 on a device token marks it refused
             (a call that works with one moves the sign-in's last_ok_at: NewClientFor
             wires both hooks) - the token NEVER enters argv/logs/
             errors, leak-canary tested). NewClientFor records where the token came
@@ -1012,9 +1014,10 @@ internal/
             one) stores nothing; Refused marks the account refused (a 401 on a
             token a refresh has since replaced is ignored) and OK moves last_ok_at
             (a REST call that worked with the current token; never ends a
-            refusal; a sign-in and a refresh move it too); SignOut revokes, then
-            forgets locally even when the revoke failed (its error returned for
-            the page). Agent: Set/Delete/Credential for the kinds
+            refusal; a sign-in and a refresh move it too); SignOut ends any device flow,
+            forgets the pair locally first (so the Bridge stops using it whatever
+            GitHub answers), then revokes it, a failed revoke returned for the
+            page. Agent: Set/Delete/Credential for the kinds
             claude_oauth_token, anthropic_api_key, openai_api_key (one printable
             line, sealed in the vault), handed to the agent container per run by
             agentbox; Credential's set time is that kind's own (agent/<kind>), so
@@ -1045,7 +1048,8 @@ internal/
             issue with the same body, files when the list is complete and has
             none, and otherwise (a same-record batch with another body, an
             unreadable or incomplete list, a marker without a time) fails asking
-            the admin to look first. A 401 is errRefused. Result {issue_url,
+            the admin to look first, unless the marker is over a day old by
+            GitHub's clock (contrib.FilingStale): then it files again. A 401 is errRefused. Result {issue_url,
             issue_number, changes, auto, maintainer}: auto and maintainer as
             known at filing; the Bridge doesn't follow the issue (a batch meta
             applies only in part is not reported back, plan D8).
@@ -1805,7 +1809,7 @@ internal/
             opened file to be the one Lstat saw, and enforce the size limit on the
             open file and again while reading; Exists Lstats a marker, never
             following a link.
-            Phase 2b (decision 19, plan D10): runner.json's handoff says the runner
+            Phase 2b (decision 19, the agent credential hand-off): runner.json's handoff says the runner
             takes the Bridge's credential; the Bridge then writes
             credential/credential.json (Credential {cli, kind, value}) in the job
             dir, in its own NON-sticky subdirectory so the runner (another uid) can
@@ -2056,7 +2060,8 @@ internal/
             POST add: the token in the answer only, DELETE revoke). Phase 2b:
             accounts.go, GET /api/accounts (GitHub: signed in, login, refused,
             the pending device code, env_token, from, can_contribute, manage_url;
-            the agent: each kind set or not and when, the container's own
+            the agent: each kind set or not, when the last was saved (set_at)
+            and when each was (set_at_by_kind), the container's own
             credential; never a credential), POST /api/accounts/github/device
             (starts a sign-in, answers the code), DELETE /api/accounts/github
             ({accounts, revoke_error}), PUT /api/accounts/agent {kind, value},

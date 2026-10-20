@@ -81,7 +81,10 @@ const (
 	// ParkBudgetExceeded: the book's summed agent cost reached the configured per-book
 	// budget (agent.book_budget_usd), so an agent stage parked before spending more. A
 	// human decision: raise the budget in config.yaml (restart to apply), then Retry -
-	// so, unlike the transient agent parks, it carries no auto-readmit time.
+	// so, unlike the transient agent parks, it carries no auto-readmit time. The
+	// month's spend reaching agent.monthly_budget_usd parks with it too, until the
+	// 1st (its readmit time) or a budget saved on the Settings tab (which re-admits
+	// the parked books at once).
 	ParkBudgetExceeded ParkCode = "budget_exceeded"
 	// Supervisor containment parks never authorize content/code changes; a human
 	// may inspect the persisted decision and explicitly Retry when satisfied.

@@ -63,7 +63,8 @@ var parkHints = map[string]string{
 		"Bridge's Accounts tab (a new claude setup-token, or an API key once the token is removed: claude uses a " +
 		"setup-token first), or in the agent container (claude setup-token / agent-login codex), whose own " +
 		"credential wins. The book tries again as soon as the Accounts tab has a new one, and every 30 minutes.",
-	string(state.ParkBudgetExceeded): "The agent budget is spent. A monthly cap resumes on the 1st; for the per-book cap, " +
+	string(state.ParkBudgetExceeded): "The agent budget is spent. A monthly cap resumes on the 1st, or as soon as it is raised on the " +
+		"Bridge's Settings tab; for the per-book cap, " +
 		"raise agent.book_budget_usd in the Bridge's config.yaml, restart it and press Retry on the Bridge's page.",
 	string(state.ParkAgentValidationExhausted): "The agent's answer kept failing the checks. Press Retry on the Bridge's page to give it another go.",
 	string(state.ParkMarkersNotConfident): "The chapter markers couldn't be read with confidence. Check the book's chapters, " +

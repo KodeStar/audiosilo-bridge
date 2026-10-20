@@ -497,19 +497,27 @@ func NewAgent(vault secrets.Store, db Store, now func() time.Time, onChange func
 	return &Agent{vault: vault, db: db, now: now, onChange: onChange}
 }
 
-// AgentState is which agent credentials the vault holds (never a value) and
-// when the last one was set.
+// AgentState is which agent credentials the vault holds (never a value), when
+// the last one was set, and when each was (SetAtByKind: only kinds set, each
+// from its own row; one saved before the rows per kind has none).
 type AgentState struct {
-	Set   map[string]bool `json:"set"`
-	SetAt string          `json:"set_at"`
+	Set         map[string]bool   `json:"set"`
+	SetAt       string            `json:"set_at"`
+	SetAtByKind map[string]string `json:"set_at_by_kind"`
 }
 
 // State is the agent's credentials now.
 func (a *Agent) State(ctx context.Context) AgentState {
-	st := AgentState{Set: map[string]bool{}}
+	st := AgentState{Set: map[string]bool{}, SetAtByKind: map[string]string{}}
 	for _, k := range AgentKinds {
 		ok, _ := a.vault.Present(k)
 		st.Set[k] = ok
+		if !ok {
+			continue
+		}
+		if acc, err := a.db.GetAccount(ctx, kindProvider(k)); err == nil && acc.SignedInAt != "" {
+			st.SetAtByKind[k] = acc.SignedInAt
+		}
 	}
 	if acc, err := a.db.GetAccount(ctx, ProviderAgent); err == nil {
 		st.SetAt = acc.SignedInAt
