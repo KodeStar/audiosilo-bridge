@@ -99,9 +99,7 @@ func TestEveryParkCodeHasAHint(t *testing.T) {
 func TestParkHintsNameAnActionThatWorks(t *testing.T) {
 	t.Parallel()
 	hints := maps.Clone(parkHints)
-	for code, hint := range describeParkHints {
-		hints["describe "+code] = hint
-	}
+	hints["describe "+string(state.ParkBudgetExceeded)] = describeBudgetHint
 	for code, hint := range hints {
 		low := strings.ToLower(hint)
 		if strings.Contains(low, "generate") && !strings.Contains(low, "cancel this job") {

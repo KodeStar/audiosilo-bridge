@@ -687,7 +687,7 @@ func writeProblem(err error) string {
 // park parks the job with one of the Bridge's own codes.
 func (h *Handler) park(r *run, code, msg string) {
 	r.rep.Progress(jobs.Progress{Step: stepWaiting, Message: "Needs attention: " + msg,
-		Extra: map[string]any{"source": r.source, "park": parkExtra(code, "")}})
+		Extra: map[string]any{"source": r.source, "park": parkExtra(code, ParkHint(code), "")}})
 	r.rep.Park(code, msg)
 	r.ownPark = true
 }
@@ -897,7 +897,7 @@ func (h *Handler) attach(ctx context.Context, eng Engine, r *run, m store.Genera
 func (r *run) bookExtra(b store.Book) map[string]any {
 	extra := map[string]any{"stage": b.State, "source": r.source}
 	if state.Status(b.Status) == state.StatusNeedsAttention {
-		extra["park"] = parkExtra(b.ParkCode, b.RetryAt)
+		extra["park"] = parkExtra(b.ParkCode, ParkHint(b.ParkCode), b.RetryAt)
 	}
 	return extra
 }

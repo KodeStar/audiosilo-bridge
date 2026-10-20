@@ -68,11 +68,11 @@ const (
 // Retry (a restart re-admits no budget park); for the description step (describing),
 // raise it and restart, since a sidecars.describe job tries again as the Bridge starts.
 func budgetExceededMsg(spent, budget float64, describing bool) string {
+	fix := "(restart to apply), then Retry"
 	if describing {
-		return fmt.Sprintf("book agent cost $%.2f reached the budget $%.2f - raise agent.book_budget_usd in config.yaml "+
-			"and restart the Bridge: the description carries on by itself", spent, budget)
+		fix = "and restart the Bridge: the description carries on by itself"
 	}
-	return fmt.Sprintf("book agent cost $%.2f reached the budget $%.2f - raise agent.book_budget_usd in config.yaml (restart to apply), then Retry", spent, budget)
+	return fmt.Sprintf("book agent cost $%.2f reached the budget $%.2f - raise agent.book_budget_usd in config.yaml %s", spent, budget, fix)
 }
 
 // monthlyBudgetExceededMsg is the park reason when this month's agent spend across
