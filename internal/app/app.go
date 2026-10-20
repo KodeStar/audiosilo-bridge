@@ -32,6 +32,7 @@ import (
 	"github.com/kodestar/audiosilo-bridge/internal/mapping"
 	"github.com/kodestar/audiosilo-bridge/internal/metaops"
 	"github.com/kodestar/audiosilo-bridge/internal/secrets"
+	"github.com/kodestar/audiosilo-bridge/internal/state"
 	"github.com/kodestar/audiosilo-bridge/internal/store"
 	"github.com/kodestar/audiosilo-bridge/internal/verify"
 	"github.com/kodestar/audiosilo-bridge/internal/web"
@@ -73,6 +74,9 @@ type Bridge struct {
 	box    *agentbox.Runner
 	gen    *generate.Handler
 	engine engineState
+	// wakeParked wakes the describe jobs parked with a code a change answers
+	// (gen.WakeParked; a test watches it).
+	wakeParked func(state.ParkCode) int
 	// hub is the ASR workers' queue and registry (Phase 1b); router the
 	// engine's ASR backend over it, once the engine has started.
 	hub    *workers.Hub
@@ -179,6 +183,7 @@ func New(ctx context.Context, opts Options) (*Bridge, string, error) {
 		},
 		WorkRoot: filepath.Join(opts.DataDir, "work"), Version: opts.Version, RetentionDays: cfg.Transcripts.RetentionDays,
 		CanContribute: b.canContribute, Log: opts.Logger})
+	b.wakeParked = b.gen.WakeParked
 	serverID := func() string { return b.conn.Pairing().ServerID }
 	corrector := correct.New(correct.Options{Meta: metaops.NewClient(cfg.Metadata.BaseURL), Tokens: b.tokens,
 		BaseURL: cfg.Contribution.APIBaseURL, CoreRepo: cfg.Contribution.CoreRepo, KV: db, ServerID: serverID, Log: opts.Logger})

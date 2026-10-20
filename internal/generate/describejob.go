@@ -277,15 +277,18 @@ func (h *Handler) holdBook(ctx context.Context, bookID int64) (func(), error) {
 
 // describeParked runs the description step until it writes one: an agent park
 // (a rate limit, the budget, a refused credential, no agent) parks the job and
-// tries again at the park's retry_at or on Retry; the job stays parked while it
-// tries, so a park that holds isn't announced again. It returns the spend across
-// the tries.
+// tries again at the park's retry_at, on Retry, or on a WakeParked for its code
+// (one made while the try ran included); the job stays parked while it tries, so
+// a park that holds isn't announced again. It returns the spend across the
+// tries.
 func (h *Handler) describeParked(ctx context.Context, r *run, d Describer, bookID int64) (described, float64, error) {
 	var spent float64
 	parked := false
 	defer func() {
 		h.mu.Lock()
-		delete(h.describeParks, r.job.ID)
+		if h.describeParks[r.job.ID].poke == r.poke { // a later run of the job may have its own
+			delete(h.describeParks, r.job.ID)
+		}
 		h.mu.Unlock()
 	}()
 	for {
@@ -293,6 +296,7 @@ func (h *Handler) describeParked(ctx context.Context, r *run, d Describer, bookI
 			r.rep.Progress(jobs.Progress{Step: pipeline.DescribeStage, Message: "Writing a description", Total: 1,
 				Extra: r.describeExtra(spent)})
 		}
+		mark := h.wakeMark()
 		got, err := h.describeHeld(ctx, d, bookID, false)
 		spent += got.res.CostUSD
 		var park *scheduler.ParkError
@@ -325,7 +329,9 @@ func (h *Handler) describeParked(ctx context.Context, r *run, d Describer, bookI
 				default:
 				}
 			}
-			h.parkDescribe(r, park, spent)
+			if h.parkDescribe(r, park, spent, mark) {
+				continue // woken while the try ran (the wake-up may have been drained above)
+			}
 			if err := h.recheckWait(ctx, r, park.RetryAfter); err != nil {
 				return described{}, spent, err
 			}
@@ -335,8 +341,11 @@ func (h *Handler) describeParked(ctx context.Context, r *run, d Describer, bookI
 	}
 }
 
-// parkDescribe reports an agent park as the job's, with its hint and retry_at.
-func (h *Handler) parkDescribe(r *run, park *scheduler.ParkError, spent float64) {
+// parkDescribe reports an agent park as the job's, with its hint and retry_at,
+// and registers it for WakeParked; woken says WakeParked woke its code after
+// mark (wakeMark, taken before the try), so the park was answered while the try
+// ran.
+func (h *Handler) parkDescribe(r *run, park *scheduler.ParkError, spent float64, mark uint64) (woken bool) {
 	code, retryAt := string(park.Code), ""
 	if !park.RetryAfter.IsZero() {
 		retryAt = store.Timestamp(park.RetryAfter)
@@ -347,8 +356,9 @@ func (h *Handler) parkDescribe(r *run, park *scheduler.ParkError, spent float64)
 		Extra: extra})
 	r.rep.Park(code, park.Reason)
 	h.mu.Lock()
-	h.describeParks[r.job.ID] = park.Code
-	h.mu.Unlock()
+	defer h.mu.Unlock()
+	h.describeParks[r.job.ID] = describePark{code: park.Code, poke: r.poke}
+	return h.woken[park.Code] > mark
 }
 
 // describeExtra is a description-only job's progress Extra: the describing

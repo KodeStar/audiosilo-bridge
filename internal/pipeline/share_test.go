@@ -2,11 +2,13 @@ package pipeline
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -166,7 +168,7 @@ func TestShareFilesWhenTheInterruptedIssueWasNotMade(t *testing.T) {
 	gh.mu.Lock()
 	gh.issues = nil // the request never reached GitHub
 	gh.mu.Unlock()
-	if _, err := exe.Share(ctx, b.ID, "reacher-01", nil); !errors.Is(err, ErrFilingUnknown) || !errors.Is(err, errFilingSettling) {
+	if _, err := exe.Share(ctx, b.ID, "reacher-01", nil); !errors.Is(err, ErrFilingUnknown) || !errors.Is(err, contrib.ErrFilingSettling) {
 		t.Fatalf("a share moments after = %v", err)
 	}
 	backdateFiling(t, exe, b.ID, store.ContribKindCharacters, 2*time.Minute)
@@ -559,5 +561,30 @@ func TestShareLookupWithARefusedSignInIsThe401(t *testing.T) {
 	var apiErr *contrib.APIError
 	if !errors.As(err, &apiErr) || apiErr.Status != http.StatusUnauthorized || gh.issueCount() != 0 {
 		t.Fatalf("err = %v, issues %d", err, gh.issueCount())
+	}
+}
+
+// The gist an interrupted submit made, on a page read before one that failed,
+// is adopted.
+func TestFiledGistBeforeAFailedPage(t *testing.T) {
+	since := time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if page, _ := strconv.Atoi(r.URL.Query().Get("page")); page >= 2 {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		rows := make([]map[string]any, contrib.GistsPage) // a whole page: the list goes on
+		for i := range rows {
+			rows[i] = map[string]any{"id": strconv.Itoa(i), "description": "other", "created_at": "2026-10-19T12:05:00Z",
+				"files": map[string]any{}}
+		}
+		rows[len(rows)-1] = map[string]any{"id": "mine", "description": "desc", "created_at": "2026-10-19T12:01:00Z",
+			"files": map[string]any{"characters.json": map[string]any{"raw_url": "raw-mine"}}}
+		_ = json.NewEncoder(w).Encode(rows)
+	}))
+	t.Cleanup(srv.Close)
+	raw, found, err := filedGist(context.Background(), contrib.NewClient(srv.URL, "t"), since, "characters.json", "desc")
+	if err != nil || !found || raw != "raw-mine" {
+		t.Fatalf("raw %q found %v err %v", raw, found, err)
 	}
 }

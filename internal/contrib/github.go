@@ -495,6 +495,23 @@ const FilingSkew = 2 * time.Minute
 // while GitHub was still making it, and the list may not show it yet.
 const FilingSettle = time.Minute
 
+// ErrFilingSettling is a lookup that found nothing under FilingSettle after the
+// marker it looks from (Settling): GitHub may still be making what it asked for.
+var ErrFilingSettling = errors.New("the earlier try was moments ago, and GitHub may still be making it")
+
+// Settling reports whether a marker set at since (GitHub's time) is under
+// FilingSettle old by Now.
+func (c *Client) Settling(ctx context.Context, since time.Time) bool {
+	return c.Now(ctx).Sub(since) < FilingSettle
+}
+
+// Unauthorized reports whether GitHub answered err with a 401 (the sign-in
+// refused).
+func Unauthorized(err error) bool {
+	var apiErr *APIError
+	return errors.As(err, &apiErr) && apiErr.Status == http.StatusUnauthorized
+}
+
 // FilingStale is the age (by GitHub's clock) past which a filing marker no
 // longer stops a new filing when the lookup for what it may have made fails in a
 // way no later try mends (each caller says which: ErrListIncomplete only grows):

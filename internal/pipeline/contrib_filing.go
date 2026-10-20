@@ -27,11 +27,6 @@ import (
 // a duplicate.
 var ErrFilingUnknown = errors.New("an earlier try may have filed it, and the Bridge can't tell")
 
-// errFilingSettling is a lookup too soon after the create it looks for: the
-// client may have given up while GitHub was still making it
-// (contrib.FilingSettle).
-var errFilingSettling = errors.New("the earlier try was moments ago, and GitHub may still be making it")
-
 // filing is a dimension's marker (the settings KV, filingKey): what its last
 // submit was making when it stopped. Times are GitHub's (contrib.Client.Now).
 type filing struct {
@@ -150,16 +145,14 @@ func filedGist(ctx context.Context, cli *contrib.Client, since time.Time, file, 
 // since doesn't match and is filed again: a duplicate a maintainer can close,
 // rather than a dimension never filed.
 //
-// loginErr is why the signed-in login couldn't be read: with no login on the
-// marker either, it is the lookup's error (a 401 is the sign-in refused).
+// loginErr is why the signed-in login couldn't be read (contrib.Client.Login
+// gives "" only with one): with no login on the marker either, it is the
+// lookup's error (a 401 is the sign-in refused).
 func (e *Executor) filedIssue(ctx context.Context, cli *contrib.Client, f filing, login string, loginErr error,
 	recorded int) (contrib.Issue, bool, error) {
 	creator := cmp.Or(f.Login, login)
 	if creator == "" {
-		if loginErr != nil {
-			return contrib.Issue{}, false, fmt.Errorf("the GitHub login is unknown: %w", loginErr)
-		}
-		return contrib.Issue{}, false, errors.New("the GitHub login is unknown")
+		return contrib.Issue{}, false, fmt.Errorf("the GitHub login is unknown: %w", loginErr)
 	}
 	// The issues read before a failing page are looked through first.
 	issues, complete, err := cli.IssuesSinceBy(ctx, e.contribCommunityRepo, f.IssueSince.Add(-contrib.FilingSkew), creator)
@@ -173,8 +166,8 @@ func (e *Executor) filedIssue(ctx context.Context, cli *contrib.Client, f filing
 		return contrib.Issue{}, false, err
 	case !complete:
 		return contrib.Issue{}, false, contrib.ErrListIncomplete
-	case cli.Now(ctx).Sub(f.IssueSince) < contrib.FilingSettle:
-		return contrib.Issue{}, false, errFilingSettling
+	case cli.Settling(ctx, f.IssueSince):
+		return contrib.Issue{}, false, contrib.ErrFilingSettling
 	}
 	return contrib.Issue{}, false, nil
 }

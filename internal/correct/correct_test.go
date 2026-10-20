@@ -1,6 +1,7 @@
 package correct
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -29,6 +30,8 @@ func (f fakeMeta) FreshCoverageForWork(context.Context, string) (metaops.Coverag
 type memKV struct {
 	mu sync.Mutex
 	m  map[string]string
+	// failSet fails each SetSetting of a key with this prefix ("": none).
+	failSet string
 }
 
 func (k *memKV) GetSetting(_ context.Context, key string) (string, bool, error) {
@@ -41,8 +44,24 @@ func (k *memKV) GetSetting(_ context.Context, key string) (string, bool, error) 
 func (k *memKV) SetSetting(_ context.Context, key, value string) error {
 	k.mu.Lock()
 	defer k.mu.Unlock()
+	if k.failSet != "" && strings.HasPrefix(key, k.failSet) {
+		return errors.New("the disk is full")
+	}
 	k.m[key] = value
 	return nil
+}
+
+// markers is the filing markers kept (key -> value).
+func (k *memKV) markers() map[string]string {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	out := map[string]string{}
+	for key, v := range k.m {
+		if strings.HasPrefix(key, "meta.correct.filing/") {
+			out[key] = v
+		}
+	}
+	return out
 }
 
 func (k *memKV) DeleteSetting(_ context.Context, key string) error {
@@ -61,17 +80,25 @@ type tokens struct {
 func (t *tokens) Resolve(context.Context) (string, string, error) { return t.token, t.from, t.err }
 func (t *tokens) Refused(_ context.Context, from, _ string)       { t.refused = append(t.refused, from) }
 
-// gh is a fake GitHub issues API: POST files, GET lists (newest first).
+// gh is a fake GitHub issues API: POST files, GET lists (newest first, paged as
+// asked).
 type gh struct {
 	mu         sync.Mutex
 	status     int
 	listStatus int
-	// failFromPage fails the list from that page on (0: never); drop makes the
-	// next issues but loses the answer (the connection closes).
+	// failFromPage fails the list from that page on (0: never) with failStatus
+	// (502 when 0); drop makes the next issues but loses the answer (the
+	// connection closes).
 	failFromPage int
+	failStatus   int
 	drop         bool
-	issues       []map[string]any
-	auth         []string
+	// limited marks every answer as the rate limit's last (so a 403 is a rate
+	// limit); endless lists other issues made since past the ones made here, so
+	// the list never reaches back (it is incomplete).
+	limited bool
+	endless bool
+	issues  []map[string]any
+	auth    []string
 	// date is GitHub's clock (every answer's Date; fakeNow when zero), so a
 	// marker's age doesn't depend on the day the tests run.
 	date time.Time
@@ -84,12 +111,15 @@ func (g *gh) server(t *testing.T) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		g.mu.Lock()
-		date := g.date
+		date, limited := g.date, g.limited
 		g.mu.Unlock()
 		if date.IsZero() {
 			date = fakeNow
 		}
 		w.Header().Set("Date", date.Format(http.TimeFormat))
+		if limited {
+			w.Header().Set("X-RateLimit-Remaining", "0")
+		}
 		if r.URL.Path != "/repos/KodeStar/audiosilo-meta/issues" {
 			http.NotFound(w, r)
 			return
@@ -102,7 +132,7 @@ func (g *gh) server(t *testing.T) *httptest.Server {
 				return
 			}
 			if page, _ := strconv.Atoi(r.URL.Query().Get("page")); g.failFromPage > 0 && page >= g.failFromPage {
-				w.WriteHeader(http.StatusBadGateway)
+				w.WriteHeader(cmp.Or(g.failStatus, http.StatusBadGateway))
 				return
 			}
 			var rows []map[string]any
@@ -111,7 +141,13 @@ func (g *gh) server(t *testing.T) *httptest.Server {
 				rows = append(rows, map[string]any{"number": 42 + i, "html_url": "https://github.com/KodeStar/audiosilo-meta/issues/" + strconv.Itoa(42+i),
 					"title": is["title"], "body": is["body"], "created_at": is["created_at"]})
 			}
-			_ = json.NewEncoder(w).Encode(rows)
+			per, _ := strconv.Atoi(r.URL.Query().Get("per_page"))
+			page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+			for g.endless && len(rows) < page*per {
+				rows = append(rows, map[string]any{"number": 9000 + len(rows), "title": "other", "body": "",
+					"created_at": fakeNow.Format(time.RFC3339)})
+			}
+			_ = json.NewEncoder(w).Encode(rows[min((page-1)*per, len(rows)):min(page*per, len(rows))])
 			return
 		}
 		var body map[string]any
@@ -202,11 +238,12 @@ func TestCorrectFilesOnceAndResumes(t *testing.T) {
 
 func TestCorrectFailures(t *testing.T) {
 	cases := map[string]struct {
-		params string
-		meta   Meta
-		tok    *tokens
-		status int
-		want   string
+		params  string
+		meta    Meta
+		tok     *tokens
+		status  int
+		limited bool
+		want    string
 	}{
 		"unknown field":   {params: `{"work_id":"w","changes":[],"evidence":"e","extra":1}`, want: "bad params"},
 		"unknown change":  {params: `{"work_id":"w","changes":[{"field":"title","corrected":"x","why":1}],"evidence":"e"}`, want: "bad params"},
@@ -218,11 +255,12 @@ func TestCorrectFailures(t *testing.T) {
 		"no sign-in":      {tok: &tokens{err: contrib.ErrNoCredential}, want: "Accounts tab"},
 		"refused sign-in": {status: http.StatusUnauthorized, want: "sign in again"},
 		"github says no":  {status: http.StatusUnprocessableEntity, want: "could not file"},
+		"rate limited":    {status: http.StatusForbidden, limited: true, want: "rate limit"},
 		"github errors":   {status: http.StatusBadGateway, want: "didn't confirm"},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
-			g := &gh{status: c.status}
+			g := &gh{status: c.status, limited: c.limited}
 			tok := c.tok
 			if tok == nil {
 				tok = &tokens{token: "ghu_user", from: contrib.FromDevice}
@@ -246,7 +284,7 @@ func TestCorrectFailures(t *testing.T) {
 			if c.status == http.StatusUnauthorized && (len(tok.refused) != 1 || tok.refused[0] != contrib.FromDevice) {
 				t.Fatalf("a 401 wasn't reported as a refusal: %v", tok.refused)
 			}
-			marked := kv.m[filingKeyWork] != ""
+			marked := len(kv.markers()) != 0
 			if c.status >= http.StatusInternalServerError && !marked {
 				t.Fatal("a server error may come after the issue is made: the filing marker must stay")
 			}
@@ -257,14 +295,36 @@ func TestCorrectFailures(t *testing.T) {
 	}
 }
 
-// filingKeyWork is the filing marker of params' book when the job names no
-// library and path.
-const filingKeyWork = "meta.correct.filing/srv-1/work/existing-work"
+// keyOf is the filing marker of the request raw on srv-1.
+func keyOf(t *testing.T, raw string) string {
+	t.Helper()
+	p, err := ParseParams(json.RawMessage(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return New(Options{ServerID: func() string { return "srv-1" }}).filingKey(p)
+}
 
-// otherBatch is a correction batch for the same record as params' with another
-// body (the record as it was, or another admin's), made a minute after the
-// marker's run.
-func otherBatch() map[string]any {
+// The filing marker is the request's: the same corrections share it whichever
+// job (or book, which may have moved) asks and whatever the server stamps as the
+// source; other corrections don't.
+func TestCorrectFilingKey(t *testing.T) {
+	key := keyOf(t, params)
+	if !strings.HasPrefix(key, "meta.correct.filing/srv-1/") {
+		t.Fatalf("key = %q", key)
+	}
+	if got := keyOf(t, strings.Replace(params, "audiosilo-server/2.4.0", "audiosilo-server/2.5.0", 1)); got != key {
+		t.Fatalf("another source stamp: %q, want %q", got, key)
+	}
+	if got := keyOf(t, strings.Replace(params, `"corrected":"2020-03-04"`, `"corrected":"2020-03-05"`, 1)); got == key {
+		t.Fatal("other corrections share the marker")
+	}
+}
+
+// otherBatchIssue is a correction batch for the same record as params' with
+// another body (another admin's, or the run's own edited since), made a minute
+// after the marker's run.
+func otherBatchIssue() map[string]any {
 	return map[string]any{"title": "[corrections] Existing Work", "created_at": "2026-10-19T12:01:00Z",
 		"body": "### Record\n\nhttps://meta.audiosilo.app/works/existing-work\n\n### Changes\n\nother"}
 }
@@ -302,61 +362,60 @@ func TestCorrectNeverFilesTwice(t *testing.T) {
 	ctx := context.Background()
 	at := time.Date(2026, 10, 19, 12, 0, 30, 0, time.UTC) // the interrupted run's marker
 	marker := markerAt(t, at)
+	key := keyOf(t, params)
 	job := jobs.Job{ID: 3, Params: json.RawMessage(params), Resumed: true}
 	run := func(g *gh, kv *memKV) (any, error) {
 		h := newHandler(t, g, &tokens{token: "t", from: contrib.FromEnv}, kv, fakeMeta{cov: cov()})
 		return h.Run(ctx, job, jobs.LocalReporter())
 	}
 
-	// A marker without a time (no way to look): a person decides.
-	g, kv := &gh{}, &memKV{m: map[string]string{filingKeyWork: "{}"}}
-	if _, err := run(g, kv); !errors.Is(err, errFiledBefore) || g.count() != 0 {
-		t.Fatalf("no time: err = %v, issues %d", err, g.count())
+	// A marker without a time (no way to look): a person decides, once; the
+	// next run files.
+	g, kv := &gh{}, &memKV{m: map[string]string{key: "{}"}}
+	if _, err := run(g, kv); !errors.Is(err, errFiledBefore) || g.count() != 0 || len(kv.markers()) != 0 {
+		t.Fatalf("no time: err = %v, issues %d, markers %v", err, g.count(), kv.markers())
+	}
+	if _, err := run(g, kv); err != nil || g.count() != 1 {
+		t.Fatalf("no time, then: err = %v, issues %d", err, g.count())
 	}
 
 	// The interrupted run had filed it: adopted, nothing filed again, the
 	// marker cleared.
 	g, kv = &gh{}, &memKV{m: map[string]string{}}
-	if _, err := run(g, kv); err != nil || g.count() != 1 || kv.m[filingKeyWork] != "" {
-		t.Fatalf("first filing: %v, issues %d, marker %q", err, g.count(), kv.m[filingKeyWork])
+	if _, err := run(g, kv); err != nil || g.count() != 1 || len(kv.markers()) != 0 {
+		t.Fatalf("first filing: %v, issues %d, markers %v", err, g.count(), kv.markers())
 	}
 	delete(kv.m, "meta.correct/srv-1/3")
-	kv.m[filingKeyWork] = marker
+	kv.m[key] = marker
 	out, err := run(g, kv)
 	if err != nil || g.count() != 1 || out.(Result).IssueNumber != 42 || out.(Result).Changes != 3 {
 		t.Fatalf("adopt: %+v %v, issues %d", out, err, g.count())
 	}
-	if !strings.Contains(kv.m["meta.correct/srv-1/3"], `"issue_number":42`) || kv.m[filingKeyWork] != "" {
-		t.Fatalf("the adopted issue isn't recorded: %q, marker %q", kv.m["meta.correct/srv-1/3"], kv.m[filingKeyWork])
+	if !strings.Contains(kv.m["meta.correct/srv-1/3"], `"issue_number":42`) || len(kv.markers()) != 0 {
+		t.Fatalf("the adopted issue isn't recorded: %q, markers %v", kv.m["meta.correct/srv-1/3"], kv.markers())
 	}
 
 	// It hadn't: filed once now.
-	g, kv = &gh{}, &memKV{m: map[string]string{filingKeyWork: marker}}
+	g, kv = &gh{}, &memKV{m: map[string]string{key: marker}}
 	if _, err := run(g, kv); err != nil || g.count() != 1 {
 		t.Fatalf("refile: %v, issues %d", err, g.count())
 	}
 
-	// A batch for the same record with another body, or a list that can't be
-	// read: a person decides; a 401 is the sign-in refused.
-	g, kv = &gh{issues: []map[string]any{otherBatch()}}, &memKV{m: map[string]string{filingKeyWork: marker}}
-	if _, err := run(g, kv); !errors.Is(err, errFiledBefore) || g.count() != 1 {
-		t.Fatalf("other body: err = %v, issues %d", err, g.count())
+	// A batch for the same record with another body, the list read back to the
+	// settled marker: a person decides, once (the marker goes); the next run
+	// files.
+	g, kv = &gh{issues: []map[string]any{otherBatchIssue()}}, &memKV{m: map[string]string{key: marker}}
+	if _, err := run(g, kv); !errors.Is(err, errFiledBefore) || g.count() != 1 || len(kv.markers()) != 0 {
+		t.Fatalf("other body: err = %v, issues %d, markers %v", err, g.count(), kv.markers())
 	}
-	g, kv = &gh{listStatus: http.StatusBadGateway}, &memKV{m: map[string]string{filingKeyWork: marker}}
-	if _, err := run(g, kv); !errors.Is(err, errFiledBefore) || g.count() != 0 {
-		t.Fatalf("list fails: err = %v, issues %d", err, g.count())
-	}
-	g, kv = &gh{listStatus: http.StatusUnauthorized}, &memKV{m: map[string]string{filingKeyWork: marker}}
-	if _, err := run(g, kv); !errors.Is(err, errRefused) || g.count() != 0 {
-		t.Fatalf("list refused: err = %v, issues %d", err, g.count())
+	if _, err := run(g, kv); err != nil || g.count() != 2 {
+		t.Fatalf("other body, then: err = %v, issues %d", err, g.count())
 	}
 
-	// The marker's age by GitHub's clock: just under a day, a lookup that can't
-	// tell stops the job; just over (contrib.FilingStale), a list that can't be
-	// read or can't reach back to the marker files again, while a batch for the
-	// same record with another body (maybe the run's own) still stops it, even
-	// on a page read before one that failed.
-	others := func() []map[string]any { // a whole page of other issues made since, on every page
+	// A list that can't be read: a person decides, and the marker stays for the
+	// next look; a 401 is the sign-in refused and a rate limit the rate limit,
+	// even past a batch for the same record on a page read before.
+	others := func() []map[string]any { // a whole page of other issues made since
 		rows := make([]map[string]any, contrib.IssuesPage)
 		for i := range rows {
 			rows[i] = map[string]any{"title": "other", "body": "", "created_at": "2026-10-19T12:05:00Z"}
@@ -364,19 +423,50 @@ func TestCorrectNeverFilesTwice(t *testing.T) {
 		return rows
 	}
 	for _, c := range []struct {
+		name string
+		gh   *gh
+		want error
+	}{
+		{"list fails", &gh{listStatus: http.StatusBadGateway}, errFiledBefore},
+		{"another body before a failed page", &gh{issues: append(others(), otherBatchIssue()), failFromPage: 2}, errFiledBefore},
+		{"another body in an incomplete list", &gh{issues: []map[string]any{otherBatchIssue()}, endless: true}, errFiledBefore},
+		{"list refused", &gh{listStatus: http.StatusUnauthorized}, errRefused},
+		{"refused past another body", &gh{issues: append(others(), otherBatchIssue()), failFromPage: 2,
+			failStatus: http.StatusUnauthorized}, errRefused},
+		{"list rate limited", &gh{listStatus: http.StatusForbidden, limited: true}, errRateLimited},
+		{"rate limited past another body", &gh{issues: append(others(), otherBatchIssue()), failFromPage: 2,
+			failStatus: http.StatusForbidden, limited: true}, errRateLimited},
+	} {
+		kv := &memKV{m: map[string]string{key: marker}}
+		before := c.gh.count()
+		if _, err := run(c.gh, kv); !errors.Is(err, c.want) || c.gh.count() != before || kv.m[key] != marker {
+			t.Fatalf("%s: err = %v, issues %d -> %d, marker %q", c.name, err, before, c.gh.count(), kv.m[key])
+		}
+	}
+
+	// The marker's age by GitHub's clock: just under a day, a lookup that can't
+	// tell stops the job; just over (contrib.FilingStale), a list that can't be
+	// read or can't reach back to the marker files again, while a batch for the
+	// same record with another body (maybe the run's own, edited) still stops it,
+	// even on a page read before one that failed, and a rate limit waits.
+	for _, c := range []struct {
 		name  string
 		gh    func() *gh
-		stale bool // files again over a day
+		stale bool  // files again over a day
+		want  error // else (errFiledBefore when nil)
 	}{
-		{"an unreadable list", func() *gh { return &gh{listStatus: http.StatusBadGateway} }, true},
-		{"an incomplete list", func() *gh { return &gh{issues: others()} }, true},
-		{"another body", func() *gh { return &gh{issues: []map[string]any{otherBatch()}} }, false},
+		{"an unreadable list", func() *gh { return &gh{listStatus: http.StatusBadGateway} }, true, nil},
+		{"an incomplete list", func() *gh { return &gh{endless: true} }, true, nil},
+		{"another body", func() *gh { return &gh{issues: []map[string]any{otherBatchIssue()}} }, false, nil},
 		{"another body before a failed page", func() *gh {
-			return &gh{issues: append(others(), otherBatch()), failFromPage: 2}
-		}, false},
+			return &gh{issues: append(others(), otherBatchIssue()), failFromPage: 2}
+		}, false, nil},
+		{"a rate-limited list", func() *gh { return &gh{listStatus: http.StatusForbidden, limited: true} }, false,
+			errRateLimited},
 	} {
+		want := cmp.Or(c.want, error(errFiledBefore))
 		for _, age := range []time.Duration{contrib.FilingStale - time.Hour, contrib.FilingStale + time.Hour} {
-			g, kv := c.gh(), &memKV{m: map[string]string{filingKeyWork: marker}}
+			g, kv := c.gh(), &memKV{m: map[string]string{key: marker}}
 			g.date = at.Add(age)
 			before := g.count()
 			files := c.stale && age > contrib.FilingStale
@@ -384,7 +474,7 @@ func TestCorrectNeverFilesTwice(t *testing.T) {
 			switch {
 			case files && (err != nil || g.count() != before+1):
 				t.Fatalf("%s, %v old: err = %v, issues %d -> %d", c.name, age, err, before, g.count())
-			case !files && (!errors.Is(err, errFiledBefore) || g.count() != before):
+			case !files && (!errors.Is(err, want) || g.count() != before):
 				t.Fatalf("%s, %v old: err = %v, issues %d -> %d", c.name, age, err, before, g.count())
 			}
 		}
@@ -401,15 +491,15 @@ func TestCorrectAdoptsItsIssueBeforeAFailedPage(t *testing.T) {
 		t.Fatalf("first filing: %v, issues %d", err, g.count())
 	}
 	g.mu.Lock()
-	for range contrib.IssuesPage {
+	for range contrib.IssuesPage - 1 { // newer issues: the own one ends page 1
 		g.issues = append(g.issues, map[string]any{"title": "other", "body": "", "created_at": "2026-10-19T12:05:00Z"})
 	}
 	g.failFromPage = 2
 	g.mu.Unlock()
 	delete(kv.m, "meta.correct/srv-1/3")
-	kv.m[filingKeyWork] = markerAt(t, time.Date(2026, 10, 19, 12, 0, 30, 0, time.UTC))
+	kv.m[keyOf(t, params)] = markerAt(t, time.Date(2026, 10, 19, 12, 0, 30, 0, time.UTC))
 	out, err := h.Run(ctx, job, jobs.LocalReporter())
-	if err != nil || out.(Result).IssueNumber != 42 || g.count() != 1+contrib.IssuesPage {
+	if err != nil || out.(Result).IssueNumber != 42 || g.count() != contrib.IssuesPage {
 		t.Fatalf("%+v %v, issues %d", out, err, g.count())
 	}
 }
@@ -428,11 +518,11 @@ func TestCorrectAdoptsItsIssuePastAnotherBatch(t *testing.T) {
 			t.Fatalf("first filing: %v, issues %d", err, g.count())
 		}
 		g.mu.Lock()
-		g.issues = append(g.issues, otherBatch()) // listed first (newest first)
+		g.issues = append(g.issues, otherBatchIssue()) // listed first (newest first)
 		g.date = date
 		g.mu.Unlock()
 		delete(kv.m, "meta.correct/srv-1/3")
-		kv.m[filingKeyWork] = markerAt(t, at)
+		kv.m[keyOf(t, params)] = markerAt(t, at)
 		out, err := h.Run(ctx, job, jobs.LocalReporter())
 		if err != nil || g.count() != 2 || out.(Result).IssueNumber != 42 {
 			t.Fatalf("at %v: %+v %v, issues %d", date, out, err, g.count())
@@ -441,50 +531,135 @@ func TestCorrectAdoptsItsIssuePastAnotherBatch(t *testing.T) {
 }
 
 // The live repro: the issue POST's answer is lost (GitHub made it), the job
-// fails in words, and the admin's NEW job for the same book adopts that issue.
-// A new job with other corrections finds the first batch filed and files its own.
-func TestCorrectNewJobForTheBookAdoptsTheLostIssue(t *testing.T) {
+// fails in words, and the admin's NEW job for the same corrections adopts that
+// issue, though the book was renamed since. Other corrections filed meanwhile
+// leave the lost filing's marker alone: suggesting the lost ones again adopts
+// their issue rather than filing them twice.
+func TestCorrectNewJobAdoptsTheLostIssue(t *testing.T) {
 	ctx := context.Background()
-	lib, path := int64(2), "Author/Book"
-	const key = "meta.correct.filing/srv-1/2/Author/Book"
+	lib := int64(2)
+	key := keyOf(t, params)
 	g, kv := &gh{drop: true}, &memKV{m: map[string]string{}}
 	h := newHandler(t, g, &tokens{token: "t", from: contrib.FromEnv}, kv, fakeMeta{cov: cov()})
-	job := func(id int64, p string) jobs.Job {
+	job := func(id int64, path, p string) jobs.Job {
 		return jobs.Job{ID: id, LibraryID: &lib, Path: &path, Params: json.RawMessage(p)}
 	}
-	_, err := h.Run(ctx, job(10, params), jobs.LocalReporter())
+	drop := func(on bool) {
+		g.mu.Lock()
+		g.drop = on
+		g.mu.Unlock()
+	}
+	_, err := h.Run(ctx, job(10, "Author/Book", params), jobs.LocalReporter())
 	if !errors.Is(err, errNoAnswer) || g.count() != 1 || kv.m[key] == "" {
 		t.Fatalf("lost answer: %v, issues %d, marker %q", err, g.count(), kv.m[key])
 	}
 	if strings.Contains(err.Error(), "contrib") || strings.Contains(err.Error(), "POST") {
 		t.Fatalf("a raw error reached the console: %v", err)
 	}
-	g.mu.Lock()
-	g.drop = false
-	g.mu.Unlock()
-	out, err := h.Run(ctx, job(11, params), jobs.LocalReporter())
-	if err != nil || g.count() != 1 || out.(Result).IssueNumber != 42 || kv.m[key] != "" {
-		t.Fatalf("new job: %+v %v, issues %d, marker %q", out, err, g.count(), kv.m[key])
+	drop(false)
+	out, err := h.Run(ctx, job(11, "Author/Book (Unabridged)", params), jobs.LocalReporter())
+	if err != nil || g.count() != 1 || out.(Result).IssueNumber != 42 {
+		t.Fatalf("new job: %+v %v, issues %d", out, err, g.count())
 	}
 	if _, left := kv.m[key]; left {
-		t.Fatal("a confirmed filing's marker is emptied, not deleted")
+		t.Fatal("a confirmed filing's marker is left")
 	}
 
-	// Other corrections lost the same way, then a third job with others again:
-	// the second batch is found filed (done), so the third files its own.
+	// Other corrections lost the same way, a third set filed meanwhile, then the
+	// second suggested again (as the lost answer's words invite).
 	other := strings.Replace(params, `"corrected":"The Existing Work"`, `"corrected":"Existing Work, The"`, 1)
-	g.mu.Lock()
-	g.drop = true
-	g.mu.Unlock()
-	if _, err := h.Run(ctx, job(12, other), jobs.LocalReporter()); !errors.Is(err, errNoAnswer) || g.count() != 2 {
+	third := strings.Replace(params, `"corrected":"2020-03-04"`, `"corrected":"2020-03-05"`, 1)
+	drop(true)
+	if _, err := h.Run(ctx, job(12, "Author/Book", other), jobs.LocalReporter()); !errors.Is(err, errNoAnswer) || g.count() != 2 {
 		t.Fatalf("second lost answer: %v, issues %d", err, g.count())
 	}
-	g.mu.Lock()
-	g.drop = false
-	g.mu.Unlock()
-	third := strings.Replace(params, `"corrected":"2020-03-04"`, `"corrected":"2020-03-05"`, 1)
-	if _, err := h.Run(ctx, job(13, third), jobs.LocalReporter()); err != nil || g.count() != 3 || kv.m[key] != "" {
-		t.Fatalf("third job: %v, issues %d, marker %q", err, g.count(), kv.m[key])
+	drop(false)
+	if _, err := h.Run(ctx, job(13, "Author/Book", third), jobs.LocalReporter()); err != nil || g.count() != 3 ||
+		kv.m[keyOf(t, other)] == "" {
+		t.Fatalf("third job: %v, issues %d, markers %v", err, g.count(), kv.markers())
+	}
+	out, err = h.Run(ctx, job(14, "Author/Book", other), jobs.LocalReporter())
+	if err != nil || g.count() != 3 || out.(Result).IssueNumber != 43 || len(kv.markers()) != 0 {
+		t.Fatalf("the second again: %+v %v, issues %d, markers %v", out, err, g.count(), kv.markers())
+	}
+}
+
+// The record the batch was composed from moves once it is filed (meta's bot
+// applies the title correction; another recording takes the ASIN): the lost
+// issue is still adopted, by the job resumed or a new one, not filed again.
+func TestCorrectAdoptsItsIssueAfterTheRecordMoved(t *testing.T) {
+	ctx := context.Background()
+	for name, move := range map[string]func(*metaops.Coverage){
+		"the title corrected": func(c *metaops.Coverage) { c.WorkTitle = "The Existing Work" },
+		"the recording moved": func(c *metaops.Coverage) { c.Recordings[0].ID = "john-smith-2021" },
+	} {
+		for _, resumed := range []bool{true, false} {
+			g, kv := &gh{drop: true}, &memKV{m: map[string]string{}}
+			tok := &tokens{token: "t", from: contrib.FromEnv}
+			job := jobs.Job{ID: 3, Params: json.RawMessage(params)}
+			if _, err := newHandler(t, g, tok, kv, fakeMeta{cov: cov()}).Run(ctx, job, jobs.LocalReporter()); !errors.Is(err, errNoAnswer) {
+				t.Fatalf("%s: lost answer: %v", name, err)
+			}
+			g.mu.Lock()
+			g.drop = false
+			g.mu.Unlock()
+			c := cov()
+			move(&c)
+			if resumed {
+				job.Resumed = true
+			} else {
+				job.ID = 4
+			}
+			out, err := newHandler(t, g, tok, kv, fakeMeta{cov: c}).Run(ctx, job, jobs.LocalReporter())
+			if err != nil || g.count() != 1 || out.(Result).IssueNumber != 42 || len(kv.markers()) != 0 {
+				t.Fatalf("%s (resumed %v): %+v %v, issues %d, markers %v", name, resumed, out, err, g.count(), kv.markers())
+			}
+		}
+	}
+}
+
+// A filing whose result can't be recorded keeps its marker: the job resumed
+// adopts the issue rather than filing it again.
+func TestCorrectKeepsTheMarkerUntilTheResultIsRecorded(t *testing.T) {
+	ctx := context.Background()
+	g, kv := &gh{}, &memKV{m: map[string]string{}, failSet: "meta.correct/"}
+	h := newHandler(t, g, &tokens{token: "t", from: contrib.FromEnv}, kv, fakeMeta{cov: cov()})
+	job := jobs.Job{ID: 3, Params: json.RawMessage(params)}
+	out, err := h.Run(ctx, job, jobs.LocalReporter())
+	if err != nil || out.(Result).IssueNumber != 42 || g.count() != 1 || kv.markers()[keyOf(t, params)] == "" {
+		t.Fatalf("unrecorded: %+v %v, issues %d, markers %v", out, err, g.count(), kv.markers())
+	}
+	kv.mu.Lock()
+	kv.failSet = ""
+	kv.mu.Unlock()
+	job.Resumed = true
+	out, err = h.Run(ctx, job, jobs.LocalReporter())
+	if err != nil || out.(Result).IssueNumber != 42 || g.count() != 1 || len(kv.markers()) != 0 {
+		t.Fatalf("resumed: %+v %v, issues %d, markers %v", out, err, g.count(), kv.markers())
+	}
+}
+
+// A marker is cleared only while it is the one the run wrote or adopted: an
+// overlapping run's newer marker for the request stays.
+func TestCorrectClearsOnlyItsMarker(t *testing.T) {
+	ctx := context.Background()
+	kv := &memKV{m: map[string]string{}}
+	h := New(Options{KV: kv, ServerID: func() string { return "srv-1" }})
+	key := keyOf(t, params)
+	mine := filing{Since: fakeNow, Sum: "sum", Job: 3}
+	theirs := filing{Since: fakeNow.Add(time.Minute), Sum: "sum", Job: 4}
+	raw, err := json.Marshal(theirs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kv.m[key] = string(raw)
+	h.clearFiling(ctx, key, mine)
+	if kv.m[key] != string(raw) {
+		t.Fatalf("another run's marker went: %q", kv.m[key])
+	}
+	h.clearFiling(ctx, key, theirs)
+	if _, left := kv.m[key]; left {
+		t.Fatal("the run's own marker is left")
 	}
 }
 
@@ -492,7 +667,7 @@ func TestCorrectNewJobForTheBookAdoptsTheLostIssue(t *testing.T) {
 // waits: GitHub may still be making the issue.
 func TestCorrectLookupSettles(t *testing.T) {
 	ctx := context.Background()
-	g, kv := &gh{}, &memKV{m: map[string]string{filingKeyWork: markerAt(t, fakeNow)}}
+	g, kv := &gh{}, &memKV{m: map[string]string{keyOf(t, params): markerAt(t, fakeNow)}}
 	h := newHandler(t, g, &tokens{token: "t", from: contrib.FromEnv}, kv, fakeMeta{cov: cov()})
 	job := jobs.Job{ID: 3, Params: json.RawMessage(params)}
 	if _, err := h.Run(ctx, job, jobs.LocalReporter()); !errors.Is(err, errSettling) || g.count() != 0 {
@@ -501,6 +676,18 @@ func TestCorrectLookupSettles(t *testing.T) {
 	h = newHandler(t, &gh{date: fakeNow.Add(2 * contrib.FilingSettle)}, &tokens{token: "t", from: contrib.FromEnv}, kv, fakeMeta{cov: cov()})
 	if _, err := h.Run(ctx, job, jobs.LocalReporter()); err != nil {
 		t.Fatalf("settled: %v", err)
+	}
+
+	// A batch for the same record with another body moments after the marker:
+	// a person decides, and the marker stays (the run's own may still come).
+	other := otherBatchIssue()
+	other["created_at"] = fakeNow.Format(time.RFC3339)
+	marker := markerAt(t, fakeNow)
+	g, kv = &gh{issues: []map[string]any{other}}, &memKV{m: map[string]string{keyOf(t, params): marker}}
+	h = newHandler(t, g, &tokens{token: "t", from: contrib.FromEnv}, kv, fakeMeta{cov: cov()})
+	if _, err := h.Run(ctx, job, jobs.LocalReporter()); !errors.Is(err, errFiledBefore) || g.count() != 1 ||
+		kv.m[keyOf(t, params)] != marker {
+		t.Fatalf("another body moments after: %v, issues %d, markers %v", err, g.count(), kv.markers())
 	}
 }
 

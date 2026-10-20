@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -15,6 +16,7 @@ import (
 	"github.com/kodestar/audiosilo-bridge/internal/api"
 	"github.com/kodestar/audiosilo-bridge/internal/link"
 	"github.com/kodestar/audiosilo-bridge/internal/setup"
+	"github.com/kodestar/audiosilo-bridge/internal/state"
 )
 
 // setupServer answers the heartbeat as a server of one of three kinds: "old"
@@ -239,6 +241,50 @@ func TestSaveBudgetMarksItReviewed(t *testing.T) {
 	s2.MonthlyBudgetUSD = &other
 	if err := b2.SaveSettings(ctx, s2); err == nil || !strings.Contains(err.Error(), "AGENT_MONTHLY_BUDGET_USD") {
 		t.Fatalf("a locked budget = %v", err)
+	}
+}
+
+// A budget changed on the page wakes the describe jobs parked on the budget (they
+// wait in their own loop, not as engine books); a save that keeps it doesn't. A
+// changed agent credential wakes the ones parked on a refused or missing one.
+func TestBudgetAndCredentialChangesWakeParkedDescribeJobs(t *testing.T) {
+	ctx := context.Background()
+	b := newTestBridge(t)
+	var mu sync.Mutex
+	var woke []state.ParkCode
+	b.wakeParked = func(code state.ParkCode) int {
+		mu.Lock()
+		defer mu.Unlock()
+		woke = append(woke, code)
+		return 0
+	}
+	got := func() []state.ParkCode {
+		mu.Lock()
+		defer mu.Unlock()
+		out := woke
+		woke = nil
+		return out
+	}
+	s := b.Settings()
+	same := *s.MonthlyBudgetUSD
+	s.MonthlyBudgetUSD = &same
+	if err := b.SaveSettings(ctx, s); err != nil {
+		t.Fatal(err)
+	}
+	if w := got(); len(w) != 0 {
+		t.Fatalf("an unchanged budget woke %v", w)
+	}
+	raised := same + 50
+	s.MonthlyBudgetUSD = &raised
+	if err := b.SaveSettings(ctx, s); err != nil {
+		t.Fatal(err)
+	}
+	if w := got(); !slices.Equal(w, []state.ParkCode{state.ParkBudgetExceeded}) {
+		t.Fatalf("a raised budget woke %v", w)
+	}
+	b.agentCredentialChanged()
+	if w := got(); !slices.Equal(w, []state.ParkCode{state.ParkAgentCredentialRefused, state.ParkAgentUnavailable}) {
+		t.Fatalf("a changed credential woke %v", w)
 	}
 }
 

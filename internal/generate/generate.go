@@ -115,8 +115,14 @@ type Handler struct {
 	// latest run's own channel.
 	pokes map[int64]chan struct{}
 	// describeParks is each describe job's park while its loop waits on it
-	// (describeParked), so WakeParked finds the ones a change answers.
-	describeParks map[int64]state.ParkCode
+	// (describeParked), with that run's wake-up channel, so WakeParked finds the
+	// ones a change answers.
+	describeParks map[int64]describePark
+	// wakeSeq numbers WakeParked's calls and woken holds each park code's latest,
+	// so a describe try that parks on a code woken while it ran tries again at
+	// once (parkDescribe).
+	wakeSeq uint64
+	woken   map[state.ParkCode]uint64
 	// doneJobs counts the jobs that finished done here (the heartbeat's
 	// estimates are computed again when it moves).
 	doneJobs atomic.Int64
@@ -142,27 +148,43 @@ func New(o Options) *Handler {
 	if o.Now == nil {
 		o.Now = time.Now
 	}
-	return &Handler{o: o, pokes: map[int64]chan struct{}{}, describeParks: map[int64]state.ParkCode{}}
+	return &Handler{o: o, pokes: map[int64]chan struct{}{}, describeParks: map[int64]describePark{},
+		woken: map[state.ParkCode]uint64{}}
+}
+
+// describePark is a describe run's park (describeParks): its code, and the
+// run's wake-up channel.
+type describePark struct {
+	code state.ParkCode
+	poke chan struct{}
 }
 
 // WakeParked wakes every sidecars.describe job parked with code to try again
-// now, and returns how many it woke: a monthly budget raised on the page
-// re-admits the engine's parked books, while a describe job waits in its own
-// loop (until its retry_at, the 1st for the monthly budget, or a Retry).
+// now, and returns how many it woke: a monthly budget raised on the page, or the
+// agent's credential changed on the Accounts tab, re-admits the engine's parked
+// books, while a describe job waits in its own loop (until its retry_at, the 1st
+// for the monthly budget, or a Retry). A job whose try is running then tries
+// again at once if that try parks with code.
 func (h *Handler) WakeParked(code state.ParkCode) int {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	h.wakeSeq++
+	h.woken[code] = h.wakeSeq
 	woke := 0
-	for id, c := range h.describeParks {
-		if c != code {
-			continue
-		}
-		if ch, ok := h.pokes[id]; ok {
-			nudge(ch)
+	for _, p := range h.describeParks {
+		if p.code == code {
+			nudge(p.poke)
 			woke++
 		}
 	}
 	return woke
+}
+
+// wakeMark is WakeParked's latest call (describeParked's before a try).
+func (h *Handler) wakeMark() uint64 {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.wakeSeq
 }
 
 func (h *Handler) now() time.Time { return h.o.Now() }

@@ -417,6 +417,43 @@ func TestDescribeJobWakesWhenTheBudgetIsRaised(t *testing.T) {
 	}
 }
 
+// A wake for the park a try ends in, made while that try ran, isn't lost: on the
+// first try (no park registered yet) or a later one (its wake-up drained as a
+// Retry the try answered), the job tries again at once rather than at retry_at.
+func TestDescribeJobWakesDuringATry(t *testing.T) {
+	t.Parallel()
+	for name, wakeOn := range map[string]int{"the first try": 1, "a later try": 2} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			hr := newHarness(t)
+			hr.generated(67)
+			trying, release := make(chan struct{}), make(chan struct{})
+			d := &fakeDescriber{db: hr.db, fail: func(call int) error {
+				if call == wakeOn {
+					close(trying)
+					<-release
+				}
+				if call <= wakeOn {
+					return scheduler.ParkWithCodeAfter(state.ParkBudgetExceeded, "the monthly budget is spent",
+						time.Now().Add(30*24*time.Hour))
+				}
+				return nil
+			}}
+			h := hr.describeHandler(d)
+			stop := hr.runAll(h)
+			defer stop()
+			hr.srv.addDescribe(68, "Author/Book")
+			if wakeOn > 1 {
+				hr.waitFor("the first park", func() bool { return h.WakeParked(state.ParkBudgetExceeded) == 1 })
+			}
+			<-trying
+			h.WakeParked(state.ParkBudgetExceeded)
+			close(release)
+			hr.waitFor("done after the wake", func() bool { s, _ := hr.srv.final(68); return s == link.StateDone })
+		})
+	}
+}
+
 // A new generate job doesn't delete the earlier run a description holds: the
 // engine's Delete says busy, and the job asks to try again.
 func TestGenerateWaitsForADescription(t *testing.T) {

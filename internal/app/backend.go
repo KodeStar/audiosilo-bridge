@@ -203,7 +203,7 @@ func (b *Bridge) SaveSettings(ctx context.Context, s api.Settings) error {
 		// A changed budget: the books parked on the old one look again (one
 		// still over it parks again until the next month), and so do the
 		// describe jobs parked on it (they wait in their own loop).
-		b.gen.WakeParked(state.ParkBudgetExceeded)
+		b.wakeParked(state.ParkBudgetExceeded)
 		if e := b.engine.get(); e != nil {
 			go e.sched.ReadmitParked(context.WithoutCancel(ctx), "the monthly budget changed", state.ParkBudgetExceeded)
 		}

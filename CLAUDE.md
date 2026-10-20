@@ -269,8 +269,8 @@ that contributions file with (env, then the sign-in, then `gh`), and agent
 credentials handed to the agent container for each run. Two light jobs that write
 nothing into a library: `sidecars.contribute` (share a book's kept characters and
 recaps) and `meta.correct` (an admin's corrections as one meta correction-batch
-issue, guarded per book: a resumed job, or a new one for the book, adopts the
-issue an interrupted filing made). The setup
+issue, guarded per request: a resumed job, or a new one asking for the same
+corrections, adopts the issue an interrupted filing made). The setup
 checklist (`setup`) on the Status tab's "Get set up" card and in the heartbeat,
 sent only once the server's reply `accepts` it. The monthly agent budget is
 editable on the page and applies live.

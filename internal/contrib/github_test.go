@@ -439,6 +439,38 @@ func TestGistsSince(t *testing.T) {
 	}
 }
 
+// A list that fails partway returns the rows read before the failing page with
+// the error, never complete: a lookup decides on them first.
+func TestListsKeepTheRowsBeforeAFailedPage(t *testing.T) {
+	since := time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)
+	var rows []map[string]any
+	pages := 0
+	list := pagedList(t, &rows, &pages)
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if page, _ := strconv.Atoi(r.URL.Query().Get("page")); page >= 2 {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		list(w, r)
+	})
+	for i := range IssuesPage {
+		rows = append(rows, map[string]any{"number": 100 + i, "title": "x", "created_at": "2026-10-19T13:00:00Z"})
+	}
+	var apiErr *APIError
+	issues, complete, err := c.IssuesSince(context.Background(), testRepo, since)
+	if !errors.As(err, &apiErr) || complete || len(issues) != IssuesPage || issues[0].Number != 100 {
+		t.Fatalf("issues: %d rows, complete %v, err %v", len(issues), complete, err)
+	}
+	rows = nil
+	for i := range GistsPage {
+		rows = append(rows, map[string]any{"id": strconv.Itoa(i), "created_at": "2026-10-19T13:00:00Z"})
+	}
+	gists, complete, err := c.GistsSince(context.Background(), since)
+	if !errors.As(err, &apiErr) || complete || len(gists) != GistsPage {
+		t.Fatalf("gists: %d rows, complete %v, err %v", len(gists), complete, err)
+	}
+}
+
 // Now is GitHub's clock, learned from the Date of its answers: a Client that has
 // had none asks GET /rate_limit once.
 func TestNow(t *testing.T) {

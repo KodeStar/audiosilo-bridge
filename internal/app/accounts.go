@@ -69,7 +69,7 @@ func (b *Bridge) agentCredentialChanged() {
 	b.Kick()
 	codes := []state.ParkCode{state.ParkAgentCredentialRefused, state.ParkAgentUnavailable}
 	for _, code := range codes {
-		b.gen.WakeParked(code) // a describe job waits in its own loop
+		b.wakeParked(code) // a describe job waits in its own loop
 	}
 	go func() {
 		ctx := context.Background()

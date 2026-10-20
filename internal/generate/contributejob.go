@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
 	"slices"
 	"strings"
 
@@ -156,11 +155,10 @@ func (c *ContributeJob) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporte
 // shareError words a share's failure for the console.
 func shareError(err error) error {
 	var park *scheduler.ParkError
-	var apiErr *contrib.APIError
 	switch {
 	case errors.As(err, &park) && park.Code == state.ParkContribUnavailable:
 		return errShareCantContribute
-	case errors.As(err, &apiErr) && apiErr.Status == http.StatusUnauthorized:
+	case contrib.Unauthorized(err):
 		return errShareRefused
 	case errors.Is(err, pipeline.ErrNotMatched):
 		return errShareNotMatched

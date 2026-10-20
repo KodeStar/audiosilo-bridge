@@ -1048,30 +1048,43 @@ internal/
             maps and composes the batch (contrib.CorrectionBatchIssue) and files
             ONE issue on the core repo with the GitHub sign-in. A job's result is
             kept under meta.correct/<server id>/<job id> (a resumed job returns
-            it). The filing is guarded per BOOK: before CreateIssue a marker
-            {since (GitHub's time, contrib.Client.Now), sum (sha256 of the title
-            and body), job} goes to meta.correct.filing/<server id>/<library
-            id>/<path> (the work id when the job names no book), so a NEW job for
-            the book (the admin pressing Suggest again after a lost answer) sees
-            it too. It is deleted (not emptied: the keys are per book) once a filing is confirmed (filed, or adopted)
-            or when GitHub answered a 4xx or a rate limit or the request never
-            left (contrib.NothingFiled; a 5xx can come after the issue was made,
-            and the client never resends a POST). A run that finds a marker lists
-            the core repo's issues made since (contrib.IssuesSince, the rows of
-            pages read before one that failed included) and: adopts a
-            [corrections] issue with its own sum; takes one with the marker's sum
-            (another job's other batch) as that filing confirmed and files its
-            own; else fails asking the admin to look first (errFiledBefore) for a
-            same-record batch with another body (errOtherBatch: it may be the
-            run's own, composed from the record as it was) or a marker without a
-            time; waits (errSettling) when the marker is under a minute old
-            (contrib.FilingSettle: GitHub may still be making it); and for an
-            unreadable or incomplete list stops only while the marker is under a
-            day old by GitHub's clock (contrib.FilingStale, Client.StaleFiling),
-            past which it files again (meta's intake catches a batch it has
-            applied). A 401, on the lookup or the filing, is errRefused; a lost
-            or 5xx answer errNoAnswer (worded: the Bridge checks before filing
-            again); a rate limit errRateLimited. Result {issue_url,
+            it). The filing is guarded per REQUEST: before CreateIssue a marker
+            {since (GitHub's time, contrib.Client.Now), sum (contrib.IssueSum of
+            the title and body sent), job} goes to meta.correct.filing/<server
+            id>/<request> (the sha256 of the params less the server's source
+            stamp: not the book, which can move, nor the composed issue, whose
+            title is the work's live title), so a NEW job asking for the same
+            corrections (the admin pressing Suggest again after a lost answer,
+            whatever the book is called by then) sees it too, and other
+            corrections never share or overwrite it. It is deleted (not emptied:
+            the keys are per request), and only while it is still the one the
+            run wrote or adopted (clearFiling compares: an overlapping run's
+            newer marker stays), once a filing is confirmed and its result
+            recorded (filed, or adopted; a failed result write keeps it, so the
+            job resumed adopts the issue), when GitHub answered a 4xx or a rate
+            limit or the request never left (contrib.NothingFiled; a 5xx can
+            come after the issue was made, and the client never resends a POST),
+            or once a person is told the Bridge can't tell (below). A run that
+            finds a marker lists the core repo's issues made since
+            (contrib.IssuesSince, the rows of pages read before one that failed
+            included) and: adopts a [corrections] issue with its own sum or the
+            marker's (the same request composed earlier: a title correction
+            meta's bot applied since, or a recording that took the ASIN, changes
+            what it composes now); else fails asking the admin to look first
+            (errFiledBefore) for a same-record batch with another body
+            (otherBatch: another admin's, or its own edited since; the marker
+            goes once the list was read back to it whole and it has settled, so
+            the next suggestion files) or a marker without a time (which goes
+            too); waits (errSettling) when the marker is under a minute old
+            (contrib.FilingSettle, Client.Settling: GitHub may still be making
+            it); and for an unreadable or incomplete list stops only while the
+            marker is under a day old by GitHub's clock (contrib.FilingStale,
+            Client.StaleFiling), past which it files again (meta's intake
+            catches a batch it has applied). A 401 (contrib.Unauthorized), on
+            the lookup (even past a same-record batch on a page read before) or
+            the filing, is errRefused; a rate limit on either errRateLimited (a
+            lookup's keeps the marker); a lost or 5xx answer errNoAnswer
+            (worded: the Bridge checks before filing again). Result {issue_url,
             issue_number, changes, auto, maintainer}: auto and maintainer as
             known at filing; the Bridge doesn't follow the issue (a batch meta
             applies only in part is not reported back, plan D8).
@@ -1693,10 +1706,14 @@ internal/
             hint, retry_at in progress) and it tries again at retry_at or on Retry
             (the shared pokes, so the page's Retry and Handler.Retry reach it;
             WakeParked(code) pokes every describe job parked with code, which a
-            monthly budget saved on the page does for budget_exceeded and an agent
-            credential changed on the Accounts tab for agent_credential_refused
-            and agent_unavailable, since these wait in their own loop, not as
-            engine books),
+            monthly budget saved on the page does for budget_exceeded and an
+            agent credential changed on the Accounts tab for
+            agent_credential_refused and agent_unavailable, since these wait in
+            their own loop, not as engine books: each park is registered in
+            describeParks with its run's own channel and removed only by that
+            run, and every wake is numbered (wakeSeq, woken per code) so a try
+            that parks with a code woken while it ran tries again at once rather
+            than lose the wake to the drain below),
             staying parked while it tries so a park that holds isn't announced
             again (a Retry pressed during a try at a timed park is answered by that
             try; the success lifts the park, one the runner restored after a restart
