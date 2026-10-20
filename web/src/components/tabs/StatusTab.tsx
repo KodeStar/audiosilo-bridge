@@ -93,8 +93,8 @@ function SetupCard({ status }: { status: Status }) {
         {items.map((it) => {
           const link = setupLink(it.id);
           return (
-            <li key={it.id} className="flex flex-wrap items-start justify-between gap-2 py-2">
-              <div className="flex items-start gap-2">
+            <li key={it.id} className="flex items-start justify-between gap-3 py-2">
+              <div className="flex min-w-0 flex-1 items-start gap-2">
                 <span
                   aria-hidden="true"
                   className={
@@ -103,7 +103,7 @@ function SetupCard({ status }: { status: Status }) {
                 >
                   {it.done ? '\u2713' : '\u2022'}
                 </span>
-                <div>
+                <div className="min-w-0">
                   <p className={`text-sm ${it.done ? 'text-dim' : 'text-hi'}`}>
                     {SETUP_ITEMS[it.id].label}
                     <span className="sr-only">{it.done ? ' (done)' : ' (to do)'}</span>
@@ -112,7 +112,10 @@ function SetupCard({ status }: { status: Status }) {
                 </div>
               </div>
               {!it.done && link && (
-                <a href={link.hash} className="text-sm text-pink-500 underline">
+                <a
+                  href={link.hash}
+                  className="shrink-0 whitespace-nowrap text-sm text-pink-500 underline"
+                >
                   Open {link.name}
                 </a>
               )}
@@ -195,8 +198,9 @@ function EngineCard({ client }: { client: ApiClient }) {
         <Row label="Transcripts">{retentionText(engine.transcript_retention_days)}</Row>
       </dl>
       <p className="mt-3 text-xs text-dim">
-        These are set in the Bridge&apos;s config.yaml (agent.monthly_budget_usd,
-        agent.book_budget_usd, transcripts.retention_days) and apply at the next start.
+        The monthly budget is set on the Settings tab and applies straight away. The per-book budget
+        and the transcript retention are set in the Bridge&apos;s config.yaml
+        (agent.book_budget_usd, transcripts.retention_days) and apply at the next start.
       </p>
     </Card>
   );
