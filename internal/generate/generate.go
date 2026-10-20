@@ -114,6 +114,9 @@ type Handler struct {
 	// Bridge's own, book_not_writable, checks again at once): each job id's
 	// latest run's own channel.
 	pokes map[int64]chan struct{}
+	// describeParks is each describe job's park while its loop waits on it
+	// (describeParked), so WakeParked finds the ones a change answers.
+	describeParks map[int64]state.ParkCode
 	// doneJobs counts the jobs that finished done here (the heartbeat's
 	// estimates are computed again when it moves).
 	doneJobs atomic.Int64
@@ -139,7 +142,30 @@ func New(o Options) *Handler {
 	if o.Now == nil {
 		o.Now = time.Now
 	}
-	return &Handler{o: o, pokes: map[int64]chan struct{}{}}
+	return &Handler{o: o, pokes: map[int64]chan struct{}{}, describeParks: map[int64]state.ParkCode{}}
+}
+
+// WakeParked wakes every sidecars.describe job parked with code to try again
+// now, and returns how many it woke: a monthly budget raised on the page
+// re-admits the engine's parked books, while a describe job waits in its own
+// loop (until its retry_at, the 1st for the monthly budget, or a Retry).
+func (h *Handler) WakeParked(code state.ParkCode) int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	woke := 0
+	for id, c := range h.describeParks {
+		if c != code {
+			continue
+		}
+		if ch, ok := h.pokes[id]; ok {
+			select {
+			case ch <- struct{}{}:
+			default:
+			}
+			woke++
+		}
+	}
+	return woke
 }
 
 func (h *Handler) now() time.Time { return h.o.Now() }

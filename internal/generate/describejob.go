@@ -283,6 +283,11 @@ func (h *Handler) holdBook(ctx context.Context, bookID int64) (func(), error) {
 func (h *Handler) describeParked(ctx context.Context, r *run, d Describer, bookID int64) (described, float64, error) {
 	var spent float64
 	parked := false
+	defer func() {
+		h.mu.Lock()
+		delete(h.describeParks, r.job.ID)
+		h.mu.Unlock()
+	}()
 	for {
 		if !parked {
 			r.rep.Progress(jobs.Progress{Step: pipeline.DescribeStage, Message: "Writing a description", Total: 1,
@@ -341,6 +346,9 @@ func (h *Handler) parkDescribe(r *run, park *scheduler.ParkError, spent float64)
 	r.rep.Progress(jobs.Progress{Step: pipeline.DescribeStage, Message: "Needs attention: Writing a description", Total: 1,
 		Extra: extra})
 	r.rep.Park(code, park.Reason)
+	h.mu.Lock()
+	h.describeParks[r.job.ID] = park.Code
+	h.mu.Unlock()
 }
 
 // describeExtra is a description-only job's progress Extra: the describing

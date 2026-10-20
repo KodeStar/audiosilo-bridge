@@ -204,6 +204,10 @@ func (b *Bridge) SaveSettings(ctx context.Context, s api.Settings) error {
 		// still over it parks again until the next month).
 		go e.sched.ReadmitParked(context.WithoutCancel(ctx), "the monthly budget changed", state.ParkBudgetExceeded)
 	}
+	if budget != nil && *budget != cur.Agent.MonthlyBudgetUSD {
+		// A describe job parked on the budget waits in its own loop: it tries now.
+		b.gen.WakeParked(state.ParkBudgetExceeded)
+	}
 	b.Kick()
 	return nil
 }

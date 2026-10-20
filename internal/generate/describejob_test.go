@@ -382,6 +382,41 @@ func TestDescribeJobParks(t *testing.T) {
 	}
 }
 
+// A describe job parked on the monthly budget (retry_at the 1st) tries again
+// when the budget is raised on the page (WakeParked), not before; a wake for
+// another park leaves it.
+func TestDescribeJobWakesWhenTheBudgetIsRaised(t *testing.T) {
+	t.Parallel()
+	hr := newHarness(t)
+	hr.generated(65)
+	d := &fakeDescriber{db: hr.db, fail: func(call int) error {
+		if call == 1 {
+			return scheduler.ParkWithCodeAfter(state.ParkBudgetExceeded, "the monthly budget is spent",
+				time.Now().Add(30*24*time.Hour))
+		}
+		return nil
+	}}
+	h := hr.describeHandler(d)
+	stop := hr.runAll(h)
+	defer stop()
+
+	hr.srv.addDescribe(66, "Author/Book")
+	hr.waitFor("the budget park", func() bool {
+		return hr.srv.saw(66, func(u link.Update, p map[string]any) bool {
+			park, _ := p["park"].(map[string]any)
+			return u.State != nil && *u.State == link.StateNeedsAttention && park["code"] == "budget_exceeded"
+		})
+	})
+	if n := h.WakeParked(state.ParkAgentRateLimited); n != 0 {
+		t.Fatalf("a rate-limit wake woke %d", n)
+	}
+	hr.waitFor("woken", func() bool { return h.WakeParked(state.ParkBudgetExceeded) == 1 })
+	hr.waitFor("done after the wake", func() bool { s, _ := hr.srv.final(66); return s == link.StateDone })
+	if n := h.WakeParked(state.ParkBudgetExceeded); n != 0 {
+		t.Fatalf("a finished job is still parked: woke %d", n)
+	}
+}
+
 // A new generate job doesn't delete the earlier run a description holds: the
 // engine's Delete says busy, and the job asks to try again.
 func TestGenerateWaitsForADescription(t *testing.T) {
