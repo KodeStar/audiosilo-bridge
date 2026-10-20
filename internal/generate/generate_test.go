@@ -322,13 +322,22 @@ func (hr *harness) runnerOf(handlers ...jobs.Handler) (stop func()) {
 
 func (hr *harness) waitFor(what string, cond func() bool) {
 	hr.t.Helper()
+	if !poll(cond) {
+		hr.t.Fatalf("timed out waiting for %s", what)
+	}
+}
+
+// poll waits up to 10 s for cond and reports whether it held. It never fails the
+// test, so it can run off the test's goroutine (in a fake a job calls).
+func poll(cond func() bool) bool {
 	deadline := time.Now().Add(10 * time.Second)
 	for !cond() {
 		if time.Now().After(deadline) {
-			hr.t.Fatalf("timed out waiting for %s", what)
+			return false
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
+	return true
 }
 
 // engineBook is the engine book job id maps to.

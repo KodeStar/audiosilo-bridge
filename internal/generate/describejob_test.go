@@ -28,17 +28,12 @@ const testDescription = `{"license":"CC-BY-SA-4.0","sources":[{"type":"community
 // fakeDescriber stands in for the pipeline's description step: it writes the
 // composed file into the engine book's work dir, or returns fail's error for a
 // call (1-based), having spent 0.01 unless freeFail. With fromWork the file names
-// the work characters.json names now, as the real step's re-compose does. hold,
-// when set, runs first in each call (1-based): a test that checks a progress the
-// job reports before a call waits there for the fake server to have it, since
-// the runner sends only a job's latest progress and an instant call would let
-// the next step replace it before it went out.
+// the work characters.json names now, as the real step's re-compose does.
 type fakeDescriber struct {
 	db       *store.DB
 	mu       sync.Mutex
 	runs     []bool // each call's noWait
 	fail     func(call int) error
-	hold     func(call int)
 	freeFail bool
 	fromWork bool
 }
@@ -47,11 +42,8 @@ func (f *fakeDescriber) Describe(ctx context.Context, bookID int64, noWait bool)
 	f.mu.Lock()
 	f.runs = append(f.runs, noWait)
 	call := len(f.runs)
-	fail, hold, freeFail, fromWork := f.fail, f.hold, f.freeFail, f.fromWork
+	fail, freeFail, fromWork := f.fail, f.freeFail, f.fromWork
 	f.mu.Unlock()
-	if hold != nil {
-		hold(call)
-	}
 	if fail != nil {
 		if err := fail(call); err != nil {
 			if freeFail {
@@ -80,16 +72,6 @@ func (f *fakeDescriber) Describe(ctx context.Context, bookID int64, noWait bool)
 	}
 	return pipeline.DescribeResult{Path: path, Chapters: 2, CheckedAgainst: pipeline.CheckedTranscripts,
 		CostUSD: 0.25, GeneratedAt: time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC)}, nil
-}
-
-// awaitSaw waits (up to 10 s) until an update for id matches; unlike waitFor it
-// never fails the test, so it can run on a job's goroutine (a fakeDescriber's
-// hold), leaving the test's own check to say what was missing.
-func (f *fakeServer) awaitSaw(id int64, match func(link.Update, map[string]any) bool) {
-	deadline := time.Now().Add(10 * time.Second)
-	for !f.saw(id, match) && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
-	}
 }
 
 // calls is each call's noWait.
@@ -235,9 +217,14 @@ func TestDescribeJob(t *testing.T) {
 	describing := func(_ link.Update, p map[string]any) bool {
 		return p["stage"] == "describing" && p["step"] == "describing"
 	}
-	// The step is reported before the call: it stays the job's progress until
-	// the server has it.
-	d := &fakeDescriber{db: hr.db, hold: func(int) { hr.srv.awaitSaw(42, describing) }}
+	// The runner sends only a job's latest progress, so the call holds until the
+	// server has the step reported before it (an instant call would replace it
+	// first). poll, not waitFor: this runs on the job's goroutine, and the check
+	// below says what was missing.
+	d := &fakeDescriber{db: hr.db, fail: func(int) error {
+		poll(func() bool { return hr.srv.saw(42, describing) })
+		return nil
+	}}
 	hr.srv.addDescribe(42, "Author/Book")
 	stop := hr.runAll(hr.describeHandler(d))
 	defer stop()
@@ -352,13 +339,10 @@ func TestDescribeJobParks(t *testing.T) {
 		park, _ := p["park"].(map[string]any)
 		return park["code"] == "agent_rate_limited" && park["retry_at"] != nil
 	}
-	d := &fakeDescriber{db: hr.db, hold: func(call int) {
-		// The try at the rate limit's retry_at: the park stays the job's progress
-		// until the server has it (the try's success would replace it at once).
-		if call == 4 {
-			hr.srv.awaitSaw(63, rateLimited)
+	d := &fakeDescriber{db: hr.db, fail: func(call int) error {
+		if call == 4 { // the try at retry_at holds until the server has the park, as in TestDescribeJob
+			poll(func() bool { return hr.srv.saw(63, rateLimited) })
 		}
-	}, fail: func(call int) error {
 		mu.Lock()
 		defer mu.Unlock()
 		switch {
