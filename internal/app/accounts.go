@@ -63,14 +63,18 @@ func (b *Bridge) githubChanged() {
 }
 
 // agentCredentialChanged runs after the Accounts tab changed the agent's
-// credential: the books parked on a refused or missing one try again, and the
-// heartbeat reports the agent's state at once.
+// credential: the books and describe jobs parked on a refused or missing one
+// try again, and the heartbeat reports the agent's state at once.
 func (b *Bridge) agentCredentialChanged() {
 	b.Kick()
+	codes := []state.ParkCode{state.ParkAgentCredentialRefused, state.ParkAgentUnavailable}
+	for _, code := range codes {
+		b.gen.WakeParked(code) // a describe job waits in its own loop
+	}
 	go func() {
 		ctx := context.Background()
 		if e := b.engine.get(); e != nil {
-			for _, code := range []state.ParkCode{state.ParkAgentCredentialRefused, state.ParkAgentUnavailable} {
+			for _, code := range codes {
 				e.sched.ReadmitParked(ctx, "the agent's credential changed on the Accounts tab", code)
 			}
 		}

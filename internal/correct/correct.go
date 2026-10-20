@@ -14,8 +14,6 @@ package correct
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -125,6 +123,7 @@ type Meta interface {
 type KV interface {
 	GetSetting(ctx context.Context, key string) (string, bool, error)
 	SetSetting(ctx context.Context, key, value string) error
+	DeleteSetting(ctx context.Context, key string) error
 }
 
 // Options wire the job.
@@ -164,17 +163,12 @@ func (h *Handler) Lane() string { return jobs.LaneLight }
 // A job's result is kept under its own key (resultKey: a resumed job reports
 // it); a filing in progress under its book's (filingKey), JSON filing: since
 // (GitHub's time, contrib.Client.Now, when the issue was about to be opened),
-// sum (issueSum of the title and body sent) and the job. "" is none.
+// sum (contrib.IssueSum of the title and body sent) and the job. Absent (or "")
+// is none.
 type filing struct {
 	Since time.Time `json:"since"`
 	Sum   string    `json:"sum"`
 	Job   int64     `json:"job"`
-}
-
-// issueSum identifies a batch by its title and body (as sent or as listed).
-func issueSum(title, body string) string {
-	h := sha256.Sum256([]byte(title + "\x00" + contrib.NormalizeBody(body)))
-	return hex.EncodeToString(h[:])
 }
 
 func (h *Handler) resultKey(job jobs.Job) string {
@@ -202,7 +196,8 @@ func (h *Handler) readFiling(ctx context.Context, key string) (f filing, ok bool
 }
 
 func (h *Handler) clearFiling(ctx context.Context, key string) {
-	if err := h.o.KV.SetSetting(context.WithoutCancel(ctx), key, ""); err != nil {
+	// Deleted, not emptied: the keys are per book, and would pile up.
+	if err := h.o.KV.DeleteSetting(context.WithoutCancel(ctx), key); err != nil {
 		h.o.Log.Warn("correct: clearing the filing marker failed", "key", key, "err", err)
 	}
 }
@@ -261,16 +256,15 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 	}
 	cli := contrib.NewClientFor(h.o.BaseURL, token, from, h.o.Tokens)
 	rep.Progress(jobs.Progress{Step: "filing", Message: "Filing the corrections", Done: 1, Total: 2})
-	sum := issueSum(title, body)
+	sum := contrib.IssueSum(title, body)
 	if interrupted {
 		filed, look, err := h.filedSince(ctx, cli, marker, sum, body)
-		var apiErr *contrib.APIError
 		switch {
 		case look == lookOurs:
 			h.o.Log.Info("correct: an interrupted filing had filed these corrections", "job", job.ID,
 				"issue", filed.Number, "by_job", marker.Job)
 			return h.done(ctx, job, key, fkey, contrib.Issue{Number: filed.Number, URL: filed.URL}, mapped, rep), nil
-		case errors.As(err, &apiErr) && apiErr.Status == http.StatusUnauthorized:
+		case unauthorized(err):
 			return nil, errRefused
 		case errors.Is(err, errFilingSettling):
 			return nil, errSettling
@@ -299,29 +293,34 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 	}
 	issue, err := cli.CreateIssue(ctx, h.o.CoreRepo, title, body, labels)
 	if err != nil {
-		if contrib.NothingFiled(err) {
-			// GitHub refused the issue and filed nothing: a later run may file them.
-			h.clearFiling(ctx, fkey)
+		if !contrib.NothingFiled(err) {
+			// GitHub may have filed it (a server error can come after the issue is
+			// made, and an answer can be lost): the marker stays, and the book's
+			// next filing looks for it first.
+			h.o.Log.Warn("correct: GitHub's answer to the issue is lost", "job", job.ID, "err", err)
+			return nil, errNoAnswer
 		}
-		// Otherwise GitHub may have filed it (a server error can come after the
-		// issue is made, and an answer can be lost): the marker stays, and the
-		// book's next filing looks for it first.
-		var apiErr *contrib.APIError
+		// GitHub refused the issue and filed nothing: a later run may file them.
+		h.clearFiling(ctx, fkey)
 		var rateErr *contrib.RateLimitError
 		switch {
-		case errors.As(err, &apiErr) && apiErr.Status == http.StatusUnauthorized:
+		case unauthorized(err):
 			return nil, errRefused
 		case errors.As(err, &rateErr):
 			return nil, errRateLimited
-		case !contrib.NothingFiled(err):
-			h.o.Log.Warn("correct: GitHub's answer to the issue is lost", "job", job.ID, "err", err)
-			return nil, errNoAnswer
 		}
 		return nil, fmt.Errorf("could not file the corrections: %w", err)
 	}
 	h.o.Log.Info("correct: filed the corrections", "job", job.ID, "work", cov.WorkID, "issue", issue.Number,
 		"changes", len(mapped))
 	return h.done(ctx, job, key, fkey, issue, mapped, rep), nil
+}
+
+// unauthorized reports whether GitHub answered err with a 401 (the sign-in
+// refused).
+func unauthorized(err error) bool {
+	var apiErr *contrib.APIError
+	return errors.As(err, &apiErr) && apiErr.Status == http.StatusUnauthorized
 }
 
 // What a lookup found: none, the job's own batch (lookOurs), or the
@@ -354,16 +353,17 @@ func (h *Handler) filedSince(ctx context.Context, cli *contrib.Client, m filing,
 		if !strings.HasPrefix(is.Title, contrib.CorrectionsTitleTag) {
 			continue
 		}
-		got := issueSum(is.Title, is.Body)
-		switch {
+		switch got := contrib.IssueSum(is.Title, is.Body); {
 		case got == sum:
 			return is, lookOurs, nil
-		case got == m.Sum && earlier.Number == 0:
-			earlier = is
-			continue
-		}
-		if r, _, _ := strings.Cut(contrib.NormalizeBody(is.Body), "\n\n### "); r == record && other == 0 {
-			other = is.Number
+		case got == m.Sum:
+			if earlier.Number == 0 {
+				earlier = is
+			}
+		case other == 0:
+			if r, _, _ := strings.Cut(contrib.NormalizeBody(is.Body), "\n\n### "); r == record {
+				other = is.Number
+			}
 		}
 	}
 	switch {

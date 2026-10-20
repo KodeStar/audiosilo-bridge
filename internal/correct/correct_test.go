@@ -45,6 +45,13 @@ func (k *memKV) SetSetting(_ context.Context, key, value string) error {
 	return nil
 }
 
+func (k *memKV) DeleteSetting(_ context.Context, key string) error {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	delete(k.m, key)
+	return nil
+}
+
 type tokens struct {
 	token, from string
 	err         error
@@ -262,7 +269,7 @@ func otherBatch() map[string]any {
 		"body": "### Record\n\nhttps://meta.audiosilo.app/works/existing-work\n\n### Changes\n\nother"}
 }
 
-// ownSum is issueSum of the batch params file.
+// ownSum is contrib.IssueSum of the batch params file.
 func ownSum(t *testing.T) string {
 	t.Helper()
 	p, err := ParseParams(json.RawMessage(params))
@@ -275,7 +282,7 @@ func ownSum(t *testing.T) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return issueSum(title, body)
+	return contrib.IssueSum(title, body)
 }
 
 // markerAt is a filing marker of params' batch set at at.
@@ -458,6 +465,9 @@ func TestCorrectNewJobForTheBookAdoptsTheLostIssue(t *testing.T) {
 	out, err := h.Run(ctx, job(11, params), jobs.LocalReporter())
 	if err != nil || g.count() != 1 || out.(Result).IssueNumber != 42 || kv.m[key] != "" {
 		t.Fatalf("new job: %+v %v, issues %d, marker %q", out, err, g.count(), kv.m[key])
+	}
+	if _, left := kv.m[key]; left {
+		t.Fatal("a confirmed filing's marker is emptied, not deleted")
 	}
 
 	// Other corrections lost the same way, then a third job with others again:

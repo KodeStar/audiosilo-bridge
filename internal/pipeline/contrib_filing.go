@@ -46,7 +46,7 @@ type filing struct {
 	// Gist is the raw URL of the gist made for Payload (an oversized body links it).
 	Gist string `json:"gist,omitempty"`
 	// IssueSince is set while an issue POST may have reached GitHub; Issue is
-	// issueSum of the title and body it sent (looked for whatever the sidecar
+	// contrib.IssueSum of the title and body it sent (looked for whatever the sidecar
 	// is now).
 	IssueSince time.Time `json:"issue_since,omitzero"`
 	Issue      string    `json:"issue,omitempty"`
@@ -54,12 +54,6 @@ type filing struct {
 
 func filingKey(bookID int64, kind string) string {
 	return "contrib.filing/" + strconv.FormatInt(bookID, 10) + "/" + kind
-}
-
-// issueSum identifies an issue by its title and body (as sent or as GitHub
-// lists it).
-func issueSum(title, body string) string {
-	return hexSHA256([]byte(title), []byte{0}, []byte(contrib.NormalizeBody(body)))
 }
 
 // gistDescription names a sidecar's gist by its content, so a lookup matches the
@@ -170,7 +164,7 @@ func (e *Executor) filedIssue(ctx context.Context, cli *contrib.Client, f filing
 	// The issues read before a failing page are looked through first.
 	issues, complete, err := cli.IssuesSinceBy(ctx, e.contribCommunityRepo, f.IssueSince.Add(-contrib.FilingSkew), creator)
 	for _, is := range issues {
-		if is.Number != recorded && issueSum(is.Title, is.Body) == f.Issue {
+		if is.Number != recorded && contrib.IssueSum(is.Title, is.Body) == f.Issue {
 			return contrib.Issue{Number: is.Number, URL: is.URL}, true, nil
 		}
 	}
@@ -272,7 +266,7 @@ func (e *Executor) fileIssue(ctx context.Context, cli *contrib.Client, bookID in
 		title, body, labels = composeIssue(kind, slug, payload, f.Gist)
 	}
 	// A refusal leaves a made gist in the marker for the next try.
-	f.Issue = issueSum(title, body)
+	f.Issue = contrib.IssueSum(title, body)
 	var issue contrib.Issue
 	err = e.guardedCreate(ctx, cli, bookID, kind, &f, &f.IssueSince, func() (err error) {
 		issue, err = cli.CreateIssue(ctx, e.contribCommunityRepo, title, body, labels)

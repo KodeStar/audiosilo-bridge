@@ -199,14 +199,14 @@ func (b *Bridge) SaveSettings(ctx context.Context, s api.Settings) error {
 		return err
 	}
 	b.kickWaiting() // a fallback that is no longer wait lets waiting books go on
-	if e := b.engine.get(); e != nil && budget != nil && *budget != cur.Agent.MonthlyBudgetUSD {
-		// A changed budget: the books parked on the old one look again (one
-		// still over it parks again until the next month).
-		go e.sched.ReadmitParked(context.WithoutCancel(ctx), "the monthly budget changed", state.ParkBudgetExceeded)
-	}
 	if budget != nil && *budget != cur.Agent.MonthlyBudgetUSD {
-		// A describe job parked on the budget waits in its own loop: it tries now.
+		// A changed budget: the books parked on the old one look again (one
+		// still over it parks again until the next month), and so do the
+		// describe jobs parked on it (they wait in their own loop).
 		b.gen.WakeParked(state.ParkBudgetExceeded)
+		if e := b.engine.get(); e != nil {
+			go e.sched.ReadmitParked(context.WithoutCancel(ctx), "the monthly budget changed", state.ParkBudgetExceeded)
+		}
 	}
 	b.Kick()
 	return nil

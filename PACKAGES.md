@@ -1053,7 +1053,7 @@ internal/
             and body), job} goes to meta.correct.filing/<server id>/<library
             id>/<path> (the work id when the job names no book), so a NEW job for
             the book (the admin pressing Suggest again after a lost answer) sees
-            it too. It is cleared once a filing is confirmed (filed, or adopted)
+            it too. It is deleted (not emptied: the keys are per book) once a filing is confirmed (filed, or adopted)
             or when GitHub answered a 4xx or a rate limit or the request never
             left (contrib.NothingFiled; a 5xx can come after the issue was made,
             and the client never resends a POST). A run that finds a marker lists
@@ -1693,8 +1693,10 @@ internal/
             hint, retry_at in progress) and it tries again at retry_at or on Retry
             (the shared pokes, so the page's Retry and Handler.Retry reach it;
             WakeParked(code) pokes every describe job parked with code, which a
-            monthly budget saved on the page does for budget_exceeded, since
-            these wait in their own loop, not as engine books),
+            monthly budget saved on the page does for budget_exceeded and an agent
+            credential changed on the Accounts tab for agent_credential_refused
+            and agent_unavailable, since these wait in their own loop, not as
+            engine books),
             staying parked while it tries so a park that holds isn't announced
             again (a Retry pressed during a try at a timed park is answered by that
             try; the success lifts the park, one the runner restored after a restart

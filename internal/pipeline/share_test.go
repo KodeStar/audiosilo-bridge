@@ -269,7 +269,7 @@ func TestShareFilesAClosedIssueAgainPastAStaleMarker(t *testing.T) {
 	first := gh.issues[0]
 	gh.mu.Unlock()
 	if err := exe.writeFiling(ctx, b.ID, store.ContribKindCharacters, filing{Login: "kodestar",
-		IssueSince: time.Now().Add(-time.Hour).UTC(), Issue: issueSum(first.title, first.body)}); err != nil {
+		IssueSince: time.Now().Add(-time.Hour).UTC(), Issue: contrib.IssueSum(first.title, first.body)}); err != nil {
 		t.Fatal(err)
 	}
 	got, err := exe.Share(ctx, b.ID, "reacher-01", nil)

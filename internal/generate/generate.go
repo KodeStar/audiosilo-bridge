@@ -158,10 +158,7 @@ func (h *Handler) WakeParked(code state.ParkCode) int {
 			continue
 		}
 		if ch, ok := h.pokes[id]; ok {
-			select {
-			case ch <- struct{}{}:
-			default:
-			}
+			nudge(ch)
 			woke++
 		}
 	}
@@ -1290,10 +1287,7 @@ func (h *Handler) Retry(ctx context.Context, jobID int64) error {
 	// reporting whether one runs here.
 	poke := func() bool {
 		if waiting {
-			select {
-			case c <- struct{}{}:
-			default:
-			}
+			nudge(c)
 		}
 		return waiting
 	}
@@ -1345,6 +1339,14 @@ func (h *Handler) setPoke(jobID int64, c chan struct{}) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.pokes[jobID] = c
+}
+
+// nudge sends a wake-up on c without waiting (one already pending is enough).
+func nudge(c chan struct{}) {
+	select {
+	case c <- struct{}{}:
+	default:
+	}
 }
 
 // dropPoke removes the job's wake-up channel if it is still c (a later run of

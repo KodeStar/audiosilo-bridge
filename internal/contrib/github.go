@@ -3,6 +3,8 @@ package contrib
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -513,6 +515,13 @@ func (c *Client) StaleFiling(since time.Time) bool {
 // list can answer CRLF line ends and trims.
 func NormalizeBody(body string) string {
 	return strings.TrimSpace(strings.ReplaceAll(body, "\r\n", "\n"))
+}
+
+// IssueSum identifies an issue by its title and body (as sent or as GitHub lists
+// it): the hex sha256 of the title, a NUL and the normalized body.
+func IssueSum(title, body string) string {
+	h := sha256.Sum256([]byte(title + "\x00" + NormalizeBody(body)))
+	return hex.EncodeToString(h[:])
 }
 
 // NothingFiled reports whether err rules out that a create call made anything:
