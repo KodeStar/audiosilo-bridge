@@ -380,7 +380,10 @@ func (g *GitHub) Token(ctx context.Context) (string, error) {
 	if err != nil {
 		// No answer from GitHub (unreachable, a server error): the pair is kept and
 		// tried again after refreshRetry. A refresh token GitHub did spend meanwhile
-		// answers bad_refresh_token then, which refuses the sign-in above.
+		// answers bad_refresh_token then, which refuses the sign-in above. The clock
+		// is read again: a refresh GitHub never answers takes ghauth's request
+		// timeout, and the access token may have expired meanwhile.
+		now = g.o.Now()
 		g.o.Log.Warn("accounts: refreshing the GitHub sign-in failed; it is tried again in a minute", "err", err)
 		g.refreshErr, g.refreshFailedAt = err, now
 		return g.unrefreshed(tok, now, err)
@@ -412,10 +415,12 @@ func (g *GitHub) unrefreshed(tok ghauth.Token, now time.Time, err error) (string
 // Refused records that GitHub refused token (a 401 on a REST call made with it):
 // the sign-in is not used again until a new one, and the heartbeat says the
 // Bridge can't contribute. A 401 on a token a refresh has since replaced (a call
-// in flight while it refreshed: GitHub ends the old token at once) says nothing
-// about the sign-in and is ignored.
+// in flight while it refreshed: GitHub ends the old token at once), or on one
+// past its expiry (served while GitHub couldn't be reached to refresh it: the
+// refresh decides then), says nothing about the sign-in and is ignored.
 func (g *GitHub) Refused(ctx context.Context, token string) {
-	if !g.current(token) {
+	cur, ok := g.current(token)
+	if !ok || (cur.Expiring() && !g.o.Now().Before(cur.ExpiresAt)) {
 		return
 	}
 	g.refuse(ctx, RefusedText)
@@ -426,7 +431,7 @@ func (g *GitHub) Refused(ctx context.Context, token string) {
 // sign-in does (a call answered just before GitHub refused the token can land
 // after the refusal).
 func (g *GitHub) OK(ctx context.Context, token string) {
-	if !g.current(token) {
+	if _, ok := g.current(token); !ok {
 		return
 	}
 	ctx = context.WithoutCancel(ctx)
@@ -436,13 +441,13 @@ func (g *GitHub) OK(ctx context.Context, token string) {
 	_ = g.o.DB.AccountOK(ctx, ProviderGitHub, g.o.Now())
 }
 
-// current reports whether token is the sign-in's access token, once a refresh
-// in progress is done.
-func (g *GitHub) current(token string) bool {
+// current is the sign-in's stored pair and whether token is its access token,
+// once a refresh in progress is done.
+func (g *GitHub) current(token string) (ghauth.Token, bool) {
 	g.refreshMu.Lock()
 	cur, _ := g.stored()
 	g.refreshMu.Unlock()
-	return cur.AccessToken != "" && cur.AccessToken == token
+	return cur, cur.AccessToken != "" && cur.AccessToken == token
 }
 
 func (g *GitHub) refuse(ctx context.Context, why string) {

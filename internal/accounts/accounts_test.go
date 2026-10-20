@@ -327,6 +327,40 @@ func TestRefreshWithoutAnswerKeepsSignIn(t *testing.T) {
 	}
 }
 
+// A refresh GitHub doesn't answer takes as long as ghauth lets it, and the
+// access token can expire meanwhile: Token judges the expiry after the refresh
+// (no expired token handed out), a 401 on a token past its expiry refuses
+// nothing, and the sign-in works again once GitHub answers.
+func TestRefreshOutlastingTheToken(t *testing.T) {
+	r := newRig(t)
+	ctx := context.Background()
+	r.signIn(t)
+	r.fake.mu.Lock()
+	r.fake.refreshDown = true
+	r.fake.refreshGate, r.fake.refreshSeen = make(chan struct{}), make(chan struct{}, 1)
+	r.fake.mu.Unlock()
+	r.clock.Add(8*time.Hour - 10*time.Second) // ten seconds before the expiry
+	done := make(chan error, 1)
+	go func() { _, err := r.gh.Token(ctx); done <- err }()
+	<-r.fake.refreshSeen
+	r.clock.Add(20 * time.Second) // the refresh hangs past the expiry
+	close(r.fake.refreshGate)
+	if err := <-done; !errors.Is(err, ErrUnrefreshed) {
+		t.Fatalf("err = %v, want ErrUnrefreshed (the token expired during the refresh)", err)
+	}
+	r.gh.Refused(ctx, "ghu_first") // a call made with it before it expired
+	if st := r.gh.State(ctx); st.Refused || !st.SignedIn {
+		t.Fatalf("state = %+v (a 401 on an expired token is no refusal)", st)
+	}
+	r.fake.mu.Lock()
+	r.fake.refreshDown = false
+	r.fake.mu.Unlock()
+	r.clock.Add(time.Minute)
+	if got, err := r.gh.Token(ctx); err != nil || got != "ghu_r1" {
+		t.Fatalf("token = %q, %v (GitHub answers again)", got, err)
+	}
+}
+
 // A refresh outlives its caller: cut short after GitHub rotated the pair, the
 // new pair would be lost and the sign-in with it.
 func TestRefreshOutlivesItsCaller(t *testing.T) {

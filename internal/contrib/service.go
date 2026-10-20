@@ -42,8 +42,9 @@ type ContribUpdate struct {
 
 // ServiceDeps are the injected collaborators shared by the core-submit endpoint
 // logic and the intake poller. contrib depends only on store/state (+ the meta
-// module's slug rules); the scheduler and event hub are reached through the
-// Readmit/Publish function seams so contrib imports neither.
+// module's slug rules, and accounts' ErrUnrefreshed for the token source); the
+// scheduler and event hub are reached through the Readmit/Publish function seams
+// so contrib imports neither.
 type ServiceDeps struct {
 	// DB is the scheduling/state store (books + contribution rows).
 	DB *store.DB

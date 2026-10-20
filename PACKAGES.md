@@ -1024,10 +1024,12 @@ internal/
             before expiry and persists first, detached from its caller (a page
             request that goes away mid-refresh would lose the rotated pair); only
             ErrBadRefresh refuses the sign-in, a refresh without GitHub's answer
-            keeps the pair (the access token serves until it expires, then Token
+            keeps the pair (the access token serves until it expires, judged
+            after the refresh, which can take ghauth's request timeout; then Token
             answers ErrUnrefreshed) and is tried again a minute later; a device flow ended meanwhile (sign-out, a newer
             one) stores nothing; Refused marks the account refused (a 401 on a
-            token a refresh has since replaced is ignored) and OK moves last_ok_at
+            token a refresh has since replaced, or on one past its expiry, is
+            ignored: the refresh decides then) and OK moves last_ok_at
             (a REST call that worked with the current token; never ends a
             refusal; a sign-in and a refresh move it too); SignOut ends any device flow,
             forgets the pair locally first (so the Bridge stops using it whatever
@@ -1281,8 +1283,10 @@ internal/
             (qa_no_converge, fix_loop_exhausted - the latter also superseding fixing +
             wiping the audit trajectory files) so an availability park never destroys a
             loop's round history; parks with a plain code just clear status.
-            ParkError.Cause (Unwrap) carries the error behind a park (contrib_unavailable's
-            credential error) so errors.Is sees through it. Timed parks
+            ParkError.Cause carries the error behind a park (contrib_unavailable's
+            credential error) for a caller that words the park (the share job); it is
+            deliberately no Unwrap, since runStage's errors.Is(err, context.Canceled)
+            would see through a park and a cancel sets no status. Timed parks
             come from ParkError.RetryAfter (ParkWithCodeAfter): the rate-limit park uses
             the parsed reset + 2min (agent.ParseResetTime - epoch accepted only within
             (now, now+48h]; clock form host-local by documented assumption) floored at
@@ -1596,7 +1600,10 @@ internal/
             (a field a later server adds is ignored) but checked strictly. A NEW job
             with contribute=issue fails BEFORE ANY SPEND when no GitHub token resolves
             (Options.ContribCredential; the contribution is the last stage), worded
-            apart when the sign-in only couldn't be refreshed (errCantContributeUnrefreshed). prepare: the library from the
+            apart when the sign-in only couldn't be refreshed (errCantContributeUnrefreshed);
+            so does a resumed one that makes a new engine book after all (its id
+            reused from another job's mapping, its book deleted or swept: create
+            checks, cantContribute). prepare: the library from the
             registry; waitMapped needs its check mapped AND writable at the mount the
             Bridge uses NOW (a new job fails otherwise; a resumed one parks
             library_not_writable and waits, its engine book going on); fetchBook waits
@@ -1860,7 +1867,7 @@ internal/
             it, and Options.Sharer (pipeline.Executor.Share) files them. Failures
             in words: not signed in, a sign-in GitHub couldn't be reached to
             refresh (Options.ContribCredential answering contrib.ErrSignInUnrefreshed,
-            or a contrib_unavailable park whose Cause is it: credFailure), refused, nothing kept
+            or a contrib_unavailable park whose Cause is it), refused, nothing kept
             here, a generate job still running, not matched. Result {library_id, path, work_id,
             contributed, covered}. The hints for agent_unavailable,
             agent_credential_refused and contrib_unavailable point at the Accounts
@@ -2078,9 +2085,12 @@ internal/
             effort: one sealed with another key, or a failed delete, never stops
             the start; the env token is read live), githubChanged kicks a beat
             and re-admits contrib_unavailable books when the Bridge can contribute
-            (a sign-in resumes the sidecars.generate job waiting on one;
-            sidecars.contribute never parks: it fails asking for a sign-in and a
-            share again),
+            (a sign-in resumes the sidecars.generate job waiting on one; a refresh
+            that works again re-admits nothing, so a book parked on a sign-in GitHub
+            couldn't be reached to refresh waits for Retry; sidecars.contribute
+            never parks: it fails asking for a sign-in, or for GitHub to be
+            reachable, and a share again); generate gets contribCredential (why
+            no token resolves) as Options.ContribCredential,
             agentCredentialChanged re-admits agent_credential_refused and
             agent_unavailable; the Backend adds Accounts, StartGitHubSignIn,
             SignOutGitHub, SetAgentCredential, DeleteAgentCredential. A budget
@@ -2260,7 +2270,7 @@ contrib, events, metaops, pipeline, scheduler, state, supervisor, toolfetch);
 `api -> {auth, jobs, link, logring, mapping, store}` (types only; it calls the
 injected Backend); `verify -> {jobs, link, mapping}`; `jobs -> {link, store}`;
 `mapping -> link`; `link` is a leaf. `generate -> {jobs, link, mapping, store,
-scheduler, state, pipeline, chapterdetect, audio, scratch, metaops, ebook, agent, fsutil}` (+ the meta
+scheduler, state, pipeline, contrib, chapterdetect, audio, scratch, metaops, ebook, agent, fsutil}` (+ the meta
 module's extract/model), its engine and server reached through its own Engine and
 Server interfaces. The agent container: `agentproto` is a leaf (standard library
 only); `agentbox -> {agent, agentproto}`; `agentrun -> {agent, agentproto,
@@ -2270,7 +2280,9 @@ knows about either (agentbox is just an agent.Runner). The engine:
 scheduler - never the reverse);
 `chapterdetect -> audio` (its number words and Silence only); `pipeline -> {audio, asr, transcript, ebook, qa, spelling, agent, repair, toolfetch, chapterdetect,
 scratch, secrets, fsutil, metaops, contrib, pricing, store, state, scheduler}` (metaops since M7's
-contributing stage, and the spelling stage's series glossary); `agent`/`repair` are leaf helpers (no
+contributing stage, and the spelling stage's series glossary); `contrib -> {store, state, accounts}`
+(+ the meta module's model/pack; accounts for ErrUnrefreshed alone, the sign-in reached
+through contrib's DeviceTokens interface, so accounts never imports contrib); `agent`/`repair` are leaf helpers (no
 scheduler/store deps; `repair -> qa` for the shared Python-compat gram/repr helpers
 and the shared clip-floor predicate `qa.ClipStartInRange`/`qa.ClipStartFloorSec`);
 `state` is pure. Handlers marshal DTOs and call into the injected packages; they

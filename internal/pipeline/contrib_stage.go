@@ -546,22 +546,24 @@ func (e *Executor) submitLocal(ctx context.Context, book store.Book, slug string
 }
 
 // contribClient resolves a GitHub credential and builds a REST client. A missing
-// credential is a ParkError (ParkContribUnavailable); any other resolve failure is a
+// credential is a ParkError (ParkContribUnavailable) whose Cause is the resolve
+// error, so a caller (the share job) tells a sign-in GitHub couldn't be reached to
+// refresh apart without reading the reason's text; any other resolve failure is a
 // transient stage error.
 func (e *Executor) contribClient(ctx context.Context) (*contrib.Client, error) {
-	if e.tokenSource == nil {
-		return nil, scheduler.ParkWithCode(state.ParkContribUnavailable, ContribUnavailableMsg)
+	var token, from string
+	err := contrib.ErrNoCredential // no token source: nothing resolves
+	if e.tokenSource != nil {
+		token, from, err = e.tokenSource.Resolve(ctx)
 	}
-	token, from, err := e.tokenSource.Resolve(ctx)
-	if err != nil {
-		// The park carries err, so a caller (the share job) tells the two apart by
-		// errors.Is rather than by the reason's text.
+	if errors.Is(err, contrib.ErrNoCredential) {
+		reason := ContribUnavailableMsg
 		if errors.Is(err, contrib.ErrSignInUnrefreshed) {
-			return nil, &scheduler.ParkError{Code: state.ParkContribUnavailable, Reason: ContribUnrefreshedMsg, Cause: err}
+			reason = ContribUnrefreshedMsg
 		}
-		if errors.Is(err, contrib.ErrNoCredential) {
-			return nil, &scheduler.ParkError{Code: state.ParkContribUnavailable, Reason: ContribUnavailableMsg, Cause: err}
-		}
+		return nil, &scheduler.ParkError{Code: state.ParkContribUnavailable, Reason: reason, Cause: err}
+	}
+	if err != nil {
 		return nil, fmt.Errorf("contributing: resolve credential: %w", err)
 	}
 	base := e.contribBaseURL

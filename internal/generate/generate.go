@@ -322,14 +322,24 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 	if err != nil {
 		return nil, err
 	}
-	if !resumed && params.Contribute == ContributeIssue {
-		// Fail before any spend: the contribution is the last stage, and without a
-		// token it could only park there after the whole run was paid for.
-		if err := credFailure(h.o.ContribCredential(ctx), errCantContributeUnrefreshed, errCantContribute); err != nil {
+	if !resumed {
+		// A new job before prepare can wait on its library; a resumed one that
+		// makes a new engine book after all is checked by create.
+		if err := h.cantContribute(ctx, r); err != nil {
 			return nil, err
 		}
 	}
 	return h.runEngineBook(ctx, eng, r, mapped, resumed, nil)
+}
+
+// cantContribute fails a contribute=issue job before any spend when no GitHub
+// token resolves: the contribution is the last stage, and without a token it
+// could only park there after the whole run was paid for. nil for any other job.
+func (h *Handler) cantContribute(ctx context.Context, r *run) error {
+	if r.params.Contribute != ContributeIssue {
+		return nil
+	}
+	return credFailure(h.o.ContribCredential(ctx), errCantContributeUnrefreshed, errCantContribute)
 }
 
 // resumeMapping is the job's mapping to an engine book and whether the job resumes
@@ -429,8 +439,8 @@ var (
 )
 
 // credFailure words a missing contribution credential (err, from
-// Options.ContribCredential or a park carrying it): unrefreshed when the sign-in
-// only couldn't be refreshed (contrib.ErrSignInUnrefreshed), else none; nil for nil.
+// Options.ContribCredential): unrefreshed when the sign-in only couldn't be
+// refreshed (contrib.ErrSignInUnrefreshed), else none; nil for nil.
 func credFailure(err, unrefreshed, none error) error {
 	switch {
 	case err == nil:
@@ -757,6 +767,14 @@ func (r *run) engineParked(parked bool, code, msg string) {
 func (h *Handler) create(ctx context.Context, eng Engine, r *run) error {
 	if r.kind == ChaptersKind {
 		return h.createChapters(ctx, eng, r)
+	}
+	if r.resuming {
+		// A resumed job whose book is another job's (an id reused) or gone (deleted,
+		// or swept since it was cancelled) starts over: a new spend, which Run's
+		// check before any spend skipped.
+		if err := h.cantContribute(ctx, r); err != nil {
+			return err
+		}
 	}
 	source, epub, note, err := chooseSource(r.place, r.params.Source)
 	if err != nil {

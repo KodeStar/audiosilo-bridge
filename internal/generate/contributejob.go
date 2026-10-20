@@ -159,7 +159,11 @@ func shareError(err error) error {
 	var park *scheduler.ParkError
 	switch {
 	case errors.As(err, &park) && park.Code == state.ParkContribUnavailable:
-		return credFailure(err, errShareUnrefreshed, errShareCantContribute)
+		// The park's Cause is the credential's resolve error (pipeline's contribClient).
+		if errors.Is(park.Cause, contrib.ErrSignInUnrefreshed) {
+			return errShareUnrefreshed
+		}
+		return errShareCantContribute
 	case contrib.Unauthorized(err):
 		return errShareRefused
 	case errors.Is(err, pipeline.ErrNotMatched):

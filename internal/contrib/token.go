@@ -27,8 +27,18 @@ var ErrNoCredential = errors.New("contrib: no GitHub credential (sign in to GitH
 // Bridge that is signed in to GitHub but whose expired sign-in couldn't be
 // refreshed because GitHub couldn't be reached (accounts.ErrUnrefreshed), with
 // nothing else to fall back on. Waiting until GitHub can be reached ends it, not
-// a sign-in, so callers word it apart.
-var ErrSignInUnrefreshed = fmt.Errorf("%w: the sign-in couldn't be refreshed (GitHub couldn't be reached)", ErrNoCredential)
+// a sign-in, so callers word it apart (and its own text leaves out
+// ErrNoCredential's "sign in" advice).
+var ErrSignInUnrefreshed error = signInUnrefreshed{}
+
+type signInUnrefreshed struct{}
+
+func (signInUnrefreshed) Error() string {
+	return "contrib: no GitHub credential (the sign-in couldn't be refreshed: GitHub couldn't be reached)"
+}
+
+// Is makes ErrSignInUnrefreshed an ErrNoCredential for errors.Is.
+func (signInUnrefreshed) Is(target error) bool { return target == ErrNoCredential }
 
 // GitHubTokenEnv names the variable that gives the Bridge a GitHub token for
 // headless setups. It is read live at every Resolve (never sealed), and wins
@@ -109,21 +119,20 @@ func (t *TokenSource) Resolve(ctx context.Context) (token, from string, err erro
 	if v := strings.TrimSpace(t.getenv(GitHubTokenEnv)); v != "" && !t.isRefused(v) {
 		return v, FromEnv, nil
 	}
-	unrefreshed := false
+	none := ErrNoCredential
 	if t.device != nil {
 		tok, derr := t.device.Token(ctx)
 		if derr == nil && tok != "" {
 			return tok, FromDevice, nil
 		}
-		unrefreshed = errors.Is(derr, accounts.ErrUnrefreshed)
+		if errors.Is(derr, accounts.ErrUnrefreshed) {
+			none = ErrSignInUnrefreshed
+		}
 	}
 	if tok := t.ghCLIToken(ctx); tok != "" && !t.isRefused(tok) {
 		return tok, FromGH, nil
 	}
-	if unrefreshed {
-		return "", "", ErrSignInUnrefreshed
-	}
-	return "", "", ErrNoCredential
+	return "", "", none
 }
 
 // ghCLIToken is `gh auth token`'s answer ("" for none), reused for ghReuseFor.

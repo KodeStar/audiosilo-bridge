@@ -104,6 +104,9 @@ func TestResolveSignInUnrefreshed(t *testing.T) {
 	if !errors.Is(err, ErrSignInUnrefreshed) || !errors.Is(err, ErrNoCredential) {
 		t.Fatalf("err = %v, want ErrSignInUnrefreshed wrapping ErrNoCredential", err)
 	}
+	if strings.Contains(err.Error(), "sign in") {
+		t.Fatalf("err = %q: a sign-in waiting on GitHub isn't told to sign in", err)
+	}
 	if tok, from, err := newSource("", &fakeDevice{err: down}, "gho_cli").Resolve(ctx); err != nil || tok != "gho_cli" || from != FromGH {
 		t.Fatalf("got (%q, %q, %v): gh still serves", tok, from, err)
 	}
