@@ -64,18 +64,29 @@ const (
 
 // budgetExceededMsg is the park reason when a book's summed agent cost has reached the
 // configured per-book budget. It names the spend and the budget and the exact fix, so a
-// user knows the one lever (raise agent.book_budget_usd, restart, Retry).
-func budgetExceededMsg(spent, budget float64) string {
+// user knows the one lever: for an engine book, raise agent.book_budget_usd, restart,
+// Retry (a restart re-admits no budget park); for the description step (describing),
+// raise it and restart, since a sidecars.describe job tries again as the Bridge starts.
+func budgetExceededMsg(spent, budget float64, describing bool) string {
+	if describing {
+		return fmt.Sprintf("book agent cost $%.2f reached the budget $%.2f - raise agent.book_budget_usd in config.yaml "+
+			"and restart the Bridge: the description carries on by itself", spent, budget)
+	}
 	return fmt.Sprintf("book agent cost $%.2f reached the budget $%.2f - raise agent.book_budget_usd in config.yaml (restart to apply), then Retry", spent, budget)
 }
 
 // monthlyBudgetExceededMsg is the park reason when this month's agent spend across
 // every book reached agent.monthly_budget_usd. A budget raised on the Settings tab
-// re-admits the book itself; one the environment sets takes a restart and a Retry.
-func monthlyBudgetExceededMsg(spent, budget float64, resume time.Time) string {
-	return fmt.Sprintf("this month's agent cost $%.2f reached the monthly budget $%.2f - the book resumes on %s, "+
+// re-admits the book itself; one the environment sets takes a restart and a Retry
+// for an engine book, and only the restart for the description step (describing).
+func monthlyBudgetExceededMsg(spent, budget float64, resume time.Time, describing bool) string {
+	what, envFix := "the book", "raise that, restart, then Retry"
+	if describing {
+		what, envFix = "the description", "raise that and restart the Bridge: the description carries on by itself"
+	}
+	return fmt.Sprintf("this month's agent cost $%.2f reached the monthly budget $%.2f - %s resumes on %s, "+
 		"or once the monthly budget is raised on the Bridge's Settings tab (when AUDIOSILO_BRIDGE_AGENT_MONTHLY_BUDGET_USD "+
-		"sets it, raise that, restart, then Retry)", spent, budget, resume.Format("2 January 2006"))
+		"sets it, %s)", spent, budget, what, resume.Format("2 January 2006"), envFix)
 }
 
 // checkMonthlyBudget is the monthly half of runAgent's budget preflight: when this
@@ -95,7 +106,8 @@ func (e *Executor) checkMonthlyBudget(ctx context.Context, stage state.State, no
 	if spent < budget {
 		return nil
 	}
-	return scheduler.ParkWithCodeAfter(state.ParkBudgetExceeded, monthlyBudgetExceededMsg(spent, budget, next), next)
+	return scheduler.ParkWithCodeAfter(state.ParkBudgetExceeded,
+		monthlyBudgetExceededMsg(spent, budget, next, stage == state.Describing), next)
 }
 
 // MonthBounds returns the start of now's calendar month and of the next one, UTC:
@@ -443,7 +455,8 @@ func (e *Executor) budgetPreflight(ctx context.Context, book store.Book, stage s
 				"book", book.ID, "known_usd", spent, "pricing_version", e.pricing.Version)
 		}
 		if spent >= e.bookBudgetUSD {
-			return scheduler.ParkWithCode(state.ParkBudgetExceeded, budgetExceededMsg(spent, e.bookBudgetUSD))
+			return scheduler.ParkWithCode(state.ParkBudgetExceeded,
+				budgetExceededMsg(spent, e.bookBudgetUSD, stage == state.Describing))
 		}
 	}
 	return e.checkMonthlyBudget(ctx, stage, time.Now())

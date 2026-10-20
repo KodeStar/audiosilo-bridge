@@ -86,7 +86,9 @@ const (
 	// 1st (UTC, its readmit time) or a changed budget saved on the Settings tab
 	// (which re-admits every book parked with it at once: one over its per-book
 	// budget parks again). A budget the environment sets is locked on the page:
-	// raise it there, restart, then Retry.
+	// raise it there, restart, then Retry (a restart re-admits no budget park; a
+	// sidecars.describe job, which parks outside the engine, tries again as the
+	// Bridge starts, so it needs only the restart).
 	ParkBudgetExceeded ParkCode = "budget_exceeded"
 	// Supervisor containment parks never authorize content/code changes; a human
 	// may inspect the persisted decision and explicitly Retry when satisfied.

@@ -163,7 +163,8 @@ type describePark struct {
 // now, and returns how many it woke: a monthly budget raised on the page, or the
 // agent's credential changed on the Accounts tab, re-admits the engine's parked
 // books, while a describe job waits in its own loop (until its retry_at, the 1st
-// for the monthly budget, or a Retry). A job whose try is running then tries
+// for the monthly budget, a Retry, or the Bridge's next start, which runs the job
+// again). A job whose try is running then tries
 // again at once if that try parks with code.
 func (h *Handler) WakeParked(code state.ParkCode) int {
 	h.mu.Lock()

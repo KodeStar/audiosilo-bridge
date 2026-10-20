@@ -539,6 +539,11 @@ func TestDescribeParks(t *testing.T) {
 		if !errors.As(err, &park) || park.Code != state.ParkBudgetExceeded || fake.count(DescribeStage) != 0 {
 			t.Fatalf("err = %v, calls %d", err, fake.count(DescribeStage))
 		}
+		// A sidecars.describe job tries again as the Bridge starts: the restart is
+		// the whole fix, no Retry.
+		if want := budgetExceededMsg(2, 1, true); park.Reason != want || strings.Contains(park.Reason, "Retry") {
+			t.Errorf("reason = %q, want %q", park.Reason, want)
+		}
 		// The (free) preparation ran first, so the positions are kept for a later
 		// try after the retention removed the transcripts.
 		if _, err := os.Stat(filepath.Join(book.WorkDir, chapterPositionsName)); err != nil {

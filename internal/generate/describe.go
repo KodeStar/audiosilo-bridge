@@ -110,6 +110,25 @@ var parkHints = map[string]string{
 // ParkHint is the advice for a park code ("" for one with none).
 func ParkHint(code string) string { return parkHints[code] }
 
+// describeParkHints replace parkHints for a sidecars.describe job's own park.
+// That job tries again as soon as the Bridge starts (the engine's books do not:
+// a restart re-admits no budget park), so a budget raised in config.yaml or the
+// environment needs the restart and no Retry.
+var describeParkHints = map[string]string{
+	string(state.ParkBudgetExceeded): "The agent budget is spent. A monthly cap resumes on the 1st, or as soon as it is raised on the " +
+		"Bridge's Settings tab; for the per-book cap, raise agent.book_budget_usd in the Bridge's config.yaml and restart it. " +
+		"A cap the Bridge's environment sets (AUDIOSILO_BRIDGE_AGENT_MONTHLY_BUDGET_USD, AUDIOSILO_BRIDGE_AGENT_BOOK_BUDGET_USD) " +
+		"is raised there instead, then the Bridge restarted. Once the Bridge starts again the description carries on by itself.",
+}
+
+// describeParkHint is the advice for a description-only job's park code.
+func describeParkHint(code string) string {
+	if h, ok := describeParkHints[code]; ok {
+		return h
+	}
+	return ParkHint(code)
+}
+
 // parkExtra is a park as a job's progress carries it: its code, its hint and,
 // when it tries again by itself, its retry_at ("" for none).
 func parkExtra(code, retryAt string) map[string]any {

@@ -1784,6 +1784,34 @@ func TestRepairedPhraseResolverReadsRepairedLayer(t *testing.T) {
 	}
 }
 
+// TestBudgetParkMessages pins the budget parks' fixes. An engine book is not
+// re-admitted at a restart, so a budget raised in config.yaml or the environment
+// still takes a Retry; the description step's park (a sidecars.describe job, which
+// tries again as the Bridge starts) needs only the restart.
+func TestBudgetParkMessages(t *testing.T) {
+	t.Parallel()
+	resume := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
+	for _, c := range []struct{ got, want string }{
+		{budgetExceededMsg(5, 4, false),
+			"book agent cost $5.00 reached the budget $4.00 - raise agent.book_budget_usd in config.yaml (restart to apply), then Retry"},
+		{budgetExceededMsg(5, 4, true),
+			"book agent cost $5.00 reached the budget $4.00 - raise agent.book_budget_usd in config.yaml and restart the Bridge: " +
+				"the description carries on by itself"},
+		{monthlyBudgetExceededMsg(25, 20, resume, false),
+			"this month's agent cost $25.00 reached the monthly budget $20.00 - the book resumes on 1 November 2026, or once the " +
+				"monthly budget is raised on the Bridge's Settings tab (when AUDIOSILO_BRIDGE_AGENT_MONTHLY_BUDGET_USD sets it, " +
+				"raise that, restart, then Retry)"},
+		{monthlyBudgetExceededMsg(25, 20, resume, true),
+			"this month's agent cost $25.00 reached the monthly budget $20.00 - the description resumes on 1 November 2026, or " +
+				"once the monthly budget is raised on the Bridge's Settings tab (when AUDIOSILO_BRIDGE_AGENT_MONTHLY_BUDGET_USD " +
+				"sets it, raise that and restart the Bridge: the description carries on by itself)"},
+	} {
+		if c.got != c.want {
+			t.Errorf("message = %q\nwant      %q", c.got, c.want)
+		}
+	}
+}
+
 // TestRunAgentParksOnMonthlyBudget: once this calendar month's agent spend across
 // every book reached the monthly budget, runAgent parks budget_exceeded before
 // invoking the agent, with an automatic re-admit at the start of the next month;
@@ -1821,8 +1849,13 @@ func TestRunAgentParksOnMonthlyBudget(t *testing.T) {
 	if !pe.RetryAfter.Equal(next) || next.Day() != 1 || next.Hour() != 0 {
 		t.Fatalf("retry after %v, want the 1st of next month (%v)", pe.RetryAfter, next)
 	}
-	if !strings.Contains(pe.Reason, "25.00") || !strings.Contains(pe.Reason, "20.00") {
-		t.Errorf("reason = %q, want it to name the spend and the budget", pe.Reason)
+	if pe.Reason != monthlyBudgetExceededMsg(25, 20, next, false) {
+		t.Errorf("reason = %q, want the engine's monthly budget message", pe.Reason)
+	}
+	// The description step's park words its own fix.
+	if err := exe.checkMonthlyBudget(ctx, state.Describing, time.Now()); !errors.As(err, &pe) ||
+		pe.Reason != monthlyBudgetExceededMsg(25, 20, next, true) {
+		t.Errorf("describing: err = %v, want the description's monthly budget message", err)
 	}
 
 	st, err := agent.New(work, string(state.FactPass), 1)

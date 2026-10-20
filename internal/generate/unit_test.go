@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -97,7 +98,11 @@ func TestEveryParkCodeHasAHint(t *testing.T) {
 // doesn't have.
 func TestParkHintsNameAnActionThatWorks(t *testing.T) {
 	t.Parallel()
-	for code, hint := range parkHints {
+	hints := maps.Clone(parkHints)
+	for code, hint := range describeParkHints {
+		hints["describe "+code] = hint
+	}
+	for code, hint := range hints {
 		low := strings.ToLower(hint)
 		if strings.Contains(low, "generate") && !strings.Contains(low, "cancel this job") {
 			t.Errorf("%s: %q sends the admin to generate again without cancelling the job", code, hint)
@@ -109,6 +114,34 @@ func TestParkHintsNameAnActionThatWorks(t *testing.T) {
 	}
 	if h := ParkHint(string(state.ParkAgentCredentialRefused)); !strings.Contains(h, "claude setup-token / agent-login codex") {
 		t.Errorf("credential refused hint = %q", h)
+	}
+}
+
+// The budget park's hint matches what resumes it. An engine book (sidecars.generate)
+// isn't re-admitted at a restart, so a budget raised in config.yaml or the
+// environment still needs a Retry; a sidecars.describe job tries again as the Bridge
+// starts, so it needs only the restart. A monthly budget saved on the page resumes
+// both, and every other code reads the same for both kinds.
+func TestBudgetParkHintPerKind(t *testing.T) {
+	t.Parallel()
+	code := string(state.ParkBudgetExceeded)
+	engine, describe := ParkHint(code), describeParkHint(code)
+	for _, want := range []string{"raised on the Bridge's Settings tab", "restart it and press Retry", "then the Bridge restarted and Retry pressed"} {
+		if !strings.Contains(engine, want) {
+			t.Errorf("generate's budget hint %q lacks %q", engine, want)
+		}
+	}
+	for _, want := range []string{"raised on the Bridge's Settings tab", "config.yaml and restart it",
+		"AUDIOSILO_BRIDGE_AGENT_MONTHLY_BUDGET_USD", "then the Bridge restarted", "the description carries on by itself"} {
+		if !strings.Contains(describe, want) {
+			t.Errorf("describe's budget hint %q lacks %q", describe, want)
+		}
+	}
+	if strings.Contains(describe, "Retry") {
+		t.Errorf("describe's budget hint %q asks for a Retry it doesn't need", describe)
+	}
+	if got := describeParkHint(string(state.ParkAgentRateLimited)); got != ParkHint(string(state.ParkAgentRateLimited)) || got == "" {
+		t.Errorf("describe's rate-limit hint = %q, want the shared one", got)
 	}
 }
 

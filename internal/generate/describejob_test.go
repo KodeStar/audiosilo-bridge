@@ -349,7 +349,7 @@ func TestDescribeJobParks(t *testing.T) {
 		return hr.srv.saw(62, func(u link.Update, p map[string]any) bool {
 			park, _ := p["park"].(map[string]any)
 			return u.State != nil && *u.State == link.StateNeedsAttention && u.Error != nil && *u.Error == "the budget is spent" &&
-				park["code"] == "budget_exceeded" && park["hint"] != "" && park["retry_at"] == nil
+				park["code"] == "budget_exceeded" && park["hint"] == describeParkHint("budget_exceeded") && park["retry_at"] == nil
 		})
 	})
 	if err := h.Retry(context.Background(), 62); err != nil {
