@@ -12,11 +12,16 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/kodestar/audiosilo-bridge/internal/api"
+	"github.com/kodestar/audiosilo-bridge/internal/contrib"
+	"github.com/kodestar/audiosilo-bridge/internal/events"
 	"github.com/kodestar/audiosilo-bridge/internal/link"
+	"github.com/kodestar/audiosilo-bridge/internal/scheduler"
 	"github.com/kodestar/audiosilo-bridge/internal/setup"
 	"github.com/kodestar/audiosilo-bridge/internal/state"
+	"github.com/kodestar/audiosilo-bridge/internal/store"
 )
 
 // setupServer answers the heartbeat as a server of one of three kinds: "old"
@@ -329,5 +334,55 @@ func TestAgentCredentialOnTheAccountsTab(t *testing.T) {
 	// The default App client ID: the sign-in is available, and none is stored.
 	if gh := b.Accounts(ctx).GitHub; !gh.Available || gh.SignedIn || gh.ManageURL == "" {
 		t.Fatalf("github = %+v", gh)
+	}
+}
+
+// A GitHub sign-in (any change githubChanged hears) resumes what waits for one:
+// the only job parked contrib_unavailable is sidecars.generate's, whose engine
+// book parks in the contributing stage, so the books parked with it are
+// re-admitted once a token resolves, and the job carries on with its book
+// (sidecars.contribute never parks: it fails asking for a sign-in, then a share
+// again). Without a token they wait.
+func TestGitHubSignInResumesContributionParks(t *testing.T) {
+	ctx := context.Background()
+	t.Setenv("PATH", t.TempDir()) // no `gh` to fall back to
+	t.Setenv(contrib.GitHubTokenEnv, "")
+	b := newTestBridge(t)
+	sched := scheduler.New(b.db, events.NewHub(64), scheduler.NewStubExecutor(0, 0), 1, t.TempDir(), false)
+	b.engine.cur.Store(&engine{sched: sched})
+	park := func(name string, code state.ParkCode) int64 {
+		bk, err := b.db.CreateBook(ctx, store.NewBook{SourcePath: "/books/" + name + ".m4b", WorkDir: t.TempDir(), Title: name})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := b.db.SetBookState(ctx, bk.ID, string(state.Contributing), "", "", ""); err != nil {
+			t.Fatal(err)
+		}
+		if err := b.db.SetBookStatusRetry(ctx, bk.ID, string(state.StatusNeedsAttention), "parked", string(code), ""); err != nil {
+			t.Fatal(err)
+		}
+		return bk.ID
+	}
+	contributing := park("contributing", state.ParkContribUnavailable)
+	other := park("other", state.ParkCoreNeeded)
+	status := func(id int64) string {
+		bk, err := b.db.GetBook(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return bk.Status
+	}
+
+	b.githubChanged() // a sign-out, say: no token resolves
+	time.Sleep(100 * time.Millisecond)
+	if s := status(contributing); s != string(state.StatusNeedsAttention) {
+		t.Fatalf("with no GitHub token the book was re-admitted (status %q)", s)
+	}
+
+	t.Setenv(contrib.GitHubTokenEnv, "ghp_signed_in")
+	b.githubChanged()
+	waitFor(t, "the contribution park re-admitted", func() bool { return status(contributing) == "" })
+	if s := status(other); s != string(state.StatusNeedsAttention) {
+		t.Fatalf("another park was re-admitted (status %q)", s)
 	}
 }

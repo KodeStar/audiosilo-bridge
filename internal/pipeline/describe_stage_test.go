@@ -539,9 +539,8 @@ func TestDescribeParks(t *testing.T) {
 		if !errors.As(err, &park) || park.Code != state.ParkBudgetExceeded || fake.count(DescribeStage) != 0 {
 			t.Fatalf("err = %v, calls %d", err, fake.count(DescribeStage))
 		}
-		// The description step's reason names the levers and no Retry: how it goes on
-		// is its caller's (a sidecars.describe job tries again as the Bridge starts).
-		if want := budgetExceededMsg(2, 1, true); park.Reason != want || strings.Contains(park.Reason, "Retry") {
+		// The same reason as every stage's: a restart (or a raise on the page), no Retry.
+		if want := budgetExceededMsg(2, 1); park.Reason != want {
 			t.Errorf("reason = %q, want %q", park.Reason, want)
 		}
 		// The (free) preparation ran first, so the positions are kept for a later

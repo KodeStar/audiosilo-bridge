@@ -104,20 +104,26 @@ func TestRestartReadmitsChangedAvailabilityParksOnce(t *testing.T) {
 	if err := db.SetBookStatus(ctx, auth.ID, string(state.StatusNeedsAttention), "supervisor: authentication failure: not logged in", string(state.ParkSupervisorEscalated)); err != nil {
 		t.Fatal(err)
 	}
-	budget := h.addBook(t, db, "budget", "", "")
-	parkBook(t, s, budget.ID, state.ParkBudgetExceeded, "")
+	// A budget raised in config.yaml or the environment applies at the start: both
+	// budget parks (the per-book one, none; the monthly one, the 1st) look again.
+	perBook := h.addBook(t, db, "per-book budget", "", "")
+	parkBook(t, s, perBook.ID, state.ParkBudgetExceeded, "")
+	monthly := h.addBook(t, db, "monthly budget", "", "")
+	parkBook(t, s, monthly.ID, state.ParkBudgetExceeded, time.Now().Add(240*time.Hour).UTC().Format(time.RFC3339))
+	// A park a person answers stays.
+	human := h.addBook(t, db, "human", "", "")
+	parkBook(t, s, human.ID, state.ParkSpellingGateFailure, "")
 
 	s.readmitRestartRecoverable(ctx)
 
-	for _, id := range []int64{rateLimited.ID, auth.ID} {
+	for _, id := range []int64{rateLimited.ID, auth.ID, perBook.ID, monthly.ID} {
 		got, _ := db.GetBook(ctx, id)
 		if got.Status != "" || got.ParkCode != "" || got.RetryAt != "" {
 			t.Errorf("restart-recoverable book %d remained parked: %+v", id, got)
 		}
 	}
-	got, _ := db.GetBook(ctx, budget.ID)
-	if got.Status != string(state.StatusNeedsAttention) || got.ParkCode != string(state.ParkBudgetExceeded) {
-		t.Fatalf("budget park was incorrectly readmitted: %+v", got)
+	if got, _ := db.GetBook(ctx, human.ID); got.ParkCode != string(state.ParkSpellingGateFailure) {
+		t.Fatalf("a person's park was readmitted: %+v", got)
 	}
 }
 

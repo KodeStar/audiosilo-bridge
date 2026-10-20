@@ -64,33 +64,25 @@ const (
 
 // budgetExceededMsg is the park reason when a book's summed agent cost has reached the
 // configured per-book budget. It names the spend, the budget and the lever (the cap in
-// config.yaml, or the environment variable that sets it, read at the next start); an
-// engine book then needs a Retry (a restart re-admits no budget park). The description
-// step's reason (describing) stops at the restart: how it goes on is its caller's (a
-// sidecars.describe job tries again as the Bridge starts and its hint says so, while
-// sidecars.generate's description and the contributing stage's only log the reason).
-func budgetExceededMsg(spent, budget float64, describing bool) string {
-	fix := ", restart, then Retry"
-	if describing {
-		fix = " and restart the Bridge"
-	}
+// config.yaml, or the environment variable that sets it, read at the next start). The
+// restart is all it takes, for every kind of job: a daemon start re-admits a budget
+// park (the scheduler's restartReadmitCodes) and runs a sidecars.describe job again,
+// and one still over its budget parks again here, before any spend.
+func budgetExceededMsg(spent, budget float64) string {
 	return fmt.Sprintf("book agent cost $%.2f reached the budget $%.2f - raise agent.book_budget_usd in config.yaml "+
-		"(or AUDIOSILO_BRIDGE_AGENT_BOOK_BUDGET_USD when that sets it)%s", spent, budget, fix)
+		"(or AUDIOSILO_BRIDGE_AGENT_BOOK_BUDGET_USD when that sets it) and restart the Bridge; the job then carries on "+
+		"by itself", spent, budget)
 }
 
 // monthlyBudgetExceededMsg is the park reason when this month's agent spend across
 // every book reached agent.monthly_budget_usd. A budget raised on the Settings tab
-// re-admits an engine book itself; one the environment sets takes a restart and a
-// Retry. The description step's reason (describing) says when there is room again and
-// names the levers, not how its caller goes on (see budgetExceededMsg).
-func monthlyBudgetExceededMsg(spent, budget float64, resume time.Time, describing bool) string {
-	what, envFix := "the book resumes", "raise that, restart, then Retry"
-	if describing {
-		what, envFix = "there is room again", "raise that and restart the Bridge"
-	}
-	return fmt.Sprintf("this month's agent cost $%.2f reached the monthly budget $%.2f - %s on %s, "+
-		"or once the monthly budget is raised on the Bridge's Settings tab (when AUDIOSILO_BRIDGE_AGENT_MONTHLY_BUDGET_USD "+
-		"sets it, %s)", spent, budget, what, resume.Format("2 January 2006"), envFix)
+// wakes the job at once; one the environment sets takes a restart (see
+// budgetExceededMsg), and none of them a Retry.
+func monthlyBudgetExceededMsg(spent, budget float64, resume time.Time) string {
+	return fmt.Sprintf("this month's agent cost $%.2f reached the monthly budget $%.2f - the job resumes on %s, "+
+		"or at once when the monthly budget is raised on the Bridge's Settings tab (when "+
+		"AUDIOSILO_BRIDGE_AGENT_MONTHLY_BUDGET_USD sets it, raise that and restart the Bridge)",
+		spent, budget, resume.Format("2 January 2006"))
 }
 
 // checkMonthlyBudget is the monthly half of runAgent's budget preflight: when this
@@ -110,8 +102,7 @@ func (e *Executor) checkMonthlyBudget(ctx context.Context, stage state.State, no
 	if spent < budget {
 		return nil
 	}
-	return scheduler.ParkWithCodeAfter(state.ParkBudgetExceeded,
-		monthlyBudgetExceededMsg(spent, budget, next, stage == state.Describing), next)
+	return scheduler.ParkWithCodeAfter(state.ParkBudgetExceeded, monthlyBudgetExceededMsg(spent, budget, next), next)
 }
 
 // MonthBounds returns the start of now's calendar month and of the next one, UTC:
@@ -460,8 +451,7 @@ func (e *Executor) budgetPreflight(ctx context.Context, book store.Book, stage s
 				"book", book.ID, "known_usd", spent, "pricing_version", e.pricing.Version)
 		}
 		if spent >= e.bookBudgetUSD {
-			return scheduler.ParkWithCode(state.ParkBudgetExceeded,
-				budgetExceededMsg(spent, e.bookBudgetUSD, stage == state.Describing))
+			return scheduler.ParkWithCode(state.ParkBudgetExceeded, budgetExceededMsg(spent, e.bookBudgetUSD))
 		}
 	}
 	return e.checkMonthlyBudget(ctx, stage, time.Now())

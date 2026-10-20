@@ -80,16 +80,15 @@ const (
 
 	// ParkBudgetExceeded: the book's summed agent cost reached the configured per-book
 	// budget (agent.book_budget_usd), so an agent stage parked before spending more. A
-	// human decision: raise the budget in config.yaml (restart to apply), then Retry -
-	// so, unlike the transient agent parks, it carries no auto-readmit time. The
-	// month's spend reaching agent.monthly_budget_usd parks with it too, until the
-	// 1st (UTC, its readmit time) or a changed budget saved on the Settings tab
-	// (which re-admits every book parked with it at once: one over its per-book
-	// budget parks again). A budget the environment sets is locked on the page:
-	// raise it there, restart, then Retry. Both Retries are an engine book's (a
-	// restart re-admits no budget park); a sidecars.describe job, which parks
-	// outside the engine, tries again as the Bridge starts, so a cap raised in
-	// config.yaml or the environment needs only the restart.
+	// human decision: raise the budget in config.yaml and restart, which re-admits it
+	// (the scheduler's restartReadmitCodes; a sidecars.describe job, which parks
+	// outside the engine, runs again as the Bridge starts) - so, unlike the transient
+	// agent parks, it carries no auto-readmit time. The month's spend reaching
+	// agent.monthly_budget_usd parks with it too, until the 1st (UTC, its readmit
+	// time) or a changed budget saved on the Settings tab (which re-admits every book
+	// parked with it at once). A budget the environment sets is locked on the page:
+	// raise it there and restart. One still over its budget parks again before any
+	// spend; no Retry is needed for either.
 	ParkBudgetExceeded ParkCode = "budget_exceeded"
 	// Supervisor containment parks never authorize content/code changes; a human
 	// may inspect the persisted decision and explicitly Retry when satisfied.

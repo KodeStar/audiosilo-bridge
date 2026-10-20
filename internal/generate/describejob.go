@@ -351,7 +351,7 @@ func (h *Handler) parkDescribe(r *run, park *scheduler.ParkError, spent float64,
 		retryAt = store.Timestamp(park.RetryAfter)
 	}
 	extra := r.describeExtra(spent)
-	extra["park"] = parkExtra(code, describeParkHint(code), retryAt)
+	extra["park"] = parkExtra(code, retryAt)
 	r.rep.Progress(jobs.Progress{Step: pipeline.DescribeStage, Message: "Needs attention: Writing a description", Total: 1,
 		Extra: extra})
 	r.rep.Park(code, park.Reason)

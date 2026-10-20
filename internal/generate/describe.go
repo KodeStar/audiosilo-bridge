@@ -63,8 +63,11 @@ var parkHints = map[string]string{
 		"Bridge's Accounts tab (a new claude setup-token, or an API key once the token is removed: claude uses a " +
 		"setup-token first), or in the agent container (claude setup-token / agent-login codex), whose own " +
 		"credential wins. The book tries again as soon as the Accounts tab has a new one, and every 30 minutes.",
-	string(state.ParkBudgetExceeded): budgetHintSpent + ", restart it and press Retry on the Bridge's page. " +
-		budgetHintEnv + ", then the Bridge restarted and Retry pressed.",
+	string(state.ParkBudgetExceeded): "The agent budget is spent. A monthly cap resumes on the 1st, or at once when " +
+		"it is raised on the Bridge's Settings tab. A cap set in the Bridge's config.yaml (the per-book " +
+		"agent.book_budget_usd) or by its environment (AUDIOSILO_BRIDGE_AGENT_MONTHLY_BUDGET_USD, " +
+		"AUDIOSILO_BRIDGE_AGENT_BOOK_BUDGET_USD) is raised there, then the Bridge restarted: the job carries on by " +
+		"itself, with no Retry needed.",
 	string(state.ParkAgentValidationExhausted): "The agent's answer kept failing the checks. Press Retry on the Bridge's page to give it another go.",
 	string(state.ParkMarkersNotConfident): "The chapter markers couldn't be read with confidence. Check the book's chapters, " +
 		"then press Retry on the Bridge's page.",
@@ -107,37 +110,10 @@ var parkHints = map[string]string{
 // ParkHint is the advice for a park code ("" for one with none).
 func ParkHint(code string) string { return parkHints[code] }
 
-// The budget park's hint as both job kinds share it: what is spent and how each
-// cap is raised, each kind adding how it then goes on.
-const (
-	budgetHintSpent = "The agent budget is spent. A monthly cap resumes on the 1st, or as soon as it is raised on the " +
-		"Bridge's Settings tab; for the per-book cap, raise agent.book_budget_usd in the Bridge's config.yaml"
-	budgetHintEnv = "A cap the Bridge's environment sets (AUDIOSILO_BRIDGE_AGENT_MONTHLY_BUDGET_USD, " +
-		"AUDIOSILO_BRIDGE_AGENT_BOOK_BUDGET_USD) is raised there instead"
-)
-
-// describeBudgetHint replaces the budget park's hint for a sidecars.describe
-// job's own park. That job tries again as soon as the Bridge starts (the jobs
-// runner resumes it), while the engine's books do not (the scheduler's
-// restartReadmitCodes leave budget parks out), so a budget raised in config.yaml
-// or the environment needs the restart and no Retry.
-const describeBudgetHint = budgetHintSpent + " and restart it. " + budgetHintEnv +
-	", then the Bridge restarted. Once the Bridge starts again the description carries on by itself."
-
-// describeParkHint is the advice for a description-only job's agent park
-// (parkDescribe). It differs from ParkHint only for budget_exceeded, so the job's
-// own Bridge parks (h.park: book_not_writable, library_not_writable) keep ParkHint.
-func describeParkHint(code string) string {
-	if code == string(state.ParkBudgetExceeded) {
-		return describeBudgetHint
-	}
-	return ParkHint(code)
-}
-
 // parkExtra is a park as a job's progress carries it: its code, its hint and,
 // when it tries again by itself, its retry_at ("" for none).
-func parkExtra(code, hint, retryAt string) map[string]any {
-	p := map[string]any{"code": code, "hint": hint}
+func parkExtra(code, retryAt string) map[string]any {
+	p := map[string]any{"code": code, "hint": ParkHint(code)}
 	if retryAt != "" {
 		p["retry_at"] = retryAt
 	}
@@ -176,7 +152,7 @@ func describe(v view) jobs.Progress {
 	extra := map[string]any{"stage": b.State, "source": v.source, "cost_usd": Cents(v.costUSD)}
 	switch state.Status(b.Status) {
 	case state.StatusNeedsAttention:
-		extra["park"] = parkExtra(b.ParkCode, ParkHint(b.ParkCode), b.RetryAt)
+		extra["park"] = parkExtra(b.ParkCode, b.RetryAt)
 		pr.Message = "Needs attention: " + pr.Message
 	case state.StatusPaused:
 		pr.Message = "Paused: " + pr.Message

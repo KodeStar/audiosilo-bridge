@@ -554,9 +554,9 @@ func Decide(i Incident, attempts, recentAutoRecoveries int, p Policy) Decision {
 			}
 		default:
 			// Book budget, contribution/core, and missing-tool parks express an
-			// external precondition. A restart probes the missing-tool ones once
-			// (the scheduler's restartReadmitCodes); the others wait for what answers
-			// them (a changed budget or a Retry, a GitHub sign-in, the core poller).
+			// external precondition. A restart probes the missing-tool and budget
+			// ones once (the scheduler's restartReadmitCodes); the others wait for
+			// what answers them (a GitHub sign-in or a Retry, the core poller).
 			// Periodic retries here would churn forever.
 			d.Action = ActionObserve
 			d.ApprovalRequired = true

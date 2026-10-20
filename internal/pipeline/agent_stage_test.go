@@ -15,6 +15,7 @@ import (
 	"github.com/kodestar/audiosilo-bridge/internal/agent"
 	"github.com/kodestar/audiosilo-bridge/internal/agent/prompts"
 	"github.com/kodestar/audiosilo-bridge/internal/audio"
+	"github.com/kodestar/audiosilo-bridge/internal/events"
 	"github.com/kodestar/audiosilo-bridge/internal/qa"
 	"github.com/kodestar/audiosilo-bridge/internal/repair"
 	"github.com/kodestar/audiosilo-bridge/internal/scheduler"
@@ -835,9 +836,8 @@ func TestRunAgentParksOnBudgetExceeded(t *testing.T) {
 	if !pe.RetryAfter.IsZero() {
 		t.Errorf("budget park must carry no auto-readmit time, got %v", pe.RetryAfter)
 	}
-	// An engine stage's park asks for the Retry a restart doesn't give it.
-	if pe.Reason != budgetExceededMsg(12, 10, false) {
-		t.Errorf("park reason = %q, want the engine's per-book budget message", pe.Reason)
+	if pe.Reason != budgetExceededMsg(12, 10) {
+		t.Errorf("park reason = %q, want the per-book budget message", pe.Reason)
 	}
 	if n := fake.count(string(state.FactPass)); n != 0 {
 		t.Errorf("agent invoked %d times over budget, want 0", n)
@@ -1785,29 +1785,92 @@ func TestRepairedPhraseResolverReadsRepairedLayer(t *testing.T) {
 	}
 }
 
-// TestBudgetParkMessages pins the budget parks' reasons: an engine book's names the
-// Retry it needs; the description step's names only the levers (each cap's setting
-// and the restart), true for all three of its callers.
+// agentStageExecutor runs every stage as an agent stage starts: runAgent, its
+// budget preflight first, then the agent.
+type agentStageExecutor struct {
+	exe  *Executor
+	work string
+}
+
+func (x agentStageExecutor) Execute(ctx context.Context, book store.Book, stage state.State, r scheduler.StageReport) (scheduler.StageResult, error) {
+	st, err := agent.New(x.work, string(stage), 1)
+	if err != nil {
+		return scheduler.StageResult{}, err
+	}
+	_, err = x.exe.runAgent(ctx, book, stage, r, st, "fact_pass.md", nil, false,
+		func(agent.Result, *agent.Staging) error { return nil })
+	return scheduler.StageResult{}, err
+}
+
+// TestRestartReadmitsABudgetParkThatParksAgainBeforeSpending: a daemon start
+// re-admits a budget-parked book (a cap raised in config.yaml or the environment
+// applies then, so the park needs no Retry); one still over its budget runs its
+// stage's budget preflight and parks again with the same reason, without invoking
+// the agent.
+func TestRestartReadmitsABudgetParkThatParksAgainBeforeSpending(t *testing.T) {
+	ctx := context.Background()
+	work := t.TempDir()
+	fake := newFakeRunner()
+	db, exe, book := dbBackedQAExecutor(t, work, fake)
+	exe.bookBudgetUSD = 10.0
+	runID, err := db.StartStageRun(ctx, book.ID, string(state.FactPass), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AddOpenStageRunUsage(ctx, book.ID, string(state.FactPass), "opus", 0, 0, 12.0); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.FinishStageRun(ctx, runID, true, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetBookState(ctx, book.ID, string(state.FactPass), "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetBookStatusRetry(ctx, book.ID, string(state.StatusNeedsAttention), "parked before the restart",
+		string(state.ParkBudgetExceeded), ""); err != nil {
+		t.Fatal(err)
+	}
+
+	sched := scheduler.New(db, events.NewHub(1024), agentStageExecutor{exe: exe, work: work}, 1, t.TempDir(), false)
+	runCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() { defer close(done); _ = sched.Start(runCtx) }()
+	defer func() { cancel(); <-done }()
+
+	want := budgetExceededMsg(12, 10)
+	var got store.Book
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+		if got, err = db.GetBook(ctx, book.ID); err == nil && got.Error == want {
+			break
+		}
+	}
+	if got.Error != want || got.Status != string(state.StatusNeedsAttention) || got.ParkCode != string(state.ParkBudgetExceeded) ||
+		got.State != string(state.FactPass) {
+		t.Fatalf("after the restart: state %q status %q park %q error %q, want parked again over budget",
+			got.State, got.Status, got.ParkCode, got.Error)
+	}
+	if n := fake.count(string(state.FactPass)); n != 0 {
+		t.Fatalf("agent invoked %d times over budget after the restart, want 0", n)
+	}
+}
+
+// TestBudgetParkMessages pins the budget parks' reasons, one for every kind of job
+// and stage: each names its cap's lever and the restart a cap set in config.yaml or
+// the environment takes, and none asks for a Retry (a restart re-admits the park).
 func TestBudgetParkMessages(t *testing.T) {
 	t.Parallel()
 	resume := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
 	for _, c := range []struct{ got, want string }{
-		{budgetExceededMsg(5, 4, false),
+		{budgetExceededMsg(5, 4),
 			"book agent cost $5.00 reached the budget $4.00 - raise agent.book_budget_usd in config.yaml " +
-				"(or AUDIOSILO_BRIDGE_AGENT_BOOK_BUDGET_USD when that sets it), restart, then Retry"},
-		{budgetExceededMsg(5, 4, true),
-			"book agent cost $5.00 reached the budget $4.00 - raise agent.book_budget_usd in config.yaml " +
-				"(or AUDIOSILO_BRIDGE_AGENT_BOOK_BUDGET_USD when that sets it) and restart the Bridge"},
-		{monthlyBudgetExceededMsg(25, 20, resume, false),
-			"this month's agent cost $25.00 reached the monthly budget $20.00 - the book resumes on 1 November 2026, or once the " +
-				"monthly budget is raised on the Bridge's Settings tab (when AUDIOSILO_BRIDGE_AGENT_MONTHLY_BUDGET_USD sets it, " +
-				"raise that, restart, then Retry)"},
-		{monthlyBudgetExceededMsg(25, 20, resume, true),
-			"this month's agent cost $25.00 reached the monthly budget $20.00 - there is room again on 1 November 2026, or " +
-				"once the monthly budget is raised on the Bridge's Settings tab (when AUDIOSILO_BRIDGE_AGENT_MONTHLY_BUDGET_USD " +
-				"sets it, raise that and restart the Bridge)"},
+				"(or AUDIOSILO_BRIDGE_AGENT_BOOK_BUDGET_USD when that sets it) and restart the Bridge; the job then " +
+				"carries on by itself"},
+		{monthlyBudgetExceededMsg(25, 20, resume),
+			"this month's agent cost $25.00 reached the monthly budget $20.00 - the job resumes on 1 November 2026, or " +
+				"at once when the monthly budget is raised on the Bridge's Settings tab (when " +
+				"AUDIOSILO_BRIDGE_AGENT_MONTHLY_BUDGET_USD sets it, raise that and restart the Bridge)"},
 	} {
-		if c.got != c.want {
+		if c.got != c.want || strings.Contains(c.got, "Retry") {
 			t.Errorf("message = %q\nwant      %q", c.got, c.want)
 		}
 	}
@@ -1850,13 +1913,8 @@ func TestRunAgentParksOnMonthlyBudget(t *testing.T) {
 	if !pe.RetryAfter.Equal(next) || next.Day() != 1 || next.Hour() != 0 {
 		t.Fatalf("retry after %v, want the 1st of next month (%v)", pe.RetryAfter, next)
 	}
-	if pe.Reason != monthlyBudgetExceededMsg(25, 20, next, false) {
-		t.Errorf("reason = %q, want the engine's monthly budget message", pe.Reason)
-	}
-	// The description step's park words its own fix.
-	if err := exe.checkMonthlyBudget(ctx, state.Describing, time.Now()); !errors.As(err, &pe) ||
-		pe.Reason != monthlyBudgetExceededMsg(25, 20, next, true) {
-		t.Errorf("describing: err = %v, want the description's monthly budget message", err)
+	if pe.Reason != monthlyBudgetExceededMsg(25, 20, next) {
+		t.Errorf("reason = %q, want the monthly budget message", pe.Reason)
 	}
 
 	st, err := agent.New(work, string(state.FactPass), 1)

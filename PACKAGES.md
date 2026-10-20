@@ -1052,12 +1052,19 @@ internal/
             it). The filing is guarded per REQUEST: before CreateIssue a marker
             {since (GitHub's time, contrib.Client.Now), sum (contrib.IssueSum of
             the title and body sent), job} goes to meta.correct.filing/<server
-            id>/<request> (the sha256 of the params less the server's source
-            stamp: not the book, which can move, nor the composed issue, whose
-            title is the work's live title), so a NEW job asking for the same
-            corrections (the admin pressing Suggest again after a lost answer,
-            whatever the book is called by then) sees it too, and other
-            corrections never share or overwrite it. It is deleted (not emptied:
+            id>/<request> (filingKey: the sha256 of the record, work_id plus
+            recording_id, ASIN and ISBN, and the changes as a sorted set of
+            {field, corrected}; NOT the evidence, which the console refills with
+            a default line naming the server version in the admin's language each
+            time its dialog opens, nor the source stamp, the region, a change's
+            current value (it moves when the community applies a fix), the book,
+            which can move, or the composed issue, whose title is the work's live
+            title), so a NEW job asking for the same corrections (the admin
+            pressing Suggest again after a lost answer, reworded or reordered,
+            whatever the book is called by then) sees it too and adopts the issue
+            the marker's sum names, and other corrections never share or
+            overwrite it. Markers keyed the earlier way (the params less the
+            source) are never read again. It is deleted (not emptied:
             the keys are per request), and only while it is still the one the
             run wrote or adopted (clearFiling compares: an overlapping run's
             newer marker stays), once a filing is confirmed and its result
@@ -1070,9 +1077,10 @@ internal/
             (contrib.IssuesSince, the rows of pages read before one that failed
             included) and: adopts a [corrections] issue with its own sum or the
             marker's (the same request composed earlier: a title correction
-            meta's bot applied since, or a recording that took the ASIN, changes
-            what it composes now); else fails asking the admin to look first
-            (errFiledBefore) for a same-record batch with another body
+            meta's bot applied since, a recording that took the ASIN, or the
+            evidence reworded, changes what it composes now); else fails asking
+            the admin to look first (errFiledBefore) for a same-record batch
+            with another body
             (otherBatch: another admin's, or its own edited since; the marker
             goes once the list was read back to it whole and it has settled, so
             the next suggestion files) or a marker without a time (which goes
@@ -1275,8 +1283,12 @@ internal/
             Phase 1a: autoReadmitCodes adds agent_credential_refused (looked at again
             every 30 min in case the credential was replaced) and budget_exceeded
             (the monthly park's retry_at is the 1st; the per-book park has none, so it
-            still waits for a human) - ONLY a park carrying a retry_at is ever
-            re-admitted. IsCancelled(b) tells Cancel's failure from a stage's by its
+            waits for a raised cap and the restart that applies it) - ONLY a park
+            carrying a retry_at is ever re-admitted. Bridge 2b: restartReadmitCodes
+            (the parks a daemon start re-admits once) add budget_exceeded, since a cap
+            raised in config.yaml or the environment applies at the start: a book still
+            over its budget parks again in runAgent's budget preflight, before any spend
+            (pipeline TestRestartReadmitsABudgetParkThatParksAgainBeforeSpending). IsCancelled(b) tells Cancel's failure from a stage's by its
             reason (cancelledReason "cancelled by user"; the status enum has no
             cancelled state). runStage closes a run on ANY error once the worker ctx
             ended (a killed ffmpeg is "signal: killed", not ctx.Err()): whoever
@@ -1626,16 +1638,13 @@ internal/
             parked engine book, else a poke for a job waiting in its own park
             (ErrNotParked, store.ErrNotFound otherwise). ParkHint words every park code
             for the console and the page (a fresh start says to cancel this job first:
-            the server keeps one open job per book); a sidecars.describe job's agent
-            park (parkDescribe) takes describeParkHint, which differs only for
-            budget_exceeded (describeBudgetHint): a restart and no Retry, since that
-            job tries again as the Bridge starts, while an engine book's asks for the
-            Retry a restart does not give it (scheduler restartReadmitCodes leave
-            budget parks out). The description step's own budget park reasons
-            (pipeline budgetExceededMsg / monthlyBudgetExceededMsg, describing) name
-            only the levers, no Retry: how it goes on is its caller's (only a
-            sidecars.describe job parks on it; generate's description and the
-            contributing stage's log it). Estimates (the heartbeat's): the
+            the server keeps one open job per book). The budget_exceeded hint and the
+            pipeline's budget park reasons (budgetExceededMsg, monthlyBudgetExceededMsg)
+            read the same for every job kind and stage: a monthly cap resumes on the
+            1st or at once when raised on the Settings tab; a cap set in config.yaml
+            or the environment is raised there and the Bridge restarted, then the job
+            carries on with no Retry (a start re-admits an engine book's budget park,
+            scheduler restartReadmitCodes, and runs a describe job again). Estimates (the heartbeat's): the
             ASR rate (seconds per chapter) scaled by the finished audio books'
             chapters per hour, else SeedASRSecondsPerAudioHour 900; agent spend per
             audio hour summed over finished audio books, per ebook averaged, nil until
@@ -2046,7 +2055,10 @@ internal/
             earlier Bridge's sealed github_pat once (forgetSealedGitHubPAT, best
             effort: one sealed with another key, or a failed delete, never stops
             the start; the env token is read live), githubChanged kicks a beat
-            and re-admits contrib_unavailable books when the Bridge can contribute,
+            and re-admits contrib_unavailable books when the Bridge can contribute
+            (a sign-in resumes the sidecars.generate job waiting on one;
+            sidecars.contribute never parks: it fails asking for a sign-in and a
+            share again),
             agentCredentialChanged re-admits agent_credential_refused and
             agent_unavailable; the Backend adds Accounts, StartGitHubSignIn,
             SignOutGitHub, SetAgentCredential, DeleteAgentCredential. A budget

@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -98,11 +97,7 @@ func TestEveryParkCodeHasAHint(t *testing.T) {
 // doesn't have.
 func TestParkHintsNameAnActionThatWorks(t *testing.T) {
 	t.Parallel()
-	hints := maps.Clone(parkHints)
-	for code := range parkHints {
-		hints["describe "+code] = describeParkHint(code)
-	}
-	for code, hint := range hints {
+	for code, hint := range parkHints {
 		low := strings.ToLower(hint)
 		if strings.Contains(low, "generate") && !strings.Contains(low, "cancel this job") {
 			t.Errorf("%s: %q sends the admin to generate again without cancelling the job", code, hint)
@@ -117,38 +112,28 @@ func TestParkHintsNameAnActionThatWorks(t *testing.T) {
 	}
 }
 
-// The budget park's hint per job kind (describeBudgetHint says why they differ): an
-// engine book's, in a generate job's progress (describe) and its description step's
-// (bookExtra), asks for a Retry; a sidecars.describe job's (parkDescribe) only for
-// the restart. Every other code reads the same for both kinds.
-func TestBudgetParkHintPerKind(t *testing.T) {
+// The budget park's hint is one for every job kind and in every place a park is
+// reported (a generate job's progress and its description step's here, a describe
+// job's in TestDescribeJobParks):
+// a monthly cap resumes on the 1st or once raised on the page; a cap set in
+// config.yaml or the environment takes a restart, after which the job carries on
+// (a restart re-admits a budget-parked engine book, and runs a describe job
+// again), so it asks for no Retry.
+func TestBudgetParkHint(t *testing.T) {
 	t.Parallel()
 	code := string(state.ParkBudgetExceeded)
-	engine, desc := ParkHint(code), describeParkHint(code)
-	for _, want := range []string{"raised on the Bridge's Settings tab", "restart it and press Retry", "then the Bridge restarted and Retry pressed"} {
-		if !strings.Contains(engine, want) {
-			t.Errorf("generate's budget hint %q lacks %q", engine, want)
-		}
-	}
-	for _, want := range []string{"raised on the Bridge's Settings tab", "config.yaml and restart it",
-		"AUDIOSILO_BRIDGE_AGENT_MONTHLY_BUDGET_USD", "then the Bridge restarted", "the description carries on by itself"} {
-		if !strings.Contains(desc, want) {
-			t.Errorf("describe's budget hint %q lacks %q", desc, want)
-		}
-	}
-	if strings.Contains(desc, "Retry") {
-		t.Errorf("describe's budget hint %q asks for a Retry it doesn't need", desc)
-	}
-	for other := range parkHints {
-		if other != code && describeParkHint(other) != ParkHint(other) {
-			t.Errorf("describe's %s hint = %q, want the shared one", other, describeParkHint(other))
-		}
+	want := "The agent budget is spent. A monthly cap resumes on the 1st, or at once when it is raised on the " +
+		"Bridge's Settings tab. A cap set in the Bridge's config.yaml (the per-book agent.book_budget_usd) or by its " +
+		"environment (AUDIOSILO_BRIDGE_AGENT_MONTHLY_BUDGET_USD, AUDIOSILO_BRIDGE_AGENT_BOOK_BUDGET_USD) is raised " +
+		"there, then the Bridge restarted: the job carries on by itself, with no Retry needed."
+	if got := ParkHint(code); got != want {
+		t.Fatalf("budget hint = %q\nwant          %q", got, want)
 	}
 	parked := store.Book{State: string(state.FactPass), Status: string(state.StatusNeedsAttention), ParkCode: code}
 	for name, extra := range map[string]map[string]any{"describe": describe(view{book: parked}).Extra,
 		"bookExtra": (&run{}).bookExtra(parked)} {
-		if park, _ := extra["park"].(map[string]any); park["hint"] != engine {
-			t.Errorf("%s: park = %+v, want the engine's budget hint", name, park)
+		if park, _ := extra["park"].(map[string]any); park["hint"] != want {
+			t.Errorf("%s: park = %+v, want the budget hint", name, park)
 		}
 	}
 }

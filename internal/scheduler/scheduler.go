@@ -1004,21 +1004,24 @@ func (s *Scheduler) advanceWaypoints(ctx context.Context) ([]store.Book, error) 
 // agent conditions a wait heals (the CLI symlink blip recovers, or the rate-limit
 // window elapses), a refused agent credential (looked at again in case it was
 // replaced) and the monthly budget (a new month starts). Only a park that carries a
-// retry_at is ever re-admitted, so the per-book budget park (none) still waits for
-// a human, as does every other park (a not-confident marker verdict, a spelling
-// gate failure, ...).
+// retry_at is ever re-admitted, so the per-book budget park (none) waits for a
+// raised cap and the restart that applies it (restartReadmitCodes), and every
+// other park for a person (a not-confident marker verdict, a spelling gate
+// failure, ...).
 var autoReadmitCodes = []state.ParkCode{state.ParkAgentUnavailable, state.ParkAgentRateLimited,
 	state.ParkAgentCredentialRefused, state.ParkBudgetExceeded}
 
 // restartReadmitCodes are the parks a daemon start re-admits once
-// (readmitRestartRecoverable): external availability a restart may have fixed.
-// budget_exceeded is left out on purpose (a per-book budget park waits for a
-// person's Retry), and the wording that asks for that Retry depends on it: the
-// generate package's engine budget hint (parkHints) and the pipeline's budget park
-// reasons (budgetExceededMsg, monthlyBudgetExceededMsg). Adding it here changes them.
+// (readmitRestartRecoverable): external availability, or a setting read only at
+// start, a restart may have changed. budget_exceeded is one: a cap raised in
+// config.yaml or the environment applies when the Bridge next starts, so the
+// restart is all it takes (the generate package's budget hint and the pipeline's
+// budget park reasons say so, and ask for no Retry); a book still over its budget
+// parks again in the stage's budget preflight, before any spend.
 var restartReadmitCodes = []state.ParkCode{
 	state.ParkAgentUnavailable, state.ParkAgentRateLimited,
 	state.ParkASRUnavailable, state.ParkMediaToolsUnavailable,
+	state.ParkBudgetExceeded,
 }
 
 // readmitRestartRecoverable gives external-availability parks one fresh attempt per
@@ -1040,7 +1043,7 @@ func (s *Scheduler) readmitRestartRecoverable(ctx context.Context) {
 		}
 		_ = s.hub.PublishBook("stage.note", b.ID, map[string]any{
 			"book_id": b.ID, "stage": b.State,
-			"msg": "daemon restart: rechecking the changed backend, credentials, or tool availability",
+			"msg": "daemon restart: rechecking the changed backend, credentials, budget, or tool availability",
 		})
 	}
 }
