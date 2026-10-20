@@ -487,9 +487,10 @@ const FilingSkew = 2 * time.Minute
 // and a marker nothing on the page can clear would block the book for good.
 const FilingStale = 24 * time.Hour
 
-// StaleFiling reports whether a marker set at since is past FilingStale at now.
-func StaleFiling(now, since time.Time) bool {
-	return !since.IsZero() && now.Sub(since) > FilingStale
+// StaleFiling reports whether a marker set at since (GitHub's time) is past
+// FilingStale by the Client's GitHub clock (Now).
+func (c *Client) StaleFiling(ctx context.Context, since time.Time) bool {
+	return !since.IsZero() && c.Now(ctx).Sub(since) > FilingStale
 }
 
 // NormalizeBody is an issue body as sent or as GitHub lists it, comparable: the

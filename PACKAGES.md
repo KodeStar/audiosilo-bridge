@@ -935,7 +935,7 @@ internal/
             holds none and (for an issue) the marker is a minute old; else it
             fails with ErrFilingUnknown (the share job words it and logs the
             cause), unless the marker is over a day old by GitHub's clock
-            (contrib.FilingStale, StaleFiling): then it files again (meta's intake
+            (contrib.FilingStale, Client.StaleFiling): then it files again (meta's intake
             catches a duplicate, and nothing on the page clears a marker). A refusal or a request that never left (contrib.NothingFiled:
             a 4xx, a rate limit, a failed dial) clears the pending time; a made
             gist is kept for the next try; the marker goes once the row is

@@ -206,7 +206,7 @@ func (e *Executor) fileIssue(ctx context.Context, cli *contrib.Client, bookID in
 	if !f.IssueSince.IsZero() {
 		issue, found, err := e.filedIssue(ctx, cli, f, login, recorded)
 		switch {
-		case err != nil && !contrib.StaleFiling(cli.Now(ctx), f.IssueSince):
+		case err != nil && !cli.StaleFiling(ctx, f.IssueSince):
 			return contrib.Issue{}, filingUnknown(kind, "issue", err)
 		case err != nil:
 			e.log.Warn("contributing: an interrupted submit's issue can't be found or ruled out, and its marker "+
@@ -228,7 +228,7 @@ func (e *Executor) fileIssue(ctx context.Context, cli *contrib.Client, bookID in
 		if f.Gist == "" && !f.GistSince.IsZero() {
 			raw, found, err := filedGist(ctx, cli, f.GistSince, file, desc)
 			switch {
-			case err != nil && !contrib.StaleFiling(cli.Now(ctx), f.GistSince):
+			case err != nil && !cli.StaleFiling(ctx, f.GistSince):
 				return contrib.Issue{}, filingUnknown(kind, "gist", err)
 			case err != nil:
 				e.log.Warn("contributing: an interrupted submit's gist can't be found or ruled out, and its marker "+

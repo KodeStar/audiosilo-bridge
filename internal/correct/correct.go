@@ -216,7 +216,7 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 	if interrupted {
 		filed, found, err := h.filedSince(ctx, cli, since, body)
 		switch {
-		case err != nil && !contrib.StaleFiling(cli.Now(ctx), since):
+		case err != nil && !cli.StaleFiling(ctx, since):
 			h.o.Log.Warn("correct: looking for an interrupted run's issue failed", "job", job.ID, "err", err)
 			return nil, errFiledBefore
 		case err != nil:
