@@ -122,10 +122,15 @@ func IsPrivateFeedURL(norm string) bool {
 var urlInText = regexp.MustCompile(`(?i)https?://[^\s<>"']+`)
 
 // RedactText removes credentials from URLs in text from untrusted peers.
-// Every match holds "://", so text without it skips the regexp scan.
+// Every match holds "://", so text without it skips the regexp scan. Closing
+// punctuation after a URL ("see https://host/a.", "(https://host/a)") is the
+// text's, so it stays after the redacted URL.
 func RedactText(s string) string {
 	if !strings.Contains(s, "://") {
 		return s
 	}
-	return urlInText.ReplaceAllStringFunc(s, RedactURL)
+	return urlInText.ReplaceAllStringFunc(s, func(m string) string {
+		u := strings.TrimRight(m, ".,:;!?)]}")
+		return RedactURL(u) + m[len(u):]
+	})
 }

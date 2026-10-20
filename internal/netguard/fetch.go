@@ -1,6 +1,7 @@
 package netguard
 
 import (
+	"compress/flate"
 	"compress/gzip"
 	"context"
 	"crypto/tls"
@@ -82,7 +83,10 @@ func (c *Client) Fetch(ctx context.Context, in Request) (*Response, error) {
 func (c *Client) once(ctx context.Context, in Request) (*Response, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	permanent := true
+	// permanent: every redirect followed was a 301 or 308. A response that
+	// followed none is no move, even when URL.String spells the URL another
+	// way (it re-encodes userinfo that NormalizeFeedURL keeps as given).
+	permanent, redirected := true, false
 	httpc := &http.Client{Transport: c.transport, CheckRedirect: func(req *http.Request, via []*http.Request) error {
 		if len(via) > 10 {
 			return &Error{Code: "http_310", Message: "The feed redirected too many times."}
@@ -90,6 +94,7 @@ func (c *Client) once(ctx context.Context, in Request) (*Response, error) {
 		if !validURL(req.URL.String()) {
 			return &Error{Code: "invalid_feed_url", Message: "The feed redirected to an invalid URL."}
 		}
+		redirected = true
 		if req.Response.StatusCode != 301 && req.Response.StatusCode != 308 {
 			permanent = false
 		}
@@ -112,7 +117,7 @@ func (c *Client) once(ctx context.Context, in Request) (*Response, error) {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	out := &Response{Status: resp.StatusCode, URL: resp.Request.URL.String(), Permanent: permanent && resp.Request.URL.String() != in.URL && resp.StatusCode == 200, ETag: header(resp.Header.Get("ETag")), LastModified: header(resp.Header.Get("Last-Modified")), CacheControl: resp.Header.Get("Cache-Control")}
+	out := &Response{Status: resp.StatusCode, URL: resp.Request.URL.String(), Permanent: redirected && permanent && resp.Request.URL.String() != in.URL && resp.StatusCode == 200, ETag: header(resp.Header.Get("ETag")), LastModified: header(resp.Header.Get("Last-Modified")), CacheControl: resp.Header.Get("Cache-Control")}
 	if resp.StatusCode == 304 {
 		return out, nil
 	}
@@ -134,7 +139,10 @@ func (c *Client) once(ctx context.Context, in Request) (*Response, error) {
 	if encoding == "gzip" {
 		gz, e := gzip.NewReader(rd)
 		if e != nil {
-			return nil, &Error{Code: "not_a_feed", Message: "The response has invalid gzip data."}
+			if corrupt(e) {
+				return nil, &Error{Code: "not_a_feed", Message: "The response has invalid gzip data."}
+			}
+			return nil, e // the connection's fault (classify): retried
 		}
 		defer func() { _ = gz.Close() }()
 		rd = gz
@@ -146,12 +154,23 @@ func (c *Client) once(ctx context.Context, in Request) (*Response, error) {
 		if ctx.Err() != nil {
 			return nil, &Error{Code: "timeout", Message: "The feed stopped responding."}
 		}
+		if corrupt(err) {
+			return nil, &Error{Code: "not_a_feed", Message: "The response has invalid gzip data."}
+		}
 		return nil, err
 	}
 	if int64(len(out.Body)) > in.MaxBytes {
 		return nil, &Error{Code: "too_large", Message: "The response exceeds the size limit."}
 	}
 	return out, nil
+}
+
+// corrupt reports whether a gzip error is the data's fault (an empty body, a
+// bad header, checksum or stream), which fails at once; a read the connection
+// broke is retried.
+func corrupt(err error) bool {
+	var stream flate.CorruptInputError
+	return errors.Is(err, io.EOF) || errors.Is(err, gzip.ErrHeader) || errors.Is(err, gzip.ErrChecksum) || errors.As(err, &stream)
 }
 
 type progressReader struct {

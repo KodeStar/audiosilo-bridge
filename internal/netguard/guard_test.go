@@ -1,10 +1,12 @@
 package netguard
 
 import (
+	"bytes"
 	"compress/gzip"
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -237,4 +239,76 @@ func TestRetryPolicyAndSafeFailures(t *testing.T) {
 	c = localClient(t)
 	_, err = c.Fetch(context.Background(), Request{URL: tlsServer.URL, MaxBytes: 100})
 	errorCode(t, err, "tls")
+}
+func TestDialTriesEveryAddress(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, "feed") }))
+	defer server.Close()
+	_, port, _ := net.SplitHostPort(server.Listener.Addr().String())
+	// The first address (TEST-NET-1) never answers: its share of the dial time
+	// runs out and the working one is still tried.
+	c := New(Options{AllowNetworks: []netip.Prefix{netip.MustParsePrefix("192.0.2.0/24"), netip.MustParsePrefix("127.0.0.1/32")}, Resolver: resolverFunc(func(context.Context, string, string) ([]netip.Addr, error) {
+		return []netip.Addr{netip.MustParseAddr("192.0.2.1"), netip.MustParseAddr("127.0.0.1")}, nil
+	})})
+	defer c.Close()
+	out, err := c.Fetch(context.Background(), Request{URL: "http://dual.example:" + port + "/feed", MaxBytes: 100})
+	if err != nil || string(out.Body) != "feed" {
+		t.Fatal(out, err)
+	}
+}
+func TestPermanentOnlyAfterARedirect(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/old" {
+			http.Redirect(w, r, "/feed", http.StatusMovedPermanently)
+			return
+		}
+		fmt.Fprint(w, "feed")
+	}))
+	defer server.Close()
+	c := localClient(t)
+	// URL.String spells this userinfo another way (pa%21ss): no redirect is
+	// no move.
+	out, err := c.Fetch(context.Background(), Request{URL: strings.Replace(server.URL, "http://", "http://u:pa!ss@", 1) + "/feed", MaxBytes: 100})
+	if err != nil || out.Permanent {
+		t.Fatalf("a fetch with no redirect reported a move: %+v %v", out, err)
+	}
+	out, err = c.Fetch(context.Background(), Request{URL: server.URL + "/old", MaxBytes: 100})
+	if err != nil || !out.Permanent || out.URL != server.URL+"/feed" {
+		t.Fatalf("301: %+v %v", out, err)
+	}
+}
+func TestGzipDataErrorsFailAtOnce(t *testing.T) {
+	t.Parallel()
+	var corrupt, truncated atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Encoding", "gzip")
+		if r.URL.Path == "/truncated" {
+			// The connection drops inside the gzip header.
+			truncated.Add(1)
+			w.Header().Set("Content-Length", "100")
+			_, _ = w.Write([]byte{0x1f, 0x8b, 8})
+			return
+		}
+		corrupt.Add(1)
+		var b bytes.Buffer
+		gz := gzip.NewWriter(&b)
+		_, _ = gz.Write([]byte(strings.Repeat("feed ", 100)))
+		_ = gz.Close()
+		raw := b.Bytes()
+		raw[len(raw)-5] ^= 0xff // a wrong checksum
+		_, _ = w.Write(raw)
+	}))
+	defer server.Close()
+	c := localClient(t)
+	_, err := c.Fetch(context.Background(), Request{URL: server.URL + "/corrupt", MaxBytes: 1000})
+	errorCode(t, err, "not_a_feed")
+	if corrupt.Load() != 1 {
+		t.Fatal("retried a corrupt body", corrupt.Load())
+	}
+	_, err = c.Fetch(context.Background(), Request{URL: server.URL + "/truncated", MaxBytes: 1000})
+	errorCode(t, err, "network")
+	if truncated.Load() != 3 {
+		t.Fatal("a broken connection was not retried", truncated.Load())
+	}
 }

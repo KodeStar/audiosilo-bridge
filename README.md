@@ -101,6 +101,8 @@ folder is `/bridge-data` in the images (`AUDIOSILO_BRIDGE_DATA`), else
 | `agent.claim_timeout_seconds` | `AUDIOSILO_BRIDGE_AGENT_CLAIM_TIMEOUT_SECONDS` | `120` | how long a job waits for the agent container to pick it up before the book waits and tries again (10 to 3600) |
 | `agent.monthly_budget_usd` | `AUDIOSILO_BRIDGE_AGENT_MONTHLY_BUDGET_USD` | `100` | the agent spend cap for a calendar month (UTC), across every book; `0` is no cap. Over it, books wait until the 1st |
 | `agent.book_budget_usd` | `AUDIOSILO_BRIDGE_AGENT_BOOK_BUDGET_USD` | `75` | the agent spend cap for one book |
+| `podcasts.allow_networks` | `AUDIOSILO_BRIDGE_PODCASTS_ALLOW_NETWORKS` (comma-separated CIDRs) | | private networks podcast feeds and artwork may come from; only for trusted feed hosts on your LAN (a list warns at start and on Status). Applies at the next start |
+| `podcasts.max_feed_mb` | `AUDIOSILO_BRIDGE_PODCASTS_MAX_FEED_MB` | `32` | the largest podcast feed fetched, once decoded (1 to 64). Applies at the next start |
 | `transcripts.retention_days` | `AUDIOSILO_BRIDGE_TRANSCRIPTS_RETENTION_DAYS` | `30` | how long a finished book's transcripts are kept (`0`: deleted when its job ends); the facts and results stay |
 | | `AUDIOSILO_BRIDGE_GITHUB_TOKEN` | | a GitHub token that can open issues on the community repos, for jobs that contribute their results (`contribute: issue`); read live, never stored, and used instead of the Accounts tab's GitHub sign-in while set |
 

@@ -133,7 +133,7 @@ Dockerfile    slim | cuda | agent | full; compose.example.yaml: server, bridge, 
 
 **Dependency direction:** `app -> {api, jobs, link, mapping, verify, generate,
 agentbox, workers, accounts, setup, correct, store, secrets, config, auth, logring,
-web, netguard, podcastjob}` plus the engine it wires; `accounts -> {agentproto, ghauth, secrets, store}`; `correct ->
+web, netguard, podcast, podcastjob}` plus the engine it wires; `accounts -> {agentproto, ghauth, secrets, store}`; `correct ->
 {contrib, jobs, metaops}`; `setup -> link`;
 `api` calls the injected Backend and the injected `auth.Manager` (login, sessions,
 the password), with types from jobs/link/mapping/store/logring; `verify -> {jobs,
@@ -166,9 +166,10 @@ in PACKAGES.md.
   book writer is `generate` (its three jobs): `characters.json`, `recaps.json`,
   `description.json` (Phase 1c), `chapters.json` (Phase 1d) and `bridge.json` in the
   book's `.audiosilo/` (a single-file book's prefixed `<stem>.`). Podcast writers
-  require a podcast-kind library and its checked marker mapping; they write only
-  the root marker, show folders, feed.json and sniffed JPEG/PNG artwork. Book
-  writers refuse podcast libraries. No episode audio is downloaded in 2c-1.
+  require a podcast-kind library and its checked marker mapping (a job claimed
+  before the check waits for it); they write only the root marker, show folders,
+  feed.json and sniffed JPEG/PNG artwork. Book writers refuse podcast libraries.
+  No episode audio is downloaded in 2c-1.
 - **The agent container's files are untrusted** (and the Bridge's are to it): every
   read goes through `agentproto.OpenRegular`/`ReadRegular` inside an `os.Root`, the
   harvest is capped, and the container's own credential never leaves it (only its
@@ -181,11 +182,11 @@ in PACKAGES.md.
   deletes an earlier Bridge's `github_pat` copy). An agent credential leaves the
   Bridge only as one run's `credential/credential.json`, which the runner deletes
   before the CLI starts, and only when the agent container has none of its own;
-  podcast feed URLs are sealed before a claim reaches server_jobs, as
-  podcast_job_<job id>, then podcast_feed_<show_id>. The job secret survives a
-  resumable stop and is deleted at any terminal end. Private feed.json files omit
-  feed, enclosure, chapters and transcript URLs. Both log sinks and the page API
-  redact URLs, including userinfo, paths and queries.
+  private podcast feed URLs are sealed before a claim reaches server_jobs, as
+  podcast_job_<job id>_<attempt> (each claim its own), then podcast_feed_<show_id>.
+  The job secret survives a resumable stop and is deleted at any terminal end.
+  Private feed.json files omit feed, enclosure, chapters and transcript URLs. Both
+  log sinks and the page API redact URLs, including userinfo, paths and queries.
 - **The page answers the local network only and always asks for its password**,
   loopback included (spike 2: an agent on the same network could reach it).
 - **The worker routes (`/worker/v1/*`, Phase 1b) take only a worker token**

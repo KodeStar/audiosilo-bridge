@@ -28,8 +28,11 @@ type libraryMarker struct {
 }
 
 // CheckPodcast proves an empty library mapping by having the server read a
-// nonce back from disk. A marker created for a failed check is removed.
-func CheckPodcast(ctx context.Context, src MarkerSource, lib link.Library, mount string) link.LibraryStatus {
+// nonce back from disk. A marker created for a failed check is removed. A
+// marker naming another library is refused while the server still has that
+// library (current; the mount shows its folder) and replaced once it doesn't
+// (the library was deleted, or this folder added again under a new id).
+func CheckPodcast(ctx context.Context, src MarkerSource, lib link.Library, mount string, current func(int64) bool) link.LibraryStatus {
 	st := link.LibraryStatus{LibraryID: lib.ID, MountPath: mount, CheckedPath: MarkerPath}
 	root, err := os.OpenRoot(mount)
 	if err != nil {
@@ -60,6 +63,13 @@ func CheckPodcast(ctx context.Context, src MarkerSource, lib link.Library, mount
 		return st
 	}
 	marker, err = readMarker(root)
+	if err == nil && marker.LibraryID != lib.ID && !current(marker.LibraryID) {
+		if err := root.Remove(MarkerPath); err != nil {
+			st.Error = "could not replace the marker of a removed library"
+			return st
+		}
+		err = os.ErrNotExist
+	}
 	if errors.Is(err, os.ErrNotExist) {
 		if err := ProbeWritable(mount); err != nil {
 			st.Error = "the library is not writable here"

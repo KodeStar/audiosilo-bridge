@@ -13,6 +13,8 @@ import (
 	"github.com/mmcdole/gofeed"
 	ext "github.com/mmcdole/gofeed/extensions"
 	"golang.org/x/net/html"
+	"golang.org/x/net/html/atom"
+	"golang.org/x/net/html/charset"
 )
 
 var ErrNotFeed = errors.New("not_a_feed")
@@ -154,11 +156,13 @@ func parse(raw []byte, base string, allowEmpty bool) (*Parsed, error) {
 
 // Resolve extension prefixes by URI, never by an untrusted prefix spelling.
 // Only declarations are collected; extension data comes from gofeed. The
-// prefixes come back sorted and distinct.
+// prefixes come back sorted and distinct. A feed in a legacy encoding
+// (ISO-8859-1, windows-1252) is decoded as gofeed decodes it.
 func podcastPrefixes(raw []byte) []string {
 	var out []string
 	d := xml.NewDecoder(bytes.NewReader(raw))
 	d.Strict = false
+	d.CharsetReader = charset.NewReaderLabel
 	for {
 		tok, e := d.Token()
 		if e != nil {
@@ -212,6 +216,14 @@ func duration(s string) *int {
 	if len(parts) > 3 || s == "" {
 		return nil
 	}
+	// The seconds may carry a fraction ("1503.4", "25:03.400"): it is dropped.
+	last := parts[len(parts)-1]
+	if whole, frac, ok := strings.Cut(last, "."); ok {
+		if frac == "" || strings.Trim(frac, "0123456789") != "" {
+			return nil
+		}
+		parts[len(parts)-1] = whole
+	}
 	n := 0
 	for _, p := range parts {
 		v, e := strconv.Atoi(p)
@@ -228,18 +240,31 @@ func duration(s string) *int {
 
 // Text strips markup, script/style content and control characters, then clips
 // on a rune boundary. The byte limit also bounds the text retained in memory.
+// What only looks like a tag stays text: a name that is no HTML element
+// ("Vec<T>") and a tag left open at the end ("x<y").
 func Text(s string, limit int) string {
 	z := html.NewTokenizer(strings.NewReader(s))
 	var b strings.Builder
+	write := func(piece []byte) { b.Write(piece[:min(len(piece), max(limit*4-b.Len(), 0))]) }
 	hidden := 0
-	for {
+	for b.Len() <= limit*4 {
 		tt := z.Next()
 		if tt == html.ErrorToken {
+			if raw := z.Raw(); hidden == 0 && len(raw) > 1 && raw[0] == '<' && isLetter(raw[1]) {
+				write([]byte(html.UnescapeString(string(raw))))
+			}
 			break
+		}
+		var name []byte // TagName answers once per token
+		if tt == html.StartTagToken || tt == html.EndTagToken || tt == html.SelfClosingTagToken {
+			name, _ = z.TagName()
+			if hidden == 0 && atom.Lookup(name) == 0 && !bytes.ContainsRune(name, ':') {
+				write(z.Raw())
+				continue
+			}
 		}
 		switch tt {
 		case html.StartTagToken:
-			name, _ := z.TagName()
 			if string(name) == "script" || string(name) == "style" {
 				hidden++
 			}
@@ -247,7 +272,6 @@ func Text(s string, limit int) string {
 				b.WriteByte(' ')
 			}
 		case html.EndTagToken:
-			name, _ := z.TagName()
 			if (string(name) == "script" || string(name) == "style") && hidden > 0 {
 				hidden--
 			}
@@ -260,13 +284,8 @@ func Text(s string, limit int) string {
 			}
 		case html.TextToken:
 			if hidden == 0 {
-				piece := z.Text()
-				room := limit*4 - b.Len()
-				b.Write(piece[:min(len(piece), max(room, 0))])
+				write(z.Text())
 			}
-		}
-		if b.Len() > limit*4 {
-			break
 		}
 	}
 	text := strings.Map(func(r rune) rune {
@@ -277,3 +296,4 @@ func Text(s string, limit int) string {
 	}, b.String())
 	return Clip(strings.Join(strings.Fields(text), " "), limit)
 }
+func isLetter(c byte) bool { return 'a' <= c|0x20 && c|0x20 <= 'z' }

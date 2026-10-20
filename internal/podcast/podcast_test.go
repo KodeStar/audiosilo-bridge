@@ -3,9 +3,11 @@ package podcast
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -154,7 +156,7 @@ func TestParseNamespacesTextAndEnclosures(t *testing.T) {
 	if _, err := Parse([]byte(`<rss version="2.0"><channel><title>News</title><item><title>A blog</title></item></channel></rss>`), "https://example.com/feed"); !errors.Is(err, ErrNotPodcast) {
 		t.Fatal(err)
 	}
-	for typ, want := range map[string]string{"audio/mpeg": "mp3", "audio/mp3": "mp3", "audio/mpeg3": "mp3", "audio/mp4": "m4a", "audio/m4a": "m4a", "audio/x-m4a": "m4a", "audio/ogg": "ogg", "audio/vorbis": "ogg", "audio/opus": "opus", "audio/x-flac": "flac", "audio/flac": "flac", "": "m4b", "application/octet-stream": "m4b", "audio/aac": "", "audio/wav": "", "video/mp4": ""} {
+	for typ, want := range map[string]string{"audio/mpeg": "mp3", "audio/mp3": "mp3", "audio/mpeg3": "mp3", "audio/x-mpeg": "mp3", "audio/x-mp3": "mp3", "audio/x-mpeg3": "mp3", "audio/mpg": "mp3", "audio/x-mpg": "mp3", "audio/mp4": "m4a", "audio/m4a": "m4a", "audio/x-m4a": "m4a", "audio/ogg": "ogg", "audio/vorbis": "ogg", "audio/opus": "opus", "audio/x-flac": "flac", "audio/flac": "flac", "": "m4b", "application/octet-stream": "m4b", "audio/aac": "", "audio/wav": "", "video/mp4": ""} {
 		if got := Extension(typ, "https://example.com/a.m4b?token=x"); got != want {
 			t.Errorf("extension %s = %s", typ, got)
 		}
@@ -192,6 +194,135 @@ func TestMergeStablePathsRemovedAndAliases(t *testing.T) {
 	added, err = Merge(f, p, "Example Show", now)
 	if err != nil || added != 0 {
 		t.Fatal("private identity not stable", added, err)
+	}
+}
+func TestMergeOwnIdentityFirstAndQueryIdentifiedEnclosures(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 20, 10, 0, 0, 0, time.UTC)
+	ep := func(guid, title, url string) Episode {
+		return Episode{GUID: guid, Title: title, EpisodeType: "full", Enclosure: Enclosure{URL: url, Type: "audio/mpeg"}, Transcripts: []Transcript{}}
+	}
+	// A new item that only shares a kept episode's title and date, listed before
+	// that episode's own item, is a new episode: it never takes the kept one.
+	f := &Feed{Episodes: []Episode{}}
+	old := ep("old", "Bonus", "https://cdn.example.com/old.mp3")
+	if _, err := Merge(f, &Parsed{Episodes: []Episode{old}}, "Show", now); err != nil {
+		t.Fatal(err)
+	}
+	kept := f.Episodes[0]
+	added, err := Merge(f, &Parsed{Episodes: []Episode{ep("new", "Bonus", "https://cdn.example.com/new.mp3"), old}}, "Show", now)
+	if err != nil || added != 1 || len(f.Episodes) != 2 {
+		t.Fatalf("merge: %d %v %+v", added, err, f.Episodes)
+	}
+	for _, e := range f.Episodes {
+		if e.GUID == "old" && (e.ID != kept.ID || e.Path != kept.Path || e.RemovedAt != "") {
+			t.Fatalf("the kept episode lost its identity: %+v", e)
+		}
+		if e.GUID == "new" && (e.ID == kept.ID || e.Path == kept.Path) {
+			t.Fatalf("a weak match took the kept episode: %+v", e)
+		}
+	}
+	// Enclosures told apart only by their query (a download link) stay apart; a
+	// tracking value on an audio file's path is still the same file.
+	f = &Feed{Episodes: []Episode{}}
+	drive := func(id string) Episode {
+		return ep("", "Episode "+id, "https://drive.example.com/uc?export=download&id="+id)
+	}
+	added, err = Merge(f, &Parsed{Episodes: []Episode{drive("A"), drive("B")}}, "Show", now)
+	if err != nil || added != 2 || len(f.Episodes) != 2 || f.Episodes[0].Path == f.Episodes[1].Path {
+		t.Fatalf("query-identified enclosures collapsed: %d %v %+v", added, err, f.Episodes)
+	}
+	if got := EnclosureBase("https://cdn.example.com/a.MP3?ts=1#t=5"); got != "https://cdn.example.com/a.MP3" {
+		t.Fatal(got)
+	}
+	if got := EnclosureBase("https://drive.example.com/uc?export=download&id=A#x"); got != "https://drive.example.com/uc?export=download&id=A" {
+		t.Fatal(got)
+	}
+}
+func TestMergeCapDropsTheLongestRemoved(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 20, 10, 0, 0, 0, time.UTC)
+	f := &Feed{Episodes: make([]Episode, 0, MaxEpisodes)}
+	for i := range MaxEpisodes {
+		f.Episodes = append(f.Episodes, Episode{ID: fmt.Sprintf("id%05d", i), GUID: fmt.Sprintf("g%d", i), Path: fmt.Sprintf("Show/%05d.mp3", i), Title: fmt.Sprintf("Old %d", i), EpisodeType: "full", Transcripts: []Transcript{},
+			RemovedAt: now.Add(-time.Duration(MaxEpisodes-i) * time.Hour).Format(time.RFC3339)})
+	}
+	f.Episodes[0].Fetch = &Fetch{Generation: 1} // fetched: never dropped
+	fresh := Episode{GUID: "fresh", Title: "Fresh", EpisodeType: "full", Enclosure: Enclosure{URL: "https://cdn.example.com/fresh.mp3", Type: "audio/mpeg"}, Transcripts: []Transcript{}}
+	// A feed rotating its items through the cap keeps updating: the removed
+	// episode gone longest (and never fetched) makes room.
+	added, err := Merge(f, &Parsed{Episodes: []Episode{fresh}}, "Show", now)
+	if err != nil || added != 1 || len(f.Episodes) != MaxEpisodes {
+		t.Fatalf("merge at the cap: %d %v %d", added, err, len(f.Episodes))
+	}
+	has := func(guid string) bool {
+		return slices.ContainsFunc(f.Episodes, func(e Episode) bool { return e.GUID == guid })
+	}
+	if !has("fresh") || !has("g0") || has("g1") || !has("g2") {
+		t.Fatal("dropped the wrong episode")
+	}
+	// Episodes the feed still lists are never dropped.
+	items := make([]Episode, 0, MaxEpisodes+1)
+	for i := range MaxEpisodes + 1 {
+		items = append(items, Episode{GUID: fmt.Sprintf("live%d", i), Title: "Live", EpisodeType: "full", Enclosure: Enclosure{URL: fmt.Sprintf("https://cdn.example.com/%d.mp3", i), Type: "audio/mpeg"}, Transcripts: []Transcript{}})
+	}
+	if _, err := Merge(&Feed{Episodes: []Episode{}}, &Parsed{Episodes: items}, "Show", now); !errors.Is(err, ErrTooLarge) {
+		t.Fatal("a feed over the cap was accepted", err)
+	}
+}
+func TestTextKeepsWhatOnlyLooksLikeMarkup(t *testing.T) {
+	t.Parallel()
+	for in, want := range map[string]string{
+		"Why a<b matters":                     "Why a<b matters",
+		"Rust: Vec<T> explained":              "Rust: Vec<T> explained",
+		"Generic <K, V> maps":                 "Generic <K, V> maps",
+		"x<y &amp; z":                         "x<y & z",
+		"<b>Bold</b> &amp; co":                "Bold & co",
+		"<p>Notes</p><script>secret</script>": "Notes",
+		"a<o:p></o:p>b":                       "a b",
+		"AT&amp;T":                            "AT&T",
+		"a < b":                               "a < b",
+	} {
+		if got := Text(in, 300); got != want {
+			t.Errorf("Text(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+func TestLegacyCharsetFeedKeepsPodcastNamespace(t *testing.T) {
+	t.Parallel()
+	feed := "<?xml version=\"1.0\" encoding=\"ISO-8859-1\"?>\n<rss version=\"2.0\" xmlns:podcast=\"https://podcastindex.org/namespace/1.0\"><channel><title>Caf\xe9</title><podcast:guid>show-guid</podcast:guid><item><guid>g1</guid><title>One</title><enclosure url=\"https://example.com/1.mp3\" type=\"audio/mpeg\"/><podcast:transcript url=\"https://example.com/1.vtt\" type=\"text/vtt\"/></item></channel></rss>"
+	p, err := Parse([]byte(feed), "https://example.com/feed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Show.Title != "Caf\u00e9" || p.Show.PodcastGUID != "show-guid" || len(p.Episodes) != 1 || len(p.Episodes[0].Transcripts) != 1 {
+		t.Fatalf("legacy charset feed lost podcast data: %+v", p)
+	}
+}
+func TestDurationTakesFractionalSeconds(t *testing.T) {
+	t.Parallel()
+	for in, want := range map[string]int{"1503": 1503, "1503.4": 1503, "25:03.400": 1503, "00:25:03.9": 1503, "01:02:03": 3723} {
+		if got := duration(in); got == nil || *got != want {
+			t.Errorf("duration(%q) = %v, want %d", in, got, want)
+		}
+	}
+	for _, in := range []string{"", "1503.", ".4", "1503.4.5", "25:03.x", "1:2:3:4", "-5"} {
+		if got := duration(in); got != nil {
+			t.Errorf("duration(%q) = %d, want none", in, *got)
+		}
+	}
+}
+func TestRedactTextKeepsClosingPunctuation(t *testing.T) {
+	t.Parallel()
+	for in, want := range map[string]string{
+		"see https://u:p@host.example/feed?token=SECRET123.":     "see https://host.example/....",
+		"(https://host.example/a?token=SECRET123), then":         "(https://host.example/...), then",
+		"dial https://host.example: refused":                     "dial https://host.example: refused",
+		"fetch https://host.example/feed.xml?k=SECRET123; retry": "fetch https://host.example/...; retry",
+	} {
+		if got := RedactText(in); got != want {
+			t.Errorf("RedactText(%q) = %q, want %q", in, got, want)
+		}
 	}
 }
 func TestIntervalAndReadRefusals(t *testing.T) {

@@ -109,8 +109,8 @@ func (h *Handler) Enabled(ctx context.Context, l slog.Level) bool {
 // Handle passes the record on and keeps a copy.
 func (h *Handler) Handle(ctx context.Context, rec slog.Record) error {
 	clean := slog.NewRecord(rec.Time, rec.Level, podcast.RedactText(rec.Message), rec.PC)
+	rec.Attrs(func(a slog.Attr) bool { clean.AddAttrs(sanitize(a)); return true })
 	prefix := strings.Join(h.groups, ".")
-	rec.Attrs(func(a slog.Attr) bool { clean.AddAttrs(sanitize(prefix, a)); return true })
 	rec = clean
 	if rec.Level >= slog.LevelInfo {
 		e := Entry{Time: rec.Time, Level: rec.Level, Message: rec.Message}
@@ -170,7 +170,7 @@ func (h *Handler) WithAttrs(attrs []slog.Attr) slog.Handler {
 	prefix := strings.Join(h.groups, ".")
 	clean := make([]slog.Attr, 0, len(attrs))
 	for _, a := range attrs {
-		a = sanitize(prefix, a)
+		a = sanitize(a)
 		clean = append(clean, a)
 		if prefix != "" {
 			a.Key = prefix + "." + a.Key
@@ -180,25 +180,19 @@ func (h *Handler) WithAttrs(attrs []slog.Attr) slog.Handler {
 	return &Handler{next: h.next.WithAttrs(clean), ring: h.ring, attrs: kept, groups: h.groups}
 }
 
-// Sanitize before either sink sees a record, including attributes attached by
-// WithAttrs. Error values may themselves contain credential-bearing URLs.
-func sanitize(prefix string, a slog.Attr) slog.Attr {
-	key := a.Key
-	if prefix != "" {
-		key = prefix + "." + key
-	}
+// sanitize takes the credentials, paths and queries out of the URLs in a value
+// before either sink sees it, attributes attached by WithAttrs included (an
+// error's text may hold a credential-bearing URL). Secret-sounding keys are the
+// ring's to redact (add): the process log keeps their values, as before.
+func sanitize(a slog.Attr) slog.Attr {
 	v := a.Value.Resolve()
 	if v.Kind() == slog.KindGroup {
 		group := v.Group()
 		out := make([]slog.Attr, 0, len(group))
 		for _, leaf := range group {
-			out = append(out, sanitize(key, leaf))
+			out = append(out, sanitize(leaf))
 		}
 		a.Value = slog.GroupValue(out...)
-		return a
-	}
-	if redact(key) {
-		a.Value = slog.StringValue("[redacted]")
 		return a
 	}
 	if strings.EqualFold(a.Key, "feed_url") {

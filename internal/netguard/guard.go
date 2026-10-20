@@ -112,9 +112,16 @@ func (c *Client) dial(ctx context.Context, network, address string) (net.Conn, e
 			return nil, ErrBlocked
 		}
 	}
-	d := &net.Dialer{Timeout: 10 * time.Second, Control: c.control}
-	for _, ip := range ips {
-		conn, e := d.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
+	d := &net.Dialer{Control: c.control}
+	deadline, _ := ctx.Deadline()
+	for i, ip := range ips {
+		// Each address gets its share of the time left (at least 2 s), as
+		// net.Dialer does for a host name, so one that drops packets can't use
+		// it all and leave a working one untried.
+		left := time.Until(deadline)
+		dctx, cancel := context.WithTimeout(ctx, min(left, max(left/time.Duration(len(ips)-i), 2*time.Second)))
+		conn, e := d.DialContext(dctx, network, net.JoinHostPort(ip.String(), port))
+		cancel()
 		if e == nil {
 			return conn, nil
 		}

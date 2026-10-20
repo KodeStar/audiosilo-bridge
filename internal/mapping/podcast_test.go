@@ -38,12 +38,12 @@ func TestPodcastMarkerRoundTripAndRegistry(t *testing.T) {
 		}
 		return marker.Nonce, nil
 	})
-	st := CheckPodcast(context.Background(), source, lib, mount)
+	st := CheckPodcast(context.Background(), source, lib, mount, func(id int64) bool { return id == 4 })
 	if !st.Mapped || !st.Writable || st.CheckedPath != MarkerPath {
 		t.Fatalf("check: %+v", st)
 	}
 	b, _ := os.ReadFile(filepath.Join(mount, MarkerPath))
-	st = CheckPodcast(context.Background(), source, lib, mount)
+	st = CheckPodcast(context.Background(), source, lib, mount, func(id int64) bool { return id == 4 })
 	after, _ := os.ReadFile(filepath.Join(mount, MarkerPath))
 	if !st.Mapped || string(b) != string(after) {
 		t.Fatal("changed an existing marker")
@@ -87,7 +87,7 @@ func TestPodcastMarkerRefusalsAndCleanup(t *testing.T) {
 					}
 				}
 			}
-			st := CheckPodcast(context.Background(), source, lib, mount)
+			st := CheckPodcast(context.Background(), source, lib, mount, func(id int64) bool { return id == 4 })
 			if st.Mapped || st.Writable || st.Error == "" {
 				t.Fatalf("allowed %s: %+v", scenario, st)
 			}
@@ -99,5 +99,41 @@ func TestPodcastMarkerRefusalsAndCleanup(t *testing.T) {
 				t.Fatal("failed marker was not cleaned up")
 			}
 		})
+	}
+}
+
+// A marker naming a library the server still has is refused (the mount shows
+// that library's folder); once the server no longer has it (deleted, or this
+// folder added again under a new id) the marker is replaced.
+func TestPodcastMarkerOfARemovedLibraryIsReplaced(t *testing.T) {
+	t.Parallel()
+	mounts := map[int64]string{4: t.TempDir(), 5: t.TempDir()}
+	os.Mkdir(filepath.Join(mounts[5], ".audiosilo"), 0755)
+	stale := []byte(`{"version":1,"library_id":4,"nonce":"0123456789abcdef0123456789abcdef"}`)
+	os.WriteFile(filepath.Join(mounts[5], MarkerPath), stale, 0644)
+	source := markerSourceFunc(func(_ context.Context, id int64) (string, error) {
+		b, err := os.ReadFile(filepath.Join(mounts[id], MarkerPath))
+		if err != nil {
+			return "", err
+		}
+		var marker libraryMarker
+		err = json.Unmarshal(b, &marker)
+		return marker.Nonce, err
+	})
+	mount := func(id int64, _ string) (string, bool) { return mounts[id], true }
+	r := NewRegistry()
+	r.SetLibraries([]link.Library{{ID: 4, Kind: "podcasts"}, {ID: 5, Kind: "podcasts"}})
+	r.Check(context.Background(), source, mount, time.Now)
+	st, _ := r.Status(5)
+	b, _ := os.ReadFile(filepath.Join(mounts[5], MarkerPath))
+	if st.Mapped || st.Error == "" || string(b) != string(stale) {
+		t.Fatalf("a listed library's marker was taken over: %+v %s", st, b)
+	}
+	r.SetLibraries([]link.Library{{ID: 5, Kind: "podcasts"}})
+	r.Check(context.Background(), source, mount, time.Now)
+	st, _ = r.Status(5)
+	b, _ = os.ReadFile(filepath.Join(mounts[5], MarkerPath))
+	if !st.Mapped || !st.Writable || !strings.Contains(string(b), `"library_id":5`) {
+		t.Fatalf("a removed library's marker blocked the mapping: %+v %s", st, b)
 	}
 }

@@ -3,7 +3,9 @@
 // stat-ed through the mount and their sizes compared with what the server sees,
 // then a probe file is written and removed to learn whether the Bridge can
 // write there. Only the size comparison catches a stale copy of a library
-// (spike 3), so a library with no indexed book is never reported mapped.
+// (spike 3), so a library with no indexed book is never reported mapped. A
+// podcast library has no books: a marker the server reads back proves it
+// instead (CheckPodcast).
 package mapping
 
 import (
@@ -334,7 +336,9 @@ func (r *Registry) Check(ctx context.Context, src BookSource, mount MountFunc, n
 	r.checking = true
 	for {
 		var libs []link.Library
+		listed := map[int64]bool{}
 		for _, l := range r.libs {
+			listed[l.ID] = true
 			if len(ids) == 0 || slices.Contains(ids, l.ID) {
 				libs = append(libs, l)
 			}
@@ -349,7 +353,7 @@ func (r *Registry) Check(ctx context.Context, src BookSource, mount MountFunc, n
 			if l.LibraryKind() == "podcasts" {
 				marker, ok := src.(MarkerSource)
 				if ok {
-					st = CheckPodcast(ctx, marker, l, path)
+					st = CheckPodcast(ctx, marker, l, path, func(id int64) bool { return listed[id] })
 				} else {
 					st = link.LibraryStatus{LibraryID: l.ID, MountPath: path, Error: "the server link cannot check a library marker"}
 				}

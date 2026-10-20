@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"os"
 	"slices"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -46,11 +48,18 @@ type Options struct {
 	Version      string
 	ServerID     func() string
 	Now          func() time.Time
+	// CheckPoll is how often a job claimed before its library's mapping check
+	// looks for the result (default 1 s).
+	CheckPoll time.Duration
 }
 type service struct {
 	o     Options
 	mu    sync.Mutex
 	locks map[string]*lock
+	// indexed holds the shows whose current feed.json the server indexed since
+	// this start: a poll asks for a rescan of any other, so an index update a
+	// failed job left owed is not lost when the feed stays the same.
+	indexed map[string]bool
 }
 type lock struct {
 	gate  chan struct{}
@@ -69,7 +78,10 @@ func New(o Options) *Subscribe {
 	if o.ServerID == nil {
 		o.ServerID = func() string { return "" }
 	}
-	return &Subscribe{s: &service{o: o, locks: map[string]*lock{}}}
+	if o.CheckPoll <= 0 {
+		o.CheckPoll = time.Second
+	}
+	return &Subscribe{s: &service{o: o, locks: map[string]*lock{}, indexed: map[string]bool{}}}
 }
 func (h *Subscribe) PollJob() *Poll { return &Poll{s: h.s} }
 func (h *Subscribe) Kind() string   { return SubscribeKind }
@@ -89,26 +101,26 @@ type subscribeParams struct {
 func (h *Subscribe) SealParams(job jobs.Job) (json.RawMessage, error) {
 	var p subscribeParams
 	if json.Unmarshal(job.Params, &p) != nil {
-		return nil, errors.New("invalid podcast params")
+		return nil, &jobs.SealFailure{Code: "invalid_feed_url", Message: "The feed request is invalid."}
 	}
 	norm, err := podcast.NormalizeFeedURL(p.FeedURL)
 	if err != nil {
-		return nil, err
+		return nil, &jobs.SealFailure{Code: "invalid_feed_url", Message: "The feed URL is invalid."}
 	}
 	p.FeedURL = norm
 	p.Private = p.Private || podcast.IsPrivateFeedURL(norm)
 	p.FeedURLSHA256 = podcast.FeedURLHash(norm)
 	p.FeedHost = podcast.FeedHost(norm)
 	if p.Private {
-		if err := h.s.o.Vault.Set(secrets.PodcastJobName(job.ID), norm); err != nil {
-			return nil, err
+		if err := h.s.o.Vault.Set(secrets.PodcastJobName(job.ID, job.Attempt), norm); err != nil {
+			return nil, &jobs.SealFailure{Code: "write_failed", Message: "The private feed credentials could not be sealed."}
 		}
 		p.FeedURL = ""
 	}
 	return json.Marshal(p)
 }
 func (h *Subscribe) Abandon(_ context.Context, job jobs.Job) {
-	_ = h.s.o.Vault.Delete(secrets.PodcastJobName(job.ID))
+	_ = h.s.o.Vault.Delete(secrets.PodcastJobName(job.ID, job.Attempt))
 }
 
 func (h *Subscribe) Run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (any, error) {
@@ -117,19 +129,17 @@ func (h *Subscribe) Run(parent context.Context, job jobs.Job, rep *jobs.Reporter
 			h.Abandon(parent, job)
 		}
 	}()
-	return bounded(parent, func(ctx context.Context) (any, error) { return h.run(ctx, job, rep) })
+	return outcome(h.run(parent, job, rep))
 }
 func (h *Poll) Run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (any, error) {
-	return bounded(parent, func(ctx context.Context) (any, error) { return h.run(ctx, job, rep) })
+	ctx, cancel := context.WithTimeout(parent, ceiling)
+	defer cancel()
+	return outcome(h.run(ctx, job, rep))
 }
 
-// bounded runs a job under the 3 minute job ceiling and maps its error to a
-// failure result.
-func bounded(parent context.Context, run func(context.Context) (any, error)) (any, error) {
-	ctx, cancel := context.WithTimeout(parent, 3*time.Minute)
-	defer cancel()
-	return outcome(run(ctx))
-}
+// ceiling bounds a job's work (a subscribe's starts once it holds the library
+// lock).
+const ceiling = 3 * time.Minute
 
 func (s *service) acquire(ctx context.Context, key string) (func(), error) {
 	s.mu.Lock()
@@ -157,16 +167,32 @@ func (s *service) acquire(ctx context.Context, key string) (func(), error) {
 	}
 }
 
-func (s *service) library(job jobs.Job) (link.Library, string, error) {
+// library is the job's podcast library and the mount it writes at. A job
+// claimed before the library's mapping check has a result for that mount (the
+// first claims after a start run beside the first check) waits for it, as
+// generate's waitMapped does, within the job's ceiling.
+func (s *service) library(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (link.Library, string, error) {
 	if job.LibraryID == nil {
 		return link.Library{}, "", fail("not_podcast_library", "This job needs a podcast library.")
 	}
-	lib, ok := s.o.Libraries.Library(*job.LibraryID)
-	if !ok {
-		return lib, "", fail("not_podcast_library", "This job needs a podcast library.")
+	for {
+		lib, ok := s.o.Libraries.Library(*job.LibraryID)
+		if !ok || lib.LibraryKind() != "podcasts" {
+			return lib, "", fail("not_podcast_library", "This job needs a podcast library.")
+		}
+		mount, _ := s.o.Mount(lib.ID, lib.Root)
+		if st, checked := s.o.Libraries.Status(lib.ID); checked && st.MountPath == mount {
+			return lib, mount, s.writable(lib, mount)
+		}
+		rep.Progress(jobs.Progress{Step: "waiting", Message: "Waiting for the library's mapping check"})
+		t := time.NewTimer(s.o.CheckPoll)
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			return lib, "", ctx.Err()
+		case <-t.C:
+		}
 	}
-	mount, _ := s.o.Mount(lib.ID, lib.Root)
-	return lib, mount, s.writable(lib, mount) // writable checks the kind
 }
 func (s *service) writable(lib link.Library, mount string) error {
 	current, ok := s.o.Libraries.Library(lib.ID)
@@ -211,22 +237,29 @@ func (s *service) feedURL(plain string, private bool, secret, invalid string) (s
 	return norm, nil
 }
 
-func (h *Subscribe) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (any, error) {
+func (h *Subscribe) run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (any, error) {
 	s := h.s
-	lib, mount, err := s.library(job)
+	wait, stop := context.WithTimeout(parent, ceiling)
+	lib, mount, err := s.library(wait, job, rep)
+	stop()
 	if err != nil {
 		return nil, err
 	}
-	unlock, err := s.acquire(ctx, s.o.ServerID()+"|"+lib.Root)
+	// A follow queued behind another one into the same library waits its turn
+	// (that one is bounded by its own ceiling), then gets a whole ceiling: the
+	// wait never times it out unfetched.
+	unlock, err := s.acquire(parent, s.o.ServerID()+"|"+lib.Root)
 	if err != nil {
 		return nil, err
 	}
 	defer unlock()
+	ctx, cancel := context.WithTimeout(parent, ceiling)
+	defer cancel()
 	var p subscribeParams
 	if json.Unmarshal(job.Params, &p) != nil {
 		return nil, fail("invalid_feed_url", "The feed request is invalid.")
 	}
-	feedURL, err := s.feedURL(p.FeedURL, p.Private, secrets.PodcastJobName(job.ID), "The feed URL is invalid.")
+	feedURL, err := s.feedURL(p.FeedURL, p.Private, secrets.PodcastJobName(job.ID, job.Attempt), "The feed URL is invalid.")
 	if err != nil {
 		return nil, err
 	}
@@ -249,7 +282,7 @@ func (h *Subscribe) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (
 	if err != nil {
 		return nil, err
 	}
-	created := f == nil
+	created, done := f == nil, false
 	if !created {
 		current := f.FeedURL
 		if f.Private {
@@ -295,6 +328,18 @@ func (h *Subscribe) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (
 		if err := root.Mkdir(show, 0o755); err != nil {
 			return nil, fail("write_failed", "The show folder could not be created.")
 		}
+		// A follow that fails before its feed.json is written takes back the
+		// folder it made (and its artwork), or each retry would add "Title (2)".
+		defer func() {
+			if done {
+				return
+			}
+			if _, err := root.Lstat(show + "/feed.json"); errors.Is(err, os.ErrNotExist) {
+				_ = root.Remove(show + "/cover.jpg")
+				_ = root.Remove(show + "/cover.png")
+				_ = root.Remove(show)
+			}
+		}()
 		if err := root.Chmod(show, 0o755); err != nil {
 			return nil, fail("write_failed", "The show folder permissions could not be set.")
 		}
@@ -323,6 +368,7 @@ func (h *Subscribe) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (
 	if _, _, err := s.persist(ctx, root, lib, mount, show, f, parsed, newURL); err != nil {
 		return nil, err
 	}
+	done = true
 	rep.Progress(jobs.Progress{Step: "indexing", Message: "Indexing the podcast show"})
 	if err := s.rescan(ctx, lib.ID, show); err != nil {
 		return nil, err
@@ -332,7 +378,7 @@ func (h *Subscribe) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (
 
 func (h *Poll) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (any, error) {
 	s := h.s
-	lib, mount, err := s.library(job)
+	lib, mount, err := s.library(ctx, job, rep)
 	if err != nil {
 		return nil, err
 	}
@@ -395,16 +441,21 @@ func (h *Poll) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (any, 
 		if err != nil {
 			return nil, err
 		}
-		if changed {
-			rep.Progress(jobs.Progress{Step: "indexing", Message: "Indexing changed podcast details"})
-			if err := s.rescan(ctx, lib.ID, show); err != nil {
-				return nil, err
-			}
+	}
+	if !s.isIndexed(lib.ID, show) {
+		rep.Progress(jobs.Progress{Step: "indexing", Message: "Indexing the podcast show"})
+		if err := s.rescan(ctx, lib.ID, show); err != nil {
+			return nil, err
 		}
 	}
 	return map[string]any{"library_id": lib.ID, "show_path": show, "status": resp.Status, "changed": changed, "new_episodes": added, "episodes": len(f.Episodes), "skipped": skipped, "moved": moved, "etag": resp.ETag, "last_modified": resp.LastModified, "next_poll_seconds": podcast.NextPoll(f, resp.CacheControl, s.o.Now())}, nil
 }
 
+// moveURL applies a permanent redirect or an itunes:new-feed-url to f and
+// answers the URL to fetch from now on. A new-feed-url counts only when it
+// names neither the URL fetched nor where that redirected, nor a URL the show
+// already moved away from (one that redirects back would otherwise flip the
+// show on every poll), and never takes an https feed to http.
 func moveURL(f *podcast.Feed, original string, resp *netguard.Response, p *podcast.Parsed) (string, bool) {
 	current := original
 	if resp.Permanent {
@@ -412,17 +463,22 @@ func moveURL(f *podcast.Feed, original string, resp *netguard.Response, p *podca
 			current = norm
 		}
 	}
-	if norm, err := podcast.NormalizeFeedURL(p.NewFeedURL); err == nil && norm != original {
+	if norm, err := podcast.NormalizeFeedURL(p.NewFeedURL); err == nil && norm != original && norm != current &&
+		!slices.Contains(f.PreviousFeedURLSHA256, podcast.FeedURLHash(norm)) && !downgrade(current, norm) {
 		current = norm
 	}
 	hash := podcast.FeedURLHash(current)
 	moved := hash != f.FeedURLSHA256
 	if moved {
-		f.PreviousFeedURLSHA256 = append([]string{f.FeedURLSHA256}, f.PreviousFeedURLSHA256...)
-		f.PreviousFeedURLSHA256 = slices.Compact(f.PreviousFeedURLSHA256)
-		if len(f.PreviousFeedURLSHA256) > 5 {
-			f.PreviousFeedURLSHA256 = f.PreviousFeedURLSHA256[:5]
+		// The hashes it moved away from, newest first, each once and never
+		// the current one.
+		previous := []string{f.FeedURLSHA256}
+		for _, h := range f.PreviousFeedURLSHA256 {
+			if h != hash && !slices.Contains(previous, h) {
+				previous = append(previous, h)
+			}
 		}
+		f.PreviousFeedURLSHA256 = previous[:min(len(previous), 5)]
 		f.FeedURLSHA256 = hash
 	}
 	f.Private = f.Private || podcast.IsPrivateFeedURL(current)
@@ -430,6 +486,11 @@ func moveURL(f *podcast.Feed, original string, resp *netguard.Response, p *podca
 	f.FeedHost = podcast.FeedHost(current)
 	f.ScrubPrivate()
 	return current, moved
+}
+
+// downgrade reports whether a move from one feed URL to another drops TLS.
+func downgrade(from, to string) bool {
+	return strings.HasPrefix(from, "https://") && strings.HasPrefix(to, "http://")
 }
 
 func (s *service) save(ctx context.Context, lib link.Library, show string, f *podcast.Feed, feedURL string) error {
@@ -462,6 +523,9 @@ func (s *service) persist(ctx context.Context, root *os.Root, lib link.Library, 
 	if err != nil {
 		return 0, false, err
 	}
+	if changed {
+		s.setIndexed(lib.ID, show, false) // before anything else can fail
+	}
 	if err := s.save(ctx, lib, show, f, feedURL); err != nil {
 		return 0, false, err
 	}
@@ -475,7 +539,29 @@ func (s *service) rescan(ctx context.Context, id int64, show string) error {
 	if _, err := srv.RescanPodcast(ctx, id, show); err != nil {
 		return fail("write_failed", "The server could not index the podcast show. Check the feed again.")
 	}
+	s.setIndexed(id, show, true)
 	return nil
+}
+
+// isIndexed reports whether the server indexed the show's current feed.json
+// since this start (setIndexed marks it after a rescan and drops it when
+// feed.json changes, before the rescan that follows can fail).
+func (s *service) isIndexed(id int64, show string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.indexed[s.indexKey(id, show)]
+}
+func (s *service) setIndexed(id int64, show string, indexed bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if indexed {
+		s.indexed[s.indexKey(id, show)] = true
+	} else {
+		delete(s.indexed, s.indexKey(id, show))
+	}
+}
+func (s *service) indexKey(id int64, show string) string {
+	return s.o.ServerID() + "|" + strconv.FormatInt(id, 10) + "|" + show
 }
 func readDir(root *os.Root) ([]os.DirEntry, error) {
 	f, err := root.Open(".")
@@ -546,9 +632,22 @@ func (s *service) artwork(ctx context.Context, root *os.Root, lib link.Library, 
 	}
 	hash := podcast.FeedURLHash(imageURL)
 	if f.Show.Image != nil && f.Show.Image.SourceSHA256 == hash {
-		return
+		// Fetched already, unless its file is gone (deleted by hand): then the
+		// show would have no artwork until the feed's image changed.
+		if _, err := root.Lstat(show + "/" + f.Show.Image.File); err == nil {
+			return
+		}
 	}
-	resp, err := s.o.Fetcher.Fetch(ctx, netguard.Request{URL: imageURL, MaxBytes: 10 << 20})
+	// Best effort: at most a minute, and half of what the job has left, so a
+	// slow image host can't use up the time feed.json, the cache and the
+	// rescan still need.
+	budget := time.Minute
+	if deadline, ok := ctx.Deadline(); ok {
+		budget = min(budget, time.Until(deadline)/2)
+	}
+	actx, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
+	resp, err := s.o.Fetcher.Fetch(actx, netguard.Request{URL: imageURL, MaxBytes: 10 << 20})
 	if err != nil || resp.Status != 200 {
 		return
 	}

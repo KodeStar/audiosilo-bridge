@@ -59,13 +59,19 @@ func ValidShow(s string) bool {
 	return s != "" && s != "." && s != ".." && !strings.HasPrefix(s, ".") && !strings.ContainsAny(s, "/\\\x00") && path.Clean(s) == s
 }
 
+// EnclosureBase is an enclosure URL without its fragment, and without its query
+// when the path names an audio file (a tracking value there changes while the
+// file stays the same, BRIDGE-PLAN spike 3). A path naming no file
+// ("/uc?export=download&id=...") keeps the query that tells its episodes apart.
 func EnclosureBase(raw string) string {
 	u, err := url.Parse(raw)
 	if err != nil {
 		return ""
 	}
-	u.RawQuery, u.Fragment, u.RawFragment = "", "", ""
-	u.ForceQuery = false
+	u.Fragment, u.RawFragment = "", ""
+	if IsAudioExtension(strings.TrimPrefix(strings.ToLower(path.Ext(u.Path)), ".")) {
+		u.RawQuery, u.ForceQuery = "", false
+	}
 	return u.String()
 }
 func Identity(e Episode) string {
@@ -101,7 +107,7 @@ func EpisodePath(show string, e Episode, ext string, used map[string]bool) strin
 func Extension(typ, rawURL string) string {
 	typ = strings.ToLower(strings.TrimSpace(strings.SplitN(typ, ";", 2)[0]))
 	switch typ {
-	case "audio/mpeg", "audio/mp3", "audio/mpeg3":
+	case "audio/mpeg", "audio/mp3", "audio/mpeg3", "audio/x-mpeg", "audio/x-mp3", "audio/x-mpeg3", "audio/mpg", "audio/x-mpg":
 		return "mp3"
 	case "audio/mp4", "audio/x-m4a", "audio/m4a":
 		return "m4a"
