@@ -219,8 +219,8 @@ func TestDescribeJob(t *testing.T) {
 	}
 	// The runner sends only a job's latest progress, so the call holds until the
 	// server has the step reported before it (an instant call would replace it
-	// first). poll, not waitFor: this runs on the job's goroutine, and the check
-	// below says what was missing.
+	// first). poll, not waitFor: this runs on the job's goroutine; the test's own
+	// wait for the step, which starts first, fails if it never comes.
 	d := &fakeDescriber{db: hr.db, fail: func(int) error {
 		poll(func() bool { return hr.srv.saw(42, describing) })
 		return nil
@@ -228,6 +228,7 @@ func TestDescribeJob(t *testing.T) {
 	hr.srv.addDescribe(42, "Author/Book")
 	stop := hr.runAll(hr.describeHandler(d))
 	defer stop()
+	hr.waitFor("the describing stage", func() bool { return hr.srv.saw(42, describing) })
 	hr.waitFor("done", func() bool { s, _ := hr.srv.final(42); return s == link.StateDone })
 	var res DescribeJobResult
 	hr.result(42, &res)
@@ -237,9 +238,6 @@ func TestDescribeJob(t *testing.T) {
 	}
 	if calls := d.calls(); len(calls) != 1 || calls[0] {
 		t.Fatalf("describe calls = %+v", calls)
-	}
-	if !hr.srv.saw(42, describing) {
-		t.Fatal("the job never reported the describing stage")
 	}
 	adir := filepath.Join(hr.root, "Author", "Book", AttachDir)
 	if raw, err := os.ReadFile(filepath.Join(adir, "description.json")); err != nil || string(raw) != testDescription {
@@ -335,22 +333,23 @@ func TestDescribeJobParks(t *testing.T) {
 	hr.generated(61)
 	var mu sync.Mutex
 	mode := "budget"
-	rateLimited := func(_ link.Update, p map[string]any) bool {
+	rateLimited := func(u link.Update, p map[string]any) bool {
 		park, _ := p["park"].(map[string]any)
-		return park["code"] == "agent_rate_limited" && park["retry_at"] != nil
+		return u.State != nil && *u.State == link.StateNeedsAttention &&
+			park["code"] == "agent_rate_limited" && park["retry_at"] != nil
 	}
 	d := &fakeDescriber{db: hr.db, fail: func(call int) error {
-		if call == 4 { // the try at retry_at holds until the server has the park, as in TestDescribeJob
-			poll(func() bool { return hr.srv.saw(63, rateLimited) })
-		}
 		mu.Lock()
-		defer mu.Unlock()
+		m := mode
+		mu.Unlock()
 		switch {
-		case mode == "budget" && call == 1:
+		case m == "budget" && call == 1:
 			return scheduler.ParkWithCode(state.ParkBudgetExceeded, "the budget is spent")
-		case mode == "rate" && call == 3:
+		case m == "rate" && call == 3:
 			return scheduler.ParkWithCodeAfter(state.ParkAgentRateLimited, "rate limited", time.Now().Add(50*time.Millisecond))
-		case mode == "checks":
+		case m == "rate": // the try at retry_at holds until the server has the park, as in TestDescribeJob
+			poll(func() bool { return hr.srv.saw(63, rateLimited) })
+		case m == "checks":
 			return scheduler.ParkWithCode(state.ParkAgentValidationExhausted, "kept failing")
 		}
 		return nil
@@ -379,10 +378,8 @@ func TestDescribeJobParks(t *testing.T) {
 		t.Fatal(err)
 	}
 	hr.srv.addDescribe(63, "Author/Book")
+	hr.waitFor("the rate limit's park", func() bool { return hr.srv.saw(63, rateLimited) })
 	hr.waitFor("done at retry_at", func() bool { s, _ := hr.srv.final(63); return s == link.StateDone })
-	if !hr.srv.saw(63, rateLimited) {
-		t.Fatal("the rate limit was never reported")
-	}
 
 	mu.Lock()
 	mode = "checks"

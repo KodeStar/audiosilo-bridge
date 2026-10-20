@@ -455,25 +455,29 @@ func TestGenerateParkAndRetry(t *testing.T) {
 	if sj, _ := hr.db.GetServerJob(context.Background(), 23); sj.State != store.JobRunning || sj.Error == "" {
 		t.Fatalf("stored while parked = %+v", sj)
 	}
+	// The engine holds the book at the next stage until the server has heard the
+	// job running again: the runner sends only a job's latest progress, so a run
+	// straight to done could replace it.
+	synth := hr.exec.gate("synthesizing")
 	if err := hr.h.Retry(context.Background(), 23); err != nil {
 		t.Fatal(err)
 	}
+	hr.waitFor("running again after the retry", func() bool {
+		hr.srv.mu.Lock()
+		defer hr.srv.mu.Unlock()
+		parked := false
+		for _, u := range hr.srv.updates[23] {
+			if u.State != nil && *u.State == link.StateNeedsAttention {
+				parked = true
+			}
+			if parked && u.State != nil && *u.State == link.StateRunning && u.Error != nil && *u.Error == "" {
+				return true
+			}
+		}
+		return false
+	})
+	close(synth)
 	hr.waitFor("done", func() bool { s, _ := hr.srv.final(23); return s == link.StateDone })
-	hr.srv.mu.Lock()
-	defer hr.srv.mu.Unlock()
-	parked := false
-	unparked := false
-	for _, u := range hr.srv.updates[23] {
-		if u.State != nil && *u.State == link.StateNeedsAttention {
-			parked = true
-		}
-		if parked && u.State != nil && *u.State == link.StateRunning && u.Error != nil && *u.Error == "" {
-			unparked = true
-		}
-	}
-	if !unparked {
-		t.Fatal("the job never reported running again after the retry")
-	}
 	if err := hr.h.Retry(context.Background(), 999); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("a retry of an unknown job = %v", err)
 	}
