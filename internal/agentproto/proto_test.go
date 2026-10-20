@@ -55,3 +55,44 @@ func TestJobID(t *testing.T) {
 		}
 	}
 }
+
+func TestDecodeCredential(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ body, cli string }{
+		{`{"cli":"claude","kind":"oauth_token","value":"sk-ant-oat01-abc"}`, CLIClaude},
+		{`{"cli":"claude","kind":"api_key","value":"sk-ant-api03-abc"}`, CLIClaude},
+		{`{"cli":"codex","kind":"api_key","value":"sk-proj-abc"}`, CLICodex},
+	} {
+		c, err := DecodeCredential([]byte(tc.body), tc.cli)
+		if err != nil || c.Value == "" {
+			t.Errorf("%s: %+v %v", tc.body, c, err)
+		}
+	}
+}
+
+func TestDecodeCredentialRefuses(t *testing.T) {
+	t.Parallel()
+	const secret = "sk-SECRET-canary"
+	for name, tc := range map[string]struct{ body, cli string }{
+		"unknown field":      {`{"cli":"claude","kind":"api_key","value":"` + secret + `","env":"X=1"}`, CLIClaude},
+		"another cli":        {`{"cli":"codex","kind":"api_key","value":"` + secret + `"}`, CLIClaude},
+		"codex oauth":        {`{"cli":"codex","kind":"oauth_token","value":"` + secret + `"}`, CLICodex},
+		"login kind":         {`{"cli":"codex","kind":"login","value":"` + secret + `"}`, CLICodex},
+		"empty value":        {`{"cli":"claude","kind":"api_key","value":""}`, CLIClaude},
+		"newline in value":   {`{"cli":"claude","kind":"api_key","value":"a\nb` + secret + `"}`, CLIClaude},
+		"space in value":     {`{"cli":"claude","kind":"api_key","value":"a b` + secret + `"}`, CLIClaude},
+		"trailing data":      {`{"cli":"claude","kind":"api_key","value":"` + secret + `"} {}`, CLIClaude},
+		"not an object":      {`"` + secret + `"`, CLIClaude},
+		"value over the cap": {`{"cli":"claude","kind":"api_key","value":"` + strings.Repeat("a", MaxCredentialValueBytes+1) + `"}`, CLIClaude},
+		"file over the cap":  {strings.Repeat(" ", MaxCredentialFileBytes+1), CLIClaude},
+	} {
+		_, err := DecodeCredential([]byte(tc.body), tc.cli)
+		if err == nil {
+			t.Errorf("%s: accepted", name)
+			continue
+		}
+		if strings.Contains(err.Error(), secret) {
+			t.Errorf("%s: the error carries the value: %v", name, err)
+		}
+	}
+}

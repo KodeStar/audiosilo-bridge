@@ -366,3 +366,50 @@ func TestASRThreads(t *testing.T) {
 		}
 	}
 }
+
+func TestGitHubConfig(t *testing.T) {
+	dir := t.TempDir()
+	cfg, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.GitHubClientID() != "Iv23likw0zS13hG4spdo" || cfg.GitHubWebBase() != "https://github.com" {
+		t.Fatalf("defaults = %q %q", cfg.GitHubClientID(), cfg.GitHubWebBase())
+	}
+	if cfg.BudgetReviewed() {
+		t.Fatal("a fresh Bridge hasn't reviewed its budget")
+	}
+	t.Setenv("AUDIOSILO_BRIDGE_GITHUB_CLIENT_ID", "Iv23other")
+	t.Setenv("AUDIOSILO_BRIDGE_GITHUB_WEB_BASE_URL", "http://fake-github.lan:9000/")
+	t.Setenv("AUDIOSILO_BRIDGE_AGENT_MONTHLY_BUDGET_USD", "50")
+	cfg, err = Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.GitHubClientID() != "Iv23other" || cfg.GitHubWebBase() != "http://fake-github.lan:9000" ||
+		!cfg.EnvSet(KeyGitHubClientID) || !cfg.BudgetReviewed() {
+		t.Fatalf("env = %q %q reviewed=%v", cfg.GitHubClientID(), cfg.GitHubWebBase(), cfg.BudgetReviewed())
+	}
+	// Saving something else never pins the defaults into the file.
+	if err := SaveFile(dir, func(c *Config) error { c.Agent.BudgetReviewedAt = "2026-10-19T10:00:00Z"; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := os.ReadFile(filepath.Join(dir, FileName))
+	if strings.Contains(string(raw), "client_id") || !strings.Contains(string(raw), "budget_reviewed_at") {
+		t.Fatalf("config.yaml = %s", raw)
+	}
+}
+
+func TestGitHubConfigRefusesBadValues(t *testing.T) {
+	for name, env := range map[string][2]string{
+		"web base not http": {"AUDIOSILO_BRIDGE_GITHUB_WEB_BASE_URL", "github.com"},
+		"client id spaces":  {"AUDIOSILO_BRIDGE_GITHUB_CLIENT_ID", "Iv23 x"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv(env[0], env[1])
+			if _, err := Load(t.TempDir()); err == nil {
+				t.Fatalf("%s=%q loaded", env[0], env[1])
+			}
+		})
+	}
+}

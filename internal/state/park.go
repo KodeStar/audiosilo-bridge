@@ -44,8 +44,10 @@ const (
 	ParkASRWorkerWaiting ParkCode = "asr_worker_waiting"
 
 	// ParkContribUnavailable: the contributing stage runs in issue mode but no
-	// GitHub credential is available (no PAT in secrets, no `gh auth token`). On the
-	// Bridge the token comes from AUDIOSILO_BRIDGE_GITHUB_TOKEN; then Retry.
+	// GitHub credential is available (contrib.TokenSource: no AUDIOSILO_BRIDGE_GITHUB_TOKEN,
+	// no sign-in on the Accounts tab, no `gh auth token`), or the sign-in couldn't be
+	// refreshed because GitHub couldn't be reached. A sign-in re-admits it; Retry
+	// does once GitHub can be reached.
 	ParkContribUnavailable ParkCode = "contrib_unavailable"
 	// ParkCoreNeeded: the book's work does not exist upstream, so an add-work (core)
 	// proposal awaits completion/confirmation in the UI before the sidecars can attach.
@@ -80,8 +82,16 @@ const (
 
 	// ParkBudgetExceeded: the book's summed agent cost reached the configured per-book
 	// budget (agent.book_budget_usd), so an agent stage parked before spending more. A
-	// human decision: raise the budget in config.yaml (restart to apply), then Retry -
-	// so, unlike the transient agent parks, it carries no auto-readmit time.
+	// human decision: raise the budget in config.yaml and restart, which re-admits it
+	// (the scheduler's restartReadmitCodes; a sidecars.describe job, which parks
+	// outside the engine, runs again as the Bridge starts) - so, unlike the transient
+	// agent parks, it carries no auto-readmit time. The month's spend reaching
+	// agent.monthly_budget_usd parks with it too, until the 1st (UTC, its readmit
+	// time) or a changed budget saved on the Settings tab (which re-admits every book
+	// parked with it at once). A budget the environment sets is locked on the page:
+	// raise it there and restart. A start leaves one the caps still stop with the same
+	// reason parked (the scheduler's budgetParkHolds), and one a changed cap still
+	// leaves over its budget parks again before any spend; no Retry is needed for either.
 	ParkBudgetExceeded ParkCode = "budget_exceeded"
 	// Supervisor containment parks never authorize content/code changes; a human
 	// may inspect the persisted decision and explicitly Retry when satisfied.

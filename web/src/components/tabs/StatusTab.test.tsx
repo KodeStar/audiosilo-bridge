@@ -4,11 +4,64 @@ import userEvent from '@testing-library/user-event';
 import { StatusTab } from './StatusTab';
 import { ApiClient } from '@/api/client';
 import { lastCall, mockFetch } from '@/test/fetchMock';
-import { engineFixture, pairedStatus, statusFixture } from '@/test/fixtures';
+import { engineFixture, pairedStatus, setupFixture, statusFixture } from '@/test/fixtures';
 
 const api = () => new ApiClient({ getToken: () => 't', onSignedOut: vi.fn() });
 
 describe('StatusTab', () => {
+  it('leads with "Get set up" until the required items are done, each linking to its tab', async () => {
+    mockFetch({
+      'GET /api/engine': { body: engineFixture() },
+      'GET /api/status': {
+        body: pairedStatus({
+          setup_complete: false,
+          setup: setupFixture(
+            {
+              libraries: { done: false, detail: '1 of 2 libraries writable', library_ids: [3] },
+              agent: {
+                done: false,
+                detail: "claude has no credential: set one on the Bridge's Accounts tab",
+              },
+              budget: { done: false, detail: '$100 a month' },
+              github: { done: false },
+            },
+            { can_contribute: false, github_login: '' },
+          ),
+        }),
+      },
+    });
+    render(<StatusTab client={api()} />);
+    const card = await screen.findByRole('region', { name: 'Get set up' });
+    expect(within(card).getByText('3 steps left')).toBeInTheDocument();
+    expect(within(card).getByText('1 of 2 libraries writable')).toBeInTheDocument();
+    const links = within(card)
+      .getAllByRole('link')
+      .map((a) => [a.textContent, a.getAttribute('href')]);
+    expect(links).toEqual([
+      ['Open Libraries', '#/libraries'],
+      ['Open Accounts', '#/accounts'],
+      ['Open Settings', '#/settings'],
+      ['Open Accounts', '#/accounts'],
+    ]);
+    // Done items are listed, without a link.
+    expect(within(card).getByText('Speech recognition')).toBeInTheDocument();
+  });
+
+  it('shows no "Get set up" card once set up, the optional GitHub item aside', async () => {
+    mockFetch({
+      'GET /api/engine': { body: engineFixture() },
+      'GET /api/status': {
+        body: pairedStatus({
+          setup: setupFixture({ github: { done: false } }),
+          setup_complete: true,
+        }),
+      },
+    });
+    render(<StatusTab client={api()} />);
+    await screen.findByText('Version');
+    expect(screen.queryByRole('region', { name: 'Get set up' })).not.toBeInTheDocument();
+  });
+
   it('pairs with the address and the code, and shows a 422 verbatim', async () => {
     const { calls } = mockFetch({
       'GET /api/engine': { body: engineFixture() },
@@ -97,6 +150,11 @@ describe('StatusTab', () => {
       '40',
     );
     expect(within(card).getByText('Deleted as soon as the job ends')).toBeInTheDocument();
+    expect(
+      within(card).getByText(
+        /monthly budget is set on the Settings tab, where a change applies straight away/,
+      ),
+    ).toBeInTheDocument();
     expect(within(card).getByText(/^whisper-cpp \(cpu\) on the Bridge/)).toBeInTheDocument();
     expect(
       within(card).getByText('With no worker connected, the Bridge transcribes them itself.'),

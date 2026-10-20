@@ -315,6 +315,7 @@ func (r *Runner) status() agentproto.Runner {
 		HeartbeatAt: r.now().UTC(),
 		Slots:       r.opts.Slots,
 		CLIs:        map[string]agentproto.CLI{},
+		Handoff:     true,
 	}
 	for _, name := range []string{agentproto.CLIClaude, agentproto.CLICodex} {
 		c, _ := r.cli(name)

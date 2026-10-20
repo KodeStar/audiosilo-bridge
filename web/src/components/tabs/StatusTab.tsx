@@ -6,6 +6,7 @@ import { laneText, onlineText, secretKeyText } from '@/lib/status';
 import { agentText, budgetPercent, budgetText, credentialText, retentionText } from '@/lib/engine';
 import { usd } from '@/lib/generate';
 import { asrText, fallbackText } from '@/lib/workers';
+import { SETUP_ITEMS, remainingRequired, setupItems, setupLink } from '@/lib/setup';
 import { Ago } from '../ui/Ago';
 import { Card } from '../ui/Card';
 import { Badge } from '../ui/Badge';
@@ -32,6 +33,7 @@ export function StatusTab({ client }: { client: ApiClient }) {
   return (
     <div className="flex flex-col gap-5">
       {loadError && <Notice kind="error">{loadError}</Notice>}
+      {!status.setup_complete && <SetupCard status={status} />}
       {pairing.paired ? (
         <PairedCard client={client} status={status} onChange={setStatus} />
       ) : (
@@ -77,8 +79,57 @@ export function StatusTab({ client }: { client: ApiClient }) {
   );
 }
 
+// SetupCard leads the tab until every required setup item is done: each item,
+// done or not, with what is missing and a link to the tab where it is done.
+function SetupCard({ status }: { status: Status }) {
+  const items = setupItems(status.setup);
+  const left = remainingRequired(status.setup);
+  return (
+    <Card
+      title="Get set up"
+      actions={<Badge tone="warn">{left === 1 ? '1 step left' : `${left} steps left`}</Badge>}
+    >
+      <ul className="flex flex-col divide-y divide-edge">
+        {items.map((it) => {
+          const link = setupLink(it.id);
+          return (
+            <li key={it.id} className="flex items-start justify-between gap-3 py-2">
+              <div className="flex min-w-0 flex-1 items-start gap-2">
+                <span
+                  aria-hidden="true"
+                  className={
+                    it.done ? 'text-green-300' : it.required ? 'text-amber-300' : 'text-dim'
+                  }
+                >
+                  {it.done ? '\u2713' : '\u2022'}
+                </span>
+                <div className="min-w-0">
+                  <p className={`text-sm ${it.done ? 'text-dim' : 'text-hi'}`}>
+                    {SETUP_ITEMS[it.id].label}
+                    <span className="sr-only">{it.done ? ' (done)' : ' (to do)'}</span>
+                  </p>
+                  {it.detail && <p className="text-xs text-dim">{it.detail}</p>}
+                </div>
+              </div>
+              {!it.done && link && (
+                <a
+                  href={link.hash}
+                  className="shrink-0 whitespace-nowrap text-sm text-pink-500 underline"
+                >
+                  Open {link.name}
+                </a>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+    </Card>
+  );
+}
+
 // EngineCard shows the sidecars engine: the agent container, speech recognition,
-// the budgets and the transcript retention (all set in config.yaml).
+// the budgets and the transcript retention (the monthly budget set on the Settings
+// tab, the rest in config.yaml).
 function EngineCard({ client }: { client: ApiClient }) {
   const { data: engine, error } = useLoad(() => client.engine(), ENGINE_POLL_MS);
   if (!engine) {
@@ -147,9 +198,11 @@ function EngineCard({ client }: { client: ApiClient }) {
         <Row label="Per book">{`Up to ${usd(engine.book_budget_usd)} of agent use`}</Row>
         <Row label="Transcripts">{retentionText(engine.transcript_retention_days)}</Row>
       </dl>
-      <p className="mt-3 text-xs text-dim">
-        These are set in the Bridge&apos;s config.yaml (agent.monthly_budget_usd,
-        agent.book_budget_usd, transcripts.retention_days) and apply at the next start.
+      <p className="mt-3 break-words text-xs text-dim">
+        The monthly budget is set on the Settings tab, where a change applies straight away (when
+        AUDIOSILO_BRIDGE_AGENT_MONTHLY_BUDGET_USD sets it, change that instead: it applies at the
+        next start). The per-book budget and the transcript retention are set in the Bridge&apos;s
+        config.yaml (agent.book_budget_usd, transcripts.retention_days) and apply at the next start.
       </p>
     </Card>
   );

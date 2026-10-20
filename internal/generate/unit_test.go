@@ -92,8 +92,9 @@ func TestEveryParkCodeHasAHint(t *testing.T) {
 
 // No hint sends anyone to generate the book again without cancelling this job
 // first: the server's enqueue finds the open (parked) job again, so that request
-// would change nothing. Nor to the Bridge's "Settings" or `gh auth login`, which
-// the Bridge doesn't have.
+// would change nothing. Nor to a "Settings" other than the Bridge page's Settings
+// tab (where the monthly budget is set), or `gh auth login`, which the Bridge
+// doesn't have.
 func TestParkHintsNameAnActionThatWorks(t *testing.T) {
 	t.Parallel()
 	for code, hint := range parkHints {
@@ -101,12 +102,43 @@ func TestParkHintsNameAnActionThatWorks(t *testing.T) {
 		if strings.Contains(low, "generate") && !strings.Contains(low, "cancel this job") {
 			t.Errorf("%s: %q sends the admin to generate again without cancelling the job", code, hint)
 		}
-		if strings.Contains(hint, "Settings") || strings.Contains(hint, "gh auth login") {
+		if strings.Contains(strings.ReplaceAll(hint, "Bridge's Settings tab", ""), "Settings") ||
+			strings.Contains(hint, "gh auth login") {
 			t.Errorf("%s: %q names something the Bridge doesn't have", code, hint)
 		}
 	}
 	if h := ParkHint(string(state.ParkAgentCredentialRefused)); !strings.Contains(h, "claude setup-token / agent-login codex") {
 		t.Errorf("credential refused hint = %q", h)
+	}
+}
+
+// The budget park's hint is one for every job kind and in every place a park is
+// reported (a generate job's progress and its description step's here, a describe
+// job's in TestDescribeJobParks):
+// a monthly cap resumes on the 1st or once raised on the page; a cap set in
+// config.yaml or the environment takes a restart, after which the job carries on
+// (a restart re-admits a budget-parked engine book, and runs a describe job
+// again), so it asks for no Retry.
+func TestBudgetParkHint(t *testing.T) {
+	t.Parallel()
+	code := string(state.ParkBudgetExceeded)
+	hint := ParkHint(code)
+	for _, phrase := range []string{"resumes on the 1st", "raised on the Bridge's Settings tab", "agent.book_budget_usd",
+		"AUDIOSILO_BRIDGE_AGENT_MONTHLY_BUDGET_USD", "AUDIOSILO_BRIDGE_AGENT_BOOK_BUDGET_USD", "the Bridge restarted",
+		"carries on by itself, with no Retry needed"} {
+		if !strings.Contains(hint, phrase) {
+			t.Errorf("budget hint %q lacks %q", hint, phrase)
+		}
+	}
+	if strings.Contains(hint, "press Retry") {
+		t.Errorf("budget hint %q asks for a Retry", hint)
+	}
+	parked := store.Book{State: string(state.FactPass), Status: string(state.StatusNeedsAttention), ParkCode: code}
+	for name, extra := range map[string]map[string]any{"describe": describe(view{book: parked}).Extra,
+		"bookExtra": (&run{}).bookExtra(parked)} {
+		if park, _ := extra["park"].(map[string]any); park["hint"] != hint {
+			t.Errorf("%s: park = %+v, want the budget hint", name, park)
+		}
 	}
 }
 

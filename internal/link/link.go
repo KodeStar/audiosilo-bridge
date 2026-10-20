@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"net/url"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -89,6 +90,36 @@ type Status struct {
 	// Estimates are what the console's confirmation dialog estimates a job from
 	// (Phase 1a; omitted when the engine isn't running yet).
 	Estimates *Estimates `json:"estimates,omitempty"`
+	// Setup is the setup checklist (Phase 2b, FIRST-RUN-PLAN F2). An optional
+	// block: sent only once the server's reply lists "setup" in accepts (an older
+	// server refuses a heartbeat with a field it doesn't know).
+	Setup *Setup `json:"setup,omitempty"`
+}
+
+// The heartbeat's optional blocks, as the reply's accepts names them.
+const AcceptSetup = "setup"
+
+// Setup is the Bridge's setup checklist: what is done, what is left, whether it
+// can contribute to the community now and as which GitHub user.
+type Setup struct {
+	Items []SetupItem `json:"items"`
+	// CanContribute: a GitHub credential resolves (the server reads this before
+	// estimates.sidecars.can_contribute).
+	CanContribute bool `json:"can_contribute"`
+	// GitHubLogin is the signed-in GitHub user ("" for none, or a token from the
+	// environment); the console shows it to admins only.
+	GitHubLogin string `json:"github_login,omitempty"`
+}
+
+// SetupItem is one checklist item: its id (paired, libraries, asr, agent,
+// budget, github), whether it is done, whether it is required, a short detail,
+// and for libraries the ids not yet mapped and writable.
+type SetupItem struct {
+	ID         string  `json:"id"`
+	Done       bool    `json:"done"`
+	Required   bool    `json:"required"`
+	Detail     string  `json:"detail,omitempty"`
+	LibraryIDs []int64 `json:"library_ids,omitempty"`
 }
 
 // Estimates are the Bridge's figures for estimating jobs, by job family.
@@ -154,6 +185,14 @@ type Library struct {
 type StatusReply struct {
 	ServerTime string    `json:"server_time"`
 	Libraries  []Library `json:"libraries"`
+	// Accepts names the optional heartbeat blocks the server takes (AcceptSetup);
+	// an older server sends none.
+	Accepts []string `json:"accepts,omitempty"`
+}
+
+// Accepting reports whether the reply lists block in accepts.
+func (r *StatusReply) Accepting(block string) bool {
+	return r != nil && slices.Contains(r.Accepts, block)
 }
 
 // Book is an indexed book's files with the size and modification time the

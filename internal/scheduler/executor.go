@@ -87,10 +87,17 @@ type Executor interface {
 // to books.retry_at and a later dispatch pass re-admits the book once the instant
 // passes (used for the transient agent-unavailable/rate-limited parks so an overnight
 // batch heals itself). A zero RetryAfter is a human-only park (Retry re-admits it).
+//
+// Cause, when set, is the error that parked the book, for a caller that words the
+// park itself (the share job reads contrib_unavailable's credential error); the
+// reason stays the text the book shows. It is deliberately no Unwrap: runStage's
+// errors.Is(err, context.Canceled) would see through a park into it, and a cancel
+// sets no status.
 type ParkError struct {
 	Reason     string
 	Code       state.ParkCode
 	RetryAfter time.Time
+	Cause      error
 }
 
 func (e *ParkError) Error() string { return e.Reason }

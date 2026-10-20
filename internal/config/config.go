@@ -186,11 +186,15 @@ type AgentConfig struct {
 	// the dir shared with it ("" = <data>/staging, see Config.AgentStagingDir);
 	// ClaimTimeoutSeconds how long a job waits for it to pick the job up;
 	// MonthlyBudgetUSD the monthly agent spend cap (0 = none).
-	StagingDir          string            `yaml:"staging_dir"`
-	ClaimTimeoutSeconds int               `yaml:"claim_timeout_seconds"`
-	MonthlyBudgetUSD    float64           `yaml:"monthly_budget_usd"`
-	Claude              map[string]string `yaml:"claude"` // agent-stage name -> model
-	OpenAI              map[string]string `yaml:"openai"` // agent-stage name -> model (empty = codex default)
+	StagingDir          string  `yaml:"staging_dir"`
+	ClaimTimeoutSeconds int     `yaml:"claim_timeout_seconds"`
+	MonthlyBudgetUSD    float64 `yaml:"monthly_budget_usd"`
+	// BudgetReviewedAt is when an admin last saved the monthly budget on the
+	// Bridge's page (the setup checklist's "budget" item, decision 7); "" for
+	// never.
+	BudgetReviewedAt string            `yaml:"budget_reviewed_at,omitempty"`
+	Claude           map[string]string `yaml:"claude"` // agent-stage name -> model
+	OpenAI           map[string]string `yaml:"openai"` // agent-stage name -> model (empty = codex default)
 }
 
 // AgentCapacity is the normalized runtime capacity model. Legacy is true only
@@ -333,6 +337,8 @@ type Config struct {
 	Contribution ContributionConfig `yaml:"contribution"`
 	// Transcripts controls the transcript cache (decision 5; bridge.go).
 	Transcripts TranscriptsConfig `yaml:"transcripts"`
+	// GitHub is the GitHub App the Accounts tab signs in to (bridge.go).
+	GitHub GitHubConfig `yaml:"github"`
 
 	// deprecations are notices about retired settings Load honoured (never saved;
 	// the server logs them at startup).

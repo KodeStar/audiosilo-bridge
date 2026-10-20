@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kodestar/audiosilo-bridge/internal/contrib"
 	"github.com/kodestar/audiosilo-bridge/internal/events"
 	"github.com/kodestar/audiosilo-bridge/internal/jobs"
 	"github.com/kodestar/audiosilo-bridge/internal/link"
@@ -290,7 +291,12 @@ func newHarness(t *testing.T) *harness {
 }
 
 func (hr *harness) handler() *Handler {
-	return New(Options{DB: hr.db, Engine: func() Engine { return hr.sched }, Libraries: hr.libs,
+	return hr.handlerWith(func() Engine { return hr.sched })
+}
+
+// handlerWith is handler with the engine engine gives (nil while it starts).
+func (hr *harness) handlerWith(engine func() Engine) *Handler {
+	return New(Options{DB: hr.db, Engine: engine, Libraries: hr.libs,
 		Mount:  func(int64, string) (string, bool) { return hr.libs.root, false },
 		Server: func() Server { return hr.cl }, WorkRoot: hr.work, Version: "0.2.0", RetentionDays: 30,
 		Poll: 10 * time.Millisecond, IdlePoll: 10 * time.Millisecond, Recheck: time.Hour, Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
@@ -316,13 +322,22 @@ func (hr *harness) runnerOf(handlers ...jobs.Handler) (stop func()) {
 
 func (hr *harness) waitFor(what string, cond func() bool) {
 	hr.t.Helper()
+	if !poll(cond) {
+		hr.t.Fatalf("timed out waiting for %s", what)
+	}
+}
+
+// poll waits up to 10 s for cond and reports whether it held. It never fails the
+// test, so it can run off the test's goroutine (in a fake a job calls).
+func poll(cond func() bool) bool {
 	deadline := time.Now().Add(10 * time.Second)
 	for !cond() {
 		if time.Now().After(deadline) {
-			hr.t.Fatalf("timed out waiting for %s", what)
+			return false
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
+	return true
 }
 
 // engineBook is the engine book job id maps to.
@@ -440,25 +455,29 @@ func TestGenerateParkAndRetry(t *testing.T) {
 	if sj, _ := hr.db.GetServerJob(context.Background(), 23); sj.State != store.JobRunning || sj.Error == "" {
 		t.Fatalf("stored while parked = %+v", sj)
 	}
+	// The engine holds the book at the next stage until the server has heard the
+	// job running again: the runner sends only a job's latest progress, so a run
+	// straight to done could replace it.
+	synth := hr.exec.gate("synthesizing")
 	if err := hr.h.Retry(context.Background(), 23); err != nil {
 		t.Fatal(err)
 	}
+	hr.waitFor("running again after the retry", func() bool {
+		hr.srv.mu.Lock()
+		defer hr.srv.mu.Unlock()
+		parked := false
+		for _, u := range hr.srv.updates[23] {
+			if u.State != nil && *u.State == link.StateNeedsAttention {
+				parked = true
+			}
+			if parked && u.State != nil && *u.State == link.StateRunning && u.Error != nil && *u.Error == "" {
+				return true
+			}
+		}
+		return false
+	})
+	close(synth)
 	hr.waitFor("done", func() bool { s, _ := hr.srv.final(23); return s == link.StateDone })
-	hr.srv.mu.Lock()
-	defer hr.srv.mu.Unlock()
-	parked := false
-	unparked := false
-	for _, u := range hr.srv.updates[23] {
-		if u.State != nil && *u.State == link.StateNeedsAttention {
-			parked = true
-		}
-		if parked && u.State != nil && *u.State == link.StateRunning && u.Error != nil && *u.Error == "" {
-			unparked = true
-		}
-	}
-	if !unparked {
-		t.Fatal("the job never reported running again after the retry")
-	}
 	if err := hr.h.Retry(context.Background(), 999); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("a retry of an unknown job = %v", err)
 	}
@@ -806,20 +825,29 @@ func TestGenerateCostIsTheBudgetBasis(t *testing.T) {
 func TestGenerateIssueNeedsAGitHubToken(t *testing.T) {
 	t.Parallel()
 	hr := newHarness(t)
-	var can atomic.Bool
+	var cred atomic.Pointer[error]
+	setCred := func(err error) { cred.Store(&err) }
+	setCred(contrib.ErrNoCredential)
 	h := hr.handler()
-	h.o.CanContribute = func(context.Context) bool { return can.Load() }
+	h.o.ContribCredential = func(context.Context) error { return *cred.Load() }
 	hr.srv.add(94, "Author/Book", `{"contribute":"issue"}`)
 	stop := hr.runner(h)
 	defer stop()
 	hr.waitFor("failed", func() bool { s, _ := hr.srv.final(94); return s == link.StateFailed })
-	if _, final := hr.srv.final(94); final.Error == nil || !strings.Contains(*final.Error, "AUDIOSILO_BRIDGE_GITHUB_TOKEN") {
+	if _, final := hr.srv.final(94); final.Error == nil || *final.Error != errCantContribute.Error() {
 		t.Fatalf("error = %v", final.Error)
 	}
 	if _, err := hr.db.GetGenerateBook(context.Background(), 94); !errors.Is(err, store.ErrNotFound) {
 		t.Fatal("the engine got a book it couldn't contribute")
 	}
-	can.Store(true)
+	// Signed in, but GitHub couldn't be reached to refresh the sign-in: worded apart.
+	setCred(contrib.ErrSignInUnrefreshed)
+	hr.srv.add(96, "Author/Book", `{"contribute":"issue"}`)
+	hr.waitFor("failed", func() bool { s, _ := hr.srv.final(96); return s == link.StateFailed })
+	if _, final := hr.srv.final(96); final.Error == nil || *final.Error != errCantContributeUnrefreshed.Error() {
+		t.Fatalf("error = %v", final.Error)
+	}
+	setCred(nil)
 	hr.srv.add(95, "Loose.m4b", `{"contribute":"issue"}`)
 	hr.waitFor("the second job runs", func() bool {
 		_, err := hr.db.GetGenerateBook(context.Background(), 95)

@@ -42,7 +42,56 @@ describe('SettingsTab', () => {
       public_url: 'http://10.0.0.5:8091',
       mapping_check_minutes: 30,
       asr_worker_fallback: 'local',
+      monthly_budget_usd: 100,
     });
+  });
+
+  it('saves the monthly budget, which reviews it, and keeps a locked one out', async () => {
+    const { calls } = mockFetch({
+      'GET /api/settings': { body: settingsFixture({ budget_reviewed: false }) },
+      'PUT /api/settings': { body: settingsFixture({ monthly_budget_usd: 25 }) },
+    });
+    render(<SettingsTab client={api()} />);
+    const field = await screen.findByLabelText('Monthly agent budget (dollars)');
+    expect(screen.getByText(/Save the settings to confirm it/)).toBeInTheDocument();
+    await userEvent.clear(field);
+    await userEvent.type(field, 'lots');
+    await userEvent.click(screen.getByRole('button', { name: 'Save settings' }));
+    expect(screen.getByRole('alert')).toHaveTextContent('Enter the budget in dollars');
+    await userEvent.clear(field);
+    await userEvent.type(field, '25');
+    await userEvent.click(screen.getByRole('button', { name: 'Save settings' }));
+    expect(await screen.findByText('Saved.')).toBeInTheDocument();
+    expect(lastCall(calls, 'PUT', '/api/settings')?.body).toMatchObject({ monthly_budget_usd: 25 });
+    expect(screen.queryByText(/Save the settings to confirm it/)).not.toBeInTheDocument();
+  });
+
+  it('saves an untouched budget as loaded, even one the field would refuse', async () => {
+    const { calls } = mockFetch({
+      'GET /api/settings': { body: settingsFixture({ monthly_budget_usd: 12.345 }) },
+      'PUT /api/settings': { body: settingsFixture({ monthly_budget_usd: 12.345 }) },
+    });
+    render(<SettingsTab client={api()} />);
+    expect(await screen.findByLabelText('Monthly agent budget (dollars)')).toHaveValue('12.345');
+    await userEvent.click(screen.getByRole('button', { name: 'Save settings' }));
+    expect(await screen.findByText('Saved.')).toBeInTheDocument();
+    expect(lastCall(calls, 'PUT', '/api/settings')?.body).toMatchObject({
+      monthly_budget_usd: 12.345,
+    });
+  });
+
+  it('sends no budget the environment sets', async () => {
+    const { calls } = mockFetch({
+      'GET /api/settings': {
+        body: settingsFixture({ monthly_budget_usd: 40, locked: ['agent.monthly_budget_usd'] }),
+      },
+      'PUT /api/settings': { body: settingsFixture() },
+    });
+    render(<SettingsTab client={api()} />);
+    expect(await screen.findByLabelText('Monthly agent budget (dollars)')).toBeDisabled();
+    await userEvent.click(screen.getByRole('button', { name: 'Save settings' }));
+    expect(await screen.findByText('Saved.')).toBeInTheDocument();
+    expect(lastCall(calls, 'PUT', '/api/settings')?.body).not.toHaveProperty('monthly_budget_usd');
   });
 
   it('saves the ASR fallback, and keeps a locked one', async () => {

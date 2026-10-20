@@ -42,8 +42,9 @@ type ContribUpdate struct {
 
 // ServiceDeps are the injected collaborators shared by the core-submit endpoint
 // logic and the intake poller. contrib depends only on store/state (+ the meta
-// module's slug rules); the scheduler and event hub are reached through the
-// Readmit/Publish function seams so contrib imports neither.
+// module's slug rules, and accounts' ErrUnrefreshed for the token source); the
+// scheduler and event hub are reached through the Readmit/Publish function seams
+// so contrib imports neither.
 type ServiceDeps struct {
 	// DB is the scheduling/state store (books + contribution rows).
 	DB *store.DB
@@ -55,7 +56,8 @@ type ServiceDeps struct {
 	// BaseURL is the GitHub REST base (empty defaults to api.github.com); tests
 	// point it at an httptest server.
 	BaseURL string
-	// Tokens resolves a GitHub credential (PAT then `gh auth token`). The poller
+	// Tokens resolves a GitHub credential (the environment's token, the GitHub
+	// sign-in, then `gh auth token`). The poller
 	// tolerates no credential (public reads are unauthenticated); a core submit
 	// requires one.
 	Tokens TokenResolver
@@ -119,17 +121,17 @@ func (s *Service) bookLock(id int64) *sync.Mutex {
 // (public reads work unauthenticated); requireToken reports whether a credential
 // is present, which the core submit requires.
 func (s *Service) client(ctx context.Context) (cli *Client, requireToken bool) {
-	token := ""
+	token, from := "", ""
 	if s.deps.Tokens != nil {
-		if tok, _, err := s.deps.Tokens.Resolve(ctx); err == nil {
-			token = tok
+		if tok, f, err := s.deps.Tokens.Resolve(ctx); err == nil {
+			token, from = tok, f
 		}
 	}
 	base := s.deps.BaseURL
 	if base == "" {
 		base = "https://api.github.com"
 	}
-	return NewClient(base, token), token != ""
+	return NewClientFor(base, token, from, s.deps.Tokens), token != ""
 }
 
 // SubmitCore opens an add-work intake issue for a book whose work does not exist
@@ -192,7 +194,9 @@ func (s *Service) SubmitCore(ctx context.Context, book store.Book, p CoreProposa
 
 	// Persist the row IMMEDIATELY after CreateIssue succeeds, BEFORE the park flip, so a
 	// crash between the two loses nothing: a resubmit finds the recorded issue and reuses
-	// it (the idempotent-reuse branch above) instead of opening a duplicate.
+	// it (the idempotent-reuse branch above) instead of opening a duplicate. A replaced
+	// row loses its intake-PR pointer (the upsert keeps it only for the same issue), so
+	// the poller follows the new issue.
 	row, err := s.deps.DB.UpsertContribution(ctx, store.Contribution{
 		BookID: book.ID,
 		Kind:   store.ContribKindCore,
@@ -204,14 +208,6 @@ func (s *Service) SubmitCore(ctx context.Context, book store.Book, p CoreProposa
 	})
 	if err != nil {
 		return store.Contribution{}, fmt.Errorf("contrib: record core row: %w", err)
-	}
-	// The upsert keeps a replaced row's intake-PR pointer: clear it, or the poller
-	// would follow the settled row's old PR instead of the new issue.
-	if hasExisting && (row.PRNumber != 0 || row.PRURL != "") {
-		if err := s.deps.DB.SetContributionStatus(ctx, row.ID, row.Status, 0, "", row.Note); err != nil {
-			return store.Contribution{}, fmt.Errorf("contrib: reset core row: %w", err)
-		}
-		row.PRNumber, row.PRURL = 0, ""
 	}
 
 	// Flip the park core_needed -> core_pending (state stays contributing, status

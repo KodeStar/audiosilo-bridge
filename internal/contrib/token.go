@@ -3,44 +3,103 @@ package contrib
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 
-	"github.com/kodestar/audiosilo-bridge/internal/secrets"
+	"github.com/kodestar/audiosilo-bridge/internal/accounts"
 )
 
-// ErrNoCredential is returned by TokenSource.Resolve when neither a GitHub PAT
-// in the secrets store nor a `gh auth token` fallback yields a token. It is a
-// sentinel so callers can errors.Is it (issue/pr contribution modes park the
-// book on this; unauthenticated public polling ignores it).
-var ErrNoCredential = errors.New("contrib: no GitHub credential (no PAT in secrets, and gh auth token is unavailable)")
+// ErrNoCredential is returned by TokenSource.Resolve when no GitHub credential
+// resolves: no AUDIOSILO_BRIDGE_GITHUB_TOKEN, no GitHub sign-in (or one GitHub
+// refused) and no `gh auth token`. It is a sentinel so callers can errors.Is it
+// (the issue contribution mode parks the book on this; unauthenticated public
+// polling ignores it).
+var ErrNoCredential = errors.New("contrib: no GitHub credential (sign in to GitHub on the Bridge's Accounts tab)")
+
+// ErrSignInUnrefreshed is the ErrNoCredential (errors.Is matches both) of a
+// Bridge that is signed in to GitHub but whose expired sign-in couldn't be
+// refreshed because GitHub couldn't be reached (accounts.ErrUnrefreshed), with
+// nothing else to fall back on. Waiting until GitHub can be reached ends it, not
+// a sign-in, so callers word it apart (and its own text leaves out
+// ErrNoCredential's "sign in" advice).
+var ErrSignInUnrefreshed error = signInUnrefreshed{}
+
+type signInUnrefreshed struct{}
+
+func (signInUnrefreshed) Error() string {
+	return "contrib: no GitHub credential (the sign-in couldn't be refreshed: GitHub couldn't be reached)"
+}
+
+// Is makes ErrSignInUnrefreshed an ErrNoCredential for errors.Is.
+func (signInUnrefreshed) Is(target error) bool { return target == ErrNoCredential }
+
+// GitHubTokenEnv names the variable that gives the Bridge a GitHub token for
+// headless setups. It is read live at every Resolve (never sealed), and wins
+// over the Accounts tab's sign-in.
+const GitHubTokenEnv = "AUDIOSILO_BRIDGE_GITHUB_TOKEN"
 
 // from values reported alongside a resolved token.
 const (
-	FromPAT = "pat"
-	FromGH  = "gh"
+	FromEnv    = "env"
+	FromDevice = "device"
+	FromGH     = "gh"
 )
 
 // ghTokenTimeout bounds the `gh auth token` shell-out.
 const ghTokenTimeout = 15 * time.Second
 
-// TokenSource resolves a GitHub credential for the REST client. It prefers a
-// PAT stored in the secrets keychain; failing that it shells out to the GitHub
-// CLI (`gh auth token`). The resolved token is never logged or placed in argv.
-type TokenSource struct {
-	sec secrets.Store
-	// ghToken resolves a token via the GitHub CLI. It is a field so tests can
-	// substitute a fake; the default runs the real `gh auth token` shell-out.
-	ghToken func(ctx context.Context) (string, error)
+// ghReuseFor is how long a `gh auth token` answer (a token, or none) is reused:
+// Resolve runs at every heartbeat and every Status poll of the page, and gh is a
+// process.
+const ghReuseFor = time.Minute
+
+// DeviceTokens is the Accounts tab's GitHub sign-in (*accounts.GitHub): its
+// access token (refreshed when it nears its expiry; an error when there is no
+// usable sign-in), Refused to record a 401 and OK a call that worked.
+type DeviceTokens interface {
+	Token(ctx context.Context) (string, error)
+	Refused(ctx context.Context, token string)
+	OK(ctx context.Context, token string)
 }
 
-// NewTokenSource returns a TokenSource backed by sec (which may be nil, in
-// which case only the gh fallback is consulted).
-func NewTokenSource(sec secrets.Store) *TokenSource {
-	ts := &TokenSource{sec: sec}
+// TokenSource resolves a GitHub credential for the REST client: the
+// environment's AUDIOSILO_BRIDGE_GITHUB_TOKEN (read live), then the device-flow
+// sign-in, then the GitHub CLI (`gh auth token`). A token GitHub refused (a 401,
+// Refused) is skipped until it changes. The resolved token is never logged or
+// placed in argv.
+type TokenSource struct {
+	device DeviceTokens
+	// getenv reads the environment; ghToken resolves a token via the GitHub CLI.
+	// Both are fields so tests can substitute fakes.
+	getenv  func(string) string
+	ghToken func(ctx context.Context) (string, error)
+	now     func() time.Time
+	// onChange runs after a refusal (the heartbeat's can_contribute drops).
+	onChange func()
+
+	mu sync.Mutex
+	// refused holds the fingerprints of the environment and gh tokens GitHub
+	// refused (the device sign-in records its own refusal).
+	refused map[string]bool
+	// gh is the last `gh auth token` answer ("" for none) and when it came.
+	gh   string
+	ghAt time.Time
+}
+
+// NewTokenSource returns a TokenSource over device (nil: no sign-in), calling
+// onChange (nil: nothing) after GitHub refuses a token.
+func NewTokenSource(device DeviceTokens, onChange func()) *TokenSource {
+	if onChange == nil {
+		onChange = func() {}
+	}
+	ts := &TokenSource{device: device, getenv: os.Getenv, now: time.Now, onChange: onChange, refused: map[string]bool{}}
 	ts.ghToken = func(ctx context.Context) (string, error) {
 		ghPath, err := exec.LookPath("gh")
 		if err != nil {
@@ -51,22 +110,120 @@ func NewTokenSource(sec secrets.Store) *TokenSource {
 	return ts
 }
 
-// Resolve returns (token, from, nil) where from is FromPAT or FromGH. It tries
-// the secrets PAT first, then the gh fallback. When neither yields a non-empty
-// token it returns ("", "", ErrNoCredential). The error path never carries the
+// Resolve returns (token, from, nil) where from is FromEnv, FromDevice or
+// FromGH, trying them in that order. When none yields a usable token it returns
+// ("", "", ErrNoCredential), or ErrSignInUnrefreshed when the sign-in is there
+// but GitHub couldn't be reached to refresh it. The error path never carries a
 // token.
 func (t *TokenSource) Resolve(ctx context.Context) (token, from string, err error) {
-	if t.sec != nil {
-		if pat, gerr := t.sec.Get(secrets.GitHubPAT); gerr == nil && pat != "" {
-			return pat, FromPAT, nil
+	if v := strings.TrimSpace(t.getenv(GitHubTokenEnv)); v != "" && !t.isRefused(v) {
+		return v, FromEnv, nil
+	}
+	none := ErrNoCredential
+	if t.device != nil {
+		tok, derr := t.device.Token(ctx)
+		if derr == nil && tok != "" {
+			return tok, FromDevice, nil
+		}
+		if errors.Is(derr, accounts.ErrUnrefreshed) {
+			none = ErrSignInUnrefreshed
 		}
 	}
-	if t.ghToken != nil {
-		if tok, gerr := t.ghToken(ctx); gerr == nil && tok != "" {
-			return tok, FromGH, nil
-		}
+	if tok := t.ghCLIToken(ctx); tok != "" && !t.isRefused(tok) {
+		return tok, FromGH, nil
 	}
-	return "", "", ErrNoCredential
+	return "", "", none
+}
+
+// ghCLIToken is `gh auth token`'s answer ("" for none), reused for ghReuseFor.
+// An answer cut short by ctx isn't kept.
+func (t *TokenSource) ghCLIToken(ctx context.Context) string {
+	if t.ghToken == nil {
+		return ""
+	}
+	t.mu.Lock()
+	if !t.ghAt.IsZero() && t.now().Sub(t.ghAt) < ghReuseFor {
+		tok := t.gh
+		t.mu.Unlock()
+		return tok
+	}
+	t.mu.Unlock()
+	tok, err := t.ghToken(ctx)
+	if err != nil {
+		tok = ""
+	}
+	if ctx.Err() == nil {
+		t.mu.Lock()
+		t.gh, t.ghAt = tok, t.now()
+		t.mu.Unlock()
+	}
+	return tok
+}
+
+// Refused records that GitHub refused token (resolved from from) with a 401:
+// the device sign-in is marked refused (until a new sign-in), an environment or
+// gh token is skipped until it changes.
+func (t *TokenSource) Refused(ctx context.Context, from, token string) {
+	if from == FromDevice {
+		if t.device != nil {
+			t.device.Refused(ctx, token)
+		}
+		return
+	}
+	t.mu.Lock()
+	t.refused[fingerprint(token)] = true
+	t.ghAt = time.Time{} // ask gh again: it may hold a new token by now
+	t.mu.Unlock()
+	t.onChange()
+}
+
+// OK records that a call made with token (resolved from from) worked: the
+// device sign-in keeps when it last did (the Accounts tab's last_ok_at); an
+// environment or gh token has no record.
+func (t *TokenSource) OK(ctx context.Context, from, token string) {
+	if from == FromDevice && t.device != nil {
+		t.device.OK(ctx, token)
+	}
+}
+
+func (t *TokenSource) isRefused(token string) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.refused[fingerprint(token)]
+}
+
+// fingerprint is a token's sha256: only it is kept for a refusal.
+func fingerprint(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
+}
+
+// Refuser is a TokenResolver that records a 401 (*TokenSource).
+type Refuser interface {
+	Refused(ctx context.Context, from, token string)
+}
+
+// Confirmer is a TokenResolver that records a call that worked (*TokenSource).
+type Confirmer interface {
+	OK(ctx context.Context, from, token string)
+}
+
+// NewClientFor is NewClient for a token resolved by r: when r records refusals,
+// a 401 on any call reports the token as refused (GitHub revoked or expired it);
+// when it records calls that worked, a call answered as wanted reports that.
+func NewClientFor(baseURL, token, from string, r TokenResolver) *Client {
+	c := NewClient(baseURL, token)
+	c.from = from
+	if token == "" {
+		return c
+	}
+	if rf, ok := r.(Refuser); ok {
+		c.onUnauthorized = func(ctx context.Context) { rf.Refused(ctx, from, token) }
+	}
+	if cf, ok := r.(Confirmer); ok {
+		c.onOK = func(ctx context.Context) { cf.OK(ctx, from, token) }
+	}
+	return c
 }
 
 // ghAuthTokenExec runs `<ghPath> auth token` (argv-only, no shell) with a short

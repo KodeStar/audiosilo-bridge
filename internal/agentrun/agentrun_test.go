@@ -5,6 +5,8 @@ package agentrun
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -301,11 +303,11 @@ func TestCredentials(t *testing.T) {
 	if got := te.r.credentialKind("claude"); got != "oauth_token" {
 		t.Fatalf("claude with a token file = %q", got)
 	}
-	env := envMap(te.r.childEnv("claude", "/tmp/run-x"))
+	env := envMap(te.r.childEnv("claude", "/tmp/run-x", nil))
 	if env["CLAUDE_CODE_OAUTH_TOKEN"] != "sk-ant-oat01-file" || env["ANTHROPIC_API_KEY"] != "" {
 		t.Fatalf("claude env = %v", env)
 	}
-	if te.r.credentialKind("codex") != "api_key" || envMap(te.r.childEnv("codex", "/tmp/run-x"))["OPENAI_API_KEY"] != "sk-file" {
+	if te.r.credentialKind("codex") != "api_key" || envMap(te.r.childEnv("codex", "/tmp/run-x", nil))["OPENAI_API_KEY"] != "sk-file" {
 		t.Fatal("codex key from a file")
 	}
 	_ = os.MkdirAll(filepath.Join(te.home, "codex"), 0o700)
@@ -313,7 +315,7 @@ func TestCredentials(t *testing.T) {
 	if te.r.credentialKind("codex") != "login" {
 		t.Fatal("a codex login is the credential")
 	}
-	if _, ok := envMap(te.r.childEnv("codex", "/tmp/run-x"))["OPENAI_API_KEY"]; ok {
+	if _, ok := envMap(te.r.childEnv("codex", "/tmp/run-x", nil))["OPENAI_API_KEY"]; ok {
 		t.Fatal("a key passed beside the login")
 	}
 	raw, _ := json.Marshal(te.r.status())
@@ -764,5 +766,108 @@ func TestRedetectFindsALateCLI(t *testing.T) {
 	}
 	if ex := waitDone(t, te.submit(t, claudeReq), 30*time.Second); ex.Error != "" || ex.ExitCode != 0 {
 		t.Fatalf("a run after the look = %+v", ex)
+	}
+}
+
+// writeCredential puts the Bridge's credential.json into a job dir (before its
+// request, as the Bridge does).
+func writeCredential(t *testing.T, job, body string) string {
+	t.Helper()
+	dir := filepath.Join(job, agentproto.CredentialDir)
+	if err := os.Mkdir(dir, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(dir, agentproto.CredentialFile)
+	if err := os.WriteFile(p, []byte(body), 0o444); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// submitWithCredential writes a job whose credential.json is in place before
+// request.json appears.
+func (te *testEnv) submitWithCredential(t *testing.T, request, credential string) (job, credPath string) {
+	t.Helper()
+	tmp := t.TempDir()
+	job = writeJob(t, tmp, request)
+	writeCredential(t, job, credential)
+	dst := filepath.Join(te.staging, filepath.Base(job))
+	if err := os.Rename(job, dst); err != nil {
+		t.Fatal(err)
+	}
+	return dst, filepath.Join(dst, agentproto.CredentialDir, agentproto.CredentialFile)
+}
+
+// The hand-off: a container with no credential takes the Bridge's, deletes the
+// file before the CLI starts, and passes it to that run only.
+func TestHandoffCredential(t *testing.T) {
+	t.Parallel()
+	env := parentEnv()
+	delete(env, "CLAUDE_CODE_OAUTH_TOKEN")
+	te := newTestEnv(t, env)
+	if !te.r.status().Handoff {
+		t.Fatal("runner.json advertises the hand-off")
+	}
+	_ = os.WriteFile(filepath.Join(te.claudeCap, "behavior"),
+		[]byte(`ls "$PWD/../credential" > "$CAP/credential_dir" 2>&1`+"\n"), 0o644)
+	te.start(t)
+	job, cred := te.submitWithCredential(t, claudeReq, `{"cli":"claude","kind":"oauth_token","value":"sk-ant-oat01-handed"}`)
+	ex := waitDone(t, job, 30*time.Second)
+	if ex.Error != "" || ex.ExitCode != 0 {
+		t.Fatalf("exit = %+v", ex)
+	}
+	got := envMap(readLines(t, filepath.Join(te.claudeCap, "env")))
+	if got["CLAUDE_CODE_OAUTH_TOKEN"] != "sk-ant-oat01-handed" || got["ANTHROPIC_API_KEY"] != "" {
+		t.Fatalf("claude env = %v", got)
+	}
+	if _, err := os.Lstat(cred); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatal("credential.json is deleted before the CLI starts")
+	}
+	if listing, _ := os.ReadFile(filepath.Join(te.claudeCap, "credential_dir")); strings.Contains(string(listing), "credential.json") {
+		t.Fatalf("the CLI saw credential.json: %s", listing)
+	}
+}
+
+// The container's own credential wins over the hand-off (decision 19), and the
+// handed file is deleted all the same.
+func TestHandoffContainerWins(t *testing.T) {
+	t.Parallel()
+	te := newTestEnv(t, parentEnv()) // CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-claude
+	te.start(t)
+	job, cred := te.submitWithCredential(t, claudeReq, `{"cli":"claude","kind":"api_key","value":"sk-ant-api-handed"}`)
+	if ex := waitDone(t, job, 30*time.Second); ex.Error != "" {
+		t.Fatalf("exit = %+v", ex)
+	}
+	got := envMap(readLines(t, filepath.Join(te.claudeCap, "env")))
+	if got["CLAUDE_CODE_OAUTH_TOKEN"] != "sk-ant-oat01-claude" || got["ANTHROPIC_API_KEY"] != "" {
+		t.Fatalf("claude env = %v", got)
+	}
+	if _, err := os.Lstat(cred); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatal("credential.json is deleted")
+	}
+}
+
+// A malformed hand-off is refused (no run) and still deleted; no credential at
+// all is the agent being unavailable.
+func TestHandoffRefused(t *testing.T) {
+	t.Parallel()
+	env := parentEnv()
+	delete(env, "CLAUDE_CODE_OAUTH_TOKEN")
+	te := newTestEnv(t, env)
+	te.start(t)
+	job, cred := te.submitWithCredential(t, claudeReq, `{"cli":"codex","kind":"api_key","value":"sk-SECRET-x"}`)
+	ex := waitDone(t, job, 30*time.Second)
+	if ex.Error == "" || ex.Unavailable || strings.Contains(ex.Error, "sk-SECRET") {
+		t.Fatalf("exit = %+v", ex)
+	}
+	if _, err := os.Lstat(cred); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatal("a refused credential.json is deleted too")
+	}
+	if _, err := os.Stat(filepath.Join(te.claudeCap, "argv")); err == nil {
+		t.Fatal("the CLI ran")
+	}
+	job = te.submit(t, claudeReq)
+	if ex := waitDone(t, job, 30*time.Second); !ex.Unavailable {
+		t.Fatalf("no credential at all: %+v", ex)
 	}
 }

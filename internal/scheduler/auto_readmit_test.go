@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/kodestar/audiosilo-bridge/internal/state"
+	"github.com/kodestar/audiosilo-bridge/internal/store"
 )
 
 // parkBook drives a book to a parked (needs_attention) agent stage carrying code and a
@@ -104,26 +105,76 @@ func TestRestartReadmitsChangedAvailabilityParksOnce(t *testing.T) {
 	if err := db.SetBookStatus(ctx, auth.ID, string(state.StatusNeedsAttention), "supervisor: authentication failure: not logged in", string(state.ParkSupervisorEscalated)); err != nil {
 		t.Fatal(err)
 	}
-	budget := h.addBook(t, db, "budget", "", "")
-	parkBook(t, s, budget.ID, state.ParkBudgetExceeded, "")
+	// A budget raised in config.yaml or the environment applies at the start: both
+	// budget parks (the per-book one, none; the monthly one, the 1st) look again
+	// (a stub executor has no budget check: TestRestartLeavesABudgetParkThatHolds).
+	perBook := h.addBook(t, db, "per-book budget", "", "")
+	parkBook(t, s, perBook.ID, state.ParkBudgetExceeded, "")
+	monthly := h.addBook(t, db, "monthly budget", "", "")
+	parkBook(t, s, monthly.ID, state.ParkBudgetExceeded, time.Now().Add(240*time.Hour).UTC().Format(time.RFC3339))
+	// A park a person answers stays.
+	human := h.addBook(t, db, "human", "", "")
+	parkBook(t, s, human.ID, state.ParkSpellingGateFailure, "")
 
 	s.readmitRestartRecoverable(ctx)
 
-	for _, id := range []int64{rateLimited.ID, auth.ID} {
+	for _, id := range []int64{rateLimited.ID, auth.ID, perBook.ID, monthly.ID} {
 		got, _ := db.GetBook(ctx, id)
 		if got.Status != "" || got.ParkCode != "" || got.RetryAt != "" {
 			t.Errorf("restart-recoverable book %d remained parked: %+v", id, got)
 		}
 	}
-	got, _ := db.GetBook(ctx, budget.ID)
-	if got.Status != string(state.StatusNeedsAttention) || got.ParkCode != string(state.ParkBudgetExceeded) {
-		t.Fatalf("budget park was incorrectly readmitted: %+v", got)
+	if got, _ := db.GetBook(ctx, human.ID); got.ParkCode != string(state.ParkSpellingGateFailure) {
+		t.Fatalf("a person's park was readmitted: %+v", got)
+	}
+}
+
+// budgetGateExecutor is a stub executor with a budget preflight that parks with
+// reason, or lets the book through when reason is "".
+type budgetGateExecutor struct {
+	*StubExecutor
+	reason string
+}
+
+func (x budgetGateExecutor) BudgetPark(context.Context, store.Book) error {
+	if x.reason == "" {
+		return nil
+	}
+	return ParkWithCode(state.ParkBudgetExceeded, x.reason)
+}
+
+// A restart leaves a budget park the caps would give back as it is (the same
+// reason): re-running its stage would only park it again. One the caps now let
+// through, or one whose reason changed (a cap raised short of the spend), is
+// re-admitted, its stage's preflight then deciding.
+func TestRestartLeavesABudgetParkThatHolds(t *testing.T) {
+	for _, tc := range []struct {
+		name, reason string
+		readmitted   bool
+	}{
+		{"the same reason", "parked", false},
+		{"another reason", "book agent cost $12.00 reached the budget $11.00", true},
+		{"room now", "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+			db := h.openDB(t)
+			s := New(db, h.hub, budgetGateExecutor{NewStubExecutor(0, 0), tc.reason}, 1, h.workRoot, false)
+			b := h.addBook(t, db, "budget", "", "")
+			parkBook(t, s, b.ID, state.ParkBudgetExceeded, "")
+			s.readmitRestartRecoverable(context.Background())
+			got, _ := db.GetBook(context.Background(), b.ID)
+			if readmitted := got.Status == ""; readmitted != tc.readmitted {
+				t.Fatalf("status %q park %q error %q, want readmitted %v", got.Status, got.ParkCode, got.Error, tc.readmitted)
+			}
+		})
 	}
 }
 
 // TestAutoReadmitMonthlyBudgetPark: the monthly budget park carries retry_at (the
 // 1st of the next month) and is re-admitted once it passes; the per-book budget
-// park carries none and stays parked for a human.
+// park carries none and stays parked (until the restart that applies a raised
+// cap, restartReadmitCodes).
 func TestAutoReadmitMonthlyBudgetPark(t *testing.T) {
 	h := newHarness(t)
 	db := h.openDB(t)

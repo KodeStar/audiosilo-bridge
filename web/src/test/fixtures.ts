@@ -1,4 +1,60 @@
-import type { Engine, Library, ServerJob, Settings, Status, Worker } from '@/api/types';
+import type {
+  Accounts,
+  Engine,
+  Library,
+  ServerJob,
+  Settings,
+  Setup,
+  SetupItem,
+  Status,
+  Worker,
+} from '@/api/types';
+
+// A setup checklist with every item done unless over says otherwise.
+export function setupFixture(
+  items: Partial<Record<string, Partial<SetupItem>>> = {},
+  over: Partial<Setup> = {},
+): Setup {
+  const ids = ['paired', 'libraries', 'asr', 'agent', 'budget', 'github'];
+  return {
+    items: ids.map((id) => ({ id, done: true, required: id !== 'github', ...items[id] })),
+    can_contribute: true,
+    github_login: 'octocat',
+    ...over,
+  };
+}
+
+export function accountsFixture(over: Partial<Accounts> = {}): Accounts {
+  return {
+    github: {
+      available: true,
+      signed_in: false,
+      refused: false,
+      login: '',
+      signed_in_at: '',
+      last_ok_at: '',
+      last_error: '',
+      pending: null,
+      flow_error: '',
+      env_token: false,
+      from: '',
+      can_contribute: false,
+      manage_url: 'https://github.com/settings/apps/authorizations',
+    },
+    agent: {
+      backend: 'claude',
+      kinds: ['claude_oauth_token', 'anthropic_api_key'],
+      set: {},
+      set_at: '',
+      set_at_by_kind: {},
+      available: false,
+      detail: "claude has no credential: set one on the Bridge's Accounts tab",
+      handoff: false,
+      container_credential: '',
+    },
+    ...over,
+  };
+}
 
 export function statusFixture(over: Partial<Status> = {}): Status {
   return {
@@ -12,6 +68,8 @@ export function statusFixture(over: Partial<Status> = {}): Status {
     secret_key: 'key file',
     public_url: '',
     server_url_default: 'http://audiosilo:8080',
+    setup: setupFixture(),
+    setup_complete: true,
     ...over,
   };
 }
@@ -76,6 +134,8 @@ export function settingsFixture(over: Partial<Settings> = {}): Settings {
     public_url: '',
     mapping_check_minutes: 10,
     asr_worker_fallback: 'local',
+    monthly_budget_usd: 100,
+    budget_reviewed: true,
     locked: [],
     ...over,
   };

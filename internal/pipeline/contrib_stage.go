@@ -67,8 +67,13 @@ const defaultContribBaseURL = "https://api.github.com"
 // exactly, mirroring AgentUnavailableMsg / MediaToolsUnavailableMsg).
 const (
 	// ContribUnavailableMsg parks a book in issue mode when no GitHub credential
-	// is available (no PAT in secrets, no `gh auth token`).
-	ContribUnavailableMsg = "GitHub credential unavailable - set AUDIOSILO_BRIDGE_GITHUB_TOKEN on the Bridge and restart it, then Retry"
+	// resolves (contrib.TokenSource: no environment token, sign-in or `gh auth token`).
+	// A sign-in on the Accounts tab re-admits it (the app's githubChanged).
+	ContribUnavailableMsg = "GitHub credential unavailable - sign in to GitHub on the Bridge's Accounts tab and the book carries on"
+	// ContribUnrefreshedMsg parks it (same code) when the Bridge is signed in but
+	// GitHub couldn't be reached to refresh the sign-in (contrib.ErrSignInUnrefreshed):
+	// a later refresh re-admits nothing, so Retry does.
+	ContribUnrefreshedMsg = "the Bridge's GitHub sign-in couldn't be refreshed because GitHub couldn't be reached - Retry once it can"
 	// CoreNeededMsg parks a book whose work does not exist upstream: a core add-work
 	// proposal has been prefilled and awaits completion/confirmation in the UI.
 	CoreNeededMsg = "this book's work does not exist on AudioSilo Meta yet - complete the work proposal, then it contributes automatically"
@@ -98,6 +103,24 @@ type contribArtifact struct {
 	kind    string // store.ContribKind{Characters,Recaps}
 	path    string
 	covered bool
+}
+
+// prepareArtifacts reconciles each artifact's sidecar file for slug (the work
+// rewritten to it, the source edition stamped) and marks the dimensions the work
+// already carries upstream as covered. ErrWorkNotFound, transport and disabled
+// degrade to "not covered" (metaissue's overwrite refusal is the backstop).
+func (e *Executor) prepareArtifacts(ctx context.Context, book store.Book, slug string, artifacts []contribArtifact) error {
+	sourceRef := e.contributionSourceRef(ctx, book, slug)
+	for _, a := range artifacts {
+		if err := reconcileSidecar(a.path, slug, sourceRef); err != nil {
+			return fmt.Errorf("reconcile %s: %w", filepath.Base(a.path), err)
+		}
+	}
+	hasChars, hasRecaps := e.coveredDimensions(ctx, slug)
+	for i, a := range artifacts {
+		artifacts[i].covered = (a.kind == store.ContribKindCharacters && hasChars) || (a.kind == store.ContribKindRecaps && hasRecaps)
+	}
+	return nil
 }
 
 // contribute is the M7 contributing stage: it reconciles the validated sidecars'
@@ -146,31 +169,17 @@ func (e *Executor) contribute(ctx context.Context, book store.Book, r scheduler.
 	// 3. Reconcile the durable sidecar files: rewrite "work" to the resolved slug and
 	// stamp the source audiobook edition, canonicalized in place, so what ships can be
 	// audited against the recording used for extraction.
-	sourceRef := e.contributionSourceRef(ctx, book, slug)
+	// 4. Skip-if-covered: a dimension the resolved work already carries upstream is
+	// recorded already_covered and never submitted (prepareArtifacts).
 	var artifacts []contribArtifact
 	if haveChars {
-		if err := reconcileSidecar(charsPath, slug, sourceRef); err != nil {
-			return scheduler.StageResult{}, fmt.Errorf("contributing: reconcile %s: %w", charactersFileName, err)
-		}
 		artifacts = append(artifacts, contribArtifact{kind: store.ContribKindCharacters, path: charsPath})
 	}
 	if haveRecaps {
-		if err := reconcileSidecar(recapsPath, slug, sourceRef); err != nil {
-			return scheduler.StageResult{}, fmt.Errorf("contributing: reconcile %s: %w", recapsFileName, err)
-		}
 		artifacts = append(artifacts, contribArtifact{kind: store.ContribKindRecaps, path: recapsPath})
 	}
-
-	// 4. Skip-if-covered: a dimension the resolved work already carries upstream is
-	// recorded already_covered and never submitted. ErrWorkNotFound/transport/disabled
-	// degrade to "not covered" (metaissue's overwrite refusal is the backstop).
-	hasChars, hasRecaps := e.coveredDimensions(ctx, slug)
-	for i := range artifacts {
-		if artifacts[i].kind == store.ContribKindCharacters {
-			artifacts[i].covered = hasChars
-		} else {
-			artifacts[i].covered = hasRecaps
-		}
+	if err := e.prepareArtifacts(ctx, book, slug, artifacts); err != nil {
+		return scheduler.StageResult{}, fmt.Errorf("contributing: %w", err)
 	}
 
 	// 5. Submit per mode (idempotent on resume). A book whose sidecars were accepted on a
@@ -447,10 +456,20 @@ func (e *Executor) submitContributions(ctx context.Context, book store.Book, slu
 
 // submitIssue opens one intake issue per uncovered dimension. It verifies the routing
 // label stuck (GitHub silently drops labels from non-collaborators) and notes when it
-// did not, and switches an oversize body to a secret gist link. A RateLimitError
+// did not, and switches an oversize body to a secret gist link. Each dimension is
+// filed once across submits (fileIssue: an interrupted earlier submit's gist or
+// issue is adopted; only a list that can't reach back to a marker over a day old
+// files again). A RateLimitError
 // propagates as a transient stage error (not a park); a resume with an already-recorded
 // row skips that dimension.
 func (e *Executor) submitIssue(ctx context.Context, book store.Book, slug string, artifacts []contribArtifact, auditNote string) error {
+	return e.submitIssueWith(ctx, book, slug, artifacts, auditNote, rowSettled)
+}
+
+// submitIssueWith is submitIssue with the rule for a row that is already settled
+// (sidecars.contribute files again over a local or covered one).
+func (e *Executor) submitIssueWith(ctx context.Context, book store.Book, slug string, artifacts []contribArtifact, auditNote string,
+	settled func([]store.Contribution, string) bool) error {
 	cli, err := e.contribClient(ctx)
 	if err != nil {
 		return err
@@ -460,7 +479,7 @@ func (e *Executor) submitIssue(ctx context.Context, book store.Book, slug string
 		// A settled row (submitted/merged/local/already_covered) is authoritative: skip
 		// it BEFORE the covered branch so a later upstream-covered verdict cannot
 		// overwrite a row that already recorded a real submission on a prior run.
-		if rowSettled(existing, a.kind) {
+		if settled(existing, a.kind) {
 			continue // resume: this dimension already posted
 		}
 		if a.covered {
@@ -473,28 +492,22 @@ func (e *Executor) submitIssue(ctx context.Context, book store.Book, slug string
 		if rerr != nil {
 			return rerr
 		}
-		title, body, labels := composeIssue(a.kind, slug, payload, "")
-		if contrib.ExceedsBodyLimit(body) {
-			file := fileNameFor(a.kind)
-			raws, gerr := cli.CreateGist(ctx, map[string]string{file: string(payload)}, true)
-			if gerr != nil {
-				return gerr
-			}
-			title, body, labels = composeIssue(a.kind, slug, payload, raws[file])
-		}
-		issue, ierr := cli.CreateIssue(ctx, e.contribCommunityRepo, title, body, labels)
+		issue, ierr := e.fileIssue(ctx, cli, book.ID, a.kind, slug, payload, rowIssue(existing, a.kind))
 		if ierr != nil {
 			return ierr
 		}
 		note := ""
-		if got, gerr := cli.GetIssue(ctx, e.contribCommunityRepo, issue.Number); gerr == nil {
-			if !labelStuck(got.Labels, routingLabel(a.kind)) {
+		// An issue filed through the GitHub App is labelled by the meta repo's
+		// route workflow once it is open (D3), so a label missing now says nothing.
+		if !cli.AppFiled() {
+			if got, gerr := cli.GetIssue(ctx, e.contribCommunityRepo, issue.Number); gerr == nil && !labelStuck(got.Labels, routingLabel(a.kind)) {
 				note = fmt.Sprintf("%s - a maintainer must apply %s for intake to run", store.ContribNoteLabelsMissingPrefix, routingLabel(a.kind))
 			}
 		}
 		if err := e.upsertRow(ctx, book.ID, a.kind, store.ContribModeIssue, issue.Number, issue.URL, store.ContribStatusSubmitted, contrib.JoinNotes(note, auditNote)); err != nil {
 			return err
 		}
+		e.clearFiling(ctx, book.ID, a.kind)
 	}
 	return nil
 }
@@ -533,24 +546,31 @@ func (e *Executor) submitLocal(ctx context.Context, book store.Book, slug string
 }
 
 // contribClient resolves a GitHub credential and builds a REST client. A missing
-// credential is a ParkError (ParkContribUnavailable); any other resolve failure is a
+// credential is a ParkError (ParkContribUnavailable) whose Cause is the resolve
+// error, so a caller (the share job) tells a sign-in GitHub couldn't be reached to
+// refresh apart without reading the reason's text; any other resolve failure is a
 // transient stage error.
 func (e *Executor) contribClient(ctx context.Context) (*contrib.Client, error) {
-	if e.tokenSource == nil {
-		return nil, scheduler.ParkWithCode(state.ParkContribUnavailable, ContribUnavailableMsg)
+	var token, from string
+	err := contrib.ErrNoCredential // no token source: nothing resolves
+	if e.tokenSource != nil {
+		token, from, err = e.tokenSource.Resolve(ctx)
 	}
-	token, _, err := e.tokenSource.Resolve(ctx)
-	if err != nil {
-		if errors.Is(err, contrib.ErrNoCredential) {
-			return nil, scheduler.ParkWithCode(state.ParkContribUnavailable, ContribUnavailableMsg)
+	if errors.Is(err, contrib.ErrNoCredential) {
+		reason := ContribUnavailableMsg
+		if errors.Is(err, contrib.ErrSignInUnrefreshed) {
+			reason = ContribUnrefreshedMsg
 		}
+		return nil, &scheduler.ParkError{Code: state.ParkContribUnavailable, Reason: reason, Cause: err}
+	}
+	if err != nil {
 		return nil, fmt.Errorf("contributing: resolve credential: %w", err)
 	}
 	base := e.contribBaseURL
 	if base == "" {
 		base = defaultContribBaseURL
 	}
-	return contrib.NewClient(base, token), nil
+	return contrib.NewClientFor(base, token, from, e.tokenSource), nil
 }
 
 // recordCovered records a dimension the resolved work already carries upstream as an
@@ -602,6 +622,17 @@ func rowSettled(rows []store.Contribution, kind string) bool {
 		return r.URL != "" || r.Status == store.ContribStatusLocal || r.Status == store.ContribStatusAlreadyCovered
 	}
 	return false
+}
+
+// rowIssue is the issue number a dimension's row (in the pre-fetched rows)
+// records, 0 for none.
+func rowIssue(rows []store.Contribution, kind string) int {
+	for _, r := range rows {
+		if r.Kind == kind {
+			return r.Number
+		}
+	}
+	return 0
 }
 
 // contribModeFor returns the book's own contribution mode (a sidecars.generate job

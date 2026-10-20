@@ -56,13 +56,18 @@ var stageLabels = map[state.State]string{
 // this one first.
 var parkHints = map[string]string{
 	string(state.ParkAgentUnavailable): "The agent container isn't answering, or its CLI has no credential. The book " +
-		"resumes by itself once it does: check the agent container is running and logged in.",
+		"resumes by itself once it does: check the agent container is running, and set the agent's credential on " +
+		"the Bridge's Accounts tab.",
 	string(state.ParkAgentRateLimited): "The agent account hit its usage limit. The book resumes by itself when the limit resets.",
-	string(state.ParkAgentCredentialRefused): "The agent's credential was refused by the provider: replace it in the agent " +
-		"container (claude setup-token / agent-login codex). The book tries again by itself every 30 minutes, so it " +
-		"goes on once the new one is in.",
-	string(state.ParkBudgetExceeded): "The agent budget is spent. A monthly cap resumes on the 1st; for the per-book cap, " +
-		"raise agent.book_budget_usd in the Bridge's config.yaml, restart it and press Retry on the Bridge's page.",
+	string(state.ParkAgentCredentialRefused): "The agent's credential was refused by the provider: replace it on the " +
+		"Bridge's Accounts tab (a new claude setup-token, or an API key once the token is removed: claude uses a " +
+		"setup-token first), or in the agent container (claude setup-token / agent-login codex), whose own " +
+		"credential wins. The book tries again as soon as the Accounts tab has a new one, and every 30 minutes.",
+	string(state.ParkBudgetExceeded): "The agent budget is spent. A monthly cap resumes on the 1st, or at once when " +
+		"it is raised on the Bridge's Settings tab. A cap set in the Bridge's config.yaml (the per-book " +
+		"agent.book_budget_usd) or by its environment (AUDIOSILO_BRIDGE_AGENT_MONTHLY_BUDGET_USD, " +
+		"AUDIOSILO_BRIDGE_AGENT_BOOK_BUDGET_USD) is raised there, then the Bridge restarted: the job carries on by " +
+		"itself, with no Retry needed.",
 	string(state.ParkAgentValidationExhausted): "The agent's answer kept failing the checks. Press Retry on the Bridge's page to give it another go.",
 	string(state.ParkMarkersNotConfident): "The chapter markers couldn't be read with confidence. Check the book's chapters, " +
 		"then press Retry on the Bridge's page.",
@@ -79,9 +84,9 @@ var parkHints = map[string]string{
 	string(state.ParkASRWorkerWaiting): "Speech recognition waits for an ASR worker: the Bridge's ASR fallback is wait, or " +
 		"the Bridge has no speech recognition of its own. Start a worker (see Workers on the Bridge's page), or, when " +
 		"the Bridge has its own, set the fallback to local there. The book goes on by itself once a worker connects.",
-	string(state.ParkContribUnavailable): "The contribution couldn't reach GitHub, or the Bridge has no GitHub token: set " +
-		"AUDIOSILO_BRIDGE_GITHUB_TOKEN on the Bridge and restart it, then press Retry on the Bridge's page. The " +
-		"characters and recaps are already saved with the book.",
+	string(state.ParkContribUnavailable): "The contribution couldn't reach GitHub, or the Bridge isn't signed in to " +
+		"GitHub: sign in on the Bridge's Accounts tab (the book goes on by itself), or press Retry on the Bridge's " +
+		"page once GitHub can be reached. The characters and recaps are already saved with the book.",
 	string(state.ParkCoreNeeded): "The book isn't in the community database yet, so its recaps can't be contributed. " +
 		"They are saved with the book; propose the book to the database, or cancel this job and generate it again " +
 		"with contribute set to local.",

@@ -274,3 +274,47 @@ func TestRescanAttachments(t *testing.T) {
 		t.Fatalf("404 not_indexable = %v", err)
 	}
 }
+
+// The setup block's wire shape (the plan's JSON, mirrored by hand on the
+// server), and the reply's accepts.
+func TestHeartbeatSetupAndAccepts(t *testing.T) {
+	t.Parallel()
+	f, c := newFake(t, http.StatusOK, `{"server_time":"x","libraries":[],"accepts":["setup","later"]}`)
+	st := Status{Version: "0.3.0", Setup: &Setup{Items: []SetupItem{
+		{ID: "paired", Done: true, Required: true},
+		{ID: "libraries", Done: false, Required: true, Detail: "1 of 2 libraries writable", LibraryIDs: []int64{3}},
+		{ID: "github", Done: false, Required: false},
+	}, CanContribute: false, GitHubLogin: "octocat"}}
+	reply, err := c.Heartbeat(context.Background(), st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reply.Accepting(AcceptSetup) || reply.Accepting("estimates") {
+		t.Fatalf("accepts = %v", reply.Accepts)
+	}
+	var sent struct {
+		Setup map[string]json.RawMessage `json:"setup"`
+	}
+	if err := json.Unmarshal([]byte(f.sent), &sent); err != nil {
+		t.Fatal(err)
+	}
+	want := `[{"id":"paired","done":true,"required":true},` +
+		`{"id":"libraries","done":false,"required":true,"detail":"1 of 2 libraries writable","library_ids":[3]},` +
+		`{"id":"github","done":false,"required":false}]`
+	if string(sent.Setup["items"]) != want || string(sent.Setup["can_contribute"]) != "false" ||
+		string(sent.Setup["github_login"]) != `"octocat"` {
+		t.Fatalf("setup = %s", f.sent)
+	}
+	// No block: no key (an older server refuses one it doesn't know).
+	if _, err := c.Heartbeat(context.Background(), Status{Version: "0.3.0"}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(f.sent, "setup") {
+		t.Fatalf("sent %s", f.sent)
+	}
+	var old StatusReply
+	_ = json.Unmarshal([]byte(`{"server_time":"x","libraries":[]}`), &old)
+	if old.Accepting(AcceptSetup) {
+		t.Fatal("an older server accepts nothing")
+	}
+}

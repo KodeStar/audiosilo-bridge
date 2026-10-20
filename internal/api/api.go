@@ -24,6 +24,7 @@ import (
 
 	"github.com/kodestar/audiosilo-bridge/internal/auth"
 	"github.com/kodestar/audiosilo-bridge/internal/jobs"
+	"github.com/kodestar/audiosilo-bridge/internal/link"
 	"github.com/kodestar/audiosilo-bridge/internal/logring"
 	"github.com/kodestar/audiosilo-bridge/internal/mapping"
 	"github.com/kodestar/audiosilo-bridge/internal/store"
@@ -44,6 +45,11 @@ type Status struct {
 	PublicURL string `json:"public_url"`
 	// ServerURLDefault prefills the pairing form (config server.url).
 	ServerURLDefault string `json:"server_url_default"`
+	// Setup is the setup checklist (Phase 2b), the one the heartbeat carries;
+	// Complete: every required item is done (the Status tab's "Get set up" card
+	// shows until then).
+	Setup         link.Setup `json:"setup"`
+	SetupComplete bool       `json:"setup_complete"`
 }
 
 // Library is a server library with the Bridge's mapping and its last check.
@@ -60,8 +66,13 @@ type Settings struct {
 	MappingCheckMinutes int    `json:"mapping_check_minutes"`
 	// ASRWorkerFallback is asr.worker_fallback: local or wait ("" on a save
 	// keeps it).
-	ASRWorkerFallback string   `json:"asr_worker_fallback"`
-	Locked            []string `json:"locked"`
+	ASRWorkerFallback string `json:"asr_worker_fallback"`
+	// MonthlyBudgetUSD is agent.monthly_budget_usd (0 = no cap; nil on a save
+	// keeps it). Saving it marks the budget reviewed (the setup checklist's
+	// budget item); BudgetReviewed says whether it is.
+	MonthlyBudgetUSD *float64 `json:"monthly_budget_usd"`
+	BudgetReviewed   bool     `json:"budget_reviewed"`
+	Locked           []string `json:"locked"`
 }
 
 // Worker is a paired ASR worker (GET /api/workers): what it last said, what it
@@ -155,6 +166,7 @@ type Backend interface {
 	// deletes one, which revokes its token (ErrNotFound: no such worker).
 	CreateWorker(ctx context.Context, name string) (*NewWorker, error)
 	RevokeWorker(ctx context.Context, id int64) error
+	AccountsBackend
 }
 
 // The Backend's error kinds, mapped to statuses.
@@ -226,6 +238,7 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("GET /api/workers", a.requireAuth(a.handleWorkers))
 	mux.HandleFunc("POST /api/workers", a.requireAuth(a.handleCreateWorker))
 	mux.HandleFunc("DELETE /api/workers/{id}", a.requireAuth(a.handleRevokeWorker))
+	a.accountRoutes(mux)
 	a.workerRoutes(mux)
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) { writeError(w, http.StatusNotFound, "not found") })
 	mux.Handle("/", a.web)
@@ -482,15 +495,16 @@ func (a *API) handleSettings(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) handleSaveSettings(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		PublicURL           string `json:"public_url"`
-		MappingCheckMinutes int    `json:"mapping_check_minutes"`
-		ASRWorkerFallback   string `json:"asr_worker_fallback"`
+		PublicURL           string   `json:"public_url"`
+		MappingCheckMinutes int      `json:"mapping_check_minutes"`
+		ASRWorkerFallback   string   `json:"asr_worker_fallback"`
+		MonthlyBudgetUSD    *float64 `json:"monthly_budget_usd"`
 	}
 	if !decodeJSON(w, r, &req) {
 		return
 	}
 	s := Settings{PublicURL: strings.TrimSpace(req.PublicURL), MappingCheckMinutes: req.MappingCheckMinutes,
-		ASRWorkerFallback: strings.TrimSpace(req.ASRWorkerFallback)}
+		ASRWorkerFallback: strings.TrimSpace(req.ASRWorkerFallback), MonthlyBudgetUSD: req.MonthlyBudgetUSD}
 	if err := a.b.SaveSettings(r.Context(), s); err != nil {
 		a.writeBackendError(w, err, "save the settings")
 		return

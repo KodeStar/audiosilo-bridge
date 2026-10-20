@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/kodestar/audiosilo-bridge/internal/agent"
+	"github.com/kodestar/audiosilo-bridge/internal/contrib"
 	"github.com/kodestar/audiosilo-bridge/internal/fsutil"
 	"github.com/kodestar/audiosilo-bridge/internal/jobs"
 	"github.com/kodestar/audiosilo-bridge/internal/link"
@@ -77,6 +78,9 @@ type Options struct {
 	// Describer is the engine's description step, nil until the engine has
 	// started (a nil func: no descriptions).
 	Describer func() Describer
+	// Sharer is the engine's share step for sidecars.contribute (nil until the
+	// engine has started; a nil func: no shares).
+	Sharer    func() Sharer
 	Libraries Libraries
 	Mount     mapping.MountFunc
 	// Server is the server link, nil while unpaired.
@@ -88,9 +92,10 @@ type Options struct {
 	// RetentionDays is transcripts.retention_days: 0 deletes a finished book's
 	// transcripts when its job ends (else the daily sweep does, that much later).
 	RetentionDays int
-	// CanContribute reports whether a GitHub token resolves (contribute=issue
-	// needs one); nil counts as yes.
-	CanContribute func(context.Context) bool
+	// ContribCredential reports why no GitHub token resolves (contribute=issue
+	// needs one): nil when one does, else contrib.ErrNoCredential or
+	// contrib.ErrSignInUnrefreshed. A nil func counts as one resolving.
+	ContribCredential func(context.Context) error
 	// Poll is how often a working engine book is looked at (default 3 s);
 	// IdlePoll how often one that is queued, paused or parked is (default 30 s;
 	// a Retry looks at once); Recheck how often a book folder that couldn't be
@@ -111,6 +116,15 @@ type Handler struct {
 	// Bridge's own, book_not_writable, checks again at once): each job id's
 	// latest run's own channel.
 	pokes map[int64]chan struct{}
+	// describeParks is each describe job's park while its loop waits on it
+	// (describeParked), with that run's wake-up channel, so WakeParked finds the
+	// ones a change answers.
+	describeParks map[int64]describePark
+	// wakeSeq numbers WakeParked's calls and woken holds each park code's latest,
+	// so a describe try that parks on a code woken while it ran tries again at
+	// once (parkDescribe).
+	wakeSeq uint64
+	woken   map[state.ParkCode]uint64
 	// doneJobs counts the jobs that finished done here (the heartbeat's
 	// estimates are computed again when it moves).
 	doneJobs atomic.Int64
@@ -136,7 +150,47 @@ func New(o Options) *Handler {
 	if o.Now == nil {
 		o.Now = time.Now
 	}
-	return &Handler{o: o, pokes: map[int64]chan struct{}{}}
+	if o.ContribCredential == nil {
+		o.ContribCredential = func(context.Context) error { return nil }
+	}
+	return &Handler{o: o, pokes: map[int64]chan struct{}{}, describeParks: map[int64]describePark{},
+		woken: map[state.ParkCode]uint64{}}
+}
+
+// describePark is a describe run's park (describeParks): its code, and the
+// run's wake-up channel.
+type describePark struct {
+	code state.ParkCode
+	poke chan struct{}
+}
+
+// WakeParked wakes every sidecars.describe job parked with code to try again
+// now, and returns how many it woke: a monthly budget raised on the page, or the
+// agent's credential changed on the Accounts tab, re-admits the engine's parked
+// books, while a describe job waits in its own loop (until its retry_at, the 1st
+// for the monthly budget, a Retry, or the Bridge's next start, which runs the job
+// again). A job whose try is running then tries again at once if that try parks
+// with code.
+func (h *Handler) WakeParked(code state.ParkCode) int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.wakeSeq++
+	h.woken[code] = h.wakeSeq
+	woke := 0
+	for _, p := range h.describeParks {
+		if p.code == code {
+			nudge(p.poke)
+			woke++
+		}
+	}
+	return woke
+}
+
+// wakeMark is WakeParked's latest call (describeParked's before a try).
+func (h *Handler) wakeMark() uint64 {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.wakeSeq
 }
 
 func (h *Handler) now() time.Time { return h.o.Now() }
@@ -268,12 +322,24 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 	if err != nil {
 		return nil, err
 	}
-	if !resumed && params.Contribute == ContributeIssue && h.o.CanContribute != nil && !h.o.CanContribute(ctx) {
-		// Fail before any spend: the contribution is the last stage, and without a
-		// token it could only park there after the whole run was paid for.
-		return nil, errCantContribute
+	if !resumed {
+		// A new job before prepare can wait on its library; a resumed one that
+		// makes a new engine book after all is checked by create.
+		if err := h.cantContribute(ctx, r); err != nil {
+			return nil, err
+		}
 	}
 	return h.runEngineBook(ctx, eng, r, mapped, resumed, nil)
+}
+
+// cantContribute fails a contribute=issue job before any spend when no GitHub
+// token resolves: the contribution is the last stage, and without a token it
+// could only park there after the whole run was paid for. nil for any other job.
+func (h *Handler) cantContribute(ctx context.Context, r *run) error {
+	if r.params.Contribute != ContributeIssue {
+		return nil
+	}
+	return credFailure(h.o.ContribCredential(ctx), errCantContributeUnrefreshed, errCantContribute)
 }
 
 // resumeMapping is the job's mapping to an engine book and whether the job resumes
@@ -360,10 +426,30 @@ func (h *Handler) startRun(job jobs.Job, rep *jobs.Reporter, kind string) (r *ru
 	return r, func() { h.dropPoke(job.ID, r.poke) }, nil
 }
 
-// errCantContribute is a contribute=issue job on a Bridge with no GitHub token.
-var errCantContribute = errors.New("this job asks to contribute the characters and recaps (contribute: issue), but " +
-	"the Bridge has no GitHub token: set AUDIOSILO_BRIDGE_GITHUB_TOKEN on the Bridge and restart it, or generate " +
-	"the book with contribute set to local")
+// errCantContribute is a contribute=issue job on a Bridge with no GitHub
+// credential; errCantContributeUnrefreshed one on a Bridge signed in to GitHub
+// whose sign-in GitHub couldn't be reached to refresh.
+var (
+	errCantContribute = errors.New("this job asks to contribute the characters and recaps (contribute: issue), but " +
+		"the Bridge isn't signed in to GitHub: sign in on the Bridge's Accounts tab, or generate the book with " +
+		"contribute set to local")
+	errCantContributeUnrefreshed = errors.New("this job asks to contribute the characters and recaps (contribute: " +
+		"issue), but the Bridge's GitHub sign-in couldn't be refreshed because GitHub couldn't be reached: generate " +
+		"the book again once it can, or with contribute set to local")
+)
+
+// credFailure words a missing contribution credential (err, from
+// Options.ContribCredential): unrefreshed when the sign-in only couldn't be
+// refreshed (contrib.ErrSignInUnrefreshed), else none; nil for nil.
+func credFailure(err, unrefreshed, none error) error {
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, contrib.ErrSignInUnrefreshed):
+		return unrefreshed
+	}
+	return none
+}
 
 // end records how the job ended, unless it resumes later (the Bridge stopping or
 // its token refused). A job that ends any other way short of done (an admin
@@ -473,6 +559,13 @@ func (h *Handler) waitEngine(ctx context.Context, r *run) (Engine, error) {
 		}
 		r.rep.Progress(jobs.Progress{Step: stepWaiting, Message: "Waiting for the engine to start"})
 		if err := agent.SleepCtx(ctx, h.o.Poll); err != nil {
+			if !jobs.Resumes(ctx) {
+				// Cancelled, or taken back, before the engine started: the run never
+				// reaches end(), so the engine book an earlier run of the job made is
+				// released as Abandon does, or a start would re-admit it with nothing
+				// to follow it.
+				h.Abandon(context.WithoutCancel(ctx), r.job)
+			}
 			return nil, err
 		}
 	}
@@ -483,16 +576,9 @@ func (h *Handler) waitEngine(ctx context.Context, r *run) (Engine, error) {
 // folder can be written. strict (a new job) fails on a library that isn't mapped
 // and writable; a resumed one waits for it, parked.
 func (h *Handler) prepare(ctx context.Context, r *run, strict bool) error {
-	srv := h.o.Server()
-	if srv == nil {
-		return errors.New("the Bridge isn't paired")
+	if err := h.serverLibrary(r); err != nil {
+		return err
 	}
-	r.srv = srv
-	lib, ok := h.o.Libraries.Library(*r.job.LibraryID)
-	if !ok {
-		return fmt.Errorf("library %d isn't one the server listed", *r.job.LibraryID)
-	}
-	r.lib = lib
 	if err := h.waitMapped(ctx, r, strict); err != nil {
 		return err
 	}
@@ -513,6 +599,22 @@ func (h *Handler) prepare(ctx context.Context, r *run, strict bool) error {
 	}
 	r.place = p
 	return h.waitWritable(ctx, r)
+}
+
+// serverLibrary sets the run's server and the job's library as the server
+// listed it.
+func (h *Handler) serverLibrary(r *run) error {
+	srv := h.o.Server()
+	if srv == nil {
+		return errors.New("the Bridge isn't paired")
+	}
+	r.srv = srv
+	lib, ok := h.o.Libraries.Library(*r.job.LibraryID)
+	if !ok {
+		return fmt.Errorf("library %d isn't one the server listed", *r.job.LibraryID)
+	}
+	r.lib = lib
+	return nil
 }
 
 // fetchBook asks the server for the book, waiting out an answer that may change
@@ -665,6 +767,14 @@ func (r *run) engineParked(parked bool, code, msg string) {
 func (h *Handler) create(ctx context.Context, eng Engine, r *run) error {
 	if r.kind == ChaptersKind {
 		return h.createChapters(ctx, eng, r)
+	}
+	if r.resuming {
+		// A resumed job whose book is another job's (an id reused) or gone (deleted,
+		// or swept since it was cancelled) starts over: a new spend, which Run's
+		// check before any spend skipped.
+		if err := h.cantContribute(ctx, r); err != nil {
+			return err
+		}
 	}
 	source, epub, note, err := chooseSource(r.place, r.params.Source)
 	if err != nil {
@@ -1252,10 +1362,7 @@ func (h *Handler) Retry(ctx context.Context, jobID int64) error {
 	// reporting whether one runs here.
 	poke := func() bool {
 		if waiting {
-			select {
-			case c <- struct{}{}:
-			default:
-			}
+			nudge(c)
 		}
 		return waiting
 	}
@@ -1307,6 +1414,14 @@ func (h *Handler) setPoke(jobID int64, c chan struct{}) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.pokes[jobID] = c
+}
+
+// nudge sends a wake-up on c without waiting (one already pending is enough).
+func nudge(c chan struct{}) {
+	select {
+	case c <- struct{}{}:
+	default:
+	}
 }
 
 // dropPoke removes the job's wake-up channel if it is still c (a later run of

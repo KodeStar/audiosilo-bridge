@@ -258,13 +258,14 @@ func TestPipelineInspectSplitToDone(t *testing.T) {
 	}
 }
 
-// waitState polls until the book reaches want or the deadline passes.
-func waitState(t *testing.T, db *store.DB, id int64, want string, timeout time.Duration) store.Book {
+// waitBook polls until the book is as done says or the deadline passes, and
+// returns it as last read.
+func waitBook(t *testing.T, db *store.DB, id int64, timeout time.Duration, done func(store.Book) bool) store.Book {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		b, err := db.GetBook(context.Background(), id)
-		if err == nil && (b.State == want || b.Status == string(state.StatusFailed)) {
+		if err == nil && done(b) {
 			return b
 		}
 		time.Sleep(20 * time.Millisecond)
@@ -273,20 +274,19 @@ func waitState(t *testing.T, db *store.DB, id int64, want string, timeout time.D
 	return b
 }
 
+// waitState polls until the book reaches want (or fails) or the deadline passes.
+func waitState(t *testing.T, db *store.DB, id int64, want string, timeout time.Duration) store.Book {
+	t.Helper()
+	return waitBook(t, db, id, timeout, func(b store.Book) bool {
+		return b.State == want || b.Status == string(state.StatusFailed)
+	})
+}
+
 // waitStatus polls until the book carries want (a status flag) or the deadline
 // passes.
 func waitStatus(t *testing.T, db *store.DB, id int64, want string, timeout time.Duration) store.Book {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		b, err := db.GetBook(context.Background(), id)
-		if err == nil && b.Status == want {
-			return b
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	b, _ := db.GetBook(context.Background(), id)
-	return b
+	return waitBook(t, db, id, timeout, func(b store.Book) bool { return b.Status == want })
 }
 
 // genM4BWithTitles builds a tiny .m4b whose chapter markers carry titles.

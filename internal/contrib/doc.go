@@ -17,9 +17,10 @@
 //
 // Wave 1A added the token source, the REST client, and the body composers. Wave
 // 3A adds the Service + intake poller (service.go / poller.go): the shared
-// core-submit and status-polling logic. It imports the stdlib, the secrets store,
-// the meta module's pkg/model (slug rules) and pkg/pack (reading a merged PR's
-// pack files), and internal/{store,state}; the
+// core-submit and status-polling logic. It imports the stdlib, the meta module's
+// pkg/model (slug rules) and pkg/pack (reading a merged PR's pack files),
+// internal/{store,state}, and internal/accounts for ErrUnrefreshed alone (the
+// sign-in itself is reached through the DeviceTokens interface); the
 // scheduler and event hub are reached through injected Readmit/Publish function
 // seams, so contrib imports neither scheduler nor pipeline (no import cycle: the
 // pipeline contributing stage imports contrib, never the reverse).

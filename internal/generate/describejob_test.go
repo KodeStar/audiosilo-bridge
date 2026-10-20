@@ -214,10 +214,21 @@ func TestDescribeJob(t *testing.T) {
 	t.Parallel()
 	hr := newHarness(t)
 	hr.generated(41)
-	d := &fakeDescriber{db: hr.db}
+	describing := func(_ link.Update, p map[string]any) bool {
+		return p["stage"] == "describing" && p["step"] == "describing"
+	}
+	// The runner sends only a job's latest progress, so the call holds until the
+	// server has the step reported before it (an instant call would replace it
+	// first). poll, not waitFor: this runs on the job's goroutine; the test's own
+	// wait for the step, which starts first, fails if it never comes.
+	d := &fakeDescriber{db: hr.db, fail: func(int) error {
+		poll(func() bool { return hr.srv.saw(42, describing) })
+		return nil
+	}}
 	hr.srv.addDescribe(42, "Author/Book")
 	stop := hr.runAll(hr.describeHandler(d))
 	defer stop()
+	hr.waitFor("the describing stage", func() bool { return hr.srv.saw(42, describing) })
 	hr.waitFor("done", func() bool { s, _ := hr.srv.final(42); return s == link.StateDone })
 	var res DescribeJobResult
 	hr.result(42, &res)
@@ -227,11 +238,6 @@ func TestDescribeJob(t *testing.T) {
 	}
 	if calls := d.calls(); len(calls) != 1 || calls[0] {
 		t.Fatalf("describe calls = %+v", calls)
-	}
-	if !hr.srv.saw(42, func(_ link.Update, p map[string]any) bool {
-		return p["stage"] == "describing" && p["step"] == "describing"
-	}) {
-		t.Fatal("the job never reported the describing stage")
 	}
 	adir := filepath.Join(hr.root, "Author", "Book", AttachDir)
 	if raw, err := os.ReadFile(filepath.Join(adir, "description.json")); err != nil || string(raw) != testDescription {
@@ -327,15 +333,23 @@ func TestDescribeJobParks(t *testing.T) {
 	hr.generated(61)
 	var mu sync.Mutex
 	mode := "budget"
+	rateLimited := func(u link.Update, p map[string]any) bool {
+		park, _ := p["park"].(map[string]any)
+		return u.State != nil && *u.State == link.StateNeedsAttention &&
+			park["code"] == "agent_rate_limited" && park["retry_at"] != nil
+	}
 	d := &fakeDescriber{db: hr.db, fail: func(call int) error {
 		mu.Lock()
-		defer mu.Unlock()
+		m := mode
+		mu.Unlock()
 		switch {
-		case mode == "budget" && call == 1:
+		case m == "budget" && call == 1:
 			return scheduler.ParkWithCode(state.ParkBudgetExceeded, "the budget is spent")
-		case mode == "rate" && call == 3:
+		case m == "rate" && call == 3:
 			return scheduler.ParkWithCodeAfter(state.ParkAgentRateLimited, "rate limited", time.Now().Add(50*time.Millisecond))
-		case mode == "checks":
+		case m == "rate": // the try at retry_at holds until the server has the park, as in TestDescribeJob
+			poll(func() bool { return hr.srv.saw(63, rateLimited) })
+		case m == "checks":
 			return scheduler.ParkWithCode(state.ParkAgentValidationExhausted, "kept failing")
 		}
 		return nil
@@ -349,7 +363,7 @@ func TestDescribeJobParks(t *testing.T) {
 		return hr.srv.saw(62, func(u link.Update, p map[string]any) bool {
 			park, _ := p["park"].(map[string]any)
 			return u.State != nil && *u.State == link.StateNeedsAttention && u.Error != nil && *u.Error == "the budget is spent" &&
-				park["code"] == "budget_exceeded" && park["hint"] != "" && park["retry_at"] == nil
+				park["code"] == "budget_exceeded" && park["hint"] == ParkHint("budget_exceeded") && park["retry_at"] == nil
 		})
 	})
 	if err := h.Retry(context.Background(), 62); err != nil {
@@ -364,13 +378,8 @@ func TestDescribeJobParks(t *testing.T) {
 		t.Fatal(err)
 	}
 	hr.srv.addDescribe(63, "Author/Book")
+	hr.waitFor("the rate limit's park", func() bool { return hr.srv.saw(63, rateLimited) })
 	hr.waitFor("done at retry_at", func() bool { s, _ := hr.srv.final(63); return s == link.StateDone })
-	if !hr.srv.saw(63, func(_ link.Update, p map[string]any) bool {
-		park, _ := p["park"].(map[string]any)
-		return park["code"] == "agent_rate_limited" && park["retry_at"] != nil
-	}) {
-		t.Fatal("the rate limit was never reported")
-	}
 
 	mu.Lock()
 	mode = "checks"
@@ -379,6 +388,78 @@ func TestDescribeJobParks(t *testing.T) {
 	hr.waitFor("failed", func() bool { s, _ := hr.srv.final(64); return s == link.StateFailed })
 	if _, u := hr.srv.final(64); u.Error == nil || *u.Error != string(errDescribeChecks) {
 		t.Fatalf("failed with %v", u.Error)
+	}
+}
+
+// A describe job parked on the monthly budget (retry_at the 1st) tries again
+// when the budget is raised on the page (WakeParked), not before; a wake for
+// another park leaves it.
+func TestDescribeJobWakesWhenTheBudgetIsRaised(t *testing.T) {
+	t.Parallel()
+	hr := newHarness(t)
+	hr.generated(65)
+	d := &fakeDescriber{db: hr.db, fail: func(call int) error {
+		if call == 1 {
+			return scheduler.ParkWithCodeAfter(state.ParkBudgetExceeded, "the monthly budget is spent",
+				time.Now().Add(30*24*time.Hour))
+		}
+		return nil
+	}}
+	h := hr.describeHandler(d)
+	stop := hr.runAll(h)
+	defer stop()
+
+	hr.srv.addDescribe(66, "Author/Book")
+	hr.waitFor("the budget park", func() bool {
+		return hr.srv.saw(66, func(u link.Update, p map[string]any) bool {
+			park, _ := p["park"].(map[string]any)
+			return u.State != nil && *u.State == link.StateNeedsAttention && park["code"] == "budget_exceeded"
+		})
+	})
+	if n := h.WakeParked(state.ParkAgentRateLimited); n != 0 {
+		t.Fatalf("a rate-limit wake woke %d", n)
+	}
+	hr.waitFor("woken", func() bool { return h.WakeParked(state.ParkBudgetExceeded) == 1 })
+	hr.waitFor("done after the wake", func() bool { s, _ := hr.srv.final(66); return s == link.StateDone })
+	if n := h.WakeParked(state.ParkBudgetExceeded); n != 0 {
+		t.Fatalf("a finished job is still parked: woke %d", n)
+	}
+}
+
+// A wake for the park a try ends in, made while that try ran, isn't lost: on the
+// first try (no park registered yet) or a later one (its wake-up drained as a
+// Retry the try answered), the job tries again at once rather than at retry_at.
+func TestDescribeJobWakesDuringATry(t *testing.T) {
+	t.Parallel()
+	for name, wakeOn := range map[string]int{"the first try": 1, "a later try": 2} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			hr := newHarness(t)
+			hr.generated(67)
+			trying, release := make(chan struct{}), make(chan struct{})
+			d := &fakeDescriber{db: hr.db, fail: func(call int) error {
+				if call == wakeOn {
+					close(trying)
+					<-release
+				}
+				if call <= wakeOn {
+					return scheduler.ParkWithCodeAfter(state.ParkBudgetExceeded, "the monthly budget is spent",
+						time.Now().Add(30*24*time.Hour))
+				}
+				return nil
+			}}
+			h := hr.describeHandler(d)
+			stop := hr.runAll(h)
+			defer stop()
+			hr.srv.addDescribe(68, "Author/Book")
+			if wakeOn > 1 {
+				hr.waitFor("the first park", func() bool { return h.WakeParked(state.ParkBudgetExceeded) == 1 })
+			}
+			<-trying
+			h.WakeParked(state.ParkBudgetExceeded)
+			close(release)
+			hr.waitFor("done after the wake", func() bool { s, _ := hr.srv.final(68); return s == link.StateDone })
+		})
 	}
 }
 

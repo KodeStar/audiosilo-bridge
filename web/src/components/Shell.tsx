@@ -8,6 +8,7 @@ import { StatusTab } from './tabs/StatusTab';
 import { LibrariesTab } from './tabs/LibrariesTab';
 import { JobsTab } from './tabs/JobsTab';
 import { SettingsTab } from './tabs/SettingsTab';
+import { AccountsTab } from './tabs/AccountsTab';
 import { WorkersTab } from './tabs/WorkersTab';
 import { LogsTab } from './tabs/LogsTab';
 
@@ -63,6 +64,7 @@ export function Shell({ client, onSignedOut }: ShellProps) {
           <JobsTab key={route.jobId ?? 'all'} client={client} focusId={route.jobId} />
         )}
         {active === 'settings' && <SettingsTab client={client} />}
+        {active === 'accounts' && <AccountsTab client={client} />}
         {active === 'workers' && <WorkersTab client={client} />}
         {active === 'logs' && <LogsTab client={client} />}
       </main>

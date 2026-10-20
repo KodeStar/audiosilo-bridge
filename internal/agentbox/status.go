@@ -25,6 +25,10 @@ type Status struct {
 	// Live: a fresh heartbeat in the protocol this Bridge speaks, whatever its CLIs
 	// (Slots is then the runner's own).
 	Live bool
+	// Handoff: the backend's runs get the vault's credential (the Accounts tab):
+	// the runner takes a hand-off and has no credential of its own. CLIs then
+	// shows that credential's kind for the backend.
+	Handoff bool
 	// Detail says why not, in words for the page and the park hint.
 	Detail      string
 	Version     string // the runner's (the Bridge binary's) version
@@ -75,11 +79,21 @@ func (r *Runner) Status() Status {
 		st.Detail = "the agent container's status is unreadable: " + err.Error()
 		return st
 	}
-	st.Version, st.Slots, st.HeartbeatAt, st.CLIs = rj.Version, rj.Slots, rj.HeartbeatAt, rj.CLIs
 	st.Live = rj.Protocol == agentproto.Protocol && r.now().Sub(rj.HeartbeatAt) <= agentproto.RunnerFreshFor
+	if c, ok := rj.CLIs[r.backend]; ok && c.Version != "" && c.Credential == "" && rj.Handoff {
+		if kind, _, since, ok := r.handoffCredential(); ok {
+			// The vault's credential stands in for the container's: its kind is what
+			// the runs are billed as, and its time moves when the Accounts tab
+			// replaces it (which ends a refusal of the old one).
+			// (rj was decoded for this call alone, so its map is ours to change.)
+			c.Credential, c.CredentialSince = kind, since.UTC()
+			rj.CLIs[r.backend], st.Handoff = c, true
+		}
+	}
+	st.Version, st.Slots, st.HeartbeatAt, st.CLIs = rj.Version, rj.Slots, rj.HeartbeatAt, rj.CLIs
 	st.Detail = r.unavailableBecause(rj)
 	if st.Detail == "" {
-		if refused := r.refusal(rj.CLIs[r.backend]); refused != "" {
+		if refused := r.refusal(rj.CLIs[r.backend], st.Handoff); refused != "" {
 			st.Refused, st.Detail = true, refused
 		}
 	}
@@ -87,10 +101,29 @@ func (r *Runner) Status() Status {
 	return st
 }
 
-// CredentialRefusedDetail is the agent's state while the provider refuses its
-// credential.
-const CredentialRefusedDetail = "the agent's credential was refused by the provider: replace it in the agent " +
-	"container (claude setup-token / agent-login codex)"
+// handoffCredential is the vault's credential for the backend (ok false for
+// none, or no Credential func).
+func (r *Runner) handoffCredential() (kind, value string, since time.Time, ok bool) {
+	if r.credential == nil {
+		return "", "", time.Time{}, false
+	}
+	return r.credential(r.backend)
+}
+
+// CredentialRefusedDetail starts the agent's state while the provider refuses
+// its credential; where to replace it follows (refusalAdvice).
+const CredentialRefusedDetail = "the agent's credential was refused by the provider"
+
+// refusalAdvice is where a refused credential is replaced: on the Accounts tab
+// when it is the one handed over, else in the agent container, whose own
+// credential wins over the Accounts tab's.
+func refusalAdvice(handoff bool) string {
+	if handoff {
+		return ": replace it on the Bridge's Accounts tab"
+	}
+	return ": replace it in the agent container (claude setup-token / agent-login codex), or remove it there " +
+		"and set one on the Bridge's Accounts tab"
+}
 
 // refusedCredential is a credential the provider refused: the runner's report of
 // it then (its kind and since when the runner has had it), and the provider's
@@ -119,8 +152,9 @@ func (r *Runner) clearRefusal() {
 // refusal is the agent's state while the provider refuses the credential the
 // runner reports now as c ("" when it doesn't): a credential the runner reports
 // as changed since (another kind, or seen since another time: replaced, or the
-// container restarted) clears it.
-func (r *Runner) refusal(c agentproto.CLI) string {
+// container restarted) clears it. handoff says c is the Accounts tab's
+// credential, handed over, rather than the container's own.
+func (r *Runner) refusal(c agentproto.CLI, handoff bool) string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.refused == nil {
@@ -130,7 +164,7 @@ func (r *Runner) refusal(c agentproto.CLI) string {
 		r.refused = nil
 		return ""
 	}
-	return CredentialRefusedDetail + " (" + r.refused.detail + ")"
+	return CredentialRefusedDetail + refusalAdvice(handoff) + " (" + r.refused.detail + ")"
 }
 
 // unavailableBecause is why runs can't go to the container now, or "". Each
@@ -149,11 +183,19 @@ func (r *Runner) unavailableBecause(rj agentproto.Runner) string {
 		return "the agent container has no " + r.backend + " CLI"
 	}
 	if c.Credential == "" {
-		why := "codex has no credential: run `audiosilo-bridge agent-login codex` in the agent container, or set OPENAI_API_KEY"
+		why := "codex has no credential: set an OpenAI API key on the Bridge's Accounts tab, or run " +
+			"`audiosilo-bridge agent-login codex` in the agent container"
 		other := agent.IDClaude
 		if r.backend == agent.IDClaude {
-			why = "claude has no credential: run `claude setup-token` on any machine and give the token to the agent container as CLAUDE_CODE_OAUTH_TOKEN (or in /agent/secrets/claude_code_oauth_token), or set ANTHROPIC_API_KEY"
+			why = "claude has no credential: set one on the Bridge's Accounts tab (a `claude setup-token` value " +
+				"or an Anthropic API key), or give one to the agent container"
 			other = agent.IDCodex
+		}
+		if !rj.Handoff {
+			if _, _, _, ok := r.handoffCredential(); ok {
+				why = r.backend + " has no credential in the agent container, and the container is too old to take " +
+					"the one on the Accounts tab: update the agent image to this Bridge's version"
+			}
 		}
 		// The other CLI may be the one signed in: the Bridge runs the one its
 		// agent.backend names (claude unless codex is set), never both.

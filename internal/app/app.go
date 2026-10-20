@@ -18,17 +18,21 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/kodestar/audiosilo-bridge/internal/accounts"
 	"github.com/kodestar/audiosilo-bridge/internal/agentbox"
 	"github.com/kodestar/audiosilo-bridge/internal/api"
 	"github.com/kodestar/audiosilo-bridge/internal/auth"
 	"github.com/kodestar/audiosilo-bridge/internal/config"
 	"github.com/kodestar/audiosilo-bridge/internal/contrib"
+	"github.com/kodestar/audiosilo-bridge/internal/correct"
 	"github.com/kodestar/audiosilo-bridge/internal/generate"
 	"github.com/kodestar/audiosilo-bridge/internal/jobs"
 	"github.com/kodestar/audiosilo-bridge/internal/link"
 	"github.com/kodestar/audiosilo-bridge/internal/logring"
 	"github.com/kodestar/audiosilo-bridge/internal/mapping"
+	"github.com/kodestar/audiosilo-bridge/internal/metaops"
 	"github.com/kodestar/audiosilo-bridge/internal/secrets"
+	"github.com/kodestar/audiosilo-bridge/internal/state"
 	"github.com/kodestar/audiosilo-bridge/internal/store"
 	"github.com/kodestar/audiosilo-bridge/internal/verify"
 	"github.com/kodestar/audiosilo-bridge/internal/web"
@@ -70,13 +74,20 @@ type Bridge struct {
 	box    *agentbox.Runner
 	gen    *generate.Handler
 	engine engineState
+	// wakeParked wakes the describe jobs parked with a code a change answers
+	// (gen.WakeParked; a test watches it).
+	wakeParked func(state.ParkCode) int
 	// hub is the ASR workers' queue and registry (Phase 1b); router the
 	// engine's ASR backend over it, once the engine has started.
 	hub    *workers.Hub
 	router atomic.Pointer[workers.Router]
-	// tokens resolves the GitHub token a contribution files issues with (the
-	// vault's github_pat, which AUDIOSILO_BRIDGE_GITHUB_TOKEN sets).
-	tokens *contrib.TokenSource
+	// tokens resolves the GitHub token a contribution files issues with
+	// (AUDIOSILO_BRIDGE_GITHUB_TOKEN, else the Accounts tab's sign-in, else gh);
+	// github is that sign-in and agentCreds the agent's credential the agent
+	// box hands to the agent container (Phase 2b).
+	tokens     *contrib.TokenSource
+	github     *accounts.GitHub
+	agentCreds *accounts.Agent
 	// est caches the heartbeat's estimates (estimates.go of the engine wiring).
 	est estimatesCache
 
@@ -94,7 +105,19 @@ type Bridge struct {
 	// beatGen counts pairings, so a heartbeat answer from before an unpair or
 	// a new pairing isn't recorded as the current one.
 	beatGen int
+	// acceptsSetup: the paired server's last reply listed "setup" in accepts,
+	// so the heartbeat carries the checklist (decision D1: the server's decoder
+	// refuses an unknown field, so it is sent only once the server says it
+	// takes it). Reset by every pair and unpair.
+	acceptsSetup bool
+	// setupRefusedAt is when the server last refused a beat for its setup
+	// block: its accepts is ignored for setupRefusedFor after, so a server that
+	// lists setup but refuses it can't make every beat go twice.
+	setupRefusedAt time.Time
 }
+
+// setupRefusedFor is how long a refused setup block stays off.
+const setupRefusedFor = time.Hour
 
 // New opens the Bridge's state in opts.DataDir.
 func New(ctx context.Context, opts Options) (*Bridge, string, error) {
@@ -120,10 +143,7 @@ func New(ctx context.Context, opts Options) (*Bridge, string, error) {
 		_ = db.Close()
 		return nil, "", err
 	}
-	if err := storeGitHubToken(vault, os.Getenv(GitHubTokenEnv), opts.Logger); err != nil {
-		_ = db.Close()
-		return nil, "", err
-	}
+	forgetSealedGitHubPAT(vault, opts.Logger)
 	conn, err := openConn(ctx, db, vault, opts.Version, opts.Logger)
 	if err != nil {
 		_ = db.Close()
@@ -141,8 +161,10 @@ func New(ctx context.Context, opts Options) (*Bridge, string, error) {
 	}
 	b := &Bridge{dataDir: opts.DataDir, version: opts.Version, log: opts.Logger, ring: opts.Ring, db: db, keySrc: keySrc,
 		vault: vault, conn: conn, libs: mapping.NewRegistry(), auth: am, kick: make(chan struct{}, 1), waitKick: make(chan struct{}, 1),
-		box: newAgentBox(cfg, opts.DataDir, opts.Logger), tokens: contrib.NewTokenSource(vault)}
+	}
 	b.cfg.Store(&cfg)
+	b.newAccounts(cfg)
+	b.box = newAgentBox(cfg, opts.DataDir, opts.Logger, b.agentCredential)
 	b.hub = workers.New(workers.Options{DB: db, BridgeVersion: opts.Version, Log: opts.Logger})
 	verifier := verify.New(b.libs, b.mount, func() mapping.BookSource {
 		if cl := b.conn.Client(); cl != nil {
@@ -151,6 +173,7 @@ func New(ctx context.Context, opts Options) (*Bridge, string, error) {
 		return nil
 	})
 	b.gen = generate.New(generate.Options{DB: db, Engine: b.engine.generateEngine, Describer: b.engine.describer,
+		Sharer:    b.engine.sharer,
 		Libraries: b.libs, Mount: b.mount,
 		Server: func() generate.Server {
 			if cl := b.conn.Client(); cl != nil {
@@ -159,41 +182,15 @@ func New(ctx context.Context, opts Options) (*Bridge, string, error) {
 			return nil
 		},
 		WorkRoot: filepath.Join(opts.DataDir, "work"), Version: opts.Version, RetentionDays: cfg.Transcripts.RetentionDays,
-		CanContribute: b.canContribute, Log: opts.Logger})
-	b.runner = jobs.New(db, b.server, b.tokenRefused, jobs.Options{Log: opts.Logger,
-		ServerID: func() string { return b.conn.Pairing().ServerID }}, verifier, b.gen, b.gen.DescribeJob(), b.gen.ChaptersJob())
+		ContribCredential: b.contribCredential, Log: opts.Logger})
+	b.wakeParked = b.gen.WakeParked
+	serverID := func() string { return b.conn.Pairing().ServerID }
+	corrector := correct.New(correct.Options{Meta: metaops.NewClient(cfg.Metadata.BaseURL), Tokens: b.tokens,
+		BaseURL: cfg.Contribution.APIBaseURL, CoreRepo: cfg.Contribution.CoreRepo, KV: db, ServerID: serverID, Log: opts.Logger})
+	b.runner = jobs.New(db, b.server, b.tokenRefused, jobs.Options{Log: opts.Logger, ServerID: serverID},
+		verifier, b.gen, b.gen.DescribeJob(), b.gen.ChaptersJob(), b.gen.ContributeJob(), corrector)
 	conn.onChange = b.linkChanged
 	return b, oneTime, nil
-}
-
-// GitHubTokenEnv names the variable that gives the Bridge its GitHub token (a
-// contribution files the community intake issue with it).
-const GitHubTokenEnv = "AUDIOSILO_BRIDGE_GITHUB_TOKEN"
-
-// storeGitHubToken seals the token from the environment into the vault as
-// github_pat (where contrib.TokenSource looks first), replacing any other: the
-// environment's value wins, every start. Unset (or blank: compose's ${VAR} of an
-// unset variable) leaves the vault as it is. The token is never logged.
-func storeGitHubToken(vault secrets.Store, value string, log *slog.Logger) error {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return nil
-	}
-	if cur, err := vault.Get(secrets.GitHubPAT); err == nil && cur == value {
-		return nil
-	}
-	if err := vault.Set(secrets.GitHubPAT, value); err != nil {
-		return fmt.Errorf("store %s in the secrets: %w", GitHubTokenEnv, err)
-	}
-	log.Info("bridge: stored the GitHub token from " + GitHubTokenEnv)
-	return nil
-}
-
-// canContribute reports whether a GitHub token resolves, which a job with
-// contribute=issue needs.
-func (b *Bridge) canContribute(ctx context.Context) bool {
-	_, _, err := b.tokens.Resolve(ctx)
-	return err == nil
 }
 
 // config is the current configuration.
@@ -240,6 +237,7 @@ func (b *Bridge) linkChanged() {
 	b.mu.Lock()
 	b.beatGen++
 	b.lastBeat, b.beatErr = time.Time{}, ""
+	b.acceptsSetup, b.setupRefusedAt = false, time.Time{}
 	b.libs.SetLibraries(nil)
 	b.mu.Unlock()
 	b.Kick()
@@ -341,12 +339,26 @@ func (b *Bridge) beat(ctx context.Context) {
 		return
 	}
 	b.mu.Lock()
-	gen := b.beatGen
+	gen, withSetup := b.beatGen, b.acceptsSetup
 	b.mu.Unlock()
 	cfg := b.config()
 	st := link.Status{Version: b.version, Kinds: b.runner.Kinds(), Libraries: b.libs.Statuses(), Workers: b.linkWorkers(ctx),
 		UIURL: cfg.PublicURL, Estimates: b.estimates(ctx)}
+	if withSetup {
+		s := b.setup(ctx)
+		st.Setup = &s
+	}
 	reply, err := cl.Heartbeat(ctx, st)
+	dropped := false
+	var apiErr *link.APIError
+	if err != nil && st.Setup != nil && errors.As(err, &apiErr) && apiErr.Status == http.StatusBadRequest {
+		// A server that listed setup refuses it (a downgrade, or a bad block):
+		// the beat goes again without it, and accepts is ignored for an hour.
+		b.log.Warn("bridge: the server refused the heartbeat's setup block; sending it without", "err", err)
+		st.Setup = nil
+		dropped = true
+		reply, err = cl.Heartbeat(ctx, st)
+	}
 	if ctx.Err() != nil {
 		return
 	}
@@ -355,7 +367,7 @@ func (b *Bridge) beat(ctx context.Context) {
 		b.mu.Unlock()
 		return
 	}
-	first, changed := false, false
+	first, changed, accepts := false, false, false
 	if err == nil {
 		// The libraries are recorded before the link counts as ready (server),
 		// and under the lock, so a reply from before a pair or an unpair can't
@@ -363,10 +375,21 @@ func (b *Bridge) beat(ctx context.Context) {
 		changed = b.libs.SetLibraries(reply.Libraries)
 		first = b.lastBeat.IsZero()
 		b.lastBeat, b.beatErr = time.Now(), ""
+		if dropped {
+			b.setupRefusedAt = time.Now()
+		}
+		accepts = reply.Accepting(link.AcceptSetup) && time.Since(b.setupRefusedAt) >= setupRefusedFor
+		b.acceptsSetup = accepts
 	} else {
 		b.beatErr = err.Error()
+		if dropped {
+			b.acceptsSetup, b.setupRefusedAt = false, time.Now()
+		}
 	}
 	b.mu.Unlock()
+	if accepts && !withSetup {
+		b.Kick() // the server takes the checklist: send it now, not in 30 s
+	}
 	switch {
 	case errors.Is(err, link.ErrUnauthorized):
 		b.conn.Refuse(ctx, cl, refusedReason)

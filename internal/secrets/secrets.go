@@ -1,5 +1,5 @@
-// Package secrets stores sensitive values (the server token, LLM API keys, a
-// GitHub PAT) OUTSIDE the config file, sealed at rest. The Bridge runs headless
+// Package secrets stores sensitive values (the server token, the agent's
+// credential, the GitHub sign-in) OUTSIDE the config file, sealed at rest. The Bridge runs headless
 // in a container, where there is no OS keychain, so every secret is an
 // AES-256-GCM sealed file in <data>/secrets (0600), the manager's BlobStore
 // format, keyed by one master key: AUDIOSILO_BRIDGE_SECRET_KEY when set (so the
@@ -32,13 +32,22 @@ const (
 	ServerToken     = "server_token"
 	AnthropicAPIKey = "anthropic_api_key"
 	OpenAIAPIKey    = "openai_api_key"
-	GitHubPAT       = "github_pat"
+	// ClaudeOAuthToken is a `claude setup-token` value (a subscription credential),
+	// set on the Accounts page and handed to the agent container per run.
+	ClaudeOAuthToken = "claude_oauth_token"
+	// GitHubUserToken is the GitHub sign-in (device flow): the access token, its
+	// refresh token and both expiries sealed together as one JSON value, so a
+	// refresh (which ends the old pair) replaces the pair in one write.
+	GitHubUserToken = "github_user_token"
+	// GitHubPAT is where earlier Bridges sealed AUDIOSILO_BRIDGE_GITHUB_TOKEN at
+	// every start. The variable is read live now; a start deletes this copy once.
+	GitHubPAT = "github_pat"
 )
 
 // Names returns the secret names an operator sets, in a stable order (drives a
 // settings presence list). The server token is the pairing's, never set by hand.
 func Names() []string {
-	return []string{AnthropicAPIKey, OpenAIAPIKey, GitHubPAT}
+	return []string{ClaudeOAuthToken, AnthropicAPIKey, OpenAIAPIKey, GitHubUserToken}
 }
 
 // Store is a named-secret backend. Get returns ("", nil) for an absent name so

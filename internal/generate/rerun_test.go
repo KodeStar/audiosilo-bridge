@@ -12,9 +12,11 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/kodestar/audiosilo-bridge/internal/contrib"
 	"github.com/kodestar/audiosilo-bridge/internal/jobs"
 	"github.com/kodestar/audiosilo-bridge/internal/link"
 	"github.com/kodestar/audiosilo-bridge/internal/scheduler"
@@ -69,6 +71,34 @@ func TestGenerateIgnoresAnotherJobsMapping(t *testing.T) {
 	}
 	if b := hr.engineBook(21); b.ID == first.ID || !strings.HasSuffix(b.SourcePath, "Loose.m4b") {
 		t.Fatalf("the reused id followed the earlier book: %+v", b)
+	}
+}
+
+// Denied: a contribute=issue job under an id an earlier job's mapping holds
+// looks resumed, so Run's check before any spend passes it by; the new engine
+// book it makes instead is checked (create), and with no GitHub token the job
+// fails as a new one does, the engine getting no book.
+func TestGenerateReusedIDIssueNeedsAGitHubToken(t *testing.T) {
+	t.Parallel()
+	hr := newHarness(t)
+	hr.srv.add(21, "Author/Book", `{}`)
+	stop := hr.runnerAs(hr.h, "server-a")
+	hr.waitFor("server A's job done", func() bool { s, _ := hr.srv.final(21); return s == link.StateDone })
+	stop()
+	first := hr.engineBook(21)
+
+	hr.srv.set(func() { hr.srv.updates[21] = nil })
+	hr.srv.add(21, "Loose.m4b", `{"contribute":"issue"}`)
+	h := hr.handler()
+	h.o.ContribCredential = func(context.Context) error { return contrib.ErrNoCredential }
+	stop2 := hr.runnerAs(h, "server-b")
+	defer stop2()
+	hr.waitFor("failed", func() bool { s, _ := hr.srv.final(21); return s == link.StateFailed })
+	if _, final := hr.srv.final(21); final.Error == nil || *final.Error != errCantContribute.Error() {
+		t.Fatalf("error = %v", final.Error)
+	}
+	if b := hr.engineBook(21); b.ID != first.ID {
+		t.Fatalf("the engine got a book it couldn't contribute: %+v", b)
 	}
 }
 
@@ -234,6 +264,42 @@ func TestGenerateAbandonedJobStopsItsBook(t *testing.T) {
 	}
 }
 
+// A resumed job cancelled while it waits for the engine to start (its first
+// report went out, the next is answered with the cancel) never reaches its end:
+// the engine book an earlier run made is still stopped and its end recorded once
+// the engine is up, or a start would re-admit it with nothing to follow it.
+func TestGenerateCancelledWhileWaitingForTheEngineStopsItsBook(t *testing.T) {
+	t.Parallel()
+	hr := newHarness(t)
+	hr.exec.gate("asr")
+	hr.srv.add(43, "Author/Book", `{}`)
+	stop := hr.runner(hr.h)
+	hr.waitFor("asr", func() bool {
+		return hr.srv.saw(43, func(_ link.Update, p map[string]any) bool { return p["stage"] == "asr" })
+	})
+	stop()
+
+	var up atomic.Bool // the engine is still starting
+	defer hr.runner(hr.handlerWith(func() Engine {
+		if up.Load() {
+			return hr.sched
+		}
+		return nil
+	}))()
+	hr.waitFor("the resumed job waiting for the engine", func() bool {
+		return hr.srv.saw(43, func(_ link.Update, p map[string]any) bool {
+			return p["message"] == "Waiting for the engine to start"
+		})
+	})
+	hr.srv.set(func() { hr.srv.cancel[43] = true })
+	hr.waitFor("the job ended", func() bool { s, _ := hr.srv.final(43); return s != "" })
+	up.Store(true)
+	hr.waitFor("the engine book stopped and the end recorded", func() bool {
+		g, _ := hr.db.GetGenerateBook(context.Background(), 43)
+		return scheduler.IsCancelled(hr.engineBook(43)) && g.EndedAt != ""
+	})
+}
+
 // With transcripts.retention_days 0 a job taken back deletes its book's
 // transcripts as it ends; handed out again, the job starts the book over rather
 // than re-admitting it onto inputs that are gone.
@@ -267,6 +333,51 @@ func TestGenerateSweptBookStartsOver(t *testing.T) {
 	}
 	if g, _ := hr.db.GetGenerateBook(context.Background(), 43); g.EndedAt == "" || *g.BookID != after.ID {
 		t.Fatalf("mapping = %+v", g)
+	}
+}
+
+// Denied: starting a swept book over is a new spend too, so a contribute=issue
+// job handed out again after the GitHub token went fails rather than run it.
+func TestGenerateSweptIssueBookNeedsAGitHubToken(t *testing.T) {
+	t.Parallel()
+	hr := newHarness(t)
+	var cred atomic.Pointer[error]
+	setCred := func(err error) { cred.Store(&err) }
+	setCred(nil)
+	h := New(Options{DB: hr.db, Engine: func() Engine { return hr.sched }, Libraries: hr.libs,
+		Mount:  func(int64, string) (string, bool) { return hr.libs.root, false },
+		Server: func() Server { return hr.cl }, WorkRoot: hr.work, Version: "0.2.0", RetentionDays: 0,
+		ContribCredential: func(context.Context) error { return *cred.Load() },
+		Poll:              10 * time.Millisecond, IdlePoll: 10 * time.Millisecond, Recheck: time.Hour,
+		Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	gate := hr.exec.gate("asr")
+	issue := `{"contribute":"issue"}`
+	hr.srv.add(43, "Author/Book", issue)
+	stop := hr.runner(h)
+	defer stop()
+	hr.waitFor("asr", func() bool {
+		return hr.srv.saw(43, func(_ link.Update, p map[string]any) bool { return p["stage"] == "asr" })
+	})
+	before := hr.engineBook(43)
+	hr.srv.set(func() { hr.srv.notHeld[43] = true })
+	hr.waitFor("the transcripts swept", func() bool {
+		g, _ := hr.db.GetGenerateBook(context.Background(), 43)
+		return g.SweptAt != ""
+	})
+	close(gate)
+	setCred(contrib.ErrNoCredential)
+	hr.srv.set(func() {
+		hr.srv.notHeld[43], hr.srv.updates[43] = false, nil
+		lib, path := int64(1), "Author/Book"
+		hr.srv.queue = append(hr.srv.queue, link.Job{ID: 43, Kind: Kind, LibraryID: &lib, Path: &path,
+			Params: json.RawMessage(issue), Attempts: 2, State: "claimed"})
+	})
+	hr.waitFor("failed", func() bool { s, _ := hr.srv.final(43); return s == link.StateFailed })
+	if _, final := hr.srv.final(43); final.Error == nil || *final.Error != errCantContribute.Error() {
+		t.Fatalf("error = %v", final.Error)
+	}
+	if after := hr.engineBook(43); after.ID != before.ID {
+		t.Fatalf("the swept book was started over (%d, was %d)", after.ID, before.ID)
 	}
 }
 

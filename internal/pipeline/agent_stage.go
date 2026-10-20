@@ -63,17 +63,27 @@ const (
 )
 
 // budgetExceededMsg is the park reason when a book's summed agent cost has reached the
-// configured per-book budget. It names the spend and the budget and the exact fix, so a
-// user knows the one lever (raise agent.book_budget_usd, restart, Retry).
+// configured per-book budget. It names the spend, the budget and the lever (the cap in
+// config.yaml, or the environment variable that sets it, read at the next start), and
+// how a job paused at the cap goes on (state.ParkBudgetExceeded: the restart is all
+// it takes). It speaks of "a job paused at the cap", not "the job", since the
+// description step's error is only logged by sidecars.generate and the contributing
+// stage, which go on without a description.
 func budgetExceededMsg(spent, budget float64) string {
-	return fmt.Sprintf("book agent cost $%.2f reached the budget $%.2f - raise agent.book_budget_usd in config.yaml (restart to apply), then Retry", spent, budget)
+	return fmt.Sprintf("book agent cost $%.2f reached the budget $%.2f - raise agent.book_budget_usd in config.yaml "+
+		"(or AUDIOSILO_BRIDGE_AGENT_BOOK_BUDGET_USD when that sets it) and restart the Bridge; a job paused at the "+
+		"cap then carries on by itself", spent, budget)
 }
 
 // monthlyBudgetExceededMsg is the park reason when this month's agent spend across
-// every book reached agent.monthly_budget_usd.
+// every book reached agent.monthly_budget_usd. A budget raised on the Settings tab
+// wakes a paused job at once; one the environment sets takes a restart (see
+// budgetExceededMsg), and none of them a Retry.
 func monthlyBudgetExceededMsg(spent, budget float64, resume time.Time) string {
-	return fmt.Sprintf("this month's agent cost $%.2f reached the monthly budget $%.2f - the book resumes on %s, "+
-		"or raise agent.monthly_budget_usd (restart to apply) and Retry", spent, budget, resume.Format("2 January 2006"))
+	return fmt.Sprintf("this month's agent cost $%.2f reached the monthly budget $%.2f - a job paused at the cap "+
+		"resumes on %s, or at once when the monthly budget is raised on the Bridge's Settings tab (when "+
+		"AUDIOSILO_BRIDGE_AGENT_MONTHLY_BUDGET_USD sets it, raise that and restart the Bridge)",
+		spent, budget, resume.Format("2 January 2006"))
 }
 
 // checkMonthlyBudget is the monthly half of runAgent's budget preflight: when this
@@ -81,7 +91,8 @@ func monthlyBudgetExceededMsg(spent, budget float64, resume time.Time) string {
 // has reached the monthly budget, the book parks budget_exceeded with an automatic
 // re-admit at the start of the next month. nil when there is no cap or room left.
 func (e *Executor) checkMonthlyBudget(ctx context.Context, stage state.State, now time.Time) error {
-	if e.db == nil || e.monthlyBudgetUSD <= 0 {
+	budget := e.monthlyBudget()
+	if e.db == nil || budget <= 0 {
 		return nil
 	}
 	start, next := MonthBounds(now)
@@ -89,10 +100,10 @@ func (e *Executor) checkMonthlyBudget(ctx context.Context, stage state.State, no
 	if err != nil {
 		return fmt.Errorf("%s: read this month's cost: %w", stage, err)
 	}
-	if spent < e.monthlyBudgetUSD {
+	if spent < budget {
 		return nil
 	}
-	return scheduler.ParkWithCodeAfter(state.ParkBudgetExceeded, monthlyBudgetExceededMsg(spent, e.monthlyBudgetUSD, next), next)
+	return scheduler.ParkWithCodeAfter(state.ParkBudgetExceeded, monthlyBudgetExceededMsg(spent, budget, next), next)
 }
 
 // MonthBounds returns the start of now's calendar month and of the next one, UTC:
@@ -428,7 +439,8 @@ func (e *Executor) runAgent(ctx context.Context, book store.Book, stage state.St
 // mid-flight. The budget sum prefers provider cost and falls back to complete
 // configured API-equivalent estimates, and includes superseded rows, so a Retry never
 // lowers the spend the guard sees. The monthly budget is checked after it. The
-// description step calls it itself, before its preparation, then runAgentWith.
+// description step calls it itself, after its (local, free) preparation and before
+// its stage run, then runAgentWith.
 func (e *Executor) budgetPreflight(ctx context.Context, book store.Book, stage state.State) error {
 	if e.db != nil && e.bookBudgetUSD > 0 {
 		spent, complete, serr := e.db.SumStageRunBudgetCost(ctx, book.ID)
@@ -444,6 +456,13 @@ func (e *Executor) budgetPreflight(ctx context.Context, book store.Book, stage s
 		}
 	}
 	return e.checkMonthlyBudget(ctx, stage, time.Now())
+}
+
+// BudgetPark is the budget preflight on its own, for the scheduler's restart
+// (budgetParkHolds): the park an agent stage of b would meet now, nil when the
+// caps let it through.
+func (e *Executor) BudgetPark(ctx context.Context, b store.Book) error {
+	return e.budgetPreflight(ctx, b, state.State(b.State))
 }
 
 // runAgentWith is runAgent after the budget preflight (its caller's), with the

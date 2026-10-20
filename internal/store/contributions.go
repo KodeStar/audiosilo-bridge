@@ -97,13 +97,17 @@ func scanContribution(sc interface{ Scan(...any) error }) (Contribution, error) 
 
 // UpsertContribution inserts a contribution row or, when one already exists for the
 // same (book_id, kind), updates its mode/repo/number/url/status/note in place -
-// preserving created_at (and the intake-PR fields, which only SetContributionStatus
-// writes). This idempotency on (book, kind) is the resume guard: a stage that crashes
-// between submitting and writing its sentinel re-runs and overwrites the same row
-// rather than minting a duplicate. The CHECK constraints on kind/mode/status reject a
-// bad value at the write. It returns the resulting row (with id + timestamps).
+// preserving created_at, and the intake-PR fields (which only SetContributionStatus
+// writes) and issue_seen_at while the row still names the same issue: a row filed
+// again as another issue (a share files a closed one again) starts without them, or
+// the poller would follow the old issue's PR. This idempotency on (book, kind) is the
+// resume guard: a stage that crashes between submitting and writing its sentinel
+// re-runs and overwrites the same row rather than minting a duplicate. The CHECK
+// constraints on kind/mode/status reject a bad value at the write. It returns the
+// resulting row (with id + timestamps).
 func (db *DB) UpsertContribution(ctx context.Context, c Contribution) (Contribution, error) {
 	now := timestamp(nowFn())
+	// In DO UPDATE a bare column is the stored row's value, before any assignment.
 	_, err := db.sql.ExecContext(ctx,
 		`INSERT INTO contributions
 		 (book_id, kind, mode, repo, number, url, status, note, created_at, updated_at)
@@ -111,6 +115,9 @@ func (db *DB) UpsertContribution(ctx context.Context, c Contribution) (Contribut
 		 ON CONFLICT(book_id, kind) DO UPDATE SET
 		   mode=excluded.mode, repo=excluded.repo, number=excluded.number,
 		   url=excluded.url, status=excluded.status, note=excluded.note,
+		   pr_number=CASE WHEN repo=excluded.repo AND number=excluded.number THEN pr_number ELSE 0 END,
+		   pr_url=CASE WHEN repo=excluded.repo AND number=excluded.number THEN pr_url ELSE '' END,
+		   issue_seen_at=CASE WHEN repo=excluded.repo AND number=excluded.number THEN issue_seen_at ELSE '' END,
 		   updated_at=excluded.updated_at`,
 		c.BookID, c.Kind, c.Mode, c.Repo, c.Number, c.URL, c.Status, c.Note, now, now)
 	if err != nil {

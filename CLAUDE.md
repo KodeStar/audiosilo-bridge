@@ -95,15 +95,21 @@ internal/
   logring/    recent log lines for the page (secrets redacted)
   web/        go:embed of the page (build-tag selected)
   secrets/    sealed-file secrets keyed by AUDIOSILO_BRIDGE_SECRET_KEY or secret.key
+  -- Phase 2b --
+  ghauth/     the GitHub App device flow, refresh, revoke (injectable base URLs)
+  accounts/   the Accounts tab's GitHub sign-in and agent credentials (vault-sealed)
+  setup/      the setup checklist the heartbeat and the Status tab show
+  correct/    meta.correct: an admin's corrections as one correction-batch issue
   config/     config.yaml + AUDIOSILO_BRIDGE_* (bridge.go: the Bridge's own settings)
   store/      SQLite, append-only migrations (0001 the engine, 0002 server_jobs,
               0003 generate_books, contrib_mode, server_id, deleted_stage_spend,
-              0004 workers, 0005 books.goal)
+              0004 workers, 0005 books.goal, 0006 accounts)
   auth/       the page's single password + hashed sessions + login limiter
   -- Phase 1a --
   generate/   sidecars.generate: server job -> engine book -> .audiosilo/ + rescan;
               sidecars.describe (Phase 1c): a description from a finished run's notes;
-              chapters.detect (Phase 1d): a chapterless book's chapters, no agent
+              chapters.detect (Phase 1d): a chapterless book's chapters, no agent;
+              sidecars.contribute (Phase 2b): share kept results with the community
   agentproto/ the staging protocol shared with the agent container (a leaf)
   agentbox/   the Bridge's side: an agent.Runner over the staging dir
   agentrun/   the agent container's side: `agent-runner` (claim, run, harvestable out/)
@@ -122,7 +128,9 @@ Dockerfile    slim | cuda | agent | full; compose.example.yaml: server, bridge, 
 ```
 
 **Dependency direction:** `app -> {api, jobs, link, mapping, verify, generate,
-agentbox, workers, store, secrets, config, auth, logring, web}` plus the engine it wires;
+agentbox, workers, accounts, setup, correct, store, secrets, config, auth, logring,
+web}` plus the engine it wires; `accounts -> {agentproto, ghauth, secrets, store}`; `correct ->
+{contrib, jobs, metaops}`; `setup -> link`;
 `api` calls the injected Backend and the injected `auth.Manager` (login, sessions,
 the password), with types from jobs/link/mapping/store/logring; `verify -> {jobs,
 link, mapping}`; `generate -> {jobs, link, mapping, store, scheduler, pipeline, ...}`
@@ -154,13 +162,17 @@ in PACKAGES.md.
   book's `.audiosilo/` (a single-file book's prefixed `<stem>.`), nothing else.
 - **The agent container's files are untrusted** (and the Bridge's are to it): every
   read goes through `agentproto.OpenRegular`/`ReadRegular` inside an `os.Root`, the
-  harvest is capped, and a credential never leaves the agent container (only its
+  harvest is capped, and the container's own credential never leaves it (only its
   kind is reported).
 - **Secrets are never logged or echoed.** The page's one-time password is printed
-  once at the first start; the server token and the GitHub token
-  (`AUDIOSILO_BRIDGE_GITHUB_TOKEN`, sealed as `github_pat` at every start) are sealed
-  in `<data>/secrets`; the log ring redacts secret-sounding attributes. Agent
-  credentials live only in the agent container.
+  once at the first start; the server token, the GitHub sign-in (the Accounts tab's
+  device flow: the token pair sealed as one value) and the agent credentials set on
+  the Accounts tab are sealed in `<data>/secrets`, and the page API never returns
+  one. `AUDIOSILO_BRIDGE_GITHUB_TOKEN` is read live and no longer sealed (a start
+  deletes an earlier Bridge's `github_pat` copy). An agent credential leaves the
+  Bridge only as one run's `credential/credential.json`, which the runner deletes
+  before the CLI starts, and only when the agent container has none of its own;
+  the log ring redacts secret-sounding attributes.
 - **The page answers the local network only and always asks for its password**,
   loopback included (spike 2: an agent on the same network could reach it).
 - **The worker routes (`/worker/v1/*`, Phase 1b) take only a worker token**
@@ -248,7 +260,22 @@ it fails saying why, one marker over only part of it or no length). A chapter's
 heading number is the detector's, whatever follows it. Titles found in the
 narration are never verified spelling evidence (a detected manifest's
 `marker_titles.txt` is empty, and the manifest staged to the spelling agent goes
-without them). See BRIDGE-PLAN.md's Status table for what is next.
+without them).
+
+**Phase 2b (contributions, Bridge side):** the Accounts tab (`#/accounts`): a GitHub
+sign-in with the audiosilo-contributions App's device flow (`ghauth`, `accounts`;
+expiring tokens refreshed single-flight and persisted before use, sign-out revokes)
+that contributions file with (env, then the sign-in, then `gh`), and agent
+credentials handed to the agent container for each run. Two light jobs that write
+nothing into a library: `sidecars.contribute` (share a book's kept characters and
+recaps) and `meta.correct` (an admin's corrections as one meta correction-batch
+issue, guarded per request: a resumed job, or a new one asking for the same
+changes whatever its evidence within a day, adopts the issue an interrupted filing
+made). The setup checklist (`setup`) on the Status tab's "Get set up" card and in
+the heartbeat,
+sent only once the server's reply `accepts` it. The monthly agent budget is
+editable on the page and applies live.
+See BRIDGE-PLAN.md's Status table for what is next.
 
 Operative caveats carried from sidecars (PACKAGES.md has the detail):
 - **audiosilo-meta is pinned** and the schema drift guard

@@ -5,6 +5,7 @@ import {
   allLocked,
   checkPublicURL,
   isLocked,
+  parseBudget,
   parseCheckMinutes,
 } from './settings';
 import { settingsFixture } from '@/test/fixtures';
@@ -25,7 +26,27 @@ describe('isLocked', () => {
       allLocked(
         settingsFixture({ locked: ['public_url', 'mapping.check_minutes', 'asr.worker_fallback'] }),
       ),
+    ).toBe(false);
+    expect(
+      allLocked(
+        settingsFixture({
+          locked: [
+            'public_url',
+            'mapping.check_minutes',
+            'asr.worker_fallback',
+            'agent.monthly_budget_usd',
+          ],
+        }),
+      ),
     ).toBe(true);
+  });
+  it('reads the monthly budget', () => {
+    expect(parseBudget('100')).toEqual({ value: 100 });
+    expect(parseBudget(' 12.50 ')).toEqual({ value: 12.5 });
+    expect(parseBudget('0')).toEqual({ value: 0 });
+    expect(parseBudget('-5')).toHaveProperty('error');
+    expect(parseBudget('12.345')).toHaveProperty('error');
+    expect(parseBudget('')).toHaveProperty('error');
   });
 });
 
