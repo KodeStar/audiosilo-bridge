@@ -808,16 +808,7 @@ func TestRunAgentParksOnBudgetExceeded(t *testing.T) {
 	exe.bookBudgetUSD = 10.0
 
 	// Record $12 of spend on a finished stage run, over the $10 budget.
-	runID, err := db.StartStageRun(ctx, book.ID, string(state.FactPass), 1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := db.AddOpenStageRunUsage(ctx, book.ID, string(state.FactPass), "opus", 0, 0, 12.0); err != nil {
-		t.Fatal(err)
-	}
-	if err := db.FinishStageRun(ctx, runID, true, nil); err != nil {
-		t.Fatal(err)
-	}
+	recordSpend(t, db, book.ID, 12)
 
 	st, err := agent.New(work, string(state.FactPass), 1)
 	if err != nil {
@@ -1785,72 +1776,99 @@ func TestRepairedPhraseResolverReadsRepairedLayer(t *testing.T) {
 	}
 }
 
-// agentStageExecutor runs every stage as an agent stage starts: runAgent, its
-// budget preflight first, then the agent.
-type agentStageExecutor struct {
-	exe  *Executor
-	work string
-}
-
-func (x agentStageExecutor) Execute(ctx context.Context, book store.Book, stage state.State, r scheduler.StageReport) (scheduler.StageResult, error) {
-	st, err := agent.New(x.work, string(stage), 1)
-	if err != nil {
-		return scheduler.StageResult{}, err
-	}
-	_, err = x.exe.runAgent(ctx, book, stage, r, st, "fact_pass.md", nil, false,
-		func(agent.Result, *agent.Staging) error { return nil })
-	return scheduler.StageResult{}, err
-}
-
 // TestRestartReadmitsABudgetParkThatParksAgainBeforeSpending: a daemon start
-// re-admits a budget-parked book (a cap raised in config.yaml or the environment
-// applies then, so the park needs no Retry); one still over its budget runs its
-// stage's budget preflight and parks again with the same reason, without invoking
-// the agent.
+// re-admits a budget-parked book whose park may have changed (a cap set in
+// config.yaml or the environment applies then, so the park needs no Retry); one
+// still over its budget runs its stage's budget preflight and parks again,
+// without invoking the agent. The next start finds the park as the caps would
+// give it back and leaves it: the stage doesn't run again.
 func TestRestartReadmitsABudgetParkThatParksAgainBeforeSpending(t *testing.T) {
 	ctx := context.Background()
 	work := t.TempDir()
+	seedFactPassInputs(t, work, []chunkRange{{From: 1, To: 2}, {From: 3, To: 4}})
 	fake := newFakeRunner()
 	db, exe, book := dbBackedQAExecutor(t, work, fake)
 	exe.bookBudgetUSD = 10.0
-	runID, err := db.StartStageRun(ctx, book.ID, string(state.FactPass), 1)
+	recordSpend(t, db, book.ID, 12)
+	if err := db.SetBookState(ctx, book.ID, string(state.FactPass), string(state.StatusNeedsAttention),
+		"parked under another cap", string(state.ParkBudgetExceeded)); err != nil {
+		t.Fatal(err)
+	}
+	// start runs the engine until the book is as done says, then stops it.
+	// readmitted is whether the start re-admitted the book: its note comes before
+	// the first queue.stats, which the start publishes once it has looked at
+	// every park.
+	start := func(done func(store.Book) bool) (got store.Book, readmitted bool) {
+		t.Helper()
+		hub := events.NewHub(events.DefaultRingSize)
+		_, sub := hub.Subscribe(0)
+		defer sub.Close()
+		sched := scheduler.New(db, hub, exe, 1, t.TempDir(), false)
+		runCtx, cancel := context.WithCancel(ctx)
+		defer cancel()
+		stopped := make(chan error, 1)
+		go func() { stopped <- sched.Start(runCtx) }()
+		for looked := false; !looked; {
+			select {
+			case ev, ok := <-sub.C:
+				if !ok {
+					t.Fatal("the event subscription was dropped")
+				}
+				readmitted = readmitted || ev.Type == "stage.note" && strings.Contains(string(ev.Data), "daemon restart")
+				looked = ev.Type == "queue.stats"
+			case err := <-stopped:
+				t.Fatalf("the start ended early: %v", err)
+			case <-time.After(10 * time.Second):
+				t.Fatal("the start published no queue.stats")
+			}
+		}
+		got = waitBook(t, db, book.ID, 10*time.Second, done)
+		cancel()
+		if err := <-stopped; err != nil {
+			t.Fatalf("the start: %v", err)
+		}
+		return got, readmitted
+	}
+	runs := func() int {
+		n, err := db.CountStageRuns(ctx, book.ID, string(state.FactPass))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+
+	want := budgetExceededMsg(12, 10)
+	got, readmitted := start(func(b store.Book) bool { return b.Error == want })
+	if !readmitted || got.Error != want || got.Status != string(state.StatusNeedsAttention) ||
+		got.ParkCode != string(state.ParkBudgetExceeded) || got.State != string(state.FactPass) {
+		t.Fatalf("after the restart: readmitted %v, state %q status %q park %q error %q, want parked again over budget",
+			readmitted, got.State, got.Status, got.ParkCode, got.Error)
+	}
+	if n := fake.count(string(state.FactPass)); n != 0 {
+		t.Fatalf("agent invoked %d times over budget after the restart, want 0", n)
+	}
+
+	before := runs()
+	got, readmitted = start(func(store.Book) bool { return true })
+	if n := runs(); readmitted || n != before || got.Error != want || got.Status != string(state.StatusNeedsAttention) {
+		t.Fatalf("the next start: readmitted %v, fact_pass runs %d (was %d), status %q error %q, want the park left as it is",
+			readmitted, n, before, got.Status, got.Error)
+	}
+}
+
+// recordSpend records usd of agent spend on a finished fact_pass run of the book.
+func recordSpend(t *testing.T, db *store.DB, bookID int64, usd float64) {
+	t.Helper()
+	ctx := context.Background()
+	runID, err := db.StartStageRun(ctx, bookID, string(state.FactPass), 1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.AddOpenStageRunUsage(ctx, book.ID, string(state.FactPass), "opus", 0, 0, 12.0); err != nil {
+	if err := db.AddOpenStageRunUsage(ctx, bookID, string(state.FactPass), "opus", 0, 0, usd); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.FinishStageRun(ctx, runID, true, nil); err != nil {
 		t.Fatal(err)
-	}
-	if err := db.SetBookState(ctx, book.ID, string(state.FactPass), "", "", ""); err != nil {
-		t.Fatal(err)
-	}
-	if err := db.SetBookStatusRetry(ctx, book.ID, string(state.StatusNeedsAttention), "parked before the restart",
-		string(state.ParkBudgetExceeded), ""); err != nil {
-		t.Fatal(err)
-	}
-
-	sched := scheduler.New(db, events.NewHub(1024), agentStageExecutor{exe: exe, work: work}, 1, t.TempDir(), false)
-	runCtx, cancel := context.WithCancel(ctx)
-	done := make(chan struct{})
-	go func() { defer close(done); _ = sched.Start(runCtx) }()
-	defer func() { cancel(); <-done }()
-
-	want := budgetExceededMsg(12, 10)
-	var got store.Book
-	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
-		if got, err = db.GetBook(ctx, book.ID); err == nil && got.Error == want {
-			break
-		}
-	}
-	if got.Error != want || got.Status != string(state.StatusNeedsAttention) || got.ParkCode != string(state.ParkBudgetExceeded) ||
-		got.State != string(state.FactPass) {
-		t.Fatalf("after the restart: state %q status %q park %q error %q, want parked again over budget",
-			got.State, got.Status, got.ParkCode, got.Error)
-	}
-	if n := fake.count(string(state.FactPass)); n != 0 {
-		t.Fatalf("agent invoked %d times over budget after the restart, want 0", n)
 	}
 }
 
@@ -1863,11 +1881,11 @@ func TestBudgetParkMessages(t *testing.T) {
 	for _, c := range []struct{ got, want string }{
 		{budgetExceededMsg(5, 4),
 			"book agent cost $5.00 reached the budget $4.00 - raise agent.book_budget_usd in config.yaml " +
-				"(or AUDIOSILO_BRIDGE_AGENT_BOOK_BUDGET_USD when that sets it) and restart the Bridge; the job then " +
-				"carries on by itself"},
+				"(or AUDIOSILO_BRIDGE_AGENT_BOOK_BUDGET_USD when that sets it) and restart the Bridge; a job paused at " +
+				"the cap then carries on by itself"},
 		{monthlyBudgetExceededMsg(25, 20, resume),
-			"this month's agent cost $25.00 reached the monthly budget $20.00 - the job resumes on 1 November 2026, or " +
-				"at once when the monthly budget is raised on the Bridge's Settings tab (when " +
+			"this month's agent cost $25.00 reached the monthly budget $20.00 - a job paused at the cap resumes on " +
+				"1 November 2026, or at once when the monthly budget is raised on the Bridge's Settings tab (when " +
 				"AUDIOSILO_BRIDGE_AGENT_MONTHLY_BUDGET_USD sets it, raise that and restart the Bridge)"},
 	} {
 		if c.got != c.want {
@@ -1893,16 +1911,7 @@ func TestRunAgentParksOnMonthlyBudget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	runID, err := db.StartStageRun(ctx, other.ID, string(state.FactPass), 1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := db.AddOpenStageRunUsage(ctx, other.ID, string(state.FactPass), "opus", 0, 0, 25); err != nil {
-		t.Fatal(err)
-	}
-	if err := db.FinishStageRun(ctx, runID, true, nil); err != nil {
-		t.Fatal(err)
-	}
+	recordSpend(t, db, other.ID, 25)
 
 	err = exe.checkMonthlyBudget(ctx, state.FactPass, time.Now())
 	var pe *scheduler.ParkError

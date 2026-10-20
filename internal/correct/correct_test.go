@@ -182,6 +182,13 @@ func (g *gh) count() int {
 	return len(g.issues)
 }
 
+// setDrop sets drop (the handler reads it under mu).
+func (g *gh) setDrop(on bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.drop = on
+}
+
 const params = `{"work_id":"existing-work","asin":"B000000001","region":"us",
  "changes":[{"field":"title","current":"Existing Work","corrected":"The Existing Work"},
             {"field":"author","current":"Jane Doe","corrected":"Jane Doe, John Smith"},
@@ -307,9 +314,10 @@ func keyOf(t *testing.T, raw string) string {
 
 // The filing marker is the request's: the record and the changes. The same
 // corrections share it whichever job (or book, which may have moved) asks,
-// however they are ordered, whatever the evidence, the source stamp, the region
-// or the community's current values say; other corrections, or the same ones
-// for another record, don't.
+// however they are ordered, whatever the evidence, the source stamp or the
+// community's current values say, and whatever picks the recording beside its
+// id; other corrections, or the same ones for another record (another region
+// picks another without an id), don't.
 func TestCorrectFilingKey(t *testing.T) {
 	key := keyOf(t, params)
 	if !strings.HasPrefix(key, "meta.correct.filing/srv-1/") {
@@ -323,12 +331,21 @@ func TestCorrectFilingKey(t *testing.T) {
 	for name, raw := range map[string]string{
 		"another source stamp": strings.Replace(params, "audiosilo-server/2.4.0", "audiosilo-server/2.5.0", 1),
 		"other evidence":       strings.Replace(params, "Edited by the server admin.", "Bearbeitet vom Admin des Servers 2.5.0.", 1),
-		"another region":       strings.Replace(params, `"region":"us"`, `"region":"uk"`, 1),
 		"another current":      strings.Replace(params, `"current":"Jane Doe"`, `"current":"Jane Doe, J. Smith"`, 1),
 		"reordered":            reordered,
+		"the ids padded":       strings.Replace(params, `"asin":"B000000001","region":"us"`, `"asin":" b000000001 ","region":"US"`, 1),
 	} {
 		if got := keyOf(t, raw); got != key {
 			t.Errorf("%s: %q, want %q", name, got, key)
+		}
+	}
+	named := strings.Replace(params, `"work_id":"existing-work",`, `"work_id":"existing-work","recording_id":"john-smith-2020",`, 1)
+	for name, raw := range map[string]string{
+		"another region": strings.Replace(named, `"region":"us"`, `"region":"uk"`, 1),
+		"another ASIN":   strings.Replace(named, `"asin":"B000000001"`, `"asin":"B000000002"`, 1),
+	} {
+		if got := keyOf(t, raw); got != keyOf(t, named) {
+			t.Errorf("beside the recording id, %s: %q, want %q", name, got, keyOf(t, named))
 		}
 	}
 	for name, raw := range map[string]string{
@@ -336,6 +353,7 @@ func TestCorrectFilingKey(t *testing.T) {
 		"another field":           strings.Replace(params, `"field":"published"`, `"field":"isbn"`, 1),
 		"another work":            strings.Replace(params, `"work_id":"existing-work"`, `"work_id":"other-work"`, 1),
 		"another recording":       strings.Replace(params, `"asin":"B000000001"`, `"asin":"B000000002"`, 1),
+		"another region":          strings.Replace(params, `"region":"us"`, `"region":"uk"`, 1),
 		"a change fewer": strings.Replace(params, `,
             {"field":"published","current":"","corrected":"2020-03-04"}`, "", 1),
 	} {
@@ -359,10 +377,8 @@ func TestCorrectAdoptsTheLostIssueWithOtherEvidence(t *testing.T) {
 	if _, err := h.Run(ctx, jobs.Job{ID: 20, Params: json.RawMessage(params)}, jobs.LocalReporter()); !errors.Is(err, errNoAnswer) || g.count() != 1 {
 		t.Fatalf("lost answer: %v, issues %d", err, g.count())
 	}
-	g.mu.Lock()
-	g.drop = false
-	g.mu.Unlock()
-	again := `{"work_id":"existing-work","asin":"B000000001",
+	g.setDrop(false)
+	again := `{"work_id":"existing-work","asin":"B000000001","region":"us",
  "changes":[{"field":"published","current":"","corrected":"2020-03-04"},
             {"field":"author","current":"Jane Doe","corrected":"Jane Doe, John Smith"},
             {"field":"title","current":"Existing Work","corrected":"The Existing Work"}],
@@ -377,19 +393,58 @@ func TestCorrectAdoptsTheLostIssueWithOtherEvidence(t *testing.T) {
 		t.Fatalf("after a confirmed filing: %+v %v, issues %d", out, err, g.count())
 	}
 	// Another corrected value is another request: a lost one's marker doesn't stop it.
-	g.mu.Lock()
-	g.drop = true
-	g.mu.Unlock()
+	g.setDrop(true)
 	if _, err := h.Run(ctx, jobs.Job{ID: 23, Params: json.RawMessage(params)}, jobs.LocalReporter()); !errors.Is(err, errNoAnswer) || g.count() != 3 {
 		t.Fatalf("second lost answer: %v, issues %d", err, g.count())
 	}
-	g.mu.Lock()
-	g.drop = false
-	g.mu.Unlock()
+	g.setDrop(false)
 	changed := strings.Replace(params, `"corrected":"2020-03-04"`, `"corrected":"2020-03-05"`, 1)
 	if out, err := h.Run(ctx, jobs.Job{ID: 24, Params: json.RawMessage(changed)}, jobs.LocalReporter()); err != nil ||
 		g.count() != 4 || out.(Result).IssueNumber != 45 || kv.markers()[keyOf(t, params)] == "" {
 		t.Fatalf("another corrected value: %+v %v, issues %d, markers %v", out, err, g.count(), kv.markers())
+	}
+}
+
+// A day after a lost answer (contrib.FilingStale) the same corrections
+// suggested by a new job (with a source the maintainers asked for, say) are no
+// retry of it: the lost answer's issue, which may be closed by then, is not
+// adopted for them but stops them once for the admin to look at, and the next
+// suggestion files, with its evidence. The job that set the marker, resumed,
+// still adopts it.
+func TestCorrectStaleMarkerIsNoNewJobsToAdopt(t *testing.T) {
+	ctx := context.Background()
+	for _, resumed := range []bool{false, true} {
+		g, kv := &gh{drop: true}, &memKV{m: map[string]string{}}
+		h := newHandler(t, g, &tokens{token: "t", from: contrib.FromEnv}, kv, fakeMeta{cov: cov()})
+		if _, err := h.Run(ctx, jobs.Job{ID: 20, Params: json.RawMessage(params)}, jobs.LocalReporter()); !errors.Is(err, errNoAnswer) {
+			t.Fatalf("lost answer: %v", err)
+		}
+		g.setDrop(false)
+		g.mu.Lock()
+		g.date = fakeNow.Add(contrib.FilingStale + time.Hour)
+		g.mu.Unlock()
+		sourced := strings.Replace(params, "Edited by the server admin.", "The publisher's page credits both authors.", 1)
+		if resumed {
+			c := cov()
+			c.WorkTitle = "The Existing Work" // the lost issue's title is no longer what it composes
+			out, err := newHandler(t, g, &tokens{token: "t", from: contrib.FromEnv}, kv, fakeMeta{cov: c}).
+				Run(ctx, jobs.Job{ID: 20, Params: json.RawMessage(params), Resumed: true}, jobs.LocalReporter())
+			if err != nil || g.count() != 1 || out.(Result).IssueNumber != 42 {
+				t.Fatalf("resumed a day later: %+v %v, issues %d", out, err, g.count())
+			}
+			continue
+		}
+		if _, err := h.Run(ctx, jobs.Job{ID: 21, Params: json.RawMessage(sourced)}, jobs.LocalReporter()); !errors.Is(err, errFiledBefore) ||
+			g.count() != 1 || len(kv.markers()) != 0 {
+			t.Fatalf("a new job a day later: %v, issues %d, markers %v", err, g.count(), kv.markers())
+		}
+		out, err := h.Run(ctx, jobs.Job{ID: 22, Params: json.RawMessage(sourced)}, jobs.LocalReporter())
+		g.mu.Lock()
+		body, _ := g.issues[len(g.issues)-1]["body"].(string)
+		g.mu.Unlock()
+		if err != nil || g.count() != 2 || out.(Result).IssueNumber != 43 || !strings.Contains(body, "credits both authors") {
+			t.Fatalf("suggested again: %+v %v, issues %d", out, err, g.count())
+		}
 	}
 }
 
@@ -616,11 +671,6 @@ func TestCorrectNewJobAdoptsTheLostIssue(t *testing.T) {
 	job := func(id int64, path, p string) jobs.Job {
 		return jobs.Job{ID: id, LibraryID: &lib, Path: &path, Params: json.RawMessage(p)}
 	}
-	drop := func(on bool) {
-		g.mu.Lock()
-		g.drop = on
-		g.mu.Unlock()
-	}
 	_, err := h.Run(ctx, job(10, "Author/Book", params), jobs.LocalReporter())
 	if !errors.Is(err, errNoAnswer) || g.count() != 1 || kv.m[key] == "" {
 		t.Fatalf("lost answer: %v, issues %d, marker %q", err, g.count(), kv.m[key])
@@ -628,7 +678,7 @@ func TestCorrectNewJobAdoptsTheLostIssue(t *testing.T) {
 	if strings.Contains(err.Error(), "contrib") || strings.Contains(err.Error(), "POST") {
 		t.Fatalf("a raw error reached the console: %v", err)
 	}
-	drop(false)
+	g.setDrop(false)
 	out, err := h.Run(ctx, job(11, "Author/Book (Unabridged)", params), jobs.LocalReporter())
 	if err != nil || g.count() != 1 || out.(Result).IssueNumber != 42 {
 		t.Fatalf("new job: %+v %v, issues %d", out, err, g.count())
@@ -641,11 +691,11 @@ func TestCorrectNewJobAdoptsTheLostIssue(t *testing.T) {
 	// second suggested again (as the lost answer's words invite).
 	other := strings.Replace(params, `"corrected":"The Existing Work"`, `"corrected":"Existing Work, The"`, 1)
 	third := strings.Replace(params, `"corrected":"2020-03-04"`, `"corrected":"2020-03-05"`, 1)
-	drop(true)
+	g.setDrop(true)
 	if _, err := h.Run(ctx, job(12, "Author/Book", other), jobs.LocalReporter()); !errors.Is(err, errNoAnswer) || g.count() != 2 {
 		t.Fatalf("second lost answer: %v, issues %d", err, g.count())
 	}
-	drop(false)
+	g.setDrop(false)
 	if _, err := h.Run(ctx, job(13, "Author/Book", third), jobs.LocalReporter()); err != nil || g.count() != 3 ||
 		kv.m[keyOf(t, other)] == "" {
 		t.Fatalf("third job: %v, issues %d, markers %v", err, g.count(), kv.markers())
@@ -672,9 +722,7 @@ func TestCorrectAdoptsItsIssueAfterTheRecordMoved(t *testing.T) {
 			if _, err := newHandler(t, g, tok, kv, fakeMeta{cov: cov()}).Run(ctx, job, jobs.LocalReporter()); !errors.Is(err, errNoAnswer) {
 				t.Fatalf("%s: lost answer: %v", name, err)
 			}
-			g.mu.Lock()
-			g.drop = false
-			g.mu.Unlock()
+			g.setDrop(false)
 			c := cov()
 			move(&c)
 			if resumed {

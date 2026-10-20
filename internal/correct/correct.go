@@ -8,10 +8,10 @@
 // before the issue is opened (meta.correct.filing/<server>/<request>) makes the
 // next job asking for the same corrections, or this one resumed, look for what
 // the interrupted filing made first: its issue is adopted (as sent, whatever the
-// community record or the evidence says now),
-// an issue for the same record it can't account for stops it once for a person to
-// decide, and it files again only when the list holds neither (or can't reach
-// back to a marker over a day old).
+// community record or the evidence says now; by another job only while the
+// marker is under a day old), an issue for the same record it can't account for
+// stops it once for a person to decide, and it files again only when the list
+// holds neither (or can't reach back to a marker over a day old).
 package correct
 
 import (
@@ -63,9 +63,10 @@ const (
 )
 
 // otherBatch is a correction batch for the same record among the issues made
-// since an interrupted filing, with neither the request's sum nor the marker's:
-// another admin's, or the filing's own issue edited since. The Bridge can't tell
-// which, so a person decides. whole says the list was read back to the marker
+// since an interrupted filing, with neither the request's sum nor the marker's
+// (filedSince): another admin's, the filing's own issue edited since, or, for
+// another job past a day, the filing's own as it was composed. The Bridge can't
+// tell which, so a person decides. whole says the list was read back to the marker
 // and the marker has settled, so that batch (or nothing) is all the filing can
 // have made: once the person is told, the marker goes. err is why the list
 // stopped short (a refusal or a rate limit is reported as itself).
@@ -116,6 +117,11 @@ func ParseParams(raw json.RawMessage) (Params, error) {
 	if p.WorkID == "" {
 		return p, errors.New("bad params: work_id is required")
 	}
+	// The record's ids in the one form the filing key and recordingFor read.
+	p.RecordingID = strings.TrimSpace(p.RecordingID)
+	p.ASIN = strings.ToUpper(strings.TrimSpace(p.ASIN))
+	p.ISBN = normISBN(p.ISBN)
+	p.Region = strings.ToLower(p.Region)
 	return p, nil
 }
 
@@ -202,33 +208,42 @@ func (h *Handler) resultKey(job jobs.Job) string {
 }
 
 // filingKey is the request's: what the admin asked to change, nothing more.
-// The sha256 of the record the changes address (the work, and the recording id
-// or the ASIN and ISBN that pick one) and the changes as a set (each field and
-// its corrected value, sorted). Not the evidence (the console fills it with a
-// default line naming the server's version, in the admin's language, each time
-// its dialog opens), the source stamp or the region; not each change's current
-// value (it moves when the community applies a fix); not the book (which can
-// move) nor the composed issue (whose title is the work's live title). So the
-// same corrections suggested again, reworded or reordered, or this job resumed,
-// find the marker, and other corrections never share or overwrite it. Markers
-// written under the earlier key (the params less the source) are never read
-// again.
+// The sha256 of the record the changes address (the work, and the recording id,
+// or else the ASIN, ISBN and region that pick one: recordingFor) and the changes
+// as a set (each field and its corrected value, sorted). Not the evidence (the
+// console fills it with a default line naming the server's version, in the
+// admin's language, each time its dialog opens) or the source stamp; not each
+// change's current value (it moves when the community applies a fix); not the
+// book (which can move) nor the composed issue (whose title is the work's live
+// title). So the same corrections suggested again, reworded or reordered, or
+// this job resumed, find the marker, and other corrections never share or
+// overwrite it. p is as ParseParams gives it, its ids in one form.
 func (h *Handler) filingKey(p Params) string {
-	changes := make([]contrib.Correction, len(p.Changes)) // Current left out
-	for i, c := range p.Changes {
-		changes[i] = contrib.Correction{Field: strings.TrimSpace(c.Field), Corrected: strings.TrimSpace(c.Corrected)}
+	// Its own type, not contrib.Correction: a field the wire gains later must not
+	// change every request's key.
+	type change struct {
+		Field     string `json:"field"`
+		Corrected string `json:"corrected"`
 	}
-	slices.SortFunc(changes, func(a, b contrib.Correction) int {
+	changes := make([]change, len(p.Changes))
+	for i, c := range p.Changes {
+		changes[i] = change{c.Field, strings.TrimSpace(c.Corrected)}
+	}
+	slices.SortFunc(changes, func(a, b change) int {
 		return cmp.Or(strings.Compare(a.Field, b.Field), strings.Compare(a.Corrected, b.Corrected))
 	})
+	asin, isbn, region := p.ASIN, p.ISBN, p.Region
+	if p.RecordingID != "" { // the id picks the recording alone
+		asin, isbn, region = "", "", ""
+	}
 	raw, _ := json.Marshal(struct { // strings only: it can't fail
-		WorkID      string               `json:"work_id"`
-		RecordingID string               `json:"recording_id"`
-		ASIN        string               `json:"asin"`
-		ISBN        string               `json:"isbn"`
-		Changes     []contrib.Correction `json:"changes"`
-	}{strings.TrimSpace(p.WorkID), strings.TrimSpace(p.RecordingID), strings.ToUpper(strings.TrimSpace(p.ASIN)),
-		normISBN(p.ISBN), changes})
+		WorkID      string   `json:"work_id"`
+		RecordingID string   `json:"recording_id"`
+		ASIN        string   `json:"asin"`
+		ISBN        string   `json:"isbn"`
+		Region      string   `json:"region"`
+		Changes     []change `json:"changes"`
+	}{p.WorkID, p.RecordingID, asin, isbn, region, changes})
 	sum := sha256.Sum256(raw)
 	return "meta.correct.filing/" + h.o.ServerID() + "/" + hex.EncodeToString(sum[:])
 }
@@ -317,7 +332,7 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 	rep.Progress(jobs.Progress{Step: "filing", Message: "Filing the corrections", Done: 1, Total: 2})
 	sum := contrib.IssueSum(title, body)
 	if interrupted {
-		filed, err := h.filedSince(ctx, cli, marker, sum, body)
+		filed, err := h.filedSince(ctx, cli, marker, job.ID, sum, body)
 		var other otherBatch
 		var rateErr *contrib.RateLimitError
 		switch {
@@ -394,19 +409,26 @@ func recordSection(body string) string {
 // job's own sum, or the marker's (the request as it was composed then: the title
 // is the work's live title, the recording comes from the live record, and the
 // evidence and source stamp may have been reworded since), first
-// among the issues read even when a later page failed. With neither, a batch for
-// the same record with another sum is an otherBatch, a list that failed or can't
-// reach back is that error (contrib.ErrListIncomplete), and a marker under
-// contrib.FilingSettle old is contrib.ErrFilingSettling.
-func (h *Handler) filedSince(ctx context.Context, cli *contrib.Client, m filing, sum, body string) (contrib.FiledIssue, error) {
+// among the issues read even when a later page failed. The marker's sum is
+// another job's to adopt only while the marker is under contrib.FilingStale old:
+// later, the same changes suggested again (with a source asked for, say) are no
+// retry of the lost answer, whose issue may be closed by then. With neither, a
+// batch for the same record with another sum is an otherBatch, a list that
+// failed or can't reach back is that error (contrib.ErrListIncomplete), and a
+// marker under contrib.FilingSettle old is contrib.ErrFilingSettling.
+func (h *Handler) filedSince(ctx context.Context, cli *contrib.Client, m filing, job int64, sum, body string) (contrib.FiledIssue, error) {
 	issues, complete, err := cli.IssuesSince(ctx, h.o.CoreRepo, m.Since.Add(-contrib.FilingSkew))
+	adopt := m.Sum
+	if m.Job != job && cli.StaleFiling(m.Since) {
+		adopt = sum
+	}
 	record := recordSection(body)
 	other := 0 // the newest same-record batch with another sum
 	for _, is := range issues {
 		if !strings.HasPrefix(is.Title, contrib.CorrectionsTitleTag) {
 			continue
 		}
-		if got := contrib.IssueSum(is.Title, is.Body); got == sum || got == m.Sum {
+		if got := contrib.IssueSum(is.Title, is.Body); got == sum || got == adopt {
 			return is, nil
 		}
 		if other == 0 && recordSection(is.Body) == record {
@@ -451,13 +473,14 @@ func (h *Handler) done(ctx context.Context, job jobs.Job, fkey string, f filing,
 }
 
 // recordingFor is the recording the changes address: the job's own, else the
-// one the job's ASIN or ISBN picks out of the work's (none, or more than one,
-// is "": meta then hands the recording's fields to a maintainer).
+// one the job's ASIN (in its region, when it names one) or ISBN picks out of the
+// work's (none, or more than one, is "": meta then hands the recording's fields
+// to a maintainer). p is as ParseParams gives it, its ids in one form.
 func recordingFor(p Params, cov metaops.Coverage) string {
-	if id := strings.TrimSpace(p.RecordingID); id != "" {
-		return id
+	if p.RecordingID != "" {
+		return p.RecordingID
 	}
-	asin, isbn := strings.TrimSpace(p.ASIN), normISBN(p.ISBN)
+	asin, isbn := p.ASIN, p.ISBN
 	if asin == "" && isbn == "" {
 		return ""
 	}

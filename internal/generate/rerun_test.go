@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -232,6 +233,42 @@ func TestGenerateAbandonedJobStopsItsBook(t *testing.T) {
 			})
 		})
 	}
+}
+
+// A resumed job cancelled while it waits for the engine to start (its first
+// report went out, the next is answered with the cancel) never reaches its end:
+// the engine book an earlier run made is still stopped and its end recorded once
+// the engine is up, or a start would re-admit it with nothing to follow it.
+func TestGenerateCancelledWhileWaitingForTheEngineStopsItsBook(t *testing.T) {
+	t.Parallel()
+	hr := newHarness(t)
+	hr.exec.gate("asr")
+	hr.srv.add(43, "Author/Book", `{}`)
+	stop := hr.runner(hr.h)
+	hr.waitFor("asr", func() bool {
+		return hr.srv.saw(43, func(_ link.Update, p map[string]any) bool { return p["stage"] == "asr" })
+	})
+	stop()
+
+	var up atomic.Bool // the engine is still starting
+	defer hr.runner(hr.handlerWith(func() Engine {
+		if up.Load() {
+			return hr.sched
+		}
+		return nil
+	}))()
+	hr.waitFor("the resumed job waiting for the engine", func() bool {
+		return hr.srv.saw(43, func(_ link.Update, p map[string]any) bool {
+			return p["message"] == "Waiting for the engine to start"
+		})
+	})
+	hr.srv.set(func() { hr.srv.cancel[43] = true })
+	hr.waitFor("the job ended", func() bool { s, _ := hr.srv.final(43); return s != "" })
+	up.Store(true)
+	hr.waitFor("the engine book stopped and the end recorded", func() bool {
+		g, _ := hr.db.GetGenerateBook(context.Background(), 43)
+		return scheduler.IsCancelled(hr.engineBook(43)) && g.EndedAt != ""
+	})
 }
 
 // With transcripts.retention_days 0 a job taken back deletes its book's

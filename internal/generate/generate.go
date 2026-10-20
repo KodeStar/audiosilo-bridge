@@ -522,6 +522,13 @@ func (h *Handler) waitEngine(ctx context.Context, r *run) (Engine, error) {
 		}
 		r.rep.Progress(jobs.Progress{Step: stepWaiting, Message: "Waiting for the engine to start"})
 		if err := agent.SleepCtx(ctx, h.o.Poll); err != nil {
+			if !jobs.Resumes(ctx) {
+				// Cancelled, or taken back, before the engine started: the run never
+				// reaches end(), so the engine book an earlier run of the job made is
+				// released as Abandon does, or a start would re-admit it with nothing
+				// to follow it.
+				h.Abandon(context.WithoutCancel(ctx), r.job)
+			}
 			return nil, err
 		}
 	}

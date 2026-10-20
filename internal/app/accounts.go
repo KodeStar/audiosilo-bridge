@@ -54,12 +54,16 @@ func forgetSealedGitHubPAT(vault secrets.Store, log *slog.Logger) {
 // says so at once, and the books waiting for a credential try again.
 func (b *Bridge) githubChanged() {
 	b.Kick()
-	go func() {
-		ctx := context.Background()
-		if e := b.engine.get(); e != nil && b.canContribute(ctx) {
-			e.sched.ReadmitParked(ctx, "a GitHub credential is available again", state.ParkContribUnavailable)
-		}
-	}()
+	go b.readmitContributions(context.Background())
+}
+
+// readmitContributions re-admits the books parked waiting for a GitHub credential
+// once one resolves, and reports how many.
+func (b *Bridge) readmitContributions(ctx context.Context) int {
+	if e := b.engine.get(); e != nil && b.canContribute(ctx) {
+		return e.sched.ReadmitParked(ctx, "a GitHub credential is available again", state.ParkContribUnavailable)
+	}
+	return 0
 }
 
 // agentCredentialChanged runs after the Accounts tab changed the agent's

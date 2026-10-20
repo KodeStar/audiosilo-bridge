@@ -823,8 +823,8 @@ internal/
             checked_against, usage}; runAgentWith is runAgent after the preflight with
             the rate-limit backoff given (noWait passes an empty schedule: a rate
             limit parks at once), stageMaxTurns gives it 10. Its parks come back
-            as *scheduler.ParkError (the caller decides; a budget park's reason,
-            describing, names only the levers and no Retry). The composed file is kept
+            as *scheduler.ParkError (the caller decides; a budget park's reason is
+            every stage's, budgetExceededMsg). The composed file is kept
             as sidecars/description.json (FinalDescriptionPath, canonical JSON); a
             later call reuses it (re-composed with the current work/sources, nothing
             spent) when a successful describing run recorded how it was made
@@ -1052,19 +1052,19 @@ internal/
             it). The filing is guarded per REQUEST: before CreateIssue a marker
             {since (GitHub's time, contrib.Client.Now), sum (contrib.IssueSum of
             the title and body sent), job} goes to meta.correct.filing/<server
-            id>/<request> (filingKey: the sha256 of the record, work_id plus
-            recording_id, ASIN and ISBN, and the changes as a sorted set of
+            id>/<request> (filingKey: the sha256 of the record, work_id plus the
+            recording_id, or else the ASIN, ISBN and region that pick one, in the
+            one form ParseParams gives them, and the changes as a sorted set of
             {field, corrected}; NOT the evidence, which the console refills with
             a default line naming the server version in the admin's language each
-            time its dialog opens, nor the source stamp, the region, a change's
+            time its dialog opens, nor the source stamp, a change's
             current value (it moves when the community applies a fix), the book,
             which can move, or the composed issue, whose title is the work's live
             title), so a NEW job asking for the same corrections (the admin
             pressing Suggest again after a lost answer, reworded or reordered,
             whatever the book is called by then) sees it too and adopts the issue
-            the marker's sum names, and other corrections never share or
-            overwrite it. Markers keyed the earlier way (the params less the
-            source) are never read again. It is deleted (not emptied:
+            the marker's sum names (while the marker is under a day old, below),
+            and other corrections never share or overwrite it. It is deleted (not emptied:
             the keys are per request), and only while it is still the one the
             run wrote or adopted (clearFiling compares: an overlapping run's
             newer marker stays), once a filing is confirmed and its result
@@ -1076,12 +1076,17 @@ internal/
             finds a marker lists the core repo's issues made since
             (contrib.IssuesSince, the rows of pages read before one that failed
             included) and: adopts a [corrections] issue with its own sum or the
-            marker's (the same request composed earlier: a title correction
-            meta's bot applied since, a recording that took the ASIN, or the
-            evidence reworded, changes what it composes now); else fails asking
-            the admin to look first (errFiledBefore) for a same-record batch
-            with another body
-            (otherBatch: another admin's, or its own edited since; the marker
+            marker's (the same request composed earlier: the work's title
+            corrected since, a recording that took the ASIN, or the evidence
+            reworded changes what it composes now; a console that names the
+            recording by then, or leaves out a change the community applied,
+            sends another request, which files), another job the marker's only
+            while the marker is under a day old by GitHub's clock
+            (contrib.FilingStale: later, the same changes suggested again, with
+            a source the maintainers asked for, say, are no retry of the lost
+            answer); else fails asking the admin to look first (errFiledBefore)
+            for a same-record batch with another body (otherBatch: another
+            admin's, its own edited since, or past a day the lost one; the marker
             goes once the list was read back to it whole and it has settled, so
             the next suggestion files) or a marker without a time (which goes
             too); waits (errSettling) when the marker is under a minute old
@@ -1284,11 +1289,16 @@ internal/
             every 30 min in case the credential was replaced) and budget_exceeded
             (the monthly park's retry_at is the 1st; the per-book park has none, so it
             waits for a raised cap and the restart that applies it) - ONLY a park
-            carrying a retry_at is ever re-admitted. Bridge 2b: restartReadmitCodes
-            (the parks a daemon start re-admits once) add budget_exceeded, since a cap
-            raised in config.yaml or the environment applies at the start: a book still
-            over its budget parks again in runAgent's budget preflight, before any spend
-            (pipeline TestRestartReadmitsABudgetParkThatParksAgainBeforeSpending). IsCancelled(b) tells Cancel's failure from a stage's by its
+            carrying a retry_at is ever re-admitted by the timed self-resume. Bridge
+            2b: restartReadmitCodes (the parks a daemon start re-admits once) add
+            budget_exceeded, since a cap
+            raised in config.yaml or the environment applies at the start, unless the
+            executor's budget preflight gives the park back as it is (budgetParkHolds:
+            the optional budgetChecker, pipeline Executor.BudgetPark, parks it with the
+            same reason), which stays: no stage re-run, no job reported running in
+            between. A book a changed cap still leaves over its budget parks again in
+            runAgent's budget preflight, before any spend (pipeline
+            TestRestartReadmitsABudgetParkThatParksAgainBeforeSpending). IsCancelled(b) tells Cancel's failure from a stage's by its
             reason (cancelledReason "cancelled by user"; the status enum has no
             cancelled state). runStage closes a run on ANY error once the worker ctx
             ended (a killed ffmpeg is "signal: killed", not ctx.Err()): whoever
@@ -1634,7 +1644,8 @@ internal/
             and retention 0 purges its transcripts now; a later attempt of the same
             job running here (Attempt higher) is left alone. Abandon (jobs.Abandoner)
             does the same for a job the runner ended without running it, waiting for
-            the engine to start when it hasn't. Retry(job): the engine's Retry for a
+            the engine to start when it hasn't, and waitEngine for a run cancelled
+            (or taken back) while it waits for the engine, which never reaches end(). Retry(job): the engine's Retry for a
             parked engine book, else a poke for a job waiting in its own park
             (ErrNotParked, store.ErrNotFound otherwise). ParkHint words every park code
             for the console and the page (a fresh start says to cancel this job first:
@@ -1644,7 +1655,9 @@ internal/
             1st or at once when raised on the Settings tab; a cap set in config.yaml
             or the environment is raised there and the Bridge restarted, then the job
             carries on with no Retry (a start re-admits an engine book's budget park,
-            scheduler restartReadmitCodes, and runs a describe job again). Estimates (the heartbeat's): the
+            scheduler restartReadmitCodes, and runs a describe job again). The reasons
+            speak of "a job paused at the cap": a generate job's description and the
+            contributing stage's only log the description step's. Estimates (the heartbeat's): the
             ASR rate (seconds per chapter) scaled by the finished audio books'
             chapters per hour, else SeedASRSecondsPerAudioHour 900; agent spend per
             audio hour summed over finished audio books, per ebook averaged, nil until

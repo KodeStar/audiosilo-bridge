@@ -1004,7 +1004,7 @@ func (s *Scheduler) advanceWaypoints(ctx context.Context) ([]store.Book, error) 
 // agent conditions a wait heals (the CLI symlink blip recovers, or the rate-limit
 // window elapses), a refused agent credential (looked at again in case it was
 // replaced) and the monthly budget (a new month starts). Only a park that carries a
-// retry_at is ever re-admitted, so the per-book budget park (none) waits for a
+// retry_at is ever re-admitted here, so the per-book budget park (none) waits for a
 // raised cap and the restart that applies it (restartReadmitCodes), and every
 // other park for a person (a not-confident marker verdict, a spelling gate
 // failure, ...).
@@ -1013,20 +1013,42 @@ var autoReadmitCodes = []state.ParkCode{state.ParkAgentUnavailable, state.ParkAg
 
 // restartReadmitCodes are the parks a daemon start re-admits once
 // (readmitRestartRecoverable): external availability, or a setting read only at
-// start, a restart may have changed. budget_exceeded is one: a cap raised in
-// config.yaml or the environment applies when the Bridge next starts, so the
-// restart is all it takes (the generate package's budget hint and the pipeline's
-// budget park reasons say so, and ask for no Retry); a book still over its budget
-// parks again in the stage's budget preflight, before any spend.
+// start, a restart may have changed. budget_exceeded is one, since a cap set in
+// config.yaml or the environment applies at the start (state.ParkBudgetExceeded;
+// the generate package's budget hint and the pipeline's budget park reasons rely
+// on it and ask for no Retry), unless its park holds (budgetParkHolds).
 var restartReadmitCodes = []state.ParkCode{
 	state.ParkAgentUnavailable, state.ParkAgentRateLimited,
 	state.ParkASRUnavailable, state.ParkMediaToolsUnavailable,
 	state.ParkBudgetExceeded,
 }
 
-// readmitRestartRecoverable gives external-availability parks one fresh attempt per
-// daemon start. If the dependency is still unavailable the stage parks again and
-// remains quiet for the rest of this run, so this cannot become a retry loop.
+// budgetChecker is the executor's budget preflight on its own (pipeline.Executor's
+// BudgetPark): the park an agent stage of the book would meet now, nil when the
+// caps let it through.
+type budgetChecker interface {
+	BudgetPark(ctx context.Context, b store.Book) error
+}
+
+// budgetParkHolds reports whether b's budget park would come back as it is: the
+// executor's preflight parks it again with the reason it shows. A restart leaves
+// such a park alone, since re-running the stage would only park it again, after
+// its preparation and with the job following it reported running in between (or
+// never, while a lower volume holds its series' lock). A cap raised, even short
+// of the spend (another reason), or a check that fails re-admits it.
+func (s *Scheduler) budgetParkHolds(ctx context.Context, b store.Book) bool {
+	check, ok := s.exec.(budgetChecker)
+	if !ok || b.ParkCode != string(state.ParkBudgetExceeded) {
+		return false
+	}
+	var pe *ParkError
+	return errors.As(check.BudgetPark(ctx, b), &pe) && pe.Code == state.ParkBudgetExceeded && pe.Reason == b.Error
+}
+
+// readmitRestartRecoverable gives the restart-recoverable parks one fresh attempt
+// per daemon start. If the dependency is still unavailable (or the budget still
+// spent) the stage parks again and remains quiet for the rest of this run, so this
+// cannot become a retry loop.
 func (s *Scheduler) readmitRestartRecoverable(ctx context.Context) {
 	books, err := s.db.ListBooks(ctx)
 	if err != nil {
@@ -1034,7 +1056,7 @@ func (s *Scheduler) readmitRestartRecoverable(ctx context.Context) {
 		return
 	}
 	for _, b := range books {
-		if !restartRecoverablePark(b) {
+		if !restartRecoverablePark(b) || s.budgetParkHolds(ctx, b) {
 			continue
 		}
 		if err := s.readmit(ctx, b); err != nil {

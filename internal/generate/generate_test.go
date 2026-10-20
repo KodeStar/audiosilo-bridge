@@ -290,7 +290,12 @@ func newHarness(t *testing.T) *harness {
 }
 
 func (hr *harness) handler() *Handler {
-	return New(Options{DB: hr.db, Engine: func() Engine { return hr.sched }, Libraries: hr.libs,
+	return hr.handlerWith(func() Engine { return hr.sched })
+}
+
+// handlerWith is handler with the engine engine gives (nil while it starts).
+func (hr *harness) handlerWith(engine func() Engine) *Handler {
+	return New(Options{DB: hr.db, Engine: engine, Libraries: hr.libs,
 		Mount:  func(int64, string) (string, bool) { return hr.libs.root, false },
 		Server: func() Server { return hr.cl }, WorkRoot: hr.work, Version: "0.2.0", RetentionDays: 30,
 		Poll: 10 * time.Millisecond, IdlePoll: 10 * time.Millisecond, Recheck: time.Hour, Log: slog.New(slog.NewTextHandler(io.Discard, nil))})

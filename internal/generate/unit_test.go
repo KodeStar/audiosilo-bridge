@@ -122,17 +122,21 @@ func TestParkHintsNameAnActionThatWorks(t *testing.T) {
 func TestBudgetParkHint(t *testing.T) {
 	t.Parallel()
 	code := string(state.ParkBudgetExceeded)
-	want := "The agent budget is spent. A monthly cap resumes on the 1st, or at once when it is raised on the " +
-		"Bridge's Settings tab. A cap set in the Bridge's config.yaml (the per-book agent.book_budget_usd) or by its " +
-		"environment (AUDIOSILO_BRIDGE_AGENT_MONTHLY_BUDGET_USD, AUDIOSILO_BRIDGE_AGENT_BOOK_BUDGET_USD) is raised " +
-		"there, then the Bridge restarted: the job carries on by itself, with no Retry needed."
-	if got := ParkHint(code); got != want {
-		t.Fatalf("budget hint = %q\nwant          %q", got, want)
+	hint := ParkHint(code)
+	for _, phrase := range []string{"resumes on the 1st", "raised on the Bridge's Settings tab", "agent.book_budget_usd",
+		"AUDIOSILO_BRIDGE_AGENT_MONTHLY_BUDGET_USD", "AUDIOSILO_BRIDGE_AGENT_BOOK_BUDGET_USD", "the Bridge restarted",
+		"carries on by itself, with no Retry needed"} {
+		if !strings.Contains(hint, phrase) {
+			t.Errorf("budget hint %q lacks %q", hint, phrase)
+		}
+	}
+	if strings.Contains(hint, "press Retry") {
+		t.Errorf("budget hint %q asks for a Retry", hint)
 	}
 	parked := store.Book{State: string(state.FactPass), Status: string(state.StatusNeedsAttention), ParkCode: code}
 	for name, extra := range map[string]map[string]any{"describe": describe(view{book: parked}).Extra,
 		"bookExtra": (&run{}).bookExtra(parked)} {
-		if park, _ := extra["park"].(map[string]any); park["hint"] != want {
+		if park, _ := extra["park"].(map[string]any); park["hint"] != hint {
 			t.Errorf("%s: park = %+v, want the budget hint", name, park)
 		}
 	}

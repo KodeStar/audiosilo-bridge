@@ -64,23 +64,24 @@ const (
 
 // budgetExceededMsg is the park reason when a book's summed agent cost has reached the
 // configured per-book budget. It names the spend, the budget and the lever (the cap in
-// config.yaml, or the environment variable that sets it, read at the next start). The
-// restart is all it takes, for every kind of job: a daemon start re-admits a budget
-// park (the scheduler's restartReadmitCodes) and runs a sidecars.describe job again,
-// and one still over its budget parks again here, before any spend.
+// config.yaml, or the environment variable that sets it, read at the next start), and
+// how a job paused at the cap goes on (state.ParkBudgetExceeded: the restart is all
+// it takes). It speaks of "a job paused at the cap", not "the job", since the
+// description step's error is only logged by sidecars.generate and the contributing
+// stage, which go on without a description.
 func budgetExceededMsg(spent, budget float64) string {
 	return fmt.Sprintf("book agent cost $%.2f reached the budget $%.2f - raise agent.book_budget_usd in config.yaml "+
-		"(or AUDIOSILO_BRIDGE_AGENT_BOOK_BUDGET_USD when that sets it) and restart the Bridge; the job then carries on "+
-		"by itself", spent, budget)
+		"(or AUDIOSILO_BRIDGE_AGENT_BOOK_BUDGET_USD when that sets it) and restart the Bridge; a job paused at the "+
+		"cap then carries on by itself", spent, budget)
 }
 
 // monthlyBudgetExceededMsg is the park reason when this month's agent spend across
 // every book reached agent.monthly_budget_usd. A budget raised on the Settings tab
-// wakes the job at once; one the environment sets takes a restart (see
+// wakes a paused job at once; one the environment sets takes a restart (see
 // budgetExceededMsg), and none of them a Retry.
 func monthlyBudgetExceededMsg(spent, budget float64, resume time.Time) string {
-	return fmt.Sprintf("this month's agent cost $%.2f reached the monthly budget $%.2f - the job resumes on %s, "+
-		"or at once when the monthly budget is raised on the Bridge's Settings tab (when "+
+	return fmt.Sprintf("this month's agent cost $%.2f reached the monthly budget $%.2f - a job paused at the cap "+
+		"resumes on %s, or at once when the monthly budget is raised on the Bridge's Settings tab (when "+
 		"AUDIOSILO_BRIDGE_AGENT_MONTHLY_BUDGET_USD sets it, raise that and restart the Bridge)",
 		spent, budget, resume.Format("2 January 2006"))
 }
@@ -455,6 +456,13 @@ func (e *Executor) budgetPreflight(ctx context.Context, book store.Book, stage s
 		}
 	}
 	return e.checkMonthlyBudget(ctx, stage, time.Now())
+}
+
+// BudgetPark is the budget preflight on its own, for the scheduler's restart
+// (budgetParkHolds): the park an agent stage of b would meet now, nil when the
+// caps let it through.
+func (e *Executor) BudgetPark(ctx context.Context, b store.Book) error {
+	return e.budgetPreflight(ctx, b, state.State(b.State))
 }
 
 // runAgentWith is runAgent after the budget preflight (its caller's), with the

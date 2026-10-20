@@ -12,7 +12,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/kodestar/audiosilo-bridge/internal/api"
 	"github.com/kodestar/audiosilo-bridge/internal/contrib"
@@ -355,10 +354,8 @@ func TestGitHubSignInResumesContributionParks(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := b.db.SetBookState(ctx, bk.ID, string(state.Contributing), "", "", ""); err != nil {
-			t.Fatal(err)
-		}
-		if err := b.db.SetBookStatusRetry(ctx, bk.ID, string(state.StatusNeedsAttention), "parked", string(code), ""); err != nil {
+		if err := b.db.SetBookState(ctx, bk.ID, string(state.Contributing), string(state.StatusNeedsAttention), "parked",
+			string(code)); err != nil {
 			t.Fatal(err)
 		}
 		return bk.ID
@@ -373,10 +370,9 @@ func TestGitHubSignInResumesContributionParks(t *testing.T) {
 		return bk.Status
 	}
 
-	b.githubChanged() // a sign-out, say: no token resolves
-	time.Sleep(100 * time.Millisecond)
-	if s := status(contributing); s != string(state.StatusNeedsAttention) {
-		t.Fatalf("with no GitHub token the book was re-admitted (status %q)", s)
+	// A sign-out, say: no token resolves (what githubChanged runs, waited for).
+	if n := b.readmitContributions(ctx); n != 0 || status(contributing) != string(state.StatusNeedsAttention) {
+		t.Fatalf("with no GitHub token %d books were re-admitted (status %q)", n, status(contributing))
 	}
 
 	t.Setenv(contrib.GitHubTokenEnv, "ghp_signed_in")

@@ -87,8 +87,9 @@ const (
 	// agent.monthly_budget_usd parks with it too, until the 1st (UTC, its readmit
 	// time) or a changed budget saved on the Settings tab (which re-admits every book
 	// parked with it at once). A budget the environment sets is locked on the page:
-	// raise it there and restart. One still over its budget parks again before any
-	// spend; no Retry is needed for either.
+	// raise it there and restart. A start leaves one the caps still stop with the same
+	// reason parked (the scheduler's budgetParkHolds), and one a changed cap still
+	// leaves over its budget parks again before any spend; no Retry is needed for either.
 	ParkBudgetExceeded ParkCode = "budget_exceeded"
 	// Supervisor containment parks never authorize content/code changes; a human
 	// may inspect the persisted decision and explicitly Retry when satisfied.
