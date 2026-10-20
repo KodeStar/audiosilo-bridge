@@ -861,8 +861,23 @@ func TestContributeNoCredentialParks(t *testing.T) {
 	cfg := contribConfig(t, db, contribModeIssue, gh.srv.URL, "", "", fakeTokenResolver{err: contrib.ErrNoCredential})
 	_, err := NewExecutor(cfg).Execute(context.Background(), b, state.Contributing, scheduler.StageReport{})
 	assertPark(t, err, state.ParkContribUnavailable)
+	if err.Error() != ContribUnavailableMsg {
+		t.Errorf("park reason = %q, want %q", err.Error(), ContribUnavailableMsg)
+	}
 	if gh.issueCount() != 0 {
 		t.Errorf("issues created = %d, want 0 when uncredentialed", gh.issueCount())
+	}
+
+	// Denied: a sign-in GitHub couldn't be reached to refresh parks the same code,
+	// worded for waiting on GitHub rather than signing in.
+	cfg = contribConfig(t, db, contribModeIssue, gh.srv.URL, "", "", fakeTokenResolver{err: contrib.ErrSignInUnrefreshed})
+	_, err = NewExecutor(cfg).Execute(context.Background(), b, state.Contributing, scheduler.StageReport{})
+	assertPark(t, err, state.ParkContribUnavailable)
+	if err.Error() != ContribUnrefreshedMsg {
+		t.Errorf("park reason = %q, want %q", err.Error(), ContribUnrefreshedMsg)
+	}
+	if gh.issueCount() != 0 {
+		t.Errorf("issues created = %d, want 0 when the sign-in is unrefreshed", gh.issueCount())
 	}
 
 	// Allowed: a PAT proceeds.

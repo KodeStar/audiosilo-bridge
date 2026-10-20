@@ -47,6 +47,8 @@ func (f failure) Error() string { return string(f) }
 const (
 	errNoCredential failure = "The Bridge isn't signed in to GitHub: sign in on the Bridge's Accounts tab, then " +
 		"suggest the corrections again."
+	errUnrefreshed failure = "The Bridge's GitHub sign-in couldn't be refreshed because GitHub couldn't be " +
+		"reached: suggest the corrections again once it can."
 	errRefused failure = "GitHub refused the Bridge's sign-in: sign in again on the Bridge's Accounts tab, then " +
 		"suggest the corrections again."
 	errMetaOff failure = "The Bridge's community metadata service is off (metadata.base_url), so it can't " +
@@ -307,6 +309,9 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 	}
 	// The credential first: without one there is nothing to fetch the record for.
 	token, from, err := h.o.Tokens.Resolve(ctx)
+	if errors.Is(err, contrib.ErrSignInUnrefreshed) {
+		return nil, errUnrefreshed
+	}
 	if errors.Is(err, contrib.ErrNoCredential) {
 		return nil, errNoCredential
 	}

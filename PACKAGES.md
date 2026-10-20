@@ -952,7 +952,11 @@ internal/
             NewTokenSource(device, onChange) resolves AUDIOSILO_BRIDGE_GITHUB_TOKEN
             read LIVE from the environment first (never sealed any more), then the
             Accounts tab's device sign-in, then `gh auth token`; Resolve returns the
-            token and where it came from (FromEnv/FromDevice/FromGH) and a 401 on a device token marks it refused
+            token and where it came from (FromEnv/FromDevice/FromGH), else
+            ErrNoCredential, or ErrSignInUnrefreshed (an ErrNoCredential too) when
+            the only credential is a sign-in GitHub couldn't be reached to refresh
+            (accounts.ErrUnrefreshed), which callers word as "once GitHub can be
+            reached" rather than "sign in"; a 401 on a device token marks it refused
             (a call that works with one moves the sign-in's last_ok_at: NewClientFor
             wires both hooks) - the token NEVER enters argv/logs/
             errors, leak-canary tested). NewClientFor records where the token came
@@ -1020,8 +1024,8 @@ internal/
             before expiry and persists first, detached from its caller (a page
             request that goes away mid-refresh would lose the rotated pair); only
             ErrBadRefresh refuses the sign-in, a refresh without GitHub's answer
-            keeps the pair (the access token serves until it expires) and is tried
-            again a minute later; a device flow ended meanwhile (sign-out, a newer
+            keeps the pair (the access token serves until it expires, then Token
+            answers ErrUnrefreshed) and is tried again a minute later; a device flow ended meanwhile (sign-out, a newer
             one) stores nothing; Refused marks the account refused (a 401 on a
             token a refresh has since replaced is ignored) and OK moves last_ok_at
             (a REST call that worked with the current token; never ends a
@@ -1589,7 +1593,8 @@ internal/
             issue, work_id <= 200 bytes, no control characters} are decoded leniently
             (a field a later server adds is ignored) but checked strictly. A NEW job
             with contribute=issue fails BEFORE ANY SPEND when no GitHub token resolves
-            (the contribution is the last stage). prepare: the library from the
+            (Options.ContribCredential; the contribution is the last stage), worded
+            apart when the sign-in only couldn't be refreshed (errCantContributeUnrefreshed). prepare: the library from the
             registry; waitMapped needs its check mapped AND writable at the mount the
             Bridge uses NOW (a new job fails otherwise; a resumed one parks
             library_not_writable and waits, its engine book going on); fetchBook waits
@@ -1851,8 +1856,10 @@ internal/
             book without a writable mapping (it writes nothing into the library),
             notesBook finds the engine book that keeps the results, holdBook holds
             it, and Options.Sharer (pipeline.Executor.Share) files them. Failures
-            in words: not signed in, refused, nothing kept here, a generate job
-            still running, not matched. Result {library_id, path, work_id,
+            in words: not signed in, a sign-in GitHub couldn't be reached to
+            refresh (Options.ContribCredential answering contrib.ErrSignInUnrefreshed,
+            or the park's pipeline.ContribUnrefreshedMsg), refused, nothing kept
+            here, a generate job still running, not matched. Result {library_id, path, work_id,
             contributed, covered}. The hints for agent_unavailable,
             agent_credential_refused and contrib_unavailable point at the Accounts
             tab.

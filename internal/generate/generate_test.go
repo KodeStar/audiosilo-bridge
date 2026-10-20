@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kodestar/audiosilo-bridge/internal/contrib"
 	"github.com/kodestar/audiosilo-bridge/internal/events"
 	"github.com/kodestar/audiosilo-bridge/internal/jobs"
 	"github.com/kodestar/audiosilo-bridge/internal/link"
@@ -811,20 +812,29 @@ func TestGenerateCostIsTheBudgetBasis(t *testing.T) {
 func TestGenerateIssueNeedsAGitHubToken(t *testing.T) {
 	t.Parallel()
 	hr := newHarness(t)
-	var can atomic.Bool
+	var cred atomic.Pointer[error]
+	setCred := func(err error) { cred.Store(&err) }
+	setCred(contrib.ErrNoCredential)
 	h := hr.handler()
-	h.o.CanContribute = func(context.Context) bool { return can.Load() }
+	h.o.ContribCredential = func(context.Context) error { return *cred.Load() }
 	hr.srv.add(94, "Author/Book", `{"contribute":"issue"}`)
 	stop := hr.runner(h)
 	defer stop()
 	hr.waitFor("failed", func() bool { s, _ := hr.srv.final(94); return s == link.StateFailed })
-	if _, final := hr.srv.final(94); final.Error == nil || !strings.Contains(*final.Error, "Accounts tab") {
+	if _, final := hr.srv.final(94); final.Error == nil || *final.Error != errCantContribute.Error() {
 		t.Fatalf("error = %v", final.Error)
 	}
 	if _, err := hr.db.GetGenerateBook(context.Background(), 94); !errors.Is(err, store.ErrNotFound) {
 		t.Fatal("the engine got a book it couldn't contribute")
 	}
-	can.Store(true)
+	// Signed in, but GitHub couldn't be reached to refresh the sign-in: worded apart.
+	setCred(contrib.ErrSignInUnrefreshed)
+	hr.srv.add(96, "Author/Book", `{"contribute":"issue"}`)
+	hr.waitFor("failed", func() bool { s, _ := hr.srv.final(96); return s == link.StateFailed })
+	if _, final := hr.srv.final(96); final.Error == nil || *final.Error != errCantContributeUnrefreshed.Error() {
+		t.Fatalf("error = %v", final.Error)
+	}
+	setCred(nil)
 	hr.srv.add(95, "Loose.m4b", `{"contribute":"issue"}`)
 	hr.waitFor("the second job runs", func() bool {
 		_, err := hr.db.GetGenerateBook(context.Background(), 95)

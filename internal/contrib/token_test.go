@@ -3,6 +3,7 @@ package contrib
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -11,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/kodestar/audiosilo-bridge/internal/accounts"
 )
 
 // fakeDevice is a scripted device sign-in.
@@ -87,6 +90,28 @@ func TestResolveNoCredential(t *testing.T) {
 	ts.ghToken = func(context.Context) (string, error) { return "", nil }
 	if _, _, err := ts.Resolve(context.Background()); !errors.Is(err, ErrNoCredential) {
 		t.Fatalf("empty-token err = %v, want ErrNoCredential", err)
+	}
+}
+
+// TestResolveSignInUnrefreshed: a sign-in GitHub couldn't be reached to refresh
+// is ErrSignInUnrefreshed (still an ErrNoCredential) when nothing else resolves,
+// and gives way to a token that does; any other sign-in error stays plain.
+func TestResolveSignInUnrefreshed(t *testing.T) {
+	ctx := context.Background()
+	down := fmt.Errorf("%w: dial tcp: i/o timeout", accounts.ErrUnrefreshed)
+	ts := newSource("", &fakeDevice{err: down}, "")
+	_, _, err := ts.Resolve(ctx)
+	if !errors.Is(err, ErrSignInUnrefreshed) || !errors.Is(err, ErrNoCredential) {
+		t.Fatalf("err = %v, want ErrSignInUnrefreshed wrapping ErrNoCredential", err)
+	}
+	if tok, from, err := newSource("", &fakeDevice{err: down}, "gho_cli").Resolve(ctx); err != nil || tok != "gho_cli" || from != FromGH {
+		t.Fatalf("got (%q, %q, %v): gh still serves", tok, from, err)
+	}
+	for _, derr := range []error{accounts.ErrNotSignedIn, accounts.ErrRefused} {
+		_, _, err := newSource("", &fakeDevice{err: derr}, "").Resolve(ctx)
+		if !errors.Is(err, ErrNoCredential) || errors.Is(err, ErrSignInUnrefreshed) {
+			t.Fatalf("%v: err = %v, want a plain ErrNoCredential", derr, err)
+		}
 	}
 }
 

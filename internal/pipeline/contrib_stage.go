@@ -68,7 +68,12 @@ const defaultContribBaseURL = "https://api.github.com"
 const (
 	// ContribUnavailableMsg parks a book in issue mode when no GitHub credential
 	// resolves (contrib.TokenSource: no environment token, sign-in or `gh auth token`).
-	ContribUnavailableMsg = "GitHub credential unavailable - sign in to GitHub on the Bridge's Accounts tab, then Retry"
+	// A sign-in on the Accounts tab re-admits it (the app's githubChanged).
+	ContribUnavailableMsg = "GitHub credential unavailable - sign in to GitHub on the Bridge's Accounts tab and the book carries on"
+	// ContribUnrefreshedMsg parks it (same code) when the Bridge is signed in but
+	// GitHub couldn't be reached to refresh the sign-in (contrib.ErrSignInUnrefreshed):
+	// a later refresh re-admits nothing, so Retry does.
+	ContribUnrefreshedMsg = "the Bridge's GitHub sign-in couldn't be refreshed because GitHub couldn't be reached - Retry once it can"
 	// CoreNeededMsg parks a book whose work does not exist upstream: a core add-work
 	// proposal has been prefilled and awaits completion/confirmation in the UI.
 	CoreNeededMsg = "this book's work does not exist on AudioSilo Meta yet - complete the work proposal, then it contributes automatically"
@@ -549,6 +554,9 @@ func (e *Executor) contribClient(ctx context.Context) (*contrib.Client, error) {
 	}
 	token, from, err := e.tokenSource.Resolve(ctx)
 	if err != nil {
+		if errors.Is(err, contrib.ErrSignInUnrefreshed) {
+			return nil, scheduler.ParkWithCode(state.ParkContribUnavailable, ContribUnrefreshedMsg)
+		}
 		if errors.Is(err, contrib.ErrNoCredential) {
 			return nil, scheduler.ParkWithCode(state.ParkContribUnavailable, ContribUnavailableMsg)
 		}

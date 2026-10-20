@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/kodestar/audiosilo-bridge/internal/accounts"
 )
 
 // ErrNoCredential is returned by TokenSource.Resolve when no GitHub credential
@@ -20,6 +22,13 @@ import (
 // (the issue contribution mode parks the book on this; unauthenticated public
 // polling ignores it).
 var ErrNoCredential = errors.New("contrib: no GitHub credential (sign in to GitHub on the Bridge's Accounts tab)")
+
+// ErrSignInUnrefreshed is the ErrNoCredential (errors.Is matches both) of a
+// Bridge that is signed in to GitHub but whose expired sign-in couldn't be
+// refreshed because GitHub couldn't be reached (accounts.ErrUnrefreshed), with
+// nothing else to fall back on. Waiting until GitHub can be reached ends it, not
+// a sign-in, so callers word it apart.
+var ErrSignInUnrefreshed = fmt.Errorf("%w: the sign-in couldn't be refreshed (GitHub couldn't be reached)", ErrNoCredential)
 
 // GitHubTokenEnv names the variable that gives the Bridge a GitHub token for
 // headless setups. It is read live at every Resolve (never sealed), and wins
@@ -93,18 +102,26 @@ func NewTokenSource(device DeviceTokens, onChange func()) *TokenSource {
 
 // Resolve returns (token, from, nil) where from is FromEnv, FromDevice or
 // FromGH, trying them in that order. When none yields a usable token it returns
-// ("", "", ErrNoCredential). The error path never carries a token.
+// ("", "", ErrNoCredential), or ErrSignInUnrefreshed when the sign-in is there
+// but GitHub couldn't be reached to refresh it. The error path never carries a
+// token.
 func (t *TokenSource) Resolve(ctx context.Context) (token, from string, err error) {
 	if v := strings.TrimSpace(t.getenv(GitHubTokenEnv)); v != "" && !t.isRefused(v) {
 		return v, FromEnv, nil
 	}
+	unrefreshed := false
 	if t.device != nil {
-		if tok, derr := t.device.Token(ctx); derr == nil && tok != "" {
+		tok, derr := t.device.Token(ctx)
+		if derr == nil && tok != "" {
 			return tok, FromDevice, nil
 		}
+		unrefreshed = errors.Is(derr, accounts.ErrUnrefreshed)
 	}
 	if tok := t.ghCLIToken(ctx); tok != "" && !t.isRefused(tok) {
 		return tok, FromGH, nil
+	}
+	if unrefreshed {
+		return "", "", ErrSignInUnrefreshed
 	}
 	return "", "", ErrNoCredential
 }

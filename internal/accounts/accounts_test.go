@@ -312,7 +312,7 @@ func TestRefreshWithoutAnswerKeepsSignIn(t *testing.T) {
 		t.Fatalf("err = %v, refreshes tried = %d (one a minute)", err, hits())
 	}
 	r.clock.Add(2 * time.Minute) // expired, and a minute since the last try
-	if _, err := r.gh.Token(ctx); err == nil || errors.Is(err, ErrRefused) || hits() != 2 {
+	if _, err := r.gh.Token(ctx); !errors.Is(err, ErrUnrefreshed) || errors.Is(err, ErrRefused) || hits() != 2 {
 		t.Fatalf("err = %v, refreshes tried = %d (an expired token without an answer is no refusal)", err, hits())
 	}
 	if st := r.gh.State(ctx); st.Refused || !st.SignedIn {

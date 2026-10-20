@@ -57,6 +57,11 @@ var (
 	// ErrRefused: GitHub refused the sign-in (revoked, or the refresh token
 	// expired); signing in again ends it.
 	ErrRefused = errors.New("GitHub refused the Bridge's sign-in: sign in again on the Accounts tab")
+	// ErrUnrefreshed: the sign-in's access token expired and its refresh got no
+	// answer from GitHub (unreachable, a server error). The sign-in stands and the
+	// refresh is tried again after refreshRetry: waiting for GitHub ends it, not a
+	// new sign-in.
+	ErrUnrefreshed = errors.New("the Bridge's GitHub sign-in couldn't be refreshed: GitHub couldn't be reached")
 )
 
 // RefusedText is the accounts row's last_error after a 401.
@@ -401,7 +406,7 @@ func (g *GitHub) unrefreshed(tok ghauth.Token, now time.Time, err error) (string
 	if now.Before(tok.ExpiresAt) {
 		return tok.AccessToken, nil
 	}
-	return "", fmt.Errorf("refresh the GitHub sign-in: %w", err)
+	return "", fmt.Errorf("%w: %w", ErrUnrefreshed, err)
 }
 
 // Refused records that GitHub refused token (a 401 on a REST call made with it):

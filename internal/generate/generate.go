@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/kodestar/audiosilo-bridge/internal/agent"
+	"github.com/kodestar/audiosilo-bridge/internal/contrib"
 	"github.com/kodestar/audiosilo-bridge/internal/fsutil"
 	"github.com/kodestar/audiosilo-bridge/internal/jobs"
 	"github.com/kodestar/audiosilo-bridge/internal/link"
@@ -91,9 +92,10 @@ type Options struct {
 	// RetentionDays is transcripts.retention_days: 0 deletes a finished book's
 	// transcripts when its job ends (else the daily sweep does, that much later).
 	RetentionDays int
-	// CanContribute reports whether a GitHub token resolves (contribute=issue
-	// needs one); nil counts as yes.
-	CanContribute func(context.Context) bool
+	// ContribCredential reports why no GitHub token resolves (contribute=issue
+	// needs one): nil when one does, else contrib.ErrNoCredential or
+	// contrib.ErrSignInUnrefreshed. A nil func counts as one resolving.
+	ContribCredential func(context.Context) error
 	// Poll is how often a working engine book is looked at (default 3 s);
 	// IdlePoll how often one that is queued, paused or parked is (default 30 s;
 	// a Retry looks at once); Recheck how often a book folder that couldn't be
@@ -317,10 +319,14 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 	if err != nil {
 		return nil, err
 	}
-	if !resumed && params.Contribute == ContributeIssue && h.o.CanContribute != nil && !h.o.CanContribute(ctx) {
+	if !resumed && params.Contribute == ContributeIssue {
 		// Fail before any spend: the contribution is the last stage, and without a
 		// token it could only park there after the whole run was paid for.
-		return nil, errCantContribute
+		if err := h.contribCredential(ctx); errors.Is(err, contrib.ErrSignInUnrefreshed) {
+			return nil, errCantContributeUnrefreshed
+		} else if err != nil {
+			return nil, errCantContribute
+		}
 	}
 	return h.runEngineBook(ctx, eng, r, mapped, resumed, nil)
 }
@@ -409,10 +415,25 @@ func (h *Handler) startRun(job jobs.Job, rep *jobs.Reporter, kind string) (r *ru
 	return r, func() { h.dropPoke(job.ID, r.poke) }, nil
 }
 
-// errCantContribute is a contribute=issue job on a Bridge with no GitHub credential.
-var errCantContribute = errors.New("this job asks to contribute the characters and recaps (contribute: issue), but " +
-	"the Bridge isn't signed in to GitHub: sign in on the Bridge's Accounts tab, or generate the book with " +
-	"contribute set to local")
+// errCantContribute is a contribute=issue job on a Bridge with no GitHub
+// credential; errCantContributeUnrefreshed one on a Bridge signed in to GitHub
+// whose sign-in GitHub couldn't be reached to refresh.
+var (
+	errCantContribute = errors.New("this job asks to contribute the characters and recaps (contribute: issue), but " +
+		"the Bridge isn't signed in to GitHub: sign in on the Bridge's Accounts tab, or generate the book with " +
+		"contribute set to local")
+	errCantContributeUnrefreshed = errors.New("this job asks to contribute the characters and recaps (contribute: " +
+		"issue), but the Bridge's GitHub sign-in couldn't be refreshed because GitHub couldn't be reached: generate " +
+		"the book again once it can, or with contribute set to local")
+)
+
+// contribCredential is Options.ContribCredential's answer (nil when it is unset).
+func (h *Handler) contribCredential(ctx context.Context) error {
+	if h.o.ContribCredential == nil {
+		return nil
+	}
+	return h.o.ContribCredential(ctx)
+}
 
 // end records how the job ended, unless it resumes later (the Bridge stopping or
 // its token refused). A job that ends any other way short of done (an admin

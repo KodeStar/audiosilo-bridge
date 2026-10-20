@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kodestar/audiosilo-bridge/internal/contrib"
 	"github.com/kodestar/audiosilo-bridge/internal/jobs"
 	"github.com/kodestar/audiosilo-bridge/internal/link"
 	"github.com/kodestar/audiosilo-bridge/internal/pipeline"
@@ -39,10 +40,10 @@ func (f *fakeSharer) Share(_ context.Context, bookID int64, workID string, dims 
 }
 
 // shareRunner runs the generate and contribute jobs with s as the share step.
-func (hr *harness) shareRunner(s Sharer, can func(context.Context) bool) (stop func()) {
+func (hr *harness) shareRunner(s Sharer, cred func(context.Context) error) (stop func()) {
 	h := New(Options{DB: hr.db, Engine: func() Engine { return hr.sched }, Sharer: func() Sharer { return s },
 		Libraries: hr.libs, Mount: func(int64, string) (string, bool) { return hr.libs.root, false },
-		Server: func() Server { return hr.cl }, WorkRoot: hr.work, Version: "0.2.0", RetentionDays: 30, CanContribute: can,
+		Server: func() Server { return hr.cl }, WorkRoot: hr.work, Version: "0.2.0", RetentionDays: 30, ContribCredential: cred,
 		Poll: 10 * time.Millisecond, IdlePoll: 10 * time.Millisecond, Recheck: time.Hour, Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
 	r := jobs.New(hr.db, func() jobs.Server { return hr.cl }, nil, jobs.Options{Keepalive: 30 * time.Millisecond,
 		ProgressEvery: 5 * time.Millisecond, Wait: 10 * time.Millisecond, RetryEvery: 20 * time.Millisecond,
@@ -68,7 +69,7 @@ func TestContributeJob(t *testing.T) {
 	hr.generated(71)
 	s := &fakeSharer{}
 	hr.srv.addContribute(72, "Author/Book", `{"work_id":"the-book","dimensions":["characters","recaps"],"later":1}`)
-	stop := hr.shareRunner(s, func(context.Context) bool { return true })
+	stop := hr.shareRunner(s, func(context.Context) error { return nil })
 	defer stop()
 	hr.waitFor("done", func() bool { s, _ := hr.srv.final(72); return s == link.StateDone })
 	var res ContributeResult
@@ -91,21 +92,23 @@ func TestContributeJobRefusals(t *testing.T) {
 		path   string
 		params string
 		err    error
-		can    bool
+		cred   error // what ContribCredential answers
 		want   describeFailure
 	}{
-		{82, "Loose.m4b", `{}`, nil, true, errShareNothing},
-		{83, "Author/Book", `{}`, nil, false, errShareCantContribute},
-		{84, "Author/Book", `{}`, pipeline.ErrNotMatched, true, errShareNotMatched},
-		{85, "Author/Book", `{}`, scheduler.ParkWithCode(state.ParkContribUnavailable, "x"), true, errShareCantContribute},
-		{86, "Author/Book", `{}`, pipeline.ErrNoSidecars, true, errShareNothing},
-		{87, "Author/Book", `{}`, fmt.Errorf("%w (the characters issue): x", pipeline.ErrFilingUnknown), true, errShareFilingUnknown},
+		{82, "Loose.m4b", `{}`, nil, nil, errShareNothing},
+		{83, "Author/Book", `{}`, nil, contrib.ErrNoCredential, errShareCantContribute},
+		{84, "Author/Book", `{}`, pipeline.ErrNotMatched, nil, errShareNotMatched},
+		{85, "Author/Book", `{}`, scheduler.ParkWithCode(state.ParkContribUnavailable, pipeline.ContribUnavailableMsg), nil, errShareCantContribute},
+		{86, "Author/Book", `{}`, pipeline.ErrNoSidecars, nil, errShareNothing},
+		{87, "Author/Book", `{}`, fmt.Errorf("%w (the characters issue): x", pipeline.ErrFilingUnknown), nil, errShareFilingUnknown},
+		{88, "Author/Book", `{}`, nil, contrib.ErrSignInUnrefreshed, errShareUnrefreshed},
+		{89, "Author/Book", `{}`, scheduler.ParkWithCode(state.ParkContribUnavailable, pipeline.ContribUnrefreshedMsg), nil, errShareUnrefreshed},
 	}
 	for _, c := range cases {
 		s := &fakeSharer{err: c.err}
-		can := c.can
+		cred := c.cred
 		hr.srv.addContribute(c.id, c.path, c.params)
-		stop := hr.shareRunner(s, func(context.Context) bool { return can })
+		stop := hr.shareRunner(s, func(context.Context) error { return cred })
 		hr.waitFor("the refusal", func() bool { st, _ := hr.srv.final(c.id); return st == link.StateFailed })
 		stop()
 		if _, u := hr.srv.final(c.id); u.Error == nil || *u.Error != string(c.want) {

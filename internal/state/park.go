@@ -45,7 +45,9 @@ const (
 
 	// ParkContribUnavailable: the contributing stage runs in issue mode but no
 	// GitHub credential is available (contrib.TokenSource: no AUDIOSILO_BRIDGE_GITHUB_TOKEN,
-	// no sign-in on the Accounts tab, no `gh auth token`). A sign-in re-admits it.
+	// no sign-in on the Accounts tab, no `gh auth token`), or the sign-in couldn't be
+	// refreshed because GitHub couldn't be reached. A sign-in re-admits it; Retry
+	// does once GitHub can be reached.
 	ParkContribUnavailable ParkCode = "contrib_unavailable"
 	// ParkCoreNeeded: the book's work does not exist upstream, so an add-work (core)
 	// proposal awaits completion/confirmation in the UI before the sidecars can attach.

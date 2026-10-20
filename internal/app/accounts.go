@@ -94,6 +94,12 @@ func (b *Bridge) agentCredential(cli string) (kind, value string, since time.Tim
 // contribute=issue needs.
 func (b *Bridge) canContribute(ctx context.Context) bool { return b.contributeFrom(ctx) != "" }
 
+// contribCredential is why no contribution token resolves now (nil when one does).
+func (b *Bridge) contribCredential(ctx context.Context) error {
+	_, _, err := b.tokens.Resolve(ctx)
+	return err
+}
+
 // contributeFrom is where a contribution's token comes from now ("" for none).
 func (b *Bridge) contributeFrom(ctx context.Context) string {
 	_, from, err := b.tokens.Resolve(ctx)

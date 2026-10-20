@@ -30,6 +30,8 @@ type Sharer interface {
 const (
 	errShareCantContribute describeFailure = "The Bridge isn't signed in to GitHub: sign in on the Bridge's Accounts " +
 		"tab, then share the book again."
+	errShareUnrefreshed describeFailure = "The Bridge's GitHub sign-in couldn't be refreshed because GitHub couldn't " +
+		"be reached: share the book again once it can."
 	errShareRefused describeFailure = "GitHub refused the Bridge's sign-in: sign in again on the Bridge's Accounts " +
 		"tab, then share the book again."
 	errShareNothing describeFailure = "The Bridge keeps no characters or recaps for this book (it was not generated " +
@@ -108,7 +110,9 @@ func (c *ContributeJob) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporte
 		return nil, err
 	}
 	defer stop()
-	if h.o.CanContribute != nil && !h.o.CanContribute(ctx) {
+	if err := h.contribCredential(ctx); errors.Is(err, contrib.ErrSignInUnrefreshed) {
+		return nil, errShareUnrefreshed
+	} else if err != nil {
 		return nil, errShareCantContribute
 	}
 	if _, err := h.waitEngine(ctx, r); err != nil {
@@ -157,6 +161,9 @@ func shareError(err error) error {
 	var park *scheduler.ParkError
 	switch {
 	case errors.As(err, &park) && park.Code == state.ParkContribUnavailable:
+		if park.Reason == pipeline.ContribUnrefreshedMsg {
+			return errShareUnrefreshed
+		}
 		return errShareCantContribute
 	case contrib.Unauthorized(err):
 		return errShareRefused
