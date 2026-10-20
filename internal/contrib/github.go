@@ -320,8 +320,17 @@ const IssuesPage = 50
 // page may not reach back to since. The list reads GitHub's own store, so an
 // issue made a moment ago is in it (search lags behind).
 func (c *Client) IssuesSince(ctx context.Context, repo string, since time.Time) (issues []FiledIssue, complete bool, err error) {
+	return c.IssuesSinceBy(ctx, repo, since, "")
+}
+
+// IssuesSinceBy is IssuesSince narrowed to the issues creator opened ("" for
+// anyone's), so one page reaches back much further.
+func (c *Client) IssuesSinceBy(ctx context.Context, repo string, since time.Time, creator string) (issues []FiledIssue, complete bool, err error) {
 	q := url.Values{"state": {"all"}, "sort": {"created"}, "direction": {"desc"},
 		"per_page": {strconv.Itoa(IssuesPage)}, "since": {since.UTC().Format(time.RFC3339)}}
+	if creator != "" {
+		q.Set("creator", creator)
+	}
 	respBody, _, err := c.request(ctx, http.MethodGet, "/repos/"+repo+"/issues?"+q.Encode(), nil, http.StatusOK)
 	if err != nil {
 		return nil, false, err
@@ -366,6 +375,85 @@ func (c *Client) GetIssue(ctx context.Context, repo string, number int) (Issue, 
 		return Issue{}, fmt.Errorf("contrib: decode issue: %w", err)
 	}
 	return r.toIssue(), nil
+}
+
+// Login is the login of the user the token belongs to (GET /user).
+func (c *Client) Login(ctx context.Context) (string, error) {
+	respBody, _, err := c.request(ctx, http.MethodGet, "/user", nil, http.StatusOK)
+	if err != nil {
+		return "", err
+	}
+	var r struct {
+		Login string `json:"login"`
+	}
+	if err := json.Unmarshal(respBody, &r); err != nil {
+		return "", fmt.Errorf("contrib: decode user: %w", err)
+	}
+	if r.Login == "" {
+		return "", errors.New("contrib: the user has no login")
+	}
+	return r.Login, nil
+}
+
+// NothingFiled reports whether err is GitHub refusing a create call outright (a
+// 4xx answer, a rate limit), so nothing was made. Any other error (a server
+// error, which can come after the issue or gist was made, a timeout, a lost
+// answer) may have made it.
+func NothingFiled(err error) bool {
+	var apiErr *APIError
+	var rateErr *RateLimitError
+	return (errors.As(err, &apiErr) && apiErr.Status < http.StatusInternalServerError) || errors.As(err, &rateErr)
+}
+
+// GistFile is one file of a gist as the gist list shows it.
+type GistFile struct {
+	RawURL string
+	Size   int
+}
+
+// Gist is one of the user's gists as the gist list shows it.
+type Gist struct {
+	ID        string
+	CreatedAt time.Time
+	Files     map[string]GistFile
+}
+
+// GistsPage is how many gists GistsSince reads (one page).
+const GistsPage = 50
+
+// GistsSince lists the user's gists created at or after since, from one page of
+// GistsPage (the list is newest first): complete is false when that page may not
+// reach back to since.
+func (c *Client) GistsSince(ctx context.Context, since time.Time) (gists []Gist, complete bool, err error) {
+	q := url.Values{"per_page": {strconv.Itoa(GistsPage)}, "since": {since.UTC().Format(time.RFC3339)}}
+	respBody, _, err := c.request(ctx, http.MethodGet, "/gists?"+q.Encode(), nil, http.StatusOK)
+	if err != nil {
+		return nil, false, err
+	}
+	var rows []struct {
+		ID        string    `json:"id"`
+		CreatedAt time.Time `json:"created_at"`
+		Files     map[string]struct {
+			RawURL string `json:"raw_url"`
+			Size   int    `json:"size"`
+		} `json:"files"`
+	}
+	if err := json.Unmarshal(respBody, &rows); err != nil {
+		return nil, false, fmt.Errorf("contrib: decode gists: %w", err)
+	}
+	complete = len(rows) < GistsPage
+	for _, r := range rows {
+		if r.CreatedAt.Before(since) {
+			complete = true // the page reaches back past since
+			continue
+		}
+		g := Gist{ID: r.ID, CreatedAt: r.CreatedAt, Files: make(map[string]GistFile, len(r.Files))}
+		for name, f := range r.Files {
+			g.Files[name] = GistFile{RawURL: f.RawURL, Size: f.Size}
+		}
+		gists = append(gists, g)
+	}
+	return gists, complete, nil
 }
 
 // CreateGist uploads files (filename -> content) as a gist and returns their raw

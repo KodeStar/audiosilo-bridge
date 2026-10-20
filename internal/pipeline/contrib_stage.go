@@ -451,7 +451,9 @@ func (e *Executor) submitContributions(ctx context.Context, book store.Book, slu
 
 // submitIssue opens one intake issue per uncovered dimension. It verifies the routing
 // label stuck (GitHub silently drops labels from non-collaborators) and notes when it
-// did not, and switches an oversize body to a secret gist link. A RateLimitError
+// did not, and switches an oversize body to a secret gist link. Each dimension is
+// filed at most once across submits (fileIssue: an interrupted earlier submit's
+// gist or issue is adopted). A RateLimitError
 // propagates as a transient stage error (not a park); a resume with an already-recorded
 // row skips that dimension.
 func (e *Executor) submitIssue(ctx context.Context, book store.Book, slug string, artifacts []contribArtifact, auditNote string) error {
@@ -484,16 +486,7 @@ func (e *Executor) submitIssueWith(ctx context.Context, book store.Book, slug st
 		if rerr != nil {
 			return rerr
 		}
-		title, body, labels := composeIssue(a.kind, slug, payload, "")
-		if contrib.ExceedsBodyLimit(body) {
-			file := fileNameFor(a.kind)
-			raws, gerr := cli.CreateGist(ctx, map[string]string{file: string(payload)}, true)
-			if gerr != nil {
-				return gerr
-			}
-			title, body, labels = composeIssue(a.kind, slug, payload, raws[file])
-		}
-		issue, ierr := cli.CreateIssue(ctx, e.contribCommunityRepo, title, body, labels)
+		issue, ierr := e.fileIssue(ctx, cli, book.ID, a.kind, slug, payload)
 		if ierr != nil {
 			return ierr
 		}
@@ -508,6 +501,7 @@ func (e *Executor) submitIssueWith(ctx context.Context, book store.Book, slug st
 		if err := e.upsertRow(ctx, book.ID, a.kind, store.ContribModeIssue, issue.Number, issue.URL, store.ContribStatusSubmitted, contrib.JoinNotes(note, auditNote)); err != nil {
 			return err
 		}
+		e.clearFiling(ctx, book.ID, a.kind)
 	}
 	return nil
 }

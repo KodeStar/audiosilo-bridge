@@ -35,8 +35,11 @@ const (
 		"tab, then share the book again."
 	errShareNothing describeFailure = "The Bridge keeps no characters or recaps for this book (it was not generated " +
 		"here, or they were removed). Generate them first."
-	errShareGenerating describeFailure = "A generate job is still running for this book; share it once it finishes."
-	errShareNotMatched describeFailure = "Match the book first: it isn't matched to a work in the community database."
+	errShareGenerating    describeFailure = "A generate job is still running for this book; share it once it finishes."
+	errShareNotMatched    describeFailure = "Match the book first: it isn't matched to a work in the community database."
+	errShareFilingUnknown describeFailure = "An earlier share stopped while filing, and the Bridge can't tell yet " +
+		"whether GitHub made the issue, so it filed nothing more: share the book again later, and if this keeps " +
+		"happening, look for the issue on the community repository."
 )
 
 // ContributeParams are sidecars.contribute's params: the community work the
@@ -160,6 +163,8 @@ func shareError(err error) error {
 		return errShareNotMatched
 	case errors.Is(err, pipeline.ErrNoSidecars):
 		return errShareNothing
+	case errors.Is(err, pipeline.ErrFilingUnknown):
+		return errShareFilingUnknown
 	}
 	return fmt.Errorf("could not share the book: %w", err)
 }

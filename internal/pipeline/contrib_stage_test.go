@@ -10,9 +10,11 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/kodestar/audiosilo-meta/pkg/canonical"
 	"github.com/kodestar/audiosilo-meta/pkg/model"
@@ -47,11 +49,21 @@ func (f fakeTokenResolver) Resolve(context.Context) (string, string, error) {
 
 // createdIssue records an issue the fake GitHub server was asked to open.
 type createdIssue struct {
-	repo   string // owner/name the issue was opened on
-	number int
-	title  string
-	body   string
-	labels []string
+	repo    string // owner/name the issue was opened on
+	number  int
+	title   string
+	body    string
+	labels  []string
+	created time.Time
+}
+
+// createdGist is a gist the fake made.
+type createdGist struct {
+	id      string
+	file    string
+	raw     string
+	size    int
+	created time.Time
 }
 
 // fakeGitHub stands in for api.github.com for the contribution client: the intake
@@ -63,8 +75,15 @@ type fakeGitHub struct {
 	mu         sync.Mutex
 	issues     []createdIssue
 	gists      int
+	gistList   []createdGist
 	dropLabels bool // GET issue omits the routing labels (non-collaborator drop)
 	rateLimit  bool // creation calls return a 403 rate-limit
+	// lostIssues / lostGists: the next N creations are made, but the connection
+	// drops before the answer (a POST that outlives the client's timeout).
+	lostIssues int
+	lostGists  int
+	listCalls  int  // issue list reads
+	listFull   bool // the issue list answers a full page of other issues
 }
 
 // testCommunityRepo is the repository the stage contributes sidecars to.
@@ -100,8 +119,45 @@ func (g *fakeGitHub) handle(w http.ResponseWriter, r *http.Request) {
 		g.decode(r, &req)
 		num := len(g.issues) + 1
 		repo := strings.TrimSuffix(strings.TrimPrefix(path, "/repos/"), "/issues")
-		g.issues = append(g.issues, createdIssue{repo: repo, number: num, title: req.Title, body: req.Body, labels: req.Labels})
+		g.issues = append(g.issues, createdIssue{repo: repo, number: num, title: req.Title, body: req.Body,
+			labels: req.Labels, created: time.Now().UTC()})
+		if g.lostIssues > 0 {
+			g.lostIssues--
+			g.drop(w)
+			return
+		}
 		g.writeIssue(w, http.StatusCreated, num, req.Labels)
+
+	case r.Method == http.MethodGet && path == "/user":
+		g.writeJSON(w, http.StatusOK, map[string]string{"login": "kodestar"})
+
+	case r.Method == http.MethodGet && strings.HasSuffix(path, "/issues"):
+		g.listCalls++
+		if r.URL.Query().Get("creator") != "kodestar" {
+			g.t.Errorf("fakeGitHub: issue list without the creator: %s", r.URL.RawQuery)
+		}
+		rows := []map[string]any{}
+		if g.listFull {
+			for i := range contrib.IssuesPage {
+				rows = append(rows, map[string]any{"number": 1000 + i, "title": "other", "body": "",
+					"created_at": time.Now().UTC().Format(time.RFC3339), "html_url": "x"})
+			}
+		}
+		for i := len(g.issues) - 1; i >= 0; i-- {
+			is := g.issues[i]
+			rows = append(rows, map[string]any{"number": is.number, "title": is.title, "body": is.body,
+				"created_at": is.created.Format(time.RFC3339), "html_url": g.srv.URL + fmt.Sprintf("/issue/%d", is.number)})
+		}
+		g.writeJSON(w, http.StatusOK, rows)
+
+	case r.Method == http.MethodGet && path == "/gists":
+		rows := []map[string]any{}
+		for i := len(g.gistList) - 1; i >= 0; i-- {
+			gs := g.gistList[i]
+			rows = append(rows, map[string]any{"id": gs.id, "created_at": gs.created.Format(time.RFC3339),
+				"files": map[string]any{gs.file: map[string]any{"raw_url": gs.raw, "size": gs.size}}})
+		}
+		g.writeJSON(w, http.StatusOK, rows)
 
 	case r.Method == http.MethodGet && strings.Contains(path, "/issues/"):
 		num := lastInt(path)
@@ -115,13 +171,26 @@ func (g *fakeGitHub) handle(w http.ResponseWriter, r *http.Request) {
 		g.writeIssue(w, http.StatusOK, num, labels)
 
 	case r.Method == http.MethodPost && strings.HasSuffix(path, "/gists"):
+		var req struct {
+			Files map[string]struct {
+				Content string `json:"content"`
+			} `json:"files"`
+		}
+		g.decode(r, &req)
 		g.gists++
-		g.writeJSON(w, http.StatusCreated, map[string]any{
-			"files": map[string]any{
-				"characters.json": map[string]string{"raw_url": g.srv.URL + "/gist/characters.json"},
-				"recaps.json":     map[string]string{"raw_url": g.srv.URL + "/gist/recaps.json"},
-			},
-		})
+		files := map[string]any{}
+		for name, f := range req.Files {
+			raw := fmt.Sprintf("%s/gist/%d/%s", g.srv.URL, g.gists, name)
+			g.gistList = append(g.gistList, createdGist{id: strconv.Itoa(g.gists), file: name, raw: raw,
+				size: len(f.Content), created: time.Now().UTC()})
+			files[name] = map[string]string{"raw_url": raw}
+		}
+		if g.lostGists > 0 {
+			g.lostGists--
+			g.drop(w)
+			return
+		}
+		g.writeJSON(w, http.StatusCreated, map[string]any{"files": files})
 
 	default:
 		g.t.Errorf("fakeGitHub: unhandled %s %s", r.Method, path)
@@ -139,6 +208,15 @@ func (g *fakeGitHub) writeIssue(w http.ResponseWriter, status, num int, labels [
 		"html_url": g.srv.URL + fmt.Sprintf("/issue/%d", num),
 		"labels":   ls,
 	})
+}
+
+// drop closes the connection without an answer.
+func (g *fakeGitHub) drop(w http.ResponseWriter) {
+	conn, _, err := w.(http.Hijacker).Hijack()
+	if err != nil {
+		g.t.Fatalf("fakeGitHub: hijack: %v", err)
+	}
+	_ = conn.Close()
 }
 
 func (g *fakeGitHub) decode(r *http.Request, v any) {
@@ -477,7 +555,7 @@ func TestContributeIssueOversizePayloadUsesGist(t *testing.T) {
 			charsBody = iss.body
 		}
 	}
-	if !strings.Contains(charsBody, gh.srv.URL+"/gist/characters.json") {
+	if !strings.Contains(charsBody, gh.srv.URL+"/gist/1/characters.json") {
 		t.Errorf("characters issue did not link the gist:\n%s", truncate(charsBody))
 	}
 	if strings.Contains(charsBody, "```json") {
@@ -972,5 +1050,29 @@ func TestContribModeForBook(t *testing.T) {
 	}
 	if got := e.contribModeFor(store.Book{}); got != "local" {
 		t.Errorf("no book mode under a local Bridge = %q", got)
+	}
+}
+
+// The contributing stage files through the same marker: a retry after a lost
+// answer adopts the issue rather than filing a second.
+func TestContributeRetryAdoptsALostIssue(t *testing.T) {
+	db := openContribDB(t)
+	gh := newFakeGitHub(t)
+	gh.lostIssues = 1
+	b := contribBook(t, db, store.NewBook{WorkID: "reacher-01"}, baseChars("x"), baseRecaps("x"))
+	cfg := contribConfig(t, db, contribModeIssue, gh.srv.URL, "", "", fakeTokenResolver{token: "ghu_x", from: contrib.FromDevice})
+	exe := NewExecutor(cfg)
+	if _, err := exe.Execute(context.Background(), b, state.Contributing, scheduler.StageReport{}); err == nil {
+		t.Fatal("a lost answer should fail the stage")
+	}
+	if _, err := exe.Execute(context.Background(), b, state.Contributing, scheduler.StageReport{}); err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	if gh.issueCount() != 2 {
+		t.Fatalf("issues = %d, want one per dimension", gh.issueCount())
+	}
+	rows := rowsByKind(t, db, b.ID)
+	if rows[store.ContribKindCharacters].Number == rows[store.ContribKindRecaps].Number {
+		t.Fatalf("rows = %+v", rows)
 	}
 }

@@ -3,6 +3,7 @@ package generate
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"slices"
@@ -98,6 +99,7 @@ func TestContributeJobRefusals(t *testing.T) {
 		{84, "Author/Book", `{}`, pipeline.ErrNotMatched, true, errShareNotMatched},
 		{85, "Author/Book", `{}`, scheduler.ParkWithCode(state.ParkContribUnavailable, "x"), true, errShareCantContribute},
 		{86, "Author/Book", `{}`, pipeline.ErrNoSidecars, true, errShareNothing},
+		{87, "Author/Book", `{}`, fmt.Errorf("%w (the characters issue): x", pipeline.ErrFilingUnknown), true, errShareFilingUnknown},
 	}
 	for _, c := range cases {
 		s := &fakeSharer{err: c.err}

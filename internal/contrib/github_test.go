@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -325,6 +327,76 @@ func TestIssuesSince(t *testing.T) {
 	}
 	if _, complete, err := c.IssuesSince(context.Background(), testRepo, since); err != nil || complete {
 		t.Fatalf("a full page of newer issues: complete %v err %v", complete, err)
+	}
+}
+
+// IssuesSinceBy narrows the list to one creator; Login reads /user.
+func TestIssuesSinceByAndLogin(t *testing.T) {
+	var query string
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/user" {
+			_ = json.NewEncoder(w).Encode(map[string]string{"login": "kodestar"})
+			return
+		}
+		query = r.URL.RawQuery
+		_ = json.NewEncoder(w).Encode([]any{})
+	})
+	login, err := c.Login(context.Background())
+	if err != nil || login != "kodestar" {
+		t.Fatalf("login %q %v", login, err)
+	}
+	if _, complete, err := c.IssuesSinceBy(context.Background(), testRepo, time.Now(), login); err != nil || !complete {
+		t.Fatalf("complete %v err %v", complete, err)
+	}
+	if !strings.Contains(query, "creator=kodestar") {
+		t.Fatalf("query %s", query)
+	}
+}
+
+func TestGistsSince(t *testing.T) {
+	since := time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)
+	rows := []map[string]any{
+		{"id": "g2", "created_at": "2026-10-19T12:05:00Z", "files": map[string]any{
+			"characters.json": map[string]any{"raw_url": "raw2", "size": 70000}}},
+		{"id": "g1", "created_at": "2026-10-19T11:00:00Z", "files": map[string]any{}},
+	}
+	var path string
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		path = r.URL.Path + "?" + r.URL.RawQuery
+		_ = json.NewEncoder(w).Encode(rows)
+	})
+	got, complete, err := c.GistsSince(context.Background(), since)
+	if err != nil || !complete || len(got) != 1 || got[0].Files["characters.json"] != (GistFile{RawURL: "raw2", Size: 70000}) {
+		t.Fatalf("got %+v complete %v err %v", got, complete, err)
+	}
+	if !strings.HasPrefix(path, "/gists?") || !strings.Contains(path, "since=2026-10-19T12%3A00%3A00Z") {
+		t.Fatalf("path %s", path)
+	}
+	rows = nil
+	for i := range GistsPage {
+		rows = append(rows, map[string]any{"id": strconv.Itoa(i), "created_at": "2026-10-19T13:00:00Z"})
+	}
+	if _, complete, err := c.GistsSince(context.Background(), since); err != nil || complete {
+		t.Fatalf("a full page of newer gists: complete %v err %v", complete, err)
+	}
+}
+
+// NothingFiled: only a refusal (4xx, rate limit) rules out that GitHub made it.
+func TestNothingFiled(t *testing.T) {
+	for _, c := range []struct {
+		err  error
+		want bool
+	}{
+		{&APIError{Status: http.StatusUnprocessableEntity}, true},
+		{&RateLimitError{Status: http.StatusForbidden}, true},
+		{fmt.Errorf("wrapped: %w", &APIError{Status: http.StatusNotFound}), true},
+		{&APIError{Status: http.StatusBadGateway}, false},
+		{context.DeadlineExceeded, false},
+		{io.ErrUnexpectedEOF, false},
+	} {
+		if got := NothingFiled(c.err); got != c.want {
+			t.Errorf("NothingFiled(%v) = %v", c.err, got)
+		}
 	}
 }
 

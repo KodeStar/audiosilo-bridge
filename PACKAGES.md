@@ -918,6 +918,20 @@ internal/
             again); a dimension already filed is kept and reported. Missing sidecars
             is ErrNoSidecars. Config.MonthlyBudget (a func) is read live, so a budget
             saved on the page applies without a restart.
+            contrib_filing.go: every issue-mode submit (the stage and Share) files a
+            dimension at most once (fileIssue). Before each create call (the gist,
+            the issue) it records a filing marker in the settings KV
+            (contrib.filing/<book id>/<kind>: the payload's sha256, gist_since, the
+            gist's raw URL once made, issue_since), since a POST that outlives the
+            client's 15 s timeout may still have made it. The next submit that
+            finds a marker for the same payload looks among what the signed-in
+            user made since then (less 2 minutes): GistsSince (one file of that
+            name and size) and IssuesSinceBy with the user's login (the same title
+            and body), and adopts a match; it creates again only when that list is
+            complete and holds none, else fails with ErrFilingUnknown (the share
+            job words it). A refusal (contrib.NothingFiled: a 4xx or a rate limit)
+            clears the pending time; a made gist is kept for the next try; the
+            marker goes once the row is recorded.
   contrib/  M7: everything GitHub-facing for contribution. TokenSource (Phase 2b:
             NewTokenSource(device, onChange) resolves AUDIOSILO_BRIDGE_GITHUB_TOKEN
             read LIVE from the environment first (never sealed any more), then the
