@@ -205,10 +205,13 @@ func (e *Executor) fileIssue(ctx context.Context, cli *contrib.Client, bookID in
 	// sent: whatever the sidecar is now, an issue it made is the dimension's.
 	if !f.IssueSince.IsZero() {
 		issue, found, err := e.filedIssue(ctx, cli, f, login, recorded)
-		if err != nil {
+		switch {
+		case err != nil && !contrib.StaleFiling(cli.Now(ctx), f.IssueSince):
 			return contrib.Issue{}, filingUnknown(kind, "issue", err)
-		}
-		if found {
+		case err != nil:
+			e.log.Warn("contributing: an interrupted submit's issue can't be found or ruled out, and its marker "+
+				"is over a day old: filing again", "book", bookID, "kind", kind, "err", err)
+		case found:
 			e.log.Info("contributing: an interrupted submit had filed the issue", "book", bookID, "kind", kind,
 				"issue", issue.Number)
 			return issue, nil
@@ -224,10 +227,13 @@ func (e *Executor) fileIssue(ctx context.Context, cli *contrib.Client, bookID in
 		file, desc := fileNameFor(kind), gistDescription(kind, slug, f.Payload)
 		if f.Gist == "" && !f.GistSince.IsZero() {
 			raw, found, err := filedGist(ctx, cli, f.GistSince, file, desc)
-			if err != nil {
+			switch {
+			case err != nil && !contrib.StaleFiling(cli.Now(ctx), f.GistSince):
 				return contrib.Issue{}, filingUnknown(kind, "gist", err)
-			}
-			if found {
+			case err != nil:
+				e.log.Warn("contributing: an interrupted submit's gist can't be found or ruled out, and its marker "+
+					"is over a day old: making another", "book", bookID, "kind", kind, "err", err)
+			case found:
 				e.log.Info("contributing: an interrupted submit had made the gist", "book", bookID, "kind", kind)
 				f.Gist = raw
 			}

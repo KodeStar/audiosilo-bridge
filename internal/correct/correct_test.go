@@ -61,11 +61,24 @@ type gh struct {
 	listStatus int
 	issues     []map[string]any
 	auth       []string
+	// date is GitHub's clock (every answer's Date; fakeNow when zero), so a
+	// marker's age doesn't depend on the day the tests run.
+	date time.Time
 }
+
+// fakeNow is the fake GitHub's clock: shortly after the issues it made.
+var fakeNow = time.Date(2026, 10, 19, 12, 10, 0, 0, time.UTC)
 
 func (g *gh) server(t *testing.T) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		g.mu.Lock()
+		date := g.date
+		g.mu.Unlock()
+		if date.IsZero() {
+			date = fakeNow
+		}
+		w.Header().Set("Date", date.Format(http.TimeFormat))
 		if r.URL.Path != "/repos/KodeStar/audiosilo-meta/issues" {
 			http.NotFound(w, r)
 			return
@@ -273,6 +286,18 @@ func TestCorrectNeverFilesTwice(t *testing.T) {
 	g, kv = &gh{listStatus: http.StatusBadGateway}, &memKV{m: map[string]string{key: marker}}
 	if _, err := run(g, kv); !errors.Is(err, errFiledBefore) || g.count() != 0 {
 		t.Fatalf("list fails: err = %v, issues %d", err, g.count())
+	}
+
+	// The marker's age by GitHub's clock: just under a day, a list that can't be
+	// read still stops the job; just over (contrib.FilingStale), it files again.
+	at := time.Date(2026, 10, 19, 12, 0, 30, 0, time.UTC)
+	g, kv = &gh{listStatus: http.StatusBadGateway, date: at.Add(contrib.FilingStale - time.Hour)}, &memKV{m: map[string]string{key: marker}}
+	if _, err := run(g, kv); !errors.Is(err, errFiledBefore) || g.count() != 0 {
+		t.Fatalf("under a day: err = %v, issues %d", err, g.count())
+	}
+	g, kv = &gh{listStatus: http.StatusBadGateway, date: at.Add(contrib.FilingStale + time.Hour)}, &memKV{m: map[string]string{key: marker}}
+	if out, err := run(g, kv); err != nil || g.count() != 1 || out.(Result).IssueNumber != 42 {
+		t.Fatalf("over a day: %+v %v, issues %d", out, err, g.count())
 	}
 }
 

@@ -481,6 +481,17 @@ func (c *Client) Login(ctx context.Context) (string, error) {
 // for what it may have made reaches back.
 const FilingSkew = 2 * time.Minute
 
+// FilingStale is the age (by GitHub's clock) past which a filing marker no
+// longer stops a new filing: a lookup that can't find or rule out what it may
+// have made files again rather than failing. meta's intake catches a duplicate,
+// and a marker nothing on the page can clear would block the book for good.
+const FilingStale = 24 * time.Hour
+
+// StaleFiling reports whether a marker set at since is past FilingStale at now.
+func StaleFiling(now, since time.Time) bool {
+	return !since.IsZero() && now.Sub(since) > FilingStale
+}
+
 // NormalizeBody is an issue body as sent or as GitHub lists it, comparable: the
 // list can answer CRLF line ends and trims.
 func NormalizeBody(body string) string {

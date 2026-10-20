@@ -215,11 +215,16 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 	rep.Progress(jobs.Progress{Step: "filing", Message: "Filing the corrections", Done: 1, Total: 2})
 	if interrupted {
 		filed, found, err := h.filedSince(ctx, cli, since, body)
-		if err != nil {
+		switch {
+		case err != nil && !contrib.StaleFiling(cli.Now(ctx), since):
 			h.o.Log.Warn("correct: looking for an interrupted run's issue failed", "job", job.ID, "err", err)
 			return nil, errFiledBefore
-		}
-		if found {
+		case err != nil:
+			// Over a day old (contrib.FilingStale): file again rather than block the
+			// job for good; meta's intake catches a duplicate batch.
+			h.o.Log.Warn("correct: an interrupted run's issue can't be found or ruled out, and its marker is "+
+				"over a day old: filing again", "job", job.ID, "err", err)
+		case found:
 			h.o.Log.Info("correct: an interrupted run had filed the corrections", "job", job.ID, "issue", filed.Number)
 			return h.done(ctx, job, key, contrib.Issue{Number: filed.Number, URL: filed.URL}, mapped, rep), nil
 		}

@@ -425,3 +425,81 @@ func TestShareAfterARefusalFilesWithoutLooking(t *testing.T) {
 		t.Fatalf("issues = %d, list calls = %d", gh.issueCount(), gh.listCalls)
 	}
 }
+
+// A marker's age by GitHub's clock: just under a day, a lookup that can't rule
+// the issue out stops the share; just over (contrib.FilingStale), it files again.
+func TestShareStaleIssueMarkerFilesAgain(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		age   time.Duration
+		files bool
+	}{
+		{"under a day", contrib.FilingStale - time.Hour, false},
+		{"over a day", contrib.FilingStale + time.Hour, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			ctx := context.Background()
+			_, gh, exe, b := shareFixture(t, baseChars("x"))
+			if err := exe.writeFiling(ctx, b.ID, store.ContribKindCharacters, filing{Login: "kodestar",
+				IssueSince: time.Now().Add(-c.age).UTC(), Issue: "an issue the list can't reach"}); err != nil {
+				t.Fatal(err)
+			}
+			gh.mu.Lock()
+			gh.listFull = true
+			gh.mu.Unlock()
+			_, err := exe.Share(ctx, b.ID, "reacher-01", nil)
+			if c.files {
+				if err != nil || gh.issueCount() != 1 {
+					t.Fatalf("err = %v, issues %d", err, gh.issueCount())
+				}
+				return
+			}
+			if !errors.Is(err, ErrFilingUnknown) || gh.issueCount() != 0 {
+				t.Fatalf("err = %v, issues %d", err, gh.issueCount())
+			}
+		})
+	}
+}
+
+// The same for a gist's marker: over a day old, another gist is made.
+func TestShareStaleGistMarkerMakesAnother(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		age   time.Duration
+		files bool
+	}{
+		{"under a day", contrib.FilingStale - time.Hour, false},
+		{"over a day", contrib.FilingStale + time.Hour, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			ctx := context.Background()
+			_, gh, exe, b := shareFixture(t, hugeChars())
+			gh.lostGists = 1
+			if _, err := exe.Share(ctx, b.ID, "reacher-01", nil); err == nil {
+				t.Fatal("a lost gist answer should fail the share")
+			}
+			f, err := exe.readFiling(ctx, b.ID, store.ContribKindCharacters)
+			if err != nil || f.GistSince.IsZero() {
+				t.Fatalf("marker %+v %v", f, err)
+			}
+			f.GistSince = time.Now().Add(-c.age).UTC()
+			if err := exe.writeFiling(ctx, b.ID, store.ContribKindCharacters, f); err != nil {
+				t.Fatal(err)
+			}
+			gh.mu.Lock()
+			gh.gistList = nil // the lost gist isn't on the page the list answers
+			gh.gistFull = true
+			gh.mu.Unlock()
+			_, err = exe.Share(ctx, b.ID, "reacher-01", nil)
+			if c.files {
+				if err != nil || gh.gists != 2 || gh.issueCount() != 1 {
+					t.Fatalf("err = %v, gists %d, issues %d", err, gh.gists, gh.issueCount())
+				}
+				return
+			}
+			if !errors.Is(err, ErrFilingUnknown) || gh.gists != 1 || gh.issueCount() != 0 {
+				t.Fatalf("err = %v, gists %d, issues %d", err, gh.gists, gh.issueCount())
+			}
+		})
+	}
+}
