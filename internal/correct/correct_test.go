@@ -305,19 +305,91 @@ func keyOf(t *testing.T, raw string) string {
 	return New(Options{ServerID: func() string { return "srv-1" }}).filingKey(p)
 }
 
-// The filing marker is the request's: the same corrections share it whichever
-// job (or book, which may have moved) asks and whatever the server stamps as the
-// source; other corrections don't.
+// The filing marker is the request's: the record and the changes. The same
+// corrections share it whichever job (or book, which may have moved) asks,
+// however they are ordered, whatever the evidence, the source stamp, the region
+// or the community's current values say; other corrections, or the same ones
+// for another record, don't.
 func TestCorrectFilingKey(t *testing.T) {
 	key := keyOf(t, params)
 	if !strings.HasPrefix(key, "meta.correct.filing/srv-1/") {
 		t.Fatalf("key = %q", key)
 	}
-	if got := keyOf(t, strings.Replace(params, "audiosilo-server/2.4.0", "audiosilo-server/2.5.0", 1)); got != key {
-		t.Fatalf("another source stamp: %q, want %q", got, key)
+	reordered := `{"work_id":"existing-work","asin":"B000000001","region":"us",
+ "changes":[{"field":"published","current":"","corrected":"2020-03-04"},
+            {"field":"title","current":"Existing Work","corrected":"The Existing Work"},
+            {"field":"author","current":"Jane Doe","corrected":"Jane Doe, John Smith"}],
+ "evidence":"Edited by the server admin.","source":"audiosilo-server/2.4.0"}`
+	for name, raw := range map[string]string{
+		"another source stamp": strings.Replace(params, "audiosilo-server/2.4.0", "audiosilo-server/2.5.0", 1),
+		"other evidence":       strings.Replace(params, "Edited by the server admin.", "Bearbeitet vom Admin des Servers 2.5.0.", 1),
+		"another region":       strings.Replace(params, `"region":"us"`, `"region":"uk"`, 1),
+		"another current":      strings.Replace(params, `"current":"Jane Doe"`, `"current":"Jane Doe, J. Smith"`, 1),
+		"reordered":            reordered,
+	} {
+		if got := keyOf(t, raw); got != key {
+			t.Errorf("%s: %q, want %q", name, got, key)
+		}
 	}
-	if got := keyOf(t, strings.Replace(params, `"corrected":"2020-03-04"`, `"corrected":"2020-03-05"`, 1)); got == key {
-		t.Fatal("other corrections share the marker")
+	for name, raw := range map[string]string{
+		"another corrected value": strings.Replace(params, `"corrected":"2020-03-04"`, `"corrected":"2020-03-05"`, 1),
+		"another field":           strings.Replace(params, `"field":"published"`, `"field":"isbn"`, 1),
+		"another work":            strings.Replace(params, `"work_id":"existing-work"`, `"work_id":"other-work"`, 1),
+		"another recording":       strings.Replace(params, `"asin":"B000000001"`, `"asin":"B000000002"`, 1),
+		"a change fewer": strings.Replace(params, `,
+            {"field":"published","current":"","corrected":"2020-03-04"}`, "", 1),
+	} {
+		if got := keyOf(t, raw); got == key {
+			t.Errorf("%s shares the marker", name)
+		}
+	}
+}
+
+// The console fills the evidence afresh each time it opens (a default line
+// naming the server's version, in the admin's language), so the same
+// corrections suggested again after a lost answer usually carry other evidence,
+// and may come in another order: the new job adopts the issue the lost answer
+// made (the marker's sum), not a second one. Once that filing is confirmed its
+// marker is gone, so suggesting them again files again; another corrected value
+// is another request, filed beside a lost one's marker.
+func TestCorrectAdoptsTheLostIssueWithOtherEvidence(t *testing.T) {
+	ctx := context.Background()
+	g, kv := &gh{drop: true}, &memKV{m: map[string]string{}}
+	h := newHandler(t, g, &tokens{token: "t", from: contrib.FromEnv}, kv, fakeMeta{cov: cov()})
+	if _, err := h.Run(ctx, jobs.Job{ID: 20, Params: json.RawMessage(params)}, jobs.LocalReporter()); !errors.Is(err, errNoAnswer) || g.count() != 1 {
+		t.Fatalf("lost answer: %v, issues %d", err, g.count())
+	}
+	g.mu.Lock()
+	g.drop = false
+	g.mu.Unlock()
+	again := `{"work_id":"existing-work","asin":"B000000001",
+ "changes":[{"field":"published","current":"","corrected":"2020-03-04"},
+            {"field":"author","current":"Jane Doe","corrected":"Jane Doe, John Smith"},
+            {"field":"title","current":"Existing Work","corrected":"The Existing Work"}],
+ "evidence":"Corrigé par l'administrateur du serveur.","source":"audiosilo-server/2.5.0"}`
+	out, err := h.Run(ctx, jobs.Job{ID: 21, Params: json.RawMessage(again)}, jobs.LocalReporter())
+	if err != nil || g.count() != 1 || out.(Result).IssueNumber != 42 || len(kv.markers()) != 0 {
+		t.Fatalf("other evidence: %+v %v, issues %d, markers %v", out, err, g.count(), kv.markers())
+	}
+	// Confirmed: the same corrections suggested once more file again.
+	if out, err := h.Run(ctx, jobs.Job{ID: 22, Params: json.RawMessage(again)}, jobs.LocalReporter()); err != nil ||
+		g.count() != 2 || out.(Result).IssueNumber != 43 {
+		t.Fatalf("after a confirmed filing: %+v %v, issues %d", out, err, g.count())
+	}
+	// Another corrected value is another request: a lost one's marker doesn't stop it.
+	g.mu.Lock()
+	g.drop = true
+	g.mu.Unlock()
+	if _, err := h.Run(ctx, jobs.Job{ID: 23, Params: json.RawMessage(params)}, jobs.LocalReporter()); !errors.Is(err, errNoAnswer) || g.count() != 3 {
+		t.Fatalf("second lost answer: %v, issues %d", err, g.count())
+	}
+	g.mu.Lock()
+	g.drop = false
+	g.mu.Unlock()
+	changed := strings.Replace(params, `"corrected":"2020-03-04"`, `"corrected":"2020-03-05"`, 1)
+	if out, err := h.Run(ctx, jobs.Job{ID: 24, Params: json.RawMessage(changed)}, jobs.LocalReporter()); err != nil ||
+		g.count() != 4 || out.(Result).IssueNumber != 45 || kv.markers()[keyOf(t, params)] == "" {
+		t.Fatalf("another corrected value: %+v %v, issues %d, markers %v", out, err, g.count(), kv.markers())
 	}
 }
 

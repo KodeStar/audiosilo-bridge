@@ -3,11 +3,12 @@
 // database's core repo as ONE correction-batch issue with the Bridge's GitHub
 // sign-in. It writes nothing into the library and runs no agent: it maps the
 // server's fields onto meta's records (contrib.CorrectionBatchIssue), files the
-// issue and reports where it is. A filing is guarded per REQUEST (what the admin
-// asked to file), not per job: a marker written before the issue is opened
-// (meta.correct.filing/<server>/<request>) makes the next job asking for the same
-// corrections, or this one resumed, look for what the interrupted filing made
-// first: its issue is adopted (as sent, whatever the community record says now),
+// issue and reports where it is. A filing is guarded per REQUEST (the changes the
+// admin asked for, whatever the evidence says), not per job: a marker written
+// before the issue is opened (meta.correct.filing/<server>/<request>) makes the
+// next job asking for the same corrections, or this one resumed, look for what
+// the interrupted filing made first: its issue is adopted (as sent, whatever the
+// community record or the evidence says now),
 // an issue for the same record it can't account for stops it once for a person to
 // decide, and it files again only when the list holds neither (or can't reach
 // back to a marker over a day old).
@@ -15,6 +16,7 @@ package correct
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -23,6 +25,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -198,14 +201,38 @@ func (h *Handler) resultKey(job jobs.Job) string {
 	return "meta.correct/" + h.o.ServerID() + "/" + strconv.FormatInt(job.ID, 10)
 }
 
-// filingKey is the request's: the sha256 of the params less the server's source
-// stamp. What the admin asked to file, not the book (which can move) or the
-// composed issue (whose title is the work's live title, which a filed title
-// correction changes), so the same corrections suggested again, or this job
-// resumed, find the marker, and other corrections never share or overwrite it.
+// filingKey is the request's: what the admin asked to change, nothing more.
+// The sha256 of the record the changes address (the work, and the recording id
+// or the ASIN and ISBN that pick one) and the changes as a set (each field and
+// its corrected value, sorted). Not the evidence (the console fills it with a
+// default line naming the server's version, in the admin's language, each time
+// its dialog opens), the source stamp or the region; not each change's current
+// value (it moves when the community applies a fix); not the book (which can
+// move) nor the composed issue (whose title is the work's live title). So the
+// same corrections suggested again, reworded or reordered, or this job resumed,
+// find the marker, and other corrections never share or overwrite it. Markers
+// written under the earlier key (the params less the source) are never read
+// again.
 func (h *Handler) filingKey(p Params) string {
-	p.Source = ""
-	raw, _ := json.Marshal(p) // strings only: it can't fail
+	type change struct {
+		Field     string `json:"field"`
+		Corrected string `json:"corrected"`
+	}
+	changes := make([]change, len(p.Changes))
+	for i, c := range p.Changes {
+		changes[i] = change{strings.TrimSpace(c.Field), strings.TrimSpace(c.Corrected)}
+	}
+	slices.SortFunc(changes, func(a, b change) int {
+		return cmp.Or(strings.Compare(a.Field, b.Field), strings.Compare(a.Corrected, b.Corrected))
+	})
+	raw, _ := json.Marshal(struct { // strings only: it can't fail
+		WorkID      string   `json:"work_id"`
+		RecordingID string   `json:"recording_id"`
+		ASIN        string   `json:"asin"`
+		ISBN        string   `json:"isbn"`
+		Changes     []change `json:"changes"`
+	}{strings.TrimSpace(p.WorkID), strings.TrimSpace(p.RecordingID), strings.ToUpper(strings.TrimSpace(p.ASIN)),
+		normISBN(p.ISBN), changes})
 	sum := sha256.Sum256(raw)
 	return "meta.correct.filing/" + h.o.ServerID() + "/" + hex.EncodeToString(sum[:])
 }
@@ -369,7 +396,8 @@ func recordSection(body string) string {
 // filedSince looks for what an interrupted filing of the request made: a
 // correction batch made since the marker (less contrib.FilingSkew) with the
 // job's own sum, or the marker's (the request as it was composed then: the title
-// is the work's live title, and the recording comes from the live record), first
+// is the work's live title, the recording comes from the live record, and the
+// evidence and source stamp may have been reworded since), first
 // among the issues read even when a later page failed. With neither, a batch for
 // the same record with another sum is an otherBatch, a list that failed or can't
 // reach back is that error (contrib.ErrListIncomplete), and a marker under
