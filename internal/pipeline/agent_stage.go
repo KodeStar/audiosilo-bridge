@@ -70,10 +70,12 @@ func budgetExceededMsg(spent, budget float64) string {
 }
 
 // monthlyBudgetExceededMsg is the park reason when this month's agent spend across
-// every book reached agent.monthly_budget_usd.
+// every book reached agent.monthly_budget_usd. A budget raised on the Settings tab
+// re-admits the book itself; one the environment sets takes a restart and a Retry.
 func monthlyBudgetExceededMsg(spent, budget float64, resume time.Time) string {
 	return fmt.Sprintf("this month's agent cost $%.2f reached the monthly budget $%.2f - the book resumes on %s, "+
-		"or raise agent.monthly_budget_usd (restart to apply) and Retry", spent, budget, resume.Format("2 January 2006"))
+		"or once the monthly budget is raised on the Bridge's Settings tab (when AUDIOSILO_BRIDGE_AGENT_MONTHLY_BUDGET_USD "+
+		"sets it, raise that, restart, then Retry)", spent, budget, resume.Format("2 January 2006"))
 }
 
 // checkMonthlyBudget is the monthly half of runAgent's budget preflight: when this

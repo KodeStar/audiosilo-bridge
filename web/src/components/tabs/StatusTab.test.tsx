@@ -151,7 +151,9 @@ describe('StatusTab', () => {
     );
     expect(within(card).getByText('Deleted as soon as the job ends')).toBeInTheDocument();
     expect(
-      within(card).getByText(/monthly budget is set on the Settings tab and applies straight away/),
+      within(card).getByText(
+        /monthly budget is set on the Settings tab, where a change applies straight away/,
+      ),
     ).toBeInTheDocument();
     expect(within(card).getByText(/^whisper-cpp \(cpu\) on the Bridge/)).toBeInTheDocument();
     expect(

@@ -128,7 +128,8 @@ function SetupCard({ status }: { status: Status }) {
 }
 
 // EngineCard shows the sidecars engine: the agent container, speech recognition,
-// the budgets and the transcript retention (all set in config.yaml).
+// the budgets and the transcript retention (the monthly budget set on the Settings
+// tab, the rest in config.yaml).
 function EngineCard({ client }: { client: ApiClient }) {
   const { data: engine, error } = useLoad(() => client.engine(), ENGINE_POLL_MS);
   if (!engine) {
@@ -197,10 +198,11 @@ function EngineCard({ client }: { client: ApiClient }) {
         <Row label="Per book">{`Up to ${usd(engine.book_budget_usd)} of agent use`}</Row>
         <Row label="Transcripts">{retentionText(engine.transcript_retention_days)}</Row>
       </dl>
-      <p className="mt-3 text-xs text-dim">
-        The monthly budget is set on the Settings tab and applies straight away. The per-book budget
-        and the transcript retention are set in the Bridge&apos;s config.yaml
-        (agent.book_budget_usd, transcripts.retention_days) and apply at the next start.
+      <p className="mt-3 break-words text-xs text-dim">
+        The monthly budget is set on the Settings tab, where a change applies straight away (when
+        AUDIOSILO_BRIDGE_AGENT_MONTHLY_BUDGET_USD sets it, change that instead: it applies at the
+        next start). The per-book budget and the transcript retention are set in the Bridge&apos;s
+        config.yaml (agent.book_budget_usd, transcripts.retention_days) and apply at the next start.
       </p>
     </Card>
   );

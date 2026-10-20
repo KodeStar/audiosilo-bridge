@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"slices"
@@ -91,6 +92,11 @@ type Client struct {
 	// login caches Login's answer (the token's user doesn't change).
 	loginMu sync.Mutex
 	login   string
+	// ahead is how far the Bridge's clock ran ahead of the Date of GitHub's
+	// last answer (dated: there was one), for Now.
+	clockMu sync.Mutex
+	ahead   time.Duration
+	dated   bool
 }
 
 // AppFiled reports whether the Client's issues are filed through the GitHub App
@@ -179,11 +185,43 @@ func (c *Client) doOnce(ctx context.Context, accept, method, path string, payloa
 		return nil, nil, 0, fmt.Errorf("contrib: %s %s: %w", method, path, err)
 	}
 	defer resp.Body.Close()
+	c.noteDate(resp.Header.Get("Date"))
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
 	if err != nil {
 		return nil, nil, 0, fmt.Errorf("contrib: read response: %w", err)
 	}
 	return respBody, resp.Header, resp.StatusCode, nil
+}
+
+// noteDate records how far the Bridge's clock runs ahead of GitHub's from an
+// answer's Date (whole seconds, so it reads up to a second more: a time taken
+// from Now is that much early, never late).
+func (c *Client) noteDate(date string) {
+	at, err := http.ParseTime(date)
+	if err != nil {
+		return
+	}
+	ahead := time.Since(at)
+	c.clockMu.Lock()
+	c.ahead, c.dated = ahead, true
+	c.clockMu.Unlock()
+}
+
+// Now is GitHub's clock as near as the Client can tell, for a time compared
+// with GitHub's created_at later: the Bridge's clock less how far it ran ahead
+// of the Date of GitHub's last answer. A Client that has had none asks first
+// (GET /rate_limit, which costs no rate limit); the Bridge's own clock when that
+// fails too.
+func (c *Client) Now(ctx context.Context) time.Time {
+	c.clockMu.Lock()
+	dated := c.dated
+	c.clockMu.Unlock()
+	if !dated {
+		_, _, _ = c.request(ctx, http.MethodGet, "/rate_limit", nil, http.StatusOK)
+	}
+	c.clockMu.Lock()
+	defer c.clockMu.Unlock()
+	return time.Now().Add(-c.ahead).UTC()
 }
 
 // setHeaders applies the GitHub API headers and (when present) the bearer token.
@@ -316,54 +354,87 @@ type FiledIssue struct {
 	CreatedAt time.Time
 }
 
-// IssuesPage is how many issues IssuesSince reads (one page).
+// maxListPages bounds how many pages a lookup reads (one GET each).
+const maxListPages = 20
+
+// ErrListIncomplete is a lookup whose list holds more since its time than the
+// Bridge reads (maxListPages pages): what it looks for can't be ruled out.
+var ErrListIncomplete = errors.New("more were made since than the Bridge reads back")
+
+// eachRow reads a list endpoint (path?q) page by page, perPage rows a page, and
+// hands each row to row until a short page (the list's end) or a page on which
+// row reported one past the window (a list sorted newest first reaches back no
+// further). complete is false when maxListPages pages ran out first.
+func eachRow[T any](ctx context.Context, c *Client, path string, q url.Values, perPage int, row func(T) (past bool)) (complete bool, err error) {
+	q.Set("per_page", strconv.Itoa(perPage))
+	for page := 1; page <= maxListPages; page++ {
+		q.Set("page", strconv.Itoa(page))
+		respBody, _, err := c.request(ctx, http.MethodGet, path+"?"+q.Encode(), nil, http.StatusOK)
+		if err != nil {
+			return false, err
+		}
+		var rows []T
+		if err := json.Unmarshal(respBody, &rows); err != nil {
+			return false, fmt.Errorf("contrib: decode %s: %w", path, err)
+		}
+		past := false
+		for _, r := range rows {
+			past = row(r) || past
+		}
+		if past || len(rows) < perPage {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// IssuesPage is how many issues a page of the issue list holds (a body runs to
+// 64 KB, so fewer than the 100 GitHub serves).
 const IssuesPage = 50
 
 // IssuesSince lists repo's issues (pull requests left out) created at or after
-// since, newest first, from one page of IssuesPage: complete is false when that
-// page may not reach back to since. The list reads GitHub's own store, so an
-// issue made a moment ago is in it (search lags behind).
+// since, newest first, reading back page by page: complete is false when
+// maxListPages pages don't reach back to since. The list reads GitHub's own
+// store, so an issue made a moment ago is in it (search lags behind).
 func (c *Client) IssuesSince(ctx context.Context, repo string, since time.Time) (issues []FiledIssue, complete bool, err error) {
 	return c.IssuesSinceBy(ctx, repo, since, "")
 }
 
+// issueRow is one row of a repo's issue list (pull requests included).
+type issueRow struct {
+	Number      int             `json:"number"`
+	HTMLURL     string          `json:"html_url"`
+	Title       string          `json:"title"`
+	Body        *string         `json:"body"`
+	CreatedAt   time.Time       `json:"created_at"`
+	PullRequest json.RawMessage `json:"pull_request"`
+}
+
 // IssuesSinceBy is IssuesSince narrowed to the issues creator opened ("" for
-// anyone's), so one page reaches back much further.
+// anyone's), so the pages reach back much further.
 func (c *Client) IssuesSinceBy(ctx context.Context, repo string, since time.Time, creator string) (issues []FiledIssue, complete bool, err error) {
+	// since filters on updated_at; sorted by creation, the first row made before
+	// it ends the window.
 	q := url.Values{"state": {"all"}, "sort": {"created"}, "direction": {"desc"},
-		"per_page": {strconv.Itoa(IssuesPage)}, "since": {since.UTC().Format(time.RFC3339)}}
+		"since": {since.UTC().Format(time.RFC3339)}}
 	if creator != "" {
 		q.Set("creator", creator)
 	}
-	respBody, _, err := c.request(ctx, http.MethodGet, "/repos/"+repo+"/issues?"+q.Encode(), nil, http.StatusOK)
+	complete, err = eachRow(ctx, c, "/repos/"+repo+"/issues", q, IssuesPage, func(r issueRow) bool {
+		if r.CreatedAt.Before(since) {
+			return true
+		}
+		if len(r.PullRequest) == 0 {
+			body := ""
+			if r.Body != nil {
+				body = *r.Body
+			}
+			issues = append(issues, FiledIssue{Number: r.Number, URL: r.HTMLURL, Title: r.Title, Body: body, CreatedAt: r.CreatedAt})
+		}
+		return false
+	})
 	if err != nil {
 		return nil, false, err
-	}
-	var rows []struct {
-		Number      int             `json:"number"`
-		HTMLURL     string          `json:"html_url"`
-		Title       string          `json:"title"`
-		Body        *string         `json:"body"`
-		CreatedAt   time.Time       `json:"created_at"`
-		PullRequest json.RawMessage `json:"pull_request"`
-	}
-	if err := json.Unmarshal(respBody, &rows); err != nil {
-		return nil, false, fmt.Errorf("contrib: decode issues: %w", err)
-	}
-	complete = len(rows) < IssuesPage
-	for _, r := range rows {
-		if r.CreatedAt.Before(since) {
-			complete = true // the page reaches back past since
-			continue
-		}
-		if len(r.PullRequest) > 0 {
-			continue
-		}
-		body := ""
-		if r.Body != nil {
-			body = *r.Body
-		}
-		issues = append(issues, FiledIssue{Number: r.Number, URL: r.HTMLURL, Title: r.Title, Body: body, CreatedAt: r.CreatedAt})
 	}
 	return issues, complete, nil
 }
@@ -406,8 +477,8 @@ func (c *Client) Login(ctx context.Context) (string, error) {
 	return r.Login, nil
 }
 
-// FilingSkew is how far before a filing marker's time a lookup for what it may
-// have made reaches back (the Bridge's clock against GitHub's created_at).
+// FilingSkew is how far before a filing marker's time (taken from Now) a lookup
+// for what it may have made reaches back.
 const FilingSkew = 2 * time.Minute
 
 // NormalizeBody is an issue body as sent or as GitHub lists it, comparable: the
@@ -416,75 +487,71 @@ func NormalizeBody(body string) string {
 	return strings.TrimSpace(strings.ReplaceAll(body, "\r\n", "\n"))
 }
 
-// NothingFiled reports whether err is GitHub refusing a create call outright (a
-// 4xx answer, a rate limit), so nothing was made. Any other error (a server
-// error, which can come after the issue or gist was made, a timeout, a lost
-// answer) may have made it.
+// NothingFiled reports whether err rules out that a create call made anything:
+// GitHub refused it outright (a 4xx answer, a rate limit), or the request never
+// left (no connection was made: the name didn't resolve, the dial failed). Any
+// other error (a server error, which can come after the issue or gist was made,
+// a timeout, a lost answer) may have made it.
 func NothingFiled(err error) bool {
 	var apiErr *APIError
 	var rateErr *RateLimitError
-	return (errors.As(err, &apiErr) && apiErr.Status < http.StatusInternalServerError) || errors.As(err, &rateErr)
-}
-
-// GistFile is one file of a gist as the gist list shows it.
-type GistFile struct {
-	RawURL string
-	Size   int
+	var opErr *net.OpError
+	return (errors.As(err, &apiErr) && apiErr.Status < http.StatusInternalServerError) || errors.As(err, &rateErr) ||
+		(errors.As(err, &opErr) && (opErr.Op == "dial" || opErr.Op == "proxyconnect"))
 }
 
 // Gist is one of the user's gists as the gist list shows it.
 type Gist struct {
-	ID        string
-	CreatedAt time.Time
-	Files     map[string]GistFile
+	ID          string
+	Description string
+	CreatedAt   time.Time
+	Files       map[string]string // file name -> raw URL
 }
 
-// GistsPage is how many gists GistsSince reads (one page).
-const GistsPage = 50
+// GistsPage is how many gists a page of the gist list holds (the most GitHub
+// serves).
+const GistsPage = 100
 
-// GistsSince lists the user's gists created at or after since, from one page of
-// GistsPage (the list is newest first): complete is false when that page may not
-// reach back to since.
+// gistRow is one row of the user's gist list.
+type gistRow struct {
+	ID          string    `json:"id"`
+	Description string    `json:"description"`
+	CreatedAt   time.Time `json:"created_at"`
+	Files       map[string]struct {
+		RawURL string `json:"raw_url"`
+	} `json:"files"`
+}
+
+// GistsSince lists the user's gists created at or after since. The list's order
+// isn't documented, so it is read to its end (since narrows it to the gists
+// updated since): complete is false when maxListPages pages don't reach it.
 func (c *Client) GistsSince(ctx context.Context, since time.Time) (gists []Gist, complete bool, err error) {
-	q := url.Values{"per_page": {strconv.Itoa(GistsPage)}, "since": {since.UTC().Format(time.RFC3339)}}
-	respBody, _, err := c.request(ctx, http.MethodGet, "/gists?"+q.Encode(), nil, http.StatusOK)
+	q := url.Values{"since": {since.UTC().Format(time.RFC3339)}}
+	complete, err = eachRow(ctx, c, "/gists", q, GistsPage, func(r gistRow) bool {
+		if !r.CreatedAt.Before(since) {
+			g := Gist{ID: r.ID, Description: r.Description, CreatedAt: r.CreatedAt, Files: make(map[string]string, len(r.Files))}
+			for name, f := range r.Files {
+				g.Files[name] = f.RawURL
+			}
+			gists = append(gists, g)
+		}
+		return false
+	})
 	if err != nil {
 		return nil, false, err
-	}
-	var rows []struct {
-		ID        string    `json:"id"`
-		CreatedAt time.Time `json:"created_at"`
-		Files     map[string]struct {
-			RawURL string `json:"raw_url"`
-			Size   int    `json:"size"`
-		} `json:"files"`
-	}
-	if err := json.Unmarshal(respBody, &rows); err != nil {
-		return nil, false, fmt.Errorf("contrib: decode gists: %w", err)
-	}
-	complete = len(rows) < GistsPage
-	for _, r := range rows {
-		if r.CreatedAt.Before(since) {
-			complete = true // the page reaches back past since
-			continue
-		}
-		g := Gist{ID: r.ID, CreatedAt: r.CreatedAt, Files: make(map[string]GistFile, len(r.Files))}
-		for name, f := range r.Files {
-			g.Files[name] = GistFile{RawURL: f.RawURL, Size: f.Size}
-		}
-		gists = append(gists, g)
 	}
 	return gists, complete, nil
 }
 
-// CreateGist uploads files (filename -> content) as a gist and returns their raw
-// URLs (filename -> raw_url). secret=true makes the gist unlisted.
-func (c *Client) CreateGist(ctx context.Context, files map[string]string, secret bool) (map[string]string, error) {
+// CreateGist uploads files (filename -> content) as a gist with description and
+// returns their raw URLs (filename -> raw_url). secret=true makes the gist
+// unlisted.
+func (c *Client) CreateGist(ctx context.Context, description string, files map[string]string, secret bool) (map[string]string, error) {
 	fm := make(map[string]map[string]string, len(files))
 	for name, content := range files {
 		fm[name] = map[string]string{"content": content}
 	}
-	reqBody := map[string]any{"public": !secret, "files": fm}
+	reqBody := map[string]any{"description": description, "public": !secret, "files": fm}
 	respBody, _, err := c.request(ctx, http.MethodPost, "/gists", reqBody, http.StatusCreated)
 	if err != nil {
 		return nil, err

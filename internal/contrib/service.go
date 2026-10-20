@@ -193,7 +193,9 @@ func (s *Service) SubmitCore(ctx context.Context, book store.Book, p CoreProposa
 
 	// Persist the row IMMEDIATELY after CreateIssue succeeds, BEFORE the park flip, so a
 	// crash between the two loses nothing: a resubmit finds the recorded issue and reuses
-	// it (the idempotent-reuse branch above) instead of opening a duplicate.
+	// it (the idempotent-reuse branch above) instead of opening a duplicate. A replaced
+	// row loses its intake-PR pointer (the upsert keeps it only for the same issue), so
+	// the poller follows the new issue.
 	row, err := s.deps.DB.UpsertContribution(ctx, store.Contribution{
 		BookID: book.ID,
 		Kind:   store.ContribKindCore,
@@ -205,14 +207,6 @@ func (s *Service) SubmitCore(ctx context.Context, book store.Book, p CoreProposa
 	})
 	if err != nil {
 		return store.Contribution{}, fmt.Errorf("contrib: record core row: %w", err)
-	}
-	// The upsert keeps a replaced row's intake-PR pointer: clear it, or the poller
-	// would follow the settled row's old PR instead of the new issue.
-	if hasExisting && (row.PRNumber != 0 || row.PRURL != "") {
-		if err := s.deps.DB.SetContributionStatus(ctx, row.ID, row.Status, 0, "", row.Note); err != nil {
-			return store.Contribution{}, fmt.Errorf("contrib: reset core row: %w", err)
-		}
-		row.PRNumber, row.PRURL = 0, ""
 	}
 
 	// Flip the park core_needed -> core_pending (state stays contributing, status

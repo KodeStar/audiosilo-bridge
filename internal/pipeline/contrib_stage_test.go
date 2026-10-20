@@ -54,15 +54,17 @@ type createdIssue struct {
 	title   string
 	body    string
 	labels  []string
+	author  string // the login that opened it
 	created time.Time
 }
 
 // createdGist is a gist the fake made.
 type createdGist struct {
 	id      string
+	desc    string
 	file    string
 	raw     string
-	size    int
+	author  string
 	created time.Time
 }
 
@@ -74,7 +76,7 @@ type fakeGitHub struct {
 
 	mu         sync.Mutex
 	issues     []createdIssue
-	gists      int
+	gists      int // gist creations (lost ones included)
 	gistList   []createdGist
 	dropLabels bool // GET issue omits the routing labels (non-collaborator drop)
 	rateLimit  bool // creation calls return a 403 rate-limit
@@ -82,8 +84,14 @@ type fakeGitHub struct {
 	// drops before the answer (a POST that outlives the client's timeout).
 	lostIssues int
 	lostGists  int
-	listCalls  int  // issue list reads
-	listFull   bool // the issue list answers a full page of other issues
+	login      string        // the signed-in user ("kodestar" when unset)
+	offset     time.Duration // GitHub's clock against the test's (Date, created_at)
+	listCalls  int           // issue list pages read
+	gistCalls  int           // gist list pages read
+	// listFull / gistFull: the list holds more made since than the Bridge reads
+	// back (every page is full of others).
+	listFull bool
+	gistFull bool
 }
 
 // testCommunityRepo is the repository the stage contributes sidecars to.
@@ -96,10 +104,40 @@ func newFakeGitHub(t *testing.T) *fakeGitHub {
 	return g
 }
 
+// now is the fake GitHub's clock.
+func (g *fakeGitHub) now() time.Time { return time.Now().Add(g.offset).UTC() }
+
+// user is the signed-in user's login.
+func (g *fakeGitHub) user() string {
+	if g.login == "" {
+		return "kodestar"
+	}
+	return g.login
+}
+
+// paged is the page of rows a list request asks for (per_page, page).
+func paged(r *http.Request, rows []map[string]any) []map[string]any {
+	per, _ := strconv.Atoi(r.URL.Query().Get("per_page"))
+	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+	per, page = max(per, 1), max(page, 1)
+	return rows[min((page-1)*per, len(rows)):min(page*per, len(rows))]
+}
+
+// fullPage is a whole page of rows the Bridge looks past (row(i) the i-th).
+func fullPage(r *http.Request, row func(i int) map[string]any) []map[string]any {
+	per, _ := strconv.Atoi(r.URL.Query().Get("per_page"))
+	rows := make([]map[string]any, 0, per)
+	for i := range per {
+		rows = append(rows, row(i))
+	}
+	return rows
+}
+
 func (g *fakeGitHub) handle(w http.ResponseWriter, r *http.Request) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	path := r.URL.Path
+	w.Header().Set("Date", g.now().Format(http.TimeFormat))
 
 	// Rate-limit creation calls (never GETs) when configured.
 	if g.rateLimit && r.Method == http.MethodPost {
@@ -120,7 +158,7 @@ func (g *fakeGitHub) handle(w http.ResponseWriter, r *http.Request) {
 		num := len(g.issues) + 1
 		repo := strings.TrimSuffix(strings.TrimPrefix(path, "/repos/"), "/issues")
 		g.issues = append(g.issues, createdIssue{repo: repo, number: num, title: req.Title, body: req.Body,
-			labels: req.Labels, created: time.Now().UTC()})
+			labels: req.Labels, author: g.user(), created: g.now()})
 		if g.lostIssues > 0 {
 			g.lostIssues--
 			g.drop(w)
@@ -129,35 +167,47 @@ func (g *fakeGitHub) handle(w http.ResponseWriter, r *http.Request) {
 		g.writeIssue(w, http.StatusCreated, num, req.Labels)
 
 	case r.Method == http.MethodGet && path == "/user":
-		g.writeJSON(w, http.StatusOK, map[string]string{"login": "kodestar"})
+		g.writeJSON(w, http.StatusOK, map[string]string{"login": g.user()})
 
 	case r.Method == http.MethodGet && strings.HasSuffix(path, "/issues"):
 		g.listCalls++
-		if r.URL.Query().Get("creator") != "kodestar" {
+		creator := r.URL.Query().Get("creator")
+		if creator == "" {
 			g.t.Errorf("fakeGitHub: issue list without the creator: %s", r.URL.RawQuery)
 		}
-		rows := []map[string]any{}
 		if g.listFull {
-			for i := range contrib.IssuesPage {
-				rows = append(rows, map[string]any{"number": 1000 + i, "title": "other", "body": "",
-					"created_at": time.Now().UTC().Format(time.RFC3339), "html_url": "x"})
+			g.writeJSON(w, http.StatusOK, fullPage(r, func(i int) map[string]any {
+				return map[string]any{"number": 1000 + i, "title": "other", "body": "",
+					"created_at": g.now().Format(time.RFC3339), "html_url": "x"}
+			}))
+			return
+		}
+		rows := []map[string]any{}
+		for i := len(g.issues) - 1; i >= 0; i-- {
+			if is := g.issues[i]; is.author == creator {
+				rows = append(rows, map[string]any{"number": is.number, "title": is.title, "body": is.body,
+					"created_at": is.created.Format(time.RFC3339), "html_url": g.srv.URL + fmt.Sprintf("/issue/%d", is.number)})
 			}
 		}
-		for i := len(g.issues) - 1; i >= 0; i-- {
-			is := g.issues[i]
-			rows = append(rows, map[string]any{"number": is.number, "title": is.title, "body": is.body,
-				"created_at": is.created.Format(time.RFC3339), "html_url": g.srv.URL + fmt.Sprintf("/issue/%d", is.number)})
-		}
-		g.writeJSON(w, http.StatusOK, rows)
+		g.writeJSON(w, http.StatusOK, paged(r, rows))
 
 	case r.Method == http.MethodGet && path == "/gists":
+		g.gistCalls++
+		if g.gistFull {
+			g.writeJSON(w, http.StatusOK, fullPage(r, func(i int) map[string]any {
+				return map[string]any{"id": fmt.Sprintf("other-%d", i), "created_at": g.now().Format(time.RFC3339),
+					"files": map[string]any{}}
+			}))
+			return
+		}
 		rows := []map[string]any{}
 		for i := len(g.gistList) - 1; i >= 0; i-- {
-			gs := g.gistList[i]
-			rows = append(rows, map[string]any{"id": gs.id, "created_at": gs.created.Format(time.RFC3339),
-				"files": map[string]any{gs.file: map[string]any{"raw_url": gs.raw, "size": gs.size}}})
+			if gs := g.gistList[i]; gs.author == g.user() {
+				rows = append(rows, map[string]any{"id": gs.id, "description": gs.desc, "created_at": gs.created.Format(time.RFC3339),
+					"files": map[string]any{gs.file: map[string]any{"raw_url": gs.raw}}})
+			}
 		}
-		g.writeJSON(w, http.StatusOK, rows)
+		g.writeJSON(w, http.StatusOK, paged(r, rows))
 
 	case r.Method == http.MethodGet && strings.Contains(path, "/issues/"):
 		num := lastInt(path)
@@ -172,17 +222,18 @@ func (g *fakeGitHub) handle(w http.ResponseWriter, r *http.Request) {
 
 	case r.Method == http.MethodPost && strings.HasSuffix(path, "/gists"):
 		var req struct {
-			Files map[string]struct {
+			Description string `json:"description"`
+			Files       map[string]struct {
 				Content string `json:"content"`
 			} `json:"files"`
 		}
 		g.decode(r, &req)
 		g.gists++
 		files := map[string]any{}
-		for name, f := range req.Files {
+		for name := range req.Files {
 			raw := fmt.Sprintf("%s/gist/%d/%s", g.srv.URL, g.gists, name)
-			g.gistList = append(g.gistList, createdGist{id: strconv.Itoa(g.gists), file: name, raw: raw,
-				size: len(f.Content), created: time.Now().UTC()})
+			g.gistList = append(g.gistList, createdGist{id: strconv.Itoa(g.gists), desc: req.Description, file: name, raw: raw,
+				author: g.user(), created: g.now()})
 			files[name] = map[string]string{"raw_url": raw}
 		}
 		if g.lostGists > 0 {
@@ -538,9 +589,7 @@ func TestContributeIssueOversizePayloadUsesGist(t *testing.T) {
 	db := openContribDB(t)
 	gh := newFakeGitHub(t)
 
-	huge := baseChars("x")
-	huge.Characters[0].Description = strings.Repeat("word ", 15000) // ~75 KB > 60 KB body limit
-	b := contribBook(t, db, store.NewBook{WorkID: "reacher-01"}, huge, baseRecaps("x"))
+	b := contribBook(t, db, store.NewBook{WorkID: "reacher-01"}, hugeChars(), baseRecaps("x"))
 	cfg := contribConfig(t, db, contribModeIssue, gh.srv.URL, "", "", fakeTokenResolver{token: "ghp_x"})
 	if _, err := NewExecutor(cfg).Execute(context.Background(), b, state.Contributing, scheduler.StageReport{}); err != nil {
 		t.Fatalf("contribute: %v", err)

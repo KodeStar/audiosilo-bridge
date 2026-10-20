@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"strconv"
 	"testing"
 )
 
@@ -200,6 +201,38 @@ func TestLandedCoverage(t *testing.T) {
 				t.Fatalf("LandedCoverage = (%t, %t), want (%t, %t)", chars, rec, tc.chars, tc.rec)
 			}
 		})
+	}
+}
+
+// A row filed again as the same issue keeps its intake-PR pointer and
+// issue_seen_at; filed as another issue it starts without them, so the poller
+// follows the new issue rather than the old one's PR.
+func TestUpsertContributionKeepsThePointerOnlyForTheSameIssue(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	b, _ := db.CreateBook(ctx, NewBook{SourcePath: "/c/p", WorkDir: "/w/p", Title: "P"})
+	filed := func(number int) Contribution {
+		t.Helper()
+		row, err := db.UpsertContribution(ctx, Contribution{BookID: b.ID, Kind: ContribKindCharacters, Mode: ContribModeIssue,
+			Repo: "KodeStar/audiosilo-meta-community", Number: number, URL: "https://gh/issues/" + strconv.Itoa(number),
+			Status: ContribStatusSubmitted})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return row
+	}
+	row := filed(12)
+	if err := db.SetContributionStatus(ctx, row.ID, ContribStatusClosed, 5, "https://gh/pull/5", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.TouchContribution(ctx, row.ID, "2026-10-20T10:00:00Z"); err != nil {
+		t.Fatal(err)
+	}
+	if got := filed(12); got.PRNumber != 5 || got.PRURL != "https://gh/pull/5" || got.IssueSeenAt == "" {
+		t.Fatalf("the same issue lost its pointer: %+v", got)
+	}
+	if got := filed(13); got.PRNumber != 0 || got.PRURL != "" || got.IssueSeenAt != "" || got.Number != 13 {
+		t.Fatalf("another issue kept the old pointer: %+v", got)
 	}
 }
 

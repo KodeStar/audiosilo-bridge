@@ -121,8 +121,6 @@ type Options struct {
 	// ServerID is the pairing's server (job ids repeat across servers).
 	ServerID func() string
 	Log      *slog.Logger
-	// Now is the clock (tests replace it).
-	Now func() time.Time
 }
 
 // Handler runs meta.correct.
@@ -135,9 +133,6 @@ func New(o Options) *Handler {
 	}
 	if o.ServerID == nil {
 		o.ServerID = func() string { return "" }
-	}
-	if o.Now == nil {
-		o.Now = time.Now
 	}
 	return &Handler{o: o}
 }
@@ -229,7 +224,8 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 			return h.done(ctx, job, key, contrib.Issue{Number: filed.Number, URL: filed.URL}, mapped, rep), nil
 		}
 	}
-	if err := h.o.KV.SetSetting(ctx, key, filingMarker+" "+h.o.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+	// GitHub's time, which the issues' created_at is compared with later.
+	if err := h.o.KV.SetSetting(ctx, key, filingMarker+" "+cli.Now(ctx).Format(time.RFC3339Nano)); err != nil {
 		return nil, err
 	}
 	issue, err := cli.CreateIssue(ctx, h.o.CoreRepo, title, body, labels)
@@ -277,7 +273,7 @@ func (h *Handler) filedSince(ctx context.Context, cli *contrib.Client, since tim
 		}
 	}
 	if !complete {
-		return contrib.FiledIssue{}, false, errors.New("more issues were made since than one page lists")
+		return contrib.FiledIssue{}, false, contrib.ErrListIncomplete
 	}
 	return contrib.FiledIssue{}, false, nil
 }

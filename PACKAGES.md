@@ -921,17 +921,23 @@ internal/
             contrib_filing.go: every issue-mode submit (the stage and Share) files a
             dimension at most once (fileIssue). Before each create call (the gist,
             the issue) it records a filing marker in the settings KV
-            (contrib.filing/<book id>/<kind>: the payload's sha256, gist_since, the
-            gist's raw URL once made, issue_since), since a POST that outlives the
-            client's 15 s timeout may still have made it. The next submit that
-            finds a marker for the same payload looks among what the signed-in
-            user made since then (less 2 minutes): GistsSince (one file of that
-            name and size) and IssuesSinceBy with the user's login (the same title
-            and body), and adopts a match; it creates again only when that list is
-            complete and holds none, else fails with ErrFilingUnknown (the share
-            job words it). A refusal (contrib.NothingFiled: a 4xx or a rate limit)
-            clears the pending time; a made gist is kept for the next try; the
-            marker goes once the row is recorded.
+            (contrib.filing/<book id>/<kind>: the payload's sha256, the GitHub
+            login, gist_since, the gist's raw URL once made, issue_since and the
+            sha256 of the title and body the issue POST sends; times in GitHub's
+            clock, contrib.Client.Now), since a POST that outlives the client's
+            15 s timeout may still have made it. The next submit looks for a
+            pending issue first, whatever the sidecar is now: IssuesSinceBy with
+            the marker's login from its time less 2 minutes, the same title and
+            body, never the issue the row already names (a closed one a share
+            files again). Then, for the same payload, a pending gist: GistsSince,
+            one file of that name, the description naming the payload's sha256.
+            It adopts a match and creates again only when the list is complete,
+            holds none and (for an issue) the marker is a minute old; else it
+            fails with ErrFilingUnknown (the share job words it and logs the
+            cause). A refusal or a request that never left (contrib.NothingFiled:
+            a 4xx, a rate limit, a failed dial) clears the pending time; a made
+            gist is kept for the next try; the marker goes once the row is
+            recorded.
   contrib/  M7: everything GitHub-facing for contribution. TokenSource (Phase 2b:
             NewTokenSource(device, onChange) resolves AUDIOSILO_BRIDGE_GITHUB_TOKEN
             read LIVE from the environment first (never sealed any more), then the
@@ -970,7 +976,11 @@ internal/
                          works-pack ENTRY KEYS at merge base vs head), the release
                          gate (admitWhenLive / releaseCorePending)
               notes.go   JoinNotes, AdoptLiveWork (shared with the stage)
-              github.go  the REST client: issues, gists, pulls, compare, contents
+              github.go  the REST client: issues, gists, pulls, compare, contents;
+                         the filing lookups' lists (IssuesSinceBy, GistsSince) read
+                         page by page, at most 20 pages (ErrListIncomplete past
+                         them); Now is GitHub's clock, from the Date of its last
+                         answer (GET /rate_limit, free, when there was none)
             ServiceDeps.CoreRepo is where SubmitCore opens add-work issues; every
             other call follows the repo a row records.
             Imports neither scheduler nor api - reaches them via injected
@@ -1018,25 +1028,27 @@ internal/
             characters and worded for the console (the budget's "$100 a month" or
             "no monthly cap"); Complete is every required item done. The heartbeat
             sends it and the page's Status tab shows it.
-  correct/  Phase 2b (plan D5): the meta.correct job (light lane). ParseParams is
-            STRICT (an unknown field refused, work_id required). It reads the
-            work's live coverage (FreshCoverageForWork: its title, the recording by
-            ASIN (and region) or ISBN when the server sent no recording id), maps
-            and composes the batch (contrib.CorrectionBatchIssue) and files ONE
-            issue on the core repo with the GitHub sign-in. Once per job: a
-            "filing <time>" marker is written to the KV store (meta.correct/<server
-            id>/<job id>) before CreateIssue and cleared only when GitHub answered
-            a 4xx or a rate limit (a 5xx can come after the issue was made, and the
-            client never resends a POST); a resumed run with the result returns
-            it; one with only the marker lists the core repo's issues made since
-            (contrib.IssuesSince: the list endpoint, not search, which lags) and
-            adopts a [corrections] issue with the same body, files when the list is
-            complete and has none, and otherwise (a same-record batch with another
-            body, an unreadable or incomplete list, a marker without a time) fails
-            asking the admin to look first. A 401 is errRefused. Result {issue_url,
-            issue_number, changes, auto, maintainer}: auto and maintainer as known
-            at filing; the Bridge doesn't follow the issue (a batch meta applies
-            only in part is not reported back, plan D8).
+  correct/  Phase 2b (plan D5): the meta.correct job (light lane). ParseParams
+            is STRICT (an unknown field refused, work_id required). It reads the
+            work's live coverage (FreshCoverageForWork: its title, the recording
+            by ASIN (and region) or ISBN when the server sent no recording id),
+            maps and composes the batch (contrib.CorrectionBatchIssue) and files
+            ONE issue on the core repo with the GitHub sign-in. Once per job: a
+            "filing <time>" marker (GitHub's time, contrib.Client.Now) is
+            written to the KV store (meta.correct/<server id>/<job id>) before
+            CreateIssue and cleared only when GitHub answered a 4xx or a rate
+            limit or the request never left (contrib.NothingFiled; a 5xx can
+            come after the issue was made, and the client never resends a POST);
+            a resumed run with the result returns it; one with only the marker
+            lists the core repo's issues made since (contrib.IssuesSince: the
+            list endpoint, not search, which lags) and adopts a [corrections]
+            issue with the same body, files when the list is complete and has
+            none, and otherwise (a same-record batch with another body, an
+            unreadable or incomplete list, a marker without a time) fails asking
+            the admin to look first. A 401 is errRefused. Result {issue_url,
+            issue_number, changes, auto, maintainer}: auto and maintainer as
+            known at filing; the Bridge doesn't follow the issue (a batch meta
+            applies only in part is not reported back, plan D8).
   secrets/  named secrets (the server token, the agent credentials, the GitHub
             sign-in; github_pat only to delete an earlier Bridge's copy) as
             AES-256-GCM sealed files in <data>/secrets (0600, the manager BlobStore's
@@ -1060,12 +1072,14 @@ internal/
             (non-empty iff status is needs_attention) is enforced INSIDE
             SetBookState/SetBookStatus, not by caller discipline; contributions'
             UNIQUE (book_id, kind) makes UpsertContribution the crash-resume
-            idempotency guard; books.retry_at is cleared with status like park_code;
-            a Retry SUPERSEDES stage_runs success rows instead of deleting them, so
+            idempotency guard (it keeps a row's intake-PR pointer and
+            issue_seen_at only while the row names the same issue);
+            books.retry_at is cleared with status like park_code; a Retry
+            SUPERSEDES stage_runs success rows instead of deleting them, so
             SCHEDULING readers (CountStageSuccesses, SucceededStages*) filter
             superseded=0 while MONEY readers (SumStageRunCost, StageRunTotals,
-            ListStageRuns) include everything. Plain tested CRUD; AuthStore adapts it
-            to auth.Store. Holds the SCHEDULING truth.
+            ListStageRuns) include everything. Plain tested CRUD; AuthStore
+            adapts it to auth.Store. Holds the SCHEDULING truth.
             0002 adds server_jobs (serverjobs.go): the server jobs this Bridge
             claimed, keyed by the SERVER's job id, with attempt, state (running |
             done | failed | needs_attention | cancelled | lost), progress, result,

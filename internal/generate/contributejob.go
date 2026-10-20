@@ -37,9 +37,10 @@ const (
 		"here, or they were removed). Generate them first."
 	errShareGenerating    describeFailure = "A generate job is still running for this book; share it once it finishes."
 	errShareNotMatched    describeFailure = "Match the book first: it isn't matched to a work in the community database."
-	errShareFilingUnknown describeFailure = "An earlier share stopped while filing, and the Bridge can't tell yet " +
-		"whether GitHub made the issue, so it filed nothing more: share the book again later, and if this keeps " +
-		"happening, look for the issue on the community repository."
+	errShareFilingUnknown describeFailure = "An earlier try at filing this book's sidecars stopped before GitHub " +
+		"answered, and the Bridge can't tell yet whether GitHub made the issue (or the gist it links), so it filed " +
+		"nothing more: share the book again in a few minutes, and if this keeps happening, look for the issue on " +
+		"the community repository."
 )
 
 // ContributeParams are sidecars.contribute's params: the community work the
@@ -141,6 +142,8 @@ func (c *ContributeJob) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporte
 	res, err := sharer.Share(ctx, b.ID, p.WorkID, p.Dimensions)
 	release()
 	if err != nil {
+		// The console gets shareError's words; the log keeps the cause.
+		h.o.Log.Warn("generate: the share failed", "job", job.ID, "path", r.rel, "err", err)
 		return nil, shareError(err)
 	}
 	h.o.Log.Info("generate: shared the book's sidecars", "job", job.ID, "path", r.rel, "work", res.WorkID,

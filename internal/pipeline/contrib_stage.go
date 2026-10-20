@@ -486,7 +486,7 @@ func (e *Executor) submitIssueWith(ctx context.Context, book store.Book, slug st
 		if rerr != nil {
 			return rerr
 		}
-		issue, ierr := e.fileIssue(ctx, cli, book.ID, a.kind, slug, payload)
+		issue, ierr := e.fileIssue(ctx, cli, book.ID, a.kind, slug, payload, rowIssue(existing, a.kind))
 		if ierr != nil {
 			return ierr
 		}
@@ -609,6 +609,17 @@ func rowSettled(rows []store.Contribution, kind string) bool {
 		return r.URL != "" || r.Status == store.ContribStatusLocal || r.Status == store.ContribStatusAlreadyCovered
 	}
 	return false
+}
+
+// rowIssue is the issue number a dimension's row (in the pre-fetched rows)
+// records, 0 for none.
+func rowIssue(rows []store.Contribution, kind string) int {
+	for _, r := range rows {
+		if r.Kind == kind {
+			return r.Number
+		}
+	}
+	return 0
 }
 
 // contribModeFor returns the book's own contribution mode (a sidecars.generate job
