@@ -554,11 +554,13 @@ func (e *Executor) contribClient(ctx context.Context) (*contrib.Client, error) {
 	}
 	token, from, err := e.tokenSource.Resolve(ctx)
 	if err != nil {
+		// The park carries err, so a caller (the share job) tells the two apart by
+		// errors.Is rather than by the reason's text.
 		if errors.Is(err, contrib.ErrSignInUnrefreshed) {
-			return nil, scheduler.ParkWithCode(state.ParkContribUnavailable, ContribUnrefreshedMsg)
+			return nil, &scheduler.ParkError{Code: state.ParkContribUnavailable, Reason: ContribUnrefreshedMsg, Cause: err}
 		}
 		if errors.Is(err, contrib.ErrNoCredential) {
-			return nil, scheduler.ParkWithCode(state.ParkContribUnavailable, ContribUnavailableMsg)
+			return nil, &scheduler.ParkError{Code: state.ParkContribUnavailable, Reason: ContribUnavailableMsg, Cause: err}
 		}
 		return nil, fmt.Errorf("contributing: resolve credential: %w", err)
 	}

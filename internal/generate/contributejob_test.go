@@ -102,7 +102,8 @@ func TestContributeJobRefusals(t *testing.T) {
 		{86, "Author/Book", `{}`, pipeline.ErrNoSidecars, nil, errShareNothing},
 		{87, "Author/Book", `{}`, fmt.Errorf("%w (the characters issue): x", pipeline.ErrFilingUnknown), nil, errShareFilingUnknown},
 		{88, "Author/Book", `{}`, nil, contrib.ErrSignInUnrefreshed, errShareUnrefreshed},
-		{89, "Author/Book", `{}`, scheduler.ParkWithCode(state.ParkContribUnavailable, pipeline.ContribUnrefreshedMsg), nil, errShareUnrefreshed},
+		{89, "Author/Book", `{}`, &scheduler.ParkError{Code: state.ParkContribUnavailable, Reason: pipeline.ContribUnrefreshedMsg,
+			Cause: contrib.ErrSignInUnrefreshed}, nil, errShareUnrefreshed},
 	}
 	for _, c := range cases {
 		s := &fakeSharer{err: c.err}

@@ -150,6 +150,9 @@ func New(o Options) *Handler {
 	if o.Now == nil {
 		o.Now = time.Now
 	}
+	if o.ContribCredential == nil {
+		o.ContribCredential = func(context.Context) error { return nil }
+	}
 	return &Handler{o: o, pokes: map[int64]chan struct{}{}, describeParks: map[int64]describePark{},
 		woken: map[state.ParkCode]uint64{}}
 }
@@ -322,10 +325,8 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 	if !resumed && params.Contribute == ContributeIssue {
 		// Fail before any spend: the contribution is the last stage, and without a
 		// token it could only park there after the whole run was paid for.
-		if err := h.contribCredential(ctx); errors.Is(err, contrib.ErrSignInUnrefreshed) {
-			return nil, errCantContributeUnrefreshed
-		} else if err != nil {
-			return nil, errCantContribute
+		if err := credFailure(h.o.ContribCredential(ctx), errCantContributeUnrefreshed, errCantContribute); err != nil {
+			return nil, err
 		}
 	}
 	return h.runEngineBook(ctx, eng, r, mapped, resumed, nil)
@@ -427,12 +428,17 @@ var (
 		"the book again once it can, or with contribute set to local")
 )
 
-// contribCredential is Options.ContribCredential's answer (nil when it is unset).
-func (h *Handler) contribCredential(ctx context.Context) error {
-	if h.o.ContribCredential == nil {
+// credFailure words a missing contribution credential (err, from
+// Options.ContribCredential or a park carrying it): unrefreshed when the sign-in
+// only couldn't be refreshed (contrib.ErrSignInUnrefreshed), else none; nil for nil.
+func credFailure(err, unrefreshed, none error) error {
+	switch {
+	case err == nil:
 		return nil
+	case errors.Is(err, contrib.ErrSignInUnrefreshed):
+		return unrefreshed
 	}
-	return h.o.ContribCredential(ctx)
+	return none
 }
 
 // end records how the job ended, unless it resumes later (the Bridge stopping or

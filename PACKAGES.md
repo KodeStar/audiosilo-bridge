@@ -1280,7 +1280,9 @@ internal/
             the CURRENT stage's successes ONLY for the round-cap park codes
             (qa_no_converge, fix_loop_exhausted - the latter also superseding fixing +
             wiping the audit trajectory files) so an availability park never destroys a
-            loop's round history; parks with a plain code just clear status. Timed parks
+            loop's round history; parks with a plain code just clear status.
+            ParkError.Cause (Unwrap) carries the error behind a park (contrib_unavailable's
+            credential error) so errors.Is sees through it. Timed parks
             come from ParkError.RetryAfter (ParkWithCodeAfter): the rate-limit park uses
             the parsed reset + 2min (agent.ParseResetTime - epoch accepted only within
             (now, now+48h]; clock form host-local by documented assumption) floored at
@@ -1858,7 +1860,7 @@ internal/
             it, and Options.Sharer (pipeline.Executor.Share) files them. Failures
             in words: not signed in, a sign-in GitHub couldn't be reached to
             refresh (Options.ContribCredential answering contrib.ErrSignInUnrefreshed,
-            or the park's pipeline.ContribUnrefreshedMsg), refused, nothing kept
+            or a contrib_unavailable park whose Cause is it: credFailure), refused, nothing kept
             here, a generate job still running, not matched. Result {library_id, path, work_id,
             contributed, covered}. The hints for agent_unavailable,
             agent_credential_refused and contrib_unavailable point at the Accounts

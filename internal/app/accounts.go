@@ -92,7 +92,7 @@ func (b *Bridge) agentCredential(cli string) (kind, value string, since time.Tim
 
 // canContribute reports whether a GitHub token resolves, which a job with
 // contribute=issue needs.
-func (b *Bridge) canContribute(ctx context.Context) bool { return b.contributeFrom(ctx) != "" }
+func (b *Bridge) canContribute(ctx context.Context) bool { return b.contribCredential(ctx) == nil }
 
 // contribCredential is why no contribution token resolves now (nil when one does).
 func (b *Bridge) contribCredential(ctx context.Context) error {

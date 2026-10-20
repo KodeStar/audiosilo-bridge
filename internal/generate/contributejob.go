@@ -110,10 +110,8 @@ func (c *ContributeJob) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporte
 		return nil, err
 	}
 	defer stop()
-	if err := h.contribCredential(ctx); errors.Is(err, contrib.ErrSignInUnrefreshed) {
-		return nil, errShareUnrefreshed
-	} else if err != nil {
-		return nil, errShareCantContribute
+	if err := credFailure(h.o.ContribCredential(ctx), errShareUnrefreshed, errShareCantContribute); err != nil {
+		return nil, err
 	}
 	if _, err := h.waitEngine(ctx, r); err != nil {
 		return nil, err
@@ -161,10 +159,7 @@ func shareError(err error) error {
 	var park *scheduler.ParkError
 	switch {
 	case errors.As(err, &park) && park.Code == state.ParkContribUnavailable:
-		if park.Reason == pipeline.ContribUnrefreshedMsg {
-			return errShareUnrefreshed
-		}
-		return errShareCantContribute
+		return credFailure(err, errShareUnrefreshed, errShareCantContribute)
 	case contrib.Unauthorized(err):
 		return errShareRefused
 	case errors.Is(err, pipeline.ErrNotMatched):

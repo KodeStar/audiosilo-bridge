@@ -87,13 +87,20 @@ type Executor interface {
 // to books.retry_at and a later dispatch pass re-admits the book once the instant
 // passes (used for the transient agent-unavailable/rate-limited parks so an overnight
 // batch heals itself). A zero RetryAfter is a human-only park (Retry re-admits it).
+//
+// Cause, when set, is the error that parked the book: errors.Is and errors.As see
+// it through the park (the reason stays the text the book shows).
 type ParkError struct {
 	Reason     string
 	Code       state.ParkCode
 	RetryAfter time.Time
+	Cause      error
 }
 
 func (e *ParkError) Error() string { return e.Reason }
+
+// Unwrap returns the park's Cause (nil when it has none).
+func (e *ParkError) Unwrap() error { return e.Cause }
 
 // Park builds a ParkError with the given human-facing reason and no typed code.
 func Park(reason string) error { return &ParkError{Reason: reason} }
