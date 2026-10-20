@@ -439,7 +439,9 @@ func (c *Client) IssuesSinceBy(ctx context.Context, repo string, since time.Time
 		return false
 	})
 	if err != nil {
-		return nil, false, err
+		// The rows read before the failing page are returned with it: the caller
+		// decides on what they hold (its own issue, a conflicting one) first.
+		return issues, false, err
 	}
 	return issues, complete, nil
 }
@@ -485,6 +487,11 @@ func (c *Client) Login(ctx context.Context) (string, error) {
 // FilingSkew is how far before a filing marker's time (taken from Now) a lookup
 // for what it may have made reaches back.
 const FilingSkew = 2 * time.Minute
+
+// FilingSettle is how old a filing marker must be (by Now) before a lookup that
+// finds nothing rules out what it may have made: the client may have given up
+// while GitHub was still making it, and the list may not show it yet.
+const FilingSettle = time.Minute
 
 // FilingStale is the age (by GitHub's clock) past which a filing marker no
 // longer stops a new filing when the lookup for what it may have made fails in a
@@ -559,7 +566,7 @@ func (c *Client) GistsSince(ctx context.Context, since time.Time) (gists []Gist,
 		return false
 	})
 	if err != nil {
-		return nil, false, err
+		return gists, false, err // the rows read so far, as IssuesSinceBy
 	}
 	return gists, complete, nil
 }

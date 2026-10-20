@@ -520,3 +520,44 @@ func TestShareStaleMarkerSurvivesAnUnreadableList(t *testing.T) {
 		})
 	}
 }
+
+// The share's own issue on a page read before one that failed is adopted.
+func TestShareAdoptsItsIssueBeforeAFailedPage(t *testing.T) {
+	ctx := context.Background()
+	_, gh, exe, b := shareFixture(t, baseChars("x"))
+	gh.lostIssues = 1
+	if _, err := exe.Share(ctx, b.ID, "reacher-01", nil); err == nil {
+		t.Fatal("a lost answer should fail the share")
+	}
+	gh.mu.Lock()
+	for i := range contrib.IssuesPage - 1 { // newer issues: the own one ends page 1
+		gh.issues = append(gh.issues, createdIssue{repo: testCommunityRepo, number: 2 + i, title: "other",
+			author: gh.user(), created: gh.now()})
+	}
+	gh.failFromPage = 2
+	gh.mu.Unlock()
+	got, err := exe.Share(ctx, b.ID, "reacher-01", nil)
+	if err != nil || got.Contributed["characters"] != gh.srv.URL+"/issue/1" || gh.issueCount() != contrib.IssuesPage {
+		t.Fatalf("share = %+v %v, issues %d", got, err, gh.issueCount())
+	}
+}
+
+// A marker without a login, and GitHub refusing the sign-in's /user: the
+// lookup's error is the 401 (the share job words it as the sign-in refused),
+// not a bare "login unknown".
+func TestShareLookupWithARefusedSignInIsThe401(t *testing.T) {
+	ctx := context.Background()
+	_, gh, exe, b := shareFixture(t, baseChars("x"))
+	if err := exe.writeFiling(ctx, b.ID, store.ContribKindCharacters, filing{IssueSince: gh.now().Add(-time.Hour),
+		Issue: "an issue"}); err != nil {
+		t.Fatal(err)
+	}
+	gh.mu.Lock()
+	gh.userStatus = http.StatusUnauthorized
+	gh.mu.Unlock()
+	_, err := exe.Share(ctx, b.ID, "reacher-01", nil)
+	var apiErr *contrib.APIError
+	if !errors.As(err, &apiErr) || apiErr.Status != http.StatusUnauthorized || gh.issueCount() != 0 {
+		t.Fatalf("err = %v, issues %d", err, gh.issueCount())
+	}
+}

@@ -28,12 +28,9 @@ import (
 var ErrFilingUnknown = errors.New("an earlier try may have filed it, and the Bridge can't tell")
 
 // errFilingSettling is a lookup too soon after the create it looks for: the
-// client may have given up while GitHub was still making it.
+// client may have given up while GitHub was still making it
+// (contrib.FilingSettle).
 var errFilingSettling = errors.New("the earlier try was moments ago, and GitHub may still be making it")
-
-// filingSettle is how old an issue's marker must be before a lookup that finds
-// nothing rules the issue out.
-const filingSettle = time.Minute
 
 // filing is a dimension's marker (the settings KV, filingKey): what its last
 // submit was making when it stopped. Times are GitHub's (contrib.Client.Now).
@@ -135,14 +132,15 @@ func (e *Executor) guardedCreate(ctx context.Context, cli *contrib.Client, bookI
 // description naming its content. found false means none was (the list is
 // complete back to then; a gist made as another user isn't listed, and is left).
 func filedGist(ctx context.Context, cli *contrib.Client, since time.Time, file, desc string) (string, bool, error) {
+	// The gists read before a failing page are looked through first.
 	gists, complete, err := cli.GistsSince(ctx, since.Add(-contrib.FilingSkew))
-	if err != nil {
-		return "", false, err
-	}
 	for _, g := range gists {
 		if raw := g.Files[file]; raw != "" && len(g.Files) == 1 && g.Description == desc {
 			return raw, true, nil
 		}
+	}
+	if err != nil {
+		return "", false, err
 	}
 	if !complete {
 		return "", false, contrib.ErrListIncomplete
@@ -157,24 +155,31 @@ func filedGist(ctx context.Context, cli *contrib.Client, since time.Time, file, 
 // to then, and the marker old enough for GitHub to list it. An issue edited
 // since doesn't match and is filed again: a duplicate a maintainer can close,
 // rather than a dimension never filed.
-func (e *Executor) filedIssue(ctx context.Context, cli *contrib.Client, f filing, login string, recorded int) (contrib.Issue, bool, error) {
+//
+// loginErr is why the signed-in login couldn't be read: with no login on the
+// marker either, it is the lookup's error (a 401 is the sign-in refused).
+func (e *Executor) filedIssue(ctx context.Context, cli *contrib.Client, f filing, login string, loginErr error,
+	recorded int) (contrib.Issue, bool, error) {
 	creator := cmp.Or(f.Login, login)
 	if creator == "" {
+		if loginErr != nil {
+			return contrib.Issue{}, false, fmt.Errorf("the GitHub login is unknown: %w", loginErr)
+		}
 		return contrib.Issue{}, false, errors.New("the GitHub login is unknown")
 	}
+	// The issues read before a failing page are looked through first.
 	issues, complete, err := cli.IssuesSinceBy(ctx, e.contribCommunityRepo, f.IssueSince.Add(-contrib.FilingSkew), creator)
-	if err != nil {
-		return contrib.Issue{}, false, err
-	}
 	for _, is := range issues {
 		if is.Number != recorded && issueSum(is.Title, is.Body) == f.Issue {
 			return contrib.Issue{Number: is.Number, URL: is.URL}, true, nil
 		}
 	}
 	switch {
+	case err != nil:
+		return contrib.Issue{}, false, err
 	case !complete:
 		return contrib.Issue{}, false, contrib.ErrListIncomplete
-	case cli.Now(ctx).Sub(f.IssueSince) < filingSettle:
+	case cli.Now(ctx).Sub(f.IssueSince) < contrib.FilingSettle:
 		return contrib.Issue{}, false, errFilingSettling
 	}
 	return contrib.Issue{}, false, nil
@@ -208,16 +213,16 @@ func (e *Executor) fileIssue(ctx context.Context, cli *contrib.Client, bookID in
 	if err != nil {
 		return contrib.Issue{}, err
 	}
-	login, err := cli.Login(ctx)
-	if err != nil {
+	login, loginErr := cli.Login(ctx)
+	if loginErr != nil {
 		// The calls below fail too when GitHub can't be reached; an issue filed
 		// without a login is looked for as whoever is signed in then.
-		e.log.Warn("contributing: read the GitHub login", "book", bookID, "kind", kind, "err", err)
+		e.log.Warn("contributing: read the GitHub login", "book", bookID, "kind", kind, "err", loginErr)
 	}
 	// An issue POST that may have reached GitHub is looked for first, by what it
 	// sent: whatever the sidecar is now, an issue it made is the dimension's.
 	if !f.IssueSince.IsZero() {
-		issue, found, err := e.filedIssue(ctx, cli, f, login, recorded)
+		issue, found, err := e.filedIssue(ctx, cli, f, login, loginErr, recorded)
 		switch {
 		case err != nil && !refileStale(cli, f.IssueSince, err):
 			return contrib.Issue{}, filingUnknown(kind, "issue", err)

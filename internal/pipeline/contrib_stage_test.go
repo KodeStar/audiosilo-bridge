@@ -94,6 +94,10 @@ type fakeGitHub struct {
 	gistFull bool
 	// listStatus: the issue and gist lists answer this status (0 as usual).
 	listStatus int
+	// failFromPage: the issue list fails from that page on (0: never);
+	// userStatus: GET /user answers this status (0 as usual).
+	failFromPage int
+	userStatus   int
 }
 
 // testCommunityRepo is the repository the stage contributes sidecars to.
@@ -169,6 +173,10 @@ func (g *fakeGitHub) handle(w http.ResponseWriter, r *http.Request) {
 		g.writeIssue(w, http.StatusCreated, num, req.Labels)
 
 	case r.Method == http.MethodGet && path == "/user":
+		if g.userStatus != 0 {
+			w.WriteHeader(g.userStatus)
+			return
+		}
 		g.writeJSON(w, http.StatusOK, map[string]string{"login": g.user()})
 
 	case r.Method == http.MethodGet && strings.HasSuffix(path, "/issues"):
@@ -179,6 +187,10 @@ func (g *fakeGitHub) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		if g.listStatus != 0 {
 			w.WriteHeader(g.listStatus)
+			return
+		}
+		if page, _ := strconv.Atoi(r.URL.Query().Get("page")); g.failFromPage > 0 && page >= g.failFromPage {
+			w.WriteHeader(http.StatusBadGateway)
 			return
 		}
 		if g.listFull {

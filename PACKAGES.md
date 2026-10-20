@@ -927,7 +927,10 @@ internal/
             clock, contrib.Client.Now), since a POST that outlives the client's
             15 s timeout may still have made it. The next submit looks for a
             pending issue first, whatever the sidecar is now: IssuesSinceBy with
-            the marker's login from its time less 2 minutes, the same title and
+            the marker's login (else the signed-in one; a 401 reading it is the
+            lookup's error, so the share says the sign-in was refused) from its
+            time less 2 minutes, through the rows of pages read before one that
+            failed too, the same title and
             body, never the issue the row already names (a closed one a share
             files again). Then, for the same payload, a pending gist: GistsSince,
             one file of that name, the description naming the payload's sha256.
@@ -1043,24 +1046,32 @@ internal/
             work's live coverage (FreshCoverageForWork: its title, the recording
             by ASIN (and region) or ISBN when the server sent no recording id),
             maps and composes the batch (contrib.CorrectionBatchIssue) and files
-            ONE issue on the core repo with the GitHub sign-in. Once per job: a
-            "filing <time>" marker (GitHub's time, contrib.Client.Now) is
-            written to the KV store (meta.correct/<server id>/<job id>) before
-            CreateIssue and cleared only when GitHub answered a 4xx or a rate
-            limit or the request never left (contrib.NothingFiled; a 5xx can
-            come after the issue was made, and the client never resends a POST);
-            a resumed run with the result returns it; one with only the marker
-            lists the core repo's issues made since (contrib.IssuesSince: the
-            list endpoint, not search, which lags) and adopts a [corrections]
-            issue with the same body anywhere in the list, files when the list
-            is complete and has none, and otherwise fails asking the admin to
-            look first (errFiledBefore): always for a same-record batch with
-            another body (errOtherBatch: it may be the run's own, composed from
-            the record as it was) or a marker without a time; for an unreadable
-            or incomplete list only while the marker is under a day old by
-            GitHub's clock (contrib.FilingStale, Client.StaleFiling), past which
-            it files again (the job would fail for good; meta's intake catches
-            a batch it has applied). A 401 is errRefused. Result {issue_url,
+            ONE issue on the core repo with the GitHub sign-in. A job's result is
+            kept under meta.correct/<server id>/<job id> (a resumed job returns
+            it). The filing is guarded per BOOK: before CreateIssue a marker
+            {since (GitHub's time, contrib.Client.Now), sum (sha256 of the title
+            and body), job} goes to meta.correct.filing/<server id>/<library
+            id>/<path> (the work id when the job names no book), so a NEW job for
+            the book (the admin pressing Suggest again after a lost answer) sees
+            it too. It is cleared once a filing is confirmed (filed, or adopted)
+            or when GitHub answered a 4xx or a rate limit or the request never
+            left (contrib.NothingFiled; a 5xx can come after the issue was made,
+            and the client never resends a POST). A run that finds a marker lists
+            the core repo's issues made since (contrib.IssuesSince, the rows of
+            pages read before one that failed included) and: adopts a
+            [corrections] issue with its own sum; takes one with the marker's sum
+            (another job's other batch) as that filing confirmed and files its
+            own; else fails asking the admin to look first (errFiledBefore) for a
+            same-record batch with another body (errOtherBatch: it may be the
+            run's own, composed from the record as it was) or a marker without a
+            time; waits (errSettling) when the marker is under a minute old
+            (contrib.FilingSettle: GitHub may still be making it); and for an
+            unreadable or incomplete list stops only while the marker is under a
+            day old by GitHub's clock (contrib.FilingStale, Client.StaleFiling),
+            past which it files again (meta's intake catches a batch it has
+            applied). A 401, on the lookup or the filing, is errRefused; a lost
+            or 5xx answer errNoAnswer (worded: the Bridge checks before filing
+            again); a rate limit errRateLimited. Result {issue_url,
             issue_number, changes, auto, maintainer}: auto and maintainer as
             known at filing; the Bridge doesn't follow the issue (a batch meta
             applies only in part is not reported back, plan D8).
@@ -1680,7 +1691,10 @@ internal/
             clears them, never between two tries. describeParked runs it: an agent park
             (rate limit, budget, credential, unavailable) is the job's park (code,
             hint, retry_at in progress) and it tries again at retry_at or on Retry
-            (the shared pokes, so the page's Retry and Handler.Retry reach it),
+            (the shared pokes, so the page's Retry and Handler.Retry reach it;
+            WakeParked(code) pokes every describe job parked with code, which a
+            monthly budget saved on the page does for budget_exceeded, since
+            these wait in their own loop, not as engine books),
             staying parked while it tries so a park that holds isn't announced
             again (a Retry pressed during a try at a timed park is answered by that
             try; the success lifts the park, one the runner restored after a restart
