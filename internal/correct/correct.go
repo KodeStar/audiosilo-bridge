@@ -214,23 +214,19 @@ func (h *Handler) resultKey(job jobs.Job) string {
 // written under the earlier key (the params less the source) are never read
 // again.
 func (h *Handler) filingKey(p Params) string {
-	type change struct {
-		Field     string `json:"field"`
-		Corrected string `json:"corrected"`
-	}
-	changes := make([]change, len(p.Changes))
+	changes := make([]contrib.Correction, len(p.Changes)) // Current left out
 	for i, c := range p.Changes {
-		changes[i] = change{strings.TrimSpace(c.Field), strings.TrimSpace(c.Corrected)}
+		changes[i] = contrib.Correction{Field: strings.TrimSpace(c.Field), Corrected: strings.TrimSpace(c.Corrected)}
 	}
-	slices.SortFunc(changes, func(a, b change) int {
+	slices.SortFunc(changes, func(a, b contrib.Correction) int {
 		return cmp.Or(strings.Compare(a.Field, b.Field), strings.Compare(a.Corrected, b.Corrected))
 	})
 	raw, _ := json.Marshal(struct { // strings only: it can't fail
-		WorkID      string   `json:"work_id"`
-		RecordingID string   `json:"recording_id"`
-		ASIN        string   `json:"asin"`
-		ISBN        string   `json:"isbn"`
-		Changes     []change `json:"changes"`
+		WorkID      string               `json:"work_id"`
+		RecordingID string               `json:"recording_id"`
+		ASIN        string               `json:"asin"`
+		ISBN        string               `json:"isbn"`
+		Changes     []contrib.Correction `json:"changes"`
 	}{strings.TrimSpace(p.WorkID), strings.TrimSpace(p.RecordingID), strings.ToUpper(strings.TrimSpace(p.ASIN)),
 		normISBN(p.ISBN), changes})
 	sum := sha256.Sum256(raw)

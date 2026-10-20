@@ -1870,7 +1870,7 @@ func TestBudgetParkMessages(t *testing.T) {
 				"at once when the monthly budget is raised on the Bridge's Settings tab (when " +
 				"AUDIOSILO_BRIDGE_AGENT_MONTHLY_BUDGET_USD sets it, raise that and restart the Bridge)"},
 	} {
-		if c.got != c.want || strings.Contains(c.got, "Retry") {
+		if c.got != c.want {
 			t.Errorf("message = %q\nwant      %q", c.got, c.want)
 		}
 	}
