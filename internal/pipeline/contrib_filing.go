@@ -2,13 +2,10 @@ package pipeline
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/kodestar/audiosilo-bridge/internal/contrib"
@@ -27,8 +24,8 @@ import (
 // couldn't be read): filing again could make a duplicate.
 var ErrFilingUnknown = errors.New("an earlier try may have filed it, and the Bridge can't tell")
 
-// filingSkew is how far before a marker's time the lookup reaches (clocks).
-const filingSkew = 2 * time.Minute
+// errListIncomplete is a lookup whose one page doesn't reach back to the marker.
+var errListIncomplete = errors.New("more were made since than one page lists")
 
 // filing is a dimension's marker (the settings KV, filingKey): what its last
 // submit was making when it stopped.
@@ -46,11 +43,6 @@ type filing struct {
 
 func filingKey(bookID int64, kind string) string {
 	return "contrib.filing/" + strconv.FormatInt(bookID, 10) + "/" + kind
-}
-
-func payloadSum(payload []byte) string {
-	sum := sha256.Sum256(payload)
-	return hex.EncodeToString(sum[:])
 }
 
 // readFiling is the dimension's marker for payload sum (a zero one, carrying the
@@ -100,13 +92,29 @@ func (e *Executor) clearFiling(ctx context.Context, bookID int64, kind string) {
 	}
 }
 
+// guardedCreate runs one create call under the marker: *since (a field of f) is
+// set to now and f recorded first; a refusal (contrib.NothingFiled) made
+// nothing, so *since is cleared again.
+func (e *Executor) guardedCreate(ctx context.Context, bookID int64, kind string, f *filing, since *time.Time, create func() error) error {
+	*since = time.Now().UTC()
+	if err := e.writeFiling(ctx, bookID, kind, *f); err != nil {
+		return err
+	}
+	err := create()
+	if err != nil && contrib.NothingFiled(err) {
+		*since = time.Time{}
+		_ = e.writeFiling(ctx, bookID, kind, *f)
+	}
+	return err
+}
+
 // filedGist looks for the gist an interrupted submit made: one of the user's
 // gists made since the marker holding only the sidecar's file, at its size.
 // found false means none was (the list is complete back to then).
-func (e *Executor) filedGist(ctx context.Context, cli *contrib.Client, since time.Time, kind, file string, size int) (string, bool, error) {
-	gists, complete, err := cli.GistsSince(ctx, since.Add(-filingSkew))
+func filedGist(ctx context.Context, cli *contrib.Client, since time.Time, file string, size int) (string, bool, error) {
+	gists, complete, err := cli.GistsSince(ctx, since.Add(-contrib.FilingSkew))
 	if err != nil {
-		return "", false, fmt.Errorf("%w (the %s gist): %w", ErrFilingUnknown, kind, err)
+		return "", false, err
 	}
 	for _, g := range gists {
 		if f, ok := g.Files[file]; ok && len(g.Files) == 1 && f.Size == size && f.RawURL != "" {
@@ -114,7 +122,7 @@ func (e *Executor) filedGist(ctx context.Context, cli *contrib.Client, since tim
 		}
 	}
 	if !complete {
-		return "", false, fmt.Errorf("%w (the %s gist): more gists were made since than one page lists", ErrFilingUnknown, kind)
+		return "", false, errListIncomplete
 	}
 	return "", false, nil
 }
@@ -122,32 +130,38 @@ func (e *Executor) filedGist(ctx context.Context, cli *contrib.Client, since tim
 // filedIssue looks for the issue an interrupted submit filed: one the same user
 // opened on the community repo since the marker, with this title and body.
 // found false means none was (the list is complete back to then).
-func (e *Executor) filedIssue(ctx context.Context, cli *contrib.Client, since time.Time, kind, title, body string) (contrib.Issue, bool, error) {
+func (e *Executor) filedIssue(ctx context.Context, cli *contrib.Client, since time.Time, title, body string) (contrib.Issue, bool, error) {
 	login, err := cli.Login(ctx)
 	if err != nil {
-		return contrib.Issue{}, false, fmt.Errorf("%w (the %s issue): %w", ErrFilingUnknown, kind, err)
+		return contrib.Issue{}, false, err
 	}
-	issues, complete, err := cli.IssuesSinceBy(ctx, e.contribCommunityRepo, since.Add(-filingSkew), login)
+	issues, complete, err := cli.IssuesSinceBy(ctx, e.contribCommunityRepo, since.Add(-contrib.FilingSkew), login)
 	if err != nil {
-		return contrib.Issue{}, false, fmt.Errorf("%w (the %s issue): %w", ErrFilingUnknown, kind, err)
+		return contrib.Issue{}, false, err
 	}
-	want := strings.TrimSpace(body)
+	want := contrib.NormalizeBody(body)
 	for _, is := range issues {
-		if is.Title == title && strings.TrimSpace(strings.ReplaceAll(is.Body, "\r\n", "\n")) == want {
+		if is.Title == title && contrib.NormalizeBody(is.Body) == want {
 			return contrib.Issue{Number: is.Number, URL: is.URL}, true, nil
 		}
 	}
 	if !complete {
-		return contrib.Issue{}, false, fmt.Errorf("%w (the %s issue): more issues were opened since than one page lists", ErrFilingUnknown, kind)
+		return contrib.Issue{}, false, errListIncomplete
 	}
 	return contrib.Issue{}, false, nil
+}
+
+// filingUnknown words a lookup that failed: what may have been filed can't be
+// found or ruled out.
+func filingUnknown(kind, what string, err error) error {
+	return fmt.Errorf("%w (the %s %s): %w", ErrFilingUnknown, kind, what, err)
 }
 
 // fileIssue files one dimension's intake issue at most once across submits: an
 // oversized body links a secret gist (made once too), and an interrupted
 // earlier submit's gist or issue is adopted rather than made again.
 func (e *Executor) fileIssue(ctx context.Context, cli *contrib.Client, bookID int64, kind, slug string, payload []byte) (contrib.Issue, error) {
-	f, err := e.readFiling(ctx, bookID, kind, payloadSum(payload))
+	f, err := e.readFiling(ctx, bookID, kind, hexSHA256(payload))
 	if err != nil {
 		return contrib.Issue{}, err
 	}
@@ -155,43 +169,34 @@ func (e *Executor) fileIssue(ctx context.Context, cli *contrib.Client, bookID in
 	if contrib.ExceedsBodyLimit(body) {
 		file := fileNameFor(kind)
 		if f.Gist == "" && !f.GistSince.IsZero() {
-			raw, found, err := e.filedGist(ctx, cli, f.GistSince, kind, file, len(payload))
+			raw, found, err := filedGist(ctx, cli, f.GistSince, file, len(payload))
 			if err != nil {
-				return contrib.Issue{}, err
+				return contrib.Issue{}, filingUnknown(kind, "gist", err)
 			}
 			if found {
 				e.log.Info("contributing: an interrupted submit had made the gist", "book", bookID, "kind", kind)
 				f.Gist = raw
 			}
+			// The next marker write records it (the gist's create, or the issue's).
 			f.GistSince = time.Time{}
-			if err := e.writeFiling(ctx, bookID, kind, f); err != nil {
-				return contrib.Issue{}, err
-			}
 		}
 		if f.Gist == "" {
-			f.GistSince = e.now().UTC()
-			if err := e.writeFiling(ctx, bookID, kind, f); err != nil {
+			var raws map[string]string
+			if err := e.guardedCreate(ctx, bookID, kind, &f, &f.GistSince, func() (err error) {
+				raws, err = cli.CreateGist(ctx, map[string]string{file: string(payload)}, true)
+				return err
+			}); err != nil {
 				return contrib.Issue{}, err
 			}
-			raws, gerr := cli.CreateGist(ctx, map[string]string{file: string(payload)}, true)
-			if gerr != nil {
-				if contrib.NothingFiled(gerr) {
-					f.GistSince = time.Time{}
-					_ = e.writeFiling(ctx, bookID, kind, f)
-				}
-				return contrib.Issue{}, gerr
-			}
+			// Recorded with the issue's marker, before the issue POST.
 			f.Gist, f.GistSince = raws[file], time.Time{}
-			if err := e.writeFiling(ctx, bookID, kind, f); err != nil {
-				return contrib.Issue{}, err
-			}
 		}
 		title, body, labels = composeIssue(kind, slug, payload, f.Gist)
 	}
 	if !f.IssueSince.IsZero() {
-		issue, found, err := e.filedIssue(ctx, cli, f.IssueSince, kind, title, body)
+		issue, found, err := e.filedIssue(ctx, cli, f.IssueSince, title, body)
 		if err != nil {
-			return contrib.Issue{}, err
+			return contrib.Issue{}, filingUnknown(kind, "issue", err)
 		}
 		if found {
 			e.log.Info("contributing: an interrupted submit had filed the issue", "book", bookID, "kind", kind,
@@ -199,18 +204,11 @@ func (e *Executor) fileIssue(ctx context.Context, cli *contrib.Client, bookID in
 			return issue, nil
 		}
 	}
-	f.IssueSince = e.now().UTC()
-	if err := e.writeFiling(ctx, bookID, kind, f); err != nil {
-		return contrib.Issue{}, err
-	}
-	issue, err := cli.CreateIssue(ctx, e.contribCommunityRepo, title, body, labels)
-	if err != nil {
-		if contrib.NothingFiled(err) {
-			// GitHub filed nothing; a gist made for it is kept for the next try.
-			f.IssueSince = time.Time{}
-			_ = e.writeFiling(ctx, bookID, kind, f)
-		}
-		return contrib.Issue{}, err
-	}
-	return issue, nil
+	// A refusal leaves a made gist in the marker for the next try.
+	var issue contrib.Issue
+	err = e.guardedCreate(ctx, bookID, kind, &f, &f.IssueSince, func() (err error) {
+		issue, err = cli.CreateIssue(ctx, e.contribCommunityRepo, title, body, labels)
+		return err
+	})
+	return issue, err
 }

@@ -153,9 +153,6 @@ func (h *Handler) Lane() string { return jobs.LaneLight }
 // result's JSON after, "" when GitHub refused it (nothing filed).
 const filingMarker = "filing"
 
-// markerSkew is how far before the marker's time a later run looks (clocks).
-const markerSkew = 2 * time.Minute
-
 // filingSince reads a filing marker: when it was set, ok false for a value that
 // isn't one; a marker without a readable time is a zero time.
 func filingSince(v string) (since time.Time, ok bool) {
@@ -256,22 +253,22 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 }
 
 // filedSince looks for the issue an interrupted run filed: a correction batch
-// made since the marker (less markerSkew) with this body. found false means none
+// made since the marker (less contrib.FilingSkew) with this body. found false means none
 // was (the list is complete back to then). A batch for the same record with
 // another body (the community record moved since, or another admin's), or a
 // list that can't be read whole, is an error: a person decides.
 func (h *Handler) filedSince(ctx context.Context, cli *contrib.Client, since time.Time, body string) (contrib.FiledIssue, bool, error) {
-	issues, complete, err := cli.IssuesSince(ctx, h.o.CoreRepo, since.Add(-markerSkew))
+	issues, complete, err := cli.IssuesSince(ctx, h.o.CoreRepo, since.Add(-contrib.FilingSkew))
 	if err != nil {
 		return contrib.FiledIssue{}, false, err
 	}
-	body = strings.TrimSpace(body)
+	body = contrib.NormalizeBody(body)
 	record, _, _ := strings.Cut(body, "\n\n### ") // the Record section
 	for _, is := range issues {
 		if !strings.HasPrefix(is.Title, contrib.CorrectionsTitleTag) {
 			continue
 		}
-		got := strings.TrimSpace(strings.ReplaceAll(is.Body, "\r\n", "\n"))
+		got := contrib.NormalizeBody(is.Body)
 		if got == body {
 			return is, true, nil
 		}

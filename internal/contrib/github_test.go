@@ -330,21 +330,29 @@ func TestIssuesSince(t *testing.T) {
 	}
 }
 
-// IssuesSinceBy narrows the list to one creator; Login reads /user.
+// IssuesSinceBy narrows the list to one creator; Login reads /user once.
 func TestIssuesSinceByAndLogin(t *testing.T) {
 	var query string
+	users := 0
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/user" {
+			users++
 			_ = json.NewEncoder(w).Encode(map[string]string{"login": "kodestar"})
 			return
 		}
 		query = r.URL.RawQuery
 		_ = json.NewEncoder(w).Encode([]any{})
 	})
-	login, err := c.Login(context.Background())
-	if err != nil || login != "kodestar" {
-		t.Fatalf("login %q %v", login, err)
+	for range 2 {
+		login, err := c.Login(context.Background())
+		if err != nil || login != "kodestar" {
+			t.Fatalf("login %q %v", login, err)
+		}
 	}
+	if users != 1 {
+		t.Fatalf("GET /user %d times, want once", users)
+	}
+	login := "kodestar"
 	if _, complete, err := c.IssuesSinceBy(context.Background(), testRepo, time.Now(), login); err != nil || !complete {
 		t.Fatalf("complete %v err %v", complete, err)
 	}

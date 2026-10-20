@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -87,6 +88,9 @@ type Client struct {
 	// from is where the token came from (FromEnv, FromDevice, FromGH; "" when
 	// NewClient made it).
 	from string
+	// login caches Login's answer (the token's user doesn't change).
+	loginMu sync.Mutex
+	login   string
 }
 
 // AppFiled reports whether the Client's issues are filed through the GitHub App
@@ -377,8 +381,14 @@ func (c *Client) GetIssue(ctx context.Context, repo string, number int) (Issue, 
 	return r.toIssue(), nil
 }
 
-// Login is the login of the user the token belongs to (GET /user).
+// Login is the login of the user the token belongs to (GET /user, read once
+// per Client).
 func (c *Client) Login(ctx context.Context) (string, error) {
+	c.loginMu.Lock()
+	defer c.loginMu.Unlock()
+	if c.login != "" {
+		return c.login, nil
+	}
 	respBody, _, err := c.request(ctx, http.MethodGet, "/user", nil, http.StatusOK)
 	if err != nil {
 		return "", err
@@ -392,7 +402,18 @@ func (c *Client) Login(ctx context.Context) (string, error) {
 	if r.Login == "" {
 		return "", errors.New("contrib: the user has no login")
 	}
+	c.login = r.Login
 	return r.Login, nil
+}
+
+// FilingSkew is how far before a filing marker's time a lookup for what it may
+// have made reaches back (the Bridge's clock against GitHub's created_at).
+const FilingSkew = 2 * time.Minute
+
+// NormalizeBody is an issue body as sent or as GitHub lists it, comparable: the
+// list can answer CRLF line ends and trims.
+func NormalizeBody(body string) string {
+	return strings.TrimSpace(strings.ReplaceAll(body, "\r\n", "\n"))
 }
 
 // NothingFiled reports whether err is GitHub refusing a create call outright (a

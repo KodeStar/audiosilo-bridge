@@ -210,8 +210,6 @@ type Executor struct {
 	contribCommunityRepo string
 	contribBaseURL       string
 	exportRoot           string
-	// now is the clock a filing marker records (tests replace it).
-	now func() time.Time
 
 	// redetectASR re-selects an ASR backend when the frozen one is unavailable. It is
 	// a field so a test can inject a scripted result; NewExecutor sets it to
@@ -281,7 +279,6 @@ func NewExecutor(cfg Config) *Executor {
 		contribCommunityRepo: cfg.ContribCommunityRepo,
 		contribBaseURL:       cfg.ContribBaseURL,
 		exportRoot:           cfg.ExportRoot,
-		now:                  time.Now,
 	}
 	e.agentWorkers.Store(int64(agentWorkers))
 	e.redetectASR = e.defaultRedetectASR
