@@ -102,7 +102,8 @@ function GitHubCard({ client, accounts, onChange }: CardProps) {
       <div className="flex flex-col gap-4">
         <p className="text-sm text-body">
           The Bridge shares characters, recaps and corrections with the community database as you,
-          through the AudioSilo Contributions app on GitHub. It can open issues and nothing else.
+          through the AudioSilo Contributions app on GitHub. It can open issues, and a gist when a
+          recaps file is too long for an issue, and nothing else.
         </p>
         {g.env_token && (
           <Notice kind="info">
