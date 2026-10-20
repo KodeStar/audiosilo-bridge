@@ -65,7 +65,9 @@ var parkHints = map[string]string{
 		"credential wins. The book tries again as soon as the Accounts tab has a new one, and every 30 minutes.",
 	string(state.ParkBudgetExceeded): "The agent budget is spent. A monthly cap resumes on the 1st, or as soon as it is raised on the " +
 		"Bridge's Settings tab; for the per-book cap, " +
-		"raise agent.book_budget_usd in the Bridge's config.yaml, restart it and press Retry on the Bridge's page.",
+		"raise agent.book_budget_usd in the Bridge's config.yaml, restart it and press Retry on the Bridge's page. " +
+		"A cap the Bridge's environment sets (AUDIOSILO_BRIDGE_AGENT_MONTHLY_BUDGET_USD, AUDIOSILO_BRIDGE_AGENT_BOOK_BUDGET_USD) " +
+		"is raised there instead, then the Bridge restarted and Retry pressed.",
 	string(state.ParkAgentValidationExhausted): "The agent's answer kept failing the checks. Press Retry on the Bridge's page to give it another go.",
 	string(state.ParkMarkersNotConfident): "The chapter markers couldn't be read with confidence. Check the book's chapters, " +
 		"then press Retry on the Bridge's page.",

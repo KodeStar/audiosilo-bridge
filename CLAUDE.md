@@ -269,9 +269,10 @@ that contributions file with (env, then the sign-in, then `gh`), and agent
 credentials handed to the agent container for each run. Two light jobs that write
 nothing into a library: `sidecars.contribute` (share a book's kept characters and
 recaps) and `meta.correct` (an admin's corrections as one meta correction-batch
-issue, filed at most once per job). The setup checklist (`setup`) on the Status
-tab's "Get set up" card and in the heartbeat, sent only once the server's reply
-`accepts` it. The monthly agent budget is editable on the page and applies live.
+issue, filed once per job: a resumed job adopts the issue it made). The setup
+checklist (`setup`) on the Status tab's "Get set up" card and in the heartbeat,
+sent only once the server's reply `accepts` it. The monthly agent budget is
+editable on the page and applies live.
 See BRIDGE-PLAN.md's Status table for what is next.
 
 Operative caveats carried from sidecars (PACKAGES.md has the detail):

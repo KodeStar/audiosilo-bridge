@@ -498,8 +498,9 @@ func NewAgent(vault secrets.Store, db Store, now func() time.Time, onChange func
 }
 
 // AgentState is which agent credentials the vault holds (never a value), when
-// the last one was set, and when each was (SetAtByKind: only kinds set, each
-// from its own row; one saved before the rows per kind has none).
+// they last changed (SetAt: a save, or a removal that left others), and when
+// each was saved (SetAtByKind: only kinds set, each from its own row; one saved
+// before the rows per kind has none).
 type AgentState struct {
 	Set         map[string]bool   `json:"set"`
 	SetAt       string            `json:"set_at"`

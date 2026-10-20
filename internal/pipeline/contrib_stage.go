@@ -452,8 +452,9 @@ func (e *Executor) submitContributions(ctx context.Context, book store.Book, slu
 // submitIssue opens one intake issue per uncovered dimension. It verifies the routing
 // label stuck (GitHub silently drops labels from non-collaborators) and notes when it
 // did not, and switches an oversize body to a secret gist link. Each dimension is
-// filed at most once across submits (fileIssue: an interrupted earlier submit's
-// gist or issue is adopted). A RateLimitError
+// filed once across submits (fileIssue: an interrupted earlier submit's gist or
+// issue is adopted; only a list that can't reach back to a marker over a day old
+// files again). A RateLimitError
 // propagates as a transient stage error (not a park); a resume with an already-recorded
 // row skips that dimension.
 func (e *Executor) submitIssue(ctx context.Context, book store.Book, slug string, artifacts []contribArtifact, auditNote string) error {

@@ -478,6 +478,38 @@ func TestNow(t *testing.T) {
 	}
 }
 
+// StaleFiling ages a marker by the GitHub clock the Client learned (two hours
+// behind the Bridge's here) and never asks for it: false until GitHub answers.
+func TestStaleFiling(t *testing.T) {
+	behind := 2 * time.Hour
+	calls := 0
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.Header().Set("Date", time.Now().Add(-behind).UTC().Format(http.TimeFormat))
+		io.WriteString(w, `{"number":1}`)
+	})
+	githubNow := func() time.Time { return time.Now().Add(-behind) }
+	if c.StaleFiling(githubNow().Add(-FilingStale-time.Hour)) || calls != 0 {
+		t.Fatalf("before any answer: stale, or %d calls", calls)
+	}
+	if _, err := c.GetIssue(context.Background(), testRepo, 1); err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range []struct {
+		name  string
+		since time.Time
+		stale bool
+	}{
+		{"under a day by GitHub's clock (over one by the Bridge's)", githubNow().Add(-FilingStale + time.Hour), false},
+		{"over a day", githubNow().Add(-FilingStale - time.Hour), true},
+		{"no marker", time.Time{}, false},
+	} {
+		if got := c.StaleFiling(m.since); got != m.stale {
+			t.Errorf("%s: StaleFiling = %v", m.name, got)
+		}
+	}
+}
+
 // NothingFiled: only a refusal (4xx, rate limit) or no connection at all rules
 // out that GitHub made it.
 func TestNothingFiled(t *testing.T) {

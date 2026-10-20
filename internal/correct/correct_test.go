@@ -236,13 +236,22 @@ func TestCorrectFailures(t *testing.T) {
 	}
 }
 
+// otherBatch is a correction batch for the same record as params' with another
+// body (the record as it was, or another admin's), made a minute after the
+// marker's run.
+func otherBatch() map[string]any {
+	return map[string]any{"title": "[corrections] Existing Work", "created_at": "2026-10-19T12:01:00Z",
+		"body": "### Record\n\nhttps://meta.audiosilo.app/works/existing-work\n\n### Changes\n\nother"}
+}
+
 // A run that stopped while filing (the marker left, no result) never files
 // twice: it adopts the issue it finds among those made since, files when there
-// is none, and leaves it to a person when it can't tell.
+// is none, and leaves it to a person when it can't tell (under a day).
 func TestCorrectNeverFilesTwice(t *testing.T) {
 	ctx := context.Background()
 	const key = "meta.correct/srv-1/3"
-	marker := filingMarker + " 2026-10-19T12:00:30Z"
+	at := time.Date(2026, 10, 19, 12, 0, 30, 0, time.UTC) // the interrupted run's marker
+	marker := filingMarker + " " + at.Format(time.RFC3339)
 	job := jobs.Job{ID: 3, Params: json.RawMessage(params), Resumed: true}
 	run := func(g *gh, kv *memKV) (any, error) {
 		h := newHandler(t, g, &tokens{token: "t", from: contrib.FromEnv}, kv, fakeMeta{cov: cov()})
@@ -277,9 +286,7 @@ func TestCorrectNeverFilesTwice(t *testing.T) {
 
 	// A batch for the same record with another body, or a list that can't be
 	// read: a person decides.
-	g, kv = &gh{}, &memKV{m: map[string]string{key: marker}}
-	g.issues = []map[string]any{{"title": "[corrections] Existing Work", "created_at": "2026-10-19T12:01:00Z",
-		"body": "### Record\n\nhttps://meta.audiosilo.app/works/existing-work\n\n### Changes\n\nother"}}
+	g, kv = &gh{issues: []map[string]any{otherBatch()}}, &memKV{m: map[string]string{key: marker}}
 	if _, err := run(g, kv); !errors.Is(err, errFiledBefore) || g.count() != 1 {
 		t.Fatalf("other body: err = %v, issues %d", err, g.count())
 	}
@@ -288,16 +295,65 @@ func TestCorrectNeverFilesTwice(t *testing.T) {
 		t.Fatalf("list fails: err = %v, issues %d", err, g.count())
 	}
 
-	// The marker's age by GitHub's clock: just under a day, a list that can't be
-	// read still stops the job; just over (contrib.FilingStale), it files again.
-	at := time.Date(2026, 10, 19, 12, 0, 30, 0, time.UTC)
-	g, kv = &gh{listStatus: http.StatusBadGateway, date: at.Add(contrib.FilingStale - time.Hour)}, &memKV{m: map[string]string{key: marker}}
-	if _, err := run(g, kv); !errors.Is(err, errFiledBefore) || g.count() != 0 {
-		t.Fatalf("under a day: err = %v, issues %d", err, g.count())
+	// The marker's age by GitHub's clock: just under a day, a lookup that can't
+	// tell stops the job; just over (contrib.FilingStale), a list that can't be
+	// read or can't reach back to the marker files again, while a batch for the
+	// same record with another body (maybe the run's own) still stops it.
+	others := func() []map[string]any { // a whole page of other issues made since, on every page
+		rows := make([]map[string]any, contrib.IssuesPage)
+		for i := range rows {
+			rows[i] = map[string]any{"title": "other", "body": "", "created_at": "2026-10-19T12:05:00Z"}
+		}
+		return rows
 	}
-	g, kv = &gh{listStatus: http.StatusBadGateway, date: at.Add(contrib.FilingStale + time.Hour)}, &memKV{m: map[string]string{key: marker}}
-	if out, err := run(g, kv); err != nil || g.count() != 1 || out.(Result).IssueNumber != 42 {
-		t.Fatalf("over a day: %+v %v, issues %d", out, err, g.count())
+	for _, c := range []struct {
+		name  string
+		gh    func() *gh
+		stale bool // files again over a day
+	}{
+		{"an unreadable list", func() *gh { return &gh{listStatus: http.StatusBadGateway} }, true},
+		{"an incomplete list", func() *gh { return &gh{issues: others()} }, true},
+		{"another body", func() *gh { return &gh{issues: []map[string]any{otherBatch()}} }, false},
+	} {
+		for _, age := range []time.Duration{contrib.FilingStale - time.Hour, contrib.FilingStale + time.Hour} {
+			g, kv := c.gh(), &memKV{m: map[string]string{key: marker}}
+			g.date = at.Add(age)
+			before := g.count()
+			files := c.stale && age > contrib.FilingStale
+			_, err := run(g, kv)
+			switch {
+			case files && (err != nil || g.count() != before+1):
+				t.Fatalf("%s, %v old: err = %v, issues %d -> %d", c.name, age, err, before, g.count())
+			case !files && (!errors.Is(err, errFiledBefore) || g.count() != before):
+				t.Fatalf("%s, %v old: err = %v, issues %d -> %d", c.name, age, err, before, g.count())
+			}
+		}
+	}
+}
+
+// A batch for the same record with another body listed before the run's own
+// (newer: another admin's) doesn't hide it: the run's issue is adopted, whatever
+// the marker's age.
+func TestCorrectAdoptsItsIssuePastAnotherBatch(t *testing.T) {
+	ctx := context.Background()
+	const key = "meta.correct/srv-1/3"
+	at := time.Date(2026, 10, 19, 12, 0, 30, 0, time.UTC)
+	job := jobs.Job{ID: 3, Params: json.RawMessage(params), Resumed: true}
+	for _, date := range []time.Time{fakeNow, at.Add(contrib.FilingStale + time.Hour)} {
+		g, kv := &gh{}, &memKV{m: map[string]string{}}
+		h := newHandler(t, g, &tokens{token: "t", from: contrib.FromEnv}, kv, fakeMeta{cov: cov()})
+		if _, err := h.Run(ctx, job, jobs.LocalReporter()); err != nil || g.count() != 1 {
+			t.Fatalf("first filing: %v, issues %d", err, g.count())
+		}
+		g.mu.Lock()
+		g.issues = append(g.issues, otherBatch()) // listed first (newest first)
+		g.date = date
+		g.mu.Unlock()
+		kv.m[key] = filingMarker + " " + at.Format(time.RFC3339)
+		out, err := h.Run(ctx, job, jobs.LocalReporter())
+		if err != nil || g.count() != 2 || out.(Result).IssueNumber != 42 {
+			t.Fatalf("at %v: %+v %v, issues %d", date, out, err, g.count())
+		}
 	}
 }
 

@@ -12,10 +12,10 @@
 //	         takes a hand-off and has no credential of its own for the CLI),
 //	         prompt.txt, request.json.tmp, then the dir opened to the agent uid
 //	         and request.json.tmp renamed to request.json (ready)
-//	Runner:  mkdir claim (atomic), request.json read, credential.json read and
-//	         deleted before the CLI starts (used only when the container has no
-//	         credential of its own for the CLI), heartbeat touched every 5 s
-//	         while the CLI runs,
+//	Runner:  mkdir claim (atomic), heartbeat touched (then every 5 s while the
+//	         CLI runs), request.json read, credential.json read and deleted
+//	         before the CLI starts (used only when the container has no
+//	         credential of its own for the CLI),
 //	         stdout.txt, stderr.txt, last_message.txt (codex), exit.json,
 //	         work/out/ opened for the Bridge to read, done.tmp renamed to done
 //	Bridge:  cancel (to stop a run), harvest of work/out/ after done, then the

@@ -426,67 +426,97 @@ func TestShareAfterARefusalFilesWithoutLooking(t *testing.T) {
 	}
 }
 
-// A marker's age by GitHub's clock: just under a day, a lookup that can't rule
-// what it made out stops the share; just over (contrib.FilingStale), it files
-// again: an issue, or another gist (then the issue).
+// A marker's age by GitHub's clock (two hours behind the Bridge's here, so the
+// Bridge's would put "under a day" over one): just under a day, a list that
+// can't reach back to it stops the share; just over (contrib.FilingStale), the
+// share files again: an issue, or another gist (then the issue).
 func TestShareStaleMarkerFilesAgain(t *testing.T) {
-	ages := []struct {
-		name  string
-		age   time.Duration
-		files bool
-	}{
-		{"under a day", contrib.FilingStale - time.Hour, false},
-		{"over a day", contrib.FilingStale + time.Hour, true},
-	}
-	for _, m := range []struct {
-		name  string
-		chars func() *model.Characters
-		// mark leaves a marker of the given age, then lists nothing that clears it.
-		mark func(t *testing.T, gh *fakeGitHub, exe *Executor, bookID int64, age time.Duration)
-		// lost gists made before (the marker's), gists all made once it files again.
-		lost, gists int
-	}{
-		{"issue", func() *model.Characters { return baseChars("x") }, func(t *testing.T, gh *fakeGitHub, exe *Executor, bookID int64, age time.Duration) {
-			if err := exe.writeFiling(context.Background(), bookID, store.ContribKindCharacters, filing{Login: "kodestar",
-				IssueSince: time.Now().Add(-age).UTC(), Issue: "an issue the list can't reach"}); err != nil {
-				t.Fatal(err)
+	for _, gist := range []bool{false, true} {
+		for _, c := range []struct {
+			name  string
+			age   time.Duration
+			files bool
+		}{
+			{"under a day", contrib.FilingStale - time.Hour, false},
+			{"over a day", contrib.FilingStale + time.Hour, true},
+		} {
+			// lost gists made before (the marker's), gists all made once it files again.
+			name, chars, lost, gists := "issue "+c.name, baseChars("x"), 0, 0
+			if gist {
+				name, chars, lost, gists = "gist "+c.name, hugeChars(), 1, 2
 			}
-			gh.mu.Lock()
-			gh.listFull = true
-			gh.mu.Unlock()
-		}, 0, 0},
-		{"gist", hugeChars, func(t *testing.T, gh *fakeGitHub, exe *Executor, bookID int64, age time.Duration) {
-			ctx := context.Background()
-			gh.lostGists = 1
-			if _, err := exe.Share(ctx, bookID, "reacher-01", nil); err == nil {
-				t.Fatal("a lost gist answer should fail the share")
-			}
-			f, err := exe.readFiling(ctx, bookID, store.ContribKindCharacters)
-			if err != nil || f.GistSince.IsZero() {
-				t.Fatalf("marker %+v %v", f, err)
-			}
-			f.GistSince = time.Now().Add(-age).UTC()
-			if err := exe.writeFiling(ctx, bookID, store.ContribKindCharacters, f); err != nil {
-				t.Fatal(err)
-			}
-			gh.mu.Lock()
-			gh.gistList = nil // the lost gist isn't on the page the list answers
-			gh.gistFull = true
-			gh.mu.Unlock()
-		}, 1, 2},
-	} {
-		for _, c := range ages {
-			t.Run(m.name+" "+c.name, func(t *testing.T) {
-				_, gh, exe, b := shareFixture(t, m.chars())
-				m.mark(t, gh, exe, b.ID, c.age)
-				_, err := exe.Share(context.Background(), b.ID, "reacher-01", nil)
+			t.Run(name, func(t *testing.T) {
+				ctx := context.Background()
+				_, gh, exe, b := shareFixture(t, chars)
+				gh.offset = -2 * time.Hour
+				if gist {
+					gh.lostGists = 1
+				} else {
+					gh.lostIssues = 1
+				}
+				if _, err := exe.Share(ctx, b.ID, "reacher-01", nil); err == nil {
+					t.Fatal("a lost answer should fail the share")
+				}
+				backdateFiling(t, exe, b.ID, store.ContribKindCharacters, c.age)
+				gh.mu.Lock()
+				gh.issues, gh.gistList = nil, nil // what it made isn't on the pages the lists answer
+				gh.listFull, gh.gistFull = true, true
+				gh.mu.Unlock()
+				_, err := exe.Share(ctx, b.ID, "reacher-01", nil)
 				switch {
-				case c.files && (err != nil || gh.gists != m.gists || gh.issueCount() != 1):
+				case c.files && (err != nil || gh.gists != gists || gh.issueCount() != 1):
 					t.Fatalf("err = %v, gists %d, issues %d", err, gh.gists, gh.issueCount())
-				case !c.files && (!errors.Is(err, ErrFilingUnknown) || gh.gists != m.lost || gh.issueCount() != 0):
+				case !c.files && (!errors.Is(err, ErrFilingUnknown) || !errors.Is(err, contrib.ErrListIncomplete) ||
+					gh.gists != lost || gh.issueCount() != 0):
 					t.Fatalf("err = %v, gists %d, issues %d", err, gh.gists, gh.issueCount())
 				}
 			})
 		}
+	}
+}
+
+// A list that can't be read (an outage, a refusal) settles nothing, whatever the
+// marker's age: the share stops with the marker as it was (a create after the
+// failed lookup would move it, and a refused one clear it), and once the list
+// reads again the share adopts the issue the lost answer made.
+func TestShareStaleMarkerSurvivesAnUnreadableList(t *testing.T) {
+	for _, v := range []struct {
+		name      string
+		status    int
+		rateLimit bool // creations are rate limited too
+	}{
+		{"an outage", http.StatusBadGateway, false},
+		{"a refusal", http.StatusForbidden, true},
+	} {
+		t.Run(v.name, func(t *testing.T) {
+			ctx := context.Background()
+			_, gh, exe, b := shareFixture(t, baseChars("x"))
+			gh.lostIssues = 1
+			if _, err := exe.Share(ctx, b.ID, "reacher-01", nil); err == nil {
+				t.Fatal("a lost answer should fail the share")
+			}
+			backdateFiling(t, exe, b.ID, store.ContribKindCharacters, contrib.FilingStale+time.Hour)
+			before, err := exe.readFiling(ctx, b.ID, store.ContribKindCharacters)
+			if err != nil {
+				t.Fatal(err)
+			}
+			gh.mu.Lock()
+			gh.listStatus, gh.rateLimit = v.status, v.rateLimit
+			gh.mu.Unlock()
+			if _, err := exe.Share(ctx, b.ID, "reacher-01", nil); !errors.Is(err, ErrFilingUnknown) {
+				t.Fatalf("share = %v", err)
+			}
+			if after, err := exe.readFiling(ctx, b.ID, store.ContribKindCharacters); err != nil ||
+				!after.IssueSince.Equal(before.IssueSince) {
+				t.Fatalf("marker %v -> %v (%v)", before.IssueSince, after.IssueSince, err)
+			}
+			gh.mu.Lock()
+			gh.listStatus, gh.rateLimit = 0, false
+			gh.mu.Unlock()
+			got, err := exe.Share(ctx, b.ID, "reacher-01", nil)
+			if err != nil || gh.issueCount() != 1 || got.Contributed["characters"] != gh.srv.URL+"/issue/1" {
+				t.Fatalf("share = %+v %v, issues %d", got, err, gh.issueCount())
+			}
+		})
 	}
 }

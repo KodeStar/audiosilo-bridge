@@ -213,15 +213,20 @@ func (c *Client) noteDate(date string) {
 // (GET /rate_limit, which costs no rate limit); the Bridge's own clock when that
 // fails too.
 func (c *Client) Now(ctx context.Context) time.Time {
-	c.clockMu.Lock()
-	dated := c.dated
-	c.clockMu.Unlock()
-	if !dated {
-		_, _, _ = c.request(ctx, http.MethodGet, "/rate_limit", nil, http.StatusOK)
+	if now, ok := c.githubNow(); ok {
+		return now
 	}
+	_, _, _ = c.request(ctx, http.MethodGet, "/rate_limit", nil, http.StatusOK)
+	now, _ := c.githubNow()
+	return now
+}
+
+// githubNow is the Bridge's clock less how far it ran ahead of the Date of
+// GitHub's last answer; ok is false before any answer (the Bridge's own clock).
+func (c *Client) githubNow() (now time.Time, ok bool) {
 	c.clockMu.Lock()
 	defer c.clockMu.Unlock()
-	return time.Now().Add(-c.ahead).UTC()
+	return time.Now().Add(-c.ahead).UTC(), c.dated
 }
 
 // setHeaders applies the GitHub API headers and (when present) the bearer token.
@@ -482,15 +487,19 @@ func (c *Client) Login(ctx context.Context) (string, error) {
 const FilingSkew = 2 * time.Minute
 
 // FilingStale is the age (by GitHub's clock) past which a filing marker no
-// longer stops a new filing: a lookup that can't find or rule out what it may
-// have made files again rather than failing. meta's intake catches a duplicate,
-// and a marker nothing on the page can clear would block the book for good.
+// longer stops a new filing when the lookup for what it may have made fails in a
+// way no later try mends (each caller says which: ErrListIncomplete only grows):
+// it files again rather than failing. meta's intake catches a duplicate it has
+// already applied, and a marker nothing on the page can clear would block for
+// good.
 const FilingStale = 24 * time.Hour
 
 // StaleFiling reports whether a marker set at since (GitHub's time) is past
-// FilingStale by the Client's GitHub clock (Now).
-func (c *Client) StaleFiling(ctx context.Context, since time.Time) bool {
-	return !since.IsZero() && c.Now(ctx).Sub(since) > FilingStale
+// FilingStale by the GitHub clock the Client learned from GitHub's answers;
+// false while GitHub hasn't answered it (the Bridge's own clock is no measure).
+func (c *Client) StaleFiling(since time.Time) bool {
+	now, ok := c.githubNow()
+	return ok && !since.IsZero() && now.Sub(since) > FilingStale
 }
 
 // NormalizeBody is an issue body as sent or as GitHub lists it, comparable: the

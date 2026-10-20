@@ -18,7 +18,8 @@ import (
 // (the stage's retry, a second "Share with the community"). Before each create a
 // submit records a filing marker for the dimension; the next submit that finds
 // one looks among what the same user made since then and adopts a match, and makes
-// another only when that list is complete and holds none.
+// another only when that list is complete and holds none, or when it can't reach
+// back to a marker over a day old (refileStale).
 
 // ErrFilingUnknown is a dimension an earlier submit may have filed that the
 // Bridge can't find or rule out (GitHub's list didn't reach back far enough, or
@@ -179,16 +180,28 @@ func (e *Executor) filedIssue(ctx context.Context, cli *contrib.Client, f filing
 	return contrib.Issue{}, false, nil
 }
 
+// refileStale reports whether a lookup that failed with err is set aside so the
+// submit files again: GitHub's list can't reach back to the marker set at since
+// (contrib.ErrListIncomplete, which only grows, so no later lookup settles it)
+// and the marker is over a day old by GitHub's clock (contrib.FilingStale). Any
+// other failure (a refusal, a rate limit, an outage, a cancel) stops the submit
+// with the marker kept, for a later submit to find what it made.
+func refileStale(cli *contrib.Client, since time.Time, err error) bool {
+	return errors.Is(err, contrib.ErrListIncomplete) && cli.StaleFiling(since)
+}
+
 // filingUnknown words a lookup that failed: what may have been filed can't be
 // found or ruled out.
 func filingUnknown(kind, what string, err error) error {
 	return fmt.Errorf("%w (the %s %s): %w", ErrFilingUnknown, kind, what, err)
 }
 
-// fileIssue files one dimension's intake issue at most once across submits: an
+// fileIssue files one dimension's intake issue once across submits: an
 // oversized body links a secret gist (made once too), and an interrupted
-// earlier submit's gist or issue is adopted rather than made again. recorded is
-// the issue the dimension's row names (0 for none), never the one adopted.
+// earlier submit's gist or issue is adopted rather than made again (only a list
+// that can't reach back to a marker over a day old makes it again: refileStale).
+// recorded is the issue the dimension's row names (0 for none), never the one
+// adopted.
 func (e *Executor) fileIssue(ctx context.Context, cli *contrib.Client, bookID int64, kind, slug string, payload []byte,
 	recorded int) (contrib.Issue, error) {
 	f, err := e.readFiling(ctx, bookID, kind)
@@ -206,11 +219,11 @@ func (e *Executor) fileIssue(ctx context.Context, cli *contrib.Client, bookID in
 	if !f.IssueSince.IsZero() {
 		issue, found, err := e.filedIssue(ctx, cli, f, login, recorded)
 		switch {
-		case err != nil && !cli.StaleFiling(ctx, f.IssueSince):
+		case err != nil && !refileStale(cli, f.IssueSince, err):
 			return contrib.Issue{}, filingUnknown(kind, "issue", err)
 		case err != nil:
-			e.log.Warn("contributing: an interrupted submit's issue can't be found or ruled out, and its marker "+
-				"is over a day old: filing again", "book", bookID, "kind", kind, "err", err)
+			e.log.Warn("contributing: GitHub's list can't reach back to an interrupted submit's issue, and its "+
+				"marker is over a day old: filing again", "book", bookID, "kind", kind, "err", err)
 		case found:
 			e.log.Info("contributing: an interrupted submit had filed the issue", "book", bookID, "kind", kind,
 				"issue", issue.Number)
@@ -228,11 +241,11 @@ func (e *Executor) fileIssue(ctx context.Context, cli *contrib.Client, bookID in
 		if f.Gist == "" && !f.GistSince.IsZero() {
 			raw, found, err := filedGist(ctx, cli, f.GistSince, file, desc)
 			switch {
-			case err != nil && !cli.StaleFiling(ctx, f.GistSince):
+			case err != nil && !refileStale(cli, f.GistSince, err):
 				return contrib.Issue{}, filingUnknown(kind, "gist", err)
 			case err != nil:
-				e.log.Warn("contributing: an interrupted submit's gist can't be found or ruled out, and its marker "+
-					"is over a day old: making another", "book", bookID, "kind", kind, "err", err)
+				e.log.Warn("contributing: GitHub's list can't reach back to an interrupted submit's gist, and its "+
+					"marker is over a day old: making another", "book", bookID, "kind", kind, "err", err)
 			case found:
 				e.log.Info("contributing: an interrupted submit had made the gist", "book", bookID, "kind", kind)
 				f.Gist = raw

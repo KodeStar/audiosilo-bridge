@@ -3,8 +3,10 @@
 // database's core repo as ONE correction-batch issue with the Bridge's GitHub
 // sign-in. It writes nothing into the library and runs no agent: it maps the
 // server's fields onto meta's records (contrib.CorrectionBatchIssue), files the
-// issue and reports where it is, once per job (a resumed job never files twice:
-// after a run that stopped mid-filing it looks for that run's issue first).
+// issue and reports where it is, once per job (after a run that stopped
+// mid-filing, a resumed job looks for that run's issue first, and files again
+// only when GitHub's list can't be read or can't reach back to that run and it
+// is over a day old).
 package correct
 
 import (
@@ -45,6 +47,12 @@ const (
 		"can't tell whether they were filed: look for a [corrections] issue on the community database before " +
 		"suggesting them again."
 )
+
+// errOtherBatch is a correction batch for the same record with another body
+// among the issues made since an interrupted run: the record moved since (the
+// batch may be that run's own, composed from the record as it was) or another
+// admin's. The Bridge can't tell which, so a person decides, whatever its age.
+var errOtherBatch = errors.New("corrects the same record with another body")
 
 // Params are meta.correct's params (the server's bridge.CorrectParams).
 type Params struct {
@@ -216,12 +224,13 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 	if interrupted {
 		filed, found, err := h.filedSince(ctx, cli, since, body)
 		switch {
-		case err != nil && !cli.StaleFiling(ctx, since):
+		case err != nil && (errors.Is(err, errOtherBatch) || !cli.StaleFiling(since)):
 			h.o.Log.Warn("correct: looking for an interrupted run's issue failed", "job", job.ID, "err", err)
 			return nil, errFiledBefore
 		case err != nil:
-			// Over a day old (contrib.FilingStale): file again rather than block the
-			// job for good; meta's intake catches a duplicate batch.
+			// The list can't be read, or can't reach back to the marker, and the
+			// marker is over a day old (contrib.FilingStale): file again rather than
+			// fail the job for good; meta's intake catches a batch it has applied.
 			h.o.Log.Warn("correct: an interrupted run's issue can't be found or ruled out, and its marker is "+
 				"over a day old: filing again", "job", job.ID, "err", err)
 		case found:
@@ -241,7 +250,7 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 		}
 		// Otherwise GitHub may have filed it (a server error can come after the
 		// issue is made, and an answer can be lost): the marker stays, and a later
-		// run looks for it rather than filing twice.
+		// run looks for it first.
 		var apiErr *contrib.APIError
 		if errors.As(err, &apiErr) && apiErr.Status == http.StatusUnauthorized {
 			return nil, errRefused
@@ -254,10 +263,10 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 }
 
 // filedSince looks for the issue an interrupted run filed: a correction batch
-// made since the marker (less contrib.FilingSkew) with this body. found false means none
-// was (the list is complete back to then). A batch for the same record with
-// another body (the community record moved since, or another admin's), or a
-// list that can't be read whole, is an error: a person decides.
+// made since the marker (less contrib.FilingSkew) with this body, anywhere in the
+// list. found false means none was (the list is complete back to then). With no
+// match, a batch for the same record with another body (errOtherBatch), or a
+// list that can't be read whole (contrib.ErrListIncomplete), is an error.
 func (h *Handler) filedSince(ctx context.Context, cli *contrib.Client, since time.Time, body string) (contrib.FiledIssue, bool, error) {
 	issues, complete, err := cli.IssuesSince(ctx, h.o.CoreRepo, since.Add(-contrib.FilingSkew))
 	if err != nil {
@@ -265,6 +274,7 @@ func (h *Handler) filedSince(ctx context.Context, cli *contrib.Client, since tim
 	}
 	body = contrib.NormalizeBody(body)
 	record, _, _ := strings.Cut(body, "\n\n### ") // the Record section
+	other := 0                                    // the newest same-record batch with another body
 	for _, is := range issues {
 		if !strings.HasPrefix(is.Title, contrib.CorrectionsTitleTag) {
 			continue
@@ -273,11 +283,14 @@ func (h *Handler) filedSince(ctx context.Context, cli *contrib.Client, since tim
 		if got == body {
 			return is, true, nil
 		}
-		if r, _, _ := strings.Cut(got, "\n\n### "); r == record {
-			return contrib.FiledIssue{}, false, fmt.Errorf("issue #%d corrects the same record with another body", is.Number)
+		if r, _, _ := strings.Cut(got, "\n\n### "); r == record && other == 0 {
+			other = is.Number
 		}
 	}
-	if !complete {
+	switch {
+	case other != 0:
+		return contrib.FiledIssue{}, false, fmt.Errorf("issue #%d %w", other, errOtherBatch)
+	case !complete:
 		return contrib.FiledIssue{}, false, contrib.ErrListIncomplete
 	}
 	return contrib.FiledIssue{}, false, nil

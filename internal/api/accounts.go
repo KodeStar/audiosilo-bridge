@@ -60,9 +60,9 @@ type AgentAccount struct {
 	Backend string   `json:"backend"`
 	Kinds   []string `json:"kinds"`
 	// Set names the kinds the Bridge holds (claude_oauth_token,
-	// anthropic_api_key, openai_api_key); SetAt when the last was saved;
-	// SetAtByKind when each kind held was (Phase 2b; a kind without its own
-	// time is left out).
+	// anthropic_api_key, openai_api_key); SetAt when they last changed (a save,
+	// or a removal that left others); SetAtByKind when each kind held was saved
+	// (Phase 2b; a kind without its own time is left out).
 	Set         map[string]bool   `json:"set"`
 	SetAt       string            `json:"set_at"`
 	SetAtByKind map[string]string `json:"set_at_by_kind"`

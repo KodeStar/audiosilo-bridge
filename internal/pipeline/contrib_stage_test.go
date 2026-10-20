@@ -92,6 +92,8 @@ type fakeGitHub struct {
 	// back (every page is full of others).
 	listFull bool
 	gistFull bool
+	// listStatus: the issue and gist lists answer this status (0 as usual).
+	listStatus int
 }
 
 // testCommunityRepo is the repository the stage contributes sidecars to.
@@ -175,6 +177,10 @@ func (g *fakeGitHub) handle(w http.ResponseWriter, r *http.Request) {
 		if creator == "" {
 			g.t.Errorf("fakeGitHub: issue list without the creator: %s", r.URL.RawQuery)
 		}
+		if g.listStatus != 0 {
+			w.WriteHeader(g.listStatus)
+			return
+		}
 		if g.listFull {
 			g.writeJSON(w, http.StatusOK, fullPage(r, func(i int) map[string]any {
 				return map[string]any{"number": 1000 + i, "title": "other", "body": "",
@@ -193,6 +199,10 @@ func (g *fakeGitHub) handle(w http.ResponseWriter, r *http.Request) {
 
 	case r.Method == http.MethodGet && path == "/gists":
 		g.gistCalls++
+		if g.listStatus != 0 {
+			w.WriteHeader(g.listStatus)
+			return
+		}
 		if g.gistFull {
 			g.writeJSON(w, http.StatusOK, fullPage(r, func(i int) map[string]any {
 				return map[string]any{"id": fmt.Sprintf("other-%d", i), "created_at": g.now().Format(time.RFC3339),

@@ -919,7 +919,7 @@ internal/
             is ErrNoSidecars. Config.MonthlyBudget (a func) is read live, so a budget
             saved on the page applies without a restart.
             contrib_filing.go: every issue-mode submit (the stage and Share) files a
-            dimension at most once (fileIssue). Before each create call (the gist,
+            dimension once (fileIssue). Before each create call (the gist,
             the issue) it records a filing marker in the settings KV
             (contrib.filing/<book id>/<kind>: the payload's sha256, the GitHub
             login, gist_since, the gist's raw URL once made, issue_since and the
@@ -934,12 +934,16 @@ internal/
             It adopts a match and creates again only when the list is complete,
             holds none and (for an issue) the marker is a minute old; else it
             fails with ErrFilingUnknown (the share job words it and logs the
-            cause), unless the marker is over a day old by GitHub's clock
-            (contrib.FilingStale, Client.StaleFiling): then it files again (meta's intake
-            catches a duplicate, and nothing on the page clears a marker). A refusal or a request that never left (contrib.NothingFiled:
-            a 4xx, a rate limit, a failed dial) clears the pending time; a made
-            gist is kept for the next try; the marker goes once the row is
-            recorded.
+            cause) and keeps the marker. Only a list that can't reach back to a
+            marker over a day old by GitHub's clock (contrib.ErrListIncomplete,
+            which only grows, and contrib.FilingStale: refileStale) files again
+            (meta's intake catches a duplicate it has applied, and nothing on
+            the page clears a marker); a list that can't be read (an outage, a
+            refusal, a rate limit) stops it at any age, since a later submit
+            can read it. A refusal or a request that never left
+            (contrib.NothingFiled: a 4xx, a rate limit, a failed dial) clears
+            the pending time; a made gist is kept for the next try; the marker
+            goes once the row is recorded.
   contrib/  M7: everything GitHub-facing for contribution. TokenSource (Phase 2b:
             NewTokenSource(device, onChange) resolves AUDIOSILO_BRIDGE_GITHUB_TOKEN
             read LIVE from the environment first (never sealed any more), then the
@@ -982,7 +986,10 @@ internal/
                          the filing lookups' lists (IssuesSinceBy, GistsSince) read
                          page by page, at most 20 pages (ErrListIncomplete past
                          them); Now is GitHub's clock, from the Date of its last
-                         answer (GET /rate_limit, free, when there was none)
+                         answer (GET /rate_limit, free, when there was none);
+                         StaleFiling ages a marker by that clock (false while
+                         GitHub hasn't answered: it never asks, nor falls back
+                         on the Bridge's clock)
             ServiceDeps.CoreRepo is where SubmitCore opens add-work issues; every
             other call follows the repo a row records.
             Imports neither scheduler nor api - reaches them via injected
@@ -1045,11 +1052,15 @@ internal/
             a resumed run with the result returns it; one with only the marker
             lists the core repo's issues made since (contrib.IssuesSince: the
             list endpoint, not search, which lags) and adopts a [corrections]
-            issue with the same body, files when the list is complete and has
-            none, and otherwise (a same-record batch with another body, an
-            unreadable or incomplete list, a marker without a time) fails asking
-            the admin to look first, unless the marker is over a day old by
-            GitHub's clock (contrib.FilingStale): then it files again. A 401 is errRefused. Result {issue_url,
+            issue with the same body anywhere in the list, files when the list
+            is complete and has none, and otherwise fails asking the admin to
+            look first (errFiledBefore): always for a same-record batch with
+            another body (errOtherBatch: it may be the run's own, composed from
+            the record as it was) or a marker without a time; for an unreadable
+            or incomplete list only while the marker is under a day old by
+            GitHub's clock (contrib.FilingStale, Client.StaleFiling), past which
+            it files again (the job would fail for good; meta's intake catches
+            a batch it has applied). A 401 is errRefused. Result {issue_url,
             issue_number, changes, auto, maintainer}: auto and maintainer as
             known at filing; the Bridge doesn't follow the issue (a batch meta
             applies only in part is not reported back, plan D8).
@@ -2060,8 +2071,9 @@ internal/
             POST add: the token in the answer only, DELETE revoke). Phase 2b:
             accounts.go, GET /api/accounts (GitHub: signed in, login, refused,
             the pending device code, env_token, from, can_contribute, manage_url;
-            the agent: each kind set or not, when the last was saved (set_at)
-            and when each was (set_at_by_kind), the container's own
+            the agent: each kind set or not, when they last changed (set_at: a
+            save, or a removal that left others) and when each held was saved
+            (set_at_by_kind), the container's own
             credential; never a credential), POST /api/accounts/github/device
             (starts a sign-in, answers the code), DELETE /api/accounts/github
             ({accounts, revoke_error}), PUT /api/accounts/agent {kind, value},
