@@ -147,7 +147,6 @@ func (h *Handler) Handle(ctx context.Context, rec slog.Record) error {
 		for _, a := range h.attrs {
 			add(a.Key, a.Value)
 		}
-		prefix := strings.Join(h.groups, ".")
 		rec.Attrs(func(a slog.Attr) bool {
 			key := a.Key
 			if prefix != "" {

@@ -47,7 +47,8 @@ func parse(raw []byte, base string, allowEmpty bool) (*Parsed, error) {
 		return nil, ErrNotFeed
 	}
 	prefixes := podcastPrefixes(raw)
-	out := &Parsed{Show: Show{Title: Text(f.Title, 300), Description: Text(f.Description, 4000), Link: absoluteURL(base, f.Link), Language: Clip(f.Language, 35), Type: "episodic", Categories: []string{}}, Episodes: []Episode{}}
+	baseURL, _ := url.Parse(base) // nil when invalid: absoluteURL then answers ""
+	out := &Parsed{Show: Show{Title: Text(f.Title, 300), Description: Text(f.Description, 4000), Link: absoluteURL(baseURL, f.Link), Language: Clip(f.Language, 35), Type: "episodic", Categories: []string{}}, Episodes: []Episode{}}
 	for _, p := range f.Authors {
 		if p != nil && p.Name != "" {
 			out.Show.Author = Text(p.Name, 300)
@@ -72,14 +73,13 @@ func parse(raw []byte, base string, allowEmpty bool) (*Parsed, error) {
 		if normalized, err := NormalizeFeedURL(i.NewFeedURL); err == nil {
 			out.NewFeedURL = normalized
 		}
-		out.ImageURL = absoluteURL(base, i.Image)
+		out.ImageURL = absoluteURL(baseURL, i.Image)
 	}
 	if out.ImageURL == "" && f.Image != nil {
-		out.ImageURL = absoluteURL(base, f.Image.URL)
+		out.ImageURL = absoluteURL(baseURL, f.Image.URL)
 	}
-	for _, x := range podcastExtensions(f.Extensions, prefixes, "guid") {
-		out.Show.PodcastGUID = Clip(strings.TrimSpace(x.Value), 1024)
-		break
+	if xs := podcastExtensions(f.Extensions, prefixes, "guid"); len(xs) > 0 {
+		out.Show.PodcastGUID = Clip(strings.TrimSpace(xs[0].Value), 1024)
 	}
 	hasEnclosures := false
 	for _, item := range f.Items {
@@ -100,7 +100,7 @@ func parse(raw []byte, base string, allowEmpty bool) (*Parsed, error) {
 			if enc == nil {
 				continue
 			}
-			u := absoluteURL(base, enc.URL)
+			u := absoluteURL(baseURL, enc.URL)
 			if Extension(enc.Type, u) == "" || u == "" {
 				continue
 			}
@@ -123,7 +123,7 @@ func parse(raw []byte, base string, allowEmpty bool) (*Parsed, error) {
 			}
 		}
 		for _, x := range podcastExtensions(item.Extensions, prefixes, "chapters") {
-			if u := absoluteURL(base, x.Attrs["url"]); u != "" {
+			if u := absoluteURL(baseURL, x.Attrs["url"]); u != "" {
 				e.ChaptersURL = u
 				break
 			}
@@ -132,7 +132,7 @@ func parse(raw []byte, base string, allowEmpty bool) (*Parsed, error) {
 			if len(e.Transcripts) == 8 {
 				break
 			}
-			u := absoluteURL(base, x.Attrs["url"])
+			u := absoluteURL(baseURL, x.Attrs["url"])
 			if u == "" {
 				continue
 			}
@@ -153,9 +153,10 @@ func parse(raw []byte, base string, allowEmpty bool) (*Parsed, error) {
 }
 
 // Resolve extension prefixes by URI, never by an untrusted prefix spelling.
-// Only declarations are collected; extension data comes from gofeed.
-func podcastPrefixes(raw []byte) map[string]bool {
-	out := map[string]bool{}
+// Only declarations are collected; extension data comes from gofeed. The
+// prefixes come back sorted and distinct.
+func podcastPrefixes(raw []byte) []string {
+	var out []string
 	d := xml.NewDecoder(bytes.NewReader(raw))
 	d.Strict = false
 	for {
@@ -166,31 +167,23 @@ func podcastPrefixes(raw []byte) map[string]bool {
 		if start, ok := tok.(xml.StartElement); ok {
 			for _, a := range start.Attr {
 				if a.Name.Space == "xmlns" && strings.TrimRight(strings.TrimSpace(a.Value), "/") == podcastNamespace {
-					out[a.Name.Local] = true
+					out = append(out, a.Name.Local)
 				}
 			}
 		}
 	}
-	return out
+	slices.Sort(out)
+	return slices.Compact(out)
 }
-func podcastExtensions(e ext.Extensions, prefixes map[string]bool, name string) []ext.Extension {
+func podcastExtensions(e ext.Extensions, prefixes []string, name string) []ext.Extension {
 	var out []ext.Extension
-	keys := make([]string, 0, len(prefixes))
-	for p := range prefixes {
-		keys = append(keys, p)
-	}
-	slices.Sort(keys)
-	for _, p := range keys {
+	for _, p := range prefixes {
 		out = append(out, e[p][name]...)
 	}
 	return out
 }
-func absoluteURL(base, raw string) string {
-	if strings.TrimSpace(raw) == "" {
-		return ""
-	}
-	b, e := url.Parse(base)
-	if e != nil {
+func absoluteURL(b *url.URL, raw string) string {
+	if b == nil || strings.TrimSpace(raw) == "" {
 		return ""
 	}
 	u, e := url.Parse(strings.TrimSpace(raw))

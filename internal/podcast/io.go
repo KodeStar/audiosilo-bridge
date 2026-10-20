@@ -2,8 +2,6 @@ package podcast
 
 import (
 	"bytes"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -12,9 +10,16 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/kodestar/audiosilo-bridge/internal/fsutil"
 )
 
 var ErrInvalidFile = errors.New("invalid feed.json")
+
+// maxReadBytes is the reader's cap (the server reads up to the same 32 MiB);
+// the Bridge writes at most MaxFileBytes.
+const maxReadBytes = 32 << 20
+
 var showIDPattern = regexp.MustCompile(`^[0-9a-f]{16}$`)
 
 func Read(root *os.Root, show string) (*Feed, error) {
@@ -33,7 +38,7 @@ func Read(root *os.Root, show string) (*Feed, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !info.Mode().IsRegular() || info.Size() > 32<<20 {
+	if !info.Mode().IsRegular() || info.Size() > maxReadBytes {
 		return nil, ErrInvalidFile
 	}
 	rd, err := root.Open(name)
@@ -41,11 +46,11 @@ func Read(root *os.Root, show string) (*Feed, error) {
 		return nil, err
 	}
 	defer rd.Close()
-	b, err := io.ReadAll(io.LimitReader(rd, (32<<20)+1))
+	b, err := io.ReadAll(io.LimitReader(rd, maxReadBytes+1))
 	if err != nil {
 		return nil, err
 	}
-	if len(b) > 32<<20 {
+	if len(b) > maxReadBytes {
 		return nil, ErrTooLarge
 	}
 	var f Feed
@@ -130,27 +135,5 @@ func WriteAtomic(root *os.Root, show, name string, data []byte) error {
 	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	var random [12]byte
-	if _, err := rand.Read(random[:]); err != nil {
-		return err
-	}
-	tmp := show + "/.audiosilo-tmp-" + hex.EncodeToString(random[:])
-	file, err := root.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = file.Close(); _ = root.Remove(tmp) }()
-	if err := file.Chmod(0o644); err != nil {
-		return err
-	}
-	if _, err := file.Write(data); err != nil {
-		return err
-	}
-	if err := file.Sync(); err != nil {
-		return err
-	}
-	if err := file.Close(); err != nil {
-		return err
-	}
-	return root.Rename(tmp, show+"/"+name)
+	return fsutil.WriteRootAtomic(root, show, name, data, 0o644, nil)
 }

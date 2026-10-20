@@ -10,6 +10,7 @@ import (
 	"os"
 	"regexp"
 
+	"github.com/kodestar/audiosilo-bridge/internal/fsutil"
 	"github.com/kodestar/audiosilo-bridge/internal/link"
 )
 
@@ -136,26 +137,10 @@ func writeMarker(root *os.Root, m libraryMarker) error {
 	if err != nil {
 		return err
 	}
-	tmp := ".audiosilo/.audiosilo-tmp-" + m.Nonce
-	f, err := root.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = f.Close(); _ = root.Remove(tmp) }()
-	if err := f.Chmod(0o644); err != nil {
-		return err
-	}
-	if _, err := f.Write(b); err != nil {
-		return err
-	}
-	if err := f.Sync(); err != nil {
-		return err
-	}
-	if err := f.Close(); err != nil {
-		return err
-	}
-	if _, err := root.Lstat(MarkerPath); !errors.Is(err, os.ErrNotExist) {
-		return errors.New("marker appeared during the check")
-	}
-	return root.Rename(tmp, MarkerPath)
+	return fsutil.WriteRootAtomic(root, ".audiosilo", "library.json", b, 0o644, func() error {
+		if _, err := root.Lstat(MarkerPath); !errors.Is(err, os.ErrNotExist) {
+			return errors.New("marker appeared during the check")
+		}
+		return nil
+	})
 }

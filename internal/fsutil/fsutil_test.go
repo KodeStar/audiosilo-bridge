@@ -1,6 +1,7 @@
 package fsutil
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -141,5 +142,37 @@ func TestFileSHA256(t *testing.T) {
 	}
 	if _, _, err := FileSHA256(p + "x"); err == nil {
 		t.Fatal("a missing file hashed")
+	}
+}
+
+func TestWriteRootAtomicWritesAndHonoursBeforeRename(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, "show"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = root.Close() }()
+	if err := WriteRootAtomic(root, "show", "a.json", []byte("one"), 0o644, nil); err != nil {
+		t.Fatal(err)
+	}
+	refused := errors.New("refused")
+	if err := WriteRootAtomic(root, "show", "a.json", []byte("two"), 0o644, func() error { return refused }); !errors.Is(err, refused) {
+		t.Fatalf("err = %v, want the beforeRename error", err)
+	}
+	got, err := os.ReadFile(filepath.Join(dir, "show", "a.json"))
+	if err != nil || string(got) != "one" {
+		t.Fatalf("destination = %q, %v; want the first write kept", got, err)
+	}
+	entries, _ := os.ReadDir(filepath.Join(dir, "show"))
+	if len(entries) != 1 {
+		t.Fatalf("temp files left behind: %v", entries)
+	}
+	if runtime.GOOS != "windows" {
+		if info, _ := os.Stat(filepath.Join(dir, "show", "a.json")); info.Mode().Perm() != 0o644 {
+			t.Fatalf("mode = %v", info.Mode().Perm())
+		}
 	}
 }

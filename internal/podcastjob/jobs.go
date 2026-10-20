@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"net/url"
 	"os"
 	"slices"
 	"sync"
@@ -99,8 +98,7 @@ func (h *Subscribe) SealParams(job jobs.Job) (json.RawMessage, error) {
 	p.FeedURL = norm
 	p.Private = p.Private || podcast.IsPrivateFeedURL(norm)
 	p.FeedURLSHA256 = podcast.FeedURLHash(norm)
-	u, _ := url.Parse(norm)
-	p.FeedHost = u.Hostname()
+	p.FeedHost = podcast.FeedHost(norm)
 	if p.Private {
 		if err := h.s.o.Vault.Set(secrets.PodcastJobName(job.ID), norm); err != nil {
 			return nil, err
@@ -119,16 +117,18 @@ func (h *Subscribe) Run(parent context.Context, job jobs.Job, rep *jobs.Reporter
 			h.Abandon(parent, job)
 		}
 	}()
-	ctx, cancel := context.WithTimeout(parent, 3*time.Minute)
-	defer cancel()
-	result, err := h.run(ctx, job, rep)
-	return outcome(result, err)
+	return bounded(parent, func(ctx context.Context) (any, error) { return h.run(ctx, job, rep) })
 }
 func (h *Poll) Run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (any, error) {
+	return bounded(parent, func(ctx context.Context) (any, error) { return h.run(ctx, job, rep) })
+}
+
+// bounded runs a job under the 3 minute job ceiling and maps its error to a
+// failure result.
+func bounded(parent context.Context, run func(context.Context) (any, error)) (any, error) {
 	ctx, cancel := context.WithTimeout(parent, 3*time.Minute)
 	defer cancel()
-	result, err := h.run(ctx, job, rep)
-	return outcome(result, err)
+	return outcome(run(ctx))
 }
 
 func (s *service) acquire(ctx context.Context, key string) (func(), error) {
@@ -162,11 +162,11 @@ func (s *service) library(job jobs.Job) (link.Library, string, error) {
 		return link.Library{}, "", fail("not_podcast_library", "This job needs a podcast library.")
 	}
 	lib, ok := s.o.Libraries.Library(*job.LibraryID)
-	if !ok || lib.LibraryKind() != "podcasts" {
+	if !ok {
 		return lib, "", fail("not_podcast_library", "This job needs a podcast library.")
 	}
 	mount, _ := s.o.Mount(lib.ID, lib.Root)
-	return lib, mount, s.writable(lib, mount)
+	return lib, mount, s.writable(lib, mount) // writable checks the kind
 }
 func (s *service) writable(lib link.Library, mount string) error {
 	current, ok := s.o.Libraries.Library(lib.ID)
@@ -194,6 +194,23 @@ func (s *service) beforeWrite(lib link.Library, mount, rel string) error {
 	return nil
 }
 
+// feedURL is a job's normalized feed URL: plain, or the vault entry secret
+// when the show is private.
+func (s *service) feedURL(plain string, private bool, secret, invalid string) (string, error) {
+	if private {
+		v, err := s.o.Vault.Get(secret)
+		if err != nil || v == "" {
+			return "", fail("feed_secret_missing", "The private feed secret is missing. Follow the feed again.")
+		}
+		plain = v
+	}
+	norm, err := podcast.NormalizeFeedURL(plain)
+	if err != nil {
+		return "", fail("invalid_feed_url", invalid)
+	}
+	return norm, nil
+}
+
 func (h *Subscribe) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (any, error) {
 	s := h.s
 	lib, mount, err := s.library(job)
@@ -209,16 +226,9 @@ func (h *Subscribe) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (
 	if json.Unmarshal(job.Params, &p) != nil {
 		return nil, fail("invalid_feed_url", "The feed request is invalid.")
 	}
-	feedURL := p.FeedURL
-	if p.Private {
-		feedURL, err = s.o.Vault.Get(secrets.PodcastJobName(job.ID))
-		if err != nil || feedURL == "" {
-			return nil, fail("feed_secret_missing", "The private feed secret is missing. Follow the feed again.")
-		}
-	}
-	feedURL, err = podcast.NormalizeFeedURL(feedURL)
+	feedURL, err := s.feedURL(p.FeedURL, p.Private, secrets.PodcastJobName(job.ID), "The feed URL is invalid.")
 	if err != nil {
-		return nil, fail("invalid_feed_url", "The feed URL is invalid.")
+		return nil, err
 	}
 	if p.FeedURLSHA256 != "" && podcast.FeedURLHash(feedURL) != p.FeedURLSHA256 {
 		return nil, fail("feed_secret_missing", "The private feed secret does not match this request.")
@@ -292,8 +302,8 @@ func (h *Subscribe) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (
 		if _, err := rand.Read(random[:]); err != nil {
 			return nil, fail("write_failed", "The show identity could not be created.")
 		}
-		u, _ := url.Parse(feedURL)
-		f = &podcast.Feed{Version: 1, Generator: "audiosilo-bridge/" + s.o.Version, ShowID: hex.EncodeToString(random[:]), FeedURL: feedURL, FeedURLSHA256: podcast.FeedURLHash(feedURL), FeedHost: u.Hostname(), PreviousFeedURLSHA256: []string{}, Private: p.Private || podcast.IsPrivateFeedURL(feedURL), SubscribedAt: s.o.Now().UTC().Format(time.RFC3339), Episodes: []podcast.Episode{}}
+		// moveURL below sets FeedURL and FeedHost.
+		f = &podcast.Feed{Version: 1, Generator: "audiosilo-bridge/" + s.o.Version, ShowID: hex.EncodeToString(random[:]), FeedURLSHA256: podcast.FeedURLHash(feedURL), PreviousFeedURLSHA256: []string{}, Private: p.Private || podcast.IsPrivateFeedURL(feedURL), SubscribedAt: s.o.Now().UTC().Format(time.RFC3339), Episodes: []podcast.Episode{}}
 	}
 	unlockShow, err := s.acquire(ctx, s.o.ServerID()+"|"+mount+"/"+show)
 	if err != nil {
@@ -309,21 +319,8 @@ func (h *Subscribe) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (
 	}
 	f.Private = f.Private || p.Private
 	newURL, _ := moveURL(f, feedURL, resp, parsed)
-	if _, err := s.merge(root, f, parsed, show); err != nil {
-		return nil, err
-	}
 	rep.Progress(jobs.Progress{Step: "writing", Message: "Saving the podcast show"})
-	if err := s.beforeWrite(lib, mount, show); err != nil {
-		return nil, err
-	}
-	s.artwork(ctx, root, lib, mount, show, f, parsed.ImageURL)
-	if err := s.beforeWrite(lib, mount, show); err != nil {
-		return nil, err
-	}
-	if _, err := podcast.Write(root, show, f, s.o.Now()); err != nil {
-		return nil, err
-	}
-	if err := s.save(ctx, lib, show, f, newURL); err != nil {
+	if _, _, err := s.persist(ctx, root, lib, mount, show, f, parsed, newURL); err != nil {
 		return nil, err
 	}
 	rep.Progress(jobs.Progress{Step: "indexing", Message: "Indexing the podcast show"})
@@ -360,16 +357,9 @@ func (h *Poll) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (any, 
 	if err != nil {
 		return nil, fail("not_a_feed", "The saved podcast feed could not be read.")
 	}
-	feedURL := f.FeedURL
-	if f.Private {
-		feedURL, err = s.o.Vault.Get(secrets.PodcastFeedName(f.ShowID))
-		if err != nil || feedURL == "" {
-			return nil, fail("feed_secret_missing", "The private feed secret is missing. Follow the feed again.")
-		}
-	}
-	feedURL, err = podcast.NormalizeFeedURL(feedURL)
+	feedURL, err := s.feedURL(f.FeedURL, f.Private, secrets.PodcastFeedName(f.ShowID), "The saved feed URL is invalid.")
 	if err != nil {
-		return nil, fail("invalid_feed_url", "The saved feed URL is invalid.")
+		return nil, err
 	}
 	var params struct {
 		ETag         string `json:"etag"`
@@ -400,23 +390,9 @@ func (h *Poll) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (any, 
 		}
 		skipped = parsed.Skipped
 		feedURL, moved = moveURL(f, feedURL, resp, parsed)
-		added, err = s.merge(root, f, parsed, show)
-		if err != nil {
-			return nil, err
-		}
 		rep.Progress(jobs.Progress{Step: "writing", Message: "Saving changed podcast details"})
-		if err := s.beforeWrite(lib, mount, show); err != nil {
-			return nil, err
-		}
-		s.artwork(ctx, root, lib, mount, show, f, parsed.ImageURL)
-		if err := s.beforeWrite(lib, mount, show); err != nil {
-			return nil, err
-		}
-		changed, err = podcast.Write(root, show, f, s.o.Now())
+		added, changed, err = s.persist(ctx, root, lib, mount, show, f, parsed, feedURL)
 		if err != nil {
-			return nil, err
-		}
-		if err := s.save(ctx, lib, show, f, feedURL); err != nil {
 			return nil, err
 		}
 		if changed {
@@ -451,8 +427,7 @@ func moveURL(f *podcast.Feed, original string, resp *netguard.Response, p *podca
 	}
 	f.Private = f.Private || podcast.IsPrivateFeedURL(current)
 	f.FeedURL = current
-	u, _ := url.Parse(current)
-	f.FeedHost = u.Hostname()
+	f.FeedHost = podcast.FeedHost(current)
 	f.ScrubPrivate()
 	return current, moved
 }
@@ -463,7 +438,34 @@ func (s *service) save(ctx context.Context, lib link.Library, show string, f *po
 			return fail("write_failed", "The private feed credentials could not be saved.")
 		}
 	}
-	return s.o.DB.UpsertPodcastShow(ctx, store.PodcastShow{ServerID: s.o.ServerID(), LibraryID: lib.ID, ShowID: f.ShowID, ShowPath: show, FeedURLSHA256: f.FeedURLSHA256, Private: f.Private, CreatedAt: f.SubscribedAt})
+	return s.o.DB.UpsertPodcastShow(ctx, s.showRow(lib, show, f))
+}
+
+// showRow is the lookup cache row for a show's feed.json.
+func (s *service) showRow(lib link.Library, show string, f *podcast.Feed) store.PodcastShow {
+	return store.PodcastShow{ServerID: s.o.ServerID(), LibraryID: lib.ID, ShowID: f.ShowID, ShowPath: show, FeedURLSHA256: f.FeedURLSHA256, Private: f.Private, CreatedAt: f.SubscribedAt}
+}
+
+// persist merges a parsed feed into f, refreshes the artwork and saves
+// feed.json, the vault entry and the cache row. It answers the number of new
+// episodes and whether feed.json changed.
+func (s *service) persist(ctx context.Context, root *os.Root, lib link.Library, mount, show string, f *podcast.Feed, parsed *podcast.Parsed, feedURL string) (int, bool, error) {
+	added, err := s.merge(root, f, parsed, show)
+	if err != nil {
+		return 0, false, err
+	}
+	s.artwork(ctx, root, lib, mount, show, f, parsed.ImageURL) // checks writability before its own write
+	if err := s.beforeWrite(lib, mount, show); err != nil {
+		return 0, false, err
+	}
+	changed, err := podcast.Write(root, show, f, s.o.Now())
+	if err != nil {
+		return 0, false, err
+	}
+	if err := s.save(ctx, lib, show, f, feedURL); err != nil {
+		return 0, false, err
+	}
+	return added, changed, nil
 }
 func (s *service) rescan(ctx context.Context, id int64, show string) error {
 	srv := s.o.Server()
@@ -513,7 +515,7 @@ func (s *service) rebuild(ctx context.Context, root *os.Root, lib link.Library, 
 		if err != nil {
 			continue
 		}
-		if err := s.o.DB.UpsertPodcastShow(ctx, store.PodcastShow{ServerID: s.o.ServerID(), LibraryID: lib.ID, ShowID: f.ShowID, ShowPath: e.Name(), FeedURLSHA256: f.FeedURLSHA256, Private: f.Private, CreatedAt: f.SubscribedAt}); err != nil {
+		if err := s.o.DB.UpsertPodcastShow(ctx, s.showRow(lib, e.Name(), f)); err != nil {
 			return err
 		}
 	}
@@ -522,7 +524,7 @@ func (s *service) rebuild(ctx context.Context, root *os.Root, lib link.Library, 
 func (s *service) find(root *os.Root, entries []os.DirEntry, p subscribeParams, feedURL string) (string, *podcast.Feed, error) {
 	hash := podcast.FeedURLHash(feedURL)
 	for _, e := range entries {
-		if !e.IsDir() || !podcast.ValidShow(e.Name()) {
+		if !e.IsDir() || !podcast.ValidShow(e.Name()) || p.ShowPath != "" && p.ShowPath != e.Name() {
 			continue
 		}
 		f, err := podcast.Read(root, e.Name())
@@ -530,9 +532,6 @@ func (s *service) find(root *os.Root, entries []os.DirEntry, p subscribeParams, 
 			continue
 		}
 		if f.FeedURLSHA256 == hash || slices.Contains(f.PreviousFeedURLSHA256, hash) {
-			if p.ShowPath != "" && p.ShowPath != e.Name() {
-				continue
-			}
 			return e.Name(), f, nil
 		}
 	}
@@ -563,9 +562,6 @@ func (s *service) artwork(ctx context.Context, root *os.Root, lib link.Library, 
 		return
 	}
 	if s.beforeWrite(lib, mount, show) != nil {
-		return
-	}
-	if _, err := mapping.SafeJoin(mount, show+"/"+name); err != nil {
 		return
 	}
 	if podcast.WriteAtomic(root, show, name, resp.Body) != nil {

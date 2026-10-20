@@ -51,17 +51,12 @@ func NormalizeFeedURL(s string) (string, error) {
 	if end := strings.IndexAny(authority, "/?#"); end >= 0 {
 		authority = authority[:end]
 	}
+	user := ""
 	if at := strings.LastIndex(authority, "@"); u.User != nil && at >= 0 {
-		user := authority[:at]
+		user = authority[:at+1]
 		u.User = nil
-		out := u.String()
-		out = strings.Replace(out, "://", "://"+user+"@", 1)
-		if len(out) > 2048 {
-			return "", ErrInvalidFeedURL
-		}
-		return out, nil
 	}
-	out := u.String()
+	out := strings.Replace(u.String(), "://", "://"+user, 1)
 	if len(out) > 2048 {
 		return "", ErrInvalidFeedURL
 	}
@@ -71,6 +66,15 @@ func NormalizeFeedURL(s string) (string, error) {
 func FeedURLHash(norm string) string {
 	h := sha256.Sum256([]byte(norm))
 	return hex.EncodeToString(h[:])
+}
+
+// FeedHost is the host name of a normalized feed URL (feed.json feed_host).
+func FeedHost(norm string) string {
+	u, err := url.Parse(norm)
+	if err != nil {
+		return ""
+	}
+	return u.Hostname()
 }
 
 func RedactURL(norm string) string {
@@ -118,4 +122,10 @@ func IsPrivateFeedURL(norm string) bool {
 var urlInText = regexp.MustCompile(`(?i)https?://[^\s<>"']+`)
 
 // RedactText removes credentials from URLs in text from untrusted peers.
-func RedactText(s string) string { return urlInText.ReplaceAllStringFunc(s, RedactURL) }
+// Every match holds "://", so text without it skips the regexp scan.
+func RedactText(s string) string {
+	if !strings.Contains(s, "://") {
+		return s
+	}
+	return urlInText.ReplaceAllStringFunc(s, RedactURL)
+}

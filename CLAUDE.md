@@ -139,8 +139,8 @@ web, netguard, podcastjob}` plus the engine it wires; `accounts -> {agentproto, 
 the password), with types from jobs/link/mapping/store/logring; `verify -> {jobs,
 link, mapping}`; `generate -> {jobs, link, mapping, store, scheduler, pipeline, ...}`
 through its own Engine/Server interfaces; `podcastjob -> {jobs, link, mapping, netguard, podcast, secrets, store}`;
-`podcast -> {gofeed, x/net/html, x/text}`; `logring -> podcast`;
-`jobs -> {link, store}`; `mapping -> link`;
+`podcast -> {fsutil, gofeed, x/net/html, x/text}`; `logring -> podcast`;
+`jobs -> {link, store}`; `mapping -> {fsutil, link}`;
 `link`, `agentproto` and `workerproto` are leaves; `workers -> {asr, fsutil,
 scheduler, state, store, transcript, workerproto}`; `worker -> {asr, fsutil, workerproto}`
 (never `workers`; its tests drive the real `api` + `workers` in-process); `api`

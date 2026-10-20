@@ -226,9 +226,7 @@ func NewRegistry() *Registry { return &Registry{results: map[int64]result{}, pen
 func (r *Registry) SetLibraries(libs []link.Library) (changed bool) {
 	sorted := slices.Clone(libs)
 	for i := range sorted {
-		if sorted[i].Kind == "" {
-			sorted[i].Kind = "books"
-		}
+		sorted[i].Kind = sorted[i].LibraryKind()
 	}
 	slices.SortFunc(sorted, func(a, b link.Library) int { return cmp.Compare(a.ID, b.ID) })
 	r.mu.Lock()
