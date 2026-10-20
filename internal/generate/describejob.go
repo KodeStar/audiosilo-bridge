@@ -323,7 +323,7 @@ func (h *Handler) describeParked(ctx context.Context, r *run, d Describer, bookI
 				// A Retry pressed while that try ran was answered by it: only one
 				// pressed once this park is reported tries again before its
 				// retry_at. (A park without one waits for a press, so a press made
-				// meanwhile, after raising the budget say, is kept.)
+				// meanwhile is kept.)
 				select {
 				case <-r.poke:
 				default:

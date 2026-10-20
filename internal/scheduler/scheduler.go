@@ -1010,6 +1010,12 @@ func (s *Scheduler) advanceWaypoints(ctx context.Context) ([]store.Book, error) 
 var autoReadmitCodes = []state.ParkCode{state.ParkAgentUnavailable, state.ParkAgentRateLimited,
 	state.ParkAgentCredentialRefused, state.ParkBudgetExceeded}
 
+// restartReadmitCodes are the parks a daemon start re-admits once
+// (readmitRestartRecoverable): external availability a restart may have fixed.
+// budget_exceeded is left out on purpose (a per-book budget park waits for a
+// person's Retry), and the wording that asks for that Retry depends on it: the
+// generate package's engine budget hint (parkHints) and the pipeline's budget park
+// reasons (budgetExceededMsg, monthlyBudgetExceededMsg). Adding it here changes them.
 var restartReadmitCodes = []state.ParkCode{
 	state.ParkAgentUnavailable, state.ParkAgentRateLimited,
 	state.ParkASRUnavailable, state.ParkMediaToolsUnavailable,

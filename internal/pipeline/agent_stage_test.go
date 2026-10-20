@@ -835,8 +835,9 @@ func TestRunAgentParksOnBudgetExceeded(t *testing.T) {
 	if !pe.RetryAfter.IsZero() {
 		t.Errorf("budget park must carry no auto-readmit time, got %v", pe.RetryAfter)
 	}
-	if !strings.Contains(pe.Reason, "12.00") || !strings.Contains(pe.Reason, "10.00") {
-		t.Errorf("park reason = %q, want it to name the spend and budget", pe.Reason)
+	// An engine stage's park asks for the Retry a restart doesn't give it.
+	if pe.Reason != budgetExceededMsg(12, 10, false) {
+		t.Errorf("park reason = %q, want the engine's per-book budget message", pe.Reason)
 	}
 	if n := fake.count(string(state.FactPass)); n != 0 {
 		t.Errorf("agent invoked %d times over budget, want 0", n)
@@ -1784,27 +1785,27 @@ func TestRepairedPhraseResolverReadsRepairedLayer(t *testing.T) {
 	}
 }
 
-// TestBudgetParkMessages pins the budget parks' fixes. An engine book is not
-// re-admitted at a restart, so a budget raised in config.yaml or the environment
-// still takes a Retry; the description step's park (a sidecars.describe job, which
-// tries again as the Bridge starts) needs only the restart.
+// TestBudgetParkMessages pins the budget parks' reasons: an engine book's names the
+// Retry it needs; the description step's names only the levers (each cap's setting
+// and the restart), true for all three of its callers.
 func TestBudgetParkMessages(t *testing.T) {
 	t.Parallel()
 	resume := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
 	for _, c := range []struct{ got, want string }{
 		{budgetExceededMsg(5, 4, false),
-			"book agent cost $5.00 reached the budget $4.00 - raise agent.book_budget_usd in config.yaml (restart to apply), then Retry"},
+			"book agent cost $5.00 reached the budget $4.00 - raise agent.book_budget_usd in config.yaml " +
+				"(or AUDIOSILO_BRIDGE_AGENT_BOOK_BUDGET_USD when that sets it), restart, then Retry"},
 		{budgetExceededMsg(5, 4, true),
-			"book agent cost $5.00 reached the budget $4.00 - raise agent.book_budget_usd in config.yaml and restart the Bridge: " +
-				"the description carries on by itself"},
+			"book agent cost $5.00 reached the budget $4.00 - raise agent.book_budget_usd in config.yaml " +
+				"(or AUDIOSILO_BRIDGE_AGENT_BOOK_BUDGET_USD when that sets it) and restart the Bridge"},
 		{monthlyBudgetExceededMsg(25, 20, resume, false),
 			"this month's agent cost $25.00 reached the monthly budget $20.00 - the book resumes on 1 November 2026, or once the " +
 				"monthly budget is raised on the Bridge's Settings tab (when AUDIOSILO_BRIDGE_AGENT_MONTHLY_BUDGET_USD sets it, " +
 				"raise that, restart, then Retry)"},
 		{monthlyBudgetExceededMsg(25, 20, resume, true),
-			"this month's agent cost $25.00 reached the monthly budget $20.00 - the description resumes on 1 November 2026, or " +
+			"this month's agent cost $25.00 reached the monthly budget $20.00 - there is room again on 1 November 2026, or " +
 				"once the monthly budget is raised on the Bridge's Settings tab (when AUDIOSILO_BRIDGE_AGENT_MONTHLY_BUDGET_USD " +
-				"sets it, raise that and restart the Bridge: the description carries on by itself)"},
+				"sets it, raise that and restart the Bridge)"},
 	} {
 		if c.got != c.want {
 			t.Errorf("message = %q\nwant      %q", c.got, c.want)

@@ -117,13 +117,16 @@ const (
 )
 
 // describeBudgetHint replaces the budget park's hint for a sidecars.describe
-// job's own park. That job tries again as soon as the Bridge starts (the engine's
-// books do not: a restart re-admits no budget park), so a budget raised in
-// config.yaml or the environment needs the restart and no Retry.
+// job's own park. That job tries again as soon as the Bridge starts (the jobs
+// runner resumes it), while the engine's books do not (the scheduler's
+// restartReadmitCodes leave budget parks out), so a budget raised in config.yaml
+// or the environment needs the restart and no Retry.
 const describeBudgetHint = budgetHintSpent + " and restart it. " + budgetHintEnv +
 	", then the Bridge restarted. Once the Bridge starts again the description carries on by itself."
 
-// describeParkHint is the advice for a description-only job's park code.
+// describeParkHint is the advice for a description-only job's agent park
+// (parkDescribe). It differs from ParkHint only for budget_exceeded, so the job's
+// own Bridge parks (h.park: book_not_writable, library_not_writable) keep ParkHint.
 func describeParkHint(code string) string {
 	if code == string(state.ParkBudgetExceeded) {
 		return describeBudgetHint

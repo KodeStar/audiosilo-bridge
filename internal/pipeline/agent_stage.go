@@ -63,28 +63,32 @@ const (
 )
 
 // budgetExceededMsg is the park reason when a book's summed agent cost has reached the
-// configured per-book budget. It names the spend and the budget and the exact fix, so a
-// user knows the one lever: for an engine book, raise agent.book_budget_usd, restart,
-// Retry (a restart re-admits no budget park); for the description step (describing),
-// raise it and restart, since a sidecars.describe job tries again as the Bridge starts.
+// configured per-book budget. It names the spend, the budget and the lever (the cap in
+// config.yaml, or the environment variable that sets it, read at the next start); an
+// engine book then needs a Retry (a restart re-admits no budget park). The description
+// step's reason (describing) stops at the restart: how it goes on is its caller's (a
+// sidecars.describe job tries again as the Bridge starts and its hint says so, while
+// sidecars.generate's description and the contributing stage's only log the reason).
 func budgetExceededMsg(spent, budget float64, describing bool) string {
-	fix := "(restart to apply), then Retry"
+	fix := ", restart, then Retry"
 	if describing {
-		fix = "and restart the Bridge: the description carries on by itself"
+		fix = " and restart the Bridge"
 	}
-	return fmt.Sprintf("book agent cost $%.2f reached the budget $%.2f - raise agent.book_budget_usd in config.yaml %s", spent, budget, fix)
+	return fmt.Sprintf("book agent cost $%.2f reached the budget $%.2f - raise agent.book_budget_usd in config.yaml "+
+		"(or AUDIOSILO_BRIDGE_AGENT_BOOK_BUDGET_USD when that sets it)%s", spent, budget, fix)
 }
 
 // monthlyBudgetExceededMsg is the park reason when this month's agent spend across
 // every book reached agent.monthly_budget_usd. A budget raised on the Settings tab
-// re-admits the book itself; one the environment sets takes a restart and a Retry
-// for an engine book, and only the restart for the description step (describing).
+// re-admits an engine book itself; one the environment sets takes a restart and a
+// Retry. The description step's reason (describing) says when there is room again and
+// names the levers, not how its caller goes on (see budgetExceededMsg).
 func monthlyBudgetExceededMsg(spent, budget float64, resume time.Time, describing bool) string {
-	what, envFix := "the book", "raise that, restart, then Retry"
+	what, envFix := "the book resumes", "raise that, restart, then Retry"
 	if describing {
-		what, envFix = "the description", "raise that and restart the Bridge: the description carries on by itself"
+		what, envFix = "there is room again", "raise that and restart the Bridge"
 	}
-	return fmt.Sprintf("this month's agent cost $%.2f reached the monthly budget $%.2f - %s resumes on %s, "+
+	return fmt.Sprintf("this month's agent cost $%.2f reached the monthly budget $%.2f - %s on %s, "+
 		"or once the monthly budget is raised on the Bridge's Settings tab (when AUDIOSILO_BRIDGE_AGENT_MONTHLY_BUDGET_USD "+
 		"sets it, %s)", spent, budget, what, resume.Format("2 January 2006"), envFix)
 }
@@ -443,7 +447,8 @@ func (e *Executor) runAgent(ctx context.Context, book store.Book, stage state.St
 // mid-flight. The budget sum prefers provider cost and falls back to complete
 // configured API-equivalent estimates, and includes superseded rows, so a Retry never
 // lowers the spend the guard sees. The monthly budget is checked after it. The
-// description step calls it itself, before its preparation, then runAgentWith.
+// description step calls it itself, after its (local, free) preparation and before
+// its stage run, then runAgentWith.
 func (e *Executor) budgetPreflight(ctx context.Context, book store.Book, stage state.State) error {
 	if e.db != nil && e.bookBudgetUSD > 0 {
 		spent, complete, serr := e.db.SumStageRunBudgetCost(ctx, book.ID)

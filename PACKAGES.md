@@ -823,7 +823,8 @@ internal/
             checked_against, usage}; runAgentWith is runAgent after the preflight with
             the rate-limit backoff given (noWait passes an empty schedule: a rate
             limit parks at once), stageMaxTurns gives it 10. Its parks come back
-            as *scheduler.ParkError (the caller decides). The composed file is kept
+            as *scheduler.ParkError (the caller decides; a budget park's reason,
+            describing, names only the levers and no Retry). The composed file is kept
             as sidecars/description.json (FinalDescriptionPath, canonical JSON); a
             later call reuses it (re-composed with the current work/sources, nothing
             spent) when a successful describing run recorded how it was made
@@ -1625,12 +1626,16 @@ internal/
             parked engine book, else a poke for a job waiting in its own park
             (ErrNotParked, store.ErrNotFound otherwise). ParkHint words every park code
             for the console and the page (a fresh start says to cancel this job first:
-            the server keeps one open job per book); a sidecars.describe job's own
-            park takes describeParkHint, whose budget_exceeded entry (and the
-            describing stage's budget park reasons, pipeline budgetExceededMsg /
-            monthlyBudgetExceededMsg) asks for a restart and no Retry, since that job
-            tries again as the Bridge starts, while an engine book's still asks for
-            the Retry a restart does not give it. Estimates (the heartbeat's): the
+            the server keeps one open job per book); a sidecars.describe job's agent
+            park (parkDescribe) takes describeParkHint, which differs only for
+            budget_exceeded (describeBudgetHint): a restart and no Retry, since that
+            job tries again as the Bridge starts, while an engine book's asks for the
+            Retry a restart does not give it (scheduler restartReadmitCodes leave
+            budget parks out). The description step's own budget park reasons
+            (pipeline budgetExceededMsg / monthlyBudgetExceededMsg, describing) name
+            only the levers, no Retry: how it goes on is its caller's (only a
+            sidecars.describe job parks on it; generate's description and the
+            contributing stage's log it). Estimates (the heartbeat's): the
             ASR rate (seconds per chapter) scaled by the finished audio books'
             chapters per hour, else SeedASRSecondsPerAudioHour 900; agent spend per
             audio hour summed over finished audio books, per ebook averaged, nil until

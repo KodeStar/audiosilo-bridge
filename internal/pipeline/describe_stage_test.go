@@ -539,8 +539,8 @@ func TestDescribeParks(t *testing.T) {
 		if !errors.As(err, &park) || park.Code != state.ParkBudgetExceeded || fake.count(DescribeStage) != 0 {
 			t.Fatalf("err = %v, calls %d", err, fake.count(DescribeStage))
 		}
-		// A sidecars.describe job tries again as the Bridge starts: the restart is
-		// the whole fix, no Retry.
+		// The description step's reason names the levers and no Retry: how it goes on
+		// is its caller's (a sidecars.describe job tries again as the Bridge starts).
 		if want := budgetExceededMsg(2, 1, true); park.Reason != want || strings.Contains(park.Reason, "Retry") {
 			t.Errorf("reason = %q, want %q", park.Reason, want)
 		}
