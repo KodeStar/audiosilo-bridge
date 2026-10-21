@@ -197,7 +197,13 @@ func New(ctx context.Context, opts Options) (*Bridge, string, error) {
 	if len(networks) > 0 {
 		opts.Logger.Warn("podcast feeds may reach explicitly allowed non-public networks", "allow_networks", cfg.Podcasts.AllowNetworks)
 	}
-	podcasts := podcastjob.New(podcastjob.Options{DB: db, Libraries: b.libs, Mount: b.mount, Vault: vault, Fetcher: b.podcastHTTP, MaxFeedBytes: int64(cfg.Podcasts.MaxFeedMB) << 20, Version: opts.Version, ServerID: serverID, Server: func() podcastjob.Server {
+	podcasts := podcastjob.New(podcastjob.Options{DB: db, Libraries: b.libs, Mount: b.mount, Vault: vault, Fetcher: b.podcastHTTP, MaxFeedBytes: int64(cfg.Podcasts.MaxFeedMB) << 20, MaxEpisodeBytes: int64(cfg.Podcasts.MaxEpisodeMB) << 20, DataDir: opts.DataDir, Probe: func(ctx context.Context, f *os.File) (podcastjob.ProbeResult, error) {
+		program := cfg.Tools.FFprobePath
+		if e := b.engine.get(); e != nil {
+			program = e.ffprobe
+		}
+		return podcastjob.LocalProbe(program)(ctx, f)
+	}, Version: opts.Version, ServerID: serverID, Server: func() podcastjob.Server {
 		if cl := b.conn.Client(); cl != nil {
 			return cl
 		}
@@ -206,7 +212,7 @@ func New(ctx context.Context, opts Options) (*Bridge, string, error) {
 	corrector := correct.New(correct.Options{Meta: metaops.NewClient(cfg.Metadata.BaseURL), Tokens: b.tokens,
 		BaseURL: cfg.Contribution.APIBaseURL, CoreRepo: cfg.Contribution.CoreRepo, KV: db, ServerID: serverID, Log: opts.Logger})
 	b.runner = jobs.New(db, b.server, b.tokenRefused, jobs.Options{Log: opts.Logger, ServerID: serverID},
-		verifier, b.gen, b.gen.DescribeJob(), b.gen.ChaptersJob(), b.gen.ContributeJob(), corrector, podcasts, podcasts.PollJob())
+		verifier, b.gen, b.gen.DescribeJob(), b.gen.ChaptersJob(), b.gen.ContributeJob(), corrector, podcasts, podcasts.PollJob(), podcasts.FetchJob(), podcasts.RetainJob())
 	conn.onChange = b.linkChanged
 	return b, oneTime, nil
 }

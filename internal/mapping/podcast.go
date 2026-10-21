@@ -107,7 +107,15 @@ func CheckPodcast(ctx context.Context, src MarkerSource, lib link.Library, mount
 	}
 	nonce, err := src.Marker(ctx, lib.ID)
 	if err != nil || nonce != marker.Nonce {
-		st.Error = "this folder isn't the library the server sees"
+		var api *link.APIError
+		switch {
+		case errors.Is(err, link.ErrNoMarker), err == nil:
+			st.Error = "this folder isn't the library the server sees"
+		case errors.As(err, &api) && api.Code == "library_not_found":
+			st.Error = "the library was removed from the server"
+		default:
+			st.Error = "could not verify this folder with the server"
+		}
 		return st
 	}
 	st.Mapped = true

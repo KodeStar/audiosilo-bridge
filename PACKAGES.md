@@ -29,6 +29,8 @@ internal/
             AUDIOSILO_BRIDGE_PODCASTS_ALLOW_NETWORKS comma-separated) and
             podcasts.max_feed_mb (1-64, default 32;
             AUDIOSILO_BRIDGE_PODCASTS_MAX_FEED_MB). Both apply at restart.
+            Phase 2c-2a: podcasts.max_episode_mb (1-4096, default 1024;
+            AUDIOSILO_BRIDGE_PODCASTS_MAX_EPISODE_MB) is a separate audio cap.
             The Bridge's own settings are bridge.go: server.url, public_url (the page
             as the LAN reaches it, sent as the heartbeat's ui_url), libraries (library
             id -> the folder the Bridge sees it at; MountFor falls back to the
@@ -1132,6 +1134,8 @@ internal/
             bridge.db. 0007 adds podcast_shows, a credential-free cache keyed by
             (server_id, show_id), indexed by server/library/feed hash. An empty
             library cache is rebuilt from feed.json before subscription dedupe.
+            0008 adds podcast_artwork_state keyed by server/library/show, storing
+            only source hash, failure count and next retry time (1 h to 24 h).
             0001 is sidecars' 13 migrations squashed at the import (the
             later columns folded into their tables; candidate_overrides and
             library_sightings dropped; the 'legacy' batch row still seeded): books,
@@ -1511,6 +1515,9 @@ internal/
             server would refuse an unknown field); app kicks a beat when it first
             appears, resends once without it on a 400, then ignores accepts for an
             hour, and resets that on every pair or unpair.
+            Phase 2c-2a mirrors PodcastRetention and CheckPodcastRetention.
+            Deletion snapshots require all protocol fields, tolerate new keys,
+            and expose no listener identities.
   mapping/  where the Bridge sees each library, CHECKED (decision 13): Check stats the
             server's sample book's files through the mount (SafeJoin: no absolute,
             "..", NUL; a backslash is a name character except on Windows) and
@@ -1525,7 +1532,9 @@ internal/
             refused; a newly created marker is removed after a failed check. A
             marker naming another library is refused while the server lists that
             library, and replaced once it doesn't (the library was deleted, or
-            the folder added again under a new id).
+            the folder added again under a new id). Missing marker/nonce mismatch is definitive;
+            network/401/503/unexpected errors say verification failed and keep
+            existing markers. Only artifacts created by that check are removed.
             Registry dispatches by the heartbeat's kind and holds the
             server's libraries from the last heartbeat and each check; Check(ids...)
             checks some or all, one library at a time, and never overlaps itself: a
@@ -1538,7 +1547,8 @@ internal/
             edit re-checks only its library (each check stats files and writes a
             probe). Status(id) is one library's last check (a write job needs it
             mapped AND writable at the mount it uses now).
-  jobs/     the generic runner. Phase 2c-1: optional ParamSealer.SealParams runs
+  jobs/     the generic runner. Phase 2c-2a adds download capacity 2 and a strict
+            Reporter.ConfirmLease publication check (network errors deny commit). Phase 2c-1: optional ParamSealer.SealParams runs
             BEFORE RecordClaim. A failure records sanitized empty params, fails
             closed without Run, and calls Abandon for any secret already sealed;
             a *SealFailure is reported as its code and message, any other error
@@ -1617,7 +1627,11 @@ internal/
             then holds, reporting each second. A mismatch is a failure WITH a result.
             Result {library_id, mount_path, path, files[{path,size,expected_size,ok}],
             writable, writable_error, elapsed_ms}: the server's console renders it.
-  netguard/ Phase 2c-1 feed/artwork client: explicit DNS resolution and a socket
+  netguard/ Stream adds a one-attempt audio GET over the same guard and transport,
+            identity encoding, caller-owned body, inactivity bound and cross-origin
+            credential stripping. The handler owns the combined three-attempt
+            retry/resume budget; ResumeAction validates exact strong identity.
+            Phase 2c-1 feed/artwork client: explicit DNS resolution and a socket
             Control check of the exact IP, public addresses or configured CIDRs
             only (including NAT64 embedded IPv4 checks), no environment proxy.
             Each resolved address is dialed in turn with its share of the 10 s
@@ -1644,6 +1658,13 @@ internal/
             20,000-episode cap the removed, never-fetched episodes gone longest
             are dropped first. Private feeds scrub URLs before each write. Golden
             fixtures and URL vectors are shared with the server.
+            Phase 2c-2a adds Fetch validation/generation transitions, bounded
+            chronological ID3 CHAP attachments and pure install/delete journals.
+            Journals are serving barriers. Exclusive hard-link then unlink installs
+            audio without overwriting a concurrent foreign file. Committed delete
+            manifests identify trash for cleanup after rescan or after 24 h.
+            Invalid Fetch keeps its episode and grants no file authority. Shared
+            phase2c2 fixtures are copied byte-for-byte, checked by manifest hashes.
   podcastjob/ podcast.subscribe and podcast.poll (light lane): require the
             heartbeat's podcasts kind and the checked writable mount at each
             write. Per-library subscribe and per-show write locks, hash dedupe,
@@ -1651,8 +1672,13 @@ internal/
             Subscribe implements ParamSealer and Abandoner: job credentials are
             sealed before persistence, resumed from the vault, resealed under
             the show id on success, and removed at every terminal job end.
-            A 304 never rewrites feed.json or artwork. Neither handler fetches
-            episode audio; retained fetch metadata is preserved. A job claimed
+            A 304 never rewrites feed.json or artwork. Both handlers preserve retained fetch metadata and recover show journals before
+            writes. Fetch downloads outside the show lock, rehashes proven partials,
+            seals validators, probes local descriptors and confirms its lease before
+            publication. Per-path process and OS file locks prevent overlap across
+            reclaimed jobs. Retain hashes local candidates and fails closed on an
+            unavailable, stale or protected aggregate. Old cleanup uses only owned
+            checkpoint/trash records, checked mappings and no live matching job. A job claimed
             before its library's mapping check (a start or re-pair) waits for it
             (CheckPoll). A subscribe's 3-minute ceiling starts once it holds the
             library lock; artwork gets at most a minute and half the time left; a
@@ -1660,7 +1686,8 @@ internal/
             poll asks for a rescan of any show the server hasn't indexed since
             this start (one a failed job left owed), 304 or not. An
             itunes:new-feed-url never names a URL the show moved away from nor
-            takes https to http. A cover deleted by hand is fetched again.
+            takes https to http. A cover deleted by hand is fetched again, subject to durable artwork backoff.
+            No failure-only feed timestamp churn and no artwork work on 304.
   generate/ sidecars.generate (Phase 1a): turns a server job into an ENGINE BOOK, follows
             it to the end reporting its stage, ETA, spend and parks, then writes the
             validated characters and recaps into the book's .audiosilo/ and asks the
@@ -2142,7 +2169,9 @@ internal/
             started by hand (spike 4); launchd and systemd end the job's process
             group/cgroup, so an installed worker doesn't leave one.
   app/      Phase 2c-1 wires the guarded client and both podcast handlers,
-            advertises their kinds, warns for allowed non-public CIDRs at start
+            advertises their kinds (2c-2a also fetch/download and retain/light),
+            uses the resolved engine probe for podcast audio, warns for allowed
+            non-public CIDRs at start
             and on Status, and redacts podcast params/results/errors for page
             job lists and details. The warning reflects the running client until
             restart, including after an unrelated settings save.
@@ -2292,7 +2321,8 @@ web/          the Bridge's page: Vite + React 19 + TS + Tailwind v4 (npm, Node 2
               files written to .audiosilo/ with any contribution links.
               Phase 1d: chapters.detect is a sidecars job too (kind label "Chapters",
               its parks and Retry; parseChaptersResult / chaptersSummary word its
-              result). The page lists no stage or park names: the hint comes in the
+              result). Podcast job labels also word Fetching episode and Checking retention.
+              The page lists no stage or park names: the hint comes in the
               progress.
               src/lib/engine.ts words the Status tab's "Characters and recaps" card
               (GET /api/engine every 10 s: the agent container and its CLIs'

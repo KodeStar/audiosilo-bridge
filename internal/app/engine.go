@@ -45,8 +45,9 @@ const eventQueueSize = 1024
 
 // engine is the running engine, nil until it has started.
 type engine struct {
-	sched *scheduler.Scheduler
-	exec  *pipeline.Executor
+	ffprobe string
+	sched   *scheduler.Scheduler
+	exec    *pipeline.Executor
 }
 
 // engineState holds the engine once it is up.
@@ -222,7 +223,7 @@ func (b *Bridge) runEngine(ctx context.Context) {
 	}()
 	go func() { defer wg.Done(); b.daily(ctx, b.pruneEvents) }()
 	go func() { defer wg.Done(); b.daily(ctx, b.sweepTranscripts) }()
-	b.engine.cur.Store(&engine{sched: sched, exec: exec})
+	b.engine.cur.Store(&engine{ffprobe: tools.FFprobe, sched: sched, exec: exec})
 	b.kickWaiting() // a book parked waiting before this start may go on now
 	log.Info("bridge: the engine started", "ffmpeg", tools.FFmpeg != "", "asr", asrCap.Backend, "asr_available", asrCap.Available,
 		"asr_worker_fallback", cfg.ASR.WorkerFallback,

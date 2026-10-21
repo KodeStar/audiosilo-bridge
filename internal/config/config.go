@@ -370,7 +370,7 @@ func Default() Config {
 		Listen:    DefaultListen,
 		Libraries: []LibraryMapping{},
 		Mapping:   MappingConfig{CheckMinutes: DefaultMappingCheckMinutes},
-		Podcasts:  PodcastsConfig{AllowNetworks: []string{}, MaxFeedMB: 32},
+		Podcasts:  PodcastsConfig{AllowNetworks: []string{}, MaxFeedMB: 32, MaxEpisodeMB: 1024},
 		Metadata:  MetadataConfig{BaseURL: DefaultMetadataBaseURL},
 		Tools:     ToolsConfig{AutoDownload: DefaultAutoDownload},
 		ASR:       ASRConfig{Backend: DefaultASRBackend, Language: DefaultASRLanguage, WorkerFallback: DefaultASRWorkerFallback},

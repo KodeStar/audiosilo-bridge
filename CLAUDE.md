@@ -98,7 +98,7 @@ internal/
   -- Phase 2c-1 --
   netguard/   guarded feed/artwork GETs: public addresses or explicit allowed CIDRs
   podcast/    feed.json v1, URL helpers, parsing, stable names and merge, cadence
-  podcastjob/ podcast.subscribe + podcast.poll, sealed URLs, locks and rescans
+  podcastjob/ subscribe, poll, fetch and retain; sealed URLs, locks, recovery and rescans
   -- Phase 2b --
   ghauth/     the GitHub App device flow, refresh, revoke (injectable base URLs)
   accounts/   the Accounts tab's GitHub sign-in and agent credentials (vault-sealed)
@@ -107,7 +107,8 @@ internal/
   config/     config.yaml + AUDIOSILO_BRIDGE_* (bridge.go: the Bridge's own settings)
   store/      SQLite, append-only migrations (0001 the engine, 0002 server_jobs,
               0003 generate_books, contrib_mode, server_id, deleted_stage_spend,
-              0004 workers, 0005 books.goal, 0006 accounts, 0007 podcast_shows)
+              0004 workers, 0005 books.goal, 0006 accounts, 0007 podcast_shows,
+              0008 podcast_artwork_state)
   auth/       the page's single password + hashed sessions + login limiter
   -- Phase 1a --
   generate/   sidecars.generate: server job -> engine book -> .audiosilo/ + rescan;
@@ -169,7 +170,7 @@ in PACKAGES.md.
   require a podcast-kind library and its checked marker mapping (a job claimed
   before the check waits for it); they write only the root marker, show folders,
   feed.json and sniffed JPEG/PNG artwork. Book writers refuse podcast libraries.
-  No episode audio is downloaded in 2c-1.
+  Episode publication and retention use recovery journals and owned trash.
 - **The agent container's files are untrusted** (and the Bridge's are to it): every
   read goes through `agentproto.OpenRegular`/`ReadRegular` inside an `os.Root`, the
   harvest is capped, and the container's own credential never leaves it (only its
@@ -305,6 +306,21 @@ AUDIOSILO_BRIDGE_PODCASTS_ALLOW_NETWORKS, comma CIDRs) only for trusted LAN feed
 hosts; a non-empty list warns at start and on Status. podcasts.max_feed_mb
 (AUDIOSILO_BRIDGE_PODCASTS_MAX_FEED_MB) defaults to 32, accepts 1-64, and applies
 at the next start. Neither audio fetching nor player views are part of 2c-1.
+
+**Phase 2c-2a (podcast episodes on disk, Bridge side):** podcast.fetch runs in a
+separate download lane of two, podcast.retain in the light lane. Streaming guarded
+GETs enforce the episode cap, exact strong-validator resume and one absolute
+budget covering probe and publication. The local audio probe sets duration and
+codec; bounded ID3 CHAP parsing writes a direct id3_chap attachment. Generations
+are pinned and journaled across audio, chapter and feed writes. Retention needs a
+fresh matching server aggregate, journals owned payload into trash, keeps Fetch
+tombstones and requests a targeted rescan. Keep is a soft window: unfinished,
+favourited, queued, streaming and fetching episodes remain protected. Retention
+policy is API-only; absent-file playback still waits for Phase 2c-2b.
+podcasts.max_episode_mb (AUDIOSILO_BRIDGE_PODCASTS_MAX_EPISODE_MB) defaults to
+1024, accepts 1-4096 MiB and applies at the next start. Artwork failure backoff
+survives restarts in migration 0008. Marker absence and nonce mismatch are distinct
+from a server verification outage; transient errors preserve existing markers.
 
 See BRIDGE-PLAN.md's Status table for what is next.
 

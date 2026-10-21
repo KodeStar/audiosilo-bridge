@@ -77,6 +77,7 @@ type Fetch struct {
 	FetchedAt       string `json:"fetched_at"`
 	DeletedAt       string `json:"deleted_at"`
 	TimelineChanged bool   `json:"timeline_changed"`
+	Codec           string `json:"codec,omitempty"`
 }
 
 // ScrubPrivate is applied immediately before every private feed write.
@@ -155,4 +156,16 @@ func RedactJSON(raw json.RawMessage) json.RawMessage {
 		return json.RawMessage(`{}`)
 	}
 	return out
+}
+
+// Invalid fetch metadata does not discard an otherwise usable episode.
+func (f *Fetch) UnmarshalJSON(b []byte) error {
+	type plain Fetch
+	var value plain
+	if json.Unmarshal(b, &value) != nil {
+		*f = Fetch{}
+		return nil
+	}
+	*f = Fetch(value)
+	return nil
 }

@@ -75,11 +75,14 @@ func (e *SealFailure) Error() string { return e.Message }
 // book is queued or parked, and the lane only bounds how many are followed.
 const (
 	LaneLight    = "light"
+	LaneDownload = "download"
 	LanePipeline = "pipeline"
 )
 
 // DefaultLanes are the lanes' capacities.
-func DefaultLanes() map[string]int { return map[string]int{LaneLight: 2, LanePipeline: 25} }
+func DefaultLanes() map[string]int {
+	return map[string]int{LaneLight: 2, LaneDownload: 2, LanePipeline: 25}
+}
 
 // ParkError parks a job (needs_attention) with a typed code.
 type ParkError struct {
@@ -1012,6 +1015,26 @@ func (p *Reporter) send() bool {
 		p.r.log.Warn("bridge: reporting progress failed", "job", p.job.ID, "err", err)
 		return true
 	}
+}
+
+// ConfirmLease proves ownership immediately before a filesystem publication.
+func (p *Reporter) ConfirmLease(ctx context.Context) error {
+	if p.r == nil {
+		return nil
+	}
+	state := link.StateRunning
+	got, err := p.srv.UpdateJob(ctx, p.job.ID, link.Update{Attempt: p.job.Attempt, State: &state})
+	if err != nil {
+		return err
+	}
+	if got.CancelRequested {
+		p.cancel(errCancelRequested)
+		return context.Canceled
+	}
+	if p.job.Path != nil && got.Path != nil && *p.job.Path != *got.Path {
+		return link.ErrNotHeld
+	}
+	return ctx.Err()
 }
 
 // clip bounds s to n bytes, cut at a character's boundary.

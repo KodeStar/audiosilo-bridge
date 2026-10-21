@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"net/netip"
 	"os"
+	"path"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -59,6 +60,9 @@ func (s *scanServer) RescanPodcast(_ context.Context, _ int64, show string) (*li
 		return nil, err
 	}
 	defer root.Close()
+	if strings.Contains(show, "/") {
+		show = path.Dir(show)
+	}
 	f, err := podcast.Read(root, show)
 	if err != nil {
 		return nil, err
@@ -81,6 +85,8 @@ type harness struct {
 	slowCover   atomic.Bool
 	onCover     atomic.Pointer[func()]
 	covers      atomic.Int32
+	audio       atomic.Pointer[http.HandlerFunc]
+	coverFail   atomic.Bool
 	claimID     atomic.Int64
 }
 
@@ -105,12 +111,24 @@ func newHarness(t *testing.T) *harness {
 	h.client = netguard.New(netguard.Options{AllowNetworks: []netip.Prefix{netip.MustParsePrefix("127.0.0.1/32")}, Version: "0.9.0"})
 	t.Cleanup(h.client.Close)
 	h.http = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/audio" {
+			if fn := h.audio.Load(); fn != nil {
+				(*fn)(w, r)
+			} else {
+				http.NotFound(w, r)
+			}
+			return
+		}
 		if h.emptyFeed.Load() {
 			fmt.Fprint(w, `<rss version="2.0"><channel><title>Example Show</title></channel></rss>`)
 			return
 		}
 		if r.URL.Path == "/cover.png" {
 			h.covers.Add(1)
+			if h.coverFail.Load() {
+				w.WriteHeader(503)
+				return
+			}
 			if hook := h.onCover.Load(); hook != nil {
 				(*hook)()
 			}
@@ -202,6 +220,9 @@ func (h *harness) read(show string) *podcast.Feed {
 		h.t.Fatal(err)
 	}
 	defer root.Close()
+	if strings.Contains(show, "/") {
+		show = path.Dir(show)
+	}
 	f, err := podcast.Read(root, show)
 	if err != nil {
 		h.t.Fatal(err)

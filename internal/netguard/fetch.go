@@ -72,7 +72,7 @@ func (c *Client) Fetch(ctx context.Context, in Request) (*Response, error) {
 			return nil, failure
 		}
 		d := []time.Duration{time.Second, 4 * time.Second}[attempt]
-		d = time.Duration(float64(d) * (0.8 + rand.Float64()*0.4)) //nolint:gosec // retry jitter is not a credential
+		d = jitter(d)
 		d = max(d, time.Duration(failure.RetryAfterSeconds)*time.Second)
 		if err := c.wait(ctx, d); err != nil {
 			return nil, classify(err)
@@ -226,4 +226,8 @@ func classify(err error) *Error {
 		return &Error{Code: "tls", Message: "The feed's secure connection could not be verified."}
 	}
 	return &Error{Code: "network", Message: "The feed could not be reached."}
+}
+
+func jitter(d time.Duration) time.Duration {
+	return time.Duration(float64(d) * (0.8 + rand.Float64()*0.4)) //nolint:gosec // retry jitter is not a credential
 }
