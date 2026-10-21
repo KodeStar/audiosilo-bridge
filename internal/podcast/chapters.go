@@ -2,6 +2,7 @@ package podcast
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -113,15 +114,7 @@ func ReadCHAP(r io.Reader, episode string, f Fetch) *ChapterList {
 	if !valid || len(chapters) < 2 {
 		return nil
 	}
-	slices.SortFunc(chapters, func(a, b chap) int {
-		if a.start < b.start {
-			return -1
-		}
-		if a.start > b.start {
-			return 1
-		}
-		return 0
-	})
+	slices.SortFunc(chapters, func(a, b chap) int { return cmp.Compare(a.start, b.start) })
 	out := &ChapterList{Version: 1, Generator: "audiosilo-bridge", GeneratedAt: f.FetchedAt, From: "id3_chap", Files: []ChapterFile{{path.Base(episode), f.Bytes, f.DurationMS}}, Chapters: []Chapter{}}
 	seen := map[string]bool{}
 	for i, c := range chapters {
@@ -220,9 +213,11 @@ func chapterText(b []byte) string {
 	var s string
 	switch b[0] {
 	case 0:
-		for _, c := range b[1:] {
-			s += string(rune(c))
+		runes := make([]rune, len(b)-1)
+		for i, c := range b[1:] {
+			runes[i] = rune(c)
 		}
+		s = string(runes)
 	case 3:
 		if !utf8.Valid(b[1:]) {
 			return ""

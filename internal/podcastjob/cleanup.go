@@ -49,6 +49,7 @@ func (s *service) cleanOwned(ctx context.Context, root *os.Root, lib link.Librar
 			fn()
 		}
 	}
+	pairing := s.pairHash()
 	if checkpoints, err := s.checkpointRoot(); err == nil {
 		defer func() { _ = checkpoints.Close() }()
 		if entries, err := readDir(checkpoints); err == nil {
@@ -63,7 +64,7 @@ func (s *service) cleanOwned(ctx context.Context, root *os.Root, lib link.Librar
 				var c checkpoint
 				err = json.NewDecoder(io.LimitReader(rd, 16384)).Decode(&c)
 				_ = rd.Close()
-				if err != nil || c.ServerHash != s.pairHash() || c.LibraryID != lib.ID || !podcast.ValidEpisodePath(c.Path) || path.Dir(c.Path) != show || !old(c.UpdatedAt) || live(c.Path) || !podcast.ValidID(c.ShowID) || !podcast.ValidID(c.EpisodeID) || !ownedTemp(c.Temp) {
+				if err != nil || c.ServerHash != pairing || c.LibraryID != lib.ID || !podcast.ValidEpisodePath(c.Path) || path.Dir(c.Path) != show || !old(c.UpdatedAt) || live(c.Path) || !podcast.ValidID(c.ShowID) || !podcast.ValidID(c.EpisodeID) || !podcast.OwnedTemp(c.Temp) {
 					continue
 				}
 				job := jobs.Job{LibraryID: &lib.ID, Path: &c.Path}

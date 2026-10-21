@@ -52,7 +52,7 @@ func (c *Client) Stream(ctx context.Context, in StreamRequest) (*StreamResponse,
 		cancel()
 		return nil, &Error{Code: "invalid_feed_url", Message: "The episode address is invalid."}
 	}
-	req.Header.Set("User-Agent", "AudioSilo-Bridge/"+c.version+" (+https://audiosilo.app)")
+	req.Header.Set("User-Agent", c.userAgent())
 	req.Header.Set("Accept-Encoding", "identity")
 	if in.Offset > 0 && StrongETag(in.ETag) {
 		req.Header.Set("Range", "bytes="+strconv.FormatInt(in.Offset, 10)+"-")
@@ -64,25 +64,19 @@ func (c *Client) Stream(ctx context.Context, in StreamRequest) (*StreamResponse,
 		return nil, classify(err)
 	}
 	timer := time.AfterFunc(c.stall, cancel)
-	body := &streamBody{body: resp.Body, timer: timer, cancel: cancel, stall: c.stall}
+	body := &streamBody{progressReader: progressReader{r: resp.Body, timer: timer, stall: c.stall}, body: resp.Body, cancel: cancel}
 	return &StreamResponse{Status: resp.StatusCode, Body: body, ContentLength: resp.ContentLength, ContentRange: resp.Header.Get("Content-Range"), Encoding: strings.ToLower(strings.TrimSpace(resp.Header.Get("Content-Encoding"))), ETag: resp.Header.Get("ETag"), RetryAfterSeconds: retryAfter(resp.Header.Get("Retry-After"), time.Now())}, nil
 }
 
+// streamBody resets the stall timer on progress (progressReader) and ends the
+// request's context once on Close.
 type streamBody struct {
-	body   io.ReadCloser
-	timer  *time.Timer
+	progressReader
+	body   io.Closer
 	cancel context.CancelFunc
-	stall  time.Duration
 	once   sync.Once
 }
 
-func (b *streamBody) Read(p []byte) (int, error) {
-	n, err := b.body.Read(p)
-	if n > 0 {
-		b.timer.Reset(b.stall)
-	}
-	return n, err
-}
 func (b *streamBody) Close() error {
 	b.once.Do(func() { b.timer.Stop(); b.cancel() })
 	return b.body.Close()

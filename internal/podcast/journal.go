@@ -36,11 +36,19 @@ func hit(fn Boundary, s string) error {
 	return nil
 }
 
+// TempPrefix names the Bridge's owned staging files in a show folder.
+const TempPrefix = ".audiosilo-tmp-"
+
+// OwnedTemp reports whether s is a bare staging name the Bridge may remove.
+func OwnedTemp(s string) bool {
+	return strings.HasPrefix(s, TempPrefix) && path.Base(s) == s && !strings.ContainsAny(s, "\\\x00")
+}
+
 func EnsureDir(root *os.Root, name string) error {
-	for i := range strings.Split(name, "/") {
-		parts := strings.Split(name, "/")
+	parts := strings.Split(name, "/")
+	for i, part := range parts {
 		p := strings.Join(parts[:i+1], "/")
-		if parts[i] == "" || parts[i] == "." || parts[i] == ".." || strings.ContainsAny(parts[i], "\\\x00") {
+		if part == "" || part == "." || part == ".." || strings.ContainsAny(part, "\\\x00") {
 			return ErrInvalidFile
 		}
 		st, err := root.Lstat(p)
@@ -94,7 +102,7 @@ func journalValid(j *Journal, show string) bool {
 		if j.Chapters != nil && !ValidChapterList(j.Chapters, j.Path, &j.Fetch) {
 			return false
 		}
-		return strings.HasPrefix(j.AudioTemp, ".audiosilo-tmp-") && path.Base(j.AudioTemp) == j.AudioTemp && !strings.ContainsAny(j.AudioTemp, "\\\x00") && j.TrashDir == "" && j.Fetch.DeletedAt == ""
+		return OwnedTemp(j.AudioTemp) && j.TrashDir == "" && j.Fetch.DeletedAt == ""
 	}
 	if j.Op == "delete" {
 		prefix := ".audiosilo-trash/podcasts/" + j.EpisodeID + "-g"
@@ -172,7 +180,8 @@ func Publish(root *os.Root, j Journal, now time.Time, fault Boundary) error {
 	if err := hit(fault, "journal"); err != nil {
 		return err
 	}
-	return complete(root, j, now, fault)
+	// The payload was verified above under the same locks: complete need not hash it again.
+	return complete(root, j, now, fault, true)
 }
 
 // RecoverShow finishes every owned transaction before any other show mutation.
@@ -218,13 +227,16 @@ func RecoverShow(root *os.Root, show string, now time.Time, fault Boundary) erro
 		if len(b) > 4<<20 || json.Unmarshal(b, &j) != nil || !journalValid(&j, show) || AttachmentPath(j.Path, ".publish.json") != p {
 			return ErrInvalidFile
 		}
-		if err := complete(root, j, now, fault); err != nil {
+		if err := complete(root, j, now, fault, false); err != nil {
 			return err
 		}
 	}
 	return nil
 }
-func complete(root *os.Root, j Journal, now time.Time, fault Boundary) error {
+
+// complete finishes a journaled transaction. verified means the caller has just
+// checked the staged (install) or named (delete) payload under the same locks.
+func complete(root *os.Root, j Journal, now time.Time, fault Boundary, verified bool) error {
 	show := path.Dir(j.Path)
 	f, err := Read(root, show)
 	if err != nil {
@@ -242,12 +254,12 @@ func complete(root *os.Root, j Journal, now time.Time, fault Boundary) error {
 		return ErrInvalidFile
 	}
 	if j.Op == "install" {
+		temp := show + "/" + j.AudioTemp
 		if !Matches(root, j.Path, &j.Fetch) {
 			if _, err := root.Lstat(j.Path); !errors.Is(err, os.ErrNotExist) {
 				return ErrInvalidFile
 			}
-			temp := show + "/" + j.AudioTemp
-			if !Matches(root, temp, &j.Fetch) {
+			if !verified && !Matches(root, temp, &j.Fetch) {
 				return ErrInvalidFile
 			}
 			if err := root.Chmod(temp, 0o644); err != nil {
@@ -264,7 +276,6 @@ func complete(root *os.Root, j Journal, now time.Time, fault Boundary) error {
 				return err
 			}
 		}
-		temp := show + "/" + j.AudioTemp
 		if _, err := root.Lstat(temp); err == nil {
 			if !Matches(root, temp, &j.Fetch) {
 				return ErrInvalidFile
@@ -285,7 +296,7 @@ func complete(root *os.Root, j Journal, now time.Time, fault Boundary) error {
 			if _, err := root.Lstat(trash); !errors.Is(err, os.ErrNotExist) {
 				return ErrInvalidFile
 			}
-			if !Matches(root, j.Path, &j.Fetch) {
+			if !verified && !Matches(root, j.Path, &j.Fetch) {
 				return ErrInvalidFile
 			}
 			if err := hit(fault, "deleting"); err != nil {
@@ -366,10 +377,7 @@ func complete(root *os.Root, j Journal, now time.Time, fault Boundary) error {
 	if err := syncDir(root, path.Dir(side)); err != nil {
 		return err
 	}
-	if err := hit(fault, "remove"); err != nil {
-		return err
-	}
-	return nil
+	return hit(fault, "remove")
 }
 
 // CleanupTrash runs after a successful rescan, or for an old owned transaction.

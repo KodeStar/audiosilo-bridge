@@ -65,7 +65,7 @@ func (s *service) saveCheckpoint(job jobs.Job, c *checkpoint, etag string) error
 	}
 	defer func() { _ = root.Close() }()
 	if c.Validator == "" {
-		c.Validator = "podcast_etag_" + nonce()
+		c.Validator = secrets.PodcastETagPrefix + nonce()
 	}
 	if !netguard.StrongETag(etag) {
 		return errors.New("unproven validator")
@@ -97,7 +97,7 @@ func (s *service) loadCheckpoint(job jobs.Job, root *os.Root, showID, episodeID 
 		return c, ""
 	}
 	var saved checkpoint
-	if json.Unmarshal(b, &saved) != nil || saved.ServerHash != c.ServerHash || saved.LibraryID != c.LibraryID || saved.ShowID != showID || saved.EpisodeID != episodeID || saved.Path != c.Path || !ownedTemp(saved.Temp) || !strings.HasPrefix(saved.Validator, "podcast_etag_") {
+	if json.Unmarshal(b, &saved) != nil || saved.ServerHash != c.ServerHash || saved.LibraryID != c.LibraryID || saved.ShowID != showID || saved.EpisodeID != episodeID || saved.Path != c.Path || !podcast.OwnedTemp(saved.Temp) || !strings.HasPrefix(saved.Validator, secrets.PodcastETagPrefix) {
 		return c, ""
 	}
 	tag, _ := s.o.Vault.Get(saved.Validator)
@@ -112,21 +112,22 @@ func (s *service) loadCheckpoint(job jobs.Job, root *os.Root, showID, episodeID 
 	s.clearCheckpoint(job, root, &saved)
 	return c, ""
 }
-func ownedTemp(s string) bool {
-	return strings.HasPrefix(s, ".audiosilo-tmp-") && path.Base(s) == s && !strings.ContainsAny(s, "\\\x00")
-}
+
+// clearCheckpoint removes the owned partial, its sealed validator and the
+// record (only under the pairing that made them), then resets c to no partial.
 func (s *service) clearCheckpoint(job jobs.Job, root *os.Root, c *checkpoint) {
+	defer func() { c.Temp, c.Offset, c.Total, c.Validator = "", 0, 0, "" }()
 	if c.ServerHash != s.pairHash() {
 		return
 	}
-	if ownedTemp(c.Temp) {
+	if podcast.OwnedTemp(c.Temp) {
 		p := path.Dir(c.Path) + "/" + c.Temp
 		if f, err := podcast.OpenRegular(root, p); err == nil {
 			_ = f.Close()
 			_ = root.Remove(p)
 		}
 	}
-	if strings.HasPrefix(c.Validator, "podcast_etag_") {
+	if strings.HasPrefix(c.Validator, secrets.PodcastETagPrefix) {
 		_ = s.o.Vault.Delete(c.Validator)
 	}
 	if dir, err := s.checkpointRoot(); err == nil {
@@ -161,15 +162,5 @@ func (s *service) fileLock(ctx context.Context, root *os.Root, episode string) (
 			_ = f.Close()
 			return nil, err
 		}
-	}
-}
-func wait(ctx context.Context, d time.Duration) error {
-	t := time.NewTimer(d)
-	defer t.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-t.C:
-		return nil
 	}
 }

@@ -98,6 +98,13 @@ func (h *Retain) run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (
 			result.Skipped++
 			continue
 		}
+		// Most kept episodes are ineligible: ask before the locked reread and full
+		// hash. This grants nothing; the locked path asks again before deleting.
+		pre := link.PodcastRetentionRequest{ShowID: p.ShowID, Path: candidate.Path, Generation: candidate.Fetch.Generation, SHA256: candidate.Fetch.SHA256, Bytes: candidate.Fetch.Bytes}
+		if check, err := srv.CheckPodcastRetention(ctx, lib.ID, pre); err != nil || !RetentionEligible(check, lib.ID, show, pre, candidate.Fetch, s.o.Now()) {
+			result.Skipped++
+			continue
+		}
 		busy, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
 		release, err := s.fileLock(busy, root, candidate.Path)
 		cancel()
@@ -146,8 +153,8 @@ func (h *Retain) run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (
 			}
 			tombstone := *current.Fetch
 			tombstone.DeletedAt = s.o.Now().UTC().Format(time.RFC3339)
-			j := podcast.Journal{Version: 1, Op: "delete", ShowID: p.ShowID, EpisodeID: current.ID, Path: current.Path, TrashDir: ".audiosilo-trash/podcasts/" + current.ID + "-g" + strconv.Itoa(tombstone.Generation) + "-" + nonce(), Fetch: tombstone}
-			transaction = j
+			transaction = podcast.Journal{Version: 1, Op: "delete", ShowID: p.ShowID, EpisodeID: current.ID, Path: current.Path, TrashDir: ".audiosilo-trash/podcasts/" + current.ID + "-g" + strconv.Itoa(tombstone.Generation) + "-" + nonce(), Fetch: tombstone}
+			j := transaction
 			denied := errors.New("retention snapshot denied deletion")
 			boundary := func(at string) error {
 				if at == "deleting" {

@@ -41,7 +41,8 @@ type Response struct {
 	CacheControl string
 }
 
-func wait(ctx context.Context, d time.Duration) error {
+// Wait sleeps for d unless ctx ends first.
+func Wait(ctx context.Context, d time.Duration) error {
 	t := time.NewTimer(d)
 	defer t.Stop()
 	select {
@@ -71,10 +72,7 @@ func (c *Client) Fetch(ctx context.Context, in Request) (*Response, error) {
 		if attempt >= 2 || !retryable(failure) || failure.RetryAfterSeconds > 10 || ctx.Err() != nil {
 			return nil, failure
 		}
-		d := []time.Duration{time.Second, 4 * time.Second}[attempt]
-		d = jitter(d)
-		d = max(d, time.Duration(failure.RetryAfterSeconds)*time.Second)
-		if err := c.wait(ctx, d); err != nil {
+		if err := c.wait(ctx, RetryDelay(attempt, failure.RetryAfterSeconds)); err != nil {
 			return nil, classify(err)
 		}
 	}
@@ -104,7 +102,7 @@ func (c *Client) once(ctx context.Context, in Request) (*Response, error) {
 	if err != nil {
 		return nil, &Error{Code: "invalid_feed_url", Message: "The feed URL is invalid."}
 	}
-	req.Header.Set("User-Agent", "AudioSilo-Bridge/"+c.version+" (+https://audiosilo.app)")
+	req.Header.Set("User-Agent", c.userAgent())
 	req.Header.Set("Accept-Encoding", "gzip")
 	if in.ETag != "" {
 		req.Header.Set("If-None-Match", in.ETag)
@@ -185,6 +183,10 @@ func (r *progressReader) Read(p []byte) (int, error) {
 		r.timer.Reset(r.stall)
 	}
 	return n, e
+}
+
+func (c *Client) userAgent() string {
+	return "AudioSilo-Bridge/" + c.version + " (+https://audiosilo.app)"
 }
 
 func header(s string) string {

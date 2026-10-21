@@ -90,7 +90,7 @@ func New(o Options) *Subscribe {
 		o.MaxEpisodeBytes = 1024 << 20
 	}
 	if o.Wait == nil {
-		o.Wait = wait
+		o.Wait = netguard.Wait
 	}
 	if o.Probe == nil {
 		o.Probe = LocalProbe("ffprobe")
@@ -377,7 +377,7 @@ func (h *Subscribe) run(parent context.Context, job jobs.Job, rep *jobs.Reporter
 		// moveURL below sets FeedURL and FeedHost.
 		f = &podcast.Feed{Version: 1, Generator: "audiosilo-bridge/" + s.o.Version, ShowID: hex.EncodeToString(random[:]), FeedURLSHA256: podcast.FeedURLHash(feedURL), PreviousFeedURLSHA256: []string{}, Private: p.Private || podcast.IsPrivateFeedURL(feedURL), SubscribedAt: s.o.Now().UTC().Format(time.RFC3339), Episodes: []podcast.Episode{}}
 	}
-	unlockShow, err := s.acquire(ctx, s.o.ServerID()+"|"+mount+"/"+show)
+	unlockShow, err := s.acquire(ctx, s.showKey(mount, show))
 	if err != nil {
 		return nil, err
 	}
@@ -419,7 +419,7 @@ func (h *Poll) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (any, 
 		return nil, fail("not_a_feed", "The podcast show path is invalid.")
 	}
 	show := *job.Path
-	unlock, err := s.acquire(ctx, s.o.ServerID()+"|"+mount+"/"+show)
+	unlock, err := s.acquire(ctx, s.showKey(mount, show))
 	if err != nil {
 		return nil, err
 	}
@@ -682,13 +682,10 @@ func (s *service) artwork(ctx context.Context, root *os.Root, lib link.Library, 
 	if err != nil {
 		return
 	}
-	if state.SourceSHA256 == hash {
-		if due, e := time.Parse(time.RFC3339, state.NextAttemptAt); e == nil && s.o.Now().Before(due) {
-			return
-		}
-	}
 	if state.SourceSHA256 != hash {
 		state = store.PodcastArtworkState{SourceSHA256: hash}
+	} else if due, e := time.Parse(time.RFC3339, state.NextAttemptAt); e == nil && s.o.Now().Before(due) {
+		return
 	}
 	success := false
 	defer func() {

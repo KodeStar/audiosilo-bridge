@@ -53,13 +53,7 @@ func EpisodeCeiling(bytes int64) time.Duration {
 	if bytes < 0 || bytes > 4096<<20 {
 		bytes = 4096 << 20
 	}
-	return 5*time.Minute + time.Duration(3*(bytes/262144+boolInt(bytes%262144 != 0))+6)*time.Second
-}
-func boolInt(b bool) int64 {
-	if b {
-		return 1
-	}
-	return 0
+	return 5*time.Minute + time.Duration(3*((bytes+262143)/262144)+6)*time.Second
 }
 
 type Timer interface {
@@ -142,7 +136,7 @@ func (h *Fetch) run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (a
 		return nil, err
 	}
 	if e.Fetch.Valid() && e.Fetch.DeletedAt == "" && podcast.Matches(root, e.Path, e.Fetch) {
-		return s.reuse(parent, lib, e, f.ShowID)
+		return s.reuse(parent, root, lib, e, f.ShowID)
 	}
 	if _, err := root.Lstat(e.Path); !errors.Is(err, os.ErrNotExist) {
 		return nil, fail("write_failed", "An unverified episode file needs administrator repair.")
@@ -292,22 +286,14 @@ func sameFetch(a, b *podcast.Fetch) bool {
 	}
 	return *a == *b
 }
-func (s *service) reuse(ctx context.Context, lib link.Library, e podcast.Episode, showID string) (any, error) {
+func (s *service) reuse(ctx context.Context, root *os.Root, lib link.Library, e podcast.Episode, showID string) (any, error) {
 	if err := s.episodeRescan(ctx, lib.ID, e.Path); err != nil {
 		return nil, err
 	}
 	n := 0
-	// Chapters are counted only from the owned, bounded attachment, never publisher tags.
-	mount, _ := s.o.Mount(lib.ID, lib.Root)
-	if root, err := os.OpenRoot(mount); err == nil {
-		defer func() { _ = root.Close() }()
-		if rd, err := podcast.OpenRegular(root, podcast.AttachmentPath(e.Path, ".chapters.json")); err == nil {
-			defer rd.Close()
-			var list podcast.ChapterList
-			if json.NewDecoder(io.LimitReader(rd, 4<<20)).Decode(&list) == nil {
-				n = len(list.Chapters)
-			}
-		}
+	// Chapters are counted only from the owned attachment matching this pin, never publisher tags.
+	if list := podcast.ReadChapters(root, e.Path, e.Fetch); list != nil {
+		n = len(list.Chapters)
 	}
 	return fetchResult{lib.ID, e.Path, showID, e.ID, *e.Fetch, n, true}, nil
 }
@@ -368,14 +354,15 @@ func (s *service) download(ctx context.Context, b *budget, job jobs.Job, root *o
 	if s.o.Streamer == nil {
 		return podcast.Fetch{}, fail("network", "The episode download is unavailable.")
 	}
+	// Resolved once per job and held in memory only; every attempt GETs the same enclosure.
+	raw, err := s.enclosure(ctx, f, e)
+	if err != nil {
+		return podcast.Fetch{}, err
+	}
 	var last error
 	for attempt := 0; attempt < 3; attempt++ {
 		if ctx.Err() != nil {
 			return podcast.Fetch{}, ctx.Err()
-		}
-		raw, err := s.enclosure(ctx, f, e)
-		if err != nil {
-			return podcast.Fetch{}, err
 		}
 		response, err := s.o.Streamer.Stream(ctx, netguard.StreamRequest{URL: raw, Offset: c.Offset, ETag: tag})
 		if err == nil {
@@ -385,47 +372,36 @@ func (s *service) download(ctx context.Context, b *budget, job jobs.Job, root *o
 			} else if response.Status == 206 {
 				action = "fresh_get"
 			}
-			if response.Status != 200 && response.Status != 206 && (response.Status != 416 || c.Offset == 0) {
+			var fetch podcast.Fetch
+			switch {
+			case response.Status != 200 && response.Status != 206 && (response.Status != 416 || c.Offset == 0):
 				err = &netguard.Error{Code: "http_" + strconv.Itoa(response.Status), Message: fmt.Sprintf("The episode returned HTTP %d.", response.Status), RetryAfterSeconds: response.RetryAfterSeconds}
-			} else if action == "fresh_get" {
+			case action == "fresh_get":
 				_ = response.Body.Close()
 				s.clearCheckpoint(job, root, c)
-				c.Temp = ""
-				c.Offset = 0
-				c.Total = 0
-				c.Validator = ""
 				tag = ""
 				last = fail("network", "The episode resume could not be verified.")
 				continue
-			} else {
-				var fetch podcast.Fetch
+			default:
 				fetch, tag, err = s.consume(ctx, b, job, root, c, tag, response, action, rep)
-				_ = response.Body.Close()
-				if err == nil {
-					return fetch, nil
-				}
 			}
 			_ = response.Body.Close()
+			if err == nil {
+				return fetch, nil
+			}
 		}
-		last = netguard.Classify(err)
 		failure := netguard.Classify(err)
-		if attempt == 2 || !netguard.Retryable(err) || failure.RetryAfterSeconds > 10 || ctx.Err() != nil {
+		last = failure
+		if attempt == 2 || !netguard.Retryable(failure) || failure.RetryAfterSeconds > 10 || ctx.Err() != nil {
 			break
 		}
 		if !netguard.StrongETag(tag) || c.Offset <= 0 || c.Total <= c.Offset {
 			s.clearCheckpoint(job, root, c)
-			c.Temp = ""
-			c.Offset = 0
-			c.Total = 0
-			c.Validator = ""
 			tag = ""
 		}
 		if err := s.o.Wait(ctx, netguard.RetryDelay(attempt, failure.RetryAfterSeconds)); err != nil {
 			return podcast.Fetch{}, err
 		}
-	}
-	if last == nil {
-		last = fail("network", "The episode download could not be completed.")
 	}
 	return podcast.Fetch{}, last
 }
@@ -447,7 +423,7 @@ func (s *service) consume(ctx context.Context, b *budget, job jobs.Job, root *os
 	}
 	freshTemp := c.Temp == ""
 	if freshTemp {
-		c.Temp = ".audiosilo-tmp-" + nonce()
+		c.Temp = podcast.TempPrefix + nonce()
 	}
 	name := path.Dir(c.Path) + "/" + c.Temp
 	flags := os.O_RDWR
@@ -478,8 +454,18 @@ func (s *service) consume(ctx context.Context, b *budget, job jobs.Job, root *os
 	}
 	c.Total = total
 	out := &downloadWriter{file: file, hash: h, rep: rep, received: c.Offset, total: total}
-	lastCheckpoint := time.Time{}
+	var lastCheck, lastCheckpoint time.Time
 	out.check = func(received int64) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		checkpointDue := received > 0 && received < total && netguard.StrongETag(tag) && time.Since(lastCheckpoint) >= 10*time.Second
+		// The mapping and pairing rechecks read the mount and the vault: at most once
+		// a second, and always before a checkpoint. Commit rechecks both under the lock.
+		if !checkpointDue && time.Since(lastCheck) < time.Second {
+			return nil
+		}
+		lastCheck = time.Now()
 		lib, ok := s.o.Libraries.Library(*job.LibraryID)
 		if !ok {
 			return fail("library_not_writable", "The podcast mapping changed.")
@@ -493,7 +479,7 @@ func (s *service) consume(ctx context.Context, b *budget, job jobs.Job, root *os
 		if _, err := mapping.SafeJoin(root.Name(), name); err != nil {
 			return err
 		}
-		if received > 0 && received < total && netguard.StrongETag(tag) && time.Since(lastCheckpoint) >= 10*time.Second {
+		if checkpointDue {
 			if err := file.Sync(); err != nil {
 				return err
 			}
@@ -545,10 +531,8 @@ type downloadWriter struct {
 }
 
 func (w *downloadWriter) Write(p []byte) (int, error) {
-	if w.check != nil {
-		if err := w.check(w.received); err != nil {
-			return 0, err
-		}
+	if err := w.check(w.received); err != nil {
+		return 0, err
 	}
 	n, err := w.file.Write(p)
 	if n > 0 {

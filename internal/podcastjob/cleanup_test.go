@@ -12,6 +12,7 @@ import (
 
 	"github.com/kodestar/audiosilo-bridge/internal/jobs"
 	"github.com/kodestar/audiosilo-bridge/internal/link"
+	"github.com/kodestar/audiosilo-bridge/internal/netguard"
 	"github.com/kodestar/audiosilo-bridge/internal/podcast"
 	"github.com/kodestar/audiosilo-bridge/internal/store"
 )
@@ -68,7 +69,7 @@ func TestOwnedCleanupHonorsAgeLiveJobAndForeignFiles(t *testing.T) {
 func TestFileLockExclusiveAcrossHandlersAndCancellation(t *testing.T) {
 	h, job := audioHarness(t)
 	s := h.handler.s
-	s.o.Wait = wait
+	s.o.Wait = netguard.Wait
 	root, _ := os.OpenRoot(h.mount)
 	defer root.Close()
 	release, err := s.fileLock(context.Background(), root, *job.Path)

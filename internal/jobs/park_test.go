@@ -3,6 +3,7 @@ package jobs
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -390,12 +391,21 @@ func TestPublicationRequiresSuccessfulLease(t *testing.T) {
 			case "unauthorized":
 				srv.unauthed = true
 			}
-			_, cancel := context.WithCancelCause(context.Background())
+			jobCtx, cancel := context.WithCancelCause(context.Background())
 			defer cancel(nil)
-			rep := &Reporter{r: &Runner{}, srv: srv, job: Job{ID: 81, Attempt: 2}, cancel: cancel}
+			unpaired := false
+			rep := &Reporter{r: &Runner{onUnauthorized: func(Server) { unpaired = true }}, srv: srv, job: Job{ID: 81, Attempt: 2}, cancel: cancel}
 			err := rep.ConfirmLease(context.Background())
 			if (err == nil) != (mode == "allowed") {
 				t.Fatal(mode, err)
+			}
+			// The publication check acts on the answer as the keepalive does.
+			if unpaired != (mode == "unauthorized") {
+				t.Fatal(mode, "unpaired", unpaired)
+			}
+			want := map[string]error{"lost": errLost, "cancel": errCancelRequested, "unauthorized": errUnpaired}[mode]
+			if got := context.Cause(jobCtx); want != nil && !errors.Is(got, want) || want == nil && got != nil {
+				t.Fatal(mode, "cause", got)
 			}
 		})
 	}
