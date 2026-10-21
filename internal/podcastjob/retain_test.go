@@ -12,6 +12,7 @@ import (
 
 	"github.com/kodestar/audiosilo-bridge/internal/jobs"
 	"github.com/kodestar/audiosilo-bridge/internal/link"
+	"github.com/kodestar/audiosilo-bridge/internal/netguard"
 	"github.com/kodestar/audiosilo-bridge/internal/podcast"
 )
 
@@ -165,5 +166,72 @@ func TestRetainDeletesOnlyVerifiedOwnedGeneration(t *testing.T) {
 				t.Fatal("retention dropped feed entries", len(f.Episodes))
 			}
 		})
+	}
+}
+
+// A deletion refused before the audio moves (Windows refusing to move open
+// audio) is skipped and leaves no barrier: recovery must never finish it later
+// without a fresh aggregate.
+func TestRetainRenameRefusalLeavesNoJournal(t *testing.T) {
+	requireProbe(t)
+	h, fetch := audioHarness(t)
+	audio := data(t, "chap-v24-reverse.mp3")
+	setAudio(h, func(w http.ResponseWriter, r *http.Request) { w.Write(audio) })
+	if _, err := h.handler.FetchJob().Run(context.Background(), fetch, jobs.LocalReporter()); err != nil {
+		t.Fatal(err)
+	}
+	keep := link.PodcastPolicy{Mode: "keep", Keep: 3, Days: 0}
+	now := h.handler.s.o.Now()
+	finished, after := now.Add(-time.Hour).Format(time.RFC3339), now.Format(time.RFC3339)
+	h.handler.s.o.Server = func() Server {
+		return &retainServer{scanServer: h.scan, policy: keep, check: func(r link.PodcastRetentionRequest) *link.PodcastRetentionCheck {
+			return &link.PodcastRetentionCheck{LibraryID: 3, ShowPath: "Fixture Show", ShowID: r.ShowID, Path: r.Path, Generation: r.Generation, SHA256: r.SHA256, Bytes: r.Bytes, CheckedAt: now.Format(time.RFC3339), Policy: keep, Followers: 2, AllFinished: true, AllFinishedAt: &finished, DeleteAfter: &after, OutsideKeepWindow: true, Eligible: true}
+		}}
+	}
+	h.handler.s.o.Fault = func(at string) error {
+		if at == "deleting" {
+			return &os.PathError{Op: "rename", Path: *fetch.Path, Err: os.ErrPermission}
+		}
+		return nil
+	}
+	show := "Fixture Show"
+	params, _ := json.Marshal(map[string]string{"show_id": "a1b2c3d4e5f60718"})
+	job := jobs.Job{ID: 82, Kind: RetainKind, LibraryID: fetch.LibraryID, Path: &show, Params: params, Attempt: 1}
+	result, err := h.handler.RetainJob().Run(context.Background(), job, jobs.LocalReporter())
+	if err != nil {
+		t.Fatal(result, err)
+	}
+	if got := result.(retainResult); got.Deleted != 0 || got.Skipped != 1 {
+		t.Fatal(got)
+	}
+	root, _ := os.OpenRoot(h.mount)
+	defer root.Close()
+	if _, err := root.Lstat(podcast.AttachmentPath(*fetch.Path, ".publish.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("refused deletion left its barrier", err)
+	}
+	h.handler.s.o.Fault = nil
+	if err := podcast.RecoverShow(root, show, now, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(h.mount, *fetch.Path)); err != nil || h.read(show).Episodes[0].Fetch.DeletedAt != "" {
+		t.Fatal("recovery deleted an unauthorized episode", err)
+	}
+}
+
+func TestLeaseFailureKeepsIdentityForLostClaimsOnly(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		err  error
+		code string
+	}{
+		{link.ErrNotHeld, "identity_changed"},
+		{link.ErrUnauthorized, "identity_changed"},
+		{context.Canceled, "identity_changed"},
+		{errors.New("connection refused"), "network"},
+	} {
+		var failure *netguard.Error
+		if !errors.As(leaseFailure(ctx, tc.err, "lost"), &failure) || failure.Code != tc.code {
+			t.Fatal(tc.err, failure)
+		}
 	}
 }

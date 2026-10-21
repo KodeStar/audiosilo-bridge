@@ -16,8 +16,10 @@ import (
 )
 
 // cleanOwned considers only named checkpoint records and committed trash
-// manifests older than a day. Unrecorded hidden files are never swept.
-func (s *service) cleanOwned(ctx context.Context, root *os.Root, lib link.Library, mount, show string) {
+// manifests older than a day. Unrecorded hidden files are never swept. self is
+// the calling job, whose own running row (at the show's path) is not a live
+// writer of these records.
+func (s *service) cleanOwned(ctx context.Context, root *os.Root, lib link.Library, mount, show string, self int64) {
 	if s.o.DB == nil || s.o.DataDir == "" || s.writable(lib, mount) != nil {
 		return
 	}
@@ -27,7 +29,7 @@ func (s *service) cleanOwned(ctx context.Context, root *os.Root, lib link.Librar
 	}
 	live := func(p string) bool {
 		for _, r := range rows {
-			if r.ServerID == s.o.ServerID() && r.LibraryID != nil && *r.LibraryID == lib.ID && r.Path != nil && (*r.Path == p || *r.Path == show) && r.State == store.JobRunning {
+			if r.ID != self && r.ServerID == s.o.ServerID() && r.LibraryID != nil && *r.LibraryID == lib.ID && r.Path != nil && (*r.Path == p || *r.Path == show) && r.State == store.JobRunning {
 				return true
 			}
 		}

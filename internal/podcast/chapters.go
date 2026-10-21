@@ -201,11 +201,12 @@ func frames(b []byte, v int, visit func(string, uint16, []byte) bool) bool {
 	return true
 }
 func chapterText(b []byte) string {
-	if len(b) > 1025 {
+	// Bound the raw text before decoding; each encoding cuts at its own unit
+	// boundary (a UTF-8 rune, a UTF-16 code unit), so a long title is clipped
+	// rather than dropped for "Chapter N".
+	truncated := len(b) > 1025
+	if truncated {
 		b = b[:1025]
-		for len(b) > 1 && !utf8.RuneStart(b[len(b)-1]) {
-			b = b[:len(b)-1]
-		}
 	}
 	if len(b) < 1 {
 		return ""
@@ -219,10 +220,20 @@ func chapterText(b []byte) string {
 		}
 		s = string(runes)
 	case 3:
-		if !utf8.Valid(b[1:]) {
+		text := b[1:]
+		if truncated {
+			i := len(text) - 1
+			for i > 0 && !utf8.RuneStart(text[i]) {
+				i--
+			}
+			if i >= 0 && !utf8.FullRune(text[i:]) {
+				text = text[:i]
+			}
+		}
+		if !utf8.Valid(text) {
 			return ""
 		}
-		s = string(b[1:])
+		s = string(text)
 	case 1, 2:
 		b0 := b[0]
 		b = b[1:]
@@ -237,6 +248,9 @@ func chapterText(b []byte) string {
 				return ""
 			}
 			b = b[2:]
+		}
+		if truncated {
+			b = b[:len(b)-len(b)%2]
 		}
 		if len(b)%2 != 0 {
 			return ""

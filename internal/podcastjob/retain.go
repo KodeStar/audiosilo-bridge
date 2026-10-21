@@ -57,6 +57,11 @@ func (h *Retain) run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (
 		return nil, fail("network", "The retention policy could not be verified.")
 	}
 	policy, err := srv.PodcastRetention(ctx, lib.ID, show, p.ShowID)
+	var apiErr *link.APIError
+	if err != nil && !errors.As(err, &apiErr) {
+		// The server could not be reached: a retryable failure, not a changed show.
+		return nil, fail("network", "The retention policy could not be verified.")
+	}
 	if err != nil || policy == nil || !policy.Valid() {
 		return nil, fail("identity_changed", "The retention policy could not be verified.")
 	}
@@ -85,10 +90,10 @@ func (h *Retain) run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (
 	if err != nil {
 		return nil, err
 	}
-	s.cleanOwned(ctx, root, lib, mount, show)
 	if feed.ShowID != p.ShowID {
 		return nil, fail("identity_changed", "The podcast show identity changed.")
 	}
+	s.cleanOwned(ctx, root, lib, mount, show, job.ID)
 	pairing := s.pairHash()
 	for _, candidate := range feed.Episodes {
 		if candidate.Fetch == nil || candidate.Fetch.DeletedAt != "" {
@@ -137,7 +142,7 @@ func (h *Retain) run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (
 				return false, nil
 			}
 			if err := rep.ConfirmLease(ctx); err != nil {
-				return false, fail("identity_changed", "The retention job no longer owns its claim.")
+				return false, leaseFailure(ctx, err, "The retention job no longer owns its claim.")
 			}
 			request := link.PodcastRetentionRequest{ShowID: p.ShowID, Path: current.Path, Generation: current.Fetch.Generation, SHA256: current.Fetch.SHA256, Bytes: current.Fetch.Bytes}
 			check, err := srv.CheckPodcastRetention(ctx, lib.ID, request)
@@ -181,9 +186,13 @@ func (h *Retain) run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (
 					}
 					return false, nil
 				}
-				// Windows may refuse moving open audio. Keep the barrier for recovery and
-				// count it as skipped; no tombstone has been claimed as successful.
-				if errors.Is(err, os.ErrPermission) {
+				// A failure before the audio moved (Windows refusing to move open audio,
+				// a trash folder that can't be made) must not leave the barrier: recovery
+				// would finish this deletion later without a fresh aggregate. AbortDelete
+				// refuses once the payload moved, and then recovery owns the deletion. A
+				// refused rename (open audio) counts as skipped.
+				var refused *os.LinkError
+				if podcast.AbortDelete(root, j) == nil && (errors.Is(err, os.ErrPermission) || errors.As(err, &refused)) {
 					return false, nil
 				}
 				return false, err

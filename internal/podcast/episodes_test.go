@@ -236,6 +236,19 @@ func TestInvalidFetchKeepsEpisodeAndChapterTextBounds(t *testing.T) {
 	if got := chapterText(long); len(got) > 200 || !utf8.ValidString(got) {
 		t.Fatal("unbounded title")
 	}
+	// A long title is clipped in its own encoding, never dropped for Chapter N:
+	// a byte that is no UTF-8 rune start ends Latin-1 and UTF-16 text too.
+	degree := strings.Repeat("\u00b0", 100)
+	for _, input := range [][]byte{
+		append([]byte{0}, bytes.Repeat([]byte{0xb0}, 1100)...),
+		append([]byte{2}, bytes.Repeat([]byte{0, 0xb0}, 600)...),
+		append([]byte{1, 0xff, 0xfe}, bytes.Repeat([]byte{0xb0, 0}, 600)...),
+		append([]byte{3}, []byte(strings.Repeat("\u00b0", 600))...),
+	} {
+		if got := chapterText(input); got != degree {
+			t.Fatalf("long title %q (%d bytes)", got, len(got))
+		}
+	}
 }
 
 func TestRecoveryAfterExclusiveLinkBeforeUnlink(t *testing.T) {

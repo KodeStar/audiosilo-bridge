@@ -141,8 +141,14 @@ func (h *Fetch) run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (a
 	if _, err := root.Lstat(e.Path); !errors.Is(err, os.ErrNotExist) {
 		return nil, fail("write_failed", "An unverified episode file needs administrator repair.")
 	}
+	// An invalid saved Fetch grants no new generation (NextFetch refuses it): say
+	// so before any enclosure GET rather than after a whole download.
+	if e.Fetch != nil && !e.Fetch.Valid() {
+		return nil, fail("write_failed", "The saved episode record needs administrator repair.")
+	}
 	ctx, b := s.budget(parent)
 	defer b.close()
+	s.dropStaleCheckpoint(job, root, f.ShowID, e.ID)
 	c, tag := s.loadCheckpoint(job, root, f.ShowID, e.ID)
 	committed := false
 	defer func() {
@@ -201,7 +207,7 @@ func (h *Fetch) run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (a
 	err = func() error {
 		defer unlockShow()
 		if err := rep.ConfirmLease(ctx); err != nil {
-			return fail("identity_changed", "The episode job no longer owns its claim.")
+			return leaseFailure(ctx, err, "The episode job no longer owns its claim.")
 		}
 		if pairing != s.pairHash() {
 			return fail("identity_changed", "The Bridge pairing changed.")
@@ -244,6 +250,16 @@ func (h *Fetch) run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (a
 		n = len(chapters.Chapters)
 	}
 	return fetchResult{lib.ID, e.Path, f.ShowID, e.ID, received, n, false}, nil
+}
+
+// leaseFailure words a refused publication check. A lost, cancelled or refused
+// claim no longer owns the job; a server that could not be reached denies the
+// commit too, but as a retryable failure rather than a changed identity.
+func leaseFailure(ctx context.Context, err error, lost string) error {
+	if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, link.ErrNotHeld) || errors.Is(err, link.ErrUnauthorized) {
+		return fail("identity_changed", lost)
+	}
+	return fail("network", "The server could not confirm the job before saving.")
 }
 func (s *service) showKey(mount, show string) string {
 	return s.o.ServerID() + "|" + mount + "/" + show
@@ -389,6 +405,12 @@ func (s *service) download(ctx context.Context, b *budget, job jobs.Job, root *o
 			if err == nil {
 				return fetch, nil
 			}
+			// A local file failure (a full disk, a replaced partial) is not a
+			// network interruption: never retried or reported as one.
+			var guard *netguard.Error
+			if !errors.As(err, &guard) && ctx.Err() == nil {
+				return podcast.Fetch{}, err
+			}
 		}
 		failure := netguard.Classify(err)
 		last = failure
@@ -411,6 +433,12 @@ func (s *service) consume(ctx context.Context, b *budget, job jobs.Job, root *os
 	}
 	total := c.Total
 	if action != "append" {
+		// A body from zero never reuses the old partial's inode: its name is
+		// unlinked and a fresh exclusive temp is made, so nothing swapped in at
+		// that name (a link to another file) is ever truncated or written.
+		if c.Temp != "" {
+			s.clearCheckpoint(job, root, c)
+		}
 		total = r.ContentLength
 		c.Offset = 0
 		tag = r.ETag
@@ -430,17 +458,16 @@ func (s *service) consume(ctx context.Context, b *budget, job jobs.Job, root *os
 	if freshTemp {
 		flags |= os.O_EXCL | os.O_CREATE
 	}
-	if action != "append" {
-		if st, err := root.Lstat(name); err == nil && !st.Mode().IsRegular() {
-			return podcast.Fetch{}, "", podcast.ErrInvalidFile
-		}
-		flags |= os.O_CREATE
-	}
 	file, err := root.OpenFile(name, flags, 0o600)
 	if err != nil {
 		return podcast.Fetch{}, "", err
 	}
 	defer file.Close()
+	if !freshTemp && !sameRegular(root, name, file, c.Offset) {
+		// The proven partial was replaced (a link, or another file) since it was
+		// checked: never append to it.
+		return podcast.Fetch{}, "", podcast.ErrInvalidFile
+	}
 	if err := file.Chmod(0o600); err != nil {
 		return podcast.Fetch{}, "", err
 	}
@@ -449,8 +476,6 @@ func (s *service) consume(ctx context.Context, b *budget, job jobs.Job, root *os
 		if n, err := io.CopyN(h, file, c.Offset); err != nil || n != c.Offset {
 			return podcast.Fetch{}, "", fail("network", "The episode partial is incomplete.")
 		}
-	} else if err := file.Truncate(0); err != nil {
-		return podcast.Fetch{}, "", err
 	}
 	c.Total = total
 	out := &downloadWriter{file: file, hash: h, rep: rep, received: c.Offset, total: total}
@@ -508,6 +533,10 @@ func (s *service) consume(ctx context.Context, b *budget, job jobs.Job, root *os
 		if errors.As(copyErr, &guard) {
 			return podcast.Fetch{}, tag, guard
 		}
+		var disk *diskError
+		if errors.As(copyErr, &disk) {
+			return podcast.Fetch{}, "", fail("write_failed", "The episode could not be saved.")
+		}
 		if c.Offset > 0 && c.Offset < total && netguard.StrongETag(tag) {
 			if err := s.saveCheckpoint(job, c, tag); err != nil {
 				return podcast.Fetch{}, "", err
@@ -519,6 +548,17 @@ func (s *service) consume(ctx context.Context, b *budget, job jobs.Job, root *os
 		return podcast.Fetch{}, tag, fail("network", "The episode download was interrupted.")
 	}
 	return podcast.Fetch{Bytes: c.Offset, SHA256: hex.EncodeToString(h.Sum(nil))}, tag, nil
+}
+
+// sameRegular reports whether the open file is the regular file at name with the
+// expected size: not a symlink's target, not a file swapped in after the open.
+func sameRegular(root *os.Root, name string, f *os.File, size int64) bool {
+	opened, err := f.Stat()
+	if err != nil || !opened.Mode().IsRegular() || opened.Size() != size {
+		return false
+	}
+	named, err := root.Lstat(name)
+	return err == nil && named.Mode().IsRegular() && os.SameFile(opened, named)
 }
 
 type downloadWriter struct {
@@ -542,8 +582,18 @@ func (w *downloadWriter) Write(p []byte) (int, error) {
 			w.progress()
 		}
 	}
-	return n, err
+	if err != nil {
+		return n, &diskError{err}
+	}
+	return n, nil
 }
+
+// diskError marks a failed write to the staged audio, telling it apart from a
+// failed read of the response body.
+type diskError struct{ err error }
+
+func (e *diskError) Error() string { return e.err.Error() }
+func (e *diskError) Unwrap() error { return e.err }
 func (w *downloadWriter) progress() {
 	var total any
 	if w.total >= 0 {

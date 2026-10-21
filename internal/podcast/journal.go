@@ -440,6 +440,19 @@ func AbortDelete(root *os.Root, j Journal) error {
 	if _, err := root.Lstat(show + "/" + j.TrashDir + "/audio"); !errors.Is(err, os.ErrNotExist) {
 		return ErrInvalidFile
 	}
+	// Only this transaction's own barrier is removed, never another journal.
+	rd, err := OpenRegular(root, AttachmentPath(j.Path, ".publish.json"))
+	if err != nil {
+		return err
+	}
+	var saved Journal
+	err = json.NewDecoder(io.LimitReader(rd, 4<<20)).Decode(&saved)
+	_ = rd.Close()
+	a, _ := json.Marshal(j)
+	b, _ := json.Marshal(saved)
+	if err != nil || string(a) != string(b) {
+		return ErrInvalidFile
+	}
 	if err := root.Remove(AttachmentPath(j.Path, ".publish.json")); err != nil {
 		return err
 	}

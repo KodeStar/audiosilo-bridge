@@ -80,24 +80,43 @@ func (s *service) saveCheckpoint(job jobs.Job, c *checkpoint, etag string) error
 	}
 	return fsutil.WriteRootAtomic(root, ".", s.checkpointName(job), b, 0o600, nil)
 }
-func (s *service) loadCheckpoint(job jobs.Job, root *os.Root, showID, episodeID string) (checkpoint, string) {
-	c := checkpoint{ServerHash: s.pairHash(), LibraryID: *job.LibraryID, ShowID: showID, EpisodeID: episodeID, Path: *job.Path}
+
+// readCheckpoint is the job's saved record when it is this pairing's, for the
+// job's library and path, naming an owned temp and a sealed validator.
+func (s *service) readCheckpoint(job jobs.Job) (checkpoint, bool) {
+	var saved checkpoint
 	dir, err := s.checkpointRoot()
 	if err != nil {
-		return c, ""
+		return saved, false
 	}
 	defer func() { _ = dir.Close() }()
 	rd, err := podcast.OpenRegular(dir, s.checkpointName(job))
 	if err != nil {
-		return c, ""
+		return saved, false
 	}
 	defer rd.Close()
 	b, err := io.ReadAll(io.LimitReader(rd, 16385))
-	if err != nil || len(b) > 16384 {
-		return c, ""
+	if err != nil || len(b) > 16384 || json.Unmarshal(b, &saved) != nil {
+		return checkpoint{}, false
 	}
-	var saved checkpoint
-	if json.Unmarshal(b, &saved) != nil || saved.ServerHash != c.ServerHash || saved.LibraryID != c.LibraryID || saved.ShowID != showID || saved.EpisodeID != episodeID || saved.Path != c.Path || !podcast.OwnedTemp(saved.Temp) || !strings.HasPrefix(saved.Validator, secrets.PodcastETagPrefix) {
+	ok := saved.ServerHash == s.pairHash() && saved.LibraryID == *job.LibraryID && saved.Path == *job.Path && podcast.OwnedTemp(saved.Temp) && strings.HasPrefix(saved.Validator, secrets.PodcastETagPrefix)
+	return saved, ok
+}
+
+// dropStaleCheckpoint removes this path's owned partial when it was made for an
+// identity the current feed no longer has (a show or episode replaced at the
+// same path): its record is about to be overwritten, which would orphan it.
+// The caller holds the path's file lock and passes the feed's current IDs.
+func (s *service) dropStaleCheckpoint(job jobs.Job, root *os.Root, showID, episodeID string) {
+	if saved, ok := s.readCheckpoint(job); ok && (saved.ShowID != showID || saved.EpisodeID != episodeID) {
+		s.clearCheckpoint(job, root, &saved)
+	}
+}
+
+func (s *service) loadCheckpoint(job jobs.Job, root *os.Root, showID, episodeID string) (checkpoint, string) {
+	c := checkpoint{ServerHash: s.pairHash(), LibraryID: *job.LibraryID, ShowID: showID, EpisodeID: episodeID, Path: *job.Path}
+	saved, ok := s.readCheckpoint(job)
+	if !ok || saved.ShowID != showID || saved.EpisodeID != episodeID {
 		return c, ""
 	}
 	tag, _ := s.o.Vault.Get(saved.Validator)

@@ -9,6 +9,7 @@ import (
 	"path"
 	"regexp"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -59,8 +60,11 @@ func NextFetch(previous *Fetch, received Fetch) (Fetch, error) {
 }
 
 // OpenRegular rejects links in every component, including links within the root.
+// As agentproto.OpenRegular does, O_NONBLOCK keeps a FIFO swapped in after the
+// Lstat from blocking the open, and the open file must be the one the Lstat saw.
 func OpenRegular(root *os.Root, name string) (*os.File, error) {
 	parts := strings.Split(name, "/")
+	var named os.FileInfo
 	for i, p := range parts {
 		if p == "" || p == "." || p == ".." || strings.ContainsAny(p, "\\\x00") {
 			return nil, ErrInvalidFile
@@ -76,13 +80,14 @@ func OpenRegular(root *os.Root, name string) (*os.File, error) {
 		} else if !st.Mode().IsRegular() {
 			return nil, ErrInvalidFile
 		}
+		named = st
 	}
-	f, err := root.Open(name)
+	f, err := root.OpenFile(name, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return nil, err
 	}
 	st, err := f.Stat()
-	if err != nil || !st.Mode().IsRegular() {
+	if err != nil || !st.Mode().IsRegular() || !os.SameFile(named, st) {
 		_ = f.Close()
 		return nil, ErrInvalidFile
 	}

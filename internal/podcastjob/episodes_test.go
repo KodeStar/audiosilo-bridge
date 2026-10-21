@@ -184,7 +184,7 @@ func TestFetchInterruptedStrongResumeAndFreshFallback(t *testing.T) {
 	}
 }
 func TestFetchDenialsNeverInstall(t *testing.T) {
-	for _, scenario := range []string{"cap", "unknown-cap", "encoded", "invalid", "probe", "identity", "mapping", "foreign", "attempts", "retry-after"} {
+	for _, scenario := range []string{"cap", "unknown-cap", "encoded", "invalid", "probe", "identity", "mapping", "foreign", "record", "attempts", "retry-after"} {
 		t.Run(scenario, func(t *testing.T) {
 			h, job := audioHarness(t)
 			var calls atomic.Int32
@@ -222,6 +222,13 @@ func TestFetchDenialsNeverInstall(t *testing.T) {
 				h.libs.SetLibraries([]link.Library{{ID: 3, Kind: "books", Root: h.mount}})
 			case "foreign":
 				os.WriteFile(filepath.Join(h.mount, *job.Path), []byte("foreign"), 0644)
+			case "record":
+				// An invalid saved Fetch can never take a new generation: no GET.
+				f := h.read("Fixture Show")
+				f.Episodes[0].Fetch = &podcast.Fetch{Generation: 0, SHA256: "bad"}
+				root, _ := os.OpenRoot(h.mount)
+				podcast.Write(root, "Fixture Show", f, h.handler.s.o.Now())
+				root.Close()
 			}
 			result, err := h.handler.FetchJob().Run(context.Background(), job, jobs.LocalReporter())
 			if err == nil {
@@ -231,7 +238,7 @@ func TestFetchDenialsNeverInstall(t *testing.T) {
 			if strings.Contains(string(raw), "PRIVATE_CANARY") || strings.Contains(string(raw), h.http.URL) {
 				t.Fatal("private error leak", string(raw))
 			}
-			if scenario == "identity" || scenario == "mapping" || scenario == "foreign" {
+			if scenario == "identity" || scenario == "mapping" || scenario == "foreign" || scenario == "record" {
 				if calls.Load() != 0 {
 					t.Fatal("denial made GET")
 				}
