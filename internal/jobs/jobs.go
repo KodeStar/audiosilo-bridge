@@ -52,6 +52,23 @@ type Handler interface {
 	Run(ctx context.Context, job Job, rep *Reporter) (result any, err error)
 }
 
+// ParamSealer removes sensitive claim params before any execution row is
+// written. A handler resumes from these stored params and its sealed secrets.
+// A failure fails the job without running it: a *SealFailure is reported as it
+// is, any other error only as a generic failure (its text may hold the secret).
+type ParamSealer interface {
+	SealParams(job Job) (stored json.RawMessage, err error)
+}
+
+// SealFailure is a ParamSealer's failure that is safe to report: it becomes
+// the failed job's result ({"code","message"}) and its message the error.
+type SealFailure struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
+func (e *SealFailure) Error() string { return e.Message }
+
 // Lanes: how many jobs of a kind can run at once. Light jobs are quick checks.
 // The pipeline lane holds the jobs that follow an engine book (sidecars.generate):
 // the engine's own scheduler does the throttling, so a job waits there while its
@@ -458,9 +475,33 @@ type strandedJob struct {
 
 // start records a claimed job and runs it.
 func (r *Runner) start(ctx context.Context, srv Server, job Job, wg *sync.WaitGroup) {
+	var sealErr error
+	sealer, sealing := r.handlers[job.Kind].(ParamSealer)
+	if sealing {
+		job.Params, sealErr = sealer.SealParams(job)
+		if sealErr != nil {
+			job.Params = json.RawMessage(`{}`)
+		}
+	}
 	if err := r.store.RecordClaim(ctx, store.ServerJob{ID: job.ID, Kind: job.Kind, LibraryID: job.LibraryID, Path: job.Path,
 		Params: job.Params, Attempt: job.Attempt, ServerID: r.opts.ServerID()}); err != nil {
 		r.log.Warn("bridge: recording a claim failed", "job", job.ID, "err", err)
+		if sealing {
+			// Fail closed: without its row the sealed secret could be neither
+			// resumed nor released later. The server hands the job out again.
+			r.abandon(ctx, job)
+			return
+		}
+	}
+	if sealErr != nil {
+		r.abandon(ctx, job)
+		var failure *SealFailure
+		if !errors.As(sealErr, &failure) {
+			failure = &SealFailure{Code: "write_failed", Message: "The job's private parameters could not be sealed."}
+		}
+		result, _ := json.Marshal(failure)
+		r.finish(ctx, srv, job, store.JobFailed, nil, result, failure.Message)
+		return
 	}
 	r.launch(ctx, srv, job, wg, "")
 }

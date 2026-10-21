@@ -70,6 +70,7 @@ export function statusFixture(over: Partial<Status> = {}): Status {
     server_url_default: 'http://audiosilo:8080',
     setup: setupFixture(),
     setup_complete: true,
+    podcast_allow_networks: [],
     ...over,
   };
 }
@@ -91,7 +92,7 @@ export function pairedStatus(over: Partial<Status> = {}): Status {
 
 export function libraryFixture(over: Partial<Library> = {}): Library {
   return {
-    library: { id: 1, name: 'Audiobooks', root: '/audiobooks' },
+    library: { id: 1, name: 'Audiobooks', root: '/audiobooks', kind: 'books' },
     mount_path: '/audiobooks',
     configured: false,
     status: {

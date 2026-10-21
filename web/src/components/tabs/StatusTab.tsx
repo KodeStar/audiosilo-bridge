@@ -33,6 +33,12 @@ export function StatusTab({ client }: { client: ApiClient }) {
   return (
     <div className="flex flex-col gap-5">
       {loadError && <Notice kind="error">{loadError}</Notice>}
+      {status.podcast_allow_networks.length > 0 && (
+        <Notice kind="warn">
+          Podcast feeds can reach these explicitly allowed networks:{' '}
+          {status.podcast_allow_networks.join(', ')}. Keep this list limited to trusted feed hosts.
+        </Notice>
+      )}
       {!status.setup_complete && <SetupCard status={status} />}
       {pairing.paired ? (
         <PairedCard client={client} status={status} onChange={setStatus} />

@@ -179,6 +179,15 @@ type Library struct {
 	ID   int64  `json:"id"`
 	Name string `json:"name"`
 	Root string `json:"root"`
+	Kind string `json:"kind"`
+}
+
+// LibraryKind treats a heartbeat from an older server as a books library.
+func (l Library) LibraryKind() string {
+	if l.Kind == "" {
+		return "books"
+	}
+	return l.Kind
 }
 
 // StatusReply is the heartbeat's answer.
@@ -256,7 +265,8 @@ var (
 	// finished, was cancelled, or its lease ran out and it was claimed again).
 	ErrNotHeld = errors.New("the job is no longer held by this claim")
 	// ErrNoBook is the book lookup's 404 no_book.
-	ErrNoBook = errors.New("no indexed book there")
+	ErrNoBook   = errors.New("no indexed book there")
+	ErrNoMarker = errors.New("no library marker there")
 	// ErrNotIndexable is a rescan's 404 not_indexable: no indexed book there.
 	ErrNotIndexable = errors.New("no indexed book at that path")
 	// ErrNoHeartbeat is a claim before any heartbeat (409 no_heartbeat).
@@ -421,6 +431,31 @@ func (c *Client) Rescan(ctx context.Context, libraryID int64, path string) (stri
 	return out.Path, nil
 }
 
+// Marker reads the nonce the server sees at the library root.
+func (c *Client) Marker(ctx context.Context, libraryID int64) (string, error) {
+	var out struct {
+		Nonce string `json:"nonce"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/api/v1/bridge/libraries/"+strconv.FormatInt(libraryID, 10)+"/marker", nil, nil, &out); err != nil {
+		return "", err
+	}
+	return out.Nonce, nil
+}
+
+type PodcastRescan struct {
+	Path     string `json:"path"`
+	Episodes int    `json:"episodes"`
+}
+
+// RescanPodcast indexes feed.json and answers its indexed episode count.
+func (c *Client) RescanPodcast(ctx context.Context, libraryID int64, path string) (*PodcastRescan, error) {
+	var out PodcastRescan
+	if err := c.do(ctx, http.MethodPost, "/api/v1/bridge/rescan", nil, map[string]any{"library_id": libraryID, "path": path}, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // RescanAttachments asks the server to re-read only the book's .audiosilo/ files
 // (POST /bridge/rescan, mode attachments), never its audio, and returns what is
 // now indexed. No indexed book at path is ErrNotIndexable.
@@ -509,6 +544,8 @@ func answerError(status int, raw []byte) error {
 		return ErrNoHeartbeat
 	case status == http.StatusNotFound && e.Code == "no_book":
 		return ErrNoBook
+	case status == http.StatusNotFound && e.Code == "no_marker":
+		return ErrNoMarker
 	case status == http.StatusNotFound && e.Code == "not_indexable":
 		return ErrNotIndexable
 	}

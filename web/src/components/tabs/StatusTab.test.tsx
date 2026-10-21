@@ -9,6 +9,24 @@ import { engineFixture, pairedStatus, setupFixture, statusFixture } from '@/test
 const api = () => new ApiClient({ getToken: () => 't', onSignedOut: vi.fn() });
 
 describe('StatusTab', () => {
+  it('warns when podcast feeds may reach configured non-public networks', async () => {
+    mockFetch({
+      'GET /api/engine': { body: engineFixture() },
+      'GET /api/status': { body: pairedStatus({ podcast_allow_networks: ['127.0.0.1/32'] }) },
+    });
+    render(<StatusTab client={api()} />);
+    expect(await screen.findByText(/Podcast feeds can reach/)).toHaveTextContent('127.0.0.1/32');
+  });
+
+  it('shows no network warning with the default podcast guard', async () => {
+    mockFetch({
+      'GET /api/engine': { body: engineFixture() },
+      'GET /api/status': { body: pairedStatus() },
+    });
+    render(<StatusTab client={api()} />);
+    await screen.findByText('Version');
+    expect(screen.queryByText(/Podcast feeds can reach/)).not.toBeInTheDocument();
+  });
   it('leads with "Get set up" until the required items are done, each linking to its tab', async () => {
     mockFetch({
       'GET /api/engine': { body: engineFixture() },

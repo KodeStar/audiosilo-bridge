@@ -111,6 +111,8 @@ describe('descriptions', () => {
   it('labels the kinds and retries a parked description job', () => {
     expect(kindLabel('sidecars.describe')).toBe('Description');
     expect(kindLabel('sidecars.generate')).toBe('Characters and recaps');
+    expect(kindLabel('podcast.subscribe')).toBe('Following a show');
+    expect(kindLabel('podcast.poll')).toBe('Checking a feed');
     expect(kindLabel('bridge.verify')).toBe('');
     expect(kindLabel('constructor')).toBe('');
     expect(kindLabel('__proto__')).toBe('');

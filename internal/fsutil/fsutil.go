@@ -5,6 +5,7 @@
 package fsutil
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"io"
@@ -54,6 +55,41 @@ func WriteFileAtomic(path string, data []byte, perm fs.FileMode) error {
 		return rerr
 	}
 	return nil
+}
+
+// WriteRootAtomic writes data to dir/name inside root through an exclusive hidden
+// temp file in dir (".audiosilo-tmp-<random>"), fsync and rename, so every step
+// stays inside root. perm is set on the file explicitly. beforeRename, when not
+// nil, runs last: its error leaves the destination untouched.
+func WriteRootAtomic(root *os.Root, dir, name string, data []byte, perm fs.FileMode, beforeRename func() error) error {
+	var random [12]byte
+	if _, err := rand.Read(random[:]); err != nil {
+		return err
+	}
+	tmp := dir + "/.audiosilo-tmp-" + hex.EncodeToString(random[:])
+	file, err := root.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, perm)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = file.Close(); _ = root.Remove(tmp) }()
+	if err := file.Chmod(perm); err != nil {
+		return err
+	}
+	if _, err := file.Write(data); err != nil {
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	if beforeRename != nil {
+		if err := beforeRename(); err != nil {
+			return err
+		}
+	}
+	return root.Rename(tmp, dir+"/"+name)
 }
 
 // IsFile reports whether path exists and is a regular file (not a directory).

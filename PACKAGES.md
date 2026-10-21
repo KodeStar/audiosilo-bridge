@@ -25,6 +25,10 @@ cmd/audiosilo-bridge/     entrypoint, four subcommands: `serve` (the default; --
                           container; --home /agent). `help` prints the usage.
 internal/
   config/   config.yaml in <data>/ + AUDIOSILO_BRIDGE_* env overrides; Load/Save/Validate.
+            Phase 2c-1: podcasts.allow_networks (CIDR strings, default empty;
+            AUDIOSILO_BRIDGE_PODCASTS_ALLOW_NETWORKS comma-separated) and
+            podcasts.max_feed_mb (1-64, default 32;
+            AUDIOSILO_BRIDGE_PODCASTS_MAX_FEED_MB). Both apply at restart.
             The Bridge's own settings are bridge.go: server.url, public_url (the page
             as the LAN reaches it, sent as the heartbeat's ui_url), libraries (library
             id -> the folder the Bridge sees it at; MountFor falls back to the
@@ -1120,9 +1124,15 @@ internal/
             ErrWrongKey, which the start reports in words. No OS keychain: the
             Bridge runs headless in a container. Names are ^[a-z][a-z0-9_]{0,63}$ (a
             name is a file name); Get hands a secret to the code that uses it, and
-            nothing echoes one.
+            nothing echoes one. Phase 2c-1: PodcastJobName(id, attempt) (each
+            claim its own: an earlier attempt's end never deletes a later one's)
+            and PodcastFeedName(show_id) name sealed podcast credentials; they
+            are omitted from the operator-managed Names() list.
   store/    SQLite (modernc, pure Go; single writer + WAL) + append-only migrations,
-            bridge.db. 0001 is sidecars' 13 migrations squashed at the import (the
+            bridge.db. 0007 adds podcast_shows, a credential-free cache keyed by
+            (server_id, show_id), indexed by server/library/feed hash. An empty
+            library cache is rebuilt from feed.json before subscription dedupe.
+            0001 is sidecars' 13 migrations squashed at the import (the
             later columns folded into their tables; candidate_overrides and
             library_sightings dropped; the 'legacy' batch row still seeded): books,
             stage_runs, progress, events (durable log, 30-day prune), rates
@@ -1470,7 +1480,9 @@ internal/
             durable-sink persister (feeds store.events)
   link/     the client of the server's Bridge routes (pairing exchange, heartbeat,
             long-poll claim narrowed by ?kind= to the kinds with room, job updates,
-            a book's files, targeted rescan). Every request sends X-AudioSilo-Client:
+            a book's files, targeted rescan). Phase 2c-1: Library.Kind (missing
+            means books), Marker (no_marker -> ErrNoMarker), RescanPodcast
+            (path and episode count). Every request sends X-AudioSilo-Client:
             "AudioSilo Bridge/<version> (<os>)", inside the server's auth.ParseClient
             grammar (a test holds the regex). Wire types mirror the server's
             internal/bridge BY HAND (no codegen): a change there is a change here,
@@ -1506,8 +1518,15 @@ internal/
             only then probes writability with an exclusive dot-named probe file (a
             crash leaves nothing the server's scan walks). A library with no indexed
             book is NEVER mapped: with nothing to compare, a wrong mount would look
-            right and a later write job would land in the wrong folder (Phase 2b's
-            podcast libraries start empty: revisit there). Registry holds the
+            right and a later write job would land in the wrong folder. Podcast
+            libraries use CheckPodcast instead: a root .audiosilo/library.json
+            marker (version, matching library id, random nonce) is read back by
+            the server. Symlinked marker folders/files and invalid markers are
+            refused; a newly created marker is removed after a failed check. A
+            marker naming another library is refused while the server lists that
+            library, and replaced once it doesn't (the library was deleted, or
+            the folder added again under a new id).
+            Registry dispatches by the heartbeat's kind and holds the
             server's libraries from the last heartbeat and each check; Check(ids...)
             checks some or all, one library at a time, and never overlaps itself: a
             check asked for while one runs is done right after it by that call, with
@@ -1519,7 +1538,14 @@ internal/
             edit re-checks only its library (each check stats files and writes a
             probe). Status(id) is one library's last check (a write job needs it
             mapped AND writable at the mount it uses now).
-  jobs/     the generic runner. Handlers declare a kind and a lane (lanes: light=2,
+  jobs/     the generic runner. Phase 2c-1: optional ParamSealer.SealParams runs
+            BEFORE RecordClaim. A failure records sanitized empty params, fails
+            closed without Run, and calls Abandon for any secret already sealed;
+            a *SealFailure is reported as its code and message, any other error
+            only as a generic write_failed (its text may hold the secret). A claim
+            the store can't record is abandoned (the server hands it out again)
+            only when its handler seals; other kinds run anyway, as before.
+            Handlers declare a kind and a lane (lanes: light=2,
             and Phase 1a's pipeline=25 for the jobs that follow an engine book: the
             engine's scheduler does the throttling, so such a job sits in its lane
             while its book is queued or parked, and the lane only bounds how many
@@ -1591,6 +1617,50 @@ internal/
             then holds, reporting each second. A mismatch is a failure WITH a result.
             Result {library_id, mount_path, path, files[{path,size,expected_size,ok}],
             writable, writable_error, elapsed_ms}: the server's console renders it.
+  netguard/ Phase 2c-1 feed/artwork client: explicit DNS resolution and a socket
+            Control check of the exact IP, public addresses or configured CIDRs
+            only (including NAT64 embedded IPv4 checks), no environment proxy.
+            Each resolved address is dialed in turn with its share of the 10 s
+            connect bound (at least 2 s), so one that drops packets can't leave a
+            working one untried. GET, gzip only, 10 redirects (Permanent only when
+            one was followed and all were 301/308), connect/header/body-stall
+            bounds and decoded size caps; two jittered retries for transient
+            failures, respecting Retry-After. Bad gzip data (empty, header,
+            checksum, stream) fails at once as not_a_feed; a read the connection
+            broke is retried. Errors never contain remote text or URLs.
+  podcast/  pure feed.json v1 types, rooted regular-file IO with capped atomic
+            writes, URL normalization/hash/privacy/redaction, NFC show names,
+            stable episode paths, identity merge and adaptive polling. Spike 5
+            selected gofeed Extensions, with prefix declarations resolved by URI
+            (a legacy-charset feed decoded as gofeed decodes it); x/net/html
+            produces plain text, keeping what only looks like a tag (a name that
+            is no HTML element, "Vec<T>", or a tag left open at the end, "x<y").
+            itunes:duration is S, M:S or H:M:S, a fraction of its seconds dropped.
+            Merge: every item first claims the kept episode of its own identity
+            or id, then the items left try the weak matches (enclosure, title and
+            date), so a weak match never takes an episode whose own item is still
+            listed. EnclosureBase drops the query only when the path names an
+            audio file (a download link's query tells episodes apart). Over the
+            20,000-episode cap the removed, never-fetched episodes gone longest
+            are dropped first. Private feeds scrub URLs before each write. Golden
+            fixtures and URL vectors are shared with the server.
+  podcastjob/ podcast.subscribe and podcast.poll (light lane): require the
+            heartbeat's podcasts kind and the checked writable mount at each
+            write. Per-library subscribe and per-show write locks, hash dedupe,
+            cache rebuild, artwork sniffing, permanent moves and targeted rescan.
+            Subscribe implements ParamSealer and Abandoner: job credentials are
+            sealed before persistence, resumed from the vault, resealed under
+            the show id on success, and removed at every terminal job end.
+            A 304 never rewrites feed.json or artwork. Neither handler fetches
+            episode audio; retained fetch metadata is preserved. A job claimed
+            before its library's mapping check (a start or re-pair) waits for it
+            (CheckPoll). A subscribe's 3-minute ceiling starts once it holds the
+            library lock; artwork gets at most a minute and half the time left; a
+            follow that fails before feed.json takes back the folder it made. A
+            poll asks for a rescan of any show the server hasn't indexed since
+            this start (one a failed job left owed), 304 or not. An
+            itunes:new-feed-url never names a URL the show moved away from nor
+            takes https to http. A cover deleted by hand is fetched again.
   generate/ sidecars.generate (Phase 1a): turns a server job into an ENGINE BOOK, follows
             it to the end reporting its stage, ETA, spend and parks, then writes the
             validated characters and recaps into the book's .audiosilo/ and asks the
@@ -2071,7 +2141,12 @@ internal/
             never into the service file. A decoder outlives a kill -9 of a worker
             started by hand (spike 4); launchd and systemd end the job's process
             group/cgroup, so an installed worker doesn't leave one.
-  app/      the wiring and the page API's Backend: Conn holds the pairing (settings
+  app/      Phase 2c-1 wires the guarded client and both podcast handlers,
+            advertises their kinds, warns for allowed non-public CIDRs at start
+            and on Status, and redacts podcast params/results/errors for page
+            job lists and details. The warning reflects the running client until
+            restart, including after an unrelated settings save.
+            The wiring and the page API's Backend: Conn holds the pairing (settings
             pairing.*, the token in the vault) and the link; the heartbeat loop beats
             every 30 s or when kicked, records the server's libraries (under b.mu,
             beatGen-checked, before the link counts as ready) and starts a mapping
@@ -2183,8 +2258,12 @@ internal/
             ids start from the clock (Unix microseconds), so they grow across
             restarts and a page still holding the previous process's cursor gets
             the new lines. Attributes whose FULL dotted key holds
-            token/password/code/key/secret/cookie/authorization are redacted, groups
-            (slog.Group, a LogValuer resolving to one) flattened leaf by leaf first.
+            token/password/code/key/secret/cookie/authorization are redacted in the
+            ring (the process log keeps their values), groups (slog.Group, a
+            LogValuer resolving to one) flattened leaf by leaf first.
+            Phase 2c-1 sanitizes BEFORE BOTH sinks: feed_url values and URLs in
+            messages/errors lose credentials, paths and queries. WithAttrs and
+            nested groups receive the same treatment.
   web/      go:embed of the page (build-tag selected) + SPA-fallback static serving;
             the page itself (/, a client route, /index.html) always goes out with
             its CSP

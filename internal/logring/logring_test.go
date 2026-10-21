@@ -97,6 +97,50 @@ func logTo(r *Ring, msg string, n int) {
 	}
 }
 
+func TestFeedURLsRedactedInBothSinks(t *testing.T) {
+	t.Parallel()
+	var captured bytes.Buffer
+	ring := New(10)
+	log := slog.New(NewHandler(slog.NewTextHandler(&captured, nil), ring))
+	url := "https://user:password@example.com/private/feed?auth=SECRET123"
+	log.With("feed_url", url).WithGroup("podcast").Warn("failed "+url, "err", fmt.Errorf("fetch %s: refused", url), "feed_url", url, "episodes", 12)
+	log.Info("nested", slog.Group("podcast", "feed_url", url, "title", "Allowed title"))
+	raw, _ := json.Marshal(ring.Since(0, 0, slog.LevelInfo))
+	for _, out := range []string{captured.String(), string(raw)} {
+		if strings.Contains(out, "SECRET123") || strings.Contains(out, "user:password") {
+			t.Fatalf("credential leaked: %s", out)
+		}
+		if !strings.Contains(out, "https://example.com/...") || !strings.Contains(out, "Allowed title") {
+			t.Fatalf("allowed fields lost: %s", out)
+		}
+	}
+}
+
+// The key redaction is the page's log view's: the process log keeps the values
+// of keys that only sound secret (key_source, decode_seconds, exit_code), as it
+// did before, while URLs lose their credentials in both sinks.
+func TestProcessLogKeepsWhatOnlyTheRingRedacts(t *testing.T) {
+	t.Parallel()
+	var captured bytes.Buffer
+	ring := New(10)
+	log := slog.New(NewHandler(slog.NewTextHandler(&captured, nil), ring))
+	log.WithGroup("asr").Info("started", "key_source", "env", "decode_seconds", 12, "exit_code", 3, "err", fmt.Errorf("fetch https://u:p@example.com/feed?auth=SECRET123: refused"), "token", "s3cret")
+	out := captured.String()
+	for _, want := range []string{"asr.key_source=env", "asr.decode_seconds=12", "asr.exit_code=3", "https://example.com/..."} {
+		if !strings.Contains(out, want) {
+			t.Errorf("process log lost %q: %s", want, out)
+		}
+	}
+	if strings.Contains(out, "SECRET123") {
+		t.Fatalf("credential leaked: %s", out)
+	}
+	e := ring.Since(0, 0, slog.LevelInfo)[0]
+	raw, _ := json.Marshal(e)
+	if e.Attrs["asr.token"] != "[redacted]" || strings.Contains(string(raw), "SECRET123") || strings.Contains(string(raw), "s3cret") {
+		t.Fatalf("ring = %s", raw)
+	}
+}
+
 type secretValue string
 
 func (s secretValue) LogValue() slog.Value {

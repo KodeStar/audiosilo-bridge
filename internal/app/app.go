@@ -31,6 +31,8 @@ import (
 	"github.com/kodestar/audiosilo-bridge/internal/logring"
 	"github.com/kodestar/audiosilo-bridge/internal/mapping"
 	"github.com/kodestar/audiosilo-bridge/internal/metaops"
+	"github.com/kodestar/audiosilo-bridge/internal/netguard"
+	"github.com/kodestar/audiosilo-bridge/internal/podcastjob"
 	"github.com/kodestar/audiosilo-bridge/internal/secrets"
 	"github.com/kodestar/audiosilo-bridge/internal/state"
 	"github.com/kodestar/audiosilo-bridge/internal/store"
@@ -57,18 +59,19 @@ type Options struct {
 
 // Bridge is the running Bridge.
 type Bridge struct {
-	dataDir string
-	version string
-	log     *slog.Logger
-	ring    *logring.Ring
-	cfg     atomic.Pointer[config.Config]
-	db      *store.DB
-	keySrc  secrets.KeySource
-	vault   secrets.Store
-	conn    *Conn
-	libs    *mapping.Registry
-	runner  *jobs.Runner
-	auth    *auth.Manager
+	dataDir     string
+	version     string
+	log         *slog.Logger
+	ring        *logring.Ring
+	cfg         atomic.Pointer[config.Config]
+	db          *store.DB
+	keySrc      secrets.KeySource
+	vault       secrets.Store
+	conn        *Conn
+	libs        *mapping.Registry
+	runner      *jobs.Runner
+	auth        *auth.Manager
+	podcastHTTP *netguard.Client
 	// box is the agent container runner (decision 15), gen the sidecars.generate
 	// job, engine the sidecars engine once it has started.
 	box    *agentbox.Runner
@@ -185,10 +188,25 @@ func New(ctx context.Context, opts Options) (*Bridge, string, error) {
 		ContribCredential: b.contribCredential, Log: opts.Logger})
 	b.wakeParked = b.gen.WakeParked
 	serverID := func() string { return b.conn.Pairing().ServerID }
+	networks, err := cfg.Podcasts.Networks()
+	if err != nil {
+		_ = db.Close()
+		return nil, "", err
+	}
+	b.podcastHTTP = netguard.New(netguard.Options{AllowNetworks: networks, Version: opts.Version})
+	if len(networks) > 0 {
+		opts.Logger.Warn("podcast feeds may reach explicitly allowed non-public networks", "allow_networks", cfg.Podcasts.AllowNetworks)
+	}
+	podcasts := podcastjob.New(podcastjob.Options{DB: db, Libraries: b.libs, Mount: b.mount, Vault: vault, Fetcher: b.podcastHTTP, MaxFeedBytes: int64(cfg.Podcasts.MaxFeedMB) << 20, Version: opts.Version, ServerID: serverID, Server: func() podcastjob.Server {
+		if cl := b.conn.Client(); cl != nil {
+			return cl
+		}
+		return nil
+	}})
 	corrector := correct.New(correct.Options{Meta: metaops.NewClient(cfg.Metadata.BaseURL), Tokens: b.tokens,
 		BaseURL: cfg.Contribution.APIBaseURL, CoreRepo: cfg.Contribution.CoreRepo, KV: db, ServerID: serverID, Log: opts.Logger})
 	b.runner = jobs.New(db, b.server, b.tokenRefused, jobs.Options{Log: opts.Logger, ServerID: serverID},
-		verifier, b.gen, b.gen.DescribeJob(), b.gen.ChaptersJob(), b.gen.ContributeJob(), corrector)
+		verifier, b.gen, b.gen.DescribeJob(), b.gen.ChaptersJob(), b.gen.ContributeJob(), corrector, podcasts, podcasts.PollJob())
 	conn.onChange = b.linkChanged
 	return b, oneTime, nil
 }
@@ -260,6 +278,7 @@ var listen = func(ctx context.Context, addr string) (net.Listener, error) {
 // Run serves the page and runs the heartbeat and the runner until ctx ends,
 // or the page's server fails (its error is returned once everything stopped).
 func (b *Bridge) Run(ctx context.Context) error {
+	defer b.podcastHTTP.Close()
 	defer func() { _ = b.db.Close() }()
 	// The heartbeat and the runner stop with ctx: a failing page server must
 	// stop them too, or Run would wait for them for ever.

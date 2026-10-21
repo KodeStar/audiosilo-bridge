@@ -318,7 +318,8 @@ type Config struct {
 	// with no entry is looked for at the server's own root path.
 	Libraries []LibraryMapping `yaml:"libraries"`
 	// Mapping is how often the mappings are checked.
-	Mapping MappingConfig `yaml:"mapping"`
+	Mapping  MappingConfig  `yaml:"mapping"`
+	Podcasts PodcastsConfig `yaml:"podcasts"`
 	// Metadata configures the community metadata API client.
 	Metadata MetadataConfig `yaml:"metadata"`
 	// Tools locates ffmpeg/ffprobe (resolved at startup, see internal/toolfetch).
@@ -369,6 +370,7 @@ func Default() Config {
 		Listen:    DefaultListen,
 		Libraries: []LibraryMapping{},
 		Mapping:   MappingConfig{CheckMinutes: DefaultMappingCheckMinutes},
+		Podcasts:  PodcastsConfig{AllowNetworks: []string{}, MaxFeedMB: 32},
 		Metadata:  MetadataConfig{BaseURL: DefaultMetadataBaseURL},
 		Tools:     ToolsConfig{AutoDownload: DefaultAutoDownload},
 		ASR:       ASRConfig{Backend: DefaultASRBackend, Language: DefaultASRLanguage, WorkerFallback: DefaultASRWorkerFallback},

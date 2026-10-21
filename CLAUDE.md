@@ -95,6 +95,10 @@ internal/
   logring/    recent log lines for the page (secrets redacted)
   web/        go:embed of the page (build-tag selected)
   secrets/    sealed-file secrets keyed by AUDIOSILO_BRIDGE_SECRET_KEY or secret.key
+  -- Phase 2c-1 --
+  netguard/   guarded feed/artwork GETs: public addresses or explicit allowed CIDRs
+  podcast/    feed.json v1, URL helpers, parsing, stable names and merge, cadence
+  podcastjob/ podcast.subscribe + podcast.poll, sealed URLs, locks and rescans
   -- Phase 2b --
   ghauth/     the GitHub App device flow, refresh, revoke (injectable base URLs)
   accounts/   the Accounts tab's GitHub sign-in and agent credentials (vault-sealed)
@@ -103,7 +107,7 @@ internal/
   config/     config.yaml + AUDIOSILO_BRIDGE_* (bridge.go: the Bridge's own settings)
   store/      SQLite, append-only migrations (0001 the engine, 0002 server_jobs,
               0003 generate_books, contrib_mode, server_id, deleted_stage_spend,
-              0004 workers, 0005 books.goal, 0006 accounts)
+              0004 workers, 0005 books.goal, 0006 accounts, 0007 podcast_shows)
   auth/       the page's single password + hashed sessions + login limiter
   -- Phase 1a --
   generate/   sidecars.generate: server job -> engine book -> .audiosilo/ + rescan;
@@ -129,12 +133,14 @@ Dockerfile    slim | cuda | agent | full; compose.example.yaml: server, bridge, 
 
 **Dependency direction:** `app -> {api, jobs, link, mapping, verify, generate,
 agentbox, workers, accounts, setup, correct, store, secrets, config, auth, logring,
-web}` plus the engine it wires; `accounts -> {agentproto, ghauth, secrets, store}`; `correct ->
+web, netguard, podcast, podcastjob}` plus the engine it wires; `accounts -> {agentproto, ghauth, secrets, store}`; `correct ->
 {contrib, jobs, metaops}`; `setup -> link`;
 `api` calls the injected Backend and the injected `auth.Manager` (login, sessions,
 the password), with types from jobs/link/mapping/store/logring; `verify -> {jobs,
 link, mapping}`; `generate -> {jobs, link, mapping, store, scheduler, pipeline, ...}`
-through its own Engine/Server interfaces; `jobs -> {link, store}`; `mapping -> link`;
+through its own Engine/Server interfaces; `podcastjob -> {jobs, link, mapping, netguard, podcast, secrets, store}`;
+`podcast -> {fsutil, gofeed, x/net/html, x/text}`; `logring -> podcast`;
+`jobs -> {link, store}`; `mapping -> {fsutil, link}`;
 `link`, `agentproto` and `workerproto` are leaves; `workers -> {asr, fsutil,
 scheduler, state, store, transcript, workerproto}`; `worker -> {asr, fsutil, workerproto}`
 (never `workers`; its tests drive the real `api` + `workers` in-process); `api`
@@ -157,9 +163,13 @@ in PACKAGES.md.
   use, checked again before each write), temp file then rename, umask 022, a
   targeted rescan after, deletes to `.audiosilo-trash/`. A library that isn't mapped
   and writable refuses a new write job (a resumed one parks and waits). Today the
-  only writer is `generate` (its three jobs): `characters.json`, `recaps.json`,
+  book writer is `generate` (its three jobs): `characters.json`, `recaps.json`,
   `description.json` (Phase 1c), `chapters.json` (Phase 1d) and `bridge.json` in the
-  book's `.audiosilo/` (a single-file book's prefixed `<stem>.`), nothing else.
+  book's `.audiosilo/` (a single-file book's prefixed `<stem>.`). Podcast writers
+  require a podcast-kind library and its checked marker mapping (a job claimed
+  before the check waits for it); they write only the root marker, show folders,
+  feed.json and sniffed JPEG/PNG artwork. Book writers refuse podcast libraries.
+  No episode audio is downloaded in 2c-1.
 - **The agent container's files are untrusted** (and the Bridge's are to it): every
   read goes through `agentproto.OpenRegular`/`ReadRegular` inside an `os.Root`, the
   harvest is capped, and the container's own credential never leaves it (only its
@@ -172,7 +182,11 @@ in PACKAGES.md.
   deletes an earlier Bridge's `github_pat` copy). An agent credential leaves the
   Bridge only as one run's `credential/credential.json`, which the runner deletes
   before the CLI starts, and only when the agent container has none of its own;
-  the log ring redacts secret-sounding attributes.
+  private podcast feed URLs are sealed before a claim reaches server_jobs, as
+  podcast_job_<job id>_<attempt> (each claim its own), then podcast_feed_<show_id>.
+  The job secret survives a resumable stop and is deleted at any terminal end.
+  Private feed.json files omit feed, enclosure, chapters and transcript URLs. Both
+  log sinks and the page API redact URLs, including userinfo, paths and queries.
 - **The page answers the local network only and always asks for its password**,
   loopback included (spike 2: an agent on the same network could reach it).
 - **The worker routes (`/worker/v1/*`, Phase 1b) take only a worker token**
@@ -275,6 +289,23 @@ made). The setup checklist (`setup`) on the Status tab's "Get set up" card and i
 the heartbeat,
 sent only once the server's reply `accepts` it. The monthly agent budget is
 editable on the page and applies live.
+**Phase 2c-1 (podcast shows, Bridge side):** light podcast.subscribe and
+podcast.poll jobs write feed.json v1 and show artwork, then request a targeted
+rescan. A library's kind comes from the heartbeat (missing means books); empty
+podcast libraries map through .audiosilo/library.json and the marker route.
+Stable episode identities and assigned paths survive feed edits and removals;
+304 responses do not write. Permanent redirects and itunes:new-feed-url retain
+the prior URL hashes; temporary redirects do not change the saved URL. Private
+URLs live in the vault only. The guarded client checks every resolved address
+and redirect, disables environment proxies, and bounds decoded bodies and stalls.
+Spike 5 covered 14 distinct real feeds: gofeed retains podcast extensions and
+their attributes, including multiple transcripts, so parsing uses Extensions
+with prefixes resolved by namespace URI. Set podcasts.allow_networks (env
+AUDIOSILO_BRIDGE_PODCASTS_ALLOW_NETWORKS, comma CIDRs) only for trusted LAN feed
+hosts; a non-empty list warns at start and on Status. podcasts.max_feed_mb
+(AUDIOSILO_BRIDGE_PODCASTS_MAX_FEED_MB) defaults to 32, accepts 1-64, and applies
+at the next start. Neither audio fetching nor player views are part of 2c-1.
+
 See BRIDGE-PLAN.md's Status table for what is next.
 
 Operative caveats carried from sidecars (PACKAGES.md has the detail):

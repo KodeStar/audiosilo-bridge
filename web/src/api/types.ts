@@ -50,6 +50,7 @@ export interface Status {
   // every required item is done.
   setup: Setup;
   setup_complete: boolean;
+  podcast_allow_networks: string[];
 }
 
 // link.SetupItem ids, in the checklist's order (internal/setup).
@@ -77,6 +78,7 @@ export interface ServerLibrary {
   id: number;
   name: string;
   root: string;
+  kind: 'books' | 'podcasts';
 }
 
 // link.LibraryStatus
