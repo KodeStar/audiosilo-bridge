@@ -265,15 +265,18 @@ func complete(root *os.Root, j Journal, now time.Time, fault Boundary, verified 
 			if err := root.Chmod(temp, 0o644); err != nil {
 				return err
 			}
-			// Link is exclusive: a foreign file appearing concurrently is never overwritten.
-			if err := root.Link(temp, j.Path); err != nil {
+			// Never replaces: a foreign file appearing concurrently is never overwritten.
+			linked, err := installAudio(root, temp, j.Path)
+			if err != nil {
 				return err
 			}
 			if err := hit(fault, "linked"); err != nil {
 				return err
 			}
-			if err := root.Remove(temp); err != nil {
-				return err
+			if linked {
+				if err := root.Remove(temp); err != nil {
+					return err
+				}
 			}
 		}
 		if _, err := root.Lstat(temp); err == nil {

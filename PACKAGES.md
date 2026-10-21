@@ -1661,7 +1661,10 @@ internal/
             Phase 2c-2a adds Fetch validation/generation transitions, bounded
             chronological ID3 CHAP attachments and pure install/delete journals.
             Journals are serving barriers. Exclusive hard-link then unlink installs
-            audio without overwriting a concurrent foreign file. Committed delete
+            audio without overwriting a concurrent foreign file; a mount without
+            hard links (SMB/CIFS, some NAS/FUSE shares) falls back to a no-replace
+            rename (renameat2 RENAME_NOREPLACE on Linux, else an absence check
+            under the show and path locks; install*.go). Committed delete
             manifests identify trash for cleanup after rescan or after 24 h.
             Invalid Fetch keeps its episode and grants no file authority. Shared
             phase2c2 fixtures are copied byte-for-byte, checked by manifest hashes.
