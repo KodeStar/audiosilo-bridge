@@ -95,6 +95,12 @@ func (h *Retain) run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (
 	}
 	s.cleanOwned(ctx, root, lib, mount, show, job.ID)
 	pairing := s.pairHash()
+	// ask stamps dispatch on the Bridge's monotonic clock: a snapshot's age runs from there.
+	ask := func(r link.PodcastRetentionRequest) (*link.PodcastRetentionCheck, time.Time, error) {
+		sent := s.o.BudgetNow()
+		check, err := srv.CheckPodcastRetention(ctx, lib.ID, r)
+		return check, sent, err
+	}
 	for _, candidate := range feed.Episodes {
 		if candidate.Fetch == nil || candidate.Fetch.DeletedAt != "" {
 			continue
@@ -106,8 +112,7 @@ func (h *Retain) run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (
 		// Most kept episodes are ineligible: ask before the locked reread and full
 		// hash. This grants nothing; the locked path asks again before deleting.
 		pre := link.PodcastRetentionRequest{ShowID: p.ShowID, Path: candidate.Path, Generation: candidate.Fetch.Generation, SHA256: candidate.Fetch.SHA256, Bytes: candidate.Fetch.Bytes}
-		sent := s.o.BudgetNow()
-		if check, err := srv.CheckPodcastRetention(ctx, lib.ID, pre); err != nil || !RetentionEligible(check, lib.ID, show, pre, candidate.Fetch, s.o.Now(), s.o.BudgetNow().Sub(sent)) {
+		if check, sent, err := ask(pre); err != nil || !RetentionEligible(check, lib.ID, show, pre, candidate.Fetch, s.o.Now(), s.o.BudgetNow().Sub(sent)) {
 			result.Skipped++
 			continue
 		}
@@ -146,8 +151,7 @@ func (h *Retain) run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (
 				return false, leaseFailure(ctx, err, "The retention job no longer owns its claim.")
 			}
 			request := link.PodcastRetentionRequest{ShowID: p.ShowID, Path: current.Path, Generation: current.Fetch.Generation, SHA256: current.Fetch.SHA256, Bytes: current.Fetch.Bytes}
-			sent := s.o.BudgetNow()
-			check, err := srv.CheckPodcastRetention(ctx, lib.ID, request)
+			check, sent, err := ask(request)
 			eligible := func() bool {
 				return RetentionEligible(check, lib.ID, show, request, current.Fetch, s.o.Now(), s.o.BudgetNow().Sub(sent))
 			}
@@ -170,9 +174,7 @@ func (h *Retain) run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (
 				if at == "deleting" {
 					if !eligible() {
 						var err error
-						sent = s.o.BudgetNow()
-						check, err = srv.CheckPodcastRetention(ctx, lib.ID, request)
-						if err != nil || check == nil {
+						if check, sent, err = ask(request); err != nil {
 							return denied
 						}
 					}

@@ -228,6 +228,15 @@ func RecoverShow(root *os.Root, show string, now time.Time, fault Boundary) erro
 		if len(b) > 4<<20 || json.Unmarshal(b, &j) != nil || !journalValid(&j, show) || AttachmentPath(j.Path, ".publish.json") != p {
 			return ErrInvalidFile
 		}
+		if j.Op == "delete" {
+			// An unmoved deletion's aggregate may be stale: leave the episode installed.
+			if _, err := root.Lstat(show + "/" + j.TrashDir + "/audio"); errors.Is(err, os.ErrNotExist) {
+				if err := AbortDelete(root, j); err != nil {
+					return err
+				}
+				continue
+			}
+		}
 		if err := complete(root, j, now, fault, false); err != nil {
 			return err
 		}
@@ -236,7 +245,8 @@ func RecoverShow(root *os.Root, show string, now time.Time, fault Boundary) erro
 }
 
 // complete finishes a journaled transaction. verified means the caller has just
-// checked the staged (install) or named (delete) payload under the same locks.
+// checked the staged (install) or named (delete) payload under the same locks;
+// without it a delete only finishes audio that already moved into trash.
 func complete(root *os.Root, j Journal, now time.Time, fault Boundary, verified bool) error {
 	show := path.Dir(j.Path)
 	f, err := Read(root, show)
@@ -301,7 +311,7 @@ func complete(root *os.Root, j Journal, now time.Time, fault Boundary, verified 
 				return ErrInvalidFile
 			}
 			if !verified {
-				return AbortDelete(root, j)
+				return ErrInvalidFile
 			}
 			if err := hit(fault, "deleting"); err != nil {
 				return err
@@ -463,5 +473,8 @@ func AbortDelete(root *os.Root, j Journal) error {
 	if err := syncDir(root, show+"/.audiosilo"); err != nil {
 		return err
 	}
-	return root.Remove(show + "/" + j.TrashDir)
+	if err := root.Remove(show + "/" + j.TrashDir); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
 }

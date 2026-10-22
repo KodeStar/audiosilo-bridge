@@ -104,6 +104,13 @@ func (s *retainServer) CheckPodcastRetention(_ context.Context, _ int64, r link.
 	}
 	return s.check(r), nil
 }
+
+// eligibleCheck is a fresh snapshot granting deletion of r under keep, finished an hour before now.
+func eligibleCheck(r link.PodcastRetentionRequest, keep link.PodcastPolicy, now time.Time) *link.PodcastRetentionCheck {
+	finished, after := now.Add(-time.Hour).Format(time.RFC3339), now.Format(time.RFC3339)
+	return &link.PodcastRetentionCheck{LibraryID: 3, ShowPath: "Fixture Show", ShowID: r.ShowID, Path: r.Path, Generation: r.Generation, SHA256: r.SHA256, Bytes: r.Bytes, CheckedAt: now.Format(time.RFC3339), Policy: keep, Followers: 2, AllFinished: true, AllFinishedAt: &finished, DeleteAfter: &after, OutsideKeepWindow: true, Eligible: true}
+}
+
 func TestRetainDeletesOnlyVerifiedOwnedGeneration(t *testing.T) {
 	requireProbe(t)
 	for _, protection := range []string{"none", "clock-ahead", "clock-behind", "fresh-refresh", "starred", "queued", "stream", "fetch", "zero", "unfinished", "stale", "slow-final", "slow-refresh", "error", "archive", "identity", "changed-bytes"} {
@@ -131,14 +138,12 @@ func TestRetainDeletesOnlyVerifiedOwnedGeneration(t *testing.T) {
 					return nil
 				}
 			}
-			finished := now.Add(-time.Hour).Format(time.RFC3339)
-			after := now.Format(time.RFC3339)
 			server.check = func(r link.PodcastRetentionRequest) *link.PodcastRetentionCheck {
 				checks++
 				if protection == "stale" || protection == "slow-final" && checks == 2 || protection == "slow-refresh" && checks == 3 {
 					clock = clock.Add(6 * time.Second)
 				}
-				c := &link.PodcastRetentionCheck{LibraryID: 3, ShowPath: "Fixture Show", ShowID: r.ShowID, Path: r.Path, Generation: r.Generation, SHA256: r.SHA256, Bytes: r.Bytes, CheckedAt: now.Format(time.RFC3339), Policy: keep, Followers: 2, AllFinished: true, AllFinishedAt: &finished, DeleteAfter: &after, OutsideKeepWindow: true, Eligible: true}
+				c := eligibleCheck(r, keep, now)
 				switch protection {
 				case "starred":
 					c.Starred = true
@@ -218,7 +223,6 @@ func TestRetainRecoveryAcrossFinalRefreshAndAudioMove(t *testing.T) {
 			clock := time.Now()
 			h.handler.s.o.BudgetNow = func() time.Time { return clock }
 			keep := link.PodcastPolicy{Mode: "keep", Keep: 3, Days: 0}
-			finished, after := now.Add(-time.Hour).Format(time.RFC3339), now.Format(time.RFC3339)
 			crash := errors.New("injected process stop")
 			checks := 0
 			server := &retainServer{scanServer: h.scan, policy: keep}
@@ -230,7 +234,7 @@ func TestRetainRecoveryAcrossFinalRefreshAndAudioMove(t *testing.T) {
 					}
 					panic(crash) // Bypass normal error cleanup, as a process stop does.
 				}
-				return &link.PodcastRetentionCheck{LibraryID: 3, ShowPath: "Fixture Show", ShowID: r.ShowID, Path: r.Path, Generation: r.Generation, SHA256: r.SHA256, Bytes: r.Bytes, CheckedAt: now.Format(time.RFC3339), Policy: keep, Followers: 2, AllFinished: true, AllFinishedAt: &finished, DeleteAfter: &after, OutsideKeepWindow: true, Eligible: true}
+				return eligibleCheck(r, keep, now)
 			}
 			h.handler.s.o.Server = func() Server { return server }
 			h.handler.s.o.Fault = func(at string) error {
@@ -304,10 +308,9 @@ func TestRetainRenameRefusalLeavesNoJournal(t *testing.T) {
 	}
 	keep := link.PodcastPolicy{Mode: "keep", Keep: 3, Days: 0}
 	now := h.handler.s.o.Now()
-	finished, after := now.Add(-time.Hour).Format(time.RFC3339), now.Format(time.RFC3339)
 	h.handler.s.o.Server = func() Server {
 		return &retainServer{scanServer: h.scan, policy: keep, check: func(r link.PodcastRetentionRequest) *link.PodcastRetentionCheck {
-			return &link.PodcastRetentionCheck{LibraryID: 3, ShowPath: "Fixture Show", ShowID: r.ShowID, Path: r.Path, Generation: r.Generation, SHA256: r.SHA256, Bytes: r.Bytes, CheckedAt: now.Format(time.RFC3339), Policy: keep, Followers: 2, AllFinished: true, AllFinishedAt: &finished, DeleteAfter: &after, OutsideKeepWindow: true, Eligible: true}
+			return eligibleCheck(r, keep, now)
 		}}
 	}
 	h.handler.s.o.Fault = func(at string) error {
