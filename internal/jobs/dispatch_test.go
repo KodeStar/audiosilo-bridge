@@ -289,19 +289,16 @@ func TestRollbackBeforeHeartbeatUsesOrdinaryAdmission(t *testing.T) {
 		started := make(chan Job, 4)
 		gates := map[int64]chan struct{}{1: make(chan struct{}), 2: make(chan struct{}), 3: make(chan struct{}), 4: make(chan struct{})}
 		var active atomic.Int32
-		h := optedHandler{handler{kind: "podcast.fetch", lane: LaneDownload, fn: func(ctx context.Context, j Job, _ *Reporter) (any, error) {
+		base := blockingHandler("podcast.fetch", LaneDownload, started, gates)
+		block := base.fn
+		base.fn = func(ctx context.Context, j Job, rep *Reporter) (any, error) {
 			if n := active.Add(1); n > 2 {
 				t.Error("enclosure concurrency exceeded 2", n)
 			}
 			defer active.Add(-1)
-			started <- j
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case <-gates[j.ID]:
-				return nil, nil
-			}
-		}}}
+			return block(ctx, j, rep)
+		}
+		h := optedHandler{base}
 		opts := testOpts()
 		opts.ServerID = func() string { return "rollback" }
 		r := New(db, func() Server { return srv }, nil, opts, h)

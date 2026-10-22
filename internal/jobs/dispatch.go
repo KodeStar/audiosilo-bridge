@@ -201,8 +201,8 @@ func (r *Runner) dispatch(ctx context.Context, reserve bool, wg *sync.WaitGroup)
 				if q.interactive {
 					q.srv.(priorityServer).WithdrawClaimMinPriority()
 				}
+				// Releasing the reservation (in launch, or below) wakes the dispatchers.
 				q.fallback = true
-				r.Wake()
 			}
 			r.start(ctx, q.srv, jobOf(result.job), wg, q)
 		}
