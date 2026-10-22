@@ -1,6 +1,10 @@
 package store
 
-import "context"
+import (
+	"context"
+	"database/sql"
+	"errors"
+)
 
 // PodcastShow is a rebuildable lookup cache. Credentials never enter this row.
 type PodcastShow struct {
@@ -38,4 +42,24 @@ func (db *DB) PodcastShows(ctx context.Context, serverID string, libraryID int64
 		out = append(out, s)
 	}
 	return out, rows.Err()
+}
+
+// PodcastArtworkState contains only a source hash, never the artwork address.
+type PodcastArtworkState struct {
+	SourceSHA256  string
+	Failures      int
+	NextAttemptAt string
+}
+
+func (db *DB) PodcastArtwork(ctx context.Context, server string, library int64, show string) (PodcastArtworkState, error) {
+	var s PodcastArtworkState
+	err := db.sql.QueryRowContext(ctx, `SELECT source_sha256,failures,next_attempt_at FROM podcast_artwork_state WHERE server_id=? AND library_id=? AND show_id=?`, server, library, show).Scan(&s.SourceSHA256, &s.Failures, &s.NextAttemptAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return s, nil
+	}
+	return s, err
+}
+func (db *DB) SavePodcastArtwork(ctx context.Context, server string, library int64, show string, s PodcastArtworkState) error {
+	_, err := db.sql.ExecContext(ctx, `INSERT INTO podcast_artwork_state(server_id,library_id,show_id,source_sha256,failures,next_attempt_at) VALUES(?,?,?,?,?,?) ON CONFLICT(server_id,library_id,show_id) DO UPDATE SET source_sha256=excluded.source_sha256,failures=excluded.failures,next_attempt_at=excluded.next_attempt_at`, server, library, show, s.SourceSHA256, s.Failures, s.NextAttemptAt)
+	return err
 }

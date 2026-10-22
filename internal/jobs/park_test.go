@@ -3,6 +3,7 @@ package jobs
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -373,5 +374,42 @@ func TestReporterPathFollowsTheServer(t *testing.T) {
 	}
 	if LocalReporter().Path() != "" {
 		t.Fatal("a local reporter has a path")
+	}
+}
+
+func TestPublicationRequiresSuccessfulLease(t *testing.T) {
+	for _, mode := range []string{"allowed", "network", "lost", "cancel", "unauthorized"} {
+		t.Run(mode, func(t *testing.T) {
+			srv := newFakeServer()
+			switch mode {
+			case "network":
+				srv.failing = true
+			case "lost":
+				srv.notHeld[81] = true
+			case "cancel":
+				srv.cancel[81] = true
+			case "unauthorized":
+				srv.unauthed = true
+			}
+			jobCtx, cancel := context.WithCancelCause(context.Background())
+			defer cancel(nil)
+			unpaired := false
+			rep := &Reporter{r: &Runner{onUnauthorized: func(Server) { unpaired = true }}, srv: srv, job: Job{ID: 81, Attempt: 2}, cancel: cancel}
+			err := rep.ConfirmLease(context.Background())
+			if (err == nil) != (mode == "allowed") {
+				t.Fatal(mode, err)
+			}
+			// The publication check acts on the answer as the keepalive does.
+			if unpaired != (mode == "unauthorized") {
+				t.Fatal(mode, "unpaired", unpaired)
+			}
+			want := map[string]error{"lost": errLost, "cancel": errCancelRequested, "unauthorized": errUnpaired}[mode]
+			if got := context.Cause(jobCtx); want != nil && !errors.Is(got, want) || want == nil && got != nil {
+				t.Fatal(mode, "cause", got)
+			}
+		})
+	}
+	if got := DefaultLanes()[LaneDownload]; got != 2 {
+		t.Fatal("episode concurrency", got)
 	}
 }

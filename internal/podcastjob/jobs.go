@@ -38,16 +38,24 @@ type Fetcher interface {
 	Fetch(context.Context, netguard.Request) (*netguard.Response, error)
 }
 type Options struct {
-	DB           *store.DB
-	Libraries    Libraries
-	Mount        mapping.MountFunc
-	Server       func() Server
-	Vault        secrets.Store
-	Fetcher      Fetcher
-	MaxFeedBytes int64
-	Version      string
-	ServerID     func() string
-	Now          func() time.Time
+	DB              *store.DB
+	Libraries       Libraries
+	Mount           mapping.MountFunc
+	Server          func() Server
+	Vault           secrets.Store
+	Fetcher         Fetcher
+	MaxFeedBytes    int64
+	MaxEpisodeBytes int64
+	DataDir         string
+	Probe           ProbeFunc
+	Streamer        Streamer
+	Wait            func(context.Context, time.Duration) error
+	Fault           podcast.Boundary
+	BudgetNow       func() time.Time
+	AfterFunc       func(time.Duration, func()) Timer
+	Version         string
+	ServerID        func() string
+	Now             func() time.Time
 	// CheckPoll is how often a job claimed before its library's mapping check
 	// looks for the result (default 1 s).
 	CheckPoll time.Duration
@@ -72,6 +80,24 @@ func New(o Options) *Subscribe {
 	if o.MaxFeedBytes <= 0 {
 		o.MaxFeedBytes = 32 << 20
 	}
+	if o.BudgetNow == nil {
+		o.BudgetNow = time.Now
+	}
+	if o.AfterFunc == nil {
+		o.AfterFunc = func(d time.Duration, fn func()) Timer { return time.AfterFunc(d, fn) }
+	}
+	if o.MaxEpisodeBytes <= 0 {
+		o.MaxEpisodeBytes = 1024 << 20
+	}
+	if o.Wait == nil {
+		o.Wait = netguard.Wait
+	}
+	if o.Probe == nil {
+		o.Probe = LocalProbe("ffprobe")
+	}
+	if o.Streamer == nil {
+		o.Streamer, _ = o.Fetcher.(Streamer)
+	}
 	if o.Now == nil {
 		o.Now = time.Now
 	}
@@ -95,6 +121,7 @@ type subscribeParams struct {
 	FeedHost      string `json:"feed_host"`
 	Private       bool   `json:"private"`
 	ShowPath      string `json:"show_path"`
+	ShowID        string `json:"show_id,omitempty"`
 }
 
 // SealParams is called before RecordClaim. Run receives only the sealed form.
@@ -350,17 +377,23 @@ func (h *Subscribe) run(parent context.Context, job jobs.Job, rep *jobs.Reporter
 		// moveURL below sets FeedURL and FeedHost.
 		f = &podcast.Feed{Version: 1, Generator: "audiosilo-bridge/" + s.o.Version, ShowID: hex.EncodeToString(random[:]), FeedURLSHA256: podcast.FeedURLHash(feedURL), PreviousFeedURLSHA256: []string{}, Private: p.Private || podcast.IsPrivateFeedURL(feedURL), SubscribedAt: s.o.Now().UTC().Format(time.RFC3339), Episodes: []podcast.Episode{}}
 	}
-	unlockShow, err := s.acquire(ctx, s.o.ServerID()+"|"+mount+"/"+show)
+	unlockShow, err := s.acquire(ctx, s.showKey(mount, show))
 	if err != nil {
 		return nil, err
 	}
 	defer unlockShow()
 	// A poll may have updated it while subscribe was fetching.
 	if !created {
+		if err := podcast.RecoverShow(root, show, s.o.Now(), s.o.Fault); err != nil {
+			return nil, err
+		}
 		f, err = podcast.Read(root, show)
 		if err != nil {
 			return nil, fail("write_failed", "The saved podcast feed could not be read.")
 		}
+	}
+	if p.ShowID != "" && f.ShowID != p.ShowID {
+		return nil, fail("identity_changed", "The podcast show identity changed.")
 	}
 	f.Private = f.Private || p.Private
 	newURL, _ := moveURL(f, feedURL, resp, parsed)
@@ -386,7 +419,7 @@ func (h *Poll) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (any, 
 		return nil, fail("not_a_feed", "The podcast show path is invalid.")
 	}
 	show := *job.Path
-	unlock, err := s.acquire(ctx, s.o.ServerID()+"|"+mount+"/"+show)
+	unlock, err := s.acquire(ctx, s.showKey(mount, show))
 	if err != nil {
 		return nil, err
 	}
@@ -399,6 +432,9 @@ func (h *Poll) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (any, 
 		return nil, fail("library_not_writable", "The podcast library could not be opened.")
 	}
 	defer func() { _ = root.Close() }()
+	if err := podcast.RecoverShow(root, show, s.o.Now(), s.o.Fault); err != nil {
+		return nil, err
+	}
 	f, err := podcast.Read(root, show)
 	if err != nil {
 		return nil, fail("not_a_feed", "The saved podcast feed could not be read.")
@@ -408,11 +444,15 @@ func (h *Poll) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (any, 
 		return nil, err
 	}
 	var params struct {
+		ShowID       string `json:"show_id"`
 		ETag         string `json:"etag"`
 		LastModified string `json:"last_modified"`
 	}
 	if len(job.Params) > 0 && json.Unmarshal(job.Params, &params) != nil || len(params.ETag) > 512 || len(params.LastModified) > 512 {
 		return nil, fail("not_a_feed", "The feed check parameters are invalid.")
+	}
+	if params.ShowID != "" && params.ShowID != f.ShowID {
+		return nil, fail("identity_changed", "The podcast show identity changed.")
 	}
 	rep.Progress(jobs.Progress{Step: "fetching", Message: "Checking the podcast feed"})
 	resp, err := s.o.Fetcher.Fetch(ctx, netguard.Request{URL: feedURL, ETag: params.ETag, LastModified: params.LastModified, MaxBytes: s.o.MaxFeedBytes})
@@ -448,7 +488,7 @@ func (h *Poll) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (any, 
 			return nil, err
 		}
 	}
-	return map[string]any{"library_id": lib.ID, "show_path": show, "status": resp.Status, "changed": changed, "new_episodes": added, "episodes": len(f.Episodes), "skipped": skipped, "moved": moved, "etag": resp.ETag, "last_modified": resp.LastModified, "next_poll_seconds": podcast.NextPoll(f, resp.CacheControl, s.o.Now())}, nil
+	return map[string]any{"library_id": lib.ID, "show_path": show, "show_id": f.ShowID, "status": resp.Status, "changed": changed, "new_episodes": added, "episodes": len(f.Episodes), "skipped": skipped, "moved": moved, "etag": resp.ETag, "last_modified": resp.LastModified, "next_poll_seconds": podcast.NextPoll(f, resp.CacheControl, s.o.Now())}, nil
 }
 
 // moveURL applies a permanent redirect or an itunes:new-feed-url to f and
@@ -638,6 +678,28 @@ func (s *service) artwork(ctx context.Context, root *os.Root, lib link.Library, 
 			return
 		}
 	}
+	state, err := s.o.DB.PodcastArtwork(ctx, s.o.ServerID(), lib.ID, f.ShowID)
+	if err != nil {
+		return
+	}
+	if state.SourceSHA256 != hash {
+		state = store.PodcastArtworkState{SourceSHA256: hash}
+	} else if due, e := time.Parse(time.RFC3339, state.NextAttemptAt); e == nil && s.o.Now().Before(due) {
+		return
+	}
+	success := false
+	defer func() {
+		if success {
+			state.Failures = 0
+			state.NextAttemptAt = ""
+		} else {
+			state.Failures = min(state.Failures+1, 25)
+			delay := time.Hour * time.Duration(1<<min(state.Failures-1, 5))
+			delay = min(delay, 24*time.Hour)
+			state.NextAttemptAt = s.o.Now().Add(delay).UTC().Format(time.RFC3339)
+		}
+		_ = s.o.DB.SavePodcastArtwork(ctx, s.o.ServerID(), lib.ID, f.ShowID, state)
+	}()
 	// Best effort: at most a minute, and half of what the job has left, so a
 	// slow image host can't use up the time feed.json, the cache and the
 	// rescan still need.
@@ -669,6 +731,7 @@ func (s *service) artwork(ctx context.Context, root *os.Root, lib link.Library, 
 	if f.Show.Image != nil && f.Show.Image.File != name && (f.Show.Image.File == "cover.jpg" || f.Show.Image.File == "cover.png") {
 		_ = root.Remove(show + "/" + f.Show.Image.File)
 	}
+	success = true
 	f.Show.Image = &podcast.Image{File: name, SourceSHA256: hash, FetchedAt: s.o.Now().UTC().Format(time.RFC3339)}
 }
 func fail(code, message string) *netguard.Error { return &netguard.Error{Code: code, Message: message} }

@@ -42,3 +42,21 @@ func TestPodcastsDefaultsEnvAndValidation(t *testing.T) {
 		t.Fatal(cfg.Podcasts, err)
 	}
 }
+
+func TestEpisodeCap(t *testing.T) {
+	cfg, err := Load(t.TempDir())
+	if err != nil || cfg.Podcasts.MaxEpisodeMB != 1024 {
+		t.Fatal(cfg.Podcasts, err)
+	}
+	for _, value := range []string{"1", "4096", "0", "4097", "broken", " "} {
+		t.Setenv("AUDIOSILO_BRIDGE_PODCASTS_MAX_EPISODE_MB", value)
+		cfg, err := Load(t.TempDir())
+		wantErr := value == "0" || value == "4097" || value == "broken"
+		if (err != nil) != wantErr {
+			t.Fatal(value, err)
+		}
+		if err == nil && value != " " && !cfg.EnvSet(KeyPodcastsMaxEpisodeMB) {
+			t.Fatal("cap is not locked")
+		}
+	}
+}

@@ -11,6 +11,7 @@ import (
 	"math/rand/v2"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -41,7 +42,8 @@ type Response struct {
 	CacheControl string
 }
 
-func wait(ctx context.Context, d time.Duration) error {
+// Wait sleeps for d unless ctx ends first.
+func Wait(ctx context.Context, d time.Duration) error {
 	t := time.NewTimer(d)
 	defer t.Stop()
 	select {
@@ -71,10 +73,7 @@ func (c *Client) Fetch(ctx context.Context, in Request) (*Response, error) {
 		if attempt >= 2 || !retryable(failure) || failure.RetryAfterSeconds > 10 || ctx.Err() != nil {
 			return nil, failure
 		}
-		d := []time.Duration{time.Second, 4 * time.Second}[attempt]
-		d = time.Duration(float64(d) * (0.8 + rand.Float64()*0.4)) //nolint:gosec // retry jitter is not a credential
-		d = max(d, time.Duration(failure.RetryAfterSeconds)*time.Second)
-		if err := c.wait(ctx, d); err != nil {
+		if err := c.wait(ctx, RetryDelay(attempt, failure.RetryAfterSeconds)); err != nil {
 			return nil, classify(err)
 		}
 	}
@@ -94,6 +93,7 @@ func (c *Client) once(ctx context.Context, in Request) (*Response, error) {
 		if !validURL(req.URL.String()) {
 			return &Error{Code: "invalid_feed_url", Message: "The feed redirected to an invalid URL."}
 		}
+		stripRedirectCredentials(req, via)
 		redirected = true
 		if req.Response.StatusCode != 301 && req.Response.StatusCode != 308 {
 			permanent = false
@@ -104,7 +104,7 @@ func (c *Client) once(ctx context.Context, in Request) (*Response, error) {
 	if err != nil {
 		return nil, &Error{Code: "invalid_feed_url", Message: "The feed URL is invalid."}
 	}
-	req.Header.Set("User-Agent", "AudioSilo-Bridge/"+c.version+" (+https://audiosilo.app)")
+	req.Header.Set("User-Agent", c.userAgent())
 	req.Header.Set("Accept-Encoding", "gzip")
 	if in.ETag != "" {
 		req.Header.Set("If-None-Match", in.ETag)
@@ -165,6 +165,33 @@ func (c *Client) once(ctx context.Context, in Request) (*Response, error) {
 	return out, nil
 }
 
+// stripRedirectCredentials keeps source credentials within their original origin.
+func stripRedirectCredentials(req *http.Request, via []*http.Request) {
+	// The HTTP client can copy the initial headers again on each hop. Once the
+	// chain crosses an origin, later redirects must not restore those credentials.
+	target := origin(req.URL)
+	for _, previous := range via {
+		if origin(previous.URL) != target {
+			req.Header.Del("Authorization")
+			req.Header.Del("Cookie")
+			req.URL.User = nil
+			return
+		}
+	}
+}
+
+// origin is a URL's scheme, host and effective port, so an explicit default port
+// (feed.example:443) is the same origin as none.
+func origin(u *url.URL) string {
+	scheme, port := strings.ToLower(u.Scheme), u.Port()
+	if port == "" && scheme == "http" {
+		port = "80"
+	} else if port == "" && scheme == "https" {
+		port = "443"
+	}
+	return scheme + "://" + net.JoinHostPort(strings.ToLower(u.Hostname()), port)
+}
+
 // corrupt reports whether a gzip error is the data's fault (an empty body, a
 // bad header, checksum or stream), which fails at once; a read the connection
 // broke is retried.
@@ -185,6 +212,10 @@ func (r *progressReader) Read(p []byte) (int, error) {
 		r.timer.Reset(r.stall)
 	}
 	return n, e
+}
+
+func (c *Client) userAgent() string {
+	return "AudioSilo-Bridge/" + c.version + " (+https://audiosilo.app)"
 }
 
 func header(s string) string {
@@ -226,4 +257,8 @@ func classify(err error) *Error {
 		return &Error{Code: "tls", Message: "The feed's secure connection could not be verified."}
 	}
 	return &Error{Code: "network", Message: "The feed could not be reached."}
+}
+
+func jitter(d time.Duration) time.Duration {
+	return time.Duration(float64(d) * (0.8 + rand.Float64()*0.4)) //nolint:gosec // retry jitter is not a credential
 }

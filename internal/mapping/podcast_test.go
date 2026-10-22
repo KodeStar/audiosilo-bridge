@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -135,5 +136,43 @@ func TestPodcastMarkerOfARemovedLibraryIsReplaced(t *testing.T) {
 	b, _ = os.ReadFile(filepath.Join(mounts[5], MarkerPath))
 	if !st.Mapped || !st.Writable || !strings.Contains(string(b), `"library_id":5`) {
 		t.Fatalf("a removed library's marker blocked the mapping: %+v %s", st, b)
+	}
+}
+
+func TestPodcastMarkerErrorSplit(t *testing.T) {
+	for _, preexisting := range []bool{false, true} {
+		for _, tc := range []struct {
+			name    string
+			err     error
+			message string
+		}{
+			{"absent", link.ErrNoMarker, "this folder isn't the library the server sees"},
+			{"removed", &link.APIError{Status: 404, Code: "library_not_found"}, "the library was removed from the server"},
+			{"unauthorized", link.ErrUnauthorized, "could not verify this folder with the server"},
+			{"unavailable", &link.APIError{Status: 503}, "could not verify this folder with the server"},
+			{"network", errors.New("https://PRIVATE_CANARY/token"), "could not verify this folder with the server"},
+		} {
+			t.Run(fmt.Sprintf("%s/%t", tc.name, preexisting), func(t *testing.T) {
+				mount := t.TempDir()
+				marker := []byte(`{"version":1,"library_id":3,"nonce":"0123456789abcdef0123456789abcdef"}`)
+				if preexisting {
+					os.Mkdir(filepath.Join(mount, ".audiosilo"), 0755)
+					os.WriteFile(filepath.Join(mount, MarkerPath), marker, 0644)
+				}
+				source := markerSourceFunc(func(context.Context, int64) (string, error) { return "", tc.err })
+				st := CheckPodcast(context.Background(), source, link.Library{ID: 3, Kind: "podcasts"}, mount, func(int64) bool { return true })
+				if st.Mapped || st.Writable || st.Error != tc.message {
+					t.Fatal(st)
+				}
+				b, err := os.ReadFile(filepath.Join(mount, MarkerPath))
+				if preexisting {
+					if err != nil || string(b) != string(marker) {
+						t.Fatal("preexisting marker changed", err)
+					}
+				} else if !errors.Is(err, os.ErrNotExist) {
+					t.Fatal("created marker survives", err)
+				}
+			})
+		}
 	}
 }

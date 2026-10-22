@@ -75,11 +75,14 @@ func (e *SealFailure) Error() string { return e.Message }
 // book is queued or parked, and the lane only bounds how many are followed.
 const (
 	LaneLight    = "light"
+	LaneDownload = "download"
 	LanePipeline = "pipeline"
 )
 
 // DefaultLanes are the lanes' capacities.
-func DefaultLanes() map[string]int { return map[string]int{LaneLight: 2, LanePipeline: 25} }
+func DefaultLanes() map[string]int {
+	return map[string]int{LaneLight: 2, LaneDownload: 2, LanePipeline: 25}
+}
 
 // ParkError parks a job (needs_attention) with a typed code.
 type ParkError struct {
@@ -985,24 +988,11 @@ func (p *Reporter) send() bool {
 		u.Progress = raw
 	}
 	got, err := p.srv.UpdateJob(ctx, p.job.ID, u)
-	if err == nil && got.Path != nil && *got.Path != "" {
-		p.mu.Lock()
-		p.path = *got.Path
-		p.mu.Unlock()
-	}
 	switch {
-	case err == nil && got.CancelRequested:
-		p.cancel(errCancelRequested)
+	case p.answer(got, err):
 		return false
 	case err == nil:
 		return true
-	case errors.Is(err, link.ErrNotHeld):
-		p.cancel(errLost)
-		return false
-	case errors.Is(err, link.ErrUnauthorized):
-		p.cancel(errUnpaired)
-		p.r.onUnauthorized(p.srv)
-		return false
 	case ctx.Err() != nil:
 		return false
 	default:
@@ -1012,6 +1002,53 @@ func (p *Reporter) send() bool {
 		p.r.log.Warn("bridge: reporting progress failed", "job", p.job.ID, "err", err)
 		return true
 	}
+}
+
+// answer acts on the server's answer to an update: the job follows a moved path,
+// and a cancel request, a lost claim or a refused token ends its context. It
+// reports whether the answer stopped the job.
+func (p *Reporter) answer(got *link.Job, err error) bool {
+	if err == nil && got.Path != nil && *got.Path != "" {
+		p.mu.Lock()
+		p.path = *got.Path
+		p.mu.Unlock()
+	}
+	switch {
+	case err == nil && got.CancelRequested:
+		p.cancel(errCancelRequested)
+	case errors.Is(err, link.ErrNotHeld):
+		p.cancel(errLost)
+	case errors.Is(err, link.ErrUnauthorized):
+		p.cancel(errUnpaired)
+		p.r.onUnauthorized(p.srv)
+	default:
+		return false
+	}
+	return true
+}
+
+// ConfirmLease proves ownership immediately before a filesystem publication. It
+// acts on the answer as the keepalive does, and also refuses a moved path: the
+// caller is about to write to the one it claimed.
+func (p *Reporter) ConfirmLease(ctx context.Context) error {
+	if p.r == nil {
+		return nil
+	}
+	state := link.StateRunning
+	got, err := p.srv.UpdateJob(ctx, p.job.ID, link.Update{Attempt: p.job.Attempt, State: &state})
+	if p.answer(got, err) {
+		if err != nil {
+			return err
+		}
+		return context.Canceled
+	}
+	if err != nil {
+		return err
+	}
+	if p.job.Path != nil && got.Path != nil && *p.job.Path != *got.Path {
+		return link.ErrNotHeld
+	}
+	return ctx.Err()
 }
 
 // clip bounds s to n bytes, cut at a character's boundary.

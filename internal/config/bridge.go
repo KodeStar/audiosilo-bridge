@@ -131,6 +131,7 @@ type MappingConfig struct {
 type PodcastsConfig struct {
 	AllowNetworks []string `yaml:"allow_networks"`
 	MaxFeedMB     int      `yaml:"max_feed_mb"`
+	MaxEpisodeMB  int      `yaml:"max_episode_mb"`
 }
 
 func (p PodcastsConfig) Networks() ([]netip.Prefix, error) {
@@ -153,6 +154,7 @@ const (
 	KeyMappingCheck          = "mapping.check_minutes"
 	KeyPodcastsAllowNetworks = "podcasts.allow_networks"
 	KeyPodcastsMaxFeedMB     = "podcasts.max_feed_mb"
+	KeyPodcastsMaxEpisodeMB  = "podcasts.max_episode_mb"
 	envServerURL             = "AUDIOSILO_BRIDGE_SERVER_URL"
 	envPublicURL             = "AUDIOSILO_BRIDGE_PUBLIC_URL"
 	envLibraries             = "AUDIOSILO_BRIDGE_LIBRARIES"
@@ -198,6 +200,10 @@ func (c Config) MountFor(libraryID int64, serverRoot string) (path string, confi
 // neither locks the setting on the page nor fails the start.
 func applyBridgeEnv(cfg *Config) {
 	cfg.fromEnv = map[string]bool{}
+	if v, ok := lookupEnv("AUDIOSILO_BRIDGE_PODCASTS_MAX_EPISODE_MB"); ok {
+		cfg.Podcasts.MaxEpisodeMB = envInt(v)
+		cfg.fromEnv[KeyPodcastsMaxEpisodeMB] = true
+	}
 	if v, ok := lookupEnv("AUDIOSILO_BRIDGE_PODCASTS_ALLOW_NETWORKS"); ok {
 		cfg.Podcasts.AllowNetworks = strings.Split(v, ",")
 		cfg.fromEnv[KeyPodcastsAllowNetworks] = true
@@ -399,6 +405,9 @@ func ignoredOnBridge(cfg Config) []string {
 
 // validateBridge checks the Bridge settings.
 func (c Config) validateBridge() error {
+	if c.Podcasts.MaxEpisodeMB < 1 || c.Podcasts.MaxEpisodeMB > 4096 {
+		return errors.New("podcasts.max_episode_mb must be between 1 and 4096")
+	}
 	if _, err := c.Podcasts.Networks(); err != nil {
 		return err
 	}

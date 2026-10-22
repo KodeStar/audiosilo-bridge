@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -26,5 +28,45 @@ func TestPodcastCacheServerAndLibraryIsolation(t *testing.T) {
 	after, _ := db.PodcastShows(ctx, "a", 3)
 	if len(after) != 1 || after[0].ShowPath != "Renamed" || after[0].CreatedAt != s.CreatedAt {
 		t.Fatal(after)
+	}
+}
+
+func TestArtworkStateIsolationAndReopen(t *testing.T) {
+	ctx := context.Background()
+	file := filepath.Join(t.TempDir(), FileName)
+	db, err := Open(ctx, file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := PodcastArtworkState{SourceSHA256: strings.Repeat("a", 64), Failures: 3, NextAttemptAt: "2026-10-22T08:00:00Z"}
+	if err := db.SavePodcastArtwork(ctx, "server", 3, "show", want); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	db, err = Open(ctx, file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	got, err := db.PodcastArtwork(ctx, "server", 3, "show")
+	if err != nil || got != want {
+		t.Fatal(got, err)
+	}
+	for _, key := range []struct {
+		server string
+		lib    int64
+		show   string
+	}{{"other", 3, "show"}, {"server", 4, "show"}, {"server", 3, "replacement"}} {
+		got, err := db.PodcastArtwork(ctx, key.server, key.lib, key.show)
+		if err != nil || got.Failures != 0 {
+			t.Fatal(got, err)
+		}
+	}
+	if err := db.SavePodcastArtwork(ctx, "server", 3, "show", PodcastArtworkState{SourceSHA256: want.SourceSHA256}); err != nil {
+		t.Fatal(err)
+	}
+	got, err = db.PodcastArtwork(ctx, "server", 3, "show")
+	if err != nil || got.Failures != 0 || got.NextAttemptAt != "" {
+		t.Fatal(got, err)
 	}
 }

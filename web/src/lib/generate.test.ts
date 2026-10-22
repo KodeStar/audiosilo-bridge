@@ -113,6 +113,8 @@ describe('descriptions', () => {
     expect(kindLabel('sidecars.generate')).toBe('Characters and recaps');
     expect(kindLabel('podcast.subscribe')).toBe('Following a show');
     expect(kindLabel('podcast.poll')).toBe('Checking a feed');
+    expect(kindLabel('podcast.fetch')).toBe('Fetching episode');
+    expect(kindLabel('podcast.retain')).toBe('Checking retention');
     expect(kindLabel('bridge.verify')).toBe('');
     expect(kindLabel('constructor')).toBe('');
     expect(kindLabel('__proto__')).toBe('');
