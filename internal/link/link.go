@@ -384,6 +384,10 @@ func (c *Client) Heartbeat(ctx context.Context, st Status) (*StatusReply, error)
 // SupportsClaimMinPriority is true only after this pairing's heartbeat accepted it.
 func (c *Client) SupportsClaimMinPriority() bool { return c.claimMinPriority.Load() }
 
+// WithdrawClaimMinPriority forgets negotiation after an ignored filter or a
+// pairing change. Only a later heartbeat reply can enable filtered claims again.
+func (c *Client) WithdrawClaimMinPriority() { c.claimMinPriority.Store(false) }
+
 // Claim asks for the next queued job of one of kinds, waiting up to wait for
 // one (at most MaxWait). It returns nil when none came.
 func (c *Client) Claim(ctx context.Context, kinds []string, wait time.Duration) (*Job, error) {

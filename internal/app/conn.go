@@ -109,6 +109,7 @@ func (c *Conn) Refuse(ctx context.Context, cl *link.Client, reason string) {
 		return
 	}
 	was := c.refusedAt.IsZero()
+	cl.WithdrawClaimMinPriority()
 	c.refusedAt = time.Now()
 	c.pairing.Paired, c.pairing.UnpairedReason = false, reason
 	onChange := c.onChange
@@ -178,6 +179,9 @@ func (c *Conn) Pair(ctx context.Context, serverURL, code string) error {
 		return err
 	}
 	c.mu.Lock()
+	if c.client != nil {
+		c.client.WithdrawClaimMinPriority()
+	}
 	c.client, c.refusedAt = cl, time.Time{}
 	c.pairing = Pairing{Paired: true, ServerURL: cl.BaseURL(), ServerID: p.ServerID, ServerName: p.ServerName, PairedAt: pairedAt}
 	onChange := c.onChange
@@ -193,6 +197,9 @@ func (c *Conn) Pair(ctx context.Context, serverURL, code string) error {
 func (c *Conn) Unpair(ctx context.Context, reason string) error {
 	c.mu.Lock()
 	was := c.client != nil
+	if was {
+		c.client.WithdrawClaimMinPriority()
+	}
 	c.client, c.refusedAt = nil, time.Time{}
 	c.pairing.Paired = false
 	c.pairing.UnpairedReason = reason

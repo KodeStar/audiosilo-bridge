@@ -40,6 +40,7 @@ func newControlledServer(accept bool) *controlledServer {
 	return s
 }
 func (s *controlledServer) SupportsClaimMinPriority() bool { return s.accepts.Load() }
+func (s *controlledServer) WithdrawClaimMinPriority()      { s.accepts.Store(false) }
 func (s *controlledServer) Claim(ctx context.Context, kinds []string, _ time.Duration) (*link.Job, error) {
 	return s.claim(ctx, kinds, nil)
 }
@@ -282,39 +283,138 @@ func TestLegacyDownloadCapacityAndNegotiationChange(t *testing.T) {
 	}
 }
 
-func TestReservedRefusesOutsideAdmission(t *testing.T) {
-	for _, mode := range []string{"below threshold", "kind not opted in"} {
-		t.Run(mode, func(t *testing.T) {
-			srv := newControlledServer(true)
-			started := make(chan Job, 1)
-			h := optedHandler{blockingHandler("podcast.fetch", LaneDownload, started, nil)}
-			r := New(openStore(t), func() Server { return srv }, nil, testOpts(), h,
-				blockingHandler("not.opted", LaneLight, started, nil))
-			startControlled(t, r)
-			reserve := srv.next(t, true)
-			job := claimed(9, h.Kind(), wirePriority(t)-1)
-			if mode == "kind not opted in" {
-				job.Kind, job.Priority = "not.opted", wirePriority(t)
+func TestRollbackBeforeHeartbeatUsesOrdinaryAdmission(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		srv, db := newControlledServer(true), openStore(t)
+		started := make(chan Job, 4)
+		gates := map[int64]chan struct{}{1: make(chan struct{}), 2: make(chan struct{}), 3: make(chan struct{}), 4: make(chan struct{})}
+		var active atomic.Int32
+		h := optedHandler{handler{kind: "podcast.fetch", lane: LaneDownload, fn: func(ctx context.Context, j Job, _ *Reporter) (any, error) {
+			if n := active.Add(1); n > 2 {
+				t.Error("enclosure concurrency exceeded 2", n)
 			}
-			answered := time.Now()
-			reserve.answer <- job
-			// A new reserved claim proves the denied response was processed,
-			// and only after a backoff: a server ignoring the filter must not
-			// see its queue refused in a tight loop.
-			srv.next(t, true)
-			if elapsed := time.Since(answered); elapsed < time.Second {
-				t.Fatal("refusal did not back off", elapsed)
-			}
-			if state, _ := srv.finalState(9); state != link.StateFailed {
-				t.Fatal("unfiltered server answer was not failed", state)
-			}
+			defer active.Add(-1)
+			started <- j
 			select {
-			case j := <-started:
-				t.Fatal("job outside admission ran", j)
-			default:
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-gates[j.ID]:
+				return nil, nil
 			}
-		})
-	}
+		}}}
+		opts := testOpts()
+		opts.ServerID = func() string { return "rollback" }
+		r := New(db, func() Server { return srv }, nil, opts, h)
+		startControlled(t, r)
+		ordinary, reserve := srv.next(t, false), srv.next(t, true)
+		ordinary.answer <- claimed(1, h.Kind(), 20)
+		await(t, started)
+		// An older server now occupies the same address, before any heartbeat.
+		job := claimed(2, h.Kind(), 20)
+		job.Params = json.RawMessage(`{"episode":"kept"}`)
+		reserve.answer <- job
+		if got := await(t, started); got.ID != 2 || got.Attempt != 1 || string(got.Params) != string(job.Params) {
+			t.Fatal("rollback claim lost its identity or params", got)
+		}
+		assertPools(t, r, map[int64]string{1: LaneDownload, 2: LaneDownload})
+		if srv.SupportsClaimMinPriority() {
+			t.Fatal("ignored filter left negotiation enabled")
+		}
+		for range 3 {
+			r.Wake() // unchanged scheduling events must not restore negotiation
+			synctest.Wait()
+		}
+		// Finishing a job immediately reissues an ordinary claim, without a
+		// refusal backoff or any more min_priority requests.
+		before := time.Now()
+		close(gates[1])
+		c := await(t, srv.calls)
+		if c.min != nil || time.Since(before) != 0 {
+			t.Fatal("rollback did not reissue ordinary claim immediately", c)
+		}
+		c.answer <- claimed(3, h.Kind(), 20)
+		await(t, started)
+		assertPools(t, r, map[int64]string{2: LaneDownload, 3: LaneDownload})
+		// A later heartbeat advertises the accept again. Two legacy downloads
+		// must finish down to one before the reserve can claim or execute.
+		srv.accepts.Store(true)
+		r.Wake()
+		synctest.Wait()
+		select {
+		case c := <-srv.calls:
+			t.Fatal("renegotiation overclaimed two active downloads", c)
+		default:
+		}
+		close(gates[2])
+		reserve = srv.next(t, true)
+		reserve.answer <- claimed(4, h.Kind(), wirePriority(t))
+		if got := await(t, started); got.ID != 4 {
+			t.Fatal(got)
+		}
+		assertPools(t, r, map[int64]string{3: LaneDownload, 4: LaneInteractive})
+		if state, _ := srv.finalState(2); state != link.StateDone {
+			t.Fatal("rollback job did not complete successfully", state)
+		}
+		sj, err := db.GetServerJob(context.Background(), 2)
+		if err != nil || sj.Attempt != 1 || sj.ServerID != "rollback" {
+			t.Fatal("rollback claim changed attempt or server", sj, err)
+		}
+	})
+}
+
+func TestOutsideReservedKindWaitsAndRenewsOrdinaryLease(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		srv := newControlledServer(true)
+		started := make(chan Job, 4)
+		gates := map[int64]chan struct{}{1: make(chan struct{}), 2: make(chan struct{})}
+		opts := testOpts()
+		opts.Lanes = DefaultLanes()
+		opts.Lanes[LaneLight] = 1
+		r := New(openStore(t), func() Server { return srv }, nil, opts,
+			optedHandler{blockingHandler("podcast.fetch", LaneDownload, started, gates)},
+			blockingHandler("not.opted", LaneLight, started, gates))
+		startControlled(t, r)
+		ordinary, reserve := srv.next(t, false), srv.next(t, true)
+		ordinary.answer <- claimed(1, "not.opted", 20)
+		await(t, started)
+		narrow := srv.next(t, false)
+		reserve.answer <- claimed(2, "not.opted", wirePriority(t))
+		// Capability withdrawal cancels the other claim too, since its
+		// capacity snapshot changed, and no filtered claim replaces it.
+		await(t, narrow.cancelled)
+		refreshed := srv.next(t, false)
+		for range 2 {
+			for await(t, srv.updated) != 2 {
+			}
+		}
+		r.mu.Lock()
+		ru := r.running[2]
+		waiting := ru != nil && ru.lane == LaneLight && !ru.admitted && r.waiting[LaneLight] == 1
+		r.mu.Unlock()
+		if !waiting {
+			t.Fatal("outside kind did not wait in its ordinary lane")
+		}
+		if state, _ := srv.finalState(2); state != "" {
+			t.Fatal("waiting claim was ended", state)
+		}
+		select {
+		case j := <-started:
+			t.Fatal("outside kind bypassed ordinary admission", j)
+		case c := <-srv.calls:
+			t.Fatal("claim looped after filter withdrawal", c)
+		default:
+		}
+		close(gates[1])
+		if j := await(t, started); j.ID != 2 {
+			t.Fatal(j)
+		}
+		assertPools(t, r, map[int64]string{2: LaneLight})
+		select {
+		case <-refreshed.cancelled:
+			t.Fatal("ordinary waiter admission changed unrelated eligibility")
+		default:
+		}
+	})
 }
 
 func TestUnchangedWakeAndCapacityRefresh(t *testing.T) {

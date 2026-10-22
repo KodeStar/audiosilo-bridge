@@ -1520,7 +1520,8 @@ internal/
             SupportsClaimMinPriority and ClaimMinPriority expose the negotiated
             int32 filter. Ordinary Claim never sends it. Missing accepts disables
             the option, unknown reply keys are tolerated, and a new Client starts
-            unnegotiated.
+            unnegotiated. WithdrawClaimMinPriority clears it after an ignored
+            filter or pairing change; a later heartbeat must advertise it again.
             Deletion snapshots require all protocol fields, tolerate new keys,
             and expose no listener identities.
   mapping/  where the Bridge sees each library, CHECKED (decision 13): Check stats the
@@ -1563,10 +1564,15 @@ internal/
             and join a long poll before reissue; unchanged wakes leave it alone.
             A job racing cancellation runs under the original link and admission;
             one racing the runner's stop is still recorded, so the next start
-            resumes it. A refused answer (outside the reserve) backs off like a
-            failed claim. Running promotions keep their pool. Recovery uses
-            ordinary admission because old rows lack priority, renews leases
-            while waiting for room, queues behind jobs already waiting, and takes
+            resumes it. An answer outside the requested admission is owned under
+            its original claim and waits for its kind's ordinary lane, never the
+            reserve. An ignored reserved filter immediately withdraws negotiation,
+            restores legacy capacities and wakes dispatchers to cancel affected
+            claims. No refusal backoff is needed: the reserved dispatcher waits
+            for a heartbeat to re-advertise support. Running promotions keep their
+            pool. Recovery uses ordinary admission because old rows lack priority.
+            Both recovery and out-of-admission jobs renew leases while waiting
+            for room, queue behind jobs already waiting, and take
             precedence over fresh claims in that lane. Live parks hold
             admission; terminal parks and releases wake the dispatcher.
             Phase 2c-2a adds the strict Reporter.ConfirmLease publication check
@@ -2242,7 +2248,9 @@ internal/
             before the server's libraries are known. A 401 on the CURRENT link
             refuses it with a reason the page shows (Conn.Refuse(cl) and accept(cl)
             ignore any other link: one a re-pair or an unpair replaced, still in use
-            by a job or a call that started before). A 401 does NOT drop the token:
+            by a job or a call that started before). Refusal, unpairing and
+            replacing a pairing withdraw claim_min_priority from the old link;
+            each new link negotiates on its own heartbeat. A 401 does NOT drop the token:
             Conn.Refuse keeps it and the heartbeat retries it every RefusedRetry (5
             min), since a demoted admin's Bridge works again once they are an admin
             again (an unpair or a new pairing revoked it for good, so a retry just

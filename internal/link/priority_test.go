@@ -69,3 +69,39 @@ func TestNegotiatedClaimPriority(t *testing.T) {
 		t.Fatal("a new pairing inherited negotiation")
 	}
 }
+
+func TestWithdrawClaimPriorityUntilHeartbeat(t *testing.T) {
+	f, c := newFake(t, 200, `{"accepts":["claim_min_priority"]}`)
+	ctx := context.Background()
+	if _, err := c.Heartbeat(ctx, Status{}); err != nil {
+		t.Fatal(err)
+	}
+	c.WithdrawClaimMinPriority()
+	before := f.last
+	if _, err := c.ClaimMinPriority(ctx, []string{"podcast.fetch"}, time.Second, 100); err == nil || f.last != before || c.SupportsClaimMinPriority() {
+		t.Fatal("withdrawn negotiation allowed a filtered request", err)
+	}
+	f.status, f.body = 204, ""
+	if _, err := c.Claim(ctx, []string{"podcast.fetch"}, time.Second); err != nil || f.last.URL.Query().Has("min_priority") {
+		t.Fatal("withdrawal changed ordinary claims", err)
+	}
+	for _, advertise := range []bool{false, true} {
+		f.status, f.body = 200, `{}`
+		if advertise {
+			f.body = `{"accepts":["claim_min_priority"]}`
+		}
+		if _, err := c.Heartbeat(ctx, Status{}); err != nil {
+			t.Fatal(err)
+		}
+		before = f.last
+		f.status, f.body = 204, ""
+		_, err := c.ClaimMinPriority(ctx, []string{"podcast.fetch"}, time.Second, 100)
+		if advertise {
+			if err != nil || f.last.URL.Query().Get("min_priority") != "100" {
+				t.Fatal("heartbeat did not restore the filter", err)
+			}
+		} else if err == nil || f.last != before {
+			t.Fatal("heartbeat without accept restored negotiation", err)
+		}
+	}
+}

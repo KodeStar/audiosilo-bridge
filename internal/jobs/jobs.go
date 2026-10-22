@@ -510,7 +510,8 @@ func (r *Runner) start(ctx context.Context, srv Server, job Job, wg *sync.WaitGr
 // launch runs a recorded job in its lane, parked with message parked when a
 // resumed one was ("" when it wasn't). A job of a kind the Bridge doesn't run is
 // failed at once. claim is nil for a recovered or stranded job, which waits for
-// ordinary admission; a claimed job takes the slot its claim reserved.
+// ordinary admission; a claimed job takes its reservation unless the server
+// ignored the requested filter, in which case it waits for ordinary admission.
 func (r *Runner) launch(ctx context.Context, srv Server, job Job, wg *sync.WaitGroup, parked string, claim *claimRequest) {
 	h, ok := r.handlers[job.Kind]
 	if !ok {
@@ -521,10 +522,12 @@ func (r *Runner) launch(ctx context.Context, srv Server, job Job, wg *sync.WaitG
 	ru := &run{job: job, srv: srv, lane: h.Lane(), cancel: cancel, parked: parked}
 	r.mu.Lock()
 	if claim != nil {
+		r.unreserveLocked(claim)
+	}
+	if claim != nil && !claim.fallback {
 		if claim.interactive {
 			ru.lane = LaneInteractive
 		}
-		r.unreserveLocked(claim)
 		ru.admitted = true
 	} else {
 		// Behind any job already waiting in the lane (first come, first admitted).

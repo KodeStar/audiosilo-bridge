@@ -10,12 +10,12 @@ import (
 	"time"
 
 	"github.com/kodestar/audiosilo-bridge/internal/link"
-	"github.com/kodestar/audiosilo-bridge/internal/store"
 )
 
 // priorityServer is optional: older links keep the ordinary Claim contract.
 type priorityServer interface {
 	SupportsClaimMinPriority() bool
+	WithdrawClaimMinPriority()
 	ClaimMinPriority(context.Context, []string, time.Duration, int32) (*link.Job, error)
 }
 
@@ -51,6 +51,9 @@ type claimRequest struct {
 	capacities  map[string]int
 	held        bool
 	serverID    string
+	// fallback keeps the original claim identity but uses ordinary admission
+	// when the server returned a job outside this request's eligibility.
+	fallback bool
 }
 
 func (q *claimRequest) holds(lane string) int {
@@ -191,26 +194,21 @@ func (r *Runner) dispatch(ctx context.Context, reserve bool, wg *sync.WaitGroup)
 		}
 		start := time.Now()
 		result, refreshed := r.poll(ctx, q, changed)
-		rejected := false
 		if result.job != nil {
-			if slices.Contains(q.kinds, result.job.Kind) && (!q.interactive || result.job.Priority >= int(InteractivePriority)) {
-				r.start(ctx, q.srv, jobOf(result.job), wg, q)
-			} else {
-				r.rejectClaim(ctx, q, result.job)
-				rejected = true
+			if !slices.Contains(q.kinds, result.job.Kind) || (q.interactive && result.job.Priority < int(InteractivePriority)) {
+				// The lease is ours even if the server ignored the filter. Drop
+				// the reserved admission and wait for the kind's ordinary lane.
+				if q.interactive {
+					q.srv.(priorityServer).WithdrawClaimMinPriority()
+				}
+				q.fallback = true
+				r.Wake()
 			}
+			r.start(ctx, q.srv, jobOf(result.job), wg, q)
 		}
 		r.unreserve(q)
 		if ctx.Err() != nil {
 			return
-		}
-		if rejected {
-			// A server ignoring the filter (one rolled back before the next
-			// heartbeat withdraws negotiation) would otherwise hand out its
-			// whole queue, one refusal after another.
-			r.pauseClaims(ctx, q, backoff)
-			backoff = min(backoff*2, time.Minute)
-			continue
 		}
 		// A refresh is a scheduling event, not a failed network attempt.
 		if refreshed || result.job != nil {
@@ -255,19 +253,8 @@ func (r *Runner) pauseClaims(ctx context.Context, previous *claimRequest, delay 
 	}
 }
 
-func (r *Runner) rejectClaim(ctx context.Context, q *claimRequest, j *link.Job) {
-	// Never execute a kind or priority outside the reserved admission, even if
-	// a server incorrectly ignores the negotiated filter. Do not persist params.
-	job := jobOf(j)
-	job.Params = nil
-	if err := r.store.RecordClaim(ctx, store.ServerJob{ID: job.ID, Kind: job.Kind, Attempt: job.Attempt, ServerID: q.serverID}); err != nil {
-		r.log.Warn("bridge: recording a refused claim failed", "job", job.ID, "err", err)
-	}
-	r.finish(ctx, q.srv, job, store.JobFailed, nil, nil, "the server returned a job outside the requested admission")
-}
-
-// Recovery and re-pair admission uses the ordinary lane, since old execution
-// rows do not store priority. A waiting recovered job renews its lease through
+// Recovery, re-pair and out-of-admission claims use the ordinary lane. Old
+// execution rows do not store priority. A waiting job renews its lease through
 // execute's reporter and takes a slot before any new claims for that lane.
 func (r *Runner) awaitAdmission(ctx context.Context, ru *run) bool {
 	for ctx.Err() == nil {

@@ -412,3 +412,48 @@ func TestHeartbeatNegotiatesDispatchCapacity(t *testing.T) {
 	b.beat(ctx)
 	capacity(2, 0)
 }
+
+func TestPairingChangesWithdrawClaimPriority(t *testing.T) {
+	for _, change := range []string{"unpair", "refusal"} {
+		t.Run(change, func(t *testing.T) {
+			b, ctx := pairedBridge(t, &setupServer{kind: "new", claimPriority: true})
+			b.beat(ctx)
+			old := b.conn.Client()
+			if !old.SupportsClaimMinPriority() {
+				t.Fatal("heartbeat did not negotiate")
+			}
+			if change == "unpair" {
+				if err := b.Unpair(ctx); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				b.conn.Refuse(ctx, old, "refused")
+			}
+			if old.SupportsClaimMinPriority() {
+				t.Fatal("pairing change retained negotiation")
+			}
+			if change == "refusal" {
+				// A heartbeat already in flight can finish on the old link before
+				// re-pairing. Replacing it must withdraw that negotiation too.
+				if _, err := old.Heartbeat(ctx, link.Status{}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := b.Pair(ctx, old.BaseURL(), "CODE"); err != nil {
+				t.Fatal(err)
+			}
+			current := b.conn.Client()
+			if current == old || current.SupportsClaimMinPriority() || old.SupportsClaimMinPriority() {
+				t.Fatal("re-pair inherited negotiation")
+			}
+			b.beat(ctx)
+			if !current.SupportsClaimMinPriority() {
+				t.Fatal("new pairing did not renegotiate")
+			}
+			b.conn.Refuse(ctx, old, "late refusal")
+			if !current.SupportsClaimMinPriority() || b.conn.Client() != current {
+				t.Fatal("old pairing withdrew current negotiation")
+			}
+		})
+	}
+}
