@@ -80,6 +80,8 @@ func (e *SealFailure) Error() string { return e.Message }
 // The pipeline lane holds the jobs that follow an engine book (sidecars.generate):
 // the engine's own scheduler does the throttling, so a job waits there while its
 // book is queued or parked, and the lane only bounds how many are followed.
+// The interactive pool is carved from the download lane: a legacy pairing folds
+// it back into download, and the two share one combined bound (roomLocked).
 const (
 	LaneLight       = "light"
 	LaneDownload    = "download"
@@ -281,6 +283,13 @@ func (r *Runner) Wake() {
 	r.wakeLocked()
 }
 
+// wakeChan is the channel the next Wake closes.
+func (r *Runner) wakeChan() <-chan struct{} {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.changed
+}
+
 func (r *Runner) wakeLocked() {
 	close(r.changed)
 	r.changed = make(chan struct{})
@@ -297,9 +306,7 @@ func (r *Runner) Run(ctx context.Context) {
 	wg.Add(1)
 	go func() { defer wg.Done(); r.retryReports(ctx) }()
 	for ctx.Err() == nil {
-		r.mu.Lock()
-		changed := r.changed
-		r.mu.Unlock()
+		changed := r.wakeChan()
 		srv := r.server()
 		if srv == nil {
 			select {
@@ -309,18 +316,15 @@ func (r *Runner) Run(ctx context.Context) {
 			}
 			continue
 		}
-		if !r.recover(ctx, srv, &wg) {
-			continue
+		if r.recover(ctx, srv, &wg) {
+			break
 		}
-		break
 	}
 	wg.Add(2)
 	go func() { defer wg.Done(); r.dispatch(ctx, false, &wg) }()
 	go func() { defer wg.Done(); r.dispatch(ctx, true, &wg) }()
 	for ctx.Err() == nil {
-		r.mu.Lock()
-		changed := r.changed
-		r.mu.Unlock()
+		changed := r.wakeChan()
 		if srv := r.server(); srv != nil {
 			r.resumeStranded(ctx, srv, &wg)
 		}
@@ -363,7 +367,7 @@ func (r *Runner) recover(ctx context.Context, srv Server, wg *sync.WaitGroup) bo
 		}
 		r.log.Info("bridge: resuming a job after a restart", "job", job.ID, "kind", job.Kind, "attempt", job.Attempt)
 		job.Resumed = true
-		r.launch(ctx, srv, job, wg, sj.Error)
+		r.launch(ctx, srv, job, wg, sj.Error, nil)
 	}
 	return true
 }
@@ -414,7 +418,7 @@ func (r *Runner) resumeStranded(ctx context.Context, srv Server, wg *sync.WaitGr
 		}
 		r.log.Info("bridge: resuming a job its refused token stopped", "job", job.ID, "kind", job.Kind, "attempt", job.Attempt)
 		job.Resumed = true
-		r.launch(ctx, srv, job, wg, sj.Error)
+		r.launch(ctx, srv, job, wg, sj.Error, nil)
 	}
 }
 
@@ -463,11 +467,12 @@ type strandedJob struct {
 	srv Server
 }
 
-// start records a claimed job and runs it.
-func (r *Runner) start(ctx context.Context, srv Server, job Job, wg *sync.WaitGroup, claims ...*claimRequest) {
+// start records a claimed job and runs it. claim is the dispatcher's request
+// that took it (nil in tests that start a job directly).
+func (r *Runner) start(ctx context.Context, srv Server, job Job, wg *sync.WaitGroup, claim *claimRequest) {
 	serverID := r.opts.ServerID()
-	if len(claims) != 0 {
-		serverID = claims[0].serverID
+	if claim != nil {
+		serverID = claim.serverID
 	}
 	var sealErr error
 	sealer, sealing := r.handlers[job.Kind].(ParamSealer)
@@ -497,13 +502,14 @@ func (r *Runner) start(ctx context.Context, srv Server, job Job, wg *sync.WaitGr
 		r.finish(ctx, srv, job, store.JobFailed, nil, result, failure.Message)
 		return
 	}
-	r.launch(ctx, srv, job, wg, "", claims...)
+	r.launch(ctx, srv, job, wg, "", claim)
 }
 
 // launch runs a recorded job in its lane, parked with message parked when a
 // resumed one was ("" when it wasn't). A job of a kind the Bridge doesn't run is
-// failed at once.
-func (r *Runner) launch(ctx context.Context, srv Server, job Job, wg *sync.WaitGroup, parked string, claims ...*claimRequest) {
+// failed at once. claim is nil for a recovered or stranded job, which waits for
+// ordinary admission; a claimed job takes the slot its claim reserved.
+func (r *Runner) launch(ctx context.Context, srv Server, job Job, wg *sync.WaitGroup, parked string, claim *claimRequest) {
 	h, ok := r.handlers[job.Kind]
 	if !ok {
 		r.finish(ctx, srv, job, store.JobFailed, nil, nil, "this Bridge doesn't run "+job.Kind+" jobs")
@@ -512,15 +518,14 @@ func (r *Runner) launch(ctx context.Context, srv Server, job Job, wg *sync.WaitG
 	rctx, cancel := context.WithCancelCause(ctx)
 	ru := &run{job: job, srv: srv, lane: h.Lane(), cancel: cancel, parked: parked}
 	r.mu.Lock()
-	if len(claims) != 0 {
-		claim := claims[0]
+	if claim != nil {
 		if claim.interactive {
 			ru.lane = LaneInteractive
 		}
 		r.unreserveLocked(claim)
 		ru.admitted = true
 	} else {
-		ru.admitted = r.roomLocked(srv, ru.lane, nil)
+		ru.admitted = r.roomLocked(r.capacities(srv), ru.lane, nil)
 	}
 	r.running[job.ID] = ru
 	if ru.admitted {

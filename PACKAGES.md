@@ -1559,7 +1559,7 @@ internal/
             The reserve never borrows background work; ordinary workers accept
             every priority. Each outstanding claim reserves admission in all
             requested lanes and transfers its selected slot atomically to its run.
-            Eligibility changes (kinds, pairing, capability or SetCapacity) cancel
+            Eligibility changes (kinds, pairing, capability or capacity) cancel
             and join a long poll before reissue; unchanged wakes leave it alone.
             A job racing cancellation runs under the original link and admission.
             Running promotions keep their pool. Recovery uses ordinary admission

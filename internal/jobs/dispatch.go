@@ -39,8 +39,8 @@ func (r *Runner) capacities(srv Server) map[string]int {
 	return caps
 }
 
-// SetCapacity changes a pool's capacity and refreshes affected claims.
-func (r *Runner) SetCapacity(lane string, capacity int) {
+// setCapacity changes a pool's capacity and refreshes affected claims.
+func (r *Runner) setCapacity(lane string, capacity int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	capacity = max(0, capacity)
@@ -71,8 +71,8 @@ func (q *claimRequest) holds(lane string) int {
 	return 0
 }
 
-func (r *Runner) roomLocked(srv Server, lane string, own *claimRequest) bool {
-	caps := r.capacities(srv)
+// roomLocked reports whether lane has a free slot under caps (capacities(srv)).
+func (r *Runner) roomLocked(caps map[string]int, lane string, own *claimRequest) bool {
 	used := func(l string) int { return r.use[l] + r.reserved[l] - own.holds(l) }
 	if used(lane) >= caps[lane] {
 		return false
@@ -94,9 +94,7 @@ func (r *Runner) request(reserve, hold bool, own *claimRequest) (*claimRequest, 
 	var srv Server
 	var serverID string
 	for {
-		r.mu.Lock()
-		changed := r.changed
-		r.mu.Unlock()
+		changed := r.wakeChan()
 		srv, serverID = r.server(), r.opts.ServerID()
 		r.mu.Lock()
 		if changed == r.changed {
@@ -115,7 +113,7 @@ func (r *Runner) request(reserve, hold bool, own *claimRequest) (*claimRequest, 
 				}
 				lane = LaneInteractive
 			}
-			if r.waiting[lane] == 0 && r.roomLocked(srv, lane, own) {
+			if r.waiting[lane] == 0 && r.roomLocked(q.capacities, lane, own) {
 				q.kinds = append(q.kinds, kind)
 				if !slices.Contains(q.lanes, lane) {
 					q.lanes = append(q.lanes, lane)
@@ -205,7 +203,7 @@ func (r *Runner) dispatch(ctx context.Context, reserve bool, wg *sync.WaitGroup)
 		start := time.Now()
 		result, refreshed := r.poll(ctx, q, changed)
 		if result.job != nil {
-			if slices.Contains(q.kinds, result.job.Kind) && (!reserve || result.job.Priority >= int(InteractivePriority)) {
+			if slices.Contains(q.kinds, result.job.Kind) && (!q.interactive || result.job.Priority >= int(InteractivePriority)) {
 				r.start(ctx, q.srv, jobOf(result.job), wg, q)
 			} else {
 				r.rejectClaim(ctx, q, result.job)
@@ -278,7 +276,7 @@ func (r *Runner) awaitAdmission(ctx context.Context, ru *run) bool {
 			r.mu.Unlock()
 			return true
 		}
-		if srv != nil && r.roomLocked(srv, ru.lane, nil) {
+		if srv != nil && r.roomLocked(r.capacities(srv), ru.lane, nil) {
 			r.waiting[ru.lane]--
 			r.use[ru.lane]++
 			ru.admitted = true

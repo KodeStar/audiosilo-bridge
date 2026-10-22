@@ -319,7 +319,7 @@ func TestUnchangedWakeAndCapacityRefresh(t *testing.T) {
 			t.Fatal("unchanged wake cancelled poll")
 		default:
 		}
-		r.SetCapacity(LaneLight, 1)
+		r.setCapacity(LaneLight, 1)
 		synctest.Wait()
 		if !await(t, done) {
 			t.Fatal("capacity change did not refresh")
@@ -526,7 +526,7 @@ func TestWaitingRecoveryRunsOrAbandons(t *testing.T) {
 			r := New(db, func() Server { return srv }, nil, opts, h)
 			r.use[LaneLight] = 1
 			var wg sync.WaitGroup
-			r.launch(ctx, srv, Job{ID: 9, Kind: h.Kind(), Attempt: 1, Resumed: true}, &wg, "")
+			r.launch(ctx, srv, Job{ID: 9, Kind: h.Kind(), Attempt: 1, Resumed: true}, &wg, "", nil)
 			done := make(chan struct{})
 			go func() { wg.Wait(); close(done) }()
 			t.Cleanup(func() { cancel(); await(t, done) })
@@ -562,7 +562,7 @@ func TestClaimRefreshReissuesWithoutTimeAdvance(t *testing.T) {
 		go func() { r.dispatch(ctx, false, &wg); close(done) }()
 		first := srv.next(t, false)
 		start := time.Now()
-		r.SetCapacity(LaneLight, 1)
+		r.setCapacity(LaneLight, 1)
 		await(t, first.cancelled)
 		srv.next(t, false)
 		if elapsed := time.Since(start); elapsed != 0 {
@@ -593,7 +593,7 @@ func TestClaimBackoffIgnoresUnchangedWake(t *testing.T) {
 		default:
 		}
 		start := time.Now()
-		r.SetCapacity(LaneLight, 1)
+		r.setCapacity(LaneLight, 1)
 		await(t, done)
 		if elapsed := time.Since(start); elapsed != 0 {
 			t.Fatal("eligibility change did not bypass backoff", elapsed)
