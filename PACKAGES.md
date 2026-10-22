@@ -1561,10 +1561,13 @@ internal/
             requested lanes and transfers its selected slot atomically to its run.
             Eligibility changes (kinds, pairing, capability or capacity) cancel
             and join a long poll before reissue; unchanged wakes leave it alone.
-            A job racing cancellation runs under the original link and admission.
-            Running promotions keep their pool. Recovery uses ordinary admission
-            because old rows lack priority, renews leases while waiting for room,
-            and takes precedence over fresh claims in that lane. Live parks hold
+            A job racing cancellation runs under the original link and admission;
+            one racing the runner's stop is still recorded, so the next start
+            resumes it. A refused answer (outside the reserve) backs off like a
+            failed claim. Running promotions keep their pool. Recovery uses
+            ordinary admission because old rows lack priority, renews leases
+            while waiting for room, queues behind jobs already waiting, and takes
+            precedence over fresh claims in that lane. Live parks hold
             admission; terminal parks and releases wake the dispatcher.
             Phase 2c-2a adds the strict Reporter.ConfirmLease publication check
             (network errors deny commit). Phase 2c-1: optional ParamSealer.SealParams runs

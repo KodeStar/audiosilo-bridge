@@ -482,7 +482,9 @@ func (r *Runner) start(ctx context.Context, srv Server, job Job, wg *sync.WaitGr
 			job.Params = json.RawMessage(`{}`)
 		}
 	}
-	if err := r.store.RecordClaim(ctx, store.ServerJob{ID: job.ID, Kind: job.Kind, LibraryID: job.LibraryID, Path: job.Path,
+	// Recorded even when the runner is stopping: a claim that raced the stop
+	// is then resumed under its lease at the next start, not left to lapse.
+	if err := r.store.RecordClaim(context.WithoutCancel(ctx), store.ServerJob{ID: job.ID, Kind: job.Kind, LibraryID: job.LibraryID, Path: job.Path,
 		Params: job.Params, Attempt: job.Attempt, ServerID: serverID}); err != nil {
 		r.log.Warn("bridge: recording a claim failed", "job", job.ID, "err", err)
 		if sealing {
@@ -525,7 +527,8 @@ func (r *Runner) launch(ctx context.Context, srv Server, job Job, wg *sync.WaitG
 		r.unreserveLocked(claim)
 		ru.admitted = true
 	} else {
-		ru.admitted = r.roomLocked(r.capacities(srv), ru.lane, nil)
+		// Behind any job already waiting in the lane (first come, first admitted).
+		ru.admitted = r.waiting[ru.lane] == 0 && r.roomLocked(r.capacities(srv), ru.lane, nil)
 	}
 	r.running[job.ID] = ru
 	if ru.admitted {

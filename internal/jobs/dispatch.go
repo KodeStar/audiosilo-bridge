@@ -39,17 +39,6 @@ func (r *Runner) capacities(srv Server) map[string]int {
 	return caps
 }
 
-// setCapacity changes a pool's capacity and refreshes affected claims.
-func (r *Runner) setCapacity(lane string, capacity int) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	capacity = max(0, capacity)
-	if r.opts.Lanes[lane] != capacity {
-		r.opts.Lanes[lane] = capacity
-		r.wakeLocked()
-	}
-}
-
 // A claim reserves one possible admission in every lane it requests. There is
 // one ordinary dispatcher and one reserved dispatcher, never unbounded waiters
 // holding newly claimed jobs. A refresh retains admission until the old call
@@ -202,16 +191,26 @@ func (r *Runner) dispatch(ctx context.Context, reserve bool, wg *sync.WaitGroup)
 		}
 		start := time.Now()
 		result, refreshed := r.poll(ctx, q, changed)
+		rejected := false
 		if result.job != nil {
 			if slices.Contains(q.kinds, result.job.Kind) && (!q.interactive || result.job.Priority >= int(InteractivePriority)) {
 				r.start(ctx, q.srv, jobOf(result.job), wg, q)
 			} else {
 				r.rejectClaim(ctx, q, result.job)
+				rejected = true
 			}
 		}
 		r.unreserve(q)
 		if ctx.Err() != nil {
 			return
+		}
+		if rejected {
+			// A server ignoring the filter (one rolled back before the next
+			// heartbeat withdraws negotiation) would otherwise hand out its
+			// whole queue, one refusal after another.
+			r.pauseClaims(ctx, q, backoff)
+			backoff = min(backoff*2, time.Minute)
+			continue
 		}
 		// A refresh is a scheduling event, not a failed network attempt.
 		if refreshed || result.job != nil {
@@ -219,6 +218,8 @@ func (r *Runner) dispatch(ctx context.Context, reserve bool, wg *sync.WaitGroup)
 			continue
 		}
 		switch {
+		case q.interactive && !supportsPriority(q.srv):
+			// Negotiation was withdrawn after the request; the next one sees it.
 		case errors.Is(result.err, link.ErrUnauthorized):
 			r.onUnauthorized(q.srv)
 		case errors.Is(result.err, link.ErrNoHeartbeat):
@@ -270,12 +271,17 @@ func (r *Runner) rejectClaim(ctx context.Context, q *claimRequest, j *link.Job) 
 // execute's reporter and takes a slot before any new claims for that lane.
 func (r *Runner) awaitAdmission(ctx context.Context, ru *run) bool {
 	for ctx.Err() == nil {
-		srv := r.server()
+		// The wake channel is taken before the pairing is read (as in request),
+		// so a pairing or heartbeat between the two is not missed.
 		r.mu.Lock()
 		if ru.admitted {
 			r.mu.Unlock()
 			return true
 		}
+		changed := r.changed
+		r.mu.Unlock()
+		srv := r.server()
+		r.mu.Lock()
 		if srv != nil && r.roomLocked(r.capacities(srv), ru.lane, nil) {
 			r.waiting[ru.lane]--
 			r.use[ru.lane]++
@@ -284,7 +290,6 @@ func (r *Runner) awaitAdmission(ctx context.Context, ru *run) bool {
 			r.mu.Unlock()
 			return true
 		}
-		changed := r.changed
 		r.mu.Unlock()
 		select {
 		case <-ctx.Done():

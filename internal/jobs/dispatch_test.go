@@ -107,6 +107,17 @@ func startControlled(t *testing.T, r *Runner) {
 	t.Cleanup(func() { cancel(); await(t, done) })
 }
 
+// setCapacity changes a pool's capacity and refreshes affected claims.
+func (r *Runner) setCapacity(lane string, capacity int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	capacity = max(0, capacity)
+	if r.opts.Lanes[lane] != capacity {
+		r.opts.Lanes[lane] = capacity
+		r.wakeLocked()
+	}
+}
+
 type optedHandler struct{ handler }
 
 func (optedHandler) Interactive() bool { return true }
@@ -285,9 +296,15 @@ func TestReservedRefusesOutsideAdmission(t *testing.T) {
 			if mode == "kind not opted in" {
 				job.Kind, job.Priority = "not.opted", wirePriority(t)
 			}
+			answered := time.Now()
 			reserve.answer <- job
-			// A new reserved claim proves the denied response was processed.
+			// A new reserved claim proves the denied response was processed,
+			// and only after a backoff: a server ignoring the filter must not
+			// see its queue refused in a tight loop.
 			srv.next(t, true)
+			if elapsed := time.Since(answered); elapsed < time.Second {
+				t.Fatal("refusal did not back off", elapsed)
+			}
 			if state, _ := srv.finalState(9); state != link.StateFailed {
 				t.Fatal("unfiltered server answer was not failed", state)
 			}
@@ -546,6 +563,55 @@ func TestWaitingRecoveryRunsOrAbandons(t *testing.T) {
 				t.Fatal("waiting job disposition", h.ran.Load(), h.abandoned())
 			}
 		})
+	}
+}
+
+func TestWaitingAdmissionSeesWakeDuringPairingRead(t *testing.T) {
+	db, srv := openStore(t), newControlledServer(false)
+	ran := make(chan struct{})
+	h := handler{kind: "light", lane: LaneLight, fn: func(context.Context, Job, *Reporter) (any, error) {
+		close(ran)
+		return nil, nil
+	}}
+	read, release := make(chan struct{}), make(chan struct{})
+	var calls atomic.Int32
+	r := New(db, func() Server {
+		if calls.Add(1) == 1 {
+			close(read)
+			<-release
+			return nil // the link becomes ready during this read
+		}
+		return srv
+	}, nil, testOpts(), h)
+	r.use[LaneLight] = 2
+	ctx, cancel := context.WithCancel(context.Background())
+	var wg sync.WaitGroup
+	t.Cleanup(func() { cancel(); wg.Wait() })
+	r.launch(ctx, srv, Job{ID: 4, Kind: h.Kind(), Attempt: 1, Resumed: true}, &wg, "", nil)
+	await(t, read)
+	r.mu.Lock()
+	r.use[LaneLight] = 0
+	r.mu.Unlock()
+	r.Wake()
+	close(release)
+	await(t, ran)
+}
+
+func TestClaimRacingStopIsRecordedForResume(t *testing.T) {
+	db, srv := openStore(t), newControlledServer(false)
+	h := handler{kind: "light", lane: LaneLight, fn: func(context.Context, Job, *Reporter) (any, error) {
+		t.Error("a claim that raced the stop ran")
+		return nil, nil
+	}}
+	r := New(db, func() Server { return srv }, nil, testOpts(), h)
+	ctx, stop := context.WithCancelCause(context.Background())
+	stop(errStopping)
+	var wg sync.WaitGroup
+	r.start(ctx, srv, Job{ID: 3, Kind: h.Kind(), Attempt: 1}, &wg, nil)
+	wg.Wait()
+	sj, err := db.GetServerJob(context.Background(), 3)
+	if err != nil || sj.State != store.JobRunning {
+		t.Fatal("claim racing the stop was not kept for the next start", sj, err)
 	}
 }
 
