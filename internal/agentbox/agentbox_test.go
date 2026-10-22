@@ -29,9 +29,11 @@ func newTestRunner(t *testing.T, backend string) (*Runner, string) {
 			"claude": {Version: "2.1.300", Credential: "oauth_token"},
 			"codex":  {Version: "0.162.1", Credential: "login"},
 		}})
-	r := New(Options{Dir: dir, Backend: backend, ClaimTimeout: 300 * time.Millisecond})
+	// Parallel filesystem-heavy tests can delay a goroutine on one CPU. Keep
+	// ordinary runs tolerant of that; timeout tests shorten their own limits.
+	r := New(Options{Dir: dir, Backend: backend, ClaimTimeout: 5 * time.Second})
 	r.poll = 5 * time.Millisecond
-	r.staleFor = 300 * time.Millisecond
+	r.staleFor = 5 * time.Second
 	r.beatCheck = 5 * time.Millisecond
 	r.beatEvery = 10 * time.Millisecond
 	r.cancelFor = 2 * time.Second
@@ -77,24 +79,32 @@ type fakeRunner struct {
 	claimed  atomic.Int32
 }
 
-func (f *fakeRunner) start(t *testing.T, dir string) {
+// start returns an idempotent stop that joins the runner. Call it before reading
+// values captured by fn or checking job cleanup: the done file does not establish
+// a happens-before relationship between goroutines for the race detector.
+func (f *fakeRunner) start(t *testing.T, dir string) func() {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	stopped := make(chan struct{})
-	t.Cleanup(func() { cancel(); <-stopped })
+	stop := func() { cancel(); <-stopped }
+	t.Cleanup(stop)
 	go func() {
 		defer close(stopped)
+		handled := make(map[string]bool)
 		for ctx.Err() == nil {
 			time.Sleep(2 * time.Millisecond)
 			entries, _ := os.ReadDir(dir)
 			for _, e := range entries {
 				job := filepath.Join(dir, e.Name())
-				if !agentproto.ValidJobID(e.Name()) || !present(job, agentproto.RequestFile) {
+				if handled[e.Name()] || !agentproto.ValidJobID(e.Name()) || !present(job, agentproto.RequestFile) {
 					continue
 				}
 				if err := os.Mkdir(filepath.Join(job, agentproto.ClaimDir), 0o700); err != nil {
 					continue
 				}
+				// Run may remove claim before request.json while deleting the job.
+				// Never run fn again and recreate files in that partially removed dir.
+				handled[e.Name()] = true
 				f.claimed.Add(1)
 				exit := f.fn(job)
 				if f.skipDone {
@@ -107,6 +117,43 @@ func (f *fakeRunner) start(t *testing.T, dir string) {
 			}
 		}
 	}()
+	return stop
+}
+
+func TestFakeRunnerDoesNotReclaimJobDuringRemoval(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	jobs := make(chan string, 2)
+	fake := &fakeRunner{fn: func(job string) agentproto.Exit {
+		jobs <- filepath.Base(job)
+		return agentproto.Exit{}
+	}}
+	stop := fake.start(t, dir)
+	waitJob := func(want string) {
+		t.Helper()
+		select {
+		case got := <-jobs:
+			if got != want {
+				t.Fatalf("claimed job %s, want %s", got, want)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("runner did not claim job %s", want)
+		}
+	}
+	first, second := "0000000000000000", "0000000000000001"
+	mustWrite(t, filepath.Join(dir, first, agentproto.RequestFile), "{}")
+	waitJob(first)
+	// Force the deletion window: claim is gone while request.json still exists.
+	if err := os.Remove(filepath.Join(dir, first, agentproto.ClaimDir)); err != nil {
+		t.Fatal(err)
+	}
+	// ReadDir sorts these ids, so the fake must scan first again before second.
+	mustWrite(t, filepath.Join(dir, second, agentproto.RequestFile), "{}")
+	waitJob(second)
+	stop()
+	if got := fake.claimed.Load(); got != 2 {
+		t.Fatalf("claimed %d jobs, want 2", got)
+	}
 }
 
 func present(dir, name string) bool {
@@ -136,6 +183,8 @@ func TestRunClaudeSuccess(t *testing.T) {
 	var seen agentproto.Request
 	var prompt, input string
 	var inputMode, outMode, prevMode os.FileMode
+	var beats atomic.Int32
+	beatSeen := make(chan struct{})
 	fake := &fakeRunner{fn: func(job string) agentproto.Exit {
 		raw, _ := os.ReadFile(filepath.Join(job, agentproto.RequestFile))
 		seen, _ = agentproto.DecodeRequest(raw)
@@ -152,19 +201,37 @@ func TestRunClaudeSuccess(t *testing.T) {
 		if info, err := os.Stat(filepath.Join(job, "work", "out", "prev.json")); err == nil {
 			prevMode = info.Mode().Perm()
 		}
-		beatFor(job, 60*time.Millisecond)
+		// Keep the run alive until Run observes a heartbeat, even if another
+		// parallel test occupies the only CPU longer than a fixed beat window.
+		deadline := time.After(5 * time.Second)
+	beating:
+		for {
+			select {
+			case <-beatSeen:
+				break beating
+			case <-deadline:
+				t.Error("Run did not report a heartbeat while the runner beat")
+				return agentproto.Exit{ExitCode: 1}
+			default:
+				beatFor(job, 5*time.Millisecond)
+			}
+		}
 		_ = os.Remove(filepath.Join(job, "work", "out", "prev.json"))
 		mustWrite(t, filepath.Join(job, "work", "out", "characters.json"), `{"a":1}`)
 		mustWrite(t, filepath.Join(job, "work", "out", "sub", "b.json"), `{"b":2}`)
 		mustWrite(t, filepath.Join(job, agentproto.StdoutFile), claudeOK)
 		return agentproto.Exit{ExitCode: 0, DurationMS: 60}
 	}}
-	fake.start(t, dir)
+	stop := fake.start(t, dir)
 
-	var beats atomic.Int32
 	res, err := r.Run(context.Background(), agent.Request{Dir: staged, Prompt: "do it", Model: "opus", Effort: "high",
-		Web: true, MaxTurns: 40, Timeout: 90*time.Second + time.Millisecond, Heartbeat: func(time.Duration) { beats.Add(1) },
+		Web: true, MaxTurns: 40, Timeout: 90*time.Second + time.Millisecond, Heartbeat: func(time.Duration) {
+			if beats.Add(1) == 1 {
+				close(beatSeen)
+			}
+		},
 		Process: func(int, bool) { t.Error("Process called with a pid from another container") }})
+	stop()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -219,8 +286,9 @@ func TestRunCodexUsesLastMessage(t *testing.T) {
 		mustWrite(t, filepath.Join(job, agentproto.LastMessageFile), "from file\n")
 		return agentproto.Exit{}
 	}}
-	fake.start(t, dir)
+	stop := fake.start(t, dir)
 	res, err := r.Run(context.Background(), agent.Request{Dir: stagedDir(t), Prompt: "p", Timeout: time.Minute})
+	stop()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -261,8 +329,9 @@ func TestRunFailures(t *testing.T) {
 				mustWrite(t, filepath.Join(job, agentproto.StderrFile), tc.stderr)
 				return tc.exit
 			}}
-			fake.start(t, dir)
+			stop := fake.start(t, dir)
 			_, err := r.Run(context.Background(), agent.Request{Dir: stagedDir(t), Prompt: "p", Timeout: time.Minute})
+			stop()
 			if err == nil || !tc.check(err) {
 				t.Fatalf("err = %v", err)
 			}
@@ -290,10 +359,11 @@ func TestHarvestSkipsLinks(t *testing.T) {
 		mustWrite(t, filepath.Join(job, agentproto.StdoutFile), claudeOK)
 		return agentproto.Exit{}
 	}}
-	fake.start(t, dir)
+	stop := fake.start(t, dir)
 	if _, err := r.Run(context.Background(), agent.Request{Dir: staged, Prompt: "p", Timeout: time.Minute}); err != nil {
 		t.Fatal(err)
 	}
+	stop()
 	out := filepath.Join(staged, "out")
 	if !present(out, "ok.json") {
 		t.Fatal("the regular file wasn't harvested")
@@ -338,8 +408,9 @@ func TestHarvestLimits(t *testing.T) {
 				mustWrite(t, filepath.Join(job, agentproto.StdoutFile), claudeOK)
 				return agentproto.Exit{}
 			}}
-			fake.start(t, dir)
+			stop := fake.start(t, dir)
 			_, err := r.Run(context.Background(), agent.Request{Dir: staged, Prompt: "p", Timeout: time.Minute})
+			stop()
 			var na *agent.NotAvailableError
 			if err == nil || !strings.Contains(err.Error(), "harvest") || errors.As(err, &na) {
 				t.Fatalf("err = %v, want the harvest's limit (the agent's outputs, not the agent unavailable)", err)
@@ -357,6 +428,7 @@ func TestHarvestLimits(t *testing.T) {
 func TestRunClaimTimeout(t *testing.T) {
 	t.Parallel()
 	r, dir := newTestRunner(t, agent.IDClaude)
+	r.claimTimeout = 300 * time.Millisecond
 	_, err := r.Run(context.Background(), agent.Request{Dir: stagedDir(t), Prompt: "p", Timeout: time.Minute})
 	var na *agent.NotAvailableError
 	if !errors.As(err, &na) || !strings.Contains(err.Error(), "didn't pick the job up") {
@@ -392,9 +464,11 @@ func TestUnclaimableLosesToARunner(t *testing.T) {
 func TestRunStaleHeartbeat(t *testing.T) {
 	t.Parallel()
 	r, dir := newTestRunner(t, agent.IDClaude)
+	r.staleFor = 300 * time.Millisecond
 	fake := &fakeRunner{skipDone: true, fn: func(string) agentproto.Exit { return agentproto.Exit{} }}
-	fake.start(t, dir)
+	stop := fake.start(t, dir)
 	_, err := r.Run(context.Background(), agent.Request{Dir: stagedDir(t), Prompt: "p", Timeout: time.Minute})
+	stop()
 	var na *agent.NotAvailableError
 	if err == nil || errors.As(err, &na) || !strings.Contains(err.Error(), "stopped answering") {
 		t.Fatalf("err = %v", err)
@@ -416,8 +490,9 @@ func TestRunCancel(t *testing.T) {
 		mustWrite(t, filepath.Join(job, agentproto.StdoutFile), claudeOK)
 		return agentproto.Exit{ExitCode: 143, Cancelled: true}
 	}}
-	fake.start(t, dir)
+	stop := fake.start(t, dir)
 	res, err := r.Run(ctx, agent.Request{Dir: stagedDir(t), Prompt: "p", Timeout: time.Minute})
+	stop()
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v", err)
 	}
@@ -687,8 +762,9 @@ func TestRunStagingTroubleIsUnavailable(t *testing.T) {
 			mustWrite(t, filepath.Join(job, agentproto.StdoutFile), claudeOK)
 			return agentproto.Exit{}
 		}}
-		fake.start(t, dir)
+		stop := fake.start(t, dir)
 		_, err := r.Run(context.Background(), agent.Request{Dir: stagedDir(t), Prompt: "p", Timeout: time.Minute})
+		stop()
 		var na *agent.NotAvailableError
 		if !errors.As(err, &na) || !strings.Contains(err.Error(), "can't read the outputs from the staging dir") {
 			t.Fatalf("err = %v, want the agent unavailable", err)
@@ -720,7 +796,7 @@ func TestRefusedCredentialIsRemembered(t *testing.T) {
 		mustWrite(t, filepath.Join(job, agentproto.StdoutFile), claudeOK)
 		return agentproto.Exit{}
 	}}
-	fake.start(t, dir)
+	stop := fake.start(t, dir)
 	run := func() error {
 		_, err := r.Run(context.Background(), agent.Request{Dir: stagedDir(t), Prompt: "p", Timeout: time.Minute})
 		return err
@@ -761,6 +837,7 @@ func TestRefusedCredentialIsRemembered(t *testing.T) {
 	if err := run(); err != nil {
 		t.Fatal(err)
 	}
+	stop()
 	if st := r.Status(); !st.Available || st.Refused {
 		t.Fatalf("after a run that went through: %+v", st)
 	}
@@ -792,8 +869,9 @@ func TestRunStoppedMidRunKeepsUsage(t *testing.T) {
 				mustWrite(t, filepath.Join(job, agentproto.StdoutFile), tc.stdout)
 				return stopped
 			}}
-			fake.start(t, dir)
+			stop := fake.start(t, dir)
 			res, err := r.Run(context.Background(), agent.Request{Dir: stagedDir(t), Prompt: "p", Model: "gpt-5.1-codex", Timeout: time.Minute})
+			stop()
 			var na *agent.NotAvailableError
 			if !errors.As(err, &na) || na.CredentialRefused || na.Detail != stopped.Error {
 				t.Fatalf("err = %v", err)
@@ -845,10 +923,11 @@ func TestHandoffCredentialIsStaged(t *testing.T) {
 		mustWrite(t, filepath.Join(job, agentproto.StdoutFile), claudeOK)
 		return agentproto.Exit{}
 	}}
-	fake.start(t, dir)
+	stop := fake.start(t, dir)
 	if _, err := r.Run(context.Background(), agent.Request{Dir: stagedDir(t), Prompt: "p", Timeout: time.Minute}); err != nil {
 		t.Fatal(err)
 	}
+	stop()
 	c, err := agentproto.DecodeCredential([]byte(seen.Load().(string)), "claude")
 	if err != nil || c.Value != "sk-ant-oat01-vault" || c.Kind != agentproto.CredentialOAuthToken {
 		t.Fatalf("credential.json = %v, %+v", err, c)
@@ -877,10 +956,11 @@ func TestHandoffNotStaged(t *testing.T) {
 			mustWrite(t, filepath.Join(job, agentproto.StdoutFile), claudeOK)
 			return agentproto.Exit{}
 		}}
-		fake.start(t, dir)
+		stop := fake.start(t, dir)
 		if _, err := r.Run(context.Background(), agent.Request{Dir: stagedDir(t), Prompt: "p", Timeout: time.Minute}); err != nil {
 			t.Fatal(err)
 		}
+		stop()
 		if staged.Load() || r.Status().Handoff {
 			t.Fatal("the container's own credential wins: nothing is handed over")
 		}
