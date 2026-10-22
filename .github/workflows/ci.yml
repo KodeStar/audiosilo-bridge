@@ -40,6 +40,10 @@ jobs:
       - name: Vet
         run: go vet ./...
 
+      # The podcast episode tests probe real audio with ffprobe and fail without it.
+      - name: Install ffmpeg (ffprobe)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+
       - name: Test (race)
         run: go test -race ./...
 
