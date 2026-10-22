@@ -17,6 +17,7 @@ func TestRedirectCredentialRule(t *testing.T) {
 	}{
 		{"same-origin", "https://source:secret@feed.example/next", true},
 		{"case-insensitive-origin", "https://source:secret@FEED.EXAMPLE/next", true},
+		{"explicit-default-port", "https://source:secret@feed.example:443/next", true},
 		{"subdomain", "https://source:secret@child.feed.example/next", false},
 		{"other-host", "https://source:secret@other.example/next", false},
 		{"other-port", "https://source:secret@feed.example:8443/next", false},
@@ -109,6 +110,9 @@ func TestRedirectCredentialsStayStripped(t *testing.T) {
 			} else {
 				fmt.Fprint(w, "feed")
 			}
+		default:
+			t.Error("unexpected redirect path", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
 		}
 	}))
 	defer server.Close()

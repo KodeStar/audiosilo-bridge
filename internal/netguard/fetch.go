@@ -11,6 +11,7 @@ import (
 	"math/rand/v2"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -168,14 +169,27 @@ func (c *Client) once(ctx context.Context, in Request) (*Response, error) {
 func stripRedirectCredentials(req *http.Request, via []*http.Request) {
 	// The HTTP client can copy the initial headers again on each hop. Once the
 	// chain crosses an origin, later redirects must not restore those credentials.
+	target := origin(req.URL)
 	for _, previous := range via {
-		if !strings.EqualFold(previous.URL.Scheme, req.URL.Scheme) || !strings.EqualFold(previous.URL.Host, req.URL.Host) {
+		if origin(previous.URL) != target {
 			req.Header.Del("Authorization")
 			req.Header.Del("Cookie")
 			req.URL.User = nil
 			return
 		}
 	}
+}
+
+// origin is a URL's scheme, host and effective port, so an explicit default port
+// (feed.example:443) is the same origin as none.
+func origin(u *url.URL) string {
+	scheme, port := strings.ToLower(u.Scheme), u.Port()
+	if port == "" && scheme == "http" {
+		port = "80"
+	} else if port == "" && scheme == "https" {
+		port = "443"
+	}
+	return scheme + "://" + net.JoinHostPort(strings.ToLower(u.Hostname()), port)
 }
 
 // corrupt reports whether a gzip error is the data's fault (an empty body, a

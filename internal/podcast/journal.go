@@ -467,14 +467,13 @@ func AbortDelete(root *os.Root, j Journal) error {
 	if err != nil || string(a) != string(b) {
 		return ErrInvalidFile
 	}
-	if err := root.Remove(AttachmentPath(j.Path, ".publish.json")); err != nil {
-		return err
-	}
-	if err := syncDir(root, show+"/.audiosilo"); err != nil {
-		return err
-	}
+	// The empty trash folder goes first: a stop between the two leaves the barrier,
+	// and the next recovery aborts again instead of orphaning an unowned folder.
 	if err := root.Remove(show + "/" + j.TrashDir); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	return nil
+	if err := root.Remove(AttachmentPath(j.Path, ".publish.json")); err != nil {
+		return err
+	}
+	return syncDir(root, show+"/.audiosilo")
 }

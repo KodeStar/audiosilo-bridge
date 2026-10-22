@@ -175,6 +175,9 @@ func TestPublicationFaultRecovery(t *testing.T) {
 				if _, err := root.Lstat(AttachmentPath(j.Path, ".publish.json")); !errors.Is(err, os.ErrNotExist) {
 					t.Fatal("aborted deletion left its barrier", err)
 				}
+				if _, err := root.Lstat("Fixture Show/" + j.TrashDir); !errors.Is(err, os.ErrNotExist) {
+					t.Fatal("aborted deletion left its trash folder", err)
+				}
 				return
 			}
 			if e := episodeFor(f, j); e.Fetch.DeletedAt != j.Fetch.DeletedAt || e.Fetch.Codec != "mp3" {
