@@ -168,6 +168,15 @@ func TestPublicationFaultRecovery(t *testing.T) {
 				t.Fatal(err)
 			}
 			f, _ = Read(root, "Fixture Show")
+			if boundary == "journal" {
+				if e := episodeFor(f, j); e.Fetch.DeletedAt != "" || !Matches(root, j.Path, e.Fetch) || ReadChapters(root, j.Path, e.Fetch) == nil {
+					t.Fatal("recovery changed an unmoved deletion", e)
+				}
+				if _, err := root.Lstat(AttachmentPath(j.Path, ".publish.json")); !errors.Is(err, os.ErrNotExist) {
+					t.Fatal("aborted deletion left its barrier", err)
+				}
+				return
+			}
 			if e := episodeFor(f, j); e.Fetch.DeletedAt != j.Fetch.DeletedAt || e.Fetch.Codec != "mp3" {
 				t.Fatal(e)
 			}

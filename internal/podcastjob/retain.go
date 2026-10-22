@@ -106,7 +106,8 @@ func (h *Retain) run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (
 		// Most kept episodes are ineligible: ask before the locked reread and full
 		// hash. This grants nothing; the locked path asks again before deleting.
 		pre := link.PodcastRetentionRequest{ShowID: p.ShowID, Path: candidate.Path, Generation: candidate.Fetch.Generation, SHA256: candidate.Fetch.SHA256, Bytes: candidate.Fetch.Bytes}
-		if check, err := srv.CheckPodcastRetention(ctx, lib.ID, pre); err != nil || !RetentionEligible(check, lib.ID, show, pre, candidate.Fetch, s.o.Now()) {
+		sent := s.o.BudgetNow()
+		if check, err := srv.CheckPodcastRetention(ctx, lib.ID, pre); err != nil || !RetentionEligible(check, lib.ID, show, pre, candidate.Fetch, s.o.Now(), s.o.BudgetNow().Sub(sent)) {
 			result.Skipped++
 			continue
 		}
@@ -145,15 +146,19 @@ func (h *Retain) run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (
 				return false, leaseFailure(ctx, err, "The retention job no longer owns its claim.")
 			}
 			request := link.PodcastRetentionRequest{ShowID: p.ShowID, Path: current.Path, Generation: current.Fetch.Generation, SHA256: current.Fetch.SHA256, Bytes: current.Fetch.Bytes}
+			sent := s.o.BudgetNow()
 			check, err := srv.CheckPodcastRetention(ctx, lib.ID, request)
-			if err != nil || check == nil || !RetentionEligible(check, lib.ID, show, request, current.Fetch, s.o.Now()) {
+			eligible := func() bool {
+				return RetentionEligible(check, lib.ID, show, request, current.Fetch, s.o.Now(), s.o.BudgetNow().Sub(sent))
+			}
+			if err != nil || !eligible() {
 				return false, nil
 			}
 			if err := s.beforeWrite(lib, mount, show); err != nil {
 				return false, err
 			}
-			// Check the timestamp again after the last mapping probe.
-			if !RetentionEligible(check, lib.ID, show, request, current.Fetch, s.o.Now()) {
+			// Check the elapsed request age again after the last mapping probe.
+			if !eligible() {
 				return false, nil
 			}
 			tombstone := *current.Fetch
@@ -163,14 +168,15 @@ func (h *Retain) run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (
 			denied := errors.New("retention snapshot denied deletion")
 			boundary := func(at string) error {
 				if at == "deleting" {
-					if !RetentionEligible(check, lib.ID, show, request, current.Fetch, s.o.Now()) {
+					if !eligible() {
 						var err error
+						sent = s.o.BudgetNow()
 						check, err = srv.CheckPodcastRetention(ctx, lib.ID, request)
 						if err != nil || check == nil {
 							return denied
 						}
 					}
-					if !RetentionEligible(check, lib.ID, show, request, current.Fetch, s.o.Now()) {
+					if !eligible() {
 						return denied
 					}
 				}
@@ -187,10 +193,10 @@ func (h *Retain) run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (
 					return false, nil
 				}
 				// A failure before the audio moved (Windows refusing to move open audio,
-				// a trash folder that can't be made) must not leave the barrier: recovery
-				// would finish this deletion later without a fresh aggregate. AbortDelete
-				// refuses once the payload moved, and then recovery owns the deletion. A
-				// refused rename (open audio) counts as skipped.
+				// a trash folder that can't be made) should remove the barrier now.
+				// Recovery also aborts unmoved deletions. AbortDelete refuses once the
+				// payload moved, and then recovery owns the deletion. A refused rename
+				// (open audio) counts as skipped.
 				var refused *os.LinkError
 				if podcast.AbortDelete(root, j) == nil && (errors.Is(err, os.ErrPermission) || errors.As(err, &refused)) {
 					return false, nil
@@ -219,13 +225,13 @@ func (h *Retain) run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (
 }
 
 // RetentionEligible independently checks the server snapshot. Missing, stale or
-// inconsistent aggregate fields cannot grant deletion authority.
-func RetentionEligible(c *link.PodcastRetentionCheck, library int64, show string, r link.PodcastRetentionRequest, f *podcast.Fetch, now time.Time) bool {
+// inconsistent aggregate fields cannot grant deletion authority. Age is measured
+// from request dispatch on the Bridge's monotonic clock, independently of checked_at.
+func RetentionEligible(c *link.PodcastRetentionCheck, library int64, show string, r link.PodcastRetentionRequest, f *podcast.Fetch, now time.Time, age time.Duration) bool {
 	if c == nil || !f.Valid() || f.DeletedAt != "" || !c.Eligible || !c.Policy.Valid() || c.Policy.Mode == "archive" || c.Policy.Mode == "keep" && !c.OutsideKeepWindow || c.LibraryID != library || c.ShowPath != show || c.ShowID != r.ShowID || c.Path != r.Path || c.Generation != r.Generation || c.SHA256 != r.SHA256 || c.Bytes != r.Bytes || c.Followers <= 0 || !c.AllFinished || c.AllFinishedAt == nil || c.DeleteAfter == nil || c.Starred || c.Queued || c.ActiveStream || c.FetchOpen {
 		return false
 	}
-	checked, err := time.Parse(time.RFC3339, c.CheckedAt)
-	if err != nil || now.Before(checked) || now.Sub(checked) > 5*time.Second {
+	if age < 0 || age > 5*time.Second {
 		return false
 	}
 	finished, err := time.Parse(time.RFC3339, *c.AllFinishedAt)

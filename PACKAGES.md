@@ -1629,8 +1629,9 @@ internal/
             writable, writable_error, elapsed_ms}: the server's console renders it.
   netguard/ Stream adds a one-attempt audio GET over the same guard and transport,
             identity encoding, caller-owned body, inactivity bound and cross-origin
-            credential stripping. The handler owns the combined three-attempt
-            retry/resume budget; ResumeAction validates exact strong identity.
+            credential stripping shared with buffered feed/artwork GETs, including
+            later hops in a redirect chain. The handler owns the combined
+            three-attempt retry/resume budget; ResumeAction validates exact strong identity.
             Phase 2c-1 feed/artwork client: explicit DNS resolution and a socket
             Control check of the exact IP, public addresses or configured CIDRs
             only (including NAT64 embedded IPv4 checks), no environment proxy.
@@ -1660,8 +1661,10 @@ internal/
             fixtures and URL vectors are shared with the server.
             Phase 2c-2a adds Fetch validation/generation transitions, bounded
             chronological ID3 CHAP attachments and pure install/delete journals.
-            Journals are serving barriers. Exclusive hard-link then unlink installs
-            audio without overwriting a concurrent foreign file; a mount without
+            Journals are serving barriers. Delete recovery aborts when audio has not
+            moved to owned trash; only a moved deletion is completed without a fresh
+            aggregate. Exclusive hard-link then unlink installs audio without
+            overwriting a concurrent foreign file; a mount without
             hard links (SMB/CIFS, some NAS/FUSE shares) falls back to a no-replace
             rename (renameat2 RENAME_NOREPLACE on Linux, else an absence check
             under the show and path locks; install*.go). Committed delete
@@ -1680,8 +1683,10 @@ internal/
             seals validators, probes local descriptors and confirms its lease before
             publication. Per-path process and OS file locks prevent overlap across
             reclaimed jobs. Retain hashes local candidates and fails closed on an
-            unavailable, stale or protected aggregate. Old cleanup uses only owned
-            checkpoint/trash records, checked mappings and no live matching job. A job claimed
+            unavailable, stale or protected aggregate. Snapshot freshness lasts five
+            seconds from request dispatch on the Bridge's monotonic clock;
+            checked_at stays on the wire and does not time freshness. Old cleanup
+            uses only owned checkpoint/trash records, checked mappings and no live matching job. A job claimed
             before its library's mapping check (a start or re-pair) waits for it
             (CheckPoll). A subscribe's 3-minute ceiling starts once it holds the
             library lock; artwork gets at most a minute and half the time left; a

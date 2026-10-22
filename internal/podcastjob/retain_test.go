@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -72,11 +73,16 @@ func TestRetentionSharedVectorsAndStaleness(t *testing.T) {
 				c.DeleteAfter = &after
 			}
 			now, _ := time.Parse(time.RFC3339, v.CheckedAt)
-			if got := RetentionEligible(&c, 3, "Fixture Show", wire.Request, f, now); got != v.Eligible {
+			if got := RetentionEligible(&c, 3, "Fixture Show", wire.Request, f, now, 0); got != v.Eligible {
 				t.Fatalf("got %v want %v", got, v.Eligible)
 			}
-			if RetentionEligible(&c, 3, "Fixture Show", wire.Request, f, now.Add(6*time.Second)) {
-				t.Fatal("stale check authorized deletion")
+			if got := RetentionEligible(&c, 3, "Fixture Show", wire.Request, f, now, 5*time.Second); got != v.Eligible {
+				t.Fatal("snapshot expired before its five-second limit")
+			}
+			for _, age := range []time.Duration{-time.Nanosecond, 5*time.Second + time.Nanosecond} {
+				if RetentionEligible(&c, 3, "Fixture Show", wire.Request, f, now, age) {
+					t.Fatal("invalid snapshot age authorized deletion", age)
+				}
 			}
 		})
 	}
@@ -100,7 +106,7 @@ func (s *retainServer) CheckPodcastRetention(_ context.Context, _ int64, r link.
 }
 func TestRetainDeletesOnlyVerifiedOwnedGeneration(t *testing.T) {
 	requireProbe(t)
-	for _, protection := range []string{"none", "starred", "queued", "stream", "fetch", "zero", "unfinished", "stale", "error", "archive", "identity", "changed-bytes"} {
+	for _, protection := range []string{"none", "clock-ahead", "clock-behind", "fresh-refresh", "starred", "queued", "stream", "fetch", "zero", "unfinished", "stale", "slow-final", "slow-refresh", "error", "archive", "identity", "changed-bytes"} {
 		t.Run(protection, func(t *testing.T) {
 			h, fetch := audioHarness(t)
 			audio := data(t, "chap-v24-reverse.mp3")
@@ -114,9 +120,24 @@ func TestRetainDeletesOnlyVerifiedOwnedGeneration(t *testing.T) {
 			}
 			server := &retainServer{scanServer: h.scan, policy: keep}
 			now := h.handler.s.o.Now()
+			clock := time.Now()
+			h.handler.s.o.BudgetNow = func() time.Time { return clock }
+			checks := 0
+			if protection == "fresh-refresh" || protection == "slow-refresh" {
+				h.handler.s.o.Fault = func(at string) error {
+					if at == "journal" {
+						clock = clock.Add(6 * time.Second)
+					}
+					return nil
+				}
+			}
 			finished := now.Add(-time.Hour).Format(time.RFC3339)
 			after := now.Format(time.RFC3339)
 			server.check = func(r link.PodcastRetentionRequest) *link.PodcastRetentionCheck {
+				checks++
+				if protection == "stale" || protection == "slow-final" && checks == 2 || protection == "slow-refresh" && checks == 3 {
+					clock = clock.Add(6 * time.Second)
+				}
 				c := &link.PodcastRetentionCheck{LibraryID: 3, ShowPath: "Fixture Show", ShowID: r.ShowID, Path: r.Path, Generation: r.Generation, SHA256: r.SHA256, Bytes: r.Bytes, CheckedAt: now.Format(time.RFC3339), Policy: keep, Followers: 2, AllFinished: true, AllFinishedAt: &finished, DeleteAfter: &after, OutsideKeepWindow: true, Eligible: true}
 				switch protection {
 				case "starred":
@@ -131,8 +152,10 @@ func TestRetainDeletesOnlyVerifiedOwnedGeneration(t *testing.T) {
 					c.Followers = 0
 				case "unfinished":
 					c.AllFinished = false
-				case "stale":
-					c.CheckedAt = now.Add(-6 * time.Second).Format(time.RFC3339)
+				case "clock-ahead":
+					c.CheckedAt = now.Add(time.Hour).Format(time.RFC3339)
+				case "clock-behind":
+					c.CheckedAt = now.Add(-time.Hour).Format(time.RFC3339)
 				case "identity":
 					c.ShowID = "1111111111111111"
 				}
@@ -155,7 +178,7 @@ func TestRetainDeletesOnlyVerifiedOwnedGeneration(t *testing.T) {
 			got := result.(retainResult)
 			_, statErr := os.Stat(filepath.Join(h.mount, *fetch.Path))
 			f := h.read(show)
-			if protection == "none" {
+			if protection == "none" || protection == "clock-ahead" || protection == "clock-behind" || protection == "fresh-refresh" {
 				if got.Deleted != 1 || !errors.Is(statErr, os.ErrNotExist) || f.Episodes[0].Fetch.DeletedAt == "" || f.Episodes[0].Fetch.Codec != "mp3" {
 					t.Fatal(got, statErr, f.Episodes[0])
 				}
@@ -164,6 +187,105 @@ func TestRetainDeletesOnlyVerifiedOwnedGeneration(t *testing.T) {
 			}
 			if len(f.Episodes) != 3 {
 				t.Fatal("retention dropped feed entries", len(f.Episodes))
+			}
+			if protection == "slow-final" && checks != 2 || (protection == "fresh-refresh" || protection == "slow-refresh") && checks != 3 {
+				t.Fatal("did not exercise the delayed deletion check", checks)
+			}
+			if _, err := os.Lstat(filepath.Join(h.mount, podcast.AttachmentPath(*fetch.Path, ".publish.json"))); !errors.Is(err, os.ErrNotExist) {
+				t.Fatal("retention left its barrier", err)
+			}
+		})
+	}
+}
+
+func TestRetainRecoveryAcrossFinalRefreshAndAudioMove(t *testing.T) {
+	requireProbe(t)
+	for _, boundary := range []string{"refresh", "audio"} {
+		t.Run(boundary, func(t *testing.T) {
+			h, fetch := audioHarness(t)
+			audio := data(t, "chap-v24-reverse.mp3")
+			setAudio(h, func(w http.ResponseWriter, _ *http.Request) { w.Write(audio) })
+			if _, err := h.handler.FetchJob().Run(context.Background(), fetch, jobs.LocalReporter()); err != nil {
+				t.Fatal(err)
+			}
+			before := *h.read("Fixture Show").Episodes[0].Fetch
+			root, err := os.OpenRoot(h.mount)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer root.Close()
+			now := h.handler.s.o.Now()
+			clock := time.Now()
+			h.handler.s.o.BudgetNow = func() time.Time { return clock }
+			keep := link.PodcastPolicy{Mode: "keep", Keep: 3, Days: 0}
+			finished, after := now.Add(-time.Hour).Format(time.RFC3339), now.Format(time.RFC3339)
+			crash := errors.New("injected process stop")
+			checks := 0
+			server := &retainServer{scanServer: h.scan, policy: keep}
+			server.check = func(r link.PodcastRetentionRequest) *link.PodcastRetentionCheck {
+				checks++
+				if boundary == "refresh" && checks == 3 {
+					if _, err := root.Lstat(podcast.AttachmentPath(*fetch.Path, ".publish.json")); err != nil {
+						t.Fatal("refresh did not follow the durable journal", err)
+					}
+					panic(crash) // Bypass normal error cleanup, as a process stop does.
+				}
+				return &link.PodcastRetentionCheck{LibraryID: 3, ShowPath: "Fixture Show", ShowID: r.ShowID, Path: r.Path, Generation: r.Generation, SHA256: r.SHA256, Bytes: r.Bytes, CheckedAt: now.Format(time.RFC3339), Policy: keep, Followers: 2, AllFinished: true, AllFinishedAt: &finished, DeleteAfter: &after, OutsideKeepWindow: true, Eligible: true}
+			}
+			h.handler.s.o.Server = func() Server { return server }
+			h.handler.s.o.Fault = func(at string) error {
+				if boundary == "refresh" && at == "journal" {
+					clock = clock.Add(6 * time.Second)
+				}
+				if boundary == "audio" && at == "audio" {
+					panic(crash)
+				}
+				return nil
+			}
+			show := "Fixture Show"
+			params, _ := json.Marshal(map[string]string{"show_id": "a1b2c3d4e5f60718"})
+			job := jobs.Job{ID: 82, Kind: RetainKind, LibraryID: fetch.LibraryID, Path: &show, Params: params, Attempt: 1}
+			func() {
+				defer func() {
+					if got := recover(); got != crash {
+						t.Fatalf("expected process stop, got %v", got)
+					}
+				}()
+				_, _ = h.handler.RetainJob().Run(context.Background(), job, jobs.LocalReporter())
+			}()
+			journalPath := podcast.AttachmentPath(*fetch.Path, ".publish.json")
+			b, err := root.ReadFile(journalPath)
+			if err != nil {
+				t.Fatal("process stop left no recovery journal", err)
+			}
+			var j podcast.Journal
+			if err := json.Unmarshal(b, &j); err != nil {
+				t.Fatal(err)
+			}
+			moved := boundary == "audio"
+			if podcast.Matches(root, *fetch.Path, &before) == moved || podcast.Matches(root, show+"/"+j.TrashDir+"/audio", &before) != moved {
+				t.Fatal("unexpected audio location at process stop")
+			}
+			if err := podcast.RecoverShow(root, show, now.Add(time.Hour), nil); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := root.Lstat(journalPath); !errors.Is(err, os.ErrNotExist) {
+				t.Fatal("recovery left its barrier", err)
+			}
+			want := before
+			if moved {
+				want.DeletedAt = j.Fetch.DeletedAt
+				if _, err := root.Lstat(*fetch.Path); !errors.Is(err, os.ErrNotExist) {
+					t.Fatal("recovery did not complete the moved deletion", err)
+				}
+				if err := podcast.CleanupTrash(root, j); err != nil {
+					t.Fatal(err)
+				}
+			} else if !podcast.Matches(root, *fetch.Path, &before) || podcast.ReadChapters(root, *fetch.Path, &before) == nil {
+				t.Fatal("recovery changed an installed episode during refresh")
+			}
+			if got := h.read(show).Episodes[0].Fetch; !reflect.DeepEqual(got, &want) {
+				t.Fatal("recovery changed fetch metadata", got, want)
 			}
 		})
 	}

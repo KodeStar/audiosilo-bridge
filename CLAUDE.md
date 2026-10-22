@@ -313,9 +313,11 @@ GETs enforce the episode cap, exact strong-validator resume and one absolute
 budget covering probe and publication. The local audio probe sets duration and
 codec; bounded ID3 CHAP parsing writes a direct id3_chap attachment. Generations
 are pinned and journaled across audio, chapter and feed writes. Retention needs a
-fresh matching server aggregate, journals owned payload into trash, keeps Fetch
-tombstones and requests a targeted rescan. Keep is a soft window: unfinished,
-favourited, queued, streaming and fetching episodes remain protected. Retention
+matching server aggregate within five seconds of request dispatch on the Bridge's
+monotonic clock, journals owned payload into trash, keeps Fetch tombstones and
+requests a targeted rescan. Recovery aborts delete journals until audio has moved
+into trash. Keep is a soft window: unfinished, favourited, queued, streaming and
+fetching episodes remain protected. Retention
 policy is API-only; absent-file playback still waits for Phase 2c-2b.
 podcasts.max_episode_mb (AUDIOSILO_BRIDGE_PODCASTS_MAX_EPISODE_MB) defaults to
 1024, accepts 1-4096 MiB and applies at the next start. Artwork failure backoff

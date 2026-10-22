@@ -92,6 +92,7 @@ func (c *Client) once(ctx context.Context, in Request) (*Response, error) {
 		if !validURL(req.URL.String()) {
 			return &Error{Code: "invalid_feed_url", Message: "The feed redirected to an invalid URL."}
 		}
+		stripRedirectCredentials(req, via)
 		redirected = true
 		if req.Response.StatusCode != 301 && req.Response.StatusCode != 308 {
 			permanent = false
@@ -161,6 +162,20 @@ func (c *Client) once(ctx context.Context, in Request) (*Response, error) {
 		return nil, &Error{Code: "too_large", Message: "The response exceeds the size limit."}
 	}
 	return out, nil
+}
+
+// stripRedirectCredentials keeps source credentials within their original origin.
+func stripRedirectCredentials(req *http.Request, via []*http.Request) {
+	// The HTTP client can copy the initial headers again on each hop. Once the
+	// chain crosses an origin, later redirects must not restore those credentials.
+	for _, previous := range via {
+		if !strings.EqualFold(previous.URL.Scheme, req.URL.Scheme) || !strings.EqualFold(previous.URL.Host, req.URL.Host) {
+			req.Header.Del("Authorization")
+			req.Header.Del("Cookie")
+			req.URL.User = nil
+			return
+		}
+	}
 }
 
 // corrupt reports whether a gzip error is the data's fault (an empty body, a

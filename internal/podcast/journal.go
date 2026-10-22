@@ -184,7 +184,8 @@ func Publish(root *os.Root, j Journal, now time.Time, fault Boundary) error {
 	return complete(root, j, now, fault, true)
 }
 
-// RecoverShow finishes every owned transaction before any other show mutation.
+// RecoverShow finishes installs and moved deletions before any other show mutation.
+// A delete whose audio has not moved is aborted: its aggregate may now be stale.
 func RecoverShow(root *os.Root, show string, now time.Time, fault Boundary) error {
 	if !ValidShow(show) {
 		return ErrInvalidFile
@@ -299,8 +300,8 @@ func complete(root *os.Root, j Journal, now time.Time, fault Boundary, verified 
 			if _, err := root.Lstat(trash); !errors.Is(err, os.ErrNotExist) {
 				return ErrInvalidFile
 			}
-			if !verified && !Matches(root, j.Path, &j.Fetch) {
-				return ErrInvalidFile
+			if !verified {
+				return AbortDelete(root, j)
 			}
 			if err := hit(fault, "deleting"); err != nil {
 				return err
