@@ -89,8 +89,8 @@ internal/
               Phase 1a: one job, retry, engine)
   link/       client of the server's Bridge routes; hand-mirrored wire types
   mapping/    library mappings: SafeJoin, size comparison, write probe, Registry
-  jobs/       generic runner: lanes (light, pipeline), claim, lease keepalive, cancel,
-              resume, park/unpark, server identity, Abandoner, reports
+  jobs/       generic runner: light/download/pipeline lanes, negotiated interactive
+              reserve, bounded admission, claim refresh, leases, recovery and parks
   verify/     bridge.verify, the proof job
   logring/    recent log lines for the page (secrets redacted)
   web/        go:embed of the page (build-tag selected)
@@ -318,11 +318,17 @@ monotonic clock, journals owned payload into trash, keeps Fetch tombstones and
 requests a targeted rescan. Recovery aborts delete journals until audio has moved
 into trash. Keep is a soft window: unfinished, favourited, queued, streaming and
 fetching episodes remain protected. Retention
-policy is API-only; absent-file playback still waits for Phase 2c-2b.
+policy is API-only; Phase 2c-2b adds on-demand dispatch below.
 podcasts.max_episode_mb (AUDIOSILO_BRIDGE_PODCASTS_MAX_EPISODE_MB) defaults to
 1024, accepts 1-4096 MiB and applies at the next start. Artwork failure backoff
 survives restarts in migration 0008. Marker absence and nonce mismatch are distinct
 from a server verification outage; transient errors preserve existing markers.
+
+**Phase 2c-2b (on-demand dispatch, Bridge side):** heartbeat negotiation of
+`claim_min_priority` enables a generic opt-in interactive pool (1) and ordinary
+download pool (1), with `podcast.fetch` the first participant. Older servers keep
+download capacity 2 and receive ordinary claims only. Claims cancel and join when
+eligibility changes; recovered jobs renew leases while waiting for bounded admission.
 
 See BRIDGE-PLAN.md's Status table for what is next.
 

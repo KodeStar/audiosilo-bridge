@@ -27,10 +27,11 @@ import (
 // (no accepts, and its decoder refuses the setup field it doesn't know), "new"
 // (accepts setup), "refusing" (lists setup, then refuses a beat carrying it).
 type setupServer struct {
-	kind  string
-	mu    sync.Mutex
-	beats []map[string]json.RawMessage
-	codes []int
+	kind          string
+	claimPriority bool
+	mu            sync.Mutex
+	beats         []map[string]json.RawMessage
+	codes         []int
 }
 
 func (f *setupServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -53,6 +54,7 @@ func (f *setupServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	f.beats = append(f.beats, body)
 	f.codes = append(f.codes, code)
+	claimPriority := f.claimPriority
 	f.mu.Unlock()
 	if code != http.StatusOK {
 		w.WriteHeader(code)
@@ -62,6 +64,9 @@ func (f *setupServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	reply := link.StatusReply{ServerTime: "now", Libraries: []link.Library{}}
 	if f.kind != "old" {
 		reply.Accepts = []string{link.AcceptSetup}
+	}
+	if claimPriority {
+		reply.Accepts = append(reply.Accepts, link.AcceptClaimMinPriority)
 	}
 	_ = json.NewEncoder(w).Encode(reply)
 }
@@ -381,4 +386,29 @@ func TestGitHubSignInResumesContributionParks(t *testing.T) {
 	if s := status(other); s != string(state.StatusNeedsAttention) {
 		t.Fatalf("another park was re-admitted (status %q)", s)
 	}
+}
+
+func TestHeartbeatNegotiatesDispatchCapacity(t *testing.T) {
+	f := &setupServer{kind: "new", claimPriority: true}
+	b, ctx := pairedBridge(t, f)
+	capacity := func(wantDownload, wantInteractive int) {
+		t.Helper()
+		caps := map[string]int{}
+		for _, lane := range b.Status().Lanes {
+			caps[lane.Name] = lane.Capacity
+		}
+		if caps["download"] != wantDownload || caps["interactive"] != wantInteractive || caps["light"] != 2 || caps["pipeline"] != 25 {
+			t.Fatal("negotiated capacity", caps)
+		}
+	}
+	capacity(2, 0)
+	b.beat(ctx)
+	capacity(1, 1)
+	b.beat(ctx)
+	capacity(1, 1)
+	f.mu.Lock()
+	f.claimPriority = false
+	f.mu.Unlock()
+	b.beat(ctx)
+	capacity(2, 0)
 }

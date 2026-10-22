@@ -563,3 +563,16 @@ func TestResumableStopDiscardsPartialWithoutProof(t *testing.T) {
 		})
 	}
 }
+
+func TestOnlyFetchOptsIntoInteractivePool(t *testing.T) {
+	h := newHarness(t)
+	var fetch jobs.Handler = h.handler.FetchJob()
+	if opt, ok := fetch.(jobs.InteractiveHandler); !ok || !opt.Interactive() || fetch.Lane() != jobs.LaneDownload {
+		t.Fatal("fetch must opt into reserve and retain its ordinary download lane")
+	}
+	for _, ordinary := range []jobs.Handler{h.handler, h.handler.PollJob(), h.handler.RetainJob()} {
+		if opt, ok := ordinary.(jobs.InteractiveHandler); ok && opt.Interactive() {
+			t.Fatalf("%s unexpectedly opted into the reserve", ordinary.Kind())
+		}
+	}
+}

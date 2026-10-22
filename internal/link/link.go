@@ -22,6 +22,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -96,8 +97,11 @@ type Status struct {
 	Setup *Setup `json:"setup,omitempty"`
 }
 
-// The heartbeat's optional blocks, as the reply's accepts names them.
-const AcceptSetup = "setup"
+// Optional protocol features named in the heartbeat reply's accepts.
+const (
+	AcceptSetup            = "setup"
+	AcceptClaimMinPriority = "claim_min_priority"
+)
 
 // Setup is the Bridge's setup checklist: what is done, what is left, whether it
 // can contribute to the community now and as which GitHub user.
@@ -194,7 +198,7 @@ func (l Library) LibraryKind() string {
 type StatusReply struct {
 	ServerTime string    `json:"server_time"`
 	Libraries  []Library `json:"libraries"`
-	// Accepts names the optional heartbeat blocks the server takes (AcceptSetup);
+	// Accepts names the optional blocks and claim options the server takes;
 	// an older server sends none.
 	Accepts []string `json:"accepts,omitempty"`
 }
@@ -303,11 +307,12 @@ const (
 
 // Client calls one server with the Bridge's token.
 type Client struct {
-	base    *url.URL
-	token   string
-	client  string
-	httpc   *http.Client
-	timeout time.Duration
+	base             *url.URL
+	token            string
+	client           string
+	httpc            *http.Client
+	timeout          time.Duration
+	claimMinPriority *atomic.Bool
 }
 
 // New returns a Client of the server at serverURL (an absolute http(s) URL)
@@ -317,7 +322,7 @@ func New(serverURL, token, version string) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Client{base: u, token: token, client: clientValue(version), httpc: &http.Client{}, timeout: requestTimeout}, nil
+	return &Client{base: u, token: token, client: clientValue(version), httpc: &http.Client{}, timeout: requestTimeout, claimMinPriority: &atomic.Bool{}}, nil
 }
 
 // clientValue is the ClientHeader value: "AudioSilo Bridge/<version> (<os>)",
@@ -372,14 +377,34 @@ func (c *Client) Heartbeat(ctx context.Context, st Status) (*StatusReply, error)
 	if err := c.do(ctx, http.MethodPut, "/api/v1/bridge/status", nil, st, &out); err != nil {
 		return nil, err
 	}
+	c.claimMinPriority.Store(out.Accepting(AcceptClaimMinPriority))
 	return &out, nil
 }
+
+// SupportsClaimMinPriority is true only after this pairing's heartbeat accepted it.
+func (c *Client) SupportsClaimMinPriority() bool { return c.claimMinPriority.Load() }
 
 // Claim asks for the next queued job of one of kinds, waiting up to wait for
 // one (at most MaxWait). It returns nil when none came.
 func (c *Client) Claim(ctx context.Context, kinds []string, wait time.Duration) (*Job, error) {
+	return c.claim(ctx, kinds, wait, nil)
+}
+
+// ClaimMinPriority requests a filtered claim only after negotiation. Claim keeps
+// the ordinary request unchanged, including on older servers.
+func (c *Client) ClaimMinPriority(ctx context.Context, kinds []string, wait time.Duration, priority int32) (*Job, error) {
+	if !c.SupportsClaimMinPriority() {
+		return nil, errors.New("the server has not accepted min_priority claims")
+	}
+	return c.claim(ctx, kinds, wait, &priority)
+}
+
+func (c *Client) claim(ctx context.Context, kinds []string, wait time.Duration, priority *int32) (*Job, error) {
 	wait = min(max(wait, 0), MaxWait)
 	q := url.Values{"wait": {strconv.Itoa(int(wait / time.Second))}}
+	if priority != nil {
+		q.Set("min_priority", strconv.FormatInt(int64(*priority), 10))
+	}
 	for _, k := range kinds {
 		q.Add("kind", k)
 	}

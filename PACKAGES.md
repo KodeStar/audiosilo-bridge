@@ -1516,6 +1516,11 @@ internal/
             appears, resends once without it on a 400, then ignores accepts for an
             hour, and resets that on every pair or unpair.
             Phase 2c-2a mirrors PodcastRetention and CheckPodcastRetention.
+            Phase 2c-2b: Heartbeat records claim_min_priority per Client;
+            SupportsClaimMinPriority and ClaimMinPriority expose the negotiated
+            int32 filter. Ordinary Claim never sends it. Missing accepts disables
+            the option, unknown reply keys are tolerated, and a new Client starts
+            unnegotiated.
             Deletion snapshots require all protocol fields, tolerate new keys,
             and expose no listener identities.
   mapping/  where the Bridge sees each library, CHECKED (decision 13): Check stats the
@@ -1547,8 +1552,22 @@ internal/
             edit re-checks only its library (each check stats files and writes a
             probe). Status(id) is one library's last check (a write job needs it
             mapped AND writable at the mount it uses now).
-  jobs/     the generic runner. Phase 2c-2a adds download capacity 2 and a strict
-            Reporter.ConfirmLease publication check (network errors deny commit). Phase 2c-1: optional ParamSealer.SealParams runs
+  jobs/     the generic runner. Phase 2c-2b: dispatch.go owns ordinary and
+            reserved dispatchers. InteractiveHandler opts a kind into the reserved
+            pool (1), claimed only with negotiated min_priority=100. Download is
+            1 with negotiation, 2 without it; light=2 and pipeline=25 stay fixed.
+            The reserve never borrows background work; ordinary workers accept
+            every priority. Each outstanding claim reserves admission in all
+            requested lanes and transfers its selected slot atomically to its run.
+            Eligibility changes (kinds, pairing, capability or SetCapacity) cancel
+            and join a long poll before reissue; unchanged wakes leave it alone.
+            A job racing cancellation runs under the original link and admission.
+            Running promotions keep their pool. Recovery uses ordinary admission
+            because old rows lack priority, renews leases while waiting for room,
+            and takes precedence over fresh claims in that lane. Live parks hold
+            admission; terminal parks and releases wake the dispatcher.
+            Phase 2c-2a adds the strict Reporter.ConfirmLease publication check
+            (network errors deny commit). Phase 2c-1: optional ParamSealer.SealParams runs
             BEFORE RecordClaim. A failure records sanitized empty params, fails
             closed without Run, and calls Abandon for any secret already sealed;
             a *SealFailure is reported as its code and message, any other error
@@ -1671,7 +1690,9 @@ internal/
             manifests identify trash for cleanup after rescan or after 24 h.
             Invalid Fetch keeps its episode and grants no file authority. Shared
             phase2c2 fixtures are copied byte-for-byte, checked by manifest hashes.
-  podcastjob/ podcast.subscribe and podcast.poll (light lane): require the
+  podcastjob/ podcast.fetch opts into the interactive reserve (2c-2b), with
+            download as its ordinary lane. Subscribe, poll and retain do not opt in.
+            podcast.subscribe and podcast.poll (light lane): require the
             heartbeat's podcasts kind and the checked writable mount at each
             write. Per-library subscribe and per-show write locks, hash dedupe,
             cache rebuild, artwork sniffing, permanent moves and targeted rescan.
@@ -2178,6 +2199,7 @@ internal/
             group/cgroup, so an installed worker doesn't leave one.
   app/      Phase 2c-1 wires the guarded client and both podcast handlers,
             advertises their kinds (2c-2a also fetch/download and retain/light),
+            opts fetch into the generic interactive pool (2c-2b),
             uses the resolved engine probe for podcast audio, warns for allowed
             non-public CIDRs at start
             and on Status, and redacts podcast params/results/errors for page
@@ -2186,7 +2208,9 @@ internal/
             The wiring and the page API's Backend: Conn holds the pairing (settings
             pairing.*, the token in the vault) and the link; the heartbeat loop beats
             every 30 s or when kicked, records the server's libraries (under b.mu,
-            beatGen-checked, before the link counts as ready) and starts a mapping
+            beatGen-checked, before the link counts as ready), wakes the runner
+            to compare negotiated eligibility on every successful reply (2c-2b),
+            and starts a mapping
             check (in the background; one asked for while another runs is queued
             and beaten once, by it) when they changed or one is due, then beats
             again with the results. Phase 2b: the beat carries the setup checklist

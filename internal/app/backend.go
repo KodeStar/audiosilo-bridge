@@ -29,9 +29,10 @@ var _ api.Backend = (*Bridge)(nil)
 // Status is the Bridge's state for its page.
 func (b *Bridge) Status() api.Status {
 	cfg := b.config()
+	lanes := b.runner.Lanes()
 	b.mu.Lock()
 	st := api.Status{Version: b.version, Pairing: b.conn.Pairing(), LastError: b.beatErr,
-		Kinds: b.runner.Kinds(), Lanes: b.runner.Lanes(), SecretKey: string(b.keySrc), PublicURL: cfg.PublicURL,
+		Kinds: b.runner.Kinds(), Lanes: lanes, SecretKey: string(b.keySrc), PublicURL: cfg.PublicURL,
 		ServerURLDefault: cfg.Server.URL}
 	if !b.lastBeat.IsZero() {
 		t := b.lastBeat.UTC()
