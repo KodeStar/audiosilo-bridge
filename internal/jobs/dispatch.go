@@ -1,0 +1,306 @@
+package jobs
+
+import (
+	"context"
+	"errors"
+	"maps"
+	"slices"
+	"sort"
+	"sync"
+	"time"
+
+	"github.com/kodestar/audiosilo-bridge/internal/link"
+)
+
+// priorityServer is optional: older links keep the ordinary Claim contract.
+type priorityServer interface {
+	SupportsClaimMinPriority() bool
+	WithdrawClaimMinPriority()
+	ClaimMinPriority(context.Context, []string, time.Duration, int32) (*link.Job, error)
+}
+
+func supportsPriority(srv Server) bool {
+	s, ok := srv.(priorityServer)
+	return ok && s.SupportsClaimMinPriority()
+}
+
+func interactive(h Handler) bool {
+	hook, ok := h.(InteractiveHandler)
+	return ok && hook.Interactive()
+}
+
+// capacities is called under mu. A legacy pairing keeps both download slots.
+func (r *Runner) capacities(srv Server) map[string]int {
+	caps := maps.Clone(r.opts.Lanes)
+	if !supportsPriority(srv) {
+		caps[LaneDownload] += caps[LaneInteractive]
+		caps[LaneInteractive] = 0
+	}
+	return caps
+}
+
+// A claim reserves one possible admission in every lane it requests. There is
+// one ordinary dispatcher and one reserved dispatcher, never unbounded waiters
+// holding newly claimed jobs. A refresh retains admission until the old call
+// has returned, including a job racing its cancellation.
+type claimRequest struct {
+	srv         Server
+	interactive bool
+	kinds       []string
+	lanes       []string
+	capacities  map[string]int
+	held        bool
+	serverID    string
+	// fallback keeps the original claim identity but uses ordinary admission
+	// when the server returned a job outside this request's eligibility.
+	fallback bool
+}
+
+func (q *claimRequest) holds(lane string) int {
+	if q != nil && q.held && slices.Contains(q.lanes, lane) {
+		return 1
+	}
+	return 0
+}
+
+// roomLocked reports whether lane has a free slot under caps (capacities(srv)).
+func (r *Runner) roomLocked(caps map[string]int, lane string, own *claimRequest) bool {
+	used := func(l string) int { return r.use[l] + r.reserved[l] - own.holds(l) }
+	if used(lane) >= caps[lane] {
+		return false
+	}
+	// A capability change cannot admit a third enclosure while an earlier
+	// pairing's ordinary or reserved jobs are still finishing.
+	if lane == LaneDownload || lane == LaneInteractive {
+		return used(LaneDownload)+used(LaneInteractive) < caps[LaneDownload]+caps[LaneInteractive]
+	}
+	return true
+}
+
+// request snapshots eligibility and optionally reserves it under the same lock.
+// own is excluded when checking whether an outstanding claim is still valid.
+func (r *Runner) request(reserve, hold bool, own *claimRequest) (*claimRequest, <-chan struct{}) {
+	// Read the external pairing without mu, but detect a wake during that read.
+	// Otherwise a re-pair between server() and locking could be missed for a
+	// whole long poll. The app changes its pairing before calling Wake.
+	var srv Server
+	var serverID string
+	for {
+		changed := r.wakeChan()
+		srv, serverID = r.server(), r.opts.ServerID()
+		r.mu.Lock()
+		if changed == r.changed {
+			break
+		}
+		r.mu.Unlock()
+	}
+	defer r.mu.Unlock()
+	q := &claimRequest{srv: srv, interactive: reserve, capacities: r.capacities(srv), serverID: serverID}
+	if srv != nil && (!reserve || supportsPriority(srv)) && !r.strayWaitingLocked(reserve) {
+		for kind, h := range r.handlers {
+			lane := h.Lane()
+			if reserve {
+				if !interactive(h) {
+					continue
+				}
+				lane = LaneInteractive
+			}
+			if r.waiting[lane] == 0 && r.roomLocked(q.capacities, lane, own) {
+				q.kinds = append(q.kinds, kind)
+				if !slices.Contains(q.lanes, lane) {
+					q.lanes = append(q.lanes, lane)
+				}
+			}
+		}
+	}
+	sort.Strings(q.kinds)
+	if hold && len(q.kinds) != 0 {
+		for _, lane := range q.lanes {
+			r.reserved[lane]++
+		}
+		q.held = true
+	}
+	return q, r.changed
+}
+
+// strayWaitingLocked reports whether a job this dispatcher took outside its
+// admission still waits for its lane. A server that keeps advertising a filter
+// it ignores then holds at most one such waiter per dispatcher, not its queue.
+func (r *Runner) strayWaitingLocked(reserve bool) bool {
+	for _, ru := range r.running {
+		if ru.stray && !ru.admitted && ru.strayReserve == reserve {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *Runner) unreserveLocked(q *claimRequest) {
+	if q.held {
+		for _, lane := range q.lanes {
+			r.reserved[lane]--
+		}
+		q.held = false
+		r.wakeLocked()
+	}
+}
+
+func (r *Runner) unreserve(q *claimRequest) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.unreserveLocked(q)
+}
+
+func sameRequest(a, b *claimRequest) bool {
+	return a.srv == b.srv && a.serverID == b.serverID && a.interactive == b.interactive && slices.Equal(a.kinds, b.kinds) && maps.Equal(a.capacities, b.capacities)
+}
+
+type claimResult struct {
+	job *link.Job
+	err error
+}
+
+// poll joins the call before returning, so a refreshed request can never leave
+// a second old claim able to take a job behind the dispatcher's back.
+func (r *Runner) poll(ctx context.Context, q *claimRequest, changed <-chan struct{}) (claimResult, bool) {
+	pollCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	done := make(chan claimResult, 1)
+	go func() {
+		var result claimResult
+		if q.interactive {
+			result.job, result.err = q.srv.(priorityServer).ClaimMinPriority(pollCtx, q.kinds, r.opts.Wait, InteractivePriority)
+		} else {
+			result.job, result.err = q.srv.Claim(pollCtx, q.kinds, r.opts.Wait)
+		}
+		done <- result
+	}()
+	for {
+		select {
+		case result := <-done:
+			return result, false
+		case <-ctx.Done():
+			cancel()
+			return <-done, true
+		case <-changed:
+			next, wake := r.request(q.interactive, false, q)
+			if !sameRequest(q, next) {
+				cancel()
+				return <-done, true
+			}
+			changed = wake
+		}
+	}
+}
+
+func (r *Runner) dispatch(ctx context.Context, reserve bool, wg *sync.WaitGroup) {
+	backoff := time.Second
+	for ctx.Err() == nil {
+		q, changed := r.request(reserve, true, nil)
+		if len(q.kinds) == 0 {
+			select {
+			case <-ctx.Done():
+			case <-changed:
+			}
+			continue
+		}
+		start := time.Now()
+		result, refreshed := r.poll(ctx, q, changed)
+		if result.job != nil {
+			if !slices.Contains(q.kinds, result.job.Kind) || (q.interactive && result.job.Priority < int(InteractivePriority)) {
+				// The lease is ours even if the server ignored the filter. Drop
+				// the reserved admission and wait for the kind's ordinary lane.
+				if q.interactive {
+					q.srv.(priorityServer).WithdrawClaimMinPriority()
+				}
+				// Releasing the reservation (in launch, or below) wakes the dispatchers.
+				q.fallback = true
+			}
+			r.start(ctx, q.srv, jobOf(result.job), wg, q)
+		}
+		r.unreserve(q)
+		if ctx.Err() != nil {
+			return
+		}
+		if q.fallback && !q.interactive {
+			// A server ignoring the kinds asked for (no negotiation to withdraw)
+			// would otherwise hand out its queue as fast as it answers.
+			r.pauseClaims(ctx, q, backoff)
+			backoff = min(backoff*2, time.Minute)
+			continue
+		}
+		// A refresh is a scheduling event, not a failed network attempt.
+		if refreshed || result.job != nil {
+			backoff = time.Second
+			continue
+		}
+		switch {
+		case q.interactive && !supportsPriority(q.srv):
+			// Negotiation was withdrawn after the request; the next one sees it.
+		case errors.Is(result.err, link.ErrUnauthorized):
+			r.onUnauthorized(q.srv)
+		case errors.Is(result.err, link.ErrNoHeartbeat):
+			r.pauseClaims(ctx, q, 2*time.Second)
+		case result.err != nil:
+			r.log.Warn("bridge: claiming a job failed", "err", result.err, "retry_in", backoff)
+			r.pauseClaims(ctx, q, backoff)
+			backoff = min(backoff*2, time.Minute)
+		default:
+			backoff = time.Second
+			if time.Since(start) < time.Second {
+				r.pauseClaims(ctx, q, time.Second)
+			}
+		}
+	}
+}
+
+func (r *Runner) pauseClaims(ctx context.Context, previous *claimRequest, delay time.Duration) {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	for {
+		next, changed := r.request(previous.interactive, false, nil)
+		if !sameRequest(previous, next) {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-changed:
+		case <-timer.C:
+			return
+		}
+	}
+}
+
+// Recovery, re-pair and out-of-admission claims use the ordinary lane. Old
+// execution rows do not store priority. A waiting job renews its lease through
+// execute's reporter and takes a slot before any new claims for that lane.
+func (r *Runner) awaitAdmission(ctx context.Context, ru *run) bool {
+	for ctx.Err() == nil {
+		// The wake channel is taken before the pairing is read (as in request),
+		// so a pairing or heartbeat between the two is not missed.
+		r.mu.Lock()
+		if ru.admitted {
+			r.mu.Unlock()
+			return true
+		}
+		changed := r.changed
+		r.mu.Unlock()
+		srv := r.server()
+		r.mu.Lock()
+		if srv != nil && r.roomLocked(r.capacities(srv), ru.lane, nil) {
+			r.waiting[ru.lane]--
+			r.use[ru.lane]++
+			ru.admitted = true
+			r.wakeLocked()
+			r.mu.Unlock()
+			return true
+		}
+		r.mu.Unlock()
+		select {
+		case <-ctx.Done():
+		case <-changed:
+		}
+	}
+	return false
+}

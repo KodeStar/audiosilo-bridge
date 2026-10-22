@@ -409,7 +409,7 @@ func TestPublicationRequiresSuccessfulLease(t *testing.T) {
 			}
 		})
 	}
-	if got := DefaultLanes()[LaneDownload]; got != 2 {
+	if got := DefaultLanes()[LaneDownload] + DefaultLanes()[LaneInteractive]; got != 2 {
 		t.Fatal("episode concurrency", got)
 	}
 }

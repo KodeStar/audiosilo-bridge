@@ -392,13 +392,12 @@ func (b *Bridge) beat(ctx context.Context) {
 		b.mu.Unlock()
 		return
 	}
-	first, changed, accepts := false, false, false
+	changed, accepts := false, false
 	if err == nil {
 		// The libraries are recorded before the link counts as ready (server),
 		// and under the lock, so a reply from before a pair or an unpair can't
 		// land after it.
 		changed = b.libs.SetLibraries(reply.Libraries)
-		first = b.lastBeat.IsZero()
 		b.lastBeat, b.beatErr = time.Now(), ""
 		if dropped {
 			b.setupRefusedAt = time.Now()
@@ -423,9 +422,9 @@ func (b *Bridge) beat(ctx context.Context) {
 		b.log.Warn("bridge: heartbeat failed", "err", err)
 		return
 	}
-	if first {
-		b.runner.Wake()
-	}
+	// The dispatcher compares eligibility, so an unchanged heartbeat leaves
+	// outstanding claims alone while capability changes refresh them now.
+	b.runner.Wake()
 	interval := time.Duration(cfg.Mapping.CheckMinutes) * time.Minute
 	if changed || b.libs.Due(time.Now(), interval) {
 		b.CheckMappings(ctx)

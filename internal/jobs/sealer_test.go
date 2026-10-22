@@ -56,7 +56,7 @@ func TestParamSealerPrecedesClaimAndFailsClosed(t *testing.T) {
 			h := &sealingHandler{db: db, fail: tc.fail, t: t}
 			r := New(db, func() Server { return srv }, nil, testOpts(), h)
 			var wg sync.WaitGroup
-			r.start(context.Background(), srv, Job{ID: 42, Kind: h.Kind(), Params: json.RawMessage(`{"feed_url":"https://example.com/feed?auth=SECRET123","private":true}`), Attempt: 1}, &wg)
+			r.start(context.Background(), srv, Job{ID: 42, Kind: h.Kind(), Params: json.RawMessage(`{"feed_url":"https://example.com/feed?auth=SECRET123","private":true}`), Attempt: 1}, &wg, nil)
 			wg.Wait()
 			row, err := db.GetServerJob(context.Background(), 42)
 			if err != nil {
@@ -112,8 +112,8 @@ func TestUnrecordedClaimFailsClosedOnlyForSealers(t *testing.T) {
 	}}
 	r := New(db, func() Server { return srv }, nil, testOpts(), sealer, other)
 	var wg sync.WaitGroup
-	r.start(context.Background(), srv, Job{ID: 1, Kind: sealer.Kind(), Params: json.RawMessage(`{}`), Attempt: 1}, &wg)
-	r.start(context.Background(), srv, Job{ID: 2, Kind: other.kind, Params: json.RawMessage(`{}`), Attempt: 1}, &wg)
+	r.start(context.Background(), srv, Job{ID: 1, Kind: sealer.Kind(), Params: json.RawMessage(`{}`), Attempt: 1}, &wg, nil)
+	r.start(context.Background(), srv, Job{ID: 2, Kind: other.kind, Params: json.RawMessage(`{}`), Attempt: 1}, &wg, nil)
 	wg.Wait()
 	select {
 	case <-ran:

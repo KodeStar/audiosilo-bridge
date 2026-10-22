@@ -524,8 +524,8 @@ func TestReleaseKeepsALaterRun(t *testing.T) {
 	r := New(openStore(t), func() Server { return nil }, nil, testOpts())
 	_, c1 := context.WithCancelCause(context.Background())
 	_, c2 := context.WithCancelCause(context.Background())
-	old := &run{job: Job{ID: 5, Attempt: 1}, lane: LaneLight, cancel: c1}
-	later := &run{job: Job{ID: 5, Attempt: 2}, lane: LaneLight, cancel: c2}
+	old := &run{job: Job{ID: 5, Attempt: 1}, lane: LaneLight, cancel: c1, admitted: true}
+	later := &run{job: Job{ID: 5, Attempt: 2}, lane: LaneLight, cancel: c2, admitted: true}
 	r.mu.Lock()
 	r.running[5], r.use[LaneLight] = later, 2
 	r.mu.Unlock()

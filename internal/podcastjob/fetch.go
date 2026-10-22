@@ -33,6 +33,7 @@ type Fetch struct{ s *service }
 func (h *Subscribe) FetchJob() *Fetch { return &Fetch{s: h.s} }
 func (h *Fetch) Kind() string         { return FetchKind }
 func (h *Fetch) Lane() string         { return jobs.LaneDownload }
+func (h *Fetch) Interactive() bool    { return true }
 
 type fetchParams struct {
 	ShowID    string `json:"show_id"`
