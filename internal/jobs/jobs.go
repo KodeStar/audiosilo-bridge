@@ -459,6 +459,9 @@ type run struct {
 	cancel   context.CancelCauseFunc
 	parked   string
 	admitted bool
+	// stray: a claim answered outside its admission (claimRequest.fallback).
+	// While it waits, the dispatcher that took it (strayReserve) claims no more.
+	stray, strayReserve bool
 }
 
 // strandedJob is a job a refused token stopped, with the link it ran on.
@@ -523,6 +526,7 @@ func (r *Runner) launch(ctx context.Context, srv Server, job Job, wg *sync.WaitG
 	r.mu.Lock()
 	if claim != nil {
 		r.unreserveLocked(claim)
+		ru.stray, ru.strayReserve = claim.fallback, claim.fallback && claim.interactive
 	}
 	if claim != nil && !claim.fallback {
 		if claim.interactive {

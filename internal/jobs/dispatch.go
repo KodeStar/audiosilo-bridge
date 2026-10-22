@@ -96,7 +96,7 @@ func (r *Runner) request(reserve, hold bool, own *claimRequest) (*claimRequest, 
 	}
 	defer r.mu.Unlock()
 	q := &claimRequest{srv: srv, interactive: reserve, capacities: r.capacities(srv), serverID: serverID}
-	if srv != nil && (!reserve || supportsPriority(srv)) {
+	if srv != nil && (!reserve || supportsPriority(srv)) && !r.strayWaitingLocked(reserve) {
 		for kind, h := range r.handlers {
 			lane := h.Lane()
 			if reserve {
@@ -121,6 +121,18 @@ func (r *Runner) request(reserve, hold bool, own *claimRequest) (*claimRequest, 
 		q.held = true
 	}
 	return q, r.changed
+}
+
+// strayWaitingLocked reports whether a job this dispatcher took outside its
+// admission still waits for its lane. A server that keeps advertising a filter
+// it ignores then holds at most one such waiter per dispatcher, not its queue.
+func (r *Runner) strayWaitingLocked(reserve bool) bool {
+	for _, ru := range r.running {
+		if ru.stray && !ru.admitted && ru.strayReserve == reserve {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *Runner) unreserveLocked(q *claimRequest) {
@@ -209,6 +221,13 @@ func (r *Runner) dispatch(ctx context.Context, reserve bool, wg *sync.WaitGroup)
 		r.unreserve(q)
 		if ctx.Err() != nil {
 			return
+		}
+		if q.fallback && !q.interactive {
+			// A server ignoring the kinds asked for (no negotiation to withdraw)
+			// would otherwise hand out its queue as fast as it answers.
+			r.pauseClaims(ctx, q, backoff)
+			backoff = min(backoff*2, time.Minute)
+			continue
 		}
 		// A refresh is a scheduling event, not a failed network attempt.
 		if refreshed || result.job != nil {

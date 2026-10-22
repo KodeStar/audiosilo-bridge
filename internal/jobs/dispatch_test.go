@@ -414,6 +414,68 @@ func TestOutsideReservedKindWaitsAndRenewsOrdinaryLease(t *testing.T) {
 	})
 }
 
+func TestIgnoredFilterHoldsOneStrayWaiter(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		srv := newControlledServer(true)
+		started := make(chan Job, 4)
+		gates := map[int64]chan struct{}{1: make(chan struct{}), 2: make(chan struct{})}
+		opts := testOpts()
+		opts.Lanes = DefaultLanes()
+		opts.Lanes[LaneLight] = 1
+		r := New(openStore(t), func() Server { return srv }, nil, opts,
+			optedHandler{blockingHandler("podcast.fetch", LaneDownload, started, gates)},
+			blockingHandler("not.opted", LaneLight, started, gates))
+		startControlled(t, r)
+		ordinary, reserve := srv.next(t, false), srv.next(t, true)
+		ordinary.answer <- claimed(1, "not.opted", 20)
+		await(t, started)
+		reserve.answer <- claimed(2, "not.opted", wirePriority(t))
+		synctest.Wait()
+		// A server that re-advertises the filter on every heartbeat but keeps
+		// ignoring it must not move its queue into waiters, one beat at a time.
+		for range 3 {
+			srv.accepts.Store(true)
+			r.Wake()
+			synctest.Wait()
+			for drained := false; !drained; {
+				select {
+				case c := <-srv.calls:
+					if c.min != nil {
+						t.Fatal("reserve claimed again while its stray waits")
+					}
+					srv.backlog = append(srv.backlog, c)
+				default:
+					drained = true
+				}
+			}
+		}
+		close(gates[1])
+		if j := await(t, started); j.ID != 2 {
+			t.Fatal(j)
+		}
+		srv.next(t, true) // the stray's admission frees the reserve again
+	})
+}
+
+func TestOrdinaryOutsideKindsBacksOff(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		srv := newControlledServer(false)
+		started := make(chan Job, 1)
+		r := New(openStore(t), func() Server { return srv }, nil, testOpts(),
+			blockingHandler("podcast.fetch", LaneDownload, started, nil))
+		startControlled(t, r)
+		answered := time.Now()
+		srv.next(t, false).answer <- claimed(5, "unknown.kind", 20)
+		srv.next(t, false)
+		if elapsed := time.Since(answered); elapsed < time.Second {
+			t.Fatal("an answer outside the requested kinds did not back off", elapsed)
+		}
+		if state, _ := srv.finalState(5); state != link.StateFailed {
+			t.Fatal("unknown kind was not failed", state)
+		}
+	})
+}
+
 func TestUnchangedWakeAndCapacityRefresh(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		srv := newControlledServer(true)

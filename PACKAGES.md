@@ -1568,8 +1568,11 @@ internal/
             its original claim and waits for its kind's ordinary lane, never the
             reserve. An ignored reserved filter immediately withdraws negotiation,
             restores legacy capacities and wakes dispatchers to cancel affected
-            claims. No refusal backoff is needed: the reserved dispatcher waits
-            for a heartbeat to re-advertise support. Running promotions keep their
+            claims. The reserved dispatcher waits for a heartbeat to re-advertise
+            support, and while a job it took outside admission still waits it
+            claims nothing (a server re-advertising a filter it ignores holds one
+            waiter, not its queue). An ordinary answer outside the requested kinds
+            backs off like a failed claim. Running promotions keep their
             pool. Recovery uses ordinary admission because old rows lack priority.
             Both recovery and out-of-admission jobs renew leases while waiting
             for room, queue behind jobs already waiting, and take
