@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/kodestar/audiosilo-bridge/internal/fsutil"
+	"github.com/kodestar/audiosilo-bridge/internal/testexe"
 	"github.com/kodestar/audiosilo-bridge/internal/toolfetch"
 )
 
@@ -24,7 +25,7 @@ func writeScript(t *testing.T, path, content string) string {
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(path, []byte(content), 0o755); err != nil { //nolint:gosec // test stub
+	if err := testexe.WriteFile(path, []byte(content)); err != nil {
 		t.Fatal(err)
 	}
 	return path
@@ -458,7 +459,7 @@ func TestWhisperCppEnsureReadyAutoDownloadsBinary(t *testing.T) {
 			return "", err
 		}
 		p := filepath.Join(dir, "whisper-cli")
-		if err := os.WriteFile(p, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil { //nolint:gosec // test stub
+		if err := testexe.WriteFile(p, []byte("#!/bin/sh\nexit 0\n")); err != nil {
 			return "", err
 		}
 		return p, nil

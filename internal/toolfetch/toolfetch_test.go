@@ -15,6 +15,8 @@ import (
 	"testing"
 
 	"github.com/ulikunitz/xz"
+
+	"github.com/kodestar/audiosilo-bridge/internal/testexe"
 )
 
 func discard() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
@@ -23,7 +25,7 @@ func discard() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, ni
 func fakeTool(t *testing.T, dir, tool string) string {
 	t.Helper()
 	p := filepath.Join(dir, binName(tool))
-	if err := os.WriteFile(p, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil { //nolint:gosec // test stub
+	if err := testexe.WriteFile(p, []byte("#!/bin/sh\nexit 0\n")); err != nil {
 		t.Fatal(err)
 	}
 	return p

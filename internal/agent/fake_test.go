@@ -6,6 +6,8 @@ import (
 	"runtime"
 	"strconv"
 	"testing"
+
+	"github.com/kodestar/audiosilo-bridge/internal/testexe"
 )
 
 // fakeCLIOpts configures a generated fake CLI shell script.
@@ -55,7 +57,7 @@ func fakeCLI(t *testing.T, opts fakeCLIOpts) (string, string) {
 		"cat \"$CAP/response.out\"\n" +
 		"exit " + strconv.Itoa(opts.exit) + "\n"
 	path := filepath.Join(dir, "fakecli")
-	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+	if err := testexe.WriteFile(path, []byte(script)); err != nil {
 		t.Fatal(err)
 	}
 	return path, cap
