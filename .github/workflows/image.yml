@@ -1,7 +1,8 @@
 name: image
 
-# Build and publish the Bridge images to GHCR (a private package while the repo
-# is private) on a v* tag and on manual dispatch. Four targets of one
+# Build and publish the Bridge images to GHCR (a public package from v0.3.0,
+# pulled with no login; the source repo stays private) on a v* tag and on manual
+# dispatch. Four targets of one
 # Dockerfile:
 #   - slim -> ghcr.io/kodestar/audiosilo-bridge:<tag>-slim, :latest-slim (amd64, arm64)
 #   - full -> ghcr.io/kodestar/audiosilo-bridge:<tag>, :latest           (amd64, arm64)
