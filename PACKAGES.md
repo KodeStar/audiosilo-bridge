@@ -16,11 +16,15 @@ are Phase 1a's generate (the sidecars.generate job) and the agent container's th
 
 
 ```
-cmd/audiosilo-bridge/     entrypoint, four subcommands: `serve` (the default; --data
+cmd/audiosilo-bridge/     entrypoint, its subcommands: `serve` (the default; --data
                           ($AUDIOSILO_BRIDGE_DATA, else ~/.audiosilo-bridge), --listen; prints the
                           page's one-time password once on the first start, never logged),
-                          `version`, `agent-runner` (the agent container's entrypoint:
-                          agentrun.Main; --staging /staging, --home /agent, --slots 1) and
+                          `version`, `reset-password` (--data; app.ResetPassword: a new
+                          generated password printed once and every session signed out,
+                          the pairing and secrets kept; refuses a folder with no bridge.db
+                          and root in a folder another user owns), `agent-runner` (the
+                          agent container's entrypoint: agentrun.Main; --staging /staging,
+                          --home /agent, --slots 1) and
                           `agent-login claude|codex` (agentrun.Login, run once inside the agent
                           container; --home /agent). `help` prints the usage.
 internal/

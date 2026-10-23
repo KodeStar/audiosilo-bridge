@@ -61,6 +61,10 @@ export function Login({ client, onSignedIn }: LoginProps) {
           <p className="text-center text-xs text-dim">
             The password was printed in the Bridge&apos;s log the first time it started.
           </p>
+          <p className="text-center text-xs text-dim">
+            Lost it? Run <code className="font-mono">audiosilo-bridge reset-password</code> where
+            the Bridge runs for a new one. The pairing and settings stay.
+          </p>
         </form>
       </div>
     </main>

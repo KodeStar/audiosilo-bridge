@@ -2,12 +2,13 @@ package agent
 
 import (
 	"context"
-	"os"
 	"path/filepath"
 	"runtime"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/kodestar/audiosilo-bridge/internal/testexe"
 )
 
 // writeSleepScript writes an executable POSIX script that sleeps for the given
@@ -21,7 +22,7 @@ func writeSleepScript(t *testing.T, sleepArg string) string {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "sleeper")
 	script := "#!/bin/sh\nsleep " + sleepArg + "\nexit 0\n"
-	if err := os.WriteFile(path, []byte(script), 0o755); err != nil { //nolint:gosec // test helper script
+	if err := testexe.WriteFile(path, []byte(script)); err != nil {
 		t.Fatal(err)
 	}
 	return path

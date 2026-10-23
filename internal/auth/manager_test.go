@@ -161,3 +161,44 @@ func TestRateLimiterAllowsBurstThenDenies(t *testing.T) {
 		t.Fatal("second attempt after single refill allowed")
 	}
 }
+
+func TestResetPasswordReplacesItAndSignsEveryoneOut(t *testing.T) {
+	m := New(NewMemStore())
+	old, err := m.EnsureAdmin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok, err := m.Login(old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fresh, err := m.ResetPassword()
+	if err != nil || fresh == "" || fresh == old {
+		t.Fatalf("ResetPassword = %q, %v", fresh, err)
+	}
+	// Denied: the old password and the old session no longer work.
+	if _, err := m.Login(old); !errors.Is(err, ErrInvalidCreds) {
+		t.Errorf("old password after reset: %v, want ErrInvalidCreds", err)
+	}
+	if ok, _ := m.Resolve(tok); ok {
+		t.Error("a session from before the reset still resolves")
+	}
+	// Allowed: the new one signs in, and the first-run path doesn't print another.
+	if _, err := m.Login(fresh); err != nil {
+		t.Errorf("new password: %v", err)
+	}
+	if pw, _ := m.EnsureAdmin(); pw != "" {
+		t.Errorf("EnsureAdmin after a reset printed %q", pw)
+	}
+}
+
+func TestResetPasswordProvisionsWhenNoneWasSet(t *testing.T) {
+	m := New(NewMemStore())
+	pw, err := m.ResetPassword()
+	if err != nil || pw == "" {
+		t.Fatalf("ResetPassword on an empty store = %q, %v", pw, err)
+	}
+	if _, err := m.Login(pw); err != nil {
+		t.Errorf("login: %v", err)
+	}
+}

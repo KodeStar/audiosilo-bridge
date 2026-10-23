@@ -2,8 +2,10 @@
 
 > **Use of AI:** AudioSilo is developed by me (a human), with assistance from AI, primarily Claude Code, to help me write, clean up, document, and review the code. That doesn't mean the app is generated on autopilot or "vibe coded". Nothing goes out until I've read it, tested it, and decided it belongs. AI is what lets one person keep up this pace, and I think it's important to disclose that.
 
-> **Private, and an internal name.** This repository is private and "Bridge" is a
-> working name (BRIDGE-PLAN.md decision 14). Nothing here is released yet.
+> **Private source, public images, and an internal name.** This repository is
+> private and "Bridge" is a working name (BRIDGE-PLAN.md decision 14). The images
+> are public from v0.3.0: pull them from `ghcr.io/kodestar/audiosilo-bridge` with
+> no login.
 
 The Bridge is the optional, always-on companion to an
 [AudioSilo](https://audiosilo.app) server. It **writes** to the library folders and
@@ -66,7 +68,7 @@ one `staging` volume, and nothing else.
    player, as an admin). The console shows an estimate first, then the job's stage,
    ETA and spend.
 
-Images (`ghcr.io/kodestar/audiosilo-bridge`, private while the repo is):
+Images (`ghcr.io/kodestar/audiosilo-bridge`, public from v0.3.0, no login needed):
 
 | Tag | What | Arch |
 |---|---|---|

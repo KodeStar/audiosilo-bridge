@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -14,6 +13,7 @@ import (
 	"time"
 
 	"github.com/kodestar/audiosilo-bridge/internal/accounts"
+	"github.com/kodestar/audiosilo-bridge/internal/testexe"
 )
 
 // fakeDevice is a scripted device sign-in.
@@ -280,7 +280,7 @@ func writeFakeGh(t *testing.T, script string) string {
 	t.Helper()
 	dir := t.TempDir()
 	p := filepath.Join(dir, "gh")
-	if err := os.WriteFile(p, []byte(script), 0o755); err != nil {
+	if err := testexe.WriteFile(p, []byte(script)); err != nil {
 		t.Fatal(err)
 	}
 	return p

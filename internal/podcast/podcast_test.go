@@ -239,6 +239,58 @@ func TestMergeOwnIdentityFirstAndQueryIdentifiedEnclosures(t *testing.T) {
 		t.Fatal(got)
 	}
 }
+func TestMergeOrdersUndatedSerialsByEpisodeNumber(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 20, 10, 0, 0, 0, time.UTC)
+	// A LibriVox-style feed: no pubDate, itunes:episode 1-10 in feed order, and
+	// file names (undated-<hash>) that sort in no useful order.
+	items := make([]Episode, 0, 11)
+	for n := 1; n <= 10; n++ {
+		items = append(items, Episode{GUID: fmt.Sprintf("lv-%d", n), Title: fmt.Sprintf("Story %d", n), Episode: new(n), EpisodeType: "full", Enclosure: Enclosure{URL: fmt.Sprintf("https://archive.example.org/story_%02d.mp3", n), Type: "audio/mpeg"}, Transcripts: []Transcript{}})
+	}
+	items = append(items, Episode{GUID: "lv-intro", Title: "Introduction", EpisodeType: "trailer", Enclosure: Enclosure{URL: "https://archive.example.org/intro.mp3", Type: "audio/mpeg"}, Transcripts: []Transcript{}})
+	f := &Feed{Episodes: []Episode{}}
+	if _, err := Merge(f, &Parsed{Episodes: items}, "Vol 002", now); err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, e := range f.Episodes {
+		got = append(got, e.GUID)
+	}
+	want := []string{"lv-10", "lv-9", "lv-8", "lv-7", "lv-6", "lv-5", "lv-4", "lv-3", "lv-2", "lv-1", "lv-intro"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("undated order %v, want %v", got, want)
+	}
+}
+
+func TestNewestFirstOrder(t *testing.T) {
+	t.Parallel()
+	ep := func(published string, season, episode *int, path string) Episode {
+		return Episode{Published: published, Season: season, Episode: episode, Path: path}
+	}
+	eps := []Episode{
+		ep("", nil, nil, "S/a.mp3"),
+		ep("", nil, new(2), "S/z.mp3"),
+		ep("2026-10-01T00:00:00Z", nil, new(1), "S/y.mp3"),
+		ep("", new(1), new(9), "S/x.mp3"),
+		ep("", new(2), new(1), "S/w.mp3"),
+		ep("2026-10-02T00:00:00Z", nil, nil, "S/v.mp3"),
+		ep("2026-10-01T00:00:00Z", nil, new(3), "S/u.mp3"),
+		ep("", nil, new(2), "S/b.mp3"),
+	}
+	slices.SortStableFunc(eps, newestFirst)
+	var got []string
+	for _, e := range eps {
+		got = append(got, e.Path)
+	}
+	// Dated first, newest date first, a shared date by episode number; then the
+	// undated by season, episode (numbered before unnumbered) and path.
+	want := []string{"S/v.mp3", "S/u.mp3", "S/y.mp3", "S/w.mp3", "S/x.mp3", "S/b.mp3", "S/z.mp3", "S/a.mp3"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("order %v, want %v", got, want)
+	}
+}
+
 func TestMergeCapDropsTheLongestRemoved(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 10, 20, 10, 0, 0, 0, time.UTC)

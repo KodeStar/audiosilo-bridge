@@ -19,6 +19,7 @@ describe('App', () => {
     expect(
       screen.getByText(/printed in the Bridge's log the first time it started/),
     ).toBeInTheDocument();
+    expect(screen.getByText('audiosilo-bridge reset-password')).toBeInTheDocument();
 
     await userEvent.type(screen.getByLabelText('Password'), 'nope');
     await userEvent.click(screen.getByRole('button', { name: 'Sign in' }));

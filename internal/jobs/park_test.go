@@ -160,6 +160,77 @@ func TestParkSurvivesARestart(t *testing.T) {
 	}
 }
 
+// A job parked when the Bridge stopped keeps its park's code through the
+// restart: the server hears a park whose code changes as a new park (a bell
+// event), so no report while it stays parked drops progress.park, even the
+// resumed handler's first steps that name none; Unpark drops the kept one.
+func TestParkCodeSurvivesARestart(t *testing.T) {
+	t.Parallel()
+	db, srv := openStore(t), newFakeServer()
+	srv.add(&link.Job{ID: 7, Kind: "k.v", Attempts: 1})
+	park := map[string]any{"code": "agent_rate_limited"}
+	first := handler{kind: "k.v", lane: LanePipeline, fn: func(ctx context.Context, j Job, rep *Reporter) (any, error) {
+		rep.Progress(Progress{Step: "waiting", Message: "Needs attention", Extra: map[string]any{"park": park, "source": "audio"}})
+		rep.Park("agent_rate_limited", "rate limited until 3pm")
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}}
+	r := New(db, func() Server { return srv }, nil, testOpts(), first)
+	runFor(t, r, func() bool {
+		sj, err := db.GetServerJob(context.Background(), 7)
+		return countState(srv, 7, link.StateNeedsAttention) >= 1 && err == nil && strings.Contains(string(sj.Progress), "agent_rate_limited")
+	})
+
+	srv.mu.Lock()
+	before := len(srv.updates[7])
+	srv.mu.Unlock()
+	second := handler{kind: "k.v", lane: LanePipeline, fn: func(ctx context.Context, j Job, rep *Reporter) (any, error) {
+		rep.Progress(Progress{Step: "starting", Message: "Starting"})
+		waitFor(t, func() bool {
+			srv.mu.Lock()
+			defer srv.mu.Unlock()
+			for _, u := range srv.updates[7][before:] {
+				if strings.Contains(string(u.Progress), "Starting") {
+					return true
+				}
+			}
+			return false
+		})
+		rep.Unpark()
+		return nil, nil
+	}}
+	r2 := New(db, func() Server { return srv }, nil, testOpts(), second)
+	runFor(t, r2, func() bool { s, _ := srv.finalState(7); return s == link.StateDone })
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+	sawStarting, sawRunning := false, false
+	for _, u := range srv.updates[7][before:] {
+		if u.State == nil {
+			continue
+		}
+		var p map[string]any
+		_ = json.Unmarshal(u.Progress, &p)
+		_, hasPark := p["park"]
+		switch *u.State {
+		case link.StateNeedsAttention:
+			if !hasPark {
+				t.Fatalf("a parked report after the restart dropped its park: %s", u.Progress)
+			}
+			if p["message"] == "Starting" {
+				sawStarting = true
+			}
+		case link.StateRunning:
+			sawRunning = true
+			if hasPark {
+				t.Fatalf("a running report kept the park: %s", u.Progress)
+			}
+		}
+	}
+	if !sawStarting || !sawRunning {
+		t.Fatalf("starting %v running %v: %+v", sawStarting, sawRunning, srv.updates[7][before:])
+	}
+}
+
 // A claim records the server's id; a start drops another server's open jobs
 // (lost, nothing reported) instead of resuming or reporting them.
 func TestServerIdentity(t *testing.T) {
@@ -411,5 +482,21 @@ func TestPublicationRequiresSuccessfulLease(t *testing.T) {
 	}
 	if got := DefaultLanes()[LaneDownload] + DefaultLanes()[LaneInteractive]; got != 2 {
 		t.Fatal("episode concurrency", got)
+	}
+}
+
+// A parked job's report with a null park names none, as the server reads it:
+// the stored park is kept, and Unpark drops it again.
+func TestParkedProgressCarriesThroughANullPark(t *testing.T) {
+	t.Parallel()
+	park := map[string]any{"code": "agent_rate_limited"}
+	rep := &Reporter{parked: true, parkMsg: "rate limited", progress: Progress{Step: "waiting", Extra: map[string]any{"park": park}}}
+	rep.Progress(Progress{Step: "starting", Extra: map[string]any{"park": nil}})
+	if got := rep.Last().Extra["park"]; got == nil {
+		t.Fatalf("a null park dropped the stored one: %+v", rep.Last())
+	}
+	rep.Unpark()
+	if _, ok := rep.Last().Extra["park"]; ok {
+		t.Fatalf("Unpark kept the carried park: %+v", rep.Last())
 	}
 }

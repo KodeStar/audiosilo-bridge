@@ -72,7 +72,8 @@ var parkHints = map[string]string{
 	string(state.ParkMarkersNotConfident): "The chapter markers couldn't be read with confidence. Check the book's chapters, " +
 		"then press Retry on the Bridge's page.",
 	string(state.ParkChaptersNotDetected): "The Bridge couldn't find the chapters in the narration. Add chapter markers " +
-		"to the audio file, then cancel this job: the server reads the markers, and a new generate job works from them.",
+		"to the audio file, or match the book to a recording with a chapter list, then cancel this job: the server " +
+		"reads those chapters, and a new job works from them.",
 	string(state.ParkQANoConverge):          "The transcript checks didn't settle. Press Retry on the Bridge's page for another round.",
 	string(state.ParkSpellingGateFailure):   "The name corrections failed their checks. Press Retry on the Bridge's page for another go.",
 	string(state.ParkMediaToolsUnavailable): "ffmpeg or ffprobe is missing on the Bridge. Install them (or allow the download), then press Retry on the Bridge's page.",

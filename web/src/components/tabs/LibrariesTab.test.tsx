@@ -37,6 +37,24 @@ describe('LibrariesTab', () => {
     expect(lastCall(calls, 'PUT', '/api/libraries/1')?.body).toEqual({ mount_path: '/mnt/books' });
   });
 
+  it('names the checked marker of a podcast library', async () => {
+    const podcasts = libraryFixture({
+      library: { id: 2, name: 'Podcasts', root: '/podcasts', kind: 'podcasts' },
+      status: {
+        library_id: 2,
+        mount_path: '/podcasts',
+        mapped: true,
+        writable: true,
+        checked_path: '.audiosilo/library.json',
+        error: '',
+      },
+    });
+    mockFetch({ 'GET /api/libraries': { body: { libraries: [libraryFixture(), podcasts] } } });
+    render(<LibrariesTab client={api()} />);
+    expect(await screen.findByText('Checked marker')).toBeInTheDocument();
+    expect(screen.getByText('Checked book')).toBeInTheDocument();
+  });
+
   it('locks the folder when the environment sets it', async () => {
     mockFetch({
       'GET /api/libraries': { body: { libraries: [libraryFixture({ locked: true })] } },

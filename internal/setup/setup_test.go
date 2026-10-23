@@ -81,11 +81,22 @@ func TestChecklistMissing(t *testing.T) {
 	none.Libraries, none.Paired = nil, false
 	none.ASR = ASR{}
 	s = Checklist(none)
-	if item(t, s, ItemLibraries).Done || item(t, s, ItemLibraries).Detail != "the server has no libraries yet" {
-		t.Fatal("no libraries isn't done")
+	if item(t, s, ItemLibraries).Done || item(t, s, ItemLibraries).Detail != "pair with a server first" {
+		t.Fatalf("unpaired libraries = %+v", item(t, s, ItemLibraries))
+	}
+	none.Paired = true
+	if l := item(t, Checklist(none), ItemLibraries); l.Done || l.Detail != "the server has no libraries yet" {
+		t.Fatalf("no libraries = %+v", l)
 	}
 	if item(t, s, ItemPaired).Done || item(t, s, ItemASR).Detail != "the engine is starting" {
 		t.Fatalf("%+v", s.Items)
+	}
+	// A refused token isn't paired but keeps its libraries: they are counted,
+	// not called missing a pairing.
+	refused := done()
+	refused.Paired = false
+	if l := item(t, Checklist(refused), ItemLibraries); l.Detail != "2 of 2 libraries writable" {
+		t.Fatalf("refused token's libraries = %+v", l)
 	}
 }
 

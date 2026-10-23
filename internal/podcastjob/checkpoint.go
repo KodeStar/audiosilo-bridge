@@ -164,22 +164,68 @@ func (s *service) fileLock(ctx context.Context, root *os.Root, episode string) (
 	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
-	f, err := root.OpenFile(p, os.O_CREATE|os.O_RDWR, 0o600)
-	if err != nil {
-		return nil, err
-	}
+	raced := 0
 	for {
+		f, err := root.OpenFile(p, os.O_CREATE|os.O_RDWR, 0o600)
+		if errors.Is(err, os.ErrNotExist) && raced < 100 {
+			// The holder removed the file as we opened it (macOS can say so
+			// for an O_CREATE open): open it again.
+			raced++
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
 		ok, err := tryLock(f)
 		if err != nil {
 			_ = f.Close()
 			return nil, err
 		}
 		if ok {
-			return func() { unlockFile(f); _ = f.Close() }, nil
-		}
-		if err := s.o.Wait(ctx, 100*time.Millisecond); err != nil {
+			// The holder before us removes the file as it lets go, so the lock
+			// we got may be on a file no longer at p (one another job has since
+			// made again and locked): only the file still at p counts.
+			if lockedAt(root, p, f) {
+				return func() { releaseLock(root, p, f) }, nil
+			}
+			unlockFile(f)
 			_ = f.Close()
+			// Opened again at once, unless the job ended meanwhile or p is no
+			// longer a lock file (a folder or link put there since the check
+			// above would never be the file locked, and the loop would spin).
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			if st, err := root.Lstat(p); err == nil && !st.Mode().IsRegular() {
+				return nil, podcast.ErrInvalidFile
+			}
+			continue
+		}
+		_ = f.Close()
+		if err := s.o.Wait(ctx, 100*time.Millisecond); err != nil {
 			return nil, err
 		}
 	}
+}
+
+// releaseLock removes the episode's .fetch.lock while still holding it, then
+// lets go: a job waiting on the removed file finds it gone (lockedAt) and
+// opens the path again, so the files never pile up and no two jobs hold one.
+// Windows too: os.Root opens files with FILE_SHARE_DELETE and removes them
+// with POSIX semantics, so removing after letting go would let a waiter lock
+// the file just before it goes while a third job makes and locks a new one.
+func releaseLock(root *os.Root, p string, f *os.File) {
+	_ = root.Remove(p)
+	unlockFile(f)
+	_ = f.Close()
+}
+
+// lockedAt reports whether f is still the file at p.
+func lockedAt(root *os.Root, p string, f *os.File) bool {
+	held, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	now, err := root.Lstat(p)
+	return err == nil && os.SameFile(held, now)
 }

@@ -8,6 +8,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -95,6 +96,60 @@ func TestFileLockExclusiveAcrossHandlersAndCancellation(t *testing.T) {
 		t.Fatal(err)
 	}
 	release()
+}
+func TestFileLockRemovesItsFileAndStaysExclusive(t *testing.T) {
+	h, job := audioHarness(t)
+	s := h.handler.s
+	s.o.Wait = netguard.Wait
+	root, _ := os.OpenRoot(h.mount)
+	defer root.Close()
+	lockFile := podcast.AttachmentPath(*job.Path, ".fetch.lock")
+	release, err := s.fileLock(context.Background(), root, *job.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := root.Lstat(lockFile); err != nil {
+		t.Fatal("no lock file while held", err)
+	}
+	release()
+	if _, err := root.Lstat(lockFile); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("the lock file outlived its release", err)
+	}
+	// Jobs queued on the file the holder removes still take turns: one at a
+	// time, and the last one leaves nothing behind.
+	var mu sync.Mutex
+	holders, most := 0, 0
+	var wg sync.WaitGroup
+	for range 6 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			other := New(s.o).s
+			for range 15 {
+				release, err := other.fileLock(context.Background(), root, *job.Path)
+				if err != nil {
+					t.Error(err)
+					return
+				}
+				mu.Lock()
+				holders++
+				most = max(most, holders)
+				mu.Unlock()
+				time.Sleep(200 * time.Microsecond)
+				mu.Lock()
+				holders--
+				mu.Unlock()
+				release()
+			}
+		}()
+	}
+	wg.Wait()
+	if most != 1 {
+		t.Fatalf("%d jobs held the episode lock at once", most)
+	}
+	if _, err := root.Lstat(lockFile); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("a lock file was left behind", err)
+	}
 }
 func TestLostIdentityAbandonRemovesOnlyOwnedPartial(t *testing.T) {
 	h, job := audioHarness(t)

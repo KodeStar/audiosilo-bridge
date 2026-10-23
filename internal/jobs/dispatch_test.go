@@ -702,7 +702,7 @@ func TestWaitingRecoveryRunsOrAbandons(t *testing.T) {
 			r := New(db, func() Server { return srv }, nil, opts, h)
 			r.use[LaneLight] = 1
 			var wg sync.WaitGroup
-			r.launch(ctx, srv, Job{ID: 9, Kind: h.Kind(), Attempt: 1, Resumed: true}, &wg, "", nil)
+			r.launch(ctx, srv, Job{ID: 9, Kind: h.Kind(), Attempt: 1, Resumed: true}, &wg, "", nil, nil)
 			done := make(chan struct{})
 			go func() { wg.Wait(); close(done) }()
 			t.Cleanup(func() { cancel(); await(t, done) })
@@ -746,7 +746,7 @@ func TestWaitingAdmissionSeesWakeDuringPairingRead(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
 	t.Cleanup(func() { cancel(); wg.Wait() })
-	r.launch(ctx, srv, Job{ID: 4, Kind: h.Kind(), Attempt: 1, Resumed: true}, &wg, "", nil)
+	r.launch(ctx, srv, Job{ID: 4, Kind: h.Kind(), Attempt: 1, Resumed: true}, &wg, "", nil, nil)
 	await(t, read)
 	r.mu.Lock()
 	r.use[LaneLight] = 0
@@ -851,4 +851,28 @@ func TestUnpairCancelsOutstandingClaims(t *testing.T) {
 	r.Wake()
 	srv.next(t, false)
 	srv.next(t, true)
+}
+
+// A legacy pairing folds the interactive reserve into the download lane, and
+// the page doesn't list an "interactive 0 of 0"; a negotiated one lists both.
+func TestLanesLeaveOutAnEmptyFoldedReserve(t *testing.T) {
+	t.Parallel()
+	lanes := func(srv Server) map[string]int {
+		opts := testOpts()
+		opts.Lanes = DefaultLanes()
+		r := New(openStore(t), func() Server { return srv }, nil, opts)
+		out := map[string]int{}
+		for _, l := range r.Lanes() {
+			out[l.Name] = l.Capacity
+		}
+		return out
+	}
+	legacy := lanes(newFakeServer())
+	if _, ok := legacy[LaneInteractive]; ok || legacy[LaneDownload] != DefaultLanes()[LaneDownload]+DefaultLanes()[LaneInteractive] {
+		t.Fatalf("legacy lanes %v", legacy)
+	}
+	negotiated := lanes(newControlledServer(true))
+	if negotiated[LaneInteractive] != DefaultLanes()[LaneInteractive] || negotiated[LaneDownload] != DefaultLanes()[LaneDownload] {
+		t.Fatalf("negotiated lanes %v", negotiated)
+	}
 }

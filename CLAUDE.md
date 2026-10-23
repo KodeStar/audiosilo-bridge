@@ -79,8 +79,8 @@ Compact map; the per-package rules and history live in [PACKAGES.md](PACKAGES.md
 **read a package's entry before changing it.**
 
 ```
-cmd/audiosilo-bridge/  serve (default; --data, --listen), version, agent-runner, agent-login,
-                       worker [install|uninstall] (Phase 1b; worker.go)
+cmd/audiosilo-bridge/  serve (default; --data, --listen), version, reset-password, agent-runner,
+                       agent-login, worker [install|uninstall] (Phase 1b; worker.go)
 internal/
   -- the shell (Phase 0) --
   app/        wiring + the page API's Backend: pairing (Conn), heartbeat (+ estimates),
@@ -176,10 +176,10 @@ in PACKAGES.md.
   harvest is capped, and the container's own credential never leaves it (only its
   kind is reported).
 - **Secrets are never logged or echoed.** The page's one-time password is printed
-  once at the first start; the server token, the GitHub sign-in (the Accounts tab's
-  device flow: the token pair sealed as one value) and the agent credentials set on
-  the Accounts tab are sealed in `<data>/secrets`, and the page API never returns
-  one. `AUDIOSILO_BRIDGE_GITHUB_TOKEN` is read live and no longer sealed (a start
+  once at the first start (and once by `reset-password`, to stdout, never the log);
+  the server token, the GitHub sign-in (the Accounts tab's device flow: the token
+  pair sealed as one value) and the agent credentials set on the Accounts tab are
+  sealed in `<data>/secrets`, and the page API never returns one. `AUDIOSILO_BRIDGE_GITHUB_TOKEN` is read live and no longer sealed (a start
   deletes an earlier Bridge's `github_pat` copy). An agent credential leaves the
   Bridge only as one run's `credential/credential.json`, which the runner deletes
   before the CLI starts, and only when the agent container has none of its own;
