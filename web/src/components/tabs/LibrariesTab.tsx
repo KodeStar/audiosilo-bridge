@@ -133,7 +133,7 @@ function LibraryCard({
         {st && (
           <>
             {st.checked_path && (
-              <Row label="Checked book">
+              <Row label={lib.library.kind === 'podcasts' ? 'Checked marker' : 'Checked book'}>
                 <code className="text-xs">{st.checked_path}</code>
               </Row>
             )}

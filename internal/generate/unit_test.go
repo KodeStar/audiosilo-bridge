@@ -110,6 +110,10 @@ func TestParkHintsNameAnActionThatWorks(t *testing.T) {
 	if h := ParkHint(string(state.ParkAgentCredentialRefused)); !strings.Contains(h, "claude setup-token / agent-login codex") {
 		t.Errorf("credential refused hint = %q", h)
 	}
+	// A chapters.detect job parks this too: the hint can't call it a generate job.
+	if h := ParkHint(string(state.ParkChaptersNotDetected)); strings.Contains(h, "generate") || !strings.Contains(h, "match the book to a recording") {
+		t.Errorf("chapters not detected hint = %q", h)
+	}
 }
 
 // The budget park's hint is one for every job kind and in every place a park is

@@ -51,7 +51,7 @@ func (b *Bridge) Pair(ctx context.Context, serverURL, code string) error {
 	err := b.conn.Pair(ctx, serverURL, code)
 	switch {
 	case errors.Is(err, link.ErrUnauthorized):
-		return api.Errorf(api.ErrRefused, "the code is wrong, used or expired; make a new one in the server's console")
+		return api.Errorf(api.ErrRefused, "The code is wrong, used or expired. Make a new one in the server's console.")
 	case errors.Is(err, ErrAlreadyPaired):
 		return api.Errorf(api.ErrConflict, "%v", err)
 	case errors.Is(err, link.ErrBadAddress):
