@@ -72,6 +72,11 @@ func serve(args []string, stderr io.Writer) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	if fs.NArg() != 0 {
+		// "--data DIR reset-password" would otherwise start the Bridge: a
+		// command goes before its flags.
+		return fmt.Errorf("serve takes no arguments, got %q (put a command before its flags)", fs.Arg(0))
+	}
 	ring := logring.New(2000)
 	log := slog.New(logring.NewHandler(slog.NewTextHandler(stderr, &slog.HandlerOptions{Level: slog.LevelInfo}), ring))
 	slog.SetDefault(log)

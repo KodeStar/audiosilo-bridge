@@ -37,9 +37,9 @@ func ResetPassword(ctx context.Context, dataDir string) (string, error) {
 		return "", err
 	}
 	pw, err := auth.New(db.AuthStore()).ResetPassword()
-	if cerr := db.Close(); err == nil {
-		err = cerr
-	}
+	// The reset is committed once it returns: a close that fails after it
+	// doesn't undo it, so the new password is still the caller's to print.
+	_ = db.Close()
 	if err != nil {
 		return "", err
 	}

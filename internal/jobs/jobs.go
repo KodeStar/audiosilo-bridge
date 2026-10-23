@@ -923,9 +923,10 @@ func (p *Reporter) Last() Progress {
 func (p *Reporter) Progress(pr Progress) {
 	pr.Step, pr.Message = clip(pr.Step, maxStepText), clip(pr.Message, maxMessageText)
 	p.mu.Lock()
-	_, named := pr.Extra["park"]
+	// A null park names none, as the server reads it (bridge.parkOf).
+	named := pr.Extra["park"] != nil
 	carried := false
-	if park, ok := p.progress.Extra["park"]; ok && p.parked && !named {
+	if park := p.progress.Extra["park"]; park != nil && p.parked && !named {
 		pr.Extra = maps.Clone(pr.Extra)
 		if pr.Extra == nil {
 			pr.Extra = map[string]any{}

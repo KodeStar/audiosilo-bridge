@@ -92,8 +92,9 @@ func Checklist(in Inputs) link.Setup {
 	}
 	libDetail := fmt.Sprintf("%d of %d libraries writable", ready, len(in.Libraries))
 	switch {
-	case !in.Paired:
-		// Before pairing there is no server to have libraries.
+	case len(in.Libraries) == 0 && !in.Paired:
+		// Before pairing there is no server to have libraries. (A refused token
+		// isn't paired either but keeps the libraries it had: those are counted.)
 		libDetail = "pair with a server first"
 	case len(in.Libraries) == 0:
 		libDetail = "the server has no libraries yet"

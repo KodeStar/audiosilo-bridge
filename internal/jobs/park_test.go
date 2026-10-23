@@ -484,3 +484,19 @@ func TestPublicationRequiresSuccessfulLease(t *testing.T) {
 		t.Fatal("episode concurrency", got)
 	}
 }
+
+// A parked job's report with a null park names none, as the server reads it:
+// the stored park is kept, and Unpark drops it again.
+func TestParkedProgressCarriesThroughANullPark(t *testing.T) {
+	t.Parallel()
+	park := map[string]any{"code": "agent_rate_limited"}
+	rep := &Reporter{parked: true, parkMsg: "rate limited", progress: Progress{Step: "waiting", Extra: map[string]any{"park": park}}}
+	rep.Progress(Progress{Step: "starting", Extra: map[string]any{"park": nil}})
+	if got := rep.Last().Extra["park"]; got == nil {
+		t.Fatalf("a null park dropped the stored one: %+v", rep.Last())
+	}
+	rep.Unpark()
+	if _, ok := rep.Last().Extra["park"]; ok {
+		t.Fatalf("Unpark kept the carried park: %+v", rep.Last())
+	}
+}

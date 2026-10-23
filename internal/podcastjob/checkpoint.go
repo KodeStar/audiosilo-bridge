@@ -190,6 +190,15 @@ func (s *service) fileLock(ctx context.Context, root *os.Root, episode string) (
 			}
 			unlockFile(f)
 			_ = f.Close()
+			// Opened again at once, unless the job ended meanwhile or p is no
+			// longer a lock file (a folder or link put there since the check
+			// above would never be the file locked, and the loop would spin).
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			if st, err := root.Lstat(p); err == nil && !st.Mode().IsRegular() {
+				return nil, podcast.ErrInvalidFile
+			}
 			continue
 		}
 		_ = f.Close()
@@ -197,6 +206,18 @@ func (s *service) fileLock(ctx context.Context, root *os.Root, episode string) (
 			return nil, err
 		}
 	}
+}
+
+// releaseLock removes the episode's .fetch.lock while still holding it, then
+// lets go: a job waiting on the removed file finds it gone (lockedAt) and
+// opens the path again, so the files never pile up and no two jobs hold one.
+// Windows too: os.Root opens files with FILE_SHARE_DELETE and removes them
+// with POSIX semantics, so removing after letting go would let a waiter lock
+// the file just before it goes while a third job makes and locks a new one.
+func releaseLock(root *os.Root, p string, f *os.File) {
+	_ = root.Remove(p)
+	unlockFile(f)
+	_ = f.Close()
 }
 
 // lockedAt reports whether f is still the file at p.

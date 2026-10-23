@@ -91,6 +91,13 @@ func TestChecklistMissing(t *testing.T) {
 	if item(t, s, ItemPaired).Done || item(t, s, ItemASR).Detail != "the engine is starting" {
 		t.Fatalf("%+v", s.Items)
 	}
+	// A refused token isn't paired but keeps its libraries: they are counted,
+	// not called missing a pairing.
+	refused := done()
+	refused.Paired = false
+	if l := item(t, Checklist(refused), ItemLibraries); l.Detail != "2 of 2 libraries writable" {
+		t.Fatalf("refused token's libraries = %+v", l)
+	}
 }
 
 func TestChecklistGitHub(t *testing.T) {

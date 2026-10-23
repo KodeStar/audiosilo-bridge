@@ -151,13 +151,11 @@ func (m *Manager) ChangePassword(current, newPassword, keep string) error {
 // password). It touches only the password hash and the sessions: the pairing,
 // the sealed secrets and everything else stay as they were.
 func (m *Manager) ResetPassword() (oneTimePassword string, err error) {
-	pw, err := m.setGenerated()
-	if err != nil {
-		return "", err
-	}
-	// No session's hash is empty, so this removes them all.
+	// Everyone is signed out first (no session's hash is empty, so this removes
+	// them all): a failure after it leaves the old password working, never a new
+	// one that was stored but not returned to be printed.
 	if err := m.store.RemoveSessionsExcept(""); err != nil {
 		return "", err
 	}
-	return pw, nil
+	return m.setGenerated()
 }
