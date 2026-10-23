@@ -702,7 +702,7 @@ func TestWaitingRecoveryRunsOrAbandons(t *testing.T) {
 			r := New(db, func() Server { return srv }, nil, opts, h)
 			r.use[LaneLight] = 1
 			var wg sync.WaitGroup
-			r.launch(ctx, srv, Job{ID: 9, Kind: h.Kind(), Attempt: 1, Resumed: true}, &wg, "", nil)
+			r.launch(ctx, srv, Job{ID: 9, Kind: h.Kind(), Attempt: 1, Resumed: true}, &wg, "", nil, nil)
 			done := make(chan struct{})
 			go func() { wg.Wait(); close(done) }()
 			t.Cleanup(func() { cancel(); await(t, done) })
@@ -746,7 +746,7 @@ func TestWaitingAdmissionSeesWakeDuringPairingRead(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
 	t.Cleanup(func() { cancel(); wg.Wait() })
-	r.launch(ctx, srv, Job{ID: 4, Kind: h.Kind(), Attempt: 1, Resumed: true}, &wg, "", nil)
+	r.launch(ctx, srv, Job{ID: 4, Kind: h.Kind(), Attempt: 1, Resumed: true}, &wg, "", nil, nil)
 	await(t, read)
 	r.mu.Lock()
 	r.use[LaneLight] = 0

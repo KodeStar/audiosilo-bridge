@@ -372,7 +372,7 @@ func (r *Runner) recover(ctx context.Context, srv Server, wg *sync.WaitGroup) bo
 		}
 		r.log.Info("bridge: resuming a job after a restart", "job", job.ID, "kind", job.Kind, "attempt", job.Attempt)
 		job.Resumed = true
-		r.launch(ctx, srv, job, wg, sj.Error, nil)
+		r.launch(ctx, srv, job, wg, sj.Error, sj.Progress, nil)
 	}
 	return true
 }
@@ -423,7 +423,7 @@ func (r *Runner) resumeStranded(ctx context.Context, srv Server, wg *sync.WaitGr
 		}
 		r.log.Info("bridge: resuming a job its refused token stopped", "job", job.ID, "kind", job.Kind, "attempt", job.Attempt)
 		job.Resumed = true
-		r.launch(ctx, srv, job, wg, sj.Error, nil)
+		r.launch(ctx, srv, job, wg, sj.Error, sj.Progress, nil)
 	}
 }
 
@@ -456,13 +456,15 @@ func storedJob(sj store.ServerJob) Job {
 }
 
 // run is one running job, and the link it runs on. parked is the park message a
-// resumed job had (its first report keeps it parked).
+// resumed job had (its first report keeps it parked), progress the progress it
+// last recorded (a parked one's first report keeps its park's code too).
 type run struct {
 	job      Job
 	srv      Server
 	lane     string
 	cancel   context.CancelCauseFunc
 	parked   string
+	progress json.RawMessage
 	admitted bool
 	// stray: a claim answered outside its admission (claimRequest.fallback).
 	// While it waits, the dispatcher that took it (strayReserve) claims no more.
@@ -512,7 +514,7 @@ func (r *Runner) start(ctx context.Context, srv Server, job Job, wg *sync.WaitGr
 		r.finish(ctx, srv, job, store.JobFailed, nil, result, failure.Message)
 		return
 	}
-	r.launch(ctx, srv, job, wg, "", claim)
+	r.launch(ctx, srv, job, wg, "", nil, claim)
 }
 
 // launch runs a recorded job in its lane, parked with message parked when a
@@ -520,14 +522,14 @@ func (r *Runner) start(ctx context.Context, srv Server, job Job, wg *sync.WaitGr
 // failed at once. claim is nil for a recovered or stranded job, which waits for
 // ordinary admission; a claimed job takes its reservation unless the server
 // ignored the requested filter, in which case it waits for ordinary admission.
-func (r *Runner) launch(ctx context.Context, srv Server, job Job, wg *sync.WaitGroup, parked string, claim *claimRequest) {
+func (r *Runner) launch(ctx context.Context, srv Server, job Job, wg *sync.WaitGroup, parked string, progress json.RawMessage, claim *claimRequest) {
 	h, ok := r.handlers[job.Kind]
 	if !ok {
 		r.finish(ctx, srv, job, store.JobFailed, nil, nil, "this Bridge doesn't run "+job.Kind+" jobs")
 		return
 	}
 	rctx, cancel := context.WithCancelCause(ctx)
-	ru := &run{job: job, srv: srv, lane: h.Lane(), cancel: cancel, parked: parked}
+	ru := &run{job: job, srv: srv, lane: h.Lane(), cancel: cancel, parked: parked, progress: progress}
 	r.mu.Lock()
 	if claim != nil {
 		r.unreserveLocked(claim)
@@ -587,6 +589,11 @@ func (r *Runner) execute(ctx, base context.Context, srv Server, h Handler, ru *r
 	rep := &Reporter{r: r, srv: srv, job: ru.job, cancel: ru.cancel, ctx: ctx, nudge: make(chan struct{}, 1)}
 	if ru.parked != "" {
 		rep.parked, rep.parkMsg = true, ru.parked
+		// The server hears a park whose code changes as a new park (a bell
+		// event): the first report sends the stored progress, park and all.
+		if pr, ok := decodeProgress(ru.progress); ok {
+			rep.progress = pr
+		}
 	}
 	if !rep.send() {
 		// Ended before its handler ran: a cancel or a lost claim ends it for good,
@@ -840,6 +847,30 @@ func (p Progress) MarshalJSON() ([]byte, error) {
 	return b, nil
 }
 
+// decodeProgress reads a stored progress object back (MarshalJSON's flat shape).
+func decodeProgress(raw json.RawMessage) (Progress, bool) {
+	var m map[string]any
+	if len(raw) == 0 || json.Unmarshal(raw, &m) != nil || m == nil {
+		return Progress{}, false
+	}
+	var p Progress
+	p.Step, _ = m["step"].(string)
+	p.Message, _ = m["message"].(string)
+	if n, ok := m["done"].(float64); ok {
+		p.Done = int(n)
+	}
+	if n, ok := m["total"].(float64); ok {
+		p.Total = int(n)
+	}
+	for _, k := range []string{"step", "message", "done", "total"} {
+		delete(m, k)
+	}
+	if len(m) > 0 {
+		p.Extra = m
+	}
+	return p, true
+}
+
 // Reporter is how a Handler reports progress. It is safe for concurrent use.
 // Progress only records: the job's reporting goroutine (loop) sends, so a
 // handler never waits on the network.
@@ -862,6 +893,9 @@ type Reporter struct {
 	// across a restart that came before the clear got through).
 	parked  bool
 	parkMsg string
+	// carried: progress.Extra's "park" is one Progress kept from the progress
+	// before it (a parked job's report that named no park), which Unpark drops.
+	carried bool
 	// path is the job's book path as the server's last answer gave it ("" until
 	// one did): the server moves an open job with its book (a rename the scan
 	// noticed), and the job hears it here.
@@ -890,10 +924,23 @@ func (p *Reporter) Last() Progress {
 
 // Progress records the job's progress; a new step is sent at once, anything
 // else within ProgressEvery. The same progress again (a handler reporting on
-// every poll) changes nothing, so it is sent only with the keepalive.
+// every poll) changes nothing, so it is sent only with the keepalive. While the
+// job is parked, a progress that names no park keeps the one before it (a job
+// resumed after a restart reports its first steps before it hears its engine's
+// park again): the server would hear a park without its code as a new one.
 func (p *Reporter) Progress(pr Progress) {
 	pr.Step, pr.Message = clip(pr.Step, maxStepText), clip(pr.Message, maxMessageText)
 	p.mu.Lock()
+	_, named := pr.Extra["park"]
+	carried := false
+	if park, ok := p.progress.Extra["park"]; ok && p.parked && !named {
+		pr.Extra = maps.Clone(pr.Extra)
+		if pr.Extra == nil {
+			pr.Extra = map[string]any{}
+		}
+		pr.Extra["park"], carried = park, true
+	}
+	p.carried = carried
 	if reflect.DeepEqual(pr, p.progress) {
 		p.mu.Unlock()
 		return
@@ -937,6 +984,11 @@ func (p *Reporter) Unpark() {
 	was := p.parked
 	if was {
 		p.parked, p.parkMsg, p.dirty = false, "", true
+		if p.carried {
+			p.progress.Extra = maps.Clone(p.progress.Extra)
+			delete(p.progress.Extra, "park")
+			p.carried = false
+		}
 	}
 	p.mu.Unlock()
 	if was {
