@@ -139,3 +139,27 @@ func (m *Manager) ChangePassword(current, newPassword, keep string) error {
 	}
 	return m.store.RemoveSessionsExcept(hashSecret(keep))
 }
+
+// ResetPassword replaces the password with a new generated one-time password
+// and signs out every session, returning the plaintext for the caller to print
+// ONCE (the `reset-password` command, for an owner who lost the first start's
+// password). It touches only the password hash and the sessions: the pairing,
+// the sealed secrets and everything else stay as they were.
+func (m *Manager) ResetPassword() (oneTimePassword string, err error) {
+	pw, err := generatePassword()
+	if err != nil {
+		return "", err
+	}
+	enc, err := HashPassword(pw)
+	if err != nil {
+		return "", err
+	}
+	if err := m.store.SaveAuth(enc); err != nil {
+		return "", err
+	}
+	// No session's hash is empty, so this removes them all.
+	if err := m.store.RemoveSessionsExcept(""); err != nil {
+		return "", err
+	}
+	return pw, nil
+}

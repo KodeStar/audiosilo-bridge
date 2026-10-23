@@ -47,6 +47,8 @@ func run(args []string, stdout, stderr io.Writer) error {
 	case "version":
 		_, _ = fmt.Fprintln(stdout, version)
 		return nil
+	case "reset-password":
+		return resetPassword(rest, stdout, stderr)
 	case "agent-runner":
 		return agentRunner(rest, stderr)
 	case "agent-login":
@@ -85,6 +87,26 @@ func serve(args []string, stderr io.Writer) error {
 		_, _ = fmt.Fprintf(stderr, "\n  AudioSilo Bridge: first start\n  The password for the Bridge's page is: %s\n  It is shown only this once; change it on the page.\n\n", oneTime)
 	}
 	return b.Run(ctx)
+}
+
+// resetPassword gives the page a new password and signs everyone out; the
+// pairing and the secrets stay (app.ResetPassword).
+func resetPassword(args []string, stdout, stderr io.Writer) error {
+	fs := flag.NewFlagSet("reset-password", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	data := fs.String("data", defaultDataDir(), "the Bridge's data directory")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("reset-password takes no arguments, got %q", fs.Arg(0))
+	}
+	pw, err := app.ResetPassword(context.Background(), *data)
+	if err != nil {
+		return err
+	}
+	_, _ = fmt.Fprintf(stdout, "\n  AudioSilo Bridge: password reset\n  The new password for the Bridge's page is: %s\n  It is shown only this once; every session was signed out. Change it on the page.\n  The pairing, mappings and stored secrets are unchanged.\n\n", pw)
+	return nil
 }
 
 // agentRunner is the agent container's entrypoint (decision 15): it runs the
@@ -141,6 +163,7 @@ func usage(w io.Writer) {
 Usage:
   audiosilo-bridge [serve] [--data DIR] [--listen HOST:PORT]
   audiosilo-bridge version
+  audiosilo-bridge reset-password [--data DIR]
   audiosilo-bridge agent-runner [--staging DIR] [--home DIR] [--slots N]
   audiosilo-bridge agent-login [--home DIR] claude|codex
   audiosilo-bridge worker --bridge URL [--token T] [--data DIR] [--backend B]
@@ -150,6 +173,11 @@ Usage:
 Commands:
   serve         Run the Bridge and its page (default).
   version       Print the build version.
+  reset-password
+                Print a new password for the Bridge's page and sign every
+                session out. The pairing, mappings and secrets stay. Run it
+                as the data folder's owner (in Docker: docker exec -u
+                PUID:PGID <container> audiosilo-bridge reset-password).
   agent-runner  Run agent jobs from the staging dir (the agent container's
                 entrypoint; default --staging /staging --home /agent).
   agent-login   Sign a CLI in, inside the agent container: codex runs its
