@@ -263,7 +263,7 @@ func TestMergeOrdersUndatedSerialsByEpisodeNumber(t *testing.T) {
 	}
 }
 
-func TestNewestFirst(t *testing.T) {
+func TestNewestFirstOrder(t *testing.T) {
 	t.Parallel()
 	ep := func(published string, season, episode *int, path string) Episode {
 		return Episode{Published: published, Season: season, Episode: episode, Path: path}
@@ -278,7 +278,7 @@ func TestNewestFirst(t *testing.T) {
 		ep("2026-10-01T00:00:00Z", nil, new(3), "S/u.mp3"),
 		ep("", nil, new(2), "S/b.mp3"),
 	}
-	slices.SortStableFunc(eps, NewestFirst)
+	slices.SortStableFunc(eps, newestFirst)
 	var got []string
 	for _, e := range eps {
 		got = append(got, e.Path)

@@ -2,6 +2,7 @@ package podcast
 
 import (
 	"cmp"
+	"math"
 	"slices"
 	"strconv"
 	"strings"
@@ -110,7 +111,7 @@ func Merge(f *Feed, p *Parsed, show string, now time.Time, occupied ...string) (
 	if len(out) > MaxEpisodes {
 		return 0, ErrTooLarge
 	}
-	slices.SortStableFunc(out, NewestFirst)
+	slices.SortStableFunc(out, newestFirst)
 	image := f.Show.Image
 	f.Show = p.Show
 	f.Show.Image = image
@@ -119,33 +120,31 @@ func Merge(f *Feed, p *Parsed, show string, now time.Time, occupied ...string) (
 	return added, nil
 }
 
-// NewestFirst is feed.json's episode order: the newest publication date first,
+// newestFirst is feed.json's episode order: the newest publication date first,
 // then (for episodes sharing a date, or with none, as LibriVox serials have) the
 // higher season, then the higher episode number, a numbered episode before an
 // unnumbered one, then the path. Undated serials list from their last numbered
 // episode back to E1 rather than in the order of their hashed file names.
-func NewestFirst(a, b Episode) int {
-	if n := cmp.Compare(b.Published, a.Published); n != 0 {
-		return n
-	}
-	if n := cmp.Compare(deref(b.Season), deref(a.Season)); n != 0 {
-		return n
-	}
-	switch {
-	case a.Episode == nil && b.Episode != nil:
-		return 1
-	case a.Episode != nil && b.Episode == nil:
-		return -1
-	}
-	if n := cmp.Compare(deref(b.Episode), deref(a.Episode)); n != 0 {
-		return n
-	}
-	return cmp.Compare(a.Path, b.Path)
+func newestFirst(a, b Episode) int {
+	return cmp.Or(
+		cmp.Compare(b.Published, a.Published),
+		cmp.Compare(orZero(b.Season), orZero(a.Season)),
+		cmp.Compare(episodeRank(b.Episode), episodeRank(a.Episode)),
+		cmp.Compare(a.Path, b.Path),
+	)
 }
 
-func deref(p *int) int {
+func orZero(p *int) int {
 	if p == nil {
 		return 0
+	}
+	return *p
+}
+
+// episodeRank sorts an unnumbered episode below every numbered one.
+func episodeRank(p *int) int {
+	if p == nil {
+		return math.MinInt
 	}
 	return *p
 }

@@ -46,6 +46,11 @@ func (m *Manager) EnsureAdmin() (oneTimePassword string, err error) {
 	if hash != "" {
 		return "", nil
 	}
+	return m.setGenerated()
+}
+
+// setGenerated stores a new generated password's hash and returns the plaintext.
+func (m *Manager) setGenerated() (string, error) {
 	pw, err := generatePassword()
 	if err != nil {
 		return "", err
@@ -146,15 +151,8 @@ func (m *Manager) ChangePassword(current, newPassword, keep string) error {
 // password). It touches only the password hash and the sessions: the pairing,
 // the sealed secrets and everything else stay as they were.
 func (m *Manager) ResetPassword() (oneTimePassword string, err error) {
-	pw, err := generatePassword()
+	pw, err := m.setGenerated()
 	if err != nil {
-		return "", err
-	}
-	enc, err := HashPassword(pw)
-	if err != nil {
-		return "", err
-	}
-	if err := m.store.SaveAuth(enc); err != nil {
 		return "", err
 	}
 	// No session's hash is empty, so this removes them all.

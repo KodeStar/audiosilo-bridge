@@ -591,9 +591,7 @@ func (r *Runner) execute(ctx, base context.Context, srv Server, h Handler, ru *r
 		rep.parked, rep.parkMsg = true, ru.parked
 		// The server hears a park whose code changes as a new park (a bell
 		// event): the first report sends the stored progress, park and all.
-		if pr, ok := decodeProgress(ru.progress); ok {
-			rep.progress = pr
-		}
+		rep.progress = decodeProgress(ru.progress)
 	}
 	if !rep.send() {
 		// Ended before its handler ran: a cancel or a lost claim ends it for good,
@@ -847,20 +845,14 @@ func (p Progress) MarshalJSON() ([]byte, error) {
 	return b, nil
 }
 
-// decodeProgress reads a stored progress object back (MarshalJSON's flat shape).
-func decodeProgress(raw json.RawMessage) (Progress, bool) {
-	var m map[string]any
-	if len(raw) == 0 || json.Unmarshal(raw, &m) != nil || m == nil {
-		return Progress{}, false
-	}
+// decodeProgress reads a stored progress object back (MarshalJSON's flat shape);
+// one it can't read is the zero Progress.
+func decodeProgress(raw json.RawMessage) Progress {
+	type base Progress
 	var p Progress
-	p.Step, _ = m["step"].(string)
-	p.Message, _ = m["message"].(string)
-	if n, ok := m["done"].(float64); ok {
-		p.Done = int(n)
-	}
-	if n, ok := m["total"].(float64); ok {
-		p.Total = int(n)
+	var m map[string]any
+	if len(raw) == 0 || json.Unmarshal(raw, (*base)(&p)) != nil || json.Unmarshal(raw, &m) != nil {
+		return Progress{}
 	}
 	for _, k := range []string{"step", "message", "done", "total"} {
 		delete(m, k)
@@ -868,7 +860,7 @@ func decodeProgress(raw json.RawMessage) (Progress, bool) {
 	if len(m) > 0 {
 		p.Extra = m
 	}
-	return p, true
+	return p
 }
 
 // Reporter is how a Handler reports progress. It is safe for concurrent use.
