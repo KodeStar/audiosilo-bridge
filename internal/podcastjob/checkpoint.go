@@ -164,22 +164,47 @@ func (s *service) fileLock(ctx context.Context, root *os.Root, episode string) (
 	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
-	f, err := root.OpenFile(p, os.O_CREATE|os.O_RDWR, 0o600)
-	if err != nil {
-		return nil, err
-	}
+	raced := 0
 	for {
+		f, err := root.OpenFile(p, os.O_CREATE|os.O_RDWR, 0o600)
+		if errors.Is(err, os.ErrNotExist) && raced < 100 {
+			// The holder removed the file as we opened it (macOS can say so
+			// for an O_CREATE open): open it again.
+			raced++
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
 		ok, err := tryLock(f)
 		if err != nil {
 			_ = f.Close()
 			return nil, err
 		}
 		if ok {
-			return func() { unlockFile(f); _ = f.Close() }, nil
-		}
-		if err := s.o.Wait(ctx, 100*time.Millisecond); err != nil {
+			// The holder before us removes the file as it lets go, so the lock
+			// we got may be on a file no longer at p (one another job has since
+			// made again and locked): only the file still at p counts.
+			if lockedAt(root, p, f) {
+				return func() { releaseLock(root, p, f) }, nil
+			}
+			unlockFile(f)
 			_ = f.Close()
+			continue
+		}
+		_ = f.Close()
+		if err := s.o.Wait(ctx, 100*time.Millisecond); err != nil {
 			return nil, err
 		}
 	}
+}
+
+// lockedAt reports whether f is still the file at p.
+func lockedAt(root *os.Root, p string, f *os.File) bool {
+	held, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	now, err := root.Lstat(p)
+	return err == nil && os.SameFile(held, now)
 }
