@@ -263,13 +263,18 @@ type Lane struct {
 	Running  int    `json:"running"`
 }
 
-// Lanes reports every lane's use, sorted by name.
+// Lanes reports every lane's use, sorted by name. A lane with no capacity and
+// nothing running is left out: a server that can't take priority claims folds
+// the interactive reserve into the download lane, and "0 of 0" says nothing.
 func (r *Runner) Lanes() []Lane {
 	srv := r.server()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	out := make([]Lane, 0, len(r.opts.Lanes))
 	for name, c := range r.capacities(srv) {
+		if c == 0 && r.use[name] == 0 {
+			continue
+		}
 		out = append(out, Lane{Name: name, Capacity: c, Running: r.use[name]})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })

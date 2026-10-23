@@ -852,3 +852,27 @@ func TestUnpairCancelsOutstandingClaims(t *testing.T) {
 	srv.next(t, false)
 	srv.next(t, true)
 }
+
+// A legacy pairing folds the interactive reserve into the download lane, and
+// the page doesn't list an "interactive 0 of 0"; a negotiated one lists both.
+func TestLanesLeaveOutAnEmptyFoldedReserve(t *testing.T) {
+	t.Parallel()
+	lanes := func(srv Server) map[string]int {
+		opts := testOpts()
+		opts.Lanes = DefaultLanes()
+		r := New(openStore(t), func() Server { return srv }, nil, opts)
+		out := map[string]int{}
+		for _, l := range r.Lanes() {
+			out[l.Name] = l.Capacity
+		}
+		return out
+	}
+	legacy := lanes(newFakeServer())
+	if _, ok := legacy[LaneInteractive]; ok || legacy[LaneDownload] != DefaultLanes()[LaneDownload]+DefaultLanes()[LaneInteractive] {
+		t.Fatalf("legacy lanes %v", legacy)
+	}
+	negotiated := lanes(newControlledServer(true))
+	if negotiated[LaneInteractive] != DefaultLanes()[LaneInteractive] || negotiated[LaneDownload] != DefaultLanes()[LaneDownload] {
+		t.Fatalf("negotiated lanes %v", negotiated)
+	}
+}
