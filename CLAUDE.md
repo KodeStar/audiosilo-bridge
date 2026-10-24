@@ -26,8 +26,8 @@ The **Bridge**: the optional, always-on companion to an AudioSilo server that
   drops typed requests there (`internal/agentproto`), never argv; slim, full and
   cuda carry no agent CLI, and config forces the supervisor's model-assisted lane
   and backend failover off.
-- **Private, internal name** (decision 14): the repo stays private until the owner
-  says otherwise; rename it with the product before any public release.
+- **Internal name** (decision 14): "Bridge" is a working name; rename it with the
+  product. The repository and the images are public.
 
 Module path: `github.com/kodestar/audiosilo-bridge`. Code is **AGPL-3.0**.
 
@@ -62,7 +62,8 @@ docker build --target slim .    # slim | cuda | agent | full (the default target
 build for a Dockerfile change. golangci-lint is **v2** at a **green baseline**: fix
 new findings, don't widen excludes. Go 1.26; a Go bump is three edits (go.mod,
 `.go-version`, the Dockerfile's `golang:` tag). CI (`.github/workflows/ci.yml`) runs
-both gates on every PR; `image.yml` builds the images on `v*` tags and dispatch.
+both gates on every PR; `image.yml` builds the images on `v*` tags and dispatch;
+`release.yml` attaches the worker archives and `checksums.txt` to the tag's release.
 
 > Before adding code, read the workspace **[CODE-HEALTH.md](../CODE-HEALTH.md)**:
 > keep logic out of the transport layer, ship a test with every feature, and give
@@ -123,6 +124,8 @@ internal/
   workers/    the Bridge's side: the segment queue + leases + registry (Hub) and the
               engine's ASR backend (Router: remote, else local or a wait)
   worker/     `audiosilo-bridge worker`: client, run loop, spool, launchd/systemd install
+  workerdist/ the worker builds the images carry + install.sh, served on /worker/install.sh
+              and /worker/download/{os}/{arch} (a leaf)
   -- the engine (from audiosilo-sidecars; app/engine.go runs it) --
   toolfetch/ audio/ asr/ transcript/ ebook/ scratch/ qa/ spelling/ agent/ repair/
   pipeline/ contrib/ state/ eta/ scheduler/ supervisor/ metaops/ events/ pricing/ fsutil/
@@ -146,7 +149,8 @@ through its own Engine/Server interfaces; `podcastjob -> {jobs, link, mapping, n
 `link`, `agentproto` and `workerproto` are leaves; `workers -> {asr, fsutil,
 scheduler, state, store, transcript, workerproto}`; `worker -> {asr, fsutil, workerproto}`
 (never `workers`; its tests drive the real `api` + `workers` in-process); `api`
-reaches the hub through its own `WorkerHub` interface and `workerproto`; `agentbox` and `agentrun` each import only
+reaches the hub through its own `WorkerHub` interface and `workerproto`, and
+serves `workerdist` (a leaf); `agentbox` and `agentrun` each import only
 `agent` + `agentproto` (agentrun also `fsutil`), never each other, and the engine
 never knows either (agentbox is just an `agent.Runner`). The engine's directions are
 in PACKAGES.md.
@@ -196,7 +200,11 @@ in PACKAGES.md.
   header; the page's routes never take a worker token. Both sides are tested
   allowed and denied. A protocol change an installed worker can't follow bumps
   `workerproto.Version`; an added field doesn't (the worker routes accept unknown
-  JSON fields).
+  JSON fields). The worker DOWNLOADS (`/worker/install.sh`,
+  `/worker/download/{os}/{arch}`) sit outside `/worker/v1` and take no
+  credential at all, only the LAN guard: the program is public and the token in
+  the user's command is the credential. The OS/architecture pick from a fixed set,
+  never a path.
 - **Every feature ships with a test**; security-critical code (the LAN guard, auth,
   SafeJoin, the vault, the claim/lease handling) has allowed AND denied tests.
 - **Hyphens, never em dashes**, in docs, comments, UI copy and generated text.
