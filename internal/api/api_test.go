@@ -103,6 +103,12 @@ type env struct {
 
 func newEnv(t *testing.T) *env {
 	t.Helper()
+	return newEnvWith(t, nil)
+}
+
+// newEnvWith is newEnv with the API adjusted before its handler is made.
+func newEnvWith(t *testing.T, adjust func(*API)) *env {
+	t.Helper()
 	am := auth.New(auth.NewMemStore())
 	pw, err := am.EnsureAdmin()
 	if err != nil {
@@ -115,7 +121,11 @@ func newEnv(t *testing.T) *env {
 	b := &backend{}
 	page := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = io.WriteString(w, "page") })
 	hub := &fakeHub{}
-	return &env{h: New(b, am, hub, page, slog.New(slog.NewTextHandler(io.Discard, nil))).Handler(), b: b, hub: hub, token: tok}
+	a := New(b, am, hub, page, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if adjust != nil {
+		adjust(a)
+	}
+	return &env{h: a.Handler(), b: b, hub: hub, token: tok}
 }
 
 // do sends a request from a LAN address unless remote is given.

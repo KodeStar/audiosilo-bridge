@@ -28,6 +28,7 @@ import (
 	"github.com/kodestar/audiosilo-bridge/internal/logring"
 	"github.com/kodestar/audiosilo-bridge/internal/mapping"
 	"github.com/kodestar/audiosilo-bridge/internal/store"
+	"github.com/kodestar/audiosilo-bridge/internal/workerdist"
 )
 
 // Status is the Bridge's state (GET /api/status).
@@ -51,6 +52,9 @@ type Status struct {
 	Setup                link.Setup `json:"setup"`
 	SetupComplete        bool       `json:"setup_complete"`
 	PodcastAllowNetworks []string   `json:"podcast_allow_networks"`
+	// WorkerDownloads: this Bridge serves install.sh and the worker builds (the
+	// image carries them; a native run doesn't). Set by the API itself.
+	WorkerDownloads bool `json:"worker_downloads"`
 }
 
 // Library is a server library with the Bridge's mapping and its last check.
@@ -204,12 +208,15 @@ type API struct {
 	web     http.Handler
 	log     *slog.Logger
 	limiter *auth.RateLimiter
+	// dist is the worker builds' folder (workerdist.DefaultDir).
+	dist workerdist.Dist
 }
 
 // New returns the API over b, with hub behind the worker routes (nil: none)
 // and web serving the page's files.
 func New(b Backend, am *auth.Manager, hub WorkerHub, web http.Handler, log *slog.Logger) *API {
-	return &API{b: b, auth: am, workers: hub, web: web, log: log, limiter: auth.NewRateLimiter(10, 0.2)}
+	return &API{b: b, auth: am, workers: hub, web: web, log: log, limiter: auth.NewRateLimiter(10, 0.2),
+		dist: workerdist.Dist{Dir: workerdist.DefaultDir}}
 }
 
 // Handler is the whole site: the API under /api, the page everywhere else,
@@ -241,6 +248,7 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/workers/{id}", a.requireAuth(a.handleRevokeWorker))
 	a.accountRoutes(mux)
 	a.workerRoutes(mux)
+	a.workerDistRoutes(mux)
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) { writeError(w, http.StatusNotFound, "not found") })
 	mux.Handle("/", a.web)
 	return lanOnly(securityHeaders(mux))
@@ -432,7 +440,14 @@ func (a *API) handlePassword(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) handleStatus(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, a.b.Status())
+	writeJSON(w, http.StatusOK, a.status())
+}
+
+// status is the Backend's status with what the API itself knows.
+func (a *API) status() Status {
+	st := a.b.Status()
+	st.WorkerDownloads = a.dist.Available()
+	return st
 }
 
 func (a *API) handlePair(w http.ResponseWriter, r *http.Request) {
@@ -451,7 +466,7 @@ func (a *API) handlePair(w http.ResponseWriter, r *http.Request) {
 		a.writeBackendError(w, err, "pair")
 		return
 	}
-	writeJSON(w, http.StatusOK, a.b.Status())
+	writeJSON(w, http.StatusOK, a.status())
 }
 
 func (a *API) handleUnpair(w http.ResponseWriter, r *http.Request) {
@@ -459,7 +474,7 @@ func (a *API) handleUnpair(w http.ResponseWriter, r *http.Request) {
 		a.writeBackendError(w, err, "unpair")
 		return
 	}
-	writeJSON(w, http.StatusOK, a.b.Status())
+	writeJSON(w, http.StatusOK, a.status())
 }
 
 func (a *API) handleLibraries(w http.ResponseWriter, r *http.Request) {
