@@ -122,6 +122,16 @@ internal/
             floor + .meta sidecar + atomic rename). LocateBinary is the shared
             no-download lookup. A missing artifact degrades gracefully (the stage
             parks/fails that book; the daemon keeps working).
+            An executable is never open for writing across a fork (bridge#12):
+            writeMode streams into a staging file unlocked, then copies it under
+            the fork lock (execfile.CreateTemp) into the file it renames into place,
+            and the whisper-cli entry is always written executable.
+  execfile/ writes files the process will exec with syscall.ForkLock held for
+            reading from open to close, so a concurrent fork can't hold the write
+            descriptor and make the exec fail with ETXTBSY (WriteFile, CreateTemp).
+            A leaf; toolfetch and every test's fake tool use it (it replaced the
+            test-only testexe). Keep the locked write a quick local copy: every fork
+            in the process waits for it.
   audio/    the mechanical audio stages: Inspect (ffprobe -> probe.json + normalized
             manifest.json; marker parsing + contiguity ported from audio_extract.py;
             single-file marker books AND multi-file "files" books) and Split (ffmpeg

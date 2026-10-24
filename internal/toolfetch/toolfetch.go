@@ -48,6 +48,8 @@ import (
 	"time"
 
 	"github.com/ulikunitz/xz"
+
+	"github.com/kodestar/audiosilo-bridge/internal/execfile"
 )
 
 // maxToolBytes caps a single extracted binary and the compressed download itself
@@ -460,8 +462,16 @@ func writeExec(path string, r io.Reader) error {
 // whole one). perm lets a caller preserve an archive entry's own mode (an
 // executable binary vs a plain shared library beside it). It returns the byte
 // count written so budget-enforcing callers can detect an over-cap entry.
+//
+// An executable perm (any x bit) is written twice (bridge#12): r streams into a
+// staging file with no lock held (a download or a decompression is slow, and
+// forks would wait for it), then execfile copies the staged bytes into the file
+// that is renamed into place with no fork while it is open. A goroutine forking
+// during the stream holds only the staging file's descriptor, so the binary is
+// never open for writing in a child when the self-check execs it (ETXTBSY).
 func writeMode(path string, r io.Reader, perm os.FileMode) (int64, error) {
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".partial-"+filepath.Base(path)+"-")
+	dir, base := filepath.Dir(path), filepath.Base(path)
+	tmp, err := os.CreateTemp(dir, ".partial-"+base+"-")
 	if err != nil {
 		return 0, err
 	}
@@ -475,8 +485,31 @@ func writeMode(path string, r io.Reader, perm os.FileMode) (int64, error) {
 	if err := tmp.Close(); err != nil {
 		return n, err
 	}
-	if err := os.Chmod(tmpName, perm); err != nil {
+	final := tmpName
+	if perm&0o111 != 0 {
+		exe, err := copyStagedExec(dir, ".exec-"+base+"-", tmpName)
+		if exe != "" {
+			defer func() { _ = os.Remove(exe) }() // no-op once renamed into place
+		}
+		if err != nil {
+			return n, err
+		}
+		final = exe
+	}
+	if err := os.Chmod(final, perm); err != nil {
 		return n, err
 	}
-	return n, os.Rename(tmpName, path)
+	return n, os.Rename(final, path)
+}
+
+// copyStagedExec copies the staged file src into a new temp file in dir under
+// the fork lock (execfile.CreateTemp) and returns its name ("" if none was made).
+func copyStagedExec(dir, pattern, src string) (string, error) {
+	in, err := os.Open(src) //nolint:gosec // our own staging file
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = in.Close() }()
+	name, _, err := execfile.CreateTemp(dir, pattern, in)
+	return name, err
 }

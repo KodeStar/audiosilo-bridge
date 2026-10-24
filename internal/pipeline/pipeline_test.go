@@ -20,10 +20,10 @@ import (
 	"github.com/kodestar/audiosilo-bridge/internal/asr"
 	"github.com/kodestar/audiosilo-bridge/internal/audio"
 	"github.com/kodestar/audiosilo-bridge/internal/events"
+	"github.com/kodestar/audiosilo-bridge/internal/execfile"
 	"github.com/kodestar/audiosilo-bridge/internal/scheduler"
 	"github.com/kodestar/audiosilo-bridge/internal/state"
 	"github.com/kodestar/audiosilo-bridge/internal/store"
-	"github.com/kodestar/audiosilo-bridge/internal/testexe"
 	"github.com/kodestar/audiosilo-bridge/internal/transcript"
 )
 
@@ -457,7 +457,7 @@ func TestSplitHeartbeatDuringSlowFFmpeg(t *testing.T) {
 	writeManifest(t, work, 1)
 	tool := filepath.Join(t.TempDir(), "ffmpeg-slow")
 	fixture := []byte("#!/bin/sh\nfor last do :; done\nsleep 0.05\ndd if=/dev/zero of=\"$last\" bs=256 count=1 2>/dev/null\n")
-	if err := testexe.WriteFile(tool, fixture); err != nil {
+	if err := execfile.WriteFile(tool, fixture, 0o755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -514,7 +514,7 @@ func TestSplitRetriesInterruptedSourceRead(t *testing.T) {
 	tool := filepath.Join(toolDir, "ffmpeg-interrupted-once")
 	marker := filepath.Join(toolDir, "attempted")
 	fixture := []byte(fmt.Sprintf("#!/bin/sh\nif [ ! -e %s ]; then\n  touch %s\n  echo 'Error opening input: Interrupted system call' >&2\n  exit 252\nfi\nfor last do :; done\ndd if=/dev/zero of=\"$last\" bs=256 count=1 2>/dev/null\n", strconv.Quote(marker), strconv.Quote(marker)))
-	if err := testexe.WriteFile(tool, fixture); err != nil {
+	if err := execfile.WriteFile(tool, fixture, 0o755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1172,7 +1172,7 @@ func TestEnsureToolsAdoptsAppearingTool(t *testing.T) {
 		t.Fatalf("ensureTools resolved %q before the tool exists, want empty", fp)
 	}
 	// The operator installs the binary (executable).
-	if err := testexe.WriteFile(toolPath, []byte("#!/bin/sh\n")); err != nil {
+	if err := execfile.WriteFile(toolPath, []byte("#!/bin/sh\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if _, fp := exe.ensureTools(); fp != toolPath {

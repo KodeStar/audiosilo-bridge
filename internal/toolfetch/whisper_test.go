@@ -18,7 +18,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/kodestar/audiosilo-bridge/internal/testexe"
+	"github.com/kodestar/audiosilo-bridge/internal/execfile"
 )
 
 // TestWhisperAssetFor pins the full platform+device -> asset table, including the
@@ -440,7 +440,7 @@ func seedStaleWhisperInstall(t *testing.T, toolsDir, asset string) string {
 		t.Fatal(err)
 	}
 	binPath := filepath.Join(dir, binName(whisperCLIBase))
-	if err := testexe.WriteFile(binPath, []byte("#!/bin/sh\nexit 0\n")); err != nil {
+	if err := execfile.WriteFile(binPath, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	stale, _ := json.Marshal(whisperMeta{Tag: "whisper-cpp-v0.0.0-old", Asset: asset, SHA256: "deadbeef"})

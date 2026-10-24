@@ -10,13 +10,16 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/ulikunitz/xz"
 
-	"github.com/kodestar/audiosilo-bridge/internal/testexe"
+	"github.com/kodestar/audiosilo-bridge/internal/execfile"
 )
 
 func discard() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
@@ -25,7 +28,7 @@ func discard() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, ni
 func fakeTool(t *testing.T, dir, tool string) string {
 	t.Helper()
 	p := filepath.Join(dir, binName(tool))
-	if err := testexe.WriteFile(p, []byte("#!/bin/sh\nexit 0\n")); err != nil {
+	if err := execfile.WriteFile(p, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	return p
@@ -354,6 +357,96 @@ func TestEnsureDownloadsAndVerifies(t *testing.T) {
 	for _, p := range []string{fm, fp} {
 		if info, err := os.Stat(p); err != nil || info.Mode().Perm()&0o100 == 0 {
 			t.Errorf("downloaded tool %q not executable: %v", p, err)
+		}
+	}
+}
+
+// bridge#12: a tool binary writeMode just wrote execs at once while other
+// goroutines fork (each one's exec is the others' fork), never "text file busy",
+// and no staging file is left behind.
+func TestWriteModeExecutableRunsUnderParallelForks(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell scripts")
+	}
+	const script = "#!/bin/sh\nexit 0\n"
+	dir := t.TempDir()
+	var wg sync.WaitGroup
+	for i := range 4 {
+		wg.Go(func() {
+			p := filepath.Join(dir, "tool"+string(rune('a'+i)))
+			for range 5 {
+				if _, err := writeMode(p, strings.NewReader(script), 0o755); err != nil {
+					t.Error(err)
+					return
+				}
+				if err := exec.Command(p).Run(); err != nil {
+					t.Error(err)
+					return
+				}
+				_ = os.Remove(p)
+			}
+		})
+	}
+	wg.Wait()
+	if left, _ := os.ReadDir(dir); len(left) != 0 {
+		t.Errorf("%d files left behind, first %q", len(left), left[0].Name())
+	}
+}
+
+// writeMode installs exactly the one file with its mode and bytes, executable or
+// not, and on a failed read installs nothing and leaves no temp file.
+func TestWriteModeInstallsOnlyTheFile(t *testing.T) {
+	for _, perm := range []os.FileMode{0o755, 0o644} {
+		dir := t.TempDir()
+		p := filepath.Join(dir, "f")
+		n, err := writeMode(p, strings.NewReader("BODY"), perm)
+		if err != nil || n != 4 {
+			t.Fatalf("writeMode(%v) = %d, %v", perm, n, err)
+		}
+		info, err := os.Stat(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if runtime.GOOS != "windows" && info.Mode().Perm() != perm {
+			t.Errorf("mode = %v, want %v", info.Mode().Perm(), perm)
+		}
+		if b, _ := os.ReadFile(p); string(b) != "BODY" { //nolint:gosec // the test's own file
+			t.Errorf("content = %q", b)
+		}
+		if left, _ := os.ReadDir(dir); len(left) != 1 {
+			t.Errorf("perm %v: %d files in the dir, want 1", perm, len(left))
+		}
+
+		failDir := t.TempDir()
+		if _, err := writeMode(filepath.Join(failDir, "f"), io.MultiReader(strings.NewReader("x"), failingReader{}), perm); err == nil {
+			t.Fatalf("perm %v: writeMode succeeded with a failing reader", perm)
+		}
+		if left, _ := os.ReadDir(failDir); len(left) != 0 {
+			t.Errorf("perm %v: a failed write left %d files", perm, len(left))
+		}
+	}
+}
+
+type failingReader struct{}
+
+func (failingReader) Read([]byte) (int, error) { return 0, io.ErrUnexpectedEOF }
+
+// The whisper-cli binary is written executable even from an entry that dropped
+// the bit (so it takes the fork-safe path before its self-check runs it); any
+// other entry keeps its own bit.
+func TestArchiveEntryPerm(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		exec bool
+		want os.FileMode
+	}{
+		{"bin/" + binName(whisperCLIBase), false, 0o755},
+		{binName(whisperCLIBase), true, 0o755},
+		{"lib/libggml.so", false, 0o644},
+		{"lib/helper", true, 0o755},
+	} {
+		if got := archiveEntryPerm(c.name, c.exec); got != c.want {
+			t.Errorf("archiveEntryPerm(%q, %v) = %v, want %v", c.name, c.exec, got, c.want)
 		}
 	}
 }
