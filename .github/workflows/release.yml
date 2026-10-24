@@ -56,9 +56,8 @@ jobs:
         run: |
           set -eu
           if ! gh release view "$TAG" >/dev/null 2>&1; then
-            case "$TAG" in
-              *-*) gh release create "$TAG" --verify-tag --title "$TAG" --notes "" --prerelease ;;
-              *) gh release create "$TAG" --verify-tag --title "$TAG" --notes "" ;;
-            esac
+            set --
+            case "$TAG" in *-*) set -- --prerelease ;; esac
+            gh release create "$TAG" --verify-tag --title "$TAG" --notes "" "$@"
           fi
           gh release upload "$TAG" dist/*.tar.gz dist/checksums.txt --clobber

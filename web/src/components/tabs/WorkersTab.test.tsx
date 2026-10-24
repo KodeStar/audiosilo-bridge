@@ -62,14 +62,7 @@ describe('WorkersTab', () => {
   });
 
   it('adds a worker and shows its token once, in the commands', async () => {
-    const { calls } = mockFetch({
-      'GET /api/workers': { body: { workers: [] } },
-      'GET /api/status': { body: statusFixture({ public_url: 'http://192.168.1.20:8091' }) },
-      'POST /api/workers': {
-        status: 201,
-        body: { worker: workerFixture({ id: 3, name: 'Studio' }), token: 'asw_secret' },
-      },
-    });
+    const { calls } = addWorker();
     render(<WorkersTab client={client()} />);
     await screen.findByText('No workers yet. Add one below.');
     fireEvent.click(screen.getByRole('button', { name: 'Add worker' }));

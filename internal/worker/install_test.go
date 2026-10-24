@@ -27,7 +27,8 @@ func service(t *testing.T, goos string) (Service, *[]string) {
 		Sleep: func(time.Duration) {}}, &ran
 }
 
-var errNotLoaded = errors.New("exit status 113")
+// errNotLoaded is launchctl print on a job launchd doesn't know.
+const errNotLoaded = exitError(113)
 
 // exitError is what exec reports for a command that exited non-zero.
 type exitError int

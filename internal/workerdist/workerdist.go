@@ -13,7 +13,6 @@ package workerdist
 import (
 	_ "embed"
 	"errors"
-	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -26,9 +25,6 @@ const DefaultDir = "/usr/local/share/audiosilo-bridge/workers"
 
 // ReleasesURL is where the worker builds are published for a manual download.
 const ReleasesURL = "https://github.com/KodeStar/audiosilo-bridge/releases"
-
-// DocsURL is the user guide's page on running a worker.
-const DocsURL = "https://docs.audiosilo.app/users/getting-started/running-a-worker"
 
 // Platform is one OS/architecture a worker runs on.
 type Platform struct {
@@ -139,13 +135,11 @@ func Address(publicURL, scheme, host string) (string, error) {
 }
 
 // Script is install.sh with the Bridge's address baked in. address must come
-// from Address; it goes in single-quoted all the same.
+// from Address; it goes in single-quoted all the same. TestScript holds that
+// install.sh carries the placeholder.
 func Script(address string) (string, error) {
 	if address == "" || strings.ContainsAny(address, "'\r\n") {
 		return "", ErrAddress
-	}
-	if !strings.Contains(script, scriptAddress) {
-		return "", fmt.Errorf("install.sh lacks its address placeholder")
 	}
 	return strings.Replace(script, scriptAddress, "'"+address+"'", 1), nil
 }

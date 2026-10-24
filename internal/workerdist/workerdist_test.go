@@ -163,8 +163,8 @@ func TestScriptRuns(t *testing.T) {
 	}
 	run := func(t *testing.T, args ...string) (string, string, string, error) {
 		t.Helper()
-		dir := filepath.Join(t.TempDir(), "bin")
-		ran, urls := filepath.Join(tmp, t.Name()[len("TestScriptRuns/"):]+".ran"), filepath.Join(tmp, t.Name()[len("TestScriptRuns/"):]+".url")
+		sub := t.TempDir()
+		dir, ran, urls := filepath.Join(sub, "bin"), filepath.Join(sub, "ran"), filepath.Join(sub, "url")
 		cmd := exec.Command("sh", append([]string{"-s", "--", "--dir", dir}, args...)...)
 		cmd.Stdin = strings.NewReader(text)
 		cmd.Env = append(os.Environ(), "PATH="+fakeBin+":"+os.Getenv("PATH"), "SERVED="+served, "RAN="+ran, "URLS="+urls, "HOME="+tmp)
@@ -211,4 +211,24 @@ func TestScriptRuns(t *testing.T) {
 			t.Fatalf("unknown flag: %v\n%s", err, out)
 		}
 	})
+}
+
+// The Dockerfile and release.yml build the same fixed set the routes serve
+// (their shell loops can't import Platforms).
+func TestPlatformsMatchBuilds(t *testing.T) {
+	t.Parallel()
+	list := make([]string, 0, len(Platforms))
+	for _, p := range Platforms {
+		list = append(list, p.OS+"/"+p.Arch)
+	}
+	loop := "for p in " + strings.Join(list, " ") + "; do"
+	for _, f := range []string{"../../Dockerfile", "../../.github/workflows/release.yml"} {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(b), loop) {
+			t.Errorf("%s doesn't build %q", f, loop)
+		}
+	}
 }

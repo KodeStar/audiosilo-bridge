@@ -28,10 +28,15 @@ func (a *API) workerDistRoutes(mux *http.ServeMux) {
 	})
 }
 
-// writePlain answers a curl: plain text, so the message reads in a terminal.
-func writePlain(w http.ResponseWriter, status int, msg string) {
+// plainHeaders marks a response for a curl: plain text, never cached.
+func plainHeaders(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
+}
+
+// writePlain answers a curl: plain text, so the message reads in a terminal.
+func writePlain(w http.ResponseWriter, status int, msg string) {
+	plainHeaders(w)
 	w.WriteHeader(status)
 	_, _ = w.Write([]byte(msg + "\n")) //nolint:gosec // text/plain under nosniff, a fixed sentence
 }
@@ -41,25 +46,22 @@ func (a *API) handleWorkerScript(w http.ResponseWriter, r *http.Request) {
 		writePlain(w, http.StatusNotFound, workerdist.ErrMissing.Error())
 		return
 	}
-	public := ""
-	if a.b != nil {
-		public = a.b.Settings().PublicURL
-	}
 	scheme := "http"
 	if r.TLS != nil {
 		scheme = "https"
 	}
-	addr, err := workerdist.Address(public, scheme, r.Host)
-	if err == nil {
-		var text string
-		if text, err = workerdist.Script(addr); err == nil {
-			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-			w.Header().Set("Cache-Control", "no-store")
-			_, _ = w.Write([]byte(text)) //nolint:gosec // text/plain under nosniff; the address is validated and single-quoted
-			return
-		}
+	addr, err := workerdist.Address(a.b.Settings().PublicURL, scheme, r.Host)
+	if err != nil {
+		writePlain(w, http.StatusBadRequest, err.Error()+": set the Bridge's public address in Settings")
+		return
 	}
-	writePlain(w, http.StatusBadRequest, err.Error()+": set the Bridge's public address in Settings")
+	text, err := workerdist.Script(addr)
+	if err != nil {
+		writePlain(w, http.StatusBadRequest, err.Error()+": set the Bridge's public address in Settings")
+		return
+	}
+	plainHeaders(w)
+	_, _ = w.Write([]byte(text)) //nolint:gosec // text/plain under nosniff; the address is validated and single-quoted
 }
 
 func (a *API) handleWorkerDownload(w http.ResponseWriter, r *http.Request) {
