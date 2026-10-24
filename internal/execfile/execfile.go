@@ -1,6 +1,7 @@
 // Package execfile writes files this process is about to exec (a downloaded
-// ffmpeg or whisper-cli, a test's fake tool) so a concurrent fork can't make
-// them busy.
+// ffmpeg or ffprobe, a test's fake tool) so a concurrent fork can't make them
+// busy. whisper-cli is too big to write this way; toolfetch's self-check
+// retries its first run instead.
 //
 // Writing an executable while another goroutine forks is racy: a child forked
 // between the write's open and its close inherits the write descriptor and

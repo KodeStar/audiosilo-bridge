@@ -472,3 +472,26 @@ func TestSelfCheckRetriesABusyBinary(t *testing.T) {
 		t.Fatalf("self-check of a tool held open throughout = %v, want ETXTBSY", err)
 	}
 }
+
+// bridge#12: a whisper-cli still busy after the self-check's retries is not a
+// "won't run here" failure. Denied: errWhisperSelfCheck (it would adopt the CPU
+// build as a sticky fallback). Allowed: the ETXTBSY error, so the install fails
+// and is tried again.
+func TestWhisperSelfCheckBusyIsNotAFallback(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("only Linux refuses to run a file that is open for writing")
+	}
+	restore := busyRetries
+	busyRetries = []time.Duration{10 * time.Millisecond}
+	defer func() { busyRetries = restore }()
+	p := fakeTool(t, t.TempDir(), "whisper-cli")
+	held, err := os.OpenFile(p, os.O_WRONLY, 0) //nolint:gosec // the test's own tool
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = held.Close() }()
+	err = whisperSelfCheck(context.Background(), p, discard())
+	if !errors.Is(err, syscall.ETXTBSY) || errors.Is(err, errWhisperSelfCheck) {
+		t.Fatalf("self-check of a busy whisper-cli = %v, want ETXTBSY and not errWhisperSelfCheck", err)
+	}
+}

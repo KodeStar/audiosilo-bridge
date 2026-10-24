@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -564,9 +565,15 @@ var errWhisperSelfCheck = errors.New("whisper-cli self-check (--help) failed")
 // is adopted. Unlike verified(), it does NOT remove the failing binary - it lives
 // in a staged temp dir the caller discards - and it wraps errWhisperSelfCheck so
 // the caller can distinguish "won't run here" (CPU-fallback eligible) from a
-// download/extract problem.
+// download/extract problem. A run still refused as busy (ETXTBSY) after
+// runSelfCheck's retries says nothing about whether the build runs here, so it
+// is not errWhisperSelfCheck: the install fails and is tried again, rather than
+// adopting the CPU build as a sticky fallback.
 func whisperSelfCheck(ctx context.Context, path string, log *slog.Logger) error {
 	if err := runSelfCheck(ctx, path, []string{"--help"}, 30*time.Second, log); err != nil {
+		if errors.Is(err, syscall.ETXTBSY) {
+			return fmt.Errorf("whisper-cli self-check: %w", err)
+		}
 		return fmt.Errorf("%w: %v", errWhisperSelfCheck, err)
 	}
 	return nil
