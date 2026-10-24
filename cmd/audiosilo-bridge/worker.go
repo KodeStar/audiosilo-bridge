@@ -116,8 +116,9 @@ func workerInstall(args []string, stdout, stderr io.Writer, remove bool) error {
 		Run: func(name string, args ...string) error {
 			cmd := exec.CommandContext(context.Background(), name, args...) //nolint:gosec // launchctl/systemctl with fixed verbs
 			cmd.Stdout, cmd.Stderr = stdout, stderr
-			if len(args) > 0 && args[0] == "bootout" {
-				// Unloading a job that isn't loaded (a first install) only says so.
+			if len(args) > 0 && (args[0] == "bootout" || args[0] == "print") {
+				// Unloading a job that isn't loaded (a first install) only says so, and
+				// print (waiting for the old job to go) dumps launchd's state.
 				cmd.Stdout, cmd.Stderr = nil, nil
 			}
 			return cmd.Run()
