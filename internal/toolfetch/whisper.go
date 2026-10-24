@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -296,7 +297,11 @@ func installWhisperAsset(ctx context.Context, toolsDir, finalDir, asset string, 
 		return "", fmt.Errorf("whisper-cli asset %q did not contain %s", asset, binName(whisperCLIBase))
 	}
 	// Always mark the binary executable (an archive entry may drop the bit), then
-	// self-check it before adopting anything.
+	// self-check it before adopting anything. It was extracted without the fork
+	// lock and is not copied under it (the CUDA build is over 1 GB: every fork in
+	// the process would wait for the copy, and the install would need room for a
+	// second copy), so a child forked during its extraction may still hold it open
+	// for writing: the self-check retries a run refused as busy (bridge#12).
 	if err := os.Chmod(stagedBin, 0o755); err != nil { //nolint:gosec // the whisper-cli binary must be executable
 		return "", err
 	}
@@ -560,9 +565,15 @@ var errWhisperSelfCheck = errors.New("whisper-cli self-check (--help) failed")
 // is adopted. Unlike verified(), it does NOT remove the failing binary - it lives
 // in a staged temp dir the caller discards - and it wraps errWhisperSelfCheck so
 // the caller can distinguish "won't run here" (CPU-fallback eligible) from a
-// download/extract problem.
+// download/extract problem. A run still refused as busy (ETXTBSY) after
+// runSelfCheck's retries says nothing about whether the build runs here, so it
+// is not errWhisperSelfCheck: the install fails and is tried again, rather than
+// adopting the CPU build as a sticky fallback.
 func whisperSelfCheck(ctx context.Context, path string, log *slog.Logger) error {
 	if err := runSelfCheck(ctx, path, []string{"--help"}, 30*time.Second, log); err != nil {
+		if errors.Is(err, syscall.ETXTBSY) {
+			return fmt.Errorf("whisper-cli self-check: %w", err)
+		}
 		return fmt.Errorf("%w: %v", errWhisperSelfCheck, err)
 	}
 	return nil

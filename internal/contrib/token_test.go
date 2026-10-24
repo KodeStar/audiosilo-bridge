@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/kodestar/audiosilo-bridge/internal/accounts"
-	"github.com/kodestar/audiosilo-bridge/internal/testexe"
+	"github.com/kodestar/audiosilo-bridge/internal/execfile"
 )
 
 // fakeDevice is a scripted device sign-in.
@@ -280,7 +280,7 @@ func writeFakeGh(t *testing.T, script string) string {
 	t.Helper()
 	dir := t.TempDir()
 	p := filepath.Join(dir, "gh")
-	if err := testexe.WriteFile(p, []byte(script)); err != nil {
+	if err := execfile.WriteFile(p, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	return p

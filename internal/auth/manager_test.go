@@ -2,6 +2,7 @@ package auth
 
 import (
 	"errors"
+	"sync"
 	"testing"
 	"time"
 )
@@ -200,5 +201,120 @@ func TestResetPasswordProvisionsWhenNoneWasSet(t *testing.T) {
 	}
 	if _, err := m.Login(pw); err != nil {
 		t.Errorf("login: %v", err)
+	}
+}
+
+// midLoginStore runs replace once, right after a sign-in or a change has loaded
+// the password hash and before it verifies and writes: the window a reset or
+// change in another request (or the reset-password process) can hit.
+type midLoginStore struct {
+	*MemStore
+	once    sync.Once
+	replace func()
+}
+
+func (s *midLoginStore) LoadAuth() (string, error) {
+	h, err := s.MemStore.LoadAuth()
+	s.once.Do(s.replace)
+	return h, err
+}
+
+func sessionCount(mem *MemStore) int {
+	mem.mu.Lock()
+	defer mem.mu.Unlock()
+	return len(mem.sessions)
+}
+
+// Security (bridge#11): a sign-in with the old password that was in flight when
+// the password was reset leaves no session behind. Denied: that sign-in, and
+// no session it could have stored resolves. Allowed: the new password.
+func TestResetPasswordDuringASignInLeavesNoSession(t *testing.T) {
+	mem := NewMemStore()
+	setup := New(mem)
+	old, err := setup.EnsureAdmin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fresh string
+	st := &midLoginStore{MemStore: mem}
+	st.replace = func() {
+		var rerr error
+		if fresh, rerr = setup.ResetPassword(); rerr != nil {
+			t.Error(rerr)
+		}
+	}
+	m := New(st)
+	if tok, err := m.Login(old); !errors.Is(err, ErrInvalidCreds) || tok != "" {
+		t.Fatalf("a sign-in racing the reset = %q, %v; want ErrInvalidCreds", tok, err)
+	}
+	if n := sessionCount(mem); n != 0 {
+		t.Fatalf("%d sessions survived the reset", n)
+	}
+	if _, err := m.Login(fresh); err != nil {
+		t.Errorf("the new password: %v", err)
+	}
+}
+
+// The same window for a password change: the racing sign-in with the old
+// password is refused, and the changer's own session stays.
+func TestChangePasswordDuringASignInLeavesNoSession(t *testing.T) {
+	mem := NewMemStore()
+	setup := New(mem)
+	pw, err := setup.EnsureAdmin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	mine, err := setup.Login(pw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := &midLoginStore{MemStore: mem}
+	st.replace = func() {
+		if err := setup.ChangePassword(pw, "a-new-strong-pass", mine); err != nil {
+			t.Error(err)
+		}
+	}
+	m := New(st)
+	if _, err := m.Login(pw); !errors.Is(err, ErrInvalidCreds) {
+		t.Fatalf("a sign-in racing the change: %v, want ErrInvalidCreds", err)
+	}
+	if ok, _ := m.Resolve(mine); !ok {
+		t.Error("the changer's session was signed out")
+	}
+	if n := sessionCount(mem); n != 1 {
+		t.Errorf("%d sessions after the change, want only the changer's", n)
+	}
+}
+
+// Security: a password change in flight with the old password when a reset
+// lands never overwrites the reset. Denied: that change (ErrInvalidCreds) and
+// the password it chose. Allowed: the reset's printed password.
+func TestChangePasswordDuringAResetKeepsTheReset(t *testing.T) {
+	mem := NewMemStore()
+	setup := New(mem)
+	old, err := setup.EnsureAdmin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	mine, err := setup.Login(old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fresh string
+	st := &midLoginStore{MemStore: mem}
+	st.replace = func() {
+		var rerr error
+		if fresh, rerr = setup.ResetPassword(); rerr != nil {
+			t.Error(rerr)
+		}
+	}
+	if err := New(st).ChangePassword(old, "a-new-strong-pass", mine); !errors.Is(err, ErrInvalidCreds) {
+		t.Fatalf("a change racing the reset: %v, want ErrInvalidCreds", err)
+	}
+	if _, err := setup.Login("a-new-strong-pass"); !errors.Is(err, ErrInvalidCreds) {
+		t.Errorf("the racing change's password signs in: %v", err)
+	}
+	if _, err := setup.Login(fresh); err != nil {
+		t.Errorf("the reset's password: %v", err)
 	}
 }

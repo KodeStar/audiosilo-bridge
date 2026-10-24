@@ -5,18 +5,25 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
+	"sync"
+	"syscall"
 	"testing"
+	"testing/iotest"
+	"time"
 
 	"github.com/ulikunitz/xz"
 
-	"github.com/kodestar/audiosilo-bridge/internal/testexe"
+	"github.com/kodestar/audiosilo-bridge/internal/execfile"
 )
 
 func discard() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
@@ -25,7 +32,7 @@ func discard() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, ni
 func fakeTool(t *testing.T, dir, tool string) string {
 	t.Helper()
 	p := filepath.Join(dir, binName(tool))
-	if err := testexe.WriteFile(p, []byte("#!/bin/sh\nexit 0\n")); err != nil {
+	if err := execfile.WriteFile(p, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	return p
@@ -355,5 +362,136 @@ func TestEnsureDownloadsAndVerifies(t *testing.T) {
 		if info, err := os.Stat(p); err != nil || info.Mode().Perm()&0o100 == 0 {
 			t.Errorf("downloaded tool %q not executable: %v", p, err)
 		}
+	}
+}
+
+// bridge#12: a tool binary copyExec just installed execs at once while other
+// goroutines fork (each one's exec is the others' fork), never "text file busy",
+// and no temp file is left behind. Each source is written the unlocked way
+// (writeMode), as the extraction does; the run is of the copy.
+func TestCopyExecRunsUnderParallelForks(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell scripts")
+	}
+	const script = "#!/bin/sh\nexit 0\n"
+	dir := t.TempDir()
+	var wg sync.WaitGroup
+	for i := range 4 {
+		wg.Go(func() {
+			src := filepath.Join(dir, "src"+string(rune('a'+i)))
+			p := filepath.Join(dir, "tool"+string(rune('a'+i)))
+			for range 5 {
+				if _, err := writeMode(src, strings.NewReader(script), 0o644); err != nil {
+					t.Error(err)
+					return
+				}
+				if err := copyExec(src, p); err != nil {
+					t.Error(err)
+					return
+				}
+				if err := exec.Command(p).Run(); err != nil { //nolint:gosec // the test's own tool
+					t.Error(err)
+					return
+				}
+				_ = os.Remove(p)
+				_ = os.Remove(src)
+			}
+		})
+	}
+	wg.Wait()
+	if left, _ := os.ReadDir(dir); len(left) != 0 {
+		t.Errorf("%d files left behind, first %q", len(left), left[0].Name())
+	}
+}
+
+// writeMode installs exactly the one file with its mode and bytes, executable or
+// not, and on a failed read installs nothing and leaves no temp file.
+func TestWriteModeInstallsOnlyTheFile(t *testing.T) {
+	for _, perm := range []os.FileMode{0o755, 0o644} {
+		dir := t.TempDir()
+		p := filepath.Join(dir, "f")
+		n, err := writeMode(p, strings.NewReader("BODY"), perm)
+		if err != nil || n != 4 {
+			t.Fatalf("writeMode(%v) = %d, %v", perm, n, err)
+		}
+		info, err := os.Stat(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if runtime.GOOS != "windows" && info.Mode().Perm() != perm {
+			t.Errorf("mode = %v, want %v", info.Mode().Perm(), perm)
+		}
+		if b, _ := os.ReadFile(p); string(b) != "BODY" { //nolint:gosec // the test's own file
+			t.Errorf("content = %q", b)
+		}
+		if left, _ := os.ReadDir(dir); len(left) != 1 {
+			t.Errorf("perm %v: %d files in the dir, want 1", perm, len(left))
+		}
+
+		failDir := t.TempDir()
+		if _, err := writeMode(filepath.Join(failDir, "f"), io.MultiReader(strings.NewReader("x"), iotest.ErrReader(io.ErrUnexpectedEOF)), perm); err == nil {
+			t.Fatalf("perm %v: writeMode succeeded with a failing reader", perm)
+		}
+		if left, _ := os.ReadDir(failDir); len(left) != 0 {
+			t.Errorf("perm %v: a failed write left %d files", perm, len(left))
+		}
+	}
+}
+
+// bridge#12: a tool still open for writing when its self-check runs (a child
+// forked during its extraction holds the descriptor until it execs; here the
+// test holds it) is refused with ETXTBSY on Linux. Allowed: released while the
+// self-check retries, it passes. Denied: held throughout, the self-check fails.
+func TestSelfCheckRetriesABusyBinary(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell scripts")
+	}
+	restore := busyRetries
+	busyRetries = []time.Duration{20 * time.Millisecond, 40 * time.Millisecond, 80 * time.Millisecond, 160 * time.Millisecond}
+	defer func() { busyRetries = restore }()
+	p := fakeTool(t, t.TempDir(), "ffmpeg")
+	w, err := os.OpenFile(p, os.O_WRONLY, 0) //nolint:gosec // the test's own tool
+	if err != nil {
+		t.Fatal(err)
+	}
+	release := time.AfterFunc(50*time.Millisecond, func() { _ = w.Close() })
+	defer release.Stop()
+	if err := runSelfCheck(context.Background(), p, nil, 10*time.Second, discard()); err != nil {
+		t.Fatalf("self-check of a tool released while it retries: %v", err)
+	}
+
+	if runtime.GOOS != "linux" {
+		return // only Linux refuses to run a file that is open for writing
+	}
+	held, err := os.OpenFile(p, os.O_WRONLY, 0) //nolint:gosec // the test's own tool
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = held.Close() }()
+	if err := runSelfCheck(context.Background(), p, nil, 10*time.Second, discard()); !errors.Is(err, syscall.ETXTBSY) {
+		t.Fatalf("self-check of a tool held open throughout = %v, want ETXTBSY", err)
+	}
+}
+
+// bridge#12: a whisper-cli still busy after the self-check's retries is not a
+// "won't run here" failure. Denied: errWhisperSelfCheck (it would adopt the CPU
+// build as a sticky fallback). Allowed: the ETXTBSY error, so the install fails
+// and is tried again.
+func TestWhisperSelfCheckBusyIsNotAFallback(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("only Linux refuses to run a file that is open for writing")
+	}
+	restore := busyRetries
+	busyRetries = []time.Duration{10 * time.Millisecond}
+	defer func() { busyRetries = restore }()
+	p := fakeTool(t, t.TempDir(), "whisper-cli")
+	held, err := os.OpenFile(p, os.O_WRONLY, 0) //nolint:gosec // the test's own tool
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = held.Close() }()
+	err = whisperSelfCheck(context.Background(), p, discard())
+	if !errors.Is(err, syscall.ETXTBSY) || errors.Is(err, errWhisperSelfCheck) {
+		t.Fatalf("self-check of a busy whisper-cli = %v, want ETXTBSY and not errWhisperSelfCheck", err)
 	}
 }

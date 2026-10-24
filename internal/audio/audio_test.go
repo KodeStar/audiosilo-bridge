@@ -17,7 +17,7 @@ import (
 
 	"github.com/kodestar/audiosilo-meta/pkg/scan"
 
-	"github.com/kodestar/audiosilo-bridge/internal/testexe"
+	"github.com/kodestar/audiosilo-bridge/internal/execfile"
 )
 
 // --- pure marker parsing / contiguity (no ffmpeg) ---
@@ -858,7 +858,7 @@ func fakeFFmpeg(t *testing.T, path, logPath, sleepSecs string) {
 		script.WriteString("sleep " + sleepSecs + "\n")
 	}
 	script.WriteString("for last do :; done\ndd if=/dev/zero of=\"$last\" bs=256 count=1 2>/dev/null\n")
-	if err := testexe.WriteFile(path, []byte(script.String())); err != nil {
+	if err := execfile.WriteFile(path, []byte(script.String()), 0o755); err != nil {
 		t.Fatal(err)
 	}
 }

@@ -16,11 +16,15 @@ import (
 // every session, for an owner who lost the one the first start printed. It opens
 // only the database in dataDir and changes only the password hash and the
 // sessions: the pairing, the library mappings, the jobs and the sealed secrets
-// stay as they were. A running Bridge reads both from the database, so it takes
-// effect at once. It refuses a folder with no Bridge database (a mistyped --data
-// would otherwise start an empty one), and a root caller in a folder another
-// user owns (the files SQLite adds would be root's, and the Bridge couldn't open
-// its database at the next start).
+// stay as they were, and the password and the sign-out are one transaction. A
+// running Bridge reads both from the database, so it takes effect at once, and a
+// sign-in or a password change it had in flight with the old password is refused
+// (auth's AddSession and ReplacePassword check that the hash it verified is
+// still the stored one): it leaves no session and never overwrites the reset.
+// It refuses a folder with no Bridge database (a mistyped --data would otherwise
+// start an empty one), and a root caller in a folder another user owns (the
+// files SQLite adds would be root's, and the Bridge couldn't open its database at
+// the next start).
 func ResetPassword(ctx context.Context, dataDir string) (string, error) {
 	dbPath := filepath.Join(dataDir, store.FileName)
 	if _, err := os.Stat(dbPath); err != nil {

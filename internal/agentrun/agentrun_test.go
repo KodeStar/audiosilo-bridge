@@ -20,7 +20,7 @@ import (
 
 	"github.com/kodestar/audiosilo-bridge/internal/agent"
 	"github.com/kodestar/audiosilo-bridge/internal/agentproto"
-	"github.com/kodestar/audiosilo-bridge/internal/testexe"
+	"github.com/kodestar/audiosilo-bridge/internal/execfile"
 )
 
 // fakeCLI writes a shell script standing in for claude or codex. On a run it
@@ -47,7 +47,7 @@ if [ -f "$CAP/behavior" ]; then . "$CAP/behavior"; fi
 printf '%s' '{"type":"result","is_error":false,"result":"ok"}'
 `
 	bin = filepath.Join(dir, name)
-	if err := testexe.WriteFile(bin, []byte(script)); err != nil {
+	if err := execfile.WriteFile(bin, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	// Run it once here: the first exec of a new file can be slow on a loaded
@@ -752,7 +752,7 @@ func TestRedetectFindsALateCLI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := testexe.WriteFile(late, body); err != nil {
+	if err := execfile.WriteFile(late, body, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	ex := waitDone(t, te.submit(t, claudeReq), 30*time.Second)

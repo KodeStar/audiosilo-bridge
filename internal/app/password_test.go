@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/kodestar/audiosilo-bridge/internal/auth"
@@ -77,6 +78,57 @@ func TestResetPasswordKeepsPairingAndSecrets(t *testing.T) {
 	}
 	if tok, err := vault.Get(secrets.ServerToken); err != nil || tok != "asb_secret" {
 		t.Errorf("server token after a reset = %q, %v", tok, err)
+	}
+}
+
+// racingStore runs reset once, between a sign-in loading the password hash and
+// storing its session.
+type racingStore struct {
+	*store.AuthStore
+	once  sync.Once
+	reset func()
+}
+
+func (s *racingStore) LoadAuth() (string, error) {
+	h, err := s.AuthStore.LoadAuth()
+	s.once.Do(s.reset)
+	return h, err
+}
+
+// Security (bridge#11): the reset-password command runs beside a live Bridge on
+// its own database connection. A sign-in with the old password that the Bridge
+// had in flight when the command ran stores no session. Denied: that sign-in.
+// Allowed: the printed password, on the Bridge's connection.
+func TestResetPasswordDuringALiveSignIn(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	db, err := store.Open(ctx, filepath.Join(dir, store.FileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	old, err := auth.New(db.AuthStore()).EnsureAdmin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fresh string
+	st := &racingStore{AuthStore: db.AuthStore()}
+	st.reset = func() {
+		var rerr error
+		if fresh, rerr = ResetPassword(ctx, dir); rerr != nil {
+			t.Error(rerr)
+		}
+	}
+	live := auth.New(st)
+	if tok, err := live.Login(old); !errors.Is(err, auth.ErrInvalidCreds) || tok != "" {
+		t.Fatalf("a sign-in racing the reset = %q, %v; want ErrInvalidCreds", tok, err)
+	}
+	tok, err := live.Login(fresh)
+	if err != nil {
+		t.Fatalf("the new password: %v", err)
+	}
+	if ok, _ := live.Resolve(tok); !ok {
+		t.Error("the new password's session doesn't resolve")
 	}
 }
 

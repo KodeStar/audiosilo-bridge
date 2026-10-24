@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kodestar/audiosilo-bridge/internal/testexe"
+	"github.com/kodestar/audiosilo-bridge/internal/execfile"
 )
 
 // writeSleepScript writes an executable POSIX script that sleeps for the given
@@ -22,7 +22,7 @@ func writeSleepScript(t *testing.T, sleepArg string) string {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "sleeper")
 	script := "#!/bin/sh\nsleep " + sleepArg + "\nexit 0\n"
-	if err := testexe.WriteFile(path, []byte(script)); err != nil {
+	if err := execfile.WriteFile(path, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	return path

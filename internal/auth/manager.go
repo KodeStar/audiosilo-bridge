@@ -46,23 +46,28 @@ func (m *Manager) EnsureAdmin() (oneTimePassword string, err error) {
 	if hash != "" {
 		return "", nil
 	}
-	return m.setGenerated()
-}
-
-// setGenerated stores a new generated password's hash and returns the plaintext.
-func (m *Manager) setGenerated() (string, error) {
-	pw, err := generatePassword()
+	pw, enc, err := generateHashed()
 	if err != nil {
 		return "", err
 	}
-	enc, err := HashPassword(pw)
-	if err != nil {
-		return "", err
-	}
-	if err := m.store.SaveAuth(enc); err != nil {
+	// With no password no session should be live; the sign-out makes sure.
+	if _, err := m.store.ReplacePassword("", enc, ""); err != nil {
 		return "", err
 	}
 	return pw, nil
+}
+
+// generateHashed returns a new generated password and its argon2id hash.
+func generateHashed() (pw, enc string, err error) {
+	pw, err = generatePassword()
+	if err != nil {
+		return "", "", err
+	}
+	enc, err = HashPassword(pw)
+	if err != nil {
+		return "", "", err
+	}
+	return pw, enc, nil
 }
 
 // Login verifies password and, on success, mints and stores a new session token,
@@ -82,17 +87,25 @@ func (m *Manager) Login(password string) (string, error) {
 	if !ok {
 		return "", ErrInvalidCreds
 	}
-	return m.mintSession()
+	return m.mintSession(hash)
 }
 
-// mintSession creates a session and returns the raw token secret.
-func (m *Manager) mintSession() (string, error) {
+// mintSession creates a session and returns the raw token secret. passwordHash
+// is the hash the password was verified against: the store adds the session
+// only while it is still the stored one, so a sign-in that verified the old
+// password while a change or reset replaced it is refused (ErrInvalidCreds)
+// rather than leaving a session the replacement didn't sign out.
+func (m *Manager) mintSession(passwordHash string) (string, error) {
 	secret, tokenHash, err := generateToken()
 	if err != nil {
 		return "", err
 	}
-	if err := m.store.AddSession(tokenHash, m.now()); err != nil {
+	added, err := m.store.AddSession(tokenHash, m.now(), passwordHash)
+	if err != nil {
 		return "", err
+	}
+	if !added {
+		return "", ErrInvalidCreds
 	}
 	return secret, nil
 }
@@ -116,7 +129,9 @@ func (m *Manager) Logout(token string) error {
 // ChangePassword verifies current and sets a new password hash. It enforces the
 // minimum length on the new password, and signs out every other session (a
 // password change is how a leaked session is cut off); the session keep (the
-// caller's token) stays signed in.
+// caller's token) stays signed in. The new hash replaces only the one current
+// was verified against: a reset or another change that lands while this one
+// hashes is never overwritten, and this change is refused (ErrInvalidCreds).
 func (m *Manager) ChangePassword(current, newPassword, keep string) error {
 	hash, err := m.store.LoadAuth()
 	if err != nil {
@@ -139,10 +154,14 @@ func (m *Manager) ChangePassword(current, newPassword, keep string) error {
 	if err != nil {
 		return err
 	}
-	if err := m.store.SaveAuth(enc); err != nil {
+	replaced, err := m.store.ReplacePassword(hash, enc, hashSecret(keep))
+	if err != nil {
 		return err
 	}
-	return m.store.RemoveSessionsExcept(hashSecret(keep))
+	if !replaced {
+		return ErrInvalidCreds
+	}
+	return nil
 }
 
 // ResetPassword replaces the password with a new generated one-time password
@@ -150,12 +169,20 @@ func (m *Manager) ChangePassword(current, newPassword, keep string) error {
 // ONCE (the `reset-password` command, for an owner who lost the first start's
 // password). It touches only the password hash and the sessions: the pairing,
 // the sealed secrets and everything else stay as they were.
+//
+// The new hash and the sign-out are one store transaction (no session's hash is
+// empty, so keeping "" removes them all): a failure changes nothing and leaves
+// the old password working, never a new one stored but not printed, and no
+// sign-in can land between the two steps (bridge#11). The reset replaces
+// whatever is stored; a sign-in or a change in flight with the old password is
+// refused instead.
 func (m *Manager) ResetPassword() (oneTimePassword string, err error) {
-	// Everyone is signed out first (no session's hash is empty, so this removes
-	// them all): a failure after it leaves the old password working, never a new
-	// one that was stored but not returned to be printed.
-	if err := m.store.RemoveSessionsExcept(""); err != nil {
+	pw, enc, err := generateHashed()
+	if err != nil {
 		return "", err
 	}
-	return m.setGenerated()
+	if _, err := m.store.ReplacePassword("", enc, ""); err != nil {
+		return "", err
+	}
+	return pw, nil
 }
