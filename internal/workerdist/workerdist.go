@@ -13,7 +13,6 @@ package workerdist
 import (
 	_ "embed"
 	"errors"
-	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -119,15 +118,11 @@ const scriptAddress = "'@@BRIDGE@@'"
 // names can carry an underscore), an IPv4 or a bracketed IPv6 address.
 var hostPattern = regexp.MustCompile(`^[A-Za-z0-9._\-]+(:[0-9]+)?$|^\[[0-9A-Fa-f:.]+\](:[0-9]+)?$`)
 
-// Address is the Bridge's address as a worker reaches it: the configured
-// public address when it is a plain http(s) one, else scheme://host from the
-// request the script came in on (ErrAddress when neither is).
-func Address(publicURL, scheme, host string) (string, error) {
-	if u, err := url.Parse(strings.TrimSpace(publicURL)); err == nil && publicURL != "" &&
-		(u.Scheme == "http" || u.Scheme == "https") && hostPattern.MatchString(u.Host) &&
-		u.User == nil && u.RawQuery == "" && u.Fragment == "" && !strings.ContainsAny(u.Path, "'\"\\`$ \t\r\n") {
-		return strings.TrimRight(u.Scheme+"://"+u.Host+u.EscapedPath(), "/"), nil
-	}
+// Address is the Bridge's address as the computer fetching the script
+// reached it: scheme://host of that request, so it is reachable from there by
+// construction (ErrAddress for a host a script can't carry). The configured
+// public address only goes into the command the Workers tab shows.
+func Address(scheme, host string) (string, error) {
 	if (scheme == "http" || scheme == "https") && hostPattern.MatchString(host) {
 		return scheme + "://" + host, nil
 	}
@@ -142,4 +137,14 @@ func Script(address string) (string, error) {
 		return "", ErrAddress
 	}
 	return strings.Replace(script, scriptAddress, "'"+address+"'", 1), nil
+}
+
+// ErrorScript is what /worker/install.sh serves when it can't serve install.sh:
+// a script that prints why to stderr and exits 1. `curl -fsSL` drops the body
+// of an error status, so an error status would reach `sh` as an empty script
+// that exits 0 and says nothing.
+func ErrorScript(msg string) string {
+	quoted := "'" + strings.ReplaceAll(strings.ReplaceAll(msg, "\r", " "), "'", `'\''`) + "'"
+	return "#!/bin/sh\n# The AudioSilo Bridge can't serve its worker install script.\n" +
+		"printf 'audiosilo-bridge worker: %s\\n' " + quoted + " >&2\nexit 1\n"
 }

@@ -1,10 +1,13 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -29,8 +32,8 @@ func distEnv(t *testing.T, missing bool) *env {
 }
 
 // The script and the downloads answer the LAN with no page password, the
-// script with the address it was fetched from baked in, or the public address
-// once one is set.
+// script with the address it was fetched from baked in (never the public
+// address: the one the curl reached is reachable from that computer).
 func TestWorkerDistAllowed(t *testing.T) {
 	t.Parallel()
 	e := distEnv(t, false)
@@ -43,8 +46,12 @@ func TestWorkerDistAllowed(t *testing.T) {
 		t.Fatalf("script content type = %q", ct)
 	}
 	e.b.saved.PublicURL = "http://192.168.1.20:8091/"
-	if r := e.do("GET", RouteWorkerScript, "", ""); !strings.Contains(r.Body.String(), "BRIDGE='http://192.168.1.20:8091'") {
-		t.Fatalf("script with a public address = %.300s", r.Body.String())
+	req := httptest.NewRequest("GET", RouteWorkerScript, nil)
+	req.RemoteAddr, req.Host = "192.168.1.30:5000", "10.0.0.7:18091"
+	rec := httptest.NewRecorder()
+	e.h.ServeHTTP(rec, req)
+	if !strings.Contains(rec.Body.String(), "BRIDGE='http://10.0.0.7:18091'") || strings.Contains(rec.Body.String(), "192.168.1.20") {
+		t.Fatalf("script with a public address set = %.300s", rec.Body.String())
 	}
 	r = e.do("GET", "/worker/download/darwin/arm64", "", "", "127.0.0.1:4000")
 	if r.Code != http.StatusOK || r.Body.String() != "GZ" || r.Header().Get("Content-Type") != "application/gzip" ||
@@ -90,24 +97,35 @@ func TestWorkerDistDenied(t *testing.T) {
 	req.Host = "evil';rm -rf ~;'"
 	rec := httptest.NewRecorder()
 	e.h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusBadRequest || strings.Contains(rec.Body.String(), "rm -rf") {
+	// Answered 200 as a script that says why and exits 1 (`curl -fsSL` would
+	// drop an error status's body, and sh would exit 0 on nothing).
+	if rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), "rm -rf") || strings.Contains(rec.Body.String(), "BRIDGE=") {
 		t.Fatalf("bad host = %d %q", rec.Code, rec.Body.String())
+	}
+	if stderr, code := runScript(t, rec.Body.String()); code != 1 || !strings.Contains(stderr, "isn't a plain host name or IP address") {
+		t.Fatalf("bad host script: exit %d, %q", code, stderr)
 	}
 }
 
 // Without the image's folder (a native run), both routes say where the
-// releases are, and the status says there are no downloads.
+// releases are: the download as a 404, the script as a script that prints it
+// and exits 1. The status says there are no downloads.
 func TestWorkerDistMissing(t *testing.T) {
 	t.Parallel()
 	e := distEnv(t, true)
-	for _, path := range []string{RouteWorkerScript, "/worker/download/darwin/arm64"} {
-		r := e.do("GET", path, "", "")
-		if r.Code != http.StatusNotFound || !strings.Contains(r.Body.String(), workerdist.ReleasesURL) {
-			t.Fatalf("%s = %d %q", path, r.Code, r.Body.String())
-		}
+	r := e.do("GET", "/worker/download/darwin/arm64", "", "")
+	if r.Code != http.StatusNotFound || !strings.Contains(r.Body.String(), workerdist.ReleasesURL) {
+		t.Fatalf("download = %d %q", r.Code, r.Body.String())
+	}
+	r = e.do("GET", RouteWorkerScript, "", "")
+	if r.Code != http.StatusOK || strings.Contains(r.Body.String(), "BRIDGE=") {
+		t.Fatalf("script = %d %q", r.Code, r.Body.String())
+	}
+	if stderr, code := runScript(t, r.Body.String()); code != 1 || !strings.Contains(stderr, workerdist.ReleasesURL) {
+		t.Fatalf("missing script: exit %d, %q", code, stderr)
 	}
 	var st Status
-	r := e.do("GET", "/api/status", e.token, "")
+	r = e.do("GET", "/api/status", e.token, "")
 	if err := json.Unmarshal(r.Body.Bytes(), &st); err != nil || st.WorkerDownloads {
 		t.Fatalf("status = %s, %v", r.Body.String(), err)
 	}
@@ -116,4 +134,23 @@ func TestWorkerDistMissing(t *testing.T) {
 	if err := json.Unmarshal(r.Body.Bytes(), &st); err != nil || !st.WorkerDownloads {
 		t.Fatalf("status = %s, %v", r.Body.String(), err)
 	}
+}
+
+// runScript runs a served script with sh: its stderr and exit code.
+func runScript(t *testing.T, text string) (string, int) {
+	t.Helper()
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("no sh")
+	}
+	cmd := exec.Command("sh")
+	cmd.Dir = t.TempDir()
+	cmd.Stdin = strings.NewReader(text)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	var exit *exec.ExitError
+	if err != nil && !errors.As(err, &exit) {
+		t.Fatal(err)
+	}
+	return stderr.String(), cmd.ProcessState.ExitCode()
 }

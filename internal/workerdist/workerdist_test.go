@@ -59,34 +59,71 @@ func TestOpen(t *testing.T) {
 func TestAddress(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
-		public, scheme, host, want string
+		scheme, host, want string
 	}{
-		{"http://192.168.1.20:8091/", "http", "10.0.0.1:8091", "http://192.168.1.20:8091"},
-		{"https://bridge.lan/sub/", "http", "x", "https://bridge.lan/sub"},
-		{"", "http", "10.0.0.1:8091", "http://10.0.0.1:8091"},
-		{"", "http", "[fd00::1]:8091", "http://[fd00::1]:8091"},
-		{"", "https", "nas.local", "https://nas.local"},
-		{"", "http", "my_nas:8091", "http://my_nas:8091"},
-		// A public address that can't go into a script falls back to the request's.
-		{"ftp://nas", "http", "nas:8091", "http://nas:8091"},
-		{"http://user:pw@nas:8091", "http", "nas:8091", "http://nas:8091"},
-		{"http://nas:8091/?a=1", "http", "nas:8091", "http://nas:8091"},
-		{"http://nas:8091/a'b", "http", "nas:8091", "http://nas:8091"},
-		{"http://na's:8091", "http", "nas:8091", "http://nas:8091"},
+		{"http", "10.0.0.1:8091", "http://10.0.0.1:8091"},
+		{"http", "[fd00::1]:8091", "http://[fd00::1]:8091"},
+		{"https", "nas.local", "https://nas.local"},
+		{"http", "my_nas:8091", "http://my_nas:8091"},
 	} {
-		got, err := Address(tc.public, tc.scheme, tc.host)
+		got, err := Address(tc.scheme, tc.host)
 		if err != nil || got != tc.want {
-			t.Errorf("Address(%q, %q, %q) = %q, %v, want %q", tc.public, tc.scheme, tc.host, got, err, tc.want)
+			t.Errorf("Address(%q, %q) = %q, %v, want %q", tc.scheme, tc.host, got, err, tc.want)
 		}
 	}
-	for _, host := range []string{"", "a b", "evil';rm -rf ~;'", "nas:80:80", "$(id)", "nas\n"} {
-		if got, err := Address("", "http", host); !errors.Is(err, ErrAddress) {
+	for _, host := range []string{"", "a b", "evil';rm -rf ~;'", "nas:80:80", "$(id)", "nas\n", "user@nas", "nas/x"} {
+		if got, err := Address("http", host); !errors.Is(err, ErrAddress) {
 			t.Errorf("Address(host %q) = %q, %v", host, got, err)
 		}
 	}
-	if _, err := Address("", "file", "nas"); !errors.Is(err, ErrAddress) {
+	if _, err := Address("file", "nas"); !errors.Is(err, ErrAddress) {
 		t.Errorf("a file scheme = %v", err)
 	}
+}
+
+// An error script says why on stderr and exits 1, whatever the message holds
+// (quotes, a command substitution, a newline): it is printed, never run.
+func TestErrorScript(t *testing.T) {
+	t.Parallel()
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("no sh")
+	}
+	for _, msg := range []string{ErrMissing.Error(), "it's $(touch pwned) `id` \"x\"\nline two\r"} {
+		text := ErrorScript(msg)
+		if !strings.HasPrefix(text, "#!/bin/sh\n") {
+			t.Fatalf("script:\n%s", text)
+		}
+		dir := t.TempDir()
+		cmd := exec.Command("sh", "-n")
+		cmd.Stdin = strings.NewReader(text)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("sh -n: %v\n%s", err, out)
+		}
+		stderr, code := runScript(t, text, dir)
+		want := "audiosilo-bridge worker: " + strings.ReplaceAll(msg, "\r", " ") + "\n"
+		if code != 1 || stderr != want {
+			t.Fatalf("exit %d, stderr %q, want %q", code, stderr, want)
+		}
+		if _, err := os.Stat(filepath.Join(dir, "pwned")); err == nil {
+			t.Fatal("the message ran a command")
+		}
+	}
+}
+
+// runScript runs a script with sh in dir: its stderr and exit code.
+func runScript(t *testing.T, text, dir string) (string, int) {
+	t.Helper()
+	cmd := exec.Command("sh")
+	cmd.Dir = dir
+	cmd.Stdin = strings.NewReader(text)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	var exit *exec.ExitError
+	if err != nil && !errors.As(err, &exit) {
+		t.Fatal(err)
+	}
+	return stderr.String(), cmd.ProcessState.ExitCode()
 }
 
 // The served script carries the address once, single-quoted, parses as POSIX

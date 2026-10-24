@@ -44,27 +44,36 @@ func writePlain(w http.ResponseWriter, status int, msg string) {
 	_, _ = w.Write([]byte(msg + "\n")) //nolint:gosec // text/plain under nosniff, a fixed sentence
 }
 
+// handleWorkerScript serves install.sh with the address this request reached
+// baked in. It always answers 200 with a script: when install.sh can't be
+// served, a script that says why and exits 1 (`curl -fsSL` would drop an error
+// status's body, and `sh` would run the empty script and exit 0).
 func (a *API) handleWorkerScript(w http.ResponseWriter, r *http.Request) {
+	text, err := a.workerScript(r)
+	if err != nil {
+		text = workerdist.ErrorScript(err.Error())
+	}
+	plainHeaders(w)
+	_, _ = w.Write([]byte(text)) //nolint:gosec // text/plain under nosniff; the address is validated and single-quoted
+}
+
+func (a *API) workerScript(r *http.Request) (string, error) {
 	if !a.dist.Available() {
-		writePlain(w, http.StatusNotFound, workerdist.ErrMissing.Error())
-		return
+		return "", workerdist.ErrMissing
 	}
 	scheme := "http"
 	if r.TLS != nil {
 		scheme = "https"
 	}
-	addr, err := workerdist.Address(a.b.Settings().PublicURL, scheme, r.Host)
-	if err != nil {
-		writePlain(w, http.StatusBadRequest, err.Error()+": set the Bridge's public address in Settings")
-		return
+	addr, err := workerdist.Address(scheme, r.Host)
+	if err == nil {
+		var text string
+		if text, err = workerdist.Script(addr); err == nil {
+			return text, nil
+		}
 	}
-	text, err := workerdist.Script(addr)
-	if err != nil {
-		writePlain(w, http.StatusBadRequest, err.Error()+": set the Bridge's public address in Settings")
-		return
-	}
-	plainHeaders(w)
-	_, _ = w.Write([]byte(text)) //nolint:gosec // text/plain under nosniff; the address is validated and single-quoted
+	return "", errors.New("the address this was fetched from isn't a plain host name or IP address: " +
+		"fetch it from the Bridge's IP address and port, as the Workers tab shows")
 }
 
 func (a *API) handleWorkerDownload(w http.ResponseWriter, r *http.Request) {

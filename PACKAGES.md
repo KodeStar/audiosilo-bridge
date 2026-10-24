@@ -2249,9 +2249,14 @@ internal/
             VERSION, never embedded in the binary), Open (the file name comes from
             the set, never the request; ErrUnknownPlatform, ErrMissing with the
             releases URL when the folder is absent: a native run), Available, and
-            install.sh (go:embed, POSIX sh): Address (the public URL when it is a
-            plain http(s) one, else scheme://Host, ErrAddress for anything a
-            script can't carry) baked in single-quoted by Script. The script
+            install.sh (go:embed, POSIX sh): Address (scheme://Host of the request
+            that fetched it, reachable from that computer by construction; never
+            public_url, which only goes into the Workers tab's command;
+            ErrAddress for a host a script can't carry) baked in single-quoted by
+            Script. When install.sh can't be served (no folder, a bad Host) the
+            route still answers 200 with ErrorScript: it prints why to stderr and
+            exits 1, since `curl -fsSL` drops an error status's body and sh would
+            exit 0 on nothing. The script
             (one main function, called on its last line, so a download cut
             short runs nothing) takes --token (required the first time; an
             update reuses the data dir's saved token), --run, --dir; detects
@@ -2372,7 +2377,8 @@ internal/
             /worker/download/{os}/{arch} (internal/workerdist), outside
             /worker/v1, behind lanOnly, with NO page password (a curl | sh has no
             session; the worker token in the user's command is the credential),
-            plain-text 404 naming the releases when the image's folder is absent;
+            the download a plain-text 404 naming the releases when the image's
+            folder is absent (install.sh an error script that exits 1 instead);
             status carries worker_downloads (the folder has a build).
             Phase 1b:
             workers.go serves /worker/v1/* to the injected WorkerHub: a worker token

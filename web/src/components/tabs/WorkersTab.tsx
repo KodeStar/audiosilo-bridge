@@ -143,8 +143,9 @@ function WorkerItem({
           <div className="flex flex-col gap-3 rounded-md border border-edge bg-surface p-3">
             <p className="text-body">
               Removing the worker revokes its token: it stops at its next call, and the segment it
-              is on goes to another worker or the Bridge. Uninstall it on its computer too (
-              {WORKER_BINARY} worker uninstall).
+              is on goes to another worker or the Bridge. Uninstall it on its computer too: run
+              audiosilo-bridge worker uninstall there (the program is in
+              ~/.audiosilo-bridge-worker/bin if you used the install command).
             </p>
             <div className="flex gap-2">
               <button type="button" onClick={remove} disabled={busy} className={dangerButton}>

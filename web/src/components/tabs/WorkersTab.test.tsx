@@ -164,7 +164,9 @@ describe('WorkersTab', () => {
     });
     render(<WorkersTab client={client()} />);
     fireEvent.click(await screen.findByRole('button', { name: 'Remove...' }));
-    expect(screen.getByText(/revokes its token/)).toBeInTheDocument();
+    expect(screen.getByText(/revokes its token/)).toHaveTextContent(
+      'run audiosilo-bridge worker uninstall there (the program is in ~/.audiosilo-bridge-worker/bin if you used the install command)',
+    );
     fireEvent.click(screen.getByRole('button', { name: 'Remove' }));
     await waitFor(() => expect(lastCall(calls, 'DELETE', '/api/workers/7')).toBeDefined());
   });
