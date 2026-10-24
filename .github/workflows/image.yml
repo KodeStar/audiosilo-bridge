@@ -11,14 +11,22 @@ name: image
 #             the agent container, decision 15)
 # latest* moves only for a release tag (not a pre-release like v1.2.0-rc.1); a
 # dispatch from a branch publishes under the branch's name (<branch>, -slim, -cuda, -agent).
+# Every push to main publishes :edge and :edge-agent, unreleased builds for testing
+# main before a release (slim and cuda stay tag-only to spare the runner minutes);
+# a newer push cancels an edge build still running, so an older one never lands last.
 # The Go binary and the page cross-build on the runner ($BUILDPLATFORM); only the
 # final apt step of the arm64 legs runs under QEMU (the agent leg also runs the
 # CLIs' --version there).
 on:
   push:
+    branches: [main]
     tags:
       - "v*"
   workflow_dispatch:
+
+concurrency:
+  group: image-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type == 'branch' }}
 
 permissions:
   contents: read
@@ -34,6 +42,7 @@ jobs:
           - target: full
             suffix: ""
             platforms: linux/amd64,linux/arm64
+            edge: true
           - target: slim
             suffix: "-slim"
             platforms: linux/amd64,linux/arm64
@@ -43,6 +52,7 @@ jobs:
           - target: agent
             suffix: "-agent"
             platforms: linux/amd64,linux/arm64
+            edge: true
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -76,10 +86,13 @@ jobs:
             suffix=${{ matrix.suffix }}
           tags: |
             type=ref,event=tag
-            type=ref,event=branch
+            type=ref,event=branch,enable=${{ github.event_name == 'workflow_dispatch' }}
+            type=edge,branch=main,enable=${{ github.event_name == 'push' && matrix.edge == true }}
             type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-') }}
 
+      # A push to main builds only the legs with an edge tag (full, agent).
       - name: Build and push
+        if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch' || matrix.edge == true
         uses: docker/build-push-action@v6
         with:
           context: .
