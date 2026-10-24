@@ -66,14 +66,10 @@ func (a *API) workerScript(r *http.Request) (string, error) {
 		scheme = "https"
 	}
 	addr, err := workerdist.Address(scheme, r.Host)
-	if err == nil {
-		var text string
-		if text, err = workerdist.Script(addr); err == nil {
-			return text, nil
-		}
+	if err != nil {
+		return "", err
 	}
-	return "", errors.New("the address this was fetched from isn't a plain host name or IP address: " +
-		"fetch it from the Bridge's IP address and port, as the Workers tab shows")
+	return workerdist.Script(addr)
 }
 
 func (a *API) handleWorkerDownload(w http.ResponseWriter, r *http.Request) {

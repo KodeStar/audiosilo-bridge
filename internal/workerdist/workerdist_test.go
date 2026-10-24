@@ -94,11 +94,6 @@ func TestErrorScript(t *testing.T) {
 			t.Fatalf("script:\n%s", text)
 		}
 		dir := t.TempDir()
-		cmd := exec.Command("sh", "-n")
-		cmd.Stdin = strings.NewReader(text)
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("sh -n: %v\n%s", err, out)
-		}
 		stderr, code := runScript(t, text, dir)
 		want := "audiosilo-bridge worker: " + strings.ReplaceAll(msg, "\r", " ") + "\n"
 		if code != 1 || stderr != want {

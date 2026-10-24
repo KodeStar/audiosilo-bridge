@@ -26,7 +26,8 @@ export function shellQuote(word: string): string {
 
 // Where the install script puts the program (the worker's default data dir
 // holds it), and the pages a manual install starts from.
-export const WORKER_BINARY = '~/.audiosilo-bridge-worker/bin/audiosilo-bridge';
+export const WORKER_BIN_DIR = '~/.audiosilo-bridge-worker/bin';
+export const WORKER_BINARY = `${WORKER_BIN_DIR}/audiosilo-bridge`;
 export const WORKER_DOCS_URL = 'https://docs.audiosilo.app/users/getting-started/running-a-worker';
 export const WORKER_RELEASES_URL = 'https://github.com/KodeStar/audiosilo-bridge/releases';
 

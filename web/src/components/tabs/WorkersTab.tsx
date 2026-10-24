@@ -7,6 +7,7 @@ import {
   audioHours,
   bridgeAddress,
   isLoopback,
+  WORKER_BIN_DIR,
   WORKER_BINARY,
   WORKER_DOCS_URL,
   WORKER_RELEASES_URL,
@@ -144,8 +145,8 @@ function WorkerItem({
             <p className="text-body">
               Removing the worker revokes its token: it stops at its next call, and the segment it
               is on goes to another worker or the Bridge. Uninstall it on its computer too: run
-              audiosilo-bridge worker uninstall there (the program is in
-              ~/.audiosilo-bridge-worker/bin if you used the install command).
+              audiosilo-bridge worker uninstall there (the program is in {WORKER_BIN_DIR} if you
+              used the install command).
             </p>
             <div className="flex gap-2">
               <button type="button" onClick={remove} disabled={busy} className={dangerButton}>

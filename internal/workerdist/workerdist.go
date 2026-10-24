@@ -47,8 +47,9 @@ var (
 	// ErrMissing: this Bridge has no build for it (no worker folder: a native
 	// run, not the image).
 	ErrMissing = errors.New("this Bridge has no worker downloads (it isn't running from the Docker image): download audiosilo-bridge for the worker's computer from " + ReleasesURL)
-	// ErrAddress: the Bridge's address can't go into the script.
-	ErrAddress = errors.New("the Bridge's address isn't a plain http(s) address")
+	// ErrAddress: the address the script was fetched from can't go into it.
+	ErrAddress = errors.New("the address this was fetched from isn't a plain host name or IP address: " +
+		"fetch it from the Bridge's IP address and port, as the Workers tab shows")
 )
 
 // Dist is a folder of worker builds.
