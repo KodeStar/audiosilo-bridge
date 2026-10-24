@@ -1015,7 +1015,12 @@ internal/
   auth/     single admin password (argon2id, generated + printed once on first run),
             opaque SHA-256-hashed session tokens, a per-IP login rate limiter; the
             Store interface is storage-agnostic (MemStore for tests; the SQLite
-            store.AuthStore in production - the M0 JSON store was removed in M1)
+            store.AuthStore in production - the M0 JSON store was removed in M1).
+            A change or reset is ReplacePassword: the new hash and the sign-out in
+            one transaction (bridge#11); AddSession takes the hash the sign-in
+            verified and stores the session only while it is still the stored one
+            (one INSERT ... WHERE EXISTS), so a sign-in racing a change or the
+            reset-password process is refused and leaves no session
   ghauth/   Phase 2b: the GitHub App user sign-in (the audiosilo-contributions App,
             DefaultClientID, AppID 5387686; the client ID overridable in config):
             RequestCode / Poll / Wait (the device flow: pending and slow_down arrive

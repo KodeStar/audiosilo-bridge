@@ -40,12 +40,23 @@ func (a *AuthStore) SaveAuth(passwordHash string) error {
 	return a.db.SetSetting(a.ctx, authPasswordKey, passwordHash)
 }
 
-// AddSession records a live session by its token hash.
-func (a *AuthStore) AddSession(tokenHash string, createdAt time.Time) error {
-	_, err := a.db.sql.ExecContext(a.ctx,
-		`INSERT INTO sessions (token_hash, created_at) VALUES (?,?)
-		 ON CONFLICT(token_hash) DO NOTHING`, tokenHash, timestamp(createdAt))
-	return err
+// AddSession records a live session by its token hash, only while
+// passwordHash is still the stored password hash. The check and the insert are
+// one statement, so a password change or reset committed by another connection
+// (the reset-password command runs as its own process) can't slip between
+// them. It reports false, adding nothing, when the hash differs or tokenHash is
+// already a session.
+func (a *AuthStore) AddSession(tokenHash string, createdAt time.Time, passwordHash string) (bool, error) {
+	res, err := a.db.sql.ExecContext(a.ctx,
+		`INSERT INTO sessions (token_hash, created_at)
+		 SELECT ?, ? WHERE EXISTS (SELECT 1 FROM settings WHERE key=? AND value=?)
+		 ON CONFLICT(token_hash) DO NOTHING`,
+		tokenHash, timestamp(createdAt), authPasswordKey, passwordHash)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n == 1, err
 }
 
 // HasSession reports whether tokenHash names a live session.
@@ -68,8 +79,23 @@ func (a *AuthStore) RemoveSession(tokenHash string) error {
 	return err
 }
 
-// RemoveSessionsExcept deletes every session but keepHash's.
-func (a *AuthStore) RemoveSessionsExcept(keepHash string) error {
-	_, err := a.db.sql.ExecContext(a.ctx, `DELETE FROM sessions WHERE token_hash != ?`, keepHash)
-	return err
+// ReplacePassword stores passwordHash and deletes every session but keepHash's
+// in one transaction (bridge#11): both commit or neither does. The upsert comes
+// first, so the transaction holds the write lock from its first statement and
+// no session can be added in between, by this process or another.
+func (a *AuthStore) ReplacePassword(passwordHash, keepHash string) error {
+	tx, err := a.db.sql.BeginTx(a.ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }() // a no-op once committed
+	if _, err := tx.ExecContext(a.ctx,
+		`INSERT INTO settings (key, value) VALUES (?,?)
+		 ON CONFLICT(key) DO UPDATE SET value=excluded.value`, authPasswordKey, passwordHash); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(a.ctx, `DELETE FROM sessions WHERE token_hash != ?`, keepHash); err != nil {
+		return err
+	}
+	return tx.Commit()
 }

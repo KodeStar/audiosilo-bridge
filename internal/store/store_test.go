@@ -627,8 +627,8 @@ func TestAuthStoreRoundTrip(t *testing.T) {
 		t.Fatalf("LoadAuth = %q", h)
 	}
 	// Sessions.
-	if err := as.AddSession("tok-hash", time.Now()); err != nil {
-		t.Fatal(err)
+	if ok, err := as.AddSession("tok-hash", time.Now(), "hash-1"); err != nil || !ok {
+		t.Fatalf("AddSession = %v, %v", ok, err)
 	}
 	if ok, _ := as.HasSession("tok-hash"); !ok {
 		t.Fatal("session not found")
@@ -636,9 +636,9 @@ func TestAuthStoreRoundTrip(t *testing.T) {
 	if ok, _ := as.HasSession("other"); ok {
 		t.Fatal("unknown session reported present")
 	}
-	// Idempotent add.
-	if err := as.AddSession("tok-hash", time.Now()); err != nil {
-		t.Fatalf("re-add: %v", err)
+	// A duplicate add is no error and adds nothing.
+	if ok, err := as.AddSession("tok-hash", time.Now(), "hash-1"); err != nil || ok {
+		t.Fatalf("re-add = %v, %v", ok, err)
 	}
 	if err := as.RemoveSession("tok-hash"); err != nil {
 		t.Fatal(err)
@@ -648,19 +648,51 @@ func TestAuthStoreRoundTrip(t *testing.T) {
 	}
 }
 
-// Security: a password change signs out every other session through the
-// SQLite store too (denied: the others are gone), the caller's own staying
-// signed in (allowed).
-func TestAuthStoreRemoveSessionsExcept(t *testing.T) {
+// Security (bridge#11): a session is added only while the hash its sign-in was
+// verified against is still the password. Allowed: the current hash. Denied: a
+// replaced hash (a sign-in that raced a change or reset), and no password yet.
+func TestAuthStoreAddSessionOnlyForTheCurrentPassword(t *testing.T) {
 	db := open(t)
 	as := db.AuthStore()
+	if ok, err := as.AddSession("before-any", time.Now(), ""); err != nil || ok {
+		t.Fatalf("AddSession with no password = %v, %v", ok, err)
+	}
+	if err := as.SaveAuth("old"); err != nil {
+		t.Fatal(err)
+	}
+	if err := as.ReplacePassword("new", ""); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := as.AddSession("stale", time.Now(), "old"); err != nil || ok {
+		t.Fatalf("AddSession with the replaced hash = %v, %v", ok, err)
+	}
+	if ok, _ := as.HasSession("stale"); ok {
+		t.Fatal("a session verified against the replaced password was stored")
+	}
+	if ok, err := as.AddSession("fresh", time.Now(), "new"); err != nil || !ok {
+		t.Fatalf("AddSession with the current hash = %v, %v", ok, err)
+	}
+}
+
+// Security: a password change signs out every other session through the
+// SQLite store too (denied: the others are gone), the caller's own staying
+// signed in (allowed), and the new hash is stored with it.
+func TestAuthStoreReplacePassword(t *testing.T) {
+	db := open(t)
+	as := db.AuthStore()
+	if err := as.SaveAuth("old"); err != nil {
+		t.Fatal(err)
+	}
 	for _, h := range []string{"mine", "leaked", "other"} {
-		if err := as.AddSession(h, time.Now()); err != nil {
-			t.Fatal(err)
+		if ok, err := as.AddSession(h, time.Now(), "old"); err != nil || !ok {
+			t.Fatalf("AddSession(%q) = %v, %v", h, ok, err)
 		}
 	}
-	if err := as.RemoveSessionsExcept("mine"); err != nil {
+	if err := as.ReplacePassword("new", "mine"); err != nil {
 		t.Fatal(err)
+	}
+	if h, _ := as.LoadAuth(); h != "new" {
+		t.Fatalf("LoadAuth after ReplacePassword = %q", h)
 	}
 	if ok, _ := as.HasSession("mine"); !ok {
 		t.Fatal("the caller's session was signed out")
@@ -669,6 +701,34 @@ func TestAuthStoreRemoveSessionsExcept(t *testing.T) {
 		if ok, _ := as.HasSession(h); ok {
 			t.Fatalf("session %q survived", h)
 		}
+	}
+}
+
+// bridge#11: the password and the sign-out are one transaction. When the
+// sign-out fails (a trigger aborts it), the new hash rolls back with it: the
+// old password still works and every session is still there.
+func TestAuthStoreReplacePasswordRollsBackBoth(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	as := db.AuthStore()
+	if err := as.SaveAuth("old"); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := as.AddSession("s1", time.Now(), "old"); err != nil || !ok {
+		t.Fatalf("AddSession = %v, %v", ok, err)
+	}
+	if _, err := db.sql.ExecContext(ctx,
+		`CREATE TRIGGER fail_signout BEFORE DELETE ON sessions BEGIN SELECT RAISE(ABORT, 'boom'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if err := as.ReplacePassword("new", ""); err == nil {
+		t.Fatal("ReplacePassword succeeded with the sign-out failing")
+	}
+	if h, _ := as.LoadAuth(); h != "old" {
+		t.Fatalf("password after a failed replace = %q, want old", h)
+	}
+	if ok, _ := as.HasSession("s1"); !ok {
+		t.Fatal("a session was removed by a failed replace")
 	}
 }
 

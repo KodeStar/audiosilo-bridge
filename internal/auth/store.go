@@ -16,16 +16,23 @@ import (
 type Store interface {
 	// LoadAuth returns the stored password hash, or "" if no admin exists yet.
 	LoadAuth() (passwordHash string, err error)
-	// SaveAuth stores the password hash (argon2id encoded).
+	// SaveAuth stores the password hash (argon2id encoded). Only the first run
+	// uses it, when there is no password and so no session yet.
 	SaveAuth(passwordHash string) error
-	// AddSession records a live session by its token hash.
-	AddSession(tokenHash string, createdAt time.Time) error
+	// AddSession records a live session by its token hash, but only while
+	// passwordHash (the hash the sign-in was verified against) is still the
+	// stored one, checked and written as one step. It reports false, adding
+	// nothing, when the password changed since (a sign-in racing a change or a
+	// reset never outlives it) or tokenHash is already a session.
+	AddSession(tokenHash string, createdAt time.Time, passwordHash string) (bool, error)
 	// HasSession reports whether a session with tokenHash exists.
 	HasSession(tokenHash string) (bool, error)
 	// RemoveSession deletes a session by its token hash (no-op if absent).
 	RemoveSession(tokenHash string) error
-	// RemoveSessionsExcept deletes every session but keepHash's.
-	RemoveSessionsExcept(keepHash string) error
+	// ReplacePassword stores a new password hash and deletes every session but
+	// keepHash's in one transaction: both happen or neither does, and no session
+	// can be added between them.
+	ReplacePassword(passwordHash, keepHash string) error
 }
 
 // MemStore is an in-memory Store for tests.
@@ -55,12 +62,15 @@ func (m *MemStore) SaveAuth(passwordHash string) error {
 	return nil
 }
 
-// AddSession records a session token hash.
-func (m *MemStore) AddSession(tokenHash string, createdAt time.Time) error {
+// AddSession records a session token hash while passwordHash is the stored one.
+func (m *MemStore) AddSession(tokenHash string, createdAt time.Time, passwordHash string) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if _, dup := m.sessions[tokenHash]; dup || m.passHash != passwordHash {
+		return false, nil
+	}
 	m.sessions[tokenHash] = createdAt
-	return nil
+	return true, nil
 }
 
 // HasSession reports whether the session token hash is present.
@@ -79,10 +89,12 @@ func (m *MemStore) RemoveSession(tokenHash string) error {
 	return nil
 }
 
-// RemoveSessionsExcept removes every session token hash but keepHash.
-func (m *MemStore) RemoveSessionsExcept(keepHash string) error {
+// ReplacePassword stores passwordHash and removes every session token hash but
+// keepHash, under one lock.
+func (m *MemStore) ReplacePassword(passwordHash, keepHash string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.passHash = passwordHash
 	for h := range m.sessions {
 		if h != keepHash {
 			delete(m.sessions, h)
