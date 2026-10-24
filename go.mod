@@ -2,6 +2,8 @@ module github.com/kodestar/audiosilo-bridge
 
 go 1.26.0
 
+toolchain go1.26.10
+
 require (
 	github.com/dlclark/regexp2 v1.12.0
 	github.com/kodestar/audiosilo-meta v0.17.0
