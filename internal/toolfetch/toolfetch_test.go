@@ -361,10 +361,11 @@ func TestEnsureDownloadsAndVerifies(t *testing.T) {
 	}
 }
 
-// bridge#12: a tool binary writeMode just wrote execs at once while other
+// bridge#12: a tool binary copyExec just installed execs at once while other
 // goroutines fork (each one's exec is the others' fork), never "text file busy",
-// and no staging file is left behind.
-func TestWriteModeExecutableRunsUnderParallelForks(t *testing.T) {
+// and no temp file is left behind. Each source is written the unlocked way
+// (writeMode), as the extraction does; the run is of the copy.
+func TestCopyExecRunsUnderParallelForks(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell scripts")
 	}
@@ -373,23 +374,55 @@ func TestWriteModeExecutableRunsUnderParallelForks(t *testing.T) {
 	var wg sync.WaitGroup
 	for i := range 4 {
 		wg.Go(func() {
+			src := filepath.Join(dir, "src"+string(rune('a'+i)))
 			p := filepath.Join(dir, "tool"+string(rune('a'+i)))
 			for range 5 {
-				if _, err := writeMode(p, strings.NewReader(script), 0o755); err != nil {
+				if _, err := writeMode(src, strings.NewReader(script), 0o644); err != nil {
 					t.Error(err)
 					return
 				}
-				if err := exec.Command(p).Run(); err != nil {
+				if err := copyExec(src, p); err != nil {
+					t.Error(err)
+					return
+				}
+				if err := exec.Command(p).Run(); err != nil { //nolint:gosec // the test's own tool
 					t.Error(err)
 					return
 				}
 				_ = os.Remove(p)
+				_ = os.Remove(src)
 			}
 		})
 	}
 	wg.Wait()
 	if left, _ := os.ReadDir(dir); len(left) != 0 {
 		t.Errorf("%d files left behind, first %q", len(left), left[0].Name())
+	}
+}
+
+// copyExec onto its own source (installWhisper's rewrite of the staged binary)
+// leaves the one file, executable, with its bytes.
+func TestCopyExecInPlace(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "bin")
+	if _, err := writeMode(p, strings.NewReader("BODY"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := copyExec(p, p); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o755 {
+		t.Errorf("mode = %v, want 0755", info.Mode().Perm())
+	}
+	if b, _ := os.ReadFile(p); string(b) != "BODY" { //nolint:gosec // the test's own file
+		t.Errorf("content = %q", b)
+	}
+	if left, _ := os.ReadDir(dir); len(left) != 1 {
+		t.Errorf("%d files in the dir, want 1", len(left))
 	}
 }
 
@@ -431,22 +464,12 @@ type failingReader struct{}
 
 func (failingReader) Read([]byte) (int, error) { return 0, io.ErrUnexpectedEOF }
 
-// The whisper-cli binary is written executable even from an entry that dropped
-// the bit (so it takes the fork-safe path before its self-check runs it); any
-// other entry keeps its own bit.
+// An archive entry keeps its own executable bit.
 func TestArchiveEntryPerm(t *testing.T) {
-	for _, c := range []struct {
-		name string
-		exec bool
-		want os.FileMode
-	}{
-		{"bin/" + binName(whisperCLIBase), false, 0o755},
-		{binName(whisperCLIBase), true, 0o755},
-		{"lib/libggml.so", false, 0o644},
-		{"lib/helper", true, 0o755},
-	} {
-		if got := archiveEntryPerm(c.name, c.exec); got != c.want {
-			t.Errorf("archiveEntryPerm(%q, %v) = %v, want %v", c.name, c.exec, got, c.want)
-		}
+	if got := archiveEntryPerm(true); got != 0o755 {
+		t.Errorf("executable entry = %v, want 0755", got)
+	}
+	if got := archiveEntryPerm(false); got != 0o644 {
+		t.Errorf("plain entry = %v, want 0644", got)
 	}
 }

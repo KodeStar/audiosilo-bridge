@@ -219,6 +219,12 @@ func (s *midLoginStore) LoadAuth() (string, error) {
 	return h, err
 }
 
+func sessionCount(mem *MemStore) int {
+	mem.mu.Lock()
+	defer mem.mu.Unlock()
+	return len(mem.sessions)
+}
+
 // Security (bridge#11): a sign-in with the old password that was in flight when
 // the password was reset leaves no session behind. Denied: that sign-in, and
 // no session it could have stored resolves. Allowed: the new password.
@@ -241,10 +247,7 @@ func TestResetPasswordDuringASignInLeavesNoSession(t *testing.T) {
 	if tok, err := m.Login(old); !errors.Is(err, ErrInvalidCreds) || tok != "" {
 		t.Fatalf("a sign-in racing the reset = %q, %v; want ErrInvalidCreds", tok, err)
 	}
-	mem.mu.Lock()
-	n := len(mem.sessions)
-	mem.mu.Unlock()
-	if n != 0 {
+	if n := sessionCount(mem); n != 0 {
 		t.Fatalf("%d sessions survived the reset", n)
 	}
 	if _, err := m.Login(fresh); err != nil {
@@ -278,10 +281,7 @@ func TestChangePasswordDuringASignInLeavesNoSession(t *testing.T) {
 	if ok, _ := m.Resolve(mine); !ok {
 		t.Error("the changer's session was signed out")
 	}
-	mem.mu.Lock()
-	n := len(mem.sessions)
-	mem.mu.Unlock()
-	if n != 1 {
+	if n := sessionCount(mem); n != 1 {
 		t.Errorf("%d sessions after the change, want only the changer's", n)
 	}
 }

@@ -46,11 +46,6 @@ func (m *Manager) EnsureAdmin() (oneTimePassword string, err error) {
 	if hash != "" {
 		return "", nil
 	}
-	return m.setGenerated()
-}
-
-// setGenerated stores a new generated password's hash and returns the plaintext.
-func (m *Manager) setGenerated() (string, error) {
 	pw, enc, err := generateHashed()
 	if err != nil {
 		return "", err

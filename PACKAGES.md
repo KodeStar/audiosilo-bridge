@@ -123,9 +123,10 @@ internal/
             no-download lookup. A missing artifact degrades gracefully (the stage
             parks/fails that book; the daemon keeps working).
             An executable is never open for writing across a fork (bridge#12):
-            writeMode streams into a staging file unlocked, then copies it under
-            the fork lock (execfile.CreateTemp) into the file it renames into place,
-            and the whisper-cli entry is always written executable.
+            extraction (writeMode) writes unlocked, and copyExec copies each binary
+            that will run under the fork lock (execfile.CreateTemp) into the file it
+            renames into place (ffmpeg/ffprobe into the tools dir, whisper-cli over
+            its own staged copy before the self-check).
   execfile/ writes files the process will exec with syscall.ForkLock held for
             reading from open to close, so a concurrent fork can't hold the write
             descriptor and make the exec fail with ETXTBSY (WriteFile, CreateTemp).

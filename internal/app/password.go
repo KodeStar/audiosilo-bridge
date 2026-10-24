@@ -19,10 +19,11 @@ import (
 // stay as they were, and the password and the sign-out are one transaction. A
 // running Bridge reads both from the database, so it takes effect at once, and a
 // sign-in it had in flight with the old password stores no session (auth's
-// AddSession checks the hash it verified is still the stored one). It refuses a folder with no Bridge database (a mistyped --data
-// would otherwise start an empty one), and a root caller in a folder another
-// user owns (the files SQLite adds would be root's, and the Bridge couldn't open
-// its database at the next start).
+// AddSession checks the hash it verified is still the stored one). It refuses a
+// folder with no Bridge database (a mistyped --data would otherwise start an
+// empty one), and a root caller in a folder another user owns (the files SQLite
+// adds would be root's, and the Bridge couldn't open its database at the next
+// start).
 func ResetPassword(ctx context.Context, dataDir string) (string, error) {
 	dbPath := filepath.Join(dataDir, store.FileName)
 	if _, err := os.Stat(dbPath); err != nil {

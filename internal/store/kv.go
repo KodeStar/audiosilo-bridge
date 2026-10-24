@@ -25,7 +25,12 @@ func (db *DB) GetSetting(ctx context.Context, key string) (string, bool, error) 
 
 // SetSetting upserts a key/value setting.
 func (db *DB) SetSetting(ctx context.Context, key, value string) error {
-	_, err := db.sql.ExecContext(ctx,
+	return setSetting(ctx, db.sql, key, value)
+}
+
+// setSetting is SetSetting through the database or a transaction.
+func setSetting(ctx context.Context, ex execer, key, value string) error {
+	_, err := ex.ExecContext(ctx,
 		`INSERT INTO settings (key, value) VALUES (?,?)
 		 ON CONFLICT(key) DO UPDATE SET value=excluded.value`, key, value)
 	return err

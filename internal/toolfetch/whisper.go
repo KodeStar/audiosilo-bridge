@@ -295,9 +295,10 @@ func installWhisperAsset(ctx context.Context, toolsDir, finalDir, asset string, 
 	if info, serr := os.Stat(stagedBin); serr != nil || info.IsDir() {
 		return "", fmt.Errorf("whisper-cli asset %q did not contain %s", asset, binName(whisperCLIBase))
 	}
-	// Always mark the binary executable (an archive entry may drop the bit), then
-	// self-check it before adopting anything.
-	if err := os.Chmod(stagedBin, 0o755); err != nil { //nolint:gosec // the whisper-cli binary must be executable
+	// Rewrite the binary executable (an archive entry may drop the bit) and
+	// fork-safely, since the self-check runs it next (bridge#12), then self-check
+	// it before adopting anything.
+	if err := copyExec(stagedBin, stagedBin); err != nil {
 		return "", err
 	}
 	if err := whisperSelfCheck(ctx, stagedBin, log); err != nil {
@@ -482,7 +483,7 @@ func extractAllTarGz(r io.Reader, destDir string) error {
 		if hdr.Typeflag != tar.TypeReg {
 			continue
 		}
-		perm := archiveEntryPerm(hdr.Name, hdr.Mode&0o111 != 0)
+		perm := archiveEntryPerm(hdr.Mode&0o111 != 0)
 		// Read one byte past the remaining budget so an over-budget entry is DETECTED
 		// (written > remaining) and rejected, rather than silently truncated at the cap.
 		n, err := writeMode(filepath.Join(destDir, filepath.Base(hdr.Name)), io.LimitReader(tr, remaining+1), perm)
@@ -523,7 +524,7 @@ func extractAllZip(ra io.ReaderAt, size int64, destDir string) error {
 		if err != nil {
 			return err
 		}
-		perm := archiveEntryPerm(zf.Name, zf.FileInfo().Mode()&0o111 != 0)
+		perm := archiveEntryPerm(zf.FileInfo().Mode()&0o111 != 0)
 		// One byte past the remaining budget: over-budget is detected, never truncated.
 		n, err := writeMode(filepath.Join(destDir, filepath.Base(zf.Name)), io.LimitReader(rc, remaining+1), perm)
 		_ = rc.Close()
@@ -543,11 +544,8 @@ func extractAllZip(ra io.ReaderAt, size int64, destDir string) error {
 }
 
 // archiveEntryPerm maps an archive entry's executable bit to a full file mode.
-// The whisper-cli binary is always executable, even from an entry that dropped
-// the bit, so writeMode writes it the fork-safe way before the self-check execs
-// it (bridge#12).
-func archiveEntryPerm(name string, executable bool) os.FileMode {
-	if executable || filepath.Base(name) == binName(whisperCLIBase) {
+func archiveEntryPerm(executable bool) os.FileMode {
+	if executable {
 		return 0o755
 	}
 	return 0o644

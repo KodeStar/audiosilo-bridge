@@ -50,12 +50,12 @@ func TestWriteFileThenRunUnderParallelForks(t *testing.T) {
 
 func TestCreateTempThenRunUnderParallelForks(t *testing.T) {
 	runUnderForks(t, func(p string) (string, error) {
-		name, n, err := CreateTemp(filepath.Dir(p), filepath.Base(p)+"-", strings.NewReader(script))
+		name, err := CreateTemp(filepath.Dir(p), filepath.Base(p)+"-", strings.NewReader(script))
 		if err != nil {
 			return "", err
 		}
-		if n != int64(len(script)) {
-			t.Errorf("CreateTemp copied %d bytes, want %d", n, len(script))
+		if b, _ := os.ReadFile(name); string(b) != script { //nolint:gosec // the test's own tool
+			t.Errorf("CreateTemp wrote %q, want %q", b, script)
 		}
 		return name, os.Chmod(name, 0o755) //nolint:gosec // the test's own tool
 	})
@@ -64,7 +64,7 @@ func TestCreateTempThenRunUnderParallelForks(t *testing.T) {
 // A failed copy still hands back the made file's name so the caller can remove it.
 func TestCreateTempReturnsTheNameOnACopyError(t *testing.T) {
 	dir := t.TempDir()
-	name, _, err := CreateTemp(dir, "x-", errReader{})
+	name, err := CreateTemp(dir, "x-", errReader{})
 	if err == nil {
 		t.Fatal("CreateTemp succeeded with a failing reader")
 	}

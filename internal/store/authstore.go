@@ -89,9 +89,7 @@ func (a *AuthStore) ReplacePassword(passwordHash, keepHash string) error {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }() // a no-op once committed
-	if _, err := tx.ExecContext(a.ctx,
-		`INSERT INTO settings (key, value) VALUES (?,?)
-		 ON CONFLICT(key) DO UPDATE SET value=excluded.value`, authPasswordKey, passwordHash); err != nil {
+	if err := setSetting(a.ctx, tx, authPasswordKey, passwordHash); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(a.ctx, `DELETE FROM sessions WHERE token_hash != ?`, keepHash); err != nil {

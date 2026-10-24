@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/kodestar/audiosilo-bridge/internal/auth"
@@ -84,16 +85,13 @@ func TestResetPasswordKeepsPairingAndSecrets(t *testing.T) {
 // storing its session.
 type racingStore struct {
 	*store.AuthStore
+	once  sync.Once
 	reset func()
-	done  bool
 }
 
 func (s *racingStore) LoadAuth() (string, error) {
 	h, err := s.AuthStore.LoadAuth()
-	if !s.done {
-		s.done = true
-		s.reset()
-	}
+	s.once.Do(s.reset)
 	return h, err
 }
 

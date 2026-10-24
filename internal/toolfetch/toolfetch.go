@@ -438,18 +438,36 @@ func safeEntryName(name string) bool {
 	return true
 }
 
-// copyExec copies src to dst as an executable.
+// copyExec installs the local file src at dst as an executable (0o755), the
+// way a binary that is about to be run must be written (bridge#12): the bytes
+// go into a sibling temp file through execfile, so no fork happens while it is
+// open for writing, and it is renamed into place only after a clean close. A
+// goroutine forking while src itself was being written (a slow download or a
+// decompression, done unlocked) holds only src's descriptor, so the file at dst
+// is never open for writing in a child when it is exec'd (ETXTBSY). src may be
+// dst: the binary is rewritten fork-safely in place.
 func copyExec(src, dst string) error {
-	in, err := os.Open(src) //nolint:gosec // src is a path inside our own temp extract dir
+	in, err := os.Open(src) //nolint:gosec // src is our own extracted or staged file
 	if err != nil {
 		return err
 	}
-	defer func() { _ = in.Close() }()
-	return writeExec(dst, io.LimitReader(in, maxToolBytes))
+	tmp, err := execfile.CreateTemp(filepath.Dir(dst), ".exec-"+filepath.Base(dst)+"-", io.LimitReader(in, maxToolBytes))
+	_ = in.Close() // before the rename, which Windows refuses over an open file
+	if tmp != "" {
+		defer func() { _ = os.Remove(tmp) }() // no-op once renamed into place
+	}
+	if err != nil {
+		return err
+	}
+	if err := os.Chmod(tmp, 0o755); err != nil { //nolint:gosec // a tool binary must be executable
+		return err
+	}
+	return os.Rename(tmp, dst)
 }
 
 // writeExec writes r to path as an executable (0o755). It is the common case of
-// writeMode for a tool binary.
+// writeMode for a tool binary that is copied into place (copyExec) before it
+// is run.
 func writeExec(path string, r io.Reader) error {
 	_, err := writeMode(path, r, 0o755)
 	return err
@@ -461,17 +479,10 @@ func writeExec(path string, r io.Reader) error {
 // check would then adopt forever, since a stat can't tell a partial file from a
 // whole one). perm lets a caller preserve an archive entry's own mode (an
 // executable binary vs a plain shared library beside it). It returns the byte
-// count written so budget-enforcing callers can detect an over-cap entry.
-//
-// An executable perm (any x bit) is written twice (bridge#12): r streams into a
-// staging file with no lock held (a download or a decompression is slow, and
-// forks would wait for it), then execfile copies the staged bytes into the file
-// that is renamed into place with no fork while it is open. A goroutine forking
-// during the stream holds only the staging file's descriptor, so the binary is
-// never open for writing in a child when the self-check execs it (ETXTBSY).
+// count written so budget-enforcing callers can detect an over-cap entry. It
+// holds no fork lock, so a file it writes goes through copyExec before it is run.
 func writeMode(path string, r io.Reader, perm os.FileMode) (int64, error) {
-	dir, base := filepath.Dir(path), filepath.Base(path)
-	tmp, err := os.CreateTemp(dir, ".partial-"+base+"-")
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".partial-"+filepath.Base(path)+"-")
 	if err != nil {
 		return 0, err
 	}
@@ -485,31 +496,8 @@ func writeMode(path string, r io.Reader, perm os.FileMode) (int64, error) {
 	if err := tmp.Close(); err != nil {
 		return n, err
 	}
-	final := tmpName
-	if perm&0o111 != 0 {
-		exe, err := copyStagedExec(dir, ".exec-"+base+"-", tmpName)
-		if exe != "" {
-			defer func() { _ = os.Remove(exe) }() // no-op once renamed into place
-		}
-		if err != nil {
-			return n, err
-		}
-		final = exe
-	}
-	if err := os.Chmod(final, perm); err != nil {
+	if err := os.Chmod(tmpName, perm); err != nil {
 		return n, err
 	}
-	return n, os.Rename(final, path)
-}
-
-// copyStagedExec copies the staged file src into a new temp file in dir under
-// the fork lock (execfile.CreateTemp) and returns its name ("" if none was made).
-func copyStagedExec(dir, pattern, src string) (string, error) {
-	in, err := os.Open(src) //nolint:gosec // our own staging file
-	if err != nil {
-		return "", err
-	}
-	defer func() { _ = in.Close() }()
-	name, _, err := execfile.CreateTemp(dir, pattern, in)
-	return name, err
+	return n, os.Rename(tmpName, path)
 }

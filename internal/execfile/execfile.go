@@ -27,20 +27,20 @@ func WriteFile(path string, data []byte, perm os.FileMode) error {
 }
 
 // CreateTemp copies r into a new file made by os.CreateTemp(dir, pattern) with
-// no fork while the file is open, and returns its name and the bytes copied.
-// The file is closed on return; on an error after it was made, the name is
-// still returned so the caller can remove it. r should be local (a staged file),
-// since forks wait for the copy.
-func CreateTemp(dir, pattern string, r io.Reader) (string, int64, error) {
+// no fork while the file is open, and returns its name. The file is closed on
+// return; on an error after it was made, the name is still returned so the
+// caller can remove it. r should be local (a staged file), since forks wait for
+// the copy.
+func CreateTemp(dir, pattern string, r io.Reader) (string, error) {
 	syscall.ForkLock.RLock()
 	defer syscall.ForkLock.RUnlock()
 	f, err := os.CreateTemp(dir, pattern)
 	if err != nil {
-		return "", 0, err
+		return "", err
 	}
-	n, err := io.Copy(f, r)
+	_, err = io.Copy(f, r)
 	if cerr := f.Close(); err == nil {
 		err = cerr
 	}
-	return f.Name(), n, err
+	return f.Name(), err
 }
