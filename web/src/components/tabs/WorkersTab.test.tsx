@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { WorkersTab } from './WorkersTab';
 import { ApiClient } from '@/api/client';
@@ -7,6 +7,11 @@ import { statusFixture, workerFixture } from '@/test/fixtures';
 import type { Status } from '@/api/types';
 
 const client = () => new ApiClient({ getToken: () => 't', onSignedOut: vi.fn() });
+
+// The copy tests stub document.execCommand: drop it, so no test inherits one.
+afterEach(() => {
+  Reflect.deleteProperty(document, 'execCommand');
+});
 
 // addWorker mocks a page that adds the worker "Studio" (token asw_secret).
 function addWorker(status: Partial<Status> = {}) {
@@ -24,7 +29,8 @@ function addWorker(status: Partial<Status> = {}) {
 
 async function submitWorker() {
   await screen.findByText('No workers yet. Add one below.');
-  // The status (worker_downloads) has loaded before the card shows.
+  // The status (worker_downloads) loads alongside: what the card shows from it
+  // is awaited with findBy.
   await waitFor(() => expect(screen.getByLabelText('Name')).toBeInTheDocument());
   fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'Studio' } });
   fireEvent.click(screen.getByRole('button', { name: 'Add worker' }));

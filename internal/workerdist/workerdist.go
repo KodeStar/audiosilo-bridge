@@ -115,9 +115,9 @@ var script string
 // scriptAddress is the placeholder install.sh carries for the address.
 const scriptAddress = "'@@BRIDGE@@'"
 
-// hostPattern is what a host (with its port) may hold: a name, an IPv4 or a
-// bracketed IPv6 address.
-var hostPattern = regexp.MustCompile(`^[A-Za-z0-9.\-]+(:[0-9]+)?$|^\[[0-9A-Fa-f:.]+\](:[0-9]+)?$`)
+// hostPattern is what a host (with its port) may hold: a name (a LAN's own
+// names can carry an underscore), an IPv4 or a bracketed IPv6 address.
+var hostPattern = regexp.MustCompile(`^[A-Za-z0-9._\-]+(:[0-9]+)?$|^\[[0-9A-Fa-f:.]+\](:[0-9]+)?$`)
 
 // Address is the Bridge's address as a worker reaches it: the configured
 // public address when it is a plain http(s) one, else scheme://host from the

@@ -21,6 +21,7 @@ function stubExec(result: boolean | 'throw') {
 
 afterEach(() => {
   Object.defineProperty(navigator, 'clipboard', { configurable: true, value: undefined });
+  Reflect.deleteProperty(document, 'execCommand');
 });
 
 describe('copyText', () => {
@@ -64,6 +65,19 @@ describe('copyText', () => {
     stubExec('throw');
     expect(await copyText('x')).toBe(false);
     expect(document.querySelector('textarea')).toBeNull();
+  });
+});
+
+describe('copyText focus', () => {
+  it('gives the focus back to what had it', async () => {
+    stubSecure(false);
+    stubExec(true);
+    const button = document.createElement('button');
+    document.body.append(button);
+    button.focus();
+    expect(await copyText('x')).toBe(true);
+    expect(document.activeElement).toBe(button);
+    button.remove();
   });
 });
 

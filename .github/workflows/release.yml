@@ -4,7 +4,9 @@ name: release
 # worker installed by hand (the Bridge's own install.sh serves the same builds
 # from the image, see internal/workerdist). Four archives, one per platform a
 # worker runs on, each holding the audiosilo-bridge binary built with the tag as
-# its version (CGO off, as the images build it), plus checksums.txt.
+# its version (CGO off, as the images build it), plus checksums.txt. The page is
+# embedded (-tags embedui), so the same binary also runs a whole Bridge natively
+# rather than the "not built" placeholder.
 #
 # The release is created (published, not a draft) when the tag has none yet; a
 # re-run replaces the assets (--clobber). image.yml builds the images for the
@@ -32,6 +34,16 @@ jobs:
           go-version-file: .go-version
           check-latest: true
 
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Build the page
+        run: scripts/build-web.sh --sync-only
+
       - name: Build the worker archives
         run: |
           set -eu
@@ -41,7 +53,7 @@ jobs:
             os="${p%/*}"; arch="${p#*/}"
             name="audiosilo-bridge_${ver}_${os}_${arch}"
             mkdir -p "build/$name"
-            CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -trimpath \
+            CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -trimpath -tags embedui \
               -ldflags "-s -w -X main.version=${TAG}" \
               -o "build/$name/audiosilo-bridge" ./cmd/audiosilo-bridge
             cp LICENSE README.md "build/$name/"

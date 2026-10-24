@@ -14,6 +14,9 @@ export async function copyText(text: string): Promise<boolean> {
     // Fall through to the legacy path.
   }
   const ta = document.createElement('textarea');
+  // The textarea takes the focus to be selected: give it back after (to the
+  // Copy button, for a keyboard user).
+  const focused = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   try {
     ta.value = text;
     ta.setAttribute('readonly', '');
@@ -21,12 +24,14 @@ export async function copyText(text: string): Promise<boolean> {
     ta.style.left = '-9999px';
     ta.style.opacity = '0';
     document.body.append(ta);
+    ta.focus({ preventScroll: true });
     ta.select();
     return document.execCommand('copy');
   } catch {
     return false;
   } finally {
     ta.remove();
+    focused?.focus();
   }
 }
 

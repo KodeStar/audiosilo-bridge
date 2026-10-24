@@ -2252,8 +2252,11 @@ internal/
             install.sh (go:embed, POSIX sh): Address (the public URL when it is a
             plain http(s) one, else scheme://Host, ErrAddress for anything a
             script can't carry) baked in single-quoted by Script. The script
-            takes --token (required), --run, --dir; detects uname (a Rosetta
-            terminal on Apple Silicon takes arm64), downloads to a temp file in
+            (one main function, called on its last line, so a download cut
+            short runs nothing) takes --token (required the first time; an
+            update reuses the data dir's saved token), --run, --dir; detects
+            uname (a Rosetta terminal on Apple Silicon takes arm64), downloads
+            to a temp file in
             the target dir, checks `version` runs, moves it to
             ~/.audiosilo-bridge-worker/bin/audiosilo-bridge and runs `worker
             install` (or `worker` with --run). Its tests run it end to end with a
@@ -2462,7 +2465,8 @@ Dockerfile             multi-stage: node build -> go build (embedui, cross-built
                        A `workers` stage (on $BUILDPLATFORM, no page, the same
                        VERSION) cross-builds the four worker builds, gzipped, into
                        /usr/local/share/audiosilo-bridge/workers of slim, cuda and
-                       full (not agent). release.yml uploads the same four as
+                       full (not agent). release.yml uploads the same four (with
+                       the page embedded, so they also run a whole Bridge) as
                        audiosilo-bridge_<ver>_<os>_<arch>.tar.gz + checksums.txt to
                        the tag's release (made, not as a draft, when missing).
                        image.yml builds all four on v* tags and dispatch (amd64+arm64;

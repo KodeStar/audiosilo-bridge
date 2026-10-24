@@ -103,7 +103,8 @@ no library and no mapping.
    `~/.audiosilo-bridge-worker/bin`, and installs the worker as a service that
    starts at login (launchd on macOS, a systemd user unit on Linux). `--run` runs it
    in the terminal instead; `--dir <path>` puts the program elsewhere. Running it
-   again updates an installed worker.
+   again updates an installed worker (`--token` can be left out then: it keeps the
+   saved one).
 3. On a Mac the worker uses mlx-whisper on Metal, which needs Python 3 and ffmpeg
    from Homebrew; its first start builds it and downloads the model.
 

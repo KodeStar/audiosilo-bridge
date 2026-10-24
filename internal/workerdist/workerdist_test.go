@@ -66,6 +66,7 @@ func TestAddress(t *testing.T) {
 		{"", "http", "10.0.0.1:8091", "http://10.0.0.1:8091"},
 		{"", "http", "[fd00::1]:8091", "http://[fd00::1]:8091"},
 		{"", "https", "nas.local", "https://nas.local"},
+		{"", "http", "my_nas:8091", "http://my_nas:8091"},
 		// A public address that can't go into a script falls back to the request's.
 		{"ftp://nas", "http", "nas:8091", "http://nas:8091"},
 		{"http://user:pw@nas:8091", "http", "nas:8091", "http://nas:8091"},
@@ -106,6 +107,9 @@ func TestScript(t *testing.T) {
 	}
 	if strings.Contains(text, "\u2014") {
 		t.Error("an em dash in the script")
+	}
+	if !strings.Contains(text, "\nRELEASES='"+ReleasesURL+"'\n") {
+		t.Error("the script's releases address isn't ReleasesURL")
 	}
 	if _, err := Script("http://a'b"); !errors.Is(err, ErrAddress) {
 		t.Errorf("a quote = %v", err)
@@ -161,13 +165,25 @@ func TestScriptRuns(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(fakeBin, "curl"), []byte(curl), 0o755); err != nil { //nolint:gosec // a test's fake tool
 		t.Fatal(err)
 	}
-	run := func(t *testing.T, args ...string) (string, string, string, error) {
+	// run runs script with args; saved is a token the worker's data dir already
+	// holds ("" for none: a first install).
+	run := func(t *testing.T, script, saved string, args ...string) (string, string, string, error) {
 		t.Helper()
 		sub := t.TempDir()
 		dir, ran, urls := filepath.Join(sub, "bin"), filepath.Join(sub, "ran"), filepath.Join(sub, "url")
+		data := filepath.Join(sub, "data")
+		if saved != "" {
+			if err := os.MkdirAll(data, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(data, "worker.token"), []byte(saved+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
 		cmd := exec.Command("sh", append([]string{"-s", "--", "--dir", dir}, args...)...)
-		cmd.Stdin = strings.NewReader(text)
-		cmd.Env = append(os.Environ(), "PATH="+fakeBin+":"+os.Getenv("PATH"), "SERVED="+served, "RAN="+ran, "URLS="+urls, "HOME="+tmp)
+		cmd.Stdin = strings.NewReader(script)
+		cmd.Env = append(os.Environ(), "PATH="+fakeBin+":"+os.Getenv("PATH"), "SERVED="+served, "RAN="+ran, "URLS="+urls, "HOME="+tmp,
+			"AUDIOSILO_WORKER_DATA="+data, "AUDIOSILO_WORKER_TOKEN=")
 		out, err := cmd.CombinedOutput()
 		r, _ := os.ReadFile(ran)
 		u, _ := os.ReadFile(urls)
@@ -179,7 +195,7 @@ func TestScriptRuns(t *testing.T) {
 		return string(out), strings.TrimSpace(string(r)), strings.TrimSpace(string(u)), err
 	}
 	t.Run("install", func(t *testing.T) {
-		out, ran, url, err := run(t, "--token", "asw_abc")
+		out, ran, url, err := run(t, text, "", "--token", "asw_abc")
 		if err != nil {
 			t.Fatalf("%v\n%s", err, out)
 		}
@@ -194,19 +210,36 @@ func TestScriptRuns(t *testing.T) {
 		}
 	})
 	t.Run("run", func(t *testing.T) {
-		out, ran, _, err := run(t, "--token=asw_def", "--run")
+		out, ran, _, err := run(t, text, "", "--token=asw_def", "--run")
 		if err != nil || ran != "worker --bridge http://192.168.1.20:8091 --token asw_def" {
 			t.Fatalf("ran %q, %v\n%s", ran, err, out)
 		}
 	})
+	// Running it again to update: the token the first install saved does.
+	t.Run("update", func(t *testing.T) {
+		out, ran, url, err := run(t, text, "asw_saved")
+		if err != nil || ran != "worker install --bridge http://192.168.1.20:8091" || url == "" {
+			t.Fatalf("update: %v, ran %q, url %q\n%s", err, ran, url, out)
+		}
+	})
+	// A download cut short runs nothing (here, past the line that installs the
+	// program): the script is one function, called on its last line.
+	t.Run("truncated", func(t *testing.T) {
+		const line = "mv -f \"$tmp\" \"$bin\"\n"
+		cut := text[:strings.Index(text, line)+len(line)]
+		out, ran, url, err := run(t, cut, "", "--token", "asw_abc")
+		if err == nil || ran != "" || url != "" {
+			t.Fatalf("truncated: %v, ran %q, url %q\n%s", err, ran, url, out)
+		}
+	})
 	t.Run("notoken", func(t *testing.T) {
-		out, ran, url, err := run(t, "--run")
+		out, ran, url, err := run(t, text, "", "--run")
 		if err == nil || !strings.Contains(out, "--token is required") || ran != "" || url != "" {
 			t.Fatalf("no token: %v, ran %q, url %q\n%s", err, ran, url, out)
 		}
 	})
 	t.Run("unknown", func(t *testing.T) {
-		out, _, url, err := run(t, "--token", "asw_x", "--service")
+		out, _, url, err := run(t, text, "", "--token", "asw_x", "--service")
 		if err == nil || !strings.Contains(out, "unknown option: --service") || url != "" {
 			t.Fatalf("unknown flag: %v\n%s", err, out)
 		}

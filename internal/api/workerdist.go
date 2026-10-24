@@ -19,6 +19,9 @@ const (
 	RouteWorkerDownload = "/worker/download/{os}/{arch}"
 )
 
+// workerDownloadTimeout bounds a worker build's download (the write deadline).
+const workerDownloadTimeout = 10 * time.Minute
+
 func (a *API) workerDistRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET "+RouteWorkerScript, a.handleWorkerScript)
 	mux.HandleFunc("GET "+RouteWorkerDownload, a.handleWorkerDownload)
@@ -76,8 +79,9 @@ func (a *API) handleWorkerDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer func() { _ = f.Close() }()
-	// About 8 MB: give a slow link (Wi-Fi, a tunnel) more than the page's 60 s.
-	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(audioWriteTimeout))
+	// About 8 MB: give a slow link (Wi-Fi, a tunnel) more than the page's 60 s,
+	// but not the hour a segment's FLAC gets: this route takes no credential.
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(workerDownloadTimeout))
 	w.Header().Set("Content-Type", "application/gzip")
 	w.Header().Set("Content-Disposition", `attachment; filename="`+info.Name()+`"`)
 	w.Header().Set("Cache-Control", "no-cache")
