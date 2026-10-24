@@ -51,6 +51,9 @@ export interface Status {
   setup: Setup;
   setup_complete: boolean;
   podcast_allow_networks: string[];
+  // This Bridge serves install.sh and the worker builds (the Docker image
+  // carries them; a Bridge run natively doesn't).
+  worker_downloads: boolean;
 }
 
 // link.SetupItem ids, in the checklist's order (internal/setup).

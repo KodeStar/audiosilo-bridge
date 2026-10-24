@@ -36,9 +36,17 @@ describe('workers', () => {
 
   it('builds the commands', () => {
     expect(workerCommands('http://nas.lan:8091', 'asw_t')).toEqual({
-      install: 'audiosilo-bridge worker install --bridge http://nas.lan:8091 --token asw_t',
-      run: 'audiosilo-bridge worker --bridge http://nas.lan:8091 --token asw_t',
+      oneLine: 'curl -fsSL http://nas.lan:8091/worker/install.sh | sh -s -- --token asw_t',
+      install:
+        '~/.audiosilo-bridge-worker/bin/audiosilo-bridge worker install --bridge http://nas.lan:8091 --token asw_t',
+      run: '~/.audiosilo-bridge-worker/bin/audiosilo-bridge worker --bridge http://nas.lan:8091 --token asw_t',
     });
+    // An address the shell would split is quoted in every command.
+    const odd = workerCommands('http://nas.lan:8091/a&b', 'asw_t');
+    expect(odd.oneLine).toBe(
+      "curl -fsSL 'http://nas.lan:8091/a&b/worker/install.sh' | sh -s -- --token asw_t",
+    );
+    expect(odd.install).toContain("--bridge 'http://nas.lan:8091/a&b' --token");
   });
 
   it('words a worker', () => {

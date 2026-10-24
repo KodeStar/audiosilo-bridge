@@ -1,11 +1,15 @@
-import { useState, type FormEvent } from 'react';
+import { useRef, useState, type FormEvent } from 'react';
 import { errorText, type ApiClient } from '@/api/client';
 import type { NewWorker, Worker } from '@/api/types';
+import { copyText, selectText } from '@/lib/clipboard';
 import { useLoad } from '@/lib/useLoad';
 import {
   audioHours,
   bridgeAddress,
   isLoopback,
+  WORKER_BINARY,
+  WORKER_DOCS_URL,
+  WORKER_RELEASES_URL,
   workerASR,
   workerCommands,
   workerSpeed,
@@ -58,7 +62,12 @@ export function WorkersTab({ client }: { client: ApiClient }) {
         )}
       </Card>
       {added ? (
-        <AddedCard added={added} address={address} onDone={() => setAdded(null)} />
+        <AddedCard
+          added={added}
+          address={address}
+          downloads={status?.worker_downloads ?? true}
+          onDone={() => setAdded(null)}
+        />
       ) : (
         <AddForm
           client={client}
@@ -134,8 +143,8 @@ function WorkerItem({
           <div className="flex flex-col gap-3 rounded-md border border-edge bg-surface p-3">
             <p className="text-body">
               Removing the worker revokes its token: it stops at its next call, and the segment it
-              is on goes to another worker or the Bridge. Uninstall it on its computer too
-              (audiosilo-bridge worker uninstall).
+              is on goes to another worker or the Bridge. Uninstall it on its computer too (
+              {WORKER_BINARY} worker uninstall).
             </p>
             <div className="flex gap-2">
               <button type="button" onClick={remove} disabled={busy} className={dangerButton}>
@@ -210,13 +219,21 @@ function AddForm({ client, onAdded }: { client: ApiClient; onAdded: (nw: NewWork
 function AddedCard({
   added,
   address,
+  downloads,
   onDone,
 }: {
   added: NewWorker;
   address: string;
+  // The Bridge serves install.sh and its worker builds (its Docker image).
+  downloads: boolean;
   onDone: () => void;
 }) {
   const cmd = workerCommands(address, added.token);
+  const releases = (
+    <a href={WORKER_RELEASES_URL} target="_blank" rel="noreferrer" className={linkClass}>
+      the GitHub releases
+    </a>
+  );
   return (
     <Card title={`Start "${added.worker.name}"`}>
       <div className="flex flex-col gap-4 text-sm">
@@ -230,21 +247,48 @@ function AddedCard({
             command.
           </Notice>
         )}
-        <div>
-          <p className="mb-1 font-medium text-hi">
-            On the worker&apos;s computer, install it as a service (it starts at login and keeps
-            running):
-          </p>
-          <Command text={cmd.install} />
-        </div>
-        <div>
-          <p className="mb-1 font-medium text-hi">Or run it once, in a terminal:</p>
-          <Command text={cmd.run} />
-        </div>
+        {downloads ? (
+          <div>
+            <p className="mb-1 font-medium text-hi">
+              On the worker&apos;s computer, paste this into a terminal. It downloads the worker
+              from this Bridge and installs it as a service (it starts at login and keeps running):
+            </p>
+            <Command text={cmd.oneLine} />
+            <p className="mt-1 text-dim">
+              Add --run at the end to run it once in that terminal instead.
+            </p>
+          </div>
+        ) : (
+          <Notice kind="info">
+            This Bridge has no worker downloads (it isn&apos;t running from the Docker image).
+            Download audiosilo-bridge for the worker&apos;s computer from {releases}, then use the
+            commands below.
+          </Notice>
+        )}
+        <details open={!downloads} className="rounded-md border border-edge p-3">
+          <summary className="cursor-pointer font-medium text-hi">Install it by hand</summary>
+          <div className="mt-3 flex flex-col gap-4">
+            <p className="text-dim">
+              Download audiosilo-bridge for its computer (macOS or Linux, arm64 or amd64) from{' '}
+              {releases}, unpack it and move the audiosilo-bridge program to {WORKER_BINARY}. On a
+              Mac, a browser download is quarantined: clear it with xattr -d com.apple.quarantine on
+              the program. Then install it as a service:
+            </p>
+            <Command text={cmd.install} />
+            <div>
+              <p className="mb-1 text-dim">Or run it once, in a terminal:</p>
+              <Command text={cmd.run} />
+            </div>
+          </div>
+        </details>
         <p className="text-dim">
-          It needs the audiosilo-bridge program for its computer (macOS or Linux). On a Mac it uses
-          mlx-whisper on Metal, which needs Python 3 (and ffmpeg) from Homebrew; the first start
-          builds it and downloads the model, a few minutes.
+          On a Mac it uses mlx-whisper on Metal, which needs Python 3 (and ffmpeg) from Homebrew;
+          the first start builds it and downloads the model, a few minutes. The worker&apos;s
+          computer must reach this Bridge on the local network. More in{' '}
+          <a href={WORKER_DOCS_URL} target="_blank" rel="noreferrer" className={linkClass}>
+            Running an ASR worker
+          </a>
+          .
         </p>
         <div>
           <button type="button" onClick={onDone} className={secondaryButton}>
@@ -256,24 +300,41 @@ function AddedCard({
   );
 }
 
+const linkClass = 'text-pink-500 underline';
+
+// Command is a command with a Copy button. On plain http the Clipboard API is
+// off, so copyText falls back; when that fails too, the command is selected
+// for a copy by hand, and the page says so (never silently).
 function Command({ text }: { text: string }) {
-  const [copied, setCopied] = useState(false);
+  const [state, setState] = useState<'idle' | 'copied' | 'failed'>('idle');
+  const code = useRef<HTMLElement>(null);
   async function copy() {
-    try {
-      await navigator.clipboard.writeText(text);
-      setCopied(true);
-    } catch {
-      setCopied(false);
+    if (await copyText(text)) {
+      setState('copied');
+      return;
     }
+    if (code.current) selectText(code.current);
+    setState('failed');
   }
   return (
-    <div className="flex flex-col gap-2 sm:flex-row sm:items-start">
-      <code className="block flex-1 rounded-md border border-edge bg-raised p-3 font-mono text-xs break-all text-body">
-        {text}
-      </code>
-      <button type="button" onClick={copy} className={secondaryButton}>
-        {copied ? 'Copied' : 'Copy'}
-      </button>
+    <div className="flex flex-col gap-2">
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-start">
+        <code
+          ref={code}
+          className="block flex-1 rounded-md border border-edge bg-raised p-3 font-mono text-xs break-all text-body"
+        >
+          {text}
+        </code>
+        <button type="button" onClick={copy} className={secondaryButton}>
+          {state === 'copied' ? 'Copied' : 'Copy'}
+        </button>
+      </div>
+      {state === 'failed' && (
+        <p role="status" className="text-xs text-dim">
+          The browser wouldn&apos;t copy it. The command is selected: select and copy it (Ctrl-C, or
+          Cmd-C on a Mac).
+        </p>
+      )}
     </div>
   );
 }

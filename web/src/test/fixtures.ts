@@ -71,6 +71,7 @@ export function statusFixture(over: Partial<Status> = {}): Status {
     setup: setupFixture(),
     setup_complete: true,
     podcast_allow_networks: [],
+    worker_downloads: true,
     ...over,
   };
 }
