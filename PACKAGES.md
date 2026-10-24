@@ -122,17 +122,21 @@ internal/
             floor + .meta sidecar + atomic rename). LocateBinary is the shared
             no-download lookup. A missing artifact degrades gracefully (the stage
             parks/fails that book; the daemon keeps working).
-            An executable is never open for writing across a fork (bridge#12):
-            extraction (writeMode) writes unlocked, and copyExec copies each binary
-            that will run under the fork lock (execfile.CreateTemp) into the file it
-            renames into place (ffmpeg/ffprobe into the tools dir, whisper-cli over
-            its own staged copy before the self-check).
+            A downloaded binary's first run never fails with ETXTBSY (bridge#12):
+            extraction (writeMode) writes unlocked; ffmpeg/ffprobe, copied out of
+            the temp extract dir anyway, are copied under the fork lock (copyExec,
+            execfile.CreateTemp) into the file renamed into place, so no child ever
+            holds them open for writing; whisper-cli (over 1 GB for CUDA, too big
+            to hold every fork for or to copy twice) is chmodded where it was
+            extracted, and runSelfCheck, every downloaded tool's first run, retries
+            a run refused as busy (busyRetries) until the child forked mid-write
+            has exec'd.
   execfile/ writes files the process will exec with syscall.ForkLock held for
             reading from open to close, so a concurrent fork can't hold the write
             descriptor and make the exec fail with ETXTBSY (WriteFile, CreateTemp).
             A leaf; toolfetch and every test's fake tool use it (it replaced the
-            test-only testexe). Keep the locked write a quick local copy: every fork
-            in the process waits for it.
+            test-only testexe). Keep the locked write a quick local copy, never a
+            download or a 1 GB binary: every fork in the process waits for it.
   audio/    the mechanical audio stages: Inspect (ffprobe -> probe.json + normalized
             manifest.json; marker parsing + contiguity ported from audio_extract.py;
             single-file marker books AND multi-file "files" books) and Split (ffmpeg
@@ -1027,11 +1031,15 @@ internal/
             opaque SHA-256-hashed session tokens, a per-IP login rate limiter; the
             Store interface is storage-agnostic (MemStore for tests; the SQLite
             store.AuthStore in production - the M0 JSON store was removed in M1).
-            A change or reset is ReplacePassword: the new hash and the sign-out in
-            one transaction (bridge#11); AddSession takes the hash the sign-in
-            verified and stores the session only while it is still the stored one
-            (one INSERT ... WHERE EXISTS), so a sign-in racing a change or the
-            reset-password process is refused and leaves no session
+            ReplacePassword is the only password writer (the first run, a change, a
+            reset): the new hash and the sign-out in one transaction (bridge#11).
+            A change passes the hash it verified and replaces only that one (an
+            UPDATE ... WHERE value=), so a change racing a reset or another change
+            is refused (ErrInvalidCreds) instead of overwriting it; the first run
+            and a reset replace whatever is stored. AddSession takes the hash the
+            sign-in verified and stores the session only while it is still the
+            stored one (one INSERT ... WHERE EXISTS), so a sign-in racing a change
+            or the reset-password process is refused and leaves no session
   ghauth/   Phase 2b: the GitHub App user sign-in (the audiosilo-contributions App,
             DefaultClientID, AppID 5387686; the client ID overridable in config):
             RequestCode / Poll / Wait (the device flow: pending and slow_down arrive

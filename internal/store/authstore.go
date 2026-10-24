@@ -13,7 +13,7 @@ import (
 // the JSON files establishes.
 const authPasswordKey = "auth.password_hash"
 
-// AuthStore adapts *DB to the auth.Store interface (LoadAuth/SaveAuth +
+// AuthStore adapts *DB to the auth.Store interface (the password hash +
 // session CRUD) so the auth Manager persists to SQLite. It is defined here
 // (rather than in internal/auth) to avoid a store->auth import; internal/auth
 // depends only on its own Store interface, which this satisfies structurally.
@@ -33,11 +33,6 @@ func (db *DB) AuthStore() *AuthStore {
 func (a *AuthStore) LoadAuth() (string, error) {
 	v, _, err := a.db.GetSetting(a.ctx, authPasswordKey)
 	return v, err
-}
-
-// SaveAuth stores the admin password hash.
-func (a *AuthStore) SaveAuth(passwordHash string) error {
-	return a.db.SetSetting(a.ctx, authPasswordKey, passwordHash)
 }
 
 // AddSession records a live session by its token hash, only while
@@ -80,20 +75,37 @@ func (a *AuthStore) RemoveSession(tokenHash string) error {
 }
 
 // ReplacePassword stores passwordHash and deletes every session but keepHash's
-// in one transaction (bridge#11): both commit or neither does. The upsert comes
-// first, so the transaction holds the write lock from its first statement and
-// no session can be added in between, by this process or another.
-func (a *AuthStore) ReplacePassword(passwordHash, keepHash string) error {
+// in one transaction (bridge#11): both commit or neither does. The password
+// write comes first, so the transaction holds the write lock from its first
+// statement and no session can be added in between, by this process or
+// another. A non-empty prevHash makes the write an UPDATE of exactly that hash:
+// when a reset or another change (possibly the reset-password process) replaced
+// it since, nothing is written and it reports false.
+func (a *AuthStore) ReplacePassword(prevHash, passwordHash, keepHash string) (bool, error) {
 	tx, err := a.db.sql.BeginTx(a.ctx, nil)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer func() { _ = tx.Rollback() }() // a no-op once committed
-	if err := setSetting(a.ctx, tx, authPasswordKey, passwordHash); err != nil {
-		return err
+	if prevHash == "" {
+		if err := setSetting(a.ctx, tx, authPasswordKey, passwordHash); err != nil {
+			return false, err
+		}
+	} else {
+		res, err := tx.ExecContext(a.ctx, `UPDATE settings SET value=? WHERE key=? AND value=?`,
+			passwordHash, authPasswordKey, prevHash)
+		if err != nil {
+			return false, err
+		}
+		if n, err := res.RowsAffected(); err != nil || n != 1 {
+			return false, err
+		}
 	}
 	if _, err := tx.ExecContext(a.ctx, `DELETE FROM sessions WHERE token_hash != ?`, keepHash); err != nil {
-		return err
+		return false, err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return true, nil
 }

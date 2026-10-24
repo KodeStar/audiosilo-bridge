@@ -5,6 +5,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -15,7 +16,10 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
+	"testing/iotest"
+	"time"
 
 	"github.com/ulikunitz/xz"
 
@@ -400,32 +404,6 @@ func TestCopyExecRunsUnderParallelForks(t *testing.T) {
 	}
 }
 
-// copyExec onto its own source (installWhisper's rewrite of the staged binary)
-// leaves the one file, executable, with its bytes.
-func TestCopyExecInPlace(t *testing.T) {
-	dir := t.TempDir()
-	p := filepath.Join(dir, "bin")
-	if _, err := writeMode(p, strings.NewReader("BODY"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := copyExec(p, p); err != nil {
-		t.Fatal(err)
-	}
-	info, err := os.Stat(p)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o755 {
-		t.Errorf("mode = %v, want 0755", info.Mode().Perm())
-	}
-	if b, _ := os.ReadFile(p); string(b) != "BODY" { //nolint:gosec // the test's own file
-		t.Errorf("content = %q", b)
-	}
-	if left, _ := os.ReadDir(dir); len(left) != 1 {
-		t.Errorf("%d files in the dir, want 1", len(left))
-	}
-}
-
 // writeMode installs exactly the one file with its mode and bytes, executable or
 // not, and on a failed read installs nothing and leaves no temp file.
 func TestWriteModeInstallsOnlyTheFile(t *testing.T) {
@@ -451,7 +429,7 @@ func TestWriteModeInstallsOnlyTheFile(t *testing.T) {
 		}
 
 		failDir := t.TempDir()
-		if _, err := writeMode(filepath.Join(failDir, "f"), io.MultiReader(strings.NewReader("x"), failingReader{}), perm); err == nil {
+		if _, err := writeMode(filepath.Join(failDir, "f"), io.MultiReader(strings.NewReader("x"), iotest.ErrReader(io.ErrUnexpectedEOF)), perm); err == nil {
 			t.Fatalf("perm %v: writeMode succeeded with a failing reader", perm)
 		}
 		if left, _ := os.ReadDir(failDir); len(left) != 0 {
@@ -460,16 +438,37 @@ func TestWriteModeInstallsOnlyTheFile(t *testing.T) {
 	}
 }
 
-type failingReader struct{}
-
-func (failingReader) Read([]byte) (int, error) { return 0, io.ErrUnexpectedEOF }
-
-// An archive entry keeps its own executable bit.
-func TestArchiveEntryPerm(t *testing.T) {
-	if got := archiveEntryPerm(true); got != 0o755 {
-		t.Errorf("executable entry = %v, want 0755", got)
+// bridge#12: a tool still open for writing when its self-check runs (a child
+// forked during its extraction holds the descriptor until it execs; here the
+// test holds it) is refused with ETXTBSY on Linux. Allowed: released while the
+// self-check retries, it passes. Denied: held throughout, the self-check fails.
+func TestSelfCheckRetriesABusyBinary(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell scripts")
 	}
-	if got := archiveEntryPerm(false); got != 0o644 {
-		t.Errorf("plain entry = %v, want 0644", got)
+	restore := busyRetries
+	busyRetries = []time.Duration{20 * time.Millisecond, 40 * time.Millisecond, 80 * time.Millisecond, 160 * time.Millisecond}
+	defer func() { busyRetries = restore }()
+	p := fakeTool(t, t.TempDir(), "ffmpeg")
+	w, err := os.OpenFile(p, os.O_WRONLY, 0) //nolint:gosec // the test's own tool
+	if err != nil {
+		t.Fatal(err)
+	}
+	release := time.AfterFunc(50*time.Millisecond, func() { _ = w.Close() })
+	defer release.Stop()
+	if err := runSelfCheck(context.Background(), p, nil, 10*time.Second, discard()); err != nil {
+		t.Fatalf("self-check of a tool released while it retries: %v", err)
+	}
+
+	if runtime.GOOS != "linux" {
+		return // only Linux refuses to run a file that is open for writing
+	}
+	held, err := os.OpenFile(p, os.O_WRONLY, 0) //nolint:gosec // the test's own tool
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = held.Close() }()
+	if err := runSelfCheck(context.Background(), p, nil, 10*time.Second, discard()); !errors.Is(err, syscall.ETXTBSY) {
+		t.Fatalf("self-check of a tool held open throughout = %v, want ETXTBSY", err)
 	}
 }

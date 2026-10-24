@@ -295,10 +295,13 @@ func installWhisperAsset(ctx context.Context, toolsDir, finalDir, asset string, 
 	if info, serr := os.Stat(stagedBin); serr != nil || info.IsDir() {
 		return "", fmt.Errorf("whisper-cli asset %q did not contain %s", asset, binName(whisperCLIBase))
 	}
-	// Rewrite the binary executable (an archive entry may drop the bit) and
-	// fork-safely, since the self-check runs it next (bridge#12), then self-check
-	// it before adopting anything.
-	if err := copyExec(stagedBin, stagedBin); err != nil {
+	// Always mark the binary executable (an archive entry may drop the bit), then
+	// self-check it before adopting anything. It was extracted without the fork
+	// lock and is not copied under it (the CUDA build is over 1 GB: every fork in
+	// the process would wait for the copy, and the install would need room for a
+	// second copy), so a child forked during its extraction may still hold it open
+	// for writing: the self-check retries a run refused as busy (bridge#12).
+	if err := os.Chmod(stagedBin, 0o755); err != nil { //nolint:gosec // the whisper-cli binary must be executable
 		return "", err
 	}
 	if err := whisperSelfCheck(ctx, stagedBin, log); err != nil {

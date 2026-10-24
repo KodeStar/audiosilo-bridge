@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/iotest"
 )
 
 const script = "#!/bin/sh\nexit 0\n"
@@ -64,7 +65,7 @@ func TestCreateTempThenRunUnderParallelForks(t *testing.T) {
 // A failed copy still hands back the made file's name so the caller can remove it.
 func TestCreateTempReturnsTheNameOnACopyError(t *testing.T) {
 	dir := t.TempDir()
-	name, err := CreateTemp(dir, "x-", errReader{})
+	name, err := CreateTemp(dir, "x-", iotest.ErrReader(os.ErrClosed))
 	if err == nil {
 		t.Fatal("CreateTemp succeeded with a failing reader")
 	}
@@ -72,7 +73,3 @@ func TestCreateTempReturnsTheNameOnACopyError(t *testing.T) {
 		t.Fatalf("name = %q, want a file in %s", name, dir)
 	}
 }
-
-type errReader struct{}
-
-func (errReader) Read([]byte) (int, error) { return 0, os.ErrClosed }

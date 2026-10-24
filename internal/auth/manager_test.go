@@ -204,9 +204,9 @@ func TestResetPasswordProvisionsWhenNoneWasSet(t *testing.T) {
 	}
 }
 
-// midLoginStore runs replace once, right after a sign-in has loaded the
-// password hash and before it verifies and stores its session: the window a
-// reset or change in another request (or the reset-password process) can hit.
+// midLoginStore runs replace once, right after a sign-in or a change has loaded
+// the password hash and before it verifies and writes: the window a reset or
+// change in another request (or the reset-password process) can hit.
 type midLoginStore struct {
 	*MemStore
 	once    sync.Once
@@ -283,5 +283,38 @@ func TestChangePasswordDuringASignInLeavesNoSession(t *testing.T) {
 	}
 	if n := sessionCount(mem); n != 1 {
 		t.Errorf("%d sessions after the change, want only the changer's", n)
+	}
+}
+
+// Security: a password change in flight with the old password when a reset
+// lands never overwrites the reset. Denied: that change (ErrInvalidCreds) and
+// the password it chose. Allowed: the reset's printed password.
+func TestChangePasswordDuringAResetKeepsTheReset(t *testing.T) {
+	mem := NewMemStore()
+	setup := New(mem)
+	old, err := setup.EnsureAdmin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	mine, err := setup.Login(old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fresh string
+	st := &midLoginStore{MemStore: mem}
+	st.replace = func() {
+		var rerr error
+		if fresh, rerr = setup.ResetPassword(); rerr != nil {
+			t.Error(rerr)
+		}
+	}
+	if err := New(st).ChangePassword(old, "a-new-strong-pass", mine); !errors.Is(err, ErrInvalidCreds) {
+		t.Fatalf("a change racing the reset: %v, want ErrInvalidCreds", err)
+	}
+	if _, err := setup.Login("a-new-strong-pass"); !errors.Is(err, ErrInvalidCreds) {
+		t.Errorf("the racing change's password signs in: %v", err)
+	}
+	if _, err := setup.Login(fresh); err != nil {
+		t.Errorf("the reset's password: %v", err)
 	}
 }

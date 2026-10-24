@@ -50,7 +50,8 @@ func (m *Manager) EnsureAdmin() (oneTimePassword string, err error) {
 	if err != nil {
 		return "", err
 	}
-	if err := m.store.SaveAuth(enc); err != nil {
+	// With no password no session should be live; the sign-out makes sure.
+	if _, err := m.store.ReplacePassword("", enc, ""); err != nil {
 		return "", err
 	}
 	return pw, nil
@@ -128,7 +129,9 @@ func (m *Manager) Logout(token string) error {
 // ChangePassword verifies current and sets a new password hash. It enforces the
 // minimum length on the new password, and signs out every other session (a
 // password change is how a leaked session is cut off); the session keep (the
-// caller's token) stays signed in.
+// caller's token) stays signed in. The new hash replaces only the one current
+// was verified against: a reset or another change that lands while this one
+// hashes is never overwritten, and this change is refused (ErrInvalidCreds).
 func (m *Manager) ChangePassword(current, newPassword, keep string) error {
 	hash, err := m.store.LoadAuth()
 	if err != nil {
@@ -151,7 +154,14 @@ func (m *Manager) ChangePassword(current, newPassword, keep string) error {
 	if err != nil {
 		return err
 	}
-	return m.store.ReplacePassword(enc, hashSecret(keep))
+	replaced, err := m.store.ReplacePassword(hash, enc, hashSecret(keep))
+	if err != nil {
+		return err
+	}
+	if !replaced {
+		return ErrInvalidCreds
+	}
+	return nil
 }
 
 // ResetPassword replaces the password with a new generated one-time password
@@ -163,13 +173,15 @@ func (m *Manager) ChangePassword(current, newPassword, keep string) error {
 // The new hash and the sign-out are one store transaction (no session's hash is
 // empty, so keeping "" removes them all): a failure changes nothing and leaves
 // the old password working, never a new one stored but not printed, and no
-// sign-in can land between the two steps (bridge#11).
+// sign-in can land between the two steps (bridge#11). The reset replaces
+// whatever is stored; a sign-in or a change in flight with the old password is
+// refused instead.
 func (m *Manager) ResetPassword() (oneTimePassword string, err error) {
 	pw, enc, err := generateHashed()
 	if err != nil {
 		return "", err
 	}
-	if err := m.store.ReplacePassword(enc, ""); err != nil {
+	if _, err := m.store.ReplacePassword("", enc, ""); err != nil {
 		return "", err
 	}
 	return pw, nil
