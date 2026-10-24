@@ -118,7 +118,8 @@ func TestWorkerDistMissing(t *testing.T) {
 		t.Fatalf("download = %d %q", r.Code, r.Body.String())
 	}
 	r = e.do("GET", RouteWorkerScript, "", "")
-	if r.Code != http.StatusOK || strings.Contains(r.Body.String(), "BRIDGE=") {
+	if r.Code != http.StatusOK || strings.Contains(r.Body.String(), "BRIDGE=") ||
+		!strings.HasPrefix(r.Header().Get("Content-Type"), "text/plain") || r.Header().Get("Cache-Control") != "no-store" {
 		t.Fatalf("script = %d %q", r.Code, r.Body.String())
 	}
 	if stderr, code := runScript(t, r.Body.String()); code != 1 || !strings.Contains(stderr, workerdist.ReleasesURL) {

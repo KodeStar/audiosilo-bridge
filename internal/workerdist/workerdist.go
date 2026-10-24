@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"unicode"
 )
 
 // DefaultDir is where the images put the worker builds.
@@ -143,9 +144,17 @@ func Script(address string) (string, error) {
 // ErrorScript is what /worker/install.sh serves when it can't serve install.sh:
 // a script that prints why to stderr and exits 1. `curl -fsSL` drops the body
 // of an error status, so an error status would reach `sh` as an empty script
-// that exits 0 and says nothing.
+// that exits 0 and says nothing. The message goes in single-quoted, with any
+// control character but a newline (a CR, an escape sequence, a NUL) a space,
+// so it can't run or redraw the terminal.
 func ErrorScript(msg string) string {
-	quoted := "'" + strings.ReplaceAll(strings.ReplaceAll(msg, "\r", " "), "'", `'\''`) + "'"
+	msg = strings.Map(func(r rune) rune {
+		if r != '\n' && unicode.IsControl(r) {
+			return ' '
+		}
+		return r
+	}, msg)
+	quoted := "'" + strings.ReplaceAll(msg, "'", `'\''`) + "'"
 	return "#!/bin/sh\n# The AudioSilo Bridge can't serve its worker install script.\n" +
 		"printf 'audiosilo-bridge worker: %s\\n' " + quoted + " >&2\nexit 1\n"
 }

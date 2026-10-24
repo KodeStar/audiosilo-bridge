@@ -88,14 +88,21 @@ func TestErrorScript(t *testing.T) {
 	if _, err := exec.LookPath("sh"); err != nil {
 		t.Skip("no sh")
 	}
-	for _, msg := range []string{ErrMissing.Error(), "it's $(touch pwned) `id` \"x\"\nline two\r"} {
-		text := ErrorScript(msg)
+	for _, tc := range []struct{ msg, want string }{
+		{ErrMissing.Error(), ErrMissing.Error()},
+		{"it's $(touch pwned) `id` \"x\"\nline two\r", "it's $(touch pwned) `id` \"x\"\nline two "},
+		// printf's own syntax and a quote-escape lookalike stay literal.
+		{`-n 100% \\ \n %s '\'' ; touch pwned`, `-n 100% \\ \n %s '\'' ; touch pwned`},
+		// Control characters (an escape sequence, a NUL, a tab, a DEL) become spaces.
+		{"esc \x1b[2J nul \x00 tab \t del \x7f end", "esc  [2J nul   tab   del   end"},
+	} {
+		text := ErrorScript(tc.msg)
 		if !strings.HasPrefix(text, "#!/bin/sh\n") {
 			t.Fatalf("script:\n%s", text)
 		}
 		dir := t.TempDir()
 		stderr, code := runScript(t, text, dir)
-		want := "audiosilo-bridge worker: " + strings.ReplaceAll(msg, "\r", " ") + "\n"
+		want := "audiosilo-bridge worker: " + tc.want + "\n"
 		if code != 1 || stderr != want {
 			t.Fatalf("exit %d, stderr %q, want %q", code, stderr, want)
 		}
