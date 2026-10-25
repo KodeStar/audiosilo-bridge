@@ -13,7 +13,6 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
-	"slices"
 	"strings"
 	"syscall"
 
@@ -185,14 +184,11 @@ func workerInstall(args []string, stdout, stderr io.Writer, remove bool) error {
 	return nil
 }
 
-// carriedFlags are the flags an update keeps from the installed service: every
-// flag `worker install` writes into the service file (the token never goes there).
-var carriedFlags = []string{"bridge", "data", "backend", "model", "whisper-cli"}
-
-// carryForward sets each of carriedFlags the command line (fs, parsed) didn't
-// give to the installed service's value, read back from svc's file and parsed
-// with the flags that wrote it, so an update keeps a customised worker's
-// --data, --backend, --model, --whisper-cli and --bridge. It returns the flags
+// carryForward sets each worker flag but --token (which never goes in the
+// service file) the command line (fs, parsed) didn't give to the installed
+// service's value, read back from svc's file and parsed with the flags that
+// wrote it, so an update keeps a customised worker's --data, --backend,
+// --model, --whisper-cli and --bridge. It returns the flags
 // it kept as "--name". No service file is a first install (nothing kept, no
 // error); one that doesn't read as `worker install` writes it is an error, and
 // nothing is kept (the defaults apply).
@@ -220,12 +216,11 @@ func carryForward(fs *flag.FlagSet, svc worker.Service) ([]string, error) {
 	fs.Visit(func(f *flag.Flag) { given[f.Name] = true })
 	var kept []string
 	prev.Visit(func(f *flag.Flag) {
-		if given[f.Name] || !slices.Contains(carriedFlags, f.Name) {
+		if given[f.Name] || f.Name == "token" {
 			return
 		}
-		if fs.Set(f.Name, f.Value.String()) == nil {
-			kept = append(kept, "--"+f.Name)
-		}
+		_ = fs.Set(f.Name, f.Value.String()) // string flags: Set can't fail
+		kept = append(kept, "--"+f.Name)
 	})
 	return kept, nil
 }

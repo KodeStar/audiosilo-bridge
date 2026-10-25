@@ -95,7 +95,7 @@ plain() {
 installed_dir() {
 	prog=$(plain "$(service_args | head -n 1)")
 	case "$prog" in
-	*/ | '') return 0 ;;
+	*/) return 0 ;;
 	/*/*) ;;
 	*) return 0 ;;
 	esac

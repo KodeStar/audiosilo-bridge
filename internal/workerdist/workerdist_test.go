@@ -375,6 +375,25 @@ func TestScriptRuns(t *testing.T) {
 			}
 		}
 	}
+	// rendered writes svc's service file into svc.Home as `worker install`
+	// renders it, for the test Bridge.
+	rendered := func(t *testing.T, svc worker.Service) {
+		t.Helper()
+		svc.BridgeURL, svc.Path = "http://192.168.1.20:8091", "/usr/bin:/bin"
+		text, err := svc.Render()
+		if err != nil {
+			t.Fatal(err)
+		}
+		file, err := svc.File()
+		if err != nil {
+			t.Fatal(err)
+		}
+		rel, err := filepath.Rel(svc.Home, file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		writeService(rel, text)(t, svc.Home)
+	}
 	run := func(t *testing.T, script, saved string, args ...string) (string, string, string, error) {
 		t.Helper()
 		r := runWith(t, script, runOpts{saved: saved}, args...)
@@ -443,26 +462,12 @@ func TestScriptRuns(t *testing.T) {
 		service := func(bin string, mkdir bool) func(t *testing.T, home string) {
 			return func(t *testing.T, home string) {
 				t.Helper()
-				svc := worker.Service{GOOS: goos, Home: home, Binary: bin, DataDir: filepath.Join(filepath.Dir(home), "data"),
-					BridgeURL: "http://192.168.1.20:8091", Path: "/usr/bin:/bin"}
-				text, err := svc.Render()
-				if err != nil {
-					t.Fatal(err)
-				}
-				file, err := svc.File()
-				if err != nil {
-					t.Fatal(err)
-				}
 				if mkdir {
 					if err := os.MkdirAll(filepath.Dir(bin), 0o755); err != nil {
 						t.Fatal(err)
 					}
 				}
-				rel, err := filepath.Rel(home, file)
-				if err != nil {
-					t.Fatal(err)
-				}
-				writeService(rel, text)(t, home)
+				rendered(t, worker.Service{GOOS: goos, Home: home, Binary: bin, DataDir: filepath.Join(filepath.Dir(home), "data")})
 			}
 		}
 		custom := filepath.Join(tmp, goos+"-custom dir", "bin")
@@ -552,15 +557,8 @@ func TestScriptRuns(t *testing.T) {
 						t.Fatal(err)
 					}
 				}
-				svc := worker.Service{GOOS: goos, Home: home, Binary: filepath.Join(home, "svc", "audiosilo-bridge"), DataDir: data,
-					BridgeURL: "http://192.168.1.20:8091", Path: "/usr/bin:/bin", Args: []string{"--backend", "whisper-cpp"}}
-				text, err := svc.Render()
-				if err != nil {
-					t.Fatal(err)
-				}
-				file, _ := svc.File()
-				rel, _ := filepath.Rel(home, file)
-				writeService(rel, text)(t, home)
+				rendered(t, worker.Service{GOOS: goos, Home: home, Binary: filepath.Join(home, "svc", "audiosilo-bridge"), DataDir: data,
+					Args: []string{"--backend", "whisper-cpp"}})
 			}
 		}
 		t.Run(goos+"/custom data", func(t *testing.T) {
@@ -632,33 +630,24 @@ func TestScriptRuns(t *testing.T) {
 				if err := os.MkdirAll(filepath.Dir(bin), 0o755); err != nil {
 					t.Fatal(err)
 				}
-				svc := worker.Service{GOOS: goos, Home: home, Binary: bin, DataDir: filepath.Join(filepath.Dir(home), "data"),
-					BridgeURL: "http://192.168.1.20:8091", Path: "/usr/bin:/bin"}
-				text, err := svc.Render()
-				if err != nil {
-					t.Fatal(err)
-				}
-				file, _ := svc.File()
-				rel, _ := filepath.Rel(home, file)
-				writeService(rel, text)(t, home)
+				rendered(t, worker.Service{GOOS: goos, Home: home, Binary: bin, DataDir: filepath.Join(filepath.Dir(home), "data")})
 			}
 		}
 		custom := func(home string) string { return filepath.Join(filepath.Dir(home), "svc bin") }
 		def := func(home string) string { return filepath.Join(home, ".audiosilo-bridge-worker", "bin") }
 		for name, tc := range map[string]struct {
 			o    runOpts
-			args []string
 			want bool
 		}{
-			"reused":     {runOpts{service: at(custom), noDir: true}, nil, true},
-			"default":    {runOpts{service: at(def), noDir: true}, nil, true},
-			"elsewhere":  {runOpts{service: at(custom)}, nil, false},
-			"no service": {runOpts{noDir: true}, nil, false},
+			"reused":     {runOpts{service: at(custom), noDir: true}, true},
+			"default":    {runOpts{service: at(def), noDir: true}, true},
+			"elsewhere":  {runOpts{service: at(custom)}, false},
+			"no service": {runOpts{noDir: true}, false},
 		} {
 			t.Run(goos+"/run note "+name, func(t *testing.T) {
 				t.Parallel()
 				tc.o.goos = goos
-				r := runWith(t, text, tc.o, append([]string{"--run", "--token", "asw_r"}, tc.args...)...)
+				r := runWith(t, text, tc.o, "--run", "--token", "asw_r")
 				if r.err != nil || r.ran != "worker --bridge http://192.168.1.20:8091 --token asw_r" {
 					t.Fatalf("ran %q, %v\n%s", r.ran, r.err, r.out)
 				}

@@ -428,13 +428,15 @@ func TestClientRoutesKeepThePrefixAsWritten(t *testing.T) {
 		if err != nil || got.EscapedPath() != tc.want {
 			t.Errorf("%s: route = %v, %v, want %s", tc.base, got, err, tc.want)
 		}
-		if strings.HasPrefix(tc.base, "http://proxy.lan/my") {
-			// What the request line carries.
-			req, _ := http.NewRequest(http.MethodGet, c.route(workerproto.RouteNext, "", url.Values{"wait": {"1"}}), nil)
-			if uri := req.URL.RequestURI(); uri != "/my+bridge(1)/worker/v1/tasks/next?wait=1" {
-				t.Errorf("request URI = %s", uri)
-			}
-		}
+	}
+	// What the request line carries.
+	c, err := newClient("http://proxy.lan/my+bridge(1)/", "t", "v", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, _ := http.NewRequest(http.MethodGet, c.route(workerproto.RouteNext, "", url.Values{"wait": {"1"}}), nil)
+	if uri := req.URL.RequestURI(); uri != "/my+bridge(1)/worker/v1/tasks/next?wait=1" {
+		t.Errorf("request URI = %s", uri)
 	}
 }
 

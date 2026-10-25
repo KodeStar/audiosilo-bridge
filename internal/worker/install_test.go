@@ -329,26 +329,31 @@ func TestInstalledArgsMalformed(t *testing.T) {
 		{"linux", "[Service]\nExecStart=/a/audiosilo-bridge worker --data /w%\n"},
 	} {
 		s, _ := service(t, tc.goos)
-		path, _ := s.File()
-		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(path, []byte(tc.text), 0o644); err != nil {
-			t.Fatal(err)
-		}
+		writeServiceFile(t, s, tc.text)
 		if got, err := s.InstalledArgs(); err == nil || errors.Is(err, fs.ErrNotExist) {
 			t.Errorf("%s %q = %q, %v", tc.goos, tc.text, got, err)
 		}
 	}
 	// A bare ExecStart, as a hand-written unit has it, reads.
 	s, _ = service(t, "linux")
-	path, _ := s.File()
-	_ = os.MkdirAll(filepath.Dir(path), 0o755)
-	if err := os.WriteFile(path, []byte("[Service]\n  ExecStart= /a/audiosilo-bridge worker  --data /w%%x\t--bridge \"http://h:1\"\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	writeServiceFile(t, s, "[Service]\n  ExecStart= /a/audiosilo-bridge worker  --data /w%%x\t--bridge \"http://h:1\"\n")
 	got, err := s.InstalledArgs()
 	if err != nil || strings.Join(got, " ") != "/a/audiosilo-bridge worker --data /w%x --bridge http://h:1" {
 		t.Fatalf("bare = %q, %v", got, err)
+	}
+}
+
+// writeServiceFile writes text as s's service file.
+func writeServiceFile(t *testing.T, s Service, text string) {
+	t.Helper()
+	path, err := s.File()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(text), 0o644); err != nil {
+		t.Fatal(err)
 	}
 }
