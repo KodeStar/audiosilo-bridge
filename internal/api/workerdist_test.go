@@ -148,6 +148,59 @@ func TestWorkerDistDenied(t *testing.T) {
 	}
 }
 
+// Security: the LAN guard knows install.sh by its cleaned path, so a refused
+// fetch of a variant the mux would redirect or answer itself still gets the
+// error script that exits 1, never a JSON 403 that `curl -fsSL | sh` turns
+// into a silent exit 0.
+func TestWorkerScriptRefusedOnPathVariants(t *testing.T) {
+	t.Parallel()
+	e := distEnv(t, false)
+	for _, target := range []string{
+		"//worker/install.sh",
+		"/worker/install.sh/",
+		"/worker/./install.sh",
+		"/worker//install.sh",
+		"/worker/../worker/install.sh",
+		"/worker/install%2Esh",
+	} {
+		for _, method := range []string{"GET", "HEAD"} {
+			req := httptest.NewRequest(method, target, nil)
+			req.RemoteAddr = "203.0.113.9:4000"
+			rec := httptest.NewRecorder()
+			e.h.ServeHTTP(rec, req)
+			if rec.Code != http.StatusOK || !strings.HasPrefix(rec.Header().Get("Content-Type"), "text/plain") {
+				t.Fatalf("%s %s from outside = %d %v", method, target, rec.Code, rec.Header())
+			}
+			if method == "HEAD" {
+				continue
+			}
+			body := rec.Body.String()
+			if !strings.HasPrefix(body, "#!/bin/sh\n") || strings.Contains(body, "BRIDGE=") {
+				t.Fatalf("%s from outside = %q", target, body)
+			}
+			if stderr, code := runScript(t, body); code != 1 || !strings.Contains(stderr, "only serves the worker install to its local network") {
+				t.Fatalf("%s refused script: exit %d, %q", target, code, stderr)
+			}
+		}
+	}
+	// Paths that only look like it keep the JSON 403.
+	for _, target := range []string{"/worker/install.shx", "/worker/install", "/install.sh", "/worker/v1/install.sh"} {
+		r := e.do("GET", target, "", "", "203.0.113.9:4000")
+		if r.Code != http.StatusForbidden || !strings.Contains(r.Body.String(), `"lan_only"`) {
+			t.Fatalf("%s from outside = %d %q", target, r.Code, r.Body.String())
+		}
+	}
+	// From the LAN the variants get whatever the mux answers today (a
+	// redirect to the clean path, or the plain 404 under /worker/), never
+	// the JSON refusal.
+	for _, target := range []string{"//worker/install.sh", "/worker/install.sh/", "/worker/./install.sh"} {
+		r := e.do("GET", target, "", "")
+		if r.Code == http.StatusForbidden || strings.Contains(r.Body.String(), "lan_only") {
+			t.Fatalf("%s from the LAN = %d %q", target, r.Code, r.Body.String())
+		}
+	}
+}
+
 // Without the image's folder (a native run), both routes say where the
 // releases are: the download as a 404, the script as a script that prints it
 // and exits 1. The status says there are no downloads.

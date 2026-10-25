@@ -3,6 +3,7 @@ package api
 import (
 	"errors"
 	"net/http"
+	"path"
 	"time"
 
 	"github.com/kodestar/audiosilo-bridge/internal/workerdist"
@@ -49,9 +50,12 @@ const errScriptLANOnly = "this Bridge only serves the worker install to its loca
 	"run the command on a computer on the Bridge's network, with the address the Workers tab shows"
 
 // isWorkerScript is a fetch of install.sh, which the LAN guard refuses with
-// an error script rather than JSON.
+// an error script rather than JSON. It decides on the cleaned path, so a
+// variant the mux would redirect or answer itself (//worker/install.sh,
+// /worker/install.sh/, /worker/./install.sh) gets the script too: `curl -fsSL`
+// would drop a JSON 403's body and sh would exit 0 on nothing.
 func isWorkerScript(r *http.Request) bool {
-	return (r.Method == http.MethodGet || r.Method == http.MethodHead) && r.URL.Path == RouteWorkerScript
+	return (r.Method == http.MethodGet || r.Method == http.MethodHead) && path.Clean(r.URL.Path) == RouteWorkerScript
 }
 
 // handleWorkerScript serves install.sh with the Bridge's address baked in
@@ -76,11 +80,9 @@ func (a *API) workerScript(r *http.Request) (string, error) {
 	if !a.dist.Available() {
 		return "", workerdist.ErrMissing
 	}
-	scheme := "http"
-	if r.TLS != nil {
-		scheme = "https"
-	}
-	addr, err := workerdist.Address(scheme, r.Host, a.b.Settings().PublicURL)
+	// The Bridge serves plain HTTP: a TLS proxy in front shows only through
+	// public_url, which Address takes when the request reached its host.
+	addr, err := workerdist.Address("http", r.Host, a.b.Settings().PublicURL)
 	if err != nil {
 		return "", err
 	}
