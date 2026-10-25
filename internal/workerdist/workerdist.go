@@ -141,8 +141,14 @@ func Address(scheme, host, publicURL string) (string, error) {
 	return scheme + "://" + host, nil
 }
 
-// pathPattern is what a public address's path prefix may hold.
-var pathPattern = regexp.MustCompile(`^[A-Za-z0-9._~/%\-]*$`)
+// pathPattern is what a public address's path prefix may hold: RFC 3986's
+// pchar (unreserved, pct-encoded, the sub-delims and ":" "@") and "/", except
+// the sub-delim "'", which would end the script's single-quoted bake-in. Every
+// place the address goes carries the rest as written: the bake-in, install.sh's
+// double-quoted expansions and curl's URL (which globs only "[]{}"), the
+// launchd plist (XML-escaped) and the systemd unit ("%" and "$" doubled inside
+// a quoted word, so ";" is no command separator either).
+var pathPattern = regexp.MustCompile(`^[A-Za-z0-9._~/%!$&()*+,;=:@\-]*$`)
 
 // publicAddress is publicURL trimmed of its trailing slashes when it is a
 // plain http(s) address (no user, query or fragment; a plain path) on host's

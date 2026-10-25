@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -102,6 +103,24 @@ func TestAddressPublicURL(t *testing.T) {
 		{"http", "proxy.lan:80", "http://proxy.lan/bridge", "http://proxy.lan/bridge"},
 		{"http", "proxy.lan", "http://proxy.lan:80/a/b-c_d.e~f%20", "http://proxy.lan:80/a/b-c_d.e~f%20"},
 		{"http", "[fd00::1]:8091", "http://[FD00::1]:8091/x", "http://[FD00::1]:8091/x"},
+		// RFC 3986's pchar: each sub-delim but "'", and ":" "@", kept as written
+		// (single-quoted in the script, they are only characters).
+		{"http", "proxy.lan", "http://proxy.lan/my+bridge(1)/", "http://proxy.lan/my+bridge(1)"},
+		{"http", "proxy.lan", "http://proxy.lan/a!b", "http://proxy.lan/a!b"},
+		{"http", "proxy.lan", "http://proxy.lan/a$b", "http://proxy.lan/a$b"},
+		{"http", "proxy.lan", "http://proxy.lan/a&b", "http://proxy.lan/a&b"},
+		{"http", "proxy.lan", "http://proxy.lan/a(b)", "http://proxy.lan/a(b)"},
+		{"http", "proxy.lan", "http://proxy.lan/a*b", "http://proxy.lan/a*b"},
+		{"http", "proxy.lan", "http://proxy.lan/a+b", "http://proxy.lan/a+b"},
+		{"http", "proxy.lan", "http://proxy.lan/a,b", "http://proxy.lan/a,b"},
+		{"http", "proxy.lan", "http://proxy.lan/a;b", "http://proxy.lan/a;b"},
+		{"http", "proxy.lan", "http://proxy.lan/a=b", "http://proxy.lan/a=b"},
+		{"http", "proxy.lan", "http://proxy.lan/a:b", "http://proxy.lan/a:b"},
+		{"http", "proxy.lan", "http://proxy.lan/a@b", "http://proxy.lan/a@b"},
+		{"http", "proxy.lan", "http://proxy.lan/$(id);x&y", "http://proxy.lan/$(id);x&y"},
+		// An "@" after the host is the path's: the host stays proxy.lan.
+		{"http", "proxy.lan", "http://proxy.lan/@evil.com", "http://proxy.lan/@evil.com"},
+		{"http", "evil.com", "http://proxy.lan/@evil.com", "http://evil.com"},
 		// Behind a TLS proxy: the request is plain http with the client's Host.
 		{"http", "bridge.example.com", "https://bridge.example.com/bridge", "https://bridge.example.com/bridge"},
 		{"http", "bridge.example.com:443", "https://bridge.example.com/bridge/", "https://bridge.example.com/bridge"},
@@ -123,8 +142,17 @@ func TestAddressPublicURL(t *testing.T) {
 		{"http", "nas.lan", "http://nas.lan/?x=1", "http://nas.lan"},
 		{"http", "nas.lan", "http://nas.lan/#x", "http://nas.lan"},
 		{"http", "nas.lan", "http://nas.lan/a'b", "http://nas.lan"},
+		{"http", "nas.lan", "http://nas.lan/a%27b'", "http://nas.lan"},
+		{"http", "nas.lan", "http://nas.lan/a\"b", "http://nas.lan"},
+		{"http", "nas.lan", "http://nas.lan/a`b", "http://nas.lan"},
+		{"http", "nas.lan", "http://nas.lan/a\\b", "http://nas.lan"},
+		{"http", "nas.lan", "http://nas.lan/a[b]", "http://nas.lan"},
+		{"http", "nas.lan", "http://nas.lan/a{b}", "http://nas.lan"},
+		{"http", "nas.lan", "http://nas.lan/a<b>", "http://nas.lan"},
+		{"http", "nas.lan", "http://nas.lan/a|b", "http://nas.lan"},
+		{"http", "nas.lan", "http://nas.lan/a^b", "http://nas.lan"},
+		{"http", "nas.lan", "http://nas.lan/a\tb", "http://nas.lan"},
 		{"http", "nas.lan", "http://nas.lan/a b", "http://nas.lan"},
-		{"http", "nas.lan", "http://nas.lan/$(id)", "http://nas.lan"},
 		{"http", "nas.lan", "http://nas.lan/a\nb", "http://nas.lan"},
 		{"http", "nas.lan", "http://nas.lan/%zz", "http://nas.lan"},
 		{"http", "nas.lan", "http:nas.lan", "http://nas.lan"},
@@ -347,6 +375,25 @@ func TestScriptRuns(t *testing.T) {
 			}
 		}
 	}
+	// rendered writes svc's service file into svc.Home as `worker install`
+	// renders it, for the test Bridge.
+	rendered := func(t *testing.T, svc worker.Service) {
+		t.Helper()
+		svc.BridgeURL, svc.Path = "http://192.168.1.20:8091", "/usr/bin:/bin"
+		text, err := svc.Render()
+		if err != nil {
+			t.Fatal(err)
+		}
+		file, err := svc.File()
+		if err != nil {
+			t.Fatal(err)
+		}
+		rel, err := filepath.Rel(svc.Home, file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		writeService(rel, text)(t, svc.Home)
+	}
 	run := func(t *testing.T, script, saved string, args ...string) (string, string, string, error) {
 		t.Helper()
 		r := runWith(t, script, runOpts{saved: saved}, args...)
@@ -411,30 +458,16 @@ func TestScriptRuns(t *testing.T) {
 	// absolute folder plainly leaves the default.
 	for _, goos := range []string{"darwin", "linux"} {
 		// service writes goos's service file running bin (made a folder when
-		// mkdir is set).
+		// mkdir is set), with runWith's data dir (where o.saved goes) as --data.
 		service := func(bin string, mkdir bool) func(t *testing.T, home string) {
 			return func(t *testing.T, home string) {
 				t.Helper()
-				svc := worker.Service{GOOS: goos, Home: home, Binary: bin, DataDir: filepath.Join(home, ".audiosilo-bridge-worker"),
-					BridgeURL: "http://192.168.1.20:8091", Path: "/usr/bin:/bin"}
-				text, err := svc.Render()
-				if err != nil {
-					t.Fatal(err)
-				}
-				file, err := svc.File()
-				if err != nil {
-					t.Fatal(err)
-				}
 				if mkdir {
 					if err := os.MkdirAll(filepath.Dir(bin), 0o755); err != nil {
 						t.Fatal(err)
 					}
 				}
-				rel, err := filepath.Rel(home, file)
-				if err != nil {
-					t.Fatal(err)
-				}
-				writeService(rel, text)(t, home)
+				rendered(t, worker.Service{GOOS: goos, Home: home, Binary: bin, DataDir: filepath.Join(filepath.Dir(home), "data")})
 			}
 		}
 		custom := filepath.Join(tmp, goos+"-custom dir", "bin")
@@ -508,6 +541,137 @@ func TestScriptRuns(t *testing.T) {
 			})
 		}
 	}
+	// The saved-token check of an update looks in the installed service's
+	// --data (`worker install` keeps it), not the default; a --run start looks
+	// in the default, as `worker` does. A --data the file had to escape (or
+	// none) leaves the default.
+	for _, goos := range []string{"darwin", "linux"} {
+		// withData writes goos's service file with --data dir, holding a
+		// saved token when token is set.
+		withData := func(dir, token string) func(t *testing.T, home string) {
+			return func(t *testing.T, home string) {
+				t.Helper()
+				data := filepath.Join(filepath.Dir(home), dir)
+				if token != "" {
+					if err := worker.SaveToken(data, token); err != nil {
+						t.Fatal(err)
+					}
+				}
+				rendered(t, worker.Service{GOOS: goos, Home: home, Binary: filepath.Join(home, "svc", "audiosilo-bridge"), DataDir: data,
+					Args: []string{"--backend", "whisper-cpp"}})
+			}
+		}
+		t.Run(goos+"/custom data", func(t *testing.T) {
+			t.Parallel()
+			r := runWith(t, text, runOpts{goos: goos, service: withData("custom data", "asw_custom")})
+			if r.err != nil || r.ran != "worker install --bridge http://192.168.1.20:8091" {
+				t.Fatalf("update with a custom --data: %v, ran %q\n%s", r.err, r.ran, r.out)
+			}
+		})
+		t.Run(goos+"/custom data run", func(t *testing.T) {
+			t.Parallel()
+			r := runWith(t, text, runOpts{goos: goos, service: withData("custom data", "asw_custom")}, "--run")
+			if r.err == nil || !strings.Contains(r.out, "--token is required") || r.url != "" {
+				t.Fatalf("--run with the token only in the service's --data: %v\n%s", r.err, r.out)
+			}
+		})
+		t.Run(goos+"/escaped data", func(t *testing.T) {
+			t.Parallel()
+			r := runWith(t, text, runOpts{goos: goos, service: withData("a&b", "asw_custom")})
+			if r.err == nil || !strings.Contains(r.out, "--token is required") || r.url != "" {
+				t.Fatalf("an escaped --data: %v\n%s", r.err, r.out)
+			}
+			// ... and the default's token does.
+			r = runWith(t, text, runOpts{goos: goos, saved: "asw_saved", service: withData("a&b", "")})
+			if r.err != nil || r.ran != "worker install --bridge http://192.168.1.20:8091" {
+				t.Fatalf("an escaped --data, the default's token: %v\n%s", r.err, r.out)
+			}
+		})
+		t.Run(goos+"/no data token", func(t *testing.T) {
+			t.Parallel()
+			// The default holds a token, the service's --data none: the service's
+			// folder is the one `worker install` reads, so it is required.
+			r := runWith(t, text, runOpts{goos: goos, saved: "asw_saved", service: withData("custom data", "")})
+			if r.err == nil || !strings.Contains(r.out, "--token is required") {
+				t.Fatalf("%v\n%s", r.err, r.out)
+			}
+		})
+	}
+	// A hand-written unit's --data=<dir> reads too.
+	t.Run("unit data=", func(t *testing.T) {
+		t.Parallel()
+		r := runWith(t, text, runOpts{goos: "linux", service: func(t *testing.T, home string) {
+			t.Helper()
+			data := filepath.Join(filepath.Dir(home), "eq data")
+			if err := worker.SaveToken(data, "asw_eq"); err != nil {
+				t.Fatal(err)
+			}
+			writeService(".config/systemd/user/audiosilo-bridge-worker.service",
+				"[Service]\nExecStart=/opt/x/audiosilo-bridge worker \"--data="+data+"\"\n")(t, home)
+		}})
+		if r.err != nil {
+			t.Fatalf("%v\n%s", r.err, r.out)
+		}
+	})
+	// A --run start that lands where the installed service runs the program
+	// from (reused, or the default folder) says the service keeps the old one
+	// until it restarts, and how; one elsewhere, or with no service, doesn't.
+	for _, goos := range []string{"darwin", "linux"} {
+		restart := "systemctl --user restart audiosilo-bridge-worker.service"
+		if goos == "darwin" {
+			restart = "launchctl kickstart -k gui/" + strconv.Itoa(os.Getuid()) + "/app.audiosilo.bridge-worker"
+		}
+		const note = "it keeps the old one until it restarts"
+		// at writes goos's service file running the program in folder (made).
+		at := func(folder func(home string) string) func(t *testing.T, home string) {
+			return func(t *testing.T, home string) {
+				t.Helper()
+				bin := filepath.Join(folder(home), "audiosilo-bridge")
+				if err := os.MkdirAll(filepath.Dir(bin), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				rendered(t, worker.Service{GOOS: goos, Home: home, Binary: bin, DataDir: filepath.Join(filepath.Dir(home), "data")})
+			}
+		}
+		custom := func(home string) string { return filepath.Join(filepath.Dir(home), "svc bin") }
+		def := func(home string) string { return filepath.Join(home, ".audiosilo-bridge-worker", "bin") }
+		// linked runs the program through a link to runWith's --dir folder: the
+		// same folder, spelled another way.
+		linked := func(t *testing.T, home string) {
+			t.Helper()
+			sub := filepath.Dir(home)
+			if err := os.MkdirAll(filepath.Join(sub, "bin"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink("bin", filepath.Join(sub, "link")); err != nil {
+				t.Fatal(err)
+			}
+			rendered(t, worker.Service{GOOS: goos, Home: home, Binary: filepath.Join(sub, "link", "audiosilo-bridge"),
+				DataDir: filepath.Join(sub, "data")})
+		}
+		for name, tc := range map[string]struct {
+			o    runOpts
+			want bool
+		}{
+			"reused":     {runOpts{service: at(custom), noDir: true}, true},
+			"default":    {runOpts{service: at(def), noDir: true}, true},
+			"linked":     {runOpts{service: linked}, true},
+			"elsewhere":  {runOpts{service: at(custom)}, false},
+			"no service": {runOpts{noDir: true}, false},
+		} {
+			t.Run(goos+"/run note "+name, func(t *testing.T) {
+				t.Parallel()
+				tc.o.goos = goos
+				r := runWith(t, text, tc.o, "--run", "--token", "asw_r")
+				if r.err != nil || r.ran != "worker --bridge http://192.168.1.20:8091 --token asw_r" {
+					t.Fatalf("ran %q, %v\n%s", r.ran, r.err, r.out)
+				}
+				if got := strings.Contains(r.out, note) && strings.Contains(r.out, "To update it now: "+restart+" (or run this again without --run)."); got != tc.want {
+					t.Fatalf("note = %v, want %v\n%s", got, tc.want, r.out)
+				}
+			})
+		}
+	}
 	// A service file that isn't the one `worker install` writes, or holds
 	// nothing usable, leaves the default.
 	for name, tc := range map[string]struct{ goos, file, text string }{
@@ -537,6 +701,23 @@ func TestScriptRuns(t *testing.T) {
 			".config/systemd/user/audiosilo-bridge-worker.service", "[Service]\n  ExecStart= "+bare+"/audiosilo-bridge worker --data x\n")})
 		if r.err != nil || !strings.Contains(r.out, "Updating the worker in "+bare+",") {
 			t.Fatalf("%v\n%s", r.err, r.out)
+		}
+	})
+	// An address with every path character public_url may carry beyond the
+	// old set (RFC 3986's sub-delims but "'", and ":" "@") reaches curl and
+	// the program byte for byte: nothing in it is run or split.
+	t.Run("address characters", func(t *testing.T) {
+		t.Parallel()
+		const addr = "http://192.168.1.20:8091/my+bridge(1)!$&*,;=:@x/$(id)$HOME"
+		script, err := Script(addr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r := runWith(t, script, runOpts{}, "--token", "asw_abc")
+		if r.err != nil || r.ran != "worker install --bridge "+addr+" --token asw_abc" ||
+			!strings.HasPrefix(r.url, addr+"/worker/download/"+runtime.GOOS+"/") ||
+			!strings.Contains(r.out, "from "+addr+" ...") {
+			t.Fatalf("%v, ran %q, url %q\n%s", r.err, r.ran, r.url, r.out)
 		}
 	})
 	t.Run("notoken", func(t *testing.T) {

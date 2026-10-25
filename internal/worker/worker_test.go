@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -406,6 +407,36 @@ func TestNewClientNeedsAnHTTPAddress(t *testing.T) {
 	}
 	if _, err := newClient("http://192.168.1.2:8091/", "t", "v", nil); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// A Bridge behind a proxy's prefix: every route goes under the prefix as
+// written, the RFC 3986 path characters public_url may hold included (a "("
+// or "!" stays one, never %28 or %21, so the proxy's prefix match sees it).
+func TestClientRoutesKeepThePrefixAsWritten(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ base, want string }{
+		{"http://nas.lan:8091", "/worker/v1/tasks/a%2Fb/audio"},
+		{"http://proxy.lan/my+bridge(1)/", "/my+bridge(1)/worker/v1/tasks/a%2Fb/audio"},
+		{"https://proxy.lan/a!$&()*+,;=:@b/c%20d", "/a!$&()*+,;=:@b/c%20d/worker/v1/tasks/a%2Fb/audio"},
+	} {
+		c, err := newClient(tc.base, "t", "v", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := url.Parse(c.route(workerproto.RouteAudio, "a/b", nil))
+		if err != nil || got.EscapedPath() != tc.want {
+			t.Errorf("%s: route = %v, %v, want %s", tc.base, got, err, tc.want)
+		}
+	}
+	// What the request line carries.
+	c, err := newClient("http://proxy.lan/my+bridge(1)/", "t", "v", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, _ := http.NewRequest(http.MethodGet, c.route(workerproto.RouteNext, "", url.Values{"wait": {"1"}}), nil)
+	if uri := req.URL.RequestURI(); uri != "/my+bridge(1)/worker/v1/tasks/next?wait=1" {
+		t.Errorf("request URI = %s", uri)
 	}
 }
 

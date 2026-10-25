@@ -2242,6 +2242,23 @@ internal/
             tearing down) and retries the bootstrap with a growing pause (it
             fails with exit status 5 meanwhile); a final failure names the
             manual launchctl bootstrap command. Sleep is injectable for tests.
+            InstalledArgs reads the service file back into its argv (the
+            plist's ProgramArguments, strict XML; the unit's first ExecStart,
+            "quoted" or bare words with only \\ and \" escapes and %% $$
+            undoubled), Render's inverse (a round-trip test holds it); no
+            file wraps fs.ErrNotExist, and anything else systemd would read
+            differently (a specifier, a $VAR, a prefix, another escape, a '
+            in a bare word, a lone ;) is an error, which `worker install`
+            prints before any --bridge refusal. `worker install` (cmd
+            worker.go carryForward) parses that argv with the same flag set
+            that wrote it and keeps each written flag (--bridge, --data, --backend, --model, --whisper-cli; never
+            --token) the command line didn't give, so an update keeps a
+            customised worker and finds its token in the kept --data; an
+            explicit flag wins (an empty one included); a file that doesn't
+            parse keeps nothing and says so on stderr. Uninstall names the
+            kept --data. The client appends each route to the --bridge path as
+            written (EscapedPath), so a proxy prefix's "(" or "!" reaches it
+            unescaped.
   workerdist/ the worker's own distribution, a leaf: the gzipped builds the
             images carry in /usr/local/share/audiosilo-bridge/workers
             (DefaultDir; audiosilo-bridge_<os>_<arch>.gz for the fixed Platforms
@@ -2257,7 +2274,13 @@ internal/
             address (no user, query or fragment; a plain path) on the request
             Host's host and port: hosts case-insensitive, a missing port on
             either side public_url's scheme's default (a TLS proxy's request
-            arrives as plain http with the client's portless Host). Otherwise the
+            arrives as plain http with the client's portless Host). The prefix
+            may hold RFC 3986's pchar (unreserved, %XX, the sub-delims and
+            ":" "@") but never "'", which would end the single-quoted
+            bake-in; each sink carries the rest as written (install.sh's
+            double-quoted expansions, curl, which globs only "[]{}", the plist
+            XML-escaped, the unit quoted with % and $ doubled), a test per
+            character. Otherwise the
             request's scheme://Host, reachable from that computer by
             construction. The admin sets public_url; the Host shows the fetching
             computer reached that host. The download URLs are under it, prefix
@@ -2268,7 +2291,9 @@ internal/
             (one main function, called on its last line, so a download cut
             short runs nothing) takes --token (required the first time; an
             update reuses the data dir's saved token), --run (says a --run start
-            doesn't save a --token it was given), --dir; detects uname (a Rosetta terminal on
+            doesn't save a --token it was given; one that lands in the folder the
+            installed service runs from says the service keeps the old program
+            until it restarts, with the restart command), --dir; detects uname (a Rosetta terminal on
             Apple Silicon takes arm64). With no --dir it reuses the installed
             service's folder (installed_dir: the launchd plist's first
             ProgramArguments string, the systemd user unit's first ExecStart word,
@@ -2278,7 +2303,12 @@ internal/
             `worker install` then points the service at) and says so; an explicit --dir
             wins. It downloads to a temp file in the target dir, checks `version`
             runs, moves it to <dir>/audiosilo-bridge and runs `worker install` (or
-            `worker` with --run). Its tests run it end to end with a fake curl
+            `worker` with --run). The saved-token check of an update looks in the
+            installed service's --data (service_args reads the service's
+            argv, installed_data takes --data <dir> or --data=<dir> when
+            it reads plainly), since `worker install` keeps it; a --run
+            start, or a service with none, looks in $AUDIOSILO_WORKER_DATA,
+            else ~/.audiosilo-bridge-worker, as `worker` does. Its tests run it end to end with a fake curl
             (and a fake uname for the other OS's service file), each run in a
             temp HOME holding service files rendered by worker.Service, so no
             test reads this computer's own.
@@ -2398,7 +2428,11 @@ internal/
             the image's folder is absent (install.sh an error script that exits 1
             instead); status carries worker_downloads (the folder has a build).
             lanOnly refuses GET/HEAD /worker/install.sh with that error script
-            (200, text/plain: a 403's body would never reach sh); every other
+            (200, text/plain: a 403's body would never reach sh), knowing it by
+            its path.Clean'd path (//worker/install.sh, /worker/install.sh/,
+            /worker/./install.sh get it too; from the LAN they get what the
+            mux answers); the address's scheme is always http (the Bridge
+            serves plain HTTP; a TLS proxy shows only through public_url); every other
             route, the downloads included, keeps the JSON 403 lan_only.
             securityHeaders wraps lanOnly, so a refusal carries nosniff too.
             Phase 1b:
