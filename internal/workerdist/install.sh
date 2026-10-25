@@ -51,13 +51,13 @@ installed_dir() {
 	[ -n "${HOME:-}" ] || return 0
 	case "$os" in
 	darwin)
-		f="${HOME:-}/Library/LaunchAgents/app.audiosilo.bridge-worker.plist"
+		f="$HOME/Library/LaunchAgents/app.audiosilo.bridge-worker.plist"
 		[ -f "$f" ] || return 0
 		prog=$(awk '/<key>ProgramArguments<\/key>/ { args = 1; next }
 			args && /<string>/ { sub(/^[ \t]*<string>/, ""); sub(/<\/string>[ \t]*$/, ""); print; exit }' "$f" 2>/dev/null) || prog=''
 		;;
 	linux)
-		f="${HOME:-}/.config/systemd/user/audiosilo-bridge-worker.service"
+		f="$HOME/.config/systemd/user/audiosilo-bridge-worker.service"
 		[ -f "$f" ] || return 0
 		# The first word of the first ExecStart: "quoted", or bare.
 		prog=$(sed -n -e 's/^[[:blank:]]*ExecStart=[[:blank:]]*"\([^"]*\)".*/\1/p' \
@@ -80,7 +80,6 @@ main() {
 	token=''
 	run=0
 	dir=''
-	dir_set=0
 	while [ $# -gt 0 ]; do
 		case "$1" in
 		--token)
@@ -98,13 +97,13 @@ main() {
 			;;
 		--dir)
 			[ $# -ge 2 ] || die '--dir needs a value'
+			[ -n "$2" ] || die '--dir is empty'
 			dir=$2
-			dir_set=1
 			shift 2
 			;;
 		--dir=*)
 			dir=${1#--dir=}
-			dir_set=1
+			[ -n "$dir" ] || die '--dir is empty'
 			shift
 			;;
 		-h | --help)
@@ -123,7 +122,6 @@ main() {
 		[ -n "${AUDIOSILO_WORKER_TOKEN:-}" ] || [ -s "$data/worker.token" ] ||
 			die "--token is required: add a worker on the Bridge's page (Workers) and copy its command"
 	fi
-	[ "$dir_set" = 0 ] || [ -n "$dir" ] || die '--dir is empty'
 
 	case "$(uname -s)" in
 	Darwin) os=darwin ;;
@@ -142,7 +140,7 @@ main() {
 	fi
 
 	# An update with no --dir goes where the installed service runs it from.
-	if [ "$dir_set" = 0 ]; then
+	if [ -z "$dir" ]; then
 		dir=$(installed_dir)
 		if [ -n "$dir" ]; then
 			say "Updating the worker in $dir, where its service runs it from (--dir puts it elsewhere)"

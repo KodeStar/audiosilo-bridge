@@ -281,7 +281,7 @@ func TestScriptRuns(t *testing.T) {
 	type runOpts struct {
 		saved, goos string
 		noDir       bool
-		service     func(home string)
+		service     func(t *testing.T, home string)
 	}
 	type result struct {
 		out, ran, url, home string
@@ -304,7 +304,7 @@ func TestScriptRuns(t *testing.T) {
 			}
 		}
 		if o.service != nil {
-			o.service(home)
+			o.service(t, home)
 		}
 		argv := []string{"-s", "--"}
 		if !o.noDir {
@@ -334,12 +334,26 @@ func TestScriptRuns(t *testing.T) {
 		}
 		return result{string(out), strings.TrimSpace(string(r)), strings.TrimSpace(string(u)), home, err}
 	}
+	// writeService returns a runOpts.service that writes text to rel under the HOME.
+	writeService := func(rel, text string) func(t *testing.T, home string) {
+		return func(t *testing.T, home string) {
+			t.Helper()
+			f := filepath.Join(home, rel)
+			if err := os.MkdirAll(filepath.Dir(f), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(f, []byte(text), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
 	run := func(t *testing.T, script, saved string, args ...string) (string, string, string, error) {
 		t.Helper()
 		r := runWith(t, script, runOpts{saved: saved}, args...)
 		return r.out, r.ran, r.url, r.err
 	}
 	t.Run("install", func(t *testing.T) {
+		t.Parallel()
 		out, ran, url, err := run(t, text, "", "--token", "asw_abc")
 		if err != nil {
 			t.Fatalf("%v\n%s", err, out)
@@ -355,6 +369,7 @@ func TestScriptRuns(t *testing.T) {
 		}
 	})
 	t.Run("run", func(t *testing.T) {
+		t.Parallel()
 		out, ran, _, err := run(t, text, "", "--token=asw_def", "--run")
 		if err != nil || ran != "worker --bridge http://192.168.1.20:8091 --token asw_def" {
 			t.Fatalf("ran %q, %v\n%s", ran, err, out)
@@ -365,6 +380,7 @@ func TestScriptRuns(t *testing.T) {
 	})
 	// Running it again to update: the token the first install saved does.
 	t.Run("update", func(t *testing.T) {
+		t.Parallel()
 		out, ran, url, err := run(t, text, "asw_saved")
 		if err != nil || ran != "worker install --bridge http://192.168.1.20:8091" || url == "" {
 			t.Fatalf("update: %v, ran %q, url %q\n%s", err, ran, url, out)
@@ -373,6 +389,7 @@ func TestScriptRuns(t *testing.T) {
 	// A download cut short runs nothing (here, past the line that installs the
 	// program): the script is one function, called on its last line.
 	t.Run("truncated", func(t *testing.T) {
+		t.Parallel()
 		const line = "mv -f \"$tmp\" \"$bin\"\n"
 		cut := text[:strings.Index(text, line)+len(line)]
 		out, ran, url, err := run(t, cut, "", "--token", "asw_abc")
@@ -387,8 +404,9 @@ func TestScriptRuns(t *testing.T) {
 	for _, goos := range []string{"darwin", "linux"} {
 		// service writes goos's service file running bin (made a folder when
 		// mkdir is set).
-		service := func(bin string, mkdir bool) func(home string) {
-			return func(home string) {
+		service := func(bin string, mkdir bool) func(t *testing.T, home string) {
+			return func(t *testing.T, home string) {
+				t.Helper()
 				svc := worker.Service{GOOS: goos, Home: home, Binary: bin, DataDir: filepath.Join(home, ".audiosilo-bridge-worker"),
 					BridgeURL: "http://192.168.1.20:8091", Path: "/usr/bin:/bin"}
 				text, err := svc.Render()
@@ -404,16 +422,16 @@ func TestScriptRuns(t *testing.T) {
 						t.Fatal(err)
 					}
 				}
-				if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+				rel, err := filepath.Rel(home, file)
+				if err != nil {
 					t.Fatal(err)
 				}
-				if err := os.WriteFile(file, []byte(text), 0o644); err != nil {
-					t.Fatal(err)
-				}
+				writeService(rel, text)(t, home)
 			}
 		}
 		custom := filepath.Join(tmp, goos+"-custom dir", "bin")
 		t.Run(goos+"/reuse", func(t *testing.T) {
+			t.Parallel()
 			r := runWith(t, text, runOpts{goos: goos, noDir: true, saved: "asw_saved",
 				service: service(filepath.Join(custom, "audiosilo-bridge"), true)})
 			if r.err != nil || !strings.Contains(r.out, "Updating the worker in "+custom+", where its service runs it from") ||
@@ -428,6 +446,7 @@ func TestScriptRuns(t *testing.T) {
 			}
 		})
 		t.Run(goos+"/explicit", func(t *testing.T) {
+			t.Parallel()
 			other := filepath.Join(tmp, goos+"-other")
 			if err := os.MkdirAll(other, 0o755); err != nil {
 				t.Fatal(err)
@@ -447,6 +466,7 @@ func TestScriptRuns(t *testing.T) {
 			"dollar":   filepath.Join(tmp, goos+"-$HOME", "audiosilo-bridge"),
 		} {
 			t.Run(goos+"/"+name, func(t *testing.T) {
+				t.Parallel()
 				r := runWith(t, text, runOpts{goos: goos, noDir: true, saved: "asw_saved", service: service(bin, name != "gone")})
 				def := filepath.Join(r.home, ".audiosilo-bridge-worker", "bin", "audiosilo-bridge")
 				if r.err != nil || strings.Contains(r.out, "Updating the worker in") || !strings.Contains(r.out, "at "+def) {
@@ -465,15 +485,8 @@ func TestScriptRuns(t *testing.T) {
 		"unit open quote": {"linux", ".config/systemd/user/audiosilo-bridge-worker.service", "[Service]\nExecStart=\"" + tmp + "/audiosilo-bridge\n"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			r := runWith(t, text, runOpts{goos: tc.goos, noDir: true, saved: "asw_saved", service: func(home string) {
-				f := filepath.Join(home, tc.file)
-				if err := os.MkdirAll(filepath.Dir(f), 0o755); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.WriteFile(f, []byte(tc.text), 0o644); err != nil {
-					t.Fatal(err)
-				}
-			}})
+			t.Parallel()
+			r := runWith(t, text, runOpts{goos: tc.goos, noDir: true, saved: "asw_saved", service: writeService(tc.file, tc.text)})
 			def := filepath.Join(r.home, ".audiosilo-bridge-worker", "bin", "audiosilo-bridge")
 			if r.err != nil || strings.Contains(r.out, "Updating the worker in") || !strings.Contains(r.out, "at "+def) {
 				t.Fatalf("%v\n%s", r.err, r.out)
@@ -482,30 +495,26 @@ func TestScriptRuns(t *testing.T) {
 	}
 	// A bare (unquoted) ExecStart, as a hand-written unit has it, is read too.
 	t.Run("unit bare", func(t *testing.T) {
+		t.Parallel()
 		bare := filepath.Join(tmp, "bare", "bin")
 		if err := os.MkdirAll(bare, 0o755); err != nil {
 			t.Fatal(err)
 		}
-		r := runWith(t, text, runOpts{goos: "linux", noDir: true, saved: "asw_saved", service: func(home string) {
-			f := filepath.Join(home, ".config/systemd/user/audiosilo-bridge-worker.service")
-			if err := os.MkdirAll(filepath.Dir(f), 0o755); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(f, []byte("[Service]\n  ExecStart= "+bare+"/audiosilo-bridge worker --data x\n"), 0o644); err != nil {
-				t.Fatal(err)
-			}
-		}})
+		r := runWith(t, text, runOpts{goos: "linux", noDir: true, saved: "asw_saved", service: writeService(
+			".config/systemd/user/audiosilo-bridge-worker.service", "[Service]\n  ExecStart= "+bare+"/audiosilo-bridge worker --data x\n")})
 		if r.err != nil || !strings.Contains(r.out, "Updating the worker in "+bare+",") {
 			t.Fatalf("%v\n%s", r.err, r.out)
 		}
 	})
 	t.Run("notoken", func(t *testing.T) {
+		t.Parallel()
 		out, ran, url, err := run(t, text, "", "--run")
 		if err == nil || !strings.Contains(out, "--token is required") || ran != "" || url != "" {
 			t.Fatalf("no token: %v, ran %q, url %q\n%s", err, ran, url, out)
 		}
 	})
 	t.Run("unknown", func(t *testing.T) {
+		t.Parallel()
 		out, _, url, err := run(t, text, "", "--token", "asw_x", "--service")
 		if err == nil || !strings.Contains(out, "unknown option: --service") || url != "" {
 			t.Fatalf("unknown flag: %v\n%s", err, out)

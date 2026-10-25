@@ -144,9 +144,6 @@ func Address(scheme, host, publicURL string) (string, error) {
 // pathPattern is what a public address's path prefix may hold.
 var pathPattern = regexp.MustCompile(`^[A-Za-z0-9._~/%\-]*$`)
 
-// defaultPorts fills in a scheme's port.
-var defaultPorts = map[string]string{"http": "80", "https": "443"}
-
 // publicAddress is publicURL trimmed of its trailing slashes when it is a
 // plain http(s) address (no user, query or fragment; a plain path) on host's
 // host and port. A port missing on either side is the public address's
@@ -155,22 +152,17 @@ var defaultPorts = map[string]string{"http": "80", "https": "443"}
 // scheme that was (the request reaches it as plain http).
 func publicAddress(publicURL, host string) (string, bool) {
 	pub := strings.TrimRight(strings.TrimSpace(publicURL), "/")
-	if pub == "" {
-		return "", false
-	}
 	u, err := url.Parse(pub)
-	if err != nil || u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.Opaque != "" ||
-		!hostPattern.MatchString(u.Host) {
+	// The path is checked as written (it goes into the script as set): what
+	// follows scheme://host, with no user part in between and a host
+	// hostPattern holds as written (url.Parse decodes no escape it allows).
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.RawQuery != "" || u.ForceQuery ||
+		u.Fragment != "" || !hostPattern.MatchString(u.Host) || !pathPattern.MatchString(pub[len(u.Scheme+"://"+u.Host):]) {
 		return "", false
 	}
-	// The path as written (it goes into the script as set): what follows
-	// scheme://host, with no user part to skip.
-	if i := strings.Index(pub, "://"); i < 0 || !pathPattern.MatchString(pub[i+3+len(u.Host):]) {
-		return "", false
-	}
-	def, ok := defaultPorts[u.Scheme]
-	if !ok {
-		return "", false
+	def := "80"
+	if u.Scheme == "https" {
+		def = "443"
 	}
 	req := &url.URL{Host: host}
 	if !strings.EqualFold(u.Hostname(), req.Hostname()) || portOr(u.Port(), def) != portOr(req.Port(), def) {
