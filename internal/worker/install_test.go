@@ -3,6 +3,7 @@ package worker
 import (
 	"encoding/xml"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -250,5 +251,104 @@ func TestTokenFile(t *testing.T) {
 	}
 	if got := LoadToken(dir); got != "asw_abc" {
 		t.Fatalf("load = %q", got)
+	}
+}
+
+// InstalledArgs reads back the command line Render wrote, whatever its words
+// hold: XML's and systemd's special characters, spaces, quotes, and a Bridge
+// address with every path character public_url may carry.
+func TestInstalledArgsRoundTrip(t *testing.T) {
+	t.Parallel()
+	for _, goos := range []string{"darwin", "linux"} {
+		t.Run(goos, func(t *testing.T) {
+			t.Parallel()
+			s, _ := service(t, goos)
+			s.Binary = `/opt/a "b"\c/100%/$HOME/<x>&'y'/audiosilo-bridge`
+			s.DataDir = "/Users/me/my data;%h$$/worker"
+			s.BridgeURL = "https://proxy.lan:8443/a!$&()*+,;=:@b/c%20d%n"
+			s.Args = []string{"--backend", "whisper-cpp", "--model", "large v3 \"q5\"", "--whisper-cli", `/opt/w\cli/$1/whisper-cli`}
+			if _, err := s.Install(); err != nil {
+				t.Fatal(err)
+			}
+			got, err := s.InstalledArgs()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Join(got, "\x00") != strings.Join(s.argv(), "\x00") {
+				t.Fatalf("read back %q, want %q", got, s.argv())
+			}
+		})
+	}
+}
+
+// The new address characters reach each service file safely: escaped in the
+// plist's XML, quoted with % and $ doubled in the unit (so systemd expands
+// neither, and ";" is no command separator).
+func TestServiceFilesCarryTheAddress(t *testing.T) {
+	t.Parallel()
+	const addr = "http://proxy.lan/a!$&()*+,;=:@b%20"
+	s, _ := service(t, "darwin")
+	s.BridgeURL = addr
+	text, _ := s.Render()
+	if !strings.Contains(text, "<string>http://proxy.lan/a!$&amp;()*+,;=:@b%20</string>") {
+		t.Fatalf("plist:\n%s", text)
+	}
+	s.GOOS = "linux"
+	text, _ = s.Render()
+	if !strings.Contains(text, `"--bridge" "http://proxy.lan/a!$$&()*+,;=:@b%%20"`) {
+		t.Fatalf("unit:\n%s", text)
+	}
+}
+
+// No service file is fs.ErrNotExist (a first install); one that doesn't read
+// as Render writes it is an error, so the caller keeps its defaults.
+func TestInstalledArgsMalformed(t *testing.T) {
+	t.Parallel()
+	s, _ := service(t, "darwin")
+	if _, err := s.InstalledArgs(); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("no file = %v", err)
+	}
+	for _, tc := range []struct{ goos, text string }{
+		{"darwin", ""},
+		{"darwin", "\x00\xff not xml\n"},
+		{"darwin", "<plist><dict><key>Label</key><string>x</string></dict></plist>\n"},
+		{"darwin", "<plist><dict><key>ProgramArguments</key><array><string>/a</string>"},
+		{"darwin", "<plist><dict><key>ProgramArguments</key><array><string>/a</string><integer>1</integer></array></dict></plist>"},
+		{"darwin", "<plist><dict><key>ProgramArguments</key><array></array></dict></plist>"},
+		{"darwin", "<plist><dict><key>ProgramArguments</key><string>/a</string><array><string>/b</string></array></dict></plist>"},
+		{"linux", "[Service]\nRestart=always\n"},
+		{"linux", "[Service]\nExecStart=\n"},
+		{"linux", "[Service]\nExecStart=\"/a/audiosilo-bridge\n"},
+		{"linux", "[Service]\nExecStart=\"/a/audiosilo-bridge\"x worker\n"},
+		{"linux", "[Service]\nExecStart=-/a/audiosilo-bridge worker\n"},
+		{"linux", "[Service]\nExecStart=\"bin/audiosilo-bridge\" worker\n"},
+		{"linux", "[Service]\nExecStart=\"/a/audiosilo-bridge\" \"worker\" \"--data\" \"%h/w\"\n"},
+		{"linux", "[Service]\nExecStart=\"/a/audiosilo-bridge\" \"worker\" \"--data\" \"$HOME/w\"\n"},
+		{"linux", "[Service]\nExecStart=\"/a/audiosilo-bridge\" \"worker\" \"--data\" \"/w\\n\"\n"},
+		{"linux", "[Service]\nExecStart=/a/audiosilo-bridge worker --data /w\\\n  --model x\n"},
+		{"linux", "[Service]\nExecStart=/a/audiosilo-bridge worker --data /w%\n"},
+	} {
+		s, _ := service(t, tc.goos)
+		path, _ := s.File()
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(tc.text), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if got, err := s.InstalledArgs(); err == nil || errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("%s %q = %q, %v", tc.goos, tc.text, got, err)
+		}
+	}
+	// A bare ExecStart, as a hand-written unit has it, reads.
+	s, _ = service(t, "linux")
+	path, _ := s.File()
+	_ = os.MkdirAll(filepath.Dir(path), 0o755)
+	if err := os.WriteFile(path, []byte("[Service]\n  ExecStart= /a/audiosilo-bridge worker  --data /w%%x\t--bridge \"http://h:1\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.InstalledArgs()
+	if err != nil || strings.Join(got, " ") != "/a/audiosilo-bridge worker --data /w%x --bridge http://h:1" {
+		t.Fatalf("bare = %q, %v", got, err)
 	}
 }

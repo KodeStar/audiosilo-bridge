@@ -1,8 +1,11 @@
 package worker
 
 import (
+	"bytes"
+	"encoding/xml"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -168,6 +171,161 @@ WantedBy=default.target
 func systemdQuote(s string) string {
 	s = strings.NewReplacer(`\`, `\\`, `"`, `\"`, "%", "%%", "\n", " ").Replace(s)
 	return `"` + s + `"`
+}
+
+// InstalledArgs is the command line of the installed service, read back from
+// its file (the plist's ProgramArguments, the unit's first ExecStart): the
+// inverse of Render, so an update can keep the flags the service runs with.
+// No file is an error wrapping fs.ErrNotExist (a first install); a file that
+// doesn't read as one Render writes is an error too (the caller keeps its
+// defaults then): unreadable, not well-formed, or holding something systemd
+// would expand (a specifier, a $VAR) whose value isn't known here.
+func (s Service) InstalledArgs() ([]string, error) {
+	path, err := s.File()
+	if err != nil {
+		return nil, err
+	}
+	b, err := os.ReadFile(path) //nolint:gosec // the user's own service file, where File puts it
+	if err != nil {
+		return nil, err
+	}
+	var argv []string
+	if s.GOOS == "darwin" {
+		argv, err = plistArgs(b)
+	} else {
+		argv, err = unitArgs(string(b))
+	}
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	if len(argv) == 0 {
+		return nil, fmt.Errorf("%s: no command line", path)
+	}
+	return argv, nil
+}
+
+// plistArgs is the strings of the ProgramArguments array.
+func plistArgs(b []byte) ([]string, error) {
+	dec := xml.NewDecoder(bytes.NewReader(b))
+	dec.Strict = true
+	lastKey := ""
+	for {
+		tok, err := dec.Token()
+		if errors.Is(err, io.EOF) {
+			return nil, errors.New("no ProgramArguments")
+		}
+		if err != nil {
+			return nil, err
+		}
+		se, ok := tok.(xml.StartElement)
+		if !ok {
+			continue
+		}
+		switch {
+		case se.Name.Local == "key":
+			if err := dec.DecodeElement(&lastKey, &se); err != nil {
+				return nil, err
+			}
+			continue
+		case se.Name.Local == "array" && lastKey == "ProgramArguments":
+			var arr struct {
+				Strings []string   `xml:"string"`
+				Other   []xml.Name `xml:",any"`
+			}
+			if err := dec.DecodeElement(&arr, &se); err != nil {
+				return nil, err
+			}
+			if len(arr.Other) > 0 {
+				return nil, errors.New("ProgramArguments holds something other than strings")
+			}
+			return arr.Strings, nil
+		}
+		lastKey = ""
+	}
+}
+
+// unitArgs is the first ExecStart's words.
+func unitArgs(text string) ([]string, error) {
+	for _, line := range strings.Split(text, "\n") {
+		if v, ok := strings.CutPrefix(strings.TrimSpace(line), "ExecStart="); ok {
+			return splitExec(v)
+		}
+	}
+	return nil, errors.New("no ExecStart")
+}
+
+// splitExec splits an ExecStart command line the way unit writes one: words
+// apart by blanks, each "quoted" (with \\ and \" its only escapes) or bare,
+// %% and $$ a literal % and $. Anything else (another backslash escape, a
+// specifier, a $VAR, an open quote, a prefix such as - or @ on the program)
+// means systemd reads it in a way this doesn't, so it is refused.
+func splitExec(v string) ([]string, error) {
+	var words []string
+	blank := func(c byte) bool { return c == ' ' || c == '\t' || c == '\r' }
+	for i := 0; ; {
+		for i < len(v) && blank(v[i]) {
+			i++
+		}
+		if i == len(v) {
+			break
+		}
+		var w strings.Builder
+		if v[i] == '"' {
+			closed := false
+			for i++; i < len(v); i++ {
+				c := v[i]
+				if c == '"' {
+					closed = true
+					i++
+					break
+				}
+				if c == '\\' {
+					if i+1 == len(v) || (v[i+1] != '\\' && v[i+1] != '"') {
+						return nil, errors.New("ExecStart has an escape this doesn't read")
+					}
+					i++
+					c = v[i]
+				}
+				w.WriteByte(c)
+			}
+			if !closed || (i < len(v) && !blank(v[i])) {
+				return nil, errors.New("ExecStart has a quote this doesn't read")
+			}
+		} else {
+			for ; i < len(v) && !blank(v[i]); i++ {
+				if v[i] == '"' || v[i] == '\\' {
+					return nil, errors.New("ExecStart has a quote or escape this doesn't read")
+				}
+				w.WriteByte(v[i])
+			}
+		}
+		word, err := unexpand(w.String())
+		if err != nil {
+			return nil, err
+		}
+		words = append(words, word)
+	}
+	if len(words) > 0 && !strings.HasPrefix(words[0], "/") {
+		return nil, errors.New("ExecStart's program isn't an absolute path")
+	}
+	return words, nil
+}
+
+// unexpand turns a unit word's %% and $$ back into % and $; any other % or $
+// is a specifier or a variable systemd expands, refused.
+func unexpand(s string) (string, error) {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c == '%' || c == '$' {
+			if i+1 == len(s) || s[i+1] != c {
+				return "", fmt.Errorf("ExecStart has a %c that systemd expands", c)
+			}
+			i++
+		}
+		b.WriteByte(c)
+	}
+	return b.String(), nil
 }
 
 // SaveToken writes the worker token into the data dir (0600).

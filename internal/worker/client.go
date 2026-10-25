@@ -50,7 +50,11 @@ func newClient(bridgeURL, token, version string, hc *http.Client) (*client, erro
 // route fills a workerproto route's {id}.
 func (c *client) route(route, taskID string, q url.Values) string {
 	u := *c.base
-	u.Path += strings.ReplaceAll(route, "{id}", url.PathEscape(taskID))
+	// Appended to the address's path as written, so a proxy's prefix reaches
+	// it byte for byte (a "(" or "!" stays one rather than becoming %28, %21).
+	raw := c.base.EscapedPath() + strings.ReplaceAll(route, "{id}", url.PathEscape(taskID))
+	u.Path, _ = url.PathUnescape(raw) // valid escapes by construction (EscapedPath, PathEscape)
+	u.RawPath = raw
 	if q != nil {
 		u.RawQuery = q.Encode()
 	}

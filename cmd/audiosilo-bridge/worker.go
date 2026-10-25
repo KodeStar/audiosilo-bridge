@@ -6,12 +6,14 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	iofs "io/fs"
 	"log/slog"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"syscall"
 
@@ -100,6 +102,9 @@ func workerInstall(args []string, stdout, stderr io.Writer, remove bool) error {
 	if err != nil {
 		return err
 	}
+	// An update (or an uninstall) keeps what the installed service runs with
+	// unless the command line says otherwise.
+	kept, keepErr := carryForward(fs, worker.Service{GOOS: runtime.GOOS, Home: home})
 	bin, err := os.Executable()
 	if err != nil {
 		return err
@@ -131,7 +136,8 @@ func workerInstall(args []string, stdout, stderr io.Writer, remove bool) error {
 		}
 		path, err := svc.Uninstall()
 		if err == nil {
-			// The service's own --data isn't known here: name the folder only when it was given.
+			// The service's --data (read from its file, or given): name the folder
+			// only when it is known.
 			note := "Its data dir (the --data it ran with, ~/.audiosilo-bridge-worker by default) stays."
 			if dataSet(fs) {
 				note = "Its data dir stays: " + data
@@ -142,6 +148,12 @@ func workerInstall(args []string, stdout, stderr io.Writer, remove bool) error {
 	}
 	if svc.BridgeURL == "" {
 		return errors.New("worker install: --bridge is required (the Bridge page's address)")
+	}
+	if keepErr != nil {
+		_, _ = fmt.Fprintln(stderr, "worker install: the installed service's settings can't be read, so it gets the defaults "+
+			"and the flags given here ("+keepErr.Error()+")")
+	} else if len(kept) > 0 && !*printOnly {
+		_, _ = fmt.Fprintln(stdout, "Keeping the installed service's "+strings.Join(kept, ", ")+" (give a flag to change it).")
 	}
 	if *printOnly {
 		text, err := svc.Render()
@@ -173,6 +185,51 @@ func workerInstall(args []string, stdout, stderr io.Writer, remove bool) error {
 	return nil
 }
 
+// carriedFlags are the flags an update keeps from the installed service: every
+// flag `worker install` writes into the service file (the token never goes there).
+var carriedFlags = []string{"bridge", "data", "backend", "model", "whisper-cli"}
+
+// carryForward sets each of carriedFlags the command line (fs, parsed) didn't
+// give to the installed service's value, read back from svc's file and parsed
+// with the flags that wrote it, so an update keeps a customised worker's
+// --data, --backend, --model, --whisper-cli and --bridge. It returns the flags
+// it kept as "--name". No service file is a first install (nothing kept, no
+// error); one that doesn't read as `worker install` writes it is an error, and
+// nothing is kept (the defaults apply).
+func carryForward(fs *flag.FlagSet, svc worker.Service) ([]string, error) {
+	argv, err := svc.InstalledArgs()
+	if errors.Is(err, iofs.ErrNotExist) || errors.Is(err, worker.ErrUnsupported) {
+		return nil, nil // a first install, or no service manager (Install says so)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if len(argv) < 2 || argv[1] != "worker" {
+		return nil, errors.New("the service doesn't run `audiosilo-bridge worker`")
+	}
+	prev := flag.NewFlagSet("installed service", flag.ContinueOnError)
+	prev.SetOutput(io.Discard)
+	addWorkerFlags(prev)
+	if err := prev.Parse(argv[2:]); err != nil {
+		return nil, fmt.Errorf("the service's flags: %w", err)
+	}
+	if prev.NArg() > 0 {
+		return nil, fmt.Errorf("the service's flags: unexpected %q", prev.Arg(0))
+	}
+	given := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { given[f.Name] = true })
+	var kept []string
+	prev.Visit(func(f *flag.Flag) {
+		if given[f.Name] || !slices.Contains(carriedFlags, f.Name) {
+			return
+		}
+		if fs.Set(f.Name, f.Value.String()) == nil {
+			kept = append(kept, "--"+f.Name)
+		}
+	})
+	return kept, nil
+}
+
 // defaultWorkerDataDir is $AUDIOSILO_WORKER_DATA, else ~/.audiosilo-bridge-worker.
 func defaultWorkerDataDir() string { return defaultDir(workerDataEnv, ".audiosilo-bridge-worker") }
 
@@ -187,7 +244,8 @@ func (f workerFlags) tokenIn(dataDir string) string {
 	return strings.TrimSpace(os.Getenv(workerTokenEnv))
 }
 
-// dataSet reports whether --data was given on the command line.
+// dataSet reports whether --data is known: given on the command line, or kept
+// from the installed service (carryForward sets it).
 func dataSet(fs *flag.FlagSet) bool {
 	set := false
 	fs.Visit(func(f *flag.Flag) { set = set || f.Name == "data" })
