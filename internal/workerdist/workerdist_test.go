@@ -378,6 +378,14 @@ func TestScriptRuns(t *testing.T) {
 			t.Fatalf("--run doesn't say the token isn't saved:\n%s", out)
 		}
 	})
+	// A --run on the saved token has no --token to warn about.
+	t.Run("run saved", func(t *testing.T) {
+		t.Parallel()
+		out, ran, _, err := run(t, text, "asw_saved", "--run")
+		if err != nil || ran != "worker --bridge http://192.168.1.20:8091" || strings.Contains(out, "does not save the token") {
+			t.Fatalf("ran %q, %v\n%s", ran, err, out)
+		}
+	})
 	// Running it again to update: the token the first install saved does.
 	t.Run("update", func(t *testing.T) {
 		t.Parallel()
@@ -445,6 +453,29 @@ func TestScriptRuns(t *testing.T) {
 				t.Fatalf("ran %q", r.ran)
 			}
 		})
+		// A folder this user can't write (a program moved to /usr/local/bin by
+		// hand, say) leaves the default, which `worker install` then points the
+		// service at, rather than an update that fails to download into it.
+		t.Run(goos+"/readonly", func(t *testing.T) {
+			t.Parallel()
+			if os.Getuid() == 0 {
+				t.Skip("root writes any folder")
+			}
+			ro := filepath.Join(tmp, goos+"-readonly")
+			r := runWith(t, text, runOpts{goos: goos, noDir: true, saved: "asw_saved",
+				service: func(t *testing.T, home string) {
+					t.Helper()
+					service(filepath.Join(ro, "audiosilo-bridge"), true)(t, home)
+					if err := os.Chmod(ro, 0o555); err != nil { //nolint:gosec // a test's read-only folder
+						t.Fatal(err)
+					}
+					t.Cleanup(func() { _ = os.Chmod(ro, 0o755) }) //nolint:gosec // back to removable
+				}})
+			def := filepath.Join(r.home, ".audiosilo-bridge-worker", "bin", "audiosilo-bridge")
+			if r.err != nil || strings.Contains(r.out, "Updating the worker in") || !strings.Contains(r.out, "at "+def) {
+				t.Fatalf("read-only folder: %v\n%s", r.err, r.out)
+			}
+		})
 		t.Run(goos+"/explicit", func(t *testing.T) {
 			t.Parallel()
 			other := filepath.Join(tmp, goos+"-other")
@@ -467,7 +498,9 @@ func TestScriptRuns(t *testing.T) {
 		} {
 			t.Run(goos+"/"+name, func(t *testing.T) {
 				t.Parallel()
-				r := runWith(t, text, runOpts{goos: goos, noDir: true, saved: "asw_saved", service: service(bin, name != "gone")})
+				// Never a relative folder: it would land in this package's directory.
+				mkdir := name != "gone" && filepath.IsAbs(bin)
+				r := runWith(t, text, runOpts{goos: goos, noDir: true, saved: "asw_saved", service: service(bin, mkdir)})
 				def := filepath.Join(r.home, ".audiosilo-bridge-worker", "bin", "audiosilo-bridge")
 				if r.err != nil || strings.Contains(r.out, "Updating the worker in") || !strings.Contains(r.out, "at "+def) {
 					t.Fatalf("%s: %v\n%s", bin, r.err, r.out)

@@ -47,9 +47,13 @@ func TestWorkerDistAllowed(t *testing.T) {
 	}
 	// A public address on another host: the address the fetch reached.
 	e.b.saved.PublicURL = "http://192.168.1.20:8091/"
-	if body := fetchScript(t, e, "10.0.0.7:18091"); !strings.Contains(body, "BRIDGE='http://10.0.0.7:18091'") ||
-		strings.Contains(body, "192.168.1.20") {
+	body := fetchScript(t, e, "10.0.0.7:18091")
+	if !strings.Contains(body, "BRIDGE='http://10.0.0.7:18091'") || strings.Contains(body, "192.168.1.20") {
 		t.Fatalf("script with another public address = %.300s", body)
+	}
+	// The download goes through $BRIDGE, so through a public address's prefix.
+	if !strings.Contains(body, `"$BRIDGE/worker/download/$os/$arch"`) {
+		t.Fatal("the script's download URL isn't under $BRIDGE")
 	}
 	// The public address's own host and port: the public address, as the
 	// Workers tab's command has it (a path prefix, https behind a TLS proxy
@@ -61,13 +65,9 @@ func TestWorkerDistAllowed(t *testing.T) {
 		{"https://bridge.example.com/bridge", "Bridge.Example.com:443", "https://bridge.example.com/bridge"},
 	} {
 		e.b.saved.PublicURL = tc.pub
-		body := fetchScript(t, e, tc.host)
+		body = fetchScript(t, e, tc.host)
 		if !strings.Contains(body, "\nBRIDGE='"+tc.want+"'\n") {
 			t.Fatalf("script for public %q via %q = %.300s", tc.pub, tc.host, body)
-		}
-		// The download goes through the same prefix.
-		if !strings.Contains(body, `"$BRIDGE/worker/download/$os/$arch"`) {
-			t.Fatal("the script's download URL isn't under $BRIDGE")
 		}
 	}
 	e.b.saved.PublicURL = ""

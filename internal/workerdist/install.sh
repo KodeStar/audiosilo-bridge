@@ -32,7 +32,7 @@ usage() {
 	say 'Usage: install.sh [--token <asw_...>] [--run] [--dir <path>]'
 	say '  --token <asw_...>  the worker token from the Bridge page (Workers), required the first time'
 	say '  --run              run the worker here in the foreground instead of installing the service'
-	say '                     (it does not save the token: a later run needs --token again)'
+	say '                     (it does not save a --token: a later run needs it again)'
 	say '  --dir <path>       where to put the program (default: the installed service'"'"'s folder,'
 	say '                     else ~/.audiosilo-bridge-worker/bin)'
 }
@@ -44,8 +44,8 @@ die() {
 # installed_dir prints the folder of the program the installed worker service
 # runs (the launchd agent's ProgramArguments, the systemd user unit's
 # ExecStart), as `worker install` writes them; nothing when there is none or
-# it doesn't read as an existing absolute folder (a path the file had to
-# escape included: pass --dir then).
+# it doesn't read as an existing absolute folder this user can write (a path
+# the file had to escape included: pass --dir then).
 installed_dir() {
 	prog=''
 	[ -n "${HOME:-}" ] || return 0
@@ -70,7 +70,9 @@ installed_dir() {
 	*) return 0 ;;
 	esac
 	prog=${prog%/*}
-	[ -d "$prog" ] && printf '%s\n' "$prog"
+	# One this user can't write (a program moved to /usr/local/bin by hand)
+	# leaves the default, which `worker install` then points the service at.
+	[ -d "$prog" ] && [ -w "$prog" ] && printf '%s\n' "$prog"
 	return 0
 }
 
@@ -179,7 +181,9 @@ main() {
 	fi
 	if [ "$run" = 1 ]; then
 		say 'Starting the worker here (Ctrl-C stops it) ...'
-		say 'A --run start does not save the token: to run it again, pass --token again (or leave out --run to install the service, which saves it).'
+		if [ -n "$token" ]; then
+			say 'A --run start does not save the token: to run it again, pass --token again (or leave out --run to install the service, which saves it).'
+		fi
 		exec "$bin" worker "$@"
 	fi
 	"$bin" worker install "$@"

@@ -2268,13 +2268,14 @@ internal/
             (one main function, called on its last line, so a download cut
             short runs nothing) takes --token (required the first time; an
             update reuses the data dir's saved token), --run (says a --run start
-            doesn't save the token), --dir; detects uname (a Rosetta terminal on
+            doesn't save a --token it was given), --dir; detects uname (a Rosetta terminal on
             Apple Silicon takes arm64). With no --dir it reuses the installed
             service's folder (installed_dir: the launchd plist's first
             ProgramArguments string, the systemd user unit's first ExecStart word,
             as `worker install` writes them; only an absolute path to an existing
-            folder with nothing the file had to escape, `\ % $ & < >`, else the
-            default ~/.audiosilo-bridge-worker/bin) and says so; an explicit --dir
+            folder this user can write, with nothing the file had to escape,
+            `\ % $ & < >`, else the default ~/.audiosilo-bridge-worker/bin, which
+            `worker install` then points the service at) and says so; an explicit --dir
             wins. It downloads to a temp file in the target dir, checks `version`
             runs, moves it to <dir>/audiosilo-bridge and runs `worker install` (or
             `worker` with --run). Its tests run it end to end with a fake curl
