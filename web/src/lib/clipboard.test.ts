@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { copyText, selectText } from './clipboard';
 
 function stubSecure(secure: boolean, writeText?: (t: string) => Promise<void>) {
@@ -69,15 +69,57 @@ describe('copyText', () => {
 });
 
 describe('copyText focus', () => {
-  it('gives the focus back to what had it', async () => {
+  let button: HTMLButtonElement;
+
+  beforeEach(() => {
     stubSecure(false);
-    stubExec(true);
-    const button = document.createElement('button');
+    button = document.createElement('button');
     document.body.append(button);
     button.focus();
-    expect(await copyText('x')).toBe(true);
-    expect(document.activeElement).toBe(button);
+  });
+
+  afterEach(() => {
     button.remove();
+  });
+
+  it('copies the selected text and gives the focus back to what had it', async () => {
+    let copied = '';
+    stubExec(true).mockImplementation(() => {
+      const ta = document.activeElement as HTMLTextAreaElement;
+      copied = ta.value.slice(ta.selectionStart, ta.selectionEnd);
+      return true;
+    });
+    expect(await copyText('asw_token')).toBe(true);
+    expect(copied).toBe('asw_token');
+    expect(document.querySelector('textarea')).toBeNull();
+    expect(document.activeElement).toBe(button);
+  });
+
+  it('places the textarea beside the focused element, inside its dialog', async () => {
+    const popup = document.createElement('div');
+    popup.setAttribute('role', 'dialog');
+    document.body.append(popup);
+    popup.append(button);
+    button.focus();
+    let parent: Element | null = null;
+    stubExec(true).mockImplementation(() => {
+      parent = document.activeElement?.parentElement ?? null;
+      return true;
+    });
+    expect(await copyText('x')).toBe(true);
+    expect(parent).toBe(popup);
+    expect(document.activeElement).toBe(button);
+    popup.remove();
+  });
+
+  it.each([
+    ['refuses', false],
+    ['throws', 'throw'],
+  ] as const)('removes the textarea and restores focus when execCommand %s', async (_, result) => {
+    stubExec(result);
+    expect(await copyText('x')).toBe(false);
+    expect(document.querySelector('textarea')).toBeNull();
+    expect(document.activeElement).toBe(button);
   });
 });
 
