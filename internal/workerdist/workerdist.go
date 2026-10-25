@@ -13,6 +13,7 @@ package workerdist
 import (
 	_ "embed"
 	"errors"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -122,13 +123,67 @@ var hostPattern = regexp.MustCompile(`^[A-Za-z0-9._\-]+(:[0-9]+)?$|^\[[0-9A-Fa-f
 
 // Address is the Bridge's address as the computer fetching the script
 // reached it: scheme://host of that request, so it is reachable from there by
-// construction (ErrAddress for a host a script can't carry). The configured
-// public address only goes into the command the Workers tab shows.
-func Address(scheme, host string) (string, error) {
-	if (scheme == "http" || scheme == "https") && hostPattern.MatchString(host) {
-		return scheme + "://" + host, nil
+// construction (ErrAddress for a host a script can't carry).
+//
+// When the configured public address names that same host and port, it is the
+// address instead, as set (its scheme and path prefix, with no trailing
+// slash), so the script matches the Workers tab's command behind a proxy that
+// serves the Bridge under a prefix or over TLS. The admin sets public_url, and
+// the request's Host shows the fetching computer reached that host. The host
+// is validated first: a Host a script can't carry never reaches the comparison.
+func Address(scheme, host, publicURL string) (string, error) {
+	if (scheme != "http" && scheme != "https") || !hostPattern.MatchString(host) {
+		return "", ErrAddress
 	}
-	return "", ErrAddress
+	if pub, ok := publicAddress(publicURL, host); ok {
+		return pub, nil
+	}
+	return scheme + "://" + host, nil
+}
+
+// pathPattern is what a public address's path prefix may hold.
+var pathPattern = regexp.MustCompile(`^[A-Za-z0-9._~/%\-]*$`)
+
+// defaultPorts fills in a scheme's port.
+var defaultPorts = map[string]string{"http": "80", "https": "443"}
+
+// publicAddress is publicURL trimmed of its trailing slashes when it is a
+// plain http(s) address (no user, query or fragment; a plain path) on host's
+// host and port. A port missing on either side is the public address's
+// scheme's default: a Host header leaves the port out exactly when the client
+// used its scheme's default, and behind a TLS proxy the Bridge can't see which
+// scheme that was (the request reaches it as plain http).
+func publicAddress(publicURL, host string) (string, bool) {
+	pub := strings.TrimRight(strings.TrimSpace(publicURL), "/")
+	if pub == "" {
+		return "", false
+	}
+	u, err := url.Parse(pub)
+	if err != nil || u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.Opaque != "" ||
+		!hostPattern.MatchString(u.Host) {
+		return "", false
+	}
+	// The path as written (it goes into the script as set): what follows
+	// scheme://host, with no user part to skip.
+	if i := strings.Index(pub, "://"); i < 0 || !pathPattern.MatchString(pub[i+3+len(u.Host):]) {
+		return "", false
+	}
+	def, ok := defaultPorts[u.Scheme]
+	if !ok {
+		return "", false
+	}
+	req := &url.URL{Host: host}
+	if !strings.EqualFold(u.Hostname(), req.Hostname()) || portOr(u.Port(), def) != portOr(req.Port(), def) {
+		return "", false
+	}
+	return pub, true
+}
+
+func portOr(port, def string) string {
+	if port == "" {
+		return def
+	}
+	return port
 }
 
 // Script is install.sh with the Bridge's address baked in. address must come

@@ -32,8 +32,8 @@ func distEnv(t *testing.T, missing bool) *env {
 }
 
 // The script and the downloads answer the LAN with no page password, the
-// script with the address it was fetched from baked in (never the public
-// address: the one the curl reached is reachable from that computer).
+// script with the address it was fetched from baked in, or the public address
+// when the fetch reached its host and port.
 func TestWorkerDistAllowed(t *testing.T) {
 	t.Parallel()
 	e := distEnv(t, false)
@@ -45,14 +45,32 @@ func TestWorkerDistAllowed(t *testing.T) {
 	if ct := r.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/plain") {
 		t.Fatalf("script content type = %q", ct)
 	}
+	// A public address on another host: the address the fetch reached.
 	e.b.saved.PublicURL = "http://192.168.1.20:8091/"
-	req := httptest.NewRequest("GET", RouteWorkerScript, nil)
-	req.RemoteAddr, req.Host = "192.168.1.30:5000", "10.0.0.7:18091"
-	rec := httptest.NewRecorder()
-	e.h.ServeHTTP(rec, req)
-	if !strings.Contains(rec.Body.String(), "BRIDGE='http://10.0.0.7:18091'") || strings.Contains(rec.Body.String(), "192.168.1.20") {
-		t.Fatalf("script with a public address set = %.300s", rec.Body.String())
+	if body := fetchScript(t, e, "10.0.0.7:18091"); !strings.Contains(body, "BRIDGE='http://10.0.0.7:18091'") ||
+		strings.Contains(body, "192.168.1.20") {
+		t.Fatalf("script with another public address = %.300s", body)
 	}
+	// The public address's own host and port: the public address, as the
+	// Workers tab's command has it (a path prefix, https behind a TLS proxy
+	// whose request reaches the Bridge as plain http).
+	for _, tc := range []struct{ pub, host, want string }{
+		{"http://192.168.1.20:8091/", "192.168.1.20:8091", "http://192.168.1.20:8091"},
+		{"http://proxy.lan/bridge/", "proxy.lan", "http://proxy.lan/bridge"},
+		{"https://bridge.example.com/bridge", "bridge.example.com", "https://bridge.example.com/bridge"},
+		{"https://bridge.example.com/bridge", "Bridge.Example.com:443", "https://bridge.example.com/bridge"},
+	} {
+		e.b.saved.PublicURL = tc.pub
+		body := fetchScript(t, e, tc.host)
+		if !strings.Contains(body, "\nBRIDGE='"+tc.want+"'\n") {
+			t.Fatalf("script for public %q via %q = %.300s", tc.pub, tc.host, body)
+		}
+		// The download goes through the same prefix.
+		if !strings.Contains(body, `"$BRIDGE/worker/download/$os/$arch"`) {
+			t.Fatal("the script's download URL isn't under $BRIDGE")
+		}
+	}
+	e.b.saved.PublicURL = ""
 	r = e.do("GET", "/worker/download/darwin/arm64", "", "", "127.0.0.1:4000")
 	if r.Code != http.StatusOK || r.Body.String() != "GZ" || r.Header().Get("Content-Type") != "application/gzip" ||
 		!strings.Contains(r.Header().Get("Content-Disposition"), "audiosilo-bridge_darwin_arm64.gz") {
@@ -69,14 +87,37 @@ func TestWorkerDistAllowed(t *testing.T) {
 func TestWorkerDistDenied(t *testing.T) {
 	t.Parallel()
 	e := distEnv(t, false)
-	for _, path := range []string{RouteWorkerScript, "/worker/download/darwin/arm64"} {
-		r := e.do("GET", path, "", "", "203.0.113.9:4000")
+	for _, remote := range []string{"203.0.113.9:4000", "100.64.1.2:4000"} { // CGNAT / Tailscale isn't local
+		// A download is a 403 (the script's `curl -f` fails loudly on it).
+		r := e.do("GET", "/worker/download/darwin/arm64", "", "", remote)
 		if r.Code != http.StatusForbidden || strings.Contains(r.Body.String(), "GZ") {
-			t.Fatalf("%s from a public address = %d %q", path, r.Code, r.Body.String())
+			t.Fatalf("download from %s = %d %q", remote, r.Code, r.Body.String())
 		}
-		r = e.do("GET", path, "", "", "100.64.1.2:4000") // CGNAT / Tailscale isn't local
-		if r.Code != http.StatusForbidden {
-			t.Fatalf("%s from CGNAT = %d", path, r.Code)
+		// install.sh is a script that says why and exits 1, never install.sh
+		// (`curl -fsSL` would drop a 403's body and sh would exit 0 on nothing).
+		req := httptest.NewRequest("GET", RouteWorkerScript, nil)
+		req.RemoteAddr = remote
+		req.Header.Set("X-Forwarded-For", "192.168.1.30")
+		rec := httptest.NewRecorder()
+		e.h.ServeHTTP(rec, req)
+		body := rec.Body.String()
+		if rec.Code != http.StatusOK || !strings.HasPrefix(body, "#!/bin/sh\n") || strings.Contains(body, "BRIDGE=") ||
+			!strings.HasPrefix(rec.Header().Get("Content-Type"), "text/plain") || rec.Header().Get("X-Content-Type-Options") != "nosniff" {
+			t.Fatalf("script from %s = %d %v %q", remote, rec.Code, rec.Header(), body)
+		}
+		if stderr, code := runScript(t, body); code != 1 || !strings.Contains(stderr, "only serves the worker install to its local network") {
+			t.Fatalf("refused script: exit %d, %q", code, stderr)
+		}
+		// Every other route keeps the JSON 403.
+		for _, path := range []string{"/api/status", "/api/health", "/worker/v1/claim", "/"} {
+			r := e.do("GET", path, "", "", remote)
+			if r.Code != http.StatusForbidden || !strings.Contains(r.Body.String(), `"lan_only"`) ||
+				!strings.HasPrefix(r.Header().Get("Content-Type"), "application/json") {
+				t.Fatalf("%s from %s = %d %q", path, remote, r.Code, r.Body.String())
+			}
+		}
+		if r := e.do("POST", RouteWorkerScript, "", "", remote); r.Code != http.StatusForbidden {
+			t.Fatalf("POST script from %s = %d", remote, r.Code)
 		}
 	}
 	for _, path := range []string{
@@ -135,6 +176,19 @@ func TestWorkerDistMissing(t *testing.T) {
 	if err := json.Unmarshal(r.Body.Bytes(), &st); err != nil || !st.WorkerDownloads {
 		t.Fatalf("status = %s, %v", r.Body.String(), err)
 	}
+}
+
+// fetchScript fetches install.sh from the LAN with the Host given.
+func fetchScript(t *testing.T, e *env, host string) string {
+	t.Helper()
+	req := httptest.NewRequest("GET", RouteWorkerScript, nil)
+	req.RemoteAddr, req.Host = "192.168.1.30:5000", host
+	rec := httptest.NewRecorder()
+	e.h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("script via %q = %d", host, rec.Code)
+	}
+	return rec.Body.String()
 }
 
 // runScript runs a served script with sh: its stderr and exit code.

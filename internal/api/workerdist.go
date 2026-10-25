@@ -44,15 +44,30 @@ func writePlain(w http.ResponseWriter, status int, msg string) {
 	_, _ = w.Write([]byte(msg + "\n")) //nolint:gosec // text/plain under nosniff, a fixed sentence
 }
 
-// handleWorkerScript serves install.sh with the address this request reached
-// baked in. It always answers 200 with a script: when install.sh can't be
-// served, a script that says why and exits 1 (`curl -fsSL` would drop an error
-// status's body, and `sh` would run the empty script and exit 0).
+// errScriptLANOnly is why the LAN guard refuses install.sh.
+const errScriptLANOnly = "this Bridge only serves the worker install to its local network: " +
+	"run the command on a computer on the Bridge's network, with the address the Workers tab shows"
+
+// isWorkerScript is a fetch of install.sh, which the LAN guard refuses with
+// an error script rather than JSON.
+func isWorkerScript(r *http.Request) bool {
+	return (r.Method == http.MethodGet || r.Method == http.MethodHead) && r.URL.Path == RouteWorkerScript
+}
+
+// handleWorkerScript serves install.sh with the Bridge's address baked in
+// (workerdist.Address). It always answers 200 with a script: when install.sh
+// can't be served, a script that says why and exits 1 (`curl -fsSL` would
+// drop an error status's body, and `sh` would run the empty script and exit 0).
 func (a *API) handleWorkerScript(w http.ResponseWriter, r *http.Request) {
 	text, err := a.workerScript(r)
 	if err != nil {
 		text = workerdist.ErrorScript(err.Error())
 	}
+	writeScript(w, text)
+}
+
+// writeScript answers 200 with a script for sh.
+func writeScript(w http.ResponseWriter, text string) {
 	plainHeaders(w)
 	_, _ = w.Write([]byte(text)) //nolint:gosec // text/plain under nosniff; the address is validated and single-quoted
 }
@@ -65,7 +80,7 @@ func (a *API) workerScript(r *http.Request) (string, error) {
 	if r.TLS != nil {
 		scheme = "https"
 	}
-	addr, err := workerdist.Address(scheme, r.Host)
+	addr, err := workerdist.Address(scheme, r.Host, a.b.Settings().PublicURL)
 	if err != nil {
 		return "", err
 	}
