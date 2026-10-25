@@ -46,8 +46,9 @@ die() {
 # line, as `worker install` writes it (the launchd agent's ProgramArguments,
 # the systemd user unit's first ExecStart: "quoted" words, or bare); nothing
 # when there is none. A word the file had to escape comes out escaped (the
-# callers refuse those), and a unit's words stop at the first escape or open
-# quote, since what follows can't be read plainly.
+# callers refuse those), and a unit's words stop at the first escape, open
+# quote or bare word holding a ' (systemd unquotes it), since what follows
+# can't be read plainly.
 service_args() {
 	[ -n "${HOME:-}" ] || return 0
 	case "$os" in
@@ -66,8 +67,10 @@ service_args() {
 			sub(/^[ \t]*ExecStart=[ \t]*/, "", line)
 			while (line != "") {
 				if (match(line, /^"[^"]*"/)) word = substr(line, 2, RLENGTH - 2)
-				else if (match(line, /^[^" \t]+/)) word = substr(line, 1, RLENGTH)
-				else exit
+				else if (match(line, /^[^" \t]+/)) {
+					word = substr(line, 1, RLENGTH)
+					if (index(word, "\047")) exit # systemd unquotes it
+				} else exit
 				if (index(word, "\\")) exit
 				print word
 				line = substr(line, RLENGTH + 1)
@@ -223,8 +226,9 @@ main() {
 	fi
 	if [ "$run" = 1 ]; then
 		# The installed service runs the program just replaced, but goes on
-		# with the old one it loaded until it restarts.
-		if [ -n "$svcdir" ] && [ "$svcdir" = "$dir" ]; then
+		# with the old one it loaded until it restarts (the same folder however
+		# --dir spells it: a trailing /, a relative path, a link).
+		if [ -n "$svcdir" ] && [ "$(CDPATH='' cd -- "$svcdir" && pwd -P)" = "$(CDPATH='' cd -- "$dir" && pwd -P)" ]; then
 			case "$os" in
 			darwin) restart="launchctl kickstart -k gui/$(id -u)/app.audiosilo.bridge-worker" ;;
 			*) restart='systemctl --user restart audiosilo-bridge-worker.service' ;;

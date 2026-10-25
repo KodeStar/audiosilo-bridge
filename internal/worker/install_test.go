@@ -327,6 +327,10 @@ func TestInstalledArgsMalformed(t *testing.T) {
 		{"linux", "[Service]\nExecStart=\"/a/audiosilo-bridge\" \"worker\" \"--data\" \"/w\\n\"\n"},
 		{"linux", "[Service]\nExecStart=/a/audiosilo-bridge worker --data /w\\\n  --model x\n"},
 		{"linux", "[Service]\nExecStart=/a/audiosilo-bridge worker --data /w%\n"},
+		// systemd unquotes a single-quoted word and splits commands at a lone ;.
+		{"linux", "[Service]\nExecStart=/a/audiosilo-bridge worker --data '/w'\n"},
+		{"linux", "[Service]\nExecStart=/a/audiosilo-bridge worker --data /a'b c'\n"},
+		{"linux", "[Service]\nExecStart=/a/audiosilo-bridge worker --model ;\n"},
 	} {
 		s, _ := service(t, tc.goos)
 		writeServiceFile(t, s, tc.text)

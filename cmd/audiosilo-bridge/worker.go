@@ -145,14 +145,16 @@ func workerInstall(args []string, stdout, stderr io.Writer, remove bool) error {
 		}
 		return err
 	}
-	if svc.BridgeURL == "" {
-		return errors.New("worker install: --bridge is required (the Bridge page's address)")
-	}
+	// Said before the --bridge check: an unreadable service is why an update
+	// suddenly needs --bridge.
 	if keepErr != nil {
 		_, _ = fmt.Fprintln(stderr, "worker install: the installed service's settings can't be read, so it gets the defaults "+
 			"and the flags given here ("+keepErr.Error()+")")
 	} else if len(kept) > 0 && !*printOnly {
 		_, _ = fmt.Fprintln(stdout, "Keeping the installed service's "+strings.Join(kept, ", ")+" (give a flag to change it).")
+	}
+	if svc.BridgeURL == "" {
+		return errors.New("worker install: --bridge is required (the Bridge page's address)")
 	}
 	if *printOnly {
 		text, err := svc.Render()

@@ -2247,10 +2247,11 @@ internal/
             "quoted" or bare words with only \\ and \" escapes and %% $$
             undoubled), Render's inverse (a round-trip test holds it); no
             file wraps fs.ErrNotExist, and anything else systemd would read
-            differently (a specifier, a $VAR, a prefix, another escape) is an
-            error. `worker install` (cmd worker.go carryForward) parses that
-            argv with the same flag set that wrote it and keeps each written
-            flag (--bridge, --data, --backend, --model, --whisper-cli; never
+            differently (a specifier, a $VAR, a prefix, another escape, a '
+            in a bare word, a lone ;) is an error, which `worker install`
+            prints before any --bridge refusal. `worker install` (cmd
+            worker.go carryForward) parses that argv with the same flag set
+            that wrote it and keeps each written flag (--bridge, --data, --backend, --model, --whisper-cli; never
             --token) the command line didn't give, so an update keeps a
             customised worker and finds its token in the kept --data; an
             explicit flag wins (an empty one included); a file that doesn't

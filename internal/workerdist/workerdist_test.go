@@ -635,12 +635,27 @@ func TestScriptRuns(t *testing.T) {
 		}
 		custom := func(home string) string { return filepath.Join(filepath.Dir(home), "svc bin") }
 		def := func(home string) string { return filepath.Join(home, ".audiosilo-bridge-worker", "bin") }
+		// linked runs the program through a link to runWith's --dir folder: the
+		// same folder, spelled another way.
+		linked := func(t *testing.T, home string) {
+			t.Helper()
+			sub := filepath.Dir(home)
+			if err := os.MkdirAll(filepath.Join(sub, "bin"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink("bin", filepath.Join(sub, "link")); err != nil {
+				t.Fatal(err)
+			}
+			rendered(t, worker.Service{GOOS: goos, Home: home, Binary: filepath.Join(sub, "link", "audiosilo-bridge"),
+				DataDir: filepath.Join(sub, "data")})
+		}
 		for name, tc := range map[string]struct {
 			o    runOpts
 			want bool
 		}{
 			"reused":     {runOpts{service: at(custom), noDir: true}, true},
 			"default":    {runOpts{service: at(def), noDir: true}, true},
+			"linked":     {runOpts{service: linked}, true},
 			"elsewhere":  {runOpts{service: at(custom)}, false},
 			"no service": {runOpts{noDir: true}, false},
 		} {

@@ -173,13 +173,17 @@ func TestWorkerInstallPrintKeepsTheService(t *testing.T) {
 		strings.Contains(out.String(), "whisper-cpp") || !strings.Contains(out.String(), "small") || !strings.Contains(out.String(), data) {
 		t.Fatalf("explicit flags:\n%s", out.String())
 	}
-	// A malformed file: the defaults, and a word on stderr.
+	// A malformed file: the defaults, and a word on stderr (also when the
+	// missing --bridge stops it, since that is why it is missing).
 	writeFile(t, svc, "not a service file\n")
 	out.Reset()
+	errb.Reset()
 	err := workerCmd([]string{"install", "--print"}, &out, &errb)
-	if err == nil || !strings.Contains(err.Error(), "--bridge is required") {
-		t.Fatalf("malformed without --bridge = %v", err)
+	if err == nil || !strings.Contains(err.Error(), "--bridge is required") ||
+		!strings.Contains(errb.String(), "the installed service's settings can't be read") {
+		t.Fatalf("malformed without --bridge = %v, stderr %q", err, errb.String())
 	}
+	errb.Reset()
 	if err := workerCmd([]string{"install", "--print", "--bridge", "http://10.0.0.5:8091"}, &out, &errb); err != nil {
 		t.Fatal(err)
 	}

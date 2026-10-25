@@ -257,8 +257,10 @@ func unitArgs(text string) ([]string, error) {
 // splitExec splits an ExecStart command line the way unit writes one: words
 // apart by blanks, each "quoted" (with \\ and \" its only escapes) or bare,
 // %% and $$ a literal % and $. Anything else (another backslash escape, a
-// specifier, a $VAR, an open quote, a prefix such as - or @ on the program)
-// means systemd reads it in a way this doesn't, so it is refused.
+// specifier, a $VAR, an open quote, a single quote in a bare word, which
+// systemd unquotes, a lone ; it splits commands at, a prefix such as - or @
+// on the program) means systemd reads it in a way this doesn't, so it is
+// refused.
 func splitExec(v string) ([]string, error) {
 	var words []string
 	blank := func(c byte) bool { return c == ' ' || c == '\t' || c == '\r' }
@@ -293,10 +295,13 @@ func splitExec(v string) ([]string, error) {
 			}
 		} else {
 			for ; i < len(v) && !blank(v[i]); i++ {
-				if v[i] == '"' || v[i] == '\\' {
+				if v[i] == '"' || v[i] == '\'' || v[i] == '\\' {
 					return nil, errors.New("ExecStart has a quote or escape this doesn't read")
 				}
 				w.WriteByte(v[i])
+			}
+			if w.String() == ";" {
+				return nil, errors.New("ExecStart has more than one command")
 			}
 		}
 		word, err := unexpand(w.String())
