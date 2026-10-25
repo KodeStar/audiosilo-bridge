@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // worker install / uninstall: a launchd agent on macOS (the user's own session,
@@ -45,7 +46,20 @@ type Service struct {
 	Path string
 	// Run runs a service manager command (launchctl, systemctl).
 	Run func(name string, args ...string) error
+	// Sleep waits between launchctl checks and retries (nil: time.Sleep).
+	Sleep func(time.Duration)
 }
+
+// How long Install waits for launchd to unload the previous worker, and how
+// often it retries a bootstrap. launchctl bootout returns before the old job
+// has finished tearing down, and a bootstrap meanwhile fails with exit status
+// 5 (Input/output error).
+const (
+	bootoutWait       = 10 * time.Second
+	bootoutPoll       = 250 * time.Millisecond
+	bootstrapAttempts = 5
+	bootstrapBackoff  = 500 * time.Millisecond
+)
 
 // ErrUnsupported: there is no service manager this knows on the platform.
 var ErrUnsupported = errors.New("worker install supports macOS (launchd) and Linux (systemd)")
@@ -195,10 +209,8 @@ func (s Service) Install() (string, error) {
 	}
 	switch s.GOOS {
 	case "darwin":
-		domain := "gui/" + strconv.Itoa(s.UID)
-		_ = s.Run("launchctl", "bootout", domain+"/"+LaunchdLabel) // not loaded yet is fine
-		if err := s.Run("launchctl", "bootstrap", domain, path); err != nil {
-			return path, fmt.Errorf("launchctl bootstrap: %w", err)
+		if err := s.bootstrap(path); err != nil {
+			return path, err
 		}
 	case "linux":
 		if err := s.Run("systemctl", "--user", "daemon-reload"); err != nil {
@@ -210,6 +222,38 @@ func (s Service) Install() (string, error) {
 		_ = s.Run("systemctl", "--user", "restart", SystemdUnit) // an update picks up the new file
 	}
 	return path, nil
+}
+
+// bootstrap (re)loads the launchd agent: it unloads the old one, waits until
+// launchd no longer knows it (bounded), then bootstraps the new file, retrying
+// with a growing pause while launchd is still busy with the old job.
+func (s Service) bootstrap(path string) error {
+	sleep := s.Sleep
+	if sleep == nil {
+		sleep = time.Sleep
+	}
+	domain := "gui/" + strconv.Itoa(s.UID)
+	target := domain + "/" + LaunchdLabel
+	_ = s.Run("launchctl", "bootout", target) // not loaded yet is fine
+	for waited := time.Duration(0); waited < bootoutWait; waited += bootoutPoll {
+		if s.Run("launchctl", "print", target) != nil {
+			break // gone
+		}
+		sleep(bootoutPoll)
+	}
+	var err error
+	pause := bootstrapBackoff
+	for attempt := 1; attempt <= bootstrapAttempts; attempt++ {
+		if err = s.Run("launchctl", "bootstrap", domain, path); err == nil {
+			return nil
+		}
+		if attempt < bootstrapAttempts {
+			sleep(pause)
+			pause *= 2
+		}
+	}
+	return fmt.Errorf("launchctl bootstrap: %w (the service file is written: try again in a moment with `launchctl bootstrap %s %s`)",
+		err, domain, path)
 }
 
 // Uninstall stops the service and removes its file (the data dir stays).

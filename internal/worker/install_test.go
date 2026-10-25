@@ -5,8 +5,10 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 func service(t *testing.T, goos string) (Service, *[]string) {
@@ -17,9 +19,21 @@ func service(t *testing.T, goos string) (Service, *[]string) {
 		Args: []string{"--backend", "mlx-whisper"}, Path: "/opt/homebrew/bin:/usr/bin:/bin",
 		Run: func(name string, args ...string) error {
 			ran = append(ran, name+" "+strings.Join(args, " "))
+			if len(args) > 0 && args[0] == "print" {
+				return errNotLoaded // launchd doesn't know the job (it unloaded)
+			}
 			return nil
-		}}, &ran
+		},
+		Sleep: func(time.Duration) {}}, &ran
 }
+
+// errNotLoaded is launchctl print on a job launchd doesn't know.
+const errNotLoaded = exitError(113)
+
+// exitError is what exec reports for a command that exited non-zero.
+type exitError int
+
+func (e exitError) Error() string { return "exit status " + strconv.Itoa(int(e)) }
 
 // The plist is well-formed XML whatever the paths hold, and runs the worker
 // with the data dir, the Bridge and the extra flags, never the token.
@@ -93,7 +107,8 @@ func TestInstallUninstall(t *testing.T) {
 		uninstall []string
 	}{
 		{"darwin", "Library/LaunchAgents/app.audiosilo.bridge-worker.plist",
-			[]string{"launchctl bootout gui/501/app.audiosilo.bridge-worker", "launchctl bootstrap gui/501 "},
+			[]string{"launchctl bootout gui/501/app.audiosilo.bridge-worker", "launchctl print gui/501/app.audiosilo.bridge-worker",
+				"launchctl bootstrap gui/501 "},
 			[]string{"launchctl bootout gui/501/app.audiosilo.bridge-worker"}},
 		{"linux", ".config/systemd/user/audiosilo-bridge-worker.service",
 			[]string{"systemctl --user daemon-reload", "systemctl --user enable --now audiosilo-bridge-worker.service",
@@ -132,17 +147,76 @@ func TestInstallUninstall(t *testing.T) {
 	}
 }
 
-func TestInstallFailure(t *testing.T) {
+// A reinstall over a running worker: launchctl bootout returns while the old
+// job is still tearing down, so Install waits for it to go and retries the
+// bootstrap that launchd refuses meanwhile (exit status 5).
+func TestInstallWaitsForBootout(t *testing.T) {
 	t.Parallel()
 	s, _ := service(t, "darwin")
+	var ran []string
+	var slept time.Duration
+	prints, bootstraps := 0, 0
+	s.Sleep = func(d time.Duration) { slept += d }
 	s.Run = func(name string, args ...string) error {
-		if len(args) > 0 && args[0] == "bootstrap" {
-			return errors.New("exit status 5")
+		ran = append(ran, args[0])
+		switch args[0] {
+		case "print":
+			prints++
+			if prints <= 2 {
+				return nil // still loaded
+			}
+			return errNotLoaded
+		case "bootstrap":
+			bootstraps++
+			if bootstraps == 1 {
+				return exitError(5)
+			}
 		}
 		return nil
 	}
-	if _, err := s.Install(); err == nil || !strings.Contains(err.Error(), "launchctl bootstrap") {
+	if _, err := s.Install(); err != nil {
 		t.Fatalf("install = %v", err)
+	}
+	if got := strings.Join(ran, " "); got != "bootout print print print bootstrap bootstrap" {
+		t.Fatalf("ran %s", got)
+	}
+	if want := 2*bootoutPoll + bootstrapBackoff; slept != want {
+		t.Fatalf("slept %v, want %v", slept, want)
+	}
+}
+
+// A job that never unloads and a bootstrap that always fails: Install gives up
+// in bounded time and says how to load the written file by hand.
+func TestInstallFailure(t *testing.T) {
+	t.Parallel()
+	s, _ := service(t, "darwin")
+	var slept time.Duration
+	prints, bootstraps := 0, 0
+	s.Sleep = func(d time.Duration) { slept += d }
+	s.Run = func(name string, args ...string) error {
+		switch args[0] {
+		case "print":
+			prints++
+			return nil // never goes
+		case "bootstrap":
+			bootstraps++
+			return exitError(5)
+		}
+		return nil
+	}
+	path, err := s.Install()
+	if err == nil || !strings.Contains(err.Error(), "launchctl bootstrap: exit status 5") ||
+		!strings.Contains(err.Error(), "launchctl bootstrap gui/501 "+path) {
+		t.Fatalf("install = %v", err)
+	}
+	if prints != int(bootoutWait/bootoutPoll) || bootstraps != bootstrapAttempts {
+		t.Fatalf("print ran %d times, bootstrap %d", prints, bootstraps)
+	}
+	if limit := bootoutWait + 16*bootstrapBackoff; slept > limit {
+		t.Fatalf("slept %v, more than %v", slept, limit)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("the service file: %v", err)
 	}
 }
 

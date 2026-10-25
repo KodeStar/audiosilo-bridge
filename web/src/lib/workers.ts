@@ -24,13 +24,26 @@ export function shellQuote(word: string): string {
   return /^[A-Za-z0-9_./:=@%+-]+$/.test(word) ? word : `'${word.replace(/'/g, `'\\''`)}'`;
 }
 
-// workerCommands are the two ways to run a worker with its token: installed
-// as a service (it always runs), or once in a terminal.
-export function workerCommands(address: string, token: string): { install: string; run: string } {
+// Where the install script puts the program (the worker's default data dir
+// holds it), and the pages a manual install starts from.
+export const WORKER_BIN_DIR = '~/.audiosilo-bridge-worker/bin';
+export const WORKER_BINARY = `${WORKER_BIN_DIR}/audiosilo-bridge`;
+export const WORKER_DOCS_URL = 'https://docs.audiosilo.app/users/getting-started/running-a-worker';
+export const WORKER_RELEASES_URL = 'https://github.com/KodeStar/audiosilo-bridge/releases';
+
+// workerCommands are the ways to start a worker with its token: the one-line
+// install (the Bridge's install.sh downloads its own build and installs the
+// service), and by hand, installed as a service (it always runs) or once in a
+// terminal. The program's path stays unquoted, so the shell expands its ~.
+export function workerCommands(
+  address: string,
+  token: string,
+): { oneLine: string; install: string; run: string } {
   const args = `--bridge ${shellQuote(address)} --token ${shellQuote(token)}`;
   return {
-    install: `audiosilo-bridge worker install ${args}`,
-    run: `audiosilo-bridge worker ${args}`,
+    oneLine: `curl -fsSL ${shellQuote(`${address}/worker/install.sh`)} | sh -s -- --token ${shellQuote(token)}`,
+    install: `${WORKER_BINARY} worker install ${args}`,
+    run: `${WORKER_BINARY} worker ${args}`,
   };
 }
 

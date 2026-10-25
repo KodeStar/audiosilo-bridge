@@ -13,6 +13,9 @@
 #             (`audiosilo-bridge agent-runner`). It sees only the staging
 #             volume shared with the Bridge and its own config volume.
 #
+# slim, cuda and full (not agent) carry the gzipped ASR worker builds the
+# Bridge serves to the computers that run a worker.
+#
 # None of slim, cuda and full carries an agent CLI: agents run only in the
 # `agent` container. The whisper models aren't baked in either: the Bridge
 # downloads the one it needs into /bridge-data/tools on first use.
@@ -53,6 +56,30 @@ RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache
     -ldflags "-s -w -X main.version=${VERSION}" \
     -o /out/audiosilo-bridge ./cmd/audiosilo-bridge
 
+# --- the ASR worker builds, served by the Bridge -------------------------------
+# audiosilo-bridge for each computer a worker runs on (internal/workerdist's
+# Platforms), with the Bridge's own VERSION so a worker installed from its
+# Bridge always speaks its protocol. Gzipped, never embedded in the binary; the
+# page answers /worker/install.sh and /worker/download/<os>/<arch> from them. No
+# embedded page (a worker never serves it), so the stage skips the web build
+# and is the same for every target platform.
+FROM --platform=$BUILDPLATFORM golang:1.26 AS workers
+ARG VERSION=0.0.0-docker
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN --mount=type=cache,target=/go/pkg/mod go mod download
+COPY cmd ./cmd
+COPY internal ./internal
+RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
+    set -eu; mkdir -p /out; \
+    for p in darwin/arm64 darwin/amd64 linux/amd64 linux/arm64; do \
+      os="${p%/*}"; arch="${p#*/}"; \
+      CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -trimpath \
+        -ldflags "-s -w -X main.version=${VERSION}" -o /tmp/audiosilo-bridge ./cmd/audiosilo-bridge; \
+      gzip -9 -n -c /tmp/audiosilo-bridge > "/out/audiosilo-bridge_${os}_${arch}.gz"; \
+    done; \
+    chmod 0644 /out/*.gz
+
 # --- whisper-cli, downloaded and checked ----------------------------------------
 # One stage per build, so each target fetches only the one it carries (the CUDA
 # build is about 830 MB). Its runtime libraries sit beside the binary, found
@@ -78,6 +105,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ffmpeg ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /out/audiosilo-bridge /usr/local/bin/audiosilo-bridge
+COPY --from=workers /out /usr/local/share/audiosilo-bridge/workers
 COPY docker/entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 # The data folder belongs to the default PUID:PGID, so a start as that user
 # (docker --user 1000:1000) can write it too; the entrypoint owns it to any
@@ -101,6 +129,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /out/audiosilo-bridge /usr/local/bin/audiosilo-bridge
 COPY --from=whisper-cuda /w/out /opt/whisper
+COPY --from=workers /out /usr/local/share/audiosilo-bridge/workers
 COPY docker/entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN install -d -o 1000 -g 1000 -m 0700 /bridge-data
 ENV AUDIOSILO_BRIDGE_DATA=/bridge-data \

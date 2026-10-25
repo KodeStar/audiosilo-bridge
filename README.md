@@ -2,10 +2,9 @@
 
 > **Use of AI:** AudioSilo is developed by me (a human), with assistance from AI, primarily Claude Code, to help me write, clean up, document, and review the code. That doesn't mean the app is generated on autopilot or "vibe coded". Nothing goes out until I've read it, tested it, and decided it belongs. AI is what lets one person keep up this pace, and I think it's important to disclose that.
 
-> **Private source, public images, and an internal name.** This repository is
-> private and "Bridge" is a working name (BRIDGE-PLAN.md decision 14). The images
-> are public from v0.3.0: pull them from `ghcr.io/kodestar/audiosilo-bridge` with
-> no login.
+> **An internal name.** "Bridge" is a working name (BRIDGE-PLAN.md decision 14).
+> The images are public: pull them from `ghcr.io/kodestar/audiosilo-bridge` with no
+> login.
 
 The Bridge is the optional, always-on companion to an
 [AudioSilo](https://audiosilo.app) server. It **writes** to the library folders and
@@ -22,21 +21,23 @@ server itself can stay read-only and safe to expose to the internet.
   whether it can write there, before any job may write into that library.
 - **Its own page** (port 8091) handles pairing, the library mappings, settings, the
   jobs it ran (with Retry for a job that needs attention), the agent container's
-  state, the monthly budget, and its log. It answers only the local network and
+  state, the monthly budget, the ASR workers, and its log. It answers only the local network and
   always asks for its password.
 - **AI agents never run in the Bridge.** They run in a separate `agent` container
   that sees only a shared staging folder and its own config: no library, none of the
   Bridge's data, and a network of its own with internet access only.
 
-Status: **Phase 1a** (pending merge): on top of Phase 0's pairing, heartbeat, job
-queue with leases, mapping checks and the proof job `bridge.verify`, the Bridge now
-**generates characters and recaps** (`sidecars.generate`). An admin presses
-Generate in the server's console or the player; the Bridge transcribes the book (or
-reads its .epub), runs the AI agents in a separate container, and saves the results
-with the book in its `.audiosilo/` folder, where the server picks them up. The
-pipeline came from audiosilo-sidecars with its history. Next is Phase 1b (a native
-transcription worker on another machine). The plan lives in the workspace's
-`BRIDGE-PLAN.md`.
+What it does today: on top of the pairing, heartbeat, job queue with leases,
+mapping checks and the proof job `bridge.verify`, the Bridge **generates characters,
+recaps and descriptions** (`sidecars.generate`, `sidecars.describe`), **finds a
+chapterless book's chapters** in its narration (`chapters.detect`), **shares** kept
+results with the community metadata (`sidecars.contribute`, `meta.correct`), and
+**subscribes to and fetches podcasts** (`podcast.*`). An admin starts a job from the
+server's console or the player; the Bridge transcribes the book (or reads its
+.epub), runs the AI agents in a separate container, and saves the results with the
+book in its `.audiosilo/` folder, where the server picks them up. Transcription can
+run on another computer with an **ASR worker** (below). The plan lives in the
+workspace's `BRIDGE-PLAN.md`.
 
 Code is licensed **AGPL-3.0** (see [LICENSE](LICENSE)).
 
@@ -77,9 +78,41 @@ Images (`ghcr.io/kodestar/audiosilo-bridge`, public from v0.3.0, no login needed
 | `latest-cuda` | transcription on an NVIDIA GPU (`--gpus all`) | amd64 |
 | `latest-agent` | the agent container: the claude and codex CLIs, run by `audiosilo-bridge agent-runner` | amd64, arm64 |
 
-Only `latest-agent` carries an AI agent CLI (decision 15). Run it as the compose
+Only `latest-agent` carries an AI agent CLI (decision 15). `latest`, `latest-slim`
+and `latest-cuda` also carry the ASR worker builds the Bridge serves. Run it as the compose
 example does: user 10002, all capabilities dropped, a read-only root, its own
 network.
+
+## Add an ASR worker (transcription on another computer)
+
+Speech recognition is much faster on a Mac with Apple Silicon (Metal) or a computer
+with an NVIDIA GPU. A worker on such a computer connects to the Bridge over the
+local network and takes every book's transcription while it is connected; it needs
+no library and no mapping.
+
+1. On the Bridge's page, open **Workers**, name the worker and press **Add worker**.
+2. Copy the one-line command it shows and paste it into a terminal on the worker's
+   computer (macOS or Linux, arm64 or amd64):
+
+   ```sh
+   curl -fsSL http://<bridge>:8091/worker/install.sh | sh -s -- --token asw_...
+   ```
+
+   The script downloads the Bridge's own `audiosilo-bridge` build for that computer
+   from the Bridge (the images carry them), puts it in
+   `~/.audiosilo-bridge-worker/bin`, and installs the worker as a service that
+   starts at login (launchd on macOS, a systemd user unit on Linux). `--run` runs it
+   in the terminal instead; `--dir <path>` puts the program elsewhere. Running it
+   again updates an installed worker (`--token` can be left out then: it keeps the
+   saved one).
+3. On a Mac the worker uses mlx-whisper on Metal, which needs Python 3 and ffmpeg
+   from Homebrew; its first start builds it and downloads the model.
+
+To install by hand, download the archive for the worker's computer from the
+[releases](https://github.com/KodeStar/audiosilo-bridge/releases), check it against
+`checksums.txt`, and run the commands the Workers tab shows under "Install it by
+hand". `audiosilo-bridge worker uninstall` removes the service. More in the user
+guide: [Running an ASR worker](https://docs.audiosilo.app/users/getting-started/running-a-worker).
 
 ## Configuration
 

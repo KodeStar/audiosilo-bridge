@@ -2236,7 +2236,36 @@ internal/
             through an injected Run; the token goes to <data>/worker.token (0600),
             never into the service file. A decoder outlives a kill -9 of a worker
             started by hand (spike 4); launchd and systemd end the job's process
-            group/cgroup, so an installed worker doesn't leave one.
+            group/cgroup, so an installed worker doesn't leave one. Install on
+            macOS waits for launchd to unload the old job after bootout
+            (launchctl print, up to 10 s; bootout returns while it is still
+            tearing down) and retries the bootstrap with a growing pause (it
+            fails with exit status 5 meanwhile); a final failure names the
+            manual launchctl bootstrap command. Sleep is injectable for tests.
+  workerdist/ the worker's own distribution, a leaf: the gzipped builds the
+            images carry in /usr/local/share/audiosilo-bridge/workers
+            (DefaultDir; audiosilo-bridge_<os>_<arch>.gz for the fixed Platforms
+            darwin/arm64, darwin/amd64, linux/amd64, linux/arm64, the Bridge's own
+            VERSION, never embedded in the binary), Open (the file name comes from
+            the set, never the request; ErrUnknownPlatform, ErrMissing with the
+            releases URL when the folder is absent: a native run), Available, and
+            install.sh (go:embed, POSIX sh): Address (scheme://Host of the request
+            that fetched it, reachable from that computer by construction; never
+            public_url, which only goes into the Workers tab's command;
+            ErrAddress for a host a script can't carry) baked in single-quoted by
+            Script. When install.sh can't be served (no folder, a bad Host) the
+            route still answers 200 with ErrorScript: it prints why to stderr and
+            exits 1, since `curl -fsSL` drops an error status's body and sh would
+            exit 0 on nothing. The script
+            (one main function, called on its last line, so a download cut
+            short runs nothing) takes --token (required the first time; an
+            update reuses the data dir's saved token), --run, --dir; detects
+            uname (a Rosetta terminal on Apple Silicon takes arm64), downloads
+            to a temp file in
+            the target dir, checks `version` runs, moves it to
+            ~/.audiosilo-bridge-worker/bin/audiosilo-bridge and runs `worker
+            install` (or `worker` with --run). Its tests run it end to end with a
+            fake curl.
   app/      Phase 2c-1 wires the guarded client and both podcast handlers,
             advertises their kinds (2c-2a also fetch/download and retain/light),
             opts fetch into the generic interactive pool (2c-2b),
@@ -2344,6 +2373,13 @@ internal/
             ({accounts, revoke_error}), PUT /api/accounts/agent {kind, value},
             DELETE /api/accounts/agent?kind=; status carries setup and
             setup_complete, settings monthly_budget_usd and budget_reviewed.
+            workerdist.go: GET /worker/install.sh and GET
+            /worker/download/{os}/{arch} (internal/workerdist), outside
+            /worker/v1, behind lanOnly, with NO page password (a curl | sh has no
+            session; the worker token in the user's command is the credential),
+            the download a plain-text 404 naming the releases when the image's
+            folder is absent (install.sh an error script that exits 1 instead);
+            status carries worker_downloads (the folder has a build).
             Phase 1b:
             workers.go serves /worker/v1/* to the injected WorkerHub: a worker token
             only (a page session is 401, and the page's routes refuse a worker
@@ -2432,6 +2468,13 @@ Dockerfile             multi-stage: node build -> go build (embedui, cross-built
                        10002, setuid/setgid bits stripped, /agent (+ secrets/, codex/)
                        0700 and /staging 0777, both volumes; the build runs each CLI's
                        --version, so a release that doesn't install fails there.
+                       A `workers` stage (on $BUILDPLATFORM, no page, the same
+                       VERSION) cross-builds the four worker builds, gzipped, into
+                       /usr/local/share/audiosilo-bridge/workers of slim, cuda and
+                       full (not agent). release.yml uploads the same four (with
+                       the page embedded, so they also run a whole Bridge) as
+                       audiosilo-bridge_<ver>_<os>_<arch>.tar.gz + checksums.txt to
+                       the tag's release (made, not as a draft, when missing).
                        image.yml builds all four on v* tags and dispatch (amd64+arm64;
                        cuda amd64; agent -> :<tag>-agent, :latest-agent).
 compose.example.yaml   three services: the server (libraries :ro), the Bridge (the same
