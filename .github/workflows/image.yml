@@ -16,6 +16,12 @@ name: image
 # The Go binary and the page cross-build on the runner ($BUILDPLATFORM); only the
 # final apt step of the arm64 legs runs under QEMU (the agent leg also runs the
 # CLIs' --version there).
+# The Dockerfile's workers stage (the four gzipped worker builds) is built once
+# per leg that carries it (full, slim and cuda on a tag; full alone on an edge
+# push), each under its own cache scope. Sharing one build would take a job ahead
+# of the matrix whose cache every leg reads, making every leg wait on it: not
+# worth it for four cross-compiles. release.yml's archives can't reuse them
+# either (they embed the page and ship as tarballs).
 on:
   push:
     branches: [main]

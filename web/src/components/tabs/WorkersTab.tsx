@@ -257,7 +257,8 @@ function AddedCard({
             </p>
             <Command text={cmd.oneLine} />
             <p className="mt-1 text-dim">
-              Add --run at the end to run it once in that terminal instead.
+              Add <code className="font-mono text-xs">--run</code> at the end to run it once in that
+              terminal instead.
             </p>
           </div>
         ) : (
@@ -273,8 +274,9 @@ function AddedCard({
             <p className="text-dim">
               Download audiosilo-bridge for its computer (macOS or Linux, arm64 or amd64) from{' '}
               {releases}, unpack it and move the audiosilo-bridge program to {WORKER_BINARY}. On a
-              Mac, a browser download is quarantined: clear it with xattr -d com.apple.quarantine on
-              the program. Then install it as a service:
+              Mac, a browser download is quarantined: clear it with{' '}
+              <code className="font-mono text-xs">xattr -d com.apple.quarantine</code> on the
+              program. Then install it as a service:
             </p>
             <Command text={cmd.install} />
             <div>
