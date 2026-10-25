@@ -251,17 +251,24 @@ func (a *API) Handler() http.Handler {
 	a.workerDistRoutes(mux)
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) { writeError(w, http.StatusNotFound, "not found") })
 	mux.Handle("/", a.web)
-	return lanOnly(securityHeaders(mux))
+	return securityHeaders(lanOnly(mux))
 }
 
 // --- middleware ---
 
 // lanOnly refuses a request whose connection doesn't come from a loopback or
 // private address. RemoteAddr only: the page isn't meant to sit behind a
-// proxy, and a forwarded header would let any client claim to be local.
+// proxy, and a forwarded header would let any client claim to be local. A
+// refused install.sh is a script that says why and exits 1 (a `curl -fsSL`
+// drops a 403's body, and sh would exit 0 on nothing); everything else is a
+// JSON 403.
 func lanOnly(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !LocalAddress(r.RemoteAddr) {
+			if isWorkerScript(r) {
+				writeScript(w, workerdist.ErrorScript(errScriptLANOnly))
+				return
+			}
 			writeErrorCode(w, http.StatusForbidden, "lan_only", "the Bridge's page answers only the local network")
 			return
 		}

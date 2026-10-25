@@ -10,6 +10,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/kodestar/audiosilo-bridge/internal/worker"
 )
 
 func TestOpen(t *testing.T) {
@@ -66,18 +68,76 @@ func TestAddress(t *testing.T) {
 		{"https", "nas.local", "https://nas.local"},
 		{"http", "my_nas:8091", "http://my_nas:8091"},
 	} {
-		got, err := Address(tc.scheme, tc.host)
+		got, err := Address(tc.scheme, tc.host, "")
 		if err != nil || got != tc.want {
 			t.Errorf("Address(%q, %q) = %q, %v, want %q", tc.scheme, tc.host, got, err, tc.want)
 		}
 	}
+	// A hostile Host is refused before any public address is looked at, even
+	// one it would otherwise "match".
 	for _, host := range []string{"", "a b", "evil';rm -rf ~;'", "nas:80:80", "$(id)", "nas\n", "user@nas", "nas/x"} {
-		if got, err := Address("http", host); !errors.Is(err, ErrAddress) {
-			t.Errorf("Address(host %q) = %q, %v", host, got, err)
+		for _, pub := range []string{"", "http://nas", "http://" + host} {
+			if got, err := Address("http", host, pub); !errors.Is(err, ErrAddress) {
+				t.Errorf("Address(host %q, public %q) = %q, %v", host, pub, got, err)
+			}
 		}
 	}
-	if _, err := Address("file", "nas"); !errors.Is(err, ErrAddress) {
+	if _, err := Address("file", "nas", "http://nas"); !errors.Is(err, ErrAddress) {
 		t.Errorf("a file scheme = %v", err)
+	}
+}
+
+// The public address goes in, as set, when the request reached its host and
+// port; otherwise the request's own address does.
+func TestAddressPublicURL(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		scheme, host, pub, want string
+	}{
+		// Matches: the same host and port (a default port filled in on either
+		// side), any case; the path prefix and scheme kept, trailing slashes not.
+		{"http", "192.168.1.20:8091", "http://192.168.1.20:8091/", "http://192.168.1.20:8091"},
+		{"http", "nas.lan:8091", " http://NAS.lan:8091 ", "http://NAS.lan:8091"},
+		{"http", "proxy.lan", "http://proxy.lan/bridge//", "http://proxy.lan/bridge"},
+		{"http", "proxy.lan:80", "http://proxy.lan/bridge", "http://proxy.lan/bridge"},
+		{"http", "proxy.lan", "http://proxy.lan:80/a/b-c_d.e~f%20", "http://proxy.lan:80/a/b-c_d.e~f%20"},
+		{"http", "[fd00::1]:8091", "http://[FD00::1]:8091/x", "http://[FD00::1]:8091/x"},
+		// Behind a TLS proxy: the request is plain http with the client's Host.
+		{"http", "bridge.example.com", "https://bridge.example.com/bridge", "https://bridge.example.com/bridge"},
+		{"http", "bridge.example.com:443", "https://bridge.example.com/bridge/", "https://bridge.example.com/bridge"},
+		{"https", "bridge.example.com", "https://bridge.example.com", "https://bridge.example.com"},
+		{"http", "proxy.lan:8443", "https://proxy.lan:8443/bridge", "https://proxy.lan:8443/bridge"},
+		// Mismatches fall back to the request's address.
+		{"http", "10.0.0.7:18091", "http://192.168.1.20:8091", "http://10.0.0.7:18091"},
+		{"http", "192.168.1.20:8092", "http://192.168.1.20:8091", "http://192.168.1.20:8092"},
+		{"http", "192.168.1.20", "http://192.168.1.20:8091", "http://192.168.1.20"},
+		{"http", "proxy.lan:80", "https://proxy.lan/bridge", "http://proxy.lan:80"},
+		{"http", "proxy.lan:8091", "https://proxy.lan/bridge", "http://proxy.lan:8091"},
+		{"http", "nas.lan", "http://nas.lan.evil.com", "http://nas.lan"},
+		{"http", "nas.lan", "http://evil.com/nas.lan", "http://nas.lan"},
+		// A public address a script can't carry as set is never used.
+		{"http", "nas.lan", "ftp://nas.lan", "http://nas.lan"},
+		{"http", "nas.lan", "nas.lan", "http://nas.lan"},
+		{"http", "nas.lan", "//nas.lan", "http://nas.lan"},
+		{"http", "nas.lan", "http://user:pw@nas.lan", "http://nas.lan"},
+		{"http", "nas.lan", "http://nas.lan/?x=1", "http://nas.lan"},
+		{"http", "nas.lan", "http://nas.lan/#x", "http://nas.lan"},
+		{"http", "nas.lan", "http://nas.lan/a'b", "http://nas.lan"},
+		{"http", "nas.lan", "http://nas.lan/a b", "http://nas.lan"},
+		{"http", "nas.lan", "http://nas.lan/$(id)", "http://nas.lan"},
+		{"http", "nas.lan", "http://nas.lan/a\nb", "http://nas.lan"},
+		{"http", "nas.lan", "http://nas.lan/%zz", "http://nas.lan"},
+		{"http", "nas.lan", "http:nas.lan", "http://nas.lan"},
+	} {
+		got, err := Address(tc.scheme, tc.host, tc.pub)
+		if err != nil || got != tc.want {
+			t.Errorf("Address(%q, %q, public %q) = %q, %v, want %q", tc.scheme, tc.host, tc.pub, got, err, tc.want)
+		}
+		if err == nil {
+			if _, err := Script(got); err != nil {
+				t.Errorf("Script(%q) = %v", got, err)
+			}
+		}
 	}
 }
 
@@ -204,36 +264,96 @@ func TestScriptRuns(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(fakeBin, "curl"), []byte(curl), 0o755); err != nil { //nolint:gosec // a test's fake tool
 		t.Fatal(err)
 	}
-	// run runs script with args; saved is a token the worker's data dir already
-	// holds ("" for none: a first install).
-	run := func(t *testing.T, script, saved string, args ...string) (string, string, string, error) {
+	// A fake uname, for a run that takes the other OS's path (FAKE_UNAME_S, _M).
+	fakeUname := filepath.Join(tmp, "fakeuname")
+	if err := os.Mkdir(fakeUname, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	uname := "#!/bin/sh\ncase \"$1\" in -m) echo \"$FAKE_UNAME_M\" ;; *) echo \"$FAKE_UNAME_S\" ;; esac\n"
+	if err := os.WriteFile(filepath.Join(fakeUname, "uname"), []byte(uname), 0o755); err != nil { //nolint:gosec // a test's fake tool
+		t.Fatal(err)
+	}
+	// runWith runs script with args in a temp HOME of its own (so it never
+	// reads this computer's service files): o.saved is a token the worker's data
+	// dir already holds ("" for none: a first install), o.noDir leaves --dir
+	// out, o.goos fakes uname (darwin or linux), o.service writes a service
+	// file into the HOME first.
+	type runOpts struct {
+		saved, goos string
+		noDir       bool
+		service     func(t *testing.T, home string)
+	}
+	type result struct {
+		out, ran, url, home string
+		err                 error
+	}
+	runWith := func(t *testing.T, script string, o runOpts, args ...string) result {
 		t.Helper()
 		sub := t.TempDir()
-		dir, ran, urls := filepath.Join(sub, "bin"), filepath.Join(sub, "ran"), filepath.Join(sub, "url")
-		data := filepath.Join(sub, "data")
-		if saved != "" {
+		home := filepath.Join(sub, "home")
+		if err := os.Mkdir(home, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		ran, urls, data := filepath.Join(sub, "ran"), filepath.Join(sub, "url"), filepath.Join(sub, "data")
+		if o.saved != "" {
 			if err := os.MkdirAll(data, 0o700); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.WriteFile(filepath.Join(data, "worker.token"), []byte(saved+"\n"), 0o600); err != nil {
+			if err := os.WriteFile(filepath.Join(data, "worker.token"), []byte(o.saved+"\n"), 0o600); err != nil {
 				t.Fatal(err)
 			}
 		}
-		cmd := exec.Command("sh", append([]string{"-s", "--", "--dir", dir}, args...)...)
+		if o.service != nil {
+			o.service(t, home)
+		}
+		argv := []string{"-s", "--"}
+		if !o.noDir {
+			argv = append(argv, "--dir", filepath.Join(sub, "bin"))
+		}
+		path := fakeBin + ":" + os.Getenv("PATH")
+		env := []string{"SERVED=" + served, "RAN=" + ran, "URLS=" + urls, "HOME=" + home,
+			"AUDIOSILO_WORKER_DATA=" + data, "AUDIOSILO_WORKER_TOKEN="}
+		switch o.goos {
+		case "darwin":
+			path = fakeUname + ":" + path
+			env = append(env, "FAKE_UNAME_S=Darwin", "FAKE_UNAME_M=arm64")
+		case "linux":
+			path = fakeUname + ":" + path
+			env = append(env, "FAKE_UNAME_S=Linux", "FAKE_UNAME_M=x86_64")
+		}
+		cmd := exec.Command("sh", append(argv, args...)...)
 		cmd.Stdin = strings.NewReader(script)
-		cmd.Env = append(os.Environ(), "PATH="+fakeBin+":"+os.Getenv("PATH"), "SERVED="+served, "RAN="+ran, "URLS="+urls, "HOME="+tmp,
-			"AUDIOSILO_WORKER_DATA="+data, "AUDIOSILO_WORKER_TOKEN=")
+		cmd.Env = append(append(os.Environ(), "PATH="+path), env...)
 		out, err := cmd.CombinedOutput()
 		r, _ := os.ReadFile(ran)
 		u, _ := os.ReadFile(urls)
-		if err == nil {
-			if fi, serr := os.Stat(filepath.Join(dir, "audiosilo-bridge")); serr != nil || fi.Mode().Perm() != 0o755 {
+		if err == nil && !o.noDir {
+			if fi, serr := os.Stat(filepath.Join(sub, "bin", "audiosilo-bridge")); serr != nil || fi.Mode().Perm() != 0o755 {
 				t.Fatalf("the program = %v, %v", fi, serr)
 			}
 		}
-		return string(out), strings.TrimSpace(string(r)), strings.TrimSpace(string(u)), err
+		return result{string(out), strings.TrimSpace(string(r)), strings.TrimSpace(string(u)), home, err}
+	}
+	// writeService returns a runOpts.service that writes text to rel under the HOME.
+	writeService := func(rel, text string) func(t *testing.T, home string) {
+		return func(t *testing.T, home string) {
+			t.Helper()
+			f := filepath.Join(home, rel)
+			if err := os.MkdirAll(filepath.Dir(f), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(f, []byte(text), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	run := func(t *testing.T, script, saved string, args ...string) (string, string, string, error) {
+		t.Helper()
+		r := runWith(t, script, runOpts{saved: saved}, args...)
+		return r.out, r.ran, r.url, r.err
 	}
 	t.Run("install", func(t *testing.T) {
+		t.Parallel()
 		out, ran, url, err := run(t, text, "", "--token", "asw_abc")
 		if err != nil {
 			t.Fatalf("%v\n%s", err, out)
@@ -249,13 +369,26 @@ func TestScriptRuns(t *testing.T) {
 		}
 	})
 	t.Run("run", func(t *testing.T) {
+		t.Parallel()
 		out, ran, _, err := run(t, text, "", "--token=asw_def", "--run")
 		if err != nil || ran != "worker --bridge http://192.168.1.20:8091 --token asw_def" {
+			t.Fatalf("ran %q, %v\n%s", ran, err, out)
+		}
+		if !strings.Contains(out, "A --run start does not save the token") {
+			t.Fatalf("--run doesn't say the token isn't saved:\n%s", out)
+		}
+	})
+	// A --run on the saved token has no --token to warn about.
+	t.Run("run saved", func(t *testing.T) {
+		t.Parallel()
+		out, ran, _, err := run(t, text, "asw_saved", "--run")
+		if err != nil || ran != "worker --bridge http://192.168.1.20:8091" || strings.Contains(out, "does not save the token") {
 			t.Fatalf("ran %q, %v\n%s", ran, err, out)
 		}
 	})
 	// Running it again to update: the token the first install saved does.
 	t.Run("update", func(t *testing.T) {
+		t.Parallel()
 		out, ran, url, err := run(t, text, "asw_saved")
 		if err != nil || ran != "worker install --bridge http://192.168.1.20:8091" || url == "" {
 			t.Fatalf("update: %v, ran %q, url %q\n%s", err, ran, url, out)
@@ -264,6 +397,7 @@ func TestScriptRuns(t *testing.T) {
 	// A download cut short runs nothing (here, past the line that installs the
 	// program): the script is one function, called on its last line.
 	t.Run("truncated", func(t *testing.T) {
+		t.Parallel()
 		const line = "mv -f \"$tmp\" \"$bin\"\n"
 		cut := text[:strings.Index(text, line)+len(line)]
 		out, ran, url, err := run(t, cut, "", "--token", "asw_abc")
@@ -271,13 +405,149 @@ func TestScriptRuns(t *testing.T) {
 			t.Fatalf("truncated: %v, ran %q, url %q\n%s", err, ran, url, out)
 		}
 	})
+	// An update with no --dir goes where the installed service runs the
+	// program from (the service file as `worker install` writes it), and says
+	// so; an explicit --dir wins; a service file that doesn't name an existing
+	// absolute folder plainly leaves the default.
+	for _, goos := range []string{"darwin", "linux"} {
+		// service writes goos's service file running bin (made a folder when
+		// mkdir is set).
+		service := func(bin string, mkdir bool) func(t *testing.T, home string) {
+			return func(t *testing.T, home string) {
+				t.Helper()
+				svc := worker.Service{GOOS: goos, Home: home, Binary: bin, DataDir: filepath.Join(home, ".audiosilo-bridge-worker"),
+					BridgeURL: "http://192.168.1.20:8091", Path: "/usr/bin:/bin"}
+				text, err := svc.Render()
+				if err != nil {
+					t.Fatal(err)
+				}
+				file, err := svc.File()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if mkdir {
+					if err := os.MkdirAll(filepath.Dir(bin), 0o755); err != nil {
+						t.Fatal(err)
+					}
+				}
+				rel, err := filepath.Rel(home, file)
+				if err != nil {
+					t.Fatal(err)
+				}
+				writeService(rel, text)(t, home)
+			}
+		}
+		custom := filepath.Join(tmp, goos+"-custom dir", "bin")
+		t.Run(goos+"/reuse", func(t *testing.T) {
+			t.Parallel()
+			r := runWith(t, text, runOpts{goos: goos, noDir: true, saved: "asw_saved",
+				service: service(filepath.Join(custom, "audiosilo-bridge"), true)})
+			if r.err != nil || !strings.Contains(r.out, "Updating the worker in "+custom+", where its service runs it from") ||
+				!strings.Contains(r.out, "Installed audiosilo-bridge v9.9.9 at "+filepath.Join(custom, "audiosilo-bridge")) {
+				t.Fatalf("reuse: %v\n%s", r.err, r.out)
+			}
+			if _, err := os.Stat(filepath.Join(r.home, ".audiosilo-bridge-worker", "bin")); err == nil {
+				t.Fatal("the default folder was made")
+			}
+			if r.ran != "worker install --bridge http://192.168.1.20:8091" {
+				t.Fatalf("ran %q", r.ran)
+			}
+		})
+		// A folder this user can't write (a program moved to /usr/local/bin by
+		// hand, say) leaves the default, which `worker install` then points the
+		// service at, rather than an update that fails to download into it.
+		t.Run(goos+"/readonly", func(t *testing.T) {
+			t.Parallel()
+			if os.Getuid() == 0 {
+				t.Skip("root writes any folder")
+			}
+			ro := filepath.Join(tmp, goos+"-readonly")
+			r := runWith(t, text, runOpts{goos: goos, noDir: true, saved: "asw_saved",
+				service: func(t *testing.T, home string) {
+					t.Helper()
+					service(filepath.Join(ro, "audiosilo-bridge"), true)(t, home)
+					if err := os.Chmod(ro, 0o555); err != nil { //nolint:gosec // a test's read-only folder
+						t.Fatal(err)
+					}
+					t.Cleanup(func() { _ = os.Chmod(ro, 0o755) }) //nolint:gosec // back to removable
+				}})
+			def := filepath.Join(r.home, ".audiosilo-bridge-worker", "bin", "audiosilo-bridge")
+			if r.err != nil || strings.Contains(r.out, "Updating the worker in") || !strings.Contains(r.out, "at "+def) {
+				t.Fatalf("read-only folder: %v\n%s", r.err, r.out)
+			}
+		})
+		t.Run(goos+"/explicit", func(t *testing.T) {
+			t.Parallel()
+			other := filepath.Join(tmp, goos+"-other")
+			if err := os.MkdirAll(other, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			r := runWith(t, text, runOpts{goos: goos, noDir: true, saved: "asw_saved",
+				service: service(filepath.Join(other, "audiosilo-bridge"), true)}, "--dir", custom+"-explicit")
+			if r.err != nil || strings.Contains(r.out, "Updating the worker in") ||
+				!strings.Contains(r.out, "at "+filepath.Join(custom+"-explicit", "audiosilo-bridge")) {
+				t.Fatalf("explicit --dir: %v\n%s", r.err, r.out)
+			}
+		})
+		for name, bin := range map[string]string{
+			"gone":     filepath.Join(tmp, goos+"-gone", "audiosilo-bridge"),
+			"relative": "bin/audiosilo-bridge",
+			"root":     "/audiosilo-bridge",
+			"escaped":  filepath.Join(tmp, goos+`-a"b%c&d`, "audiosilo-bridge"),
+			"dollar":   filepath.Join(tmp, goos+"-$HOME", "audiosilo-bridge"),
+		} {
+			t.Run(goos+"/"+name, func(t *testing.T) {
+				t.Parallel()
+				// Never a relative folder: it would land in this package's directory.
+				mkdir := name != "gone" && filepath.IsAbs(bin)
+				r := runWith(t, text, runOpts{goos: goos, noDir: true, saved: "asw_saved", service: service(bin, mkdir)})
+				def := filepath.Join(r.home, ".audiosilo-bridge-worker", "bin", "audiosilo-bridge")
+				if r.err != nil || strings.Contains(r.out, "Updating the worker in") || !strings.Contains(r.out, "at "+def) {
+					t.Fatalf("%s: %v\n%s", bin, r.err, r.out)
+				}
+			})
+		}
+	}
+	// A service file that isn't the one `worker install` writes, or holds
+	// nothing usable, leaves the default.
+	for name, tc := range map[string]struct{ goos, file, text string }{
+		"plist no args":   {"darwin", "Library/LaunchAgents/app.audiosilo.bridge-worker.plist", "<plist><dict><key>Label</key><string>x</string></dict></plist>\n"},
+		"plist garbage":   {"darwin", "Library/LaunchAgents/app.audiosilo.bridge-worker.plist", "\x00\xff not xml\n"},
+		"unit no exec":    {"linux", ".config/systemd/user/audiosilo-bridge-worker.service", "[Service]\nRestart=always\n"},
+		"unit prefixed":   {"linux", ".config/systemd/user/audiosilo-bridge-worker.service", "[Service]\nExecStart=-" + tmp + "/audiosilo-bridge worker\n"},
+		"unit open quote": {"linux", ".config/systemd/user/audiosilo-bridge-worker.service", "[Service]\nExecStart=\"" + tmp + "/audiosilo-bridge\n"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			r := runWith(t, text, runOpts{goos: tc.goos, noDir: true, saved: "asw_saved", service: writeService(tc.file, tc.text)})
+			def := filepath.Join(r.home, ".audiosilo-bridge-worker", "bin", "audiosilo-bridge")
+			if r.err != nil || strings.Contains(r.out, "Updating the worker in") || !strings.Contains(r.out, "at "+def) {
+				t.Fatalf("%v\n%s", r.err, r.out)
+			}
+		})
+	}
+	// A bare (unquoted) ExecStart, as a hand-written unit has it, is read too.
+	t.Run("unit bare", func(t *testing.T) {
+		t.Parallel()
+		bare := filepath.Join(tmp, "bare", "bin")
+		if err := os.MkdirAll(bare, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		r := runWith(t, text, runOpts{goos: "linux", noDir: true, saved: "asw_saved", service: writeService(
+			".config/systemd/user/audiosilo-bridge-worker.service", "[Service]\n  ExecStart= "+bare+"/audiosilo-bridge worker --data x\n")})
+		if r.err != nil || !strings.Contains(r.out, "Updating the worker in "+bare+",") {
+			t.Fatalf("%v\n%s", r.err, r.out)
+		}
+	})
 	t.Run("notoken", func(t *testing.T) {
+		t.Parallel()
 		out, ran, url, err := run(t, text, "", "--run")
 		if err == nil || !strings.Contains(out, "--token is required") || ran != "" || url != "" {
 			t.Fatalf("no token: %v, ran %q, url %q\n%s", err, ran, url, out)
 		}
 	})
 	t.Run("unknown", func(t *testing.T) {
+		t.Parallel()
 		out, _, url, err := run(t, text, "", "--token", "asw_x", "--service")
 		if err == nil || !strings.Contains(out, "unknown option: --service") || url != "" {
 			t.Fatalf("unknown flag: %v\n%s", err, out)

@@ -2249,23 +2249,39 @@ internal/
             VERSION, never embedded in the binary), Open (the file name comes from
             the set, never the request; ErrUnknownPlatform, ErrMissing with the
             releases URL when the folder is absent: a native run), Available, and
-            install.sh (go:embed, POSIX sh): Address (scheme://Host of the request
-            that fetched it, reachable from that computer by construction; never
-            public_url, which only goes into the Workers tab's command;
-            ErrAddress for a host a script can't carry) baked in single-quoted by
-            Script. When install.sh can't be served (no folder, a bad Host) the
+            install.sh (go:embed, POSIX sh): Address baked in single-quoted by
+            Script. Address validates the request's Host first (ErrAddress for a
+            host a script can't carry, whatever public_url says), then takes
+            public_url as set (scheme and path prefix, trailing slashes trimmed,
+            so it equals the Workers tab's command) when it is a plain http(s)
+            address (no user, query or fragment; a plain path) on the request
+            Host's host and port: hosts case-insensitive, a missing port on
+            either side public_url's scheme's default (a TLS proxy's request
+            arrives as plain http with the client's portless Host). Otherwise the
+            request's scheme://Host, reachable from that computer by
+            construction. The admin sets public_url; the Host shows the fetching
+            computer reached that host. The download URLs are under it, prefix
+            included. When install.sh can't be served (no folder, a bad Host) the
             route still answers 200 with ErrorScript: it prints why to stderr and
             exits 1, since `curl -fsSL` drops an error status's body and sh would
             exit 0 on nothing. The script
             (one main function, called on its last line, so a download cut
             short runs nothing) takes --token (required the first time; an
-            update reuses the data dir's saved token), --run, --dir; detects
-            uname (a Rosetta terminal on Apple Silicon takes arm64), downloads
-            to a temp file in
-            the target dir, checks `version` runs, moves it to
-            ~/.audiosilo-bridge-worker/bin/audiosilo-bridge and runs `worker
-            install` (or `worker` with --run). Its tests run it end to end with a
-            fake curl.
+            update reuses the data dir's saved token), --run (says a --run start
+            doesn't save a --token it was given), --dir; detects uname (a Rosetta terminal on
+            Apple Silicon takes arm64). With no --dir it reuses the installed
+            service's folder (installed_dir: the launchd plist's first
+            ProgramArguments string, the systemd user unit's first ExecStart word,
+            as `worker install` writes them; only an absolute path to an existing
+            folder this user can write, with nothing the file had to escape,
+            `\ % $ & < >`, else the default ~/.audiosilo-bridge-worker/bin, which
+            `worker install` then points the service at) and says so; an explicit --dir
+            wins. It downloads to a temp file in the target dir, checks `version`
+            runs, moves it to <dir>/audiosilo-bridge and runs `worker install` (or
+            `worker` with --run). Its tests run it end to end with a fake curl
+            (and a fake uname for the other OS's service file), each run in a
+            temp HOME holding service files rendered by worker.Service, so no
+            test reads this computer's own.
   app/      Phase 2c-1 wires the guarded client and both podcast handlers,
             advertises their kinds (2c-2a also fetch/download and retain/light),
             opts fetch into the generic interactive pool (2c-2b),
@@ -2377,9 +2393,14 @@ internal/
             /worker/download/{os}/{arch} (internal/workerdist), outside
             /worker/v1, behind lanOnly, with NO page password (a curl | sh has no
             session; the worker token in the user's command is the credential),
-            the download a plain-text 404 naming the releases when the image's
-            folder is absent (install.sh an error script that exits 1 instead);
-            status carries worker_downloads (the folder has a build).
+            install.sh's address from workerdist.Address with the saved
+            public_url, the download a plain-text 404 naming the releases when
+            the image's folder is absent (install.sh an error script that exits 1
+            instead); status carries worker_downloads (the folder has a build).
+            lanOnly refuses GET/HEAD /worker/install.sh with that error script
+            (200, text/plain: a 403's body would never reach sh); every other
+            route, the downloads included, keeps the JSON 403 lan_only.
+            securityHeaders wraps lanOnly, so a refusal carries nosniff too.
             Phase 1b:
             workers.go serves /worker/v1/* to the injected WorkerHub: a worker token
             only (a page session is 401, and the page's routes refuse a worker

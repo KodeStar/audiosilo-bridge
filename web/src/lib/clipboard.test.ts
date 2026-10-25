@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { copyText, selectText } from './clipboard';
 
 function stubSecure(secure: boolean, writeText?: (t: string) => Promise<void>) {
@@ -9,10 +9,12 @@ function stubSecure(secure: boolean, writeText?: (t: string) => Promise<void>) {
   });
 }
 
-function stubExec(result: boolean | 'throw') {
+// onCopy runs inside execCommand, while the hidden textarea is in the page.
+function stubExec(result: boolean | 'throw', onCopy?: () => void) {
   const exec = vi.fn((cmd: string) => {
-    if (result === 'throw') throw new Error('no');
     expect(cmd).toBe('copy');
+    onCopy?.();
+    if (result === 'throw') throw new Error('no');
     return result;
   });
   Object.defineProperty(document, 'execCommand', { configurable: true, value: exec });
@@ -34,22 +36,6 @@ describe('copyText', () => {
     expect(exec).not.toHaveBeenCalled();
   });
 
-  it('falls back to a hidden textarea on plain http', async () => {
-    const writeText = vi.fn(async () => {});
-    stubSecure(false, writeText);
-    let copied = '';
-    const exec = vi.fn(() => {
-      copied = (document.activeElement as HTMLTextAreaElement | null)?.value ?? '';
-      copied ||= document.querySelector('textarea')?.value ?? '';
-      return true;
-    });
-    Object.defineProperty(document, 'execCommand', { configurable: true, value: exec });
-    expect(await copyText('asw_token')).toBe(true);
-    expect(writeText).not.toHaveBeenCalled();
-    expect(copied).toBe('asw_token');
-    expect(document.querySelector('textarea')).toBeNull();
-  });
-
   it('falls back when the Clipboard API refuses', async () => {
     stubSecure(true, async () => {
       throw new Error('denied');
@@ -57,28 +43,67 @@ describe('copyText', () => {
     stubExec(true);
     expect(await copyText('x')).toBe(true);
   });
-
-  it('says so when both ways fail', async () => {
-    stubSecure(false);
-    stubExec(false);
-    expect(await copyText('x')).toBe(false);
-    stubExec('throw');
-    expect(await copyText('x')).toBe(false);
-    expect(document.querySelector('textarea')).toBeNull();
-  });
 });
 
-describe('copyText focus', () => {
-  it('gives the focus back to what had it', async () => {
+describe('copyText fallback on plain http', () => {
+  let button: HTMLButtonElement;
+  let popup: HTMLElement | undefined;
+
+  beforeEach(() => {
     stubSecure(false);
-    stubExec(true);
-    const button = document.createElement('button');
+    button = document.createElement('button');
     document.body.append(button);
     button.focus();
-    expect(await copyText('x')).toBe(true);
-    expect(document.activeElement).toBe(button);
-    button.remove();
   });
+
+  afterEach(() => {
+    button.remove();
+    popup?.remove();
+    popup = undefined;
+  });
+
+  it('copies the selected text from a hidden textarea and gives the focus back', async () => {
+    const writeText = vi.fn(async () => {});
+    stubSecure(false, writeText);
+    let copied = '';
+    stubExec(true, () => {
+      const ta = document.activeElement as HTMLTextAreaElement;
+      copied = ta.value.slice(ta.selectionStart, ta.selectionEnd);
+    });
+    expect(await copyText('asw_token')).toBe(true);
+    expect(writeText).not.toHaveBeenCalled();
+    expect(copied).toBe('asw_token');
+    expect(document.querySelector('textarea')).toBeNull();
+    expect(document.activeElement).toBe(button);
+  });
+
+  it('places the textarea beside the focused element, inside its dialog', async () => {
+    popup = document.createElement('div');
+    popup.setAttribute('role', 'dialog');
+    document.body.append(popup);
+    popup.append(button);
+    button.focus();
+    let parent: Element | null = null;
+    stubExec(true, () => {
+      parent = document.activeElement?.parentElement ?? null;
+    });
+    expect(await copyText('x')).toBe(true);
+    expect(parent).toBe(popup);
+    expect(document.activeElement).toBe(button);
+  });
+
+  it.each([
+    ['refuses', false],
+    ['throws', 'throw'],
+  ] as const)(
+    'says so, removes the textarea and restores focus when execCommand %s',
+    async (_, result) => {
+      stubExec(result);
+      expect(await copyText('x')).toBe(false);
+      expect(document.querySelector('textarea')).toBeNull();
+      expect(document.activeElement).toBe(button);
+    },
+  );
 });
 
 describe('selectText', () => {

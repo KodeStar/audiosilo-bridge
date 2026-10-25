@@ -7,14 +7,17 @@
 #   curl -fsSL <bridge>/worker/install.sh | sh -s -- --token asw_...
 #
 # It downloads the Bridge's own audiosilo-bridge build for this computer from
-# the Bridge, puts it in ~/.audiosilo-bridge-worker/bin (or --dir), then
-# installs the worker as a service that starts at login (launchd on macOS, a
-# systemd user unit on Linux), or with --run runs it in this terminal instead.
+# the Bridge, puts it in ~/.audiosilo-bridge-worker/bin (or --dir; an update
+# without --dir reuses the installed service's folder), then installs the
+# worker as a service that starts at login (launchd on macOS, a systemd user
+# unit on Linux), or with --run runs it in this terminal instead.
 #
 #   --token <asw_...>  the worker's token from the Workers tab (required the
 #                      first time; running it again to update reuses the saved one)
-#   --run              run the worker here in the foreground, no service
-#   --dir <path>       where to put the program
+#   --run              run the worker here in the foreground, no service (a
+#                      --run start doesn't save the token)
+#   --dir <path>       where to put the program (default: the installed
+#                      service's folder, else ~/.audiosilo-bridge-worker/bin)
 #
 # A file curl downloads carries no quarantine mark, so macOS Gatekeeper
 # doesn't stop the unsigned program. The script holds no secret: the token
@@ -29,11 +32,48 @@ usage() {
 	say 'Usage: install.sh [--token <asw_...>] [--run] [--dir <path>]'
 	say '  --token <asw_...>  the worker token from the Bridge page (Workers), required the first time'
 	say '  --run              run the worker here in the foreground instead of installing the service'
-	say '  --dir <path>       where to put the program (default ~/.audiosilo-bridge-worker/bin)'
+	say '                     (it does not save a --token: a later run needs it again)'
+	say '  --dir <path>       where to put the program (default: the installed service'"'"'s folder,'
+	say '                     else ~/.audiosilo-bridge-worker/bin)'
 }
 die() {
 	printf 'audiosilo-bridge worker: %s\n' "$*" >&2
 	exit 1
+}
+
+# installed_dir prints the folder of the program the installed worker service
+# runs (the launchd agent's ProgramArguments, the systemd user unit's
+# ExecStart), as `worker install` writes them; nothing when there is none or
+# it doesn't read as an existing absolute folder this user can write (a path
+# the file had to escape included: pass --dir then).
+installed_dir() {
+	prog=''
+	[ -n "${HOME:-}" ] || return 0
+	case "$os" in
+	darwin)
+		f="$HOME/Library/LaunchAgents/app.audiosilo.bridge-worker.plist"
+		[ -f "$f" ] || return 0
+		prog=$(awk '/<key>ProgramArguments<\/key>/ { args = 1; next }
+			args && /<string>/ { sub(/^[ \t]*<string>/, ""); sub(/<\/string>[ \t]*$/, ""); print; exit }' "$f" 2>/dev/null) || prog=''
+		;;
+	linux)
+		f="$HOME/.config/systemd/user/audiosilo-bridge-worker.service"
+		[ -f "$f" ] || return 0
+		# The first word of the first ExecStart: "quoted", or bare.
+		prog=$(sed -n -e 's/^[[:blank:]]*ExecStart=[[:blank:]]*"\([^"]*\)".*/\1/p' \
+			-e 's/^[[:blank:]]*ExecStart=[[:blank:]]*\([^"[:blank:]][^[:blank:]]*\).*/\1/p' "$f" 2>/dev/null | head -n 1) || prog=''
+		;;
+	esac
+	case "$prog" in
+	*/ | *[\\%\$\&\<\>]*) return 0 ;;
+	/*/*) ;;
+	*) return 0 ;;
+	esac
+	prog=${prog%/*}
+	# One this user can't write (a program moved to /usr/local/bin by hand)
+	# leaves the default, which `worker install` then points the service at.
+	[ -d "$prog" ] && [ -w "$prog" ] && printf '%s\n' "$prog"
+	return 0
 }
 
 # main runs only once the whole script has arrived: a download cut short runs
@@ -41,7 +81,7 @@ die() {
 main() {
 	token=''
 	run=0
-	dir="${HOME:-}/.audiosilo-bridge-worker/bin"
+	dir=''
 	while [ $# -gt 0 ]; do
 		case "$1" in
 		--token)
@@ -59,11 +99,13 @@ main() {
 			;;
 		--dir)
 			[ $# -ge 2 ] || die '--dir needs a value'
+			[ -n "$2" ] || die '--dir is empty'
 			dir=$2
 			shift 2
 			;;
 		--dir=*)
 			dir=${1#--dir=}
+			[ -n "$dir" ] || die '--dir is empty'
 			shift
 			;;
 		-h | --help)
@@ -82,7 +124,6 @@ main() {
 		[ -n "${AUDIOSILO_WORKER_TOKEN:-}" ] || [ -s "$data/worker.token" ] ||
 			die "--token is required: add a worker on the Bridge's page (Workers) and copy its command"
 	fi
-	[ -n "$dir" ] || die '--dir is empty'
 
 	case "$(uname -s)" in
 	Darwin) os=darwin ;;
@@ -98,6 +139,16 @@ main() {
 	# native build, which is the one with Metal.
 	if [ "$os" = darwin ] && [ "$arch" = amd64 ] && [ "$(sysctl -n hw.optional.arm64 2>/dev/null || true)" = 1 ]; then
 		arch=arm64
+	fi
+
+	# An update with no --dir goes where the installed service runs it from.
+	if [ -z "$dir" ]; then
+		dir=$(installed_dir)
+		if [ -n "$dir" ]; then
+			say "Updating the worker in $dir, where its service runs it from (--dir puts it elsewhere)"
+		else
+			dir="${HOME:-}/.audiosilo-bridge-worker/bin"
+		fi
 	fi
 
 	command -v curl >/dev/null 2>&1 || die 'curl is needed'
@@ -130,6 +181,9 @@ main() {
 	fi
 	if [ "$run" = 1 ]; then
 		say 'Starting the worker here (Ctrl-C stops it) ...'
+		if [ -n "$token" ]; then
+			say 'A --run start does not save the token: to run it again, pass --token again (or leave out --run to install the service, which saves it).'
+		fi
 		exec "$bin" worker "$@"
 	fi
 	"$bin" worker install "$@"

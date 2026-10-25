@@ -99,6 +99,9 @@ describe('WorkersTab', () => {
       'https://github.com/KodeStar/audiosilo-bridge/releases',
     );
     expect(screen.getByText(/shown only now/)).toBeInTheDocument();
+    // Flags and commands in the copy read as code.
+    expect(screen.getByText('--run').tagName).toBe('CODE');
+    expect(screen.getByText('xattr -d com.apple.quarantine').tagName).toBe('CODE');
     expect(lastCall(calls, 'POST', '/api/workers')?.body).toEqual({ name: 'Studio' });
     fireEvent.click(screen.getByRole('button', { name: 'Done' }));
     await waitFor(() => expect(screen.queryByText(/asw_secret/)).not.toBeInTheDocument());
