@@ -152,6 +152,21 @@ func (c *Conn) Pairing() Pairing {
 // ErrAlreadyPaired is a pairing while one is live: unpair first.
 var ErrAlreadyPaired = errors.New("the Bridge is already paired: unpair it first")
 
+// ErrPairNotSaved wraps a failure after the server accepted the pairing code
+// (the code is spent): keeping the token or the pairing on this Bridge failed.
+var ErrPairNotSaved = errors.New("the server accepted the pairing, but this Bridge couldn't save it")
+
+// pairNotSaved is a failure after the server accepted the code: errors.Is
+// matches ErrPairNotSaved, and Unwrap is the cause.
+type pairNotSaved struct{ cause error }
+
+func (e *pairNotSaved) Error() string        { return ErrPairNotSaved.Error() + ": " + e.cause.Error() }
+func (e *pairNotSaved) Unwrap() error        { return e.cause }
+func (e *pairNotSaved) Is(target error) bool { return target == ErrPairNotSaved }
+
+// notSaved tags err as a failure after the server accepted the code.
+func notSaved(err error) error { return &pairNotSaved{cause: err} }
+
 // Pair trades a pairing code from the server's console for the Bridge's token
 // and keeps it (sealed). A wrong or expired code is link.ErrUnauthorized.
 func (c *Conn) Pair(ctx context.Context, serverURL, code string) error {
@@ -162,21 +177,23 @@ func (c *Conn) Pair(ctx context.Context, serverURL, code string) error {
 	if err != nil {
 		return err
 	}
+	// From here on the server has accepted (and spent) the code: a failure is
+	// this Bridge's, tagged ErrPairNotSaved so the page says so.
 	cl, err := link.New(serverURL, p.Token, c.version)
 	if err != nil {
-		return err
+		return notSaved(err)
 	}
 	if err := c.vault.Set(secrets.ServerToken, p.Token); err != nil {
-		return err
+		return notSaved(err)
 	}
 	pairedAt := time.Now().UTC().Format(time.RFC3339)
 	for k, v := range map[string]string{keyServerURL: cl.BaseURL(), keyServerID: p.ServerID, keyServerName: p.ServerName, keyPairedAt: pairedAt} {
 		if err := c.db.SetSetting(ctx, k, v); err != nil {
-			return err
+			return notSaved(err)
 		}
 	}
 	if err := c.db.DeleteSetting(ctx, keyUnpaired); err != nil {
-		return err
+		return notSaved(err)
 	}
 	c.mu.Lock()
 	if c.client != nil {

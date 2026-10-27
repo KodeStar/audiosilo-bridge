@@ -268,6 +268,12 @@ func TestPairAndErrors(t *testing.T) {
 			t.Errorf("the message isn't the sentence alone: %s", w.Body.String())
 		}
 	}
+	// ErrFailed: a local failure whose sentence the page shows (500 with it).
+	e.b.pairErr = Errorf(ErrFailed, "The server accepted the pairing, but this Bridge couldn't save it (disk full).")
+	w := e.do("POST", "/api/pair", e.token, `{"server_url":"http://a","code":"c"}`)
+	if w.Code != http.StatusInternalServerError || !strings.Contains(w.Body.String(), "couldn't save it (disk full)") {
+		t.Errorf("ErrFailed = %d %s", w.Code, w.Body.String())
+	}
 }
 
 func TestMountsSettingsJobsLogs(t *testing.T) {

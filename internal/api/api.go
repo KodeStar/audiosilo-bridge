@@ -182,6 +182,9 @@ var (
 	ErrConflict    = errors.New("conflict")                    // 409
 	ErrLocked      = errors.New("set by the environment")      // 409, code locked
 	ErrUnreachable = errors.New("the server can't be reached") // 502
+	// ErrFailed is a local failure whose sentence the page shows (500), for an
+	// error the owner can act on rather than a bare "... failed".
+	ErrFailed = errors.New("failed") // 500
 )
 
 // kindError is a Backend error of one of the kinds above whose message is the
@@ -386,6 +389,9 @@ func (a *API) writeBackendError(w http.ResponseWriter, err error, op string) {
 		writeError(w, http.StatusConflict, msg)
 	case errors.Is(err, ErrUnreachable):
 		writeError(w, http.StatusBadGateway, msg)
+	case errors.Is(err, ErrFailed):
+		a.log.Warn("bridge page: "+op+" failed", "err", err)
+		writeError(w, http.StatusInternalServerError, msg)
 	default:
 		a.log.Warn("bridge page: "+op+" failed", "err", err)
 		writeError(w, http.StatusInternalServerError, op+" failed")
