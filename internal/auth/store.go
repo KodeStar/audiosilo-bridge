@@ -30,11 +30,10 @@ type Store interface {
 	// every session but keepHash's in one transaction: both happen or neither
 	// does, and no session can be added between them. It is the only password
 	// writer beside CreatePassword, so no password is ever set without the
-	// sign-out. A non-empty
-	// prevHash makes it conditional: it replaces only while prevHash (the hash a
-	// change verified) is still the stored one, and reports false, changing
-	// nothing, when a reset or another change replaced it since. An empty prevHash
-	// replaces whatever is stored (the first run, a reset).
+	// sign-out. A non-empty prevHash makes it conditional: it replaces only while
+	// prevHash (the hash a change verified) is still the stored one, and reports
+	// false, changing nothing, when a reset or another change replaced it since.
+	// An empty prevHash replaces whatever is stored (a reset).
 	ReplacePassword(prevHash, passwordHash, keepHash string) (bool, error)
 	// CreatePassword stores passwordHash only while no password is stored (the
 	// first run), signing every session out with it in one transaction. It

@@ -87,15 +87,19 @@ func unreachableText(serverURL string, err error) string {
 	const hint = " Use the server's address as this computer reaches it, like http://192.168.1.10:8080."
 	var dnsErr *net.DNSError
 	var netErr net.Error
+	reason := ""
 	switch {
 	case errors.As(err, &dnsErr) && dnsErr.IsNotFound:
-		return "Couldn't reach " + addr + " (no such host)." + hint
+		reason = "no such host"
 	case errors.As(err, &dnsErr):
-		return "Couldn't reach " + addr + " (its name couldn't be looked up)." + hint
+		reason = "its name couldn't be looked up"
 	case errors.Is(err, syscall.ECONNREFUSED):
-		return "Couldn't reach " + addr + " (nothing answered on that port)." + hint
+		reason = "nothing answered on that port"
 	case errors.As(err, &netErr) && netErr.Timeout():
-		return "Couldn't reach " + addr + " (it didn't answer in time)." + hint
+		reason = "it didn't answer in time"
+	}
+	if reason != "" {
+		return "Couldn't reach " + addr + " (" + reason + ")." + hint
 	}
 	// Anything else keeps its cause, without the request line url.Error adds.
 	var urlErr *url.Error

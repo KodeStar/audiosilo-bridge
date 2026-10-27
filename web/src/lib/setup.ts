@@ -52,11 +52,8 @@ export function setupLink(id: SetupItemId): SetupLink | null {
 // setupLinks are the links an item not done shows: its tab, and for speech
 // recognition waiting for a worker the Workers tab first.
 export function setupLinks(item: Pick<SetupItem, 'detail'> & { id: SetupItemId }): SetupLink[] {
-  const own = setupLink(item.id);
-  const links = own ? [own] : [];
-  if (item.id === 'asr' && item.detail === ASR_WAITING) {
-    const workers = tabLink('workers');
-    if (workers) links.unshift(workers);
-  }
-  return links;
+  const waiting = item.id === 'asr' && item.detail === ASR_WAITING;
+  return [waiting ? tabLink('workers') : null, setupLink(item.id)].filter(
+    (l): l is SetupLink => l !== null,
+  );
 }

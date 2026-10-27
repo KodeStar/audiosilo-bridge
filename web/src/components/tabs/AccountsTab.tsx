@@ -55,6 +55,8 @@ interface CardProps {
 function GitHubCard({ client, accounts, onChange }: CardProps) {
   const g = accounts.github;
   const state = githubState(g);
+  // gh already shares; signing in here is optional and switches to the app.
+  const canSignInHere = state === 'elsewhere' && g.from === 'gh' && g.available;
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [warning, setWarning] = useState<string | null>(null);
@@ -113,7 +115,7 @@ function GitHubCard({ client, accounts, onChange }: CardProps) {
             AUDIOSILO_BRIDGE_GITHUB_TOKEN is set, and the Bridge uses it before this sign-in.
           </Notice>
         )}
-        {state === 'elsewhere' && g.from === 'gh' && g.available && (
+        {canSignInHere && (
           <p className="text-sm text-dim">
             Sharing already works through the gh command. Signing in here is optional: the Bridge
             then shares through the AudioSilo Contributions app instead.
@@ -175,7 +177,7 @@ function GitHubCard({ client, accounts, onChange }: CardProps) {
               {busy ? 'Starting...' : 'Sign in to GitHub'}
             </button>
           )}
-          {state === 'elsewhere' && g.from === 'gh' && g.available && (
+          {canSignInHere && (
             <button type="button" onClick={signIn} disabled={busy} className={secondaryButton}>
               {busy ? 'Starting...' : 'Sign in here instead'}
             </button>
