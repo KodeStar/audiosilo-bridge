@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -21,6 +22,7 @@ import (
 
 	"github.com/kodestar/audiosilo-bridge/internal/api"
 	"github.com/kodestar/audiosilo-bridge/internal/link"
+	"github.com/kodestar/audiosilo-bridge/internal/secrets"
 )
 
 // jobServer is a fuller fake server: every pairing mints a new token and
@@ -340,6 +342,7 @@ func TestPairErrorWording(t *testing.T) {
 		{"dns timeout", wrap(&net.DNSError{Err: "i/o timeout", IsTimeout: true}), api.ErrUnreachable, "(its name couldn't be looked up)"},
 		{"dial timeout", wrap(&net.OpError{Op: "dial", Net: "tcp", Err: timeoutErr{}}), api.ErrUnreachable, "(it didn't answer in time)"},
 		{"other transport", wrap(errors.New("EOF")), api.ErrUnreachable, "Couldn't reach http://audiosilo:8080: EOF."},
+		{"answer timed out", fmt.Errorf("read: %w", context.DeadlineExceeded), api.ErrUnreachable, "(it didn't answer in time)"},
 		{"5xx", &link.APIError{Status: 500, Message: "database is locked"}, api.ErrUnreachable,
 			"The server at http://audiosilo:8080 answered with an error (500: database is locked). Try again"},
 		{"5xx no message", &link.APIError{Status: 503}, api.ErrUnreachable, "answered with an error (503). Try again"},
@@ -388,7 +391,7 @@ func TestPairAnsweredOrNotSaved(t *testing.T) {
 	}
 	garbled := answer(http.StatusOK, `not json`)
 	defer garbled.Close()
-	if err := b.Pair(context.Background(), garbled.URL, "code"); !strings.Contains(err.Error(), "couldn't use") {
+	if err := b.Pair(context.Background(), garbled.URL, "code"); err == nil || !strings.Contains(err.Error(), "couldn't use") {
 		t.Errorf("an unusable answer = %v", err)
 	}
 	ok := answer(http.StatusOK, `{"token":"bt_x","server_id":"s1","server_name":"Home"}`)
@@ -401,6 +404,9 @@ func TestPairAnsweredOrNotSaved(t *testing.T) {
 	}
 	if b.conn.Client() != nil {
 		t.Error("a pairing not saved left the Bridge paired")
+	}
+	if tok, _ := b.conn.vault.Get(secrets.ServerToken); tok != "" {
+		t.Error("a pairing not saved kept its token")
 	}
 }
 

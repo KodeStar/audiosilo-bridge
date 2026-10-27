@@ -373,7 +373,8 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, v any) bool {
 }
 
 // writeBackendError maps a Backend error; the message of a typed one is the
-// Backend's sentence, anything else a 500 that is logged, never echoed.
+// Backend's sentence, anything else a 500 that is logged and echoed only when
+// it is an ErrFailed one.
 func (a *API) writeBackendError(w http.ResponseWriter, err error, op string) {
 	msg := err.Error()
 	switch {

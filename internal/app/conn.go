@@ -152,17 +152,15 @@ func (c *Conn) Pairing() Pairing {
 // ErrAlreadyPaired is a pairing while one is live: unpair first.
 var ErrAlreadyPaired = errors.New("the Bridge is already paired: unpair it first")
 
-// ErrPairNotSaved wraps a failure after the server accepted the pairing code
-// (the code is spent): keeping the token or the pairing on this Bridge failed.
-var ErrPairNotSaved = errors.New("the server accepted the pairing, but this Bridge couldn't save it")
-
-// pairNotSaved is a failure after the server accepted the code: errors.Is
-// matches ErrPairNotSaved, and Unwrap is the cause.
+// pairNotSaved is a failure after the server accepted (and spent) the pairing
+// code: keeping the token or the pairing on this Bridge failed. Unwrap is the
+// cause.
 type pairNotSaved struct{ cause error }
 
-func (e *pairNotSaved) Error() string        { return ErrPairNotSaved.Error() + ": " + e.cause.Error() }
-func (e *pairNotSaved) Unwrap() error        { return e.cause }
-func (e *pairNotSaved) Is(target error) bool { return target == ErrPairNotSaved }
+func (e *pairNotSaved) Error() string {
+	return "the server accepted the pairing, but this Bridge couldn't save it: " + e.cause.Error()
+}
+func (e *pairNotSaved) Unwrap() error { return e.cause }
 
 // notSaved tags err as a failure after the server accepted the code.
 func notSaved(err error) error { return &pairNotSaved{cause: err} }
@@ -178,7 +176,11 @@ func (c *Conn) Pair(ctx context.Context, serverURL, code string) error {
 		return err
 	}
 	// From here on the server has accepted (and spent) the code: a failure is
-	// this Bridge's, tagged ErrPairNotSaved so the page says so.
+	// this Bridge's, tagged pairNotSaved so the page says so. The save no
+	// longer follows the caller's cancellation (a page closed mid-pairing must
+	// not lose a spent code), and a failed one forgets the token again so a
+	// restart can't come back paired from a half-saved pairing.
+	ctx = context.WithoutCancel(ctx)
 	cl, err := link.New(serverURL, p.Token, c.version)
 	if err != nil {
 		return notSaved(err)
@@ -187,12 +189,10 @@ func (c *Conn) Pair(ctx context.Context, serverURL, code string) error {
 		return notSaved(err)
 	}
 	pairedAt := time.Now().UTC().Format(time.RFC3339)
-	for k, v := range map[string]string{keyServerURL: cl.BaseURL(), keyServerID: p.ServerID, keyServerName: p.ServerName, keyPairedAt: pairedAt} {
-		if err := c.db.SetSetting(ctx, k, v); err != nil {
-			return notSaved(err)
+	if err := c.savePairing(ctx, cl.BaseURL(), p, pairedAt); err != nil {
+		if derr := c.vault.Delete(secrets.ServerToken); derr != nil {
+			c.log.Warn("bridge: forgetting the unsaved pairing's token failed", "err", derr)
 		}
-	}
-	if err := c.db.DeleteSetting(ctx, keyUnpaired); err != nil {
 		return notSaved(err)
 	}
 	c.mu.Lock()
@@ -206,6 +206,16 @@ func (c *Conn) Pair(ctx context.Context, serverURL, code string) error {
 	c.log.Info("bridge: paired", "server", cl.BaseURL(), "server_name", p.ServerName)
 	onChange()
 	return nil
+}
+
+// savePairing keeps the pairing's settings and clears an unpaired reason.
+func (c *Conn) savePairing(ctx context.Context, serverURL string, p *link.Paired, pairedAt string) error {
+	for k, v := range map[string]string{keyServerURL: serverURL, keyServerID: p.ServerID, keyServerName: p.ServerName, keyPairedAt: pairedAt} {
+		if err := c.db.SetSetting(ctx, k, v); err != nil {
+			return err
+		}
+	}
+	return c.db.DeleteSetting(ctx, keyUnpaired)
 }
 
 // Unpair forgets the token (the server keeps the bridge token until an admin

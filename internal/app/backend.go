@@ -93,6 +93,9 @@ func pairError(serverURL string, err error) error {
 	case errors.As(err, &urlErr):
 		// The request itself failed: no answer came.
 		return api.Errorf(api.ErrUnreachable, "%s", unreachableText(addr, urlErr.Err))
+	case errors.Is(err, context.DeadlineExceeded):
+		// The answer started but didn't finish in time.
+		return api.Errorf(api.ErrUnreachable, "%s", unreachableText(addr, err))
 	}
 	// An answer came but couldn't be used (not JSON, no token).
 	return api.Errorf(api.ErrUnreachable, "The server at %s gave an answer this Bridge couldn't use (%v). "+
