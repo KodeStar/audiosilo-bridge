@@ -100,7 +100,8 @@ export class ApiClient {
     return this.request('/api/logout', { method: 'POST' });
   }
 
-  // 403 = the current password is wrong; 400 = the new one is too short.
+  // 403 = the current password is wrong; 400 = the new one is too short; 409 =
+  // a reset (or another change) replaced the password meanwhile.
   changePassword(current: string, next: string): Promise<void> {
     return this.request('/api/password', { method: 'POST', body: { current, new: next } });
   }

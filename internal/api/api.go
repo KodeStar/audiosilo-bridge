@@ -439,6 +439,10 @@ func (a *API) handlePassword(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, auth.ErrInvalidCreds):
 		// 403, not 401: the session is fine, and a 401 signs the page out.
 		writeError(w, http.StatusForbidden, "the current password is wrong")
+	case errors.Is(err, auth.ErrPasswordReplaced):
+		// The current password was right, but a reset (or another change)
+		// replaced it while this change ran, and nothing was changed.
+		writeError(w, http.StatusConflict, "the password was changed or reset meanwhile: sign in with the new one")
 	case errors.Is(err, auth.ErrPasswordTooShort):
 		writeError(w, http.StatusBadRequest, "the new password needs at least "+strconv.Itoa(auth.MinPasswordLen)+" characters")
 	default:

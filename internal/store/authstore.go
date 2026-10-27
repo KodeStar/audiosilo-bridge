@@ -74,6 +74,36 @@ func (a *AuthStore) RemoveSession(tokenHash string) error {
 	return err
 }
 
+// CreatePassword stores passwordHash and deletes every session in one
+// transaction, only while no password is stored: the first start's EnsureAdmin
+// (bridge#16). The check and the write are one statement (an upsert that
+// updates only an empty value), so a reset-password process that committed a
+// password first is never overwritten; it reports false, changing nothing.
+func (a *AuthStore) CreatePassword(passwordHash string) (bool, error) {
+	tx, err := a.db.sql.BeginTx(a.ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback() }() // a no-op once committed
+	res, err := tx.ExecContext(a.ctx,
+		`INSERT INTO settings (key, value) VALUES (?,?)
+		 ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE settings.value = ''`,
+		authPasswordKey, passwordHash)
+	if err != nil {
+		return false, err
+	}
+	if n, err := res.RowsAffected(); err != nil || n != 1 {
+		return false, err
+	}
+	if _, err := tx.ExecContext(a.ctx, `DELETE FROM sessions`); err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // ReplacePassword stores passwordHash and deletes every session but keepHash's
 // in one transaction (bridge#11): both commit or neither does. The password
 // write comes first, so the transaction holds the write lock from its first

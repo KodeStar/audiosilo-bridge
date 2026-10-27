@@ -324,6 +324,41 @@ func TestPassword(t *testing.T) {
 	}
 }
 
+// resetMidChangeStore is a store where every password change loses to a reset
+// that landed while it ran (the conditional replace finds another hash).
+type resetMidChangeStore struct{ *auth.MemStore }
+
+func (s resetMidChangeStore) ReplacePassword(prev, hash, keep string) (bool, error) {
+	if prev != "" {
+		return false, nil
+	}
+	return s.MemStore.ReplacePassword(prev, hash, keep)
+}
+
+// bridge#16: a change whose current password was right but lost to a reset
+// says so (409), not "the current password is wrong".
+func TestPasswordChangeLosingToAReset(t *testing.T) {
+	t.Parallel()
+	am := auth.New(resetMidChangeStore{auth.NewMemStore()})
+	pw, err := am.EnsureAdmin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok, err := am.Login(pw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := New(&backend{}, am, &fakeHub{}, http.NotFoundHandler(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	r := httptest.NewRequest("POST", "/api/password", strings.NewReader(`{"current":"`+pw+`","new":"long enough pw"}`))
+	r.RemoteAddr = "192.168.1.20:5000"
+	r.Header.Set("Authorization", "Bearer "+tok)
+	w := httptest.NewRecorder()
+	a.Handler().ServeHTTP(w, r)
+	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "reset meanwhile") {
+		t.Fatalf("a change losing to a reset = %d %s", w.Code, w.Body.String())
+	}
+}
+
 // A job's detail (the console's deep link), its Retry, and the engine's state.
 func TestJobDetailRetryAndEngine(t *testing.T) {
 	t.Parallel()

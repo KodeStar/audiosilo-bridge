@@ -29,12 +29,18 @@ type Store interface {
 	// ReplacePassword stores a new password hash (argon2id encoded) and deletes
 	// every session but keepHash's in one transaction: both happen or neither
 	// does, and no session can be added between them. It is the only password
-	// writer, so no password is ever set without the sign-out. A non-empty
+	// writer beside CreatePassword, so no password is ever set without the
+	// sign-out. A non-empty
 	// prevHash makes it conditional: it replaces only while prevHash (the hash a
 	// change verified) is still the stored one, and reports false, changing
 	// nothing, when a reset or another change replaced it since. An empty prevHash
 	// replaces whatever is stored (the first run, a reset).
 	ReplacePassword(prevHash, passwordHash, keepHash string) (bool, error)
+	// CreatePassword stores passwordHash only while no password is stored (the
+	// first run), signing every session out with it in one transaction. It
+	// reports false, changing nothing, when one is: a reset-password run on the
+	// same data dir that landed first is never overwritten (bridge#16).
+	CreatePassword(passwordHash string) (bool, error)
 }
 
 // MemStore is an in-memory Store for tests.
@@ -81,6 +87,19 @@ func (m *MemStore) RemoveSession(tokenHash string) error {
 	defer m.mu.Unlock()
 	delete(m.sessions, tokenHash)
 	return nil
+}
+
+// CreatePassword stores passwordHash, signing every session out, only while no
+// password is stored.
+func (m *MemStore) CreatePassword(passwordHash string) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.passHash != "" {
+		return false, nil
+	}
+	m.passHash = passwordHash
+	clear(m.sessions)
+	return true, nil
 }
 
 // ReplacePassword stores passwordHash and removes every session token hash but
