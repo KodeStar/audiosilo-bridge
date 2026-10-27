@@ -5,10 +5,12 @@ interface TabBarProps {
   onSelect: (id: TabId) => void;
 }
 
+// The tabs wrap onto a second row at phone width rather than scroll sideways,
+// where Workers and Logs sat off-screen with nothing to say the row scrolled.
 export function TabBar({ active, onSelect }: TabBarProps) {
   return (
     <nav
-      className="flex gap-1 overflow-x-auto border-b border-edge bg-surface px-4"
+      className="flex flex-wrap gap-x-1 border-b border-edge bg-surface px-2 sm:px-4"
       role="tablist"
       aria-label="Sections"
     >
@@ -24,7 +26,7 @@ export function TabBar({ active, onSelect }: TabBarProps) {
             aria-controls="panel"
             onClick={() => onSelect(tab.id)}
             className={
-              'border-b-2 px-4 py-3 text-sm whitespace-nowrap transition-colors ' +
+              'border-b-2 px-3 py-3 text-sm sm:px-4 whitespace-nowrap transition-colors ' +
               (selected ? 'border-pink-600 text-hi' : 'border-transparent text-dim hover:text-body')
             }
           >
