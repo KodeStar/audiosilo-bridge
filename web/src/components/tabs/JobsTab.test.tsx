@@ -144,8 +144,9 @@ describe('JobsTab', () => {
     render(<JobsTab client={api()} />);
     const card = await screen.findByRole('article', { name: 'Job 12' });
     expect(within(card).getByText('Needs attention')).toBeInTheDocument();
-    expect(within(card).getByText('agent_unavailable')).toBeInTheDocument();
-    expect(within(card).getByText(/agent backend unavailable/)).toBeInTheDocument();
+    // The park's code is for the log: the page says it in words.
+    expect(within(card).queryByText(/agent_unavailable/)).toBeNull();
+    expect(within(card).getByText('agent backend unavailable')).toBeInTheDocument();
     expect(
       within(card).getByText('Check the agent container is running and logged in.'),
     ).toBeInTheDocument();
@@ -155,6 +156,30 @@ describe('JobsTab', () => {
     expect(await within(card).findByText('Running')).toBeInTheDocument();
     expect(within(card).queryByRole('button', { name: 'Retry' })).toBeNull();
     expect(lastCall(calls, 'POST', '/api/jobs/12/retry')).toBeDefined();
+  });
+
+  it('words a park whose message is only its code, and names who asks for jobs', async () => {
+    mockFetch({
+      'GET /api/jobs': {
+        body: {
+          jobs: [
+            generateJobFixture({
+              error: 'asr_worker_waiting',
+              progress: {
+                step: 'transcribing',
+                park: { code: 'asr_worker_waiting', hint: 'Start a worker.' },
+              },
+            }),
+          ],
+        },
+      },
+    });
+    render(<JobsTab client={api()} />);
+    const card = await screen.findByRole('article', { name: 'Job 12' });
+    expect(within(card).queryByText(/asr_worker_waiting/)).toBeNull();
+    expect(within(card).getByText('Start a worker.')).toBeInTheDocument();
+    expect(screen.getByText(/a listener in the player/)).toBeInTheDocument();
+    expect(screen.queryByText(/Jobs are started from/)).toBeNull();
   });
 
   it("shows a done sidecars job's result", async () => {

@@ -36,6 +36,7 @@ import {
   isSidecars,
   kindLabel,
   parkOf,
+  parkText,
   parseChaptersResult,
   parseDescribeResult,
   parseGenerateResult,
@@ -137,13 +138,13 @@ function JobList({ client }: { client: ApiClient }) {
   return (
     <div className="flex flex-col gap-4">
       <p className="max-w-prose text-sm text-dim">
-        The jobs this Bridge took from the server, newest first. Jobs are started from the
-        server&apos;s console.
+        What this Bridge was asked to do, newest first: by an admin in the server&apos;s console, by
+        a listener in the player, or by the server&apos;s schedule.
       </p>
       {error && <Notice kind="error">{error}</Notice>}
       {jobs.length === 0 ? (
         <EmptyState title="No jobs yet">
-          When the server&apos;s console queues a job, this Bridge takes it and it shows here.
+          When the server queues a job, this Bridge takes it and it shows here.
         </EmptyState>
       ) : (
         <ul className="flex flex-col gap-3">
@@ -300,6 +301,7 @@ function JobCard({
 function GenerateProgress({ job }: { job: ServerJob }) {
   const p = job.progress;
   const park = parkOf(job);
+  const parkMsg = park ? parkText(job, park) : '';
   const percent = progressPercent(p);
   const facts = generateFacts(p, park !== null);
   return (
@@ -311,11 +313,9 @@ function GenerateProgress({ job }: { job: ServerJob }) {
       {facts.length > 0 && <p className="text-xs text-dim">{facts.join(' - ')}</p>}
       {park && (
         <Notice kind="warn">
-          <p>
-            <code className="text-xs">{park.code}</code>
-            {job.error && <>: {job.error}</>}
-          </p>
-          {park.hint && <p className="mt-1">{park.hint}</p>}
+          {parkMsg && <p>{parkMsg}</p>}
+          {park.hint && <p className={parkMsg ? 'mt-1' : undefined}>{park.hint}</p>}
+          {!parkMsg && !park.hint && <p>The job needs attention: see the Bridge&apos;s log.</p>}
           {park.retry_at && (
             <p className="mt-1 text-xs">
               Resumes by itself <Ago at={park.retry_at} />.
