@@ -9,11 +9,13 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -291,6 +293,61 @@ func TestPairErrors(t *testing.T) {
 		t.Errorf("a self-signed certificate = %v, want a refusal naming the http:// address", err)
 	}
 }
+
+// A server the Bridge never reached gets a sentence that names the address and
+// says what to use instead, not Go's "dial tcp: lookup ..." chain.
+func TestPairUnreachableIsWorded(t *testing.T) {
+	b, _, err := New(context.Background(), Options{DataDir: t.TempDir(), Version: "0.1.0", Listen: "127.0.0.1:0", Logger: quiet()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = b.db.Close() }()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	closed := "http://" + ln.Addr().String()
+	_ = ln.Close()
+	err = b.Pair(context.Background(), closed+"/", "code")
+	if !errors.Is(err, api.ErrUnreachable) {
+		t.Fatalf("a closed port = %v, want ErrUnreachable", err)
+	}
+	want := "Couldn't reach " + closed + " (nothing answered on that port). Use the server's address"
+	if !strings.Contains(err.Error(), want) || strings.Contains(err.Error(), "dial tcp") {
+		t.Errorf("a closed port = %q, want %q", err, want)
+	}
+}
+
+func TestUnreachableText(t *testing.T) {
+	const addr = "http://audiosilo:8080"
+	wrap := func(e error) error { return &url.Error{Op: "Post", URL: addr + "/api/v1/bridge/pair", Err: e} }
+	cases := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"no such host", wrap(&net.OpError{Op: "dial", Net: "tcp", Err: &net.DNSError{Err: "no such host", Name: "audiosilo", IsNotFound: true}}),
+			"Couldn't reach http://audiosilo:8080 (no such host). Use the server's address as this computer reaches it, like http://192.168.1.10:8080."},
+		{"lookup failed", wrap(&net.DNSError{Err: "server misbehaving", Name: "audiosilo"}), "(its name couldn't be looked up)"},
+		{"refused", wrap(&net.OpError{Op: "dial", Net: "tcp", Err: os.NewSyscallError("connect", syscall.ECONNREFUSED)}), "(nothing answered on that port)"},
+		{"timeout", wrap(&net.DNSError{Err: "i/o timeout", IsTimeout: true, IsNotFound: false}), "(its name couldn't be looked up)"},
+		{"dial timeout", wrap(&net.OpError{Op: "dial", Net: "tcp", Err: timeoutErr{}}), "(it didn't answer in time)"},
+		{"other", wrap(errors.New("EOF")), "Couldn't reach http://audiosilo:8080: EOF."},
+	}
+	for _, c := range cases {
+		got := unreachableText(addr+"/ ", c.err)
+		if !strings.Contains(got, c.want) || strings.Contains(got, "Post ") {
+			t.Errorf("%s: %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+// timeoutErr is a net.Error that timed out.
+type timeoutErr struct{}
+
+func (timeoutErr) Error() string   { return "i/o timeout" }
+func (timeoutErr) Timeout() bool   { return true }
+func (timeoutErr) Temporary() bool { return true }
 
 // failingListener accepts nothing: its Accept fails for good at once.
 type failingListener struct{ net.Listener }

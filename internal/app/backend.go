@@ -5,10 +5,12 @@ import (
 	"crypto/tls"
 	"errors"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/kodestar/audiosilo-bridge/internal/api"
@@ -71,9 +73,36 @@ func (b *Bridge) Pair(ctx context.Context, serverURL, code string) error {
 			return api.Errorf(api.ErrRefused, "the server's certificate isn't trusted (a self-signed one?): "+
 				"pair with its http:// address on your network, for example %s", plainAddress(serverURL))
 		}
-		return api.Errorf(api.ErrUnreachable, "could not reach the server: %v", err)
+		return api.Errorf(api.ErrUnreachable, "%s", unreachableText(serverURL, err))
 	}
 	return nil
+}
+
+// unreachableText words a pairing that never reached the server: the address
+// as typed, why in a few words, and what address to use instead. A name the
+// Bridge can't look up is usually a compose service name (http://audiosilo:8080)
+// given to a Bridge that isn't in that compose project.
+func unreachableText(serverURL string, err error) string {
+	addr := strings.TrimRight(strings.TrimSpace(serverURL), "/")
+	const hint = " Use the server's address as this computer reaches it, like http://192.168.1.10:8080."
+	var dnsErr *net.DNSError
+	var netErr net.Error
+	switch {
+	case errors.As(err, &dnsErr) && dnsErr.IsNotFound:
+		return "Couldn't reach " + addr + " (no such host)." + hint
+	case errors.As(err, &dnsErr):
+		return "Couldn't reach " + addr + " (its name couldn't be looked up)." + hint
+	case errors.Is(err, syscall.ECONNREFUSED):
+		return "Couldn't reach " + addr + " (nothing answered on that port)." + hint
+	case errors.As(err, &netErr) && netErr.Timeout():
+		return "Couldn't reach " + addr + " (it didn't answer in time)." + hint
+	}
+	// Anything else keeps its cause, without the request line url.Error adds.
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		err = urlErr.Err
+	}
+	return "Couldn't reach " + addr + ": " + err.Error() + "."
 }
 
 // plainAddress is an https server address as http (the same host and port).
