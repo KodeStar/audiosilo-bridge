@@ -65,6 +65,7 @@ func pairError(serverURL string, err error) error {
 	var apiErr *link.APIError
 	var certErr *tls.CertificateVerificationError
 	var urlErr *url.Error
+	var ns *pairNotSaved
 	switch {
 	case errors.Is(err, link.ErrUnauthorized):
 		return api.Errorf(api.ErrRefused, "The code is wrong, used or expired. Make a new one in the server's console.")
@@ -72,10 +73,10 @@ func pairError(serverURL string, err error) error {
 		return api.Errorf(api.ErrConflict, "%v", err)
 	case errors.Is(err, link.ErrBadAddress):
 		return api.Errorf(api.ErrInvalid, "%v", err)
-	case errors.Is(err, ErrPairNotSaved):
+	case errors.As(err, &ns):
 		// The code is spent: a new one is needed.
 		return api.Errorf(api.ErrFailed, "The server accepted the pairing, but this Bridge couldn't save it (%v). "+
-			"Fix that (see the Bridge's log), make a new code in the server's console and pair again.", errors.Unwrap(err))
+			"Fix that (see the Bridge's log), make a new code in the server's console and pair again.", ns.cause)
 	case errors.As(err, &apiErr) && (apiErr.Status == http.StatusNotFound || apiErr.Status == http.StatusMethodNotAllowed):
 		return api.Errorf(api.ErrRefused, "that server doesn't know about a Bridge (update it to a version with the Bridge)")
 	case errors.As(err, &apiErr) && apiErr.Status < http.StatusInternalServerError:

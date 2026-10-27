@@ -389,12 +389,13 @@ func (a *API) writeBackendError(w http.ResponseWriter, err error, op string) {
 		writeError(w, http.StatusConflict, msg)
 	case errors.Is(err, ErrUnreachable):
 		writeError(w, http.StatusBadGateway, msg)
-	case errors.Is(err, ErrFailed):
-		a.log.Warn("bridge page: "+op+" failed", "err", err)
-		writeError(w, http.StatusInternalServerError, msg)
 	default:
+		// A 500 is logged; only an ErrFailed one shows its sentence.
 		a.log.Warn("bridge page: "+op+" failed", "err", err)
-		writeError(w, http.StatusInternalServerError, op+" failed")
+		if !errors.Is(err, ErrFailed) {
+			msg = op + " failed"
+		}
+		writeError(w, http.StatusInternalServerError, msg)
 	}
 }
 
