@@ -67,6 +67,18 @@ describe('WorkersTab', () => {
     expect(screen.getByText('Never connected')).toBeInTheDocument();
   });
 
+  it("breaks a dev build's long version inside the card", async () => {
+    mockFetch({
+      'GET /api/workers': {
+        body: { workers: [workerFixture({ version: 'dev-79f98778ce0123456789abcdefd32a711' })] },
+      },
+      'GET /api/status': { body: statusFixture() },
+    });
+    render(<WorkersTab client={client()} />);
+    const line = await screen.findByText(/version dev-79f98778ce/);
+    expect(line.className).toContain('[overflow-wrap:anywhere]');
+  });
+
   it('adds a worker and shows its token once, in the commands', async () => {
     const { calls } = addWorker();
     render(<WorkersTab client={client()} />);

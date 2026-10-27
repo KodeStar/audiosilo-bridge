@@ -119,7 +119,8 @@ function WorkerItem({
           <Badge tone="muted">{w.last_seen_at ? 'Not connected' : 'Never connected'}</Badge>
         )}
       </div>
-      <p className="mt-1 text-dim">
+      {/* A dev build's version is one long word: let it break inside the card. */}
+      <p className="mt-1 text-dim [overflow-wrap:anywhere]">
         {[asr, w.version && `version ${w.version}`].filter(Boolean).join(' - ') ||
           'It says what it runs when it connects.'}
       </p>
