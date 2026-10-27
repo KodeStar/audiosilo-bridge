@@ -208,7 +208,10 @@ func ensure(ctx context.Context, dir string, log *slog.Logger) (ffmpeg, ffprobe 
 	log.Info("ffmpeg/ffprobe not found locally - downloading a static build (one time)", "into", dir)
 	if err := download(ctx, s, dir); err != nil {
 		log.Warn("ffmpeg auto-download failed; running without it (will retry next start)", "err", err)
-		return cached(dir)
+		// A download that failed part way may have copied one tool in already:
+		// its first run is still the self-check (copyExec holds no fork lock).
+		ffmpeg, ffprobe = cached(dir)
+		return verified(ctx, ffmpeg, log), verified(ctx, ffprobe, log)
 	}
 	ffmpeg, ffprobe = cached(dir)
 	// Adopt only binaries that actually run on this machine.
@@ -269,7 +272,11 @@ func verified(ctx context.Context, path string, log *slog.Logger) string {
 		return ""
 	}
 	if runSelfCheck(ctx, path, []string{"-version"}, 15*time.Second, log) != nil {
-		_ = os.Remove(path)
+		// A check cut short by shutdown (a download cancelled part way) says
+		// nothing about the file: keep it for the next start to check.
+		if ctx.Err() == nil {
+			_ = os.Remove(path)
+		}
 		return ""
 	}
 	return path

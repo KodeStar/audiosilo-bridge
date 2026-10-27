@@ -68,6 +68,7 @@ describe('parkText', () => {
   it('says nothing when the message is only the code or repeats the hint', () => {
     expect(parkText(at('asr_worker_waiting'), park)).toBe('');
     expect(parkText(at('Start a worker.'), park)).toBe('');
+    expect(parkText(at('asr_worker_waiting: Start a worker.'), park)).toBe('');
     expect(parkText(at(''), park)).toBe('');
   });
 });
@@ -132,7 +133,10 @@ describe('descriptions', () => {
     expect(kindLabel('podcast.poll')).toBe('Checking a feed');
     expect(kindLabel('podcast.fetch')).toBe('Fetching an episode');
     expect(kindLabel('podcast.retain')).toBe('Checking retained episodes');
-    expect(kindLabel('bridge.verify')).toBe('');
+    expect(kindLabel('sidecars.contribute')).toBe('Community share');
+    expect(kindLabel('meta.correct')).toBe('Corrections');
+    expect(kindLabel('bridge.verify')).toBe('Verify');
+    expect(kindLabel('some.future.kind')).toBe('');
     expect(kindLabel('constructor')).toBe('');
     expect(kindLabel('__proto__')).toBe('');
     expect(isSidecars(describeJobFixture())).toBe(true);

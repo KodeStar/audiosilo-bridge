@@ -364,6 +364,60 @@ func TestEnsureDownloadsAndVerifies(t *testing.T) {
 	}
 }
 
+// A download that fails still adopts only tools that pass their self-check: a
+// cached one that doesn't run comes back "" (and is removed), one that does is
+// kept. (A failed download can leave a tool copyExec just wrote; its first run
+// must be the self-check, which retries a run refused as busy.)
+func TestEnsureFailedDownloadVerifiesWhatIsCached(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("stub tool is a shell script")
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "down", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	restore := platformSpec
+	platformSpec = func(string, string) (spec, bool) {
+		return spec{combinedURL: srv.URL, combinedKind: "tar.xz"}, true
+	}
+	defer func() { platformSpec = restore }()
+
+	dir := t.TempDir()
+	broken := filepath.Join(dir, binName("ffmpeg"))
+	if err := execfile.WriteFile(broken, []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fm, fp := ensure(context.Background(), dir, discard())
+	if fm != "" || fp != "" {
+		t.Fatalf("a failed download with a broken cached ffmpeg = %q,%q, want none", fm, fp)
+	}
+	if _, err := os.Stat(broken); !os.IsNotExist(err) {
+		t.Errorf("the broken ffmpeg was kept: %v", err)
+	}
+
+	good := fakeTool(t, dir, "ffmpeg")
+	if fm, _ := ensure(context.Background(), dir, discard()); fm != good {
+		t.Fatalf("a failed download with a working cached ffmpeg = %q, want %q", fm, good)
+	}
+}
+
+// A self-check cut short by shutdown keeps the tool: a cancelled context says
+// nothing about the file (ensure checks what a cancelled download left).
+func TestVerifiedKeepsToolWhenCancelled(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("stub tool is a shell script")
+	}
+	good := fakeTool(t, t.TempDir(), "ffmpeg")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if got := verified(ctx, good, discard()); got != "" {
+		t.Fatalf("verified with a cancelled context = %q, want \"\"", got)
+	}
+	if _, err := os.Stat(good); err != nil {
+		t.Errorf("the tool was removed: %v", err)
+	}
+}
+
 // bridge#12/#16: a tool binary copyExec just installed (a plain copy, no fork
 // lock) passes its self-check, its first run, while other goroutines fork (each
 // one's exec is the others' fork): a run refused as busy is tried again, never

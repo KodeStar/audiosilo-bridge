@@ -330,6 +330,8 @@ func TestUnreachableText(t *testing.T) {
 			"Couldn't reach http://audiosilo:8080 (no such host). Use the server's address as this computer reaches it, like http://192.168.1.10:8080."},
 		{"lookup failed", wrap(&net.DNSError{Err: "server misbehaving", Name: "audiosilo"}), "(its name couldn't be looked up)"},
 		{"refused", wrap(&net.OpError{Op: "dial", Net: "tcp", Err: os.NewSyscallError("connect", syscall.ECONNREFUSED)}), "(nothing answered on that port)"},
+		{"no route to host", wrap(&net.OpError{Op: "dial", Net: "tcp", Err: os.NewSyscallError("connect", syscall.EHOSTUNREACH)}), "(no route to that address)"},
+		{"network unreachable", wrap(&net.OpError{Op: "dial", Net: "tcp", Err: os.NewSyscallError("connect", syscall.ENETUNREACH)}), "(no route to that address)"},
 		{"timeout", wrap(&net.DNSError{Err: "i/o timeout", IsTimeout: true, IsNotFound: false}), "(its name couldn't be looked up)"},
 		{"dial timeout", wrap(&net.OpError{Op: "dial", Net: "tcp", Err: timeoutErr{}}), "(it didn't answer in time)"},
 		{"other", wrap(errors.New("EOF")), "Couldn't reach http://audiosilo:8080: EOF."},

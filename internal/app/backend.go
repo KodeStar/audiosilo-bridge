@@ -95,6 +95,8 @@ func unreachableText(serverURL string, err error) string {
 		reason = "its name couldn't be looked up"
 	case errors.Is(err, syscall.ECONNREFUSED):
 		reason = "nothing answered on that port"
+	case errors.Is(err, syscall.EHOSTUNREACH), errors.Is(err, syscall.ENETUNREACH):
+		reason = "no route to that address"
 	case errors.As(err, &netErr) && netErr.Timeout():
 		reason = "it didn't answer in time"
 	}

@@ -40,6 +40,9 @@ const KIND_LABELS: Record<string, string> = {
   [GENERATE_KIND]: 'Characters and recaps',
   [DESCRIBE_KIND]: 'Description',
   [CHAPTERS_KIND]: 'Chapters',
+  'sidecars.contribute': 'Community share',
+  'meta.correct': 'Corrections',
+  'bridge.verify': 'Verify',
   'podcast.subscribe': 'Following a show',
   'podcast.poll': 'Checking a feed',
   'podcast.fetch': 'Fetching an episode',
@@ -64,10 +67,10 @@ export function parkOf(job: ServerJob): Park | null {
 // when it is only the park's code (a park with no message) or repeats the hint.
 // The code itself is for the log, never the page.
 export function parkText(job: ServerJob, park: Park): string {
-  const msg = (job.error ?? '').trim();
-  if (msg === '' || msg === park.code || msg === park.hint) return '';
+  let msg = (job.error ?? '').trim();
   const prefix = `${park.code}: `;
-  return msg.startsWith(prefix) ? msg.slice(prefix.length) : msg;
+  if (msg.startsWith(prefix)) msg = msg.slice(prefix.length).trim();
+  return msg === '' || msg === park.code || msg === park.hint ? '' : msg;
 }
 
 // effectiveState is the state to show: a running job that is parked shows as
