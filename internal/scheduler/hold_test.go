@@ -51,7 +51,7 @@ func TestHold(t *testing.T) {
 		t.Fatalf("a held book ran %+v", runs)
 	}
 	releaseQueued()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(waitLimit)
 	for {
 		if b, _ := db.GetBook(ctx, queued.ID); b.State == string(state.Done) {
 			break

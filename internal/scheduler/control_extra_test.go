@@ -57,7 +57,7 @@ func TestStageSuccessWithoutSentinelFails(t *testing.T) {
 			}
 		}
 		return false
-	}, 5*time.Second)
+	}, waitLimit)
 
 	var got store.Book
 	for _, bk := range books {
@@ -98,7 +98,7 @@ func TestPauseAfterSentinelBeforeAdvanceStaysPaused(t *testing.T) {
 	sched.Notify()
 
 	// It advances past inspecting once (to splitting) then the pause holds it.
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(waitLimit)
 	var cur store.Book
 	for time.Now().Before(deadline) {
 		cur, _ = db.GetBook(context.Background(), b.ID)
@@ -138,7 +138,7 @@ func TestBookStateEventCarriesError(t *testing.T) {
 		t.Fatalf("cancel: %v", err)
 	}
 
-	deadline := time.After(2 * time.Second)
+	deadline := time.After(waitLimit)
 	for {
 		select {
 		case ev := <-sub.C:
@@ -191,7 +191,7 @@ func TestQALoopReExecutesUntilClean(t *testing.T) {
 		return r
 	}
 
-	books := runUntil(t, db, h.hub, exec, 2, allDone, 15*time.Second)
+	books := runUntil(t, db, h.hub, exec, 2, allDone, waitLimit)
 	if !allDone(books) {
 		t.Fatal("QA loop did not terminate (a frozen sentinel would loop forever)")
 	}
@@ -252,7 +252,7 @@ func TestCrashWindowResumeNoExtraRun(t *testing.T) {
 	// Resume: reconcile closes the open run failed; dispatch skips re-execution and
 	// advances. Then the stub carries the book to done.
 	exec := NewStubExecutor(1*time.Millisecond, 3*time.Millisecond)
-	books := runUntil(t, db, h.hub, exec, 2, allDone, 15*time.Second)
+	books := runUntil(t, db, h.hub, exec, 2, allDone, waitLimit)
 	if !allDone(books) {
 		t.Fatal("did not resume to completion")
 	}
@@ -339,7 +339,7 @@ func TestParkCodePersistsAndClears(t *testing.T) {
 	sched.Notify()
 
 	// Wait for the park to land in the DB.
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(waitLimit)
 	var cur store.Book
 	for time.Now().Before(deadline) {
 		cur, _ = db.GetBook(context.Background(), b.ID)
@@ -356,7 +356,7 @@ func TestParkCodePersistsAndClears(t *testing.T) {
 	}
 
 	// The book.state event carried the typed code alongside the needs_attention status.
-	evDeadline := time.After(2 * time.Second)
+	evDeadline := time.After(waitLimit)
 	for {
 		select {
 		case ev := <-sub.C:
@@ -419,7 +419,7 @@ func TestFixLoopExhaustedParksWithCode(t *testing.T) {
 			}
 		}
 		return false
-	}, 5*time.Second)
+	}, waitLimit)
 
 	var got store.Book
 	for _, bk := range books {
@@ -462,7 +462,7 @@ func TestCancelSurvivesAKilledStage(t *testing.T) {
 
 	select {
 	case <-exec.started:
-	case <-time.After(3 * time.Second):
+	case <-time.After(waitLimit):
 		cancel()
 		t.Fatal("the stage never started")
 	}

@@ -88,6 +88,13 @@ func (h *harness) addBook(t *testing.T, db *store.DB, slug, series, pos string) 
 	return b
 }
 
+// waitLimit bounds every wait for something the scheduler does in the
+// background. A wait ends as soon as it sees the effect, so the bound costs
+// nothing when the test passes; it is generous because 2-3 s flaked under a
+// parallel -race run of the whole module (bridge#16). Waits that prove nothing
+// happens keep their short windows.
+const waitLimit = 20 * time.Second
+
 // runUntil runs a scheduler in the background and waits until pred(books) holds
 // or the deadline passes. It returns the final books and cancels the scheduler.
 func runUntil(t *testing.T, db *store.DB, hub *events.Hub, exec Executor, agentCap int,
@@ -138,7 +145,7 @@ func TestPipelineRunsToDone(t *testing.T) {
 	h.addBook(t, db, "book-c", "", "")
 
 	exec := NewStubExecutor(2*time.Millisecond, 6*time.Millisecond)
-	books := runUntil(t, db, h.hub, exec, 2, allDone, 15*time.Second)
+	books := runUntil(t, db, h.hub, exec, 2, allDone, waitLimit)
 	if !allDone(books) {
 		for _, b := range books {
 			t.Logf("book %d %s state=%s status=%s", b.ID, b.Title, b.State, b.Status)
@@ -174,7 +181,7 @@ func TestAgentQueueConcurrencyBoundsBooks(t *testing.T) {
 		inner:  NewStubExecutor(time.Millisecond, 15*time.Millisecond),
 		counts: func(st state.State) bool { return state.LaneOf(st) == state.LaneAgent },
 	}
-	books := runUntil(t, db, h.hub, exec, 2, allDone, 15*time.Second)
+	books := runUntil(t, db, h.hub, exec, 2, allDone, waitLimit)
 	if !allDone(books) {
 		t.Fatal("books did not finish")
 	}
@@ -193,7 +200,7 @@ func TestMechanicalLaneSerializesLibrarySourceIO(t *testing.T) {
 		inner:  NewStubExecutor(15*time.Millisecond, time.Millisecond),
 		counts: state.ReadsSource,
 	}
-	books := runUntil(t, db, h.hub, exec, 2, allDone, 15*time.Second)
+	books := runUntil(t, db, h.hub, exec, 2, allDone, waitLimit)
 	if !allDone(books) {
 		t.Fatal("books did not finish")
 	}
@@ -220,7 +227,7 @@ func TestCrashResumeNoDuplicateStages(t *testing.T) {
 	sched.Notify()
 
 	// Wait until some but not all books are past 'asr', then cut power.
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(waitLimit)
 	for time.Now().Before(deadline) {
 		books, _ := db.ListBooks(context.Background())
 		progressed, finished := 0, 0
@@ -248,7 +255,7 @@ func TestCrashResumeNoDuplicateStages(t *testing.T) {
 	}
 	defer db2.Close()
 	exec2 := NewStubExecutor(2*time.Millisecond, 6*time.Millisecond)
-	books := runUntil(t, db2, h.hub, exec2, 2, allDone, 20*time.Second)
+	books := runUntil(t, db2, h.hub, exec2, 2, allDone, waitLimit)
 	if !allDone(books) {
 		t.Fatal("did not resume to completion")
 	}
@@ -294,7 +301,7 @@ func TestPauseResume(t *testing.T) {
 	if err := sched.Resume(context.Background(), b.ID); err != nil {
 		t.Fatalf("resume: %v", err)
 	}
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(waitLimit)
 	for time.Now().Before(deadline) {
 		cur, _ := db.GetBook(context.Background(), b.ID)
 		if cur.State == string(state.Done) {

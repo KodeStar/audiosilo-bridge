@@ -154,7 +154,7 @@ func TestStartupGCSkipsReservedBook(t *testing.T) {
 // GC) deterministically without a fixed sleep.
 func waitUntil(t *testing.T, cond func() bool, msg string) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(waitLimit)
 	for time.Now().Before(deadline) {
 		if cond() {
 			return
