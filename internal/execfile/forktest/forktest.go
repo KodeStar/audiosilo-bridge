@@ -6,6 +6,7 @@
 package forktest
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -19,7 +20,7 @@ const Script = "#!/bin/sh\nexit 0\n"
 
 // Exec runs the tool at p, the way a first run without retries does.
 func Exec(p string) error {
-	return exec.Command(p).Run() //nolint:gosec // the test's own tool
+	return exec.CommandContext(context.Background(), p).Run() //nolint:gosec // the test's own tool
 }
 
 // Run has 4 goroutines each write a tool with write (given the path to use,
