@@ -11,11 +11,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
-	"sync"
 	"syscall"
 	"testing"
 	"testing/iotest"
@@ -24,6 +22,7 @@ import (
 	"github.com/ulikunitz/xz"
 
 	"github.com/kodestar/audiosilo-bridge/internal/execfile"
+	"github.com/kodestar/audiosilo-bridge/internal/execfile/forktest"
 )
 
 func discard() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
@@ -365,40 +364,22 @@ func TestEnsureDownloadsAndVerifies(t *testing.T) {
 	}
 }
 
-// bridge#12: a tool binary copyExec just installed execs at once while other
-// goroutines fork (each one's exec is the others' fork), never "text file busy",
-// and no temp file is left behind. Each source is written the unlocked way
+// bridge#12/#16: a tool binary copyExec just installed (a plain copy, no fork
+// lock) passes its self-check, its first run, while other goroutines fork (each
+// one's exec is the others' fork): a run refused as busy is tried again, never
+// failed. No temp file is left behind. Each source is written the unlocked way
 // (writeMode), as the extraction does; the run is of the copy.
-func TestCopyExecRunsUnderParallelForks(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("shell scripts")
-	}
-	const script = "#!/bin/sh\nexit 0\n"
-	dir := t.TempDir()
-	var wg sync.WaitGroup
-	for i := range 4 {
-		wg.Go(func() {
-			src := filepath.Join(dir, "src"+string(rune('a'+i)))
-			p := filepath.Join(dir, "tool"+string(rune('a'+i)))
-			for range 5 {
-				if _, err := writeMode(src, strings.NewReader(script), 0o644); err != nil {
-					t.Error(err)
-					return
-				}
-				if err := copyExec(src, p); err != nil {
-					t.Error(err)
-					return
-				}
-				if err := exec.Command(p).Run(); err != nil { //nolint:gosec // the test's own tool
-					t.Error(err)
-					return
-				}
-				_ = os.Remove(p)
-				_ = os.Remove(src)
-			}
-		})
-	}
-	wg.Wait()
+func TestCopyExecSelfCheckUnderParallelForks(t *testing.T) {
+	dir := forktest.Run(t, func(p string) (string, error) {
+		src := p + ".src"
+		if _, err := writeMode(src, strings.NewReader(forktest.Script), 0o644); err != nil {
+			return "", err
+		}
+		defer func() { _ = os.Remove(src) }()
+		return p, copyExec(src, p)
+	}, func(p string) error {
+		return runSelfCheck(context.Background(), p, nil, 10*time.Second, discard())
+	})
 	if left, _ := os.ReadDir(dir); len(left) != 0 {
 		t.Errorf("%d files left behind, first %q", len(left), left[0].Name())
 	}

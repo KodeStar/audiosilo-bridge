@@ -122,21 +122,21 @@ internal/
             floor + .meta sidecar + atomic rename). LocateBinary is the shared
             no-download lookup. A missing artifact degrades gracefully (the stage
             parks/fails that book; the daemon keeps working).
-            A downloaded binary's first run never fails with ETXTBSY (bridge#12):
-            extraction (writeMode) writes unlocked; ffmpeg/ffprobe, copied out of
-            the temp extract dir anyway, are copied under the fork lock (copyExec,
-            execfile.CreateTemp) into the file renamed into place, so no child ever
-            holds them open for writing; whisper-cli (over 1 GB for CUDA, too big
-            to hold every fork for or to copy twice) is chmodded where it was
-            extracted, and runSelfCheck, every downloaded tool's first run, retries
-            a run refused as busy (busyRetries) until the child forked mid-write
-            has exec'd.
-  execfile/ writes files the process will exec with syscall.ForkLock held for
-            reading from open to close, so a concurrent fork can't hold the write
-            descriptor and make the exec fail with ETXTBSY (WriteFile, CreateTemp).
-            A leaf; toolfetch and every test's fake tool use it (it replaced the
-            test-only testexe). Keep the locked write a quick local copy, never a
-            download or a 1 GB binary: every fork in the process waits for it.
+            A downloaded binary's first run never fails with ETXTBSY (bridge#12,
+            #16): every tool is written unlocked (writeMode; ffmpeg/ffprobe copied
+            out of the temp extract dir by copyExec, a plain atomic copy;
+            whisper-cli chmodded where it was extracted), and runSelfCheck, every
+            downloaded tool's first run, retries a run refused as busy
+            (busyRetries) until the child forked mid-write has exec'd. No install
+            holds the fork lock: every fork in the process would wait for it.
+  execfile/ writes files the process will exec at once with syscall.ForkLock
+            held for reading from open to close, so a concurrent fork can't hold
+            the write descriptor and make the exec fail with ETXTBSY (WriteFile).
+            A leaf; every test's fake tool uses it (it replaced the test-only
+            testexe). Keep the locked write small, never a download or a large
+            binary: every fork in the process waits for it. fsutil.WriteFileAtomic
+            is not fork-safe for an executable run at once. execfile/forktest is
+            the shared fork-stress test (execfile's and toolfetch's).
   audio/    the mechanical audio stages: Inspect (ffprobe -> probe.json + normalized
             manifest.json; marker parsing + contiguity ported from audio_extract.py;
             single-file marker books AND multi-file "files" books) and Split (ffmpeg

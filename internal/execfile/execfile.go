@@ -1,7 +1,7 @@
-// Package execfile writes files this process is about to exec (a downloaded
-// ffmpeg or ffprobe, a test's fake tool) so a concurrent fork can't make them
-// busy. whisper-cli is too big to write this way; toolfetch's self-check
-// retries its first run instead.
+// Package execfile writes files this process is about to exec at once (a test's
+// fake tool) so a concurrent fork can't make them busy. The tools toolfetch
+// downloads are written plainly instead: their first run is its self-check,
+// which retries a run refused as busy (bridge#16).
 //
 // Writing an executable while another goroutine forks is racy: a child forked
 // between the write's open and its close inherits the write descriptor and
@@ -9,12 +9,14 @@
 // ETXTBSY ("text file busy"). os/exec forks holding syscall.ForkLock for
 // writing, so holding it for reading from the open to the close means no fork
 // can happen while the descriptor exists (bridge#12). Every fork in the process
-// waits while it is held, so the writes here should be quick local copies, never
-// a download.
+// waits while it is held, so the writes here should be small, never a download
+// or a copy of a large binary.
+//
+// fsutil.WriteFileAtomic with an executable mode is NOT fork-safe in this way:
+// a file it writes that is run at once belongs here.
 package execfile
 
 import (
-	"io"
 	"os"
 	"syscall"
 )
@@ -25,23 +27,4 @@ func WriteFile(path string, data []byte, perm os.FileMode) error {
 	syscall.ForkLock.RLock()
 	defer syscall.ForkLock.RUnlock()
 	return os.WriteFile(path, data, perm)
-}
-
-// CreateTemp copies r into a new file made by os.CreateTemp(dir, pattern) with
-// no fork while the file is open, and returns its name. The file is closed on
-// return; on an error after it was made, the name is still returned so the
-// caller can remove it. r should be local (a staged file), since forks wait for
-// the copy.
-func CreateTemp(dir, pattern string, r io.Reader) (string, error) {
-	syscall.ForkLock.RLock()
-	defer syscall.ForkLock.RUnlock()
-	f, err := os.CreateTemp(dir, pattern)
-	if err != nil {
-		return "", err
-	}
-	_, err = io.Copy(f, r)
-	if cerr := f.Close(); err == nil {
-		err = cerr
-	}
-	return f.Name(), err
 }
