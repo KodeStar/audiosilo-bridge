@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { remainingRequired, setupItems, setupLink } from './setup';
+import { ASR_WAITING, remainingRequired, setupItems, setupLink, setupLinks } from './setup';
 import { setupFixture } from '@/test/fixtures';
 
 describe('setup', () => {
@@ -10,6 +10,21 @@ describe('setup', () => {
     expect(setupLink('budget')?.hash).toBe('#/settings');
     expect(setupLink('libraries')).toEqual({ hash: '#/libraries', name: 'Libraries' });
     expect(setupLink('paired')).toBeNull();
+  });
+
+  it('links Workers first while speech recognition waits for a worker', () => {
+    expect(setupLinks({ id: 'asr', detail: ASR_WAITING }).map((l) => l.name)).toEqual([
+      'Workers',
+      'Settings',
+    ]);
+    expect(setupLinks({ id: 'asr', detail: 'whisper is missing' }).map((l) => l.name)).toEqual([
+      'Settings',
+    ]);
+    // The words only mean a wait on the asr item.
+    expect(setupLinks({ id: 'budget', detail: ASR_WAITING }).map((l) => l.name)).toEqual([
+      'Settings',
+    ]);
+    expect(setupLinks({ id: 'paired' })).toEqual([]);
   });
 
   it('counts the required items left, never the optional one', () => {

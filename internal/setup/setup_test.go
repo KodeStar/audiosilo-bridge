@@ -71,7 +71,7 @@ func TestChecklistMissing(t *testing.T) {
 	if a := item(t, s, ItemAgent); a.Done || !strings.Contains(a.Detail, "Accounts tab") {
 		t.Fatalf("agent = %+v", a)
 	}
-	if a := item(t, s, ItemASR); a.Done || a.Detail != "waiting for an ASR worker" {
+	if a := item(t, s, ItemASR); a.Done || a.Detail != "waiting for an ASR worker" { // the page matches these words
 		t.Fatalf("asr = %+v", a)
 	}
 	if b := item(t, s, ItemBudget); b.Done || b.Detail != "$12.50 a month" {

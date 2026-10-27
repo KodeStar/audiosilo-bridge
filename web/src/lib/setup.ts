@@ -30,9 +30,33 @@ export function remainingRequired(setup: Setup | null | undefined): number {
   return setupItems(setup).filter((it) => it.required && !it.done).length;
 }
 
-// setupLink is where an item is done: its tab's hash and name (null: here).
-export function setupLink(id: SetupItemId): { hash: string; name: string } | null {
-  const tab = SETUP_ITEMS[id].tab;
+// ASR_WAITING is the asr item's detail while the engine waits for an ASR worker
+// (the Bridge's setup.DetailASRWaiting): the usual fix is a worker, not a setting.
+export const ASR_WAITING = 'waiting for an ASR worker';
+
+export interface SetupLink {
+  hash: string;
+  name: string;
+}
+
+function tabLink(tab: TabId | null): SetupLink | null {
   const name = TABS.find((t) => t.id === tab)?.label;
   return tab && name ? { hash: `#/${tab}`, name } : null;
+}
+
+// setupLink is where an item is done: its tab's hash and name (null: here).
+export function setupLink(id: SetupItemId): SetupLink | null {
+  return tabLink(SETUP_ITEMS[id].tab);
+}
+
+// setupLinks are the links an item not done shows: its tab, and for speech
+// recognition waiting for a worker the Workers tab first.
+export function setupLinks(item: Pick<SetupItem, 'detail'> & { id: SetupItemId }): SetupLink[] {
+  const own = setupLink(item.id);
+  const links = own ? [own] : [];
+  if (item.id === 'asr' && item.detail === ASR_WAITING) {
+    const workers = tabLink('workers');
+    if (workers) links.unshift(workers);
+  }
+  return links;
 }

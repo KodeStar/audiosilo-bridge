@@ -65,6 +65,27 @@ describe('StatusTab', () => {
     expect(within(card).getByText('Speech recognition')).toBeInTheDocument();
   });
 
+  it('links Workers while speech recognition waits for a worker', async () => {
+    mockFetch({
+      'GET /api/engine': { body: engineFixture() },
+      'GET /api/status': {
+        body: pairedStatus({
+          setup_complete: false,
+          setup: setupFixture({ asr: { done: false, detail: 'waiting for an ASR worker' } }),
+        }),
+      },
+    });
+    render(<StatusTab client={api()} />);
+    const card = await screen.findByRole('region', { name: 'Get set up' });
+    const links = within(card)
+      .getAllByRole('link')
+      .map((a) => [a.textContent, a.getAttribute('href')]);
+    expect(links).toEqual([
+      ['Open Workers', '#/workers'],
+      ['Open Settings', '#/settings'],
+    ]);
+  });
+
   it('shows no "Get set up" card once set up, the optional GitHub item aside', async () => {
     mockFetch({
       'GET /api/engine': { body: engineFixture() },
