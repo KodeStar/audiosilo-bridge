@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { checkCredential, fromText, githubState, minutesLeft, savedText } from './accounts';
+import {
+  checkCredential,
+  elsewhereBadge,
+  fromText,
+  githubState,
+  minutesLeft,
+  savedText,
+} from './accounts';
 import { accountsFixture } from '@/test/fixtures';
 
 describe('accounts', () => {
@@ -16,6 +23,12 @@ describe('accounts', () => {
         pending: { user_code: 'AB', verification_uri: 'u', expires_at: '' },
       }),
     ).toBe('pending');
+    // Signed in through gh or the environment, not on this page.
+    expect(githubState({ ...g, from: 'gh', can_contribute: true })).toBe('elsewhere');
+    expect(githubState({ ...g, from: 'env', can_contribute: true })).toBe('elsewhere');
+    expect(githubState({ ...g, available: false, from: 'gh' })).toBe('elsewhere');
+    expect(elsewhereBadge('gh')).toBe('Signed in (gh)');
+    expect(elsewhereBadge('env')).toBe('Signed in (environment)');
   });
 
   it("says where a contribution's token comes from", () => {
