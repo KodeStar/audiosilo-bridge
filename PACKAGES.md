@@ -1467,7 +1467,7 @@ internal/
             work-dir names, file names and counts carry; its phrases still come
             first (agent's own "refused the credential" among them). handleIncident records no row for an observe decision left for
             approval when the book's newest supervisor run is that same observation
-            of the same incident family (unchangedObservation, sameIncidentFamily:
+            of the same incident family (unchangedObservation: its incidentKey under that run's stage run;
             kind, book, stage and fingerprint, any stage run), so a park that
             resumes itself every 30 minutes and parks again the same way (a refused
             credential) is recorded once, not once per resume.
@@ -1980,7 +1980,7 @@ internal/
             it reads and checks it again only when pipeline.DetectedStamp (local stats
             of chapters_detected.json and the manifest) changed since the last look,
             so the poll it runs on costs a stat or two (checked against the book's
-            audio where the job finds it now, run.audioFile; one that can't be
+            audio where the job finds it now, markersFile; one that can't be
             looked at is not current and asked again at the next look, never kept
             so); chaptersJSON composes the file
             at each write, from the book's files and path as they are then (the server

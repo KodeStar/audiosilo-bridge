@@ -946,25 +946,3 @@ func TestUnchangedObservationIsRecordedOnce(t *testing.T) {
 		t.Fatalf("after another decision, rows = %d, want 4", len(got))
 	}
 }
-
-// sameIncidentFamily takes an incident key for i's family whatever its stage run,
-// and nothing else.
-func TestSameIncidentFamily(t *testing.T) {
-	i := Incident{Kind: IncidentParkedRecovery, BookID: 7, Stage: "fact_pass", StageRunID: 9, Fingerprint: "abc"}
-	if !sameIncidentFamily(incidentKey(i), i) {
-		t.Fatal("its own key")
-	}
-	other := i
-	other.StageRunID = 12
-	if !sameIncidentFamily(incidentKey(other), i) {
-		t.Fatal("another stage run of the same failure")
-	}
-	for _, key := range []string{
-		"parked_recovery/7/fact_pass/9/abd", "parked_recovery/8/fact_pass/9/abc", "parked_recovery/7/auditing/9/abc",
-		"unclassified/7/fact_pass/9/abc", "parked_recovery/7/fact_pass/x/abc", "parked_recovery/7/fact_pass//abc", "",
-	} {
-		if sameIncidentFamily(key, i) {
-			t.Fatalf("%q taken for %s", key, incidentKey(i))
-		}
-	}
-}

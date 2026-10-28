@@ -491,13 +491,7 @@ func TestDetectionRerunnable(t *testing.T) {
 		}
 	}
 	// The audio file, last written well before inspect probed it (at mod).
-	writeSource := func(body string, mod time.Time) {
-		t.Helper()
-		mustWriteFile(src, body)
-		if err := os.Chtimes(src, mod, mod); err != nil {
-			t.Fatal(err)
-		}
-	}
+	writeSource := func(body string, mod time.Time) { writeFileAt(t, src, body, mod) }
 	before := time.Now().Add(-time.Hour)
 	writeSource("the audio", before)
 	work := filepath.Join(dir, "work")
@@ -584,15 +578,7 @@ func TestTranscriptionContinuable(t *testing.T) {
 	dir := t.TempDir()
 	src := filepath.Join(dir, "book.m4b")
 	before := time.Now().Add(-time.Hour)
-	writeSource := func(body string, mod time.Time) {
-		t.Helper()
-		if err := os.WriteFile(src, []byte(body), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Chtimes(src, mod, mod); err != nil {
-			t.Fatal(err)
-		}
-	}
+	writeSource := func(body string, mod time.Time) { writeFileAt(t, src, body, mod) }
 	writeSource("the audio", before)
 	work := filepath.Join(dir, "work")
 	if err := os.MkdirAll(work, 0o750); err != nil {
@@ -664,15 +650,7 @@ func TestDetectedChaptersCheckCurrent(t *testing.T) {
 	dir := t.TempDir()
 	src := filepath.Join(dir, "book.m4b")
 	before := time.Now().Add(-time.Hour).Truncate(time.Second)
-	writeSource := func(path, body string, mod time.Time) {
-		t.Helper()
-		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Chtimes(path, mod, mod); err != nil {
-			t.Fatal(err)
-		}
-	}
+	writeSource := func(path, body string, mod time.Time) { writeFileAt(t, path, body, mod) }
 	writeSource(src, "the audio", before)
 	work := filepath.Join(dir, "work")
 	if err := os.MkdirAll(work, 0o750); err != nil {
@@ -749,5 +727,16 @@ func TestDetectedChaptersCheckCurrent(t *testing.T) {
 	writeSource(src, "another encode", before)
 	if ok, _ := (DetectedChapters{ManifestSHA: fp}).CheckCurrent(work, ""); ok {
 		t.Fatal("a legacy list with no size passed a file of another size than the probe's")
+	}
+}
+
+// writeFileAt writes body to path and sets its modification time to mod.
+func writeFileAt(t *testing.T, path, body string, mod time.Time) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, mod, mod); err != nil {
+		t.Fatal(err)
 	}
 }

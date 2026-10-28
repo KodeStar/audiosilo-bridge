@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -58,46 +59,30 @@ func ErrorFingerprint(message string) string {
 // duration).
 var statusPattern = regexp.MustCompile(`\b(?:status(?:[ _]?code)?|http(?:/\d(?:\.\d)?)?|error(?:[ _]?code)?|code)["']?\s*[:=]?\s*(\d{3})\b`)
 
-// statusKinds are the status codes classifyError reads, by the incident each is.
-var statusKinds = map[string]IncidentKind{
-	"401": IncidentAuthentication,
-	"429": IncidentRateLimit,
-	"503": IncidentBackendUnavailable,
+// errorKinds are the incidents classifyError reads, in the order it tries them:
+// each by its phrases, then by its status code (statusPattern). "refused the
+// credential" is agent.credentialRefused's own wording (whatever the provider said
+// after it).
+var errorKinds = []struct {
+	kind    IncidentKind
+	status  string
+	phrases []string
+}{
+	{IncidentAuthentication, "401", []string{"not logged in", "authentication", "unauthorized", "invalid api key", "refused the credential"}},
+	{IncidentRateLimit, "429", []string{"rate limit", "rate_limit", "too many requests", "overloaded", "usage limit"}},
+	{IncidentBackendUnavailable, "503", []string{"backend unavailable", "cli not found", "not found on path", "connection refused", "service unavailable"}},
 }
 
 func classifyError(message string) IncidentKind {
 	low := strings.ToLower(message)
-	statuses := map[IncidentKind]bool{}
+	statuses := map[string]bool{}
 	for _, m := range statusPattern.FindAllStringSubmatch(low, -1) {
-		if kind, ok := statusKinds[m[1]]; ok {
-			statuses[kind] = true
+		statuses[m[1]] = true
+	}
+	for _, k := range errorKinds {
+		if slices.ContainsFunc(k.phrases, func(sig string) bool { return strings.Contains(low, sig) }) || statuses[k.status] {
+			return k.kind
 		}
-	}
-	// "refused the credential" is agent.credentialRefused's own wording (whatever
-	// the provider said after it).
-	for _, sig := range []string{"not logged in", "authentication", "unauthorized", "invalid api key", "refused the credential"} {
-		if strings.Contains(low, sig) {
-			return IncidentAuthentication
-		}
-	}
-	if statuses[IncidentAuthentication] {
-		return IncidentAuthentication
-	}
-	for _, sig := range []string{"rate limit", "rate_limit", "too many requests", "overloaded", "usage limit"} {
-		if strings.Contains(low, sig) {
-			return IncidentRateLimit
-		}
-	}
-	if statuses[IncidentRateLimit] {
-		return IncidentRateLimit
-	}
-	for _, sig := range []string{"backend unavailable", "cli not found", "not found on path", "connection refused", "service unavailable"} {
-		if strings.Contains(low, sig) {
-			return IncidentBackendUnavailable
-		}
-	}
-	if statuses[IncidentBackendUnavailable] {
-		return IncidentBackendUnavailable
 	}
 	return ""
 }

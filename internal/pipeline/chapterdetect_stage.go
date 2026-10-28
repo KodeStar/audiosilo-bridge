@@ -137,8 +137,8 @@ func DetectedStamp(workDir string) (string, bool) {
 // CurrentFor reports whether d still describes the book in workDir, its audio
 // file at source (CheckCurrent), false when that can't be told.
 func (d DetectedChapters) CurrentFor(workDir, source string) bool {
-	current, err := d.CheckCurrent(workDir, source)
-	return current && err == nil
+	current, _ := d.CheckCurrent(workDir, source)
+	return current
 }
 
 // sourceModSlack is how far the audio file's modification time may be from the
@@ -184,9 +184,7 @@ func (d DetectedChapters) CheckCurrent(workDir, source string) (bool, error) {
 	// No time recorded (a list from before it was, or one written while the file
 	// was out of sight): the file must be the one inspect read.
 	if d.SourceSize <= 0 {
-		if size := audio.ProbedSize(workDir); size <= 0 || info.Size() != size {
-			return false, nil
-		}
+		return inspectedFile(workDir, info), nil
 	}
 	return modifiedBeforeProbe(workDir, info), nil
 }
@@ -381,12 +379,14 @@ const sourceClockSlack = 2 * time.Minute
 // known) and modified no later than probe.json was written, give or take
 // sourceClockSlack (a tag editor adding chapter markers can keep the size).
 func inspectedSource(workDir, source string) bool {
-	size := audio.ProbedSize(workDir)
 	info, err := os.Stat(source)
-	if err != nil || size <= 0 || info.Size() != size {
-		return false
-	}
-	return modifiedBeforeProbe(workDir, info)
+	return err == nil && inspectedFile(workDir, info)
+}
+
+// inspectedFile is inspectedSource for the audio file already looked at (info).
+func inspectedFile(workDir string, info os.FileInfo) bool {
+	size := audio.ProbedSize(workDir)
+	return size > 0 && info.Size() == size && modifiedBeforeProbe(workDir, info)
 }
 
 // modifiedBeforeProbe reports whether the audio file (info) was modified no later

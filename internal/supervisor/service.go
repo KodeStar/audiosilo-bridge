@@ -8,8 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -460,21 +458,14 @@ func (s *Service) unchangedObservation(ctx context.Context, i Incident, d Decisi
 	} else if err != nil {
 		return false, err
 	}
-	return last.State == "approval_required" && last.SelectedAction == string(ActionObserve) &&
-		sameIncidentFamily(last.IncidentKey, i), nil
-}
-
-// sameIncidentFamily reports whether incidentKey (incidentKey's form) names i's
-// incident family: its kind, book, stage and fingerprint, whatever its stage run
-// (store.CountSupervisorIncidentFamily's rule).
-func sameIncidentFamily(key string, i Incident) bool {
-	prefix := fmt.Sprintf("%s/%d/%s/", i.Kind, i.BookID, i.Stage)
-	suffix := "/" + i.Fingerprint
-	if len(key) < len(prefix)+len(suffix) || !strings.HasPrefix(key, prefix) || !strings.HasSuffix(key, suffix) {
-		return false
+	// i's family under the last run's stage run: its key if it was the same family.
+	same := i
+	same.StageRunID = 0
+	if last.StageRunID != nil {
+		same.StageRunID = *last.StageRunID
 	}
-	_, err := strconv.ParseInt(key[len(prefix):len(key)-len(suffix)], 10, 64)
-	return err == nil
+	return last.State == "approval_required" && last.SelectedAction == string(ActionObserve) &&
+		last.IncidentKey == incidentKey(same), nil
 }
 
 func (s *Service) finishRun(ctx context.Context, r store.SupervisorRun) error {

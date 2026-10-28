@@ -127,14 +127,10 @@ func detectedSum(d pipeline.DetectedChapters) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// audioFile is the book's one audio file where the job finds it now (the server
-// moves a job with its book), "" when it can't tell (the manifest's path is then
-// the one looked at).
-func (r *run) audioFile() string {
-	if r.place.full == "" {
-		return ""
-	}
-	if src, err := audio.ResolveSource(r.place.full); err == nil && src.Style == audio.StyleMarkers {
+// markersFile is the one audio file of the book at path (a file, or a folder
+// holding one), "" when it isn't a one-file book or can't be looked at.
+func markersFile(path string) string {
+	if src, err := audio.ResolveSource(path); err == nil && src.Style == audio.StyleMarkers {
 		return src.BookFile
 	}
 	return ""
@@ -161,7 +157,9 @@ func (h *Handler) refreshChapters(r *run, b store.Book) (pipeline.DetectedChapte
 			r.detectedStamp, r.detected, r.detectedOK = stamp, pipeline.DetectedChapters{}, false
 			return pipeline.DetectedChapters{}, false
 		}
-		current, err := d.CheckCurrent(b.WorkDir, r.audioFile())
+		// The audio where the job finds it now (the server moves a job with its
+		// book); the manifest's path when that can't be told.
+		current, err := d.CheckCurrent(b.WorkDir, markersFile(r.place.full))
 		if err != nil {
 			// The audio can't be looked at now (a mount gone for a moment): not
 			// current, and asked again at the next look rather than kept.
@@ -323,8 +321,8 @@ func (h *Handler) continueChapters(ctx context.Context, eng Engine, r *run, old 
 	if r.source != SourceAudio || !continuable(old) {
 		return false, nil
 	}
-	src, err := audio.ResolveSource(old.SourcePath)
-	if err != nil || src.Style != audio.StyleMarkers {
+	bookFile := markersFile(old.SourcePath)
+	if bookFile == "" {
 		return false, nil
 	}
 	release, err := h.holdBook(ctx, old.ID)
@@ -352,7 +350,7 @@ func (h *Handler) continueChapters(ctx context.Context, eng Engine, r *run, old 
 			return false, nil
 		}
 	default:
-		if d, err := pipeline.ReadDetectedChapters(old.WorkDir); err != nil || !d.CurrentFor(old.WorkDir, src.BookFile) {
+		if d, err := pipeline.ReadDetectedChapters(old.WorkDir); err != nil || !d.CurrentFor(old.WorkDir, bookFile) {
 			return false, nil
 		}
 	}
