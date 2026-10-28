@@ -11,6 +11,7 @@ import {
   isSidecars,
   kindLabel,
   parkOf,
+  parkText,
   parseChaptersResult,
   parseDescribeResult,
   parseGenerateResult,
@@ -52,6 +53,23 @@ describe('parks', () => {
     expect(canRetry(jobFixture({ progress: { step: 'x', park: { code: 'x', hint: '' } } }))).toBe(
       false,
     );
+  });
+});
+
+describe('parkText', () => {
+  const park = { code: 'asr_worker_waiting', hint: 'Start a worker.' };
+  const at = (error: string) => generateJobFixture({ error });
+  it('words a park without its code', () => {
+    expect(parkText(at('waiting for a worker'), park)).toBe('waiting for a worker');
+    expect(parkText(at('asr_worker_waiting: waiting for a worker'), park)).toBe(
+      'waiting for a worker',
+    );
+  });
+  it('says nothing when the message is only the code or repeats the hint', () => {
+    expect(parkText(at('asr_worker_waiting'), park)).toBe('');
+    expect(parkText(at('Start a worker.'), park)).toBe('');
+    expect(parkText(at('asr_worker_waiting: Start a worker.'), park)).toBe('');
+    expect(parkText(at(''), park)).toBe('');
   });
 });
 
@@ -113,9 +131,12 @@ describe('descriptions', () => {
     expect(kindLabel('sidecars.generate')).toBe('Characters and recaps');
     expect(kindLabel('podcast.subscribe')).toBe('Following a show');
     expect(kindLabel('podcast.poll')).toBe('Checking a feed');
-    expect(kindLabel('podcast.fetch')).toBe('Fetching episode');
-    expect(kindLabel('podcast.retain')).toBe('Checking retention');
-    expect(kindLabel('bridge.verify')).toBe('');
+    expect(kindLabel('podcast.fetch')).toBe('Fetching an episode');
+    expect(kindLabel('podcast.retain')).toBe('Checking retained episodes');
+    expect(kindLabel('sidecars.contribute')).toBe('Community share');
+    expect(kindLabel('meta.correct')).toBe('Corrections');
+    expect(kindLabel('bridge.verify')).toBe('Verify');
+    expect(kindLabel('some.future.kind')).toBe('');
     expect(kindLabel('constructor')).toBe('');
     expect(kindLabel('__proto__')).toBe('');
     expect(isSidecars(describeJobFixture())).toBe(true);

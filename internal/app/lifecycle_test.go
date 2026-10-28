@@ -4,21 +4,25 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/kodestar/audiosilo-bridge/internal/api"
 	"github.com/kodestar/audiosilo-bridge/internal/link"
+	"github.com/kodestar/audiosilo-bridge/internal/secrets"
 )
 
 // jobServer is a fuller fake server: every pairing mints a new token and
@@ -291,6 +295,127 @@ func TestPairErrors(t *testing.T) {
 		t.Errorf("a self-signed certificate = %v, want a refusal naming the http:// address", err)
 	}
 }
+
+// A server the Bridge never reached gets a sentence that names the address and
+// says what to use instead, not Go's "dial tcp: lookup ..." chain.
+func TestPairUnreachableIsWorded(t *testing.T) {
+	b, _, err := New(context.Background(), Options{DataDir: t.TempDir(), Version: "0.1.0", Listen: "127.0.0.1:0", Logger: quiet()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = b.db.Close() }()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	closed := "http://" + ln.Addr().String()
+	_ = ln.Close()
+	err = b.Pair(context.Background(), closed+"/", "code")
+	if !errors.Is(err, api.ErrUnreachable) {
+		t.Fatalf("a closed port = %v, want ErrUnreachable", err)
+	}
+	want := "Couldn't reach " + closed + " (nothing answered on that port). Use the server's address"
+	if !strings.Contains(err.Error(), want) || strings.Contains(err.Error(), "dial tcp") {
+		t.Errorf("a closed port = %q, want %q", err, want)
+	}
+}
+
+// pairError words each failure by where it happened. Only a request that got
+// no answer says "Couldn't reach"; a 5xx says the server answered with an
+// error; an answer that can't be used says so; a failure after the server
+// accepted the code says the pairing wasn't saved here and a new code is needed.
+func TestPairErrorWording(t *testing.T) {
+	const addr = "http://audiosilo:8080"
+	wrap := func(e error) error { return &url.Error{Op: "Post", URL: addr + "/api/v1/bridge/pair", Err: e} }
+	cases := []struct {
+		name string
+		err  error
+		kind error
+		want string
+	}{
+		{"no such host", wrap(&net.OpError{Op: "dial", Net: "tcp", Err: &net.DNSError{Err: "no such host", Name: "audiosilo", IsNotFound: true}}), api.ErrUnreachable,
+			"Couldn't reach http://audiosilo:8080 (no such host). Use the server's address as this computer reaches it, like http://192.168.1.10:8080."},
+		{"lookup failed", wrap(&net.DNSError{Err: "server misbehaving", Name: "audiosilo"}), api.ErrUnreachable, "(its name couldn't be looked up)"},
+		{"refused", wrap(&net.OpError{Op: "dial", Net: "tcp", Err: os.NewSyscallError("connect", syscall.ECONNREFUSED)}), api.ErrUnreachable, "(nothing answered on that port)"},
+		{"no route to host", wrap(&net.OpError{Op: "dial", Net: "tcp", Err: os.NewSyscallError("connect", syscall.EHOSTUNREACH)}), api.ErrUnreachable, "(no route to that address)"},
+		{"network unreachable", wrap(&net.OpError{Op: "dial", Net: "tcp", Err: os.NewSyscallError("connect", syscall.ENETUNREACH)}), api.ErrUnreachable, "(no route to that address)"},
+		{"dns timeout", wrap(&net.DNSError{Err: "i/o timeout", IsTimeout: true}), api.ErrUnreachable, "(its name couldn't be looked up)"},
+		{"dial timeout", wrap(&net.OpError{Op: "dial", Net: "tcp", Err: timeoutErr{}}), api.ErrUnreachable, "(it didn't answer in time)"},
+		{"other transport", wrap(errors.New("EOF")), api.ErrUnreachable, "Couldn't reach http://audiosilo:8080: EOF."},
+		{"answer timed out", fmt.Errorf("read: %w", context.DeadlineExceeded), api.ErrUnreachable, "(it didn't answer in time)"},
+		{"5xx", &link.APIError{Status: 500, Message: "database is locked"}, api.ErrUnreachable,
+			"The server at http://audiosilo:8080 answered with an error (500: database is locked). Try again"},
+		{"5xx no message", &link.APIError{Status: 503}, api.ErrUnreachable, "answered with an error (503). Try again"},
+		{"4xx", &link.APIError{Status: 409, Message: "another Bridge is pairing"}, api.ErrRefused, "the server refused the pairing: another Bridge is pairing"},
+		{"bad answer", errors.New("decode the server's answer to POST /api/v1/bridge/pair: unexpected end of JSON input"), api.ErrUnreachable,
+			"The server at http://audiosilo:8080 gave an answer this Bridge couldn't use (decode"},
+		{"not saved", notSaved(errors.New("disk full")), api.ErrFailed,
+			"The server accepted the pairing, but this Bridge couldn't save it (disk full). Fix that (see the Bridge's log), make a new code"},
+		{"code", link.ErrUnauthorized, api.ErrRefused, "The code is wrong, used or expired."},
+	}
+	for _, c := range cases {
+		err := pairError(addr+"/ ", c.err)
+		if !errors.Is(err, c.kind) || !strings.Contains(err.Error(), c.want) || strings.Contains(err.Error(), "Post ") {
+			t.Errorf("%s: %v, want %v %q", c.name, err, c.kind, c.want)
+		}
+		if c.kind != api.ErrUnreachable && strings.Contains(err.Error(), "Couldn't reach") {
+			t.Errorf("%s: %q says Couldn't reach, but the server answered", c.name, err)
+		}
+	}
+	if pairError(addr, nil) != nil {
+		t.Error("pairError(nil) != nil")
+	}
+}
+
+// End to end: a server answering 500, one answering 200 with no usable body,
+// and a pairing the server accepted but this Bridge couldn't save (its
+// database closed) are each worded for where they failed.
+func TestPairAnsweredOrNotSaved(t *testing.T) {
+	b, _, err := New(context.Background(), Options{DataDir: t.TempDir(), Version: "0.1.0", Listen: "127.0.0.1:0", Logger: quiet()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = b.db.Close() }()
+	answer := func(status int, body string) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(status)
+			_, _ = io.WriteString(w, body)
+		}))
+	}
+	failing := answer(http.StatusInternalServerError, `{"error":"boom"}`)
+	defer failing.Close()
+	if err := b.Pair(context.Background(), failing.URL, "code"); !errors.Is(err, api.ErrUnreachable) ||
+		!strings.Contains(err.Error(), "answered with an error (500") || strings.Contains(err.Error(), "Couldn't reach") {
+		t.Errorf("a 500 = %v", err)
+	}
+	garbled := answer(http.StatusOK, `not json`)
+	defer garbled.Close()
+	if err := b.Pair(context.Background(), garbled.URL, "code"); err == nil || !strings.Contains(err.Error(), "couldn't use") {
+		t.Errorf("an unusable answer = %v", err)
+	}
+	ok := answer(http.StatusOK, `{"token":"bt_x","server_id":"s1","server_name":"Home"}`)
+	defer ok.Close()
+	_ = b.db.Close() // saving the pairing fails after the server accepted the code
+	err = b.Pair(context.Background(), ok.URL, "code")
+	if !errors.Is(err, api.ErrFailed) || !strings.Contains(err.Error(), "accepted the pairing, but this Bridge couldn't save it") ||
+		strings.Contains(err.Error(), "Couldn't reach") {
+		t.Errorf("a pairing not saved = %v", err)
+	}
+	if b.conn.Client() != nil {
+		t.Error("a pairing not saved left the Bridge paired")
+	}
+	if tok, _ := b.conn.vault.Get(secrets.ServerToken); tok != "" {
+		t.Error("a pairing not saved kept its token")
+	}
+}
+
+// timeoutErr is a net.Error that timed out.
+type timeoutErr struct{}
+
+func (timeoutErr) Error() string   { return "i/o timeout" }
+func (timeoutErr) Timeout() bool   { return true }
+func (timeoutErr) Temporary() bool { return true }
 
 // failingListener accepts nothing: its Accept fails for good at once.
 type failingListener struct{ net.Listener }

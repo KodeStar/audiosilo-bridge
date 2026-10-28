@@ -11,11 +11,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
-	"sync"
 	"syscall"
 	"testing"
 	"testing/iotest"
@@ -24,6 +22,7 @@ import (
 	"github.com/ulikunitz/xz"
 
 	"github.com/kodestar/audiosilo-bridge/internal/execfile"
+	"github.com/kodestar/audiosilo-bridge/internal/execfile/forktest"
 )
 
 func discard() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
@@ -365,40 +364,76 @@ func TestEnsureDownloadsAndVerifies(t *testing.T) {
 	}
 }
 
-// bridge#12: a tool binary copyExec just installed execs at once while other
-// goroutines fork (each one's exec is the others' fork), never "text file busy",
-// and no temp file is left behind. Each source is written the unlocked way
-// (writeMode), as the extraction does; the run is of the copy.
-func TestCopyExecRunsUnderParallelForks(t *testing.T) {
+// A download that fails still adopts only tools that pass their self-check: a
+// cached one that doesn't run comes back "" (and is removed), one that does is
+// kept. (A failed download can leave a tool copyExec just wrote; its first run
+// must be the self-check, which retries a run refused as busy.)
+func TestEnsureFailedDownloadVerifiesWhatIsCached(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("shell scripts")
+		t.Skip("stub tool is a shell script")
 	}
-	const script = "#!/bin/sh\nexit 0\n"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "down", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	restore := platformSpec
+	platformSpec = func(string, string) (spec, bool) {
+		return spec{combinedURL: srv.URL, combinedKind: "tar.xz"}, true
+	}
+	defer func() { platformSpec = restore }()
+
 	dir := t.TempDir()
-	var wg sync.WaitGroup
-	for i := range 4 {
-		wg.Go(func() {
-			src := filepath.Join(dir, "src"+string(rune('a'+i)))
-			p := filepath.Join(dir, "tool"+string(rune('a'+i)))
-			for range 5 {
-				if _, err := writeMode(src, strings.NewReader(script), 0o644); err != nil {
-					t.Error(err)
-					return
-				}
-				if err := copyExec(src, p); err != nil {
-					t.Error(err)
-					return
-				}
-				if err := exec.Command(p).Run(); err != nil { //nolint:gosec // the test's own tool
-					t.Error(err)
-					return
-				}
-				_ = os.Remove(p)
-				_ = os.Remove(src)
-			}
-		})
+	broken := filepath.Join(dir, binName("ffmpeg"))
+	if err := execfile.WriteFile(broken, []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
 	}
-	wg.Wait()
+	fm, fp := ensure(context.Background(), dir, discard())
+	if fm != "" || fp != "" {
+		t.Fatalf("a failed download with a broken cached ffmpeg = %q,%q, want none", fm, fp)
+	}
+	if _, err := os.Stat(broken); !os.IsNotExist(err) {
+		t.Errorf("the broken ffmpeg was kept: %v", err)
+	}
+
+	good := fakeTool(t, dir, "ffmpeg")
+	if fm, _ := ensure(context.Background(), dir, discard()); fm != good {
+		t.Fatalf("a failed download with a working cached ffmpeg = %q, want %q", fm, good)
+	}
+}
+
+// A self-check cut short by shutdown keeps the tool: a cancelled context says
+// nothing about the file (ensure checks what a cancelled download left).
+func TestVerifiedKeepsToolWhenCancelled(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("stub tool is a shell script")
+	}
+	good := fakeTool(t, t.TempDir(), "ffmpeg")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if got := verified(ctx, good, discard()); got != "" {
+		t.Fatalf("verified with a cancelled context = %q, want \"\"", got)
+	}
+	if _, err := os.Stat(good); err != nil {
+		t.Errorf("the tool was removed: %v", err)
+	}
+}
+
+// bridge#12/#16: a tool binary copyExec just installed (a plain copy, no fork
+// lock) passes its self-check, its first run, while other goroutines fork (each
+// one's exec is the others' fork): a run refused as busy is tried again, never
+// failed. No temp file is left behind. Each source is written the unlocked way
+// (writeMode), as the extraction does; the run is of the copy.
+func TestCopyExecSelfCheckUnderParallelForks(t *testing.T) {
+	dir := forktest.Run(t, func(p string) (string, error) {
+		src := p + ".src"
+		if _, err := writeMode(src, strings.NewReader(forktest.Script), 0o644); err != nil {
+			return "", err
+		}
+		defer func() { _ = os.Remove(src) }()
+		return p, copyExec(src, p)
+	}, func(p string) error {
+		return runSelfCheck(context.Background(), p, nil, 10*time.Second, discard())
+	})
 	if left, _ := os.ReadDir(dir); len(left) != 0 {
 		t.Errorf("%d files left behind, first %q", len(left), left[0].Name())
 	}

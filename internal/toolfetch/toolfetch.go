@@ -49,8 +49,6 @@ import (
 	"time"
 
 	"github.com/ulikunitz/xz"
-
-	"github.com/kodestar/audiosilo-bridge/internal/execfile"
 )
 
 // maxToolBytes caps a single extracted binary and the compressed download itself
@@ -210,7 +208,10 @@ func ensure(ctx context.Context, dir string, log *slog.Logger) (ffmpeg, ffprobe 
 	log.Info("ffmpeg/ffprobe not found locally - downloading a static build (one time)", "into", dir)
 	if err := download(ctx, s, dir); err != nil {
 		log.Warn("ffmpeg auto-download failed; running without it (will retry next start)", "err", err)
-		return cached(dir)
+		// A download that failed part way may have copied one tool in already:
+		// its first run is still the self-check (copyExec holds no fork lock).
+		ffmpeg, ffprobe = cached(dir)
+		return verified(ctx, ffmpeg, log), verified(ctx, ffprobe, log)
 	}
 	ffmpeg, ffprobe = cached(dir)
 	// Adopt only binaries that actually run on this machine.
@@ -223,8 +224,8 @@ func ensure(ctx context.Context, dir string, log *slog.Logger) (ffmpeg, ffprobe 
 }
 
 // busyRetries are runSelfCheck's waits before each new try of a run that failed
-// with ETXTBSY ("text file busy", Linux): a binary extracted without the fork
-// lock (whisper-cli) can still be open for writing in a child another goroutine
+// with ETXTBSY ("text file busy", Linux): a binary written without the fork
+// lock (all of them) can still be open for writing in a child another goroutine
 // forked mid-write, until that child execs (bridge#12). A var so a test can
 // shorten it.
 var busyRetries = []time.Duration{50 * time.Millisecond, 100 * time.Millisecond, 200 * time.Millisecond, 400 * time.Millisecond, 800 * time.Millisecond}
@@ -271,7 +272,11 @@ func verified(ctx context.Context, path string, log *slog.Logger) string {
 		return ""
 	}
 	if runSelfCheck(ctx, path, []string{"-version"}, 15*time.Second, log) != nil {
-		_ = os.Remove(path)
+		// A check cut short by shutdown (a download cancelled part way) says
+		// nothing about the file: keep it for the next start to check.
+		if ctx.Err() == nil {
+			_ = os.Remove(path)
+		}
 		return ""
 	}
 	return path
@@ -457,38 +462,24 @@ func safeEntryName(name string) bool {
 	return true
 }
 
-// copyExec installs the local file src at dst as an executable (0o755), the
-// way a binary that is about to be run must be written (bridge#12): the bytes
-// go into a sibling temp file through execfile, so no fork happens while it is
-// open for writing, and it is renamed into place only after a clean close. A
-// goroutine forking while src itself was being written (a slow download or a
-// decompression, done unlocked) holds only src's descriptor, so the file at dst
-// is never open for writing in a child when it is exec'd (ETXTBSY). src is
-// copied whole (its extraction enforced the size cap). Every fork waits for the
-// copy, so it is for ffmpeg and ffprobe, which are copied out of the temp
-// extract dir anyway, never for whisper-cli (see installWhisperAsset).
+// copyExec installs the local file src at dst as an executable (0o755): a
+// plain atomic copy (writeExec), the way ffmpeg and ffprobe leave the temp
+// extract dir. It holds no fork lock (bridge#16: holding every fork in the
+// process for a 100 MB copy bought nothing): a child forked mid-copy may hold
+// dst open for writing until it execs, and verified's runSelfCheck, the tool's
+// first run, retries a run refused as busy (ETXTBSY) until it has. src is
+// copied whole (its extraction enforced the size cap).
 func copyExec(src, dst string) error {
 	in, err := os.Open(src) //nolint:gosec // src is a path inside our own temp extract dir
 	if err != nil {
 		return err
 	}
 	defer func() { _ = in.Close() }()
-	tmp, err := execfile.CreateTemp(filepath.Dir(dst), ".exec-"+filepath.Base(dst)+"-", in)
-	if tmp != "" {
-		defer func() { _ = os.Remove(tmp) }() // no-op once renamed into place
-	}
-	if err != nil {
-		return err
-	}
-	if err := os.Chmod(tmp, 0o755); err != nil { //nolint:gosec // a tool binary must be executable
-		return err
-	}
-	return os.Rename(tmp, dst)
+	return writeExec(dst, in)
 }
 
-// writeExec writes r to path as an executable (0o755). It is the common case of
-// writeMode for a tool binary that is copied into place (copyExec) before it
-// is run.
+// writeExec writes r to path as an executable (0o755): writeMode for a tool
+// binary, whose first run is runSelfCheck.
 func writeExec(path string, r io.Reader) error {
 	_, err := writeMode(path, r, 0o755)
 	return err
@@ -501,9 +492,8 @@ func writeExec(path string, r io.Reader) error {
 // whole one). perm lets a caller preserve an archive entry's own mode (an
 // executable binary vs a plain shared library beside it). It returns the byte
 // count written so budget-enforcing callers can detect an over-cap entry. It
-// holds no fork lock: a binary it writes is either copied into place by copyExec
-// before it runs (ffmpeg, ffprobe) or first run by runSelfCheck, which retries a
-// run refused as busy (whisper-cli).
+// holds no fork lock: every binary it writes (ffmpeg, ffprobe, whisper-cli) is
+// first run by runSelfCheck, which retries a run refused as busy.
 func writeMode(path string, r io.Reader, perm os.FileMode) (int64, error) {
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".partial-"+filepath.Base(path)+"-")
 	if err != nil {

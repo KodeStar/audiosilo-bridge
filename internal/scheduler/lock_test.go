@@ -196,7 +196,7 @@ func TestCorrectiveRetranscriptionHasPriorityInSerialASRLane(t *testing.T) {
 			<-done
 			t.Fatalf("first ASR stage = %s, want corrective retranscription", stage)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(waitLimit):
 		cancel()
 		<-done
 		t.Fatal("timed out waiting for corrective retranscription")
@@ -357,7 +357,7 @@ func TestCancelledPredecessorDoesNotBlockLaterVolume(t *testing.T) {
 			}
 		}
 		return false
-	}, 10*time.Second)
+	}, waitLimit)
 	for _, b := range books {
 		if b.ID == b2.ID && b.State != string(state.Done) {
 			t.Fatalf("vol-2 stuck behind the cancelled vol-1: state=%s status=%q", b.State, b.Status)
@@ -435,7 +435,7 @@ func TestParkedSeriesDoesNotDeadlockOtherSeries(t *testing.T) {
 		}
 		return x1Parked && freeDone
 	}
-	books := runUntil(t, db, h.hub, exec, 2, pred, 20*time.Second)
+	books := runUntil(t, db, h.hub, exec, 2, pred, waitLimit)
 
 	var x1, x2, freeb store.Book
 	for _, b := range books {

@@ -25,6 +25,11 @@ const (
 	ItemGitHub    = "github"
 )
 
+// DetailASRWaiting is the asr item's detail while the engine waits for an ASR
+// worker (asr.worker_fallback: wait). The page matches it (web/src/lib/setup.ts)
+// to link the Workers tab, so keep the words stable.
+const DetailASRWaiting = "waiting for an ASR worker"
+
 // maxDetail bounds an item's detail (the server keeps 256 characters).
 const maxDetail = 200
 
@@ -112,7 +117,7 @@ func Checklist(in Inputs) link.Setup {
 	case in.ASR.Remote && asrDone:
 		asrDetail = "worker"
 	case in.ASR.Waiting:
-		asrDetail = "waiting for an ASR worker"
+		asrDetail = DetailASRWaiting
 	case !asrDone:
 		asrDetail = firstNonEmpty(in.ASR.Detail, "speech recognition isn't available")
 	}

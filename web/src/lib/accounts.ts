@@ -35,13 +35,22 @@ export function fromText(from: TokenFrom): string {
   }
 }
 
-// GitHubState is what the GitHub card shows.
-export type GitHubState = 'unavailable' | 'pending' | 'refused' | 'signed_in' | 'signed_out';
+// GitHubState is what the GitHub card shows. 'elsewhere' is a Bridge that
+// shares through the gh command's sign-in or AUDIOSILO_BRIDGE_GITHUB_TOKEN
+// without this page's sign-in: it is signed in, just not here.
+export type GitHubState =
+  'unavailable' | 'pending' | 'refused' | 'signed_in' | 'elsewhere' | 'signed_out';
 
 export function githubState(g: GitHubAccount): GitHubState {
   if (g.pending) return 'pending';
   if (g.signed_in) return g.refused ? 'refused' : 'signed_in';
+  if (g.from === 'gh' || g.from === 'env') return 'elsewhere';
   return g.available ? 'signed_out' : 'unavailable';
+}
+
+// elsewhereBadge names the sign-in an 'elsewhere' Bridge shares through.
+export function elsewhereBadge(from: TokenFrom): string {
+  return from === 'env' ? 'Signed in (environment)' : 'Signed in (gh)';
 }
 
 // minutesLeft is how long a sign-in code stays good, in whole minutes (0 when

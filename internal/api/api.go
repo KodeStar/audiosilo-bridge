@@ -182,6 +182,9 @@ var (
 	ErrConflict    = errors.New("conflict")                    // 409
 	ErrLocked      = errors.New("set by the environment")      // 409, code locked
 	ErrUnreachable = errors.New("the server can't be reached") // 502
+	// ErrFailed is a local failure whose sentence the page shows (500), for an
+	// error the owner can act on rather than a bare "... failed".
+	ErrFailed = errors.New("failed") // 500
 )
 
 // kindError is a Backend error of one of the kinds above whose message is the
@@ -370,7 +373,8 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, v any) bool {
 }
 
 // writeBackendError maps a Backend error; the message of a typed one is the
-// Backend's sentence, anything else a 500 that is logged, never echoed.
+// Backend's sentence, anything else a 500 that is logged and echoed only when
+// it is an ErrFailed one.
 func (a *API) writeBackendError(w http.ResponseWriter, err error, op string) {
 	msg := err.Error()
 	switch {
@@ -387,8 +391,12 @@ func (a *API) writeBackendError(w http.ResponseWriter, err error, op string) {
 	case errors.Is(err, ErrUnreachable):
 		writeError(w, http.StatusBadGateway, msg)
 	default:
+		// A 500 is logged; only an ErrFailed one shows its sentence.
 		a.log.Warn("bridge page: "+op+" failed", "err", err)
-		writeError(w, http.StatusInternalServerError, op+" failed")
+		if !errors.Is(err, ErrFailed) {
+			msg = op + " failed"
+		}
+		writeError(w, http.StatusInternalServerError, msg)
 	}
 }
 
@@ -439,6 +447,10 @@ func (a *API) handlePassword(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, auth.ErrInvalidCreds):
 		// 403, not 401: the session is fine, and a 401 signs the page out.
 		writeError(w, http.StatusForbidden, "the current password is wrong")
+	case errors.Is(err, auth.ErrPasswordReplaced):
+		// The current password was right, but a reset (or another change)
+		// replaced it while this change ran, and nothing was changed.
+		writeError(w, http.StatusConflict, "the password was changed or reset meanwhile: sign in with the new one")
 	case errors.Is(err, auth.ErrPasswordTooShort):
 		writeError(w, http.StatusBadRequest, "the new password needs at least "+strconv.Itoa(auth.MinPasswordLen)+" characters")
 	default:

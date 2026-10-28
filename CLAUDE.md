@@ -129,7 +129,7 @@ internal/
   -- the engine (from audiosilo-sidecars; app/engine.go runs it) --
   toolfetch/ audio/ asr/ transcript/ ebook/ scratch/ qa/ spelling/ agent/ repair/
   pipeline/ contrib/ state/ eta/ scheduler/ supervisor/ metaops/ events/ pricing/ fsutil/
-  execfile/ (fork-safe executable writes, a leaf; toolfetch and the tests' fake tools)
+  execfile/ (fork-safe executable writes, a leaf; the tests' fake tools)
   chapterdetect/ (Phase 1d: chapters from the narration; pure, imported by pipeline)
 web/          the page: Vite + React 19 + TS + Tailwind v4; pure logic in src/lib
 docker/       entrypoint.sh (own /bridge-data, umask 022, drop to PUID:PGID)

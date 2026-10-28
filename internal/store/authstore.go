@@ -74,6 +74,20 @@ func (a *AuthStore) RemoveSession(tokenHash string) error {
 	return err
 }
 
+// CreatePassword stores passwordHash and deletes every session in one
+// transaction, only while no password is stored: the first start's EnsureAdmin
+// (bridge#16). The check and the write are one statement (an upsert that
+// updates only an empty value), so a reset-password process that committed a
+// password first is never overwritten; it reports false, changing nothing.
+func (a *AuthStore) CreatePassword(passwordHash string) (bool, error) {
+	return a.swapPassword("", func(tx *sql.Tx) (sql.Result, error) {
+		return tx.ExecContext(a.ctx,
+			`INSERT INTO settings (key, value) VALUES (?,?)
+			 ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE settings.value = ''`,
+			authPasswordKey, passwordHash)
+	})
+}
+
 // ReplacePassword stores passwordHash and deletes every session but keepHash's
 // in one transaction (bridge#11): both commit or neither does. The password
 // write comes first, so the transaction holds the write lock from its first
@@ -82,21 +96,31 @@ func (a *AuthStore) RemoveSession(tokenHash string) error {
 // when a reset or another change (possibly the reset-password process) replaced
 // it since, nothing is written and it reports false.
 func (a *AuthStore) ReplacePassword(prevHash, passwordHash, keepHash string) (bool, error) {
+	return a.swapPassword(keepHash, func(tx *sql.Tx) (sql.Result, error) {
+		if prevHash == "" {
+			return nil, setSetting(a.ctx, tx, authPasswordKey, passwordHash)
+		}
+		return tx.ExecContext(a.ctx, `UPDATE settings SET value=? WHERE key=? AND value=?`,
+			passwordHash, authPasswordKey, prevHash)
+	})
+}
+
+// swapPassword is both password writers' transaction: write first (it takes
+// the write lock, so no session is added in between), then, when it wrote,
+// every session but keepHash's is deleted. A write's result must affect exactly
+// one row (a nil result: an unconditional write); otherwise nothing changes and
+// it reports false.
+func (a *AuthStore) swapPassword(keepHash string, write func(*sql.Tx) (sql.Result, error)) (bool, error) {
 	tx, err := a.db.sql.BeginTx(a.ctx, nil)
 	if err != nil {
 		return false, err
 	}
 	defer func() { _ = tx.Rollback() }() // a no-op once committed
-	if prevHash == "" {
-		if err := setSetting(a.ctx, tx, authPasswordKey, passwordHash); err != nil {
-			return false, err
-		}
-	} else {
-		res, err := tx.ExecContext(a.ctx, `UPDATE settings SET value=? WHERE key=? AND value=?`,
-			passwordHash, authPasswordKey, prevHash)
-		if err != nil {
-			return false, err
-		}
+	res, err := write(tx)
+	if err != nil {
+		return false, err
+	}
+	if res != nil {
 		if n, err := res.RowsAffected(); err != nil || n != 1 {
 			return false, err
 		}

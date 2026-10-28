@@ -122,21 +122,21 @@ internal/
             floor + .meta sidecar + atomic rename). LocateBinary is the shared
             no-download lookup. A missing artifact degrades gracefully (the stage
             parks/fails that book; the daemon keeps working).
-            A downloaded binary's first run never fails with ETXTBSY (bridge#12):
-            extraction (writeMode) writes unlocked; ffmpeg/ffprobe, copied out of
-            the temp extract dir anyway, are copied under the fork lock (copyExec,
-            execfile.CreateTemp) into the file renamed into place, so no child ever
-            holds them open for writing; whisper-cli (over 1 GB for CUDA, too big
-            to hold every fork for or to copy twice) is chmodded where it was
-            extracted, and runSelfCheck, every downloaded tool's first run, retries
-            a run refused as busy (busyRetries) until the child forked mid-write
-            has exec'd.
-  execfile/ writes files the process will exec with syscall.ForkLock held for
-            reading from open to close, so a concurrent fork can't hold the write
-            descriptor and make the exec fail with ETXTBSY (WriteFile, CreateTemp).
-            A leaf; toolfetch and every test's fake tool use it (it replaced the
-            test-only testexe). Keep the locked write a quick local copy, never a
-            download or a 1 GB binary: every fork in the process waits for it.
+            A downloaded binary's first run never fails with ETXTBSY (bridge#12,
+            #16): every tool is written unlocked (writeMode; ffmpeg/ffprobe copied
+            out of the temp extract dir by copyExec, a plain atomic copy;
+            whisper-cli chmodded where it was extracted), and runSelfCheck, every
+            downloaded tool's first run, retries a run refused as busy
+            (busyRetries) until the child forked mid-write has exec'd. No install
+            holds the fork lock: every fork in the process would wait for it.
+  execfile/ writes files the process will exec at once with syscall.ForkLock
+            held for reading from open to close, so a concurrent fork can't hold
+            the write descriptor and make the exec fail with ETXTBSY (WriteFile).
+            A leaf; every test's fake tool uses it (it replaced the test-only
+            testexe). Keep the locked write small, never a download or a large
+            binary: every fork in the process waits for it. fsutil.WriteFileAtomic
+            is not fork-safe for an executable run at once. execfile/forktest is
+            the shared fork-stress test (execfile's and toolfetch's).
   audio/    the mechanical audio stages: Inspect (ffprobe -> probe.json + normalized
             manifest.json; marker parsing + contiguity ported from audio_extract.py;
             single-file marker books AND multi-file "files" books) and Split (ffmpeg
@@ -1031,12 +1031,17 @@ internal/
             opaque SHA-256-hashed session tokens, a per-IP login rate limiter; the
             Store interface is storage-agnostic (MemStore for tests; the SQLite
             store.AuthStore in production - the M0 JSON store was removed in M1).
-            ReplacePassword is the only password writer (the first run, a change, a
-            reset): the new hash and the sign-out in one transaction (bridge#11).
-            A change passes the hash it verified and replaces only that one (an
-            UPDATE ... WHERE value=), so a change racing a reset or another change
-            is refused (ErrInvalidCreds) instead of overwriting it; the first run
-            and a reset replace whatever is stored. AddSession takes the hash the
+            ReplacePassword (a change, a reset) and CreatePassword (the first run)
+            are the only password writers: the new hash and the sign-out in one
+            transaction (bridge#11). A change passes the hash it verified and
+            replaces only that one (an UPDATE ... WHERE value=), so a change racing
+            a reset or another change is refused (ErrPasswordReplaced, the page's
+            409) instead of overwriting it; a reset replaces whatever is stored;
+            the first run's EnsureAdmin creates one only while none is stored (an
+            upsert that updates only an empty value), so a reset-password run
+            that landed first wins and nothing is printed (bridge#16). Each check
+            and write is ONE statement: the two-process race tests
+            (authstore_race_test.go) fail if one is split into a read and a write. AddSession takes the hash the
             sign-in verified and stores the session only while it is still the
             stored one (one INSERT ... WHERE EXISTS), so a sign-in racing a change
             or the reset-password process is refused and leaves no session

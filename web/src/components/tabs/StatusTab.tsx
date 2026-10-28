@@ -6,7 +6,7 @@ import { laneText, onlineText, secretKeyText } from '@/lib/status';
 import { agentText, budgetPercent, budgetText, credentialText, retentionText } from '@/lib/engine';
 import { usd } from '@/lib/generate';
 import { asrText, fallbackText } from '@/lib/workers';
-import { SETUP_ITEMS, remainingRequired, setupItems, setupLink } from '@/lib/setup';
+import { SETUP_ITEMS, remainingRequired, setupItems, setupLinks } from '@/lib/setup';
 import { Ago } from '../ui/Ago';
 import { Card } from '../ui/Card';
 import { Badge } from '../ui/Badge';
@@ -97,7 +97,7 @@ function SetupCard({ status }: { status: Status }) {
     >
       <ul className="flex flex-col divide-y divide-edge">
         {items.map((it) => {
-          const link = setupLink(it.id);
+          const links = it.done ? [] : setupLinks(it);
           return (
             <li key={it.id} className="flex items-start justify-between gap-3 py-2">
               <div className="flex min-w-0 flex-1 items-start gap-2">
@@ -117,13 +117,18 @@ function SetupCard({ status }: { status: Status }) {
                   {it.detail && <p className="text-xs text-dim">{it.detail}</p>}
                 </div>
               </div>
-              {!it.done && link && (
-                <a
-                  href={link.hash}
-                  className="shrink-0 whitespace-nowrap text-sm text-pink-500 underline"
-                >
-                  Open {link.name}
-                </a>
+              {links.length > 0 && (
+                <div className="flex shrink-0 flex-col items-end gap-1">
+                  {links.map((link) => (
+                    <a
+                      key={link.hash}
+                      href={link.hash}
+                      className="whitespace-nowrap text-sm text-pink-500 underline"
+                    >
+                      Open {link.name}
+                    </a>
+                  ))}
+                </div>
               )}
             </li>
           );

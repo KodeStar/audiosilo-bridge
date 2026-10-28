@@ -5,10 +5,12 @@ import (
 	"crypto/tls"
 	"errors"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/kodestar/audiosilo-bridge/internal/api"
@@ -48,7 +50,22 @@ func (b *Bridge) Status() api.Status {
 
 // Pair pairs with the server at serverURL using a code from its console.
 func (b *Bridge) Pair(ctx context.Context, serverURL, code string) error {
-	err := b.conn.Pair(ctx, serverURL, code)
+	return pairError(serverURL, b.conn.Pair(ctx, serverURL, code))
+}
+
+// pairError words a pairing's failure for the page by where it happened: the
+// address, the request never answered (unreachable), the server's answer (a
+// refusal, an older server, a 5xx, one that can't be read), or this Bridge
+// after the server accepted the code.
+func pairError(serverURL string, err error) error {
+	if err == nil {
+		return nil
+	}
+	addr := strings.TrimRight(strings.TrimSpace(serverURL), "/")
+	var apiErr *link.APIError
+	var certErr *tls.CertificateVerificationError
+	var urlErr *url.Error
+	var ns *pairNotSaved
 	switch {
 	case errors.Is(err, link.ErrUnauthorized):
 		return api.Errorf(api.ErrRefused, "The code is wrong, used or expired. Make a new one in the server's console.")
@@ -56,24 +73,68 @@ func (b *Bridge) Pair(ctx context.Context, serverURL, code string) error {
 		return api.Errorf(api.ErrConflict, "%v", err)
 	case errors.Is(err, link.ErrBadAddress):
 		return api.Errorf(api.ErrInvalid, "%v", err)
-	case err != nil:
-		var apiErr *link.APIError
-		var certErr *tls.CertificateVerificationError
-		switch {
-		case errors.As(err, &apiErr) && (apiErr.Status == http.StatusNotFound || apiErr.Status == http.StatusMethodNotAllowed):
-			return api.Errorf(api.ErrRefused, "that server doesn't know about a Bridge (update it to a version with the Bridge)")
-		case errors.As(err, &apiErr) && apiErr.Status < http.StatusInternalServerError:
-			return api.Errorf(api.ErrRefused, "the server refused the pairing: %s", apiErr.Message)
-		case errors.As(err, &certErr):
-			// The server's default certificate is self-signed, which the Bridge
-			// can't trust: on the local network the server also answers plain
-			// HTTP on the same port.
-			return api.Errorf(api.ErrRefused, "the server's certificate isn't trusted (a self-signed one?): "+
-				"pair with its http:// address on your network, for example %s", plainAddress(serverURL))
-		}
-		return api.Errorf(api.ErrUnreachable, "could not reach the server: %v", err)
+	case errors.As(err, &ns):
+		// The code is spent: a new one is needed.
+		return api.Errorf(api.ErrFailed, "The server accepted the pairing, but this Bridge couldn't save it (%v). "+
+			"Fix that (see the Bridge's log), make a new code in the server's console and pair again.", ns.cause)
+	case errors.As(err, &apiErr) && (apiErr.Status == http.StatusNotFound || apiErr.Status == http.StatusMethodNotAllowed):
+		return api.Errorf(api.ErrRefused, "that server doesn't know about a Bridge (update it to a version with the Bridge)")
+	case errors.As(err, &apiErr) && apiErr.Status < http.StatusInternalServerError:
+		return api.Errorf(api.ErrRefused, "the server refused the pairing: %s", apiErr.Message)
+	case errors.As(err, &apiErr):
+		return api.Errorf(api.ErrUnreachable, "The server at %s answered with an error (%d%s). Try again, and if it "+
+			"keeps happening check the server's log.", addr, apiErr.Status, prefixed(": ", apiErr.Message))
+	case errors.As(err, &certErr):
+		// The server's default certificate is self-signed, which the Bridge
+		// can't trust: on the local network the server also answers plain
+		// HTTP on the same port.
+		return api.Errorf(api.ErrRefused, "the server's certificate isn't trusted (a self-signed one?): "+
+			"pair with its http:// address on your network, for example %s", plainAddress(serverURL))
+	case errors.As(err, &urlErr):
+		// The request itself failed: no answer came.
+		return api.Errorf(api.ErrUnreachable, "%s", unreachableText(addr, urlErr.Err))
+	case errors.Is(err, context.DeadlineExceeded):
+		// The answer started but didn't finish in time.
+		return api.Errorf(api.ErrUnreachable, "%s", unreachableText(addr, err))
 	}
-	return nil
+	// An answer came but couldn't be used (not JSON, no token).
+	return api.Errorf(api.ErrUnreachable, "The server at %s gave an answer this Bridge couldn't use (%v). "+
+		"Check the address is the AudioSilo server's, and that it is up to date.", addr, err)
+}
+
+// prefixed is s after sep, or "" for an empty s.
+func prefixed(sep, s string) string {
+	if s == "" {
+		return ""
+	}
+	return sep + s
+}
+
+// unreachableText words a request to addr that got no answer: why in a few
+// words, and what address to use instead. A name the Bridge can't look up is
+// usually a compose service name (http://audiosilo:8080) given to a Bridge
+// that isn't in that compose project.
+func unreachableText(addr string, err error) string {
+	const hint = " Use the server's address as this computer reaches it, like http://192.168.1.10:8080."
+	var dnsErr *net.DNSError
+	var netErr net.Error
+	reason := ""
+	switch {
+	case errors.As(err, &dnsErr) && dnsErr.IsNotFound:
+		reason = "no such host"
+	case errors.As(err, &dnsErr):
+		reason = "its name couldn't be looked up"
+	case errors.Is(err, syscall.ECONNREFUSED):
+		reason = "nothing answered on that port"
+	case errors.Is(err, syscall.EHOSTUNREACH), errors.Is(err, syscall.ENETUNREACH):
+		reason = "no route to that address"
+	case errors.As(err, &netErr) && netErr.Timeout():
+		reason = "it didn't answer in time"
+	}
+	if reason != "" {
+		return "Couldn't reach " + addr + " (" + reason + ")." + hint
+	}
+	return "Couldn't reach " + addr + ": " + err.Error() + "."
 }
 
 // plainAddress is an https server address as http (the same host and port).

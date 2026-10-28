@@ -6,6 +6,7 @@ import {
   KIND_LABELS,
   PENDING_POLL_MS,
   checkCredential,
+  elsewhereBadge,
   fromText,
   githubState,
   minutesLeft,
@@ -54,6 +55,8 @@ interface CardProps {
 function GitHubCard({ client, accounts, onChange }: CardProps) {
   const g = accounts.github;
   const state = githubState(g);
+  // gh already shares; signing in here is optional and switches to the app.
+  const canSignInHere = state === 'elsewhere' && g.from === 'gh' && g.available;
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [warning, setWarning] = useState<string | null>(null);
@@ -89,6 +92,8 @@ function GitHubCard({ client, accounts, onChange }: CardProps) {
   const badge =
     state === 'signed_in' ? (
       <Badge tone="good">Signed in</Badge>
+    ) : state === 'elsewhere' ? (
+      <Badge tone="good">{elsewhereBadge(g.from)}</Badge>
     ) : state === 'refused' ? (
       <Badge tone="bad">Sign in again</Badge>
     ) : state === 'pending' ? (
@@ -109,6 +114,12 @@ function GitHubCard({ client, accounts, onChange }: CardProps) {
           <Notice kind="info">
             AUDIOSILO_BRIDGE_GITHUB_TOKEN is set, and the Bridge uses it before this sign-in.
           </Notice>
+        )}
+        {canSignInHere && (
+          <p className="text-sm text-dim">
+            Sharing already works through the gh command. Signing in here is optional: the Bridge
+            then shares through the AudioSilo Contributions app instead.
+          </p>
         )}
         {state === 'unavailable' && (
           <Notice kind="warn">
@@ -164,6 +175,11 @@ function GitHubCard({ client, accounts, onChange }: CardProps) {
           {(state === 'signed_out' || state === 'refused') && (
             <button type="button" onClick={signIn} disabled={busy} className={primaryButton}>
               {busy ? 'Starting...' : 'Sign in to GitHub'}
+            </button>
+          )}
+          {canSignInHere && (
+            <button type="button" onClick={signIn} disabled={busy} className={secondaryButton}>
+              {busy ? 'Starting...' : 'Sign in here instead'}
             </button>
           )}
           {(g.signed_in || g.pending) && (

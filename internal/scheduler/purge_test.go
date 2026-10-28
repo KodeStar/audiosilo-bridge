@@ -196,7 +196,7 @@ func TestReservationBlocksDispatchUntilReleased(t *testing.T) {
 	s.unreserve(b.ID)
 	select {
 	case <-exec.started:
-	case <-time.After(2 * time.Second):
+	case <-time.After(waitLimit):
 		t.Fatal("book did not start after the reservation was released")
 	}
 	cancel()
@@ -274,7 +274,7 @@ func TestPurgeInvalidatesSplitSentinel(t *testing.T) {
 	if err := s.Resume(ctx, b.ID); err != nil {
 		t.Fatalf("resume: %v", err)
 	}
-	books := waitBooks(t, db, allDone, 15*time.Second)
+	books := waitBooks(t, db, allDone, waitLimit)
 	cancel()
 	<-done
 	if !allDone(books) {
@@ -370,7 +370,7 @@ func TestPurgeThenRetryReSplitsWithoutRestart(t *testing.T) {
 	if err := rs.Retry(ctx, b.ID); err != nil {
 		t.Fatalf("retry: %v", err)
 	}
-	books := waitBooks(t, db, allDone, 15*time.Second)
+	books := waitBooks(t, db, allDone, waitLimit)
 	cancel()
 	<-done
 	if !allDone(books) {

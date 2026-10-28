@@ -34,14 +34,19 @@ export function isSidecars(job: ServerJob): boolean {
   return isGenerate(job) || isDescribe(job) || isChapters(job);
 }
 
+// The console's names for the same kinds (its bridge.kind.* strings): one set of
+// names across the two pages.
 const KIND_LABELS: Record<string, string> = {
   [GENERATE_KIND]: 'Characters and recaps',
   [DESCRIBE_KIND]: 'Description',
   [CHAPTERS_KIND]: 'Chapters',
+  'sidecars.contribute': 'Community share',
+  'meta.correct': 'Corrections',
+  'bridge.verify': 'Verify',
   'podcast.subscribe': 'Following a show',
   'podcast.poll': 'Checking a feed',
-  'podcast.fetch': 'Fetching episode',
-  'podcast.retain': 'Checking retention',
+  'podcast.fetch': 'Fetching an episode',
+  'podcast.retain': 'Checking retained episodes',
 };
 
 // kindLabel words a job kind ("" for one with no label: the kind shows as it is).
@@ -56,6 +61,16 @@ export function parkOf(job: ServerJob): Park | null {
   if (job.state !== 'running') return null;
   const park = job.progress?.park;
   return park && typeof park.code === 'string' && park.code !== '' ? park : null;
+}
+
+// parkText is a parked job's message as prose: the engine's message, left out
+// when it is only the park's code (a park with no message) or repeats the hint.
+// The code itself is for the log, never the page.
+export function parkText(job: ServerJob, park: Park): string {
+  let msg = (job.error ?? '').trim();
+  const prefix = `${park.code}: `;
+  if (msg.startsWith(prefix)) msg = msg.slice(prefix.length).trim();
+  return msg === '' || msg === park.code || msg === park.hint ? '' : msg;
 }
 
 // effectiveState is the state to show: a running job that is parked shows as

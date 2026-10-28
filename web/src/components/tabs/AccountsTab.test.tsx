@@ -57,6 +57,37 @@ describe('AccountsTab', () => {
     expect(lastCall(calls, 'POST', '/api/accounts/github/device')).toBeDefined();
   });
 
+  it('says signed in when sharing goes through gh, and offers this sign-in as optional', async () => {
+    const a = accountsFixture();
+    mockFetch({
+      'GET /api/accounts': {
+        body: { ...a, github: { ...a.github, from: 'gh', can_contribute: true } },
+      },
+    });
+    render(<AccountsTab client={api()} />);
+    const card = await screen.findByRole('region', { name: 'GitHub' });
+    expect(within(card).getByText('Signed in (gh)')).toBeInTheDocument();
+    expect(within(card).queryByText('Not signed in')).not.toBeInTheDocument();
+    expect(within(card).queryByRole('button', { name: 'Sign in to GitHub' })).toBeNull();
+    expect(within(card).getByRole('button', { name: 'Sign in here instead' })).toBeInTheDocument();
+  });
+
+  it('says signed in through the environment, with no sign-in to offer', async () => {
+    const a = accountsFixture();
+    mockFetch({
+      'GET /api/accounts': {
+        body: {
+          ...a,
+          github: { ...a.github, from: 'env', env_token: true, can_contribute: true },
+        },
+      },
+    });
+    render(<AccountsTab client={api()} />);
+    const card = await screen.findByRole('region', { name: 'GitHub' });
+    expect(within(card).getByText('Signed in (environment)')).toBeInTheDocument();
+    expect(within(card).queryByRole('button', { name: /Sign in/ })).toBeNull();
+  });
+
   it('shows the sign-in, signs out, and passes on a revoke GitHub did not confirm', async () => {
     const { calls } = mockFetch({
       'GET /api/accounts': { body: signedIn() },

@@ -287,8 +287,8 @@ func TestChangePasswordDuringASignInLeavesNoSession(t *testing.T) {
 }
 
 // Security: a password change in flight with the old password when a reset
-// lands never overwrites the reset. Denied: that change (ErrInvalidCreds) and
-// the password it chose. Allowed: the reset's printed password.
+// lands never overwrites the reset. Denied: that change (ErrPasswordReplaced,
+// not "the current password is wrong": it was right) and the password it chose. Allowed: the reset's printed password.
 func TestChangePasswordDuringAResetKeepsTheReset(t *testing.T) {
 	mem := NewMemStore()
 	setup := New(mem)
@@ -308,13 +308,58 @@ func TestChangePasswordDuringAResetKeepsTheReset(t *testing.T) {
 			t.Error(rerr)
 		}
 	}
-	if err := New(st).ChangePassword(old, "a-new-strong-pass", mine); !errors.Is(err, ErrInvalidCreds) {
-		t.Fatalf("a change racing the reset: %v, want ErrInvalidCreds", err)
+	if err := New(st).ChangePassword(old, "a-new-strong-pass", mine); !errors.Is(err, ErrPasswordReplaced) {
+		t.Fatalf("a change racing the reset: %v, want ErrPasswordReplaced", err)
 	}
 	if _, err := setup.Login("a-new-strong-pass"); !errors.Is(err, ErrInvalidCreds) {
 		t.Errorf("the racing change's password signs in: %v", err)
 	}
 	if _, err := setup.Login(fresh); err != nil {
 		t.Errorf("the reset's password: %v", err)
+	}
+}
+
+// Security (bridge#16): a first start whose EnsureAdmin found no password while
+// a reset-password run on the same data dir stored one never overwrites it.
+// Denied: a second one-time password (EnsureAdmin prints nothing). Allowed: the
+// reset's password signs in.
+func TestEnsureAdminDuringAResetKeepsTheReset(t *testing.T) {
+	mem := NewMemStore()
+	var fresh string
+	st := &midLoginStore{MemStore: mem}
+	st.replace = func() {
+		var rerr error
+		if fresh, rerr = New(mem).ResetPassword(); rerr != nil {
+			t.Error(rerr)
+		}
+	}
+	m := New(st)
+	pw, err := m.EnsureAdmin()
+	if err != nil || pw != "" {
+		t.Fatalf("EnsureAdmin racing a reset = %q, %v; want nothing printed", pw, err)
+	}
+	if _, err := m.Login(fresh); err != nil {
+		t.Errorf("the reset's password: %v", err)
+	}
+}
+
+// CreatePassword sets a first password and signs everyone out; with one stored
+// it changes nothing.
+func TestMemStoreCreatePasswordOnlyWhenNoneIsSet(t *testing.T) {
+	mem := NewMemStore()
+	if ok, err := mem.CreatePassword("first"); err != nil || !ok {
+		t.Fatalf("CreatePassword on an empty store = %v, %v", ok, err)
+	}
+	if ok, _ := mem.AddSession("s1", time.Now(), "first"); !ok {
+		t.Fatal("AddSession refused")
+	}
+	if ok, err := mem.CreatePassword("second"); err != nil || ok {
+		t.Fatalf("CreatePassword with one set = %v, %v; want false", ok, err)
+	}
+	if h, _ := mem.LoadAuth(); h != "first" {
+		t.Fatalf("password = %q, want first", h)
+	}
+	if n := sessionCount(mem); n != 1 {
+		t.Fatalf("%d sessions after a refused create, want 1", n)
 	}
 }

@@ -21,6 +21,10 @@ var (
 	ErrPasswordTooShort = errors.New("password too short")
 	// ErrNoAdmin is returned by Login when no admin has been provisioned yet.
 	ErrNoAdmin = errors.New("no admin configured")
+	// ErrPasswordReplaced is returned by a password change whose current
+	// password was right but was replaced (by a reset, or another change) while
+	// the change ran: nothing was changed.
+	ErrPasswordReplaced = errors.New("the password was changed or reset meanwhile")
 )
 
 // Manager is the auth service over a Store.
@@ -37,7 +41,9 @@ func New(store Store) *Manager {
 // EnsureAdmin provisions the admin on first run. If no password hash exists it
 // generates a one-time password, stores its argon2id hash, and returns the
 // plaintext so the caller can print it ONCE in the startup banner. If an admin
-// already exists it returns ("", nil) - the password is never re-printed.
+// already exists it returns ("", nil) - the password is never re-printed. The
+// write is create-if-absent: a reset-password run on the same data dir that
+// stores its password first wins, and this one prints nothing (bridge#16).
 func (m *Manager) EnsureAdmin() (oneTimePassword string, err error) {
 	hash, err := m.store.LoadAuth()
 	if err != nil {
@@ -51,7 +57,8 @@ func (m *Manager) EnsureAdmin() (oneTimePassword string, err error) {
 		return "", err
 	}
 	// With no password no session should be live; the sign-out makes sure.
-	if _, err := m.store.ReplacePassword("", enc, ""); err != nil {
+	created, err := m.store.CreatePassword(enc)
+	if err != nil || !created {
 		return "", err
 	}
 	return pw, nil
@@ -131,7 +138,7 @@ func (m *Manager) Logout(token string) error {
 // password change is how a leaked session is cut off); the session keep (the
 // caller's token) stays signed in. The new hash replaces only the one current
 // was verified against: a reset or another change that lands while this one
-// hashes is never overwritten, and this change is refused (ErrInvalidCreds).
+// hashes is never overwritten, and this change is refused (ErrPasswordReplaced).
 func (m *Manager) ChangePassword(current, newPassword, keep string) error {
 	hash, err := m.store.LoadAuth()
 	if err != nil {
@@ -159,7 +166,7 @@ func (m *Manager) ChangePassword(current, newPassword, keep string) error {
 		return err
 	}
 	if !replaced {
-		return ErrInvalidCreds
+		return ErrPasswordReplaced
 	}
 	return nil
 }
@@ -175,7 +182,7 @@ func (m *Manager) ChangePassword(current, newPassword, keep string) error {
 // the old password working, never a new one stored but not printed, and no
 // sign-in can land between the two steps (bridge#11). The reset replaces
 // whatever is stored; a sign-in or a change in flight with the old password is
-// refused instead.
+// refused instead (ErrInvalidCreds, ErrPasswordReplaced).
 func (m *Manager) ResetPassword() (oneTimePassword string, err error) {
 	pw, enc, err := generateHashed()
 	if err != nil {

@@ -20,6 +20,11 @@ import (
 // that a later run would trust. perm is applied to the final file explicitly (a
 // Chmod on the temp file), so the result is deterministic regardless of the
 // process umask. An existing file at path is atomically replaced.
+//
+// It is not fork-safe for an executable the process runs at once: a goroutine
+// forking mid-write can leave the child holding the write descriptor, and the
+// exec fails with ETXTBSY ("text file busy"). Write such a file with
+// internal/execfile, or retry its first run as toolfetch's self-check does.
 func WriteFileAtomic(path string, data []byte, perm fs.FileMode) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o750); err != nil {
