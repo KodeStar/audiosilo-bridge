@@ -384,6 +384,122 @@ func TestChaptersDetectFollowsABookMovedWhileAway(t *testing.T) {
 	}
 }
 
+// moveLooseMidRun runs job id (a chapters job when chapters, else a generate job)
+// on Loose.m4b until asr, renames the file to Moved.m4b and lets the run go on;
+// the server carries the job to the new path (the answers to its reports say so)
+// after tell, so a write before then finds the book gone. It returns once the job
+// ended done, failing the test on any other end.
+func moveLooseMidRun(hr *harness, id int64, chapters bool, tell time.Duration) {
+	hr.t.Helper()
+	hr.exec.windowed = true
+	gate := hr.exec.gate("asr")
+	h := hr.handler()
+	h.o.Recheck = 20 * time.Millisecond
+	var stop func()
+	if chapters {
+		hr.srv.addKind(id, ChaptersKind, "Loose.m4b", `{}`)
+		stop = hr.runner(h, h.ChaptersJob())
+	} else {
+		hr.srv.set(func() {
+			hr.srv.books["Loose.m4b"] = link.Book{LibraryID: 1, Path: "Loose.m4b", Files: []link.BookFile{{Path: "Loose.m4b", Size: 6}},
+				Info: &link.BookInfo{Title: "Loose"}}
+		})
+		hr.srv.add(id, "Loose.m4b", `{}`)
+		stop = hr.runner(h)
+	}
+	defer stop()
+	hr.waitFor("asr", func() bool {
+		return hr.srv.saw(id, func(_ link.Update, p map[string]any) bool { return p["stage"] == "asr" })
+	})
+	if err := os.Rename(filepath.Join(hr.root, "Loose.m4b"), filepath.Join(hr.root, "Moved.m4b")); err != nil {
+		hr.t.Fatal(err)
+	}
+	carry := func() {
+		hr.srv.set(func() {
+			hr.srv.books["Moved.m4b"] = link.Book{LibraryID: 1, Path: "Moved.m4b", Files: []link.BookFile{{Path: "Moved.m4b", Size: 6}},
+				Info: &link.BookInfo{Title: "Loose"}}
+			delete(hr.srv.books, "Loose.m4b")
+			hr.srv.paths = map[int64]string{id: "Moved.m4b"}
+		})
+	}
+	if tell == 0 {
+		// A report's answer carries the new path before the run goes on.
+		carry()
+		time.Sleep(3 * h.o.Poll)
+	}
+	close(gate)
+	if tell > 0 {
+		time.Sleep(tell)
+		carry()
+	}
+	hr.waitFor("the job ended", func() bool { s, _ := hr.srv.final(id); return s != "" })
+	if s, u := hr.srv.final(id); s != link.StateDone {
+		msg := ""
+		if u.Error != nil {
+			msg = *u.Error
+		}
+		hr.t.Fatalf("the job ended %s (%s), want done", s, msg)
+	}
+}
+
+// A book the server moved mid-run keeps its chapters: they are checked against the
+// audio where the job has the book now, not where it was at the claim. Before, a
+// chapters job failed at its done ("the engine kept no chapters for the book") and
+// a generate job finished without them. A move the server tells only after the
+// run is done waits for it, parked, as a save that can't write does.
+func TestChaptersFollowABookMovedMidRun(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name     string
+		chapters bool
+		tell     time.Duration
+	}{
+		{"chapters job", true, 0},
+		{"chapters job, the move told late", true, 500 * time.Millisecond},
+		{"generate job", false, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			hr := newHarness(t)
+			moveLooseMidRun(hr, 45, tc.chapters, tc.tell)
+			if _, err := os.Stat(filepath.Join(hr.root, AttachDir, "Moved.chapters.json")); err != nil {
+				t.Fatalf("no chapters at the new path: %v", err)
+			}
+		})
+	}
+}
+
+// A list whose audio can't be looked at now (a mount gone for a moment) is neither
+// written nor dropped: a write that can wait parks until the audio is back, one
+// that can't returns errAudioUnseen, and the run is never cleared for it.
+func TestAwaitChaptersWaitsForTheAudio(t *testing.T) {
+	t.Parallel()
+	b := store.Book{WorkDir: t.TempDir(), SourcePath: filepath.Join(t.TempDir(), "Loose.m4b")}
+	mustWrite(t, b.SourcePath, "abcdef")
+	detectChapters(t, b)
+	h := New(Options{Recheck: 20 * time.Millisecond})
+	r := &run{files: []link.BookFile{{Path: "Loose.m4b", Size: 6}}, rel: "Loose.m4b", place: place{single: true},
+		rep: jobs.LocalReporter(), poke: make(chan struct{}, 1)}
+	hidden := b.SourcePath + ".away"
+	if err := os.Rename(b.SourcePath, hidden); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := h.awaitChapters(context.Background(), r, b, false); ok || !errors.Is(err, errAudioUnseen) {
+		t.Fatalf("no wait, the audio out of sight = %v, %v, want errAudioUnseen", ok, err)
+	}
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		_ = os.Rename(hidden, b.SourcePath)
+	}()
+	d, ok, err := h.awaitChapters(context.Background(), r, b, true)
+	if !ok || err != nil || len(d.Chapters) != 3 {
+		t.Fatalf("waited for the audio = %+v, %v, %v", d, ok, err)
+	}
+	if r.ownPark {
+		t.Fatal("the wait's park outlived it")
+	}
+}
+
 // A generate job continues a finished chapters run only while its list is current
 // for the audio on disk: a file replaced since is transcribed again, never sent on
 // with the old file's transcripts and chapters.

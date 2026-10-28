@@ -112,6 +112,10 @@ type Incident struct {
 	Ambiguous   bool         `json:"ambiguous"`
 	Protected   bool         `json:"protected"`
 	ParkCode    string       `json:"park_code,omitempty"`
+	// SelfResuming says the parked book carries a retry_at: the scheduler's timed
+	// self-resume re-admits it, so the same park coming back is the timer's, not
+	// news (a park only a person or a restart lifts comes back only after one).
+	SelfResuming bool `json:"-"`
 }
 
 type Decision struct {

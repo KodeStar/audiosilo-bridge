@@ -1591,8 +1591,9 @@ func TestPipelineChaptersGoal(t *testing.T) {
 		t.Fatalf("state %q status %q err %q, want done", final.State, final.Status, final.Error)
 	}
 	list, err := ReadDetectedChapters(final.WorkDir)
-	if err != nil || len(list.Chapters) != 1 || !list.CurrentFor(final.WorkDir, "") {
-		t.Fatalf("chapters_detected.json = %+v, %v", list, err)
+	current, cerr := list.CheckCurrent(final.WorkDir, "")
+	if err != nil || len(list.Chapters) != 1 || !current || cerr != nil {
+		t.Fatalf("chapters_detected.json = %+v, %v (current %v, %v)", list, err, current, cerr)
 	}
 	if scheduler.SentinelExists(final.WorkDir, string(state.Sanitizing)) {
 		t.Fatal("a chapters-only book ran past chapter_detecting")

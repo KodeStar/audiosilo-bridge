@@ -879,14 +879,16 @@ func TestArtifactStatusStillChecksCompletedEarlierStagesDuringRerun(t *testing.T
 // required) and resumes itself on a timer, parking again the same way, records
 // its observation once, not once per resume (bridge#24: 56 rows in seven hours).
 // A different failure is a new observation, as is the same one after another
-// decision for the book.
+// decision for the book, and a park nothing re-admits but a person (no retry_at)
+// each time it comes back.
 func TestUnchangedObservationIsRecordedOnce(t *testing.T) {
 	ctx := context.Background()
 	db := supervisorDB(t)
 	_ = db.EnsureBatch(ctx, "observe", time.Now())
 	b, _ := db.CreateBook(ctx, store.NewBook{BatchID: "observe", SourcePath: "/obs", WorkDir: t.TempDir(), Title: "Observe", State: "fact_pass"})
 	attempt := 0
-	park := func(errMsg string) {
+	retryAt := time.Now().Add(30 * time.Minute).UTC().Format(time.RFC3339)
+	parkWith := func(errMsg, code, at string) {
 		t.Helper()
 		attempt++
 		id, err := db.StartStageRun(ctx, b.ID, "fact_pass", attempt)
@@ -894,8 +896,10 @@ func TestUnchangedObservationIsRecordedOnce(t *testing.T) {
 			t.Fatal(err)
 		}
 		_ = db.FinishStageRun(ctx, id, false, failedRunMetrics(t, errMsg))
-		_ = db.SetBookStatus(ctx, b.ID, string(state.StatusNeedsAttention), errMsg, string(state.ParkAgentCredentialRefused))
+		_ = db.SetBookStatusRetry(ctx, b.ID, string(state.StatusNeedsAttention), errMsg, code, at)
 	}
+	// The timed self-resume's park: a refused credential, looked at again at retry_at.
+	park := func(errMsg string) { t.Helper(); parkWith(errMsg, string(state.ParkAgentCredentialRefused), retryAt) }
 	cfg := config.Default().Supervisor
 	cfg.AutomaticActions = true
 	cfg.MaxAttempts = 3
@@ -944,5 +948,15 @@ func TestUnchangedObservationIsRecordedOnce(t *testing.T) {
 	s.check(ctx, "observe")
 	if got := rows(); len(got) != 4 {
 		t.Fatalf("after another decision, rows = %d, want 4", len(got))
+	}
+	// A park nothing re-admits on a timer (no retry_at: the media tools missing)
+	// comes back only after someone acted (a Retry, which records no supervisor
+	// run, or a restart): news each time.
+	for n := 1; n <= 2; n++ {
+		parkWith("ffmpeg not found on PATH", string(state.ParkMediaToolsUnavailable), "")
+		s.check(ctx, "observe")
+		if got := rows(); len(got) != 4+n {
+			t.Fatalf("a person's park back after a Retry: rows = %d, want %d", len(got), 4+n)
+		}
 	}
 }

@@ -441,15 +441,18 @@ func (s *Service) handleIncident(ctx context.Context, trigger string, i Incident
 	return s.finishRun(ctx, r)
 }
 
-// unchangedObservation reports whether decision d only observes an incident that
-// waits for a person (approval required) exactly as the book's last supervisor run
-// did: the same incident family (kind, stage and fingerprint; a new stage run of
-// the same failure is the same family) observed and left for approval, with no
-// other run for the book since. Recording it again says nothing new: a park that
-// resumes itself every half hour and parks again the same way (a refused
-// credential) would add a row each time.
+// unchangedObservation reports whether decision d only observes a self-resuming
+// park (i.SelfResuming: the scheduler's timer re-admits it) that waits for a
+// person (approval required) exactly as the book's last supervisor run did: the
+// same incident family (kind, stage and fingerprint; a new stage run of the same
+// failure is the same family) observed and left for approval, with no other run
+// for the book since. Recording it again says nothing new: a park that resumes
+// itself every half hour and parks again the same way (a refused credential)
+// would add a row each time. A park nothing re-admits but a person (a Retry,
+// which records no supervisor run) or a restart is recorded each time it comes
+// back: that is a new incident after someone acted.
 func (s *Service) unchangedObservation(ctx context.Context, i Incident, d Decision) (bool, error) {
-	if d.Action != ActionObserve || !d.ApprovalRequired {
+	if d.Action != ActionObserve || !d.ApprovalRequired || !i.SelfResuming {
 		return false, nil
 	}
 	last, err := s.db.LatestSupervisorRunForBook(ctx, i.BookID)

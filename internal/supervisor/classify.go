@@ -340,7 +340,7 @@ func classifyParked(book store.Book, runs []store.StageRun) (Incident, bool) {
 	}
 	return Incident{
 		Kind: IncidentParkedRecovery, BookID: book.ID, BatchID: book.BatchID,
-		Stage: book.State, StageRunID: stageRunID, ParkCode: book.ParkCode,
+		Stage: book.State, StageRunID: stageRunID, ParkCode: book.ParkCode, SelfResuming: book.RetryAt != "",
 		Fingerprint: parkedRecoveryFingerprint(book, stageErr),
 		Diagnosis:   "parked book requires a bounded recovery plan", Evidence: evidence,
 	}, true

@@ -233,9 +233,10 @@ func TestChapterDetectStage(t *testing.T) {
 		t.Errorf("the window FLACs outlived the cut: %v", err)
 	}
 	list, err := ReadDetectedChapters(book.WorkDir)
+	current, cerr := list.CheckCurrent(book.WorkDir, "")
 	if err != nil || len(list.Chapters) != 2 || list.Chapters[0].StartMs != 0 || list.Chapters[1].StartMs != 12300 ||
-		list.Chapters[1].LengthMs != 7700 || !list.CurrentFor(book.WorkDir, "") {
-		t.Fatalf("chapters_detected.json = %+v, %v", list, err)
+		list.Chapters[1].LengthMs != 7700 || !current || cerr != nil {
+		t.Fatalf("chapters_detected.json = %+v, %v (current %v, %v)", list, err, current, cerr)
 	}
 	if !scheduler.SentinelExists(book.WorkDir, string(state.ChapterDetecting)) {
 		t.Fatal("no sentinel")
@@ -630,6 +631,42 @@ func TestTranscriptionContinuable(t *testing.T) {
 			t.Fatalf("not continuable once %s was undone", tc.denied)
 		}
 	}
+	// The raws kept for another manifest (asr would park that for a person).
+	if err := writeASRProvenance(work, asrProvenance{ManifestSHA: "another manifest"}); err != nil {
+		t.Fatal(err)
+	}
+	if TranscriptionContinuable(work) {
+		t.Fatal("continuable with raws kept for another manifest")
+	}
+	fp, err := manifestFingerprint(work)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeASRProvenance(work, asrProvenance{ManifestSHA: fp}); err != nil {
+		t.Fatal(err)
+	}
+	if !TranscriptionContinuable(work) {
+		t.Fatal("not continuable with the raws kept for its own manifest")
+	}
+	// Splitting's sentinel kept passes it straight on: the windows it cut must still
+	// be there (gone, asr would fail on the window it has to transcribe).
+	if err := scheduler.WriteSentinel(work, string(state.Splitting), scheduler.StageResult{}); err != nil {
+		t.Fatal(err)
+	}
+	if TranscriptionContinuable(work) {
+		t.Fatal("continuable with splitting passed on and its windows gone")
+	}
+	for w := 1; w <= 2; w++ {
+		if err := os.MkdirAll(filepath.Join(work, audio.ChaptersDir), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(work, audio.ChaptersDir, audio.ChapterFileName(w)), make([]byte, 512), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !TranscriptionContinuable(work) {
+		t.Fatal("not continuable with splitting passed on and its windows whole")
+	}
 	// The layer moved aside: the detection ran, so it isn't a book stopped at asr.
 	wdir := filepath.Join(work, audio.WindowsDir)
 	writeManifestStruct(t, wdir, m)
@@ -693,9 +730,6 @@ func TestDetectedChaptersCheckCurrent(t *testing.T) {
 	if ok, err := check(""); ok || err == nil {
 		t.Fatalf("a file that can't be looked at = %v, %v, want an error", ok, err)
 	}
-	if d.CurrentFor(work, "") {
-		t.Fatal("CurrentFor passed a file that can't be looked at")
-	}
 	// The book moved (a rename keeps the size and time): current at its new path.
 	moved := filepath.Join(dir, "moved.m4b")
 	if err := os.Rename(src+".away", moved); err != nil {
@@ -738,5 +772,47 @@ func writeFileAt(t *testing.T, path, body string, mod time.Time) {
 	}
 	if err := os.Chtimes(path, mod, mod); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// The detected list records the audio file's size and time only while the file is
+// the one inspect read: a file replaced while the book was transcribed (its
+// transcripts are the old file's) records nothing, so the list is never current
+// for it, never handed on with the old file's transcripts and chapters.
+func TestDetectedListRecordsOnlyTheInspectedFile(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "book.m4b")
+	before := time.Now().Add(-time.Hour)
+	writeFileAt(t, src, "the audio", before)
+	work := filepath.Join(dir, "work")
+	if err := os.MkdirAll(work, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	writeProbeJSON(t, work, `{"format":{"duration":"20","size":"9"}}`)
+	m, tl := detectedFixture([]string{"Chapter One", "Chapter Two", "Chapter Three"})
+	m.Source = src
+	if err := audio.WriteManifest(work, m); err != nil {
+		t.Fatal(err)
+	}
+	fp, err := manifestFingerprint(work)
+	if err != nil {
+		t.Fatal(err)
+	}
+	book := store.Book{WorkDir: work}
+	list, err := writeDetectedChapters(book, m, tl.split(m.Chapters), nil, fp)
+	if err != nil || list.SourceSize != 9 || list.SourceModTime == 0 {
+		t.Fatalf("the inspected file's list = %+v, %v", list, err)
+	}
+	if ok, err := list.CheckCurrent(work, ""); !ok || err != nil {
+		t.Fatalf("current for the inspected file = %v, %v", ok, err)
+	}
+	// Replaced while the book was transcribed (the same time, to show the size tells).
+	writeFileAt(t, src, "another encode", before)
+	list, err = writeDetectedChapters(book, m, tl.split(m.Chapters), nil, fp)
+	if err != nil || list.SourceSize != 0 || list.SourceModTime != 0 {
+		t.Fatalf("a replaced file's list = %+v, %v, want nothing recorded", list, err)
+	}
+	if ok, err := list.CheckCurrent(work, ""); ok || err != nil {
+		t.Fatalf("a list for a file replaced mid-run is current: %v, %v", ok, err)
 	}
 }

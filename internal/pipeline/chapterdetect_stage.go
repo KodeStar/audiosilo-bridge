@@ -134,13 +134,6 @@ func DetectedStamp(workDir string) (string, bool) {
 	return stamp, true
 }
 
-// CurrentFor reports whether d still describes the book in workDir, its audio
-// file at source (CheckCurrent), false when that can't be told.
-func (d DetectedChapters) CurrentFor(workDir, source string) bool {
-	current, _ := d.CheckCurrent(workDir, source)
-	return current
-}
-
 // sourceModSlack is how far the audio file's modification time may be from the
 // one d recorded and still be the same file: a library seen through another
 // mount (SMB, FUSE) can round it. An edit that matters comes after the whole
@@ -401,16 +394,40 @@ func modifiedBeforeProbe(workDir string, info os.FileInfo) bool {
 // for a worker, cancelled or failed there) can go on transcribing from what it
 // kept, the windows it finished never transcribed again: the windows manifest is
 // in place (inspect made it and chapter_detecting hasn't moved it) with windows to
-// transcribe, and the audio file is the one inspected (inspectedSource). A
-// generate job continues such a chapters-only book from splitting (passed
-// straight on while its window FLACs are whole, cut again after a purge), and asr
-// then skips every window already complete.
+// transcribe, the raws kept are its own (asr.json names no other manifest: asr
+// would park that for a person), the audio file is the one inspected
+// (inspectedSource), and while splitting's sentinel would pass it straight on,
+// the windows it cut are still there (every window heard, and a FLAC for each one
+// still to transcribe). A generate job continues such a chapters-only book from
+// splitting (cut again after a purge, which takes the sentinel too), and asr then
+// skips every window already complete.
 func TranscriptionContinuable(workDir string) bool {
 	layer, err := readWindowLayer(workDir)
 	if err != nil || layer.moved || len(layer.manifest.Chapters) == 0 {
 		return false
 	}
-	return inspectedSource(workDir, layer.manifest.Source)
+	if prior := readASRProvenance(workDir).ManifestSHA; prior != "" {
+		if fp, err := manifestFingerprint(workDir); err != nil || fp != prior {
+			return false
+		}
+	}
+	if !inspectedSource(workDir, layer.manifest.Source) {
+		return false
+	}
+	if !scheduler.SentinelExists(workDir, string(state.Splitting)) {
+		return true
+	}
+	chapters := filepath.Join(workDir, audio.ChaptersDir)
+	for _, w := range layer.manifest.Chapters {
+		if !audio.WindowHeard(chapters, w) {
+			return false
+		}
+		if !rawComplete(filepath.Join(layer.rawDir, transcript.RawName(w.Chapter))) &&
+			!fsutil.IsFile(filepath.Join(chapters, audio.ChapterFileName(w.Chapter))) {
+			return false
+		}
+	}
+	return true
 }
 
 // DetectionRerunnable reports whether a book stopped at chapter_detecting (parked,
@@ -573,8 +590,13 @@ func writeDetectedChapters(book store.Book, m audio.Manifest, docs []transcript.
 		return DetectedChapters{}, err
 	}
 	d := DetectedChapters{ManifestSHA: fp, DurationMs: ms(m.Duration), Chapters: list}
+	// Only the file inspect read: one replaced while the book was transcribed (its
+	// transcripts are the old file's) records nothing, so the list is never current
+	// for it (CheckCurrent's rule for a list with no time asks for the probed file).
 	if info, err := os.Stat(m.Source); err == nil {
-		d.SourceSize, d.SourceModTime = info.Size(), info.ModTime().UnixNano()
+		if audio.ProbedSize(book.WorkDir) <= 0 || inspectedFile(book.WorkDir, info) {
+			d.SourceSize, d.SourceModTime = info.Size(), info.ModTime().UnixNano()
+		}
 	}
 	out, err := json.MarshalIndent(d, "", "  ")
 	if err != nil {
