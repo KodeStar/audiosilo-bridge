@@ -158,12 +158,18 @@ func Resumes(ctx context.Context) bool {
 
 // DefaultKeepalive is how often a running job with no new progress reports by
 // default. Each report renews the server's 2-minute lease (and is a write
-// there), so 30 s keeps four reports inside one lease, enough to ride out a
-// failed send or two, while an idle job moves the server's write generation
+// there), so 30 s keeps four reports inside one lease (a failed one is tried
+// again sooner, DefaultReportRetry), while an idle job moves the server's write generation
 // twice a minute rather than six times. A changed progress is still sent within
 // ProgressEvery and a new step at once; only a cancel waits up to this long to
 // be heard.
 const DefaultKeepalive = 30 * time.Second
+
+// DefaultReportRetry is how soon a running job reports again after a report
+// that didn't reach the server, until one does (then Keepalive again). At the
+// keepalive alone, one report through and three failed would let the 2-minute
+// lease lapse; at 10 s about ten attempts fit, as before the 30 s keepalive.
+const DefaultReportRetry = 10 * time.Second
 
 // Options tunes a Runner; zero values take the defaults.
 type Options struct {
@@ -172,6 +178,9 @@ type Options struct {
 	// renewing the server's 2-minute lease and picking up a cancel (default
 	// DefaultKeepalive).
 	Keepalive time.Duration
+	// ReportRetry stands in for Keepalive while a job's last report failed
+	// (default DefaultReportRetry; never longer than Keepalive).
+	ReportRetry time.Duration
 	// ProgressEvery is the shortest gap between two progress reports of a job
 	// (a new step is sent at once).
 	ProgressEvery time.Duration
@@ -227,6 +236,10 @@ func New(st Store, server func() Server, onUnauthorized func(Server), opts Optio
 	if opts.Keepalive <= 0 {
 		opts.Keepalive = DefaultKeepalive
 	}
+	if opts.ReportRetry <= 0 {
+		opts.ReportRetry = DefaultReportRetry
+	}
+	opts.ReportRetry = min(opts.ReportRetry, opts.Keepalive)
 	if opts.ProgressEvery <= 0 {
 		opts.ProgressEvery = 2 * time.Second
 	}
@@ -890,6 +903,9 @@ type Reporter struct {
 	// dirty: progress changed since it was last sent (and stored).
 	dirty  bool
 	sentAt time.Time
+	// failing: the last report didn't reach the server, so the next goes after
+	// ReportRetry rather than Keepalive (only loop's goroutine touches it).
+	failing bool
 	// parked: the job reports needs_attention with parkMsg as its error, until
 	// Unpark. Unparked, every report clears the error (one a park left, even
 	// across a restart that came before the clear got through).
@@ -1019,7 +1035,8 @@ func (p *Reporter) wake() {
 
 // loop sends the job's progress until done closes or the job's context ends: a
 // new step at once, other changes at most every ProgressEvery, and a keepalive
-// every Keepalive when nothing changed (renewing the lease).
+// every Keepalive when nothing changed (renewing the lease), every ReportRetry
+// while the last report failed.
 func (p *Reporter) loop(done <-chan struct{}) {
 	t := time.NewTicker(p.r.opts.ProgressEvery)
 	defer t.Stop()
@@ -1043,7 +1060,11 @@ func (p *Reporter) loop(done <-chan struct{}) {
 			since, dirty := time.Since(p.sentAt), p.dirty
 			p.mu.Unlock()
 			changed := dirty && since >= p.r.opts.ProgressEvery
-			if !changed && since < p.r.opts.Keepalive {
+			keepalive := p.r.opts.Keepalive
+			if p.failing {
+				keepalive = p.r.opts.ReportRetry
+			}
+			if !changed && since < keepalive {
 				continue
 			}
 		}
@@ -1081,6 +1102,7 @@ func (p *Reporter) send() bool {
 		u.Progress = raw
 	}
 	got, err := p.srv.UpdateJob(ctx, p.job.ID, u)
+	p.failing = false
 	switch {
 	case p.answer(got, err):
 		return false
@@ -1091,7 +1113,8 @@ func (p *Reporter) send() bool {
 	default:
 		// The server is unreachable for now: the job goes on, and its lease
 		// (a running job's) lasts two minutes from the last report that got
-		// through.
+		// through, so the next report goes after ReportRetry, not Keepalive.
+		p.failing = true
 		p.r.log.Warn("bridge: reporting progress failed", "job", p.job.ID, "err", err)
 		return true
 	}

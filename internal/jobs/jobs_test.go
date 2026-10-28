@@ -31,6 +31,7 @@ type fakeServer struct {
 	hang     chan struct{}    // updates wait for it to close (nil: none)
 	changed  chan struct{}    // closed on every update
 	paths    map[int64]string // the job's path in an update's answer (a book that moved)
+	tries    map[int64]int    // every update asked, failed ones included
 }
 
 func newFakeServer() *fakeServer {
@@ -77,6 +78,10 @@ func (f *fakeServer) UpdateJob(ctx context.Context, id int64, u link.Update) (*l
 		f.mu.Lock()
 	}
 	defer f.mu.Unlock()
+	if f.tries == nil {
+		f.tries = map[int64]int{}
+	}
+	f.tries[id]++
 	if f.unauthed {
 		return nil, link.ErrUnauthorized
 	}

@@ -511,6 +511,69 @@ func TestDefaultKeepaliveLeavesLeaseMargin(t *testing.T) {
 	if n := serverLease / DefaultKeepalive; n < 4 {
 		t.Fatalf("only %d keepalives fit in the %v lease, want at least 4", n, serverLease)
 	}
+	if DefaultReportRetry != 10*time.Second || r.opts.ReportRetry != DefaultReportRetry {
+		t.Fatalf("ReportRetry = %v, want 10s", r.opts.ReportRetry)
+	}
+	if n := serverLease / DefaultReportRetry; n < 10 {
+		t.Fatalf("only %d retries fit in the %v lease, want at least 10", n, serverLease)
+	}
+}
+
+// A report that fails is tried again after ReportRetry, not Keepalive, until one
+// gets through; then the job is back on the Keepalive.
+func TestFailedReportRetriesSoonerUntilOneSucceeds(t *testing.T) {
+	t.Parallel()
+	db, srv := openStore(t), newFakeServer()
+	srv.add(&link.Job{ID: 10, Kind: "k.retry", Attempts: 1})
+	opts := testOpts()
+	opts.Keepalive = time.Second
+	opts.ReportRetry = 50 * time.Millisecond
+	tries := func() int {
+		srv.mu.Lock()
+		defer srv.mu.Unlock()
+		return srv.tries[10]
+	}
+	setFailing := func(v bool) {
+		srv.mu.Lock()
+		srv.failing = v
+		srv.mu.Unlock()
+	}
+	waitFor := func(cond func() bool, what string) error {
+		for deadline := time.Now().Add(5 * time.Second); !cond(); time.Sleep(time.Millisecond) {
+			if time.Now().After(deadline) {
+				return fmt.Errorf("timed out waiting for %s", what)
+			}
+		}
+		return nil
+	}
+	r := New(db, func() Server { return srv }, nil, opts, handler{kind: "k.retry", lane: LaneLight,
+		fn: func(_ context.Context, _ Job, _ *Reporter) (any, error) {
+			setFailing(true)
+			// The first keepalive (a second after the start's report) fails...
+			first := tries()
+			if err := waitFor(func() bool { return tries() > first }, "the first keepalive"); err != nil {
+				return nil, err
+			}
+			// ...and is tried again within ReportRetry, not a second later.
+			failed := tries()
+			time.Sleep(400 * time.Millisecond)
+			if got := tries() - failed; got < 2 {
+				return nil, fmt.Errorf("%d tries in 400 ms after a failed report, want a retry every 50 ms", got)
+			}
+			// Once one gets through, the job is back on the one-second keepalive.
+			running := countState(srv, 10, link.StateRunning)
+			setFailing(false)
+			if err := waitFor(func() bool { return countState(srv, 10, link.StateRunning) > running }, "a report through"); err != nil {
+				return nil, err
+			}
+			through := tries()
+			time.Sleep(500 * time.Millisecond)
+			if got := tries() - through; got != 0 {
+				return nil, fmt.Errorf("%d reports in 500 ms after one got through, want none before the keepalive", got)
+			}
+			return nil, nil
+		}})
+	wantDone(t, r, srv, 10)
 }
 
 // A running job with no new progress reports once per Keepalive, not once per

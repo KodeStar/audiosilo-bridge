@@ -1651,7 +1651,10 @@ internal/
             quick wins: every report is a server write that empties its generation
             caches; four still fit in the lease), renewing the server's 2-minute
             lease, so a cancel is heard within about 32 s (the keepalive is checked
-            on the 2 s ProgressEvery tick); a reply
+            on the 2 s ProgressEvery tick). After a report that didn't reach the
+            server the next goes after ReportRetry (DefaultReportRetry 10 s) instead,
+            until one gets through, then Keepalive again: at 30 s alone one report
+            through and three failed would lapse the lease. A reply
             with cancel_requested ends its context (errCancelRequested -> reported
             cancelled), a 409 ends it as lost (nothing more sent), a 401 is handed to
             the app WITH the link that got it (onUnauthorized(srv): a job of the
