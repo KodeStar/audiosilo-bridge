@@ -1044,7 +1044,11 @@ internal/
             (authstore_race_test.go) fail if one is split into a read and a write. AddSession takes the hash the
             sign-in verified and stores the session only while it is still the
             stored one (one INSERT ... WHERE EXISTS), so a sign-in racing a change
-            or the reset-password process is refused and leaves no session
+            or the reset-password process is refused and leaves no session.
+            Every argon2id hash and verify goes through argonKey, which schedules
+            memoryReleaser (debug.FreeOSMemory once hashing has been quiet 1 s, on
+            its own goroutine; the server's server#244 port): without it one login
+            took an idle Bridge from 30 MB to 97 MB RSS for minutes.
   ghauth/   Phase 2b: the GitHub App user sign-in (the audiosilo-contributions App,
             DefaultClientID, AppID 5387686; the client ID overridable in config):
             RequestCode / Poll / Wait (the device flow: pending and slow_down arrive
