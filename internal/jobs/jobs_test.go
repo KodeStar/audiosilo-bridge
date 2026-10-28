@@ -35,7 +35,8 @@ type fakeServer struct {
 }
 
 func newFakeServer() *fakeServer {
-	return &fakeServer{updates: map[int64][]link.Update{}, cancel: map[int64]bool{}, notHeld: map[int64]bool{}, changed: make(chan struct{})}
+	return &fakeServer{updates: map[int64][]link.Update{}, cancel: map[int64]bool{}, notHeld: map[int64]bool{},
+		tries: map[int64]int{}, changed: make(chan struct{})}
 }
 
 func (f *fakeServer) add(j *link.Job) {
@@ -78,9 +79,6 @@ func (f *fakeServer) UpdateJob(ctx context.Context, id int64, u link.Update) (*l
 		f.mu.Lock()
 	}
 	defer f.mu.Unlock()
-	if f.tries == nil {
-		f.tries = map[int64]int{}
-	}
 	f.tries[id]++
 	if f.unauthed {
 		return nil, link.ErrUnauthorized

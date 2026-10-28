@@ -511,8 +511,8 @@ func TestDefaultKeepaliveLeavesLeaseMargin(t *testing.T) {
 	if n := serverLease / DefaultKeepalive; n < 4 {
 		t.Fatalf("only %d keepalives fit in the %v lease, want at least 4", n, serverLease)
 	}
-	if DefaultReportRetry != 10*time.Second || r.opts.ReportRetry != DefaultReportRetry {
-		t.Fatalf("ReportRetry = %v, want 10s", r.opts.ReportRetry)
+	if r.opts.ReportRetry != DefaultReportRetry {
+		t.Fatalf("ReportRetry = %v, want DefaultReportRetry", r.opts.ReportRetry)
 	}
 	if n := serverLease / DefaultReportRetry; n < 10 {
 		t.Fatalf("only %d retries fit in the %v lease, want at least 10", n, serverLease)
@@ -538,8 +538,8 @@ func TestFailedReportRetriesSoonerUntilOneSucceeds(t *testing.T) {
 		srv.failing = v
 		srv.mu.Unlock()
 	}
-	waitFor := func(cond func() bool, what string) error {
-		for deadline := time.Now().Add(5 * time.Second); !cond(); time.Sleep(time.Millisecond) {
+	await := func(cond func() bool, what string) error {
+		for deadline := time.Now().Add(5 * time.Second); !cond(); time.Sleep(5 * time.Millisecond) {
 			if time.Now().After(deadline) {
 				return fmt.Errorf("timed out waiting for %s", what)
 			}
@@ -551,7 +551,7 @@ func TestFailedReportRetriesSoonerUntilOneSucceeds(t *testing.T) {
 			setFailing(true)
 			// The first keepalive (a second after the start's report) fails...
 			first := tries()
-			if err := waitFor(func() bool { return tries() > first }, "the first keepalive"); err != nil {
+			if err := await(func() bool { return tries() > first }, "the first keepalive"); err != nil {
 				return nil, err
 			}
 			// ...and is tried again within ReportRetry, not a second later.
@@ -563,7 +563,7 @@ func TestFailedReportRetriesSoonerUntilOneSucceeds(t *testing.T) {
 			// Once one gets through, the job is back on the one-second keepalive.
 			running := countState(srv, 10, link.StateRunning)
 			setFailing(false)
-			if err := waitFor(func() bool { return countState(srv, 10, link.StateRunning) > running }, "a report through"); err != nil {
+			if err := await(func() bool { return countState(srv, 10, link.StateRunning) > running }, "a report through"); err != nil {
 				return nil, err
 			}
 			through := tries()

@@ -904,7 +904,8 @@ type Reporter struct {
 	dirty  bool
 	sentAt time.Time
 	// failing: the last report didn't reach the server, so the next goes after
-	// ReportRetry rather than Keepalive (only loop's goroutine touches it).
+	// ReportRetry rather than Keepalive (only send touches it: execute's
+	// first, then loop's goroutine).
 	failing bool
 	// parked: the job reports needs_attention with parkMsg as its error, until
 	// Unpark. Unparked, every report clears the error (one a park left, even
