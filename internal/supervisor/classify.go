@@ -51,22 +51,53 @@ func ErrorFingerprint(message string) string {
 	return hex.EncodeToString(sum[:12])
 }
 
+// statusPattern finds an HTTP status code as an error states one: after a word
+// that says it is a status ("status 429", "status code: 503", "HTTP 401",
+// "HTTP/1.1 503", "API Error: 429", `"status":429`, "code=401"), never a bare
+// number, which can be anything (a work dir's or a file's name, a count, a
+// duration).
+var statusPattern = regexp.MustCompile(`\b(?:status(?:[ _]?code)?|http(?:/\d(?:\.\d)?)?|error(?:[ _]?code)?|code)["']?\s*[:=]?\s*(\d{3})\b`)
+
+// statusKinds are the status codes classifyError reads, by the incident each is.
+var statusKinds = map[string]IncidentKind{
+	"401": IncidentAuthentication,
+	"429": IncidentRateLimit,
+	"503": IncidentBackendUnavailable,
+}
+
 func classifyError(message string) IncidentKind {
 	low := strings.ToLower(message)
-	for _, sig := range []string{"not logged in", "authentication", "unauthorized", "invalid api key", "401"} {
+	statuses := map[IncidentKind]bool{}
+	for _, m := range statusPattern.FindAllStringSubmatch(low, -1) {
+		if kind, ok := statusKinds[m[1]]; ok {
+			statuses[kind] = true
+		}
+	}
+	// "refused the credential" is agent.credentialRefused's own wording (whatever
+	// the provider said after it).
+	for _, sig := range []string{"not logged in", "authentication", "unauthorized", "invalid api key", "refused the credential"} {
 		if strings.Contains(low, sig) {
 			return IncidentAuthentication
 		}
 	}
-	for _, sig := range []string{"rate limit", "rate_limit", "too many requests", "429", "overloaded", "usage limit"} {
+	if statuses[IncidentAuthentication] {
+		return IncidentAuthentication
+	}
+	for _, sig := range []string{"rate limit", "rate_limit", "too many requests", "overloaded", "usage limit"} {
 		if strings.Contains(low, sig) {
 			return IncidentRateLimit
 		}
 	}
-	for _, sig := range []string{"backend unavailable", "cli not found", "not found on path", "connection refused", "service unavailable", "503"} {
+	if statuses[IncidentRateLimit] {
+		return IncidentRateLimit
+	}
+	for _, sig := range []string{"backend unavailable", "cli not found", "not found on path", "connection refused", "service unavailable"} {
 		if strings.Contains(low, sig) {
 			return IncidentBackendUnavailable
 		}
+	}
+	if statuses[IncidentBackendUnavailable] {
+		return IncidentBackendUnavailable
 	}
 	return ""
 }

@@ -874,3 +874,97 @@ func TestArtifactStatusStillChecksCompletedEarlierStagesDuringRerun(t *testing.T
 		t.Fatalf("completed prerequisite statuses = %+v", statuses)
 	}
 }
+
+// A park that waits for a person (a refused credential: observe, approval
+// required) and resumes itself on a timer, parking again the same way, records
+// its observation once, not once per resume (bridge#24: 56 rows in seven hours).
+// A different failure is a new observation, as is the same one after another
+// decision for the book.
+func TestUnchangedObservationIsRecordedOnce(t *testing.T) {
+	ctx := context.Background()
+	db := supervisorDB(t)
+	_ = db.EnsureBatch(ctx, "observe", time.Now())
+	b, _ := db.CreateBook(ctx, store.NewBook{BatchID: "observe", SourcePath: "/obs", WorkDir: t.TempDir(), Title: "Observe", State: "fact_pass"})
+	attempt := 0
+	park := func(errMsg string) {
+		t.Helper()
+		attempt++
+		id, err := db.StartStageRun(ctx, b.ID, "fact_pass", attempt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = db.FinishStageRun(ctx, id, false, failedRunMetrics(t, errMsg))
+		_ = db.SetBookStatus(ctx, b.ID, string(state.StatusNeedsAttention), errMsg, string(state.ParkAgentCredentialRefused))
+	}
+	cfg := config.Default().Supervisor
+	cfg.AutomaticActions = true
+	cfg.MaxAttempts = 3
+	cfg.StaleMinutes, cfg.NoProgressMinutes, cfg.MaxStageMinutes = 999, 999, 999
+	s := New(db, cfg, pricing.Table{Version: "test"}, nil, Hooks{
+		Runtime: func([]store.Book) Runtime { return Runtime{ActiveBooks: map[int64]bool{}} },
+		Apply:   func(context.Context, Action, Incident) (string, error) { return "applied", nil },
+	})
+	rows := func() []store.SupervisorRun {
+		t.Helper()
+		runs, err := db.RecentSupervisorRuns(ctx, "observe", 200)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return runs
+	}
+	refused := "claude: the credential was refused (401)"
+	park(refused)
+	s.check(ctx, "observe")
+	first := rows()
+	if len(first) != 1 || first[0].SelectedAction != string(ActionObserve) || first[0].State != "approval_required" {
+		t.Fatalf("first observation = %+v", first)
+	}
+	// Three self-resumes, each a new stage run parking the same way.
+	for n := 0; n < 3; n++ {
+		park(refused)
+		s.check(ctx, "observe")
+	}
+	if got := rows(); len(got) != 1 {
+		t.Fatalf("an unchanged park recorded %d rows, want 1", len(got))
+	}
+	// A different failure is news.
+	park("claude: the credential has expired")
+	s.check(ctx, "observe")
+	if got := rows(); len(got) != 2 {
+		t.Fatalf("a changed park recorded %d rows, want 2", len(got))
+	}
+	// Another decision for the book in between: the same park is recorded again.
+	bid := b.ID
+	if _, err := db.StartSupervisorRun(ctx, store.SupervisorRun{IncidentKey: "unclassified/x", BatchID: "observe", BookID: &bid,
+		Trigger: "seed", Diagnosis: "something else", Evidence: json.RawMessage(`[]`), SelectedAction: "retry",
+		State: "completed"}); err != nil {
+		t.Fatal(err)
+	}
+	park("claude: the credential has expired")
+	s.check(ctx, "observe")
+	if got := rows(); len(got) != 4 {
+		t.Fatalf("after another decision, rows = %d, want 4", len(got))
+	}
+}
+
+// sameIncidentFamily takes an incident key for i's family whatever its stage run,
+// and nothing else.
+func TestSameIncidentFamily(t *testing.T) {
+	i := Incident{Kind: IncidentParkedRecovery, BookID: 7, Stage: "fact_pass", StageRunID: 9, Fingerprint: "abc"}
+	if !sameIncidentFamily(incidentKey(i), i) {
+		t.Fatal("its own key")
+	}
+	other := i
+	other.StageRunID = 12
+	if !sameIncidentFamily(incidentKey(other), i) {
+		t.Fatal("another stage run of the same failure")
+	}
+	for _, key := range []string{
+		"parked_recovery/7/fact_pass/9/abd", "parked_recovery/8/fact_pass/9/abc", "parked_recovery/7/auditing/9/abc",
+		"unclassified/7/fact_pass/9/abc", "parked_recovery/7/fact_pass/x/abc", "parked_recovery/7/fact_pass//abc", "",
+	} {
+		if sameIncidentFamily(key, i) {
+			t.Fatalf("%q taken for %s", key, incidentKey(i))
+		}
+	}
+}

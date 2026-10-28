@@ -440,3 +440,43 @@ func TestChaptersNotDetectedIsAHumanDecision(t *testing.T) {
 		}
 	}
 }
+
+// classifyError reads 401, 429 and 503 only as status codes an error states
+// ("status 429", "HTTP 401", "API Error: 503", `"status":429`), never as bare
+// digits: a work dir's name, a file's, a count or a duration is no auth, rate-limit
+// or availability failure.
+func TestClassifyErrorMatchesStatusTokensNotBareDigits(t *testing.T) {
+	for _, tc := range []struct {
+		message string
+		want    IncidentKind
+	}{
+		// Status codes as errors state them.
+		{"unexpected status 401 from the API", IncidentAuthentication},
+		{"HTTP 401", IncidentAuthentication},
+		{"API Error: 401 {\"type\":\"error\"}", IncidentAuthentication},
+		{"exceeded retry limit, last status: 429", IncidentRateLimit},
+		{`{"status":429,"message":"slow down"}`, IncidentRateLimit},
+		{"error_code=429", IncidentRateLimit},
+		{"HTTP/1.1 503", IncidentBackendUnavailable},
+		{"request failed: status code 503", IncidentBackendUnavailable},
+		{"code: 503", IncidentBackendUnavailable},
+		// The phrases, as before.
+		{"claude: Not logged in. Please run /login", IncidentAuthentication},
+		{"agent backend unavailable: the provider refused the credential: 401 Invalid bearer token", IncidentAuthentication},
+		{"Too Many Requests", IncidentRateLimit},
+		{"codex: connection refused", IncidentBackendUnavailable},
+		// Bare digits are nothing.
+		{"open /work/book-401/transcripts-raw/ch429.json: permission denied", ""},
+		{"ffmpeg: Invalid data found when processing input /library/Book 503/part 2.m4b", ""},
+		{"fact pass produced 429 characters, more than the 400 allowed", ""},
+		{"stage ran 503 seconds past its bound", ""},
+		{"chapter 401 has no transcript", ""},
+		// Another status is nothing either.
+		{"unexpected status 500", ""},
+		{"HTTP 404", ""},
+	} {
+		if got := classifyError(tc.message); got != tc.want {
+			t.Errorf("classifyError(%q) = %q, want %q", tc.message, got, tc.want)
+		}
+	}
+}

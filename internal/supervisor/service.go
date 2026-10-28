@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -401,6 +403,9 @@ func (s *Service) handleIncident(ctx context.Context, trigger string, i Incident
 		i.Evidence = append(i.Evidence, autoRecoveryCapEvidence(recoveries))
 	}
 	d = Decide(i, attempts, recoveries, s.policy)
+	if repeat, err := s.unchangedObservation(ctx, i, d); err != nil || repeat {
+		return err
+	}
 	evidence, _ := json.Marshal(i.Evidence)
 	bookID := i.BookID
 	var stageRunID *int64
@@ -436,6 +441,40 @@ func (s *Service) handleIncident(ctx context.Context, trigger string, i Incident
 		r.ActionOutcome = "automatic actions disabled; recommendation recorded"
 	}
 	return s.finishRun(ctx, r)
+}
+
+// unchangedObservation reports whether decision d only observes an incident that
+// waits for a person (approval required) exactly as the book's last supervisor run
+// did: the same incident family (kind, stage and fingerprint; a new stage run of
+// the same failure is the same family) observed and left for approval, with no
+// other run for the book since. Recording it again says nothing new: a park that
+// resumes itself every half hour and parks again the same way (a refused
+// credential) would add a row each time.
+func (s *Service) unchangedObservation(ctx context.Context, i Incident, d Decision) (bool, error) {
+	if d.Action != ActionObserve || !d.ApprovalRequired {
+		return false, nil
+	}
+	last, err := s.db.LatestSupervisorRunForBook(ctx, i.BookID)
+	if errors.Is(err, store.ErrNotFound) {
+		return false, nil
+	} else if err != nil {
+		return false, err
+	}
+	return last.State == "approval_required" && last.SelectedAction == string(ActionObserve) &&
+		sameIncidentFamily(last.IncidentKey, i), nil
+}
+
+// sameIncidentFamily reports whether incidentKey (incidentKey's form) names i's
+// incident family: its kind, book, stage and fingerprint, whatever its stage run
+// (store.CountSupervisorIncidentFamily's rule).
+func sameIncidentFamily(key string, i Incident) bool {
+	prefix := fmt.Sprintf("%s/%d/%s/", i.Kind, i.BookID, i.Stage)
+	suffix := "/" + i.Fingerprint
+	if len(key) < len(prefix)+len(suffix) || !strings.HasPrefix(key, prefix) || !strings.HasSuffix(key, suffix) {
+		return false
+	}
+	_, err := strconv.ParseInt(key[len(prefix):len(key)-len(suffix)], 10, 64)
+	return err == nil
 }
 
 func (s *Service) finishRun(ctx context.Context, r store.SupervisorRun) error {
