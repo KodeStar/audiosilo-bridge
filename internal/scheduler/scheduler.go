@@ -980,12 +980,35 @@ func (s *Scheduler) dispatchBooks(ctx context.Context) ([]store.Book, error) {
 	if err != nil {
 		return nil, err
 	}
+	return mergeFinished(books, finished), nil
+}
+
+// mergeFinished merges the two id-ordered reads of dispatchBooks into one
+// id-ordered list. The reads are two statements, not one snapshot: a book whose
+// last stage finished between them is in both, and its finished identity (the
+// later read) is the one kept, so the pass neither counts it twice in its series
+// ranks nor offers its stale stage to a lane.
+func mergeFinished(unfinished, finished []store.Book) []store.Book {
 	if len(finished) == 0 {
-		return books, nil
+		return unfinished
 	}
-	books = append(books, finished...)
-	sortByID(books)
-	return books, nil
+	out := make([]store.Book, 0, len(unfinished)+len(finished))
+	i, j := 0, 0
+	for i < len(unfinished) && j < len(finished) {
+		switch a, b := unfinished[i].ID, finished[j].ID; {
+		case a < b:
+			out = append(out, unfinished[i])
+			i++
+		case b < a:
+			out = append(out, finished[j])
+			j++
+		default:
+			out = append(out, finished[j])
+			i, j = i+1, j+1
+		}
+	}
+	out = append(out, unfinished[i:]...)
+	return append(out, finished[j:]...)
 }
 
 // advanceWaypoints promotes queued/ready books (no lane, no executor) to their

@@ -57,7 +57,7 @@ func TestGenerateWaitsForADescriptionToLetGo(t *testing.T) {
 		t.Fatal("the finished book couldn't be held")
 	}
 	h := hr.handler()
-	h.o.Poll = 50 * time.Millisecond // holdTries polls: a second to let go in
+	h.o.Poll = 50 * time.Millisecond // giveWayTries polls: two seconds to let go in
 	hr.srv.add(74, "Author/Book", `{}`)
 	stop := hr.runner(h)
 	defer stop()

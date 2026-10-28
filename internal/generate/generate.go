@@ -869,14 +869,14 @@ func (h *Handler) queueBook(ctx context.Context, eng Engine, r *run, nb store.Ne
 }
 
 // deleteEarlier deletes the engine book of the book's earlier run, waiting a few
-// polls (holdTries) while the engine is busy with it: a description reading it,
+// polls (giveWayTries) while the engine is busy with it: a description reading it,
 // which the server asked to give way to this job and which lets go at its next
 // report, or a stage the earlier job's end just stopped. scheduler.ErrBusy when it
 // stays busy.
 func (h *Handler) deleteEarlier(ctx context.Context, eng Engine, r *run, id int64) error {
 	for i := 1; ; i++ {
 		err := eng.Delete(ctx, id)
-		if !errors.Is(err, scheduler.ErrBusy) || i == holdTries {
+		if !errors.Is(err, scheduler.ErrBusy) || i == giveWayTries {
 			return err
 		}
 		r.rep.Progress(jobs.Progress{Step: stepWaiting, Message: "Waiting for the engine to let go of the book's earlier run"})

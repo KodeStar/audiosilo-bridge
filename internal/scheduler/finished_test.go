@@ -71,6 +71,36 @@ func TestDispatchBooksReadsFinishedBooksOnlyForSeriesRanks(t *testing.T) {
 	}
 }
 
+// The two dispatch reads are not one snapshot: a book that reached done between
+// them is in both, and the merge keeps it once, as the later finished identity,
+// so it is neither ranked twice in its series nor offered to a lane at the stage
+// it just finished.
+func TestMergeFinishedKeepsABookInBothReadsOnce(t *testing.T) {
+	unfinished := []store.Book{
+		{ID: 1, State: string(state.ASR), Series: "A", SeriesPos: "2", Title: "one"},
+		{ID: 3, State: string(state.Contributing), Series: "A", SeriesPos: "3", Title: "three"},
+		{ID: 6, State: string(state.FactPass), Series: "B", SeriesPos: "1", Title: "six"},
+	}
+	finished := []store.Book{
+		{ID: 2, State: string(state.Done), Series: "A", SeriesPos: "1"},
+		{ID: 3, State: string(state.Done), Series: "A", SeriesPos: "3"},
+		{ID: 9, State: string(state.Done), Series: "B", SeriesPos: "2"},
+	}
+	books := mergeFinished(unfinished, finished)
+	if got, want := bookIDs(books), []int64{1, 2, 3, 6, 9}; !slices.Equal(got, want) {
+		t.Fatalf("merged %v, want %v", got, want)
+	}
+	if books[2].State != string(state.Done) || books[2].Title != "" {
+		t.Fatalf("book 3 = %+v, want the later finished read", books[2])
+	}
+	if got := mergeFinished(unfinished, nil); !slices.Equal(bookIDs(got), []int64{1, 3, 6}) {
+		t.Fatalf("no finished books: %v", bookIDs(got))
+	}
+	if got := mergeFinished(nil, finished); !slices.Equal(bookIDs(got), []int64{2, 3, 9}) {
+		t.Fatalf("no unfinished books: %v", bookIDs(got))
+	}
+}
+
 // A finished book the scheduler no longer reads is dispatched again once it
 // leaves done: its stage runs a second time and it finishes again.
 func TestBookLeavingDoneIsDispatchedAgain(t *testing.T) {

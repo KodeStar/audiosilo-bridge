@@ -1389,6 +1389,8 @@ internal/
             (ListFinishedSeriesBooks), since a
             finished volume still counts in the series breadth ranks (asrBreadthRanks,
             the ETA simulation); the ETA progress read is ListUnfinishedProgress.
+            The two reads are two statements, so mergeFinished keeps a book that
+            reached done between them once, as its finished identity.
             A book that leaves done is read in full at the next pass. Reconcile,
             the startup GC and the restart re-admit still read every book.
   supervisor/ the health-tick babysitter (config supervisor.*): classifies incidents
@@ -1648,7 +1650,8 @@ internal/
             every Keepalive (DefaultKeepalive 30 s, 10 s before the 2026-10 perf
             quick wins: every report is a server write that empties its generation
             caches; four still fit in the lease), renewing the server's 2-minute
-            lease, so a cancel is heard within 30 s; a reply
+            lease, so a cancel is heard within about 32 s (the keepalive is checked
+            on the 2 s ProgressEvery tick); a reply
             with cancel_requested ends its context (errCancelRequested -> reported
             cancelled), a 409 ends it as lost (nothing more sent), a 401 is handed to
             the app WITH the link that got it (onUnauthorized(srv): a job of the
@@ -1935,7 +1938,7 @@ internal/
             holdTries polls, else errBookBusy, "The engine is busy with this book;
             try again in a minute.") for the call and the read-back of the file, so
             no stage, Retry's dispatch, Delete, purge, sweep or supervisor terminate
-            acts on the book meanwhile (a new generate job waits holdTries polls for
+            acts on the book meanwhile (a new generate job waits giveWayTries polls for
             a held earlier run, deleteEarlier: the server asks a describe job to give
             way to it, which it does at its next report; then "try again in a
             minute"); a park waits with the hold let go (the job's in-process
@@ -2018,7 +2021,8 @@ internal/
             job only once that one is cancelled (a PARKED one it cancels as it queues
             it; a working one refuses it, 409 detect_open, until an admin cancels
             it), and the Bridge hears that cancel at the chapters job's next report,
-            so create() first waits up to holdTries polls (awaitChaptersGivingWay)
+            so create() first waits up to giveWayTries polls (awaitChaptersGivingWay,
+            40: two minutes at the 3 s Poll, a 30 s keepalive or two lost)
             while that chapters job still follows the book, whatever the book is
             doing, or no job does but the book isn't stopped yet (its job's end is
             stopping it; one still not stopped when the wait runs out is stopped
