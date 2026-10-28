@@ -156,11 +156,21 @@ func Resumes(ctx context.Context) bool {
 	return !errors.Is(cause, errCancelRequested) && !errors.Is(cause, errLost)
 }
 
+// DefaultKeepalive is how often a running job with no new progress reports by
+// default. Each report renews the server's 2-minute lease (and is a write
+// there), so 30 s keeps four reports inside one lease, enough to ride out a
+// failed send or two, while an idle job moves the server's write generation
+// twice a minute rather than six times. A changed progress is still sent within
+// ProgressEvery and a new step at once; only a cancel waits up to this long to
+// be heard.
+const DefaultKeepalive = 30 * time.Second
+
 // Options tunes a Runner; zero values take the defaults.
 type Options struct {
 	Lanes map[string]int
 	// Keepalive is how often a running job reports even with no new progress,
-	// renewing the server's 2-minute lease and picking up a cancel.
+	// renewing the server's 2-minute lease and picking up a cancel (default
+	// DefaultKeepalive).
 	Keepalive time.Duration
 	// ProgressEvery is the shortest gap between two progress reports of a job
 	// (a new step is sent at once).
@@ -215,7 +225,7 @@ func New(st Store, server func() Server, onUnauthorized func(Server), opts Optio
 	}
 	opts.Lanes = maps.Clone(opts.Lanes)
 	if opts.Keepalive <= 0 {
-		opts.Keepalive = 10 * time.Second
+		opts.Keepalive = DefaultKeepalive
 	}
 	if opts.ProgressEvery <= 0 {
 		opts.ProgressEvery = 2 * time.Second

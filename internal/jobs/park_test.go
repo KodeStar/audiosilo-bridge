@@ -500,3 +500,50 @@ func TestParkedProgressCarriesThroughANullPark(t *testing.T) {
 		t.Fatalf("Unpark kept the carried park: %+v", rep.Last())
 	}
 }
+
+// The default keepalive is 30 s: a running job with nothing new reports twice a
+// minute, which still leaves four renewals inside the server's 2-minute lease
+// (a failed send or two never loses the claim). Change-driven reports keep their
+// 2 s gap.
+func TestDefaultKeepaliveLeavesLeaseMargin(t *testing.T) {
+	t.Parallel()
+	r := New(openStore(t), func() Server { return nil }, nil, Options{Log: quietLog()})
+	if DefaultKeepalive != 30*time.Second || r.opts.Keepalive != DefaultKeepalive {
+		t.Fatalf("Keepalive = %v, want 30s", r.opts.Keepalive)
+	}
+	if r.opts.ProgressEvery != 2*time.Second {
+		t.Fatalf("ProgressEvery = %v, want 2s (change-driven reports unchanged)", r.opts.ProgressEvery)
+	}
+	const serverLease = 2 * time.Minute // audiosilo-server bridge.Lease
+	if n := serverLease / DefaultKeepalive; n < 4 {
+		t.Fatalf("only %d keepalives fit in the %v lease, want at least 4", n, serverLease)
+	}
+}
+
+// A running job with no new progress reports once per Keepalive, not once per
+// ProgressEvery tick.
+func TestIdleJobReportsOncePerKeepalive(t *testing.T) {
+	t.Parallel()
+	db, srv := openStore(t), newFakeServer()
+	srv.add(&link.Job{ID: 9, Kind: "k.idle", Attempts: 1})
+	opts := testOpts()
+	opts.Keepalive = 150 * time.Millisecond
+	r := New(db, func() Server { return srv }, nil, opts, handler{kind: "k.idle", lane: LaneLight,
+		fn: func(_ context.Context, _ Job, _ *Reporter) (any, error) {
+			start := countState(srv, 9, link.StateRunning)
+			time.Sleep(500 * time.Millisecond)
+			// ~3 keepalives in 500 ms at 150 ms; a report per 1 ms tick would be hundreds.
+			if got := countState(srv, 9, link.StateRunning) - start; got < 1 || got > 4 {
+				return nil, fmt.Errorf("keepalive reports in 500 ms = %d, want 1 to 4 at a 150 ms keepalive", got)
+			}
+			return nil, nil
+		}})
+	runFor(t, r, func() bool { s, _ := srv.finalState(9); return s != "" })
+	if s, u := srv.finalState(9); s != link.StateDone {
+		msg := ""
+		if u.Error != nil {
+			msg = *u.Error
+		}
+		t.Fatalf("final = %q: %s", s, msg)
+	}
+}

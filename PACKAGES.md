@@ -1625,7 +1625,10 @@ internal/
             while its book is queued or parked, and the lane only bounds how many
             are followed); the claim loop asks only for kinds whose lane has room, and
             waits (no claim) while unpaired or full. A running job reports at least
-            every Keepalive (10 s), renewing the server's 2-minute lease; a reply
+            every Keepalive (DefaultKeepalive 30 s, 10 s before the 2026-10 perf
+            quick wins: every report is a server write that empties its generation
+            caches; four still fit in the lease), renewing the server's 2-minute
+            lease, so a cancel is heard within 30 s; a reply
             with cancel_requested ends its context (errCancelRequested -> reported
             cancelled), a 409 ends it as lost (nothing more sent), a 401 is handed to
             the app WITH the link that got it (onUnauthorized(srv): a job of the
