@@ -16,6 +16,7 @@ import (
 	"errors"
 	"log/slog"
 	"maps"
+	"net/http"
 	"reflect"
 	"sort"
 	"strings"
@@ -158,11 +159,11 @@ func Resumes(ctx context.Context) bool {
 
 // DefaultKeepalive is how often a running job with no new progress reports by
 // default. Each report renews the server's 2-minute lease (and is a write
-// there), so 30 s keeps four reports inside one lease (a failed one is tried
-// again sooner, DefaultReportRetry), while an idle job moves the server's write generation
-// twice a minute rather than six times. A changed progress is still sent within
-// ProgressEvery and a new step at once; only a cancel waits up to this long to
-// be heard.
+// there), so 30 s keeps four reports inside one lease (one that didn't get
+// through is tried again sooner, DefaultReportRetry), while an idle job moves
+// the server's write generation twice a minute rather than six times. A
+// changed progress is still sent within ProgressEvery and a new step at once;
+// only a cancel waits up to this long to be heard.
 const DefaultKeepalive = 30 * time.Second
 
 // DefaultReportRetry is how soon a running job reports again after a report
@@ -903,9 +904,9 @@ type Reporter struct {
 	// dirty: progress changed since it was last sent (and stored).
 	dirty  bool
 	sentAt time.Time
-	// failing: the last report didn't reach the server, so the next goes after
-	// ReportRetry rather than Keepalive (only send touches it: execute's
-	// first, then loop's goroutine).
+	// failing: the last report didn't reach the server (unreachable), so the
+	// next goes after ReportRetry rather than Keepalive. Only send writes it
+	// and loop reads it, both on loop's goroutine after execute's first send.
 	failing bool
 	// parked: the job reports needs_attention with parkMsg as its error, until
 	// Unpark. Unparked, every report clears the error (one a park left, even
@@ -1114,11 +1115,25 @@ func (p *Reporter) send() bool {
 	default:
 		// The server is unreachable for now: the job goes on, and its lease
 		// (a running job's) lasts two minutes from the last report that got
-		// through, so the next report goes after ReportRetry, not Keepalive.
-		p.failing = true
+		// through, so the next report goes after ReportRetry, not Keepalive
+		// (a refusal would only be refused again: it waits the Keepalive).
+		p.failing = unreachable(err)
 		p.r.log.Warn("bridge: reporting progress failed", "job", p.job.ID, "err", err)
 		return true
 	}
+}
+
+// unreachable reports whether a failed report may get through if sent again
+// soon: no answer at all (the network, a timeout), a 5xx, a 408 or a 429. Any
+// other 4xx (a bad update, a job the server no longer has) is refused the same
+// way however soon it goes.
+func unreachable(err error) bool {
+	var refused *link.APIError
+	if !errors.As(err, &refused) {
+		return true
+	}
+	return refused.Status >= http.StatusInternalServerError ||
+		refused.Status == http.StatusRequestTimeout || refused.Status == http.StatusTooManyRequests
 }
 
 // answer acts on the server's answer to an update: the job follows a moved path,

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"slices"
 	"strings"
 	"sync"
@@ -566,14 +567,41 @@ func TestFailedReportRetriesSoonerUntilOneSucceeds(t *testing.T) {
 			if err := await(func() bool { return countState(srv, 10, link.StateRunning) > running }, "a report through"); err != nil {
 				return nil, err
 			}
+			// (300 ms, well short of the second, so a slow wake on a loaded
+			// machine still lands before the next keepalive.)
 			through := tries()
-			time.Sleep(500 * time.Millisecond)
+			time.Sleep(300 * time.Millisecond)
 			if got := tries() - through; got != 0 {
-				return nil, fmt.Errorf("%d reports in 500 ms after one got through, want none before the keepalive", got)
+				return nil, fmt.Errorf("%d reports in 300 ms after one got through, want none before the keepalive", got)
 			}
 			return nil, nil
 		}})
 	wantDone(t, r, srv, 10)
+}
+
+// Only a report that may get through if sent again soon takes the ReportRetry:
+// a 4xx refusal (bar 408 and 429) waits the Keepalive like any report.
+func TestUnreachable(t *testing.T) {
+	t.Parallel()
+	for _, c := range []struct {
+		err  error
+		want bool
+	}{
+		{errors.New("connection refused"), true},
+		{context.DeadlineExceeded, true},
+		{&link.APIError{Status: http.StatusInternalServerError}, true},
+		{&link.APIError{Status: http.StatusBadGateway}, true},
+		{&link.APIError{Status: http.StatusTooManyRequests}, true},
+		{&link.APIError{Status: http.StatusRequestTimeout}, true},
+		{&link.APIError{Status: http.StatusBadRequest}, false},
+		{&link.APIError{Status: http.StatusNotFound}, false},
+		{&link.APIError{Status: http.StatusConflict, Code: "kind_unavailable"}, false},
+		{fmt.Errorf("wrapped: %w", &link.APIError{Status: http.StatusBadRequest}), false},
+	} {
+		if got := unreachable(c.err); got != c.want {
+			t.Errorf("unreachable(%v) = %v, want %v", c.err, got, c.want)
+		}
+	}
 }
 
 // A running job with no new progress reports once per Keepalive, not once per

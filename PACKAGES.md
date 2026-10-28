@@ -1654,7 +1654,9 @@ internal/
             on the 2 s ProgressEvery tick). After a report that didn't reach the
             server the next goes after ReportRetry (DefaultReportRetry 10 s) instead,
             until one gets through, then Keepalive again: at 30 s alone one report
-            through and three failed would lapse the lease. A reply
+            through and three failed would lapse the lease. Only an answerless
+            failure, a 5xx, 408 or 429 counts (unreachable); any other 4xx would be
+            refused again however soon, so it waits the Keepalive. A reply
             with cancel_requested ends its context (errCancelRequested -> reported
             cancelled), a 409 ends it as lost (nothing more sent), a 401 is handed to
             the app WITH the link that got it (onUnauthorized(srv): a job of the
