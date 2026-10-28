@@ -904,9 +904,16 @@ internal/
             (loadDetectedPositions) instead of classifying again from the text layer
             QA leaves (a re-transcribed opening, a loop repaired past the edge rule,
             moved every position off the list). DetectedChaptersPath /
-            ReadDetectedChapters / CurrentFor (manifest fingerprint and source size) /
+            ReadDetectedChapters / CurrentFor and CheckCurrent (manifest fingerprint,
+            the source's size and mtime (source_mtime_ns, within sourceModSlack, 2 s,
+            for a mount's rounding) at the path the caller says the book is now (a
+            moved book; "" the manifest's); fails closed: a stat error is never
+            current, CheckCurrent returns it so a caching caller asks again; a list
+            with no mtime recorded falls back on inspectedSource's rule) /
             DetectedStamp (local stats, so a poller re-reads only a changed list) are
-            generate's, and DetectionRerunnable (a book stopped at chapter_detecting
+            generate's, as is TranscriptionContinuable (a book stopped at asr can go
+            on from what it kept: the windows manifest in place, not moved, and the
+            file the one inspected, inspectedSource), and DetectionRerunnable (a book stopped at chapter_detecting
             can run it again from what it kept: the window layer with the confident
             detection kept for it, or in place with every window's silences to be
             had; every window's raw complete; the file the one inspected: the size
@@ -1454,6 +1461,16 @@ internal/
             broken artifact on a finished book.
             Phase 1d: chapters_not_detected is decided like markers_not_confident (a
             person's call: park_escalate for approval, never an automatic retry).
+            bridge#24: classifyError reads 401, 429 and 503 only as status codes an
+            error states (statusPattern: after status, status code, HTTP[/1.1],
+            error[_code] or code, `"status":429` included), never bare digits, which
+            work-dir names, file names and counts carry; its phrases still come
+            first (agent's own "refused the credential" among them). handleIncident records no row for an observe decision left for
+            approval when the book's newest supervisor run is that same observation
+            of the same incident family (unchangedObservation, sameIncidentFamily:
+            kind, book, stage and fingerprint, any stage run), so a park that
+            resumes itself every 30 minutes and parks again the same way (a refused
+            credential) is recorded once, not once per resume.
   metaops/  meta.audiosilo.app client (coverage/lookup, capped 1h TTL caches,
             graceful degrade) + the PathAllowed/AllowedPath containment checks
             (Phase 1a passes the mapped mounts as the roots). glossary.go adds
@@ -1962,7 +1979,10 @@ internal/
             chapters}. refreshChapters reads the list and returns (the list, current):
             it reads and checks it again only when pipeline.DetectedStamp (local stats
             of chapters_detected.json and the manifest) changed since the last look,
-            so the poll it runs on costs a stat or two; chaptersJSON composes the file
+            so the poll it runs on costs a stat or two (checked against the book's
+            audio where the job finds it now, run.audioFile; one that can't be
+            looked at is not current and asked again at the next look, never kept
+            so); chaptersJSON composes the file
             at each write, from the book's files and path as they are then (the server
             moves a job with its book: a list naming the old file would never apply),
             at the time the run first noted the list. sidecars.generate (r.kind ==
@@ -1978,10 +1998,15 @@ internal/
             merge, mergedProvenance, takes fresh's object by its key). create()
             CONTINUES a goal-chapters engine book at the same source path (not swept,
             no open job, the audio read): a done one whose list is CurrentFor the file
-            on disk, from splitting; or one cancelled or failed at chapter_detecting
+            on disk, from splitting; one cancelled or failed at chapter_detecting
             whose kept windows can run it again (pipeline.DetectionRerunnable), going
             on there, so the detection runs again from the window layer with the
-            whole pipeline after it and nothing is transcribed again; either only
+            whole pipeline after it and nothing is transcribed again; or one
+            cancelled or failed at asr (a chapters job parked asr_worker_waiting,
+            cancelled as a generate job is queued, bridge#24) whose windows manifest
+            is in place for the file inspected (pipeline.TranscriptionContinuable),
+            from splitting (its kept sentinel passes it on; a purge took that too),
+            asr transcribing only the windows it hadn't finished; each only
             while the book is still the one file it was (audio.ResolveSource: a
             folder that gained an audio file is a multi-file book now)
             (continueChapters -> store.ContinueChapters with the state it checked and
