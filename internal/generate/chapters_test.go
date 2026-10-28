@@ -41,7 +41,7 @@ func detectChapters(t *testing.T, b store.Book) {
 	sum := sha256.Sum256(raw)
 	d := pipeline.DetectedChapters{ManifestSHA: hex.EncodeToString(sum[:]), DurationMs: 30000}
 	if info, err := os.Stat(b.SourcePath); err == nil {
-		d.SourceSize = info.Size()
+		d.SourceSize, d.SourceModTime = info.Size(), info.ModTime().UnixNano()
 	}
 	for i, c := range m.Chapters {
 		d.Chapters = append(d.Chapters, pipeline.DetectedChapter{Title: c.Title, StartMs: int64(i) * 10000, LengthMs: 10000, Parts: []int{i + 1}})
@@ -292,6 +292,7 @@ func TestKeptChapters(t *testing.T) {
 func TestRefreshChaptersOnlyWhenChanged(t *testing.T) {
 	t.Parallel()
 	b := store.Book{WorkDir: t.TempDir(), SourcePath: filepath.Join(t.TempDir(), "Loose.m4b")}
+	mustWrite(t, b.SourcePath, "abcdef")
 	if refreshed, ok := New(Options{}).refreshChapters(&run{}, b); ok || len(refreshed.Chapters) != 0 {
 		t.Fatal("a list before there is one")
 	}
@@ -314,6 +315,33 @@ func TestRefreshChaptersOnlyWhenChanged(t *testing.T) {
 	if again, ok := h.refreshChapters(r, b); !ok || len(again.Chapters) != 3 {
 		t.Fatalf("an unchanged list was read again: %+v, %v", again, ok)
 	}
+	// Garbled is unreadable: put the list back as it was before the next steps.
+	mustWrite(t, path, string(raw))
+	if err := os.Chtimes(path, info.ModTime(), info.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	r.detectedStamp = ""
+	if _, ok := h.refreshChapters(r, b); !ok {
+		t.Fatal("the restored list isn't current")
+	}
+	// The audio out of sight for a moment (a mount gone): not current, and not
+	// kept so, the list unchanged: it is current again once the file is back.
+	src, _ := os.Stat(b.SourcePath)
+	hidden := b.SourcePath + ".away"
+	if err := os.Rename(b.SourcePath, hidden); err != nil {
+		t.Fatal(err)
+	}
+	r.detectedStamp = ""
+	if _, ok := h.refreshChapters(r, b); ok {
+		t.Fatal("a list whose audio can't be looked at is current")
+	}
+	if err := os.Rename(hidden, b.SourcePath); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := h.refreshChapters(r, b); !ok {
+		t.Fatalf("the audio is back (%v), but the list stayed not current", src.ModTime())
+	}
+	mustWrite(t, path, garbled)
 	later := info.ModTime().Add(time.Second)
 	if err := os.Chtimes(path, later, later); err != nil {
 		t.Fatal(err)
@@ -480,6 +508,122 @@ func TestGenerateContinuesACancelledChaptersRun(t *testing.T) {
 	if err := json.Unmarshal(final.Result, &res); err != nil ||
 		strings.Join(res.Files, ",") != "Loose.characters.json,Loose.recaps.json,Loose.chapters.json,Loose.bridge.json" {
 		t.Fatalf("result = %s", final.Result)
+	}
+}
+
+// parkChaptersAtASR runs a chapters job (id) on Loose.m4b until it parks at asr
+// waiting for an ASR worker (asr_worker_waiting), with its first window
+// transcribed, and returns its engine book.
+func parkChaptersAtASR(hr *harness, id int64) store.Book {
+	hr.t.Helper()
+	hr.exec.windowed = true
+	hr.exec.parks[string(state.ASR)] = 1
+	hr.srv.addKind(id, ChaptersKind, "Loose.m4b", `{}`)
+	hr.waitFor("the chapters job parked at asr", func() bool { return hr.srv.newParks(id, string(state.ParkASRWorkerWaiting)) > 0 })
+	b := hr.engineBook(id)
+	windowLayer(hr.t, b)
+	// Only the first window was transcribed before the worker went.
+	if err := os.Remove(filepath.Join(b.WorkDir, transcript.RawDir, transcript.RawName(2))); err != nil {
+		hr.t.Fatal(err)
+	}
+	return b
+}
+
+// A generate job queued for a book whose chapters job parked at asr waiting for a
+// worker (the server cancels that job as it queues this one) continues its engine
+// book instead of clearing it: the window it transcribed is kept, and the run goes
+// on from splitting (passed straight on, its window FLACs whole) through asr, the
+// detection and the whole pipeline, with the job's identity (bridge#24).
+func TestGenerateContinuesAChaptersRunParkedAtASR(t *testing.T) {
+	t.Parallel()
+	hr := newHarness(t)
+	hr.h.o.Poll = 250 * time.Millisecond // holdTries polls: five seconds to give way in
+	stop := hr.runner(hr.h, hr.h.ChaptersJob())
+	defer stop()
+	first := parkChaptersAtASR(hr, 71)
+	kept := filepath.Join(first.WorkDir, transcript.RawDir, transcript.RawName(1))
+	want, err := os.ReadFile(kept) //nolint:gosec // test
+	if err != nil {
+		t.Fatal(err)
+	}
+	hr.srv.set(func() {
+		hr.srv.books["Loose.m4b"] = link.Book{LibraryID: 1, Path: "Loose.m4b", Files: []link.BookFile{{Path: "Loose.m4b", Size: 6}},
+			Info: &link.BookInfo{Title: "The Loose One", Series: "The Saga", SeriesIndex: "4"}}
+	})
+	hr.srv.add(72, "Loose.m4b", `{}`)
+	hr.waitFor("the generate job waiting for the chapters job", func() bool {
+		return hr.srv.saw(72, func(_ link.Update, p map[string]any) bool {
+			return p["message"] == "Waiting for the book's chapters job to give way"
+		})
+	})
+	hr.srv.set(func() { hr.srv.cancel[71] = true })
+	hr.waitFor("the chapters job cancelled", func() bool { s, _ := hr.srv.final(71); return s == link.StateCancelled })
+	waitDone(hr, 72)
+	b := hr.engineBook(72)
+	if b.ID != first.ID || b.WorkDir != first.WorkDir || b.Goal != "" || b.Title != "The Loose One" || b.SeriesPos != "4" {
+		t.Fatalf("the generate job's book = %+v, want the chapters run (%d) continued", b, first.ID)
+	}
+	if got, err := os.ReadFile(kept); err != nil || string(got) != string(want) { //nolint:gosec // test
+		t.Fatalf("the transcribed window = %q, %v: the continue threw it away", got, err)
+	}
+	// Splitting's kept sentinel passes it straight on (its window FLACs are whole;
+	// a purge that took them takes the sentinel too, so they would be cut again).
+	if inspect, _ := stageRuns(hr, b.ID, state.Inspecting); inspect != 1 {
+		t.Fatalf("inspecting runs = %d: the continue started over", inspect)
+	}
+	if split, _ := stageRuns(hr, b.ID, state.Splitting); split != 1 {
+		t.Fatalf("splitting runs = %d: the continue split again", split)
+	}
+	if asr, _ := stageRuns(hr, b.ID, state.ASR); asr != 2 {
+		t.Fatalf("asr runs = %d, want the parked run and the continued one", asr)
+	}
+	if _, ok := stageRuns(hr, b.ID, state.ChapterDetecting); ok != 1 {
+		t.Fatal("the continued run didn't find the chapters")
+	}
+	if !scheduler.SentinelExists(b.WorkDir, string(state.Sanitizing)) {
+		t.Fatal("the continued book didn't run the whole pipeline")
+	}
+}
+
+// A chapters run parked at asr is never continued once its file was replaced (or
+// its windows manifest is gone): the generate job starts its own run.
+func TestGenerateDoesNotContinueAnASRRunItCantTrust(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		spoil func(hr *harness, b store.Book)
+	}{
+		{"replaced", func(hr *harness, _ store.Book) {
+			mustWrite(hr.t, filepath.Join(hr.root, "Loose.m4b"), "another encode")
+			hr.srv.set(func() {
+				hr.srv.books["Loose.m4b"] = link.Book{LibraryID: 1, Path: "Loose.m4b", Files: []link.BookFile{{Path: "Loose.m4b", Size: 14}},
+					Info: &link.BookInfo{Title: "Loose"}}
+			})
+		}},
+		{"no windows manifest", func(hr *harness, b store.Book) {
+			if err := os.Remove(filepath.Join(b.WorkDir, audio.ManifestName)); err != nil {
+				hr.t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			hr := newHarness(t)
+			stop := hr.runner(hr.h, hr.h.ChaptersJob())
+			defer stop()
+			first := parkChaptersAtASR(hr, 73)
+			hr.srv.set(func() { hr.srv.cancel[73] = true })
+			hr.waitFor("the engine book cancelled", func() bool {
+				b, err := hr.db.GetBook(context.Background(), first.ID)
+				return err == nil && scheduler.IsCancelled(b)
+			})
+			tc.spoil(hr, first)
+			hr.srv.add(74, "Loose.m4b", `{}`)
+			waitDone(hr, 74)
+			if b := hr.engineBook(74); b.ID == first.ID {
+				t.Fatalf("the generate job continued the chapters run (book %d)", b.ID)
+			}
+		})
 	}
 }
 

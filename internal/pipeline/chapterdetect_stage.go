@@ -87,9 +87,14 @@ type DetectedChapters struct {
 	ManifestSHA string `json:"manifest_sha"`
 	// SourceSize is the audio file's size then: a replaced file makes it stale too
 	// (0 when it couldn't be looked at then: unknown, never compared).
-	SourceSize int64             `json:"source_size"`
-	DurationMs int64             `json:"duration_ms"`
-	Chapters   []DetectedChapter `json:"chapters"`
+	SourceSize int64 `json:"source_size"`
+	// SourceModTime is the audio file's modification time then, in Unix
+	// nanoseconds: a same-size rewrite (a tag edit) makes it stale too. 0 on a list
+	// written before it was recorded, or when the file couldn't be looked at then:
+	// the file must then be no newer than probe.json (inspectedSource's rule).
+	SourceModTime int64             `json:"source_mtime_ns,omitempty"`
+	DurationMs    int64             `json:"duration_ms"`
+	Chapters      []DetectedChapter `json:"chapters"`
 }
 
 // DetectedChapter is one entry of DetectedChapters.
@@ -129,22 +134,61 @@ func DetectedStamp(workDir string) (string, bool) {
 	return stamp, true
 }
 
-// CurrentFor reports whether d still describes the book in workDir: its manifest is
-// the one d was made from, and its audio file (when it can be looked at, and was
-// when d was written) has the same size.
-func (d DetectedChapters) CurrentFor(workDir string) bool {
+// CurrentFor reports whether d still describes the book in workDir, its audio
+// file at source (CheckCurrent), false when that can't be told.
+func (d DetectedChapters) CurrentFor(workDir, source string) bool {
+	current, err := d.CheckCurrent(workDir, source)
+	return current && err == nil
+}
+
+// sourceModSlack is how far the audio file's modification time may be from the
+// one d recorded and still be the same file: a library seen through another
+// mount (SMB, FUSE) can round it. An edit that matters comes after the whole
+// transcription, far past it.
+const sourceModSlack = 2 * time.Second
+
+// CheckCurrent reports whether d still describes the book in workDir: its manifest
+// is the one d was made from, and its audio file, at source (where the book is
+// now: a book the server moved with its job keeps its engine book; "" for the
+// manifest's path), has the size and modification time d recorded (a list that
+// recorded no time: the file inspect read, inspectedSource's rule).
+// It fails closed: an error when the manifest or the audio file can't be looked
+// at now (a mount gone for a moment), which a caller that caches the answer asks
+// again rather than keeping.
+func (d DetectedChapters) CheckCurrent(workDir, source string) (bool, error) {
 	fp, err := manifestFingerprint(workDir)
-	if err != nil || fp != d.ManifestSHA {
-		return false
+	if err != nil {
+		return false, err
+	}
+	if fp != d.ManifestSHA {
+		return false, nil
 	}
 	m, err := audio.ReadManifest(workDir)
 	if err != nil {
-		return false
+		return false, err
 	}
-	if info, err := os.Stat(m.Source); err == nil && d.SourceSize > 0 && info.Size() != d.SourceSize {
-		return false
+	if source == "" {
+		source = m.Source
 	}
-	return true
+	info, err := os.Stat(source)
+	if err != nil {
+		return false, err
+	}
+	if d.SourceSize > 0 && info.Size() != d.SourceSize {
+		return false, nil
+	}
+	if d.SourceModTime != 0 {
+		diff := info.ModTime().Sub(time.Unix(0, d.SourceModTime))
+		return diff.Abs() <= sourceModSlack, nil
+	}
+	// No time recorded (a list from before it was, or one written while the file
+	// was out of sight): the file must be the one inspect read.
+	if d.SourceSize <= 0 {
+		if size := audio.ProbedSize(workDir); size <= 0 || info.Size() != size {
+			return false, nil
+		}
+	}
+	return modifiedBeforeProbe(workDir, info), nil
 }
 
 // windowLayer is where a book's windows are: in place (manifest.json and
@@ -332,6 +376,43 @@ func keptDetection(workDir, sha string) (chapterdetect.Result, bool) {
 // parked) comes after the whole transcription, well past it.
 const sourceClockSlack = 2 * time.Minute
 
+// inspectedSource reports whether the audio file at source is still the one
+// inspect read for the book in workDir: the size probe.json states (which must be
+// known) and modified no later than probe.json was written, give or take
+// sourceClockSlack (a tag editor adding chapter markers can keep the size).
+func inspectedSource(workDir, source string) bool {
+	size := audio.ProbedSize(workDir)
+	info, err := os.Stat(source)
+	if err != nil || size <= 0 || info.Size() != size {
+		return false
+	}
+	return modifiedBeforeProbe(workDir, info)
+}
+
+// modifiedBeforeProbe reports whether the audio file (info) was modified no later
+// than the book's probe.json was written, give or take sourceClockSlack; false
+// when there is no probe.json to tell by.
+func modifiedBeforeProbe(workDir string, info os.FileInfo) bool {
+	probe, err := os.Stat(filepath.Join(workDir, audio.ProbeName))
+	return err == nil && !info.ModTime().After(probe.ModTime().Add(sourceClockSlack))
+}
+
+// TranscriptionContinuable reports whether a book stopped at asr (parked waiting
+// for a worker, cancelled or failed there) can go on transcribing from what it
+// kept, the windows it finished never transcribed again: the windows manifest is
+// in place (inspect made it and chapter_detecting hasn't moved it) with windows to
+// transcribe, and the audio file is the one inspected (inspectedSource). A
+// generate job continues such a chapters-only book from splitting (passed
+// straight on while its window FLACs are whole, cut again after a purge), and asr
+// then skips every window already complete.
+func TranscriptionContinuable(workDir string) bool {
+	layer, err := readWindowLayer(workDir)
+	if err != nil || layer.moved || len(layer.manifest.Chapters) == 0 {
+		return false
+	}
+	return inspectedSource(workDir, layer.manifest.Source)
+}
+
 // DetectionRerunnable reports whether a book stopped at chapter_detecting (parked,
 // cancelled or failed there) can run the stage again from what it kept, its audio
 // never transcribed again: the window layer, with the confident detection kept for
@@ -346,13 +427,9 @@ func DetectionRerunnable(workDir string) bool {
 	if err != nil || len(layer.manifest.Chapters) == 0 {
 		return false
 	}
-	// The cheap checks first: a replaced or edited file refuses before any
+	// The cheap check first: a replaced or edited file refuses before any
 	// transcript is read.
-	size := audio.ProbedSize(workDir)
-	info, err := os.Stat(layer.manifest.Source)
-	probe, perr := os.Stat(filepath.Join(workDir, audio.ProbeName))
-	if err != nil || perr != nil || size <= 0 || info.Size() != size ||
-		info.ModTime().After(probe.ModTime().Add(sourceClockSlack)) {
+	if !inspectedSource(workDir, layer.manifest.Source) {
 		return false
 	}
 	_, kept := keptDetection(workDir, windowsSHA(layer.manifest))
@@ -497,7 +574,7 @@ func writeDetectedChapters(book store.Book, m audio.Manifest, docs []transcript.
 	}
 	d := DetectedChapters{ManifestSHA: fp, DurationMs: ms(m.Duration), Chapters: list}
 	if info, err := os.Stat(m.Source); err == nil {
-		d.SourceSize = info.Size()
+		d.SourceSize, d.SourceModTime = info.Size(), info.ModTime().UnixNano()
 	}
 	out, err := json.MarshalIndent(d, "", "  ")
 	if err != nil {

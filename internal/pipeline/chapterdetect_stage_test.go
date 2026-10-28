@@ -234,7 +234,7 @@ func TestChapterDetectStage(t *testing.T) {
 	}
 	list, err := ReadDetectedChapters(book.WorkDir)
 	if err != nil || len(list.Chapters) != 2 || list.Chapters[0].StartMs != 0 || list.Chapters[1].StartMs != 12300 ||
-		list.Chapters[1].LengthMs != 7700 || !list.CurrentFor(book.WorkDir) {
+		list.Chapters[1].LengthMs != 7700 || !list.CurrentFor(book.WorkDir, "") {
 		t.Fatalf("chapters_detected.json = %+v, %v", list, err)
 	}
 	if !scheduler.SentinelExists(book.WorkDir, string(state.ChapterDetecting)) {
@@ -573,5 +573,181 @@ func TestDetectionRerunnable(t *testing.T) {
 	writeJSONFile(t, detection, kept)
 	if !DetectionRerunnable(work) {
 		t.Fatal("a moved layer with its detection isn't rerunnable")
+	}
+}
+
+// TranscriptionContinuable says a book stopped at asr (parked waiting for a worker,
+// then cancelled) can go on transcribing from what it kept: the windows manifest
+// in place, the file the one inspected. A replaced or edited file, a probe with no
+// size, a markers manifest or a window layer moved aside are denied.
+func TestTranscriptionContinuable(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "book.m4b")
+	before := time.Now().Add(-time.Hour)
+	writeSource := func(body string, mod time.Time) {
+		t.Helper()
+		if err := os.WriteFile(src, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(src, mod, mod); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeSource("the audio", before)
+	work := filepath.Join(dir, "work")
+	if err := os.MkdirAll(work, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if TranscriptionContinuable(work) {
+		t.Fatal("continuable with no manifest")
+	}
+	m := audio.Manifest{Source: src, Style: audio.StyleWindows, Duration: 20, ChapterCount: 2, Chapters: []audio.Chapter{
+		{Chapter: 1, Start: 0, End: 10, Duration: 10}, {Chapter: 2, Start: 10, End: 20, Duration: 10}}}
+	writeManifestStruct(t, work, m)
+	probe := `{"format":{"duration":"20","size":"9"}}`
+	writeProbeJSON(t, work, probe)
+	// Only the first window transcribed: what there is to keep.
+	if err := os.MkdirAll(filepath.Join(work, transcript.RawDir), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(work, transcript.RawDir, transcript.RawName(1)), owJSON("and@1 on@2"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !TranscriptionContinuable(work) {
+		t.Fatal("a windows book stopped at asr isn't continuable")
+	}
+	for _, tc := range []struct {
+		denied         string
+		spoil, restore func()
+	}{
+		{"the file replaced since it was inspected",
+			func() { writeSource("another encode", before) }, func() { writeSource("the audio", before) }},
+		{"the file edited in place since it was inspected, its size kept",
+			func() { writeSource("the AUDIO", time.Now().Add(time.Hour)) }, func() { writeSource("the audio", before) }},
+		{"the file gone (a mount out of sight)",
+			func() { _ = os.Remove(src) }, func() { writeSource("the audio", before) }},
+		{"a probe that states no size",
+			func() { writeProbeJSON(t, work, `{"format":{"duration":"20"}}`) }, func() { writeProbeJSON(t, work, probe) }},
+		{"a markers manifest (not a windows book)",
+			func() {
+				mm := m
+				mm.Style = audio.StyleMarkers
+				writeManifestStruct(t, work, mm)
+			}, func() { writeManifestStruct(t, work, m) }},
+	} {
+		tc.spoil()
+		if TranscriptionContinuable(work) {
+			t.Fatalf("continuable with %s", tc.denied)
+		}
+		tc.restore()
+		if !TranscriptionContinuable(work) {
+			t.Fatalf("not continuable once %s was undone", tc.denied)
+		}
+	}
+	// The layer moved aside: the detection ran, so it isn't a book stopped at asr.
+	wdir := filepath.Join(work, audio.WindowsDir)
+	writeManifestStruct(t, wdir, m)
+	if err := os.Rename(filepath.Join(work, transcript.RawDir), filepath.Join(wdir, transcript.RawDir)); err != nil {
+		t.Fatal(err)
+	}
+	if TranscriptionContinuable(work) {
+		t.Fatal("continuable with the window layer moved aside")
+	}
+}
+
+// CheckCurrent holds a detected list current only for the file it was made from:
+// the same size AND modification time (a same-size rewrite, a tag edit, is stale),
+// at the path the caller says the book is now (a moved book). It fails closed: a
+// file that can't be looked at is an error, never current. A list from before the
+// time was recorded falls back on the probe (the file inspect read).
+func TestDetectedChaptersCheckCurrent(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "book.m4b")
+	before := time.Now().Add(-time.Hour).Truncate(time.Second)
+	writeSource := func(path, body string, mod time.Time) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(path, mod, mod); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeSource(src, "the audio", before)
+	work := filepath.Join(dir, "work")
+	if err := os.MkdirAll(work, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	m := audio.Manifest{Source: src, Style: audio.StyleMarkers, Detected: true, Duration: 20, ChapterCount: 1,
+		Chapters: []audio.Chapter{{Chapter: 1, Start: 0, End: 20, Duration: 20}}}
+	writeManifestStruct(t, work, m)
+	writeProbeJSON(t, work, `{"format":{"duration":"20","size":"9"}}`)
+	fp, err := manifestFingerprint(work)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := DetectedChapters{ManifestSHA: fp, SourceSize: 9, SourceModTime: before.UnixNano(), DurationMs: 20000}
+	check := func(source string) (bool, error) { t.Helper(); return d.CheckCurrent(work, source) }
+
+	if ok, err := check(""); !ok || err != nil {
+		t.Fatalf("the file it was made from = %v, %v", ok, err)
+	}
+	// Within the mount's rounding of the time.
+	writeSource(src, "the audio", before.Add(sourceModSlack/2))
+	if ok, err := check(""); !ok || err != nil {
+		t.Fatalf("a time within the slack = %v, %v", ok, err)
+	}
+	// Same size, rewritten later (a tag edit): stale.
+	writeSource(src, "the AUDIO", before.Add(time.Minute))
+	if ok, err := check(""); ok || err != nil {
+		t.Fatalf("a same-size rewrite = %v, %v, want stale", ok, err)
+	}
+	// Another size: stale.
+	writeSource(src, "another encode", before)
+	if ok, err := check(""); ok || err != nil {
+		t.Fatalf("a replaced file = %v, %v, want stale", ok, err)
+	}
+	writeSource(src, "the audio", before)
+	// The file out of sight: an error, never current.
+	if err := os.Rename(src, src+".away"); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := check(""); ok || err == nil {
+		t.Fatalf("a file that can't be looked at = %v, %v, want an error", ok, err)
+	}
+	if d.CurrentFor(work, "") {
+		t.Fatal("CurrentFor passed a file that can't be looked at")
+	}
+	// The book moved (a rename keeps the size and time): current at its new path.
+	moved := filepath.Join(dir, "moved.m4b")
+	if err := os.Rename(src+".away", moved); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := check(moved); !ok || err != nil {
+		t.Fatalf("the moved file = %v, %v", ok, err)
+	}
+	if err := os.Rename(moved, src); err != nil {
+		t.Fatal(err)
+	}
+	// Another manifest: stale, whatever the file.
+	if ok, err := (DetectedChapters{ManifestSHA: "other", SourceSize: 9, SourceModTime: before.UnixNano()}).CheckCurrent(work, ""); ok || err != nil {
+		t.Fatalf("another manifest = %v, %v", ok, err)
+	}
+
+	// A list from before the time was recorded: the file must not be newer than
+	// its probe, and with no size recorded either, the size the probe states.
+	for _, legacy := range []DetectedChapters{{ManifestSHA: fp, SourceSize: 9}, {ManifestSHA: fp}} {
+		if ok, err := legacy.CheckCurrent(work, ""); !ok || err != nil {
+			t.Fatalf("legacy %+v on the file inspected = %v, %v", legacy, ok, err)
+		}
+		writeSource(src, "the AUDIO", time.Now().Add(time.Hour))
+		if ok, err := legacy.CheckCurrent(work, ""); ok || err != nil {
+			t.Fatalf("legacy %+v on a file edited since its probe = %v, %v, want stale", legacy, ok, err)
+		}
+		writeSource(src, "the audio", before)
+	}
+	writeSource(src, "another encode", before)
+	if ok, _ := (DetectedChapters{ManifestSHA: fp}).CheckCurrent(work, ""); ok {
+		t.Fatal("a legacy list with no size passed a file of another size than the probe's")
 	}
 }

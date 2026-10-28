@@ -127,12 +127,26 @@ func detectedSum(d pipeline.DetectedChapters) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// audioFile is the book's one audio file where the job finds it now (the server
+// moves a job with its book), "" when it can't tell (the manifest's path is then
+// the one looked at).
+func (r *run) audioFile() string {
+	if r.place.full == "" {
+		return ""
+	}
+	if src, err := audio.ResolveSource(r.place.full); err == nil && src.Style == audio.StyleMarkers {
+		return src.BookFile
+	}
+	return ""
+}
+
 // refreshChapters reads the engine book's detected list when it has one for its
 // current manifest, notes it for the run's chapters.json (chaptersJSON composes the
 // file at each write) and returns the list and whether it is current. A generate
 // job looks at every poll, so the list is read and checked again only when its
 // files changed since the last look (pipeline.DetectedStamp: local stats; no list
-// yet is one stat).
+// yet is one stat; a list whose audio can't be looked at is not current, and
+// checked again at the next look).
 func (h *Handler) refreshChapters(r *run, b store.Book) (pipeline.DetectedChapters, bool) {
 	stamp, ok := pipeline.DetectedStamp(b.WorkDir)
 	if !ok {
@@ -147,7 +161,13 @@ func (h *Handler) refreshChapters(r *run, b store.Book) (pipeline.DetectedChapte
 			r.detectedStamp, r.detected, r.detectedOK = stamp, pipeline.DetectedChapters{}, false
 			return pipeline.DetectedChapters{}, false
 		}
-		r.detectedStamp, r.detected, r.detectedOK = stamp, d, d.CurrentFor(b.WorkDir)
+		current, err := d.CheckCurrent(b.WorkDir, r.audioFile())
+		if err != nil {
+			// The audio can't be looked at now (a mount gone for a moment): not
+			// current, and asked again at the next look rather than kept.
+			stamp = ""
+		}
+		r.detectedStamp, r.detected, r.detectedOK = stamp, d, current
 	}
 	if !r.detectedOK {
 		return r.detected, false
@@ -280,7 +300,13 @@ func sidecarsWithoutChapters(p place) bool {
 //   - one cancelled or failed at chapter_detecting (the server cancels a parked
 //     chapters job as it queues a generate job for the book) whose kept window
 //     layer can run the stage again (pipeline.DetectionRerunnable) goes on from
-//     there, the stage running again over the kept windows.
+//     there, the stage running again over the kept windows;
+//   - one cancelled or failed at asr (a chapters job parked asr_worker_waiting,
+//     cancelled the same way) whose windows manifest is in place for the file
+//     inspected (pipeline.TranscriptionContinuable) goes on from splitting (its
+//     kept sentinel passes it straight on; a purge that took the window FLACs
+//     took that too, so they are cut again), and asr transcribes only the
+//     windows it hadn't finished.
 //
 // Either only while the book is still the one file it was (a folder that has
 // gained an audio file is a multi-file book now), the retention hasn't swept its
@@ -297,7 +323,8 @@ func (h *Handler) continueChapters(ctx context.Context, eng Engine, r *run, old 
 	if r.source != SourceAudio || !continuable(old) {
 		return false, nil
 	}
-	if src, err := audio.ResolveSource(old.SourcePath); err != nil || src.Style != audio.StyleMarkers {
+	src, err := audio.ResolveSource(old.SourcePath)
+	if err != nil || src.Style != audio.StyleMarkers {
 		return false, nil
 	}
 	release, err := h.holdBook(ctx, old.ID)
@@ -314,13 +341,20 @@ func (h *Handler) continueChapters(ctx context.Context, eng Engine, r *run, old 
 		return false, err
 	}
 	to := state.Splitting
-	if from := state.State(old.State); from == state.ChapterDetecting {
+	switch from := state.State(old.State); from {
+	case state.ChapterDetecting:
 		if !pipeline.DetectionRerunnable(old.WorkDir) {
 			return false, nil
 		}
 		to = from
-	} else if d, err := pipeline.ReadDetectedChapters(old.WorkDir); err != nil || !d.CurrentFor(old.WorkDir) {
-		return false, nil
+	case state.ASR:
+		if !pipeline.TranscriptionContinuable(old.WorkDir) {
+			return false, nil
+		}
+	default:
+		if d, err := pipeline.ReadDetectedChapters(old.WorkDir); err != nil || !d.CurrentFor(old.WorkDir, src.BookFile) {
+			return false, nil
+		}
 	}
 	err = h.o.DB.ContinueChapters(ctx, old.ID, old.State, string(to), h.newBook(r, old.SourcePath, ""),
 		store.GenerateBook{ServerJobID: r.job.ID, LibraryID: r.lib.ID, RelPath: r.rel})
@@ -337,13 +371,13 @@ func (h *Handler) continueChapters(ctx context.Context, eng Engine, r *run, old 
 }
 
 // continuable reports whether engine book b is a chapters run a generate job can
-// go on with: goal chapters, and done, or failed (a cancel included) at
+// go on with: goal chapters, and done, or failed (a cancel included) at asr or
 // chapter_detecting.
 func continuable(b store.Book) bool {
 	switch state.State(b.State) {
 	case state.Done:
 		return b.Goal == state.GoalChapters
-	case state.ChapterDetecting:
+	case state.ASR, state.ChapterDetecting:
 		return b.Goal == state.GoalChapters && state.Status(b.Status) == state.StatusFailed
 	default:
 		return false
