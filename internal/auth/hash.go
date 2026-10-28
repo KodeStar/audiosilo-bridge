@@ -85,13 +85,9 @@ var hashMemory = &memoryReleaser{delay: hashReleaseDelay, free: debug.FreeOSMemo
 
 // memoryReleaser hands an argon2id hash's work memory (argonMemory, 64 MiB, a
 // fresh allocation each time) back to the OS once the hashes go quiet. Without
-// it a Bridge that hashes the page's password at first start or a login and
-// then idles keeps that memory: the heap grew to hold the block, so the garbage
-// it leaves stays under the next GC's goal and no GC runs to free it, and the
-// background scavenger returns freed pages only slowly. An idle Bridge went
-// from 30 MB RSS to 97 MB after one login and took ~5 minutes to come back to
-// ~50 MB (the 2026-10 perf spike); the server fixed the same in server#244.
-// The release (debug.FreeOSMemory: a GC, then every free page returned) runs on
+// it an idle Bridge keeps that memory for minutes: the garbage stays under the
+// next GC's goal and the scavenger returns pages slowly (the server's
+// server#244; numbers in PACKAGES.md). The release (debug.FreeOSMemory) runs on
 // its own goroutine after delay with no further hash, never on the request's.
 type memoryReleaser struct {
 	delay time.Duration

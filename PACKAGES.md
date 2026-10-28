@@ -1384,8 +1384,9 @@ internal/
             any other (its chapter FLACs go; a continue re-splits).
             Perf quick wins (2026-10): the dispatch pass reads dispatchBooks, the
             unfinished books in full (store.ListUnfinishedBooks: all but state done
-            with no status) plus the finished books of a named series with only
-            id/state/status/series/series_pos (ListFinishedSeriesBooks), since a
+            with no status) plus the finished books of a series that still has an
+            unfinished volume, with only id/state/status/series/series_pos
+            (ListFinishedSeriesBooks), since a
             finished volume still counts in the series breadth ranks (asrBreadthRanks,
             the ETA simulation); the ETA progress read is ListUnfinishedProgress.
             A book that leaves done is read in full at the next pass. Reconcile,

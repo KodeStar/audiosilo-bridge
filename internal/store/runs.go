@@ -508,7 +508,7 @@ func (db *DB) SetProgress(ctx context.Context, bookID int64, stage string, done,
 }
 
 // ListProgress returns all progress rows for a book (used by the book-detail
-// endpoint). The list endpoint uses ListAllProgress to avoid an N+1.
+// endpoint). The periodic passes use ListUnfinishedProgress to avoid an N+1.
 func (db *DB) ListProgress(ctx context.Context, bookID int64) ([]Progress, error) {
 	rows, err := db.sql.QueryContext(ctx,
 		`SELECT stage, done, total FROM progress WHERE book_id=? ORDER BY stage`, bookID)

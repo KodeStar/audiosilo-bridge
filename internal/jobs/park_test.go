@@ -320,14 +320,7 @@ func TestUnchangedProgressIsNotSent(t *testing.T) {
 			}
 			return nil, nil
 		}})
-	runFor(t, r, func() bool { s, _ := srv.finalState(8); return s != "" })
-	if s, u := srv.finalState(8); s != link.StateDone {
-		msg := ""
-		if u.Error != nil {
-			msg = *u.Error
-		}
-		t.Fatalf("final = %q: %s", s, msg)
-	}
+	wantDone(t, r, srv, 8)
 }
 
 // abandoner is a handler that hears of the jobs the runner ends without it.
@@ -538,8 +531,14 @@ func TestIdleJobReportsOncePerKeepalive(t *testing.T) {
 			}
 			return nil, nil
 		}})
-	runFor(t, r, func() bool { s, _ := srv.finalState(9); return s != "" })
-	if s, u := srv.finalState(9); s != link.StateDone {
+	wantDone(t, r, srv, 9)
+}
+
+// wantDone runs r until job id ends and fails the test unless it ended done.
+func wantDone(t *testing.T, r *Runner, srv *fakeServer, id int64) {
+	t.Helper()
+	runFor(t, r, func() bool { s, _ := srv.finalState(id); return s != "" })
+	if s, u := srv.finalState(id); s != link.StateDone {
 		msg := ""
 		if u.Error != nil {
 			msg = *u.Error

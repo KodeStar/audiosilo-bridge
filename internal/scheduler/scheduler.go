@@ -964,16 +964,13 @@ func (s *Scheduler) autoPurgeDone(ctx context.Context, id int64) {
 	}
 }
 
-// dispatchBooks is the dispatch pass's read: every unfinished book in full, plus
-// the finished books of a named series with only their identity and series
-// position (store.ListFinishedSeriesBooks), ordered by id as ListBooks was. A
-// finished book (done, no status) runs nothing, holds no series lock, is never
-// runnable, queued or on the board, and has no ETA, so the pass needs it only
-// for the series breadth ranks (asrBreadthRanks and the ETA simulation count a
-// finished earlier volume, keeping a later one a wave deep). Reading only that
-// keeps a library's growing history of finished books off the 5 s pass. A book
-// that leaves done (a Retry, a re-run, a continued chapters run) is read in full
-// again at the next pass.
+// dispatchBooks is the dispatch pass's read, ordered by id as ListBooks was:
+// every unfinished book in full, plus the finished volumes of a series that
+// still has one, identity and series position only (store.ListFinishedSeriesBooks).
+// A finished book (done, no status) runs nothing, holds no series lock and has
+// no ETA, so the pass needs it only for the series breadth ranks (asrBreadthRanks
+// and the ETA simulation count a finished earlier volume, keeping a later one a
+// wave deep). A book that leaves done is read in full again at the next pass.
 func (s *Scheduler) dispatchBooks(ctx context.Context) ([]store.Book, error) {
 	books, err := s.db.ListUnfinishedBooks(ctx)
 	if err != nil {

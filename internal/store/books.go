@@ -429,14 +429,16 @@ func (db *DB) ListUnfinishedBooks(ctx context.Context) ([]Book, error) {
 	return db.queryBooks(ctx, `SELECT `+bookCols+` FROM books WHERE `+unfinishedBook+` ORDER BY id`)
 }
 
-// ListFinishedSeriesBooks returns the finished books (state done, no status) that
-// belong to a named series, ordered by id, with ONLY ID, State, Status, Series and
-// SeriesPos filled. A finished volume still counts toward its series' breadth-first
-// ASR ranks (a later volume stays one deep), which is all the dispatch pass needs
-// of it, so it reads these columns instead of decoding every finished book.
+// ListFinishedSeriesBooks returns the finished books (state done, no status) of
+// every named series that still has an unfinished volume, ordered by id, with
+// ONLY ID, State, Status, Series and SeriesPos filled. A finished volume still
+// counts toward its series' breadth-first ASR ranks (a later volume stays one
+// deep), which is all the dispatch pass needs of it; a series with nothing left
+// to run has no rank to keep, so its volumes are not read at all.
 func (db *DB) ListFinishedSeriesBooks(ctx context.Context) ([]Book, error) {
 	rows, err := db.sql.QueryContext(ctx, `SELECT id, state, status, series, series_pos FROM books
-		WHERE NOT (`+unfinishedBook+`) AND trim(series) != '' ORDER BY id`)
+		WHERE state = 'done' AND status = '' AND trim(series) != ''
+		AND trim(series) IN (SELECT trim(series) FROM books WHERE `+unfinishedBook+`) ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
