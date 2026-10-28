@@ -27,7 +27,7 @@ func (s *Scheduler) publishETAs(ctx context.Context, books []store.Book) {
 		return
 	}
 
-	progressByBook, err := s.db.ListAllProgress(ctx)
+	progressByBook, err := s.db.ListUnfinishedProgress(ctx)
 	if err != nil {
 		return
 	}

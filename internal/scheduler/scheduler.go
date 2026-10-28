@@ -964,14 +964,41 @@ func (s *Scheduler) autoPurgeDone(ctx context.Context, id int64) {
 	}
 }
 
+// dispatchBooks is the dispatch pass's read: every unfinished book in full, plus
+// the finished books of a named series with only their identity and series
+// position (store.ListFinishedSeriesBooks), ordered by id as ListBooks was. A
+// finished book (done, no status) runs nothing, holds no series lock, is never
+// runnable, queued or on the board, and has no ETA, so the pass needs it only
+// for the series breadth ranks (asrBreadthRanks and the ETA simulation count a
+// finished earlier volume, keeping a later one a wave deep). Reading only that
+// keeps a library's growing history of finished books off the 5 s pass. A book
+// that leaves done (a Retry, a re-run, a continued chapters run) is read in full
+// again at the next pass.
+func (s *Scheduler) dispatchBooks(ctx context.Context) ([]store.Book, error) {
+	books, err := s.db.ListUnfinishedBooks(ctx)
+	if err != nil {
+		return nil, err
+	}
+	finished, err := s.db.ListFinishedSeriesBooks(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if len(finished) == 0 {
+		return books, nil
+	}
+	books = append(books, finished...)
+	sortByID(books)
+	return books, nil
+}
+
 // advanceWaypoints promotes queued/ready books (no lane, no executor) to their
 // next state until none remain, so the machine never stalls on a waypoint. It
-// loops until a pass advances nothing and returns that final, fresh book list so
-// dispatch can act on it without re-querying.
+// loops until a pass advances nothing and returns that final, fresh book list
+// (dispatchBooks) so dispatch can act on it without re-querying.
 func (s *Scheduler) advanceWaypoints(ctx context.Context) ([]store.Book, error) {
 	// One initial query; subsequent passes advance the in-memory slice so a chain
 	// of waypoints (queued -> inspecting, ready -> contributing) needs no re-read.
-	books, err := s.db.ListBooks(ctx)
+	books, err := s.dispatchBooks(ctx)
 	if err != nil {
 		return nil, err
 	}

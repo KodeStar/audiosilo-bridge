@@ -479,12 +479,12 @@ func TestProgress(t *testing.T) {
 	if err := db.SetProgress(ctx, b2.ID, "splitting", 1, 3); err != nil {
 		t.Fatal(err)
 	}
-	byBook, err := db.ListAllProgress(ctx)
+	byBook, err := db.ListUnfinishedProgress(ctx)
 	if err != nil {
-		t.Fatalf("ListAllProgress: %v", err)
+		t.Fatalf("ListUnfinishedProgress: %v", err)
 	}
 	if len(byBook) != 2 {
-		t.Fatalf("ListAllProgress buckets = %d, want 2", len(byBook))
+		t.Fatalf("ListUnfinishedProgress buckets = %d, want 2", len(byBook))
 	}
 	if len(byBook[b.ID]) != 1 || byBook[b.ID][0].Stage != "asr" {
 		t.Fatalf("bucket for b = %+v", byBook[b.ID])

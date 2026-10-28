@@ -53,7 +53,7 @@ func TestDescribingRunsAreNotIncidents(t *testing.T) {
 	if got, err := s.engineRunsOf(ctx, b.ID); err != nil || len(got) != 1 || got[0].Stage != "fact_pass" {
 		t.Fatalf("engineRunsOf = %+v, %v", got, err)
 	}
-	if all, err := s.engineRunsAll(ctx); err != nil || len(all[b.ID]) != 1 || all[b.ID][0].Stage != "fact_pass" {
-		t.Fatalf("engineRunsAll = %+v, %v", all, err)
+	if all, err := s.engineRunsUnfinished(ctx); err != nil || len(all[b.ID]) != 1 || all[b.ID][0].Stage != "fact_pass" {
+		t.Fatalf("engineRunsUnfinished = %+v, %v", all, err)
 	}
 }

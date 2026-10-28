@@ -149,12 +149,19 @@ func (s *Service) check(ctx context.Context, trigger string) {
 		return
 	}
 	defer s.checkMu.Unlock()
-	books, err := s.db.ListBooks(ctx)
+	// Finished books (done, no status) are left out at the query: Classify can
+	// raise nothing on one but a protected artifact incident (the purge after done
+	// removes its scratch on purpose), which no action may apply to (a park and a
+	// rerun both refuse a terminal or ready+ book), and nothing else of theirs is
+	// read. Reading them cost every tick a sentinel read and artifact stats per
+	// finished stage of every book ever processed. A book that leaves done (a
+	// re-run, a reset, a continued chapters run) is read again from the next tick.
+	books, err := s.db.ListUnfinishedBooks(ctx)
 	if err != nil {
 		s.setCheck(err)
 		return
 	}
-	runsByBook, err := s.engineRunsAll(ctx)
+	runsByBook, err := s.engineRunsUnfinished(ctx)
 	if err != nil {
 		s.setCheck(err)
 		return
@@ -168,7 +175,7 @@ func (s *Service) check(ctx context.Context, trigger string) {
 	for _, invocation := range activeInvocations {
 		invocationsByRun[invocation.StageRunID] = append(invocationsByRun[invocation.StageRunID], invocation)
 	}
-	progressByBook, err := s.db.ListAllProgress(ctx)
+	progressByBook, err := s.db.ListUnfinishedProgress(ctx)
 	if err != nil {
 		s.setCheck(err)
 		return
@@ -315,15 +322,15 @@ func (s *Service) freshSnapshot(ctx context.Context, bookID int64, pass passRead
 	return s.buildSnapshot(book, runs, pass), runs, nil
 }
 
-// engineRunsOf and engineRunsAll are the supervisor's reads of the stage runs
-// (one book's, every book's), engine stages only: see engineRuns.
+// engineRunsOf and engineRunsUnfinished are the supervisor's reads of the stage
+// runs (one book's, every unfinished book's), engine stages only: see engineRuns.
 func (s *Service) engineRunsOf(ctx context.Context, bookID int64) ([]store.StageRun, error) {
 	runs, err := s.db.ListStageRuns(ctx, bookID)
 	return engineRuns(runs), err
 }
 
-func (s *Service) engineRunsAll(ctx context.Context) (map[int64][]store.StageRun, error) {
-	byBook, err := s.db.StageRunsAll(ctx)
+func (s *Service) engineRunsUnfinished(ctx context.Context) (map[int64][]store.StageRun, error) {
+	byBook, err := s.db.StageRunsUnfinished(ctx)
 	for id, runs := range byBook {
 		byBook[id] = engineRuns(runs)
 	}
@@ -723,7 +730,7 @@ func (s *Service) Ask(ctx context.Context, bookID int64) (store.SupervisorRun, e
 	}
 	runtime := Runtime{ActiveBooks: map[int64]bool{}}
 	if s.hooks.Runtime != nil {
-		books, listErr := s.db.ListBooks(ctx)
+		books, listErr := s.db.ListUnfinishedBooks(ctx) // a finished book has no runtime share
 		if listErr != nil {
 			return store.SupervisorRun{}, listErr
 		}
@@ -765,7 +772,7 @@ func (s *Service) Status() Status {
 	runtime := Runtime{ActiveBooks: map[int64]bool{}}
 	if s.hooks.Runtime != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		books, err := s.db.ListBooks(ctx)
+		books, err := s.db.ListUnfinishedBooks(ctx) // a finished book has no runtime share
 		cancel()
 		if err != nil {
 			if lastErr == "" {

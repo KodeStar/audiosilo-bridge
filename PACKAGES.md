@@ -1382,6 +1382,14 @@ internal/
             Outcome; advance fills Outcome.Goal from books.goal, and the ETA input
             carries it (eta.Book.Goal) as it is. A goal-chapters book reaching done is auto-purged like
             any other (its chapter FLACs go; a continue re-splits).
+            Perf quick wins (2026-10): the dispatch pass reads dispatchBooks, the
+            unfinished books in full (store.ListUnfinishedBooks: all but state done
+            with no status) plus the finished books of a named series with only
+            id/state/status/series/series_pos (ListFinishedSeriesBooks), since a
+            finished volume still counts in the series breadth ranks (asrBreadthRanks,
+            the ETA simulation); the ETA progress read is ListUnfinishedProgress.
+            A book that leaves done is read in full at the next pass. Reconcile,
+            the startup GC and the restart re-admit still read every book.
   supervisor/ the health-tick babysitter (config supervisor.*): classifies incidents
             over book/stage-run snapshots (deterministic classifiers + optional
             model-assisted lane), decides bounded recovery actions, and applies them
@@ -1417,7 +1425,14 @@ internal/
             stage; and collectArtifactStatuses trusts an OPEN stage run over the
             stale book snapshot (the scheduler can advance the state between the
             two reads), so an intentionally absent sentinel for an in-flight rerun
-            is not reported broken. The batch ListBooks/StageRunsAll reads predate
+            is not reported broken. The tick reads only the unfinished books
+            (ListUnfinishedBooks, StageRunsUnfinished, ListUnfinishedProgress; perf
+            quick wins 2026-10): a finished book (done, no status) can raise only a
+            protected artifact incident no action may apply to, and reading it cost a
+            sentinel read and artifact stats per finished stage every 30 s, forever;
+            one that leaves done is read from the next tick, and a done book with a
+            status still is. collectArtifactStatuses keeps its done+splitting skip
+            for the confirmation's fresh read. The batch reads predate
             the pass's own per-book filesystem work, so that classification is only a
             CHEAP FILTER: every incident is confirmed by re-reading just that book
             (GetBook + ListStageRuns), rebuilding its snapshot through the shared
