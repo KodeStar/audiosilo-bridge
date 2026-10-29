@@ -621,6 +621,51 @@ func (db *DB) ContinueChapters(ctx context.Context, id int64, from, to string, n
 	return tx.Commit()
 }
 
+// ContinueReadalong turns an engine book that stopped at from into a read-along
+// run going on at to with goal (Phase 3c's reuse table, decided by the caller):
+// its identity, work dir, source and series stay the book's; its kind becomes
+// audio and its ebook path goes (a read-along reads the audio: the ebook is the
+// job's, never the engine's source); status clear, so the scheduler takes it up
+// at to. job (when it names a server job) is mapped to the book in the same
+// transaction. ErrNotContinuable when the book isn't stopped at from (done,
+// failed, parked or paused: the caller holds the engine's hold on it and checked
+// no other job follows it) or, going on past inspecting, the retention swept its
+// transcripts; checked in the one statement, so a book that changed meanwhile
+// isn't moved. A book going on from inspecting makes its transcripts anew, so a
+// sweep doesn't stop it, and its mappings are unswept again: the retention
+// counts from this job's end.
+func (db *DB) ContinueReadalong(ctx context.Context, id int64, from, to, goal string, job GenerateBook) error {
+	fresh := to == "inspecting"
+	tx, err := db.sql.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	res, err := tx.ExecContext(ctx,
+		`UPDATE books SET goal=?, kind='audio', ebook_path='', state=?, status='', error='', park_code='', retry_at='',
+		     updated_at=?
+		  WHERE id=? AND state=? AND (state='done' OR status IN ('failed','needs_attention','paused'))
+		    AND (? OR NOT EXISTS (SELECT 1 FROM generate_books WHERE book_id=? AND swept_at!=''))`,
+		goal, to, timestamp(nowFn()), id, from, fresh, id)
+	if err := checkAffected(res, err); errors.Is(err, ErrNotFound) {
+		return ErrNotContinuable
+	} else if err != nil {
+		return err
+	}
+	if fresh {
+		if _, err := tx.ExecContext(ctx, `UPDATE generate_books SET swept_at='' WHERE book_id=?`, id); err != nil {
+			return err
+		}
+	}
+	if job.ServerJobID != 0 {
+		job.BookID = &id
+		if err := putGenerateBook(ctx, tx, job); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 // SetBookCoverage stores the coverage JSON snapshot for a book.
 func (db *DB) SetBookCoverage(ctx context.Context, id int64, coverage json.RawMessage) error {
 	res, err := db.sql.ExecContext(ctx,

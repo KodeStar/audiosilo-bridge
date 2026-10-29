@@ -173,6 +173,15 @@ func (db *DB) UnsweptGenerateBooks(ctx context.Context, cutoff time.Time) ([]Swe
 	return out, rows.Err()
 }
 
+// GenerateBookSwept reports whether the retention swept engine book bookID's
+// transcripts (any job's mapping to it records the sweep).
+func (db *DB) GenerateBookSwept(ctx context.Context, bookID int64) (bool, error) {
+	var n int
+	err := db.sql.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM generate_books WHERE book_id = ? AND swept_at != ''`, bookID).Scan(&n)
+	return n > 0, err
+}
+
 // MarkGenerateBookSwept records that an engine book's transcripts were deleted,
 // so the sweep skips it from now on.
 func (db *DB) MarkGenerateBookSwept(ctx context.Context, bookID int64, at time.Time) error {

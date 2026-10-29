@@ -59,6 +59,12 @@ func TestGenerateBooksMapAJobToItsBook(t *testing.T) {
 	if got, _ := db.UnsweptGenerateBooks(ctx, end.Add(time.Hour)); len(got) != 0 {
 		t.Fatalf("a swept book was listed: %+v", got)
 	}
+	if swept, err := db.GenerateBookSwept(ctx, b.ID); err != nil || !swept {
+		t.Fatalf("swept = %v, %v", swept, err)
+	}
+	if swept, _ := db.GenerateBookSwept(ctx, b.ID+100); swept {
+		t.Fatal("a book never mapped reads as swept")
+	}
 	// Mapping the job again (a resume that recreated its book) opens it again.
 	if err := db.PutGenerateBook(ctx, GenerateBook{ServerJobID: 12, BookID: &b.ID, LibraryID: 1, RelPath: "A/Book"}); err != nil {
 		t.Fatal(err)

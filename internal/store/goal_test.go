@@ -227,3 +227,74 @@ func TestContinueChaptersClearsADoneBooksStatus(t *testing.T) {
 		}
 	}
 }
+
+// ContinueReadalong moves a stopped book (done, failed, parked or paused) on at
+// the state the caller picked with the goal it gives, kind audio and no ebook
+// path, its status cleared and the job mapped in the same statement. A book a
+// stage may be running (status none), one not where the caller looked, or a
+// swept one is left as it is.
+func TestContinueReadalong(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	mk := func(src, st, status string) Book {
+		t.Helper()
+		b, err := db.CreateBook(ctx, NewBook{SourcePath: src, WorkDir: "/w" + src, Title: "T", Kind: "ebook", EbookPath: src + ".epub",
+			Series: "S", SeriesPos: "2"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := db.SetBookState(ctx, b.ID, st, status, "x", ""); err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	job := func(id int64) GenerateBook { return GenerateBook{ServerJobID: id, LibraryID: 1, RelPath: "B"} }
+	running := mk("/lib/A", string(state.SpellingResearch), "")
+	if err := db.ContinueReadalong(ctx, running.ID, string(state.SpellingResearch), string(state.ReadalongAligning), "", job(1)); !errors.Is(err, ErrNotContinuable) {
+		t.Fatalf("a book a stage may run = %v, want ErrNotContinuable", err)
+	}
+	parked := mk("/lib/B", string(state.SpellingResearch), string(state.StatusNeedsAttention))
+	if err := db.ContinueReadalong(ctx, parked.ID, string(state.Done), string(state.ReadalongAligning), "", job(2)); !errors.Is(err, ErrNotContinuable) {
+		t.Fatalf("not where the caller looked = %v, want ErrNotContinuable", err)
+	}
+	if _, err := db.GetGenerateBook(ctx, 2); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("a refused continue mapped its job: %v", err)
+	}
+	if err := db.ContinueReadalong(ctx, parked.ID, string(state.SpellingResearch), string(state.ReadalongAligning), "", job(2)); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := db.GetBook(ctx, parked.ID)
+	if got.Goal != "" || got.State != string(state.ReadalongAligning) || got.Status != "" || got.Error != "" ||
+		got.Kind != "audio" || got.EbookPath != "" || got.Series != "S" || got.Title != "T" {
+		t.Fatalf("continued = %+v", got)
+	}
+	if g, err := db.GetGenerateBook(ctx, 2); err != nil || g.BookID == nil || *g.BookID != parked.ID {
+		t.Fatalf("the job's mapping = %+v, %v", g, err)
+	}
+	for _, status := range []string{string(state.StatusFailed), string(state.StatusPaused)} {
+		b := mk("/lib/C"+status, string(state.QASweep), status)
+		if err := db.ContinueReadalong(ctx, b.ID, string(state.QASweep), string(state.Sanitizing), state.GoalReadalong, GenerateBook{}); err != nil {
+			t.Fatalf("%s: %v", status, err)
+		}
+		if got, _ := db.GetBook(ctx, b.ID); got.Goal != state.GoalReadalong || got.State != string(state.Sanitizing) {
+			t.Fatalf("%s: continued = %+v", status, got)
+		}
+	}
+	done := mk("/lib/D", string(state.Done), "")
+	if err := db.PutGenerateBook(ctx, GenerateBook{ServerJobID: 5, BookID: &done.ID, LibraryID: 1, RelPath: "D"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.MarkGenerateBookSwept(ctx, done.ID, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.ContinueReadalong(ctx, done.ID, string(state.Done), string(state.Sanitizing), state.GoalReadalong, job(6)); !errors.Is(err, ErrNotContinuable) {
+		t.Fatalf("a swept book from its transcripts = %v, want ErrNotContinuable", err)
+	}
+	// From inspecting a sweep doesn't matter, and the book is unswept again.
+	if err := db.ContinueReadalong(ctx, done.ID, string(state.Done), string(state.Inspecting), state.GoalReadalong, job(6)); err != nil {
+		t.Fatal(err)
+	}
+	if g, _ := db.GetGenerateBook(ctx, 5); g.SweptAt != "" {
+		t.Fatalf("still swept: %+v", g)
+	}
+}
