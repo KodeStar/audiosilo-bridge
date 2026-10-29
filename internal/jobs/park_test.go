@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"slices"
 	"strings"
 	"sync"
@@ -320,14 +321,7 @@ func TestUnchangedProgressIsNotSent(t *testing.T) {
 			}
 			return nil, nil
 		}})
-	runFor(t, r, func() bool { s, _ := srv.finalState(8); return s != "" })
-	if s, u := srv.finalState(8); s != link.StateDone {
-		msg := ""
-		if u.Error != nil {
-			msg = *u.Error
-		}
-		t.Fatalf("final = %q: %s", s, msg)
-	}
+	wantDone(t, r, srv, 8)
 }
 
 // abandoner is a handler that hears of the jobs the runner ends without it.
@@ -498,5 +492,148 @@ func TestParkedProgressCarriesThroughANullPark(t *testing.T) {
 	rep.Unpark()
 	if _, ok := rep.Last().Extra["park"]; ok {
 		t.Fatalf("Unpark kept the carried park: %+v", rep.Last())
+	}
+}
+
+// The default keepalive is 30 s: a running job with nothing new reports twice a
+// minute, which still leaves four renewals inside the server's 2-minute lease
+// (a failed send or two never loses the claim). Change-driven reports keep their
+// 2 s gap.
+func TestDefaultKeepaliveLeavesLeaseMargin(t *testing.T) {
+	t.Parallel()
+	r := New(openStore(t), func() Server { return nil }, nil, Options{Log: quietLog()})
+	if DefaultKeepalive != 30*time.Second || r.opts.Keepalive != DefaultKeepalive {
+		t.Fatalf("Keepalive = %v, want 30s", r.opts.Keepalive)
+	}
+	if r.opts.ProgressEvery != 2*time.Second {
+		t.Fatalf("ProgressEvery = %v, want 2s (change-driven reports unchanged)", r.opts.ProgressEvery)
+	}
+	const serverLease = 2 * time.Minute // audiosilo-server bridge.Lease
+	if n := serverLease / DefaultKeepalive; n < 4 {
+		t.Fatalf("only %d keepalives fit in the %v lease, want at least 4", n, serverLease)
+	}
+	if r.opts.ReportRetry != DefaultReportRetry {
+		t.Fatalf("ReportRetry = %v, want DefaultReportRetry", r.opts.ReportRetry)
+	}
+	if n := serverLease / DefaultReportRetry; n < 10 {
+		t.Fatalf("only %d retries fit in the %v lease, want at least 10", n, serverLease)
+	}
+}
+
+// A report that fails is tried again after ReportRetry, not Keepalive, until one
+// gets through; then the job is back on the Keepalive.
+func TestFailedReportRetriesSoonerUntilOneSucceeds(t *testing.T) {
+	t.Parallel()
+	db, srv := openStore(t), newFakeServer()
+	srv.add(&link.Job{ID: 10, Kind: "k.retry", Attempts: 1})
+	opts := testOpts()
+	opts.Keepalive = time.Second
+	opts.ReportRetry = 50 * time.Millisecond
+	tries := func() int {
+		srv.mu.Lock()
+		defer srv.mu.Unlock()
+		return srv.tries[10]
+	}
+	setFailing := func(v bool) {
+		srv.mu.Lock()
+		srv.failing = v
+		srv.mu.Unlock()
+	}
+	await := func(cond func() bool, what string) error {
+		for deadline := time.Now().Add(5 * time.Second); !cond(); time.Sleep(5 * time.Millisecond) {
+			if time.Now().After(deadline) {
+				return fmt.Errorf("timed out waiting for %s", what)
+			}
+		}
+		return nil
+	}
+	r := New(db, func() Server { return srv }, nil, opts, handler{kind: "k.retry", lane: LaneLight,
+		fn: func(_ context.Context, _ Job, _ *Reporter) (any, error) {
+			setFailing(true)
+			// The first keepalive (a second after the start's report) fails...
+			first := tries()
+			if err := await(func() bool { return tries() > first }, "the first keepalive"); err != nil {
+				return nil, err
+			}
+			// ...and is tried again within ReportRetry, not a second later.
+			failed := tries()
+			time.Sleep(400 * time.Millisecond)
+			if got := tries() - failed; got < 2 {
+				return nil, fmt.Errorf("%d tries in 400 ms after a failed report, want a retry every 50 ms", got)
+			}
+			// Once one gets through, the job is back on the one-second keepalive.
+			running := countState(srv, 10, link.StateRunning)
+			setFailing(false)
+			if err := await(func() bool { return countState(srv, 10, link.StateRunning) > running }, "a report through"); err != nil {
+				return nil, err
+			}
+			// (300 ms, well short of the second, so a slow wake on a loaded
+			// machine still lands before the next keepalive.)
+			through := tries()
+			time.Sleep(300 * time.Millisecond)
+			if got := tries() - through; got != 0 {
+				return nil, fmt.Errorf("%d reports in 300 ms after one got through, want none before the keepalive", got)
+			}
+			return nil, nil
+		}})
+	wantDone(t, r, srv, 10)
+}
+
+// Only a report that may get through if sent again soon takes the ReportRetry:
+// a 4xx refusal (bar 408 and 429) waits the Keepalive like any report.
+func TestUnreachable(t *testing.T) {
+	t.Parallel()
+	for _, c := range []struct {
+		err  error
+		want bool
+	}{
+		{errors.New("connection refused"), true},
+		{context.DeadlineExceeded, true},
+		{&link.APIError{Status: http.StatusInternalServerError}, true},
+		{&link.APIError{Status: http.StatusBadGateway}, true},
+		{&link.APIError{Status: http.StatusTooManyRequests}, true},
+		{&link.APIError{Status: http.StatusRequestTimeout}, true},
+		{&link.APIError{Status: http.StatusBadRequest}, false},
+		{&link.APIError{Status: http.StatusNotFound}, false},
+		{&link.APIError{Status: http.StatusConflict, Code: "kind_unavailable"}, false},
+		{fmt.Errorf("wrapped: %w", &link.APIError{Status: http.StatusBadRequest}), false},
+	} {
+		if got := unreachable(c.err); got != c.want {
+			t.Errorf("unreachable(%v) = %v, want %v", c.err, got, c.want)
+		}
+	}
+}
+
+// A running job with no new progress reports once per Keepalive, not once per
+// ProgressEvery tick.
+func TestIdleJobReportsOncePerKeepalive(t *testing.T) {
+	t.Parallel()
+	db, srv := openStore(t), newFakeServer()
+	srv.add(&link.Job{ID: 9, Kind: "k.idle", Attempts: 1})
+	opts := testOpts()
+	opts.Keepalive = 150 * time.Millisecond
+	r := New(db, func() Server { return srv }, nil, opts, handler{kind: "k.idle", lane: LaneLight,
+		fn: func(_ context.Context, _ Job, _ *Reporter) (any, error) {
+			start := countState(srv, 9, link.StateRunning)
+			time.Sleep(500 * time.Millisecond)
+			// ~3 keepalives in 500 ms at 150 ms; a report per 1 ms tick would be hundreds.
+			if got := countState(srv, 9, link.StateRunning) - start; got < 1 || got > 4 {
+				return nil, fmt.Errorf("keepalive reports in 500 ms = %d, want 1 to 4 at a 150 ms keepalive", got)
+			}
+			return nil, nil
+		}})
+	wantDone(t, r, srv, 9)
+}
+
+// wantDone runs r until job id ends and fails the test unless it ended done.
+func wantDone(t *testing.T, r *Runner, srv *fakeServer, id int64) {
+	t.Helper()
+	runFor(t, r, func() bool { s, _ := srv.finalState(id); return s != "" })
+	if s, u := srv.finalState(id); s != link.StateDone {
+		msg := ""
+		if u.Error != nil {
+			msg = *u.Error
+		}
+		t.Fatalf("final = %q: %s", s, msg)
 	}
 }

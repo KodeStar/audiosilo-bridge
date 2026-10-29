@@ -414,6 +414,46 @@ func (db *DB) ListBooks(ctx context.Context) ([]Book, error) {
 	return db.queryBooks(ctx, `SELECT `+bookCols+` FROM books ORDER BY id`)
 }
 
+// unfinishedBook is the WHERE predicate of a book the engine may still act on:
+// every book but a finished one (state done with no status). A finished book has
+// no stage to run, holds no series lock and can be neither parked nor recovered,
+// so the periodic passes (the 5 s dispatch, the 30 s supervisor tick) read only
+// these; a book that leaves done (a re-run, a reset, a continued chapters run)
+// matches again at the next pass. A done book WITH a status is kept: it is not
+// the normal finished shape, so it stays in view.
+const unfinishedBook = `NOT (state = 'done' AND status = '')`
+
+// ListUnfinishedBooks returns every book but the finished ones (see
+// unfinishedBook), ordered by id.
+func (db *DB) ListUnfinishedBooks(ctx context.Context) ([]Book, error) {
+	return db.queryBooks(ctx, `SELECT `+bookCols+` FROM books WHERE `+unfinishedBook+` ORDER BY id`)
+}
+
+// ListFinishedSeriesBooks returns the finished books (state done, no status) of
+// every named series that still has an unfinished volume, ordered by id, with
+// ONLY ID, State, Status, Series and SeriesPos filled. A finished volume still
+// counts toward its series' breadth-first ASR ranks (a later volume stays one
+// deep), which is all the dispatch pass needs of it; a series with nothing left
+// to run has no rank to keep, so its volumes are not read at all.
+func (db *DB) ListFinishedSeriesBooks(ctx context.Context) ([]Book, error) {
+	rows, err := db.sql.QueryContext(ctx, `SELECT id, state, status, series, series_pos FROM books
+		WHERE state = 'done' AND status = '' AND trim(series) != ''
+		AND trim(series) IN (SELECT trim(series) FROM books WHERE `+unfinishedBook+`) ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []Book
+	for rows.Next() {
+		var b Book
+		if err := rows.Scan(&b.ID, &b.State, &b.Status, &b.Series, &b.SeriesPos); err != nil {
+			return nil, err
+		}
+		out = append(out, b)
+	}
+	return out, rows.Err()
+}
+
 // queryBooks runs a SELECT of bookCols and scans every row.
 func (db *DB) queryBooks(ctx context.Context, query string, args ...any) ([]Book, error) {
 	rows, err := db.sql.QueryContext(ctx, query, args...)

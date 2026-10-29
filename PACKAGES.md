@@ -1057,7 +1057,11 @@ internal/
             (authstore_race_test.go) fail if one is split into a read and a write. AddSession takes the hash the
             sign-in verified and stores the session only while it is still the
             stored one (one INSERT ... WHERE EXISTS), so a sign-in racing a change
-            or the reset-password process is refused and leaves no session
+            or the reset-password process is refused and leaves no session.
+            Every argon2id hash and verify goes through argonKey, which schedules
+            memoryReleaser (debug.FreeOSMemory once hashing has been quiet 1 s, on
+            its own goroutine; the server's server#244 port): without it one login
+            took an idle Bridge from 30 MB to 97 MB RSS for minutes.
   ghauth/   Phase 2b: the GitHub App user sign-in (the audiosilo-contributions App,
             DefaultClientID, AppID 5387686; the client ID overridable in config):
             RequestCode / Poll / Wait (the device flow: pending and slow_down arrive
@@ -1391,6 +1395,17 @@ internal/
             Outcome; advance fills Outcome.Goal from books.goal, and the ETA input
             carries it (eta.Book.Goal) as it is. A goal-chapters book reaching done is auto-purged like
             any other (its chapter FLACs go; a continue re-splits).
+            Perf quick wins (2026-10): the dispatch pass reads dispatchBooks, the
+            unfinished books in full (store.ListUnfinishedBooks: all but state done
+            with no status) plus the finished books of a series that still has an
+            unfinished volume, with only id/state/status/series/series_pos
+            (ListFinishedSeriesBooks), since a
+            finished volume still counts in the series breadth ranks (asrBreadthRanks,
+            the ETA simulation); the ETA progress read is ListUnfinishedProgress.
+            The two reads are two statements, so mergeFinished keeps a book that
+            reached done between them once, as its finished identity.
+            A book that leaves done is read in full at the next pass. Reconcile,
+            the startup GC and the restart re-admit still read every book.
   supervisor/ the health-tick babysitter (config supervisor.*): classifies incidents
             over book/stage-run snapshots (deterministic classifiers + optional
             model-assisted lane), decides bounded recovery actions, and applies them
@@ -1426,7 +1441,14 @@ internal/
             stage; and collectArtifactStatuses trusts an OPEN stage run over the
             stale book snapshot (the scheduler can advance the state between the
             two reads), so an intentionally absent sentinel for an in-flight rerun
-            is not reported broken. The batch ListBooks/StageRunsAll reads predate
+            is not reported broken. The tick reads only the unfinished books
+            (ListUnfinishedBooks, StageRunsUnfinished, ListUnfinishedProgress; perf
+            quick wins 2026-10): a finished book (done, no status) can raise only a
+            protected artifact incident no action may apply to, and reading it cost a
+            sentinel read and artifact stats per finished stage every 30 s, forever;
+            one that leaves done is read from the next tick, and a done book with a
+            status still is. collectArtifactStatuses keeps its done+splitting skip
+            for the confirmation's fresh read. The batch reads predate
             the pass's own per-book filesystem work, so that classification is only a
             CHEAP FILTER: every incident is confirmed by re-reading just that book
             (GetBook + ListStageRuns), rebuilding its snapshot through the shared
@@ -1653,7 +1675,16 @@ internal/
             while its book is queued or parked, and the lane only bounds how many
             are followed); the claim loop asks only for kinds whose lane has room, and
             waits (no claim) while unpaired or full. A running job reports at least
-            every Keepalive (10 s), renewing the server's 2-minute lease; a reply
+            every Keepalive (DefaultKeepalive 30 s, 10 s before the 2026-10 perf
+            quick wins: every report is a server write that empties its generation
+            caches; four still fit in the lease), renewing the server's 2-minute
+            lease, so a cancel is heard within about 32 s (the keepalive is checked
+            on the 2 s ProgressEvery tick). After a report that didn't reach the
+            server the next goes after ReportRetry (DefaultReportRetry 10 s) instead,
+            until one gets through, then Keepalive again: at 30 s alone one report
+            through and three failed would lapse the lease. Only an answerless
+            failure, a 5xx, 408 or 429 counts (unreachable); any other 4xx would be
+            refused again however soon, so it waits the Keepalive. A reply
             with cancel_requested ends its context (errCancelRequested -> reported
             cancelled), a 409 ends it as lost (nothing more sent), a 401 is handed to
             the app WITH the link that got it (onUnauthorized(srv): a job of the
@@ -1940,7 +1971,7 @@ internal/
             holdTries polls, else errBookBusy, "The engine is busy with this book;
             try again in a minute.") for the call and the read-back of the file, so
             no stage, Retry's dispatch, Delete, purge, sweep or supervisor terminate
-            acts on the book meanwhile (a new generate job waits holdTries polls for
+            acts on the book meanwhile (a new generate job waits giveWayTries polls for
             a held earlier run, deleteEarlier: the server asks a describe job to give
             way to it, which it does at its next report; then "try again in a
             minute"); a park waits with the hold let go (the job's in-process
@@ -2041,7 +2072,8 @@ internal/
             job only once that one is cancelled (a PARKED one it cancels as it queues
             it; a working one refuses it, 409 detect_open, until an admin cancels
             it), and the Bridge hears that cancel at the chapters job's next report,
-            so create() first waits up to holdTries polls (awaitChaptersGivingWay)
+            so create() first waits up to giveWayTries polls (awaitChaptersGivingWay,
+            40: two minutes at the 3 s Poll, a 30 s keepalive or two lost)
             while that chapters job still follows the book, whatever the book is
             doing, or no job does but the book isn't stopped yet (its job's end is
             stopping it; one still not stopped when the wait runs out is stopped

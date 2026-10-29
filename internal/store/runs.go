@@ -382,10 +382,13 @@ func (db *DB) ListStageRuns(ctx context.Context, bookID int64) ([]StageRun, erro
 	return out, rows.Err()
 }
 
-// StageRunsAll returns every stage run grouped by book in one catalogue query.
-// Periodic orchestration checks use this instead of issuing one query per book.
-func (db *DB) StageRunsAll(ctx context.Context) (map[int64][]StageRun, error) {
-	rows, err := db.sql.QueryContext(ctx, `SELECT `+runCols+` FROM stage_runs ORDER BY book_id, id`)
+// StageRunsUnfinished returns the stage runs of every unfinished book (see
+// unfinishedBook) grouped by book, in one query. The supervisor's tick uses it
+// instead of one query per book, and leaves out the finished books, whose whole
+// run history would otherwise be a growing read every pass.
+func (db *DB) StageRunsUnfinished(ctx context.Context) (map[int64][]StageRun, error) {
+	rows, err := db.sql.QueryContext(ctx, `SELECT `+runCols+` FROM stage_runs
+		WHERE book_id IN (SELECT id FROM books WHERE `+unfinishedBook+`) ORDER BY book_id, id`)
 	if err != nil {
 		return nil, err
 	}
@@ -505,7 +508,7 @@ func (db *DB) SetProgress(ctx context.Context, bookID int64, stage string, done,
 }
 
 // ListProgress returns all progress rows for a book (used by the book-detail
-// endpoint). The list endpoint uses ListAllProgress to avoid an N+1.
+// endpoint). The periodic passes use ListUnfinishedProgress to avoid an N+1.
 func (db *DB) ListProgress(ctx context.Context, bookID int64) ([]Progress, error) {
 	rows, err := db.sql.QueryContext(ctx,
 		`SELECT stage, done, total FROM progress WHERE book_id=? ORDER BY stage`, bookID)
@@ -524,12 +527,14 @@ func (db *DB) ListProgress(ctx context.Context, bookID int64) ([]Progress, error
 	return out, rows.Err()
 }
 
-// ListAllProgress returns every book's progress rows bucketed by book id, in one
-// query. The list endpoint uses it instead of calling ListProgress per book (an
-// N+1). Books with no progress rows are simply absent from the map.
-func (db *DB) ListAllProgress(ctx context.Context) (map[int64][]Progress, error) {
-	rows, err := db.sql.QueryContext(ctx,
-		`SELECT book_id, stage, done, total FROM progress ORDER BY book_id, stage`)
+// ListUnfinishedProgress returns the progress rows of every unfinished book (see
+// unfinishedBook) bucketed by book id, in one query: the periodic passes (the
+// ETA recompute, the supervisor's tick) use it instead of calling ListProgress
+// per book (an N+1), and only to estimate the work left, which a finished book
+// has none of. Books with no progress rows are simply absent from the map.
+func (db *DB) ListUnfinishedProgress(ctx context.Context) (map[int64][]Progress, error) {
+	rows, err := db.sql.QueryContext(ctx, `SELECT book_id, stage, done, total FROM progress
+		WHERE book_id IN (SELECT id FROM books WHERE `+unfinishedBook+`) ORDER BY book_id, stage`)
 	if err != nil {
 		return nil, err
 	}

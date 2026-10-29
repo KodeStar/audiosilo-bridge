@@ -585,7 +585,7 @@ func stageRuns(hr *harness, bookID int64, stage state.State) (runs, ok int) {
 func TestGenerateContinuesACancelledChaptersRun(t *testing.T) {
 	t.Parallel()
 	hr := newHarness(t)
-	hr.h.o.Poll = 250 * time.Millisecond // holdTries polls: five seconds to give way in
+	hr.h.o.Poll = 250 * time.Millisecond // giveWayTries polls: ten seconds to give way in
 	stop := hr.runner(hr.h, hr.h.ChaptersJob())
 	defer stop()
 	first := parkChapters(hr, 51)
@@ -891,7 +891,7 @@ func orphanChapters(hr *harness, id int64) (store.Book, func()) {
 func TestGenerateWaitsForACancelledWorkingChaptersJob(t *testing.T) {
 	t.Parallel()
 	hr := newHarness(t)
-	hr.h.o.Poll = 250 * time.Millisecond // holdTries polls: five seconds to give way in
+	hr.h.o.Poll = 250 * time.Millisecond // giveWayTries polls: ten seconds to give way in
 	hr.exec.windowed = true
 	gate := hr.exec.gate(string(state.ChapterDetecting))
 	stop := hr.runner(hr.h, hr.h.ChaptersJob())

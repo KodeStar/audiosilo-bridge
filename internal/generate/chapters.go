@@ -445,7 +445,7 @@ func continuable(b store.Book) bool {
 	}
 }
 
-// awaitChaptersGivingWay waits up to holdTries polls for the book's chapters run
+// awaitChaptersGivingWay waits up to giveWayTries polls for the book's chapters run
 // to give way to this generate job (chaptersGivingWay): the server queues a
 // generate job beside a chapters.detect job only once that one is cancelled (a
 // parked one it cancels as it queues it; a working one an admin cancelled), the
@@ -463,7 +463,7 @@ func (h *Handler) awaitChaptersGivingWay(ctx context.Context, r *run, b store.Bo
 		if !chaptersGivingWay(b, openID, kind) {
 			return b, openID, kind, nil
 		}
-		if i == holdTries {
+		if i == giveWayTries {
 			if openID == 0 {
 				h.stopBook(context.WithoutCancel(ctx), r.job.ID, b.ID)
 				b, err = h.o.DB.GetBook(ctx, b.ID)

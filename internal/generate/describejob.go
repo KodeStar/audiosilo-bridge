@@ -40,10 +40,14 @@ const (
 
 // holdTries bounds the wait for the engine's hold on a book (a stage just
 // finishing or re-admitted, a purge): that many polls, then the description (or a
-// job end's transcript purge, or a generate job's continue) gives up. It also
-// bounds a generate job's wait for a chapters job to give way (at its next
-// report, Keepalive at the most) and for an earlier run to be let go.
+// job end's transcript purge, or a generate job's continue) gives up.
 const holdTries = 20
+
+// giveWayTries bounds a generate job's wait for another job to give way at its
+// next report (a cancelled chapters job, a description asked to let go of the
+// earlier run): two minutes at the default 3 s Poll, so the give-way still lands
+// with a keepalive report (jobs.DefaultKeepalive, 30 s) or two lost on the way.
+const giveWayTries = 40
 
 // DescribeJob runs sidecars.describe. It shares the generate handler's parts:
 // the checked mapping, the book's folder, its parks, its Retry.

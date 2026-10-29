@@ -964,14 +964,61 @@ func (s *Scheduler) autoPurgeDone(ctx context.Context, id int64) {
 	}
 }
 
+// dispatchBooks is the dispatch pass's read, ordered by id as ListBooks was:
+// every unfinished book in full, plus the finished volumes of a series that
+// still has one, identity and series position only (store.ListFinishedSeriesBooks).
+// A finished book (done, no status) runs nothing, holds no series lock and has
+// no ETA, so the pass needs it only for the series breadth ranks (asrBreadthRanks
+// and the ETA simulation count a finished earlier volume, keeping a later one a
+// wave deep). A book that leaves done is read in full again at the next pass.
+func (s *Scheduler) dispatchBooks(ctx context.Context) ([]store.Book, error) {
+	books, err := s.db.ListUnfinishedBooks(ctx)
+	if err != nil {
+		return nil, err
+	}
+	finished, err := s.db.ListFinishedSeriesBooks(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return mergeFinished(books, finished), nil
+}
+
+// mergeFinished merges the two id-ordered reads of dispatchBooks into one
+// id-ordered list. The reads are two statements, not one snapshot: a book whose
+// last stage finished between them is in both, and its finished identity (the
+// later read) is the one kept, so the pass neither counts it twice in its series
+// ranks nor offers its stale stage to a lane.
+func mergeFinished(unfinished, finished []store.Book) []store.Book {
+	if len(finished) == 0 {
+		return unfinished
+	}
+	out := make([]store.Book, 0, len(unfinished)+len(finished))
+	i, j := 0, 0
+	for i < len(unfinished) && j < len(finished) {
+		switch a, b := unfinished[i].ID, finished[j].ID; {
+		case a < b:
+			out = append(out, unfinished[i])
+			i++
+		case b < a:
+			out = append(out, finished[j])
+			j++
+		default:
+			out = append(out, finished[j])
+			i, j = i+1, j+1
+		}
+	}
+	out = append(out, unfinished[i:]...)
+	return append(out, finished[j:]...)
+}
+
 // advanceWaypoints promotes queued/ready books (no lane, no executor) to their
 // next state until none remain, so the machine never stalls on a waypoint. It
-// loops until a pass advances nothing and returns that final, fresh book list so
-// dispatch can act on it without re-querying.
+// loops until a pass advances nothing and returns that final, fresh book list
+// (dispatchBooks) so dispatch can act on it without re-querying.
 func (s *Scheduler) advanceWaypoints(ctx context.Context) ([]store.Book, error) {
 	// One initial query; subsequent passes advance the in-memory slice so a chain
 	// of waypoints (queued -> inspecting, ready -> contributing) needs no re-read.
-	books, err := s.db.ListBooks(ctx)
+	books, err := s.dispatchBooks(ctx)
 	if err != nil {
 		return nil, err
 	}
