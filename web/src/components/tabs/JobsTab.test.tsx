@@ -4,7 +4,12 @@ import userEvent from '@testing-library/user-event';
 import { JobsTab } from './JobsTab';
 import { ApiClient } from '@/api/client';
 import { lastCall, mockFetch } from '@/test/fetchMock';
-import { describeJobFixture, generateJobFixture, jobFixture } from '@/test/fixtures';
+import {
+  describeJobFixture,
+  generateJobFixture,
+  jobFixture,
+  libraryFixture,
+} from '@/test/fixtures';
 
 const api = () => new ApiClient({ getToken: () => 't', onSignedOut: vi.fn() });
 
@@ -37,6 +42,16 @@ describe('JobsTab', () => {
     expect(within(card).queryByRole('button', { name: 'Cancel' })).toBeNull();
     expect(within(card).getByText('Report pending')).toBeInTheDocument();
     expect(lastCall(calls, 'POST', '/api/jobs/7/cancel')).toBeDefined();
+  });
+
+  it("names a job's library as the Libraries tab does", async () => {
+    mockFetch({
+      'GET /api/jobs': { body: { jobs: [jobFixture()] } },
+      'GET /api/libraries': { body: { libraries: [libraryFixture()] } },
+    });
+    render(<JobsTab client={api()} />);
+    const card = await screen.findByRole('article', { name: 'Job 7' });
+    expect(await within(card).findByText('Audiobooks · Author/Book')).toBeInTheDocument();
   });
 
   it('says so when the job is no longer running here', async () => {

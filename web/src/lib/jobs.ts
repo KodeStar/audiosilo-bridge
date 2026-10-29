@@ -1,4 +1,4 @@
-import type { Progress, ServerJob } from '@/api/types';
+import type { Library, Progress, ServerJob } from '@/api/types';
 import type { Tone } from '@/components/ui/Badge';
 import { effectiveState } from './generate';
 import { clampPercent } from './percent';
@@ -58,8 +58,22 @@ export function progressPercent(p: Progress | null | undefined): number | null {
   return clampPercent(((p.done ?? 0) / p.total) * 100);
 }
 
-// jobTarget is "library 2: Author/Book", "library 2" or "".
-export function jobTarget(job: ServerJob): string {
+// libraryNames maps each library the Bridge knows (the Libraries tab's list)
+// to its name.
+export function libraryNames(libs: Library[] | null | undefined): Map<number, string> {
+  const out = new Map<number, string>();
+  for (const l of libs ?? []) {
+    if (l.library.name) out.set(l.library.id, l.library.name);
+  }
+  return out;
+}
+
+// jobTarget is "Books · Author/Book" with the library's name from names (as the
+// server's console shows a job), else "library 2: Author/Book"; without a path
+// the library alone ("Books", "library 2"), or "".
+export function jobTarget(job: ServerJob, names?: ReadonlyMap<number, string>): string {
+  const name = job.library_id != null ? names?.get(job.library_id) : undefined;
+  if (name) return job.path ? `${name} · ${job.path}` : name;
   const lib = job.library_id != null ? `library ${job.library_id}` : '';
   if (job.path) return lib ? `${lib}: ${job.path}` : job.path;
   return lib;
