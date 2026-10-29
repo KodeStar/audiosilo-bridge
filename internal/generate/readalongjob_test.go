@@ -394,7 +394,7 @@ func seedEarlier(hr *harness, goal string, st state.State, status string) store.
 		hr.t.Fatal(err)
 	}
 	b, err := hr.db.CreateBook(ctx, store.NewBook{SourcePath: sp, WorkDir: store.DeriveWorkDir(hr.work, sp, "The Book"), Title: "The Book",
-		Goal: goal, Kind: string(state.KindAudio)})
+		Goal: goal, Kind: string(state.KindAudio), State: string(state.Done)}) // never queued: the engine would run it
 	if err != nil {
 		hr.t.Fatal(err)
 	}
@@ -489,6 +489,54 @@ func TestReadalongReusesTheEarlierRun(t *testing.T) {
 				t.Fatalf("asr.json after going on from %s: %v", tc.firstStage, err)
 			}
 		})
+	}
+}
+
+// A read-along that went on from a whole run keeps its notes for the next
+// read-along after a Reconcile rewind superseded its fact pass's success: with its
+// transcripts swept, the read-along goes on in the same engine book from
+// inspecting, never clearing it for a new one.
+func TestReadalongKeepsAWholeRunsNotesAfterARewind(t *testing.T) {
+	t.Parallel()
+	hr := readalongHarness(t)
+	ctx := context.Background()
+	old := seedEarlier(hr, state.GoalReadalong, state.Done, "")
+	id, err := hr.db.StartStageRun(ctx, old.ID, string(state.FactPass), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := hr.db.FinishStageRun(ctx, id, true, nil); err != nil {
+		t.Fatal(err)
+	}
+	notes := filepath.Join(old.WorkDir, "facts", "knowledge-final.md")
+	mustWrite(t, notes, "## ROSTER\n")
+	// What Reconcile does to the fact pass when it rewinds the book to an earlier
+	// stage whose sentinel went missing.
+	if err := hr.db.SupersedeStageSuccesses(ctx, old.ID, string(state.FactPass)); err != nil {
+		t.Fatal(err)
+	}
+	if err := hr.db.PutGenerateBook(ctx, store.GenerateBook{ServerJobID: 99, BookID: &old.ID, LibraryID: 1, RelPath: "Author/Book"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := hr.db.EndGenerateBook(ctx, 99, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := hr.db.MarkGenerateBookSwept(ctx, old.ID, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	before := len(hr.stagesRun(old.ID))
+	hr.srv.addKind(213, ReadalongKind, "Author/Book", `{}`)
+	stop := hr.runner(hr.h, hr.h.ReadalongJob())
+	defer stop()
+	hr.waitFor("done", func() bool { s, _ := hr.srv.final(213); return s == link.StateDone })
+	if b := hr.engineBook(213); b.ID != old.ID || b.Goal != state.GoalReadalong {
+		t.Fatalf("engine book %d (earlier %d), goal %q", b.ID, old.ID, b.Goal)
+	}
+	if stages := hr.stagesRun(old.ID)[before:]; len(stages) == 0 || stages[0] != string(state.Inspecting) {
+		t.Fatalf("stages run %v, want from inspecting", stages)
+	}
+	if _, err := os.Stat(notes); err != nil {
+		t.Fatalf("the whole run's notes: %v", err)
 	}
 }
 

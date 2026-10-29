@@ -242,13 +242,19 @@ func holdsWholeRun(goal string, st state.State, factPass bool) bool {
 }
 
 // readalongFromWholeRun reports whether engine book b is a read-along that went on
-// from a whole run: goal readalong with a fact pass behind it.
+// from a whole run: goal readalong with a fact pass's notes behind it. Read from
+// the notes on disk, or failing that from any fact pass that ever succeeded on it:
+// never from a live success alone, which a Reconcile rewind after a crash (to a
+// read-along stage whose sentinel went) supersedes with every later stage's, while
+// the notes stay.
 func (h *Handler) readalongFromWholeRun(ctx context.Context, b store.Book) (bool, error) {
 	if b.Goal != state.GoalReadalong {
 		return false, nil
 	}
-	n, err := h.o.DB.CountStageSuccesses(ctx, b.ID, string(state.FactPass))
-	return n > 0, err
+	if pipeline.HoldsNotes(b.WorkDir) {
+		return true, nil
+	}
+	return h.o.DB.StageEverSucceeded(ctx, b.ID, string(state.FactPass))
 }
 
 // keepsWholeRun is holdsWholeRun for engine book b.

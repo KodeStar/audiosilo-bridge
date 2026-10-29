@@ -28,6 +28,13 @@ const factsDir = spelling.FactsDir
 // series and gives synthesis a concise book-level view.
 const knowledgeFinalName = "knowledge-final.md"
 
+// HoldsNotes reports whether a fact pass left its notes in workDir: the knowledge
+// sheet, which the transcript retention keeps (a sequel's carryover and the
+// description read it) and which no stage but the fact pass writes.
+func HoldsNotes(workDir string) bool {
+	return fsutil.IsFile(filepath.Join(workDir, factsDir, knowledgeFinalName))
+}
+
 // knowledgeInheritedName is the staged filename for the SERIES PREDECESSOR's
 // knowledge-final.md when it seeds a later book's opening chunk.
 const knowledgeInheritedName = "knowledge-inherited.md"

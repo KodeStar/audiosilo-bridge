@@ -1171,18 +1171,26 @@ func TestChaptersDetectRefusedBesideOtherSidecars(t *testing.T) {
 
 // A finished whole run of the book is never cleared for a chapters run: its notes
 // carry a series on and describe the book. That holds once a read-along took it on
-// too (stopped aligning, or gone on as a read-along after its fact pass).
+// too (stopped aligning, or gone on as a read-along after its fact pass), and after
+// a Reconcile rewind superseded that fact pass's success (the notes stay).
 func TestChaptersDetectKeepsAFinishedRun(t *testing.T) {
 	t.Parallel()
+	const (
+		factPassLive    = "live"    // the fact pass's success, as it ran
+		factPassRewound = "rewound" // that success superseded by a rewind, the notes kept
+		factPassNotes   = "notes"   // the notes on disk, no record of the run
+	)
 	for _, tc := range []struct {
 		name, goal string
 		st         state.State
 		status     string
-		factPass   bool
+		factPass   string
 	}{
-		{"whole run done", "", state.Done, "", false},
-		{"whole run stopped aligning a read-along", "", state.ReadalongAligning, string(state.StatusFailed), false},
-		{"read-along gone on from a whole run", state.GoalReadalong, state.Done, "", true},
+		{"whole run done", "", state.Done, "", ""},
+		{"whole run stopped aligning a read-along", "", state.ReadalongAligning, string(state.StatusFailed), ""},
+		{"read-along gone on from a whole run", state.GoalReadalong, state.Done, "", factPassLive},
+		{"read-along gone on from a whole run, rewound since", state.GoalReadalong, state.Done, "", factPassRewound},
+		{"read-along holding a whole run's notes", state.GoalReadalong, state.ReadalongAligning, string(state.StatusFailed), factPassNotes},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -1192,14 +1200,15 @@ func TestChaptersDetectKeepsAFinishedRun(t *testing.T) {
 			if err != nil || !ok {
 				t.Fatal(sp, ok, err)
 			}
-			old, err := hr.db.CreateBook(ctx, store.NewBook{SourcePath: sp, WorkDir: filepath.Join(hr.work, "loose"), Title: "Loose", Goal: tc.goal})
+			old, err := hr.db.CreateBook(ctx, store.NewBook{SourcePath: sp, WorkDir: filepath.Join(hr.work, "loose"), Title: "Loose", Goal: tc.goal,
+				State: string(state.Done)}) // never queued: the engine would run it
 			if err != nil {
 				t.Fatal(err)
 			}
 			if err := hr.db.SetBookState(ctx, old.ID, string(tc.st), tc.status, "", ""); err != nil {
 				t.Fatal(err)
 			}
-			if tc.factPass {
+			if tc.factPass == factPassLive || tc.factPass == factPassRewound {
 				id, err := hr.db.StartStageRun(ctx, old.ID, string(state.FactPass), 1)
 				if err != nil {
 					t.Fatal(err)
@@ -1207,6 +1216,16 @@ func TestChaptersDetectKeepsAFinishedRun(t *testing.T) {
 				if err := hr.db.FinishStageRun(ctx, id, true, nil); err != nil {
 					t.Fatal(err)
 				}
+			}
+			if tc.factPass == factPassRewound {
+				// What Reconcile does to the fact pass when it rewinds the book to an
+				// earlier stage whose sentinel went missing.
+				if err := hr.db.SupersedeStageSuccesses(ctx, old.ID, string(state.FactPass)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.factPass == factPassNotes {
+				mustWrite(t, filepath.Join(old.WorkDir, "facts", "knowledge-final.md"), "## ROSTER\n")
 			}
 			hr.srv.addKind(44, ChaptersKind, "Loose.m4b", `{}`)
 			stop := hr.runner(hr.h, hr.h.ChaptersJob())

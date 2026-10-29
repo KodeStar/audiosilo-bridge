@@ -324,6 +324,17 @@ func (db *DB) CountStageSuccesses(ctx context.Context, bookID int64, stage strin
 	return n, err
 }
 
+// StageEverSucceeded reports whether a run of stage ever completed ok for a book,
+// superseded ones included. It is a HISTORY reader, not a scheduling one: a
+// Reconcile rewind or a Retry retires a success for scheduling, but what the stage
+// made (a fact pass's notes) can outlive that.
+func (db *DB) StageEverSucceeded(ctx context.Context, bookID int64, stage string) (bool, error) {
+	var ok bool
+	err := db.sql.QueryRowContext(ctx,
+		`SELECT EXISTS(SELECT 1 FROM stage_runs WHERE book_id=? AND stage=? AND ok=1)`, bookID, stage).Scan(&ok)
+	return ok, err
+}
+
 const runCols = `id, book_id, stage, attempt, started_at, finished_at, ok, metrics, ` +
 	`model, input_tokens, output_tokens, cost_usd, superseded, cache_read_tokens, ` +
 	`cost_reported, estimated_api_cost_usd, estimate_complete, heartbeat_at, progress_at, process_id, process_active`
