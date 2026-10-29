@@ -32,7 +32,7 @@ const knowledgeFinalName = "knowledge-final.md"
 // sheet, which the transcript retention keeps (a sequel's carryover and the
 // description read it) and which no stage but the fact pass writes.
 func HoldsNotes(workDir string) bool {
-	return fsutil.IsFile(filepath.Join(workDir, factsDir, knowledgeFinalName))
+	return fsutil.IsFile(filepath.Join(factsDirPath(workDir), knowledgeFinalName))
 }
 
 // knowledgeInheritedName is the staged filename for the SERIES PREDECESSOR's
@@ -205,7 +205,7 @@ sendJobs:
 	// The assembly is intentionally separate from extraction. It reads only the
 	// compact facts (never transcripts), runs once, and is resumable on re-entry.
 	assembledThisRun := false
-	if !fsutil.IsFile(filepath.Join(book.WorkDir, factsDir, knowledgeFinalName)) {
+	if !HoldsNotes(book.WorkDir) {
 		usage, aerr := e.assembleFacts(ctx, book, r, plan, hasCarryover, pred, class)
 		usageTotal.add(usage.Usage)
 		usageTotal.Invocations += usage.Invocations

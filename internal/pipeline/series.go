@@ -2,11 +2,8 @@ package pipeline
 
 import (
 	"context"
-	"path/filepath"
 	"strings"
 
-	"github.com/kodestar/audiosilo-bridge/internal/fsutil"
-	"github.com/kodestar/audiosilo-bridge/internal/spelling"
 	"github.com/kodestar/audiosilo-bridge/internal/state"
 	"github.com/kodestar/audiosilo-bridge/internal/store"
 )
@@ -43,7 +40,7 @@ func findSeriesPredecessor(ctx context.Context, db *store.DB, book store.Book) (
 		if pos >= target {
 			continue
 		}
-		if !fsutil.IsFile(filepath.Join(cand.WorkDir, spelling.FactsDir, knowledgeFinalName)) {
+		if !HoldsNotes(cand.WorkDir) {
 			continue
 		}
 		if best == nil || pos > bestPos || (pos == bestPos && cand.ID > best.ID) {

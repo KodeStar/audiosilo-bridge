@@ -1354,8 +1354,8 @@ internal/
             at one path, never a real path); Book.IsAudioRun, Book.AudioSource (the
             path the audio is read from: inspect and the markers file read it).
             ContinueChapters sets source_path to nb's when nb names one (a generate job
-            taking on the audio run as the book's own). StageEverSucceeded(book, stage)
-            counts superseded successes (a history reader).
+            taking on the audio run as the book's own). LatestOkStageRun(book, stage)
+            reads superseded successes too (a history reader).
   state/    per-book pipeline state machine: table-driven states/lanes/transitions,
             CanStart/NextState guards, the audit fix-loop cap. Pure, no I/O. M6 added
             ParkCode (typed park reasons - M7 added contrib_unavailable, core_needed,

@@ -189,9 +189,9 @@ type readalongEarlier struct {
 }
 
 // readalongReuse is the reuse table (decision 6): where the book's earlier audio
-// engine book (never an ebook run: audioRun) goes on for a read-along (to, with goal), or ok false for a new one (the
-// earlier cleared). Every row but the last needs the transcripts kept and the
-// audio unchanged:
+// engine book (never an ebook run: audioRun) goes on for a read-along (to, with
+// goal), or ok false for a new one (the earlier cleared). Every row but the last
+// needs the transcripts kept and the audio unchanged:
 //   - a whole run (goal "") past qa_adjudicating (a finished one an earlier
 //     read-along stopped at readalong_aligning too): on at readalong_aligning, its
 //     goal kept (its transcripts are repaired already);
@@ -254,7 +254,12 @@ func (h *Handler) readalongFromWholeRun(ctx context.Context, b store.Book) (bool
 	if pipeline.HoldsNotes(b.WorkDir) {
 		return true, nil
 	}
-	return h.o.DB.StageEverSucceeded(ctx, b.ID, string(state.FactPass))
+	// LatestOkStageRun reads superseded successes too: the history, not scheduling.
+	_, err := h.o.DB.LatestOkStageRun(ctx, b.ID, string(state.FactPass))
+	if errors.Is(err, store.ErrNotFound) {
+		return false, nil
+	}
+	return err == nil, err
 }
 
 // keepsWholeRun is holdsWholeRun for engine book b.
@@ -311,8 +316,7 @@ func (h *Handler) prepareContinue(ctx context.Context, b store.Book, to state.St
 // ebook is checked first (none, DRM, not an EPUB, too big: refused before any
 // transcription). The earlier engine book is audioRun's (an ebook run is never
 // touched: the read-along runs beside it). One another open job follows refuses
-// the job; one a stage runs on makes it try again in a
-// minute; otherwise the reuse table decides, under the engine's hold, and what
+// the job; one a stage runs on makes it try again in a minute; otherwise the reuse table decides, under the engine's hold, and what
 // it doesn't reuse is cleared for a new book (goal readalong, no series: nothing
 // a later volume carries on from).
 func (h *Handler) createReadalong(ctx context.Context, eng Engine, r *run) error {
@@ -363,24 +367,25 @@ func (h *Handler) createReadalong(ctx context.Context, eng Engine, r *run) error
 // contribution's): then the audio run beside it (store.AudioRunKey), which is
 // also the one found when the ebook run went since. store.ErrNotFound (with the
 // key) for none.
-func (h *Handler) audioRun(ctx context.Context, sp string) (b store.Book, key string, err error) {
+func (h *Handler) audioRun(ctx context.Context, sp string) (store.Book, string, error) {
 	own, err := h.o.DB.GetBookBySourcePath(ctx, sp)
-	switch {
-	case err == nil && own.Kind != string(state.KindEbook):
-		return own, sp, nil
-	case err != nil && !errors.Is(err, store.ErrNotFound):
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
 		return store.Book{}, "", err
 	}
-	key = store.AudioRunKey(sp)
-	beside, berr := h.o.DB.GetBookBySourcePath(ctx, key)
+	if err == nil && own.Kind != string(state.KindEbook) {
+		return own, sp, nil
+	}
+	ebookRun := err == nil
+	key := store.AudioRunKey(sp)
+	beside, err := h.o.DB.GetBookBySourcePath(ctx, key)
 	switch {
-	case berr == nil:
+	case err == nil:
 		return beside, key, nil
-	case !errors.Is(berr, store.ErrNotFound):
-		return store.Book{}, "", berr
-	case err != nil:
+	case !errors.Is(err, store.ErrNotFound):
+		return store.Book{}, "", err
+	case !ebookRun:
 		// No run at all: a new one is the book's own.
-		return store.Book{}, sp, store.ErrNotFound
+		key = sp
 	}
 	return store.Book{}, key, store.ErrNotFound
 }

@@ -245,8 +245,10 @@ func (db *DB) StageRunBudgetCost(ctx context.Context, runID int64) (float64, err
 	return cost, err
 }
 
-// LatestOkStageRun returns the book's newest successful run of stage, or
-// ErrNotFound when there is none.
+// LatestOkStageRun returns the book's newest successful run of stage, superseded
+// ones included, or ErrNotFound when there is none. It is a HISTORY reader, not a
+// scheduling one: a Reconcile rewind or a Retry retires a success for scheduling,
+// but what the stage made (a fact pass's notes) can outlive that.
 func (db *DB) LatestOkStageRun(ctx context.Context, bookID int64, stage string) (StageRun, error) {
 	r, err := scanRun(db.sql.QueryRowContext(ctx,
 		`SELECT `+runCols+` FROM stage_runs WHERE book_id=? AND stage=? AND ok=1 ORDER BY id DESC LIMIT 1`, bookID, stage))
@@ -322,17 +324,6 @@ func (db *DB) CountStageSuccesses(ctx context.Context, bookID int64, stage strin
 	err := db.sql.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM stage_runs WHERE book_id=? AND stage=? AND ok=1 AND superseded=0`, bookID, stage).Scan(&n)
 	return n, err
-}
-
-// StageEverSucceeded reports whether a run of stage ever completed ok for a book,
-// superseded ones included. It is a HISTORY reader, not a scheduling one: a
-// Reconcile rewind or a Retry retires a success for scheduling, but what the stage
-// made (a fact pass's notes) can outlive that.
-func (db *DB) StageEverSucceeded(ctx context.Context, bookID int64, stage string) (bool, error) {
-	var ok bool
-	err := db.sql.QueryRowContext(ctx,
-		`SELECT EXISTS(SELECT 1 FROM stage_runs WHERE book_id=? AND stage=? AND ok=1)`, bookID, stage).Scan(&ok)
-	return ok, err
 }
 
 const runCols = `id, book_id, stage, attempt, started_at, finished_at, ok, metrics, ` +

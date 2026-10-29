@@ -817,26 +817,26 @@ func (h *Handler) create(ctx context.Context, eng Engine, r *run) error {
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
 		return err
 	}
+	found := err == nil
 	// Read from the audio, the job also takes on the audio run beside an ebook run
 	// (a read-along's or a chapters job's, store.AudioRunKey), the ebook run
 	// cleared first: the whole run, the book's notes, is the audio's now. Read from
 	// the ebook, it leaves that run alone.
 	if r.source == SourceAudio {
-		beside, berr := h.earlierRun(ctx, r, store.AudioRunKey(sp))
-		switch {
-		case errors.Is(berr, store.ErrNotFound):
-		case berr != nil:
-			return berr
-		default:
-			if err == nil {
+		beside, err := h.earlierRun(ctx, r, store.AudioRunKey(sp))
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			return err
+		}
+		if err == nil {
+			if found {
 				if err := h.clearEarlier(ctx, eng, r, old.ID); err != nil {
 					return err
 				}
 			}
-			old, err = beside, nil
+			old, found = beside, true
 		}
 	}
-	if err == nil {
+	if found {
 		if ok, err := h.continueReadalongRun(ctx, eng, r, old); ok || err != nil {
 			return err
 		}

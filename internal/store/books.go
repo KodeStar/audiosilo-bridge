@@ -596,8 +596,8 @@ var ErrNotContinuable = errors.New("the book isn't a chapters book to continue")
 // dir and kind stay the book's; its source path becomes nb's when nb names one
 // (the same path, or the book's own for the audio run beside an ebook run the
 // caller cleared first: the whole run is the book's then). job (when it names a
-// server job) is mapped to the book in the same transaction, so a book is never continued with no job
-// to follow it, nor left stopped. ErrNotContinuable when the book isn't one
+// server job) is mapped to the book in the same transaction, so a book is never
+// continued with no job to follow it, nor left stopped. ErrNotContinuable when the book isn't one
 // stopped at from, or the retention swept its transcripts (a continue needs them);
 // checked in the one statement, so a book that changed meanwhile isn't moved. The
 // SQL asks for any goal short of the whole pipeline (chapters is the only one) and
@@ -646,8 +646,8 @@ func (db *DB) ContinueChapters(ctx context.Context, id int64, from, to string, n
 // read-along run going on at to with goal (Phase 3c's reuse table, decided by the
 // caller): its identity, work dir, source, kind and series stay the book's (an
 // ebook run is never continued: its notes are the ebook's, and a read-along runs
-// beside it, AudioRunKey); status clear, so the scheduler takes it up at to. job (when it names a server job) is mapped to the book in the same
-// transaction. ErrNotContinuable when the book isn't stopped at from (done,
+// beside it, AudioRunKey); status clear, so the scheduler takes it up at to. job
+// (when it names a server job) is mapped to the book in the same transaction. ErrNotContinuable when the book isn't stopped at from (done,
 // failed, parked or paused: the caller holds the engine's hold on it and checked
 // no other job follows it) or, going on past inspecting, the retention swept its
 // transcripts; checked in the one statement, so a book that changed meanwhile
