@@ -678,7 +678,7 @@ func (h *Handler) createChapters(ctx context.Context, eng Engine, r *run) error 
 		if err := h.openJobRefusal(ctx, r, old.ID); err != nil {
 			return err
 		}
-		if old.Goal != state.GoalChapters && state.State(old.State) == state.Done {
+		if old.Goal == "" && state.State(old.State) == state.Done {
 			return errChaptersKeepsRun
 		}
 		if err := h.clearEarlier(ctx, eng, r, old.ID); err != nil {

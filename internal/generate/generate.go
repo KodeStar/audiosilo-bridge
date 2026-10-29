@@ -290,6 +290,9 @@ type run struct {
 	detectedOK     bool
 	detectedUnseen bool
 	detectedStamp  string
+	// readalongAsked says the run handed its engine book the read-along request
+	// (readalong.align: the ebook and the server's files, written once a run).
+	readalongAsked bool
 }
 
 // bookKey is what changes on an engine book row when the scheduler moves it.
@@ -776,8 +779,11 @@ func (r *run) engineParked(parked bool, code, msg string) {
 // run (the same source path) is deleted first, unless another open job follows it
 // or a stage of it runs right now.
 func (h *Handler) create(ctx context.Context, eng Engine, r *run) error {
-	if r.kind == ChaptersKind {
+	switch r.kind {
+	case ChaptersKind:
 		return h.createChapters(ctx, eng, r)
+	case ReadalongKind:
+		return h.createReadalong(ctx, eng, r)
 	}
 	if r.resuming {
 		// A resumed job whose book is another job's (an id reused) or gone (deleted,
@@ -823,6 +829,9 @@ func (h *Handler) create(ctx context.Context, eng Engine, r *run) error {
 	case openID != 0:
 		return fmt.Errorf("job %d is already generating this book; cancel it first", openID)
 	default:
+		if ok, err := h.continueReadalongRun(ctx, eng, r, old); ok || err != nil {
+			return err
+		}
 		if ok, err := h.continueChapters(ctx, eng, r, old); ok || err != nil {
 			return err
 		}
@@ -1022,9 +1031,17 @@ func (h *Handler) step(ctx context.Context, eng Engine, r *run, b store.Book) (a
 	v := view{book: b, source: r.source, progress: r.progress, costUSD: r.costUSD}
 	v.eta, v.hasETA = eng.ETASeconds(b.ID)
 	st, status := state.State(b.State), state.Status(b.Status)
+	if r.kind == ReadalongKind {
+		if err := h.readalongAsk(ctx, r, b); err != nil {
+			return nil, true, err
+		}
+	}
 	switch {
 	case st == state.Done && r.kind == ChaptersKind:
 		res, err := h.finishChapters(ctx, r, b)
+		return res, true, err
+	case st == state.Done && r.kind == ReadalongKind:
+		res, err := h.finishReadalong(ctx, r, b)
 		return res, true, err
 	case st == state.Done:
 		res, err := h.finish(ctx, r, b, v.costUSD)
@@ -1043,8 +1060,8 @@ func (h *Handler) step(ctx context.Context, eng Engine, r *run, b store.Book) (a
 		return nil, true, fmt.Errorf("the engine failed the book at %s: %s", b.State, b.Error)
 	}
 	pr := describe(v)
-	if r.kind == ChaptersKind {
-		delete(pr.Extra, "cost_usd") // speech recognition and detection only: no agent spend
+	if r.kind == ChaptersKind || r.kind == ReadalongKind {
+		delete(pr.Extra, "cost_usd") // speech recognition, detection and alignment only: no agent spend
 	}
 	r.rep.Progress(pr)
 	// The chapters go into the library as soon as they are found, long before the
@@ -1291,6 +1308,9 @@ func (h *Handler) adoptMove(ctx context.Context, r *run) bool {
 	r.jobPath, r.rel = cur, cur
 	if book, err := r.srv.Book(ctx, r.lib.ID, cur); err == nil {
 		r.files = book.Files
+		if book.Info != nil {
+			r.info = book.Info
+		}
 		if book.Path != "" {
 			r.rel = book.Path
 		}

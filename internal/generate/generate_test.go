@@ -170,6 +170,10 @@ type hooks struct {
 	// inspectErr fails inspect with that sentence.
 	windowed   bool
 	inspectErr error
+	// alignCoverage is the text coverage readalong_aligning's map states (0:
+	// 0.95); afterAlign runs once it wrote the map.
+	alignCoverage float64
+	afterAlign    func(b store.Book)
 }
 
 func (e *hooks) Execute(ctx context.Context, b store.Book, st state.State, r scheduler.StageReport) (scheduler.StageResult, error) {
@@ -217,6 +221,14 @@ func (e *hooks) Execute(ctx context.Context, b store.Book, st state.State, r sch
 		return res, scheduler.WriteSentinel(b.WorkDir, string(st), res)
 	case st == state.ChapterDetecting:
 		detectChapters(e.t, b)
+	case st == state.ReadalongAligning:
+		e.mu.Lock()
+		cov, after := e.alignCoverage, e.afterAlign
+		e.mu.Unlock()
+		writeAlignedMap(e.t, b, cov)
+		if after != nil {
+			after(b)
+		}
 	}
 	switch st {
 	case state.FactPass:
