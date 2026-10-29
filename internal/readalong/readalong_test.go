@@ -348,6 +348,84 @@ func TestHealWindows(t *testing.T) {
 	}
 }
 
+// A section's trailing run of unaligned sentences (nothing aligned after it in the
+// section) is healed from its last aligned sentence for as long as its text could
+// take, bounded by its chapter's end and the next section's first aligned sentence.
+func TestHealWindowsTrailingRun(t *testing.T) {
+	tl, err := Compose(StyleFiles, []ManifestChapter{{Chapter: 1, FilePath: "a"}, {Chapter: 2, FilePath: "b"}},
+		[]AudioFile{{"a", 1000}, {"b", 1000}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sec := func(t1 float64, gapChars ...int) SectionResult {
+		s := SectionResult{Spans: []Span{{Start: 0, End: 10, T0: t1 - 5, T1: t1}}}
+		at := 10
+		for _, c := range gapChars {
+			s.Gaps = append(s.Gaps, Gap{Start: at, End: at + c})
+			at += c
+		}
+		return s
+	}
+	for _, tc := range []struct {
+		name string
+		res  Result
+		want []Window
+	}{
+		{"bounded by the text", Result{Sections: []SectionResult{sec(100, 300, 200)}},
+			[]Window{{File: 0, Start: 99.5, End: 160, Gaps: 2}}},
+		{"bounded by the chapter's end", Result{Sections: []SectionResult{sec(900, 5000)}},
+			[]Window{{File: 0, Start: 899.5, End: 1000, Gaps: 1}}},
+		{"bounded by the next section's first sentence", Result{Sections: []SectionResult{sec(100, 5000), sec(150)}},
+			[]Window{{File: 0, Start: 99.5, End: 145.5, Gaps: 1}}},
+		{"never past 600 s", Result{Sections: []SectionResult{sec(10, 9000)}},
+			[]Window{{File: 0, Start: 9.5, End: 609.5, Gaps: 1}}},
+		// Denied: no text to place, a sentence aligned at the chapter's very end,
+		// and a section with nothing aligned at all (no sentence to start from).
+		{"no text", Result{Sections: []SectionResult{sec(100, 0)}}, nil},
+		{"at the chapter's end", Result{Sections: []SectionResult{sec(1000, 300)}}, nil},
+		{"nothing aligned", Result{Sections: []SectionResult{{Gaps: []Gap{{Start: 0, End: 400}}}}}, nil},
+	} {
+		if got := tl.HealWindows(tc.res, nil); !slices.Equal(got, tc.want) {
+			t.Errorf("%s: windows %+v, want %+v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// The Call of the Wild's shape (the 3c-1 live run): chapter 1's last 230 s are a
+// "buck buck" loop, so the section's last 3101 characters never aligned and the
+// next section starts in the next file. The trailing run is healed to the
+// chapter's end, and the transcript check's loop range lands on the same window.
+func TestHealWindowsLoopedChapterEnd(t *testing.T) {
+	tl, err := Compose(StyleFiles, []ManifestChapter{{Chapter: 1, FilePath: "01.mp3"}, {Chapter: 2, FilePath: "02.mp3"}},
+		[]AudioFile{{"01.mp3", 1510.89}, {"02.mp3", 1400}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := Result{Sections: []SectionResult{
+		{Spans: []Span{{Start: 0, End: 100, T0: 0, T1: 600}, {Start: 100, End: 22000, T0: 600, T1: 1276.42}},
+			Gaps: []Gap{{Start: 22000, End: 23500}, {Start: 23500, End: 25101}}},
+		{Spans: []Span{{Start: 0, End: 50, T0: 1512, T1: 1520}}},
+	}}
+	want := []Window{{File: 0, Start: 1275.92, End: 1510.89, Gaps: 2}}
+	if got := tl.HealWindows(res, nil); !slices.Equal(got, want) {
+		t.Fatalf("windows %+v, want %+v", got, want)
+	}
+	loop, ok := tl.LoopWindow(1, 1277, 1507)
+	if !ok || loop != (Window{File: 0, Start: 1276.5, End: 1507.5}) {
+		t.Fatalf("loop window %+v %v", loop, ok)
+	}
+	if got := tl.HealWindows(res, []Window{loop}); !slices.Equal(got, want) {
+		t.Fatalf("with the loop: %+v, want %+v", got, want)
+	}
+	// Denied: a "loop" over 600 s (a phrase the book repeats), a chapter the book
+	// doesn't have, an empty range.
+	for _, r := range [][3]float64{{1, 10, 900}, {9, 10, 20}, {1, 30, 30}} {
+		if w, ok := tl.LoopWindow(int(r[0]), r[1], r[2]); ok {
+			t.Errorf("loop window %v = %+v", r, w)
+		}
+	}
+}
+
 func TestHealWindowsJoinChaptersOfOneFile(t *testing.T) {
 	tl, _ := Compose(StyleMarkers, []ManifestChapter{{Chapter: 1, Start: 0}, {Chapter: 2, Start: 50}}, []AudioFile{{"b", 100}})
 	parts := tl.Parts(Window{File: 0, Start: 40, End: 60})

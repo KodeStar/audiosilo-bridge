@@ -2288,8 +2288,9 @@ func ensureRetranscribeDecodeParams(workDir, tag string) error {
 }
 
 // retranscribeChapter re-transcribes one chapter FRESH into retranscribe/, then uses
-// repair.AdoptFresh to decide (never blindly) whether the fresh run replaces the
-// original. On adopt it replaces the immutable raw (unfreeze -> write -> re-freeze
+// repair.AdoptFresh (a read-along book: repair.AdoptFreshReadalong, which weighs the
+// loops, not the word count) to decide (never blindly) whether the fresh run
+// replaces the original. On adopt it replaces the immutable raw (unfreeze -> write -> re-freeze
 // 0444), re-derives the json/text layers, and drops the chapter's stale
 // repaired/corrected files (correcting re-runs fully). On keep it leaves everything.
 // It returns whether the fresh run was adopted.
@@ -2311,8 +2312,9 @@ func (e *Executor) retranscribeChapter(ctx context.Context, r scheduler.StageRep
 	// rather than re-running the expensive full-chapter ASR. The completeness test is
 	// the same one asrStage uses (transcript.Complete via rawComplete). The adopt
 	// decision below is itself idempotent - after an ADOPT the fresh and main raw hold
-	// identical content (AdoptFresh then keeps, a no-op re-derive), after a KEEP nothing
-	// changed - so re-deciding a reused raw never corrupts a chapter.
+	// identical content (AdoptFresh then keeps; AdoptFreshReadalong adopts again, a
+	// no-op re-derive), after a KEEP nothing changed - so re-deciding a reused raw
+	// never corrupts a chapter.
 	if !rawComplete(freshRawPath) {
 		// Prompt-free (no seeded initial prompt: a guess makes a wrong spelling recur),
 		// but NoContext-on: unlike asrStage, a repair re-transcription must vary the
@@ -2341,15 +2343,19 @@ func (e *Executor) retranscribeChapter(ctx context.Context, r scheduler.StageRep
 		return false, fmt.Errorf("retranscribing: normalize fresh chapter %d: %w", chapter, err)
 	}
 
-	origWords := 0
+	orig := repair.AdoptStats{DurationSec: durationSec}
 	if origT, oerr := transcript.ReadNormalized(filepath.Join(book.WorkDir, transcript.JSONDir), chapter); oerr == nil {
-		origWords = len(strings.Fields(transcript.PlainText(origT)))
+		text := transcript.PlainText(origT)
+		orig.Words, orig.LoopWords = len(strings.Fields(text)), qa.LoopWords(text)
 	}
-	freshWords := len(strings.Fields(transcript.PlainText(freshT)))
-	decision := repair.AdoptFresh(
-		repair.AdoptStats{Words: origWords, DurationSec: durationSec},
-		repair.AdoptStats{Words: freshWords, DurationSec: durationSec},
-	)
+	freshText := transcript.PlainText(freshT)
+	fresh := repair.AdoptStats{Words: len(strings.Fields(freshText)), DurationSec: durationSec, LoopWords: qa.LoopWords(freshText)}
+	adopt := repair.AdoptFresh
+	if book.Goal == state.GoalReadalong {
+		// A read-along keeps no loop for the word count's sake (Phase 3c-1).
+		adopt = repair.AdoptFreshReadalong
+	}
+	decision := adopt(orig, fresh)
 	if !decision.Adopt {
 		return false, nil
 	}

@@ -497,3 +497,26 @@ func TestReadalongInspectWindowsAnUnusableTable(t *testing.T) {
 		}
 	}
 }
+
+// The transcript check's located loops become heal windows (a re-align reuses the
+// kept transcripts, loops and all, and the mechanical round writes no tail
+// verdicts); an unlocated one, or one over 600 s, doesn't.
+func TestReadalongLoopWindows(t *testing.T) {
+	tl, err := readalong.Compose(readalong.StyleFiles, []readalong.ManifestChapter{{Chapter: 1, FilePath: "01.mp3"}, {Chapter: 4, FilePath: "04.mp3"}},
+		[]readalong.AudioFile{{Path: "01.mp3", Duration: 1510.89}, {Path: "04.mp3", Duration: 1400}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sec := func(v float64) *float64 { return &v }
+	rep := &qa.Report{CrossSegment: []qa.CrossSegmentHit{
+		{Chapter: 1, Count: 2641, FirstSec: sec(1277), LastSec: sec(1507)},
+		{Chapter: 4, Count: 4194, FirstSec: sec(957), LastSec: sec(1331)},
+		{Chapter: 4, Count: 9, Pos: -1},                               // not located
+		{Chapter: 1, Count: 6, FirstSec: sec(10), LastSec: sec(1200)}, // a phrase the book repeats
+	}}
+	got := readalongLoopWindows(rep, tl)
+	want := []readalong.Window{{File: 0, Start: 1276.5, End: 1507.5}, {File: 1, Start: 956.5, End: 1331.5}}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("windows %+v, want %+v", got, want)
+	}
+}

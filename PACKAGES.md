@@ -341,8 +341,12 @@ internal/
             meant), Compose (whole-book time = the SERVER's file durations in its order
             + the in-file chapter start + the word time, never the manifest's cross-file
             starts), HealWindows ([prev.end - 0.5, next.start + 0.5] per unaligned run,
-            2-600 s, cut at file boundaries, plus tail_verdicts windows, overlapping or
-            touching ones merged), Onset/Snap (10 ms frame energies on one grid per
+            2-600 s; a section's TRAILING run from prev.end - 0.5 for its text at 10
+            characters a second + 10 s, never past its chapter's end nor the next
+            section's first aligned sentence, at most 600 s (a chapter-end loop, CotW
+            in the 3c-1 live run); cut at file boundaries, plus the extra windows
+            (tail_verdicts, LoopWindow: the transcript check's loop ranges, 2-600 s),
+            overlapping or touching ones merged), Onset/Snap (10 ms frame energies on one grid per
             chapter, p10 + 0.3 (p95 - p10), after-pause/run-start/mid-flow; start =
             onset - 0.1 s, never past end - 0.2 s nor before raw - 0.5 s), Build/Encode
             (audiosilo-readalong/v1, keys in order, times clamped to the book and
@@ -400,7 +404,9 @@ internal/
             chapter-0 asymmetries are CONTRACT, golden-tested against 2 real books).
             Reads transcripts-json/ (+ transcripts-repaired/ for multi-loop); writes
             qa_report.json (stable enum contract for the M5 adjudicator/UI) +
-            qa_report.md (byte-compatible with the Python report). Report.Clean()
+            qa_report.md (byte-compatible with the Python report). LoopWords(text):
+            the words a 6-gram repeated 5+ times covers (the read-along's adoption
+            rule). Report.Clean()
             drives the QAClean branch; the retranscribe queue = wph outliers +
             mid-chapter loops. Loud errors on manifest/transcript divergence,
             wrong-schema files, and an empty transcript set.
@@ -528,7 +534,11 @@ internal/
             tail loop, cut+re-transcribe the window prompt-free, health-check, rotation-
             adjudicate FABRICATED/BENIGN/CLIP-REDEGENERATED, splice into
             transcripts-repaired/ + repairs.log/tail_verdicts.json) and AdoptFresh
-            (never-blindly-adopt full-chapter plausibility). No agent; injected a
+            (never-blindly-adopt full-chapter plausibility). AdoptFreshReadalong is goal
+            readalong's rule (Phase 3c-1): adopt the NoContext re-run unless it loops
+            over more words (AdoptStats.LoopWords, qa.LoopWords) or keeps under 80% of
+            the original's words outside its loops; never word count (a looped original
+            has more words, which AdoptFresh keeps). No agent; injected a
             ClipCutter (ffmpeg) + a Transcribe func so it stays unit-testable. The
             re-transcription (full-chapter AND clip) runs NoContext (asr.Job.NoContext)
             so a context-conditioned repetition collapse cannot replay identically.
@@ -1053,7 +1063,9 @@ internal/
             Rel(manifest.Source, file), the single-file styles by start), cuts again
             every chapter FLAC a purge took (splitWithRetries on the manifest), reads
             transcripts-json/ only, opens the EPUB (its sentences as the job's
-            refusals), aligns, heals (each window a clip cut across its chapter FLACs
+            refusals), aligns, heals (the windows: HealWindows' plus tail_verdicts' plus
+            the located cross-segment loops of a qa.Run over the transcripts it reads,
+            readalongLoopWindows; each window a clip cut across its chapter FLACs
             into readalong/heal/<f###_start_end>.flac, transcribed NoContext through the
             engine's backend: a worker when one is connected; a complete raw reused, the
             clip deleted, an empty answer keeps the words it had), aligns again, snaps

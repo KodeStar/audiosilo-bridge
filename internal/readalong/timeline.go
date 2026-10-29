@@ -207,6 +207,12 @@ const (
 	healPad = 0.5
 	healMin = 2.0
 	healMax = 600.0
+	// A section's trailing run (no aligned sentence after it in the section) runs
+	// from its last aligned sentence for as long as its text could take to narrate
+	// at a slow 10 characters a second, plus 10 s, never past its chapter's end nor
+	// the next section's first aligned sentence. CotW's chapter-end loops took 13.5.
+	healTrailCharsPerSec = 10.0
+	healTrailSlack       = 10.0
 )
 
 // ChapterWindow is a chapter-relative stretch as a window (a tail_verdicts
@@ -230,24 +236,72 @@ func (tl Timeline) ChapterWindow(chapter int, start, end float64) (Window, bool)
 	return Window{}, false
 }
 
+// LoopWindow is a chapter's looped stretch (the transcript check's, chapter-relative
+// first to last second) as a window, 0.5 s wider each side and within the chapter;
+// ok is false for a chapter the timeline doesn't have, or a stretch under 2 or over
+// 600 s (a phrase the book itself repeats across a chapter, not a loop to heal).
+func (tl Timeline) LoopWindow(chapter int, from, to float64) (Window, bool) {
+	if to <= from {
+		return Window{}, false
+	}
+	w, ok := tl.ChapterWindow(chapter, from-healPad, to+healPad)
+	if d := w.End - w.Start; !ok || d < healMin || d > healMax {
+		return Window{}, false
+	}
+	return w, true
+}
+
+// chapterEndAt is the whole-book end of the chapter playing at whole-book t (t
+// itself when none does). trailingWindow asks it at the window's start, half a
+// second inside the last aligned sentence, so a sentence ending on a file boundary
+// is its own chapter's.
+func (tl Timeline) chapterEndAt(t float64) float64 {
+	f := tl.fileAt(t)
+	if f >= len(tl.FileStart) {
+		return t
+	}
+	x := t - tl.FileStart[f]
+	for _, c := range tl.Chapters {
+		if c.File == f && c.Start <= x && x < c.End {
+			return tl.FileStart[f] + c.End
+		}
+	}
+	return t
+}
+
 // HealWindows plans the gap heal (decision 8): every run of unaligned sentences
 // between two aligned ones in a section becomes [prev.end - 0.5, next.start + 0.5]
-// when 2 to 600 s long, cut at a FILE boundary into one window per file (each
-// again 2 to 600 s); then the extra windows (tail_verdicts) are added and
-// overlapping windows in a file merged.
+// when 2 to 600 s long, and a section's trailing run (a loop that took its
+// chapter's end, say) [prev.end - 0.5, ...] for as long as its text could take
+// (healTrailCharsPerSec), never past its chapter's end nor the next section's first
+// aligned sentence, at most 600 s; each cut at a FILE boundary into one window per
+// file (each again 2 to 600 s); then the extra windows (tail_verdicts, the
+// transcript check's loops) are added and overlapping windows in a file merged.
 func (tl Timeline) HealWindows(res Result, extra []Window) []Window {
+	// nextT0[i] is the start of the first aligned sentence after section i.
+	nextT0 := make([]float64, len(res.Sections))
+	next := math.Inf(1)
+	for i := len(res.Sections) - 1; i >= 0; i-- {
+		nextT0[i] = next
+		if sp := res.Sections[i].Spans; len(sp) > 0 {
+			next = sp[0].T0
+			for _, s := range sp {
+				next = math.Min(next, s.T0)
+			}
+		}
+	}
 	var wins []Window
-	for _, sec := range res.Sections {
+	for si, sec := range res.Sections {
 		type item struct {
-			start int
-			span  *Span
+			start, chars int
+			span         *Span
 		}
 		items := make([]item, 0, len(sec.Spans)+len(sec.Gaps))
 		for k := range sec.Spans {
-			items = append(items, item{sec.Spans[k].Start, &sec.Spans[k]})
+			items = append(items, item{start: sec.Spans[k].Start, span: &sec.Spans[k]})
 		}
 		for _, g := range sec.Gaps {
-			items = append(items, item{start: g.Start})
+			items = append(items, item{start: g.Start, chars: max(0, g.End-g.Start)})
 		}
 		sort.SliceStable(items, func(x, y int) bool { return items[x].start < items[y].start })
 		for k := 0; k < len(items); {
@@ -259,9 +313,18 @@ func (tl Timeline) HealWindows(res Result, extra []Window) []Window {
 			for j < len(items) && items[j].span == nil {
 				j++
 			}
-			if k > 0 && j < len(items) {
+			switch {
+			case k > 0 && j < len(items):
 				a, b := items[k-1].span.T1-healPad, items[j].span.T0+healPad
 				if d := b - a; d >= healMin && d <= healMax {
+					wins = append(wins, tl.cutAtFiles(a, b, j-k)...)
+				}
+			case k > 0:
+				chars := 0
+				for _, it := range items[k:j] {
+					chars += it.chars
+				}
+				if a, b, ok := tl.trailingWindow(items[k-1].span.T1, nextT0[si], chars); ok {
 					wins = append(wins, tl.cutAtFiles(a, b, j-k)...)
 				}
 			}
@@ -270,6 +333,20 @@ func (tl Timeline) HealWindows(res Result, extra []Window) []Window {
 	}
 	wins = append(wins, extra...)
 	return mergeWindows(wins)
+}
+
+// trailingWindow is the whole-book stretch a section's trailing run of chars
+// characters may lie in after its last aligned sentence ended at t1: to its
+// chapter's end, the next aligned sentence (next) or as long as the text could take
+// (healTrailCharsPerSec), whichever comes first, at most 600 s. ok is false for no
+// text, or a stretch under 2 s.
+func (tl Timeline) trailingWindow(t1, next float64, chars int) (a, b float64, ok bool) {
+	if chars <= 0 {
+		return 0, 0, false
+	}
+	a = t1 - healPad
+	b = min(tl.chapterEndAt(a), next+healPad, t1+float64(chars)/healTrailCharsPerSec+healTrailSlack, a+healMax)
+	return a, b, b-a >= healMin
 }
 
 // cutAtFiles cuts whole-book [a, b] into one in-file window per file it touches.

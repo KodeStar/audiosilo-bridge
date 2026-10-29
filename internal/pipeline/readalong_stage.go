@@ -214,6 +214,37 @@ func readalongTimeline(m audio.Manifest, files []ReadalongFile) (readalong.Timel
 	return readalong.Compose(m.Style, chs, af)
 }
 
+// transcriptLoops are the loops the transcript check finds in the transcripts the
+// alignment reads (a cross-segment 6-gram loop's first to last second), as heal
+// windows: the mechanical round writes no tail verdicts, and a re-align reuses the
+// kept transcripts, loops and all. A check that can't run heals nothing extra.
+func (e *Executor) transcriptLoops(book store.Book, m audio.Manifest, tl readalong.Timeline) []readalong.Window {
+	durations := make(map[int]float64, len(m.Chapters))
+	for _, c := range m.Chapters {
+		durations[c.Chapter] = c.Duration
+	}
+	rep, err := qa.Run(qa.Input{WorkDir: book.WorkDir, Durations: durations})
+	if err != nil {
+		e.log.Warn("readalong_aligning: the transcript check couldn't run; healing without its loops", "book", book.ID, "err", err)
+		return nil
+	}
+	return readalongLoopWindows(rep, tl)
+}
+
+// readalongLoopWindows are the report's located cross-segment loops as windows.
+func readalongLoopWindows(rep *qa.Report, tl readalong.Timeline) []readalong.Window {
+	var out []readalong.Window
+	for _, h := range rep.CrossSegment {
+		if h.FirstSec == nil || h.LastSec == nil {
+			continue
+		}
+		if w, ok := tl.LoopWindow(h.Chapter, *h.FirstSec, *h.LastSec); ok {
+			out = append(out, w)
+		}
+	}
+	return out
+}
+
 // readalongAlign is the readalong_aligning stage.
 func (e *Executor) readalongAlign(ctx context.Context, book store.Book, r scheduler.StageReport) (scheduler.StageResult, error) {
 	ffmpeg, _ := e.ensureTools()
@@ -279,6 +310,7 @@ func (e *Executor) readalongAlign(ctx context.Context, book store.Book, r schedu
 			loops = append(loops, w)
 		}
 	}
+	loops = append(loops, e.transcriptLoops(book, manifest, tl)...)
 	wins := tl.HealWindows(first, loops)
 	rep.HealLoopWindows = len(loops)
 	patches, err := e.healWindows(ctx, book, r, tl, wins, ffmpeg)

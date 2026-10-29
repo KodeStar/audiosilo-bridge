@@ -26,6 +26,9 @@ const (
 type AdoptStats struct {
 	Words       int
 	DurationSec float64
+	// LoopWords are the words inside the transcript's 6-gram loops (qa.LoopWords);
+	// only the read-along's rule weighs them.
+	LoopWords int
 }
 
 // AdoptDecision is AdoptFresh's verdict.
@@ -71,4 +74,30 @@ func AdoptFresh(original, fresh AdoptStats) AdoptDecision {
 		return AdoptDecision{Adopt: true, Reason: "both plausible, fresh recovered more words; adopt"}
 	}
 	return AdoptDecision{Adopt: false, Reason: "both plausible, fresh not longer; keep original"}
+}
+
+// readalongMinKept is the share of the original's words outside its loops a fresh
+// read-along re-run must keep: below it the fresh run dropped narration (a collapse).
+const readalongMinKept = 0.8
+
+// AdoptFreshReadalong is a read-along book's adoption rule (Phase 3c-1): the
+// fresh NoContext re-run of a chapter the transcript check flagged replaces the
+// original unless it is clearly worse. A loop's words are noise, not narration,
+// so word count can't judge it (a looped original has MORE words; AdoptFresh keeps
+// it), and the spike adopted every re-run:
+//
+//   - fresh loops over more words than the original -> keep original.
+//   - fresh keeps under 80% of the original's words outside its loops (a collapse
+//     that dropped narration)                       -> keep original.
+//   - otherwise                                      -> adopt.
+//
+// generate's whole run keeps AdoptFresh. Pure and table-tested.
+func AdoptFreshReadalong(original, fresh AdoptStats) AdoptDecision {
+	if fresh.LoopWords > original.LoopWords {
+		return AdoptDecision{Adopt: false, Reason: "fresh run loops over more words; keep original"}
+	}
+	if float64(fresh.Words-fresh.LoopWords) < readalongMinKept*float64(original.Words-original.LoopWords) {
+		return AdoptDecision{Adopt: false, Reason: "fresh run dropped narration the original had outside its loops; keep original"}
+	}
+	return AdoptDecision{Adopt: true, Reason: "fresh run no loopier and keeps the narration; adopt"}
 }

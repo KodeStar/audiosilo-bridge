@@ -428,6 +428,30 @@ func normalizeASCII(s string) string {
 	return strings.Join(strings.Fields(b.String()), " ")
 }
 
+// LoopWords is how many of text's words lie inside a 6-gram loop: covered by an
+// occurrence of any 6-gram (over its Unicode-normalized words) repeated at least 5
+// times, cross_segment_scan.py's "not natural prose" threshold. A read-along's
+// adoption rule weighs it (repair.AdoptFreshReadalong): a loop's words are noise.
+func LoopWords(text string) int {
+	toks := strings.Fields(normalizeUnicode(text))
+	counts, _, _ := gramCounts(toks)
+	covered := make([]bool, len(toks))
+	for i := 0; i+gramSize <= len(toks); i++ {
+		if counts[gramKey(toks[i:i+gramSize])] >= crossThreshold {
+			for k := i; k < i+gramSize; k++ {
+				covered[k] = true
+			}
+		}
+	}
+	n := 0
+	for _, c := range covered {
+		if c {
+			n++
+		}
+	}
+	return n
+}
+
 // TopGram returns the most common 6-gram in toks and its count, breaking ties by
 // first appearance (Python Counter.most_common(1) over an insertion-ordered
 // Counter). Returns (nil, 0) when there are fewer than 6 tokens.
