@@ -1825,7 +1825,14 @@ internal/
             until one gets through, then Keepalive again: at 30 s alone one report
             through and three failed would lapse the lease. Only an answerless
             failure, a 5xx, 408 or 429 counts (unreachable); any other 4xx would be
-            refused again however soon, so it waits the Keepalive. A reply
+            refused again however soon, so it waits the Keepalive. The first failed
+            report warns, the rest log at debug, and the first one through after
+            them logs one Info (bridge#31); a ConfirmLease or Refresh that gets
+            through clears failing too (under the Reporter's lock: they run on
+            the handler's goroutine). Reporter.Refresh (v0.5.0, BRIDGE-01) reports
+            the job now, parked as it is, for another job it stands in the way
+            of: nil while the server holds it, ErrStopped when the answer (a
+            cancel, a lost claim) ended it. A reply
             with cancel_requested ends its context (errCancelRequested -> reported
             cancelled), a 409 ends it as lost (nothing more sent), a 401 is handed to
             the app WITH the link that got it (onUnauthorized(srv): a job of the
