@@ -446,3 +446,54 @@ func TestTranscriptionContinuableChapters(t *testing.T) {
 		t.Fatal("continuable with a file touched since it was inspected")
 	}
 }
+
+// TestReadalongInspectWindowsAnUnusableTable: a read-along book whose marker table
+// isn't usable (chapter 2 missing) is transcribed in windows, never sent to the
+// agent's markers_normalizing; a generate book's goes there as before.
+func TestReadalongInspectWindowsAnUnusableTable(t *testing.T) {
+	ffmpeg, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		t.Skip("ffmpeg not installed")
+	}
+	ffprobe, err := exec.LookPath("ffprobe")
+	if err != nil {
+		t.Skip("ffprobe not installed")
+	}
+	dir := t.TempDir()
+	var meta strings.Builder
+	meta.WriteString(";FFMETADATA1\ntitle=Gappy\n")
+	for i, title := range []string{"Chapter 1", "Chapter 3", "Chapter 4"} {
+		fmt.Fprintf(&meta, "[CHAPTER]\nTIMEBASE=1/1000\nSTART=%d\nEND=%d\ntitle=%s\n", i*2000, (i+1)*2000, title)
+	}
+	metaPath := filepath.Join(dir, "meta.txt")
+	if err := os.WriteFile(metaPath, []byte(meta.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	src := filepath.Join(dir, "gappy.m4b")
+	if out, err := exec.Command(ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "sine=frequency=220:duration=6", //nolint:gosec // test
+		"-i", metaPath, "-map", "0:a", "-map_metadata", "1", "-c:a", "aac", src).CombinedOutput(); err != nil {
+		t.Fatalf("ffmpeg: %v: %s", err, out)
+	}
+	exe := NewExecutor(Config{FFmpeg: ffmpeg, FFprobe: ffprobe, Fallback: scheduler.NewStubExecutor(0, 0)})
+	for _, tc := range []struct {
+		goal  string
+		style string
+	}{{state.GoalReadalong, audio.StyleWindows}, {"", audio.StyleMarkers}} {
+		work := filepath.Join(dir, "work-"+tc.goal)
+		if err := os.MkdirAll(work, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		res, err := exe.Execute(context.Background(), store.Book{SourcePath: src, WorkDir: work, Goal: tc.goal}, state.Inspecting, scheduler.StageReport{})
+		if err != nil {
+			t.Fatalf("goal %q: %v", tc.goal, err)
+		}
+		m, err := audio.ReadManifest(work)
+		if err != nil || m.Style != tc.style {
+			t.Fatalf("goal %q: manifest %q, want %q (%v)", tc.goal, m.Style, tc.style, err)
+		}
+		next, _, err := state.NextState(state.KindAudio, state.Inspecting, state.Outcome{Goal: tc.goal, MarkersContiguous: res.MarkersContiguous})
+		if want := map[string]state.State{state.GoalReadalong: state.Splitting, "": state.MarkersNormalizing}[tc.goal]; err != nil || next != want {
+			t.Fatalf("goal %q: next %q, want %q (%v)", tc.goal, next, want, err)
+		}
+	}
+}
