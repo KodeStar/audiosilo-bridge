@@ -232,6 +232,16 @@ type BookInfo struct {
 	ISBN        string   `json:"isbn"`
 	Duration    float64  `json:"duration"`
 	WorkID      string   `json:"work_id"`
+	// Ebook is the book's ebook as the server indexed it (the reader's, the one a
+	// readalong.align job aligns; Phase 3c), nil when it has none or the server is
+	// older.
+	Ebook *Ebook `json:"ebook,omitempty"`
+}
+
+// Ebook is a book's ebook: its path relative to the library root and its size.
+type Ebook struct {
+	Path string `json:"path"`
+	Size int64  `json:"size"`
 }
 
 // Attachments says which of a book's .audiosilo/ files the server indexed after
@@ -244,13 +254,20 @@ type Attachments struct {
 	// Chapters: chapters.json (Phase 1d; an older server sends none).
 	Chapters bool `json:"chapters"`
 	Bridge   bool `json:"bridge"`
+	// Readalong: readalong.json, a read-along map whose head checked (Phase 3c; an
+	// older server sends none).
+	Readalong bool `json:"readalong"`
 }
 
 // BookFile is one of a Book's files, its path relative to the library root.
+// Duration is its indexed length in seconds (a single-file book's is the
+// book's), which a read-along map's whole-book times are built from (Phase 3c;
+// 0 from an older server).
 type BookFile struct {
-	Path    string `json:"path"`
-	Size    int64  `json:"size"`
-	ModTime int64  `json:"mod_time"`
+	Path     string  `json:"path"`
+	Size     int64   `json:"size"`
+	ModTime  int64   `json:"mod_time"`
+	Duration float64 `json:"duration"`
 }
 
 // Paired is what the pairing exchange answers.
