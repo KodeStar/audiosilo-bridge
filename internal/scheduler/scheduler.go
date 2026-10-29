@@ -651,7 +651,7 @@ func queueGroup(kind state.Kind, st state.State) string {
 	if kind == state.KindEbook {
 		return queueGroupProcessing
 	}
-	if st == state.Retranscribing || st == state.ReadalongAligning || state.Order(st) <= state.Order(state.ASR) {
+	if state.LaneOf(st) == state.LaneASR || state.Order(st) <= state.Order(state.ASR) {
 		return queueGroupASR
 	}
 	return queueGroupProcessing

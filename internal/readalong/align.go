@@ -489,14 +489,9 @@ func (a *aligner) nw(i0, i1, j0, j1 int, freeLead, freeTail bool) ([]pair, bool)
 		return nil, false
 	}
 	const gap = -1
-	const neg = math.MinInt32 / 2
 	cols := m + 1
 	S := make([]int32, (n+1)*cols)
-	P := make([]int8, (n+1)*cols)
-	for k := range S {
-		S[k] = neg
-	}
-	S[0] = 0
+	P := make([]int8, (n+1)*cols) // every cell of S is written below: row 0, column 0, then the rest
 	for j := 1; j <= m; j++ {
 		if freeLead {
 			S[j] = 0

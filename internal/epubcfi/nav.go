@@ -54,18 +54,32 @@ func indexChildNodes(n *Node) []slot {
 	return append(nodes, slot{kind: slotAfter})
 }
 
+// slotIndex is node's index in indexChildNodes(parent), -1 when it isn't a child,
+// counted without building the list: a CFI per sentence over a long section's
+// body would otherwise rebuild it once per sentence end.
+func slotIndex(parent, node *Node) int {
+	i := 1 // slotBefore
+	for k, c := range parent.Children {
+		if k == 0 {
+			if c.Type == ElementNode {
+				i++ // slotFirst
+			}
+		} else if c.Type != TextNode && parent.Children[k-1].Type == ElementNode {
+			i++ // slotNull
+		}
+		if c == node {
+			return i
+		}
+		i++
+	}
+	return -1
+}
+
 // nodeToParts ports foliate's: the steps from the document element down to node,
 // offset (a text node's, UTF-16) on the last.
 func nodeToParts(node *Node, offset *int) Path {
 	parent := node.Parent
-	index := -1
-	for i, s := range indexChildNodes(parent) {
-		if s.kind == slotNode && s.node == node {
-			index = i
-			break
-		}
-	}
-	part := Part{ID: node.ID(), Index: index, Offset: offset}
+	part := Part{ID: node.ID(), Index: slotIndex(parent, node), Offset: offset}
 	var out Path
 	if parent != node.doc.Root && parent.Type != DocumentNode {
 		out = append(nodeToParts(parent, nil), part)

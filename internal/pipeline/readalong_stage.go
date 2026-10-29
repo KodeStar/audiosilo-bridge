@@ -61,9 +61,6 @@ type ReadalongRequest struct {
 
 // WriteReadalongRequest writes the job's request into the book's work dir.
 func WriteReadalongRequest(workDir string, req ReadalongRequest) error {
-	if err := os.MkdirAll(filepath.Join(workDir, readalong.WorkDir), 0o750); err != nil {
-		return err
-	}
 	raw, err := json.MarshalIndent(req, "", "  ")
 	if err != nil {
 		return err
@@ -102,9 +99,6 @@ func readalongRepaired(workDir string) bool {
 }
 
 func markReadalongRepaired(workDir string) error {
-	if err := os.MkdirAll(filepath.Join(workDir, readalong.WorkDir), 0o750); err != nil {
-		return err
-	}
 	return fsutil.WriteFileAtomic(filepath.Join(workDir, readalong.RepairedPath), []byte("1\n"), 0o644)
 }
 
@@ -189,23 +183,12 @@ func ReadReadalongReport(workDir string) (ReadalongReport, error) {
 // manifest's chapter by its file (relative to the book folder, the manifest's
 // source), the single-file styles' by their start in the one file.
 func readalongTimeline(m audio.Manifest, files []ReadalongFile) (readalong.Timeline, error) {
-	var style string
-	switch m.Style {
-	case audio.StyleFiles:
-		style = readalong.StyleFiles
-	case audio.StyleMarkers:
-		style = readalong.StyleMarkers
-	case audio.StyleWindows:
-		style = readalong.StyleWindows
-	default:
-		return readalong.Timeline{}, fmt.Errorf("a %q book has no audio to line up", m.Style)
-	}
 	chs := make([]readalong.ManifestChapter, 0, len(m.Chapters))
 	for _, c := range m.Chapters {
 		mc := readalong.ManifestChapter{Chapter: c.Chapter, Start: c.Start}
-		if style == readalong.StyleFiles {
+		if m.Style == audio.StyleFiles {
 			rel, err := filepath.Rel(m.Source, c.FilePath)
-			if err != nil || strings.HasPrefix(rel, "..") {
+			if err != nil || !fsutil.Within(m.Source, c.FilePath) {
 				return readalong.Timeline{}, fmt.Errorf("chapter %d's file isn't in the book's folder", c.Chapter)
 			}
 			mc.FilePath = filepath.ToSlash(rel)
@@ -216,7 +199,7 @@ func readalongTimeline(m audio.Manifest, files []ReadalongFile) (readalong.Timel
 	for k, f := range files {
 		af[k] = readalong.AudioFile{Path: f.Path, Duration: f.Duration}
 	}
-	return readalong.Compose(style, chs, af)
+	return readalong.Compose(m.Style, chs, af)
 }
 
 // readalongAlign is the readalong_aligning stage.
@@ -257,16 +240,16 @@ func (e *Executor) readalongAlign(ctx context.Context, book store.Book, r schedu
 		if err != nil {
 			return scheduler.StageResult{}, fmt.Errorf("readalong_aligning: read chapter %d's transcript: %w", c.Chapter, err)
 		}
-		words[c.Chapter] = transcriptWords(tr, 0)
+		words[c.Chapter] = transcriptWords(tr)
 	}
 
 	epub, err := readalong.OpenEPUB(req.Ebook)
 	if err != nil {
-		return scheduler.StageResult{}, readalongEbookErr(err)
+		return scheduler.StageResult{}, ReadalongEbookErr(err)
 	}
 	text, err := readalong.LoadText(epub)
 	if err != nil {
-		return scheduler.StageResult{}, readalongEbookErr(err)
+		return scheduler.StageResult{}, ReadalongEbookErr(err)
 	}
 	rep.EbookSHA256 = epub.SHA256
 	sections := text.Sections()
@@ -368,9 +351,9 @@ func (e *Executor) readalongAlign(ctx context.Context, book store.Book, r schedu
 	return result, nil
 }
 
-// readalongEbookErr words an ebook the stage can't read for the job's console:
-// the readalong package's own sentences as they are.
-func readalongEbookErr(err error) error {
+// ReadalongEbookErr words an ebook that can't be read for the job's console: the
+// readalong package's own sentences as they are.
+func ReadalongEbookErr(err error) error {
 	switch {
 	case errors.Is(err, readalong.ErrDRM), errors.Is(err, readalong.ErrNotEPUB), errors.Is(err, readalong.ErrEbookTooBig):
 		return err
@@ -380,12 +363,12 @@ func readalongEbookErr(err error) error {
 	return fmt.Errorf("the book's ebook can't be read: %w", err)
 }
 
-// transcriptWords are a transcript's words, offset seconds later.
-func transcriptWords(tr transcript.Transcript, offset float64) []readalong.Word {
+// transcriptWords are a transcript's words.
+func transcriptWords(tr transcript.Transcript) []readalong.Word {
 	var out []readalong.Word
 	for _, s := range tr.Segments {
 		for _, w := range s.Words {
-			out = append(out, readalong.Word{W: w.W, Start: offset + w.Start, End: offset + w.End})
+			out = append(out, readalong.Word{W: w.W, Start: w.Start, End: w.End})
 		}
 	}
 	return out
@@ -489,7 +472,7 @@ func (e *Executor) healWindows(ctx context.Context, book store.Book, r scheduler
 			return nil, fmt.Errorf("readalong_aligning: heal window %d: %w", k+1, err)
 		}
 		var pw []readalong.Word
-		for _, wd := range transcriptWords(tr, 0) {
+		for _, wd := range transcriptWords(tr) {
 			if wd.Start < 0 || wd.Start >= dur {
 				continue // decoded past the clip's ends
 			}

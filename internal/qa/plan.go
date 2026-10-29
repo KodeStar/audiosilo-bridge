@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"slices"
 	"sort"
 	"strings"
 
@@ -359,29 +358,14 @@ func allowedChapters(rep *Report) map[int]bool {
 // prompt-free; every other flagged chapter is accepted. Never a tail or mid clip:
 // their spliced text has no word timings to align. Nil for a clean report.
 func MechanicalPlan(rep *Report) *Plan {
-	redo := map[int]bool{}
-	for _, ch := range rep.RetranscribeQueue {
-		redo[ch] = true
-	}
-	for _, r := range rep.RepeatedRuns {
-		redo[r.Chapter] = true
-	}
+	redo := requiredChapters(rep) // the queue, tail-rate hits, repeated runs, mid-chapter loops
 	for _, f := range rep.MultiLoop {
-		redo[f.Chapter] = true
+		redo[f.Chapter] = true // an end-fade loop too
 	}
-	for _, h := range rep.TailRate {
-		redo[h.Chapter] = true
-	}
-	chapters := AllowedChapters(rep)
-	for ch := range redo {
-		if !slices.Contains(chapters, ch) {
-			chapters = append(chapters, ch)
-		}
-	}
+	chapters := AllowedChapters(rep) // sorted, a superset of redo
 	if len(chapters) == 0 {
 		return nil
 	}
-	sort.Ints(chapters)
 	p := &Plan{Notes: "mechanical loop repair (read-along): no agent"}
 	for _, ch := range chapters {
 		if redo[ch] {

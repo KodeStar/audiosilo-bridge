@@ -79,6 +79,15 @@ func writesFile(d pipeline.DetectedChapters, files []link.BookFile) bool {
 	return len(d.Chapters) >= minFileChapters && len(d.Chapters) <= maxFileChapters && len(files) > 0
 }
 
+// bookRelPath is a server file path p as the book's sidecars name it: relative to
+// the book's folder rel, or a single-file book's file name.
+func bookRelPath(p, rel string, single bool) string {
+	if single {
+		return path.Base(p)
+	}
+	return strings.TrimPrefix(p, strings.TrimSuffix(rel, "/")+"/")
+}
+
 // composeChapters renders chapters.json for the detected list d over the book's
 // files as the server lists them (paths made relative to the book's folder rel; a
 // single-file book's is the file's name). nil for a list a file isn't written for
@@ -89,11 +98,7 @@ func composeChapters(d pipeline.DetectedChapters, files []link.BookFile, rel str
 	}
 	f := ChaptersFile{Version: 1, Generator: "audiosilo-bridge", GeneratedAt: now.UTC().Format(time.RFC3339), From: chaptersFrom}
 	for _, bf := range files {
-		p := strings.TrimPrefix(bf.Path, strings.TrimSuffix(rel, "/")+"/")
-		if single {
-			p = path.Base(bf.Path)
-		}
-		item := ChaptersFileItem{Path: p, Size: bf.Size}
+		item := ChaptersFileItem{Path: bookRelPath(bf.Path, rel, single), Size: bf.Size}
 		if len(files) == 1 {
 			item.DurationMs = d.DurationMs
 		}

@@ -2,18 +2,15 @@ package generate
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"math"
 	"os"
-	"path"
 	"slices"
 	"strings"
 
+	"github.com/kodestar/audiosilo-bridge/internal/fsutil"
 	"github.com/kodestar/audiosilo-bridge/internal/jobs"
 	"github.com/kodestar/audiosilo-bridge/internal/mapping"
 	"github.com/kodestar/audiosilo-bridge/internal/metaops"
@@ -142,11 +139,7 @@ func (r *run) readalongEbook() (string, error) {
 func (h *Handler) readalongRequest(r *run, ebook string) pipeline.ReadalongRequest {
 	req := pipeline.ReadalongRequest{Ebook: ebook, Version: h.o.Version}
 	for _, f := range r.files {
-		p := strings.TrimPrefix(f.Path, strings.TrimSuffix(r.rel, "/")+"/")
-		if r.place.single {
-			p = path.Base(f.Path)
-		}
-		req.Files = append(req.Files, pipeline.ReadalongFile{Path: p, Duration: f.Duration})
+		req.Files = append(req.Files, pipeline.ReadalongFile{Path: bookRelPath(f.Path, r.rel, r.place.single), Duration: f.Duration})
 	}
 	return req
 }
@@ -247,14 +240,14 @@ func (h *Handler) prepareContinue(ctx context.Context, b store.Book, to state.St
 		}
 		reset := (s == to && to != state.Splitting) ||
 			(slices.Contains(readalongPath, s) && state.Order(s) > state.Order(to))
-		switch {
-		case reset:
+		purged := state.Order(s) < state.Order(to) && !scheduler.SentinelExists(b.WorkDir, string(s))
+		if !reset && !purged {
+			continue
+		}
+		if reset {
 			if err := os.Remove(scheduler.SentinelPath(b.WorkDir, string(s))); err != nil && !errors.Is(err, fs.ErrNotExist) {
 				return err
 			}
-		case state.Order(s) < state.Order(to) && !scheduler.SentinelExists(b.WorkDir, string(s)):
-		default:
-			continue
 		}
 		if err := h.o.DB.SupersedeStageSuccesses(ctx, b.ID, string(s)); err != nil {
 			return err
@@ -279,10 +272,7 @@ func (h *Handler) createReadalong(ctx context.Context, eng Engine, r *run) error
 		return err
 	}
 	if _, err := readalong.OpenEPUB(ebook); err != nil {
-		if errors.Is(err, readalong.ErrDRM) || errors.Is(err, readalong.ErrNotEPUB) || errors.Is(err, readalong.ErrEbookTooBig) {
-			return err
-		}
-		return fmt.Errorf("the book's ebook can't be read: %w", err)
+		return pipeline.ReadalongEbookErr(err)
 	}
 	sp, ok, err := metaops.AllowedPath(r.place.full, []string{r.mount})
 	if err != nil || !ok {
@@ -443,7 +433,7 @@ func (h *Handler) finishReadalong(ctx context.Context, r *run, b store.Book) (an
 	if len(raw) > readalong.MaxMapBytes {
 		return nil, readalong.ErrMapTooBig
 	}
-	if err := h.checkEbookUnchanged(ctx, r, m.Ebook.SHA256); err != nil {
+	if err := checkEbookUnchanged(r, m.Ebook.SHA256); err != nil {
 		return nil, err
 	}
 	extra := map[string]any{"stage": string(state.Done), "source": r.source}
@@ -474,46 +464,26 @@ func (h *Handler) finishReadalong(ctx context.Context, r *run, b store.Book) (an
 }
 
 // checkEbookUnchanged fails the job when the book's ebook (where the server has
-// it now: the job may have moved with its book) no longer hashes to sum, the one
-// the map was aligned from.
-func (h *Handler) checkEbookUnchanged(ctx context.Context, r *run, sum string) error {
-	if cur := r.rep.Path(); cur != "" && cur != r.jobPath {
-		if book, err := r.srv.Book(ctx, r.lib.ID, cur); err == nil && book.Info != nil {
-			r.info = book.Info
-		}
-	}
+// it now: readalongAsk, just before, followed a move) no longer hashes to sum, the
+// one the map was aligned from.
+func checkEbookUnchanged(r *run, sum string) error {
 	ebook, err := r.readalongEbook()
 	if errors.Is(err, errNoReadalongEbook) {
 		return errNoReadalongEbook
 	} else if err != nil {
 		return fmt.Errorf("%w (the read-along is kept for the next try)", err)
 	}
-	got, err := fileSHA256(ebook)
+	n, got, err := fsutil.FileSHA256(ebook)
 	if err != nil {
 		return fmt.Errorf("the book's ebook can't be read to check it (%s)", writeProblem(err))
+	}
+	if n > readalong.MaxEbookBytes {
+		return readalong.ErrEbookTooBig
 	}
 	if got != sum {
 		return errEbookChanged
 	}
 	return nil
-}
-
-// fileSHA256 is the file's sha256, read to at most readalong.MaxEbookBytes.
-func fileSHA256(p string) (string, error) {
-	f, err := os.Open(p) //nolint:gosec // resolved through the checked mapping
-	if err != nil {
-		return "", err
-	}
-	defer func() { _ = f.Close() }()
-	hash := sha256.New()
-	n, err := io.Copy(hash, io.LimitReader(f, readalong.MaxEbookBytes+1))
-	if err != nil {
-		return "", err
-	}
-	if n > readalong.MaxEbookBytes {
-		return "", readalong.ErrEbookTooBig
-	}
-	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
 // transcribedForJob reports whether the book's speech recognition ran for this

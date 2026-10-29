@@ -193,7 +193,7 @@ func Build(res Result, text *Text, tl Timeline, ebookPath string, gen Generator)
 		AudioGaps:   []TimeRange{},
 	}
 	for _, f := range tl.Files {
-		m.Audio.Files = append(m.Audio.Files, MapFile{Path: f.Path, Duration: math.Round(f.Duration*1000) / 1000})
+		m.Audio.Files = append(m.Audio.Files, MapFile{Path: f.Path, Duration: round3(f.Duration)})
 	}
 	clamp := func(t float64) float64 { return round2(math.Min(math.Max(t, 0), duration)) }
 	var all []MapSpan

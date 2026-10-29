@@ -195,7 +195,7 @@ type windowLayer struct {
 // before that, manifest.json must be the windows manifest.
 func readWindowLayer(workDir string) (windowLayer, error) {
 	wdir := filepath.Join(workDir, audio.WindowsDir)
-	if info, err := os.Stat(filepath.Join(wdir, transcript.RawDir)); err == nil && info.IsDir() {
+	if windowsMoved(workDir) {
 		m, err := audio.ReadManifest(wdir)
 		if err != nil {
 			return windowLayer{}, fmt.Errorf("read the moved windows manifest: %w", err)
