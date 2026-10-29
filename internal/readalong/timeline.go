@@ -252,21 +252,15 @@ func (tl Timeline) LoopWindow(chapter int, from, to float64) (Window, bool) {
 }
 
 // chapterEndAt is the whole-book end of the chapter playing at whole-book t (t
-// itself when none does). trailingWindow asks it at the window's start, half a
+// itself when there is none). trailingWindow asks it at the window's start, half a
 // second inside the last aligned sentence, so a sentence ending on a file boundary
 // is its own chapter's.
 func (tl Timeline) chapterEndAt(t float64) float64 {
-	f := tl.fileAt(t)
-	if f >= len(tl.FileStart) {
+	if len(tl.Chapters) == 0 {
 		return t
 	}
-	x := t - tl.FileStart[f]
-	for _, c := range tl.Chapters {
-		if c.File == f && c.Start <= x && x < c.End {
-			return tl.FileStart[f] + c.End
-		}
-	}
-	return t
+	c := tl.Chapters[tl.ChapterAt(t)]
+	return tl.FileStart[c.File] + c.End
 }
 
 // HealWindows plans the gap heal (decision 8): every run of unaligned sentences
@@ -285,8 +279,8 @@ func (tl Timeline) HealWindows(res Result, extra []Window) []Window {
 		nextT0[i] = next
 		if sp := res.Sections[i].Spans; len(sp) > 0 {
 			next = sp[0].T0
-			for _, s := range sp {
-				next = math.Min(next, s.T0)
+			for _, s := range sp[1:] {
+				next = min(next, s.T0)
 			}
 		}
 	}
