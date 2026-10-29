@@ -30,6 +30,23 @@ const (
 // to link the Workers tab, so keep the words stable.
 const DetailASRWaiting = "waiting for an ASR worker"
 
+// DetailLibrariesChecking is the libraries item's detail from pairing until the
+// first heartbeat has listed the server's libraries and each has been checked
+// (BRIDGE-14): before then the Bridge knows none, which is not the server having
+// none.
+const DetailLibrariesChecking = "checking the libraries..."
+
+// agentFor is what the agent is for, in the agent item's detail while it isn't
+// ready (BRIDGE-07: plain words, never the staging volume).
+const agentFor = "the agent signs in to Claude or ChatGPT and is needed for characters, recaps and descriptions"
+
+// DetailAgentNotRunning and DetailAgentNoCredential are the agent item's detail
+// while no agent container is running, and while it runs with no credential.
+const (
+	DetailAgentNotRunning   = "the agent container isn't running yet; " + agentFor
+	DetailAgentNoCredential = "set the agent's sign-in on the Accounts tab; " + agentFor
+)
+
 // maxDetail bounds an item's detail (the server keeps 256 characters).
 const maxDetail = 200
 
@@ -56,7 +73,12 @@ type ASR struct {
 type Agent struct {
 	Backend   string
 	Available bool
-	Detail    string
+	// Running: the agent container is up (a fresh heartbeat in this Bridge's
+	// protocol); Refused: the provider refused its credential, Detail saying
+	// where to replace it (the item's detail then).
+	Running bool
+	Refused bool
+	Detail  string
 }
 
 // GitHub is the contribution credential.
@@ -69,7 +91,10 @@ type GitHub struct {
 
 // Inputs are what the checklist is made from.
 type Inputs struct {
-	Paired           bool
+	Paired bool
+	// LibrariesPending: paired, but no heartbeat has listed the server's
+	// libraries yet, or one listed has no check yet.
+	LibrariesPending bool
 	Libraries        []Library
 	ASR              ASR
 	Agent            Agent
@@ -101,11 +126,14 @@ func Checklist(in Inputs) link.Setup {
 		// Before pairing there is no server to have libraries. (A refused token
 		// isn't paired either but keeps the libraries it had: those are counted.)
 		libDetail = "pair with a server first"
+	case in.Paired && in.LibrariesPending:
+		libDetail = DetailLibrariesChecking
 	case len(in.Libraries) == 0:
 		libDetail = "the server has no libraries yet"
 	}
-	libs := add(ItemLibraries, len(in.Libraries) > 0 && len(missing) == 0, true, libDetail)
-	if len(missing) > 0 {
+	pending := in.Paired && in.LibrariesPending
+	libs := add(ItemLibraries, !pending && len(in.Libraries) > 0 && len(missing) == 0, true, libDetail)
+	if len(missing) > 0 && !pending {
 		libs.LibraryIDs = missing
 	}
 
@@ -123,9 +151,17 @@ func Checklist(in Inputs) link.Setup {
 	}
 	add(ItemASR, asrDone, true, asrDetail)
 
+	// The item stays required (FIRST-RUN F2); the Accounts tab carries the
+	// agent's full state, the checklist only what to do in plain words.
 	agentDetail := in.Agent.Backend
-	if !in.Agent.Available {
-		agentDetail = firstNonEmpty(in.Agent.Detail, "the agent container isn't ready")
+	switch {
+	case in.Agent.Available:
+	case in.Agent.Refused:
+		agentDetail = firstNonEmpty(in.Agent.Detail, DetailAgentNoCredential)
+	case !in.Agent.Running:
+		agentDetail = DetailAgentNotRunning
+	default:
+		agentDetail = DetailAgentNoCredential
 	}
 	add(ItemAgent, in.Agent.Available, true, agentDetail)
 

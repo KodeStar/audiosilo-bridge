@@ -57,7 +57,7 @@ func TestChecklistOrderAndComplete(t *testing.T) {
 func TestChecklistMissing(t *testing.T) {
 	in := done()
 	in.Libraries = []Library{{ID: 1, Mapped: true, Writable: true}, {ID: 3, Mapped: true}}
-	in.Agent = Agent{Backend: "claude", Detail: "claude has no credential: set one on the Bridge's Accounts tab"}
+	in.Agent = Agent{Backend: "claude", Running: true, Detail: "claude has no credential: set one on the Bridge's Accounts tab"}
 	in.ASR = ASR{Started: true, Waiting: true, Available: true}
 	in.BudgetReviewed, in.MonthlyBudgetUSD = false, 12.5
 	s := Checklist(in)
@@ -68,7 +68,7 @@ func TestChecklistMissing(t *testing.T) {
 	if l.Done || l.Detail != "1 of 2 libraries writable" || len(l.LibraryIDs) != 1 || l.LibraryIDs[0] != 3 {
 		t.Fatalf("libraries = %+v", l)
 	}
-	if a := item(t, s, ItemAgent); a.Done || !strings.Contains(a.Detail, "Accounts tab") {
+	if a := item(t, s, ItemAgent); a.Done || !a.Required || a.Detail != DetailAgentNoCredential {
 		t.Fatalf("agent = %+v", a)
 	}
 	if a := item(t, s, ItemASR); a.Done || a.Detail != "waiting for an ASR worker" { // the page matches these words
@@ -119,8 +119,55 @@ func TestChecklistGitHub(t *testing.T) {
 
 func TestDetailIsBounded(t *testing.T) {
 	in := done()
-	in.Agent = Agent{Detail: strings.Repeat("é", 300)}
+	in.Agent = Agent{Refused: true, Detail: strings.Repeat("é", 300)}
 	if d := item(t, Checklist(in), ItemAgent).Detail; len(d) > maxDetail || !strings.HasSuffix(d, "...") {
 		t.Fatalf("detail = %d bytes", len(d))
+	}
+}
+
+// The agent item says in plain words what to do and what the agent is for, never
+// the staging volume, and stays required (BRIDGE-07); a refusal keeps the words
+// saying where to replace the credential.
+func TestChecklistAgentWords(t *testing.T) {
+	in := done()
+	in.Agent = Agent{Backend: "claude", Detail: "the agent container isn't running (it hasn't written its status into the staging dir; check that both containers mount the same staging volume)"}
+	a := item(t, Checklist(in), ItemAgent)
+	if a.Done || !a.Required || a.Detail != DetailAgentNotRunning {
+		t.Fatalf("no agent container: %+v", a)
+	}
+	for _, d := range []string{DetailAgentNotRunning, DetailAgentNoCredential} {
+		if strings.Contains(d, "staging") || !strings.Contains(d, "Claude or ChatGPT") ||
+			!strings.Contains(d, "characters, recaps and descriptions") || len(d) > maxDetail {
+			t.Errorf("detail %q", d)
+		}
+	}
+	in.Agent = Agent{Backend: "claude", Running: true, Refused: true, Detail: "the agent's credential was refused by the provider: replace it on the Bridge's Accounts tab"}
+	if a := item(t, Checklist(in), ItemAgent); a.Done || a.Detail != in.Agent.Detail {
+		t.Fatalf("refused: %+v", a)
+	}
+	in.Agent = Agent{Backend: "codex", Running: true, Available: true}
+	if a := item(t, Checklist(in), ItemAgent); !a.Done || a.Detail != "codex" {
+		t.Fatalf("ready: %+v", a)
+	}
+}
+
+// From pairing until the first heartbeat lists the libraries and each is
+// checked, the item says it is checking, not that the server has none
+// (BRIDGE-14).
+func TestChecklistLibrariesChecking(t *testing.T) {
+	in := done()
+	in.Libraries, in.LibrariesPending = nil, true
+	if l := item(t, Checklist(in), ItemLibraries); l.Done || l.Detail != DetailLibrariesChecking || l.LibraryIDs != nil {
+		t.Fatalf("right after pairing: %+v", l)
+	}
+	// One library checked, another not yet: still checking, nothing called missing.
+	in.Libraries = []Library{{ID: 1}}
+	if l := item(t, Checklist(in), ItemLibraries); l.Done || l.Detail != DetailLibrariesChecking || l.LibraryIDs != nil {
+		t.Fatalf("checking: %+v", l)
+	}
+	// Unpaired, the pairing comes first.
+	in.Paired, in.Libraries = false, nil
+	if l := item(t, Checklist(in), ItemLibraries); l.Detail != "pair with a server first" {
+		t.Fatalf("unpaired: %+v", l)
 	}
 }

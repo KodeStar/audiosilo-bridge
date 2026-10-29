@@ -172,12 +172,19 @@ func TestRegistry(t *testing.T) {
 		t.Fatal("the same list in another order is no change")
 	}
 	now := time.Date(2026, 10, 15, 10, 0, 0, 0, time.UTC)
-	if !r.Due(now, time.Minute) {
+	if !r.Due(now, time.Minute) || !r.Unchecked() {
 		t.Fatal("unchecked libraries are due")
 	}
 	mount := func(id int64, root string) (string, bool) { return root, false }
 	src := books{book: &link.Book{Path: "Author/Book", Files: files}}
+	r.Check(context.Background(), src, mount, func() time.Time { return now }, 1)
+	if !r.Unchecked() {
+		t.Fatal("library 2 has no check yet")
+	}
 	r.Check(context.Background(), src, mount, func() time.Time { return now })
+	if r.Unchecked() {
+		t.Fatal("every library is checked")
+	}
 	if r.Due(now.Add(30*time.Second), time.Minute) || !r.Due(now.Add(time.Minute), time.Minute) {
 		t.Fatal("Due ignores the interval")
 	}

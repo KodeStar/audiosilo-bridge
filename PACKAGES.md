@@ -1207,7 +1207,14 @@ internal/
             github, each {id, done, required, detail}; details cut to 200
             characters and worded for the console (the budget's "$100 a month" or
             "no monthly cap"); Complete is every required item done. The heartbeat
-            sends it and the page's Status tab shows it.
+            sends it and the page's Status tab shows it (the console shows the
+            details as they are). v0.5.0: the libraries item says
+            DetailLibrariesChecking from pairing until a heartbeat has listed the
+            libraries and each is checked (LibrariesPending: no beat since the
+            link changed, or mapping.Registry.Unchecked), BRIDGE-14; the agent
+            item (still required) says in plain words what to do and what the
+            agent is for (DetailAgentNotRunning, DetailAgentNoCredential), the
+            agentbox detail only for a refused credential, BRIDGE-07.
   correct/  Phase 2b (plan D5): the meta.correct job (light lane). ParseParams
             is STRICT (an unknown field refused, work_id required). It reads the
             work's live coverage (FreshCoverageForWork: its title, the recording
