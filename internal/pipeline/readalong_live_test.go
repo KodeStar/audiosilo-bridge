@@ -35,12 +35,12 @@ func TestLiveReadalongAlign(t *testing.T) {
 		dataDir = t.TempDir()
 	}
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	b, cap, err := asr.Select(context.Background(), asr.SelectConfig{Backend: asr.IDMLXWhisper, DataDir: dataDir, Log: log})
-	if err != nil || !cap.Available {
-		t.Skipf("mlx-whisper not available: %v %s", err, cap.Detail)
+	b, capab, err := asr.Select(context.Background(), asr.SelectConfig{Backend: asr.IDMLXWhisper, DataDir: dataDir, Log: log})
+	if err != nil || !capab.Available {
+		t.Skipf("mlx-whisper not available: %v %s", err, capab.Detail)
 	}
 	exe := NewExecutor(Config{DataDir: dataDir, Log: log, Fallback: scheduler.NewStubExecutor(0, 0),
-		ASR: ASRSetup{Backend: b, Cap: cap, Model: asr.DefaultModelFor(cap.Backend), Language: "en"}})
+		ASR: ASRSetup{Backend: b, Cap: capab, Model: asr.DefaultModelFor(capab.Backend), Language: "en"}})
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer cancel()
 	start := time.Now()

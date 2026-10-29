@@ -2343,9 +2343,16 @@ func (e *Executor) retranscribeChapter(ctx context.Context, r scheduler.StageRep
 		return false, fmt.Errorf("retranscribing: normalize fresh chapter %d: %w", chapter, err)
 	}
 
+	// A read-along keeps no loop for the word count's sake (Phase 3c-1); only its
+	// rule weighs the loop words.
+	readalongRule := book.Goal == state.GoalReadalong
 	stats := func(t transcript.Transcript) repair.AdoptStats {
 		text := transcript.PlainText(t)
-		return repair.AdoptStats{Words: len(strings.Fields(text)), DurationSec: durationSec, LoopWords: qa.LoopWords(text)}
+		s := repair.AdoptStats{Words: len(strings.Fields(text)), DurationSec: durationSec}
+		if readalongRule {
+			s.LoopWords = qa.LoopWords(text)
+		}
+		return s
 	}
 	orig := repair.AdoptStats{DurationSec: durationSec}
 	if origT, oerr := transcript.ReadNormalized(filepath.Join(book.WorkDir, transcript.JSONDir), chapter); oerr == nil {
@@ -2353,8 +2360,7 @@ func (e *Executor) retranscribeChapter(ctx context.Context, r scheduler.StageRep
 	}
 	fresh := stats(freshT)
 	adopt := repair.AdoptFresh
-	if book.Goal == state.GoalReadalong {
-		// A read-along keeps no loop for the word count's sake (Phase 3c-1).
+	if readalongRule {
 		adopt = repair.AdoptFreshReadalong
 	}
 	decision := adopt(orig, fresh)

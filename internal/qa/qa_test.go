@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -660,6 +661,26 @@ func TestRunAndWriteReport(t *testing.T) {
 		if !strings.Contains(string(md), want) {
 			t.Errorf("qa_report.md missing %q\n---\n%s", want, md)
 		}
+	}
+}
+
+// CrossSegment (the read-along's heal windows) is Run's cross-segment detector alone.
+func TestCrossSegmentMatchesRun(t *testing.T) {
+	work := t.TempDir()
+	jsonDir := filepath.Join(work, transcript.JSONDir)
+	writeNormalized(t, jsonDir, transcript.Transcript{Chapter: 1, Schema: transcript.Schema,
+		Segments: []transcript.Segment{seg(0, 10, 20, " "+distinctTokens(30)+" "+strings.Repeat("he ran to the old house ", 5))}})
+	in := Input{WorkDir: work, Durations: map[int]float64{1: 1000}}
+	rep, err := Run(in)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	hits, err := CrossSegment(in)
+	if err != nil || len(hits) != 1 || !reflect.DeepEqual(hits, rep.CrossSegment) {
+		t.Errorf("CrossSegment = %+v, %v; want Run's %+v", hits, err, rep.CrossSegment)
+	}
+	if _, err := CrossSegment(Input{WorkDir: t.TempDir()}); err == nil {
+		t.Error("CrossSegment should error when transcripts-json/ is absent")
 	}
 }
 

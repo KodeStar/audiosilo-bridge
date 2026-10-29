@@ -508,13 +508,13 @@ func TestReadalongLoopWindows(t *testing.T) {
 		t.Fatal(err)
 	}
 	sec := func(v float64) *float64 { return &v }
-	rep := &qa.Report{CrossSegment: []qa.CrossSegmentHit{
+	hits := []qa.CrossSegmentHit{
 		{Chapter: 1, Count: 2641, FirstSec: sec(1277), LastSec: sec(1507)},
 		{Chapter: 4, Count: 4194, FirstSec: sec(957), LastSec: sec(1331)},
 		{Chapter: 4, Count: 9, Pos: -1},                               // not located
 		{Chapter: 1, Count: 6, FirstSec: sec(10), LastSec: sec(1200)}, // a phrase the book repeats
-	}}
-	got := readalongLoopWindows(rep, tl)
+	}
+	got := readalongLoopWindows(hits, tl)
 	want := []readalong.Window{{File: 0, Start: 1276.5, End: 1507.5}, {File: 1, Start: 956.5, End: 1331.5}}
 	if fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Fatalf("windows %+v, want %+v", got, want)

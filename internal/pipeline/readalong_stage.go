@@ -219,18 +219,18 @@ func readalongTimeline(m audio.Manifest, files []ReadalongFile) (readalong.Timel
 // windows: the mechanical round writes no tail verdicts, and a re-align reuses the
 // kept transcripts, loops and all. A check that can't run heals nothing extra.
 func (e *Executor) transcriptLoops(book store.Book, m audio.Manifest, tl readalong.Timeline) []readalong.Window {
-	rep, err := qa.Run(qa.Input{WorkDir: book.WorkDir, Durations: chapterDurations(m.Chapters)})
+	hits, err := qa.CrossSegment(qa.Input{WorkDir: book.WorkDir, Durations: chapterDurations(m.Chapters)})
 	if err != nil {
 		e.log.Warn("readalong_aligning: the transcript check couldn't run; healing without its loops", "book", book.ID, "err", err)
 		return nil
 	}
-	return readalongLoopWindows(rep, tl)
+	return readalongLoopWindows(hits, tl)
 }
 
-// readalongLoopWindows are the report's located cross-segment loops as windows.
-func readalongLoopWindows(rep *qa.Report, tl readalong.Timeline) []readalong.Window {
+// readalongLoopWindows are the located cross-segment loops as windows.
+func readalongLoopWindows(hits []qa.CrossSegmentHit, tl readalong.Timeline) []readalong.Window {
 	var out []readalong.Window
-	for _, h := range rep.CrossSegment {
+	for _, h := range hits {
 		if h.FirstSec == nil || h.LastSec == nil {
 			continue
 		}

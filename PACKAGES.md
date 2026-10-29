@@ -404,7 +404,8 @@ internal/
             chapter-0 asymmetries are CONTRACT, golden-tested against 2 real books).
             Reads transcripts-json/ (+ transcripts-repaired/ for multi-loop); writes
             qa_report.json (stable enum contract for the M5 adjudicator/UI) +
-            qa_report.md (byte-compatible with the Python report). LoopWords(text):
+            qa_report.md (byte-compatible with the Python report). CrossSegment(input): that
+            detector alone (the read-along's heal windows). LoopWords(text):
             the words a 6-gram repeated 5+ times covers (the read-along's adoption
             rule). Report.Clean()
             drives the QAClean branch; the retranscribe queue = wph outliers +
@@ -1064,7 +1065,7 @@ internal/
             every chapter FLAC a purge took (splitWithRetries on the manifest), reads
             transcripts-json/ only, opens the EPUB (its sentences as the job's
             refusals), aligns, heals (the windows: HealWindows' plus tail_verdicts' plus
-            the located cross-segment loops of a qa.Run over the transcripts it reads,
+            the located loops of a qa.CrossSegment over the transcripts it reads,
             readalongLoopWindows; each window a clip cut across its chapter FLACs
             into readalong/heal/<f###_start_end>.flac, transcribed NoContext through the
             engine's backend: a worker when one is connected; a complete raw reused, the

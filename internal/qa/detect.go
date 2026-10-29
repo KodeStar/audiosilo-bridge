@@ -434,10 +434,15 @@ func normalizeASCII(s string) string {
 // adoption rule weighs it (repair.AdoptFreshReadalong): a loop's words are noise.
 func LoopWords(text string) int {
 	toks := strings.Fields(normalizeUnicode(text))
-	counts, _, _ := gramCounts(toks)
+	keys := make([]string, max(0, len(toks)-gramSize+1))
+	counts := make(map[string]int, len(keys))
+	for i := range keys {
+		keys[i] = gramKey(toks[i : i+gramSize])
+		counts[keys[i]]++
+	}
 	covered := make([]bool, len(toks))
-	for i := 0; i+gramSize <= len(toks); i++ {
-		if counts[gramKey(toks[i:i+gramSize])] >= crossThreshold {
+	for i, key := range keys {
+		if counts[key] >= crossThreshold {
 			for k := i; k < i+gramSize; k++ {
 				covered[k] = true
 			}
