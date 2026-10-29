@@ -285,6 +285,17 @@ func Run(input Input) (*Report, error) {
 	return rep, nil
 }
 
+// CrossSegment runs the cross-segment loop detector alone (Report.CrossSegment),
+// over the same transcripts and with the same loud errors as Run, without the
+// other detectors (the read-along's heal windows need only its located loops).
+func CrossSegment(input Input) ([]CrossSegmentHit, error) {
+	docs, err := loadChapters(input)
+	if err != nil {
+		return nil, err
+	}
+	return crossSegmentLoops(docs), nil
+}
+
 // loadChapters reads and parses every transcripts-json/chNNN.json in the work dir,
 // building a chapterDoc per chapter in ascending chapter order. Zero chapters is a
 // loud error (nothing to sweep means the sanitizing stage has not produced output),

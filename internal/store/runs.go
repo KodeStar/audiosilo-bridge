@@ -245,8 +245,10 @@ func (db *DB) StageRunBudgetCost(ctx context.Context, runID int64) (float64, err
 	return cost, err
 }
 
-// LatestOkStageRun returns the book's newest successful run of stage, or
-// ErrNotFound when there is none.
+// LatestOkStageRun returns the book's newest successful run of stage, superseded
+// ones included, or ErrNotFound when there is none. It is a HISTORY reader, not a
+// scheduling one: a Reconcile rewind or a Retry retires a success for scheduling,
+// but what the stage made (a fact pass's notes) can outlive that.
 func (db *DB) LatestOkStageRun(ctx context.Context, bookID int64, stage string) (StageRun, error) {
 	r, err := scanRun(db.sql.QueryRowContext(ctx,
 		`SELECT `+runCols+` FROM stage_runs WHERE book_id=? AND stage=? AND ok=1 ORDER BY id DESC LIMIT 1`, bookID, stage))

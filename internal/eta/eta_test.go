@@ -3,6 +3,7 @@ package eta
 import (
 	"math"
 	"reflect"
+	"slices"
 	"testing"
 
 	"github.com/kodestar/audiosilo-bridge/internal/state"
@@ -298,5 +299,30 @@ func TestGoalChaptersPath(t *testing.T) {
 		if s == state.ChapterDetecting {
 			t.Fatal("the whole pipeline's estimate predicts chapter_detecting")
 		}
+	}
+}
+
+// TestGoalReadalongPath: a read-along book's estimate runs no agent stage and ends
+// with readalong_aligning; the whole pipeline's never predicts it.
+func TestGoalReadalongPath(t *testing.T) {
+	stages := func(b Book) []state.State {
+		var out []state.State
+		for _, s := range remainingSegments(b, nil) {
+			out = append(out, s.stage)
+		}
+		return out
+	}
+	b := Book{State: state.Inspecting, Chapters: 10, Goal: state.GoalReadalong}
+	want := []state.State{state.Inspecting, state.Splitting, state.ASR, state.Sanitizing, state.QASweep, state.ReadalongAligning}
+	if got := stages(b); !slices.Equal(got, want) {
+		t.Fatalf("read-along path = %v, want %v", got, want)
+	}
+	b = Book{State: state.ReadalongAligning, Chapters: 10, Goal: state.GoalReadalong}
+	if secs, ok := BookETA(b, nil); !ok || secs != 180 {
+		t.Fatalf("eta at readalong_aligning = %v %v", secs, ok)
+	}
+	b.Goal, b.State = "", state.Inspecting
+	if slices.Contains(stages(b), state.ReadalongAligning) {
+		t.Fatal("the whole pipeline's estimate predicts readalong_aligning")
 	}
 }

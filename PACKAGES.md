@@ -240,6 +240,13 @@ internal/
             chapter_detecting writes; WindowsDir ("windows") is where it moves the
             window layer. ParseNumberWords exports the marker parser's number words
             (chapterdetect reads spoken headings with it).
+            Phase 3c-1: InspectWith(opts) with InspectOptions.WindowUnusable (goal
+            readalong): a single file whose marker table isn't Usable() gets the WINDOWS
+            manifest a markerless one does (chapter boundaries don't matter to an
+            alignment, and markers_normalizing is an agent stage); Inspect is
+            InspectWith with none. CutSpan(parts) cuts one mono/16 kHz FLAC across
+            chapter FLACs of one file (the heal's clip; cutParts shared with the
+            windows).
   asr/      the ASR backend abstraction (M3a/M3b): Backend{ID,Detect,EnsureReady,
             Transcribe} over a normalized Job (audio/outDir/chapter/prompt/language),
             producing RAW per-chapter output byte-for-byte. Two backends behind
@@ -301,6 +308,54 @@ internal/
             invented but Emperor's Soul's spoken headings its publisher merges. Past
             Tense's reference is another master's list (6.5 s longer): the test maps
             it onto the file by a fitted line (about -3.8 s, +59 ppm) first.
+  epubcfi/  Phase 3c-1: a Go port of foliate's epubcfi.js (pin 78914aef, the frontend's
+            FOLIATE_PIN.txt), a leaf over x/net/html and x/text: a minimal DOM
+            (ParseXML: encoding/xml non-strict with HTML entities for
+            application/xhtml+xml; ParseHTML for text/html; comments and PIs dropped,
+            CDATA as text, whitespace text kept),
+            FromRange/ToRange/FromElements/Parse/Compare, offsets in UTF-16 code units
+            as the DOM's, and WalkText (epublib.mjs's walkText: script/style skipped,
+            the BLOCK set, a source newline a space) with CFI(start, end) over its rune
+            offsets. Held to golden CFIs foliate itself wrote (testdata/golden.json from
+            scripts/cfi-golden/gen.mjs, Node 24 + exact-pinned jsdom, not in CI; Alice
+            plus synthetic sections: CDATA, entities, comments, PIs, adjacent text
+            nodes, ids, astral characters, a text/html item, deep nesting) in both
+            directions; a test checks the copied epubcfi.js's sha256 against the pin
+            line.
+  readalong/ Phase 3c-1: the read-along aligner, PURE apart from reading the EPUB (no
+            clock, no exec): a port of the spike's Python (.readalong-spike/tools/align)
+            held to it by an env-gated parity test (AUDIOSILO_READALONG_SPIKE=<spike
+            dir>: sentences within 2%, body coverage within 0.5 pp, shared
+            sentence-start median under 0.05 s, every CFI resolving;
+            AUDIOSILO_READALONG_MAPS=<dir> writes the five corpus maps in the v1
+            format). OpenEPUB/ReadEPUB (regular file <= 256 MiB, DRM refused:
+            META-INF/rights.xml or an encryption.xml beyond font obfuscation, sha256 of
+            the bytes; the spine with each section's CFI), LoadText (every content
+            document walked; Sections() the linear ones, a linear="no" item is a note
+            not narrated in place), textnorm (TOKEN_RE, NFKD, apostrophes out, digits
+            spelled out with years in pairs; SplitSentences), Align (interned tokens,
+            unique 5-gram candidates, RANSAC + LIS placement of up to 8 clusters per
+            section, anchors resolved, gaps filled by an int32 Needleman-Wunsch with 1:1
+            to 1:5 moves under 4M cells, then sentences; chaining resets per placed
+            unit, and the second cluster's threshold is max(20, 0.02 nB) as the spike
+            meant), Compose (whole-book time = the SERVER's file durations in its order
+            + the in-file chapter start + the word time, never the manifest's cross-file
+            starts), HealWindows ([prev.end - 0.5, next.start + 0.5] per unaligned run,
+            2-600 s; a section's TRAILING run from prev.end - 0.5 for its text at 10
+            characters a second + 10 s, never past its chapter's end nor the next
+            section's first aligned sentence, at most 600 s (a chapter-end loop, CotW
+            in the 3c-1 live run); cut at file boundaries, plus the extra windows
+            (tail_verdicts, LoopWindow: the transcript check's loop ranges, 2-600 s),
+            overlapping or touching ones merged), Onset/Snap (10 ms frame energies on one grid per
+            chapter, p10 + 0.3 (p95 - p10), after-pause/run-start/mid-flow; start =
+            onset - 0.1 s, never past end - 0.2 s nor before raw - 0.5 s), Build/Encode
+            (audiosilo-readalong/v1, keys in order, times clamped to the book and
+            rounded to 0.01, file durations to 0.001, book-relative paths, coverage
+            {text: the read body's sentence characters from the first aligned sentence
+            to the last, audio}, audio_gaps over 5 s; refused over MaxMapBytes 16 MiB).
+            workdir.go names the stage's work-dir files (readalong/request.json,
+            words.json, heal/, map.json, align_report.json, repaired) so scratch can
+            name them too. testdata/alice.readalong.json is a regenerated spike map.
   ebook/    M9: the epub front half. BuildUniverse turns audiosilo-meta pkg/extract's
             per-section split into the LOGICAL chapter universe the sidecars publish
             positions against, then WriteChapterText/WriteManifest materialize it.
@@ -339,16 +394,28 @@ internal/
             Purge reclaims windows/chapters/ (audio.WindowAudioDir, no sentinel): the
             window FLACs chapter_detecting removes itself once the chapters are cut,
             left only by a run stopped in between (a re-run splits from the source).
+            Phase 3c-1: PurgeTranscripts also removes readalong/words.json and
+            readalong/heal/ (the heal's raws), keeping readalong/map.json (CFIs and
+            times only, so a write a park held up still finishes), align_report.json and
+            request.json.
   qa/       M4: the mechanical transcript-QA degeneration sweep, a faithful Go port
             of the historical Python detectors (qa_sweep/cross_segment/
             within_segment/multi_loop/tail_rate scans - thresholds and per-detector
             chapter-0 asymmetries are CONTRACT, golden-tested against 2 real books).
             Reads transcripts-json/ (+ transcripts-repaired/ for multi-loop); writes
             qa_report.json (stable enum contract for the M5 adjudicator/UI) +
-            qa_report.md (byte-compatible with the Python report). Report.Clean()
+            qa_report.md (byte-compatible with the Python report). CrossSegment(input): that
+            detector alone (the read-along's heal windows). LoopWords(text):
+            the words a 6-gram repeated 5+ times covers (the read-along's adoption
+            rule). Report.Clean()
             drives the QAClean branch; the retranscribe queue = wph outliers +
             mid-chapter loops. Loud errors on manifest/transcript divergence,
             wrong-schema files, and an empty transcript set.
+            Phase 3c-1: MechanicalPlan(rep) is a read-along book's loop repair with no
+            agent: every chapter in the retranscribe queue or with a repeated run, a
+            multi-loop or a tail-rate hit is re-transcribed whole (never a tail or mid
+            clip: their spliced text has no word timings), every other allowed chapter
+            accepted; nil for a clean report.
   spelling/ M4: the corrections/spelling ENGINES ported from apply_corrections/
             check_corrections/generate_spellings/check_first_use.py. Engine-vs-data
             split: per-book data is corrections.json + spellings.json in the work
@@ -468,7 +535,13 @@ internal/
             tail loop, cut+re-transcribe the window prompt-free, health-check, rotation-
             adjudicate FABRICATED/BENIGN/CLIP-REDEGENERATED, splice into
             transcripts-repaired/ + repairs.log/tail_verdicts.json) and AdoptFresh
-            (never-blindly-adopt full-chapter plausibility). No agent; injected a
+            (never-blindly-adopt full-chapter plausibility). AdoptFreshReadalong is goal
+            readalong's rule (Phase 3c-1): adopt the NoContext re-run unless its word
+            rate is implausible (AdoptFresh's check: the heal takes that span), it loops
+            over more words (AdoptStats.LoopWords, qa.LoopWords), it is shorter than a
+            loop-free original, or it keeps under 80% of a looped original's words
+            outside its loops; a looped original's extra words never count for it
+            (AdoptFresh keeps it for them). No agent; injected a
             ClipCutter (ffmpeg) + a Transcribe func so it stays unit-testable. The
             re-transcription (full-chapter AND clip) runs NoContext (asr.Job.NoContext)
             so a context-conditioned repetition collapse cannot replay identically.
@@ -986,6 +1059,37 @@ internal/
             (contrib.NothingFiled: a 4xx, a rate limit, a failed dial) clears
             the pending time; a made gist is kept for the next try; the marker
             goes once the row is recorded.
+            Phase 3c-1, readalong_stage.go: readalong_aligning reads
+            readalong/request.json (WriteReadalongRequest: the ebook's Bridge path, the
+            server's files book-relative in its order with their durations, the Bridge
+            version), composes the timeline from the manifest (files style by
+            Rel(manifest.Source, file), the single-file styles by start), cuts again
+            every chapter FLAC a purge took (splitWithRetries on the manifest), reads
+            transcripts-json/ only, opens the EPUB (its sentences as the job's
+            refusals), aligns, heals (the windows: HealWindows' plus tail_verdicts' plus
+            the located loops of a qa.CrossSegment over the transcripts it reads,
+            readalongLoopWindows; each window a clip cut across its chapter FLACs
+            into readalong/heal/<f###_start_end>.flac, transcribed NoContext through the
+            engine's backend: a worker when one is connected; a complete raw reused, the
+            clip deleted, an empty answer keeps the words it had), aligns again, snaps
+            on energies from an ffmpeg f32le pipe per chapter FLAC (only the energies
+            kept), and writes readalong/map.json, words.json and align_report.json
+            (coverage, first-pass coverage, heal windows and seconds, snap stats, ebook
+            sha256, resplit). The map's generator.asr is path.Base of asr.json's model.
+            qa_sweep for goal readalong (readalongSweep): a dirty report writes
+            qa.MechanicalPlan and goes to retranscribing ONCE (retranscribing writes
+            readalong/repaired for goal readalong; ResetReadalongRepair forgets it),
+            then on to aligning clean or not with a note naming the chapters left.
+            retranscribeChapter cuts a missing chapter FLAC again (resplitChapter, any
+            goal). inspect for goal readalong uses InspectWith(WindowUnusable) and fails
+            ErrReadalongNoLength for a marker file it can't window.
+            TranscriptionContinuable now covers files and markers manifests too
+            (chaptersContinuable: raws of this manifest, AudioCurrent, a raw or a FLAC
+            per chapter once splitting's sentinel is there). AudioCurrent(workDir,
+            source) is the reuse table's audio check: a single file probe.json's size
+            and not modified after it (sourceClockSlack), a folder the same files by
+            name and order none modified after probe.json; an error when it can't be
+            looked at. ReadalongMap/ReadReadalongReport are the job's readers.
   contrib/  M7: everything GitHub-facing for contribution. TokenSource (Phase 2b:
             NewTokenSource(device, onChange) resolves AUDIOSILO_BRIDGE_GITHUB_TOKEN
             read LIVE from the environment first (never sealed any more), then the
@@ -1232,8 +1336,9 @@ internal/
             GetBookBySourcePath finds an earlier run of the same book.
             Phase 1c: StageRunBudgetCost(runID) is one run's budget-basis spend (the
             description step reports its own); LatestGenerateBookAt(library, path)
-            is the newest generate job's surviving engine book at a path
-            (sidecars.describe finds a moved book's run with it); NextStageAttempt
+            is the newest generate job's surviving engine book at a path, never
+            the audio run beside an ebook run (sidecars.describe finds a moved
+            book's run with it); NextStageAttempt
             (one past every recorded run: the scheduler's and the description step's
             run numbers) and LatestOkStageRun (a stage's newest success, or
             ErrNotFound).
@@ -1257,6 +1362,20 @@ internal/
             agent/<kind>, the last keeping when that agent credential was set;
             login, signed_in_at, last_ok_at, refused_at, last_error), what the
             Accounts tab shows; the credentials are in the vault.
+            Phase 3c-1: ContinueReadalong(id, from, to, goal, job) moves a stopped
+            engine book (done, or failed, parked or paused: the caller holds it and
+            checked no other job follows it) on at to with goal, its kind kept, its
+            status cleared and the job mapped in one transaction; ErrNotContinuable
+            when it isn't stopped at from, is an ebook run, or (going on past
+            inspecting) was swept. Going on from inspecting ignores a sweep and clears
+            swept_at on the book's mappings (the retention then counts from this job's
+            end). GenerateBookSwept(bookID). AudioRunKey(path) is the source_path
+            of the audio run beside an ebook run ("audio:" + the path: two engine books
+            at one path, never a real path); Book.IsAudioRun, Book.AudioSource (the
+            path the audio is read from: inspect and the markers file read it).
+            ContinueChapters sets source_path to nb's when nb names one (a generate job
+            taking on the audio run as the book's own). LatestOkStageRun(book, stage)
+            reads superseded successes too (a history reader).
   state/    per-book pipeline state machine: table-driven states/lanes/transitions,
             CanStart/NextState guards, the audit fix-loop cap. Pure, no I/O. M6 added
             ParkCode (typed park reasons - M7 added contrib_unavailable, core_needed,
@@ -1273,7 +1392,10 @@ internal/
             instead of hand-rolling it). The post-M9 round added the SourceIO
             Def column + ReadsSource (the stages that open the original library
             item; the scheduler's mechanical-lane serialization and the ETA
-            simulation both consume it). Phase 1a: HoldsSeriesLock(state, status)
+            simulation both consume it). Phase 3c-1: SeriesLockExempt(goal, state)
+            keeps a read-along (goal readalong, or a whole run at readalong_aligning)
+            out of its series' lock beside HoldsSeriesLock (scheduler and ETA).
+            Phase 1a: HoldsSeriesLock(state, status)
             takes the status - a FAILED book (a cancel is a failure) holds nothing,
             since the job that wanted it ended and nothing will finish it (a later
             volume runs without its carryover, like a series' first book), while a
@@ -1290,6 +1412,18 @@ internal/
             books.goal's one value; PathNext(kind, goal, cur) is the remaining path's
             routing by it (the ETA follows it), so the goal routing lives here once.
             ParkChaptersNotDetected (chapters_not_detected, human only).
+            Phase 3c-1: GoalReadalong ("readalong") and ReadalongAligning
+            ("readalong_aligning", LaneASR, order after retranscribing, mechanical, Next
+            [Done]; NOT SourceIO, nor is Retranscribing:
+            TestReadsSourcePinsLibrarySourceStages wants every SourceIO stage in the
+            mechanical lane, and the ASR lane's cap of 1 serialises them anyway). The
+            goal readalong path is inspecting -> splitting -> asr -> sanitizing ->
+            qa_sweep -> [retranscribing -> qa_sweep] -> readalong_aligning -> done:
+            inspect never routes it to markers_normalizing, asr never to
+            chapter_detecting, qa_sweep to retranscribing on Outcome.RetranscribeNeeded
+            (the mechanical round) else readalong_aligning, qa_adjudicating (a continued
+            whole run) to readalong_aligning. PathNext follows it; a test walks it for
+            every kind and finds no agent state.
   eta/      the PURE ETA engine (no I/O, no clock): per-stage unit kinds
             (chapter/chunk/book) + seed rates from the historical extraction metrics,
             EWMA Observe (alpha 0.3), book ETA = rate x remaining units over the
@@ -1309,6 +1443,8 @@ internal/
             with Book.Goal (books.goal): a chapters-only book goes asr ->
             chapter_detecting -> done; the mainline skips the stage like the other
             conditional ones.
+            Phase 3c-1: readalong_aligning's seed {book, 180 s}; the goal readalong path
+            follows state.PathNext.
   scheduler/ one wake-on-event goroutine over three lanes (ASR cap 1 / agent cap =
             config, series-locked / mechanical cap 2) over an injected Executor +
             _done/<stage>.json sentinels (the CONTENT truth) and crash reconcile.
@@ -1607,6 +1743,10 @@ internal/
             filter or pairing change; a later heartbeat must advertise it again.
             Deletion snapshots require all protocol fields, tolerate new keys,
             and expose no listener identities.
+            Phase 3c-1: BookFile.Duration (the server's indexed seconds; a single-file
+            book's is the book's), BookInfo.Ebook {path, size} (the server's pick of the
+            book's ebook, omitted when none) and Attachments.Readalong (the rescan read
+            readalong.json).
   mapping/  where the Bridge sees each library, CHECKED (decision 13): Check stats the
             server's sample book's files through the mount (SafeJoin: no absolute,
             "..", NUL; a backslash is a name character except on Windows) and
@@ -2121,6 +2261,54 @@ internal/
             contributed, covered}. The hints for agent_unavailable,
             agent_credential_refused and contrib_unavailable point at the Accounts
             tab.
+            Phase 3c-1, readalongjob.go: readalong.align (ReadalongJob, the pipeline
+            lane, Abandoner; generate's strict prepare). createReadalong refuses before
+            any work a book the server names no ebook for ("this book has no ebook"),
+            one outside the mapping, not a regular file, over 256 MiB, DRM or not an
+            EPUB (readalong.OpenEPUB). The earlier engine book is audioRun's: the
+            book's own run, unless that is an ebook run, which a read-along or chapters
+            job never continues, converts nor clears (its kind, ebook path, manifest and
+            notes are describe's and a contribution's): then the audio run beside it
+            (store.AudioRunKey), a new one made there. One another open job follows
+            refuses the job (a generate job's in words); one a
+            stage holds says try again in a minute; else, held, readalongReuse (decision
+            6, pure, table-tested) picks: a whole run past qa_adjudicating (or stopped
+            at readalong_aligning) -> readalong_aligning, goal kept; a read-along done or stopped at aligning ->
+            aligning; transcribed but not repaired (chapters done; stopped from
+            sanitizing to retranscribing) -> sanitizing, goal readalong; stopped at asr
+            and TranscriptionContinuable -> splitting; a finished whole run swept or
+            with other audio -> inspecting, goal readalong, its transcripts purged
+            first when another recording's, its notes kept (a read-along with a fact
+            pass behind it counts as a whole run: holdsWholeRun, which createChapters'
+            errChaptersKeepsRun applies too; read from the notes on disk, else any fact
+            pass that ever succeeded, so a Reconcile rewind doesn't lift it); else cleared for a
+            new book (goal readalong, no series, no contribution). An audio file that
+            can't be looked at now says try again, never "the audio changed"; a file the
+            server has no length for fails before any work (rescan). prepareContinue
+            removes the sentinels of to (not splitting's) and of the read-along stages
+            after it and retires their successes and those of every stage a purge took
+            the sentinel of (a restart's Reconcile would rewind to them), drops asr.json
+            going on from inspecting (pipeline.ForgetTranscription: a new manifest), and
+            resets the repair round before qa_sweep. A generate job reading the audio
+            takes on the audio run beside an ebook run (earlierRun for both; the ebook
+            run cleared first, then the audio run continued, re-keyed to the book's
+            path, or cleared); one reading the ebook leaves it alone, and describe's
+            latestGenerated skips it (no notes). A generate job never continues a
+            read-along transcribed in windows (its chapters were never found). The request is written
+            before the book goes on, and again (readalongAsk) when a resumed run first
+            looks or the server moved the job with its book. At done: the map under 50%
+            text coverage fails ("the ebook and the narration don't match: N% lined
+            up"), an ebook whose sha256 now differs from the map's fails ("the ebook
+            changed while aligning; run it again"), else readalong.json
+            (<stem>.readalong.json) is saved where the book is now (save:
+            book_not_writable park until it can), bridge.json untouched, then
+            RescanAttachments. Result {library_id, path, file, coverage, sections,
+            spans, audio_gaps, heal_windows, transcribed (an asr run since the job took
+            the book), ebook_sha256}; no cost_usd in its progress. The job's end records
+            ended_at (release), the retention's clock. A generate job continues a done
+            read-along run at qa_sweep with goal "" (continueReadalongRun via
+            ContinueChapters, decision 7); a chapters job clears a read-along run rather
+            than refusing it as a whole run.
   agentproto/ the staging protocol between the Bridge and the agent container (decision
             15), shared by both sides so they can't drift; a LEAF (standard library
             only). Protocol 1 (both sides refuse another). A job dir <staging>/<16 hex>/:
@@ -2634,7 +2822,8 @@ contrib, events, metaops, pipeline, scheduler, state, supervisor, toolfetch);
 `api -> {auth, jobs, link, logring, mapping, store}` (types only; it calls the
 injected Backend); `verify -> {jobs, link, mapping}`; `jobs -> {link, store}`;
 `mapping -> link`; `link` is a leaf. `generate -> {jobs, link, mapping, store,
-scheduler, state, pipeline, contrib, chapterdetect, audio, scratch, metaops, ebook, agent, fsutil}` (+ the meta
+scheduler, state, pipeline, contrib, chapterdetect, audio, scratch, metaops, ebook, agent, fsutil,
+readalong}` (+ the meta
 module's extract/model), its engine and server reached through its own Engine and
 Server interfaces. The agent container: `agentproto` is a leaf (standard library
 only); `agentbox -> {agent, agentproto}`; `agentrun -> {agent, agentproto,
@@ -2642,8 +2831,10 @@ fsutil}`; neither imports the other, and neither the pipeline nor the scheduler
 knows about either (agentbox is just an agent.Runner). The engine:
 `scheduler -> {store, state, eta, events, scratch}`; `eta -> state` (pure, imported BY
 scheduler - never the reverse);
-`chapterdetect -> audio` (its number words and Silence only); `pipeline -> {audio, asr, transcript, ebook, qa, spelling, agent, repair, toolfetch, chapterdetect,
-scratch, secrets, fsutil, metaops, contrib, pricing, store, state, scheduler}` (metaops since M7's
+`chapterdetect -> audio` (its number words and Silence only); `readalong -> epubcfi`
+(+ x/text) and `epubcfi -> {x/net/html, x/text}`, both pure leaves of the engine;
+`scratch -> readalong` (its work-dir names only); `pipeline -> {audio, asr, transcript, ebook, qa, spelling, agent, repair, toolfetch, chapterdetect,
+readalong, scratch, secrets, fsutil, metaops, contrib, pricing, store, state, scheduler}` (metaops since M7's
 contributing stage, and the spelling stage's series glossary); `contrib -> {store, state, accounts}`
 (+ the meta module's model/pack; accounts for ErrUnrefreshed alone, the sign-in reached
 through contrib's DeviceTokens interface, so accounts never imports contrib); `agent`/`repair` are leaf helpers (no

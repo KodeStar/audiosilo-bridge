@@ -336,3 +336,48 @@ func TestAdoptFresh(t *testing.T) {
 		})
 	}
 }
+
+// The read-along's rule adopts the fresh NoContext re-run unless it is clearly
+// worse: implausible by word rate, loopier, or it dropped narration (a looped
+// original's extra words never count for it). The Call of the Wild's chapter 1
+// (3c-1 live run): 5843 words, 2675 of them a "buck" loop, over 25 minutes;
+// AdoptFresh kept it (both rates plausible, the loop longer).
+func TestAdoptFreshReadalong(t *testing.T) {
+	const dur = 1510.0
+	cotw := AdoptStats{Words: 5843, LoopWords: 2675, DurationSec: dur}
+	clean := AdoptStats{Words: 3400, DurationSec: dur}
+	allLoop := AdoptStats{Words: 6000, LoopWords: 5900, DurationSec: dur}
+	if d := AdoptFresh(cotw, clean); d.Adopt {
+		t.Fatalf("generate's rule now adopts the CotW shape (%s); it must stay as it was", d.Reason)
+	}
+	for _, c := range []struct {
+		name            string
+		original, fresh AdoptStats
+		wantAdopt       bool
+	}{
+		{"looped original, clean fresh", cotw, clean, true},
+		{"looped original, fresh loops less", cotw, AdoptStats{Words: 3600, LoopWords: 200, DurationSec: dur}, true},
+		{"same transcript (an adopted re-run decided again)", clean, clean, true},
+		{"loop-free original, fresh longer", clean, AdoptStats{Words: 3500, DurationSec: dur}, true},
+		{"almost-all-loop original, plausible fresh", allLoop, AdoptStats{Words: 1800, DurationSec: dur}, true},
+		{"looped original, fresh loops as much (a tie)", cotw, AdoptStats{Words: 5900, LoopWords: 2675, DurationSec: dur}, true},
+		{"no original transcript, plausible loop-free fresh", AdoptStats{DurationSec: dur}, clean, true},
+		// Denied: clearly worse.
+		{"loop-free original, fresh a little shorter", clean, AdoptStats{Words: 3300, DurationSec: dur}, false},
+		{"almost-all-loop original, collapsed fresh", allLoop, AdoptStats{Words: 200, DurationSec: dur}, false},
+		{"fresh crammed", cotw, AdoptStats{Words: 8000, DurationSec: dur}, false},
+		{"zero duration (no rate to judge)", AdoptStats{Words: 5843, LoopWords: 2675}, AdoptStats{Words: 3400}, false},
+		{"empty fresh run", cotw, AdoptStats{DurationSec: dur}, false},
+		{"loop-free original, fresh longer but loops", clean, AdoptStats{Words: 3600, LoopWords: 60, DurationSec: dur}, false},
+		{"fresh loops more", AdoptStats{Words: 3400, LoopWords: 10, DurationSec: dur}, AdoptStats{Words: 3500, LoopWords: 600, DurationSec: dur}, false},
+		{"fresh collapsed", cotw, AdoptStats{Words: 1200, DurationSec: dur}, false},
+		{"fresh dropped narration a clean original had", clean, AdoptStats{Words: 2000, DurationSec: dur}, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			d := AdoptFreshReadalong(c.original, c.fresh)
+			if d.Adopt != c.wantAdopt || d.Reason == "" {
+				t.Errorf("Adopt = %v (%q), want %v", d.Adopt, d.Reason, c.wantAdopt)
+			}
+		})
+	}
+}

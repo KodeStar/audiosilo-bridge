@@ -26,6 +26,9 @@ const (
 type AdoptStats struct {
 	Words       int
 	DurationSec float64
+	// LoopWords are the words inside the transcript's 6-gram loops (qa.LoopWords);
+	// only the read-along's rule weighs them.
+	LoopWords int
 }
 
 // AdoptDecision is AdoptFresh's verdict.
@@ -49,6 +52,10 @@ func (s AdoptStats) plausible() bool {
 	return w >= plausibleMinWPM && w <= plausibleMaxWPM
 }
 
+// reasonFreshImplausible is the keep reason both rules give a fresh run outside
+// the narration band.
+const reasonFreshImplausible = "fresh run implausible by word rate (collapsed or re-degenerated); keep original"
+
 // AdoptFresh decides whether to adopt a freshly re-transcribed full chapter over the
 // original, comparing word count and duration plausibility. It NEVER blindly adopts:
 //
@@ -62,7 +69,7 @@ func (s AdoptStats) plausible() bool {
 // It is a pure function (no I/O) and table-tested.
 func AdoptFresh(original, fresh AdoptStats) AdoptDecision {
 	if !fresh.plausible() {
-		return AdoptDecision{Adopt: false, Reason: "fresh run implausible by word rate (collapsed or re-degenerated); keep original"}
+		return AdoptDecision{Adopt: false, Reason: reasonFreshImplausible}
 	}
 	if !original.plausible() {
 		return AdoptDecision{Adopt: true, Reason: "fresh run plausible where the original was not; adopt"}
@@ -71,4 +78,40 @@ func AdoptFresh(original, fresh AdoptStats) AdoptDecision {
 		return AdoptDecision{Adopt: true, Reason: "both plausible, fresh recovered more words; adopt"}
 	}
 	return AdoptDecision{Adopt: false, Reason: "both plausible, fresh not longer; keep original"}
+}
+
+// readalongMinKept is the share of a looped original's words outside its loops a
+// fresh read-along re-run must keep: below it the fresh run dropped narration (a
+// collapse). Every word of a loop-free original is narration, so it needs all of them.
+const readalongMinKept = 0.8
+
+// AdoptFreshReadalong is a read-along book's adoption rule (Phase 3c-1): the
+// fresh NoContext re-run of a chapter the transcript check flagged replaces the
+// original unless it is clearly worse. A loop's words are noise, not narration,
+// so word count alone can't judge a looped original (it has MORE words; AdoptFresh
+// keeps it), and the spike adopted every re-run:
+//
+//   - fresh implausible by word rate (collapsed or crammed: AdoptFresh's check)
+//     -> keep original (the heal takes that span).
+//   - fresh loops over more words than the original -> keep original.
+//   - fresh keeps under 80% of a looped original's words outside its loops, or
+//     fewer words than a loop-free original (a re-run for dropout, a low word
+//     rate or a fast tail): it dropped narration    -> keep original.
+//   - otherwise                                      -> adopt.
+//
+// generate's whole run keeps AdoptFresh. Pure and table-tested.
+func AdoptFreshReadalong(original, fresh AdoptStats) AdoptDecision {
+	minKept := readalongMinKept
+	if original.LoopWords == 0 {
+		minKept = 1 // a fresh run that reaches that case is loop-free too
+	}
+	switch {
+	case !fresh.plausible():
+		return AdoptDecision{Adopt: false, Reason: reasonFreshImplausible}
+	case fresh.LoopWords > original.LoopWords:
+		return AdoptDecision{Adopt: false, Reason: "fresh run loops over more words; keep original"}
+	case float64(fresh.Words-fresh.LoopWords) < minKept*float64(original.Words-original.LoopWords):
+		return AdoptDecision{Adopt: false, Reason: "fresh run dropped narration the original had outside its loops; keep original"}
+	}
+	return AdoptDecision{Adopt: true, Reason: "fresh run no loopier and keeps the narration; adopt"}
 }

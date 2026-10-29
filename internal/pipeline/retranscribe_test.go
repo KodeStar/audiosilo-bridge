@@ -994,3 +994,42 @@ func TestRetranscribeRepairOutcomesUpsertAcrossRounds(t *testing.T) {
 		t.Errorf("round 2 repair_outcomes[2] = %+v, want the round-1 unlocatable UPSERTED to a spliced record with clip_start_sec=%.1f", got[2], window)
 	}
 }
+
+// A read-along book adopts the fresh NoContext re-run of a looped chapter that
+// generate's rule keeps: the original has more words (the loop's) and both rates
+// are plausible (the Call of the Wild's chapter-end loops, 3c-1 live run).
+func TestRetranscribeReadalongAdoptsOverALoop(t *testing.T) {
+	for _, c := range []struct {
+		goal  string
+		adopt bool
+	}{{state.GoalReadalong, true}, {"", false}} {
+		t.Run("goal "+c.goal, func(t *testing.T) {
+			work := t.TempDir()
+			// 2.5 s: the fake's 3 fresh words are 72 wpm, the 12 looped ones 288 wpm,
+			// both inside AdoptFresh's plausible band.
+			writeManifestStruct(t, work, audio.Manifest{Source: "/x", Style: audio.StyleMarkers, Duration: 2.5, ChapterCount: 1,
+				Chapters: []audio.Chapter{{Chapter: 2, Start: 0, End: 2.5, Duration: 2.5}}})
+			seedNormalized(t, work, transcript.Transcript{Schema: transcript.Schema, Chapter: 2, Segments: []transcript.Segment{
+				{ID: 0, Start: 0, End: 2.5, Text: " He ran" + strings.Repeat(" buck", 10)}}})
+			seedFLACs(t, work, 2)
+			seedPlan(t, work, qa.PlanEntry{Chapter: 2, Action: qa.ActionRetranscribe, Reason: "mechanical loop repair (read-along): no agent"})
+			exe := NewExecutor(Config{DataDir: t.TempDir(), ASR: fakeASR(newFakeBackend()), Fallback: scheduler.NewStubExecutor(0, 0)})
+			res, err := exe.Execute(context.Background(), store.Book{ID: 1, WorkDir: work, Goal: c.goal}, state.Retranscribing, scheduler.StageReport{})
+			if err != nil {
+				t.Fatalf("retranscribing: %v", err)
+			}
+			adopted := 0
+			if c.adopt {
+				adopted = 1
+			}
+			assertRetranscribeMetrics(t, res.Metrics, map[string]int{"retranscribed": 1, "adopted": adopted, "kept": 1 - adopted})
+			got, err := transcript.ReadNormalized(filepath.Join(work, transcript.JSONDir), 2)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if looped := strings.Contains(transcript.PlainText(got), "buck buck"); looped == c.adopt {
+				t.Errorf("transcript now %q", transcript.PlainText(got))
+			}
+		})
+	}
+}

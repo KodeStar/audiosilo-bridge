@@ -276,3 +276,14 @@ func TestQueueETAEndedPredecessorReleasesSeries(t *testing.T) {
 		}
 	}
 }
+
+// A parked read-along of an earlier volume holds no series lock, as in the
+// scheduler, so the later volume's carryover stages still run.
+func TestQueueETAReadalongHoldsNoSeriesLock(t *testing.T) {
+	later := Book{ID: 2, State: state.SpellingResearch, Series: "Saga", SeriesPos: "2", Chapters: 5}
+	alone, _ := BookETA(later, nil)
+	earlier := Book{ID: 1, State: state.ASR, Status: state.StatusNeedsAttention, Goal: state.GoalReadalong, Series: "Saga", SeriesPos: "1", Chapters: 5}
+	if got := QueueETA([]Book{earlier, later}, nil, caps(2)); math.Abs(got-alone) > 1e-6 {
+		t.Errorf("makespan = %v, want %v (the read-along holds nothing)", got, alone)
+	}
+}

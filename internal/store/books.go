@@ -48,6 +48,25 @@ func enforceRetryAt(status, retryAt string) string {
 	return retryAt
 }
 
+// audioRunPrefix keys the audio run beside a book's ebook run (Phase 3c-1): a
+// read-along or chapters job reads the audio, and never continues, converts nor
+// clears the ebook run (its kind, ebook path, chapter manifest and notes are the
+// description's and a contribution's). Two engine books share the one source path
+// then, so the audio run's source_path is this prefix and the path: never a real
+// path (those are absolute), so it collides with no book.
+const audioRunPrefix = "audio:"
+
+// AudioRunKey is the source_path of the audio run beside the ebook run at
+// sourcePath.
+func AudioRunKey(sourcePath string) string { return audioRunPrefix + sourcePath }
+
+// IsAudioRun reports whether b is the audio run beside an ebook run.
+func (b Book) IsAudioRun() bool { return strings.HasPrefix(b.SourcePath, audioRunPrefix) }
+
+// AudioSource is the path b's audio is read from: its source path, less the
+// audio run's key prefix.
+func (b Book) AudioSource() string { return strings.TrimPrefix(b.SourcePath, audioRunPrefix) }
+
 // DeriveWorkDir returns a unique per-book scratch directory under root. The
 // source_path hash guarantees uniqueness (two books may share a title), while the
 // title slug keeps the path human-readable. An empty/all-symbol title falls back
@@ -614,12 +633,14 @@ var ErrNotContinuable = errors.New("the book isn't a chapters book to continue")
 // been matched since the chapters job made it), contribution mode and work id;
 // status clear, so the scheduler takes it up at to (a done book too: a cancel or
 // a park landing as its last stage finished leaves its status on it). The work
-// dir, source and kind stay the book's. job (when it names a server job) is mapped
-// to the book in the same transaction, so a book is never continued with no job
-// to follow it, nor left stopped. ErrNotContinuable when the book isn't one
-// stopped at from, or the retention swept its transcripts (a continue needs them);
-// checked in the one statement, so a book that changed meanwhile isn't moved. The
-// SQL asks for any goal short of the whole pipeline (chapters is the only one) and
+// dir and kind stay the book's; its source path becomes nb's when nb names one
+// (the same path, or the book's own for the audio run beside an ebook run the
+// caller cleared first: the whole run is the book's then). job (when it names a
+// server job) is mapped to the book in the same transaction, so a book is never
+// continued with no job to follow it, nor left stopped. ErrNotContinuable when
+// the book isn't one stopped at from, or the retention swept its transcripts (a
+// continue needs them); checked in the one statement, so a book that changed
+// meanwhile isn't moved. The SQL asks for any goal short of the whole pipeline (chapters is the only one) and
 // takes both states from the caller, which decides where a book goes on from.
 func (db *DB) ContinueChapters(ctx context.Context, id int64, from, to string, nb NewBook, job GenerateBook) error {
 	authors, err := marshalJSONDefault(nb.Authors, "[]")
@@ -640,17 +661,62 @@ func (db *DB) ContinueChapters(ctx context.Context, id int64, from, to string, n
 	}
 	defer func() { _ = tx.Rollback() }()
 	res, err := tx.ExecContext(ctx,
-		`UPDATE books SET goal='', title=?, authors=?, narrators=?, series=?, series_pos=?, asin=?, isbn=?,
+		`UPDATE books SET goal='', source_path=COALESCE(NULLIF(?, ''), source_path), title=?, authors=?, narrators=?, series=?, series_pos=?, asin=?, isbn=?,
 		     identity_sources=?, contrib_mode=?, work_id=?, state=?, status='', error='', park_code='', retry_at='',
 		     updated_at=?
 		  WHERE id=? AND goal!='' AND state=? AND (state='done' OR status='failed')
 		    AND NOT EXISTS (SELECT 1 FROM generate_books WHERE book_id=? AND swept_at!='')`,
-		nb.Title, authors, narrators, nb.Series, nb.SeriesPos, nb.ASIN, nb.ISBN, idsrc, nb.ContribMode, nb.WorkID,
+		nb.SourcePath, nb.Title, authors, narrators, nb.Series, nb.SeriesPos, nb.ASIN, nb.ISBN, idsrc, nb.ContribMode, nb.WorkID,
 		to, timestamp(nowFn()), id, from, id)
 	if err := checkAffected(res, err); errors.Is(err, ErrNotFound) {
 		return ErrNotContinuable
 	} else if err != nil {
 		return err
+	}
+	if job.ServerJobID != 0 {
+		job.BookID = &id
+		if err := putGenerateBook(ctx, tx, job); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// ContinueReadalong turns an audio engine book that stopped at from into a
+// read-along run going on at to with goal (Phase 3c's reuse table, decided by the
+// caller): its identity, work dir, source, kind and series stay the book's (an
+// ebook run is never continued: its notes are the ebook's, and a read-along runs
+// beside it, AudioRunKey); status clear, so the scheduler takes it up at to. job
+// (when it names a server job) is mapped to the book in the same transaction.
+// ErrNotContinuable when the book isn't stopped at from (done, failed, parked or
+// paused: the caller holds the engine's hold on it and checked no other job
+// follows it) or, going on past inspecting, the retention swept its
+// transcripts; checked in the one statement, so a book that changed meanwhile
+// isn't moved. A book going on from inspecting makes its transcripts anew, so a
+// sweep doesn't stop it, and its mappings are unswept again: the retention
+// counts from this job's end.
+func (db *DB) ContinueReadalong(ctx context.Context, id int64, from, to, goal string, job GenerateBook) error {
+	fresh := to == "inspecting"
+	tx, err := db.sql.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	res, err := tx.ExecContext(ctx,
+		`UPDATE books SET goal=?, state=?, status='', error='', park_code='', retry_at='',
+		     updated_at=?
+		  WHERE id=? AND kind='audio' AND state=? AND (state='done' OR status IN ('failed','needs_attention','paused'))
+		    AND (? OR NOT EXISTS (SELECT 1 FROM generate_books WHERE book_id=? AND swept_at!=''))`,
+		goal, to, timestamp(nowFn()), id, from, fresh, id)
+	if err := checkAffected(res, err); errors.Is(err, ErrNotFound) {
+		return ErrNotContinuable
+	} else if err != nil {
+		return err
+	}
+	if fresh {
+		if _, err := tx.ExecContext(ctx, `UPDATE generate_books SET swept_at='' WHERE book_id=?`, id); err != nil {
+			return err
+		}
 	}
 	if job.ServerJobID != 0 {
 		job.BookID = &id

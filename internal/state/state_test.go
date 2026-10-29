@@ -22,7 +22,7 @@ func TestTableCoversAllStatesWithLane(t *testing.T) {
 	stages := map[State]bool{
 		Inspecting: true, MarkersNormalizing: true, Splitting: true, ASR: true,
 		ChapterDetecting: true, Sanitizing: true, QASweep: true, QAAdjudicating: true, Retranscribing: true,
-		SpellingResearch: true, Correcting: true, Extracting: true, ChapterMapping: true,
+		ReadalongAligning: true, SpellingResearch: true, Correcting: true, Extracting: true, ChapterMapping: true,
 		FactPass: true, Synthesizing: true, Validating: true, Auditing: true,
 		Fixing: true, Contributing: true,
 	}
@@ -45,7 +45,7 @@ func TestLanesAssigned(t *testing.T) {
 	want := map[State]Lane{
 		Inspecting: LaneMechanical, MarkersNormalizing: LaneAgent, Splitting: LaneMechanical,
 		ASR: LaneASR, ChapterDetecting: LaneMechanical, Sanitizing: LaneMechanical, QASweep: LaneMechanical,
-		QAAdjudicating: LaneAgent, Retranscribing: LaneASR, SpellingResearch: LaneAgent,
+		QAAdjudicating: LaneAgent, Retranscribing: LaneASR, ReadalongAligning: LaneASR, SpellingResearch: LaneAgent,
 		Correcting: LaneMechanical, Extracting: LaneMechanical, ChapterMapping: LaneAgent,
 		FactPass: LaneAgent, Synthesizing: LaneAgent,
 		Validating: LaneMechanical, Auditing: LaneAgent, Fixing: LaneAgent,
@@ -89,6 +89,10 @@ func TestNextStateLegalPerTable(t *testing.T) {
 		{FixAttempts: MaxFixAttempts},
 		{Windowed: true},
 		{Goal: GoalChapters},
+		{Goal: GoalReadalong},
+		{Goal: GoalReadalong, RetranscribeNeeded: true},
+		{Goal: GoalReadalong, Windowed: true},
+		{Goal: GoalReadalong, QAClean: true},
 	}
 	for _, s := range All() {
 		if IsTerminal(s) {
@@ -284,6 +288,19 @@ func TestHoldsSeriesLock(t *testing.T) {
 	for _, s := range []State{Ready, Contributing, Done} {
 		if HoldsSeriesLock(s, StatusNone) {
 			t.Errorf("%q (Ready or later) must not hold the series lock", s)
+		}
+	}
+}
+
+// TestSeriesLockExempt: a read-along run (any state of goal readalong, or a whole
+// run at readalong_aligning) stays out of its series' lock; nothing else does.
+func TestSeriesLockExempt(t *testing.T) {
+	for _, s := range All() {
+		if !SeriesLockExempt(GoalReadalong, s) {
+			t.Errorf("a read-along at %q holds the series lock", s)
+		}
+		if SeriesLockExempt("", s) != (s == ReadalongAligning) || SeriesLockExempt(GoalChapters, s) != (s == ReadalongAligning) {
+			t.Errorf("SeriesLockExempt at %q is wrong", s)
 		}
 	}
 }
@@ -508,5 +525,76 @@ func TestChapterDetectingBranches(t *testing.T) {
 	if PathNext(KindAudio, "", ASR) != Sanitizing || PathNext(KindAudio, GoalChapters, ASR) != ChapterDetecting ||
 		PathNext(KindAudio, GoalChapters, ChapterDetecting) != Done || PathNext(KindAudio, GoalChapters, Splitting) != ASR {
 		t.Error("PathNext doesn't route a chapters-only book through chapter_detecting to done")
+	}
+}
+
+// A goal readalong book never reaches an agent stage (decision 2): every branch
+// NextState can take from every state it can be in, and PathNext from every
+// start, for both kinds.
+func TestReadalongGoalVisitsNoAgentState(t *testing.T) {
+	branches := []Outcome{
+		{Goal: GoalReadalong},
+		{Goal: GoalReadalong, MarkersContiguous: true},
+		{Goal: GoalReadalong, Windowed: true},
+		{Goal: GoalReadalong, QAClean: true},
+		{Goal: GoalReadalong, RetranscribeNeeded: true},
+	}
+	seen := map[State]bool{Queued: true}
+	work := []State{Queued}
+	for len(work) > 0 {
+		s := work[0]
+		work = work[1:]
+		if IsAgent(s) {
+			t.Fatalf("goal readalong reaches agent state %q", s)
+		}
+		if IsTerminal(s) {
+			continue
+		}
+		for _, o := range branches {
+			next, _, err := NextState(KindAudio, s, o)
+			if err != nil {
+				t.Fatalf("NextState(%q, %+v): %v", s, o, err)
+			}
+			if !seen[next] {
+				seen[next] = true
+				work = append(work, next)
+			}
+		}
+	}
+	want := []State{Queued, Inspecting, Splitting, ASR, Sanitizing, QASweep, Retranscribing, ReadalongAligning, Done}
+	if len(seen) != len(want) {
+		t.Fatalf("goal readalong reaches %v, want %v", seen, want)
+	}
+	for _, s := range want {
+		if !seen[s] {
+			t.Fatalf("goal readalong never reaches %q", s)
+		}
+	}
+	for _, kind := range []Kind{KindAudio, KindEbook} {
+		for _, start := range want {
+			steps := 0
+			for cur := start; !IsTerminal(cur); cur = PathNext(kind, GoalReadalong, cur) {
+				if IsAgent(cur) {
+					t.Fatalf("PathNext(%s, readalong) from %q visits agent state %q", kind, start, cur)
+				}
+				if steps++; steps > len(table) {
+					t.Fatalf("PathNext from %q loops", start)
+				}
+			}
+		}
+	}
+	// A book continued at qa_adjudicating aligns rather than adjudicates.
+	if n, _, _ := NextState(KindAudio, QAAdjudicating, Outcome{Goal: GoalReadalong}); n != ReadalongAligning {
+		t.Fatalf("qa_adjudicating -> %q", n)
+	}
+	// The whole pipeline is unchanged.
+	if n, _, _ := NextState(KindAudio, QASweep, Outcome{}); n != QAAdjudicating {
+		t.Fatalf("goal \"\" qa_sweep -> %q", n)
+	}
+	if n, _, _ := NextState(KindAudio, ASR, Outcome{Windowed: true}); n != ChapterDetecting {
+		t.Fatalf("goal \"\" windowed asr -> %q", n)
+	}
+	if n, _, _ := NextState(KindAudio, ReadalongAligning, Outcome{}); n != Done {
+		t.Fatalf("readalong_aligning -> %q", n)
 	}
 }

@@ -79,6 +79,15 @@ func writesFile(d pipeline.DetectedChapters, files []link.BookFile) bool {
 	return len(d.Chapters) >= minFileChapters && len(d.Chapters) <= maxFileChapters && len(files) > 0
 }
 
+// bookRelPath is a server file path p as the book's sidecars name it: relative to
+// the book's folder rel, or a single-file book's file name.
+func bookRelPath(p, rel string, single bool) string {
+	if single {
+		return path.Base(p)
+	}
+	return strings.TrimPrefix(p, strings.TrimSuffix(rel, "/")+"/")
+}
+
 // composeChapters renders chapters.json for the detected list d over the book's
 // files as the server lists them (paths made relative to the book's folder rel; a
 // single-file book's is the file's name). nil for a list a file isn't written for
@@ -89,11 +98,7 @@ func composeChapters(d pipeline.DetectedChapters, files []link.BookFile, rel str
 	}
 	f := ChaptersFile{Version: 1, Generator: "audiosilo-bridge", GeneratedAt: now.UTC().Format(time.RFC3339), From: chaptersFrom}
 	for _, bf := range files {
-		p := strings.TrimPrefix(bf.Path, strings.TrimSuffix(rel, "/")+"/")
-		if single {
-			p = path.Base(bf.Path)
-		}
-		item := ChaptersFileItem{Path: p, Size: bf.Size}
+		item := ChaptersFileItem{Path: bookRelPath(bf.Path, rel, single), Size: bf.Size}
 		if len(files) == 1 {
 			item.DurationMs = d.DurationMs
 		}
@@ -371,7 +376,7 @@ func (h *Handler) continueChapters(ctx context.Context, eng Engine, r *run, old 
 	if r.source != SourceAudio || !continuable(old) {
 		return false, nil
 	}
-	bookFile := markersFile(old.SourcePath)
+	bookFile := markersFile(old.AudioSource())
 	if bookFile == "" {
 		return false, nil
 	}
@@ -417,7 +422,7 @@ func (h *Handler) continueChapters(ctx context.Context, eng Engine, r *run, old 
 			return false, nil
 		}
 	}
-	err = h.o.DB.ContinueChapters(ctx, old.ID, old.State, string(to), h.newBook(r, old.SourcePath, ""),
+	err = h.o.DB.ContinueChapters(ctx, old.ID, old.State, string(to), h.newBook(r, old.AudioSource(), ""),
 		store.GenerateBook{ServerJobID: r.job.ID, LibraryID: r.lib.ID, RelPath: r.rel})
 	if errors.Is(err, store.ErrNotContinuable) {
 		return false, nil
@@ -614,15 +619,21 @@ func (c *ChaptersJob) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter)
 }
 
 // chaptersFromEarlier writes the chapters an earlier run here already found for the
-// book (an engine book at its source path whose detected list belongs to its
-// manifest now), with no new run; done says it did. A book an open generate job
+// book (its audio run, audioRun's, whose detected list belongs to its manifest
+// now), with no new run; done says it did. A book an open generate job
 // follows is refused: that run brings the chapters; so is one whose characters and
 // recaps were made without chapters found in the narration (before any run).
 func (h *Handler) chaptersFromEarlier(ctx context.Context, r *run) (any, bool, error) {
 	if sidecarsWithoutChapters(r.place) {
 		return nil, true, errChaptersBesideSidecars
 	}
-	old, err := h.bookAtSource(ctx, r)
+	sp, ok, err := metaops.AllowedPath(r.place.full, []string{r.mount})
+	if err != nil || !ok {
+		return nil, false, nil
+	}
+	// The audio run (an ebook run holds no detected chapters: a chapters job runs
+	// beside it, audioRun).
+	old, _, err := h.audioRun(ctx, sp)
 	if errors.Is(err, store.ErrNotFound) {
 		return nil, false, nil
 	}
@@ -657,8 +668,11 @@ func (h *Handler) openJobRefusal(ctx context.Context, r *run, bookID int64) erro
 	if err != nil || id == 0 {
 		return err
 	}
-	if kind == Kind {
+	switch kind {
+	case Kind:
 		return errChaptersGenerating
+	case ReadalongKind:
+		return fmt.Errorf("job %d is making this book's read-along; let it finish or cancel it first", id)
 	}
 	return fmt.Errorf("job %d is already finding this book's chapters; cancel it first", id)
 }
@@ -666,19 +680,23 @@ func (h *Handler) openJobRefusal(ctx context.Context, r *run, bookID int64) erro
 // createChapters makes the engine book of a chapters job: goal chapters, the
 // audio, no contribution, and no series (a chapters-only run makes nothing a later
 // volume carries on from, so it must not hold the series' lock; a generate job that
-// continues it gives it the book's series). An earlier engine book at the same source
-// path with nothing to reuse is deleted first (as a generate job does), unless an
-// open job follows it or it is a finished whole run (errChaptersKeepsRun).
+// continues it gives it the book's series). The earlier engine book (audioRun's:
+// never an ebook run, which the chapters run goes beside) with nothing to reuse is
+// deleted first (as a generate job does), unless an open job follows it or it is
+// a finished whole run (errChaptersKeepsRun).
 func (h *Handler) createChapters(ctx context.Context, eng Engine, r *run) error {
 	sp, ok, err := metaops.AllowedPath(r.place.full, []string{r.mount})
 	if err != nil || !ok {
 		return errors.New("the book's path leaves the library's folder")
 	}
-	if old, err := h.o.DB.GetBookBySourcePath(ctx, sp); err == nil {
+	old, key, err := h.audioRun(ctx, sp)
+	if err == nil {
 		if err := h.openJobRefusal(ctx, r, old.ID); err != nil {
 			return err
 		}
-		if old.Goal != state.GoalChapters && state.State(old.State) == state.Done {
+		if keeps, err := h.keepsWholeRun(ctx, old); err != nil {
+			return err
+		} else if keeps {
 			return errChaptersKeepsRun
 		}
 		if err := h.clearEarlier(ctx, eng, r, old.ID); err != nil {
@@ -687,7 +705,7 @@ func (h *Handler) createChapters(ctx context.Context, eng Engine, r *run) error 
 	} else if !errors.Is(err, store.ErrNotFound) {
 		return err
 	}
-	nb := h.newBook(r, sp, "")
+	nb := h.newBook(r, key, "")
 	nb.Goal = state.GoalChapters
 	nb.Series, nb.SeriesPos = "", ""
 	return h.queueBook(ctx, eng, r, nb)

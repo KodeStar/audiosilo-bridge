@@ -99,6 +99,21 @@ func audioFilesIn(dir string) ([]string, error) {
 // after transcription. A table of several markers in an unknown dialect is a
 // vocabulary gap, not a markerless file: it still goes to markers_normalizing.
 func Inspect(ctx context.Context, sourcePath, workDir, ffprobePath, ffmpegPath string) (Manifest, MarkerStats, error) {
+	return InspectWith(ctx, sourcePath, workDir, ffprobePath, ffmpegPath, InspectOptions{})
+}
+
+// InspectOptions are a book goal's inspect rules.
+type InspectOptions struct {
+	// WindowUnusable gives a single file whose marker table isn't Usable (a dialect
+	// the parser doesn't know, an unmapped interlude) a WINDOWS manifest, as a
+	// markerless file gets, instead of a draft for markers_normalizing (an agent
+	// stage). A read-along book (Phase 3c) sets it: chapter boundaries don't matter
+	// to alignment, only that all the narration is transcribed.
+	WindowUnusable bool
+}
+
+// InspectWith is Inspect with a goal's options.
+func InspectWith(ctx context.Context, sourcePath, workDir, ffprobePath, ffmpegPath string, opts InspectOptions) (Manifest, MarkerStats, error) {
 	if err := os.MkdirAll(workDir, 0o750); err != nil {
 		return Manifest{}, MarkerStats{}, err
 	}
@@ -109,12 +124,12 @@ func Inspect(ctx context.Context, sourcePath, workDir, ffprobePath, ffmpegPath s
 	if src.Style == StyleFiles {
 		return inspectFiles(ctx, src.Files, workDir, ffprobePath)
 	}
-	return inspectMarkers(ctx, src.BookFile, workDir, ffprobePath, ffmpegPath)
+	return inspectMarkers(ctx, src.BookFile, workDir, ffprobePath, ffmpegPath, opts)
 }
 
 // inspectMarkers probes a single chaptered file and builds a marker-derived
 // manifest.
-func inspectMarkers(ctx context.Context, bookFile, workDir, ffprobePath, ffmpegPath string) (Manifest, MarkerStats, error) {
+func inspectMarkers(ctx context.Context, bookFile, workDir, ffprobePath, ffmpegPath string, opts InspectOptions) (Manifest, MarkerStats, error) {
 	if ffprobePath == "" {
 		return Manifest{}, MarkerStats{}, errors.New("ffprobe unavailable; cannot read chapter markers")
 	}
@@ -127,7 +142,8 @@ func inspectMarkers(ctx context.Context, bookFile, workDir, ffprobePath, ffmpegP
 	}
 
 	m, stats := markerManifestFromProbe(bookFile, meta)
-	if markers := probeMarkers(meta); markerless(markers, m.Duration) && m.Duration > 0 {
+	markers := probeMarkers(meta)
+	if (markerless(markers, m.Duration) || (opts.WindowUnusable && !stats.Usable())) && m.Duration > 0 {
 		// Nothing to chapter by: transcribe in windows and find the chapters in the
 		// narration. (A file with no known duration can't be cut, so it keeps the
 		// draft and goes to markers_normalizing, as before.)

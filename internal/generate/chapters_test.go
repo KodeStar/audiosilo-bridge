@@ -29,7 +29,7 @@ import (
 // detected manifest and a list of three chapters current for it.
 func detectChapters(t *testing.T, b store.Book) {
 	t.Helper()
-	m := audio.Manifest{Source: b.SourcePath, Style: audio.StyleMarkers, Detected: true, Duration: 30, ChapterCount: 3}
+	m := audio.Manifest{Source: b.AudioSource(), Style: audio.StyleMarkers, Detected: true, Duration: 30, ChapterCount: 3}
 	for i, title := range []string{"Prologue / Chapter 1", "Chapter 2", "Chapter 3"} {
 		m.Chapters = append(m.Chapters, audio.Chapter{Chapter: i + 1, Title: title, Start: float64(i * 10), End: float64(i*10 + 10), Duration: 10})
 	}
@@ -40,7 +40,7 @@ func detectChapters(t *testing.T, b store.Book) {
 	raw, _ := os.ReadFile(filepath.Join(b.WorkDir, audio.ManifestName)) //nolint:gosec // test
 	sum := sha256.Sum256(raw)
 	d := pipeline.DetectedChapters{ManifestSHA: hex.EncodeToString(sum[:]), DurationMs: 30000}
-	if info, err := os.Stat(b.SourcePath); err == nil {
+	if info, err := os.Stat(b.AudioSource()); err == nil {
 		d.SourceSize, d.SourceModTime = info.Size(), info.ModTime().UnixNano()
 	}
 	for i, c := range m.Chapters {
@@ -1170,31 +1170,74 @@ func TestChaptersDetectRefusedBesideOtherSidecars(t *testing.T) {
 }
 
 // A finished whole run of the book is never cleared for a chapters run: its notes
-// carry a series on and describe the book.
+// carry a series on and describe the book. That holds once a read-along took it on
+// too (stopped aligning, or gone on as a read-along after its fact pass), and after
+// a Reconcile rewind superseded that fact pass's success (the notes stay).
 func TestChaptersDetectKeepsAFinishedRun(t *testing.T) {
 	t.Parallel()
-	hr := newHarness(t)
-	ctx := context.Background()
-	sp, ok, err := metaops.AllowedPath(filepath.Join(hr.root, "Loose.m4b"), []string{hr.root})
-	if err != nil || !ok {
-		t.Fatal(sp, ok, err)
-	}
-	old, err := hr.db.CreateBook(ctx, store.NewBook{SourcePath: sp, WorkDir: filepath.Join(hr.work, "loose"), Title: "Loose"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := hr.db.SetBookState(ctx, old.ID, string(state.Done), "", "", ""); err != nil {
-		t.Fatal(err)
-	}
-	hr.srv.addKind(44, ChaptersKind, "Loose.m4b", `{}`)
-	stop := hr.runner(hr.h, hr.h.ChaptersJob())
-	defer stop()
-	hr.waitFor("refused", func() bool { s, _ := hr.srv.final(44); return s == link.StateFailed })
-	if _, final := hr.srv.final(44); final.Error == nil || *final.Error != string(errChaptersKeepsRun) {
-		t.Fatalf("error = %v", final.Error)
-	}
-	if got, err := hr.db.GetBook(ctx, old.ID); err != nil || got.State != string(state.Done) {
-		t.Fatalf("the finished run = %+v, %v", got, err)
+	const (
+		factPassLive    = "live"    // the fact pass's success, as it ran
+		factPassRewound = "rewound" // that success superseded by a rewind, the notes kept
+		factPassNotes   = "notes"   // the notes on disk, no record of the run
+	)
+	for _, tc := range []struct {
+		name, goal string
+		st         state.State
+		status     string
+		factPass   string
+	}{
+		{"whole run done", "", state.Done, "", ""},
+		{"whole run stopped aligning a read-along", "", state.ReadalongAligning, string(state.StatusFailed), ""},
+		{"read-along gone on from a whole run", state.GoalReadalong, state.Done, "", factPassLive},
+		{"read-along gone on from a whole run, rewound since", state.GoalReadalong, state.Done, "", factPassRewound},
+		{"read-along holding a whole run's notes", state.GoalReadalong, state.ReadalongAligning, string(state.StatusFailed), factPassNotes},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			hr := newHarness(t)
+			ctx := context.Background()
+			sp, ok, err := metaops.AllowedPath(filepath.Join(hr.root, "Loose.m4b"), []string{hr.root})
+			if err != nil || !ok {
+				t.Fatal(sp, ok, err)
+			}
+			old, err := hr.db.CreateBook(ctx, store.NewBook{SourcePath: sp, WorkDir: filepath.Join(hr.work, "loose"), Title: "Loose", Goal: tc.goal,
+				State: string(state.Done)}) // never queued: the engine would run it
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := hr.db.SetBookState(ctx, old.ID, string(tc.st), tc.status, "", ""); err != nil {
+				t.Fatal(err)
+			}
+			if tc.factPass == factPassLive || tc.factPass == factPassRewound {
+				id, err := hr.db.StartStageRun(ctx, old.ID, string(state.FactPass), 1)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := hr.db.FinishStageRun(ctx, id, true, nil); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.factPass == factPassRewound {
+				// What Reconcile does to the fact pass when it rewinds the book to an
+				// earlier stage whose sentinel went missing.
+				if err := hr.db.SupersedeStageSuccesses(ctx, old.ID, string(state.FactPass)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.factPass == factPassNotes {
+				mustWrite(t, filepath.Join(old.WorkDir, "facts", "knowledge-final.md"), "## ROSTER\n")
+			}
+			hr.srv.addKind(44, ChaptersKind, "Loose.m4b", `{}`)
+			stop := hr.runner(hr.h, hr.h.ChaptersJob())
+			defer stop()
+			hr.waitFor("refused", func() bool { s, _ := hr.srv.final(44); return s == link.StateFailed })
+			if _, final := hr.srv.final(44); final.Error == nil || *final.Error != string(errChaptersKeepsRun) {
+				t.Fatalf("error = %v", final.Error)
+			}
+			if got, err := hr.db.GetBook(ctx, old.ID); err != nil || got.State != string(tc.st) {
+				t.Fatalf("the finished run = %+v, %v", got, err)
+			}
+		})
 	}
 }
 
@@ -1306,5 +1349,81 @@ func TestChaptersFromEarlierParksOnce(t *testing.T) {
 	}
 	if _, err := hr.db.GetGenerateBook(context.Background(), 47); err == nil {
 		t.Fatal("the job mapped an engine book of its own")
+	}
+}
+
+// A chapters job never clears an ebook run (nor reads it: it holds no
+// transcription): it runs in the audio run beside it, the ebook run left as it was.
+func TestChaptersDetectRunsBesideAnEbookRun(t *testing.T) {
+	t.Parallel()
+	hr := newHarness(t)
+	hr.exec.windowed = true
+	ctx := context.Background()
+	sp, ok, err := metaops.AllowedPath(filepath.Join(hr.root, "Loose.m4b"), []string{hr.root})
+	if err != nil || !ok {
+		t.Fatal(sp, ok, err)
+	}
+	ebook, err := hr.db.CreateBook(ctx, store.NewBook{SourcePath: sp, WorkDir: filepath.Join(hr.work, "loose"), Title: "Loose",
+		Kind: string(state.KindEbook), EbookPath: filepath.Join(hr.root, "Loose.epub"), State: string(state.Done)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := hr.db.SetBookState(ctx, ebook.ID, string(state.FactPass), string(state.StatusFailed), "", ""); err != nil {
+		t.Fatal(err)
+	}
+	hr.srv.addKind(47, ChaptersKind, "Loose.m4b", `{}`)
+	stop := hr.runner(hr.h, hr.h.ChaptersJob())
+	defer stop()
+	hr.waitFor("done", func() bool { s, _ := hr.srv.final(47); return s == link.StateDone })
+	b := hr.engineBook(47)
+	if b.ID == ebook.ID || b.SourcePath != store.AudioRunKey(sp) || b.Goal != state.GoalChapters {
+		t.Fatalf("the chapters run = %+v", b)
+	}
+	got, err := hr.db.GetBook(ctx, ebook.ID)
+	if err != nil || got.Kind != string(state.KindEbook) || got.State != string(state.FactPass) || got.SourcePath != sp {
+		t.Fatalf("the ebook run = %+v, %v", got, err)
+	}
+	if _, err := os.Stat(filepath.Join(hr.root, AttachDir, "Loose.chapters.json")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A second chapters job writes the chapters the audio run beside an ebook run
+// already found, with no new run: the earlier-run lookup reads the audio run, never
+// the ebook run at the book's path.
+func TestChaptersFromEarlierReadsTheAudioRunBesideAnEbookRun(t *testing.T) {
+	t.Parallel()
+	hr := newHarness(t)
+	hr.exec.windowed = true
+	ctx := context.Background()
+	sp, ok, err := metaops.AllowedPath(filepath.Join(hr.root, "Loose.m4b"), []string{hr.root})
+	if err != nil || !ok {
+		t.Fatal(sp, ok, err)
+	}
+	ebook, err := hr.db.CreateBook(ctx, store.NewBook{SourcePath: sp, WorkDir: filepath.Join(hr.work, "loose"), Title: "Loose",
+		Kind: string(state.KindEbook), EbookPath: filepath.Join(hr.root, "Loose.epub"), State: string(state.Done)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := hr.db.SetBookState(ctx, ebook.ID, string(state.FactPass), string(state.StatusFailed), "", ""); err != nil {
+		t.Fatal(err)
+	}
+	hr.srv.addKind(47, ChaptersKind, "Loose.m4b", `{}`)
+	stop := hr.runner(hr.h, hr.h.ChaptersJob())
+	hr.waitFor("the first job done", func() bool { s, _ := hr.srv.final(47); return s == link.StateDone })
+	stop()
+	beside := hr.engineBook(47)
+	hr.srv.addKind(48, ChaptersKind, "Loose.m4b", `{}`)
+	stop2 := hr.runner(hr.h, hr.h.ChaptersJob())
+	defer stop2()
+	hr.waitFor("the second job done", func() bool { s, _ := hr.srv.final(48); return s == link.StateDone })
+	if _, err := hr.db.GetGenerateBook(ctx, 48); err == nil {
+		t.Fatal("the second job made a run of its own")
+	}
+	if got, err := hr.db.GetBook(ctx, beside.ID); err != nil || got.SourcePath != store.AudioRunKey(sp) {
+		t.Fatalf("the audio run = %+v, %v", got, err)
+	}
+	if got, err := hr.db.GetBook(ctx, ebook.ID); err != nil || got.Kind != string(state.KindEbook) {
+		t.Fatalf("the ebook run = %+v, %v", got, err)
 	}
 }

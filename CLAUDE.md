@@ -116,6 +116,8 @@ internal/
               sidecars.describe (Phase 1c): a description from a finished run's notes;
               chapters.detect (Phase 1d): a chapterless book's chapters, no agent;
               sidecars.contribute (Phase 2b): share kept results with the community
+              readalong.align (Phase 3c-1): the ebook lined up with the narration,
+              no agent, as .audiosilo/readalong.json
   agentproto/ the staging protocol shared with the agent container (a leaf)
   agentbox/   the Bridge's side: an agent.Runner over the staging dir
   agentrun/   the agent container's side: `agent-runner` (claim, run, harvestable out/)
@@ -131,6 +133,8 @@ internal/
   pipeline/ contrib/ state/ eta/ scheduler/ supervisor/ metaops/ events/ pricing/ fsutil/
   execfile/ (fork-safe executable writes, a leaf; the tests' fake tools)
   chapterdetect/ (Phase 1d: chapters from the narration; pure, imported by pipeline)
+  epubcfi/ readalong/ (Phase 3c-1: foliate's CFIs in Go; the read-along aligner, map
+                       writer and heal/snap planning; pure, imported by pipeline)
 web/          the page: Vite + React 19 + TS + Tailwind v4; pure logic in src/lib
 docker/       entrypoint.sh (own /bridge-data, umask 022, drop to PUID:PGID)
 Dockerfile    slim | cuda | agent | full; compose.example.yaml: server, bridge, agent
@@ -170,8 +174,9 @@ in PACKAGES.md.
   targeted rescan after, deletes to `.audiosilo-trash/`. A library that isn't mapped
   and writable refuses a new write job (a resumed one parks and waits). Today the
   book writer is `generate` (its three jobs): `characters.json`, `recaps.json`,
-  `description.json` (Phase 1c), `chapters.json` (Phase 1d) and `bridge.json` in the
-  book's `.audiosilo/` (a single-file book's prefixed `<stem>.`). Podcast writers
+  `description.json` (Phase 1c), `chapters.json` (Phase 1d), `readalong.json` (Phase
+  3c-1) and `bridge.json` in the book's `.audiosilo/` (a single-file book's prefixed
+  `<stem>.`). Podcast writers
   require a podcast-kind library and its checked marker mapping (a job claimed
   before the check waits for it); they write only the root marker, show folders,
   feed.json and sniffed JPEG/PNG artwork. Book writers refuse podcast libraries.
@@ -338,6 +343,19 @@ from a server verification outage; transient errors preserve existing markers.
 download pool (1), with `podcast.fetch` the first participant. Older servers keep
 download capacity 2 and receive ordinary claims only. Claims cancel and join when
 eligibility changes; recovered jobs renew leases while waiting for bounded admission.
+
+**Phase 3c-1 (read-along, Bridge side):** `readalong.align` lines the book's ebook
+(the server's `book.ebook`) up with its narration, sentence by sentence, with no
+agent: engine goal `readalong` (inspect windows an unusable marker table; one
+mechanical loop-repair round, `qa.MechanicalPlan`), then `readalong_aligning` (ASR
+lane: the chapter FLACs a purge took cut again, align, heal the gaps by NoContext
+re-transcription, align again, snap the starts to speech onsets) and the map
+(`audiosilo-readalong/v1`, CFIs that match foliate's) written as
+`.audiosilo/readalong.json` unless under 50% of the text lined up. An earlier engine
+run of the same audio is reused by the reuse table (never a whole run cleared), and
+a generate job continues a done read-along run at qa_sweep. An ebook run is never
+continued, converted nor cleared by a read-along or chapters job: they run in the
+audio run beside it (`store.AudioRunKey`), which describe never reads.
 
 See BRIDGE-PLAN.md's Status table for what is next.
 

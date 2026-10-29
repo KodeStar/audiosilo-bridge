@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -663,6 +664,26 @@ func TestRunAndWriteReport(t *testing.T) {
 	}
 }
 
+// CrossSegment (the read-along's heal windows) is Run's cross-segment detector alone.
+func TestCrossSegmentMatchesRun(t *testing.T) {
+	work := t.TempDir()
+	jsonDir := filepath.Join(work, transcript.JSONDir)
+	writeNormalized(t, jsonDir, transcript.Transcript{Chapter: 1, Schema: transcript.Schema,
+		Segments: []transcript.Segment{seg(0, 10, 20, " "+distinctTokens(30)+" "+strings.Repeat("he ran to the old house ", 5))}})
+	in := Input{WorkDir: work, Durations: map[int]float64{1: 1000}}
+	rep, err := Run(in)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	hits, err := CrossSegment(in)
+	if err != nil || len(hits) != 1 || !reflect.DeepEqual(hits, rep.CrossSegment) {
+		t.Errorf("CrossSegment = %+v, %v; want Run's %+v", hits, err, rep.CrossSegment)
+	}
+	if _, err := CrossSegment(Input{WorkDir: t.TempDir()}); err == nil {
+		t.Error("CrossSegment should error when transcripts-json/ is absent")
+	}
+}
+
 func TestRunMissingJSONDir(t *testing.T) {
 	if _, err := Run(Input{WorkDir: t.TempDir()}); err == nil {
 		t.Error("Run should error when transcripts-json/ is absent")
@@ -707,4 +728,25 @@ func TestRunLoudErrors(t *testing.T) {
 			t.Errorf("a wrong-shape JSON file should be a schema error, got %v", err)
 		}
 	})
+}
+
+// LoopWords counts the words a 6-gram repeated 5 or more times covers: a run of
+// one word, a looped phrase, none in prose, and a phrase said four times only.
+func TestLoopWords(t *testing.T) {
+	prose := "Buck did not read the newspapers, or he would have known that trouble was brewing."
+	for _, c := range []struct {
+		name string
+		text string
+		want int
+	}{
+		{"prose", prose, 0},
+		{"a one-word loop", prose + strings.Repeat(" buck,", 12), 12},
+		{"a phrase looped", prose + strings.Repeat(" and the dogs ran on", 6), 30},
+		{"a phrase said four times", prose + strings.Repeat(" and the dogs ran on", 4), 0},
+		{"empty", "", 0},
+	} {
+		if got := LoopWords(c.text); got != c.want {
+			t.Errorf("%s: %d, want %d", c.name, got, c.want)
+		}
+	}
 }

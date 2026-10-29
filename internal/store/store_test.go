@@ -234,6 +234,14 @@ func TestStageRunsAndReconcileHelpers(t *testing.T) {
 	if ok, _ := db.CountStageSuccesses(ctx, b.ID, "asr"); ok != 0 {
 		t.Fatalf("CountStageSuccesses after supersede = %d, want 0", ok)
 	}
+	// A history reader still sees the superseded success; a stage that never
+	// succeeded is none.
+	if _, err := db.LatestOkStageRun(ctx, b.ID, "asr"); err != nil {
+		t.Fatalf("LatestOkStageRun after supersede: %v", err)
+	}
+	if _, err := db.LatestOkStageRun(ctx, b.ID, "fact_pass"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("LatestOkStageRun(fact_pass) = %v, want ErrNotFound", err)
+	}
 	// ... but the row (and its cost) is PRESERVED - a MONEY reader still sees it, marked
 	// superseded - so a Retry never erases recorded spend.
 	runs, _ := db.ListStageRuns(ctx, b.ID)

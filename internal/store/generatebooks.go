@@ -124,13 +124,16 @@ func (db *DB) OpenGenerateJobsForBook(ctx context.Context, bookID, exceptJob int
 // LatestGenerateBookAt returns the engine book of the newest sidecars.generate
 // job for the book at (libraryID, relPath) whose book still exists (the path the
 // job last followed it to), or ErrNotFound. sidecars.describe finds the run whose
-// notes it reads with it when the book's source path no longer leads there.
+// notes it reads with it when the book's source path no longer leads there, so
+// the audio run beside an ebook run (AudioRunKey: it holds no notes) is passed
+// over for the ebook run's own job.
 func (db *DB) LatestGenerateBookAt(ctx context.Context, libraryID int64, relPath string) (int64, error) {
 	var id int64
 	err := db.sql.QueryRowContext(ctx,
-		`SELECT book_id FROM generate_books
-		  WHERE library_id = ? AND rel_path = ? AND book_id IS NOT NULL
-		  ORDER BY created_at DESC, server_job_id DESC LIMIT 1`, libraryID, relPath).Scan(&id)
+		`SELECT g.book_id FROM generate_books g JOIN books b ON b.id = g.book_id
+		  WHERE g.library_id = ? AND g.rel_path = ? AND substr(b.source_path, 1, ?) != ?
+		  ORDER BY g.created_at DESC, g.server_job_id DESC LIMIT 1`,
+		libraryID, relPath, len(audioRunPrefix), audioRunPrefix).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, ErrNotFound
 	}
@@ -171,6 +174,15 @@ func (db *DB) UnsweptGenerateBooks(ctx context.Context, cutoff time.Time) ([]Swe
 		out = append(out, b)
 	}
 	return out, rows.Err()
+}
+
+// GenerateBookSwept reports whether the retention swept engine book bookID's
+// transcripts (any job's mapping to it records the sweep).
+func (db *DB) GenerateBookSwept(ctx context.Context, bookID int64) (bool, error) {
+	var n int
+	err := db.sql.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM generate_books WHERE book_id = ? AND swept_at != ''`, bookID).Scan(&n)
+	return n > 0, err
 }
 
 // MarkGenerateBookSwept records that an engine book's transcripts were deleted,

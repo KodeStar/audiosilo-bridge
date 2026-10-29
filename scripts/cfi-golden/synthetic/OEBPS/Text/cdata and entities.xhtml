@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head><title>CDATA and entities</title><style>p { margin: 0 }</style></head>
+<body>
+<h1 id="top">Fish &amp; Chips &lt;tonight&gt;</h1>
+<p>Before the data <![CDATA[inside <raw> & unescaped]]> and after it. Second sentence here.</p>
+<p>Numeric&#160;space, an em&#x2014;dash, a quote &#8220;like this&#8221; and &apos;that&apos;.</p>
+<p>One<!-- a comment between -->two<?some-pi with data?>three, glued by what was dropped.</p>
+<p><![CDATA[Only CDATA in this one.]]></p>
+<script type="text/javascript">var x = "not text";</script>
+<p>Last line of the section.</p>
+</body>
+</html>

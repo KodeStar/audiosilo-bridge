@@ -104,14 +104,18 @@ func QueueETA(books []Book, rates map[string]float64, caps LaneCaps) float64 {
 			b.MaxAgentsPerBook = min(b.MaxAgentsPerBook, shared)
 		}
 		segs := remainingSegments(b, rates)
+		series := strings.TrimSpace(b.Series)
+		if state.SeriesLockExempt(b.Goal, b.State) {
+			series = "" // a read-along never holds its series' lock, as in the scheduler
+		}
 		if len(segs) == 0 {
-			if b.Status != state.StatusNone && strings.TrimSpace(b.Series) != "" && state.HoldsSeriesLock(b.State, b.Status) {
-				sim = append(sim, &simBook{id: b.ID, series: strings.TrimSpace(b.Series), pos: state.ParseSeriesPos(b.SeriesPos), held: true})
+			if b.Status != state.StatusNone && series != "" && state.HoldsSeriesLock(b.State, b.Status) {
+				sim = append(sim, &simBook{id: b.ID, series: series, pos: state.ParseSeriesPos(b.SeriesPos), held: true})
 			}
 			continue
 		}
 		sim = append(sim, &simBook{
-			id: b.ID, series: strings.TrimSpace(b.Series), pos: state.ParseSeriesPos(b.SeriesPos),
+			id: b.ID, series: series, pos: state.ParseSeriesPos(b.SeriesPos),
 			seriesRank: seriesRanks[b.ID], segs: segs,
 		})
 	}

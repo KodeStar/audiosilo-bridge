@@ -116,8 +116,12 @@ var stageUnits = map[state.State]stageUnit{
 	state.QASweep:          {unitBook, 10},
 	state.QAAdjudicating:   {unitBook, 300},
 	state.Retranscribing:   {unitChapter, 60},
-	state.SpellingResearch: {unitBook, 600},
-	state.Correcting:       {unitBook, 15},
+	// ReadalongAligning (Phase 3c): the spike aligned a 10 h book in about a minute
+	// (the snap's decode included), plus the heal's re-ASR of the unaligned
+	// stretches, a few minutes of audio on a typical book.
+	state.ReadalongAligning: {unitBook, 180},
+	state.SpellingResearch:  {unitBook, 600},
+	state.Correcting:        {unitBook, 15},
 	// Extracting is a zip read plus HTML-to-text over a whole book: mechanical and
 	// fast, but not free on a 600-page novel. ChapterMapping mirrors
 	// MarkersNormalizing, the agent stage it is modelled on.

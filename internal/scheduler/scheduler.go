@@ -651,7 +651,7 @@ func queueGroup(kind state.Kind, st state.State) string {
 	if kind == state.KindEbook {
 		return queueGroupProcessing
 	}
-	if st == state.Retranscribing || state.Order(st) <= state.Order(state.ASR) {
+	if state.LaneOf(st) == state.LaneASR || state.Order(st) <= state.Order(state.ASR) {
 		return queueGroupASR
 	}
 	return queueGroupProcessing
@@ -1185,8 +1185,8 @@ func lockHolders(books []store.Book) map[int64]bool {
 	holders := map[int64]bool{}
 	best := seriesLockOwners(books)
 	for _, b := range books {
-		if !state.HoldsSeriesLock(state.State(b.State), state.Status(b.Status)) {
-			continue // finished for lock purposes (ready or beyond)
+		if !state.HoldsSeriesLock(state.State(b.State), state.Status(b.Status)) || state.SeriesLockExempt(b.Goal, state.State(b.State)) {
+			continue // finished for lock purposes (ready or beyond), or a read-along
 		}
 		if strings.TrimSpace(b.Series) == "" {
 			holders[b.ID] = true
@@ -1235,7 +1235,8 @@ func SeriesBlockers(books []store.Book) map[int64]SeriesBlocker {
 func seriesLockOwners(books []store.Book) map[string]store.Book {
 	best := map[string]store.Book{}
 	for _, b := range books {
-		if !state.HoldsSeriesLock(state.State(b.State), state.Status(b.Status)) || strings.TrimSpace(b.Series) == "" {
+		if !state.HoldsSeriesLock(state.State(b.State), state.Status(b.Status)) || strings.TrimSpace(b.Series) == "" ||
+			state.SeriesLockExempt(b.Goal, state.State(b.State)) {
 			continue
 		}
 		cur, ok := best[b.Series]

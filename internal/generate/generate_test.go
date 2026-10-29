@@ -170,6 +170,10 @@ type hooks struct {
 	// inspectErr fails inspect with that sentence.
 	windowed   bool
 	inspectErr error
+	// alignCoverage is the text coverage readalong_aligning's map states (0:
+	// 0.95); afterAlign runs once it wrote the map.
+	alignCoverage float64
+	afterAlign    func(b store.Book)
 }
 
 func (e *hooks) Execute(ctx context.Context, b store.Book, st state.State, r scheduler.StageReport) (scheduler.StageResult, error) {
@@ -208,7 +212,7 @@ func (e *hooks) Execute(ctx context.Context, b store.Book, st state.State, r sch
 	case st == state.Inspecting:
 		// probe.json as inspect leaves it for a single file: its size, written
 		// after the file was (the detected list's continue check reads both).
-		if info, err := os.Stat(b.SourcePath); err == nil && info.Mode().IsRegular() && os.MkdirAll(b.WorkDir, 0o750) == nil {
+		if info, err := os.Stat(b.AudioSource()); err == nil && info.Mode().IsRegular() && os.MkdirAll(b.WorkDir, 0o750) == nil {
 			_ = os.WriteFile(filepath.Join(b.WorkDir, audio.ProbeName),
 				[]byte(fmt.Sprintf(`{"format":{"duration":"30","size":"%d"}}`, info.Size())), 0o600)
 		}
@@ -217,6 +221,14 @@ func (e *hooks) Execute(ctx context.Context, b store.Book, st state.State, r sch
 		return res, scheduler.WriteSentinel(b.WorkDir, string(st), res)
 	case st == state.ChapterDetecting:
 		detectChapters(e.t, b)
+	case st == state.ReadalongAligning:
+		e.mu.Lock()
+		cov, after := e.alignCoverage, e.afterAlign
+		e.mu.Unlock()
+		writeAlignedMap(e.t, b, cov)
+		if after != nil {
+			after(b)
+		}
 	}
 	switch st {
 	case state.FactPass:

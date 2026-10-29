@@ -2181,6 +2181,13 @@ func (e *Executor) retranscribe(ctx context.Context, book store.Book, r schedule
 		// learned per-unit rate with ~ms no-ops.
 		RateSample: rateSample(done-completed-skippedNew-unlocatableNew, loopSeconds),
 	}
+	// A read-along book's one mechanical round is done (decision 4): its next sweep
+	// goes on to readalong_aligning, clean or not.
+	if book.Goal == state.GoalReadalong {
+		if err := markReadalongRepaired(book.WorkDir); err != nil {
+			return scheduler.StageResult{}, fmt.Errorf("retranscribing: %w", err)
+		}
+	}
 	if err := scheduler.WriteSentinel(book.WorkDir, string(state.Retranscribing), result); err != nil {
 		return scheduler.StageResult{}, err
 	}
@@ -2281,15 +2288,20 @@ func ensureRetranscribeDecodeParams(workDir, tag string) error {
 }
 
 // retranscribeChapter re-transcribes one chapter FRESH into retranscribe/, then uses
-// repair.AdoptFresh to decide (never blindly) whether the fresh run replaces the
-// original. On adopt it replaces the immutable raw (unfreeze -> write -> re-freeze
+// repair.AdoptFresh (a read-along book: repair.AdoptFreshReadalong, which weighs the
+// loops rather than a looped original's extra words) to decide (never blindly)
+// whether the fresh run replaces the original. On adopt it replaces the immutable raw (unfreeze -> write -> re-freeze
 // 0444), re-derives the json/text layers, and drops the chapter's stale
 // repaired/corrected files (correcting re-runs fully). On keep it leaves everything.
 // It returns whether the fresh run was adopted.
 func (e *Executor) retranscribeChapter(ctx context.Context, r scheduler.StageReport, setup ASRSetup, book store.Book, durationSec float64, chapter int) (bool, error) {
 	flac := filepath.Join(book.WorkDir, audio.ChaptersDir, audio.ChapterFileName(chapter))
 	if !fsutil.IsFile(flac) {
-		return false, fmt.Errorf("retranscribing: chapter %d FLAC missing (%s); split must run first", chapter, flac)
+		// A purge took it (a read-along continues a finished run from its
+		// transcripts, Phase 3c): cut it again from the source.
+		if err := e.resplitChapter(ctx, r, book, chapter); err != nil {
+			return false, err
+		}
 	}
 	freshDir := filepath.Join(book.WorkDir, repair.RetranscribeDir)
 	if err := os.MkdirAll(freshDir, 0o750); err != nil {
@@ -2300,8 +2312,9 @@ func (e *Executor) retranscribeChapter(ctx context.Context, r scheduler.StageRep
 	// rather than re-running the expensive full-chapter ASR. The completeness test is
 	// the same one asrStage uses (transcript.Complete via rawComplete). The adopt
 	// decision below is itself idempotent - after an ADOPT the fresh and main raw hold
-	// identical content (AdoptFresh then keeps, a no-op re-derive), after a KEEP nothing
-	// changed - so re-deciding a reused raw never corrupts a chapter.
+	// identical content (AdoptFresh then keeps; AdoptFreshReadalong adopts again, a
+	// no-op re-derive), after a KEEP nothing changed - so re-deciding a reused raw
+	// never corrupts a chapter.
 	if !rawComplete(freshRawPath) {
 		// Prompt-free (no seeded initial prompt: a guess makes a wrong spelling recur),
 		// but NoContext-on: unlike asrStage, a repair re-transcription must vary the
@@ -2330,15 +2343,27 @@ func (e *Executor) retranscribeChapter(ctx context.Context, r scheduler.StageRep
 		return false, fmt.Errorf("retranscribing: normalize fresh chapter %d: %w", chapter, err)
 	}
 
-	origWords := 0
-	if origT, oerr := transcript.ReadNormalized(filepath.Join(book.WorkDir, transcript.JSONDir), chapter); oerr == nil {
-		origWords = len(strings.Fields(transcript.PlainText(origT)))
+	// A read-along keeps no loop for the word count's sake (Phase 3c-1); only its
+	// rule weighs the loop words.
+	readalongRule := book.Goal == state.GoalReadalong
+	stats := func(t transcript.Transcript) repair.AdoptStats {
+		text := transcript.PlainText(t)
+		s := repair.AdoptStats{Words: len(strings.Fields(text)), DurationSec: durationSec}
+		if readalongRule {
+			s.LoopWords = qa.LoopWords(text)
+		}
+		return s
 	}
-	freshWords := len(strings.Fields(transcript.PlainText(freshT)))
-	decision := repair.AdoptFresh(
-		repair.AdoptStats{Words: origWords, DurationSec: durationSec},
-		repair.AdoptStats{Words: freshWords, DurationSec: durationSec},
-	)
+	orig := repair.AdoptStats{DurationSec: durationSec}
+	if origT, oerr := transcript.ReadNormalized(filepath.Join(book.WorkDir, transcript.JSONDir), chapter); oerr == nil {
+		orig = stats(origT)
+	}
+	fresh := stats(freshT)
+	adopt := repair.AdoptFresh
+	if readalongRule {
+		adopt = repair.AdoptFreshReadalong
+	}
+	decision := adopt(orig, fresh)
 	if !decision.Adopt {
 		return false, nil
 	}
@@ -2360,6 +2385,35 @@ func (e *Executor) retranscribeChapter(ctx context.Context, r scheduler.StageRep
 	}
 	removeChapterDerived(book.WorkDir, chapter)
 	return true, nil
+}
+
+// resplitChapter cuts one chapter's FLAC again from the source (one a purge took).
+func (e *Executor) resplitChapter(ctx context.Context, r scheduler.StageReport, book store.Book, chapter int) error {
+	ffmpeg, _ := e.ensureTools()
+	if ffmpeg == "" {
+		return scheduler.ParkWithCode(state.ParkMediaToolsUnavailable, MediaToolsUnavailableMsg)
+	}
+	m, err := audio.ReadManifest(book.WorkDir)
+	if err != nil {
+		return fmt.Errorf("retranscribing: read manifest: %w", err)
+	}
+	one := m
+	one.Chapters = nil
+	for _, c := range m.Chapters {
+		if c.Chapter == chapter {
+			one.Chapters = append(one.Chapters, c)
+		}
+	}
+	if len(one.Chapters) == 0 {
+		return fmt.Errorf("retranscribing: chapter %d isn't in the manifest", chapter)
+	}
+	if _, err := splitWithRetries(ctx, one, book.WorkDir, ffmpeg, r, nil); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return fmt.Errorf("retranscribing: cut chapter %d again: %w", chapter, err)
+	}
+	return nil
 }
 
 // clipChapter runs one chapter's mechanical clip repair - the shared spine of the tail

@@ -19,6 +19,12 @@
 // re-maps the window transcripts onto them. A book whose goal is chapters (the
 // chapters.detect job, GoalChapters) stops there, done.
 //
+// A book whose goal is readalong (the readalong.align job, GoalReadalong, Phase
+// 3c) runs no agent stage at all:
+//
+//	queued -> inspecting -> splitting -> asr -> sanitizing -> qa_sweep
+//	-> [retranscribing -> qa_sweep](one round) -> readalong_aligning -> done
+//
 // Ebook mirrors EXTRACTION.md, whose whole point is that exact text needs none of
 // the machinery that reconstructs it from audio:
 //
@@ -84,18 +90,22 @@ const (
 	QASweep            State = "qa_sweep"
 	QAAdjudicating     State = "qa_adjudicating"
 	Retranscribing     State = "retranscribing"
-	SpellingResearch   State = "spelling_research"
-	Correcting         State = "correcting"
-	Extracting         State = "extracting"
-	ChapterMapping     State = "chapter_mapping"
-	FactPass           State = "fact_pass"
-	Synthesizing       State = "synthesizing"
-	Validating         State = "validating"
-	Auditing           State = "auditing"
-	Fixing             State = "fixing"
-	Ready              State = "ready"
-	Contributing       State = "contributing"
-	Done               State = "done"
+	// ReadalongAligning (Phase 3c, goal readalong only) lines the ebook's text up
+	// with the narration's words: a gap heal (NoContext re-ASR of the unaligned
+	// stretches, so it holds the ASR lane), the onset snap, the map.
+	ReadalongAligning State = "readalong_aligning"
+	SpellingResearch  State = "spelling_research"
+	Correcting        State = "correcting"
+	Extracting        State = "extracting"
+	ChapterMapping    State = "chapter_mapping"
+	FactPass          State = "fact_pass"
+	Synthesizing      State = "synthesizing"
+	Validating        State = "validating"
+	Auditing          State = "auditing"
+	Fixing            State = "fixing"
+	Ready             State = "ready"
+	Contributing      State = "contributing"
+	Done              State = "done"
 )
 
 // Describing names the stage runs of the Bridge's description step (Phase 1c).
@@ -114,6 +124,13 @@ func RoutesModel(s State) bool { return IsAgent(s) || s == Describing }
 // empty goal is the whole pipeline. NextState (Outcome.Goal) and PathNext route
 // by it; the store's SQL names it too.
 const GoalChapters = "chapters"
+
+// GoalReadalong is a book's goal when it is run for a read-along map only (the
+// readalong.align job, Phase 3c): no agent stage. Inspect gives a marker table that
+// isn't usable a windows manifest instead of markers_normalizing, asr goes to
+// sanitizing even when windowed, qa_sweep's loop repair is a mechanical
+// retranscribe round (one only), then readalong_aligning and done.
+const GoalReadalong = "readalong"
 
 // Lane is the executor pool a stage runs in. The three lanes have different
 // resource profiles (GPU-bound ASR, rate-limited agents, cheap mechanical work)
@@ -199,21 +216,29 @@ var table = map[State]Def{
 	// stats it, so it reads the source.
 	ChapterDetecting: {Lane: LaneMechanical, Next: []State{Done, Sanitizing}, SourceIO: true, order: 5},
 	Sanitizing:       {Lane: LaneMechanical, Next: []State{QASweep}, order: 6},
-	QASweep:          {Lane: LaneMechanical, Next: []State{QAAdjudicating, SpellingResearch}, order: 7},
-	QAAdjudicating:   {Lane: LaneAgent, Next: []State{Retranscribing, SpellingResearch}, Agent: true, order: 8},
-	Retranscribing:   {Lane: LaneASR, Next: []State{QASweep}, order: 9},
-	SpellingResearch: {Lane: LaneAgent, Next: []State{Correcting}, Agent: true, order: 10},
-	Correcting:       {Lane: LaneMechanical, Next: []State{FactPass}, order: 11},
-	Extracting:       {Lane: LaneMechanical, Next: []State{ChapterMapping, FactPass}, SourceIO: true, order: 12},
-	ChapterMapping:   {Lane: LaneAgent, Next: []State{FactPass}, Agent: true, order: 13},
-	FactPass:         {Lane: LaneAgent, Next: []State{Synthesizing}, Agent: true, order: 14},
-	Synthesizing:     {Lane: LaneAgent, Next: []State{Validating}, Agent: true, order: 15},
-	Validating:       {Lane: LaneMechanical, Next: []State{Auditing}, order: 16},
-	Auditing:         {Lane: LaneAgent, Next: []State{Fixing, Ready}, Agent: true, order: 17},
-	Fixing:           {Lane: LaneAgent, Next: []State{Validating}, Agent: true, order: 18},
-	Ready:            {Lane: LaneNone, Next: []State{Contributing}, order: 19},
-	Contributing:     {Lane: LaneMechanical, Next: []State{Done}, order: 20},
-	Done:             {Lane: LaneNone, Next: nil, Terminal: true, order: 21},
+	QASweep:          {Lane: LaneMechanical, Next: []State{QAAdjudicating, Retranscribing, ReadalongAligning, SpellingResearch}, order: 7},
+	QAAdjudicating:   {Lane: LaneAgent, Next: []State{Retranscribing, ReadalongAligning, SpellingResearch}, Agent: true, order: 8},
+	// retranscribing re-splits, for a goal readalong book, a chapter FLAC a purge
+	// took before it re-runs it (a whole run's kept transcript continued at
+	// sanitizing). Rare, one chapter at a time, so not a SourceIO stage.
+	Retranscribing: {Lane: LaneASR, Next: []State{QASweep}, order: 9},
+	// readalong_aligning re-splits the chapter FLACs a purge took (the heal and the
+	// snap need 16 kHz audio) and its heal re-ASRs, so it holds the ASR lane, whose
+	// cap of one already keeps it to one source read (SourceIO only gates the
+	// mechanical lane).
+	ReadalongAligning: {Lane: LaneASR, Next: []State{Done}, order: 10},
+	SpellingResearch:  {Lane: LaneAgent, Next: []State{Correcting}, Agent: true, order: 11},
+	Correcting:        {Lane: LaneMechanical, Next: []State{FactPass}, order: 12},
+	Extracting:        {Lane: LaneMechanical, Next: []State{ChapterMapping, FactPass}, SourceIO: true, order: 13},
+	ChapterMapping:    {Lane: LaneAgent, Next: []State{FactPass}, Agent: true, order: 14},
+	FactPass:          {Lane: LaneAgent, Next: []State{Synthesizing}, Agent: true, order: 15},
+	Synthesizing:      {Lane: LaneAgent, Next: []State{Validating}, Agent: true, order: 16},
+	Validating:        {Lane: LaneMechanical, Next: []State{Auditing}, order: 17},
+	Auditing:          {Lane: LaneAgent, Next: []State{Fixing, Ready}, Agent: true, order: 18},
+	Fixing:            {Lane: LaneAgent, Next: []State{Validating}, Agent: true, order: 19},
+	Ready:             {Lane: LaneNone, Next: []State{Contributing}, order: 20},
+	Contributing:      {Lane: LaneMechanical, Next: []State{Done}, order: 21},
+	Done:              {Lane: LaneNone, Next: nil, Terminal: true, order: 22},
 }
 
 // All returns every state in canonical forward order.
@@ -286,9 +311,25 @@ func MainlineNext(kind Kind, s State) State {
 
 // PathNext is the stage after s on the remaining path of a book of kind with goal
 // (books.goal): the mainline (MainlineNext), except that a chapters-only book
-// (GoalChapters) goes from asr to chapter_detecting and is done after it, as
-// NextState routes it. The ETA engine follows it.
+// (GoalChapters) goes from asr to chapter_detecting and is done after it, and a
+// read-along book (GoalReadalong) runs no agent stage (inspecting to splitting,
+// asr to sanitizing, qa_sweep to readalong_aligning, then done), as NextState
+// routes them. The ETA engine follows it.
 func PathNext(kind Kind, goal string, s State) State {
+	if goal == GoalReadalong {
+		switch s {
+		case Queued:
+			return Inspecting
+		case Inspecting:
+			return Splitting
+		case ASR:
+			return Sanitizing
+		case QASweep, QAAdjudicating:
+			return ReadalongAligning
+		case ReadalongAligning:
+			return Done
+		}
+	}
 	if goal == GoalChapters {
 		switch s {
 		case ASR:
@@ -309,6 +350,15 @@ func PathNext(kind Kind, goal string, s State) State {
 // series does. A parked or paused book still holds it: it resumes. The scheduler
 // and the ETA simulation both pick each series' lock holder with it.
 func HoldsSeriesLock(s State, st Status) bool { return st != StatusFailed && Order(s) < Order(Ready) }
+
+// SeriesLockExempt reports whether a book of goal at s stays out of its series'
+// lock whatever its state: a read-along run (goal readalong, or a finished whole
+// run aligning again at readalong_aligning, Phase 3c) authors nothing a later
+// volume waits for, yet keeps the series a sequel's carryover finds it by. The
+// scheduler and the ETA simulation both apply it beside HoldsSeriesLock.
+func SeriesLockExempt(goal string, s State) bool {
+	return goal == GoalReadalong || s == ReadalongAligning
+}
 
 // RequiresSeriesOrder reports whether an agent stage consumes series carryover or
 // authors/validates spoiler-sensitive sidecars. Marker normalization and QA
@@ -343,7 +393,8 @@ type Outcome struct {
 	MarkersContiguous bool
 	// QAClean (qa_sweep): no degeneration found, so adjudication is skipped.
 	QAClean bool
-	// RetranscribeNeeded (qa_adjudicating): a flagged chapter must be redone.
+	// RetranscribeNeeded (qa_adjudicating): a flagged chapter must be redone. For a
+	// goal readalong book (qa_sweep): the mechanical loop-repair round runs.
 	RetranscribeNeeded bool
 	// AuditPassed (auditing): the adversarial audit passed; go to ready.
 	AuditPassed bool
@@ -358,8 +409,10 @@ type Outcome struct {
 	// Windowed (asr): the transcripts are duration windows of a book with no
 	// chapter markers, so chapter_detecting finds the chapters before sanitizing.
 	Windowed bool
-	// Goal (chapter_detecting) is the book's goal (books.goal): GoalChapters is done
-	// once the chapters are found. Filled from the book, not by a stage.
+	// Goal is the book's goal (books.goal): GoalChapters is done once the chapters
+	// are found (chapter_detecting); GoalReadalong routes inspecting, asr, qa_sweep
+	// and qa_adjudicating around the agent stages. Filled from the book, not by a
+	// stage.
 	Goal string
 }
 
@@ -396,7 +449,7 @@ func NextState(kind Kind, cur State, o Outcome) (State, Status, error) {
 			next = ChapterMapping
 		}
 	case ASR:
-		if o.Windowed {
+		if o.Windowed && o.Goal != GoalReadalong {
 			next = ChapterDetecting
 		} else {
 			next = Sanitizing
@@ -408,21 +461,35 @@ func NextState(kind Kind, cur State, o Outcome) (State, Status, error) {
 			next = Sanitizing
 		}
 	case Inspecting:
-		if o.MarkersContiguous {
+		if o.MarkersContiguous || o.Goal == GoalReadalong {
 			next = Splitting // skip markers_normalizing
 		} else {
 			next = MarkersNormalizing
 		}
 	case QASweep:
+		if o.Goal == GoalReadalong {
+			// The mechanical loop repair: one retranscribe round, then align.
+			if o.RetranscribeNeeded {
+				next = Retranscribing
+			} else {
+				next = ReadalongAligning
+			}
+			break
+		}
 		if o.QAClean {
 			next = SpellingResearch // skip adjudication
 		} else {
 			next = QAAdjudicating
 		}
 	case QAAdjudicating:
-		if o.RetranscribeNeeded {
+		switch {
+		case o.RetranscribeNeeded:
 			next = Retranscribing
-		} else {
+		case o.Goal == GoalReadalong:
+			// Never routed here by a goal readalong book; one continued from an
+			// earlier book that stopped here aligns rather than adjudicates.
+			next = ReadalongAligning
+		default:
 			next = SpellingResearch
 		}
 	case Auditing:

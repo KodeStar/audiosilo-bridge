@@ -4,6 +4,7 @@ import type {
   DescribeResult,
   GenerateResult,
   Park,
+  ReadalongResult,
   Progress,
   ServerJob,
 } from '@/api/types';
@@ -16,6 +17,9 @@ export const DESCRIBE_KIND = 'sidecars.describe';
 // The chapters-only job (Phase 1d): speech recognition and chapter detection for a
 // book with no chapter markers; the same progress, without a spend.
 export const CHAPTERS_KIND = 'chapters.detect';
+// The read-along job (Phase 3c): the ebook lined up with the narration, no agent;
+// the same progress, without a spend.
+export const READALONG_KIND = 'readalong.align';
 
 export function isGenerate(job: ServerJob): boolean {
   return job.kind === GENERATE_KIND;
@@ -29,9 +33,13 @@ export function isChapters(job: ServerJob): boolean {
   return job.kind === CHAPTERS_KIND;
 }
 
+export function isReadalong(job: ServerJob): boolean {
+  return job.kind === READALONG_KIND;
+}
+
 // isSidecars: a job that follows the engine (its progress and parks look alike).
 export function isSidecars(job: ServerJob): boolean {
-  return isGenerate(job) || isDescribe(job) || isChapters(job);
+  return isGenerate(job) || isDescribe(job) || isChapters(job) || isReadalong(job);
 }
 
 // The console's names for the same kinds (its bridge.kind.* strings): one set of
@@ -40,6 +48,7 @@ const KIND_LABELS: Record<string, string> = {
   [GENERATE_KIND]: 'Characters and recaps',
   [DESCRIBE_KIND]: 'Description',
   [CHAPTERS_KIND]: 'Chapters',
+  [READALONG_KIND]: 'Read-along',
   'sidecars.contribute': 'Community share',
   'meta.correct': 'Corrections',
   'bridge.verify': 'Verify',
@@ -233,4 +242,42 @@ export function chaptersSummary(r: ChaptersResult): string {
   if (r.files.length === 0)
     return `${r.chapters} chapters found in the narration, but no chapter file was written`;
   return `${r.chapters} chapters found in the narration`;
+}
+
+// parseReadalongResult reads a done read-along job's result, or null when it isn't
+// one.
+export function parseReadalongResult(r: unknown): ReadalongResult | null {
+  if (!r || typeof r !== 'object') return null;
+  const o = r as Partial<ReadalongResult>;
+  const cov = o.coverage;
+  if (
+    typeof o.path !== 'string' ||
+    typeof o.file !== 'string' ||
+    !cov ||
+    typeof cov.text !== 'number' ||
+    typeof cov.audio !== 'number' ||
+    typeof o.spans !== 'number'
+  )
+    return null;
+  return {
+    library_id: typeof o.library_id === 'number' ? o.library_id : 0,
+    path: o.path,
+    file: o.file,
+    coverage: { text: cov.text, audio: cov.audio },
+    sections: typeof o.sections === 'number' ? o.sections : 0,
+    spans: o.spans,
+    audio_gaps: typeof o.audio_gaps === 'number' ? o.audio_gaps : 0,
+    heal_windows: typeof o.heal_windows === 'number' ? o.heal_windows : 0,
+    transcribed: o.transcribed === true,
+    ebook_sha256: typeof o.ebook_sha256 === 'string' ? o.ebook_sha256 : '',
+  };
+}
+
+// readalongSummary is "96% of the text lined up (1,234 sentences), transcribed
+// for it" ("from the transcript kept" when an earlier run's was reused).
+export function readalongSummary(r: ReadalongResult): string {
+  const pct = Math.round(r.coverage.text * 100);
+  const sentences = r.spans === 1 ? '1 sentence' : `${r.spans.toLocaleString('en-US')} sentences`;
+  const how = r.transcribed ? 'transcribed for it' : 'from the transcript kept';
+  return `${pct}% of the text lined up (${sentences}), ${how}`;
 }

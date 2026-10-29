@@ -574,7 +574,8 @@ func TestDetectionRerunnable(t *testing.T) {
 // TranscriptionContinuable says a book stopped at asr (parked waiting for a worker,
 // then cancelled) can go on transcribing from what it kept: the windows manifest
 // in place, the file the one inspected. A replaced or edited file, a probe with no
-// size, a markers manifest or a window layer moved aside are denied.
+// size or a window layer moved aside are denied. (A markers or files manifest has
+// its own rule: TestTranscriptionContinuableChapters.)
 func TestTranscriptionContinuable(t *testing.T) {
 	dir := t.TempDir()
 	src := filepath.Join(dir, "book.m4b")
@@ -615,12 +616,6 @@ func TestTranscriptionContinuable(t *testing.T) {
 			func() { _ = os.Remove(src) }, func() { writeSource("the audio", before) }},
 		{"a probe that states no size",
 			func() { writeProbeJSON(t, work, `{"format":{"duration":"20"}}`) }, func() { writeProbeJSON(t, work, probe) }},
-		{"a markers manifest (not a windows book)",
-			func() {
-				mm := m
-				mm.Style = audio.StyleMarkers
-				writeManifestStruct(t, work, mm)
-			}, func() { writeManifestStruct(t, work, m) }},
 	} {
 		tc.spoil()
 		if TranscriptionContinuable(work) {

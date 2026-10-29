@@ -372,6 +372,28 @@ func windowParts(ch Chapter, windows []Chapter, dir string) ([]windowPart, bool)
 	return parts, len(parts) > 0
 }
 
+// SpanPart is a stretch of a FLAC: start and length in seconds.
+type SpanPart struct {
+	File       string
+	Start, Dur float64
+}
+
+// CutSpan encodes parts, joined in order, as one mono/16 kHz FLAC at out (the
+// read-along heal's clip across the chapter FLACs of one file, Phase 3c).
+func CutSpan(ctx context.Context, ffmpegPath string, parts []SpanPart, out string) error {
+	if ffmpegPath == "" {
+		return errors.New("ffmpeg unavailable; cannot cut a clip")
+	}
+	if len(parts) == 0 {
+		return errors.New("no audio to cut")
+	}
+	wp := make([]windowPart, len(parts))
+	for i, p := range parts {
+		wp[i] = windowPart{file: p.File, start: p.Start, dur: p.Dur}
+	}
+	return cutParts(ctx, ffmpegPath, wp, out, "clip")
+}
+
 // cutParts encodes parts, joined in order, as one mono/16 kHz FLAC at out (one
 // part is a plain seek, as CutClip cuts; several are trimmed inputs joined by the
 // concat filter, every input's -ss/-t exact on a FLAC).

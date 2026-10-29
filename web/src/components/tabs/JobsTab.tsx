@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { ApiError, errorText, type ApiClient } from '@/api/client';
 import type {
   ChaptersResult,
+  ReadalongResult,
   DescribeResult,
   GenerateResult,
   ServerJob,
@@ -27,6 +28,8 @@ import {
   canRetry,
   descriptionText,
   chaptersSummary,
+  isReadalong,
+  readalongSummary,
   describeSummary,
   effectiveState,
   generateFacts,
@@ -38,6 +41,7 @@ import {
   parkOf,
   parkText,
   parseChaptersResult,
+  parseReadalongResult,
   parseDescribeResult,
   parseGenerateResult,
   resultSummary,
@@ -336,6 +340,8 @@ function ResultView({ job }: { job: ServerJob }) {
   if (described) return <DescribeView result={described} />;
   const chapters = isChapters(job) ? parseChaptersResult(job.result) : null;
   if (chapters) return <ChaptersView result={chapters} />;
+  const aligned = isReadalong(job) ? parseReadalongResult(job.result) : null;
+  if (aligned) return <ReadalongView result={aligned} />;
   return (
     <pre className="overflow-x-auto rounded-md bg-deep p-3 text-xs text-body">
       {prettyJSON(job.result)}
@@ -386,6 +392,15 @@ function ChaptersView({ result }: { result: ChaptersResult }) {
     <div className="flex flex-col gap-2 text-xs text-dim">
       <p className="text-sm text-body">{chaptersSummary(result)}</p>
       {result.files.length > 0 && <SavedWith path={result.path} files={result.files} />}
+    </div>
+  );
+}
+
+function ReadalongView({ result }: { result: ReadalongResult }) {
+  return (
+    <div className="flex flex-col gap-2 text-xs text-dim">
+      <p className="text-sm text-body">{readalongSummary(result)}</p>
+      <SavedWith path={result.path} files={[result.file]} />
     </div>
   );
 }

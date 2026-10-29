@@ -212,9 +212,21 @@ func TestBookInfo(t *testing.T) {
 		got.SeriesIndex != "3" || got.Duration != want.Duration || got.WorkID != "the-b" || got.ASIN != "B0" || got.ISBN != "97" {
 		t.Fatalf("info = %+v", got)
 	}
+	if b.Info.Ebook != nil {
+		t.Fatalf("a book with no ebook decoded one: %+v", b.Info.Ebook)
+	}
 	f.body = `{"library_id":1,"path":"A/B","files":[]}`
 	if b, _ := c.Book(context.Background(), 1, ""); b.Info != nil {
 		t.Fatalf("the sample answer has a book block: %+v", b.Info)
+	}
+	// Phase 3c: the files' indexed lengths and the book's ebook.
+	f.body = `{"library_id":1,"path":"A/B","files":[{"path":"A/B/01.mp3","size":5,"mod_time":7,"duration":640.584},` +
+		`{"path":"A/B/02.mp3","size":6,"mod_time":8,"duration":12.5}],"book":{"title":"B","authors":[],"narrators":[],` +
+		`"series":"","series_index":"","asin":"","isbn":"","duration":653.084,"work_id":"","ebook":{"path":"A/B/b.epub","size":84540}}}`
+	b, err = c.Book(context.Background(), 1, "A/B")
+	if err != nil || len(b.Files) != 2 || b.Files[0].Duration != 640.584 || b.Files[1].Duration != 12.5 ||
+		b.Info.Ebook == nil || *b.Info.Ebook != (Ebook{Path: "A/B/b.epub", Size: 84540}) {
+		t.Fatalf("Book = %+v (%+v), %v", b, b.Info, err)
 	}
 }
 
@@ -266,8 +278,12 @@ func TestRescanAttachments(t *testing.T) {
 	}
 	// An older server sends no description or chapters: they read as not indexed.
 	f.body = `{"path":"A/B","attachments":{"characters":true,"recaps":true,"bridge":true}}`
-	if got, err := c.RescanAttachments(context.Background(), 1, "A/B"); err != nil || got.Description || got.Chapters {
+	if got, err := c.RescanAttachments(context.Background(), 1, "A/B"); err != nil || got.Description || got.Chapters || got.Readalong {
 		t.Fatalf("older server = %+v, %v", got, err)
+	}
+	f.body = `{"path":"A/B","attachments":{"characters":false,"recaps":false,"bridge":false,"readalong":true}}`
+	if got, err := c.RescanAttachments(context.Background(), 1, "A/B"); err != nil || !got.Readalong {
+		t.Fatalf("readalong = %+v, %v", got, err)
 	}
 	f.status, f.body = http.StatusNotFound, `{"error":"no indexed book there","code":"not_indexable"}`
 	if _, err := c.RescanAttachments(context.Background(), 1, "A/B"); !errors.Is(err, ErrNotIndexable) {

@@ -23,6 +23,7 @@ import (
 	"github.com/kodestar/audiosilo-bridge/internal/ebook"
 	"github.com/kodestar/audiosilo-bridge/internal/fsutil"
 	"github.com/kodestar/audiosilo-bridge/internal/qa"
+	"github.com/kodestar/audiosilo-bridge/internal/readalong"
 	"github.com/kodestar/audiosilo-bridge/internal/repair"
 	"github.com/kodestar/audiosilo-bridge/internal/spelling"
 	"github.com/kodestar/audiosilo-bridge/internal/state"
@@ -243,20 +244,23 @@ func Purge(workRoot, workDir string, kind state.Kind) error {
 // audio book's transcripts-corrected/ as a durable; this tier is where it goes.)
 // windows/ is a chapterless book's window layer (Phase 1d: the windows' raw
 // transcripts and the detection); its chapters_detected.json (titles only) stays,
-// like the manifest.
+// like the manifest. readalong/heal/ is the read-along heal's raw transcripts
+// (Phase 3c); readalong/map.json (CFIs and times only) stays, so a write a park
+// held up can still finish.
 var transcriptDirs = []string{
 	transcript.RawDir, transcript.JSONDir, transcript.TextDir, transcript.RepairedDir, spelling.CorrectedDir,
-	audio.WindowsDir,
+	audio.WindowsDir, readalong.HealPath,
 }
 
 // transcriptFiles quote the transcript at the work dir's root: the spelling
 // candidates' snippets, the reference matches, the QA reports' looped phrases,
 // the QA plan's and its accepted ledger's reasons, the tail verdicts' looped
-// phrases, and the correction and repair logs.
+// phrases, the correction and repair logs, and the words a read-along map was
+// aligned from.
 var transcriptFiles = []string{
 	spelling.CandidatesFile, spelling.ReferenceMatchesFile, qa.ReportJSONName, qa.ReportMDName,
 	qa.PlanFile, qa.AcceptedFile, repair.TailVerdictsName,
-	spelling.CorrectionsLogFile, repair.RepairsLogName,
+	spelling.CorrectionsLogFile, repair.RepairsLogName, readalong.WordsPath,
 }
 
 // carriedTranscript reports whether a file under spelling.RefsDir is a copy of

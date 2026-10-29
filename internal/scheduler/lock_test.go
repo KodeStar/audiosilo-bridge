@@ -35,6 +35,24 @@ func TestLockHoldersSeriesOrdering(t *testing.T) {
 	}
 }
 
+// A read-along of an earlier volume (a finished whole run aligning again, or a
+// read-along gone on from one, parked) never takes its series' lock from the later
+// volume being generated.
+func TestLockHoldersSkipReadalong(t *testing.T) {
+	aligning := bk(1, "S", "1", string(state.ReadalongAligning))
+	parked := bk(1, "S", "1", string(state.ASR))
+	parked.Goal, parked.Status = state.GoalReadalong, string(state.StatusNeedsAttention)
+	for _, first := range []store.Book{aligning, parked} {
+		books := []store.Book{first, bk(2, "S", "2", string(state.FactPass))}
+		if h := lockHolders(books); h[1] || !h[2] {
+			t.Fatalf("%s/%q: holders = %v, want only book 2", first.State, first.Goal, h)
+		}
+		if owners := seriesLockOwners(books); owners["S"].ID != 2 {
+			t.Fatalf("%s/%q: owner = %d, want 2", first.State, first.Goal, owners["S"].ID)
+		}
+	}
+}
+
 func TestSortASRLaneBreadthFirstAcrossSeries(t *testing.T) {
 	// Series A book 1 has already left ASR. Its presence in the full library must
 	// keep A2 at depth 1, allowing the first books from B and C to transcribe before
