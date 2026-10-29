@@ -49,7 +49,7 @@ const (
 
 // errNoMatch is a map whose text coverage is under minReadalongCoverage.
 func errNoMatch(coverage float64) error {
-	return describeFailure(fmt.Sprintf("the ebook and the narration don't match: %d%% lined up", int(math.Round(100*coverage))))
+	return describeFailure(fmt.Sprintf("the ebook and the narration don't match: %d%% lined up", int(math.Floor(100*coverage))))
 }
 
 // ReadalongJob runs readalong.align. It shares the generate handler's parts: the
