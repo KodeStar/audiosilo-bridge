@@ -597,10 +597,10 @@ var ErrNotContinuable = errors.New("the book isn't a chapters book to continue")
 // (the same path, or the book's own for the audio run beside an ebook run the
 // caller cleared first: the whole run is the book's then). job (when it names a
 // server job) is mapped to the book in the same transaction, so a book is never
-// continued with no job to follow it, nor left stopped. ErrNotContinuable when the book isn't one
-// stopped at from, or the retention swept its transcripts (a continue needs them);
-// checked in the one statement, so a book that changed meanwhile isn't moved. The
-// SQL asks for any goal short of the whole pipeline (chapters is the only one) and
+// continued with no job to follow it, nor left stopped. ErrNotContinuable when
+// the book isn't one stopped at from, or the retention swept its transcripts (a
+// continue needs them); checked in the one statement, so a book that changed
+// meanwhile isn't moved. The SQL asks for any goal short of the whole pipeline (chapters is the only one) and
 // takes both states from the caller, which decides where a book goes on from.
 func (db *DB) ContinueChapters(ctx context.Context, id int64, from, to string, nb NewBook, job GenerateBook) error {
 	authors, err := marshalJSONDefault(nb.Authors, "[]")
@@ -647,9 +647,10 @@ func (db *DB) ContinueChapters(ctx context.Context, id int64, from, to string, n
 // caller): its identity, work dir, source, kind and series stay the book's (an
 // ebook run is never continued: its notes are the ebook's, and a read-along runs
 // beside it, AudioRunKey); status clear, so the scheduler takes it up at to. job
-// (when it names a server job) is mapped to the book in the same transaction. ErrNotContinuable when the book isn't stopped at from (done,
-// failed, parked or paused: the caller holds the engine's hold on it and checked
-// no other job follows it) or, going on past inspecting, the retention swept its
+// (when it names a server job) is mapped to the book in the same transaction.
+// ErrNotContinuable when the book isn't stopped at from (done, failed, parked or
+// paused: the caller holds the engine's hold on it and checked no other job
+// follows it) or, going on past inspecting, the retention swept its
 // transcripts; checked in the one statement, so a book that changed meanwhile
 // isn't moved. A book going on from inspecting makes its transcripts anew, so a
 // sweep doesn't stop it, and its mappings are unswept again: the retention

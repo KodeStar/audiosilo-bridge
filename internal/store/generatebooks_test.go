@@ -186,3 +186,33 @@ func TestCostSums(t *testing.T) {
 		t.Fatalf("the ebook = %+v", got[1])
 	}
 }
+
+// The newest mapping at a library path that leads to the audio run beside an
+// ebook run (it holds no notes) is passed over for the ebook run's own.
+func TestLatestGenerateBookAtPassesOverTheAudioRun(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	ebook, err := db.CreateBook(ctx, NewBook{SourcePath: "/lib/A/Book", WorkDir: "/w/ebook", Title: "Book", Kind: "ebook", EbookPath: "/lib/A/Book/Book.epub"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	audio, err := db.CreateBook(ctx, NewBook{SourcePath: AudioRunKey("/lib/A/Book"), WorkDir: "/w/audio", Title: "Book"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.PutGenerateBook(ctx, GenerateBook{ServerJobID: 12, BookID: &ebook.ID, LibraryID: 1, RelPath: "A/Book"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.PutGenerateBook(ctx, GenerateBook{ServerJobID: 13, BookID: &audio.ID, LibraryID: 1, RelPath: "A/Book"}); err != nil {
+		t.Fatal(err)
+	}
+	if id, err := db.LatestGenerateBookAt(ctx, 1, "A/Book"); err != nil || id != ebook.ID {
+		t.Fatalf("latest = %d, %v; want the ebook run %d", id, err, ebook.ID)
+	}
+	if err := db.DeleteBook(ctx, ebook.ID); err != nil {
+		t.Fatal(err)
+	}
+	if id, err := db.LatestGenerateBookAt(ctx, 1, "A/Book"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("only the audio run left = %d, %v; want ErrNotFound", id, err)
+	}
+}

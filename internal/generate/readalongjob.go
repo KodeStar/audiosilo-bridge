@@ -316,9 +316,10 @@ func (h *Handler) prepareContinue(ctx context.Context, b store.Book, to state.St
 // ebook is checked first (none, DRM, not an EPUB, too big: refused before any
 // transcription). The earlier engine book is audioRun's (an ebook run is never
 // touched: the read-along runs beside it). One another open job follows refuses
-// the job; one a stage runs on makes it try again in a minute; otherwise the reuse table decides, under the engine's hold, and what
-// it doesn't reuse is cleared for a new book (goal readalong, no series: nothing
-// a later volume carries on from).
+// the job; one a stage runs on makes it try again in a minute; otherwise the
+// reuse table decides, under the engine's hold, and what it doesn't reuse is
+// cleared for a new book (goal readalong, no series: nothing a later volume
+// carries on from).
 func (h *Handler) createReadalong(ctx context.Context, eng Engine, r *run) error {
 	ebook, err := r.readalongEbook()
 	if err != nil {

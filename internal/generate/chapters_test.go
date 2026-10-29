@@ -1387,3 +1387,43 @@ func TestChaptersDetectRunsBesideAnEbookRun(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// A second chapters job writes the chapters the audio run beside an ebook run
+// already found, with no new run: the earlier-run lookup reads the audio run, never
+// the ebook run at the book's path.
+func TestChaptersFromEarlierReadsTheAudioRunBesideAnEbookRun(t *testing.T) {
+	t.Parallel()
+	hr := newHarness(t)
+	hr.exec.windowed = true
+	ctx := context.Background()
+	sp, ok, err := metaops.AllowedPath(filepath.Join(hr.root, "Loose.m4b"), []string{hr.root})
+	if err != nil || !ok {
+		t.Fatal(sp, ok, err)
+	}
+	ebook, err := hr.db.CreateBook(ctx, store.NewBook{SourcePath: sp, WorkDir: filepath.Join(hr.work, "loose"), Title: "Loose",
+		Kind: string(state.KindEbook), EbookPath: filepath.Join(hr.root, "Loose.epub"), State: string(state.Done)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := hr.db.SetBookState(ctx, ebook.ID, string(state.FactPass), string(state.StatusFailed), "", ""); err != nil {
+		t.Fatal(err)
+	}
+	hr.srv.addKind(47, ChaptersKind, "Loose.m4b", `{}`)
+	stop := hr.runner(hr.h, hr.h.ChaptersJob())
+	hr.waitFor("the first job done", func() bool { s, _ := hr.srv.final(47); return s == link.StateDone })
+	stop()
+	beside := hr.engineBook(47)
+	hr.srv.addKind(48, ChaptersKind, "Loose.m4b", `{}`)
+	stop2 := hr.runner(hr.h, hr.h.ChaptersJob())
+	defer stop2()
+	hr.waitFor("the second job done", func() bool { s, _ := hr.srv.final(48); return s == link.StateDone })
+	if _, err := hr.db.GetGenerateBook(ctx, 48); err == nil {
+		t.Fatal("the second job made a run of its own")
+	}
+	if got, err := hr.db.GetBook(ctx, beside.ID); err != nil || got.SourcePath != store.AudioRunKey(sp) {
+		t.Fatalf("the audio run = %+v, %v", got, err)
+	}
+	if got, err := hr.db.GetBook(ctx, ebook.ID); err != nil || got.Kind != string(state.KindEbook) {
+		t.Fatalf("the ebook run = %+v, %v", got, err)
+	}
+}

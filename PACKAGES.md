@@ -1317,8 +1317,9 @@ internal/
             GetBookBySourcePath finds an earlier run of the same book.
             Phase 1c: StageRunBudgetCost(runID) is one run's budget-basis spend (the
             description step reports its own); LatestGenerateBookAt(library, path)
-            is the newest generate job's surviving engine book at a path
-            (sidecars.describe finds a moved book's run with it); NextStageAttempt
+            is the newest generate job's surviving engine book at a path, never
+            the audio run beside an ebook run (sidecars.describe finds a moved
+            book's run with it); NextStageAttempt
             (one past every recorded run: the scheduler's and the description step's
             run numbers) and LatestOkStageRun (a stage's newest success, or
             ErrNotFound).
