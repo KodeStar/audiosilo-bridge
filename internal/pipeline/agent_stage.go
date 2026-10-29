@@ -2181,6 +2181,13 @@ func (e *Executor) retranscribe(ctx context.Context, book store.Book, r schedule
 		// learned per-unit rate with ~ms no-ops.
 		RateSample: rateSample(done-completed-skippedNew-unlocatableNew, loopSeconds),
 	}
+	// A read-along book's one mechanical round is done (decision 4): its next sweep
+	// goes on to readalong_aligning, clean or not.
+	if book.Goal == state.GoalReadalong {
+		if err := markReadalongRepaired(book.WorkDir); err != nil {
+			return scheduler.StageResult{}, fmt.Errorf("retranscribing: %w", err)
+		}
+	}
 	if err := scheduler.WriteSentinel(book.WorkDir, string(state.Retranscribing), result); err != nil {
 		return scheduler.StageResult{}, err
 	}
@@ -2289,7 +2296,11 @@ func ensureRetranscribeDecodeParams(workDir, tag string) error {
 func (e *Executor) retranscribeChapter(ctx context.Context, r scheduler.StageReport, setup ASRSetup, book store.Book, durationSec float64, chapter int) (bool, error) {
 	flac := filepath.Join(book.WorkDir, audio.ChaptersDir, audio.ChapterFileName(chapter))
 	if !fsutil.IsFile(flac) {
-		return false, fmt.Errorf("retranscribing: chapter %d FLAC missing (%s); split must run first", chapter, flac)
+		// A purge took it (a read-along continues a finished run from its
+		// transcripts, Phase 3c): cut it again from the source.
+		if err := e.resplitChapter(ctx, r, book, chapter); err != nil {
+			return false, err
+		}
 	}
 	freshDir := filepath.Join(book.WorkDir, repair.RetranscribeDir)
 	if err := os.MkdirAll(freshDir, 0o750); err != nil {
@@ -2360,6 +2371,35 @@ func (e *Executor) retranscribeChapter(ctx context.Context, r scheduler.StageRep
 	}
 	removeChapterDerived(book.WorkDir, chapter)
 	return true, nil
+}
+
+// resplitChapter cuts one chapter's FLAC again from the source (one a purge took).
+func (e *Executor) resplitChapter(ctx context.Context, r scheduler.StageReport, book store.Book, chapter int) error {
+	ffmpeg, _ := e.ensureTools()
+	if ffmpeg == "" {
+		return scheduler.ParkWithCode(state.ParkMediaToolsUnavailable, MediaToolsUnavailableMsg)
+	}
+	m, err := audio.ReadManifest(book.WorkDir)
+	if err != nil {
+		return fmt.Errorf("retranscribing: read manifest: %w", err)
+	}
+	one := m
+	one.Chapters = nil
+	for _, c := range m.Chapters {
+		if c.Chapter == chapter {
+			one.Chapters = append(one.Chapters, c)
+		}
+	}
+	if len(one.Chapters) == 0 {
+		return fmt.Errorf("retranscribing: chapter %d isn't in the manifest", chapter)
+	}
+	if _, err := splitWithRetries(ctx, one, book.WorkDir, ffmpeg, r, nil); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return fmt.Errorf("retranscribing: cut chapter %d again: %w", chapter, err)
+	}
+	return nil
 }
 
 // clipChapter runs one chapter's mechanical clip repair - the shared spine of the tail

@@ -35,6 +35,7 @@ var stageLabels = map[state.State]string{
 	state.QASweep:            "Checking the transcripts",
 	state.QAAdjudicating:     "Reviewing transcript problems",
 	state.Retranscribing:     "Transcribing chapters again",
+	state.ReadalongAligning:  "Lining up the ebook with the narration",
 	state.SpellingResearch:   "Researching the names",
 	state.Correcting:         "Correcting the names",
 	state.Extracting:         "Reading the ebook",

@@ -392,7 +392,14 @@ func modifiedBeforeProbe(workDir string, info os.FileInfo) bool {
 
 // TranscriptionContinuable reports whether a book stopped at asr (parked waiting
 // for a worker, cancelled or failed there) can go on transcribing from what it
-// kept, the windows it finished never transcribed again: the windows manifest is
+// kept, the windows (or chapters) it finished never transcribed again.
+//
+// A book transcribed by its files or its marker table (a read-along continues one,
+// Phase 3c) can when its raws are its manifest's (asr.json names no other), its
+// audio is what was inspected (AudioCurrent) and, once splitting's sentinel would
+// pass it on, every chapter has its raw or its FLAC to transcribe.
+//
+// A windowed book can when the windows manifest is
 // in place (inspect made it and chapter_detecting hasn't moved it) with windows to
 // transcribe, the raws kept are its own (asr.json names no other manifest: asr
 // would park that for a person), the audio file is the one inspected
@@ -402,6 +409,9 @@ func modifiedBeforeProbe(workDir string, info os.FileInfo) bool {
 // splitting (cut again after a purge, which takes the sentinel too), and asr then
 // skips every window already complete.
 func TranscriptionContinuable(workDir string) bool {
+	if m, err := audio.ReadManifest(workDir); err == nil && m.Style != audio.StyleWindows && !windowsMoved(workDir) {
+		return chaptersContinuable(workDir, m)
+	}
 	layer, err := readWindowLayer(workDir)
 	if err != nil || layer.moved || len(layer.manifest.Chapters) == 0 {
 		return false
@@ -424,6 +434,39 @@ func TranscriptionContinuable(workDir string) bool {
 		}
 		if !rawComplete(filepath.Join(layer.rawDir, transcript.RawName(w.Chapter))) &&
 			!fsutil.IsFile(filepath.Join(chapters, audio.ChapterFileName(w.Chapter))) {
+			return false
+		}
+	}
+	return true
+}
+
+// windowsMoved reports whether chapter_detecting moved the window layer aside
+// (the book is past asr).
+func windowsMoved(workDir string) bool {
+	info, err := os.Stat(filepath.Join(workDir, audio.WindowsDir, transcript.RawDir))
+	return err == nil && info.IsDir()
+}
+
+// chaptersContinuable is TranscriptionContinuable for a files or markers manifest.
+func chaptersContinuable(workDir string, m audio.Manifest) bool {
+	if len(m.Chapters) == 0 || (m.Style != audio.StyleFiles && m.Style != audio.StyleMarkers) {
+		return false
+	}
+	if prior := readASRProvenance(workDir).ManifestSHA; prior != "" {
+		if fp, err := manifestFingerprint(workDir); err != nil || fp != prior {
+			return false
+		}
+	}
+	if ok, err := AudioCurrent(workDir, ""); err != nil || !ok {
+		return false
+	}
+	if !scheduler.SentinelExists(workDir, string(state.Splitting)) {
+		return true
+	}
+	chapters := filepath.Join(workDir, audio.ChaptersDir)
+	for _, c := range m.Chapters {
+		if !rawComplete(filepath.Join(workDir, transcript.RawDir, transcript.RawName(c.Chapter))) &&
+			!fsutil.IsFile(filepath.Join(chapters, audio.ChapterFileName(c.Chapter))) {
 			return false
 		}
 	}

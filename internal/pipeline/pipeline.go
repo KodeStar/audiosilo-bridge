@@ -468,6 +468,8 @@ func (e *Executor) Execute(ctx context.Context, book store.Book, stage state.Sta
 		return e.qaAdjudicate(ctx, book, r)
 	case state.Retranscribing:
 		return e.retranscribe(ctx, book, r)
+	case state.ReadalongAligning:
+		return e.readalongAlign(ctx, book, r)
 	case state.SpellingResearch:
 		return e.spellingResearch(ctx, book, r)
 	case state.Correcting:
@@ -526,6 +528,10 @@ var (
 // ChaptersRefusals are the sentences a chapters-only book's inspect fails with.
 var ChaptersRefusals = []error{ErrHasMarkerChapters, ErrHasFileChapters, ErrPartialMarker, ErrUnknownLength}
 
+// ErrReadalongNoLength fails a read-along book whose one file has chapter markers
+// that can't be used and no length to cut it into windows by.
+var ErrReadalongNoLength = errors.New("The book's audio file doesn't say how long it is, so it can't be lined up with the ebook") //nolint:staticcheck // ST1005: a sentence the console shows as it is
+
 // chaptersRefusal is why a chapters-only book's inspect made no windows (m is not a
 // windows manifest): its chapters are its files or its markers, or its one file has
 // a marker over only part of it, or no length to cut it by.
@@ -577,7 +583,10 @@ func (e *Executor) inspect(ctx context.Context, book store.Book, r scheduler.Sta
 		return fmt.Sprintf("inspecting: still placing the transcription windows (%s elapsed)", humanDuration(elapsed))
 	}, func() error {
 		var ierr error
-		manifest, markers, ierr = audio.Inspect(ctx, book.SourcePath, book.WorkDir, ffprobe, ffmpeg)
+		// A read-along never maps markers with an agent: a table that isn't usable
+		// is transcribed in windows, as a markerless file is (decision 3).
+		opts := audio.InspectOptions{WindowUnusable: book.Goal == state.GoalReadalong}
+		manifest, markers, ierr = audio.InspectWith(ctx, book.SourcePath, book.WorkDir, ffprobe, ffmpeg, opts)
 		return ierr
 	})
 	if err != nil {
@@ -589,6 +598,11 @@ func (e *Executor) inspect(ctx context.Context, book store.Book, r scheduler.Sta
 	// are.
 	if book.Goal == state.GoalChapters && manifest.Style != audio.StyleWindows {
 		return scheduler.StageResult{}, chaptersRefusal(manifest, markers)
+	}
+	// A read-along book goes straight to splitting, so its manifest must be one
+	// split can cut: the files, a usable marker table or the windows.
+	if book.Goal == state.GoalReadalong && manifest.Style == audio.StyleMarkers && !markers.Usable() {
+		return scheduler.StageResult{}, ErrReadalongNoLength
 	}
 	if r.Note != nil {
 		if manifest.Style == audio.StyleWindows {
@@ -1131,8 +1145,15 @@ func (e *Executor) qaSweep(ctx context.Context, book store.Book, r scheduler.Sta
 			midChapterRuns++
 		}
 	}
+	retranscribe := false
+	if book.Goal == state.GoalReadalong {
+		if retranscribe, err = readalongSweep(book.WorkDir, rep, r); err != nil {
+			return scheduler.StageResult{}, err
+		}
+	}
 	result := scheduler.StageResult{
-		QAClean: rep.Clean(),
+		QAClean:            rep.Clean(),
+		RetranscribeNeeded: retranscribe,
 		Metrics: metrics(map[string]any{
 			// chapter_count keeps the cross-stage meaning (the book's manifest
 			// chapter count, like inspect/split/asr/sanitize) - NOT qa's internal
