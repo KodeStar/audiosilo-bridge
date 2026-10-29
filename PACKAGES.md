@@ -536,10 +536,12 @@ internal/
             adjudicate FABRICATED/BENIGN/CLIP-REDEGENERATED, splice into
             transcripts-repaired/ + repairs.log/tail_verdicts.json) and AdoptFresh
             (never-blindly-adopt full-chapter plausibility). AdoptFreshReadalong is goal
-            readalong's rule (Phase 3c-1): adopt the NoContext re-run unless it loops
-            over more words (AdoptStats.LoopWords, qa.LoopWords) or keeps under 80% of
-            the original's words outside its loops; never word count (a looped original
-            has more words, which AdoptFresh keeps). No agent; injected a
+            readalong's rule (Phase 3c-1): adopt the NoContext re-run unless its word
+            rate is implausible (AdoptFresh's check: the heal takes that span), it loops
+            over more words (AdoptStats.LoopWords, qa.LoopWords), it is shorter than a
+            loop-free original, or it keeps under 80% of a looped original's words
+            outside its loops; a looped original's extra words never count for it
+            (AdoptFresh keeps it for them). No agent; injected a
             ClipCutter (ffmpeg) + a Transcribe func so it stays unit-testable. The
             re-transcription (full-chapter AND clip) runs NoContext (asr.Job.NoContext)
             so a context-conditioned repetition collapse cannot replay identically.

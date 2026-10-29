@@ -83,20 +83,30 @@ const readalongMinKept = 0.8
 // AdoptFreshReadalong is a read-along book's adoption rule (Phase 3c-1): the
 // fresh NoContext re-run of a chapter the transcript check flagged replaces the
 // original unless it is clearly worse. A loop's words are noise, not narration,
-// so word count can't judge it (a looped original has MORE words; AdoptFresh keeps
-// it), and the spike adopted every re-run:
+// so word count alone can't judge a looped original (it has MORE words; AdoptFresh
+// keeps it), and the spike adopted every re-run:
 //
+//   - fresh implausible by word rate (collapsed or crammed: AdoptFresh's check)
+//     -> keep original (the heal takes that span).
 //   - fresh loops over more words than the original -> keep original.
+//   - original loop-free (a re-run for dropout, a low word rate or a fast tail):
+//     fresh shorter -> keep original; else adopt.
 //   - fresh keeps under 80% of the original's words outside its loops (a collapse
 //     that dropped narration)                       -> keep original.
 //   - otherwise                                      -> adopt.
 //
 // generate's whole run keeps AdoptFresh. Pure and table-tested.
 func AdoptFreshReadalong(original, fresh AdoptStats) AdoptDecision {
-	if fresh.LoopWords > original.LoopWords {
+	switch {
+	case !fresh.plausible():
+		return AdoptDecision{Adopt: false, Reason: "fresh run implausible by word rate (collapsed or re-degenerated); keep original"}
+	case fresh.LoopWords > original.LoopWords:
 		return AdoptDecision{Adopt: false, Reason: "fresh run loops over more words; keep original"}
-	}
-	if float64(fresh.Words-fresh.LoopWords) < readalongMinKept*float64(original.Words-original.LoopWords) {
+	case original.LoopWords == 0 && fresh.Words < original.Words:
+		return AdoptDecision{Adopt: false, Reason: "original has no loop and the fresh run is shorter; keep original"}
+	case original.LoopWords == 0:
+		return AdoptDecision{Adopt: true, Reason: "original has no loop and the fresh run is no shorter; adopt"}
+	case float64(fresh.Words-fresh.LoopWords) < readalongMinKept*float64(original.Words-original.LoopWords):
 		return AdoptDecision{Adopt: false, Reason: "fresh run dropped narration the original had outside its loops; keep original"}
 	}
 	return AdoptDecision{Adopt: true, Reason: "fresh run no loopier and keeps the narration; adopt"}

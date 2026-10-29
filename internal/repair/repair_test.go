@@ -345,6 +345,7 @@ func TestAdoptFreshReadalong(t *testing.T) {
 	const dur = 1510.0
 	cotw := AdoptStats{Words: 5843, LoopWords: 2675, DurationSec: dur}
 	clean := AdoptStats{Words: 3400, DurationSec: dur}
+	allLoop := AdoptStats{Words: 6000, LoopWords: 5900, DurationSec: dur}
 	if d := AdoptFresh(cotw, clean); d.Adopt {
 		t.Fatalf("generate's rule now adopts the CotW shape (%s); it must stay as it was", d.Reason)
 	}
@@ -356,8 +357,12 @@ func TestAdoptFreshReadalong(t *testing.T) {
 		{"looped original, clean fresh", cotw, clean, true},
 		{"looped original, fresh loops less", cotw, AdoptStats{Words: 3600, LoopWords: 200, DurationSec: dur}, true},
 		{"same transcript (an adopted re-run decided again)", clean, clean, true},
-		{"fresh a little shorter", AdoptStats{Words: 3400, DurationSec: dur}, AdoptStats{Words: 3000, DurationSec: dur}, true},
+		{"loop-free original, fresh longer", clean, AdoptStats{Words: 3500, DurationSec: dur}, true},
+		{"almost-all-loop original, plausible fresh", allLoop, AdoptStats{Words: 1800, DurationSec: dur}, true},
 		// Denied: clearly worse.
+		{"loop-free original, fresh a little shorter", clean, AdoptStats{Words: 3300, DurationSec: dur}, false},
+		{"almost-all-loop original, collapsed fresh", allLoop, AdoptStats{Words: 200, DurationSec: dur}, false},
+		{"fresh crammed", cotw, AdoptStats{Words: 8000, DurationSec: dur}, false},
 		{"fresh loops more", AdoptStats{Words: 3400, LoopWords: 10, DurationSec: dur}, AdoptStats{Words: 3500, LoopWords: 600, DurationSec: dur}, false},
 		{"fresh collapsed", cotw, AdoptStats{Words: 1200, DurationSec: dur}, false},
 		{"fresh dropped narration a clean original had", clean, AdoptStats{Words: 2000, DurationSec: dur}, false},
