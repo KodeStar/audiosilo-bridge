@@ -13,6 +13,8 @@ import {
   parkOf,
   parkText,
   parseChaptersResult,
+  parseReadalongResult,
+  readalongSummary,
   parseDescribeResult,
   parseGenerateResult,
   resultSummary,
@@ -218,5 +220,42 @@ describe('chapters', () => {
     );
     expect(parseChaptersResult({ path: 'x', files: [] })).toBeNull();
     expect(parseChaptersResult(null)).toBeNull();
+  });
+});
+
+describe('readalong', () => {
+  it('labels the kind and follows it as an engine job', () => {
+    const job = jobFixture({ kind: 'readalong.align' });
+    expect(kindLabel('readalong.align')).toBe('Read-along');
+    expect(isSidecars(job)).toBe(true);
+    const parked = jobFixture({
+      kind: 'readalong.align',
+      state: 'running',
+      progress: { step: 'asr', park: { code: 'asr_worker_waiting', hint: 'Start a worker.' } },
+    });
+    expect(canRetry(parked)).toBe(true);
+  });
+  it('reads and words a read-along result', () => {
+    const r = parseReadalongResult({
+      library_id: 1,
+      path: 'Author/Book',
+      file: 'readalong.json',
+      coverage: { text: 0.9612, audio: 0.95 },
+      sections: 30,
+      spans: 1234,
+      audio_gaps: 2,
+      heal_windows: 4,
+      transcribed: true,
+      ebook_sha256: 'ab',
+    });
+    expect(r?.file).toBe('readalong.json');
+    expect(readalongSummary(r!)).toBe(
+      '96% of the text lined up (1,234 sentences), transcribed for it',
+    );
+    expect(readalongSummary({ ...r!, spans: 1, transcribed: false })).toBe(
+      '96% of the text lined up (1 sentence), from the transcript kept',
+    );
+    expect(parseReadalongResult({ path: 'x', file: 'y' })).toBeNull();
+    expect(parseReadalongResult(null)).toBeNull();
   });
 });

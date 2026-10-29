@@ -225,6 +225,24 @@ export interface ChaptersResult {
   source: 'audio';
 }
 
+// generate.ReadalongResult (a readalong.align job's result).
+export interface ReadalongResult {
+  library_id: number;
+  path: string;
+  // The map's name in the book's .audiosilo/ folder.
+  file: string;
+  // The share of the read text and of the audio lined up (0..1).
+  coverage: { text: number; audio: number };
+  sections: number;
+  spans: number;
+  audio_gaps: number;
+  // The stretches transcribed again to heal the gaps.
+  heal_windows: number;
+  // Whether the job transcribed the book (false: an earlier run's transcript).
+  transcribed: boolean;
+  ebook_sha256: string;
+}
+
 // store.ServerJob
 export interface ServerJob {
   id: number;
