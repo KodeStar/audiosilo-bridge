@@ -1,0 +1,12 @@
+{
+  "name": "cfi-golden",
+  "private": true,
+  "type": "module",
+  "description": "Writes internal/epubcfi/testdata/golden.json with foliate's epubcfi.js on jsdom",
+  "scripts": {
+    "gen": "node gen.mjs"
+  },
+  "dependencies": {
+    "jsdom": "26.1.0"
+  }
+}

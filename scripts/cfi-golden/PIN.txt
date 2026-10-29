@@ -1,0 +1,4 @@
+# epubcfi.js is copied byte-identical from audiosilo-frontend's reader/vendor/foliate-js
+# (reader/vendor/FOLIATE_PIN.txt). internal/epubcfi's TestGoldenPin holds the copy to this line.
+commit 78914aef4466eb960965702401634c2cb348e9b1
+e1a688ad5c84bf31f33cef467f92c7a6d060a0f17ec37c1d3c048e9c7b1cf645  epubcfi.js
