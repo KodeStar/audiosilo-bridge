@@ -228,17 +228,30 @@ func TestContinueChaptersClearsADoneBooksStatus(t *testing.T) {
 	}
 }
 
-// ContinueReadalong moves a stopped book (done, failed, parked or paused) on at
-// the state the caller picked with the goal it gives, kind audio and no ebook
-// path, its status cleared and the job mapped in the same statement. A book a
-// stage may be running (status none), one not where the caller looked, or a
-// swept one is left as it is.
+// ContinueReadalong moves a stopped audio book (done, failed, parked or paused)
+// on at the state the caller picked with the goal it gives, its kind kept, its
+// status cleared and the job mapped in the same statement. A book a stage may be
+// running (status none), one not where the caller looked, a swept one, or an
+// ebook run (its notes are the ebook's) is left as it is.
 func TestContinueReadalong(t *testing.T) {
 	db := open(t)
 	ctx := context.Background()
+	ebook, err := db.CreateBook(ctx, NewBook{SourcePath: "/lib/E", WorkDir: "/w/lib/E", Title: "E", Kind: "ebook", EbookPath: "/lib/E/e.epub"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetBookState(ctx, ebook.ID, string(state.Done), "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.ContinueReadalong(ctx, ebook.ID, string(state.Done), string(state.Inspecting), state.GoalReadalong, GenerateBook{}); !errors.Is(err, ErrNotContinuable) {
+		t.Fatalf("an ebook run = %v, want ErrNotContinuable", err)
+	}
+	if got, _ := db.GetBook(ctx, ebook.ID); got.Kind != "ebook" || got.EbookPath != "/lib/E/e.epub" || got.Goal != "" || got.State != string(state.Done) {
+		t.Fatalf("the ebook run = %+v", got)
+	}
 	mk := func(src, st, status string) Book {
 		t.Helper()
-		b, err := db.CreateBook(ctx, NewBook{SourcePath: src, WorkDir: "/w" + src, Title: "T", Kind: "ebook", EbookPath: src + ".epub",
+		b, err := db.CreateBook(ctx, NewBook{SourcePath: src, WorkDir: "/w" + src, Title: "T",
 			Series: "S", SeriesPos: "2"})
 		if err != nil {
 			t.Fatal(err)
@@ -265,7 +278,7 @@ func TestContinueReadalong(t *testing.T) {
 	}
 	got, _ := db.GetBook(ctx, parked.ID)
 	if got.Goal != "" || got.State != string(state.ReadalongAligning) || got.Status != "" || got.Error != "" ||
-		got.Kind != "audio" || got.EbookPath != "" || got.Series != "S" || got.Title != "T" {
+		got.Kind != "audio" || got.Series != "S" || got.Title != "T" {
 		t.Fatalf("continued = %+v", got)
 	}
 	if g, err := db.GetGenerateBook(ctx, 2); err != nil || g.BookID == nil || *g.BookID != parked.ID {
@@ -296,5 +309,44 @@ func TestContinueReadalong(t *testing.T) {
 	}
 	if g, _ := db.GetGenerateBook(ctx, 5); g.SweptAt != "" {
 		t.Fatalf("still swept: %+v", g)
+	}
+}
+
+// The audio run beside an ebook run is keyed apart from it (AudioRunKey: both
+// stand at the one source path), reads its audio from the path, and takes the
+// book's own source path when a generate job continues it (the ebook run cleared
+// first); a continue naming no source path keeps the book's.
+func TestAudioRunKey(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	if _, err := db.CreateBook(ctx, NewBook{SourcePath: "/lib/A", WorkDir: "/w/a", Title: "A", Kind: "ebook", EbookPath: "/lib/A/a.epub"}); err != nil {
+		t.Fatal(err)
+	}
+	beside, err := db.CreateBook(ctx, NewBook{SourcePath: AudioRunKey("/lib/A"), WorkDir: "/w/a2", Title: "A", Goal: state.GoalReadalong})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !beside.IsAudioRun() || beside.AudioSource() != "/lib/A" {
+		t.Fatalf("the audio run = %+v", beside)
+	}
+	if own, _ := db.GetBookBySourcePath(ctx, "/lib/A"); own.IsAudioRun() || own.AudioSource() != "/lib/A" || own.Kind != "ebook" {
+		t.Fatalf("the ebook run = %+v", own)
+	}
+	if err := db.SetBookState(ctx, beside.ID, string(state.Done), "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	// Denied while the ebook run stands at the path.
+	if err := db.ContinueChapters(ctx, beside.ID, "done", "qa_sweep", NewBook{SourcePath: "/lib/A", Title: "A"}, GenerateBook{}); err == nil {
+		t.Fatal("re-keyed onto a path another book holds")
+	}
+	own, _ := db.GetBookBySourcePath(ctx, "/lib/A")
+	if err := db.DeleteBook(ctx, own.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.ContinueChapters(ctx, beside.ID, "done", "qa_sweep", NewBook{SourcePath: "/lib/A", Title: "A"}, GenerateBook{}); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := db.GetBook(ctx, beside.ID); got.SourcePath != "/lib/A" || got.IsAudioRun() || got.WorkDir != "/w/a2" || got.Goal != "" {
+		t.Fatalf("continued = %+v", got)
 	}
 }

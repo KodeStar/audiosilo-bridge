@@ -353,7 +353,9 @@ re-transcription, align again, snap the starts to speech onsets) and the map
 (`audiosilo-readalong/v1`, CFIs that match foliate's) written as
 `.audiosilo/readalong.json` unless under 50% of the text lined up. An earlier engine
 run of the same audio is reused by the reuse table (never a whole run cleared), and
-a generate job continues a done read-along run at qa_sweep.
+a generate job continues a done read-along run at qa_sweep. An ebook run is never
+continued, converted nor cleared by a read-along or chapters job: they run in the
+audio run beside it (`store.AudioRunKey`), which describe never reads.
 
 See BRIDGE-PLAN.md's Status table for what is next.
 

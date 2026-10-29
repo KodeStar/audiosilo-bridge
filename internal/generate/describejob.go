@@ -191,6 +191,11 @@ func (h *Handler) latestGenerated(ctx context.Context, r *run) (store.Book, erro
 	if err != nil {
 		return store.Book{}, err
 	}
+	// The audio run beside an ebook run (a read-along's or a chapters job's) holds
+	// no notes.
+	if b.IsAudioRun() {
+		return store.Book{}, store.ErrNotFound
+	}
 	if _, ok, err := metaops.AllowedPath(b.SourcePath, []string{r.mount}); err != nil || !ok {
 		return store.Book{}, store.ErrNotFound
 	}

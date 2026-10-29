@@ -376,7 +376,7 @@ func (h *Handler) continueChapters(ctx context.Context, eng Engine, r *run, old 
 	if r.source != SourceAudio || !continuable(old) {
 		return false, nil
 	}
-	bookFile := markersFile(old.SourcePath)
+	bookFile := markersFile(old.AudioSource())
 	if bookFile == "" {
 		return false, nil
 	}
@@ -422,7 +422,7 @@ func (h *Handler) continueChapters(ctx context.Context, eng Engine, r *run, old 
 			return false, nil
 		}
 	}
-	err = h.o.DB.ContinueChapters(ctx, old.ID, old.State, string(to), h.newBook(r, old.SourcePath, ""),
+	err = h.o.DB.ContinueChapters(ctx, old.ID, old.State, string(to), h.newBook(r, old.AudioSource(), ""),
 		store.GenerateBook{ServerJobID: r.job.ID, LibraryID: r.lib.ID, RelPath: r.rel})
 	if errors.Is(err, store.ErrNotContinuable) {
 		return false, nil
@@ -682,7 +682,8 @@ func (h *Handler) createChapters(ctx context.Context, eng Engine, r *run) error 
 	if err != nil || !ok {
 		return errors.New("the book's path leaves the library's folder")
 	}
-	if old, err := h.o.DB.GetBookBySourcePath(ctx, sp); err == nil {
+	old, key, err := h.audioRun(ctx, sp)
+	if err == nil {
 		if err := h.openJobRefusal(ctx, r, old.ID); err != nil {
 			return err
 		}
@@ -697,7 +698,7 @@ func (h *Handler) createChapters(ctx context.Context, eng Engine, r *run) error 
 	} else if !errors.Is(err, store.ErrNotFound) {
 		return err
 	}
-	nb := h.newBook(r, sp, "")
+	nb := h.newBook(r, key, "")
 	nb.Goal = state.GoalChapters
 	nb.Series, nb.SeriesPos = "", ""
 	return h.queueBook(ctx, eng, r, nb)

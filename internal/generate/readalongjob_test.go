@@ -362,7 +362,6 @@ func TestReadalongReuseTable(t *testing.T) {
 		{"stopped at asr, continuable", readalongEarlier{Goal: "chapters", State: "asr", Status: failed, Continuable: true}, state.Splitting, "readalong", true},
 		{"whole run done, swept", readalongEarlier{State: "done", Swept: true, Current: true}, state.Inspecting, "readalong", true},
 		{"whole run done, audio changed", readalongEarlier{State: "done"}, state.Inspecting, "readalong", true},
-		{"ebook whole run done", readalongEarlier{State: "done", Kind: "ebook", Current: true}, state.Inspecting, "readalong", true},
 		{"whole run a read-along stopped aligning", readalongEarlier{State: "readalong_aligning", Status: failed, Current: true}, state.ReadalongAligning, "", true},
 		{"whole run stopped aligning, swept", readalongEarlier{State: "readalong_aligning", Status: failed, Swept: true, Current: true}, state.Inspecting, "readalong", true},
 		{"read-along from a whole run, failed at splitting", readalongEarlier{Goal: "readalong", State: "splitting", Status: failed, Current: true, FactPass: true}, state.Inspecting, "readalong", true},
@@ -373,7 +372,6 @@ func TestReadalongReuseTable(t *testing.T) {
 		{"chapters done, audio changed", readalongEarlier{Goal: "chapters", State: "done"}, "", "", false},
 		{"whole run failed at inspecting", readalongEarlier{State: "inspecting", Status: failed, Current: true}, "", "", false},
 		{"a stage may run", readalongEarlier{State: "spelling_research", Current: true}, "", "", false},
-		{"ebook run parked at fact_pass", readalongEarlier{State: "fact_pass", Kind: "ebook", Status: parked, Current: true}, "", "", false},
 	} {
 		to, goal, ok := readalongReuse(tc.e)
 		if to != tc.to || goal != tc.goal || ok != tc.ok {
@@ -387,13 +385,24 @@ func TestReadalongReuseTable(t *testing.T) {
 // now, transcripts, a sentinel per stage before st.
 func seedEarlier(hr *harness, goal string, st state.State, status string) store.Book {
 	hr.t.Helper()
-	ctx := context.Background()
-	full := filepath.Join(hr.root, "Author", "Book")
-	sp, ok, err := metaops.AllowedPath(full, []string{hr.root})
+	return seedEarlierAt(hr, bookSource(hr), goal, st, status)
+}
+
+// bookSource is the folder book's engine source path.
+func bookSource(hr *harness) string {
+	hr.t.Helper()
+	sp, ok, err := metaops.AllowedPath(filepath.Join(hr.root, "Author", "Book"), []string{hr.root})
 	if err != nil || !ok {
 		hr.t.Fatal(err)
 	}
-	b, err := hr.db.CreateBook(ctx, store.NewBook{SourcePath: sp, WorkDir: store.DeriveWorkDir(hr.work, sp, "The Book"), Title: "The Book",
+	return sp
+}
+
+// seedEarlierAt is seedEarlier's run at source path key.
+func seedEarlierAt(hr *harness, key, goal string, st state.State, status string) store.Book {
+	hr.t.Helper()
+	ctx := context.Background()
+	b, err := hr.db.CreateBook(ctx, store.NewBook{SourcePath: key, WorkDir: store.DeriveWorkDir(hr.work, key, "The Book"), Title: "The Book",
 		Goal: goal, Kind: string(state.KindAudio), State: string(state.Done)}) // never queued: the engine would run it
 	if err != nil {
 		hr.t.Fatal(err)
@@ -401,13 +410,7 @@ func seedEarlier(hr *harness, goal string, st state.State, status string) store.
 	if err := hr.db.SetBookState(ctx, b.ID, string(st), status, "", ""); err != nil {
 		hr.t.Fatal(err)
 	}
-	m := audio.Manifest{Source: full, Style: audio.StyleFiles, Duration: 5400, ChapterCount: 2, Chapters: []audio.Chapter{
-		{Chapter: 1, Start: 0, End: 3600, Duration: 3600, FilePath: filepath.Join(full, "01.mp3")},
-		{Chapter: 2, Start: 3600, End: 5400, Duration: 1800, FilePath: filepath.Join(full, "02.mp3")}}}
-	if err := audio.WriteManifest(b.WorkDir, m); err != nil {
-		hr.t.Fatal(err)
-	}
-	mustWrite(hr.t, filepath.Join(b.WorkDir, audio.ProbeName), `{"format":{"duration":"5400"}}`)
+	inspected(hr, b.WorkDir)
 	mustWrite(hr.t, filepath.Join(b.WorkDir, "transcripts-json", "ch001.json"), "{}")
 	mustWrite(hr.t, filepath.Join(b.WorkDir, "asr.json"), `{"manifest_sha":"the-earlier-manifest"}`)
 	for _, s := range readalongPath {
@@ -604,5 +607,139 @@ func TestGenerateTranscribesAWindowedReadalongRunAgain(t *testing.T) {
 	b := hr.engineBook(214)
 	if b.ID == old.ID || !slices.Contains(hr.stagesRun(b.ID), string(state.ASR)) {
 		t.Fatalf("engine book %d (earlier %d) ran %v, want a new run with asr", b.ID, old.ID, hr.stagesRun(b.ID))
+	}
+}
+
+// inspected leaves in workDir what inspect leaves for the folder book: its files
+// manifest and probe.
+func inspected(hr *harness, workDir string) {
+	hr.t.Helper()
+	full := filepath.Join(hr.root, "Author", "Book")
+	m := audio.Manifest{Source: full, Style: audio.StyleFiles, Duration: 5400, ChapterCount: 2, Chapters: []audio.Chapter{
+		{Chapter: 1, Start: 0, End: 3600, Duration: 3600, FilePath: filepath.Join(full, "01.mp3")},
+		{Chapter: 2, Start: 3600, End: 5400, Duration: 1800, FilePath: filepath.Join(full, "02.mp3")}}}
+	if err := audio.WriteManifest(workDir, m); err != nil {
+		hr.t.Fatal(err)
+	}
+	mustWrite(hr.t, filepath.Join(workDir, audio.ProbeName), `{"format":{"duration":"5400"}}`)
+}
+
+// seedEbookRun puts a finished ebook run of the folder book in the engine: its
+// own manifest (the ebook's chapters) and notes.
+func seedEbookRun(hr *harness) store.Book {
+	hr.t.Helper()
+	ctx := context.Background()
+	sp := bookSource(hr)
+	b, err := hr.db.CreateBook(ctx, store.NewBook{SourcePath: sp, WorkDir: store.DeriveWorkDir(hr.work, sp, "The Book"), Title: "The Book",
+		Kind: string(state.KindEbook), EbookPath: filepath.Join(sp, "Book.epub"), State: string(state.Done)})
+	if err != nil {
+		hr.t.Fatal(err)
+	}
+	mustWrite(hr.t, filepath.Join(b.WorkDir, audio.ManifestName), `{"style":"ebook"}`)
+	mustWrite(hr.t, filepath.Join(b.WorkDir, "facts", "knowledge-final.md"), "## ROSTER\n")
+	mustWrite(hr.t, filepath.Join(b.WorkDir, "sidecars", "characters.json"), `{"work":"the-book","characters":[]}`)
+	return b
+}
+
+// ebookRunIntact fails the test unless the ebook run is as seedEbookRun left it.
+func ebookRunIntact(hr *harness, e store.Book) {
+	hr.t.Helper()
+	got, err := hr.db.GetBook(context.Background(), e.ID)
+	if err != nil || got.Kind != string(state.KindEbook) || got.EbookPath != e.EbookPath || got.SourcePath != e.SourcePath ||
+		got.Goal != "" || got.State != string(state.Done) {
+		hr.t.Fatalf("the ebook run = %+v, %v", got, err)
+	}
+	if raw, err := os.ReadFile(filepath.Join(e.WorkDir, audio.ManifestName)); err != nil || string(raw) != `{"style":"ebook"}` {
+		hr.t.Fatalf("the ebook run's manifest = %s, %v", raw, err)
+	}
+	if _, err := os.Stat(filepath.Join(e.WorkDir, "facts", "knowledge-final.md")); err != nil {
+		hr.t.Fatalf("the ebook run's notes: %v", err)
+	}
+}
+
+// A read-along never continues nor clears an ebook run (its notes, chapter
+// manifest and kind are the description's): it runs beside it, in an audio run of
+// its own, which the next read-along reuses. A description reads the ebook run
+// still, and a generate job reading the ebook leaves the audio run alone.
+func TestReadalongRunsBesideAnEbookRun(t *testing.T) {
+	t.Parallel()
+	hr := readalongHarness(t)
+	ctx := context.Background()
+	ebook := seedEbookRun(hr)
+	d := &fakeDescriber{db: hr.db}
+	h := hr.describeHandler(d)
+	stop := hr.runner(h, h.ReadalongJob(), h.DescribeJob())
+	defer stop()
+
+	hr.srv.addKind(230, ReadalongKind, "Author/Book", `{}`)
+	hr.waitFor("the read-along", func() bool { s, _ := hr.srv.final(230); return s == link.StateDone })
+	beside := hr.engineBook(230)
+	if beside.ID == ebook.ID || beside.SourcePath != store.AudioRunKey(ebook.SourcePath) || beside.Kind != string(state.KindAudio) ||
+		beside.Goal != state.GoalReadalong || beside.WorkDir == ebook.WorkDir {
+		t.Fatalf("the read-along's run = %+v (ebook run %+v)", beside, ebook)
+	}
+	if stages := hr.stagesRun(beside.ID); len(stages) == 0 || stages[0] != string(state.Inspecting) {
+		t.Fatalf("the read-along ran %v", stages)
+	}
+	if _, err := os.Stat(filepath.Join(hr.root, "Author", "Book", AttachDir, "readalong.json")); err != nil {
+		t.Fatal(err)
+	}
+	ebookRunIntact(hr, ebook)
+	inspected(hr, beside.WorkDir) // as the real inspect leaves it (the test executor doesn't)
+
+	// The description reads the ebook run's notes, ebook-sourced.
+	hr.srv.addDescribe(231, "Author/Book")
+	hr.waitFor("the description", func() bool { s, _ := hr.srv.final(231); return s == link.StateDone || s == link.StateFailed })
+	if s, final := hr.srv.final(231); s != link.StateDone {
+		t.Fatalf("the description: %v", *final.Error)
+	}
+	var prov Provenance
+	raw, _ := os.ReadFile(filepath.Join(hr.root, "Author", "Book", AttachDir, "bridge.json"))
+	if err := json.Unmarshal(raw, &prov); err != nil || prov.Source != SourceEbook {
+		t.Fatalf("bridge.json = %s, %v", raw, err)
+	}
+
+	// The next read-along reuses the audio run.
+	hr.srv.addKind(232, ReadalongKind, "Author/Book", `{}`)
+	hr.waitFor("the second read-along", func() bool { s, _ := hr.srv.final(232); return s == link.StateDone })
+	if b := hr.engineBook(232); b.ID != beside.ID {
+		t.Fatalf("the second read-along's run = %d, want %d", b.ID, beside.ID)
+	}
+	ebookRunIntact(hr, ebook)
+
+	// A generate job reading the ebook replaces the ebook run, never taking up
+	// nor clearing the audio run.
+	hr.srv.add(233, "Author/Book", `{"source":"ebook"}`)
+	hr.waitFor("the generate job", func() bool { s, _ := hr.srv.final(233); return s == link.StateDone })
+	if b := hr.engineBook(233); b.ID == beside.ID || b.Kind != string(state.KindEbook) || b.SourcePath != ebook.SourcePath {
+		t.Fatalf("the generate job's run = %+v", b)
+	}
+	if got, err := hr.db.GetBook(ctx, beside.ID); err != nil || got.SourcePath != beside.SourcePath || got.Goal != state.GoalReadalong {
+		t.Fatalf("the audio run = %+v, %v", got, err)
+	}
+}
+
+// A generate job reading the audio takes on the audio run beside an ebook run
+// (its transcription kept, on at qa_sweep) as the book's own run, the ebook run
+// cleared: the book's notes are the audio's from then on.
+func TestGenerateTakesOnTheAudioRunBesideAnEbookRun(t *testing.T) {
+	t.Parallel()
+	hr := readalongHarness(t)
+	ebook := seedEbookRun(hr)
+	beside := seedEarlierAt(hr, store.AudioRunKey(ebook.SourcePath), state.GoalReadalong, state.Done, "")
+	before := len(hr.stagesRun(beside.ID))
+	hr.srv.add(234, "Author/Book", `{"source":"audio"}`)
+	stop := hr.runner(hr.h, hr.h.ReadalongJob())
+	defer stop()
+	hr.waitFor("done", func() bool { s, _ := hr.srv.final(234); return s == link.StateDone })
+	b := hr.engineBook(234)
+	if b.ID != beside.ID || b.SourcePath != ebook.SourcePath || b.Goal != "" || b.WorkDir != beside.WorkDir {
+		t.Fatalf("engine book = %+v (audio run %d)", b, beside.ID)
+	}
+	if stages := hr.stagesRun(b.ID)[before:]; len(stages) == 0 || stages[0] != string(state.QASweep) {
+		t.Fatalf("stages run %v, want from qa_sweep", stages)
+	}
+	if _, err := hr.db.GetBook(context.Background(), ebook.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("the ebook run: %v", err)
 	}
 }

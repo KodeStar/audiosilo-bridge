@@ -813,24 +813,30 @@ func (h *Handler) create(ctx context.Context, eng Engine, r *run) error {
 		}
 		ebookPath = ep
 	}
-	old, err := h.o.DB.GetBookBySourcePath(ctx, sp)
-	var openID int64
-	var openKind string
-	if err == nil {
-		old, openID, openKind, err = h.awaitChaptersGivingWay(ctx, r, old)
-	}
-	switch {
-	case errors.Is(err, store.ErrNotFound):
-		// No earlier run (or it went while this job waited): a book of its own.
-	case err != nil:
+	old, err := h.earlierRun(ctx, r, sp)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
 		return err
-	case openID != 0 && openKind == ChaptersKind:
-		return fmt.Errorf("job %d is finding this book's chapters; let it finish (this job can then go on from its transcription) or cancel it first", openID)
-	case openID != 0 && openKind == ReadalongKind:
-		return fmt.Errorf("job %d is making this book's read-along; let it finish or cancel it first", openID)
-	case openID != 0:
-		return fmt.Errorf("job %d is already generating this book; cancel it first", openID)
-	default:
+	}
+	// Read from the audio, the job also takes on the audio run beside an ebook run
+	// (a read-along's or a chapters job's, store.AudioRunKey), the ebook run
+	// cleared first: the whole run, the book's notes, is the audio's now. Read from
+	// the ebook, it leaves that run alone.
+	if r.source == SourceAudio {
+		beside, berr := h.earlierRun(ctx, r, store.AudioRunKey(sp))
+		switch {
+		case errors.Is(berr, store.ErrNotFound):
+		case berr != nil:
+			return berr
+		default:
+			if err == nil {
+				if err := h.clearEarlier(ctx, eng, r, old.ID); err != nil {
+					return err
+				}
+			}
+			old, err = beside, nil
+		}
+	}
+	if err == nil {
 		if ok, err := h.continueReadalongRun(ctx, eng, r, old); ok || err != nil {
 			return err
 		}
@@ -842,6 +848,28 @@ func (h *Handler) create(ctx context.Context, eng Engine, r *run) error {
 		}
 	}
 	return h.queueBook(ctx, eng, r, h.newBook(r, sp, ebookPath))
+}
+
+// earlierRun is the engine book at source path key (store.ErrNotFound for none,
+// or one that went while the job waited), once a chapters job following it gave
+// way; any other open job on it refuses the job.
+func (h *Handler) earlierRun(ctx context.Context, r *run, key string) (store.Book, error) {
+	old, err := h.o.DB.GetBookBySourcePath(ctx, key)
+	if err != nil {
+		return store.Book{}, err
+	}
+	old, openID, openKind, err := h.awaitChaptersGivingWay(ctx, r, old)
+	switch {
+	case err != nil:
+		return store.Book{}, err
+	case openID != 0 && openKind == ChaptersKind:
+		return store.Book{}, fmt.Errorf("job %d is finding this book's chapters; let it finish (this job can then go on from its transcription) or cancel it first", openID)
+	case openID != 0 && openKind == ReadalongKind:
+		return store.Book{}, fmt.Errorf("job %d is making this book's read-along; let it finish or cancel it first", openID)
+	case openID != 0:
+		return store.Book{}, fmt.Errorf("job %d is already generating this book; cancel it first", openID)
+	}
+	return old, nil
 }
 
 // errEarlierRunBusy is a new job's refusal while the engine stays busy with the

@@ -1344,12 +1344,18 @@ internal/
             Accounts tab shows; the credentials are in the vault.
             Phase 3c-1: ContinueReadalong(id, from, to, goal, job) moves a stopped
             engine book (done, or failed, parked or paused: the caller holds it and
-            checked no other job follows it) on at to with goal, kind audio and no ebook
-            path, its status cleared and the job mapped in one transaction;
-            ErrNotContinuable when it isn't stopped at from or (going on past
+            checked no other job follows it) on at to with goal, its kind kept, its
+            status cleared and the job mapped in one transaction; ErrNotContinuable
+            when it isn't stopped at from, is an ebook run, or (going on past
             inspecting) was swept. Going on from inspecting ignores a sweep and clears
             swept_at on the book's mappings (the retention then counts from this job's
-            end). GenerateBookSwept(bookID).
+            end). GenerateBookSwept(bookID). AudioRunKey(path) is the source_path
+            of the audio run beside an ebook run ("audio:" + the path: two engine books
+            at one path, never a real path); Book.IsAudioRun, Book.AudioSource (the
+            path the audio is read from: inspect and the markers file read it).
+            ContinueChapters sets source_path to nb's when nb names one (a generate job
+            taking on the audio run as the book's own). StageEverSucceeded(book, stage)
+            counts superseded successes (a history reader).
   state/    per-book pipeline state machine: table-driven states/lanes/transitions,
             CanStart/NextState guards, the audit fix-loop cap. Pure, no I/O. M6 added
             ParkCode (typed park reasons - M7 added contrib_unavailable, core_needed,
@@ -2211,18 +2217,23 @@ internal/
             lane, Abandoner; generate's strict prepare). createReadalong refuses before
             any work a book the server names no ebook for ("this book has no ebook"),
             one outside the mapping, not a regular file, over 256 MiB, DRM or not an
-            EPUB (readalong.OpenEPUB). An earlier engine book at the audio's path
-            another open job follows refuses the job (a generate job's in words); one a
+            EPUB (readalong.OpenEPUB). The earlier engine book is audioRun's: the
+            book's own run, unless that is an ebook run, which a read-along or chapters
+            job never continues, converts nor clears (its kind, ebook path, manifest and
+            notes are describe's and a contribution's): then the audio run beside it
+            (store.AudioRunKey), a new one made there. One another open job follows
+            refuses the job (a generate job's in words); one a
             stage holds says try again in a minute; else, held, readalongReuse (decision
             6, pure, table-tested) picks: a whole run past qa_adjudicating (or stopped
             at readalong_aligning) -> readalong_aligning, goal kept; a read-along done or stopped at aligning ->
             aligning; transcribed but not repaired (chapters done; stopped from
             sanitizing to retranscribing) -> sanitizing, goal readalong; stopped at asr
             and TranscriptionContinuable -> splitting; a finished whole run swept or
-            with other audio (or an ebook run) -> inspecting, goal readalong, its
-            transcripts purged first when another recording's, its notes kept (a
-            read-along with a fact pass behind it counts as a whole run: holdsWholeRun,
-            which createChapters' errChaptersKeepsRun applies too); else cleared for a
+            with other audio -> inspecting, goal readalong, its transcripts purged
+            first when another recording's, its notes kept (a read-along with a fact
+            pass behind it counts as a whole run: holdsWholeRun, which createChapters'
+            errChaptersKeepsRun applies too; read from the notes on disk, else any fact
+            pass that ever succeeded, so a Reconcile rewind doesn't lift it); else cleared for a
             new book (goal readalong, no series, no contribution). An audio file that
             can't be looked at now says try again, never "the audio changed"; a file the
             server has no length for fails before any work (rescan). prepareContinue
@@ -2230,7 +2241,11 @@ internal/
             after it and retires their successes and those of every stage a purge took
             the sentinel of (a restart's Reconcile would rewind to them), drops asr.json
             going on from inspecting (pipeline.ForgetTranscription: a new manifest), and
-            resets the repair round before qa_sweep. A generate job never continues a
+            resets the repair round before qa_sweep. A generate job reading the audio
+            takes on the audio run beside an ebook run (earlierRun for both; the ebook
+            run cleared first, then the audio run continued, re-keyed to the book's
+            path, or cleared); one reading the ebook leaves it alone, and describe's
+            latestGenerated skips it (no notes). A generate job never continues a
             read-along transcribed in windows (its chapters were never found). The request is written
             before the book goes on, and again (readalongAsk) when a resumed run first
             looks or the server moved the job with its book. At done: the map under 50%

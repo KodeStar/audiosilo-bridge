@@ -29,7 +29,7 @@ import (
 // detected manifest and a list of three chapters current for it.
 func detectChapters(t *testing.T, b store.Book) {
 	t.Helper()
-	m := audio.Manifest{Source: b.SourcePath, Style: audio.StyleMarkers, Detected: true, Duration: 30, ChapterCount: 3}
+	m := audio.Manifest{Source: b.AudioSource(), Style: audio.StyleMarkers, Detected: true, Duration: 30, ChapterCount: 3}
 	for i, title := range []string{"Prologue / Chapter 1", "Chapter 2", "Chapter 3"} {
 		m.Chapters = append(m.Chapters, audio.Chapter{Chapter: i + 1, Title: title, Start: float64(i * 10), End: float64(i*10 + 10), Duration: 10})
 	}
@@ -40,7 +40,7 @@ func detectChapters(t *testing.T, b store.Book) {
 	raw, _ := os.ReadFile(filepath.Join(b.WorkDir, audio.ManifestName)) //nolint:gosec // test
 	sum := sha256.Sum256(raw)
 	d := pipeline.DetectedChapters{ManifestSHA: hex.EncodeToString(sum[:]), DurationMs: 30000}
-	if info, err := os.Stat(b.SourcePath); err == nil {
+	if info, err := os.Stat(b.AudioSource()); err == nil {
 		d.SourceSize, d.SourceModTime = info.Size(), info.ModTime().UnixNano()
 	}
 	for i, c := range m.Chapters {
@@ -1349,5 +1349,41 @@ func TestChaptersFromEarlierParksOnce(t *testing.T) {
 	}
 	if _, err := hr.db.GetGenerateBook(context.Background(), 47); err == nil {
 		t.Fatal("the job mapped an engine book of its own")
+	}
+}
+
+// A chapters job never clears an ebook run (nor reads it: it holds no
+// transcription): it runs in the audio run beside it, the ebook run left as it was.
+func TestChaptersDetectRunsBesideAnEbookRun(t *testing.T) {
+	t.Parallel()
+	hr := newHarness(t)
+	hr.exec.windowed = true
+	ctx := context.Background()
+	sp, ok, err := metaops.AllowedPath(filepath.Join(hr.root, "Loose.m4b"), []string{hr.root})
+	if err != nil || !ok {
+		t.Fatal(sp, ok, err)
+	}
+	ebook, err := hr.db.CreateBook(ctx, store.NewBook{SourcePath: sp, WorkDir: filepath.Join(hr.work, "loose"), Title: "Loose",
+		Kind: string(state.KindEbook), EbookPath: filepath.Join(hr.root, "Loose.epub"), State: string(state.Done)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := hr.db.SetBookState(ctx, ebook.ID, string(state.FactPass), string(state.StatusFailed), "", ""); err != nil {
+		t.Fatal(err)
+	}
+	hr.srv.addKind(47, ChaptersKind, "Loose.m4b", `{}`)
+	stop := hr.runner(hr.h, hr.h.ChaptersJob())
+	defer stop()
+	hr.waitFor("done", func() bool { s, _ := hr.srv.final(47); return s == link.StateDone })
+	b := hr.engineBook(47)
+	if b.ID == ebook.ID || b.SourcePath != store.AudioRunKey(sp) || b.Goal != state.GoalChapters {
+		t.Fatalf("the chapters run = %+v", b)
+	}
+	got, err := hr.db.GetBook(ctx, ebook.ID)
+	if err != nil || got.Kind != string(state.KindEbook) || got.State != string(state.FactPass) || got.SourcePath != sp {
+		t.Fatalf("the ebook run = %+v, %v", got, err)
+	}
+	if _, err := os.Stat(filepath.Join(hr.root, AttachDir, "Loose.chapters.json")); err != nil {
+		t.Fatal(err)
 	}
 }

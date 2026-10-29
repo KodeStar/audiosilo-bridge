@@ -180,7 +180,7 @@ func (h *Handler) readalongAsk(ctx context.Context, r *run, b store.Book) error 
 // readalongEarlier is what decision 6's table reads of the book's earlier engine
 // book.
 type readalongEarlier struct {
-	Goal, State, Status, Kind string
+	Goal, State, Status string
 	// Swept: the retention deleted its transcripts. Current: its audio is still
 	// the book's (pipeline.AudioCurrent). Continuable: stopped at asr, it can go on
 	// transcribing from what it kept (pipeline.TranscriptionContinuable). FactPass:
@@ -188,8 +188,8 @@ type readalongEarlier struct {
 	Swept, Current, Continuable, FactPass bool
 }
 
-// readalongReuse is the reuse table (decision 6): where the book's earlier engine
-// book goes on for a read-along (to, with goal), or ok false for a new one (the
+// readalongReuse is the reuse table (decision 6): where the book's earlier audio
+// engine book (never an ebook run: audioRun) goes on for a read-along (to, with goal), or ok false for a new one (the
 // earlier cleared). Every row but the last needs the transcripts kept and the
 // audio unchanged:
 //   - a whole run (goal "") past qa_adjudicating (a finished one an earlier
@@ -208,7 +208,7 @@ func readalongReuse(e readalongEarlier) (to state.State, goal string, ok bool) {
 	if st != state.Done && status != state.StatusFailed && status != state.StatusNeedsAttention && status != state.StatusPaused {
 		return "", "", false
 	}
-	kept := !e.Swept && e.Current && e.Kind != string(state.KindEbook)
+	kept := !e.Swept && e.Current
 	order := state.Order(st)
 	switch {
 	case kept && e.Goal == "" && order >= state.Order(state.ReadalongAligning):
@@ -309,8 +309,9 @@ func (h *Handler) prepareContinue(ctx context.Context, b store.Book, to state.St
 
 // createReadalong makes (or reuses) the engine book of a read-along job. The
 // ebook is checked first (none, DRM, not an EPUB, too big: refused before any
-// transcription). An earlier engine book at the audio's path that another open
-// job follows refuses the job; one a stage runs on makes it try again in a
+// transcription). The earlier engine book is audioRun's (an ebook run is never
+// touched: the read-along runs beside it). One another open job follows refuses
+// the job; one a stage runs on makes it try again in a
 // minute; otherwise the reuse table decides, under the engine's hold, and what
 // it doesn't reuse is cleared for a new book (goal readalong, no series: nothing
 // a later volume carries on from).
@@ -333,7 +334,7 @@ func (h *Handler) createReadalong(ctx context.Context, eng Engine, r *run) error
 	if err != nil || !ok {
 		return errors.New("the book's path leaves the library's folder")
 	}
-	old, err := h.o.DB.GetBookBySourcePath(ctx, sp)
+	old, key, err := h.audioRun(ctx, sp)
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 	case err != nil:
@@ -346,13 +347,42 @@ func (h *Handler) createReadalong(ctx context.Context, eng Engine, r *run) error
 			return err
 		}
 	}
-	nb := h.newBook(r, sp, "")
+	nb := h.newBook(r, key, "")
 	nb.Goal = state.GoalReadalong
 	nb.Series, nb.SeriesPos, nb.ContribMode = "", "", ""
 	if err := h.writeReadalongRequest(r, nb.WorkDir); err != nil {
 		return err
 	}
 	return h.queueBook(ctx, eng, r, nb)
+}
+
+// audioRun is the engine book a read-along or chapters job of the book at source
+// path sp works on, and the source path a new one takes (key): the book's own run,
+// unless that is an ebook run, which neither job ever continues, converts nor
+// clears (its notes, chapter manifest and kind are the description's and a
+// contribution's): then the audio run beside it (store.AudioRunKey), which is
+// also the one found when the ebook run went since. store.ErrNotFound (with the
+// key) for none.
+func (h *Handler) audioRun(ctx context.Context, sp string) (b store.Book, key string, err error) {
+	own, err := h.o.DB.GetBookBySourcePath(ctx, sp)
+	switch {
+	case err == nil && own.Kind != string(state.KindEbook):
+		return own, sp, nil
+	case err != nil && !errors.Is(err, store.ErrNotFound):
+		return store.Book{}, "", err
+	}
+	key = store.AudioRunKey(sp)
+	beside, berr := h.o.DB.GetBookBySourcePath(ctx, key)
+	switch {
+	case berr == nil:
+		return beside, key, nil
+	case !errors.Is(berr, store.ErrNotFound):
+		return store.Book{}, "", berr
+	case err != nil:
+		// No run at all: a new one is the book's own.
+		return store.Book{}, sp, store.ErrNotFound
+	}
+	return store.Book{}, key, store.ErrNotFound
 }
 
 // reuseForReadalong continues the book's earlier engine book old for the job when
@@ -396,7 +426,7 @@ func (h *Handler) reuseForReadalong(ctx context.Context, eng Engine, r *run, old
 	if pe := (*fs.PathError)(nil); errors.As(err, &pe) && !errors.Is(err, fs.ErrNotExist) {
 		return false, fmt.Errorf("%w; try again in a minute", errAudioUnseen)
 	}
-	e := readalongEarlier{Goal: old.Goal, State: old.State, Status: old.Status, Kind: old.Kind, Swept: swept, Current: current}
+	e := readalongEarlier{Goal: old.Goal, State: old.State, Status: old.Status, Swept: swept, Current: current}
 	if state.State(old.State) == state.ASR {
 		e.Continuable = pipeline.TranscriptionContinuable(old.WorkDir)
 	}
@@ -476,7 +506,7 @@ func (h *Handler) continueReadalongRun(ctx context.Context, eng Engine, r *run, 
 	if err := h.prepareContinue(ctx, old, state.QASweep); err != nil {
 		return false, fmt.Errorf("could not ready the book's read-along run: %w", err)
 	}
-	err = h.o.DB.ContinueChapters(ctx, old.ID, string(state.Done), string(state.QASweep), h.newBook(r, old.SourcePath, ""),
+	err = h.o.DB.ContinueChapters(ctx, old.ID, string(state.Done), string(state.QASweep), h.newBook(r, old.AudioSource(), ""),
 		store.GenerateBook{ServerJobID: r.job.ID, LibraryID: r.lib.ID, RelPath: r.rel})
 	if errors.Is(err, store.ErrNotContinuable) {
 		return false, nil

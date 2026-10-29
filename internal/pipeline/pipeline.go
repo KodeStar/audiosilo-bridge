@@ -586,7 +586,7 @@ func (e *Executor) inspect(ctx context.Context, book store.Book, r scheduler.Sta
 		// A read-along never maps markers with an agent: a table that isn't usable
 		// is transcribed in windows, as a markerless file is (decision 3).
 		opts := audio.InspectOptions{WindowUnusable: book.Goal == state.GoalReadalong}
-		manifest, markers, ierr = audio.InspectWith(ctx, book.SourcePath, book.WorkDir, ffprobe, ffmpeg, opts)
+		manifest, markers, ierr = audio.InspectWith(ctx, book.AudioSource(), book.WorkDir, ffprobe, ffmpeg, opts)
 		return ierr
 	})
 	if err != nil {
