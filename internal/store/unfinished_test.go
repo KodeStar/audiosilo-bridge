@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"slices"
+	"strings"
 	"testing"
+	"unicode"
 
 	"github.com/kodestar/audiosilo-bridge/internal/state"
 )
@@ -87,8 +89,7 @@ func TestUnfinishedReadsSkipFinishedBooks(t *testing.T) {
 	if len(finished) != 1 {
 		t.Fatalf("ListFinishedSeriesBooks = %+v, want the one finished series book with a live volume", finished)
 	}
-	if f := finished[0]; f.ID != doneSeries.ID || f.State != "done" || f.Status != "" || f.Series != "Saga" ||
-		f.SeriesPos != "2" || f.Title != "" || f.WorkDir != "" {
+	if f := finished[0]; f != (SeriesMember{ID: doneSeries.ID, Series: "Saga", SeriesPos: "2"}) {
 		t.Fatalf("finished series book = %+v", f)
 	}
 
@@ -132,5 +133,45 @@ func TestUnfinishedPredicateMatchesTerminalStates(t *testing.T) {
 	}
 	if got := bookIDs(books); !slices.Equal(got, want) {
 		t.Fatalf("ListUnfinishedBooks = %v, want %v", got, want)
+	}
+}
+
+// A finished volume groups with its series' unfinished one however either is
+// padded: the SQL trims the characters strings.TrimSpace trims (bridge#31), so
+// the store's grouping and the Go ranks agree, a no-break space and a tab
+// included. A series that is only space is no series.
+func TestFinishedSeriesTrimsAsGoDoes(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	mk := func(path, st, series string) Book {
+		t.Helper()
+		b, err := db.CreateBook(ctx, NewBook{SourcePath: path, WorkDir: "/w" + path, Title: path, State: st, Series: series, SeriesPos: "1"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	mk("/live", "asr", "Saga\u00a0")
+	padded := mk("/padded", "done", "\t Saga\u3000")
+	mk("/blank", "done", " \u00a0")
+	mk("/blank-live", "asr", "\u2003")
+	finished, err := db.ListFinishedSeriesBooks(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(finished) != 1 || finished[0].ID != padded.ID {
+		t.Fatalf("ListFinishedSeriesBooks = %+v, want the padded Saga volume only", finished)
+	}
+	if got := strings.TrimSpace(finished[0].Series); got != "Saga" {
+		t.Fatalf("series = %q", got)
+	}
+}
+
+// seriesSpace is exactly unicode.IsSpace's set, the one strings.TrimSpace trims.
+func TestSeriesSpaceIsUnicodeSpace(t *testing.T) {
+	for r := rune(0); r <= unicode.MaxRune; r++ {
+		if unicode.IsSpace(r) != strings.ContainsRune(seriesSpace, r) {
+			t.Fatalf("U+%04X: unicode.IsSpace %v, in seriesSpace %v", r, unicode.IsSpace(r), !unicode.IsSpace(r))
+		}
 	}
 }

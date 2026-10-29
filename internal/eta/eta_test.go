@@ -195,8 +195,8 @@ func TestQueueETALegacyGlobalInvocationCapIsNotMultiplied(t *testing.T) {
 		{ID: 2, State: state.FactPass, MaxAgentsPerBook: 2, Progress: map[string]Progress{"fact_pass": {Total: 2}}},
 	}
 	rates := map[string]float64{"fact_pass": 100}
-	legacy := QueueETA(books, rates, LaneCaps{ASR: 1, Mechanical: 2, Agent: 2, AgentInvocations: 2})
-	modern := QueueETA(books, rates, LaneCaps{ASR: 1, Mechanical: 2, Agent: 2, AgentInvocations: 4})
+	legacy := QueueETA(books, nil, rates, LaneCaps{ASR: 1, Mechanical: 2, Agent: 2, AgentInvocations: 2})
+	modern := QueueETA(books, nil, rates, LaneCaps{ASR: 1, Mechanical: 2, Agent: 2, AgentInvocations: 4})
 	if legacy-modern != 100 {
 		t.Fatalf("legacy=%v modern=%v delta=%v, want one extra extraction wave", legacy, modern, legacy-modern)
 	}

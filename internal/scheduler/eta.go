@@ -21,7 +21,7 @@ import (
 // skips the progress query and the queue simulation entirely and publishes a single
 // empty snapshot (deduped, so an idle daemon clears the ETA once and then stays
 // silent). Only an active pass pays for the full recompute.
-func (s *Scheduler) publishETAs(ctx context.Context, books []store.Book) {
+func (s *Scheduler) publishETAs(ctx context.Context, books []store.Book, finished []state.SeriesQueueItem) {
 	if !anyActiveBook(books) {
 		s.publishEmptyETAs()
 		return
@@ -58,7 +58,7 @@ func (s *Scheduler) publishETAs(ctx context.Context, books []store.Book) {
 	// Every capacity the simulation runs under comes from the dispatcher's own
 	// constants, including the mechanical lane's narrower source-IO sub-cap - the
 	// prediction and the dispatch must share one capacity model.
-	queue := round10(eta.QueueETA(inputs, rates, eta.LaneCaps{
+	queue := round10(eta.QueueETA(inputs, finished, rates, eta.LaneCaps{
 		ASR: asrCapacity, Mechanical: mechCapacity, MechanicalSourceIO: sourceIOCapacity,
 		Agent:            s.agentCapacity(),
 		AgentInvocations: agentInvocationCapacity(s.exec, s.agentCapacity()),

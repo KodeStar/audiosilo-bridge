@@ -85,7 +85,7 @@ func TestPublishETAsAndDedup(t *testing.T) {
 	defer sub.Close()
 
 	books, _ := db.ListBooks(context.Background())
-	s.publishETAs(context.Background(), books)
+	s.publishETAs(context.Background(), books, nil)
 
 	// One eta.update frame carrying the queued book with a positive ETA.
 	ev := waitFor(t, sub, "eta.update")
@@ -112,7 +112,7 @@ func TestPublishETAsAndDedup(t *testing.T) {
 	}
 
 	// A second identical pass is deduped: no further eta.update frame.
-	s.publishETAs(context.Background(), books)
+	s.publishETAs(context.Background(), books, nil)
 	if got := drainType(sub, "eta.update"); got {
 		t.Error("identical ETA snapshot republished; want deduped")
 	}
@@ -137,7 +137,7 @@ func TestETASecondsNoETAForParked(t *testing.T) {
 	}
 
 	books, _ := db.ListBooks(ctx)
-	s.publishETAs(ctx, books)
+	s.publishETAs(ctx, books, nil)
 
 	if _, ok := s.ETASeconds(active.ID); !ok {
 		t.Error("active book has no ETA, want one")
@@ -165,7 +165,7 @@ func TestPublishETAsIdleEmptySnapshot(t *testing.T) {
 
 	// First pass: the queued book is active, so it gets an ETA.
 	books, _ := db.ListBooks(ctx)
-	s.publishETAs(ctx, books)
+	s.publishETAs(ctx, books, nil)
 	if _, ok := s.ETASeconds(b.ID); !ok {
 		t.Fatal("active book has no ETA after the first pass")
 	}
@@ -178,7 +178,7 @@ func TestPublishETAsIdleEmptySnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	books, _ = db.ListBooks(ctx)
-	s.publishETAs(ctx, books)
+	s.publishETAs(ctx, books, nil)
 
 	// An empty eta.update is published and the snapshot is cleared. queue_seconds is
 	// JSON null (nothing to estimate), not a numeric 0.
@@ -201,7 +201,7 @@ func TestPublishETAsIdleEmptySnapshot(t *testing.T) {
 	}
 
 	// A second idle pass is deduped: no further eta.update frame.
-	s.publishETAs(ctx, books)
+	s.publishETAs(ctx, books, nil)
 	if drainType(sub, "eta.update") {
 		t.Error("idle clear republished; want deduped")
 	}
@@ -222,7 +222,7 @@ func TestETASnapshot(t *testing.T) {
 
 	b, _ := db.CreateBook(ctx, store.NewBook{SourcePath: "/a", WorkDir: "/w/a", Title: "A"})
 	books, _ := db.ListBooks(ctx)
-	s.publishETAs(ctx, books)
+	s.publishETAs(ctx, books, nil)
 
 	snap := s.ETASnapshot()
 	single, ok := s.ETASeconds(b.ID)

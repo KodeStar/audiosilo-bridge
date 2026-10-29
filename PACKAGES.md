@@ -1533,12 +1533,13 @@ internal/
             any other (its chapter FLACs go; a continue re-splits).
             Perf quick wins (2026-10): the dispatch pass reads dispatchBooks, the
             unfinished books in full (store.ListUnfinishedBooks: all but state done
-            with no status) plus the finished books of a series that still has an
-            unfinished volume, with only id/state/status/series/series_pos
-            (ListFinishedSeriesBooks), since a
-            finished volume still counts in the series breadth ranks (asrBreadthRanks,
-            the ETA simulation); the ETA progress read is ListUnfinishedProgress.
-            The two reads are two statements, so mergeFinished keeps a book that
+            with no status) and, apart from them, the finished books of a series
+            that still has an unfinished volume as []state.SeriesQueueItem
+            (ListFinishedSeriesBooks, its series trimmed of exactly what
+            strings.TrimSpace trims, bridge#31), since a finished volume still
+            counts in the series breadth ranks (asrBreadthRanks, eta.QueueETA's
+            finished); the ETA progress read is ListUnfinishedProgress.
+            The two reads are two statements, so dropFinished keeps a book that
             reached done between them once, as its finished identity.
             A book that leaves done is read in full at the next pass. Reconcile,
             the startup GC and the restart re-admit still read every book.

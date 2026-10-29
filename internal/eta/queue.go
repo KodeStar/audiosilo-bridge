@@ -85,13 +85,15 @@ func (sb *simBook) holdsSeriesLock() bool {
 // the agent lane
 // runs a book only while it holds its series lock (the lowest-position book with
 // agent work remaining per series; seriesless books are always eligible), recomputed
-// as books progress. It is pure and reads no clock.
-func QueueETA(books []Book, rates map[string]float64, caps LaneCaps) float64 {
-	seriesItems := make([]state.SeriesQueueItem, 0, len(books))
+// as books progress. finished are the series identities of finished volumes
+// (store.ListFinishedSeriesBooks), which count in the breadth ranks and run
+// nothing. It is pure and reads no clock.
+func QueueETA(books []Book, finished []state.SeriesQueueItem, rates map[string]float64, caps LaneCaps) float64 {
+	seriesItems := make([]state.SeriesQueueItem, 0, len(books)+len(finished))
 	for _, b := range books {
 		seriesItems = append(seriesItems, state.SeriesQueueItem{ID: b.ID, Series: b.Series, SeriesPos: b.SeriesPos})
 	}
-	seriesRanks := state.SeriesBreadthRanks(seriesItems)
+	seriesRanks := state.SeriesBreadthRanks(append(seriesItems, finished...))
 	sim := make([]*simBook, 0, len(books))
 	for _, b := range books {
 		// BookETA describes an isolated book and may use its full fan-out. QueueETA
