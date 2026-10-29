@@ -273,3 +273,64 @@ func TestReparseMarkerlessIntoWindows(t *testing.T) {
 		t.Fatalf("a draft with chapters: %+v, %v", m, err)
 	}
 }
+
+// A read-along book's inspect (Phase 3c) windows a marker table that isn't usable
+// (chapter 2 missing from the numbering) instead of drafting it for markers_normalizing; any
+// other book's inspect keeps the draft.
+func TestInspectWindowsAnUnusableTableForReadalong(t *testing.T) {
+	ffmpeg, ffprobe := requireFFmpeg(t)
+	dir := t.TempDir()
+	book := genChapteredM4B(t, ffmpeg, dir, []string{"Chapter 1", "Chapter 3", "Chapter 4"}, 2)
+	m, stats, err := Inspect(context.Background(), book, filepath.Join(dir, "work"), ffprobe, ffmpeg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Usable() || m.Style != StyleMarkers {
+		t.Fatalf("whole run: style %s, usable %v", m.Style, stats.Usable())
+	}
+	m, stats, err = InspectWith(context.Background(), book, filepath.Join(dir, "work2"), ffprobe, ffmpeg, InspectOptions{WindowUnusable: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !stats.Usable() || m.Style != StyleWindows || len(m.Chapters) != 1 || m.Chapters[0].End < 5.9 {
+		t.Fatalf("read-along: style %s, usable %v, %+v", m.Style, stats.Usable(), m.Chapters)
+	}
+	// A usable table stays a markers manifest for a read-along book too.
+	gdir := filepath.Join(dir, "g")
+	if err := os.MkdirAll(gdir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	good := genChapteredM4B(t, ffmpeg, gdir, []string{"Chapter 1", "Chapter 2"}, 2)
+	m, _, err = InspectWith(context.Background(), good, filepath.Join(dir, "work3"), ffprobe, ffmpeg, InspectOptions{WindowUnusable: true})
+	if err != nil || m.Style != StyleMarkers || len(m.Chapters) != 2 {
+		t.Fatalf("usable table: %s %d, %v", m.Style, len(m.Chapters), err)
+	}
+}
+
+// CutSpan joins stretches of chapter FLACs into one clip (the read-along heal).
+func TestCutSpan(t *testing.T) {
+	ffmpeg, ffprobe := requireFFmpeg(t)
+	dir := t.TempDir()
+	var files []string
+	for k := range 2 {
+		p := filepath.Join(dir, ChapterFileName(k+1))
+		if out, err := exec.Command(ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",
+			"-i", "sine=frequency=220:duration=4", "-ac", "1", "-ar", "16000", p).CombinedOutput(); err != nil {
+			t.Fatalf("generate: %v: %s", err, out)
+		}
+		files = append(files, p)
+	}
+	out := filepath.Join(dir, "clip.flac")
+	if err := CutSpan(context.Background(), ffmpeg, []SpanPart{{files[0], 3, 1}, {files[1], 0, 1.5}}, out); err != nil {
+		t.Fatal(err)
+	}
+	if got := flacSeconds(t, ffprobe, out); math.Abs(got-2.5) > 0.003 {
+		t.Fatalf("clip runs %.4f s, want 2.5", got)
+	}
+	if err := CutSpan(context.Background(), ffmpeg, nil, out); err == nil {
+		t.Fatal("an empty clip was cut")
+	}
+	if err := CutSpan(context.Background(), "", []SpanPart{{files[0], 0, 1}}, out); err == nil {
+		t.Fatal("a clip was cut without ffmpeg")
+	}
+}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -350,4 +351,44 @@ func allowedChapters(rep *Report) map[int]bool {
 		set[f.Chapter] = true
 	}
 	return set
+}
+
+// MechanicalPlan is a read-along book's loop repair (Phase 3c, decision 4), made
+// without an agent: every chapter in the retranscribe queue or with a loop finding
+// (a repeated run, a multi-loop, a tail-rate hit) is re-transcribed whole,
+// prompt-free; every other flagged chapter is accepted. Never a tail or mid clip:
+// their spliced text has no word timings to align. Nil for a clean report.
+func MechanicalPlan(rep *Report) *Plan {
+	redo := map[int]bool{}
+	for _, ch := range rep.RetranscribeQueue {
+		redo[ch] = true
+	}
+	for _, r := range rep.RepeatedRuns {
+		redo[r.Chapter] = true
+	}
+	for _, f := range rep.MultiLoop {
+		redo[f.Chapter] = true
+	}
+	for _, h := range rep.TailRate {
+		redo[h.Chapter] = true
+	}
+	chapters := AllowedChapters(rep)
+	for ch := range redo {
+		if !slices.Contains(chapters, ch) {
+			chapters = append(chapters, ch)
+		}
+	}
+	if len(chapters) == 0 {
+		return nil
+	}
+	sort.Ints(chapters)
+	p := &Plan{Notes: "mechanical loop repair (read-along): no agent"}
+	for _, ch := range chapters {
+		if redo[ch] {
+			p.Entries = append(p.Entries, PlanEntry{Chapter: ch, Action: ActionRetranscribe, Reason: "a loop or a dropout the sweep found: re-transcribed prompt-free"})
+		} else {
+			p.Entries = append(p.Entries, PlanEntry{Chapter: ch, Action: ActionAccept, Reason: "no loop: kept as transcribed"})
+		}
+	}
+	return p
 }

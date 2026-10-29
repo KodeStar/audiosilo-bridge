@@ -311,3 +311,13 @@ func TestPauseResume(t *testing.T) {
 	}
 	t.Fatal("resumed book did not reach done")
 }
+
+// A read-along book's readalong_aligning is ASR work in the queue's groups.
+func TestQueueGroupReadalongAligning(t *testing.T) {
+	if g := queueGroup(state.KindAudio, state.ReadalongAligning); g != queueGroupASR {
+		t.Fatalf("readalong_aligning group %q, want %q", g, queueGroupASR)
+	}
+	if g := queueGroup(state.KindAudio, state.SpellingResearch); g != queueGroupProcessing {
+		t.Fatalf("spelling_research group %q", g)
+	}
+}

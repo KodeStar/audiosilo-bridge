@@ -420,3 +420,53 @@ func TestLoadReport_RoundTrip(t *testing.T) {
 		t.Error("expected LoadReport to fail in a dir without the report")
 	}
 }
+
+// TestMechanicalPlan: a read-along book's loop repair re-transcribes the queue and
+// every chapter with a loop finding, accepts the rest, never clips, and passes the
+// plan validator the retranscribing stage relies on.
+func TestMechanicalPlan(t *testing.T) {
+	if p := MechanicalPlan(&Report{}); p != nil {
+		t.Fatalf("a clean report planned %+v", p)
+	}
+	rep := &Report{
+		RetranscribeQueue: []int{2},
+		RepeatedRuns:      []RepeatedRun{{Chapter: 3}},
+		MultiLoop:         []MultiLoopFinding{{Chapter: 4, MidChapter: true}, {Chapter: 5}},
+		TailRate:          []TailRateHit{{Chapter: 6}},
+		CrossSegment:      []CrossSegmentHit{{Chapter: 7}},
+		WPHOutliers:       []WPHOutlier{{Chapter: 2}, {Chapter: 8}},
+	}
+	p := MechanicalPlan(rep)
+	got := map[int]PlanAction{}
+	for _, e := range p.Entries {
+		got[e.Chapter] = e.Action
+		if e.ClipStartSec != 0 || e.ClipEndSec != 0 {
+			t.Fatalf("chapter %d has a clip window", e.Chapter)
+		}
+	}
+	for _, ch := range []int{2, 3, 4, 5, 6} {
+		if got[ch] != ActionRetranscribe {
+			t.Errorf("chapter %d: %q, want retranscribe", ch, got[ch])
+		}
+	}
+	for _, ch := range []int{7, 8} {
+		if got[ch] != ActionAccept {
+			t.Errorf("chapter %d: %q, want accept", ch, got[ch])
+		}
+	}
+	if !p.RetranscribeNeeded() {
+		t.Fatal("RetranscribeNeeded is false")
+	}
+	durations := map[int]float64{}
+	for ch := 1; ch <= 8; ch++ {
+		durations[ch] = 600
+	}
+	if err := p.Validate(rep, durations); err != nil {
+		t.Fatalf("the mechanical plan doesn't validate: %v", err)
+	}
+	// Only soft findings: everything accepted, nothing to re-run.
+	soft := MechanicalPlan(&Report{CrossSegment: []CrossSegmentHit{{Chapter: 1}}})
+	if soft == nil || soft.RetranscribeNeeded() {
+		t.Fatalf("soft findings: %+v", soft)
+	}
+}
