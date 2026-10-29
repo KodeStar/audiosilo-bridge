@@ -792,7 +792,7 @@ func TestContinueChaptersForACancelledJobLeavesTheRun(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	r := &run{job: jobs.Job{ID: 58}, lib: link.Library{ID: 1}, rel: "Loose.m4b", source: SourceAudio, place: place{single: true}}
-	if ok, err := hr.h.continueChapters(ctx, hr.sched, r, b); ok || err == nil {
+	if ok, err := hr.h.continueChapters(ctx, hr.sched, r, b, 0); ok || err == nil {
 		t.Fatalf("continue for a cancelled job = %v, %v", ok, err)
 	}
 	if got, _ := hr.db.GetBook(context.Background(), b.ID); got.Goal != state.GoalChapters || !scheduler.IsCancelled(got) {
@@ -1047,7 +1047,7 @@ func TestContinueChaptersRefusesAFolderThatGainedAFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := &run{job: jobs.Job{ID: 59}, lib: link.Library{ID: 1}, rel: "Solo", source: SourceAudio}
-	if ok, err := hr.h.continueChapters(ctx, hr.sched, r, b); ok || err != nil {
+	if ok, err := hr.h.continueChapters(ctx, hr.sched, r, b, 0); ok || err != nil {
 		t.Fatalf("continue a folder that gained a file = %v, %v", ok, err)
 	}
 	if got, _ := hr.db.GetBook(ctx, b.ID); got.Goal != state.GoalChapters {
@@ -1426,4 +1426,55 @@ func TestChaptersFromEarlierReadsTheAudioRunBesideAnEbookRun(t *testing.T) {
 	if got, err := hr.db.GetBook(ctx, ebook.ID); err != nil || got.Kind != string(state.KindEbook) {
 		t.Fatalf("the ebook run = %+v, %v", got, err)
 	}
+}
+
+// An admin cancels a parked chapters job and asks again at once, before the
+// parked job's next keepalive would tell the Bridge (BRIDGE-01): the new job asks
+// it to report now, waits for its end and runs, rather than refusing it as
+// still open.
+func TestChaptersAgainRightAfterACancelRuns(t *testing.T) {
+	t.Parallel()
+	hr := newHarness(t)
+	stop := hr.runnerKeepalive(time.Hour, hr.h, hr.h.ChaptersJob())
+	defer stop()
+	parkChapters(hr, 90)
+	hr.srv.set(func() { hr.srv.cancel[90] = true })
+	hr.srv.addKind(91, ChaptersKind, "Loose.m4b", `{}`)
+	hr.waitFor("the second chapters job ended", func() bool { s, _ := hr.srv.final(91); return s != "" })
+	if s, u := hr.srv.final(91); s != link.StateDone {
+		t.Fatalf("the second chapters job ended %s (%q), want done", s, errOf(u))
+	}
+	if s, _ := hr.srv.final(90); s != link.StateCancelled {
+		t.Fatalf("the cancelled job ended %q, want cancelled", s)
+	}
+}
+
+// The same job not cancelled is still refused at once: the server answers its
+// report that it holds it open.
+func TestChaptersAgainWhileOneIsParkedIsRefused(t *testing.T) {
+	t.Parallel()
+	hr := newHarness(t)
+	stop := hr.runnerKeepalive(time.Hour, hr.h, hr.h.ChaptersJob())
+	defer stop()
+	parkChapters(hr, 92)
+	start := time.Now()
+	hr.srv.addKind(93, ChaptersKind, "Loose.m4b", `{}`)
+	hr.waitFor("the second chapters job refused", func() bool { s, _ := hr.srv.final(93); return s != "" })
+	if s, u := hr.srv.final(93); s != link.StateFailed || u.Error == nil || !strings.Contains(*u.Error, "job 92 is already finding") {
+		t.Fatalf("the second chapters job ended %s (%q), want refused", s, errOf(u))
+	}
+	if waited := time.Since(start); waited > 5*time.Second {
+		t.Fatalf("the refusal took %v, want no wait for a job the server holds", waited)
+	}
+	if s, _ := hr.srv.final(92); s != "" {
+		t.Fatalf("the parked job ended %q", s)
+	}
+}
+
+// errOf is an update's error, "" for none.
+func errOf(u link.Update) string {
+	if u.Error == nil {
+		return ""
+	}
+	return *u.Error
 }

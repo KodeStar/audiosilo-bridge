@@ -335,7 +335,13 @@ func (hr *harness) runner(h *Handler, more ...jobs.Handler) (stop func()) {
 // runnerOf runs the handlers' jobs until stopped (the returned func): it claims
 // only their kinds.
 func (hr *harness) runnerOf(handlers ...jobs.Handler) (stop func()) {
-	r := jobs.New(hr.db, func() jobs.Server { return hr.cl }, nil, jobs.Options{Keepalive: 30 * time.Millisecond,
+	return hr.runnerKeepalive(30*time.Millisecond, handlers...)
+}
+
+// runnerKeepalive is runnerOf with a running job's keepalive (how soon an idle
+// or parked job hears a cancel on its own).
+func (hr *harness) runnerKeepalive(keepalive time.Duration, handlers ...jobs.Handler) (stop func()) {
+	r := jobs.New(hr.db, func() jobs.Server { return hr.cl }, nil, jobs.Options{Keepalive: keepalive,
 		ProgressEvery: 5 * time.Millisecond, Wait: 10 * time.Millisecond, RetryEvery: 20 * time.Millisecond,
 		ServerID: func() string { return "srv" }, Log: slog.New(slog.NewTextHandler(io.Discard, nil))}, handlers...)
 	ctx, cancel := context.WithCancel(context.Background())

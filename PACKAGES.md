@@ -1999,7 +1999,12 @@ internal/
             contained by metaops.AllowedPath under the mount; an earlier engine book at
             the same source_path is deleted first unless another open job follows it
             (refused: cancel it first) or a stage of it runs (scheduler.ErrBusy: try
-            again in a minute); the new book takes its identity from the server's book
+            again in a minute). An open job in the way is asked to report now
+            (Reporter.Refresh through the handler's runHandle, BRIDGE-01): one the
+            server still holds is refused at once, one its answer stopped (an admin
+            cancelled it a moment ago) or that can't be asked is waited for, up to
+            openJobWait (30 s), as chapters jobs do in openJobRefusal and
+            awaitChaptersGivingWay asks a chapters job to give way at once; the new book takes its identity from the server's book
             block (identity_sources "server"), its work id from params else the
             server's metadata cache, kind ebook with an epub, contrib_mode from the
             params; generate_books maps the job to it. RESUME: a mapping is the job's
@@ -2298,9 +2303,10 @@ internal/
             the sentinel of (a restart's Reconcile would rewind to them), drops asr.json
             going on from inspecting (pipeline.ForgetTranscription: a new manifest), and
             resets the repair round before qa_sweep. A generate job reading the audio
-            takes on the audio run beside an ebook run (earlierRun for both; the ebook
-            run cleared first, then the audio run continued, re-keyed to the book's
-            path, or cleared); one reading the ebook leaves it alone, and describe's
+            takes on the audio run beside an ebook run (earlierRun for both; the audio
+            run continued, re-keyed to the book's path, the ebook run cleared inside
+            the continue under the audio run's hold, or both cleared, the audio run
+            first, so a refused continue keeps both, bridge#34); one reading the ebook leaves it alone, and describe's
             latestGenerated skips it (no notes). A generate job never continues a
             read-along transcribed in windows (its chapters were never found). The request is written
             before the book goes on, and again (readalongAsk) when a resumed run first

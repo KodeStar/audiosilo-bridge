@@ -476,7 +476,7 @@ func (h *Handler) reuseForReadalong(ctx context.Context, eng Engine, r *run, old
 // marker table it couldn't use): the whole pipeline would write characters and
 // recaps by window, its chapters never found; held throughout, as
 // continueChapters does. It reports whether it continued it.
-func (h *Handler) continueReadalongRun(ctx context.Context, eng Engine, r *run, old store.Book) (bool, error) {
+func (h *Handler) continueReadalongRun(ctx context.Context, eng Engine, r *run, old store.Book, ebookRun int64) (bool, error) {
 	if r.source != SourceAudio || old.Goal != state.GoalReadalong || state.State(old.State) != state.Done {
 		return false, nil
 	}
@@ -508,6 +508,9 @@ func (h *Handler) continueReadalongRun(ctx context.Context, eng Engine, r *run, 
 	}
 	if !current {
 		return false, nil
+	}
+	if err := h.clearEbookRun(ctx, eng, r, ebookRun); err != nil {
+		return false, err
 	}
 	if err := h.prepareContinue(ctx, old, state.QASweep); err != nil {
 		return false, fmt.Errorf("could not ready the book's read-along run: %w", err)
