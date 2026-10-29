@@ -93,6 +93,18 @@ func ResetReadalongRepair(workDir string) error {
 	return err
 }
 
+// ForgetTranscription drops asr.json, the provenance naming the manifest the kept
+// raws were transcribed from: a run continued from inspecting (its transcripts gone,
+// or its audio changed) makes a new manifest, which asr would otherwise take for
+// another edition and park manifest_changed for a person.
+func ForgetTranscription(workDir string) error {
+	err := os.Remove(filepath.Join(workDir, asrInfoName))
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	return err
+}
+
 // readalongRepaired reports whether the book's one mechanical repair round ran.
 func readalongRepaired(workDir string) bool {
 	return fsutil.IsFile(filepath.Join(workDir, readalong.RepairedPath))

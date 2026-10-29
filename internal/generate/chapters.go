@@ -662,8 +662,11 @@ func (h *Handler) openJobRefusal(ctx context.Context, r *run, bookID int64) erro
 	if err != nil || id == 0 {
 		return err
 	}
-	if kind == Kind {
+	switch kind {
+	case Kind:
 		return errChaptersGenerating
+	case ReadalongKind:
+		return fmt.Errorf("job %d is making this book's read-along; let it finish or cancel it first", id)
 	}
 	return fmt.Errorf("job %d is already finding this book's chapters; cancel it first", id)
 }
@@ -683,7 +686,9 @@ func (h *Handler) createChapters(ctx context.Context, eng Engine, r *run) error 
 		if err := h.openJobRefusal(ctx, r, old.ID); err != nil {
 			return err
 		}
-		if old.Goal == "" && state.State(old.State) == state.Done {
+		if keeps, err := h.keepsWholeRun(ctx, old); err != nil {
+			return err
+		} else if keeps {
 			return errChaptersKeepsRun
 		}
 		if err := h.clearEarlier(ctx, eng, r, old.ID); err != nil {

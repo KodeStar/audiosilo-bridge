@@ -292,6 +292,19 @@ func TestHoldsSeriesLock(t *testing.T) {
 	}
 }
 
+// TestSeriesLockExempt: a read-along run (any state of goal readalong, or a whole
+// run at readalong_aligning) stays out of its series' lock; nothing else does.
+func TestSeriesLockExempt(t *testing.T) {
+	for _, s := range All() {
+		if !SeriesLockExempt(GoalReadalong, s) {
+			t.Errorf("a read-along at %q holds the series lock", s)
+		}
+		if SeriesLockExempt("", s) != (s == ReadalongAligning) || SeriesLockExempt(GoalChapters, s) != (s == ReadalongAligning) {
+			t.Errorf("SeriesLockExempt at %q is wrong", s)
+		}
+	}
+}
+
 // TestCanStartGuards covers the status, waypoint, and series-lock gates - the
 // allowed and denied cases for each.
 func TestCanStartGuards(t *testing.T) {

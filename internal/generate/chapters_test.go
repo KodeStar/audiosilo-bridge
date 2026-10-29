@@ -1170,31 +1170,55 @@ func TestChaptersDetectRefusedBesideOtherSidecars(t *testing.T) {
 }
 
 // A finished whole run of the book is never cleared for a chapters run: its notes
-// carry a series on and describe the book.
+// carry a series on and describe the book. That holds once a read-along took it on
+// too (stopped aligning, or gone on as a read-along after its fact pass).
 func TestChaptersDetectKeepsAFinishedRun(t *testing.T) {
 	t.Parallel()
-	hr := newHarness(t)
-	ctx := context.Background()
-	sp, ok, err := metaops.AllowedPath(filepath.Join(hr.root, "Loose.m4b"), []string{hr.root})
-	if err != nil || !ok {
-		t.Fatal(sp, ok, err)
-	}
-	old, err := hr.db.CreateBook(ctx, store.NewBook{SourcePath: sp, WorkDir: filepath.Join(hr.work, "loose"), Title: "Loose"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := hr.db.SetBookState(ctx, old.ID, string(state.Done), "", "", ""); err != nil {
-		t.Fatal(err)
-	}
-	hr.srv.addKind(44, ChaptersKind, "Loose.m4b", `{}`)
-	stop := hr.runner(hr.h, hr.h.ChaptersJob())
-	defer stop()
-	hr.waitFor("refused", func() bool { s, _ := hr.srv.final(44); return s == link.StateFailed })
-	if _, final := hr.srv.final(44); final.Error == nil || *final.Error != string(errChaptersKeepsRun) {
-		t.Fatalf("error = %v", final.Error)
-	}
-	if got, err := hr.db.GetBook(ctx, old.ID); err != nil || got.State != string(state.Done) {
-		t.Fatalf("the finished run = %+v, %v", got, err)
+	for _, tc := range []struct {
+		name, goal string
+		st         state.State
+		status     string
+		factPass   bool
+	}{
+		{"whole run done", "", state.Done, "", false},
+		{"whole run stopped aligning a read-along", "", state.ReadalongAligning, string(state.StatusFailed), false},
+		{"read-along gone on from a whole run", state.GoalReadalong, state.Done, "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			hr := newHarness(t)
+			ctx := context.Background()
+			sp, ok, err := metaops.AllowedPath(filepath.Join(hr.root, "Loose.m4b"), []string{hr.root})
+			if err != nil || !ok {
+				t.Fatal(sp, ok, err)
+			}
+			old, err := hr.db.CreateBook(ctx, store.NewBook{SourcePath: sp, WorkDir: filepath.Join(hr.work, "loose"), Title: "Loose", Goal: tc.goal})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := hr.db.SetBookState(ctx, old.ID, string(tc.st), tc.status, "", ""); err != nil {
+				t.Fatal(err)
+			}
+			if tc.factPass {
+				id, err := hr.db.StartStageRun(ctx, old.ID, string(state.FactPass), 1)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := hr.db.FinishStageRun(ctx, id, true, nil); err != nil {
+					t.Fatal(err)
+				}
+			}
+			hr.srv.addKind(44, ChaptersKind, "Loose.m4b", `{}`)
+			stop := hr.runner(hr.h, hr.h.ChaptersJob())
+			defer stop()
+			hr.waitFor("refused", func() bool { s, _ := hr.srv.final(44); return s == link.StateFailed })
+			if _, final := hr.srv.final(44); final.Error == nil || *final.Error != string(errChaptersKeepsRun) {
+				t.Fatalf("error = %v", final.Error)
+			}
+			if got, err := hr.db.GetBook(ctx, old.ID); err != nil || got.State != string(tc.st) {
+				t.Fatalf("the finished run = %+v, %v", got, err)
+			}
+		})
 	}
 }
 

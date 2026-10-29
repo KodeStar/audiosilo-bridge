@@ -826,6 +826,8 @@ func (h *Handler) create(ctx context.Context, eng Engine, r *run) error {
 		return err
 	case openID != 0 && openKind == ChaptersKind:
 		return fmt.Errorf("job %d is finding this book's chapters; let it finish (this job can then go on from its transcription) or cancel it first", openID)
+	case openID != 0 && openKind == ReadalongKind:
+		return fmt.Errorf("job %d is making this book's read-along; let it finish or cancel it first", openID)
 	case openID != 0:
 		return fmt.Errorf("job %d is already generating this book; cancel it first", openID)
 	default:

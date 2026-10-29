@@ -351,6 +351,15 @@ func PathNext(kind Kind, goal string, s State) State {
 // and the ETA simulation both pick each series' lock holder with it.
 func HoldsSeriesLock(s State, st Status) bool { return st != StatusFailed && Order(s) < Order(Ready) }
 
+// SeriesLockExempt reports whether a book of goal at s stays out of its series'
+// lock whatever its state: a read-along run (goal readalong, or a finished whole
+// run aligning again at readalong_aligning, Phase 3c) authors nothing a later
+// volume waits for, yet keeps the series a sequel's carryover finds it by. The
+// scheduler and the ETA simulation both apply it beside HoldsSeriesLock.
+func SeriesLockExempt(goal string, s State) bool {
+	return goal == GoalReadalong || s == ReadalongAligning
+}
+
 // RequiresSeriesOrder reports whether an agent stage consumes series carryover or
 // authors/validates spoiler-sensitive sidecars. Marker normalization and QA
 // adjudication operate only on the current book's audio/transcript, so they may run

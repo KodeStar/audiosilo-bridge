@@ -363,6 +363,10 @@ func TestReadalongReuseTable(t *testing.T) {
 		{"whole run done, swept", readalongEarlier{State: "done", Swept: true, Current: true}, state.Inspecting, "readalong", true},
 		{"whole run done, audio changed", readalongEarlier{State: "done"}, state.Inspecting, "readalong", true},
 		{"ebook whole run done", readalongEarlier{State: "done", Kind: "ebook", Current: true}, state.Inspecting, "readalong", true},
+		{"whole run a read-along stopped aligning", readalongEarlier{State: "readalong_aligning", Status: failed, Current: true}, state.ReadalongAligning, "", true},
+		{"whole run stopped aligning, swept", readalongEarlier{State: "readalong_aligning", Status: failed, Swept: true, Current: true}, state.Inspecting, "readalong", true},
+		{"read-along from a whole run, failed at splitting", readalongEarlier{Goal: "readalong", State: "splitting", Status: failed, Current: true, FactPass: true}, state.Inspecting, "readalong", true},
+		{"read-along from a whole run, done, swept", readalongEarlier{Goal: "readalong", State: "done", Swept: true, Current: true, FactPass: true}, state.Inspecting, "readalong", true},
 		// Denied rows: a new book.
 		{"stopped at asr, not continuable", readalongEarlier{State: "asr", Status: failed, Current: true}, "", "", false},
 		{"read-along done, swept", readalongEarlier{Goal: "readalong", State: "done", Swept: true, Current: true}, "", "", false},
@@ -405,6 +409,7 @@ func seedEarlier(hr *harness, goal string, st state.State, status string) store.
 	}
 	mustWrite(hr.t, filepath.Join(b.WorkDir, audio.ProbeName), `{"format":{"duration":"5400"}}`)
 	mustWrite(hr.t, filepath.Join(b.WorkDir, "transcripts-json", "ch001.json"), "{}")
+	mustWrite(hr.t, filepath.Join(b.WorkDir, "asr.json"), `{"manifest_sha":"the-earlier-manifest"}`)
 	for _, s := range readalongPath {
 		if state.Order(s) < state.Order(st) || st == state.Done {
 			if err := scheduler.WriteSentinel(b.WorkDir, string(s), scheduler.StageResult{QAClean: true}); err != nil {
@@ -435,6 +440,7 @@ func TestReadalongReusesTheEarlierRun(t *testing.T) {
 		transcribed bool
 	}{
 		{"whole run done", "", state.Done, "", false, true, state.ReadalongAligning, "", false},
+		{"whole run stopped aligning", "", state.ReadalongAligning, string(state.StatusFailed), false, true, state.ReadalongAligning, "", false},
 		{"read-along done", state.GoalReadalong, state.Done, "", false, true, state.ReadalongAligning, state.GoalReadalong, false},
 		{"chapters done", state.GoalChapters, state.Done, "", false, true, state.Sanitizing, state.GoalReadalong, false},
 		{"whole run swept", "", state.Done, "", true, true, state.Inspecting, state.GoalReadalong, true},
@@ -476,6 +482,11 @@ func TestReadalongReusesTheEarlierRun(t *testing.T) {
 			}
 			if _, err := hr.db.GetBook(context.Background(), old.ID); tc.sameBook == errors.Is(err, store.ErrNotFound) {
 				t.Fatalf("the earlier book: %v", err)
+			}
+			// Going on from inspecting forgets the manifest the old transcripts were
+			// made from (asr would park manifest_changed); any other row keeps it.
+			if _, err := os.Stat(filepath.Join(b.WorkDir, "asr.json")); tc.sameBook && (err == nil) == (tc.firstStage == state.Inspecting) {
+				t.Fatalf("asr.json after going on from %s: %v", tc.firstStage, err)
 			}
 		})
 	}
@@ -520,5 +531,30 @@ func TestGenerateContinuesAReadalongRun(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(hr.root, "Author", "Book", AttachDir, "characters.json")); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// A read-along run transcribed in windows isn't continued by a generate job: the
+// whole pipeline would write characters and recaps by window, its chapters never
+// found. The book is transcribed again in a run of its own.
+func TestGenerateTranscribesAWindowedReadalongRunAgain(t *testing.T) {
+	t.Parallel()
+	hr := readalongHarness(t)
+	old := seedEarlier(hr, state.GoalReadalong, state.Done, "")
+	m, err := audio.ReadManifest(old.WorkDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Style = audio.StyleWindows
+	if err := audio.WriteManifest(old.WorkDir, m); err != nil {
+		t.Fatal(err)
+	}
+	hr.srv.add(214, "Author/Book", `{"source":"audio"}`)
+	stop := hr.runner(hr.h, hr.h.ReadalongJob())
+	defer stop()
+	hr.waitFor("done", func() bool { s, _ := hr.srv.final(214); return s == link.StateDone })
+	b := hr.engineBook(214)
+	if b.ID == old.ID || !slices.Contains(hr.stagesRun(b.ID), string(state.ASR)) {
+		t.Fatalf("engine book %d (earlier %d) ran %v, want a new run with asr", b.ID, old.ID, hr.stagesRun(b.ID))
 	}
 }

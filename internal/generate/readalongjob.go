@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/kodestar/audiosilo-bridge/internal/audio"
 	"github.com/kodestar/audiosilo-bridge/internal/fsutil"
 	"github.com/kodestar/audiosilo-bridge/internal/jobs"
 	"github.com/kodestar/audiosilo-bridge/internal/mapping"
@@ -165,13 +166,13 @@ func (h *Handler) writeReadalongRequest(r *run, workDir string) error {
 func (h *Handler) readalongAsk(ctx context.Context, r *run, b store.Book) error {
 	if cur := r.rep.Path(); cur != "" && cur != r.jobPath && h.adoptMove(ctx, r) {
 		h.recordMove(ctx, r)
-		if err := r.relocate(); err != nil {
-			return nil // not there yet as the server says: looked at again at the next poll
-		}
-		r.readalongAsked = false
+		r.readalongAsked = false // adoptMove took the move: asked again below, or at a later poll
 	}
 	if r.readalongAsked {
 		return nil
+	}
+	if err := r.relocate(); err != nil {
+		return nil // not there yet as the server says: looked at again at the next poll
 	}
 	return h.writeReadalongRequest(r, b.WorkDir)
 }
@@ -182,23 +183,26 @@ type readalongEarlier struct {
 	Goal, State, Status, Kind string
 	// Swept: the retention deleted its transcripts. Current: its audio is still
 	// the book's (pipeline.AudioCurrent). Continuable: stopped at asr, it can go on
-	// transcribing from what it kept (pipeline.TranscriptionContinuable).
-	Swept, Current, Continuable bool
+	// transcribing from what it kept (pipeline.TranscriptionContinuable). FactPass:
+	// a fact pass ran on it (a read-along that went on from a whole run).
+	Swept, Current, Continuable, FactPass bool
 }
 
 // readalongReuse is the reuse table (decision 6): where the book's earlier engine
 // book goes on for a read-along (to, with goal), or ok false for a new one (the
 // earlier cleared). Every row but the last needs the transcripts kept and the
 // audio unchanged:
-//   - a whole run (goal "") past qa_adjudicating: on at readalong_aligning, its
+//   - a whole run (goal "") past qa_adjudicating (a finished one an earlier
+//     read-along stopped at readalong_aligning too): on at readalong_aligning, its
 //     goal kept (its transcripts are repaired already);
 //   - a read-along, done or stopped at readalong_aligning: aligned again there;
 //   - transcribed but not repaired (a chapters run done; any run stopped from
 //     sanitizing to retranscribing): on from sanitizing, goal readalong;
 //   - stopped at asr with what it transcribed kept: on from splitting;
-//   - a finished whole run whose transcripts went or whose audio changed: on from
-//     inspecting, goal readalong (its notes, knowledge and ledger kept: a whole
-//     run is never cleared, errChaptersKeepsRun's rule).
+//   - a finished whole run (one a read-along took on included) whose transcripts
+//     went or whose audio changed: on from inspecting, goal readalong (its notes,
+//     knowledge and ledger kept: a whole run is never cleared, errChaptersKeepsRun's
+//     rule).
 func readalongReuse(e readalongEarlier) (to state.State, goal string, ok bool) {
 	st, status := state.State(e.State), state.Status(e.Status)
 	if st != state.Done && status != state.StatusFailed && status != state.StatusNeedsAttention && status != state.StatusPaused {
@@ -207,7 +211,7 @@ func readalongReuse(e readalongEarlier) (to state.State, goal string, ok bool) {
 	kept := !e.Swept && e.Current && e.Kind != string(state.KindEbook)
 	order := state.Order(st)
 	switch {
-	case kept && e.Goal == "" && order >= state.Order(state.SpellingResearch):
+	case kept && e.Goal == "" && order >= state.Order(state.ReadalongAligning):
 		return state.ReadalongAligning, "", true
 	case kept && e.Goal == state.GoalReadalong && (st == state.Done || st == state.ReadalongAligning):
 		return state.ReadalongAligning, state.GoalReadalong, true
@@ -216,10 +220,41 @@ func readalongReuse(e readalongEarlier) (to state.State, goal string, ok bool) {
 		return state.Sanitizing, state.GoalReadalong, true
 	case st == state.ASR && e.Continuable:
 		return state.Splitting, state.GoalReadalong, true
-	case e.Goal == "" && st == state.Done:
+	case holdsWholeRun(e.Goal, st, e.FactPass):
 		return state.Inspecting, state.GoalReadalong, true
 	}
 	return "", "", false
+}
+
+// holdsWholeRun reports whether an engine book (goal, at st, factPass: a fact pass
+// ran on it) holds a finished whole run's notes, knowledge and ledger (a sequel's
+// carryover, the description's source): a whole run (goal "") done, or stopped at
+// readalong_aligning where a read-along took it on, or a read-along that went on
+// from one. Neither a read-along nor a chapters job clears it.
+func holdsWholeRun(goal string, st state.State, factPass bool) bool {
+	switch goal {
+	case "":
+		return st == state.Done || st == state.ReadalongAligning
+	case state.GoalReadalong:
+		return factPass
+	}
+	return false
+}
+
+// readalongFromWholeRun reports whether engine book b is a read-along that went on
+// from a whole run: goal readalong with a fact pass behind it.
+func (h *Handler) readalongFromWholeRun(ctx context.Context, b store.Book) (bool, error) {
+	if b.Goal != state.GoalReadalong {
+		return false, nil
+	}
+	n, err := h.o.DB.CountStageSuccesses(ctx, b.ID, string(state.FactPass))
+	return n > 0, err
+}
+
+// keepsWholeRun is holdsWholeRun for engine book b.
+func (h *Handler) keepsWholeRun(ctx context.Context, b store.Book) (bool, error) {
+	factPass, err := h.readalongFromWholeRun(ctx, b)
+	return err == nil && holdsWholeRun(b.Goal, state.State(b.State), factPass), err
 }
 
 // readalongPath are the stages a read-along run visits.
@@ -230,9 +265,11 @@ var readalongPath = []state.State{state.Inspecting, state.Splitting, state.ASR, 
 // sentinels of to (splitting's excepted: a kept one passes a book stopped at asr
 // straight on, its FLACs cut again only if a purge took the sentinel too) and of
 // the read-along stages after it go, their successes with them, and the
-// successes of earlier stages whose sentinels a purge took are retired (a restart
-// would rewind the book to them: Reconcile). A book going on before qa_sweep gets
-// its loop-repair round again.
+// successes of every other stage whose sentinel a purge took are retired (a
+// restart would rewind the book to them: Reconcile; an ebook run's extracting and
+// chapter_mapping sort after the read-along's stages). A book going on before
+// qa_sweep gets its loop-repair round again; one going on from inspecting forgets
+// the manifest its old transcripts were made from.
 func (h *Handler) prepareContinue(ctx context.Context, b store.Book, to state.State) error {
 	for _, s := range state.All() {
 		if !state.IsStage(s) {
@@ -240,7 +277,7 @@ func (h *Handler) prepareContinue(ctx context.Context, b store.Book, to state.St
 		}
 		reset := (s == to && to != state.Splitting) ||
 			(slices.Contains(readalongPath, s) && state.Order(s) > state.Order(to))
-		purged := state.Order(s) < state.Order(to) && !scheduler.SentinelExists(b.WorkDir, string(s))
+		purged := !scheduler.SentinelExists(b.WorkDir, string(s))
 		if !reset && !purged {
 			continue
 		}
@@ -250,6 +287,11 @@ func (h *Handler) prepareContinue(ctx context.Context, b store.Book, to state.St
 			}
 		}
 		if err := h.o.DB.SupersedeStageSuccesses(ctx, b.ID, string(s)); err != nil {
+			return err
+		}
+	}
+	if to == state.Inspecting {
+		if err := pipeline.ForgetTranscription(b.WorkDir); err != nil {
 			return err
 		}
 	}
@@ -273,6 +315,13 @@ func (h *Handler) createReadalong(ctx context.Context, eng Engine, r *run) error
 	}
 	if _, err := readalong.OpenEPUB(ebook); err != nil {
 		return pipeline.ReadalongEbookErr(err)
+	}
+	// The map's times are the server's file lengths (decision 10): one it doesn't
+	// know would fail the alignment only after the whole transcription.
+	for _, f := range r.files {
+		if !(f.Duration > 0) {
+			return fmt.Errorf("the server has no length for %s, so the read-along can't be timed; rescan the book, then run it again", f.Path)
+		}
 	}
 	sp, ok, err := metaops.AllowedPath(r.place.full, []string{r.mount})
 	if err != nil || !ok {
@@ -335,10 +384,18 @@ func (h *Handler) reuseForReadalong(ctx context.Context, eng Engine, r *run, old
 	if err != nil {
 		return false, err
 	}
-	current, _ := pipeline.AudioCurrent(old.WorkDir, r.place.full)
+	// An audio file that can't be looked at now (not one that went) is a moment's
+	// trouble, never "the audio changed": that would purge the kept transcripts.
+	current, err := pipeline.AudioCurrent(old.WorkDir, r.place.full)
+	if pe := (*fs.PathError)(nil); errors.As(err, &pe) && !errors.Is(err, fs.ErrNotExist) {
+		return false, fmt.Errorf("%w; try again in a minute", errAudioUnseen)
+	}
 	e := readalongEarlier{Goal: old.Goal, State: old.State, Status: old.Status, Kind: old.Kind, Swept: swept, Current: current}
 	if state.State(old.State) == state.ASR {
 		e.Continuable = pipeline.TranscriptionContinuable(old.WorkDir)
+	}
+	if e.FactPass, err = h.readalongFromWholeRun(ctx, old); err != nil {
+		return false, err
 	}
 	to, goal, ok := readalongReuse(e)
 	if !ok {
@@ -373,8 +430,10 @@ func (h *Handler) reuseForReadalong(ctx context.Context, eng Engine, r *run, old
 // generate job reading the audio (decision 7): on at qa_sweep with goal "", the
 // agent review then runs on the transcript the read-along already repaired, which
 // is never made again. Only while the run's transcripts are kept and its audio is
-// the book's; held throughout, as continueChapters does. It reports whether it
-// continued it.
+// the book's, and never a run transcribed in windows (a chapterless file, or a
+// marker table it couldn't use): the whole pipeline would write characters and
+// recaps by window, its chapters never found; held throughout, as
+// continueChapters does. It reports whether it continued it.
 func (h *Handler) continueReadalongRun(ctx context.Context, eng Engine, r *run, old store.Book) (bool, error) {
 	if r.source != SourceAudio || old.Goal != state.GoalReadalong || state.State(old.State) != state.Done {
 		return false, nil
@@ -386,7 +445,14 @@ func (h *Handler) continueReadalongRun(ctx context.Context, eng Engine, r *run, 
 		return false, err
 	}
 	defer release()
-	if old, err = h.o.DB.GetBook(ctx, old.ID); err != nil || old.Goal != state.GoalReadalong || state.State(old.State) != state.Done {
+	if old, err = h.o.DB.GetBook(ctx, old.ID); errors.Is(err, store.ErrNotFound) {
+		return false, nil
+	} else if err != nil {
+		return false, err
+	} else if old.Goal != state.GoalReadalong || state.State(old.State) != state.Done {
+		return false, nil
+	}
+	if m, err := audio.ReadManifest(old.WorkDir); err != nil || m.Style == audio.StyleWindows {
 		return false, nil
 	}
 	if swept, err := h.o.DB.GenerateBookSwept(ctx, old.ID); err != nil || swept {

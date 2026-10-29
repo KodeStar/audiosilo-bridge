@@ -1366,7 +1366,10 @@ internal/
             instead of hand-rolling it). The post-M9 round added the SourceIO
             Def column + ReadsSource (the stages that open the original library
             item; the scheduler's mechanical-lane serialization and the ETA
-            simulation both consume it). Phase 1a: HoldsSeriesLock(state, status)
+            simulation both consume it). Phase 3c-1: SeriesLockExempt(goal, state)
+            keeps a read-along (goal readalong, or a whole run at readalong_aligning)
+            out of its series' lock beside HoldsSeriesLock (scheduler and ETA).
+            Phase 1a: HoldsSeriesLock(state, status)
             takes the status - a FAILED book (a cancel is a failure) holds nothing,
             since the job that wanted it ended and nothing will finish it (a later
             volume runs without its carryover, like a series' first book), while a
@@ -2211,18 +2214,24 @@ internal/
             EPUB (readalong.OpenEPUB). An earlier engine book at the audio's path
             another open job follows refuses the job (a generate job's in words); one a
             stage holds says try again in a minute; else, held, readalongReuse (decision
-            6, pure, table-tested) picks: a whole run past qa_adjudicating ->
-            readalong_aligning, goal kept; a read-along done or stopped at aligning ->
+            6, pure, table-tested) picks: a whole run past qa_adjudicating (or stopped
+            at readalong_aligning) -> readalong_aligning, goal kept; a read-along done or stopped at aligning ->
             aligning; transcribed but not repaired (chapters done; stopped from
             sanitizing to retranscribing) -> sanitizing, goal readalong; stopped at asr
             and TranscriptionContinuable -> splitting; a finished whole run swept or
             with other audio (or an ebook run) -> inspecting, goal readalong, its
-            transcripts purged first when another recording's, its notes kept; else
-            cleared for a new book (goal readalong, no series, no contribution).
-            prepareContinue removes the sentinels of to (not splitting's) and of the
-            read-along stages after it and retires their successes and those of earlier
-            stages a purge took the sentinel of (a restart's Reconcile would rewind to
-            them), and resets the repair round before qa_sweep. The request is written
+            transcripts purged first when another recording's, its notes kept (a
+            read-along with a fact pass behind it counts as a whole run: holdsWholeRun,
+            which createChapters' errChaptersKeepsRun applies too); else cleared for a
+            new book (goal readalong, no series, no contribution). An audio file that
+            can't be looked at now says try again, never "the audio changed"; a file the
+            server has no length for fails before any work (rescan). prepareContinue
+            removes the sentinels of to (not splitting's) and of the read-along stages
+            after it and retires their successes and those of every stage a purge took
+            the sentinel of (a restart's Reconcile would rewind to them), drops asr.json
+            going on from inspecting (pipeline.ForgetTranscription: a new manifest), and
+            resets the repair round before qa_sweep. A generate job never continues a
+            read-along transcribed in windows (its chapters were never found). The request is written
             before the book goes on, and again (readalongAsk) when a resumed run first
             looks or the server moved the job with its book. At done: the map under 50%
             text coverage fails ("the ebook and the narration don't match: N% lined
