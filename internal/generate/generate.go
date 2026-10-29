@@ -283,10 +283,13 @@ type run struct {
 	chaptersRetryAt time.Time
 	// detected is the detected list last read (pipeline.DetectedStamp says when;
 	// detectedOK that it was current then), so refreshChapters reads it again only
-	// once it changed.
-	detected      pipeline.DetectedChapters
-	detectedOK    bool
-	detectedStamp string
+	// once it changed. detectedUnseen says the last look couldn't look at the
+	// book's audio (a mount gone for a moment): the list is neither current nor
+	// stale, and is looked at again at the next look.
+	detected       pipeline.DetectedChapters
+	detectedOK     bool
+	detectedUnseen bool
+	detectedStamp  string
 }
 
 // bookKey is what changes on an engine book row when the scheduler moves it.
@@ -1140,7 +1143,11 @@ func (h *Handler) writeSidecars(ctx context.Context, r *run, b store.Book, wait 
 	// can say how that was made); none when it got none. The chapters the run found
 	// go with them, composed for the book where it is when it is written.
 	s.description = r.descRaw
-	h.refreshChapters(r, b)
+	// Never without the run's chapters only because their audio is out of sight
+	// for a moment: the characters written alone would keep a chapters job off.
+	if _, _, err := h.awaitChapters(ctx, r, b, wait); err != nil {
+		return sidecars{}, err
+	}
 	if s.chapters, err = r.chaptersJSON(r.place.single); err != nil {
 		return sidecars{}, err
 	}
@@ -1168,9 +1175,11 @@ func (h *Handler) writeSidecars(ctx context.Context, r *run, b store.Book, wait 
 			if err != nil {
 				return nil, err
 			}
-			s.chapters = chapters
-			prov.Chapters = r.chaptersProv
-			if prov.Chapters == nil {
+			// What vouches for the chapters.json left in place when this write has
+			// none (no current list, or none to write over the book's files now).
+			if s.chapters = chapters; chapters != nil {
+				prov.Chapters = r.chaptersProv
+			} else {
 				prov.Chapters = keptObject[ChaptersProvenance](p.dir, p.prefix, chaptersName, "chapters")
 			}
 			return attachmentFiles(s, prov)

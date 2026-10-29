@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -18,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kodestar/audiosilo-bridge/internal/audio"
 	"github.com/kodestar/audiosilo-bridge/internal/contrib"
 	"github.com/kodestar/audiosilo-bridge/internal/events"
 	"github.com/kodestar/audiosilo-bridge/internal/jobs"
@@ -192,6 +194,9 @@ func (e *hooks) Execute(ctx context.Context, b store.Book, st state.State, r sch
 		if st == state.ChapterDetecting {
 			return scheduler.StageResult{}, scheduler.ParkWithCode(state.ParkChaptersNotDetected, "couldn't find the chapters")
 		}
+		if st == state.ASR {
+			return scheduler.StageResult{}, scheduler.ParkWithCode(state.ParkASRWorkerWaiting, "speech recognition waits for an ASR worker")
+		}
 		return scheduler.StageResult{}, scheduler.ParkWithCode(state.ParkAgentValidationExhausted, "the fact pass kept failing its checks")
 	}
 	e.mu.Lock()
@@ -200,6 +205,13 @@ func (e *hooks) Execute(ctx context.Context, b store.Book, st state.State, r sch
 	switch {
 	case st == state.Inspecting && inspectErr != nil:
 		return scheduler.StageResult{}, inspectErr
+	case st == state.Inspecting:
+		// probe.json as inspect leaves it for a single file: its size, written
+		// after the file was (the detected list's continue check reads both).
+		if info, err := os.Stat(b.SourcePath); err == nil && info.Mode().IsRegular() && os.MkdirAll(b.WorkDir, 0o750) == nil {
+			_ = os.WriteFile(filepath.Join(b.WorkDir, audio.ProbeName),
+				[]byte(fmt.Sprintf(`{"format":{"duration":"30","size":"%d"}}`, info.Size())), 0o600)
+		}
 	case st == state.ASR && windowed:
 		res := scheduler.StageResult{Windowed: true}
 		return res, scheduler.WriteSentinel(b.WorkDir, string(st), res)

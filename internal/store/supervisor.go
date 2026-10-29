@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 )
@@ -179,6 +180,17 @@ func (db *DB) RecentSupervisorRuns(ctx context.Context, batchID string, limit in
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+// LatestSupervisorRunForBook is the book's newest supervisor run (ErrNotFound when
+// it has none).
+func (db *DB) LatestSupervisorRunForBook(ctx context.Context, bookID int64) (SupervisorRun, error) {
+	r, err := scanSupervisorRun(db.sql.QueryRowContext(ctx,
+		`SELECT `+supervisorCols+` FROM supervisor_runs WHERE book_id=? ORDER BY id DESC LIMIT 1`, bookID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return SupervisorRun{}, ErrNotFound
+	}
+	return r, err
 }
 
 // HasIncident reports whether this exact immutable incident event was already

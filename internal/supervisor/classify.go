@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -51,21 +52,36 @@ func ErrorFingerprint(message string) string {
 	return hex.EncodeToString(sum[:12])
 }
 
+// statusPattern finds an HTTP status code as an error states one: after a word
+// that says it is a status ("status 429", "status code: 503", "HTTP 401",
+// "HTTP/1.1 503", "API Error: 429", `"status":429`, "code=401"), never a bare
+// number, which can be anything (a work dir's or a file's name, a count, a
+// duration).
+var statusPattern = regexp.MustCompile(`\b(?:status(?:[ _]?code)?|http(?:/\d(?:\.\d)?)?|error(?:[ _]?code)?|code)["']?\s*[:=]?\s*(\d{3})\b`)
+
+// errorKinds are the incidents classifyError reads, in the order it tries them:
+// each by its phrases, then by its status code (statusPattern). "refused the
+// credential" is agent.credentialRefused's own wording (whatever the provider said
+// after it).
+var errorKinds = []struct {
+	kind    IncidentKind
+	status  string
+	phrases []string
+}{
+	{IncidentAuthentication, "401", []string{"not logged in", "authentication", "unauthorized", "invalid api key", "refused the credential"}},
+	{IncidentRateLimit, "429", []string{"rate limit", "rate_limit", "too many requests", "overloaded", "usage limit"}},
+	{IncidentBackendUnavailable, "503", []string{"backend unavailable", "cli not found", "not found on path", "connection refused", "service unavailable"}},
+}
+
 func classifyError(message string) IncidentKind {
 	low := strings.ToLower(message)
-	for _, sig := range []string{"not logged in", "authentication", "unauthorized", "invalid api key", "401"} {
-		if strings.Contains(low, sig) {
-			return IncidentAuthentication
-		}
+	statuses := map[string]bool{}
+	for _, m := range statusPattern.FindAllStringSubmatch(low, -1) {
+		statuses[m[1]] = true
 	}
-	for _, sig := range []string{"rate limit", "rate_limit", "too many requests", "429", "overloaded", "usage limit"} {
-		if strings.Contains(low, sig) {
-			return IncidentRateLimit
-		}
-	}
-	for _, sig := range []string{"backend unavailable", "cli not found", "not found on path", "connection refused", "service unavailable", "503"} {
-		if strings.Contains(low, sig) {
-			return IncidentBackendUnavailable
+	for _, k := range errorKinds {
+		if slices.ContainsFunc(k.phrases, func(sig string) bool { return strings.Contains(low, sig) }) || statuses[k.status] {
+			return k.kind
 		}
 	}
 	return ""
@@ -324,7 +340,7 @@ func classifyParked(book store.Book, runs []store.StageRun) (Incident, bool) {
 	}
 	return Incident{
 		Kind: IncidentParkedRecovery, BookID: book.ID, BatchID: book.BatchID,
-		Stage: book.State, StageRunID: stageRunID, ParkCode: book.ParkCode,
+		Stage: book.State, StageRunID: stageRunID, ParkCode: book.ParkCode, SelfResuming: book.RetryAt != "",
 		Fingerprint: parkedRecoveryFingerprint(book, stageErr),
 		Diagnosis:   "parked book requires a bounded recovery plan", Evidence: evidence,
 	}, true

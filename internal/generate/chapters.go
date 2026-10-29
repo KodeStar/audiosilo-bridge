@@ -127,16 +127,74 @@ func detectedSum(d pipeline.DetectedChapters) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// markersFile is the one audio file of the book at path (a file, or a folder
+// holding one), "" when it isn't a one-file book or can't be looked at.
+func markersFile(path string) string {
+	if src, err := audio.ResolveSource(path); err == nil && src.Style == audio.StyleMarkers {
+		return src.BookFile
+	}
+	return ""
+}
+
+// bookFileNow is the book's one audio file where the job has it now: at the path
+// the server's last answer moved the job to (adoptMove takes it up at the next
+// save, after the chapters were checked), else at the run's place; "" when that
+// can't be told.
+func (r *run) bookFileNow() string {
+	full := r.place.full
+	if r.rep != nil {
+		if cur := r.rep.Path(); cur != "" && cur != r.jobPath {
+			if p, err := locate(r.mount, cur); err == nil {
+				full = p.full
+			}
+		}
+	}
+	return markersFile(full)
+}
+
+// errAudioUnseen: the book's audio can't be looked at to tell whether the
+// chapters found are still its own.
+var errAudioUnseen = errors.New("the Bridge can't look at the book's audio file now to check the chapters found against it")
+
+// awaitChapters is refreshChapters for a write that must not go without the run's
+// chapters only because their audio can't be looked at now (a mount gone for a
+// moment): with wait (the book is done) it parks book_not_writable and looks
+// again every Recheck (or on Retry) until it can, as a save that can't write
+// does, lifting its own park once it can; without, it returns errAudioUnseen for
+// the caller to try again later.
+func (h *Handler) awaitChapters(ctx context.Context, r *run, b store.Book, wait bool) (pipeline.DetectedChapters, bool, error) {
+	parked := false
+	for {
+		d, ok := h.refreshChapters(r, b)
+		if !r.detectedUnseen {
+			if parked && r.ownPark {
+				r.rep.Unpark()
+				r.ownPark = false
+			}
+			return d, ok, nil
+		}
+		if !wait {
+			return d, false, errAudioUnseen
+		}
+		h.park(r, parkBookNotWritable, errAudioUnseen.Error())
+		parked = true
+		if err := h.recheckWait(ctx, r, time.Now().Add(h.o.Recheck)); err != nil {
+			return d, false, err
+		}
+	}
+}
+
 // refreshChapters reads the engine book's detected list when it has one for its
 // current manifest, notes it for the run's chapters.json (chaptersJSON composes the
 // file at each write) and returns the list and whether it is current. A generate
 // job looks at every poll, so the list is read and checked again only when its
 // files changed since the last look (pipeline.DetectedStamp: local stats; no list
-// yet is one stat).
+// yet is one stat; a list whose audio can't be looked at is not current,
+// r.detectedUnseen says so, and it is checked again at the next look).
 func (h *Handler) refreshChapters(r *run, b store.Book) (pipeline.DetectedChapters, bool) {
 	stamp, ok := pipeline.DetectedStamp(b.WorkDir)
 	if !ok {
-		r.detected, r.detectedOK, r.detectedStamp = pipeline.DetectedChapters{}, false, ""
+		r.detected, r.detectedOK, r.detectedUnseen, r.detectedStamp = pipeline.DetectedChapters{}, false, false, ""
 		return pipeline.DetectedChapters{}, false
 	}
 	if stamp != r.detectedStamp {
@@ -144,10 +202,18 @@ func (h *Handler) refreshChapters(r *run, b store.Book) (pipeline.DetectedChapte
 		if err != nil {
 			// A list that can't be read is none: an earlier one noted is never
 			// written in its place.
-			r.detectedStamp, r.detected, r.detectedOK = stamp, pipeline.DetectedChapters{}, false
+			r.detectedStamp, r.detected, r.detectedOK, r.detectedUnseen = stamp, pipeline.DetectedChapters{}, false, false
 			return pipeline.DetectedChapters{}, false
 		}
-		r.detectedStamp, r.detected, r.detectedOK = stamp, d, d.CurrentFor(b.WorkDir)
+		// The audio where the job finds it now (the server moves a job with its
+		// book); the manifest's path when that can't be told.
+		current, err := d.CheckCurrent(b.WorkDir, r.bookFileNow())
+		if err != nil {
+			// The audio can't be looked at now (a mount gone for a moment): not
+			// current, and asked again at the next look rather than kept.
+			stamp = ""
+		}
+		r.detectedStamp, r.detected, r.detectedOK, r.detectedUnseen = stamp, d, current, err != nil
 	}
 	if !r.detectedOK {
 		return r.detected, false
@@ -220,8 +286,10 @@ func (h *Handler) saveChapters(ctx context.Context, r *run, wait, record bool, e
 // until the finish replaces them. It reports whether it tried a save (the stage is
 // then reported again).
 func (h *Handler) saveChaptersEarly(ctx context.Context, r *run, b store.Book) bool {
-	h.refreshChapters(r, b)
-	if r.chaptersProv == nil || r.chaptersSaved == r.chaptersSum || h.now().Before(r.chaptersRetryAt) || !h.mappedNow(r) {
+	// Only a list current now: a noted one that went stale, or whose audio can't be
+	// looked at, would save bridge.json's chapters object without its file.
+	if _, ok := h.refreshChapters(r, b); !ok || r.chaptersProv == nil || r.chaptersSaved == r.chaptersSum ||
+		h.now().Before(r.chaptersRetryAt) || !h.mappedNow(r) {
 		return false
 	}
 	if p, err := locate(r.mount, r.rel); err != nil || sidecarsWithoutChapters(p) {
@@ -280,7 +348,13 @@ func sidecarsWithoutChapters(p place) bool {
 //   - one cancelled or failed at chapter_detecting (the server cancels a parked
 //     chapters job as it queues a generate job for the book) whose kept window
 //     layer can run the stage again (pipeline.DetectionRerunnable) goes on from
-//     there, the stage running again over the kept windows.
+//     there, the stage running again over the kept windows;
+//   - one cancelled or failed at asr (a chapters job parked asr_worker_waiting,
+//     cancelled the same way) whose windows manifest is in place for the file
+//     inspected (pipeline.TranscriptionContinuable) goes on from splitting (its
+//     kept sentinel passes it straight on; a purge that took the window FLACs
+//     took that too, so they are cut again), and asr transcribes only the
+//     windows it hadn't finished.
 //
 // Either only while the book is still the one file it was (a folder that has
 // gained an audio file is a multi-file book now), the retention hasn't swept its
@@ -297,7 +371,8 @@ func (h *Handler) continueChapters(ctx context.Context, eng Engine, r *run, old 
 	if r.source != SourceAudio || !continuable(old) {
 		return false, nil
 	}
-	if src, err := audio.ResolveSource(old.SourcePath); err != nil || src.Style != audio.StyleMarkers {
+	bookFile := markersFile(old.SourcePath)
+	if bookFile == "" {
 		return false, nil
 	}
 	release, err := h.holdBook(ctx, old.ID)
@@ -314,13 +389,33 @@ func (h *Handler) continueChapters(ctx context.Context, eng Engine, r *run, old 
 		return false, err
 	}
 	to := state.Splitting
-	if from := state.State(old.State); from == state.ChapterDetecting {
+	switch from := state.State(old.State); from {
+	case state.ChapterDetecting:
 		if !pipeline.DetectionRerunnable(old.WorkDir) {
 			return false, nil
 		}
 		to = from
-	} else if d, err := pipeline.ReadDetectedChapters(old.WorkDir); err != nil || !d.CurrentFor(old.WorkDir) {
-		return false, nil
+	case state.ASR:
+		if !pipeline.TranscriptionContinuable(old.WorkDir) {
+			return false, nil
+		}
+	default:
+		// The run's own file, the one the continued run cuts the chapters from (a
+		// file renamed in the book's folder since is a new run's to read).
+		if m, err := audio.ReadManifest(old.WorkDir); err != nil || m.Source != bookFile {
+			return false, nil
+		}
+		d, err := pipeline.ReadDetectedChapters(old.WorkDir)
+		if err != nil {
+			return false, nil
+		}
+		if current, err := d.CheckCurrent(old.WorkDir, bookFile); err != nil {
+			// The audio out of sight for a moment: the run is kept for the next
+			// job, never cleared unseen.
+			return false, fmt.Errorf("%w; try again in a minute", errAudioUnseen)
+		} else if !current {
+			return false, nil
+		}
 	}
 	err = h.o.DB.ContinueChapters(ctx, old.ID, old.State, string(to), h.newBook(r, old.SourcePath, ""),
 		store.GenerateBook{ServerJobID: r.job.ID, LibraryID: r.lib.ID, RelPath: r.rel})
@@ -337,13 +432,13 @@ func (h *Handler) continueChapters(ctx context.Context, eng Engine, r *run, old 
 }
 
 // continuable reports whether engine book b is a chapters run a generate job can
-// go on with: goal chapters, and done, or failed (a cancel included) at
+// go on with: goal chapters, and done, or failed (a cancel included) at asr or
 // chapter_detecting.
 func continuable(b store.Book) bool {
 	switch state.State(b.State) {
 	case state.Done:
 		return b.Goal == state.GoalChapters
-	case state.ChapterDetecting:
+	case state.ASR, state.ChapterDetecting:
 		return b.Goal == state.GoalChapters && state.Status(b.Status) == state.StatusFailed
 	default:
 		return false
@@ -537,7 +632,11 @@ func (h *Handler) chaptersFromEarlier(ctx context.Context, r *run) (any, bool, e
 	if err := h.openJobRefusal(ctx, r, old.ID); err != nil {
 		return nil, true, err
 	}
-	if _, ok := h.refreshChapters(r, old); !ok {
+	// A list whose audio can't be looked at now fails the job rather than going on
+	// to a new run, which would clear this one unseen.
+	if _, ok, err := h.awaitChapters(ctx, r, old, false); err != nil {
+		return nil, true, fmt.Errorf("%w; try again in a minute", err)
+	} else if !ok {
 		return nil, false, nil
 	}
 	h.o.Log.Info("chapters: an earlier run found the book's chapters; writing them", "job", r.job.ID, "book", old.ID)
@@ -605,7 +704,10 @@ func (h *Handler) finishChapters(ctx context.Context, r *run, b store.Book) (any
 // a move in the job's mapping. Never beside characters and recaps made without
 // chapters found in the narration (errChaptersBesideSidecars).
 func (h *Handler) writeDetected(ctx context.Context, r *run, b store.Book, record bool) (any, error) {
-	d, ok := h.refreshChapters(r, b)
+	d, ok, err := h.awaitChapters(ctx, r, b, true)
+	if err != nil {
+		return nil, err
+	}
 	if !ok {
 		return nil, errors.New("the engine kept no chapters for the book")
 	}

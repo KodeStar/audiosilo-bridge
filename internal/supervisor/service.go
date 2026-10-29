@@ -401,6 +401,9 @@ func (s *Service) handleIncident(ctx context.Context, trigger string, i Incident
 		i.Evidence = append(i.Evidence, autoRecoveryCapEvidence(recoveries))
 	}
 	d = Decide(i, attempts, recoveries, s.policy)
+	if repeat, err := s.unchangedObservation(ctx, i, d); err != nil || repeat {
+		return err
+	}
 	evidence, _ := json.Marshal(i.Evidence)
 	bookID := i.BookID
 	var stageRunID *int64
@@ -436,6 +439,36 @@ func (s *Service) handleIncident(ctx context.Context, trigger string, i Incident
 		r.ActionOutcome = "automatic actions disabled; recommendation recorded"
 	}
 	return s.finishRun(ctx, r)
+}
+
+// unchangedObservation reports whether decision d only observes a self-resuming
+// park (i.SelfResuming: the scheduler's timer re-admits it) that waits for a
+// person (approval required) exactly as the book's last supervisor run did: the
+// same incident family (kind, stage and fingerprint; a new stage run of the same
+// failure is the same family) observed and left for approval, with no other run
+// for the book since. Recording it again says nothing new: a park that resumes
+// itself every half hour and parks again the same way (a refused credential)
+// would add a row each time. A park nothing re-admits but a person (a Retry,
+// which records no supervisor run) or a restart is recorded each time it comes
+// back: that is a new incident after someone acted.
+func (s *Service) unchangedObservation(ctx context.Context, i Incident, d Decision) (bool, error) {
+	if d.Action != ActionObserve || !d.ApprovalRequired || !i.SelfResuming {
+		return false, nil
+	}
+	last, err := s.db.LatestSupervisorRunForBook(ctx, i.BookID)
+	if errors.Is(err, store.ErrNotFound) {
+		return false, nil
+	} else if err != nil {
+		return false, err
+	}
+	// i's family under the last run's stage run: its key if it was the same family.
+	same := i
+	same.StageRunID = 0
+	if last.StageRunID != nil {
+		same.StageRunID = *last.StageRunID
+	}
+	return last.State == "approval_required" && last.SelectedAction == string(ActionObserve) &&
+		last.IncidentKey == incidentKey(same), nil
 }
 
 func (s *Service) finishRun(ctx context.Context, r store.SupervisorRun) error {
