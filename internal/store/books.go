@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/kodestar/audiosilo-bridge/internal/state"
 	sqlite "modernc.org/sqlite"
 	sqlite3 "modernc.org/sqlite/lib"
 )
@@ -456,14 +457,6 @@ func (db *DB) ListUnfinishedBooks(ctx context.Context) ([]Book, error) {
 const seriesSpace = "\t\n\v\f\r \u0085\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a" +
 	"\u2028\u2029\u202f\u205f\u3000"
 
-// SeriesMember is a finished book's series identity: all a finished volume
-// gives the series breadth ranks.
-type SeriesMember struct {
-	ID        int64
-	Series    string
-	SeriesPos string
-}
-
 // ListFinishedSeriesBooks returns the series identity of every finished book
 // (state done, no status) of a named series that still has an unfinished
 // volume, ordered by id. A finished volume still counts toward its series'
@@ -471,7 +464,7 @@ type SeriesMember struct {
 // dispatch pass needs of it; a series with nothing left to run has no rank to
 // keep, so its volumes are not read at all. Series compare trimmed of
 // seriesSpace, as Go's strings.TrimSpace trims them.
-func (db *DB) ListFinishedSeriesBooks(ctx context.Context) ([]SeriesMember, error) {
+func (db *DB) ListFinishedSeriesBooks(ctx context.Context) ([]state.SeriesQueueItem, error) {
 	rows, err := db.sql.QueryContext(ctx, `SELECT id, series, series_pos FROM books
 		WHERE state = 'done' AND status = '' AND trim(series, ?1) != ''
 		AND trim(series, ?1) IN (SELECT trim(series, ?1) FROM books WHERE `+unfinishedBook+`) ORDER BY id`, seriesSpace)
@@ -479,9 +472,9 @@ func (db *DB) ListFinishedSeriesBooks(ctx context.Context) ([]SeriesMember, erro
 		return nil, err
 	}
 	defer func() { _ = rows.Close() }()
-	var out []SeriesMember
+	var out []state.SeriesQueueItem
 	for rows.Next() {
-		var m SeriesMember
+		var m state.SeriesQueueItem
 		if err := rows.Scan(&m.ID, &m.Series, &m.SeriesPos); err != nil {
 			return nil, err
 		}

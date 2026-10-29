@@ -981,13 +981,9 @@ func (s *Scheduler) dispatchBooks(ctx context.Context) ([]store.Book, []state.Se
 	if err != nil {
 		return nil, nil, err
 	}
-	members, err := s.db.ListFinishedSeriesBooks(ctx)
+	finished, err := s.db.ListFinishedSeriesBooks(ctx)
 	if err != nil {
 		return nil, nil, err
-	}
-	finished := make([]state.SeriesQueueItem, 0, len(members))
-	for _, m := range members {
-		finished = append(finished, state.SeriesQueueItem{ID: m.ID, Series: m.Series, SeriesPos: m.SeriesPos})
 	}
 	return dropFinished(books, finished), finished, nil
 }

@@ -120,18 +120,18 @@ func Checklist(in Inputs) link.Setup {
 			missing = append(missing, l.ID)
 		}
 	}
+	pending := in.Paired && in.LibrariesPending
 	libDetail := fmt.Sprintf("%d of %d libraries writable", ready, len(in.Libraries))
 	switch {
 	case len(in.Libraries) == 0 && !in.Paired:
 		// Before pairing there is no server to have libraries. (A refused token
 		// isn't paired either but keeps the libraries it had: those are counted.)
 		libDetail = "pair with a server first"
-	case in.Paired && in.LibrariesPending:
+	case pending:
 		libDetail = DetailLibrariesChecking
 	case len(in.Libraries) == 0:
 		libDetail = "the server has no libraries yet"
 	}
-	pending := in.Paired && in.LibrariesPending
 	libs := add(ItemLibraries, !pending && len(in.Libraries) > 0 && len(missing) == 0, true, libDetail)
 	if len(missing) > 0 && !pending {
 		libs.LibraryIDs = missing

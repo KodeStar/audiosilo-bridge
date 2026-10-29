@@ -202,7 +202,7 @@ function JobCard({
   const percent = progressPercent(job.progress);
   const report = reportText(job);
   const hint = stateHint(shown);
-  const target = jobTarget(job, names ?? undefined);
+  const target = jobTarget(job, names);
 
   async function retry() {
     setBusy(true);

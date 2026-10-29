@@ -89,7 +89,7 @@ func TestUnfinishedReadsSkipFinishedBooks(t *testing.T) {
 	if len(finished) != 1 {
 		t.Fatalf("ListFinishedSeriesBooks = %+v, want the one finished series book with a live volume", finished)
 	}
-	if f := finished[0]; f != (SeriesMember{ID: doneSeries.ID, Series: "Saga", SeriesPos: "2"}) {
+	if f := finished[0]; f != (state.SeriesQueueItem{ID: doneSeries.ID, Series: "Saga", SeriesPos: "2"}) {
 		t.Fatalf("finished series book = %+v", f)
 	}
 

@@ -1492,9 +1492,9 @@ var ErrNotParked = errors.New("the job isn't waiting on anything a retry would h
 // to check again now. store.ErrNotFound when the job isn't one of this handler's.
 func (h *Handler) Retry(ctx context.Context, jobID int64) error {
 	h.mu.Lock()
-	run, waiting := h.pokes[jobID]
+	rh, waiting := h.pokes[jobID]
 	h.mu.Unlock()
-	c := run.poke
+	c := rh.poke
 	// poke wakes the running job (to look at its book, or at its folder, now),
 	// reporting whether one runs here.
 	poke := func() bool {

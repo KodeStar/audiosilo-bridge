@@ -71,7 +71,7 @@ export function libraryNames(libs: Library[] | null | undefined): Map<number, st
 // jobTarget is "Books · Author/Book" with the library's name from names (as the
 // server's console shows a job), else "library 2: Author/Book"; without a path
 // the library alone ("Books", "library 2"), or "".
-export function jobTarget(job: ServerJob, names?: ReadonlyMap<number, string>): string {
+export function jobTarget(job: ServerJob, names?: ReadonlyMap<number, string> | null): string {
   const name = job.library_id != null ? names?.get(job.library_id) : undefined;
   if (name) return job.path ? `${name} · ${job.path}` : name;
   const lib = job.library_id != null ? `library ${job.library_id}` : '';
