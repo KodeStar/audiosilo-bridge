@@ -2289,8 +2289,8 @@ func ensureRetranscribeDecodeParams(workDir, tag string) error {
 
 // retranscribeChapter re-transcribes one chapter FRESH into retranscribe/, then uses
 // repair.AdoptFresh (a read-along book: repair.AdoptFreshReadalong, which weighs the
-// loops, not the word count) to decide (never blindly) whether the fresh run
-// replaces the original. On adopt it replaces the immutable raw (unfreeze -> write -> re-freeze
+// loops rather than a looped original's extra words) to decide (never blindly)
+// whether the fresh run replaces the original. On adopt it replaces the immutable raw (unfreeze -> write -> re-freeze
 // 0444), re-derives the json/text layers, and drops the chapter's stale
 // repaired/corrected files (correcting re-runs fully). On keep it leaves everything.
 // It returns whether the fresh run was adopted.
