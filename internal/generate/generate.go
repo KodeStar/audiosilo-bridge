@@ -509,19 +509,22 @@ func (h *Handler) Abandon(ctx context.Context, job jobs.Job) {
 // transcript retention counts from it, and the supervisor leaves a book no job
 // follows alone), and with retention_days 0 the transcripts go now. The stop
 // comes first so a job waiting for this one's end (awaitOpenJobEnd) starts only
-// once the engine's cancel has returned. A later claim of the same job may run
-// here already (the server re-queued it after a lease ran out and handed it out
-// again before this attempt heard it was lost): that attempt follows the book
-// now, so it is left alone.
+// once the engine's cancel has returned. A stop left to another open job is
+// tried again once this end is recorded: two jobs on the book ending at once
+// would each leave it to the other, and the later end then stops it. A later
+// claim of the same job may run here already (the server re-queued it after a
+// lease ran out and handed it out again before this attempt heard it was lost):
+// that attempt follows the book now, so it is left alone.
 func (h *Handler) release(ctx context.Context, job jobs.Job, bookID int64, stop bool) {
 	if sj, err := h.o.DB.GetServerJob(ctx, job.ID); err == nil && sj.Attempt > job.Attempt {
 		return
 	}
-	if stop {
-		h.stopBook(ctx, job.ID, bookID)
-	}
+	followed := stop && h.stopBook(ctx, job.ID, bookID)
 	if err := h.o.DB.EndGenerateBook(ctx, job.ID, h.now()); err != nil {
 		h.o.Log.Warn("generate: recording the job's end failed", "job", job.ID, "err", err)
+	}
+	if followed {
+		h.stopBook(ctx, job.ID, bookID)
 	}
 	if h.o.RetentionDays == 0 {
 		if err := h.purgeEnded(ctx, bookID); err != nil {
@@ -533,22 +536,24 @@ func (h *Handler) release(ctx context.Context, job jobs.Job, bookID int64, stop 
 // stopBook cancels a job's engine book unless it already ended (done, or
 // failed: a cancel would overwrite its error) or another open job follows it now
 // (a generate job continued the chapters run, so a late end of the chapters job,
-// one Abandon releases once the engine starts, leaves it to that job).
-func (h *Handler) stopBook(ctx context.Context, jobID, bookID int64) {
+// one Abandon releases once the engine starts, leaves it to that job). It
+// reports whether it left the book to another open job.
+func (h *Handler) stopBook(ctx context.Context, jobID, bookID int64) (followed bool) {
 	eng := h.o.Engine()
 	if eng == nil {
-		return
+		return false
 	}
 	b, err := h.o.DB.GetBook(ctx, bookID)
 	if err != nil || finished(b.State, b.Status) {
-		return
+		return false
 	}
 	if open, err := h.o.DB.OpenGenerateJobsForBook(ctx, bookID, jobID); err != nil || len(open) > 0 {
-		return
+		return err == nil
 	}
 	if err := eng.Cancel(ctx, bookID); err != nil && !errors.Is(err, scheduler.ErrInvalidOp) {
 		h.o.Log.Warn("generate: cancelling the engine book failed", "job", jobID, "book", bookID, "err", err)
 	}
+	return false
 }
 
 // hold takes the engine's hold on an engine book for work outside its stages (the

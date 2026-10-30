@@ -497,7 +497,9 @@ func (h *Handler) awaitChaptersGivingWay(ctx context.Context, r *run, b store.Bo
 // chaptersGivingWay reports whether book b is a chapters run on its way to giving
 // way: its chapters job still open (whatever the book is doing: working, parked,
 // or done and saving its list, the job is cancelled and ends at its next report),
-// or with no job following it and not stopped yet (that job's end is stopping it).
+// or with no job following it and not stopped yet (that job's end left the stop
+// to another job, or waits for the engine to start: awaitChaptersGivingWay stops
+// it when the wait runs out).
 func chaptersGivingWay(b store.Book, openID int64, kind string) bool {
 	switch {
 	case b.Goal != state.GoalChapters:
