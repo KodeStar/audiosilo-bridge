@@ -509,12 +509,10 @@ func (h *Handler) Abandon(ctx context.Context, job jobs.Job) {
 // transcript retention counts from it, and the supervisor leaves a book no job
 // follows alone), and with retention_days 0 the transcripts go now. The stop
 // comes first so a job waiting for this one's end (awaitOpenJobEnd) starts only
-// once the engine's cancel has returned; stopBook leaves this job out of its own
-// open-job check, so the order changes nothing else, and no lock is held across
-// the cancel. A later claim of
-// the same job may run here already (the server re-queued it after a lease ran
-// out and handed it out again before this attempt heard it was lost): that
-// attempt follows the book now, so it is left alone.
+// once the engine's cancel has returned. A later claim of the same job may run
+// here already (the server re-queued it after a lease ran out and handed it out
+// again before this attempt heard it was lost): that attempt follows the book
+// now, so it is left alone.
 func (h *Handler) release(ctx context.Context, job jobs.Job, bookID int64, stop bool) {
 	if sj, err := h.o.DB.GetServerJob(ctx, job.ID); err == nil && sj.Attempt > job.Attempt {
 		return
