@@ -916,7 +916,7 @@ func (h *Handler) awaitOpenJobEnd(ctx context.Context, r *run, bookID int64) (in
 		if time.Duration(i)*h.o.Poll >= openJobWait {
 			return id, kind, nil
 		}
-		r.rep.Progress(jobs.Progress{Step: stepWaiting, Message: "Waiting for the book's cancelled job to end"})
+		r.rep.Progress(jobs.Progress{Step: stepWaiting, Message: "Waiting for the book's earlier job to end"})
 		if err := agent.SleepCtx(ctx, h.o.Poll); err != nil {
 			return 0, "", err
 		}

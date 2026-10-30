@@ -615,3 +615,53 @@ func TestDescriptionErrorText(t *testing.T) {
 		}
 	}
 }
+
+// An admin cancels a parked generate job and asks for a description at once,
+// before the job's next keepalive would tell the Bridge (BRIDGE-01): the
+// description waits for the job's end and runs on the run's notes. Not
+// cancelled, it is refused at once.
+func TestDescribeRightAfterACancelRuns(t *testing.T) {
+	t.Parallel()
+	for _, cancel := range []bool{true, false} {
+		hr := newHarness(t)
+		d := &fakeDescriber{db: hr.db}
+		h := hr.describeHandler(d)
+		hr.exec.parks["contributing"] = 1
+		hr.srv.add(301, "Author/Book", `{}`)
+		stop := hr.runnerKeepalive(time.Hour, h, h.DescribeJob())
+		// Parked and quiet: the park's description written and its last step
+		// reported, so (at a one-hour keepalive) the job reports nothing more on
+		// its own.
+		hr.waitFor("the contributing park, settled", func() bool {
+			hr.srv.mu.Lock()
+			defer hr.srv.mu.Unlock()
+			ups := hr.srv.updates[301]
+			if len(ups) == 0 || len(d.calls()) == 0 {
+				return false
+			}
+			var p map[string]any
+			last := ups[len(ups)-1]
+			_ = json.Unmarshal(last.Progress, &p)
+			return *last.State == link.StateNeedsAttention && p["step"] == "contributing"
+		})
+		if cancel {
+			hr.srv.set(func() { hr.srv.cancel[301] = true })
+		}
+		start := time.Now()
+		hr.srv.addDescribe(302, "Author/Book")
+		hr.waitFor("the description ended", func() bool { s, _ := hr.srv.final(302); return s != "" })
+		s, u := hr.srv.final(302)
+		switch {
+		case cancel && s != link.StateDone:
+			t.Fatalf("after a cancel the description ended %s (%q), want done", s, errOf(u))
+		case !cancel && (s != link.StateFailed || errOf(u) != string(errDescribeGenerating)):
+			t.Fatalf("with the job open the description ended %s (%q), want refused", s, errOf(u))
+		case !cancel && time.Since(start) > 5*time.Second:
+			t.Fatalf("the refusal took %v", time.Since(start))
+		}
+		if st, _ := hr.srv.final(301); cancel != (st == link.StateCancelled) {
+			t.Fatalf("cancel %v: the generate job ended %q", cancel, st)
+		}
+		stop()
+	}
+}
