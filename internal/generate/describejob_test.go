@@ -615,3 +615,116 @@ func TestDescriptionErrorText(t *testing.T) {
 		}
 	}
 }
+
+// An admin cancels a parked generate job and asks for a description at once,
+// before the job's next keepalive would tell the Bridge (BRIDGE-01): the
+// description waits for the job's end and runs on the run's notes. Not
+// cancelled, it is refused at once.
+func TestDescribeRightAfterACancelRuns(t *testing.T) {
+	t.Parallel()
+	for name, cancel := range map[string]bool{"cancelled": true, "open": false} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			hr := newHarness(t)
+			d := &fakeDescriber{db: hr.db}
+			h := hr.describeHandler(d)
+			hr.exec.parks["contributing"] = 1
+			hr.srv.add(301, "Author/Book", `{}`)
+			defer hr.runnerKeepalive(time.Hour, h, h.DescribeJob())()
+			// Parked and quiet: the park's description written and its last step
+			// reported, so (at a one-hour keepalive) the job reports nothing more on
+			// its own.
+			hr.waitFor("the contributing park, settled", hr.contributingSettled(301, d))
+			if cancel {
+				hr.srv.set(func() { hr.srv.cancel[301] = true })
+			}
+			start := time.Now()
+			hr.srv.addDescribe(302, "Author/Book")
+			hr.waitFor("the description ended", func() bool { s, _ := hr.srv.final(302); return s != "" })
+			s, u := hr.srv.final(302)
+			switch {
+			case cancel && s != link.StateDone:
+				t.Fatalf("after a cancel the description ended %s (%q), want done", s, errOf(u))
+			case !cancel && (s != link.StateFailed || errOf(u) != string(errDescribeGenerating)):
+				t.Fatalf("with the job open the description ended %s (%q), want refused", s, errOf(u))
+			case !cancel && time.Since(start) > 5*time.Second:
+				t.Fatalf("the refusal took %v", time.Since(start))
+			}
+			if st, _ := hr.srv.final(301); cancel != (st == link.StateCancelled) {
+				t.Fatalf("cancel %v: the generate job ended %q", cancel, st)
+			}
+		})
+	}
+}
+
+// contributingSettled reports whether job id is parked at the contributing step
+// and quiet: the park's description written and its last step reported, so (at a
+// one-hour keepalive) the job reports nothing more on its own.
+func (hr *harness) contributingSettled(id int64, d *fakeDescriber) func() bool {
+	return func() bool {
+		hr.srv.mu.Lock()
+		defer hr.srv.mu.Unlock()
+		ups := hr.srv.updates[id]
+		if len(ups) == 0 || len(d.calls()) == 0 {
+			return false
+		}
+		var p map[string]any
+		last := ups[len(ups)-1]
+		_ = json.Unmarshal(last.Progress, &p)
+		return *last.State == link.StateNeedsAttention && p["step"] == "contributing"
+	}
+}
+
+// slowCancel is the engine with a Cancel that closes started on its first call,
+// then blocks until open is called.
+type slowCancel struct {
+	Engine
+	startOnce, openOnce sync.Once
+	started, gate       chan struct{}
+}
+
+func (e *slowCancel) Cancel(ctx context.Context, id int64) error {
+	e.startOnce.Do(func() { close(e.started) })
+	<-e.gate
+	return e.Engine.Cancel(ctx, id)
+}
+
+// open lets every Cancel through; it may be called more than once.
+func (e *slowCancel) open() { e.openOnce.Do(func() { close(e.gate) }) }
+
+// A job's end is visible only once the engine's cancel of its book has returned:
+// a description waiting on a just-cancelled job doesn't start while the engine is
+// still cancelling the book.
+func TestDescribeWaitsForTheEnginesCancel(t *testing.T) {
+	t.Parallel()
+	hr := newHarness(t)
+	d := &fakeDescriber{db: hr.db}
+	eng := &slowCancel{Engine: hr.sched, started: make(chan struct{}), gate: make(chan struct{})}
+	h := hr.describeHandler(d)
+	h.o.Engine = func() Engine { return eng }
+	hr.exec.parks["contributing"] = 1
+	hr.srv.add(311, "Author/Book", `{}`)
+	defer hr.runnerKeepalive(time.Hour, h, h.DescribeJob())()
+	defer eng.open() // before the runner stops: a failure must not leave the cancel waiting
+	// Parked and quiet (as in TestDescribeRightAfterACancelRuns): the cancel is
+	// heard only through the description's Refresh.
+	hr.waitFor("the contributing park, settled", hr.contributingSettled(311, d))
+	calls := len(d.calls())
+	hr.srv.set(func() { hr.srv.cancel[311] = true })
+	hr.srv.addDescribe(312, "Author/Book")
+	select {
+	case <-eng.started:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the engine was never asked to cancel the book")
+	}
+	time.Sleep(100 * time.Millisecond) // ten polls of the description's wait
+	if s, u := hr.srv.final(312); s != "" || len(d.calls()) != calls {
+		t.Fatalf("while the engine cancels the book: the description ended %q (%q), describe calls %d (was %d)",
+			s, errOf(u), len(d.calls()), calls)
+	}
+	eng.open()
+	hr.waitFor("the description ended", func() bool { s, _ := hr.srv.final(312); return s != "" })
+	if s, u := hr.srv.final(312); s != link.StateDone {
+		t.Fatalf("the description ended %s (%q), want done", s, errOf(u))
+	}
+}

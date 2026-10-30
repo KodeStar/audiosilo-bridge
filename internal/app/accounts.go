@@ -185,6 +185,10 @@ func (b *Bridge) setup(ctx context.Context) link.Setup {
 	cfg := b.config()
 	in := setup.Inputs{Paired: b.conn.Client() != nil, BudgetReviewed: cfg.BudgetReviewed(),
 		MonthlyBudgetUSD: cfg.Agent.MonthlyBudgetUSD}
+	b.mu.Lock()
+	listed := !b.lastBeat.IsZero()
+	b.mu.Unlock()
+	in.LibrariesPending = !listed || b.libs.Unchecked()
 	for _, s := range b.libs.Statuses() {
 		in.Libraries = append(in.Libraries, setup.Library{ID: s.LibraryID, Mapped: s.Mapped, Writable: s.Writable})
 	}
@@ -200,7 +204,8 @@ func (b *Bridge) setup(ctx context.Context) link.Setup {
 		}
 	}
 	st := b.box.Status()
-	in.Agent = setup.Agent{Backend: b.box.ID(), Available: st.Available, Detail: st.Detail}
+	in.Agent = setup.Agent{Backend: b.box.ID(), Available: st.Available, Problem: setup.AgentProblem(st.Problem), Other: st.Other,
+		Refused: st.Refused, Detail: st.Detail}
 	if from := b.contributeFrom(ctx); from != "" {
 		in.GitHub = setup.GitHub{CanContribute: true, From: from}
 		if from == contrib.FromDevice {

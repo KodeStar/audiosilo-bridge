@@ -898,6 +898,10 @@ type Reporter struct {
 	ctx    context.Context //nolint:containedctx // the job's own context, for its sends
 	// nudge wakes loop when the step changed (nil for a LocalReporter).
 	nudge chan struct{}
+	// sendMu orders the reports that carry the job's state (send, Refresh): each
+	// takes its snapshot and makes its request under it, so a Refresh another
+	// job asked for never lands after a newer report (a park lifted since).
+	sendMu sync.Mutex
 
 	mu       sync.Mutex
 	progress Progress
@@ -905,9 +909,12 @@ type Reporter struct {
 	dirty  bool
 	sentAt time.Time
 	// failing: the last report didn't reach the server (unreachable), so the
-	// next goes after ReportRetry rather than Keepalive. Only send writes it
-	// and loop reads it, both on loop's goroutine after execute's first send.
+	// next goes after ReportRetry rather than Keepalive; any report that gets
+	// through clears it (a ConfirmLease's too, on the handler's goroutine, and a
+	// Refresh's, on the goroutine of the job that asked for it). warned: a failed report was logged and none has got through
+	// since, so the next failures are quiet until one does (bridge#31).
 	failing bool
+	warned  bool
 	// parked: the job reports needs_attention with parkMsg as its error, until
 	// Unpark. Unparked, every report clears the error (one a park left, even
 	// across a restart that came before the clear got through).
@@ -1059,11 +1066,11 @@ func (p *Reporter) loop(done <-chan struct{}) {
 			}
 		case <-t.C:
 			p.mu.Lock()
-			since, dirty := time.Since(p.sentAt), p.dirty
+			since, dirty, failing := time.Since(p.sentAt), p.dirty, p.failing
 			p.mu.Unlock()
 			changed := dirty && since >= p.r.opts.ProgressEvery
 			keepalive := p.r.opts.Keepalive
-			if p.failing {
+			if failing {
 				keepalive = p.r.opts.ReportRetry
 			}
 			if !changed && since < keepalive {
@@ -1082,44 +1089,78 @@ func (p *Reporter) loop(done <-chan struct{}) {
 // whether the job goes on.
 func (p *Reporter) send() bool {
 	ctx := p.ctx
+	p.sendMu.Lock()
+	defer p.sendMu.Unlock()
 	p.mu.Lock()
 	pr, dirty := p.progress, p.dirty
 	parked, parkMsg := p.parked, p.parkMsg
 	p.sentAt, p.dirty = time.Now(), false
 	p.mu.Unlock()
-	raw, _ := json.Marshal(pr)
+	u, raw := p.updateOf(pr, parked, parkMsg)
 	if dirty {
 		if err := p.r.store.SetServerJobReport(ctx, p.job.ID, p.job.Attempt, raw, parkMsg); err != nil && ctx.Err() == nil {
 			p.r.log.Warn("bridge: recording progress failed", "job", p.job.ID, "err", err)
 		}
 	}
-	// The error always goes out: the park's message while parked, else "", which
-	// clears the one a park left.
-	state := link.StateRunning
-	u := link.Update{Attempt: p.job.Attempt, State: &state, Error: &parkMsg}
-	if parked {
-		state = link.StateNeedsAttention
-	}
-	if pr.Step != "" {
-		u.Progress = raw
-	}
 	got, err := p.srv.UpdateJob(ctx, p.job.ID, u)
-	p.failing = false
 	switch {
 	case p.answer(got, err):
 		return false
 	case err == nil:
+		p.reached()
 		return true
 	case ctx.Err() != nil:
 		return false
 	default:
-		// The server is unreachable for now: the job goes on, and its lease
-		// (a running job's) lasts two minutes from the last report that got
-		// through, so the next report goes after ReportRetry, not Keepalive
-		// (a refusal would only be refused again: it waits the Keepalive).
-		p.failing = unreachable(err)
-		p.r.log.Warn("bridge: reporting progress failed", "job", p.job.ID, "err", err)
+		p.failed(err)
 		return true
+	}
+}
+
+// updateOf is the report of progress pr, parked (with parkMsg) or not. The
+// error always goes out: the park's message while parked, else "", which clears
+// the one a park left.
+func (p *Reporter) updateOf(pr Progress, parked bool, parkMsg string) (link.Update, json.RawMessage) {
+	raw, _ := json.Marshal(pr)
+	state := link.StateRunning
+	if parked {
+		state = link.StateNeedsAttention
+	}
+	u := link.Update{Attempt: p.job.Attempt, State: &state, Error: &parkMsg}
+	if pr.Step != "" {
+		u.Progress = raw
+	}
+	return u, raw
+}
+
+// failed notes a report that didn't get through: the job goes on, and its lease
+// (a running job's) lasts two minutes from the last report that got through, so
+// while the server is unreachable the next report goes after ReportRetry, not
+// Keepalive (a refusal would only be refused again: it waits the Keepalive). The
+// first failure is logged as a warning, the rest at debug until one gets through
+// (during an outage every running job would warn every ReportRetry).
+func (p *Reporter) failed(err error) {
+	p.mu.Lock()
+	p.failing = unreachable(err)
+	first := !p.warned
+	p.warned = true
+	p.mu.Unlock()
+	if first {
+		p.r.log.Warn("bridge: reporting progress failed", "job", p.job.ID, "err", err)
+	} else {
+		p.r.log.Debug("bridge: reporting progress failed again", "job", p.job.ID, "err", err)
+	}
+}
+
+// reached notes a report that got through: the next goes after the Keepalive,
+// and a failure logged before it gets its recovery line.
+func (p *Reporter) reached() {
+	p.mu.Lock()
+	warned := p.warned
+	p.failing, p.warned = false, false
+	p.mu.Unlock()
+	if warned {
+		p.r.log.Info("bridge: reporting progress again", "job", p.job.ID)
 	}
 }
 
@@ -1177,10 +1218,43 @@ func (p *Reporter) ConfirmLease(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	p.reached()
 	if p.job.Path != nil && got.Path != nil && *p.job.Path != *got.Path {
 		return link.ErrNotHeld
 	}
 	return ctx.Err()
+}
+
+// ErrStopped is Refresh's answer for a job the server's answer stopped: a cancel
+// it holds for the job, a lost claim or a refused token. The job's context has
+// ended; its run is on its way out.
+var ErrStopped = errors.New("the server stopped the job")
+
+// Refresh reports the job now, as its next keepalive would (parked or not, with
+// its progress), and acts on the answer as that report would. Another job asks
+// for it when this one stands in its way: the server may have cancelled it since
+// its last report, and would otherwise say so only at the next keepalive. nil
+// when the server holds the job open; ErrStopped when the answer stopped it; the
+// error when the report didn't get through.
+func (p *Reporter) Refresh(ctx context.Context) error {
+	if p.r == nil {
+		return nil
+	}
+	p.sendMu.Lock()
+	defer p.sendMu.Unlock()
+	p.mu.Lock()
+	pr, parked, parkMsg := p.progress, p.parked, p.parkMsg
+	p.mu.Unlock()
+	u, _ := p.updateOf(pr, parked, parkMsg)
+	got, err := p.srv.UpdateJob(ctx, p.job.ID, u)
+	if p.answer(got, err) {
+		return ErrStopped
+	}
+	if err != nil {
+		return err
+	}
+	p.reached()
+	return nil
 }
 
 // clip bounds s to n bytes, cut at a character's boundary.

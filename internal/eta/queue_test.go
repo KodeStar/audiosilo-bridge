@@ -19,7 +19,7 @@ func approx(t *testing.T, got, want float64) {
 func caps(agent int) LaneCaps { return LaneCaps{ASR: 1, Mechanical: 2, Agent: agent} }
 
 func TestQueueETAEmpty(t *testing.T) {
-	if got := QueueETA(nil, nil, caps(2)); got != 0 {
+	if got := QueueETA(nil, nil, nil, caps(2)); got != 0 {
 		t.Errorf("empty queue = %v, want 0", got)
 	}
 	// Only terminal/paused books contribute nothing.
@@ -27,7 +27,7 @@ func TestQueueETAEmpty(t *testing.T) {
 		{ID: 1, State: state.Done},
 		{ID: 2, State: state.ASR, Status: state.StatusPaused, Chapters: 5},
 	}
-	if got := QueueETA(books, nil, caps(2)); got != 0 {
+	if got := QueueETA(books, nil, nil, caps(2)); got != 0 {
 		t.Errorf("all-inactive queue = %v, want 0", got)
 	}
 }
@@ -36,7 +36,7 @@ func TestQueueETASingleBookEqualsBookETA(t *testing.T) {
 	// With no contention, the makespan of a lone book equals its BookETA.
 	b := Book{ID: 1, State: state.Validating}
 	want, _ := BookETA(b, nil)
-	approx(t, QueueETA([]Book{b}, nil, caps(2)), want)
+	approx(t, QueueETA([]Book{b}, nil, nil, caps(2)), want)
 }
 
 func TestQueueETAMechanicalParallelism(t *testing.T) {
@@ -49,10 +49,10 @@ func TestQueueETAMechanicalParallelism(t *testing.T) {
 		}
 		return out
 	}
-	approx(t, QueueETA(mk(2), nil, caps(4)), 1) // 2 in parallel
-	approx(t, QueueETA(mk(3), nil, caps(4)), 2) // 2 then 1
-	approx(t, QueueETA(mk(4), nil, caps(4)), 2) // two waves of 2
-	approx(t, QueueETA(mk(5), nil, caps(4)), 3) // three waves
+	approx(t, QueueETA(mk(2), nil, nil, caps(4)), 1) // 2 in parallel
+	approx(t, QueueETA(mk(3), nil, nil, caps(4)), 2) // 2 then 1
+	approx(t, QueueETA(mk(4), nil, nil, caps(4)), 2) // two waves of 2
+	approx(t, QueueETA(mk(5), nil, nil, caps(4)), 3) // three waves
 }
 
 // TestStartWaitingSourceIOSubCap pins the mechanical lane's narrower source-IO
@@ -129,8 +129,8 @@ func TestQueueETASourceIOSubCapShiftsMakespan(t *testing.T) {
 	wide := base
 	wide.MechanicalSourceIO = 2
 
-	serial := QueueETA(books, nil, base)
-	parallel := QueueETA(books, nil, wide)
+	serial := QueueETA(books, nil, nil, base)
+	parallel := QueueETA(books, nil, nil, wide)
 	if serial-parallel != 20 {
 		t.Fatalf("serial=%v parallel=%v delta=%v, want one extracting unit (20)",
 			serial, parallel, serial-parallel)
@@ -145,21 +145,21 @@ func TestQueueETASeriesLockSerializesAgent(t *testing.T) {
 		{ID: 1, State: state.Auditing, Series: "S", SeriesPos: "1"},
 		{ID: 2, State: state.Auditing, Series: "S", SeriesPos: "2"},
 	}
-	approx(t, QueueETA(same, nil, caps(2)), 700+700+1)
+	approx(t, QueueETA(same, nil, nil, caps(2)), 700+700+1)
 
 	// Different series (agentCap 2) -> both audit in parallel, then contributing: 701.
 	diff := []Book{
 		{ID: 1, State: state.Auditing, Series: "A", SeriesPos: "1"},
 		{ID: 2, State: state.Auditing, Series: "B", SeriesPos: "1"},
 	}
-	approx(t, QueueETA(diff, nil, caps(2)), 700+1)
+	approx(t, QueueETA(diff, nil, nil, caps(2)), 700+1)
 
 	// Seriesless books are always eligible -> parallel like the different-series case.
 	none := []Book{
 		{ID: 1, State: state.Auditing},
 		{ID: 2, State: state.Auditing},
 	}
-	approx(t, QueueETA(none, nil, caps(2)), 700+1)
+	approx(t, QueueETA(none, nil, nil, caps(2)), 700+1)
 }
 
 func TestQueueETAAgentCapLimitsParallelism(t *testing.T) {
@@ -170,7 +170,7 @@ func TestQueueETAAgentCapLimitsParallelism(t *testing.T) {
 		{ID: 2, State: state.Auditing, Series: "B", SeriesPos: "1"},
 		{ID: 3, State: state.Auditing, Series: "C", SeriesPos: "1"},
 	}
-	approx(t, QueueETA(books, nil, caps(1)), 700*3+1)
+	approx(t, QueueETA(books, nil, nil, caps(1)), 700*3+1)
 }
 
 func TestSortLaneRetranscribePriority(t *testing.T) {
@@ -270,7 +270,7 @@ func TestQueueETAEndedPredecessorReleasesSeries(t *testing.T) {
 		{state.StatusFailed, alone},
 	} {
 		earlier := Book{ID: 1, State: state.ASR, Status: tc.status, Series: "Saga", SeriesPos: "1", Chapters: 5}
-		got := QueueETA([]Book{earlier, later}, nil, caps(2))
+		got := QueueETA([]Book{earlier, later}, nil, nil, caps(2))
 		if math.Abs(got-tc.want) > 1e-6 {
 			t.Errorf("earlier volume %q: makespan = %v, want %v", tc.status, got, tc.want)
 		}
@@ -283,7 +283,7 @@ func TestQueueETAReadalongHoldsNoSeriesLock(t *testing.T) {
 	later := Book{ID: 2, State: state.SpellingResearch, Series: "Saga", SeriesPos: "2", Chapters: 5}
 	alone, _ := BookETA(later, nil)
 	earlier := Book{ID: 1, State: state.ASR, Status: state.StatusNeedsAttention, Goal: state.GoalReadalong, Series: "Saga", SeriesPos: "1", Chapters: 5}
-	if got := QueueETA([]Book{earlier, later}, nil, caps(2)); math.Abs(got-alone) > 1e-6 {
+	if got := QueueETA([]Book{earlier, later}, nil, nil, caps(2)); math.Abs(got-alone) > 1e-6 {
 		t.Errorf("makespan = %v, want %v (the read-along holds nothing)", got, alone)
 	}
 }

@@ -393,8 +393,10 @@ func (h *Handler) audioRun(ctx context.Context, sp string) (store.Book, string, 
 
 // reuseForReadalong continues the book's earlier engine book old for the job when
 // the reuse table says so, and reports whether it did; an error refuses the job.
+// An open job the server has just cancelled is waited for first (awaitOpenJobEnd,
+// BRIDGE-01), as a generate or chapters job does.
 func (h *Handler) reuseForReadalong(ctx context.Context, eng Engine, r *run, old store.Book) (bool, error) {
-	if id, kind, err := h.firstOpenJob(ctx, old.ID, r.job.ID); err != nil {
+	if id, kind, err := h.awaitOpenJobEnd(ctx, r, old.ID); err != nil {
 		return false, err
 	} else if id != 0 {
 		switch kind {
@@ -476,7 +478,7 @@ func (h *Handler) reuseForReadalong(ctx context.Context, eng Engine, r *run, old
 // marker table it couldn't use): the whole pipeline would write characters and
 // recaps by window, its chapters never found; held throughout, as
 // continueChapters does. It reports whether it continued it.
-func (h *Handler) continueReadalongRun(ctx context.Context, eng Engine, r *run, old store.Book) (bool, error) {
+func (h *Handler) continueReadalongRun(ctx context.Context, eng Engine, r *run, old store.Book, ebookRun int64) (bool, error) {
 	if r.source != SourceAudio || old.Goal != state.GoalReadalong || state.State(old.State) != state.Done {
 		return false, nil
 	}
@@ -508,6 +510,9 @@ func (h *Handler) continueReadalongRun(ctx context.Context, eng Engine, r *run, 
 	}
 	if !current {
 		return false, nil
+	}
+	if err := h.clearEbookRun(ctx, eng, r, ebookRun); err != nil {
+		return false, err
 	}
 	if err := h.prepareContinue(ctx, old, state.QASweep); err != nil {
 		return false, fmt.Errorf("could not ready the book's read-along run: %w", err)

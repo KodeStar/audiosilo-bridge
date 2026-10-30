@@ -1207,7 +1207,18 @@ internal/
             github, each {id, done, required, detail}; details cut to 200
             characters and worded for the console (the budget's "$100 a month" or
             "no monthly cap"); Complete is every required item done. The heartbeat
-            sends it and the page's Status tab shows it.
+            sends it and the page's Status tab shows it (the console shows the
+            details as they are). v0.5.0: the libraries item says
+            DetailLibrariesChecking from pairing until a heartbeat has listed the
+            libraries and each is checked (LibrariesPending: no beat since the
+            link changed, or mapping.Registry.Unchecked), BRIDGE-14; the agent
+            item (still required) says in plain words what to do and what the
+            agent is for, by the kind of problem agentbox.Status reports
+            (Problem, Other; the app converts it to setup.AgentProblem):
+            not running, an image of another version (another protocol, or too old for the
+            Accounts tab's credential), no CLI for the backend, the other
+            backend signed in, or no credential (only that one asks for a
+            sign-in); the agentbox detail only for a refused credential, BRIDGE-07.
   correct/  Phase 2b (plan D5): the meta.correct job (light lane). ParseParams
             is STRICT (an unknown field refused, work_id required). It reads the
             work's live coverage (FreshCoverageForWork: its title, the recording
@@ -1533,12 +1544,13 @@ internal/
             any other (its chapter FLACs go; a continue re-splits).
             Perf quick wins (2026-10): the dispatch pass reads dispatchBooks, the
             unfinished books in full (store.ListUnfinishedBooks: all but state done
-            with no status) plus the finished books of a series that still has an
-            unfinished volume, with only id/state/status/series/series_pos
-            (ListFinishedSeriesBooks), since a
-            finished volume still counts in the series breadth ranks (asrBreadthRanks,
-            the ETA simulation); the ETA progress read is ListUnfinishedProgress.
-            The two reads are two statements, so mergeFinished keeps a book that
+            with no status) and, apart from them, the finished books of a series
+            that still has an unfinished volume as []state.SeriesQueueItem
+            (ListFinishedSeriesBooks, its series trimmed of exactly what
+            strings.TrimSpace trims, bridge#31), since a finished volume still
+            counts in the series breadth ranks (asrBreadthRanks, eta.QueueETA's
+            finished); the ETA progress read is ListUnfinishedProgress.
+            The two reads are two statements, so dropFinished keeps a book that
             reached done between them once, as its finished identity.
             A book that leaves done is read in full at the next pass. Reconcile,
             the startup GC and the restart re-admit still read every book.
@@ -1824,7 +1836,14 @@ internal/
             until one gets through, then Keepalive again: at 30 s alone one report
             through and three failed would lapse the lease. Only an answerless
             failure, a 5xx, 408 or 429 counts (unreachable); any other 4xx would be
-            refused again however soon, so it waits the Keepalive. A reply
+            refused again however soon, so it waits the Keepalive. The first failed
+            report warns, the rest log at debug, and the first one through after
+            them logs one Info (bridge#31); a ConfirmLease or Refresh that gets
+            through clears failing too (under the Reporter's lock: they run on
+            the handler's goroutine). Reporter.Refresh (v0.5.0, BRIDGE-01) reports
+            the job now, parked as it is, for another job it stands in the way
+            of: nil while the server holds it, ErrStopped when the answer (a
+            cancel, a lost claim) ended it. A reply
             with cancel_requested ends its context (errCancelRequested -> reported
             cancelled), a 409 ends it as lost (nothing more sent), a 401 is handed to
             the app WITH the link that got it (onUnauthorized(srv): a job of the
@@ -1991,7 +2010,12 @@ internal/
             contained by metaops.AllowedPath under the mount; an earlier engine book at
             the same source_path is deleted first unless another open job follows it
             (refused: cancel it first) or a stage of it runs (scheduler.ErrBusy: try
-            again in a minute); the new book takes its identity from the server's book
+            again in a minute). An open job in the way is asked to report now
+            (Reporter.Refresh through the handler's runHandle, BRIDGE-01): one the
+            server still holds is refused at once, one its answer stopped (an admin
+            cancelled it a moment ago) or that can't be asked is waited for, up to
+            openJobWait (30 s), as chapters jobs do in openJobRefusal, read-along jobs in reuseForReadalong and describe jobs in notesBook, and
+            awaitChaptersGivingWay asks a chapters job to give way at once; the new book takes its identity from the server's book
             block (identity_sources "server"), its work id from params else the
             server's metadata cache, kind ebook with an epub, contrib_mode from the
             params; generate_books maps the job to it. RESUME: a mapping is the job's
@@ -2290,9 +2314,10 @@ internal/
             the sentinel of (a restart's Reconcile would rewind to them), drops asr.json
             going on from inspecting (pipeline.ForgetTranscription: a new manifest), and
             resets the repair round before qa_sweep. A generate job reading the audio
-            takes on the audio run beside an ebook run (earlierRun for both; the ebook
-            run cleared first, then the audio run continued, re-keyed to the book's
-            path, or cleared); one reading the ebook leaves it alone, and describe's
+            takes on the audio run beside an ebook run (earlierRun for both; the audio
+            run continued, re-keyed to the book's path, the ebook run cleared inside
+            the continue under the audio run's hold, or both cleared, the audio run
+            first, so a refused continue keeps both, bridge#34); one reading the ebook leaves it alone, and describe's
             latestGenerated skips it (no notes). A generate job never continues a
             read-along transcribed in windows (its chapters were never found). The request is written
             before the book goes on, and again (readalongAsk) when a resumed run first

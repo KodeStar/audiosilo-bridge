@@ -30,6 +30,51 @@ const (
 // to link the Workers tab, so keep the words stable.
 const DetailASRWaiting = "waiting for an ASR worker"
 
+// DetailLibrariesChecking is the libraries item's detail from pairing until the
+// first heartbeat has listed the server's libraries and each has been checked
+// (BRIDGE-14): before then the Bridge knows none, which is not the server having
+// none.
+const DetailLibrariesChecking = "checking the libraries..."
+
+// agentFor is what the agent is for, in the agent item's detail while it isn't
+// ready (BRIDGE-07: plain words, never the staging volume).
+const agentFor = "the agent signs in to Claude or ChatGPT and is needed for characters, recaps and descriptions"
+
+// The agent item's detail while no agent container is running, while its image
+// isn't this Bridge's version (another protocol, older or newer, or too old to
+// take the Accounts tab's credential), and while it runs with no credential;
+// agentNoCLI and agentOtherBackend name the backends.
+const (
+	DetailAgentNotRunning   = "the agent container isn't running yet; " + agentFor
+	DetailAgentOutdated     = "the agent image isn't this Bridge's version: run the same version of both images; " + agentFor
+	DetailAgentNoCredential = "set the agent's sign-in on the Accounts tab; " + agentFor
+)
+
+// agentNoCLI is the detail while the agent image has no CLI for backend.
+func agentNoCLI(backend string) string {
+	return "the agent image has no " + backend + " CLI: use this Bridge's agent image; " + agentFor
+}
+
+// agentOtherBackend is the detail while other's CLI is signed in but the Bridge
+// runs backend's.
+func agentOtherBackend(backend, other string) string {
+	return other + " is signed in, but this Bridge runs " + backend + ": set agent.backend: " + other +
+		" and restart the Bridge, or set " + backend + "'s sign-in on the Accounts tab"
+}
+
+// AgentProblem is why the agent isn't ready: the agent container's state
+// (agentbox.Problem, the same strings, converted by the app).
+type AgentProblem string
+
+// The problems the checklist words.
+const (
+	AgentNotRunning   AgentProblem = "not_running"
+	AgentOutdated     AgentProblem = "outdated"
+	AgentNoCLI        AgentProblem = "no_cli"
+	AgentOtherBackend AgentProblem = "other_backend"
+	AgentNoCredential AgentProblem = "no_credential"
+)
+
 // maxDetail bounds an item's detail (the server keeps 256 characters).
 const maxDetail = 200
 
@@ -56,7 +101,14 @@ type ASR struct {
 type Agent struct {
 	Backend   string
 	Available bool
-	Detail    string
+	// Problem: why it isn't ready (unknown reads as not running); Other, for
+	// AgentOtherBackend, the CLI that is signed in. Refused: the provider
+	// refused its credential, Detail saying where to replace it (the item's
+	// detail then).
+	Problem AgentProblem
+	Other   string
+	Refused bool
+	Detail  string
 }
 
 // GitHub is the contribution credential.
@@ -69,7 +121,10 @@ type GitHub struct {
 
 // Inputs are what the checklist is made from.
 type Inputs struct {
-	Paired           bool
+	Paired bool
+	// LibrariesPending: paired, but no heartbeat has listed the server's
+	// libraries yet, or one listed has no check yet.
+	LibrariesPending bool
 	Libraries        []Library
 	ASR              ASR
 	Agent            Agent
@@ -95,17 +150,20 @@ func Checklist(in Inputs) link.Setup {
 			missing = append(missing, l.ID)
 		}
 	}
+	pending := in.Paired && in.LibrariesPending
 	libDetail := fmt.Sprintf("%d of %d libraries writable", ready, len(in.Libraries))
 	switch {
 	case len(in.Libraries) == 0 && !in.Paired:
 		// Before pairing there is no server to have libraries. (A refused token
 		// isn't paired either but keeps the libraries it had: those are counted.)
 		libDetail = "pair with a server first"
+	case pending:
+		libDetail = DetailLibrariesChecking
 	case len(in.Libraries) == 0:
 		libDetail = "the server has no libraries yet"
 	}
-	libs := add(ItemLibraries, len(in.Libraries) > 0 && len(missing) == 0, true, libDetail)
-	if len(missing) > 0 {
+	libs := add(ItemLibraries, !pending && len(in.Libraries) > 0 && len(missing) == 0, true, libDetail)
+	if len(missing) > 0 && !pending {
 		libs.LibraryIDs = missing
 	}
 
@@ -123,9 +181,23 @@ func Checklist(in Inputs) link.Setup {
 	}
 	add(ItemASR, asrDone, true, asrDetail)
 
+	// The item stays required (FIRST-RUN F2); the Accounts tab carries the
+	// agent's full state, the checklist only what to do in plain words.
 	agentDetail := in.Agent.Backend
-	if !in.Agent.Available {
-		agentDetail = firstNonEmpty(in.Agent.Detail, "the agent container isn't ready")
+	switch {
+	case in.Agent.Available:
+	case in.Agent.Refused:
+		agentDetail = firstNonEmpty(in.Agent.Detail, DetailAgentNoCredential)
+	case in.Agent.Problem == AgentOutdated:
+		agentDetail = DetailAgentOutdated
+	case in.Agent.Problem == AgentNoCLI:
+		agentDetail = agentNoCLI(in.Agent.Backend)
+	case in.Agent.Problem == AgentOtherBackend && in.Agent.Other != "":
+		agentDetail = agentOtherBackend(in.Agent.Backend, in.Agent.Other)
+	case in.Agent.Problem == AgentNoCredential, in.Agent.Problem == AgentOtherBackend:
+		agentDetail = DetailAgentNoCredential
+	default:
+		agentDetail = DetailAgentNotRunning
 	}
 	add(ItemAgent, in.Agent.Available, true, agentDetail)
 

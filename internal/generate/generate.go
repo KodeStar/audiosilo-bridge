@@ -114,8 +114,9 @@ type Handler struct {
 	mu sync.Mutex
 	// pokes wake a running job when its Retry is pressed (a park of the
 	// Bridge's own, book_not_writable, checks again at once): each job id's
-	// latest run's own channel.
-	pokes map[int64]chan struct{}
+	// latest run's own channel, with its Reporter (another job asks it to
+	// report now when it stands in that job's way, awaitOpenJobEnd).
+	pokes map[int64]runHandle
 	// describeParks is each describe job's park while its loop waits on it
 	// (describeParked), with that run's wake-up channel, so WakeParked finds the
 	// ones a change answers.
@@ -153,7 +154,7 @@ func New(o Options) *Handler {
 	if o.ContribCredential == nil {
 		o.ContribCredential = func(context.Context) error { return nil }
 	}
-	return &Handler{o: o, pokes: map[int64]chan struct{}{}, describeParks: map[int64]describePark{},
+	return &Handler{o: o, pokes: map[int64]runHandle{}, describeParks: map[int64]describePark{},
 		woken: map[state.ParkCode]uint64{}}
 }
 
@@ -432,7 +433,7 @@ func (h *Handler) startRun(job jobs.Job, rep *jobs.Reporter, kind string) (r *ru
 	if p := rep.Path(); p != "" {
 		r.rel, r.jobPath = p, p
 	}
-	h.setPoke(job.ID, r.poke)
+	h.setPoke(job.ID, r.poke, rep)
 	rep.Progress(jobs.Progress{Step: stepWaiting, Message: "Starting"})
 	return r, func() { h.dropPoke(job.ID, r.poke) }, nil
 }
@@ -503,21 +504,26 @@ func (h *Handler) Abandon(ctx context.Context, job jobs.Job) {
 	}()
 }
 
-// release ends a job's hold on its engine book: the end is recorded (the
+// release ends a job's hold on its engine book: a job that didn't finish stops
+// the book (nothing follows it any more), then the end is recorded (the
 // transcript retention counts from it, and the supervisor leaves a book no job
-// follows alone), a job that didn't finish stops the book (nothing follows it
-// any more), and with retention_days 0 the transcripts go now. A later claim of
-// the same job may run here already (the server re-queued it after a lease ran
-// out and handed it out again before this attempt heard it was lost): that
-// attempt follows the book now, so it is left alone.
+// follows alone), and with retention_days 0 the transcripts go now. The stop
+// comes first so a job waiting for this one's end (awaitOpenJobEnd) starts only
+// once the engine's cancel has returned. A stop left to another open job is
+// tried again once this end is recorded: two jobs on the book ending at once
+// would each leave it to the other, and the later end then stops it. A later
+// claim of the same job may run here already (the server re-queued it after a
+// lease ran out and handed it out again before this attempt heard it was lost):
+// that attempt follows the book now, so it is left alone.
 func (h *Handler) release(ctx context.Context, job jobs.Job, bookID int64, stop bool) {
 	if sj, err := h.o.DB.GetServerJob(ctx, job.ID); err == nil && sj.Attempt > job.Attempt {
 		return
 	}
+	followed := stop && h.stopBook(ctx, job.ID, bookID)
 	if err := h.o.DB.EndGenerateBook(ctx, job.ID, h.now()); err != nil {
 		h.o.Log.Warn("generate: recording the job's end failed", "job", job.ID, "err", err)
 	}
-	if stop {
+	if followed {
 		h.stopBook(ctx, job.ID, bookID)
 	}
 	if h.o.RetentionDays == 0 {
@@ -530,22 +536,24 @@ func (h *Handler) release(ctx context.Context, job jobs.Job, bookID int64, stop 
 // stopBook cancels a job's engine book unless it already ended (done, or
 // failed: a cancel would overwrite its error) or another open job follows it now
 // (a generate job continued the chapters run, so a late end of the chapters job,
-// one Abandon releases once the engine starts, leaves it to that job).
-func (h *Handler) stopBook(ctx context.Context, jobID, bookID int64) {
+// one Abandon releases once the engine starts, leaves it to that job). It
+// reports whether it left the book to another open job.
+func (h *Handler) stopBook(ctx context.Context, jobID, bookID int64) (followed bool) {
 	eng := h.o.Engine()
 	if eng == nil {
-		return
+		return false
 	}
 	b, err := h.o.DB.GetBook(ctx, bookID)
 	if err != nil || finished(b.State, b.Status) {
-		return
+		return false
 	}
 	if open, err := h.o.DB.OpenGenerateJobsForBook(ctx, bookID, jobID); err != nil || len(open) > 0 {
-		return
+		return err == nil
 	}
 	if err := eng.Cancel(ctx, bookID); err != nil && !errors.Is(err, scheduler.ErrInvalidOp) {
 		h.o.Log.Warn("generate: cancelling the engine book failed", "job", jobID, "book", bookID, "err", err)
 	}
+	return false
 }
 
 // hold takes the engine's hold on an engine book for work outside its stages (the
@@ -820,8 +828,12 @@ func (h *Handler) create(ctx context.Context, eng Engine, r *run) error {
 	found := err == nil
 	// Read from the audio, the job also takes on the audio run beside an ebook run
 	// (a read-along's or a chapters job's, store.AudioRunKey), the ebook run
-	// cleared first: the whole run, the book's notes, is the audio's now. Read from
-	// the ebook, it leaves that run alone.
+	// cleared: the whole run, the book's notes, is the audio's now. It is cleared
+	// only once the job is sure to go on: inside a continue, under the audio run's
+	// hold, or after the audio run when neither continue takes it, so a refused
+	// continue keeps both runs as they were (bridge#34). Read from the ebook, the
+	// job leaves the audio run alone.
+	ebookRun := int64(0)
 	if r.source == SourceAudio {
 		beside, err := h.earlierRun(ctx, r, store.AudioRunKey(sp))
 		if err != nil && !errors.Is(err, store.ErrNotFound) {
@@ -829,21 +841,22 @@ func (h *Handler) create(ctx context.Context, eng Engine, r *run) error {
 		}
 		if err == nil {
 			if found {
-				if err := h.clearEarlier(ctx, eng, r, old.ID); err != nil {
-					return err
-				}
+				ebookRun = old.ID
 			}
 			old, found = beside, true
 		}
 	}
 	if found {
-		if ok, err := h.continueReadalongRun(ctx, eng, r, old); ok || err != nil {
+		if ok, err := h.continueReadalongRun(ctx, eng, r, old, ebookRun); ok || err != nil {
 			return err
 		}
-		if ok, err := h.continueChapters(ctx, eng, r, old); ok || err != nil {
+		if ok, err := h.continueChapters(ctx, eng, r, old, ebookRun); ok || err != nil {
 			return err
 		}
 		if err := h.clearEarlier(ctx, eng, r, old.ID); err != nil {
+			return err
+		}
+		if err := h.clearEbookRun(ctx, eng, r, ebookRun); err != nil {
 			return err
 		}
 	}
@@ -859,6 +872,15 @@ func (h *Handler) earlierRun(ctx context.Context, r *run, key string) (store.Boo
 		return store.Book{}, err
 	}
 	old, openID, openKind, err := h.awaitChaptersGivingWay(ctx, r, old)
+	if err == nil && openID != 0 {
+		// A job the server cancelled a moment ago ends first (BRIDGE-01), and a
+		// chapters run it followed is then given the chance to give way.
+		if openID, openKind, err = h.awaitOpenJobEnd(ctx, r, old.ID); err == nil && openID == 0 {
+			if old, err = h.o.DB.GetBook(ctx, old.ID); err == nil {
+				old, openID, openKind, err = h.awaitChaptersGivingWay(ctx, r, old)
+			}
+		}
+	}
 	switch {
 	case err != nil:
 		return store.Book{}, err
@@ -870,6 +892,51 @@ func (h *Handler) earlierRun(ctx context.Context, r *run, key string) (store.Boo
 		return store.Book{}, fmt.Errorf("job %d is already generating this book; cancel it first", openID)
 	}
 	return old, nil
+}
+
+// openJobWait bounds a new job's wait for an open job on the same engine book
+// that the server has stopped to end here (BRIDGE-01): an admin cancels a parked
+// job and asks again at once, before that job's next keepalive (up to 30 s) has
+// told the Bridge. The new job asks it to report now (jobs.Reporter.Refresh), so
+// the wait is usually one round trip and the job's end.
+const openJobWait = 30 * time.Second
+
+// awaitOpenJobEnd returns the first open job other than r's following engine
+// book bookID (firstOpenJob, id 0 for none) once the ones the server has stopped
+// have ended here. Each is asked to report now: one the server still holds open
+// is returned at once, for the caller to refuse; one its answer stopped, or one
+// that couldn't be asked (not running here, the server not reached), is waited
+// for, up to openJobWait.
+func (h *Handler) awaitOpenJobEnd(ctx context.Context, r *run, bookID int64) (int64, string, error) {
+	asked := map[int64]bool{}
+	for i := 0; ; i++ {
+		id, kind, err := h.firstOpenJob(ctx, bookID, r.job.ID)
+		if err != nil || id == 0 {
+			return id, kind, err
+		}
+		if !asked[id] {
+			asked[id] = true
+			if h.refreshJob(ctx, id) {
+				return id, kind, nil
+			}
+		}
+		if time.Duration(i)*h.o.Poll >= openJobWait {
+			return id, kind, nil
+		}
+		r.rep.Progress(jobs.Progress{Step: stepWaiting, Message: "Waiting for the book's earlier job to end"})
+		if err := agent.SleepCtx(ctx, h.o.Poll); err != nil {
+			return 0, "", err
+		}
+	}
+}
+
+// refreshJob asks open job id, when it runs here, to report now (acting on the
+// answer: a cancel ends it), and reports whether the server still holds it open.
+func (h *Handler) refreshJob(ctx context.Context, id int64) bool {
+	h.mu.Lock()
+	rep := h.pokes[id].rep
+	h.mu.Unlock()
+	return rep != nil && rep.Refresh(ctx) == nil
 }
 
 // errEarlierRunBusy is a new job's refusal while the engine stays busy with the
@@ -886,6 +953,15 @@ func (h *Handler) clearEarlier(ctx context.Context, eng Engine, r *run, id int64
 	}
 	h.o.Log.Info("generate: the book's earlier run was cleared", "job", r.job.ID, "old_book", id)
 	return nil
+}
+
+// clearEbookRun clears the ebook run (id; 0 for none) beside the audio run a job
+// reading the audio takes on (create), once it is sure to.
+func (h *Handler) clearEbookRun(ctx context.Context, eng Engine, r *run, id int64) error {
+	if id == 0 {
+		return nil
+	}
+	return h.clearEarlier(ctx, eng, r, id)
 }
 
 // queueBook makes the job's engine book nb in a batch of its own, maps the job to
@@ -1423,8 +1499,9 @@ var ErrNotParked = errors.New("the job isn't waiting on anything a retry would h
 // to check again now. store.ErrNotFound when the job isn't one of this handler's.
 func (h *Handler) Retry(ctx context.Context, jobID int64) error {
 	h.mu.Lock()
-	c, waiting := h.pokes[jobID]
+	rh, waiting := h.pokes[jobID]
 	h.mu.Unlock()
+	c := rh.poke
 	// poke wakes the running job (to look at its book, or at its folder, now),
 	// reporting whether one runs here.
 	poke := func() bool {
@@ -1476,11 +1553,18 @@ func (h *Handler) Retry(ctx context.Context, jobID int64) error {
 	return nil
 }
 
-// setPoke makes c the job's wake-up channel (its latest run's).
-func (h *Handler) setPoke(jobID int64, c chan struct{}) {
+// runHandle is a running job's wake-up channel and Reporter (Handler.pokes).
+type runHandle struct {
+	poke chan struct{}
+	rep  *jobs.Reporter
+}
+
+// setPoke makes c the job's wake-up channel (its latest run's), with the run's
+// Reporter.
+func (h *Handler) setPoke(jobID int64, c chan struct{}, rep *jobs.Reporter) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.pokes[jobID] = c
+	h.pokes[jobID] = runHandle{poke: c, rep: rep}
 }
 
 // nudge sends a wake-up on c without waiting (one already pending is enough).
@@ -1496,7 +1580,7 @@ func nudge(c chan struct{}) {
 func (h *Handler) dropPoke(jobID int64, c chan struct{}) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if h.pokes[jobID] == c {
+	if h.pokes[jobID].poke == c {
 		delete(h.pokes, jobID)
 	}
 }

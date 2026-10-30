@@ -743,3 +743,51 @@ func TestGenerateTakesOnTheAudioRunBesideAnEbookRun(t *testing.T) {
 		t.Fatalf("the ebook run: %v", err)
 	}
 }
+
+// A generate job reading the audio whose continue of the audio run beside an
+// ebook run is refused (the engine stays busy with the audio run) leaves the
+// ebook run as it was, its notes and manifest kept (bridge#34): the ebook run is
+// cleared only once the job is sure to take the audio run on.
+func TestRefusedContinueKeepsTheEbookRun(t *testing.T) {
+	t.Parallel()
+	hr := readalongHarness(t)
+	ebook := seedEbookRun(hr)
+	beside := seedEarlierAt(hr, store.AudioRunKey(ebook.SourcePath), state.GoalReadalong, state.Done, "")
+	release, ok := hr.sched.Hold(beside.ID)
+	if !ok {
+		t.Fatal("the engine wouldn't hold the audio run")
+	}
+	defer release()
+	hr.srv.add(235, "Author/Book", `{"source":"audio"}`)
+	stop := hr.runner(hr.h, hr.h.ReadalongJob())
+	defer stop()
+	hr.waitFor("the generate job ended", func() bool { s, _ := hr.srv.final(235); return s != "" })
+	if s, u := hr.srv.final(235); s != link.StateFailed || u.Error == nil || *u.Error != errEarlierRunBusy.Error() {
+		t.Fatalf("the generate job ended %s (%q), want failed with %q", s, errOf(u), errEarlierRunBusy)
+	}
+	ebookRunIntact(hr, ebook)
+	if got, err := hr.db.GetBook(context.Background(), beside.ID); err != nil || got.Goal != state.GoalReadalong || got.SourcePath != beside.SourcePath {
+		t.Fatalf("the audio run = %+v, %v", got, err)
+	}
+}
+
+// An admin cancels a parked chapters job and asks for the read-along at once,
+// before the parked job's next keepalive would tell the Bridge (BRIDGE-01): the
+// read-along asks it to report now and waits for its end rather than refusing
+// it as still working on the book.
+func TestReadalongRightAfterACancelIsNotRefused(t *testing.T) {
+	t.Parallel()
+	hr := readalongHarness(t)
+	stop := hr.runnerKeepalive(time.Hour, hr.h, hr.h.ChaptersJob(), hr.h.ReadalongJob())
+	defer stop()
+	parkChapters(hr, 236)
+	hr.srv.set(func() { hr.srv.cancel[236] = true })
+	hr.srv.addKind(237, ReadalongKind, "Loose.m4b", `{}`)
+	hr.waitFor("the read-along job ended", func() bool { s, _ := hr.srv.final(237); return s != "" })
+	if s, u := hr.srv.final(237); s == link.StateFailed && strings.Contains(errOf(u), "let it finish or cancel it first") {
+		t.Fatalf("the read-along was refused: %q", errOf(u))
+	}
+	if s, _ := hr.srv.final(236); s != link.StateCancelled {
+		t.Fatalf("the cancelled job ended %q, want cancelled", s)
+	}
+}

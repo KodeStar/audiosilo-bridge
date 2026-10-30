@@ -68,7 +68,7 @@ func TestSortASRLaneBreadthFirstAcrossSeries(t *testing.T) {
 	}
 	candidates := []store.Book{all[4], all[2], all[1], all[6], all[5], all[3]}
 
-	sortASRLane(candidates, all)
+	sortASRLane(candidates, all, nil)
 
 	want := []int64{4, 6, 7, 2, 5, 3}
 	for i, id := range want {
@@ -87,7 +87,7 @@ func TestSortASRLaneRetranscriptionJumpsBreadthQueue(t *testing.T) {
 	}
 	candidates := append([]store.Book(nil), all...)
 
-	sortASRLane(candidates, all)
+	sortASRLane(candidates, all, nil)
 
 	want := []int64{9, 1, 3, 2}
 	for i, id := range want {
@@ -122,7 +122,7 @@ func TestQueueSnapshotSeparatesLiveProcessingFromActualASROrder(t *testing.T) {
 		13: {lane: state.LaneAgent, stage: state.FactPass},
 	}
 
-	snapshot := queueSnapshot(books, active)
+	snapshot := queueSnapshot(books, nil, active)
 	assertQueue := func(id int64, group, bucket string, position int, running bool) {
 		t.Helper()
 		got, ok := snapshot[id]
@@ -168,7 +168,7 @@ func TestSortASRLaneQueuesEveryCorrectiveAheadOfFullBookASR(t *testing.T) {
 	}
 	candidates := append([]store.Book(nil), all...)
 
-	sortASRLane(candidates, all)
+	sortASRLane(candidates, all, nil)
 
 	if got, want := bookIDs(candidates), []int64{8, 9, 1, 2}; !slices.Equal(got, want) {
 		t.Fatalf("ASR lane order = %v, want %v (both correctives before any full book)", got, want)
@@ -293,7 +293,7 @@ func TestQueueStatsPublishesAndClearsSeriesBlockers(t *testing.T) {
 		return payload
 	}
 
-	s.publishQueueStats(books, map[state.Lane]int{})
+	s.publishQueueStats(books, nil, map[state.Lane]int{})
 	first := decode()
 	if got := first.SeriesBlockedBy["2"]; got.BookID != 1 || got.Title != "Saga One" {
 		t.Fatalf("published blocker = %+v", got)
@@ -303,7 +303,7 @@ func TestQueueStatsPublishesAndClearsSeriesBlockers(t *testing.T) {
 	}
 
 	books[0].State = string(state.Ready)
-	s.publishQueueStats(books, map[state.Lane]int{})
+	s.publishQueueStats(books, nil, map[state.Lane]int{})
 	if got := decode().SeriesBlockedBy; len(got) != 0 {
 		t.Fatalf("published blockers after release = %+v, want empty", got)
 	}

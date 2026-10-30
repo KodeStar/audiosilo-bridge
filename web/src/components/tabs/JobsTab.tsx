@@ -15,6 +15,7 @@ import {
   hasResult,
   jobTarget,
   jobsPollInterval,
+  libraryNames,
   mergeJobs,
   progressPercent,
   progressText,
@@ -66,12 +67,20 @@ export function JobsTab({
   client: ApiClient;
   focusId?: number | null;
 }) {
-  if (focusId !== null) return <FocusedJob client={client} id={focusId} />;
-  return <JobList client={client} />;
+  // The libraries' names, read once: a job names its library by them (an id
+  // until they load, or when they can't).
+  const { data: names } = useLoad(
+    async () => libraryNames((await client.libraries()).libraries),
+    null,
+  );
+  if (focusId !== null) return <FocusedJob client={client} id={focusId} names={names} />;
+  return <JobList client={client} names={names} />;
 }
 
+type Names = ReadonlyMap<number, string> | null;
+
 // FocusedJob is one job's detail, polled like the list.
-function FocusedJob({ client, id }: { client: ApiClient; id: number }) {
+function FocusedJob({ client, id, names }: { client: ApiClient; id: number; names: Names }) {
   const {
     data: job,
     error,
@@ -93,14 +102,14 @@ function FocusedJob({ client, id }: { client: ApiClient; id: number }) {
       ) : (
         <>
           {error && <Notice kind="error">{error}</Notice>}
-          <JobCard client={client} job={job} onChanged={reload} open />
+          <JobCard client={client} job={job} names={names} onChanged={reload} open />
         </>
       )}
     </div>
   );
 }
 
-function JobList({ client }: { client: ApiClient }) {
+function JobList({ client, names }: { client: ApiClient; names: Names }) {
   // The cursor for the next older page (undefined: no more).
   const [nextBefore, setNextBefore] = useState<number | undefined>(undefined);
   // Older pages were loaded: polling then keeps them and their cursor.
@@ -154,7 +163,7 @@ function JobList({ client }: { client: ApiClient }) {
         <ul className="flex flex-col gap-3">
           {jobs.map((job) => (
             <li key={job.id}>
-              <JobCard client={client} job={job} onChanged={reload} />
+              <JobCard client={client} job={job} names={names} onChanged={reload} />
             </li>
           ))}
         </ul>
@@ -173,11 +182,13 @@ function JobList({ client }: { client: ApiClient }) {
 function JobCard({
   client,
   job,
+  names,
   onChanged,
   open = false,
 }: {
   client: ApiClient;
   job: ServerJob;
+  names: Names;
   onChanged: () => Promise<void>;
   // Show the details at once (the job's own page).
   open?: boolean;
@@ -191,7 +202,7 @@ function JobCard({
   const percent = progressPercent(job.progress);
   const report = reportText(job);
   const hint = stateHint(shown);
-  const target = jobTarget(job);
+  const target = jobTarget(job, names);
 
   async function retry() {
     setBusy(true);

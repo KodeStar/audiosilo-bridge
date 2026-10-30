@@ -372,7 +372,7 @@ func sidecarsWithoutChapters(p place) bool {
 // cancelled meanwhile leaves the run as it was, for the next one): a continued
 // book always has its job to follow it and is never left stopped. It reports
 // whether it continued it.
-func (h *Handler) continueChapters(ctx context.Context, eng Engine, r *run, old store.Book) (bool, error) {
+func (h *Handler) continueChapters(ctx context.Context, eng Engine, r *run, old store.Book, ebookRun int64) (bool, error) {
 	if r.source != SourceAudio || !continuable(old) {
 		return false, nil
 	}
@@ -422,6 +422,9 @@ func (h *Handler) continueChapters(ctx context.Context, eng Engine, r *run, old 
 			return false, nil
 		}
 	}
+	if err := h.clearEbookRun(ctx, eng, r, ebookRun); err != nil {
+		return false, err
+	}
 	err = h.o.DB.ContinueChapters(ctx, old.ID, old.State, string(to), h.newBook(r, old.AudioSource(), ""),
 		store.GenerateBook{ServerJobID: r.job.ID, LibraryID: r.lib.ID, RelPath: r.rel})
 	if errors.Is(err, store.ErrNotContinuable) {
@@ -461,12 +464,18 @@ func continuable(b store.Book) bool {
 // the first other open job following it (openID 0 when none, kind "" when
 // unknown), which the caller refuses.
 func (h *Handler) awaitChaptersGivingWay(ctx context.Context, r *run, b store.Book) (_ store.Book, openID int64, kind string, err error) {
+	asked := int64(0)
 	for i := 1; ; i++ {
 		if openID, kind, err = h.firstOpenJob(ctx, b.ID, r.job.ID); err != nil {
 			return b, 0, "", err
 		}
 		if !chaptersGivingWay(b, openID, kind) {
 			return b, openID, kind, nil
+		}
+		if openID != 0 && openID != asked {
+			// It hears the cancel now rather than at its next keepalive.
+			asked = openID
+			h.refreshJob(ctx, openID)
 		}
 		if i == giveWayTries {
 			if openID == 0 {
@@ -488,7 +497,9 @@ func (h *Handler) awaitChaptersGivingWay(ctx context.Context, r *run, b store.Bo
 // chaptersGivingWay reports whether book b is a chapters run on its way to giving
 // way: its chapters job still open (whatever the book is doing: working, parked,
 // or done and saving its list, the job is cancelled and ends at its next report),
-// or with no job following it and not stopped yet (that job's end is stopping it).
+// or with no job following it and not stopped yet (that job's end left the stop
+// to another job, or waits for the engine to start: awaitChaptersGivingWay stops
+// it when the wait runs out).
 func chaptersGivingWay(b store.Book, openID int64, kind string) bool {
 	switch {
 	case b.Goal != state.GoalChapters:
@@ -640,7 +651,9 @@ func (h *Handler) chaptersFromEarlier(ctx context.Context, r *run) (any, bool, e
 	if err != nil {
 		return nil, true, err
 	}
-	if err := h.openJobRefusal(ctx, r, old.ID); err != nil {
+	if old, err = h.openJobRefusal(ctx, r, old); errors.Is(err, store.ErrNotFound) {
+		return nil, false, nil
+	} else if err != nil {
 		return nil, true, err
 	}
 	// A list whose audio can't be looked at now fails the job rather than going on
@@ -662,19 +675,23 @@ func (h *Handler) chaptersFromEarlier(ctx context.Context, r *run) (any, bool, e
 
 // openJobRefusal refuses a chapters job for an engine book another open job
 // follows: a generate job's run brings the chapters; another chapters job is
-// already finding them.
-func (h *Handler) openJobRefusal(ctx context.Context, r *run, bookID int64) error {
-	id, kind, err := h.firstOpenJob(ctx, bookID, r.job.ID)
-	if err != nil || id == 0 {
-		return err
+// already finding them. A job the server has just cancelled is waited for
+// (awaitOpenJobEnd, BRIDGE-01). It returns the engine book as it is then
+// (store.ErrNotFound once it is gone).
+func (h *Handler) openJobRefusal(ctx context.Context, r *run, b store.Book) (store.Book, error) {
+	id, kind, err := h.awaitOpenJobEnd(ctx, r, b.ID)
+	if err != nil {
+		return b, err
 	}
-	switch kind {
-	case Kind:
-		return errChaptersGenerating
-	case ReadalongKind:
-		return fmt.Errorf("job %d is making this book's read-along; let it finish or cancel it first", id)
+	switch {
+	case id == 0:
+		return h.o.DB.GetBook(ctx, b.ID)
+	case kind == Kind:
+		return b, errChaptersGenerating
+	case kind == ReadalongKind:
+		return b, fmt.Errorf("job %d is making this book's read-along; let it finish or cancel it first", id)
 	}
-	return fmt.Errorf("job %d is already finding this book's chapters; cancel it first", id)
+	return b, fmt.Errorf("job %d is already finding this book's chapters; cancel it first", id)
 }
 
 // createChapters makes the engine book of a chapters job: goal chapters, the
@@ -691,9 +708,9 @@ func (h *Handler) createChapters(ctx context.Context, eng Engine, r *run) error 
 	}
 	old, key, err := h.audioRun(ctx, sp)
 	if err == nil {
-		if err := h.openJobRefusal(ctx, r, old.ID); err != nil {
-			return err
-		}
+		old, err = h.openJobRefusal(ctx, r, old)
+	}
+	if err == nil {
 		if keeps, err := h.keepsWholeRun(ctx, old); err != nil {
 			return err
 		} else if keeps {

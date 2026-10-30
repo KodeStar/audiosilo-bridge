@@ -6,6 +6,7 @@ import {
   hasResult,
   jobTarget,
   jobsPollInterval,
+  libraryNames,
   mergeJobs,
   progressPercent,
   progressText,
@@ -14,7 +15,7 @@ import {
   stateLabel,
   stateTone,
 } from './jobs';
-import { generateJobFixture, jobFixture } from '@/test/fixtures';
+import { generateJobFixture, jobFixture, libraryFixture } from '@/test/fixtures';
 
 describe('state labels', () => {
   it('words every state', () => {
@@ -79,6 +80,19 @@ describe('jobTarget', () => {
     expect(jobTarget(jobFixture())).toBe('library 1: Author/Book');
     expect(jobTarget(jobFixture({ path: null }))).toBe('library 1');
     expect(jobTarget(jobFixture({ library_id: null, path: null }))).toBe('');
+  });
+
+  it('names the library when the Bridge knows it', () => {
+    const names = libraryNames([
+      libraryFixture(),
+      libraryFixture({ library: { id: 3, name: '', root: '/p', kind: 'podcasts' } }),
+    ]);
+    expect(jobTarget(jobFixture(), names)).toBe('Audiobooks · Author/Book');
+    expect(jobTarget(jobFixture({ path: null }), names)).toBe('Audiobooks');
+    // An unnamed or unknown library keeps its id.
+    expect(jobTarget(jobFixture({ library_id: 3 }), names)).toBe('library 3: Author/Book');
+    expect(jobTarget(jobFixture({ library_id: 9 }), names)).toBe('library 9: Author/Book');
+    expect(libraryNames(null).size).toBe(0);
   });
 });
 

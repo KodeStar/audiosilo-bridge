@@ -159,13 +159,24 @@ func (h *Handler) notesBook(ctx context.Context, r *run) (store.Book, error) {
 	if err != nil {
 		return store.Book{}, err
 	}
-	open, err := h.o.DB.OpenGenerateJobsForBook(ctx, b.ID, 0)
+	// An open job on the run refuses the description, unless the server has just
+	// cancelled it: that one is waited for (awaitOpenJobEnd, BRIDGE-01) and the
+	// run read again as its end left it.
+	open, _, err := h.awaitOpenJobEnd(ctx, r, b.ID)
 	if err != nil {
+		return store.Book{}, err
+	}
+	if open != 0 {
+		return store.Book{}, errDescribeGenerating
+	}
+	if b, err = h.o.DB.GetBook(ctx, b.ID); errors.Is(err, store.ErrNotFound) {
+		return store.Book{}, errDescribeNoNotes
+	} else if err != nil {
 		return store.Book{}, err
 	}
 	// A book the engine still has queued or running (no park, not done) is
 	// working too, whether or not a job follows it.
-	if len(open) > 0 || (b.Status == "" && state.State(b.State) != state.Done) {
+	if b.Status == "" && state.State(b.State) != state.Done {
 		return store.Book{}, errDescribeGenerating
 	}
 	r.sourceOf(b)

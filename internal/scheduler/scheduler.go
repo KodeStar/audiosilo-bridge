@@ -28,6 +28,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -406,7 +407,7 @@ func (s *Scheduler) dispatch() {
 	s.autoReadmitDue(ctx)
 	// advanceWaypoints promotes queued/ready books until none remain and returns
 	// the resulting fresh list, so dispatch never re-queries.
-	books, err := s.advanceWaypoints(ctx)
+	books, finished, err := s.advanceWaypoints(ctx)
 	if err != nil {
 		return
 	}
@@ -451,7 +452,7 @@ func (s *Scheduler) dispatch() {
 	// rest breadth-first across series so each series opens an agent slot before ASR
 	// loops back to later books. One fill down that sorted slice offers the slot in
 	// exactly that priority.
-	sortASRLane(asr, books)
+	sortASRLane(asr, books, finished)
 	sortByID(agent)
 	sortByID(mech)
 
@@ -466,20 +467,24 @@ func (s *Scheduler) dispatch() {
 		sourceIOCapacity-sourceIOActive,
 	)
 
-	s.publishQueueStats(books, counts)
-	s.publishETAs(ctx, books)
+	s.publishQueueStats(books, finished, counts)
+	s.publishETAs(ctx, books, finished)
 }
 
-func sortASRLane(candidates, allBooks []store.Book) {
-	sortASRLaneWithRanks(candidates, asrBreadthRanks(allBooks))
+// sortASRLane orders the ASR candidates; allBooks and finished are the pass's
+// books and the finished series volumes, which the breadth ranks count.
+func sortASRLane(candidates, allBooks []store.Book, finished []state.SeriesQueueItem) {
+	sortASRLaneWithRanks(candidates, asrBreadthRanks(allBooks, finished))
 }
 
-func asrBreadthRanks(allBooks []store.Book) map[int64]int {
-	items := make([]state.SeriesQueueItem, 0, len(allBooks))
+// asrBreadthRanks are the series breadth ranks of the pass's books, with the
+// finished volumes of their series (dispatchBooks) counted in.
+func asrBreadthRanks(allBooks []store.Book, finished []state.SeriesQueueItem) map[int64]int {
+	items := make([]state.SeriesQueueItem, 0, len(allBooks)+len(finished))
 	for _, b := range allBooks {
 		items = append(items, state.SeriesQueueItem{ID: b.ID, Series: b.Series, SeriesPos: b.SeriesPos})
 	}
-	return state.SeriesBreadthRanks(items)
+	return state.SeriesBreadthRanks(append(items, finished...))
 }
 
 func sortASRLaneWithRanks(candidates []store.Book, ranks map[int64]int) {
@@ -505,14 +510,14 @@ func sortByID(b []store.Book) {
 // a worker actually running a book from another book merely waiting at a stage in
 // that lane. Idle exceptional and terminal books are absent; a cooperatively paused
 // in-flight stage remains active until its worker exits.
-func (s *Scheduler) QueueSnapshot(books []store.Book) map[int64]QueueBook {
+func (s *Scheduler) QueueSnapshot(books []store.Book, finished []state.SeriesQueueItem) map[int64]QueueBook {
 	s.mu.Lock()
 	active := make(map[int64]inflightBook, len(s.inflight))
 	for id, ib := range s.inflight {
 		active[id] = *ib
 	}
 	s.mu.Unlock()
-	return queueSnapshot(books, active)
+	return queueSnapshot(books, finished, active)
 }
 
 // queueSnapshot is the pure half of QueueSnapshot, split out for exact ordering
@@ -524,7 +529,7 @@ func (s *Scheduler) QueueSnapshot(books []store.Book) map[int64]QueueBook {
 // full-book position. Agent and mechanical work stays in separate buckets for the
 // stronger reason - those workers are genuinely independent, so no truthful total
 // order between them exists at all.
-func queueSnapshot(books []store.Book, inflight map[int64]inflightBook) map[int64]QueueBook {
+func queueSnapshot(books []store.Book, finished []state.SeriesQueueItem, inflight map[int64]inflightBook) map[int64]QueueBook {
 	buckets := make(map[string][]store.Book)
 	holders := lockHolders(books)
 	for _, b := range books {
@@ -574,7 +579,7 @@ func queueSnapshot(books []store.Book, inflight map[int64]inflightBook) map[int6
 	}
 	// The ordinary full-book ASR worker is breadth-first across series. Compute the
 	// ranks once for all ASR buckets rather than rebuilding them for every view.
-	ranks := asrBreadthRanks(books)
+	ranks := asrBreadthRanks(books, finished)
 	sortASRLaneWithRanks(buckets[queueBucketTranscribing], ranks)
 	sortASRLaneWithRanks(buckets[queueBucketTranscription], ranks)
 
@@ -965,62 +970,51 @@ func (s *Scheduler) autoPurgeDone(ctx context.Context, id int64) {
 }
 
 // dispatchBooks is the dispatch pass's read, ordered by id as ListBooks was:
-// every unfinished book in full, plus the finished volumes of a series that
-// still has one, identity and series position only (store.ListFinishedSeriesBooks).
+// every unfinished book in full, and apart from them the series identity of each
+// finished volume of a series that still has one (store.ListFinishedSeriesBooks).
 // A finished book (done, no status) runs nothing, holds no series lock and has
 // no ETA, so the pass needs it only for the series breadth ranks (asrBreadthRanks
 // and the ETA simulation count a finished earlier volume, keeping a later one a
 // wave deep). A book that leaves done is read in full again at the next pass.
-func (s *Scheduler) dispatchBooks(ctx context.Context) ([]store.Book, error) {
+func (s *Scheduler) dispatchBooks(ctx context.Context) ([]store.Book, []state.SeriesQueueItem, error) {
 	books, err := s.db.ListUnfinishedBooks(ctx)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	finished, err := s.db.ListFinishedSeriesBooks(ctx)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return mergeFinished(books, finished), nil
+	return dropFinished(books, finished), finished, nil
 }
 
-// mergeFinished merges the two id-ordered reads of dispatchBooks into one
-// id-ordered list. The reads are two statements, not one snapshot: a book whose
+// dropFinished leaves out of the unfinished books the ones finished names. The
+// two reads of dispatchBooks are two statements, not one snapshot: a book whose
 // last stage finished between them is in both, and its finished identity (the
 // later read) is the one kept, so the pass neither counts it twice in its series
 // ranks nor offers its stale stage to a lane.
-func mergeFinished(unfinished, finished []store.Book) []store.Book {
+func dropFinished(unfinished []store.Book, finished []state.SeriesQueueItem) []store.Book {
 	if len(finished) == 0 {
 		return unfinished
 	}
-	out := make([]store.Book, 0, len(unfinished)+len(finished))
-	i, j := 0, 0
-	for i < len(unfinished) && j < len(finished) {
-		switch a, b := unfinished[i].ID, finished[j].ID; {
-		case a < b:
-			out = append(out, unfinished[i])
-			i++
-		case b < a:
-			out = append(out, finished[j])
-			j++
-		default:
-			out = append(out, finished[j])
-			i, j = i+1, j+1
-		}
+	done := make(map[int64]bool, len(finished))
+	for _, f := range finished {
+		done[f.ID] = true
 	}
-	out = append(out, unfinished[i:]...)
-	return append(out, finished[j:]...)
+	return slices.DeleteFunc(unfinished, func(b store.Book) bool { return done[b.ID] })
 }
 
 // advanceWaypoints promotes queued/ready books (no lane, no executor) to their
 // next state until none remain, so the machine never stalls on a waypoint. It
 // loops until a pass advances nothing and returns that final, fresh book list
-// (dispatchBooks) so dispatch can act on it without re-querying.
-func (s *Scheduler) advanceWaypoints(ctx context.Context) ([]store.Book, error) {
+// (dispatchBooks, with its finished series volumes) so dispatch can act on it
+// without re-querying.
+func (s *Scheduler) advanceWaypoints(ctx context.Context) ([]store.Book, []state.SeriesQueueItem, error) {
 	// One initial query; subsequent passes advance the in-memory slice so a chain
 	// of waypoints (queued -> inspecting, ready -> contributing) needs no re-read.
-	books, err := s.dispatchBooks(ctx)
+	books, finished, err := s.dispatchBooks(ctx)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	for {
 		advanced := false
@@ -1042,7 +1036,7 @@ func (s *Scheduler) advanceWaypoints(ctx context.Context) ([]store.Book, error) 
 			advanced = true
 		}
 		if !advanced {
-			return books, nil
+			return books, finished, nil
 		}
 	}
 }
@@ -1281,7 +1275,7 @@ func (s *Scheduler) publishState(bookID int64, st, status, errMsg, parkCode, ret
 // published, so an idle 5s tick that recomputes an identical snapshot does not
 // emit an SSE frame, persist a durable row, or re-render every client. Start
 // resets the dedup so the first pass always publishes.
-func (s *Scheduler) publishQueueStats(books []store.Book, counts map[state.Lane]int) {
+func (s *Scheduler) publishQueueStats(books []store.Book, finished []state.SeriesQueueItem, counts map[state.Lane]int) {
 	// "queued" is a legacy wire name: it counts every runnable, nonterminal book,
 	// including books currently occupying workers. The UI labels it Runnable so it
 	// is not mistaken for waiting-only accounting.
@@ -1300,7 +1294,7 @@ func (s *Scheduler) publishQueueStats(books []store.Book, counts map[state.Lane]
 	perBookJSON, _ := json.Marshal(perBook) // int-key map is emitted in stable key order
 	seriesBlockedBy := SeriesBlockers(books)
 	seriesBlockedJSON, _ := json.Marshal(seriesBlockedBy)
-	queueBooks := queueBooksPayload(s.QueueSnapshot(books))
+	queueBooks := queueBooksPayload(s.QueueSnapshot(books, finished))
 	queueBooksJSON, _ := json.Marshal(queueBooks)
 	next := queueStats{
 		asr:               counts[state.LaneASR],

@@ -278,6 +278,18 @@ func (r *Registry) Statuses() []link.LibraryStatus {
 	return out
 }
 
+// Unchecked reports whether a library listed has no check yet.
+func (r *Registry) Unchecked() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, l := range r.libs {
+		if _, ok := r.results[l.ID]; !ok {
+			return true
+		}
+	}
+	return false
+}
+
 // Entries lists every library with its mount and last check, for the Bridge's
 // page.
 func (r *Registry) Entries(mount MountFunc) []Entry {

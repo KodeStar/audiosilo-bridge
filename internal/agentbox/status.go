@@ -30,7 +30,12 @@ type Status struct {
 	// shows that credential's kind for the backend.
 	Handoff bool
 	// Detail says why not, in words for the page and the park hint.
-	Detail      string
+	Detail string
+	// Problem is why not as a kind (Problem*: "" when Available or Refused), and
+	// Other, for ProblemOtherBackend, the CLI that is signed in: the setup
+	// checklist words them for a person (internal/setup).
+	Problem     Problem
+	Other       string
 	Version     string // the runner's (the Bridge binary's) version
 	Slots       int
 	HeartbeatAt time.Time
@@ -50,11 +55,26 @@ func (s Status) Subscription(backend string) bool {
 	return false
 }
 
+// Problem is why runs can't go to the agent container, as a kind.
+type Problem string
+
+// The problems: no container running (no status, an unreadable one, or a stale
+// heartbeat); a container that must be updated to this Bridge's version (another
+// protocol, or too old to take the Accounts tab's credential); no CLI for the
+// backend; another backend's CLI signed in instead; no credential at all.
+const (
+	ProblemNotRunning   Problem = "not_running"
+	ProblemOutdated     Problem = "outdated"
+	ProblemNoCLI        Problem = "no_cli"
+	ProblemOtherBackend Problem = "other_backend"
+	ProblemNoCredential Problem = "no_credential"
+)
+
 // Status reads runner.json now. Detail never names a Bridge path: it becomes a
 // parked book's reason, which the server shows in its console. The path goes to
 // the log instead (once per outage, as Status runs on every heartbeat).
 func (r *Runner) Status() Status {
-	var st Status
+	st := Status{Problem: ProblemNotRunning}
 	root, err := os.OpenRoot(r.dir)
 	if err != nil {
 		if !r.dirMissing.Swap(true) {
@@ -91,7 +111,7 @@ func (r *Runner) Status() Status {
 		}
 	}
 	st.Version, st.Slots, st.HeartbeatAt, st.CLIs = rj.Version, rj.Slots, rj.HeartbeatAt, rj.CLIs
-	st.Detail = r.unavailableBecause(rj)
+	st.Problem, st.Other, st.Detail = r.unavailableBecause(rj)
 	if st.Detail == "" {
 		if refused := r.refusal(rj.CLIs[r.backend], st.Handoff); refused != "" {
 			st.Refused, st.Detail = true, refused
@@ -171,38 +191,48 @@ func (r *Runner) refusal(c agentproto.CLI, handoff bool) string {
 // reason reads on its own: it is the page's status line and a parked book's
 // reason. The backend is always claude or codex (the app maps the config onto
 // one of them).
-func (r *Runner) unavailableBecause(rj agentproto.Runner) string {
+func (r *Runner) unavailableBecause(rj agentproto.Runner) (problem Problem, other, why string) {
 	if rj.Protocol != agentproto.Protocol {
-		return fmt.Sprintf("the agent container speaks protocol %d and this Bridge %d: run the same version of both images", rj.Protocol, agentproto.Protocol)
+		return ProblemOutdated, "", fmt.Sprintf("the agent container speaks protocol %d and this Bridge %d: run the same version of both images", rj.Protocol, agentproto.Protocol)
 	}
 	if age := r.now().Sub(rj.HeartbeatAt); age > agentproto.RunnerFreshFor {
-		return fmt.Sprintf("the agent container isn't running (its last heartbeat was %s ago)", age.Round(time.Second))
+		return ProblemNotRunning, "", fmt.Sprintf("the agent container isn't running (its last heartbeat was %s ago)", age.Round(time.Second))
 	}
 	c := rj.CLIs[r.backend]
 	if c.Version == "" {
-		return "the agent container has no " + r.backend + " CLI"
+		return ProblemNoCLI, "", "the agent container has no " + r.backend + " CLI"
 	}
-	if c.Credential == "" {
-		why := "codex has no credential: set an OpenAI API key on the Bridge's Accounts tab, or run " +
-			"`audiosilo-bridge agent-login codex` in the agent container"
-		other := agent.IDClaude
-		if r.backend == agent.IDClaude {
-			why = "claude has no credential: set one on the Bridge's Accounts tab (a `claude setup-token` value " +
-				"or an Anthropic API key), or give one to the agent container"
-			other = agent.IDCodex
-		}
-		if !rj.Handoff {
-			if _, _, _, ok := r.handoffCredential(); ok {
-				why = r.backend + " has no credential in the agent container, and the container is too old to take " +
-					"the one on the Accounts tab: update the agent image to this Bridge's version"
-			}
-		}
-		// The other CLI may be the one signed in: the Bridge runs the one its
-		// agent.backend names (claude unless codex is set), never both.
-		if o := rj.CLIs[other]; o.Version != "" && o.Credential != "" {
-			why += "; " + other + " is signed in: set agent.backend: " + other + " (AUDIOSILO_BRIDGE_AGENT_BACKEND=" + other + ") on the Bridge and restart it to use " + other
-		}
-		return why
+	if c.Credential != "" {
+		return "", "", ""
 	}
-	return ""
+	why = "codex has no credential: set an OpenAI API key on the Bridge's Accounts tab, or run " +
+		"`audiosilo-bridge agent-login codex` in the agent container"
+	other = agent.IDClaude
+	if r.backend == agent.IDClaude {
+		why = "claude has no credential: set one on the Bridge's Accounts tab (a `claude setup-token` value " +
+			"or an Anthropic API key), or give one to the agent container"
+		other = agent.IDCodex
+	}
+	tooOld := false
+	if !rj.Handoff {
+		_, _, _, tooOld = r.handoffCredential()
+	}
+	if tooOld {
+		why = r.backend + " has no credential in the agent container, and the container is too old to take " +
+			"the one on the Accounts tab: update the agent image to this Bridge's version"
+	}
+	// The other CLI may be the one signed in: the Bridge runs the one its
+	// agent.backend names (claude unless codex is set), never both.
+	o := rj.CLIs[other]
+	otherSignedIn := o.Version != "" && o.Credential != ""
+	if otherSignedIn {
+		why += "; " + other + " is signed in: set agent.backend: " + other + " (AUDIOSILO_BRIDGE_AGENT_BACKEND=" + other + ") on the Bridge and restart it to use " + other
+	}
+	switch {
+	case tooOld:
+		return ProblemOutdated, "", why
+	case otherSignedIn:
+		return ProblemOtherBackend, other, why
+	}
+	return ProblemNoCredential, "", why
 }
