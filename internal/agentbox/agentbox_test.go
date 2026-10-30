@@ -547,20 +547,22 @@ func TestStatus(t *testing.T) {
 		link      bool // runner.json is a link to a fresh status elsewhere
 		available bool
 		detail    string
+		problem   Problem
+		other     string
 	}{
 		"fresh":          {backend: "claude", rj: &agentproto.Runner{Protocol: 1, HeartbeatAt: now, Slots: 1, CLIs: full}, available: true},
 		"fresh codex":    {backend: "codex", rj: &agentproto.Runner{Protocol: 1, HeartbeatAt: now, CLIs: full}, available: true},
-		"stale":          {backend: "claude", rj: &agentproto.Runner{Protocol: 1, HeartbeatAt: now.Add(-time.Minute), CLIs: full}, detail: "isn't running"},
-		"wrong protocol": {backend: "claude", rj: &agentproto.Runner{Protocol: 2, HeartbeatAt: now, CLIs: full}, detail: "protocol 2"},
+		"stale":          {backend: "claude", rj: &agentproto.Runner{Protocol: 1, HeartbeatAt: now.Add(-time.Minute), CLIs: full}, detail: "isn't running", problem: ProblemNotRunning},
+		"wrong protocol": {backend: "claude", rj: &agentproto.Runner{Protocol: 2, HeartbeatAt: now, CLIs: full}, detail: "protocol 2", problem: ProblemOutdated},
 		"no credential": {backend: "claude", rj: &agentproto.Runner{Protocol: 1, HeartbeatAt: now,
-			CLIs: map[string]agentproto.CLI{"claude": {Version: "2.1.300"}}}, detail: "claude has no credential"},
+			CLIs: map[string]agentproto.CLI{"claude": {Version: "2.1.300"}}}, detail: "claude has no credential", problem: ProblemNoCredential},
 		"codex signed in instead": {backend: "claude", rj: &agentproto.Runner{Protocol: 1, HeartbeatAt: now,
 			CLIs: map[string]agentproto.CLI{"claude": {Version: "2.1.300"}, "codex": {Version: "0.162.1", Credential: "login"}}},
-			detail: "codex is signed in: set agent.backend: codex"},
-		"no cli":  {backend: "codex", rj: &agentproto.Runner{Protocol: 1, HeartbeatAt: now, CLIs: map[string]agentproto.CLI{}}, detail: "no codex CLI"},
-		"missing": {backend: "claude", detail: "isn't running"},
-		"garbage": {backend: "claude", raw: "{not json", detail: "unreadable"},
-		"a link":  {backend: "claude", link: true, detail: "can't be read"},
+			detail: "codex is signed in: set agent.backend: codex", problem: ProblemOtherBackend, other: "codex"},
+		"no cli":  {backend: "codex", rj: &agentproto.Runner{Protocol: 1, HeartbeatAt: now, CLIs: map[string]agentproto.CLI{}}, detail: "no codex CLI", problem: ProblemNoCLI},
+		"missing": {backend: "claude", detail: "isn't running", problem: ProblemNotRunning},
+		"garbage": {backend: "claude", raw: "{not json", detail: "unreadable", problem: ProblemNotRunning},
+		"a link":  {backend: "claude", link: true, detail: "can't be read", problem: ProblemNotRunning},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -580,7 +582,7 @@ func TestStatus(t *testing.T) {
 			}
 			r := New(Options{Dir: dir, Backend: tc.backend})
 			st := r.Status()
-			if st.Available != tc.available || !strings.Contains(st.Detail, tc.detail) {
+			if st.Available != tc.available || !strings.Contains(st.Detail, tc.detail) || st.Problem != tc.problem || st.Other != tc.other {
 				t.Fatalf("status = %+v", st)
 			}
 			// Detail is a park reason the server shows: never a Bridge path.
@@ -1004,5 +1006,20 @@ func TestHandoffRefusalEndsOnReplace(t *testing.T) {
 	since.Store(time.Date(2026, 10, 19, 10, 0, 0, 0, time.UTC))
 	if st := r.Status(); st.Refused || !st.Available {
 		t.Fatalf("a replaced credential: %+v", st)
+	}
+}
+
+// A container too old to take the Accounts tab's credential (no hand-off) is a
+// container to update, not a sign-in to set.
+func TestStatusTooOldForTheHandoffIsOutdated(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	writeRunnerJSON(t, dir, agentproto.Runner{Protocol: 1, HeartbeatAt: time.Now(),
+		CLIs: map[string]agentproto.CLI{"claude": {Version: "2.1.300"}}})
+	r := New(Options{Dir: dir, Backend: agent.IDClaude, Credential: func(string) (string, string, time.Time, bool) {
+		return agentproto.CredentialOAuthToken, "tok", time.Now(), true
+	}})
+	if st := r.Status(); st.Available || st.Problem != ProblemOutdated || !strings.Contains(st.Detail, "too old") {
+		t.Fatalf("status = %+v", st)
 	}
 }

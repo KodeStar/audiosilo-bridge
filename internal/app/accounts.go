@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/kodestar/audiosilo-bridge/internal/accounts"
+	"github.com/kodestar/audiosilo-bridge/internal/agentbox"
 	"github.com/kodestar/audiosilo-bridge/internal/api"
 	"github.com/kodestar/audiosilo-bridge/internal/config"
 	"github.com/kodestar/audiosilo-bridge/internal/contrib"
@@ -180,6 +181,23 @@ func (b *Bridge) DeleteAgentCredential(ctx context.Context, kind string) error {
 	return err
 }
 
+// agentProblem is the agent container's problem as the setup checklist words it.
+func agentProblem(p agentbox.Problem) setup.AgentProblem {
+	switch p {
+	case agentbox.ProblemOutdated:
+		return setup.AgentOutdated
+	case agentbox.ProblemNoCLI:
+		return setup.AgentNoCLI
+	case agentbox.ProblemOtherBackend:
+		return setup.AgentOtherBackend
+	case agentbox.ProblemNoCredential:
+		return setup.AgentNoCredential
+	case agentbox.ProblemNotRunning:
+		return setup.AgentNotRunning
+	}
+	return ""
+}
+
 // setup is the setup checklist now (FIRST-RUN-PLAN.md F2).
 func (b *Bridge) setup(ctx context.Context) link.Setup {
 	cfg := b.config()
@@ -204,7 +222,8 @@ func (b *Bridge) setup(ctx context.Context) link.Setup {
 		}
 	}
 	st := b.box.Status()
-	in.Agent = setup.Agent{Backend: b.box.ID(), Available: st.Available, Running: st.Live, Refused: st.Refused, Detail: st.Detail}
+	in.Agent = setup.Agent{Backend: b.box.ID(), Available: st.Available, Problem: agentProblem(st.Problem), Other: st.Other,
+		Refused: st.Refused, Detail: st.Detail}
 	if from := b.contributeFrom(ctx); from != "" {
 		in.GitHub = setup.GitHub{CanContribute: true, From: from}
 		if from == contrib.FromDevice {

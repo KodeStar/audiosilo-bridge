@@ -1213,8 +1213,12 @@ internal/
             libraries and each is checked (LibrariesPending: no beat since the
             link changed, or mapping.Registry.Unchecked), BRIDGE-14; the agent
             item (still required) says in plain words what to do and what the
-            agent is for (DetailAgentNotRunning, DetailAgentNoCredential), the
-            agentbox detail only for a refused credential, BRIDGE-07.
+            agent is for, by the kind of problem agentbox.Status reports
+            (Problem, Other; app.agentProblem maps it to setup.AgentProblem):
+            not running, an image to update (another protocol, or too old for the
+            Accounts tab's credential), no CLI for the backend, the other
+            backend signed in, or no credential (only that one asks for a
+            sign-in); the agentbox detail only for a refused credential, BRIDGE-07.
   correct/  Phase 2b (plan D5): the meta.correct job (light lane). ParseParams
             is STRICT (an unknown field refused, work_id required). It reads the
             work's live coverage (FreshCoverageForWork: its title, the recording
@@ -2010,7 +2014,7 @@ internal/
             (Reporter.Refresh through the handler's runHandle, BRIDGE-01): one the
             server still holds is refused at once, one its answer stopped (an admin
             cancelled it a moment ago) or that can't be asked is waited for, up to
-            openJobWait (30 s), as chapters jobs do in openJobRefusal and read-along jobs in reuseForReadalong, and
+            openJobWait (30 s), as chapters jobs do in openJobRefusal, read-along jobs in reuseForReadalong and describe jobs in notesBook, and
             awaitChaptersGivingWay asks a chapters job to give way at once; the new book takes its identity from the server's book
             block (identity_sources "server"), its work id from params else the
             server's metadata cache, kind ebook with an epub, contrib_mode from the

@@ -57,7 +57,7 @@ func TestChecklistOrderAndComplete(t *testing.T) {
 func TestChecklistMissing(t *testing.T) {
 	in := done()
 	in.Libraries = []Library{{ID: 1, Mapped: true, Writable: true}, {ID: 3, Mapped: true}}
-	in.Agent = Agent{Backend: "claude", Running: true, Detail: "claude has no credential: set one on the Bridge's Accounts tab"}
+	in.Agent = Agent{Backend: "claude", Problem: AgentNoCredential, Detail: "claude has no credential: set one on the Bridge's Accounts tab"}
 	in.ASR = ASR{Started: true, Waiting: true, Available: true}
 	in.BudgetReviewed, in.MonthlyBudgetUSD = false, 12.5
 	s := Checklist(in)
@@ -135,17 +135,23 @@ func TestChecklistAgentWords(t *testing.T) {
 	if a.Done || !a.Required || a.Detail != DetailAgentNotRunning {
 		t.Fatalf("no agent container: %+v", a)
 	}
-	for _, d := range []string{DetailAgentNotRunning, DetailAgentNoCredential} {
+	for _, d := range []string{DetailAgentNotRunning, DetailAgentOutdated, DetailAgentNoCredential, agentNoCLI("claude"),
+		agentOtherBackend("claude", "codex")} {
+		if strings.Contains(d, "staging") || len(d) > maxDetail {
+			t.Errorf("detail %q", d)
+		}
+	}
+	for _, d := range []string{DetailAgentNotRunning, DetailAgentOutdated, DetailAgentNoCredential, agentNoCLI("claude")} {
 		if strings.Contains(d, "staging") || !strings.Contains(d, "Claude or ChatGPT") ||
 			!strings.Contains(d, "characters, recaps and descriptions") || len(d) > maxDetail {
 			t.Errorf("detail %q", d)
 		}
 	}
-	in.Agent = Agent{Backend: "claude", Running: true, Refused: true, Detail: "the agent's credential was refused by the provider: replace it on the Bridge's Accounts tab"}
+	in.Agent = Agent{Backend: "claude", Refused: true, Detail: "the agent's credential was refused by the provider: replace it on the Bridge's Accounts tab"}
 	if a := item(t, Checklist(in), ItemAgent); a.Done || a.Detail != in.Agent.Detail {
 		t.Fatalf("refused: %+v", a)
 	}
-	in.Agent = Agent{Backend: "codex", Running: true, Available: true}
+	in.Agent = Agent{Backend: "codex", Available: true}
 	if a := item(t, Checklist(in), ItemAgent); !a.Done || a.Detail != "codex" {
 		t.Fatalf("ready: %+v", a)
 	}
@@ -169,5 +175,34 @@ func TestChecklistLibrariesChecking(t *testing.T) {
 	in.Paired, in.Libraries = false, nil
 	if l := item(t, Checklist(in), ItemLibraries); l.Detail != "pair with a server first" {
 		t.Fatalf("unpaired: %+v", l)
+	}
+}
+
+// Each kind of agent problem gets its own plain hint: only a missing credential
+// asks for a sign-in; an old agent container asks for an update, a missing CLI
+// for this Bridge's agent image, a mismatched backend names both.
+func TestChecklistAgentProblems(t *testing.T) {
+	for _, c := range []struct {
+		agent Agent
+		want  string
+	}{
+		{Agent{Backend: "claude"}, DetailAgentNotRunning},
+		{Agent{Backend: "claude", Problem: AgentNotRunning}, DetailAgentNotRunning},
+		{Agent{Backend: "claude", Problem: AgentOutdated}, DetailAgentOutdated},
+		{Agent{Backend: "codex", Problem: AgentNoCLI}, "the agent image has no codex CLI: use this Bridge's agent image; " + agentFor},
+		{Agent{Backend: "claude", Problem: AgentOtherBackend, Other: "codex"},
+			"codex is signed in, but this Bridge runs claude: set agent.backend: codex and restart the Bridge, or set claude's sign-in on the Accounts tab"},
+		{Agent{Backend: "claude", Problem: AgentOtherBackend}, DetailAgentNoCredential},
+		{Agent{Backend: "claude", Problem: AgentNoCredential}, DetailAgentNoCredential},
+	} {
+		in := done()
+		in.Agent = c.agent
+		a := item(t, Checklist(in), ItemAgent)
+		if a.Done || !a.Required || a.Detail != c.want {
+			t.Errorf("%+v: item %+v, want detail %q", c.agent, a, c.want)
+		}
+		if c.agent.Problem != AgentNoCredential && c.agent.Problem != AgentOtherBackend && strings.Contains(a.Detail, "sign-in") {
+			t.Errorf("%+v asks for a sign-in: %q", c.agent, a.Detail)
+		}
 	}
 }

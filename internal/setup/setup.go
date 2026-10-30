@@ -40,11 +40,39 @@ const DetailLibrariesChecking = "checking the libraries..."
 // ready (BRIDGE-07: plain words, never the staging volume).
 const agentFor = "the agent signs in to Claude or ChatGPT and is needed for characters, recaps and descriptions"
 
-// DetailAgentNotRunning and DetailAgentNoCredential are the agent item's detail
-// while no agent container is running, and while it runs with no credential.
+// The agent item's detail while no agent container is running, while it must be
+// updated to this Bridge's version (another protocol, or too old to take the
+// Accounts tab's credential), and while it runs with no credential;
+// agentNoCLI and agentOtherBackend name the backends.
 const (
 	DetailAgentNotRunning   = "the agent container isn't running yet; " + agentFor
+	DetailAgentOutdated     = "update the agent image to this Bridge's version; " + agentFor
 	DetailAgentNoCredential = "set the agent's sign-in on the Accounts tab; " + agentFor
+)
+
+// agentNoCLI is the detail while the agent image has no CLI for backend.
+func agentNoCLI(backend string) string {
+	return "the agent image has no " + backend + " CLI: use this Bridge's agent image; " + agentFor
+}
+
+// agentOtherBackend is the detail while other's CLI is signed in but the Bridge
+// runs backend's.
+func agentOtherBackend(backend, other string) string {
+	return other + " is signed in, but this Bridge runs " + backend + ": set agent.backend: " + other +
+		" and restart the Bridge, or set " + backend + "'s sign-in on the Accounts tab"
+}
+
+// AgentProblem is why the agent isn't ready, as the app tells it from the agent
+// container's state (agentbox.Problem).
+type AgentProblem string
+
+// The problems the checklist words.
+const (
+	AgentNotRunning   AgentProblem = "not_running"
+	AgentOutdated     AgentProblem = "outdated"
+	AgentNoCLI        AgentProblem = "no_cli"
+	AgentOtherBackend AgentProblem = "other_backend"
+	AgentNoCredential AgentProblem = "no_credential"
 )
 
 // maxDetail bounds an item's detail (the server keeps 256 characters).
@@ -73,10 +101,12 @@ type ASR struct {
 type Agent struct {
 	Backend   string
 	Available bool
-	// Running: the agent container is up (a fresh heartbeat in this Bridge's
-	// protocol); Refused: the provider refused its credential, Detail saying
-	// where to replace it (the item's detail then).
-	Running bool
+	// Problem: why it isn't ready (unknown reads as not running); Other, for
+	// AgentOtherBackend, the CLI that is signed in. Refused: the provider
+	// refused its credential, Detail saying where to replace it (the item's
+	// detail then).
+	Problem AgentProblem
+	Other   string
 	Refused bool
 	Detail  string
 }
@@ -158,10 +188,16 @@ func Checklist(in Inputs) link.Setup {
 	case in.Agent.Available:
 	case in.Agent.Refused:
 		agentDetail = firstNonEmpty(in.Agent.Detail, DetailAgentNoCredential)
-	case !in.Agent.Running:
-		agentDetail = DetailAgentNotRunning
-	default:
+	case in.Agent.Problem == AgentOutdated:
+		agentDetail = DetailAgentOutdated
+	case in.Agent.Problem == AgentNoCLI:
+		agentDetail = agentNoCLI(in.Agent.Backend)
+	case in.Agent.Problem == AgentOtherBackend && in.Agent.Other != "":
+		agentDetail = agentOtherBackend(in.Agent.Backend, in.Agent.Other)
+	case in.Agent.Problem == AgentNoCredential, in.Agent.Problem == AgentOtherBackend:
 		agentDetail = DetailAgentNoCredential
+	default:
+		agentDetail = DetailAgentNotRunning
 	}
 	add(ItemAgent, in.Agent.Available, true, agentDetail)
 
