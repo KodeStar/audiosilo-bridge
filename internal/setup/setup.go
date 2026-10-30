@@ -62,8 +62,8 @@ func agentOtherBackend(backend, other string) string {
 		" and restart the Bridge, or set " + backend + "'s sign-in on the Accounts tab"
 }
 
-// AgentProblem is why the agent isn't ready, as the app tells it from the agent
-// container's state (agentbox.Problem).
+// AgentProblem is why the agent isn't ready: the agent container's state
+// (agentbox.Problem, the same strings, converted by the app).
 type AgentProblem string
 
 // The problems the checklist words.

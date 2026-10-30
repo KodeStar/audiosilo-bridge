@@ -7,7 +7,8 @@ import (
 	"github.com/kodestar/audiosilo-bridge/internal/setup"
 )
 
-// Every agent container problem reaches the checklist as its own kind.
+// The app converts agentbox.Problem to setup.AgentProblem as is: every agent
+// container problem must have the checklist's spelling.
 func TestAgentProblem(t *testing.T) {
 	for in, want := range map[agentbox.Problem]setup.AgentProblem{
 		agentbox.ProblemNotRunning:   setup.AgentNotRunning,
@@ -15,10 +16,9 @@ func TestAgentProblem(t *testing.T) {
 		agentbox.ProblemNoCLI:        setup.AgentNoCLI,
 		agentbox.ProblemOtherBackend: setup.AgentOtherBackend,
 		agentbox.ProblemNoCredential: setup.AgentNoCredential,
-		"":                           "",
 	} {
-		if got := agentProblem(in); got != want {
-			t.Errorf("agentProblem(%q) = %q, want %q", in, got, want)
+		if got := setup.AgentProblem(in); got != want {
+			t.Errorf("setup.AgentProblem(%q) = %q, want %q", in, got, want)
 		}
 	}
 }

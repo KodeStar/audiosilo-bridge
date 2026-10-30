@@ -135,15 +135,11 @@ func TestChecklistAgentWords(t *testing.T) {
 	if a.Done || !a.Required || a.Detail != DetailAgentNotRunning {
 		t.Fatalf("no agent container: %+v", a)
 	}
-	for _, d := range []string{DetailAgentNotRunning, DetailAgentOutdated, DetailAgentNoCredential, agentNoCLI("claude"),
-		agentOtherBackend("claude", "codex")} {
-		if strings.Contains(d, "staging") || len(d) > maxDetail {
-			t.Errorf("detail %q", d)
-		}
-	}
-	for _, d := range []string{DetailAgentNotRunning, DetailAgentOutdated, DetailAgentNoCredential, agentNoCLI("claude")} {
-		if strings.Contains(d, "staging") || !strings.Contains(d, "Claude or ChatGPT") ||
-			!strings.Contains(d, "characters, recaps and descriptions") || len(d) > maxDetail {
+	// Each says what the agent is for, but the backend mismatch, which names both.
+	for d, sayFor := range map[string]bool{DetailAgentNotRunning: true, DetailAgentOutdated: true, DetailAgentNoCredential: true,
+		agentNoCLI("claude"): true, agentOtherBackend("claude", "codex"): false} {
+		if strings.Contains(d, "staging") || len(d) > maxDetail ||
+			sayFor && (!strings.Contains(d, "Claude or ChatGPT") || !strings.Contains(d, "characters, recaps and descriptions")) {
 			t.Errorf("detail %q", d)
 		}
 	}
