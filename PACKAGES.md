@@ -1215,7 +1215,7 @@ internal/
             item (still required) says in plain words what to do and what the
             agent is for, by the kind of problem agentbox.Status reports
             (Problem, Other; the app converts it to setup.AgentProblem):
-            not running, an image to update (another protocol, or too old for the
+            not running, an image of another version (another protocol, or too old for the
             Accounts tab's credential), no CLI for the backend, the other
             backend signed in, or no credential (only that one asks for a
             sign-in); the agentbox detail only for a refused credential, BRIDGE-07.

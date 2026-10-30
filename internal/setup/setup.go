@@ -40,13 +40,13 @@ const DetailLibrariesChecking = "checking the libraries..."
 // ready (BRIDGE-07: plain words, never the staging volume).
 const agentFor = "the agent signs in to Claude or ChatGPT and is needed for characters, recaps and descriptions"
 
-// The agent item's detail while no agent container is running, while it must be
-// updated to this Bridge's version (another protocol, or too old to take the
-// Accounts tab's credential), and while it runs with no credential;
+// The agent item's detail while no agent container is running, while its image
+// isn't this Bridge's version (another protocol, older or newer, or too old to
+// take the Accounts tab's credential), and while it runs with no credential;
 // agentNoCLI and agentOtherBackend name the backends.
 const (
 	DetailAgentNotRunning   = "the agent container isn't running yet; " + agentFor
-	DetailAgentOutdated     = "update the agent image to this Bridge's version; " + agentFor
+	DetailAgentOutdated     = "the agent image isn't this Bridge's version: run the same version of both images; " + agentFor
 	DetailAgentNoCredential = "set the agent's sign-in on the Accounts tab; " + agentFor
 )
 
