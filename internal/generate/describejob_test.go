@@ -667,3 +667,70 @@ func TestDescribeRightAfterACancelRuns(t *testing.T) {
 		})
 	}
 }
+
+// slowCancel is the engine with a Cancel that waits for gate to close (it says
+// when the first one started on started).
+type slowCancel struct {
+	Engine
+	once    *sync.Once
+	started chan struct{}
+	gate    chan struct{}
+}
+
+func (e slowCancel) Cancel(ctx context.Context, id int64) error {
+	e.once.Do(func() { close(e.started) })
+	<-e.gate
+	return e.Engine.Cancel(ctx, id)
+}
+
+// A job's end is visible only once the engine's cancel of its book has returned:
+// a description waiting on a just-cancelled job doesn't start while the engine is
+// still cancelling the book.
+func TestDescribeWaitsForTheEnginesCancel(t *testing.T) {
+	t.Parallel()
+	hr := newHarness(t)
+	d := &fakeDescriber{db: hr.db}
+	eng := slowCancel{Engine: hr.sched, once: &sync.Once{}, started: make(chan struct{}), gate: make(chan struct{})}
+	var opened sync.Once
+	openGate := func() { opened.Do(func() { close(eng.gate) }) }
+	h := New(Options{DB: hr.db, Engine: func() Engine { return eng }, Describer: func() Describer { return d },
+		Libraries: hr.libs, Mount: func(int64, string) (string, bool) { return hr.libs.root, false },
+		Server: func() Server { return hr.cl }, WorkRoot: hr.work, Version: "0.2.0", RetentionDays: 30,
+		Poll: 10 * time.Millisecond, IdlePoll: 10 * time.Millisecond, Recheck: time.Hour, Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	hr.exec.parks["contributing"] = 1
+	hr.srv.add(311, "Author/Book", `{}`)
+	defer hr.runnerKeepalive(time.Hour, h, h.DescribeJob())()
+	defer openGate() // before the runner stops: a failure must not leave the cancel waiting
+	// Parked and quiet (as in TestDescribeRightAfterACancelRuns): the cancel is
+	// heard only through the description's Refresh.
+	hr.waitFor("the contributing park, settled", func() bool {
+		hr.srv.mu.Lock()
+		defer hr.srv.mu.Unlock()
+		ups := hr.srv.updates[311]
+		if len(ups) == 0 || len(d.calls()) == 0 {
+			return false
+		}
+		var p map[string]any
+		last := ups[len(ups)-1]
+		_ = json.Unmarshal(last.Progress, &p)
+		return *last.State == link.StateNeedsAttention && p["step"] == "contributing"
+	})
+	calls := len(d.calls())
+	hr.srv.set(func() { hr.srv.cancel[311] = true })
+	hr.srv.addDescribe(312, "Author/Book")
+	select {
+	case <-eng.started:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the engine was never asked to cancel the book")
+	}
+	time.Sleep(300 * time.Millisecond)
+	if s, u := hr.srv.final(312); s != "" || len(d.calls()) != calls {
+		t.Fatalf("while the engine cancels the book: the description ended %q (%q), describe calls %d (was %d)",
+			s, errOf(u), len(d.calls()), calls)
+	}
+	openGate()
+	hr.waitFor("the description ended", func() bool { s, _ := hr.srv.final(312); return s != "" })
+	if s, u := hr.srv.final(312); s != link.StateDone {
+		t.Fatalf("the description ended %s (%q), want done", s, errOf(u))
+	}
+}

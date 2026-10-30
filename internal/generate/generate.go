@@ -504,10 +504,14 @@ func (h *Handler) Abandon(ctx context.Context, job jobs.Job) {
 	}()
 }
 
-// release ends a job's hold on its engine book: the end is recorded (the
+// release ends a job's hold on its engine book: a job that didn't finish stops
+// the book (nothing follows it any more), then the end is recorded (the
 // transcript retention counts from it, and the supervisor leaves a book no job
-// follows alone), a job that didn't finish stops the book (nothing follows it
-// any more), and with retention_days 0 the transcripts go now. A later claim of
+// follows alone), and with retention_days 0 the transcripts go now. The stop
+// comes first so a job waiting for this one's end (awaitOpenJobEnd) starts only
+// once the engine's cancel has returned; stopBook leaves this job out of its own
+// open-job check, so the order changes nothing else, and no lock is held across
+// the cancel. A later claim of
 // the same job may run here already (the server re-queued it after a lease ran
 // out and handed it out again before this attempt heard it was lost): that
 // attempt follows the book now, so it is left alone.
@@ -515,11 +519,11 @@ func (h *Handler) release(ctx context.Context, job jobs.Job, bookID int64, stop 
 	if sj, err := h.o.DB.GetServerJob(ctx, job.ID); err == nil && sj.Attempt > job.Attempt {
 		return
 	}
-	if err := h.o.DB.EndGenerateBook(ctx, job.ID, h.now()); err != nil {
-		h.o.Log.Warn("generate: recording the job's end failed", "job", job.ID, "err", err)
-	}
 	if stop {
 		h.stopBook(ctx, job.ID, bookID)
+	}
+	if err := h.o.DB.EndGenerateBook(ctx, job.ID, h.now()); err != nil {
+		h.o.Log.Warn("generate: recording the job's end failed", "job", job.ID, "err", err)
 	}
 	if h.o.RetentionDays == 0 {
 		if err := h.purgeEnded(ctx, bookID); err != nil {
