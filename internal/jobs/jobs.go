@@ -898,6 +898,10 @@ type Reporter struct {
 	ctx    context.Context //nolint:containedctx // the job's own context, for its sends
 	// nudge wakes loop when the step changed (nil for a LocalReporter).
 	nudge chan struct{}
+	// sendMu orders the reports that carry the job's state (send, Refresh): each
+	// takes its snapshot and makes its request under it, so a Refresh another
+	// job asked for never lands after a newer report (a park lifted since).
+	sendMu sync.Mutex
 
 	mu       sync.Mutex
 	progress Progress
@@ -906,8 +910,8 @@ type Reporter struct {
 	sentAt time.Time
 	// failing: the last report didn't reach the server (unreachable), so the
 	// next goes after ReportRetry rather than Keepalive; any report that gets
-	// through clears it (a ConfirmLease's or a Refresh's too, on the handler's
-	// goroutine). warned: a failed report was logged and none has got through
+	// through clears it (a ConfirmLease's too, on the handler's goroutine, and a
+	// Refresh's, on the goroutine of the job that asked for it). warned: a failed report was logged and none has got through
 	// since, so the next failures are quiet until one does (bridge#31).
 	failing bool
 	warned  bool
@@ -1085,6 +1089,8 @@ func (p *Reporter) loop(done <-chan struct{}) {
 // whether the job goes on.
 func (p *Reporter) send() bool {
 	ctx := p.ctx
+	p.sendMu.Lock()
+	defer p.sendMu.Unlock()
 	p.mu.Lock()
 	pr, dirty := p.progress, p.dirty
 	parked, parkMsg := p.parked, p.parkMsg
@@ -1234,6 +1240,8 @@ func (p *Reporter) Refresh(ctx context.Context) error {
 	if p.r == nil {
 		return nil
 	}
+	p.sendMu.Lock()
+	defer p.sendMu.Unlock()
 	p.mu.Lock()
 	pr, parked, parkMsg := p.progress, p.parked, p.parkMsg
 	p.mu.Unlock()

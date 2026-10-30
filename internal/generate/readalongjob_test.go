@@ -770,3 +770,24 @@ func TestRefusedContinueKeepsTheEbookRun(t *testing.T) {
 		t.Fatalf("the audio run = %+v, %v", got, err)
 	}
 }
+
+// An admin cancels a parked chapters job and asks for the read-along at once,
+// before the parked job's next keepalive would tell the Bridge (BRIDGE-01): the
+// read-along asks it to report now and waits for its end rather than refusing
+// it as still working on the book.
+func TestReadalongRightAfterACancelIsNotRefused(t *testing.T) {
+	t.Parallel()
+	hr := readalongHarness(t)
+	stop := hr.runnerKeepalive(time.Hour, hr.h, hr.h.ChaptersJob(), hr.h.ReadalongJob())
+	defer stop()
+	parkChapters(hr, 236)
+	hr.srv.set(func() { hr.srv.cancel[236] = true })
+	hr.srv.addKind(237, ReadalongKind, "Loose.m4b", `{}`)
+	hr.waitFor("the read-along job ended", func() bool { s, _ := hr.srv.final(237); return s != "" })
+	if s, u := hr.srv.final(237); s == link.StateFailed && strings.Contains(errOf(u), "let it finish or cancel it first") {
+		t.Fatalf("the read-along was refused: %q", errOf(u))
+	}
+	if s, _ := hr.srv.final(236); s != link.StateCancelled {
+		t.Fatalf("the cancelled job ended %q, want cancelled", s)
+	}
+}

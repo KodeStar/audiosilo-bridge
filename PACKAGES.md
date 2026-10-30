@@ -2010,7 +2010,7 @@ internal/
             (Reporter.Refresh through the handler's runHandle, BRIDGE-01): one the
             server still holds is refused at once, one its answer stopped (an admin
             cancelled it a moment ago) or that can't be asked is waited for, up to
-            openJobWait (30 s), as chapters jobs do in openJobRefusal and
+            openJobWait (30 s), as chapters jobs do in openJobRefusal and read-along jobs in reuseForReadalong, and
             awaitChaptersGivingWay asks a chapters job to give way at once; the new book takes its identity from the server's book
             block (identity_sources "server"), its work id from params else the
             server's metadata cache, kind ebook with an epub, contrib_mode from the

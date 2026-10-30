@@ -393,8 +393,10 @@ func (h *Handler) audioRun(ctx context.Context, sp string) (store.Book, string, 
 
 // reuseForReadalong continues the book's earlier engine book old for the job when
 // the reuse table says so, and reports whether it did; an error refuses the job.
+// An open job the server has just cancelled is waited for first (awaitOpenJobEnd,
+// BRIDGE-01), as a generate or chapters job does.
 func (h *Handler) reuseForReadalong(ctx context.Context, eng Engine, r *run, old store.Book) (bool, error) {
-	if id, kind, err := h.firstOpenJob(ctx, old.ID, r.job.ID); err != nil {
+	if id, kind, err := h.awaitOpenJobEnd(ctx, r, old.ID); err != nil {
 		return false, err
 	} else if id != 0 {
 		switch kind {
