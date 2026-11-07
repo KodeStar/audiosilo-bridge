@@ -36,7 +36,8 @@ func pendingOrder(date, asin string) audible.Order {
 }
 
 func closedOrder(date, asin string, preorder bool) audible.Order {
-	return audible.Order{Date: day(date), Preorder: preorder, State: "ORDER_CLOSED", Items: []audible.OrderItem{{ASIN: asin}}}
+	return audible.Order{Date: day(date), Preorder: preorder, State: audible.OrderClosed, DetailState: audible.OrderSucceeded,
+		Items: []audible.OrderItem{{ASIN: asin}}}
 }
 
 func asinsOf(rows []store.AudiblePreorder) []string {
@@ -73,10 +74,22 @@ func TestReconcilePreorders(t *testing.T) {
 		{name: "the library listing a remembered one drops it, orders or not",
 			rows: []store.AudiblePreorder{remembered("B0GV5H3V89", "2026-03-30")}, library: []string{"B0GV5H3V89"},
 			want: []string{}},
-		{name: "its order seen closed drops it",
+		{name: "its order delivered keeps it until the library lists it",
 			rows:   []store.AudiblePreorder{remembered("B0HG4PZMYQ", "2026-08-28")},
 			orders: []audible.Order{closedOrder("2026-08-28", "B0HG4PZMYQ", true), closedOrder("2026-05-07", "B0OLDBUY01", false)},
-			want:   []string{}},
+			want:   []string{"B0HG4PZMYQ"}},
+		{name: "its order delivered and the library listing it drops it",
+			rows:    []store.AudiblePreorder{remembered("B0HG4PZMYQ", "2026-08-28")},
+			library: []string{"B0HG4PZMYQ"},
+			orders:  []audible.Order{closedOrder("2026-08-28", "B0HG4PZMYQ", true)},
+			want:    []string{}},
+		{name: "its order closed without success (cancelled) drops it",
+			rows: []store.AudiblePreorder{remembered("B0HG4PZMYQ", "2026-08-28")},
+			orders: []audible.Order{{Date: day("2026-08-28"), Preorder: true, State: audible.OrderClosed, DetailState: "ORDER_CANCELLED",
+				Items: []audible.OrderItem{{ASIN: "B0HG4PZMYQ"}}}},
+			want: []string{}},
+		{name: "a delivered order never adds a title",
+			orders: []audible.Order{closedOrder("2026-08-28", "B0HG4PZMYQ", true)}, want: []string{}},
 		{name: "its order seen cancelled drops it",
 			rows:   []store.AudiblePreorder{remembered("B0HG4PZMYQ", "2026-08-28")},
 			orders: []audible.Order{{Date: day("2026-08-28"), Preorder: true, State: "ORDER_CANCELLED", Items: []audible.OrderItem{{ASIN: "B0HG4PZMYQ"}}}},

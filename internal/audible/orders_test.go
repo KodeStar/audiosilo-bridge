@@ -60,6 +60,15 @@ func TestOrders(t *testing.T) {
 	if !slices.Equal(pending, []string{"B0PENDING1"}) {
 		t.Fatalf("pending = %v, want only B0PENDING1 (delivered, cancelled and bought ones aren't)", pending)
 	}
+	// Delivered: closed and succeeded (the delivered preorder and the
+	// purchase), never the pending or the cancelled one.
+	var delivered []bool
+	for _, o := range orders {
+		delivered = append(delivered, o.Delivered())
+	}
+	if !slices.Equal(delivered, []bool{false, true, false, true}) || orders[1].DetailState != OrderSucceeded {
+		t.Fatalf("delivered = %v (%+v)", delivered, orders[1])
+	}
 	if want := time.Date(2026, 10, 19, 19, 49, 51, 0, time.UTC); !orders[0].Date.Equal(want) {
 		t.Fatalf("date = %v", orders[0].Date)
 	}

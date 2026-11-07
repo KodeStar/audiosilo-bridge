@@ -26,14 +26,22 @@ import (
 // delivered (ORDER_CLOSED with detail_state ORDER_SUCCEEDED) or cancelled.
 const OrderPendingPreorder = "ORDER_PENDING_PREORDER"
 
+// A delivered order: state ORDER_CLOSED with detail_state ORDER_SUCCEEDED (a
+// delivered preorder, or any purchase).
+const (
+	OrderClosed    = "ORDER_CLOSED"
+	OrderSucceeded = "ORDER_SUCCEEDED"
+)
+
 // Order is one order of the account, as far as the Bridge reads it: never a
 // payment, price or address field.
 type Order struct {
 	// Date is when it was placed (zero when Audible sent none that parses).
-	Date     time.Time
-	Preorder bool
-	State    string
-	Items    []OrderItem
+	Date        time.Time
+	Preorder    bool
+	State       string
+	DetailState string
+	Items       []OrderItem
 }
 
 // OrderItem is one title of an order.
@@ -47,6 +55,13 @@ func (o Order) PendingPreorder() bool {
 	return o.Preorder && o.State == OrderPendingPreorder
 }
 
+// Delivered reports whether o went through: ORDER_CLOSED with detail_state
+// ORDER_SUCCEEDED. A delivered preorder's title joins the library, though the
+// library may list it a little later than the order closes.
+func (o Order) Delivered() bool {
+	return o.State == OrderClosed && o.DetailState == OrderSucceeded
+}
+
 type ordersResp struct {
 	Orders   []orderWire `json:"orders"`
 	MaxPages int         `json:"max_number_of_pages"`
@@ -55,10 +70,11 @@ type ordersResp struct {
 // orderWire decodes only the fields an Order keeps: the payment fields an
 // item carries are never read into memory as values.
 type orderWire struct {
-	Date     string `json:"date"`
-	Preorder bool   `json:"preorder"`
-	State    string `json:"state"`
-	Items    []struct {
+	Date        string `json:"date"`
+	Preorder    bool   `json:"preorder"`
+	State       string `json:"state"`
+	DetailState string `json:"detail_state"`
+	Items       []struct {
 		ASIN string `json:"asin"`
 	} `json:"items"`
 }
@@ -84,7 +100,8 @@ func (c *Client) Orders(ctx context.Context) ([]Order, error) {
 		}
 		added := 0
 		for _, w := range resp.Orders {
-			o := Order{Date: parseLastUpdated(w.Date), Preorder: w.Preorder, State: strings.TrimSpace(w.State)}
+			o := Order{Date: parseLastUpdated(w.Date), Preorder: w.Preorder, State: strings.TrimSpace(w.State),
+				DetailState: strings.TrimSpace(w.DetailState)}
 			key := w.Date + "|" + o.State
 			for _, it := range w.Items {
 				asin := strings.ToUpper(strings.TrimSpace(it.ASIN))

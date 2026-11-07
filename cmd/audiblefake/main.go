@@ -24,17 +24,26 @@ import (
 
 func main() {
 	listen := flag.String("listen", "127.0.0.1:8099", "address to serve the fake on")
-	maxASINs := flag.Int("lastpositions-max", 10, "most ASINs one lastpositions request may carry before a 400")
+	maxASINs := flag.Int("lastpositions-max", 10, "most ASINs one lastpositions or catalog request may carry before a 400")
 	flag.Parse()
 
 	fake := audiblefake.New(audiblefake.Options{LastPositionsMax: *maxASINs})
-	fmt.Fprintf(os.Stderr, "Audible fake on http://%s (AUDIOSILO_BRIDGE_AUDIBLE_FAKE_URL=http://%s)\n"+
-		"controls: GET /_fake/calls, POST /_fake/refuse, GET /_fake/titles,\n"+
-		"  POST /_fake/old-profile (every device so far on the older profile: licenses denied as throttled),\n"+
-		"  POST /_fake/cut?after=BYTES (the next download drops part way), POST /_fake/expire (download URLs expire),\n"+
-		"  POST /_fake/release?asin=ASIN (a preorder comes out today),\n"+
-		"  POST /_fake/position?asin=ASIN&ms=MS&ago=SECONDS (a place heard on another device),\n"+
-		"  GET /_fake/positions (every place Audible holds; GET /_fake/calls put_positions are the Bridge's writes)\n", *listen, *listen)
+	fmt.Fprint(os.Stderr, help(*listen))
 	srv := &http.Server{Addr: *listen, Handler: fake.Handler(), ReadHeaderTimeout: 10 * time.Second}
 	log.Fatal(srv.ListenAndServe())
+}
+
+// help is what the command prints at start: where the fake listens, the
+// Audible routes a live check leans on, and its own controls (a test holds
+// every path it names to a route the fake serves).
+func help(listen string) string {
+	return fmt.Sprintf("Audible fake on http://%s (AUDIOSILO_BRIDGE_AUDIBLE_FAKE_URL=http://%s)\n", listen, listen) +
+		"controls: GET /_fake/calls, POST /_fake/refuse, GET /_fake/titles (every title, preorders included, with its state),\n" +
+		"  POST /_fake/old-profile (every device so far on the older profile: licenses denied as throttled),\n" +
+		"  POST /_fake/cut?after=BYTES (the next download drops part way), POST /_fake/expire (download URLs expire)\n" +
+		"preorders: not in GET /1.0/library until released; GET /1.0/orders lists them pending (and one cancelled),\n" +
+		"  GET /1.0/catalog/products describes them,\n" +
+		"  POST /_fake/release?asin=ASIN (a preorder comes out today: it joins the library and its order closes)\n" +
+		"places: POST /_fake/position?asin=ASIN&ms=MS&ago=SECONDS (a place heard on another device),\n" +
+		"  GET /_fake/positions (every place Audible holds; GET /_fake/calls put_positions are the Bridge's writes)\n"
 }

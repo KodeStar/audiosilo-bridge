@@ -2172,7 +2172,8 @@ internal/
             ignored and any response_groups a 500, so none is sent; follows max_number_of_pages
             only when over 1, bounded at 20, stopping at a page that adds nothing), decoding only
             date, preorder, state and items' asin (never a payment field);
-            Order.PendingPreorder is preorder AND state ORDER_PENDING_PREORDER. Products reads the
+            Order.PendingPreorder is preorder AND state ORDER_PENDING_PREORDER; Order.Delivered is
+            ORDER_CLOSED with detail_state ORDER_SUCCEEDED. Products reads the
             catalog (GET /1.0/catalog/products?asins=, batches of 25 split on 400/414 by splitOnOverflow, shared with LastPositions, an ASIN the
             batches left out, answered without a title, or held by a batch that failed (unless
             Audible asked to wait) read alone at /1.0/catalog/products/{asin}, an unknown one left
@@ -2269,8 +2270,10 @@ internal/
             items the library doesn't list (the library wins), remembered in audible_preorders,
             described by the catalog every poll, as records with Preorder and PreorderReason (an
             undescribed one by its ASIN alone). Dropped when the library lists it, its order is
-            seen in another state (none pending), a listing reaching back past its order no
-            longer holds it, or PreorderDropAfter (30 days) after its release date (one the catalog
+            seen cancelled (neither pending nor Delivered, none pending; a Delivered order,
+            ORDER_CLOSED + ORDER_SUCCEEDED, keeps it until the library lists it, so it never
+            drops out of a final poll in between), a listing reaching back past its order no
+            longer holds it in any state, or PreorderDropAfter (30 days) after its release date (one the catalog
             never dated counts as released two years after its order was last seen pending). Never
             fails: orders or catalog failing is one warning each and the remembered ones are
             reported (with the last description; a catalog failing part way describes what it
@@ -2448,7 +2451,12 @@ internal/
             markers as young (decision 6). Deps: audibleacct (types), audible,
             fsutil, importjob, jobs, link, mapping, placement, source, store,
             transfer.
-  audiblesync/ Phase 4c: an account's places both ways. audible.sync (light; params
+  audiblesync/ Phase 4c: an account's places both ways. A title the Bridge remembers as a
+            pending preorder (store.AudiblePreorders, 0012) is synced in neither direction: the job
+            leaves it out of its params before listing (unlisted, so never read nor pushed;
+            Result.SkippedPreorder) and the push's due skips it (its place waits): the server lists
+            a preorder fuzzy-matched to another edition, and Audible denies its content reference.
+            audible.sync (light; params
             link.AudibleSyncParams, strict): a device refusal fails audible_refused (the server stops
             queueing until a sign-in again maps the account), a sign-in refusal audible_sign_in (the
             server keeps queueing: the next poll Audible answers ends it), another server's or none

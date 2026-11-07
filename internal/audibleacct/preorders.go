@@ -34,8 +34,9 @@ const undatedPreorderYears = 2
 // as a record with Preorder set and audible.PreorderReason.
 //
 // A remembered preorder is dropped when the library lists it, when its order
-// is seen in a state other than pending (cancelled, or delivered: the library
-// lists it then), when an orders listing that reaches back past its order date
+// is seen cancelled (any state but pending or delivered, none pending; a
+// delivered order keeps it until the library lists it, which may be a little
+// later, so it never drops out of a final poll in between), when an orders listing that reaches back past its order date
 // no longer holds it (cancelled), or when its release date is
 // PreorderDropAfter past (one the catalog never dated: undatedPreorderYears
 // after its order was last seen pending, then PreorderDropAfter).
@@ -115,12 +116,13 @@ func (m *Manager) rememberedPreorder(ctx context.Context, id, asin string) (sour
 // (none when it failed: then only the library rule applies), at now. A
 // title a pending preorder order holds is added (ordered at its order's date,
 // else now) or seen again (last seen now); a remembered one is dropped when
-// the library lists it, when an order holds it in another state and none
-// pending, or when it is missing from a listing whose oldest order is older
+// the library lists it, when an order holds it cancelled (neither pending nor
+// delivered) and none pending, or when it is missing from a listing whose oldest order is older
 // than its order (it was in the window, so it was cancelled). By ASIN.
 func reconcilePreorders(rows []store.AudiblePreorder, inLibrary map[string]bool, orders []audible.Order, now time.Time) []store.AudiblePreorder {
 	pending := map[string]time.Time{}
-	other := map[string]bool{}
+	cancelled := map[string]bool{}
+	listed := map[string]bool{} // in any order of the listing
 	var oldest time.Time
 	for _, o := range orders {
 		if !o.Date.IsZero() && (oldest.IsZero() || o.Date.Before(oldest)) {
@@ -131,8 +133,14 @@ func reconcilePreorders(rows []store.AudiblePreorder, inLibrary map[string]bool,
 			if !ASINPattern.MatchString(a) {
 				continue
 			}
+			listed[a] = true
 			if !o.PendingPreorder() {
-				other[a] = true
+				// A delivered order keeps a remembered preorder until the
+				// library lists it (it may close before the library does);
+				// any other state (cancelled) drops it.
+				if !o.Delivered() {
+					cancelled[a] = true
+				}
 				continue
 			}
 			// The earliest pending order's date (an unknown one gives way).
@@ -153,7 +161,7 @@ func reconcilePreorders(rows []store.AudiblePreorder, inLibrary map[string]bool,
 			if r.OrderedAt.IsZero() {
 				r.OrderedAt = orderedAt(d, now)
 			}
-		} else if other[a] || (!oldest.IsZero() && !r.OrderedAt.IsZero() && oldest.Before(r.OrderedAt)) {
+		} else if cancelled[a] || (!listed[a] && !oldest.IsZero() && !r.OrderedAt.IsZero() && oldest.Before(r.OrderedAt)) {
 			continue
 		}
 		have[a] = true
