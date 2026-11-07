@@ -161,7 +161,11 @@ var secretKeys = map[string]bool{
 	"given_name": true, "website_cookies": true, "store_authentication_cookie": true,
 	"x-amz-signature": true, "x-amz-credential": true, "x-amz-security-token": true,
 	"signature": true, "policy": true, "key-pair-id": true,
-	// An order item's payment fields (GET /1.0/orders) and any price.
+	// An order's and an order item's payment fields (GET /1.0/orders) and any
+	// price.
+	"payment": true, "payment_profile": true, "payment_contract_id": true, "payment_contract_revision_id": true,
+	"payment_plan_id": true, "billing_period": true, "subscription_id": true, "refunds": true, "subcharges": true,
+	"vat_rate": true, "mfa_details": true,
 	"amount_charged": true, "payment_method": true, "tax_amount": true, "taxes": true, "tax_transaction_id": true,
 	"coupon_amount": true, "credits_applied": true, "promotion_amount": true, "promo_ids": true, "credit_promo_id": true,
 	"merchant_id": true, "plan_id": true, "plan_status": true, "next_billing_date": true, "combined_order_id": true,

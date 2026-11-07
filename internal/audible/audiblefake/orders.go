@@ -12,8 +12,9 @@ import (
 // The orders listing and the catalog, shaped as a real UK account answered
 // them (2026-11): GET /1.0/orders ignores every query parameter, answers a
 // 500 to any response_groups, sends about six months of orders on one page
-// with the paging fields at 0, and an item has asin and is_preorder beside
-// payment fields (synthetic here). A pending preorder is preorder true in
+// with the paging fields at 0, and an order and each of its items carry
+// payment fields (synthetic here) beside the date, the state and the item's
+// asin and is_preorder. A pending preorder is preorder true in
 // ORDER_PENDING_PREORDER / ORDER_CREATED; a delivered one, or any purchase,
 // ORDER_CLOSED / ORDER_SUCCEEDED. The catalog answers any title (owned or
 // not), its title only with product_desc asked.
@@ -55,6 +56,10 @@ func (f *Fake) orders(w http.ResponseWriter, r *http.Request, _ []byte) {
 		out = append(out, order{date, map[string]any{
 			"date": date.Format(time.RFC3339), "preorder": preorder, "state": state, "detail_state": detail,
 			"type": "CONTENT", "order_type_specification": "Content",
+			// The order's own synthetic payment fields, as Audible sends them.
+			"payment": map[string]any{"payment_method_id": "FAKE-ORDER-PAYMENT", "amount": 0}, "payment_profile": "FAKE-PAYMENT-PROFILE",
+			"payment_contract_id": "FAKE-CONTRACT", "subscription_id": "FAKE-SUBSCRIPTION", "vat_rate": "FAKE-VAT-RATE",
+			"refunds": []map[string]any{}, "subCharges": []map[string]any{{"amount": "FAKE-SUBCHARGE"}},
 			"items": []map[string]any{{
 				"asin": t.ASIN, "is_preorder": preorder,
 				// Synthetic payment fields, as Audible sends beside the ASIN:

@@ -585,7 +585,8 @@ func (f *Fake) library(w http.ResponseWriter, r *http.Request, _ []byte) {
 	writeJSON(w, http.StatusOK, map[string]any{"items": items, "response_groups": strings.Split(r.URL.Query().Get("response_groups"), ",")})
 }
 
-// libraryItem is a title as the library endpoint sends it.
+// libraryItem is a title as the library endpoint sends it, its release date
+// a day of now's UTC calendar (the Bridge reads a date as that day's UTC start).
 func libraryItem(t Title, now time.Time) map[string]any {
 	names := func(ns []string) []map[string]string {
 		out := make([]map[string]string, len(ns))
@@ -604,7 +605,7 @@ func libraryItem(t Title, now time.Time) map[string]any {
 		"subtitle":              t.Subtitle,
 		"authors":               names(t.Authors),
 		"narrators":             names(t.Narrators),
-		"release_date":          now.AddDate(0, 0, t.ReleaseIn).Format("2006-01-02"),
+		"release_date":          now.UTC().AddDate(0, 0, t.ReleaseIn).Format("2006-01-02"),
 		"content_type":          "Product",
 		"content_delivery_type": delivery,
 		"customer_rights":       map[string]bool{"is_consumable_offline": !t.NoRights},

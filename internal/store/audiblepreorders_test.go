@@ -8,7 +8,7 @@ import (
 
 // The remembered preorders: a set replaces the account's rows (another
 // account's stay), times round-trip (zero as unknown), and removing the
-// account forgets its rows.
+// account forgets its rows (and a late set for it fails).
 func TestAudiblePreorders(t *testing.T) {
 	ctx := context.Background()
 	db := open(t)
@@ -62,5 +62,13 @@ func TestAudiblePreorders(t *testing.T) {
 	}
 	if other, _ := db.AudiblePreorders(ctx, "efgh5678"); len(other) != 1 {
 		t.Fatalf("another account's rows after a removal = %+v", other)
+	}
+
+	// Denied: a poll that finishes after the removal can't write them back.
+	if err := db.SetAudiblePreorders(ctx, "abcd1234", []AudiblePreorder{got[1]}); err == nil {
+		t.Fatal("a removed account's preorders were written back")
+	}
+	if got, _ := db.AudiblePreorders(ctx, "abcd1234"); len(got) != 0 {
+		t.Fatalf("a removed account's rows after a late write = %+v", got)
 	}
 }

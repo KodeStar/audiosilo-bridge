@@ -204,7 +204,7 @@ func TestPreorderPollReleaseImportAgainstTheFake(t *testing.T) {
 	by := reported(1)
 	canopy := by["B0FAKE0005"]
 	if len(canopy) != 1 || canopy[0].State != link.AudiblePreorder || canopy[0].Title != "The Golden Canopy" ||
-		canopy[0].ReleaseDate != time.Now().AddDate(0, 0, 21).Format(time.DateOnly) || canopy[0].Planned == nil {
+		canopy[0].ReleaseDate != time.Now().UTC().AddDate(0, 0, 21).Format(time.DateOnly) || canopy[0].Planned == nil {
 		t.Fatalf("the preorder = %+v", canopy)
 	}
 	if got := by[audiblefake.CancelledPreorder.ASIN]; len(got) != 0 {

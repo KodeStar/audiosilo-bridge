@@ -2,13 +2,20 @@ package audibleacct
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/pem"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/kodestar/audiosilo-bridge/internal/audible"
+	"github.com/kodestar/audiosilo-bridge/internal/secrets"
 	"github.com/kodestar/audiosilo-bridge/internal/source"
 	"github.com/kodestar/audiosilo-bridge/internal/store"
 )
@@ -127,19 +134,25 @@ func TestReconcilePreordersTimes(t *testing.T) {
 }
 
 // TestDropReleased: a preorder released PreorderDropAfter ago that the library
-// still doesn't list goes; one released less long ago, one ahead and one with
-// no date known stay.
+// still doesn't list goes; one released less long ago and one ahead stay. One
+// the catalog never dated counts as released undatedPreorderYears after its
+// order was last seen pending, and stays while that is unknown.
 func TestDropReleased(t *testing.T) {
 	rec := func(asin, release string) store.AudiblePreorder {
 		return store.AudiblePreorder{ASIN: asin, Record: `{"ReleaseDate":"` + release + `"}`}
+	}
+	undated := func(asin string, seen time.Time) store.AudiblePreorder {
+		return store.AudiblePreorder{ASIN: asin, LastSeenAt: seen, Record: `{"Title":"Undated"}`}
 	}
 	rows := []store.AudiblePreorder{
 		rec("B0OLD00001", pnow.Add(-PreorderDropAfter).Format(time.DateOnly)),
 		rec("B0RECENT01", pnow.AddDate(0, 0, -29).Format(time.DateOnly)),
 		rec("B0AHEAD001", "2026-12-08"),
 		{ASIN: "B0UNFILLED"},
+		undated("B0UNDATED1", pnow.AddDate(-undatedPreorderYears, 0, 0).Add(-PreorderDropAfter)),
+		undated("B0UNDATED2", pnow.AddDate(-undatedPreorderYears, 0, 0)),
 	}
-	if got := asinsOf(dropReleased(rows, pnow)); !slices.Equal(got, []string{"B0RECENT01", "B0AHEAD001", "B0UNFILLED"}) {
+	if got := asinsOf(dropReleased(rows, pnow)); !slices.Equal(got, []string{"B0RECENT01", "B0AHEAD001", "B0UNFILLED", "B0UNDATED2"}) {
 		t.Fatalf("kept %v", got)
 	}
 }
@@ -228,9 +241,10 @@ func TestPreordersSoftFailure(t *testing.T) {
 	}
 
 	// The orders fail (Audible's answer quoting a secret the redaction must
-	// keep out of the log is the Service's job; this one carries none).
+	// keep out of the log is the Service's job; this one carries none), and
+	// the catalog answers nothing.
 	e.svc.ordersErr = errors.New("GET /1.0/orders: HTTP 500: boom")
-	e.svc.productsErr = errors.New("GET /1.0/catalog/products: HTTP 502: down")
+	e.svc.products, e.svc.productsErr = nil, errors.New("GET /1.0/catalog/products: HTTP 502: down")
 	e.logs.Reset()
 	got := e.m.Preorders(ctx, a.ID, nil)
 	if len(got) != 2 {
@@ -249,5 +263,117 @@ func TestPreordersSoftFailure(t *testing.T) {
 	if rows, _ := e.db.AudiblePreorders(ctx, a.ID); len(rows) != 2 || rows[1].Record == "" {
 		t.Fatalf("remembered after failures = %+v", rows)
 	}
+
+	// The catalog fails after describing one title: its new description is
+	// used, the other keeps what it had.
+	e.svc.ordersErr = nil
+	e.svc.products = map[string]source.Record{"B0HN716NQ7": {ASIN: "B0HN716NQ7", Title: "Beware of Chicken 6", ReleaseDate: "2026-12-15"}}
+	if got := e.m.Preorders(ctx, a.ID, nil); len(got) != 2 || got[1].ReleaseDate != "2026-12-15" || got[0].Title != "" {
+		t.Fatalf("with the catalog failing part way = %+v", got)
+	}
 	e.noSecrets(t)
+}
+
+// TestPreordersWaitSparesTheCatalog: when Audible asks the Bridge to wait on
+// the orders, the catalog isn't asked (it would only be asked to wait too);
+// the remembered preorders are reported with their last description.
+func TestPreordersWaitSparesTheCatalog(t *testing.T) {
+	e := newEnv(t)
+	a := e.signIn(t)
+	ctx := context.Background()
+	e.m.o.Now = func() time.Time { return pnow }
+	e.svc.orders = []audible.Order{pendingOrder("2026-10-19", "B0HN716NQ7")}
+	e.svc.products = map[string]source.Record{"B0HN716NQ7": {ASIN: "B0HN716NQ7", Title: "Beware of Chicken 6", ReleaseDate: "2026-12-08"}}
+	if got := e.m.Preorders(ctx, a.ID, nil); len(got) != 1 || len(e.svc.asked) != 1 {
+		t.Fatalf("first poll = %+v, catalog reads %v", got, e.svc.asked)
+	}
+	e.svc.ordersErr = waitAnswer(t)
+	got := e.m.Preorders(ctx, a.ID, nil)
+	if len(got) != 1 || got[0].Title != "Beware of Chicken 6" || len(e.svc.asked) != 1 {
+		t.Fatalf("after a wait = %+v, catalog reads %v", got, e.svc.asked)
+	}
+}
+
+// waitAnswer is Audible asking the Bridge to wait (a 429 whose Retry-After is
+// past the backoff's cap), as the real Service answers it.
+func waitAnswer(t *testing.T) error {
+	t.Helper()
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", "600")
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer ts.Close()
+	key, err := rsa.GenerateKey(rand.Reader, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyPEM := string(pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)}))
+	_, err = Audible(audible.WithEndpoints(audible.Endpoints{API: ts.URL})).Orders(context.Background(),
+		audible.Credentials{ADPToken: "ADP", DevicePrivateKey: keyPEM, DeviceType: "A2CZJZGLK2JJVM", DeviceSerial: "SER", Marketplace: "us"})
+	if _, ok := audible.RetryWait(err); !ok {
+		t.Fatalf("err = %v, want Audible asking to wait", err)
+	}
+	return err
+}
+
+// preorderStore counts the writes of the remembered preorders, and fails
+// their reads when failRead is set.
+type preorderStore struct {
+	Store
+	failRead bool
+	writes   int
+}
+
+func (s *preorderStore) AudiblePreorders(ctx context.Context, account string) ([]store.AudiblePreorder, error) {
+	if s.failRead {
+		return nil, errors.New("database disk image is malformed")
+	}
+	return s.Store.AudiblePreorders(ctx, account)
+}
+
+func (s *preorderStore) SetAudiblePreorders(ctx context.Context, account string, ps []store.AudiblePreorder) error {
+	s.writes++
+	return s.Store.SetAudiblePreorders(ctx, account, ps)
+}
+
+// TestPreordersKeepWhatIsRemembered (denied): when the remembered preorders
+// can't be read, the poll reports the orders' pending ones and writes nothing
+// back (a write would forget the rest); when the sign-in can't be opened, it
+// reports the remembered ones, asking Audible nothing and writing nothing.
+func TestPreordersKeepWhatIsRemembered(t *testing.T) {
+	e := newEnv(t)
+	a := e.signIn(t)
+	ctx := context.Background()
+	e.m.o.Now = func() time.Time { return pnow }
+	e.svc.orders = []audible.Order{pendingOrder("2026-10-19", "B0HN716NQ7"), pendingOrder("2026-05-08", "B0H1VSQCJM"),
+		closedOrder("2026-05-07", "B0OLDBUY01", false)}
+	if got := asinsOfRecs(e.m.Preorders(ctx, a.ID, nil)); !slices.Equal(got, []string{"B0H1VSQCJM", "B0HN716NQ7"}) {
+		t.Fatalf("first poll = %v", got)
+	}
+	// The window moves on past Unique's order: only the store still knows it.
+	e.svc.orders = []audible.Order{pendingOrder("2026-10-19", "B0HN716NQ7"), closedOrder("2026-06-01", "B0OLDBUY02", false)}
+
+	broken := &preorderStore{Store: e.db, failRead: true}
+	e.m.o.DB = broken
+	e.logs.Reset()
+	if got := asinsOfRecs(e.m.Preorders(ctx, a.ID, nil)); !slices.Equal(got, []string{"B0HN716NQ7"}) || broken.writes != 0 {
+		t.Fatalf("with the store unreadable = %v, %d writes", got, broken.writes)
+	}
+	if !strings.Contains(e.logs.String(), "reading the remembered preorders failed") {
+		t.Fatalf("logs = %s", e.logs.String())
+	}
+	if rows, _ := e.db.AudiblePreorders(ctx, a.ID); !slices.Equal(asinsOf(rows), []string{"B0H1VSQCJM", "B0HN716NQ7"}) {
+		t.Fatalf("remembered after an unreadable store = %v", asinsOf(rows))
+	}
+
+	if err := e.vault.Delete(secrets.AudibleName(a.ID)); err != nil {
+		t.Fatal(err)
+	}
+	counting := &preorderStore{Store: e.db}
+	e.m.o.DB = counting
+	asked := len(e.svc.asked)
+	got := e.m.Preorders(ctx, a.ID, nil)
+	if !slices.Equal(asinsOfRecs(got), []string{"B0H1VSQCJM", "B0HN716NQ7"}) || len(e.svc.asked) != asked || counting.writes != 0 {
+		t.Fatalf("without a sign-in = %v, catalog reads %v, %d writes", asinsOfRecs(got), e.svc.asked[asked:], counting.writes)
+	}
 }

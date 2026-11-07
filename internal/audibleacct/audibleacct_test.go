@@ -53,8 +53,8 @@ type stubService struct {
 	barrier      *sync.WaitGroup // when set, each Register waits on it after its Done
 	oldProfile   bool            // Register answers a sign-in with no profile recorded (an earlier Bridge's)
 	// orders and products are the preorders' calls: the orders listing (or
-	// ordersErr), the catalog by ASIN (or productsErr), and the ASINs each
-	// catalog read asked for.
+	// ordersErr), the catalog by ASIN (with productsErr, what it read before
+	// failing), and the ASINs each catalog read asked for.
 	orders      []audible.Order
 	ordersErr   error
 	products    map[string]source.Record
@@ -162,16 +162,13 @@ func (s *stubService) Products(_ context.Context, _ audible.Credentials, asins [
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.asked = append(s.asked, asins)
-	if s.productsErr != nil {
-		return nil, s.productsErr
-	}
 	var out []source.Record
 	for _, a := range asins {
 		if r, ok := s.products[a]; ok {
 			out = append(out, r)
 		}
 	}
-	return out, nil
+	return out, s.productsErr
 }
 
 // stubServer is the server's account routes.

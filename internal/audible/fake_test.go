@@ -491,6 +491,8 @@ func TestRecorderScrubsCredentials(t *testing.T) {
 		"customer id": creds.CustomerID, "serial": serial, "code": code, "verifier": pkce.Verifier,
 		"challenge": pkce.Challenge, "account name": "Fake Customer",
 		"order amount": "FAKE-AMOUNT", "payment method": "FAKE-PAYMENT-METHOD", "tax": "FAKE-TAX", "merchant": "FAKE-MERCHANT",
+		"order payment": "FAKE-ORDER-PAYMENT", "payment profile": "FAKE-PAYMENT-PROFILE", "contract": "FAKE-CONTRACT",
+		"subscription": "FAKE-SUBSCRIPTION", "vat rate": "FAKE-VAT-RATE", "subcharge": "FAKE-SUBCHARGE",
 	} {
 		if strings.Contains(rec, secret) {
 			t.Errorf("the recording holds the %s", name)

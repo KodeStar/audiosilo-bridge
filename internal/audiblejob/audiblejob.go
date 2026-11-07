@@ -235,13 +235,27 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 			res.Unavailable++
 		}
 		c := importjob.Claim{}
-		// A preorder the catalog hasn't described yet has nothing to match on.
+		// A preorder the catalog hasn't described yet matches by its ASIN only.
 		if b, score, ok := matchTitled(matcher, rec); ok && matchable(b.Path) {
 			agrees, disagrees := importjob.PositionAgrees(rec, b)
 			c = importjob.Claim{Path: b.Path, Score: score, Work: importjob.WorkKey(rec), Agrees: agrees, Disagrees: disagrees}
 			matchedBook[b.Path] = b
 		}
 		titles, used, claims = append(titles, t), append(used, rec), append(claims, c)
+	}
+	// A preorder isn't out yet, so a book a title of the library claims too is
+	// that title's edition: the preorder gives way, rather than contest the
+	// book or keep the title's ASIN off it.
+	owned := map[string]bool{}
+	for i, c := range claims {
+		if c.Path != "" && titles[i].State != link.AudiblePreorder {
+			owned[c.Path] = true
+		}
+	}
+	for i, c := range claims {
+		if titles[i].State == link.AudiblePreorder && owned[c.Path] {
+			claims[i] = importjob.Claim{}
+		}
 	}
 	// A book several titles claimed keeps the best one only (the one whose
 	// series number is the book's, else the best score; a tie between two
@@ -321,13 +335,15 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 	return res, nil
 }
 
-// matchTitled is the matcher's book for rec, never one for a record with no
-// title (a preorder the catalog hasn't described yet).
+// matchTitled is the matcher's book for rec. A record with no title (a
+// preorder the catalog hasn't described yet) matches by its ASIN only: the
+// fuzzy pass would go on its author or series alone.
 func matchTitled(m *importjob.BookMatcher, rec source.Record) (link.LibraryBook, float64, bool) {
-	if strings.TrimSpace(rec.Title) == "" {
+	b, score, ok := m.MatchScored(rec)
+	if ok && strings.TrimSpace(rec.Title) == "" && !strings.EqualFold(b.ASIN, rec.ASIN) {
 		return link.LibraryBook{}, 0, false
 	}
-	return m.MatchScored(rec)
+	return b, score, ok
 }
 
 // planUnmatched sets each unmatched title's Planned: where a backup of it
@@ -345,7 +361,7 @@ func (h *Handler) planUnmatched(ctx context.Context, libraryID int64, template s
 	}()
 	for i := range titles {
 		// A preorder the catalog hasn't described yet has no name to place.
-		if titles[i].Match != nil || used[i].Title == "" {
+		if titles[i].Match != nil || strings.TrimSpace(used[i].Title) == "" {
 			continue
 		}
 		if err := ctx.Err(); err != nil {

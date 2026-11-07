@@ -1439,7 +1439,8 @@ internal/
             an audible.poll saw in the orders, ordered_at, last_seen_at, record (the catalog's
             description as JSON, '' until filled), filled_at; no credential or payment field):
             AudiblePreorders lists an account's, SetAudiblePreorders replaces them in one tx, and
-            DeleteAudibleAccount deletes them with the account.
+            DeleteAudibleAccount deletes them with the account (account REFERENCES
+            audible_accounts ON DELETE CASCADE: a poll's late write for a removed account fails).
   state/    per-book pipeline state machine: table-driven states/lanes/transitions,
             CanStart/NextState guards, the audit fix-loop cap. Pure, no I/O. M6 added
             ParkCode (typed park reasons - M7 added contrib_unavailable, core_needed,
@@ -2173,9 +2174,11 @@ internal/
             date, preorder, state and items' asin (never a payment field);
             Order.PendingPreorder is preorder AND state ORDER_PENDING_PREORDER. Products reads the
             catalog (GET /1.0/catalog/products?asins=, batches of 25 split on 400/414 by splitOnOverflow, shared with LastPositions, an ASIN the
-            batch left out read alone at /1.0/catalog/products/{asin}, an unknown one left out) with
-            contributors,product_attrs,product_desc,series (title is null without product_desc),
-            as records like the library's. unavailableReason checks show/periodical, THEN a
+            batches left out, answered without a title, or held by a batch that failed (unless
+            Audible asked to wait) read alone at /1.0/catalog/products/{asin}, an unknown one left
+            out; a single read failing, or a wait, ends the reads and returns the records read with
+            the error) with contributors,product_attrs,product_desc,series (title is null without
+            product_desc), as records like the library's. unavailableReason checks show/periodical, THEN a
             plausible future date (PreorderReason, a pre-order whatever its rights say), THEN the
             rights.
             Phase 4c: a 414 splits a lastpositions batch as a 400 does; RetryWait(err) reads a 429/503's
@@ -2224,7 +2227,7 @@ internal/
             (until then /1.0/library/{asin} is a 404 and its license NotReleased); GET /1.0/orders
             lists every fixture title ordered within OrdersWindow (183 days: a title bought at
             release, a preorder 40 days ago, pending until Release closes it) plus
-            CancelledPreorder (ORDER_CANCELLED), items with synthetic payment fields, a 500 on any
+            CancelledPreorder (ORDER_CANCELLED), orders and items with synthetic payment fields, a 500 on any
             response_groups; GET /1.0/catalog/products(?asins= | /{asin}) answers every fixture and
             the cancelled one, title only with product_desc, 400 over LastPositionsMax ASINs.
             Recorder: the owner's recording transport, a 0600 JSON-lines file per
@@ -2267,9 +2270,12 @@ internal/
             described by the catalog every poll, as records with Preorder and PreorderReason (an
             undescribed one by its ASIN alone). Dropped when the library lists it, its order is
             seen in another state (none pending), a listing reaching back past its order no
-            longer holds it, or PreorderDropAfter (30 days) after its release date. Never fails:
-            orders or catalog failing is one warning each and the remembered ones are reported
-            (with the last description); a store read failure writes nothing back. Orders and
+            longer holds it, or PreorderDropAfter (30 days) after its release date (one the catalog
+            never dated counts as released two years after its order was last seen pending). Never
+            fails: orders or catalog failing is one warning each and the remembered ones are
+            reported (with the last description; a catalog failing part way describes what it
+            read; Audible asking to wait on the orders spares the catalog); a store read failure
+            writes nothing back. Orders and
             Products use the sign-in without recording a refusal. Title answers a remembered
             preorder's record on ErrNotInLibrary (an import then says not_released). Phase 4b: Title and License go
             through the same signed path (Manager.signed: open the sign-in, call, on
@@ -2305,8 +2311,8 @@ internal/
             Bridge's and was mapped on the paired server (else fails asking to map
             it again), lists the Audible library (a refusal is the account's, the
             job just fails) and appends Accounts.Preorders (never fails; a record
-            with no title, a preorder not described yet, is neither matched nor
-            planned), reads the account's books library on the server page
+            with no title, a preorder not described yet, matches only by its ASIN
+            and is never planned), reads the account's books library on the server page
             by page (500, bounded at 2000 pages), skips records without a usable
             ASIN, states them (UnavailableReason "" available, "pre-order"
             preorder, else unavailable with the reason), matches with
@@ -2317,7 +2323,8 @@ internal/
             is the book's, else the best score (importjob.KeepBest, each claim's
             Agrees/Disagrees from importjob.PositionAgrees: a tie keeps none unless
             it is one work owned twice, which all keep: dropping it would download
-            it again), the others go out unmatched, with Reason
+            it again; a preorder gives way before that to a library title that
+            claims its book: another edition), the others go out unmatched, with Reason
             link.ReasonContested ("contested", on an available title; 4b's
             back-up-everything skips them) and ContestedPath (the book's path,
             contested_path, omitted otherwise), except a title whose number

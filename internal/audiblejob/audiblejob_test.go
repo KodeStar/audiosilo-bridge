@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kodestar/audiosilo-bridge/internal/audible"
 	"github.com/kodestar/audiosilo-bridge/internal/audibleacct"
 	"github.com/kodestar/audiosilo-bridge/internal/jobs"
 	"github.com/kodestar/audiosilo-bridge/internal/link"
@@ -485,6 +486,58 @@ func TestPollSkipsOverlongMatchesWithinTitleBatch(t *testing.T) {
 		if title.Match == nil || title.Match.Path != fs.books[i].Path {
 			t.Errorf("valid neighbor %s lost its match", title.ASIN)
 		}
+	}
+}
+
+// A preorder of another edition of a book a library title claims gives way:
+// the library title keeps the book and puts its ASIN on it, whether the
+// preorder is the same work or another one, and the preorder goes out
+// unmatched (planned), never contested. A library title with no title still
+// matches the book carrying its ASIN (and only that one).
+func TestPollPreordersGiveWayToTheLibrary(t *testing.T) {
+	t.Parallel()
+	fs := &fakeServer{pageSize: 500, books: []link.LibraryBook{
+		{Path: "Herbert/Dune", Title: "Dune", Authors: []string{"Frank Herbert"}},
+		{Path: "Quill/Canopy", Title: "The Golden Canopy", Authors: []string{"Mara Quill"}},
+		{Path: "Quill/Orchard", Title: "The Glass Orchard", Authors: []string{"Mara Quill"}, ASIN: "B0FAKE0001"},
+		{Path: "Quill/Thicket", Title: "The Thicket", Authors: []string{"Mara Quill"}},
+	}}
+	preorder := func(asin, title string, authors ...string) source.Record {
+		return source.Record{ASIN: asin, Title: title, Author: authors[0], Authors: authors, ReleaseDate: "2027-01-12",
+			Preorder: true, UnavailableReason: audible.PreorderReason}
+	}
+	accts := &stubAccounts{acct: account(), recs: []source.Record{
+		{ASIN: "B0DUNE0001", Title: "Dune", Author: "Frank Herbert"},
+		{ASIN: "B0CANOPY01", Title: "The Golden Canopy", Author: "Mara Quill"},
+		{ASIN: "B0FAKE0001", Author: "Mara Quill"},
+		{ASIN: "B0BLANK001", Author: "Mara Quill", Series: "Orchard Cycle", SeriesPosition: "3"},
+	}, pre: []source.Record{
+		preorder("B0DUNE0002", "Dune", "Frank Herbert"),
+		preorder("B0CANOPY02", "The Golden Canopy", "Mara Quill", "Full Cast"),
+	}}
+	res, err := run(t, setup(t, fs, accts), "acct0001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	by := map[string]link.AudibleTitle{}
+	for _, tt := range fs.calls[0].Titles {
+		by[tt.ASIN] = tt
+	}
+	for asin, path := range map[string]string{"B0DUNE0001": "Herbert/Dune", "B0CANOPY01": "Quill/Canopy", "B0FAKE0001": "Quill/Orchard"} {
+		if m := by[asin].Match; m == nil || m.Path != path {
+			t.Fatalf("%s's match = %+v, want %s", asin, m, path)
+		}
+	}
+	for _, asin := range []string{"B0DUNE0002", "B0CANOPY02"} {
+		if p := by[asin]; p.Match != nil || p.Reason == link.ReasonContested || p.Planned == nil {
+			t.Fatalf("the preorder %s = %+v", asin, p)
+		}
+	}
+	if b := by["B0BLANK001"]; b.Match != nil || b.Planned != nil {
+		t.Fatalf("a title with no title and no book of its ASIN = %+v", b)
+	}
+	if res.Contested != 0 || len(fs.enriched) != 2 || fs.enriched["Herbert/Dune"] != "B0DUNE0001" || fs.enriched["Quill/Canopy"] != "B0CANOPY01" {
+		t.Fatalf("enriched %v, result %+v", fs.enriched, res)
 	}
 }
 

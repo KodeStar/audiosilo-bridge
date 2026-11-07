@@ -118,38 +118,40 @@ const catalogBatch = lastPositionsBatch
 // a preorder isn't there) as records, as a library listing would make them,
 // with no customer rights (the catalog says nothing about this account's).
 // It asks GET /1.0/catalog/products?asins=a,b,... in batches of catalogBatch,
-// splitting a batch Audible refuses for its length; an ASIN the batched read
-// doesn't answer (or one alone it still refuses with a 400) is read alone
-// (GET /1.0/catalog/products/{asin}), and one the catalog doesn't know is left
-// out. Each returned record's ASIN is one asked for.
+// splitting a batch Audible refuses for its length; an ASIN the batched reads
+// don't answer with its title (left out, one alone still refused with a 400,
+// or in a batch that failed) is read alone (GET /1.0/catalog/products/{asin}),
+// and one the catalog doesn't know is left out. A failed batch ends the
+// batches; Audible asking the Bridge to wait, ctx ending or a single read
+// failing ends the reads, and the records read before are returned with that
+// error. Each returned record's ASIN is one asked for.
 func (c *Client) Products(ctx context.Context, asins []string) ([]source.Record, error) {
 	got := map[string]libItem{}
-	for start := 0; start < len(asins); start += catalogBatch {
-		end := min(start+catalogBatch, len(asins))
-		if err := c.productsChunk(ctx, asins[start:end], got); err != nil {
-			return nil, err
-		}
+	var err error
+	for start := 0; start < len(asins) && err == nil; start += catalogBatch {
+		err = c.productsChunk(ctx, asins[start:min(start+catalogBatch, len(asins))], got)
+	}
+	if _, wait := RetryWait(err); !wait && ctx.Err() == nil {
+		err = nil // the single reads answer for the batches that didn't
 	}
 	now := time.Now()
 	out := make([]source.Record, 0, len(asins))
 	for _, a := range asins {
 		it, ok := got[strings.ToUpper(a)]
-		if !ok {
-			var err error
-			if it, ok, err = c.product(ctx, a); err != nil {
-				return nil, err
-			}
+		if !ok && err == nil {
+			it, ok, err = c.product(ctx, a)
 		}
 		if ok {
 			it.ASIN = a
 			out = append(out, it.toRecord(now))
 		}
 	}
-	return out, nil
+	return out, err
 }
 
 // productsChunk reads one batch into got (by upper-case ASIN), split by
-// splitOnOverflow. A single ASIN still refused is left for Products to read
+// splitOnOverflow. A single ASIN still refused, or a title answered without
+// its title (the response groups not applied), is left for Products to read
 // alone.
 func (c *Client) productsChunk(ctx context.Context, asins []string, got map[string]libItem) error {
 	return splitOnOverflow(asins, func(batch []string) error {
@@ -165,7 +167,7 @@ func (c *Client) productsChunk(ctx context.Context, asins []string, got map[stri
 			return err
 		}
 		for _, p := range resp.Products {
-			if a := strings.ToUpper(strings.TrimSpace(p.ASIN)); a != "" {
+			if a := strings.ToUpper(strings.TrimSpace(p.ASIN)); a != "" && strings.TrimSpace(p.Title) != "" {
 				got[a] = p
 			}
 		}

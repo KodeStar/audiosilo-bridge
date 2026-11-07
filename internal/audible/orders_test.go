@@ -204,6 +204,82 @@ func TestProducts(t *testing.T) {
 	}
 }
 
+// TestProductsFallbacks: what the batched read doesn't answer with a title is
+// read alone (a batch that failed, one still refused with a 400 down to one
+// ASIN, a product sent without its title); a single read that fails ends the
+// reads but keeps every record read, returned with its error; Audible asking
+// the Bridge to wait ends the reads at once.
+func TestProductsFallbacks(t *testing.T) {
+	asins := []string{"B0CAT00001", "B0CAT00002", "B0CAT00003"}
+	cases := []struct {
+		name     string
+		batch    int    // the batched read's status (0: it answers)
+		untitled bool   // the batched read sends its products without their titles
+		omit     string // an ASIN the batched read leaves out
+		single   int    // every single read's status (0: it answers)
+		want     []string
+		reads    []string // the single reads made
+		status   int      // the error's status (0: no error)
+	}{
+		{name: "a batch that failed is read alone", batch: http.StatusInternalServerError, want: asins, reads: asins},
+		{name: "a 400 down to one ASIN is read alone", batch: http.StatusBadRequest, want: asins, reads: asins},
+		{name: "a product without its title is read alone", untitled: true, want: asins, reads: asins},
+		{name: "a failed single read keeps what was read", omit: "B0CAT00002", single: http.StatusInternalServerError,
+			want: []string{"B0CAT00001", "B0CAT00003"}, reads: []string{"B0CAT00002"}, status: http.StatusInternalServerError},
+		{name: "Audible asking to wait ends the reads", batch: http.StatusTooManyRequests, want: []string{}, status: http.StatusTooManyRequests},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var mu sync.Mutex
+			var reads []string
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				defer mu.Unlock()
+				if asin, ok := strings.CutPrefix(r.URL.Path, "/1.0/catalog/products/"); ok {
+					reads = append(reads, asin)
+					if tc.single != 0 {
+						w.WriteHeader(tc.single)
+						return
+					}
+					_ = json.NewEncoder(w).Encode(map[string]any{"product": map[string]any{"asin": asin, "title": "Title " + asin}})
+					return
+				}
+				if tc.batch != 0 {
+					w.WriteHeader(tc.batch)
+					return
+				}
+				out := []map[string]any{}
+				for _, a := range strings.Split(r.URL.Query().Get("asins"), ",") {
+					if a == tc.omit {
+						continue
+					}
+					p := map[string]any{"asin": a, "title": "Title " + a}
+					if tc.untitled {
+						p["title"] = nil
+					}
+					out = append(out, p)
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{"products": out})
+			}))
+			defer ts.Close()
+			recs, err := testClient(t, ts.URL).Products(context.Background(), asins)
+			if HTTPStatus(err) != tc.status || (tc.status == 0) != (err == nil) {
+				t.Fatalf("err = %v, want status %d", err, tc.status)
+			}
+			got := make([]string, len(recs))
+			for i, r := range recs {
+				if r.Title != "Title "+r.ASIN {
+					t.Fatalf("record = %+v", r)
+				}
+				got[i] = r.ASIN
+			}
+			if !slices.Equal(got, tc.want) || !slices.Equal(reads, tc.reads) {
+				t.Fatalf("records %v (want %v), read alone %v (want %v)", got, tc.want, reads, tc.reads)
+			}
+		})
+	}
+}
+
 // TestProductsError: a catalog that fails (not a length refusal) is an error.
 func TestProductsError(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

@@ -18,6 +18,13 @@ import (
 // (its own wait is 14 days).
 const PreorderDropAfter = 30 * 24 * time.Hour
 
+// undatedPreorderYears: a remembered preorder the catalog never dated (no
+// date, or a placeholder one) counts as released this many years after its
+// order was last seen pending, and is dropped PreorderDropAfter later: Audible
+// dates a preorder at most two years ahead (audible's plausibleDate), so by
+// then the library lists it or it was cancelled.
+const undatedPreorderYears = 2
+
 // Preorders are account id's pending preorders, for a poll that listed
 // library (the account's Audible library): every title a pending preorder
 // order holds that the library doesn't list (the library wins), remembered
@@ -30,14 +37,17 @@ const PreorderDropAfter = 30 * 24 * time.Hour
 // is seen in a state other than pending (cancelled, or delivered: the library
 // lists it then), when an orders listing that reaches back past its order date
 // no longer holds it (cancelled), or when its release date is
-// PreorderDropAfter past.
+// PreorderDropAfter past (one the catalog never dated: undatedPreorderYears
+// after its order was last seen pending, then PreorderDropAfter).
 //
 // It never fails the poll: the orders or the catalog failing logs one warning
 // each (Audible's answer, redacted, never a credential) and the remembered
-// preorders are reported with the catalog's last description. A preorder the
-// catalog never described is reported by its ASIN alone (the server takes a
-// title without a title). The store failing is a warning too (nothing is then
-// written back, so nothing remembered is lost).
+// preorders are reported with the catalog's last description (a catalog that
+// fails part way still describes the titles it read). When Audible asked the
+// Bridge to wait on the orders, the catalog isn't asked. A preorder
+// the catalog never described is reported by its ASIN alone (the server takes
+// a title without a title). The store failing is a warning too (nothing is
+// then written back, so nothing remembered is lost).
 func (m *Manager) Preorders(ctx context.Context, id string, library []source.Record) []source.Record {
 	now := m.o.Now()
 	inLibrary := make(map[string]bool, len(library))
@@ -56,6 +66,7 @@ func (m *Manager) Preorders(ctx context.Context, id string, library []source.Rec
 	}
 
 	orders, err := m.o.Service.Orders(ctx, creds)
+	_, wait := audible.RetryWait(err)
 	if err != nil {
 		orders = nil // a failed listing drops and adds nothing
 		if ctx.Err() == nil {
@@ -64,7 +75,7 @@ func (m *Manager) Preorders(ctx context.Context, id string, library []source.Rec
 	}
 	rows = reconcilePreorders(rows, inLibrary, orders, now)
 
-	if len(rows) > 0 {
+	if len(rows) > 0 && !wait {
 		asins := make([]string, len(rows))
 		for i, r := range rows {
 			asins[i] = r.ASIN
@@ -189,11 +200,19 @@ func fillPreorders(rows []store.AudiblePreorder, recs []source.Record, now time.
 }
 
 // dropReleased drops the rows whose release date (the catalog's) is
-// PreorderDropAfter or more before now.
+// PreorderDropAfter or more before now, a row with none counting as released
+// undatedPreorderYears after its order was last seen pending (never, when
+// that is unknown).
 func dropReleased(rows []store.AudiblePreorder, now time.Time) []store.AudiblePreorder {
 	return slices.DeleteFunc(rows, func(r store.AudiblePreorder) bool {
 		d, err := time.Parse(time.DateOnly, preorderRecord(r).ReleaseDate)
-		return err == nil && !now.Before(d.Add(PreorderDropAfter))
+		if err != nil {
+			if r.LastSeenAt.IsZero() {
+				return false
+			}
+			d = r.LastSeenAt.AddDate(undatedPreorderYears, 0, 0)
+		}
+		return !now.Before(d.Add(PreorderDropAfter))
 	})
 }
 
