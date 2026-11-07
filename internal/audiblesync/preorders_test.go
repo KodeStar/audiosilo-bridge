@@ -61,8 +61,8 @@ func TestSyncSkipsRememberedPreorders(t *testing.T) {
 }
 
 // The push never writes a remembered pending preorder's place (Audible denies
-// its content reference: a false sync error every pass); the place waits and
-// is written once the poll forgets the preorder.
+// its content reference: a false sync error every pass); with no sync in
+// between, the place waits and is written once the poll forgets the preorder.
 func TestPushSkipsRememberedPreorders(t *testing.T) {
 	e := newEnv(t)
 	e.list(t, st("B0PREORDR1", "A/Six", 36000))

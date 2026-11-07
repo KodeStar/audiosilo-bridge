@@ -2454,7 +2454,7 @@ internal/
   audiblesync/ Phase 4c: an account's places both ways. A title the Bridge remembers as a
             pending preorder (store.AudiblePreorders, 0012) is synced in neither direction: the job
             leaves it out of its params before listing (unlisted, so never read nor pushed;
-            Result.SkippedPreorder) and the push's due skips it (its place waits): the server lists
+            Result.SkippedPreorder, its waiting place forgotten) and the push's due skips it until then: the server lists
             a preorder fuzzy-matched to another edition, and Audible denies its content reference.
             audible.sync (light; params
             link.AudibleSyncParams, strict): a device refusal fails audible_refused (the server stops

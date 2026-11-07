@@ -26,8 +26,7 @@ import (
 // delivered (ORDER_CLOSED with detail_state ORDER_SUCCEEDED) or cancelled.
 const OrderPendingPreorder = "ORDER_PENDING_PREORDER"
 
-// A delivered order: state ORDER_CLOSED with detail_state ORDER_SUCCEEDED (a
-// delivered preorder, or any purchase).
+// The state and detail_state of a delivered order (Order.Delivered).
 const (
 	OrderClosed    = "ORDER_CLOSED"
 	OrderSucceeded = "ORDER_SUCCEEDED"

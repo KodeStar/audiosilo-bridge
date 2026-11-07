@@ -34,6 +34,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"slices"
 	"strconv"
 	"time"
 
@@ -414,16 +415,10 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (*R
 	}
 	// A pending preorder the server matched to a book (another edition) is
 	// left out: unlisted here, so neither read from Audible nor pushed.
-	skipped := 0
-	if pre := h.o.preorders(ctx, acct.ID); len(pre) > 0 {
-		kept := p.Titles[:0:0]
-		for _, t := range p.Titles {
-			if !pre[t.ASIN] {
-				kept = append(kept, t)
-			}
-		}
-		skipped, p.Titles = len(p.Titles)-len(kept), kept
-	}
+	pre := h.o.preorders(ctx, acct.ID)
+	before := len(p.Titles)
+	p.Titles = slices.DeleteFunc(p.Titles, func(t link.AudibleSyncTitle) bool { return pre[t.ASIN] })
+	skipped := before - len(p.Titles)
 	res := &Result{Account: acct.ID, Titles: len(p.Titles), SkippedPreorder: skipped}
 	now := h.o.Now()
 

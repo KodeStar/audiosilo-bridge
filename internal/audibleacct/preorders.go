@@ -34,10 +34,9 @@ const undatedPreorderYears = 2
 // as a record with Preorder set and audible.PreorderReason.
 //
 // A remembered preorder is dropped when the library lists it, when its order
-// is seen cancelled (any state but pending or delivered, none pending; a
-// delivered order keeps it until the library lists it, which may be a little
-// later, so it never drops out of a final poll in between), when an orders listing that reaches back past its order date
-// no longer holds it (cancelled), or when its release date is
+// is seen cancelled (none pending; a delivered order keeps it, see
+// reconcilePreorders), when an orders listing that reaches back past its
+// order date no longer holds it (cancelled), or when its release date is
 // PreorderDropAfter past (one the catalog never dated: undatedPreorderYears
 // after its order was last seen pending, then PreorderDropAfter).
 //
@@ -117,8 +116,9 @@ func (m *Manager) rememberedPreorder(ctx context.Context, id, asin string) (sour
 // title a pending preorder order holds is added (ordered at its order's date,
 // else now) or seen again (last seen now); a remembered one is dropped when
 // the library lists it, when an order holds it cancelled (neither pending nor
-// delivered) and none pending, or when it is missing from a listing whose oldest order is older
-// than its order (it was in the window, so it was cancelled). By ASIN.
+// delivered) and none pending, or when it is missing from every order of a
+// listing whose oldest order is older than its order (it was in the window, so
+// it was cancelled). By ASIN.
 func reconcilePreorders(rows []store.AudiblePreorder, inLibrary map[string]bool, orders []audible.Order, now time.Time) []store.AudiblePreorder {
 	pending := map[string]time.Time{}
 	cancelled := map[string]bool{}

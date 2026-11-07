@@ -252,7 +252,8 @@ func (p *Pusher) due(ctx context.Context, a store.AudibleAccount, now time.Time)
 		return
 	}
 	// A remembered pending preorder is never pushed (Audible denies its
-	// content reference: a false sync error every pass). Its place waits.
+	// content reference: a false sync error every pass). Its place waits
+	// until the next sync, which leaves it unlisted and forgets the place.
 	var pre map[string]bool
 	if len(list) > 0 {
 		pre = p.o.preorders(ctx, a.ID)
