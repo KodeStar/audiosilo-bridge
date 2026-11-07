@@ -56,6 +56,10 @@ type Accounts interface {
 	// Library lists the account's Audible library (audibleacct.ErrRefused when
 	// Audible refuses the sign-in, which it records).
 	Library(ctx context.Context, id string) ([]source.Record, error)
+	// Preorders are the account's pending preorders the library doesn't list
+	// (audibleacct.Manager.Preorders: from the orders, remembered, described
+	// by the catalog). It never fails: a failure is its own warning.
+	Preorders(ctx context.Context, id string, library []source.Record) []source.Record
 	Polled(ctx context.Context, id string, titles, matched int) error
 	Failed(ctx context.Context, id, why string) error
 }
@@ -197,6 +201,10 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 	if err != nil {
 		return nil, h.fail(ctx, acct.ID, "could not list the Audible library: "+err.Error())
 	}
+	// A pending preorder isn't in the library until it is released: the
+	// orders show it, and the accounts remember it.
+	rep.Progress(jobs.Progress{Step: "audible", Message: "Listing the Audible preorders"})
+	recs = append(recs, h.o.Accounts.Preorders(ctx, acct.ID, recs)...)
 
 	rep.Progress(jobs.Progress{Step: "books", Message: "Reading the library's books on the server"})
 	books, err := allBooks(ctx, srv, acct.LibraryID)
@@ -227,7 +235,8 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 			res.Unavailable++
 		}
 		c := importjob.Claim{}
-		if b, score, ok := matcher.MatchScored(rec); ok && matchable(b.Path) {
+		// A preorder the catalog hasn't described yet has nothing to match on.
+		if b, score, ok := matchTitled(matcher, rec); ok && matchable(b.Path) {
 			agrees, disagrees := importjob.PositionAgrees(rec, b)
 			c = importjob.Claim{Path: b.Path, Score: score, Work: importjob.WorkKey(rec), Agrees: agrees, Disagrees: disagrees}
 			matchedBook[b.Path] = b
@@ -312,6 +321,15 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 	return res, nil
 }
 
+// matchTitled is the matcher's book for rec, never one for a record with no
+// title (a preorder the catalog hasn't described yet).
+func matchTitled(m *importjob.BookMatcher, rec source.Record) (link.LibraryBook, float64, bool) {
+	if strings.TrimSpace(rec.Title) == "" {
+		return link.LibraryBook{}, 0, false
+	}
+	return m.MatchScored(rec)
+}
+
 // planUnmatched sets each unmatched title's Planned: where a backup of it
 // would go, as the import would place it now (the console shows it on the
 // title's row; used[i] is titles[i]'s record). The planner (and the library's
@@ -326,7 +344,8 @@ func (h *Handler) planUnmatched(ctx context.Context, libraryID int64, template s
 		}
 	}()
 	for i := range titles {
-		if titles[i].Match != nil {
+		// A preorder the catalog hasn't described yet has no name to place.
+		if titles[i].Match != nil || used[i].Title == "" {
 			continue
 		}
 		if err := ctx.Err(); err != nil {

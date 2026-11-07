@@ -25,6 +25,8 @@ type stubAccounts struct {
 	acct   store.AudibleAccount
 	recs   []source.Record
 	libErr error
+	// pre are the preorders the accounts report beside the library.
+	pre    []source.Record
 	polled []int
 	failed []string
 }
@@ -37,6 +39,9 @@ func (s *stubAccounts) Account(_ context.Context, id string) (store.AudibleAccou
 }
 func (s *stubAccounts) Library(context.Context, string) ([]source.Record, error) {
 	return s.recs, s.libErr
+}
+func (s *stubAccounts) Preorders(context.Context, string, []source.Record) []source.Record {
+	return s.pre
 }
 func (s *stubAccounts) Polled(_ context.Context, _ string, titles, matched int) error {
 	s.polled = append(s.polled, titles, matched)
@@ -480,5 +485,52 @@ func TestPollSkipsOverlongMatchesWithinTitleBatch(t *testing.T) {
 		if title.Match == nil || title.Match.Path != fs.books[i].Path {
 			t.Errorf("valid neighbor %s lost its match", title.ASIN)
 		}
+	}
+}
+
+// The preorders the accounts report beside the library (from the orders) go
+// out as preorder titles with their release date and series; one matched to
+// a book never puts its ASIN on it; an unmatched one is planned; one the
+// catalog hasn't described yet goes out by its ASIN, unmatched and unplanned.
+func TestPollReportsPreordersFromTheOrders(t *testing.T) {
+	t.Parallel()
+	fs := &fakeServer{pageSize: 500, books: []link.LibraryBook{
+		{Path: "Casualfarmer/Beware of Chicken 6", Title: "Beware of Chicken 6", Authors: []string{"Casualfarmer"}},
+	}}
+	accts := &stubAccounts{acct: account(), recs: []source.Record{
+		{ASIN: "B0FAKE0001", Title: "The Glass Orchard", Author: "Mara Quill"},
+	}, pre: []source.Record{
+		{ASIN: "B0HN716NQ7", Title: "Beware of Chicken 6", Author: "Casualfarmer", Series: "Beware of Chicken", SeriesPosition: "6",
+			ReleaseDate: "2026-12-08", FileName: "Beware of Chicken 6.m4b", Preorder: true, UnavailableReason: "Not released yet (pre-order)"},
+		{ASIN: "B0GV5G2ZKY", Title: "Return of the Runebound Professor 9", Author: "Actus", Series: "Return of the Runebound Professor",
+			SeriesPosition: "9", ReleaseDate: "2027-01-12", RuntimeSec: 48000, FileName: "Return of the Runebound Professor 9.m4b",
+			Preorder: true, UnavailableReason: "Not released yet (pre-order)"},
+		{ASIN: "B0HG4PZMYQ", Preorder: true, UnavailableReason: "Not released yet (pre-order)"},
+	}}
+	res, err := run(t, setup(t, fs, accts), "acct0001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Titles != 4 || res.Available != 1 || res.Preorder != 3 || res.Matched != 1 || res.Enriched != 0 {
+		t.Fatalf("result = %+v", res)
+	}
+	by := map[string]link.AudibleTitle{}
+	for _, tt := range fs.calls[0].Titles {
+		by[tt.ASIN] = tt
+	}
+	if c := by["B0HN716NQ7"]; c.State != link.AudiblePreorder || c.Match == nil || c.ReleaseDate != "2026-12-08" || c.Planned != nil {
+		t.Fatalf("matched preorder = %+v", c)
+	}
+	r := by["B0GV5G2ZKY"]
+	if r.State != link.AudiblePreorder || r.Match != nil || r.ReleaseDate != "2027-01-12" || r.RuntimeS != 48000 ||
+		len(r.Series) != 1 || r.Series[0].Position != "9" || r.Planned == nil || r.Planned.File != "Return of the Runebound Professor 9.m4b" {
+		t.Fatalf("unmatched preorder = %+v (planned %+v)", r, r.Planned)
+	}
+	if u := by["B0HG4PZMYQ"]; u.State != link.AudiblePreorder || u.Title != "" || u.Match != nil || u.Planned != nil ||
+		u.Reason == "" || u.Authors == nil || u.Series == nil {
+		t.Fatalf("undescribed preorder = %+v", u)
+	}
+	if len(fs.enriched) != 0 {
+		t.Fatalf("a preorder's ASIN went onto a book: %v", fs.enriched)
 	}
 }
