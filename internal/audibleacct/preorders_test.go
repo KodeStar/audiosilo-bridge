@@ -25,11 +25,11 @@ func day(s string) time.Time {
 
 func pendingOrder(date, asin string) audible.Order {
 	return audible.Order{Date: day(date), Preorder: true, State: audible.OrderPendingPreorder,
-		Items: []audible.OrderItem{{ASIN: asin, IsPreorder: true}}}
+		Items: []audible.OrderItem{{ASIN: asin}}}
 }
 
 func closedOrder(date, asin string, preorder bool) audible.Order {
-	return audible.Order{Date: day(date), Preorder: preorder, State: "ORDER_CLOSED", Items: []audible.OrderItem{{ASIN: asin, IsPreorder: preorder}}}
+	return audible.Order{Date: day(date), Preorder: preorder, State: "ORDER_CLOSED", Items: []audible.OrderItem{{ASIN: asin}}}
 }
 
 func asinsOf(rows []store.AudiblePreorder) []string {
@@ -50,47 +50,43 @@ func TestReconcilePreorders(t *testing.T) {
 		rows    []store.AudiblePreorder
 		library []string
 		orders  []audible.Order
-		listed  bool
 		want    []string
 	}{
 		{name: "a pending order adds its title",
 			orders: []audible.Order{pendingOrder("2026-10-19", "B0HN716NQ7"), closedOrder("2026-05-07", "B0OLDBUY01", false)},
-			listed: true, want: []string{"B0HN716NQ7"}},
+			want:   []string{"B0HN716NQ7"}},
 		{name: "a lower-case ASIN is the same title",
-			orders: []audible.Order{pendingOrder("2026-10-19", "b0hn716nq7")}, listed: true, want: []string{"B0HN716NQ7"}},
+			orders: []audible.Order{pendingOrder("2026-10-19", "b0hn716nq7")}, want: []string{"B0HN716NQ7"}},
 		{name: "a delivered or ordinary order adds nothing",
 			orders: []audible.Order{closedOrder("2026-10-07", "B0DELIVER1", true), closedOrder("2026-10-01", "B0BOUGHT01", false)},
-			listed: true, want: []string{}},
+			want:   []string{}},
 		{name: "the library wins over a pending order",
 			library: []string{"B0HN716NQ7"}, orders: []audible.Order{pendingOrder("2026-10-19", "B0HN716NQ7")},
-			listed: true, want: []string{}},
+			want: []string{}},
 		{name: "the library listing a remembered one drops it, orders or not",
 			rows: []store.AudiblePreorder{remembered("B0GV5H3V89", "2026-03-30")}, library: []string{"B0GV5H3V89"},
-			listed: false, want: []string{}},
+			want: []string{}},
 		{name: "its order seen closed drops it",
 			rows:   []store.AudiblePreorder{remembered("B0HG4PZMYQ", "2026-08-28")},
 			orders: []audible.Order{closedOrder("2026-08-28", "B0HG4PZMYQ", true), closedOrder("2026-05-07", "B0OLDBUY01", false)},
-			listed: true, want: []string{}},
+			want:   []string{}},
 		{name: "its order seen cancelled drops it",
 			rows:   []store.AudiblePreorder{remembered("B0HG4PZMYQ", "2026-08-28")},
 			orders: []audible.Order{{Date: day("2026-08-28"), Preorder: true, State: "ORDER_CANCELLED", Items: []audible.OrderItem{{ASIN: "B0HG4PZMYQ"}}}},
-			listed: true, want: []string{}},
+			want:   []string{}},
 		{name: "a pending order wins over another order of the title",
 			orders: []audible.Order{closedOrder("2026-06-01", "B0HG4PZMYQ", true), pendingOrder("2026-08-28", "B0HG4PZMYQ")},
-			listed: true, want: []string{"B0HG4PZMYQ"}},
+			want:   []string{"B0HG4PZMYQ"}},
 		{name: "missing from a listing that reaches past its order: cancelled",
 			rows:   []store.AudiblePreorder{remembered("B0HG4PZMYQ", "2026-08-28")},
-			orders: []audible.Order{closedOrder("2026-05-07", "B0OLDBUY01", false)}, listed: true, want: []string{}},
+			orders: []audible.Order{closedOrder("2026-05-07", "B0OLDBUY01", false)}, want: []string{}},
 		{name: "missing from a listing whose window starts after its order: kept",
 			rows:   []store.AudiblePreorder{remembered("B0GV5H3V89", "2026-03-30")},
-			orders: []audible.Order{closedOrder("2026-05-07", "B0OLDBUY01", false)}, listed: true, want: []string{"B0GV5H3V89"}},
-		{name: "an empty listing drops nothing",
-			rows: []store.AudiblePreorder{remembered("B0HG4PZMYQ", "2026-08-28")}, listed: true, want: []string{"B0HG4PZMYQ"}},
-		{name: "a failed listing drops nothing and adds nothing",
-			rows:   []store.AudiblePreorder{remembered("B0HG4PZMYQ", "2026-08-28")},
-			orders: nil, listed: false, want: []string{"B0HG4PZMYQ"}},
+			orders: []audible.Order{closedOrder("2026-05-07", "B0OLDBUY01", false)}, want: []string{"B0GV5H3V89"}},
+		{name: "an empty or failed listing (no orders) drops nothing",
+			rows: []store.AudiblePreorder{remembered("B0HG4PZMYQ", "2026-08-28")}, want: []string{"B0HG4PZMYQ"}},
 		{name: "an order with an ASIN that isn't one adds nothing",
-			orders: []audible.Order{pendingOrder("2026-10-19", "not-an-asin")}, listed: true, want: []string{}},
+			orders: []audible.Order{pendingOrder("2026-10-19", "not-an-asin")}, want: []string{}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -98,7 +94,7 @@ func TestReconcilePreorders(t *testing.T) {
 			for _, a := range tc.library {
 				lib[a] = true
 			}
-			got := asinsOf(reconcilePreorders(tc.rows, lib, tc.orders, tc.listed, pnow))
+			got := asinsOf(reconcilePreorders(tc.rows, lib, tc.orders, pnow))
 			if !slices.Equal(got, tc.want) {
 				t.Fatalf("kept %v, want %v", got, tc.want)
 			}
@@ -111,7 +107,7 @@ func TestReconcilePreorders(t *testing.T) {
 func TestReconcilePreordersTimes(t *testing.T) {
 	rows := []store.AudiblePreorder{{ASIN: "B0HG4PZMYQ", OrderedAt: day("2026-08-28"), LastSeenAt: day("2026-11-01"), Record: "{}"}}
 	undated := audible.Order{Preorder: true, State: audible.OrderPendingPreorder, Items: []audible.OrderItem{{ASIN: "B0UNDATED1"}}}
-	got := reconcilePreorders(rows, nil, []audible.Order{pendingOrder("2026-10-19", "B0HN716NQ7"), pendingOrder("2026-08-28", "B0HG4PZMYQ"), undated}, true, pnow)
+	got := reconcilePreorders(rows, nil, []audible.Order{pendingOrder("2026-10-19", "B0HN716NQ7"), pendingOrder("2026-08-28", "B0HG4PZMYQ"), undated}, pnow)
 	if len(got) != 3 {
 		t.Fatalf("rows = %+v", got)
 	}

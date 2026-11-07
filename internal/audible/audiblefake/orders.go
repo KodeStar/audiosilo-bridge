@@ -43,12 +43,6 @@ func (f *Fake) orders(w http.ResponseWriter, r *http.Request, _ []byte) {
 		return
 	}
 	now := f.opts.Now().UTC()
-	f.mu.Lock()
-	released := make(map[string]bool, len(f.released))
-	for a := range f.released {
-		released[a] = true
-	}
-	f.mu.Unlock()
 	type order struct {
 		date time.Time
 		body map[string]any
@@ -70,16 +64,18 @@ func (f *Fake) orders(w http.ResponseWriter, r *http.Request, _ []byte) {
 			}},
 		}})
 	}
+	f.mu.Lock()
 	for _, t := range Fixtures {
 		switch {
-		case t.ReleaseIn > 0 && released[t.ASIN]:
-			add(t, now.AddDate(0, 0, -preorderPlacedDaysAgo), true, "ORDER_CLOSED", "ORDER_SUCCEEDED")
-		case t.ReleaseIn > 0:
-			add(t, now.AddDate(0, 0, -preorderPlacedDaysAgo), true, "ORDER_PENDING_PREORDER", "ORDER_CREATED")
-		default:
+		case t.ReleaseIn <= 0:
 			add(t, now.AddDate(0, 0, t.ReleaseIn), false, "ORDER_CLOSED", "ORDER_SUCCEEDED")
+		case f.released[t.ASIN]:
+			add(t, now.AddDate(0, 0, -preorderPlacedDaysAgo), true, "ORDER_CLOSED", "ORDER_SUCCEEDED")
+		default:
+			add(t, now.AddDate(0, 0, -preorderPlacedDaysAgo), true, "ORDER_PENDING_PREORDER", "ORDER_CREATED")
 		}
 	}
+	f.mu.Unlock()
 	add(CancelledPreorder, now.AddDate(0, 0, -preorderPlacedDaysAgo-5), true, "ORDER_CANCELLED", "ORDER_CANCELLED")
 	slices.SortStableFunc(out, func(a, b order) int { return b.date.Compare(a.date) })
 	orders := make([]map[string]any, len(out))
@@ -118,14 +114,8 @@ func catalogProduct(t Title, now time.Time, groups string) map[string]any {
 // LastPositionsMax ASINs (Audible's list-length check).
 func (f *Fake) products(w http.ResponseWriter, r *http.Request, _ []byte) {
 	q := r.URL.Query()
-	var asins []string
-	for a := range strings.SplitSeq(q.Get("asins"), ",") {
-		if a = strings.TrimSpace(a); a != "" {
-			asins = append(asins, a)
-		}
-	}
-	if len(asins) > f.opts.LastPositionsMax {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"message": "1 validation error detected: Value at 'asins' failed to satisfy constraint"})
+	asins := queryASINs(r)
+	if f.refuseLongASINList(w, asins) {
 		return
 	}
 	now := f.opts.Now()

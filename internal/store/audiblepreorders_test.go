@@ -35,7 +35,7 @@ func TestAudiblePreorders(t *testing.T) {
 	if len(got) != 2 || got[0].ASIN != "B0GV5G2ZKY" || got[1].ASIN != "B0HN716NQ7" {
 		t.Fatalf("rows = %+v", got)
 	}
-	if b := got[1]; b.Account != "abcd1234" || !b.OrderedAt.Equal(ordered) || !b.LastSeenAt.Equal(at) ||
+	if b := got[1]; !b.OrderedAt.Equal(ordered) || !b.LastSeenAt.Equal(at) ||
 		!b.FilledAt.Equal(at) || b.Record != `{"title":"Beware of Chicken 6"}` {
 		t.Fatalf("row = %+v", b)
 	}

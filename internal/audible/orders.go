@@ -2,7 +2,6 @@ package audible
 
 import (
 	"context"
-	"errors"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -39,8 +38,7 @@ type Order struct {
 
 // OrderItem is one title of an order.
 type OrderItem struct {
-	ASIN       string
-	IsPreorder bool
+	ASIN string
 }
 
 // PendingPreorder reports whether o is a preorder still waiting for its
@@ -61,8 +59,7 @@ type orderWire struct {
 	Preorder bool   `json:"preorder"`
 	State    string `json:"state"`
 	Items    []struct {
-		ASIN       string `json:"asin"`
-		IsPreorder bool   `json:"is_preorder"`
+		ASIN string `json:"asin"`
 	} `json:"items"`
 }
 
@@ -87,11 +84,11 @@ func (c *Client) Orders(ctx context.Context) ([]Order, error) {
 		}
 		added := 0
 		for _, w := range resp.Orders {
-			o := Order{Date: parseOrderDate(w.Date), Preorder: w.Preorder, State: strings.TrimSpace(w.State)}
+			o := Order{Date: parseLastUpdated(w.Date), Preorder: w.Preorder, State: strings.TrimSpace(w.State)}
 			key := w.Date + "|" + o.State
 			for _, it := range w.Items {
 				asin := strings.ToUpper(strings.TrimSpace(it.ASIN))
-				o.Items = append(o.Items, OrderItem{ASIN: asin, IsPreorder: it.IsPreorder})
+				o.Items = append(o.Items, OrderItem{ASIN: asin})
 				key += "|" + asin
 			}
 			if seen[key] {
@@ -108,16 +105,6 @@ func (c *Client) Orders(ctx context.Context) ([]Order, error) {
 	return out, nil
 }
 
-// parseOrderDate reads an order's date (RFC 3339, "2026-10-19T19:49:51Z") as
-// UTC; zero when it doesn't parse.
-func parseOrderDate(s string) time.Time {
-	t, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(s))
-	if err != nil {
-		return time.Time{}
-	}
-	return t.UTC()
-}
-
 // catalogGroups are the response groups a catalog read asks for: a product's
 // title needs product_desc (without it Audible sends title null), its release
 // date and length product_attrs.
@@ -125,7 +112,7 @@ const catalogGroups = "contributors,product_attrs,product_desc,series"
 
 // catalogBatch is the starting number of ASINs per catalog request, split on a
 // 400 or 414 as lastpositions' list is (the cap isn't documented).
-const catalogBatch = 25
+const catalogBatch = lastPositionsBatch
 
 // Products reads titles from Audible's catalog (not the account's library:
 // a preorder isn't there) as records, as a library listing would make them,
@@ -161,37 +148,29 @@ func (c *Client) Products(ctx context.Context, asins []string) ([]source.Record,
 	return out, nil
 }
 
-// productsChunk reads one batch into got (by upper-case ASIN), splitting it on
-// a 400 or 414 while it holds more than one ASIN. A single ASIN still refused
-// is left for Products to read alone.
+// productsChunk reads one batch into got (by upper-case ASIN), split by
+// splitOnOverflow. A single ASIN still refused is left for Products to read
+// alone.
 func (c *Client) productsChunk(ctx context.Context, asins []string, got map[string]libItem) error {
-	if len(asins) == 0 {
+	return splitOnOverflow(asins, func(batch []string) error {
+		q := url.Values{"asins": {strings.Join(batch, ",")}, "response_groups": {catalogGroups}}
+		var resp struct {
+			Products []libItem `json:"products"`
+		}
+		err := c.doSigned(ctx, http.MethodGet, "/1.0/catalog/products?"+q.Encode(), nil, &resp)
+		if len(batch) == 1 && listOverflow(err) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		for _, p := range resp.Products {
+			if a := strings.ToUpper(strings.TrimSpace(p.ASIN)); a != "" {
+				got[a] = p
+			}
+		}
 		return nil
-	}
-	q := url.Values{"asins": {strings.Join(asins, ",")}, "response_groups": {catalogGroups}}
-	var resp struct {
-		Products []libItem `json:"products"`
-	}
-	if err := c.doSigned(ctx, http.MethodGet, "/1.0/catalog/products?"+q.Encode(), nil, &resp); err != nil {
-		var he *httpError
-		if errors.As(err, &he) && (he.StatusCode == http.StatusBadRequest || he.StatusCode == http.StatusRequestURITooLong) {
-			if len(asins) == 1 {
-				return nil
-			}
-			mid := len(asins) / 2
-			if err := c.productsChunk(ctx, asins[:mid], got); err != nil {
-				return err
-			}
-			return c.productsChunk(ctx, asins[mid:], got)
-		}
-		return err
-	}
-	for _, p := range resp.Products {
-		if a := strings.ToUpper(strings.TrimSpace(p.ASIN)); a != "" {
-			got[a] = p
-		}
-	}
-	return nil
+	})
 }
 
 // product reads one title from the catalog; false (no error) when the catalog

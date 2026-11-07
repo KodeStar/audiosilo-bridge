@@ -3,7 +3,6 @@ package audible
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -71,48 +70,61 @@ func (c *Client) LastPositions(ctx context.Context, asins []string, onProgress f
 }
 
 // lastPositionsChunk fetches one batch of ASINs and merges the "Exists" positions
-// into out. Audible caps the ASIN-list length per request but doesn't document the
-// limit and 400s the whole batch when exceeded (a list-length constraint, not a
-// per-ASIN one), so on a 400 (or a 414, the URL itself too long) with more
-// than one ASIN it splits the batch and retries each half - converging on
-// whatever the real cap is without a magic number. A single ASIN can't overflow
-// a list-length cap, so the recursion always terminates.
+// into out, split by splitOnOverflow.
 func (c *Client) lastPositionsChunk(ctx context.Context, asins []string, out map[string]Position) error {
+	return splitOnOverflow(asins, func(batch []string) error {
+		path := "/1.0/annotations/lastpositions?" + url.Values{"asins": {strings.Join(batch, ",")}}.Encode()
+		var resp struct {
+			Annots []struct {
+				ASIN string `json:"asin"`
+				Last struct {
+					Status      string `json:"status"`
+					PositionMs  flexMS `json:"position_ms"`
+					LastUpdated string `json:"last_updated"`
+				} `json:"last_position_heard"`
+			} `json:"asin_last_position_heard_annots"`
+		}
+		if err := c.doSigned(ctx, http.MethodGet, path, nil, &resp); err != nil {
+			return err
+		}
+		for _, a := range resp.Annots {
+			if a.Last.Status != "Exists" {
+				continue
+			}
+			out[a.ASIN] = Position{PositionMs: int64(a.Last.PositionMs), LastUpdated: parseLastUpdated(a.Last.LastUpdated)}
+		}
+		return nil
+	})
+}
+
+// splitOnOverflow calls fetch with asins, and when Audible refuses a list of
+// more than one for its length, calls it again with each half. Audible caps
+// an ASIN list's length per request but doesn't document the limit and 400s
+// the whole batch when exceeded (a list-length constraint, not a per-ASIN
+// one); a 414 (the URL too long for Amazon's front end) is the same overflow
+// met before the list-length check. So it converges on whatever the real cap
+// is without a magic number, and a single ASIN can't overflow a list-length
+// cap, so the recursion always terminates (fetch's error for one is returned).
+func splitOnOverflow(asins []string, fetch func([]string) error) error {
 	if len(asins) == 0 {
 		return nil
 	}
-	path := "/1.0/annotations/lastpositions?" + url.Values{"asins": {strings.Join(asins, ",")}}.Encode()
-	var resp struct {
-		Annots []struct {
-			ASIN string `json:"asin"`
-			Last struct {
-				Status      string `json:"status"`
-				PositionMs  flexMS `json:"position_ms"`
-				LastUpdated string `json:"last_updated"`
-			} `json:"last_position_heard"`
-		} `json:"asin_last_position_heard_annots"`
-	}
-	if err := c.doSigned(ctx, http.MethodGet, path, nil, &resp); err != nil {
-		// A 414 (the URL is too long for Amazon's front end) is the same
-		// overflow as the 400, met before the list-length check: split too.
-		var he *httpError
-		if len(asins) > 1 && errors.As(err, &he) &&
-			(he.StatusCode == http.StatusBadRequest || he.StatusCode == http.StatusRequestURITooLong) {
-			mid := len(asins) / 2
-			if err := c.lastPositionsChunk(ctx, asins[:mid], out); err != nil {
-				return err
-			}
-			return c.lastPositionsChunk(ctx, asins[mid:], out)
+	err := fetch(asins)
+	if len(asins) > 1 && listOverflow(err) {
+		mid := len(asins) / 2
+		if err := splitOnOverflow(asins[:mid], fetch); err != nil {
+			return err
 		}
-		return err
+		return splitOnOverflow(asins[mid:], fetch)
 	}
-	for _, a := range resp.Annots {
-		if a.Last.Status != "Exists" {
-			continue
-		}
-		out[a.ASIN] = Position{PositionMs: int64(a.Last.PositionMs), LastUpdated: parseLastUpdated(a.Last.LastUpdated)}
-	}
-	return nil
+	return err
+}
+
+// listOverflow reports whether err is Audible refusing an ASIN list for its
+// length (a 400 or a 414).
+func listOverflow(err error) bool {
+	s := HTTPStatus(err)
+	return s == http.StatusBadRequest || s == http.StatusRequestURITooLong
 }
 
 // lastUpdatedLayouts are the shapes Audible's last_updated has been seen in

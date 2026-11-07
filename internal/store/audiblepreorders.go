@@ -11,7 +11,6 @@ import (
 // it (Record: the caller's JSON, "" until a catalog read succeeded) with when
 // (FilledAt). Zero times are unknown.
 type AudiblePreorder struct {
-	Account    string
 	ASIN       string
 	OrderedAt  time.Time
 	LastSeenAt time.Time
@@ -21,7 +20,7 @@ type AudiblePreorder struct {
 
 // AudiblePreorders lists account's remembered preorders, by ASIN.
 func (db *DB) AudiblePreorders(ctx context.Context, account string) ([]AudiblePreorder, error) {
-	rows, err := db.sql.QueryContext(ctx, `SELECT account, asin, ordered_at, last_seen_at, record, filled_at
+	rows, err := db.sql.QueryContext(ctx, `SELECT asin, ordered_at, last_seen_at, record, filled_at
 		FROM audible_preorders WHERE account = ? ORDER BY asin`, account)
 	if err != nil {
 		return nil, err
@@ -31,7 +30,7 @@ func (db *DB) AudiblePreorders(ctx context.Context, account string) ([]AudiblePr
 	for rows.Next() {
 		var p AudiblePreorder
 		var ordered, seen, filled string
-		if err := rows.Scan(&p.Account, &p.ASIN, &ordered, &seen, &p.Record, &filled); err != nil {
+		if err := rows.Scan(&p.ASIN, &ordered, &seen, &p.Record, &filled); err != nil {
 			return nil, err
 		}
 		p.OrderedAt, p.LastSeenAt, p.FilledAt = parseStamp(ordered), parseStamp(seen), parseStamp(filled)
@@ -40,8 +39,8 @@ func (db *DB) AudiblePreorders(ctx context.Context, account string) ([]AudiblePr
 	return out, rows.Err()
 }
 
-// SetAudiblePreorders replaces account's remembered preorders with ps (each
-// one's Account is ignored: they are account's), in one transaction.
+// SetAudiblePreorders replaces account's remembered preorders with ps, in one
+// transaction.
 func (db *DB) SetAudiblePreorders(ctx context.Context, account string, ps []AudiblePreorder) error {
 	tx, err := db.sql.BeginTx(ctx, nil)
 	if err != nil {

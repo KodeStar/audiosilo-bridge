@@ -52,15 +52,17 @@ func (m *Manager) Preorders(ctx context.Context, id string, library []source.Rec
 	creds, err := m.open(id)
 	if err != nil {
 		m.o.Log.Warn("audible: the account's sign-in can't be opened for its preorders", "account", id, "err", err)
-		return preorderRecords(dropReleased(reconcilePreorders(rows, inLibrary, nil, false, now), now))
+		return preorderRecords(dropReleased(reconcilePreorders(rows, inLibrary, nil, now), now))
 	}
 
 	orders, err := m.o.Service.Orders(ctx, creds)
-	listed := err == nil
-	if err != nil && ctx.Err() == nil {
-		m.o.Log.Warn("audible: listing the orders failed: reporting the preorders remembered", "account", id, "err", err)
+	if err != nil {
+		orders = nil // a failed listing drops and adds nothing
+		if ctx.Err() == nil {
+			m.o.Log.Warn("audible: listing the orders failed: reporting the preorders remembered", "account", id, "err", err)
+		}
 	}
-	rows = reconcilePreorders(rows, inLibrary, orders, listed, now)
+	rows = reconcilePreorders(rows, inLibrary, orders, now)
 
 	if len(rows) > 0 {
 		asins := make([]string, len(rows))
@@ -99,13 +101,13 @@ func (m *Manager) rememberedPreorder(ctx context.Context, id, asin string) (sour
 }
 
 // reconcilePreorders is the remembered preorders after an orders listing
-// (listed false: it failed, and only the library rule applies), at now. A
+// (none when it failed: then only the library rule applies), at now. A
 // title a pending preorder order holds is added (ordered at its order's date,
 // else now) or seen again (last seen now); a remembered one is dropped when
 // the library lists it, when an order holds it in another state and none
 // pending, or when it is missing from a listing whose oldest order is older
 // than its order (it was in the window, so it was cancelled). By ASIN.
-func reconcilePreorders(rows []store.AudiblePreorder, inLibrary map[string]bool, orders []audible.Order, listed bool, now time.Time) []store.AudiblePreorder {
+func reconcilePreorders(rows []store.AudiblePreorder, inLibrary map[string]bool, orders []audible.Order, now time.Time) []store.AudiblePreorder {
 	pending := map[string]time.Time{}
 	other := map[string]bool{}
 	var oldest time.Time
@@ -135,27 +137,23 @@ func reconcilePreorders(rows []store.AudiblePreorder, inLibrary map[string]bool,
 		if inLibrary[a] || have[a] {
 			continue
 		}
-		if listed {
-			if _, ok := pending[a]; ok {
-				r.LastSeenAt = now
-				if r.OrderedAt.IsZero() {
-					r.OrderedAt = orderedAt(pending[a], now)
-				}
-			} else if other[a] || (!oldest.IsZero() && !r.OrderedAt.IsZero() && oldest.Before(r.OrderedAt)) {
-				continue
+		if d, ok := pending[a]; ok {
+			r.LastSeenAt = now
+			if r.OrderedAt.IsZero() {
+				r.OrderedAt = orderedAt(d, now)
 			}
+		} else if other[a] || (!oldest.IsZero() && !r.OrderedAt.IsZero() && oldest.Before(r.OrderedAt)) {
+			continue
 		}
 		have[a] = true
 		out = append(out, r)
 	}
-	if listed {
-		for a, d := range pending {
-			if inLibrary[a] || have[a] {
-				continue
-			}
-			have[a] = true
-			out = append(out, store.AudiblePreorder{ASIN: a, OrderedAt: orderedAt(d, now), LastSeenAt: now})
+	for a, d := range pending {
+		if inLibrary[a] || have[a] {
+			continue
 		}
+		have[a] = true
+		out = append(out, store.AudiblePreorder{ASIN: a, OrderedAt: orderedAt(d, now), LastSeenAt: now})
 	}
 	slices.SortFunc(out, func(x, y store.AudiblePreorder) int { return strings.Compare(x.ASIN, y.ASIN) })
 	return out

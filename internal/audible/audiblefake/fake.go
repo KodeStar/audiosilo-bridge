@@ -621,12 +621,7 @@ func libraryItem(t Title, now time.Time) map[string]any {
 // lastPositions is GET /1.0/annotations/lastpositions?asins=a,b: 400 over
 // LastPositionsMax ASINs, as Audible's list-length check does.
 func (f *Fake) lastPositions(w http.ResponseWriter, r *http.Request, _ []byte) {
-	var asins []string
-	for a := range strings.SplitSeq(r.URL.Query().Get("asins"), ",") {
-		if a = strings.TrimSpace(a); a != "" {
-			asins = append(asins, a)
-		}
-	}
+	asins := queryASINs(r)
 	f.mu.Lock()
 	f.calls.LastPositionsSizes = append(f.calls.LastPositionsSizes, len(asins))
 	f.mu.Unlock()
@@ -634,9 +629,7 @@ func (f *Fake) lastPositions(w http.ResponseWriter, r *http.Request, _ []byte) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"message": "asins is required"})
 		return
 	}
-	if len(asins) > f.opts.LastPositionsMax {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"message": fmt.Sprintf(
-			"1 validation error detected: Value at 'asins' failed to satisfy constraint: Member must have length less than or equal to %d", f.opts.LastPositionsMax)})
+	if f.refuseLongASINList(w, asins) {
 		return
 	}
 	annots := make([]map[string]any, 0, len(asins))
@@ -692,4 +685,27 @@ func randHex(n int) string {
 	b := make([]byte, n)
 	_, _ = rand.Read(b)
 	return strings.ToUpper(hex.EncodeToString(b))
+}
+
+// queryASINs is the request's comma-separated asins query parameter, blanks
+// left out.
+func queryASINs(r *http.Request) []string {
+	var asins []string
+	for a := range strings.SplitSeq(r.URL.Query().Get("asins"), ",") {
+		if a = strings.TrimSpace(a); a != "" {
+			asins = append(asins, a)
+		}
+	}
+	return asins
+}
+
+// refuseLongASINList answers a 400 for a list over LastPositionsMax ASINs, as
+// Audible's list-length check does, and reports whether it did.
+func (f *Fake) refuseLongASINList(w http.ResponseWriter, asins []string) bool {
+	if len(asins) <= f.opts.LastPositionsMax {
+		return false
+	}
+	writeJSON(w, http.StatusBadRequest, map[string]string{"message": fmt.Sprintf(
+		"1 validation error detected: Value at 'asins' failed to satisfy constraint: Member must have length less than or equal to %d", f.opts.LastPositionsMax)})
+	return true
 }
