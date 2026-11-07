@@ -56,9 +56,9 @@ func TestReleaseDatePlausible(t *testing.T) {
 	}
 }
 
-// TestUnavailableCheckOrder: the delivery type and the rights are checked
-// before the date, so an upcoming show or an upcoming title without rights
-// carries that reason and is never a pre-order.
+// TestUnavailableCheckOrder: a show or periodical is checked first, then a
+// plausible release date ahead (a pre-order, whatever its rights say: Audible
+// grants none to a title not out yet), then the rights.
 func TestUnavailableCheckOrder(t *testing.T) {
 	now := time.Date(2026, 11, 3, 0, 0, 0, 0, time.UTC)
 	soon := "2027-01-01"
@@ -70,12 +70,22 @@ func TestUnavailableCheckOrder(t *testing.T) {
 		t.Fatal("an upcoming show's record is a preorder")
 	}
 	noRights := libItem{ReleaseDate: soon, CustomerRights: &customerRights{}}
-	if r, pre := noRights.unavailableReason(now); !strings.Contains(r, "download rights") || pre {
-		t.Fatalf("upcoming title without rights = %q, preorder %v", r, pre)
+	if r, pre := noRights.unavailableReason(now); r != PreorderReason || !pre {
+		t.Fatalf("upcoming title without rights = %q, preorder %v, want a pre-order", r, pre)
 	}
 	upcoming := libItem{ReleaseDate: soon, CustomerRights: &customerRights{IsConsumableOffline: true}}
-	if r, pre := upcoming.unavailableReason(now); !strings.Contains(r, "pre-order") || !pre {
+	if r, pre := upcoming.unavailableReason(now); r != PreorderReason || !pre {
 		t.Fatalf("upcoming title = %q, preorder %v", r, pre)
+	}
+	// Released, no rights: unavailable for its rights, not a pre-order.
+	out := libItem{ReleaseDate: "2026-01-01", CustomerRights: &customerRights{}}
+	if r, pre := out.unavailableReason(now); !strings.Contains(r, "download rights") || pre {
+		t.Fatalf("released title without rights = %q, preorder %v", r, pre)
+	}
+	// A placeholder date far ahead is no date: the rights decide.
+	placeholder := libItem{ReleaseDate: "2200-01-01", CustomerRights: &customerRights{}}
+	if r, pre := placeholder.unavailableReason(now); !strings.Contains(r, "download rights") || pre {
+		t.Fatalf("placeholder-dated title without rights = %q, preorder %v", r, pre)
 	}
 }
 

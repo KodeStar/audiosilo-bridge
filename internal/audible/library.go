@@ -221,13 +221,18 @@ func (it libItem) logOddDate(log *slog.Logger, now time.Time) {
 		"is_consumable_offline", rights)
 }
 
+// PreorderReason is a preorder's UnavailableReason.
+const PreorderReason = "Not released yet (pre-order)"
+
 // unavailableReason reports why a library item can't be downloaded ("" = it
 // can) and whether that is because it is a pre-order. The license endpoint
 // would fail these with an opaque error (HTTP 400 for periodicals, an empty
 // voucher for titles without offline rights), so classifying them here lets the
-// UI say why up front. The delivery type and the rights are checked before the
-// date, so a show or a title without rights is never called a pre-order. All
-// checks are defensive: a missing field never marks a book unavailable.
+// UI say why up front. A show or periodical is checked first (never a
+// pre-order), then a plausible release date still ahead (a pre-order, whatever
+// its rights say: Audible grants none to a title not out yet), then the
+// rights. All checks are defensive: a missing field never marks a book
+// unavailable.
 func (it libItem) unavailableReason(now time.Time) (reason string, preorder bool) {
 	switch it.ContentDeliveryType {
 	case "Periodical", "PodcastParent":
@@ -235,11 +240,11 @@ func (it libItem) unavailableReason(now time.Time) (reason string, preorder bool
 		// downloadable audiobook file; a license request is refused outright.
 		return "An Audible show/periodical - it has no downloadable audiobook file", false
 	}
+	if date, _ := it.dates(now); ReleaseIsUpcoming(date, now) {
+		return PreorderReason, true
+	}
 	if it.CustomerRights != nil && !it.CustomerRights.IsConsumableOffline {
 		return "Audible reports no download rights for this title (often a Plus/included title that left the catalog)", false
-	}
-	if date, _ := it.dates(now); ReleaseIsUpcoming(date, now) {
-		return "Not released yet (pre-order)", true
 	}
 	return "", false
 }
