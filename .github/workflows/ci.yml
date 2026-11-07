@@ -52,7 +52,7 @@ jobs:
       - name: Audible fake (audiblefake tag)
         run: |
           go vet -tags audiblefake ./internal/audible/... ./internal/audibleacct ./internal/audiblejob ./internal/audiblesync ./internal/app ./cmd/audiblefake
-          go test -race -tags audiblefake ./internal/audible/... ./internal/audibleacct ./internal/audiblejob ./internal/audiblesync
+          go test -race -tags audiblefake ./internal/audible/... ./internal/audibleacct ./internal/audiblejob ./internal/audiblesync ./cmd/audiblefake
           go test -race -tags audiblefake -run Audible ./internal/app
 
       # golangci-lint-action@v8 installs golangci-lint v2 (required for Go 1.25+),

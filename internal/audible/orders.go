@@ -101,7 +101,7 @@ func (c *Client) Orders(ctx context.Context) ([]Order, error) {
 		for _, w := range resp.Orders {
 			o := Order{Date: parseLastUpdated(w.Date), Preorder: w.Preorder, State: strings.TrimSpace(w.State),
 				DetailState: strings.TrimSpace(w.DetailState)}
-			key := w.Date + "|" + o.State
+			key := w.Date + "|" + o.State + "|" + o.DetailState
 			for _, it := range w.Items {
 				asin := strings.ToUpper(strings.TrimSpace(it.ASIN))
 				o.Items = append(o.Items, OrderItem{ASIN: asin})

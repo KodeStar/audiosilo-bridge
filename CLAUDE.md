@@ -59,7 +59,7 @@ docker build --target slim .    # slim | cuda | agent | full (the default target
 
 # The Audible fake exists only behind its tag (never in a release build or image):
 go vet -tags audiblefake ./internal/audible/... ./internal/audibleacct ./internal/audiblejob ./internal/audiblesync ./internal/app ./cmd/audiblefake
-go test -race -tags audiblefake ./internal/audible/... ./internal/audibleacct ./internal/audiblejob ./internal/audiblesync
+go test -race -tags audiblefake ./internal/audible/... ./internal/audibleacct ./internal/audiblejob ./internal/audiblesync ./cmd/audiblefake
 go test -race -tags audiblefake -run Audible ./internal/app
 ```
 

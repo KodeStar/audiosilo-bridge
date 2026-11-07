@@ -2171,7 +2171,7 @@ internal/
             Orders reads GET /1.0/orders (about six months, one page, every query parameter
             ignored and any response_groups a 500, so none is sent; follows max_number_of_pages
             only when over 1, bounded at 20, stopping at a page that adds nothing), decoding only
-            date, preorder, state and items' asin (never a payment field);
+            date, preorder, state, detail_state and items' asin (never a payment field);
             Order.PendingPreorder is preorder AND state ORDER_PENDING_PREORDER; Order.Delivered is
             ORDER_CLOSED with detail_state ORDER_SUCCEEDED. Products reads the
             catalog (GET /1.0/catalog/products?asins=, batches of 25 split on 400/414 by splitOnOverflow, shared with LastPositions, an ASIN the

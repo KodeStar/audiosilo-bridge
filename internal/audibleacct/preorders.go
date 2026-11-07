@@ -116,12 +116,12 @@ func (m *Manager) rememberedPreorder(ctx context.Context, id, asin string) (sour
 // title a pending preorder order holds is added (ordered at its order's date,
 // else now) or seen again (last seen now); a remembered one is dropped when
 // the library lists it, when an order holds it cancelled (neither pending nor
-// delivered) and none pending, or when it is missing from every order of a
-// listing whose oldest order is older than its order (it was in the window, so
-// it was cancelled). By ASIN.
+// delivered) and none pending or delivered, or when it is missing from every
+// order of a listing whose oldest order is older than its order (it was in the
+// window, so it was cancelled). By ASIN.
 func reconcilePreorders(rows []store.AudiblePreorder, inLibrary map[string]bool, orders []audible.Order, now time.Time) []store.AudiblePreorder {
 	pending := map[string]time.Time{}
-	cancelled := map[string]bool{}
+	cancelled, delivered := map[string]bool{}, map[string]bool{}
 	listed := map[string]bool{} // in any order of the listing
 	var oldest time.Time
 	for _, o := range orders {
@@ -136,9 +136,12 @@ func reconcilePreorders(rows []store.AudiblePreorder, inLibrary map[string]bool,
 			listed[a] = true
 			if !o.PendingPreorder() {
 				// A delivered order keeps a remembered preorder until the
-				// library lists it (it may close before the library does);
-				// any other state (cancelled) drops it.
-				if !o.Delivered() {
+				// library lists it (it may close before the library does),
+				// even beside an earlier cancelled one; any other state
+				// (cancelled) drops it.
+				if o.Delivered() {
+					delivered[a] = true
+				} else {
 					cancelled[a] = true
 				}
 				continue
@@ -161,7 +164,7 @@ func reconcilePreorders(rows []store.AudiblePreorder, inLibrary map[string]bool,
 			if r.OrderedAt.IsZero() {
 				r.OrderedAt = orderedAt(d, now)
 			}
-		} else if cancelled[a] || (!listed[a] && !oldest.IsZero() && !r.OrderedAt.IsZero() && oldest.Before(r.OrderedAt)) {
+		} else if (cancelled[a] && !delivered[a]) || (!listed[a] && !oldest.IsZero() && !r.OrderedAt.IsZero() && oldest.Before(r.OrderedAt)) {
 			continue
 		}
 		have[a] = true
