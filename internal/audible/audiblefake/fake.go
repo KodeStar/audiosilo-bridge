@@ -16,7 +16,9 @@
 // device and customer ids, and the download is an UNENCRYPTED fixture .m4b
 // served as the "AAXC" (ffmpeg passes it through with the key set), with
 // Range and If-Range, and controls to cut a download, expire the URLs and
-// release a preorder (content.go).
+// release a preorder (content.go). A preorder is not in the library until it
+// is released: the orders listing (pending) and the catalog show it, shaped as
+// a real account's were (orders.go).
 //
 // This package must never import internal/audible: audible's audiblefake build
 // imports it (for the Recorder).
@@ -45,9 +47,9 @@ import (
 
 // Options configure a Fake.
 type Options struct {
-	// LastPositionsMax is the most ASINs one lastpositions request may carry
-	// before the fake answers 400, as Audible does at an undocumented N
-	// (default 10, under the client's first batch of 25 so the split runs).
+	// LastPositionsMax is the most ASINs one lastpositions or catalog request
+	// may carry before the fake answers 400, as Audible does at an undocumented
+	// N (default 10, under the client's first batch of 25 so the split runs).
 	LastPositionsMax int
 	// Now is the clock release dates and places are relative to (default
 	// time.Now).
@@ -272,6 +274,9 @@ func (f *Fake) Handler() http.Handler {
 	mux.HandleFunc("GET /1.0/annotations/lastpositions", f.signed(f.lastPositions))
 	mux.HandleFunc("PUT /1.0/lastpositions/{asin}", f.signed(f.putPosition))
 	mux.HandleFunc("GET /1.0/library/{asin}", f.signed(f.libraryTitle))
+	mux.HandleFunc("GET /1.0/orders", f.signed(f.orders))
+	mux.HandleFunc("GET /1.0/catalog/products", f.signed(f.products))
+	mux.HandleFunc("GET /1.0/catalog/products/{asin}", f.signed(f.product))
 	mux.HandleFunc("POST /1.0/content/{asin}/licenserequest", f.signed(f.license))
 	mux.HandleFunc("GET /_fake/content/{file}", f.signed(f.download))
 	mux.HandleFunc("GET /_fake/calls", func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, http.StatusOK, f.Calls()) })
@@ -339,7 +344,7 @@ func (f *Fake) Handler() http.Handler {
 			Title
 			State string `json:"state"`
 		}
-		titles := f.titles()
+		titles := f.catalog()
 		rows := make([]row, len(titles))
 		for i, t := range titles {
 			rows[i] = row{t, t.State()}

@@ -41,8 +41,11 @@ func (t Title) State() string {
 	return "available"
 }
 
-// Fixtures is the fake's library: 30 titles, 22 available, 4 preorders and 4
-// unavailable (two shows, two without download rights). Series books carry their
+// Fixtures are the fake's titles: 30, 22 available, 4 preorders and 4
+// unavailable (two shows, two without download rights). The library lists the
+// 26 that are out; a preorder shows only in the orders (pending) and the
+// catalog until Release puts it in the library (orders.go), as Audible's API
+// does. Series books carry their
 // sequence; a few are co-written or share a series across authors' credits, so
 // matching and placement see the shapes real libraries have.
 var Fixtures = []Title{

@@ -49,8 +49,10 @@ func (f *Fake) ExpireURLs() {
 	f.mu.Unlock()
 }
 
-// Release releases a preorder today: the library lists it available and a
-// license is granted. False for an ASIN that isn't a fixture preorder.
+// Release releases a preorder today: it joins the library (until then the
+// library doesn't list it and GET /1.0/library/{asin} is a 404, as Audible's
+// doesn't), listed available, its order closes and a license is granted.
+// False for an ASIN that isn't a fixture preorder.
 func (f *Fake) Release(asin string) bool {
 	for _, t := range Fixtures {
 		if t.ASIN == asin && t.ReleaseIn > 0 {
@@ -63,9 +65,9 @@ func (f *Fake) Release(asin string) bool {
 	return false
 }
 
-// titles is the library as it stands: the fixtures, a released preorder out
-// today (with a runtime).
-func (f *Fake) titles() []Title {
+// catalog is every fixture title as it stands (a released preorder out today,
+// with a runtime): what the catalog and the orders know.
+func (f *Fake) catalog() []Title {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	out := make([]Title, len(Fixtures))
@@ -77,6 +79,19 @@ func (f *Fake) titles() []Title {
 			}
 		}
 		out[i] = t
+	}
+	return out
+}
+
+// titles is the library as it stands: the catalog without the preorders not
+// released yet (Audible's library holds a preorder only once it is out).
+func (f *Fake) titles() []Title {
+	all := f.catalog()
+	out := all[:0]
+	for _, t := range all {
+		if t.ReleaseIn <= 0 {
+			out = append(out, t)
+		}
 	}
 	return out
 }
@@ -127,6 +142,15 @@ func (f *Fake) license(w http.ResponseWriter, r *http.Request, _ []byte) {
 		return
 	}
 	t, ok := f.title(asin)
+	if !ok {
+		// A preorder the account ordered isn't in its library until it is
+		// out: its license is denied as not released (what Audible answers
+		// for one was not seen; the Bridge never asks before the poll says it
+		// is available).
+		if c, known := f.catalogTitle(asin); known && c.ReleaseIn > 0 && c.ASIN != CancelledPreorder.ASIN {
+			t, ok = c, true
+		}
+	}
 	denyAll := func(reasons ...map[string]string) {
 		f.record(LicenseCall{ASIN: asin, Status: "Denied"})
 		writeJSON(w, http.StatusOK, map[string]any{"content_license": map[string]any{

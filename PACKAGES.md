@@ -1435,6 +1435,11 @@ internal/
             ContinueChapters sets source_path to nb's when nb names one (a generate job
             taking on the audio run as the book's own). LatestOkStageRun(book, stage)
             reads superseded successes too (a history reader).
+            0012 (audiblepreorders.go) adds audible_preorders ((account, asin): a pending preorder
+            an audible.poll saw in the orders, ordered_at, last_seen_at, record (the catalog's
+            description as JSON, '' until filled), filled_at; no credential or payment field):
+            AudiblePreorders lists an account's, SetAudiblePreorders replaces them in one tx, and
+            DeleteAudibleAccount deletes them with the account.
   state/    per-book pipeline state machine: table-driven states/lanes/transitions,
             CanStart/NextState guards, the audit fix-loop cap. Pure, no I/O. M6 added
             ParkCode (typed park reasons - M7 added contrib_unavailable, core_needed,
@@ -2070,8 +2075,8 @@ internal/
             "<first name>'s AudioSilo", DeviceName); signed calls (sign.go: RSA
             PKCS#1 v1.5 over method, path?query, date, body, adp token; no bearer);
             Library (pages of 1000, deduped, bounded at 250 pages; UnavailableReason
-            says show/periodical, no download rights or preorder, checked in that
-            order, so only a preorder sets Record.Preorder; a release date in 2100
+            says show/periodical, preorder or no download rights, checked in that
+            order (see Preorders below), so only a preorder sets Record.Preorder; a release date in 2100
             or later, or more than 2 years ahead, is a placeholder (Audible sends
             2200-01-01 for some old titles): issue_date stands in, else no date,
             which reads as released; such a title logs its raw date, delivery type
@@ -2160,6 +2165,19 @@ internal/
             library paths or titles, which the shapes would cut words out of
             ("Basic Economics") (RedactedError keeps errors.Is). The per-book key/iv are
             in ffmpeg's argv (visible in the container's process table): accepted.
+            Preorders (orders.go; the 2026-11 real-account evidence): a pending preorder is NOT in
+            the library (GET /1.0/library lists none, /1.0/library/{asin} is a 404) until released;
+            Orders reads GET /1.0/orders (about six months, one page, every query parameter
+            ignored and any response_groups a 500, so none is sent; follows max_number_of_pages
+            only when over 1, bounded at 20, stopping at a page that adds nothing), decoding only
+            date, preorder, state and items' asin/is_preorder (never a payment field);
+            Order.PendingPreorder is preorder AND state ORDER_PENDING_PREORDER. Products reads the
+            catalog (GET /1.0/catalog/products?asins=, batches of 25 split on 400/414, an ASIN the
+            batch left out read alone at /1.0/catalog/products/{asin}, an unknown one left out) with
+            contributors,product_attrs,product_desc,series (title is null without product_desc),
+            as records like the library's. unavailableReason checks show/periodical, THEN a
+            plausible future date (PreorderReason, a pre-order whatever its rights say), THEN the
+            rights.
             Phase 4c: a 414 splits a lastpositions batch as a 400 does; RetryWait(err) reads a 429/503's
             Retry-After (kept on the error, read up to a day); the identity calls (register, token,
             deregister) send the profile's userAgent too (bridge#46); ContentACR's answer with no acr
@@ -2202,9 +2220,16 @@ internal/
             recorded with its time (put_positions[].at on /_fake/calls), POST
             /_fake/position?asin=&ms=&ago= (SetPosition: a place heard on another device) and GET
             /_fake/positions (every place it holds).
+            Preorders (orders.go): the library lists a fixture preorder only once Released
+            (until then /1.0/library/{asin} is a 404 and its license NotReleased); GET /1.0/orders
+            lists every fixture title ordered within OrdersWindow (183 days: a title bought at
+            release, a preorder 40 days ago, pending until Release closes it) plus
+            CancelledPreorder (ORDER_CANCELLED), items with synthetic payment fields, a 500 on any
+            response_groups; GET /1.0/catalog/products(?asins= | /{asin}) answers every fixture and
+            the cancelled one, title only with product_desc, 400 over LastPositionsMax ASINs.
             Recorder: the owner's recording transport, a 0600 JSON-lines file per
             run, scrubbed AS IT WRITES (secret keys and the customer, device and
-            token subtrees redacted, headers from an allowlist, signed CDN queries
+            token subtrees redacted, an order's payment fields and any price too, headers from an allowlist, signed CDN queries
             dropped, unparseable bodies by size only); a test runs a whole flow
             through it and finds no credential. Never imports audible (audible's
             tagged build imports it).
@@ -2236,7 +2261,17 @@ internal/
             the audible package; a stub in tests), which answers ErrRefused on a
             401/403 signed call: Library lists again when a sign-in again replaced
             the device meanwhile, else records the refusal (RefusedText) and runs
-            OnChange (the heartbeat's checklist). Phase 4b: Title and License go
+            OnChange (the heartbeat's checklist). Preorders(id, library) (preorders.go): the
+            pending preorders a poll reports beside the library: the orders' pending-preorder
+            items the library doesn't list (the library wins), remembered in audible_preorders,
+            described by the catalog every poll, as records with Preorder and PreorderReason (an
+            undescribed one by its ASIN alone). Dropped when the library lists it, its order is
+            seen in another state (none pending), a listing reaching back past its order no
+            longer holds it, or PreorderDropAfter (30 days) after its release date. Never fails:
+            orders or catalog failing is one warning each and the remembered ones are reported
+            (with the last description); a store read failure writes nothing back. Orders and
+            Products use the sign-in without recording a refusal. Title answers a remembered
+            preorder's record on ErrNotInLibrary (an import then says not_released). Phase 4b: Title and License go
             through the same signed path (Manager.signed: open the sign-in, call, on
             a refusal retry once with a newer sign-in, else record it); Download
             only opens the sign-in (its 401/403 is an expired URL, the import's to
@@ -2269,7 +2304,9 @@ internal/
             library). Checks the account is this
             Bridge's and was mapped on the paired server (else fails asking to map
             it again), lists the Audible library (a refusal is the account's, the
-            job just fails), reads the account's books library on the server page
+            job just fails) and appends Accounts.Preorders (never fails; a record
+            with no title, a preorder not described yet, is neither matched nor
+            planned), reads the account's books library on the server page
             by page (500, bounded at 2000 pages), skips records without a usable
             ASIN, states them (UnavailableReason "" available, "pre-order"
             preorder, else unavailable with the reason), matches with

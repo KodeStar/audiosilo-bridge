@@ -115,7 +115,8 @@ internal/
               0003 generate_books, contrib_mode, server_id, deleted_stage_spend,
               0004 workers, 0005 books.goal, 0006 accounts, 0007 podcast_shows,
               0008 podcast_artwork_state, 0009 audible_accounts,
-              0010 audible_accounts.device_profile, 0011 audible_push + sync health + refusal_kind)
+              0010 audible_accounts.device_profile, 0011 audible_push + sync health + refusal_kind,
+              0012 audible_preorders)
   auth/       the page's single password + hashed sessions + login limiter
   -- Phase 1a --
   generate/   sidecars.generate: server job -> engine book -> .audiosilo/ + rescan;
@@ -148,7 +149,7 @@ internal/
               only): the fake and the scrubbing Recorder
   audibleacct/ the Audible accounts: paste-back sign-in (PKCE + serial in memory 15 min),
               register, vault audible_<id>, mapping on the server first, deregister on remove
-  audiblejob/ audible.poll (light): library -> paged server books -> BookMatcher ->
+  audiblejob/ audible.poll (light): library + pending preorders (orders, remembered) -> paged server books -> BookMatcher ->
               titles in calls of 500 (poll_id, final) -> unambiguous ASIN backfill;
               audible.import (Phase 4b, download lane, one per account): license ->
               resumable download -> ffmpeg decrypt -> placement -> no-replace install
