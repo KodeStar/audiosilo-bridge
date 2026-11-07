@@ -3,7 +3,8 @@
 -- library until it is released; only the orders listing shows one, and that
 -- goes back about six months. So each audible.poll remembers the preorders it
 -- saw there and reports them until the library lists them or they are dropped
--- (cancelled, delivered, or released 30 days ago and still not listed; one
+-- (cancelled, missing from every order in the listing, or released 30 days ago
+-- and still not listed; a delivered one stays until the library lists it; one
 -- never dated counts as released two years after it was last seen pending),
 -- even after their order leaves the listing's window.
 --

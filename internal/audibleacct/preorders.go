@@ -42,9 +42,11 @@ const undatedPreorderYears = 2
 //
 // It never fails the poll: the orders or the catalog failing logs one warning
 // each (Audible's answer, redacted, never a credential) and the remembered
-// preorders are reported with the catalog's last description (a catalog that
-// fails part way still describes the titles it read). When Audible asked the
-// Bridge to wait on the orders, the catalog isn't asked. A preorder
+// preorders are still reported. A failed orders listing still has the catalog
+// describe them, unless Audible asked the Bridge to wait (429/503) or the
+// sign-in can't be opened; a failed catalog leaves each with its last
+// description (one that fails part way still describes the titles it read).
+// A preorder
 // the catalog never described is reported by its ASIN alone (the server takes
 // a title without a title). The store failing is a warning too (nothing is
 // then written back, so nothing remembered is lost).
