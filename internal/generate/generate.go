@@ -129,6 +129,46 @@ type Handler struct {
 	// doneJobs counts the jobs that finished done here (the heartbeat's
 	// estimates are computed again when it moves).
 	doneJobs atomic.Int64
+	// ended is closed (and replaced) at each job's end here (release): a job
+	// waiting for another to give way wakes on it, not at its next poll
+	// (bridge#24). endMu guards it.
+	endMu sync.Mutex
+	ended chan struct{}
+}
+
+// endSignal is the channel the next job end here closes. A waiter takes it
+// before it reads what it waits on, so an end in between still wakes it.
+func (h *Handler) endSignal() <-chan struct{} {
+	h.endMu.Lock()
+	defer h.endMu.Unlock()
+	if h.ended == nil {
+		h.ended = make(chan struct{})
+	}
+	return h.ended
+}
+
+// signalEnd wakes every waiter on endSignal.
+func (h *Handler) signalEnd() {
+	h.endMu.Lock()
+	defer h.endMu.Unlock()
+	if h.ended != nil {
+		close(h.ended)
+		h.ended = nil
+	}
+}
+
+// pollOrEnd sleeps one poll, or less when a job here ends first (ended, from
+// endSignal).
+func (h *Handler) pollOrEnd(ctx context.Context, ended <-chan struct{}) error {
+	t := time.NewTimer(h.o.Poll)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+	case <-ended:
+	}
+	return nil
 }
 
 // Finished is how many jobs finished done since the start.
@@ -526,6 +566,7 @@ func (h *Handler) release(ctx context.Context, job jobs.Job, bookID int64, stop 
 	if followed {
 		h.stopBook(ctx, job.ID, bookID)
 	}
+	h.signalEnd()
 	if h.o.RetentionDays == 0 {
 		if err := h.purgeEnded(ctx, bookID); err != nil {
 			h.o.Log.Warn("generate: deleting the transcripts failed", "job", job.ID, "err", err)
@@ -909,7 +950,9 @@ const openJobWait = 30 * time.Second
 // for, up to openJobWait.
 func (h *Handler) awaitOpenJobEnd(ctx context.Context, r *run, bookID int64) (int64, string, error) {
 	asked := map[int64]bool{}
-	for i := 0; ; i++ {
+	deadline := time.Now().Add(openJobWait)
+	for {
+		ended := h.endSignal()
 		id, kind, err := h.firstOpenJob(ctx, bookID, r.job.ID)
 		if err != nil || id == 0 {
 			return id, kind, err
@@ -920,11 +963,11 @@ func (h *Handler) awaitOpenJobEnd(ctx context.Context, r *run, bookID int64) (in
 				return id, kind, nil
 			}
 		}
-		if time.Duration(i)*h.o.Poll >= openJobWait {
+		if !time.Now().Before(deadline) {
 			return id, kind, nil
 		}
 		r.rep.Progress(jobs.Progress{Step: stepWaiting, Message: "Waiting for the book's earlier job to end"})
-		if err := agent.SleepCtx(ctx, h.o.Poll); err != nil {
+		if err := h.pollOrEnd(ctx, ended); err != nil {
 			return 0, "", err
 		}
 	}

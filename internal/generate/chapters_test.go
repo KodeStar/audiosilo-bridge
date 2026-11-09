@@ -1478,3 +1478,30 @@ func errOf(u link.Update) string {
 	}
 	return *u.Error
 }
+
+// A job waiting for another to give way wakes at that job's end, not at its next
+// poll (bridge#24): release signals every waiter that took the signal before.
+func TestJobEndWakesGiveWayWaiters(t *testing.T) {
+	t.Parallel()
+	hr := newHarness(t)
+	hr.h.o.Poll = time.Hour
+	ended := hr.h.endSignal()
+	woke := make(chan error, 1)
+	go func() { woke <- hr.h.pollOrEnd(context.Background(), ended) }()
+	hr.h.release(context.Background(), jobs.Job{ID: 999, Attempt: 1}, 1, false)
+	select {
+	case err := <-woke:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a job's end didn't wake the waiter")
+	}
+	// A signal taken after the end waits for the next one (or the poll).
+	later := hr.h.endSignal()
+	select {
+	case <-later:
+		t.Fatal("a new signal was already closed")
+	default:
+	}
+}

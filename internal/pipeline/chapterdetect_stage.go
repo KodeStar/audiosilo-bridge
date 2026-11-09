@@ -140,6 +140,9 @@ func DetectedStamp(workDir string) (string, bool) {
 // transcription, far past it.
 const sourceModSlack = 2 * time.Second
 
+// sourceStatWait bounds CheckCurrent's stat of the book's audio.
+const sourceStatWait = 10 * time.Second
+
 // CheckCurrent reports whether d still describes the book in workDir: its manifest
 // is the one d was made from, and its audio file, at source (where the book is
 // now: a book the server moved with its job keeps its engine book; "" for the
@@ -163,7 +166,10 @@ func (d DetectedChapters) CheckCurrent(workDir, source string) (bool, error) {
 	if source == "" {
 		source = m.Source
 	}
-	info, err := os.Stat(source)
+	// Bounded: a generate job looks at every poll, and a stat a hung network
+	// mount holds would stall it (bridge#24). A stat that doesn't answer in time
+	// is an audio out of sight, looked at again at the next poll.
+	info, err := fsutil.StatWithin(source, sourceStatWait)
 	if err != nil {
 		return false, err
 	}

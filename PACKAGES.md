@@ -146,6 +146,11 @@ internal/
             callers read as unknown); nospace_unix.go / free_windows.go: IsNoSpace(err)
             (ENOSPC/EDQUOT; Windows' disk-full errors) and IsReadOnly(err) (EROFS,
             which fs.ErrPermission doesn't match; ERROR_WRITE_PROTECT).
+            v2.7.0 (bridge#24): StatWithin(path, d) is os.Stat bounded by d
+            (ErrStatTimeout, wrapped in a PathError) with one stat in flight per path:
+            a later ask of a path still out waits on that one, so a poll over a hung
+            SMB mount never piles up blocked stats. The detected list's CheckCurrent
+            stats the audio through it (10 s).
   execfile/ writes files the process will exec at once with syscall.ForkLock
             held for reading from open to close, so a concurrent fork can't hold
             the write descriptor and make the exec fail with ETXTBSY (WriteFile).
@@ -1713,6 +1718,13 @@ internal/
             credential) is recorded once, not once per resume. A park only a person
             or a restart lifts (no retry_at) is recorded each time it comes back: a
             Retry records no supervisor run, and the park after it is news.
+            v2.7.0 (bridge#24): statusVerbPattern also reads a reply's status after
+            returned, responded [with] or answered when the number ends the clause
+            (punctuation, the end, or the status's reason phrase: "returned 429
+            characters" is nothing), and a bracketed status after failed, error,
+            refused, denied or rejected ("request failed (429)"), never a bracketed
+            number alone. The scheduler's park_escalate on a book already parked
+            keeps the park's own message (for people) and logs the diagnosis.
   metaops/  meta.audiosilo.app client (coverage/lookup, capped 1h TTL caches,
             graceful degrade) + the PathAllowed/AllowedPath containment checks
             (Phase 1a passes the mapped mounts as the roots). glossary.go adds
@@ -2930,6 +2942,11 @@ internal/
             read-along run at qa_sweep with goal "" (continueReadalongRun via
             ContinueChapters, decision 7); a chapters job clears a read-along run rather
             than refusing it as a whole run.
+            v2.7.0 (bridge#24): every job end here (release) closes the Handler's end
+            signal (endSignal/signalEnd), and the give-way waits (awaitChaptersGivingWay,
+            awaitOpenJobEnd) wake on it, their bounds now time (giveWayTries-1 polls,
+            openJobWait) rather than a count of wake-ups; a waiter takes the signal before
+            it reads what it waits on, so an end in between still wakes it.
   agentproto/ the staging protocol between the Bridge and the agent container (decision
             15), shared by both sides so they can't drift; a LEAF (standard library
             only). Protocol 1 (both sides refuse another). A job dir <staging>/<16 hex>/:

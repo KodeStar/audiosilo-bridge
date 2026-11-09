@@ -15,7 +15,6 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/kodestar/audiosilo-bridge/internal/agent"
 	"github.com/kodestar/audiosilo-bridge/internal/audio"
 	"github.com/kodestar/audiosilo-bridge/internal/chapterdetect"
 	"github.com/kodestar/audiosilo-bridge/internal/jobs"
@@ -453,7 +452,7 @@ func continuable(b store.Book) bool {
 	}
 }
 
-// awaitChaptersGivingWay waits up to giveWayTries polls for the book's chapters run
+// awaitChaptersGivingWay waits up to giveWayTries polls' time for the book's chapters run
 // to give way to this generate job (chaptersGivingWay): the server queues a
 // generate job beside a chapters.detect job only once that one is cancelled (a
 // parked one it cancels as it queues it; a working one an admin cancelled), the
@@ -463,9 +462,19 @@ func continuable(b store.Book) bool {
 // stopped here, as that end would have. It returns the book as it is then and
 // the first other open job following it (openID 0 when none, kind "" when
 // unknown), which the caller refuses.
+//
+// It wakes at each job end here (endSignal: the chapters job's end stops the
+// book), the poll only its bound (bridge#24).
 func (h *Handler) awaitChaptersGivingWay(ctx context.Context, r *run, b store.Book) (_ store.Book, openID int64, kind string, err error) {
 	asked := int64(0)
-	for i := 1; ; i++ {
+	deadline := time.Now().Add(time.Duration(giveWayTries-1) * h.o.Poll)
+	for first := true; ; first = false {
+		ended := h.endSignal()
+		if !first {
+			if b, err = h.o.DB.GetBook(ctx, b.ID); err != nil {
+				return b, 0, "", err
+			}
+		}
 		if openID, kind, err = h.firstOpenJob(ctx, b.ID, r.job.ID); err != nil {
 			return b, 0, "", err
 		}
@@ -477,7 +486,7 @@ func (h *Handler) awaitChaptersGivingWay(ctx context.Context, r *run, b store.Bo
 			asked = openID
 			h.refreshJob(ctx, openID)
 		}
-		if i == giveWayTries {
+		if !time.Now().Before(deadline) {
 			if openID == 0 {
 				h.stopBook(context.WithoutCancel(ctx), r.job.ID, b.ID)
 				b, err = h.o.DB.GetBook(ctx, b.ID)
@@ -485,10 +494,7 @@ func (h *Handler) awaitChaptersGivingWay(ctx context.Context, r *run, b store.Bo
 			return b, openID, kind, err
 		}
 		r.rep.Progress(jobs.Progress{Step: stepWaiting, Message: "Waiting for the book's chapters job to give way"})
-		if err := agent.SleepCtx(ctx, h.o.Poll); err != nil {
-			return b, 0, "", err
-		}
-		if b, err = h.o.DB.GetBook(ctx, b.ID); err != nil {
+		if err := h.pollOrEnd(ctx, ended); err != nil {
 			return b, 0, "", err
 		}
 	}
