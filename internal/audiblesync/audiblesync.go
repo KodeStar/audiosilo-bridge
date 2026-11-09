@@ -142,6 +142,7 @@ type Store interface {
 	AudiblePushed(ctx context.Context, account, asin string, ms int64, at time.Time) error
 	DropAudiblePush(ctx context.Context, account, asin string) error
 	AudibleHeard(ctx context.Context, x store.AudiblePush, ms int64, applied bool, since time.Time) error
+	RearmAudiblePush(ctx context.Context, x store.AudiblePush, now time.Time) (bool, error)
 	SetAudibleACR(ctx context.Context, account, asin, acr string) error
 	SetAudiblePushCursor(ctx context.Context, id, cursor string, from time.Time) error
 	AudibleSyncOK(ctx context.Context, id string, at time.Time) error
@@ -359,6 +360,10 @@ type Result struct {
 	// Not sent again within the job; the next sync sends them again, so a
 	// corrected match syncs.
 	Mismatched int `json:"mismatched,omitempty"`
+	// Reasserted: of the behind, places the Audible app uploaded over the one
+	// the Bridge wrote while the server still holds that one: the server's
+	// place waits to be written to Audible again (the push).
+	Reasserted int `json:"reasserted,omitempty"`
 	// Skipped places: Audible's echo of a place the Bridge wrote, a place past
 	// the runtime, one too old for the server, one at the start.
 	SkippedEcho        int `json:"skipped_echo,omitempty"`
@@ -561,6 +566,10 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (*R
 			// from an older server row would move Audible back: it goes.
 			if err := h.o.DB.AudibleHeard(ctx, x, hp.ms, applied, now); err != nil {
 				h.o.Log.Warn("audible: recording a place heard failed", "account", acct.ID, "err", err)
+				continue
+			}
+			if r.Status == link.SyncNotApplied && r.Reason == link.SyncBehind && overwritten(x, hp.ms) {
+				h.reassert(ctx, acct.ID, x, now, res)
 			}
 		}
 		rep.Progress(jobs.Progress{Step: "server", Message: "Sending the places to the server", Done: res.Sent, Total: len(events)})
@@ -573,6 +582,35 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (*R
 	h.o.Log.Info("audible: places synced", "account", acct.ID, "titles", res.Titles, "heard", res.Heard, "sent", res.Sent,
 		"applied", res.Applied, "behind", res.Behind, "duplicate", res.Duplicate)
 	return res, nil
+}
+
+// overwritten reports whether Audible's place (heardMs, which the server found
+// behind its own) is an older place over the one the Bridge last wrote for x's
+// title: the Bridge wrote one (LastMs), the server row it last read is still
+// that place (within echoMs: the server hasn't moved since the push), and
+// Audible's place is behind it by more than echoMs. The Audible app does this
+// when it uploads the place it still holds after the push (bridge#51).
+func overwritten(x store.AudiblePush, heardMs int64) bool {
+	return x.LastMs >= 0 && x.RowMs >= 0 && near(x.RowMs, x.LastMs) && heardMs < x.RowMs-echoMs
+}
+
+// reassert makes the server's place for x's title wait to be written to
+// Audible again (store.RearmAudiblePush, guarded against anything the push
+// recorded since the job read x). The push writes it once it has been still
+// for StillFor and only after reading Audible's places again, so a place
+// Audible moved further on meanwhile is never overwritten. Bounded: only a new
+// Audible place is answered behind (the same one again is a duplicate), so
+// this runs once per older place the app uploads.
+func (h *Handler) reassert(ctx context.Context, account string, x store.AudiblePush, now time.Time, res *Result) {
+	ok, err := h.o.DB.RearmAudiblePush(ctx, x, now)
+	switch {
+	case err != nil:
+		h.o.Log.Warn("audible: re-arming a place to write to Audible failed", "account", account, "err", err)
+	case ok:
+		res.Reasserted++
+		h.o.Log.Info("audible: Audible holds an older place than the one written to it; writing the server's place again",
+			"account", account, "asin", x.ASIN, "position_ms", x.RowMs)
+	}
 }
 
 // near reports whether v is within echoMs of ref (-1: none).

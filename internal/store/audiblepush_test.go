@@ -416,3 +416,90 @@ func TestAudibleSyncHealthReset(t *testing.T) {
 		})
 	}
 }
+
+// RearmAudiblePush (bridge#51) makes the server row last read wait again, only
+// while nothing changed since the sync read the row: denied once the push
+// wrote again, a new server row was recorded, a place already waits, or the
+// title is no longer listed.
+func TestRearmAudiblePush(t *testing.T) {
+	ctx := context.Background()
+	db := open(t)
+	at := time.Date(2026, 11, 3, 10, 0, 0, 0, time.UTC)
+	a := AudibleAccount{ID: "abcd1234", Label: "Chris", Marketplace: "us", ServerID: "srv-1", UserID: 3, LibraryID: 1, Policy: "manual"}
+	if err := db.SignInAudibleAccount(ctx, a, at); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.ListAudibleSync(ctx, a.ID, []AudibleSyncTitle{{ASIN: "B000000001", LibraryID: 1, Path: "A/One", RuntimeS: 36000}}); err != nil {
+		t.Fatal(err)
+	}
+	// The push wrote the server's place.
+	if err := db.WantAudiblePush(ctx, a.ID, "B000000001", AudibleRow{Ms: 5_000_000, Seen: at}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AudiblePushed(ctx, a.ID, "B000000001", 5_000_000, at.Add(4*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	read := func() AudiblePush {
+		x, err := db.GetAudiblePush(ctx, a.ID, "B000000001")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return x
+	}
+	rearm := func(x AudiblePush, now time.Time) bool {
+		ok, err := db.RearmAudiblePush(ctx, x, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return ok
+	}
+	now := at.Add(10 * time.Minute)
+
+	// Denied: the push wrote again since the sync read the row.
+	x := read()
+	if err := db.WantAudiblePush(ctx, a.ID, "B000000001", AudibleRow{Ms: 5_000_000, Seen: at}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AudiblePushed(ctx, a.ID, "B000000001", 5_000_000, at.Add(6*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if rearm(x, now) || read().WantMs != nil {
+		t.Fatalf("re-armed after a push since: %+v", read())
+	}
+	// Denied: a new server row was recorded since.
+	x = read()
+	if err := db.WantAudiblePush(ctx, a.ID, "B000000001", AudibleRow{Ms: 6_000_000, Seen: now}); err != nil {
+		t.Fatal(err)
+	}
+	if rearm(x, now) || *read().WantMs != 6_000_000 {
+		t.Fatalf("re-armed over a new row: %+v", read())
+	}
+	// Denied: a place already waits (the same row read again).
+	x = read()
+	if rearm(x, now.Add(time.Minute)) || read().RowSeen != Timestamp(now) {
+		t.Fatalf("re-armed over a waiting place: %+v", read())
+	}
+	if err := db.AudiblePushed(ctx, a.ID, "B000000001", 6_000_000, now); err != nil {
+		t.Fatal(err)
+	}
+	// Denied: no longer listed.
+	x = read()
+	if err := db.ListAudibleSync(ctx, a.ID, nil); err != nil {
+		t.Fatal(err)
+	}
+	if rearm(x, now) {
+		t.Fatalf("re-armed an unlisted title: %+v", read())
+	}
+	// Allowed: listed again, nothing changed since the read.
+	if err := db.ListAudibleSync(ctx, a.ID, []AudibleSyncTitle{{ASIN: "B000000001", LibraryID: 1, Path: "A/One", RuntimeS: 36000}}); err != nil {
+		t.Fatal(err)
+	}
+	x = read()
+	later := now.Add(20 * time.Minute)
+	if !rearm(x, later) {
+		t.Fatalf("not re-armed: %+v", read())
+	}
+	if y := read(); y.WantMs == nil || *y.WantMs != 6_000_000 || y.RowSeen != Timestamp(later) || y.LastMs != 6_000_000 {
+		t.Fatalf("re-armed row = %+v", y)
+	}
+}

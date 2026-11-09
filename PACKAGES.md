@@ -2523,7 +2523,15 @@ internal/
             feeds the setup item's detail only. A sync_off reply or a changed mapping
             clears a stale sync_error without recording a successful sync, keeping
             Audible's wait (same device); only a new sign-in (a new device) clears
-            both. Deps: audible, audibleacct, jobs, link, store.
+            both. bridge#51 (v2.7.0): the Audible app may upload the older place it still
+            held over one the push wrote; the sync then answers it behind and, when the
+            Bridge wrote the title's last place (last_ms), the server row it last read is
+            still that place (within 5 s) and Audible's is behind it by more than 5 s,
+            re-arms the push (store.RearmAudiblePush: want_ms = row_ms, row_seen now, only
+            while listed, nothing waiting, no push and no new row since the job read it;
+            Result.Reasserted). The push's read before the write still drops it if Audible
+            moved further on. Once per older place: the same place again is already heard.
+            Deps: audible, audibleacct, jobs, link, store.
   importjob/ matching and placement against a library (the manager's, ported):
             BookMatcher over []link.LibraryBook (reused pkg/match.NewIndexWith under
             match.ImportOptions(), the import rules the server's own callers don't

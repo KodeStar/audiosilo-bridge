@@ -209,6 +209,26 @@ func (db *DB) AudibleHeard(ctx context.Context, x AudiblePush, ms int64, applied
 	return err
 }
 
+// RearmAudiblePush makes the server row last read for x's title (row_ms) wait
+// to be written to Audible again, first read at now (the push's stillness
+// counts from it), and reports whether it did. An audible.sync calls it when
+// Audible answered a place behind the one the Bridge wrote, and the server
+// still holds that place (the Audible app uploaded an older place over it).
+// Only while nothing changed since the job read x (as x): the title is listed,
+// no place waits, the push hasn't written since (at) and no new server row was
+// recorded (row_ms, row_seen). The push's own checks still run before the
+// write (Audible further on is never overwritten).
+func (db *DB) RearmAudiblePush(ctx context.Context, x AudiblePush, now time.Time) (bool, error) {
+	res, err := db.sql.ExecContext(ctx, `UPDATE audible_push SET want_ms = row_ms, row_seen = ?1
+		WHERE account = ?2 AND asin = ?3 AND listed = 1 AND want_ms IS NULL AND row_ms >= 0
+		  AND at = ?4 AND row_ms = ?5 AND row_seen = ?6`, timestamp(now), x.Account, x.ASIN, x.At, x.RowMs, x.RowSeen)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
 // SetAudibleACR caches (account, asin)'s content reference ("" forgets it).
 func (db *DB) SetAudibleACR(ctx context.Context, account, asin, acr string) error {
 	_, err := db.sql.ExecContext(ctx, `UPDATE audible_push SET acr = ? WHERE account = ? AND asin = ?`, acr, account, asin)
@@ -219,12 +239,8 @@ func (db *DB) SetAudibleACR(ctx context.Context, account, asin, acr string) erro
 // and when its baseline read the feed to the end (from; kept once set, and a
 // zero from, a baseline still under way, leaves it).
 func (db *DB) SetAudiblePushCursor(ctx context.Context, id, cursor string, from time.Time) error {
-	stamp := ""
-	if !from.IsZero() {
-		stamp = timestamp(from)
-	}
 	_, err := db.sql.ExecContext(ctx, `UPDATE audible_accounts SET push_cursor = ?,
-		push_from = CASE WHEN push_from = '' THEN ? ELSE push_from END WHERE id = ?`, cursor, stamp, id)
+		push_from = CASE WHEN push_from = '' THEN ? ELSE push_from END WHERE id = ?`, cursor, stamp(from), id)
 	return err
 }
 
