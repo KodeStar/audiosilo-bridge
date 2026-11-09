@@ -1521,7 +1521,7 @@ func (h *Handler) rescan(ctx context.Context, r *run) {
 		got, err := r.srv.RescanAttachments(ctx, r.lib.ID, r.rel)
 		if err == nil {
 			h.o.Log.Info("generate: the server read the attachments", "job", r.job.ID, "characters", got.Characters, "recaps", got.Recaps,
-				"description", got.Description, "chapters", got.Chapters)
+				"description", got.Description, "chapters", got.Chapters, "readalong", got.Readalong)
 			return
 		}
 		if i == rescanTries || errors.Is(err, link.ErrNotIndexable) || ctx.Err() != nil {
