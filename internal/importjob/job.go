@@ -340,10 +340,21 @@ func PositionAgrees(rec source.Record, b link.LibraryBook) (agrees, disagrees bo
 // are the same book owned twice (two ASINs, an edition each), which share a
 // book without contesting it; the position keeps apart the volumes a series
 // lists under one bare title. A title that folds to nothing is no identity:
-// its key is "", which KeepBest never takes for the same work.
+// its key is "", which KeepBest never takes for the same work. Nor is a title
+// with no position that is its series' bare name (bridge#43): Audible lists
+// several volumes so, and with no number to tell them apart they would all
+// read as one work and all keep a book only one of them is. The parsed
+// sequence stands in for a position Audible gave only as a number.
 func WorkKey(rec source.Record) string {
 	title := match.Fold(rec.Title)
 	if title == "" {
+		return ""
+	}
+	pos := strings.TrimSpace(rec.SeriesPosition)
+	if pos == "" && rec.HasSequence {
+		pos = strconv.FormatFloat(rec.Sequence, 'f', -1, 64)
+	}
+	if pos == "" && rec.Series != "" && match.Fold(rec.Series) == title {
 		return ""
 	}
 	authors := rec.Authors
@@ -357,7 +368,43 @@ func WorkKey(rec source.Record) string {
 		}
 	}
 	slices.Sort(folded)
-	return title + "\x00" + strings.Join(slices.Compact(folded), "\x00") + "\x00" + strings.TrimSpace(rec.SeriesPosition)
+	return title + "\x00" + strings.Join(slices.Compact(folded), "\x00") + "\x00" + pos
+}
+
+// Twins are the paths of books the library holds more than once: another
+// book with the same title, authors and series (folded, in any order). A
+// title matched to one of them by its words alone can't tell which copy it
+// is, so its ASIN goes on neither (bridge#40). A title that folds to nothing
+// has no twin.
+func Twins(books []link.LibraryBook) map[string]bool {
+	byKey := map[string][]string{}
+	for _, b := range books {
+		title := match.Fold(b.Title)
+		if title == "" {
+			continue
+		}
+		parts := make([]string, 0, len(b.Authors)+len(b.Series))
+		for _, a := range b.Authors {
+			if f := match.Fold(a); f != "" {
+				parts = append(parts, "a\x00"+f)
+			}
+		}
+		for _, s := range b.Series {
+			parts = append(parts, "s\x00"+match.NormalizeSeries(s.Name)+"\x00"+strings.TrimSpace(s.Position))
+		}
+		slices.Sort(parts)
+		k := title + "\x00" + strings.Join(slices.Compact(parts), "\x00")
+		byKey[k] = append(byKey[k], b.Path)
+	}
+	out := map[string]bool{}
+	for _, paths := range byKey {
+		if len(paths) > 1 {
+			for _, p := range paths {
+				out[p] = true
+			}
+		}
+	}
+	return out
 }
 
 // SpanMismatch reports whether rec spans books (its position is a range: a

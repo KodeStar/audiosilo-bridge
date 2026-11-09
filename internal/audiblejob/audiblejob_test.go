@@ -352,16 +352,26 @@ func TestPollCancelledRecordsNoFailure(t *testing.T) {
 
 func TestPollRefusals(t *testing.T) {
 	t.Parallel()
-	// Audible refuses: nothing reported to the server, the refusal is the error.
+	// Audible refuses: nothing reported to the server, the refusal is a coded
+	// failure (bridge#40), its result and its error: the sign-in's for now...
 	accts := &stubAccounts{acct: account(), libErr: fmt.Errorf("%w (HTTP 401)", audibleacct.ErrRefused)}
 	fs := &fakeServer{pageSize: 500}
 	h := setup(t, fs, accts)
-	if _, err := run(t, h, "acct0001"); !errors.Is(err, audibleacct.ErrRefused) {
-		t.Fatalf("refused = %v", err)
+	params, _ := json.Marshal(Params{Account: "acct0001"})
+	out, err := h.Run(context.Background(), jobs.Job{ID: 7, Kind: Kind, Params: params, Attempt: 1}, jobs.LocalReporter())
+	var f *Failure
+	if !errors.As(err, &f) || f.Code != CodeSignIn || out != f {
+		t.Fatalf("refused = %#v, %v", out, err)
 	}
 	if len(fs.calls) != 0 || len(accts.failed) != 0 {
 		t.Fatalf("calls %d failed %v", len(fs.calls), accts.failed)
 	}
+	// ...or the device's (Audible denies its licenses): sign in again.
+	accts.acct.RefusedAt, accts.acct.RefusalKind = "2026-11-09T10:00:00Z", store.RefusalDevice
+	if _, err := run(t, h, "acct0001"); !errors.As(err, &f) || f.Code != CodeRefused || f.Message != ThrottledText {
+		t.Fatalf("throttled = %v", err)
+	}
+	accts.acct.RefusedAt, accts.acct.RefusalKind = "", ""
 	// Another Audible failure is recorded on the account.
 	accts.libErr = errors.New("connection reset")
 	if _, err := run(t, h, "acct0001"); err == nil || len(accts.failed) != 1 {
@@ -476,16 +486,47 @@ func TestPollSkipsOverlongMatchesWithinTitleBatch(t *testing.T) {
 		len(fs.calls[0].Titles) != 500 || len(fs.calls[1].Titles) != 1 || !fs.calls[1].Final {
 		t.Fatalf("result = %+v, batches = %d", res, len(fs.calls))
 	}
+	if res.Overlong != 2 {
+		t.Fatalf("overlong = %d", res.Overlong)
+	}
 	for i, title := range fs.calls[0].Titles {
 		if i == 2 || i == 4 {
-			if title.Match != nil || title.ContestedPath != "" {
-				t.Errorf("over-cap path was sent for %s", title.ASIN)
+			// bridge#56: reported contested (Back up everything skips it, so
+			// no second copy), the book unnamed (its path can't be sent).
+			if title.Match != nil || title.ContestedPath != "" || title.Reason != link.ReasonContested {
+				t.Errorf("over-cap match for %s = %+v", title.ASIN, title)
 			}
 			continue
 		}
 		if title.Match == nil || title.Match.Path != fs.books[i].Path {
 			t.Errorf("valid neighbor %s lost its match", title.ASIN)
 		}
+	}
+}
+
+// bridge#40: one title whose words match two identical books (the library
+// holds it twice) keeps a match, but its ASIN goes on neither copy: the words
+// can't tell them apart. A book with no twin is enriched as before.
+func TestPollNeverEnrichesATwin(t *testing.T) {
+	t.Parallel()
+	fs := &fakeServer{pageSize: 500, books: []link.LibraryBook{
+		{Path: "Quill/Grove", Title: "The Copper Grove", Authors: []string{"Mara Quill"}},
+		{Path: "Quill/Grove (copy)", Title: "The Copper Grove", Authors: []string{"Mara Quill"}},
+		{Path: "Sato/Ledger", Title: "The Lighthouse Ledger", Authors: []string{"Imogen Sato"}},
+	}}
+	accts := &stubAccounts{acct: account(), recs: []source.Record{
+		{ASIN: "B0FAKE0002", Title: "The Copper Grove", Author: "Mara Quill"},
+		{ASIN: "B0FAKE0024", Title: "The Lighthouse Ledger", Author: "Imogen Sato"},
+	}}
+	res, err := run(t, setup(t, fs, accts), "acct0001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.MatchedFuzzy != 2 || res.Contested != 0 || res.Enriched != 1 {
+		t.Fatalf("result = %+v", res)
+	}
+	if len(fs.enriched) != 1 || fs.enriched["Sato/Ledger"] != "B0FAKE0024" {
+		t.Fatalf("enriched = %v", fs.enriched)
 	}
 }
 

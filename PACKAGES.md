@@ -2387,7 +2387,14 @@ internal/
             still have no ASIN, so the next poll picks them up); asin_set and a
             moved book are skipped, other failures counted (enrich_failed). Polled/Failed record the account's outcome (a
             poll stopped, cancelled or lost records nothing). The result is counts
-            only (no titles, no credential).
+            only (no titles, no credential). v2.7.0: a refused listing fails coded
+            (Failure as result and error: audible_refused with ThrottledText for a
+            device refusal, else audible_sign_in; the server reads no poll code yet);
+            a title matched to a book whose path is over MaxBookPath (4096 bytes,
+            the server's cap) goes out contested with no contested_path (Overlong;
+            bridge#56: unmatched it would be a title Back up everything downloads
+            again); a fuzzy match on a book the library holds twice
+            (importjob.Twins) is kept but never enriched (bridge#40).
             Phase 4b, import.go: audible.import (download lane; one per account at a
             time, a per-account gate; params {account, asin, library_id, dest_path,
             template}, unknown fields ignored, the rest validated). Steps reported
@@ -2432,8 +2439,7 @@ internal/
             functions over a transfer.LibraryFS (the import's methods open the
             mount's os.Root and call them; vacant also returns the conflict:
             link.ConflictFile|Book|Audio; listedBook is its books-listing part). License (denials mapped as the title's; a title
-            only offered as a DRM-free MP3 fails without a code: not backed up
-            yet), download to <data>/audible/tmp/<acct>-<asin>.aaxc.part (free
+            only offered as a DRM-free MP3 fails drm_free: not backed up yet), download to <data>/audible/tmp/<acct>-<asin>.aaxc.part (free
             space: the tmp folder 2.2x the size less what the partial holds, the
             library 1.1x, else disk_full; a free space that can't be read is no
             refusal; a dropped connection, a stall or a 5xx resumes from the
@@ -2548,7 +2554,8 @@ internal/
             none, unless every tied claim is one WorkKey: folded title, folded
             author set and position, the same book owned twice, and a claim of the
             keeper's work keeps it at any score; a title that folds to nothing has
-            no key; 4b owner fixes: when the best is no ASIN match and some claims'
+            no key, nor (bridge#43) a title with no position or sequence that is its
+            series' bare name, the volumes Audible lists so; 4b owner fixes: when the best is no ASIN match and some claims'
             position agrees with the book's (Claim.Agrees), only those compete, so
             the volume whose number is the book's keeps it even over a higher
             score; KeepBest also returns contested: every losing claim but one
@@ -2558,7 +2565,8 @@ internal/
             folder code's number there, whatever that series is called); a range
             or no number on either side is neither; MatchScored is not gated by
             it), SpanMismatch (a range record on a book with no
-            range: no enrichment), Plan(records, {Mode, Template, Books}) (destinations
+            range: no enrichment), Twins (the paths of books listed more than once:
+            folded title, authors and series alike; no enrichment by words), Plan(records, {Mode, Template, Books}) (destinations
             only, each item's RelPath, Kind (placement.Kind) and Siblings (the
             series' books listed); Planner (NewPlanner(books), Plan(rec, mode,
             template)) is Plan for many records over one library: AuthorFolders

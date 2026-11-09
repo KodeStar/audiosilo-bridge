@@ -54,6 +54,12 @@ const (
 	CodeDiskFull       = "disk_full"           // the Bridge's temp space or the library is short of room
 	CodeURLExpired     = "offline_url_expired" // the download URL expired again after one new license
 	CodeUnknownAccount = "unknown_account"     // not this Bridge's account, or mapped on another server
+	// CodeDRMFree: Audible offers the title only as a DRM-free MP3, which the
+	// Bridge doesn't back up yet (bridge#46).
+	CodeDRMFree = "drm_free"
+	// CodeSignIn: a poll Audible refused the sign-in for now (the next poll
+	// tries again); an import's sign-in refusal stays audible_refused.
+	CodeSignIn = "audible_sign_in"
 )
 
 // tmpHeadroom is the free-space factor for the Bridge's temp folder: it holds
@@ -886,7 +892,7 @@ func (h *Importer) license(ctx context.Context, account, asin string) (audible.L
 	case errors.Is(err, audible.ErrDenied):
 		return audible.License{}, fail(CodeRefused, "Audible refused a download license: %v", err)
 	case errors.Is(err, audible.ErrDRMFree):
-		return audible.License{}, errors.New("audible offers the title only as a DRM-free MP3, which this version of the Bridge doesn't back up")
+		return audible.License{}, fail(CodeDRMFree, "Audible offers the title only as a DRM-free MP3, which this version of the Bridge doesn't back up.")
 	}
 	return audible.License{}, fmt.Errorf("asking Audible for a license: %w", err)
 }

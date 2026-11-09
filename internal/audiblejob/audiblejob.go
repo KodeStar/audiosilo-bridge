@@ -24,6 +24,7 @@ import (
 	"log/slog"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/kodestar/audiosilo-bridge/internal/audible"
@@ -149,6 +150,10 @@ type Result struct {
 	MatchedASIN  int `json:"matched_asin"`
 	MatchedFuzzy int `json:"matched_fuzzy"`
 	Contested    int `json:"contested"`
+	// Overlong titles matched a book whose path is longer than the server
+	// takes (MaxBookPath): reported unmatched as contested, never as a title
+	// to back up (bridge#56).
+	Overlong int `json:"overlong,omitempty"`
 	// Enriched books got the ASIN of their title; EnrichFailed ones the server
 	// didn't answer for (tried again at the next poll).
 	Enriched     int `json:"enriched"`
@@ -162,8 +167,16 @@ type Result struct {
 
 // Run polls the account. Its error passes through audible.RedactedError, so no
 // Amazon account identifier reaches the job's error, whatever wrapped it.
+//
+// A refused account fails coded, as an import and a sync do (Failure, both its
+// result and its error): CodeRefused when Audible refuses the device,
+// CodeSignIn when it refuses the sign-in for now.
 func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (any, error) {
 	res, err := h.run(ctx, job, rep)
+	var f *Failure
+	if errors.As(err, &f) {
+		return f, f
+	}
 	if err != nil {
 		return nil, audible.RedactedError(err)
 	}
@@ -196,7 +209,7 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 	rep.Progress(jobs.Progress{Step: "audible", Message: "Listing the Audible library"})
 	recs, err := h.o.Accounts.Library(ctx, acct.ID)
 	if errors.Is(err, audibleacct.ErrRefused) {
-		return nil, err // recorded by the accounts
+		return nil, h.refused(ctx, acct.ID) // recorded by the accounts
 	}
 	if err != nil {
 		return nil, h.fail(ctx, acct.ID, "could not list the Audible library: "+err.Error())
@@ -219,6 +232,7 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 	used := make([]source.Record, 0, len(recs)) // used[i] is titles[i]'s record
 	claims := make([]importjob.Claim, 0, len(recs))
 	matchedBook := map[string]link.LibraryBook{}
+	var overlong []bool // overlong[i]: titles[i] matched a book whose path the server won't take
 	for _, rec := range recs {
 		rec.ASIN = strings.ToUpper(strings.TrimSpace(rec.ASIN))
 		if !audibleacct.ASINPattern.MatchString(rec.ASIN) {
@@ -234,14 +248,18 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 		default:
 			res.Unavailable++
 		}
-		c := importjob.Claim{}
+		c, long := importjob.Claim{}, false
 		// A preorder the catalog hasn't described yet matches by its ASIN only.
 		if b, score, ok := matchTitled(matcher, rec); ok && matchable(b.Path) {
 			agrees, disagrees := importjob.PositionAgrees(rec, b)
 			c = importjob.Claim{Path: b.Path, Score: score, Work: importjob.WorkKey(rec), Agrees: agrees, Disagrees: disagrees}
 			matchedBook[b.Path] = b
+		} else if ok && fs.ValidPath(b.Path) {
+			long = true
+			h.o.Log.Warn("audible: a title matched a book whose path is longer than the server takes; reported as contested, not as a title to back up",
+				"account", acct.ID, "asin", rec.ASIN, "path_bytes", len(b.Path))
 		}
-		titles, used, claims = append(titles, t), append(used, rec), append(claims, c)
+		titles, used, claims, overlong = append(titles, t), append(used, rec), append(claims, c), append(overlong, long)
 	}
 	// A preorder isn't out yet, so a book a title of the library claims too is
 	// that title's edition: the preorder gives way, rather than contest the
@@ -263,6 +281,16 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 	// contested and the book's path unless their number says they are another
 	// volume, so the console shows them as not here and a backup of everything
 	// can skip them.
+	// A title matched to a book whose path the server won't take can't be
+	// sent as a match; unmatched it would read as a title to back up, and Back
+	// up everything would download a second copy. It goes as contested (which
+	// that skips), with no book named: the path can't be sent either.
+	for i, long := range overlong {
+		if long && titles[i].Reason == "" {
+			titles[i].Reason = link.ReasonContested
+			res.Overlong++
+		}
+	}
 	keep, contested := importjob.KeepBest(claims)
 	claimed := map[string]int{} // path -> how many titles claimed it
 	for _, c := range claims {
@@ -273,6 +301,7 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 			res.Contested++
 		}
 	}
+	twins := sync.OnceValue(func() map[string]bool { return importjob.Twins(books) })
 	var hits []hit
 	for i, c := range claims {
 		if c.Path == "" {
@@ -297,7 +326,10 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 		// was wrong. A preorder isn't out yet, so the book on disk is another
 		// edition: its ASIN would stay on that book for good. A pack matched
 		// to a folder that holds no range may be one volume: not the pack's.
-		if claimed[c.Path] == 1 && b.ASIN == "" && titles[i].State != link.AudiblePreorder && !importjob.SpanMismatch(rec, b) {
+		// Nor does a book the library holds twice (a twin): the title's words
+		// can't tell the copies apart.
+		if claimed[c.Path] == 1 && b.ASIN == "" && titles[i].State != link.AudiblePreorder && !importjob.SpanMismatch(rec, b) &&
+			!twins()[b.Path] {
 			hits = append(hits, hit{path: b.Path, asin: rec.ASIN})
 		}
 	}
@@ -408,11 +440,25 @@ func (h *Handler) fail(ctx context.Context, account, why string) error {
 	return errors.New(why)
 }
 
+// MaxBookPath is the longest book path the server takes, in bytes (its
+// catalog.MaxPathBytes).
+const MaxBookPath = 4096
+
 // matchable reports whether p is a book path the server takes in a match and
 // an enrichment: "." (a library that is one book, at its root) or a clean path
-// below the root, within the server's 4096-byte limit.
+// below the root, within MaxBookPath.
 func matchable(p string) bool {
-	return len(p) <= 4096 && fs.ValidPath(p)
+	return len(p) <= MaxBookPath && fs.ValidPath(p)
+}
+
+// refused is a poll's failure when Audible refused account id: the device
+// (Throttled, read again since the listing may have just recorded it) or the
+// sign-in for now.
+func (h *Handler) refused(ctx context.Context, id string) *Failure {
+	if acct, err := h.o.Accounts.Account(context.WithoutCancel(ctx), id); err == nil && audibleacct.Throttled(acct) {
+		return throttledDevice()
+	}
+	return &Failure{Code: CodeSignIn, Message: "Audible refused the account's sign-in: the next check tries again, or sign in again on the Bridge's Accounts tab."}
 }
 
 // bookLister reads a library's books page by page (Server and ImportServer).
