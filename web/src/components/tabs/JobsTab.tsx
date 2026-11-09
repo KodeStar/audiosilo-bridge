@@ -242,8 +242,15 @@ function JobCard({
           <a href={jobHash(job.id)} className="text-sm font-medium text-hi hover:underline">
             #{job.id}
           </a>
-          {label && <span className="text-sm text-body">{label}</span>}
-          <code className="text-xs text-body">{job.kind}</code>
+          {/* The console's name for the kind; the kind itself only when there is
+              none (its tooltip keeps it for the log, bridge#13). */}
+          {label ? (
+            <span className="text-sm text-body" title={job.kind}>
+              {label}
+            </span>
+          ) : (
+            <code className="text-xs text-body">{job.kind}</code>
+          )}
           <Badge tone={stateTone(shown)} title={hint || undefined}>
             {stateLabel(shown)}
           </Badge>
@@ -328,8 +335,16 @@ function GenerateProgress({ job }: { job: ServerJob }) {
       {facts.length > 0 && <p className="text-xs text-dim">{facts.join(' - ')}</p>}
       {park && (
         <Notice kind="warn">
-          {parkMsg && <p>{parkMsg}</p>}
-          {park.hint && <p className={parkMsg ? 'mt-1' : undefined}>{park.hint}</p>}
+          {/* The park's hint is the instruction for people (the same words the
+              Bridge sends the server); the engine's own message, when it says
+              more, is a detail under it (bridge#13, bridge#24). */}
+          {park.hint ? <p>{park.hint}</p> : parkMsg && <p>{parkMsg}</p>}
+          {park.hint && parkMsg && (
+            <details className="mt-1 text-xs">
+              <summary className="cursor-pointer">Details</summary>
+              <p className="mt-1 break-words">{parkMsg}</p>
+            </details>
+          )}
           {!parkMsg && !park.hint && <p>The job needs attention: see the Bridge&apos;s log.</p>}
           {park.retry_at && (
             <p className="mt-1 text-xs">
