@@ -1442,6 +1442,12 @@ internal/
             AudiblePreorders lists an account's, SetAudiblePreorders replaces them in one tx, and
             DeleteAudibleAccount deletes them with the account (account REFERENCES
             audible_accounts ON DELETE CASCADE: a poll's late write for a removed account fails).
+            0013 (bridge#31) adds idx_books_unfinished, a partial index whose WHERE is
+            unfinishedBook word for word (SQLite takes it only then; a test reads the query
+            plans), so the periodic passes scan only the books the engine may act on.
+            ClearBookStatusIf (bridge#37) is the readmit's clear: it writes only while the row
+            still has the status and error the caller read (ErrStatusChanged otherwise), so a
+            Cancel landing between a readmit's read and its write is never undone.
   state/    per-book pipeline state machine: table-driven states/lanes/transitions,
             CanStart/NextState guards, the audit fix-loop cap. Pure, no I/O. M6 added
             ParkCode (typed park reasons - M7 added contrib_unavailable, core_needed,
