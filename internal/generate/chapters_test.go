@@ -1505,3 +1505,74 @@ func TestJobEndWakesGiveWayWaiters(t *testing.T) {
 	default:
 	}
 }
+
+// BRIDGE-09 (bridge#35, the owner's call): a chapters job asked again after an
+// admin cancelled one parked at asr waiting for a worker takes up the cancelled
+// run, its transcribed window kept, instead of clearing it and transcribing the
+// whole book again; it finds the chapters and writes them as a chapters run.
+func TestChaptersJobTakesUpItsCancelledRun(t *testing.T) {
+	t.Parallel()
+	hr := newHarness(t)
+	stop := hr.runner(hr.h, hr.h.ChaptersJob())
+	defer stop()
+	first := parkChaptersAtASR(hr, 91)
+	kept := filepath.Join(first.WorkDir, transcript.RawDir, transcript.RawName(1))
+	want, err := os.ReadFile(kept) //nolint:gosec // test
+	if err != nil {
+		t.Fatal(err)
+	}
+	hr.srv.set(func() { hr.srv.cancel[91] = true })
+	hr.waitFor("the engine book cancelled", func() bool {
+		b, err := hr.db.GetBook(context.Background(), first.ID)
+		return err == nil && scheduler.IsCancelled(b)
+	})
+	hr.srv.addKind(92, ChaptersKind, "Loose.m4b", `{}`)
+	waitDone(hr, 92)
+	b := hr.engineBook(92)
+	if b.ID != first.ID || b.WorkDir != first.WorkDir || b.Goal != state.GoalChapters {
+		t.Fatalf("the second chapters job's book = %+v, want the cancelled run (%d) taken up", b, first.ID)
+	}
+	if got, err := os.ReadFile(kept); err != nil || string(got) != string(want) { //nolint:gosec // test
+		t.Fatalf("the transcribed window = %q, %v: the run was thrown away", got, err)
+	}
+	if inspect, _ := stageRuns(hr, b.ID, state.Inspecting); inspect != 1 {
+		t.Fatalf("inspecting runs = %d: the job started over", inspect)
+	}
+	if asr, _ := stageRuns(hr, b.ID, state.ASR); asr != 2 {
+		t.Fatalf("asr runs = %d, want the parked run and the continued one", asr)
+	}
+	if _, ok := stageRuns(hr, b.ID, state.ChapterDetecting); ok != 1 {
+		t.Fatal("the run taken up didn't find the chapters")
+	}
+	if scheduler.SentinelExists(b.WorkDir, string(state.Sanitizing)) {
+		t.Fatal("a chapters run went on past its goal")
+	}
+	if _, err := os.Stat(filepath.Join(hr.root, AttachDir, "Loose.chapters.json")); err != nil {
+		t.Fatalf("no chapters written: %v", err)
+	}
+}
+
+// A cancelled chapters run whose file was replaced since is never taken up: the
+// new chapters job clears it and starts its own run.
+func TestChaptersJobDoesNotTakeUpARunItCantTrust(t *testing.T) {
+	t.Parallel()
+	hr := newHarness(t)
+	stop := hr.runner(hr.h, hr.h.ChaptersJob())
+	defer stop()
+	first := parkChaptersAtASR(hr, 93)
+	hr.srv.set(func() { hr.srv.cancel[93] = true })
+	hr.waitFor("the engine book cancelled", func() bool {
+		b, err := hr.db.GetBook(context.Background(), first.ID)
+		return err == nil && scheduler.IsCancelled(b)
+	})
+	mustWrite(t, filepath.Join(hr.root, "Loose.m4b"), "another encode")
+	hr.srv.set(func() {
+		hr.srv.books["Loose.m4b"] = link.Book{LibraryID: 1, Path: "Loose.m4b", Files: []link.BookFile{{Path: "Loose.m4b", Size: 14}},
+			Info: &link.BookInfo{Title: "Loose"}}
+	})
+	hr.srv.addKind(94, ChaptersKind, "Loose.m4b", `{}`)
+	waitDone(hr, 94)
+	if b := hr.engineBook(94); b.ID == first.ID {
+		t.Fatalf("the chapters job took up a run of another file (book %d)", b.ID)
+	}
+}

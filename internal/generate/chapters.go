@@ -394,13 +394,9 @@ func (h *Handler) continueChapters(ctx context.Context, eng Engine, r *run, old 
 	}
 	to := state.Splitting
 	switch from := state.State(old.State); from {
-	case state.ChapterDetecting:
-		if !pipeline.DetectionRerunnable(old.WorkDir) {
-			return false, nil
-		}
-		to = from
-	case state.ASR:
-		if !pipeline.TranscriptionContinuable(old.WorkDir) {
+	case state.ChapterDetecting, state.ASR:
+		var ok bool
+		if to, ok = resumesAt(old); !ok {
 			return false, nil
 		}
 	default:
@@ -434,6 +430,80 @@ func (h *Handler) continueChapters(ctx context.Context, eng Engine, r *run, old 
 	r.bookID = old.ID
 	h.o.Log.Info("generate: continuing the book's chapters run, its transcription kept", "job", r.job.ID, "book", old.ID,
 		"from", old.State)
+	eng.Notify()
+	return true, nil
+}
+
+// resumesAt is where an engine book stopped at asr or chapter_detecting goes on
+// from what it kept: splitting for one at asr whose transcription can go on
+// (pipeline.TranscriptionContinuable: its kept sentinel passes it straight on,
+// and asr transcribes only what it hadn't finished), chapter_detecting for one
+// there whose kept window layer can run the stage again
+// (pipeline.DetectionRerunnable); ok false for any other.
+func resumesAt(b store.Book) (state.State, bool) {
+	switch from := state.State(b.State); from {
+	case state.ChapterDetecting:
+		return from, pipeline.DetectionRerunnable(b.WorkDir)
+	case state.ASR:
+		return state.Splitting, pipeline.TranscriptionContinuable(b.WorkDir)
+	}
+	return "", false
+}
+
+// stoppedChapters reports whether engine book b is a chapters run (goal
+// chapters, a single file) cancelled or failed at asr or chapter_detecting: one a
+// new chapters job takes up again (resumeChapters).
+func stoppedChapters(b store.Book) bool {
+	switch state.State(b.State) {
+	case state.ASR, state.ChapterDetecting:
+		return b.Goal == state.GoalChapters && state.Status(b.Status) == state.StatusFailed &&
+			markersFile(b.AudioSource()) != ""
+	}
+	return false
+}
+
+// resumeChapters takes up the book's chapters run old for a new chapters job,
+// keeping what it transcribed (BRIDGE-09, the owner's call on bridge#35: an admin
+// cancels a detect job parked waiting for a worker, then detects again, and the
+// book was transcribed all over). A run cancelled or failed at asr or
+// chapter_detecting (stoppedChapters) goes on from resumesAt with goal chapters,
+// its identity and work dir its own, under the engine's hold (a stage the cancel
+// just stopped may still be finishing: one that stays busy fails the job to be
+// tried again, never the run cleared unseen) and looked at again once held; the
+// cleared status and the job's mapping are one transaction
+// (store.ContinueReadalong, the audio run's continue with the goal it is given),
+// which refuses a run the retention swept. It reports whether it took it up; a
+// run it doesn't is cleared by the caller, as before.
+func (h *Handler) resumeChapters(ctx context.Context, eng Engine, r *run, old store.Book) (bool, error) {
+	if !stoppedChapters(old) {
+		return false, nil
+	}
+	release, err := h.holdBook(ctx, old.ID)
+	if errors.Is(err, errBookBusy) {
+		return false, errEarlierRunBusy
+	} else if err != nil {
+		return false, err
+	}
+	defer release()
+	if old, err = h.o.DB.GetBook(ctx, old.ID); errors.Is(err, store.ErrNotFound) || (err == nil && !stoppedChapters(old)) {
+		return false, nil
+	} else if err != nil {
+		return false, err
+	}
+	to, ok := resumesAt(old)
+	if !ok {
+		return false, nil
+	}
+	err = h.o.DB.ContinueReadalong(ctx, old.ID, old.State, string(to), state.GoalChapters,
+		store.GenerateBook{ServerJobID: r.job.ID, LibraryID: r.lib.ID, RelPath: r.rel})
+	if errors.Is(err, store.ErrNotContinuable) {
+		return false, nil
+	} else if err != nil {
+		return false, err
+	}
+	r.bookID = old.ID
+	h.o.Log.Info("chapters: taking up the book's stopped chapters run, its transcription kept", "job", r.job.ID,
+		"book", old.ID, "from", old.State, "at", to)
 	eng.Notify()
 	return true, nil
 }
@@ -706,7 +776,8 @@ func (h *Handler) openJobRefusal(ctx context.Context, r *run, b store.Book) (sto
 // continues it gives it the book's series). The earlier engine book (audioRun's:
 // never an ebook run, which the chapters run goes beside) with nothing to reuse is
 // deleted first (as a generate job does), unless an open job follows it or it is
-// a finished whole run (errChaptersKeepsRun).
+// a finished whole run (errChaptersKeepsRun); a chapters run stopped at asr or
+// chapter_detecting is taken up again instead (resumeChapters, BRIDGE-09).
 func (h *Handler) createChapters(ctx context.Context, eng Engine, r *run) error {
 	sp, ok, err := metaops.AllowedPath(r.place.full, []string{r.mount})
 	if err != nil || !ok {
@@ -721,6 +792,9 @@ func (h *Handler) createChapters(ctx context.Context, eng Engine, r *run) error 
 			return err
 		} else if keeps {
 			return errChaptersKeepsRun
+		}
+		if ok, err := h.resumeChapters(ctx, eng, r, old); ok || err != nil {
+			return err
 		}
 		if err := h.clearEarlier(ctx, eng, r, old.ID); err != nil {
 			return err

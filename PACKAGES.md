@@ -2947,6 +2947,13 @@ internal/
             awaitOpenJobEnd) wake on it, their bounds now time (giveWayTries-1 polls,
             openJobWait) rather than a count of wake-ups; a waiter takes the signal before
             it reads what it waits on, so an end in between still wakes it.
+            BRIDGE-09 (bridge#35, the owner's call): a chapters job whose book's chapters
+            run was cancelled or failed at asr or chapter_detecting (stoppedChapters: goal
+            chapters, a single file) takes it up again (resumeChapters, under the hold,
+            through store.ContinueReadalong with goal chapters; resumesAt, shared with
+            continueChapters: splitting for a continuable transcription, chapter_detecting
+            for a rerunnable detection) instead of clearing it and transcribing again; one
+            it can't trust (the file replaced, the windows gone, swept) is cleared as before.
   agentproto/ the staging protocol between the Bridge and the agent container (decision
             15), shared by both sides so they can't drift; a LEAF (standard library
             only). Protocol 1 (both sides refuse another). A job dir <staging>/<16 hex>/:
