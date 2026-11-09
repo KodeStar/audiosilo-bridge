@@ -287,7 +287,10 @@ type Manager struct {
 	// earlier, as any sign-in again does; the store's unique index on
 	// (customer_hash, marketplace) backs it). Held across the server call;
 	// sign-ins are rare. Remove takes it while it forgets locally, so a sign-in
-	// again finishing meanwhile never stores the account back after it.
+	// again finishing meanwhile never stores the account back after it; Map
+	// takes it throughout, so a remap and a sign-in again of the same account
+	// can't record their mappings in one order on the server and the other
+	// here.
 	finishMu sync.Mutex
 }
 
@@ -401,6 +404,15 @@ func (m *Mapping) check() error {
 	return nil
 }
 
+// keepUserName keeps a's stored name for its person when m maps the same
+// person with no name: the server's people couldn't be read just now, which
+// is no reason to forget it (bridge#40).
+func (m *Mapping) keepUserName(a store.AudibleAccount) {
+	if m.UserName == "" && m.UserID == a.UserID {
+		m.UserName = a.UserName
+	}
+}
+
 // label is m's label, else "<user> (<MARKETPLACE>)".
 func (m Mapping) label(marketplace string) string {
 	if m.Label != "" {
@@ -485,6 +497,9 @@ func (m *Manager) Finish(ctx context.Context, srv Server, serverID string, f Fin
 	}
 	if prev.ID != "" && madeLabel(f.Label, prev) {
 		f.Label = ""
+	}
+	if prev.ID != "" {
+		f.keepUserName(prev)
 	}
 	acct := store.AudibleAccount{ID: prev.ID, Marketplace: l.mp.Code, CustomerHash: hash, ServerID: serverID,
 		Label: f.label(l.mp.Code), UserID: f.UserID, UserName: f.UserName, LibraryID: f.LibraryID, Policy: f.Policy, Sync: f.Sync,
@@ -576,7 +591,8 @@ func input(a store.AudibleAccount) link.AudibleAccountInput {
 }
 
 // Map records a new mapping of account id: on the server (srv, paired with
-// serverID) first, then here. ErrNotFound: no such account.
+// serverID) first, then here. ErrNotFound: no such account. It runs under
+// finishMu, one at a time with sign-ins and removals.
 func (m *Manager) Map(ctx context.Context, srv Server, serverID, id string, mp Mapping) (store.AudibleAccount, error) {
 	if err := mp.check(); err != nil {
 		return store.AudibleAccount{}, err
@@ -584,6 +600,8 @@ func (m *Manager) Map(ctx context.Context, srv Server, serverID, id string, mp M
 	if srv == nil {
 		return store.AudibleAccount{}, ErrNotPaired
 	}
+	m.finishMu.Lock()
+	defer m.finishMu.Unlock()
 	a, err := m.Account(ctx, id)
 	if err != nil {
 		return store.AudibleAccount{}, err
@@ -591,6 +609,7 @@ func (m *Manager) Map(ctx context.Context, srv Server, serverID, id string, mp M
 	if madeLabel(mp.Label, a) {
 		mp.Label = ""
 	}
+	mp.keepUserName(a)
 	a.Label, a.UserID, a.UserName, a.LibraryID, a.Policy, a.Sync, a.ServerID =
 		mp.label(a.Marketplace), mp.UserID, mp.UserName, mp.LibraryID, mp.Policy, mp.Sync, serverID
 	if _, err := srv.PutAudibleAccount(ctx, a.ID, input(a)); err != nil {

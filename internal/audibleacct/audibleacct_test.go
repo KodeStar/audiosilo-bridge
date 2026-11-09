@@ -68,8 +68,16 @@ func (s *stubService) AuthorizeURL(mp audible.Marketplace, pkce audible.PKCE, se
 
 func (s *stubService) Register(_ context.Context, mp audible.Marketplace, code string, _ audible.PKCE, serial string) (audible.Credentials, error) {
 	if s.barrier != nil {
+		// Each sign-in waits for the others here, but never forever: a test
+		// whose sign-ins can't all reach Register fails instead of hanging.
 		s.barrier.Done()
-		s.barrier.Wait()
+		met := make(chan struct{})
+		go func() { s.barrier.Wait(); close(met) }()
+		select {
+		case <-met:
+		case <-time.After(10 * time.Second):
+			return audible.Credentials{}, errors.New("barrier: the other sign-ins never reached Register")
+		}
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -602,6 +610,75 @@ func TestMapRecordsOnTheServerThenHere(t *testing.T) {
 	}
 	if _, err := e.m.Account(context.Background(), "../../x"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("a malformed id = %v", err)
+	}
+}
+
+// bridge#40: Map runs one at a time with a sign-in and a removal (finishMu):
+// a removal started while a remap waits on the server waits for it, rather
+// than forget the account between the server's record and this one.
+func TestMapHoldsTheAccountsLock(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	a := e.signIn(t)
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	e.srv.onPut = func() { once.Do(func() { close(entered); <-release }) }
+	mapped := make(chan error, 1)
+	go func() {
+		_, err := e.m.Map(context.Background(), e.srv, "srv-1", a.ID, Mapping{UserID: 4, UserName: "Sam", LibraryID: 2, Policy: "manual"})
+		mapped <- err
+	}()
+	select {
+	case <-entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the remap never reached the server")
+	}
+	removed := make(chan error, 1)
+	go func() {
+		_, err := e.m.Remove(context.Background(), e.srv, a.ID)
+		removed <- err
+	}()
+	time.Sleep(100 * time.Millisecond)
+	if _, err := e.db.GetAudibleAccount(context.Background(), a.ID); err != nil {
+		t.Fatalf("the removal ran during the remap: %v", err)
+	}
+	close(release)
+	if err := <-mapped; err != nil {
+		t.Fatalf("map = %v", err)
+	}
+	if err := <-removed; err != nil {
+		t.Fatalf("remove = %v", err)
+	}
+	if _, err := e.m.Account(context.Background(), a.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("the account is kept: %v", err)
+	}
+}
+
+// bridge#40: a mapping that comes with no name for the person (the server's
+// people couldn't be read) keeps the stored name when it is the same person,
+// on a remap and on a sign-in again; another person has none to keep.
+func TestMappingKeepsTheUserName(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	a := e.signIn(t)
+	got, err := e.m.Map(context.Background(), e.srv, "srv-1", a.ID, Mapping{Label: a.Label, UserID: 3, LibraryID: 1, Policy: "manual"})
+	if err != nil || got.UserName != "Chris" || got.Label != "Chris (US)" {
+		t.Fatalf("same person = %+v, %v", got, err)
+	}
+	st, err := e.m.Start("us")
+	if err != nil {
+		t.Fatal(err)
+	}
+	nameless := mapping()
+	nameless.UserName = ""
+	again, err := e.m.Finish(context.Background(), e.srv, "srv-1", Finish{Login: st.Login,
+		RedirectURL: "https://www.amazon.com/ap/maplanding?openid.oa2.authorization_code=" + stubCode, Mapping: nameless})
+	if err != nil || again.ID != a.ID || again.UserName != "Chris" || again.Label != "Chris (US)" {
+		t.Fatalf("signed in again = %+v, %v", again, err)
+	}
+	other, err := e.m.Map(context.Background(), e.srv, "srv-1", a.ID, Mapping{Label: again.Label, UserID: 4, LibraryID: 1, Policy: "manual"})
+	if err != nil || other.UserName != "" || other.Label != "Audible (US)" {
+		t.Fatalf("another person = %+v, %v", other, err)
 	}
 }
 

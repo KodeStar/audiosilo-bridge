@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from 'react';
+import { useId, useState, type FormEvent } from 'react';
 import { errorText, type ApiClient } from '@/api/client';
 import type {
   AudibleAccount,
@@ -294,6 +294,9 @@ function SignInForm({
   onDone: (d: AudibleAccounts) => void;
   onCancel: () => void;
 }) {
+  // Each open form its own ids: an account's sign-in again and a new sign-in
+  // can be open together.
+  const id = useId();
   const [marketplace, setMarketplace] = useState(initial.marketplace);
   const [started, setStarted] = useState<AudibleSignIn | null>(null);
   // tried: a finish was sent, which spends the sign-in (whatever it answered).
@@ -326,11 +329,11 @@ function SignInForm({
     <div className="flex flex-col gap-4 rounded-md border border-edge bg-raised p-4">
       <Field
         label="Audible store"
-        htmlFor="audible-marketplace"
+        htmlFor={`${id}-marketplace`}
         note="The store the Audible account buys from."
       >
         <select
-          id="audible-marketplace"
+          id={`${id}-marketplace`}
           value={marketplace}
           onChange={(e) => {
             setMarketplace(e.target.value);
@@ -375,9 +378,9 @@ function SignInForm({
             that page&apos;s address from the browser&apos;s address bar and paste it below within{' '}
             {minutesLeft(started.expires_at)} minutes.
           </p>
-          <Field label="The address Amazon showed" htmlFor="audible-redirect">
+          <Field label="The address Amazon showed" htmlFor={`${id}-redirect`}>
             <input
-              id="audible-redirect"
+              id={`${id}-redirect`}
               type="text"
               autoComplete="off"
               spellCheck={false}
@@ -431,6 +434,7 @@ function MappingForm({
   onSubmit: (m: AudibleMapping) => Promise<void>;
   onCancel?: () => void;
 }) {
+  const id = useId();
   const [m, setM] = useState<AudibleMapping>(initial);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -457,11 +461,11 @@ function MappingForm({
       {data.users_error && <Notice kind="warn">{data.users_error}</Notice>}
       <Field
         label="Belongs to"
-        htmlFor="audible-user"
+        htmlFor={`${id}-user`}
         note="The person on the server whose books these are."
       >
         <select
-          id="audible-user"
+          id={`${id}-user`}
           value={m.user_id || ''}
           onChange={(e) => setM({ ...m, user_id: Number(e.target.value) || 0 })}
           className={inputClass}
@@ -474,9 +478,9 @@ function MappingForm({
           ))}
         </select>
       </Field>
-      <Field label="Library" htmlFor="audible-library" note="The books library its titles go to.">
+      <Field label="Library" htmlFor={`${id}-library`} note="The books library its titles go to.">
         <select
-          id="audible-library"
+          id={`${id}-library`}
           value={m.library_id || ''}
           onChange={(e) => setM({ ...m, library_id: Number(e.target.value) || 0 })}
           className={inputClass}
@@ -492,11 +496,11 @@ function MappingForm({
       {policyHere ? (
         <Field
           label="Back up"
-          htmlFor="audible-policy"
+          htmlFor={`${id}-policy`}
           note="Which new purchases the Bridge backs up on its own after each check (titles first seen after you choose it); any title can still be backed up from the console, which changes this later."
         >
           <select
-            id="audible-policy"
+            id={`${id}-policy`}
             value={m.policy}
             onChange={(e) => setM({ ...m, policy: e.target.value as AudiblePolicy })}
             className={inputClass}
@@ -520,11 +524,11 @@ function MappingForm({
       </p>
       <Field
         label="Name (optional)"
-        htmlFor="audible-label"
+        htmlFor={`${id}-label`}
         note="How the console names the account."
       >
         <input
-          id="audible-label"
+          id={`${id}-label`}
           type="text"
           value={m.label}
           maxLength={100}

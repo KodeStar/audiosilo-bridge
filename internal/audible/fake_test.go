@@ -510,3 +510,32 @@ func TestRecorderScrubsCredentials(t *testing.T) {
 		}
 	}
 }
+
+// Two recordings opened together (in one second, one process) each get a file
+// of their own (bridge#40: the per-second names collided, and O_EXCL then
+// refused the second).
+func TestRecordersNeverShareAFile(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer ts.Close()
+	dir := t.TempDir()
+	for range 3 {
+		hc := &http.Client{Transport: audiblefake.NewRecorder(http.DefaultTransport, dir)}
+		resp, err := hc.Get(ts.URL + "/1.0/library")
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+	}
+	files, _ := filepath.Glob(filepath.Join(dir, "audible-*.jsonl"))
+	if len(files) != 3 {
+		t.Fatalf("recordings = %v", files)
+	}
+	for _, f := range files {
+		if raw, _ := os.ReadFile(f); strings.Count(string(raw), "\n") != 1 {
+			t.Fatalf("%s holds %q", f, raw)
+		}
+	}
+}

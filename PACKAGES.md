@@ -2258,7 +2258,7 @@ internal/
             response_groups; GET /1.0/catalog/products(?asins= | /{asin}) answers every fixture and
             the cancelled one, title only with product_desc, 400 over LastPositionsMax ASINs.
             Recorder: the owner's recording transport, a 0600 JSON-lines file per
-            run, scrubbed AS IT WRITES (secret keys and the customer, device and
+            run (named by the time to the nanosecond, the pid and a per-process count), scrubbed AS IT WRITES (secret keys and the customer, device and
             token subtrees redacted, an order's payment fields and any price too, headers from an allowlist, signed CDN queries
             dropped, unparseable bodies by size only); a test runs a whole flow
             through it and finds no credential. Never imports audible (audible's
@@ -2283,7 +2283,10 @@ internal/
             the row is stored (finishMu; Remove takes it while it forgets locally), so two sign-ins of one Amazon account finishing together
             end as a sign-in again, not two accounts (the unique index backs it). A name the Bridge made ("<person> (<STORE>)") follows
             the person when Map or a sign-in again changes it; a typed one stays.
-            Map records a new mapping on the server, then here. Remove forgets
+            Map records a new mapping on the server, then here, under finishMu (bridge#40:
+            a remap and a sign-in again or a removal never interleave). A mapping with no
+            user name for the account's own person (the server's people couldn't be read)
+            keeps the stored name (Map and a sign-in again), never "". Remove forgets
             locally FIRST (vault, then row), then DELETEs on the server and
             deregisters, run to the end even if the page goes away; either failing
             is a warning for the page, never the account kept. Library opens the
