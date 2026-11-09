@@ -19,8 +19,9 @@ import (
 // Recorder is an http.RoundTripper that writes every exchange it carries to a
 // JSON-lines file, for the owner's one recording run against a real account
 // (the fake's later fixtures come from it). It scrubs AS IT WRITES: tokens, the
-// device key, codes, the customer and device ids, cookies, vouchers, signed URLs
-// and the account holder's name never reach the file; titles, authors and the
+// device key, codes, the customer and device ids, cookies, vouchers, signed URLs,
+// the account holder's name, and an order's payment fields and any price never
+// reach the file; titles, authors and the
 // shapes are kept. A body it can't parse as JSON or a form is recorded by size
 // only. Headers are recorded from an allowlist (never Authorization, Cookie or
 // the x-adp-* signature). It writes to its own file, never the log.
@@ -160,6 +161,16 @@ var secretKeys = map[string]bool{
 	"given_name": true, "website_cookies": true, "store_authentication_cookie": true,
 	"x-amz-signature": true, "x-amz-credential": true, "x-amz-security-token": true,
 	"signature": true, "policy": true, "key-pair-id": true,
+	// An order's and an order item's payment fields (GET /1.0/orders) and any
+	// price.
+	"payment": true, "payment_profile": true, "payment_contract_id": true, "payment_contract_revision_id": true,
+	"payment_plan_id": true, "billing_period": true, "subscription_id": true, "refunds": true, "subcharges": true,
+	"vat_rate": true, "mfa_details": true,
+	"amount_charged": true, "payment_method": true, "tax_amount": true, "taxes": true, "tax_transaction_id": true,
+	"coupon_amount": true, "credits_applied": true, "promotion_amount": true, "promo_ids": true, "credit_promo_id": true,
+	"merchant_id": true, "plan_id": true, "plan_status": true, "next_billing_date": true, "combined_order_id": true,
+	"institution_id": true, "institution_benefit_plan_id": true, "emp_provider_id": true, "return_information": true,
+	"billing_address": true, "shipping_address": true, "address": true, "price": true,
 }
 
 // secretSubtrees are JSON keys whose whole subtree is scrubbed (every string

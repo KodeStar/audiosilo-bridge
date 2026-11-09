@@ -251,10 +251,23 @@ func (p *Pusher) due(ctx context.Context, a store.AudibleAccount, now time.Time)
 		p.o.Log.Warn("audible: listing the places to push failed", "account", a.ID, "err", err)
 		return
 	}
+	// A remembered pending preorder is never pushed (Audible denies its
+	// content reference: a false sync error every pass). Its place waits
+	// until the next sync, which leaves it unlisted and forgets the place.
+	// Read only once a place is still long enough to be written.
+	var pre map[string]bool
 	var ready []store.AudiblePush
 	for _, x := range list {
 		seen, err := time.Parse(time.RFC3339Nano, x.RowSeen)
-		if err != nil || now.Sub(seen) < StillFor || p.dropped(ctx, a, x) {
+		if err != nil || now.Sub(seen) < StillFor {
+			continue
+		}
+		if pre == nil {
+			if pre = p.o.preorders(ctx, a.ID); pre == nil {
+				pre = map[string]bool{}
+			}
+		}
+		if pre[x.ASIN] || p.dropped(ctx, a, x) {
 			continue
 		}
 		ready = append(ready, x)

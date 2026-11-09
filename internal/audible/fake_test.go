@@ -218,7 +218,7 @@ func registerOldProfile(t *testing.T, opts []Option) Credentials {
 }
 
 func TestFakeLibraryStates(t *testing.T) {
-	_, opts := startFake(t)
+	fake, opts := startFake(t)
 	c, err := NewClient(registerWithFake(t, opts), opts...)
 	if err != nil {
 		t.Fatal(err)
@@ -227,13 +227,18 @@ func TestFakeLibraryStates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(recs) != len(audiblefake.Fixtures) || len(recs) != 30 {
+	// The library holds no preorder (Audible's lists one only once it is out).
+	if len(recs) != 26 {
 		t.Fatalf("library = %d titles", len(recs))
+	}
+	fixtures := map[string]audiblefake.Title{}
+	for _, f := range audiblefake.Fixtures {
+		fixtures[f.ASIN] = f
 	}
 	counts := map[string]int{}
 	for i, r := range recs {
-		want := audiblefake.Fixtures[i]
-		if r.ASIN != want.ASIN || r.Title != want.Title {
+		want, ok := fixtures[r.ASIN]
+		if !ok || r.Title != want.Title {
 			t.Fatalf("record %d = %+v", i, r)
 		}
 		var got string
@@ -250,10 +255,71 @@ func TestFakeLibraryStates(t *testing.T) {
 		}
 		counts[got]++
 	}
-	if counts["available"] != 22 || counts["preorder"] != 4 || counts["unavailable"] != 4 {
+	if counts["available"] != 22 || counts["preorder"] != 0 || counts["unavailable"] != 4 {
 		t.Fatalf("states = %v", counts)
 	}
+	if _, err := c.Title(context.Background(), "B0FAKE0005"); !errors.Is(err, ErrNotInLibrary) {
+		t.Fatalf("a preorder's library read = %v, want not in the library", err)
+	}
+
+	// The orders: the four preorders pending, the cancelled one not, recent
+	// purchases closed, nothing older than the window.
+	orders, err := c.Orders(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pending []string
+	cancelled := false
+	for _, o := range orders {
+		if time.Since(o.Date) > audiblefake.OrdersWindow {
+			t.Fatalf("an order from %v, past the window", o.Date)
+		}
+		for _, it := range o.Items {
+			if o.PendingPreorder() {
+				pending = append(pending, it.ASIN)
+			}
+			if it.ASIN == audiblefake.CancelledPreorder.ASIN {
+				cancelled = !o.PendingPreorder() && o.Preorder
+			}
+		}
+	}
+	slices.Sort(pending)
+	if !slices.Equal(pending, []string{"B0FAKE0005", "B0FAKE0010", "B0FAKE0017", "B0FAKE0026"}) || !cancelled {
+		t.Fatalf("pending = %v, cancelled listed %v", pending, cancelled)
+	}
+	// The catalog describes them (the split on the fake's 400 over 10 runs).
+	asked := append(pending, audiblefake.CancelledPreorder.ASIN, "B0NOTKNOWN")
+	for i := range 20 {
+		asked = append(asked, audiblefake.Fixtures[i].ASIN)
+	}
+	prods, err := c.Products(context.Background(), asked)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(prods) != len(asked)-1 || prods[0].Title != "The Golden Canopy" || !prods[0].Preorder || prods[0].ReleaseDate == "" ||
+		prods[0].Series != "Orchard Cycle" || prods[0].SeriesPosition != "5" {
+		t.Fatalf("catalog = %d, first %+v", len(prods), prods[0])
+	}
+
+	// Released: the library lists it, available, and its order is closed.
+	fake.Release("B0FAKE0005")
+	recs, _ = c.Library(context.Background())
+	if len(recs) != 27 {
+		t.Fatalf("library after a release = %d", len(recs))
+	}
+	if r, err := c.Title(context.Background(), "B0FAKE0005"); err != nil || r.UnavailableReason != "" {
+		t.Fatalf("released title = %+v, %v", r, err)
+	}
+	orders, _ = c.Orders(context.Background())
+	for _, o := range orders {
+		if o.PendingPreorder() && o.Items[0].ASIN == "B0FAKE0005" {
+			t.Fatal("a released preorder's order is still pending")
+		}
+	}
 	thicket := recs[2]
+	if thicket.ASIN != "B0FAKE0003" {
+		t.Fatalf("third record = %+v", thicket)
+	}
 	if thicket.Series != "Orchard Cycle" || !thicket.HasSequence || thicket.Sequence != 3 || thicket.RuntimeSec != 745*60 || thicket.Narrator != "Iris Fenwick" {
 		t.Fatalf("series record = %+v", thicket)
 	}
@@ -397,6 +463,9 @@ func TestRecorderScrubsCredentials(t *testing.T) {
 	if _, err := c.LastPositions(context.Background(), []string{"B0FAKE0001"}, nil); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := c.Orders(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	refreshed, err := RefreshAccessToken(context.Background(), creds, opts...)
 	if err != nil {
 		t.Fatal(err)
@@ -421,6 +490,9 @@ func TestRecorderScrubsCredentials(t *testing.T) {
 		"refresh token": creds.RefreshToken, "adp token": creds.ADPToken, "device key": keyLine,
 		"customer id": creds.CustomerID, "serial": serial, "code": code, "verifier": pkce.Verifier,
 		"challenge": pkce.Challenge, "account name": "Fake Customer",
+		"order amount": "FAKE-AMOUNT", "payment method": "FAKE-PAYMENT-METHOD", "tax": "FAKE-TAX", "merchant": "FAKE-MERCHANT",
+		"order payment": "FAKE-ORDER-PAYMENT", "payment profile": "FAKE-PAYMENT-PROFILE", "contract": "FAKE-CONTRACT",
+		"subscription": "FAKE-SUBSCRIPTION", "vat rate": "FAKE-VAT-RATE", "subcharge": "FAKE-SUBCHARGE",
 	} {
 		if strings.Contains(rec, secret) {
 			t.Errorf("the recording holds the %s", name)
@@ -431,7 +503,8 @@ func TestRecorderScrubsCredentials(t *testing.T) {
 			t.Errorf("the recording holds the %s header", h)
 		}
 	}
-	for _, kept := range []string{"The Glass Orchard", "/1.0/library", "asin_last_position_heard_annots", "/auth/register", "REDACTED"} {
+	for _, kept := range []string{"The Glass Orchard", "/1.0/library", "asin_last_position_heard_annots", "/auth/register", "REDACTED",
+		"/1.0/orders", "ORDER_PENDING_PREORDER", "B0FAKE0005"} {
 		if !strings.Contains(rec, kept) {
 			t.Errorf("the recording lost %q", kept)
 		}

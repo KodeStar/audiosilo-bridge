@@ -34,6 +34,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"slices"
 	"strconv"
 	"time"
 
@@ -146,6 +147,10 @@ type Store interface {
 	AudibleSyncOK(ctx context.Context, id string, at time.Time) error
 	AudibleSyncFailed(ctx context.Context, id, why string, retryAt time.Time) error
 	ClearAudibleSyncError(ctx context.Context, id string) (bool, error)
+	// AudiblePreorders are the pending preorders a poll remembers (migration
+	// 0012): neither direction syncs one (it isn't out, so Audible has no
+	// place for it and denies the content reference a push needs).
+	AudiblePreorders(ctx context.Context, account string) ([]store.AudiblePreorder, error)
 }
 
 // Server is the part of the server link the sync calls (*link.Client).
@@ -182,6 +187,21 @@ func (o *Options) defaults() {
 	if o.Now == nil {
 		o.Now = time.Now
 	}
+}
+
+// preorders are account's remembered pending preorders by ASIN (none, with a
+// warning, when the store can't say: the sync then runs as it did before).
+func (o *Options) preorders(ctx context.Context, account string) map[string]bool {
+	rows, err := o.DB.AudiblePreorders(ctx, account)
+	if err != nil {
+		o.Log.Warn("audible: reading the remembered preorders failed", "account", account, "err", err)
+		return nil
+	}
+	out := make(map[string]bool, len(rows))
+	for _, r := range rows {
+		out[r.ASIN] = true
+	}
+	return out
 }
 
 func (o *Options) server() Server {
@@ -345,6 +365,9 @@ type Result struct {
 	SkippedPastRuntime int `json:"skipped_past_runtime,omitempty"`
 	SkippedOld         int `json:"skipped_old,omitempty"`
 	SkippedStart       int `json:"skipped_start,omitempty"`
+	// SkippedPreorder: titles the server listed that the Bridge remembers as
+	// pending preorders (not synced until they are out).
+	SkippedPreorder int `json:"skipped_preorder,omitempty"`
 	// Waiting: Audible asked the Bridge to wait (until WaitUntil), so the sync
 	// didn't call it; SyncOff: the server's sync was off by the time it ran.
 	Waiting   bool   `json:"waiting,omitempty"`
@@ -390,7 +413,13 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (*R
 	if srv == nil {
 		return nil, errors.New("the Bridge isn't paired with a server")
 	}
-	res := &Result{Account: acct.ID, Titles: len(p.Titles)}
+	// A pending preorder the server matched to a book (another edition) is
+	// left out: unlisted here, so neither read from Audible nor pushed.
+	pre := h.o.preorders(ctx, acct.ID)
+	before := len(p.Titles)
+	p.Titles = slices.DeleteFunc(p.Titles, func(t link.AudibleSyncTitle) bool { return pre[t.ASIN] })
+	skipped := before - len(p.Titles)
+	res := &Result{Account: acct.ID, Titles: len(p.Titles), SkippedPreorder: skipped}
 	now := h.o.Now()
 
 	// The listing goes first, even while Audible asks the Bridge to wait: the

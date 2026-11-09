@@ -65,8 +65,14 @@ func TestAccountAgainstTheFake(t *testing.T) {
 		t.Fatalf("the sign-in's profile = %q", a.DeviceProfile)
 	}
 	recs, err := m.Library(context.Background(), a.ID)
-	if err != nil || len(recs) != len(audiblefake.Fixtures) {
-		t.Fatalf("library = %d, %v", len(recs), err)
+	if err != nil || len(recs) != len(audiblefake.Fixtures)-4 {
+		t.Fatalf("library = %d, %v (the four preorders aren't in it)", len(recs), err)
+	}
+	// The preorders come from the orders, described by the catalog; the
+	// cancelled one doesn't.
+	pre := m.Preorders(context.Background(), a.ID, recs)
+	if len(pre) != 4 || pre[0].ASIN != "B0FAKE0005" || pre[0].Title != "The Golden Canopy" || !pre[0].Preorder || pre[0].ReleaseDate == "" {
+		t.Fatalf("preorders = %+v", pre)
 	}
 
 	creds, _ := m.credentials(a.ID)

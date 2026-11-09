@@ -16,7 +16,9 @@
 // device and customer ids, and the download is an UNENCRYPTED fixture .m4b
 // served as the "AAXC" (ffmpeg passes it through with the key set), with
 // Range and If-Range, and controls to cut a download, expire the URLs and
-// release a preorder (content.go).
+// release a preorder (content.go). A preorder is not in the library until it
+// is released: the orders listing (pending) and the catalog show it, shaped as
+// a real account's were (orders.go).
 //
 // This package must never import internal/audible: audible's audiblefake build
 // imports it (for the Recorder).
@@ -45,9 +47,9 @@ import (
 
 // Options configure a Fake.
 type Options struct {
-	// LastPositionsMax is the most ASINs one lastpositions request may carry
-	// before the fake answers 400, as Audible does at an undocumented N
-	// (default 10, under the client's first batch of 25 so the split runs).
+	// LastPositionsMax is the most ASINs one lastpositions or catalog request
+	// may carry before the fake answers 400, as Audible does at an undocumented
+	// N (default 10, under the client's first batch of 25 so the split runs).
 	LastPositionsMax int
 	// Now is the clock release dates and places are relative to (default
 	// time.Now).
@@ -272,6 +274,9 @@ func (f *Fake) Handler() http.Handler {
 	mux.HandleFunc("GET /1.0/annotations/lastpositions", f.signed(f.lastPositions))
 	mux.HandleFunc("PUT /1.0/lastpositions/{asin}", f.signed(f.putPosition))
 	mux.HandleFunc("GET /1.0/library/{asin}", f.signed(f.libraryTitle))
+	mux.HandleFunc("GET /1.0/orders", f.signed(f.orders))
+	mux.HandleFunc("GET /1.0/catalog/products", f.signed(f.products))
+	mux.HandleFunc("GET /1.0/catalog/products/{asin}", f.signed(f.product))
 	mux.HandleFunc("POST /1.0/content/{asin}/licenserequest", f.signed(f.license))
 	mux.HandleFunc("GET /_fake/content/{file}", f.signed(f.download))
 	mux.HandleFunc("GET /_fake/calls", func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, http.StatusOK, f.Calls()) })
@@ -339,7 +344,7 @@ func (f *Fake) Handler() http.Handler {
 			Title
 			State string `json:"state"`
 		}
-		titles := f.titles()
+		titles := f.catalog()
 		rows := make([]row, len(titles))
 		for i, t := range titles {
 			rows[i] = row{t, t.State()}
@@ -580,7 +585,8 @@ func (f *Fake) library(w http.ResponseWriter, r *http.Request, _ []byte) {
 	writeJSON(w, http.StatusOK, map[string]any{"items": items, "response_groups": strings.Split(r.URL.Query().Get("response_groups"), ",")})
 }
 
-// libraryItem is a title as the library endpoint sends it.
+// libraryItem is a title as the library endpoint sends it, its release date
+// a day of now's UTC calendar (the Bridge reads a date as that day's UTC start).
 func libraryItem(t Title, now time.Time) map[string]any {
 	names := func(ns []string) []map[string]string {
 		out := make([]map[string]string, len(ns))
@@ -599,7 +605,7 @@ func libraryItem(t Title, now time.Time) map[string]any {
 		"subtitle":              t.Subtitle,
 		"authors":               names(t.Authors),
 		"narrators":             names(t.Narrators),
-		"release_date":          now.AddDate(0, 0, t.ReleaseIn).Format("2006-01-02"),
+		"release_date":          now.UTC().AddDate(0, 0, t.ReleaseIn).Format("2006-01-02"),
 		"content_type":          "Product",
 		"content_delivery_type": delivery,
 		"customer_rights":       map[string]bool{"is_consumable_offline": !t.NoRights},
@@ -616,12 +622,7 @@ func libraryItem(t Title, now time.Time) map[string]any {
 // lastPositions is GET /1.0/annotations/lastpositions?asins=a,b: 400 over
 // LastPositionsMax ASINs, as Audible's list-length check does.
 func (f *Fake) lastPositions(w http.ResponseWriter, r *http.Request, _ []byte) {
-	var asins []string
-	for a := range strings.SplitSeq(r.URL.Query().Get("asins"), ",") {
-		if a = strings.TrimSpace(a); a != "" {
-			asins = append(asins, a)
-		}
-	}
+	asins := queryASINs(r)
 	f.mu.Lock()
 	f.calls.LastPositionsSizes = append(f.calls.LastPositionsSizes, len(asins))
 	f.mu.Unlock()
@@ -629,9 +630,7 @@ func (f *Fake) lastPositions(w http.ResponseWriter, r *http.Request, _ []byte) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"message": "asins is required"})
 		return
 	}
-	if len(asins) > f.opts.LastPositionsMax {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"message": fmt.Sprintf(
-			"1 validation error detected: Value at 'asins' failed to satisfy constraint: Member must have length less than or equal to %d", f.opts.LastPositionsMax)})
+	if f.refuseLongASINList(w, asins) {
 		return
 	}
 	annots := make([]map[string]any, 0, len(asins))
@@ -687,4 +686,27 @@ func randHex(n int) string {
 	b := make([]byte, n)
 	_, _ = rand.Read(b)
 	return strings.ToUpper(hex.EncodeToString(b))
+}
+
+// queryASINs is the request's comma-separated asins query parameter, blanks
+// left out.
+func queryASINs(r *http.Request) []string {
+	var asins []string
+	for a := range strings.SplitSeq(r.URL.Query().Get("asins"), ",") {
+		if a = strings.TrimSpace(a); a != "" {
+			asins = append(asins, a)
+		}
+	}
+	return asins
+}
+
+// refuseLongASINList answers a 400 for a list over LastPositionsMax ASINs, as
+// Audible's list-length check does, and reports whether it did.
+func (f *Fake) refuseLongASINList(w http.ResponseWriter, asins []string) bool {
+	if len(asins) <= f.opts.LastPositionsMax {
+		return false
+	}
+	writeJSON(w, http.StatusBadRequest, map[string]string{"message": fmt.Sprintf(
+		"1 validation error detected: Value at 'asins' failed to satisfy constraint: Member must have length less than or equal to %d", f.opts.LastPositionsMax)})
+	return true
 }

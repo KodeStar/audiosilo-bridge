@@ -243,7 +243,7 @@ func (db *DB) AudibleAccountError(ctx context.Context, id, why string) error {
 	return err
 }
 
-// DeleteAudibleAccount forgets id and its push rows.
+// DeleteAudibleAccount forgets id, its push rows and its remembered preorders.
 func (db *DB) DeleteAudibleAccount(ctx context.Context, id string) error {
 	tx, err := db.sql.BeginTx(ctx, nil)
 	if err != nil {
@@ -251,6 +251,9 @@ func (db *DB) DeleteAudibleAccount(ctx context.Context, id string) error {
 	}
 	defer func() { _ = tx.Rollback() }()
 	if _, err := tx.ExecContext(ctx, `DELETE FROM audible_push WHERE account = ?`, id); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM audible_preorders WHERE account = ?`, id); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM audible_accounts WHERE id = ?`, id); err != nil {

@@ -123,6 +123,12 @@ type Service interface {
 	LastPositions(ctx context.Context, creds audible.Credentials, asins []string) (map[string]audible.Position, error)
 	ContentACR(ctx context.Context, creds audible.Credentials, asin string) (string, error)
 	SetLastPosition(ctx context.Context, creds audible.Credentials, asin, acr string, positionMs int64) error
+	// Orders and Products are a poll's preorders: the account's orders (a
+	// pending preorder shows nowhere else) and the catalog's description of
+	// titles not in the library. Their 401/403 is answered as it came, never
+	// as ErrRefused: a poll's preorders never refuse the account.
+	Orders(ctx context.Context, creds audible.Credentials) ([]audible.Order, error)
+	Products(ctx context.Context, creds audible.Credentials, asins []string) ([]source.Record, error)
 }
 
 // Audible is the real Service, its calls made with opts (endpoints, an HTTP
@@ -208,6 +214,24 @@ func (c client) SetLastPosition(ctx context.Context, creds audible.Credentials, 
 	return creds.Redact(cl.SetLastPosition(ctx, asin, acr, positionMs))
 }
 
+func (c client) Orders(ctx context.Context, creds audible.Credentials) ([]audible.Order, error) {
+	cl, err := audible.NewClient(creds, c.opts...)
+	if err != nil {
+		return nil, err
+	}
+	out, err := cl.Orders(ctx)
+	return out, creds.Redact(err)
+}
+
+func (c client) Products(ctx context.Context, creds audible.Credentials, asins []string) ([]source.Record, error) {
+	cl, err := audible.NewClient(creds, c.opts...)
+	if err != nil {
+		return nil, err
+	}
+	out, err := cl.Products(ctx, asins)
+	return out, creds.Redact(err)
+}
+
 // refused wraps a 401/403 on a signed API call as ErrRefused.
 func refused(err error) error {
 	if audible.IsRefused(err) {
@@ -228,6 +252,8 @@ type Store interface {
 	AudibleAccepted(ctx context.Context, id, kind string) (bool, error)
 	AudibleAccountError(ctx context.Context, id, why string) error
 	DeleteAudibleAccount(ctx context.Context, id string) error
+	AudiblePreorders(ctx context.Context, account string) ([]store.AudiblePreorder, error)
+	SetAudiblePreorders(ctx context.Context, account string, ps []store.AudiblePreorder) error
 }
 
 // Server is the part of the server link the accounts use (*link.Client).
@@ -659,7 +685,9 @@ func (m *Manager) Library(ctx context.Context, id string) ([]source.Record, erro
 }
 
 // Title reads one title of account id's library (an import's metadata);
-// audible.ErrNotInLibrary when the library doesn't hold it. A refusal is
+// audible.ErrNotInLibrary when the library doesn't hold it, unless it is a
+// pending preorder a poll remembers (Preorders): then its preorder record, so
+// an import says it isn't released yet rather than not owned. A refusal is
 // Library's.
 func (m *Manager) Title(ctx context.Context, id, asin string) (source.Record, error) {
 	var rec source.Record
@@ -667,6 +695,11 @@ func (m *Manager) Title(ctx context.Context, id, asin string) (source.Record, er
 		rec, err = m.o.Service.Title(ctx, creds, asin)
 		return err
 	})
+	if errors.Is(err, audible.ErrNotInLibrary) {
+		if pre, ok := m.rememberedPreorder(ctx, id, asin); ok {
+			return pre, nil
+		}
+	}
 	return rec, err
 }
 
