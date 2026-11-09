@@ -646,3 +646,91 @@ func wantDone(t *testing.T, r *Runner, srv *fakeServer, id int64) {
 		t.Fatalf("final = %q: %s", s, msg)
 	}
 }
+
+// releaseFirst is an abandoner that records, at each Abandon, the state the
+// store holds for the job: a job another waits on (generate's awaitOpenJobEnd
+// reads the row's running state) must still read running while its work is
+// released, never lost before (bridge#37).
+type releaseFirst struct {
+	handler
+	db *store.DB
+	mu sync.Mutex
+	at []string
+}
+
+func (a *releaseFirst) Abandon(ctx context.Context, j Job) {
+	sj, err := a.db.GetServerJob(context.WithoutCancel(ctx), j.ID)
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if err != nil {
+		a.at = append(a.at, "error: "+err.Error())
+		return
+	}
+	a.at = append(a.at, sj.State)
+}
+
+func (a *releaseFirst) states() []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return slices.Clone(a.at)
+}
+
+// A start that drops another server's running job releases it before it
+// records it lost.
+func TestDroppedJobIsReleasedBeforeItIsLost(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db, srv := openStore(t), newFakeServer()
+	if err := db.RecordClaim(ctx, store.ServerJob{ID: 9, Kind: "k.v", Attempt: 1, ServerID: "srv-old"}); err != nil {
+		t.Fatal(err)
+	}
+	h := &releaseFirst{db: db, handler: handler{kind: "k.v", lane: LaneLight,
+		fn: func(context.Context, Job, *Reporter) (any, error) { return nil, nil }}}
+	opts := testOpts()
+	opts.ServerID = func() string { return "srv-new" }
+	r := New(db, func() Server { return srv }, nil, opts, h)
+	runFor(t, r, func() bool {
+		sj, err := db.GetServerJob(ctx, 9)
+		return err == nil && sj.State == store.JobLost
+	})
+	if got := h.states(); !slices.Equal(got, []string{store.JobRunning}) {
+		t.Fatalf("job state at Abandon = %v, want [running] (released before it is recorded lost)", got)
+	}
+}
+
+// A job a refused token stopped, found on another server's link once the
+// Bridge is paired again, is released before it is recorded lost.
+func TestStrandedJobOfAnotherServerIsReleasedBeforeItIsLost(t *testing.T) {
+	t.Parallel()
+	db, a, b := openStore(t), newFakeServer(), newFakeServer()
+	a.add(&link.Job{ID: 6, Kind: "k.v", Attempts: 1})
+	var mu sync.Mutex
+	current := Server(a)
+	h := &releaseFirst{db: db, handler: handler{kind: "k.v", lane: LaneLight, fn: func(ctx context.Context, _ Job, _ *Reporter) (any, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}}}
+	r := New(db, func() Server { mu.Lock(); defer mu.Unlock(); return current }, func(Server) {
+		mu.Lock()
+		current = b // paired with another server
+		mu.Unlock()
+	}, testOpts(), h)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { r.Run(ctx); close(done) }()
+	defer func() { cancel(); <-done }()
+	waitFor(t, func() bool {
+		sj, err := db.GetServerJob(context.Background(), 6)
+		return err == nil && sj.State == store.JobRunning
+	})
+	a.mu.Lock()
+	a.unauthed = true
+	a.mu.Unlock()
+	waitFor(t, func() bool {
+		sj, _ := db.GetServerJob(context.Background(), 6)
+		return sj != nil && sj.State == store.JobLost
+	})
+	if got := h.states(); !slices.Equal(got, []string{store.JobRunning}) {
+		t.Fatalf("job state at Abandon = %v, want [running] (released before it is recorded lost)", got)
+	}
+}

@@ -157,8 +157,10 @@ func (s *Scheduler) readmit(ctx context.Context, b store.Book) error {
 		_ = os.Remove(filepath.Join(b.WorkDir, AuditAcceptedFile))
 	}
 	// Clearing the status clears the error, the typed park_code, and any scheduled
-	// retry_at together.
-	if err := s.db.SetBookStatus(ctx, id, string(state.StatusNone), "", ""); err != nil {
+	// retry_at together, and only while the book still carries the status and error
+	// read into b: a Cancel landing since (a supervisor tick racing it, bridge#37) is
+	// never undone, so a cancelled book never runs again with no job following it.
+	if err := s.db.ClearBookStatusIf(ctx, id, b.Status, b.Error); err != nil {
 		return err
 	}
 	s.publishState(id, b.State, "", "", "", "")

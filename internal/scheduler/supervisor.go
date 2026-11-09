@@ -63,6 +63,11 @@ func (s *Scheduler) SupervisorApply(ctx context.Context, action string, bookID i
 		if err != nil {
 			return "", err
 		}
+		if IsCancelled(b) {
+			// A cancel ends the book for good (its job is gone or going): only a
+			// person's Retry, or a new job continuing it, takes it up again.
+			return "book was cancelled; not readmitted", nil
+		}
 		if b.Status == string(state.StatusFailed) || b.Status == string(state.StatusNeedsAttention) {
 			if action == "readmit" && b.RetryAt != "" {
 				due, parseErr := time.Parse(time.RFC3339Nano, b.RetryAt)
