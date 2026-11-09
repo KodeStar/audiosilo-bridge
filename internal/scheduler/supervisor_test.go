@@ -135,8 +135,8 @@ func TestSupervisorParkIncludesIncidentDetail(t *testing.T) {
 }
 
 // TestSupervisorParkEscalatePreservesUnderlyingParkCode: escalating a book that is ALREADY
-// parked with a typed code must update only the operator-facing message and keep the
-// underlying park code, so its Retry/readmit semantics survive. Rewriting a wrapped
+// parked with a typed code must keep the underlying park code and its own message (the
+// diagnosis is logged, bridge#24), so its Retry/readmit semantics survive. Rewriting a wrapped
 // fix_loop_exhausted park to supervisor_escalated made a manual Retry take the plain readmit
 // branch (no auditing/fixing supersede, no trajectory wipe), so the audit stage re-entered
 // with an exhausted round history and re-parked instantly. It also confirms an escalation of
@@ -191,8 +191,10 @@ func TestSupervisorParkEscalatePreservesUnderlyingParkCode(t *testing.T) {
 	if got.ParkCode != string(state.ParkFixLoopExhausted) {
 		t.Fatalf("park_code=%q after escalation, want fix_loop_exhausted preserved", got.ParkCode)
 	}
-	if got.Error != state.SupervisorMessagePrefix+detail {
-		t.Fatalf("error=%q, want the escalation message", got.Error)
+	// The park's own message, for people, is kept: the supervisor's diagnosis goes to
+	// the log (bridge#24).
+	if got.Error != "audit did not converge after 3 fix rounds" {
+		t.Fatalf("error=%q, want the park's own message kept", got.Error)
 	}
 
 	// A Retry now takes the fix_loop_exhausted readmit branch: auditing AND fixing
@@ -274,5 +276,28 @@ func TestSupervisorRerunPreservesDeliberatePause(t *testing.T) {
 	}
 	if got.State != string(state.QASweep) || got.Status != string(state.StatusPaused) || got.Error != "paused by operator" {
 		t.Fatalf("paused rerun changed operator status: %+v", got)
+	}
+}
+
+// A parked book with no message of its own takes the supervisor's on an
+// escalation, its park code kept.
+func TestSupervisorParkEscalateFillsAnEmptyParkMessage(t *testing.T) {
+	h := newHarness(t)
+	db := h.openDB(t)
+	ctx := context.Background()
+	s := New(db, events.NewHub(8), NewStubExecutor(0, 0), 2, h.workRoot, false)
+	b := h.addBook(t, db, "bare-park", "", "")
+	if err := db.SetBookStatus(ctx, b.ID, string(state.StatusNeedsAttention), "", string(state.ParkQANoConverge)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.SupervisorApply(ctx, "park_escalate", b.ID, b.State, "loop detected"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := db.GetBook(ctx, b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Error != state.SupervisorMessagePrefix+"loop detected" || got.ParkCode != string(state.ParkQANoConverge) {
+		t.Fatalf("got error=%q park_code=%q", got.Error, got.ParkCode)
 	}
 }

@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/kodestar/audiosilo-bridge/internal/state"
@@ -206,6 +208,15 @@ func (s *Scheduler) supervisorPark(ctx context.Context, bookID int64, code state
 	effectiveCode, retryAt := code, ""
 	if b.Status == string(state.StatusNeedsAttention) && b.ParkCode != "" {
 		effectiveCode, retryAt = state.ParkCode(b.ParkCode), b.RetryAt
+		// The park's own message is the one for people (the console and the
+		// Bridge's page show it beside the park's hint); the supervisor's
+		// diagnosis goes to the log, never over it (bridge#24). A park with no
+		// message of its own takes the supervisor's.
+		if strings.TrimSpace(b.Error) != "" {
+			slog.Info("supervisor: a parked book escalated; its park message kept", "book_id", bookID,
+				"park_code", b.ParkCode, "diagnosis", reason)
+			reason = b.Error
+		}
 	}
 	if err := s.db.SetBookStatusRetry(ctx, bookID, string(state.StatusNeedsAttention), reason, string(effectiveCode), retryAt); err != nil {
 		return "", err

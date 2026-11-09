@@ -59,6 +59,13 @@ func ErrorFingerprint(message string) string {
 // duration).
 var statusPattern = regexp.MustCompile(`\b(?:status(?:[ _]?code)?|http(?:/\d(?:\.\d)?)?|error(?:[ _]?code)?|code)["']?\s*[:=]?\s*(\d{3})\b`)
 
+// statusVerbPattern finds a status a reply is said to have had: "returned 503",
+// "responded with 429", "answered 401", the number ending the clause (the end,
+// punctuation, or the status's own reason phrase), so "returned 429 characters"
+// is nothing; and a status in brackets after a failure, "request failed (429)",
+// "refused (401)", never a bracketed number alone ("Book (503)"). bridge#24.
+var statusVerbPattern = regexp.MustCompile(`\b(?:returned|responded(?: with)?|answered)\s+(\d{3})(?:\s*(?:$|[:;,.)\]-])|\s+(?:too many|service unavailable|unauthori[sz]ed))|\b(?:failed|error|refused|denied|rejected)\s*\((\d{3})\)`)
+
 // errorKinds are the incidents classifyError reads, in the order it tries them:
 // each by its phrases, then by its status code (statusPattern). "refused the
 // credential" is agent.credentialRefused's own wording (whatever the provider said
@@ -78,6 +85,9 @@ func classifyError(message string) IncidentKind {
 	statuses := map[string]bool{}
 	for _, m := range statusPattern.FindAllStringSubmatch(low, -1) {
 		statuses[m[1]] = true
+	}
+	for _, m := range statusVerbPattern.FindAllStringSubmatch(low, -1) {
+		statuses[m[1]+m[2]] = true // one of the two groups matched
 	}
 	for _, k := range errorKinds {
 		if slices.ContainsFunc(k.phrases, func(sig string) bool { return strings.Contains(low, sig) }) || statuses[k.status] {
