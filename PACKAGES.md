@@ -1230,7 +1230,8 @@ internal/
             DetailLibrariesChecking from pairing until a heartbeat has listed the
             libraries and each is checked (LibrariesPending: no beat since the
             link changed, or mapping.Registry.Unchecked), BRIDGE-14; the agent
-            item (still required) says in plain words what to do and what the
+            item (optional since v2.7.0, bridge#36: podcasts, read-along,
+            chapters and Audible need no agent) says in plain words what to do and what the
             agent is for, by the kind of problem agentbox.Status reports
             (Problem, Other; the app converts it to setup.AgentProblem):
             not running, an image of another version (another protocol, or too old for the

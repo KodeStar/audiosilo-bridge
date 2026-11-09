@@ -28,12 +28,14 @@ describe('setup', () => {
     expect(setupLinks({ id: 'paired' })).toEqual([]);
   });
 
-  it('counts the required items left, never the optional one', () => {
+  it('counts the required items left, never the optional ones', () => {
     expect(remainingRequired(setupFixture())).toBe(0);
     expect(remainingRequired(setupFixture({ github: { done: false } }))).toBe(0);
+    // The agent is optional (bridge#36): a Bridge without one completes its setup.
+    expect(remainingRequired(setupFixture({ agent: { done: false } }))).toBe(0);
     expect(
       remainingRequired(setupFixture({ agent: { done: false }, budget: { done: false } })),
-    ).toBe(2);
+    ).toBe(1);
     expect(remainingRequired(null)).toBe(0);
   });
 
