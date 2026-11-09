@@ -8,19 +8,19 @@ import (
 // AudiblePreorder is a pending preorder an audible.poll remembers for an
 // account (migration 0012): when it was ordered, when a poll last saw it
 // pending in the orders listing, and the title as the catalog last described
-// it (Record: the caller's JSON, "" until a catalog read succeeded) with when
-// (FilledAt). Zero times are unknown.
+// it (Record: the caller's JSON, "" until a catalog read succeeded). Zero
+// times are unknown. (0012's filled_at column is no longer written: nothing
+// read it.)
 type AudiblePreorder struct {
 	ASIN       string
 	OrderedAt  time.Time
 	LastSeenAt time.Time
 	Record     string
-	FilledAt   time.Time
 }
 
 // AudiblePreorders lists account's remembered preorders, by ASIN.
 func (db *DB) AudiblePreorders(ctx context.Context, account string) ([]AudiblePreorder, error) {
-	rows, err := db.sql.QueryContext(ctx, `SELECT asin, ordered_at, last_seen_at, record, filled_at
+	rows, err := db.sql.QueryContext(ctx, `SELECT asin, ordered_at, last_seen_at, record
 		FROM audible_preorders WHERE account = ? ORDER BY asin`, account)
 	if err != nil {
 		return nil, err
@@ -29,11 +29,11 @@ func (db *DB) AudiblePreorders(ctx context.Context, account string) ([]AudiblePr
 	out := []AudiblePreorder{}
 	for rows.Next() {
 		var p AudiblePreorder
-		var ordered, seen, filled string
-		if err := rows.Scan(&p.ASIN, &ordered, &seen, &p.Record, &filled); err != nil {
+		var ordered, seen string
+		if err := rows.Scan(&p.ASIN, &ordered, &seen, &p.Record); err != nil {
 			return nil, err
 		}
-		p.OrderedAt, p.LastSeenAt, p.FilledAt = parseStamp(ordered), parseStamp(seen), parseStamp(filled)
+		p.OrderedAt, p.LastSeenAt = parseStamp(ordered), parseStamp(seen)
 		out = append(out, p)
 	}
 	return out, rows.Err()
@@ -50,14 +50,14 @@ func (db *DB) SetAudiblePreorders(ctx context.Context, account string, ps []Audi
 	if _, err := tx.ExecContext(ctx, `DELETE FROM audible_preorders WHERE account = ?`, account); err != nil {
 		return err
 	}
-	ins, err := tx.PrepareContext(ctx, `INSERT INTO audible_preorders (account, asin, ordered_at, last_seen_at, record, filled_at)
-		VALUES (?, ?, ?, ?, ?, ?)`)
+	ins, err := tx.PrepareContext(ctx, `INSERT INTO audible_preorders (account, asin, ordered_at, last_seen_at, record)
+		VALUES (?, ?, ?, ?, ?)`)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = ins.Close() }()
 	for _, p := range ps {
-		if _, err := ins.ExecContext(ctx, account, p.ASIN, stamp(p.OrderedAt), stamp(p.LastSeenAt), p.Record, stamp(p.FilledAt)); err != nil {
+		if _, err := ins.ExecContext(ctx, account, p.ASIN, stamp(p.OrderedAt), stamp(p.LastSeenAt), p.Record); err != nil {
 			return err
 		}
 	}

@@ -18,6 +18,13 @@ import (
 // (its own wait is 14 days).
 const PreorderDropAfter = 30 * 24 * time.Hour
 
+// DeliveredDropAfter is how long a remembered preorder whose order was seen
+// delivered is kept while the library still doesn't list it, counted from
+// when the order closed (bridge#60): the library lists a delivered title soon
+// after, so one it never does was refunded or released under another ASIN,
+// and holding it longer only keeps it out of the sync.
+const DeliveredDropAfter = 14 * 24 * time.Hour
+
 // undatedPreorderYears: a remembered preorder the catalog never dated (no
 // date, or a placeholder one) counts as released this many years after its
 // order was last seen pending, and is dropped PreorderDropAfter later: Audible
@@ -86,7 +93,7 @@ func (m *Manager) Preorders(ctx context.Context, id string, library []source.Rec
 		if err != nil && ctx.Err() == nil {
 			m.o.Log.Warn("audible: reading the preorders from the catalog failed: reporting what it said before", "account", id, "err", err)
 		}
-		fillPreorders(rows, recs, now)
+		fillPreorders(rows, recs)
 	}
 	rows = dropReleased(rows, now)
 
@@ -168,6 +175,8 @@ func reconcilePreorders(rows []store.AudiblePreorder, inLibrary map[string]bool,
 			}
 		} else if (cancelled[a] && !delivered[a]) || (!listed[a] && !oldest.IsZero() && !r.OrderedAt.IsZero() && oldest.Before(r.OrderedAt)) {
 			continue
+		} else if delivered[a] && deliveredLongAgo(r, now) {
+			continue
 		}
 		have[a] = true
 		out = append(out, r)
@@ -183,6 +192,19 @@ func reconcilePreorders(rows []store.AudiblePreorder, inLibrary map[string]bool,
 	return out
 }
 
+// deliveredLongAgo reports whether r, a remembered preorder whose order is
+// seen delivered, has waited DeliveredDropAfter for the library since its
+// order closed. The listing gives no closing date, so it counts from the
+// later of when a poll last saw the order pending and the catalog's release
+// date: both come before the close. Never, when neither is known.
+func deliveredLongAgo(r store.AudiblePreorder, now time.Time) bool {
+	closed := r.LastSeenAt
+	if d, err := time.Parse(time.DateOnly, preorderRecord(r).ReleaseDate); err == nil && d.After(closed) {
+		closed = d
+	}
+	return !closed.IsZero() && !now.Before(closed.Add(DeliveredDropAfter))
+}
+
 // orderedAt is an order's date, or now when it had none.
 func orderedAt(d, now time.Time) time.Time {
 	if d.IsZero() {
@@ -192,9 +214,8 @@ func orderedAt(d, now time.Time) time.Time {
 }
 
 // fillPreorders records the catalog's description of each row recs answers
-// for (by ASIN), filled at now. A row the catalog didn't answer keeps what it
-// had.
-func fillPreorders(rows []store.AudiblePreorder, recs []source.Record, now time.Time) {
+// for (by ASIN). A row the catalog didn't answer keeps what it had.
+func fillPreorders(rows []store.AudiblePreorder, recs []source.Record) {
 	by := make(map[string]source.Record, len(recs))
 	for _, r := range recs {
 		by[strings.ToUpper(strings.TrimSpace(r.ASIN))] = r
@@ -208,7 +229,7 @@ func fillPreorders(rows []store.AudiblePreorder, recs []source.Record, now time.
 		if err != nil {
 			continue
 		}
-		rows[i].Record, rows[i].FilledAt = string(raw), now
+		rows[i].Record = string(raw)
 	}
 }
 

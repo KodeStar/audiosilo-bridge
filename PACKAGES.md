@@ -2298,7 +2298,9 @@ internal/
             undescribed one by its ASIN alone). Dropped when the library lists it, its order is
             seen cancelled (neither pending nor Delivered, none pending; a Delivered order,
             ORDER_CLOSED + ORDER_SUCCEEDED, keeps it until the library lists it, so it never
-            drops out of a final poll in between), a listing reaching back past its order no
+            drops out of a final poll in between, but only DeliveredDropAfter, 14 days, from
+            the later of its last-seen-pending time and its release date: bridge#60, a refund
+            or a release under another ASIN), a listing reaching back past its order no
             longer holds it in any state, or PreorderDropAfter (30 days) after its release date (one the catalog
             never dated counts as released two years after its order was last seen pending). Never
             fails: orders or catalog failing is one warning each and the remembered ones are
