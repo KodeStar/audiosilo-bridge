@@ -58,15 +58,16 @@ func ErrorFingerprint(message string) string {
 //   - after a word that says it is a status ("status 429", "status code: 503",
 //     "HTTP 401", "HTTP/1.1 503", "API Error: 429", `"status":429`, "code=401");
 //   - one a reply is said to have had ("returned 503", "responded with 429",
-//     "answered 401"), the number ending the clause (the end, punctuation, or the
-//     status's own reason phrase), so "returned 429 characters" is nothing;
+//     "answered 401"), the number ending the clause (the end, punctuation, a
+//     spaced dash, or the status's own reason phrase), so "returned 429
+//     characters" and "returned 429-token" are nothing;
 //   - in brackets after a failure ("request failed (429)", "refused (401)"),
 //     never a bracketed number alone ("Book (503)").
 //
 // The last two are bridge#24's.
 var statusPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`\b(?:status(?:[ _]?code)?|http(?:/\d(?:\.\d)?)?|error(?:[ _]?code)?|code)["']?\s*[:=]?\s*(\d{3})\b`),
-	regexp.MustCompile(`\b(?:returned|responded(?: with)?|answered)\s+(\d{3})(?:\s*(?:$|[:;,.)\]-])|\s+(?:too many|service unavailable|unauthori[sz]ed))`),
+	regexp.MustCompile(`\b(?:returned|responded(?: with)?|answered)\s+(\d{3})(?:\s*(?:$|[:;,.)\]])|\s+-|\s+(?:too many|service unavailable|unauthori[sz]ed))`),
 	regexp.MustCompile(`\b(?:failed|error|refused|denied|rejected)\s*\((\d{3})\)`),
 }
 

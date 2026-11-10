@@ -49,6 +49,13 @@ func StatWithin(path string, d time.Duration) (fs.FileInfo, error) {
 		}()
 	}
 	statsMu.Unlock()
+	// An answer already in hand wins over a bound already spent (a select with
+	// both ready picks at random).
+	select {
+	case <-c.done:
+		return c.info, c.err
+	default:
+	}
 	t := time.NewTimer(d - time.Since(c.started))
 	defer t.Stop()
 	select {

@@ -3,6 +3,7 @@ package scheduler
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 
@@ -96,6 +97,48 @@ func TestSupervisorReadmitRacingCancelEndsCancelled(t *testing.T) {
 		}
 		if !IsCancelled(got) {
 			t.Fatalf("book %d after the race: status=%q error=%q, want cancelled", b.ID, got.Status, got.Error)
+		}
+	}
+}
+
+// bridge#37: every supervisor write holds only while the book still has the
+// status and error SupervisorApply read, so a Cancel landing between that read
+// and the write (the job's end stops the book while the supervisor's tick acts)
+// is never cleared nor parked over.
+func TestSupervisorWritesNeverUndoACancelThatLandedAfterTheRead(t *testing.T) {
+	h := newHarness(t)
+	db := h.openDB(t)
+	ctx := context.Background()
+	s := New(db, events.NewHub(8), NewStubExecutor(0, 0), 2, h.workRoot, false)
+	actions := map[string]func(store.Book) (string, error){
+		"terminate_requeue": func(b store.Book) (string, error) { return s.supervisorTerminateRequeue(ctx, b) },
+		"supersede_rerun": func(b store.Book) (string, error) {
+			return s.supervisorSupersedeRerun(ctx, b, string(state.Inspecting))
+		},
+		"stop_budget": func(b store.Book) (string, error) {
+			return s.supervisorPark(ctx, b, state.ParkSupervisorBudget, "over budget")
+		},
+		"park_escalate": func(b store.Book) (string, error) {
+			return s.supervisorPark(ctx, b, state.ParkSupervisorEscalated, state.SupervisorMessagePrefix+"loop")
+		},
+	}
+	for name, apply := range actions {
+		b := h.addBook(t, db, "stale-"+strings.ReplaceAll(name, "_", "-"), "", "")
+		if err := db.SetBookStatus(ctx, b.ID, string(state.StatusNeedsAttention), "waiting for a worker", string(state.ParkASRWorkerWaiting)); err != nil {
+			t.Fatal(err)
+		}
+		read, err := db.GetBook(ctx, b.ID) // the supervisor's read: parked
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Cancel(ctx, b.ID); err != nil { // the job's end lands here
+			t.Fatal(err)
+		}
+		if outcome, err := apply(read); err != nil || outcome != statusChangedOutcome {
+			t.Fatalf("%s over a cancel = %q, %v", name, outcome, err)
+		}
+		if got, err := db.GetBook(ctx, b.ID); err != nil || !IsCancelled(got) {
+			t.Fatalf("%s undid the cancel: %+v, %v", name, got, err)
 		}
 	}
 }

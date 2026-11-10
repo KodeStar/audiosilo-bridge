@@ -481,6 +481,8 @@ func TestClassifyErrorMatchesStatusTokensNotBareDigits(t *testing.T) {
 		{"chapter 401 has no transcript", ""},
 		{"the fact pass returned 429 characters", ""},
 		{"split returned 503 segments for the book", ""},
+		{"the agent returned 429-token notes", ""},
+		{"upstream returned 503 - try later", IncidentBackendUnavailable},
 		{"open /library/Book (503)/part 1.m4b: no such file", ""},
 		{"chapter (429) is empty", ""},
 		// Another status is nothing either.

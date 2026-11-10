@@ -150,7 +150,8 @@ internal/
             (ErrStatTimeout, wrapped in a PathError) with one stat in flight per path:
             a later ask of a path still out waits on that one, so a poll over a hung
             SMB mount never piles up blocked stats. The detected list's CheckCurrent
-            stats the audio through it (10 s).
+            stats the audio through it (pipeline.SourceStatWait, 10 s), and so does a
+            generate job's look at where the book is now before it (bookFileNow).
   execfile/ writes files the process will exec at once with syscall.ForkLock
             held for reading from open to close, so a concurrent fork can't hold
             the write descriptor and make the exec fail with ETXTBSY (WriteFile).
@@ -1450,9 +1451,10 @@ internal/
             0013 (bridge#31) adds idx_books_unfinished, a partial index whose WHERE is
             unfinishedBook word for word (SQLite takes it only then; a test reads the query
             plans), so the periodic passes scan only the books the engine may act on.
-            ClearBookStatusIf (bridge#37) is the readmit's clear: it writes only while the row
-            still has the status and error the caller read (ErrStatusChanged otherwise), so a
-            Cancel landing between a readmit's read and its write is never undone.
+            SetBookStatusIf (bridge#37) writes a status only while the row still has the status
+            and error the caller read (ErrStatusChanged otherwise), so a Cancel landing between
+            a supervisor action's read and its write is never undone; ClearBookStatusIf is its
+            clear (the readmit's).
   state/    per-book pipeline state machine: table-driven states/lanes/transitions,
             CanStart/NextState guards, the audit fix-loop cap. Pure, no I/O. M6 added
             ParkCode (typed park reasons - M7 added contrib_unavailable, core_needed,
@@ -1704,7 +1706,7 @@ internal/
             Phase 1d: chapters_not_detected is decided like markers_not_confident (a
             person's call: park_escalate for approval, never an automatic retry).
             bridge#24: classifyError reads 401, 429 and 503 only as status codes an
-            error states (statusPattern: after status, status code, HTTP[/1.1],
+            error states (statusPatterns: after status, status code, HTTP[/1.1],
             error[_code] or code, `"status":429` included), never bare digits, which
             work-dir names, file names and counts carry; its phrases still come
             first (agent's own "refused the credential" among them). handleIncident
@@ -1718,13 +1720,18 @@ internal/
             credential) is recorded once, not once per resume. A park only a person
             or a restart lifts (no retry_at) is recorded each time it comes back: a
             Retry records no supervisor run, and the park after it is news.
-            v2.7.0 (bridge#24): statusVerbPattern also reads a reply's status after
+            v2.7.0 (bridge#24): statusPatterns also read a reply's status after
             returned, responded [with] or answered when the number ends the clause
             (punctuation, the end, or the status's reason phrase: "returned 429
             characters" is nothing), and a bracketed status after failed, error,
             refused, denied or rejected ("request failed (429)"), never a bracketed
             number alone. The scheduler's park_escalate on a book already parked
             keeps the park's own message (for people) and logs the diagnosis.
+            bridge#37: SupervisorApply never acts on a cancelled book, and every
+            status write it makes (readmit, terminate_requeue, supersede_rerun,
+            stop_budget, park_escalate) holds only while the row still has the
+            status and error of its read (store.SetBookStatusIf), so a Cancel
+            landing in between is never cleared nor parked over.
   metaops/  meta.audiosilo.app client (coverage/lookup, capped 1h TTL caches,
             graceful degrade) + the PathAllowed/AllowedPath containment checks
             (Phase 1a passes the mapped mounts as the roots). glossary.go adds

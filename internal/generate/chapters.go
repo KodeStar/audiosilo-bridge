@@ -17,6 +17,7 @@ import (
 
 	"github.com/kodestar/audiosilo-bridge/internal/audio"
 	"github.com/kodestar/audiosilo-bridge/internal/chapterdetect"
+	"github.com/kodestar/audiosilo-bridge/internal/fsutil"
 	"github.com/kodestar/audiosilo-bridge/internal/jobs"
 	"github.com/kodestar/audiosilo-bridge/internal/link"
 	"github.com/kodestar/audiosilo-bridge/internal/metaops"
@@ -143,8 +144,11 @@ func markersFile(path string) string {
 // bookFileNow is the book's one audio file where the job has it now: at the path
 // the server's last answer moved the job to (adoptMove takes it up at the next
 // save, after the chapters were checked), else at the run's place; "" when that
-// can't be told.
-func (r *run) bookFileNow() string {
+// can't be told. The look is bounded as CheckCurrent's stat is (bridge#24):
+// markersFile's own stat of a hung mount would hold the poll before that one, so
+// a place that doesn't answer in time is fsutil.ErrStatTimeout, the audio out of
+// sight.
+func (r *run) bookFileNow() (string, error) {
 	full := r.place.full
 	if r.rep != nil {
 		if cur := r.rep.Path(); cur != "" && cur != r.jobPath {
@@ -153,7 +157,10 @@ func (r *run) bookFileNow() string {
 			}
 		}
 	}
-	return markersFile(full)
+	if _, err := fsutil.StatWithin(full, pipeline.SourceStatWait); errors.Is(err, fsutil.ErrStatTimeout) {
+		return "", err
+	}
+	return markersFile(full), nil
 }
 
 // errAudioUnseen: the book's audio can't be looked at to tell whether the
@@ -211,7 +218,11 @@ func (h *Handler) refreshChapters(r *run, b store.Book) (pipeline.DetectedChapte
 		}
 		// The audio where the job finds it now (the server moves a job with its
 		// book); the manifest's path when that can't be told.
-		current, err := d.CheckCurrent(b.WorkDir, r.bookFileNow())
+		file, err := r.bookFileNow()
+		current := false
+		if err == nil {
+			current, err = d.CheckCurrent(b.WorkDir, file)
+		}
 		if err != nil {
 			// The audio can't be looked at now (a mount gone for a moment): not
 			// current, and asked again at the next look rather than kept.
