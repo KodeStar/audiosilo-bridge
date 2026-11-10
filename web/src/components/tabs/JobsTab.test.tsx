@@ -212,7 +212,7 @@ describe('JobsTab', () => {
           jobs: [
             generateJobFixture({
               error: 'something the engine said',
-              progress: { step: 'x', park: { code: 'new_park' } },
+              progress: { step: 'x', park: { code: 'new_park', hint: '' } },
             }),
             generateJobFixture({ id: 13, kind: 'future.kind', progress: { step: 'x' } }),
           ],

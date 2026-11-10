@@ -19,7 +19,12 @@ export function setupFixture(
 ): Setup {
   const ids = ['paired', 'libraries', 'asr', 'agent', 'budget', 'github'];
   return {
-    items: ids.map((id) => ({ id, done: true, required: id !== 'github' && id !== 'agent', ...items[id] })),
+    items: ids.map((id) => ({
+      id,
+      done: true,
+      required: id !== 'github' && id !== 'agent',
+      ...items[id],
+    })),
     can_contribute: true,
     github_login: 'octocat',
     ...over,

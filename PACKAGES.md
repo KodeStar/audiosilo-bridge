@@ -3413,6 +3413,14 @@ web/          the Bridge's page: Vite + React 19 + TS + Tailwind v4 (npm, Node 2
               Settings, Accounts, Workers, Logs), thin over src/lib. Jobs poll every 3 s while one
               runs (a PARKED job counts as needs attention, so it polls at 15 s: it may
               wait for days), else 15 s; a bridge.verify result renders as a file table.
+              v2.7.0: the page follows the system's colour scheme (BRIDGE-17): dark by
+              default, and under prefers-color-scheme light index.css redefines the brand
+              tokens and the stock state shades the page uses with the server console's
+              light palette (src/theme.test.ts fails a token or a used red/amber/green/pink
+              shade the light block misses); public/favicon.svg (also in the
+              placeholder) is linked from index.html. The Jobs tab names a known kind
+              in words only (the kind is the label's tooltip) and leads a park with its
+              hint, the engine's message a Details line under it (bridge#13).
               Phase 1a: the hash is a Route (routeFromHash: "#jobs", "#/logs", and
               "#/jobs/<server job id>", the server console's link to one job, which
               the Jobs tab shows alone as FocusedJob); src/lib/generate.ts reads a

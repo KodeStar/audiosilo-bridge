@@ -52,3 +52,20 @@ func TestMissingFileIs404(t *testing.T) {
 		}
 	}
 }
+
+// The page links its icon and the icon is served (the v2.5.1 sweep saw the
+// favicon request 404, bridge#35), as an SVG.
+func TestServesTheFavicon(t *testing.T) {
+	t.Parallel()
+	h := New()
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	if !strings.Contains(rec.Body.String(), `href="/favicon.svg"`) {
+		t.Error("the page links no icon")
+	}
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/favicon.svg", nil))
+	if rec.Code != http.StatusOK || !strings.HasPrefix(rec.Header().Get("Content-Type"), "image/svg+xml") {
+		t.Fatalf("GET /favicon.svg = %d, %q", rec.Code, rec.Header().Get("Content-Type"))
+	}
+}
