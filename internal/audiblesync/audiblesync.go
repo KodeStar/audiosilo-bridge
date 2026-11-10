@@ -613,6 +613,9 @@ func (h *Handler) reassert(ctx context.Context, account string, x store.AudibleP
 		res.Reasserted++
 		h.o.Log.Info("audible: Audible holds an older place than the one written to it; writing the server's place again",
 			"account", account, "asin", x.ASIN, "position_ms", x.RowMs)
+	case x.ReassertedMs == x.RowMs:
+		h.o.Log.Info("audible: Audible went behind a place already written again once; left alone",
+			"account", account, "asin", x.ASIN, "position_ms", x.RowMs)
 	}
 }
 

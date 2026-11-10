@@ -71,8 +71,8 @@ func scanAudiblePush(row interface{ Scan(...any) error }) (AudiblePush, error) {
 // unlisted (a title the console stopped syncing, or one that lost its match),
 // and its waiting place forgotten. The pushes, places heard and cached
 // content references stay. A title whose book changed forgets its waiting
-// place too, and the other book's row last read (the next one read for the
-// new book is a new place).
+// place too, the other book's row last read (the next one read for the
+// new book is a new place) and its re-asserted place.
 func (db *DB) ListAudibleSync(ctx context.Context, account string, titles []AudibleSyncTitle) error {
 	tx, err := db.sql.BeginTx(ctx, nil)
 	if err != nil {
@@ -88,6 +88,7 @@ func (db *DB) ListAudibleSync(ctx context.Context, account string, titles []Audi
 			want_ms = CASE WHEN library_id = excluded.library_id AND path = excluded.path THEN want_ms ELSE NULL END,
 			row_ms = CASE WHEN library_id = excluded.library_id AND path = excluded.path THEN row_ms ELSE -1 END,
 			row_seen = CASE WHEN library_id = excluded.library_id AND path = excluded.path THEN row_seen ELSE '' END,
+			reasserted_ms = CASE WHEN library_id = excluded.library_id AND path = excluded.path THEN reasserted_ms ELSE -1 END,
 			library_id = excluded.library_id, path = excluded.path, runtime_s = excluded.runtime_s, listed = 1`)
 	if err != nil {
 		return err
@@ -164,7 +165,7 @@ func (db *DB) SeenAudibleRow(ctx context.Context, account, asin string, row Audi
 // the last audible.sync didn't list for it (a new match, a re-match, a title
 // synced again, a remap): it waits unlisted, never pushed, until the next
 // sync lists the title for that book (ListAudibleSync keeps it) or doesn't
-// (it goes).
+// (it goes). Another book forgets the re-asserted place (reasserted_ms).
 func (db *DB) PendAudiblePush(ctx context.Context, account, asin string, libraryID int64, path string, want bool,
 	row AudibleRow) error {
 	var ms *int64
@@ -174,7 +175,8 @@ func (db *DB) PendAudiblePush(ctx context.Context, account, asin string, library
 	_, err := db.sql.ExecContext(ctx, `INSERT INTO audible_push (account, asin, library_id, path, listed, want_ms, row_ms, row_seen)
 		VALUES (?, ?, ?, ?, 0, ?, ?, ?)
 		ON CONFLICT(account, asin) DO UPDATE SET library_id = excluded.library_id, path = excluded.path, listed = 0,
-			want_ms = excluded.want_ms, row_ms = excluded.row_ms, row_seen = excluded.row_seen`,
+			want_ms = excluded.want_ms, row_ms = excluded.row_ms, row_seen = excluded.row_seen,
+			reasserted_ms = CASE WHEN library_id = excluded.library_id AND path = excluded.path THEN reasserted_ms ELSE -1 END`,
 		account, asin, libraryID, path, ms, row.Ms, timestamp(row.Seen))
 	return err
 }

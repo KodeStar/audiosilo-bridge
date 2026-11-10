@@ -2545,7 +2545,7 @@ internal/
             migration 0014; owner decision after review): a sync can't tell the app's stale
             upload from a listener who rewound in the Audible app, so Audible behind the same
             written place again is left alone until the push writes a new place (AudiblePushed
-            of another place resets it).
+            of another place resets it, as does another book for the title).
             Deps: audible, audibleacct, jobs, link, store.
   importjob/ matching and placement against a library (the manager's, ported):
             BookMatcher over []link.LibraryBook (reused pkg/match.NewIndexWith under

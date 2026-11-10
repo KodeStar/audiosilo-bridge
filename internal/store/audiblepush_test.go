@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"testing"
 	"time"
@@ -522,5 +523,68 @@ func TestRearmAudiblePush(t *testing.T) {
 	}
 	if y := read(); y.ReassertedMs != -1 || !rearm(y, later.Add(2*time.Hour)) {
 		t.Fatalf("a new place wasn't re-armed: %+v", read())
+	}
+	// Another book forgets the re-asserted place, whether the sync lists it
+	// there or the push pends a row on it first; the same book keeps it.
+	if err := db.ListAudibleSync(ctx, a.ID, []AudibleSyncTitle{{ASIN: "B000000001", LibraryID: 1, Path: "A/One", RuntimeS: 36000}}); err != nil {
+		t.Fatal(err)
+	}
+	if y := read(); y.ReassertedMs != 7_000_000 {
+		t.Fatalf("the same book forgot its re-asserted place: %+v", y)
+	}
+	if err := db.ListAudibleSync(ctx, a.ID, []AudibleSyncTitle{{ASIN: "B000000001", LibraryID: 1, Path: "A/Two", RuntimeS: 36000}}); err != nil {
+		t.Fatal(err)
+	}
+	if y := read(); y.ReassertedMs != -1 {
+		t.Fatalf("another book kept the re-asserted place: %+v", y)
+	}
+	if err := db.ListAudibleSync(ctx, a.ID, []AudibleSyncTitle{{ASIN: "B000000001", LibraryID: 1, Path: "A/Two", RuntimeS: 36000}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.WantAudiblePush(ctx, a.ID, "B000000001", AudibleRow{Ms: 8_000_000, Seen: later}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AudiblePushed(ctx, a.ID, "B000000001", 8_000_000, later.Add(3*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if !rearm(read(), later.Add(4*time.Hour)) {
+		t.Fatalf("not re-armed: %+v", read())
+	}
+	if err := db.PendAudiblePush(ctx, a.ID, "B000000001", 1, "A/Three", false, AudibleRow{Ms: 8_000_000, Seen: later}); err != nil {
+		t.Fatal(err)
+	}
+	if y := read(); y.ReassertedMs != -1 {
+		t.Fatalf("a pended row on another book kept the re-asserted place: %+v", y)
+	}
+}
+
+// Migration 0014 on a Bridge that already syncs: an existing push row has no
+// re-asserted place (-1), so it may be re-armed once.
+func TestMigrationReasserted(t *testing.T) {
+	ctx := context.Background()
+	sqldb, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sqldb.SetMaxOpenConns(1)
+	db := &DB{sql: sqldb}
+	t.Cleanup(func() { _ = db.Close() })
+	if err := db.migrateTo(ctx, "0012_audible_preorders.sql"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sqldb.ExecContext(ctx, `INSERT INTO audible_push (account, asin, library_id, path, listed, last_ms, at, row_ms, row_seen)
+		VALUES ('abcd1234', 'B000000001', 1, 'A/One', 1, 5000000, '2026-11-03T10:04:00.000000000Z', 5000000,
+			'2026-11-03T10:00:00.000000000Z')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	x, err := db.GetAudiblePush(ctx, "abcd1234", "B000000001")
+	if err != nil || x.ReassertedMs != -1 {
+		t.Fatalf("migrated row = %+v, %v", x, err)
+	}
+	if ok, err := db.RearmAudiblePush(ctx, x, time.Date(2026, 11, 3, 11, 0, 0, 0, time.UTC)); err != nil || !ok {
+		t.Fatalf("a migrated row wasn't re-armed: %v, %v", ok, err)
 	}
 }
