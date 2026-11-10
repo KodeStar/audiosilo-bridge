@@ -71,7 +71,7 @@ func TestChecklistMissing(t *testing.T) {
 	if l.Done || l.Detail != "1 of 2 libraries writable" || len(l.LibraryIDs) != 1 || l.LibraryIDs[0] != 3 {
 		t.Fatalf("libraries = %+v", l)
 	}
-	if a := item(t, s, ItemAgent); a.Done || !a.Required || a.Detail != DetailAgentNoCredential {
+	if a := item(t, s, ItemAgent); a.Done || a.Required || a.Detail != DetailAgentNoCredential {
 		t.Fatalf("agent = %+v", a)
 	}
 	if a := item(t, s, ItemASR); a.Done || a.Detail != "waiting for an ASR worker" { // the page matches these words
@@ -135,7 +135,7 @@ func TestChecklistAgentWords(t *testing.T) {
 	in := done()
 	in.Agent = Agent{Backend: "claude", Detail: "the agent container isn't running (it hasn't written its status into the staging dir; check that both containers mount the same staging volume)"}
 	a := item(t, Checklist(in), ItemAgent)
-	if a.Done || !a.Required || a.Detail != DetailAgentNotRunning {
+	if a.Done || a.Required || a.Detail != DetailAgentNotRunning {
 		t.Fatalf("no agent container: %+v", a)
 	}
 	// Each says what the agent is for, but the backend mismatch, which names both.
@@ -197,7 +197,7 @@ func TestChecklistAgentProblems(t *testing.T) {
 		in := done()
 		in.Agent = c.agent
 		a := item(t, Checklist(in), ItemAgent)
-		if a.Done || !a.Required || a.Detail != c.want {
+		if a.Done || a.Required || a.Detail != c.want {
 			t.Errorf("%+v: item %+v, want detail %q", c.agent, a, c.want)
 		}
 		if c.agent.Problem != AgentNoCredential && c.agent.Problem != AgentOtherBackend && strings.Contains(a.Detail, "sign-in") {
@@ -249,5 +249,25 @@ func TestAudibleItem(t *testing.T) {
 	in.Audible = Audible{Accounts: 2, SyncFailing: 2, SyncError: strings.Repeat("x", 400)}
 	if a := item(t, Checklist(in), ItemAudible); len(a.Detail) > maxDetail {
 		t.Fatalf("a long error isn't cut: %d", len(a.Detail))
+	}
+}
+
+// bridge#36: the agent is optional. A Bridge with no agent container (one for
+// podcasts, read-along, chapters or Audible) completes its setup, the item
+// still saying what to do; a missing required item still keeps it incomplete.
+func TestAgentIsOptional(t *testing.T) {
+	in := done()
+	in.Agent = Agent{Backend: "claude"} // no agent container at all
+	s := Checklist(in)
+	a := item(t, s, ItemAgent)
+	if a.Done || a.Required || a.Detail != DetailAgentNotRunning {
+		t.Fatalf("agent = %+v", a)
+	}
+	if !Complete(s) {
+		t.Fatal("a Bridge without an agent never completes its setup")
+	}
+	in.BudgetReviewed = false
+	if Complete(Checklist(in)) {
+		t.Fatal("complete with the budget not reviewed")
 	}
 }

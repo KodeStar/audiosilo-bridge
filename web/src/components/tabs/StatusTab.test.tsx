@@ -50,7 +50,8 @@ describe('StatusTab', () => {
     });
     render(<StatusTab client={api()} />);
     const card = await screen.findByRole('region', { name: 'Get set up' });
-    expect(within(card).getByText('3 steps left')).toBeInTheDocument();
+    // The agent is optional (bridge#36): libraries and the budget are the two left.
+    expect(within(card).getByText('2 steps left')).toBeInTheDocument();
     expect(within(card).getByText('1 of 2 libraries writable')).toBeInTheDocument();
     const links = within(card)
       .getAllByRole('link')

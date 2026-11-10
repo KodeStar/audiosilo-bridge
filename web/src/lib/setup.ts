@@ -9,7 +9,10 @@ export const SETUP_ITEMS: Record<SetupItemId, { label: string; tab: TabId | null
   paired: { label: 'Pair with a server', tab: null },
   libraries: { label: 'Map the libraries', tab: 'libraries' },
   asr: { label: 'Speech recognition', tab: 'settings' },
-  agent: { label: "Set the agent's credential", tab: 'accounts' },
+  agent: {
+    label: "Set the agent's credential (optional, for characters, recaps and descriptions)",
+    tab: 'accounts',
+  },
   budget: { label: 'Review the monthly budget', tab: 'settings' },
   github: { label: 'Sign in to GitHub (optional, to share with the community)', tab: 'accounts' },
   audible: { label: 'Sign in to Audible (optional)', tab: 'accounts' },

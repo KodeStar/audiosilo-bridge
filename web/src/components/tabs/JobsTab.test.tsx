@@ -161,10 +161,18 @@ describe('JobsTab', () => {
     expect(within(card).getByText('Needs attention')).toBeInTheDocument();
     // The park's code is for the log: the page says it in words.
     expect(within(card).queryByText(/agent_unavailable/)).toBeNull();
-    expect(within(card).getByText('agent backend unavailable')).toBeInTheDocument();
+    // The hint leads; the engine's own message is a detail under it (bridge#13).
     expect(
       within(card).getByText('Check the agent container is running and logged in.'),
     ).toBeInTheDocument();
+    const engineMsg = within(card).getByText('agent backend unavailable');
+    expect(engineMsg.closest('details')).not.toBeNull();
+    // The kind is named in words, its code kept only as the label's tooltip.
+    expect(within(card).queryByText('sidecars.generate')).toBeNull();
+    expect(within(card).getByText('Characters and recaps')).toHaveAttribute(
+      'title',
+      'sidecars.generate',
+    );
     expect(within(card).getByText('$1.50 spent - from the ebook')).toBeInTheDocument();
 
     await userEvent.click(within(card).getByRole('button', { name: 'Retry' }));
@@ -195,6 +203,27 @@ describe('JobsTab', () => {
     expect(within(card).getByText('Start a worker.')).toBeInTheDocument();
     expect(screen.getByText(/a listener in the player/)).toBeInTheDocument();
     expect(screen.queryByText(/Jobs are started from/)).toBeNull();
+  });
+
+  it("shows the engine's message for a park with no hint, and an unnamed kind as it is", async () => {
+    mockFetch({
+      'GET /api/jobs': {
+        body: {
+          jobs: [
+            generateJobFixture({
+              error: 'something the engine said',
+              progress: { step: 'x', park: { code: 'new_park', hint: '' } },
+            }),
+            generateJobFixture({ id: 13, kind: 'future.kind', progress: { step: 'x' } }),
+          ],
+        },
+      },
+    });
+    render(<JobsTab client={api()} />);
+    const card = await screen.findByRole('article', { name: 'Job 12' });
+    expect(within(card).getByText('something the engine said').closest('details')).toBeNull();
+    const other = await screen.findByRole('article', { name: 'Job 13' });
+    expect(within(other).getByText('future.kind')).toBeInTheDocument();
   });
 
   it("shows a done sidecars job's result", async () => {

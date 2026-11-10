@@ -1,9 +1,12 @@
 // Package setup is the Bridge's setup checklist (BRIDGE-PLAN.md Phase 2b,
 // FIRST-RUN-PLAN.md Phase F2): paired with a server; every library mapping
 // checked and writable (decision 13); speech recognition ready (the Bridge's
-// own, or a native worker); the agent's credential set; the monthly budget
-// reviewed (decision 7); GitHub signed in (optional, only for contributing,
-// decision 17); an Audible account signed in (optional, Phase 4a). Checklist
+// own, or a native worker); the agent's credential set (optional since
+// bridge#36: only characters, recaps and descriptions need the agent, so a
+// Bridge for podcasts, read-along, chapters or Audible completes without it);
+// the monthly budget reviewed (decision 7); GitHub signed in (optional, only for
+// contributing, decision 17); an Audible account signed in (optional, Phase
+// 4a). Checklist
 // is pure: the app gathers the inputs, the heartbeat carries the result to the
 // server (link.Setup) and the Bridge's page leads its Status tab with it until
 // every required item is done.
@@ -200,7 +203,8 @@ func Checklist(in Inputs) link.Setup {
 	}
 	add(ItemASR, asrDone, true, asrDetail)
 
-	// The item stays required (FIRST-RUN F2); the Accounts tab carries the
+	// Optional (the owner's call on bridge#36, reversing FIRST-RUN F2): podcasts,
+	// read-along, chapters and Audible need no agent. The Accounts tab carries the
 	// agent's full state, the checklist only what to do in plain words.
 	agentDetail := in.Agent.Backend
 	switch {
@@ -218,7 +222,7 @@ func Checklist(in Inputs) link.Setup {
 	default:
 		agentDetail = DetailAgentNotRunning
 	}
-	add(ItemAgent, in.Agent.Available, true, agentDetail)
+	add(ItemAgent, in.Agent.Available, false, agentDetail)
 
 	budget := "no monthly cap"
 	if in.MonthlyBudgetUSD > 0 {

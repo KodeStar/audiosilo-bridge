@@ -3,8 +3,11 @@ package scheduler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log/slog"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/kodestar/audiosilo-bridge/internal/state"
@@ -57,12 +60,22 @@ func (s *Scheduler) SupervisorRuntime(books []store.Book) SupervisorRuntimeSnaps
 // SupervisorApply executes the supervisor's small predefined playbook. The string
 // action is mapped at the server seam so scheduler does not depend on supervisor.
 func (s *Scheduler) SupervisorApply(ctx context.Context, action string, bookID int64, stage string, detail ...string) (string, error) {
+	var b store.Book
 	switch action {
-	case "retry", "readmit":
-		b, err := s.db.GetBook(ctx, bookID)
-		if err != nil {
+	case "retry", "readmit", "terminate_requeue", "supersede_rerun", "stop_budget", "park_escalate":
+		var err error
+		if b, err = s.db.GetBook(ctx, bookID); err != nil {
 			return "", err
 		}
+		if IsCancelled(b) {
+			// A cancel ends the book for good (its job is gone or going): only a
+			// person's Retry, or a new job continuing it, takes it up again, and no
+			// supervisor action writes over it (bridge#37).
+			return "book was cancelled; left as it is", nil
+		}
+	}
+	switch action {
+	case "retry", "readmit":
 		if b.Status == string(state.StatusFailed) || b.Status == string(state.StatusNeedsAttention) {
 			if action == "readmit" && b.RetryAt != "" {
 				due, parseErr := time.Parse(time.RFC3339Nano, b.RetryAt)
@@ -70,7 +83,9 @@ func (s *Scheduler) SupervisorApply(ctx context.Context, action string, bookID i
 					return "existing transient readmission window retained until " + b.RetryAt, nil
 				}
 			}
-			if err := s.readmit(ctx, b); err != nil {
+			if err := s.readmit(ctx, b); errors.Is(err, store.ErrStatusChanged) {
+				return statusChangedOutcome, nil
+			} else if err != nil {
 				return "", err
 			}
 			return "book readmitted", nil
@@ -80,17 +95,17 @@ func (s *Scheduler) SupervisorApply(ctx context.Context, action string, bookID i
 		s.notify()
 		return "scheduler dispatch nudged", nil
 	case "terminate_requeue":
-		return s.supervisorTerminateRequeue(ctx, bookID)
+		return s.supervisorTerminateRequeue(ctx, b)
 	case "supersede_rerun":
-		return s.supervisorSupersedeRerun(ctx, bookID, stage)
+		return s.supervisorSupersedeRerun(ctx, b, stage)
 	case "stop_budget":
-		return s.supervisorPark(ctx, bookID, state.ParkSupervisorBudget, "supervisor stopped the stage at its configured duration/token/cost limit")
+		return s.supervisorPark(ctx, b, state.ParkSupervisorBudget, "supervisor stopped the stage at its configured duration/token/cost limit")
 	case "park_escalate":
 		message := "supervisor parked this book for operator review"
 		if len(detail) > 0 && detail[0] != "" {
 			message = state.SupervisorMessagePrefix + detail[0]
 		}
-		return s.supervisorPark(ctx, bookID, state.ParkSupervisorEscalated, message)
+		return s.supervisorPark(ctx, b, state.ParkSupervisorEscalated, message)
 	case "reallocate":
 		s.notify()
 		return "idle configured capacity was offered queued work", nil
@@ -99,11 +114,17 @@ func (s *Scheduler) SupervisorApply(ctx context.Context, action string, bookID i
 	}
 }
 
-func (s *Scheduler) supervisorTerminateRequeue(ctx context.Context, bookID int64) (string, error) {
-	b, err := s.db.GetBook(ctx, bookID)
-	if err != nil {
-		return "", err
-	}
+// statusChangedOutcome is a supervisor action's outcome when the book's status
+// changed between its read and the action's write (a Cancel landing there,
+// bridge#37): the write is never made over it.
+const statusChangedOutcome = "the book's status changed meanwhile; left as it is"
+
+// The supervisor's writes below take the book SupervisorApply read (and checked
+// isn't cancelled), and each status write holds only while the row still has the
+// status and error of that read (store.SetBookStatusIf).
+
+func (s *Scheduler) supervisorTerminateRequeue(ctx context.Context, b store.Book) (string, error) {
+	bookID := b.ID
 	s.mu.Lock()
 	_, active := s.inflight[bookID]
 	s.mu.Unlock()
@@ -126,7 +147,9 @@ func (s *Scheduler) supervisorTerminateRequeue(ctx context.Context, bookID int64
 		}
 	}
 	if b.Status != "" {
-		if err := s.db.SetBookStatus(ctx, b.ID, "", "", ""); err != nil {
+		if err := s.db.ClearBookStatusIf(ctx, b.ID, b.Status, b.Error); errors.Is(err, store.ErrStatusChanged) {
+			return statusChangedOutcome, nil
+		} else if err != nil {
 			return "", err
 		}
 	}
@@ -137,14 +160,11 @@ func (s *Scheduler) supervisorTerminateRequeue(ctx context.Context, bookID int64
 	return "no active invocation remained; scheduler nudged", nil
 }
 
-func (s *Scheduler) supervisorSupersedeRerun(ctx context.Context, bookID int64, stageName string) (string, error) {
+func (s *Scheduler) supervisorSupersedeRerun(ctx context.Context, b store.Book, stageName string) (string, error) {
+	bookID := b.ID
 	stage := state.State(stageName)
 	if !state.IsStage(stage) || stage == state.Contributing {
 		return "", ErrInvalidOp
-	}
-	b, err := s.db.GetBook(ctx, bookID)
-	if err != nil {
-		return "", err
 	}
 	if state.Order(state.State(b.State)) >= state.Order(state.Ready) {
 		return "", ErrInvalidOp
@@ -167,11 +187,18 @@ func (s *Scheduler) supervisorSupersedeRerun(ctx context.Context, bookID int64, 
 			_ = os.Remove(SentinelPath(b.WorkDir, string(candidate)))
 		}
 	}
+	// The state alone first (a status set since is kept), then a clear of the
+	// status read, unless it is a deliberate pause.
+	if err := s.db.SetBookPipelineState(ctx, bookID, string(stage)); err != nil {
+		return "", err
+	}
 	status, errMessage, parkCode := "", "", ""
 	if b.Status == string(state.StatusPaused) {
 		status, errMessage, parkCode = b.Status, b.Error, b.ParkCode
-	}
-	if err := s.db.SetBookState(ctx, bookID, string(stage), status, errMessage, parkCode); err != nil {
+	} else if err := s.db.ClearBookStatusIf(ctx, bookID, b.Status, b.Error); errors.Is(err, store.ErrStatusChanged) {
+		s.notify()
+		return statusChangedOutcome, nil
+	} else if err != nil {
 		return "", err
 	}
 	s.publishState(bookID, string(stage), status, errMessage, parkCode, "")
@@ -179,11 +206,8 @@ func (s *Scheduler) supervisorSupersedeRerun(ctx context.Context, bookID int64, 
 	return "invalidated stage and later sentinels; rerun queued with released inputs/code", nil
 }
 
-func (s *Scheduler) supervisorPark(ctx context.Context, bookID int64, code state.ParkCode, reason string) (string, error) {
-	b, err := s.db.GetBook(ctx, bookID)
-	if err != nil {
-		return "", err
-	}
+func (s *Scheduler) supervisorPark(ctx context.Context, b store.Book, code state.ParkCode, reason string) (string, error) {
+	bookID := b.ID
 	if state.IsTerminal(state.State(b.State)) {
 		return "", ErrInvalidOp
 	}
@@ -201,8 +225,20 @@ func (s *Scheduler) supervisorPark(ctx context.Context, bookID int64, code state
 	effectiveCode, retryAt := code, ""
 	if b.Status == string(state.StatusNeedsAttention) && b.ParkCode != "" {
 		effectiveCode, retryAt = state.ParkCode(b.ParkCode), b.RetryAt
+		// The park's own message is the one for people (the console and the
+		// Bridge's page show it beside the park's hint); the supervisor's
+		// diagnosis goes to the log, never over it (bridge#24). A park with no
+		// message of its own takes the supervisor's.
+		if strings.TrimSpace(b.Error) != "" {
+			slog.Info("supervisor: a parked book escalated; its park message kept", "book_id", bookID,
+				"park_code", b.ParkCode, "diagnosis", reason)
+			reason = b.Error
+		}
 	}
-	if err := s.db.SetBookStatusRetry(ctx, bookID, string(state.StatusNeedsAttention), reason, string(effectiveCode), retryAt); err != nil {
+	err := s.db.SetBookStatusIf(ctx, bookID, b.Status, b.Error, string(state.StatusNeedsAttention), reason, string(effectiveCode), retryAt)
+	if errors.Is(err, store.ErrStatusChanged) {
+		return statusChangedOutcome, nil
+	} else if err != nil {
 		return "", err
 	}
 	s.cancelInflight(bookID)

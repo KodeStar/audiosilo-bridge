@@ -25,6 +25,56 @@ html {
   color-scheme: dark;
 }
 
+/* The light theme (BRIDGE-17, bridge#35): the page follows the system's
+   preference, as the console and the player do, with the console's light
+   palette (audiosilo-server admin-ui globals.css: background, card, muted,
+   border, foreground, muted-foreground, brand, success, warning, destructive and
+   their soft fills; the warning and success inks a shade darker than the
+   console's, #965705 and #0b7553, so small text on their soft fills, the
+   surfaces and the raised fill keeps 4.5:1 or better). The brand tokens are
+   redefined, and so are the few stock shades the page uses for states
+   (badges, notices, the danger button), which are dark-theme shades:
+   unlayered, so they win over Tailwind's theme layer. */
+@media (prefers-color-scheme: light) {
+  :root {
+    --color-deep: #f5f7fa;
+    --color-surface: #ffffff;
+    --color-raised: #eef1f5;
+    --color-edge: #e0e5ed;
+    --color-hi: #121c36;
+    --color-body: #18244a;
+    --color-dim: #5b6680;
+    --color-success: #0b7553;
+
+    --color-pink-300: #a3195a;
+    --color-pink-500: #a3195a;
+    --color-pink-600: #db2777;
+    --color-pink-700: #a3195a;
+    --color-pink-950: #fce7f1;
+
+    --color-red-200: #c42b3c;
+    --color-red-300: #c42b3c;
+    --color-red-600: #c42b3c;
+    --color-red-800: color-mix(in oklab, #c42b3c 40%, #ffffff);
+    --color-red-950: #fde8ea;
+
+    --color-amber-200: #965705;
+    --color-amber-300: #965705;
+    --color-amber-700: color-mix(in oklab, #a86206 40%, #ffffff);
+    --color-amber-950: #fdf1dc;
+
+    --color-green-200: #0b7553;
+    --color-green-300: #0b7553;
+    --color-green-700: color-mix(in oklab, #0d7f5a 40%, #ffffff);
+    --color-green-800: color-mix(in oklab, #0d7f5a 40%, #ffffff);
+    --color-green-950: #e1f5ec;
+  }
+
+  html {
+    color-scheme: light;
+  }
+}
+
 body {
   margin: 0;
   min-height: 100vh;

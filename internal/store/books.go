@@ -632,6 +632,32 @@ func (db *DB) SetBookStatusRetry(ctx context.Context, id int64, status, errMsg, 
 	return checkAffected(res, err)
 }
 
+// ErrStatusChanged is ClearBookStatusIf for a book whose status or error is no
+// longer the one the caller read.
+var ErrStatusChanged = errors.New("the book's status changed since it was read")
+
+// SetBookStatusIf is SetBookStatusRetry, but only while the row still carries the
+// status and error the caller read (fromStatus, fromErr; in the one statement): a
+// write that landed in between (a Cancel marking the book failed, bridge#37) is
+// never undone. ErrStatusChanged when it no longer does (or the book went).
+func (db *DB) SetBookStatusIf(ctx context.Context, id int64, fromStatus, fromErr, status, errMsg, parkCode, retryAt string) error {
+	res, err := db.sql.ExecContext(ctx,
+		`UPDATE books SET status=?, error=?, park_code=?, retry_at=?, updated_at=? WHERE id=? AND status=? AND error=?`,
+		status, errMsg, enforceParkCode(status, parkCode), enforceRetryAt(status, retryAt),
+		timestamp(nowFn()), id, fromStatus, fromErr)
+	if err := checkAffected(res, err); !errors.Is(err, ErrNotFound) {
+		return err
+	}
+	return ErrStatusChanged
+}
+
+// ClearBookStatusIf clears a book's status, error, park code and retry_at, as
+// SetBookStatus(id, "", "", "") does, but only while the row still carries the
+// status and error the caller read (SetBookStatusIf).
+func (db *DB) ClearBookStatusIf(ctx context.Context, id int64, status, errMsg string) error {
+	return db.SetBookStatusIf(ctx, id, status, errMsg, "", "", "", "")
+}
+
 // ErrNotContinuable is ContinueChapters for a book that isn't a chapters-only book
 // stopped where the caller looked (its row changed since).
 var ErrNotContinuable = errors.New("the book isn't a chapters book to continue")

@@ -146,6 +146,12 @@ internal/
             callers read as unknown); nospace_unix.go / free_windows.go: IsNoSpace(err)
             (ENOSPC/EDQUOT; Windows' disk-full errors) and IsReadOnly(err) (EROFS,
             which fs.ErrPermission doesn't match; ERROR_WRITE_PROTECT).
+            v2.7.0 (bridge#24): StatWithin(path, d) is os.Stat bounded by d
+            (ErrStatTimeout, wrapped in a PathError) with one stat in flight per path:
+            a later ask of a path still out waits on that one, so a poll over a hung
+            SMB mount never piles up blocked stats. The detected list's CheckCurrent
+            stats the audio through it (pipeline.SourceStatWait, 10 s), and so does a
+            generate job's look at where the book is now before it (bookFileNow).
   execfile/ writes files the process will exec at once with syscall.ForkLock
             held for reading from open to close, so a concurrent fork can't hold
             the write descriptor and make the exec fail with ETXTBSY (WriteFile).
@@ -1230,7 +1236,8 @@ internal/
             DetailLibrariesChecking from pairing until a heartbeat has listed the
             libraries and each is checked (LibrariesPending: no beat since the
             link changed, or mapping.Registry.Unchecked), BRIDGE-14; the agent
-            item (still required) says in plain words what to do and what the
+            item (optional since v2.7.0, bridge#36: podcasts, read-along,
+            chapters and Audible need no agent) says in plain words what to do and what the
             agent is for, by the kind of problem agentbox.Status reports
             (Problem, Other; the app converts it to setup.AgentProblem):
             not running, an image of another version (another protocol, or too old for the
@@ -1441,6 +1448,13 @@ internal/
             AudiblePreorders lists an account's, SetAudiblePreorders replaces them in one tx, and
             DeleteAudibleAccount deletes them with the account (account REFERENCES
             audible_accounts ON DELETE CASCADE: a poll's late write for a removed account fails).
+            0013 (bridge#31) adds idx_books_unfinished, a partial index whose WHERE is
+            unfinishedBook word for word (SQLite takes it only then; a test reads the query
+            plans), so the periodic passes scan only the books the engine may act on.
+            SetBookStatusIf (bridge#37) writes a status only while the row still has the status
+            and error the caller read (ErrStatusChanged otherwise), so a Cancel landing between
+            a supervisor action's read and its write is never undone; ClearBookStatusIf is its
+            clear (the readmit's).
   state/    per-book pipeline state machine: table-driven states/lanes/transitions,
             CanStart/NextState guards, the audit fix-loop cap. Pure, no I/O. M6 added
             ParkCode (typed park reasons - M7 added contrib_unavailable, core_needed,
@@ -1692,7 +1706,7 @@ internal/
             Phase 1d: chapters_not_detected is decided like markers_not_confident (a
             person's call: park_escalate for approval, never an automatic retry).
             bridge#24: classifyError reads 401, 429 and 503 only as status codes an
-            error states (statusPattern: after status, status code, HTTP[/1.1],
+            error states (statusPatterns: after status, status code, HTTP[/1.1],
             error[_code] or code, `"status":429` included), never bare digits, which
             work-dir names, file names and counts carry; its phrases still come
             first (agent's own "refused the credential" among them). handleIncident
@@ -1706,6 +1720,18 @@ internal/
             credential) is recorded once, not once per resume. A park only a person
             or a restart lifts (no retry_at) is recorded each time it comes back: a
             Retry records no supervisor run, and the park after it is news.
+            v2.7.0 (bridge#24): statusPatterns also read a reply's status after
+            returned, responded [with] or answered when the number ends the clause
+            (punctuation, the end, or the status's reason phrase: "returned 429
+            characters" is nothing), and a bracketed status after failed, error,
+            refused, denied or rejected ("request failed (429)"), never a bracketed
+            number alone. The scheduler's park_escalate on a book already parked
+            keeps the park's own message (for people) and logs the diagnosis.
+            bridge#37: SupervisorApply never acts on a cancelled book, and every
+            status write it makes (readmit, terminate_requeue, supersede_rerun,
+            stop_budget, park_escalate) holds only while the row still has the
+            status and error of its read (store.SetBookStatusIf), so a Cancel
+            landing in between is never cleared nor parked over.
   metaops/  meta.audiosilo.app client (coverage/lookup, capped 1h TTL caches,
             graceful degrade) + the PathAllowed/AllowedPath containment checks
             (Phase 1a passes the mapped mounts as the roots). glossary.go adds
@@ -2923,6 +2949,20 @@ internal/
             read-along run at qa_sweep with goal "" (continueReadalongRun via
             ContinueChapters, decision 7); a chapters job clears a read-along run rather
             than refusing it as a whole run.
+            v2.7.0 (bridge#24): every job end here (release) closes the Handler's end
+            signal (endSignal/signalEnd), and the give-way waits (awaitChaptersGivingWay,
+            awaitOpenJobEnd) wake on it, their bounds now time (giveWayTries-1 polls,
+            openJobWait) rather than a count of wake-ups; a waiter takes the signal before
+            it reads what it waits on, so an end in between still wakes it.
+            BRIDGE-09 (bridge#35, the owner's call): a chapters job whose book's chapters
+            run was cancelled at asr or chapter_detecting (cancelledChapters: goal
+            chapters, a single file, scheduler.IsCancelled; one that failed for a reason
+            of its own is cleared, so asking again never fails the same way forever)
+            takes it up again (resumeChapters, under the hold,
+            through store.ContinueReadalong with goal chapters; resumesAt, shared with
+            continueChapters: splitting for a continuable transcription, chapter_detecting
+            for a rerunnable detection) instead of clearing it and transcribing again; one
+            it can't trust (the file replaced, the windows gone, swept) is cleared as before.
   agentproto/ the staging protocol between the Bridge and the agent container (decision
             15), shared by both sides so they can't drift; a LEAF (standard library
             only). Protocol 1 (both sides refuse another). A job dir <staging>/<16 hex>/:
@@ -3382,6 +3422,14 @@ web/          the Bridge's page: Vite + React 19 + TS + Tailwind v4 (npm, Node 2
               Settings, Accounts, Workers, Logs), thin over src/lib. Jobs poll every 3 s while one
               runs (a PARKED job counts as needs attention, so it polls at 15 s: it may
               wait for days), else 15 s; a bridge.verify result renders as a file table.
+              v2.7.0: the page follows the system's colour scheme (BRIDGE-17): dark by
+              default, and under prefers-color-scheme light index.css redefines the brand
+              tokens and the stock state shades the page uses with the server console's
+              light palette (src/theme.test.ts fails a token or a used red/amber/green/pink
+              shade the light block misses); public/favicon.svg (also in the
+              placeholder) is linked from index.html. The Jobs tab names a known kind
+              in words only (the kind is the label's tooltip) and leads a park with its
+              hint, the engine's message a Details line under it (bridge#13).
               Phase 1a: the hash is a Route (routeFromHash: "#jobs", "#/logs", and
               "#/jobs/<server job id>", the server console's link to one job, which
               the Jobs tab shows alone as FocusedJob); src/lib/generate.ts reads a

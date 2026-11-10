@@ -44,8 +44,9 @@ func TestSupervisorApplyOnlyFollowedBooks(t *testing.T) {
 	apply := supervisorApply(db, sched)
 	inc := supervisor.Incident{BookID: book.ID, Stage: "fact_pass", Diagnosis: "parked"}
 
-	// Allowed: its job is open, so a recovery goes through.
-	if err := sched.Cancel(ctx, book.ID); err != nil {
+	// Allowed: its job is open, so a recovery of a failed stage goes through (a
+	// cancelled book never is: scheduler.SupervisorApply, bridge#37).
+	if err := db.SetBookStatus(ctx, book.ID, "failed", "fact pass failed", ""); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := apply(ctx, supervisor.ActionReadmit, inc); err != nil {

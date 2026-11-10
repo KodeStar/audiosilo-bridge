@@ -460,6 +460,14 @@ func TestClassifyErrorMatchesStatusTokensNotBareDigits(t *testing.T) {
 		{"HTTP/1.1 503", IncidentBackendUnavailable},
 		{"request failed: status code 503", IncidentBackendUnavailable},
 		{"code: 503", IncidentBackendUnavailable},
+		// A reply said to have had a status, and a bracketed status after a
+		// failure (bridge#24).
+		{"the provider returned 503", IncidentBackendUnavailable},
+		{"upstream returned 503: try later", IncidentBackendUnavailable},
+		{"server responded with 429 Too Many", IncidentRateLimit},
+		{"the API answered 401, unauthorized", IncidentAuthentication},
+		{"request failed (429)", IncidentRateLimit},
+		{"token refused (401)", IncidentAuthentication},
 		// The phrases, as before.
 		{"claude: Not logged in. Please run /login", IncidentAuthentication},
 		{"agent backend unavailable: the provider refused the credential: 401 Invalid bearer token", IncidentAuthentication},
@@ -471,6 +479,16 @@ func TestClassifyErrorMatchesStatusTokensNotBareDigits(t *testing.T) {
 		{"fact pass produced 429 characters, more than the 400 allowed", ""},
 		{"stage ran 503 seconds past its bound", ""},
 		{"chapter 401 has no transcript", ""},
+		{"the fact pass returned 429 characters", ""},
+		{"split returned 503 segments for the book", ""},
+		{"the agent returned 429-token notes", ""},
+		{"upstream returned 503 - try later", IncidentBackendUnavailable},
+		{"upstream returned 503\nretrying in 30s", IncidentBackendUnavailable},
+		{"token refused (401).", IncidentAuthentication},
+		{"open /library/Book (503)/part 1.m4b: no such file", ""},
+		{"open /library/Access Denied (503)/part 1.m4b: no such file", ""},
+		{"the decode returned 503.2 seconds of audio", ""},
+		{"chapter (429) is empty", ""},
 		// Another status is nothing either.
 		{"unexpected status 500", ""},
 		{"HTTP 404", ""},

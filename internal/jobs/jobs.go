@@ -425,18 +425,24 @@ func (r *Runner) recover(ctx context.Context, srv Server, wg *sync.WaitGroup) bo
 }
 
 // dropOtherServers ends what a start found open for another server: a running
-// job is lost, an unreported end is never sent.
+// job is lost (dropLost), an unreported end is never sent.
 func (r *Runner) dropOtherServers(ctx context.Context, sj store.ServerJob) {
 	r.log.Info("bridge: a job of another server is dropped", "job", sj.ID, "server", sj.ServerID)
-	var err error
 	if sj.State == store.JobRunning {
-		err = r.store.FinishServerJob(ctx, sj.ID, sj.Attempt, store.JobLost, nil, "the Bridge was paired with another server")
-		r.abandon(ctx, storedJob(sj))
-	} else {
-		err = r.store.MarkServerJobReported(ctx, sj.ID, sj.Attempt)
-	}
-	if err != nil {
+		r.dropLost(ctx, storedJob(sj))
+	} else if err := r.store.MarkServerJobReported(ctx, sj.ID, sj.Attempt); err != nil {
 		r.log.Warn("bridge: recording a job failed", "job", sj.ID, "err", err)
+	}
+}
+
+// dropLost ends a running job of a server the Bridge is no longer paired with:
+// its work is released (Abandon) before it is recorded lost, so a job waiting for
+// it to end (generate's awaitOpenJobEnd reads the row's running state) starts only
+// once the engine book is stopped, as the runner's own ends order it (bridge#37).
+func (r *Runner) dropLost(ctx context.Context, job Job) {
+	r.abandon(ctx, job)
+	if err := r.store.FinishServerJob(ctx, job.ID, job.Attempt, store.JobLost, nil, "the Bridge was paired with another server"); err != nil {
+		r.log.Warn("bridge: recording a job failed", "job", job.ID, "err", err)
 	}
 }
 
@@ -462,10 +468,7 @@ func (r *Runner) resumeStranded(ctx context.Context, srv Server, wg *sync.WaitGr
 		if !sameServer(s.srv, srv) || r.otherServer(*sj) {
 			// Paired with another server since: its job ids are another
 			// server's, and the claim can't be reported anywhere now.
-			if err := r.store.FinishServerJob(ctx, job.ID, job.Attempt, store.JobLost, nil, "the Bridge was paired with another server"); err != nil {
-				r.log.Warn("bridge: recording a job failed", "job", job.ID, "err", err)
-			}
-			r.abandon(ctx, job)
+			r.dropLost(ctx, job)
 			continue
 		}
 		r.log.Info("bridge: resuming a job its refused token stopped", "job", job.ID, "kind", job.Kind, "attempt", job.Attempt)

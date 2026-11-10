@@ -175,3 +175,33 @@ func TestSeriesSpaceIsUnicodeSpace(t *testing.T) {
 		}
 	}
 }
+
+// The periodic reads of unfinished books use the partial index (migration 0013,
+// bridge#31), so a Bridge with thousands of finished books scans only the rest:
+// its WHERE must match unfinishedBook for SQLite to take it.
+func TestUnfinishedReadsUseThePartialIndex(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	for _, q := range []string{
+		`SELECT id FROM books WHERE ` + unfinishedBook + ` ORDER BY id`,
+		`SELECT id FROM stage_runs WHERE book_id IN (SELECT id FROM books WHERE ` + unfinishedBook + `)`,
+	} {
+		rows, err := db.sql.QueryContext(ctx, `EXPLAIN QUERY PLAN `+q)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var plan []string
+		for rows.Next() {
+			var id, parent, notused int
+			var detail string
+			if err := rows.Scan(&id, &parent, &notused, &detail); err != nil {
+				t.Fatal(err)
+			}
+			plan = append(plan, detail)
+		}
+		_ = rows.Close()
+		if !strings.Contains(strings.Join(plan, "\n"), "idx_books_unfinished") {
+			t.Fatalf("%s\nplan:\n%s\nwant idx_books_unfinished", q, strings.Join(plan, "\n"))
+		}
+	}
+}
