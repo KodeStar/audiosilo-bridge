@@ -361,14 +361,20 @@ func WorkKey(rec source.Record) string {
 	if len(authors) == 0 && rec.Author != "" {
 		authors = []string{rec.Author}
 	}
-	folded := make([]string, 0, len(authors))
-	for _, a := range authors {
-		if f := match.Fold(a); f != "" {
+	return title + "\x00" + strings.Join(foldedNames(authors), "\x00") + "\x00" + pos
+}
+
+// foldedNames are names folded, the empty ones dropped, sorted and without
+// repeats: an author list in any order, as WorkKey and Twins compare them.
+func foldedNames(names []string) []string {
+	folded := make([]string, 0, len(names))
+	for _, n := range names {
+		if f := match.Fold(n); f != "" {
 			folded = append(folded, f)
 		}
 	}
 	slices.Sort(folded)
-	return title + "\x00" + strings.Join(slices.Compact(folded), "\x00") + "\x00" + pos
+	return slices.Compact(folded)
 }
 
 // Twins are the paths of books the library holds more than once: another
@@ -384,10 +390,8 @@ func Twins(books []link.LibraryBook) map[string]bool {
 			continue
 		}
 		parts := make([]string, 0, len(b.Authors)+len(b.Series))
-		for _, a := range b.Authors {
-			if f := match.Fold(a); f != "" {
-				parts = append(parts, "a\x00"+f)
-			}
+		for _, f := range foldedNames(b.Authors) {
+			parts = append(parts, "a\x00"+f)
 		}
 		for _, s := range b.Series {
 			parts = append(parts, "s\x00"+match.NormalizeSeries(s.Name)+"\x00"+strings.TrimSpace(s.Position))

@@ -498,9 +498,7 @@ func (m *Manager) Finish(ctx context.Context, srv Server, serverID string, f Fin
 	if prev.ID != "" && madeLabel(f.Label, prev) {
 		f.Label = ""
 	}
-	if prev.ID != "" {
-		f.keepUserName(prev)
-	}
+	f.keepUserName(prev)
 	acct := store.AudibleAccount{ID: prev.ID, Marketplace: l.mp.Code, CustomerHash: hash, ServerID: serverID,
 		Label: f.label(l.mp.Code), UserID: f.UserID, UserName: f.UserName, LibraryID: f.LibraryID, Policy: f.Policy, Sync: f.Sync,
 		DeviceProfile: creds.Profile}

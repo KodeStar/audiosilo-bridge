@@ -1444,7 +1444,7 @@ internal/
             reads superseded successes too (a history reader).
             0012 (audiblepreorders.go) adds audible_preorders ((account, asin): a pending preorder
             an audible.poll saw in the orders, ordered_at, last_seen_at, record (the catalog's
-            description as JSON, '' until filled), filled_at; no credential or payment field):
+            description as JSON, '' until filled), filled_at (unused since bridge#60); no credential or payment field):
             AudiblePreorders lists an account's, SetAudiblePreorders replaces them in one tx, and
             DeleteAudibleAccount deletes them with the account (account REFERENCES
             audible_accounts ON DELETE CASCADE: a poll's late write for a removed account fails).

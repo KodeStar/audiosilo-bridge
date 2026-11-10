@@ -24,7 +24,6 @@ import (
 	"log/slog"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/kodestar/audiosilo-bridge/internal/audible"
@@ -232,7 +231,6 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 	used := make([]source.Record, 0, len(recs)) // used[i] is titles[i]'s record
 	claims := make([]importjob.Claim, 0, len(recs))
 	matchedBook := map[string]link.LibraryBook{}
-	var overlong []bool // overlong[i]: titles[i] matched a book whose path the server won't take
 	for _, rec := range recs {
 		rec.ASIN = strings.ToUpper(strings.TrimSpace(rec.ASIN))
 		if !audibleacct.ASINPattern.MatchString(rec.ASIN) {
@@ -248,18 +246,26 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 		default:
 			res.Unavailable++
 		}
-		c, long := importjob.Claim{}, false
+		var c importjob.Claim
 		// A preorder the catalog hasn't described yet matches by its ASIN only.
 		if b, score, ok := matchTitled(matcher, rec); ok && matchable(b.Path) {
 			agrees, disagrees := importjob.PositionAgrees(rec, b)
 			c = importjob.Claim{Path: b.Path, Score: score, Work: importjob.WorkKey(rec), Agrees: agrees, Disagrees: disagrees}
 			matchedBook[b.Path] = b
 		} else if ok && fs.ValidPath(b.Path) {
-			long = true
+			// A title matched to a book whose path the server won't take
+			// can't be sent as a match; unmatched it would read as a title to
+			// back up, and Back up everything would download a second copy.
+			// It goes as contested (which that skips), with no book named:
+			// the path can't be sent either.
+			if t.Reason == "" {
+				t.Reason = link.ReasonContested
+				res.Overlong++
+			}
 			h.o.Log.Warn("audible: a title matched a book whose path is longer than the server takes; reported as contested, not as a title to back up",
 				"account", acct.ID, "asin", rec.ASIN, "path_bytes", len(b.Path))
 		}
-		titles, used, claims, overlong = append(titles, t), append(used, rec), append(claims, c), append(overlong, long)
+		titles, used, claims = append(titles, t), append(used, rec), append(claims, c)
 	}
 	// A preorder isn't out yet, so a book a title of the library claims too is
 	// that title's edition: the preorder gives way, rather than contest the
@@ -281,16 +287,6 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 	// contested and the book's path unless their number says they are another
 	// volume, so the console shows them as not here and a backup of everything
 	// can skip them.
-	// A title matched to a book whose path the server won't take can't be
-	// sent as a match; unmatched it would read as a title to back up, and Back
-	// up everything would download a second copy. It goes as contested (which
-	// that skips), with no book named: the path can't be sent either.
-	for i, long := range overlong {
-		if long && titles[i].Reason == "" {
-			titles[i].Reason = link.ReasonContested
-			res.Overlong++
-		}
-	}
 	keep, contested := importjob.KeepBest(claims)
 	claimed := map[string]int{} // path -> how many titles claimed it
 	for _, c := range claims {
@@ -301,7 +297,7 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 			res.Contested++
 		}
 	}
-	twins := sync.OnceValue(func() map[string]bool { return importjob.Twins(books) })
+	twins := importjob.Twins(books)
 	var hits []hit
 	for i, c := range claims {
 		if c.Path == "" {
@@ -329,7 +325,7 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 		// Nor does a book the library holds twice (a twin): the title's words
 		// can't tell the copies apart.
 		if claimed[c.Path] == 1 && b.ASIN == "" && titles[i].State != link.AudiblePreorder && !importjob.SpanMismatch(rec, b) &&
-			!twins()[b.Path] {
+			!twins[b.Path] {
 			hits = append(hits, hit{path: b.Path, asin: rec.ASIN})
 		}
 	}
@@ -458,7 +454,7 @@ func (h *Handler) refused(ctx context.Context, id string) *Failure {
 	if acct, err := h.o.Accounts.Account(context.WithoutCancel(ctx), id); err == nil && audibleacct.Throttled(acct) {
 		return throttledDevice()
 	}
-	return &Failure{Code: CodeSignIn, Message: "Audible refused the account's sign-in: the next check tries again, or sign in again on the Bridge's Accounts tab."}
+	return fail(CodeSignIn, "Audible refused the account's sign-in: the next check tries again, or sign in again on the Bridge's Accounts tab.")
 }
 
 // bookLister reads a library's books page by page (Server and ImportServer).

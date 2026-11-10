@@ -199,7 +199,7 @@ func reconcilePreorders(rows []store.AudiblePreorder, inLibrary map[string]bool,
 // date: both come before the close. Never, when neither is known.
 func deliveredLongAgo(r store.AudiblePreorder, now time.Time) bool {
 	closed := r.LastSeenAt
-	if d, err := time.Parse(time.DateOnly, preorderRecord(r).ReleaseDate); err == nil && d.After(closed) {
+	if d, ok := releaseDate(r); ok && d.After(closed) {
 		closed = d
 	}
 	return !closed.IsZero() && !now.Before(closed.Add(DeliveredDropAfter))
@@ -239,8 +239,8 @@ func fillPreorders(rows []store.AudiblePreorder, recs []source.Record) {
 // that is unknown).
 func dropReleased(rows []store.AudiblePreorder, now time.Time) []store.AudiblePreorder {
 	return slices.DeleteFunc(rows, func(r store.AudiblePreorder) bool {
-		d, err := time.Parse(time.DateOnly, preorderRecord(r).ReleaseDate)
-		if err != nil {
+		d, ok := releaseDate(r)
+		if !ok {
 			if r.LastSeenAt.IsZero() {
 				return false
 			}
@@ -248,6 +248,12 @@ func dropReleased(rows []store.AudiblePreorder, now time.Time) []store.AudiblePr
 		}
 		return !now.Before(d.Add(PreorderDropAfter))
 	})
+}
+
+// releaseDate is r's release date as the catalog described it, if it did.
+func releaseDate(r store.AudiblePreorder) (time.Time, bool) {
+	d, err := time.Parse(time.DateOnly, preorderRecord(r).ReleaseDate)
+	return d, err == nil
 }
 
 // preorderRecord is a row as a record: the catalog's description when it has
