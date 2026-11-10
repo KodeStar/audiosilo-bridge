@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1574,5 +1575,59 @@ func TestChaptersJobDoesNotTakeUpARunItCantTrust(t *testing.T) {
 	waitDone(hr, 94)
 	if b := hr.engineBook(94); b.ID == first.ID {
 		t.Fatalf("the chapters job took up a run of another file (book %d)", b.ID)
+	}
+}
+
+// bridge#37: two jobs following one engine book that end at the same moment
+// each find the other still open at their first stop, and each leaves the book
+// to the other; the stop tried again once each end is recorded makes sure the
+// later one stops it. Under -race, many rounds of two concurrent releases always
+// leave the book stopped.
+func TestConcurrentEndsStopTheBook(t *testing.T) {
+	t.Parallel()
+	hr := newHarness(t)
+	ctx := context.Background()
+	batch, err := hr.db.CreateBatch(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range 25 {
+		b, err := hr.db.CreateBook(ctx, store.NewBook{BatchID: batch.ID, SourcePath: fmt.Sprintf("/lib/race-%d", i),
+			WorkDir: filepath.Join(hr.work, fmt.Sprintf("race-%d", i)), Title: "Race", State: string(state.ASR)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Paused, so the running engine leaves it alone until a job's end stops it.
+		if err := hr.db.SetBookStatus(ctx, b.ID, string(state.StatusPaused), "", ""); err != nil {
+			t.Fatal(err)
+		}
+		ids := []int64{int64(1000 + 2*i), int64(1001 + 2*i)}
+		for _, id := range ids {
+			if err := hr.db.RecordClaim(ctx, store.ServerJob{ID: id, Kind: Kind, Attempt: 1}); err != nil {
+				t.Fatal(err)
+			}
+			if err := hr.db.PutGenerateBook(ctx, store.GenerateBook{ServerJobID: id, BookID: &b.ID, LibraryID: 1, RelPath: "race"}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		for _, id := range ids {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				hr.h.release(ctx, jobs.Job{ID: id, Kind: Kind, Attempt: 1}, b.ID, true)
+			}()
+		}
+		close(start)
+		wg.Wait()
+		got, err := hr.db.GetBook(ctx, b.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !scheduler.IsCancelled(got) {
+			t.Fatalf("round %d: the book after two concurrent ends: status=%q error=%q, want stopped", i, got.Status, got.Error)
+		}
 	}
 }
