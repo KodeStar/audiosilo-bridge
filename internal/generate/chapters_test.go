@@ -1578,6 +1578,33 @@ func TestChaptersJobDoesNotTakeUpARunItCantTrust(t *testing.T) {
 	}
 }
 
+// A chapters run that FAILED at asr for a reason of its own (not a cancel) is
+// never taken up: the new chapters job clears it and starts its own run, so
+// asking again never fails the same way forever (the owner's BRIDGE-09 call
+// covers a detect re-run after a cancel only).
+func TestChaptersJobDoesNotTakeUpAFailedRun(t *testing.T) {
+	t.Parallel()
+	hr := newHarness(t)
+	stop := hr.runner(hr.h, hr.h.ChaptersJob())
+	defer stop()
+	first := parkChaptersAtASR(hr, 95)
+	hr.srv.set(func() { hr.srv.cancel[95] = true })
+	hr.waitFor("the engine book stopped", func() bool {
+		b, err := hr.db.GetBook(context.Background(), first.ID)
+		return err == nil && scheduler.IsCancelled(b)
+	})
+	// The run failed at asr instead (its transcription is as continuable as a
+	// cancelled one's; only the reason differs).
+	if err := hr.db.SetBookStatus(context.Background(), first.ID, string(state.StatusFailed), "asr: the decoder crashed", ""); err != nil {
+		t.Fatal(err)
+	}
+	hr.srv.addKind(96, ChaptersKind, "Loose.m4b", `{}`)
+	waitDone(hr, 96)
+	if b := hr.engineBook(96); b.ID == first.ID {
+		t.Fatalf("the chapters job took up a failed run (book %d)", b.ID)
+	}
+}
+
 // bridge#37: two jobs following one engine book that end at the same moment
 // each find the other still open at their first stop, and each leaves the book
 // to the other; the stop tried again once each end is recorded makes sure the

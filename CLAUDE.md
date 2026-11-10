@@ -317,7 +317,7 @@ are found and continues a chapters run rather than transcribing again
 one cancelled or failed at `chapter_detecting` (the server cancels a parked
 `chapters.detect` job as it queues the generate job, which waits for it to give way)
 going on there to detect again from its kept windows; a new chapters job takes up a
-chapters run cancelled or failed at asr or `chapter_detecting` the same way (BRIDGE-09). **Entry k of the list is logical
+chapters run cancelled (never one that failed) at asr or `chapter_detecting` the same way (BRIDGE-09). **Entry k of the list is logical
 position k by construction**: the classification it is grouped by is kept
 (`positions_detected.json`) and is the one the later stages use, its positions the
 entries' ordinals. chapters.json is never written beside characters and recaps made

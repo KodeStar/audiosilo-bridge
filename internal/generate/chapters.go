@@ -23,6 +23,7 @@ import (
 	"github.com/kodestar/audiosilo-bridge/internal/mapping"
 	"github.com/kodestar/audiosilo-bridge/internal/metaops"
 	"github.com/kodestar/audiosilo-bridge/internal/pipeline"
+	"github.com/kodestar/audiosilo-bridge/internal/scheduler"
 	"github.com/kodestar/audiosilo-bridge/internal/state"
 	"github.com/kodestar/audiosilo-bridge/internal/store"
 )
@@ -460,17 +461,20 @@ func resumesAt(b store.Book) (state.State, bool) {
 }
 
 // stoppedChapters reports whether engine book b is a chapters run (goal
-// chapters, a single file) cancelled or failed at asr or chapter_detecting: one a
-// new chapters job takes up again (resumeChapters).
+// chapters, a single file) CANCELLED at asr or chapter_detecting: one a new
+// chapters job takes up again (resumeChapters). Only a cancel (the owner's call:
+// "a detect re-run after a cancel"): a run that failed for a reason of its own is
+// cleared by the new job, so asking again never fails the same way forever.
 func stoppedChapters(b store.Book) bool {
-	return state.State(b.State) != state.Done && continuable(b) && markersFile(b.AudioSource()) != ""
+	return state.State(b.State) != state.Done && continuable(b) && scheduler.IsCancelled(b) &&
+		markersFile(b.AudioSource()) != ""
 }
 
 // resumeChapters takes up the book's chapters run old for a new chapters job,
 // keeping what it transcribed (BRIDGE-09, the owner's call on bridge#35: an admin
 // cancels a detect job parked waiting for a worker, then detects again, and the
-// book was transcribed all over). A run cancelled or failed at asr or
-// chapter_detecting (stoppedChapters) goes on from resumesAt with goal chapters,
+// book was transcribed all over). A run cancelled at asr or chapter_detecting
+// (stoppedChapters; a failed one is cleared) goes on from resumesAt with goal chapters,
 // its identity and work dir its own, under the engine's hold (a stage the cancel
 // just stopped may still be finishing: one that stays busy fails the job to be
 // tried again, never the run cleared unseen) and looked at again once held; the
