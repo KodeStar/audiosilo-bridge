@@ -32,6 +32,7 @@ const (
 	ServerToken     = "server_token"
 	AnthropicAPIKey = "anthropic_api_key"
 	OpenAIAPIKey    = "openai_api_key"
+	MistralAPIKey   = "mistral_api_key"
 	// ClaudeOAuthToken is a `claude setup-token` value (a subscription credential),
 	// set on the Accounts page and handed to the agent container per run.
 	ClaudeOAuthToken = "claude_oauth_token"
@@ -47,7 +48,7 @@ const (
 // Names returns the secret names an operator sets, in a stable order (drives a
 // settings presence list). The server token is the pairing's, never set by hand.
 func Names() []string {
-	return []string{ClaudeOAuthToken, AnthropicAPIKey, OpenAIAPIKey, GitHubUserToken}
+	return []string{ClaudeOAuthToken, AnthropicAPIKey, OpenAIAPIKey, MistralAPIKey, GitHubUserToken}
 }
 
 // Store is a named-secret backend. Get returns ("", nil) for an absent name so

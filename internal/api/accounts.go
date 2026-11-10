@@ -55,12 +55,12 @@ type GitHubPending struct {
 // AgentAccount is the agent's credential as the Bridge holds it, and the agent
 // container's view of it.
 type AgentAccount struct {
-	// Backend is the CLI the agent container runs (claude or codex); Kinds the
+	// Backend is the CLI the agent container runs (claude, codex or mistral); Kinds the
 	// credential kinds it takes, in the order it uses them.
 	Backend string   `json:"backend"`
 	Kinds   []string `json:"kinds"`
 	// Set names the kinds the Bridge holds (claude_oauth_token,
-	// anthropic_api_key, openai_api_key); SetAt when they last changed (a save,
+	// anthropic_api_key, openai_api_key, mistral_api_key); SetAt when they last changed (a save,
 	// or a removal that left others); SetAtByKind when each kind held was saved
 	// (Phase 2b; a kind without its own time is left out).
 	Set         map[string]bool   `json:"set"`

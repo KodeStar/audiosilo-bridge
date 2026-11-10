@@ -28,7 +28,7 @@ cmd/audiosilo-bridge/     entrypoint, its subcommands: `serve` (the default; --d
                           and root in a folder another user owns), `agent-runner` (the
                           agent container's entrypoint: agentrun.Main; --staging /staging,
                           --home /agent, --slots 1) and
-                          `agent-login claude|codex` (agentrun.Login, run once inside the agent
+                          `agent-login claude|codex|mistral` (agentrun.Login, run once inside the agent
                           container; --home /agent). `help` prints the usage.
 cmd/audiblefake/          Phase 4a, ONLY with -tags audiblefake: serves the Audible fake
                           (--listen 127.0.0.1:8099, --lastpositions-max 10) for a live check.
@@ -519,7 +519,7 @@ internal/
             code: CLIOutcome {Stdout, Stderr, ExitErr, TimedOut, Timeout, LastMessage}
             is what a run left behind wherever it ran (outcomeOf maps runCLI's return:
             its timeout error is TimedOut, anything else ExitErr), and
-            ClaudeResult/CodexResult(model, outcome) parse it, classify a rate limit
+            ClaudeResult/CodexResult/MistralResult(model, outcome) parse it, classify a rate limit
             first, and keep the reported usage on the Result even beside an error
             (spend is captured on a failed run too); Run returns ctx.Err() for a
             parent cancel. ClaudeArgs(req) and CodexArgs(req, lastMsgFile, sandbox)

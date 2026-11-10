@@ -30,11 +30,11 @@ import (
 )
 
 // AgentUnavailableMsg is the needs_attention reason an agent stage parks a book with
-// when no agent backend can run (no claude/codex CLI resolved, or an explicit
+// when no agent backend can run (no claude/codex/vibe CLI resolved, or an explicit
 // configured path is missing). It is a human-fixable precondition - install a CLI or
 // fix the config path, then Retry - so parking (which Retry re-admits) fits better
 // than a hard failure, exactly like MediaToolsUnavailableMsg for the audio stages.
-const AgentUnavailableMsg = "agent backend unavailable - install the claude or codex CLI, or set agent.backend/claude_path/codex_path in config.yaml, then Retry"
+const AgentUnavailableMsg = "agent backend unavailable - install the claude, codex or vibe (mistral) CLI, or set agent.backend/claude_path/codex_path/mistral_path in config.yaml, then Retry"
 
 // Park-reason strings/prefixes for the remaining agent/spelling park conditions. They
 // are consts (not inline at the throw site) so the tests that assert them cite one
@@ -228,13 +228,19 @@ func (e *Executor) ActivateFallback(ctx context.Context, backend, model string) 
 		if e.agentModels.OpenAI == nil {
 			e.agentModels.OpenAI = map[string]string{}
 		}
+		if e.agentModels.Mistral == nil {
+			e.agentModels.Mistral = map[string]string{}
+		}
 		for _, st := range state.All() {
 			if !state.IsAgent(st) {
 				continue
 			}
-			if backend == agent.IDClaude {
+			switch backend {
+			case agent.IDClaude:
 				e.agentModels.Claude[string(st)] = model
-			} else {
+			case agent.IDMistral:
+				e.agentModels.Mistral[string(st)] = model
+			default:
 				e.agentModels.OpenAI[string(st)] = model
 			}
 		}
@@ -487,8 +493,8 @@ func (e *Executor) runAgentWith(ctx context.Context, book store.Book, stage stat
 		return agentUsage{}, scheduler.ParkWithCode(state.ParkAgentUnavailable, AgentUnavailableMsg)
 	}
 	e.mu.Lock()
-	model := agent.ModelFor(e.agentModels.Claude, e.agentModels.OpenAI, runner.ID(), string(stage))
-	effort := agent.ModelFor(e.agentEfforts.Claude, e.agentEfforts.OpenAI, runner.ID(), string(stage))
+	model := agent.ModelFor(agent.ModelMaps(e.agentModels), runner.ID(), string(stage))
+	effort := agent.ModelFor(agent.ModelMaps(e.agentEfforts), runner.ID(), string(stage))
 	e.mu.Unlock()
 
 	prompt, err := prompts.Render(promptName, promptData)

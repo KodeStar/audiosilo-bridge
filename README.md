@@ -66,7 +66,10 @@ one `staging` volume, and nothing else.
    `.env` file beside the compose file, or sign codex in once with
    `docker compose exec agent audiosilo-bridge agent-login codex` and set
    `AUDIOSILO_BRIDGE_AGENT_BACKEND: codex` on the Bridge. An API key
-   (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`) works too, billed per token. The Bridge's
+   (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`) works too, billed per token. For Mistral
+   Vibe, set a `MISTRAL_API_KEY` (or add it on the Accounts tab) and
+   `AUDIOSILO_BRIDGE_AGENT_BACKEND: mistral`; it has no web tools, and a `no tools`
+   run is read-only rather than tool-free. The Bridge's
    page shows the agent as ready within about 15 seconds.
 6. Generate characters and recaps from a book's page in the console (or the
    player, as an admin). The console shows an estimate first, then the job's stage,
@@ -79,7 +82,7 @@ Images (`ghcr.io/kodestar/audiosilo-bridge`, public from v0.3.0, no login needed
 | `latest` | the full image: Go, ffmpeg and a CPU whisper.cpp for transcription | amd64, arm64 |
 | `latest-slim` | Go and ffmpeg only, for a Bridge that never transcribes | amd64, arm64 |
 | `latest-cuda` | transcription on an NVIDIA GPU (`--gpus all`) | amd64 |
-| `latest-agent` | the agent container: the claude and codex CLIs, run by `audiosilo-bridge agent-runner` | amd64, arm64 |
+| `latest-agent` | the agent container: the claude, codex and Mistral Vibe CLIs, run by `audiosilo-bridge agent-runner` | amd64, arm64 |
 
 Only `latest-agent` carries an AI agent CLI (decision 15). `latest`, `latest-slim`
 and `latest-cuda` also carry the ASR worker builds the Bridge serves. Run it as the compose
@@ -134,7 +137,7 @@ folder is `/bridge-data` in the images (`AUDIOSILO_BRIDGE_DATA`), else
 | | `AUDIOSILO_BRIDGE_PAIR_CODE` | | pair on start (first start only) |
 | | `AUDIOSILO_BRIDGE_SECRET_KEY` | `<data>/secret.key` | the key that seals the stored secrets (32 bytes, hex or base64) |
 | | `PUID` / `PGID` | `1000` | the user the Bridge runs as (Unraid: 99/100); a start as another user (`--user`) needs a data folder that user owns |
-| `agent.backend` | `AUDIOSILO_BRIDGE_AGENT_BACKEND` | `claude` | the CLI the agent container runs: `claude` or `codex` |
+| `agent.backend` | `AUDIOSILO_BRIDGE_AGENT_BACKEND` | `claude` | the CLI the agent container runs: `claude`, `codex` or `mistral` |
 | `agent.staging_dir` | `AUDIOSILO_BRIDGE_AGENT_STAGING_DIR` | `<data>/staging` | the folder shared with the agent container (an absolute path; compose uses `/staging`) |
 | `agent.claim_timeout_seconds` | `AUDIOSILO_BRIDGE_AGENT_CLAIM_TIMEOUT_SECONDS` | `120` | how long a job waits for the agent container to pick it up before the book waits and tries again (10 to 3600) |
 | `agent.monthly_budget_usd` | `AUDIOSILO_BRIDGE_AGENT_MONTHLY_BUDGET_USD` | `100` | the agent spend cap for a calendar month (UTC), across every book; `0` is no cap. Over it, books wait until the 1st |

@@ -64,7 +64,7 @@ func TestSelectAutoPrefersClaudeThenCodex(t *testing.T) {
 }
 
 func TestSelectAutoNoneAvailable(t *testing.T) {
-	r, av, err := Select(context.Background(), SelectConfig{Backend: "auto", ClaudePath: "/no/claude", CodexPath: "/no/codex"}, secrets.NewMemStore())
+	r, av, err := Select(context.Background(), SelectConfig{Backend: "auto", ClaudePath: "/no/claude", CodexPath: "/no/codex", MistralPath: "/no/vibe"}, secrets.NewMemStore())
 	if err != nil {
 		t.Fatalf("auto-none should not error: %v", err)
 	}
@@ -79,6 +79,7 @@ func TestSelectAutoNoneAvailable(t *testing.T) {
 func TestModelFor(t *testing.T) {
 	claude := map[string]string{"fact_pass": "sonnet", "synthesizing": "opus"}
 	openai := map[string]string{"fact_pass": "gpt-5"}
+	mistral := map[string]string{"fact_pass": "mistral-small"}
 	cases := []struct {
 		backend, stage, want string
 	}{
@@ -87,10 +88,12 @@ func TestModelFor(t *testing.T) {
 		{"claude", "auditing", ""}, // missing key -> default
 		{"codex", "fact_pass", "gpt-5"},
 		{"codex", "synthesizing", ""},
+		{"mistral", "fact_pass", "mistral-small"},
+		{"mistral", "synthesizing", ""},
 		{"unknown", "fact_pass", ""},
 	}
 	for _, c := range cases {
-		if got := ModelFor(claude, openai, c.backend, c.stage); got != c.want {
+		if got := ModelFor(ModelMaps{Claude: claude, OpenAI: openai, Mistral: mistral}, c.backend, c.stage); got != c.want {
 			t.Errorf("ModelFor(%s,%s) = %q, want %q", c.backend, c.stage, got, c.want)
 		}
 	}

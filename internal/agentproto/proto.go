@@ -16,7 +16,7 @@
 //	         CLI runs), request.json read, credential.json read and deleted
 //	         before the CLI starts (used only when the container has no
 //	         credential of its own for the CLI),
-//	         stdout.txt, stderr.txt, last_message.txt (codex), exit.json,
+//	         stdout.txt, stderr.txt, last_message.txt (codex), export.json (mistral), exit.json,
 //	         work/out/ opened for the Bridge to read, done.tmp renamed to done
 //	Bridge:  cancel (to stop a run), harvest of work/out/ after done, then the
 //	         job dir is deleted
@@ -59,9 +59,12 @@ const (
 	StdoutFile      = "stdout.txt"
 	StderrFile      = "stderr.txt"
 	LastMessageFile = "last_message.txt"
-	ExitFile        = "exit.json"
-	DoneFile        = "done"
-	DoneTmpFile     = "done.tmp"
+	// ExportFile is the compact run export of the mistral CLI (vibe): its
+	// outcome, usage and cost.
+	ExportFile  = "export.json"
+	ExitFile    = "exit.json"
+	DoneFile    = "done"
+	DoneTmpFile = "done.tmp"
 	// CredentialDir holds CredentialFile: its own dir (not sticky, unlike the job
 	// dir), so the runner, another uid, can delete the Bridge's file before the
 	// CLI starts.
@@ -73,6 +76,8 @@ const (
 const (
 	CLIClaude = "claude"
 	CLICodex  = "codex"
+	// CLIMistral is the Mistral Vibe CLI (the vibe binary).
+	CLIMistral = "mistral"
 )
 
 // The credential kinds runner.json reports per CLI ("" = none). oauth_token and
@@ -80,7 +85,7 @@ const (
 const (
 	CredentialOAuthToken = "oauth_token" // claude: CLAUDE_CODE_OAUTH_TOKEN
 	CredentialLogin      = "login"       // codex: a device login in CODEX_HOME/auth.json
-	CredentialAPIKey     = "api_key"     // ANTHROPIC_API_KEY / OPENAI_API_KEY
+	CredentialAPIKey     = "api_key"     // ANTHROPIC_API_KEY / OPENAI_API_KEY / MISTRAL_API_KEY
 )
 
 // Bounds on what a request may ask for, and on the files each side reads back.
@@ -93,6 +98,7 @@ const (
 	MaxExitBytes      = 64 << 10
 	MaxStdoutBytes    = 64 << 20
 	MaxStderrBytes    = 8 << 20
+	MaxExportBytes    = 1 << 20
 	// MaxCredentialFileBytes bounds credential.json, MaxCredentialValueBytes the
 	// credential in it.
 	MaxCredentialFileBytes  = 4 << 10
@@ -157,7 +163,7 @@ func DecodeCredential(data []byte, cli string) (Credential, error) {
 	}
 	switch {
 	case cli == CLIClaude && (c.Kind == CredentialOAuthToken || c.Kind == CredentialAPIKey):
-	case cli == CLICodex && c.Kind == CredentialAPIKey:
+	case (cli == CLICodex || cli == CLIMistral) && c.Kind == CredentialAPIKey:
 	default:
 		return Credential{}, fmt.Errorf("credential.json's kind %q isn't one %s takes", c.Kind, cli)
 	}
@@ -218,7 +224,7 @@ type Exit struct {
 }
 
 // modelRe allows the model names the CLIs take ("opus", "claude-opus-4-1[1m]",
-// "gpt-5.1-codex"), never a leading dash (it would read as a flag).
+// "gpt-5.1-codex", "devstral-2"), never a leading dash (it would read as a flag).
 var modelRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/@\[\]-]{0,127}$`)
 
 // effortRe allows an effort name (low, medium, high, xhigh, max, minimal). It goes
@@ -251,8 +257,8 @@ func (r Request) Validate() error {
 	if r.Protocol != Protocol {
 		return fmt.Errorf("request protocol %d, the runner speaks %d", r.Protocol, Protocol)
 	}
-	if r.CLI != CLIClaude && r.CLI != CLICodex {
-		return fmt.Errorf("request cli %q must be %q or %q", r.CLI, CLIClaude, CLICodex)
+	if r.CLI != CLIClaude && r.CLI != CLICodex && r.CLI != CLIMistral {
+		return fmt.Errorf("request cli %q must be %q, %q or %q", r.CLI, CLIClaude, CLICodex, CLIMistral)
 	}
 	if r.Model != "" && !modelRe.MatchString(r.Model) {
 		return fmt.Errorf("request model %q is not a model name", r.Model)

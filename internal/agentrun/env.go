@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kodestar/audiosilo-bridge/internal/agent"
 	"github.com/kodestar/audiosilo-bridge/internal/agentproto"
 )
 
@@ -19,6 +20,7 @@ const (
 	envAnthropic   = "ANTHROPIC_API_KEY"
 	envOpenAI      = "OPENAI_API_KEY"
 	envCodex       = "CODEX_API_KEY"
+	envMistral     = "MISTRAL_API_KEY"
 )
 
 // defaultPath is the child's PATH when the runner has none.
@@ -96,6 +98,15 @@ func (r *Runner) childEnv(cli, runDir string, handed *agentproto.Credential) []s
 		case own == "" && handed != nil && handed.Kind == agentproto.CredentialAPIKey:
 			env = append(env, envOpenAI+"="+handed.Value, envCodex+"="+handed.Value)
 		}
+	case agentproto.CLIMistral:
+		// vibe's config and session journal live under the run's private dir.
+		env = append(env, agent.MistralEnv(filepath.Join(runDir, "vibe"))...)
+		switch {
+		case own == agentproto.CredentialAPIKey:
+			env = append(env, envMistral+"="+r.secret(envMistral))
+		case own == "" && handed != nil && handed.Kind == agentproto.CredentialAPIKey:
+			env = append(env, envMistral+"="+handed.Value)
+		}
 	}
 	return env
 }
@@ -111,6 +122,10 @@ func (r *Runner) credentialKind(cli string) string {
 			return agentproto.CredentialOAuthToken
 		}
 		if r.hasSecret(envAnthropic) {
+			return agentproto.CredentialAPIKey
+		}
+	case agentproto.CLIMistral:
+		if r.hasSecret(envMistral) {
 			return agentproto.CredentialAPIKey
 		}
 	case agentproto.CLICodex:
@@ -156,6 +171,8 @@ func (r *Runner) credentialFingerprint(cli, kind string) string {
 		value = r.secret(envClaudeToken)
 	case cli == agentproto.CLIClaude:
 		value = r.secret(envAnthropic)
+	case cli == agentproto.CLIMistral:
+		value = r.secret(envMistral)
 	case kind == agentproto.CredentialLogin:
 		if f, err := os.Open(filepath.Join(r.codexHome(), "auth.json")); err == nil {
 			b, _ := io.ReadAll(io.LimitReader(f, maxSecretBytes))

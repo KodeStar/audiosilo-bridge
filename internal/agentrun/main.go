@@ -38,8 +38,8 @@ func Main(ctx context.Context, opts Options) error {
 // Login is `audiosilo-bridge agent-login <cli>`, run once inside the agent
 // container. codex: `codex login --device-auth` with CODEX_HOME on the agent
 // volume, the terminal attached (it prints a URL and a code to enter in a
-// browser; the login lands in CODEX_HOME/auth.json, 0600). claude: how to give
-// the container a token. Neither echoes a credential.
+// browser; the login lands in CODEX_HOME/auth.json, 0600). claude and mistral:
+// how to give the container a token or key. Neither echoes a credential.
 func Login(ctx context.Context, opts Options, cli string, stdin io.Reader, stdout, stderr io.Writer) error {
 	if opts.Staging == "" {
 		opts.Staging = "-" // not used by a login
@@ -65,8 +65,17 @@ account, not a shared one.
 		return err
 	case agentproto.CLICodex:
 		return r.loginCodex(ctx, stdin, stdout, stderr)
+	case agentproto.CLIMistral:
+		_, err := fmt.Fprintf(stdout, `The mistral CLI (vibe) signs in with an API key from console.mistral.ai; it has
+no login to run. Give the key to this container, either
+  - as the environment variable MISTRAL_API_KEY (compose: in the agent
+    service's environment, from your .env file), or
+  - in the file %s (mode 0600),
+or set it on the Bridge's Accounts tab. The key is billed per token.
+`, r.secretFile(envMistral))
+		return err
 	default:
-		return fmt.Errorf("agent-login: unknown CLI %q (want claude or codex)", cli)
+		return fmt.Errorf("agent-login: unknown CLI %q (want claude, codex or mistral)", cli)
 	}
 }
 

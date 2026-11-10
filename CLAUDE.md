@@ -21,7 +21,7 @@ The **Bridge**: the optional, always-on companion to an AudioSilo server that
 - **No standalone mode** (decision 2): it always pairs with a server.
 - **Mappings are checked, never assumed** (decision 13): see `internal/mapping`.
 - **Agents never run in this container** (decision 15): the `agent` image (the
-  native claude and codex CLIs, run by `audiosilo-bridge agent-runner`) sees only the
+  native claude, codex and Mistral Vibe (`vibe`) CLIs, run by `audiosilo-bridge agent-runner`) sees only the
   staging volume it shares with the Bridge and its own `/agent` volume. The Bridge
   drops typed requests there (`internal/agentproto`), never argv; slim, full and
   cuda carry no agent CLI, and config forces the supervisor's model-assisted lane
@@ -252,6 +252,17 @@ in PACKAGES.md.
   SafeJoin, the vault, the claim/lease handling) has allowed AND denied tests.
 - **Hyphens, never em dashes**, in docs, comments, UI copy and generated text.
 - **Commits** as `KodeStar <kode@audiosilo.app>`, no trailers.
+
+**Mistral agent backend:** `mistral` (Mistral Vibe, `vibe -p`, prompt on stdin) beside
+claude and codex (`internal/agent/mistral.go`). API key only (`MISTRAL_API_KEY`,
+vault `mistral_api_key`, the Accounts tab); no web tools (`SupportsWeb` false);
+`EnforcesNoTools` false (a NoTools run enables only read_file and grep). Each run gets
+its own `VIBE_HOME` in the container's run dir with telemetry, updates and
+connectors off; outcome, usage and cost come from vibe's `export.json`, which the
+runner compacts before the Bridge reads it. Models: `agent.mistral` (stage -> model,
+empty = CLI default; no reasoning effort). `mistral` is valid as `agent.backend` and
+`supervisor.fallback_backend`, not `model_backend`. The agent image pins
+`MISTRAL_VIBE_VERSION` (installed with uv under /opt/vibe).
 
 ## Status
 

@@ -21,7 +21,7 @@
 # PUID/PGID: use the owner of your library folders (Unraid: 99/100), the same
 # for both, so files the Bridge writes belong to the share's owner.
 #
-# The agent container runs the AI CLIs (claude, codex) for characters and
+# The agent container runs the AI CLIs (claude, codex, Mistral Vibe) for characters and
 # recaps. It sees only the staging volume it shares with the Bridge and its own
 # config volume: never a library, the Bridge's data or its secrets, and it is
 # on its own network (internet only), so it can't reach the Bridge or the
@@ -30,7 +30,8 @@
 # this one, or sign codex in once with
 #   docker compose exec agent audiosilo-bridge agent-login codex
 # and set AUDIOSILO_BRIDGE_AGENT_BACKEND: codex on the bridge (it runs claude
-# unless told otherwise).
+# unless told otherwise). For Mistral, put MISTRAL_API_KEY in the .env file and set
+# AUDIOSILO_BRIDGE_AGENT_BACKEND: mistral (no web tools, so no web research).
 name: audiosilo
 
 services:
@@ -66,7 +67,7 @@ services:
       # The folder shared with the agent container (below). Kept outside
       # /bridge-data, whose first-start ownership fix would otherwise reach it.
       AUDIOSILO_BRIDGE_AGENT_STAGING_DIR: /staging
-      # The CLI the agent container runs: claude (the default) or codex.
+      # The CLI the agent container runs: claude (the default), codex or mistral.
       # AUDIOSILO_BRIDGE_AGENT_BACKEND: codex
       # A GitHub token (a fine-grained one that can open issues on the community
       # repos) lets a job contribute its characters and recaps (contribute: issue).
@@ -92,6 +93,7 @@ services:
       - CLAUDE_CODE_OAUTH_TOKEN
       # - ANTHROPIC_API_KEY
       # - OPENAI_API_KEY
+      # - MISTRAL_API_KEY
     volumes:
       - staging:/staging
       - agent-config:/agent

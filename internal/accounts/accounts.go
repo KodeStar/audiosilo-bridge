@@ -465,15 +465,16 @@ func (g *GitHub) refuse(ctx context.Context, why string) {
 
 // The agent credential kinds the page sets, as vault names: a claude
 // setup-token (a subscription), an Anthropic API key (claude, billed) or an
-// OpenAI API key (codex, billed).
+// OpenAI API key (codex, billed) or a Mistral API key (vibe, billed).
 const (
 	AgentClaudeToken  = secrets.ClaudeOAuthToken
 	AgentAnthropicKey = secrets.AnthropicAPIKey
 	AgentOpenAIKey    = secrets.OpenAIAPIKey
+	AgentMistralKey   = secrets.MistralAPIKey
 )
 
 // AgentKinds are the agent credential kinds, in the page's order.
-var AgentKinds = []string{AgentClaudeToken, AgentAnthropicKey, AgentOpenAIKey}
+var AgentKinds = []string{AgentClaudeToken, AgentAnthropicKey, AgentOpenAIKey, AgentMistralKey}
 
 // ErrInvalidCredential is a value or kind the page can't store: errors.Is
 // matches it, and the error's text is the problem alone (never the value).
@@ -604,11 +605,12 @@ func (a *Agent) Delete(ctx context.Context, kind string) error {
 // cliKinds is which vault credentials each CLI takes, in the order it uses
 // them (a subscription token first for claude), with agentproto's kind for each.
 var cliKinds = map[string][]struct{ name, kind string }{
-	agentproto.CLIClaude: {{AgentClaudeToken, agentproto.CredentialOAuthToken}, {AgentAnthropicKey, agentproto.CredentialAPIKey}},
-	agentproto.CLICodex:  {{AgentOpenAIKey, agentproto.CredentialAPIKey}},
+	agentproto.CLIClaude:  {{AgentClaudeToken, agentproto.CredentialOAuthToken}, {AgentAnthropicKey, agentproto.CredentialAPIKey}},
+	agentproto.CLICodex:   {{AgentOpenAIKey, agentproto.CredentialAPIKey}},
+	agentproto.CLIMistral: {{AgentMistralKey, agentproto.CredentialAPIKey}},
 }
 
-// KindsFor are the vault credentials cli ("claude" or "codex") takes, in its order.
+// KindsFor are the vault credentials cli ("claude", "codex" or "mistral") takes, in its order.
 func KindsFor(cli string) []string {
 	var names []string
 	for _, k := range cliKinds[cli] {
@@ -617,7 +619,7 @@ func KindsFor(cli string) []string {
 	return names
 }
 
-// Credential is the vault's credential for cli ("claude" or "codex"): its
+// Credential is the vault's credential for cli ("claude", "codex" or "mistral"): its
 // agentproto kind, its value and when it was set. ok is false when there is none.
 func (a *Agent) Credential(ctx context.Context, cli string) (kind, value string, since time.Time, ok bool) {
 	for _, o := range cliKinds[cli] {
