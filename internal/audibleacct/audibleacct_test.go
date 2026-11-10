@@ -680,6 +680,14 @@ func TestMappingKeepsTheUserName(t *testing.T) {
 	if err != nil || other.UserName != "" || other.Label != "Audible (US)" {
 		t.Fatalf("another person = %+v, %v", other, err)
 	}
+	// Denied: the same person id on another server is someone else.
+	if _, err := e.m.Map(context.Background(), e.srv, "srv-1", a.ID, Mapping{UserID: 3, UserName: "Chris", LibraryID: 1, Policy: "manual"}); err != nil {
+		t.Fatal(err)
+	}
+	moved, err := e.m.Map(context.Background(), e.srv, "srv-2", a.ID, Mapping{Label: "Chris (US)", UserID: 3, LibraryID: 1, Policy: "manual"})
+	if err != nil || moved.UserName != "" || moved.Label != "Audible (US)" {
+		t.Fatalf("same id on another server = %+v, %v", moved, err)
+	}
 }
 
 // Remove forgets locally first, then tells the server and deregisters; a

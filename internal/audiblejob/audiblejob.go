@@ -359,7 +359,7 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 		h.o.Log.Warn("audible: recording the poll failed", "account", acct.ID, "err", err)
 	}
 	h.o.Log.Info("audible: polled", "account", acct.ID, "titles", res.Titles, "matched", res.Matched, "contested", res.Contested,
-		"enriched", res.Enriched, "enrich_failed", res.EnrichFailed, "enrich_deferred", res.EnrichDeferred)
+		"enriched", res.Enriched, "enrich_failed", res.EnrichFailed, "enrich_deferred", res.EnrichDeferred, "overlong", res.Overlong)
 	return res, nil
 }
 

@@ -216,10 +216,12 @@ func (db *DB) AudibleHeard(ctx context.Context, x AudiblePush, ms int64, applied
 // still holds that place (the Audible app uploaded an older place over it).
 // Only while nothing changed since the job read x (as x): the title is listed,
 // no place waits, the push hasn't written since (at) and no new server row was
-// recorded (row_ms, row_seen). The push's own checks still run before the
-// write (Audible further on is never overwritten).
+// recorded (row_ms, row_seen). The place last written is no longer Audible's
+// (last_ms -1): left, the push's debounce would drop the re-armed place as
+// the one it last wrote. The push's own checks still run before the write
+// (Audible further on is never overwritten).
 func (db *DB) RearmAudiblePush(ctx context.Context, x AudiblePush, now time.Time) (bool, error) {
-	res, err := db.sql.ExecContext(ctx, `UPDATE audible_push SET want_ms = row_ms, row_seen = ?1
+	res, err := db.sql.ExecContext(ctx, `UPDATE audible_push SET want_ms = row_ms, row_seen = ?1, last_ms = -1
 		WHERE account = ?2 AND asin = ?3 AND listed = 1 AND want_ms IS NULL AND row_ms >= 0
 		  AND at = ?4 AND row_ms = ?5 AND row_seen = ?6`, timestamp(now), x.Account, x.ASIN, x.At, x.RowMs, x.RowSeen)
 	if err != nil {

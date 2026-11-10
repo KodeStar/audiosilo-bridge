@@ -569,7 +569,7 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (*R
 				continue
 			}
 			if r.Status == link.SyncNotApplied && r.Reason == link.SyncBehind && overwritten(x, hp.ms) {
-				h.reassert(ctx, acct.ID, x, now, res)
+				h.reassert(ctx, acct.ID, x, res)
 			}
 		}
 		rep.Progress(jobs.Progress{Step: "server", Message: "Sending the places to the server", Done: res.Sent, Total: len(events)})
@@ -580,7 +580,7 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (*R
 	}
 	h.o.health(ctx, acct, nil, time.Time{})
 	h.o.Log.Info("audible: places synced", "account", acct.ID, "titles", res.Titles, "heard", res.Heard, "sent", res.Sent,
-		"applied", res.Applied, "behind", res.Behind, "duplicate", res.Duplicate)
+		"applied", res.Applied, "behind", res.Behind, "duplicate", res.Duplicate, "reasserted", res.Reasserted)
 	return res, nil
 }
 
@@ -597,12 +597,13 @@ func overwritten(x store.AudiblePush, heardMs int64) bool {
 // reassert makes the server's place for x's title wait to be written to
 // Audible again (store.RearmAudiblePush, guarded against anything the push
 // recorded since the job read x). The push writes it once it has been still
-// for StillFor and only after reading Audible's places again, so a place
-// Audible moved further on meanwhile is never overwritten. Bounded: only a new
-// Audible place is answered behind (the same one again is a duplicate), so
-// this runs once per older place the app uploads.
-func (h *Handler) reassert(ctx context.Context, account string, x store.AudiblePush, now time.Time, res *Result) {
-	ok, err := h.o.DB.RearmAudiblePush(ctx, x, now)
+// for StillFor from now (never the job's start: a long sync would leave no
+// wait) and only after reading Audible's places again, so a place Audible
+// moved further on meanwhile is never overwritten. Bounded: only a new Audible
+// place is answered behind (the same one again is a duplicate), so this runs
+// once per older place the app uploads.
+func (h *Handler) reassert(ctx context.Context, account string, x store.AudiblePush, res *Result) {
+	ok, err := h.o.DB.RearmAudiblePush(ctx, x, h.o.Now())
 	switch {
 	case err != nil:
 		h.o.Log.Warn("audible: re-arming a place to write to Audible failed", "account", account, "err", err)

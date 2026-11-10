@@ -499,7 +499,9 @@ func TestRearmAudiblePush(t *testing.T) {
 	if !rearm(x, later) {
 		t.Fatalf("not re-armed: %+v", read())
 	}
-	if y := read(); y.WantMs == nil || *y.WantMs != 6_000_000 || y.RowSeen != Timestamp(later) || y.LastMs != 6_000_000 {
+	// The last write is forgotten: the push's debounce would otherwise drop
+	// the re-armed place as the one it last wrote.
+	if y := read(); y.WantMs == nil || *y.WantMs != 6_000_000 || y.RowSeen != Timestamp(later) || y.LastMs != -1 {
 		t.Fatalf("re-armed row = %+v", y)
 	}
 }

@@ -354,7 +354,7 @@ func WorkKey(rec source.Record) string {
 	if pos == "" && rec.HasSequence {
 		pos = strconv.FormatFloat(rec.Sequence, 'f', -1, 64)
 	}
-	if pos == "" && rec.Series != "" && match.Fold(rec.Series) == title {
+	if pos == "" && bareSeriesTitle(rec.Title, rec.Series) {
 		return ""
 	}
 	authors := rec.Authors
@@ -362,6 +362,21 @@ func WorkKey(rec source.Record) string {
 		authors = []string{rec.Author}
 	}
 	return title + "\x00" + strings.Join(foldedNames(authors), "\x00") + "\x00" + pos
+}
+
+// bareSeriesTitle reports whether title is series' bare name: alike folded,
+// or as the matcher names a series (a leading article and Audible's trailing
+// " Series" aside, "Dragon Heart" in "Dragon Heart Series"; never two names
+// that both reduce to nothing there, as non-Latin ones do).
+func bareSeriesTitle(title, series string) bool {
+	if series == "" {
+		return false
+	}
+	if match.Fold(series) == match.Fold(title) {
+		return true
+	}
+	n := match.NormalizeSeries(series)
+	return n != "" && n == match.NormalizeSeries(title)
 }
 
 // foldedNames are names folded, the empty ones dropped, sorted and without

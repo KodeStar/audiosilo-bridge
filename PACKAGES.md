@@ -2285,8 +2285,8 @@ internal/
             the person when Map or a sign-in again changes it; a typed one stays.
             Map records a new mapping on the server, then here, under finishMu (bridge#40:
             a remap and a sign-in again or a removal never interleave). A mapping with no
-            user name for the account's own person (the server's people couldn't be read)
-            keeps the stored name (Map and a sign-in again), never "". Remove forgets
+            user name for the account's own person on the same server (the server's people
+            couldn't be read) keeps the stored name (Map and a sign-in again), never "". Remove forgets
             locally FIRST (vault, then row), then DELETEs on the server and
             deregisters, run to the end even if the page goes away; either failing
             is a warning for the page, never the account kept. Library opens the
@@ -2538,8 +2538,8 @@ internal/
             held over one the push wrote; the sync then answers it behind and, when the
             Bridge wrote the title's last place (last_ms), the server row it last read is
             still that place (within 5 s) and Audible's is behind it by more than 5 s,
-            re-arms the push (store.RearmAudiblePush: want_ms = row_ms, row_seen now, only
-            while listed, nothing waiting, no push and no new row since the job read it;
+            re-arms the push (store.RearmAudiblePush: want_ms = row_ms, row_seen the time of the
+            re-arm, last_ms -1 so the debounce keeps it, only while listed, nothing waiting, no push and no new row since the job read it;
             Result.Reasserted). The push's read before the write still drops it if Audible
             moved further on. Once per older place: the same place again is already heard.
             Deps: audible, audibleacct, jobs, link, store.
@@ -2560,7 +2560,8 @@ internal/
             author set and position, the same book owned twice, and a claim of the
             keeper's work keeps it at any score; a title that folds to nothing has
             no key, nor (bridge#43) a title with no position or sequence that is its
-            series' bare name, the volumes Audible lists so; 4b owner fixes: when the best is no ASIN match and some claims'
+            series' bare name (folded alike, or alike under match.NormalizeSeries, a
+            name it reduces to nothing aside), the volumes Audible lists so; 4b owner fixes: when the best is no ASIN match and some claims'
             position agrees with the book's (Claim.Agrees), only those compete, so
             the volume whose number is the book's keeps it even over a higher
             score; KeepBest also returns contested: every losing claim but one

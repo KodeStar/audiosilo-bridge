@@ -369,6 +369,18 @@ func TestWorkKeyBareSeriesTitle(t *testing.T) {
 	if WorkKey(source.Record{Title: "The Long Road", Series: "The Long Road", SeriesPosition: "2", Authors: []string{"Ann Co"}}) == "" {
 		t.Error("a bare series title with a position lost its key")
 	}
+	// The series named as the matcher names it: Audible's trailing " Series",
+	// a leading article.
+	for _, series := range []string{"The Long Road Series", "Long Road"} {
+		if k := WorkKey(source.Record{Title: "The Long Road", Series: series, Authors: []string{"Ann Co"}}); k != "" {
+			t.Errorf("a bare title in %q: key = %q, want none", series, k)
+		}
+	}
+	// Two non-Latin names that both reduce to nothing under the ASCII-only
+	// normalising are told apart.
+	if WorkKey(source.Record{Title: "長い道", Series: "別の道", Authors: []string{"Ann Co"}}) == "" {
+		t.Error("a non-Latin titled volume lost its key")
+	}
 	if WorkKey(source.Record{Title: "The Long Road", Authors: []string{"Ann Co"}}) == "" {
 		t.Error("a standalone title lost its key")
 	}
