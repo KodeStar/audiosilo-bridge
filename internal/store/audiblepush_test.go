@@ -501,7 +501,26 @@ func TestRearmAudiblePush(t *testing.T) {
 	}
 	// The last write is forgotten: the push's debounce would otherwise drop
 	// the re-armed place as the one it last wrote.
-	if y := read(); y.WantMs == nil || *y.WantMs != 6_000_000 || y.RowSeen != Timestamp(later) || y.LastMs != -1 {
+	if y := read(); y.WantMs == nil || *y.WantMs != 6_000_000 || y.RowSeen != Timestamp(later) || y.LastMs != -1 ||
+		y.ReassertedMs != 6_000_000 {
 		t.Fatalf("re-armed row = %+v", y)
+	}
+	// At most once per written place: written again, the same place is never
+	// re-armed a second time...
+	if err := db.AudiblePushed(ctx, a.ID, "B000000001", 6_000_000, later.Add(4*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if y := read(); y.ReassertedMs != 6_000_000 || rearm(y, later.Add(time.Hour)) {
+		t.Fatalf("re-armed the same place twice: %+v", read())
+	}
+	// ...until the push writes a new place.
+	if err := db.WantAudiblePush(ctx, a.ID, "B000000001", AudibleRow{Ms: 7_000_000, Seen: later}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AudiblePushed(ctx, a.ID, "B000000001", 7_000_000, later.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if y := read(); y.ReassertedMs != -1 || !rearm(y, later.Add(2*time.Hour)) {
+		t.Fatalf("a new place wasn't re-armed: %+v", read())
 	}
 }

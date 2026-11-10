@@ -31,6 +31,10 @@ type AudiblePush struct {
 	// that place (its own clock).
 	RowMs   int64
 	RowSeen string
+	// ReassertedMs is the written place an audible.sync already re-armed once
+	// (migration 0014, -1 none): never re-armed again until a new place is
+	// written.
+	ReassertedMs int64
 }
 
 // AudibleRow is a server progress row as the push records it: its place (ms)
@@ -49,13 +53,13 @@ type AudibleSyncTitle struct {
 	RuntimeS  int64
 }
 
-const audiblePushColumns = `account, asin, library_id, path, runtime_s, listed, acr, last_ms, at, heard_ms, want_ms, row_ms, row_seen`
+const audiblePushColumns = `account, asin, library_id, path, runtime_s, listed, acr, last_ms, at, heard_ms, want_ms, row_ms, row_seen, reasserted_ms`
 
 func scanAudiblePush(row interface{ Scan(...any) error }) (AudiblePush, error) {
 	var p AudiblePush
 	var want sql.NullInt64
 	err := row.Scan(&p.Account, &p.ASIN, &p.LibraryID, &p.Path, &p.RuntimeS, &p.Listed, &p.ACR, &p.LastMs, &p.At, &p.HeardMs,
-		&want, &p.RowMs, &p.RowSeen)
+		&want, &p.RowMs, &p.RowSeen, &p.ReassertedMs)
 	if want.Valid {
 		p.WantMs = &want.Int64
 	}
@@ -183,10 +187,13 @@ func (db *DB) DropAudiblePush(ctx context.Context, account, asin string) error {
 
 // AudiblePushed records that ms was written to Audible at at: the waiting
 // place goes, and the place heard before it is no longer Audible's (heard_ms
-// -1: a server place there is a move, written like any other).
+// -1: a server place there is a move, written like any other). A place other
+// than the one re-armed once (reasserted_ms) is a new place: it may be
+// re-armed once in its turn.
 func (db *DB) AudiblePushed(ctx context.Context, account, asin string, ms int64, at time.Time) error {
-	_, err := db.sql.ExecContext(ctx, `UPDATE audible_push SET want_ms = NULL, last_ms = ?, at = ?, heard_ms = -1
-		WHERE account = ? AND asin = ?`, ms, timestamp(at), account, asin)
+	_, err := db.sql.ExecContext(ctx, `UPDATE audible_push SET want_ms = NULL, last_ms = ?1, at = ?2, heard_ms = -1,
+			reasserted_ms = CASE WHEN reasserted_ms = ?1 THEN reasserted_ms ELSE -1 END
+		WHERE account = ?3 AND asin = ?4`, ms, timestamp(at), account, asin)
 	return err
 }
 
@@ -220,9 +227,16 @@ func (db *DB) AudibleHeard(ctx context.Context, x AudiblePush, ms int64, applied
 // (last_ms -1): left, the push's debounce would drop the re-armed place as
 // the one it last wrote. The push's own checks still run before the write
 // (Audible further on is never overwritten).
+//
+// At most once per written place (reasserted_ms, bridge#51): a sync can't tell
+// the app's stale upload from a listener who rewound in the Audible app and
+// listens on there, so once the place was written again and Audible went
+// behind it once more, it is left alone until the push writes a new place
+// (AudiblePushed).
 func (db *DB) RearmAudiblePush(ctx context.Context, x AudiblePush, now time.Time) (bool, error) {
-	res, err := db.sql.ExecContext(ctx, `UPDATE audible_push SET want_ms = row_ms, row_seen = ?1, last_ms = -1
-		WHERE account = ?2 AND asin = ?3 AND listed = 1 AND want_ms IS NULL AND row_ms >= 0
+	res, err := db.sql.ExecContext(ctx, `UPDATE audible_push SET want_ms = row_ms, row_seen = ?1, last_ms = -1,
+			reasserted_ms = row_ms
+		WHERE account = ?2 AND asin = ?3 AND listed = 1 AND want_ms IS NULL AND row_ms >= 0 AND reasserted_ms != row_ms
 		  AND at = ?4 AND row_ms = ?5 AND row_seen = ?6`, timestamp(now), x.Account, x.ASIN, x.At, x.RowMs, x.RowSeen)
 	if err != nil {
 		return false, err

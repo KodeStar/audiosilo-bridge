@@ -599,9 +599,11 @@ func overwritten(x store.AudiblePush, heardMs int64) bool {
 // recorded since the job read x). The push writes it once it has been still
 // for StillFor from now (never the job's start: a long sync would leave no
 // wait) and only after reading Audible's places again, so a place Audible
-// moved further on meanwhile is never overwritten. Bounded: only a new Audible
-// place is answered behind (the same one again is a duplicate), so this runs
-// once per older place the app uploads.
+// moved further on meanwhile is never overwritten. At most once per place the
+// Bridge wrote (reasserted_ms, migration 0014): the sync can't tell the app's
+// stale upload from a listener who rewound in the Audible app and listens on
+// there, so a second behind for the same written place is left alone until
+// the push writes a new one.
 func (h *Handler) reassert(ctx context.Context, account string, x store.AudiblePush, res *Result) {
 	ok, err := h.o.DB.RearmAudiblePush(ctx, x, h.o.Now())
 	switch {

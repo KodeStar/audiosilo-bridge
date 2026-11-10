@@ -81,6 +81,63 @@ func TestSyncReassertsAPlaceAudibleOverwrote(t *testing.T) {
 	}
 }
 
+// bridge#51, at most once per written place: after the place was written again,
+// Audible going behind it once more (a listener who rewound in the Audible app
+// and listens on there) is left alone: no re-arm, no write. A new place the
+// push writes may be re-asserted once in its turn.
+func TestReassertAtMostOncePerWrittenPlace(t *testing.T) {
+	e := newEnv(t)
+	p := e.pushed(t, 5393.514)
+	raw := params(t, title("B000000001", "A/One", 36000))
+
+	// The stale upload is healed once.
+	e.now = e.now.Add(time.Minute)
+	e.audibleAt(4_000_000, e.now)
+	if res, err := e.runSync(t, raw); err != nil || res.Reasserted != 1 {
+		t.Fatalf("first = %+v, %v", res, err)
+	}
+	e.now = e.now.Add(4 * time.Minute)
+	p.Tick(context.Background())
+	if got := e.sets(); len(got) != 2 || got[1] != "B000000001@5393514" {
+		t.Fatalf("sets = %v", got)
+	}
+
+	// Behind the same place again, at another place and time: left alone.
+	e.now = e.now.Add(time.Minute)
+	e.audibleAt(4_100_000, e.now)
+	res, err := e.runSync(t, raw)
+	if err != nil || res.Behind != 1 || res.Reasserted != 0 {
+		t.Fatalf("second = %+v, %v", res, err)
+	}
+	if x, _ := e.db.GetAudiblePush(context.Background(), acctID, "B000000001"); x.WantMs != nil || x.ReassertedMs != 5_393_514 {
+		t.Fatalf("push row = %+v", x)
+	}
+	e.now = e.now.Add(10 * time.Minute)
+	p.Tick(context.Background())
+	if got := e.sets(); len(got) != 2 {
+		t.Fatalf("the listener's place was overwritten again: %v", got)
+	}
+
+	// A new place written on AudioSilo (further on), then overwritten by the
+	// app: re-asserted once again.
+	e.srv.server["A/One"] = 6000
+	e.srv.add("A/One", "B000000001", 6000, e.now, "web-1")
+	e.read(p)
+	e.now = e.now.Add(4 * time.Minute)
+	p.Tick(context.Background())
+	if got := e.sets(); len(got) != 3 || got[2] != "B000000001@6000000" {
+		t.Fatalf("the new place wasn't written: %v", got)
+	}
+	if x, _ := e.db.GetAudiblePush(context.Background(), acctID, "B000000001"); x.ReassertedMs != -1 {
+		t.Fatalf("a new place kept the old re-assert: %+v", x)
+	}
+	e.now = e.now.Add(time.Minute)
+	e.audibleAt(5_000_000, e.now)
+	if res, err := e.runSync(t, raw); err != nil || res.Reasserted != 1 {
+		t.Fatalf("after a new place = %+v, %v", res, err)
+	}
+}
+
 // Denied: a re-armed place is never written over Audible once it moved further
 // on (the listener went on in the Audible app before the push came round): the
 // push's read before the write drops it, and the next sync brings Audible's in.

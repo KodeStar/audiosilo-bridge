@@ -116,7 +116,8 @@ internal/
               0004 workers, 0005 books.goal, 0006 accounts, 0007 podcast_shows,
               0008 podcast_artwork_state, 0009 audible_accounts,
               0010 audible_accounts.device_profile, 0011 audible_push + sync health + refusal_kind,
-              0012 audible_preorders, 0013 idx_books_unfinished)
+              0012 audible_preorders, 0013 idx_books_unfinished,
+              0014 audible_push.reasserted_ms)
   auth/       the page's single password + hashed sessions + login limiter
   -- Phase 1a --
   generate/   sidecars.generate: server job -> engine book -> .audiosilo/ + rescan;

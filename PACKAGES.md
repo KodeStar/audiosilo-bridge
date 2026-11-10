@@ -2541,7 +2541,11 @@ internal/
             re-arms the push (store.RearmAudiblePush: want_ms = row_ms, row_seen the time of the
             re-arm, last_ms -1 so the debounce keeps it, only while listed, nothing waiting, no push and no new row since the job read it;
             Result.Reasserted). The push's read before the write still drops it if Audible
-            moved further on. Once per older place: the same place again is already heard.
+            moved further on. At most once per place the Bridge wrote (reasserted_ms,
+            migration 0014; owner decision after review): a sync can't tell the app's stale
+            upload from a listener who rewound in the Audible app, so Audible behind the same
+            written place again is left alone until the push writes a new place (AudiblePushed
+            of another place resets it).
             Deps: audible, audibleacct, jobs, link, store.
   importjob/ matching and placement against a library (the manager's, ported):
             BookMatcher over []link.LibraryBook (reused pkg/match.NewIndexWith under
