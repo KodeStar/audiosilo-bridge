@@ -2955,9 +2955,10 @@ internal/
             openJobWait) rather than a count of wake-ups; a waiter takes the signal before
             it reads what it waits on, so an end in between still wakes it.
             BRIDGE-09 (bridge#35, the owner's call): a chapters job whose book's chapters
-            run was cancelled at asr or chapter_detecting (stoppedChapters: goal chapters, a
-            single file, scheduler.IsCancelled; one that failed for a reason of its own is
-            cleared, so asking again never fails the same way forever) takes it up again (resumeChapters, under the hold,
+            run was cancelled at asr or chapter_detecting (cancelledChapters: goal
+            chapters, a single file, scheduler.IsCancelled; one that failed for a reason
+            of its own is cleared, so asking again never fails the same way forever)
+            takes it up again (resumeChapters, under the hold,
             through store.ContinueReadalong with goal chapters; resumesAt, shared with
             continueChapters: splitting for a continuable transcription, chapter_detecting
             for a rerunnable detection) instead of clearing it and transcribing again; one

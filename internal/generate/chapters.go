@@ -460,12 +460,12 @@ func resumesAt(b store.Book) (state.State, bool) {
 	return "", false
 }
 
-// stoppedChapters reports whether engine book b is a chapters run (goal
+// cancelledChapters reports whether engine book b is a chapters run (goal
 // chapters, a single file) CANCELLED at asr or chapter_detecting: one a new
 // chapters job takes up again (resumeChapters). Only a cancel (the owner's call:
-// "a detect re-run after a cancel"): a run that failed for a reason of its own is
-// cleared by the new job, so asking again never fails the same way forever.
-func stoppedChapters(b store.Book) bool {
+// "a detect re-run after a cancel"): a run that failed for a reason of its own
+// is cleared by the new job, so asking again never fails the same way forever.
+func cancelledChapters(b store.Book) bool {
 	return state.State(b.State) != state.Done && continuable(b) && scheduler.IsCancelled(b) &&
 		markersFile(b.AudioSource()) != ""
 }
@@ -474,19 +474,19 @@ func stoppedChapters(b store.Book) bool {
 // keeping what it transcribed (BRIDGE-09, the owner's call on bridge#35: an admin
 // cancels a detect job parked waiting for a worker, then detects again, and the
 // book was transcribed all over). A run cancelled at asr or chapter_detecting
-// (stoppedChapters; a failed one is cleared) goes on from resumesAt with goal chapters,
-// its identity and work dir its own, under the engine's hold (a stage the cancel
-// just stopped may still be finishing: one that stays busy fails the job to be
-// tried again, never the run cleared unseen) and looked at again once held; the
-// cleared status and the job's mapping are one transaction
+// (cancelledChapters; a failed one is cleared) goes on from resumesAt with goal
+// chapters, its identity and work dir its own, under the engine's hold (a stage
+// the cancel just stopped may still be finishing: one that stays busy fails the
+// job to be tried again, never the run cleared unseen) and looked at again once
+// held; the cleared status and the job's mapping are one transaction
 // (store.ContinueReadalong, the audio run's continue with the goal it is given),
 // which refuses a run the retention swept. It reports whether it took it up; a
 // run it doesn't is cleared by the caller, as before.
 func (h *Handler) resumeChapters(ctx context.Context, eng Engine, r *run, old store.Book) (bool, error) {
-	if !stoppedChapters(old) {
+	if !cancelledChapters(old) {
 		return false, nil
 	}
-	old, release, ok, err := h.holdStill(ctx, old, stoppedChapters)
+	old, release, ok, err := h.holdStill(ctx, old, cancelledChapters)
 	if !ok {
 		return false, err
 	}
@@ -802,8 +802,9 @@ func (h *Handler) openJobRefusal(ctx context.Context, r *run, b store.Book) (sto
 // continues it gives it the book's series). The earlier engine book (audioRun's:
 // never an ebook run, which the chapters run goes beside) with nothing to reuse is
 // deleted first (as a generate job does), unless an open job follows it or it is
-// a finished whole run (errChaptersKeepsRun); a chapters run stopped at asr or
-// chapter_detecting is taken up again instead (resumeChapters, BRIDGE-09).
+// a finished whole run (errChaptersKeepsRun); a chapters run cancelled (never
+// one that failed) at asr or chapter_detecting is taken up again instead
+// (resumeChapters, BRIDGE-09).
 func (h *Handler) createChapters(ctx context.Context, eng Engine, r *run) error {
 	sp, ok, err := metaops.AllowedPath(r.place.full, []string{r.mount})
 	if err != nil || !ok {
