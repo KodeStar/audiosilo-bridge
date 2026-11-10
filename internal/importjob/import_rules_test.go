@@ -347,6 +347,69 @@ func TestWorkKey(t *testing.T) {
 	}
 }
 
+// bridge#43: volumes Audible lists under their series' bare name with no
+// position are no one work (a tie between them keeps none); a number, given
+// as a position or only as the parsed sequence, still tells them apart, and
+// a standalone title with no series keeps its key.
+func TestWorkKeyBareSeriesTitle(t *testing.T) {
+	bare := source.Record{Title: "The Long Road", Series: "The Long Road", Authors: []string{"Ann Co"}}
+	if k := WorkKey(bare); k != "" {
+		t.Errorf("a bare series title's key = %q, want none", k)
+	}
+	if keep, contested := KeepBest([]Claim{{Path: "a", Score: 2, Work: WorkKey(bare)}, {Path: "a", Score: 2, Work: WorkKey(bare)}}); keep[0] || keep[1] ||
+		!contested[0] || !contested[1] {
+		t.Errorf("two bare-series volumes tied on one book: keep %v contested %v", keep, contested)
+	}
+	one, two := bare, bare
+	one.HasSequence, one.Sequence = true, 1
+	two.HasSequence, two.Sequence = true, 2
+	if WorkKey(one) == "" || WorkKey(one) == WorkKey(two) {
+		t.Errorf("sequences: %q vs %q", WorkKey(one), WorkKey(two))
+	}
+	if WorkKey(source.Record{Title: "The Long Road", Series: "The Long Road", SeriesPosition: "2", Authors: []string{"Ann Co"}}) == "" {
+		t.Error("a bare series title with a position lost its key")
+	}
+	// The series named as the matcher names it: Audible's trailing " Series",
+	// a leading article.
+	for _, series := range []string{"The Long Road Series", "Long Road"} {
+		if k := WorkKey(source.Record{Title: "The Long Road", Series: series, Authors: []string{"Ann Co"}}); k != "" {
+			t.Errorf("a bare title in %q: key = %q, want none", series, k)
+		}
+	}
+	// Two non-Latin names that both reduce to nothing under the ASCII-only
+	// normalising are told apart.
+	if WorkKey(source.Record{Title: "長い道", Series: "別の道", Authors: []string{"Ann Co"}}) == "" {
+		t.Error("a non-Latin titled volume lost its key")
+	}
+	if WorkKey(source.Record{Title: "The Long Road", Authors: []string{"Ann Co"}}) == "" {
+		t.Error("a standalone title lost its key")
+	}
+	if WorkKey(source.Record{Title: "Into the Dark", Series: "The Long Road", Authors: []string{"Ann Co"}}) == "" {
+		t.Error("a titled volume with no position lost its key")
+	}
+}
+
+// Twins: the books the library holds twice (title, authors and series alike,
+// case and order aside) are each other's twins; another author, series
+// position or title is not.
+func TestTwins(t *testing.T) {
+	books := []link.LibraryBook{
+		{Path: "A/One", Title: "Equal Measures", Authors: []string{"Tess Prat", "Ann Co"}, Series: []link.SeriesRef{{Name: "Measures", Position: "1"}}},
+		{Path: "B/One", Title: "equal measures", Authors: []string{"ann co", "Tess Prat"}, Series: []link.SeriesRef{{Name: "The Measures", Position: "1"}}},
+		{Path: "A/Two", Title: "Equal Measures", Authors: []string{"Tess Prat", "Ann Co"}, Series: []link.SeriesRef{{Name: "Measures", Position: "2"}}},
+		{Path: "A/Other", Title: "Equal Measures", Authors: []string{"Tess Prat"}, Series: []link.SeriesRef{{Name: "Measures", Position: "1"}}},
+		{Path: "X/1", Title: " -- "},
+		{Path: "X/2", Title: " -- "},
+		// Two non-Latin series the ASCII-only normalising reduces to nothing.
+		{Path: "J/1", Title: "Equal Measures", Authors: []string{"Tess Prat"}, Series: []link.SeriesRef{{Name: "長い道", Position: "1"}}},
+		{Path: "J/2", Title: "Equal Measures", Authors: []string{"Tess Prat"}, Series: []link.SeriesRef{{Name: "別の道", Position: "1"}}},
+	}
+	got := Twins(books)
+	if len(got) != 2 || !got["A/One"] || !got["B/One"] {
+		t.Fatalf("twins = %v", got)
+	}
+}
+
 // SpanMismatch: a pack (a range position) matched to a book with no range is a
 // mismatch; a pack on a range book, or a single volume anywhere, is not.
 func TestSpanMismatch(t *testing.T) {

@@ -220,7 +220,12 @@ func (p *Pusher) row(ctx context.Context, a store.AudibleAccount, titles map[str
 	switch {
 	case !sameBook || !x.Listed:
 		err = p.o.DB.PendAudiblePush(ctx, a.ID, row.ASIN, row.LibraryID, row.Path, !history, rec)
-		x = store.AudiblePush{Account: a.ID, ASIN: row.ASIN, LibraryID: row.LibraryID, Path: row.Path, LastMs: x.LastMs, HeardMs: x.HeardMs}
+		reasserted := x.ReassertedMs
+		if !sameBook {
+			reasserted = -1
+		}
+		x = store.AudiblePush{Account: a.ID, ASIN: row.ASIN, LibraryID: row.LibraryID, Path: row.Path, LastMs: x.LastMs, HeardMs: x.HeardMs,
+			ReassertedMs: reasserted}
 		if !known {
 			x.LastMs, x.HeardMs = -1, -1
 		}

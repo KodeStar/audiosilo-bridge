@@ -340,24 +340,96 @@ func PositionAgrees(rec source.Record, b link.LibraryBook) (agrees, disagrees bo
 // are the same book owned twice (two ASINs, an edition each), which share a
 // book without contesting it; the position keeps apart the volumes a series
 // lists under one bare title. A title that folds to nothing is no identity:
-// its key is "", which KeepBest never takes for the same work.
+// its key is "", which KeepBest never takes for the same work. Nor is a title
+// with no position that is its series' bare name (bridge#43): Audible lists
+// several volumes so, and with no number to tell them apart they would all
+// read as one work and all keep a book only one of them is. The parsed
+// sequence stands in for a position Audible gave only as a number.
 func WorkKey(rec source.Record) string {
 	title := match.Fold(rec.Title)
 	if title == "" {
+		return ""
+	}
+	pos := strings.TrimSpace(rec.SeriesPosition)
+	if pos == "" && rec.HasSequence {
+		pos = strconv.FormatFloat(rec.Sequence, 'f', -1, 64)
+	}
+	if pos == "" && bareSeriesTitle(rec.Title, rec.Series) {
 		return ""
 	}
 	authors := rec.Authors
 	if len(authors) == 0 && rec.Author != "" {
 		authors = []string{rec.Author}
 	}
-	folded := make([]string, 0, len(authors))
-	for _, a := range authors {
-		if f := match.Fold(a); f != "" {
+	return title + "\x00" + strings.Join(foldedNames(authors), "\x00") + "\x00" + pos
+}
+
+// bareSeriesTitle reports whether title is series' bare name: alike folded,
+// or as the matcher names a series (a leading article and Audible's trailing
+// " Series" aside, "Dragon Heart" in "Dragon Heart Series"; never two names
+// that both reduce to nothing there, as non-Latin ones do).
+func bareSeriesTitle(title, series string) bool {
+	if series == "" {
+		return false
+	}
+	if match.Fold(series) == match.Fold(title) {
+		return true
+	}
+	n := match.NormalizeSeries(series)
+	return n != "" && n == match.NormalizeSeries(title)
+}
+
+// foldedNames are names folded, the empty ones dropped, sorted and without
+// repeats: an author list in any order, as WorkKey and Twins compare them.
+func foldedNames(names []string) []string {
+	folded := make([]string, 0, len(names))
+	for _, n := range names {
+		if f := match.Fold(n); f != "" {
 			folded = append(folded, f)
 		}
 	}
 	slices.Sort(folded)
-	return title + "\x00" + strings.Join(slices.Compact(folded), "\x00") + "\x00" + strings.TrimSpace(rec.SeriesPosition)
+	return slices.Compact(folded)
+}
+
+// Twins are the paths of books the library holds more than once: another
+// book with the same title, authors and series (folded, in any order). A
+// title matched to one of them by its words alone can't tell which copy it
+// is, so its ASIN goes on neither (bridge#40). A title that folds to nothing
+// has no twin.
+func Twins(books []link.LibraryBook) map[string]bool {
+	byKey := map[string][]string{}
+	for _, b := range books {
+		title := match.Fold(b.Title)
+		if title == "" {
+			continue
+		}
+		parts := make([]string, 0, len(b.Authors)+len(b.Series))
+		for _, f := range foldedNames(b.Authors) {
+			parts = append(parts, "a\x00"+f)
+		}
+		for _, s := range b.Series {
+			// As the matcher names a series, or folded when that reduces it
+			// to nothing (a non-Latin name): two such series stay apart.
+			name := match.NormalizeSeries(s.Name)
+			if name == "" {
+				name = match.Fold(s.Name)
+			}
+			parts = append(parts, "s\x00"+name+"\x00"+strings.TrimSpace(s.Position))
+		}
+		slices.Sort(parts)
+		k := title + "\x00" + strings.Join(slices.Compact(parts), "\x00")
+		byKey[k] = append(byKey[k], b.Path)
+	}
+	out := map[string]bool{}
+	for _, paths := range byKey {
+		if len(paths) > 1 {
+			for _, p := range paths {
+				out[p] = true
+			}
+		}
+	}
+	return out
 }
 
 // SpanMismatch reports whether rec spans books (its position is a range: a

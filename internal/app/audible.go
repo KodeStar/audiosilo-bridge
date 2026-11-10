@@ -238,8 +238,15 @@ func (b *Bridge) audibleSetup(ctx context.Context) setup.Audible {
 	if err != nil {
 		return setup.Audible{}
 	}
-	out := setup.Audible{Accounts: len(accts)}
+	// An account mapped on another server isn't this server's (bridge#40):
+	// it neither polls nor syncs here until it is mapped again.
+	serverID := b.conn.Pairing().ServerID
+	out := setup.Audible{}
 	for _, a := range accts {
+		if a.OnOtherServer(serverID) {
+			continue
+		}
+		out.Accounts++
 		switch {
 		case a.RefusedAt != "":
 			out.Refused++

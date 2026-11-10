@@ -1444,7 +1444,7 @@ internal/
             reads superseded successes too (a history reader).
             0012 (audiblepreorders.go) adds audible_preorders ((account, asin): a pending preorder
             an audible.poll saw in the orders, ordered_at, last_seen_at, record (the catalog's
-            description as JSON, '' until filled), filled_at; no credential or payment field):
+            description as JSON, '' until filled), filled_at (unused since bridge#60); no credential or payment field):
             AudiblePreorders lists an account's, SetAudiblePreorders replaces them in one tx, and
             DeleteAudibleAccount deletes them with the account (account REFERENCES
             audible_accounts ON DELETE CASCADE: a poll's late write for a removed account fails).
@@ -2258,7 +2258,7 @@ internal/
             response_groups; GET /1.0/catalog/products(?asins= | /{asin}) answers every fixture and
             the cancelled one, title only with product_desc, 400 over LastPositionsMax ASINs.
             Recorder: the owner's recording transport, a 0600 JSON-lines file per
-            run, scrubbed AS IT WRITES (secret keys and the customer, device and
+            run (named by the time to the nanosecond, the pid and a per-process count), scrubbed AS IT WRITES (secret keys and the customer, device and
             token subtrees redacted, an order's payment fields and any price too, headers from an allowlist, signed CDN queries
             dropped, unparseable bodies by size only); a test runs a whole flow
             through it and finds no credential. Never imports audible (audible's
@@ -2283,7 +2283,10 @@ internal/
             the row is stored (finishMu; Remove takes it while it forgets locally), so two sign-ins of one Amazon account finishing together
             end as a sign-in again, not two accounts (the unique index backs it). A name the Bridge made ("<person> (<STORE>)") follows
             the person when Map or a sign-in again changes it; a typed one stays.
-            Map records a new mapping on the server, then here. Remove forgets
+            Map records a new mapping on the server, then here, under finishMu (bridge#40:
+            a remap and a sign-in again or a removal never interleave). A mapping with no
+            user name for the account's own person on the same server (the server's people
+            couldn't be read) keeps the stored name (Map and a sign-in again), never "". Remove forgets
             locally FIRST (vault, then row), then DELETEs on the server and
             deregisters, run to the end even if the page goes away; either failing
             is a warning for the page, never the account kept. Library opens the
@@ -2298,7 +2301,9 @@ internal/
             undescribed one by its ASIN alone). Dropped when the library lists it, its order is
             seen cancelled (neither pending nor Delivered, none pending; a Delivered order,
             ORDER_CLOSED + ORDER_SUCCEEDED, keeps it until the library lists it, so it never
-            drops out of a final poll in between), a listing reaching back past its order no
+            drops out of a final poll in between, but only DeliveredDropAfter, 14 days, from
+            the later of its last-seen-pending time and its release date: bridge#60, a refund
+            or a release under another ASIN), a listing reaching back past its order no
             longer holds it in any state, or PreorderDropAfter (30 days) after its release date (one the catalog
             never dated counts as released two years after its order was last seen pending). Never
             fails: orders or catalog failing is one warning each and the remembered ones are
@@ -2387,7 +2392,14 @@ internal/
             still have no ASIN, so the next poll picks them up); asin_set and a
             moved book are skipped, other failures counted (enrich_failed). Polled/Failed record the account's outcome (a
             poll stopped, cancelled or lost records nothing). The result is counts
-            only (no titles, no credential).
+            only (no titles, no credential). v2.7.0: a refused listing fails coded
+            (Failure as result and error: audible_refused with ThrottledText for a
+            device refusal, else audible_sign_in; the server reads no poll code yet);
+            a title matched to a book whose path is over MaxBookPath (4096 bytes,
+            the server's cap) goes out contested with no contested_path (Overlong;
+            bridge#56: unmatched it would be a title Back up everything downloads
+            again); a fuzzy match on a book the library holds twice
+            (importjob.Twins) is kept but never enriched (bridge#40).
             Phase 4b, import.go: audible.import (download lane; one per account at a
             time, a per-account gate; params {account, asin, library_id, dest_path,
             template}, unknown fields ignored, the rest validated). Steps reported
@@ -2432,8 +2444,7 @@ internal/
             functions over a transfer.LibraryFS (the import's methods open the
             mount's os.Root and call them; vacant also returns the conflict:
             link.ConflictFile|Book|Audio; listedBook is its books-listing part). License (denials mapped as the title's; a title
-            only offered as a DRM-free MP3 fails without a code: not backed up
-            yet), download to <data>/audible/tmp/<acct>-<asin>.aaxc.part (free
+            only offered as a DRM-free MP3 fails drm_free: not backed up yet), download to <data>/audible/tmp/<acct>-<asin>.aaxc.part (free
             space: the tmp folder 2.2x the size less what the partial holds, the
             library 1.1x, else disk_full; a free space that can't be read is no
             refusal; a dropped connection, a stall or a 5xx resumes from the
@@ -2523,7 +2534,19 @@ internal/
             feeds the setup item's detail only. A sync_off reply or a changed mapping
             clears a stale sync_error without recording a successful sync, keeping
             Audible's wait (same device); only a new sign-in (a new device) clears
-            both. Deps: audible, audibleacct, jobs, link, store.
+            both. bridge#51 (v2.7.0): the Audible app may upload the older place it still
+            held over one the push wrote; the sync then answers it behind and, when the
+            Bridge wrote the title's last place (last_ms), the server row it last read is
+            still that place (within 5 s) and Audible's is behind it by more than 5 s,
+            re-arms the push (store.RearmAudiblePush: want_ms = row_ms, row_seen the time of the
+            re-arm, last_ms -1 so the debounce keeps it, only while listed, nothing waiting, no push and no new row since the job read it;
+            Result.Reasserted). The push's read before the write still drops it if Audible
+            moved further on. At most once per place the Bridge wrote (reasserted_ms,
+            migration 0014; owner decision after review): a sync can't tell the app's stale
+            upload from a listener who rewound in the Audible app, so Audible behind the same
+            written place again is left alone until the push writes a new place (AudiblePushed
+            of another place resets it, as does another book for the title).
+            Deps: audible, audibleacct, jobs, link, store.
   importjob/ matching and placement against a library (the manager's, ported):
             BookMatcher over []link.LibraryBook (reused pkg/match.NewIndexWith under
             match.ImportOptions(), the import rules the server's own callers don't
@@ -2540,7 +2563,9 @@ internal/
             none, unless every tied claim is one WorkKey: folded title, folded
             author set and position, the same book owned twice, and a claim of the
             keeper's work keeps it at any score; a title that folds to nothing has
-            no key; 4b owner fixes: when the best is no ASIN match and some claims'
+            no key, nor (bridge#43) a title with no position or sequence that is its
+            series' bare name (folded alike, or alike under match.NormalizeSeries, a
+            name it reduces to nothing aside), the volumes Audible lists so; 4b owner fixes: when the best is no ASIN match and some claims'
             position agrees with the book's (Claim.Agrees), only those compete, so
             the volume whose number is the book's keeps it even over a higher
             score; KeepBest also returns contested: every losing claim but one
@@ -2550,7 +2575,8 @@ internal/
             folder code's number there, whatever that series is called); a range
             or no number on either side is neither; MatchScored is not gated by
             it), SpanMismatch (a range record on a book with no
-            range: no enrichment), Plan(records, {Mode, Template, Books}) (destinations
+            range: no enrichment), Twins (the paths of books listed more than once:
+            folded title, authors and series alike; no enrichment by words), Plan(records, {Mode, Template, Books}) (destinations
             only, each item's RelPath, Kind (placement.Kind) and Siblings (the
             series' books listed); Planner (NewPlanner(books), Plan(rec, mode,
             template)) is Plan for many records over one library: AuthorFolders

@@ -31,6 +31,10 @@ type AudiblePush struct {
 	// that place (its own clock).
 	RowMs   int64
 	RowSeen string
+	// ReassertedMs is the written place an audible.sync already re-armed once
+	// (migration 0014, -1 none): never re-armed again until a new place is
+	// written.
+	ReassertedMs int64
 }
 
 // AudibleRow is a server progress row as the push records it: its place (ms)
@@ -49,13 +53,13 @@ type AudibleSyncTitle struct {
 	RuntimeS  int64
 }
 
-const audiblePushColumns = `account, asin, library_id, path, runtime_s, listed, acr, last_ms, at, heard_ms, want_ms, row_ms, row_seen`
+const audiblePushColumns = `account, asin, library_id, path, runtime_s, listed, acr, last_ms, at, heard_ms, want_ms, row_ms, row_seen, reasserted_ms`
 
 func scanAudiblePush(row interface{ Scan(...any) error }) (AudiblePush, error) {
 	var p AudiblePush
 	var want sql.NullInt64
 	err := row.Scan(&p.Account, &p.ASIN, &p.LibraryID, &p.Path, &p.RuntimeS, &p.Listed, &p.ACR, &p.LastMs, &p.At, &p.HeardMs,
-		&want, &p.RowMs, &p.RowSeen)
+		&want, &p.RowMs, &p.RowSeen, &p.ReassertedMs)
 	if want.Valid {
 		p.WantMs = &want.Int64
 	}
@@ -67,8 +71,8 @@ func scanAudiblePush(row interface{ Scan(...any) error }) (AudiblePush, error) {
 // unlisted (a title the console stopped syncing, or one that lost its match),
 // and its waiting place forgotten. The pushes, places heard and cached
 // content references stay. A title whose book changed forgets its waiting
-// place too, and the other book's row last read (the next one read for the
-// new book is a new place).
+// place too, the other book's row last read (the next one read for the
+// new book is a new place) and its re-asserted place.
 func (db *DB) ListAudibleSync(ctx context.Context, account string, titles []AudibleSyncTitle) error {
 	tx, err := db.sql.BeginTx(ctx, nil)
 	if err != nil {
@@ -84,6 +88,7 @@ func (db *DB) ListAudibleSync(ctx context.Context, account string, titles []Audi
 			want_ms = CASE WHEN library_id = excluded.library_id AND path = excluded.path THEN want_ms ELSE NULL END,
 			row_ms = CASE WHEN library_id = excluded.library_id AND path = excluded.path THEN row_ms ELSE -1 END,
 			row_seen = CASE WHEN library_id = excluded.library_id AND path = excluded.path THEN row_seen ELSE '' END,
+			reasserted_ms = CASE WHEN library_id = excluded.library_id AND path = excluded.path THEN reasserted_ms ELSE -1 END,
 			library_id = excluded.library_id, path = excluded.path, runtime_s = excluded.runtime_s, listed = 1`)
 	if err != nil {
 		return err
@@ -160,7 +165,7 @@ func (db *DB) SeenAudibleRow(ctx context.Context, account, asin string, row Audi
 // the last audible.sync didn't list for it (a new match, a re-match, a title
 // synced again, a remap): it waits unlisted, never pushed, until the next
 // sync lists the title for that book (ListAudibleSync keeps it) or doesn't
-// (it goes).
+// (it goes). Another book forgets the re-asserted place (reasserted_ms).
 func (db *DB) PendAudiblePush(ctx context.Context, account, asin string, libraryID int64, path string, want bool,
 	row AudibleRow) error {
 	var ms *int64
@@ -170,7 +175,8 @@ func (db *DB) PendAudiblePush(ctx context.Context, account, asin string, library
 	_, err := db.sql.ExecContext(ctx, `INSERT INTO audible_push (account, asin, library_id, path, listed, want_ms, row_ms, row_seen)
 		VALUES (?, ?, ?, ?, 0, ?, ?, ?)
 		ON CONFLICT(account, asin) DO UPDATE SET library_id = excluded.library_id, path = excluded.path, listed = 0,
-			want_ms = excluded.want_ms, row_ms = excluded.row_ms, row_seen = excluded.row_seen`,
+			want_ms = excluded.want_ms, row_ms = excluded.row_ms, row_seen = excluded.row_seen,
+			reasserted_ms = CASE WHEN library_id = excluded.library_id AND path = excluded.path THEN reasserted_ms ELSE -1 END`,
 		account, asin, libraryID, path, ms, row.Ms, timestamp(row.Seen))
 	return err
 }
@@ -183,10 +189,13 @@ func (db *DB) DropAudiblePush(ctx context.Context, account, asin string) error {
 
 // AudiblePushed records that ms was written to Audible at at: the waiting
 // place goes, and the place heard before it is no longer Audible's (heard_ms
-// -1: a server place there is a move, written like any other).
+// -1: a server place there is a move, written like any other). A place other
+// than the one re-armed once (reasserted_ms) is a new place: it may be
+// re-armed once in its turn.
 func (db *DB) AudiblePushed(ctx context.Context, account, asin string, ms int64, at time.Time) error {
-	_, err := db.sql.ExecContext(ctx, `UPDATE audible_push SET want_ms = NULL, last_ms = ?, at = ?, heard_ms = -1
-		WHERE account = ? AND asin = ?`, ms, timestamp(at), account, asin)
+	_, err := db.sql.ExecContext(ctx, `UPDATE audible_push SET want_ms = NULL, last_ms = ?1, at = ?2, heard_ms = -1,
+			reasserted_ms = CASE WHEN reasserted_ms = ?1 THEN reasserted_ms ELSE -1 END
+		WHERE account = ?3 AND asin = ?4`, ms, timestamp(at), account, asin)
 	return err
 }
 
@@ -209,6 +218,35 @@ func (db *DB) AudibleHeard(ctx context.Context, x AudiblePush, ms int64, applied
 	return err
 }
 
+// RearmAudiblePush makes the server row last read for x's title (row_ms) wait
+// to be written to Audible again, first read at now (the push's stillness
+// counts from it), and reports whether it did. An audible.sync calls it when
+// Audible answered a place behind the one the Bridge wrote, and the server
+// still holds that place (the Audible app uploaded an older place over it).
+// Only while nothing changed since the job read x (as x): the title is listed,
+// no place waits, the push hasn't written since (at) and no new server row was
+// recorded (row_ms, row_seen). The place last written is no longer Audible's
+// (last_ms -1): left, the push's debounce would drop the re-armed place as
+// the one it last wrote. The push's own checks still run before the write
+// (Audible further on is never overwritten).
+//
+// At most once per written place (reasserted_ms, bridge#51): a sync can't tell
+// the app's stale upload from a listener who rewound in the Audible app and
+// listens on there, so once the place was written again and Audible went
+// behind it once more, it is left alone until the push writes a new place
+// (AudiblePushed).
+func (db *DB) RearmAudiblePush(ctx context.Context, x AudiblePush, now time.Time) (bool, error) {
+	res, err := db.sql.ExecContext(ctx, `UPDATE audible_push SET want_ms = row_ms, row_seen = ?1, last_ms = -1,
+			reasserted_ms = row_ms
+		WHERE account = ?2 AND asin = ?3 AND listed = 1 AND want_ms IS NULL AND row_ms >= 0 AND reasserted_ms != row_ms
+		  AND at = ?4 AND row_ms = ?5 AND row_seen = ?6`, timestamp(now), x.Account, x.ASIN, x.At, x.RowMs, x.RowSeen)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
 // SetAudibleACR caches (account, asin)'s content reference ("" forgets it).
 func (db *DB) SetAudibleACR(ctx context.Context, account, asin, acr string) error {
 	_, err := db.sql.ExecContext(ctx, `UPDATE audible_push SET acr = ? WHERE account = ? AND asin = ?`, acr, account, asin)
@@ -219,12 +257,8 @@ func (db *DB) SetAudibleACR(ctx context.Context, account, asin, acr string) erro
 // and when its baseline read the feed to the end (from; kept once set, and a
 // zero from, a baseline still under way, leaves it).
 func (db *DB) SetAudiblePushCursor(ctx context.Context, id, cursor string, from time.Time) error {
-	stamp := ""
-	if !from.IsZero() {
-		stamp = timestamp(from)
-	}
 	_, err := db.sql.ExecContext(ctx, `UPDATE audible_accounts SET push_cursor = ?,
-		push_from = CASE WHEN push_from = '' THEN ? ELSE push_from END WHERE id = ?`, cursor, stamp, id)
+		push_from = CASE WHEN push_from = '' THEN ? ELSE push_from END WHERE id = ?`, cursor, stamp(from), id)
 	return err
 }
 

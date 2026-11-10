@@ -270,6 +270,34 @@ describe('AudibleCard', () => {
     });
   });
 
+  it('gives each open form its own element ids', async () => {
+    mockFetch({
+      'GET /api/accounts/audible': {
+        body: audibleFixture({
+          accounts: [
+            audibleAccountFixture(),
+            audibleAccountFixture({ id: 'acct0002', label: 'Sam (US)', user_id: 4 }),
+          ],
+        }),
+      },
+    });
+    render(<AudibleCard client={api()} />);
+    const rows = [
+      await screen.findByRole('region', { name: 'Chris (US)' }),
+      await screen.findByRole('region', { name: 'Sam (US)' }),
+    ];
+    for (const row of rows) {
+      await userEvent.click(within(row).getByRole('button', { name: 'Change' }));
+    }
+    const ids = Array.from(document.querySelectorAll('[id]'), (el) => el.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    // Each form's label names its own field.
+    for (const row of rows) {
+      const library = within(row).getByLabelText('Library');
+      expect(row.contains(library)).toBe(true);
+    }
+  });
+
   it('removes an account after asking, and says what Amazon did not confirm', async () => {
     const { calls } = mockFetch({
       'GET /api/accounts/audible': {

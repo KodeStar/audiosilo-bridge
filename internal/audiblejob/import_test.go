@@ -1323,14 +1323,14 @@ func TestImportRefusesAnUnreachableDestination(t *testing.T) {
 	}
 }
 
-// A title Audible offers only as a DRM-free MP3 fails plainly (no code: not a
-// refusal the admin can fix), saying why, and leaves nothing.
+// A title Audible offers only as a DRM-free MP3 fails with its own code
+// (drm_free, bridge#46: the console says why), and leaves nothing.
 func TestImportDRMFreeTitle(t *testing.T) {
 	e := newImportEnv(t)
 	e.accts.licErr = []error{fmt.Errorf("%w: B0FAKE0002", audible.ErrDRMFree)}
 	res, err := e.run(context.Background(), e.params(nil))
 	var f *Failure
-	if err == nil || errors.As(err, &f) || res != nil || !strings.Contains(err.Error(), "DRM-free MP3") {
+	if !errors.As(err, &f) || f.Code != CodeDRMFree || res != any(f) || !strings.Contains(err.Error(), "DRM-free MP3") {
 		t.Fatalf("res %#v, err %v", res, err)
 	}
 	if e.accts.downloads != 0 || len(e.libraryFiles()) != 0 {

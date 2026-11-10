@@ -78,6 +78,35 @@ func TestAudibleSetupSyncHealth(t *testing.T) {
 	if got := b.audibleSetup(ctx); got.Accounts != 4 || got.Refused != 0 || got.SyncFailing != 0 || got.SyncError != "" {
 		t.Fatalf("setup after signing in again: %+v", got)
 	}
+	// Paired with srv-1: an account mapped on another server isn't counted,
+	// nor its refusal or sync failure (bridge#40).
+	b.conn.mu.Lock()
+	b.conn.pairing.ServerID = "srv-1"
+	b.conn.mu.Unlock()
+	for _, id := range []string{"healthy001", "refused001", "syncfail01"} {
+		a, err := b.db.GetAudibleAccount(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		a.ServerID = "srv-1"
+		if err := b.db.MapAudibleAccount(ctx, a); err != nil {
+			t.Fatal(err)
+		}
+	}
+	other, err := b.db.GetAudibleAccount(ctx, "syncfail02")
+	if err != nil {
+		t.Fatal(err)
+	}
+	other.ServerID = "srv-2"
+	if err := b.db.MapAudibleAccount(ctx, other); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.db.RefuseAudibleAccount(ctx, "syncfail02", store.RefusalDevice, "sign in again", at); err != nil {
+		t.Fatal(err)
+	}
+	if got := b.audibleSetup(ctx); got.Accounts != 3 || got.Refused != 0 {
+		t.Fatalf("setup with an account on another server: %+v", got)
+	}
 }
 
 // A refusal (Amazon's or the server's 4xx) is a 422 with its answer; Amazon or

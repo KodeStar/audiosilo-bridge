@@ -151,6 +151,44 @@ func TestReconcilePreordersTimes(t *testing.T) {
 	}
 }
 
+// TestReconcileDeliveredCap (bridge#60): a remembered preorder whose order is
+// seen delivered waits DeliveredDropAfter for the library, counted from the
+// later of when it was last seen pending and its release date; then it goes
+// (refunded, or released under another ASIN). A pending order still wins.
+func TestReconcileDeliveredCap(t *testing.T) {
+	row := func(seen time.Time, release string) store.AudiblePreorder {
+		r := store.AudiblePreorder{ASIN: "B0HG4PZMYQ", OrderedAt: day("2026-08-28"), LastSeenAt: seen}
+		if release != "" {
+			r.Record = `{"ReleaseDate":"` + release + `"}`
+		}
+		return r
+	}
+	delivered := []audible.Order{closedOrder("2026-08-28", "B0HG4PZMYQ", true)}
+	cases := []struct {
+		name   string
+		row    store.AudiblePreorder
+		orders []audible.Order
+		kept   bool
+	}{
+		{"closed less long ago: kept", row(pnow.Add(-DeliveredDropAfter+time.Hour), ""), delivered, true},
+		{"closed DeliveredDropAfter ago: dropped", row(pnow.Add(-DeliveredDropAfter), ""), delivered, false},
+		{"a later release date counts", row(pnow.Add(-30*24*time.Hour), pnow.AddDate(0, 0, -3).Format(time.DateOnly)), delivered, true},
+		{"released long ago, seen pending lately", row(pnow.AddDate(0, 0, -2), "2026-01-01"), delivered, true},
+		{"never seen pending, no date: kept", row(time.Time{}, ""), delivered, true},
+		{"still pending in another order: kept", row(pnow.Add(-30*24*time.Hour), ""),
+			append([]audible.Order{pendingOrder("2026-08-28", "B0HG4PZMYQ")}, delivered...), true},
+		{"no delivered order seen: the cap doesn't apply", row(pnow.Add(-30*24*time.Hour), ""), nil, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := reconcilePreorders([]store.AudiblePreorder{tc.row}, nil, tc.orders, pnow)
+			if (len(got) == 1) != tc.kept {
+				t.Fatalf("kept %v, want %v", asinsOf(got), tc.kept)
+			}
+		})
+	}
+}
+
 // TestDropReleased: a preorder released PreorderDropAfter ago that the library
 // still doesn't list goes; one released less long ago and one ahead stay. One
 // the catalog never dated counts as released undatedPreorderYears after its

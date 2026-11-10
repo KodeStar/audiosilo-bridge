@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -98,6 +99,9 @@ func (r *Recorder) RoundTrip(req *http.Request) (*http.Response, error) {
 	return resp, nil
 }
 
+// recordings counts the recording files this process opened.
+var recordings atomic.Int64
+
 // write appends e to the recording file, opening it on first use.
 func (r *Recorder) write(e Entry) {
 	line, err := json.Marshal(e)
@@ -108,7 +112,11 @@ func (r *Recorder) write(e Entry) {
 	defer r.mu.Unlock()
 	if r.file == nil && r.err == nil {
 		if r.err = os.MkdirAll(r.dir, 0o700); r.err == nil {
-			name := filepath.Join(r.dir, fmt.Sprintf("audible-%s-%d.jsonl", time.Now().UTC().Format("20060102-150405"), os.Getpid()))
+			// The time to the nanosecond, the process and a count of the
+			// recordings it opened: two in one second never share a file
+			// (O_EXCL would refuse the second).
+			name := filepath.Join(r.dir, fmt.Sprintf("audible-%s-%d-%d.jsonl", time.Now().UTC().Format("20060102-150405.000000000"),
+				os.Getpid(), recordings.Add(1)))
 			r.file, r.err = os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) //nolint:gosec // the operator's recording dir
 		}
 	}

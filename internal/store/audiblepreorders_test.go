@@ -20,7 +20,7 @@ func TestAudiblePreorders(t *testing.T) {
 	}
 	ordered := time.Date(2026, 10, 19, 19, 49, 51, 0, time.UTC)
 	if err := db.SetAudiblePreorders(ctx, "abcd1234", []AudiblePreorder{
-		{ASIN: "B0HN716NQ7", OrderedAt: ordered, LastSeenAt: at, Record: `{"title":"Beware of Chicken 6"}`, FilledAt: at},
+		{ASIN: "B0HN716NQ7", OrderedAt: ordered, LastSeenAt: at, Record: `{"title":"Beware of Chicken 6"}`},
 		{ASIN: "B0GV5G2ZKY", OrderedAt: ordered, LastSeenAt: at},
 	}); err != nil {
 		t.Fatal(err)
@@ -36,10 +36,10 @@ func TestAudiblePreorders(t *testing.T) {
 		t.Fatalf("rows = %+v", got)
 	}
 	if b := got[1]; !b.OrderedAt.Equal(ordered) || !b.LastSeenAt.Equal(at) ||
-		!b.FilledAt.Equal(at) || b.Record != `{"title":"Beware of Chicken 6"}` {
+		b.Record != `{"title":"Beware of Chicken 6"}` {
 		t.Fatalf("row = %+v", b)
 	}
-	if a := got[0]; a.Record != "" || !a.FilledAt.IsZero() {
+	if a := got[0]; a.Record != "" {
 		t.Fatalf("an unfilled row = %+v", a)
 	}
 
