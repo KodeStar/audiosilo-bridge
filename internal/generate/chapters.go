@@ -379,23 +379,15 @@ func (h *Handler) continueChapters(ctx context.Context, eng Engine, r *run, old 
 	if bookFile == "" {
 		return false, nil
 	}
-	release, err := h.holdBook(ctx, old.ID)
-	if errors.Is(err, errBookBusy) {
-		return false, errEarlierRunBusy
-	} else if err != nil {
+	// The stage the cancel stopped may have finished first (done now).
+	old, release, ok, err := h.holdStill(ctx, old, continuable)
+	if !ok {
 		return false, err
 	}
 	defer release()
-	// The stage the cancel stopped may have finished first (done now).
-	if old, err = h.o.DB.GetBook(ctx, old.ID); errors.Is(err, store.ErrNotFound) || (err == nil && !continuable(old)) {
-		return false, nil
-	} else if err != nil {
-		return false, err
-	}
 	to := state.Splitting
 	switch from := state.State(old.State); from {
 	case state.ChapterDetecting, state.ASR:
-		var ok bool
 		if to, ok = resumesAt(old); !ok {
 			return false, nil
 		}
@@ -454,12 +446,7 @@ func resumesAt(b store.Book) (state.State, bool) {
 // chapters, a single file) cancelled or failed at asr or chapter_detecting: one a
 // new chapters job takes up again (resumeChapters).
 func stoppedChapters(b store.Book) bool {
-	switch state.State(b.State) {
-	case state.ASR, state.ChapterDetecting:
-		return b.Goal == state.GoalChapters && state.Status(b.Status) == state.StatusFailed &&
-			markersFile(b.AudioSource()) != ""
-	}
-	return false
+	return state.State(b.State) != state.Done && continuable(b) && markersFile(b.AudioSource()) != ""
 }
 
 // resumeChapters takes up the book's chapters run old for a new chapters job,
@@ -478,18 +465,11 @@ func (h *Handler) resumeChapters(ctx context.Context, eng Engine, r *run, old st
 	if !stoppedChapters(old) {
 		return false, nil
 	}
-	release, err := h.holdBook(ctx, old.ID)
-	if errors.Is(err, errBookBusy) {
-		return false, errEarlierRunBusy
-	} else if err != nil {
+	old, release, ok, err := h.holdStill(ctx, old, stoppedChapters)
+	if !ok {
 		return false, err
 	}
 	defer release()
-	if old, err = h.o.DB.GetBook(ctx, old.ID); errors.Is(err, store.ErrNotFound) || (err == nil && !stoppedChapters(old)) {
-		return false, nil
-	} else if err != nil {
-		return false, err
-	}
 	to, ok := resumesAt(old)
 	if !ok {
 		return false, nil
@@ -506,6 +486,30 @@ func (h *Handler) resumeChapters(ctx context.Context, eng Engine, r *run, old st
 		"book", old.ID, "from", old.State, "at", to)
 	eng.Notify()
 	return true, nil
+}
+
+// holdStill holds engine book old for a job taking up its run (a stage a cancel
+// just stopped may still be finishing: one that stays busy is errEarlierRunBusy,
+// for the job to be tried again, never the run cleared unseen) and reads it again
+// once held, so no purge or stage starts on it in between. ok is false, the hold
+// let go, when the book went, no longer passes still, or err; otherwise the
+// caller releases it.
+func (h *Handler) holdStill(ctx context.Context, old store.Book, still func(store.Book) bool) (_ store.Book, release func(), ok bool, err error) {
+	release, err = h.holdBook(ctx, old.ID)
+	if errors.Is(err, errBookBusy) {
+		return old, nil, false, errEarlierRunBusy
+	} else if err != nil {
+		return old, nil, false, err
+	}
+	b, err := h.o.DB.GetBook(ctx, old.ID)
+	if err != nil || !still(b) {
+		release()
+		if errors.Is(err, store.ErrNotFound) {
+			err = nil
+		}
+		return old, nil, false, err
+	}
+	return b, release, true, nil
 }
 
 // continuable reports whether engine book b is a chapters run a generate job can
@@ -538,13 +542,8 @@ func continuable(b store.Book) bool {
 func (h *Handler) awaitChaptersGivingWay(ctx context.Context, r *run, b store.Book) (_ store.Book, openID int64, kind string, err error) {
 	asked := int64(0)
 	deadline := time.Now().Add(time.Duration(giveWayTries-1) * h.o.Poll)
-	for first := true; ; first = false {
-		ended := h.endSignal()
-		if !first {
-			if b, err = h.o.DB.GetBook(ctx, b.ID); err != nil {
-				return b, 0, "", err
-			}
-		}
+	ended := h.endSignal()
+	for {
 		if openID, kind, err = h.firstOpenJob(ctx, b.ID, r.job.ID); err != nil {
 			return b, 0, "", err
 		}
@@ -565,6 +564,12 @@ func (h *Handler) awaitChaptersGivingWay(ctx context.Context, r *run, b store.Bo
 		}
 		r.rep.Progress(jobs.Progress{Step: stepWaiting, Message: "Waiting for the book's chapters job to give way"})
 		if err := h.pollOrEnd(ctx, ended); err != nil {
+			return b, 0, "", err
+		}
+		// Taken before the read, so an end landing after it still wakes the next
+		// wait.
+		ended = h.endSignal()
+		if b, err = h.o.DB.GetBook(ctx, b.ID); err != nil {
 			return b, 0, "", err
 		}
 	}

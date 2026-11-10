@@ -324,6 +324,11 @@ function GenerateProgress({ job }: { job: ServerJob }) {
   const p = job.progress;
   const park = parkOf(job);
   const parkMsg = park ? parkText(job, park) : '';
+  // The park's hint is the instruction for people (the same words the Bridge
+  // sends the server); the engine's own message, when it says more, is a detail
+  // under it (bridge#13, bridge#24).
+  const parkLead = park?.hint || parkMsg || "The job needs attention: see the Bridge's log.";
+  const parkDetail = park?.hint ? parkMsg : '';
   const percent = progressPercent(p);
   const facts = generateFacts(p, park !== null);
   return (
@@ -335,17 +340,13 @@ function GenerateProgress({ job }: { job: ServerJob }) {
       {facts.length > 0 && <p className="text-xs text-dim">{facts.join(' - ')}</p>}
       {park && (
         <Notice kind="warn">
-          {/* The park's hint is the instruction for people (the same words the
-              Bridge sends the server); the engine's own message, when it says
-              more, is a detail under it (bridge#13, bridge#24). */}
-          {park.hint ? <p>{park.hint}</p> : parkMsg && <p>{parkMsg}</p>}
-          {park.hint && parkMsg && (
+          <p>{parkLead}</p>
+          {parkDetail && (
             <details className="mt-1 text-xs">
               <summary className="cursor-pointer">Details</summary>
-              <p className="mt-1 break-words">{parkMsg}</p>
+              <p className="mt-1 break-words">{parkDetail}</p>
             </details>
           )}
-          {!parkMsg && !park.hint && <p>The job needs attention: see the Bridge&apos;s log.</p>}
           {park.retry_at && (
             <p className="mt-1 text-xs">
               Resumes by itself <Ago at={park.retry_at} />.

@@ -59,17 +59,22 @@ func (s *Scheduler) SupervisorRuntime(books []store.Book) SupervisorRuntimeSnaps
 // SupervisorApply executes the supervisor's small predefined playbook. The string
 // action is mapped at the server seam so scheduler does not depend on supervisor.
 func (s *Scheduler) SupervisorApply(ctx context.Context, action string, bookID int64, stage string, detail ...string) (string, error) {
+	var b store.Book
 	switch action {
-	case "retry", "readmit":
-		b, err := s.db.GetBook(ctx, bookID)
-		if err != nil {
+	case "retry", "readmit", "terminate_requeue", "supersede_rerun", "stop_budget", "park_escalate":
+		var err error
+		if b, err = s.db.GetBook(ctx, bookID); err != nil {
 			return "", err
 		}
 		if IsCancelled(b) {
 			// A cancel ends the book for good (its job is gone or going): only a
-			// person's Retry, or a new job continuing it, takes it up again.
-			return "book was cancelled; not readmitted", nil
+			// person's Retry, or a new job continuing it, takes it up again, and no
+			// supervisor action writes over it (bridge#37).
+			return "book was cancelled; left as it is", nil
 		}
+	}
+	switch action {
+	case "retry", "readmit":
 		if b.Status == string(state.StatusFailed) || b.Status == string(state.StatusNeedsAttention) {
 			if action == "readmit" && b.RetryAt != "" {
 				due, parseErr := time.Parse(time.RFC3339Nano, b.RetryAt)

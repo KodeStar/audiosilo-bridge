@@ -40,15 +40,16 @@ func TestReadmitNeverUndoesACancelThatLandedAfterTheRead(t *testing.T) {
 	if !IsCancelled(got) {
 		t.Fatalf("the cancel was undone: status=%q error=%q", got.Status, got.Error)
 	}
-	// The supervisor's own entry point refuses a cancelled book outright.
-	for _, action := range []string{"readmit", "retry"} {
-		outcome, err := s.SupervisorApply(ctx, action, b.ID, b.State)
-		if err != nil || outcome != "book was cancelled; not readmitted" {
+	// The supervisor's own entry point leaves a cancelled book alone, whatever the
+	// action that would write it.
+	for _, action := range []string{"readmit", "retry", "terminate_requeue", "supersede_rerun", "stop_budget", "park_escalate"} {
+		outcome, err := s.SupervisorApply(ctx, action, b.ID, b.State, "a diagnosis")
+		if err != nil || outcome != "book was cancelled; left as it is" {
 			t.Fatalf("%s on a cancelled book = %q, %v", action, outcome, err)
 		}
 	}
 	if got, _ := db.GetBook(ctx, b.ID); !IsCancelled(got) {
-		t.Fatalf("the supervisor readmitted a cancelled book: %+v", got)
+		t.Fatalf("the supervisor wrote over a cancelled book: %+v", got)
 	}
 	// A person's Retry still takes a cancelled book up again (allowed).
 	if err := s.Retry(ctx, b.ID); err != nil {

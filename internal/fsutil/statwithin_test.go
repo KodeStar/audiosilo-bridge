@@ -31,7 +31,7 @@ func TestStatWithinAnswers(t *testing.T) {
 func TestStatWithinTimesOutAndSharesTheStatOut(t *testing.T) {
 	t.Parallel()
 	const path = "/hung/mount/book.m4b"
-	c := &statCall{done: make(chan struct{})}
+	c := &statCall{done: make(chan struct{}), started: time.Now()}
 	statsMu.Lock()
 	statsInFlight[path] = c // a stat stuck on a hung mount
 	statsMu.Unlock()
@@ -40,13 +40,19 @@ func TestStatWithinTimesOutAndSharesTheStatOut(t *testing.T) {
 			t.Fatalf("a hung stat = %v, want ErrStatTimeout", err)
 		}
 	}
+	// A stat out longer than d already: a later ask doesn't wait d again.
+	c.started = time.Now().Add(-time.Minute)
+	began := time.Now()
+	if _, err := StatWithin(path, 5*time.Second); !errors.Is(err, ErrStatTimeout) || time.Since(began) > time.Second {
+		t.Fatalf("joining a stat out past d = %v after %v, want ErrStatTimeout at once", err, time.Since(began))
+	}
 	statsMu.Lock()
 	if statsInFlight[path] != c {
 		statsMu.Unlock()
 		t.Fatal("a second stat of the hung path was started")
 	}
 	// The mount answers.
-	c.res = statResult{err: fs.ErrNotExist}
+	c.err = fs.ErrNotExist
 	delete(statsInFlight, path)
 	statsMu.Unlock()
 	close(c.done)

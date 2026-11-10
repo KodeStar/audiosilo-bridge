@@ -645,12 +645,10 @@ func (db *DB) ClearBookStatusIf(ctx context.Context, id int64, status, errMsg st
 	res, err := db.sql.ExecContext(ctx,
 		`UPDATE books SET status='', error='', park_code='', retry_at='', updated_at=? WHERE id=? AND status=? AND error=?`,
 		timestamp(nowFn()), id, status, errMsg)
-	if err := checkAffected(res, err); errors.Is(err, ErrNotFound) {
-		return ErrStatusChanged
-	} else if err != nil {
+	if err := checkAffected(res, err); !errors.Is(err, ErrNotFound) {
 		return err
 	}
-	return nil
+	return ErrStatusChanged
 }
 
 // ErrNotContinuable is ContinueChapters for a book that isn't a chapters-only book
