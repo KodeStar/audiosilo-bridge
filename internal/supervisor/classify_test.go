@@ -483,7 +483,11 @@ func TestClassifyErrorMatchesStatusTokensNotBareDigits(t *testing.T) {
 		{"split returned 503 segments for the book", ""},
 		{"the agent returned 429-token notes", ""},
 		{"upstream returned 503 - try later", IncidentBackendUnavailable},
+		{"upstream returned 503\nretrying in 30s", IncidentBackendUnavailable},
+		{"token refused (401).", IncidentAuthentication},
 		{"open /library/Book (503)/part 1.m4b: no such file", ""},
+		{"open /library/Access Denied (503)/part 1.m4b: no such file", ""},
+		{"the decode returned 503.2 seconds of audio", ""},
 		{"chapter (429) is empty", ""},
 		// Another status is nothing either.
 		{"unexpected status 500", ""},

@@ -20,6 +20,7 @@ import (
 	"github.com/kodestar/audiosilo-bridge/internal/fsutil"
 	"github.com/kodestar/audiosilo-bridge/internal/jobs"
 	"github.com/kodestar/audiosilo-bridge/internal/link"
+	"github.com/kodestar/audiosilo-bridge/internal/mapping"
 	"github.com/kodestar/audiosilo-bridge/internal/metaops"
 	"github.com/kodestar/audiosilo-bridge/internal/pipeline"
 	"github.com/kodestar/audiosilo-bridge/internal/state"
@@ -145,15 +146,20 @@ func markersFile(path string) string {
 // the server's last answer moved the job to (adoptMove takes it up at the next
 // save, after the chapters were checked), else at the run's place; "" when that
 // can't be told. The look is bounded as CheckCurrent's stat is (bridge#24):
-// markersFile's own stat of a hung mount would hold the poll before that one, so
-// a place that doesn't answer in time is fsutil.ErrStatTimeout, the audio out of
-// sight.
+// locate's and markersFile's own stats of a hung mount would hold the poll
+// before that one, so a place (the moved one included) that doesn't answer in
+// time is fsutil.ErrStatTimeout, the audio out of sight.
 func (r *run) bookFileNow() (string, error) {
 	full := r.place.full
 	if r.rep != nil {
 		if cur := r.rep.Path(); cur != "" && cur != r.jobPath {
-			if p, err := locate(r.mount, cur); err == nil {
-				full = p.full
+			// locate's place, its stat bounded.
+			if p, err := mapping.SafeJoin(r.mount, cur); err == nil {
+				if _, err := fsutil.StatWithin(p, pipeline.SourceStatWait); err == nil {
+					full = p
+				} else if errors.Is(err, fsutil.ErrStatTimeout) {
+					return "", err
+				}
 			}
 		}
 	}
@@ -397,7 +403,7 @@ func (h *Handler) continueChapters(ctx context.Context, eng Engine, r *run, old 
 	}
 	defer release()
 	to := state.Splitting
-	switch from := state.State(old.State); from {
+	switch state.State(old.State) {
 	case state.ChapterDetecting, state.ASR:
 		if to, ok = resumesAt(old); !ok {
 			return false, nil
