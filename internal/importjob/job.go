@@ -409,7 +409,13 @@ func Twins(books []link.LibraryBook) map[string]bool {
 			parts = append(parts, "a\x00"+f)
 		}
 		for _, s := range b.Series {
-			parts = append(parts, "s\x00"+match.NormalizeSeries(s.Name)+"\x00"+strings.TrimSpace(s.Position))
+			// As the matcher names a series, or folded when that reduces it
+			// to nothing (a non-Latin name): two such series stay apart.
+			name := match.NormalizeSeries(s.Name)
+			if name == "" {
+				name = match.Fold(s.Name)
+			}
+			parts = append(parts, "s\x00"+name+"\x00"+strings.TrimSpace(s.Position))
 		}
 		slices.Sort(parts)
 		k := title + "\x00" + strings.Join(slices.Compact(parts), "\x00")

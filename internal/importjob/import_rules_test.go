@@ -400,6 +400,9 @@ func TestTwins(t *testing.T) {
 		{Path: "A/Other", Title: "Equal Measures", Authors: []string{"Tess Prat"}, Series: []link.SeriesRef{{Name: "Measures", Position: "1"}}},
 		{Path: "X/1", Title: " -- "},
 		{Path: "X/2", Title: " -- "},
+		// Two non-Latin series the ASCII-only normalising reduces to nothing.
+		{Path: "J/1", Title: "Equal Measures", Authors: []string{"Tess Prat"}, Series: []link.SeriesRef{{Name: "長い道", Position: "1"}}},
+		{Path: "J/2", Title: "Equal Measures", Authors: []string{"Tess Prat"}, Series: []link.SeriesRef{{Name: "別の道", Position: "1"}}},
 	}
 	got := Twins(books)
 	if len(got) != 2 || !got["A/One"] || !got["B/One"] {
