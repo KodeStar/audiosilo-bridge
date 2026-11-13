@@ -48,7 +48,7 @@ func (c *Client) Stream(ctx context.Context, in StreamRequest) (*StreamResponse,
 		if !validURL(req.URL.String()) {
 			return &Error{Code: "invalid_feed_url", Message: "The episode redirected to an invalid address."}
 		}
-		if in.Allow != nil && !in.Allow(req.URL) {
+		if !allows(in.Allow, req.URL) {
 			return blockedHost()
 		}
 		stripRedirectCredentials(req, via)

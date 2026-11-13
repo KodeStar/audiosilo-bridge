@@ -130,13 +130,19 @@ func (c *Client) dial(ctx context.Context, network, address string) (net.Conn, e
 	return nil, err
 }
 
-// allowedBy reports whether allow (nil: every URL) admits raw.
+// allowedBy reports whether allow (nil: every URL) admits raw, a request's
+// first URL.
 func allowedBy(allow func(*url.URL) bool, raw string) bool {
 	if allow == nil {
 		return true
 	}
 	u, err := url.Parse(raw)
 	return err == nil && allow(u)
+}
+
+// allows reports whether allow (nil: every URL) admits u, a redirect's URL.
+func allows(allow func(*url.URL) bool, u *url.URL) bool {
+	return allow == nil || allow(u)
 }
 
 // blockedHost is a request's failure when its Allow refused a URL, the first

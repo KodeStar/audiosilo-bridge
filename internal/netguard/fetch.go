@@ -99,7 +99,7 @@ func (c *Client) once(ctx context.Context, in Request) (*Response, error) {
 		if !validURL(req.URL.String()) {
 			return &Error{Code: "invalid_feed_url", Message: "The feed redirected to an invalid URL."}
 		}
-		if in.Allow != nil && !in.Allow(req.URL) {
+		if !allows(in.Allow, req.URL) {
 			return blockedHost()
 		}
 		stripRedirectCredentials(req, via)
