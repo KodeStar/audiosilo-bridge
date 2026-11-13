@@ -994,7 +994,7 @@ func TestAudioChecks(t *testing.T) {
 	for ct, want := range map[string]bool{
 		"": true, "audio/mpeg": true, "audio/ogg; codecs=vorbis": true, "application/octet-stream": true,
 		"application/ogg": true, "text/html": false, "text/plain; charset=utf-8": false, "application/json": false,
-		"image/jpeg": false, ";;bad": false,
+		"image/jpeg": false, ";;bad": false, "audio/mpeg; charset": true, "text/html; charset": false,
 	} {
 		if got := audioType(ct); got != want {
 			t.Errorf("audioType(%q) = %v", ct, got)

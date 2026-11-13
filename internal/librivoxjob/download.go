@@ -284,8 +284,10 @@ func audioType(contentType string) bool {
 	if strings.TrimSpace(contentType) == "" {
 		return true
 	}
+	// A malformed parameter ("audio/mpeg; charset") still names the type:
+	// ParseMediaType returns it beside ErrInvalidMediaParameter.
 	mt, _, err := mime.ParseMediaType(contentType)
-	if err != nil {
+	if err != nil && !errors.Is(err, mime.ErrInvalidMediaParameter) {
 		return false
 	}
 	return strings.HasPrefix(mt, "audio/") || mt == "application/octet-stream" || mt == "binary/octet-stream" ||
