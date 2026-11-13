@@ -774,3 +774,21 @@ func TestFetchRestartDropsPartialBeforeValidators(t *testing.T) {
 		t.Fatalf("restarted file %d bytes, checked %v", len(got), checked)
 	}
 }
+
+// A mapping moved to another mount during the fetch fails it (what it staged
+// isn't there) and removes the staging folder from the mount it was in.
+func TestFetchMountMovedFails(t *testing.T) {
+	x := newHarness(t)
+	old, moved := x.mount, t.TempDir()
+	x.fetch.files[sectionURL(1)].cut = []int{100}
+	x.fetch.files[sectionURL(1)].onCut = func() { x.mount, x.libs.mount = moved, moved }
+	out, err := x.run(context.Background(), false)
+	if code := failureCode(t, out, err); code != CodeNotWritable {
+		t.Fatalf("code %q (%v)", code, err)
+	}
+	for _, mount := range []string{old, moved} {
+		if entries, _ := os.ReadDir(mount); len(entries) != 0 {
+			t.Fatalf("%s holds %v after the failure", mount, entries)
+		}
+	}
+}

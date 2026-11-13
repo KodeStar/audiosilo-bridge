@@ -333,6 +333,10 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, p Params, rep *jobs.Rep
 	if err := h.download(ctx, f, book.Sections, names); err != nil {
 		return nil, err
 	}
+	// The mapping again before the cover's and the marker's writes.
+	if err := h.recheck(ctx, f, StepCover); err != nil {
+		return nil, err
+	}
 	h.cover(ctx, f, book)
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -606,7 +610,7 @@ func countFiles(root *os.Root, rel string) (n int, bytes int64) {
 // destination meanwhile moves the book to the fallback name once, else exists.
 func (h *Handler) place(ctx context.Context, f *fetch, names []string) error {
 	h.report(f.rep, jobs.Progress{Step: StepPlace, Message: "Placing the book in the library"})
-	if _, _, err := h.mapped(ctx, f.lib.ID, f.rep, StepPlace, false); err != nil {
+	if err := h.recheck(ctx, f, StepPlace); err != nil {
 		return err
 	}
 	root, err := f.openRoot()
@@ -676,6 +680,21 @@ func (h *Handler) report(rep *jobs.Reporter, pr jobs.Progress) {
 	if h.o.onProgress != nil {
 		h.o.onProgress(pr)
 	}
+}
+
+// recheck is mapped for a fetch under way: the library must still be a
+// checked, writable mapping (not writable now, the job parks until it is),
+// and at the mount the staging folder is in. A mapping moved to another mount
+// fails the fetch: what it staged isn't there.
+func (h *Handler) recheck(ctx context.Context, f *fetch, step string) error {
+	_, mount, err := h.mapped(ctx, f.lib.ID, f.rep, step, false)
+	if err != nil {
+		return err
+	}
+	if mount != f.mount {
+		return fail(CodeNotWritable, "Library %s moved to another folder on the Bridge during the fetch: add the recording again.", f.lib.Name)
+	}
+	return nil
 }
 
 // mapped is the fetch's books library and its mount once the library is a

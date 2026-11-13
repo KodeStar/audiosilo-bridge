@@ -46,29 +46,36 @@ const copyBufBytes = 1 << 20
 // whole), so a resumed run skips it and goes on with the next, resuming that
 // one's .part with Range/If-Range when its strong ETag was recorded.
 func (h *Handler) download(ctx context.Context, f *fetch, sections []metaops.LibrivoxSection, names []string) error {
-	root, err := f.openRoot()
-	if err != nil {
-		return err
-	}
-	defer func() { _ = root.Close() }()
 	n := len(sections)
 	for i, s := range sections {
 		// The mapping again before each section's writes: one that went away
 		// parks the job (not_writable) with what it fetched, until it is back.
-		if _, _, err := h.mapped(ctx, f.lib.ID, f.rep, StepDownload, false); err != nil {
+		if err := h.recheck(ctx, f, StepDownload); err != nil {
 			return err
 		}
 		h.report(f.rep, jobs.Progress{Step: StepDownload, Message: fmt.Sprintf("Downloading section %d of %d from archive.org", i+1, n),
 			Done: i, Total: n})
-		if st, err := root.Lstat(path.Join(f.staging(), names[i])); err == nil && st.Mode().IsRegular() {
-			continue
-		}
-		if err := h.section(ctx, root, f, i, s.ListenURL, names[i]); err != nil {
+		if err := h.fetchSection(ctx, f, i, s.ListenURL, names[i]); err != nil {
 			return err
 		}
 	}
 	h.report(f.rep, jobs.Progress{Step: StepDownload, Message: "Downloaded from archive.org", Done: n, Total: n})
 	return nil
+}
+
+// fetchSection downloads section i unless the staging folder holds it already.
+// The library is opened for each section: a handle opened before a park may
+// be on a mount that went away since.
+func (h *Handler) fetchSection(ctx context.Context, f *fetch, i int, rawURL, name string) error {
+	root, err := f.openRoot()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = root.Close() }()
+	if st, err := root.Lstat(path.Join(f.staging(), name)); err == nil && st.Mode().IsRegular() {
+		return nil
+	}
+	return h.section(ctx, root, f, i, rawURL, name)
 }
 
 // retry is an attempt that may be tried again: after retryAfter when the
@@ -278,7 +285,7 @@ func (h *Handler) cover(ctx context.Context, f *fetch, book metaops.LibrivoxBook
 	if book.CoverartJPG == nil || *book.CoverartJPG == "" {
 		return
 	}
-	root, err := os.OpenRoot(f.mount)
+	root, err := f.openRoot()
 	if err != nil {
 		return
 	}
