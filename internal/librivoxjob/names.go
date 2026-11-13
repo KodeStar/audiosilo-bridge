@@ -163,8 +163,12 @@ func AllowedURL(u *url.URL) bool {
 	return host == "archive.org" || (strings.HasSuffix(host, ".archive.org") && len(host) > len(".archive.org"))
 }
 
-// allowedRaw is AllowedURL over a URL string.
+// allowedRaw is AllowedURL over a URL string, as it is requested: a padded
+// one is refused here rather than checked trimmed and then sent as it is.
 func allowedRaw(raw string) bool {
-	u, err := url.Parse(strings.TrimSpace(raw))
+	if raw != strings.TrimSpace(raw) {
+		return false
+	}
+	u, err := url.Parse(raw)
 	return err == nil && AllowedURL(u)
 }

@@ -869,3 +869,22 @@ func TestAbandonLeavesAnotherLibrarysFetch(t *testing.T) {
 		t.Fatal("Abandon removed another library's fetch")
 	}
 }
+
+// A padded URL is refused as it stands: the check and the request see one
+// spelling.
+func TestFetchPaddedURLRefused(t *testing.T) {
+	for _, raw := range []string{" " + sectionURL(1), sectionURL(1) + " ", sectionURL(1) + "\n"} {
+		if allowedRaw(raw) {
+			t.Errorf("allowedRaw(%q)", raw)
+		}
+	}
+	if !allowedRaw(sectionURL(1)) {
+		t.Error("the URL itself refused")
+	}
+	x := newHarness(t)
+	x.meta.book.Sections[1].ListenURL += " "
+	out, err := x.run(context.Background(), false)
+	if code := failureCode(t, out, err); code != CodeArchiveUnavailable || len(x.fetch.seen()) != 0 || x.exists("L. Leslie Brooke") {
+		t.Fatalf("code %q (%v), %d requests", code, err, len(x.fetch.seen()))
+	}
+}

@@ -2619,7 +2619,8 @@ internal/
             section URL must be https on archive.org or *.archive.org
             (AllowedURL, checked before anything is fetched or written, and on
             every redirect through netguard's per-request Allow; never
-            librivox.org), fetched by the app's own netguard client (public
+            librivox.org; a padded URL is refused as it stands, so the check
+            and the request see one spelling), fetched by the app's own netguard client (public
             addresses only, not the podcasts' allow_networks). Placement:
             placement.Suggest standalone (an existing author folder from
             importjob.AuthorFolders reused verbatim, else the sanitized author),
