@@ -2674,9 +2674,15 @@ internal/
             follows it rather than planning again, Abandon finds the staging
             folder by it, and once placed it is the placement marker (a failed
             rescan keeps the book and the state; the retry goes on from the
-            rescan). A stop or a lost claim keeps staging and state; a cancel, a
-            failure or Abandon (not on a lost claim) removes the staging folder,
-            the author folder it made when empty, and the state. A lost claim
+            rescan). A placement the state never recorded (a kill between the
+            rename and the state's write) is adopted by the marker: staging
+            gone and the folder or its fallback holding this project is placed
+            (adopt), never fetched again. A stop or a lost claim keeps staging
+            and state; a cancel, a
+            failure or Abandon (not on a lost claim, and only a state for the
+            abandoned job's own library: the state is keyed by project) removes
+            the staging folder, the author folder it made when empty, and the
+            state. A lost claim
             never handed out again leaves its staging folder (hidden, unindexed).
             Steps manifest, download (done/total = sections), cover, place,
             rescan. Result {library_id, path (the rescan's), librivox_id, files,

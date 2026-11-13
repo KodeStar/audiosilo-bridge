@@ -197,7 +197,9 @@ const mappingPoll = time.Second
 
 // Abandon removes the staging folder of a job the runner ended without
 // running it (cancelled before it resumed). A lost claim keeps it: the server
-// hands the job out again and the next claim resumes it. A placed book stays.
+// hands the job out again and the next claim resumes it. A placed book stays,
+// and so does a state for another library: the state is the project's, not
+// the job's, and that one is a later fetch's.
 func (h *Handler) Abandon(ctx context.Context, job jobs.Job) {
 	if jobs.Lost(ctx) {
 		return
@@ -207,7 +209,7 @@ func (h *Handler) Abandon(ctx context.Context, job jobs.Job) {
 		return
 	}
 	st := h.loadState(p.LibrivoxID)
-	if st == nil || st.Placed {
+	if st == nil || st.Placed || st.LibraryID != p.LibraryID {
 		return
 	}
 	h.discard(p.LibrivoxID, st)
