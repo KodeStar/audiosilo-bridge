@@ -71,22 +71,33 @@ func (h *Handler) download(ctx context.Context, f *fetch, sections []metaops.Lib
 	return nil
 }
 
-// retry is an attempt that may be tried again: after RetryAfter when the
-// server said so, and whether the partial holds more than before it (a cut
-// 200 that started the file again from zero adds nothing until it passes
-// what the partial held).
+// retry is an attempt that may be tried again: after retryAfter when the
+// server said so. size is what the partial holds after it (0 when the attempt
+// wrote nothing or the partial went).
 type retry struct {
 	retryAfter int
-	added      bool
+	size       int64
 	cause      string
 }
 
 func (r *retry) Error() string { return r.cause }
 
+// partSize is what a section's partial holds, 0 when there is none.
+func partSize(root *os.Root, part string) int64 {
+	if st, err := root.Lstat(part); err == nil && st.Mode().IsRegular() {
+		return st.Size()
+	}
+	return 0
+}
+
 // section downloads one section to <staging>/<name>, trying again while
 // attempts add to the partial (downloadAttempts in a row that add nothing
 // fail archive_unavailable).
 func (h *Handler) section(ctx context.Context, root *os.Root, f *fetch, i int, rawURL, name string) error {
+	// high is the most the partial has held. Only an attempt that takes it
+	// past that added to it: one that started the file again from zero adds
+	// nothing until it does, however its size compares with the last cut's.
+	high := partSize(root, path.Join(f.staging(), name)+partSuffix)
 	failures := 0
 	for {
 		err := h.attempt(ctx, root, f, i, rawURL, name)
@@ -99,16 +110,19 @@ func (h *Handler) section(ctx context.Context, root *os.Root, f *fetch, i int, r
 		case !errors.As(err, &r):
 			return err
 		}
-		if r.added {
-			failures = 0
+		if r.size > high {
+			high, failures = r.size, 0
+		} else {
+			failures++
 		}
-		if failures++; failures >= downloadAttempts {
+		if failures >= downloadAttempts {
 			return fail(CodeArchiveUnavailable, "archive.org didn't deliver section %d of LibriVox recording %d (%s): try again later.",
 				i+1, f.p.LibrivoxID, r.cause)
 		}
 		h.o.Log.Info("librivox: a section's download failed; trying again", "librivox_id", f.p.LibrivoxID, "section", i+1,
-			"attempt", failures, "cause", r.cause)
-		wait := max(time.Duration(failures*failures)*2*time.Second, min(time.Duration(r.retryAfter)*time.Second, maxRetryAfter))
+			"failures", failures, "cause", r.cause)
+		backoff := max(failures, 1)
+		wait := max(time.Duration(backoff*backoff)*2*time.Second, min(time.Duration(r.retryAfter)*time.Second, maxRetryAfter))
 		if werr := h.o.Wait(ctx, wait); werr != nil {
 			return werr
 		}
@@ -122,10 +136,7 @@ func (h *Handler) section(ctx context.Context, root *os.Root, f *fetch, i int, r
 func (h *Handler) attempt(ctx context.Context, root *os.Root, f *fetch, i int, rawURL, name string) error {
 	final := path.Join(f.staging(), name)
 	part := final + partSuffix
-	offset := int64(0)
-	if st, err := root.Lstat(part); err == nil && st.Mode().IsRegular() {
-		offset = st.Size()
-	}
+	offset := partSize(root, part)
 	prev := f.st.Files[name]
 	if offset == 0 {
 		prev = partState{}
@@ -215,13 +226,14 @@ func (h *Handler) attempt(ctx context.Context, root *os.Root, f *fetch, i int, r
 		_ = root.Remove(part)
 		return fmt.Errorf("section %d is larger than the Bridge's cap for one file", i+1)
 	case cerr != nil:
-		return &retry{added: size > offset, cause: "network"}
+		return &retry{size: size, cause: "network"}
 	case total > 0 && size != total:
 		if size > total {
 			_ = root.Remove(part)
 			delete(f.st.Files, name)
+			size = 0
 		}
-		return &retry{added: size > offset, cause: "short"}
+		return &retry{size: size, cause: "short"}
 	}
 	if err := root.Rename(part, final); err != nil {
 		return writeFailure(err, final)

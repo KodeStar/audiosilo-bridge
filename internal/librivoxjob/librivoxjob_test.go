@@ -707,3 +707,19 @@ func TestFetchParksMidDownload(t *testing.T) {
 		t.Fatal("the job didn't park mid-download")
 	}
 }
+
+// Restarts from zero whose cuts only ever pass the LAST cut, never the most
+// the partial has held, add nothing: the section fails instead of going on
+// for as long as the cuts alternate.
+func TestFetchRestartsNeverPassingTheirBestFail(t *testing.T) {
+	x := newHarness(t)
+	x.fetch.files[sectionURL(2)].etag = `W/"weak"`
+	x.fetch.files[sectionURL(2)].cut = []int{1000, 500, 600, 500, 600}
+	out, err := x.run(context.Background(), false)
+	if code := failureCode(t, out, err); code != CodeArchiveUnavailable {
+		t.Fatalf("code %q (%v)", code, err)
+	}
+	if left := len(x.fetch.files[sectionURL(2)].cut); left != 1 {
+		t.Fatalf("%d cuts left: three attempts in a row that add nothing end the section", left)
+	}
+}
