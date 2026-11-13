@@ -16,12 +16,11 @@ import (
 // state is a fetch's plan and progress, kept in the Bridge's data
 // (<StateDir>/<library_id>-<librivox_id>.json, one per library and project, so
 // fetches of one project into two libraries never touch each other's staging)
-// from the moment it picks the folder: a
-// resumed run (a restart, a lost claim handed out again) goes on with the same
-// staging folder and destination instead of planning again against a library
-// that changed meanwhile, Abandon finds the staging folder to remove, and once
-// the folder is placed it is the placement marker (a failed rescan retries
-// from the rescan, decision 6).
+// from the moment it picks the folder: a resumed run (a restart, a lost claim
+// handed out again) goes on with the same staging folder and destination
+// instead of planning again against a library that changed meanwhile, Abandon
+// finds the staging folder to remove, and once the folder is placed it is the
+// placement marker (a failed rescan retries from the rescan, decision 6).
 type state struct {
 	LibraryID int64 `json:"library_id"`
 	// Parent is the folder the book goes in ("" for the library's root), and

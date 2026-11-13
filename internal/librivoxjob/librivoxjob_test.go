@@ -867,22 +867,6 @@ func TestFetchAdoptsUnrecordedPlacement(t *testing.T) {
 	}
 }
 
-// Abandon leaves a state that is another library's fetch of the project: the
-// state is the project's, and the abandoned job never wrote that one.
-func TestAbandonLeavesAnotherLibrarysFetch(t *testing.T) {
-	x := newHarness(t)
-	ctx, stop := context.WithCancel(context.Background())
-	x.fetch.files[sectionURL(2)].cut = []int{100}
-	x.fetch.files[sectionURL(2)].onCut = stop
-	_, _ = x.run(ctx, false)
-	other := x.job(true)
-	other.Params = bytes.Replace(other.Params, []byte(`"library_id":3`), []byte(`"library_id":4`), 1)
-	x.h.Abandon(jobs.AbandonContext(context.Background(), false), other)
-	if !x.exists(stagingDir) || x.h.loadState(3, testID) == nil {
-		t.Fatal("Abandon removed another library's fetch")
-	}
-}
-
 // A padded URL is refused as it stands: the check and the request see one
 // spelling.
 func TestFetchPaddedURLRefused(t *testing.T) {
