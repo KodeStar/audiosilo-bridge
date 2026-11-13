@@ -667,3 +667,45 @@ func (f *flakyFetcher) Stream(ctx context.Context, in netguard.StreamRequest) (*
 	}
 	return f.fakeFetcher.Stream(ctx, in)
 }
+
+// Without a strong ETag every attempt starts the file again: cut attempts
+// that never get past what the partial held count as adding nothing, so the
+// section fails instead of looping.
+func TestFetchWeakETagCutsFail(t *testing.T) {
+	x := newHarness(t)
+	x.fetch.files[sectionURL(2)].etag = `W/"weak"`
+	x.fetch.files[sectionURL(2)].cut = []int{500, 500, 500, 500}
+	out, err := x.run(context.Background(), false)
+	if code := failureCode(t, out, err); code != CodeArchiveUnavailable {
+		t.Fatalf("code %q (%v)", code, err)
+	}
+}
+
+// A mapping that goes away during the download parks the job with what it
+// fetched; it goes on once the mapping is back.
+func TestFetchParksMidDownload(t *testing.T) {
+	x := newHarness(t)
+	x.fetch.files[sectionURL(2)].cut = []int{100}
+	x.fetch.files[sectionURL(2)].onCut = func() { x.libs.writable = false }
+	waits := 0
+	x.h.o.Wait = func(context.Context, time.Duration) error {
+		// The first wait is the cut section's retry; the next is the park's.
+		if waits++; waits > 1 {
+			x.libs.writable = true
+		}
+		return nil
+	}
+	out, err := x.run(context.Background(), false)
+	if err != nil || out.(*Result).Bytes != 6014 {
+		t.Fatalf("%#v %v", out, err)
+	}
+	parked := false
+	for _, p := range x.progress {
+		if park, ok := p.Extra["park"].(map[string]any); ok && park["code"] == CodeNotWritable && p.Step == StepDownload {
+			parked = true
+		}
+	}
+	if !parked {
+		t.Fatal("the job didn't park mid-download")
+	}
+}

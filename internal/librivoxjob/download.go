@@ -49,6 +49,11 @@ func (h *Handler) download(ctx context.Context, f *fetch, sections []metaops.Lib
 	defer func() { _ = root.Close() }()
 	n := len(sections)
 	for i, s := range sections {
+		// The mapping again before each section's writes: one that went away
+		// parks the job (not_writable) with what it fetched, until it is back.
+		if _, _, err := h.mapped(ctx, f.lib.ID, f.rep, StepDownload, false); err != nil {
+			return err
+		}
 		h.report(f.rep, jobs.Progress{Step: StepDownload, Message: fmt.Sprintf("Downloading section %d of %d from archive.org", i+1, n),
 			Done: i, Total: n})
 		if st, err := root.Lstat(path.Join(f.st.Staging, names[i])); err == nil && st.Mode().IsRegular() {
@@ -63,7 +68,9 @@ func (h *Handler) download(ctx context.Context, f *fetch, sections []metaops.Lib
 }
 
 // retry is an attempt that may be tried again: after RetryAfter when the
-// server said so, and whether it added to the partial.
+// server said so, and whether the partial holds more than before it (a cut
+// 200 that started the file again from zero adds nothing until it passes
+// what the partial held).
 type retry struct {
 	retryAfter int
 	added      bool
@@ -204,13 +211,13 @@ func (h *Handler) attempt(ctx context.Context, root *os.Root, f *fetch, i int, r
 		_ = root.Remove(part)
 		return fmt.Errorf("section %d is larger than the Bridge's cap for one file", i+1)
 	case cerr != nil:
-		return &retry{added: n > 0, cause: "network"}
+		return &retry{added: size > offset, cause: "network"}
 	case total > 0 && size != total:
 		if size > total {
 			_ = root.Remove(part)
 			delete(f.st.Files, name)
 		}
-		return &retry{added: n > 0, cause: "short"}
+		return &retry{added: size > offset, cause: "short"}
 	}
 	if err := root.Rename(part, final); err != nil {
 		return writeFailure(err, final)
