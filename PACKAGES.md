@@ -2639,16 +2639,33 @@ internal/
             exists. Staging <parent>/.audiosilo-librivox-<id>/ (a dot folder the
             scan skips), every write through the mount's os.Root (0755/0644):
             each section to <name>.part, its strong ETag and size recorded in
-            the state before the body, a resume asks Range/If-Range
-            (netguard.ResumeAction proves the 206; anything unproven starts the
-            file again), renamed to its name only at the stated size (a finished
-            file is skipped on resume); three attempts in a row that add nothing
-            fail archive_unavailable, as does a 4xx; the library's free space
-            1.1x each file's rest, else disk_full. cover.jpg best effort (only a
+            the state before the body (the ETag only beside a stated size; a
+            body from its start removes the old partial BEFORE the new
+            validators are saved, so a stop between the two never leaves old
+            bytes a later 206 would be proven to continue), a resume asks
+            Range/If-Range (netguard.ResumeAction proves the 206; anything
+            unproven starts the file again), renamed to its name only at the
+            stated size and never empty (a finished file is skipped on resume);
+            three attempts in a row that add nothing fail archive_unavailable
+            (adding = past the MOST the partial has held, section's high-water
+            mark, so restarts from zero that only pass the last cut don't
+            count), as does a 4xx other than 408, 416 and 429 (tried again);
+            the library's free space 1.1x each file's rest, else disk_full.
+            The mapping is checked again before each section, before the cover
+            and marker, and before the rename (recheck): not writable parks; a
+            mapping moved to another mount fails not_writable (the staging
+            folder isn't there), and the library is opened per section, not
+            held across a park. cover.jpg best effort (only a
             sniffed JPEG from archive.org), then .audiosilo/librivox.json
             {version 1, librivox_id, work_id, recording_id, archive_id} (decision
             3), the mapping checked again (a resumed or late job parks
-            not_writable), ONE fsutil.RenameNoReplace staging -> book folder (a
+            not_writable), the staging folder swept to this manifest's files
+            (sweep: a partial or a section an earlier run staged under a title
+            the manifest changed since is removed, a missing section fails; an
+            entry is the manifest's by its name or by os.SameFile with the file
+            found under that name, since a mount may list NFD for NFC, and the
+            sections are looked for again after the removals),
+            ONE fsutil.RenameNoReplace staging -> book folder (a
             folder that raced in takes the fallback once, never replaced), then
             the rescan (3 tries). State <data>/librivox/<id>.json (state.go: the
             library, parent and whether the fetch made it, destination (staging is

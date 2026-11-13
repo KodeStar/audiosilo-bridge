@@ -15,6 +15,7 @@ import (
 	"os"
 	"path"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -618,16 +619,12 @@ func (h *Handler) place(ctx context.Context, f *fetch, names []string) error {
 		return err
 	}
 	defer func() { _ = root.Close() }()
+	if err := sweep(root, f.staging(), names); err != nil {
+		return err
+	}
 	n, bytes := countFiles(root, f.staging())
-	if n < len(names) {
-		return fmt.Errorf("the staging folder holds %d files, %d expected", n, len(names))
-	}
 	primary := f.st.Dest
-	dests := []string{primary}
-	if !strings.HasSuffix(primary, fallbackName("", f.p.LibrivoxID)) {
-		dests = append(dests, fallbackName(primary, f.p.LibrivoxID)) // not the fallback already
-	}
-	for _, dest := range dests {
+	for _, dest := range candidates(primary, f.p.LibrivoxID) {
 		err = fsutil.RenameNoReplace(root, f.staging(), dest)
 		if errors.Is(err, fs.ErrExist) {
 			continue
@@ -643,6 +640,64 @@ func (h *Handler) place(ctx context.Context, f *fetch, names []string) error {
 		return nil
 	}
 	return fail(CodeExists, "Something else is already at %s in the library: nothing was overwritten. Move or rename it, then add the recording again.", primary)
+}
+
+// sweep leaves the staging folder holding this manifest's files only: its
+// sections, the cover and .audiosilo/. Anything else there is an earlier
+// run's (a partial, or a section fetched under a title the manifest has
+// changed since) and goes, so it is never placed with the book; a section
+// that isn't there fails the placement. An entry is the manifest's by its
+// name, or by being the same file as the one found under that name: a mount
+// may list a name in another form than it was given (NFD for NFC). The
+// sections are looked for again after the removals, so a mount that tells
+// neither way never has an incomplete book placed.
+func sweep(root *os.Root, staging string, names []string) error {
+	sections := func() ([]fs.FileInfo, error) {
+		infos := make([]fs.FileInfo, 0, len(names)+2)
+		for i, name := range names {
+			st, err := root.Lstat(path.Join(staging, name))
+			if err != nil || !st.Mode().IsRegular() {
+				return nil, fmt.Errorf("the staging folder doesn't hold section %d of the recording's %d", i+1, len(names))
+			}
+			infos = append(infos, st)
+		}
+		return infos, nil
+	}
+	keep, err := sections()
+	if err != nil {
+		return err
+	}
+	named := map[string]bool{}
+	for _, name := range names {
+		named[name] = true
+	}
+	for _, name := range []string{coverName, path.Dir(markerRel)} {
+		named[name] = true
+		if st, err := root.Lstat(path.Join(staging, name)); err == nil {
+			keep = append(keep, st)
+		}
+	}
+	entries, err := fs.ReadDir(transfer.RootFS(root), staging)
+	if err != nil {
+		return fmt.Errorf("reading the staging folder: %w", err)
+	}
+	for _, e := range entries {
+		if named[e.Name()] {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue // gone since the listing
+		}
+		if slices.ContainsFunc(keep, func(k fs.FileInfo) bool { return os.SameFile(k, info) }) {
+			continue
+		}
+		if err := root.RemoveAll(path.Join(staging, e.Name())); err != nil {
+			return writeFailure(err, path.Join(staging, e.Name()))
+		}
+	}
+	_, err = sections()
+	return err
 }
 
 // rescanAttempts bounds the rescan's tries (the book is placed either way).

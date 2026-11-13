@@ -105,6 +105,15 @@ func fallbackName(title string, id int) string {
 	return fmt.Sprintf("%s (LibriVox %d)", title, id)
 }
 
+// candidates are the folders a fetch planned for dest may place the book at:
+// dest, then once its fallback name, unless dest is the fallback already.
+func candidates(dest string, id int) []string {
+	if strings.HasSuffix(dest, fallbackName("", id)) {
+		return []string{dest}
+	}
+	return []string{dest, fallbackName(dest, id)}
+}
+
 // audioExts are the extensions a section file keeps from its URL; anything
 // else is named .mp3 (LibriVox publishes its sections as MP3).
 var audioExts = map[string]bool{".mp3": true, ".ogg": true, ".m4a": true, ".m4b": true, ".flac": true, ".opus": true}

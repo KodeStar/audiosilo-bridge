@@ -775,6 +775,36 @@ func TestFetchRestartDropsPartialBeforeValidators(t *testing.T) {
 	}
 }
 
+// What an earlier run staged under names the manifest no longer has (a
+// partial, a section whose title changed) is never placed with the book.
+func TestFetchPlacesOnlyTheManifestsFiles(t *testing.T) {
+	x := newHarness(t)
+	ctx, stop := context.WithCancel(context.Background())
+	x.fetch.files[sectionURL(2)].cut = []int{700}
+	x.fetch.files[sectionURL(2)].onCut = stop
+	if _, err := x.run(ctx, false); !errors.Is(err, context.Canceled) {
+		t.Fatalf("first run: %v", err)
+	}
+	x.meta.book.Sections[0].Title = "The Garden"
+	x.meta.book.Sections[1].Title = "The Party"
+	out, err := x.run(context.Background(), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(x.path(bookDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	want := []string{".audiosilo", "01 - The Garden.mp3", "02 - The Party.mp3", "03 - Johnny Crow's New Garden.mp3", "cover.jpg"}
+	if !slices.Equal(names, want) || out.(*Result).Files != 4 || out.(*Result).Bytes != 6014 {
+		t.Fatalf("placed %v, %+v", names, out)
+	}
+}
+
 // A mapping moved to another mount during the fetch fails it (what it staged
 // isn't there) and removes the staging folder from the mount it was in.
 func TestFetchMountMovedFails(t *testing.T) {
