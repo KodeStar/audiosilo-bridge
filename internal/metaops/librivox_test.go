@@ -54,7 +54,8 @@ func TestLibrivoxReads(t *testing.T) {
 		t.Fatal(err)
 	}
 	if b.ID != "192" || b.Title != "Johnny Crow's Garden" || len(b.Sections) != 2 || b.CoverartJPG == nil ||
-		b.Sections[1].ListenURL != "https://www.archive.org/download/johnny_crow_garden_librivox/johnnycrow_02_brooke_64kb.mp3" {
+		b.Sections[1].ListenURL != "https://www.archive.org/download/johnny_crow_garden_librivox/johnnycrow_02_brooke_64kb.mp3" ||
+		b.Sections[1].SectionNumber != "2" {
 		t.Fatalf("%+v", b)
 	}
 	if b.Authors[0].Name() != "L. Leslie Brooke" || b.ArchiveID() != "johnny_crow_garden_librivox" {

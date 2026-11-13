@@ -47,8 +47,11 @@ func (p LibrivoxPerson) Name() string {
 
 // LibrivoxSection is one section (one file) of a project.
 type LibrivoxSection struct {
-	Title     string `json:"title"`
-	ListenURL string `json:"listen_url"`
+	// SectionNumber is LibriVox's own number for the section (from 0 on some
+	// projects), a string as LibriVox sends it.
+	SectionNumber string `json:"section_number"`
+	Title         string `json:"title"`
+	ListenURL     string `json:"listen_url"`
 }
 
 // librivoxDetails is the prefix the feed states url_iarchive with.

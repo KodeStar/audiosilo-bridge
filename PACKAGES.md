@@ -2638,8 +2638,11 @@ internal/
             "LibriVox <id>". Names: control characters and space runs folded,
             Sanitize, cut to 180 bytes on a rune boundary; files "NN - <section
             title>.<ext>" (NN the 1-based position, at least two digits, the
-            count's width; never section_number; an untitled section is
-            "Section N"; the URL's audio extension, else .mp3). The title's
+            count's width; never section_number; a title opening with the
+            section's own number and a separator ("1 - ", "1. ", "1: ", "1) ",
+            matching its section_number or position) loses it, so 5495's "1 -
+            Chapter 01 ..." is "01 - Chapter 01 ...", while "1984" stays; an
+            untitled section, or one that was only its number, is "Section N"; the URL's audio extension, else .mp3). The title's
             folder taken, once "<Title> (LibriVox <id>)", else exists; a folder
             already holding this project's librivox.json is the book (rescan
             only); an author folder that is a listed book or holds audio is

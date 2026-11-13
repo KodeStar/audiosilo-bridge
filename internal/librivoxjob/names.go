@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/url"
 	"path"
+	"regexp"
 	"strconv"
 	"strings"
 	"unicode"
@@ -127,13 +128,40 @@ func sectionNames(sections []metaops.LibrivoxSection) []string {
 	out := make([]string, len(sections))
 	for i, s := range sections {
 		n := i + 1
-		name := segment(s.Title)
+		name := segment(dropOwnNumber(s.Title, s.SectionNumber, n))
 		if name == "" {
 			name = "Section " + strconv.Itoa(n)
 		}
 		out[i] = fmt.Sprintf("%0*d - %s%s", width, n, name, sectionExt(s.ListenURL))
 	}
 	return out
+}
+
+// ownNumber is a section title that opens with a number and a separator
+// ("1 - ", "1. ", "1: ", "1) "), or is a number alone (a separator after it
+// or not). "1.5 Interlude" is no match: the separator needs a space after it.
+var ownNumber = regexp.MustCompile(`^\s*(\d+)(?:\s*[-.:)](?:\s+(.*)|\s*)|\s*)$`)
+
+// dropOwnNumber is a section's title without the number it opens with when
+// that number is the section's own (its section_number, or its 1-based
+// position pos): "1 - Chapter 01 through Chapter 06" is section 1's
+// "Chapter 01 through Chapter 06", since its file is named "01 - " already.
+// A title that is only its own number comes back "" (the caller names it
+// "Section N"); any other number ("1984", "1984 - Part One" as section 1) is
+// the title's own and stays.
+func dropOwnNumber(title, sectionNumber string, pos int) string {
+	m := ownNumber.FindStringSubmatch(title)
+	if m == nil {
+		return title
+	}
+	num, err := strconv.Atoi(m[1])
+	if err != nil {
+		return title
+	}
+	if sn, err := strconv.Atoi(strings.TrimSpace(sectionNumber)); (err != nil || num != sn) && num != pos {
+		return title
+	}
+	return m[2]
 }
 
 // sectionExt is the file's extension from its URL's path (lower case), .mp3

@@ -166,3 +166,47 @@ func TestAllowedURL(t *testing.T) {
 		t.Error("a nil URL allowed")
 	}
 }
+
+// A section title that opens with the section's own number (its
+// section_number or its position) loses it: the file name carries it already.
+func TestSectionNamesDropOwnNumber(t *testing.T) {
+	for _, tc := range []struct {
+		title, number string
+		pos           int
+		want          string
+	}{
+		{"1 - Chapter 01 through Chapter 06", "1", 1, "Chapter 01 through Chapter 06"}, // project 5495
+		{"1. Down the Rabbit-Hole", "1", 1, "Down the Rabbit-Hole"},
+		{"2: The Pool of Tears", "2", 2, "The Pool of Tears"},
+		{"3) A Caucus-Race", "3", 3, "A Caucus-Race"},
+		{"03 - Zero padded", "3", 3, "Zero padded"},
+		{"0 - Preface", "0", 1, "Preface"},               // section_number from 0
+		{"1 - Preface", "0", 1, "Preface"},               // the position
+		{"7 - Wrong number", "3", 3, "7 - Wrong number"}, // neither: kept
+		{"1984", "1", 1, "1984"},                         // a number title, not a prefix
+		{"1984 - Part One", "1", 1, "1984 - Part One"},
+		{"1.5 Interlude", "1", 1, "1.5 Interlude"}, // no separator before a word
+		{"12 Angry Men", "12", 12, "12 Angry Men"}, // no separator
+		{"5", "5", 5, ""},  // only its own number
+		{"5.", "5", 5, ""}, // nothing after the separator
+		{"5", "", 5, ""},
+		{"Chapter 1", "1", 1, "Chapter 1"},
+		{"", "1", 1, ""},
+	} {
+		if got := dropOwnNumber(tc.title, tc.number, tc.pos); got != tc.want {
+			t.Errorf("dropOwnNumber(%q, %q, %d) = %q, want %q", tc.title, tc.number, tc.pos, got, tc.want)
+		}
+	}
+	got := sectionNames([]metaops.LibrivoxSection{
+		{SectionNumber: "1", Title: "1 - Chapter 01 through Chapter 06"},
+		{SectionNumber: "2", Title: "2"},
+		{SectionNumber: "3", Title: "1984"},
+		{SectionNumber: "4", Title: "Introduction"},
+	})
+	want := []string{"01 - Chapter 01 through Chapter 06.mp3", "02 - Section 2.mp3", "03 - 1984.mp3", "04 - Introduction.mp3"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("section %d: %q, want %q", i+1, got[i], want[i])
+		}
+	}
+}
