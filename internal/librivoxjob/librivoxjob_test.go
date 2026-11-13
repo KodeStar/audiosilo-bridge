@@ -573,29 +573,27 @@ func TestParseParams(t *testing.T) {
 	}
 }
 
-// A state file that doesn't name this project's staging folder is dropped,
-// never followed (it decides what the cleanup removes).
+// A state file whose paths aren't clean library paths is dropped, never
+// followed (it decides what the cleanup removes).
 func TestStateValid(t *testing.T) {
 	for _, tc := range []struct {
 		st state
 		ok bool
 	}{
-		{state{LibraryID: 3, Parent: "A", Staging: "A/" + stagingName(192), Dest: "A/T"}, true},
-		{state{LibraryID: 3, Parent: "", Staging: stagingName(192), Dest: "T"}, true},
-		{state{LibraryID: 3, Parent: "A", Staging: "A/" + stagingName(5), Dest: "A/T"}, false},
-		{state{LibraryID: 3, Parent: "A", Staging: "B/" + stagingName(192), Dest: "A/T"}, false},
-		{state{LibraryID: 3, Parent: "..", Staging: "../" + stagingName(192), Dest: "../T"}, false},
-		{state{LibraryID: 3, Parent: "A", Staging: "A/" + stagingName(192), Dest: "A/../T"}, false},
-		{state{LibraryID: 3, Parent: "A", Staging: "A/" + stagingName(192), Dest: "B/T"}, false},
-		{state{LibraryID: 0, Parent: "A", Staging: "A/" + stagingName(192), Dest: "A/T"}, false},
+		{state{LibraryID: 3, Parent: "A", Dest: "A/T"}, true},
+		{state{LibraryID: 3, Parent: "", Dest: "T"}, true},
+		{state{LibraryID: 3, Parent: "..", Dest: "../T"}, false},
+		{state{LibraryID: 3, Parent: "A", Dest: "A/../T"}, false},
+		{state{LibraryID: 3, Parent: "A", Dest: "B/T"}, false},
+		{state{LibraryID: 0, Parent: "A", Dest: "A/T"}, false},
 	} {
-		if got := tc.st.valid(192); got != tc.ok {
+		if got := tc.st.valid(); got != tc.ok {
 			t.Errorf("%+v valid = %v", tc.st, got)
 		}
 	}
 	x := newHarness(t)
 	_ = os.MkdirAll(x.stateDir, 0o700)
-	_ = os.WriteFile(x.h.statePath(192), []byte(`{"library_id":3,"parent":"..","staging":"../`+stagingName(192)+`","dest":"../T"}`), 0o600)
+	_ = os.WriteFile(x.h.statePath(192), []byte(`{"library_id":3,"parent":"..","dest":"../T"}`), 0o600)
 	if x.h.loadState(192) != nil {
 		t.Fatal("an invalid state loaded")
 	}

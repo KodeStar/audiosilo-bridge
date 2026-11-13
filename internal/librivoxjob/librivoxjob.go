@@ -166,7 +166,7 @@ type Options struct {
 }
 
 // Handler runs librivox.fetch on the download lane (capacity 1, shared with
-// audible.import): one book at a time.
+// audible.import and an ordinary podcast.fetch): one book at a time.
 type Handler struct {
 	o Options
 }
@@ -209,12 +209,18 @@ func (h *Handler) Abandon(ctx context.Context, job jobs.Job) {
 	if st == nil || st.Placed {
 		return
 	}
+	h.discard(p.LibrivoxID, st)
+}
+
+// discard removes a fetch's staging folder from the library its state names
+// (best effort) and the state.
+func (h *Handler) discard(id int, st *state) {
 	if lib, ok := h.o.Libraries.Library(st.LibraryID); ok {
 		if mount, _ := h.o.Mount(lib.ID, lib.Root); mount != "" {
-			h.removeStaging(mount, p.LibrivoxID, st)
+			h.removeStaging(mount, id, st)
 		}
 	}
-	h.dropState(p.LibrivoxID)
+	h.dropState(id)
 }
 
 // Run fetches the recording: manifest, download, cover, place, rescan.
@@ -246,6 +252,18 @@ type fetch struct {
 	rep   *jobs.Reporter
 }
 
+// staging is the fetch's staging folder (library-relative).
+func (f *fetch) staging() string { return f.st.staging(f.p.LibrivoxID) }
+
+// openRoot opens the library at its mount for the fetch's writes.
+func (f *fetch) openRoot() (*os.Root, error) {
+	root, err := os.OpenRoot(f.mount)
+	if err != nil {
+		return nil, fail(CodeNotWritable, "The Bridge can't open the library at its mount: %v", err)
+	}
+	return root, nil
+}
+
 func (h *Handler) run(ctx context.Context, job jobs.Job, p Params, rep *jobs.Reporter) (res *Result, err error) {
 	var srv Server
 	if h.o.Server != nil {
@@ -261,8 +279,11 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, p Params, rep *jobs.Rep
 	f := &fetch{p: p, lib: lib, mount: mount, rep: rep, st: h.loadState(p.LibrivoxID)}
 	if f.st != nil && f.st.LibraryID != lib.ID {
 		// An earlier fetch of the project for another library: its staging
-		// folder goes (best effort), and this one plans afresh.
-		h.Abandon(context.WithoutCancel(ctx), jobs.Job{Params: job.Params})
+		// folder goes (best effort; a book it placed stays), and this one plans
+		// afresh.
+		if !f.st.Placed {
+			h.discard(p.LibrivoxID, f.st)
+		}
 		f.st = nil
 	}
 	defer func() {
@@ -329,13 +350,16 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, p Params, rep *jobs.Rep
 // doesn't have (another meta base than the server's, decision 5) is no
 // failure: the project names the folder then.
 func (h *Handler) manifest(ctx context.Context, p Params) (metaops.LibrivoxBook, *metaops.LibrivoxWork, error) {
+	metadataOff := func() error {
+		return fail(CodeMetadataOff, "The Bridge has no metadata service set (metadata.base_url), so it can't read LibriVox recordings.")
+	}
 	if h.o.Meta == nil {
-		return metaops.LibrivoxBook{}, nil, fail(CodeMetadataOff, "The Bridge has no metadata service set (metadata.base_url), so it can't read LibriVox recordings.")
+		return metaops.LibrivoxBook{}, nil, metadataOff()
 	}
 	book, err := h.o.Meta.LibrivoxAudiobook(ctx, p.LibrivoxID)
 	switch {
 	case errors.Is(err, metaops.ErrDisabled):
-		return book, nil, fail(CodeMetadataOff, "The Bridge has no metadata service set (metadata.base_url), so it can't read LibriVox recordings.")
+		return book, nil, metadataOff()
 	case errors.Is(err, metaops.ErrNotFound):
 		return book, nil, fail(CodeNotFound, "The metadata database has no LibriVox recording %d.", p.LibrivoxID)
 	case err != nil:
@@ -388,23 +412,26 @@ func (h *Handler) plan(ctx context.Context, f *fetch, srv Server, book metaops.L
 	}
 	author, title := bookNames(f.p.LibrivoxID, book, work)
 	parent, dest := destination(author, title, books)
-	root, err := os.OpenRoot(f.mount)
+	root, err := f.openRoot()
 	if err != nil {
-		return fail(CodeNotWritable, "The Bridge can't open the library at its mount: %v", err)
+		return err
 	}
 	defer func() { _ = root.Close() }()
 	if parent != "" {
 		// The author folder as the library spells it (a case-insensitive disk).
-		if parent, err = transfer.OnDisk(transfer.RootFS(root), parent); err != nil {
+		spelled, err := transfer.OnDisk(transfer.RootFS(root), parent)
+		if err != nil {
 			return fail(CodeNotWritable, "The Bridge can't place the book under %s in the library: %v", parent, err)
 		}
+		parent = spelled
 		if err := h.parentFree(root, parent, books); err != nil {
 			return err
 		}
 	}
-	st := &state{LibraryID: f.lib.ID, Parent: parent, Staging: path.Join(parent, stagingName(f.p.LibrivoxID))}
-	for i, name := range []string{path.Base(dest), fallbackName(path.Base(dest), f.p.LibrivoxID)} {
-		at := path.Join(parent, name)
+	st := &state{LibraryID: f.lib.ID, Parent: parent}
+	dest = path.Join(parent, path.Base(dest)) // under the author folder as spelled on disk
+	fallback := fallbackName(dest, f.p.LibrivoxID)
+	for _, at := range []string{dest, fallback} {
 		if _, err := transfer.CleanRel(at); err != nil {
 			return fail(CodeNotWritable, "The book's folder %q isn't a valid path in the library.", at)
 		}
@@ -417,13 +444,14 @@ func (h *Handler) plan(ctx context.Context, f *fetch, srv Server, book metaops.L
 		case holdsProjectIn(root, at, f.p.LibrivoxID):
 			st.Dest, st.Placed = at, true
 			st.Count, st.Bytes = countFiles(root, at)
-		case i == 1:
-			return fail(CodeExists, "%s and %s are both taken in the library: nothing was overwritten. Move or rename one of them, then add the recording again.",
-				path.Join(parent, path.Base(dest)), at)
-		default:
-			continue
 		}
-		break
+		if st.Dest != "" {
+			break
+		}
+	}
+	if st.Dest == "" {
+		return fail(CodeExists, "%s and %s are both taken in the library: nothing was overwritten. Move or rename one of them, then add the recording again.",
+			dest, fallback)
 	}
 	if !st.Placed {
 		if _, err := root.Lstat(parent); parent != "" && errors.Is(err, fs.ErrNotExist) {
@@ -463,9 +491,9 @@ func (h *Handler) parentFree(root *os.Root, parent string, books []link.LibraryB
 // prepare makes the author folder and the staging folder (0755, through the
 // mount's root).
 func (h *Handler) prepare(f *fetch) error {
-	root, err := os.OpenRoot(f.mount)
+	root, err := f.openRoot()
 	if err != nil {
-		return fail(CodeNotWritable, "The Bridge can't open the library at its mount: %v", err)
+		return err
 	}
 	defer func() { _ = root.Close() }()
 	if f.st.Parent != "" {
@@ -473,11 +501,12 @@ func (h *Handler) prepare(f *fetch) error {
 			return writeFailure(err, f.st.Parent)
 		}
 	}
-	if err := root.Mkdir(f.st.Staging, 0o755); err != nil && !errors.Is(err, fs.ErrExist) {
-		return writeFailure(err, f.st.Staging)
+	staging := f.staging()
+	if err := root.Mkdir(staging, 0o755); err != nil && !errors.Is(err, fs.ErrExist) {
+		return writeFailure(err, staging)
 	}
-	if st, err := root.Lstat(f.st.Staging); err != nil || !st.IsDir() {
-		return fail(CodeNotWritable, "The Bridge can't use %s in the library as its staging folder.", f.st.Staging)
+	if st, err := root.Lstat(staging); err != nil || !st.IsDir() {
+		return fail(CodeNotWritable, "The Bridge can't use %s in the library as its staging folder.", staging)
 	}
 	return nil
 }
@@ -502,10 +531,8 @@ func (h *Handler) removeStaging(mount string, id int, st *state) {
 		return
 	}
 	defer func() { _ = root.Close() }()
-	if path.Base(st.Staging) == stagingName(id) {
-		if err := root.RemoveAll(st.Staging); err != nil {
-			h.o.Log.Warn("librivox: removing a fetch's staging folder failed", "librivox_id", id, "path", st.Staging, "err", err)
-		}
+	if err := root.RemoveAll(st.staging(id)); err != nil {
+		h.o.Log.Warn("librivox: removing a fetch's staging folder failed", "librivox_id", id, "path", st.staging(id), "err", err)
 	}
 	if st.MadeParent && st.Parent != "" {
 		_ = root.Remove(st.Parent) // only when empty
@@ -519,17 +546,17 @@ func (h *Handler) writeMarker(f *fetch, archiveID string) error {
 	if err != nil {
 		return err
 	}
-	root, err := os.OpenRoot(f.mount)
+	root, err := f.openRoot()
 	if err != nil {
-		return fail(CodeNotWritable, "The Bridge can't open the library at its mount: %v", err)
+		return err
 	}
 	defer func() { _ = root.Close() }()
-	dir := path.Join(f.st.Staging, path.Dir(markerRel))
+	dir := path.Join(f.staging(), path.Dir(markerRel))
 	if err := root.Mkdir(dir, 0o755); err != nil && !errors.Is(err, fs.ErrExist) {
 		return writeFailure(err, dir)
 	}
 	if err := fsutil.WriteRootAtomic(root, dir, path.Base(markerRel), b, 0o644, nil); err != nil {
-		return writeFailure(err, path.Join(f.st.Staging, markerRel))
+		return writeFailure(err, path.Join(f.staging(), markerRel))
 	}
 	return nil
 }
@@ -582,25 +609,22 @@ func (h *Handler) place(ctx context.Context, f *fetch, names []string) error {
 	if _, _, err := h.mapped(ctx, f.lib.ID, f.rep, StepPlace, false); err != nil {
 		return err
 	}
-	root, err := os.OpenRoot(f.mount)
+	root, err := f.openRoot()
 	if err != nil {
-		return fail(CodeNotWritable, "The Bridge can't open the library at its mount: %v", err)
+		return err
 	}
 	defer func() { _ = root.Close() }()
-	n, bytes := countFiles(root, f.st.Staging)
+	n, bytes := countFiles(root, f.staging())
 	if n < len(names) {
 		return fmt.Errorf("the staging folder holds %d files, %d expected", n, len(names))
 	}
 	primary := f.st.Dest
-	fallback := path.Join(f.st.Parent, fallbackName(path.Base(primary), f.p.LibrivoxID))
-	if strings.HasSuffix(primary, fmt.Sprintf(" (LibriVox %d)", f.p.LibrivoxID)) {
-		fallback = ""
+	dests := []string{primary}
+	if !strings.HasSuffix(primary, fallbackName("", f.p.LibrivoxID)) {
+		dests = append(dests, fallbackName(primary, f.p.LibrivoxID)) // not the fallback already
 	}
-	for _, dest := range []string{primary, fallback} {
-		if dest == "" {
-			break
-		}
-		err = fsutil.RenameNoReplace(root, f.st.Staging, dest)
+	for _, dest := range dests {
+		err = fsutil.RenameNoReplace(root, f.staging(), dest)
 		if errors.Is(err, fs.ErrExist) {
 			continue
 		}

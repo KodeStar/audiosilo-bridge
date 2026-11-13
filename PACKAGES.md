@@ -2608,7 +2608,8 @@ internal/
             LibriVox L6 exports Sanitize (librivoxjob names its section files
             with it).
   librivoxjob/ LibriVox L6 (LIBRIVOX-PLAN.md), librivox.fetch on the download lane
-            (capacity 1, shared with audible.import: one book at a time). Params
+            (capacity 1, shared with audible.import and an ordinary podcast.fetch:
+            one book at a time). Params
             {librivox_id, work_id, recording_id, library_id} (server-built,
             strict; unknown fields ignored). Manifest from the Bridge's OWN meta
             base (metaops.LibrivoxAudiobook: /api/v1/librivox/audiobooks?id=N&
@@ -2650,7 +2651,8 @@ internal/
             not_writable), ONE fsutil.RenameNoReplace staging -> book folder (a
             folder that raced in takes the fallback once, never replaced), then
             the rescan (3 tries). State <data>/librivox/<id>.json (state.go: the
-            library, parent and whether the fetch made it, staging, destination,
+            library, parent and whether the fetch made it, destination (staging is
+            <parent>/.audiosilo-librivox-<id>, never stored),
             the partials' validators, then placed + count + bytes): a resumed run
             follows it rather than planning again, Abandon finds the staging
             folder by it, and once placed it is the placement marker (a failed
@@ -3625,5 +3627,5 @@ and the shared clip-floor predicate `qa.ClipStartInRange`/`qa.ClipStartFloorSec`
 and `audiblejob -> {audible, audibleacct, fsutil, importjob, jobs, link, mapping, placement,
 source, store, transfer}` (Phase 4b's import; app wires both;
 neither imports app or api); LibriVox L6: `librivoxjob -> {fsutil, importjob, jobs, link,
-mapping, metaops, netguard, placement, transfer}` (app wires it). Handlers marshal DTOs and call into the injected packages; they
+mapping, metaops, netguard, placement, transfer, audiosilo-server/pkg/match}` (app wires it). Handlers marshal DTOs and call into the injected packages; they
 hold no logic (state transitions live in `state`, dispatch in `scheduler`).

@@ -183,7 +183,7 @@ imports `audible`); `importjob -> {link, placement, source,
 audiosilo-server/pkg/match}`; `audibleacct -> {audible, link, secrets, source, store}`;
 `audiblejob -> {audible, audibleacct, fsutil, importjob, jobs, link, mapping, placement,
 source, store, transfer}` (app wires both); `librivoxjob -> {fsutil, importjob, jobs, link,
-mapping, metaops, netguard, placement, transfer}`; `audiblesync -> {audible, audibleacct, jobs, link, store}`; `transfer -> {fsutil, mapping, progress}`;
+mapping, metaops, netguard, placement, transfer, audiosilo-server/pkg/match}`; `audiblesync -> {audible, audibleacct, jobs, link, store}`; `transfer -> {fsutil, mapping, progress}`;
 `jobs -> {link, store}`; `mapping -> {fsutil, link}`;
 `link`, `agentproto` and `workerproto` are leaves; `workers -> {asr, fsutil,
 scheduler, state, store, transcript, workerproto}`; `worker -> {asr, fsutil, workerproto}`

@@ -42,9 +42,9 @@ const partSuffix = ".part"
 // whole), so a resumed run skips it and goes on with the next, resuming that
 // one's .part with Range/If-Range when its strong ETag was recorded.
 func (h *Handler) download(ctx context.Context, f *fetch, sections []metaops.LibrivoxSection, names []string) error {
-	root, err := os.OpenRoot(f.mount)
+	root, err := f.openRoot()
 	if err != nil {
-		return fail(CodeNotWritable, "The Bridge can't open the library at its mount: %v", err)
+		return err
 	}
 	defer func() { _ = root.Close() }()
 	n := len(sections)
@@ -56,7 +56,7 @@ func (h *Handler) download(ctx context.Context, f *fetch, sections []metaops.Lib
 		}
 		h.report(f.rep, jobs.Progress{Step: StepDownload, Message: fmt.Sprintf("Downloading section %d of %d from archive.org", i+1, n),
 			Done: i, Total: n})
-		if st, err := root.Lstat(path.Join(f.st.Staging, names[i])); err == nil && st.Mode().IsRegular() {
+		if st, err := root.Lstat(path.Join(f.staging(), names[i])); err == nil && st.Mode().IsRegular() {
 			continue
 		}
 		if err := h.section(ctx, root, f, i, s.ListenURL, names[i]); err != nil {
@@ -116,7 +116,7 @@ func (h *Handler) section(ctx context.Context, root *os.Root, f *fetch, i int, r
 // anything unproven starts again. The file is renamed from its .part once it
 // holds the size the response stated.
 func (h *Handler) attempt(ctx context.Context, root *os.Root, f *fetch, i int, rawURL, name string) error {
-	final := path.Join(f.st.Staging, name)
+	final := path.Join(f.staging(), name)
 	part := final + partSuffix
 	offset := int64(0)
 	if st, err := root.Lstat(part); err == nil && st.Mode().IsRegular() {
@@ -128,11 +128,8 @@ func (h *Handler) attempt(ctx context.Context, root *os.Root, f *fetch, i int, r
 	}
 	resp, err := h.o.Fetcher.Stream(ctx, netguard.StreamRequest{URL: rawURL, Offset: offset, ETag: prev.ETag, Allow: AllowedURL})
 	if err != nil {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
 		e := netguard.Classify(err)
-		if retryableCode(e.Code) {
+		if netguard.Retryable(err) {
 			return &retry{retryAfter: e.RetryAfterSeconds, cause: e.Code}
 		}
 		return fail(CodeArchiveUnavailable, "The Bridge can't download section %d of LibriVox recording %d from archive.org (%s).",
@@ -141,14 +138,14 @@ func (h *Handler) attempt(ctx context.Context, root *os.Root, f *fetch, i int, r
 	defer func() { _ = resp.Body.Close() }()
 
 	appending := false
-	total := int64(0)
+	start, total := int64(0), int64(0)
 	switch {
 	case resp.Encoding != "" && resp.Encoding != "identity":
 		return fail(CodeArchiveUnavailable, "archive.org sent section %d of LibriVox recording %d encoded (%s).", i+1, f.p.LibrivoxID, resp.Encoding)
 	case resp.Status == http.StatusOK:
 		total = max(resp.ContentLength, 0)
 	case resp.Status == http.StatusPartialContent && netguard.ResumeAction(offset, prev.Total, prev.ETag, resp) == "append":
-		appending, total = true, prev.Total
+		appending, start, total = true, offset, prev.Total
 	case resp.Status == http.StatusPartialContent, resp.Status == http.StatusRequestedRangeNotSatisfiable:
 		// Not a continuation the Bridge can prove: the partial goes and the
 		// next attempt asks for the whole file.
@@ -163,13 +160,9 @@ func (h *Handler) attempt(ctx context.Context, root *os.Root, f *fetch, i int, r
 	if total > maxFileBytes {
 		return fmt.Errorf("section %d is larger than the Bridge's cap for one file", i+1)
 	}
-	start := int64(0)
-	if appending {
-		start = offset
-	}
 	if total > 0 {
 		need := int64(math.Ceil(transfer.DefaultHeadroom * float64(total-start)))
-		if free, err := h.o.Free(filepath.Join(f.mount, filepath.FromSlash(f.st.Staging))); err == nil && free < need {
+		if free, err := h.o.Free(filepath.Join(f.mount, filepath.FromSlash(f.staging()))); err == nil && free < need {
 			return fail(CodeDiskFull, "The library is short of space for section %d of the recording.", i+1)
 		}
 	}
@@ -222,18 +215,10 @@ func (h *Handler) attempt(ctx context.Context, root *os.Root, f *fetch, i int, r
 	if err := root.Rename(part, final); err != nil {
 		return writeFailure(err, final)
 	}
+	// The file under its own name is the record that it is finished: its
+	// entry goes with the next save.
 	delete(f.st.Files, name)
-	if err := h.saveState(f.p.LibrivoxID, f.st); err != nil {
-		h.o.Log.Warn("librivox: recording a finished section failed", "librivox_id", f.p.LibrivoxID, "err", err)
-	}
 	return nil
-}
-
-// retryableCode reports whether a netguard failure is worth another attempt
-// (a name lookup, a timeout, a dropped connection); a blocked address or host,
-// an invalid URL, a TLS failure or a redirect loop is not.
-func retryableCode(code string) bool {
-	return code == "dns" || code == "timeout" || code == "network"
 }
 
 // writeErr remembers a write's failure, so a failed copy tells the library's
@@ -263,7 +248,7 @@ func (h *Handler) cover(ctx context.Context, f *fetch, book metaops.LibrivoxBook
 		return
 	}
 	defer func() { _ = root.Close() }()
-	if _, err := root.Lstat(path.Join(f.st.Staging, coverName)); err == nil {
+	if _, err := root.Lstat(path.Join(f.staging(), coverName)); err == nil {
 		return
 	}
 	h.report(f.rep, jobs.Progress{Step: StepCover, Message: "Downloading the cover from archive.org"})
@@ -281,7 +266,7 @@ func (h *Handler) cover(ctx context.Context, f *fetch, book metaops.LibrivoxBook
 		log.Info("librivox: the cover isn't a JPEG; the book goes without one")
 		return
 	}
-	if err := fsutil.WriteRootAtomic(root, f.st.Staging, coverName, resp.Body, 0o644, nil); err != nil && !errors.Is(err, fs.ErrExist) {
+	if err := fsutil.WriteRootAtomic(root, f.staging(), coverName, resp.Body, 0o644, nil); err != nil && !errors.Is(err, fs.ErrExist) {
 		log.Warn("librivox: writing the cover failed; the book goes without one", "err", err)
 	}
 }

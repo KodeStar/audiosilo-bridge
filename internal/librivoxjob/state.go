@@ -27,9 +27,8 @@ type state struct {
 	// the staging folder).
 	Parent     string `json:"parent"`
 	MadeParent bool   `json:"made_parent,omitempty"`
-	// Staging is <parent>/.audiosilo-librivox-<id>, Dest the book's folder.
-	Staging string `json:"staging"`
-	Dest    string `json:"dest"`
+	// Dest is the book's folder, directly in Parent (as the staging folder is).
+	Dest string `json:"dest"`
 	// Files is each section's partial download: the strong ETag and the
 	// size its response stated, so a resume asks only for the rest.
 	Files map[string]partState `json:"files,omitempty"`
@@ -49,14 +48,17 @@ type partState struct {
 // never indexes, beside the book's destination so placing it is one rename.
 func stagingName(id int) string { return ".audiosilo-librivox-" + strconv.Itoa(id) }
 
+// staging is the project's staging folder: <parent>/.audiosilo-librivox-<id>.
+func (st *state) staging(id int) string { return path.Join(st.Parent, stagingName(id)) }
+
 // statePath is the project's state file.
 func (h *Handler) statePath(id int) string {
 	return filepath.Join(h.o.StateDir, strconv.Itoa(id)+".json")
 }
 
 // loadState reads the project's state, nil when there is none. One that
-// can't be read, or whose paths aren't this project's staging and a clean
-// library path, goes: the run plans afresh.
+// can't be read, or whose paths aren't clean library paths, goes: the run
+// plans afresh.
 func (h *Handler) loadState(id int) *state {
 	p := h.statePath(id)
 	b, err := os.ReadFile(p) //nolint:gosec // G304: the job's own state in the Bridge's data
@@ -64,18 +66,17 @@ func (h *Handler) loadState(id int) *state {
 		return nil
 	}
 	var st state
-	if json.Unmarshal(b, &st) != nil || !st.valid(id) {
+	if json.Unmarshal(b, &st) != nil || !st.valid() {
 		_ = os.Remove(p)
 		return nil
 	}
 	return &st
 }
 
-// valid reports whether the state's paths are this project's: the staging
-// folder and the destination clean library paths, both directly in Parent,
-// the staging folder named for the project.
-func (st *state) valid(id int) bool {
-	if st.LibraryID <= 0 || path.Base(st.Staging) != stagingName(id) {
+// valid reports whether the state's paths are clean library paths: Parent,
+// and the destination directly in it.
+func (st *state) valid() bool {
+	if st.LibraryID <= 0 {
 		return false
 	}
 	parent := st.Parent
@@ -84,12 +85,8 @@ func (st *state) valid(id int) bool {
 	} else if clean, err := transfer.CleanRel(parent); err != nil || clean != parent {
 		return false
 	}
-	if clean, err := transfer.CleanRel(st.Dest); err != nil || clean != st.Dest || path.Dir(st.Dest) != parent {
-		return false
-	}
-	// The staging folder's own name is a dot name, which CleanRel refuses:
-	// only its folder is checked (it is Parent's).
-	return path.Dir(st.Staging) == parent
+	clean, err := transfer.CleanRel(st.Dest)
+	return err == nil && clean == st.Dest && path.Dir(st.Dest) == parent
 }
 
 // saveState writes the project's state.
