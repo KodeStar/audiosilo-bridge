@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -14,13 +15,21 @@ type StreamRequest struct {
 	URL    string
 	Offset int64
 	ETag   string
+	// Allow, when set, is asked about the first URL and every redirect's: a
+	// URL it refuses fails the request as blocked_host before it is sent
+	// (librivox.fetch: archive.org over https only). The address checks apply
+	// either way.
+	Allow func(*url.URL) bool
 }
 type StreamResponse struct {
-	Status            int
-	Body              io.ReadCloser
-	ContentLength     int64
-	ContentRange      string
-	Encoding          string
+	Status        int
+	Body          io.ReadCloser
+	ContentLength int64
+	ContentRange  string
+	Encoding      string
+	// ContentType is the response's Content-Type as sent (librivox.fetch
+	// refuses a page where a file was asked for).
+	ContentType       string
 	ETag              string
 	RetryAfterSeconds int
 }
@@ -31,6 +40,9 @@ func (c *Client) Stream(ctx context.Context, in StreamRequest) (*StreamResponse,
 	if !validURL(in.URL) {
 		return nil, &Error{Code: "invalid_feed_url", Message: "The episode address is invalid."}
 	}
+	if !allowedBy(in.Allow, in.URL) {
+		return nil, blockedHost()
+	}
 	ctx, cancel := context.WithCancel(ctx)
 	hc := &http.Client{Transport: c.transport, CheckRedirect: func(req *http.Request, via []*http.Request) error {
 		if len(via) > 10 {
@@ -38,6 +50,9 @@ func (c *Client) Stream(ctx context.Context, in StreamRequest) (*StreamResponse,
 		}
 		if !validURL(req.URL.String()) {
 			return &Error{Code: "invalid_feed_url", Message: "The episode redirected to an invalid address."}
+		}
+		if !allows(in.Allow, req.URL) {
+			return blockedHost()
 		}
 		stripRedirectCredentials(req, via)
 		return nil
@@ -60,7 +75,7 @@ func (c *Client) Stream(ctx context.Context, in StreamRequest) (*StreamResponse,
 	}
 	timer := time.AfterFunc(c.stall, cancel)
 	body := &streamBody{progressReader: progressReader{r: resp.Body, timer: timer, stall: c.stall}, body: resp.Body, cancel: cancel}
-	return &StreamResponse{Status: resp.StatusCode, Body: body, ContentLength: resp.ContentLength, ContentRange: resp.Header.Get("Content-Range"), Encoding: strings.ToLower(strings.TrimSpace(resp.Header.Get("Content-Encoding"))), ETag: resp.Header.Get("ETag"), RetryAfterSeconds: retryAfter(resp.Header.Get("Retry-After"), time.Now())}, nil
+	return &StreamResponse{Status: resp.StatusCode, Body: body, ContentLength: resp.ContentLength, ContentRange: resp.Header.Get("Content-Range"), Encoding: strings.ToLower(strings.TrimSpace(resp.Header.Get("Content-Encoding"))), ContentType: resp.Header.Get("Content-Type"), ETag: resp.Header.Get("ETag"), RetryAfterSeconds: retryAfter(resp.Header.Get("Retry-After"), time.Now())}, nil
 }
 
 // streamBody resets the stall timer on progress (progressReader) and ends the

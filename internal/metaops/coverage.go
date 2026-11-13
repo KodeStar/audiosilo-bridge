@@ -577,6 +577,45 @@ func (c *Client) lookup(ctx context.Context, kind, value string) (workID string,
 	return v.workID, v.found, true
 }
 
+// workPayload is the works/{id} payload, the fields this package reads: its
+// ONE mirror (workDetail's cached projection and LibrivoxWork's both decode it).
+type workPayload struct {
+	ID      string `json:"id"`
+	Title   string `json:"title"`
+	Authors []struct {
+		Name string `json:"name"`
+	} `json:"authors"`
+	Series []SeriesRef `json:"series"`
+	// Characters carries the names too, not just presence: SeriesGlossary needs
+	// them, and decoding them here keeps one cache entry per work (a sibling of
+	// the book being processed is usually already warm from the coverage path).
+	Characters []struct {
+		Name    string   `json:"name"`
+		Aliases []string `json:"aliases"`
+	} `json:"characters"`
+	Recaps     []json.RawMessage `json:"recaps"`
+	Recordings []struct {
+		ID        string `json:"id"`
+		Narrators []struct {
+			Name string `json:"name"`
+		} `json:"narrators"`
+		RuntimeMin int          `json:"runtime_min"`
+		ASINs      []RegionASIN `json:"asin"`
+		ISBNs      []string     `json:"isbn"`
+		// LibrivoxID and ArchiveID: the recording's LibriVox project and its
+		// Internet Archive item (librivox.go).
+		LibrivoxID int    `json:"librivox_id"`
+		ArchiveID  string `json:"archive_id"`
+	} `json:"recordings"`
+}
+
+// fetchWork reads works/{id}, uncached. found=false is a clean 404; ok=false a
+// transport failure.
+func (c *Client) fetchWork(ctx context.Context, workID string) (res workPayload, found, ok bool) {
+	found, ok = c.getJSON(ctx, "/api/v1/works/"+url.PathEscape(workID), &res)
+	return res, found, ok
+}
+
 // workDetail fetches a work's title + sidecar presence, cached per work. Sidecar
 // keys are omitempty on the wire, so a present, non-empty array means the work
 // carries that sidecar. found=false is a clean 404; ok=false is a transport
@@ -585,30 +624,7 @@ func (c *Client) workDetail(ctx context.Context, workID string) (v workVal, foun
 	if cached, hit := c.works.get(workID); hit {
 		return cached, true, true
 	}
-	var res struct {
-		ID     string      `json:"id"`
-		Title  string      `json:"title"`
-		Series []SeriesRef `json:"series"`
-		// Characters carries the names too, not just presence: SeriesGlossary needs
-		// them, and decoding them here keeps ONE mirror of the works/{id} payload
-		// and one cache entry per work (a sibling of the book being processed is
-		// usually already warm from the coverage path).
-		Characters []struct {
-			Name    string   `json:"name"`
-			Aliases []string `json:"aliases"`
-		} `json:"characters"`
-		Recaps     []json.RawMessage `json:"recaps"`
-		Recordings []struct {
-			ID        string `json:"id"`
-			Narrators []struct {
-				Name string `json:"name"`
-			} `json:"narrators"`
-			RuntimeMin int          `json:"runtime_min"`
-			ASINs      []RegionASIN `json:"asin"`
-			ISBNs      []string     `json:"isbn"`
-		} `json:"recordings"`
-	}
-	f, okc := c.getJSON(ctx, "/api/v1/works/"+url.PathEscape(workID), &res)
+	res, f, okc := c.fetchWork(ctx, workID)
 	if !okc {
 		return workVal{}, false, false
 	}

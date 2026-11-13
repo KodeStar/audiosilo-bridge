@@ -57,6 +57,7 @@ const KIND_LABELS: Record<string, string> = {
   'podcast.fetch': 'Fetching an episode',
   'podcast.retain': 'Checking retained episodes',
   'audible.poll': 'Checking an Audible library',
+  'librivox.fetch': 'Adding from LibriVox',
 };
 
 // kindLabel words a job kind ("" for one with no label: the kind shows as it is).

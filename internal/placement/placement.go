@@ -97,7 +97,7 @@ func Suggest(in Input) Suggestion {
 
 func standalone(in Input) Suggestion {
 	return Suggestion{
-		RelPath:  authorSegment(in) + "/" + sanitize(in.Title),
+		RelPath:  authorSegment(in) + "/" + Sanitize(in.Title),
 		Filename: in.Filename,
 		Kind:     Standalone,
 		Note:     "no series - placed directly under the author",
@@ -111,7 +111,7 @@ func authorSegment(in Input) string {
 	if in.AuthorFolder != "" {
 		return in.AuthorFolder
 	}
-	return sanitize(in.Author)
+	return Sanitize(in.Author)
 }
 
 func seriesWithSiblings(in Input) Suggestion {
@@ -155,7 +155,7 @@ func seriesNew(in Input) Suggestion {
 	}
 	prefix := guessShortcode(in.SeriesName)
 	leaf := buildLeaf(prefix, 2, in)
-	rel := authorSegment(in) + "/" + sanitize(in.SeriesName) + "/" + leaf
+	rel := authorSegment(in) + "/" + Sanitize(in.SeriesName) + "/" + leaf
 	return Suggestion{
 		RelPath:  rel,
 		Filename: in.Filename,
@@ -168,10 +168,10 @@ func seriesNew(in Input) Suggestion {
 // sequence it falls back to just the title (still inside its own folder).
 func buildLeaf(prefix string, width int, in Input) string {
 	if !in.HasSequence {
-		return sanitize(in.Title)
+		return Sanitize(in.Title)
 	}
 	num := formatSequence(in.Sequence, width)
-	return sanitize(prefix + num + " - " + in.Title)
+	return Sanitize(prefix + num + " - " + in.Title)
 }
 
 // bareTitle reports whether a cleaned title has nothing of its own to name a folder
@@ -416,11 +416,12 @@ var stopwords = map[string]bool{
 	"to": true, "in": true,
 }
 
-// sanitize makes a path segment safe to create on disk without mangling the
+// Sanitize makes a path segment safe to create on disk without mangling the
 // punctuation that real library folders use (apostrophes, commas, periods).
 // A leading dot goes too ("...And Ladies of the Club", ".hack"): a hidden
-// name is never indexed by the server's scan.
-func sanitize(s string) string {
+// name is never indexed by the server's scan. librivox.fetch names its
+// section files with it too, so a book's folder and its files follow one rule.
+func Sanitize(s string) string {
 	s = strings.TrimSpace(s)
 	replacer := strings.NewReplacer("/", "-", "\\", "-", ":", " -", "\x00", "")
 	s = replacer.Replace(s)

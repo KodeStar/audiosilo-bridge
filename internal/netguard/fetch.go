@@ -31,6 +31,9 @@ type Request struct {
 	ETag         string
 	LastModified string
 	MaxBytes     int64
+	// Allow is StreamRequest.Allow: asked about the first URL and every
+	// redirect's, a refusal fails the request as blocked_host.
+	Allow func(*url.URL) bool
 }
 type Response struct {
 	Status       int
@@ -62,6 +65,9 @@ func (c *Client) Fetch(ctx context.Context, in Request) (*Response, error) {
 	if in.MaxBytes <= 0 {
 		return nil, &Error{Code: "too_large", Message: "The response size limit is invalid."}
 	}
+	if !allowedBy(in.Allow, in.URL) {
+		return nil, blockedHost()
+	}
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Minute)
 	defer cancel()
 	for attempt := 0; ; attempt++ {
@@ -92,6 +98,9 @@ func (c *Client) once(ctx context.Context, in Request) (*Response, error) {
 		}
 		if !validURL(req.URL.String()) {
 			return &Error{Code: "invalid_feed_url", Message: "The feed redirected to an invalid URL."}
+		}
+		if !allows(in.Allow, req.URL) {
+			return blockedHost()
 		}
 		stripRedirectCredentials(req, via)
 		redirected = true
