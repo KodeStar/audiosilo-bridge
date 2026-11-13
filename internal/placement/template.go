@@ -224,7 +224,7 @@ func (t *Template) Render(v Vars) (string, error) {
 	parts := strings.Split(sb.String(), "/")
 	out := make([]string, 0, len(parts))
 	for _, p := range parts {
-		if s := sanitize(p); s != "" {
+		if s := Sanitize(p); s != "" {
 			out = append(out, s)
 		}
 	}

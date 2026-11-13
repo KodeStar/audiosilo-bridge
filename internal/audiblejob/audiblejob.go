@@ -39,9 +39,6 @@ import (
 // Kind is the job kind.
 const Kind = "audible.poll"
 
-// maxBookPages bounds the library listing (500 books a page: a million books).
-const maxBookPages = 2000
-
 // maxRuntime is the longest runtime the server takes (seconds).
 const maxRuntime = 1_000_000
 
@@ -457,30 +454,12 @@ func (h *Handler) refused(ctx context.Context, id string) *Failure {
 	return fail(CodeSignIn, "Audible refused the account's sign-in: the next check tries again, or sign in again on the Bridge's Accounts tab.")
 }
 
-// bookLister reads a library's books page by page (Server and ImportServer).
-type bookLister interface {
-	LibraryBooks(ctx context.Context, libraryID int64, after string, limit int) (*link.LibraryBooks, error)
-}
-
-// allBooks reads every page of the library's books.
-func allBooks(ctx context.Context, srv bookLister, libraryID int64) ([]link.LibraryBook, error) {
+// allBooks reads every page of the account's library's books.
+func allBooks(ctx context.Context, srv importjob.BookLister, libraryID int64) ([]link.LibraryBook, error) {
 	if libraryID <= 0 {
 		return nil, errors.New("the account has no library: map it again on the Bridge's Accounts tab")
 	}
-	var books []link.LibraryBook
-	after := ""
-	for range maxBookPages {
-		page, err := srv.LibraryBooks(ctx, libraryID, after, link.MaxLibraryBooks)
-		if err != nil {
-			return nil, err
-		}
-		books = append(books, page.Books...)
-		if page.Next == "" || page.Next == after {
-			return books, nil
-		}
-		after = page.Next
-	}
-	return nil, fmt.Errorf("the library has more than %d pages of books", maxBookPages)
+	return importjob.AllBooks(ctx, srv, libraryID)
 }
 
 // title is a record as the poll reports it.
