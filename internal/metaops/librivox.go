@@ -22,8 +22,8 @@ var ErrNotFound = errors.New("not found in the metadata database")
 var ErrUnavailable = errors.New("the metadata service is unavailable")
 
 // LibrivoxBook is one project of the LibriVox-shaped feed, the fields a fetch
-// reads. LibriVox's ids, section numbers and playtimes are strings, and
-// coverart_jpg is null when the project states none.
+// reads. LibriVox's ids are strings, and coverart_jpg is null when the project
+// states none.
 type LibrivoxBook struct {
 	ID          string            `json:"id"`
 	Title       string            `json:"title"`
@@ -47,10 +47,8 @@ func (p LibrivoxPerson) Name() string {
 
 // LibrivoxSection is one section (one file) of a project.
 type LibrivoxSection struct {
-	SectionNumber string `json:"section_number"`
-	Title         string `json:"title"`
-	ListenURL     string `json:"listen_url"`
-	Playtime      string `json:"playtime"`
+	Title     string `json:"title"`
+	ListenURL string `json:"listen_url"`
 }
 
 // librivoxDetails is the prefix the feed states url_iarchive with.
@@ -83,13 +81,8 @@ func (c *Client) LibrivoxAudiobook(ctx context.Context, id int) (LibrivoxBook, e
 		Books []LibrivoxBook `json:"books"`
 	}
 	found, ok := c.getJSON(ctx, "/api/v1/librivox/audiobooks?"+q.Encode(), &res)
-	switch {
-	case ctx.Err() != nil:
-		return LibrivoxBook{}, ctx.Err()
-	case !ok:
-		return LibrivoxBook{}, ErrUnavailable
-	case !found:
-		return LibrivoxBook{}, ErrNotFound
+	if err := readErr(ctx, found, ok); err != nil {
+		return LibrivoxBook{}, err
 	}
 	for _, b := range res.Books {
 		if b.ID == strconv.Itoa(id) {
@@ -102,7 +95,6 @@ func (c *Client) LibrivoxAudiobook(ctx context.Context, id int) (LibrivoxBook, e
 // LibrivoxWork is a work as a fetch reads it: its title, its authors' names
 // and its recordings' LibriVox identities.
 type LibrivoxWork struct {
-	ID         string
 	Title      string
 	Authors    []string
 	Recordings []LibrivoxRecording
@@ -128,34 +120,31 @@ func (w LibrivoxWork) LibrivoxCount() int {
 	return n
 }
 
+// readErr is a getJSON outcome as these reads' error: the caller's cancel,
+// ErrUnavailable, ErrNotFound, or nil.
+func readErr(ctx context.Context, found, ok bool) error {
+	switch {
+	case ctx.Err() != nil:
+		return ctx.Err()
+	case !ok:
+		return ErrUnavailable
+	case !found:
+		return ErrNotFound
+	}
+	return nil
+}
+
 // LibrivoxWork reads a work for a LibriVox fetch. ErrDisabled, ErrNotFound and
 // ErrUnavailable as LibrivoxAudiobook's.
 func (c *Client) LibrivoxWork(ctx context.Context, workID string) (LibrivoxWork, error) {
 	if !c.Enabled() {
 		return LibrivoxWork{}, ErrDisabled
 	}
-	var res struct {
-		ID      string `json:"id"`
-		Title   string `json:"title"`
-		Authors []struct {
-			Name string `json:"name"`
-		} `json:"authors"`
-		Recordings []struct {
-			ID         string `json:"id"`
-			LibrivoxID int    `json:"librivox_id"`
-			ArchiveID  string `json:"archive_id"`
-		} `json:"recordings"`
+	res, found, ok := c.fetchWork(ctx, workID)
+	if err := readErr(ctx, found, ok); err != nil {
+		return LibrivoxWork{}, err
 	}
-	found, ok := c.getJSON(ctx, "/api/v1/works/"+url.PathEscape(workID), &res)
-	switch {
-	case ctx.Err() != nil:
-		return LibrivoxWork{}, ctx.Err()
-	case !ok:
-		return LibrivoxWork{}, ErrUnavailable
-	case !found:
-		return LibrivoxWork{}, ErrNotFound
-	}
-	w := LibrivoxWork{ID: res.ID, Title: res.Title}
+	w := LibrivoxWork{Title: res.Title}
 	for _, a := range res.Authors {
 		if name := strings.TrimSpace(a.Name); name != "" {
 			w.Authors = append(w.Authors, name)

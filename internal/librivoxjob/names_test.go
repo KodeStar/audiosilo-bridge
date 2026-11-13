@@ -94,11 +94,11 @@ func TestDestination(t *testing.T) {
 
 func TestSectionNames(t *testing.T) {
 	sections := []metaops.LibrivoxSection{
-		{SectionNumber: "0", Title: "Introduction", ListenURL: "https://archive.org/download/x/intro_64kb.mp3"},
-		{SectionNumber: "1", Title: "", ListenURL: "https://archive.org/download/x/one.ogg"},
-		{SectionNumber: "2", Title: "../../escape", ListenURL: "https://archive.org/download/x/two"},
-		{SectionNumber: "3", Title: ".hidden", ListenURL: "https://archive.org/download/x/three.MP3?x=1"},
-		{SectionNumber: "4", Title: strings.Repeat("w", 400), ListenURL: "https://archive.org/download/x/four.exe"},
+		{Title: "Introduction", ListenURL: "https://archive.org/download/x/intro_64kb.mp3"},
+		{Title: "", ListenURL: "https://archive.org/download/x/one.ogg"},
+		{Title: "../../escape", ListenURL: "https://archive.org/download/x/two"},
+		{Title: ".hidden", ListenURL: "https://archive.org/download/x/three.MP3?x=1"},
+		{Title: strings.Repeat("w", 400), ListenURL: "https://archive.org/download/x/four.exe"},
 	}
 	got := sectionNames(sections)
 	want := []string{

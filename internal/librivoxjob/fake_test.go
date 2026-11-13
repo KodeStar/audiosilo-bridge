@@ -82,21 +82,19 @@ func (f *fakeFetcher) seen() []request {
 }
 
 func (f *fakeFetcher) resolve(raw string, allow func(*url.URL) bool) (*remote, error) {
-	for _, at := range []string{raw} {
+	refused := func(at string) bool {
 		u, err := url.Parse(at)
-		if err != nil || (allow != nil && !allow(u)) {
-			return nil, &netguard.Error{Code: "blocked_host", Message: "blocked"}
-		}
+		return err != nil || (allow != nil && !allow(u))
+	}
+	if refused(raw) {
+		return nil, &netguard.Error{Code: "blocked_host", Message: "blocked"}
 	}
 	r := f.files[raw]
 	if r == nil {
 		return &remote{status: http.StatusNotFound}, nil
 	}
-	if r.redirect != "" {
-		u, err := url.Parse(r.redirect)
-		if err != nil || (allow != nil && !allow(u)) {
-			return nil, &netguard.Error{Code: "blocked_host", Message: "blocked"}
-		}
+	if r.redirect != "" && refused(r.redirect) {
+		return nil, &netguard.Error{Code: "blocked_host", Message: "blocked"}
 	}
 	return r, nil
 }
@@ -260,11 +258,11 @@ func newHarness(t *testing.T) *harness {
 			Authors:     []metaops.LibrivoxPerson{{FirstName: "L. Leslie", LastName: "Brooke"}},
 			URLIArchive: "https://www.archive.org/details/" + testItem, CoverartJPG: &cover,
 			Sections: []metaops.LibrivoxSection{
-				{SectionNumber: "1", Title: "Johnny Crow's Garden", ListenURL: sectionURL(1)},
-				{SectionNumber: "2", Title: "Johnny Crow's Party", ListenURL: sectionURL(2)},
-				{SectionNumber: "3", Title: "Johnny Crow's New Garden", ListenURL: sectionURL(3)},
+				{Title: "Johnny Crow's Garden", ListenURL: sectionURL(1)},
+				{Title: "Johnny Crow's Party", ListenURL: sectionURL(2)},
+				{Title: "Johnny Crow's New Garden", ListenURL: sectionURL(3)},
 			}},
-		work: metaops.LibrivoxWork{ID: testWork, Title: testTitle, Authors: []string{testAuthor},
+		work: metaops.LibrivoxWork{Title: testTitle, Authors: []string{testAuthor},
 			Recordings: []metaops.LibrivoxRecording{{ID: testRec, LibrivoxID: testID, ArchiveID: testItem}}},
 	}
 	x.fetch = &fakeFetcher{files: map[string]*remote{
