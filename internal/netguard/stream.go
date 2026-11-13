@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -14,6 +15,11 @@ type StreamRequest struct {
 	URL    string
 	Offset int64
 	ETag   string
+	// Allow, when set, is asked about the first URL and every redirect's: a
+	// URL it refuses fails the request as blocked_host before it is sent
+	// (librivox.fetch: archive.org over https only). The address checks apply
+	// either way.
+	Allow func(*url.URL) bool
 }
 type StreamResponse struct {
 	Status            int
@@ -31,6 +37,9 @@ func (c *Client) Stream(ctx context.Context, in StreamRequest) (*StreamResponse,
 	if !validURL(in.URL) {
 		return nil, &Error{Code: "invalid_feed_url", Message: "The episode address is invalid."}
 	}
+	if !allowedBy(in.Allow, in.URL) {
+		return nil, blockedHost()
+	}
 	ctx, cancel := context.WithCancel(ctx)
 	hc := &http.Client{Transport: c.transport, CheckRedirect: func(req *http.Request, via []*http.Request) error {
 		if len(via) > 10 {
@@ -38,6 +47,9 @@ func (c *Client) Stream(ctx context.Context, in StreamRequest) (*StreamResponse,
 		}
 		if !validURL(req.URL.String()) {
 			return &Error{Code: "invalid_feed_url", Message: "The episode redirected to an invalid address."}
+		}
+		if in.Allow != nil && !in.Allow(req.URL) {
+			return blockedHost()
 		}
 		stripRedirectCredentials(req, via)
 		return nil

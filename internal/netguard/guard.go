@@ -130,6 +130,21 @@ func (c *Client) dial(ctx context.Context, network, address string) (net.Conn, e
 	return nil, err
 }
 
+// allowedBy reports whether allow (nil: every URL) admits raw.
+func allowedBy(allow func(*url.URL) bool, raw string) bool {
+	if allow == nil {
+		return true
+	}
+	u, err := url.Parse(raw)
+	return err == nil && allow(u)
+}
+
+// blockedHost is a request's failure when its Allow refused a URL, the first
+// or a redirect's.
+func blockedHost() *Error {
+	return &Error{Code: "blocked_host", Message: "The address is not on the hosts this request may reach."}
+}
+
 func validURL(raw string) bool {
 	u, err := url.Parse(raw)
 	return err == nil && u.Hostname() != "" && (u.Scheme == "http" || u.Scheme == "https")
