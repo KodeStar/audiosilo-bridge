@@ -175,6 +175,14 @@ func (h *Handler) attempt(ctx context.Context, root *os.Root, f *fetch, i int, r
 	if total > maxFileBytes {
 		return fmt.Errorf("section %d is larger than the Bridge's cap for one file", i+1)
 	}
+	// A body from its start replaces the partial, which goes before the new
+	// validators are recorded: a stop between the two must never leave the old
+	// bytes under validators that would prove a later 206 continues them.
+	if !appending {
+		if err := root.Remove(part); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return writeFailure(err, part)
+		}
+	}
 	if total > 0 {
 		need := int64(math.Ceil(transfer.DefaultHeadroom * float64(total-start)))
 		if free, err := h.o.Free(filepath.Join(f.mount, filepath.FromSlash(f.staging()))); err == nil && free < need {
@@ -186,8 +194,10 @@ func (h *Handler) attempt(ctx context.Context, root *os.Root, f *fetch, i int, r
 	if f.st.Files == nil {
 		f.st.Files = map[string]partState{}
 	}
+	// The ETag only beside a stated size: without one no 206 could be proven
+	// to continue the partial, so the next attempt asks for the whole file.
 	ps := partState{Total: total}
-	if netguard.StrongETag(resp.ETag) {
+	if total > 0 && netguard.StrongETag(resp.ETag) {
 		ps.ETag = resp.ETag
 	}
 	f.st.Files[name] = ps

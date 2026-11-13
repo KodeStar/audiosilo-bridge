@@ -723,3 +723,40 @@ func TestFetchRestartsNeverPassingTheirBestFail(t *testing.T) {
 		t.Fatalf("%d cuts left: three attempts in a row that add nothing end the section", left)
 	}
 }
+
+// A body from its start drops the old partial before its validators are
+// recorded: a stop between the two can't leave the old bytes under the new
+// ETag, which would prove a later 206 continues them.
+func TestFetchRestartDropsPartialBeforeValidators(t *testing.T) {
+	x := newHarness(t)
+	ctx, stop := context.WithCancel(context.Background())
+	x.fetch.files[sectionURL(2)].cut = []int{700}
+	x.fetch.files[sectionURL(2)].onCut = stop
+	if _, err := x.run(ctx, false); !errors.Is(err, context.Canceled) {
+		t.Fatalf("first run: %v", err)
+	}
+	part := stagingDir + "/02 - Johnny Crow's Party.mp3.part"
+	if !x.exists(part) {
+		t.Fatal("no partial to restart")
+	}
+	// The file changed on archive.org: the resume's If-Range gets the whole
+	// new file under a new ETag.
+	x.fetch.files[sectionURL(2)] = &remote{body: bytes.Repeat([]byte("n"), 2000), etag: `"etag-2b"`}
+	checked := false
+	x.h.o.Free = func(string) (int64, error) {
+		if !checked { // the restarted section's attempt, before its state is saved
+			checked = true
+			if x.exists(part) {
+				t.Error("the old partial was still there when the new validators were recorded")
+			}
+		}
+		return x.free, nil
+	}
+	if _, err := x.run(context.Background(), true); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := os.ReadFile(x.path(bookDir + "/02 - Johnny Crow's Party.mp3"))
+	if !checked || !bytes.Equal(got, x.fetch.files[sectionURL(2)].body) {
+		t.Fatalf("restarted file %d bytes, checked %v", len(got), checked)
+	}
+}
