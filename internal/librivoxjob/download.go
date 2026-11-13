@@ -296,25 +296,33 @@ func audioType(contentType string) bool {
 
 // audioHead reports whether a finished section's first bytes are audio: an
 // ID3 tag or an MPEG frame sync (LibriVox's MP3s), else the Ogg, FLAC or MP4
-// signature a section of another extension starts with.
+// signature a section of another extension starts with. Zero bytes before
+// the tag or the first frame (padding some encoders leave) are skipped within
+// the first headWindow bytes.
 func audioHead(root *os.Root, name string) bool {
 	file, err := root.Open(name)
 	if err != nil {
 		return false
 	}
 	defer func() { _ = file.Close() }()
-	head := make([]byte, 12)
+	head := make([]byte, headWindow)
 	n, _ := io.ReadFull(file, head)
 	return isAudioHead(head[:n])
 }
 
+// headWindow bounds how far audioHead looks past leading zero padding.
+const headWindow = 4096
+
 func isAudioHead(b []byte) bool {
+	if len(b) >= 8 && string(b[4:8]) == "ftyp" {
+		// MP4's box size leads with zero bytes: checked before the padding goes.
+		return true
+	}
+	b = bytes.TrimLeft(b, "\x00")
 	switch {
 	case bytes.HasPrefix(b, []byte("ID3")), bytes.HasPrefix(b, []byte("OggS")), bytes.HasPrefix(b, []byte("fLaC")):
 		return true
 	case len(b) >= 2 && b[0] == 0xFF && b[1]&0xE0 == 0xE0:
-		return true
-	case len(b) >= 8 && string(b[4:8]) == "ftyp":
 		return true
 	}
 	return false

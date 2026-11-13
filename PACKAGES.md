@@ -2654,8 +2654,9 @@ internal/
             unproven starts the file again), renamed to its name only at the
             stated size and never empty, and only audio (a Content-Type other
             than none, audio/*, octet-stream or application/ogg is never written;
-            a whole file whose first bytes are no ID3 tag, MPEG frame sync, OggS,
-            fLaC or MP4 ftyp is removed; both tried again like a dropped
+            a whole file whose first bytes (past zero padding in its first 4 KB)
+            are no ID3 tag, MPEG frame sync, OggS, fLaC or MP4 ftyp is removed;
+            both tried again like a dropped
             connection, then archive_unavailable; a finished file is skipped on
             resume);
             three attempts in a row that add nothing fail archive_unavailable

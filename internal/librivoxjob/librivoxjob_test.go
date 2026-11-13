@@ -1003,6 +1003,7 @@ func TestAudioChecks(t *testing.T) {
 	for head, want := range map[string]bool{
 		"ID3\x04": true, "\xFF\xFB\x90": true, "\xFF\xF3": true, "OggS": true, "fLaC": true, "\x00\x00\x00\x20ftypM4A ": true,
 		"<html>": false, "": false, "\xFF\x00": false, "x": false,
+		"\x00\x00\x00\xFF\xFB\x90": true, "\x00\x00ID3\x03": true, "\x00\x00\x00\x00": false, "\x00\x00<!DO": false,
 	} {
 		if got := isAudioHead([]byte(head)); got != want {
 			t.Errorf("isAudioHead(%q) = %v", head, got)
