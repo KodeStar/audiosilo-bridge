@@ -197,9 +197,9 @@ const mappingPoll = time.Second
 
 // Abandon removes the staging folder of a job the runner ended without
 // running it (cancelled before it resumed). A lost claim keeps it: the server
-// hands the job out again and the next claim resumes it. A placed book stays,
-// and so does a state for another library: the state is the project's, not
-// the job's, and that one is a later fetch's.
+// hands the job out again and the next claim resumes it. A placed book stays.
+// The state is the job's library's alone, so a fetch of the same project
+// into another library is never touched.
 func (h *Handler) Abandon(ctx context.Context, job jobs.Job) {
 	if jobs.Lost(ctx) {
 		return
@@ -208,22 +208,16 @@ func (h *Handler) Abandon(ctx context.Context, job jobs.Job) {
 	if err != nil {
 		return
 	}
-	st := h.loadState(p.LibrivoxID)
-	if st == nil || st.Placed || st.LibraryID != p.LibraryID {
+	st := h.loadState(p.LibraryID, p.LibrivoxID)
+	if st == nil || st.Placed {
 		return
 	}
-	h.discard(p.LibrivoxID, st)
-}
-
-// discard removes a fetch's staging folder from the library its state names
-// (best effort) and the state.
-func (h *Handler) discard(id int, st *state) {
 	if lib, ok := h.o.Libraries.Library(st.LibraryID); ok {
 		if mount, _ := h.o.Mount(lib.ID, lib.Root); mount != "" {
-			h.removeStaging(mount, id, st)
+			h.removeStaging(mount, p.LibrivoxID, st)
 		}
 	}
-	h.dropState(id)
+	h.dropState(st.LibraryID, p.LibrivoxID)
 }
 
 // Run fetches the recording: manifest, download, cover, place, rescan.
@@ -279,29 +273,21 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, p Params, rep *jobs.Rep
 	if err != nil {
 		return nil, err
 	}
-	f := &fetch{p: p, lib: lib, mount: mount, rep: rep, st: h.loadState(p.LibrivoxID)}
-	if f.st != nil && f.st.LibraryID != lib.ID {
-		// An earlier fetch of the project for another library: its staging
-		// folder goes (best effort; a book it placed stays), and this one plans
-		// afresh.
-		if !f.st.Placed {
-			h.discard(p.LibrivoxID, f.st)
-		}
-		f.st = nil
-	}
+	f := &fetch{p: p, lib: lib, mount: mount, rep: rep, st: h.loadState(lib.ID, p.LibrivoxID)}
 	defer func() {
 		// A stop the next start resumes, and a lost claim the server hands out
 		// again, keep the staging folder and the state; a cancel or a failure
 		// before the book was placed removes both. A placed book stays, and its
 		// state with it when the rescan failed (the retry goes on from there).
-		if err == nil || f.st == nil || f.st.Placed {
+		var keep *keepStaging
+		if err == nil || f.st == nil || f.st.Placed || errors.As(err, &keep) {
 			return
 		}
 		if ctx.Err() != nil && (jobs.Resumes(ctx) || jobs.Lost(ctx)) {
 			return
 		}
 		h.removeStaging(f.mount, p.LibrivoxID, f.st)
-		h.dropState(p.LibrivoxID)
+		h.dropState(lib.ID, p.LibrivoxID)
 	}()
 
 	// An earlier run placed the book and then failed (the rescan): while its
@@ -313,12 +299,12 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, p Params, rep *jobs.Rep
 		if h.holdsProject(mount, f.st.Dest, p.LibrivoxID) {
 			return h.finish(ctx, f, srv)
 		}
-		h.dropState(p.LibrivoxID)
+		h.dropState(lib.ID, p.LibrivoxID)
 		f.st = nil
 	}
 
 	h.report(rep, jobs.Progress{Step: StepManifest, Message: "Reading the recording from the metadata database"})
-	book, work, err := h.manifest(ctx, p)
+	book, work, err := h.manifest(ctx, p, rep)
 	if err != nil {
 		return nil, err
 	}
@@ -359,14 +345,19 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, p Params, rep *jobs.Rep
 // manifest reads the project's manifest and its work from meta. A work meta
 // doesn't have (another meta base than the server's, decision 5) is no
 // failure: the project names the folder then.
-func (h *Handler) manifest(ctx context.Context, p Params) (metaops.LibrivoxBook, *metaops.LibrivoxWork, error) {
+//
+// meta unavailable (a 5xx, a dropped connection) is never terminal: each read
+// is tried metaAttempts times, and still unavailable the run fails with a
+// keepStaging error, which keeps the staging folder and the state for the
+// next attempt. Only meta's definite 404 (not_found) ends the fetch.
+func (h *Handler) manifest(ctx context.Context, p Params, rep *jobs.Reporter) (metaops.LibrivoxBook, *metaops.LibrivoxWork, error) {
 	metadataOff := func() error {
 		return fail(CodeMetadataOff, "The Bridge has no metadata service set (metadata.base_url), so it can't read LibriVox recordings.")
 	}
 	if h.o.Meta == nil {
 		return metaops.LibrivoxBook{}, nil, metadataOff()
 	}
-	book, err := h.o.Meta.LibrivoxAudiobook(ctx, p.LibrivoxID)
+	book, err := metaRead(ctx, h, rep, func() (metaops.LibrivoxBook, error) { return h.o.Meta.LibrivoxAudiobook(ctx, p.LibrivoxID) })
 	switch {
 	case errors.Is(err, metaops.ErrDisabled):
 		return book, nil, metadataOff()
@@ -382,7 +373,7 @@ func (h *Handler) manifest(ctx context.Context, p Params) (metaops.LibrivoxBook,
 			return book, nil, fail(CodeArchiveUnavailable, "Section %d of LibriVox recording %d isn't a file on archive.org, the only place the Bridge downloads LibriVox from.", i+1, p.LibrivoxID)
 		}
 	}
-	w, err := h.o.Meta.LibrivoxWork(ctx, p.WorkID)
+	w, err := metaRead(ctx, h, rep, func() (metaops.LibrivoxWork, error) { return h.o.Meta.LibrivoxWork(ctx, p.WorkID) })
 	switch {
 	case errors.Is(err, metaops.ErrNotFound):
 		return book, nil, nil
@@ -396,6 +387,42 @@ func (h *Handler) manifest(ctx context.Context, p Params) (metaops.LibrivoxBook,
 		}
 	}
 	return book, &w, nil
+}
+
+// metaAttempts bounds one meta read while meta is unavailable; metaWait is
+// the first wait between two, doubled each time (5 s, 10 s, 20 s).
+const (
+	metaAttempts = 4
+	metaWait     = 5 * time.Second
+)
+
+// keepStaging is a run's failure that leaves the staging folder and the state
+// for the next attempt (meta unavailable): nothing the fetch holds is wrong.
+type keepStaging struct{ err error }
+
+func (k *keepStaging) Error() string { return k.err.Error() }
+func (k *keepStaging) Unwrap() error { return k.err }
+
+// metaRead is read, tried again while meta is unavailable
+// (metaops.ErrUnavailable); still unavailable after metaAttempts, the error is
+// a keepStaging. Any other answer (a 404, metadata off, the context) is
+// returned at once.
+func metaRead[T any](ctx context.Context, h *Handler, rep *jobs.Reporter, read func() (T, error)) (T, error) {
+	wait := metaWait
+	for attempt := 1; ; attempt++ {
+		v, err := read()
+		if err == nil || !errors.Is(err, metaops.ErrUnavailable) || ctx.Err() != nil {
+			return v, err
+		}
+		if attempt == metaAttempts {
+			return v, &keepStaging{err: err}
+		}
+		h.report(rep, jobs.Progress{Step: StepManifest, Message: "The metadata database isn't answering: trying again"})
+		if werr := h.o.Wait(ctx, wait); werr != nil {
+			return v, werr
+		}
+		wait *= 2
+	}
 }
 
 // archiveIDOf is the project's Internet Archive item: the recording's in the
@@ -756,7 +783,7 @@ func (h *Handler) finish(ctx context.Context, f *fetch, srv Server) (*Result, er
 	}
 	h.o.Log.Info("librivox: added", "librivox_id", f.p.LibrivoxID, "library", f.lib.ID, "path", bookPath,
 		"files", f.st.Count, "bytes", f.st.Bytes)
-	h.dropState(f.p.LibrivoxID)
+	h.dropState(f.lib.ID, f.p.LibrivoxID)
 	return &Result{LibraryID: f.lib.ID, Path: bookPath, LibrivoxID: f.p.LibrivoxID, Files: f.st.Count, Bytes: f.st.Bytes}, nil
 }
 

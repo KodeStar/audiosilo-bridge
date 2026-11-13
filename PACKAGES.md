@@ -2045,6 +2045,8 @@ internal/
             about the first URL and every redirect's (CheckRedirect); a refusal is
             blocked_host before the refused address is dialled. Nil keeps the
             old rule (the podcasts pass none).
+            StreamResponse carries the Content-Type as sent (librivox.fetch refuses
+            a page where a file was asked for).
   podcast/  pure feed.json v1 types, rooted regular-file IO with capped atomic
             writes, URL normalization/hash/privacy/redaction, NFC show names,
             stable episode paths, identity merge and adaptive polling. Spike 5
@@ -2615,7 +2617,11 @@ internal/
             base (metaops.LibrivoxAudiobook: /api/v1/librivox/audiobooks?id=N&
             extended=1&coverart=1, LibriVox's shape; decision 5, the server's
             mirror is never asked) and the work (metaops.LibrivoxWork, works/{id};
-            a 404 there is no failure, the project names the folder then). Every
+            a 404 there is no failure, the project names the folder then). meta
+            unavailable (5xx, a dropped connection) is never terminal: each read
+            is tried 4 times (5, 10, 20 s apart), then the run fails uncoded
+            (keepStaging) with its staging folder and state kept for the next
+            attempt; only meta's definite 404 ends the fetch as not_found. Every
             section URL must be https on archive.org or *.archive.org
             (AllowedURL, checked before anything is fetched or written, and on
             every redirect through netguard's per-request Allow; never
@@ -2646,7 +2652,12 @@ internal/
             bytes a later 206 would be proven to continue), a resume asks
             Range/If-Range (netguard.ResumeAction proves the 206; anything
             unproven starts the file again), renamed to its name only at the
-            stated size and never empty (a finished file is skipped on resume);
+            stated size and never empty, and only audio (a Content-Type other
+            than none, audio/*, octet-stream or application/ogg is never written;
+            a whole file whose first bytes are no ID3 tag, MPEG frame sync, OggS,
+            fLaC or MP4 ftyp is removed; both tried again like a dropped
+            connection, then archive_unavailable; a finished file is skipped on
+            resume);
             three attempts in a row that add nothing fail archive_unavailable
             (adding = past the MOST the partial has held, section's high-water
             mark, so restarts from zero that only pass the last cut don't
@@ -2668,7 +2679,9 @@ internal/
             sections are looked for again after the removals),
             ONE fsutil.RenameNoReplace staging -> book folder (a
             folder that raced in takes the fallback once, never replaced), then
-            the rescan (3 tries). State <data>/librivox/<id>.json (state.go: the
+            the rescan (3 tries). State <data>/librivox/<library_id>-<id>.json,
+            one per library and project, so fetches of one project into two
+            libraries never touch each other's staging (state.go: the
             library, parent and whether the fetch made it, destination (staging is
             <parent>/.audiosilo-librivox-<id>, never stored),
             the partials' validators, then placed + count + bytes): a resumed run
@@ -2680,8 +2693,8 @@ internal/
             gone and the folder or its fallback holding this project is placed
             (adopt), never fetched again. A stop or a lost claim keeps staging
             and state; a cancel, a
-            failure or Abandon (not on a lost claim, and only a state for the
-            abandoned job's own library: the state is keyed by project) removes
+            failure or Abandon (not on a lost claim; only the abandoned job's own
+            library's state) removes
             the staging folder, the author folder it made when empty, and the
             state. A lost claim
             never handed out again leaves its staging folder (hidden, unindexed).

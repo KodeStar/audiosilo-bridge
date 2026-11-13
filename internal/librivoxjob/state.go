@@ -14,7 +14,9 @@ import (
 )
 
 // state is a fetch's plan and progress, kept in the Bridge's data
-// (<StateDir>/<librivox_id>.json) from the moment it picks the folder: a
+// (<StateDir>/<library_id>-<librivox_id>.json, one per library and project, so
+// fetches of one project into two libraries never touch each other's staging)
+// from the moment it picks the folder: a
 // resumed run (a restart, a lost claim handed out again) goes on with the same
 // staging folder and destination instead of planning again against a library
 // that changed meanwhile, Abandon finds the staging folder to remove, and once
@@ -51,22 +53,22 @@ func stagingName(id int) string { return ".audiosilo-librivox-" + strconv.Itoa(i
 // staging is the project's staging folder: <parent>/.audiosilo-librivox-<id>.
 func (st *state) staging(id int) string { return path.Join(st.Parent, stagingName(id)) }
 
-// statePath is the project's state file.
-func (h *Handler) statePath(id int) string {
-	return filepath.Join(h.o.StateDir, strconv.Itoa(id)+".json")
+// statePath is the state file of the project's fetch into library lib.
+func (h *Handler) statePath(lib int64, id int) string {
+	return filepath.Join(h.o.StateDir, strconv.FormatInt(lib, 10)+"-"+strconv.Itoa(id)+".json")
 }
 
-// loadState reads the project's state, nil when there is none. One that
-// can't be read, or whose paths aren't clean library paths, goes: the run
-// plans afresh.
-func (h *Handler) loadState(id int) *state {
-	p := h.statePath(id)
+// loadState reads the state of the project's fetch into library lib, nil when
+// there is none. One that can't be read, that names another library, or whose
+// paths aren't clean library paths, goes: the run plans afresh.
+func (h *Handler) loadState(lib int64, id int) *state {
+	p := h.statePath(lib, id)
 	b, err := os.ReadFile(p) //nolint:gosec // G304: the job's own state in the Bridge's data
 	if err != nil {
 		return nil
 	}
 	var st state
-	if json.Unmarshal(b, &st) != nil || !st.valid() {
+	if json.Unmarshal(b, &st) != nil || st.LibraryID != lib || !st.valid() {
 		_ = os.Remove(p)
 		return nil
 	}
@@ -89,7 +91,7 @@ func (st *state) valid() bool {
 	return err == nil && clean == st.Dest && path.Dir(st.Dest) == parent
 }
 
-// saveState writes the project's state.
+// saveState writes the state of the project's fetch into st's library.
 func (h *Handler) saveState(id int, st *state) error {
 	if err := os.MkdirAll(h.o.StateDir, 0o700); err != nil {
 		return err
@@ -98,12 +100,12 @@ func (h *Handler) saveState(id int, st *state) error {
 	if err != nil {
 		return err
 	}
-	return fsutil.WriteFileAtomic(h.statePath(id), b, 0o600)
+	return fsutil.WriteFileAtomic(h.statePath(st.LibraryID, id), b, 0o600)
 }
 
-// dropState removes the project's state.
-func (h *Handler) dropState(id int) {
-	if err := os.Remove(h.statePath(id)); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		h.o.Log.Warn("librivox: removing a fetch's state failed", "librivox_id", id, "err", err)
+// dropState removes the state of the project's fetch into library lib.
+func (h *Handler) dropState(lib int64, id int) {
+	if err := os.Remove(h.statePath(lib, id)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		h.o.Log.Warn("librivox: removing a fetch's state failed", "library", lib, "librivox_id", id, "err", err)
 	}
 }

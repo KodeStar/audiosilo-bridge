@@ -2,16 +2,19 @@ package librivoxjob
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
 	"math"
+	"mime"
 	"net/http"
 	"os"
 	"path"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/kodestar/audiosilo-bridge/internal/fsutil"
@@ -179,6 +182,11 @@ func (h *Handler) attempt(ctx context.Context, root *os.Root, f *fetch, i int, r
 	default:
 		return fail(CodeArchiveUnavailable, "archive.org answered HTTP %d for section %d of LibriVox recording %d.", resp.Status, i+1, f.p.LibrivoxID)
 	}
+	if !audioType(resp.ContentType) {
+		// A page where a file was asked for (an error or a login page with a
+		// 200): never written, tried again like a dropped connection.
+		return &retry{size: offset, cause: "not_audio"}
+	}
 	if total > maxFileBytes {
 		return fmt.Errorf("section %d is larger than the Bridge's cap for one file", i+1)
 	}
@@ -254,6 +262,12 @@ func (h *Handler) attempt(ctx context.Context, root *os.Root, f *fetch, i int, r
 		}
 		return &retry{size: size, cause: "short"}
 	}
+	if !audioHead(root, part) {
+		// Whole but not audio: it goes, and the section starts again.
+		_ = root.Remove(part)
+		delete(f.st.Files, name)
+		return &retry{cause: "not_audio"}
+	}
 	if err := root.Rename(part, final); err != nil {
 		return writeFailure(err, final)
 	}
@@ -261,6 +275,47 @@ func (h *Handler) attempt(ctx context.Context, root *os.Root, f *fetch, i int, r
 	// entry goes with the next save.
 	delete(f.st.Files, name)
 	return nil
+}
+
+// audioType reports whether a response's Content-Type may carry a section:
+// none stated, audio/*, or a generic binary type. A text, HTML, JSON or other
+// typed answer is a page, not the file.
+func audioType(contentType string) bool {
+	if strings.TrimSpace(contentType) == "" {
+		return true
+	}
+	mt, _, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		return false
+	}
+	return strings.HasPrefix(mt, "audio/") || mt == "application/octet-stream" || mt == "binary/octet-stream" ||
+		mt == "application/ogg"
+}
+
+// audioHead reports whether a finished section's first bytes are audio: an
+// ID3 tag or an MPEG frame sync (LibriVox's MP3s), else the Ogg, FLAC or MP4
+// signature a section of another extension starts with.
+func audioHead(root *os.Root, name string) bool {
+	file, err := root.Open(name)
+	if err != nil {
+		return false
+	}
+	defer func() { _ = file.Close() }()
+	head := make([]byte, 12)
+	n, _ := io.ReadFull(file, head)
+	return isAudioHead(head[:n])
+}
+
+func isAudioHead(b []byte) bool {
+	switch {
+	case bytes.HasPrefix(b, []byte("ID3")), bytes.HasPrefix(b, []byte("OggS")), bytes.HasPrefix(b, []byte("fLaC")):
+		return true
+	case len(b) >= 2 && b[0] == 0xFF && b[1]&0xE0 == 0xE0:
+		return true
+	case len(b) >= 8 && string(b[4:8]) == "ftyp":
+		return true
+	}
+	return false
 }
 
 // writeErr remembers a write's failure, so a failed copy tells the library's

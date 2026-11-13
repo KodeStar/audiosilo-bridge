@@ -57,6 +57,9 @@ func TestRequestAllowFirstURLAndRedirects(t *testing.T) {
 			if string(b) != "body" {
 				t.Fatalf("%s: %q", p, b)
 			}
+			if !strings.HasPrefix(r.ContentType, "text/plain") {
+				t.Fatalf("%s: content type %q", p, r.ContentType)
+			}
 			f, err := c.Fetch(context.Background(), Request{URL: base + p, MaxBytes: 100, Allow: allow})
 			if err != nil || string(f.Body) != "body" {
 				t.Fatal(p, err)

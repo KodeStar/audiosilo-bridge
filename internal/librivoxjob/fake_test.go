@@ -2,6 +2,7 @@ package librivoxjob
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -28,10 +29,24 @@ type fakeMeta struct {
 	work    metaops.LibrivoxWork
 	workErr error
 	reads   int
+	// bookErrs and workErrs: each read pops one first (nil: answer as usual).
+	bookErrs, workErrs []error
+}
+
+func pop(q *[]error) error {
+	if len(*q) == 0 {
+		return nil
+	}
+	err := (*q)[0]
+	*q = (*q)[1:]
+	return err
 }
 
 func (m *fakeMeta) LibrivoxAudiobook(_ context.Context, id int) (metaops.LibrivoxBook, error) {
 	m.reads++
+	if err := pop(&m.bookErrs); err != nil {
+		return metaops.LibrivoxBook{}, err
+	}
 	if m.bookErr != nil {
 		return metaops.LibrivoxBook{}, m.bookErr
 	}
@@ -42,12 +57,17 @@ func (m *fakeMeta) LibrivoxAudiobook(_ context.Context, id int) (metaops.Librivo
 }
 
 func (m *fakeMeta) LibrivoxWork(context.Context, string) (metaops.LibrivoxWork, error) {
+	if err := pop(&m.workErrs); err != nil {
+		return metaops.LibrivoxWork{}, err
+	}
 	return m.work, m.workErr
 }
 
 // remote is one file the fake archive.org serves.
 type remote struct {
-	body   []byte
+	body []byte
+	// ctype is the Content-Type sent ("" is audio/mpeg).
+	ctype  string
 	etag   string
 	status int // an error status instead of the file
 	// redirect: the file is served from this URL, which Allow is asked about
@@ -131,7 +151,7 @@ func (f *fakeFetcher) Stream(_ context.Context, in netguard.StreamRequest) (*net
 	if r.status != 0 {
 		return &netguard.StreamResponse{Status: r.status, Body: io.NopCloser(bytes.NewReader(nil)), ContentLength: 0}, nil
 	}
-	resp := &netguard.StreamResponse{Status: http.StatusOK, ETag: r.etag, ContentLength: int64(len(r.body))}
+	resp := &netguard.StreamResponse{Status: http.StatusOK, ETag: r.etag, ContentLength: int64(len(r.body)), ContentType: cmp.Or(r.ctype, "audio/mpeg")}
 	body := r.body
 	// Range only with a strong ETag, as netguard sends it.
 	if in.Offset > 0 && netguard.StrongETag(in.ETag) && in.ETag == r.etag && in.Offset < int64(len(r.body)) {
@@ -164,6 +184,11 @@ func (f *fakeFetcher) Fetch(_ context.Context, in netguard.Request) (*netguard.R
 		return nil, &netguard.Error{Code: "http_" + strconv.Itoa(r.status), Message: "status"}
 	}
 	return &netguard.Response{Status: http.StatusOK, Body: r.body}, nil
+}
+
+// mp3 is an n-byte section body: an ID3 header, then fill.
+func mp3(fill byte, n int) []byte {
+	return append([]byte("ID3"), bytes.Repeat([]byte{fill}, n-3)...)
 }
 
 // fakeServer is the server link: the library's books and the rescan.
@@ -201,20 +226,34 @@ type fakeLibs struct {
 	mount    string
 	writable bool
 	kind     string
+	// second, when set, is library 4's mount: a second books library.
+	second string
+}
+
+// mountOf is library id's mount, "" for none.
+func (l *fakeLibs) mountOf(id int64) string {
+	switch {
+	case id == 3:
+		return l.mount
+	case id == 4 && l.second != "":
+		return l.second
+	}
+	return ""
 }
 
 func (l *fakeLibs) Library(id int64) (link.Library, bool) {
-	if id != 3 {
+	if l.mountOf(id) == "" {
 		return link.Library{}, false
 	}
-	return link.Library{ID: 3, Name: "Books", Root: "/srv/books", Kind: l.kind}, true
+	return link.Library{ID: id, Name: "Books", Root: "/srv/books" + strconv.FormatInt(id, 10), Kind: l.kind}, true
 }
 
 func (l *fakeLibs) Status(id int64) (link.LibraryStatus, bool) {
-	if id != 3 {
+	mount := l.mountOf(id)
+	if mount == "" {
 		return link.LibraryStatus{}, false
 	}
-	return link.LibraryStatus{LibraryID: 3, MountPath: l.mount, Mapped: true, Writable: l.writable}, true
+	return link.LibraryStatus{LibraryID: id, MountPath: mount, Mapped: true, Writable: l.writable}, true
 }
 
 // harness is a handler over the fakes, a library folder and a state folder.
@@ -266,15 +305,15 @@ func newHarness(t *testing.T) *harness {
 			Recordings: []metaops.LibrivoxRecording{{ID: testRec, LibrivoxID: testID, ArchiveID: testItem}}},
 	}
 	x.fetch = &fakeFetcher{files: map[string]*remote{
-		sectionURL(1): {body: bytes.Repeat([]byte("1"), 1000), etag: `"etag-1"`},
-		sectionURL(2): {body: bytes.Repeat([]byte("2"), 2000), etag: `"etag-2"`},
-		sectionURL(3): {body: bytes.Repeat([]byte("3"), 3000), etag: `"etag-3"`},
+		sectionURL(1): {body: mp3('1', 1000), etag: `"etag-1"`},
+		sectionURL(2): {body: mp3('2', 2000), etag: `"etag-2"`},
+		sectionURL(3): {body: mp3('3', 3000), etag: `"etag-3"`},
 		coverURL:      {body: jpeg},
 	}}
 	x.srv = &fakeServer{}
 	x.libs = &fakeLibs{mount: x.mount, writable: true}
 	x.h = New(Options{Meta: x.meta, Fetcher: x.fetch, Libraries: x.libs, StateDir: x.stateDir,
-		Mount:  func(int64, string) (string, bool) { return x.mount, true },
+		Mount:  func(id int64, _ string) (string, bool) { return x.libs.mountOf(id), true },
 		Server: func() Server { return x.srv },
 		Free:   func(string) (int64, error) { return x.free, nil },
 		Wait:   func(ctx context.Context, _ time.Duration) error { return ctx.Err() },

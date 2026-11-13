@@ -593,12 +593,17 @@ func TestStateValid(t *testing.T) {
 	}
 	x := newHarness(t)
 	_ = os.MkdirAll(x.stateDir, 0o700)
-	_ = os.WriteFile(x.h.statePath(192), []byte(`{"library_id":3,"parent":"..","dest":"../T"}`), 0o600)
-	if x.h.loadState(192) != nil {
+	_ = os.WriteFile(x.h.statePath(3, 192), []byte(`{"library_id":3,"parent":"..","dest":"../T"}`), 0o600)
+	if x.h.loadState(3, 192) != nil {
 		t.Fatal("an invalid state loaded")
 	}
-	if _, err := os.Stat(x.h.statePath(192)); err == nil {
+	if _, err := os.Stat(x.h.statePath(3, 192)); err == nil {
 		t.Fatal("an invalid state stayed")
+	}
+	// A state file naming another library than its own is never followed.
+	_ = os.WriteFile(x.h.statePath(3, 192), []byte(`{"library_id":4,"parent":"A","dest":"A/T"}`), 0o600)
+	if x.h.loadState(3, 192) != nil {
+		t.Fatal("another library's state loaded")
 	}
 }
 
@@ -656,9 +661,17 @@ func TestFetchTransientStatuses(t *testing.T) {
 type flakyFetcher struct {
 	*fakeFetcher
 	statuses map[string][]int
+	// html: that many 200 answers of an HTML page before the file.
+	html map[string]int
 }
 
 func (f *flakyFetcher) Stream(ctx context.Context, in netguard.StreamRequest) (*netguard.StreamResponse, error) {
+	if f.html[in.URL] > 0 {
+		f.html[in.URL]--
+		page := "<html>not found</html>"
+		return &netguard.StreamResponse{Status: 200, Body: io.NopCloser(strings.NewReader(page)), ContentLength: int64(len(page)),
+			ContentType: "text/html"}, nil
+	}
 	if q := f.statuses[in.URL]; len(q) > 0 {
 		f.statuses[in.URL] = q[1:]
 		return &netguard.StreamResponse{Status: q[0], Body: io.NopCloser(strings.NewReader("")), RetryAfterSeconds: 1}, nil
@@ -755,7 +768,7 @@ func TestFetchRestartDropsPartialBeforeValidators(t *testing.T) {
 	}
 	// The file changed on archive.org: the resume's If-Range gets the whole
 	// new file under a new ETag.
-	x.fetch.files[sectionURL(2)] = &remote{body: bytes.Repeat([]byte("n"), 2000), etag: `"etag-2b"`}
+	x.fetch.files[sectionURL(2)] = &remote{body: mp3('n', 2000), etag: `"etag-2b"`}
 	checked := false
 	x.h.o.Free = func(string) (int64, error) {
 		if !checked { // the restarted section's attempt, before its state is saved
@@ -833,7 +846,7 @@ func TestFetchAdoptsUnrecordedPlacement(t *testing.T) {
 	if _, err := x.run(context.Background(), false); err == nil {
 		t.Fatal("the first run's rescan didn't fail")
 	}
-	st := x.h.loadState(testID)
+	st := x.h.loadState(3, testID)
 	if st == nil || !st.Placed {
 		t.Fatalf("state %+v", st)
 	}
@@ -865,7 +878,7 @@ func TestAbandonLeavesAnotherLibrarysFetch(t *testing.T) {
 	other := x.job(true)
 	other.Params = bytes.Replace(other.Params, []byte(`"library_id":3`), []byte(`"library_id":4`), 1)
 	x.h.Abandon(jobs.AbandonContext(context.Background(), false), other)
-	if !x.exists(stagingDir) || x.h.loadState(testID) == nil {
+	if !x.exists(stagingDir) || x.h.loadState(3, testID) == nil {
 		t.Fatal("Abandon removed another library's fetch")
 	}
 }
@@ -886,5 +899,185 @@ func TestFetchPaddedURLRefused(t *testing.T) {
 	out, err := x.run(context.Background(), false)
 	if code := failureCode(t, out, err); code != CodeArchiveUnavailable || len(x.fetch.seen()) != 0 || x.exists("L. Leslie Brooke") {
 		t.Fatalf("code %q (%v), %d requests", code, err, len(x.fetch.seen()))
+	}
+}
+
+// meta unavailable for a while is tried again inside the run, for the
+// manifest and the work alike.
+func TestFetchMetaUnavailableRetried(t *testing.T) {
+	x := newHarness(t)
+	u := metaops.ErrUnavailable
+	x.meta.bookErrs = []error{u, u}
+	x.meta.workErrs = []error{u}
+	out, err := x.run(context.Background(), false)
+	if err != nil || out.(*Result).Path != bookDir {
+		t.Fatalf("%#v %v", out, err)
+	}
+	if x.meta.reads != 3 {
+		t.Fatalf("%d manifest reads", x.meta.reads)
+	}
+}
+
+// meta unavailable past the retries on a resumed run fails without a code and
+// keeps the staging folder and the state: the next attempt resumes, never
+// fetching a finished section again. A definite 404 still ends the fetch.
+func TestFetchMetaUnavailableKeepsStaging(t *testing.T) {
+	for _, which := range []string{"manifest", "work"} {
+		t.Run(which, func(t *testing.T) {
+			x := newHarness(t)
+			ctx, stop := context.WithCancel(context.Background())
+			x.fetch.files[sectionURL(2)].cut = []int{100}
+			x.fetch.files[sectionURL(2)].onCut = stop
+			_, _ = x.run(ctx, false)
+			if !x.exists(stagingDir + "/01 - Johnny Crow's Garden.mp3") {
+				t.Fatal("no staged section")
+			}
+			u := metaops.ErrUnavailable
+			if which == "manifest" {
+				x.meta.bookErr = u
+			} else {
+				x.meta.workErr = u
+			}
+			out, err := x.run(context.Background(), true)
+			if err == nil || !errors.Is(err, metaops.ErrUnavailable) {
+				t.Fatalf("resumed run: %v", err)
+			}
+			if code := failureCode(t, out, err); code != "" {
+				t.Fatalf("meta unavailable was coded %q", code)
+			}
+			if !x.exists(stagingDir+"/01 - Johnny Crow's Garden.mp3") || x.h.loadState(3, testID) == nil {
+				t.Fatal("meta unavailable removed the staging folder or the state")
+			}
+			x.meta.bookErr, x.meta.workErr = nil, nil
+			before := len(x.fetch.seen())
+			if _, err := x.run(context.Background(), true); err != nil {
+				t.Fatal(err)
+			}
+			for _, r := range x.fetch.seen()[before:] {
+				if r.url == sectionURL(1) {
+					t.Fatal("a finished section was fetched again")
+				}
+			}
+		})
+	}
+	x := newHarness(t)
+	ctx, stop := context.WithCancel(context.Background())
+	x.fetch.files[sectionURL(2)].cut = []int{100}
+	x.fetch.files[sectionURL(2)].onCut = stop
+	_, _ = x.run(ctx, false)
+	x.meta.bookErr = metaops.ErrNotFound
+	out, err := x.run(context.Background(), true)
+	if code := failureCode(t, out, err); code != CodeNotFound {
+		t.Fatalf("code %q (%v)", code, err)
+	}
+	if x.exists(stagingDir) || x.h.loadState(3, testID) != nil {
+		t.Fatal("not_found kept the staging folder")
+	}
+}
+
+// A section that isn't audio (a page sent with a 200, or bytes that are
+// neither an ID3 tag nor an MPEG frame) is never kept: it is tried again,
+// then archive_unavailable, and nothing is placed.
+func TestFetchRefusesNonAudio(t *testing.T) {
+	for name, set := range map[string]func(r *remote){
+		"html type":  func(r *remote) { r.ctype = "text/html; charset=utf-8" },
+		"json type":  func(r *remote) { r.ctype = "application/json" },
+		"html bytes": func(r *remote) { r.body = append([]byte("<!DOCTYPE html>"), r.body[15:]...) },
+		"text bytes": func(r *remote) { r.body = bytes.Repeat([]byte("x"), len(r.body)) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			x := newHarness(t)
+			set(x.fetch.files[sectionURL(2)])
+			out, err := x.run(context.Background(), false)
+			if code := failureCode(t, out, err); code != CodeArchiveUnavailable {
+				t.Fatalf("code %q (%v)", code, err)
+			}
+			if x.exists(stagingDir) || x.exists(bookDir) {
+				t.Fatal("a non-audio section was kept or placed")
+			}
+		})
+	}
+	// Once: tried again, and the real file then is kept.
+	x := newHarness(t)
+	x.h.o.Fetcher = &flakyFetcher{fakeFetcher: x.fetch, html: map[string]int{sectionURL(2): 1}}
+	out, err := x.run(context.Background(), false)
+	if err != nil || out.(*Result).Bytes != 6014 {
+		t.Fatalf("%#v %v", out, err)
+	}
+}
+
+func TestAudioChecks(t *testing.T) {
+	for ct, want := range map[string]bool{
+		"": true, "audio/mpeg": true, "audio/ogg; codecs=vorbis": true, "application/octet-stream": true,
+		"application/ogg": true, "text/html": false, "text/plain; charset=utf-8": false, "application/json": false,
+		"image/jpeg": false, ";;bad": false,
+	} {
+		if got := audioType(ct); got != want {
+			t.Errorf("audioType(%q) = %v", ct, got)
+		}
+	}
+	for head, want := range map[string]bool{
+		"ID3\x04": true, "\xFF\xFB\x90": true, "\xFF\xF3": true, "OggS": true, "fLaC": true, "\x00\x00\x00\x20ftypM4A ": true,
+		"<html>": false, "": false, "\xFF\x00": false, "x": false,
+	} {
+		if got := isAudioHead([]byte(head)); got != want {
+			t.Errorf("isAudioHead(%q) = %v", head, got)
+		}
+	}
+}
+
+// Two libraries fetching one project keep their own state and staging: a run
+// into one never discards the other's, and Abandon of one leaves the other.
+func TestFetchTwoLibrariesIndependent(t *testing.T) {
+	x := newHarness(t)
+	other := t.TempDir()
+	x.libs.second = other
+	ctx, stop := context.WithCancel(context.Background())
+	x.fetch.files[sectionURL(2)].cut = []int{100}
+	x.fetch.files[sectionURL(2)].onCut = stop
+	_, _ = x.run(ctx, false) // library 3 stops mid-download
+	if !x.exists(stagingDir) {
+		t.Fatal("no staging in library 3")
+	}
+	// Library 4 fetches the whole project.
+	job4 := x.job(false)
+	lib4 := int64(4)
+	job4.LibraryID = &lib4
+	job4.Params = bytes.Replace(job4.Params, []byte(`"library_id":3`), []byte(`"library_id":4`), 1)
+	out, err := x.h.Run(context.Background(), job4, jobs.LocalReporter())
+	if err != nil || out.(*Result).LibraryID != 4 {
+		t.Fatalf("library 4: %#v %v", out, err)
+	}
+	if _, err := os.Stat(path.Join(other, bookDir, "01 - Johnny Crow's Garden.mp3")); err != nil {
+		t.Fatal("library 4's book isn't there")
+	}
+	if !x.exists(stagingDir+"/01 - Johnny Crow's Garden.mp3") || x.h.loadState(3, testID) == nil {
+		t.Fatal("library 4's fetch discarded library 3's staging")
+	}
+	// Library 4 stops mid-download too; Abandon of library 3's job leaves it.
+	x.fetch.files[sectionURL(2)].cut = []int{100}
+	ctx, stop = context.WithCancel(context.Background())
+	x.fetch.files[sectionURL(2)].onCut = stop
+	if err := os.RemoveAll(path.Join(other, bookDir)); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = x.h.Run(ctx, job4, jobs.LocalReporter())
+	staging4 := path.Join(other, stagingDir)
+	if _, err := os.Stat(staging4); err != nil {
+		t.Fatal("no staging in library 4")
+	}
+	x.h.Abandon(jobs.AbandonContext(context.Background(), false), x.job(true))
+	if x.exists(stagingDir) {
+		t.Fatal("Abandon left library 3's staging")
+	}
+	if _, err := os.Stat(staging4); err != nil || x.h.loadState(4, testID) == nil {
+		t.Fatal("Abandon of library 3's job removed library 4's fetch")
+	}
+	// Library 3 resumes from scratch independently and finishes.
+	if _, err := x.run(context.Background(), false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(staging4); err != nil {
+		t.Fatal("library 3's run removed library 4's staging")
 	}
 }
