@@ -157,6 +157,11 @@ internal/
               -> rescan -> ASIN enrich
   audiblesync/ Phase 4c: audible.sync (lastpositions -> furthest-only events) + the push loop (feed -> SetLastPosition)
   importjob/  BookMatcher (link.LibraryBook) + Plan: match and place against a library
+  -- LibriVox L6 --
+  librivoxjob/ librivox.fetch (download lane): the manifest from meta's LibriVox-shaped
+              feed, the sections from archive.org only (https, every redirect checked)
+              into a staging folder, Author/Title/NN - Section.mp3 + cover.jpg +
+              .audiosilo/librivox.json by one no-replace rename, rescan
   transfer/   Local.Place: SafeJoin + os.Root, free-space check, no-replace install
   placement/ source/ progress/  (the manager's; source trimmed to Record in 4b)
 web/          the page: Vite + React 19 + TS + Tailwind v4; pure logic in src/lib
@@ -166,7 +171,7 @@ Dockerfile    slim | cuda | agent | full; compose.example.yaml: server, bridge, 
 
 **Dependency direction:** `app -> {api, jobs, link, mapping, verify, generate,
 agentbox, workers, accounts, setup, correct, store, secrets, config, auth, logring,
-web, netguard, podcast, podcastjob, audibleacct, audiblejob, audiblesync}` plus the engine it wires; `accounts -> {agentproto, ghauth, secrets, store}`; `correct ->
+web, netguard, podcast, podcastjob, audibleacct, audiblejob, audiblesync, librivoxjob}` plus the engine it wires; `accounts -> {agentproto, ghauth, secrets, store}`; `correct ->
 {contrib, jobs, metaops}`; `setup -> link`;
 `api` calls the injected Backend and the injected `auth.Manager` (login, sessions,
 the password), with types from jobs/link/mapping/store/logring; `verify -> {jobs,
@@ -177,7 +182,8 @@ through its own Engine/Server interfaces; `podcastjob -> {jobs, link, mapping, n
 imports `audible`); `importjob -> {link, placement, source,
 audiosilo-server/pkg/match}`; `audibleacct -> {audible, link, secrets, source, store}`;
 `audiblejob -> {audible, audibleacct, fsutil, importjob, jobs, link, mapping, placement,
-source, store, transfer}` (app wires both); `audiblesync -> {audible, audibleacct, jobs, link, store}`; `transfer -> {fsutil, mapping, progress}`;
+source, store, transfer}` (app wires both); `librivoxjob -> {fsutil, importjob, jobs, link,
+mapping, metaops, netguard, placement, transfer}`; `audiblesync -> {audible, audibleacct, jobs, link, store}`; `transfer -> {fsutil, mapping, progress}`;
 `jobs -> {link, store}`; `mapping -> {fsutil, link}`;
 `link`, `agentproto` and `workerproto` are leaves; `workers -> {asr, fsutil,
 scheduler, state, store, transcript, workerproto}`; `worker -> {asr, fsutil, workerproto}`
@@ -205,7 +211,10 @@ in PACKAGES.md.
   book writer is `generate` (its three jobs): `characters.json`, `recaps.json`,
   `description.json` (Phase 1c), `chapters.json` (Phase 1d), `readalong.json` (Phase
   3c-1) and `bridge.json` in the book's `.audiosilo/` (a single-file book's prefixed
-  `<stem>.`). Podcast writers
+  `<stem>.`). `librivox.fetch` (LibriVox L6) writes whole new book folders: its own
+  dot staging folder beside the destination (removed outright on a cancel or a
+  failure: it holds only the job's own downloads), then one no-replace rename,
+  never into an existing book. Podcast writers
   require a podcast-kind library and its checked marker mapping (a job claimed
   before the check waits for it); they write only the root marker, show folders,
   feed.json and sniffed JPEG/PNG artwork. Book writers refuse podcast libraries.
@@ -439,6 +448,14 @@ key set) with Range, a cut and an expiry. No migration.
 (`audiblesync`, migration 0011): Audible's places to the server furthest only, the
 server's still places back to Audible; a refused account neither syncs nor pushes,
 a sync error never refuses one; the page's sync switch went (the console owns it).
+
+**LibriVox L6-1 (Add from LibriVox, Bridge side):** `librivox.fetch`
+(`librivoxjob`, LIBRIVOX-PLAN.md L6): the manifest from the Bridge's own meta base,
+the sections from archive.org only (`AllowedURL` on every URL and redirect through
+netguard's new per-request `Allow`), staged in the library and placed by one
+no-replace rename with `cover.jpg` and `.audiosilo/librivox.json`, then rescanned;
+resumable per section, its plan and placement marker in `<data>/librivox/`. The
+server records the book's LibriVox identity from the job's result (its fold).
 
 See BRIDGE-PLAN.md's Status table for what is next.
 

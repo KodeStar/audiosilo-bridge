@@ -144,7 +144,7 @@ func TestPairBeatMapAndRevoke(t *testing.T) {
 		return ok && len(st.Libraries) == 1 && st.Libraries[0].Mapped && st.Libraries[0].Writable
 	})
 	st, _ := fs.lastBeat()
-	if st.Version != "0.1.0" || strings.Join(st.Kinds, ",") != "audible.import,audible.poll,audible.sync,bridge.verify,chapters.detect,meta.correct,podcast.fetch,podcast.poll,podcast.retain,podcast.subscribe,readalong.align,sidecars.contribute,sidecars.describe,sidecars.generate" || st.UIURL != "http://bridge.lan:8091" {
+	if st.Version != "0.1.0" || strings.Join(st.Kinds, ",") != "audible.import,audible.poll,audible.sync,bridge.verify,chapters.detect,librivox.fetch,meta.correct,podcast.fetch,podcast.poll,podcast.retain,podcast.subscribe,readalong.align,sidecars.contribute,sidecars.describe,sidecars.generate" || st.UIURL != "http://bridge.lan:8091" {
 		t.Fatalf("heartbeat = %+v", st)
 	}
 	// Once the engine runs, every heartbeat carries the estimates.
@@ -283,7 +283,7 @@ func TestEngineViewAndJobRoutes(t *testing.T) {
 	if _, err := b.Job(context.Background(), 5); !errors.Is(err, api.ErrNotFound) {
 		t.Fatalf("an unknown job = %v", err)
 	}
-	if k := strings.Join(b.runner.Kinds(), ","); k != "audible.import,audible.poll,audible.sync,bridge.verify,chapters.detect,meta.correct,podcast.fetch,podcast.poll,podcast.retain,podcast.subscribe,readalong.align,sidecars.contribute,sidecars.describe,sidecars.generate" {
+	if k := strings.Join(b.runner.Kinds(), ","); k != "audible.import,audible.poll,audible.sync,bridge.verify,chapters.detect,librivox.fetch,meta.correct,podcast.fetch,podcast.poll,podcast.retain,podcast.subscribe,readalong.align,sidecars.contribute,sidecars.describe,sidecars.generate" {
 		t.Fatalf("kinds = %s", k)
 	}
 }

@@ -1734,7 +1734,12 @@ internal/
             landing in between is never cleared nor parked over.
   metaops/  meta.audiosilo.app client (coverage/lookup, capped 1h TTL caches,
             graceful degrade) + the PathAllowed/AllowedPath containment checks
-            (Phase 1a passes the mapped mounts as the roots). glossary.go adds
+            (Phase 1a passes the mapped mounts as the roots). librivox.go (LibriVox
+            L6): LibrivoxAudiobook (the LibriVox-shaped feed, one project with
+            extended=1&coverart=1; LibriVox's string ids, nullable coverart_jpg,
+            ArchiveID from url_iarchive) and LibrivoxWork (works/{id}: title,
+            author names, each recording's librivox_id and archive_id), uncached,
+            with ErrDisabled / ErrNotFound / ErrUnavailable apart. glossary.go adds
             SeriesGlossary (work -> its series -> the OTHER volumes' contributed
             character names/aliases, <= 12 siblings, own TTL caches), the canonical
             spelling evidence the spelling stage checks a transcript against; it
@@ -2036,6 +2041,10 @@ internal/
             failures, respecting Retry-After. Bad gzip data (empty, header,
             checksum, stream) fails at once as not_a_feed; a read the connection
             broke is retried. Errors never contain remote text or URLs.
+            LibriVox L6: Request and StreamRequest take an optional Allow, asked
+            about the first URL and every redirect's (CheckRedirect); a refusal is
+            blocked_host before the refused address is dialled. Nil keeps the
+            old rule (the podcasts pass none).
   podcast/  pure feed.json v1 types, rooted regular-file IO with capped atomic
             writes, URL normalization/hash/privacy/redaction, NFC show names,
             stable episode paths, identity merge and adaptive polling. Spike 5
@@ -2589,12 +2598,74 @@ internal/
             the library holds a record is BookMatcher's). Run, the existence check
             and ApplyDestinations went in Phase 4b: audiblejob's import runs the
             steps. The manager's serverapi client went: the Bridge holds
-            the paged listing. Deps: link, placement, source,
+            the paged listing. AllBooks (books.go, LibriVox L6) reads that listing
+            whole for audiblejob and librivoxjob. Deps: link, placement, source,
             audiosilo-server/pkg/match.
   placement/ where a new book goes (the manager's): Auto (series siblings'
             folder and shortcode convention, else author/title) and templates.
             Phase 4b: a generated segment loses its leading dots too ("...And
             Ladies of the Club", ".hack"): a hidden name is never indexed.
+            LibriVox L6 exports Sanitize (librivoxjob names its section files
+            with it).
+  librivoxjob/ LibriVox L6 (LIBRIVOX-PLAN.md), librivox.fetch on the download lane
+            (capacity 1, shared with audible.import: one book at a time). Params
+            {librivox_id, work_id, recording_id, library_id} (server-built,
+            strict; unknown fields ignored). Manifest from the Bridge's OWN meta
+            base (metaops.LibrivoxAudiobook: /api/v1/librivox/audiobooks?id=N&
+            extended=1&coverart=1, LibriVox's shape; decision 5, the server's
+            mirror is never asked) and the work (metaops.LibrivoxWork, works/{id};
+            a 404 there is no failure, the project names the folder then). Every
+            section URL must be https on archive.org or *.archive.org
+            (AllowedURL, checked before anything is fetched or written, and on
+            every redirect through netguard's per-request Allow; never
+            librivox.org), fetched by the app's own netguard client (public
+            addresses only, not the podcasts' allow_networks). Placement:
+            placement.Suggest standalone (an existing author folder from
+            importjob.AuthorFolders reused verbatim, else the sanitized author),
+            NOT importjob.Planner.Plan: its match.CleanTitle drops "(version 2)"
+            and "Vol. 001", which tell two projects of one work apart. Title =
+            the work's, or the project's own when the work has more than one
+            LibriVox recording; author = the first credit, Various over three;
+            no author places at the library root; nothing left of a title is
+            "LibriVox <id>". Names: control characters and space runs folded,
+            Sanitize, cut to 180 bytes on a rune boundary; files "NN - <section
+            title>.<ext>" (NN the 1-based position, at least two digits, the
+            count's width; never section_number; an untitled section is
+            "Section N"; the URL's audio extension, else .mp3). The title's
+            folder taken, once "<Title> (LibriVox <id>)", else exists; a folder
+            already holding this project's librivox.json is the book (rescan
+            only); an author folder that is a listed book or holds audio is
+            exists. Staging <parent>/.audiosilo-librivox-<id>/ (a dot folder the
+            scan skips), every write through the mount's os.Root (0755/0644):
+            each section to <name>.part, its strong ETag and size recorded in
+            the state before the body, a resume asks Range/If-Range
+            (netguard.ResumeAction proves the 206; anything unproven starts the
+            file again), renamed to its name only at the stated size (a finished
+            file is skipped on resume); three attempts in a row that add nothing
+            fail archive_unavailable, as does a 4xx; the library's free space
+            1.1x each file's rest, else disk_full. cover.jpg best effort (only a
+            sniffed JPEG from archive.org), then .audiosilo/librivox.json
+            {version 1, librivox_id, work_id, recording_id, archive_id} (decision
+            3), the mapping checked again (a resumed or late job parks
+            not_writable), ONE fsutil.RenameNoReplace staging -> book folder (a
+            folder that raced in takes the fallback once, never replaced), then
+            the rescan (3 tries). State <data>/librivox/<id>.json (state.go: the
+            library, parent and whether the fetch made it, staging, destination,
+            the partials' validators, then placed + count + bytes): a resumed run
+            follows it rather than planning again, Abandon finds the staging
+            folder by it, and once placed it is the placement marker (a failed
+            rescan keeps the book and the state; the retry goes on from the
+            rescan). A stop or a lost claim keeps staging and state; a cancel, a
+            failure or Abandon (not on a lost claim) removes the staging folder,
+            the author folder it made when empty, and the state. A lost claim
+            never handed out again leaves its staging folder (hidden, unindexed).
+            Steps manifest, download (done/total = sections), cover, place,
+            rescan. Result {library_id, path (the rescan's), librivox_id, files,
+            bytes} (files and bytes: the sections and the cover); a failure is
+            Failure {code, message} as result and error, codes not_writable,
+            exists, disk_full, not_found, archive_unavailable, metadata_off,
+            never a URL. Deps: fsutil, importjob, jobs, link, mapping, metaops,
+            netguard, placement, transfer, audiosilo-server/pkg/match.
   source/   Record (normalized metadata of one importable book: the ASIN,
             UnavailableReason; Phase 4a: Authors (every credit), SeriesPosition as
             the source spells it, ReleaseDate YYYY-MM-DD or "") (source.go only;
@@ -3553,5 +3624,6 @@ and the shared clip-floor predicate `qa.ClipStartInRange`/`qa.ClipStartFloorSec`
 `state` is pure. Phase 4a: `audibleacct -> {audible, link, secrets, source, store}`
 and `audiblejob -> {audible, audibleacct, fsutil, importjob, jobs, link, mapping, placement,
 source, store, transfer}` (Phase 4b's import; app wires both;
-neither imports app or api). Handlers marshal DTOs and call into the injected packages; they
+neither imports app or api); LibriVox L6: `librivoxjob -> {fsutil, importjob, jobs, link,
+mapping, metaops, netguard, placement, transfer}` (app wires it). Handlers marshal DTOs and call into the injected packages; they
 hold no logic (state transitions live in `state`, dispatch in `scheduler`).

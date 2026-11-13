@@ -75,6 +75,9 @@ type Bridge struct {
 	runner      *jobs.Runner
 	auth        *auth.Manager
 	podcastHTTP *netguard.Client
+	// librivoxHTTP is librivox.fetch's guarded client: public addresses only
+	// (never the podcasts' allow_networks), archive.org hosts only per request.
+	librivoxHTTP *netguard.Client
 	// box is the agent container runner (decision 15), gen the sidecars.generate
 	// job, engine the sidecars engine once it has started.
 	box    *agentbox.Runner
@@ -216,7 +219,8 @@ func New(ctx context.Context, opts Options) (*Bridge, string, error) {
 		}
 		return nil
 	}})
-	corrector := correct.New(correct.Options{Meta: metaops.NewClient(cfg.Metadata.BaseURL), Tokens: b.tokens,
+	meta := metaops.NewClient(cfg.Metadata.BaseURL)
+	corrector := correct.New(correct.Options{Meta: meta, Tokens: b.tokens,
 		BaseURL: cfg.Contribution.APIBaseURL, CoreRepo: cfg.Contribution.CoreRepo, KV: db, ServerID: serverID, Log: opts.Logger})
 	var audiblePoll *audiblejob.Handler
 	var audibleImport *audiblejob.Importer
@@ -225,7 +229,7 @@ func New(ctx context.Context, opts Options) (*Bridge, string, error) {
 	audibleSync, b.audiblePush = b.newAudibleSync(db, opts.Logger, serverID)
 	b.runner = jobs.New(db, b.server, b.tokenRefused, jobs.Options{Log: opts.Logger, ServerID: serverID},
 		verifier, b.gen, b.gen.DescribeJob(), b.gen.ChaptersJob(), b.gen.ReadalongJob(), b.gen.ContributeJob(), corrector, podcasts, podcasts.PollJob(), podcasts.FetchJob(), podcasts.RetainJob(),
-		audiblePoll, audibleImport, audibleSync)
+		audiblePoll, audibleImport, audibleSync, b.newLibrivox(meta, opts.Logger))
 	conn.onChange = b.linkChanged
 	return b, oneTime, nil
 }
@@ -298,6 +302,7 @@ var listen = func(ctx context.Context, addr string) (net.Listener, error) {
 // or the page's server fails (its error is returned once everything stopped).
 func (b *Bridge) Run(ctx context.Context) error {
 	defer b.podcastHTTP.Close()
+	defer b.librivoxHTTP.Close()
 	defer func() { _ = b.db.Close() }()
 	// The heartbeat and the runner stop with ctx: a failing page server must
 	// stop them too, or Run would wait for them for ever.
