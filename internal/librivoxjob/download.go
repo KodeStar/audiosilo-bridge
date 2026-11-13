@@ -237,7 +237,9 @@ func (h *Handler) attempt(ctx context.Context, root *os.Root, f *fetch, i int, r
 		return fmt.Errorf("section %d is larger than the Bridge's cap for one file", i+1)
 	case cerr != nil:
 		return &retry{size: size, cause: "network"}
-	case total > 0 && size != total:
+	case size == 0, total > 0 && size != total:
+		// An empty body is never a section, whatever length the response
+		// stated; one longer than stated can't be trusted either.
 		if size > total {
 			_ = root.Remove(part)
 			delete(f.st.Files, name)

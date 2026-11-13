@@ -708,6 +708,20 @@ func TestFetchParksMidDownload(t *testing.T) {
 	}
 }
 
+// An empty body is never a section, whatever length the response stated: it
+// is tried again and then fails, rather than being placed as a finished file.
+func TestFetchEmptyBodyFails(t *testing.T) {
+	x := newHarness(t)
+	x.fetch.files[sectionURL(2)].body = nil
+	out, err := x.run(context.Background(), false)
+	if code := failureCode(t, out, err); code != CodeArchiveUnavailable {
+		t.Fatalf("code %q (%v)", code, err)
+	}
+	if x.exists(bookDir) || x.exists(stagingDir) {
+		t.Fatal("an empty section was placed or left staged")
+	}
+}
+
 // Restarts from zero whose cuts only ever pass the LAST cut, never the most
 // the partial has held, add nothing: the section fails instead of going on
 // for as long as the cuts alternate.
