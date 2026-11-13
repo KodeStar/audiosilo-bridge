@@ -1,6 +1,7 @@
 package librivoxjob
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -36,6 +37,9 @@ const maxRetryAfter = 5 * time.Minute
 
 // partSuffix names a section's partial download in the staging folder.
 const partSuffix = ".part"
+
+// copyBufBytes is how much of a section's body is gathered before a write.
+const copyBufBytes = 1 << 20
 
 // download fetches every section not in the staging folder yet: a file there
 // under its own name is finished (it is renamed from its .part only once
@@ -188,8 +192,15 @@ func (h *Handler) attempt(ctx context.Context, root *os.Root, f *fetch, i int, r
 	if err != nil {
 		return writeFailure(err, part)
 	}
+	// Buffered: a body arrives in reads of a TLS record at most, and each as
+	// its own write is a round trip on a network mount. The flush runs after a
+	// cut connection too, so the partial holds all that arrived.
 	w := &writeErr{w: file}
-	n, cerr := io.Copy(w, io.LimitReader(resp.Body, maxFileBytes-start+1))
+	buf := bufio.NewWriterSize(w, copyBufBytes)
+	n, cerr := io.Copy(buf, io.LimitReader(resp.Body, maxFileBytes-start+1))
+	if err := buf.Flush(); err != nil && w.err == nil {
+		w.err = err
+	}
 	if err := file.Sync(); err != nil && w.err == nil {
 		w.err = err
 	}
