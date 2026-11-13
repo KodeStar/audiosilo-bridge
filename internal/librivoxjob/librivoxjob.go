@@ -304,6 +304,9 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, p Params, rep *jobs.Rep
 
 	// An earlier run placed the book and then failed (the rescan): while its
 	// folder is still this project's, go on from the rescan.
+	if f.st != nil {
+		h.adopt(f)
+	}
 	if f.st != nil && f.st.Placed {
 		if h.holdsProject(mount, f.st.Dest, p.LibrivoxID) {
 			return h.finish(ctx, f, srv)
@@ -698,6 +701,32 @@ func sweep(root *os.Root, staging string, names []string) error {
 	}
 	_, err = sections()
 	return err
+}
+
+// adopt marks a fetch placed whose staging folder is gone and whose folder
+// (or its fallback) holds this project: the rename happened and the state's
+// write after it didn't land (a kill between the two, a full data folder).
+// Without it the resumed run would download the book again and place it a
+// second time under the fallback name.
+func (h *Handler) adopt(f *fetch) {
+	if f.st.Placed {
+		return
+	}
+	root, err := f.openRoot()
+	if err != nil {
+		return
+	}
+	defer func() { _ = root.Close() }()
+	if _, err := root.Lstat(f.staging()); !errors.Is(err, fs.ErrNotExist) {
+		return
+	}
+	for _, at := range candidates(f.st.Dest, f.p.LibrivoxID) {
+		if holdsProjectIn(root, at, f.p.LibrivoxID) {
+			f.st.Dest, f.st.Placed, f.st.Files = at, true, nil
+			f.st.Count, f.st.Bytes = countFiles(root, at)
+			return
+		}
+	}
 }
 
 // rescanAttempts bounds the rescan's tries (the book is placed either way).

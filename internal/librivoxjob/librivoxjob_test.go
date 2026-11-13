@@ -822,3 +822,34 @@ func TestFetchMountMovedFails(t *testing.T) {
 		}
 	}
 }
+
+// A placement whose state never said so (a kill between the rename and the
+// state's write) is found by the book's marker: the next run rescans it and
+// doesn't download the book again under the fallback name.
+func TestFetchAdoptsUnrecordedPlacement(t *testing.T) {
+	x := newHarness(t)
+	boom := errors.New("server busy")
+	x.srv.rescanErr = []error{boom, boom, boom}
+	if _, err := x.run(context.Background(), false); err == nil {
+		t.Fatal("the first run's rescan didn't fail")
+	}
+	st := x.h.loadState(testID)
+	if st == nil || !st.Placed {
+		t.Fatalf("state %+v", st)
+	}
+	st.Placed, st.Count, st.Bytes = false, 0, 0
+	if err := x.h.saveState(testID, st); err != nil {
+		t.Fatal(err)
+	}
+	before := len(x.fetch.seen())
+	out, err := x.run(context.Background(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r := out.(*Result); r.Path != bookDir || r.Files != 4 || r.Bytes != 6014 || len(x.fetch.seen()) != before {
+		t.Fatalf("%+v, %d new requests", r, len(x.fetch.seen())-before)
+	}
+	if x.exists(fallbackName(bookDir, testID)) || x.exists(stagingDir) {
+		t.Fatal("the book was fetched a second time")
+	}
+}
