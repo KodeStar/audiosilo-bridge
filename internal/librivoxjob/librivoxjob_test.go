@@ -364,8 +364,8 @@ func TestFetchExistsFallback(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p := out.(*Result).Path; p != bookDir+" (LibriVox 192)" {
-		t.Fatalf("placed at %q", p)
+	if r := out.(*Result); r.Path != bookDir+" (LibriVox 192)" || r.Adopted {
+		t.Fatalf("%+v", r)
 	}
 	if entries, _ := os.ReadDir(x.path(bookDir)); len(entries) != 0 {
 		t.Fatal("the existing folder was written to")
@@ -396,8 +396,9 @@ func TestFetchPlaceRace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p := out.(*Result).Path; p != bookDir+" (LibriVox 192)" {
-		t.Fatalf("placed at %q", p)
+	// This run renamed staging into place (under the fallback name): not adopted.
+	if r := out.(*Result); r.Path != bookDir+" (LibriVox 192)" || r.Adopted {
+		t.Fatalf("%+v", r)
 	}
 	if !x.exists(bookDir + "/theirs") {
 		t.Fatal("the other folder was replaced")
