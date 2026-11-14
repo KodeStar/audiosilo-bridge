@@ -486,7 +486,7 @@ func (b *Bridge) CheckMappings(ctx context.Context, ids ...int64) {
 		// beating here too would ask for it again while it is still due.
 		if b.libs.Check(ctx, cl, b.mount, time.Now, ids...) {
 			b.Kick()
-			b.sweepLibrivox()
+			b.sweepLibrivox(ctx)
 		}
 	}()
 }

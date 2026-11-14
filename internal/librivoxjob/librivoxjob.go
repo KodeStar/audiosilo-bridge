@@ -237,12 +237,16 @@ func (h *Handler) Abandon(ctx context.Context, job jobs.Job) {
 	if st == nil || st.Placed {
 		return
 	}
-	if lib, ok := h.o.Libraries.Library(st.LibraryID); ok {
-		if mount, _ := h.o.Mount(lib.ID, lib.Root); mount != "" {
-			h.removeStaging(mount, p.LibrivoxID, st)
-		}
+	// The state goes with the folder it names: while the folder can't be
+	// reached or removed (the library isn't listed yet, its mount is away), the
+	// state stays and the sweep removes both later.
+	lib, ok := h.o.Libraries.Library(st.LibraryID)
+	if !ok {
+		return
 	}
-	h.dropState(st.LibraryID, p.LibrivoxID)
+	if mount, _ := h.o.Mount(lib.ID, lib.Root); mount != "" && h.removeStaging(mount, p.LibrivoxID, st) {
+		h.dropState(st.LibraryID, p.LibrivoxID)
+	}
 }
 
 // Run fetches the recording: manifest, download, cover, place, rescan.
@@ -259,6 +263,10 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 		return nil, err
 	}
 	defer h.end(k)
+	// The state a run leaves (a stop, a lost claim, meta or archive.org down)
+	// was last used now, however long ago the run began or last saved it (one
+	// parked for days): the sweep goes by that.
+	defer func() { h.touchState(k.lib, k.id, time.Now()) }()
 	res, err := h.run(ctx, job, p, rep)
 	var f *Failure
 	if errors.As(err, &f) {
@@ -367,8 +375,11 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, p Params, rep *jobs.Rep
 		if ctx.Err() != nil && (jobs.Resumes(ctx) || jobs.Lost(ctx)) {
 			return
 		}
-		h.removeStaging(f.mount, p.LibrivoxID, f.st)
-		h.dropState(lib.ID, p.LibrivoxID)
+		// A folder that can't be removed now (a cancel while the mount is
+		// away) keeps its state, for the sweep.
+		if h.removeStaging(f.mount, p.LibrivoxID, f.st) {
+			h.dropState(lib.ID, p.LibrivoxID)
+		}
 	}()
 
 	// An earlier run placed the book and then failed (the rescan): while its
@@ -659,19 +670,25 @@ func writeFailure(err error, rel string) error {
 }
 
 // removeStaging removes the staging folder, and the author folder this fetch
-// made once it is empty, through the mount's root (best effort).
-func (h *Handler) removeStaging(mount string, id int, st *state) {
+// made once it is empty, through the mount's root. It reports whether the
+// staging folder is gone: when it isn't (the mount can't be opened or written
+// now), the caller keeps the state, which is all that still names the folder,
+// for the sweep.
+func (h *Handler) removeStaging(mount string, id int, st *state) bool {
 	root, err := os.OpenRoot(mount)
 	if err != nil {
-		return
+		h.o.Log.Warn("librivox: removing a fetch's staging folder failed", "librivox_id", id, "path", st.staging(id), "err", err)
+		return false
 	}
 	defer func() { _ = root.Close() }()
 	if err := root.RemoveAll(st.staging(id)); err != nil {
 		h.o.Log.Warn("librivox: removing a fetch's staging folder failed", "librivox_id", id, "path", st.staging(id), "err", err)
+		return false
 	}
 	if st.MadeParent && st.Parent != "" {
 		_ = root.Remove(st.Parent) // only when empty
 	}
+	return true
 }
 
 // writeMarker writes .audiosilo/librivox.json into the staging folder.

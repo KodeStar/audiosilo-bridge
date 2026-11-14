@@ -2,6 +2,7 @@ package librivoxjob
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -46,7 +47,7 @@ func TestSweepRemovesAbandonedStaging(t *testing.T) {
 	x := newHarness(t)
 	x.stageAndStop(t)
 	x.age(t, StagingMaxAge-time.Hour)
-	x.h.Sweep(time.Now())
+	x.h.Sweep(time.Now(), nil)
 	if !x.exists(stagingDir) || !x.hasState() {
 		t.Fatal("the sweep took a young fetch's staging")
 	}
@@ -60,7 +61,7 @@ func TestSweepRemovesAbandonedStaging(t *testing.T) {
 	}
 	at := time.Now().Add(-StagingMaxAge - time.Hour)
 	_ = os.Chtimes(old, at, at)
-	x.h.Sweep(time.Now())
+	x.h.Sweep(time.Now(), nil)
 	if x.exists(stagingDir) || x.exists("L. Leslie Brooke") || x.hasState() {
 		t.Fatal("the sweep left an abandoned fetch")
 	}
@@ -82,9 +83,107 @@ func TestRunMarksStateUsed(t *testing.T) {
 	if _, err := x.run(context.Background(), false); err == nil {
 		t.Fatal("meta down didn't fail the run")
 	}
-	x.h.Sweep(time.Now())
+	x.h.Sweep(time.Now(), nil)
 	if !x.exists(stagingDir) || !x.hasState() {
 		t.Fatal("the sweep took a fetch a run just used")
+	}
+}
+
+// A run that ends long after its state was last saved (parked for days, then
+// meta down) leaves it marked used: the sweep goes by when the run ended.
+func TestRunEndMarksStateUsed(t *testing.T) {
+	x := newHarness(t)
+	x.stageAndStop(t)
+	x.meta.bookErr = metaops.ErrUnavailable
+	x.h.o.Wait = func(ctx context.Context, _ time.Duration) error {
+		x.age(t, StagingMaxAge+time.Hour) // the run goes on, its state untouched for days
+		return ctx.Err()
+	}
+	if _, err := x.run(context.Background(), false); err == nil {
+		t.Fatal("meta down didn't fail the run")
+	}
+	x.h.Sweep(time.Now(), nil)
+	if !x.exists(stagingDir) || !x.hasState() {
+		t.Fatal("the sweep took a fetch whose run just ended")
+	}
+}
+
+// A fetch whose job the runner still holds (a recovered job waiting for its
+// lane, one a refused token stopped) has no run here yet: the sweep leaves
+// it, however old its state.
+func TestSweepLeavesOpenJobs(t *testing.T) {
+	x := newHarness(t)
+	x.stageAndStop(t)
+	x.age(t, StagingMaxAge+time.Hour)
+	other := json.RawMessage(`{"librivox_id":7,"work_id":"w","recording_id":"r","library_id":3}`)
+	x.h.Sweep(time.Now(), []json.RawMessage{json.RawMessage(`{`), other, x.job(true).Params})
+	if !x.exists(stagingDir) || !x.hasState() {
+		t.Fatal("the sweep took the fetch of an open job")
+	}
+	x.h.Sweep(time.Now(), []json.RawMessage{other})
+	if x.exists(stagingDir) || x.hasState() {
+		t.Fatal("the sweep left an abandoned fetch")
+	}
+}
+
+// A staging folder that can't be removed now keeps its state, which is all
+// that names it: the sweep and Abandon leave both for a later sweep.
+func TestStateStaysWithStagingThatCantBeRemoved(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root removes from a read-only folder")
+	}
+	x := newHarness(t)
+	x.stageAndStop(t)
+	x.age(t, StagingMaxAge+time.Hour)
+	author := x.path("L. Leslie Brooke")
+	if err := os.Chmod(author, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(author, 0o755) })
+	x.h.Sweep(time.Now(), nil)
+	if !x.exists(stagingDir) || !x.hasState() {
+		t.Fatal("the sweep dropped the state of a staging folder it couldn't remove")
+	}
+	x.h.Abandon(jobs.AbandonContext(context.Background(), false), x.job(true))
+	if !x.exists(stagingDir) || !x.hasState() {
+		t.Fatal("Abandon dropped the state of a staging folder it couldn't remove")
+	}
+	if err := os.Chmod(author, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	x.h.Sweep(time.Now(), nil)
+	if x.exists(stagingDir) || x.exists("L. Leslie Brooke") || x.hasState() {
+		t.Fatal("a later sweep left the fetch")
+	}
+}
+
+// In the state folder the sweep removes old regular files only (never a
+// folder), and a file whose name isn't a state's own never stands for one.
+func TestSweepStateFolderStrays(t *testing.T) {
+	x := newHarness(t)
+	x.stageAndStop(t) // a young fetch of library 3
+	at := time.Now().Add(-StagingMaxAge - time.Hour)
+	dir, alias := filepath.Join(x.stateDir, "kept"), filepath.Join(x.stateDir, "03-192.json")
+	if err := os.MkdirAll(filepath.Join(dir, "inner"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(alias, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{dir, alias} {
+		if err := os.Chtimes(p, at, at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	x.h.Sweep(time.Now(), nil)
+	if _, err := os.Stat(filepath.Join(dir, "inner")); err != nil {
+		t.Fatal("the sweep removed a folder")
+	}
+	if _, err := os.Stat(alias); err == nil {
+		t.Fatal("an old stray file stayed")
+	}
+	if !x.exists(stagingDir) || !x.hasState() {
+		t.Fatal("a stray name swept a young fetch")
 	}
 }
 
@@ -96,13 +195,13 @@ func TestSweepLeavesWhatItMustNot(t *testing.T) {
 	x.age(t, StagingMaxAge+time.Hour)
 	k := key{lib: 3, id: testID}
 	x.h.begin(k)
-	x.h.Sweep(time.Now())
+	x.h.Sweep(time.Now(), nil)
 	x.h.end(k)
 	if !x.exists(stagingDir) || !x.hasState() {
 		t.Fatal("the sweep took a running fetch's staging")
 	}
 	x.libs.writable = false
-	x.h.Sweep(time.Now())
+	x.h.Sweep(time.Now(), nil)
 	if !x.exists(stagingDir) || !x.hasState() {
 		t.Fatal("the sweep dropped a fetch it can't reach")
 	}
@@ -116,7 +215,7 @@ func TestSweepLeavesWhatItMustNot(t *testing.T) {
 		t.Fatal("the rescan didn't fail")
 	}
 	x.age(t, StagingMaxAge+time.Hour)
-	x.h.Sweep(time.Now())
+	x.h.Sweep(time.Now(), nil)
 	if !x.exists(bookDir+"/03 - Johnny Crow's New Garden.mp3") || x.hasState() {
 		t.Fatal("the sweep took a placed book, or kept its state")
 	}
@@ -143,7 +242,7 @@ func TestOtherServersStateNeverActedOn(t *testing.T) {
 	x.stageAndStop(t)
 	x.age(t, StagingMaxAge+time.Hour)
 	x.serverID = "server-b"
-	x.h.Sweep(time.Now())
+	x.h.Sweep(time.Now(), nil)
 	if !x.exists(stagingDir) || x.hasState() {
 		t.Fatal("the sweep acted on another server's state, or kept it")
 	}

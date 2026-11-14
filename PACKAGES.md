@@ -2733,18 +2733,26 @@ internal/
             failure or Abandon (not on a lost claim; only the abandoned job's own
             library's state) removes
             the staging folder, the author folder it made when empty, and the
-            state. A fetch already running here (the same library and project,
+            state (removeStaging reports whether the folder went: one that
+            can't be removed now, a cancel while the mount is away or a library
+            not listed yet, keeps its state for the sweep). A fetch already running here (the same library and project,
             the handler's active set) holds a second run back up to ~2 min
             (awaitPolls: a re-add claimed while a cancelled parked run is still
             ending, since the server cancels a parked job at once and the run
             hears it at its next report), then fails it; Abandon leaves it. sweep.go (bridge#69, audible.import's 7 days): Sweep, run by the
             app after each mapping check (not at start-up: the staging folders
             are in the libraries, known only after a heartbeat and the check),
-            removes a state unused for StagingMaxAge (a run touches it on
-            resume) with its staging folder and the author folder it made; it
-            skips an active fetch, keeps one whose library isn't a checked
-            writable mapping now, drops only the state of a placed book or of
-            another server, and removes other old files in the state folder. A
+            removes a state unused for StagingMaxAge (a run touches it when it
+            loads it and when it ends; the age is read again under the fetch's
+            reservation) with its staging folder and the author folder it made;
+            it skips an active fetch and one whose job the runner still holds
+            (the app names the running librivox.fetch rows' params from
+            store.OpenServerJobs: a recovered job waiting for its lane or one a
+            refused token stopped has no run yet; rows it can't read, no sweep),
+            keeps one whose library isn't a checked writable mapping now or
+            whose staging folder can't be removed, drops only the state of a
+            placed book or of another server, and removes other old regular
+            files in the state folder (never a folder). A
             staging folder whose state is gone is out of its reach.
             Steps manifest, download (done/total = sections), cover, place,
             rescan. Result {library_id, path (the rescan's), librivox_id, files,

@@ -92,8 +92,10 @@ func (h *Handler) loadState(lib int64, id int) *state {
 }
 
 // touchState marks the state of the project's fetch into library lib as in
-// use now: the sweep goes by the state's age, and a run that resumes without
-// saving (everything downloaded, meta down again) must not look abandoned.
+// use now (nothing when there is none): the sweep goes by the state's age, and
+// a run that resumes without saving (everything downloaded, meta down again),
+// or one that ends long after its last save (parked for days), must not look
+// abandoned. A run touches it when it loads it and when it ends.
 func (h *Handler) touchState(lib int64, id int, now time.Time) {
 	_ = os.Chtimes(h.statePath(lib, id), now, now)
 }
