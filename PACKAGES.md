@@ -2759,10 +2759,7 @@ internal/
             bytes, adopted} (files and bytes: the sections and the cover;
             adopted, always sent since bridge#69, false only when this run
             itself renamed staging into place (the server treats that folder
-            as new); any run that finds the folder already placed says true:
-            plan finding it holding this project, a kept placed state (a
-            retried failed rescan) or an earlier run's unrecorded rename, since
-            the book may have been indexed and edited meanwhile); a failure is
+            as new), true for any run that finds it already placed); a failure is
             Failure {code, message} as result and error, codes not_writable,
             exists, disk_full, not_found, archive_unavailable, metadata_off,
             never a URL. Deps: fsutil, importjob, jobs, link, mapping, metaops,
