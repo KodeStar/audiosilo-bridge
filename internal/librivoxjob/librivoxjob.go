@@ -17,6 +17,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/kodestar/audiosilo-bridge/internal/fsutil"
@@ -98,12 +99,18 @@ func ParseParams(raw json.RawMessage) (Params, error) {
 
 // Result is a done fetch: the book's path as the server indexed it, the
 // project, and the files placed (the sections and the cover) with their bytes.
+// Adopted (always sent; additive, so an older server ignores it) is true when
+// the book's folder already held this project's librivox.json when the fetch
+// planned, so the Bridge downloaded and placed nothing and only rescanned it;
+// false when this fetch placed the folder (a resume that finds its own
+// unrecorded placement included).
 type Result struct {
 	LibraryID  int64  `json:"library_id"`
 	Path       string `json:"path"`
 	LibrivoxID int    `json:"librivox_id"`
 	Files      int    `json:"files"`
 	Bytes      int64  `json:"bytes"`
+	Adopted    bool   `json:"adopted"`
 }
 
 // Marker is .audiosilo/librivox.json, the book's LibriVox identity in its own
@@ -156,6 +163,9 @@ type Options struct {
 	// StateDir is <data>/librivox: each fetch's plan and partial downloads'
 	// validators (state).
 	StateDir string
+	// ServerID is the paired server's id ("" when unknown), recorded in each
+	// state: a state of another server is never acted on.
+	ServerID func() string
 	Log      *slog.Logger
 
 	// Seams (tests): the free-space reader and the wait between attempts and
@@ -170,6 +180,11 @@ type Options struct {
 // audible.import and an ordinary podcast.fetch): one book at a time.
 type Handler struct {
 	o Options
+
+	// mu guards active: the fetches running here (Run), which Abandon and
+	// Sweep leave alone, and which a second claim of the same fetch can't join.
+	mu     sync.Mutex
+	active map[key]bool
 }
 
 // New returns the handler.
@@ -183,7 +198,10 @@ func New(o Options) *Handler {
 	if o.Wait == nil {
 		o.Wait = netguard.Wait
 	}
-	return &Handler{o: o}
+	if o.ServerID == nil {
+		o.ServerID = func() string { return "" }
+	}
+	return &Handler{o: o, active: map[key]bool{}}
 }
 
 // Kind is librivox.fetch.
@@ -199,7 +217,9 @@ const mappingPoll = time.Second
 // running it (cancelled before it resumed). A lost claim keeps it: the server
 // hands the job out again and the next claim resumes it. A placed book stays.
 // The state is the job's library's alone, so a fetch of the same project
-// into another library is never touched.
+// into another library is never touched, and this server's alone: another
+// server's state is never followed into this server's same-numbered library.
+// A fetch of the same project and library running here meanwhile keeps it.
 func (h *Handler) Abandon(ctx context.Context, job jobs.Job) {
 	if jobs.Lost(ctx) {
 		return
@@ -208,6 +228,11 @@ func (h *Handler) Abandon(ctx context.Context, job jobs.Job) {
 	if err != nil {
 		return
 	}
+	k := key{lib: p.LibraryID, id: p.LibrivoxID}
+	if !h.begin(k) {
+		return
+	}
+	defer h.end(k)
 	st := h.loadState(p.LibraryID, p.LibrivoxID)
 	if st == nil || st.Placed {
 		return
@@ -229,6 +254,11 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 	if job.LibraryID != nil && *job.LibraryID != p.LibraryID {
 		return nil, errors.New("bad params: library_id isn't the job's library")
 	}
+	k := key{lib: p.LibraryID, id: p.LibrivoxID}
+	if !h.begin(k) {
+		return nil, errors.New("the Bridge is already adding this recording to this library")
+	}
+	defer h.end(k)
 	res, err := h.run(ctx, job, p, rep)
 	var f *Failure
 	if errors.As(err, &f) {
@@ -274,6 +304,9 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, p Params, rep *jobs.Rep
 		return nil, err
 	}
 	f := &fetch{p: p, lib: lib, mount: mount, rep: rep, st: h.loadState(lib.ID, p.LibrivoxID)}
+	if f.st != nil {
+		h.touchState(lib.ID, p.LibrivoxID, time.Now())
+	}
 	defer func() {
 		// A stop the next start resumes, and a lost claim the server hands out
 		// again, keep the staging folder and the state; a cancel or a failure
@@ -465,7 +498,7 @@ func (h *Handler) plan(ctx context.Context, f *fetch, srv Server, book metaops.L
 			return err
 		}
 	}
-	st := &state{LibraryID: f.lib.ID, Parent: parent}
+	st := &state{LibraryID: f.lib.ID, ServerID: h.o.ServerID(), Parent: parent}
 	dest = path.Join(parent, path.Base(dest)) // under the author folder as spelled on disk
 	fallback := fallbackName(dest, f.p.LibrivoxID)
 	for _, at := range []string{dest, fallback} {
@@ -479,8 +512,15 @@ func (h *Handler) plan(ctx context.Context, f *fetch, srv Server, book metaops.L
 		case err != nil:
 			return fail(CodeNotWritable, "The Bridge can't look at %s in the library: %v", at, err)
 		case holdsProjectIn(root, at, f.p.LibrivoxID):
-			st.Dest, st.Placed = at, true
-			st.Count, st.Bytes = countFiles(root, at)
+			// The folder as the disk spells it (a case-insensitive disk finds
+			// "johnny crow's garden" for "Johnny Crow's Garden"): the rescan
+			// asks the server for the folder it indexes.
+			spelled, err := transfer.OnDisk(transfer.RootFS(root), at)
+			if err != nil || path.Dir(spelled) != path.Dir(at) {
+				spelled = at
+			}
+			st.Dest, st.Placed, st.Adopted = spelled, true, true
+			st.Count, st.Bytes = countFiles(root, spelled)
 		}
 		if st.Dest != "" {
 			break
@@ -502,6 +542,14 @@ func (h *Handler) plan(ctx context.Context, f *fetch, srv Server, book metaops.L
 	return nil
 }
 
+// scannerAudioExts are the extensions the server's scanner indexes as audio
+// (audiosilo-server internal/metadata AudioExtensions, mirrored by hand): an
+// author folder holding one is a book of its own to the server.
+var scannerAudioExts = map[string]bool{
+	".m4b": true, ".m4a": true, ".mp4": true, ".mp3": true,
+	".flac": true, ".ogg": true, ".opus": true, ".mka": true,
+}
+
 // parentFree refuses an author folder that is itself a book (one the server
 // lists, or one holding audio): the book's folder in it would join that book.
 func (h *Handler) parentFree(root *os.Root, parent string, books []link.LibraryBook) error {
@@ -518,7 +566,7 @@ func (h *Handler) parentFree(root *os.Root, parent string, books []link.LibraryB
 		return fail(CodeNotWritable, "The Bridge can't read the folder %s in the library: %v", parent, err)
 	}
 	for _, e := range entries {
-		if !e.IsDir() && audioExts[strings.ToLower(path.Ext(e.Name()))] {
+		if !e.IsDir() && scannerAudioExts[strings.ToLower(path.Ext(e.Name()))] {
 			return fail(CodeExists, "%s already holds audio (%s), a book of its own, so the recording can't go in a folder inside it.", parent, e.Name())
 		}
 	}
@@ -784,7 +832,8 @@ func (h *Handler) finish(ctx context.Context, f *fetch, srv Server) (*Result, er
 	h.o.Log.Info("librivox: added", "librivox_id", f.p.LibrivoxID, "library", f.lib.ID, "path", bookPath,
 		"files", f.st.Count, "bytes", f.st.Bytes)
 	h.dropState(f.lib.ID, f.p.LibrivoxID)
-	return &Result{LibraryID: f.lib.ID, Path: bookPath, LibrivoxID: f.p.LibrivoxID, Files: f.st.Count, Bytes: f.st.Bytes}, nil
+	return &Result{LibraryID: f.lib.ID, Path: bookPath, LibrivoxID: f.p.LibrivoxID, Files: f.st.Count, Bytes: f.st.Bytes,
+		Adopted: f.st.Adopted}, nil
 }
 
 // report records the job's progress.
@@ -815,7 +864,13 @@ func (h *Handler) recheck(ctx context.Context, f *fetch, step string) error {
 // the check waits for it; a mapping that isn't writable fails a new job
 // (strict) and parks a resumed one, or one past its download, not_writable
 // until it comes back.
+//
+// A parked fetch gives its download-lane slot back (jobs.Reporter.Yield), so
+// the Audible imports and podcast downloads that share the lane run while it
+// waits; once the mapping is back it takes a slot again (Reclaim) before it
+// writes anything, so downloads still go one at a time.
 func (h *Handler) mapped(ctx context.Context, id int64, rep *jobs.Reporter, step string, strict bool) (link.Library, string, error) {
+	yielded := false
 	for {
 		lib, ok := h.o.Libraries.Library(id)
 		if !ok || lib.LibraryKind() != "books" {
@@ -827,6 +882,12 @@ func (h *Handler) mapped(ctx context.Context, id int64, rep *jobs.Reporter, step
 		switch {
 		case checked && st.MountPath == mount && st.Mapped && st.Writable:
 			rep.Unpark()
+			if yielded {
+				h.report(rep, jobs.Progress{Step: step, Message: "Waiting for the Bridge's other download to finish"})
+				if err := rep.Reclaim(ctx); err != nil {
+					return link.Library{}, "", err
+				}
+			}
 			return lib, mount, nil
 		case !checked || st.MountPath != mount:
 			h.report(rep, jobs.Progress{Step: step, Message: "Waiting for the library's mapping check"})
@@ -836,6 +897,8 @@ func (h *Handler) mapped(ctx context.Context, id int64, rep *jobs.Reporter, step
 			h.report(rep, jobs.Progress{Step: step, Message: "Needs attention: " + why,
 				Extra: map[string]any{"park": map[string]any{"code": CodeNotWritable}}})
 			rep.Park(CodeNotWritable, why)
+			rep.Yield()
+			yielded = true
 		}
 		if err := h.o.Wait(ctx, mappingPoll); err != nil {
 			return link.Library{}, "", err

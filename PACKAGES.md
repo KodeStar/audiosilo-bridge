@@ -1739,7 +1739,10 @@ internal/
             extended=1&coverart=1; LibriVox's string ids, nullable coverart_jpg,
             ArchiveID from url_iarchive) and LibrivoxWork (works/{id}: title,
             author names, each recording's librivox_id and archive_id), uncached,
-            with ErrDisabled / ErrNotFound / ErrUnavailable apart. glossary.go adds
+            with ErrDisabled / ErrNotFound / ErrUnavailable apart, and (bridge#69)
+            ErrRefused for a permanent 4xx (any but 404, 408, 425, 429) from
+            readJSON; getJSON's other callers still read a refusal as
+            unavailable (ok=false, never cached as a miss). glossary.go adds
             SeriesGlossary (work -> its series -> the OTHER volumes' contributed
             character names/aliases, <= 12 siblings, own TTL caches), the canonical
             spelling evidence the spelling stage checks a transcript against; it
@@ -1904,7 +1907,14 @@ internal/
             the server may hand the same job out again), on the job's context and
             on the one Abandon gets (abandonFor carries the cause), so a handler
             keeps what the next claim can resume; LoseContext and AbandonContext
-            make those contexts for handler tests. Phase 2c-2b: dispatch.go owns ordinary and
+            make those contexts for handler tests. bridge#69: Reporter.Yield
+            gives a running job's lane slot back while it waits on something
+            outside the Bridge (opt-in; a Park alone keeps the slot, as
+            TestLiveParkKeepsSlot pins): the run is then "yielded", counted in
+            neither use nor waiting, so the lane claims another job; Reclaim
+            queues it first in line (waiting) and waits for admission. release
+            and strayWaitingLocked know the yielded state; a LocalReporter's
+            Yield and Reclaim do nothing. librivox.fetch yields while parked. Phase 2c-2b: dispatch.go owns ordinary and
             reserved dispatchers. InteractiveHandler opts a kind into the reserved
             pool (1), claimed only with negotiated min_priority=100. Download is
             1 with negotiation, 2 without it; light=2 and pipeline=25 stay fixed.
@@ -2621,7 +2631,9 @@ internal/
             unavailable (5xx, a dropped connection) is never terminal: each read
             is tried 4 times (5, 10, 20 s apart), then the run fails uncoded
             (keepStaging) with its staging folder and state kept for the next
-            attempt; only meta's definite 404 ends the fetch as not_found. Every
+            attempt; only meta's definite 404 ends the fetch as not_found
+            (bridge#69: a permanent 4xx, metaops.ErrRefused, ends it at once,
+            uncoded, read once and its staging removed). Every
             section URL must be https on archive.org or *.archive.org
             (AllowedURL, checked before anything is fetched or written, and on
             every redirect through netguard's per-request Allow; never
@@ -2645,8 +2657,11 @@ internal/
             untitled section, or one that was only its number, is "Section N"; the URL's audio extension, else .mp3). The title's
             folder taken, once "<Title> (LibriVox <id>)", else exists; a folder
             already holding this project's librivox.json is the book (rescan
-            only); an author folder that is a listed book or holds audio is
-            exists. Staging <parent>/.audiosilo-librivox-<id>/ (a dot folder the
+            only, the result's adopted true; its folder as the disk spells it,
+            transfer.OnDisk, so a case-insensitive disk rescans the indexed
+            spelling); an author folder that is a listed book or holds audio
+            (scannerAudioExts: the server scanner's extensions, mirrored by
+            hand, wider than the section names' audioExts) is exists. Staging <parent>/.audiosilo-librivox-<id>/ (a dot folder the
             scan skips), every write through the mount's os.Root (0755/0644):
             each section to <name>.part, its strong ETag and size recorded in
             the state before the body (the ETag only beside a stated size; a
@@ -2658,18 +2673,28 @@ internal/
             stated size and never empty, and only audio (a Content-Type other
             than none, audio/*, octet-stream or application/ogg is never written;
             a whole file whose first bytes (past zero padding in its first 4 KB)
-            are no ID3 tag, MPEG frame sync, OggS, fLaC or MP4 ftyp is removed;
+            are no ID3 or APE tag, MPEG frame sync, RIFF WAVE (RIFF-MP3), OggS,
+            fLaC or MP4 ftyp is removed;
             both tried again like a dropped
             connection, then archive_unavailable; a finished file is skipped on
             resume);
             three attempts in a row that add nothing fail archive_unavailable
             (adding = past the MOST the partial has held, section's high-water
             mark, so restarts from zero that only pass the last cut don't
-            count), as does a 4xx other than 408, 416 and 429 (tried again);
+            count) and, since bridge#69, KEEP the staging folder and the state
+            like a meta outage (keepStaging wrapping the Failure: the code
+            stays archive_unavailable, the next attempt resumes); a 4xx other
+            than 408, 416 and 429 (tried again) fails archive_unavailable and
+            removes them;
             the library's free space 1.1x each file's rest, else disk_full.
             The mapping is checked again before each section, before the cover
             and marker, and before the rename (recheck): not writable parks; a
-            mapping moved to another mount fails not_writable (the staging
+            mapping moved to another mount fails not_writable (bridge#69: a
+            parked fetch gives its download-lane slot back with
+            jobs.Reporter.Yield, so Audible imports and podcast downloads run
+            while it waits, and takes one again with Reclaim once the mapping is
+            back, before any write: downloads stay one at a time, sections
+            serial) (the staging
             folder isn't there), and the library is opened per section, not
             held across a park. cover.jpg best effort (only a
             sniffed JPEG from archive.org), then .audiosilo/librivox.json
@@ -2686,9 +2711,13 @@ internal/
             the rescan (3 tries). State <data>/librivox/<library_id>-<id>.json,
             one per library and project, so fetches of one project into two
             libraries never touch each other's staging (state.go: the
-            library, parent and whether the fetch made it, destination (staging is
+            library, the paired server's id (bridge#69: a state of another
+            server is dropped by loadState, so a run plans afresh and Abandon
+            and the sweep never follow it into this server's same-numbered
+            library; none recorded counts as this server's), parent and whether
+            the fetch made it, destination (staging is
             <parent>/.audiosilo-librivox-<id>, never stored),
-            the partials' validators, then placed + count + bytes): a resumed run
+            the partials' validators, then placed + count + bytes + adopted): a resumed run
             follows it rather than planning again, Abandon finds the staging
             folder by it, and once placed it is the placement marker (a failed
             rescan keeps the book and the state; the retry goes on from the
@@ -2700,11 +2729,24 @@ internal/
             failure or Abandon (not on a lost claim; only the abandoned job's own
             library's state) removes
             the staging folder, the author folder it made when empty, and the
-            state. A lost claim
-            never handed out again leaves its staging folder (hidden, unindexed).
+            state. A fetch already running here (the same library and project,
+            the handler's active set) refuses a second run and Abandon leaves
+            it. sweep.go (bridge#69, audible.import's 7 days): Sweep, run by the
+            app after each mapping check (not at start-up: the staging folders
+            are in the libraries, known only after a heartbeat and the check),
+            removes a state unused for StagingMaxAge (a run touches it on
+            resume) with its staging folder and the author folder it made; it
+            skips an active fetch, keeps one whose library isn't a checked
+            writable mapping now, drops only the state of a placed book or of
+            another server, and removes other old files in the state folder. A
+            staging folder whose state is gone is out of its reach.
             Steps manifest, download (done/total = sections), cover, place,
             rescan. Result {library_id, path (the rescan's), librivox_id, files,
-            bytes} (files and bytes: the sections and the cover); a failure is
+            bytes, adopted} (files and bytes: the sections and the cover;
+            adopted, always sent since bridge#69, true only when plan found the
+            folder already holding this project, carried in the state across a
+            failed rescan; a resume that finds its own unrecorded rename is
+            false); a failure is
             Failure {code, message} as result and error, codes not_writable,
             exists, disk_full, not_found, archive_unavailable, metadata_off,
             never a URL. Deps: fsutil, importjob, jobs, link, mapping, metaops,

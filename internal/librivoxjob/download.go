@@ -126,8 +126,12 @@ func (h *Handler) section(ctx context.Context, root *os.Root, f *fetch, i int, r
 			failures++
 		}
 		if failures >= downloadAttempts {
-			return fail(CodeArchiveUnavailable, "archive.org didn't deliver section %d of LibriVox recording %d (%s): try again later.",
-				i+1, f.p.LibrivoxID, r.cause)
+			// archive.org down (or cutting every attempt short) is never this
+			// fetch's fault: like meta down, the staging folder and the state
+			// stay for the next attempt, which resumes from them (the sweep
+			// removes them once unused for StagingMaxAge).
+			return &keepStaging{err: fail(CodeArchiveUnavailable, "archive.org didn't deliver section %d of LibriVox recording %d (%s): try again later.",
+				i+1, f.p.LibrivoxID, r.cause)}
 		}
 		h.o.Log.Info("librivox: a section's download failed; trying again", "librivox_id", f.p.LibrivoxID, "section", i+1,
 			"failures", failures, "cause", r.cause)
@@ -295,10 +299,10 @@ func audioType(contentType string) bool {
 }
 
 // audioHead reports whether a finished section's first bytes are audio: an
-// ID3 tag or an MPEG frame sync (LibriVox's MP3s), else the Ogg, FLAC or MP4
-// signature a section of another extension starts with. Zero bytes before
-// the tag or the first frame (padding some encoders leave) are skipped within
-// the first headWindow bytes.
+// ID3 or APE tag or an MPEG frame sync (LibriVox's MP3s), a RIFF WAVE wrapper
+// (RIFF-MP3), else the Ogg, FLAC or MP4 signature a section of another
+// extension starts with. Zero bytes before the tag or the first frame (padding
+// some encoders leave) are skipped within the first headWindow bytes.
 func audioHead(root *os.Root, name string) bool {
 	file, err := root.Open(name)
 	if err != nil {
@@ -321,6 +325,12 @@ func isAudioHead(b []byte) bool {
 	b = bytes.TrimLeft(b, "\x00")
 	switch {
 	case bytes.HasPrefix(b, []byte("ID3")), bytes.HasPrefix(b, []byte("OggS")), bytes.HasPrefix(b, []byte("fLaC")):
+		return true
+	case len(b) >= 12 && string(b[:4]) == "RIFF" && string(b[8:12]) == "WAVE":
+		// An MP3 in a RIFF WAVE wrapper (some old encoders' RIFF-MP3).
+		return true
+	case bytes.HasPrefix(b, []byte("APETAGEX")):
+		// An APE tag at the file's head, before the first frame.
 		return true
 	case len(b) >= 2 && b[0] == 0xFF && b[1]&0xE0 == 0xE0:
 		return true
