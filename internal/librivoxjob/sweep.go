@@ -14,31 +14,6 @@ import (
 // archive.org was down and was never retried.
 const StagingMaxAge = 7 * 24 * time.Hour
 
-// key is one fetch's state: a library and a project.
-type key struct {
-	lib int64
-	id  int
-}
-
-// begin marks the fetch of k as running here, false when one already is (the
-// sweep and Abandon leave a running fetch's staging alone).
-func (h *Handler) begin(k key) bool {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if h.active[k] {
-		return false
-	}
-	h.active[k] = true
-	return true
-}
-
-// end marks the fetch of k as no longer running here.
-func (h *Handler) end(k key) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	delete(h.active, k)
-}
-
 // parseStateName reads <library_id>-<librivox_id>.json.
 func parseStateName(name string) (key, bool) {
 	stem, ok := strings.CutSuffix(name, ".json")
@@ -88,11 +63,11 @@ func (h *Handler) Sweep(now time.Time) {
 
 // sweepOne is Sweep for one old state.
 func (h *Handler) sweepOne(k key) {
-	h.mu.Lock()
-	defer h.mu.Unlock() // a run of this fetch can't start meanwhile
-	if h.active[k] {
+	if !h.begin(k) {
 		return
 	}
+	defer h.end(k) // a run of this fetch waits meanwhile (await)
+
 	st := h.loadState(k.lib, k.id) // gone already when invalid or another server's
 	if st == nil {
 		return

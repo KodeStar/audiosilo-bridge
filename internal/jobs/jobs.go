@@ -1090,7 +1090,7 @@ func (p *Reporter) Unpark() {
 // keeps the slot. Nothing for a job that holds none (a LocalReporter only
 // records it for Yielded).
 func (p *Reporter) Yield() {
-	if p.r == nil || p.ru == nil {
+	if p.ru == nil {
 		p.mu.Lock()
 		p.localYielded = true
 		p.mu.Unlock()
@@ -1112,7 +1112,7 @@ func (p *Reporter) Yield() {
 // job holding the slot to end. The context's error when it ended first; nil at
 // once when the job didn't yield.
 func (p *Reporter) Reclaim(ctx context.Context) error {
-	if p.r == nil || p.ru == nil {
+	if p.ru == nil {
 		p.mu.Lock()
 		p.localYielded = false
 		p.mu.Unlock()
@@ -1137,7 +1137,7 @@ func (p *Reporter) Reclaim(ctx context.Context) error {
 // Yielded reports whether the job gave its slot back and hasn't reclaimed one
 // (a LocalReporter records its Yield and Reclaim too, for a handler's tests).
 func (p *Reporter) Yielded() bool {
-	if p.r == nil || p.ru == nil {
+	if p.ru == nil {
 		p.mu.Lock()
 		defer p.mu.Unlock()
 		return p.localYielded

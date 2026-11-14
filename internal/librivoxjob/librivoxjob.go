@@ -270,6 +270,32 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 	return res, nil
 }
 
+// key is one fetch's state: a library and a project.
+type key struct {
+	lib int64
+	id  int
+}
+
+// begin marks the fetch of k as held here (a run, an Abandon or the sweep at
+// work on it), false when it already is: the sweep and Abandon leave a running
+// fetch's staging alone.
+func (h *Handler) begin(k key) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.active[k] {
+		return false
+	}
+	h.active[k] = true
+	return true
+}
+
+// end gives the fetch of k up again.
+func (h *Handler) end(k key) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	delete(h.active, k)
+}
+
 // awaitPolls bounds how long a run waits for an earlier run of the same fetch
 // to end (mappingPoll apart: about two minutes). That run is one ending: the
 // server cancels a parked job at once, and the run hears it at its next
@@ -404,7 +430,8 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, p Params, rep *jobs.Rep
 // meta unavailable (a 5xx, a dropped connection) is never terminal: each read
 // is tried metaAttempts times, and still unavailable the run fails with a
 // keepStaging error, which keeps the staging folder and the state for the
-// next attempt. Only meta's definite 404 (not_found) ends the fetch.
+// next attempt. Meta's definite answers end the fetch: a 404 (not_found), or
+// a refusal (metaops.ErrRefused), which no retry would change.
 func (h *Handler) manifest(ctx context.Context, p Params, rep *jobs.Reporter) (metaops.LibrivoxBook, *metaops.LibrivoxWork, error) {
 	metadataOff := func() error {
 		return fail(CodeMetadataOff, "The Bridge has no metadata service set (metadata.base_url), so it can't read LibriVox recordings.")
@@ -452,7 +479,8 @@ const (
 )
 
 // keepStaging is a run's failure that leaves the staging folder and the state
-// for the next attempt (meta unavailable): nothing the fetch holds is wrong.
+// for the next attempt (meta or archive.org unavailable): nothing the fetch
+// holds is wrong.
 type keepStaging struct{ err error }
 
 func (k *keepStaging) Error() string { return k.err.Error() }
@@ -460,8 +488,8 @@ func (k *keepStaging) Unwrap() error { return k.err }
 
 // metaRead is read, tried again while meta is unavailable
 // (metaops.ErrUnavailable); still unavailable after metaAttempts, the error is
-// a keepStaging. Any other answer (a 404, metadata off, the context) is
-// returned at once.
+// a keepStaging. Any other answer (a 404, a refusal, metadata off, the
+// context) is returned at once.
 func metaRead[T any](ctx context.Context, h *Handler, rep *jobs.Reporter, read func() (T, error)) (T, error) {
 	wait := metaWait
 	for attempt := 1; ; attempt++ {
@@ -892,7 +920,6 @@ func (h *Handler) recheck(ctx context.Context, f *fetch, step string) error {
 // waits; once the mapping is back it takes a slot again (Reclaim) before it
 // writes anything, so downloads still go one at a time.
 func (h *Handler) mapped(ctx context.Context, id int64, rep *jobs.Reporter, step string, strict bool) (link.Library, string, error) {
-	yielded := false
 	for {
 		lib, ok := h.o.Libraries.Library(id)
 		if !ok || lib.LibraryKind() != "books" {
@@ -902,19 +929,18 @@ func (h *Handler) mapped(ctx context.Context, id int64, rep *jobs.Reporter, step
 		st, checked := h.o.Libraries.Status(lib.ID)
 		why := fmt.Sprintf("Library %s must be mapped and writable on the Bridge: check its mapping on the Bridge's Status tab.", lib.Name)
 		switch {
-		case checked && st.MountPath == mount && st.Mapped && st.Writable && yielded:
+		case checked && st.MountPath == mount && st.Mapped && st.Writable:
+			rep.Unpark()
+			if !rep.Yielded() {
+				return lib, mount, nil
+			}
 			// Back, but without a slot: take one, then look at the mapping
 			// again, since the wait for the slot may have been long.
-			rep.Unpark()
 			h.report(rep, jobs.Progress{Step: step, Message: "Waiting for the Bridge's other download to finish"})
 			if err := rep.Reclaim(ctx); err != nil {
 				return link.Library{}, "", err
 			}
-			yielded = false
 			continue
-		case checked && st.MountPath == mount && st.Mapped && st.Writable:
-			rep.Unpark()
-			return lib, mount, nil
 		case !checked || st.MountPath != mount:
 			h.report(rep, jobs.Progress{Step: step, Message: "Waiting for the library's mapping check"})
 		case strict:
@@ -924,7 +950,6 @@ func (h *Handler) mapped(ctx context.Context, id int64, rep *jobs.Reporter, step
 				Extra: map[string]any{"park": map[string]any{"code": CodeNotWritable}}})
 			rep.Park(CodeNotWritable, why)
 			rep.Yield()
-			yielded = true
 		}
 		if err := h.o.Wait(ctx, mappingPoll); err != nil {
 			return link.Library{}, "", err

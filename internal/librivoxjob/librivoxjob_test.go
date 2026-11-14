@@ -413,20 +413,9 @@ func TestFetchParentIsABook(t *testing.T) {
 	if code := failureCode(t, out, err); code != CodeExists {
 		t.Fatalf("listed: code %q (%v)", code, err)
 	}
-	x = newHarness(t)
-	if err := os.MkdirAll(x.path("L. Leslie Brooke"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(x.path("L. Leslie Brooke/track.mp3"), []byte("a"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	out, err = x.run(context.Background(), false)
-	if code := failureCode(t, out, err); code != CodeExists {
-		t.Fatalf("audio: code %q (%v)", code, err)
-	}
 	// Every extension the server's scanner indexes counts, not only the ones
 	// a section is named with.
-	for _, name := range []string{"track.mka", "track.MP4"} {
+	for _, name := range []string{"track.mp3", "track.mka", "track.MP4"} {
 		x = newHarness(t)
 		if err := os.MkdirAll(x.path("L. Leslie Brooke"), 0o755); err != nil {
 			t.Fatal(err)

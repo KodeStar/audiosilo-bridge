@@ -884,18 +884,6 @@ func laneCounts(r *Runner, lane string) (use, waiting int) {
 	return r.use[lane], r.waiting[lane]
 }
 
-// eventually fails the test unless cond holds within 3 s.
-func eventually(t *testing.T, what string, cond func() bool) {
-	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
-	for !cond() {
-		if time.Now().After(deadline) {
-			t.Fatal("timed out waiting for", what)
-		}
-		time.Sleep(time.Millisecond)
-	}
-}
-
 // A job that parks and yields gives its download slot to the next download
 // job; its Reclaim waits for that job to end and queues first; a cancel while
 // it is yielded or reclaiming leaves the lane's counts right.
@@ -953,7 +941,7 @@ func TestYieldFreesSlotAndReclaimWaits(t *testing.T) {
 				if !r.Cancel(1) {
 					t.Fatal("no job 1")
 				}
-				eventually(t, "the cancelled job's end", func() bool {
+				waitFor(t, func() bool { // the cancelled job's end
 					r.mu.Lock()
 					defer r.mu.Unlock()
 					return len(r.running) == 0 && r.use[LaneDownload] == 0 && r.waiting[LaneDownload] == 0
@@ -968,7 +956,7 @@ func TestYieldFreesSlotAndReclaimWaits(t *testing.T) {
 			c.answer <- claimed(2, other.Kind(), 0)
 			await(t, started)
 			close(goOn)
-			eventually(t, "the reclaim queued", func() bool {
+			waitFor(t, func() bool { // the reclaim queued
 				use, waiting := laneCounts(r, LaneDownload)
 				return use == 1 && waiting == 1
 			})
@@ -982,12 +970,12 @@ func TestYieldFreesSlotAndReclaimWaits(t *testing.T) {
 				if err := await(t, reclaimed); err == nil {
 					t.Fatal("a cancelled reclaim succeeded")
 				}
-				eventually(t, "the cancelled job's end", func() bool {
+				waitFor(t, func() bool { // the cancelled job's end
 					use, waiting := laneCounts(r, LaneDownload)
 					return use == 1 && waiting == 0
 				})
 				close(gate[2])
-				eventually(t, "the lane empty", func() bool {
+				waitFor(t, func() bool { // the lane empty
 					use, waiting := laneCounts(r, LaneDownload)
 					return use == 0 && waiting == 0
 				})
@@ -1001,7 +989,7 @@ func TestYieldFreesSlotAndReclaimWaits(t *testing.T) {
 				t.Fatalf("reclaimed: use %d waiting %d", use, waiting)
 			}
 			close(finish)
-			eventually(t, "the lane empty", func() bool {
+			waitFor(t, func() bool { // the lane empty
 				use, waiting := laneCounts(r, LaneDownload)
 				return use == 0 && waiting == 0
 			})
