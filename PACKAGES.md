@@ -1913,7 +1913,9 @@ internal/
             TestLiveParkKeepsSlot pins): the run is then "yielded", counted in
             neither use nor waiting, so the lane claims another job; Reclaim
             queues it first in line (waiting) and waits for admission. release
-            and strayWaitingLocked know the yielded state; Yielded reports it (a
+            knows the yielded state, and Yield clears the run's stray mark (a
+            stray holds its dispatcher for its first wait only, never for the
+            wait in Reclaim); Yielded reports it (a
             LocalReporter only records its Yield and Reclaim, for a handler's
             tests). librivox.fetch yields while parked. Phase 2c-2b: dispatch.go owns ordinary and
             reserved dispatchers. InteractiveHandler opts a kind into the reserved

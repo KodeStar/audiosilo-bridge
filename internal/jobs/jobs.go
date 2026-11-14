@@ -521,7 +521,8 @@ type run struct {
 	// lane admits another job meanwhile; Reporter.Reclaim queues it again.
 	yielded bool
 	// stray: a claim answered outside its admission (claimRequest.fallback).
-	// While it waits, the dispatcher that took it (strayReserve) claims no more.
+	// While it waits for its first slot, the dispatcher that took it
+	// (strayReserve) claims no more; Yield clears it.
 	stray, strayReserve bool
 }
 
@@ -1102,7 +1103,10 @@ func (p *Reporter) Yield() {
 	if !ru.admitted {
 		return
 	}
-	ru.admitted, ru.yielded = false, true
+	// A stray's hold on its dispatcher (strayWaitingLocked) is for its first
+	// wait only: it had its slot, so neither the yield nor the wait in Reclaim
+	// keeps that dispatcher from claiming for the other lanes.
+	ru.admitted, ru.yielded, ru.stray = false, true, false
 	r.use[ru.lane]--
 	r.wakeLocked()
 }

@@ -997,6 +997,59 @@ func TestYieldFreesSlotAndReclaimWaits(t *testing.T) {
 	}
 }
 
+// A stray (a claim answered outside its admission) holds its dispatcher only
+// while it waits for its first slot: once it yielded, neither the yield nor
+// its wait in Reclaim behind another download stops the claims for the other
+// lanes.
+func TestYieldedStrayFreesItsDispatcher(t *testing.T) {
+	srv := newControlledServer(false)
+	opts := testOpts()
+	opts.Lanes = map[string]int{LaneDownload: 1, LaneLight: 1}
+	r := New(openStore(t), func() Server { return srv }, nil, opts)
+	ctx, cancel := context.WithCancelCause(context.Background())
+	defer cancel(nil)
+	ru := &run{job: Job{ID: 1}, lane: LaneDownload, cancel: cancel, stray: true}
+	r.mu.Lock()
+	r.running[1] = ru
+	r.waiting[LaneDownload]++
+	if !r.strayWaitingLocked(false) {
+		t.Error("a waiting stray doesn't hold its dispatcher")
+	}
+	r.mu.Unlock()
+	if !r.awaitAdmission(ctx, ru) {
+		t.Fatal("not admitted")
+	}
+	rep := &Reporter{r: r, ru: ru}
+	rep.Yield()
+	r.mu.Lock()
+	held := r.strayWaitingLocked(false)
+	r.use[LaneDownload]++ // another download took the slot
+	r.mu.Unlock()
+	if held {
+		t.Fatal("a yielded stray holds its dispatcher")
+	}
+	reclaimed := make(chan error, 1)
+	go func() { reclaimed <- rep.Reclaim(ctx) }()
+	waitFor(t, func() bool {
+		_, waiting := laneCounts(r, LaneDownload)
+		return waiting == 1
+	})
+	r.mu.Lock()
+	held = r.strayWaitingLocked(false)
+	r.mu.Unlock()
+	if held {
+		t.Fatal("a reclaiming stray holds its dispatcher")
+	}
+	cancel(errCancelRequested)
+	if err := await(t, reclaimed); err == nil {
+		t.Fatal("a cancelled reclaim succeeded")
+	}
+	r.release(ru, false)
+	if use, waiting := laneCounts(r, LaneDownload); use != 1 || waiting != 0 {
+		t.Fatalf("released: use %d waiting %d", use, waiting)
+	}
+}
+
 // A LocalReporter's Yield and Reclaim only record it, for Yielded.
 func TestLocalReporterYield(t *testing.T) {
 	rep := LocalReporter()
