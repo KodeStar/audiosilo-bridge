@@ -516,6 +516,10 @@ type run struct {
 	parked   string
 	progress json.RawMessage
 	admitted bool
+	// yielded: the job gave its slot back while it waits on something outside
+	// the Bridge (Reporter.Yield): counted neither in use nor in waiting, so the
+	// lane admits another job meanwhile; Reporter.Reclaim queues it again.
+	yielded bool
 	// stray: a claim answered outside its admission (claimRequest.fallback).
 	// While it waits, the dispatcher that took it (strayReserve) claims no more.
 	stray, strayReserve bool
@@ -620,9 +624,10 @@ func (r *Runner) release(ru *run, stranded bool) {
 	if r.running[ru.job.ID] == ru { // a later claim of the same job may run under its id
 		delete(r.running, ru.job.ID)
 	}
-	if ru.admitted {
+	switch {
+	case ru.admitted:
 		r.use[ru.lane]--
-	} else {
+	case !ru.yielded:
 		r.waiting[ru.lane]--
 	}
 	if stranded {
@@ -636,7 +641,7 @@ func (r *Runner) release(ru *run, stranded bool) {
 // which must go out after the job's own context ended). It reports whether a
 // refused token stopped the job (left running, to resume under its claim).
 func (r *Runner) execute(ctx, base context.Context, srv Server, h Handler, ru *run) (stranded bool) {
-	rep := &Reporter{r: r, srv: srv, job: ru.job, cancel: ru.cancel, ctx: ctx, nudge: make(chan struct{}, 1)}
+	rep := &Reporter{r: r, ru: ru, srv: srv, job: ru.job, cancel: ru.cancel, ctx: ctx, nudge: make(chan struct{}, 1)}
 	if ru.parked != "" {
 		rep.parked, rep.parkMsg = true, ru.parked
 		// The server hears a park whose code changes as a new park (a bell
@@ -917,7 +922,10 @@ func decodeProgress(raw json.RawMessage) Progress {
 // Progress only records: the job's reporting goroutine (loop) sends, so a
 // handler never waits on the network.
 type Reporter struct {
-	r      *Runner
+	r *Runner
+	// ru is the job's run (nil for a LocalReporter): Yield and Reclaim move its
+	// lane slot.
+	ru     *run
 	srv    Server
 	job    Job
 	cancel context.CancelCauseFunc
@@ -1071,6 +1079,50 @@ func (p *Reporter) Unpark() {
 	if was {
 		p.wake()
 	}
+}
+
+// Yield gives the job's lane slot back while it waits on something outside
+// the Bridge for an unknown time (a parked librivox.fetch waiting for its
+// library's mapping), so the lane admits another job meanwhile. The job keeps
+// running and reporting; it holds no slot until Reclaim. Opt-in: a park alone
+// keeps the slot. Nothing for a LocalReporter or a job that holds none.
+func (p *Reporter) Yield() {
+	if p.r == nil || p.ru == nil {
+		return
+	}
+	r, ru := p.r, p.ru
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !ru.admitted {
+		return
+	}
+	ru.admitted, ru.yielded = false, true
+	r.use[ru.lane]--
+	r.wakeLocked()
+}
+
+// Reclaim takes a lane slot again after Yield before the job goes on: it
+// queues first in line (no new claim for the lane meanwhile) and waits for the
+// job holding the slot to end. The context's error when it ended first; nil at
+// once when the job didn't yield.
+func (p *Reporter) Reclaim(ctx context.Context) error {
+	if p.r == nil || p.ru == nil {
+		return nil
+	}
+	r, ru := p.r, p.ru
+	r.mu.Lock()
+	if !ru.yielded {
+		r.mu.Unlock()
+		return nil
+	}
+	ru.yielded = false
+	r.waiting[ru.lane]++
+	r.wakeLocked()
+	r.mu.Unlock()
+	if !r.awaitAdmission(ctx, ru) {
+		return ctx.Err()
+	}
+	return nil
 }
 
 // parkState reports whether the job is parked, and with what message.

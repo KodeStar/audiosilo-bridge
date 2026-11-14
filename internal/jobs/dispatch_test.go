@@ -876,3 +876,138 @@ func TestLanesLeaveOutAnEmptyFoldedReserve(t *testing.T) {
 		t.Fatalf("negotiated lanes %v", negotiated)
 	}
 }
+
+// laneCounts reads a lane's use and waiting counts.
+func laneCounts(r *Runner, lane string) (use, waiting int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.use[lane], r.waiting[lane]
+}
+
+// eventually fails the test unless cond holds within 3 s.
+func eventually(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for", what)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// A job that parks and yields gives its download slot to the next download
+// job; its Reclaim waits for that job to end and queues first; a cancel while
+// it is yielded or reclaiming leaves the lane's counts right.
+func TestYieldFreesSlotAndReclaimWaits(t *testing.T) {
+	for _, mode := range []string{"reclaim", "cancel_yielded", "cancel_reclaiming"} {
+		t.Run(mode, func(t *testing.T) {
+			srv := newControlledServer(false)
+			yielded, goOn, reclaimed, finish := make(chan struct{}), make(chan struct{}), make(chan error, 1), make(chan struct{})
+			parker := handler{kind: "lane.parker", lane: LaneDownload, fn: func(ctx context.Context, _ Job, rep *Reporter) (any, error) {
+				rep.Park("not_writable", "Waiting for the mapping")
+				rep.Yield()
+				rep.Yield() // a second Yield changes nothing
+				close(yielded)
+				select {
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				case <-goOn:
+				}
+				rep.Unpark()
+				err := rep.Reclaim(ctx)
+				reclaimed <- err
+				if err != nil {
+					return nil, err
+				}
+				select {
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				case <-finish:
+				}
+				return nil, nil
+			}}
+			started := make(chan Job, 4)
+			gate := map[int64]chan struct{}{2: make(chan struct{})}
+			other := blockingHandler("lane.other", LaneDownload, started, gate)
+			opts := testOpts()
+			opts.Lanes = map[string]int{LaneDownload: 1, LaneLight: 1}
+			r := New(openStore(t), func() Server { return srv }, nil, opts, parker, other, handler{kind: "light", lane: LaneLight})
+			startControlled(t, r)
+			first := srv.next(t, false)
+			if !slices.Contains(first.kinds, "lane.other") {
+				t.Fatal(first.kinds)
+			}
+			first.answer <- claimed(1, parker.Kind(), 0)
+			await(t, yielded)
+			if use, waiting := laneCounts(r, LaneDownload); use != 0 || waiting != 0 {
+				t.Fatalf("yielded: use %d waiting %d", use, waiting)
+			}
+			if mode == "cancel_yielded" {
+				if !r.Cancel(1) {
+					t.Fatal("no job 1")
+				}
+				eventually(t, "the cancelled job's end", func() bool {
+					r.mu.Lock()
+					defer r.mu.Unlock()
+					return len(r.running) == 0 && r.use[LaneDownload] == 0 && r.waiting[LaneDownload] == 0
+				})
+				return
+			}
+			// The lane takes another download job meanwhile.
+			var c *controlledClaim
+			for c == nil || !slices.Contains(c.kinds, "lane.other") {
+				c = srv.next(t, false)
+			}
+			c.answer <- claimed(2, other.Kind(), 0)
+			await(t, started)
+			close(goOn)
+			eventually(t, "the reclaim queued", func() bool {
+				use, waiting := laneCounts(r, LaneDownload)
+				return use == 1 && waiting == 1
+			})
+			select {
+			case err := <-reclaimed:
+				t.Fatalf("reclaimed while the other job holds the slot (%v)", err)
+			case <-time.After(50 * time.Millisecond):
+			}
+			if mode == "cancel_reclaiming" {
+				r.Cancel(1)
+				if err := await(t, reclaimed); err == nil {
+					t.Fatal("a cancelled reclaim succeeded")
+				}
+				eventually(t, "the cancelled job's end", func() bool {
+					use, waiting := laneCounts(r, LaneDownload)
+					return use == 1 && waiting == 0
+				})
+				close(gate[2])
+				eventually(t, "the lane empty", func() bool {
+					use, waiting := laneCounts(r, LaneDownload)
+					return use == 0 && waiting == 0
+				})
+				return
+			}
+			close(gate[2])
+			if err := await(t, reclaimed); err != nil {
+				t.Fatal(err)
+			}
+			if use, waiting := laneCounts(r, LaneDownload); use != 1 || waiting != 0 {
+				t.Fatalf("reclaimed: use %d waiting %d", use, waiting)
+			}
+			close(finish)
+			eventually(t, "the lane empty", func() bool {
+				use, waiting := laneCounts(r, LaneDownload)
+				return use == 0 && waiting == 0
+			})
+		})
+	}
+}
+
+// A LocalReporter's Yield and Reclaim do nothing.
+func TestLocalReporterYield(t *testing.T) {
+	rep := LocalReporter()
+	rep.Yield()
+	if err := rep.Reclaim(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}

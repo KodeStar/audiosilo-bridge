@@ -128,7 +128,7 @@ func (r *Runner) request(reserve, hold bool, own *claimRequest) (*claimRequest, 
 // it ignores then holds at most one such waiter per dispatcher, not its queue.
 func (r *Runner) strayWaitingLocked(reserve bool) bool {
 	for _, ru := range r.running {
-		if ru.stray && !ru.admitted && ru.strayReserve == reserve {
+		if ru.stray && !ru.admitted && !ru.yielded && ru.strayReserve == reserve {
 			return true
 		}
 	}
