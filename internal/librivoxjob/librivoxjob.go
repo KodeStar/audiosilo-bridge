@@ -255,8 +255,8 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 		return nil, errors.New("bad params: library_id isn't the job's library")
 	}
 	k := key{lib: p.LibraryID, id: p.LibrivoxID}
-	if !h.begin(k) {
-		return nil, errors.New("the Bridge is already adding this recording to this library")
+	if err := h.await(ctx, k, rep); err != nil {
+		return nil, err
 	}
 	defer h.end(k)
 	res, err := h.run(ctx, job, p, rep)
@@ -268,6 +268,28 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 		return nil, err
 	}
 	return res, nil
+}
+
+// awaitPolls bounds how long a run waits for an earlier run of the same fetch
+// to end (mappingPoll apart: about two minutes). That run is one ending: the
+// server cancels a parked job at once, and the run hears it at its next
+// report, so the re-added job can be claimed before it has stopped.
+const awaitPolls = 120
+
+// await marks the fetch of k as running here once no other run of it is.
+func (h *Handler) await(ctx context.Context, k key, rep *jobs.Reporter) error {
+	for poll := 0; !h.begin(k); poll++ {
+		if poll == awaitPolls {
+			return errors.New("the Bridge is already adding this recording to this library")
+		}
+		if poll == 0 {
+			h.report(rep, jobs.Progress{Step: StepManifest, Message: "Waiting for the Bridge's earlier run of this fetch to end"})
+		}
+		if err := h.o.Wait(ctx, mappingPoll); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // fetch is one run's working set.
@@ -880,14 +902,18 @@ func (h *Handler) mapped(ctx context.Context, id int64, rep *jobs.Reporter, step
 		st, checked := h.o.Libraries.Status(lib.ID)
 		why := fmt.Sprintf("Library %s must be mapped and writable on the Bridge: check its mapping on the Bridge's Status tab.", lib.Name)
 		switch {
+		case checked && st.MountPath == mount && st.Mapped && st.Writable && yielded:
+			// Back, but without a slot: take one, then look at the mapping
+			// again, since the wait for the slot may have been long.
+			rep.Unpark()
+			h.report(rep, jobs.Progress{Step: step, Message: "Waiting for the Bridge's other download to finish"})
+			if err := rep.Reclaim(ctx); err != nil {
+				return link.Library{}, "", err
+			}
+			yielded = false
+			continue
 		case checked && st.MountPath == mount && st.Mapped && st.Writable:
 			rep.Unpark()
-			if yielded {
-				h.report(rep, jobs.Progress{Step: step, Message: "Waiting for the Bridge's other download to finish"})
-				if err := rep.Reclaim(ctx); err != nil {
-					return link.Library{}, "", err
-				}
-			}
 			return lib, mount, nil
 		case !checked || st.MountPath != mount:
 			h.report(rep, jobs.Progress{Step: step, Message: "Waiting for the library's mapping check"})

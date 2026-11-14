@@ -1913,8 +1913,9 @@ internal/
             TestLiveParkKeepsSlot pins): the run is then "yielded", counted in
             neither use nor waiting, so the lane claims another job; Reclaim
             queues it first in line (waiting) and waits for admission. release
-            and strayWaitingLocked know the yielded state; a LocalReporter's
-            Yield and Reclaim do nothing. librivox.fetch yields while parked. Phase 2c-2b: dispatch.go owns ordinary and
+            and strayWaitingLocked know the yielded state; Yielded reports it (a
+            LocalReporter only records its Yield and Reclaim, for a handler's
+            tests). librivox.fetch yields while parked. Phase 2c-2b: dispatch.go owns ordinary and
             reserved dispatchers. InteractiveHandler opts a kind into the reserved
             pool (1), claimed only with negotiated min_priority=100. Download is
             1 with negotiation, 2 without it; light=2 and pipeline=25 stay fixed.
@@ -2693,7 +2694,8 @@ internal/
             parked fetch gives its download-lane slot back with
             jobs.Reporter.Yield, so Audible imports and podcast downloads run
             while it waits, and takes one again with Reclaim once the mapping is
-            back, before any write: downloads stay one at a time, sections
+            back, then looks at the mapping again, since the slot's wait may be
+            long, before any write: downloads stay one at a time, sections
             serial) (the staging
             folder isn't there), and the library is opened per section, not
             held across a park. cover.jpg best effort (only a
@@ -2730,8 +2732,10 @@ internal/
             library's state) removes
             the staging folder, the author folder it made when empty, and the
             state. A fetch already running here (the same library and project,
-            the handler's active set) refuses a second run and Abandon leaves
-            it. sweep.go (bridge#69, audible.import's 7 days): Sweep, run by the
+            the handler's active set) holds a second run back up to ~2 min
+            (awaitPolls: a re-add claimed while a cancelled parked run is still
+            ending, since the server cancels a parked job at once and the run
+            hears it at its next report), then fails it; Abandon leaves it. sweep.go (bridge#69, audible.import's 7 days): Sweep, run by the
             app after each mapping check (not at start-up: the staging folders
             are in the libraries, known only after a heartbeat and the check),
             removes a state unused for StagingMaxAge (a run touches it on

@@ -162,21 +162,37 @@ func TestOtherServersStateNeverActedOn(t *testing.T) {
 }
 
 // A second run of a fetch already running here (the same library and
-// project) fails at once and leaves the first's staging alone; so does
-// Abandon.
+// project: a re-add claimed while a cancelled parked run is still ending)
+// waits for it to end; it fails when it doesn't within the bound, leaving the
+// first's staging alone, as Abandon does.
 func TestRunAlreadyRunning(t *testing.T) {
 	x := newHarness(t)
 	x.stageAndStop(t)
 	k := key{lib: 3, id: testID}
 	x.h.begin(k)
+	polls := 0
+	x.h.o.Wait = func(ctx context.Context, _ time.Duration) error {
+		polls++
+		return ctx.Err()
+	}
 	if _, err := x.run(context.Background(), false); err == nil {
 		t.Fatal("a second run of the same fetch ran")
+	}
+	if polls != awaitPolls {
+		t.Fatalf("%d polls", polls)
 	}
 	x.h.Abandon(jobs.AbandonContext(context.Background(), false), x.job(true))
 	if !x.exists(stagingDir) || !x.hasState() {
 		t.Fatal("the second run or Abandon touched the first's staging")
 	}
-	x.h.end(k)
+	// The first run ends during the wait: the second goes on.
+	polls = 0
+	x.h.o.Wait = func(ctx context.Context, _ time.Duration) error {
+		if polls++; polls == 3 {
+			x.h.end(k)
+		}
+		return ctx.Err()
+	}
 	if _, err := x.run(context.Background(), false); err != nil {
 		t.Fatal(err)
 	}

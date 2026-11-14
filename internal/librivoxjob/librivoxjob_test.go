@@ -777,15 +777,17 @@ func TestFetchParksMidDownload(t *testing.T) {
 	x := newHarness(t)
 	x.fetch.files[sectionURL(2)].cut = []int{100}
 	x.fetch.files[sectionURL(2)].onCut = func() { x.libs.writable = false }
-	waits := 0
+	rep := jobs.LocalReporter()
+	waits, yieldedParked := 0, false
 	x.h.o.Wait = func(context.Context, time.Duration) error {
 		// The first wait is the cut section's retry; the next is the park's.
 		if waits++; waits > 1 {
+			yieldedParked = rep.Yielded()
 			x.libs.writable = true
 		}
 		return nil
 	}
-	out, err := x.run(context.Background(), false)
+	out, err := x.h.Run(context.Background(), x.job(false), rep)
 	if err != nil || out.(*Result).Bytes != 6014 {
 		t.Fatalf("%#v %v", out, err)
 	}
@@ -798,16 +800,52 @@ func TestFetchParksMidDownload(t *testing.T) {
 	if !parked {
 		t.Fatal("the job didn't park mid-download")
 	}
-	// Parked, it gave its download-lane slot back: it takes one again before
+	// Parked, it gave its download-lane slot back: it took one again before
 	// the next write.
-	reclaimed := false
-	for _, p := range x.progress {
-		if p.Message == "Waiting for the Bridge's other download to finish" {
-			reclaimed = true
+	if !yieldedParked || rep.Yielded() {
+		t.Fatalf("yielded while parked %v, after %v", yieldedParked, rep.Yielded())
+	}
+}
+
+// A mapping that went away again while the fetch waited for its slot back
+// parks it again (the slot's wait may be long): it never writes on the
+// mapping it saw before the wait.
+func TestFetchRechecksAfterReclaim(t *testing.T) {
+	x := newHarness(t)
+	x.fetch.files[sectionURL(2)].cut = []int{100}
+	x.fetch.files[sectionURL(2)].onCut = func() { x.libs.writable = false }
+	flipped := false
+	progress := x.h.o.onProgress
+	x.h.o.onProgress = func(p jobs.Progress) {
+		progress(p)
+		if p.Message == "Waiting for the Bridge's other download to finish" && !flipped {
+			flipped = true
+			x.libs.writable = false
 		}
 	}
-	if !reclaimed {
-		t.Fatal("the job went on without taking a download-lane slot again")
+	waits := 0
+	x.h.o.Wait = func(context.Context, time.Duration) error {
+		// The first wait is the cut section's retry; the others are parks'.
+		if waits++; waits > 1 {
+			x.libs.writable = true
+		}
+		return nil
+	}
+	out, err := x.run(context.Background(), false)
+	if err != nil || out.(*Result).Bytes != 6014 {
+		t.Fatalf("%#v %v", out, err)
+	}
+	// Right after the slot's wait, the fetch parks again: nothing is
+	// downloaded in between.
+	next := jobs.Progress{}
+	for i, p := range x.progress {
+		if p.Message == "Waiting for the Bridge's other download to finish" && i+1 < len(x.progress) {
+			next = x.progress[i+1]
+			break
+		}
+	}
+	if _, parked := next.Extra["park"]; !flipped || !parked {
+		t.Fatalf("flipped %v, then %+v: the fetch didn't look at the mapping again after its slot", flipped, next)
 	}
 }
 
