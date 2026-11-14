@@ -39,7 +39,7 @@ func TestFetchPlacesBook(t *testing.T) {
 		t.Fatalf("result %+v, want %+v", *res, want)
 	}
 	b, _ := json.Marshal(res)
-	if string(b) != `{"library_id":3,"path":"L. Leslie Brooke/Johnny Crow's Garden","librivox_id":192,"files":4,"bytes":6014}` {
+	if string(b) != `{"library_id":3,"path":"L. Leslie Brooke/Johnny Crow's Garden","librivox_id":192,"files":4,"bytes":6014,"adopted":false}` {
 		t.Fatalf("result JSON %s", b)
 	}
 	for i, name := range []string{"01 - Johnny Crow's Garden.mp3", "02 - Johnny Crow's Party.mp3", "03 - Johnny Crow's New Garden.mp3"} {
@@ -238,7 +238,9 @@ func TestFetchRestartsWithoutStrongETag(t *testing.T) {
 }
 
 // Dropped connections that add to the partial go on; three in a row that add
-// nothing fail archive_unavailable and remove the staging folder.
+// nothing fail archive_unavailable. archive.org down is no fault of the fetch
+// (as meta down): the sections downloaded and the state stay, and the next
+// run asks only for the rest.
 func TestFetchDroppedConnections(t *testing.T) {
 	x := newHarness(t)
 	x.fetch.files[sectionURL(3)].cut = []int{1000, 1000, 500}
@@ -251,8 +253,24 @@ func TestFetchDroppedConnections(t *testing.T) {
 	if code := failureCode(t, out, err); code != CodeArchiveUnavailable {
 		t.Fatalf("code %q (%v)", code, err)
 	}
-	if x.exists(stagingDir) || x.exists("L. Leslie Brooke") {
-		t.Fatal("a failure left the staging folder")
+	if !x.exists(stagingDir+"/01 - Johnny Crow's Garden.mp3") || !x.exists(stagingDir+"/02 - Johnny Crow's Party.mp3") {
+		t.Fatal("an archive.org outage dropped the downloaded sections")
+	}
+	if entries, _ := os.ReadDir(x.stateDir); len(entries) != 1 {
+		t.Fatalf("state %v", entries)
+	}
+	before := len(x.fetch.seen())
+	out, err = x.run(context.Background(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res := out.(*Result); res.Path != bookDir || res.Files != 4 {
+		t.Fatalf("%+v", res)
+	}
+	for _, r := range x.fetch.seen()[before:] {
+		if r.url == sectionURL(1) || r.url == sectionURL(2) {
+			t.Fatalf("asked for %s again", r.url)
+		}
 	}
 }
 
@@ -346,8 +364,8 @@ func TestFetchExistsFallback(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p := out.(*Result).Path; p != bookDir+" (LibriVox 192)" {
-		t.Fatalf("placed at %q", p)
+	if r := out.(*Result); r.Path != bookDir+" (LibriVox 192)" || r.Adopted {
+		t.Fatalf("%+v", r)
 	}
 	if entries, _ := os.ReadDir(x.path(bookDir)); len(entries) != 0 {
 		t.Fatal("the existing folder was written to")
@@ -378,8 +396,9 @@ func TestFetchPlaceRace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p := out.(*Result).Path; p != bookDir+" (LibriVox 192)" {
-		t.Fatalf("placed at %q", p)
+	// This run renamed staging into place (under the fallback name): not adopted.
+	if r := out.(*Result); r.Path != bookDir+" (LibriVox 192)" || r.Adopted {
+		t.Fatalf("%+v", r)
 	}
 	if !x.exists(bookDir + "/theirs") {
 		t.Fatal("the other folder was replaced")
@@ -395,16 +414,29 @@ func TestFetchParentIsABook(t *testing.T) {
 	if code := failureCode(t, out, err); code != CodeExists {
 		t.Fatalf("listed: code %q (%v)", code, err)
 	}
+	// Every extension the server's scanner indexes counts, not only the ones
+	// a section is named with.
+	for _, name := range []string{"track.mp3", "track.mka", "track.MP4"} {
+		x = newHarness(t)
+		if err := os.MkdirAll(x.path("L. Leslie Brooke"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(x.path("L. Leslie Brooke/"+name), []byte("a"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		out, err = x.run(context.Background(), false)
+		if code := failureCode(t, out, err); code != CodeExists {
+			t.Fatalf("%s: code %q (%v)", name, code, err)
+		}
+	}
+	// Other files don't make the folder a book.
 	x = newHarness(t)
 	if err := os.MkdirAll(x.path("L. Leslie Brooke"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(x.path("L. Leslie Brooke/track.mp3"), []byte("a"), 0o644); err != nil {
+	_ = os.WriteFile(x.path("L. Leslie Brooke/notes.txt"), []byte("a"), 0o644)
+	if _, err := x.run(context.Background(), false); err != nil {
 		t.Fatal(err)
-	}
-	out, err = x.run(context.Background(), false)
-	if code := failureCode(t, out, err); code != CodeExists {
-		t.Fatalf("audio: code %q (%v)", code, err)
 	}
 }
 
@@ -441,7 +473,8 @@ func TestFetchRescanFailureResumesAtRescan(t *testing.T) {
 	if len(x.fetch.seen()) != before || x.meta.reads != reads {
 		t.Fatal("the retry read or downloaded again")
 	}
-	if r := out.(*Result); r.Path != bookDir || r.Files != 4 || r.Bytes != 6014 {
+	// The folder was placed by the earlier run, so this one adopts it.
+	if r := out.(*Result); r.Path != bookDir || r.Files != 4 || r.Bytes != 6014 || !r.Adopted {
 		t.Fatalf("%+v", r)
 	}
 }
@@ -459,8 +492,45 @@ func TestFetchFolderAlreadyHoldsProject(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r := out.(*Result); r.Path != bookDir || r.Files != 1 || r.Bytes != 3 || len(x.fetch.seen()) != 0 {
+	if r := out.(*Result); r.Path != bookDir || r.Files != 1 || r.Bytes != 3 || !r.Adopted || len(x.fetch.seen()) != 0 {
 		t.Fatalf("%+v, %d requests", r, len(x.fetch.seen()))
+	}
+	// Adopted, and the rescan failed: the retry from the state still says so.
+	x = newHarness(t)
+	if err := os.MkdirAll(x.path(bookDir+"/.audiosilo"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.WriteFile(x.path(bookDir+"/.audiosilo/librivox.json"), []byte(`{"version":1,"librivox_id":192}`), 0o644)
+	boom := errors.New("server busy")
+	x.srv.rescanErr = []error{boom, boom, boom}
+	if _, err := x.run(context.Background(), false); err == nil {
+		t.Fatal("the rescan didn't fail")
+	}
+	out, err = x.run(context.Background(), false)
+	if err != nil || !out.(*Result).Adopted {
+		t.Fatalf("%#v %v", out, err)
+	}
+}
+
+// On a case-insensitive disk a folder holding the project under another
+// spelling is adopted as the disk spells it, so the rescan asks the server for
+// the folder it indexes.
+func TestFetchAdoptedFolderRespelled(t *testing.T) {
+	x := newHarness(t)
+	lower := "L. Leslie Brooke/johnny crow's garden"
+	if err := os.MkdirAll(x.path(lower+"/.audiosilo"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(x.path(bookDir)); err != nil {
+		t.Skip("a case-sensitive disk")
+	}
+	_ = os.WriteFile(x.path(lower+"/.audiosilo/librivox.json"), []byte(`{"version":1,"librivox_id":192}`), 0o644)
+	out, err := x.run(context.Background(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r := out.(*Result); r.Path != lower || !r.Adopted || !slices.Equal(x.srv.rescanned, []string{lower}) {
+		t.Fatalf("%+v, rescanned %v", r, x.srv.rescanned)
 	}
 }
 
@@ -698,15 +768,17 @@ func TestFetchParksMidDownload(t *testing.T) {
 	x := newHarness(t)
 	x.fetch.files[sectionURL(2)].cut = []int{100}
 	x.fetch.files[sectionURL(2)].onCut = func() { x.libs.writable = false }
-	waits := 0
+	rep := jobs.LocalReporter()
+	waits, yieldedParked := 0, false
 	x.h.o.Wait = func(context.Context, time.Duration) error {
 		// The first wait is the cut section's retry; the next is the park's.
 		if waits++; waits > 1 {
+			yieldedParked = rep.Yielded()
 			x.libs.writable = true
 		}
 		return nil
 	}
-	out, err := x.run(context.Background(), false)
+	out, err := x.h.Run(context.Background(), x.job(false), rep)
 	if err != nil || out.(*Result).Bytes != 6014 {
 		t.Fatalf("%#v %v", out, err)
 	}
@@ -719,6 +791,53 @@ func TestFetchParksMidDownload(t *testing.T) {
 	if !parked {
 		t.Fatal("the job didn't park mid-download")
 	}
+	// Parked, it gave its download-lane slot back: it took one again before
+	// the next write.
+	if !yieldedParked || rep.Yielded() {
+		t.Fatalf("yielded while parked %v, after %v", yieldedParked, rep.Yielded())
+	}
+}
+
+// A mapping that went away again while the fetch waited for its slot back
+// parks it again (the slot's wait may be long): it never writes on the
+// mapping it saw before the wait.
+func TestFetchRechecksAfterReclaim(t *testing.T) {
+	x := newHarness(t)
+	x.fetch.files[sectionURL(2)].cut = []int{100}
+	x.fetch.files[sectionURL(2)].onCut = func() { x.libs.writable = false }
+	flipped := false
+	progress := x.h.o.onProgress
+	x.h.o.onProgress = func(p jobs.Progress) {
+		progress(p)
+		if p.Message == "Waiting for the Bridge's other download to finish" && !flipped {
+			flipped = true
+			x.libs.writable = false
+		}
+	}
+	waits := 0
+	x.h.o.Wait = func(context.Context, time.Duration) error {
+		// The first wait is the cut section's retry; the others are parks'.
+		if waits++; waits > 1 {
+			x.libs.writable = true
+		}
+		return nil
+	}
+	out, err := x.run(context.Background(), false)
+	if err != nil || out.(*Result).Bytes != 6014 {
+		t.Fatalf("%#v %v", out, err)
+	}
+	// Right after the slot's wait, the fetch parks again: nothing is
+	// downloaded in between.
+	next := jobs.Progress{}
+	for i, p := range x.progress {
+		if p.Message == "Waiting for the Bridge's other download to finish" && i+1 < len(x.progress) {
+			next = x.progress[i+1]
+			break
+		}
+	}
+	if _, parked := next.Extra["park"]; !flipped || !parked {
+		t.Fatalf("flipped %v, then %+v: the fetch didn't look at the mapping again after its slot", flipped, next)
+	}
 }
 
 // An empty body is never a section, whatever length the response stated: it
@@ -730,8 +849,8 @@ func TestFetchEmptyBodyFails(t *testing.T) {
 	if code := failureCode(t, out, err); code != CodeArchiveUnavailable {
 		t.Fatalf("code %q (%v)", code, err)
 	}
-	if x.exists(bookDir) || x.exists(stagingDir) {
-		t.Fatal("an empty section was placed or left staged")
+	if x.exists(bookDir) || x.exists(stagingDir+"/02 - Johnny Crow's Party.mp3") {
+		t.Fatal("an empty section was placed or staged")
 	}
 }
 
@@ -837,8 +956,9 @@ func TestFetchMountMovedFails(t *testing.T) {
 }
 
 // A placement whose state never said so (a kill between the rename and the
-// state's write) is found by the book's marker: the next run rescans it and
-// doesn't download the book again under the fallback name.
+// state's write) is found by the book's marker: the next run rescans it,
+// doesn't download the book again under the fallback name, and reports it
+// adopted (the rename was an earlier run's).
 func TestFetchAdoptsUnrecordedPlacement(t *testing.T) {
 	x := newHarness(t)
 	boom := errors.New("server busy")
@@ -859,7 +979,7 @@ func TestFetchAdoptsUnrecordedPlacement(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r := out.(*Result); r.Path != bookDir || r.Files != 4 || r.Bytes != 6014 || len(x.fetch.seen()) != before {
+	if r := out.(*Result); r.Path != bookDir || r.Files != 4 || r.Bytes != 6014 || !r.Adopted || len(x.fetch.seen()) != before {
 		t.Fatalf("%+v, %d new requests", r, len(x.fetch.seen())-before)
 	}
 	if x.exists(fallbackName(bookDir, testID)) || x.exists(stagingDir) {
@@ -976,7 +1096,8 @@ func TestFetchRefusesNonAudio(t *testing.T) {
 			if code := failureCode(t, out, err); code != CodeArchiveUnavailable {
 				t.Fatalf("code %q (%v)", code, err)
 			}
-			if x.exists(stagingDir) || x.exists(bookDir) {
+			part := stagingDir + "/02 - Johnny Crow's Party.mp3"
+			if x.exists(part) || x.exists(part+partSuffix) || x.exists(bookDir) {
 				t.Fatal("a non-audio section was kept or placed")
 			}
 		})
@@ -1004,6 +1125,7 @@ func TestAudioChecks(t *testing.T) {
 		"ID3\x04": true, "\xFF\xFB\x90": true, "\xFF\xF3": true, "OggS": true, "fLaC": true, "\x00\x00\x00\x20ftypM4A ": true,
 		"<html>": false, "": false, "\xFF\x00": false, "x": false,
 		"\x00\x00\x00\xFF\xFB\x90": true, "\x00\x00ID3\x03": true, "\x00\x00\x00\x00": false, "\x00\x00<!DO": false,
+		"RIFF\x24\x00\x00\x00WAVEfmt ": true, "RIFF\x24\x00\x00\x00AVI ": false, "RIFF": false, "APETAGEX\xd0\x07": true, "APETAG": false,
 	} {
 		if got := isAudioHead([]byte(head)); got != want {
 			t.Errorf("isAudioHead(%q) = %v", head, got)

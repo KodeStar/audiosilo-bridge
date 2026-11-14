@@ -17,6 +17,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/kodestar/audiosilo-bridge/internal/fsutil"
@@ -98,12 +99,20 @@ func ParseParams(raw json.RawMessage) (Params, error) {
 
 // Result is a done fetch: the book's path as the server indexed it, the
 // project, and the files placed (the sections and the cover) with their bytes.
+// Adopted (always sent; additive, so an older server ignores it) is false only
+// when this run itself renamed the staging folder into place: the server then
+// treats the folder as new. Any run that finds the folder already placed says
+// true, whether the folder held this project when the fetch planned, a kept
+// state says Placed (a retried failed rescan) or the run finds an earlier
+// run's unrecorded rename: the book may have been indexed and edited since, and
+// a false would have the server drop those edits.
 type Result struct {
 	LibraryID  int64  `json:"library_id"`
 	Path       string `json:"path"`
 	LibrivoxID int    `json:"librivox_id"`
 	Files      int    `json:"files"`
 	Bytes      int64  `json:"bytes"`
+	Adopted    bool   `json:"adopted"`
 }
 
 // Marker is .audiosilo/librivox.json, the book's LibriVox identity in its own
@@ -156,6 +165,9 @@ type Options struct {
 	// StateDir is <data>/librivox: each fetch's plan and partial downloads'
 	// validators (state).
 	StateDir string
+	// ServerID is the paired server's id ("" when unknown), recorded in each
+	// state: a state of another server is never acted on.
+	ServerID func() string
 	Log      *slog.Logger
 
 	// Seams (tests): the free-space reader and the wait between attempts and
@@ -170,6 +182,11 @@ type Options struct {
 // audible.import and an ordinary podcast.fetch): one book at a time.
 type Handler struct {
 	o Options
+
+	// mu guards active: the fetches running here (Run), which Abandon and
+	// Sweep leave alone, and which a second claim of the same fetch can't join.
+	mu     sync.Mutex
+	active map[key]bool
 }
 
 // New returns the handler.
@@ -183,7 +200,10 @@ func New(o Options) *Handler {
 	if o.Wait == nil {
 		o.Wait = netguard.Wait
 	}
-	return &Handler{o: o}
+	if o.ServerID == nil {
+		o.ServerID = func() string { return "" }
+	}
+	return &Handler{o: o, active: map[key]bool{}}
 }
 
 // Kind is librivox.fetch.
@@ -199,7 +219,9 @@ const mappingPoll = time.Second
 // running it (cancelled before it resumed). A lost claim keeps it: the server
 // hands the job out again and the next claim resumes it. A placed book stays.
 // The state is the job's library's alone, so a fetch of the same project
-// into another library is never touched.
+// into another library is never touched, and this server's alone: another
+// server's state is never followed into this server's same-numbered library.
+// A fetch of the same project and library running here meanwhile keeps it.
 func (h *Handler) Abandon(ctx context.Context, job jobs.Job) {
 	if jobs.Lost(ctx) {
 		return
@@ -208,16 +230,25 @@ func (h *Handler) Abandon(ctx context.Context, job jobs.Job) {
 	if err != nil {
 		return
 	}
+	k := key{lib: p.LibraryID, id: p.LibrivoxID}
+	if !h.begin(k) {
+		return
+	}
+	defer h.end(k)
 	st := h.loadState(p.LibraryID, p.LibrivoxID)
 	if st == nil || st.Placed {
 		return
 	}
-	if lib, ok := h.o.Libraries.Library(st.LibraryID); ok {
-		if mount, _ := h.o.Mount(lib.ID, lib.Root); mount != "" {
-			h.removeStaging(mount, p.LibrivoxID, st)
-		}
+	// The state goes with the folder it names: while the folder can't be
+	// reached or removed (the library isn't listed yet, its mount is away), the
+	// state stays and the sweep removes both later.
+	lib, ok := h.o.Libraries.Library(st.LibraryID)
+	if !ok {
+		return
 	}
-	h.dropState(st.LibraryID, p.LibrivoxID)
+	if mount, _ := h.o.Mount(lib.ID, lib.Root); mount != "" && h.removeStaging(mount, p.LibrivoxID, st) {
+		h.dropState(st.LibraryID, p.LibrivoxID)
+	}
 }
 
 // Run fetches the recording: manifest, download, cover, place, rescan.
@@ -229,6 +260,15 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 	if job.LibraryID != nil && *job.LibraryID != p.LibraryID {
 		return nil, errors.New("bad params: library_id isn't the job's library")
 	}
+	k := key{lib: p.LibraryID, id: p.LibrivoxID}
+	if err := h.await(ctx, k, rep); err != nil {
+		return nil, err
+	}
+	defer h.end(k)
+	// The state a run leaves (a stop, a lost claim, meta or archive.org down)
+	// was last used now, however long ago the run began or last saved it (one
+	// parked for days): the sweep goes by that.
+	defer func() { h.touchState(k.lib, k.id, time.Now()) }()
 	res, err := h.run(ctx, job, p, rep)
 	var f *Failure
 	if errors.As(err, &f) {
@@ -240,6 +280,54 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 	return res, nil
 }
 
+// key is one fetch's state: a library and a project.
+type key struct {
+	lib int64
+	id  int
+}
+
+// begin marks the fetch of k as held here (a run, an Abandon or the sweep at
+// work on it), false when it already is: the sweep and Abandon leave a running
+// fetch's staging alone.
+func (h *Handler) begin(k key) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.active[k] {
+		return false
+	}
+	h.active[k] = true
+	return true
+}
+
+// end gives the fetch of k up again.
+func (h *Handler) end(k key) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	delete(h.active, k)
+}
+
+// awaitPolls bounds how long a run waits for an earlier run of the same fetch
+// to end (mappingPoll apart: about two minutes). That run is one ending: the
+// server cancels a parked job at once, and the run hears it at its next
+// report, so the re-added job can be claimed before it has stopped.
+const awaitPolls = 120
+
+// await marks the fetch of k as running here once no other run of it is.
+func (h *Handler) await(ctx context.Context, k key, rep *jobs.Reporter) error {
+	for poll := 0; !h.begin(k); poll++ {
+		if poll == awaitPolls {
+			return errors.New("the Bridge is already adding this recording to this library")
+		}
+		if poll == 0 {
+			h.report(rep, jobs.Progress{Step: StepManifest, Message: "Waiting for the Bridge's earlier run of this fetch to end"})
+		}
+		if err := h.o.Wait(ctx, mappingPoll); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // fetch is one run's working set.
 type fetch struct {
 	p     Params
@@ -247,6 +335,9 @@ type fetch struct {
 	mount string
 	st    *state
 	rep   *jobs.Reporter
+	// renamed: this run renamed the staging folder into place (the result's
+	// adopted is false only then).
+	renamed bool
 }
 
 // staging is the fetch's staging folder (library-relative).
@@ -274,6 +365,9 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, p Params, rep *jobs.Rep
 		return nil, err
 	}
 	f := &fetch{p: p, lib: lib, mount: mount, rep: rep, st: h.loadState(lib.ID, p.LibrivoxID)}
+	if f.st != nil {
+		h.touchState(lib.ID, p.LibrivoxID, time.Now())
+	}
 	defer func() {
 		// A stop the next start resumes, and a lost claim the server hands out
 		// again, keep the staging folder and the state; a cancel or a failure
@@ -286,8 +380,11 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, p Params, rep *jobs.Rep
 		if ctx.Err() != nil && (jobs.Resumes(ctx) || jobs.Lost(ctx)) {
 			return
 		}
-		h.removeStaging(f.mount, p.LibrivoxID, f.st)
-		h.dropState(lib.ID, p.LibrivoxID)
+		// A folder that can't be removed now (a cancel while the mount is
+		// away) keeps its state, for the sweep.
+		if h.removeStaging(f.mount, p.LibrivoxID, f.st) {
+			h.dropState(lib.ID, p.LibrivoxID)
+		}
 	}()
 
 	// An earlier run placed the book and then failed (the rescan): while its
@@ -349,7 +446,8 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, p Params, rep *jobs.Rep
 // meta unavailable (a 5xx, a dropped connection) is never terminal: each read
 // is tried metaAttempts times, and still unavailable the run fails with a
 // keepStaging error, which keeps the staging folder and the state for the
-// next attempt. Only meta's definite 404 (not_found) ends the fetch.
+// next attempt. Meta's definite answers end the fetch: a 404 (not_found), or
+// a refusal (metaops.ErrRefused), which no retry would change.
 func (h *Handler) manifest(ctx context.Context, p Params, rep *jobs.Reporter) (metaops.LibrivoxBook, *metaops.LibrivoxWork, error) {
 	metadataOff := func() error {
 		return fail(CodeMetadataOff, "The Bridge has no metadata service set (metadata.base_url), so it can't read LibriVox recordings.")
@@ -397,7 +495,8 @@ const (
 )
 
 // keepStaging is a run's failure that leaves the staging folder and the state
-// for the next attempt (meta unavailable): nothing the fetch holds is wrong.
+// for the next attempt (meta or archive.org unavailable): nothing the fetch
+// holds is wrong.
 type keepStaging struct{ err error }
 
 func (k *keepStaging) Error() string { return k.err.Error() }
@@ -405,8 +504,8 @@ func (k *keepStaging) Unwrap() error { return k.err }
 
 // metaRead is read, tried again while meta is unavailable
 // (metaops.ErrUnavailable); still unavailable after metaAttempts, the error is
-// a keepStaging. Any other answer (a 404, metadata off, the context) is
-// returned at once.
+// a keepStaging. Any other answer (a 404, a refusal, metadata off, the
+// context) is returned at once.
 func metaRead[T any](ctx context.Context, h *Handler, rep *jobs.Reporter, read func() (T, error)) (T, error) {
 	wait := metaWait
 	for attempt := 1; ; attempt++ {
@@ -465,7 +564,7 @@ func (h *Handler) plan(ctx context.Context, f *fetch, srv Server, book metaops.L
 			return err
 		}
 	}
-	st := &state{LibraryID: f.lib.ID, Parent: parent}
+	st := &state{LibraryID: f.lib.ID, ServerID: h.o.ServerID(), Parent: parent}
 	dest = path.Join(parent, path.Base(dest)) // under the author folder as spelled on disk
 	fallback := fallbackName(dest, f.p.LibrivoxID)
 	for _, at := range []string{dest, fallback} {
@@ -479,8 +578,15 @@ func (h *Handler) plan(ctx context.Context, f *fetch, srv Server, book metaops.L
 		case err != nil:
 			return fail(CodeNotWritable, "The Bridge can't look at %s in the library: %v", at, err)
 		case holdsProjectIn(root, at, f.p.LibrivoxID):
-			st.Dest, st.Placed = at, true
-			st.Count, st.Bytes = countFiles(root, at)
+			// The folder as the disk spells it (a case-insensitive disk finds
+			// "johnny crow's garden" for "Johnny Crow's Garden"): the rescan
+			// asks the server for the folder it indexes.
+			spelled, err := transfer.OnDisk(transfer.RootFS(root), at)
+			if err != nil || path.Dir(spelled) != path.Dir(at) {
+				spelled = at
+			}
+			st.Dest, st.Placed = spelled, true
+			st.Count, st.Bytes = countFiles(root, spelled)
 		}
 		if st.Dest != "" {
 			break
@@ -502,6 +608,14 @@ func (h *Handler) plan(ctx context.Context, f *fetch, srv Server, book metaops.L
 	return nil
 }
 
+// scannerAudioExts are the extensions the server's scanner indexes as audio
+// (audiosilo-server internal/metadata AudioExtensions, mirrored by hand): an
+// author folder holding one is a book of its own to the server.
+var scannerAudioExts = map[string]bool{
+	".m4b": true, ".m4a": true, ".mp4": true, ".mp3": true,
+	".flac": true, ".ogg": true, ".opus": true, ".mka": true,
+}
+
 // parentFree refuses an author folder that is itself a book (one the server
 // lists, or one holding audio): the book's folder in it would join that book.
 func (h *Handler) parentFree(root *os.Root, parent string, books []link.LibraryBook) error {
@@ -518,7 +632,7 @@ func (h *Handler) parentFree(root *os.Root, parent string, books []link.LibraryB
 		return fail(CodeNotWritable, "The Bridge can't read the folder %s in the library: %v", parent, err)
 	}
 	for _, e := range entries {
-		if !e.IsDir() && audioExts[strings.ToLower(path.Ext(e.Name()))] {
+		if !e.IsDir() && scannerAudioExts[strings.ToLower(path.Ext(e.Name()))] {
 			return fail(CodeExists, "%s already holds audio (%s), a book of its own, so the recording can't go in a folder inside it.", parent, e.Name())
 		}
 	}
@@ -561,19 +675,25 @@ func writeFailure(err error, rel string) error {
 }
 
 // removeStaging removes the staging folder, and the author folder this fetch
-// made once it is empty, through the mount's root (best effort).
-func (h *Handler) removeStaging(mount string, id int, st *state) {
+// made once it is empty, through the mount's root. It reports whether the
+// staging folder is gone: when it isn't (the mount can't be opened or written
+// now), the caller keeps the state, which is all that still names the folder,
+// for the sweep.
+func (h *Handler) removeStaging(mount string, id int, st *state) bool {
 	root, err := os.OpenRoot(mount)
 	if err != nil {
-		return
+		h.o.Log.Warn("librivox: removing a fetch's staging folder failed", "librivox_id", id, "path", st.staging(id), "err", err)
+		return false
 	}
 	defer func() { _ = root.Close() }()
 	if err := root.RemoveAll(st.staging(id)); err != nil {
 		h.o.Log.Warn("librivox: removing a fetch's staging folder failed", "librivox_id", id, "path", st.staging(id), "err", err)
+		return false
 	}
 	if st.MadeParent && st.Parent != "" {
 		_ = root.Remove(st.Parent) // only when empty
 	}
+	return true
 }
 
 // writeMarker writes .audiosilo/librivox.json into the staging folder.
@@ -666,6 +786,7 @@ func (h *Handler) place(ctx context.Context, f *fetch, names []string) error {
 		}
 		f.st.Dest, f.st.Placed, f.st.Count, f.st.Bytes = dest, true, n, bytes
 		f.st.Files = nil
+		f.renamed = true
 		if serr := h.saveState(f.p.LibrivoxID, f.st); serr != nil {
 			h.o.Log.Warn("librivox: recording a placed book failed", "librivox_id", f.p.LibrivoxID, "err", serr)
 		}
@@ -784,7 +905,8 @@ func (h *Handler) finish(ctx context.Context, f *fetch, srv Server) (*Result, er
 	h.o.Log.Info("librivox: added", "librivox_id", f.p.LibrivoxID, "library", f.lib.ID, "path", bookPath,
 		"files", f.st.Count, "bytes", f.st.Bytes)
 	h.dropState(f.lib.ID, f.p.LibrivoxID)
-	return &Result{LibraryID: f.lib.ID, Path: bookPath, LibrivoxID: f.p.LibrivoxID, Files: f.st.Count, Bytes: f.st.Bytes}, nil
+	return &Result{LibraryID: f.lib.ID, Path: bookPath, LibrivoxID: f.p.LibrivoxID, Files: f.st.Count, Bytes: f.st.Bytes,
+		Adopted: !f.renamed}, nil
 }
 
 // report records the job's progress.
@@ -815,6 +937,11 @@ func (h *Handler) recheck(ctx context.Context, f *fetch, step string) error {
 // the check waits for it; a mapping that isn't writable fails a new job
 // (strict) and parks a resumed one, or one past its download, not_writable
 // until it comes back.
+//
+// A parked fetch gives its download-lane slot back (jobs.Reporter.Yield), so
+// the Audible imports and podcast downloads that share the lane run while it
+// waits; once the mapping is back it takes a slot again (Reclaim) before it
+// writes anything, so downloads still go one at a time.
 func (h *Handler) mapped(ctx context.Context, id int64, rep *jobs.Reporter, step string, strict bool) (link.Library, string, error) {
 	for {
 		lib, ok := h.o.Libraries.Library(id)
@@ -827,7 +954,16 @@ func (h *Handler) mapped(ctx context.Context, id int64, rep *jobs.Reporter, step
 		switch {
 		case checked && st.MountPath == mount && st.Mapped && st.Writable:
 			rep.Unpark()
-			return lib, mount, nil
+			if !rep.Yielded() {
+				return lib, mount, nil
+			}
+			// Back, but without a slot: take one, then look at the mapping
+			// again, since the wait for the slot may have been long.
+			h.report(rep, jobs.Progress{Step: step, Message: "Waiting for the Bridge's other download to finish"})
+			if err := rep.Reclaim(ctx); err != nil {
+				return link.Library{}, "", err
+			}
+			continue
 		case !checked || st.MountPath != mount:
 			h.report(rep, jobs.Progress{Step: step, Message: "Waiting for the library's mapping check"})
 		case strict:
@@ -836,6 +972,7 @@ func (h *Handler) mapped(ctx context.Context, id int64, rep *jobs.Reporter, step
 			h.report(rep, jobs.Progress{Step: step, Message: "Needs attention: " + why,
 				Extra: map[string]any{"park": map[string]any{"code": CodeNotWritable}}})
 			rep.Park(CodeNotWritable, why)
+			rep.Yield()
 		}
 		if err := h.o.Wait(ctx, mappingPoll); err != nil {
 			return link.Library{}, "", err

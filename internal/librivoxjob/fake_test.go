@@ -266,6 +266,7 @@ type harness struct {
 	mount    string
 	stateDir string
 	free     int64
+	serverID string
 	progress []jobs.Progress
 	mu       sync.Mutex
 }
@@ -313,10 +314,11 @@ func newHarness(t *testing.T) *harness {
 	x.srv = &fakeServer{}
 	x.libs = &fakeLibs{mount: x.mount, writable: true}
 	x.h = New(Options{Meta: x.meta, Fetcher: x.fetch, Libraries: x.libs, StateDir: x.stateDir,
-		Mount:  func(id int64, _ string) (string, bool) { return x.libs.mountOf(id), true },
-		Server: func() Server { return x.srv },
-		Free:   func(string) (int64, error) { return x.free, nil },
-		Wait:   func(ctx context.Context, _ time.Duration) error { return ctx.Err() },
+		Mount:    func(id int64, _ string) (string, bool) { return x.libs.mountOf(id), true },
+		Server:   func() Server { return x.srv },
+		ServerID: func() string { return x.serverID },
+		Free:     func(string) (int64, error) { return x.free, nil },
+		Wait:     func(ctx context.Context, _ time.Duration) error { return ctx.Err() },
 		onProgress: func(p jobs.Progress) {
 			x.mu.Lock()
 			x.progress = append(x.progress, p)

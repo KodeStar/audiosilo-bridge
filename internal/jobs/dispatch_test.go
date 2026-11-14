@@ -876,3 +876,191 @@ func TestLanesLeaveOutAnEmptyFoldedReserve(t *testing.T) {
 		t.Fatalf("negotiated lanes %v", negotiated)
 	}
 }
+
+// laneCounts reads a lane's use and waiting counts.
+func laneCounts(r *Runner, lane string) (use, waiting int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.use[lane], r.waiting[lane]
+}
+
+// A job that parks and yields gives its download slot to the next download
+// job; its Reclaim waits for that job to end and queues first; a cancel while
+// it is yielded or reclaiming leaves the lane's counts right.
+func TestYieldFreesSlotAndReclaimWaits(t *testing.T) {
+	for _, mode := range []string{"reclaim", "cancel_yielded", "cancel_reclaiming"} {
+		t.Run(mode, func(t *testing.T) {
+			srv := newControlledServer(false)
+			yielded, goOn, reclaimed, finish := make(chan struct{}), make(chan struct{}), make(chan error, 1), make(chan struct{})
+			parker := handler{kind: "lane.parker", lane: LaneDownload, fn: func(ctx context.Context, _ Job, rep *Reporter) (any, error) {
+				rep.Park("not_writable", "Waiting for the mapping")
+				rep.Yield()
+				rep.Yield() // a second Yield changes nothing
+				if !rep.Yielded() {
+					t.Error("not yielded after Yield")
+				}
+				close(yielded)
+				select {
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				case <-goOn:
+				}
+				rep.Unpark()
+				err := rep.Reclaim(ctx)
+				if err == nil && rep.Yielded() {
+					t.Error("still yielded after Reclaim")
+				}
+				reclaimed <- err
+				if err != nil {
+					return nil, err
+				}
+				select {
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				case <-finish:
+				}
+				return nil, nil
+			}}
+			started := make(chan Job, 4)
+			gate := map[int64]chan struct{}{2: make(chan struct{})}
+			other := blockingHandler("lane.other", LaneDownload, started, gate)
+			opts := testOpts()
+			opts.Lanes = map[string]int{LaneDownload: 1, LaneLight: 1}
+			r := New(openStore(t), func() Server { return srv }, nil, opts, parker, other, handler{kind: "light", lane: LaneLight})
+			startControlled(t, r)
+			first := srv.next(t, false)
+			if !slices.Contains(first.kinds, "lane.other") {
+				t.Fatal(first.kinds)
+			}
+			first.answer <- claimed(1, parker.Kind(), 0)
+			await(t, yielded)
+			if use, waiting := laneCounts(r, LaneDownload); use != 0 || waiting != 0 {
+				t.Fatalf("yielded: use %d waiting %d", use, waiting)
+			}
+			if mode == "cancel_yielded" {
+				if !r.Cancel(1) {
+					t.Fatal("no job 1")
+				}
+				waitFor(t, func() bool { // the cancelled job's end
+					r.mu.Lock()
+					defer r.mu.Unlock()
+					return len(r.running) == 0 && r.use[LaneDownload] == 0 && r.waiting[LaneDownload] == 0
+				})
+				return
+			}
+			// The lane takes another download job meanwhile.
+			var c *controlledClaim
+			for c == nil || !slices.Contains(c.kinds, "lane.other") {
+				c = srv.next(t, false)
+			}
+			c.answer <- claimed(2, other.Kind(), 0)
+			await(t, started)
+			close(goOn)
+			waitFor(t, func() bool { // the reclaim queued
+				use, waiting := laneCounts(r, LaneDownload)
+				return use == 1 && waiting == 1
+			})
+			select {
+			case err := <-reclaimed:
+				t.Fatalf("reclaimed while the other job holds the slot (%v)", err)
+			case <-time.After(50 * time.Millisecond):
+			}
+			if mode == "cancel_reclaiming" {
+				r.Cancel(1)
+				if err := await(t, reclaimed); err == nil {
+					t.Fatal("a cancelled reclaim succeeded")
+				}
+				waitFor(t, func() bool { // the cancelled job's end
+					use, waiting := laneCounts(r, LaneDownload)
+					return use == 1 && waiting == 0
+				})
+				close(gate[2])
+				waitFor(t, func() bool { // the lane empty
+					use, waiting := laneCounts(r, LaneDownload)
+					return use == 0 && waiting == 0
+				})
+				return
+			}
+			close(gate[2])
+			if err := await(t, reclaimed); err != nil {
+				t.Fatal(err)
+			}
+			if use, waiting := laneCounts(r, LaneDownload); use != 1 || waiting != 0 {
+				t.Fatalf("reclaimed: use %d waiting %d", use, waiting)
+			}
+			close(finish)
+			waitFor(t, func() bool { // the lane empty
+				use, waiting := laneCounts(r, LaneDownload)
+				return use == 0 && waiting == 0
+			})
+		})
+	}
+}
+
+// A stray (a claim answered outside its admission) holds its dispatcher only
+// while it waits for its first slot: once it yielded, neither the yield nor
+// its wait in Reclaim behind another download stops the claims for the other
+// lanes.
+func TestYieldedStrayFreesItsDispatcher(t *testing.T) {
+	srv := newControlledServer(false)
+	opts := testOpts()
+	opts.Lanes = map[string]int{LaneDownload: 1, LaneLight: 1}
+	r := New(openStore(t), func() Server { return srv }, nil, opts)
+	ctx, cancel := context.WithCancelCause(context.Background())
+	defer cancel(nil)
+	ru := &run{job: Job{ID: 1}, lane: LaneDownload, cancel: cancel, stray: true}
+	r.mu.Lock()
+	r.running[1] = ru
+	r.waiting[LaneDownload]++
+	if !r.strayWaitingLocked(false) {
+		t.Error("a waiting stray doesn't hold its dispatcher")
+	}
+	r.mu.Unlock()
+	if !r.awaitAdmission(ctx, ru) {
+		t.Fatal("not admitted")
+	}
+	rep := &Reporter{r: r, ru: ru}
+	rep.Yield()
+	r.mu.Lock()
+	held := r.strayWaitingLocked(false)
+	r.use[LaneDownload]++ // another download took the slot
+	r.mu.Unlock()
+	if held {
+		t.Fatal("a yielded stray holds its dispatcher")
+	}
+	reclaimed := make(chan error, 1)
+	go func() { reclaimed <- rep.Reclaim(ctx) }()
+	waitFor(t, func() bool {
+		_, waiting := laneCounts(r, LaneDownload)
+		return waiting == 1
+	})
+	r.mu.Lock()
+	held = r.strayWaitingLocked(false)
+	r.mu.Unlock()
+	if held {
+		t.Fatal("a reclaiming stray holds its dispatcher")
+	}
+	cancel(errCancelRequested)
+	if err := await(t, reclaimed); err == nil {
+		t.Fatal("a cancelled reclaim succeeded")
+	}
+	r.release(ru, false)
+	if use, waiting := laneCounts(r, LaneDownload); use != 1 || waiting != 0 {
+		t.Fatalf("released: use %d waiting %d", use, waiting)
+	}
+}
+
+// A LocalReporter's Yield and Reclaim only record it, for Yielded.
+func TestLocalReporterYield(t *testing.T) {
+	rep := LocalReporter()
+	if rep.Yielded() {
+		t.Fatal("yielded before Yield")
+	}
+	rep.Yield()
+	if !rep.Yielded() {
+		t.Fatal("Yield unrecorded")
+	}
+	if err := rep.Reclaim(context.Background()); err != nil || rep.Yielded() {
+		t.Fatal("Reclaim", err)
+	}
+}

@@ -30,6 +30,7 @@ import (
 	"github.com/kodestar/audiosilo-bridge/internal/correct"
 	"github.com/kodestar/audiosilo-bridge/internal/generate"
 	"github.com/kodestar/audiosilo-bridge/internal/jobs"
+	"github.com/kodestar/audiosilo-bridge/internal/librivoxjob"
 	"github.com/kodestar/audiosilo-bridge/internal/link"
 	"github.com/kodestar/audiosilo-bridge/internal/logring"
 	"github.com/kodestar/audiosilo-bridge/internal/mapping"
@@ -78,6 +79,8 @@ type Bridge struct {
 	// librivoxHTTP is librivox.fetch's guarded client: public addresses only
 	// (never the podcasts' allow_networks), archive.org hosts only per request.
 	librivoxHTTP *netguard.Client
+	// librivox is librivox.fetch's handler (its sweep runs after a mapping check).
+	librivox *librivoxjob.Handler
 	// box is the agent container runner (decision 15), gen the sidecars.generate
 	// job, engine the sidecars engine once it has started.
 	box    *agentbox.Runner
@@ -229,7 +232,7 @@ func New(ctx context.Context, opts Options) (*Bridge, string, error) {
 	audibleSync, b.audiblePush = b.newAudibleSync(db, opts.Logger, serverID)
 	b.runner = jobs.New(db, b.server, b.tokenRefused, jobs.Options{Log: opts.Logger, ServerID: serverID},
 		verifier, b.gen, b.gen.DescribeJob(), b.gen.ChaptersJob(), b.gen.ReadalongJob(), b.gen.ContributeJob(), corrector, podcasts, podcasts.PollJob(), podcasts.FetchJob(), podcasts.RetainJob(),
-		audiblePoll, audibleImport, audibleSync, b.newLibrivox(meta, opts.Logger))
+		audiblePoll, audibleImport, audibleSync, b.newLibrivox(meta, opts.Logger, serverID))
 	conn.onChange = b.linkChanged
 	return b, oneTime, nil
 }
@@ -483,6 +486,7 @@ func (b *Bridge) CheckMappings(ctx context.Context, ids ...int64) {
 		// beating here too would ask for it again while it is still due.
 		if b.libs.Check(ctx, cl, b.mount, time.Now, ids...) {
 			b.Kick()
+			b.sweepLibrivox(ctx)
 		}
 	}()
 }

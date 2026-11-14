@@ -524,29 +524,47 @@ func cloneRecordingRefs(in []RecordingRef) []RecordingRef {
 // getJSON performs a GET and decodes JSON into v. It returns (found=false) for a
 // 404 and (ok=false) for any transport/decoding/non-2xx failure.
 func (c *Client) getJSON(ctx context.Context, path string, v any) (found, ok bool) {
+	switch err := c.readJSON(ctx, path, v); {
+	case err == nil:
+		return true, true
+	case errors.Is(err, ErrNotFound):
+		return false, true
+	}
+	return false, false // a refusal too: these callers degrade, never cache it
+}
+
+// readJSON is getJSON's outcome as an error: nil, ErrNotFound (a 404),
+// ErrRefused (any other 4xx but 408, 425 and 429: an answer that asking again
+// won't change), else ErrUnavailable (a transport failure, a 5xx, a 408, 425
+// or 429, a body that isn't the shape).
+func (c *Client) readJSON(ctx context.Context, path string, v any) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+path, nil)
 	if err != nil {
-		return false, false
+		return ErrUnavailable
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return false, false
+		return ErrUnavailable
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusNotFound {
-		return false, true
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return false, false
+	switch code := resp.StatusCode; {
+	case code == http.StatusNotFound:
+		return ErrNotFound
+	case code == http.StatusRequestTimeout, code == http.StatusTooEarly, code == http.StatusTooManyRequests:
+		return ErrUnavailable
+	case code >= 400 && code < 500:
+		return fmt.Errorf("%w (HTTP %d)", ErrRefused, code)
+	case code < 200 || code >= 300:
+		return ErrUnavailable
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
 	if err != nil {
-		return false, false
+		return ErrUnavailable
 	}
 	if err := json.Unmarshal(body, v); err != nil {
-		return false, false
+		return ErrUnavailable
 	}
-	return true, true
+	return nil
 }
 
 // lookup resolves an identifier to a work id, cached per identifier. ok=false
@@ -609,11 +627,10 @@ type workPayload struct {
 	} `json:"recordings"`
 }
 
-// fetchWork reads works/{id}, uncached. found=false is a clean 404; ok=false a
-// transport failure.
-func (c *Client) fetchWork(ctx context.Context, workID string) (res workPayload, found, ok bool) {
-	found, ok = c.getJSON(ctx, "/api/v1/works/"+url.PathEscape(workID), &res)
-	return res, found, ok
+// fetchWork reads works/{id}, uncached: readJSON's outcome.
+func (c *Client) fetchWork(ctx context.Context, workID string) (res workPayload, err error) {
+	err = c.readJSON(ctx, "/api/v1/works/"+url.PathEscape(workID), &res)
+	return res, err
 }
 
 // workDetail fetches a work's title + sidecar presence, cached per work. Sidecar
@@ -624,12 +641,12 @@ func (c *Client) workDetail(ctx context.Context, workID string) (v workVal, foun
 	if cached, hit := c.works.get(workID); hit {
 		return cached, true, true
 	}
-	res, f, okc := c.fetchWork(ctx, workID)
-	if !okc {
-		return workVal{}, false, false
-	}
-	if !f {
+	res, err := c.fetchWork(ctx, workID)
+	switch {
+	case errors.Is(err, ErrNotFound):
 		return workVal{}, false, true
+	case err != nil:
+		return workVal{}, false, false // a refusal too, as getJSON's
 	}
 	v = workVal{id: res.ID, title: res.Title, hasChars: len(res.Characters) > 0, hasRecap: len(res.Recaps) > 0}
 	v.series = readingSeries(res.Series)

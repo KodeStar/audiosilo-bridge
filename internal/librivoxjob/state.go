@@ -8,6 +8,7 @@ import (
 	"path"
 	"path/filepath"
 	"strconv"
+	"time"
 
 	"github.com/kodestar/audiosilo-bridge/internal/fsutil"
 	"github.com/kodestar/audiosilo-bridge/internal/transfer"
@@ -23,6 +24,10 @@ import (
 // placement marker (a failed rescan retries from the rescan, decision 6).
 type state struct {
 	LibraryID int64 `json:"library_id"`
+	// ServerID is the paired server's id when the fetch planned ("" when it
+	// was unknown, or a state from before it was kept): LibraryID is that
+	// server's library. A state of another server is never acted on.
+	ServerID string `json:"server_id,omitempty"`
 	// Parent is the folder the book goes in ("" for the library's root), and
 	// MadeParent whether this fetch created it (removed again, when empty, with
 	// the staging folder).
@@ -59,7 +64,10 @@ func (h *Handler) statePath(lib int64, id int) string {
 
 // loadState reads the state of the project's fetch into library lib, nil when
 // there is none. One that can't be read, that names another library, or whose
-// paths aren't clean library paths, goes: the run plans afresh.
+// paths aren't clean library paths, goes: the run plans afresh. So does one of
+// another server (the Bridge was paired with this one since): its library id
+// means nothing here, so its staging folder is left where it is, never looked
+// for in this server's same-numbered library.
 func (h *Handler) loadState(lib int64, id int) *state {
 	p := h.statePath(lib, id)
 	b, err := os.ReadFile(p) //nolint:gosec // G304: the job's own state in the Bridge's data
@@ -71,7 +79,22 @@ func (h *Handler) loadState(lib int64, id int) *state {
 		_ = os.Remove(p)
 		return nil
 	}
+	if cur := h.o.ServerID(); st.ServerID != "" && cur != "" && st.ServerID != cur {
+		h.o.Log.Warn("librivox: a fetch's state is another server's; its staging folder is left as it is",
+			"library", lib, "librivox_id", id, "server", st.ServerID, "path", st.staging(id))
+		_ = os.Remove(p)
+		return nil
+	}
 	return &st
+}
+
+// touchState marks the state of the project's fetch into library lib as in
+// use now (nothing when there is none): the sweep goes by the state's age, and
+// a run that resumes without saving (everything downloaded, meta down again),
+// or one that ends long after its last save (parked for days), must not look
+// abandoned. A run touches it when it loads it and when it ends.
+func (h *Handler) touchState(lib int64, id int, now time.Time) {
+	_ = os.Chtimes(h.statePath(lib, id), now, now)
 }
 
 // valid reports whether the state's paths are clean library paths: Parent,
