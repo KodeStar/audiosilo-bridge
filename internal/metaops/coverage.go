@@ -627,11 +627,10 @@ type workPayload struct {
 	} `json:"recordings"`
 }
 
-// fetchWork reads works/{id}, uncached. found=false is a clean 404; ok=false a
-// transport failure.
-func (c *Client) fetchWork(ctx context.Context, workID string) (res workPayload, found, ok bool) {
-	found, ok = c.getJSON(ctx, "/api/v1/works/"+url.PathEscape(workID), &res)
-	return res, found, ok
+// fetchWork reads works/{id}, uncached: readJSON's outcome.
+func (c *Client) fetchWork(ctx context.Context, workID string) (res workPayload, err error) {
+	err = c.readJSON(ctx, "/api/v1/works/"+url.PathEscape(workID), &res)
+	return res, err
 }
 
 // workDetail fetches a work's title + sidecar presence, cached per work. Sidecar
@@ -642,12 +641,12 @@ func (c *Client) workDetail(ctx context.Context, workID string) (v workVal, foun
 	if cached, hit := c.works.get(workID); hit {
 		return cached, true, true
 	}
-	res, f, okc := c.fetchWork(ctx, workID)
-	if !okc {
-		return workVal{}, false, false
-	}
-	if !f {
+	res, err := c.fetchWork(ctx, workID)
+	switch {
+	case errors.Is(err, ErrNotFound):
 		return workVal{}, false, true
+	case err != nil:
+		return workVal{}, false, false // a refusal too, as getJSON's
 	}
 	v = workVal{id: res.ID, title: res.Title, hasChars: len(res.Characters) > 0, hasRecap: len(res.Recaps) > 0}
 	v.series = readingSeries(res.Series)

@@ -142,8 +142,8 @@ func (c *Client) LibrivoxWork(ctx context.Context, workID string) (LibrivoxWork,
 	if !c.Enabled() {
 		return LibrivoxWork{}, ErrDisabled
 	}
-	var res workPayload
-	if err := readErr(ctx, c.readJSON(ctx, "/api/v1/works/"+url.PathEscape(workID), &res)); err != nil {
+	res, err := c.fetchWork(ctx, workID)
+	if err := readErr(ctx, err); err != nil {
 		return LibrivoxWork{}, err
 	}
 	w := LibrivoxWork{Title: res.Title}
