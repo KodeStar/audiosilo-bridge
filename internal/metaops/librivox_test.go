@@ -110,3 +110,42 @@ func TestLibrivoxArchiveID(t *testing.T) {
 		}
 	}
 }
+
+// A permanent 4xx other than a 404 is ErrRefused (asked once, never retried
+// by a fetch); 408, 425, 429 and 5xx stay ErrUnavailable. The callers that
+// degrade (lookup's cache) still read a refusal as unavailable, never a miss.
+func TestLibrivoxRefusedStatuses(t *testing.T) {
+	status := 0
+	asked := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		asked++
+		w.WriteHeader(status)
+	}))
+	defer srv.Close()
+	c := NewClient(srv.URL)
+	ctx := context.Background()
+	for code, want := range map[int]error{
+		http.StatusBadRequest: ErrRefused, http.StatusForbidden: ErrRefused, http.StatusGone: ErrRefused,
+		http.StatusUnauthorized: ErrRefused, http.StatusNotFound: ErrNotFound,
+		http.StatusRequestTimeout: ErrUnavailable, http.StatusTooEarly: ErrUnavailable,
+		http.StatusTooManyRequests: ErrUnavailable, http.StatusBadGateway: ErrUnavailable,
+	} {
+		status = code
+		if _, err := c.LibrivoxAudiobook(ctx, 192); !errors.Is(err, want) {
+			t.Errorf("project, HTTP %d: %v, want %v", code, err, want)
+		}
+		if _, err := c.LibrivoxWork(ctx, "w"); !errors.Is(err, want) {
+			t.Errorf("work, HTTP %d: %v, want %v", code, err, want)
+		}
+	}
+	// lookup: a 403 is unavailable and not cached, so the next call asks again.
+	status = http.StatusForbidden
+	if _, found, ok := c.lookup(ctx, "asin", "B0"); found || ok {
+		t.Fatalf("a refused lookup: found %v ok %v", found, ok)
+	}
+	before := asked
+	_, _, _ = c.lookup(ctx, "asin", "B0")
+	if asked != before+1 {
+		t.Fatal("a refused lookup was cached")
+	}
+}

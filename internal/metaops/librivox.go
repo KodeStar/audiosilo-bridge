@@ -21,6 +21,10 @@ var ErrNotFound = errors.New("not found in the metadata database")
 // transport failure, a 5xx, a body that isn't the shape).
 var ErrUnavailable = errors.New("the metadata service is unavailable")
 
+// ErrRefused is a permanent 4xx from meta other than a 404 (a 400, 403, 410):
+// asking again won't change it. A 408, 425 or 429 is ErrUnavailable.
+var ErrRefused = errors.New("the metadata service refused the request")
+
 // LibrivoxBook is one project of the LibriVox-shaped feed, the fields a fetch
 // reads. LibriVox's ids are strings, and coverart_jpg is null when the project
 // states none.
@@ -74,7 +78,8 @@ func (b LibrivoxBook) ArchiveID() string {
 
 // LibrivoxAudiobook reads LibriVox project id from meta's feed, with its
 // sections and cover. ErrDisabled: no base URL; ErrNotFound: meta has no such
-// project; ErrUnavailable: meta can't be read now.
+// project; ErrRefused: meta refuses the request for good; ErrUnavailable: meta
+// can't be read now.
 func (c *Client) LibrivoxAudiobook(ctx context.Context, id int) (LibrivoxBook, error) {
 	if !c.Enabled() {
 		return LibrivoxBook{}, ErrDisabled
@@ -83,8 +88,7 @@ func (c *Client) LibrivoxAudiobook(ctx context.Context, id int) (LibrivoxBook, e
 	var res struct {
 		Books []LibrivoxBook `json:"books"`
 	}
-	found, ok := c.getJSON(ctx, "/api/v1/librivox/audiobooks?"+q.Encode(), &res)
-	if err := readErr(ctx, found, ok); err != nil {
+	if err := readErr(ctx, c.readJSON(ctx, "/api/v1/librivox/audiobooks?"+q.Encode(), &res)); err != nil {
 		return LibrivoxBook{}, err
 	}
 	for _, b := range res.Books {
@@ -123,28 +127,23 @@ func (w LibrivoxWork) LibrivoxCount() int {
 	return n
 }
 
-// readErr is a getJSON outcome as these reads' error: the caller's cancel,
-// ErrUnavailable, ErrNotFound, or nil.
-func readErr(ctx context.Context, found, ok bool) error {
-	switch {
-	case ctx.Err() != nil:
+// readErr is a readJSON outcome as these reads' error: the caller's cancel
+// before anything else, else the outcome.
+func readErr(ctx context.Context, err error) error {
+	if ctx.Err() != nil {
 		return ctx.Err()
-	case !ok:
-		return ErrUnavailable
-	case !found:
-		return ErrNotFound
 	}
-	return nil
+	return err
 }
 
-// LibrivoxWork reads a work for a LibriVox fetch. ErrDisabled, ErrNotFound and
-// ErrUnavailable as LibrivoxAudiobook's.
+// LibrivoxWork reads a work for a LibriVox fetch. ErrDisabled, ErrNotFound,
+// ErrRefused and ErrUnavailable as LibrivoxAudiobook's.
 func (c *Client) LibrivoxWork(ctx context.Context, workID string) (LibrivoxWork, error) {
 	if !c.Enabled() {
 		return LibrivoxWork{}, ErrDisabled
 	}
-	res, found, ok := c.fetchWork(ctx, workID)
-	if err := readErr(ctx, found, ok); err != nil {
+	var res workPayload
+	if err := readErr(ctx, c.readJSON(ctx, "/api/v1/works/"+url.PathEscape(workID), &res)); err != nil {
 		return LibrivoxWork{}, err
 	}
 	w := LibrivoxWork{Title: res.Title}
