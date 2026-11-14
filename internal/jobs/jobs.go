@@ -961,6 +961,8 @@ type Reporter struct {
 	// one did): the server moves an open job with its book (a rename the scan
 	// noticed), and the job hears it here.
 	path string
+	// localYielded is a LocalReporter's Yield, for Yielded (a handler's tests).
+	localYielded bool
 }
 
 // LocalReporter returns a Reporter that records progress and sends nothing (a
@@ -1085,9 +1087,13 @@ func (p *Reporter) Unpark() {
 // the Bridge for an unknown time (a parked librivox.fetch waiting for its
 // library's mapping), so the lane admits another job meanwhile. The job keeps
 // running and reporting; it holds no slot until Reclaim. Opt-in: a park alone
-// keeps the slot. Nothing for a LocalReporter or a job that holds none.
+// keeps the slot. Nothing for a job that holds none (a LocalReporter only
+// records it for Yielded).
 func (p *Reporter) Yield() {
 	if p.r == nil || p.ru == nil {
+		p.mu.Lock()
+		p.localYielded = true
+		p.mu.Unlock()
 		return
 	}
 	r, ru := p.r, p.ru
@@ -1107,6 +1113,9 @@ func (p *Reporter) Yield() {
 // once when the job didn't yield.
 func (p *Reporter) Reclaim(ctx context.Context) error {
 	if p.r == nil || p.ru == nil {
+		p.mu.Lock()
+		p.localYielded = false
+		p.mu.Unlock()
 		return nil
 	}
 	r, ru := p.r, p.ru
@@ -1123,6 +1132,19 @@ func (p *Reporter) Reclaim(ctx context.Context) error {
 		return ctx.Err()
 	}
 	return nil
+}
+
+// Yielded reports whether the job gave its slot back and hasn't reclaimed one
+// (a LocalReporter records its Yield and Reclaim too, for a handler's tests).
+func (p *Reporter) Yielded() bool {
+	if p.r == nil || p.ru == nil {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		return p.localYielded
+	}
+	p.r.mu.Lock()
+	defer p.r.mu.Unlock()
+	return p.ru.yielded
 }
 
 // parkState reports whether the job is parked, and with what message.

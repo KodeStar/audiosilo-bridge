@@ -908,6 +908,9 @@ func TestYieldFreesSlotAndReclaimWaits(t *testing.T) {
 				rep.Park("not_writable", "Waiting for the mapping")
 				rep.Yield()
 				rep.Yield() // a second Yield changes nothing
+				if !rep.Yielded() {
+					t.Error("not yielded after Yield")
+				}
 				close(yielded)
 				select {
 				case <-ctx.Done():
@@ -916,6 +919,9 @@ func TestYieldFreesSlotAndReclaimWaits(t *testing.T) {
 				}
 				rep.Unpark()
 				err := rep.Reclaim(ctx)
+				if err == nil && rep.Yielded() {
+					t.Error("still yielded after Reclaim")
+				}
 				reclaimed <- err
 				if err != nil {
 					return nil, err
@@ -1003,11 +1009,17 @@ func TestYieldFreesSlotAndReclaimWaits(t *testing.T) {
 	}
 }
 
-// A LocalReporter's Yield and Reclaim do nothing.
+// A LocalReporter's Yield and Reclaim only record it, for Yielded.
 func TestLocalReporterYield(t *testing.T) {
 	rep := LocalReporter()
+	if rep.Yielded() {
+		t.Fatal("yielded before Yield")
+	}
 	rep.Yield()
-	if err := rep.Reclaim(context.Background()); err != nil {
-		t.Fatal(err)
+	if !rep.Yielded() {
+		t.Fatal("Yield unrecorded")
+	}
+	if err := rep.Reclaim(context.Background()); err != nil || rep.Yielded() {
+		t.Fatal("Reclaim", err)
 	}
 }
