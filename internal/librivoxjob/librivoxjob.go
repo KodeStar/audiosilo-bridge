@@ -99,11 +99,13 @@ func ParseParams(raw json.RawMessage) (Params, error) {
 
 // Result is a done fetch: the book's path as the server indexed it, the
 // project, and the files placed (the sections and the cover) with their bytes.
-// Adopted (always sent; additive, so an older server ignores it) is true when
-// the book's folder already held this project's librivox.json when the fetch
-// planned, so the Bridge downloaded and placed nothing and only rescanned it;
-// false when this fetch placed the folder (a resume that finds its own
-// unrecorded placement included).
+// Adopted (always sent; additive, so an older server ignores it) is false only
+// when this run itself renamed the staging folder into place: the server then
+// treats the folder as new. Any run that finds the folder already placed says
+// true, whether the folder held this project when the fetch planned, a kept
+// state says Placed (a retried failed rescan) or the run finds an earlier
+// run's unrecorded rename: the book may have been indexed and edited since, and
+// a false would have the server drop those edits.
 type Result struct {
 	LibraryID  int64  `json:"library_id"`
 	Path       string `json:"path"`
@@ -333,6 +335,9 @@ type fetch struct {
 	mount string
 	st    *state
 	rep   *jobs.Reporter
+	// renamed: this run renamed the staging folder into place (the result's
+	// adopted is false only then).
+	renamed bool
 }
 
 // staging is the fetch's staging folder (library-relative).
@@ -580,7 +585,7 @@ func (h *Handler) plan(ctx context.Context, f *fetch, srv Server, book metaops.L
 			if err != nil || path.Dir(spelled) != path.Dir(at) {
 				spelled = at
 			}
-			st.Dest, st.Placed, st.Adopted = spelled, true, true
+			st.Dest, st.Placed = spelled, true
 			st.Count, st.Bytes = countFiles(root, spelled)
 		}
 		if st.Dest != "" {
@@ -781,6 +786,7 @@ func (h *Handler) place(ctx context.Context, f *fetch, names []string) error {
 		}
 		f.st.Dest, f.st.Placed, f.st.Count, f.st.Bytes = dest, true, n, bytes
 		f.st.Files = nil
+		f.renamed = true
 		if serr := h.saveState(f.p.LibrivoxID, f.st); serr != nil {
 			h.o.Log.Warn("librivox: recording a placed book failed", "librivox_id", f.p.LibrivoxID, "err", serr)
 		}
@@ -900,7 +906,7 @@ func (h *Handler) finish(ctx context.Context, f *fetch, srv Server) (*Result, er
 		"files", f.st.Count, "bytes", f.st.Bytes)
 	h.dropState(f.lib.ID, f.p.LibrivoxID)
 	return &Result{LibraryID: f.lib.ID, Path: bookPath, LibrivoxID: f.p.LibrivoxID, Files: f.st.Count, Bytes: f.st.Bytes,
-		Adopted: f.st.Adopted}, nil
+		Adopted: !f.renamed}, nil
 }
 
 // report records the job's progress.

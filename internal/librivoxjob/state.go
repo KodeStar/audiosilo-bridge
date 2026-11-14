@@ -42,9 +42,6 @@ type state struct {
 	Placed bool  `json:"placed,omitempty"`
 	Count  int   `json:"count,omitempty"`
 	Bytes  int64 `json:"bytes,omitempty"`
-	// Adopted: Dest is a folder that already held this project when the fetch
-	// planned (no download, no rename), as the result's adopted says.
-	Adopted bool `json:"adopted,omitempty"`
 }
 
 // partState is one section's partial download.

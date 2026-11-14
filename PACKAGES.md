@@ -2721,7 +2721,7 @@ internal/
             library; none recorded counts as this server's), parent and whether
             the fetch made it, destination (staging is
             <parent>/.audiosilo-librivox-<id>, never stored),
-            the partials' validators, then placed + count + bytes + adopted): a resumed run
+            the partials' validators, then placed + count + bytes): a resumed run
             follows it rather than planning again, Abandon finds the staging
             folder by it, and once placed it is the placement marker (a failed
             rescan keeps the book and the state; the retry goes on from the
@@ -2757,10 +2757,12 @@ internal/
             Steps manifest, download (done/total = sections), cover, place,
             rescan. Result {library_id, path (the rescan's), librivox_id, files,
             bytes, adopted} (files and bytes: the sections and the cover;
-            adopted, always sent since bridge#69, true only when plan found the
-            folder already holding this project, carried in the state across a
-            failed rescan; a resume that finds its own unrecorded rename is
-            false); a failure is
+            adopted, always sent since bridge#69, false only when this run
+            itself renamed staging into place (the server treats that folder
+            as new); any run that finds the folder already placed says true:
+            plan finding it holding this project, a kept placed state (a
+            retried failed rescan) or an earlier run's unrecorded rename, since
+            the book may have been indexed and edited meanwhile); a failure is
             Failure {code, message} as result and error, codes not_writable,
             exists, disk_full, not_found, archive_unavailable, metadata_off,
             never a URL. Deps: fsutil, importjob, jobs, link, mapping, metaops,

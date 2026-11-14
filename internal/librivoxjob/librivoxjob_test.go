@@ -472,7 +472,8 @@ func TestFetchRescanFailureResumesAtRescan(t *testing.T) {
 	if len(x.fetch.seen()) != before || x.meta.reads != reads {
 		t.Fatal("the retry read or downloaded again")
 	}
-	if r := out.(*Result); r.Path != bookDir || r.Files != 4 || r.Bytes != 6014 {
+	// The folder was placed by the earlier run, so this one adopts it.
+	if r := out.(*Result); r.Path != bookDir || r.Files != 4 || r.Bytes != 6014 || !r.Adopted {
 		t.Fatalf("%+v", r)
 	}
 }
@@ -954,8 +955,9 @@ func TestFetchMountMovedFails(t *testing.T) {
 }
 
 // A placement whose state never said so (a kill between the rename and the
-// state's write) is found by the book's marker: the next run rescans it and
-// doesn't download the book again under the fallback name.
+// state's write) is found by the book's marker: the next run rescans it,
+// doesn't download the book again under the fallback name, and reports it
+// adopted (the rename was an earlier run's).
 func TestFetchAdoptsUnrecordedPlacement(t *testing.T) {
 	x := newHarness(t)
 	boom := errors.New("server busy")
@@ -976,7 +978,7 @@ func TestFetchAdoptsUnrecordedPlacement(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r := out.(*Result); r.Path != bookDir || r.Files != 4 || r.Bytes != 6014 || r.Adopted || len(x.fetch.seen()) != before {
+	if r := out.(*Result); r.Path != bookDir || r.Files != 4 || r.Bytes != 6014 || !r.Adopted || len(x.fetch.seen()) != before {
 		t.Fatalf("%+v, %d new requests", r, len(x.fetch.seen())-before)
 	}
 	if x.exists(fallbackName(bookDir, testID)) || x.exists(stagingDir) {
