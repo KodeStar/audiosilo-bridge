@@ -304,11 +304,19 @@ func newHarness(t *testing.T) *harness {
 	libs.writable.Store(true)
 	exec := &hooks{t: t, stub: scheduler.NewStubExecutor(time.Millisecond, 2*time.Millisecond), db: db, parks: map[string]int{}, block: map[string]chan struct{}{}}
 	work := filepath.Join(dir, "work")
-	sched := scheduler.New(db, events.NewHub(256), exec, 2, work, false)
+	hub := events.NewHub(256)
+	sched := scheduler.New(db, hub, exec, 2, work, false)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { defer close(done); _ = sched.Start(ctx) }()
 	t.Cleanup(func() { cancel(); <-done })
+	// The start-up Reconcile must be over before a test seeds the store: run
+	// after it, Reconcile rewinds a seeded book whose stage success has no
+	// sentinel under the test (bridge#41). The first dispatch after it
+	// publishes queue.stats.
+	if !poll(func() bool { return published(hub, "queue.stats") }) {
+		t.Fatal("the scheduler never started")
+	}
 	hr := &harness{t: t, db: db, srv: srv, cl: cl, libs: libs, exec: exec, sched: sched, root: root, work: work}
 	hr.h = hr.handler()
 	return hr
@@ -355,6 +363,18 @@ func (hr *harness) waitFor(what string, cond func() bool) {
 	if !poll(cond) {
 		hr.t.Fatalf("timed out waiting for %s", what)
 	}
+}
+
+// published reports whether hub has published an event of type typ.
+func published(hub *events.Hub, typ string) bool {
+	replay, sub := hub.Subscribe(0)
+	sub.Close()
+	for _, ev := range replay {
+		if ev.Type == typ {
+			return true
+		}
+	}
+	return false
 }
 
 // poll waits up to 10 s for cond and reports whether it held. It never fails the

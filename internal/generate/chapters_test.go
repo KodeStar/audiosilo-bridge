@@ -1233,7 +1233,11 @@ func TestChaptersDetectKeepsAFinishedRun(t *testing.T) {
 			defer stop()
 			hr.waitFor("refused", func() bool { s, _ := hr.srv.final(44); return s == link.StateFailed })
 			if _, final := hr.srv.final(44); final.Error == nil || *final.Error != string(errChaptersKeepsRun) {
-				t.Fatalf("error = %v", final.Error)
+				msg := "<nil>"
+				if final.Error != nil {
+					msg = *final.Error
+				}
+				t.Fatalf("error = %s", msg)
 			}
 			if got, err := hr.db.GetBook(ctx, old.ID); err != nil || got.State != string(tc.st) {
 				t.Fatalf("the finished run = %+v, %v", got, err)
