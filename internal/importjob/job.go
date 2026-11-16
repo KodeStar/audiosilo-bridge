@@ -313,11 +313,11 @@ type Claim struct {
 // neither when either has none (a range is none: a pack is matched by
 // MatchScored's rules). rec's is its SeriesPosition; b's is its position in
 // rec's series. When b is not in that series, its main series' counts only
-// when rec names no series, or when that number is the folder code's leading
-// b's folder name (the listing puts a folder code's number there: "PG02 - ..."
-// is 2 whatever the series is called). Any other main series' number (a
-// franchise's, "Cosmere 7" for "Mistborn 1") says nothing about rec's
-// (bridge#43).
+// when rec names no series, or when it is the number of the folder code that
+// leads b's folder name (the listing puts a folder code's number there: "PG02
+// - ..." is 2 whatever Audible calls the series). Any other main series'
+// number (a franchise's, "Cosmere 7" for "Mistborn 1") says nothing about
+// rec's (bridge#43).
 func PositionAgrees(rec source.Record, b link.LibraryBook) (agrees, disagrees bool) {
 	want, ok := parsePosition(rec.SeriesPosition)
 	if !ok || len(b.Series) == 0 {
@@ -332,7 +332,7 @@ func PositionAgrees(rec source.Record, b link.LibraryBook) (agrees, disagrees bo
 				break
 			}
 		}
-		if !named && !folderCodeIs(b.Path, pos) {
+		if !named && !folderCodeIs(b.Path, b.Series[0].Name, pos) {
 			return false, false
 		}
 	}
@@ -347,21 +347,46 @@ func PositionAgrees(rec source.Record, b link.LibraryBook) (agrees, disagrees bo
 // one (its metadata.FolderCodePosition): one to five letters, maybe a space,
 // then a number of one to three digits, maybe a decimal part, ending where a
 // word does ("DH06 - Land of Magic", "DF15.5 Brief Cases").
-var folderCode = regexp.MustCompile(`^[A-Za-z]{1,5} ?(\d{1,3}(?:\.\d+)?)(?:$|[^\pL\pN_])`)
+var folderCode = regexp.MustCompile(`^([A-Za-z]{1,5}) ?(\d{1,3}(?:\.\d+)?)(?:$|[^\pL\pN_])`)
 
-// folderCodeIs reports whether the folder at p (its last segment) leads with a
-// folder code whose number is pos.
-func folderCodeIs(p, pos string) bool {
+// folderCodeIs reports whether the folder at p (its last segment) leads with
+// a code of series' initials whose number is pos ("LT02 - ..." for "L-T" 2,
+// never "Book 07 - ..." for "Cosmere" 7), as the server's listing reads one.
+func folderCodeIs(p, series, pos string) bool {
 	want, ok := parsePosition(pos)
 	if !ok {
 		return false
 	}
 	m := folderCode.FindStringSubmatch(strings.TrimSpace(path.Base(p)))
-	if m == nil {
+	if m == nil || !initialsOf(m[1], series) {
 		return false
 	}
-	got, ok := parsePosition(m[1])
+	got, ok := parsePosition(m[2])
 	return ok && got == want
+}
+
+// apostrophes are dropped before a series is split into words, so one joins a
+// word ("Emperor's Edge" is two words).
+var apostrophes = strings.NewReplacer("'", "", "\u2019", "")
+
+// initialsOf reports whether code's letters are, case aside, the initials of
+// series' words, all or some of them in order (the server's rule: "DH" for
+// "Dragon Heart", "LT" for "L-T").
+func initialsOf(code, series string) bool {
+	words := strings.FieldsFunc(apostrophes.Replace(series), func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	})
+	want := []rune(strings.ToLower(code))
+	i := 0
+	for _, w := range words {
+		if i == len(want) {
+			break
+		}
+		if first, _ := utf8.DecodeRuneInString(w); unicode.ToLower(first) == want[i] {
+			i++
+		}
+	}
+	return i == len(want)
 }
 
 // WorkKey identifies the work a record is: its title (folded), its authors

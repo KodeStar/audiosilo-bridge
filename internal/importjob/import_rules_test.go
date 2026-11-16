@@ -227,6 +227,8 @@ func TestPositionAgrees(t *testing.T) {
 		{"a franchise's number", "Lanterns of London", "1", "Aar/Moon over Tidewater", series("Aar Universe", "7"), false, false},
 		{"a folder code of another number", "Lanterns of London", "2", "Aar/LT07 - Moon", series("Aar Universe", "2"), false, false},
 		{"no code: the letters run on", "Lanterns of London", "2", "Aar/LT02x Moon", series("L-T", "2"), false, false},
+		{"no code: not the series' initials", "Lanterns of London", "7", "Aar/Book 07 - Moon", series("Aar Universe", "7"), false, false},
+		{"a code of some initials in order", "Lanterns of London", "3", "Aar/AU03 - Moon", series("Aar's Wide Universe", "3"), true, false},
 		{"no series on the title: the main one", "", "2", "", series("Lanterns of London", "2"), true, false},
 		{"no series on the title: another number", "", "3", "", series("Lanterns of London", "2"), false, true},
 		{"the named series over the main one", "Lanterns of London", "4", "", []link.SeriesRef{{Name: "Universe", Position: "9"}, {Name: "lanterns of london", Position: "4"}}, true, false},
