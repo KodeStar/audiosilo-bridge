@@ -233,7 +233,7 @@ func (w *whisperCpp) Transcribe(ctx context.Context, job Job) error {
 	}
 	out, err := runTool(ctx, 2*time.Hour, cli, args...)
 	if err != nil {
-		return fmt.Errorf("whisper-cli chapter %d: %w: %s", job.Chapter, err, out)
+		return fmt.Errorf("whisper-cli chapter %d: %w: %s", job.Chapter, err, outputTail(out))
 	}
 	// whisper-cli exits 0 on a bad argument too, so success is the transcript file.
 	if !fsutil.IsFile(jsonOut) {

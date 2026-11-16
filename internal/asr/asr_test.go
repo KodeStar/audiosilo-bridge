@@ -744,21 +744,10 @@ func TestWhisperCppNoContextArg(t *testing.T) {
 			if err != nil {
 				t.Fatalf("read recorded args: %v", err)
 			}
-			args := strings.Split(strings.TrimSpace(string(gotArgs)), "\n")
-			has := false
-			for i, a := range args {
-				if a == "-mc" {
-					if i+1 >= len(args) || args[i+1] != "0" {
-						t.Fatalf("-mc not followed by 0: %q", args)
-					}
-					has = true
-				}
-				if a == "--no-context" || a == "-nc" {
-					t.Fatalf("%s is not a whisper-cli flag (bridge#72): %q", a, args)
-				}
-			}
-			if has != tc.want {
-				t.Errorf("-mc 0 present = %v, want %v (args: %q)", has, tc.want, args)
+			// The strict fake already fails an unknown flag (--no-context).
+			dump := string(gotArgs)
+			if has := strings.Contains(dump, "\n-mc\n0\n"); has != tc.want || hasLine(dump, "-mc") != tc.want {
+				t.Errorf("-mc 0 present = %v, want %v (args: %q)", has, tc.want, dump)
 			}
 		})
 	}

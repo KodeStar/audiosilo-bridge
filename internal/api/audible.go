@@ -103,7 +103,7 @@ type AudibleMapping struct {
 	UserID    int64  `json:"user_id"`
 	LibraryID int64  `json:"library_id"`
 	Policy    string `json:"policy"`
-	Sync      bool   `json:"sync,omitempty"`
+	Sync      bool   `json:"sync"`
 }
 
 // AudibleFinish ends a sign-in.
