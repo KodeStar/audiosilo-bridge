@@ -52,8 +52,8 @@ func TestEnrichPaced(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.Enriched != 4 || res.EnrichFailed != 0 || res.EnrichDeferred != 0 || len(fs.enriched) != 4 {
-		t.Fatalf("result = %+v, enriched %v", res, fs.enriched)
+	if res.Enriched != 4 || res.EnrichFailed != 0 || res.EnrichDeferred != 0 || len(fs.enrichedNow()) != 4 {
+		t.Fatalf("result = %+v, enriched %v", res, fs.enrichedNow())
 	}
 	if len(c.waits) != 3 {
 		t.Fatalf("waits = %v, want 3 gaps", c.waits)
@@ -86,8 +86,8 @@ func TestEnrichHonoursRetryAfter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.Enriched != 4 || res.EnrichFailed != 0 || res.EnrichDeferred != 0 || len(fs.enriched) != 4 {
-		t.Fatalf("result = %+v, enriched %v", res, fs.enriched)
+	if res.Enriched != 4 || res.EnrichFailed != 0 || res.EnrichDeferred != 0 || len(fs.enrichedNow()) != 4 {
+		t.Fatalf("result = %+v, enriched %v", res, fs.enrichedNow())
 	}
 	// The second book: gap, 429 -> its Retry-After (3 s), 429 again -> the
 	// backoff (the second in a row: 4 s), then through; the last two at the
@@ -112,8 +112,8 @@ func TestEnrichZeroRetryAfter(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if fs.enrichN != enrichMaxLimited || res.EnrichDeferred != 1 || len(c.waits) != enrichMaxLimited-1 {
-				t.Fatalf("result = %+v after %d attempts, waits %v", res, fs.enrichN, c.waits)
+			if fs.enrichCalls() != enrichMaxLimited || res.EnrichDeferred != 1 || len(c.waits) != enrichMaxLimited-1 {
+				t.Fatalf("result = %+v after %d attempts, waits %v", res, fs.enrichCalls(), c.waits)
 			}
 			for _, wait := range c.waits {
 				if wait != 0 {
@@ -130,8 +130,8 @@ func TestEnrichCancelledDuringZeroRetry(t *testing.T) {
 	fs.limit = func(int) (string, bool) { return "0", true }
 	h := setup(t, fs, accts)
 	h.sleep = func(context.Context, time.Duration) error { return context.Canceled }
-	if _, err := run(t, h, "acct0001"); err == nil || fs.enrichN != 1 {
-		t.Fatalf("cancelled retry: err %v, attempts %d", err, fs.enrichN)
+	if _, err := run(t, h, "acct0001"); err == nil || fs.enrichCalls() != 1 {
+		t.Fatalf("cancelled retry: err %v, attempts %d", err, fs.enrichCalls())
 	}
 }
 
@@ -173,8 +173,8 @@ func TestEnrichDefersTheRest(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if res.Enriched != 3 || res.EnrichDeferred != 0 || res.MatchedASIN != 2 || len(fs.enriched) != 5 {
-			t.Fatalf("the next poll = %+v, enriched %v", res, fs.enriched)
+		if res.Enriched != 3 || res.EnrichDeferred != 0 || res.MatchedASIN != 2 || len(fs.enrichedNow()) != 5 {
+			t.Fatalf("the next poll = %+v, enriched %v", res, fs.enrichedNow())
 		}
 	})
 	t.Run("429s in a row", func(t *testing.T) {
@@ -190,8 +190,8 @@ func TestEnrichDefersTheRest(t *testing.T) {
 		}
 		// One through, then enrichMaxLimited 429s in a row: the last of them
 		// leaves the rest, without a wait.
-		if res.Enriched != 1 || res.EnrichDeferred != 2 || res.EnrichFailed != 0 || fs.enrichN != 1+enrichMaxLimited {
-			t.Fatalf("result = %+v after %d calls", res, fs.enrichN)
+		if res.Enriched != 1 || res.EnrichDeferred != 2 || res.EnrichFailed != 0 || fs.enrichCalls() != 1+enrichMaxLimited {
+			t.Fatalf("result = %+v after %d calls", res, fs.enrichCalls())
 		}
 	})
 	t.Run("the poll's time runs out", func(t *testing.T) {
@@ -224,8 +224,8 @@ func TestEnrichCancelled(t *testing.T) {
 	if _, err := run(t, h, "acct0001"); err == nil {
 		t.Fatal("a cancelled wait finished the poll")
 	}
-	if len(accts.failed) != 0 || len(fs.enriched) != 1 {
-		t.Fatalf("failed %v, enriched %v", accts.failed, fs.enriched)
+	if len(accts.failed) != 0 || len(fs.enrichedNow()) != 1 {
+		t.Fatalf("failed %v, enriched %v", accts.failed, fs.enrichedNow())
 	}
 }
 
@@ -294,8 +294,8 @@ func TestPollContestedKeepsTheBest(t *testing.T) {
 					t.Errorf("%s: state %q reason %q contested_path %q, want available %q %q", tt.ASIN, tt.State, tt.Reason, tt.ContestedPath, wantReason, wantPath)
 				}
 			}
-			if res.Matched != len(want) || res.Contested != 3 || res.Enriched != 0 || len(fs.enriched) != 0 {
-				t.Fatalf("result = %+v, enriched %v", res, fs.enriched)
+			if res.Matched != len(want) || res.Contested != 3 || res.Enriched != 0 || len(fs.enrichedNow()) != 0 {
+				t.Fatalf("result = %+v, enriched %v", res, fs.enrichedNow())
 			}
 		})
 	}
@@ -323,10 +323,10 @@ func TestPollPackOnVolumeNotEnriched(t *testing.T) {
 		t.Fatal(err)
 	}
 	if res.Matched != 2 || res.Enriched != 1 {
-		t.Fatalf("result = %+v, enriched %v", res, fs.enriched)
+		t.Fatalf("result = %+v, enriched %v", res, fs.enrichedNow())
 	}
-	if want := map[string]string{"Fell/Iron Vale/IV07-08": "B0PACK0078"}; fmt.Sprint(fs.enriched) != fmt.Sprint(want) {
-		t.Fatalf("enriched %v, want %v", fs.enriched, want)
+	if want := map[string]string{"Fell/Iron Vale/IV07-08": "B0PACK0078"}; fmt.Sprint(fs.enrichedNow()) != fmt.Sprint(want) {
+		t.Fatalf("enriched %v, want %v", fs.enrichedNow(), want)
 	}
 }
 

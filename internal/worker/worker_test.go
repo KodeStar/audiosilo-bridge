@@ -143,7 +143,17 @@ func TestWorkerRoundTrip(t *testing.T) {
 			t.Fatal("the worker never answered")
 		}
 	}
-	vs, _ := s.hub.Workers(ctx)
+	// The hub counts a segment just after its waiter has the result (a store
+	// write), so the count is waited for, never read once (bridge#41).
+	var vs []workers.View
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		vs, _ = s.hub.Workers(ctx)
+		if len(vs) == 1 && vs[0].Segments == 2 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 	if len(vs) != 1 || !vs[0].Connected || vs[0].Backend != "mlx-whisper" || vs[0].Segments != 2 {
 		t.Fatalf("worker = %+v", vs)
 	}
