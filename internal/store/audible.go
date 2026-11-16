@@ -221,18 +221,11 @@ func (db *DB) AudiblePolled(ctx context.Context, id string, titles, matched int,
 // it, and its guidance (sign in again) is what the account needs, where a
 // sign-in refusal's says the next check tries again.
 func (db *DB) RefuseAudibleAccount(ctx context.Context, id, kind, why string, at time.Time) error {
-	_, err := db.sql.ExecContext(ctx, `UPDATE audible_accounts SET
-		refused_at = CASE WHEN `+keepDevice+` THEN refused_at ELSE ?1 END,
-		last_error = CASE WHEN `+keepDevice+` THEN last_error ELSE ?3 END,
-		refusal_kind = CASE WHEN `+keepDevice+` THEN refusal_kind ELSE ?2 END
-		WHERE id = ?4`,
+	_, err := db.sql.ExecContext(ctx, `UPDATE audible_accounts SET refused_at = ?1, refusal_kind = ?2, last_error = ?3
+		WHERE id = ?4 AND NOT (?2 = ?6 AND refused_at <> '' AND refusal_kind = ?5)`,
 		timestamp(at), kind, why, id, RefusalDevice, RefusalSignIn)
 	return err
 }
-
-// keepDevice is RefuseAudibleAccount's test: a standing device refusal (?5)
-// meets a sign-in one (?6). The SET clauses all read the row as it was.
-const keepDevice = `(refused_at <> '' AND refusal_kind = ?5 AND ?2 = ?6)`
 
 // AudibleAccepted ends id's refusal when it is of kind (Audible answered a
 // signed call, so a sign-in it refused before is accepted again), reporting
