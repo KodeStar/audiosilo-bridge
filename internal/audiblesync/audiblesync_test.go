@@ -116,6 +116,7 @@ type stubServer struct {
 	postErr  error
 	rows     []link.AudibleProgressRow
 	feedErr  error
+	badSince string   // a cursor the feed answers 400 for
 	feedAsks []string // since values
 	pageSize int
 	duration map[string]float64 // path -> the book's length on the server (0 unknown)
@@ -158,6 +159,9 @@ func (s *stubServer) AudibleProgress(_ context.Context, account, since string, l
 	s.feedAsks = append(s.feedAsks, since)
 	if s.feedErr != nil {
 		return nil, s.feedErr
+	}
+	if since != "" && since == s.badSince {
+		return nil, &link.APIError{Status: http.StatusBadRequest, Code: "invalid_request"}
 	}
 	start := 0
 	if since != "" {
