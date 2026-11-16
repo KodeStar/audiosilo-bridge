@@ -207,31 +207,43 @@ func TestKeepBest(t *testing.T) {
 }
 
 // TestPositionAgrees: the title's number against the book's in the title's
-// series, else the book's main series (a folder code's number); a range, or
-// no number on either side, is neither.
+// series; the book's main series' number only when the title names no series,
+// or when it is the folder code's leading the book's folder (bridge#43: a
+// franchise's number says nothing about the title's).
 func TestPositionAgrees(t *testing.T) {
 	cases := []struct {
 		name            string
+		series          string // the title's ("" none)
 		pos             string
+		path            string // the book's ("" a folder with no code)
 		book            []link.SeriesRef
 		agree, disagree bool
 	}{
-		{"the same number", "2", series("Lanterns of London", "2"), true, false},
-		{"another number", "1", series("Lanterns of London", "2"), false, true},
-		{"2 is 2.0", "2", series("Lanterns of London", "2.0"), true, false},
-		{"the main series' number", "2", series("L-T", "2"), true, false},
-		{"the main series' other number", "3", series("L-T", "2"), false, true},
-		{"the named series over the main one", "4", []link.SeriesRef{{Name: "Universe", Position: "9"}, {Name: "lanterns of london", Position: "4"}}, true, false},
-		{"the named series without a number", "4", []link.SeriesRef{{Name: "Universe", Position: "4"}, {Name: "Lanterns of London", Position: ""}}, false, false},
-		{"a range on the book", "5", series("Lanterns of London", "5-6"), false, false},
-		{"a range on the title", "5-6", series("Lanterns of London", "5"), false, false},
-		{"no number on the title", "", series("Lanterns of London", "2"), false, false},
-		{"no number on the book", "2", series("Lanterns of London", ""), false, false},
-		{"no series on the book", "2", nil, false, false},
+		{"the same number", "Lanterns of London", "2", "", series("Lanterns of London", "2"), true, false},
+		{"another number", "Lanterns of London", "1", "", series("Lanterns of London", "2"), false, true},
+		{"2 is 2.0", "Lanterns of London", "2", "", series("Lanterns of London", "2.0"), true, false},
+		{"the folder code's number", "Lanterns of London", "2", "Aar/LT02 - Moon over Tidewater", series("L-T", "2"), true, false},
+		{"the folder code's other number", "Lanterns of London", "3", "Aar/LT 02 Moon", series("L-T", "2"), false, true},
+		{"a franchise's number", "Lanterns of London", "1", "Aar/Moon over Tidewater", series("Aar Universe", "7"), false, false},
+		{"a folder code of another number", "Lanterns of London", "2", "Aar/LT07 - Moon", series("Aar Universe", "2"), false, false},
+		{"no code: the letters run on", "Lanterns of London", "2", "Aar/LT02x Moon", series("L-T", "2"), false, false},
+		{"no series on the title: the main one", "", "2", "", series("Lanterns of London", "2"), true, false},
+		{"no series on the title: another number", "", "3", "", series("Lanterns of London", "2"), false, true},
+		{"the named series over the main one", "Lanterns of London", "4", "", []link.SeriesRef{{Name: "Universe", Position: "9"}, {Name: "lanterns of london", Position: "4"}}, true, false},
+		{"the named series without a number", "Lanterns of London", "4", "", []link.SeriesRef{{Name: "Universe", Position: "4"}, {Name: "Lanterns of London", Position: ""}}, false, false},
+		{"a range on the book", "Lanterns of London", "5", "", series("Lanterns of London", "5-6"), false, false},
+		{"a range on the title", "Lanterns of London", "5-6", "", series("Lanterns of London", "5"), false, false},
+		{"no number on the title", "Lanterns of London", "", "", series("Lanterns of London", "2"), false, false},
+		{"no number on the book", "Lanterns of London", "2", "", series("Lanterns of London", ""), false, false},
+		{"no series on the book", "Lanterns of London", "2", "", nil, false, false},
 	}
 	for _, tc := range cases {
-		rec := audibleRec("B0POS00001", "Moon over Tidewater", "Ben Aar", "Lanterns of London", tc.pos)
-		a, d := PositionAgrees(rec, link.LibraryBook{Path: "x", Series: tc.book})
+		rec := audibleRec("B0POS00001", "Moon over Tidewater", "Ben Aar", tc.series, tc.pos)
+		p := tc.path
+		if p == "" {
+			p = "Aar/Moon over Tidewater"
+		}
+		a, d := PositionAgrees(rec, link.LibraryBook{Path: p, Series: tc.book})
 		if a != tc.agree || d != tc.disagree {
 			t.Errorf("%s: agrees %v disagrees %v, want %v %v", tc.name, a, d, tc.agree, tc.disagree)
 		}
@@ -403,9 +415,13 @@ func TestTwins(t *testing.T) {
 		// Two non-Latin series the ASCII-only normalising reduces to nothing.
 		{Path: "J/1", Title: "Equal Measures", Authors: []string{"Tess Prat"}, Series: []link.SeriesRef{{Name: "長い道", Position: "1"}}},
 		{Path: "J/2", Title: "Equal Measures", Authors: []string{"Tess Prat"}, Series: []link.SeriesRef{{Name: "別の道", Position: "1"}}},
+		// One position written two ways is one position (bridge#64).
+		{Path: "N/1", Title: "Second Wind", Authors: []string{"Tess Prat"}, Series: []link.SeriesRef{{Name: "Winds", Position: "1"}}},
+		{Path: "N/2", Title: "Second Wind", Authors: []string{"Tess Prat"}, Series: []link.SeriesRef{{Name: "Winds", Position: " 1.0"}}},
+		{Path: "N/3", Title: "Second Wind", Authors: []string{"Tess Prat"}, Series: []link.SeriesRef{{Name: "Winds", Position: "1.5"}}},
 	}
 	got := Twins(books)
-	if len(got) != 2 || !got["A/One"] || !got["B/One"] {
+	if len(got) != 4 || !got["A/One"] || !got["B/One"] || !got["N/1"] || !got["N/2"] {
 		t.Fatalf("twins = %v", got)
 	}
 }
