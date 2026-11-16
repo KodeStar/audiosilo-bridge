@@ -79,8 +79,9 @@ const (
 	// echoMs: a place within this of the one last written to Audible (or, the
 	// push's way, of the one last heard from it) is the other side's own place
 	// coming back. It is also the push's debounce: a place this close to the
-	// last one written isn't written again.
-	echoMs = 5000
+	// last one written isn't written again. The store's re-assert rule
+	// compares with the same tolerance.
+	echoMs = store.AudibleNearMs
 	// maxTitles bounds a job's titles (the server's params are 1 MiB).
 	maxTitles = 20000
 )
@@ -613,7 +614,7 @@ func (h *Handler) reassert(ctx context.Context, account string, x store.AudibleP
 		res.Reasserted++
 		h.o.Log.Info("audible: Audible holds an older place than the one written to it; writing the server's place again",
 			"account", account, "asin", x.ASIN, "position_ms", x.RowMs)
-	case x.ReassertedMs == x.RowMs:
+	case near(x.RowMs, x.ReassertedMs):
 		h.o.Log.Info("audible: Audible went behind a place already written again once; left alone",
 			"account", account, "asin", x.ASIN, "position_ms", x.RowMs)
 	}

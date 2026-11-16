@@ -217,3 +217,42 @@ func TestOverwritten(t *testing.T) {
 		}
 	}
 }
+
+// bridge#64: the once-per-place rule compares places with the echo's
+// tolerance. After a heal, the server's place moving by 2 s (within echoMs:
+// the push's debounce writes nothing) is the same place: Audible going behind
+// it again earns no second heal.
+func TestReassertSmallServerMoveIsTheSamePlace(t *testing.T) {
+	e := newEnv(t)
+	p := e.pushed(t, 5393.514)
+	raw := params(t, title("B000000001", "A/One", 36000))
+	e.now = e.now.Add(time.Minute)
+	e.audibleAt(4_000_000, e.now)
+	if res, err := e.runSync(t, raw); err != nil || res.Reasserted != 1 {
+		t.Fatalf("first = %+v, %v", res, err)
+	}
+	e.now = e.now.Add(4 * time.Minute)
+	p.Tick(context.Background())
+	if got := e.sets(); len(got) != 2 {
+		t.Fatalf("sets = %v", got)
+	}
+
+	e.srv.server["A/One"] = 5395.514
+	e.srv.add("A/One", "B000000001", 5395.514, e.now, "web-1")
+	e.read(p)
+	e.now = e.now.Add(4 * time.Minute)
+	p.Tick(context.Background())
+	if got := e.sets(); len(got) != 2 {
+		t.Fatalf("a 2 s move was written: %v", got)
+	}
+	e.now = e.now.Add(time.Minute)
+	e.audibleAt(4_100_000, e.now)
+	if res, err := e.runSync(t, raw); err != nil || res.Behind != 1 || res.Reasserted != 0 {
+		t.Fatalf("behind the moved place = %+v, %v", res, err)
+	}
+	e.now = e.now.Add(10 * time.Minute)
+	p.Tick(context.Background())
+	if got := e.sets(); len(got) != 2 {
+		t.Fatalf("healed a second time: %v", got)
+	}
+}

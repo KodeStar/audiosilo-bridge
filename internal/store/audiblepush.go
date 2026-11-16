@@ -194,10 +194,16 @@ func (db *DB) DropAudiblePush(ctx context.Context, account, asin string) error {
 // re-armed once in its turn.
 func (db *DB) AudiblePushed(ctx context.Context, account, asin string, ms int64, at time.Time) error {
 	_, err := db.sql.ExecContext(ctx, `UPDATE audible_push SET want_ms = NULL, last_ms = ?1, at = ?2, heard_ms = -1,
-			reasserted_ms = CASE WHEN reasserted_ms = ?1 THEN reasserted_ms ELSE -1 END
-		WHERE account = ?3 AND asin = ?4`, ms, timestamp(at), account, asin)
+			reasserted_ms = CASE WHEN reasserted_ms >= 0 AND abs(reasserted_ms - ?1) <= ?5 THEN reasserted_ms ELSE -1 END
+		WHERE account = ?3 AND asin = ?4`, ms, timestamp(at), account, asin, AudibleNearMs)
 	return err
 }
+
+// AudibleNearMs is how close two places on one title are to count as the
+// same one (the sync's echo and the push's debounce, audiblesync's echoMs):
+// the re-assert's once-per-place rule compares with it too, so a server move
+// of a second or two is not a new place to heal again (bridge#64).
+const AudibleNearMs = 5000
 
 // AudibleHeard records the Audible place (ms) an audible.sync that started at
 // since sent to the server for x's title (x as the job read it at since). The
@@ -234,12 +240,14 @@ func (db *DB) AudibleHeard(ctx context.Context, x AudiblePush, ms int64, applied
 // the app's stale upload from a listener who rewound in the Audible app and
 // listens on there, so once the place was written again and Audible went
 // behind it once more, it is left alone until the push writes a new place
-// (AudiblePushed).
+// (AudiblePushed). A place within AudibleNearMs of the one re-armed is the same
+// place.
 func (db *DB) RearmAudiblePush(ctx context.Context, x AudiblePush, now time.Time) (bool, error) {
 	res, err := db.sql.ExecContext(ctx, `UPDATE audible_push SET want_ms = row_ms, row_seen = ?1, last_ms = -1,
 			reasserted_ms = row_ms
-		WHERE account = ?2 AND asin = ?3 AND listed = 1 AND want_ms IS NULL AND row_ms >= 0 AND reasserted_ms != row_ms
-		  AND at = ?4 AND row_ms = ?5 AND row_seen = ?6`, timestamp(now), x.Account, x.ASIN, x.At, x.RowMs, x.RowSeen)
+		WHERE account = ?2 AND asin = ?3 AND listed = 1 AND want_ms IS NULL AND row_ms >= 0
+		  AND (reasserted_ms < 0 OR abs(reasserted_ms - row_ms) > ?7)
+		  AND at = ?4 AND row_ms = ?5 AND row_seen = ?6`, timestamp(now), x.Account, x.ASIN, x.At, x.RowMs, x.RowSeen, AudibleNearMs)
 	if err != nil {
 		return false, err
 	}
