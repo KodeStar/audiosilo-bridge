@@ -71,7 +71,7 @@ func (m *Manager) Preorders(ctx context.Context, id string, library []source.Rec
 	creds, err := m.open(id)
 	if err != nil {
 		m.o.Log.Warn("audible: the account's sign-in can't be opened for its preorders", "account", id, "err", err)
-		return preorderRecords(dropReleased(reconcilePreorders(rows, inLibrary, nil, now), now))
+		return preorderRecords(dropReleased(reconcilePreorders(rows, inLibrary, nil, now, time.Time{}), now))
 	}
 
 	orders, err := m.o.Service.Orders(ctx, creds)
@@ -82,7 +82,7 @@ func (m *Manager) Preorders(ctx context.Context, id string, library []source.Rec
 			m.o.Log.Warn("audible: listing the orders failed: reporting the preorders remembered", "account", id, "err", err)
 		}
 	}
-	rows = reconcilePreorders(rows, inLibrary, orders, now)
+	rows = reconcilePreorders(rows, inLibrary, orders, now, m.lastPoll(ctx, id))
 
 	if len(rows) > 0 && !wait {
 		asins := make([]string, len(rows))
@@ -103,6 +103,17 @@ func (m *Manager) Preorders(ctx context.Context, id string, library []source.Rec
 		}
 	}
 	return preorderRecords(rows)
+}
+
+// lastPoll is when account id's last complete poll ran (zero when it never
+// did, or the store can't say).
+func (m *Manager) lastPoll(ctx context.Context, id string) time.Time {
+	a, err := m.o.DB.GetAudibleAccount(ctx, id)
+	if err != nil {
+		return time.Time{}
+	}
+	at, _ := time.Parse(time.RFC3339Nano, a.LastPollAt)
+	return at
 }
 
 // rememberedPreorder is account id's remembered pending preorder asin as a
@@ -130,7 +141,14 @@ func (m *Manager) rememberedPreorder(ctx context.Context, id, asin string) (sour
 // window, so it was cancelled), or when an order holds it delivered, none
 // pending, and it has waited DeliveredDropAfter for the library since
 // (deliveredLongAgo). By ASIN.
-func reconcilePreorders(rows []store.AudiblePreorder, inLibrary map[string]bool, orders []audible.Order, now time.Time) []store.AudiblePreorder {
+//
+// lastPoll is when the account's previous poll ran: after a gap of
+// DeliveredDropAfter or more (the Bridge was down), when the order closed
+// is unknown (it was last seen pending before the gap, and may have closed
+// just now), so a delivered one that would go counts from now instead
+// (bridge#64): its last-seen time moves to now, and the next poll judges it.
+func reconcilePreorders(rows []store.AudiblePreorder, inLibrary map[string]bool, orders []audible.Order, now, lastPoll time.Time) []store.AudiblePreorder {
+	gap := !lastPoll.IsZero() && !now.Before(lastPoll.Add(DeliveredDropAfter))
 	pending := map[string]time.Time{}
 	cancelled, delivered := map[string]bool{}, map[string]bool{}
 	listed := map[string]bool{} // in any order of the listing
@@ -178,7 +196,10 @@ func reconcilePreorders(rows []store.AudiblePreorder, inLibrary map[string]bool,
 		} else if (cancelled[a] && !delivered[a]) || (!listed[a] && !oldest.IsZero() && !r.OrderedAt.IsZero() && oldest.Before(r.OrderedAt)) {
 			continue
 		} else if delivered[a] && deliveredLongAgo(r, now) {
-			continue
+			if !gap {
+				continue
+			}
+			r.LastSeenAt = now
 		}
 		have[a] = true
 		out = append(out, r)

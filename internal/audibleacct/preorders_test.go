@@ -119,7 +119,7 @@ func TestReconcilePreorders(t *testing.T) {
 			for _, a := range tc.library {
 				lib[a] = true
 			}
-			got := asinsOf(reconcilePreorders(tc.rows, lib, tc.orders, pnow))
+			got := asinsOf(reconcilePreorders(tc.rows, lib, tc.orders, pnow, time.Time{}))
 			if !slices.Equal(got, tc.want) {
 				t.Fatalf("kept %v, want %v", got, tc.want)
 			}
@@ -132,7 +132,7 @@ func TestReconcilePreorders(t *testing.T) {
 func TestReconcilePreordersTimes(t *testing.T) {
 	rows := []store.AudiblePreorder{{ASIN: "B0HG4PZMYQ", OrderedAt: day("2026-08-28"), LastSeenAt: day("2026-11-01"), Record: "{}"}}
 	undated := audible.Order{Preorder: true, State: audible.OrderPendingPreorder, Items: []audible.OrderItem{{ASIN: "B0UNDATED1"}}}
-	got := reconcilePreorders(rows, nil, []audible.Order{pendingOrder("2026-10-19", "B0HN716NQ7"), pendingOrder("2026-08-28", "B0HG4PZMYQ"), undated}, pnow)
+	got := reconcilePreorders(rows, nil, []audible.Order{pendingOrder("2026-10-19", "B0HN716NQ7"), pendingOrder("2026-08-28", "B0HG4PZMYQ"), undated}, pnow, time.Time{})
 	if len(got) != 3 {
 		t.Fatalf("rows = %+v", got)
 	}
@@ -181,11 +181,29 @@ func TestReconcileDeliveredCap(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := reconcilePreorders([]store.AudiblePreorder{tc.row}, nil, tc.orders, pnow)
+			got := reconcilePreorders([]store.AudiblePreorder{tc.row}, nil, tc.orders, pnow, pnow.Add(-24*time.Hour))
 			if (len(got) == 1) != tc.kept {
 				t.Fatalf("kept %v, want %v", asinsOf(got), tc.kept)
 			}
 		})
+	}
+
+	// The first poll after the Bridge was down DeliveredDropAfter or more
+	// (bridge#64): an undated preorder last seen pending before the gap may
+	// have closed just now, so it is kept and counts from now; the next poll
+	// after a usual interval keeps it, and DeliveredDropAfter later it goes.
+	old := row(pnow.Add(-30*24*time.Hour), "")
+	got := reconcilePreorders([]store.AudiblePreorder{old}, nil, delivered, pnow, pnow.Add(-29*24*time.Hour))
+	if len(got) != 1 || !got[0].LastSeenAt.Equal(pnow) {
+		t.Fatalf("after downtime = %+v", got)
+	}
+	next := pnow.Add(24 * time.Hour)
+	if again := reconcilePreorders(got, nil, delivered, next, pnow); len(again) != 1 {
+		t.Fatalf("the next poll dropped it: %+v", again)
+	}
+	later := pnow.Add(DeliveredDropAfter)
+	if again := reconcilePreorders(got, nil, delivered, later, later.Add(-24*time.Hour)); len(again) != 0 {
+		t.Fatalf("kept DeliveredDropAfter after the first poll back: %+v", again)
 	}
 }
 
