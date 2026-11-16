@@ -95,13 +95,15 @@ type AudibleSignIn struct {
 	ExpiresAt   time.Time `json:"expires_at"`
 }
 
-// AudibleMapping is an account's mapping as the page sends it.
+// AudibleMapping is an account's mapping as the page sends it. Whether its
+// places sync is the server console's (Phase 4c): the page sends none, and
+// Sync, from a page an earlier Bridge served still open, is ignored.
 type AudibleMapping struct {
 	Label     string `json:"label"`
 	UserID    int64  `json:"user_id"`
 	LibraryID int64  `json:"library_id"`
 	Policy    string `json:"policy"`
-	Sync      bool   `json:"sync"`
+	Sync      bool   `json:"sync,omitempty"`
 }
 
 // AudibleFinish ends a sign-in.

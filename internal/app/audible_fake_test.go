@@ -154,7 +154,7 @@ func TestAudibleAccountThroughTheBridge(t *testing.T) {
 	_ = resp.Body.Close()
 	redirect := resp.Header.Get("Location")
 	if err := b.FinishAudibleSignIn(ctx, api.AudibleFinish{Login: st.Login, RedirectURL: redirect,
-		AudibleMapping: api.AudibleMapping{UserID: 3, LibraryID: 1, Policy: "manual", Sync: true}}); err != nil {
+		AudibleMapping: api.AudibleMapping{UserID: 3, LibraryID: 1, Policy: "manual"}}); err != nil {
 		t.Fatal(err)
 	}
 	page = b.Audible(ctx)

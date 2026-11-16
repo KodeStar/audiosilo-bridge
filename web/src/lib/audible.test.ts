@@ -40,7 +40,7 @@ describe('audible', () => {
         users: [{ id: 3, name: 'Chris', admin: true }],
         libraries: [{ id: 1, name: 'Books' }],
       }),
-    ).toEqual({ label: '', user_id: 3, library_id: 1, policy: 'manual', sync: false });
+    ).toEqual({ label: '', user_id: 3, library_id: 1, policy: 'manual' });
     const two = defaultMapping({
       users: [
         { id: 3, name: 'Chris', admin: true },
@@ -71,7 +71,6 @@ describe('audible', () => {
       user_id: 3,
       library_id: 1,
       policy: 'manual',
-      sync: true,
     });
     // Another server's person and library ids name nothing here: picked again.
     expect(mappingOf({ ...a, other_server: true })).toEqual({
@@ -79,7 +78,6 @@ describe('audible', () => {
       user_id: 0,
       library_id: 0,
       policy: 'manual',
-      sync: true,
     });
   });
 });
