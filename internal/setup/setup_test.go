@@ -246,6 +246,17 @@ func TestAudibleItem(t *testing.T) {
 		a.Detail != "2 accounts signed in; places not syncing for 1 account: writing the place to Audible: Audible asked the Bridge to wait" {
 		t.Fatalf("sync failing = %+v", a)
 	}
+	// Every account mapped on another server (bridge#64): not done, and the
+	// detail says why rather than nothing.
+	in.Audible = Audible{OtherServer: 2}
+	if a := item(t, Checklist(in), ItemAudible); a.Done ||
+		a.Detail != "2 accounts are mapped on another server: map one on this server on the Accounts tab" {
+		t.Fatalf("all on another server = %+v", a)
+	}
+	in.Audible = Audible{Accounts: 1, OtherServer: 1}
+	if a := item(t, Checklist(in), ItemAudible); !a.Done || a.Detail != "1 account signed in" {
+		t.Fatalf("one here, one elsewhere = %+v", a)
+	}
 	in.Audible = Audible{Accounts: 2, SyncFailing: 2, SyncError: strings.Repeat("x", 400)}
 	if a := item(t, Checklist(in), ItemAudible); len(a.Detail) > maxDetail {
 		t.Fatalf("a long error isn't cut: %d", len(a.Detail))

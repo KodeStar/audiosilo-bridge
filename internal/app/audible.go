@@ -244,6 +244,7 @@ func (b *Bridge) audibleSetup(ctx context.Context) setup.Audible {
 	out := setup.Audible{}
 	for _, a := range accts {
 		if a.OnOtherServer(serverID) {
+			out.OtherServer++
 			continue
 		}
 		out.Accounts++
