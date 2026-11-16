@@ -990,6 +990,15 @@ func TestThrottledLicenseRefusesTheAccountUntilASignIn(t *testing.T) {
 	if got, _ = e.m.Account(ctx, a.ID); !Throttled(got) || got.LastTitles != 30 {
 		t.Fatalf("a poll ended the throttling: %+v", got)
 	}
+	// A listing refused meanwhile (a 401) keeps the device refusal and its
+	// advice, so the poll still says to sign in again (bridge#64).
+	e.svc.libraryErr = fmt.Errorf("%w (HTTP 401)", ErrRefused)
+	if _, err := e.m.Library(ctx, a.ID); !errors.Is(err, ErrRefused) {
+		t.Fatalf("a refused listing = %v", err)
+	}
+	if got, _ = e.m.Account(ctx, a.ID); !Throttled(got) || got.LastError != ThrottledText {
+		t.Fatalf("a refused listing replaced the device refusal: %+v", got)
+	}
 
 	e.svc.libraryErr = nil
 	if b := e.signIn(t); b.ID != a.ID || b.RefusedAt != "" || b.LastError != "" || Throttled(b) {
