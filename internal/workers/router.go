@@ -156,6 +156,13 @@ func (r *Router) decodeLocal(ctx context.Context, job asr.Job) (yielded bool, er
 		}
 		return false, scheduler.ParkWithCode(state.ParkASRUnavailable, "ASR setup failed ("+r.Local.ID()+"): "+err.Error()+" - fix this, then retry")
 	}
+	// A worker that connected while the backend was prepared takes the
+	// segment before a local decode starts (loading the model for nothing).
+	select {
+	case <-connected:
+		return true, nil
+	default:
+	}
 	lctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	done := make(chan error, 1)
