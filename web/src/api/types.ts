@@ -347,7 +347,7 @@ export interface NewWorker {
 // never the credential).
 export interface EngineCLI {
   version: string;
-  // "oauth_token" | "api_key" (claude), "login" | "api_key" (codex), "" for none.
+  // "oauth_token" | "api_key" (claude), "login" | "api_key" (codex), "api_key" (mistral), "" for none.
   credential: string;
 }
 
@@ -422,7 +422,8 @@ export interface GitHubAccount {
 }
 
 // The agent credential kinds (the vault's names).
-export type AgentKind = 'claude_oauth_token' | 'anthropic_api_key' | 'openai_api_key';
+export type AgentKind =
+  'claude_oauth_token' | 'anthropic_api_key' | 'openai_api_key' | 'mistral_api_key';
 
 // api.AgentAccount
 export interface AgentAccount {

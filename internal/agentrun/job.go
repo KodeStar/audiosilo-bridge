@@ -85,7 +85,8 @@ func (r *Runner) execute(ctx context.Context, job *os.Root, id string) agentprot
 
 	work := filepath.Join(job.Name(), agentproto.WorkDir)
 	areq := agent.Request{Dir: work, Model: req.Model, Effort: req.Effort, Web: req.Web, NoTools: req.NoTools, MaxTurns: req.MaxTurns}
-	var args []string
+	var args, extraEnv []string
+	var vibeOut string
 	lastMsg := filepath.Join(runDir, agentproto.LastMessageFile)
 	switch req.CLI {
 	case agentproto.CLIClaude:
@@ -97,13 +98,24 @@ func (r *Runner) execute(ctx context.Context, job *os.Root, id string) agentprot
 		args = agent.CodexArgs(areq, lastMsg, agent.CodexSandboxOff)
 		r.codexStart()
 		defer r.codexEnd()
+	case agentproto.CLIMistral:
+		vibeOut = filepath.Join(runDir, "vibe-out")
+		for _, d := range []string{vibeOut, filepath.Join(runDir, "vibe")} {
+			if err := os.Mkdir(d, 0o700); err != nil {
+				return refused("create the run's vibe dir: " + err.Error())
+			}
+		}
+		args = agent.MistralArgs(areq, vibeOut)
+		if m := agent.MistralModelEnv(req.Model); len(m) > 0 {
+			extraEnv = m
+		}
 	}
 
 	exit := r.spawn(ctx, job, spec{
 		path:    cli.path,
 		args:    args,
 		dir:     work,
-		env:     r.childEnv(req.CLI, runDir, handed),
+		env:     append(r.childEnv(req.CLI, runDir, handed), extraEnv...),
 		stdin:   prompt,
 		timeout: time.Duration(req.TimeoutSeconds) * time.Second,
 	})
@@ -115,7 +127,32 @@ func (r *Runner) execute(ctx context.Context, job *os.Root, id string) agentprot
 	if req.CLI == agentproto.CLICodex {
 		r.copyLastMessage(job, runDir, id)
 	}
+	if req.CLI == agentproto.CLIMistral {
+		r.copyExport(job, vibeOut, id)
+	}
 	return exit
+}
+
+// copyExport puts vibe's run export in the job dir as export.json, reduced to the
+// fields the Bridge reads (the full file carries the run's configuration). vibe
+// wrote it, so it is read like any untrusted file.
+func (r *Runner) copyExport(job *os.Root, vibeOut, id string) {
+	out, err := os.OpenRoot(vibeOut)
+	if err != nil {
+		return
+	}
+	defer func() { _ = out.Close() }()
+	raw, err := agentproto.ReadRegular(out, agent.MistralExportFile, agentproto.MaxExportBytes)
+	if err != nil {
+		return
+	}
+	compact, err := agent.CompactMistralExport(raw)
+	if err != nil {
+		return
+	}
+	if err := writeNew(job, agentproto.ExportFile, compact); err != nil {
+		r.log.Warn("agent runner: write export.json", "job", id, "err", err)
+	}
 }
 
 // copyLastMessage copies codex's --output-last-message file from the run's temp

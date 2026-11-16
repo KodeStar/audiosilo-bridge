@@ -4,7 +4,7 @@
 // (internal/agentrun) to finish it, and harvests the outputs back into the
 // pipeline's staged dir. The protocol (file names, JSON shapes) is
 // internal/agentproto; the output parsing is internal/agent's own
-// (ClaudeResult/CodexResult), so a run in the container is classified exactly like
+// (ClaudeResult/CodexResult/MistralResult), so a run in the container is classified exactly like
 // a local one.
 //
 // Everything the container writes is untrusted: files are read with
@@ -50,7 +50,7 @@ const (
 // Options configures a Runner.
 type Options struct {
 	Dir     string // the staging dir (agent.staging_dir)
-	Backend string // "claude" | "codex": which CLI the runs use
+	Backend string // "claude" | "codex" | "mistral": which CLI the runs use
 	// ClaimTimeout is agent.claim_timeout_seconds, which config defaults and
 	// validates; the app always passes it.
 	ClaimTimeout time.Duration
@@ -181,12 +181,13 @@ func (r *Runner) reclaim(job string) {
 // ID is the backend the runs use, so telemetry and model routing see the CLI.
 func (r *Runner) ID() string { return r.backend }
 
-// SupportsWeb is true: both CLIs can search the web, and the agent container
-// has its own internet-only network.
-func (r *Runner) SupportsWeb() bool { return true }
+// SupportsWeb is true for claude and codex, which can search the web (the agent
+// container has its own internet-only network), false for mistral, whose web
+// tools are never enabled.
+func (r *Runner) SupportsWeb() bool { return r.backend != agent.IDMistral }
 
 // EnforcesNoTools reports what the fronted CLI does: claude removes its tool
-// catalogue for a NoTools run, codex can't (its read-only sandbox still reads).
+// catalogue for a NoTools run, codex and mistral can't (a read-only run still reads).
 func (r *Runner) EnforcesNoTools() bool { return r.backend == agent.IDClaude }
 
 // Detect maps Status onto the engine's Availability. RetryAfter is always set:
@@ -449,6 +450,11 @@ func (r *Runner) parse(root *os.Root, model string, out agent.CLIOutcome) (agent
 	stdout, _ := agentproto.ReadRegular(root, agentproto.StdoutFile, agentproto.MaxStdoutBytes)
 	stderr, _ := agentproto.ReadRegular(root, agentproto.StderrFile, agentproto.MaxStderrBytes)
 	out.Stdout, out.Stderr = string(stdout), string(stderr)
+	if r.backend == agent.IDMistral {
+		export, _ := agentproto.ReadRegular(root, agentproto.ExportFile, agentproto.MaxExportBytes)
+		out.Export = string(export)
+		return agent.MistralResult(model, out)
+	}
 	if r.backend == agent.IDCodex {
 		last, _ := agentproto.ReadRegular(root, agentproto.LastMessageFile, agentproto.MaxStdoutBytes)
 		out.LastMessage = string(last)

@@ -19,6 +19,10 @@ export const KIND_LABELS: Record<AgentKind, { label: string; note: string }> = {
     label: 'OpenAI API key',
     note: 'An API key from platform.openai.com. Its use is billed to the key.',
   },
+  mistral_api_key: {
+    label: 'Mistral API key',
+    note: 'An API key from console.mistral.ai. Its use is billed to the key.',
+  },
 };
 
 // fromText says where a contribution's GitHub token comes from now.

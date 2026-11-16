@@ -140,7 +140,7 @@ func agentLogin(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return errors.New("agent-login: name the CLI: agent-login claude | agent-login codex")
+		return errors.New("agent-login: name the CLI: agent-login claude | agent-login codex | agent-login mistral")
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -170,7 +170,7 @@ Usage:
   audiosilo-bridge version
   audiosilo-bridge reset-password [--data DIR]
   audiosilo-bridge agent-runner [--staging DIR] [--home DIR] [--slots N]
-  audiosilo-bridge agent-login [--home DIR] claude|codex
+  audiosilo-bridge agent-login [--home DIR] claude|codex|mistral
   audiosilo-bridge worker --bridge URL [--token T] [--data DIR] [--backend B]
   audiosilo-bridge worker install --bridge URL --token T [--data DIR] [--backend B] [--print]
   audiosilo-bridge worker uninstall [--print]
@@ -186,7 +186,8 @@ Commands:
   agent-runner  Run agent jobs from the staging dir (the agent container's
                 entrypoint; default --staging /staging --home /agent).
   agent-login   Sign a CLI in, inside the agent container: codex runs its
-                device login, claude prints how to provide a token.
+                device login, claude and mistral print how to provide a
+                token or key.
   worker        Run an ASR worker: transcribe the Bridge's audio here (a Mac's
                 Metal, a GPU). It connects out to the Bridge's page address.
                 Make its token on the Bridge's page (Workers).

@@ -1,4 +1,4 @@
-// Package agent runs a headless coding-agent CLI (claude or codex) as one step of
+// Package agent runs a headless coding-agent CLI (claude, codex or mistral) as one step of
 // the sidecars pipeline. It is the M5 seam that turns a staged context directory
 // plus a rendered prompt into structured outputs on disk, capturing token/cost
 // usage and translating the two vendors' invocation and output contracts behind a
@@ -30,6 +30,8 @@ import (
 const (
 	IDClaude = "claude"
 	IDCodex  = "codex"
+	// IDMistral is the Mistral Vibe CLI (the `vibe` binary).
+	IDMistral = "mistral"
 )
 
 // maxTurns caps a single agent run's tool-use turns. A generous ceiling: the
@@ -197,15 +199,17 @@ type SelectConfig struct {
 	Backend    string
 	ClaudePath string
 	CodexPath  string
+	// MistralPath locates the Mistral Vibe CLI ("" = vibe on $PATH).
+	MistralPath string
 }
 
 // Select resolves the configured or auto-detected runner and reports its
 // availability.
 //
-//   - backend "claude"/"codex": that runner, whether or not it is currently
+//   - backend "claude"/"codex"/"mistral": that runner, whether or not it is currently
 //     available (an unavailable one still lets /system explain the state and lets
 //     the pipeline park the book with an actionable message).
-//   - backend "" or "auto": claude if detectable, else codex if detectable, else a
+//   - backend "" or "auto": claude if detectable, else codex, else mistral, else a
 //     nil runner with Available=false.
 //
 // It returns a non-nil error only for two loud misconfigurations, mirroring the
@@ -216,7 +220,7 @@ type SelectConfig struct {
 func Select(ctx context.Context, cfg SelectConfig, sec secrets.Store) (Runner, Availability, error) {
 	backend := strings.TrimSpace(cfg.Backend)
 	switch backend {
-	case IDClaude, IDCodex:
+	case IDClaude, IDCodex, IDMistral:
 		r, explicit := runnerFor(backend, cfg, sec)
 		av := r.Detect(ctx)
 		// The loud misconfiguration: an explicitly selected path that does not
@@ -235,33 +239,50 @@ func Select(ctx context.Context, cfg SelectConfig, sec secrets.Store) (Runner, A
 		if av := x.Detect(ctx); av.Available {
 			return x, av, nil
 		}
-		return nil, Availability{Detail: "no agent CLI found; install the claude or codex CLI, or set agent.backend and the matching path"}, nil
+		m := newMistralRunner(cfg.MistralPath, sec)
+		if av := m.Detect(ctx); av.Available {
+			return m, av, nil
+		}
+		return nil, Availability{Detail: "no agent CLI found; install the claude, codex or vibe (mistral) CLI, or set agent.backend and the matching path"}, nil
 	default:
 		return nil, Availability{Backend: cfg.Backend, Detail: "unknown agent.backend"},
-			&NotAvailableError{Backend: cfg.Backend, Detail: "unknown agent.backend (want \"\", \"claude\", or \"codex\")"}
+			&NotAvailableError{Backend: cfg.Backend, Detail: "unknown agent.backend (want \"\", \"claude\", \"codex\", or \"mistral\")"}
 	}
 }
 
 // runnerFor builds the runner for an explicitly selected backend and returns its
 // configured explicit path (so Select can classify an unresolvable path as a loud
-// misconfiguration). backend must be IDClaude or IDCodex.
+// misconfiguration). backend must be IDClaude, IDCodex or IDMistral.
 func runnerFor(backend string, cfg SelectConfig, sec secrets.Store) (Runner, string) {
-	if backend == IDCodex {
+	switch backend {
+	case IDCodex:
 		return newCodexRunner(cfg.CodexPath, sec), cfg.CodexPath
+	case IDMistral:
+		return newMistralRunner(cfg.MistralPath, sec), cfg.MistralPath
 	}
 	return newClaudeRunner(cfg.ClaudePath, sec), cfg.ClaudePath
 }
 
-// ModelFor resolves the model name for a stage: the claude map for the claude
-// backend, the openai map for codex. A missing key returns "" (the backend CLI's
-// default model). Pure and config-free by design - the maps come from
-// config.AgentConfig.Claude / .OpenAI upstream.
-func ModelFor(claudeMap, openaiMap map[string]string, backendID, stage string) string {
+// ModelMaps are the per-backend stage -> model maps (config.AgentConfig's Claude,
+// OpenAI and Mistral). A map may be nil.
+type ModelMaps struct {
+	Claude  map[string]string
+	OpenAI  map[string]string
+	Mistral map[string]string
+}
+
+// ModelFor resolves the model (or effort) name for a stage: the claude map for the
+// claude backend, the openai map for codex, the mistral map for mistral. A missing
+// key returns "" (the backend CLI's default model). Pure and config-free by design
+// - the maps come from config.AgentConfig upstream.
+func ModelFor(maps ModelMaps, backendID, stage string) string {
 	switch backendID {
 	case IDClaude:
-		return claudeMap[stage]
+		return maps.Claude[stage]
 	case IDCodex:
-		return openaiMap[stage]
+		return maps.OpenAI[stage]
+	case IDMistral:
+		return maps.Mistral[stage]
 	default:
 		return ""
 	}

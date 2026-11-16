@@ -30,6 +30,7 @@ ARG WHISPER_TAG=whisper-cpp-v1.9.1-1
 # runs both --version, so a release that doesn't install fails here.
 ARG CLAUDE_VERSION=2.1.300
 ARG CODEX_VERSION=0.162.1
+ARG MISTRAL_VIBE_VERSION=3.0.3
 
 # --- the page ------------------------------------------------------------------
 FROM --platform=$BUILDPLATFORM node:24-slim AS web
@@ -169,6 +170,18 @@ RUN set -eu; \
     cp -a "$v" /out/codex; \
     test -x /out/codex/bin/codex && test -x /out/codex/bin/codex-code-mode-host && test -x /out/codex/codex-path/rg
 
+# --- mistral vibe ---------------------------------------------------------------------
+# A Python tool: installed with uv into /opt/vibe (its own interpreter and venv, whose
+# shebangs hardcode the path, so the agent stage copies it to the same place).
+FROM debian:bookworm-slim AS agent-vibe
+ARG MISTRAL_VIBE_VERSION
+COPY --from=ghcr.io/astral-sh/uv:0.8 /uv /usr/local/bin/uv
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+ENV UV_TOOL_DIR=/opt/vibe/tools UV_TOOL_BIN_DIR=/opt/vibe/bin UV_PYTHON_INSTALL_DIR=/opt/vibe/python
+RUN uv tool install "mistral-vibe==${MISTRAL_VIBE_VERSION}" && test -x /opt/vibe/bin/vibe
+
 # --- agent ---------------------------------------------------------------------------
 # Run with the compose example's hardening: user 10002:10002, cap_drop ALL,
 # no-new-privileges, a read-only root, tmpfs /tmp, its own network. /staging is
@@ -180,8 +193,10 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=agent-clis /out/claude /usr/local/bin/claude
 COPY --from=agent-clis /out/codex /opt/codex
+COPY --from=agent-vibe /opt/vibe /opt/vibe
 COPY --from=build /out/audiosilo-bridge /usr/local/bin/audiosilo-bridge
 RUN ln -s /opt/codex/bin/codex /usr/local/bin/codex \
+    && ln -s /opt/vibe/bin/vibe /usr/local/bin/vibe \
     && ln -s /opt/codex/codex-path/rg /usr/local/bin/rg \
     && groupadd --gid 10002 agent \
     && useradd --no-create-home --home-dir /tmp --shell /usr/sbin/nologin --uid 10002 --gid 10002 agent \
@@ -190,6 +205,7 @@ RUN ln -s /opt/codex/bin/codex /usr/local/bin/codex \
     && install -d -m 0777 /staging \
     && mkdir /tmp/v && HOME=/tmp/v DISABLE_AUTOUPDATER=1 claude --version \
     && HOME=/tmp/v CODEX_HOME=/tmp/v codex --version \
+    && HOME=/tmp/v VIBE_HOME=/tmp/v vibe --version \
     && audiosilo-bridge version && rm -rf /tmp/v
 ENV DISABLE_AUTOUPDATER=1 \
     HOME=/tmp

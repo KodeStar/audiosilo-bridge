@@ -364,6 +364,9 @@ func ignoredOnBridge(cfg Config) []string {
 	if strings.TrimSpace(cfg.Agent.CodexPath) != "" {
 		note("agent.codex_path", clis)
 	}
+	if strings.TrimSpace(cfg.Agent.MistralPath) != "" {
+		note("agent.mistral_path", clis)
+	}
 	const forcedOff = "it is always off, as it would run an agent CLI in the Bridge"
 	sup := cfg.Supervisor
 	for _, f := range []struct {

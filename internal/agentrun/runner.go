@@ -61,9 +61,9 @@ type Options struct {
 	Getenv func(string) (string, bool)
 	// TmpDir holds the per-run dirs (/tmp when empty).
 	TmpDir string
-	// ClaudeBin and CodexBin are the CLIs (looked up on PATH as claude and codex
+	// ClaudeBin, CodexBin and MistralBin (vibe) are the CLIs (looked up on PATH as claude and codex
 	// when empty).
-	ClaudeBin, CodexBin string
+	ClaudeBin, CodexBin, MistralBin string
 }
 
 // Runner runs the jobs in one staging dir.
@@ -137,6 +137,9 @@ func New(opts Options) (*Runner, error) {
 	}
 	if opts.CodexBin == "" {
 		opts.CodexBin = agentproto.CLICodex
+	}
+	if opts.MistralBin == "" {
+		opts.MistralBin = "vibe" // the CLI's binary, not its backend name
 	}
 	log := opts.Log
 	if log == nil {
@@ -244,7 +247,7 @@ func (r *Runner) detectAgain(ctx context.Context, wg *sync.WaitGroup) {
 // --version failed this time keeps what an earlier look found.
 func (r *Runner) detect(ctx context.Context) {
 	found := map[string]cliInfo{}
-	for name, bin := range map[string]string{agentproto.CLIClaude: r.opts.ClaudeBin, agentproto.CLICodex: r.opts.CodexBin} {
+	for name, bin := range map[string]string{agentproto.CLIClaude: r.opts.ClaudeBin, agentproto.CLICodex: r.opts.CodexBin, agentproto.CLIMistral: r.opts.MistralBin} {
 		path, err := r.lookPath(bin)
 		if err != nil {
 			if _, had := r.cli(name); had {
@@ -317,7 +320,7 @@ func (r *Runner) status() agentproto.Runner {
 		CLIs:        map[string]agentproto.CLI{},
 		Handoff:     true,
 	}
-	for _, name := range []string{agentproto.CLIClaude, agentproto.CLICodex} {
+	for _, name := range []string{agentproto.CLIClaude, agentproto.CLICodex, agentproto.CLIMistral} {
 		c, _ := r.cli(name)
 		kind := r.credentialKind(name)
 		st.CLIs[name] = agentproto.CLI{Version: c.version, Credential: kind, CredentialSince: r.credentialSince(name, kind)}

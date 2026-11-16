@@ -151,7 +151,7 @@ func runVersion(ctx context.Context, path, arg string) (string, error) {
 
 // CLIOutcome is what one agent CLI run left behind, wherever it ran: in this
 // process (runCLI) or in the agent container (internal/agentbox reads it back from
-// the staging dir). ClaudeResult and CodexResult interpret it, so both paths parse
+// the staging dir). ClaudeResult, CodexResult and MistralResult interpret it, so both paths parse
 // the output, classify rate limits and shape their errors with one copy of the code.
 type CLIOutcome struct {
 	Stdout string
@@ -164,6 +164,9 @@ type CLIOutcome struct {
 	Timeout  time.Duration // the cap that fired, for the message
 	// LastMessage is codex's --output-last-message file ("" when absent).
 	LastMessage string
+	// Export is vibe's run export (export.json, "" when absent): its outcome,
+	// usage and cost.
+	Export string
 }
 
 // outcomeOf maps runCLI's return onto a CLIOutcome: its timeout error becomes

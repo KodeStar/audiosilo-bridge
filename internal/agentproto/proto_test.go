@@ -96,3 +96,18 @@ func TestDecodeCredentialRefuses(t *testing.T) {
 		}
 	}
 }
+
+func TestDecodeCredentialMistral(t *testing.T) {
+	ok := `{"cli":"mistral","kind":"api_key","value":"abc123"}`
+	if _, err := DecodeCredential([]byte(ok), CLIMistral); err != nil {
+		t.Fatalf("api key refused: %v", err)
+	}
+	for _, bad := range []string{
+		`{"cli":"mistral","kind":"oauth_token","value":"abc123"}`,
+		`{"cli":"codex","kind":"api_key","value":"abc123"}`,
+	} {
+		if _, err := DecodeCredential([]byte(bad), CLIMistral); err == nil {
+			t.Errorf("accepted %s", bad)
+		}
+	}
+}

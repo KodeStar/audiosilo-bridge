@@ -78,8 +78,9 @@ const (
 // claude (the Bridge's app maps it; the engine's own agent.Select reads it as
 // auto, which the Bridge never calls).
 const (
-	AgentBackendClaude = agent.IDClaude
-	AgentBackendCodex  = agent.IDCodex
+	AgentBackendClaude  = agent.IDClaude
+	AgentBackendCodex   = agent.IDCodex
+	AgentBackendMistral = agent.IDMistral
 )
 
 // DefaultMetadataBaseURL is the community metadata API the coverage/lookup client
@@ -157,18 +158,18 @@ type ASRConfig struct {
 }
 
 // AgentConfig holds the agent-runner settings (live as of M5). Backend selects the
-// headless CLI runner; empty = auto. ClaudePath/CodexPath explicitly locate the CLI
+// headless CLI runner; empty = auto. ClaudePath/CodexPath/MistralPath explicitly locate the CLI
 // binaries (empty = $PATH lookup). TimeoutMinutes bounds a single invocation. Model
-// routing is config, never hardcoded: Claude/OpenAI map a pipeline stage name to a
+// routing is config, never hardcoded: Claude/OpenAI/Mistral map a pipeline stage name to a
 // model name, so no vendor model id ever appears in code. An empty OpenAI map is
 // intentional - an unset codex model means "use the codex CLI's default model"; we
-// never invent an OpenAI model id.
+// never invent an OpenAI model id. The same goes for Mistral.
 //
 // Changing any agent field takes effect only on a daemon RESTART (the runner is
 // resolved once at startup, like asr.backend), unlike cors_origins which the API
 // re-reads live per request.
 type AgentConfig struct {
-	Backend string `yaml:"backend"` // "" (claude) | "claude" | "codex"
+	Backend string `yaml:"backend"` // "" (claude) | "claude" | "codex" | "mistral"
 	// Concurrency is deprecated. It remains readable/writable for compatibility and
 	// is used only by the explicit legacy normalization path. New configurations
 	// should set QueueConcurrency and MaxAgentsPerBook instead.
@@ -177,6 +178,7 @@ type AgentConfig struct {
 	MaxAgentsPerBook int    `yaml:"max_agents_per_book,omitempty"` // fan-out within one supported stage
 	ClaudePath       string `yaml:"claude_path"`                   // explicit claude CLI location; "" = $PATH
 	CodexPath        string `yaml:"codex_path"`                    // explicit codex CLI location; "" = $PATH
+	MistralPath      string `yaml:"mistral_path"`                  // explicit vibe CLI location; "" = $PATH
 	TimeoutMinutes   int    `yaml:"timeout_minutes"`               // per-invocation wall-clock cap
 	// BookBudgetUSD caps total agent spend per book: a stage parks the book
 	// budget_exceeded once its summed cost reaches this (0 -> the default; set a very
@@ -193,8 +195,9 @@ type AgentConfig struct {
 	// Bridge's page (the setup checklist's "budget" item, decision 7); "" for
 	// never.
 	BudgetReviewedAt string            `yaml:"budget_reviewed_at,omitempty"`
-	Claude           map[string]string `yaml:"claude"` // agent-stage name -> model
-	OpenAI           map[string]string `yaml:"openai"` // agent-stage name -> model (empty = codex default)
+	Claude           map[string]string `yaml:"claude"`  // agent-stage name -> model
+	OpenAI           map[string]string `yaml:"openai"`  // agent-stage name -> model (empty = codex default)
+	Mistral          map[string]string `yaml:"mistral"` // agent-stage name -> model (empty = vibe default)
 }
 
 // AgentCapacity is the normalized runtime capacity model. Legacy is true only
@@ -383,6 +386,7 @@ func Default() Config {
 			MonthlyBudgetUSD:    DefaultMonthlyBudgetUSD,
 			Claude:              defaultClaudeModels(),
 			OpenAI:              map[string]string{},
+			Mistral:             map[string]string{},
 		},
 		Transcripts: TranscriptsConfig{RetentionDays: DefaultTranscriptRetentionDays},
 		Pricing:     pricing.Table{Version: "unconfigured-v1", Rates: map[string]pricing.Rate{}},
@@ -631,6 +635,9 @@ func applyEnv(cfg *Config) (seen envSeen) {
 	if v, ok := os.LookupEnv("AUDIOSILO_BRIDGE_AGENT_CODEX_PATH"); ok {
 		cfg.Agent.CodexPath = v
 	}
+	if v, ok := os.LookupEnv("AUDIOSILO_BRIDGE_AGENT_MISTRAL_PATH"); ok {
+		cfg.Agent.MistralPath = v
+	}
 	if v, ok := os.LookupEnv("AUDIOSILO_BRIDGE_AGENT_TIMEOUT_MINUTES"); ok {
 		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
 			cfg.Agent.TimeoutMinutes = n
@@ -785,15 +792,15 @@ func validateSupervisor(c SupervisorConfig) error {
 	}
 	switch strings.TrimSpace(c.ModelBackend) {
 	case "", AgentBackendClaude:
-	case AgentBackendCodex:
-		return errors.New("supervisor.model_backend codex cannot enforce the required no-tools boundary")
+	case AgentBackendCodex, AgentBackendMistral:
+		return fmt.Errorf("supervisor.model_backend %s cannot enforce the required no-tools boundary", strings.TrimSpace(c.ModelBackend))
 	default:
 		return fmt.Errorf("supervisor.model_backend %q must be %q or empty", c.ModelBackend, AgentBackendClaude)
 	}
 	switch strings.TrimSpace(c.FallbackBackend) {
-	case "", AgentBackendClaude, AgentBackendCodex:
+	case "", AgentBackendClaude, AgentBackendCodex, AgentBackendMistral:
 	default:
-		return fmt.Errorf("supervisor.fallback_backend %q must be %q, %q, or empty", c.FallbackBackend, AgentBackendClaude, AgentBackendCodex)
+		return fmt.Errorf("supervisor.fallback_backend %q must be %q, %q, %q, or empty", c.FallbackBackend, AgentBackendClaude, AgentBackendCodex, AgentBackendMistral)
 	}
 	if c.ModelAutomaticActions && !c.ModelAssisted {
 		return errors.New("supervisor.model_automatic_actions requires model_assisted")
@@ -823,10 +830,10 @@ func (c Config) Validate() error {
 		return fmt.Errorf("effective agent invocation limit must be between 1 and %d, got %d", MaxGlobalAgentInvocations, cap.GlobalInvocations)
 	}
 	switch c.Agent.Backend {
-	case "", AgentBackendClaude, AgentBackendCodex:
+	case "", AgentBackendClaude, AgentBackendCodex, AgentBackendMistral:
 	default:
-		return fmt.Errorf("agent.backend %q must be %q, %q, or empty (claude)",
-			c.Agent.Backend, AgentBackendClaude, AgentBackendCodex)
+		return fmt.Errorf("agent.backend %q must be %q, %q, %q, or empty (claude)",
+			c.Agent.Backend, AgentBackendClaude, AgentBackendCodex, AgentBackendMistral)
 	}
 	if c.Agent.TimeoutMinutes < 1 {
 		return fmt.Errorf("agent.timeout_minutes must be >= 1, got %d", c.Agent.TimeoutMinutes)
@@ -858,6 +865,11 @@ func (c Config) Validate() error {
 	for key := range c.Agent.OpenAI {
 		if !state.RoutesModel(state.State(key)) {
 			return fmt.Errorf("agent.openai has key %q, which is not an agent stage", key)
+		}
+	}
+	for key := range c.Agent.Mistral {
+		if !state.RoutesModel(state.State(key)) {
+			return fmt.Errorf("agent.mistral has key %q, which is not an agent stage", key)
 		}
 	}
 	if err := c.validateBridge(); err != nil {

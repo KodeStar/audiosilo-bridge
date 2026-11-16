@@ -85,10 +85,12 @@ func (s *engineState) sharer() generate.Sharer {
 	return nil
 }
 
-// agentBackend is the CLI the agent container runs (claude unless codex is set).
+// agentBackend is the CLI the agent container runs (claude unless codex or
+// mistral is set).
 func agentBackend(cfg config.Config) string {
-	if cfg.Agent.Backend == config.AgentBackendCodex {
-		return config.AgentBackendCodex
+	switch cfg.Agent.Backend {
+	case config.AgentBackendCodex, config.AgentBackendMistral:
+		return cfg.Agent.Backend
 	}
 	return config.AgentBackendClaude
 }
@@ -149,7 +151,7 @@ func (b *Bridge) runEngine(ctx context.Context) {
 		ASR:       pipeline.ASRSetup{Backend: router, Cap: routerCap, Model: asrModel, Language: cfg.ASR.Language},
 		ASRSelect: asrSelect,
 		Agent:     box, AgentAvail: box.Detect(ctx), AgentRedetect: redetect,
-		AgentModels:      pipeline.AgentModels{Claude: cfg.Agent.Claude, OpenAI: cfg.Agent.OpenAI},
+		AgentModels:      pipeline.AgentModels{Claude: cfg.Agent.Claude, OpenAI: cfg.Agent.OpenAI, Mistral: cfg.Agent.Mistral},
 		AgentTimeout:     time.Duration(cfg.Agent.TimeoutMinutes) * time.Minute,
 		AgentConcurrency: slots, MaxAgentsPerBook: slots,
 		BookBudgetUSD: cfg.Agent.BookBudgetUSD,

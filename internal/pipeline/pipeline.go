@@ -74,12 +74,13 @@ type ToolConfig struct {
 }
 
 // AgentModels routes each agent stage to a model per backend. Claude keys the claude
-// backend, OpenAI the codex backend; a missing key means the backend CLI's default
-// model. It is a plain-map view of config.AgentConfig.Claude/.OpenAI so the pipeline
+// backend, OpenAI the codex backend, Mistral the mistral one; a missing key means the backend CLI's default
+// model. It is a plain-map view of config.AgentConfig.Claude/.OpenAI/.Mistral so the pipeline
 // package never imports internal/config.
 type AgentModels struct {
-	Claude map[string]string
-	OpenAI map[string]string
+	Claude  map[string]string
+	OpenAI  map[string]string
+	Mistral map[string]string
 }
 
 // AgentEfforts routes optional reasoning-effort overrides independently from
@@ -87,8 +88,9 @@ type AgentModels struct {
 // backend defaults; the benchmark harness uses them to make effort a controlled
 // experimental variable rather than ambient CLI configuration.
 type AgentEfforts struct {
-	Claude map[string]string
-	OpenAI map[string]string
+	Claude  map[string]string
+	OpenAI  map[string]string
+	Mistral map[string]string
 }
 
 // Config configures a composite Executor. FFmpeg/FFprobe are the tool paths

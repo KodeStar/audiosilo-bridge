@@ -115,7 +115,7 @@ const (
 // pipeline that runs it, config's model maps that route it) share one spelling.
 const Describing State = "describing"
 
-// RoutesModel reports whether a model map (agent.claude, agent.openai) may route
+// RoutesModel reports whether a model map (agent.claude, agent.openai, agent.mistral) may route
 // s: every agent stage, and the description step, an agent run outside the machine.
 func RoutesModel(s State) bool { return IsAgent(s) || s == Describing }
 
