@@ -2609,7 +2609,9 @@ internal/
             (agrees/disagrees: rec's SeriesPosition as one number against b's
             position in rec's series, else b's main series' only when rec names no
             series or that number is the folder code leading b's folder, its letters
-            the series' initials as the server reads one (the listing
+            the series' initials as the server reads one (folderCodeIs ports its
+            metadata.FolderCodePosition: a range, a third number joined on, letters
+            after the number and 0 are no single number; the listing
             puts a folder code's number there, whatever that series is called; a
             franchise's number says nothing, bridge#43); a range
             or no number on either side is neither; MatchScored is not gated by

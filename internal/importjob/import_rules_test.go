@@ -2,7 +2,9 @@ package importjob
 
 import (
 	"fmt"
+	"regexp"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/kodestar/audiosilo-bridge/internal/link"
@@ -228,6 +230,16 @@ func TestPositionAgrees(t *testing.T) {
 		{"a folder code of another number", "Lanterns of London", "2", "Aar/LT07 - Moon", series("Aar Universe", "2"), false, false},
 		{"no code: the letters run on", "Lanterns of London", "2", "Aar/LT02x Moon", series("L-T", "2"), false, false},
 		{"no code: not the series' initials", "Lanterns of London", "7", "Aar/Book 07 - Moon", series("Aar Universe", "7"), false, false},
+		// The server's reading of a code, case by case: a range or a third
+		// number joined on is never its first number, a decimal part can't be
+		// backed off, and 0 is no position.
+		{"no code: a range", "Lanterns of London", "5", "Aar/LT05-06 - Moon", series("L-T", "5"), false, false},
+		{"no code: an en dash range", "Lanterns of London", "5", "Aar/LT05\u201306 - Moon", series("L-T", "5"), false, false},
+		{"no code: a third number joined on", "Lanterns of London", "5", "Aar/LT05-06-07 - Moon", series("L-T", "5"), false, false},
+		{"no code: letters after the decimal part", "Lanterns of London", "15", "Aar/LT15.5x Moon", series("L-T", "15"), false, false},
+		{"no code: 0", "Lanterns of London", "0", "Aar/LT00 - Moon", series("L-T", "0"), false, false},
+		{"a decimal code", "Lanterns of London", "15.5", "Aar/LT15.5 Moon", series("L-T", "15.5"), true, false},
+		{"a hyphen that joins no number", "Lanterns of London", "5", "Aar/LT05-Moon", series("L-T", "5"), true, false},
 		{"a code of some initials in order", "Lanterns of London", "3", "Aar/AU03 - Moon", series("Aar's Wide Universe", "3"), true, false},
 		{"no series on the title: the main one", "", "2", "", series("Lanterns of London", "2"), true, false},
 		{"no series on the title: another number", "", "3", "", series("Lanterns of London", "2"), false, true},
@@ -248,6 +260,74 @@ func TestPositionAgrees(t *testing.T) {
 		a, d := PositionAgrees(rec, link.LibraryBook{Path: p, Series: tc.book})
 		if a != tc.agree || d != tc.disagree {
 			t.Errorf("%s: agrees %v disagrees %v, want %v %v", tc.name, a, d, tc.agree, tc.disagree)
+		}
+	}
+}
+
+// TestFolderCodeIsServerVectors: folderCodeIs reads a folder code exactly as
+// the server's metadata.FolderCodePosition does, on that function's own test
+// table (name, series, the position it reads, a range's end; want 0 is no
+// code). Every number in a name agrees only when the server reads it as the
+// code's single position: never a range's start, a number cut short, or 0.
+func TestFolderCodeIsServerVectors(t *testing.T) {
+	number := regexp.MustCompile(`\d+(?:\.\d+)?`)
+	for _, tc := range []struct {
+		name, series string
+		want, end    float64
+	}{
+		{"DH06 - Land of Magic", "Dragon Heart", 6, 0},
+		{"BDM01 - Oathbound Healer", "Beneath the Dragoneye Moons", 1, 0},
+		{"FWM01 - He Who Fights With Monsters - Book 1", "He Who Fights With Monsters", 1, 0},
+		{"DF15.5 Brief Cases", "Dresden Files", 15.5, 0},
+		{"PH15 - 15", "Primal Hunter", 15, 0},
+		{"LAM05-06", "Legend of the Arch Magus", 5, 6},
+		{"LAM05\u201306 - Omnibus", "Legend of the Arch Magus", 5, 6},
+		{"DF15.5-16", "Dresden Files", 15.5, 16},
+		{"LAM06-05", "Legend of the Arch Magus", 0, 0},
+		{"LAM05-05", "Legend of the Arch Magus", 0, 0},
+		{"LAM05-06x", "Legend of the Arch Magus", 0, 0},
+		{"LAM05-0612", "Legend of the Arch Magus", 0, 0},
+		{"LAM05-06-07", "Legend of the Arch Magus", 0, 0},
+		{"LAM05-06 - 07 Omnibus", "Legend of the Arch Magus", 5, 6},
+		{"DH06 - 07 Land", "Dragon Heart", 6, 0},
+		{"DH06-Land", "Dragon Heart", 6, 0},
+		{"HALO 07-08", "Halo", 0, 0},
+		{"EE07 - Forged in Blood Part 2", "Emperor's Edge", 7, 0},
+		{"RADT01 - Reborn as a Demonic Tree", "Reborn as a Demonic Tree", 1, 0},
+		{"WT01", "World-Tree", 1, 0},
+		{"C04 - Skysworn", "Cradle", 4, 0},
+		{"dh06 - land of magic.m4b", "Dragon Heart", 6, 0},
+		{"HALO 07 - Evolutions (M4B)", "Halo", 0, 0},
+		{"MB01 - The Final Empire", "Mistborn", 0, 0},
+		{"AF05 - Legion's Fifth Vault", "Divine Apostasy", 0, 0},
+		{"CD1", "02 - How to Be a Pirate", 0, 0},
+		{"01. The Enchanted Wood", "The Faraway Tree", 0, 0},
+		{"Brief Cases", "Dresden Files", 0, 0},
+		{"DH06x - Land", "Dragon Heart", 0, 0},
+		{"DF15.5x Brief Cases", "Dresden Files", 0, 0},
+		{"DF15. Brief Cases", "Dresden Files", 15, 0},
+		{"DH1234 - Land", "Dragon Heart", 0, 0},
+		{"DH0 - Prologue", "Dragon Heart", 0, 0},
+		{"DH1999", "Dragon Heart", 0, 0},
+		{"DH06", "", 0, 0},
+	} {
+		// Each number in the name, whole, without its decimal part and cut to
+		// the three digits a code's number holds, and the server's reading.
+		probes := map[float64]bool{tc.want: true, tc.end: true}
+		for _, n := range number.FindAllString(tc.name, -1) {
+			whole, _, _ := strings.Cut(n, ".")
+			for _, s := range []string{n, whole, whole[:min(len(whole), 3)]} {
+				if v, err := strconv.ParseFloat(s, 64); err == nil {
+					probes[v] = true
+				}
+			}
+		}
+		single := tc.want != 0 && tc.end == 0
+		for p := range probes {
+			pos := strconv.FormatFloat(p, 'f', -1, 64)
+			if got, want := folderCodeIs("Aar/"+tc.name, tc.series, pos), single && p == tc.want; got != want {
+				t.Errorf("folderCodeIs(%q, %q, %s) = %v, want %v", tc.name, tc.series, pos, got, want)
+			}
 		}
 	}
 }

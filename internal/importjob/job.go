@@ -345,24 +345,50 @@ func PositionAgrees(rec source.Record, b link.LibraryBook) (agrees, disagrees bo
 
 // folderCode is a leading series code on a folder name, as the server reads
 // one (its metadata.FolderCodePosition): one to five letters, maybe a space,
-// then a number of one to three digits, maybe a decimal part, ending where a
-// word does ("DH06 - Land of Magic", "DF15.5 Brief Cases").
-var folderCode = regexp.MustCompile(`^([A-Za-z]{1,5}) ?(\d{1,3}(?:\.\d+)?)(?:$|[^\pL\pN_])`)
+// then a number of one to three digits, maybe a decimal part ("DH06 - Land of
+// Magic", "DF15.5 Brief Cases"). What follows the number decides whether it is
+// one (folderCodeIs).
+var folderCode = regexp.MustCompile(`^([A-Za-z]{1,5}) ?(\d{1,3}(?:\.\d+)?)`)
 
 // folderCodeIs reports whether the folder at p (its last segment) leads with
 // a code of series' initials whose number is pos ("LT02 - ..." for "L-T" 2,
 // never "Book 07 - ..." for "Cosmere" 7), as the server's listing reads one.
+// As there, the number must end where a word does ("DF15.5x" is no code, never
+// 15), a number joined on makes it a range or nothing, never its first number
+// ("LAM05-06" is 5 to 6, "LAM05-06-07" no code), and 0 is no position.
 func folderCodeIs(p, series, pos string) bool {
 	want, ok := parsePosition(pos)
 	if !ok {
 		return false
 	}
-	m := folderCode.FindStringSubmatch(strings.TrimSpace(path.Base(p)))
+	name := strings.TrimSpace(path.Base(p))
+	m := folderCode.FindStringSubmatch(name)
 	if m == nil || !initialsOf(m[1], series) {
 		return false
 	}
+	if rest := name[len(m[0]):]; !wordEndsAt(rest) || joinsNumber(rest) {
+		return false
+	}
 	got, ok := parsePosition(m[2])
-	return ok && got == want
+	return ok && got != 0 && got == want
+}
+
+// wordEndsAt reports whether no letter, digit or underscore starts s: the
+// greedy number before it ended where a word does (the server's rule).
+func wordEndsAt(s string) bool {
+	r, _ := utf8.DecodeRuneInString(s)
+	return r != '_' && !unicode.IsLetter(r) && !unicode.IsDigit(r)
+}
+
+// joinsNumber reports whether s starts with a hyphen or an en dash then a
+// digit: another number joined onto a code's (the server's rule).
+func joinsNumber(s string) bool {
+	r, n := utf8.DecodeRuneInString(s)
+	if r != '-' && r != '\u2013' {
+		return false
+	}
+	d, _ := utf8.DecodeRuneInString(s[n:])
+	return unicode.IsDigit(d)
 }
 
 // apostrophes are dropped before a series is split into words, so one joins a
