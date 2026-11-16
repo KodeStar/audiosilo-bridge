@@ -498,9 +498,11 @@ func TestReconcileClosesOpenRunsAndRewindsOnMissingSentinel(t *testing.T) {
 
 	sched := New(db, h.hub, NewStubExecutor(0, 0), 2, h.workRoot, false)
 	sched.ctx = ctx
+	t.Cleanup(sched.wg.Wait) // join Reconcile's background work before the harness closes the DB
 	if err := sched.Reconcile(ctx); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
+	sched.wg.Wait()
 
 	// The open run is now closed failed.
 	if open, _ := db.OpenStageRuns(ctx); len(open) != 0 {

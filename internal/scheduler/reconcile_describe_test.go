@@ -25,9 +25,11 @@ func TestReconcileIgnoresARunOutsideTheStateMachine(t *testing.T) {
 
 	sched := New(db, h.hub, NewStubExecutor(0, 0), 2, h.workRoot, false)
 	sched.ctx = ctx
+	t.Cleanup(sched.wg.Wait) // join Reconcile's background work before the harness closes the DB
 	if err := sched.Reconcile(ctx); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
+	sched.wg.Wait()
 	cur, _ := db.GetBook(ctx, b.ID)
 	if cur.State != string(state.Contributing) || cur.ParkCode != string(state.ParkCoreNeeded) {
 		t.Fatalf("book moved to %q (%q), want it left at contributing", cur.State, cur.ParkCode)
@@ -42,6 +44,7 @@ func TestReconcileIgnoresARunOutsideTheStateMachine(t *testing.T) {
 	if err := sched.Reconcile(ctx); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
+	sched.wg.Wait()
 	if cur, _ := db.GetBook(ctx, b.ID); cur.State != string(state.ASR) {
 		t.Fatalf("rewound to %q, want asr", cur.State)
 	}
