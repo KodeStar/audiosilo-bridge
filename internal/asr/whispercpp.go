@@ -2,7 +2,9 @@ package asr
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -217,15 +219,37 @@ func (w *whisperCpp) Transcribe(ctx context.Context, job Job) error {
 		args = append(args, "-t", strconv.Itoa(w.threads))
 	}
 	if job.NoContext {
-		// -nc/--no-context: do not use past transcription as the decoder's initial
-		// prompt across windows. The repair path sets this so a deterministic
-		// repetition collapse cannot replay identically on the retry.
-		args = append(args, "--no-context")
+		// -mc 0 (--max-context 0): do not feed past transcription back as the
+		// decoder's prompt across windows. The repair path sets this so a
+		// deterministic repetition collapse cannot replay identically on the retry.
+		// whisper-cli has no --no-context flag (bridge#72): it exits 0 on an
+		// unknown argument after printing its usage, writing nothing.
+		args = append(args, "-mc", "0")
 	}
-	if out, err := runTool(ctx, 2*time.Hour, cli, args...); err != nil {
+	// A leftover JSON from an earlier run must not pass the check below.
+	jsonOut := outPrefix + ".json"
+	if err := os.Remove(jsonOut); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("whisper-cli chapter %d: remove stale output: %w", job.Chapter, err)
+	}
+	out, err := runTool(ctx, 2*time.Hour, cli, args...)
+	if err != nil {
 		return fmt.Errorf("whisper-cli chapter %d: %w: %s", job.Chapter, err, out)
 	}
+	// whisper-cli exits 0 on a bad argument too, so success is the transcript file.
+	if !fsutil.IsFile(jsonOut) {
+		return fmt.Errorf("whisper-cli chapter %d: no transcript written to %s: %s", job.Chapter, jsonOut, outputTail(out))
+	}
 	return nil
+}
+
+// outputTail keeps the last part of a tool's output for an error message: a
+// whisper-cli that wrote no transcript printed its usage or the whole decode.
+func outputTail(out string) string {
+	const limit = 1024
+	if len(out) <= limit {
+		return out
+	}
+	return "..." + out[len(out)-limit:]
 }
 
 // detectWhisperDevice guesses the informational accelerator: Metal on Apple

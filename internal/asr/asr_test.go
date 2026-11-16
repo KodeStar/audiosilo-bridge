@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -683,8 +684,11 @@ func TestSelect(t *testing.T) {
 }
 
 // recordingWhisperCLI writes a fake whisper-cli that records every argv token (one
-// per line) into argsFile and still emits a valid -ojf raw JSON at the -of prefix,
-// so a test can assert which flags Transcribe passed.
+// per line) into argsFile and emits a valid -ojf raw JSON at the -of prefix, so a
+// test can assert which flags Transcribe passed. It is strict like the real
+// v1.9.1 binary: an argument it does not know prints "error: unknown argument"
+// and exits 0 WITHOUT writing the JSON (bridge#72: --no-context passed every fake
+// run and failed every real one).
 func recordingWhisperCLI(t *testing.T, argsFile string) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -694,20 +698,21 @@ OF=""
 while [ $# -gt 0 ]; do
   case "$1" in
     -of) OF="$2"; shift 2;;
-    -m|-f|-l|--prompt) shift 2;;
-    -oj|-ojf|--no-context) shift;;
-    *) shift;;
+    -m|-f|-l|--prompt|-t|-mc) shift 2;;
+    -oj|-ojf) shift;;
+    *) echo "error: unknown argument: $1" >&2; echo "usage: whisper-cli [options] file0 file1 ..."; exit 0;;
   esac
 done
 printf '{"result":{"language":"en"},"transcription":[{"offsets":{"from":0,"to":1000},"text":" fake","tokens":[{"text":" fake","offsets":{"from":0,"to":500},"p":0.9}]}]}\n' > "$OF.json"
 `, argsFile))
 }
 
-// TestWhisperCppNoContextArg: the whisper-cpp backend appends --no-context exactly
-// when Job.NoContext is set (the repair path), and omits it otherwise (first-pass
-// ASR) - so a deterministic repetition collapse can be retried with context
-// disabled instead of replaying identically. Transcribe itself has no platform
-// guard, so this runs on any unix.
+// TestWhisperCppNoContextArg: the whisper-cpp backend passes -mc 0 (max-context
+// 0: no past text fed back) exactly when Job.NoContext is set (the repair path),
+// and omits it otherwise (first-pass ASR), so a deterministic repetition collapse
+// can be retried with context disabled instead of replaying identically. It never
+// passes --no-context, which whisper-cli does not have (bridge#72). Transcribe
+// itself has no platform guard, so this runs on any unix.
 func TestWhisperCppNoContextArg(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell-script fake is unix-only")
@@ -739,10 +744,105 @@ func TestWhisperCppNoContextArg(t *testing.T) {
 			if err != nil {
 				t.Fatalf("read recorded args: %v", err)
 			}
-			has := hasLine(string(gotArgs), "--no-context")
-			if has != tc.want {
-				t.Errorf("--no-context present = %v, want %v (args: %q)", has, tc.want, gotArgs)
+			args := strings.Split(strings.TrimSpace(string(gotArgs)), "\n")
+			has := false
+			for i, a := range args {
+				if a == "-mc" {
+					if i+1 >= len(args) || args[i+1] != "0" {
+						t.Fatalf("-mc not followed by 0: %q", args)
+					}
+					has = true
+				}
+				if a == "--no-context" || a == "-nc" {
+					t.Fatalf("%s is not a whisper-cli flag (bridge#72): %q", a, args)
+				}
 			}
+			if has != tc.want {
+				t.Errorf("-mc 0 present = %v, want %v (args: %q)", has, tc.want, args)
+			}
+		})
+	}
+}
+
+// TestWhisperCppNoOutputIsAnError: whisper-cli exits 0 on a bad argument after
+// printing its usage, so a run that wrote no transcript is an error naming the
+// missing output, not a success the caller trips over later. A JSON left by an
+// earlier run is removed first, so it cannot pass for this run's output.
+func TestWhisperCppNoOutputIsAnError(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script fake is unix-only")
+	}
+	dir := t.TempDir()
+	cli := writeScript(t, filepath.Join(dir, "whisper-cli"), `#!/bin/sh
+echo "error: unknown argument: --bogus" >&2
+echo "usage: whisper-cli [options] file0 file1 ..."
+exit 0
+`)
+	dataDir := t.TempDir()
+	b := newWhisperCpp(SelectConfig{WhisperCLIPath: cli, DataDir: dataDir, Log: discardLogger()})
+	seedWhisperModel(t, b, dataDir)
+	audio := filepath.Join(dataDir, "ch003.flac")
+	if err := os.WriteFile(audio, []byte("flac"), 0o644); err != nil { //nolint:gosec // test artifact
+		t.Fatal(err)
+	}
+	outDir := filepath.Join(dataDir, "raw")
+	if err := os.MkdirAll(outDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	stale := filepath.Join(outDir, "ch003.json")
+	if err := os.WriteFile(stale, []byte(`{"transcription":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := b.Transcribe(context.Background(), Job{Audio: audio, OutDir: outDir, Chapter: 3, Language: "en", NoContext: true})
+	if err == nil {
+		t.Fatal("Transcribe succeeded with no transcript written")
+	}
+	if !strings.Contains(err.Error(), "no transcript written") || !strings.Contains(err.Error(), stale) {
+		t.Errorf("error = %v, want it to name the missing output %s", err, stale)
+	}
+	if !strings.Contains(err.Error(), "unknown argument") {
+		t.Errorf("error = %v, want the tool's output in it", err)
+	}
+	if _, statErr := os.Stat(stale); !errors.Is(statErr, fs.ErrNotExist) {
+		t.Errorf("stale JSON still present after the run: %v", statErr)
+	}
+}
+
+// TestWhisperCppLiveCLI runs Transcribe against a real whisper-cli, with and
+// without NoContext, when AUDIOSILO_BRIDGE_LIVE_WHISPER_CLI, _MODEL (a ggml
+// model) and _AUDIO (a short speech clip) are set: the check that the flags the
+// backend passes are ones the bundled binary knows (bridge#72), which a fake
+// can only mirror. Run it inside an image: GOOS=linux go test -c ./internal/asr,
+// then the test binary with the image's /opt/whisper/whisper-cli.
+func TestWhisperCppLiveCLI(t *testing.T) {
+	cli := os.Getenv("AUDIOSILO_BRIDGE_LIVE_WHISPER_CLI")
+	model := os.Getenv("AUDIOSILO_BRIDGE_LIVE_WHISPER_MODEL")
+	audio := os.Getenv("AUDIOSILO_BRIDGE_LIVE_WHISPER_AUDIO")
+	if cli == "" || model == "" || audio == "" {
+		t.Skip("set AUDIOSILO_BRIDGE_LIVE_WHISPER_CLI, _MODEL and _AUDIO to run against a real whisper-cli")
+	}
+	for _, noContext := range []bool{false, true} {
+		t.Run(fmt.Sprintf("no_context=%v", noContext), func(t *testing.T) {
+			dataDir := t.TempDir()
+			b := newWhisperCpp(SelectConfig{WhisperCLIPath: cli, DataDir: dataDir, Log: discardLogger()})
+			if err := os.MkdirAll(filepath.Dir(b.modelPath(dataDir)), 0o750); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(model, b.modelPath(dataDir)); err != nil {
+				t.Fatal(err)
+			}
+			job := Job{Audio: audio, OutDir: filepath.Join(dataDir, "raw"), Chapter: 1, Language: "en", NoContext: noContext}
+			if err := b.Transcribe(context.Background(), job); err != nil {
+				t.Fatalf("Transcribe: %v", err)
+			}
+			raw, err := os.ReadFile(filepath.Join(job.OutDir, outputStem(audio)+".json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(raw), `"transcription"`) || !strings.Contains(string(raw), `"tokens"`) {
+				t.Fatalf("no full JSON transcript: %.300s", raw)
+			}
+			t.Logf("transcript: %.400s", raw)
 		})
 	}
 }
