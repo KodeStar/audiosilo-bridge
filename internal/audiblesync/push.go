@@ -95,12 +95,6 @@ func (p *Pusher) Tick(ctx context.Context) {
 	}
 }
 
-// badRequest is the server's 400 answer: for the feed, a cursor it can't read.
-func badRequest(err error) bool {
-	var e *link.APIError
-	return errors.As(err, &e) && e.Status == http.StatusBadRequest
-}
-
 func (p *Pusher) isPaused(id string, now time.Time) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -150,7 +144,7 @@ func (p *Pusher) account(ctx context.Context, srv Server, a store.AudibleAccount
 			p.pause(a.ID, now.Add(refusedWait))
 			p.o.health(ctx, a, err, time.Time{})
 			return
-		case cursor != "" && badRequest(err):
+		case errors.Is(err, link.ErrBadCursor):
 			// The server refused the cursor (a server restored from a backup,
 			// its feed rebuilt): sent again it fails the same way every pass,
 			// stopping the push for good. Read the feed again from its start;

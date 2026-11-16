@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -141,6 +142,9 @@ var (
 	// ErrUserUnavailable is a 403 user_unavailable: the account's person is
 	// disabled, a kid or a demo account since it was mapped.
 	ErrUserUnavailable = errors.New("the account's person can't be synced for (disabled, a kid or a demo account): map the account to someone else")
+	// ErrBadCursor is AudibleProgress's 400 for a since the server can't read
+	// (a server restored from a backup, its feed rebuilt): read from the start.
+	ErrBadCursor = errors.New("the server refused the progress cursor")
 )
 
 // syncError maps the sync routes' refusals.
@@ -176,7 +180,8 @@ func (c *Client) PostAudibleListening(ctx context.Context, account string, in Au
 
 // AudibleProgress reads one page of account's person's places changed after
 // since ("" from the start), at most limit (0 for MaxAudibleProgress).
-// ErrSyncOff, ErrUserUnavailable, ErrUnknownAccount.
+// ErrSyncOff, ErrUserUnavailable, ErrUnknownAccount, ErrBadCursor (a 400 when
+// since was sent).
 func (c *Client) AudibleProgress(ctx context.Context, account, since string, limit int) (*AudibleProgress, error) {
 	if limit <= 0 {
 		limit = MaxAudibleProgress
@@ -187,6 +192,10 @@ func (c *Client) AudibleProgress(ctx context.Context, account, since string, lim
 	}
 	var out AudibleProgress
 	if err := c.do(ctx, http.MethodGet, "/api/v1/bridge/progress", q, nil, &out); err != nil {
+		var e *APIError
+		if since != "" && errors.As(err, &e) && e.Status == http.StatusBadRequest {
+			return nil, fmt.Errorf("%w: %w", ErrBadCursor, err)
+		}
 		return nil, syncError(err)
 	}
 	if out.Rows == nil {

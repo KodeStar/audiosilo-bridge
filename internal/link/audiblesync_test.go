@@ -43,6 +43,9 @@ func TestAudibleSyncWireMirror(t *testing.T) {
 			case "gone0000":
 				w.WriteHeader(http.StatusNotFound)
 				_, _ = w.Write([]byte(`{"error":"x","code":"unknown_account"}`))
+			case "badbad00":
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(`{"error":"x","code":"invalid_request"}`))
 			default:
 				_, _ = w.Write([]byte(`{"rows":null,"next":"","more":false}`))
 			}
@@ -100,5 +103,12 @@ func TestAudibleSyncWireMirror(t *testing.T) {
 	}
 	if _, err := c.AudibleProgress(ctx, "gone0000", "", 0); !errors.Is(err, ErrUnknownAccount) {
 		t.Fatalf("gone = %v", err)
+	}
+	// A 400 blames the cursor only when one was sent.
+	if _, err := c.AudibleProgress(ctx, "badbad00", "Q9", 0); !errors.Is(err, ErrBadCursor) {
+		t.Fatalf("bad cursor = %v", err)
+	}
+	if _, err := c.AudibleProgress(ctx, "badbad00", "", 0); err == nil || errors.Is(err, ErrBadCursor) {
+		t.Fatalf("400 from the start = %v", err)
 	}
 }

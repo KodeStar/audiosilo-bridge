@@ -161,7 +161,7 @@ func (s *stubServer) AudibleProgress(_ context.Context, account, since string, l
 		return nil, s.feedErr
 	}
 	if since != "" && since == s.badSince {
-		return nil, &link.APIError{Status: http.StatusBadRequest, Code: "invalid_request"}
+		return nil, fmt.Errorf("%w: %w", link.ErrBadCursor, &link.APIError{Status: http.StatusBadRequest, Code: "invalid_request"})
 	}
 	start := 0
 	if since != "" {

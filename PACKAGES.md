@@ -1878,7 +1878,8 @@ internal/
             server-built params), PostAudibleListening (POST .../listening {sent_at, events}: a listen of
             no length or a finish, answered {server_time, results, progress}) and AudibleProgress (GET
             /bridge/progress?account=&since=&limit= -> {rows, next, more}: next opaque and kept between
-            polls); 403 sync_off -> ErrSyncOff, 403 user_unavailable -> ErrUserUnavailable.
+            polls); 403 sync_off -> ErrSyncOff, 403 user_unavailable -> ErrUserUnavailable, a 400
+            on a sent since -> ErrBadCursor (bridge#50).
   mapping/  where the Bridge sees each library, CHECKED (decision 13): Check stats the
             server's sample book's files through the mount (SafeJoin: no absolute,
             "..", NUL; a backslash is a name character except on Windows) and
