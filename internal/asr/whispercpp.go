@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/kodestar/audiosilo-bridge/internal/fsutil"
 	"github.com/kodestar/audiosilo-bridge/internal/toolfetch"
@@ -244,12 +245,17 @@ func (w *whisperCpp) Transcribe(ctx context.Context, job Job) error {
 
 // outputTail keeps the last part of a tool's output for an error message: a
 // whisper-cli that wrote no transcript printed its usage or the whole decode.
+// The cut never lands inside a character (the decode prints the book's words).
 func outputTail(out string) string {
 	const limit = 1024
 	if len(out) <= limit {
 		return out
 	}
-	return "..." + out[len(out)-limit:]
+	tail := out[len(out)-limit:]
+	for len(tail) > 0 && !utf8.RuneStart(tail[0]) {
+		tail = tail[1:]
+	}
+	return "..." + tail
 }
 
 // detectWhisperDevice guesses the informational accelerator: Metal on Apple

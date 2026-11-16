@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/kodestar/audiosilo-bridge/internal/execfile"
 	"github.com/kodestar/audiosilo-bridge/internal/fsutil"
@@ -947,5 +948,22 @@ func TestRawOutputName(t *testing.T) {
 		if got := RawOutputName(c.audioPath); got != c.want {
 			t.Errorf("RawOutputName(%q) = %q, want %q", c.audioPath, got, c.want)
 		}
+	}
+}
+
+// TestOutputTail: a tool's long output is cut to its last part for an error
+// message, never inside a character.
+func TestOutputTail(t *testing.T) {
+	if got := outputTail("short"); got != "short" {
+		t.Fatalf("short = %q", got)
+	}
+	long := strings.Repeat("a", 2000)
+	if got := outputTail(long); got != "..."+strings.Repeat("a", 1024) {
+		t.Fatalf("long: %d bytes", len(got))
+	}
+	// Two-byte characters with the cut landing inside one.
+	got := outputTail(strings.Repeat("é", 1000) + "x")
+	if !utf8.ValidString(got) || !strings.HasPrefix(got, "...é") || len(got) != 3+1023 {
+		t.Fatalf("cut inside a character: valid %v, %d bytes", utf8.ValidString(got), len(got))
 	}
 }
