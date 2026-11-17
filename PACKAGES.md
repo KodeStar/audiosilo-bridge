@@ -3756,7 +3756,8 @@ compose.example.yaml   three services: the server (libraries :ro), the Bridge (t
                        folders :rw, AUDIOSILO_BRIDGE_AGENT_STAGING_DIR=/staging, the
                        optional AUDIOSILO_BRIDGE_AGENT_BACKEND and
                        AUDIOSILO_BRIDGE_GITHUB_TOKEN) and `agent` (:latest-agent, user
-                       10002:10002 with group_add the Bridge's PGID (the credential
+                       10002:10002 with group_add the Bridge's PGID (a YAML alias of
+                       the bridge service's PGID, so the two can't differ; the credential
                        hand-off then goes to that group alone), cap_drop ALL,
                        no-new-privileges, read-only root,
                        tmpfs /tmp, its own internet-only network, the credential
