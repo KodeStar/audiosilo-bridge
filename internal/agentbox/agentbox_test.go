@@ -957,10 +957,9 @@ func stageHandoff(t *testing.T, groups []int) credentialModes {
 	return run()
 }
 
-// handoffStager is a Runner that hands the vault's credential over, with
-// runner.json reporting groups. run runs one job and returns what the fake
-// runner found.
-func handoffStager(t *testing.T, groups []int) (*Runner, func() credentialModes) {
+// vaultHandoff is a Runner that hands the vault's credential over, with
+// runner.json reporting groups, and its staging dir.
+func vaultHandoff(t *testing.T, groups []int) (*Runner, string) {
 	t.Helper()
 	r, dir := newTestRunner(t, agent.IDClaude)
 	r.credential = func(string) (string, string, time.Time, bool) {
@@ -969,6 +968,14 @@ func handoffStager(t *testing.T, groups []int) (*Runner, func() credentialModes)
 	rj := handoffRunner(true)
 	rj.Groups = groups
 	writeRunnerJSON(t, dir, rj)
+	return r, dir
+}
+
+// handoffStager is vaultHandoff's Runner. run runs one job and returns what
+// the fake runner found.
+func handoffStager(t *testing.T, groups []int) (*Runner, func() credentialModes) {
+	t.Helper()
+	r, dir := vaultHandoff(t, groups)
 	var seen atomic.Value
 	fake := &fakeRunner{fn: func(job string) agentproto.Exit {
 		var m credentialModes
@@ -1158,7 +1165,11 @@ func (d *deniedGroupRunner) fn(t *testing.T) func(job string) agentproto.Exit {
 			return agentproto.Exit{ExitCode: -1, CredentialDenied: true,
 				Error: "couldn't delete the Bridge's credential.json before the run: permission denied"}
 		}
-		if _, err := agentproto.DecodeCredential(mustRead(t, filepath.Join(job, agentproto.CredentialDir, agentproto.CredentialFile)), "claude"); err != nil {
+		raw, err := os.ReadFile(filepath.Join(job, agentproto.CredentialDir, agentproto.CredentialFile))
+		if err == nil {
+			_, err = agentproto.DecodeCredential(raw, "claude")
+		}
+		if err != nil {
 			return agentproto.Exit{ExitCode: -1, Error: err.Error()}
 		}
 		d.ran++
@@ -1167,73 +1178,44 @@ func (d *deniedGroupRunner) fn(t *testing.T) func(job string) agentproto.Exit {
 	}
 }
 
-func mustRead(t *testing.T, path string) []byte {
-	t.Helper()
-	b, err := os.ReadFile(path)
-	if err != nil {
-		t.Error(err)
-	}
-	return b
-}
-
-// groupHandoff is a Runner that hands the vault's credential to the Bridge's
-// group (the runner reports it), its log in logged, run by d.
-func groupHandoff(t *testing.T, d *deniedGroupRunner) (*Runner, *strings.Builder, func()) {
-	t.Helper()
-	r, dir := newTestRunner(t, agent.IDClaude)
-	r.credential = func(string) (string, string, time.Time, bool) {
-		return agentproto.CredentialOAuthToken, "sk-ant-oat01-vault", time.Now(), true
-	}
-	logged := &strings.Builder{}
-	r.log = slog.New(slog.NewTextHandler(logged, nil))
-	rj := handoffRunner(true)
-	rj.Groups = []int{os.Getegid()}
-	writeRunnerJSON(t, dir, rj)
-	stop := (&fakeRunner{fn: d.fn(t)}).start(t, dir)
-	t.Cleanup(func() { assertNoJobDirs(t, dir) })
-	return r, logged, stop
-}
-
 // A runner denied the credential handed to its group (the containers map the
 // staging volume's ids differently) still runs: the job is staged once more,
-// as it was before there was a group, and goes through; every later run of the
-// process goes that way at once, and the log says so once (allowed: the run
-// succeeds on the fallback; denied: no run fails on the group, and the CLI ran
-// once per run).
-func TestHandoffCredentialFallsBackWhenTheRunnerIsDenied(t *testing.T) {
+// as it was before there was a group, and goes through; every later run of
+// the process goes that way at once, Status no longer counts the group, and
+// the log says so once. A runner that takes the group's credential keeps
+// getting it so: no job is staged twice and nothing is logged (allowed: both
+// runs succeed; denied: no run fails on the group).
+func TestHandoffCredentialGroupTake(t *testing.T) {
 	t.Parallel()
-	d := &deniedGroupRunner{deny: true}
-	r, logged, stop := groupHandoff(t, d)
-	for range 2 {
-		if _, err := r.Run(context.Background(), agent.Request{Dir: stagedDir(t), Prompt: "p", Timeout: time.Minute}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	stop()
-	want := []fs.FileMode{credentialGroupDirMode, credentialDirMode, credentialDirMode}
-	if !slices.Equal(d.modes, want) || d.ran != 2 {
-		t.Fatalf("credential dirs %v, %d runs (want %v, 2)", d.modes, d.ran, want)
-	}
-	if n := strings.Count(logged.String(), "couldn't take the credential handed to the Bridge's group"); n != 1 {
-		t.Fatalf("the denial is logged %d times, want once:\n%s", n, logged.String())
-	}
-}
-
-// A runner that takes the group's credential keeps getting it so: no job is
-// staged twice and nothing is logged.
-func TestHandoffCredentialStaysWithTheGroup(t *testing.T) {
-	t.Parallel()
-	d := &deniedGroupRunner{}
-	r, logged, stop := groupHandoff(t, d)
-	for range 2 {
-		if _, err := r.Run(context.Background(), agent.Request{Dir: stagedDir(t), Prompt: "p", Timeout: time.Minute}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	stop()
-	want := []fs.FileMode{credentialGroupDirMode, credentialGroupDirMode}
-	if !slices.Equal(d.modes, want) || d.ran != 2 || logged.Len() != 0 {
-		t.Fatalf("credential dirs %v, %d runs (want %v, 2); log:\n%s", d.modes, d.ran, want, logged.String())
+	for name, tc := range map[string]struct {
+		deny bool
+		want []fs.FileMode
+		logs int
+	}{
+		"denied": {deny: true, want: []fs.FileMode{credentialGroupDirMode, credentialDirMode, credentialDirMode}, logs: 1},
+		"taken":  {want: []fs.FileMode{credentialGroupDirMode, credentialGroupDirMode}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			r, dir := vaultHandoff(t, []int{os.Getegid()})
+			var logged strings.Builder
+			r.log = slog.New(slog.NewTextHandler(&logged, nil))
+			d := &deniedGroupRunner{deny: tc.deny}
+			stop := (&fakeRunner{fn: d.fn(t)}).start(t, dir)
+			for range 2 {
+				if _, err := r.Run(context.Background(), agent.Request{Dir: stagedDir(t), Prompt: "p", Timeout: time.Minute}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			stop()
+			if !slices.Equal(d.modes, tc.want) || d.ran != 2 || r.Status().ShareGroup == tc.deny {
+				t.Fatalf("credential dirs %v, %d runs, share group %v (want %v, 2, %v)", d.modes, d.ran, r.Status().ShareGroup, tc.want, !tc.deny)
+			}
+			if n := strings.Count(logged.String(), "couldn't take the credential handed to the Bridge's group"); n != tc.logs || strings.Count(logged.String(), "level=WARN") != tc.logs {
+				t.Fatalf("the denial is logged %d times, want %d:\n%s", n, tc.logs, logged.String())
+			}
+			assertNoJobDirs(t, dir)
+		})
 	}
 }
 
@@ -1241,11 +1223,7 @@ func TestHandoffCredentialStaysWithTheGroup(t *testing.T) {
 // job refused, never staged again.
 func TestHandoffCredentialDeniedWithoutTheGroupFails(t *testing.T) {
 	t.Parallel()
-	r, dir := newTestRunner(t, agent.IDClaude)
-	r.credential = func(string) (string, string, time.Time, bool) {
-		return agentproto.CredentialOAuthToken, "sk-ant-oat01-vault", time.Now(), true
-	}
-	writeRunnerJSON(t, dir, handoffRunner(true))
+	r, dir := vaultHandoff(t, nil)
 	fake := &fakeRunner{fn: func(string) agentproto.Exit {
 		return agentproto.Exit{ExitCode: -1, CredentialDenied: true, Error: "read the Bridge's credential.json: permission denied"}
 	}}

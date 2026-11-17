@@ -234,7 +234,6 @@ func (r *Runner) Run(ctx context.Context, req agent.Request) (agent.Result, erro
 	if req.Dir == "" {
 		return agent.Result{}, errors.New("agent container: the request has no staged dir")
 	}
-	timeout := requestTimeout(req.Timeout)
 	var handed *agentproto.Credential
 	if st.Handoff {
 		if kind, value, _, ok := r.handoffCredential(); ok {
@@ -242,16 +241,16 @@ func (r *Runner) Run(ctx context.Context, req agent.Request) (agent.Result, erro
 		}
 	}
 	group := noGroup
-	if st.ShareGroup && !r.groupDenied.Load() {
+	if st.ShareGroup {
 		group = r.gid
 	}
-	if handed != nil && !st.ShareGroup && !r.warnedGroup.Swap(true) {
+	if handed != nil && !st.ShareGroup && !r.groupDenied.Load() && !r.warnedGroup.Swap(true) {
 		r.log.Warn("agent container: the runner isn't in the Bridge's group, so the handed credential is readable by every uid "+
 			"until the runner takes it; add that group to the agent container (group_add with the Bridge's PGID, as in the "+
 			"compose example) and recreate it, on an agent image as new as this Bridge (an older one reports no groups)",
 			"bridge_gid", r.gid)
 	}
-	res, err := r.runJob(ctx, req, st, timeout, handed, group)
+	res, err := r.runJob(ctx, req, st, handed, group)
 	var denied *credentialDeniedError
 	if group != noGroup && errors.As(err, &denied) {
 		// The runner reports the Bridge's gid among its groups, yet its uid may
@@ -267,16 +266,17 @@ func (r *Runner) Run(ctx context.Context, req agent.Request) (agent.Result, erro
 				"both the same mapping and restart the Bridge to keep it to that group",
 				"bridge_gid", r.gid, "detail", denied.detail)
 		}
-		res, err = r.runJob(ctx, req, st, timeout, handed, noGroup)
+		res, err = r.runJob(ctx, req, st, handed, noGroup)
 	}
 	return res, err
 }
 
-// runJob is one job in the container: stage it (with handed handed to group,
-// as stage), wait for the runner, read the outcome, harvest out/. The job dir
+// runJob is one job in the container: stage it (handed, when set, goes to
+// group as stage hands it), wait for the runner, read the outcome, harvest out/. The job dir
 // is gone when it returns. st is the runner's report the run was handed over
 // on.
-func (r *Runner) runJob(ctx context.Context, req agent.Request, st Status, timeout int, handed *agentproto.Credential, group int) (agent.Result, error) {
+func (r *Runner) runJob(ctx context.Context, req agent.Request, st Status, handed *agentproto.Credential, group int) (agent.Result, error) {
+	timeout := requestTimeout(req.Timeout)
 	id, err := agentproto.NewJobID()
 	if err != nil {
 		return agent.Result{}, fmt.Errorf("agent container: job id: %w", err)
@@ -330,7 +330,10 @@ func (r *Runner) runJob(ctx context.Context, req agent.Request, st Status, timeo
 // because its uid may not take the handed credential (Exit.CredentialDenied).
 type credentialDeniedError struct{ detail string }
 
-func (e *credentialDeniedError) Error() string { return "agent container refused the job: " + e.detail }
+func (e *credentialDeniedError) Error() string { return refusedJob + e.detail }
+
+// refusedJob starts the error of a job the runner refused (exit.json's error).
+const refusedJob = "agent container refused the job: "
 
 // noteCredential remembers a credential the provider refused, and forgets one
 // once a run shows it works (an answer, or a rate limit: the provider took the
@@ -493,7 +496,7 @@ func (r *Runner) outcome(root *os.Root, model string, timeout time.Duration) (ag
 			res, _ := r.parse(root, model, agent.CLIOutcome{ExitErr: errors.New(ex.Error), Timeout: timeout})
 			return agent.Result{Usage: res.Usage}, &agent.NotAvailableError{Backend: r.backend, Detail: ex.Error}
 		}
-		return agent.Result{}, fmt.Errorf("agent container refused the job: %s", ex.Error)
+		return agent.Result{}, errors.New(refusedJob + ex.Error)
 	}
 	out := agent.CLIOutcome{TimedOut: ex.TimedOut, Timeout: timeout}
 	switch {
