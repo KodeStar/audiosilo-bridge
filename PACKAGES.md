@@ -3361,7 +3361,9 @@ internal/
             than 30 s: an earlier runner's) finished at the start and with every
             status write, before the Bridge's 60 s stale limit; the staging dir
             scanned every 1 s while a slot is free, oldest request first, everything
-            through an os.Root. execute: request.json decoded strictly, a missing CLI
+            through an os.Root, the claim made inside the job dir already opened
+            (never through its path: the Bridge reads the claim as the runner's word
+            that it ran that very dir, agentbox's trust.go). execute: request.json decoded strictly, a missing CLI
             or credential is Exit unavailable, prompt.txt bounded, the argv built HERE
             with agent.ClaudeArgs / agent.CodexArgs(CodexSandboxOff) (one copy of the
             flags). The child's environment is an ALLOW-LIST: PATH, LANG, TZ, a

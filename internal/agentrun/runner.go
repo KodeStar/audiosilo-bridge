@@ -366,9 +366,9 @@ func (r *Runner) writeStatus() {
 }
 
 // scan claims ready jobs while a slot is free, oldest request first. Every
-// check and the claim go through an os.Root over the staging dir, and each job
-// is then run inside its own: the Bridge writes the job dirs, so a link in one
-// must not lead the runner out of it.
+// check goes through an os.Root over the staging dir, and each job is then
+// claimed and run inside its own: the Bridge writes the job dirs, so a link in
+// one must not lead the runner out of it.
 func (r *Runner) scan(ctx context.Context, wg *sync.WaitGroup) {
 	if ctx.Err() != nil || len(r.slots) == cap(r.slots) {
 		return // stopping, or every slot is busy: no use listing the jobs
@@ -385,16 +385,19 @@ func (r *Runner) scan(ctx context.Context, wg *sync.WaitGroup) {
 		default:
 			return // every slot is busy
 		}
-		if err := staging.Mkdir(filepath.Join(id, agentproto.ClaimDir), 0o700); err != nil {
-			<-r.slots // taken by another runner, or withdrawn by the Bridge
-			continue
-		}
 		job, err := staging.OpenRoot(id)
 		if err != nil {
-			// Claimed but can't be opened (most likely the Bridge removed it): with no
-			// heartbeat, the Bridge gives up on it by itself.
-			r.log.Warn("agent runner: open a claimed job", "job", id, "err", err)
-			<-r.slots
+			<-r.slots // removed by the Bridge since it was listed
+			continue
+		}
+		// The claim is made inside the dir just opened, never through its path:
+		// the staging dir is open to every uid on the volume, and one that swapped
+		// another dir in between the two would get a claim in a job this runner
+		// never runs (the Bridge takes the claim as the runner's word that it
+		// ran the job, agentbox's trust.go).
+		if err := job.Mkdir(agentproto.ClaimDir, 0o700); err != nil {
+			_ = job.Close()
+			<-r.slots // taken by another runner, or withdrawn by the Bridge
 			continue
 		}
 		r.setActive(id, true)
