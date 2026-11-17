@@ -39,7 +39,8 @@ const (
 	// by every uid until the runner takes it. The agent can anyway put a file
 	// there, which the runner reads strictly and only ever as its own run's
 	// credential. A staging volume that refuses the chown or the ACL change
-	// (NFS, CIFS) gets the 0777 and 0444 hand-off too, rather than no run.
+	// (NFS, CIFS) gets the 0777 and 0444 hand-off too, rather than no run, and
+	// so does a runner its group's credential is denied to (Run).
 	credentialDirMode       = 0o777
 	credentialFileMode      = inputFile
 	credentialGroupDirMode  = 0o770

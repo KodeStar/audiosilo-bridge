@@ -214,14 +214,19 @@ type Request struct {
 // the job at all (a malformed request, a missing prompt, the CLI's credential
 // missing) or stopped it itself (the container stopping or restarting);
 // Unavailable marks the kinds the Bridge should treat as the agent being
-// unavailable (park and self-resume) rather than a failed run.
+// unavailable (park and self-resume) rather than a failed run. CredentialDenied
+// marks a job refused, before the CLI started, because the runner's uid may not
+// take credential.json (a group-only hand-off on a volume whose ids its groups
+// don't name, as with a user namespace that maps them differently): the Bridge
+// stages it again for every uid.
 type Exit struct {
-	ExitCode    int    `json:"exit_code"`
-	TimedOut    bool   `json:"timed_out"`
-	Cancelled   bool   `json:"cancelled"`
-	DurationMS  int64  `json:"duration_ms"`
-	Error       string `json:"error,omitempty"`
-	Unavailable bool   `json:"unavailable,omitempty"`
+	ExitCode         int    `json:"exit_code"`
+	TimedOut         bool   `json:"timed_out"`
+	Cancelled        bool   `json:"cancelled"`
+	DurationMS       int64  `json:"duration_ms"`
+	Error            string `json:"error,omitempty"`
+	Unavailable      bool   `json:"unavailable,omitempty"`
+	CredentialDenied bool   `json:"credential_denied,omitempty"`
 }
 
 // modelRe allows the model names the CLIs take ("opus", "claude-opus-4-1[1m]",

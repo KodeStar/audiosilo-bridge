@@ -60,7 +60,9 @@ func (r *Runner) execute(ctx context.Context, job *os.Root, id string) agentprot
 	// else can run: the CLI never finds it on disk.
 	handed, err := r.takeCredential(job, req.CLI)
 	if err != nil {
-		return refused(err.Error())
+		exit := refused(err.Error())
+		exit.CredentialDenied = errors.Is(err, fs.ErrPermission)
+		return exit
 	}
 	if r.credentialKind(req.CLI) == "" && handed == nil {
 		return unavailable(req.CLI + " has no credential: set one on the Bridge's Accounts tab, or give one to the agent container")
@@ -140,7 +142,9 @@ func (r *Runner) copyLastMessage(job *os.Root, runDir, id string) {
 // deletes it (a failed delete refuses the job: the CLI must never find it). It
 // returns nil when there is none, or when the container has a credential of its
 // own for cli (the container's wins, decision 19: its environment and secrets
-// files are the headless override). The value is never logged.
+// files are the headless override). The value is never logged. An error that
+// is fs.ErrPermission is the runner's uid denied the file (execute reports it as
+// Exit.CredentialDenied).
 func (r *Runner) takeCredential(job *os.Root, cli string) (*agentproto.Credential, error) {
 	name := filepath.Join(agentproto.CredentialDir, agentproto.CredentialFile)
 	if _, err := job.Lstat(name); errors.Is(err, fs.ErrNotExist) {
@@ -148,13 +152,13 @@ func (r *Runner) takeCredential(job *os.Root, cli string) (*agentproto.Credentia
 	}
 	raw, rerr := agentproto.ReadRegular(job, name, agentproto.MaxCredentialFileBytes)
 	if err := job.Remove(name); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return nil, errors.New("couldn't delete the Bridge's credential.json before the run: " + err.Error())
+		return nil, fmt.Errorf("couldn't delete the Bridge's credential.json before the run: %w", err)
 	}
 	if r.credentialKind(cli) != "" {
 		return nil, nil
 	}
 	if rerr != nil {
-		return nil, errors.New("read the Bridge's credential.json: " + rerr.Error())
+		return nil, fmt.Errorf("read the Bridge's credential.json: %w", rerr)
 	}
 	c, err := agentproto.DecodeCredential(raw, cli)
 	if err != nil {

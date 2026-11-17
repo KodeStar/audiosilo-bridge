@@ -31,7 +31,8 @@ type Status struct {
 	// shows that credential's kind for the backend.
 	Handoff bool
 	// ShareGroup: the runner is in the Bridge's group (runner.json's groups),
-	// so a handed credential is that group's alone, never every uid's.
+	// so a handed credential is that group's alone, never every uid's (unless
+	// the runner couldn't take it so: Run).
 	ShareGroup bool
 	// Detail says why not, in words for the page and the park hint.
 	Detail string

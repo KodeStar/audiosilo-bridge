@@ -93,6 +93,10 @@ type Runner struct {
 	// every uid because the runner isn't in the Bridge's group, warnedVolume
 	// because the staging volume refused the group: each once per process.
 	warnedGroup, warnedVolume atomic.Bool
+	// groupDenied is set once the runner, in the Bridge's group by its ids,
+	// couldn't take a credential handed to that group: the rest of this
+	// process hands it to every uid (Run).
+	groupDenied atomic.Bool
 }
 
 var _ agent.Runner = (*Runner)(nil)
@@ -230,12 +234,6 @@ func (r *Runner) Run(ctx context.Context, req agent.Request) (agent.Result, erro
 	if req.Dir == "" {
 		return agent.Result{}, errors.New("agent container: the request has no staged dir")
 	}
-	id, err := agentproto.NewJobID()
-	if err != nil {
-		return agent.Result{}, fmt.Errorf("agent container: job id: %w", err)
-	}
-	job := filepath.Join(r.dir, id)
-	defer r.remove(job)
 	timeout := requestTimeout(req.Timeout)
 	var handed *agentproto.Credential
 	if st.Handoff {
@@ -244,7 +242,7 @@ func (r *Runner) Run(ctx context.Context, req agent.Request) (agent.Result, erro
 		}
 	}
 	group := noGroup
-	if st.ShareGroup {
+	if st.ShareGroup && !r.groupDenied.Load() {
 		group = r.gid
 	}
 	if handed != nil && !st.ShareGroup && !r.warnedGroup.Swap(true) {
@@ -253,6 +251,38 @@ func (r *Runner) Run(ctx context.Context, req agent.Request) (agent.Result, erro
 			"compose example) and recreate it, on an agent image as new as this Bridge (an older one reports no groups)",
 			"bridge_gid", r.gid)
 	}
+	res, err := r.runJob(ctx, req, st, timeout, handed, group)
+	var denied *credentialDeniedError
+	if group != noGroup && errors.As(err, &denied) {
+		// The runner reports the Bridge's gid among its groups, yet its uid may
+		// not take the file that group was given: the two containers map the
+		// ids on the staging volume differently (a user namespace, as rootless
+		// Podman sets up). The CLI never started, so nothing of the job ran: it
+		// is staged again (its first dir already gone) as it was before there
+		// was a group, and every later run of this process goes that way.
+		if !r.groupDenied.Swap(true) {
+			r.log.Warn("agent container: the runner couldn't take the credential handed to the Bridge's group alone, so from "+
+				"now on the handed credential is readable by every uid until the runner takes it; the two containers see "+
+				"different ids on the staging volume (different user-namespace mappings, as rootless Podman can set up): give "+
+				"both the same mapping and restart the Bridge to keep it to that group",
+				"bridge_gid", r.gid, "detail", denied.detail)
+		}
+		res, err = r.runJob(ctx, req, st, timeout, handed, noGroup)
+	}
+	return res, err
+}
+
+// runJob is one job in the container: stage it (with handed handed to group,
+// as stage), wait for the runner, read the outcome, harvest out/. The job dir
+// is gone when it returns. st is the runner's report the run was handed over
+// on.
+func (r *Runner) runJob(ctx context.Context, req agent.Request, st Status, timeout int, handed *agentproto.Credential, group int) (agent.Result, error) {
+	id, err := agentproto.NewJobID()
+	if err != nil {
+		return agent.Result{}, fmt.Errorf("agent container: job id: %w", err)
+	}
+	job := filepath.Join(r.dir, id)
+	defer r.remove(job)
 	root, groupErr, err := stage(job, req, r.backend, timeout, handed, group)
 	if groupErr != nil && !r.warnedVolume.Swap(true) {
 		r.log.Warn("agent container: the staging volume refused to hand the credential to the Bridge's group alone, so it is "+
@@ -276,7 +306,8 @@ func (r *Runner) Run(ctx context.Context, req agent.Request) (agent.Result, erro
 		return res, waitErr
 	}
 	var unavailable *agent.NotAvailableError
-	if errors.As(runErr, &unavailable) {
+	var denied *credentialDeniedError
+	if errors.As(runErr, &unavailable) || errors.As(runErr, &denied) {
 		return res, runErr
 	}
 	// Harvest after any finished run, failed ones too: a validation retry patches
@@ -294,6 +325,12 @@ func (r *Runner) Run(ctx context.Context, req agent.Request) (agent.Result, erro
 	}
 	return res, runErr
 }
+
+// credentialDeniedError is a job the runner refused, before the CLI started,
+// because its uid may not take the handed credential (Exit.CredentialDenied).
+type credentialDeniedError struct{ detail string }
+
+func (e *credentialDeniedError) Error() string { return "agent container refused the job: " + e.detail }
 
 // noteCredential remembers a credential the provider refused, and forgets one
 // once a run shows it works (an answer, or a rate limit: the provider took the
@@ -445,6 +482,9 @@ func (r *Runner) outcome(root *os.Root, model string, timeout time.Duration) (ag
 		return agent.Result{}, fmt.Errorf("agent container: parse exit.json: %w", err)
 	}
 	if ex.Error != "" {
+		if ex.CredentialDenied {
+			return agent.Result{}, &credentialDeniedError{detail: ex.Error}
+		}
 		if ex.Unavailable {
 			// The container stopped or restarted mid-run (or couldn't start the CLI):
 			// a run that got going may have spent tokens, so whatever usage its

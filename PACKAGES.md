@@ -3254,7 +3254,9 @@ internal/
             0440, both chowned to that group, any ACL inherited from the staging
             dir removed (no other uid can read it); else
             (an older runner, no shared group, or a staging volume that refuses
-            the chown or the ACL change: NFS, CIFS) 0777 and 0444 as before. DecodeCredential is strict (unknown
+            the chown or the ACL change: NFS, CIFS) 0777 and 0444 as before.
+            exit.json's credential_denied: the runner's uid was denied the file
+            (refused before the CLI starts). DecodeCredential is strict (unknown
             field, trailing data, over 4 KiB, another CLI, a kind that CLI doesn't
             take, or a value that isn't one printable line all refused; the value
             never in an error).
@@ -3316,7 +3318,11 @@ internal/
             (Status.ShareGroup), else 0444 in 0777, logged once a process with
             the fix (group_add with the Bridge's PGID); a volume that refuses
             the chown or the ACL drop falls back to those modes too, logged
-            once, never a failed run. A container
+            once, never a failed run. A group-only credential the runner is
+            denied (credential_denied: the containers map the volume's ids
+            differently, a user namespace) re-stages that job once in those
+            modes (nothing ran) and the rest of the process uses them, logged
+            once (groupDenied). A container
             credential always wins; a runner that can't take a hand-off gets
             nothing and is told to update. A refusal's detail says where to
             replace the credential: the Accounts tab for the handed one, the agent
