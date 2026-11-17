@@ -83,6 +83,10 @@ type Runner struct {
 	detecting  atomic.Bool
 	redetect   atomic.Bool
 	lastDetect time.Time
+	// statusMu orders the runner.json writes (the status tick's and a
+	// background detect's): each is read and written under it, so an older
+	// look never lands over a newer one.
+	statusMu sync.Mutex
 
 	// creds holds, per CLI, a fingerprint of the credential it has and since when
 	// (guarded by credMu): runner.json's credential_since. The fingerprint stays in
@@ -350,6 +354,8 @@ func groups() []int {
 // writeStatus rewrites runner.json (a temp file renamed into place, 0644 so the
 // Bridge's uid can read it).
 func (r *Runner) writeStatus() {
+	r.statusMu.Lock()
+	defer r.statusMu.Unlock()
 	body, err := json.Marshal(r.status())
 	if err != nil {
 		return
