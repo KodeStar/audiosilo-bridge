@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
@@ -135,15 +136,18 @@ func detectedSum(d pipeline.DetectedChapters) string {
 }
 
 // markersFile is the one audio file of the book at path (a file, or a folder
-// holding one), "" when it isn't a one-file book or can't be looked at. Its
-// stat and folder read are bounded as CheckCurrent's stat is (bridge#24,
-// bridge#65): a place that doesn't answer in time is fsutil.ErrStatTimeout.
+// holding one), "" when it isn't a one-file book. Its stat and folder read are
+// bounded as CheckCurrent's stat is (bridge#24, bridge#65), and it fails closed
+// as that does: a place that can't be looked at now (one that doesn't answer in
+// time, fsutil.ErrStatTimeout, or whose look the file system refuses: a mount
+// gone for a moment) is the look's error, never "not a one-file book".
 func markersFile(path string) (string, error) {
 	src, err := audio.ResolveSourceWithin(path, pipeline.SourceStatWait)
-	if errors.Is(err, fsutil.ErrStatTimeout) {
+	var look *fs.PathError
+	switch {
+	case errors.As(err, &look):
 		return "", err
-	}
-	if err == nil && src.Style == audio.StyleMarkers {
+	case err == nil && src.Style == audio.StyleMarkers:
 		return src.BookFile, nil
 	}
 	return "", nil
@@ -152,7 +156,8 @@ func markersFile(path string) (string, error) {
 // bookFileNow is the book's one audio file where the job has it now: at the path
 // the server's last answer moved the job to (adoptMove takes it up at the next
 // save, after the chapters were checked), else at the run's place; "" when that
-// can't be told. The look is bounded as CheckCurrent's stat is (bridge#24):
+// can't be told (CheckCurrent then looks at the manifest's path, and fails
+// closed itself). The look is bounded as CheckCurrent's stat is (bridge#24):
 // locate's stat and markersFile's looks at a hung mount would hold the poll
 // before that one, so a place (the moved one included) that doesn't answer in
 // time is fsutil.ErrStatTimeout, the audio out of sight.
@@ -170,7 +175,11 @@ func (r *run) bookFileNow() (string, error) {
 			}
 		}
 	}
-	return markersFile(full)
+	file, err := markersFile(full)
+	if err != nil && !errors.Is(err, fsutil.ErrStatTimeout) {
+		return "", nil
+	}
+	return file, err
 }
 
 // errAudioUnseen: the book's audio can't be looked at to tell whether the

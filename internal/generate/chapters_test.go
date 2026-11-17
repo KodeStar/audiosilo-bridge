@@ -1633,6 +1633,46 @@ func TestGenerateDoesNotContinueAFailedRun(t *testing.T) {
 	}
 }
 
+// A cancelled chapters run whose audio can't be looked at now (its folder
+// refuses the look: a mount gone for a moment) is never read as "not a one-file
+// book" and cleared: a generate job's continue and a chapters job's take-up both
+// fail with errAudioUnseen, the run kept for the next job (bridge#24). A place
+// that answers and isn't a one-file book is no error.
+func TestAChaptersRunIsKeptWhileItsAudioIsOutOfSight(t *testing.T) {
+	t.Parallel()
+	if os.Geteuid() == 0 {
+		t.Skip("root reads a folder whatever its mode")
+	}
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "Loose.m4b"), "abcdef")
+	if file, err := markersFile(dir); err != nil || file != filepath.Join(dir, "Loose.m4b") {
+		t.Fatalf("a one-file book's folder = %q, %v", file, err)
+	}
+	mustWrite(t, filepath.Join(dir, "Second.m4b"), "abcdef")
+	if file, err := markersFile(dir); err != nil || file != "" {
+		t.Fatalf("a folder of two files = %q, %v, want none and no error", file, err)
+	}
+	if err := os.Chmod(dir, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) }) //nolint:gosec // test
+	if file, err := markersFile(dir); err == nil {
+		t.Fatalf("a folder that can't be read = %q, want the look's error", file)
+	}
+	old := store.Book{ID: 1, SourcePath: dir, State: string(state.ASR), Goal: state.GoalChapters,
+		Status: string(state.StatusFailed), Error: "cancelled by user"}
+	if !scheduler.IsCancelled(old) {
+		t.Fatal("the book isn't a cancelled one")
+	}
+	h := New(Options{})
+	if ok, err := h.continueChapters(context.Background(), nil, &run{source: SourceAudio}, old, 0); ok || !errors.Is(err, errAudioUnseen) {
+		t.Fatalf("continuing a run whose audio is out of sight = %v, %v, want errAudioUnseen", ok, err)
+	}
+	if ok, err := h.resumeChapters(context.Background(), nil, &run{}, old); ok || !errors.Is(err, errAudioUnseen) {
+		t.Fatalf("taking up a run whose audio is out of sight = %v, %v, want errAudioUnseen", ok, err)
+	}
+}
+
 // bridge#37, deterministically: the later of two ends whose first stops each
 // found the other open stops the book with the stop it tries again once its
 // end is recorded. Job A's first stop leaves the book to job B; B then ends
