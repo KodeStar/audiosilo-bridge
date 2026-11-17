@@ -361,23 +361,24 @@ func sidecarsWithoutChapters(p place) bool {
 
 // continueChapters takes over a chapters.detect run of the same book for a new
 // generate job reading the audio, so its transcription (the expensive part) is
-// kept instead of deleted and done again (store.ContinueChapters). Two runs
+// kept instead of deleted and done again (store.ContinueChapters). These runs
 // continue (continuable):
 //   - a done one whose detected list is current for the audio on disk (a file
 //     replaced since is transcribed again) goes on from splitting, which cuts the
 //     chapter FLACs the done-time purge removed; asr then finds every transcript
 //     complete, so the book goes on to sanitizing and the rest;
-//   - one cancelled or failed at chapter_detecting (the server cancels a parked
+//   - one cancelled at chapter_detecting (the server cancels a parked
 //     chapters job as it queues a generate job for the book) whose kept window
 //     layer can run the stage again (pipeline.DetectionRerunnable) goes on from
 //     there, the stage running again over the kept windows;
-//   - one cancelled or failed at asr (a chapters job parked asr_worker_waiting,
+//   - one cancelled at asr (a chapters job parked asr_worker_waiting,
 //     cancelled the same way) whose windows manifest is in place for the file
 //     inspected (pipeline.TranscriptionContinuable) goes on from splitting (its
 //     kept sentinel passes it straight on; a purge that took the window FLACs
 //     took that too, so they are cut again), and asr transcribes only the
 //     windows it hadn't finished.
 //
+// One that failed there for a reason of its own is cleared and run afresh.
 // Either only while the book is still the one file it was (a folder that has
 // gained an audio file is a multi-file book now), the retention hasn't swept its
 // transcripts and no open job follows it (the caller checked). It is held
@@ -466,8 +467,7 @@ func resumesAt(b store.Book) (state.State, bool) {
 // "a detect re-run after a cancel"): a run that failed for a reason of its own
 // is cleared by the new job, so asking again never fails the same way forever.
 func cancelledChapters(b store.Book) bool {
-	return state.State(b.State) != state.Done && continuable(b) && scheduler.IsCancelled(b) &&
-		markersFile(b.AudioSource()) != ""
+	return state.State(b.State) != state.Done && continuable(b) && markersFile(b.AudioSource()) != ""
 }
 
 // resumeChapters takes up the book's chapters run old for a new chapters job,
@@ -534,14 +534,16 @@ func (h *Handler) holdStill(ctx context.Context, old store.Book, still func(stor
 }
 
 // continuable reports whether engine book b is a chapters run a generate job can
-// go on with: goal chapters, and done, or failed (a cancel included) at asr or
-// chapter_detecting.
+// go on with: goal chapters, and done, or cancelled at asr or chapter_detecting.
+// A run that failed there for a reason of its own is cleared, as a chapters
+// job's re-run clears it (cancelledChapters), so a generate job never fails the
+// same way again on its transcription (bridge#24).
 func continuable(b store.Book) bool {
 	switch state.State(b.State) {
 	case state.Done:
 		return b.Goal == state.GoalChapters
 	case state.ASR, state.ChapterDetecting:
-		return b.Goal == state.GoalChapters && state.Status(b.Status) == state.StatusFailed
+		return b.Goal == state.GoalChapters && scheduler.IsCancelled(b)
 	default:
 		return false
 	}

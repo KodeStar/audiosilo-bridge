@@ -1609,6 +1609,30 @@ func TestChaptersJobDoesNotTakeUpAFailedRun(t *testing.T) {
 	}
 }
 
+// A generate job never continues a chapters run that FAILED at asr for a reason
+// of its own (bridge#24): it clears it and starts its own run, as a chapters
+// job's re-run does; only a cancelled run is taken up.
+func TestGenerateDoesNotContinueAFailedRun(t *testing.T) {
+	t.Parallel()
+	hr := newHarness(t)
+	stop := hr.runner(hr.h, hr.h.ChaptersJob())
+	defer stop()
+	first := parkChaptersAtASR(hr, 97)
+	hr.srv.set(func() { hr.srv.cancel[97] = true })
+	hr.waitFor("the engine book stopped", func() bool {
+		b, err := hr.db.GetBook(context.Background(), first.ID)
+		return err == nil && scheduler.IsCancelled(b)
+	})
+	if err := hr.db.SetBookStatus(context.Background(), first.ID, string(state.StatusFailed), "asr: the decoder crashed", ""); err != nil {
+		t.Fatal(err)
+	}
+	hr.srv.add(98, "Loose.m4b", `{}`)
+	waitDone(hr, 98)
+	if b := hr.engineBook(98); b.ID == first.ID {
+		t.Fatalf("the generate job continued a failed chapters run (book %d)", b.ID)
+	}
+}
+
 // bridge#37: two jobs following one engine book that end at the same moment
 // each find the other still open at their first stop, and each leaves the book
 // to the other; the stop tried again once each end is recorded makes sure the
