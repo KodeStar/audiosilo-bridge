@@ -2377,8 +2377,8 @@ internal/
             record a refusal. Deps: audible, link,
             secrets, source, store.
   audiblejob/ Phase 4a: audible.poll (light lane; params {"account", "template"}
-            strict (template, the account's path template, optional, <= 1024
-            bytes; an unknown field is refused); the server claims it with no
+            strict (template, the account's path template, optional, <= 500
+            bytes, the server's bound, bridge#47; an unknown field is refused); the server claims it with no
             library). Checks the account is this
             Bridge's and was mapped on the paired server (else fails asking to map
             it again), lists the Audible library (a refusal is the account's, the
@@ -2895,7 +2895,9 @@ internal/
             the engine to start when it hasn't, and waitEngine for a run cancelled
             (or taken back) while it waits for the engine, which never reaches end(). Retry(job): the engine's Retry for a
             parked engine book, else a poke for a job waiting in its own park
-            (ErrNotParked, store.ErrNotFound otherwise). ParkHint words every park code
+            (ErrNotParked, store.ErrNotFound otherwise; ErrBookChanged when the book was
+            parked again or cancelled between the engine's read and write, bridge#65).
+            ParkHint words every park code
             for the console and the page (a fresh start says to cancel this job first:
             the server keeps one open job per book). The budget_exceeded hint and the
             pipeline's budget park reasons (budgetExceededMsg, monthlyBudgetExceededMsg)
@@ -3054,15 +3056,17 @@ internal/
             CONTINUES a goal-chapters engine book at the same source path (not swept,
             no open job, the audio read): a done one whose manifest names the book's
             one file and whose list is current for it (CheckCurrent; the file out of
-            sight fails the job with errAudioUnseen, the run kept), from splitting; one cancelled or failed at chapter_detecting
+            sight fails the job with errAudioUnseen, the run kept), from splitting; one cancelled at chapter_detecting
             whose kept windows can run it again (pipeline.DetectionRerunnable), going
             on there, so the detection runs again from the window layer with the
             whole pipeline after it and nothing is transcribed again; or one
-            cancelled or failed at asr (a chapters job parked asr_worker_waiting,
+            cancelled at asr (a chapters job parked asr_worker_waiting,
             cancelled as a generate job is queued, bridge#24) whose windows manifest
             is in place for the file inspected (pipeline.TranscriptionContinuable),
             from splitting (its kept sentinel passes it on; a purge took that too),
-            asr transcribing only the windows it hadn't finished; each only
+            asr transcribing only the windows it hadn't finished (one that failed
+            there for a reason of its own is cleared, never continued, bridge#24);
+            each only
             while the book is still the one file it was (audio.ResolveSource: a
             folder that gained an audio file is a multi-file book now)
             (continueChapters -> store.ContinueChapters with the state it checked and
@@ -3562,7 +3566,7 @@ internal/
             (can_contribute computed with them, since resolving can shell out to
             gh), with the agent's readiness and the budget read fresh each beat. The
             Backend adds Job(id), RetryJob (generate.Retry: ErrNotFound -> 404,
-            ErrNotParked -> 409) and Engine (the agent container from
+            ErrNotParked and ErrBookChanged -> 409) and Engine (the agent container from
             agentbox.Status, ASR capability, budgets and this month's spend, the
             retention).
   api/      transport-only HTTP of the Bridge's page (/api/*): login (rate limited),
@@ -3652,8 +3656,10 @@ web/          the Bridge's page: Vite + React 19 + TS + Tailwind v4 (npm, Node 2
               default, and under prefers-color-scheme light index.css redefines the brand
               tokens and the stock state shades the page uses with the server console's
               light palette (src/theme.test.ts fails a token or a used red/amber/green/pink
-              shade the light block misses); public/favicon.svg (also in the
-              placeholder) is linked from index.html. The Jobs tab names a known kind
+              shade the light block misses, and the wordmark's "Bridge" below 4.5:1 on
+              the surface in either theme); public/favicon.svg is the logo's one source
+              (linked from index.html, the Wordmark's glyph; the placeholder's byte copy
+              is pinned to it by internal/web's test, bridge#65). The Jobs tab names a known kind
               in words only (the kind is the label's tooltip) and leads a park with its
               hint, the engine's message a Details line under it (bridge#13).
               Phase 1a: the hash is a Route (routeFromHash: "#jobs", "#/logs", and
