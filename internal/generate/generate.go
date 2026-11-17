@@ -1537,6 +1537,10 @@ func (h *Handler) rescan(ctx context.Context, r *run) {
 // ErrNotParked is a Retry for a job that isn't parked.
 var ErrNotParked = errors.New("the job isn't waiting on anything a retry would help")
 
+// ErrBookChanged is a Retry that met the book parked again, or cancelled,
+// between its read and its write (store.ErrStatusChanged): nothing was done.
+var ErrBookChanged = errors.New("the book changed meanwhile; try again")
+
 // Retry re-admits a parked job's engine book (the engine's own Retry), or wakes a
 // job parked before the engine has its book (the book's folder wasn't writable)
 // to check again now. store.ErrNotFound when the job isn't one of this handler's.
@@ -1587,8 +1591,11 @@ func (h *Handler) Retry(ctx context.Context, jobID int64) error {
 		return ErrNotParked
 	}
 	if err := eng.Retry(ctx, b.ID); err != nil {
-		if errors.Is(err, scheduler.ErrInvalidOp) {
+		switch {
+		case errors.Is(err, scheduler.ErrInvalidOp):
 			return ErrNotParked
+		case errors.Is(err, store.ErrStatusChanged):
+			return ErrBookChanged
 		}
 		return err
 	}

@@ -108,13 +108,25 @@ func (s *Scheduler) ReadmitParked(ctx context.Context, msg string, code state.Pa
 		err := s.readmit(ctx, b)
 		s.unreserve(b.ID)
 		if err != nil {
-			slog.Warn("readmit-parked: readmit failed", "book_id", b.ID, "err", err)
+			logReadmitFailed(slog.Default(), "readmit-parked", b.ID, err)
 			continue
 		}
 		n++
 		_ = s.hub.PublishBook("stage.note", b.ID, map[string]any{"book_id": b.ID, "stage": b.State, "msg": msg})
 	}
 	return n
+}
+
+// logReadmitFailed logs a batch re-admission (what) that didn't happen: at Debug
+// when the book's status changed between the list and the write (a re-park or a
+// Cancel landing there: the book is left as it is, nothing went wrong), at Warn
+// otherwise (bridge#65).
+func logReadmitFailed(log *slog.Logger, what string, bookID int64, err error) {
+	if errors.Is(err, store.ErrStatusChanged) {
+		log.Debug(what+": the book's status changed meanwhile; left as it is", "book_id", bookID)
+		return
+	}
+	log.Warn(what+": readmit failed", "book_id", bookID, "err", err)
 }
 
 // readmit is the shared re-admission body: it forces the book's current stage to

@@ -1,8 +1,11 @@
 package scheduler
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"testing"
@@ -140,5 +143,23 @@ func TestSupervisorWritesNeverUndoACancelThatLandedAfterTheRead(t *testing.T) {
 		if got, err := db.GetBook(ctx, b.ID); err != nil || !IsCancelled(got) {
 			t.Fatalf("%s undid the cancel: %+v, %v", name, got, err)
 		}
+	}
+}
+
+// A batch re-admission that met the book's status changed (a re-park or a
+// Cancel between the list and the write) is logged at Debug, nothing having
+// gone wrong; any other failure stays a Warn (bridge#65).
+func TestBatchReadmitStatusChangeLogsAtDebug(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	logReadmitFailed(log, "auto-readmit", 7, fmt.Errorf("clear: %w", store.ErrStatusChanged))
+	if out := buf.String(); !strings.Contains(out, "level=DEBUG") || !strings.Contains(out, "book_id=7") {
+		t.Fatalf("a status change logged as %q, want Debug", out)
+	}
+	buf.Reset()
+	logReadmitFailed(log, "auto-readmit", 8, errors.New("database is locked"))
+	if out := buf.String(); !strings.Contains(out, "level=WARN") || !strings.Contains(out, "database is locked") {
+		t.Fatalf("a failure logged as %q, want Warn", out)
 	}
 }

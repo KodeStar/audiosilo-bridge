@@ -342,7 +342,7 @@ func (b *Bridge) RetryJob(ctx context.Context, id int64) error {
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		return api.Errorf(api.ErrNotFound, "job %d isn't a sidecars job this Bridge runs", id)
-	case errors.Is(err, generate.ErrNotParked):
+	case errors.Is(err, generate.ErrNotParked), errors.Is(err, generate.ErrBookChanged):
 		return api.Errorf(api.ErrConflict, "%v", err)
 	}
 	return err
