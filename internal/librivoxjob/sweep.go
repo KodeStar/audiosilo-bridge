@@ -2,13 +2,15 @@ package librivoxjob
 
 import (
 	"encoding/json"
-	"io/fs"
+	"errors"
 	"os"
 	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/kodestar/audiosilo-bridge/internal/fsutil"
 )
 
 // StagingMaxAge is how long the sweep keeps a fetch's staging folder and state
@@ -179,43 +181,61 @@ func (h *Handler) sweepStrays(now time.Time, held map[key]bool) {
 		if !ok {
 			continue
 		}
+		strays := strayCandidates(mount)
+		if len(strays) == 0 {
+			continue
+		}
 		root, err := os.OpenRoot(mount)
 		if err != nil {
 			continue
 		}
-		for _, rel := range strayCandidates(root) {
-			h.sweepStray(root, ls.LibraryID, rel, now, held)
+		for _, s := range strays {
+			h.sweepStray(root, ls.LibraryID, s, now, held)
 		}
 		_ = root.Close()
 	}
 }
 
-// strayCandidates are the staging-named folders in root's top folder and in
-// each folder directly in it.
-func strayCandidates(root *os.Root) []string {
-	top, err := fs.ReadDir(root.FS(), ".")
+// strayLookWait bounds each folder read of the walk for stray staging folders
+// (fsutil.ReadDirWithin): a library on a mount that hangs is left for the next
+// walk rather than holding the sweep.
+const strayLookWait = 10 * time.Second
+
+// stray is a staging-named folder the walk found: rel in the library, the
+// project id its name carries.
+type stray struct {
+	rel string
+	id  int
+}
+
+// strayCandidates are the staging-named folders in the library's top folder
+// (mount) and in each folder directly in it. Each read is bounded by
+// strayLookWait; the first that doesn't answer ends the walk of this library.
+// A symlink is never followed (its entry isn't a folder).
+func strayCandidates(mount string) []stray {
+	top, err := fsutil.ReadDirWithin(mount, strayLookWait)
 	if err != nil {
 		return nil
 	}
-	var out []string
+	var out []stray
 	for _, e := range top {
 		if !e.IsDir() {
 			continue
 		}
-		if _, ok := stagingID(e.Name()); ok {
-			out = append(out, e.Name())
+		if id, ok := stagingID(e.Name()); ok {
+			out = append(out, stray{rel: e.Name(), id: id})
 			continue
 		}
 		if strings.HasPrefix(e.Name(), ".") {
 			continue
 		}
-		inner, err := fs.ReadDir(root.FS(), e.Name())
-		if err != nil {
-			continue
+		inner, err := fsutil.ReadDirWithin(filepath.Join(mount, e.Name()), strayLookWait)
+		if errors.Is(err, fsutil.ErrStatTimeout) {
+			return out
 		}
 		for _, f := range inner {
-			if _, ok := stagingID(f.Name()); ok && f.IsDir() {
-				out = append(out, path.Join(e.Name(), f.Name()))
+			if id, ok := stagingID(f.Name()); ok && f.IsDir() {
+				out = append(out, stray{rel: path.Join(e.Name(), f.Name()), id: id})
 			}
 		}
 	}
@@ -232,26 +252,25 @@ func stagingID(name string) (int, bool) {
 	return id, err == nil && id > 0 && stagingName(id) == name
 }
 
-// sweepStray is sweepStrays for one staging folder rel of library lib.
-func (h *Handler) sweepStray(root *os.Root, lib int64, rel string, now time.Time, held map[key]bool) {
-	id, _ := stagingID(path.Base(rel))
-	k := key{lib: lib, id: id}
+// sweepStray is sweepStrays for one staging folder s of library lib.
+func (h *Handler) sweepStray(root *os.Root, lib int64, s stray, now time.Time, held map[key]bool) {
+	k := key{lib: lib, id: s.id}
 	if held[k] || !h.begin(k) {
 		return
 	}
 	defer h.end(k)
-	if st := h.loadState(lib, id); st != nil && st.staging(id) == rel {
+	if st := h.loadState(lib, s.id); st != nil && st.staging(s.id) == s.rel {
 		return
 	}
-	info, err := root.Lstat(rel)
+	info, err := root.Lstat(s.rel)
 	if err != nil || !info.IsDir() || now.Sub(info.ModTime()) < StagingMaxAge {
 		return
 	}
-	if err := root.RemoveAll(rel); err != nil {
-		h.o.Log.Warn("librivox: removing a stray staging folder failed", "library", lib, "path", rel, "err", err)
+	if err := root.RemoveAll(s.rel); err != nil {
+		h.o.Log.Warn("librivox: removing a stray staging folder failed", "library", lib, "path", s.rel, "err", err)
 		return
 	}
-	h.o.Log.Info("librivox: swept a staging folder no fetch names", "library", lib, "path", rel)
+	h.o.Log.Info("librivox: swept a staging folder no fetch names", "library", lib, "path", s.rel)
 }
 
 // writableMount is the books library's mount while it is a checked, writable
