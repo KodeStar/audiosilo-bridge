@@ -167,6 +167,34 @@ func TestAudiblePolledKeepsADeviceRefusal(t *testing.T) {
 	if got := get(); got.RefusalKind != RefusalDevice {
 		t.Fatalf("the device refusal ended: %+v", got)
 	}
+	// A sign-in refusal (a listing's 401) never overwrites a standing device
+	// one: its guidance, sign in again, is what the account needs (bridge#64).
+	if err := db.RefuseAudibleAccount(ctx, a.ID, RefusalSignIn, "sign-in refused", at.Add(90*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if got := get(); got.RefusalKind != RefusalDevice || got.LastError != "any words" || got.RefusedAt != Timestamp(at.Add(time.Hour)) {
+		t.Fatalf("a sign-in refusal replaced the device's: %+v", got)
+	}
+	// A sign-in again ends it; a sign-in refusal then is recorded as one.
+	if err := db.SignInAudibleAccount(ctx, a, at.Add(100*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.RefuseAudibleAccount(ctx, a.ID, RefusalSignIn, "sign-in refused", at); err != nil {
+		t.Fatal(err)
+	}
+	if got := get(); got.RefusalKind != RefusalSignIn || got.LastError != "sign-in refused" {
+		t.Fatalf("a sign-in refusal = %+v", got)
+	}
+	// A device refusal replaces a sign-in one.
+	if err := db.RefuseAudibleAccount(ctx, a.ID, RefusalDevice, "throttled", at); err != nil {
+		t.Fatal(err)
+	}
+	if got := get(); got.RefusalKind != RefusalDevice || got.LastError != "throttled" {
+		t.Fatalf("a device refusal over a sign-in one = %+v", got)
+	}
+	if err := db.SignInAudibleAccount(ctx, a, at.Add(110*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
 	if err := db.RefuseAudibleAccount(ctx, a.ID, RefusalSignIn, "sign-in refused", at); err != nil {
 		t.Fatal(err)
 	}

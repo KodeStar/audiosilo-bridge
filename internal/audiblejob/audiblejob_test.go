@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -69,6 +70,22 @@ type fakeServer struct {
 	// Retry-After ("-" for none) when it returns ok.
 	limit   func(n int) (retryAfter string, ok bool)
 	enrichN int
+}
+
+// enrichedNow is a copy of the books given an ASIN so far, read under the
+// fake's lock: the handler writes it on the server's goroutine, which a
+// response reaching the client does not order before the test's read.
+func (f *fakeServer) enrichedNow() map[string]string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return maps.Clone(f.enriched)
+}
+
+// enrichCalls is how many enrichment PUTs reached the fake, under its lock.
+func (f *fakeServer) enrichCalls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.enrichN
 }
 
 func (f *fakeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {

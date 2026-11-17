@@ -244,7 +244,7 @@ func newEnv(t *testing.T) *env {
 }
 
 func mapping() Mapping {
-	return Mapping{UserID: 3, UserName: "Chris", LibraryID: 1, Policy: "manual", Sync: true}
+	return Mapping{UserID: 3, UserName: "Chris", LibraryID: 1, Policy: "manual"}
 }
 
 func (e *env) signIn(t *testing.T) store.AudibleAccount {
@@ -309,10 +309,10 @@ func TestSignInSealsTheCredentialsAndMapsOnTheServerFirst(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !IDPattern.MatchString(a.ID) || a.Label != "Chris (US)" || a.ServerID != "srv-1" || a.UserID != 3 || a.LibraryID != 1 ||
-		a.Policy != "manual" || !a.Sync || a.CustomerHash == "" || a.LastOKAt == "" {
+		a.Policy != "manual" || a.Sync || a.CustomerHash == "" || a.LastOKAt == "" {
 		t.Fatalf("account = %+v", a)
 	}
-	if in := e.srv.put[a.ID]; in != (link.AudibleAccountInput{Label: "Chris (US)", Marketplace: "us", UserID: 3, LibraryID: 1, Policy: "manual", Sync: true}) {
+	if in := e.srv.put[a.ID]; in != (link.AudibleAccountInput{Label: "Chris (US)", Marketplace: "us", UserID: 3, LibraryID: 1, Policy: "manual"}) {
 		t.Fatalf("server mapping = %+v", in)
 	}
 	// The login is spent.
@@ -989,6 +989,15 @@ func TestThrottledLicenseRefusesTheAccountUntilASignIn(t *testing.T) {
 	}
 	if got, _ = e.m.Account(ctx, a.ID); !Throttled(got) || got.LastTitles != 30 {
 		t.Fatalf("a poll ended the throttling: %+v", got)
+	}
+	// A listing refused meanwhile (a 401) keeps the device refusal and its
+	// advice, so the poll still says to sign in again (bridge#64).
+	e.svc.libraryErr = fmt.Errorf("%w (HTTP 401)", ErrRefused)
+	if _, err := e.m.Library(ctx, a.ID); !errors.Is(err, ErrRefused) {
+		t.Fatalf("a refused listing = %v", err)
+	}
+	if got, _ = e.m.Account(ctx, a.ID); !Throttled(got) || got.LastError != ThrottledText {
+		t.Fatalf("a refused listing replaced the device refusal: %+v", got)
 	}
 
 	e.svc.libraryErr = nil

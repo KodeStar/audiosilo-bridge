@@ -520,7 +520,6 @@ export interface AudibleMapping {
   user_id: number;
   library_id: number;
   policy: AudiblePolicy;
-  sync: boolean;
 }
 
 // DELETE /api/accounts/audible/{id}

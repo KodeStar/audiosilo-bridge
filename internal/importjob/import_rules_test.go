@@ -2,7 +2,9 @@ package importjob
 
 import (
 	"fmt"
+	"regexp"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/kodestar/audiosilo-bridge/internal/link"
@@ -207,33 +209,125 @@ func TestKeepBest(t *testing.T) {
 }
 
 // TestPositionAgrees: the title's number against the book's in the title's
-// series, else the book's main series (a folder code's number); a range, or
-// no number on either side, is neither.
+// series; the book's main series' number only when the title names no series,
+// or when it is the folder code's leading the book's folder (bridge#43: a
+// franchise's number says nothing about the title's).
 func TestPositionAgrees(t *testing.T) {
 	cases := []struct {
 		name            string
+		series          string // the title's ("" none)
 		pos             string
+		path            string // the book's ("" a folder with no code)
 		book            []link.SeriesRef
 		agree, disagree bool
 	}{
-		{"the same number", "2", series("Lanterns of London", "2"), true, false},
-		{"another number", "1", series("Lanterns of London", "2"), false, true},
-		{"2 is 2.0", "2", series("Lanterns of London", "2.0"), true, false},
-		{"the main series' number", "2", series("L-T", "2"), true, false},
-		{"the main series' other number", "3", series("L-T", "2"), false, true},
-		{"the named series over the main one", "4", []link.SeriesRef{{Name: "Universe", Position: "9"}, {Name: "lanterns of london", Position: "4"}}, true, false},
-		{"the named series without a number", "4", []link.SeriesRef{{Name: "Universe", Position: "4"}, {Name: "Lanterns of London", Position: ""}}, false, false},
-		{"a range on the book", "5", series("Lanterns of London", "5-6"), false, false},
-		{"a range on the title", "5-6", series("Lanterns of London", "5"), false, false},
-		{"no number on the title", "", series("Lanterns of London", "2"), false, false},
-		{"no number on the book", "2", series("Lanterns of London", ""), false, false},
-		{"no series on the book", "2", nil, false, false},
+		{"the same number", "Lanterns of London", "2", "", series("Lanterns of London", "2"), true, false},
+		{"another number", "Lanterns of London", "1", "", series("Lanterns of London", "2"), false, true},
+		{"2 is 2.0", "Lanterns of London", "2", "", series("Lanterns of London", "2.0"), true, false},
+		{"the folder code's number", "Lanterns of London", "2", "Aar/LT02 - Moon over Tidewater", series("L-T", "2"), true, false},
+		{"the folder code's other number", "Lanterns of London", "3", "Aar/LT 02 Moon", series("L-T", "2"), false, true},
+		{"a franchise's number", "Lanterns of London", "1", "Aar/Moon over Tidewater", series("Aar Universe", "7"), false, false},
+		{"a folder code of another number", "Lanterns of London", "2", "Aar/LT07 - Moon", series("Aar Universe", "2"), false, false},
+		{"no code: the letters run on", "Lanterns of London", "2", "Aar/LT02x Moon", series("L-T", "2"), false, false},
+		{"no code: not the series' initials", "Lanterns of London", "7", "Aar/Book 07 - Moon", series("Aar Universe", "7"), false, false},
+		// The server's reading of a code, case by case: a range or a third
+		// number joined on is never its first number, a decimal part can't be
+		// backed off, and 0 is no position.
+		{"no code: a range", "Lanterns of London", "5", "Aar/LT05-06 - Moon", series("L-T", "5"), false, false},
+		{"no code: an en dash range", "Lanterns of London", "5", "Aar/LT05\u201306 - Moon", series("L-T", "5"), false, false},
+		{"no code: a third number joined on", "Lanterns of London", "5", "Aar/LT05-06-07 - Moon", series("L-T", "5"), false, false},
+		{"no code: letters after the decimal part", "Lanterns of London", "15", "Aar/LT15.5x Moon", series("L-T", "15"), false, false},
+		{"no code: 0", "Lanterns of London", "0", "Aar/LT00 - Moon", series("L-T", "0"), false, false},
+		{"a decimal code", "Lanterns of London", "15.5", "Aar/LT15.5 Moon", series("L-T", "15.5"), true, false},
+		{"a hyphen that joins no number", "Lanterns of London", "5", "Aar/LT05-Moon", series("L-T", "5"), true, false},
+		{"a code of some initials in order", "Lanterns of London", "3", "Aar/AU03 - Moon", series("Aar's Wide Universe", "3"), true, false},
+		{"no series on the title: the main one", "", "2", "", series("Lanterns of London", "2"), true, false},
+		{"no series on the title: another number", "", "3", "", series("Lanterns of London", "2"), false, true},
+		{"the named series over the main one", "Lanterns of London", "4", "", []link.SeriesRef{{Name: "Universe", Position: "9"}, {Name: "lanterns of london", Position: "4"}}, true, false},
+		{"the named series without a number", "Lanterns of London", "4", "", []link.SeriesRef{{Name: "Universe", Position: "4"}, {Name: "Lanterns of London", Position: ""}}, false, false},
+		{"a range on the book", "Lanterns of London", "5", "", series("Lanterns of London", "5-6"), false, false},
+		{"a range on the title", "Lanterns of London", "5-6", "", series("Lanterns of London", "5"), false, false},
+		{"no number on the title", "Lanterns of London", "", "", series("Lanterns of London", "2"), false, false},
+		{"no number on the book", "Lanterns of London", "2", "", series("Lanterns of London", ""), false, false},
+		{"no series on the book", "Lanterns of London", "2", "", nil, false, false},
 	}
 	for _, tc := range cases {
-		rec := audibleRec("B0POS00001", "Moon over Tidewater", "Ben Aar", "Lanterns of London", tc.pos)
-		a, d := PositionAgrees(rec, link.LibraryBook{Path: "x", Series: tc.book})
+		rec := audibleRec("B0POS00001", "Moon over Tidewater", "Ben Aar", tc.series, tc.pos)
+		p := tc.path
+		if p == "" {
+			p = "Aar/Moon over Tidewater"
+		}
+		a, d := PositionAgrees(rec, link.LibraryBook{Path: p, Series: tc.book})
 		if a != tc.agree || d != tc.disagree {
 			t.Errorf("%s: agrees %v disagrees %v, want %v %v", tc.name, a, d, tc.agree, tc.disagree)
+		}
+	}
+}
+
+// TestFolderCodeIsServerVectors: folderCodeIs reads a folder code exactly as
+// the server's metadata.FolderCodePosition does, on that function's own test
+// table (name, series, the position it reads, a range's end; want 0 is no
+// code). Every number in a name agrees only when the server reads it as the
+// code's single position: never a range's start, a number cut short, or 0.
+func TestFolderCodeIsServerVectors(t *testing.T) {
+	number := regexp.MustCompile(`\d+(?:\.\d+)?`)
+	for _, tc := range []struct {
+		name, series string
+		want, end    float64
+	}{
+		{"DH06 - Land of Magic", "Dragon Heart", 6, 0},
+		{"BDM01 - Oathbound Healer", "Beneath the Dragoneye Moons", 1, 0},
+		{"FWM01 - He Who Fights With Monsters - Book 1", "He Who Fights With Monsters", 1, 0},
+		{"DF15.5 Brief Cases", "Dresden Files", 15.5, 0},
+		{"PH15 - 15", "Primal Hunter", 15, 0},
+		{"LAM05-06", "Legend of the Arch Magus", 5, 6},
+		{"LAM05\u201306 - Omnibus", "Legend of the Arch Magus", 5, 6},
+		{"DF15.5-16", "Dresden Files", 15.5, 16},
+		{"LAM06-05", "Legend of the Arch Magus", 0, 0},
+		{"LAM05-05", "Legend of the Arch Magus", 0, 0},
+		{"LAM05-06x", "Legend of the Arch Magus", 0, 0},
+		{"LAM05-0612", "Legend of the Arch Magus", 0, 0},
+		{"LAM05-06-07", "Legend of the Arch Magus", 0, 0},
+		{"LAM05-06 - 07 Omnibus", "Legend of the Arch Magus", 5, 6},
+		{"DH06 - 07 Land", "Dragon Heart", 6, 0},
+		{"DH06-Land", "Dragon Heart", 6, 0},
+		{"HALO 07-08", "Halo", 0, 0},
+		{"EE07 - Forged in Blood Part 2", "Emperor's Edge", 7, 0},
+		{"RADT01 - Reborn as a Demonic Tree", "Reborn as a Demonic Tree", 1, 0},
+		{"WT01", "World-Tree", 1, 0},
+		{"C04 - Skysworn", "Cradle", 4, 0},
+		{"dh06 - land of magic.m4b", "Dragon Heart", 6, 0},
+		{"HALO 07 - Evolutions (M4B)", "Halo", 0, 0},
+		{"MB01 - The Final Empire", "Mistborn", 0, 0},
+		{"AF05 - Legion's Fifth Vault", "Divine Apostasy", 0, 0},
+		{"CD1", "02 - How to Be a Pirate", 0, 0},
+		{"01. The Enchanted Wood", "The Faraway Tree", 0, 0},
+		{"Brief Cases", "Dresden Files", 0, 0},
+		{"DH06x - Land", "Dragon Heart", 0, 0},
+		{"DF15.5x Brief Cases", "Dresden Files", 0, 0},
+		{"DF15. Brief Cases", "Dresden Files", 15, 0},
+		{"DH1234 - Land", "Dragon Heart", 0, 0},
+		{"DH0 - Prologue", "Dragon Heart", 0, 0},
+		{"DH1999", "Dragon Heart", 0, 0},
+		{"DH06", "", 0, 0},
+	} {
+		// Each number in the name, whole, without its decimal part and cut to
+		// the three digits a code's number holds, and the server's reading.
+		probes := map[float64]bool{tc.want: true, tc.end: true}
+		for _, n := range number.FindAllString(tc.name, -1) {
+			whole, _, _ := strings.Cut(n, ".")
+			for _, s := range []string{n, whole, whole[:min(len(whole), 3)]} {
+				if v, err := strconv.ParseFloat(s, 64); err == nil {
+					probes[v] = true
+				}
+			}
+		}
+		single := tc.want != 0 && tc.end == 0
+		for p := range probes {
+			pos := strconv.FormatFloat(p, 'f', -1, 64)
+			if got, want := folderCodeIs("Aar/"+tc.name, tc.series, pos), single && p == tc.want; got != want {
+				t.Errorf("folderCodeIs(%q, %q, %s) = %v, want %v", tc.name, tc.series, pos, got, want)
+			}
 		}
 	}
 }
@@ -403,9 +497,13 @@ func TestTwins(t *testing.T) {
 		// Two non-Latin series the ASCII-only normalising reduces to nothing.
 		{Path: "J/1", Title: "Equal Measures", Authors: []string{"Tess Prat"}, Series: []link.SeriesRef{{Name: "長い道", Position: "1"}}},
 		{Path: "J/2", Title: "Equal Measures", Authors: []string{"Tess Prat"}, Series: []link.SeriesRef{{Name: "別の道", Position: "1"}}},
+		// One position written two ways is one position (bridge#64).
+		{Path: "N/1", Title: "Second Wind", Authors: []string{"Tess Prat"}, Series: []link.SeriesRef{{Name: "Winds", Position: "1"}}},
+		{Path: "N/2", Title: "Second Wind", Authors: []string{"Tess Prat"}, Series: []link.SeriesRef{{Name: "Winds", Position: " 1.0"}}},
+		{Path: "N/3", Title: "Second Wind", Authors: []string{"Tess Prat"}, Series: []link.SeriesRef{{Name: "Winds", Position: "1.5"}}},
 	}
 	got := Twins(books)
-	if len(got) != 2 || !got["A/One"] || !got["B/One"] {
+	if len(got) != 4 || !got["A/One"] || !got["B/One"] || !got["N/1"] || !got["N/2"] {
 		t.Fatalf("twins = %v", got)
 	}
 }

@@ -383,7 +383,6 @@ type Mapping struct {
 	UserName  string
 	LibraryID int64
 	Policy    string
-	Sync      bool
 }
 
 // check normalises and checks m.
@@ -501,7 +500,7 @@ func (m *Manager) Finish(ctx context.Context, srv Server, serverID string, f Fin
 	}
 	f.keepUserName(prev, serverID)
 	acct := store.AudibleAccount{ID: prev.ID, Marketplace: l.mp.Code, CustomerHash: hash, ServerID: serverID,
-		Label: f.label(l.mp.Code), UserID: f.UserID, UserName: f.UserName, LibraryID: f.LibraryID, Policy: f.Policy, Sync: f.Sync,
+		Label: f.label(l.mp.Code), UserID: f.UserID, UserName: f.UserName, LibraryID: f.LibraryID, Policy: f.Policy,
 		DeviceProfile: creds.Profile}
 	if acct.ID == "" {
 		if acct.ID, err = randomID(); err != nil {
@@ -610,8 +609,8 @@ func (m *Manager) Map(ctx context.Context, srv Server, serverID, id string, mp M
 		mp.Label = ""
 	}
 	mp.keepUserName(a, serverID)
-	a.Label, a.UserID, a.UserName, a.LibraryID, a.Policy, a.Sync, a.ServerID =
-		mp.label(a.Marketplace), mp.UserID, mp.UserName, mp.LibraryID, mp.Policy, mp.Sync, serverID
+	a.Label, a.UserID, a.UserName, a.LibraryID, a.Policy, a.ServerID =
+		mp.label(a.Marketplace), mp.UserID, mp.UserName, mp.LibraryID, mp.Policy, serverID
 	if _, err := srv.PutAudibleAccount(ctx, a.ID, input(a)); err != nil {
 		return store.AudibleAccount{}, err
 	}

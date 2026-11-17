@@ -84,7 +84,6 @@ describe('AudibleCard', () => {
       user_id: 3,
       library_id: 1,
       policy: 'series',
-      sync: false,
     });
     const row = within(card).getByRole('region', { name: 'Chris (UK)' });
     expect(within(row).getByText('Not checked yet')).toBeInTheDocument();
@@ -266,7 +265,6 @@ describe('AudibleCard', () => {
       user_id: 3,
       library_id: 2,
       policy: 'manual',
-      sync: true,
     });
   });
 

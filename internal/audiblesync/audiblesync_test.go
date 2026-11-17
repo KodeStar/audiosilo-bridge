@@ -116,6 +116,7 @@ type stubServer struct {
 	postErr  error
 	rows     []link.AudibleProgressRow
 	feedErr  error
+	badSince string   // a cursor the feed answers 400 for
 	feedAsks []string // since values
 	pageSize int
 	duration map[string]float64 // path -> the book's length on the server (0 unknown)
@@ -158,6 +159,9 @@ func (s *stubServer) AudibleProgress(_ context.Context, account, since string, l
 	s.feedAsks = append(s.feedAsks, since)
 	if s.feedErr != nil {
 		return nil, s.feedErr
+	}
+	if since != "" && since == s.badSince {
+		return nil, fmt.Errorf("%w: %w", link.ErrBadCursor, &link.APIError{Status: http.StatusBadRequest, Code: "invalid_request"})
 	}
 	start := 0
 	if since != "" {
@@ -346,22 +350,28 @@ func TestEventID(t *testing.T) {
 // before asking Audible anything: a device refusal (only a sign-in again ends
 // it) audible_refused, which the server keeps until the account is mapped
 // again; a sign-in refusal, which ends by itself once Audible answers a call,
-// audible_sign_in, which the server leaves alone (its syncs stay queued). An
-// unknown account, or one mapped on another server, is unknown_account.
+// audible_sign_in, which the server leaves alone (its syncs stay queued). A
+// sign-in refusal after a device one keeps the device refusal (bridge#64), so
+// the steps run in order. An unknown account, or one mapped on another
+// server, is unknown_account.
 func TestSyncRefusedAccount(t *testing.T) {
 	e := newEnv(t)
 	e.accts.places["B000000001"] = audible.Position{PositionMs: 60_000, LastUpdated: e.now}
-	for kind, code := range map[string]string{store.RefusalSignIn: CodeSignIn, store.RefusalDevice: CodeRefused} {
-		if err := e.db.RefuseAudibleAccount(context.Background(), acctID, kind, "refused", e.now); err != nil {
+	for _, step := range []struct{ kind, code string }{
+		{store.RefusalSignIn, CodeSignIn},
+		{store.RefusalDevice, CodeRefused},
+		{store.RefusalSignIn, CodeRefused}, // the device refusal stands
+	} {
+		if err := e.db.RefuseAudibleAccount(context.Background(), acctID, step.kind, "refused", e.now); err != nil {
 			t.Fatal(err)
 		}
 		_, err := e.runSync(t, params(t, title("B000000001", "A/One", 3600)))
 		var f *Failure
-		if !errors.As(err, &f) || f.Code != code {
-			t.Fatalf("%s: err = %v, want %s", kind, err, code)
+		if !errors.As(err, &f) || f.Code != step.code {
+			t.Fatalf("%s: err = %v, want %s", step.kind, err, step.code)
 		}
 		if e.accts.reads != 0 || len(e.srv.posted) != 0 {
-			t.Fatalf("%s: a refused account asked Audible (%d) or posted (%d)", kind, e.accts.reads, len(e.srv.posted))
+			t.Fatalf("%s: a refused account asked Audible (%d) or posted (%d)", step.kind, e.accts.reads, len(e.srv.posted))
 		}
 	}
 	// Allowed: signed in again, it syncs.

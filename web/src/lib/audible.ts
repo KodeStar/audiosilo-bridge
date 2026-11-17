@@ -55,20 +55,19 @@ export function mappingProblem(m: Pick<AudibleMapping, 'user_id' | 'library_id'>
 }
 
 // defaultMapping is a new account's mapping: the only person and the only
-// library when there is one of each, the manual policy. sync is sent as false
-// and the server ignores it: the console turns an account's sync on (Phase 4c).
+// library when there is one of each, the manual policy. Whether its places
+// sync is the server console's (Phase 4c), so a mapping carries none.
 export function defaultMapping(data: Pick<AudibleAccounts, 'users' | 'libraries'>): AudibleMapping {
   return {
     label: '',
     user_id: data.users.length === 1 ? data.users[0].id : 0,
     library_id: data.libraries.length === 1 ? data.libraries[0].id : 0,
     policy: 'manual',
-    sync: false,
   };
 }
 
 // mappingOf is an account's mapping as the form edits it. An account mapped on
-// another server keeps its name, policy and sync, but its person and library
+// another server keeps its name and policy, but its person and library
 // are that server's ids (here they name nothing, or someone else): they are
 // picked again.
 export function mappingOf(a: AudibleAccount): AudibleMapping {
@@ -78,7 +77,6 @@ export function mappingOf(a: AudibleAccount): AudibleMapping {
     user_id: here ? a.user_id : 0,
     library_id: here ? a.library_id : 0,
     policy: a.policy,
-    sync: a.sync,
   };
 }
 

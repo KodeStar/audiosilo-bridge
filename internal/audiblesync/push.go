@@ -144,6 +144,16 @@ func (p *Pusher) account(ctx context.Context, srv Server, a store.AudibleAccount
 			p.pause(a.ID, now.Add(refusedWait))
 			p.o.health(ctx, a, err, time.Time{})
 			return
+		case errors.Is(err, link.ErrBadCursor):
+			// The server refused the cursor (a server restored from a backup,
+			// its feed rebuilt): sent again it fails the same way every pass,
+			// stopping the push for good. Read the feed again from its start;
+			// the rows recorded already read at the same place change nothing.
+			p.o.Log.Warn("audible: the server refused the push's cursor, reading its places from the start", "account", a.ID, "err", err)
+			if err := p.o.DB.SetAudiblePushCursor(ctx, a.ID, "", time.Time{}); err != nil {
+				p.o.Log.Warn("audible: resetting the push's cursor failed", "account", a.ID, "err", err)
+			}
+			return
 		case err != nil:
 			if ctx.Err() == nil {
 				p.o.Log.Warn("audible: reading the server's places failed", "account", a.ID, "err", err)

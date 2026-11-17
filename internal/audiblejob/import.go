@@ -489,13 +489,15 @@ func (h *Importer) run(ctx context.Context, job jobs.Job, p ImportParams, rep *j
 // paths the server's rescan can answer for a book it already had: the file's
 // own, its folder's, or a disc set's above it), whether that book may take the
 // title's ASIN: only under the poll's rule, the matcher over the library
-// picking that book for the title, and the title not spanning books the book
+// picking that book for the title, the title not spanning books the book
 // doesn't (importjob.SpanMismatch), so an omnibus never names a single volume
-// and a title never names another book. The book the rescan answers decides:
+// and a title never names another book, and the book not one the library
+// holds twice (importjob.Twins: the title's words can't tell the copies
+// apart, bridge#64). The book the rescan answers decides:
 // one not listed here is new, the title itself (a pack placed as a pack
 // included), and takes the ASIN.
 func joinedBooks(rec source.Record, books []link.LibraryBook, rel string) map[string]bool {
-	var joins map[string]bool
+	var joins, twins map[string]bool
 	var match link.LibraryBook
 	matched, looked := false, false
 	for _, at := range []string{rel, path.Dir(rel), path.Dir(path.Dir(rel))} {
@@ -508,12 +510,13 @@ func joinedBooks(rec source.Record, books []link.LibraryBook, rel string) map[st
 			}
 			if !looked {
 				match, matched = importjob.MatchInBooks(books, rec)
+				twins = importjob.Twins(books)
 				looked = true
 			}
 			if joins == nil {
 				joins = map[string]bool{}
 			}
-			joins[b.Path] = matched && match.Path == b.Path && !importjob.SpanMismatch(rec, b)
+			joins[b.Path] = matched && match.Path == b.Path && !importjob.SpanMismatch(rec, b) && !twins[b.Path]
 		}
 	}
 	return joins

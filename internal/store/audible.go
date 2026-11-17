@@ -216,10 +216,14 @@ func (db *DB) AudiblePolled(ctx context.Context, id string, titles, matched int,
 }
 
 // RefuseAudibleAccount records that Audible refused id at at: its kind
-// (RefusalSignIn or RefusalDevice) and why, in words.
+// (RefusalSignIn or RefusalDevice) and why, in words. A device refusal still
+// standing is kept over a sign-in one (bridge#64): only a sign-in again ends
+// it, and its guidance (sign in again) is what the account needs, where a
+// sign-in refusal's says the next check tries again.
 func (db *DB) RefuseAudibleAccount(ctx context.Context, id, kind, why string, at time.Time) error {
-	_, err := db.sql.ExecContext(ctx, `UPDATE audible_accounts SET refused_at = ?, refusal_kind = ?, last_error = ? WHERE id = ?`,
-		timestamp(at), kind, why, id)
+	_, err := db.sql.ExecContext(ctx, `UPDATE audible_accounts SET refused_at = ?1, refusal_kind = ?2, last_error = ?3
+		WHERE id = ?4 AND NOT (?2 = ?6 AND refused_at <> '' AND refusal_kind = ?5)`,
+		timestamp(at), kind, why, id, RefusalDevice, RefusalSignIn)
 	return err
 }
 

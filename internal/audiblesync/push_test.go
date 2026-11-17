@@ -693,3 +693,44 @@ func TestPushRowNotRecordedIsReadAgain(t *testing.T) {
 		t.Fatalf("sets = %v", got)
 	}
 }
+
+// A cursor the server refuses (400) is not sent again every pass, stopping the
+// push for good: the push reads the feed again from its start, and a place
+// changed meanwhile is still written. A 400 with no cursor is a failure like
+// any other.
+func TestPushRejectedCursorReadsFromTheStart(t *testing.T) {
+	e := newEnv(t)
+	e.list(t, st("B000000001", "A/One", 3600))
+	p := NewPusher(e.o)
+	e.started(t, p)
+	if err := e.db.SetAudiblePushCursor(context.Background(), acctID, "c99", time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	e.srv.badSince = "c99"
+	e.srv.add("A/One", "B000000001", 600, e.now, "web-1")
+
+	e.read(p)
+	if a := e.account(t); a.PushCursor != "" || a.PushFrom == "" {
+		t.Fatalf("after the refused cursor: cursor %q from %q", a.PushCursor, a.PushFrom)
+	}
+	e.read(p)
+	if a := e.account(t); a.PushCursor != "c1" {
+		t.Fatalf("the read from the start left cursor %q", a.PushCursor)
+	}
+	e.now = e.now.Add(4 * time.Minute)
+	p.Tick(context.Background())
+	if got := e.sets(); len(got) != 1 || got[0] != "B000000001@600000" {
+		t.Fatalf("sets = %v", got)
+	}
+	if asks := e.srv.feedAsks; len(asks) < 3 || asks[1] != "c99" || asks[2] != "" {
+		t.Fatalf("feed asks = %q, want the refused cursor then the start", asks)
+	}
+
+	// No cursor to blame: the 400 is recorded as the push's failure.
+	e2 := newEnv(t)
+	e2.srv.feedErr = &link.APIError{Status: http.StatusBadRequest, Code: "invalid_request"}
+	NewPusher(e2.o).Tick(context.Background())
+	if a := e2.account(t); a.SyncError == "" || a.PushCursor != "" {
+		t.Fatalf("a 400 on the feed's start: %+v", a)
+	}
+}

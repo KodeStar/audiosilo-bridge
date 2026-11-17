@@ -78,7 +78,7 @@ func TestPollAgainstTheFake(t *testing.T) {
 	}
 	_ = resp.Body.Close()
 	acct, err := m.Finish(context.Background(), srv, "srv-1", audibleacct.Finish{Login: st.Login, RedirectURL: resp.Header.Get("Location"),
-		Mapping: audibleacct.Mapping{UserID: 3, UserName: "Chris", LibraryID: 1, Policy: "manual", Sync: true}})
+		Mapping: audibleacct.Mapping{UserID: 3, UserName: "Chris", LibraryID: 1, Policy: "manual"}})
 	if err != nil {
 		t.Fatal(err)
 	}

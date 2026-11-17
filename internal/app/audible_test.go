@@ -104,7 +104,7 @@ func TestAudibleSetupSyncHealth(t *testing.T) {
 	if err := b.db.RefuseAudibleAccount(ctx, "syncfail02", store.RefusalDevice, "sign in again", at); err != nil {
 		t.Fatal(err)
 	}
-	if got := b.audibleSetup(ctx); got.Accounts != 3 || got.Refused != 0 {
+	if got := b.audibleSetup(ctx); got.Accounts != 3 || got.Refused != 0 || got.OtherServer != 1 {
 		t.Fatalf("setup with an account on another server: %+v", got)
 	}
 }

@@ -279,7 +279,11 @@ internal/
             toolfetch.LocateBinary, else the toolfetch auto-download cache - Detect
             is optimistic when auto-download can supply a binary, EnsureReady(ctx)
             performs the fetch + downloads ggml-large-v3-turbo; an explicit
-            whisper_cli_path that does not resolve is a loud error). One job at a
+            whisper_cli_path that does not resolve is a loud error; NoContext is
+            -mc 0, whisper-cli having no --no-context, and a run that wrote no JSON is
+            an error, a stale one removed first, since whisper-cli exits 0 on a bad
+            argument: bridge#72; a gated live test, TestWhisperCppLiveCLI, runs a real
+            whisper-cli). One job at a
             time is the scheduler's job (Lane A cap 1); this package doesn't
             self-serialize. Never seeds the initial prompt with a guess. Gated live
             smoke: -tags asrlive. Phase 1b: Job.Start/Duration place the audio in
@@ -1228,7 +1232,8 @@ internal/
   setup/    Phase 2b (FIRST-RUN-PLAN F2): Checklist(Inputs) is the setup checklist
             (link.Setup) in its fixed order: paired, libraries, asr, agent, budget,
             github, audible (Phase 4a, optional: done with an account signed in and
-            none refused; an additive id older servers and pages leave out), each {id, done, required, detail}; details cut to 200
+            none refused; an additive id older servers and pages leave out; with
+            every account mapped on another server it says so, bridge#64), each {id, done, required, detail}; details cut to 200
             characters and worded for the console (the budget's "$100 a month" or
             "no monthly cap"); Complete is every required item done. The heartbeat
             sends it and the page's Status tab shows it (the console shows the
@@ -1351,7 +1356,10 @@ internal/
             library), sync_at/sync_error/sync_retry_at (AudibleSyncFailed and AudibleSyncOK never shorten a
             wait still ahead) and refusal_kind (bridge#46: 'sign_in' | 'device'
             in a column, 4b's throttled rows migrated by their text; AudiblePolled keeps a device refusal,
-            AudibleAccepted ends one of the kind given). 0007 adds podcast_shows, a credential-free cache keyed by
+            as RefuseAudibleAccount does over a sign-in one (bridge#64),
+            AudibleAccepted ends one of the kind given). AudibleNearMs (5 s) is the
+            one tolerance of "the same place" (audiblesync's echoMs, the re-assert's
+            once-per-place rule). 0007 adds podcast_shows, a credential-free cache keyed by
             (server_id, show_id), indexed by server/library/feed hash. An empty
             library cache is rebuilt from feed.json before subscription dedupe.
             0008 adds podcast_artwork_state keyed by server/library/show, storing
@@ -1870,7 +1878,8 @@ internal/
             server-built params), PostAudibleListening (POST .../listening {sent_at, events}: a listen of
             no length or a finish, answered {server_time, results, progress}) and AudibleProgress (GET
             /bridge/progress?account=&since=&limit= -> {rows, next, more}: next opaque and kept between
-            polls); 403 sync_off -> ErrSyncOff, 403 user_unavailable -> ErrUserUnavailable.
+            polls); 403 sync_off -> ErrSyncOff, 403 user_unavailable -> ErrUserUnavailable, a 400
+            on a sent since -> ErrBadCursor (bridge#50).
   mapping/  where the Bridge sees each library, CHECKED (decision 13): Check stats the
             server's sample book's files through the mount (SafeJoin: no absolute,
             "..", NUL; a backslash is a name character except on Windows) and
@@ -2327,7 +2336,9 @@ internal/
             ORDER_CLOSED + ORDER_SUCCEEDED, keeps it until the library lists it, so it never
             drops out of a final poll in between, but only DeliveredDropAfter, 14 days, from
             the later of its last-seen-pending time and its release date: bridge#60, a refund
-            or a release under another ASIN), a listing reaching back past its order no
+            or a release under another ASIN; on the first poll after one
+            DeliveredDropAfter or more since the last, one it would drop counts from
+            now instead, its close unknown: bridge#64), a listing reaching back past its order no
             longer holds it in any state, or PreorderDropAfter (30 days) after its release date (one the catalog
             never dated counts as released two years after its order was last seen pending). Never
             fails: orders or catalog failing is one warning each and the remembered ones are
@@ -2483,8 +2494,8 @@ internal/
             waited out as the poll's enrichment does, limitWait, then enriched
             false). The books of the library the file could join (joinedBooks: at
             its own path, its folder or a disc set's folder above it) each get a
-            verdict, the BookMatcher picking that book for the title and not
-            SpanMismatch; the book the rescan answers decides: one of those takes
+            verdict, the BookMatcher picking that book for the title, not
+            SpanMismatch and not a twin (importjob.Twins, bridge#64); the book the rescan answers decides: one of those takes
             the ASIN only on its verdict, any other is new (the title's own, a pack
             placed as a pack included) and takes it; since a destination in a
             listed book's folder is exists, the one join left is a dest_path into
@@ -2542,7 +2553,8 @@ internal/
             may give a row again with updated_at unchanged, so a row is new by its place alone (a new version at the same place is none),
             never its time; the baseline, every read until one reaches the feed's end, takes only rows
             of the last 10 min by updated_at, history after it is none; a row it fails to record keeps
-            the cursor, so the pass reads it again), skips rows by audible:<account>, keeps a
+            the cursor, so the pass reads it again; a cursor the server refuses,
+            400, goes back to the feed's start, bridge#50), skips rows by audible:<account>, keeps a
             row on a title the last sync didn't list for that book pending (listed 0,
             store.PendAudiblePush) until a sync lists it; for the places still for StillFor (3 min, since
             row_seen: the Bridge's clock) it drops one under 1 s, within 5 s of last_ms (debounce) or
@@ -2565,7 +2577,7 @@ internal/
             re-arms the push (store.RearmAudiblePush: want_ms = row_ms, row_seen the time of the
             re-arm, last_ms -1 so the debounce keeps it, only while listed, nothing waiting, no push and no new row since the job read it;
             Result.Reasserted). The push's read before the write still drops it if Audible
-            moved further on. At most once per place the Bridge wrote (reasserted_ms,
+            moved further on. At most once per place the Bridge wrote (reasserted_ms, within 5 s,
             migration 0014; owner decision after review): a sync can't tell the app's stale
             upload from a listener who rewound in the Audible app, so Audible behind the same
             written place again is left alone until the push writes a new place (AudiblePushed
@@ -2595,12 +2607,18 @@ internal/
             score; KeepBest also returns contested: every losing claim but one
             whose position disagrees (Claim.Disagrees)), PositionAgrees(rec, b)
             (agrees/disagrees: rec's SeriesPosition as one number against b's
-            position in rec's series, else b's main series' (the listing puts a
-            folder code's number there, whatever that series is called); a range
+            position in rec's series, else b's main series' only when rec names no
+            series or that number is the folder code leading b's folder, its letters
+            the series' initials as the server reads one (folderCodeIs ports its
+            metadata.FolderCodePosition: a range, a third number joined on, letters
+            after the number and 0 are no single number; the listing
+            puts a folder code's number there, whatever that series is called; a
+            franchise's number says nothing, bridge#43); a range
             or no number on either side is neither; MatchScored is not gated by
             it), SpanMismatch (a range record on a book with no
             range: no enrichment), Twins (the paths of books listed more than once:
-            folded title, authors and series alike; no enrichment by words), Plan(records, {Mode, Template, Books}) (destinations
+            folded title, authors and series alike, positions by value; no
+            enrichment by words), Plan(records, {Mode, Template, Books}) (destinations
             only, each item's RelPath, Kind (placement.Kind) and Siblings (the
             series' books listed); Planner (NewPlanner(books), Plan(rec, mode,
             template)) is Plan for many records over one library: AuthorFolders
@@ -3332,7 +3350,8 @@ internal/
             local decode would, fsutil.WriteFileAtomic), else Wait() (asr.
             worker_fallback == wait, read per segment) parks asr_worker_waiting, else
             the Bridge's own backend (prepared lazily, stopped and re-routed when a
-            worker connects mid-decode); no usable local backend is a wait too.
+            worker connects mid-decode, never started for one that connected while
+            it was prepared); no usable local backend is a wait too.
             Detect is always available (so the executor never re-detects), CanRun
             says whether a segment would run now (followWaiting's condition). ID/
             Detect report the route NOW (backend "worker", device "remote"), so

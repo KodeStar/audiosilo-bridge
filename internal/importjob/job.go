@@ -312,20 +312,28 @@ type Claim struct {
 // one number and the same, disagrees when both are one number and differ, and
 // neither when either has none (a range is none: a pack is matched by
 // MatchScored's rules). rec's is its SeriesPosition; b's is its position in
-// rec's series, else, when b is not in that series, its main series' (the
-// listing puts a folder code's number there: "PG02 - ..." is 2 whatever the
-// series is called).
+// rec's series. When b is not in that series, its main series' counts only
+// when rec names no series, or when it is the number of the folder code that
+// leads b's folder name (the listing puts a folder code's number there: "PG02
+// - ..." is 2 whatever Audible calls the series). Any other main series'
+// number (a franchise's, "Cosmere 7" for "Mistborn 1") says nothing about
+// rec's (bridge#43).
 func PositionAgrees(rec source.Record, b link.LibraryBook) (agrees, disagrees bool) {
 	want, ok := parsePosition(rec.SeriesPosition)
 	if !ok || len(b.Series) == 0 {
 		return false, false
 	}
 	pos := b.Series[0].Position
-	target := match.NormalizeSeries(rec.Series)
-	for _, s := range b.Series {
-		if target != "" && match.NormalizeSeries(s.Name) == target {
-			pos = s.Position
-			break
+	if target := match.NormalizeSeries(rec.Series); target != "" {
+		named := false
+		for _, s := range b.Series {
+			if match.NormalizeSeries(s.Name) == target {
+				pos, named = s.Position, true
+				break
+			}
+		}
+		if !named && !folderCodeIs(b.Path, b.Series[0].Name, pos) {
+			return false, false
 		}
 	}
 	got, ok := parsePosition(pos)
@@ -333,6 +341,78 @@ func PositionAgrees(rec source.Record, b link.LibraryBook) (agrees, disagrees bo
 		return false, false
 	}
 	return got == want, got != want
+}
+
+// folderCode is a leading series code on a folder name, as the server reads
+// one (its metadata.FolderCodePosition): one to five letters, maybe a space,
+// then a number of one to three digits, maybe a decimal part ("DH06 - Land of
+// Magic", "DF15.5 Brief Cases"). What follows the number decides whether it is
+// one (folderCodeIs).
+var folderCode = regexp.MustCompile(`^([A-Za-z]{1,5}) ?(\d{1,3}(?:\.\d+)?)`)
+
+// folderCodeIs reports whether the folder at p (its last segment) leads with
+// a code of series' initials whose number is pos ("LT02 - ..." for "L-T" 2,
+// never "Book 07 - ..." for "Cosmere" 7), as the server's listing reads one.
+// As there, the number must end where a word does ("DF15.5x" is no code, never
+// 15), a number joined on makes it a range or nothing, never its first number
+// ("LAM05-06" is 5 to 6, "LAM05-06-07" no code), and 0 is no position.
+func folderCodeIs(p, series, pos string) bool {
+	want, ok := parsePosition(pos)
+	if !ok {
+		return false
+	}
+	name := strings.TrimSpace(path.Base(p))
+	m := folderCode.FindStringSubmatch(name)
+	if m == nil || !initialsOf(m[1], series) {
+		return false
+	}
+	if rest := name[len(m[0]):]; !wordEndsAt(rest) || joinsNumber(rest) {
+		return false
+	}
+	got, ok := parsePosition(m[2])
+	return ok && got != 0 && got == want
+}
+
+// wordEndsAt reports whether no letter, digit or underscore starts s: the
+// greedy number before it ended where a word does (the server's rule).
+func wordEndsAt(s string) bool {
+	r, _ := utf8.DecodeRuneInString(s)
+	return r != '_' && !unicode.IsLetter(r) && !unicode.IsDigit(r)
+}
+
+// joinsNumber reports whether s starts with a hyphen or an en dash then a
+// digit: another number joined onto a code's (the server's rule).
+func joinsNumber(s string) bool {
+	r, n := utf8.DecodeRuneInString(s)
+	if r != '-' && r != '\u2013' {
+		return false
+	}
+	d, _ := utf8.DecodeRuneInString(s[n:])
+	return unicode.IsDigit(d)
+}
+
+// apostrophes are dropped before a series is split into words, so one joins a
+// word ("Emperor's Edge" is two words).
+var apostrophes = strings.NewReplacer("'", "", "\u2019", "")
+
+// initialsOf reports whether code's letters are, case aside, the initials of
+// series' words, all or some of them in order (the server's rule: "DH" for
+// "Dragon Heart", "LT" for "L-T").
+func initialsOf(code, series string) bool {
+	words := strings.FieldsFunc(apostrophes.Replace(series), func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	})
+	want := []rune(strings.ToLower(code))
+	i := 0
+	for _, w := range words {
+		if i == len(want) {
+			break
+		}
+		if first, _ := utf8.DecodeRuneInString(w); unicode.ToLower(first) == want[i] {
+			i++
+		}
+	}
+	return i == len(want)
 }
 
 // WorkKey identifies the work a record is: its title (folded), its authors
@@ -393,7 +473,8 @@ func foldedNames(names []string) []string {
 }
 
 // Twins are the paths of books the library holds more than once: another
-// book with the same title, authors and series (folded, in any order). A
+// book with the same title, authors and series (folded, in any order; a
+// series' position by its value). A
 // title matched to one of them by its words alone can't tell which copy it
 // is, so its ASIN goes on neither (bridge#40). A title that folds to nothing
 // has no twin.
@@ -415,7 +496,7 @@ func Twins(books []link.LibraryBook) map[string]bool {
 			if name == "" {
 				name = match.Fold(s.Name)
 			}
-			parts = append(parts, "s\x00"+name+"\x00"+strings.TrimSpace(s.Position))
+			parts = append(parts, "s\x00"+name+"\x00"+positionKey(s.Position))
 		}
 		slices.Sort(parts)
 		k := title + "\x00" + strings.Join(slices.Compact(parts), "\x00")
@@ -536,6 +617,16 @@ func SeriesPosition(b link.LibraryBook, series string) (float64, bool) {
 		}
 	}
 	return 0, false
+}
+
+// positionKey is a series position as Twins compares it: a number by its
+// value ("1" and "1.0" are one position, bridge#64), anything else (a range,
+// none) as written.
+func positionKey(s string) string {
+	if v, ok := parsePosition(s); ok {
+		return strconv.FormatFloat(v, 'f', -1, 64)
+	}
+	return strings.TrimSpace(s)
 }
 
 // parsePosition reads a server series position ("3", "2.5"); anything else, and

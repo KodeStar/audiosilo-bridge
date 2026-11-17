@@ -175,7 +175,7 @@ func (b *Bridge) RemoveAudibleAccount(ctx context.Context, id string) (string, e
 // what the Bridge knows: a books library the server listed (the server checks
 // again, and checks the user).
 func (b *Bridge) audibleMapping(ctx context.Context, m api.AudibleMapping) (audibleacct.Mapping, error) {
-	out := audibleacct.Mapping{Label: m.Label, UserID: m.UserID, LibraryID: m.LibraryID, Policy: m.Policy, Sync: m.Sync}
+	out := audibleacct.Mapping{Label: m.Label, UserID: m.UserID, LibraryID: m.LibraryID, Policy: m.Policy}
 	if m.LibraryID > 0 {
 		lib, ok := b.libs.Library(m.LibraryID)
 		if !ok {
@@ -244,6 +244,7 @@ func (b *Bridge) audibleSetup(ctx context.Context) setup.Audible {
 	out := setup.Audible{}
 	for _, a := range accts {
 		if a.OnOtherServer(serverID) {
+			out.OtherServer++
 			continue
 		}
 		out.Accounts++

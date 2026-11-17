@@ -202,3 +202,24 @@ func TestImportEnrichPacedOn429(t *testing.T) {
 		}
 	})
 }
+
+// joinedBooks applies the poll's twin rule (bridge#64): a book the library
+// holds twice may not take the title's ASIN when the file joins it, since the
+// title's words can't tell the copies apart; the only copy may.
+func TestJoinedBooksTwins(t *testing.T) {
+	grove := rec("B0FAKE0002", "The Copper Grove", "Mara Quill", "Orchard Cycle", 2)
+	copper := link.LibraryBook{Path: "Mara Quill/Orchard Cycle/OC02 - The Copper Grove", Title: "The Copper Grove",
+		Authors: []string{"Mara Quill"}, Series: []link.SeriesRef{{Name: "Orchard Cycle", Position: "2"}}}
+	copy2 := copper
+	copy2.Path = "Mara Quill/Copper Grove (another copy)"
+	copy2.Series = []link.SeriesRef{{Name: "Orchard Cycle", Position: "2.0"}}
+	rel := path.Join(copper.Path, "Disc 2", "The Copper Grove.m4b") // a disc folder of the book
+
+	if got := joinedBooks(grove, []link.LibraryBook{copper}, rel); !got[copper.Path] {
+		t.Fatalf("the only copy = %v, want it to take the ASIN", got)
+	}
+	got := joinedBooks(grove, []link.LibraryBook{copper, copy2}, rel)
+	if v, ok := got[copper.Path]; !ok || v {
+		t.Fatalf("a twin = %v, want it joined without the ASIN", got)
+	}
+}

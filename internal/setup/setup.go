@@ -131,8 +131,11 @@ type GitHub struct {
 // more have a device on an older profile (signed in, but Amazon denies their
 // licenses until they sign in again). Phase 4c: SyncFailing counts the
 // accounts (not refused) whose last position sync failed, SyncError the first
-// one's reason; a sync failure never makes the item not done.
+// one's reason; a sync failure never makes the item not done. OtherServer
+// counts the accounts mapped on another server than the paired one (not in
+// Accounts: they neither poll nor sync here until mapped on this one).
 type Audible struct {
+	OtherServer int
 	Accounts    int
 	Refused     int
 	OldProfile  int
@@ -254,6 +257,11 @@ func Checklist(in Inputs) link.Setup {
 		}
 	case a.Accounts > 0:
 		audible = plural(a.Accounts, "account", "accounts") + " signed in"
+	case a.OtherServer > 0:
+		// Every account is another server's (bridge#64): say so, or the item
+		// reads as if none was ever signed in.
+		audible = plural(a.OtherServer, "account is", "accounts are") +
+			" mapped on another server: map one on this server on the Accounts tab"
 	}
 	if a.SyncFailing > 0 {
 		audible += "; places not syncing for " + plural(a.SyncFailing, "account", "accounts")
