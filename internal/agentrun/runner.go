@@ -20,6 +20,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -316,6 +317,7 @@ func (r *Runner) status() agentproto.Runner {
 		Slots:       r.opts.Slots,
 		CLIs:        map[string]agentproto.CLI{},
 		Handoff:     true,
+		Groups:      groups(),
 	}
 	for _, name := range []string{agentproto.CLIClaude, agentproto.CLICodex} {
 		c, _ := r.cli(name)
@@ -323,6 +325,19 @@ func (r *Runner) status() agentproto.Runner {
 		st.CLIs[name] = agentproto.CLI{Version: c.version, Credential: kind, CredentialSince: r.credentialSince(name, kind)}
 	}
 	return st
+}
+
+// groups are the runner's group ids, its own first, for runner.json: the
+// Bridge hands credential.json to its group alone when they hold it.
+func groups() []int {
+	out := []int{os.Getgid()}
+	more, _ := os.Getgroups() // none where the OS has no such list
+	for _, g := range more {
+		if !slices.Contains(out, g) {
+			out = append(out, g)
+		}
+	}
+	return out
 }
 
 // writeStatus rewrites runner.json (a temp file renamed into place, 0644 so the

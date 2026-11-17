@@ -3245,7 +3245,10 @@ internal/
             takes the Bridge's credential; the Bridge then writes
             credential/credential.json (Credential {cli, kind, value}) in the job
             dir, in its own NON-sticky subdirectory so the runner (another uid) can
-            delete it, before request.json. DecodeCredential is strict (unknown
+            delete it, before request.json. runner.json's groups (bridge#25) are
+            the runner's gids: when they hold the Bridge's, the dir is 0730 and the
+            file 0440, both chowned to that group (no other uid can read it); else
+            (an older runner, no shared group) 0777 and 0444 as before. DecodeCredential is strict (unknown
             field, trailing data, over 4 KiB, another CLI, a kind that CLI doesn't
             take, or a value that isn't one printable line all refused; the value
             never in an error).
@@ -3302,7 +3305,9 @@ internal/
             takes a hand-off: Status counts the agent available, billed as that
             kind, its set time standing for credential_since (so replacing it on
             the Accounts tab ends a refusal); stage() writes credential.json
-            (0444, synced) in credential/ (0777) before the request. A container
+            (synced) in credential/ before the request: the Bridge's group's
+            alone (0440 in 0730) when runner.json's groups hold it
+            (Status.ShareGroup), else 0444 in 0777, logged once a process. A container
             credential always wins; a runner that can't take a hand-off gets
             nothing and is told to update. A refusal's detail says where to
             replace the credential: the Accounts tab for the handed one, the agent
@@ -3347,7 +3352,8 @@ internal/
             to done. Login: codex runs `codex login --device-auth` with the
             allow-listed environment and CODEX_HOME on the volume; claude prints how
             to give the container a `claude setup-token` token.
-            Phase 2b: runner.json says handoff: true; execute reads the job's
+            Phase 2b: runner.json says handoff: true (and, bridge#25, its groups,
+            its own gid first); execute reads the job's
             credential.json (agentproto.DecodeCredential) and DELETES it before
             the CLI starts, and childEnv uses it only when the container has no
             credential of its own for the CLI (claude: the OAuth token or
@@ -3743,7 +3749,9 @@ compose.example.yaml   three services: the server (libraries :ro), the Bridge (t
                        folders :rw, AUDIOSILO_BRIDGE_AGENT_STAGING_DIR=/staging, the
                        optional AUDIOSILO_BRIDGE_AGENT_BACKEND and
                        AUDIOSILO_BRIDGE_GITHUB_TOKEN) and `agent` (:latest-agent, user
-                       10002:10002, cap_drop ALL, no-new-privileges, read-only root,
+                       10002:10002 with group_add the Bridge's PGID (the credential
+                       hand-off then goes to that group alone), cap_drop ALL,
+                       no-new-privileges, read-only root,
                        tmpfs /tmp, its own internet-only network, the credential
                        variables by NAME only, stop_grace_period 20s). The `staging`
                        volume is the only one both mount, outside /bridge-data (whose

@@ -27,10 +27,19 @@ const (
 	outDirMode  = 0o777
 	outFileMode = 0o666
 	requestMode = 0o644
-	// credentialDirMode lets the runner (another uid) delete the handed
-	// credential.json; the agent could anyway put a file there, which the
-	// runner reads strictly and only ever as its own run's credential.
-	credentialDirMode = 0o777
+	// The handed credential.json and its dir. The runner (another uid) must
+	// read the file and delete it. When it is in the Bridge's group
+	// (runner.json's groups) both are that group's alone: the dir 0730 (the
+	// group may delete the file, never list the dir) and the file 0440, so no
+	// other uid can read it. Else (an older runner, or a container started
+	// without the Bridge's group) the dir is 0777 and the file 0444, as
+	// before: readable by every uid until the runner takes it. The agent can
+	// anyway put a file there, which the runner reads strictly and only ever
+	// as its own run's credential.
+	credentialDirMode      = 0o777
+	credentialFileMode     = inputFile
+	credentialGroupDirMode = 0o730
+	credentialGroupMode    = 0o440
 )
 
 // stage creates the job dir and writes it: work/ (a copy of the staged dir),
@@ -43,8 +52,9 @@ const (
 // it. The caller closes the returned Root.
 //
 // handed, when set, is the vault's credential for the run: credential.json in
-// its own dir, written before the request so the runner finds it at the claim.
-func stage(job string, req agent.Request, cli string, timeout int, handed *agentproto.Credential) (*os.Root, error) {
+// its own dir, written before the request so the runner finds it at the claim;
+// shareGroup hands it to the Bridge's group alone (the runner is in it).
+func stage(job string, req agent.Request, cli string, timeout int, handed *agentproto.Credential, shareGroup bool) (*os.Root, error) {
 	if err := os.Mkdir(job, 0o700); err != nil {
 		return nil, err
 	}
@@ -52,7 +62,7 @@ func stage(job string, req agent.Request, cli string, timeout int, handed *agent
 	if err != nil {
 		return nil, err
 	}
-	if err := fill(root, req, cli, timeout, handed); err != nil {
+	if err := fill(root, req, cli, timeout, handed, shareGroup); err != nil {
 		_ = root.Close()
 		return nil, err
 	}
@@ -83,12 +93,12 @@ func openMadeDir(path string) (*os.Root, error) {
 
 // fill writes the job into its (still private) dir, opens the dir to the agent
 // uid, and renames request.json into place.
-func fill(root *os.Root, req agent.Request, cli string, timeout int, handed *agentproto.Credential) error {
+func fill(root *os.Root, req agent.Request, cli string, timeout int, handed *agentproto.Credential, shareGroup bool) error {
 	if err := copyTree(req.Dir, root, agentproto.WorkDir); err != nil {
 		return err
 	}
 	if handed != nil {
-		if err := writeCredential(root, *handed); err != nil {
+		if err := writeCredential(root, *handed, shareGroup); err != nil {
 			return err
 		}
 	}
@@ -121,17 +131,36 @@ func fill(root *os.Root, req agent.Request, cli string, timeout int, handed *age
 }
 
 // writeCredential writes credential.json into its own dir: the dir open to the
-// agent uid (not sticky, so the runner can delete the file before the CLI starts),
-// the file read-only and synced.
-func writeCredential(root *os.Root, c agentproto.Credential) error {
+// runner (not sticky, so it can delete the file before the CLI starts), the
+// file read-only and synced. With shareGroup both belong to the Bridge's group
+// (set explicitly: a setgid staging dir would hand them its own) and no other
+// uid gets any access; else every uid may read the file.
+func writeCredential(root *os.Root, c agentproto.Credential, shareGroup bool) error {
 	body, err := json.Marshal(c)
 	if err != nil {
 		return err
 	}
-	if err := mkdir(root, agentproto.CredentialDir, credentialDirMode); err != nil {
+	dirMode, fileMode := fs.FileMode(credentialDirMode), fs.FileMode(credentialFileMode)
+	if shareGroup {
+		dirMode, fileMode = credentialGroupDirMode, credentialGroupMode
+	}
+	name := filepath.Join(agentproto.CredentialDir, agentproto.CredentialFile)
+	if err := root.Mkdir(agentproto.CredentialDir, 0o700); err != nil {
 		return err
 	}
-	return createFile(root, filepath.Join(agentproto.CredentialDir, agentproto.CredentialFile), bytes.NewReader(body), inputFile, true)
+	if err := createFile(root, name, bytes.NewReader(body), fileMode, true); err != nil {
+		return err
+	}
+	if shareGroup {
+		gid := os.Getgid()
+		if err := root.Chown(name, -1, gid); err != nil {
+			return err
+		}
+		if err := root.Chown(agentproto.CredentialDir, -1, gid); err != nil {
+			return err
+		}
+	}
+	return root.Chmod(agentproto.CredentialDir, dirMode)
 }
 
 // copyTree copies the staged dir src into dst under root: regular files only

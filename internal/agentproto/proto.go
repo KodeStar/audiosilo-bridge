@@ -64,7 +64,8 @@ const (
 	DoneTmpFile     = "done.tmp"
 	// CredentialDir holds CredentialFile: its own dir (not sticky, unlike the job
 	// dir), so the runner, another uid, can delete the Bridge's file before the
-	// CLI starts.
+	// CLI starts. It is the Bridge's group's alone when the runner is in that
+	// group (Runner.Groups), else open to every uid.
 	CredentialDir  = "credential"
 	CredentialFile = "credential.json"
 )
@@ -123,6 +124,12 @@ type Runner struct {
 	// credential of its own for (Phase 2b, decision 19). An older runner sends
 	// none, and the Bridge then hands nothing over.
 	Handoff bool `json:"handoff,omitempty"`
+	// Groups are the runner's group ids (its own and its supplementary ones).
+	// When they hold the Bridge's group, the Bridge hands credential.json to
+	// that group alone (credential/ 0730, the file 0440) rather than to every
+	// uid (0777 and 0444): the compose example adds the Bridge's PGID to the
+	// agent container. An older runner sends none.
+	Groups []int `json:"groups,omitempty"`
 }
 
 // Credential is credential.json: the agent credential the Bridge holds in its

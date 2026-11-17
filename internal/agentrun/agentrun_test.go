@@ -631,6 +631,11 @@ func TestRunnerJSON(t *testing.T) {
 	if rj.Protocol != 1 || rj.Version != "0.2.0-test" || rj.Slots != 1 || time.Since(rj.HeartbeatAt) > time.Minute {
 		t.Fatalf("runner.json = %+v", rj)
 	}
+	// Its groups, its own first: the Bridge hands a credential to its group
+	// alone when they hold it.
+	if len(rj.Groups) == 0 || rj.Groups[0] != os.Getgid() {
+		t.Fatalf("groups = %v, want %d first", rj.Groups, os.Getgid())
+	}
 	claude, codex := rj.CLIs["claude"], rj.CLIs["codex"]
 	if claude.Version != "9.9.9 (fake claude)" || claude.Credential != "oauth_token" || claude.CredentialSince.IsZero() ||
 		codex != (agentproto.CLI{Version: "9.9.9 (fake codex)"}) {

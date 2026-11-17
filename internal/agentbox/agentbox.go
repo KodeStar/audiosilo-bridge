@@ -85,6 +85,9 @@ type Runner struct {
 	// dirMissing is set while the staging dir can't be opened, so Status logs
 	// its path once per outage rather than on every call.
 	dirMissing atomic.Bool
+	// warnedGroup is set once the log has said a handed credential goes to
+	// every uid (the runner isn't in the Bridge's group): once per process.
+	warnedGroup atomic.Bool
 }
 
 var _ agent.Runner = (*Runner)(nil)
@@ -234,7 +237,11 @@ func (r *Runner) Run(ctx context.Context, req agent.Request) (agent.Result, erro
 			handed = &agentproto.Credential{CLI: r.backend, Kind: kind, Value: value}
 		}
 	}
-	root, err := stage(job, req, r.backend, timeout, handed)
+	if handed != nil && !st.ShareGroup && !r.warnedGroup.Swap(true) {
+		r.log.Warn("agent container: the runner isn't in the Bridge's group, so the handed credential is readable by every uid " +
+			"until the runner takes it; add the Bridge's PGID to the agent container (group_add in the compose example)")
+	}
+	root, err := stage(job, req, r.backend, timeout, handed, st.ShareGroup)
 	if err != nil {
 		return agent.Result{}, r.stagingFailed("write the job into", err)
 	}

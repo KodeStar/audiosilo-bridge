@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -701,7 +702,7 @@ func TestStageThroughTheJobDirsRoot(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	job := filepath.Join(dir, "00000000000000aa")
-	root, err := stage(job, agent.Request{Dir: stagedDir(t), Prompt: "p"}, agent.IDClaude, 60, nil)
+	root, err := stage(job, agent.Request{Dir: stagedDir(t), Prompt: "p"}, agent.IDClaude, 60, nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -935,6 +936,80 @@ func TestHandoffCredentialIsStaged(t *testing.T) {
 		t.Fatalf("credential.json = %v, %+v", err, c)
 	}
 	assertNoJobDirs(t, dir)
+}
+
+// credentialModes is the staged credential dir's and file's modes and the
+// file's group, read by the fake runner before it answers.
+type credentialModes struct {
+	dir, file fs.FileMode
+	gid       int
+}
+
+// stageHandoff runs one job with the vault's credential handed over, with
+// runner.json reporting groups, and returns what the runner found.
+func stageHandoff(t *testing.T, groups []int) credentialModes {
+	t.Helper()
+	r, dir := newTestRunner(t, agent.IDClaude)
+	r.credential = func(string) (string, string, time.Time, bool) {
+		return agentproto.CredentialOAuthToken, "sk-ant-oat01-vault", time.Now(), true
+	}
+	rj := handoffRunner(true)
+	rj.Groups = groups
+	writeRunnerJSON(t, dir, rj)
+	var seen atomic.Value
+	fake := &fakeRunner{fn: func(job string) agentproto.Exit {
+		var m credentialModes
+		if info, err := os.Stat(filepath.Join(job, agentproto.CredentialDir)); err == nil {
+			m.dir = info.Mode()
+		}
+		if info, err := os.Stat(filepath.Join(job, agentproto.CredentialDir, agentproto.CredentialFile)); err == nil {
+			m.file, m.gid = info.Mode(), fileGID(info)
+		}
+		seen.Store(m)
+		mustWrite(t, filepath.Join(job, agentproto.StdoutFile), claudeOK)
+		return agentproto.Exit{}
+	}}
+	stop := fake.start(t, dir)
+	if _, err := r.Run(context.Background(), agent.Request{Dir: stagedDir(t), Prompt: "p", Timeout: time.Minute}); err != nil {
+		t.Fatal(err)
+	}
+	stop()
+	m, _ := seen.Load().(credentialModes)
+	return m
+}
+
+// fileGID is info's group id (-1 where the OS has none).
+func fileGID(info fs.FileInfo) int {
+	if st, ok := info.Sys().(*syscall.Stat_t); ok {
+		return int(st.Gid)
+	}
+	return -1
+}
+
+// A runner in the Bridge's group gets the credential as that group's alone
+// (allowed: the group may read the file and delete it; denied: every other
+// uid has no access at all, not even to list the dir). One that isn't (an
+// older runner, or no shared group) gets it as before, readable by every uid.
+func TestHandoffCredentialModes(t *testing.T) {
+	t.Parallel()
+	t.Run("runner in the Bridge's group", func(t *testing.T) {
+		t.Parallel()
+		m := stageHandoff(t, []int{os.Getgid() + 1, os.Getgid()})
+		if m.dir != fs.ModeDir|0o730 || m.file != 0o440 || m.gid != os.Getgid() {
+			t.Fatalf("modes = dir %v, file %v, gid %d (want 0730, 0440, %d)", m.dir, m.file, m.gid, os.Getgid())
+		}
+		if m.dir&0o007 != 0 || m.file&0o007 != 0 || m.dir&0o040 != 0 {
+			t.Fatalf("another uid can reach the credential: dir %v, file %v", m.dir, m.file)
+		}
+	})
+	t.Run("runner not in it", func(t *testing.T) {
+		t.Parallel()
+		for _, groups := range [][]int{nil, {os.Getgid() + 1}} {
+			if m := stageHandoff(t, groups); m.dir != fs.ModeDir|0o777 || m.file != 0o444 {
+				t.Fatalf("groups %v: modes = dir %v, file %v (want 0777, 0444)", groups, m.dir, m.file)
+			}
+		}
+	})
 }
 
 // No hand-off: the container's own credential is used (nothing staged), a
