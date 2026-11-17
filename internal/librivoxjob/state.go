@@ -44,7 +44,8 @@ type state struct {
 	Bytes  int64 `json:"bytes,omitempty"`
 	// Unmapped is when the sweep first found the library's mapping gone (the
 	// library deleted on the server, or no longer mapped here) with the fetch
-	// unplaced: StagingMaxAge after it the state ends (sweepOne).
+	// unplaced: StagingMaxAge after it the state ends (sweepOne). A run that
+	// finds the library mapped again clears it at once.
 	Unmapped time.Time `json:"unmapped,omitzero"`
 }
 

@@ -326,6 +326,15 @@ func TestSweepEndsAStateWhoseLibraryIsGone(t *testing.T) {
 	x.libs.mount = ""
 	x.h.Sweep(now, nil)
 	x.libs.mount = mount
+	// A run on the mapped library that saves nothing (meta down) still forgets
+	// the time it went, so a later unmapping counts from its own start.
+	x.meta.bookErr = metaops.ErrUnavailable
+	if _, err := x.run(context.Background(), true); err == nil {
+		t.Fatal("meta down didn't fail the run")
+	}
+	if !x.loadRaw(t).Unmapped.IsZero() {
+		t.Fatal("a run on the mapped library left the time it went in the state")
+	}
 	x.h.Sweep(now.Add(StagingMaxAge+time.Hour), nil)
 	if x.hasState() || x.exists(stagingDir) {
 		t.Fatal("a library back in time didn't have its abandoned fetch swept")

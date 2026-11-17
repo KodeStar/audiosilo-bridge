@@ -369,7 +369,14 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, p Params, rep *jobs.Rep
 	}
 	f := &fetch{p: p, lib: lib, mount: mount, rep: rep, st: h.loadState(lib.ID, p.LibrivoxID)}
 	if f.st != nil {
-		f.st.Unmapped = time.Time{} // mapped again: the next save forgets it went
+		if !f.st.Unmapped.IsZero() {
+			// Mapped again: forgotten now, not at a next save a run may never
+			// make, so a later unmapping counts from its own start (endUnmapped).
+			f.st.Unmapped = time.Time{}
+			if err := h.saveState(p.LibrivoxID, f.st); err != nil {
+				h.o.Log.Warn("librivox: clearing a fetch's unmapped time failed", "library", lib.ID, "librivox_id", p.LibrivoxID, "err", err)
+			}
+		}
 		h.touchState(lib.ID, p.LibrivoxID, time.Now())
 	}
 	defer func() {
