@@ -420,14 +420,14 @@ var stopwords = map[string]bool{
 // punctuation that real library folders use (apostrophes, commas, periods).
 // The characters an SMB share or a Windows disk can't store go too (bridge#47:
 // "Who Moved My Cheese?" is "Who Moved My Cheese"): ? * < > are dropped, a
-// double quote becomes an apostrophe and | a hyphen, and the runs of spaces a
-// drop leaves are one space. A leading dot goes too ("...And Ladies of the
-// Club", ".hack"): a hidden name is never indexed by the server's scan.
-// librivox.fetch names its section files with it too, so a book's folder and
-// its files follow one rule.
+// double quote becomes an apostrophe and | a hyphen, and control characters
+// (which neither stores either) and the runs of spaces a drop leaves are one
+// space. A leading dot goes too ("...And Ladies of the Club", ".hack"): a
+// hidden name is never indexed by the server's scan. librivox.fetch names its
+// section files with it too, so a book's folder and its files follow one rule.
 func Sanitize(s string) string {
 	s = segmentReplacer.Replace(s)
-	s = strings.Join(strings.Fields(s), " ")
+	s = strings.Join(strings.FieldsFunc(s, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }), " ")
 	return strings.Trim(s, " .")
 }
 

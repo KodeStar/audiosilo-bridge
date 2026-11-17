@@ -2661,8 +2661,8 @@ internal/
             Phase 4b: a generated segment loses its leading dots too ("...And
             Ladies of the Club", ".hack"): a hidden name is never indexed.
             bridge#47: Sanitize drops what an SMB share or a Windows disk can't
-            store (? * < > dropped, " as ', | as -, the spaces a drop leaves
-            closed up).
+            store (? * < > dropped, " as ', | as -, control characters as a
+            space, the spaces a drop leaves closed up).
             LibriVox L6 exports Sanitize (librivoxjob names its section files
             with it; an Audible backup's file name, audible's safeFileName, is
             Sanitize too, "audiobook" when it leaves nothing).

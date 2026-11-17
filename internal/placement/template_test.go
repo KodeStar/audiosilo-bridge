@@ -79,6 +79,7 @@ func TestSanitizeDropsCharactersSMBRefuses(t *testing.T) {
 		"<Untitled> Book":                  "Untitled Book",
 		"Why? * Because":                   "Why Because",
 		"Title : Sub":                      "Title - Sub",
+		"Bell\x07 and\x1bEscape":           "Bell and Escape",
 		"Mr. Penumbra's 24-Hour Bookstore": "Mr. Penumbra's 24-Hour Bookstore",
 		"...And Ladies of the Club":        "And Ladies of the Club",
 	} {
