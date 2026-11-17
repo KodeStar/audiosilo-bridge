@@ -1633,6 +1633,54 @@ func TestGenerateDoesNotContinueAFailedRun(t *testing.T) {
 	}
 }
 
+// bridge#37, deterministically: the later of two ends whose first stops each
+// found the other open stops the book with the stop it tries again once its
+// end is recorded. Job A's first stop leaves the book to job B; B then ends
+// whole in A's window (its stops both find A open); A's retry stops it.
+func TestReleaseRetriesTheStopAfterAConcurrentEnd(t *testing.T) {
+	t.Parallel()
+	hr := newHarness(t)
+	ctx := context.Background()
+	batch, err := hr.db.CreateBatch(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := hr.db.CreateBook(ctx, store.NewBook{BatchID: batch.ID, SourcePath: "/lib/window",
+		WorkDir: filepath.Join(hr.work, "window"), Title: "Window", State: string(state.ASR)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := hr.db.SetBookStatus(ctx, b.ID, string(state.StatusPaused), "", ""); err != nil {
+		t.Fatal(err)
+	}
+	const a, other = 2001, 2002
+	for _, id := range []int64{a, other} {
+		if err := hr.db.RecordClaim(ctx, store.ServerJob{ID: id, Kind: Kind, Attempt: 1}); err != nil {
+			t.Fatal(err)
+		}
+		if err := hr.db.PutGenerateBook(ctx, store.GenerateBook{ServerJobID: id, BookID: &b.ID, LibraryID: 1, RelPath: "window"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	hr.h.beforeEnd = func(id int64) {
+		if id != a {
+			return
+		}
+		hr.h.release(ctx, jobs.Job{ID: other, Kind: Kind, Attempt: 1}, b.ID, true)
+		if got, _ := hr.db.GetBook(ctx, b.ID); scheduler.IsCancelled(got) {
+			t.Error("job B stopped the book while job A was still open")
+		}
+	}
+	hr.h.release(ctx, jobs.Job{ID: a, Kind: Kind, Attempt: 1}, b.ID, true)
+	got, err := hr.db.GetBook(ctx, b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !scheduler.IsCancelled(got) {
+		t.Fatalf("the book after both ends: status=%q error=%q, want stopped", got.Status, got.Error)
+	}
+}
+
 // bridge#37: two jobs following one engine book that end at the same moment
 // each find the other still open at their first stop, and each leaves the book
 // to the other; the stop tried again once each end is recorded makes sure the

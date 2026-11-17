@@ -134,6 +134,9 @@ type Handler struct {
 	// (bridge#24). endMu guards it.
 	endMu sync.Mutex
 	ended chan struct{}
+	// beforeEnd, a seam (tests), runs in release between its first stop and the
+	// job's recorded end: the window another job's end can land in.
+	beforeEnd func(jobID int64)
 }
 
 // endSignal is the channel the next job end here closes. A waiter takes it
@@ -560,6 +563,9 @@ func (h *Handler) release(ctx context.Context, job jobs.Job, bookID int64, stop 
 		return
 	}
 	followed := stop && h.stopBook(ctx, job.ID, bookID)
+	if h.beforeEnd != nil {
+		h.beforeEnd(job.ID)
+	}
 	if err := h.o.DB.EndGenerateBook(ctx, job.ID, h.now()); err != nil {
 		h.o.Log.Warn("generate: recording the job's end failed", "job", job.ID, "err", err)
 	}
