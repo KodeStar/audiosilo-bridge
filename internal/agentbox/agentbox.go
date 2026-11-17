@@ -103,6 +103,11 @@ type Runner struct {
 	// couldn't take a credential handed to that group: the rest of this
 	// process hands it to every uid (Run).
 	groupDenied atomic.Bool
+	// groupBlocked, with agent.require_group on, is why the credential can't
+	// be kept to the Bridge's group (the runner was denied the group's file,
+	// or the volume refused the chown), learned by a run and kept for the rest
+	// of the process: Status reports the agent unavailable with it.
+	groupBlocked atomic.Pointer[string]
 	// uid is the Bridge's own (effective) uid, and runnerUID the runner's as
 	// the staging volume shows it, pinned by the first live runner.json
 	// (noUID until then): only the runner's files may move a handed
@@ -257,20 +262,13 @@ func (r *Runner) Run(ctx context.Context, req agent.Request) (agent.Result, erro
 			handed = &agentproto.Credential{CLI: r.backend, Kind: kind, Value: value}
 		}
 	}
-	if handed != nil && !st.ShareGroup && r.requireGroup {
-		return agent.Result{}, &agent.NotAvailableError{Backend: r.backend, Detail: "the agent container isn't in the Bridge's group, " +
-			"which agent.require_group asks for: add that group to it (group_add with the Bridge's PGID, as in the compose " +
-			"example) and recreate it, on an agent image as new as this Bridge"}
-	}
 	group := noGroup
 	if st.ShareGroup {
 		group = r.gid
 	}
 	if handed != nil && !st.ShareGroup && !r.groupDenied.Load() && !r.warnedGroup.Swap(true) {
 		r.log.Warn("agent container: the runner isn't in the Bridge's group, so the handed credential is readable by every uid "+
-			"until the runner takes it; add that group to the agent container (group_add with the Bridge's PGID, as in the "+
-			"compose example) and recreate it, on an agent image as new as this Bridge (an older one reports no groups)",
-			"bridge_gid", r.gid)
+			"until the runner takes it; "+remedyGroupAdd+" (an older one reports no groups)", "bridge_gid", r.gid)
 	}
 	res, err := r.runJob(ctx, req, st, handed, group)
 	var denied *credentialDeniedError
@@ -282,16 +280,13 @@ func (r *Runner) Run(ctx context.Context, req agent.Request) (agent.Result, erro
 		// is staged again (its first dir already gone) as it was before there
 		// was a group, and every later run of this process goes that way.
 		if r.requireGroup {
-			return res, &agent.NotAvailableError{Backend: r.backend, Detail: "the agent container couldn't take the credential " +
-				"handed to the Bridge's group alone, and agent.require_group is on: the two containers see different ids on the " +
-				"staging volume (different user-namespace mappings, as rootless Podman can set up); give both the same mapping"}
+			return res, r.blockGroup("the agent container couldn't take the credential kept to the Bridge's group: "+
+				remedyMapping+", then restart the Bridge", denied.detail)
 		}
 		if !r.groupDenied.Swap(true) {
 			r.log.Warn("agent container: the runner couldn't take the credential handed to the Bridge's group alone, so from "+
-				"now on the handed credential is readable by every uid until the runner takes it; the two containers see "+
-				"different ids on the staging volume (different user-namespace mappings, as rootless Podman can set up): give "+
-				"both the same mapping and restart the Bridge to keep it to that group",
-				"bridge_gid", r.gid, "detail", denied.detail)
+				"now on the handed credential is readable by every uid until the runner takes it; "+remedyMapping+
+				" and restart the Bridge to keep it to that group", "bridge_gid", r.gid, "detail", denied.detail)
 		}
 		if ctx.Err() != nil {
 			return res, ctx.Err()
@@ -318,14 +313,13 @@ func (r *Runner) runJob(ctx context.Context, req agent.Request, st Status, hande
 	root, groupErr, err := stage(job, req, r.backend, timeout, handed, group, r.requireGroup)
 	var refused *groupRefusedError
 	if errors.As(err, &refused) {
-		return agent.Result{}, &agent.NotAvailableError{Backend: r.backend, Detail: "the staging volume refused to hand the " +
-			"credential to the Bridge's group alone (" + ioProblem(refused.err) + "), and agent.require_group is on: use a " +
-			"staging volume that allows chown (a local one, not NFS or CIFS)"}
+		return agent.Result{}, r.blockGroup("the staging volume refused to give the credential to the Bridge's group ("+
+			ioProblem(refused.err)+"): use "+remedyVolume+", then restart the Bridge", refused.err.Error())
 	}
 	if groupErr != nil && !r.warnedVolume.Swap(true) {
 		r.log.Warn("agent container: the staging volume refused to hand the credential to the Bridge's group alone, so it is "+
-			"readable by every uid until the runner takes it; a staging volume that allows chown (a local one, not NFS or CIFS) "+
-			"keeps it to that group", "bridge_gid", r.gid, "err", groupErr)
+			"readable by every uid until the runner takes it; "+remedyVolume+" keeps it to that group", "bridge_gid", r.gid,
+			"err", groupErr)
 	}
 	if err != nil {
 		return agent.Result{}, r.stagingFailed("write the job into", err)
@@ -373,6 +367,28 @@ func (r *Runner) runJob(ctx context.Context, req agent.Request, st Status, hande
 		return res, herr
 	}
 	return res, runErr
+}
+
+// The fixes for a handed credential that can't be kept to the Bridge's group,
+// worded once for the log's warnings and agent.require_group's details.
+const (
+	remedyGroupAdd = "add that group to the agent container (group_add with the Bridge's PGID, as in the compose example) " +
+		"and recreate it, on an agent image as new as this Bridge"
+	remedyMapping = "the two containers see different ids on the staging volume (different user-namespace mappings, as " +
+		"rootless Podman can set up): give both the same mapping"
+	remedyVolume = "a staging volume that allows chown (a local one, not NFS or CIFS)"
+)
+
+// blockGroup keeps, for the rest of the process, why agent.require_group
+// can't be met (groupBlocked: Status reports the agent unavailable with it,
+// so no later job is staged), logs it once with cause, and returns it as this
+// run's error.
+func (r *Runner) blockGroup(why, cause string) error {
+	why = "agent.require_group is on, and " + why
+	if r.groupBlocked.CompareAndSwap(nil, &why) {
+		r.log.Warn("agent container: "+why, "bridge_gid", r.gid, "cause", cause)
+	}
+	return &agent.NotAvailableError{Backend: r.backend, Detail: *r.groupBlocked.Load()}
 }
 
 // credentialDeniedError is a job the runner refused, before the CLI started,

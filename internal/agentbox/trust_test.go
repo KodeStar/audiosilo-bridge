@@ -124,40 +124,40 @@ func TestForgedRunnerJSONKeepsTheGroup(t *testing.T) {
 // group stays on (denied).
 func TestForgedCredentialDeniedKeepsTheGroup(t *testing.T) {
 	t.Parallel()
-	for name, tc := range map[string]struct {
-		pin    int64
-		forged bool
-	}{
-		"the runner's":  {pin: noUID},
-		"another uid's": {pin: otherUID(), forged: true},
-	} {
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-			r, dir := vaultHandoff(t, []int{os.Getegid()})
-			r.runnerUID.Store(tc.pin)
-			d := &deniedGroupRunner{deny: true}
-			fake := &fakeRunner{fn: d.fn(t)}
-			stop := fake.start(t, dir)
-			_, err := r.Run(context.Background(), agent.Request{Dir: stagedDir(t), Prompt: "p", Timeout: time.Minute})
-			stop()
-			if tc.forged {
-				if err == nil || !strings.Contains(err.Error(), "refused the job") || fake.claimed.Load() != 1 ||
-					r.groupDenied.Load() || !r.Status().ShareGroup {
-					t.Fatalf("err = %v, %d jobs, group denied %v", err, fake.claimed.Load(), r.groupDenied.Load())
-				}
-			} else if err != nil || fake.claimed.Load() != 2 || !r.groupDenied.Load() || r.Status().ShareGroup {
-				t.Fatalf("err = %v, %d jobs, group denied %v", err, fake.claimed.Load(), r.groupDenied.Load())
-			}
-			assertNoJobDirs(t, dir)
-		})
+	run := func(t *testing.T, pin int64) (*Runner, *fakeRunner, error) {
+		t.Helper()
+		r, dir := vaultHandoff(t, []int{os.Getegid()})
+		r.runnerUID.Store(pin)
+		fake := &fakeRunner{fn: (&deniedGroupRunner{deny: true}).fn(t)}
+		stop := fake.start(t, dir)
+		_, err := r.Run(context.Background(), agent.Request{Dir: stagedDir(t), Prompt: "p", Timeout: time.Minute})
+		stop()
+		assertNoJobDirs(t, dir)
+		return r, fake, err
 	}
+	t.Run("the runner's", func(t *testing.T) {
+		t.Parallel()
+		r, fake, err := run(t, noUID)
+		if err != nil || fake.claimed.Load() != 2 || !r.groupDenied.Load() || r.Status().ShareGroup {
+			t.Fatalf("err = %v, %d jobs, group denied %v", err, fake.claimed.Load(), r.groupDenied.Load())
+		}
+	})
+	t.Run("another uid's", func(t *testing.T) {
+		t.Parallel()
+		r, fake, err := run(t, otherUID())
+		if err == nil || !strings.Contains(err.Error(), "refused the job") || fake.claimed.Load() != 1 ||
+			r.groupDenied.Load() || !r.Status().ShareGroup {
+			t.Fatalf("err = %v, %d jobs, group denied %v", err, fake.claimed.Load(), r.groupDenied.Load())
+		}
+	})
 }
 
 // agent.require_group never moves the credential to every uid: a runner
 // outside the group, a volume that refuses the chown and a runner denied the
-// group's file each make the agent unavailable, saying so, and the job (when
-// one was staged) is never opened to every uid. A runner in the group runs as
-// before (allowed).
+// group's file each make the agent unavailable, saying so in its status (the
+// page, the heartbeat, the checklist) so no later job is staged, and the job
+// (when one was staged) is never opened to every uid. A runner in the group
+// runs as before (allowed).
 func TestRequireGroup(t *testing.T) {
 	t.Parallel()
 	run := func(t *testing.T, r *Runner, dir string, d *deniedGroupRunner) (*fakeRunner, error) {
@@ -170,11 +170,17 @@ func TestRequireGroup(t *testing.T) {
 		assertNoJobDirs(t, dir)
 		return fake, err
 	}
-	unavailable := func(t *testing.T, err error) {
+	unavailable := func(t *testing.T, r *Runner, err error) {
 		t.Helper()
 		var na *agent.NotAvailableError
 		if !errors.As(err, &na) || !strings.Contains(na.Detail, "agent.require_group") {
 			t.Fatalf("err = %v, want the agent unavailable naming agent.require_group", err)
+		}
+		if st := r.Status(); st.Available || st.Refused || st.Problem != ProblemGroupRequired || st.Detail != na.Detail {
+			t.Fatalf("status = %+v, want unavailable with %q", st, na.Detail)
+		}
+		if av := r.Detect(context.Background()); av.Available || av.Detail != na.Detail {
+			t.Fatalf("detect = %+v", av)
 		}
 	}
 	t.Run("in the group", func(t *testing.T) {
@@ -189,7 +195,7 @@ func TestRequireGroup(t *testing.T) {
 		t.Parallel()
 		r, dir := vaultHandoff(t, nil)
 		fake, err := run(t, r, dir, &deniedGroupRunner{})
-		unavailable(t, err)
+		unavailable(t, r, err)
 		if fake.claimed.Load() != 0 {
 			t.Fatalf("%d jobs staged", fake.claimed.Load())
 		}
@@ -200,7 +206,7 @@ func TestRequireGroup(t *testing.T) {
 		r, dir := vaultHandoff(t, []int{gid})
 		r.gid = gid
 		fake, err := run(t, r, dir, &deniedGroupRunner{})
-		unavailable(t, err)
+		unavailable(t, r, err)
 		if fake.claimed.Load() != 0 {
 			t.Fatalf("%d jobs staged", fake.claimed.Load())
 		}
@@ -210,9 +216,14 @@ func TestRequireGroup(t *testing.T) {
 		r, dir := vaultHandoff(t, []int{os.Getegid()})
 		d := &deniedGroupRunner{deny: true}
 		fake, err := run(t, r, dir, d)
-		unavailable(t, err)
+		unavailable(t, r, err)
 		if fake.claimed.Load() != 1 || d.ran != 0 || r.groupDenied.Load() || !r.Status().ShareGroup {
 			t.Fatalf("%d jobs, %d runs, group denied %v", fake.claimed.Load(), d.ran, r.groupDenied.Load())
 		}
+		// The next run is refused before anything is staged.
+		if fake, err = run(t, r, dir, d); fake.claimed.Load() != 0 {
+			t.Fatalf("a later run staged %d jobs (%v)", fake.claimed.Load(), err)
+		}
+		unavailable(t, r, err)
 	})
 }

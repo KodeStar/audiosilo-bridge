@@ -3338,7 +3338,9 @@ internal/
             (Options.RequireGroup, off by default) never moves it off the
             group: a runner outside it, a volume refusing the chown (the
             job is never opened to the runner) and a denied runner each
-            make the agent unavailable, the detail saying why. A container
+            make the agent unavailable in Status (Problem group_required,
+            the page, heartbeat and checklist saying so; the last two kept
+            for the process, groupBlocked, as only a run learns them). A container
             credential always wins; a runner that can't take a hand-off gets
             nothing and is told to update. A refusal's detail says where to
             replace the credential: the Accounts tab for the handed one, the agent

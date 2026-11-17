@@ -73,6 +73,9 @@ const (
 	ProblemNoCLI        Problem = "no_cli"
 	ProblemOtherBackend Problem = "other_backend"
 	ProblemNoCredential Problem = "no_credential"
+	// ProblemGroupRequired: agent.require_group is on and the handed
+	// credential can't be kept to the Bridge's group (Detail says why).
+	ProblemGroupRequired Problem = "group_required"
 )
 
 // Status reads runner.json now. Detail never names a Bridge path: it becomes a
@@ -118,6 +121,11 @@ func (r *Runner) Status() Status {
 	st.Version, st.Slots, st.HeartbeatAt, st.CLIs = rj.Version, rj.Slots, rj.HeartbeatAt, rj.CLIs
 	st.ShareGroup = r.shareGroup(rj, info, st.Live)
 	st.Problem, st.Other, st.Detail = r.unavailableBecause(rj)
+	if st.Detail == "" && st.Handoff {
+		if why := r.groupRequired(st.ShareGroup); why != "" {
+			st.Problem, st.Detail = ProblemGroupRequired, why
+		}
+	}
 	if st.Detail == "" {
 		if refused := r.refusal(rj.CLIs[r.backend], st.Handoff); refused != "" {
 			st.Refused, st.Detail = true, refused
@@ -145,6 +153,22 @@ func (r *Runner) shareGroup(rj agentproto.Runner, info fs.FileInfo, live bool) b
 		r.notFromRunner("runner.json naming no Bridge group", uid)
 	}
 	return !own
+}
+
+// groupRequired is why agent.require_group stops a handed credential now,
+// or "": a run learned the group can't be had (groupBlocked), or the runner
+// isn't in the group (share, shareGroup's answer).
+func (r *Runner) groupRequired(share bool) string {
+	if !r.requireGroup {
+		return ""
+	}
+	if why := r.groupBlocked.Load(); why != nil {
+		return *why
+	}
+	if !share {
+		return "agent.require_group is on, and the agent container isn't in the Bridge's group: " + remedyGroupAdd
+	}
+	return ""
 }
 
 // handoffCredential is the vault's credential for the backend (ok false for
