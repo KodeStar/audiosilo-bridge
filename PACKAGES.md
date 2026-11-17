@@ -3072,8 +3072,10 @@ internal/
             asr transcribing only the windows it hadn't finished (one that failed
             there for a reason of its own is cleared, never continued, bridge#24);
             each only
-            while the book is still the one file it was (audio.ResolveSource: a
-            folder that gained an audio file is a multi-file book now)
+            while the book is still the one file it was (markersFile, through
+            audio.ResolveSourceWithin: a folder that gained an audio file is a
+            multi-file book now; a look that doesn't answer in time fails the job
+            with errAudioUnseen, the run kept, never cleared unseen)
             (continueChapters -> store.ContinueChapters with the state it checked and
             the one to go on at, under the engine's Hold, waited for as the delete
             would (holdBook: a stage the cancel just stopped may still be finishing;
@@ -3190,7 +3192,9 @@ internal/
             it reads what it waits on, so an end in between still wakes it.
             BRIDGE-09 (bridge#35, the owner's call): a chapters job whose book's chapters
             run was cancelled at asr or chapter_detecting (cancelledChapters: goal
-            chapters, a single file, scheduler.IsCancelled; one that failed for a reason
+            chapters, scheduler.IsCancelled, and a single file by markersFile, whose
+            look that doesn't answer in time fails the job with errAudioUnseen, the
+            run kept; one that failed for a reason
             of its own is cleared, so asking again never fails the same way forever)
             takes it up again (resumeChapters, under the hold,
             through store.ContinueReadalong with goal chapters; resumesAt, shared with

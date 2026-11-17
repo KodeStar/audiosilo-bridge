@@ -397,7 +397,12 @@ func (h *Handler) continueChapters(ctx context.Context, eng Engine, r *run, old 
 	if r.source != SourceAudio || !continuable(old) {
 		return false, nil
 	}
-	bookFile, _ := markersFile(old.AudioSource())
+	bookFile, err := markersFile(old.AudioSource())
+	if err != nil {
+		// The audio out of sight for a moment: the run is kept for the next
+		// job, never cleared unseen.
+		return false, fmt.Errorf("%w; try again in a minute", errAudioUnseen)
+	}
 	if bookFile == "" {
 		return false, nil
 	}
@@ -465,16 +470,13 @@ func resumesAt(b store.Book) (state.State, bool) {
 }
 
 // cancelledChapters reports whether engine book b is a chapters run (goal
-// chapters, a single file) CANCELLED at asr or chapter_detecting: one a new
-// chapters job takes up again (resumeChapters). Only a cancel (the owner's call:
-// "a detect re-run after a cancel"): a run that failed for a reason of its own
-// is cleared by the new job, so asking again never fails the same way forever.
+// chapters) CANCELLED at asr or chapter_detecting: one a new chapters job takes
+// up again (resumeChapters, while it is still a single file). Only a cancel (the
+// owner's call: "a detect re-run after a cancel"): a run that failed for a
+// reason of its own is cleared by the new job, so asking again never fails the
+// same way forever.
 func cancelledChapters(b store.Book) bool {
-	if state.State(b.State) == state.Done || !continuable(b) {
-		return false
-	}
-	file, _ := markersFile(b.AudioSource())
-	return file != ""
+	return state.State(b.State) != state.Done && continuable(b)
 }
 
 // resumeChapters takes up the book's chapters run old for a new chapters job,
@@ -491,6 +493,13 @@ func cancelledChapters(b store.Book) bool {
 // run it doesn't is cleared by the caller, as before.
 func (h *Handler) resumeChapters(ctx context.Context, eng Engine, r *run, old store.Book) (bool, error) {
 	if !cancelledChapters(old) {
+		return false, nil
+	}
+	if file, err := markersFile(old.AudioSource()); err != nil {
+		// The audio out of sight for a moment: the run is kept for the next
+		// job, never cleared unseen.
+		return false, fmt.Errorf("%w; try again in a minute", errAudioUnseen)
+	} else if file == "" {
 		return false, nil
 	}
 	old, release, ok, err := h.holdStill(ctx, old, cancelledChapters)
