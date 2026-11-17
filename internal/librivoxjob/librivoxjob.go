@@ -177,6 +177,10 @@ type Options struct {
 	Wait func(ctx context.Context, d time.Duration) error
 	// onProgress sees every progress the job reports (tests).
 	onProgress func(jobs.Progress)
+	// strayWait replaces strayWorkWait, and strayLooked runs between the
+	// sweep's look at a stray staging folder and its removal (tests).
+	strayWait   time.Duration
+	strayLooked func(rel string)
 }
 
 // Handler runs librivox.fetch on the download lane (capacity 1, shared with

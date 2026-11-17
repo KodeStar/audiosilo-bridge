@@ -2788,7 +2788,17 @@ internal/
             there (stagingContents: "NN - title.ext" sections and their .part,
             cover.jpg, .audiosilo/librivox.json, atomic-write temps; no folder
             or symlink), its newest entry older than StagingMaxAge, and removes
-            them (the mapping checked again first; never the author folder).
+            them (the mapping checked again first; never the author folder):
+            clearStray opens the folder once, through the mount's root, and
+            looks and removes through that (a root of its own, so nothing
+            outside the folder looked at can go), the mapping checked once more
+            in between. It removes what it saw, each by its name, a folder only
+            when empty and never recursively, so a file put there since the
+            look stays, and a folder that is no longer the one looked at
+            (renamed away, a symlink in its place) is left. The look
+            and the removal run aside holding the project's reservation, the
+            sweep waiting strayWorkWait for them: a library that hangs after the
+            walk listed it is left for the next walk.
             Steps manifest, download (done/total = sections), cover, place,
             rescan. Result {library_id, path (the rescan's), librivox_id, files,
             bytes, adopted} (files and bytes: the sections and the cover;

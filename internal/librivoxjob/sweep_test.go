@@ -517,6 +517,103 @@ func TestSweepRemovesStrayStaging(t *testing.T) {
 	}
 }
 
+// The sweep removes from a stray staging folder only what it saw there: a
+// file put in after its look stays, and the folder with it; a folder renamed
+// away after the look, another reached by a symlink now in its place, loses
+// nothing; nor does one whose library stopped being writable during the look
+// (bridge#71).
+func TestSweepRemovesOnlyWhatItSawInAStray(t *testing.T) {
+	now := time.Now()
+	old := now.Add(-StagingMaxAge - time.Hour)
+
+	x := newHarness(t)
+	x.mkStray(t, stagingName(60), old)
+	x.h.o.strayLooked = func(rel string) {
+		for _, f := range []string{"notes.txt", ".audiosilo/characters.json"} {
+			if err := os.WriteFile(filepath.Join(x.path(rel), filepath.FromSlash(f)), []byte("mine"), 0o644); err != nil { //nolint:gosec // test
+				t.Error(err)
+			}
+		}
+	}
+	x.h.Sweep(now, nil)
+	for _, kept := range []string{"notes.txt", ".audiosilo/characters.json"} {
+		if !x.exists(stagingName(60) + "/" + kept) {
+			t.Errorf("%s, put in the folder after the sweep looked at it, went", kept)
+		}
+	}
+	if x.exists(stagingName(60) + "/" + coverName) {
+		t.Error("the fetch's own files stayed")
+	}
+
+	x = newHarness(t)
+	x.mkStray(t, stagingName(61), old)
+	x.h.o.strayLooked = func(rel string) {
+		if err := os.Rename(x.path(rel), x.path("Rescued")); err != nil {
+			t.Error(err)
+		}
+		if err := os.Symlink("Rescued", x.path(rel)); err != nil {
+			t.Error(err)
+		}
+	}
+	x.h.Sweep(now, nil)
+	for _, kept := range []string{"01 - Chapter One.mp3", coverName, markerRel} {
+		if !x.exists("Rescued/" + kept) {
+			t.Errorf("%s went from a folder renamed after the sweep looked at it", kept)
+		}
+	}
+	if _, err := os.Lstat(x.path(stagingName(61))); err != nil {
+		t.Errorf("the symlink put in the staging folder's place went: %v", err)
+	}
+
+	x = newHarness(t)
+	x.mkStray(t, stagingName(62), old)
+	x.h.o.strayLooked = func(string) { x.libs.writable = false }
+	x.h.Sweep(now, nil)
+	for _, kept := range []string{"01 - Chapter One.mp3", coverName, markerRel} {
+		if !x.exists(stagingName(62) + "/" + kept) {
+			t.Errorf("%s went from a library no longer writable once the sweep had looked", kept)
+		}
+	}
+}
+
+// A library that stops answering once a stray is found doesn't hold the
+// sweep: it goes on after its wait, the library's other strays left for the
+// next walk, and the project stays reserved until the removal still out ends
+// (bridge#71).
+func TestSweepDoesNotWaitOnAStrayItsMountHolds(t *testing.T) {
+	x := newHarness(t)
+	now := time.Now()
+	old := now.Add(-StagingMaxAge - time.Hour)
+	x.mkStray(t, stagingName(50), old)
+	x.mkStray(t, stagingName(51), old)
+	hung, answer := make(chan struct{}), make(chan struct{})
+	x.h.o.strayWait = 20 * time.Millisecond
+	x.h.o.strayLooked = func(string) {
+		close(hung)
+		<-answer
+	}
+	x.h.Sweep(now, nil) // returns: the mount holds the removal
+	<-hung
+	k := key{lib: 3, id: 50}
+	if x.h.begin(k) {
+		t.Fatal("the project wasn't reserved while its stray's removal was out")
+	}
+	if !x.exists(stagingName(50)) || !x.exists(stagingName(51)) {
+		t.Fatal("a stray went while the mount held, or the walk went on in a library not answering")
+	}
+	close(answer)
+	for deadline := time.Now().Add(5 * time.Second); !x.h.begin(k); {
+		if time.Now().After(deadline) {
+			t.Fatal("the reservation outlived the removal")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	x.h.end(k)
+	if x.exists(stagingName(50)) {
+		t.Fatal("the removal the mount held didn't go on once it answered")
+	}
+}
+
 // A second run of a fetch already running here (the same library and
 // project: a re-add claimed while a cancelled parked run is still ending)
 // waits for it to end; it fails when it doesn't within the bound, leaving the

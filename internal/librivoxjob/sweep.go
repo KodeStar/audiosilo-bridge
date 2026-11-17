@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/kodestar/audiosilo-bridge/internal/fsutil"
+	"github.com/kodestar/audiosilo-bridge/internal/transfer"
 )
 
 // StagingMaxAge is how long the sweep keeps a fetch's staging folder and state
@@ -179,31 +180,25 @@ const strayWalkEvery = 24 * time.Hour
 // nothing but what a fetch writes there (stagingContents). A project with a
 // state in any library, a run here or a job the runner holds is left alone
 // (projectKnown); the author folder is kept (no state says the fetch made
-// it). bridge#71.
+// it). A library that stops answering while one of its strays is looked at or
+// removed is left for the next walk (sweepStray). bridge#71.
 func (h *Handler) sweepStrays(now time.Time, held map[key]bool) {
 	for _, ls := range h.o.Libraries.Statuses() {
 		mount, ok := h.writableMount(ls.LibraryID)
 		if !ok {
 			continue
 		}
-		strays := strayCandidates(mount)
-		if len(strays) == 0 {
-			continue
+		for _, s := range strayCandidates(mount) {
+			if !h.sweepStray(mount, ls.LibraryID, s, now, held) {
+				break
+			}
 		}
-		root, err := os.OpenRoot(mount)
-		if err != nil {
-			continue
-		}
-		for _, s := range strays {
-			h.sweepStray(root, mount, ls.LibraryID, s, now, held)
-		}
-		_ = root.Close()
 	}
 }
 
 // strayLookWait bounds each folder read of the walk for stray staging folders
 // (fsutil.ReadDirWithin): a library on a mount that hangs is left for the next
-// walk rather than holding the sweep.
+// walk rather than holding the sweep (strayWorkWait once a stray is found).
 const strayLookWait = 10 * time.Second
 
 // stray is a staging-named folder the walk found: rel in the library, the
@@ -257,37 +252,119 @@ func stagingID(name string) (int, bool) {
 	return id, err == nil && id > 0 && stagingName(id) == name
 }
 
-// sweepStray is sweepStrays for one staging folder s of library lib, at mount
-// (root). The mapping is checked again first: the walk may have taken long.
-func (h *Handler) sweepStray(root *os.Root, mount string, lib int64, s stray, now time.Time, held map[key]bool) {
+// strayWorkWait bounds the sweep's wait for the look at one stray staging
+// folder and its removal (sweepStray).
+const strayWorkWait = time.Minute
+
+// sweepStray is sweepStrays for one staging folder s of library lib, at mount.
+// The mapping is checked again first: the walk may have taken long. The look
+// and the removal (clearStray) run aside, holding the project's reservation
+// until they end, and the sweep waits strayWorkWait for them: on a mount that
+// hangs after the walk listed it the sweep goes on (answered false, for the
+// caller to leave this library's other strays to the next walk), and no run of
+// this fetch starts in the folder while a removal is still out.
+func (h *Handler) sweepStray(mount string, lib int64, s stray, now time.Time, held map[key]bool) (answered bool) {
 	k := key{lib: lib, id: s.id}
 	if !h.begin(k) {
-		return
+		return true
 	}
-	defer h.end(k)
 	if m, ok := h.writableMount(lib); !ok || m != mount || h.projectKnown(k, held) {
+		h.end(k)
+		return true
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer h.end(k)
+		h.clearStray(mount, lib, s.rel, now)
+	}()
+	wait := h.o.strayWait
+	if wait <= 0 {
+		wait = strayWorkWait
+	}
+	t := time.NewTimer(wait)
+	defer t.Stop()
+	select {
+	case <-done:
+		return true
+	case <-t.C:
+		h.o.Log.Warn("librivox: a library stopped answering at a stray staging folder; its others wait for the next walk",
+			"library", lib, "path", s.rel)
+		return false
+	}
+}
+
+// clearStray removes the staging folder rel of library lib, through the
+// mount's root, when it holds only what a fetch writes there, nothing in it
+// changed for StagingMaxAge. The folder is opened once and looked at and
+// emptied through that (a root of its own), so what is removed is in the
+// folder that was looked at, whatever its name leads to by then. It removes
+// what it saw, each by its name, a folder only when empty, never anything
+// else: a file put there since the look stays, and the folder with it. A
+// folder that isn't the one looked at any more (renamed away, a symlink or
+// another folder in its place) is left.
+func (h *Handler) clearStray(mount string, lib int64, rel string, now time.Time) {
+	root, err := os.OpenRoot(mount)
+	if err != nil {
 		return
 	}
-	info, err := root.Lstat(s.rel)
-	if err != nil || !info.IsDir() {
+	defer func() { _ = root.Close() }()
+	dir, err := root.Lstat(rel)
+	if err != nil || !dir.IsDir() {
 		return
 	}
-	newest, only := stagingContents(filepath.Join(mount, filepath.FromSlash(s.rel)))
+	in, err := root.OpenRoot(rel)
+	if err != nil {
+		return
+	}
+	defer func() { _ = in.Close() }()
+	if !sameFolder(in, ".", dir) { // a symlink took its name since the Lstat
+		return
+	}
+	seen, newest, only := stagingContents(in)
 	if !only {
-		h.o.Log.Info("librivox: left a staging-named folder not shown to hold only a fetch's files", "library", lib, "path", s.rel)
+		h.o.Log.Info("librivox: left a staging-named folder not shown to hold only a fetch's files", "library", lib, "path", rel)
 		return
 	}
-	if info.ModTime().After(newest) {
-		newest = info.ModTime()
+	if dir.ModTime().After(newest) {
+		newest = dir.ModTime()
 	}
 	if now.Sub(newest) < StagingMaxAge {
 		return
 	}
-	if err := root.RemoveAll(s.rel); err != nil {
-		h.o.Log.Warn("librivox: removing a stray staging folder failed", "library", lib, "path", s.rel, "err", err)
+	if h.o.strayLooked != nil {
+		h.o.strayLooked(rel)
+	}
+	// Again now: the look may have taken long on a mount that hung.
+	if m, ok := h.writableMount(lib); !ok || m != mount || !sameFolder(root, rel, dir) {
 		return
 	}
-	h.o.Log.Info("librivox: swept a staging folder no fetch names", "library", lib, "path", s.rel)
+	var failed error
+	for _, name := range seen {
+		if err := in.Remove(name); err != nil && !errors.Is(err, fs.ErrNotExist) && failed == nil {
+			failed = err
+		}
+	}
+	if failed == nil {
+		// The folder itself goes by its name in the library, so only while that
+		// name is still it (and only empty).
+		if !sameFolder(root, rel, dir) {
+			return
+		}
+		failed = root.Remove(rel)
+	}
+	if failed != nil {
+		h.o.Log.Warn("librivox: removing a stray staging folder failed", "library", lib, "path", rel, "err", failed)
+		return
+	}
+	h.o.Log.Info("librivox: swept a staging folder no fetch names", "library", lib, "path", rel)
+}
+
+// sameFolder reports whether name in root is still the folder dir (not
+// following a symlink at name).
+func sameFolder(root *os.Root, name string, dir fs.FileInfo) bool {
+	at, err := root.Lstat(name)
+	return err == nil && os.SameFile(dir, at)
 }
 
 // projectKnown reports whether a fetch here knows project k.id in any library:
@@ -347,43 +424,45 @@ func fetchFileName(name string, top bool) bool {
 	return name == coverName || sectionFile.MatchString(name)
 }
 
-// stagingContents reports whether the staging folder dir (its path on the
-// mount) holds only what a fetch writes there: regular files named as a fetch
-// names them (fetchFileName), and the .audiosilo/ folder holding only the
-// marker (and its write's temp); and the newest change among them. Any other
-// entry (a folder, a symlink, a file of another name) is a no, and so is a
-// folder read that fails or doesn't answer within strayLookWait.
-func stagingContents(dir string) (newest time.Time, only bool) {
-	return fetchFilesIn(dir, true)
-}
-
-func fetchFilesIn(dir string, top bool) (newest time.Time, only bool) {
-	entries, err := fsutil.ReadDirWithin(dir, strayLookWait)
-	if err != nil {
-		return time.Time{}, false
-	}
-	for _, e := range entries {
-		switch {
-		case top && e.IsDir() && e.Name() == path.Dir(markerRel):
-			inner, ok := fetchFilesIn(filepath.Join(dir, e.Name()), false)
-			if !ok {
-				return time.Time{}, false
-			}
-			if inner.After(newest) {
-				newest = inner
-			}
-		case !e.Type().IsRegular() || !fetchFileName(e.Name(), top):
-			return time.Time{}, false
-		}
-		info, err := e.Info()
+// stagingContents reports whether the staging folder (in, a root at it) holds
+// only what a fetch writes there: regular files named as a fetch names them
+// (fetchFileName), and the .audiosilo/ folder holding only the marker (and
+// its write's temp). It returns what it saw, staging-relative, a folder after
+// what it holds, and the newest change among them. Any other entry (a folder,
+// a symlink, a file of another name) is a no, and so is anything that can't
+// be looked at.
+func stagingContents(in *os.Root) (seen []string, newest time.Time, only bool) {
+	sub := path.Dir(markerRel)
+	var look func(dir string) bool
+	look = func(dir string) bool {
+		entries, err := fs.ReadDir(transfer.RootFS(in), dir)
 		if err != nil {
-			return time.Time{}, false
+			return false
 		}
-		if info.ModTime().After(newest) {
-			newest = info.ModTime()
+		for _, e := range entries {
+			at := path.Join(dir, e.Name())
+			info, err := in.Lstat(at)
+			switch {
+			case err != nil:
+				return false
+			case dir == "." && e.Name() == sub && info.IsDir():
+				if !look(sub) {
+					return false
+				}
+			case !info.Mode().IsRegular() || !fetchFileName(e.Name(), dir == "."):
+				return false
+			}
+			seen = append(seen, at)
+			if info.ModTime().After(newest) {
+				newest = info.ModTime()
+			}
 		}
+		return true
 	}
-	return newest, true
+	if !look(".") {
+		return nil, time.Time{}, false
+	}
+	return seen, newest, true
 }
 
 // writableMount is the books library's mount while it is a checked, writable
