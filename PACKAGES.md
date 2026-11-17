@@ -152,6 +152,9 @@ internal/
             SMB mount never piles up blocked stats. The detected list's CheckCurrent
             stats the audio through it (pipeline.SourceStatWait, 10 s), and so does a
             generate job's look at where the book is now before it (bookFileNow).
+            bridge#65: ReadDirWithin(path, d) is os.ReadDir bounded the same way (one
+            read in flight per path), and audio.ResolveSourceWithin resolves a book's
+            audio through both, as the generate job's markersFile does.
   execfile/ writes files the process will exec at once with syscall.ForkLock
             held for reading from open to close, so a concurrent fork can't hold
             the write descriptor and make the exec fail with ETXTBSY (WriteFile).

@@ -135,19 +135,25 @@ func detectedSum(d pipeline.DetectedChapters) string {
 }
 
 // markersFile is the one audio file of the book at path (a file, or a folder
-// holding one), "" when it isn't a one-file book or can't be looked at.
-func markersFile(path string) string {
-	if src, err := audio.ResolveSource(path); err == nil && src.Style == audio.StyleMarkers {
-		return src.BookFile
+// holding one), "" when it isn't a one-file book or can't be looked at. Its
+// stat and folder read are bounded as CheckCurrent's stat is (bridge#24,
+// bridge#65): a place that doesn't answer in time is fsutil.ErrStatTimeout.
+func markersFile(path string) (string, error) {
+	src, err := audio.ResolveSourceWithin(path, pipeline.SourceStatWait)
+	if errors.Is(err, fsutil.ErrStatTimeout) {
+		return "", err
 	}
-	return ""
+	if err == nil && src.Style == audio.StyleMarkers {
+		return src.BookFile, nil
+	}
+	return "", nil
 }
 
 // bookFileNow is the book's one audio file where the job has it now: at the path
 // the server's last answer moved the job to (adoptMove takes it up at the next
 // save, after the chapters were checked), else at the run's place; "" when that
 // can't be told. The look is bounded as CheckCurrent's stat is (bridge#24):
-// locate's and markersFile's own stats of a hung mount would hold the poll
+// locate's stat and markersFile's looks at a hung mount would hold the poll
 // before that one, so a place (the moved one included) that doesn't answer in
 // time is fsutil.ErrStatTimeout, the audio out of sight.
 func (r *run) bookFileNow() (string, error) {
@@ -164,10 +170,7 @@ func (r *run) bookFileNow() (string, error) {
 			}
 		}
 	}
-	if _, err := fsutil.StatWithin(full, pipeline.SourceStatWait); errors.Is(err, fsutil.ErrStatTimeout) {
-		return "", err
-	}
-	return markersFile(full), nil
+	return markersFile(full)
 }
 
 // errAudioUnseen: the book's audio can't be looked at to tell whether the
@@ -394,7 +397,7 @@ func (h *Handler) continueChapters(ctx context.Context, eng Engine, r *run, old 
 	if r.source != SourceAudio || !continuable(old) {
 		return false, nil
 	}
-	bookFile := markersFile(old.AudioSource())
+	bookFile, _ := markersFile(old.AudioSource())
 	if bookFile == "" {
 		return false, nil
 	}
@@ -467,7 +470,11 @@ func resumesAt(b store.Book) (state.State, bool) {
 // "a detect re-run after a cancel"): a run that failed for a reason of its own
 // is cleared by the new job, so asking again never fails the same way forever.
 func cancelledChapters(b store.Book) bool {
-	return state.State(b.State) != state.Done && continuable(b) && markersFile(b.AudioSource()) != ""
+	if state.State(b.State) == state.Done || !continuable(b) {
+		return false
+	}
+	file, _ := markersFile(b.AudioSource())
+	return file != ""
 }
 
 // resumeChapters takes up the book's chapters run old for a new chapters job,
