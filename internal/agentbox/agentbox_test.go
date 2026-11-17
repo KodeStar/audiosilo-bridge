@@ -979,7 +979,11 @@ func handoffStager(t *testing.T, groups []int) (*Runner, func() credentialModes)
 			m.file, m.gid = info.Mode(), fileGID(info)
 		}
 		// Any other uid first: its take, when it may not, changes nothing.
-		m.other = takeAs(job, m, 0)
+		// Not as root, whose take goes through whatever the bits and leaves
+		// the group nothing to take.
+		if os.Geteuid() != 0 {
+			m.other = takeAs(job, m, 0)
+		}
 		m.group = takeAs(job, m, 3)
 		seen.Store(m)
 		mustWrite(t, filepath.Join(job, agentproto.StdoutFile), claudeOK)
@@ -1001,8 +1005,8 @@ func handoffStager(t *testing.T, groups []int) (*Runner, func() credentialModes)
 // takeCredential: stat, read and delete it through an os.Root on the job dir)
 // by a uid with the mode bits at shift (3: the file's group, 0: any other uid)
 // on the dir and the file. The test runs as their owner, so the owner's bits
-// are set to those for the take and put back after it (a test run as root
-// passes whatever the bits).
+// are set to those for the take and put back after it (root's take passes
+// whatever the bits, so a test run as root tries only the group's).
 func takeAs(job string, m credentialModes, shift uint) error {
 	dir := filepath.Join(job, agentproto.CredentialDir)
 	file := filepath.Join(dir, agentproto.CredentialFile)
