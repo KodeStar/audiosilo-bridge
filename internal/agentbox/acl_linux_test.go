@@ -63,7 +63,7 @@ func TestHandoffCredentialDropsInheritedACL(t *testing.T) {
 	}
 	job := filepath.Join(dir, "00000000000000aa")
 	handed := &agentproto.Credential{CLI: agent.IDClaude, Kind: agentproto.CredentialOAuthToken, Value: "sk-ant-oat01-vault"}
-	root, groupErr, err := stage(job, agent.Request{Dir: stagedDir(t), Prompt: "p"}, agent.IDClaude, 60, handed, os.Getegid())
+	root, groupErr, err := stage(job, agent.Request{Dir: stagedDir(t), Prompt: "p"}, agent.IDClaude, 60, handed, os.Getegid(), false)
 	if err != nil || groupErr != nil {
 		t.Fatal(err, groupErr)
 	}

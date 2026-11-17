@@ -96,10 +96,13 @@ func pairError(serverURL string, err error) error {
 	case errors.Is(err, context.DeadlineExceeded):
 		// The answer started but didn't finish in time.
 		return api.Errorf(api.ErrUnreachable, "%s", unreachableText(addr, err))
+	case errors.Is(err, link.ErrUnusableAnswer):
+		// An answer came but couldn't be used (not JSON, no token).
+		return api.Errorf(api.ErrUnreachable, "The server at %s gave an answer this Bridge couldn't use (%v). "+
+			"Check the address is the AudioSilo server's, and that it is up to date.", addr, err)
 	}
-	// An answer came but couldn't be used (not JSON, no token).
-	return api.Errorf(api.ErrUnreachable, "The server at %s gave an answer this Bridge couldn't use (%v). "+
-		"Check the address is the AudioSilo server's, and that it is up to date.", addr, err)
+	// Anything else went wrong on the way (an answer cut off part way).
+	return api.Errorf(api.ErrUnreachable, "Pairing with the server at %s failed (%v). Try again.", addr, err)
 }
 
 // prefixed is s after sep, or "" for an empty s.

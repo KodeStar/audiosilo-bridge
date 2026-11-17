@@ -55,6 +55,10 @@ const (
 	DetailAgentNotRunning   = "the agent container isn't running yet; " + agentFor
 	DetailAgentOutdated     = "the agent image isn't this Bridge's version: run the same version of both images; " + agentFor
 	DetailAgentNoCredential = "set the agent's sign-in on the Accounts tab; " + agentFor
+	// DetailAgentGroupRequired: agent.require_group is on and the credential
+	// can't be kept to the Bridge's group (the Accounts tab says why).
+	DetailAgentGroupRequired = "agent.require_group is on, and the agent's credential can't be kept to the Bridge's group: " +
+		"the Accounts tab says why"
 )
 
 // agentNoCLI is the detail while the agent image has no CLI for backend.
@@ -75,11 +79,12 @@ type AgentProblem string
 
 // The problems the checklist words.
 const (
-	AgentNotRunning   AgentProblem = "not_running"
-	AgentOutdated     AgentProblem = "outdated"
-	AgentNoCLI        AgentProblem = "no_cli"
-	AgentOtherBackend AgentProblem = "other_backend"
-	AgentNoCredential AgentProblem = "no_credential"
+	AgentNotRunning    AgentProblem = "not_running"
+	AgentOutdated      AgentProblem = "outdated"
+	AgentNoCLI         AgentProblem = "no_cli"
+	AgentOtherBackend  AgentProblem = "other_backend"
+	AgentNoCredential  AgentProblem = "no_credential"
+	AgentGroupRequired AgentProblem = "group_required"
 )
 
 // maxDetail bounds an item's detail (the server keeps 256 characters).
@@ -222,6 +227,8 @@ func Checklist(in Inputs) link.Setup {
 		agentDetail = agentOtherBackend(in.Agent.Backend, in.Agent.Other)
 	case in.Agent.Problem == AgentNoCredential, in.Agent.Problem == AgentOtherBackend:
 		agentDetail = DetailAgentNoCredential
+	case in.Agent.Problem == AgentGroupRequired:
+		agentDetail = DetailAgentGroupRequired
 	default:
 		agentDetail = DetailAgentNotRunning
 	}

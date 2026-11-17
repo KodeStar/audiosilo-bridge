@@ -76,8 +76,16 @@ func TestPairSendsNoCredential(t *testing.T) {
 		t.Fatalf("body = %s", f.sent)
 	}
 	f.status, f.body = http.StatusUnauthorized, `{"error":"invalid or expired pairing code"}`
-	if _, err := Pair(context.Background(), srv.URL, "x", "0.1.0"); !errors.Is(err, ErrUnauthorized) {
+	if _, err := Pair(context.Background(), srv.URL, "x", "0.1.0"); !errors.Is(err, ErrUnauthorized) || errors.Is(err, ErrUnusableAnswer) {
 		t.Fatalf("a wrong code = %v, want ErrUnauthorized", err)
+	}
+	// A 2xx the Bridge can't use is ErrUnusableAnswer, worded as its cause.
+	for body, want := range map[string]string{`not json`: "decode the server's answer to POST /api/v1/bridge/pair",
+		`{"server_id":"s1"}`: "carried no token"} {
+		f.status, f.body = http.StatusOK, body
+		if _, err := Pair(context.Background(), srv.URL, "x", "0.1.0"); !errors.Is(err, ErrUnusableAnswer) || !strings.Contains(err.Error(), want) {
+			t.Fatalf("answer %s = %v, want ErrUnusableAnswer %q", body, err, want)
+		}
 	}
 }
 

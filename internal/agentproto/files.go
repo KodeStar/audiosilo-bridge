@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"syscall"
 )
@@ -60,23 +61,32 @@ func openRegular(root *os.Root, name string) (*os.File, os.FileInfo, error) {
 // bytes (checked on the open file and again while reading, since the writer
 // may still be appending).
 func ReadRegular(root *os.Root, name string, limit int64) ([]byte, error) {
+	b, _, err := ReadRegularInfo(root, name, limit)
+	return b, err
+}
+
+// ReadRegularInfo is ReadRegular with the FileInfo of the file it read (the
+// open file's, so its owner is that of the very file read, not of one swapped
+// in after; a file can still be moved into place whole by any uid that may
+// write both dirs).
+func ReadRegularInfo(root *os.Root, name string, limit int64) ([]byte, fs.FileInfo, error) {
 	f, info, err := openRegular(root, name)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer func() { _ = f.Close() }()
 	tooLarge := fmt.Errorf("%s is over %d bytes: %w", name, limit, ErrTooLarge)
 	if info.Size() > limit {
-		return nil, tooLarge
+		return nil, nil, tooLarge
 	}
 	b, err := io.ReadAll(io.LimitReader(f, limit+1))
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if int64(len(b)) > limit {
-		return nil, tooLarge
+		return nil, nil, tooLarge
 	}
-	return b, nil
+	return b, info, nil
 }
 
 // Exists reports whether name exists inside root. A link counts and is never

@@ -1825,7 +1825,10 @@ internal/
             ErrNoBook, ErrNotIndexable (a rescan's 404 not_indexable), else *APIError
             (an HTML proxy page never becomes a message; RetryAfter carries a 429's
             Retry-After, seconds or an HTTP date, clamped at a day; RetryAfterSet
-            distinguishes a valid zero wait from a missing or invalid header).
+            distinguishes a valid zero wait from a missing or invalid header);
+            a 2xx it can't use (not the JSON expected, a pairing with no token)
+            is ErrUnusableAnswer (bridge#28), worded as its cause, which the
+            page's pairing error keys on rather than on what's left over.
             Phase 1a: Paired carries
             the server's server_id (the job runner's server identity); the book
             lookup's answer carries a `book` block (BookInfo: title, authors and
@@ -3242,7 +3245,8 @@ internal/
             OpenRegular/ReadRegular read inside an os.Root, refuse a link (Lstat
             first), open O_NONBLOCK (a FIFO swapped in never blocks), require the
             opened file to be the one Lstat saw, and enforce the size limit on the
-            open file and again while reading; Exists Lstats a marker, never
+            open file and again while reading (ReadRegularInfo also returns the
+            open file's FileInfo: the owner of the very file read); Exists Lstats a marker, never
             following a link.
             Phase 2b (decision 19, the agent credential hand-off): runner.json's handoff says the runner
             takes the Bridge's credential; the Bridge then writes
@@ -3322,7 +3326,33 @@ internal/
             denied (credential_denied: the containers map the volume's ids
             differently, a user namespace) re-stages that job once in those
             modes (nothing ran) and the rest of the process uses them, logged
-            once (groupDenied). A container
+            once (groupDenied). Only the runner's own files may move
+            the credential off the group (trust.go): the runner's uid as
+            the volume shows it is pinned by the first live runner.json
+            (never the Bridge's own uid; a live one from a second uid ends
+            the pin until a restart), and a runner.json naming no group
+            or an exit.json's credential_denied written by any other uid,
+            or with a second link, is ignored for it (the group's modes
+            kept, the job refused, its reason saying to restart the Bridge
+            if the agent container now runs as another user), logged once:
+            the staging dir is open to every uid on the volume, so a forged
+            file could otherwise hand the credential to all of them (the
+            pin is trust on first use: trust.go names its limits). An
+            exit.json's owner says only that the runner wrote it somewhere
+            (it runs any job dir it finds, so another uid's dir, holding a
+            credential the runner may not delete, gets a credential_denied
+            of the runner's own that can be moved into a real job), so a
+            denial also needs the job's own dir to bear it out (deniedHere):
+            the claim a 0700 dir of the runner's uid (a dir can't be moved
+            in by a uid that may not write it) and the credential in place,
+            still so 2 s later (a runner that had only just claimed the job
+            takes it within that); else it is the job refused. agent.require_group
+            (Options.RequireGroup, off by default) never moves it off the
+            group: a runner outside it, a volume refusing the chown (the
+            job is never opened to the runner) and a denied runner each
+            make the agent unavailable in Status (Problem group_required,
+            the page, heartbeat and checklist saying so; the last two kept
+            for the process, groupBlocked, as only a run learns them). A container
             credential always wins; a runner that can't take a hand-off gets
             nothing and is told to update. A refusal's detail says where to
             replace the credential: the Accounts tab for the handed one, the agent
@@ -3340,7 +3370,9 @@ internal/
             than 30 s: an earlier runner's) finished at the start and with every
             status write, before the Bridge's 60 s stale limit; the staging dir
             scanned every 1 s while a slot is free, oldest request first, everything
-            through an os.Root. execute: request.json decoded strictly, a missing CLI
+            through an os.Root, the claim made inside the job dir already opened
+            (never through its path: the Bridge reads the claim as the runner's word
+            that it ran that very dir, agentbox's trust.go). execute: request.json decoded strictly, a missing CLI
             or credential is Exit unavailable, prompt.txt bounded, the argv built HERE
             with agent.ClaudeArgs / agent.CodexArgs(CodexSandboxOff) (one copy of the
             flags). The child's environment is an ALLOW-LIST: PATH, LANG, TZ, a

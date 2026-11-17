@@ -234,7 +234,9 @@ in PACKAGES.md.
   deletes an earlier Bridge's `github_pat` copy). An agent credential leaves the
   Bridge only as one run's `credential/credential.json`, which the runner deletes
   before the CLI starts, and only when the agent container has none of its own
-  (readable by the Bridge's group alone when the runner reports it and can take it so, else by any uid);
+  (readable by the Bridge's group alone when the runner reports it and can take it so, else by any uid;
+  only the runner's own uid's runner.json and exit.json can move it off the group, and
+  agent.require_group never does, agentbox/trust.go);
   private podcast feed URLs are sealed before a claim reaches server_jobs, as
   podcast_job_<job id>_<attempt> (each claim its own), then podcast_feed_<show_id>.
   The job secret survives a resumable stop and is deleted at any terminal end.

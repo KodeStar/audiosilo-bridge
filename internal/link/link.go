@@ -321,6 +321,9 @@ var (
 	ErrNoMarker = errors.New("no library marker there")
 	// ErrNotIndexable is a rescan's 404 not_indexable: no indexed book there.
 	ErrNotIndexable = errors.New("no indexed book at that path")
+	// ErrUnusableAnswer marks a 2xx answer the Bridge couldn't use: not the
+	// JSON it expects, or without what it must carry (a pairing's token).
+	ErrUnusableAnswer = errors.New("the server's answer couldn't be used")
 	// ErrNoHeartbeat is a claim before any heartbeat (409 no_heartbeat).
 	ErrNoHeartbeat = errors.New("the server has no heartbeat from this Bridge yet")
 	// ErrBadAddress is a server address that isn't an absolute http(s) URL.
@@ -417,7 +420,7 @@ func Pair(ctx context.Context, serverURL, code, version string) (*Paired, error)
 		return nil, err
 	}
 	if out.Token == "" {
-		return nil, errors.New("the server's pairing answer carried no token")
+		return nil, unusableError{errors.New("the server's pairing answer carried no token")}
 	}
 	return &out, nil
 }
@@ -602,7 +605,7 @@ func (c *Client) doFound(ctx context.Context, method, path string, q url.Values,
 			return true, nil
 		}
 		if err := json.Unmarshal(raw, out); err != nil {
-			return false, fmt.Errorf("decode the server's answer to %s %s: %w", method, path, err)
+			return false, unusableError{fmt.Errorf("decode the server's answer to %s %s: %w", method, path, err)}
 		}
 		return true, nil
 	}
@@ -613,6 +616,13 @@ func (c *Client) doFound(ctx context.Context, method, path string, q url.Values,
 	}
 	return false, err
 }
+
+// unusableError is an answer the Bridge couldn't use (ErrUnusableAnswer),
+// worded as its cause.
+type unusableError struct{ err error }
+
+func (e unusableError) Error() string   { return e.err.Error() }
+func (e unusableError) Unwrap() []error { return []error{e.err, ErrUnusableAnswer} }
 
 // maxRetryAfter bounds a Retry-After, in either form.
 const maxRetryAfter = 24 * time.Hour

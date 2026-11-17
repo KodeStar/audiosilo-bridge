@@ -163,6 +163,7 @@ const (
 	KeyAgentStagingDir      = "agent.staging_dir"
 	KeyAgentClaimTimeout    = "agent.claim_timeout_seconds"
 	KeyAgentMonthlyBudget   = "agent.monthly_budget_usd"
+	KeyAgentRequireGroup    = "agent.require_group"
 	KeyTranscriptsRetention = "transcripts.retention_days"
 	KeyASRWorkerFallback    = "asr.worker_fallback"
 	KeyGitHubClientID       = "github.client_id"
@@ -172,6 +173,7 @@ const (
 	envAgentStagingDir      = "AUDIOSILO_BRIDGE_AGENT_STAGING_DIR"
 	envAgentClaimTimeout    = "AUDIOSILO_BRIDGE_AGENT_CLAIM_TIMEOUT_SECONDS"
 	envAgentMonthlyBudget   = "AUDIOSILO_BRIDGE_AGENT_MONTHLY_BUDGET_USD"
+	envAgentRequireGroup    = "AUDIOSILO_BRIDGE_AGENT_REQUIRE_GROUP"
 	envTranscriptsRetention = "AUDIOSILO_BRIDGE_TRANSCRIPTS_RETENTION_DAYS"
 	envASRWorkerFallback    = "AUDIOSILO_BRIDGE_ASR_WORKER_FALLBACK"
 )
@@ -243,6 +245,14 @@ func applyBridgeEnv(cfg *Config) {
 		}
 		cfg.Agent.MonthlyBudgetUSD = f
 		cfg.fromEnv[KeyAgentMonthlyBudget] = true
+	}
+	if v, ok := lookupEnv(envAgentRequireGroup); ok {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			cfg.badRequireGroup = v
+		}
+		cfg.Agent.RequireGroup = b
+		cfg.fromEnv[KeyAgentRequireGroup] = true
 	}
 	if v, ok := lookupEnv(envTranscriptsRetention); ok {
 		cfg.Transcripts.RetentionDays = envInt(v)
@@ -445,6 +455,9 @@ func (c Config) validateBridge() error {
 	}
 	if t := c.Agent.ClaimTimeoutSeconds; t < MinClaimTimeoutSeconds || t > MaxClaimTimeoutSeconds {
 		return fmt.Errorf("agent.claim_timeout_seconds must be between %d and %d, got %d", MinClaimTimeoutSeconds, MaxClaimTimeoutSeconds, t)
+	}
+	if c.badRequireGroup != "" {
+		return fmt.Errorf("%s must be true or false, got %q", envAgentRequireGroup, c.badRequireGroup)
 	}
 	if b := c.Agent.MonthlyBudgetUSD; b < 0 || math.IsNaN(b) || math.IsInf(b, 0) {
 		return fmt.Errorf("agent.monthly_budget_usd must be 0 (no cap) or more, got %v", b)

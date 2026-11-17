@@ -30,9 +30,10 @@ type Status struct {
 	// the runner takes a hand-off and has no credential of its own. CLIs then
 	// shows that credential's kind for the backend.
 	Handoff bool
-	// ShareGroup: the runner is in the Bridge's group (runner.json's groups),
-	// so a handed credential is that group's alone, never every uid's; false
-	// once the runner couldn't take one so (Run), for the rest of the process.
+	// ShareGroup: a handed credential is the Bridge's group's alone, never
+	// every uid's: the runner is in that group (runner.json's groups), or a
+	// runner.json naming no group isn't the runner's (trust.go); false once
+	// the runner couldn't take one so (Run), for the rest of the process.
 	ShareGroup bool
 	// Detail says why not, in words for the page and the park hint.
 	Detail string
@@ -73,6 +74,9 @@ const (
 	ProblemNoCLI        Problem = "no_cli"
 	ProblemOtherBackend Problem = "other_backend"
 	ProblemNoCredential Problem = "no_credential"
+	// ProblemGroupRequired: agent.require_group is on and the handed
+	// credential can't be kept to the Bridge's group (Detail says why).
+	ProblemGroupRequired Problem = "group_required"
 )
 
 // Status reads runner.json now. Detail never names a Bridge path: it becomes a
@@ -90,7 +94,7 @@ func (r *Runner) Status() Status {
 	}
 	r.dirMissing.Store(false)
 	defer func() { _ = root.Close() }()
-	raw, err := agentproto.ReadRegular(root, agentproto.RunnerFile, agentproto.MaxRunnerBytes)
+	raw, info, err := agentproto.ReadRegularInfo(root, agentproto.RunnerFile, agentproto.MaxRunnerBytes)
 	if errors.Is(err, fs.ErrNotExist) {
 		st.Detail = "the agent container isn't running (it hasn't written its status into the staging dir; check that both containers mount the same staging volume)"
 		return st
@@ -116,8 +120,13 @@ func (r *Runner) Status() Status {
 		}
 	}
 	st.Version, st.Slots, st.HeartbeatAt, st.CLIs = rj.Version, rj.Slots, rj.HeartbeatAt, rj.CLIs
-	st.ShareGroup = slices.Contains(rj.Groups, r.gid) && !r.groupDenied.Load()
+	st.ShareGroup = r.shareGroup(rj, info, st.Live)
 	st.Problem, st.Other, st.Detail = r.unavailableBecause(rj)
+	if st.Detail == "" && st.Handoff {
+		if why := r.groupRequired(st.ShareGroup); why != "" {
+			st.Problem, st.Detail = ProblemGroupRequired, why
+		}
+	}
 	if st.Detail == "" {
 		if refused := r.refusal(rj.CLIs[r.backend], st.Handoff); refused != "" {
 			st.Refused, st.Detail = true, refused
@@ -125,6 +134,42 @@ func (r *Runner) Status() Status {
 	}
 	st.Available = st.Detail == ""
 	return st
+}
+
+// shareGroup reports whether a handed credential goes to the Bridge's group
+// alone, by runner.json rj (read from info; live when its heartbeat is fresh
+// in this protocol): when its groups hold the Bridge's, and also when another
+// uid than the runner's wrote it (trust.go), so a forged one can't move the
+// credential to every uid. Never once the runner was denied the group's
+// credential (Run).
+func (r *Runner) shareGroup(rj agentproto.Runner, info fs.FileInfo, live bool) bool {
+	if r.groupDenied.Load() {
+		return false
+	}
+	uid, own := r.fromRunner(info, live)
+	if slices.Contains(rj.Groups, r.gid) {
+		return true
+	}
+	if !own {
+		r.notFromRunner("runner.json naming no Bridge group", uid)
+	}
+	return !own
+}
+
+// groupRequired is why agent.require_group stops a handed credential now,
+// or "": a run learned the group can't be had (groupBlocked), or the runner
+// isn't in the group (share, shareGroup's answer).
+func (r *Runner) groupRequired(share bool) string {
+	if !r.requireGroup {
+		return ""
+	}
+	if why := r.groupBlocked.Load(); why != nil {
+		return *why
+	}
+	if !share {
+		return "agent.require_group is on, and the agent container isn't in the Bridge's group: " + remedyGroupAdd
+	}
+	return ""
 }
 
 // handoffCredential is the vault's credential for the backend (ok false for

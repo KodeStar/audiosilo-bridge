@@ -189,6 +189,10 @@ type AgentConfig struct {
 	StagingDir          string  `yaml:"staging_dir"`
 	ClaimTimeoutSeconds int     `yaml:"claim_timeout_seconds"`
 	MonthlyBudgetUSD    float64 `yaml:"monthly_budget_usd"`
+	// RequireGroup keeps the agent credential handed to the agent container
+	// to the Bridge's group in every case (agentbox.Options.RequireGroup):
+	// where it would go to every uid instead, the agent is unavailable.
+	RequireGroup bool `yaml:"require_group,omitempty"`
 	// BudgetReviewedAt is when an admin last saved the monthly budget on the
 	// Bridge's page (the setup checklist's "budget" item, decision 7); "" for
 	// never.
@@ -353,6 +357,9 @@ type Config struct {
 	legacyCustomRepo string
 	// fromEnv names the Bridge settings the environment set (EnvSet).
 	fromEnv map[string]bool
+	// badRequireGroup is an AUDIOSILO_BRIDGE_AGENT_REQUIRE_GROUP that isn't a
+	// boolean, for Validate to refuse (a typo must not turn the check off).
+	badRequireGroup string
 }
 
 // Deprecations returns the notices Load collected about deprecated settings it
