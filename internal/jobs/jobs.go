@@ -1269,25 +1269,18 @@ func (p *Reporter) updateOf(pr Progress, parked bool, parkMsg string) (link.Upda
 // may lead it with, none when that leaves only the code. A progress naming no
 // park is left as it is; pr's own maps are never changed.
 func withParkMessage(pr Progress, msg string) Progress {
-	var park map[string]any
-	switch v := pr.Extra["park"].(type) {
-	case map[string]any:
-		park = maps.Clone(v)
-	case map[string]string:
-		park = make(map[string]any, len(v)+1)
-		for k, s := range v {
-			park[k] = s
-		}
-	default:
+	named, ok := pr.Extra["park"].(map[string]any)
+	if !ok {
 		return pr
 	}
-	code, _ := park["code"].(string)
+	code, _ := named["code"].(string)
 	if code != "" {
 		msg = strings.TrimSpace(strings.TrimPrefix(msg, code+":"))
 	}
 	if msg == "" || msg == code {
 		return pr
 	}
+	park := maps.Clone(named)
 	park["message"] = msg
 	pr.Extra = maps.Clone(pr.Extra)
 	pr.Extra["park"] = park

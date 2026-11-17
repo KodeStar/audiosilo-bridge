@@ -56,24 +56,19 @@ func (s *stubAccounts) Accounts(ctx context.Context) ([]store.AudibleAccount, er
 func (s *stubAccounts) Positions(_ context.Context, _ string, asins []string) (map[string]audible.Position, error) {
 	s.mu.Lock()
 	s.reads++
-	if s.placesErr != nil {
-		defer s.mu.Unlock()
-		var out map[string]audible.Position
-		for _, a := range s.readFirst {
-			if p, ok := s.places[a]; ok && slices.Contains(asins, a) {
-				if out == nil {
-					out = map[string]audible.Position{}
-				}
-				out[a] = p
-			}
-		}
-		return out, s.placesErr
+	read := asins
+	if s.placesErr != nil { // only the ones read before the failure
+		read = slices.DeleteFunc(slices.Clone(s.readFirst), func(a string) bool { return !slices.Contains(asins, a) })
 	}
 	out := map[string]audible.Position{}
-	for _, a := range asins {
+	for _, a := range read {
 		if p, ok := s.places[a]; ok {
 			out[a] = p
 		}
+	}
+	if s.placesErr != nil {
+		s.mu.Unlock()
+		return out, s.placesErr
 	}
 	hook := s.onRead
 	s.mu.Unlock()

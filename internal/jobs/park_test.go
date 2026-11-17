@@ -22,7 +22,7 @@ import (
 func TestProgressExtra(t *testing.T) {
 	t.Parallel()
 	b, err := json.Marshal(Progress{Step: "asr", Message: "Transcribing", Done: 3, Total: 9,
-		Extra: map[string]any{"stage": "asr", "eta_seconds": 60, "step": "nope", "park": map[string]string{"code": "x"}}})
+		Extra: map[string]any{"stage": "asr", "eta_seconds": 60, "step": "nope", "park": map[string]any{"code": "x"}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,7 +52,7 @@ func TestParkAndUnpark(t *testing.T) {
 	db, srv := openStore(t), newFakeServer()
 	srv.add(&link.Job{ID: 1, Kind: "k.v", Attempts: 1})
 	h := handler{kind: "k.v", lane: LanePipeline, fn: func(ctx context.Context, j Job, rep *Reporter) (any, error) {
-		rep.Progress(Progress{Step: "fact_pass", Extra: map[string]any{"park": map[string]string{"code": "agent_unavailable"}}})
+		rep.Progress(Progress{Step: "fact_pass", Extra: map[string]any{"park": map[string]any{"code": "agent_unavailable"}}})
 		rep.Park("agent_unavailable", "the agent container isn't answering")
 		waitFor(t, func() bool { return countState(srv, 1, link.StateNeedsAttention) >= 2 })
 		if parked, msg := rep.parkState(); !parked || msg != "the agent container isn't answering" {
