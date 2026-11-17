@@ -100,6 +100,10 @@ type Runner struct {
 	activeMu sync.Mutex
 	active   map[string]bool
 
+	// groups are runner.json's groups, read once: a process with no
+	// capabilities can't change them.
+	groups []int
+
 	killDelay   time.Duration // TERM to KILL on a cancel or a timeout
 	scanEvery   time.Duration
 	statusEvery time.Duration // runner.json and the orphan recovery
@@ -150,6 +154,7 @@ func New(opts Options) (*Runner, error) {
 		clis:        map[string]cliInfo{},
 		creds:       map[string]credSeen{},
 		active:      map[string]bool{},
+		groups:      groups(),
 		killDelay:   10 * time.Second,
 		scanEvery:   scanInterval,
 		statusEvery: agentproto.RunnerInterval,
@@ -317,7 +322,7 @@ func (r *Runner) status() agentproto.Runner {
 		Slots:       r.opts.Slots,
 		CLIs:        map[string]agentproto.CLI{},
 		Handoff:     true,
-		Groups:      groups(),
+		Groups:      r.groups,
 	}
 	for _, name := range []string{agentproto.CLIClaude, agentproto.CLICodex} {
 		c, _ := r.cli(name)
