@@ -68,6 +68,16 @@ func TestFromRunner(t *testing.T) {
 		t.Fatalf("a runner.json of the Bridge's own uid: own %v, pinned %d", own, self.runnerUID.Load())
 	}
 
+	// Nothing to warn of before a pin, nor for the Bridge's own uid.
+	var logged strings.Builder
+	self.log = slog.New(slog.NewTextHandler(&logged, nil))
+	self.notFromRunner("runner.json", me+1)
+	self.runnerUID.Store(otherUID())
+	self.notFromRunner("runner.json", me)
+	if logged.Len() != 0 {
+		t.Fatalf("warned: %s", logged.String())
+	}
+
 	other, _ := newTestRunner(t, agent.IDClaude)
 	other.runnerUID.Store(otherUID())
 	if _, own := other.fromRunner(si, true); own || other.runnerUID.Load() != otherUID() {

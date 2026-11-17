@@ -52,9 +52,12 @@ func (r *Runner) fromRunner(info fs.FileInfo, pin bool) (uid int, own bool) {
 
 // notFromRunner logs, once a process, a file in the staging dir that would
 // have moved the handed credential off the Bridge's group but isn't the
-// runner's (fromRunner), so it didn't.
+// runner's (fromRunner), so it didn't. Not before a runner's uid is pinned
+// (nothing to tell it from: a stale runner.json at the start), nor for the
+// Bridge's own uid (both containers as one user, where the group decides
+// nothing).
 func (r *Runner) notFromRunner(what string, uid int) {
-	if r.warnedForeign.Swap(true) {
+	if uid == r.uid || r.runnerUID.Load() == noUID || r.warnedForeign.Swap(true) {
 		return
 	}
 	r.log.Warn("agent container: "+what+" isn't the runner's (another uid wrote it), so the handed credential stays the "+
