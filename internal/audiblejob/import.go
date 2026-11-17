@@ -136,8 +136,13 @@ type ImportParams struct {
 	Template  string `json:"template"`
 }
 
-// maxTemplate bounds a path template.
-const maxTemplate = 1024
+// maxTemplate bounds a path template and maxDestPath a destination, in bytes:
+// the server's own bounds (bridge.MaxAudibleTemplate, MaxAudibleDestPath), so a
+// template the server would refuse is never taken from a job (bridge#47).
+const (
+	maxTemplate = 500
+	maxDestPath = 1024
+)
 
 // ParseImportParams reads and checks the params.
 func ParseImportParams(raw json.RawMessage) (ImportParams, error) {
@@ -153,7 +158,7 @@ func ParseImportParams(raw json.RawMessage) (ImportParams, error) {
 		return ImportParams{}, errors.New("bad params: asin must be an ASIN")
 	case p.LibraryID <= 0:
 		return ImportParams{}, errors.New("bad params: library_id is required")
-	case len(p.Template) > maxTemplate || len(p.DestPath) > maxTemplate:
+	case len(p.Template) > maxTemplate || len(p.DestPath) > maxDestPath:
 		return ImportParams{}, errors.New("bad params: the template or dest_path is too long")
 	}
 	return p, nil

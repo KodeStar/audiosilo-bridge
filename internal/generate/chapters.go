@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
@@ -135,19 +136,29 @@ func detectedSum(d pipeline.DetectedChapters) string {
 }
 
 // markersFile is the one audio file of the book at path (a file, or a folder
-// holding one), "" when it isn't a one-file book or can't be looked at.
-func markersFile(path string) string {
-	if src, err := audio.ResolveSource(path); err == nil && src.Style == audio.StyleMarkers {
-		return src.BookFile
+// holding one), "" when it isn't a one-file book. Its stat and folder read are
+// bounded as CheckCurrent's stat is (bridge#24, bridge#65), and it fails closed
+// as that does: a place that can't be looked at now (one that doesn't answer in
+// time, fsutil.ErrStatTimeout, or whose look the file system refuses: a mount
+// gone for a moment) is the look's error, never "not a one-file book".
+func markersFile(path string) (string, error) {
+	src, err := audio.ResolveSourceWithin(path, pipeline.SourceStatWait)
+	var look *fs.PathError
+	switch {
+	case errors.As(err, &look):
+		return "", err
+	case err == nil && src.Style == audio.StyleMarkers:
+		return src.BookFile, nil
 	}
-	return ""
+	return "", nil
 }
 
 // bookFileNow is the book's one audio file where the job has it now: at the path
 // the server's last answer moved the job to (adoptMove takes it up at the next
 // save, after the chapters were checked), else at the run's place; "" when that
-// can't be told. The look is bounded as CheckCurrent's stat is (bridge#24):
-// locate's and markersFile's own stats of a hung mount would hold the poll
+// can't be told (CheckCurrent then looks at the manifest's path, and fails
+// closed itself). The look is bounded as CheckCurrent's stat is (bridge#24):
+// locate's stat and markersFile's looks at a hung mount would hold the poll
 // before that one, so a place (the moved one included) that doesn't answer in
 // time is fsutil.ErrStatTimeout, the audio out of sight.
 func (r *run) bookFileNow() (string, error) {
@@ -164,10 +175,11 @@ func (r *run) bookFileNow() (string, error) {
 			}
 		}
 	}
-	if _, err := fsutil.StatWithin(full, pipeline.SourceStatWait); errors.Is(err, fsutil.ErrStatTimeout) {
-		return "", err
+	file, err := markersFile(full)
+	if err != nil && !errors.Is(err, fsutil.ErrStatTimeout) {
+		return "", nil
 	}
-	return markersFile(full), nil
+	return file, err
 }
 
 // errAudioUnseen: the book's audio can't be looked at to tell whether the
@@ -361,23 +373,24 @@ func sidecarsWithoutChapters(p place) bool {
 
 // continueChapters takes over a chapters.detect run of the same book for a new
 // generate job reading the audio, so its transcription (the expensive part) is
-// kept instead of deleted and done again (store.ContinueChapters). Two runs
+// kept instead of deleted and done again (store.ContinueChapters). These runs
 // continue (continuable):
 //   - a done one whose detected list is current for the audio on disk (a file
 //     replaced since is transcribed again) goes on from splitting, which cuts the
 //     chapter FLACs the done-time purge removed; asr then finds every transcript
 //     complete, so the book goes on to sanitizing and the rest;
-//   - one cancelled or failed at chapter_detecting (the server cancels a parked
+//   - one cancelled at chapter_detecting (the server cancels a parked
 //     chapters job as it queues a generate job for the book) whose kept window
 //     layer can run the stage again (pipeline.DetectionRerunnable) goes on from
 //     there, the stage running again over the kept windows;
-//   - one cancelled or failed at asr (a chapters job parked asr_worker_waiting,
+//   - one cancelled at asr (a chapters job parked asr_worker_waiting,
 //     cancelled the same way) whose windows manifest is in place for the file
 //     inspected (pipeline.TranscriptionContinuable) goes on from splitting (its
 //     kept sentinel passes it straight on; a purge that took the window FLACs
 //     took that too, so they are cut again), and asr transcribes only the
 //     windows it hadn't finished.
 //
+// One that failed there for a reason of its own is cleared and run afresh.
 // Either only while the book is still the one file it was (a folder that has
 // gained an audio file is a multi-file book now), the retention hasn't swept its
 // transcripts and no open job follows it (the caller checked). It is held
@@ -393,7 +406,12 @@ func (h *Handler) continueChapters(ctx context.Context, eng Engine, r *run, old 
 	if r.source != SourceAudio || !continuable(old) {
 		return false, nil
 	}
-	bookFile := markersFile(old.AudioSource())
+	bookFile, err := markersFile(old.AudioSource())
+	if err != nil {
+		// The audio out of sight for a moment: the run is kept for the next
+		// job, never cleared unseen.
+		return false, fmt.Errorf("%w; try again in a minute", errAudioUnseen)
+	}
 	if bookFile == "" {
 		return false, nil
 	}
@@ -461,13 +479,13 @@ func resumesAt(b store.Book) (state.State, bool) {
 }
 
 // cancelledChapters reports whether engine book b is a chapters run (goal
-// chapters, a single file) CANCELLED at asr or chapter_detecting: one a new
-// chapters job takes up again (resumeChapters). Only a cancel (the owner's call:
-// "a detect re-run after a cancel"): a run that failed for a reason of its own
-// is cleared by the new job, so asking again never fails the same way forever.
+// chapters) CANCELLED at asr or chapter_detecting: one a new chapters job takes
+// up again (resumeChapters, while it is still a single file). Only a cancel (the
+// owner's call: "a detect re-run after a cancel"): a run that failed for a
+// reason of its own is cleared by the new job, so asking again never fails the
+// same way forever.
 func cancelledChapters(b store.Book) bool {
-	return state.State(b.State) != state.Done && continuable(b) && scheduler.IsCancelled(b) &&
-		markersFile(b.AudioSource()) != ""
+	return state.State(b.State) != state.Done && continuable(b)
 }
 
 // resumeChapters takes up the book's chapters run old for a new chapters job,
@@ -484,6 +502,13 @@ func cancelledChapters(b store.Book) bool {
 // run it doesn't is cleared by the caller, as before.
 func (h *Handler) resumeChapters(ctx context.Context, eng Engine, r *run, old store.Book) (bool, error) {
 	if !cancelledChapters(old) {
+		return false, nil
+	}
+	if file, err := markersFile(old.AudioSource()); err != nil {
+		// The audio out of sight for a moment: the run is kept for the next
+		// job, never cleared unseen.
+		return false, fmt.Errorf("%w; try again in a minute", errAudioUnseen)
+	} else if file == "" {
 		return false, nil
 	}
 	old, release, ok, err := h.holdStill(ctx, old, cancelledChapters)
@@ -534,14 +559,16 @@ func (h *Handler) holdStill(ctx context.Context, old store.Book, still func(stor
 }
 
 // continuable reports whether engine book b is a chapters run a generate job can
-// go on with: goal chapters, and done, or failed (a cancel included) at asr or
-// chapter_detecting.
+// go on with: goal chapters, and done, or cancelled at asr or chapter_detecting.
+// A run that failed there for a reason of its own is cleared, as a chapters
+// job's re-run clears it (cancelledChapters), so a generate job never fails the
+// same way again on its transcription (bridge#24).
 func continuable(b store.Book) bool {
 	switch state.State(b.State) {
 	case state.Done:
 		return b.Goal == state.GoalChapters
 	case state.ASR, state.ChapterDetecting:
-		return b.Goal == state.GoalChapters && state.Status(b.Status) == state.StatusFailed
+		return b.Goal == state.GoalChapters && scheduler.IsCancelled(b)
 	default:
 		return false
 	}

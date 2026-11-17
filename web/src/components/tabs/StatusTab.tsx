@@ -333,14 +333,14 @@ function PairForm({
         <Field
           label="Server address"
           htmlFor="pair-server"
-          note="The address the Bridge uses to reach the AudioSilo server."
+          note="The address the Bridge uses to reach the AudioSilo server: its service name, like http://audiosilo:8080, when both run in one Docker Compose stack, otherwise its address on your network."
         >
           <input
             id="pair-server"
             type="url"
             value={serverUrl}
             onChange={(e) => setServerUrl(e.target.value)}
-            placeholder="http://audiosilo:8080"
+            placeholder="http://192.168.1.10:8080"
             className={inputClass}
           />
         </Field>

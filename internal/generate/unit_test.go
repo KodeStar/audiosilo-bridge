@@ -614,3 +614,49 @@ func mustWrite(t *testing.T, path, content string) {
 		t.Fatal(err)
 	}
 }
+
+// racedRetryEngine is an engine whose Retry meets the book parked again
+// between its read and its write (the scheduler's store.ErrStatusChanged).
+type racedRetryEngine struct{ Engine }
+
+func (racedRetryEngine) Retry(context.Context, int64) error { return store.ErrStatusChanged }
+
+// A person's Retry that races a re-park answers "the book changed, try again"
+// (a conflict on the page), never the store's raw error (bridge#65); one that
+// lands re-admits as before.
+func TestRetryRacingAReparkSaysTryAgain(t *testing.T) {
+	t.Parallel()
+	db, err := store.Open(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	ctx := context.Background()
+	b, err := db.CreateBook(ctx, store.NewBook{SourcePath: "/lib/parked", WorkDir: t.TempDir(), Title: "parked"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = db.SetBookState(ctx, b.ID, "fact_pass", "needs_attention", "the fact pass kept failing its checks", "agent_validation_exhausted")
+	_ = db.PutGenerateBook(ctx, store.GenerateBook{ServerJobID: 1, BookID: &b.ID, LibraryID: 1, RelPath: "parked"})
+
+	raced := New(Options{DB: db, Engine: func() Engine { return racedRetryEngine{} }, Poll: time.Millisecond})
+	if err := raced.Retry(ctx, 1); !errors.Is(err, ErrBookChanged) {
+		t.Fatalf("a retry racing a re-park = %v, want ErrBookChanged", err)
+	}
+	var retried int64
+	landed := New(Options{DB: db, Engine: func() Engine { return retryEngine{retried: &retried} }, Poll: time.Millisecond})
+	if err := landed.Retry(ctx, 1); err != nil || retried != b.ID {
+		t.Fatalf("a retry that lands = %v (book %d)", err, retried)
+	}
+}
+
+// retryEngine records the book a Retry re-admits.
+type retryEngine struct {
+	Engine
+	retried *int64
+}
+
+func (e retryEngine) Retry(_ context.Context, id int64) error {
+	*e.retried = id
+	return nil
+}

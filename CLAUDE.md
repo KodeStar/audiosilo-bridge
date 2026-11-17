@@ -213,7 +213,10 @@ in PACKAGES.md.
   3c-1) and `bridge.json` in the book's `.audiosilo/` (a single-file book's prefixed
   `<stem>.`). `librivox.fetch` (LibriVox L6) writes whole new book folders: its own
   dot staging folder beside the destination (removed outright on a cancel or a
-  failure: it holds only the job's own downloads), then one no-replace rename,
+  failure, or by the sweep once abandoned: it holds only the job's own downloads;
+  a staging-named folder no state knows goes only while it holds nothing else,
+  file by file, never recursively),
+  then one no-replace rename,
   never into an existing book. Podcast writers
   require a podcast-kind library and its checked marker mapping (a job claimed
   before the check waits for it); they write only the root marker, show folders,
@@ -324,9 +327,10 @@ job (speech recognition and detection only, no agent, no series lock) writes
 `chapters.json` at its done; `sidecars.generate` writes it as soon as the chapters
 are found and continues a chapters run rather than transcribing again
 (`store.ContinueChapters`, with the job's identity): a finished one from splitting, or
-one cancelled or failed at `chapter_detecting` (the server cancels a parked
+one cancelled at `chapter_detecting` (the server cancels a parked
 `chapters.detect` job as it queues the generate job, which waits for it to give way)
-going on there to detect again from its kept windows; a new chapters job takes up a
+going on there to detect again from its kept windows (one that failed there is
+cleared, never continued); a new chapters job takes up a
 chapters run cancelled (never one that failed) at asr or `chapter_detecting` the same way (BRIDGE-09). **Entry k of the list is logical
 position k by construction**: the classification it is grouped by is kept
 (`positions_detected.json`) and is the one the later stages use, its positions the

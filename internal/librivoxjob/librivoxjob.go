@@ -153,6 +153,7 @@ type Server interface {
 type Libraries interface {
 	Library(id int64) (link.Library, bool)
 	Status(id int64) (link.LibraryStatus, bool)
+	Statuses() []link.LibraryStatus
 }
 
 // Options wire the handler.
@@ -176,6 +177,10 @@ type Options struct {
 	Wait func(ctx context.Context, d time.Duration) error
 	// onProgress sees every progress the job reports (tests).
 	onProgress func(jobs.Progress)
+	// strayWait replaces strayWorkWait, and strayLooked runs between the
+	// sweep's look at a stray staging folder and its removal (tests).
+	strayWait   time.Duration
+	strayLooked func(rel string)
 }
 
 // Handler runs librivox.fetch on the download lane (capacity 1, shared with
@@ -184,9 +189,11 @@ type Handler struct {
 	o Options
 
 	// mu guards active: the fetches running here (Run), which Abandon and
-	// Sweep leave alone, and which a second claim of the same fetch can't join.
-	mu     sync.Mutex
-	active map[key]bool
+	// Sweep leave alone, and which a second claim of the same fetch can't join;
+	// and strayWalk, when Sweep last looked for staging folders no state names.
+	mu        sync.Mutex
+	active    map[key]bool
+	strayWalk time.Time
 }
 
 // New returns the handler.
@@ -236,7 +243,7 @@ func (h *Handler) Abandon(ctx context.Context, job jobs.Job) {
 	}
 	defer h.end(k)
 	st := h.loadState(p.LibraryID, p.LibrivoxID)
-	if st == nil || st.Placed {
+	if st == nil || st.Placed || h.serverUnknown(st) {
 		return
 	}
 	// The state goes with the folder it names: while the folder can't be
@@ -366,6 +373,14 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, p Params, rep *jobs.Rep
 	}
 	f := &fetch{p: p, lib: lib, mount: mount, rep: rep, st: h.loadState(lib.ID, p.LibrivoxID)}
 	if f.st != nil {
+		if !f.st.Unmapped.IsZero() {
+			// Mapped again: forgotten now, not at a next save a run may never
+			// make, so a later unmapping counts from its own start (endUnmapped).
+			f.st.Unmapped = time.Time{}
+			if err := h.saveState(p.LibrivoxID, f.st); err != nil {
+				h.o.Log.Warn("librivox: clearing a fetch's unmapped time failed", "library", lib.ID, "librivox_id", p.LibrivoxID, "err", err)
+			}
+		}
 		h.touchState(lib.ID, p.LibrivoxID, time.Now())
 	}
 	defer func() {

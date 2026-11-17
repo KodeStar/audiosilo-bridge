@@ -1101,7 +1101,7 @@ func (s *Scheduler) readmitRestartRecoverable(ctx context.Context) {
 			continue
 		}
 		if err := s.readmit(ctx, b); err != nil {
-			slog.Warn("restart-readmit: readmit failed", "book_id", b.ID, "err", err)
+			logReadmitFailed(slog.Default(), "restart-readmit", b.ID, err)
 			continue
 		}
 		_ = s.hub.PublishBook("stage.note", b.ID, map[string]any{
@@ -1156,7 +1156,7 @@ func (s *Scheduler) autoReadmitDue(ctx context.Context) {
 		err := s.readmit(ctx, b)
 		s.unreserve(b.ID)
 		if err != nil {
-			slog.Warn("auto-readmit: readmit failed", "book_id", b.ID, "err", err)
+			logReadmitFailed(slog.Default(), "auto-readmit", b.ID, err)
 			continue
 		}
 		_ = s.hub.PublishBook("stage.note", b.ID, map[string]any{"book_id": b.ID, "stage": b.State,

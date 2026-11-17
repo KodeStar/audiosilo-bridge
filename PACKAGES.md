@@ -152,6 +152,9 @@ internal/
             SMB mount never piles up blocked stats. The detected list's CheckCurrent
             stats the audio through it (pipeline.SourceStatWait, 10 s), and so does a
             generate job's look at where the book is now before it (bookFileNow).
+            bridge#65: ReadDirWithin(path, d) is os.ReadDir bounded the same way (one
+            read in flight per path), and audio.ResolveSourceWithin resolves a book's
+            audio through both, as the generate job's markersFile does.
   execfile/ writes files the process will exec at once with syscall.ForkLock
             held for reading from open to close, so a concurrent fork can't hold
             the write descriptor and make the exec fail with ETXTBSY (WriteFile).
@@ -2374,8 +2377,8 @@ internal/
             record a refusal. Deps: audible, link,
             secrets, source, store.
   audiblejob/ Phase 4a: audible.poll (light lane; params {"account", "template"}
-            strict (template, the account's path template, optional, <= 1024
-            bytes; an unknown field is refused); the server claims it with no
+            strict (template, the account's path template, optional, <= 500
+            bytes, the server's bound, bridge#47; an unknown field is refused); the server claims it with no
             library). Checks the account is this
             Bridge's and was mapped on the paired server (else fails asking to map
             it again), lists the Audible library (a refusal is the account's, the
@@ -2736,7 +2739,9 @@ internal/
             library, the paired server's id (bridge#69: a state of another
             server is dropped by loadState, so a run plans afresh and Abandon
             and the sweep never follow it into this server's same-numbered
-            library; none recorded counts as this server's), parent and whether
+            library; none recorded counts as this server's, and one recorded
+            while the paired server's id isn't known now is left alone by
+            Abandon and the sweep, bridge#71, serverUnknown), parent and whether
             the fetch made it, destination (staging is
             <parent>/.audiosilo-librivox-<id>, never stored),
             the partials' validators, then placed + count + bytes): a resumed run
@@ -2770,8 +2775,30 @@ internal/
             keeps one whose library isn't a checked writable mapping now or
             whose staging folder can't be removed, drops only the state of a
             placed book or of another server, and removes other old regular
-            files in the state folder (never a folder). A
-            staging folder whose state is gone is out of its reach.
+            files in the state folder (never a folder). bridge#71: an unplaced
+            fetch whose library's mapping is gone (not listed by the server, or
+            checked unmapped; an unwritable one isn't gone) gets the time in the
+            state (Unmapped, forgotten when a run finds it mapped again) and
+            ends StagingMaxAge later, its staging folder left in place; once a
+            day (strayWalkEvery) sweepStrays looks in every checked writable
+            books library's root and author folders (each folder read bounded,
+            fsutil.ReadDirWithin) for folders named exactly
+            .audiosilo-librivox-<id> of a project no state in any library, run
+            or held job knows (projectKnown), holding only what a fetch writes
+            there (stagingContents: "NN - title.ext" sections and their .part,
+            cover.jpg, .audiosilo/librivox.json, atomic-write temps; no folder
+            or symlink), its newest entry older than StagingMaxAge, and removes
+            them (the mapping checked again first; never the author folder):
+            clearStray opens the folder once, through the mount's root, and
+            looks and removes through that (a root of its own, so nothing
+            outside the folder looked at can go), the mapping checked once more
+            in between. It removes what it saw, each by its name, a folder only
+            when empty and never recursively, so a file put there since the
+            look stays, and a folder that is no longer the one looked at
+            (renamed away, a symlink in its place) is left. The look
+            and the removal run aside holding the project's reservation, the
+            sweep waiting strayWorkWait for them: a library that hangs after the
+            walk listed it is left for the next walk.
             Steps manifest, download (done/total = sections), cover, place,
             rescan. Result {library_id, path (the rescan's), librivox_id, files,
             bytes, adopted} (files and bytes: the sections and the cover;
@@ -2883,7 +2910,9 @@ internal/
             the engine to start when it hasn't, and waitEngine for a run cancelled
             (or taken back) while it waits for the engine, which never reaches end(). Retry(job): the engine's Retry for a
             parked engine book, else a poke for a job waiting in its own park
-            (ErrNotParked, store.ErrNotFound otherwise). ParkHint words every park code
+            (ErrNotParked, store.ErrNotFound otherwise; ErrBookChanged when the book was
+            parked again or cancelled between the engine's read and write, bridge#65).
+            ParkHint words every park code
             for the console and the page (a fresh start says to cancel this job first:
             the server keeps one open job per book). The budget_exceeded hint and the
             pipeline's budget park reasons (budgetExceededMsg, monthlyBudgetExceededMsg)
@@ -3042,17 +3071,22 @@ internal/
             CONTINUES a goal-chapters engine book at the same source path (not swept,
             no open job, the audio read): a done one whose manifest names the book's
             one file and whose list is current for it (CheckCurrent; the file out of
-            sight fails the job with errAudioUnseen, the run kept), from splitting; one cancelled or failed at chapter_detecting
+            sight fails the job with errAudioUnseen, the run kept), from splitting; one cancelled at chapter_detecting
             whose kept windows can run it again (pipeline.DetectionRerunnable), going
             on there, so the detection runs again from the window layer with the
             whole pipeline after it and nothing is transcribed again; or one
-            cancelled or failed at asr (a chapters job parked asr_worker_waiting,
+            cancelled at asr (a chapters job parked asr_worker_waiting,
             cancelled as a generate job is queued, bridge#24) whose windows manifest
             is in place for the file inspected (pipeline.TranscriptionContinuable),
             from splitting (its kept sentinel passes it on; a purge took that too),
-            asr transcribing only the windows it hadn't finished; each only
-            while the book is still the one file it was (audio.ResolveSource: a
-            folder that gained an audio file is a multi-file book now)
+            asr transcribing only the windows it hadn't finished (one that failed
+            there for a reason of its own is cleared, never continued, bridge#24);
+            each only
+            while the book is still the one file it was (markersFile, through
+            audio.ResolveSourceWithin: a folder that gained an audio file is a
+            multi-file book now; a look that doesn't answer in time, or that the
+            file system refuses, fails the job with errAudioUnseen, the run kept,
+            never cleared unseen)
             (continueChapters -> store.ContinueChapters with the state it checked and
             the one to go on at, under the engine's Hold, waited for as the delete
             would (holdBook: a stage the cancel just stopped may still be finishing;
@@ -3169,7 +3203,9 @@ internal/
             it reads what it waits on, so an end in between still wakes it.
             BRIDGE-09 (bridge#35, the owner's call): a chapters job whose book's chapters
             run was cancelled at asr or chapter_detecting (cancelledChapters: goal
-            chapters, a single file, scheduler.IsCancelled; one that failed for a reason
+            chapters, scheduler.IsCancelled, and a single file by markersFile, whose
+            look that doesn't answer in time or is refused fails the job with
+            errAudioUnseen, the run kept; one that failed for a reason
             of its own is cleared, so asking again never fails the same way forever)
             takes it up again (resumeChapters, under the hold,
             through store.ContinueReadalong with goal chapters; resumesAt, shared with
@@ -3550,7 +3586,7 @@ internal/
             (can_contribute computed with them, since resolving can shell out to
             gh), with the agent's readiness and the budget read fresh each beat. The
             Backend adds Job(id), RetryJob (generate.Retry: ErrNotFound -> 404,
-            ErrNotParked -> 409) and Engine (the agent container from
+            ErrNotParked and ErrBookChanged -> 409) and Engine (the agent container from
             agentbox.Status, ASR capability, budgets and this month's spend, the
             retention).
   api/      transport-only HTTP of the Bridge's page (/api/*): login (rate limited),
@@ -3640,8 +3676,10 @@ web/          the Bridge's page: Vite + React 19 + TS + Tailwind v4 (npm, Node 2
               default, and under prefers-color-scheme light index.css redefines the brand
               tokens and the stock state shades the page uses with the server console's
               light palette (src/theme.test.ts fails a token or a used red/amber/green/pink
-              shade the light block misses); public/favicon.svg (also in the
-              placeholder) is linked from index.html. The Jobs tab names a known kind
+              shade the light block misses, and the wordmark's "Bridge" below 4.5:1 on
+              the surface in either theme); public/favicon.svg is the logo's one source
+              (linked from index.html, the Wordmark's glyph; the placeholder's byte copy
+              is pinned to it by internal/web's test, bridge#65). The Jobs tab names a known kind
               in words only (the kind is the label's tooltip) and leads a park with its
               hint, the engine's message a Details line under it (bridge#13).
               Phase 1a: the hash is a Route (routeFromHash: "#jobs", "#/logs", and

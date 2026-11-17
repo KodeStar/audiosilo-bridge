@@ -126,6 +126,9 @@ describe('StatusTab', () => {
 
     const address = await screen.findByLabelText('Server address');
     expect(address).toHaveValue('http://audiosilo:8080');
+    // The hint is a LAN address, never the compose service name a server run
+    // as a binary or on another machine can't be reached by (server#273).
+    expect(address).toHaveAttribute('placeholder', 'http://192.168.1.10:8080');
     expect(screen.getByText(/the server refused the token/)).toBeInTheDocument();
 
     await userEvent.type(screen.getByLabelText('Pairing code'), ' ABCD-1234 ');

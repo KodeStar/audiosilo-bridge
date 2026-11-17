@@ -31,10 +31,10 @@ func TestStatWithinAnswers(t *testing.T) {
 func TestStatWithinTimesOutAndSharesTheStatOut(t *testing.T) {
 	t.Parallel()
 	const path = "/hung/mount/book.m4b"
-	c := &statCall{done: make(chan struct{}), started: time.Now()}
-	statsMu.Lock()
-	statsInFlight[path] = c // a stat stuck on a hung mount
-	statsMu.Unlock()
+	c := &lookCall[fs.FileInfo]{done: make(chan struct{}), started: time.Now()}
+	stats.mu.Lock()
+	stats.calls[path] = c // a stat stuck on a hung mount
+	stats.mu.Unlock()
 	for range 3 {
 		if _, err := StatWithin(path, 10*time.Millisecond); !errors.Is(err, ErrStatTimeout) {
 			t.Fatalf("a hung stat = %v, want ErrStatTimeout", err)
@@ -46,17 +46,55 @@ func TestStatWithinTimesOutAndSharesTheStatOut(t *testing.T) {
 	if _, err := StatWithin(path, 5*time.Second); !errors.Is(err, ErrStatTimeout) || time.Since(began) > time.Second {
 		t.Fatalf("joining a stat out past d = %v after %v, want ErrStatTimeout at once", err, time.Since(began))
 	}
-	statsMu.Lock()
-	if statsInFlight[path] != c {
-		statsMu.Unlock()
+	stats.mu.Lock()
+	if stats.calls[path] != c {
+		stats.mu.Unlock()
 		t.Fatal("a second stat of the hung path was started")
 	}
 	// The mount answers.
 	c.err = fs.ErrNotExist
-	delete(statsInFlight, path)
-	statsMu.Unlock()
+	delete(stats.calls, path)
+	stats.mu.Unlock()
 	close(c.done)
 	if _, err := StatWithin(path, 5*time.Second); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("after the mount answered = %v, want a fresh stat's ErrNotExist", err)
+	}
+}
+
+// ReadDirWithin answers as os.ReadDir does for a file system that answers, and
+// a folder read a hung mount holds is ErrStatTimeout, a second ask waiting on
+// the read already out (bridge#65).
+func TestReadDirWithin(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.mp3"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := ReadDirWithin(dir, 5*time.Second)
+	if err != nil || len(entries) != 1 || entries[0].Name() != "a.mp3" {
+		t.Fatalf("ReadDirWithin = %v, %v", entries, err)
+	}
+	if _, err := ReadDirWithin(filepath.Join(dir, "gone"), 5*time.Second); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("a missing folder = %v, want ErrNotExist", err)
+	}
+
+	const hung = "/hung/mount/Author/Book"
+	c := &lookCall[[]fs.DirEntry]{done: make(chan struct{}), started: time.Now()}
+	readDirs.mu.Lock()
+	readDirs.calls[hung] = c // a folder read stuck on a hung mount
+	readDirs.mu.Unlock()
+	for range 2 {
+		var pe *fs.PathError
+		if _, err := ReadDirWithin(hung, 10*time.Millisecond); !errors.Is(err, ErrStatTimeout) || !errors.As(err, &pe) || pe.Op != "readdir" {
+			t.Fatalf("a hung folder read = %v, want a readdir ErrStatTimeout", err)
+		}
+	}
+	readDirs.mu.Lock()
+	same := readDirs.calls[hung] == c
+	delete(readDirs.calls, hung)
+	readDirs.mu.Unlock()
+	close(c.done)
+	if !same {
+		t.Fatal("a second read of the hung folder was started")
 	}
 }

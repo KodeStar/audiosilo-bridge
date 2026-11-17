@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/kodestar/audiosilo-bridge/internal/source"
@@ -99,7 +100,7 @@ func (c *Client) Library(ctx context.Context) ([]source.Record, error) {
 			}
 			seen[k] = true
 			recs = append(recs, it.toRecord(now))
-			it.logOddDate(c.set.log, now)
+			it.logOddDate(c.set.log, c.set.oddDates, now)
 		}
 		// A short page is the last one. A full page that contributed nothing new means
 		// the endpoint is replaying a page instead of advancing - stop either way.
@@ -204,11 +205,36 @@ func (it libItem) dates(now time.Time) (date string, odd bool) {
 	return date, odd
 }
 
-// logOddDate logs, once per title a listing returns, the raw fields behind a
-// date it set aside, so a title stored oddly can be explained from the log.
-// Only library fields: never a token, the customer id or a request.
-func (it libItem) logOddDate(log *slog.Logger, now time.Time) {
-	if _, odd := it.dates(now); log == nil || !odd {
+// oddDateLog is the odd dates already logged, by ASIN and raw dates: a title
+// whose date was set aside is explained once, not at every poll (bridge#44);
+// one whose raw dates change is logged again.
+type oddDateLog struct {
+	mu   sync.Mutex
+	seen map[string]bool
+}
+
+// oddDatesLogged is the process's memory of the odd dates it logged.
+var oddDatesLogged = newOddDateLog()
+
+func newOddDateLog() *oddDateLog { return &oddDateLog{seen: map[string]bool{}} }
+
+// first reports whether key is new, remembering it.
+func (o *oddDateLog) first(key string) bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.seen[key] {
+		return false
+	}
+	o.seen[key] = true
+	return true
+}
+
+// logOddDate logs the raw fields behind a date the listing set aside, once per
+// title and dates in the process (seen), so a title stored oddly can be
+// explained from the log without a line at every poll. Only library fields:
+// never a token, the customer id or a request.
+func (it libItem) logOddDate(log *slog.Logger, seen *oddDateLog, now time.Time) {
+	if _, odd := it.dates(now); log == nil || !odd || !seen.first(it.ASIN+"|"+it.ReleaseDate+"|"+it.IssueDate) {
 		return
 	}
 	rights := "absent"

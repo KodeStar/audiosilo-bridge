@@ -134,6 +134,9 @@ type Handler struct {
 	// (bridge#24). endMu guards it.
 	endMu sync.Mutex
 	ended chan struct{}
+	// beforeEnd, a seam (tests), runs in release between its first stop and the
+	// job's recorded end: the window another job's end can land in.
+	beforeEnd func(jobID int64)
 }
 
 // endSignal is the channel the next job end here closes. A waiter takes it
@@ -560,6 +563,9 @@ func (h *Handler) release(ctx context.Context, job jobs.Job, bookID int64, stop 
 		return
 	}
 	followed := stop && h.stopBook(ctx, job.ID, bookID)
+	if h.beforeEnd != nil {
+		h.beforeEnd(job.ID)
+	}
 	if err := h.o.DB.EndGenerateBook(ctx, job.ID, h.now()); err != nil {
 		h.o.Log.Warn("generate: recording the job's end failed", "job", job.ID, "err", err)
 	}
@@ -1537,6 +1543,10 @@ func (h *Handler) rescan(ctx context.Context, r *run) {
 // ErrNotParked is a Retry for a job that isn't parked.
 var ErrNotParked = errors.New("the job isn't waiting on anything a retry would help")
 
+// ErrBookChanged is a Retry that met the book parked again, or cancelled,
+// between its read and its write (store.ErrStatusChanged): nothing was done.
+var ErrBookChanged = errors.New("the book changed meanwhile; try again")
+
 // Retry re-admits a parked job's engine book (the engine's own Retry), or wakes a
 // job parked before the engine has its book (the book's folder wasn't writable)
 // to check again now. store.ErrNotFound when the job isn't one of this handler's.
@@ -1587,8 +1597,11 @@ func (h *Handler) Retry(ctx context.Context, jobID int64) error {
 		return ErrNotParked
 	}
 	if err := eng.Retry(ctx, b.ID); err != nil {
-		if errors.Is(err, scheduler.ErrInvalidOp) {
+		switch {
+		case errors.Is(err, scheduler.ErrInvalidOp):
 			return ErrNotParked
+		case errors.Is(err, store.ErrStatusChanged):
+			return ErrBookChanged
 		}
 		return err
 	}

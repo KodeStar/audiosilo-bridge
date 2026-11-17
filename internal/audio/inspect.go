@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -34,7 +35,22 @@ type Source struct {
 // file (marker style); a directory of several audio files is a multi-file book
 // (one chapter per file, in name order).
 func ResolveSource(sourcePath string) (Source, error) {
-	info, err := os.Stat(sourcePath)
+	return resolveSource(sourcePath, os.Stat, os.ReadDir)
+}
+
+// ResolveSourceWithin is ResolveSource with each look at the file system
+// bounded by d (fsutil.StatWithin, fsutil.ReadDirWithin): a hung mount is
+// fsutil.ErrStatTimeout, never a caller held (bridge#65).
+func ResolveSourceWithin(sourcePath string, d time.Duration) (Source, error) {
+	return resolveSource(sourcePath,
+		func(p string) (fs.FileInfo, error) { return fsutil.StatWithin(p, d) },
+		func(p string) ([]fs.DirEntry, error) { return fsutil.ReadDirWithin(p, d) })
+}
+
+// resolveSource is ResolveSource with its stat and its folder read.
+func resolveSource(sourcePath string, stat func(string) (fs.FileInfo, error),
+	readDir func(string) ([]fs.DirEntry, error)) (Source, error) {
+	info, err := stat(sourcePath)
 	if err != nil {
 		return Source{}, fmt.Errorf("stat source: %w", err)
 	}
@@ -44,10 +60,11 @@ func ResolveSource(sourcePath string) (Source, error) {
 		}
 		return Source{Style: StyleMarkers, BookFile: sourcePath}, nil
 	}
-	files, err := audioFilesIn(sourcePath)
+	entries, err := readDir(sourcePath)
 	if err != nil {
 		return Source{}, err
 	}
+	files := audioFilesIn(sourcePath, entries)
 	switch len(files) {
 	case 0:
 		return Source{}, fmt.Errorf("no audio files in %q", sourcePath)
@@ -58,7 +75,7 @@ func ResolveSource(sourcePath string) (Source, error) {
 	}
 }
 
-// audioFilesIn lists the audio files directly in dir (non-recursive), in
+// audioFilesIn lists the audio files among dir's entries (non-recursive), in
 // numeric-aware ("natural") name order so multi-file chapter order is stable and
 // intuitive: "Chapter 2" sorts before "Chapter 10", which a plain byte sort gets
 // wrong for unpadded names. The order IS audiosilo-meta pkg/scan's exported
@@ -67,11 +84,7 @@ func ResolveSource(sourcePath string) (Source, error) {
 // folder. That matters because this enumeration determines chapter numbers,
 // which spoiler-gate community sidecars (position.chapter) - a divergent local
 // copy could silently misalign spoiler positions.
-func audioFilesIn(dir string) ([]string, error) {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil, err
-	}
+func audioFilesIn(dir string, entries []fs.DirEntry) []string {
 	var files []string
 	for _, e := range entries {
 		if e.IsDir() || !IsAudio(e.Name()) {
@@ -82,7 +95,7 @@ func audioFilesIn(dir string) ([]string, error) {
 	sort.SliceStable(files, func(i, j int) bool {
 		return scan.NaturalLess(filepath.Base(files[i]), filepath.Base(files[j]))
 	})
-	return files, nil
+	return files
 }
 
 // Inspect probes a book's source audio, writes probe.json + a manifest.json into

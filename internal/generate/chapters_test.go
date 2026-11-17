@@ -1609,6 +1609,118 @@ func TestChaptersJobDoesNotTakeUpAFailedRun(t *testing.T) {
 	}
 }
 
+// A generate job never continues a chapters run that FAILED at asr for a reason
+// of its own (bridge#24): it clears it and starts its own run, as a chapters
+// job's re-run does; only a cancelled run is taken up.
+func TestGenerateDoesNotContinueAFailedRun(t *testing.T) {
+	t.Parallel()
+	hr := newHarness(t)
+	stop := hr.runner(hr.h, hr.h.ChaptersJob())
+	defer stop()
+	first := parkChaptersAtASR(hr, 97)
+	hr.srv.set(func() { hr.srv.cancel[97] = true })
+	hr.waitFor("the engine book stopped", func() bool {
+		b, err := hr.db.GetBook(context.Background(), first.ID)
+		return err == nil && scheduler.IsCancelled(b)
+	})
+	if err := hr.db.SetBookStatus(context.Background(), first.ID, string(state.StatusFailed), "asr: the decoder crashed", ""); err != nil {
+		t.Fatal(err)
+	}
+	hr.srv.add(98, "Loose.m4b", `{}`)
+	waitDone(hr, 98)
+	if b := hr.engineBook(98); b.ID == first.ID {
+		t.Fatalf("the generate job continued a failed chapters run (book %d)", b.ID)
+	}
+}
+
+// A cancelled chapters run whose audio can't be looked at now (its folder
+// refuses the look: a mount gone for a moment) is never read as "not a one-file
+// book" and cleared: a generate job's continue and a chapters job's take-up both
+// fail with errAudioUnseen, the run kept for the next job (bridge#24). A place
+// that answers and isn't a one-file book is no error.
+func TestAChaptersRunIsKeptWhileItsAudioIsOutOfSight(t *testing.T) {
+	t.Parallel()
+	if os.Geteuid() == 0 {
+		t.Skip("root reads a folder whatever its mode")
+	}
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "Loose.m4b"), "abcdef")
+	if file, err := markersFile(dir); err != nil || file != filepath.Join(dir, "Loose.m4b") {
+		t.Fatalf("a one-file book's folder = %q, %v", file, err)
+	}
+	mustWrite(t, filepath.Join(dir, "Second.m4b"), "abcdef")
+	if file, err := markersFile(dir); err != nil || file != "" {
+		t.Fatalf("a folder of two files = %q, %v, want none and no error", file, err)
+	}
+	if err := os.Chmod(dir, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) }) //nolint:gosec // test
+	if file, err := markersFile(dir); err == nil {
+		t.Fatalf("a folder that can't be read = %q, want the look's error", file)
+	}
+	old := store.Book{ID: 1, SourcePath: dir, State: string(state.ASR), Goal: state.GoalChapters,
+		Status: string(state.StatusFailed), Error: "cancelled by user"}
+	if !scheduler.IsCancelled(old) {
+		t.Fatal("the book isn't a cancelled one")
+	}
+	h := New(Options{})
+	if ok, err := h.continueChapters(context.Background(), nil, &run{source: SourceAudio}, old, 0); ok || !errors.Is(err, errAudioUnseen) {
+		t.Fatalf("continuing a run whose audio is out of sight = %v, %v, want errAudioUnseen", ok, err)
+	}
+	if ok, err := h.resumeChapters(context.Background(), nil, &run{}, old); ok || !errors.Is(err, errAudioUnseen) {
+		t.Fatalf("taking up a run whose audio is out of sight = %v, %v, want errAudioUnseen", ok, err)
+	}
+}
+
+// bridge#37, deterministically: the later of two ends whose first stops each
+// found the other open stops the book with the stop it tries again once its
+// end is recorded. Job A's first stop leaves the book to job B; B then ends
+// whole in A's window (its stops both find A open); A's retry stops it.
+func TestReleaseRetriesTheStopAfterAConcurrentEnd(t *testing.T) {
+	t.Parallel()
+	hr := newHarness(t)
+	ctx := context.Background()
+	batch, err := hr.db.CreateBatch(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := hr.db.CreateBook(ctx, store.NewBook{BatchID: batch.ID, SourcePath: "/lib/window",
+		WorkDir: filepath.Join(hr.work, "window"), Title: "Window", State: string(state.ASR)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := hr.db.SetBookStatus(ctx, b.ID, string(state.StatusPaused), "", ""); err != nil {
+		t.Fatal(err)
+	}
+	const a, other = 2001, 2002
+	for _, id := range []int64{a, other} {
+		if err := hr.db.RecordClaim(ctx, store.ServerJob{ID: id, Kind: Kind, Attempt: 1}); err != nil {
+			t.Fatal(err)
+		}
+		if err := hr.db.PutGenerateBook(ctx, store.GenerateBook{ServerJobID: id, BookID: &b.ID, LibraryID: 1, RelPath: "window"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	hr.h.beforeEnd = func(id int64) {
+		if id != a {
+			return
+		}
+		hr.h.release(ctx, jobs.Job{ID: other, Kind: Kind, Attempt: 1}, b.ID, true)
+		if got, _ := hr.db.GetBook(ctx, b.ID); scheduler.IsCancelled(got) {
+			t.Error("job B stopped the book while job A was still open")
+		}
+	}
+	hr.h.release(ctx, jobs.Job{ID: a, Kind: Kind, Attempt: 1}, b.ID, true)
+	got, err := hr.db.GetBook(ctx, b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !scheduler.IsCancelled(got) {
+		t.Fatalf("the book after both ends: status=%q error=%q, want stopped", got.Status, got.Error)
+	}
+}
+
 // bridge#37: two jobs following one engine book that end at the same moment
 // each find the other still open at their first stop, and each leaves the book
 // to the other; the stop tried again once each end is recorded makes sure the

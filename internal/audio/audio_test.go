@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -18,6 +19,7 @@ import (
 	"github.com/kodestar/audiosilo-meta/pkg/scan"
 
 	"github.com/kodestar/audiosilo-bridge/internal/execfile"
+	"github.com/kodestar/audiosilo-bridge/internal/fsutil"
 )
 
 // --- pure marker parsing / contiguity (no ffmpeg) ---
@@ -596,17 +598,44 @@ func TestNaturalOrder(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	files, err := audioFilesIn(dir)
-	if err != nil {
-		t.Fatalf("audioFilesIn: %v", err)
+	src, err := ResolveSource(dir)
+	if err != nil || src.Style != StyleFiles {
+		t.Fatalf("ResolveSource: %+v, %v", src, err)
 	}
 	var bases []string
-	for _, f := range files {
+	for _, f := range src.Files {
 		bases = append(bases, filepath.Base(f))
 	}
 	want := []string{"Chapter 1.mp3", "Chapter 2.mp3", "Chapter 10.mp3"}
 	if !reflect.DeepEqual(bases, want) {
 		t.Errorf("audioFilesIn order = %v, want %v", bases, want)
+	}
+}
+
+// ResolveSourceWithin answers as ResolveSource does on a file system that
+// answers, and a look that doesn't answer in time is fsutil.ErrStatTimeout
+// (bridge#65).
+func TestResolveSourceWithin(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	book := filepath.Join(dir, "Book.m4b")
+	if err := os.WriteFile(book, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{dir, book} {
+		src, err := ResolveSourceWithin(p, 5*time.Second)
+		if err != nil || src.Style != StyleMarkers || src.BookFile != book {
+			t.Fatalf("ResolveSourceWithin(%s) = %+v, %v", p, src, err)
+		}
+	}
+	if _, err := ResolveSourceWithin(filepath.Join(dir, "gone"), 5*time.Second); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("a missing book = %v", err)
+	}
+	hung := func(p string) ([]fs.DirEntry, error) {
+		return nil, &fs.PathError{Op: "readdir", Path: p, Err: fsutil.ErrStatTimeout}
+	}
+	if _, err := resolveSource(dir, os.Stat, hung); !errors.Is(err, fsutil.ErrStatTimeout) {
+		t.Fatalf("a hung folder read = %v, want ErrStatTimeout", err)
 	}
 }
 
