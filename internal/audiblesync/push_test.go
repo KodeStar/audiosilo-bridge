@@ -287,12 +287,12 @@ func TestPushUserUnavailable(t *testing.T) {
 	}
 }
 
-// A server with no progress feed (older than 2.6.0: its 404 names no
-// account) pauses the account for an hour and says to update, rather than
-// failing every minute; an unknown account is still the short wait.
+// A server with no progress feed (older than 2.6.0: link's ErrNoAudibleSync)
+// pauses the account for an hour and says to update, rather than failing
+// every minute.
 func TestPushOldServer(t *testing.T) {
 	e := newEnv(t)
-	e.srv.feedErr = &link.APIError{Status: http.StatusNotFound, Code: "not_found"}
+	e.srv.feedErr = link.ErrNoAudibleSync
 	p := NewPusher(e.o)
 	p.Tick(context.Background())
 	if a := e.account(t); !strings.Contains(a.SyncError, "update it to 2.6.0") || a.SyncRetryAt != "" {
@@ -307,10 +307,6 @@ func TestPushOldServer(t *testing.T) {
 	p.Tick(context.Background())
 	if len(e.srv.feedAsks) != 2 {
 		t.Fatalf("not asked again after the hour: %v", e.srv.feedAsks)
-	}
-	if isOldServer(link.ErrUnknownAccount) || isOldServer(fmt.Errorf("%w: %w", link.ErrUnknownAccount, &link.APIError{Status: http.StatusNotFound})) ||
-		isOldServer(&link.APIError{Status: http.StatusServiceUnavailable}) {
-		t.Fatal("an unknown account or another answer read as an old server")
 	}
 }
 

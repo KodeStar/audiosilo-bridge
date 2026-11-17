@@ -85,6 +85,10 @@ func TestAudibleSyncWireMirror(t *testing.T) {
 	if _, err := c.PostAudibleListening(ctx, "offoff00", AudibleListening{SentAt: "x"}); !errors.Is(err, ErrSyncOff) {
 		t.Fatalf("sync off = %v", err)
 	}
+	// A 404 naming no account is a server with no such route (before 2.6.0).
+	if _, err := c.PostAudibleListening(ctx, "nosuch00", AudibleListening{SentAt: "x"}); !errors.Is(err, ErrNoAudibleSync) {
+		t.Fatalf("old server = %v", err)
+	}
 
 	page, err := c.AudibleProgress(ctx, "abcd1234", "Q0", 0)
 	if err != nil || len(page.Rows) != 1 || page.Next != "Q1" || !page.More ||

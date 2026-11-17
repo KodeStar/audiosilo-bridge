@@ -25,8 +25,8 @@ const (
 	offWait     = 5 * time.Minute
 	refusedWait = 15 * time.Minute
 	// oldServerWait is how long an account is left when the server has no
-	// progress feed at all (a 404 that isn't unknown_account: a server older
-	// than 2.6.0, before Audible sync), rather than asking every minute.
+	// progress feed at all (link.ErrNoAudibleSync: a server older than 2.6.0,
+	// before Audible sync), rather than asking every minute.
 	oldServerWait = time.Hour
 	// errorWait is the least wait after a failure (the server's or Audible's).
 	errorWait = 2 * time.Minute
@@ -158,10 +158,10 @@ func (p *Pusher) account(ctx context.Context, srv Server, a store.AudibleAccount
 				p.o.Log.Warn("audible: resetting the push's cursor failed", "account", a.ID, "err", err)
 			}
 			return
-		case isOldServer(err):
+		case errors.Is(err, link.ErrNoAudibleSync):
 			p.o.Log.Warn("audible: the server has no places feed (it is older than 2.6.0); asking again in an hour", "account", a.ID)
 			p.pause(a.ID, now.Add(oldServerWait))
-			p.o.health(ctx, a, errors.New("the server doesn't sync places with Audible: update it to 2.6.0 or later"), time.Time{})
+			p.o.health(ctx, a, err, time.Time{})
 			return
 		case err != nil:
 			if ctx.Err() == nil {
@@ -202,15 +202,6 @@ func (p *Pusher) account(ctx context.Context, srv Server, a store.AudibleAccount
 		}
 	}
 	p.due(ctx, a, now)
-}
-
-// isOldServer reports whether err is the server answering the progress feed
-// with a 404 that names no account (link maps unknown_account to
-// ErrUnknownAccount): the route itself is missing, a server before Audible
-// sync.
-func isOldServer(err error) bool {
-	var e *link.APIError
-	return errors.As(err, &e) && e.Status == http.StatusNotFound && !errors.Is(err, link.ErrUnknownAccount)
 }
 
 // row records one server place: a place on a listed title's book that moved

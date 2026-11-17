@@ -145,6 +145,9 @@ var (
 	// ErrBadCursor is AudibleProgress's 400 for a since the server can't read
 	// (a server restored from a backup, its feed rebuilt): read from the start.
 	ErrBadCursor = errors.New("the server refused the progress cursor")
+	// ErrNoAudibleSync is a 404 that names no account: the route itself is
+	// missing, a server older than 2.6.0 (before Audible sync).
+	ErrNoAudibleSync = errors.New("the server doesn't sync places with Audible: update it to 2.6.0 or later")
 )
 
 // syncError maps the sync routes' refusals.
@@ -160,13 +163,15 @@ func syncError(err error) error {
 		return ErrUserUnavailable
 	case e.Status == http.StatusNotFound && e.Code == "unknown_account":
 		return ErrUnknownAccount
+	case e.Status == http.StatusNotFound:
+		return ErrNoAudibleSync
 	}
 	return err
 }
 
 // PostAudibleListening posts account's places on Audible for its person
 // (POST /bridge/audible/accounts/{account}/listening). ErrSyncOff,
-// ErrUserUnavailable, ErrUnknownAccount.
+// ErrUserUnavailable, ErrUnknownAccount, ErrNoAudibleSync.
 func (c *Client) PostAudibleListening(ctx context.Context, account string, in AudibleListening) (*SyncAnswer, error) {
 	if in.Events == nil {
 		in.Events = []AudibleEvent{}
@@ -180,8 +185,8 @@ func (c *Client) PostAudibleListening(ctx context.Context, account string, in Au
 
 // AudibleProgress reads one page of account's person's places changed after
 // since ("" from the start), at most limit (0 for MaxAudibleProgress).
-// ErrSyncOff, ErrUserUnavailable, ErrUnknownAccount, ErrBadCursor (a 400 when
-// since was sent).
+// ErrSyncOff, ErrUserUnavailable, ErrUnknownAccount, ErrNoAudibleSync,
+// ErrBadCursor (a 400 when since was sent).
 func (c *Client) AudibleProgress(ctx context.Context, account, since string, limit int) (*AudibleProgress, error) {
 	if limit <= 0 {
 		limit = MaxAudibleProgress
