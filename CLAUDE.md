@@ -213,7 +213,9 @@ in PACKAGES.md.
   3c-1) and `bridge.json` in the book's `.audiosilo/` (a single-file book's prefixed
   `<stem>.`). `librivox.fetch` (LibriVox L6) writes whole new book folders: its own
   dot staging folder beside the destination (removed outright on a cancel or a
-  failure: it holds only the job's own downloads), then one no-replace rename,
+  failure, or by the sweep once abandoned: it holds only the job's own downloads;
+  a staging-named folder no state knows goes only while it holds nothing else),
+  then one no-replace rename,
   never into an existing book. Podcast writers
   require a podcast-kind library and its checked marker mapping (a job claimed
   before the check waits for it); they write only the root marker, show folders,

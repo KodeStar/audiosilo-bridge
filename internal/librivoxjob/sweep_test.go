@@ -353,17 +353,118 @@ func TestSweepEndsAStateWhoseLibraryIsGone(t *testing.T) {
 	}
 }
 
-// mkStray makes a staging-named folder rel in the library, last changed at.
-func (x *harness) mkStray(t *testing.T, rel string, at time.Time) {
+// mkStray makes a staging-named folder rel in the library holding what a fetch
+// writes there (a section, a partial, the cover, the marker and atomic writes'
+// temps) and the extra files given, every one of them last changed at.
+func (x *harness) mkStray(t *testing.T, rel string, at time.Time, extra ...string) {
 	t.Helper()
-	if err := os.MkdirAll(x.path(rel), 0o755); err != nil {
+	files := append([]string{"01 - Chapter One.mp3", "02 - Chapter Two.mp3.part", coverName, ".audiosilo-tmp-0a1b2c",
+		markerRel, ".audiosilo/.audiosilo-tmp-3d4e5f"}, extra...)
+	for _, f := range files {
+		p := filepath.Join(x.path(rel), filepath.FromSlash(f))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil { //nolint:gosec // test
+			t.Fatal(err)
+		}
+	}
+	err := filepath.WalkDir(x.path(rel), func(p string, _ os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		return os.Chtimes(p, at, at)
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(x.path(rel), "01.mp3"), []byte("x"), 0o644); err != nil { //nolint:gosec // test
-		t.Fatal(err)
-	}
+}
+
+// touchStray sets the folder rel in the library as last changed at, after an
+// entry was added to it.
+func (x *harness) touchStray(t *testing.T, rel string, at time.Time) {
+	t.Helper()
 	if err := os.Chtimes(x.path(rel), at, at); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// A staging-named folder the sweep can't tell is only a fetch's leftovers
+// stays, however old: one holding a file a fetch never names, a folder or a
+// symlink (in it or in its .audiosilo/), one of a project another library's
+// state knows, and one whose newest file is young (bridge#71).
+func TestSweepLeavesStagingItCantVouchFor(t *testing.T) {
+	x := newHarness(t)
+	now := time.Now()
+	old := now.Add(-StagingMaxAge - time.Hour)
+	foreign := map[string]string{
+		stagingName(90): "notes.txt",
+		stagingName(91): "01.mp3", // not the "NN - title" a fetch names a section
+		stagingName(92): "Extras/01 - Bonus.mp3",
+		stagingName(93): ".audiosilo/characters.json",
+	}
+	for rel, extra := range foreign {
+		x.mkStray(t, rel, old, extra)
+	}
+	x.mkStray(t, stagingName(94), old)
+	if err := os.Symlink(x.stateDir, filepath.Join(x.path(stagingName(94)), "03 - Linked.mp3")); err != nil {
+		t.Fatal(err)
+	}
+	x.touchStray(t, stagingName(94), old)
+	// Project 95's state is library 4's (this folder as another mount reaches it).
+	x.mkStray(t, stagingName(95), old)
+	if err := os.MkdirAll(x.stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(x.stateDir, "4-95.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Project 96's partial still grows.
+	x.mkStray(t, stagingName(96), old)
+	if err := os.WriteFile(filepath.Join(x.path(stagingName(96)), "03 - Three.mp3.part"), []byte("x"), 0o644); err != nil { //nolint:gosec // test
+		t.Fatal(err)
+	}
+	x.touchStray(t, stagingName(96), old)
+	x.mkStray(t, stagingName(97), old) // only a fetch's leftovers: goes
+	// A user's folder named like a staging folder but not exactly one.
+	similar := []string{".audiosilo-librivox-097", ".audiosilo-librivox-97 (copy)", "audiosilo-librivox-97",
+		".audiosilo-librivox-+97", ".Audiosilo-librivox-89", ".audiosilo-librivox-97.bak"}
+	for _, rel := range similar {
+		x.mkStray(t, rel, old)
+	}
+	// A staging-named symlink out of the library, and an author folder that
+	// is a symlink out of it holding a staging folder: neither is followed.
+	outside := t.TempDir()
+	x.mkStray(t, "../"+filepath.Base(outside)+"/"+stagingName(98), old) // fetch-like leftovers outside
+	if err := os.Symlink(filepath.Join(outside, stagingName(98)), x.path(stagingName(98))); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, x.path("Linked Author")); err != nil {
+		t.Fatal(err)
+	}
+
+	x.h.Sweep(now, nil)
+	for _, rel := range similar {
+		if !x.exists(rel) {
+			t.Errorf("the user's folder %s went", rel)
+		}
+	}
+	if !x.exists(stagingName(98)) {
+		t.Error("the staging-named symlink went")
+	}
+	if _, err := os.Stat(filepath.Join(outside, stagingName(98), coverName)); err != nil {
+		t.Errorf("a staging folder outside the library, reached by a symlink, was emptied: %v", err)
+	}
+	for _, id := range []int{90, 91, 92, 93, 94, 95, 96} {
+		if !x.exists(stagingName(id)) {
+			t.Errorf("%s went", stagingName(id))
+		}
+	}
+	if x.exists(stagingName(97)) {
+		t.Error("a fetch's leftovers stayed")
+	}
+	if _, err := os.Stat(x.stateDir); err != nil {
+		t.Fatalf("the symlink's target went: %v", err)
 	}
 }
 

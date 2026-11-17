@@ -2781,9 +2781,14 @@ internal/
             state (Unmapped, forgotten when a run finds it mapped again) and
             ends StagingMaxAge later, its staging folder left in place; once a
             day (strayWalkEvery) sweepStrays looks in every checked writable
-            books library's root and author folders for staging folders no
-            state names, older than StagingMaxAge, and removes them (never a
-            held or active fetch's, never the author folder).
+            books library's root and author folders (each folder read bounded,
+            fsutil.ReadDirWithin) for folders named exactly
+            .audiosilo-librivox-<id> of a project no state in any library, run
+            or held job knows (projectKnown), holding only what a fetch writes
+            there (stagingContents: "NN - title.ext" sections and their .part,
+            cover.jpg, .audiosilo/librivox.json, atomic-write temps; no folder
+            or symlink), its newest entry older than StagingMaxAge, and removes
+            them (the mapping checked again first; never the author folder).
             Steps manifest, download (done/total = sections), cover, place,
             rescan. Result {library_id, path (the rescan's), librivox_id, files,
             bytes, adopted} (files and bytes: the sections and the cover;

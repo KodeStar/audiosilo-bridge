@@ -62,8 +62,11 @@ func WriteFileAtomic(path string, data []byte, perm fs.FileMode) error {
 	return nil
 }
 
+// RootTempPrefix begins the name of WriteRootAtomic's temp file.
+const RootTempPrefix = ".audiosilo-tmp-"
+
 // WriteRootAtomic writes data to dir/name inside root through an exclusive hidden
-// temp file in dir (".audiosilo-tmp-<random>"), fsync and rename, so every step
+// temp file in dir (RootTempPrefix + random), fsync and rename, so every step
 // stays inside root. perm is set on the file explicitly. beforeRename, when not
 // nil, runs last: its error leaves the destination untouched.
 func WriteRootAtomic(root *os.Root, dir, name string, data []byte, perm fs.FileMode, beforeRename func() error) error {
@@ -71,7 +74,7 @@ func WriteRootAtomic(root *os.Root, dir, name string, data []byte, perm fs.FileM
 	if _, err := rand.Read(random[:]); err != nil {
 		return err
 	}
-	tmp := dir + "/.audiosilo-tmp-" + hex.EncodeToString(random[:])
+	tmp := dir + "/" + RootTempPrefix + hex.EncodeToString(random[:])
 	file, err := root.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, perm)
 	if err != nil {
 		return err
