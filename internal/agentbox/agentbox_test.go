@@ -939,10 +939,12 @@ func TestHandoffCredentialIsStaged(t *testing.T) {
 }
 
 // credentialModes is the staged credential dir's and file's modes and the
-// file's group, read by the fake runner before it answers.
+// file's group, and how the runner's take went for a uid in the file's group
+// and for any other uid (takeAs), read by the fake runner before it answers.
 type credentialModes struct {
-	dir, file fs.FileMode
-	gid       int
+	dir, file    fs.FileMode
+	gid          int
+	group, other error
 }
 
 // stageHandoff runs one job with the vault's credential handed over, with
@@ -965,6 +967,9 @@ func stageHandoff(t *testing.T, groups []int) credentialModes {
 		if info, err := os.Stat(filepath.Join(job, agentproto.CredentialDir, agentproto.CredentialFile)); err == nil {
 			m.file, m.gid = info.Mode(), fileGID(info)
 		}
+		// Any other uid first: its take, when it may not, changes nothing.
+		m.other = takeAs(job, m, 0)
+		m.group = takeAs(job, m, 3)
 		seen.Store(m)
 		mustWrite(t, filepath.Join(job, agentproto.StdoutFile), claudeOK)
 		return agentproto.Exit{}
@@ -978,6 +983,41 @@ func stageHandoff(t *testing.T, groups []int) credentialModes {
 	return m
 }
 
+// takeAs is the runner's take of the staged credential (agentrun's
+// takeCredential: stat, read and delete it through an os.Root on the job dir)
+// by a uid with the mode bits at shift (3: the file's group, 0: any other uid)
+// on the dir and the file. The test runs as their owner, so the owner's bits
+// are set to those for the take and put back after it (a test run as root
+// passes whatever the bits).
+func takeAs(job string, m credentialModes, shift uint) error {
+	dir := filepath.Join(job, agentproto.CredentialDir)
+	file := filepath.Join(dir, agentproto.CredentialFile)
+	as := func(mode fs.FileMode) fs.FileMode { return ((mode.Perm() >> shift) & 0o7) << 6 }
+	if err := os.Chmod(file, as(m.file)); err != nil {
+		return err
+	}
+	if err := os.Chmod(dir, as(m.dir)); err != nil {
+		return err
+	}
+	defer func() {
+		_ = os.Chmod(dir, m.dir.Perm())
+		_ = os.Chmod(file, m.file.Perm()) // gone after a take
+	}()
+	root, err := os.OpenRoot(job)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = root.Close() }()
+	name := filepath.Join(agentproto.CredentialDir, agentproto.CredentialFile)
+	if _, err := root.Lstat(name); err != nil {
+		return err
+	}
+	if _, err := root.ReadFile(name); err != nil {
+		return err
+	}
+	return root.Remove(name)
+}
+
 // fileGID is info's group id (-1 where the OS has none).
 func fileGID(info fs.FileInfo) int {
 	if st, ok := info.Sys().(*syscall.Stat_t); ok {
@@ -987,24 +1027,31 @@ func fileGID(info fs.FileInfo) int {
 }
 
 // A runner in the Bridge's group gets the credential as that group's alone
-// (allowed: the group may read the file and delete it; denied: every other
-// uid has no access at all, not even to list the dir). One that isn't (an
-// older runner, or no shared group) gets it as before, readable by every uid.
+// (allowed: the group may stat, read and delete the file through an os.Root,
+// as the runner does; denied: every other uid has no access at all). One that
+// isn't (an older runner, or no shared group) gets it as before, readable by
+// every uid.
 func TestHandoffCredentialModes(t *testing.T) {
 	t.Parallel()
 	t.Run("runner in the Bridge's group", func(t *testing.T) {
 		t.Parallel()
 		m := stageHandoff(t, []int{os.Getgid() + 1, os.Getgid()})
-		// No bits for other uids, and the group may not list the dir.
-		if m.dir != fs.ModeDir|0o730 || m.file != 0o440 || m.gid != os.Getgid() {
-			t.Fatalf("modes = dir %v, file %v, gid %d (want 0730, 0440, %d)", m.dir, m.file, m.gid, os.Getgid())
+		if m.dir != fs.ModeDir|0o770 || m.file != 0o440 || m.gid != os.Getgid() {
+			t.Fatalf("modes = dir %v, file %v, gid %d (want 0770, 0440, %d)", m.dir, m.file, m.gid, os.Getgid())
+		}
+		if m.group != nil {
+			t.Fatalf("the group's take = %v, want it taken", m.group)
+		}
+		if os.Geteuid() != 0 && !errors.Is(m.other, fs.ErrPermission) {
+			t.Fatalf("another uid's take = %v, want permission denied", m.other)
 		}
 	})
 	t.Run("runner not in it", func(t *testing.T) {
 		t.Parallel()
 		for _, groups := range [][]int{nil, {os.Getgid() + 1}} {
-			if m := stageHandoff(t, groups); m.dir != fs.ModeDir|0o777 || m.file != 0o444 {
-				t.Fatalf("groups %v: modes = dir %v, file %v (want 0777, 0444)", groups, m.dir, m.file)
+			m := stageHandoff(t, groups)
+			if m.dir != fs.ModeDir|0o777 || m.file != 0o444 || m.other != nil {
+				t.Fatalf("groups %v: modes = dir %v, file %v, take %v (want 0777, 0444, taken)", groups, m.dir, m.file, m.other)
 			}
 		}
 	})

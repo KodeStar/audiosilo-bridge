@@ -3247,8 +3247,10 @@ internal/
             credential/credential.json (Credential {cli, kind, value}) in the job
             dir, in its own NON-sticky subdirectory so the runner (another uid) can
             delete it, before request.json. runner.json's groups (bridge#25) are
-            the runner's gids: when they hold the Bridge's, the dir is 0730 and the
-            file 0440, both chowned to that group (no other uid can read it); else
+            the runner's gids: when they hold the Bridge's, the dir is 0770 (the
+            runner's os.Root opens it, so the group needs read too) and the file
+            0440, both chowned to that group, any ACL inherited from the staging
+            dir removed (no other uid can read it); else
             (an older runner, no shared group) 0777 and 0444 as before. DecodeCredential is strict (unknown
             field, trailing data, over 4 KiB, another CLI, a kind that CLI doesn't
             take, or a value that isn't one printable line all refused; the value
@@ -3307,7 +3309,7 @@ internal/
             kind, its set time standing for credential_since (so replacing it on
             the Accounts tab ends a refusal); stage() writes credential.json
             (synced) in credential/ before the request: the Bridge's group's
-            alone (0440 in 0730) when runner.json's groups hold it
+            alone (0440 in 0770) when runner.json's groups hold it
             (Status.ShareGroup), else 0444 in 0777, logged once a process. A container
             credential always wins; a runner that can't take a hand-off gets
             nothing and is told to update. A refusal's detail says where to

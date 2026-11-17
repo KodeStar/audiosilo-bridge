@@ -126,7 +126,7 @@ type Runner struct {
 	Handoff bool `json:"handoff,omitempty"`
 	// Groups are the runner's group ids (its own and its supplementary ones).
 	// When they hold the Bridge's group, the Bridge hands credential.json to
-	// that group alone (credential/ 0730, the file 0440) rather than to every
+	// that group alone (credential/ 0770, the file 0440) rather than to every
 	// uid (0777 and 0444): the compose example adds the Bridge's PGID to the
 	// agent container. An older runner sends none.
 	Groups []int `json:"groups,omitempty"`

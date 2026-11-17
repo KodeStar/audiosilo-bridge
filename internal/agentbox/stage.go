@@ -29,16 +29,18 @@ const (
 	requestMode = 0o644
 	// The handed credential.json and its dir. The runner (another uid) must
 	// read the file and delete it. When it is in the Bridge's group
-	// (runner.json's groups) both are that group's alone: the dir 0730 (the
-	// group may delete the file, never list the dir) and the file 0440, so no
-	// other uid can read it. Else (an older runner, or a container started
-	// without the Bridge's group) the dir is 0777 and the file 0444, as
-	// before: readable by every uid until the runner takes it. The agent can
-	// anyway put a file there, which the runner reads strictly and only ever
-	// as its own run's credential.
+	// (runner.json's groups) both are that group's alone: the dir 0770 and
+	// the file 0440, so no other uid can read it. The group needs read on the
+	// dir as well as write and search: the runner takes the file through an
+	// os.Root, which opens each dir on the way (an open a dir without read
+	// refuses). Else (an older runner, or a container started without the
+	// Bridge's group) the dir is 0777 and the file 0444, as before: readable
+	// by every uid until the runner takes it. The agent can anyway put a file
+	// there, which the runner reads strictly and only ever as its own run's
+	// credential.
 	credentialDirMode       = 0o777
 	credentialFileMode      = inputFile
-	credentialGroupDirMode  = 0o730
+	credentialGroupDirMode  = 0o770
 	credentialGroupFileMode = 0o440
 )
 
@@ -133,8 +135,11 @@ func fill(root *os.Root, req agent.Request, cli string, timeout int, handed *age
 // writeCredential writes credential.json into its own dir: the dir open to the
 // runner (not sticky, so it can delete the file before the CLI starts), the
 // file read-only and synced. With shareGroup both belong to the Bridge's group
-// (set explicitly: a setgid staging dir would hand them its own) and no other
-// uid gets any access; else every uid may read the file.
+// (set explicitly: a setgid staging dir would hand them its own), any access
+// ACL they inherited from a staging dir with a default ACL is removed (its
+// named users and groups would read the file under the mode's mask), and no
+// other uid gets any access; else every uid may read the file. The job dir is
+// still private (0700) throughout, so no step leaves a window.
 func writeCredential(root *os.Root, c agentproto.Credential, shareGroup bool) error {
 	body, err := json.Marshal(c)
 	if err != nil {
@@ -156,9 +161,25 @@ func writeCredential(root *os.Root, c agentproto.Credential, shareGroup bool) er
 			if err := root.Chown(p, -1, os.Getgid()); err != nil {
 				return err
 			}
+			if err := dropACLAt(root, p); err != nil {
+				return err
+			}
 		}
 	}
 	return root.Chmod(agentproto.CredentialDir, dirMode)
+}
+
+// dropACLAt removes the POSIX ACLs name (under root) inherited (dropACL).
+func dropACLAt(root *os.Root, name string) error {
+	f, err := root.Open(name)
+	if err != nil {
+		return err
+	}
+	err = dropACL(f)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	return err
 }
 
 // copyTree copies the staged dir src into dst under root: regular files only
