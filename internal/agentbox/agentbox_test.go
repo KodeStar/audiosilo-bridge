@@ -1236,6 +1236,26 @@ func TestHandoffCredentialDeniedWithoutTheGroupFails(t *testing.T) {
 	assertNoJobDirs(t, dir)
 }
 
+// A credential_denied for a group-only credential the runner did take (its
+// file is gone) isn't borne out: the job is refused, never staged again, and
+// the group stays on.
+func TestHandoffCredentialDeniedButTakenFails(t *testing.T) {
+	t.Parallel()
+	r, dir := vaultHandoff(t, []int{os.Getegid()})
+	fake := &fakeRunner{fn: func(job string) agentproto.Exit {
+		_ = os.Remove(filepath.Join(job, agentproto.CredentialDir, agentproto.CredentialFile))
+		return agentproto.Exit{ExitCode: -1, CredentialDenied: true, Error: "read the Bridge's credential.json: permission denied"}
+	}}
+	stop := fake.start(t, dir)
+	_, err := r.Run(context.Background(), agent.Request{Dir: stagedDir(t), Prompt: "p", Timeout: time.Minute})
+	stop()
+	var denied *credentialDeniedError
+	if err == nil || errors.As(err, &denied) || fake.claimed.Load() != 1 || r.groupDenied.Load() || !r.Status().ShareGroup {
+		t.Fatalf("err = %v, %d jobs, group denied %v", err, fake.claimed.Load(), r.groupDenied.Load())
+	}
+	assertNoJobDirs(t, dir)
+}
+
 // No hand-off: the container's own credential is used (nothing staged), a
 // runner that can't take one gets nothing (and says to update it), and no vault
 // credential leaves the agent unavailable.

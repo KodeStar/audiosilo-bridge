@@ -252,7 +252,7 @@ func (r *Runner) Run(ctx context.Context, req agent.Request) (agent.Result, erro
 	}
 	res, err := r.runJob(ctx, req, st, handed, group)
 	var denied *credentialDeniedError
-	if group != noGroup && errors.As(err, &denied) {
+	if errors.As(err, &denied) {
 		// The runner reports the Bridge's gid among its groups, yet its uid may
 		// not take the file that group was given: the two containers map the
 		// ids on the staging volume differently (a user namespace, as rootless
@@ -266,15 +266,20 @@ func (r *Runner) Run(ctx context.Context, req agent.Request) (agent.Result, erro
 				"both the same mapping and restart the Bridge to keep it to that group",
 				"bridge_gid", r.gid, "detail", denied.detail)
 		}
+		if ctx.Err() != nil {
+			return res, ctx.Err()
+		}
 		res, err = r.runJob(ctx, req, st, handed, noGroup)
 	}
 	return res, err
 }
 
 // runJob is one job in the container: stage it (handed, when set, goes to
-// group as stage hands it), wait for the runner, read the outcome, harvest out/. The job dir
-// is gone when it returns. st is the runner's report the run was handed over
-// on.
+// group as stage hands it), wait for the runner, read the outcome, harvest
+// out/. The job dir is gone when it returns. st is the runner's report the run
+// was handed over on. A credentialDeniedError comes back only for a credential
+// the group alone was given that is still in place (the runner never took it):
+// any other denial is the job refused.
 func (r *Runner) runJob(ctx context.Context, req agent.Request, st Status, handed *agentproto.Credential, group int) (agent.Result, error) {
 	timeout := requestTimeout(req.Timeout)
 	id, err := agentproto.NewJobID()
@@ -305,9 +310,20 @@ func (r *Runner) runJob(ctx context.Context, req agent.Request, st Status, hande
 		// it reported is still worth recording; the outputs aren't harvested.
 		return res, waitErr
 	}
-	var unavailable *agent.NotAvailableError
 	var denied *credentialDeniedError
-	if errors.As(runErr, &unavailable) || errors.As(runErr, &denied) {
+	if errors.As(runErr, &denied) {
+		// Only a group-only credential the runner left in place is one its uid
+		// couldn't take: a volume that refused the group got the every-uid
+		// modes already, and an exit.json the runner's files don't bear out
+		// must not turn the group off for the rest of the process.
+		taken := !agentproto.Exists(root, filepath.Join(agentproto.CredentialDir, agentproto.CredentialFile))
+		if handed == nil || group == noGroup || groupErr != nil || taken {
+			return res, errors.New(runErr.Error())
+		}
+		return res, runErr
+	}
+	var unavailable *agent.NotAvailableError
+	if errors.As(runErr, &unavailable) {
 		return res, runErr
 	}
 	// Harvest after any finished run, failed ones too: a validation retry patches
