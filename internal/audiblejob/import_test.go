@@ -642,6 +642,20 @@ func TestImportParams(t *testing.T) {
 			t.Errorf("%s: accepted", raw)
 		}
 	}
+	// The server's bounds: a 500-byte template and a 1024-byte destination
+	// (bridge#47), one byte more refused.
+	at := func(template, dest int) string {
+		return `{"account":"acct0001","asin":"B0FAKE0002","library_id":1,"template":"` + strings.Repeat("t", template) +
+			`","dest_path":"` + strings.Repeat("d", dest) + `"}`
+	}
+	if _, err := ParseImportParams(json.RawMessage(at(500, 1024))); err != nil {
+		t.Errorf("a template and destination at the bounds: %v", err)
+	}
+	for _, raw := range []string{at(501, 1), at(1, 1025)} {
+		if _, err := ParseImportParams(json.RawMessage(raw)); err == nil {
+			t.Errorf("%.120s: accepted", raw)
+		}
+	}
 	// Unknown fields are the server's to add; the ASIN is read upper-case.
 	p, err := ParseImportParams(json.RawMessage(`{"account":"acct0001","asin":"b0fake0002","library_id":1,"later":true}`))
 	if err != nil || p.ASIN != "B0FAKE0002" {
