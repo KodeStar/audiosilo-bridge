@@ -333,9 +333,11 @@ func (r *Runner) status() agentproto.Runner {
 }
 
 // groups are the runner's group ids, its own first, for runner.json: the
-// Bridge hands credential.json to its group alone when they hold it.
+// Bridge hands credential.json to its group alone when they hold it. Its own
+// is the effective one, which with the supplementary ones is what a file's
+// group bits are checked against (the real gid plays no part).
 func groups() []int {
-	out := []int{os.Getgid()}
+	out := []int{os.Getegid()}
 	more, _ := os.Getgroups() // none where the OS has no such list
 	for _, g := range more {
 		if !slices.Contains(out, g) {

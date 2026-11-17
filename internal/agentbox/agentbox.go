@@ -85,8 +85,9 @@ type Runner struct {
 	// dirMissing is set while the staging dir can't be opened, so Status logs
 	// its path once per outage rather than on every call.
 	dirMissing atomic.Bool
-	// gid is the Bridge's group, the one a handed credential goes to alone
-	// when the runner is in it.
+	// gid is the Bridge's group (its effective one: the group its new files
+	// get and the one it may always chown to), the one a handed credential
+	// goes to alone when the runner is in it.
 	gid int
 	// warnedGroup is set once the log has said a handed credential goes to
 	// every uid because the runner isn't in the Bridge's group, warnedVolume
@@ -106,7 +107,7 @@ func New(opts Options) *Runner {
 		claimTimeout: opts.ClaimTimeout,
 		log:          opts.Log,
 		credential:   opts.Credential,
-		gid:          os.Getgid(),
+		gid:          os.Getegid(),
 		now:          time.Now,
 		poll:         defaultPoll,
 		staleFor:     defaultStaleFor,

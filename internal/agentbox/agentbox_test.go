@@ -1053,9 +1053,9 @@ func TestHandoffCredentialModes(t *testing.T) {
 	t.Parallel()
 	t.Run("runner in the Bridge's group", func(t *testing.T) {
 		t.Parallel()
-		m := stageHandoff(t, []int{os.Getgid() + 1, os.Getgid()})
-		if m.dir != fs.ModeDir|0o770 || m.file != 0o440 || m.gid != os.Getgid() {
-			t.Fatalf("modes = dir %v, file %v, gid %d (want 0770, 0440, %d)", m.dir, m.file, m.gid, os.Getgid())
+		m := stageHandoff(t, []int{os.Getegid() + 1, os.Getegid()})
+		if m.dir != fs.ModeDir|0o770 || m.file != 0o440 || m.gid != os.Getegid() {
+			t.Fatalf("modes = dir %v, file %v, gid %d (want 0770, 0440, %d)", m.dir, m.file, m.gid, os.Getegid())
 		}
 		if m.group != nil {
 			t.Fatalf("the group's take = %v, want it taken", m.group)
@@ -1066,7 +1066,7 @@ func TestHandoffCredentialModes(t *testing.T) {
 	})
 	t.Run("runner not in it", func(t *testing.T) {
 		t.Parallel()
-		for _, groups := range [][]int{nil, {os.Getgid() + 1}} {
+		for _, groups := range [][]int{nil, {os.Getegid() + 1}} {
 			m := stageHandoff(t, groups)
 			if m.dir != fs.ModeDir|0o777 || m.file != 0o444 || m.other != nil {
 				t.Fatalf("groups %v: modes = dir %v, file %v, take %v (want 0777, 0444, taken)", groups, m.dir, m.file, m.other)
@@ -1122,14 +1122,14 @@ func TestHandoffCredentialFallsBackWhenTheGroupIsRefused(t *testing.T) {
 // Bridge's group added to the agent container.
 func TestHandoffCredentialWarnsOnceWithoutTheGroup(t *testing.T) {
 	t.Parallel()
-	r, run := handoffStager(t, []int{os.Getgid() + 1})
+	r, run := handoffStager(t, []int{os.Getegid() + 1})
 	var logged strings.Builder
 	r.log = slog.New(slog.NewTextHandler(&logged, nil))
 	run()
 	run()
 	out := logged.String()
 	if strings.Count(out, "isn't in the Bridge's group") != 1 || !strings.Contains(out, "group_add") ||
-		!strings.Contains(out, fmt.Sprintf("bridge_gid=%d", os.Getgid())) {
+		!strings.Contains(out, fmt.Sprintf("bridge_gid=%d", os.Getegid())) {
 		t.Fatalf("log = %s", out)
 	}
 }

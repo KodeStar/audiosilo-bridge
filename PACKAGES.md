@@ -3362,7 +3362,7 @@ internal/
             allow-listed environment and CODEX_HOME on the volume; claude prints how
             to give the container a `claude setup-token` token.
             Phase 2b: runner.json says handoff: true (and, bridge#25, its groups,
-            its own gid first); execute reads the job's
+            its own effective gid first); execute reads the job's
             credential.json (agentproto.DecodeCredential) and DELETES it before
             the CLI starts, and childEnv uses it only when the container has no
             credential of its own for the CLI (claude: the OAuth token or

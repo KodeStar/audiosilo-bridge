@@ -633,8 +633,8 @@ func TestRunnerJSON(t *testing.T) {
 	}
 	// Its groups, its own first: the Bridge hands a credential to its group
 	// alone when they hold it.
-	if len(rj.Groups) == 0 || rj.Groups[0] != os.Getgid() {
-		t.Fatalf("groups = %v, want %d first", rj.Groups, os.Getgid())
+	if len(rj.Groups) == 0 || rj.Groups[0] != os.Getegid() {
+		t.Fatalf("groups = %v, want %d first", rj.Groups, os.Getegid())
 	}
 	claude, codex := rj.CLIs["claude"], rj.CLIs["codex"]
 	if claude.Version != "9.9.9 (fake claude)" || claude.Credential != "oauth_token" || claude.CredentialSince.IsZero() ||
