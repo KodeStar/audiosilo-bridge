@@ -115,6 +115,15 @@ func TestWithParkMessage(t *testing.T) {
 	if _, ok := park["message"]; ok || len(pr.Extra) != 2 {
 		t.Fatalf("the caller's maps changed: %v", pr.Extra)
 	}
+	// A message an earlier report left (a park carried over, or restored after
+	// a restart) goes when the park's message is now only its code.
+	stale := Progress{Step: "asr", Extra: map[string]any{"park": map[string]any{"code": "asr_worker_waiting", "message": "older"}}}
+	if got := withParkMessage(stale, "asr_worker_waiting"); got.Extra["park"].(map[string]any)["message"] != nil {
+		t.Errorf("a stale message stayed: %v", got.Extra["park"])
+	}
+	if stale.Extra["park"].(map[string]any)["message"] != "older" {
+		t.Fatalf("the caller's park changed: %v", stale.Extra["park"])
+	}
 	plain := Progress{Step: "asr", Extra: map[string]any{"stage": "asr"}}
 	if got := withParkMessage(plain, "a message"); len(got.Extra) != 1 {
 		t.Fatalf("a progress with no park gained one: %v", got.Extra)

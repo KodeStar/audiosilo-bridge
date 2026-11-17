@@ -1266,8 +1266,9 @@ func (p *Reporter) updateOf(pr Progress, parked bool, parkMsg string) (link.Upda
 // withParkMessage puts a parked job's message for people beside its park in pr
 // (progress park.message, bridge#28), so the page reads it there rather than
 // taking the code off the job's error: msg without the "<code>: " the engine
-// may lead it with, none when that leaves only the code. A progress naming no
-// park is left as it is; pr's own maps are never changed.
+// may lead it with, none when that leaves only the code (a message an earlier
+// report left there, a park carried over or restored after a restart, goes). A
+// progress naming no park is left as it is; pr's own maps are never changed.
 func withParkMessage(pr Progress, msg string) Progress {
 	named, ok := pr.Extra["park"].(map[string]any)
 	if !ok {
@@ -1277,11 +1278,16 @@ func withParkMessage(pr Progress, msg string) Progress {
 	if code != "" {
 		msg = strings.TrimSpace(strings.TrimPrefix(msg, code+":"))
 	}
-	if msg == "" || msg == code {
+	none := msg == "" || msg == code
+	if _, had := named["message"]; none && !had {
 		return pr
 	}
 	park := maps.Clone(named)
-	park["message"] = msg
+	if none {
+		delete(park, "message")
+	} else {
+		park["message"] = msg
+	}
 	pr.Extra = maps.Clone(pr.Extra)
 	pr.Extra["park"] = park
 	return pr
