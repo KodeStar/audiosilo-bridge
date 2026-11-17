@@ -243,13 +243,18 @@ func TestPushFailuresHoldNoCredential(t *testing.T) {
 			t.Fatalf("%s: sync_error = %q, %v (want %q)", step, a.SyncError, err, want)
 		}
 		texts := map[string]string{"sync_error": a.SyncError, "log": fa.logs.String()}
-		_ = filepath.WalkDir(fa.data, func(path string, d fs.DirEntry, err error) error {
-			if err == nil && d.Type().IsRegular() {
-				b, _ := os.ReadFile(path)
-				texts[path] = string(b)
+		// A file or dir the walk can't read fails the test: it would leave a
+		// credential written there unseen.
+		if err := filepath.WalkDir(fa.data, func(path string, d fs.DirEntry, err error) error {
+			if err != nil || !d.Type().IsRegular() {
+				return err
 			}
-			return nil
-		})
+			b, err := os.ReadFile(path)
+			texts[path] = string(b)
+			return err
+		}); err != nil {
+			t.Fatalf("%s: reading the data dir: %v", step, err)
+		}
 		for what, text := range texts {
 			for _, c := range canaries {
 				if c != "" && strings.Contains(text, c) {
