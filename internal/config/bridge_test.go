@@ -215,6 +215,7 @@ func TestAgentContainerInvalid(t *testing.T) {
 		"retention negative":     {"AUDIOSILO_BRIDGE_TRANSCRIPTS_RETENTION_DAYS", "-3"},
 		"retention not a number": {"AUDIOSILO_BRIDGE_TRANSCRIPTS_RETENTION_DAYS", "a month"},
 		"retention too long":     {"AUDIOSILO_BRIDGE_TRANSCRIPTS_RETENTION_DAYS", "100000"},
+		"require group not bool": {"AUDIOSILO_BRIDGE_AGENT_REQUIRE_GROUP", "yes please"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Setenv(env[0], env[1])
@@ -411,5 +412,32 @@ func TestGitHubConfigRefusesBadValues(t *testing.T) {
 				t.Fatalf("%s=%q loaded", env[0], env[1])
 			}
 		})
+	}
+}
+
+// agent.require_group is off unless the file or the environment turns it on;
+// the environment's value locks it and is never saved into config.yaml.
+func TestAgentRequireGroup(t *testing.T) {
+	dir := t.TempDir()
+	cfg, err := Load(dir)
+	if err != nil || cfg.Agent.RequireGroup {
+		t.Fatalf("default: %v, %v", cfg.Agent.RequireGroup, err)
+	}
+	if err := SaveFile(dir, func(c *Config) error { c.Agent.RequireGroup = true; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if cfg, err = Load(dir); err != nil || !cfg.Agent.RequireGroup || cfg.EnvSet(KeyAgentRequireGroup) {
+		t.Fatalf("from the file: %v, env %v, %v", cfg.Agent.RequireGroup, cfg.EnvSet(KeyAgentRequireGroup), err)
+	}
+	t.Setenv("AUDIOSILO_BRIDGE_AGENT_REQUIRE_GROUP", "false")
+	if cfg, err = Load(dir); err != nil || cfg.Agent.RequireGroup || !cfg.EnvSet(KeyAgentRequireGroup) {
+		t.Fatalf("from the environment: %v, env %v, %v", cfg.Agent.RequireGroup, cfg.EnvSet(KeyAgentRequireGroup), err)
+	}
+	if err := SaveFile(dir, func(*Config) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, FileName))
+	if err != nil || !strings.Contains(string(raw), "require_group: true") {
+		t.Fatalf("the file:\n%s (%v)", raw, err)
 	}
 }

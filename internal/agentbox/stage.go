@@ -60,8 +60,9 @@ const (
 // its own dir, written before the request so the runner finds it at the claim;
 // group, when not noGroup, is the Bridge's gid: the credential is handed to
 // that group alone (the runner is in it). groupErr is why it went to every uid
-// instead (the staging volume refused), nil when it didn't.
-func stage(job string, req agent.Request, cli string, timeout int, handed *agentproto.Credential, group int) (root *os.Root, groupErr, err error) {
+// instead (the staging volume refused), nil when it didn't; strict refuses
+// that instead (writeCredential).
+func stage(job string, req agent.Request, cli string, timeout int, handed *agentproto.Credential, group int, strict bool) (root *os.Root, groupErr, err error) {
 	if err := os.Mkdir(job, 0o700); err != nil {
 		return nil, nil, err
 	}
@@ -69,7 +70,7 @@ func stage(job string, req agent.Request, cli string, timeout int, handed *agent
 	if err != nil {
 		return nil, nil, err
 	}
-	if groupErr, err = fill(root, req, cli, timeout, handed, group); err != nil {
+	if groupErr, err = fill(root, req, cli, timeout, handed, group, strict); err != nil {
 		_ = root.Close()
 		return nil, nil, err
 	}
@@ -103,12 +104,12 @@ func openMadeDir(path string) (*os.Root, error) {
 
 // fill writes the job into its (still private) dir, opens the dir to the agent
 // uid, and renames request.json into place. groupErr is writeCredential's.
-func fill(root *os.Root, req agent.Request, cli string, timeout int, handed *agentproto.Credential, group int) (groupErr, err error) {
+func fill(root *os.Root, req agent.Request, cli string, timeout int, handed *agentproto.Credential, group int, strict bool) (groupErr, err error) {
 	if err := copyTree(req.Dir, root, agentproto.WorkDir); err != nil {
 		return nil, err
 	}
 	if handed != nil {
-		if groupErr, err = writeCredential(root, *handed, group); err != nil {
+		if groupErr, err = writeCredential(root, *handed, group, strict); err != nil {
 			return nil, err
 		}
 	}
@@ -149,9 +150,10 @@ func fill(root *os.Root, req agent.Request, cli string, timeout int, handed *age
 // other uid gets any access; else every uid may read the file. A staging
 // volume that refuses the chown or the ACL change (NFS, CIFS) gets the file
 // as every uid's too, with groupErr saying why: the hand-off as it was before
-// there was a group, rather than a run that fails. The job dir is still
-// private (0700) throughout, so no step leaves a window.
-func writeCredential(root *os.Root, c agentproto.Credential, group int) (groupErr, err error) {
+// there was a group, rather than a run that fails; strict (agent.require_group)
+// returns a groupRefusedError instead. The job dir is still private (0700)
+// throughout, so no step leaves a window.
+func writeCredential(root *os.Root, c agentproto.Credential, group int, strict bool) (groupErr, err error) {
 	body, err := json.Marshal(c)
 	if err != nil {
 		return nil, err
@@ -169,6 +171,9 @@ func writeCredential(root *os.Root, c agentproto.Credential, group int) (groupEr
 	}
 	if group != noGroup {
 		if groupErr = giveGroup(root, group, name, agentproto.CredentialDir); groupErr != nil {
+			if strict {
+				return nil, &groupRefusedError{err: groupErr}
+			}
 			dirMode = credentialDirMode
 			if err := root.Chmod(name, credentialFileMode); err != nil {
 				return nil, err
@@ -176,6 +181,16 @@ func writeCredential(root *os.Root, c agentproto.Credential, group int) (groupEr
 		}
 	}
 	return groupErr, root.Chmod(agentproto.CredentialDir, dirMode)
+}
+
+// groupRefusedError is a staging volume that refused the group (giveGroup's
+// error) while agent.require_group is on: the job is never opened to the
+// runner, so the credential, the group's or every uid's, never leaves the
+// Bridge's private job dir.
+type groupRefusedError struct{ err error }
+
+func (e *groupRefusedError) Error() string {
+	return "hand the credential to the Bridge's group: " + e.err.Error()
 }
 
 // giveGroup makes each of names (under root) group's, with no ACL beside its

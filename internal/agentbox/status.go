@@ -90,7 +90,7 @@ func (r *Runner) Status() Status {
 	}
 	r.dirMissing.Store(false)
 	defer func() { _ = root.Close() }()
-	raw, err := agentproto.ReadRegular(root, agentproto.RunnerFile, agentproto.MaxRunnerBytes)
+	raw, info, err := agentproto.ReadRegularInfo(root, agentproto.RunnerFile, agentproto.MaxRunnerBytes)
 	if errors.Is(err, fs.ErrNotExist) {
 		st.Detail = "the agent container isn't running (it hasn't written its status into the staging dir; check that both containers mount the same staging volume)"
 		return st
@@ -116,7 +116,7 @@ func (r *Runner) Status() Status {
 		}
 	}
 	st.Version, st.Slots, st.HeartbeatAt, st.CLIs = rj.Version, rj.Slots, rj.HeartbeatAt, rj.CLIs
-	st.ShareGroup = slices.Contains(rj.Groups, r.gid) && !r.groupDenied.Load()
+	st.ShareGroup = r.shareGroup(rj, info, st.Live)
 	st.Problem, st.Other, st.Detail = r.unavailableBecause(rj)
 	if st.Detail == "" {
 		if refused := r.refusal(rj.CLIs[r.backend], st.Handoff); refused != "" {
@@ -125,6 +125,26 @@ func (r *Runner) Status() Status {
 	}
 	st.Available = st.Detail == ""
 	return st
+}
+
+// shareGroup reports whether a handed credential goes to the Bridge's group
+// alone, by runner.json rj (read from info; live when its heartbeat is fresh
+// in this protocol): when its groups hold the Bridge's, and also when another
+// uid than the runner's wrote it (trust.go), so a forged one can't move the
+// credential to every uid. Never once the runner was denied the group's
+// credential (Run).
+func (r *Runner) shareGroup(rj agentproto.Runner, info fs.FileInfo, live bool) bool {
+	if r.groupDenied.Load() {
+		return false
+	}
+	uid, own := r.fromRunner(info, live)
+	if slices.Contains(rj.Groups, r.gid) {
+		return true
+	}
+	if !own {
+		r.notFromRunner("runner.json naming no Bridge group", uid)
+	}
+	return !own
 }
 
 // handoffCredential is the vault's credential for the backend (ok false for

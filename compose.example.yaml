@@ -70,6 +70,10 @@ services:
       AUDIOSILO_BRIDGE_AGENT_STAGING_DIR: /staging
       # The CLI the agent container runs: claude (the default) or codex.
       # AUDIOSILO_BRIDGE_AGENT_BACKEND: codex
+      # Never hand the agent credential to every user on the staging volume
+      # (the agent waits instead, saying why, when it can't be kept to the
+      # group_add group below):
+      # AUDIOSILO_BRIDGE_AGENT_REQUIRE_GROUP: "true"
       # A GitHub token (a fine-grained one that can open issues on the community
       # repos) lets a job contribute its characters and recaps (contribute: issue).
       # Read live and never stored; while set it is used instead of the Accounts

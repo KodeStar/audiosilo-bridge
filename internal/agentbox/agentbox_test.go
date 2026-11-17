@@ -40,6 +40,9 @@ func newTestRunner(t *testing.T, backend string) (*Runner, string) {
 	r.beatCheck = 5 * time.Millisecond
 	r.beatEvery = 10 * time.Millisecond
 	r.cancelFor = 2 * time.Second
+	// The test writes the runner's files, so it stands for the runner's uid,
+	// and the Bridge is some other one (trust.go).
+	r.uid = os.Geteuid() + 1
 	return r, dir
 }
 
@@ -704,7 +707,7 @@ func TestStageThroughTheJobDirsRoot(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	job := filepath.Join(dir, "00000000000000aa")
-	root, _, err := stage(job, agent.Request{Dir: stagedDir(t), Prompt: "p"}, agent.IDClaude, 60, nil, noGroup)
+	root, _, err := stage(job, agent.Request{Dir: stagedDir(t), Prompt: "p"}, agent.IDClaude, 60, nil, noGroup, false)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -385,7 +385,8 @@ func (p *eventPersister) Close() {
 func newAgentBox(cfg config.Config, dataDir string, log *slog.Logger,
 	credential func(cli string) (kind, value string, since time.Time, ok bool)) *agentbox.Runner {
 	return agentbox.New(agentbox.Options{Dir: cfg.AgentStagingDir(dataDir), Backend: agentBackend(cfg),
-		ClaimTimeout: time.Duration(cfg.Agent.ClaimTimeoutSeconds) * time.Second, Log: log, Credential: credential})
+		ClaimTimeout: time.Duration(cfg.Agent.ClaimTimeoutSeconds) * time.Second, Log: log, Credential: credential,
+		RequireGroup: cfg.Agent.RequireGroup})
 }
 
 // estimatesEvery is how often the heartbeat's estimates are computed again: they

@@ -3242,7 +3242,8 @@ internal/
             OpenRegular/ReadRegular read inside an os.Root, refuse a link (Lstat
             first), open O_NONBLOCK (a FIFO swapped in never blocks), require the
             opened file to be the one Lstat saw, and enforce the size limit on the
-            open file and again while reading; Exists Lstats a marker, never
+            open file and again while reading (ReadRegularInfo also returns the
+            open file's FileInfo: its owner wrote what was read); Exists Lstats a marker, never
             following a link.
             Phase 2b (decision 19, the agent credential hand-off): runner.json's handoff says the runner
             takes the Bridge's credential; the Bridge then writes
@@ -3322,7 +3323,19 @@ internal/
             denied (credential_denied: the containers map the volume's ids
             differently, a user namespace) re-stages that job once in those
             modes (nothing ran) and the rest of the process uses them, logged
-            once (groupDenied). A container
+            once (groupDenied). Only the runner's own files may move
+            the credential off the group (trust.go): the runner's uid as
+            the volume shows it is pinned by the first live runner.json
+            (never the Bridge's own uid), and a runner.json naming no group
+            or an exit.json's credential_denied written by any other uid,
+            or with a second link, is ignored for it (the group's modes
+            kept, the job refused), logged once: the staging dir is open to
+            every uid on the volume, so a forged file could otherwise hand
+            the credential to all of them. agent.require_group
+            (Options.RequireGroup, off by default) never moves it off the
+            group: a runner outside it, a volume refusing the chown (the
+            job is never opened to the runner) and a denied runner each
+            make the agent unavailable, the detail saying why. A container
             credential always wins; a runner that can't take a hand-off gets
             nothing and is told to update. A refusal's detail says where to
             replace the credential: the Accounts tab for the handed one, the agent

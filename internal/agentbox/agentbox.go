@@ -60,6 +60,11 @@ type Options struct {
 	// ok false for none. nil: nothing to hand over. It is handed to a run only
 	// when the runner takes a hand-off and has no credential of its own.
 	Credential func(cli string) (kind, value string, since time.Time, ok bool)
+	// RequireGroup (agent.require_group) keeps a handed credential to the
+	// Bridge's group in every case: a runner outside the group, a staging
+	// volume that refuses the chown and a runner denied the group's file each
+	// make the agent unavailable rather than hand it to every uid.
+	RequireGroup bool
 }
 
 // Runner implements agent.Runner over the staging protocol.
@@ -69,6 +74,7 @@ type Runner struct {
 	claimTimeout time.Duration
 	log          *slog.Logger
 	credential   func(cli string) (kind, value string, since time.Time, ok bool)
+	requireGroup bool
 
 	now       func() time.Time
 	poll      time.Duration
@@ -97,6 +103,14 @@ type Runner struct {
 	// couldn't take a credential handed to that group: the rest of this
 	// process hands it to every uid (Run).
 	groupDenied atomic.Bool
+	// uid is the Bridge's own (effective) uid, and runnerUID the runner's as
+	// the staging volume shows it, pinned by the first live runner.json
+	// (noUID until then): only the runner's files may move a handed
+	// credential off the group (trust.go). warnedForeign is set once the log
+	// has said one from another uid didn't.
+	uid           int
+	runnerUID     atomic.Int64
+	warnedForeign atomic.Bool
 }
 
 var _ agent.Runner = (*Runner)(nil)
@@ -111,7 +125,9 @@ func New(opts Options) *Runner {
 		claimTimeout: opts.ClaimTimeout,
 		log:          opts.Log,
 		credential:   opts.Credential,
+		requireGroup: opts.RequireGroup,
 		gid:          os.Getegid(),
+		uid:          os.Geteuid(),
 		now:          time.Now,
 		poll:         defaultPoll,
 		staleFor:     defaultStaleFor,
@@ -127,6 +143,7 @@ func New(opts Options) *Runner {
 	if r.log == nil {
 		r.log = slog.New(slog.DiscardHandler)
 	}
+	r.runnerUID.Store(noUID)
 	r.prepare()
 	return r
 }
@@ -240,6 +257,11 @@ func (r *Runner) Run(ctx context.Context, req agent.Request) (agent.Result, erro
 			handed = &agentproto.Credential{CLI: r.backend, Kind: kind, Value: value}
 		}
 	}
+	if handed != nil && !st.ShareGroup && r.requireGroup {
+		return agent.Result{}, &agent.NotAvailableError{Backend: r.backend, Detail: "the agent container isn't in the Bridge's group, " +
+			"which agent.require_group asks for: add that group to it (group_add with the Bridge's PGID, as in the compose " +
+			"example) and recreate it, on an agent image as new as this Bridge"}
+	}
 	group := noGroup
 	if st.ShareGroup {
 		group = r.gid
@@ -259,6 +281,11 @@ func (r *Runner) Run(ctx context.Context, req agent.Request) (agent.Result, erro
 		// Podman sets up). The CLI never started, so nothing of the job ran: it
 		// is staged again (its first dir already gone) as it was before there
 		// was a group, and every later run of this process goes that way.
+		if r.requireGroup {
+			return res, &agent.NotAvailableError{Backend: r.backend, Detail: "the agent container couldn't take the credential " +
+				"handed to the Bridge's group alone, and agent.require_group is on: the two containers see different ids on the " +
+				"staging volume (different user-namespace mappings, as rootless Podman can set up); give both the same mapping"}
+		}
 		if !r.groupDenied.Swap(true) {
 			r.log.Warn("agent container: the runner couldn't take the credential handed to the Bridge's group alone, so from "+
 				"now on the handed credential is readable by every uid until the runner takes it; the two containers see "+
@@ -288,7 +315,13 @@ func (r *Runner) runJob(ctx context.Context, req agent.Request, st Status, hande
 	}
 	job := filepath.Join(r.dir, id)
 	defer r.remove(job)
-	root, groupErr, err := stage(job, req, r.backend, timeout, handed, group)
+	root, groupErr, err := stage(job, req, r.backend, timeout, handed, group, r.requireGroup)
+	var refused *groupRefusedError
+	if errors.As(err, &refused) {
+		return agent.Result{}, &agent.NotAvailableError{Backend: r.backend, Detail: "the staging volume refused to hand the " +
+			"credential to the Bridge's group alone (" + ioProblem(refused.err) + "), and agent.require_group is on: use a " +
+			"staging volume that allows chown (a local one, not NFS or CIFS)"}
+	}
 	if groupErr != nil && !r.warnedVolume.Swap(true) {
 		r.log.Warn("agent container: the staging volume refused to hand the credential to the Bridge's group alone, so it is "+
 			"readable by every uid until the runner takes it; a staging volume that allows chown (a local one, not NFS or CIFS) "+
@@ -492,7 +525,7 @@ func (r *Runner) heartbeatAt(root *os.Root, claimedAt time.Time) time.Time {
 // code the local runners use. An unavailable exit still reports the usage the
 // CLI's output shows, so a paid run the container cut short is counted.
 func (r *Runner) outcome(root *os.Root, model string, timeout time.Duration) (agent.Result, error) {
-	raw, err := agentproto.ReadRegular(root, agentproto.ExitFile, agentproto.MaxExitBytes)
+	raw, info, err := agentproto.ReadRegularInfo(root, agentproto.ExitFile, agentproto.MaxExitBytes)
 	if err != nil {
 		return agent.Result{}, r.stagingFailed("read the run's exit.json from", err)
 	}
@@ -502,7 +535,11 @@ func (r *Runner) outcome(root *os.Root, model string, timeout time.Duration) (ag
 	}
 	if ex.Error != "" {
 		if ex.CredentialDenied {
-			return agent.Result{}, &credentialDeniedError{detail: ex.Error}
+			uid, own := r.fromRunner(info, false)
+			if own {
+				return agent.Result{}, &credentialDeniedError{detail: ex.Error}
+			}
+			r.notFromRunner("a job's exit.json saying the runner was denied the credential", uid)
 		}
 		if ex.Unavailable {
 			// The container stopped or restarted mid-run (or couldn't start the CLI):
