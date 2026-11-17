@@ -1825,7 +1825,10 @@ internal/
             ErrNoBook, ErrNotIndexable (a rescan's 404 not_indexable), else *APIError
             (an HTML proxy page never becomes a message; RetryAfter carries a 429's
             Retry-After, seconds or an HTTP date, clamped at a day; RetryAfterSet
-            distinguishes a valid zero wait from a missing or invalid header).
+            distinguishes a valid zero wait from a missing or invalid header);
+            a 2xx it can't use (not the JSON expected, a pairing with no token)
+            is ErrUnusableAnswer (bridge#28), worded as its cause, which the
+            page's pairing error keys on rather than on what's left over.
             Phase 1a: Paired carries
             the server's server_id (the job runner's server identity); the book
             lookup's answer carries a `book` block (BookInfo: title, authors and
