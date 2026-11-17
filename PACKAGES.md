@@ -2552,7 +2552,8 @@ internal/
             in it. Pusher (not a job): every PushEvery (1 min)
             per account mapped here, not refused, not waiting, not paused (in memory: sync_off 5 min,
             user_unavailable or unknown 15 min, the server's 429/503 its Retry-After, at least 2 min,
-            this loop only): reads the feed from push_cursor (it pages in the server's write order, change_seq, and
+            a feed 404 naming no account (a server before 2.6.0) 1 h with a sync_error saying to
+            update, bridge#50; this loop only): reads the feed from push_cursor (it pages in the server's write order, change_seq, and
             may give a row again with updated_at unchanged, so a row is new by its place alone (a new version at the same place is none),
             never its time; the baseline, every read until one reaches the feed's end, takes only rows
             of the last 10 min by updated_at, history after it is none; a row it fails to record keeps
