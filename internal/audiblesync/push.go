@@ -24,6 +24,10 @@ const (
 	// person can't be synced for now, or one the server doesn't know.
 	offWait     = 5 * time.Minute
 	refusedWait = 15 * time.Minute
+	// oldServerWait is how long an account is left when the server has no
+	// progress feed at all (link.ErrNoAudibleSync: a server older than 2.6.0,
+	// before Audible sync), rather than asking every minute.
+	oldServerWait = time.Hour
 	// errorWait is the least wait after a failure (the server's or Audible's).
 	errorWait = 2 * time.Minute
 	// baselineWindow: the first read of an account's feed to its end (the
@@ -153,6 +157,11 @@ func (p *Pusher) account(ctx context.Context, srv Server, a store.AudibleAccount
 			if err := p.o.DB.SetAudiblePushCursor(ctx, a.ID, "", time.Time{}); err != nil {
 				p.o.Log.Warn("audible: resetting the push's cursor failed", "account", a.ID, "err", err)
 			}
+			return
+		case errors.Is(err, link.ErrNoAudibleSync):
+			p.o.Log.Warn("audible: the server has no places feed (it is older than 2.6.0); asking again in an hour", "account", a.ID)
+			p.pause(a.ID, now.Add(oldServerWait))
+			p.o.health(ctx, a, err, time.Time{})
 			return
 		case err != nil:
 			if ctx.Err() == nil {

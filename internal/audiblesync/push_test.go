@@ -287,6 +287,29 @@ func TestPushUserUnavailable(t *testing.T) {
 	}
 }
 
+// A server with no progress feed (older than 2.6.0: link's ErrNoAudibleSync)
+// pauses the account for an hour and says to update, rather than failing
+// every minute.
+func TestPushOldServer(t *testing.T) {
+	e := newEnv(t)
+	e.srv.feedErr = link.ErrNoAudibleSync
+	p := NewPusher(e.o)
+	p.Tick(context.Background())
+	if a := e.account(t); !strings.Contains(a.SyncError, "update it to 2.6.0") || a.SyncRetryAt != "" {
+		t.Fatalf("account = %+v", a)
+	}
+	e.now = e.now.Add(refusedWait + time.Minute)
+	p.Tick(context.Background())
+	if len(e.srv.feedAsks) != 1 {
+		t.Fatalf("asked again within the hour: %v", e.srv.feedAsks)
+	}
+	e.now = e.now.Add(oldServerWait)
+	p.Tick(context.Background())
+	if len(e.srv.feedAsks) != 2 {
+		t.Fatalf("not asked again after the hour: %v", e.srv.feedAsks)
+	}
+}
+
 // Nothing runs while unpaired.
 func TestPushUnpaired(t *testing.T) {
 	e := newEnv(t)

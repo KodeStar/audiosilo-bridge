@@ -64,7 +64,8 @@ const (
 	DoneTmpFile     = "done.tmp"
 	// CredentialDir holds CredentialFile: its own dir (not sticky, unlike the job
 	// dir), so the runner, another uid, can delete the Bridge's file before the
-	// CLI starts.
+	// CLI starts. It is the Bridge's group's alone when the runner is in that
+	// group (Runner.Groups), else open to every uid.
 	CredentialDir  = "credential"
 	CredentialFile = "credential.json"
 )
@@ -123,6 +124,12 @@ type Runner struct {
 	// credential of its own for (Phase 2b, decision 19). An older runner sends
 	// none, and the Bridge then hands nothing over.
 	Handoff bool `json:"handoff,omitempty"`
+	// Groups are the runner's group ids (its own and its supplementary ones).
+	// When they hold the Bridge's group, the Bridge hands credential.json to
+	// that group alone (credential/ 0770, the file 0440) rather than to every
+	// uid (0777 and 0444): the compose example adds the Bridge's PGID to the
+	// agent container. An older runner sends none.
+	Groups []int `json:"groups,omitempty"`
 }
 
 // Credential is credential.json: the agent credential the Bridge holds in its
@@ -207,14 +214,19 @@ type Request struct {
 // the job at all (a malformed request, a missing prompt, the CLI's credential
 // missing) or stopped it itself (the container stopping or restarting);
 // Unavailable marks the kinds the Bridge should treat as the agent being
-// unavailable (park and self-resume) rather than a failed run.
+// unavailable (park and self-resume) rather than a failed run. CredentialDenied
+// marks a job refused, before the CLI started, because the runner's uid may not
+// take credential.json (a group-only hand-off on a volume whose ids its groups
+// don't name, as with a user namespace that maps them differently): the Bridge
+// stages it again for every uid.
 type Exit struct {
-	ExitCode    int    `json:"exit_code"`
-	TimedOut    bool   `json:"timed_out"`
-	Cancelled   bool   `json:"cancelled"`
-	DurationMS  int64  `json:"duration_ms"`
-	Error       string `json:"error,omitempty"`
-	Unavailable bool   `json:"unavailable,omitempty"`
+	ExitCode         int    `json:"exit_code"`
+	TimedOut         bool   `json:"timed_out"`
+	Cancelled        bool   `json:"cancelled"`
+	DurationMS       int64  `json:"duration_ms"`
+	Error            string `json:"error,omitempty"`
+	Unavailable      bool   `json:"unavailable,omitempty"`
+	CredentialDenied bool   `json:"credential_denied,omitempty"`
 }
 
 // modelRe allows the model names the CLIs take ("opus", "claude-opus-4-1[1m]",

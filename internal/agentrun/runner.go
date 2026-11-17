@@ -20,6 +20,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -99,6 +100,10 @@ type Runner struct {
 	activeMu sync.Mutex
 	active   map[string]bool
 
+	// groups are runner.json's groups, read once: a process with no
+	// capabilities can't change them.
+	groups []int
+
 	killDelay   time.Duration // TERM to KILL on a cancel or a timeout
 	scanEvery   time.Duration
 	statusEvery time.Duration // runner.json and the orphan recovery
@@ -149,6 +154,7 @@ func New(opts Options) (*Runner, error) {
 		clis:        map[string]cliInfo{},
 		creds:       map[string]credSeen{},
 		active:      map[string]bool{},
+		groups:      groups(),
 		killDelay:   10 * time.Second,
 		scanEvery:   scanInterval,
 		statusEvery: agentproto.RunnerInterval,
@@ -316,6 +322,7 @@ func (r *Runner) status() agentproto.Runner {
 		Slots:       r.opts.Slots,
 		CLIs:        map[string]agentproto.CLI{},
 		Handoff:     true,
+		Groups:      r.groups,
 	}
 	for _, name := range []string{agentproto.CLIClaude, agentproto.CLICodex} {
 		c, _ := r.cli(name)
@@ -323,6 +330,21 @@ func (r *Runner) status() agentproto.Runner {
 		st.CLIs[name] = agentproto.CLI{Version: c.version, Credential: kind, CredentialSince: r.credentialSince(name, kind)}
 	}
 	return st
+}
+
+// groups are the runner's group ids, its own first, for runner.json: the
+// Bridge hands credential.json to its group alone when they hold it. Its own
+// is the effective one, which with the supplementary ones is what a file's
+// group bits are checked against (the real gid plays no part).
+func groups() []int {
+	out := []int{os.Getegid()}
+	more, _ := os.Getgroups() // none where the OS has no such list
+	for _, g := range more {
+		if !slices.Contains(out, g) {
+			out = append(out, g)
+		}
+	}
+	return out
 }
 
 // writeStatus rewrites runner.json (a temp file renamed into place, 0644 so the

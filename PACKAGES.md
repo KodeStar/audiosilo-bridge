@@ -1882,7 +1882,9 @@ internal/
             no length or a finish, answered {server_time, results, progress}) and AudibleProgress (GET
             /bridge/progress?account=&since=&limit= -> {rows, next, more}: next opaque and kept between
             polls); 403 sync_off -> ErrSyncOff, 403 user_unavailable -> ErrUserUnavailable, a 400
-            on a sent since -> ErrBadCursor (bridge#50).
+            on a sent since -> ErrBadCursor (bridge#50), a 404 for a missing route (code not_found,
+            or none) -> ErrNoAudibleSync (a server before 2.6.0; a 404 with any other code stays
+            the APIError, bridge#50).
   mapping/  where the Bridge sees each library, CHECKED (decision 13): Check stats the
             server's sample book's files through the mount (SafeJoin: no absolute,
             "..", NUL; a backslash is a name character except on Windows) and
@@ -2552,7 +2554,8 @@ internal/
             in it. Pusher (not a job): every PushEvery (1 min)
             per account mapped here, not refused, not waiting, not paused (in memory: sync_off 5 min,
             user_unavailable or unknown 15 min, the server's 429/503 its Retry-After, at least 2 min,
-            this loop only): reads the feed from push_cursor (it pages in the server's write order, change_seq, and
+            a feed 404 for a missing route (not_found or no code: a server before 2.6.0) 1 h with a sync_error saying to
+            update, bridge#50; this loop only): reads the feed from push_cursor (it pages in the server's write order, change_seq, and
             may give a row again with updated_at unchanged, so a row is new by its place alone (a new version at the same place is none),
             never its time; the baseline, every read until one reaches the feed's end, takes only rows
             of the last 10 min by updated_at, history after it is none; a row it fails to record keeps
@@ -3245,7 +3248,15 @@ internal/
             takes the Bridge's credential; the Bridge then writes
             credential/credential.json (Credential {cli, kind, value}) in the job
             dir, in its own NON-sticky subdirectory so the runner (another uid) can
-            delete it, before request.json. DecodeCredential is strict (unknown
+            delete it, before request.json. runner.json's groups (bridge#25) are
+            the runner's gids: when they hold the Bridge's, the dir is 0770 (the
+            runner's os.Root opens it, so the group needs read too) and the file
+            0440, both chowned to that group, any ACL inherited from the staging
+            dir removed (no other uid can read it); else
+            (an older runner, no shared group, or a staging volume that refuses
+            the chown or the ACL change: NFS, CIFS) 0777 and 0444 as before.
+            exit.json's credential_denied: the runner's uid was denied the file
+            (refused before the CLI starts). DecodeCredential is strict (unknown
             field, trailing data, over 4 KiB, another CLI, a kind that CLI doesn't
             take, or a value that isn't one printable line all refused; the value
             never in an error).
@@ -3302,7 +3313,16 @@ internal/
             takes a hand-off: Status counts the agent available, billed as that
             kind, its set time standing for credential_since (so replacing it on
             the Accounts tab ends a refusal); stage() writes credential.json
-            (0444, synced) in credential/ (0777) before the request. A container
+            (synced) in credential/ before the request: the Bridge's group's
+            alone (0440 in 0770) when runner.json's groups hold it
+            (Status.ShareGroup), else 0444 in 0777, logged once a process with
+            the fix (group_add with the Bridge's PGID); a volume that refuses
+            the chown or the ACL drop falls back to those modes too, logged
+            once, never a failed run. A group-only credential the runner is
+            denied (credential_denied: the containers map the volume's ids
+            differently, a user namespace) re-stages that job once in those
+            modes (nothing ran) and the rest of the process uses them, logged
+            once (groupDenied). A container
             credential always wins; a runner that can't take a hand-off gets
             nothing and is told to update. A refusal's detail says where to
             replace the credential: the Accounts tab for the handed one, the agent
@@ -3347,7 +3367,8 @@ internal/
             to done. Login: codex runs `codex login --device-auth` with the
             allow-listed environment and CODEX_HOME on the volume; claude prints how
             to give the container a `claude setup-token` token.
-            Phase 2b: runner.json says handoff: true; execute reads the job's
+            Phase 2b: runner.json says handoff: true (and, bridge#25, its groups,
+            its own effective gid first); execute reads the job's
             credential.json (agentproto.DecodeCredential) and DELETES it before
             the CLI starts, and childEnv uses it only when the container has no
             credential of its own for the CLI (claude: the OAuth token or
@@ -3743,7 +3764,10 @@ compose.example.yaml   three services: the server (libraries :ro), the Bridge (t
                        folders :rw, AUDIOSILO_BRIDGE_AGENT_STAGING_DIR=/staging, the
                        optional AUDIOSILO_BRIDGE_AGENT_BACKEND and
                        AUDIOSILO_BRIDGE_GITHUB_TOKEN) and `agent` (:latest-agent, user
-                       10002:10002, cap_drop ALL, no-new-privileges, read-only root,
+                       10002:10002 with group_add the Bridge's PGID (a YAML alias of
+                       the bridge service's PGID, so the two can't differ; the credential
+                       hand-off then goes to that group alone), cap_drop ALL,
+                       no-new-privileges, read-only root,
                        tmpfs /tmp, its own internet-only network, the credential
                        variables by NAME only, stop_grace_period 20s). The `staging`
                        volume is the only one both mount, outside /bridge-data (whose

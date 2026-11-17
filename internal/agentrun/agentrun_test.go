@@ -631,6 +631,11 @@ func TestRunnerJSON(t *testing.T) {
 	if rj.Protocol != 1 || rj.Version != "0.2.0-test" || rj.Slots != 1 || time.Since(rj.HeartbeatAt) > time.Minute {
 		t.Fatalf("runner.json = %+v", rj)
 	}
+	// Its groups, its own first: the Bridge hands a credential to its group
+	// alone when they hold it.
+	if len(rj.Groups) == 0 || rj.Groups[0] != os.Getegid() {
+		t.Fatalf("groups = %v, want %d first", rj.Groups, os.Getegid())
+	}
 	claude, codex := rj.CLIs["claude"], rj.CLIs["codex"]
 	if claude.Version != "9.9.9 (fake claude)" || claude.Credential != "oauth_token" || claude.CredentialSince.IsZero() ||
 		codex != (agentproto.CLI{Version: "9.9.9 (fake codex)"}) {
@@ -848,6 +853,35 @@ func TestHandoffContainerWins(t *testing.T) {
 	}
 }
 
+// A credential.json the runner's uid may not take (handed to a group the
+// volume's ids don't give it, as under a user namespace that maps them
+// differently) is refused as credential_denied before the CLI starts, so the
+// Bridge stages the job again for every uid; a malformed one never is
+// (TestHandoffRefused).
+func TestHandoffCredentialDenied(t *testing.T) {
+	t.Parallel()
+	if os.Geteuid() == 0 {
+		t.Skip("root takes the file whatever its modes")
+	}
+	env := parentEnv()
+	delete(env, "CLAUDE_CODE_OAUTH_TOKEN")
+	te := newTestEnv(t, env)
+	job, cred := te.submitWithCredential(t, claudeReq, `{"cli":"claude","kind":"oauth_token","value":"sk-ant-oat01-handed"}`)
+	credDir := filepath.Dir(cred)
+	if err := os.Chmod(credDir, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(credDir, 0o700) })
+	te.start(t)
+	ex := waitDone(t, job, 30*time.Second)
+	if !ex.CredentialDenied || ex.Unavailable || ex.Error == "" || strings.Contains(ex.Error, "sk-ant") {
+		t.Fatalf("exit = %+v", ex)
+	}
+	if _, err := os.Stat(filepath.Join(te.claudeCap, "argv")); err == nil {
+		t.Fatal("the CLI ran")
+	}
+}
+
 // A malformed hand-off is refused (no run) and still deleted; no credential at
 // all is the agent being unavailable.
 func TestHandoffRefused(t *testing.T) {
@@ -858,7 +892,7 @@ func TestHandoffRefused(t *testing.T) {
 	te.start(t)
 	job, cred := te.submitWithCredential(t, claudeReq, `{"cli":"codex","kind":"api_key","value":"sk-SECRET-x"}`)
 	ex := waitDone(t, job, 30*time.Second)
-	if ex.Error == "" || ex.Unavailable || strings.Contains(ex.Error, "sk-SECRET") {
+	if ex.Error == "" || ex.Unavailable || ex.CredentialDenied || strings.Contains(ex.Error, "sk-SECRET") {
 		t.Fatalf("exit = %+v", ex)
 	}
 	if _, err := os.Lstat(cred); !errors.Is(err, fs.ErrNotExist) {

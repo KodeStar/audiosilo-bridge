@@ -31,6 +31,13 @@ func TestAudibleSyncWireMirror(t *testing.T) {
 		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/bridge/audible/accounts/offoff00/listening":
 			w.WriteHeader(http.StatusForbidden)
 			_, _ = w.Write([]byte(`{"error":"sync with Audible is off for this account","code":"sync_off"}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/bridge/audible/accounts/route000/listening":
+			// A server since 2.5's API answers a route it lacks as not_found.
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":"not found","code":"not_found"}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/bridge/audible/accounts/lib40400/listening":
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":"no such library","code":"unknown_library"}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/bridge/progress":
 			queries = append(queries, r.URL.RawQuery)
 			switch r.URL.Query().Get("account") {
@@ -84,6 +91,19 @@ func TestAudibleSyncWireMirror(t *testing.T) {
 	}
 	if _, err := c.PostAudibleListening(ctx, "offoff00", AudibleListening{SentAt: "x"}); !errors.Is(err, ErrSyncOff) {
 		t.Fatalf("sync off = %v", err)
+	}
+	// A 404 for a missing route (a bare one, or the API's not_found) is a
+	// server with no such route (before 2.6.0); one with another code is that
+	// answer.
+	for _, account := range []string{"nosuch00", "route000"} {
+		if _, err := c.PostAudibleListening(ctx, account, AudibleListening{SentAt: "x"}); !errors.Is(err, ErrNoAudibleSync) {
+			t.Fatalf("old server (%s) = %v", account, err)
+		}
+	}
+	var ae *APIError
+	if _, err := c.PostAudibleListening(ctx, "lib40400", AudibleListening{SentAt: "x"}); errors.Is(err, ErrNoAudibleSync) ||
+		!errors.As(err, &ae) || ae.Code != "unknown_library" {
+		t.Fatalf("a coded 404 = %v", err)
 	}
 
 	page, err := c.AudibleProgress(ctx, "abcd1234", "Q0", 0)

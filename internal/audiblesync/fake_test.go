@@ -6,11 +6,15 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -30,23 +34,36 @@ func (mapServer) PutAudibleAccount(_ context.Context, id string, _ link.AudibleA
 }
 func (mapServer) DeleteAudibleAccount(context.Context, string) error { return nil }
 
-// Both ways against the fake, through the real client and accounts: the job
-// reads all 30 titles' places in batches of 25 split under the fake's cap of
-// 10, posts the ones it has, and the push loop writes a server place back
-// once (PUT lastpositions recorded with the content reference from a license
-// request), not again within 5 seconds, and the next sync doesn't echo it.
-func TestSyncBothWaysAgainstTheFake(t *testing.T) {
-	t.Parallel()
-	now := time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
-	fake := audiblefake.New(audiblefake.Options{KeyBits: 1024, Now: func() time.Time { return now }, FFmpeg: "-"})
-	ts := httptest.NewServer(fake.Handler())
-	defer ts.Close()
+// fakeAccount is an account signed in against the Audible fake through the
+// real client and accounts, its credentials sealed in a vault under data.
+type fakeAccount struct {
+	fake  *audiblefake.Fake
+	m     *audibleacct.Manager
+	acct  store.AudibleAccount
+	db    *store.DB
+	data  string
+	vault *secrets.Vault
+	logs  *bytes.Buffer
+	log   *slog.Logger
+}
+
+// newFakeAccount signs an account in against the fake at now; wrap, when set,
+// stands in front of the fake's handler.
+func newFakeAccount(t *testing.T, now func() time.Time, wrap func(http.Handler) http.Handler) *fakeAccount {
+	t.Helper()
+	fake := audiblefake.New(audiblefake.Options{KeyBits: 1024, Now: now, FFmpeg: "-"})
+	h := fake.Handler()
+	if wrap != nil {
+		h = wrap(h)
+	}
+	ts := httptest.NewServer(h)
+	t.Cleanup(ts.Close)
 	data := t.TempDir()
 	db, err := store.Open(context.Background(), filepath.Join(data, store.FileName))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	t.Cleanup(func() { _ = db.Close() })
 	vault, _, err := secrets.Open(data, "")
 	if err != nil {
 		t.Fatal(err)
@@ -70,6 +87,19 @@ func TestSyncBothWaysAgainstTheFake(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	return &fakeAccount{fake: fake, m: m, acct: acct, db: db, data: data, vault: vault, logs: &logs, log: log}
+}
+
+// Both ways against the fake, through the real client and accounts: the job
+// reads all 30 titles' places in batches of 25 split under the fake's cap of
+// 10, posts the ones it has, and the push loop writes a server place back
+// once (PUT lastpositions recorded with the content reference from a license
+// request), not again within 5 seconds, and the next sync doesn't echo it.
+func TestSyncBothWaysAgainstTheFake(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
+	fa := newFakeAccount(t, func() time.Time { return now }, nil)
+	fake, m, acct, db, logs, log := fa.fake, fa.m, fa.acct, fa.db, fa.logs, fa.log
 
 	srv := &stubServer{server: map[string]float64{}}
 	var titles []link.AudibleSyncTitle
@@ -152,6 +182,101 @@ func TestSyncBothWaysAgainstTheFake(t *testing.T) {
 		if strings.Contains(logs.String(), secret) {
 			t.Fatalf("the log holds a credential: %s", logs.String())
 		}
+	}
+}
+
+// The push loop's failures carry no credential: Audible answering a license
+// request (a 500) and a place (a 400) with a body quoting the account's real
+// tokens, customer id and serial leaves none in sync_error, the log, or any file under the data
+// dir but the vault's sealed one (bridge#50: the sync job's walk is in
+// internal/app; this is the push loop's).
+func TestPushFailuresHoldNoCredential(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
+	var failing atomic.Value // "license" | "put", the body set below
+	var body atomic.Value
+	fa := newFakeAccount(t, func() time.Time { return now }, func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			what, _ := failing.Load().(string)
+			msg, _ := body.Load().(string)
+			switch {
+			case what == "license" && strings.HasSuffix(r.URL.Path, "/licenserequest"):
+				w.WriteHeader(http.StatusInternalServerError)
+				_, _ = io.WriteString(w, msg)
+			case what == "put" && r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/1.0/lastpositions/"):
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = io.WriteString(w, msg)
+			default:
+				next.ServeHTTP(w, r)
+			}
+		})
+	})
+	raw, err := fa.vault.Get(secrets.AudibleName(fa.acct.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	creds, err := audible.ParseCredentials(raw)
+	if err != nil || creds.AccessToken == "" || creds.ADPToken == "" {
+		t.Fatalf("sealed = %+v, %v", creds, err)
+	}
+	// Audible's answers can quote what Amazon holds; the device key signs
+	// requests and is never sent, so no answer holds it, but no file or log
+	// line may either.
+	canaries := []string{creds.AccessToken, creds.RefreshToken, creds.ADPToken, creds.CustomerID, creds.DeviceSerial}
+	body.Store("refused " + strings.Join(canaries, " "))
+	if lines := strings.Split(creds.DevicePrivateKey, "\n"); len(lines) > 1 {
+		canaries = append(canaries, lines[1])
+	}
+
+	ctx := context.Background()
+	const asin = "B0FAKE0006"
+	if err := fa.db.ListAudibleSync(ctx, fa.acct.ID, []store.AudibleSyncTitle{{ASIN: asin, LibraryID: 1, Path: "Books/" + asin, RuntimeS: 60000}}); err != nil {
+		t.Fatal(err)
+	}
+	srv := &stubServer{server: map[string]float64{}}
+	p := NewPusher(Options{Accounts: fa.m, DB: fa.db, Server: func() Server { return srv }, ServerID: func() string { return "srv-1" },
+		Log: fa.log, Now: func() time.Time { return now }})
+	clean := func(step, want string) {
+		t.Helper()
+		a, err := fa.db.GetAudibleAccount(ctx, fa.acct.ID)
+		if err != nil || !strings.Contains(a.SyncError, want) {
+			t.Fatalf("%s: sync_error = %q, %v (want %q)", step, a.SyncError, err, want)
+		}
+		texts := map[string]string{"sync_error": a.SyncError, "log": fa.logs.String()}
+		// A file or dir the walk can't read fails the test: it would leave a
+		// credential written there unseen.
+		if err := filepath.WalkDir(fa.data, func(path string, d fs.DirEntry, err error) error {
+			if err != nil || !d.Type().IsRegular() {
+				return err
+			}
+			b, err := os.ReadFile(path)
+			texts[path] = string(b)
+			return err
+		}); err != nil {
+			t.Fatalf("%s: reading the data dir: %v", step, err)
+		}
+		for what, text := range texts {
+			for _, c := range canaries {
+				if c != "" && strings.Contains(text, c) {
+					t.Fatalf("%s: %s holds a credential", step, what)
+				}
+			}
+		}
+	}
+
+	p.Tick(ctx) // the feed's start
+	srv.add("Books/"+asin, asin, 1234.5, now, "web-1")
+	p.Tick(ctx) // read: still from now
+	now = now.Add(4 * time.Minute)
+	failing.Store("license")
+	p.Tick(ctx)
+	clean("a failed license request", "reading the title's content reference on Audible")
+	now = now.Add(3 * time.Minute) // past the loop's wait
+	failing.Store("put")
+	p.Tick(ctx)
+	clean("a refused place", "writing the place to Audible")
+	if puts := fa.fake.Calls().PutPositions; len(puts) != 0 {
+		t.Fatalf("a place was written: %+v", puts)
 	}
 }
 

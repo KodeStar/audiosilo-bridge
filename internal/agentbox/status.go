@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"slices"
 	"time"
 
 	"github.com/kodestar/audiosilo-bridge/internal/agent"
@@ -29,6 +30,10 @@ type Status struct {
 	// the runner takes a hand-off and has no credential of its own. CLIs then
 	// shows that credential's kind for the backend.
 	Handoff bool
+	// ShareGroup: the runner is in the Bridge's group (runner.json's groups),
+	// so a handed credential is that group's alone, never every uid's; false
+	// once the runner couldn't take one so (Run), for the rest of the process.
+	ShareGroup bool
 	// Detail says why not, in words for the page and the park hint.
 	Detail string
 	// Problem is why not as a kind (Problem*: "" when Available or Refused), and
@@ -111,6 +116,7 @@ func (r *Runner) Status() Status {
 		}
 	}
 	st.Version, st.Slots, st.HeartbeatAt, st.CLIs = rj.Version, rj.Slots, rj.HeartbeatAt, rj.CLIs
+	st.ShareGroup = slices.Contains(rj.Groups, r.gid) && !r.groupDenied.Load()
 	st.Problem, st.Other, st.Detail = r.unavailableBecause(rj)
 	if st.Detail == "" {
 		if refused := r.refusal(rj.CLIs[r.backend], st.Handoff); refused != "" {

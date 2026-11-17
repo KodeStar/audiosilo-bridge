@@ -83,8 +83,9 @@ Images (`ghcr.io/kodestar/audiosilo-bridge`, public from v0.3.0, no login needed
 
 Only `latest-agent` carries an AI agent CLI (decision 15). `latest`, `latest-slim`
 and `latest-cuda` also carry the ASR worker builds the Bridge serves. Run it as the compose
-example does: user 10002, all capabilities dropped, a read-only root, its own
-network.
+example does: user 10002 with the Bridge's PGID added (`group_add`, so the agent
+credential the Bridge hands it is readable by that group alone), all capabilities
+dropped, a read-only root, its own network.
 
 ## Add an ASR worker (transcription on another computer)
 

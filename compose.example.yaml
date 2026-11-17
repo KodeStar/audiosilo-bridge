@@ -54,7 +54,9 @@ services:
     depends_on: [audiosilo]
     environment:
       PUID: "1000"
-      PGID: "1000"
+      # &bridge_pgid names this value: the agent container's group_add below
+      # follows it, so change it here only.
+      PGID: &bridge_pgid "1000"
       # The server as the Bridge reaches it on this network.
       AUDIOSILO_BRIDGE_SERVER_URL: http://audiosilo:8080
       # The Bridge's page as your LAN reaches it (the console links to it).
@@ -86,6 +88,12 @@ services:
     image: ghcr.io/kodestar/audiosilo-bridge:latest-agent
     restart: unless-stopped
     user: "10002:10002"
+    # The bridge's PGID above (*bridge_pgid follows it): the Bridge hands the
+    # agent credential from its Accounts tab to this group alone, never to
+    # every user on the staging volume. Without it the hand-off still works,
+    # readable by any user until the runner takes it (the Bridge's log says so
+    # once).
+    group_add: [*bridge_pgid]
     environment:
       # By name only: the value comes from your shell or .env and is never
       # written here. Set the one you use; the runner reports which it found.

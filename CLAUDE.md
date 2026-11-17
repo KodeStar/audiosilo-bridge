@@ -233,7 +233,8 @@ in PACKAGES.md.
   sealed in `<data>/secrets`, and the page API never returns one. `AUDIOSILO_BRIDGE_GITHUB_TOKEN` is read live and no longer sealed (a start
   deletes an earlier Bridge's `github_pat` copy). An agent credential leaves the
   Bridge only as one run's `credential/credential.json`, which the runner deletes
-  before the CLI starts, and only when the agent container has none of its own;
+  before the CLI starts, and only when the agent container has none of its own
+  (readable by the Bridge's group alone when the runner reports it and can take it so, else by any uid);
   private podcast feed URLs are sealed before a claim reaches server_jobs, as
   podcast_job_<job id>_<attempt> (each claim its own), then podcast_feed_<show_id>.
   The job secret survives a resumable stop and is deleted at any terminal end.
