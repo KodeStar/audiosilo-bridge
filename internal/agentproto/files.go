@@ -66,8 +66,9 @@ func ReadRegular(root *os.Root, name string, limit int64) ([]byte, error) {
 }
 
 // ReadRegularInfo is ReadRegular with the FileInfo of the file it read (the
-// open file's, so its owner is the writer of what was read, not of a file
-// swapped in after).
+// open file's, so its owner is that of the very file read, not of one swapped
+// in after; a file can still be moved into place whole by any uid that may
+// write both dirs).
 func ReadRegularInfo(root *os.Root, name string, limit int64) ([]byte, fs.FileInfo, error) {
 	f, info, err := openRegular(root, name)
 	if err != nil {

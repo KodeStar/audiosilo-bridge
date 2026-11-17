@@ -55,6 +55,18 @@ func TestFromRunner(t *testing.T) {
 	if _, own := r.fromRunner(info(), false); own {
 		t.Fatal("a file with a second link counts as the runner's")
 	}
+	// A live runner.json with a second link can't pin, and says so once.
+	linked, _ := newTestRunner(t, agent.IDClaude)
+	var said strings.Builder
+	linked.log = slog.New(slog.NewTextHandler(&said, nil))
+	for range 2 {
+		if _, own := linked.fromRunner(info(), true); own || linked.runnerUID.Load() != noUID {
+			t.Fatalf("a live runner.json with a second link: own %v, pinned %d", own, linked.runnerUID.Load())
+		}
+	}
+	if n := strings.Count(said.String(), "more than one link"); n != 1 {
+		t.Fatalf("the second link is logged %d times, want 1:\n%s", n, said.String())
+	}
 
 	self, _ := newTestRunner(t, agent.IDClaude)
 	self.uid = me
@@ -78,17 +90,34 @@ func TestFromRunner(t *testing.T) {
 		t.Fatalf("warned: %s", logged.String())
 	}
 
+	// A live runner.json from a second uid ends the pin: neither is the
+	// runner's after, said once; a file of either uid then counts as no one's.
 	other, _ := newTestRunner(t, agent.IDClaude)
+	var contested strings.Builder
+	other.log = slog.New(slog.NewTextHandler(&contested, nil))
 	other.runnerUID.Store(otherUID())
-	if _, own := other.fromRunner(si, true); own || other.runnerUID.Load() != otherUID() {
-		t.Fatalf("another uid's runner.json: own %v, pinned %d", own, other.runnerUID.Load())
+	for range 2 {
+		if _, own := other.fromRunner(si, true); own || other.runnerUID.Load() != contestedUID {
+			t.Fatalf("a second uid's live runner.json: own %v, pinned %d", own, other.runnerUID.Load())
+		}
+	}
+	if _, own := other.fromRunner(si, false); own {
+		t.Fatal("a file counts as the runner's once the pin is contested")
+	}
+	if n := strings.Count(contested.String(), "a second uid wrote a live runner.json"); n != 1 {
+		t.Fatalf("the contest is logged %d times, want 1:\n%s", n, contested.String())
+	}
+	other.notFromRunner("runner.json", me)
+	if strings.Contains(contested.String(), "isn't the runner's") {
+		t.Fatalf("warned of a foreign file after the contest: %s", contested.String())
 	}
 }
 
 // A runner.json naming no Bridge group moves the credential to every uid only
 // when the runner's uid wrote it (allowed: 0777 and 0444, as for a runner
 // without group_add); written by any other uid it is a forgery, and the
-// credential stays the group's (denied: 0770 and 0440), logged once.
+// credential stays the group's (denied: 0770 and 0440), logged once (as a
+// second uid ending the pin: the test's runner.json is live).
 func TestForgedRunnerJSONKeepsTheGroup(t *testing.T) {
 	t.Parallel()
 	for name, tc := range map[string]struct {
@@ -111,7 +140,7 @@ func TestForgedRunnerJSONKeepsTheGroup(t *testing.T) {
 					t.Fatalf("modes = dir %v, file %v (want %v, %v)", m.dir, m.file, tc.dir, tc.file)
 				}
 			}
-			if n := strings.Count(logged.String(), "isn't the runner's"); n != tc.logged {
+			if n := strings.Count(logged.String(), "stays the Bridge's group's alone"); n != tc.logged {
 				t.Fatalf("the forged runner.json is logged %d times, want %d:\n%s", n, tc.logged, logged.String())
 			}
 		})
@@ -145,7 +174,8 @@ func TestForgedCredentialDeniedKeepsTheGroup(t *testing.T) {
 	t.Run("another uid's", func(t *testing.T) {
 		t.Parallel()
 		r, fake, err := run(t, otherUID())
-		if err == nil || !strings.Contains(err.Error(), "refused the job") || fake.claimed.Load() != 1 ||
+		if err == nil || !strings.Contains(err.Error(), "refused the job") || !strings.Contains(err.Error(), "restart the Bridge") ||
+			fake.claimed.Load() != 1 ||
 			r.groupDenied.Load() || !r.Status().ShareGroup {
 			t.Fatalf("err = %v, %d jobs, group denied %v", err, fake.claimed.Load(), r.groupDenied.Load())
 		}

@@ -112,7 +112,8 @@ type Runner struct {
 	// the staging volume shows it, pinned by the first live runner.json
 	// (noUID until then): only the runner's files may move a handed
 	// credential off the group (trust.go). warnedForeign is set once the log
-	// has said one from another uid didn't.
+	// has said one from another uid (or a runner.json with a second link)
+	// didn't.
 	uid           int
 	runnerUID     atomic.Int64
 	warnedForeign atomic.Bool
@@ -400,6 +401,12 @@ func (e *credentialDeniedError) Error() string { return refusedJob + e.detail }
 // refusedJob starts the error of a job the runner refused (exit.json's error).
 const refusedJob = "agent container refused the job: "
 
+// notRunnersDenial ends the refusal of a job whose credential_denied another
+// uid than the runner's wrote (trust.go), so the book's reason says what the
+// log says only once.
+const notRunnersDenial = " (not from the runner's uid on the staging volume, so the credential stayed the Bridge's " +
+	"group's: if the agent container now runs as another user, restart the Bridge)"
+
 // noteCredential remembers a credential the provider refused, and forgets one
 // once a run shows it works (an answer, or a rate limit: the provider took the
 // credential then). st is the runner's report when the run was handed over.
@@ -556,6 +563,9 @@ func (r *Runner) outcome(root *os.Root, model string, timeout time.Duration) (ag
 				return agent.Result{}, &credentialDeniedError{detail: ex.Error}
 			}
 			r.notFromRunner("a job's exit.json saying the runner was denied the credential", uid)
+			if !ex.Unavailable {
+				return agent.Result{}, errors.New(refusedJob + ex.Error + notRunnersDenial)
+			}
 		}
 		if ex.Unavailable {
 			// The container stopped or restarted mid-run (or couldn't start the CLI):

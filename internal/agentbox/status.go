@@ -30,9 +30,10 @@ type Status struct {
 	// the runner takes a hand-off and has no credential of its own. CLIs then
 	// shows that credential's kind for the backend.
 	Handoff bool
-	// ShareGroup: the runner is in the Bridge's group (runner.json's groups),
-	// so a handed credential is that group's alone, never every uid's; false
-	// once the runner couldn't take one so (Run), for the rest of the process.
+	// ShareGroup: a handed credential is the Bridge's group's alone, never
+	// every uid's: the runner is in that group (runner.json's groups), or a
+	// runner.json naming no group isn't the runner's (trust.go); false once
+	// the runner couldn't take one so (Run), for the rest of the process.
 	ShareGroup bool
 	// Detail says why not, in words for the page and the park hint.
 	Detail string
