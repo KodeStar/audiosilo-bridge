@@ -62,6 +62,11 @@ func TestParkAndUnpark(t *testing.T) {
 		if sj.State != store.JobRunning || sj.Error != "the agent container isn't answering" {
 			t.Errorf("stored while parked = %+v", sj)
 		}
+		// The park carries its message for people (bridge#28), stored and sent.
+		if !strings.Contains(string(sj.Progress), `"message":"the agent container isn't answering"`) ||
+			!strings.Contains(string(lastUpdate(srv, 1).Progress), `"message":"the agent container isn't answering"`) {
+			t.Errorf("park without its message: stored %s, sent %s", sj.Progress, lastUpdate(srv, 1).Progress)
+		}
 		rep.Unpark()
 		rep.Progress(Progress{Step: "synthesizing"})
 		waitFor(t, func() bool {
@@ -85,6 +90,34 @@ func TestParkAndUnpark(t *testing.T) {
 	}
 	if !sawPark || !sawClear {
 		t.Fatalf("park sent %v, cleared %v: %+v", sawPark, sawClear, srv.updates[1])
+	}
+}
+
+// withParkMessage puts the message beside the park it names, without the
+// "<code>: " an engine message may lead with, and adds none for a message that
+// is only the code or a progress that names no park (bridge#28).
+func TestWithParkMessage(t *testing.T) {
+	t.Parallel()
+	park := map[string]any{"code": "asr_worker_waiting", "hint": "Add a worker."}
+	pr := Progress{Step: "asr", Extra: map[string]any{"stage": "asr", "park": park}}
+	for msg, want := range map[string]string{
+		"asr_worker_waiting: speech recognition waits for a worker": "speech recognition waits for a worker",
+		"speech recognition waits for a worker":                     "speech recognition waits for a worker",
+		"asr_worker_waiting":                                        "",
+		"asr_worker_waiting:":                                       "",
+	} {
+		got := withParkMessage(pr, msg)
+		gotMsg, _ := got.Extra["park"].(map[string]any)["message"].(string)
+		if gotMsg != want {
+			t.Errorf("%q: message %q, want %q", msg, gotMsg, want)
+		}
+	}
+	if _, ok := park["message"]; ok || len(pr.Extra) != 2 {
+		t.Fatalf("the caller's maps changed: %v", pr.Extra)
+	}
+	plain := Progress{Step: "asr", Extra: map[string]any{"stage": "asr"}}
+	if got := withParkMessage(plain, "a message"); len(got.Extra) != 1 {
+		t.Fatalf("a progress with no park gained one: %v", got.Extra)
 	}
 }
 
@@ -113,6 +146,37 @@ func TestParkedJobCancelledOnTheServer(t *testing.T) {
 	})
 	if resumes.Load() {
 		t.Fatal("a job the server took back says it resumes")
+	}
+}
+
+// A parked job an admin cancels on a server that says so (409 not_held, reason
+// cancelled, bridge#35) ends cancelled, not lost: its context says it neither
+// resumes nor was lost (so a handler keeps nothing for a later claim).
+func TestParkedJobCancelledByAnAdmin(t *testing.T) {
+	t.Parallel()
+	db, srv := openStore(t), newFakeServer()
+	srv.add(&link.Job{ID: 2, Kind: "k.v", Attempts: 1})
+	var resumes, lost atomic.Bool
+	resumes.Store(true)
+	lost.Store(true)
+	h := handler{kind: "k.v", lane: LanePipeline, fn: func(ctx context.Context, j Job, rep *Reporter) (any, error) {
+		rep.Park("asr_worker_waiting", "waiting for an ASR worker")
+		waitFor(t, func() bool { return countState(srv, 2, link.StateNeedsAttention) >= 1 })
+		srv.mu.Lock()
+		srv.gone[2] = true
+		srv.mu.Unlock()
+		<-ctx.Done()
+		resumes.Store(Resumes(ctx))
+		lost.Store(Lost(ctx))
+		return nil, ctx.Err()
+	}}
+	r := New(db, func() Server { return srv }, nil, testOpts(), h)
+	runFor(t, r, func() bool {
+		sj, err := db.GetServerJob(context.Background(), 2)
+		return err == nil && sj.State == store.JobCancelled && sj.Reported
+	})
+	if resumes.Load() || lost.Load() {
+		t.Fatalf("a job an admin cancelled says resumes %v, lost %v", resumes.Load(), lost.Load())
 	}
 }
 

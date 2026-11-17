@@ -73,6 +73,15 @@ describe('parkText', () => {
     expect(parkText(at('asr_worker_waiting: Start a worker.'), park)).toBe('');
     expect(parkText(at(''), park)).toBe('');
   });
+  it("reads the park's own message over the error (bridge#28)", () => {
+    const own = { ...park, message: 'speech recognition waits for a worker' };
+    expect(parkText(at('asr_worker_waiting: something older'), own)).toBe(
+      'speech recognition waits for a worker',
+    );
+    // Its code or the hint as the message says nothing, whatever the error.
+    expect(parkText(at('waiting for a worker'), { ...park, message: 'Start a worker.' })).toBe('');
+    expect(parkText(at('waiting for a worker'), { ...park, message: '' })).toBe('');
+  });
 });
 
 describe('wording', () => {

@@ -74,13 +74,20 @@ export function parkOf(job: ServerJob): Park | null {
   return park && typeof park.code === 'string' && park.code !== '' ? park : null;
 }
 
-// parkText is a parked job's message as prose: the engine's message, left out
-// when it is only the park's code (a park with no message) or repeats the hint.
-// The code itself is for the log, never the page.
+// parkText is a parked job's message as prose: the park's own message (the
+// Bridge puts it beside the park since bridge#28), else, for a job parked by an
+// earlier Bridge, its error without the "<code>: " it may lead with; left out
+// when it is only the park's code or repeats the hint. The code itself is for
+// the log, never the page.
 export function parkText(job: ServerJob, park: Park): string {
-  let msg = (job.error ?? '').trim();
-  const prefix = `${park.code}: `;
-  if (msg.startsWith(prefix)) msg = msg.slice(prefix.length).trim();
+  let msg: string;
+  if (typeof park.message === 'string') {
+    msg = park.message.trim();
+  } else {
+    msg = (job.error ?? '').trim();
+    const prefix = `${park.code}: `;
+    if (msg.startsWith(prefix)) msg = msg.slice(prefix.length).trim();
+  }
   return msg === '' || msg === park.code || msg === park.hint ? '' : msg;
 }
 

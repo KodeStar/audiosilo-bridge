@@ -34,10 +34,6 @@ export function remainingRequired(setup: Setup | null | undefined): number {
   return setupItems(setup).filter((it) => it.required && !it.done).length;
 }
 
-// ASR_WAITING is the asr item's detail while the engine waits for an ASR worker
-// (the Bridge's setup.DetailASRWaiting): the usual fix is a worker, not a setting.
-export const ASR_WAITING = 'waiting for an ASR worker';
-
 export interface SetupLink {
   hash: string;
   name: string;
@@ -53,11 +49,13 @@ export function setupLink(id: SetupItemId): SetupLink | null {
   return tabLink(SETUP_ITEMS[id].tab);
 }
 
-// setupLinks are the links an item not done shows: its tab, and for speech
-// recognition waiting for a worker the Workers tab first.
-export function setupLinks(item: Pick<SetupItem, 'detail'> & { id: SetupItemId }): SetupLink[] {
-  const waiting = item.id === 'asr' && item.detail === ASR_WAITING;
-  return [waiting ? tabLink('workers') : null, setupLink(item.id)].filter(
+// setupLinks are the links an item not done shows: its tab, and for an item
+// waiting for an ASR worker (needs_worker, bridge#28) the Workers tab first: the
+// usual fix is a worker, not a setting.
+export function setupLinks(
+  item: Pick<SetupItem, 'needs_worker'> & { id: SetupItemId },
+): SetupLink[] {
+  return [item.needs_worker ? tabLink('workers') : null, setupLink(item.id)].filter(
     (l): l is SetupLink => l !== null,
   );
 }

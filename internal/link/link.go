@@ -124,6 +124,10 @@ type SetupItem struct {
 	Required   bool    `json:"required"`
 	Detail     string  `json:"detail,omitempty"`
 	LibraryIDs []int64 `json:"library_ids,omitempty"`
+	// NeedsWorker: the step waits for an ASR worker, so it is fixed on the
+	// Workers tab (bridge#28; an older server ignores the key, as it reads
+	// the block leniently).
+	NeedsWorker bool `json:"needs_worker,omitempty"`
 }
 
 // Estimates are the Bridge's figures for estimating jobs, by job family.
@@ -316,6 +320,11 @@ var (
 	// ErrNotHeld is a job update's 409: the claim no longer holds the job (it
 	// finished, was cancelled, or its lease ran out and it was claimed again).
 	ErrNotHeld = errors.New("the job is no longer held by this claim")
+	// ErrCancelledHere is ErrNotHeld for a job cancelled while this claim held
+	// it (the 409 not_held's reason "cancelled": an admin cancelled it parked,
+	// which ends it at once, bridge#35). errors.Is reads it as ErrNotHeld too;
+	// an older server never sends it, and its jobs read as lost as before.
+	ErrCancelledHere = fmt.Errorf("%w: it was cancelled", ErrNotHeld)
 	// ErrNoBook is the book lookup's 404 no_book.
 	ErrNoBook   = errors.New("no indexed book there")
 	ErrNoMarker = errors.New("no library marker there")
@@ -479,7 +488,7 @@ func (c *Client) claim(ctx context.Context, kinds []string, wait time.Duration, 
 
 // UpdateJob reports on a job the Bridge holds and returns it as stored (its
 // CancelRequested asks the Bridge to stop). A claim that no longer holds it is
-// ErrNotHeld.
+// ErrNotHeld (ErrCancelledHere when the job was cancelled while it held it).
 func (c *Client) UpdateJob(ctx context.Context, id int64, u Update) (*Job, error) {
 	var out Job
 	if err := c.do(ctx, http.MethodPatch, "/api/v1/bridge/jobs/"+strconv.FormatInt(id, 10), nil, u, &out); err != nil {
@@ -647,13 +656,16 @@ func retryAfter(v string, now time.Time) (time.Duration, bool) {
 // answerError maps a failed answer to its sentinel or an APIError.
 func answerError(status int, raw []byte) error {
 	var e struct {
-		Error string `json:"error"`
-		Code  string `json:"code"`
+		Error  string `json:"error"`
+		Code   string `json:"code"`
+		Reason string `json:"reason"`
 	}
 	_ = json.Unmarshal(raw, &e)
 	switch {
 	case status == http.StatusUnauthorized:
 		return ErrUnauthorized
+	case status == http.StatusConflict && e.Code == "not_held" && e.Reason == "cancelled":
+		return ErrCancelledHere
 	case status == http.StatusConflict && (e.Code == "not_held" || e.Code == "finished"):
 		return ErrNotHeld
 	case status == http.StatusConflict && e.Code == "no_heartbeat":
