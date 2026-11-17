@@ -260,6 +260,153 @@ func TestOtherServersStateNeverActedOn(t *testing.T) {
 	}
 }
 
+// A state naming a server while the paired server's id isn't known (a start
+// before the first heartbeat) is never acted on by Abandon or the sweep: it
+// can't be told to be this server's (bridge#71). Once the id is known, it is.
+func TestUnknownServerNeverActedOn(t *testing.T) {
+	x := newHarness(t)
+	x.serverID = "server-a"
+	x.stageAndStop(t)
+	x.age(t, StagingMaxAge+time.Hour)
+	x.serverID = ""
+	x.h.Abandon(jobs.AbandonContext(context.Background(), false), x.job(true))
+	x.h.Sweep(time.Now(), nil)
+	if !x.exists(stagingDir) || !x.hasState() {
+		t.Fatal("Abandon or the sweep acted on a state with the server unknown")
+	}
+	x.serverID = "server-a"
+	x.h.Sweep(time.Now(), nil)
+	if x.exists(stagingDir) || x.hasState() {
+		t.Fatal("the sweep left this server's abandoned fetch")
+	}
+}
+
+// loadRaw reads the fetch's state as it is on disk.
+func (x *harness) loadRaw(t *testing.T) state {
+	t.Helper()
+	b, err := os.ReadFile(x.h.statePath(3, testID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var st state
+	if err := json.Unmarshal(b, &st); err != nil {
+		t.Fatal(err)
+	}
+	return st
+}
+
+// An unplaced fetch whose library's mapping is gone keeps its state
+// StagingMaxAge after the sweep first finds it gone, then the state ends, its
+// staging folder left in the library (bridge#71). A library that comes back
+// in time is swept as before; one only unwritable now keeps its state.
+func TestSweepEndsAStateWhoseLibraryIsGone(t *testing.T) {
+	x := newHarness(t)
+	x.stageAndStop(t)
+	x.age(t, StagingMaxAge+time.Hour)
+	x.libs.mount = "" // the library deleted on the server
+	now := time.Now()
+	x.h.Sweep(now, nil)
+	if !x.hasState() || x.loadRaw(t).Unmapped.IsZero() {
+		t.Fatal("the first sweep without the library didn't keep the state with the time it went")
+	}
+	x.h.Sweep(now.Add(StagingMaxAge-time.Hour), nil)
+	if !x.hasState() {
+		t.Fatal("the state ended before StagingMaxAge without its library")
+	}
+	x.h.Sweep(now.Add(StagingMaxAge+time.Hour), nil)
+	if x.hasState() || !x.exists(stagingDir) {
+		t.Fatal("the state of a library gone for StagingMaxAge stayed, or its staging folder was touched")
+	}
+
+	// Back in time: swept as an abandoned fetch.
+	x = newHarness(t)
+	x.stageAndStop(t)
+	x.age(t, StagingMaxAge+time.Hour)
+	mount := x.libs.mount
+	x.libs.mount = ""
+	x.h.Sweep(now, nil)
+	x.libs.mount = mount
+	x.h.Sweep(now.Add(StagingMaxAge+time.Hour), nil)
+	if x.hasState() || x.exists(stagingDir) {
+		t.Fatal("a library back in time didn't have its abandoned fetch swept")
+	}
+
+	// Mapped but unwritable: not gone, kept however long.
+	x = newHarness(t)
+	x.stageAndStop(t)
+	x.age(t, StagingMaxAge+time.Hour)
+	x.libs.writable = false
+	x.h.Sweep(now, nil)
+	x.age(t, 3*StagingMaxAge)
+	x.h.Sweep(now.Add(2*StagingMaxAge), nil)
+	if !x.hasState() || !x.loadRaw(t).Unmapped.IsZero() {
+		t.Fatal("an unwritable library's fetch was treated as unmapped")
+	}
+}
+
+// mkStray makes a staging-named folder rel in the library, last changed at.
+func (x *harness) mkStray(t *testing.T, rel string, at time.Time) {
+	t.Helper()
+	if err := os.MkdirAll(x.path(rel), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(x.path(rel), "01.mp3"), []byte("x"), 0o644); err != nil { //nolint:gosec // test
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(x.path(rel), at, at); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Staging folders no state names (in the library's root or an author folder)
+// go once older than StagingMaxAge, at most once a day (bridge#71); a young
+// one, a held fetch's, a staging folder its state names, and folders that only
+// look like one stay.
+func TestSweepRemovesStrayStaging(t *testing.T) {
+	x := newHarness(t)
+	x.stageAndStop(t) // its state names stagingDir
+	now := time.Now()
+	old, young := now.Add(-StagingMaxAge-time.Hour), now.Add(-time.Hour)
+	if err := os.Chtimes(x.path(stagingDir), old, old); err != nil {
+		t.Fatal(err)
+	}
+	x.mkStray(t, stagingName(77), old)
+	x.mkStray(t, "An Author/"+stagingName(78), old)
+	x.mkStray(t, stagingName(79), young)
+	x.mkStray(t, stagingName(80), old)
+	x.mkStray(t, stagingPrefix+"x", old)
+	x.mkStray(t, "An Author/Book/"+stagingName(81), old) // deeper than a staging folder goes
+	open := []json.RawMessage{json.RawMessage(`{"librivox_id":80,"work_id":"w","recording_id":"r","library_id":3}`)}
+	x.h.Sweep(now, open)
+	for _, gone := range []string{stagingName(77), "An Author/" + stagingName(78)} {
+		if x.exists(gone) {
+			t.Fatalf("the stray %s stayed", gone)
+		}
+	}
+	if !x.exists("An Author") {
+		t.Fatal("the author folder of a stray went")
+	}
+	for _, kept := range []string{stagingDir, stagingName(79), stagingName(80), stagingPrefix + "x", "An Author/Book/" + stagingName(81)} {
+		if !x.exists(kept) {
+			t.Fatalf("%s went", kept)
+		}
+	}
+	if !x.hasState() {
+		t.Fatal("the young fetch's state went")
+	}
+
+	// At most once a day.
+	x.mkStray(t, stagingName(82), old)
+	x.h.Sweep(now.Add(time.Hour), nil)
+	if !x.exists(stagingName(82)) {
+		t.Fatal("the strays were looked for again within the day")
+	}
+	x.h.Sweep(now.Add(strayWalkEvery), nil)
+	if x.exists(stagingName(82)) || x.exists(stagingName(80)) {
+		t.Fatal("the next day's sweep left a stray, or a fetch no longer held")
+	}
+}
+
 // A second run of a fetch already running here (the same library and
 // project: a re-add claimed while a cancelled parked run is still ending)
 // waits for it to end; it fails when it doesn't within the bound, leaving the

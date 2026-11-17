@@ -42,6 +42,10 @@ type state struct {
 	Placed bool  `json:"placed,omitempty"`
 	Count  int   `json:"count,omitempty"`
 	Bytes  int64 `json:"bytes,omitempty"`
+	// Unmapped is when the sweep first found the library's mapping gone (the
+	// library deleted on the server, or no longer mapped here) with the fetch
+	// unplaced: StagingMaxAge after it the state ends (sweepOne).
+	Unmapped time.Time `json:"unmapped,omitzero"`
 }
 
 // partState is one section's partial download.
@@ -50,9 +54,12 @@ type partState struct {
 	Total int64  `json:"total,omitempty"`
 }
 
+// stagingPrefix begins every staging folder's name.
+const stagingPrefix = ".audiosilo-librivox-"
+
 // stagingName is the staging folder's name: a dot folder the server's scan
 // never indexes, beside the book's destination so placing it is one rename.
-func stagingName(id int) string { return ".audiosilo-librivox-" + strconv.Itoa(id) }
+func stagingName(id int) string { return stagingPrefix + strconv.Itoa(id) }
 
 // staging is the project's staging folder: <parent>/.audiosilo-librivox-<id>.
 func (st *state) staging(id int) string { return path.Join(st.Parent, stagingName(id)) }
@@ -86,6 +93,14 @@ func (h *Handler) loadState(lib int64, id int) *state {
 		return nil
 	}
 	return &st
+}
+
+// serverUnknown reports whether st names a server while the paired server's
+// id isn't known now: Abandon and the sweep, which remove things, leave such a
+// state alone, as they can't tell it is this server's (bridge#71). A run still
+// resumes from it (loadState's lenient read).
+func (h *Handler) serverUnknown(st *state) bool {
+	return st.ServerID != "" && h.o.ServerID() == ""
 }
 
 // touchState marks the state of the project's fetch into library lib as in

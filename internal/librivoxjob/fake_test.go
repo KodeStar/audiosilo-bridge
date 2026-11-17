@@ -248,6 +248,16 @@ func (l *fakeLibs) Library(id int64) (link.Library, bool) {
 	return link.Library{ID: id, Name: "Books", Root: "/srv/books" + strconv.FormatInt(id, 10), Kind: l.kind}, true
 }
 
+func (l *fakeLibs) Statuses() []link.LibraryStatus {
+	var out []link.LibraryStatus
+	for _, id := range []int64{3, 4} {
+		if st, ok := l.Status(id); ok {
+			out = append(out, st)
+		}
+	}
+	return out
+}
+
 func (l *fakeLibs) Status(id int64) (link.LibraryStatus, bool) {
 	mount := l.mountOf(id)
 	if mount == "" {

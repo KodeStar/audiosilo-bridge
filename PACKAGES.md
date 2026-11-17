@@ -2739,7 +2739,9 @@ internal/
             library, the paired server's id (bridge#69: a state of another
             server is dropped by loadState, so a run plans afresh and Abandon
             and the sweep never follow it into this server's same-numbered
-            library; none recorded counts as this server's), parent and whether
+            library; none recorded counts as this server's, and one recorded
+            while the paired server's id isn't known now is left alone by
+            Abandon and the sweep, bridge#71, serverUnknown), parent and whether
             the fetch made it, destination (staging is
             <parent>/.audiosilo-librivox-<id>, never stored),
             the partials' validators, then placed + count + bytes): a resumed run
@@ -2773,8 +2775,15 @@ internal/
             keeps one whose library isn't a checked writable mapping now or
             whose staging folder can't be removed, drops only the state of a
             placed book or of another server, and removes other old regular
-            files in the state folder (never a folder). A
-            staging folder whose state is gone is out of its reach.
+            files in the state folder (never a folder). bridge#71: an unplaced
+            fetch whose library's mapping is gone (not listed by the server, or
+            checked unmapped; an unwritable one isn't gone) gets the time in the
+            state (Unmapped, forgotten when a run finds it mapped again) and
+            ends StagingMaxAge later, its staging folder left in place; once a
+            day (strayWalkEvery) sweepStrays looks in every checked writable
+            books library's root and author folders for staging folders no
+            state names, older than StagingMaxAge, and removes them (never a
+            held or active fetch's, never the author folder).
             Steps manifest, download (done/total = sections), cover, place,
             rescan. Result {library_id, path (the rescan's), librivox_id, files,
             bytes, adopted} (files and bytes: the sections and the cover;
