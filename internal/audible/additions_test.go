@@ -704,13 +704,15 @@ func TestDownloadErrorHidesAnUnparsableURL(t *testing.T) {
 }
 
 // A title's file name is never hidden (a dot name the server never indexes),
-// never empty, and has no separator.
+// never empty, and has no separator or character an SMB share refuses.
 func TestSafeFileName(t *testing.T) {
 	for in, want := range map[string]string{
 		"...And Ladies of the Club": "And Ladies of the Club",
 		".hack//Sign":               "hack--Sign",
 		"Re: Zero. ":                "Re - Zero",
 		" . ":                       "audiobook",
+		"Who Moved My Cheese?":      "Who Moved My Cheese",
+		"?":                         "audiobook",
 	} {
 		if got := safeFileName(in); got != want {
 			t.Errorf("safeFileName(%q) = %q, want %q", in, got, want)

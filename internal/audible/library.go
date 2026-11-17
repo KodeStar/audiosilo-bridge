@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/kodestar/audiosilo-bridge/internal/placement"
 	"github.com/kodestar/audiosilo-bridge/internal/source"
 )
 
@@ -356,10 +357,11 @@ func firstNonEmptyStr(vals ...string) string {
 	return ""
 }
 
+// safeFileName is a title as a file name: placement.Sanitize's rule, the one
+// generated folders follow (no separator, no hidden dot name, nothing an SMB
+// share refuses, bridge#47), never empty.
 func safeFileName(s string) string {
-	s = strings.TrimSpace(s)
-	r := strings.NewReplacer("/", "-", "\\", "-", ":", " -", "\x00", "")
-	out := strings.Trim(r.Replace(s), " .") // no hidden (dot) name, which the server never indexes
+	out := placement.Sanitize(s)
 	if out == "" {
 		out = "audiobook"
 	}

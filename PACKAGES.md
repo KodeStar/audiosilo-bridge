@@ -2664,7 +2664,8 @@ internal/
             store (? * < > dropped, " as ', | as -, the spaces a drop leaves
             closed up).
             LibriVox L6 exports Sanitize (librivoxjob names its section files
-            with it).
+            with it; an Audible backup's file name, audible's safeFileName, is
+            Sanitize too, "audiobook" when it leaves nothing).
   librivoxjob/ LibriVox L6 (LIBRIVOX-PLAN.md), librivox.fetch on the download lane
             (capacity 1, shared with audible.import and an ordinary podcast.fetch:
             one book at a time). Params
