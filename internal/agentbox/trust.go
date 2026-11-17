@@ -46,12 +46,21 @@ import (
 // nothing is pinned yet, so a runner.json written ahead of the runner's is
 // pinned in its place (and the staging dir isn't sticky, so any uid can put
 // one there just before a Bridge restart) until the real runner's next write
-// is read. Other limits: a uid unmapped in the
+// is read, which a forger that puts its own back after each of them can put
+// off for as long as it likes. Other limits: a uid unmapped in the
 // Bridge's user namespace shows as the overflow uid, the same for every such
-// uid, and work/out/ is open to every uid, so a file the CLI wrote there (the
-// runner's uid) can be moved into another job's dir. agent.require_group
-// (Options.RequireGroup) is for an operator who wants no move off the group at
-// all.
+// uid (where the runner's own is one, each of them counts as the runner's),
+// and the CLI runs as the runner's uid, so whatever it writes counts as
+// the runner's: a file it left in work/out/ (open to every uid) can be moved
+// into the staging dir or another job's dir, and a CLI told to (a prompt
+// injected by a book's text, or a job another uid put in the staging dir with
+// a credential of its own) can write a runner.json or claim a job itself.
+// No owner check can tell the two apart, and none would keep the credential
+// from such a CLI: it holds its own run's in its environment, and it is in
+// the runner's groups, so it reads a waiting job's in the group's modes too.
+// agent.require_group (Options.RequireGroup) is for an operator who wants no
+// move off the group at all: there the same forgeries can only make the agent
+// unavailable until the Bridge restarts.
 
 // noUID is runnerUID before a runner.json pinned it, and contestedUID once a
 // second uid wrote a live one (never a file's owner, so nothing is the
@@ -136,7 +145,7 @@ func (r *Runner) notFromRunner(what string, uid int) {
 	if pinned := r.runnerUID.Load(); uid == r.uid || pinned == noUID || pinned == contestedUID || r.warnedForeign.Swap(true) {
 		return
 	}
-	r.log.Warn("agent container: "+what+" isn't the runner's (another uid wrote it), so the handed credential stays the "+
+	r.log.Warn("agent container: "+what+" isn't the runner's (another uid wrote it, or it has a second link), so the handed credential stays the "+
 		"Bridge's group's alone; if the agent container now runs as another user, restart the Bridge",
 		"owner_uid", uid, "runner_uid", r.runnerUID.Load())
 }
