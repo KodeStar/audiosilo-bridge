@@ -3337,7 +3337,16 @@ internal/
             if the agent container now runs as another user), logged once:
             the staging dir is open to every uid on the volume, so a forged
             file could otherwise hand the credential to all of them (the
-            pin is trust on first use: trust.go names its limits). agent.require_group
+            pin is trust on first use: trust.go names its limits). An
+            exit.json's owner says only that the runner wrote it somewhere
+            (it runs any job dir it finds, so another uid's dir, holding a
+            credential the runner may not delete, gets a credential_denied
+            of the runner's own that can be moved into a real job), so a
+            denial also needs the job's own dir to bear it out (deniedHere):
+            the claim a 0700 dir of the runner's uid (a dir can't be moved
+            in by a uid that may not write it) and the credential in place,
+            still so 2 s later (a runner that had only just claimed the job
+            takes it within that); else it is the job refused. agent.require_group
             (Options.RequireGroup, off by default) never moves it off the
             group: a runner outside it, a volume refusing the chown (the
             job is never opened to the runner) and a denied runner each

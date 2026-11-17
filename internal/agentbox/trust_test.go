@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/kodestar/audiosilo-bridge/internal/agent"
+	"github.com/kodestar/audiosilo-bridge/internal/agentproto"
 )
 
 // otherUID is a uid that isn't this process's: the runner's when the test's
@@ -180,6 +181,95 @@ func TestForgedCredentialDeniedKeepsTheGroup(t *testing.T) {
 			t.Fatalf("err = %v, %d jobs, group denied %v", err, fake.claimed.Load(), r.groupDenied.Load())
 		}
 	})
+}
+
+// plantDenial plays a uid that moves an exit.json of the runner's into the
+// next job in dir without the runner running it: any uid can have the runner
+// write one saying it was denied a credential (a job dir of its own making,
+// whose credential the runner may not delete). before sets the job dir up
+// first, after runs once the job is marked done. The test's files stand for
+// the runner's uid, so the exit.json's owner is the runner's. The returned
+// stop joins it.
+func plantDenial(t *testing.T, dir string, before, after func(job string)) (stop func()) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	stopped := make(chan struct{})
+	stop = func() { cancel(); <-stopped }
+	t.Cleanup(stop)
+	go func() {
+		defer close(stopped)
+		for ctx.Err() == nil {
+			time.Sleep(2 * time.Millisecond)
+			entries, _ := os.ReadDir(dir)
+			for _, e := range entries {
+				job := filepath.Join(dir, e.Name())
+				if !agentproto.ValidJobID(e.Name()) || !present(job, agentproto.RequestFile) {
+					continue
+				}
+				if before != nil {
+					before(job)
+				}
+				_ = os.WriteFile(filepath.Join(job, agentproto.ExitFile),
+					[]byte(`{"exit_code":-1,"error":"couldn't delete the Bridge's credential.json before the run: permission denied","credential_denied":true}`), 0o644)
+				_ = os.WriteFile(filepath.Join(job, agentproto.DoneFile), nil, 0o644)
+				if after != nil {
+					after(job)
+				}
+				return
+			}
+		}
+	}()
+	return stop
+}
+
+// An exit.json of the runner's own moves the credential off the group only
+// for a job the runner itself claimed and whose credential it left in place
+// (allowed: TestForgedCredentialDeniedKeepsTheGroup's runner). One moved into
+// a job the runner never claimed, one whose claim any uid may write (a dir
+// moved in) and one whose credential the runner takes a moment later (it had
+// only just claimed the job) are each the job refused, never restaged, and
+// the group stays on (denied).
+func TestMovedCredentialDeniedKeepsTheGroup(t *testing.T) {
+	t.Parallel()
+	claim := func(mode fs.FileMode) func(job string) {
+		return func(job string) {
+			path := filepath.Join(job, agentproto.ClaimDir)
+			if err := os.Mkdir(path, 0o700); err == nil {
+				_ = os.Chmod(path, mode) //nolint:gosec // 0777 is the case under test: a dir any uid may move
+			}
+		}
+	}
+	for name, tc := range map[string]struct {
+		before, after func(job string)
+		takeFor       time.Duration
+	}{
+		"never claimed":             {},
+		"a claim any uid may write": {before: claim(0o777)},
+		// The Bridge finds the credential in place at its first look, and gone
+		// by its second, takeFor later.
+		"the credential taken a moment later": {before: claim(0o700), takeFor: time.Second, after: func(job string) {
+			time.Sleep(50 * time.Millisecond)
+			_ = os.Remove(filepath.Join(job, agentproto.CredentialDir, agentproto.CredentialFile))
+		}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			r, dir := vaultHandoff(t, []int{os.Getegid()})
+			if tc.takeFor > 0 {
+				r.takeFor = tc.takeFor
+			}
+			stop := plantDenial(t, dir, tc.before, tc.after)
+			_, err := r.Run(context.Background(), agent.Request{Dir: stagedDir(t), Prompt: "p", Timeout: time.Minute})
+			stop()
+			assertNoJobDirs(t, dir)
+			if err == nil || !strings.Contains(err.Error(), "refused the job") || r.groupDenied.Load() || !r.Status().ShareGroup {
+				t.Fatalf("err = %v, group denied %v", err, r.groupDenied.Load())
+			}
+			if r.runnerUID.Load() != int64(os.Geteuid()) {
+				t.Fatalf("the runner's uid isn't pinned (%d): the exit.json's owner was never the question", r.runnerUID.Load())
+			}
+		})
+	}
 }
 
 // agent.require_group never moves the credential to every uid: a runner

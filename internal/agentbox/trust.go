@@ -2,6 +2,9 @@ package agentbox
 
 import (
 	"io/fs"
+	"os"
+
+	"github.com/kodestar/audiosilo-bridge/internal/agentproto"
 )
 
 // Who may move the handed credential off the Bridge's group. The staging dir
@@ -26,6 +29,16 @@ import (
 //     group decides nothing anyway.
 //   - A file with more than one link is not the runner's: a link to another
 //     job's file made in this job's dir.
+//   - An exit.json's credential_denied also needs the runner's own claim on
+//     the job (claimedByRunner) and the credential left in place (deniedHere).
+//     The owner alone says only that the runner wrote the file somewhere, and
+//     any uid can have it write one: the runner runs whatever job dir it finds
+//     in the staging dir, so a dir of another uid's making, holding a
+//     credential the runner may not delete, gets a credential_denied exit.json
+//     of the runner's own that its maker can move into a real job. A dir can't
+//     be moved that way (only a uid that may write a dir can give it another
+//     parent, and the claim is 0700), and the runner makes its claim inside
+//     the job dir it then runs.
 //
 // A file from any other uid can't move the credential off the group: a
 // runner.json naming no group still gets it in the group's modes, and its
@@ -94,6 +107,23 @@ func (r *Runner) pin(uid int) {
 			return
 		}
 	}
+}
+
+// claimedByRunner reports whether the runner itself claimed the job under
+// root: its claim is a dir of the runner's uid that no other uid may write,
+// so not one made by another uid, nor a dir the CLI left open in work/out/
+// and another uid moved into place. Off Unix, where a file has no owner,
+// every claim counts as the runner's.
+func (r *Runner) claimedByRunner(root *os.Root) bool {
+	info, err := root.Lstat(agentproto.ClaimDir)
+	if err != nil || !info.IsDir() {
+		return false
+	}
+	uid, _, ok := fileOwner(info)
+	if !ok {
+		return true
+	}
+	return int64(uid) == r.runnerUID.Load() && info.Mode().Perm()&0o022 == 0
 }
 
 // notFromRunner logs, once a process, a file in the staging dir that would

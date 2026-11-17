@@ -40,6 +40,7 @@ func newTestRunner(t *testing.T, backend string) (*Runner, string) {
 	r.beatCheck = 5 * time.Millisecond
 	r.beatEvery = 10 * time.Millisecond
 	r.cancelFor = 2 * time.Second
+	r.takeFor = 20 * time.Millisecond
 	// The test writes the runner's files, so it stands for the runner's uid,
 	// and the Bridge is some other one (trust.go).
 	r.uid = os.Geteuid() + 1

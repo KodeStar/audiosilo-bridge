@@ -44,6 +44,7 @@ const (
 	defaultBeatCheck = agentproto.HeartbeatInterval // the runner's heartbeat can't change faster than it touches it
 	defaultBeatEvery = 60 * time.Second             // Request.Heartbeat cadence, as the local runners
 	defaultCancelFor = 30 * time.Second             // how long a cancel waits for done
+	defaultTakeFor   = 2 * time.Second              // how long a runner that claimed a job may take to take its credential
 	sweepAge         = 24 * time.Hour               // job dirs older than this are removed on New
 )
 
@@ -82,6 +83,7 @@ type Runner struct {
 	beatCheck time.Duration
 	beatEvery time.Duration
 	cancelFor time.Duration
+	takeFor   time.Duration
 
 	// mu guards refused: the credential the provider refused last, until a run
 	// goes through or the runner reports another (status.go).
@@ -140,6 +142,7 @@ func New(opts Options) *Runner {
 		beatCheck:    defaultBeatCheck,
 		beatEvery:    defaultBeatEvery,
 		cancelFor:    defaultCancelFor,
+		takeFor:      defaultTakeFor,
 	}
 	if r.claimTimeout <= 0 {
 		// Only a caller that skipped config gets here: the same 2 minutes as
@@ -301,8 +304,8 @@ func (r *Runner) Run(ctx context.Context, req agent.Request) (agent.Result, erro
 // group as stage hands it), wait for the runner, read the outcome, harvest
 // out/. The job dir is gone when it returns. st is the runner's report the run
 // was handed over on. A credentialDeniedError comes back only for a credential
-// the group alone was given that is still in place (the runner never took it):
-// any other denial is the job refused.
+// the group alone was given that the runner claimed and left in place
+// (deniedHere): any other denial is the job refused.
 func (r *Runner) runJob(ctx context.Context, req agent.Request, st Status, handed *agentproto.Credential, group int) (agent.Result, error) {
 	timeout := requestTimeout(req.Timeout)
 	id, err := agentproto.NewJobID()
@@ -342,10 +345,13 @@ func (r *Runner) runJob(ctx context.Context, req agent.Request, st Status, hande
 	if errors.As(runErr, &denied) {
 		// Only a group-only credential the runner left in place is one its uid
 		// couldn't take: a volume that refused the group got the every-uid
-		// modes already, and an exit.json the runner's files don't bear out
+		// modes already, and an exit.json the job's own dir doesn't bear out
 		// must not turn the group off for the rest of the process.
-		taken := !agentproto.Exists(root, filepath.Join(agentproto.CredentialDir, agentproto.CredentialFile))
-		if handed == nil || group == noGroup || groupErr != nil || taken {
+		borneOut := handed != nil && group != noGroup && groupErr == nil && r.deniedHere(ctx, root)
+		if err := ctx.Err(); err != nil {
+			return res, err
+		}
+		if !borneOut {
 			return res, errors.New(runErr.Error())
 		}
 		return res, runErr
@@ -368,6 +374,28 @@ func (r *Runner) runJob(ctx context.Context, req agent.Request, st Status, hande
 		return res, herr
 	}
 	return res, runErr
+}
+
+// deniedHere reports whether the job's own dir bears out an exit.json saying
+// the runner was denied this job's credential. The exit.json's owner says only
+// that the runner wrote it somewhere (trust.go): any uid can put a job dir of
+// its own making in the staging dir, with a credential the runner can't
+// delete, and move the exit.json the runner then writes into this one. So the
+// runner must have claimed this very job (claimedByRunner) and left the
+// credential in place, still so takeFor later: a runner that claimed the job
+// this instant takes the credential well within that, which a done marker put
+// there meanwhile by another uid would otherwise pass off as left.
+func (r *Runner) deniedHere(ctx context.Context, root *os.Root) bool {
+	credential := filepath.Join(agentproto.CredentialDir, agentproto.CredentialFile)
+	if !agentproto.Exists(root, credential) || !r.claimedByRunner(root) {
+		return false
+	}
+	select {
+	case <-ctx.Done():
+		return false
+	case <-time.After(r.takeFor):
+	}
+	return agentproto.Exists(root, credential)
 }
 
 // The fixes for a handed credential that can't be kept to the Bridge's group,
