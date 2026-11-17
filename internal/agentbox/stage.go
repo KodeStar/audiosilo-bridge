@@ -14,12 +14,13 @@ import (
 	"github.com/kodestar/audiosilo-bridge/internal/agentproto"
 )
 
-// Modes in a job dir. The Bridge and the agent run as different uids sharing no
-// group, so what the agent must write is world-writable and what the Bridge must
-// keep is the Bridge's own: the job dir is sticky (the agent adds its files but
-// can't delete or replace the Bridge's), inputs are read-only, and only work/out/
-// is the agent's to change (a validation retry patches the previous attempt's
-// files there, so those are writable too).
+// Modes in a job dir. The Bridge and the agent run as different uids, and no
+// mode here counts on a group they share (the one exception is the handed
+// credential, below), so what the agent must write is world-writable and what
+// the Bridge must keep is the Bridge's own: the job dir is sticky (the agent
+// adds its files but can't delete or replace the Bridge's), inputs are
+// read-only, and only work/out/ is the agent's to change (a validation retry
+// patches the previous attempt's files there, so those are writable too).
 const (
 	jobDirMode  = 0o777 | os.ModeSticky
 	inputDir    = 0o755
