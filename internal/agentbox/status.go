@@ -115,7 +115,7 @@ func (r *Runner) Status() Status {
 		}
 	}
 	st.Version, st.Slots, st.HeartbeatAt, st.CLIs = rj.Version, rj.Slots, rj.HeartbeatAt, rj.CLIs
-	st.ShareGroup = slices.Contains(rj.Groups, os.Getgid())
+	st.ShareGroup = slices.Contains(rj.Groups, r.gid)
 	st.Problem, st.Other, st.Detail = r.unavailableBecause(rj)
 	if st.Detail == "" {
 		if refused := r.refusal(rj.CLIs[r.backend], st.Handoff); refused != "" {

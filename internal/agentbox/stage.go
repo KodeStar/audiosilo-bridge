@@ -37,7 +37,8 @@ const (
 	// Bridge's group) the dir is 0777 and the file 0444, as before: readable
 	// by every uid until the runner takes it. The agent can anyway put a file
 	// there, which the runner reads strictly and only ever as its own run's
-	// credential.
+	// credential. A staging volume that refuses the chown or the ACL change
+	// (NFS, CIFS) gets the 0777 and 0444 hand-off too, rather than no run.
 	credentialDirMode       = 0o777
 	credentialFileMode      = inputFile
 	credentialGroupDirMode  = 0o770
@@ -55,21 +56,26 @@ const (
 //
 // handed, when set, is the vault's credential for the run: credential.json in
 // its own dir, written before the request so the runner finds it at the claim;
-// shareGroup hands it to the Bridge's group alone (the runner is in it).
-func stage(job string, req agent.Request, cli string, timeout int, handed *agentproto.Credential, shareGroup bool) (*os.Root, error) {
+// group, when not noGroup, is the Bridge's gid: the credential is handed to
+// that group alone (the runner is in it). groupErr is why it went to every uid
+// instead (the staging volume refused), nil when it didn't.
+func stage(job string, req agent.Request, cli string, timeout int, handed *agentproto.Credential, group int) (root *os.Root, groupErr, err error) {
 	if err := os.Mkdir(job, 0o700); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	root, err := openMadeDir(job)
+	root, err = openMadeDir(job)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	if err := fill(root, req, cli, timeout, handed, shareGroup); err != nil {
+	if groupErr, err = fill(root, req, cli, timeout, handed, group); err != nil {
 		_ = root.Close()
-		return nil, err
+		return nil, nil, err
 	}
-	return root, nil
+	return root, groupErr, nil
 }
+
+// noGroup is stage's group for a credential handed to every uid.
+const noGroup = -1
 
 // openMadeDir opens the dir just made at path as an os.Root, refusing it when
 // the entry at path is no longer that dir: a link put in its place would take
@@ -94,18 +100,18 @@ func openMadeDir(path string) (*os.Root, error) {
 }
 
 // fill writes the job into its (still private) dir, opens the dir to the agent
-// uid, and renames request.json into place.
-func fill(root *os.Root, req agent.Request, cli string, timeout int, handed *agentproto.Credential, shareGroup bool) error {
+// uid, and renames request.json into place. groupErr is writeCredential's.
+func fill(root *os.Root, req agent.Request, cli string, timeout int, handed *agentproto.Credential, group int) (groupErr, err error) {
 	if err := copyTree(req.Dir, root, agentproto.WorkDir); err != nil {
-		return err
+		return nil, err
 	}
 	if handed != nil {
-		if err := writeCredential(root, *handed, shareGroup); err != nil {
-			return err
+		if groupErr, err = writeCredential(root, *handed, group); err != nil {
+			return nil, err
 		}
 	}
 	if err := createFile(root, agentproto.PromptFile, strings.NewReader(req.Prompt), inputFile, true); err != nil {
-		return err
+		return nil, err
 	}
 	body, err := json.Marshal(agentproto.Request{
 		Protocol:       agentproto.Protocol,
@@ -118,55 +124,70 @@ func fill(root *os.Root, req agent.Request, cli string, timeout int, handed *age
 		TimeoutSeconds: timeout,
 	})
 	if err != nil {
-		return err
+		return nil, err
 	}
 	// request.json.tmp is the contract's name for the request in progress: it is
 	// written whole, then renamed to request.json, the ready signal, once the dir
 	// is open to the agent uid.
 	if err := createFile(root, agentproto.RequestTmpFile, bytes.NewReader(body), requestMode, true); err != nil {
-		return err
+		return nil, err
 	}
 	if err := root.Chmod(".", jobDirMode); err != nil { //nolint:gosec // shared with the agent uid by design (decision 15)
-		return err
+		return nil, err
 	}
-	return root.Rename(agentproto.RequestTmpFile, agentproto.RequestFile)
+	return groupErr, root.Rename(agentproto.RequestTmpFile, agentproto.RequestFile)
 }
 
 // writeCredential writes credential.json into its own dir: the dir open to the
 // runner (not sticky, so it can delete the file before the CLI starts), the
-// file read-only and synced. With shareGroup both belong to the Bridge's group
+// file read-only and synced. With a group (the Bridge's) both belong to it
 // (set explicitly: a setgid staging dir would hand them its own), any access
 // ACL they inherited from a staging dir with a default ACL is removed (its
 // named users and groups would read the file under the mode's mask), and no
-// other uid gets any access; else every uid may read the file. The job dir is
-// still private (0700) throughout, so no step leaves a window.
-func writeCredential(root *os.Root, c agentproto.Credential, shareGroup bool) error {
+// other uid gets any access; else every uid may read the file. A staging
+// volume that refuses the chown or the ACL change (NFS, CIFS) gets the file
+// as every uid's too, with groupErr saying why: the hand-off as it was before
+// there was a group, rather than a run that fails. The job dir is still
+// private (0700) throughout, so no step leaves a window.
+func writeCredential(root *os.Root, c agentproto.Credential, group int) (groupErr, err error) {
 	body, err := json.Marshal(c)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	dirMode, fileMode := fs.FileMode(credentialDirMode), fs.FileMode(credentialFileMode)
-	if shareGroup {
+	if group != noGroup {
 		dirMode, fileMode = credentialGroupDirMode, credentialGroupFileMode
 	}
 	name := filepath.Join(agentproto.CredentialDir, agentproto.CredentialFile)
 	if err := root.Mkdir(agentproto.CredentialDir, 0o700); err != nil {
-		return err
+		return nil, err
 	}
 	if err := createFile(root, name, bytes.NewReader(body), fileMode, true); err != nil {
-		return err
+		return nil, err
 	}
-	if shareGroup {
-		for _, p := range []string{name, agentproto.CredentialDir} {
-			if err := root.Chown(p, -1, os.Getgid()); err != nil {
-				return err
-			}
-			if err := dropACLAt(root, p); err != nil {
-				return err
+	if group != noGroup {
+		if groupErr = giveGroup(root, group, name, agentproto.CredentialDir); groupErr != nil {
+			dirMode = credentialDirMode
+			if err := root.Chmod(name, credentialFileMode); err != nil {
+				return nil, err
 			}
 		}
 	}
-	return root.Chmod(agentproto.CredentialDir, dirMode)
+	return groupErr, root.Chmod(agentproto.CredentialDir, dirMode)
+}
+
+// giveGroup makes each of names (under root) group's, with no ACL beside its
+// mode.
+func giveGroup(root *os.Root, group int, names ...string) error {
+	for _, p := range names {
+		if err := root.Chown(p, -1, group); err != nil {
+			return err
+		}
+		if err := dropACLAt(root, p); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // dropACLAt removes the POSIX ACLs name (under root) inherited (dropACL).

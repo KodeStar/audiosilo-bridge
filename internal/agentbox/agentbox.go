@@ -85,9 +85,13 @@ type Runner struct {
 	// dirMissing is set while the staging dir can't be opened, so Status logs
 	// its path once per outage rather than on every call.
 	dirMissing atomic.Bool
+	// gid is the Bridge's group, the one a handed credential goes to alone
+	// when the runner is in it.
+	gid int
 	// warnedGroup is set once the log has said a handed credential goes to
-	// every uid (the runner isn't in the Bridge's group): once per process.
-	warnedGroup atomic.Bool
+	// every uid because the runner isn't in the Bridge's group, warnedVolume
+	// because the staging volume refused the group: each once per process.
+	warnedGroup, warnedVolume atomic.Bool
 }
 
 var _ agent.Runner = (*Runner)(nil)
@@ -102,6 +106,7 @@ func New(opts Options) *Runner {
 		claimTimeout: opts.ClaimTimeout,
 		log:          opts.Log,
 		credential:   opts.Credential,
+		gid:          os.Getgid(),
 		now:          time.Now,
 		poll:         defaultPoll,
 		staleFor:     defaultStaleFor,
@@ -237,11 +242,22 @@ func (r *Runner) Run(ctx context.Context, req agent.Request) (agent.Result, erro
 			handed = &agentproto.Credential{CLI: r.backend, Kind: kind, Value: value}
 		}
 	}
-	if handed != nil && !st.ShareGroup && !r.warnedGroup.Swap(true) {
-		r.log.Warn("agent container: the runner isn't in the Bridge's group, so the handed credential is readable by every uid " +
-			"until the runner takes it; add the Bridge's PGID to the agent container (group_add in the compose example)")
+	group := noGroup
+	if st.ShareGroup {
+		group = r.gid
 	}
-	root, err := stage(job, req, r.backend, timeout, handed, st.ShareGroup)
+	if handed != nil && !st.ShareGroup && !r.warnedGroup.Swap(true) {
+		r.log.Warn("agent container: the runner isn't in the Bridge's group, so the handed credential is readable by every uid "+
+			"until the runner takes it; add that group to the agent container (group_add with the Bridge's PGID, as in the "+
+			"compose example) and recreate it, on an agent image as new as this Bridge (an older one reports no groups)",
+			"bridge_gid", r.gid)
+	}
+	root, groupErr, err := stage(job, req, r.backend, timeout, handed, group)
+	if groupErr != nil && !r.warnedVolume.Swap(true) {
+		r.log.Warn("agent container: the staging volume refused to hand the credential to the Bridge's group alone, so it is "+
+			"readable by every uid until the runner takes it; a staging volume that allows chown (a local one, not NFS or CIFS) "+
+			"keeps it to that group", "bridge_gid", r.gid, "err", groupErr)
+	}
 	if err != nil {
 		return agent.Result{}, r.stagingFailed("write the job into", err)
 	}

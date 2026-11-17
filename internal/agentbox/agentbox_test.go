@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -702,7 +704,7 @@ func TestStageThroughTheJobDirsRoot(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	job := filepath.Join(dir, "00000000000000aa")
-	root, err := stage(job, agent.Request{Dir: stagedDir(t), Prompt: "p"}, agent.IDClaude, 60, nil, false)
+	root, _, err := stage(job, agent.Request{Dir: stagedDir(t), Prompt: "p"}, agent.IDClaude, 60, nil, noGroup)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -951,6 +953,15 @@ type credentialModes struct {
 // runner.json reporting groups, and returns what the runner found.
 func stageHandoff(t *testing.T, groups []int) credentialModes {
 	t.Helper()
+	_, run := handoffStager(t, groups)
+	return run()
+}
+
+// handoffStager is a Runner that hands the vault's credential over, with
+// runner.json reporting groups. run runs one job and returns what the fake
+// runner found.
+func handoffStager(t *testing.T, groups []int) (*Runner, func() credentialModes) {
+	t.Helper()
 	r, dir := newTestRunner(t, agent.IDClaude)
 	r.credential = func(string) (string, string, time.Time, bool) {
 		return agentproto.CredentialOAuthToken, "sk-ant-oat01-vault", time.Now(), true
@@ -974,13 +985,16 @@ func stageHandoff(t *testing.T, groups []int) credentialModes {
 		mustWrite(t, filepath.Join(job, agentproto.StdoutFile), claudeOK)
 		return agentproto.Exit{}
 	}}
-	stop := fake.start(t, dir)
-	if _, err := r.Run(context.Background(), agent.Request{Dir: stagedDir(t), Prompt: "p", Timeout: time.Minute}); err != nil {
-		t.Fatal(err)
+	fake.start(t, dir)
+	return r, func() credentialModes {
+		t.Helper()
+		if _, err := r.Run(context.Background(), agent.Request{Dir: stagedDir(t), Prompt: "p", Timeout: time.Minute}); err != nil {
+			t.Fatal(err)
+		}
+		// Stored before the fake marks the job done, which Run waited for.
+		m, _ := seen.Load().(credentialModes)
+		return m
 	}
-	stop()
-	m, _ := seen.Load().(credentialModes)
-	return m
 }
 
 // takeAs is the runner's take of the staged credential (agentrun's
@@ -1055,6 +1069,65 @@ func TestHandoffCredentialModes(t *testing.T) {
 			}
 		}
 	})
+}
+
+// foreignGID is a group id this process isn't in, so a chown to it is refused
+// (as a staging volume that allows no chown refuses the Bridge's own).
+func foreignGID(t *testing.T) int {
+	t.Helper()
+	if os.Geteuid() == 0 {
+		t.Skip("root may chown to any group")
+	}
+	mine, err := os.Getgroups()
+	if err != nil {
+		t.Skip("no group list here:", err)
+	}
+	mine = append(mine, os.Getgid(), os.Getegid())
+	gid := 54321
+	for slices.Contains(mine, gid) {
+		gid++
+	}
+	return gid
+}
+
+// A staging volume that refuses the chown to the Bridge's group (NFS, CIFS)
+// still gets the hand-off, as it was before there was a group: readable by
+// every uid until the runner takes it, the reason logged once (allowed: the
+// run goes through and any uid takes the file; denied: no run fails on it).
+func TestHandoffCredentialFallsBackWhenTheGroupIsRefused(t *testing.T) {
+	t.Parallel()
+	gid := foreignGID(t)
+	r, run := handoffStager(t, []int{gid})
+	var logged strings.Builder
+	r.log, r.gid = slog.New(slog.NewTextHandler(&logged, nil)), gid
+	for range 2 {
+		m := run()
+		if m.dir != fs.ModeDir|0o777 || m.file != 0o444 || m.other != nil {
+			t.Fatalf("modes = dir %v, file %v, take %v (want 0777, 0444, taken)", m.dir, m.file, m.other)
+		}
+	}
+	if n := strings.Count(logged.String(), "the staging volume refused"); n != 1 {
+		t.Fatalf("the refused group is logged %d times, want once:\n%s", n, logged.String())
+	}
+	if strings.Contains(logged.String(), "isn't in the Bridge's group") {
+		t.Fatalf("the runner is in the group, yet the log says it isn't:\n%s", logged.String())
+	}
+}
+
+// A runner that isn't in the Bridge's group is logged once, with the fix: the
+// Bridge's group added to the agent container.
+func TestHandoffCredentialWarnsOnceWithoutTheGroup(t *testing.T) {
+	t.Parallel()
+	r, run := handoffStager(t, []int{os.Getgid() + 1})
+	var logged strings.Builder
+	r.log = slog.New(slog.NewTextHandler(&logged, nil))
+	run()
+	run()
+	out := logged.String()
+	if strings.Count(out, "isn't in the Bridge's group") != 1 || !strings.Contains(out, "group_add") ||
+		!strings.Contains(out, fmt.Sprintf("bridge_gid=%d", os.Getgid())) {
+		t.Fatalf("log = %s", out)
+	}
 }
 
 // No hand-off: the container's own credential is used (nothing staged), a
