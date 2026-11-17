@@ -69,6 +69,12 @@ func withSleep(f func(context.Context, time.Duration) error) Option {
 	return func(s *settings) { s.sleep = f }
 }
 
+// withOddDateLog gives the client its own memory of the odd dates it logged
+// (tests: the process's would carry over from one test to the next).
+func withOddDateLog(o *oddDateLog) Option {
+	return func(s *settings) { s.oddDates = o }
+}
+
 // withStall replaces how long a download waits for its next byte (tests).
 func withStall(d time.Duration) Option {
 	return func(s *settings) { s.stall = d }
@@ -81,6 +87,7 @@ type settings struct {
 	sleep     func(context.Context, time.Duration) error
 	stall     time.Duration // 0: downloadStall
 	log       *slog.Logger  // nil: no log
+	oddDates  *oddDateLog   // nil: oddDatesLogged, the process's
 }
 
 // endpointsOf is the endpoints opts set, else mp's.
@@ -112,6 +119,9 @@ func resolve(mp Marketplace, timeout time.Duration, opts []Option) settings {
 	}
 	if s.stall <= 0 {
 		s.stall = downloadStall
+	}
+	if s.oddDates == nil {
+		s.oddDates = oddDatesLogged
 	}
 	return s
 }

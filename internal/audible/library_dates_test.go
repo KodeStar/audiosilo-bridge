@@ -90,7 +90,8 @@ func TestUnavailableCheckOrder(t *testing.T) {
 }
 
 // TestLibraryLogsOddDate: a title whose date was set aside logs its raw
-// fields once, and the log carries no credential.
+// fields once, and the log carries no credential. A second listing (the next
+// poll, another client) logs it no more (bridge#44).
 func TestLibraryLogsOddDate(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{"items":[
@@ -102,14 +103,19 @@ func TestLibraryLogsOddDate(t *testing.T) {
 	defer ts.Close()
 	var buf bytes.Buffer
 	keyPEM, _ := pemKey(t, false)
-	c, err := NewClient(Credentials{
-		ADPToken: "ADP-SECRET", DevicePrivateKey: keyPEM, DeviceType: deviceType,
-		DeviceSerial: "SER", CustomerID: "CUST-SECRET", Marketplace: "us",
-	}, WithEndpoints(Endpoints{Amazon: ts.URL, AmazonAPI: ts.URL, API: ts.URL}), noSleep(),
-		WithLogger(slog.New(slog.NewTextHandler(&buf, nil))))
-	if err != nil {
-		t.Fatal(err)
+	logged := newOddDateLog()
+	client := func() *Client {
+		c, err := NewClient(Credentials{
+			ADPToken: "ADP-SECRET", DevicePrivateKey: keyPEM, DeviceType: deviceType,
+			DeviceSerial: "SER", CustomerID: "CUST-SECRET", Marketplace: "us",
+		}, WithEndpoints(Endpoints{Amazon: ts.URL, AmazonAPI: ts.URL, API: ts.URL}), noSleep(),
+			WithLogger(slog.New(slog.NewTextHandler(&buf, nil))), withOddDateLog(logged))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c
 	}
+	c := client()
 	recs, err := c.Library(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -131,5 +137,14 @@ func TestLibraryLogsOddDate(t *testing.T) {
 		if strings.Contains(out, secret) {
 			t.Fatalf("log carries %q:\n%s", secret, out)
 		}
+	}
+	buf.Reset()
+	for _, again := range []*Client{c, client()} {
+		if _, err := again.Library(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if strings.Contains(buf.String(), "implausible") {
+		t.Fatalf("the odd title was logged again at the next listing:\n%s", buf.String())
 	}
 }
