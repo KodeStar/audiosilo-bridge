@@ -1,8 +1,10 @@
 package web
 
 import (
+	"bytes"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 )
@@ -67,5 +69,23 @@ func TestServesTheFavicon(t *testing.T) {
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/favicon.svg", nil))
 	if rec.Code != http.StatusOK || !strings.HasPrefix(rec.Header().Get("Content-Type"), "image/svg+xml") {
 		t.Fatalf("GET /favicon.svg = %d, %q", rec.Code, rec.Header().Get("Content-Type"))
+	}
+}
+
+// The logo has one source, web/public/favicon.svg (the page's favicon and its
+// wordmark's glyph); the placeholder page, built without Node, keeps a byte copy
+// of it, which must not drift (bridge#65).
+func TestPlaceholderFaviconIsThePagesLogo(t *testing.T) {
+	t.Parallel()
+	src, err := os.ReadFile("../../web/public/favicon.svg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cp, err := os.ReadFile("dist-placeholder/favicon.svg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(src, cp) {
+		t.Fatal("internal/web/dist-placeholder/favicon.svg differs from web/public/favicon.svg: copy the logo over")
 	}
 }
