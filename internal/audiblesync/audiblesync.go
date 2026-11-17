@@ -34,6 +34,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"math/rand/v2"
 	"slices"
 	"strconv"
 	"time"
@@ -460,13 +461,25 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (*R
 		pushes[x.ASIN] = x
 	}
 	rep.Progress(jobs.Progress{Step: "audible", Message: "Reading the places on Audible", Total: len(asins)})
+	// In a new order every sync: a read Audible stops partway (a rate limit
+	// after so many batches) keeps the places it got (below), so over a few
+	// syncs every title is read, not only the ones listed first (bridge#50).
+	rand.Shuffle(len(asins), func(i, j int) { asins[i], asins[j] = asins[j], asins[i] }) //nolint:gosec // an order, not a secret
 	places, err := h.o.Accounts.Positions(ctx, acct.ID, asins)
+	// partial: Audible stopped partway; the places it gave are synced, then the
+	// job fails as a read that failed whole does (the wait recorded now).
+	var partial error
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
 		h.o.health(ctx, acct, fmt.Errorf("reading the places on Audible: %w", err), retryAt(err, h.o.Now(), errorWait))
-		return nil, fail(CodeAudible, "Audible didn't answer the places: %v", err)
+		partial = fail(CodeAudible, "Audible didn't answer the places: %v", err)
+		if len(places) == 0 {
+			return nil, partial
+		}
+		h.o.Log.Warn("audible: Audible answered only some of the places; syncing those", "account", acct.ID,
+			"read", len(places), "titles", len(asins), "err", audible.RedactedError(err))
 	}
 
 	var events []link.AudibleEvent
@@ -578,6 +591,10 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (*R
 	if res.Mismatched > 0 {
 		h.o.Log.Warn("audible: the server's books for some titles are another length than on Audible, so their matches look wrong; not synced",
 			"account", acct.ID, "events", res.Mismatched)
+	}
+	if partial != nil {
+		h.o.Log.Info("audible: some places synced", "account", acct.ID, "heard", res.Heard, "sent", res.Sent, "applied", res.Applied)
+		return nil, partial
 	}
 	h.o.health(ctx, acct, nil, time.Time{})
 	h.o.Log.Info("audible: places synced", "account", acct.ID, "titles", res.Titles, "heard", res.Heard, "sent", res.Sent,

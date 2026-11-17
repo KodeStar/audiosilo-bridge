@@ -124,11 +124,14 @@ type AudibleProgressRow struct {
 // the cursor sent as since (the books of the account's synced titles the
 // person can reach, rows the account itself wrote left out, oldest change
 // first), Next the cursor to send next time (since again when nothing
-// changed: kept between polls), More whether to ask again at once.
+// changed: kept between polls), More whether to ask again at once, and
+// ServerTime the server's clock (RFC 3339; "" from a server before 2.7.0),
+// which the rows' UpdatedAt are read against (bridge#50).
 type AudibleProgress struct {
-	Rows []AudibleProgressRow `json:"rows"`
-	Next string               `json:"next"`
-	More bool                 `json:"more"`
+	Rows       []AudibleProgressRow `json:"rows"`
+	Next       string               `json:"next"`
+	More       bool                 `json:"more"`
+	ServerTime string               `json:"server_time"`
 }
 
 // MaxAudibleProgress is the largest page the Bridge asks for.

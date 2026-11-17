@@ -119,12 +119,7 @@ func (p *Pusher) pause(id string, until time.Time) {
 // account reads a's feed from its cursor, records the places waiting, then
 // writes the ones due.
 func (p *Pusher) account(ctx context.Context, srv Server, a store.AudibleAccount, now time.Time) {
-	// cutoff: while the baseline reads the feed (push_from unset, perhaps over
-	// several passes), a row changed before it is history; after, none is.
-	var cutoff time.Time
-	if a.PushFrom == "" {
-		cutoff = now.Add(-baselineWindow)
-	}
+	baseline := a.PushFrom == ""
 	list, err := p.o.DB.AudiblePushes(ctx, a.ID)
 	if err != nil {
 		p.o.Log.Warn("audible: listing the places to push failed", "account", a.ID, "err", err)
@@ -176,6 +171,7 @@ func (p *Pusher) account(ctx context.Context, srv Server, a store.AudibleAccount
 			}
 			return
 		}
+		cutoff := baselineCutoff(baseline, page.ServerTime, now)
 		for _, row := range page.Rows {
 			if !p.row(ctx, a, titles, row, cutoff, now) {
 				unrecorded = true
@@ -202,6 +198,22 @@ func (p *Pusher) account(ctx context.Context, srv Server, a store.AudibleAccount
 		}
 	}
 	p.due(ctx, a, now)
+}
+
+// baselineCutoff is when a row's place counts as history: while the baseline
+// reads the feed (push_from unset, perhaps over several passes) a row changed
+// before it is history, after it none is (zero). The rows' updated_at are the
+// server's clock, so the window is counted back from the page's server_time
+// (bridge#50: a Bridge clock minutes off misjudged recent places), else, from a
+// server before 2.7.0, from the Bridge's own clock.
+func baselineCutoff(baseline bool, serverTime string, now time.Time) time.Time {
+	if !baseline {
+		return time.Time{}
+	}
+	if at, err := time.Parse(time.RFC3339Nano, serverTime); err == nil {
+		return at.Add(-baselineWindow)
+	}
+	return now.Add(-baselineWindow)
 }
 
 // row records one server place: a place on a listed title's book that moved
@@ -310,9 +322,10 @@ func (p *Pusher) due(ctx context.Context, a store.AudibleAccount, now time.Time)
 			return
 		}
 		// Audible refused the read itself (a 4xx): the places are written as
-		// they were before this check, as when Audible has none.
+		// they were before this check, as when Audible has none, but for the
+		// ones it answered before the refusal (a later batch's), whose
+		// further-on places on Audible still win (bridge#50).
 		p.o.Log.Warn("audible: reading the places on Audible before writing failed", "account", a.ID, "err", audible.RedactedError(err))
-		places = nil
 	}
 	for _, x := range ready {
 		if ctx.Err() != nil {

@@ -53,7 +53,6 @@ type AudibleAccount struct {
 	LibraryID   int64  `json:"library_id"`
 	LibraryName string `json:"library_name"`
 	Policy      string `json:"policy"`
-	Sync        bool   `json:"sync"`
 	CreatedAt   string `json:"created_at"`
 	LastOKAt    string `json:"last_ok_at"`
 	LastPollAt  string `json:"last_poll_at"`

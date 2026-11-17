@@ -55,12 +55,17 @@ type Position struct {
 // doesn't overflow the query-string length limit; results are merged. onProgress
 // (may be nil) is called with the cumulative count of ASINs fetched after each
 // batch, so a caller can show a progress bar over a large library.
+//
+// A batch that fails ends the read with its error, and the map returned beside
+// it holds every place read before it (bridge#50: a rate limit late in a large
+// library no longer throws away the batches already read). A caller that only
+// trusts a whole read checks the error first.
 func (c *Client) LastPositions(ctx context.Context, asins []string, onProgress func(done int)) (map[string]Position, error) {
 	out := make(map[string]Position, len(asins))
 	for start := 0; start < len(asins); start += lastPositionsBatch {
 		end := min(start+lastPositionsBatch, len(asins))
 		if err := c.lastPositionsChunk(ctx, asins[start:end], out); err != nil {
-			return nil, err
+			return out, err
 		}
 		if onProgress != nil {
 			onProgress(end)

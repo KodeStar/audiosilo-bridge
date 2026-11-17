@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -29,6 +30,7 @@ type stubAccounts struct {
 	mu        sync.Mutex
 	places    map[string]audible.Position
 	placesErr error
+	readFirst []string // with placesErr: the ASINs whose places came back before it
 	reads     int
 	onRead    func() // runs as Audible answers a read (outside the lock)
 	acrs      int
@@ -55,8 +57,17 @@ func (s *stubAccounts) Positions(_ context.Context, _ string, asins []string) (m
 	s.mu.Lock()
 	s.reads++
 	if s.placesErr != nil {
-		s.mu.Unlock()
-		return nil, s.placesErr
+		defer s.mu.Unlock()
+		var out map[string]audible.Position
+		for _, a := range s.readFirst {
+			if p, ok := s.places[a]; ok && slices.Contains(asins, a) {
+				if out == nil {
+					out = map[string]audible.Position{}
+				}
+				out[a] = p
+			}
+		}
+		return out, s.placesErr
 	}
 	out := map[string]audible.Position{}
 	for _, a := range asins {
@@ -119,6 +130,7 @@ type stubServer struct {
 	badSince string   // a cursor the feed answers 400 for
 	feedAsks []string // since values
 	pageSize int
+	clock    time.Time          // the feed's server_time (zero: none, a server before 2.7.0)
 	duration map[string]float64 // path -> the book's length on the server (0 unknown)
 	rejected map[string]string  // path -> the reason the server rejects its events
 }
@@ -173,6 +185,9 @@ func (s *stubServer) AudibleProgress(_ context.Context, account, since string, l
 	}
 	end := min(start+size, len(s.rows))
 	page := &link.AudibleProgress{Rows: append([]link.AudibleProgressRow{}, s.rows[start:end]...), Next: since, More: end-start == size}
+	if !s.clock.IsZero() {
+		page.ServerTime = s.clock.UTC().Format(time.RFC3339)
+	}
 	if end > start {
 		page.Next = fmt.Sprintf("c%d", end)
 	}
@@ -459,6 +474,36 @@ func TestSyncErrorBacksOffWithoutRefusing(t *testing.T) {
 	}
 	if a := e.account(t); a.RefusedAt != "" || a.SyncError == "" {
 		t.Fatalf("after user_unavailable: %+v", a)
+	}
+}
+
+// A read Audible stops partway (a rate limit after some batches) still syncs
+// the places it gave (bridge#50), then fails as a whole failed read does: the
+// wait is recorded and the sync isn't counted as done.
+func TestSyncKeepsPlacesReadBeforeAFailure(t *testing.T) {
+	e := newEnv(t)
+	e.accts.places["B000000001"] = audible.Position{PositionMs: 60_000, LastUpdated: e.now}
+	e.accts.places["B000000002"] = audible.Position{PositionMs: 90_000, LastUpdated: e.now}
+	e.accts.placesErr = retryErr(t, http.StatusTooManyRequests, "600")
+	e.accts.readFirst = []string{"B000000001"}
+	raw := params(t, title("B000000001", "A/One", 3600), title("B000000002", "A/Two", 3600))
+	_, err := e.runSync(t, raw)
+	var f *Failure
+	if !errors.As(err, &f) || f.Code != CodeAudible {
+		t.Fatalf("err = %v, want the read's failure", err)
+	}
+	if len(e.srv.posted) != 1 || len(e.srv.posted[0].Events) != 1 || e.srv.posted[0].Events[0].Path != "A/One" {
+		t.Fatalf("posted = %+v, want the one place read", e.srv.posted)
+	}
+	if a := e.account(t); a.SyncError == "" || a.SyncRetryAt != store.Timestamp(e.now.Add(10*time.Minute)) {
+		t.Fatalf("after a partial read: %+v, want the wait recorded", a)
+	}
+	// Nothing read at all: nothing posted.
+	e.srv.posted = nil
+	e.accts.readFirst = nil
+	e.now = e.now.Add(11 * time.Minute)
+	if _, err := e.runSync(t, raw); !errors.As(err, &f) || len(e.srv.posted) != 0 {
+		t.Fatalf("a read that failed whole = %v, posted %+v", err, e.srv.posted)
 	}
 }
 

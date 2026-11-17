@@ -114,7 +114,7 @@ func (b *Bridge) Audible(ctx context.Context) api.AudibleAccounts {
 		}
 		out.Accounts = append(out.Accounts, api.AudibleAccount{ID: a.ID, Label: a.Label, Marketplace: a.Marketplace,
 			UserID: a.UserID, UserName: a.UserName, LibraryID: a.LibraryID, LibraryName: library,
-			Policy: a.Policy, Sync: a.Sync, CreatedAt: a.CreatedAt, LastOKAt: a.LastOKAt, LastPollAt: a.LastPollAt,
+			Policy: a.Policy, CreatedAt: a.CreatedAt, LastOKAt: a.LastOKAt, LastPollAt: a.LastPollAt,
 			LastTitles: a.LastTitles, LastMatched: a.LastMatched, Refused: a.RefusedAt != "", RefusedAt: a.RefusedAt,
 			LastError: a.LastError, OtherServer: other, OldProfile: audibleacct.OldProfile(a)})
 	}

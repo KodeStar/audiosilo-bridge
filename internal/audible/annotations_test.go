@@ -74,6 +74,40 @@ func TestLastPositionsChunks(t *testing.T) {
 	}
 }
 
+// A batch that fails ends the read, and the places of the batches read before
+// it come back with the error (bridge#50), never thrown away.
+func TestLastPositionsKeepsBatchesBeforeAFailure(t *testing.T) {
+	asins := make([]string, 2*lastPositionsBatch+3)
+	for i := range asins {
+		asins[i] = fmt.Sprintf("B%09d", i)
+	}
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 2 {
+			http.Error(w, `{"message":"gone"}`, http.StatusNotFound)
+			return
+		}
+		var annots []string
+		for a := range strings.SplitSeq(r.URL.Query().Get("asins"), ",") {
+			annots = append(annots, fmt.Sprintf(`{"asin":%q,"last_position_heard":{"status":"Exists","position_ms":5000}}`, a))
+		}
+		_, _ = io.WriteString(w, `{"asin_last_position_heard_annots":[`+strings.Join(annots, ",")+`]}`)
+	}))
+	defer srv.Close()
+
+	got, err := testClient(t, srv.URL).LastPositions(context.Background(), asins, nil)
+	if err == nil || HTTPStatus(err) != http.StatusNotFound {
+		t.Fatalf("err = %v, want the second batch's 404", err)
+	}
+	if len(got) != lastPositionsBatch || got[asins[0]].PositionMs != 5000 || calls != 2 {
+		t.Fatalf("places = %d (calls %d), want the first batch's %d", len(got), calls, lastPositionsBatch)
+	}
+	if _, ok := got[asins[lastPositionsBatch]]; ok {
+		t.Fatal("a place of the failed batch came back")
+	}
+}
+
 // TestLastPositionsAdaptiveSplit proves the batch self-tunes below Audible's
 // undocumented ASIN-list cap: when the endpoint 400s an over-long list, the client
 // splits and retries, converging on the real limit and still returning every
