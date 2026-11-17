@@ -388,6 +388,34 @@ func TestGitHubSignInResumesContributionParks(t *testing.T) {
 	}
 }
 
+// A GitHub sign-in that resolved while the engine was starting (githubChanged
+// re-admits nothing without a running engine) still resumes the books parked
+// waiting for one once the engine is up (bridge#25). Signed out, they wait
+// (TestGitHubSignInResumesContributionParks).
+func TestEngineStartResumesContributionParks(t *testing.T) {
+	ctx := context.Background()
+	t.Setenv("PATH", t.TempDir()) // no `gh` to fall back to
+	t.Setenv(contrib.GitHubTokenEnv, "ghp_signed_in")
+	b := newTestBridge(t)
+	bk, err := b.db.CreateBook(ctx, store.NewBook{SourcePath: "/books/waiting.m4b", WorkDir: t.TempDir(), Title: "waiting"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.db.SetBookState(ctx, bk.ID, string(state.Contributing), string(state.StatusNeedsAttention), "parked",
+		string(state.ParkContribUnavailable)); err != nil {
+		t.Fatal(err)
+	}
+	if n := b.readmitContributions(ctx); n != 0 {
+		t.Fatalf("re-admitted %d with no engine", n)
+	}
+	sched := scheduler.New(b.db, events.NewHub(64), scheduler.NewStubExecutor(0, 0), 1, t.TempDir(), false)
+	b.engineStarted(ctx, &engine{sched: sched})
+	waitFor(t, "the contribution park re-admitted at the engine's start", func() bool {
+		got, err := b.db.GetBook(ctx, bk.ID)
+		return err == nil && got.Status == ""
+	})
+}
+
 func TestHeartbeatNegotiatesDispatchCapacity(t *testing.T) {
 	f := &setupServer{kind: "new", claimPriority: true}
 	b, ctx := pairedBridge(t, f)

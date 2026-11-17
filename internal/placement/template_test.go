@@ -68,6 +68,30 @@ func TestTemplateSanitizesSegments(t *testing.T) {
 	}
 }
 
+// The characters an SMB share or a Windows disk can't store never reach a
+// generated name (bridge#47), and the gaps they leave close up.
+func TestSanitizeDropsCharactersSMBRefuses(t *testing.T) {
+	for in, want := range map[string]string{
+		"Who Moved My Cheese?":             "Who Moved My Cheese",
+		"M*A*S*H":                          "MASH",
+		`The "Real" Story`:                 "The 'Real' Story",
+		"Either | Or":                      "Either - Or",
+		"<Untitled> Book":                  "Untitled Book",
+		"Why? * Because":                   "Why Because",
+		"Title : Sub":                      "Title - Sub",
+		"Mr. Penumbra's 24-Hour Bookstore": "Mr. Penumbra's 24-Hour Bookstore",
+		"...And Ladies of the Club":        "And Ladies of the Club",
+	} {
+		if got := Sanitize(in); got != want {
+			t.Errorf("Sanitize(%q) = %q, want %q", in, got, want)
+		}
+	}
+	tm, _ := Parse("{Author}/{Title}")
+	if got, _ := tm.Render(Vars{Author: "Spencer Johnson", Title: "Who Moved My Cheese?"}); got != "Spencer Johnson/Who Moved My Cheese" {
+		t.Fatalf("template = %q", got)
+	}
+}
+
 func TestSuggestWithTemplateUsesSiblings(t *testing.T) {
 	in := Input{
 		Author: "Will Wight", Title: "Waybound", TitleShort: "Waybound",

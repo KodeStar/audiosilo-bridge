@@ -224,13 +224,23 @@ func (b *Bridge) runEngine(ctx context.Context) {
 	}()
 	go func() { defer wg.Done(); b.daily(ctx, b.pruneEvents) }()
 	go func() { defer wg.Done(); b.daily(ctx, b.sweepTranscripts) }()
-	b.engine.cur.Store(&engine{ffmpeg: tools.FFmpeg, ffprobe: tools.FFprobe, sched: sched, exec: exec})
-	b.kickWaiting() // a book parked waiting before this start may go on now
+	b.engineStarted(ctx, &engine{ffmpeg: tools.FFmpeg, ffprobe: tools.FFprobe, sched: sched, exec: exec})
 	log.Info("bridge: the engine started", "ffmpeg", tools.FFmpeg != "", "asr", asrCap.Backend, "asr_available", asrCap.Available,
 		"asr_worker_fallback", cfg.ASR.WorkerFallback,
 		"agent_backend", box.ID(), "agent_slots", slots, "staging", cfg.AgentStagingDir(b.dataDir))
 	b.runner.Wake()
 	wg.Wait()
+}
+
+// engineStarted makes e the running engine and takes up what waited for one: a
+// book parked waiting for a worker before this start may go on now, and the
+// books parked for a GitHub credential are re-admitted when one resolves (a
+// sign-in while the engine was starting re-admitted nothing: githubChanged
+// needs a running engine, bridge#25).
+func (b *Bridge) engineStarted(ctx context.Context, e *engine) {
+	b.engine.cur.Store(e)
+	b.kickWaiting()
+	go b.readmitContributions(ctx)
 }
 
 // agentSlotsEvery is how often the agent container's slots are looked at: as
