@@ -145,8 +145,10 @@ var (
 	// ErrBadCursor is AudibleProgress's 400 for a since the server can't read
 	// (a server restored from a backup, its feed rebuilt): read from the start.
 	ErrBadCursor = errors.New("the server refused the progress cursor")
-	// ErrNoAudibleSync is a 404 that names no account: the route itself is
-	// missing, a server older than 2.6.0 (before Audible sync).
+	// ErrNoAudibleSync is the 404 for a route the server doesn't have (its
+	// API's not_found, or a bare 404 with no code): a server older than
+	// 2.6.0, before Audible sync. A 404 with another code (unknown_account,
+	// or one a later server adds) is that answer, never this.
 	ErrNoAudibleSync = errors.New("the server doesn't sync places with Audible: update it to 2.6.0 or later")
 )
 
@@ -163,7 +165,7 @@ func syncError(err error) error {
 		return ErrUserUnavailable
 	case e.Status == http.StatusNotFound && e.Code == "unknown_account":
 		return ErrUnknownAccount
-	case e.Status == http.StatusNotFound:
+	case e.Status == http.StatusNotFound && (e.Code == "" || e.Code == "not_found"):
 		return ErrNoAudibleSync
 	}
 	return err
