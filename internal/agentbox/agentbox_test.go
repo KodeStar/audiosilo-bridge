@@ -995,11 +995,9 @@ func TestHandoffCredentialModes(t *testing.T) {
 	t.Run("runner in the Bridge's group", func(t *testing.T) {
 		t.Parallel()
 		m := stageHandoff(t, []int{os.Getgid() + 1, os.Getgid()})
+		// No bits for other uids, and the group may not list the dir.
 		if m.dir != fs.ModeDir|0o730 || m.file != 0o440 || m.gid != os.Getgid() {
 			t.Fatalf("modes = dir %v, file %v, gid %d (want 0730, 0440, %d)", m.dir, m.file, m.gid, os.Getgid())
-		}
-		if m.dir&0o007 != 0 || m.file&0o007 != 0 || m.dir&0o040 != 0 {
-			t.Fatalf("another uid can reach the credential: dir %v, file %v", m.dir, m.file)
 		}
 	})
 	t.Run("runner not in it", func(t *testing.T) {

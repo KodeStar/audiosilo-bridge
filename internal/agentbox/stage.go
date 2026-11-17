@@ -36,10 +36,10 @@ const (
 	// before: readable by every uid until the runner takes it. The agent can
 	// anyway put a file there, which the runner reads strictly and only ever
 	// as its own run's credential.
-	credentialDirMode      = 0o777
-	credentialFileMode     = inputFile
-	credentialGroupDirMode = 0o730
-	credentialGroupMode    = 0o440
+	credentialDirMode       = 0o777
+	credentialFileMode      = inputFile
+	credentialGroupDirMode  = 0o730
+	credentialGroupFileMode = 0o440
 )
 
 // stage creates the job dir and writes it: work/ (a copy of the staged dir),
@@ -142,7 +142,7 @@ func writeCredential(root *os.Root, c agentproto.Credential, shareGroup bool) er
 	}
 	dirMode, fileMode := fs.FileMode(credentialDirMode), fs.FileMode(credentialFileMode)
 	if shareGroup {
-		dirMode, fileMode = credentialGroupDirMode, credentialGroupMode
+		dirMode, fileMode = credentialGroupDirMode, credentialGroupFileMode
 	}
 	name := filepath.Join(agentproto.CredentialDir, agentproto.CredentialFile)
 	if err := root.Mkdir(agentproto.CredentialDir, 0o700); err != nil {
@@ -152,12 +152,10 @@ func writeCredential(root *os.Root, c agentproto.Credential, shareGroup bool) er
 		return err
 	}
 	if shareGroup {
-		gid := os.Getgid()
-		if err := root.Chown(name, -1, gid); err != nil {
-			return err
-		}
-		if err := root.Chown(agentproto.CredentialDir, -1, gid); err != nil {
-			return err
+		for _, p := range []string{name, agentproto.CredentialDir} {
+			if err := root.Chown(p, -1, os.Getgid()); err != nil {
+				return err
+			}
 		}
 	}
 	return root.Chmod(agentproto.CredentialDir, dirMode)
