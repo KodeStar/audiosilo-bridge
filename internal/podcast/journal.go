@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"os"
 	"path"
 	"runtime"
@@ -187,6 +188,8 @@ func Publish(root *os.Root, j Journal, now time.Time, fault Boundary) error {
 
 // RecoverShow finishes installs and moved deletions before any other show mutation.
 // A delete whose audio has not moved is aborted: its aggregate may now be stale.
+// An install whose staged audio is gone before anything of it was written is
+// aborted too (AbortInstall).
 func RecoverShow(root *os.Root, show string, now time.Time, fault Boundary) error {
 	if !ValidShow(show) {
 		return ErrInvalidFile
@@ -222,6 +225,17 @@ func RecoverShow(root *os.Root, show string, now time.Time, fault Boundary) erro
 		}
 		if !journalValid(&j, show) || AttachmentPath(j.Path, ".publish.json") != p {
 			return ErrInvalidFile
+		}
+		if j.Op == "install" && stagedAudioGone(root, j) {
+			// An older Bridge removed the staged audio of an install whose
+			// Publish failed after this journal: nothing was installed, and the
+			// journal would block the show for good. Drop it; the episode is
+			// fetched again as one never installed.
+			if err := AbortInstall(root, j); err != nil {
+				return err
+			}
+			slog.Warn("podcasts: an episode's staged download was gone; it will be fetched again", "show", show, "episode_id", j.EpisodeID)
+			continue
 		}
 		if j.Op == "delete" {
 			// An unmoved deletion's aggregate may be stale: leave the episode installed.
@@ -483,6 +497,67 @@ func AbortDelete(root *os.Root, j Journal) error {
 	// and the next recovery aborts again instead of orphaning an unowned folder.
 	if err := root.Remove(show + "/" + j.TrashDir); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
+	}
+	if err := root.Remove(AttachmentPath(j.Path, ".publish.json")); err != nil {
+		return err
+	}
+	return syncDir(root, show+"/.audiosilo")
+}
+
+// stagedAudioGone reports whether neither an install's staged audio nor its
+// target exists (neither name is anything, a link included). Otherwise
+// complete decides as before: it finishes an install whose audio is in place
+// and refuses anything else.
+func stagedAudioGone(root *os.Root, j Journal) bool {
+	if _, err := root.Lstat(path.Dir(j.Path) + "/" + j.AudioTemp); !errors.Is(err, os.ErrNotExist) {
+		return false
+	}
+	_, err := root.Lstat(j.Path)
+	return errors.Is(err, os.ErrNotExist)
+}
+
+// AbortInstall removes an install's barrier when its staged audio is gone and
+// nothing of the install was written. The journal records no step, so each step
+// after staging is proven not to have run by the trace it leaves: the audio at
+// the episode's path, the chapters attachment for this fetch (or any other the
+// episode's current pin does not own, which Publish would have refused), and
+// the feed's pin of this fetch. With any of those present it refuses, as
+// recovery did before. The feed keeps the episode's earlier pin, so the
+// episode stays not installed and is fetched again.
+func AbortInstall(root *os.Root, j Journal) error {
+	show := path.Dir(j.Path)
+	if j.Op != "install" || !journalValid(&j, show) {
+		return ErrInvalidFile
+	}
+	// Read rejects a link in any component of the show's feed.json: the show
+	// folder is a real folder for the absence checks below.
+	f, err := Read(root, show)
+	if err != nil {
+		return err
+	}
+	e := episodeFor(f, j)
+	if e == nil || (e.Fetch != nil && *e.Fetch == j.Fetch) {
+		return ErrInvalidFile
+	}
+	if !stagedAudioGone(root, j) {
+		return ErrInvalidFile
+	}
+	side := AttachmentPath(j.Path, ".chapters.json")
+	if err := regularOrAbsent(root, side); err != nil {
+		return err
+	}
+	if _, err := root.Lstat(side); err == nil && (ReadChapters(root, j.Path, &j.Fetch) != nil || ReadChapters(root, j.Path, e.Fetch) == nil) {
+		return ErrInvalidFile
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	// Only this transaction's own barrier is removed, never another journal.
+	saved, err := ReadJournal(root, AttachmentPath(j.Path, ".publish.json"))
+	if err != nil {
+		return err
+	}
+	if !sameJournal(j, saved) {
+		return ErrInvalidFile
 	}
 	if err := root.Remove(AttachmentPath(j.Path, ".publish.json")); err != nil {
 		return err

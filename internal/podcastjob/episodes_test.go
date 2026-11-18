@@ -952,6 +952,59 @@ func TestFetchFailedPublishKeepsTheJournalsStagedAudio(t *testing.T) {
 	}
 }
 
+// A show an older Bridge left stuck (a journal whose staged audio its failed
+// publish removed) is recovered by the next fetch: the journal goes and the
+// episode is downloaded again and installed.
+func TestFetchAfterAStuckJournalFetchesTheEpisodeAgain(t *testing.T) {
+	requireProbe(t)
+	h, job := audioHarness(t)
+	s := h.handler.s
+	audio := data(t, "chap-v24-reverse.mp3")
+	var calls atomic.Int32
+	setAudio(h, func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Write(audio)
+	})
+	show := filepath.Join(h.mount, filepath.Dir(*job.Path))
+	s.o.Fault = func(at string) error {
+		if at == "journal" {
+			return errors.New("stopped after the journal")
+		}
+		return nil
+	}
+	if result, err := h.handler.FetchJob().Run(context.Background(), job, jobs.LocalReporter()); err == nil {
+		t.Fatal("a failed publish succeeded:", result)
+	}
+	for _, p := range partials(show) {
+		if err := os.Remove(p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s.o.Fault = nil
+	result, err := h.handler.FetchJob().Run(context.Background(), job, jobs.LocalReporter())
+	if err != nil {
+		t.Fatal("the stuck show still refuses the fetch:", err)
+	}
+	got := result.(fetchResult)
+	if got.Reused || calls.Load() != 2 {
+		t.Fatal("the episode was not downloaded again:", got, calls.Load())
+	}
+	root, err := os.OpenRoot(h.mount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	if !podcast.Matches(root, *job.Path, &got.Fetch) {
+		t.Fatal("the episode was not installed")
+	}
+	if _, err := root.Lstat(podcast.AttachmentPath(*job.Path, ".publish.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("the stuck journal was kept:", err)
+	}
+	if f := h.read("Fixture Show"); f.Episodes[0].Fetch == nil || *f.Episodes[0].Fetch != got.Fetch {
+		t.Fatal("the feed does not pin the installed episode", f.Episodes[0].Fetch)
+	}
+}
+
 // A clear removes a recorded partial beside a journal that stages another file.
 func TestClearRemovesAPartialNoJournalStages(t *testing.T) {
 	h, job := audioHarness(t)
