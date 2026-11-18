@@ -165,7 +165,7 @@ export interface ServiceNote {
 }
 
 // serviceNote words the endpoint's agent service's state: running, not
-// running (with how to start it, which the Bridge's detail says), or refused,
+// running (the Bridge's detail as it is, which says how to start it), or refused,
 // naming what it found and, for the agent home's marker, the file to remove.
 export function serviceNote(s: AgentService): ServiceNote {
   switch (s.state) {
@@ -179,7 +179,10 @@ export function serviceNote(s: AgentService): ServiceNote {
     case 'not_running':
       return {
         kind: 'warn',
-        text: `The endpoint's agent service (agent-endpoint) isn't running${s.detail ? `: ${s.detail}` : '. Start it with docker compose --profile endpoint up -d agent-endpoint.'}`,
+        // The Bridge's detail names the service and says how to start it.
+        text: s.detail
+          ? s.detail.charAt(0).toUpperCase() + s.detail.slice(1)
+          : "The endpoint's agent service (agent-endpoint) isn't running. Start it with docker compose --profile endpoint up -d agent-endpoint.",
         found: '',
         marker: null,
       };

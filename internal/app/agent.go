@@ -41,18 +41,18 @@ func (b *Bridge) AgentSettings(ctx context.Context) api.AgentSettings {
 // endpointService words the endpoint's agent service for Settings > Agent,
 // from the agent's status on the openai-compatible backend: not running (no
 // fresh runner.json, or no service of its own set up for the Bridge to read),
-// refused (it answers, but isn't one the Bridge sends runs to: a credential
-// within its reach, the wrong kind of runner or user, an older image, no
-// codex), else running (the endpoint's own settings aside).
+// running (no problem, or only the endpoint's own settings missing), else
+// refused (it answers, but the Bridge sends it no runs: a credential within
+// its reach, the wrong kind of runner or user, an older image, no codex, and
+// any problem added later).
 func endpointService(st agentbox.Status) *api.AgentService {
 	switch {
 	case st.Problem == agentbox.ProblemNotRunning, st.Problem == agentbox.ProblemEndpointService && !st.Live:
 		return &api.AgentService{State: api.ServiceNotRunning, Detail: st.Detail}
-	case st.Problem == agentbox.ProblemOwnCredentials, st.Problem == agentbox.ProblemEndpointService,
-		st.Problem == agentbox.ProblemOutdated, st.Problem == agentbox.ProblemNoCLI:
-		return &api.AgentService{State: api.ServiceRefused, Detail: st.Detail, Found: st.Found}
+	case st.Problem == "", st.Problem == agentbox.ProblemNoEndpoint:
+		return &api.AgentService{State: api.ServiceRunning}
 	}
-	return &api.AgentService{State: api.ServiceRunning}
+	return &api.AgentService{State: api.ServiceRefused, Detail: st.Detail, Found: st.Found}
 }
 
 // SaveAgentSettings saves the backend and the endpoint. A setting the

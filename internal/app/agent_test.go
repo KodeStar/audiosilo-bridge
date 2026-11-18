@@ -92,13 +92,14 @@ func TestEndpointServiceState(t *testing.T) {
 		st   agentbox.Status
 		want api.AgentService
 	}{
-		"stale":           {agentbox.Status{Problem: agentbox.ProblemNotRunning, Detail: "d"}, api.AgentService{State: api.ServiceNotRunning, Detail: "d"}},
-		"none set up":     {agentbox.Status{Problem: agentbox.ProblemEndpointService, Detail: "d"}, api.AgentService{State: api.ServiceNotRunning, Detail: "d"}},
-		"not its own":     {agentbox.Status{Live: true, Problem: agentbox.ProblemEndpointService, Detail: "d", Found: "x"}, api.AgentService{State: api.ServiceRefused, Detail: "d", Found: "x"}},
-		"a credential":    {agentbox.Status{Live: true, Problem: agentbox.ProblemOwnCredentials, Detail: "d", Found: "/m holds /m/.audiosilo-agent-home"}, api.AgentService{State: api.ServiceRefused, Detail: "d", Found: "/m holds /m/.audiosilo-agent-home"}},
-		"an older image":  {agentbox.Status{Problem: agentbox.ProblemOutdated, Detail: "d"}, api.AgentService{State: api.ServiceRefused, Detail: "d"}},
-		"ready":           {agentbox.Status{Live: true, Available: true}, api.AgentService{State: api.ServiceRunning}},
-		"no endpoint yet": {agentbox.Status{Live: true, Problem: agentbox.ProblemNoEndpoint, Detail: "d"}, api.AgentService{State: api.ServiceRunning}},
+		"stale":             {agentbox.Status{Problem: agentbox.ProblemNotRunning, Detail: "d"}, api.AgentService{State: api.ServiceNotRunning, Detail: "d"}},
+		"none set up":       {agentbox.Status{Problem: agentbox.ProblemEndpointService, Detail: "d"}, api.AgentService{State: api.ServiceNotRunning, Detail: "d"}},
+		"not its own":       {agentbox.Status{Live: true, Problem: agentbox.ProblemEndpointService, Detail: "d", Found: "x"}, api.AgentService{State: api.ServiceRefused, Detail: "d", Found: "x"}},
+		"a credential":      {agentbox.Status{Live: true, Problem: agentbox.ProblemOwnCredentials, Detail: "d", Found: "/m holds /m/.audiosilo-agent-home"}, api.AgentService{State: api.ServiceRefused, Detail: "d", Found: "/m holds /m/.audiosilo-agent-home"}},
+		"an older image":    {agentbox.Status{Problem: agentbox.ProblemOutdated, Detail: "d"}, api.AgentService{State: api.ServiceRefused, Detail: "d"}},
+		"ready":             {agentbox.Status{Live: true, Available: true}, api.AgentService{State: api.ServiceRunning}},
+		"no endpoint yet":   {agentbox.Status{Live: true, Problem: agentbox.ProblemNoEndpoint, Detail: "d"}, api.AgentService{State: api.ServiceRunning}},
+		"its key held back": {agentbox.Status{Live: true, Problem: agentbox.ProblemGroupRequired, Detail: "d"}, api.AgentService{State: api.ServiceRefused, Detail: "d"}},
 	} {
 		if got := endpointService(tc.st); *got != tc.want {
 			t.Errorf("%s: %+v, want %+v", name, *got, tc.want)

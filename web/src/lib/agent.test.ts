@@ -130,11 +130,15 @@ describe('serviceNote', () => {
     });
     const off = serviceNote({
       state: 'not_running',
-      detail: 'start it with docker compose --profile endpoint up -d agent-endpoint',
+      detail:
+        "the endpoint's agent service (agent-endpoint) isn't running (its last heartbeat was 2m0s ago): start it with docker compose --profile endpoint up -d agent-endpoint",
       found: '',
     });
     expect(off.kind).toBe('warn');
-    expect(off.text).toContain('agent-endpoint');
+    expect(off.text).toMatch(
+      /^The endpoint's agent service \(agent-endpoint\) isn't running \(its last/,
+    );
+    expect(off.text.match(/isn't running/g)).toHaveLength(1);
     expect(off.text).toContain('--profile endpoint');
     expect(off.text).not.toMatch(/Claude|ChatGPT|agent container/);
     // An older Bridge's empty detail still says how.

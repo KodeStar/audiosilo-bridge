@@ -4021,8 +4021,8 @@ internal/
             start), the endpoint, config.ModelStages, the endpoint key's state
             (agentCreds, never the key), the env-locked keys and, while the
             openai-compatible backend runs, Service (endpointService over
-            box.Status(): not_running, refused with detail and found, or
-            running). SaveAgentSettings
+            box.Status(): not_running, running (no problem, or no endpoint set),
+            else refused with detail and found). SaveAgentSettings
             refuses (ErrLocked) a change to a value the environment sets, saves,
             hands the engine EndpointModels (SetCompatibleModels) and, when the
             running endpoint's address or models changed, agentChanged (the books parked on
