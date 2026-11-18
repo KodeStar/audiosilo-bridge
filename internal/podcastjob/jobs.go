@@ -162,10 +162,11 @@ func (h *Poll) Run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (an
 	return outcome(h.run(parent, job, rep))
 }
 
-// ceiling bounds a job's work, which starts once it holds its lock: a wait
-// never leaves the feed's own fetch short of time. The wait for the library's
-// mapping check is bounded by one more ceiling, and so is a poll's wait for its
-// show (a subscribe's for its library waits on that follow's own ceiling).
+// ceiling bounds a subscribe's or a poll's work, which starts once it holds its
+// lock: a wait never leaves the feed's own fetch short of time. The wait for
+// the library's mapping check is bounded by one more ceiling, which a poll's
+// wait for its show shares (a subscribe's for its library waits on that
+// follow's own ceiling). A retain's covers its whole run.
 const ceiling = 3 * time.Minute
 
 func (s *service) acquire(ctx context.Context, key string) (func(), error) {
@@ -761,8 +762,9 @@ func outcome(result any, err error) (any, error) {
 		failure = fail("too_large", "The podcast feed exceeds its size or episode limit.")
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		// The Bridge's own deadline or stop outside the feed's fetch (that
-		// one's is the netguard's timeout): no fault of the feed's.
-		failure = fail("bridge_lost", "The Bridge stopped the feed check before it finished.")
+		// one's is the netguard's timeout): no fault of the feed's. Every
+		// podcast job reports through here, so the message names none.
+		failure = fail("bridge_lost", "The Bridge stopped the job before it finished.")
 	default:
 		failure = fail("write_failed", "The podcast show could not be saved.")
 	}
