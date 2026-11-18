@@ -129,14 +129,19 @@ func (db *DB) EndGenerateBook(ctx context.Context, serverJobID int64, attempt in
 	if err := checkAffected(res, err); !errors.Is(err, ErrNotFound) {
 		return err
 	}
-	var later bool
-	if err := db.sql.QueryRowContext(ctx, `SELECT `+laterClaimSQL, serverJobID, attempt).Scan(&later); err != nil {
+	if later, err := db.LaterClaim(ctx, serverJobID, attempt); err != nil || !later {
 		return err
 	}
-	if later {
-		return ErrFollowed
-	}
-	return nil
+	return ErrFollowed
+}
+
+// LaterClaim reports whether a later attempt of server job serverJobID than
+// attempt is recorded here (RecordClaim): that claim follows the job's engine
+// book now, even before its attach reopens the job's mapping.
+func (db *DB) LaterClaim(ctx context.Context, serverJobID int64, attempt int) (bool, error) {
+	var later bool
+	err := db.sql.QueryRowContext(ctx, `SELECT `+laterClaimSQL, serverJobID, attempt).Scan(&later)
+	return later, err
 }
 
 // ReopenGenerateBook marks a server job's mapping open again (a job the server

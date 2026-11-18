@@ -1609,8 +1609,11 @@ internal/
             round-cap park parks again). RetryAsRead(b) is Retry for a book the caller
             read (generate's Retry): it re-admits only while the book still has b's
             status and error (the contrib poller's Readmit too). CancelStored(db, id)
-            is Cancel's store write alone, for a caller with no scheduler running
-            (generate's Abandon before the engine starts); a start's reconcileBook
+            is Cancel's store write alone, for a caller with no scheduler running;
+            CancelUnlessFollowed(id, g) and CancelStoredUnlessFollowed(db, id, g) are
+            the two written only while a store.StopGuard holds
+            (SetBookStatusUnlessFollowed, store.ErrFollowed otherwise): generate's job
+            ends, its Abandon before the engine starts included; a start's reconcileBook
             rewinds by the state alone (SetBookPipelineState), and a pass moves a
             book on from a waypoint the same way (advanceWaypoint), so neither writes
             the status it read back over such a cancel; a stage's own park or failure
@@ -3010,7 +3013,7 @@ internal/
             and the write is never stopped nor its mapping ended. Abandon (jobs.Abandoner)
             does the same for a job the runner ended without running it, before it
             returns even when the engine hasn't started (stopBook then cancels the book
-            in the store alone, scheduler.CancelStored: nothing runs it yet; and once
+            in the store alone, scheduler.CancelStoredUnlessFollowed: nothing runs it yet; and once
             the engine is up, stopStartedStage stops a stage its scheduler began on the
             book before that write, or a status such a stage wrote over it, through
             the engine's guarded cancel, and only then purges a retention 0 book's
@@ -3050,7 +3053,9 @@ internal/
             Under the hold the book is looked at again (purgeHeld): one no longer
             finished, or that an open job follows again (a later claim of its job
             re-opened and re-admitted it while the purge waited), keeps its
-            transcripts and stays unswept.
+            transcripts and stays unswept; a job end's purge also leaves a book to a
+            later claim of the job recorded before its attach reopened the mapping
+            (store.LaterClaim).
             Phase 1c, DESCRIPTIONS (describejob.go): Options.Describer is the
             engine's description step (pipeline.Executor.Describe). A generate job's
             write() saves the characters and recaps first, then runs it

@@ -532,7 +532,7 @@ func (h *Handler) end(ctx context.Context, r *run, res any, err error) (any, err
 		// a book whose retention is 0 days go now.
 		endCtx := context.WithoutCancel(ctx)
 		if h.release(endCtx, r.job, r.bookID, err != nil) {
-			h.purgeAtEnd(endCtx, r.job.ID, r.bookID)
+			h.purgeAtEnd(endCtx, r.job, r.bookID)
 		}
 	}
 	return res, err
@@ -556,7 +556,7 @@ func (h *Handler) Abandon(ctx context.Context, job jobs.Job) {
 	ended := h.release(ctx, job, bookID, true)
 	if engineUp {
 		if ended {
-			h.purgeAtEnd(ctx, job.ID, bookID)
+			h.purgeAtEnd(ctx, job, bookID)
 		}
 		return
 	}
@@ -569,7 +569,7 @@ func (h *Handler) Abandon(ctx context.Context, job jobs.Job) {
 // stopStartedStage waits for the engine to start, then stops a stage it began on
 // book bookID before the store's cancel landed (its scheduler starts beside the
 // Bridge's jobs), or a status such a stage wrote over the cancel (stopBook,
-// cancelled books included): the engine's own Cancel, which also keeps a dispatch
+// cancelled books included): the engine's guarded cancel, which also keeps a dispatch
 // pass that read the book before the store's cancel from starting a stage on it
 // afterwards. The transcripts of a book whose retention is 0 days go only now
 // (purgeAtEnd): with no engine nothing held the book against such a stage. A
@@ -594,7 +594,7 @@ func (h *Handler) stopStartedStage(ctx context.Context, job jobs.Job, bookID int
 	if h.stopBook(ctx, stopGuard(job, true), bookID, true) {
 		return
 	}
-	h.purgeAtEnd(ctx, job.ID, bookID)
+	h.purgeAtEnd(ctx, job, bookID)
 }
 
 // release ends a job's hold on its engine book: a job that didn't finish stops
@@ -638,12 +638,12 @@ func (h *Handler) release(ctx context.Context, job jobs.Job, bookID int64, stop 
 // transcripts.retention_days is 0 (purgeEnded). It needs the engine up: the
 // engine's hold on the book is what keeps a stage from starting on it meanwhile
 // (hold takes none without an engine, and its scheduler may be starting).
-func (h *Handler) purgeAtEnd(ctx context.Context, jobID, bookID int64) {
+func (h *Handler) purgeAtEnd(ctx context.Context, job jobs.Job, bookID int64) {
 	if h.o.RetentionDays != 0 {
 		return
 	}
-	if err := h.purgeEnded(ctx, bookID); err != nil {
-		h.o.Log.Warn("generate: deleting the transcripts failed", "job", jobID, "err", err)
+	if err := h.purgeEnded(ctx, job, bookID); err != nil {
+		h.o.Log.Warn("generate: deleting the transcripts failed", "job", job.ID, "err", err)
 	}
 }
 
@@ -651,12 +651,13 @@ func (h *Handler) purgeAtEnd(ctx context.Context, jobID, bookID int64) {
 // failed: a cancel would overwrite its error) or another open job follows it now
 // (a generate job continued the chapters run, so a late end of the chapters job
 // leaves it to that job). With no engine yet the cancel is the store's alone
-// (scheduler.CancelStored): nothing runs the book to interrupt. recancel stops
-// a book already cancelled too (stopStartedStage: a stage the engine began before
-// the cancel landed). The cancel is written only while g holds (store.StopGuard:
-// no later attempt of the job, no other open job on the book, the job's mapping
-// still ended when g.Ended), in the store's one statement. It reports whether it
-// left the book to another open job or a later claim.
+// (scheduler.CancelStoredUnlessFollowed): nothing runs the book to interrupt.
+// recancel stops a book already cancelled too (stopStartedStage: a stage the
+// engine began before the cancel landed). The cancel is written only while g
+// holds (store.StopGuard: no later attempt of the job, no other open job on the
+// book, the job's mapping still ended when g.Ended), in the store's one
+// statement. It reports whether it left the book to another open job or a later
+// claim.
 func (h *Handler) stopBook(ctx context.Context, g store.StopGuard, bookID int64, recancel bool) (followed bool) {
 	b, err := h.o.DB.GetBook(ctx, bookID)
 	if err != nil || (finished(b.State, b.Status) && (!recancel || !scheduler.IsCancelled(b))) {

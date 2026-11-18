@@ -5,6 +5,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/kodestar/audiosilo-bridge/internal/jobs"
 	"github.com/kodestar/audiosilo-bridge/internal/scratch"
 	"github.com/kodestar/audiosilo-bridge/internal/state"
 	"github.com/kodestar/audiosilo-bridge/internal/store"
@@ -28,7 +29,7 @@ func (h *Handler) purge(ctx context.Context, b store.SweepBook) (swept bool, err
 		return false, nil
 	}
 	defer release()
-	return h.purgeHeld(ctx, b.ID)
+	return h.purgeHeld(ctx, b.ID, nil)
 }
 
 // purgeHeld deletes one held book's transcripts, updates its disk gauge and records
@@ -36,8 +37,10 @@ func (h *Handler) purge(ctx context.Context, b store.SweepBook) (swept bool, err
 // again under the hold: one a job follows again since it was found finished (a
 // later claim of its job re-opening and re-admitting it while the purge waited
 // for the hold) runs on its transcripts, so it is left alone, and swept reports
-// false.
-func (h *Handler) purgeHeld(ctx context.Context, bookID int64) (swept bool, err error) {
+// false. ending, when set, is the job whose end purges: a later claim of it
+// recorded since (store.LaterClaim) follows the book before its attach reopens
+// the mapping, so it keeps the transcripts too.
+func (h *Handler) purgeHeld(ctx context.Context, bookID int64, ending *jobs.Job) (swept bool, err error) {
 	b, err := h.o.DB.GetBook(ctx, bookID)
 	if errors.Is(err, store.ErrNotFound) {
 		return false, nil
@@ -47,6 +50,11 @@ func (h *Handler) purgeHeld(ctx context.Context, bookID int64) (swept bool, err 
 	}
 	if followed, err := h.o.DB.GenerateBookFollowed(ctx, bookID); err != nil || followed {
 		return false, err
+	}
+	if ending != nil {
+		if later, err := h.o.DB.LaterClaim(ctx, ending.ID, ending.Attempt); err != nil || later {
+			return false, err
+		}
 	}
 	if err := scratch.PurgeTranscripts(h.o.WorkRoot, b.WorkDir, state.ParseKind(b.Kind)); err != nil {
 		return false, err
@@ -58,11 +66,12 @@ func (h *Handler) purgeHeld(ctx context.Context, bookID int64) (swept bool, err 
 	return true, h.o.DB.MarkGenerateBookSwept(ctx, b.ID, h.now())
 }
 
-// purgeEnded deletes the transcripts of the job's own engine book as its job
-// ends (transcripts.retention_days 0). It waits a few polls for the engine to let
-// go of the book (a stage the job's end just stopped is still finishing); one it
-// keeps is left for the sweep.
-func (h *Handler) purgeEnded(ctx context.Context, bookID int64) error {
+// purgeEnded deletes the transcripts of job's own engine book as job ends
+// (transcripts.retention_days 0), unless a later claim of job follows it
+// (purgeHeld). It waits a few polls for the engine to let go of the book (a stage
+// the job's end just stopped is still finishing); one it keeps is left for the
+// sweep.
+func (h *Handler) purgeEnded(ctx context.Context, job jobs.Job, bookID int64) error {
 	b, err := h.o.DB.GetBook(ctx, bookID)
 	if err != nil || !finished(b.State, b.Status) {
 		return err
@@ -75,7 +84,7 @@ func (h *Handler) purgeEnded(ctx context.Context, bookID int64) error {
 		return err
 	}
 	defer release()
-	_, err = h.purgeHeld(ctx, b.ID)
+	_, err = h.purgeHeld(ctx, b.ID, &job)
 	return err
 }
 

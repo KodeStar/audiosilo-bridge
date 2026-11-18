@@ -444,10 +444,10 @@ func TestPurgeEndedIsTheJobsBookOnly(t *testing.T) {
 	own := mk(1, "own", "done")
 	other := mk(2, "other", "done")
 	working := mk(3, "working", "fact_pass")
-	if err := h.purgeEnded(ctx, own.ID); err != nil || present(own.WorkDir) {
+	if err := h.purgeEnded(ctx, jobs.Job{ID: 1, Attempt: 1}, own.ID); err != nil || present(own.WorkDir) {
 		t.Fatalf("the job's own book: %v, present %v", err, present(own.WorkDir))
 	}
-	if err := h.purgeEnded(ctx, working.ID); err != nil || !present(working.WorkDir) {
+	if err := h.purgeEnded(ctx, jobs.Job{ID: 3, Attempt: 1}, working.ID); err != nil || !present(working.WorkDir) {
 		t.Fatalf("a working book was purged: %v", err)
 	}
 	if !present(other.WorkDir) {
@@ -494,7 +494,7 @@ func TestSweepSkipsAHeldBook(t *testing.T) {
 	if n, err := h.SweepTranscripts(ctx, 0); err != nil || n != 0 || !present(wd) {
 		t.Fatalf("a held book: swept %d, %v, present %v", n, err, present(wd))
 	}
-	if err := h.purgeEnded(ctx, b.ID); err != nil || !present(wd) {
+	if err := h.purgeEnded(ctx, jobs.Job{ID: 1, Attempt: 1}, b.ID); err != nil || !present(wd) {
 		t.Fatalf("a held book purged at its job's end: %v", err)
 	}
 	delete(eng.held, b.ID)
@@ -546,7 +546,7 @@ func TestPurgeRechecksTheBookUnderTheHold(t *testing.T) {
 	_ = db.EndGenerateBook(ctx, 1, 1, time.Now().Add(-time.Hour))
 
 	readmitted = true
-	if err := h.purgeEnded(ctx, b.ID); err != nil || !present(wd) {
+	if err := h.purgeEnded(ctx, jobs.Job{ID: 1, Attempt: 1}, b.ID); err != nil || !present(wd) {
 		t.Fatalf("a book re-admitted under the job end's purge lost its transcripts: %v", err)
 	}
 	_ = db.SetBookState(ctx, b.ID, "fact_pass", "failed", "cancelled", "")
@@ -558,12 +558,51 @@ func TestPurgeRechecksTheBookUnderTheHold(t *testing.T) {
 	// Its job's mapping open again (the later claim re-opened it, its Retry not
 	// landed yet): still followed, so still not purged.
 	_ = db.ReopenGenerateBook(ctx, 1)
-	if err := h.purgeEnded(ctx, b.ID); err != nil || !present(wd) {
+	if err := h.purgeEnded(ctx, jobs.Job{ID: 1, Attempt: 1}, b.ID); err != nil || !present(wd) {
 		t.Fatalf("a book its job follows again lost its transcripts: %v", err)
 	}
 	_ = db.EndGenerateBook(ctx, 1, 1, time.Now().Add(-time.Hour))
 	if n, err := h.SweepTranscripts(ctx, 0); err != nil || n != 1 || present(wd) {
 		t.Fatalf("a finished book: swept %d, %v, present %v", n, err, present(wd))
+	}
+}
+
+// A job end's purge leaves the transcripts to a later claim of the job recorded
+// before its attach reopened the mapping (denied: that attach re-admits the book
+// it read cancelled, its stages' transcripts counted done); the claim's own end
+// purges them (allowed).
+func TestPurgeAtEndKeepsALaterClaimsTranscripts(t *testing.T) {
+	t.Parallel()
+	db, err := store.Open(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	ctx := context.Background()
+	root := t.TempDir()
+	h := New(Options{DB: db, WorkRoot: root})
+	wd := filepath.Join(root, "reclaimed")
+	mustWrite(t, filepath.Join(wd, "transcripts-raw", "ch001.json"), "x")
+	b, err := db.CreateBook(ctx, store.NewBook{SourcePath: "/lib/reclaimed", WorkDir: wd, Title: "reclaimed"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = db.SetBookState(ctx, b.ID, "fact_pass", "failed", "cancelled by user", "")
+	if err := db.RecordClaim(ctx, store.ServerJob{ID: 1, Kind: Kind, Attempt: 1}); err != nil {
+		t.Fatal(err)
+	}
+	_ = db.PutGenerateBook(ctx, store.GenerateBook{ServerJobID: 1, BookID: &b.ID, LibraryID: 1, RelPath: "reclaimed"})
+	if err := db.EndGenerateBook(ctx, 1, 1, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.RecordClaim(ctx, store.ServerJob{ID: 1, Kind: Kind, Attempt: 2}); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.purgeEnded(ctx, jobs.Job{ID: 1, Attempt: 1}, b.ID); err != nil || !present(wd) {
+		t.Fatalf("attempt 1's end purged the book attempt 2 follows: %v", err)
+	}
+	if err := h.purgeEnded(ctx, jobs.Job{ID: 1, Attempt: 2}, b.ID); err != nil || present(wd) {
+		t.Fatalf("attempt 2's own end: %v, present %v", err, present(wd))
 	}
 }
 
