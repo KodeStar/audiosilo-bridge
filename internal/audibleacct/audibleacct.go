@@ -686,11 +686,14 @@ func (m *Manager) Account(ctx context.Context, id string) (store.AudibleAccount,
 // reads refused. A sign-in again records itself on the server first, which
 // ends the account's refusal there, and only then seals and stores the new
 // sign-in here, so a job claimed in between still reads the old refusal and
-// would answer it, marking the account refused on the server again for a
-// sign-in it never used. A job reads the account with this before it says it
-// is refused: it then runs with the new sign-in (sealed by then too). Only a
-// refused account waits, for the change in flight, whose server call is
-// bounded by its request.
+// would answer it for a sign-in it never used: a sync's answer marks the
+// account refused on the server again, an import fails. A job reads the
+// account with this before it says it is refused: it then runs with the new
+// sign-in (sealed by then too). Only a refused account waits, for the change
+// in flight (any account's: finishMu is the Manager's), and the wait doesn't
+// follow ctx: it is bounded by the calls made under finishMu, each with its
+// own timeout (the link's request, Amazon's deregistration), which a failed
+// sign-in's rollback makes past its page's cancel.
 func (m *Manager) SettledAccount(ctx context.Context, id string) (store.AudibleAccount, error) {
 	a, err := m.Account(ctx, id)
 	if err != nil || a.RefusedAt == "" {

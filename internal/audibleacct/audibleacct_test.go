@@ -651,9 +651,24 @@ func TestMapHoldsTheAccountsLock(t *testing.T) {
 		mapped <- err
 	}()
 	held(t, "the remap")
-	// An account that isn't refused reads at once: nothing to wait for.
-	if got, err := e.m.SettledAccount(context.Background(), a.ID); err != nil || got.RefusedAt != "" {
-		t.Fatalf("settled, not refused = %+v, %v", got, err)
+	// An account that isn't refused reads at once: nothing to wait for. Read
+	// beside the test, so a read that waits fails it rather than hang it.
+	notRefused := make(chan error, 1)
+	go func() {
+		got, err := e.m.SettledAccount(context.Background(), a.ID)
+		if err == nil && got.RefusedAt != "" {
+			err = fmt.Errorf("refused: %+v", got)
+		}
+		notRefused <- err
+	}()
+	select {
+	case err := <-notRefused:
+		if err != nil {
+			t.Fatalf("settled, not refused = %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		release()
+		t.Fatal("SettledAccount of an account that isn't refused waited for the remap")
 	}
 	removed := make(chan error, 1)
 	go func() {

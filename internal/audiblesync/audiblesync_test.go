@@ -459,11 +459,6 @@ func TestSyncWaitsForASignInInFlight(t *testing.T) {
 			t.Fatalf("%s: a sync during a sign-in again = %+v, %v (settled %d, reads %d)", kind, res, err, e.accts.settled, e.accts.reads)
 		}
 	}
-	// An account that isn't refused reads once: no wait on a sign-in.
-	e := newEnv(t)
-	if _, err := e.runSync(t, params(t)); err != nil || e.accts.settled != 0 {
-		t.Fatalf("a signed-in account = %v (settled %d)", err, e.accts.settled)
-	}
 }
 
 // Denied: the params are read strictly (an unknown field, a bad account, a
