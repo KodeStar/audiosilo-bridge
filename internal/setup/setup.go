@@ -246,7 +246,7 @@ func Checklist(in Inputs) link.Setup {
 	agentDetail := in.Agent.Backend
 	switch {
 	case in.Agent.Available && in.Agent.Shared:
-		agentDetail = in.Agent.Backend + DetailAgentShared
+		agentDetail += DetailAgentShared
 	case in.Agent.Available:
 	case in.Agent.Refused:
 		agentDetail = firstNonEmpty(in.Agent.Detail, DetailAgentNoCredential)

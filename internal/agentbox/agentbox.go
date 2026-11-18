@@ -128,9 +128,8 @@ type Runner struct {
 	probing    atomic.Bool
 	// probes counts the probes in flight, for Wait.
 	probes sync.WaitGroup
-	// spoiled is who spoiled the last group probe while groupDenied or
-	// groupBlocked held (another uid claimed or answered it), nil once a
-	// probe gets the runner's own answer: Status says so (probe.go).
+	// spoiled is who spoiled the last group probe (probe.go), nil once a
+	// probe gets the runner's own answer: Status says so.
 	spoiled atomic.Pointer[probeSpoil]
 	// uid is the Bridge's own (effective) uid, and runnerUID the runner's as
 	// the staging volume shows it, pinned by the first live runner.json
@@ -381,7 +380,7 @@ func (r *Runner) runJob(ctx context.Context, req agent.Request, st Status, hande
 		// couldn't take: a volume that refused the group got the every-uid
 		// modes already, and an exit.json the job's own dir doesn't bear out
 		// must not turn the group off for the rest of the process.
-		borneOut := handed != nil && group != noGroup && groupErr == nil && r.deniedHere(ctx, root)
+		borneOut := handed != nil && group != noGroup && groupErr == nil && r.deniedHere(ctx, root, r.runnerUID.Load())
 		if err := ctx.Err(); err != nil {
 			return res, err
 		}
@@ -415,13 +414,13 @@ func (r *Runner) runJob(ctx context.Context, req agent.Request, st Status, hande
 // that the runner wrote it somewhere (trust.go): any uid can put a job dir of
 // its own making in the staging dir, with a credential the runner can't
 // delete, and move the exit.json the runner then writes into this one. So the
-// runner must have claimed this very job (claimedByRunner) and left the
+// runner (its uid) must have claimed this very job (claimedBy) and left the
 // credential in place, still so takeFor later: a runner that claimed the job
 // this instant takes the credential well within that, which a done marker put
 // there meanwhile by another uid would otherwise pass off as left.
-func (r *Runner) deniedHere(ctx context.Context, root *os.Root) bool {
+func (r *Runner) deniedHere(ctx context.Context, root *os.Root, runner int64) bool {
 	credential := filepath.Join(agentproto.CredentialDir, agentproto.CredentialFile)
-	if !agentproto.Exists(root, credential) || !r.claimedByRunner(root) {
+	if !agentproto.Exists(root, credential) || !claimedBy(root, runner) {
 		return false
 	}
 	select {

@@ -44,13 +44,7 @@ func (m *mappedRunner) fn(t *testing.T) func(job string) agentproto.Exit {
 			return agentproto.Exit{ExitCode: -1, CredentialDenied: true,
 				Error: "couldn't delete the Bridge's credential.json before the run: permission denied"}
 		}
-		name := filepath.Join(dir, agentproto.CredentialFile)
-		raw, err := os.ReadFile(name)
-		_ = os.Remove(name)
-		if err == nil {
-			_, err = agentproto.DecodeCredential(raw, "claude")
-		}
-		if err != nil {
+		if err := takeCredential(job); err != nil {
 			return agentproto.Exit{ExitCode: -1, Error: err.Error()}
 		}
 		m.mu.Lock()
@@ -62,16 +56,21 @@ func (m *mappedRunner) fn(t *testing.T) func(job string) agentproto.Exit {
 	}
 }
 
-// takeProbe is a runner's take of a probe, as agentrun's: the credential read
-// and deleted, then refused by DecodeCredential (it names the probe's kind).
-func takeProbe(job string) agentproto.Exit {
+// takeCredential takes job's credential as agentrun's runner does: read and
+// deleted, then decoded (a probe's is refused, naming its kind).
+func takeCredential(job string) error {
 	name := filepath.Join(job, agentproto.CredentialDir, agentproto.CredentialFile)
 	raw, err := os.ReadFile(name)
 	_ = os.Remove(name)
 	if err == nil {
 		_, err = agentproto.DecodeCredential(raw, agent.IDClaude)
 	}
-	return agentproto.Exit{ExitCode: -1, Error: err.Error()}
+	return err
+}
+
+// takeProbe is a runner's take of a probe: its credential taken and refused.
+func takeProbe(job string) agentproto.Exit {
+	return agentproto.Exit{ExitCode: -1, Error: takeCredential(job).Error()}
 }
 
 // The runner's refusal of a probe names the probe's kind, for either CLI:
@@ -253,9 +252,10 @@ func TestProbeOnlyWhenDue(t *testing.T) {
 // A probe ends the fallback whoever the volume shows the runner as: the id
 // mapping's fix gives the runner another uid there, which contests the pin
 // (trust.go), and both containers as one user never pin one; runner.json's
-// owner stands for the runner then (probeRunner) (allowed: the
-// take ends the fallback with the pin contested or never set; denied: a
-// runner still denied the group's file keeps it either way).
+// owner stands for the runner then (probeRunner), for its denial too, which
+// ends a spoiled probe's warning (allowed: the take ends the fallback with the
+// pin contested or never set; denied: a runner still denied the group's file
+// keeps it either way).
 func TestProbeEndsTheFallbackWithoutAPin(t *testing.T) {
 	t.Parallel()
 	for name, pinned := range map[string]int64{"contested": contestedUID, "unpinned": noUID} {
@@ -267,8 +267,9 @@ func TestProbeEndsTheFallbackWithoutAPin(t *testing.T) {
 			stop := (&fakeRunner{fn: m.fn(t)}).start(t, dir)
 			r.groupDenied.Store(true)
 			r.runnerUID.Store(pinned)
-			if got := r.probeGroup(context.Background()); got == probeTaken || !r.groupDenied.Load() {
-				t.Fatalf("probe while denied = %v, group denied %v", got, r.groupDenied.Load())
+			r.spoiled.Store(&probeSpoil{uid: 4242})
+			if got := r.probeGroup(context.Background()); got != probeDenied || !r.groupDenied.Load() || r.spoiled.Load() != nil {
+				t.Fatalf("probe while denied = %v, group denied %v, spoiled %+v", got, r.groupDenied.Load(), r.spoiled.Load())
 			}
 			m.deny.Store(false)
 			if got := r.probeGroup(context.Background()); got != probeTaken || r.groupDenied.Load() {

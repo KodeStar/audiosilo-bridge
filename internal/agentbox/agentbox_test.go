@@ -79,10 +79,12 @@ func mustWrite(t *testing.T, path, body string) {
 
 // fakeRunner plays the agent container: it claims the first job that appears,
 // runs fn on it (fn writes outputs and returns exit.json), then marks it done.
-// skipDone leaves it claimed and unfinished (a dead runner).
+// skipDone leaves it claimed and unfinished (a dead runner); noClaim answers
+// each job once with no claim of its own (fn makes any).
 type fakeRunner struct {
 	fn       func(job string) agentproto.Exit
 	skipDone bool
+	noClaim  bool
 	claimed  atomic.Int32
 }
 
@@ -106,7 +108,7 @@ func (f *fakeRunner) start(t *testing.T, dir string) func() {
 				if handled[e.Name()] || !agentproto.ValidJobID(e.Name()) || !present(job, agentproto.RequestFile) {
 					continue
 				}
-				if err := os.Mkdir(filepath.Join(job, agentproto.ClaimDir), 0o700); err != nil {
+				if !f.noClaim && os.Mkdir(filepath.Join(job, agentproto.ClaimDir), 0o700) != nil {
 					continue
 				}
 				// Run may remove claim before request.json while deleting the job.

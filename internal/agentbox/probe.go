@@ -70,11 +70,17 @@ const (
 )
 
 // probeSpoil is who spoiled the last group probe: the uid that claimed or
-// answered it, or known false when what is in its dir names no other uid (a
-// done with no claim, a credential gone before the runner read it).
-type probeSpoil struct {
-	uid   int
-	known bool
+// answered it, or noUID when what is in its dir names no other uid (a done
+// with no claim, a credential gone before the runner read it).
+type probeSpoil struct{ uid int }
+
+// spoiledBy is the probeSpoil for a file of uid's that isn't the runner's
+// (runner): no uid to name when it is the runner's own.
+func spoiledBy(uid, runner int) *probeSpoil {
+	if uid == runner {
+		return &probeSpoil{uid: noUID}
+	}
+	return &probeSpoil{uid: uid}
 }
 
 // holdsFallback reports whether a run's fallback from the group holds for the
@@ -118,21 +124,20 @@ func (r *Runner) Wait() { r.probes.Wait() }
 // group's file.
 func (r *Runner) probeGroup(ctx context.Context) probeOutcome {
 	out, spoil := r.probeJob(ctx)
+	if out == probeTaken || out == probeDenied || out == probeRefused {
+		// The runner's own answer: whatever spoiled an earlier probe didn't this one.
+		r.spoiled.Store(nil)
+	}
 	switch out {
 	case probeTaken:
 		denied, blocked := r.groupDenied.Swap(false), r.groupBlocked.Swap(nil)
 		r.volumeRefused.Store(false)
-		r.spoiled.Store(nil)
 		if denied || blocked != nil {
 			r.log.Info("agent container: the runner takes a file kept to the Bridge's group again, so a handed credential "+
 				"goes to that group alone from now on", "bridge_gid", r.gid)
 		}
 	case probeSpoiled:
 		r.noteSpoiled(spoil)
-	case probeDenied, probeRefused:
-		// A clean answer: whatever spoiled an earlier probe didn't this one.
-		r.spoiled.Store(nil)
-		fallthrough
 	default:
 		r.log.Debug("agent container: the group probe found the fallback still needed", "outcome", int(out))
 	}
@@ -148,7 +153,7 @@ func (r *Runner) noteSpoiled(s *probeSpoil) {
 		return
 	}
 	if prev := r.spoiled.Swap(s); prev != nil && *prev == *s {
-		r.log.Debug("agent container: the group probe was spoiled again", "uid", s.uid, "uid_known", s.known)
+		r.log.Debug("agent container: the group probe was spoiled again", "uid", s.uid)
 		return
 	}
 	held := "the handed credential stays readable by every uid on the staging volume until the runner takes it"
@@ -156,7 +161,7 @@ func (r *Runner) noteSpoiled(s *probeSpoil) {
 		held = "agent.require_group keeps the agent unavailable"
 	}
 	who := []any{"runner_uid", r.runnerUID.Load()}
-	if s.known {
+	if s.uid != noUID {
 		who = append(who, "uid", s.uid)
 	}
 	r.log.Warn("agent container: another uid than the runner's claimed or answered the group probe, or took its "+
@@ -171,8 +176,7 @@ func (r *Runner) probeJob(ctx context.Context) (probeOutcome, *probeSpoil) {
 	// in its dir) would otherwise hold probing, and so every later probe, for
 	// the rest of the process. The runner takes and refuses a probe at once,
 	// so the claim timeout and then staleFor are plenty.
-	stopping := ctx
-	ctx, cancel := context.WithTimeout(ctx, r.claimTimeout+r.staleFor)
+	bounded, cancel := context.WithTimeout(ctx, r.claimTimeout+r.staleFor)
 	defer cancel()
 	id, err := agentproto.NewJobID()
 	if err != nil {
@@ -213,8 +217,8 @@ func (r *Runner) probeJob(ctx context.Context) (probeOutcome, *probeSpoil) {
 	if err := openJob(root, agentproto.Request{Protocol: agentproto.Protocol, CLI: r.backend, TimeoutSeconds: 60}); err != nil {
 		return probeUnknown, nil
 	}
-	done, _ := r.wait(ctx, root, nil)
-	if stopping.Err() != nil {
+	done, _ := r.wait(bounded, root, nil)
+	if ctx.Err() != nil {
 		return probeUnknown, nil
 	}
 	runner, ok := r.probeRunner()
@@ -224,7 +228,7 @@ func (r *Runner) probeJob(ctx context.Context) (probeOutcome, *probeSpoil) {
 	if s := r.spoiler(root, runner); s != nil {
 		return probeSpoiled, s
 	}
-	if !done || ctx.Err() != nil {
+	if !done || bounded.Err() != nil {
 		return probeUnknown, nil
 	}
 	raw, err := agentproto.ReadRegular(root, agentproto.ExitFile, agentproto.MaxExitBytes)
@@ -241,7 +245,7 @@ func (r *Runner) probeJob(ctx context.Context) (probeOutcome, *probeSpoil) {
 	case ex.CredentialDenied:
 		// Believed as a run's denial is (trust.go): the runner's own exit.json,
 		// borne out by its claim and the file left in place.
-		if r.deniedHere(ctx, root) {
+		if r.deniedHere(bounded, root, int64(runner)) {
 			return probeDenied, nil
 		}
 	case !gone(root, credential):
@@ -257,7 +261,7 @@ func (r *Runner) probeJob(ctx context.Context) (probeOutcome, *probeSpoil) {
 	case ex.Unavailable:
 		// The runner found no credential to take: another uid in the group
 		// deleted it first, which would have passed for the runner's take.
-		return probeSpoiled, &probeSpoil{}
+		return probeSpoiled, &probeSpoil{uid: noUID}
 	}
 	return probeUnknown, nil
 }
@@ -303,9 +307,9 @@ func (r *Runner) spoiler(root *os.Root, runner int) *probeSpoil {
 		if !ok {
 			return nil
 		}
-		runnerClaimed = uid == runner && info.IsDir() && info.Mode().Perm()&0o022 == 0
+		runnerClaimed = runnersClaim(info, int64(runner))
 		if !runnerClaimed && uid != r.uid {
-			return &probeSpoil{uid: uid, known: uid != runner}
+			return spoiledBy(uid, runner)
 		}
 	}
 	for _, name := range []string{agentproto.ExitFile, agentproto.DoneFile} {
@@ -318,7 +322,7 @@ func (r *Runner) spoiler(root *os.Root, runner int) *probeSpoil {
 			return nil
 		}
 		if uid != runner || links != 1 || !runnerClaimed {
-			return &probeSpoil{uid: uid, known: uid != runner}
+			return spoiledBy(uid, runner)
 		}
 	}
 	return nil
