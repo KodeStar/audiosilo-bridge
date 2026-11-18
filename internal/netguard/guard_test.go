@@ -322,9 +322,13 @@ func TestFetchCutRetryKeepsTheLastFailure(t *testing.T) {
 	}))
 	defer server.Close()
 	c := localClient(t)
-	c.wait = Wait // the first retry waits about a second, past the deadline
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	// The caller's context ends during the first retry wait.
+	c.wait = func(ctx context.Context, _ time.Duration) error {
+		cancel()
+		return ctx.Err()
+	}
 	_, err := c.Fetch(ctx, Request{URL: server.URL + "/feed", MaxBytes: 100})
 	errorCode(t, err, "http_503")
 }
