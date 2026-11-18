@@ -2467,14 +2467,28 @@ internal/
             tagged tests run the whole life against the fake. Phase 4c: the refusal's kind is
             store.RefusalSignIn or RefusalDevice (Throttled reads the kind; ThrottledText is copy);
             Positions, ContentACR and SetPosition are the position sync's signed calls, which never
-            record a refusal. Deps: audible, link,
-            secrets, source, store.
+            record a refusal. SettledAccount is Account, read again under finishMu when it reads
+            refused: a sign-in again ends the refusal on the server before it stores the new
+            sign-in here, and a sync answering the old refusal in between would mark the account
+            refused again (an import would fail). A signed call's refusal waits the same way
+            (refused, under finishMu): it is retried once with the sign-in that replaced its
+            device, one stored meanwhile or storing itself then, so a poll claimed in that window
+            lists with the new sign-in. AwaitedAccount is the read under finishMu whatever the
+            account reads: for a job about to fail for an account it can't find or one mapped
+            elsewhere (NotHere: the poll, the import, the sync). finishMu is the Manager's, so
+            these waits follow the job's ctx (a one-slot channel, lockFinishCtx): a cancelled
+            job gives up with ctx.Err() rather than sit behind another account's slow sign-in
+            (its rollback deregisters past its page's cancel), holding nothing while it waits;
+            a refused call that gives up records nothing. Finish, Map and Remove wait as before.
+            Deps: audible, link, secrets, source, store.
   audiblejob/ Phase 4a: audible.poll (light lane; params {"account", "template"}
             strict (template, the account's path template, optional, <= 500
             bytes, the server's bound, bridge#47; an unknown field is refused); the server claims it with no
             library). Checks the account is this
             Bridge's and was mapped on the paired server (else fails asking to map
-            it again), lists the Audible library (a refusal is the account's, the
+            it again; an account that reads unknown or mapped elsewhere is read again
+            first with audibleacct AwaitedAccount, past a sign-in or mapping the server
+            has and this Bridge is still storing), lists the Audible library (a refusal is the account's, the
             job just fails) and appends Accounts.Preorders (never fails; a record
             with no title, a preorder not described yet, matches only by its ASIN
             and is never planned), reads the account's books library on the server page
@@ -2538,7 +2552,9 @@ internal/
             gate or the mapping check), download, decrypt, place, rescan, enrich.
             Checks the account (this Bridge's, mapped on this server, else
             unknown_account) and the library (the account's, a books one, mapped
-            AND writable at the mount in use, else not_writable). A mapping check
+            AND writable at the mount in use, else not_writable; an account that fails
+            either is read again first with audibleacct AwaitedAccount, as the poll's, past a
+            sign-in or mapping the server has and this Bridge is still storing). A mapping check
             not made yet for that mount is waited for (mappingPoll, 1 s), no park;
             an unwritable mapping refuses a NEW job at once, while a resumed job,
             and any job at the place step (checked again before the copy), parks
@@ -2553,8 +2569,10 @@ internal/
             same name), never no_rights; the account then reads refused, and every
             later import of it fails audible_refused at once, before the title read
             or a license (ThrottledText for a throttled account, else the sign-in
-            refusal's; the account read again first, since a sign-in may have ended it
-            while the job waited for the mapping), after a marker's rescan-only resume,
+            refusal's; the account read again first, with SettledAccount, since a sign-in may
+            have ended it while the job waited for the mapping, or be storing itself, and
+            checked as the first read is: none, another server's or another library's), after a
+            marker's rescan-only resume,
             until a sign-in again) and the destination (Destination, a wrapper over
             destination(), which also returns the plan's kind and siblings and
             which the poll's plans share: dest_path FIRST, the
@@ -2629,10 +2647,11 @@ internal/
             Result.SkippedPreorder, its waiting place forgotten) and the push's due skips it until then: the server lists
             a preorder fuzzy-matched to another edition, and Audible denies its content reference.
             audible.sync (light; params
-            link.AudibleSyncParams, strict): a device refusal fails audible_refused (the server stops
+            link.AudibleSyncParams, strict): the account read with audibleacct SettledAccount; a
+            device refusal fails audible_refused (the server stops
             queueing until a sign-in again maps the account), a sign-in refusal audible_sign_in (the
             server keeps queueing: the next poll Audible answers ends it), another server's or none
-            unknown_account; lists the titles (store.ListAudibleSync) first, then while sync_retry_at
+            unknown_account (read again first with AwaitedAccount, as the poll's); lists the titles (store.ListAudibleSync) first, then while sync_retry_at
             is ahead ends "waiting" without calling Audible; reads the push's rows, then lastpositions
             (in batches of 25 ASINs, split on 400/414, in a new random order each sync; a 429/503 waits Audible's Retry-After from when
             it came back, at least 2 min; a read Audible stops partway still syncs the places it gave,
@@ -2640,7 +2659,9 @@ internal/
             or within 5 s of the place last written (its echo), posts a listen of no length (from_pos =
             to_pos, started_at = ended_at = last_updated, start jump; id EventID: "aud-" + 32 hex of
             sha256(account|asin|position_ms|last_updated|kind|library_id|path), kind "" or "finish", so
-            a re-matched title's place is a new event) and a finish at the book's end (98%, or 3 min
+            a re-matched title's place is a new event; last_updated "" when Audible gave none, the form
+            the server re-derives to correct those places by the Bridge's sent_at, so TestEventID pins
+            its vectors) and a finish at the book's end (98%, or 3 min
             left past 90%), 200 a call; a place answered (not rejected) records heard_ms
             (store.AudibleHeard: it clears a last_ms written before the job began, and an applied one
             drops a place waiting from the row the push had then, or one not further on recorded since

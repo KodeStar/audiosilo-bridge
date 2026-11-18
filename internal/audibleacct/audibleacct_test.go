@@ -249,16 +249,52 @@ func mapping() Mapping {
 
 func (e *env) signIn(t *testing.T) store.AudibleAccount {
 	t.Helper()
-	st, err := e.m.Start("us")
-	if err != nil {
-		t.Fatal(err)
-	}
-	a, err := e.m.Finish(context.Background(), e.srv, "srv-1", Finish{Login: st.Login,
-		RedirectURL: "https://www.amazon.com/ap/maplanding?openid.oa2.authorization_code=" + stubCode, Mapping: mapping()})
+	a, err := e.trySignIn()
 	if err != nil {
 		t.Fatal(err)
 	}
 	return a
+}
+
+// trySignIn is signIn for a goroutine other than the test's.
+func (e *env) trySignIn() (store.AudibleAccount, error) {
+	st, err := e.m.Start("us")
+	if err != nil {
+		return store.AudibleAccount{}, err
+	}
+	return e.m.Finish(context.Background(), e.srv, "srv-1", Finish{Login: st.Login,
+		RedirectURL: "https://www.amazon.com/ap/maplanding?openid.oa2.authorization_code=" + stubCode, Mapping: mapping()})
+}
+
+// holdPut holds the next server PUT once it is reached, until release (or the
+// test's end, so a failed test leaves no call held): reached returns once a
+// goroutine's call is held there (what, in the failure).
+func (e *env) holdPut(t *testing.T) (reached func(what string), release func()) {
+	t.Helper()
+	entered, held := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	e.srv.onPut = func() { once.Do(func() { close(entered); <-held }) }
+	release = sync.OnceFunc(func() { close(held) })
+	t.Cleanup(release)
+	return func(what string) {
+		t.Helper()
+		select {
+		case <-entered:
+		case <-time.After(10 * time.Second):
+			t.Fatalf("%s never reached the server", what)
+		}
+	}, release
+}
+
+// replaceDevice seals c under a new device serial as account id's sign-in:
+// what a sign-in again stores, without its server call.
+func (e *env) replaceDevice(id string, c audible.Credentials, serial string) error {
+	c.DeviceSerial = serial
+	raw, err := c.Marshal()
+	if err != nil {
+		return err
+	}
+	return e.vault.Set(secrets.AudibleName(id), raw)
 }
 
 // noSecrets fails when any stub secret is anywhere under the data dir but the
@@ -616,22 +652,35 @@ func TestMapRecordsOnTheServerThenHere(t *testing.T) {
 // bridge#40: Map runs one at a time with a sign-in and a removal (finishMu):
 // a removal started while a remap waits on the server waits for it, rather
 // than forget the account between the server's record and this one.
+// SettledAccount of an account that isn't refused doesn't wait.
 func TestMapHoldsTheAccountsLock(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
 	a := e.signIn(t)
-	entered, release := make(chan struct{}), make(chan struct{})
-	var once sync.Once
-	e.srv.onPut = func() { once.Do(func() { close(entered); <-release }) }
+	reached, release := e.holdPut(t)
 	mapped := make(chan error, 1)
 	go func() {
 		_, err := e.m.Map(context.Background(), e.srv, "srv-1", a.ID, Mapping{UserID: 4, UserName: "Sam", LibraryID: 2, Policy: "manual"})
 		mapped <- err
 	}()
+	reached("the remap")
+	// An account that isn't refused reads at once: nothing to wait for. Read
+	// beside the test, so a read that waits fails it rather than hang it.
+	notRefused := make(chan error, 1)
+	go func() {
+		got, err := e.m.SettledAccount(context.Background(), a.ID)
+		if err == nil && got.RefusedAt != "" {
+			err = fmt.Errorf("refused: %+v", got)
+		}
+		notRefused <- err
+	}()
 	select {
-	case <-entered:
+	case err := <-notRefused:
+		if err != nil {
+			t.Fatalf("settled, not refused = %v", err)
+		}
 	case <-time.After(10 * time.Second):
-		t.Fatal("the remap never reached the server")
+		t.Fatal("SettledAccount of an account that isn't refused waited for the remap")
 	}
 	removed := make(chan error, 1)
 	go func() {
@@ -642,7 +691,7 @@ func TestMapHoldsTheAccountsLock(t *testing.T) {
 	if _, err := e.db.GetAudibleAccount(context.Background(), a.ID); err != nil {
 		t.Fatalf("the removal ran during the remap: %v", err)
 	}
-	close(release)
+	release()
 	if err := <-mapped; err != nil {
 		t.Fatalf("map = %v", err)
 	}
@@ -652,6 +701,220 @@ func TestMapHoldsTheAccountsLock(t *testing.T) {
 	if _, err := e.m.Account(context.Background(), a.ID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("the account is kept: %v", err)
 	}
+}
+
+// AwaitedAccount reads past a change in flight whatever the account reads: a
+// remap the server has and this Bridge hasn't stored yet is waited for, where
+// SettledAccount of an account that isn't refused answers the old mapping at
+// once (TestMapHoldsTheAccountsLock).
+func TestAwaitedAccountWaitsForAMappingInFlight(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	a := e.signIn(t)
+	reached, release := e.holdPut(t)
+	mapped := make(chan error, 1)
+	go func() {
+		_, err := e.m.Map(context.Background(), e.srv, "srv-1", a.ID, Mapping{UserID: 4, UserName: "Sam", LibraryID: 2, Policy: "manual"})
+		mapped <- err
+	}()
+	reached("the remap")
+	type read struct {
+		a   store.AudibleAccount
+		err error
+	}
+	awaited := make(chan read, 1)
+	go func() {
+		got, err := e.m.AwaitedAccount(context.Background(), a.ID)
+		awaited <- read{got, err}
+	}()
+	select {
+	case r := <-awaited:
+		t.Fatalf("answered during the remap: %+v, %v", r.a, r.err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	release()
+	if err := <-mapped; err != nil {
+		t.Fatalf("map = %v", err)
+	}
+	if r := <-awaited; r.err != nil || r.a.LibraryID != 2 || r.a.UserID != 4 {
+		t.Fatalf("awaited = %+v, %v (want the new mapping)", r.a, r.err)
+	}
+}
+
+// A sign-in again records itself on the server before it stores the new
+// sign-in here: SettledAccount reads past it (the account signed in, the new
+// device sealed), where Account, read in between, still answers the old
+// refusal. With nothing in flight it answers the refusal that stands.
+func TestSettledAccountWaitsForASignInInFlight(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	a := e.signIn(t)
+	first, _ := e.m.credentials(a.ID)
+	if err := e.db.RefuseAudibleAccount(context.Background(), a.ID, store.RefusalDevice, ThrottledText, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := e.m.SettledAccount(context.Background(), a.ID); err != nil || !Throttled(got) {
+		t.Fatalf("a refusal that stands = %+v, %v", got, err)
+	}
+
+	reached, release := e.holdPut(t)
+	signedIn := make(chan error, 1)
+	go func() {
+		_, err := e.trySignIn()
+		signedIn <- err
+	}()
+	reached("the sign-in again")
+	if got, err := e.m.Account(context.Background(), a.ID); err != nil || !Throttled(got) {
+		t.Fatalf("the window: Account = %+v, %v (want the old refusal)", got, err)
+	}
+	type read struct {
+		a      store.AudibleAccount
+		err    error
+		serial string // the device sealed as the read answers
+	}
+	settled := make(chan read, 1)
+	go func() {
+		got, err := e.m.SettledAccount(context.Background(), a.ID)
+		now, _ := e.m.credentials(a.ID)
+		settled <- read{got, err, now.DeviceSerial}
+	}()
+	select {
+	case r := <-settled:
+		t.Fatalf("SettledAccount answered during the sign-in: %+v, %v", r.a, r.err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	release()
+	if err := <-signedIn; err != nil {
+		t.Fatalf("sign-in again = %v", err)
+	}
+	r := <-settled
+	if r.err != nil || r.a.RefusedAt != "" {
+		t.Fatalf("settled = %+v, %v (want signed in)", r.a, r.err)
+	}
+	if r.serial == "" || r.serial == first.DeviceSerial {
+		t.Fatalf("the settled read came before the new device was sealed (device %q)", r.serial)
+	}
+}
+
+// finishMu is the Manager's: a job reading its account past another
+// account's change in flight waits for it, but gives up with ctx.Err() once
+// the job is cancelled, rather than sit behind a slow sign-in (its rollback
+// deregisters at Amazon past its page's cancel). AwaitedAccount, a refused
+// account's SettledAccount and a refused signed call (which then records
+// nothing) all give up; the change in flight finishes as it would.
+func TestAccountWaitsFollowTheJobsCtx(t *testing.T) {
+	t.Parallel()
+	for _, c := range []struct {
+		name   string
+		refuse bool // SettledAccount waits only for a refused account
+		wait   func(ctx context.Context, e *env, id string) error
+	}{
+		{"AwaitedAccount", false, func(ctx context.Context, e *env, id string) error {
+			_, err := e.m.AwaitedAccount(ctx, id)
+			return err
+		}},
+		{"SettledAccount", true, func(ctx context.Context, e *env, id string) error {
+			_, err := e.m.SettledAccount(ctx, id)
+			return err
+		}},
+		{"a refused call", false, func(ctx context.Context, e *env, id string) error {
+			_, err := e.m.Library(ctx, id)
+			return err
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			e := newEnv(t)
+			a := e.signIn(t)
+			if c.refuse {
+				if err := e.db.RefuseAudibleAccount(context.Background(), a.ID, store.RefusalSignIn, RefusedText, time.Now()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			e.svc.library = func(audible.Credentials) ([]source.Record, error) {
+				return nil, fmt.Errorf("%w (HTTP 401)", ErrRefused)
+			}
+			// Another Amazon account's sign-in holds finishMu.
+			e.svc.customer = "amzn1.account.OTHER"
+			reached, release := e.holdPut(t)
+			signedIn := make(chan error, 1)
+			go func() {
+				_, err := e.trySignIn()
+				signedIn <- err
+			}()
+			reached("the other account's sign-in")
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			waited := make(chan error, 1)
+			go func() { waited <- c.wait(ctx, e, a.ID) }()
+			select {
+			case err := <-waited:
+				t.Fatalf("answered during the other sign-in: %v", err)
+			case <-time.After(100 * time.Millisecond):
+			}
+			cancel()
+			select {
+			case err := <-waited:
+				if !errors.Is(err, context.Canceled) {
+					t.Fatalf("a cancelled wait = %v", err)
+				}
+			case <-time.After(10 * time.Second):
+				t.Fatal("a cancelled job kept waiting for another account's sign-in")
+			}
+			release()
+			if err := <-signedIn; err != nil {
+				t.Fatalf("the other sign-in = %v", err)
+			}
+			if got, _ := e.m.Account(context.Background(), a.ID); (got.RefusedAt != "") != c.refuse {
+				t.Fatalf("the refusal after the cancel: %+v", got)
+			}
+		})
+	}
+}
+
+// finishMu released unheld panics, as sync.Mutex's Unlock does, rather than
+// wait to take the next holder's slot; an ended ctx never takes it.
+func TestFinishMuGuards(t *testing.T) {
+	t.Parallel()
+	m := New(Options{})
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("releasing finishMu unheld didn't panic")
+			}
+		}()
+		m.unlockFinish()
+	}()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	// Ended before the wait, and ending as the wait starts: then select may
+	// take finishMu, which must be given back.
+	for i := range 200 {
+		c := ctx
+		if i%2 == 1 {
+			c = &endingCtx{Context: ctx}
+		}
+		if err := m.lockFinishCtx(c); !errors.Is(err, context.Canceled) {
+			t.Fatalf("an ended ctx = %v", err)
+		}
+	}
+	m.lockFinish()
+	m.unlockFinish()
+}
+
+// endingCtx is an ended ctx whose first Err still reads nil: a ctx that ends
+// between lockFinishCtx's check and its wait.
+type endingCtx struct {
+	context.Context
+	asked bool
+}
+
+func (c *endingCtx) Err() error {
+	if !c.asked {
+		c.asked = true
+		return nil
+	}
+	return c.Context.Err()
 }
 
 // bridge#40: a mapping that comes with no name for the person (the server's
@@ -840,13 +1103,7 @@ func TestLibraryAfterASignInAgainIsNoRefusal(t *testing.T) {
 			return []source.Record{{ASIN: "B0FAKE0001", Title: "One"}}, nil
 		}
 		// The sign-in again lands while this device's call is out.
-		next := c
-		next.DeviceSerial = "SERIAL-NEW"
-		raw, err := next.Marshal()
-		if err != nil {
-			return nil, err
-		}
-		if err := e.vault.Set(secrets.AudibleName(a.ID), raw); err != nil {
+		if err := e.replaceDevice(a.ID, c, "SERIAL-NEW"); err != nil {
 			return nil, err
 		}
 		return nil, fmt.Errorf("%w (HTTP 401)", ErrRefused)
@@ -860,31 +1117,107 @@ func TestLibraryAfterASignInAgainIsNoRefusal(t *testing.T) {
 	}
 }
 
-// A refusal whose device another sign-in again replaced by the time it would be
-// recorded (here: during the retry) isn't recorded on the account.
+// A poll whose device Audible refuses while a sign-in again is storing itself
+// (recorded on the server, the new device not sealed yet) waits for it and
+// lists the library with the new sign-in, rather than answer the refusal the
+// sign-in is ending.
+func TestLibraryDuringASignInAgainUsesTheNewDevice(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	a := e.signIn(t)
+	first, _ := e.m.credentials(a.ID)
+	e.svc.library = func(c audible.Credentials) ([]source.Record, error) {
+		if c.DeviceSerial == first.DeviceSerial {
+			return nil, fmt.Errorf("%w (HTTP 401)", ErrRefused)
+		}
+		return []source.Record{{ASIN: "B0FAKE0001", Title: "One"}}, nil
+	}
+	reached, release := e.holdPut(t)
+	signedIn := make(chan error, 1)
+	go func() {
+		_, err := e.trySignIn()
+		signedIn <- err
+	}()
+	reached("the sign-in again")
+	type listing struct {
+		recs []source.Record
+		err  error
+	}
+	listed := make(chan listing, 1)
+	go func() {
+		recs, err := e.m.Library(context.Background(), a.ID)
+		listed <- listing{recs, err}
+	}()
+	select {
+	case l := <-listed:
+		t.Fatalf("the listing answered during the sign-in: %v, %v", l.recs, l.err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	release()
+	if err := <-signedIn; err != nil {
+		t.Fatalf("sign-in again = %v", err)
+	}
+	if l := <-listed; l.err != nil || len(l.recs) != 1 {
+		t.Fatalf("library = %v, %v (want the new sign-in's listing)", l.recs, l.err)
+	}
+	if got, _ := e.m.Account(context.Background(), a.ID); got.RefusedAt != "" || got.LastError != "" {
+		t.Fatalf("marked refused: %+v", got)
+	}
+}
+
+// A refusal of a replaced device is tried again with the new sign-in, once: when
+// another sign-in again replaced that one too while the retry was out, its
+// refusal is answered and recorded on nothing (neither device is the
+// account's).
 func TestRefusalOfAReplacedDeviceIsNotRecorded(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
 	a := e.signIn(t)
+	changed := 0
+	e.m.o.OnChange = func() { changed++ }
 	calls := 0
 	e.svc.library = func(c audible.Credentials) ([]source.Record, error) {
 		calls++
-		next := c
-		next.DeviceSerial = fmt.Sprintf("SERIAL-NEW-%d", calls)
-		raw, err := next.Marshal()
-		if err != nil {
-			return nil, err
-		}
-		if err := e.vault.Set(secrets.AudibleName(a.ID), raw); err != nil {
+		if err := e.replaceDevice(a.ID, c, fmt.Sprintf("SERIAL-NEW-%d", calls)); err != nil {
 			return nil, err
 		}
 		return nil, fmt.Errorf("%w (HTTP 401)", ErrRefused)
 	}
 	if _, err := e.m.Library(context.Background(), a.ID); !errors.Is(err, ErrRefused) || calls != 2 {
-		t.Fatalf("library = %v (calls %d)", err, calls)
+		t.Fatalf("library = %v (calls %d, want the call and one retry)", err, calls)
 	}
-	if got, _ := e.m.Account(context.Background(), a.ID); got.RefusedAt != "" {
-		t.Fatalf("a replaced device's refusal was recorded: %+v", got)
+	if got, _ := e.m.Account(context.Background(), a.ID); got.RefusedAt != "" || changed != 0 {
+		t.Fatalf("a replaced device's refusal was recorded: %+v (changed %d)", got, changed)
+	}
+}
+
+// The retry's refusal is the account's when its device still is: Audible
+// refusing the sign-in that replaced the first is answered and recorded, as
+// any refusal of the current device (TestLibraryMarksARefusal), not tried a
+// third time.
+func TestRefusalOfTheNewDeviceIsRecorded(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	a := e.signIn(t)
+	first, _ := e.m.credentials(a.ID)
+	changed := 0
+	e.m.o.OnChange = func() { changed++ }
+	calls := 0
+	e.svc.library = func(c audible.Credentials) ([]source.Record, error) {
+		calls++
+		if c.DeviceSerial == first.DeviceSerial {
+			if err := e.replaceDevice(a.ID, c, "SERIAL-NEW"); err != nil {
+				return nil, err
+			}
+		}
+		return nil, fmt.Errorf("%w (HTTP 401)", ErrRefused)
+	}
+	if _, err := e.m.Library(context.Background(), a.ID); !errors.Is(err, ErrRefused) || calls != 2 {
+		t.Fatalf("library = %v (calls %d, want the call and one retry)", err, calls)
+	}
+	got, _ := e.m.Account(context.Background(), a.ID)
+	if got.RefusedAt == "" || got.LastError != RefusedText || got.RefusalKind != store.RefusalSignIn || changed != 1 {
+		t.Fatalf("the new device's refusal = %+v (changed %d)", got, changed)
 	}
 }
 

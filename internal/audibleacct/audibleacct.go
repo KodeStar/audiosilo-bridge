@@ -286,12 +286,49 @@ type Manager struct {
 	// otherwise both find no account and make two (the later now replaces the
 	// earlier, as any sign-in again does; the store's unique index on
 	// (customer_hash, marketplace) backs it). Held across the server call;
-	// sign-ins are rare. Remove takes it while it forgets locally, so a sign-in
-	// again finishing meanwhile never stores the account back after it; Map
-	// takes it throughout, so a remap and a sign-in again of the same account
-	// can't record their mappings in one order on the server and the other
-	// here.
-	finishMu sync.Mutex
+	// sign-ins are rare. SettledAccount, AwaitedAccount and a signed call's
+	// refusal (refused) take it to read past a sign-in in flight, and give up
+	// waiting when their job's ctx ends (lockFinishCtx): it is the Manager's,
+	// so another account's slow sign-in would otherwise keep a cancelled job.
+	// Remove takes it while it forgets locally, so a sign-in again finishing
+	// meanwhile never stores the account back after it; Map takes it
+	// throughout, so a remap and a sign-in again of the same account can't
+	// record their mappings in one order on the server and the other here.
+	// A one-slot channel rather than a sync.Mutex, so a wait can follow ctx.
+	finishMu chan struct{}
+}
+
+// lockFinish takes finishMu.
+func (m *Manager) lockFinish() { m.finishMu <- struct{}{} }
+
+// lockFinishCtx takes finishMu, or gives up with ctx.Err() once ctx ends
+// (an ended ctx never takes it: select picks either ready case at random, so
+// a take that raced the end is given back).
+func (m *Manager) lockFinishCtx(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	select {
+	case m.finishMu <- struct{}{}:
+		if err := ctx.Err(); err != nil {
+			m.unlockFinish()
+			return err
+		}
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// unlockFinish releases finishMu. Releasing it unheld panics, as
+// sync.Mutex's Unlock does: a blocking receive would instead wait to take
+// the next holder's slot, leaving finishMu free while that holder runs.
+func (m *Manager) unlockFinish() {
+	select {
+	case <-m.finishMu:
+	default:
+		panic("audibleacct: unlock of unlocked finishMu")
+	}
 }
 
 // login is a sign-in in progress: what Register needs once the admin pastes
@@ -317,7 +354,7 @@ func New(o Options) *Manager {
 	if o.Service == nil {
 		o.Service = Audible(audible.WithLogger(o.Log))
 	}
-	return &Manager{o: o, logins: map[string]login{}}
+	return &Manager{o: o, logins: map[string]login{}, finishMu: make(chan struct{}, 1)}
 }
 
 // Started is a sign-in waiting for the admin: open URL at Amazon, then paste
@@ -482,8 +519,8 @@ func (m *Manager) Finish(ctx context.Context, srv Server, serverID string, f Fin
 		}
 	}
 	// See finishMu: held from the lookup until the row is stored.
-	m.finishMu.Lock()
-	unlock := sync.OnceFunc(m.finishMu.Unlock)
+	m.lockFinish()
+	unlock := sync.OnceFunc(m.unlockFinish)
 	defer unlock()
 	hash := customerHash(creds.CustomerID)
 	prev, perr := m.o.DB.AudibleAccountByCustomer(ctx, hash, l.mp.Code)
@@ -598,8 +635,8 @@ func (m *Manager) Map(ctx context.Context, srv Server, serverID, id string, mp M
 	if srv == nil {
 		return store.AudibleAccount{}, ErrNotPaired
 	}
-	m.finishMu.Lock()
-	unlock := sync.OnceFunc(m.finishMu.Unlock)
+	m.lockFinish()
+	unlock := sync.OnceFunc(m.unlockFinish)
 	defer unlock()
 	a, err := m.Account(ctx, id)
 	if err != nil {
@@ -630,8 +667,8 @@ func (m *Manager) Map(ctx context.Context, srv Server, serverID, id string, mp M
 // sign-in is the only way to deregister the device.
 func (m *Manager) Remove(ctx context.Context, srv Server, id string) (warning string, err error) {
 	// See finishMu: held until the account is forgotten here.
-	m.finishMu.Lock()
-	unlock := sync.OnceFunc(m.finishMu.Unlock)
+	m.lockFinish()
+	unlock := sync.OnceFunc(m.unlockFinish)
 	defer unlock()
 	if _, err := m.Account(ctx, id); err != nil {
 		return "", err
@@ -678,6 +715,51 @@ func (m *Manager) Account(ctx context.Context, id string) (store.AudibleAccount,
 		return store.AudibleAccount{}, ErrNotFound
 	}
 	return a, err
+}
+
+// SettledAccount is Account, read again once no sign-in, mapping or removal
+// is in flight (each holds finishMu until its row is stored) when the account
+// reads refused. A sign-in again records itself on the server first, which
+// ends the account's refusal there, and only then seals and stores the new
+// sign-in here, so a job claimed in between still reads the old refusal and
+// would answer it for a sign-in it never used: a sync's answer marks the
+// account refused on the server again, an import fails. A job reads the
+// account with this before it says it is refused: it then runs with the new
+// sign-in (sealed by then too). Only a refused account waits, for the change
+// in flight (any account's: finishMu is the Manager's, so a failed sign-in's
+// rollback, Amazon's deregistration past its page's cancel, can hold it a
+// while). The wait follows ctx: a job cancelled meanwhile gives up with
+// ctx.Err(), holding nothing of the Manager's while it waits.
+func (m *Manager) SettledAccount(ctx context.Context, id string) (store.AudibleAccount, error) {
+	a, err := m.Account(ctx, id)
+	if err != nil || a.RefusedAt == "" {
+		return a, err
+	}
+	return m.AwaitedAccount(ctx, id)
+}
+
+// AwaitedAccount is Account read once no sign-in, mapping or removal is in
+// flight, whatever the account reads now (SettledAccount's wait: ctx.Err()
+// once ctx ends first). A sign-in and a mapping record themselves on the
+// server before they store themselves here, so a job the server queued in
+// between finds no account yet, or the mapping being replaced. A job reads
+// the account with this before it fails for either (NotHere), never to begin
+// with: every job would wait for any account's sign-in.
+func (m *Manager) AwaitedAccount(ctx context.Context, id string) (store.AudibleAccount, error) {
+	if err := m.lockFinishCtx(ctx); err != nil {
+		return store.AudibleAccount{}, err
+	}
+	defer m.unlockFinish()
+	return m.Account(ctx, id)
+}
+
+// NotHere reports whether an account read (a, err) found no account, or one
+// mapped on another server than serverID: what a sign-in or a mapping the
+// server already recorded reads until it stores itself here, so a job reads
+// such an account again with AwaitedAccount before it fails for it (and an
+// account mapped here never waits).
+func NotHere(a store.AudibleAccount, err error, serverID string) bool {
+	return errors.Is(err, ErrNotFound) || (err == nil && a.OnOtherServer(serverID))
 }
 
 // credentials opens account id's sealed sign-in.
@@ -794,11 +876,12 @@ func (m *Manager) open(id string) (audible.Credentials, error) {
 // signed runs one signed call with account id's sign-in. A refusal (ErrRefused
 // from the Service, or a license denied to the device: audible.ErrThrottled)
 // is tried once more with a newer sign-in when one replaced the device
-// meanwhile, else it marks the account refused (a sign-in refusal with
-// RefusedText, or a device one with ThrottledText), runs OnChange and answers
-// ErrRefused, or the throttled denial as it came. A call Audible answers ends
-// a sign-in refusal recorded before (a transient 401/403), never a device's
-// (only a sign-in again ends it).
+// meanwhile, or is storing itself (refused waits for it), else it marks the
+// account refused (a sign-in refusal with RefusedText, or a device one with
+// ThrottledText), runs OnChange and answers ErrRefused, or the throttled
+// denial as it came (ctx.Err() when the job is cancelled while refused
+// waits). A call Audible answers ends a sign-in refusal recorded before (a
+// transient 401/403), never a device's (only a sign-in again ends it).
 func (m *Manager) signed(ctx context.Context, id string, call func(audible.Credentials) error) error {
 	creds, err := m.open(id)
 	if err != nil {
@@ -806,45 +889,69 @@ func (m *Manager) signed(ctx context.Context, id string, call func(audible.Crede
 	}
 	err = call(creds)
 	if refusal(err) {
-		// A sign-in that finished meanwhile deregistered the device this call
-		// used: call again with the new one rather than mark it refused.
-		if fresh, ferr := m.credentials(id); ferr == nil && fresh.DeviceSerial != creds.DeviceSerial {
+		// A sign-in again deregistered the device this call used, or is ending
+		// the refusal it met: call again with the new one rather than answer
+		// for the old. Once: a device replaced again while that call was out
+		// answers its refusal, recorded on nothing.
+		fresh, replaced, werr := m.refused(ctx, id, creds, err)
+		if werr != nil {
+			return werr
+		}
+		if replaced {
 			creds = fresh
-			err = call(fresh)
+			if err = call(creds); refusal(err) {
+				_, replaced, werr := m.refused(ctx, id, creds, err)
+				if werr != nil {
+					return werr
+				}
+				if replaced {
+					m.o.Log.Warn("audible: Audible refused a device that a sign-in again replaced meanwhile", "account", id, "err", err)
+				}
+			}
 		}
 	}
-	if !refusal(err) {
-		if err == nil {
-			m.accepted(ctx, id)
-		}
-		return err
+	switch {
+	case err == nil:
+		m.accepted(ctx, id)
+	case errors.Is(err, ErrRefused) && !errors.Is(err, audible.ErrThrottled):
+		return ErrRefused
 	}
-	throttled := errors.Is(err, audible.ErrThrottled)
+	return err
+}
+
+// refused records err, Audible's refusal of account id's device creds, on the
+// account and runs OnChange, unless a sign-in again replaced that device: then
+// it records nothing and answers the new sign-in (replaced). It reads the
+// account's device under finishMu (held by a sign-in from its lookup until
+// its row is stored), so it waits for a sign-in in flight, and one that stored
+// a new device is never marked refused for the old one (a ThrottledText
+// refusal outlives polls). A job cancelled while it waits records nothing and
+// answers ctx.Err() (werr): the next call meets the refusal again.
+func (m *Manager) refused(ctx context.Context, id string, creds audible.Credentials, err error) (fresh audible.Credentials, replaced bool, werr error) {
 	kind, why, msg := store.RefusalSignIn, RefusedText, "audible: Audible refused the account's sign-in"
-	if throttled {
+	if errors.Is(err, audible.ErrThrottled) {
 		kind, why, msg = store.RefusalDevice, ThrottledText, "audible: Audible refused the account's device a license: it must sign in again"
 	}
-	// Under finishMu (held by a sign-in from its lookup until its row is
-	// stored), and only while the refused device is still the account's: a
-	// sign-in again that stored a new device after the check above must not
-	// be marked refused for the old one (a ThrottledText refusal outlives polls).
-	m.finishMu.Lock()
-	cur, cerr := m.credentials(id)
-	stale := cerr == nil && cur.DeviceSerial != creds.DeviceSerial
-	if !stale {
-		if rerr := m.o.DB.RefuseAudibleAccount(context.WithoutCancel(ctx), id, kind, why, m.o.Now()); rerr != nil {
-			m.o.Log.Warn("audible: recording a refusal failed", "account", id, "err", rerr)
+	if werr := m.lockFinishCtx(ctx); werr != nil {
+		return audible.Credentials{}, false, werr
+	}
+	func() {
+		defer m.unlockFinish()
+		var cerr error
+		fresh, cerr = m.credentials(id)
+		replaced = cerr == nil && fresh.DeviceSerial != creds.DeviceSerial
+		if !replaced {
+			if rerr := m.o.DB.RefuseAudibleAccount(context.WithoutCancel(ctx), id, kind, why, m.o.Now()); rerr != nil {
+				m.o.Log.Warn("audible: recording a refusal failed", "account", id, "err", rerr)
+			}
 		}
+	}()
+	if replaced {
+		return fresh, true, nil
 	}
-	m.finishMu.Unlock()
-	m.o.Log.Warn(msg, "account", id, "err", err, "replaced", stale)
-	if !stale {
-		m.o.OnChange()
-	}
-	if throttled {
-		return err
-	}
-	return ErrRefused
+	m.o.Log.Warn(msg, "account", id, "err", err)
+	m.o.OnChange()
+	return audible.Credentials{}, false, nil
 }
 
 // accepted ends account id's sign-in refusal (store.RefusalSignIn) after Audible

@@ -44,8 +44,13 @@ const (
 type stubImportAccounts struct {
 	mu       sync.Mutex
 	acct     store.AudibleAccount
-	acctThen []store.AudibleAccount // each Account read after the first answers the next
+	acctThen []store.AudibleAccount // each SettledAccount read of a refused account answers the next (Account the current one)
 	acctErr  error
+	// stored is the account once the change in flight is stored: what an
+	// AwaitedAccount read answers and leaves (nil: nothing was in flight).
+	// awaits counts those reads.
+	stored   *store.AudibleAccount
+	awaits   int
 	title    source.Record
 	titleErr error
 	licErr   []error // popped per License call
@@ -67,11 +72,27 @@ func (s *stubImportAccounts) Account(_ context.Context, id string) (store.Audibl
 	if id != s.acct.ID {
 		return store.AudibleAccount{}, audibleacct.ErrNotFound
 	}
-	a := s.acct
+	return s.acct, nil
+}
+
+// SettledAccount is the manager's: only an account that reads refused is read
+// again (acctThen: what its wait let through).
+func (s *stubImportAccounts) SettledAccount(ctx context.Context, id string) (store.AudibleAccount, error) {
+	if a, err := s.Account(ctx, id); err != nil || a.RefusedAt == "" {
+		return a, err
+	}
 	if len(s.acctThen) > 0 {
 		s.acct, s.acctThen = s.acctThen[0], s.acctThen[1:]
 	}
-	return a, nil
+	return s.Account(ctx, id)
+}
+
+func (s *stubImportAccounts) AwaitedAccount(ctx context.Context, id string) (store.AudibleAccount, error) {
+	s.awaits++
+	if s.stored != nil {
+		s.acct, s.stored = *s.stored, nil
+	}
+	return s.Account(ctx, id)
 }
 
 func (s *stubImportAccounts) Title(context.Context, string, string) (source.Record, error) {
@@ -686,7 +707,9 @@ func TestImportOfARefusedAccountFailsFast(t *testing.T) {
 		})
 	}
 	// A sign-in again that ended the refusal after the job's first read
-	// (while it waited for the library's mapping) imports.
+	// (while it waited for the library's mapping), or that the read again
+	// waited for (SettledAccount: recorded on the server, not yet here),
+	// imports.
 	e := newImportEnv(t)
 	signedIn := e.accts.acct
 	e.accts.acct.RefusedAt, e.accts.acct.LastError, e.accts.acct.RefusalKind = "2026-11-03T10:00:00Z", audibleacct.ThrottledText, store.RefusalDevice
@@ -694,11 +717,74 @@ func TestImportOfARefusedAccountFailsFast(t *testing.T) {
 	if _, err := e.run(context.Background(), e.params(nil)); err != nil || e.accts.licenses != 1 {
 		t.Fatalf("an account signed in again meanwhile: %v (licenses %d)", err, e.accts.licenses)
 	}
+	// Denied: what the read again waited for removed the account or mapped it
+	// elsewhere, checked as the first read is.
+	for _, c := range []struct {
+		name string
+		then func(*store.AudibleAccount)
+		code string
+	}{
+		{"removed", func(a *store.AudibleAccount) { a.ID = "acct0002" }, CodeUnknownAccount},
+		{"another server's", func(a *store.AudibleAccount) { a.ServerID = "srv0" }, CodeUnknownAccount},
+		{"another library", func(a *store.AudibleAccount) { a.LibraryID = 2 }, CodeNotWritable},
+	} {
+		e := newImportEnv(t)
+		then := e.accts.acct
+		c.then(&then)
+		e.accts.acct.RefusedAt, e.accts.acct.LastError, e.accts.acct.RefusalKind = "2026-11-03T10:00:00Z", audibleacct.ThrottledText, store.RefusalDevice
+		e.accts.acctThen = []store.AudibleAccount{then}
+		_, err := e.run(context.Background(), e.params(nil))
+		var f *Failure
+		if !errors.As(err, &f) || f.Code != c.code || e.accts.licenses != 0 {
+			t.Fatalf("%s while the read again waited: %v (licenses %d)", c.name, err, e.accts.licenses)
+		}
+	}
 
 	e = newImportEnv(t)
 	e.accts.acct.LastError = "could not list the Audible library: connection reset"
 	if _, err := e.run(context.Background(), e.params(nil)); err != nil || e.accts.licenses != 1 {
 		t.Fatalf("an account with a poll error: %v (licenses %d)", err, e.accts.licenses)
+	}
+}
+
+// A sign-in or a mapping records itself on the server, which may queue an
+// import, before it stores itself here: an import claimed in between reads no
+// account yet, or one mapped on another server or to another library. It
+// reads the account again past the change in flight (AwaitedAccount) and
+// imports, rather than fail; an account mapped here never waits, and one
+// still not importable after the wait fails as before.
+func TestImportReadsPastAChangeInFlight(t *testing.T) {
+	cases := []struct {
+		name string
+		now  func(*store.AudibleAccount) // the account as the import first reads it
+		code string                      // the failure when nothing was in flight
+	}{
+		{"a first sign-in", func(a *store.AudibleAccount) { a.ID = "acct0002" }, CodeUnknownAccount},
+		{"a mapping from another server", func(a *store.AudibleAccount) { a.ServerID = "srv0" }, CodeUnknownAccount},
+		{"a mapping to another library", func(a *store.AudibleAccount) { a.LibraryID = 2 }, CodeNotWritable},
+	}
+	for _, c := range cases {
+		e := newImportEnv(t)
+		stored := e.accts.acct
+		c.now(&e.accts.acct)
+		e.accts.stored = &stored
+		if _, err := e.run(context.Background(), e.params(nil)); err != nil || e.accts.awaits != 1 || e.accts.licenses != 1 {
+			t.Fatalf("%s: an import during it = %v (read again %d times, licenses %d)", c.name, err, e.accts.awaits, e.accts.licenses)
+		}
+	}
+	// Denied: still not importable once nothing is in flight.
+	for _, c := range cases {
+		e := newImportEnv(t)
+		c.now(&e.accts.acct)
+		_, err := e.run(context.Background(), e.params(nil))
+		var f *Failure
+		if !errors.As(err, &f) || f.Code != c.code || e.accts.awaits != 1 || e.accts.licenses != 0 {
+			t.Fatalf("%s with nothing in flight: %v (read again %d times, licenses %d)", c.name, err, e.accts.awaits, e.accts.licenses)
+		}
+	}
+	e := newImportEnv(t)
+	if _, err := e.run(context.Background(), e.params(nil)); err != nil || e.accts.awaits != 0 {
+		t.Fatalf("an account mapped here = %v (read again %d times)", err, e.accts.awaits)
 	}
 }
 

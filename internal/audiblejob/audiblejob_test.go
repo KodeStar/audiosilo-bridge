@@ -31,6 +31,11 @@ type stubAccounts struct {
 	pre    []source.Record
 	polled []int
 	failed []string
+	// stored is the account once the change in flight is stored: what an
+	// AwaitedAccount read answers and leaves (nil: nothing was in flight).
+	// awaits counts those reads.
+	stored *store.AudibleAccount
+	awaits int
 }
 
 func (s *stubAccounts) Account(_ context.Context, id string) (store.AudibleAccount, error) {
@@ -38,6 +43,13 @@ func (s *stubAccounts) Account(_ context.Context, id string) (store.AudibleAccou
 		return store.AudibleAccount{}, audibleacct.ErrNotFound
 	}
 	return s.acct, nil
+}
+func (s *stubAccounts) AwaitedAccount(ctx context.Context, id string) (store.AudibleAccount, error) {
+	s.awaits++
+	if s.stored != nil {
+		s.acct, s.stored = *s.stored, nil
+	}
+	return s.Account(ctx, id)
 }
 func (s *stubAccounts) Library(context.Context, string) ([]source.Record, error) {
 	return s.recs, s.libErr
@@ -181,6 +193,43 @@ func run(t *testing.T, h *Handler, account string) (Result, error) {
 		return Result{}, err
 	}
 	return out.(Result), nil
+}
+
+// A sign-in and a mapping record themselves on the server before they store
+// themselves here. A poll the server queued in between reads the account
+// again once the change is stored, rather than fail for an account this Bridge
+// doesn't have yet or for the mapping being replaced; a poll that finds its
+// account never waits.
+func TestPollReadsPastAChangeInFlight(t *testing.T) {
+	t.Parallel()
+	for _, c := range []struct {
+		name string
+		now  store.AudibleAccount // as the poll first reads it
+	}{
+		{"a first sign-in", store.AudibleAccount{}},
+		{"a mapping from another server", store.AudibleAccount{ID: "acct0001", ServerID: "srv-2", LibraryID: 9}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			fs, accts := backfill(1)
+			stored := accts.acct
+			accts.acct, accts.stored = c.now, &stored
+			h := setup(t, fs, accts)
+			res, err := run(t, h, "acct0001")
+			if err != nil || res.Matched != 1 || accts.awaits != 1 || len(accts.failed) != 0 {
+				t.Fatalf("poll = %+v, %v (read again %d times, failed %v)", res, err, accts.awaits, accts.failed)
+			}
+			// The stored mapping's library, not the replaced one's.
+			if len(fs.enrichedNow()) != 1 {
+				t.Fatalf("enriched = %v", fs.enrichedNow())
+			}
+		})
+	}
+	fs, accts := backfill(1)
+	h := setup(t, fs, accts)
+	if _, err := run(t, h, "acct0001"); err != nil || accts.awaits != 0 {
+		t.Fatalf("a poll of an account mapped here = %v (read again %d times)", err, accts.awaits)
+	}
 }
 
 func TestPollMatchesReportsAndEnriches(t *testing.T) {
@@ -404,11 +453,13 @@ func TestPollRefusals(t *testing.T) {
 			t.Fatalf("%s accepted", raw)
 		}
 	}
-	// Mapped on another server.
+	// Mapped on another server: read again past a change in flight, and
+	// still so.
 	accts.libErr = nil
 	accts.acct.ServerID = "srv-2"
-	if _, err := run(t, h, "acct0001"); err == nil || !strings.Contains(err.Error(), "another server") {
-		t.Fatalf("another server = %v", err)
+	awaits := accts.awaits
+	if _, err := run(t, h, "acct0001"); err == nil || !strings.Contains(err.Error(), "another server") || accts.awaits != awaits+1 {
+		t.Fatalf("another server = %v (read again %d times)", err, accts.awaits-awaits)
 	}
 	// The server lost the account.
 	accts.acct.ServerID = "srv-1"

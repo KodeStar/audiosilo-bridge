@@ -39,6 +39,10 @@ type stubAccounts struct {
 	setErr    error
 	wrongACR  error  // the answer to a write with another content reference
 	onSet     func() // runs as a write reaches Audible (outside the lock)
+	settled   int    // SettledAccount reads of a refused account (its wait)
+	onSettle  func() // runs as SettledAccount waits (a sign-in in flight storing itself)
+	awaits    int    // AwaitedAccount reads (its wait)
+	onAwait   func() // runs as AwaitedAccount waits (a sign-in or mapping in flight storing itself)
 }
 
 func (s *stubAccounts) Account(ctx context.Context, id string) (store.AudibleAccount, error) {
@@ -47,6 +51,31 @@ func (s *stubAccounts) Account(ctx context.Context, id string) (store.AudibleAcc
 		return a, audibleacct.ErrNotFound
 	}
 	return a, err
+}
+
+func (s *stubAccounts) SettledAccount(ctx context.Context, id string) (store.AudibleAccount, error) {
+	if a, err := s.Account(ctx, id); err != nil || a.RefusedAt == "" {
+		return a, err
+	}
+	s.mu.Lock()
+	s.settled++
+	hook := s.onSettle
+	s.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
+	return s.Account(ctx, id)
+}
+
+func (s *stubAccounts) AwaitedAccount(ctx context.Context, id string) (store.AudibleAccount, error) {
+	s.mu.Lock()
+	s.awaits++
+	hook := s.onAwait
+	s.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
+	return s.Account(ctx, id)
 }
 
 func (s *stubAccounts) Accounts(ctx context.Context) ([]store.AudibleAccount, error) {
@@ -354,6 +383,21 @@ func TestEventID(t *testing.T) {
 			t.Fatal("two different places share an id")
 		}
 	}
+	// A place Audible sent no last_updated for hashes an empty last_updated.
+	// The server depends on this form: it re-derives these ids to find the
+	// places the Bridge dated on its own clock and corrects them by its
+	// sent_at (audiosilo-server catalog.audibleUndatedID, CROSS-REPO §23), with
+	// these same vectors in its TestAudibleUndatedID. A change to the formula
+	// must change both.
+	book := link.AudibleSyncTitle{ASIN: "B000000001", LibraryID: 1, Path: "Author/Book"}
+	for kind, want := range map[string]string{
+		"":               "aud-bcba95b12c2bb665a13b0dcc0cb5ddac",
+		link.EventFinish: "aud-71841ac49adbb0c3fce441ddea6c829a",
+	} {
+		if got := EventID("acct0001", book, audible.Position{PositionMs: 500000}, kind); got != want {
+			t.Errorf("undated, kind %q: id %s, want %s", kind, got, want)
+		}
+	}
 }
 
 // Denied: a refused account (the "Sign in again" state) doesn't sync, failing
@@ -401,6 +445,74 @@ func TestSyncRefusedAccount(t *testing.T) {
 	e.o.ServerID = func() string { return "srv-2" }
 	if _, err := e.runSync(t, params(t)); !errors.As(err, &f) || f.Code != CodeUnknownAccount {
 		t.Fatalf("another server = %v", err)
+	}
+}
+
+// A sync claimed while a sign-in again is finishing (the server already
+// recorded it, so it ended the refusal there, but the new sign-in isn't stored
+// here yet) reads the account again past it and syncs with the new sign-in:
+// answering the old device refusal would mark the account refused again on
+// the server. A sign-in refusal waits the same way. A refusal that stands
+// once nothing is in flight is still answered (TestSyncRefusedAccount).
+func TestSyncWaitsForASignInInFlight(t *testing.T) {
+	for _, kind := range []string{store.RefusalDevice, store.RefusalSignIn} {
+		e := newEnv(t)
+		e.accts.places["B000000001"] = audible.Position{PositionMs: 60_000, LastUpdated: e.now}
+		if err := e.db.RefuseAudibleAccount(context.Background(), acctID, kind, "refused", e.now); err != nil {
+			t.Fatal(err)
+		}
+		signedIn := e.account(t)
+		e.accts.onSettle = func() {
+			if err := e.db.SignInAudibleAccount(context.Background(), signedIn, e.now); err != nil {
+				t.Error(err)
+			}
+		}
+		res, err := e.runSync(t, params(t, title("B000000001", "A/One", 3600)))
+		if err != nil || res.Applied != 1 || e.accts.settled != 1 || e.accts.reads != 1 {
+			t.Fatalf("%s: a sync during a sign-in again = %+v, %v (settled %d, reads %d)", kind, res, err, e.accts.settled, e.accts.reads)
+		}
+	}
+}
+
+// A sign-in or a mapping records itself on the server, which may queue a
+// sync, before it stores itself here: a sync claimed in between reads no
+// account yet, or one mapped on another server. It reads the account again
+// past the change in flight (AwaitedAccount) and syncs, rather than fail
+// unknown_account; an account mapped here never waits, and one still not here
+// after the wait fails (TestSyncRefusedAccount).
+func TestSyncReadsPastAChangeInFlight(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		now  func(e *env, a store.AudibleAccount) error // the account as the sync first reads it
+	}{
+		{"a first sign-in", func(e *env, a store.AudibleAccount) error {
+			return e.db.DeleteAudibleAccount(context.Background(), a.ID)
+		}},
+		{"a mapping from another server", func(e *env, a store.AudibleAccount) error {
+			a.ServerID = "srv-2"
+			return e.db.MapAudibleAccount(context.Background(), a)
+		}},
+	} {
+		e := newEnv(t)
+		e.accts.places["B000000001"] = audible.Position{PositionMs: 60_000, LastUpdated: e.now}
+		stored := e.account(t)
+		if err := c.now(e, stored); err != nil {
+			t.Fatal(err)
+		}
+		e.accts.onAwait = func() {
+			if err := e.db.SignInAudibleAccount(context.Background(), stored, e.now); err != nil {
+				t.Error(err)
+			}
+		}
+		res, err := e.runSync(t, params(t, title("B000000001", "A/One", 3600)))
+		if err != nil || res.Applied != 1 || e.accts.awaits != 1 {
+			t.Fatalf("%s: a sync during it = %+v, %v (read again %d times)", c.name, res, err, e.accts.awaits)
+		}
+	}
+	e := newEnv(t)
+	e.accts.places["B000000001"] = audible.Position{PositionMs: 60_000, LastUpdated: e.now}
+	if res, err := e.runSync(t, params(t, title("B000000001", "A/One", 3600))); err != nil || res.Applied != 1 || e.accts.awaits != 0 {
+		t.Fatalf("an account mapped here = %+v, %v (read again %d times)", res, err, e.accts.awaits)
 	}
 }
 

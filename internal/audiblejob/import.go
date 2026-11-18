@@ -187,6 +187,12 @@ type ImportFile struct {
 // its download, with the account's sign-in.
 type ImportAccounts interface {
 	Account(ctx context.Context, id string) (store.AudibleAccount, error)
+	// SettledAccount is Account read past a sign-in in flight when the
+	// account reads refused (audibleacct.Manager.SettledAccount).
+	SettledAccount(ctx context.Context, id string) (store.AudibleAccount, error)
+	// AwaitedAccount is Account read past a sign-in, mapping or removal in
+	// flight (audibleacct.Manager.AwaitedAccount).
+	AwaitedAccount(ctx context.Context, id string) (store.AudibleAccount, error)
 	Title(ctx context.Context, id, asin string) (source.Record, error)
 	License(ctx context.Context, id, asin string) (audible.License, error)
 	Download(ctx context.Context, id, url, dest string, opts audible.DownloadOptions) error
@@ -316,6 +322,23 @@ func (h *Importer) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (a
 	return res, nil
 }
 
+// importable checks an account read of p's import (acct and its error): the
+// account is this Bridge's, mapped on this server, with p's library its books
+// library.
+func (h *Importer) importable(acct store.AudibleAccount, err error, p ImportParams) error {
+	switch {
+	case errors.Is(err, audibleacct.ErrNotFound):
+		return fail(CodeUnknownAccount, "This Bridge has no Audible account %s: it was removed here, or signed in on another Bridge.", p.Account)
+	case err != nil:
+		return err
+	case acct.OnOtherServer(h.o.ServerID()):
+		return fail(CodeUnknownAccount, "The Audible account is mapped on another server: map it again on the Bridge's Accounts tab.")
+	case acct.LibraryID != p.LibraryID:
+		return fail(CodeNotWritable, "Library %d isn't the Audible account's books library: map the account again or queue the import again.", p.LibraryID)
+	}
+	return nil
+}
+
 func (h *Importer) run(ctx context.Context, job jobs.Job, p ImportParams, rep *jobs.Reporter) (res *ImportResult, err error) {
 	// One import of the account at a time: while it holds the gate, the
 	// title's temp files are this job's alone (an older attempt of the same job
@@ -338,17 +361,15 @@ func (h *Importer) run(ctx context.Context, job jobs.Job, p ImportParams, rep *j
 	}()
 
 	acct, err := h.o.Accounts.Account(ctx, p.Account)
-	if errors.Is(err, audibleacct.ErrNotFound) {
-		return nil, fail(CodeUnknownAccount, "This Bridge has no Audible account %s: it was removed here, or signed in on another Bridge.", p.Account)
+	// As the poll's read: a sign-in or a mapping the server recorded, and
+	// queued this import for, may still be storing itself here (no account
+	// yet, another server's or another library's). Read again past it before
+	// failing for that; an account that passes never waits.
+	if audibleacct.NotHere(acct, err, h.o.ServerID()) || (err == nil && acct.LibraryID != p.LibraryID) {
+		acct, err = h.o.Accounts.AwaitedAccount(ctx, p.Account)
 	}
-	if err != nil {
+	if err := h.importable(acct, err, p); err != nil {
 		return nil, err
-	}
-	if acct.OnOtherServer(h.o.ServerID()) {
-		return nil, fail(CodeUnknownAccount, "The Audible account is mapped on another server: map it again on the Bridge's Accounts tab.")
-	}
-	if acct.LibraryID != p.LibraryID {
-		return nil, fail(CodeNotWritable, "Library %d isn't the Audible account's books library: map the account again or queue the import again.", p.LibraryID)
 	}
 	var srv ImportServer
 	if h.o.Server != nil {
@@ -383,10 +404,14 @@ func (h *Importer) run(ctx context.Context, job jobs.Job, p ImportParams, rep *j
 	// A refused account fails here, before asking Audible anything: each queued
 	// import would only be refused in turn (a device denied licenses, for one,
 	// stays denied) until the owner signs in again, which ends the refusal.
-	// Read again: the job may have waited for the library's mapping, and a
-	// sign-in again meanwhile ended the refusal the first read saw.
+	// Read again with SettledAccount: the job may have waited for the
+	// library's mapping, and a sign-in again meanwhile, or one still storing
+	// itself, ended the refusal the first read saw. The read again is checked
+	// as the first was: what it waited for may have removed the account or
+	// mapped it elsewhere.
 	if acct.RefusedAt != "" {
-		if acct, err = h.o.Accounts.Account(ctx, acct.ID); err != nil {
+		acct, err = h.o.Accounts.SettledAccount(ctx, acct.ID)
+		if err := h.importable(acct, err, p); err != nil {
 			return nil, err
 		}
 	}
