@@ -530,8 +530,9 @@ func (b *Bridge) retryRefused(ctx context.Context) {
 }
 
 // sweepPodcasts removes the old podcast partials no checkpoint records
-// (podcastjob's SweepPartials). Like sweepLibrivox it runs after a mapping
-// check, once the podcast libraries' mounts are known and checked.
+// (podcastjob's SweepPartials, which spaces its own sweeps). Like sweepLibrivox
+// it runs after a mapping check, once the podcast libraries' mounts are known
+// and checked.
 func (b *Bridge) sweepPodcasts(ctx context.Context) {
 	if b.podcasts == nil || ctx.Err() != nil {
 		return

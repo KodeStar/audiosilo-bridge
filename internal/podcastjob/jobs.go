@@ -69,6 +69,8 @@ type service struct {
 	// this start: a poll asks for a rescan of any other, so an index update a
 	// failed job left owed is not lost when the feed stays the same.
 	indexed map[string]bool
+	// swept is when SweepPartials last started a whole-library sweep.
+	swept time.Time
 }
 type lock struct {
 	gate  chan struct{}
@@ -612,14 +614,7 @@ func (s *service) setIndexed(id int64, show string, indexed bool) {
 func (s *service) indexKey(id int64, show string) string {
 	return s.o.ServerID() + "|" + strconv.FormatInt(id, 10) + "|" + show
 }
-func readDir(root *os.Root) ([]os.DirEntry, error) {
-	f, err := root.Open(".")
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	return f.ReadDir(-1)
-}
+func readDir(root *os.Root) ([]os.DirEntry, error) { return listDir(root, ".") }
 
 func (s *service) merge(root *os.Root, f *podcast.Feed, p *podcast.Parsed, show string) (int, error) {
 	dir, err := root.Open(show)

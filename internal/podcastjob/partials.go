@@ -13,6 +13,7 @@ import (
 
 	"github.com/kodestar/audiosilo-bridge/internal/link"
 	"github.com/kodestar/audiosilo-bridge/internal/podcast"
+	"github.com/kodestar/audiosilo-bridge/internal/secrets"
 	"github.com/kodestar/audiosilo-bridge/internal/store"
 )
 
@@ -29,11 +30,27 @@ const partialMaxAge = 24 * time.Hour
 // which is enough for a name a record holds but not for a name found on disk.
 var ownedTempName = regexp.MustCompile(`^` + regexp.QuoteMeta(podcast.TempPrefix) + `[0-9a-f]{24}$`)
 
+// sweepEvery spaces the whole-library sweeps: a partial waits a day
+// (partialMaxAge) before it may go, so reading every show folder on each
+// mapping check (every ten minutes by default) would buy nothing.
+const sweepEvery = time.Hour
+
 // SweepPartials sweeps every show of every checked, mapped and writable
-// podcast library (sweepPartials): the Bridge runs it after a mapping check,
-// so at start and on that check's cadence, beside a retain's cleanOwned.
+// podcast library (sweepPartials): the Bridge calls it after a mapping check,
+// so at start and then at most once per sweepEvery, beside a retain's
+// cleanOwned.
 func (h *Subscribe) SweepPartials(ctx context.Context) {
 	s := h.s
+	now := s.o.Now()
+	s.mu.Lock()
+	// A sweep still running, or one just done, covers this call too. (A clock
+	// set back since the last one sweeps now.)
+	if since := now.Sub(s.swept); !s.swept.IsZero() && since >= 0 && since < sweepEvery {
+		s.mu.Unlock()
+		return
+	}
+	s.swept = now
+	s.mu.Unlock()
 	for _, st := range s.o.Libraries.Statuses() {
 		if ctx.Err() != nil {
 			return
@@ -70,55 +87,50 @@ func (h *Subscribe) SweepPartials(ctx context.Context) {
 // sweepPartials removes the old partials no checkpoint record names (issue
 // #87): a download stopped before its first checkpoint, or one whose record a
 // later download could not take over, whose file could not be removed then.
-// Nothing else ever resumes or removes such a file. In each show with no
-// running job of this Bridge (self, the calling job, aside) and no install or
-// delete journal awaiting recovery, it removes the regular files directly in
-// the show folder named as the Bridge names its temps (ownedTempName) that are
-// older than partialMaxAge and that no record of this pairing names. A link,
-// a folder, a file under a linked folder or one of any other name is never
-// touched. Nothing is swept when the open jobs or the records can't be read.
+// Nothing else ever resumes or removes such a file. In each show (a folder
+// holding a feed.json) with no running job of this Bridge (self, the calling
+// job, aside) and no install or delete journal awaiting recovery, it removes
+// the regular files directly in the show folder named as the Bridge names its
+// temps (ownedTempName) that are older than partialMaxAge and that no record
+// of this pairing names. A link, a folder, a file under a linked folder or one
+// of any other name is never touched. A show holding no file of such a name
+// costs one folder listing; for any other the open jobs and the records are
+// read then, show by show, so a job claimed or a record written while an
+// earlier show was swept counts. Nothing is swept when either can't be read.
 func (s *service) sweepPartials(ctx context.Context, root *os.Root, lib link.Library, mount string, shows []string, self int64) {
-	if len(shows) == 0 || s.o.DB == nil || s.o.DataDir == "" || s.writable(lib, mount) != nil {
+	if s.o.DB == nil || s.o.DataDir == "" || s.writable(lib, mount) != nil {
 		return
 	}
-	rows, err := s.o.DB.OpenServerJobs(ctx)
-	if err != nil {
-		return
-	}
-	recorded, ok := s.recordedPartials(lib.ID)
-	if !ok {
-		return
-	}
-	busy := func(show string) bool {
-		for _, r := range rows {
-			if r.ID != self && r.State == store.JobRunning && r.LibraryID != nil && *r.LibraryID == lib.ID && r.Path != nil && (*r.Path == show || path.Dir(*r.Path) == show) {
-				return true
-			}
-		}
-		return false
-	}
-	now := s.o.Now()
 	for _, show := range shows {
 		if ctx.Err() != nil {
 			return
 		}
-		if busy(show) || journalsPending(root, show) {
-			continue
-		}
-		d, err := root.Open(show)
-		if err != nil {
-			continue
-		}
-		entries, err := d.ReadDir(-1)
-		_ = d.Close()
-		if err != nil {
-			continue
-		}
+		var names []string
+		entries, _ := listDir(root, show)
 		for _, e := range entries {
-			p := show + "/" + e.Name()
-			if !ownedTempName.MatchString(e.Name()) || recorded[p] {
+			if ownedTempName.MatchString(e.Name()) {
+				names = append(names, e.Name())
+			}
+		}
+		if len(names) == 0 {
+			continue
+		}
+		if _, err := podcast.LstatRegular(root, show+"/feed.json"); err != nil {
+			continue // not a show (or a linked one): nothing in it is the Bridge's to sweep
+		}
+		if s.busy(ctx, lib.ID, show, self) || journalsPending(root, show) {
+			continue
+		}
+		recorded, ok := s.recordedPartials()
+		if !ok {
+			return
+		}
+		now := s.o.Now()
+		for _, name := range names {
+			if recorded[name] {
 				continue
 			}
+			p := show + "/" + name
 			// No link in any component, and a regular file at the name.
 			st, err := podcast.LstatRegular(root, p)
 			if err != nil || now.Sub(st.ModTime()) <= partialMaxAge {
@@ -132,10 +144,32 @@ func (s *service) sweepPartials(ctx context.Context, root *os.Root, lib link.Lib
 	}
 }
 
-// recordedPartials is the root-relative partials this pairing's checkpoint
-// records in library id name, whether or not the record is still valid: false
-// when the records can't be read.
-func (s *service) recordedPartials(id int64) (map[string]bool, bool) {
+// busy reports whether a job of this Bridge other than self is running in
+// library id's show (at the show's path or an episode's), or the open jobs
+// can't be read to tell. A claimed job's row is running from its claim.
+func (s *service) busy(ctx context.Context, id int64, show string, self int64) bool {
+	rows, err := s.o.DB.OpenServerJobs(ctx)
+	if err != nil {
+		return true
+	}
+	for _, r := range rows {
+		if r.ID != self && r.State == store.JobRunning && r.LibraryID != nil && *r.LibraryID == id && r.Path != nil && (*r.Path == show || path.Dir(*r.Path) == show) {
+			return true
+		}
+	}
+	return false
+}
+
+// recordedPartials is the names of the partials this pairing's checkpoint
+// records name, in any library and whether or not the record is still valid: a
+// partial's name is random, so the bare name tells it apart whatever the form
+// of its show's name on disk. False when the records can't be read, or the
+// pairing's token can't (pairHash would then name another, empty folder and
+// every recorded partial would pass for unrecorded).
+func (s *service) recordedPartials() (map[string]bool, bool) {
+	if _, err := s.o.Vault.Get(secrets.ServerToken); err != nil {
+		return nil, false
+	}
 	dir, err := s.checkpointRoot()
 	if err != nil {
 		return nil, false
@@ -151,17 +185,21 @@ func (s *service) recordedPartials(id int64) (map[string]bool, bool) {
 			continue
 		}
 		rd, err := podcast.OpenRegular(dir, entry.Name())
-		if errors.Is(err, podcast.ErrInvalidFile) {
-			continue // not a regular file: never read as a record
+		if errors.Is(err, podcast.ErrInvalidFile) || errors.Is(err, os.ErrNotExist) {
+			continue // not a regular file (never read as a record), or cleared since the listing
 		}
 		if err != nil {
 			return nil, false
 		}
-		var c checkpoint
-		err = json.NewDecoder(io.LimitReader(rd, 16384)).Decode(&c)
+		b, err := io.ReadAll(io.LimitReader(rd, 16385))
 		_ = rd.Close()
-		if err == nil && c.LibraryID == id && podcast.OwnedTemp(c.Temp) {
-			recorded[c.partialName()] = true
+		if err != nil {
+			return nil, false
+		}
+		// A record no job can read back (readCheckpoint's limit) holds nothing.
+		var c checkpoint
+		if len(b) <= 16384 && json.Unmarshal(b, &c) == nil && podcast.OwnedTemp(c.Temp) {
+			recorded[c.Temp] = true
 		}
 	}
 	return recorded, true
@@ -179,12 +217,7 @@ func journalsPending(root *os.Root, show string) bool {
 	if err != nil || !st.IsDir() || st.Mode()&os.ModeSymlink != 0 {
 		return true
 	}
-	d, err := root.Open(dir)
-	if err != nil {
-		return true
-	}
-	entries, err := d.ReadDir(-1)
-	_ = d.Close()
+	entries, err := listDir(root, dir)
 	if err != nil {
 		return true
 	}
@@ -194,4 +227,14 @@ func journalsPending(root *os.Root, show string) bool {
 		}
 	}
 	return false
+}
+
+// listDir is the entries of dir inside root.
+func listDir(root *os.Root, dir string) ([]os.DirEntry, error) {
+	d, err := root.Open(dir)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = d.Close() }()
+	return d.ReadDir(-1)
 }
