@@ -1275,9 +1275,17 @@ internal/
             another address as none, however the address changed (the page,
             config.yaml, the environment), so the key only ever reaches the
             address it was entered for; DropStaleEndpointKey deletes such a key
-            (no onChange: it was no credential). Set writes the key before its
-            row, so a failure between the two never leaves an old key under a
-            new address. The
+            (no onChange: it was no credential). The key and its row are one
+            pair under endpointMu (Set, Delete, the reads and the drop), and
+            Set deletes an earlier key's row for another address first, then
+            writes the key, then its row: a failure between them leaves the
+            new key under no address (unused), never under the address of the
+            key before it. A row that can't be read (not ErrNotFound) is an
+            error: the key goes nowhere meanwhile and is NOT dropped.
+            SetFor(kind, value, enteredFor) is Set with the address the page
+            showed beside the key: invalid when the endpoint's address is
+            another by now (a stale page), so a key never lands under an
+            address its owner didn't see. The
             store's accounts table (migration 0006) keeps only what the page
             shows (login, signed_in_at, last_ok_at, refused_at, last_error),
             never a credential.
@@ -3900,7 +3908,8 @@ internal/
             endpoint failing is the answer's error. A save that changes the
             address removes the key (dropStaleEndpointKey, also run at the start
             for an address config.yaml or the environment moved), so the page
-            asks for the new address's.
+            asks for the new address's. SetAgentCredential passes the address the
+            page showed beside an endpoint key (normalized) to agentCreds.SetFor.
             engine.go's agentBackend names codex or openai-compatible, else claude;
             the box takes Endpoint as a func reading config each time.
             Phase 4b: audible.go also builds audiblejob's Importer (the
@@ -4021,8 +4030,9 @@ internal/
             context_tokens/tools when the endpoint says, responses yes|no|unknown,
             or error; key_sent: the check carried the key, which goes to the saved
             address alone). The key is an agent credential (PUT /api/accounts/agent,
-            kind endpoint_api_key; 400 with no address saved), never in these
-            answers.
+            kind endpoint_api_key; 400 with no address saved, and 400 when the
+            optional "endpoint", the address the page showed beside the key, is no
+            longer the saved one), never in these answers.
             transport-only HTTP of the Bridge's page (/api/*): login (rate limited),
             password (a wrong current one is 403, never 401, which signs the page
             out), status, pair/unpair, libraries + mount edits + check now, settings,
@@ -4039,7 +4049,8 @@ internal/
             (set_at_by_kind), the container's own
             credential; never a credential), POST /api/accounts/github/device
             (starts a sign-in, answers the code), DELETE /api/accounts/github
-            ({accounts, revoke_error}), PUT /api/accounts/agent {kind, value},
+            ({accounts, revoke_error}), PUT /api/accounts/agent {kind, value,
+            endpoint?},
             DELETE /api/accounts/agent?kind=; status carries setup and
             setup_complete, settings monthly_budget_usd and budget_reviewed.
             Phase 4a: audible.go, GET /api/accounts/audible (accounts, marketplaces,

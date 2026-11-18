@@ -234,9 +234,14 @@ export class ApiClient {
   }
 
   // Seals an agent credential; the answer never carries it. 400 = an unknown
-  // kind or a malformed value.
-  setAgentCredential(kind: AgentKind, value: string): Promise<Accounts> {
-    return this.request('/api/accounts/agent', { method: 'PUT', body: { kind, value } });
+  // kind or a malformed value. endpoint is the endpoint address the page shows
+  // beside an endpoint_api_key: 400 too when the Bridge's saved address is
+  // another by now (the key is kept for the address it was entered for).
+  setAgentCredential(kind: AgentKind, value: string, endpoint?: string): Promise<Accounts> {
+    return this.request('/api/accounts/agent', {
+      method: 'PUT',
+      body: endpoint ? { kind, value, endpoint } : { kind, value },
+    });
   }
 
   // Removes one kind (all when none is given).

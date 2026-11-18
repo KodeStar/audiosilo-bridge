@@ -15,7 +15,9 @@ type fakeAccounts struct {
 	signedOut bool
 	revokeErr string
 	set       map[string]string
-	deleted   []string
+	// setEndpoint is the endpoint address the last set came with.
+	setEndpoint string
+	deleted     []string
 }
 
 func (b *backend) Accounts(context.Context) Accounts {
@@ -37,10 +39,11 @@ func (b *backend) SignOutGitHub(context.Context) (string, error) {
 	b.acc.signedOut = true
 	return b.acc.revokeErr, nil
 }
-func (b *backend) SetAgentCredential(_ context.Context, kind, value string) error {
+func (b *backend) SetAgentCredential(_ context.Context, kind, value, endpoint string) error {
 	if kind != "claude_oauth_token" || strings.ContainsAny(value, " \n") {
 		return Errorf(ErrInvalid, "that isn't a credential this Bridge takes")
 	}
+	b.acc.setEndpoint = endpoint
 	if b.acc.set == nil {
 		b.acc.set = map[string]string{}
 	}
@@ -82,6 +85,12 @@ func TestAccountsRoutes(t *testing.T) {
 	if w.Code != http.StatusOK || e.b.acc.set["claude_oauth_token"] != "sk-ant-oat01-secret" ||
 		strings.Contains(w.Body.String(), "secret") || !strings.Contains(w.Body.String(), `"claude_oauth_token":true`) {
 		t.Fatalf("set = %d %s", w.Code, w.Body.String())
+	}
+	// The endpoint address the page showed beside the key goes along.
+	w = e.do(http.MethodPut, "/api/accounts/agent", e.token,
+		`{"kind":"claude_oauth_token","value":"sk-ant-oat01-secret","endpoint":" http://192.168.1.20:11434/v1 "}`)
+	if w.Code != http.StatusOK || e.b.acc.setEndpoint != "http://192.168.1.20:11434/v1" {
+		t.Fatalf("set with an endpoint = %d, %q", w.Code, e.b.acc.setEndpoint)
 	}
 	w = e.do(http.MethodPut, "/api/accounts/agent", e.token, `{"kind":"claude_oauth_token","value":"has space-secret"}`)
 	if w.Code != http.StatusBadRequest || strings.Contains(w.Body.String(), "secret") {

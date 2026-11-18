@@ -104,7 +104,7 @@ func (b *Bridge) dropStaleEndpointKey(ctx context.Context) {
 	dropped, err := b.agentCreds.DropStaleEndpointKey(ctx)
 	switch {
 	case err != nil:
-		b.log.Warn("the endpoint's API key was entered for another address and couldn't be removed (it isn't used)", "err", err)
+		b.log.Warn("the endpoint's API key couldn't be checked against its address, or removed as another address's (it isn't used meanwhile)", "err", err)
 	case dropped:
 		b.log.Info("the endpoint's address changed: its API key was for the other address and is removed (enter this address's key in Settings > Agent)")
 	}
@@ -186,9 +186,11 @@ func (b *Bridge) SignOutGitHub(ctx context.Context) (string, error) {
 	return "", nil
 }
 
-// SetAgentCredential seals one agent credential.
-func (b *Bridge) SetAgentCredential(ctx context.Context, kind, value string) error {
-	err := b.agentCreds.Set(ctx, kind, value)
+// SetAgentCredential seals one agent credential. endpoint is the endpoint
+// address the page showed beside an endpoint key ("" when it named none): the
+// key is refused when the saved address is another by now.
+func (b *Bridge) SetAgentCredential(ctx context.Context, kind, value, endpoint string) error {
+	err := b.agentCreds.SetFor(ctx, kind, value, config.NormalizeBaseURL(endpoint))
 	if errors.Is(err, accounts.ErrInvalidCredential) {
 		// The message names the kind and the problem, never the value.
 		return api.Errorf(api.ErrInvalid, "%v", err)

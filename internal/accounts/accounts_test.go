@@ -778,3 +778,127 @@ func TestAgentEndpointKeyIsItsAddressAlone(t *testing.T) {
 		t.Fatalf("replaced = %q", key)
 	}
 }
+
+// flakyStore is a Store whose reads of, or sign-ins to, the endpoint key's row
+// fail while a test says so.
+type flakyStore struct {
+	Store
+	failGet, failSignIn bool
+}
+
+func (s *flakyStore) GetAccount(ctx context.Context, provider string) (store.Account, error) {
+	if s.failGet && provider == kindProvider(AgentEndpointKey) {
+		return store.Account{}, errors.New("database is locked")
+	}
+	return s.Store.GetAccount(ctx, provider)
+}
+
+func (s *flakyStore) SignInAccount(ctx context.Context, provider, login string, at time.Time) error {
+	if s.failSignIn && provider == kindProvider(AgentEndpointKey) {
+		return errors.New("database is locked")
+	}
+	return s.Store.SignInAccount(ctx, provider, login, at)
+}
+
+// A key the page took beside one address is refused once the endpoint has
+// another (a stale page: another tab, config.yaml or the environment moved
+// it), so it never lands under an address its owner didn't see (denied); the
+// address the page shows being the endpoint's, it is stored (allowed).
+func TestAgentEndpointKeyEnteredForAStaleAddress(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	const shown, now = "https://openrouter.ai/api/v1", "https://elsewhere.example/v1"
+	addr := now
+	vault := secrets.NewMemStore()
+	a := NewAgent(vault, db, nil, nil, func() string { return addr })
+	err = a.SetFor(ctx, AgentEndpointKey, "sk-for-the-shown-one", shown)
+	if !errors.Is(err, ErrInvalidCredential) || !strings.Contains(err.Error(), "reload") || strings.Contains(err.Error(), "sk-for") {
+		t.Fatalf("a key entered beside a stale address = %v", err)
+	}
+	if ok, _ := vault.Present(AgentEndpointKey); ok {
+		t.Fatal("the key was stored for an address its owner didn't see")
+	}
+	if err := a.SetFor(ctx, AgentEndpointKey, "sk-now", now); err != nil {
+		t.Fatal(err)
+	}
+	if key, _ := a.EndpointKey(ctx, now); key != "sk-now" {
+		t.Fatalf("key = %q", key)
+	}
+	// The other kinds have no address.
+	if err := a.SetFor(ctx, AgentOpenAIKey, "sk-openai", shown); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A key whose row couldn't be written is under no address: the row of the key
+// before it, entered for another address, is gone first, so moving back to
+// that address never hands it the new key (denied).
+func TestAgentEndpointKeyRowFailureLeavesItUnused(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	const first, other = "https://openrouter.ai/api/v1", "https://elsewhere.example/v1"
+	addr := first
+	fs := &flakyStore{Store: db}
+	a := NewAgent(secrets.NewMemStore(), fs, nil, nil, func() string { return addr })
+	if err := a.Set(ctx, AgentEndpointKey, "sk-first"); err != nil {
+		t.Fatal(err)
+	}
+	addr, fs.failSignIn = other, true
+	if err := a.Set(ctx, AgentEndpointKey, "sk-other"); err == nil {
+		t.Fatal("the row's failure wasn't reported")
+	}
+	fs.failSignIn = false
+	for _, at := range []string{first, other} {
+		addr = at
+		if key, _ := a.EndpointKey(ctx, at); key != "" {
+			t.Fatalf("EndpointKey(%s) = %q after a key whose row failed", at, key)
+		}
+		if _, _, _, ok := a.Credential(ctx, agent.IDOpenAICompatible); ok {
+			t.Fatalf("a key with no row is the credential at %s", at)
+		}
+	}
+}
+
+// A row that can't be read says nothing of the key's address: the key goes
+// nowhere meanwhile, and is not dropped (it is the address's own once the row
+// reads again).
+func TestAgentEndpointKeyUnreadRowDropsNothing(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	const addr = "https://openrouter.ai/api/v1"
+	vault := secrets.NewMemStore()
+	fs := &flakyStore{Store: db}
+	a := NewAgent(vault, fs, nil, nil, func() string { return addr })
+	if err := a.Set(ctx, AgentEndpointKey, "sk-mine"); err != nil {
+		t.Fatal(err)
+	}
+	fs.failGet = true
+	if dropped, err := a.DropStaleEndpointKey(ctx); dropped || err == nil {
+		t.Fatalf("drop with the row unread = %v, %v", dropped, err)
+	}
+	if ok, _ := vault.Present(AgentEndpointKey); !ok {
+		t.Fatal("the key was dropped on a read error")
+	}
+	if key, err := a.EndpointKey(ctx, addr); key != "" || err == nil {
+		t.Fatalf("EndpointKey with the row unread = %q, %v", key, err)
+	}
+	if st := a.State(ctx); st.Set[AgentEndpointKey] {
+		t.Fatalf("state = %+v", st)
+	}
+	fs.failGet = false
+	if key, err := a.EndpointKey(ctx, addr); key != "sk-mine" || err != nil {
+		t.Fatalf("once the row reads again: %q, %v", key, err)
+	}
+}

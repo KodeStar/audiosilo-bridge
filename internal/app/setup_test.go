@@ -312,14 +312,14 @@ func TestAgentCredentialOnTheAccountsTab(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = b.db.Close() }()
-	err = b.SetAgentCredential(ctx, "claude_oauth_token", "sk-ant oat-secret")
+	err = b.SetAgentCredential(ctx, "claude_oauth_token", "sk-ant oat-secret", "")
 	if err == nil || strings.Contains(err.Error(), "secret") || !errors.Is(err, api.ErrInvalid) {
 		t.Fatalf("a value with a space = %v", err)
 	}
-	if err := b.SetAgentCredential(ctx, "nope", "x"); !errors.Is(err, api.ErrInvalid) {
+	if err := b.SetAgentCredential(ctx, "nope", "x", ""); !errors.Is(err, api.ErrInvalid) {
 		t.Fatalf("an unknown kind = %v", err)
 	}
-	if err := b.SetAgentCredential(ctx, "claude_oauth_token", " sk-ant-oat01-secret\n"); err != nil {
+	if err := b.SetAgentCredential(ctx, "claude_oauth_token", " sk-ant-oat01-secret\n", ""); err != nil {
 		t.Fatal(err)
 	}
 	acc := b.Accounts(ctx)

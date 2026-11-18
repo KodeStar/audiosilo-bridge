@@ -52,7 +52,7 @@ func TestAgentSettingsSave(t *testing.T) {
 	if !strings.Contains(string(raw), "openai_compatible:") || !strings.Contains(string(raw), "backend: openai-compatible") {
 		t.Fatalf("config.yaml = %s", raw)
 	}
-	if err := b.SetAgentCredential(ctx, accounts.AgentEndpointKey, "sk-endpoint"); err != nil {
+	if err := b.SetAgentCredential(ctx, accounts.AgentEndpointKey, "sk-endpoint", ""); err != nil {
 		t.Fatal(err)
 	}
 	if s = b.AgentSettings(ctx); !s.KeySet || s.KeySetAt == "" {
@@ -127,7 +127,7 @@ func TestCheckEndpoint(t *testing.T) {
 	if err := b.SaveAgentSettings(ctx, api.AgentSettings{Endpoint: api.AgentEndpoint{BaseURL: srv.URL + "/v1"}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := b.SetAgentCredential(ctx, accounts.AgentEndpointKey, "sk-endpoint-vault"); err != nil {
+	if err := b.SetAgentCredential(ctx, accounts.AgentEndpointKey, "sk-endpoint-vault", ""); err != nil {
 		t.Fatal(err)
 	}
 	res, err := b.CheckEndpoint(ctx, srv.URL+"/v1/")
@@ -199,7 +199,7 @@ func TestEndpointKeyStaysWithItsAddress(t *testing.T) {
 		return out
 	}
 
-	if err := b.SetAgentCredential(ctx, accounts.AgentEndpointKey, "sk-mine"); !errors.Is(err, api.ErrInvalid) {
+	if err := b.SetAgentCredential(ctx, accounts.AgentEndpointKey, "sk-mine", ""); !errors.Is(err, api.ErrInvalid) {
 		t.Fatalf("a key before any address = %v", err)
 	}
 	save := func(base string) {
@@ -209,7 +209,16 @@ func TestEndpointKeyStaysWithItsAddress(t *testing.T) {
 		}
 	}
 	save(mine.URL + "/v1")
-	if err := b.SetAgentCredential(ctx, accounts.AgentEndpointKey, "sk-mine"); err != nil {
+	if err := b.SetAgentCredential(ctx, accounts.AgentEndpointKey, "sk-mine", ""); err != nil {
+		t.Fatal(err)
+	}
+	// A page still showing another address (a stale tab) can't enter its key
+	// for this one (denied); the page showing this address can (allowed).
+	if err := b.SetAgentCredential(ctx, accounts.AgentEndpointKey, "sk-theirs", theirs.URL+"/v1"); !errors.Is(err, api.ErrInvalid) ||
+		strings.Contains(err.Error(), "sk-theirs") {
+		t.Fatalf("a key entered beside a stale address = %v", err)
+	}
+	if err := b.SetAgentCredential(ctx, accounts.AgentEndpointKey, "sk-mine", mine.URL+"/v1/"); err != nil {
 		t.Fatal(err)
 	}
 	// Saved again as it is (a model changed, say): the key stays.
@@ -269,7 +278,7 @@ func TestEndpointKeyDroppedWhenTheAddressMovedOutsideThePage(t *testing.T) {
 	if err := b.SaveAgentSettings(ctx, api.AgentSettings{Endpoint: api.AgentEndpoint{BaseURL: "http://192.168.1.20:11434/v1", Model: "m"}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := b.SetAgentCredential(ctx, accounts.AgentEndpointKey, "sk-mine"); err != nil {
+	if err := b.SetAgentCredential(ctx, accounts.AgentEndpointKey, "sk-mine", ""); err != nil {
 		t.Fatal(err)
 	}
 	_ = b.db.Close()

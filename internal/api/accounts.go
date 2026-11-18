@@ -88,8 +88,11 @@ type AccountsBackend interface {
 	// on GitHub; revokeErr says the revoke failed (the sign-in is gone here).
 	SignOutGitHub(ctx context.Context) (revokeErr string, err error)
 	// SetAgentCredential seals one agent credential (ErrInvalid: an unknown
-	// kind or a malformed value, said without the value).
-	SetAgentCredential(ctx context.Context, kind, value string) error
+	// kind or a malformed value, said without the value). endpoint is the
+	// endpoint address the page showed beside an endpoint_api_key ("" when it
+	// named none): ErrInvalid too when that is no longer the saved address,
+	// the one the key is kept for.
+	SetAgentCredential(ctx context.Context, kind, value, endpoint string) error
 	// DeleteAgentCredential removes one kind ("" for all).
 	DeleteAgentCredential(ctx context.Context, kind string) error
 }
@@ -128,11 +131,14 @@ func (a *API) handleSetAgent(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Kind  string `json:"kind"`
 		Value string `json:"value"`
+		// Endpoint: the endpoint address the page showed beside an
+		// endpoint_api_key (Settings > Agent sends it; optional).
+		Endpoint string `json:"endpoint"`
 	}
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	if err := a.b.SetAgentCredential(r.Context(), strings.TrimSpace(req.Kind), req.Value); err != nil {
+	if err := a.b.SetAgentCredential(r.Context(), strings.TrimSpace(req.Kind), req.Value, strings.TrimSpace(req.Endpoint)); err != nil {
 		a.writeBackendError(w, err, "save the agent credential")
 		return
 	}

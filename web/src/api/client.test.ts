@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { ApiClient, ApiError, LAN_ONLY_MESSAGE } from './client';
-import { mockFetch } from '@/test/fetchMock';
+import { lastCall, mockFetch } from '@/test/fetchMock';
 import { accountsFixture, engineFixture, generateJobFixture } from '@/test/fixtures';
 
 function client(token: string | null = 'tok') {
@@ -182,12 +182,24 @@ describe('ApiClient', () => {
     expect((await c.startGitHubSignIn()).user_code).toBe('AB-CD');
     expect((await c.signOutGitHub()).revoke_error).toBe('');
     await c.setAgentCredential('openai_api_key', 'sk-x');
+    expect(lastCall(calls, 'PUT', '/api/accounts/agent')?.body).toEqual({
+      kind: 'openai_api_key',
+      value: 'sk-x',
+    });
+    // The endpoint's key goes with the address the page shows beside it.
+    await c.setAgentCredential('endpoint_api_key', 'sk-e', 'http://192.168.1.20:11434/v1');
+    expect(lastCall(calls, 'PUT', '/api/accounts/agent')?.body).toEqual({
+      kind: 'endpoint_api_key',
+      value: 'sk-e',
+      endpoint: 'http://192.168.1.20:11434/v1',
+    });
     await c.deleteAgentCredential('openai_api_key');
     await c.deleteAgentCredential();
     expect(calls.map((x) => `${x.method} ${x.url}`)).toEqual([
       'GET /api/accounts',
       'POST /api/accounts/github/device',
       'DELETE /api/accounts/github',
+      'PUT /api/accounts/agent',
       'PUT /api/accounts/agent',
       'DELETE /api/accounts/agent?kind=openai_api_key',
       'DELETE /api/accounts/agent',
