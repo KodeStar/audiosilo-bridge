@@ -84,6 +84,13 @@ const (
 	CredentialAPIKey     = "api_key"     // ANTHROPIC_API_KEY / OPENAI_API_KEY
 )
 
+// CredentialGroupProbe is the kind of the Bridge's group probe (agentbox's
+// probe.go): a credential.json no CLI takes, which the runner deletes and then
+// refuses with an exit.json error naming this kind (DecodeCredential's %q).
+// The Bridge reads that refusal as the runner's take, so the runner's wording
+// must keep naming the kind (agentrun's TestGroupProbeRefusalNamesTheKind).
+const CredentialGroupProbe = "group_probe"
+
 // Bounds on what a request may ask for, and on the files each side reads back.
 const (
 	MaxTurns          = 1000

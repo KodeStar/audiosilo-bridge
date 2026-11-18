@@ -48,7 +48,7 @@ const probeEvery = 5 * time.Minute
 
 // probeKind is the probe's credential.json kind: no CLI takes it
 // (agentproto.DecodeCredential refuses it), so a runner never runs on it.
-const probeKind = "group_probe"
+const probeKind = agentproto.CredentialGroupProbe
 
 // probeOutcome is what one probe found.
 type probeOutcome int
