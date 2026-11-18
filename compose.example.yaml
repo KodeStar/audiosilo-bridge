@@ -41,8 +41,10 @@
 # Or pick an OpenAI-compatible endpoint (the OpenAI API, a router, Ollama or LM
 # Studio) in the Bridge page's Settings > Agent. Its runs go to agent-endpoint,
 # never to the agent container: the endpoint's model runs commands where it
-# runs, so that service has a user of its own, its own staging volume, no
-# /agent volume and no credential, and kills whatever a run leaves behind.
+# runs, so that service has a user of its own, its own staging volume, never
+# agent-config (docker gives it the image's own /agent as an anonymous volume,
+# empty and closed to its user) and no credential, and kills whatever a run
+# leaves behind.
 # Start it with the profile:
 #   docker compose --profile endpoint up -d
 # The Bridge refuses endpoint runs (and says why on its page) while it isn't
@@ -148,9 +150,13 @@ services:
 
   # An OpenAI-compatible endpoint's own agent service: started only with
   # --profile endpoint. Keep it apart from the agent container: its own user
-  # (never the agent's 10002), its own staging volume, no /agent volume (nor
-  # agent-config, or a CLI's login, at any other path) and no credential in its
-  # environment. The runner refuses its runs otherwise.
+  # (never the agent's 10002), its own staging volume, never agent-config at
+  # /agent or any other path (nor a CLI's login, or the bridge's data), and no
+  # credential in its environment (nor the bridge's AUDIOSILO_BRIDGE_SECRET_KEY
+  # or GitHub token). The image declares /agent a volume, so docker gives this
+  # service an anonymous one: a copy of the image's empty /agent, 10002's and
+  # 0700, which 10003 can't open. The runner refuses its runs otherwise, and
+  # ends a run in progress when one of those comes within its reach.
   agent-endpoint:
     image: ghcr.io/kodestar/audiosilo-bridge:latest-agent
     profiles: [endpoint]

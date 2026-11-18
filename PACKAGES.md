@@ -176,6 +176,8 @@ internal/
             bridge#65: ReadDirWithin(path, d) is os.ReadDir bounded the same way (one
             read in flight per path), and audio.ResolveSourceWithin resolves a book's
             audio through both, as the generate job's markersFile does.
+            BR-OPENAI-2: LstatWithin(path, d) is os.Lstat bounded the same way, for
+            the endpoint's agent service's mount check (agentrun's mounts.go).
   execfile/ writes files the process will exec at once with syscall.ForkLock
             held for reading from open to close, so a concurrent fork can't hold
             the write descriptor and make the exec fail with ETXTBSY (WriteFile).
@@ -1316,6 +1318,8 @@ internal/
             container, not --endpoint-only, the agent's user); endpoint_only
             (AgentEndpointOnly) claude or codex sent to the endpoint's service.
             Each points at the Accounts tab, which shows agentbox's full detail.
+            Not running on that backend is DetailAgentEndpointNotRunning (names
+            agent-endpoint and --profile endpoint, never Claude or ChatGPT).
             Phase 2b (FIRST-RUN-PLAN F2): Checklist(Inputs) is the setup checklist
             (link.Setup) in its fixed order: paired, libraries, asr, agent, budget,
             github, audible (Phase 4a, optional: done with an account signed in and
@@ -3554,8 +3558,11 @@ internal/
             (agent-runner --endpoint-only), which alone runs endpoint requests
             and runs nothing else; own_credentials (that service's): it holds a
             credential in its environment, can reach the agent home or has the
-            agent volume or a CLI's login mounted anywhere (the runner refuses an
-            endpoint run while it does).
+            agent volume, a CLI's login or the Bridge's vault mounted anywhere
+            (the runner refuses an endpoint run while it does); found (BR-OPENAI-2,
+            with own_credentials): what it found, a variable's name or a path in
+            that service, never a value, TrimFound (printable, MaxFoundBytes 512)
+            on both sides, as runner.json is that service's to rewrite.
   agentbox/ the Bridge's side of the agent container: an agent.Runner that runs no CLI,
             drops each invocation into the staging dir, waits for agentrun, and
             harvests the outputs back into the pipeline's staged dir; the outcome is
@@ -3566,9 +3573,15 @@ internal/
             last run: runs still go through, a refused call costs nothing and the
             first that works clears it; a credential the runner reports as changed,
             by kind or credential_since, clears it too), Live (fresh, whatever its
-            CLIs; fresh is a heartbeat_at within 30 s before now and at most
-            runnerClockSkew, 5 s, after it: one in the future is a status the runner
-            didn't write, or a clock gone wrong), each "why not" worded for the page
+            CLIs; fresh is judged on the Bridge's clock (BR-OPENAI-2, heartbeatAge):
+            a heartbeat_at that changed since the last read is fresh now and stays
+            so for 30 s, whatever date it carries (a runner on another clock, a VM
+            that slept); the first read of a dir's runner.json goes by its own date,
+            within 30 s before now and at most runnerClockSkew, 5 s, after it, so a
+            stopped runner's file or a future-dated one isn't live until it
+            changes; a job's heartbeat likewise counts when its or the claim's
+            mtime changes, staleFor after the last change on the Bridge's clock),
+            each "why not" worded for the page
             and a park (claude: `claude
             setup-token` -> CLAUDE_CODE_OAUTH_TOKEN; codex: agent-login; and when the
             OTHER CLI is signed in, how to switch agent.backend), never naming a
@@ -3728,7 +3741,11 @@ internal/
             os.SameFile), a runner.json without endpoint_only, or one owned by the
             uid of a live runner.json in the agent's dir (the same user); then
             ProblemOwnCredentials while that service holds a credential or reaches
-            /agent (runner.json's own_credentials, or a CLI entry with one). The
+            /agent (runner.json's own_credentials, or a CLI entry with one;
+            Status.Found is its found, for Settings > Agent alone, never Detail). A
+            not-running Detail on this backend names agent-endpoint and its start
+            (docker compose --profile endpoint up -d agent-endpoint) and the
+            agent.endpoint_staging_dir setting, never the agent container. The
             claude and codex backends refuse an endpoint-only runner in their dir
             (ProblemEndpointOnly). Dir() is the dir the runs go to (the page's
             staging_dir, the engine's log).
@@ -3795,7 +3812,9 @@ internal/
             endpointElsewhere), never touches --home (/agent), and refuses its
             runs (endpointBlocked) while credentialProblem (logged with each
             refusal: a variable's name or a path, never a value): one of the
-            four credential variables in its environment, homeReachable (the
+            four credential variables or the Bridge's vault variables
+            (AUDIOSILO_BRIDGE_SECRET_KEY, AUDIOSILO_BRIDGE_GITHUB_TOKEN) in its
+            environment, homeReachable (the
             home listable, writable or searchable by its uid: not missing or
             closed, the image's 0700 /agent of uid 10002 as an anonymous volume
             being closed to 10003), or credentialMount (mounts.go, over
@@ -3807,8 +3826,19 @@ internal/
             agent home's marker .audiosilo-agent-home (markHome writes it into
             the agent container's home at the start) at its point or one dir
             below (a tmpfs at its point only; the rules and the file list are
-            in mounts.go). runner.json says
-            endpoint_only and own_credentials for the Bridge's Status. Main
+            in mounts.go), the Bridge's vault (secret.key, secrets/<name>.enc,
+            or those names mounted alone) included. BR-OPENAI-2: the walk fails
+            closed: a mount point it can enter but not list, one with more than
+            maxMountChildren (1024) entries, a look past lookTimeout (5 s, through
+            fsutil.LstatWithin/ReadDirWithin: a hung NFS or SMB mount) or the walk
+            past walkBudget (20 s) each count as holding. The walk runs once per
+            status tick (refreshMounts) and is cached for one interval between
+            (mountProblem); spawn's poll reads the last answer every second and
+            ends a run in progress (exit unavailable, endpointBlocked) once a tick
+            finds a credential. runner.json says endpoint_only, own_credentials
+            and found for the Bridge's Status. The agent container's runner
+            (not --endpoint-only) chmods its home, secrets/ and codex/ 0700 at
+            the start (closeHome; a folder only, never through a link). Main
             makes that runner a child subreaper and not
             dumpable (endpointHardening, Linux only; elsewhere it refuses to
             start): whatever a run starts becomes the runner's child however it
@@ -3989,7 +4019,10 @@ internal/
   app/      bridge#84: agent.go is Settings > Agent. AgentSettings answers the
             saved backend, the running one (box.ID(); a backend applies at the next
             start), the endpoint, config.ModelStages, the endpoint key's state
-            (agentCreds, never the key) and the env-locked keys. SaveAgentSettings
+            (agentCreds, never the key), the env-locked keys and, while the
+            openai-compatible backend runs, Service (endpointService over
+            box.Status(): not_running, refused with detail and found, or
+            running). SaveAgentSettings
             refuses (ErrLocked) a change to a value the environment sets, saves,
             hands the engine EndpointModels (SetCompatibleModels) and, when the
             running endpoint's address or models changed, agentChanged (the books parked on
@@ -4120,6 +4153,8 @@ internal/
   api/      bridge#84: agent.go, behind requireAuth: GET /api/settings/agent
             (AgentSettings), PUT (backend + openai_compatible; answers the settings
             saved; 409 locked for an env-set value, 400 for one config refuses) and
+            service (AgentService {state: running|not_running|refused, detail,
+            found}, null unless the endpoint backend runs);
             POST /api/settings/agent/test {base_url} (EndpointCheck: models with
             context_tokens/tools when the endpoint says, responses yes|no|unknown,
             or error; key_sent: the check carried the key, which goes to the saved

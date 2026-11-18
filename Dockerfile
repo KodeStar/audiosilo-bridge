@@ -176,7 +176,8 @@ RUN set -eu; \
 # copies this mode); /agent holds the agent's credentials and codex's login.
 # The same image is the OpenAI-compatible endpoint's own agent service
 # (`agent-runner --endpoint-only`): user 10003:10003, a staging volume of its
-# own and no /agent volume, so the image's /agent (10002's, 0700) is closed to it.
+# own and never agent-config: its /agent is the anonymous volume VOLUME below
+# makes from the image's (10002's, 0700, empty), closed to it.
 FROM debian:bookworm-slim AS agent
 RUN apt-get update \
     && apt-get install -y --no-install-recommends tini ca-certificates \
