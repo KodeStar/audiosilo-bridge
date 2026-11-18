@@ -85,7 +85,7 @@ func TestRecoverStillInstallsAPresentStagedAudio(t *testing.T) {
 	if err := Publish(root, j, time.Now(), stopAt("journal")); !errors.Is(err, errStop) {
 		t.Fatal(err)
 	}
-	if err := AbortInstall(root, j); !errors.Is(err, ErrInvalidFile) {
+	if err := abortInstall(root, j); !errors.Is(err, ErrInvalidFile) {
 		t.Fatal("aborted an install whose staged audio is present:", err)
 	}
 	journalKept(t, root, j)
@@ -149,7 +149,7 @@ func TestRecoverStuckInstallFailsClosedOnLinks(t *testing.T) {
 		if err := RecoverShow(root, "Fixture Show", time.Now(), nil); !errors.Is(err, ErrInvalidFile) {
 			t.Fatal(err)
 		}
-		if err := AbortInstall(root, j); !errors.Is(err, ErrInvalidFile) {
+		if err := abortInstall(root, j); !errors.Is(err, ErrInvalidFile) {
 			t.Fatal(err)
 		}
 		journalKept(t, root, j)
@@ -172,7 +172,7 @@ func TestRecoverStuckInstallFailsClosedOnLinks(t *testing.T) {
 		if err := RecoverShow(root, "Fixture Show", time.Now(), nil); !errors.Is(err, ErrInvalidFile) {
 			t.Fatal(err)
 		}
-		if err := AbortInstall(root, j); !errors.Is(err, ErrInvalidFile) {
+		if err := abortInstall(root, j); !errors.Is(err, ErrInvalidFile) {
 			t.Fatal(err)
 		}
 		if st, err := root.Lstat(name); err != nil || st.Mode()&os.ModeSymlink == 0 {

@@ -189,7 +189,7 @@ func Publish(root *os.Root, j Journal, now time.Time, fault Boundary) error {
 // RecoverShow finishes installs and moved deletions before any other show mutation.
 // A delete whose audio has not moved is aborted: its aggregate may now be stale.
 // An install whose staged audio is gone before anything of it was written is
-// aborted too (AbortInstall).
+// aborted too (abortInstall).
 func RecoverShow(root *os.Root, show string, now time.Time, fault Boundary) error {
 	if !ValidShow(show) {
 		return ErrInvalidFile
@@ -227,11 +227,8 @@ func RecoverShow(root *os.Root, show string, now time.Time, fault Boundary) erro
 			return ErrInvalidFile
 		}
 		if j.Op == "install" && stagedAudioGone(root, j) {
-			// An older Bridge removed the staged audio of an install whose
-			// Publish failed after this journal: nothing was installed, and the
-			// journal would block the show for good. Drop it; the episode is
-			// fetched again as one never installed.
-			if err := AbortInstall(root, j); err != nil {
+			// An older Bridge's failed Publish removed this staged audio.
+			if err := abortInstall(root, j); err != nil {
 				return err
 			}
 			slog.Warn("podcasts: an episode's staged download was gone; it will be fetched again", "show", show, "episode_id", j.EpisodeID)
@@ -485,20 +482,16 @@ func AbortDelete(root *os.Root, j Journal) error {
 	if _, err := root.Lstat(show + "/" + j.TrashDir + "/audio"); !errors.Is(err, os.ErrNotExist) {
 		return ErrInvalidFile
 	}
-	// Only this transaction's own barrier is removed, never another journal.
-	saved, err := ReadJournal(root, AttachmentPath(j.Path, ".publish.json"))
+	barrier, err := ownJournal(root, j)
 	if err != nil {
 		return err
-	}
-	if !sameJournal(j, saved) {
-		return ErrInvalidFile
 	}
 	// The empty trash folder goes first: a stop between the two leaves the barrier,
 	// and the next recovery aborts again instead of orphaning an unowned folder.
 	if err := root.Remove(show + "/" + j.TrashDir); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	if err := root.Remove(AttachmentPath(j.Path, ".publish.json")); err != nil {
+	if err := root.Remove(barrier); err != nil {
 		return err
 	}
 	return syncDir(root, show+"/.audiosilo")
@@ -516,7 +509,7 @@ func stagedAudioGone(root *os.Root, j Journal) bool {
 	return errors.Is(err, os.ErrNotExist)
 }
 
-// AbortInstall removes an install's barrier when its staged audio is gone and
+// abortInstall removes an install's barrier when its staged audio is gone and
 // nothing of the install was written. The journal records no step, so each step
 // after staging is proven not to have run by the trace it leaves: the audio at
 // the episode's path, the chapters attachment for this fetch (or any other the
@@ -524,7 +517,7 @@ func stagedAudioGone(root *os.Root, j Journal) bool {
 // the feed's pin of this fetch. With any of those present it refuses, as
 // recovery did before. The feed keeps the episode's earlier pin, so the
 // episode stays not installed and is fetched again.
-func AbortInstall(root *os.Root, j Journal) error {
+func abortInstall(root *os.Root, j Journal) error {
 	show := path.Dir(j.Path)
 	if j.Op != "install" || !journalValid(&j, show) {
 		return ErrInvalidFile
@@ -551,16 +544,26 @@ func AbortInstall(root *os.Root, j Journal) error {
 	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	// Only this transaction's own barrier is removed, never another journal.
-	saved, err := ReadJournal(root, AttachmentPath(j.Path, ".publish.json"))
+	barrier, err := ownJournal(root, j)
 	if err != nil {
 		return err
 	}
-	if !sameJournal(j, saved) {
-		return ErrInvalidFile
-	}
-	if err := root.Remove(AttachmentPath(j.Path, ".publish.json")); err != nil {
+	if err := root.Remove(barrier); err != nil {
 		return err
 	}
 	return syncDir(root, show+"/.audiosilo")
+}
+
+// ownJournal returns the name of j's journal when the journal there is j's own:
+// an abort removes only this transaction's barrier, never another journal.
+func ownJournal(root *os.Root, j Journal) (string, error) {
+	name := AttachmentPath(j.Path, ".publish.json")
+	saved, err := ReadJournal(root, name)
+	if err != nil {
+		return "", err
+	}
+	if !sameJournal(j, saved) {
+		return "", ErrInvalidFile
+	}
+	return name, nil
 }

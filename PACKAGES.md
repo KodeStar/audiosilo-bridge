@@ -2254,13 +2254,11 @@ internal/
             chronological ID3 CHAP attachments and pure install/delete journals.
             Journals are serving barriers. Delete recovery aborts when audio has not
             moved to owned trash; only a moved deletion is completed without a fresh
-            aggregate. Install recovery aborts (AbortInstall, a warning in the log)
+            aggregate. Install recovery aborts (abortInstall, a warning in the log)
             when neither the staged audio nor the episode's audio exists and no later
-            step left its trace (this fetch's chapters, or any the current pin does
-            not own; the feed's pin of this fetch): the journal goes, the feed keeps
-            the earlier pin and the episode is fetched again. An older Bridge's failed
-            Publish removed that staged audio on exit, leaving the show refusing every
-            write. Exclusive hard-link then unlink installs audio without
+            step left its trace: the journal goes, the feed keeps the earlier pin and
+            the episode is fetched again. An older Bridge's failed Publish removed
+            that staged audio on exit, leaving the show refusing every write. Exclusive hard-link then unlink installs audio without
             overwriting a concurrent foreign file; a mount without
             hard links (SMB/CIFS, some NAS/FUSE shares) falls back to a no-replace
             rename (renameat2 RENAME_NOREPLACE on Linux, else an absence check
@@ -2285,7 +2283,7 @@ internal/
             seals validators, probes local descriptors and confirms its lease
             before publication. No checkpoint clear removes a partial a pending
             install journal stages (journalStages): RecoverShow installs it
-            (or, with it gone, drops the journal: podcast.AbortInstall).
+            (or, with it gone, drops the journal).
             Per-path process and OS file locks prevent overlap across
             reclaimed jobs. Retain hashes local candidates and fails closed on an
             unavailable, stale or protected aggregate. Snapshot freshness lasts five
