@@ -91,9 +91,10 @@ var AgentBackends = []string{AgentBackendClaude, AgentBackendCodex, AgentBackend
 
 // validateEndpoint checks agent.openai_compatible: a base URL by
 // agentproto.CheckBaseURL's rules, model names a request may carry, per-stage
-// keys that name a stage, and, with the openai-compatible backend, a base URL
-// and a model for every stage.
-func (c AgentConfig) validateEndpoint() error {
+// keys that name a stage, and, with the openai-compatible backend and complete
+// (the environment's values in: not config.yaml alone, where the environment
+// may set the address or the model), a base URL and a model for every stage.
+func (c AgentConfig) validateEndpoint(complete bool) error {
 	e := c.OpenAICompatible
 	if e.BaseURL != "" {
 		if err := agentproto.CheckBaseURL(e.BaseURL); err != nil {
@@ -111,7 +112,7 @@ func (c AgentConfig) validateEndpoint() error {
 			return fmt.Errorf("agent.openai_compatible.models[%q] %q is not a model name", key, m)
 		}
 	}
-	if c.Backend != AgentBackendOpenAICompatible {
+	if !complete || c.Backend != AgentBackendOpenAICompatible {
 		return nil
 	}
 	if e.BaseURL == "" {
@@ -450,6 +451,11 @@ type Config struct {
 	// badRequireGroup is an AUDIOSILO_BRIDGE_AGENT_REQUIRE_GROUP that isn't a
 	// boolean, for Validate to refuse (a typo must not turn the check off).
 	badRequireGroup string
+	// fileOnly is config.yaml without the environment (SaveFile's): Validate
+	// leaves out the rules the environment's values may answer (the
+	// openai-compatible backend's address and models), which SaveFile checks on
+	// the file as the next start reads it.
+	fileOnly bool
 }
 
 // Deprecations returns the notices Load collected about deprecated settings it
@@ -538,10 +544,23 @@ func Load(dataDir string) (Config, error) { return load(dataDir, true) }
 // load is Load, with or without the environment (SaveFile edits the file's own
 // values, never the environment's).
 func load(dataDir string, withEnv bool) (Config, error) {
-	cfg := Default()
 	path := filepath.Join(dataDir, FileName)
 	raw, err := os.ReadFile(path) //nolint:gosec // path is operator-controlled data dir
-	fileExists := err == nil
+	switch {
+	case err == nil:
+	case errors.Is(err, os.ErrNotExist):
+		// First run: keep defaults.
+	default:
+		return Config{}, fmt.Errorf("read %s: %w", path, err)
+	}
+	return decode(path, raw, err == nil, withEnv)
+}
+
+// decode is load's work on config.yaml's bytes (raw, when fileExists; path
+// names the file in errors). SaveFile runs it on the bytes it is about to
+// write, with the environment, to check the file as the next start reads it.
+func decode(path string, raw []byte, fileExists, withEnv bool) (Config, error) {
+	cfg := Default()
 	var capacityKeys struct {
 		Agent struct {
 			Concurrency      *int `yaml:"concurrency"`
@@ -556,18 +575,13 @@ func load(dataDir string, withEnv bool) (Config, error) {
 			CommunityRepo *string `yaml:"community_repo"`
 		} `yaml:"contribution"`
 	}
-	switch {
-	case err == nil:
+	if fileExists {
 		if uerr := yaml.Unmarshal(raw, &capacityKeys); uerr != nil {
 			return Config{}, fmt.Errorf("parse %s: %w", path, uerr)
 		}
 		if uerr := yaml.Unmarshal(raw, &cfg); uerr != nil {
 			return Config{}, fmt.Errorf("parse %s: %w", path, uerr)
 		}
-	case errors.Is(err, os.ErrNotExist):
-		// First run: keep defaults.
-	default:
-		return Config{}, fmt.Errorf("read %s: %w", path, err)
 	}
 	// Capacity normalization is intentionally presence-aware. yaml.Unmarshal merges
 	// into Default(), so without this explicit path an old `concurrency: N` file
@@ -640,6 +654,7 @@ func load(dataDir string, withEnv bool) (Config, error) {
 	if strings.TrimSpace(cfg.Contribution.APIBaseURL) == "" {
 		cfg.Contribution.APIBaseURL = DefaultContributionAPIBaseURL
 	}
+	cfg.fileOnly = !withEnv
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
 	}
@@ -919,7 +934,7 @@ func (c Config) Validate() error {
 	if c.Agent.Backend != "" && !slices.Contains(AgentBackends, c.Agent.Backend) {
 		return fmt.Errorf("agent.backend %q must be one of %q, or empty (claude)", c.Agent.Backend, AgentBackends)
 	}
-	if err := c.Agent.validateEndpoint(); err != nil {
+	if err := c.Agent.validateEndpoint(!c.fileOnly); err != nil {
 		return err
 	}
 	if c.Agent.TimeoutMinutes < 1 {

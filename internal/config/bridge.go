@@ -543,7 +543,11 @@ func checkHTTPURL(raw string) error {
 // SaveFile changes config.yaml's own values: it loads the file without the
 // environment, applies edit, validates the result and writes it (0600, a
 // temporary file renamed into place). So a value the environment sets is never
-// written to the file by a save of something else.
+// written to the file by a save of something else. The file is also checked as
+// the next start reads it, the environment's values over it, before it is
+// written: a rule across settings (agent.backend openai-compatible needs an
+// address and a model) may hold only with the environment's values, and must
+// hold with them, or the next start would refuse the file.
 func SaveFile(dataDir string, edit func(*Config) error) error {
 	cfg, err := load(dataDir, false)
 	if err != nil {
@@ -556,17 +560,39 @@ func SaveFile(dataDir string, edit func(*Config) error) error {
 	if err := cfg.Validate(); err != nil {
 		return err
 	}
-	return writeFile(dataDir, cfg)
+	out, err := marshal(cfg)
+	if err != nil {
+		return err
+	}
+	path := filepath.Join(dataDir, FileName)
+	if _, err := decode(path, out, true, true); err != nil {
+		return err
+	}
+	return writeBytes(dataDir, out)
 }
 
 // writeFile writes cfg to config.yaml (0600) through a temporary file.
 func writeFile(dataDir string, cfg Config) error {
-	if err := os.MkdirAll(dataDir, 0o700); err != nil {
-		return fmt.Errorf("create data dir: %w", err)
+	out, err := marshal(cfg)
+	if err != nil {
+		return err
 	}
+	return writeBytes(dataDir, out)
+}
+
+// marshal is cfg as config.yaml holds it.
+func marshal(cfg Config) ([]byte, error) {
 	out, err := yaml.Marshal(cfg)
 	if err != nil {
-		return fmt.Errorf("marshal config: %w", err)
+		return nil, fmt.Errorf("marshal config: %w", err)
+	}
+	return out, nil
+}
+
+// writeBytes writes out as config.yaml (0600) through a temporary file.
+func writeBytes(dataDir string, out []byte) error {
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		return fmt.Errorf("create data dir: %w", err)
 	}
 	return fsutil.WriteFileAtomic(filepath.Join(dataDir, FileName), out, 0o600)
 }

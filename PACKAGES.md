@@ -40,7 +40,10 @@ internal/
             engine takes EndpointModels() on a save). Validate: the address by
             agentproto.CheckBaseURL whenever set, model names by ValidModel, models'
             keys by state.RoutesModel, and with that backend an address and a model
-            for every stage (ModelStages: the agent stages, then describing).
+            for every stage (ModelStages: the agent stages, then describing): a
+            rule config.yaml alone can't answer when the environment sets one, so a
+            file-only load (fileOnly) leaves it out and SaveFile checks its bytes as
+            the next start reads them (decode with the environment) before writing.
             normalizeBridge trims them (the address without its trailing slashes, a
             blank stage model dropped). AUDIOSILO_BRIDGE_AGENT_BACKEND now goes
             through applyBridgeEnv (locks the page; empty = unset, as the others),

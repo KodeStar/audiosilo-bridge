@@ -133,3 +133,46 @@ func TestEndpointEnvAndFile(t *testing.T) {
 		t.Fatalf("backend from the environment: %v %q", err, cfg.Agent.Backend)
 	}
 }
+
+// An address or a model the environment sets answers the openai-compatible
+// backend's need for one: the page picks the backend while they come from the
+// environment, and a save of anything else goes on (allowed); a save that
+// would leave the next start without an address is refused, the file as it was
+// (denied).
+func TestEndpointSaveWithEnv(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("AUDIOSILO_BRIDGE_AGENT_OPENAI_COMPATIBLE_BASE_URL", "http://10.0.0.5:11434/v1")
+	t.Setenv("AUDIOSILO_BRIDGE_AGENT_OPENAI_COMPATIBLE_MODEL", "qwen3:32b")
+	if err := SaveFile(dir, func(c *Config) error { c.Agent.Backend = AgentBackendOpenAICompatible; return nil }); err != nil {
+		t.Fatalf("the backend, its address and model from the environment: %v", err)
+	}
+	if err := SaveFile(dir, func(c *Config) error { c.Agent.MonthlyBudgetUSD = 5; return nil }); err != nil {
+		t.Fatalf("another save: %v", err)
+	}
+	cfg, err := Load(dir)
+	if err != nil || cfg.Agent.Backend != AgentBackendOpenAICompatible || cfg.Agent.OpenAICompatible.BaseURL != "http://10.0.0.5:11434/v1" {
+		t.Fatalf("Load = %+v, %v", cfg.Agent.OpenAICompatible, err)
+	}
+
+	dir = t.TempDir()
+	t.Setenv("AUDIOSILO_BRIDGE_AGENT_OPENAI_COMPATIBLE_BASE_URL", "")
+	t.Setenv("AUDIOSILO_BRIDGE_AGENT_OPENAI_COMPATIBLE_MODEL", "")
+	t.Setenv("AUDIOSILO_BRIDGE_AGENT_BACKEND", AgentBackendOpenAICompatible)
+	if err := SaveFile(dir, func(c *Config) error {
+		c.Agent.OpenAICompatible = AgentEndpointConfig{BaseURL: "http://10.0.0.5:11434/v1", Model: "m"}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := os.ReadFile(filepath.Join(dir, FileName))
+	if err := SaveFile(dir, func(c *Config) error { c.Agent.OpenAICompatible.BaseURL = ""; return nil }); err == nil ||
+		!strings.Contains(err.Error(), "base_url") {
+		t.Fatalf("an address cleared under the environment's backend = %v", err)
+	}
+	if after, _ := os.ReadFile(filepath.Join(dir, FileName)); string(after) != string(before) {
+		t.Fatalf("the refused save wrote config.yaml:\n%s", after)
+	}
+	if _, err := Load(dir); err != nil {
+		t.Fatalf("the next start: %v", err)
+	}
+}
