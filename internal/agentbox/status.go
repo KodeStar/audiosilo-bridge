@@ -233,10 +233,19 @@ func (r *Runner) live(dir string, rj agentproto.Runner) bool {
 // endpoint profile), never the agent container.
 func (r *Runner) notRunning(why string) string {
 	if r.backend == agent.IDOpenAICompatible {
-		return "the endpoint's agent service (agent-endpoint) isn't running (" + why + "): start it with " +
+		return r.service() + " isn't running (" + why + "): start it with " +
 			"docker compose --profile endpoint up -d agent-endpoint"
 	}
-	return "the agent container isn't running (" + why + ")"
+	return r.service() + " isn't running (" + why + ")"
+}
+
+// service names where the runs go in the agent's state: the endpoint's own
+// agent service on the openai-compatible backend, else the agent container.
+func (r *Runner) service() string {
+	if r.backend == agent.IDOpenAICompatible {
+		return "the endpoint's agent service (agent-endpoint)"
+	}
+	return "the agent container"
 }
 
 // stagingSetting is the setting naming the staging dir the runs go to.
@@ -273,12 +282,12 @@ func (r *Runner) Status() Status {
 		return st
 	}
 	if err != nil {
-		st.Detail = "the agent container's status can't be read (" + ioProblem(err) + ")"
+		st.Detail = "the status of " + r.service() + " can't be read (" + ioProblem(err) + ")"
 		return st
 	}
 	var rj agentproto.Runner
 	if err := json.Unmarshal(raw, &rj); err != nil {
-		st.Detail = "the agent container's status is unreadable: " + err.Error()
+		st.Detail = "the status of " + r.service() + " is unreadable: " + err.Error()
 		return st
 	}
 	st.Live = r.live(r.dir, rj)
@@ -489,7 +498,7 @@ func (r *Runner) refusal(c agentproto.CLI, handoff bool) string {
 // config onto one of them).
 func (r *Runner) unavailableBecause(rj agentproto.Runner, info fs.FileInfo) (problem Problem, other, why string) {
 	if rj.Protocol != agentproto.Protocol {
-		return ProblemOutdated, "", fmt.Sprintf("the agent container speaks protocol %d and this Bridge %d: run the same version of both images", rj.Protocol, agentproto.Protocol)
+		return ProblemOutdated, "", fmt.Sprintf("%s speaks protocol %d and this Bridge %d: run the same version of both images", r.service(), rj.Protocol, agentproto.Protocol)
 	}
 	if age, fresh := r.heartbeatAge(r.dir, rj); !fresh {
 		if age > 0 {
@@ -503,12 +512,12 @@ func (r *Runner) unavailableBecause(rj agentproto.Runner, info fs.FileInfo) (pro
 	}
 	c := rj.CLIs[r.backend]
 	if c.Version == "" {
-		return ProblemNoCLI, "", "the agent container has no " + r.cli + " CLI"
+		return ProblemNoCLI, "", r.service() + " has no " + r.cli + " CLI"
 	}
 	if r.backend == agent.IDOpenAICompatible {
 		switch {
 		case !rj.Endpoints:
-			return ProblemOutdated, "", "the agent container is too old to run an OpenAI-compatible endpoint: update the agent image to this Bridge's version"
+			return ProblemOutdated, "", r.service() + " is too old to run an OpenAI-compatible endpoint: update the agent image to this Bridge's version"
 		case !rj.EndpointOnly:
 			return ProblemEndpointService, "", notEndpointOnlyDetail
 		case r.sameUserAsAgent(info):
