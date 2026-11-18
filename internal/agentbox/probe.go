@@ -50,6 +50,13 @@ const probeEvery = 5 * time.Minute
 // (agentproto.DecodeCredential refuses it), so a runner never runs on it.
 const probeKind = agentproto.CredentialGroupProbe
 
+// probeModel and probeEndpoint make a probe on the openai-compatible backend
+// an endpoint request the runner accepts (probeJob); nothing ever reaches them.
+const (
+	probeModel    = "group-probe"
+	probeEndpoint = "http://group-probe.invalid/v1"
+)
+
 // probeOutcome is what one probe found.
 type probeOutcome int
 
@@ -198,7 +205,7 @@ func (r *Runner) probeJob(ctx context.Context) (probeOutcome, *probeSpoil) {
 	}
 	// strict: a volume that refuses the group says so, rather than the probe
 	// falling back to the every-uid modes it is there to leave.
-	probe := agentproto.Credential{CLI: r.backend, Kind: probeKind, Value: probeKind}
+	probe := agentproto.Credential{CLI: r.cli, Kind: probeKind, Value: probeKind}
 	var refused *groupRefusedError
 	_, err = writeCredential(root, probe, r.gid, true)
 	if (err == nil || errors.As(err, &refused)) && r.groupFailed.Swap(nil) != nil {
@@ -215,7 +222,16 @@ func (r *Runner) probeJob(ctx context.Context) (probeOutcome, *probeSpoil) {
 	} else if err != nil {
 		return probeUnknown, nil
 	}
-	if err := openJob(root, agentproto.Request{Protocol: agentproto.Protocol, CLI: r.backend, TimeoutSeconds: 60}); err != nil {
+	req := agentproto.Request{Protocol: agentproto.Protocol, CLI: r.cli, TimeoutSeconds: 60}
+	if r.cli != r.backend {
+		// An endpoint's runs (bridge#84) take the handed credential whatever the
+		// container has of its own, which a plain codex run never reads while
+		// the container is signed in: the probe goes as an endpoint run so the
+		// runner takes its file as it takes theirs. The runner refuses the
+		// probe's kind before anything would use this address or model.
+		req.Model, req.Endpoint = probeModel, &agentproto.Endpoint{BaseURL: probeEndpoint}
+	}
+	if err := openJob(root, req); err != nil {
 		return probeUnknown, nil
 	}
 	done, _ := r.wait(bounded, root, nil)

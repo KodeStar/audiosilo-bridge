@@ -16,6 +16,7 @@ import {
   parseBudget,
   parseCheckMinutes,
 } from '@/lib/settings';
+import { AgentSettingsCard } from './AgentSettingsCard';
 import { Card } from '../ui/Card';
 import { Field, inputClass } from '../ui/Field';
 import { Loading } from '../ui/Loading';
@@ -26,6 +27,7 @@ export function SettingsTab({ client }: { client: ApiClient }) {
   return (
     <div className="flex flex-col gap-5">
       <SettingsForm client={client} />
+      <AgentSettingsCard client={client} />
       <PasswordForm client={client} />
     </div>
   );

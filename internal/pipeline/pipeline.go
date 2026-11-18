@@ -74,12 +74,14 @@ type ToolConfig struct {
 }
 
 // AgentModels routes each agent stage to a model per backend. Claude keys the claude
-// backend, OpenAI the codex backend; a missing key means the backend CLI's default
-// model. It is a plain-map view of config.AgentConfig.Claude/.OpenAI so the pipeline
-// package never imports internal/config.
+// backend, OpenAI the codex backend, Compatible an OpenAI-compatible endpoint
+// (bridge#84: every stage named, as an endpoint has no default model); a missing
+// key means the backend CLI's default model. It is a plain-map view of
+// config.AgentConfig so the pipeline package never imports internal/config.
 type AgentModels struct {
-	Claude map[string]string
-	OpenAI map[string]string
+	Claude     map[string]string
+	OpenAI     map[string]string
+	Compatible map[string]string
 }
 
 // AgentEfforts routes optional reasoning-effort overrides independently from

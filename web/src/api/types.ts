@@ -148,6 +148,66 @@ export interface SettingsUpdate {
   monthly_budget_usd?: number;
 }
 
+// --- Settings > Agent (internal/api/agent.go, bridge#84) ---
+
+// agent.backend: the CLI the agent container runs, or codex against an
+// OpenAI-compatible endpoint.
+export type AgentBackendName = 'claude' | 'codex' | 'openai-compatible';
+
+// The agent settings the environment can set (AgentSettings.locked).
+export type AgentSettingKey =
+  'agent.backend' | 'agent.openai_compatible.base_url' | 'agent.openai_compatible.model';
+
+// agent.openai_compatible: the endpoint's address, the model every stage uses,
+// and the stages' own models.
+export interface AgentEndpoint {
+  base_url: string;
+  model: string;
+  models: Record<string, string>;
+}
+
+// GET /api/settings/agent
+export interface AgentSettings {
+  // As saved; running_backend is the one the agent runs now (a new backend
+  // applies when the Bridge restarts, the endpoint at once).
+  backend: AgentBackendName;
+  running_backend: AgentBackendName;
+  backends: AgentBackendName[];
+  openai_compatible: AgentEndpoint;
+  // The stages a model can be set for, in the pipeline's order.
+  stages: string[];
+  // The endpoint's API key is set (PUT /api/accounts/agent, endpoint_api_key).
+  key_set: boolean;
+  key_set_at: string;
+  locked: AgentSettingKey[];
+}
+
+// PUT /api/settings/agent
+export interface AgentSettingsUpdate {
+  backend: AgentBackendName;
+  openai_compatible: AgentEndpoint;
+}
+
+// One model the endpoint lists; context_tokens and tools are left out when
+// the endpoint doesn't say.
+export interface EndpointModel {
+  id: string;
+  context_tokens?: number;
+  tools?: boolean;
+}
+
+// POST /api/settings/agent/test: the endpoint's models, whether it offers the
+// Responses API, or error (why the models couldn't be listed). key_sent: the
+// check carried the endpoint's API key, which the Bridge sends to the saved
+// address alone (the one it was entered for).
+export interface EndpointCheck {
+  models: EndpointModel[];
+  responses: '' | 'yes' | 'no' | 'unknown';
+  responses_detail: string;
+  error: string;
+  key_sent: boolean;
+}
+
 // The states a job can have on the Bridge (store.Job*).
 export type JobState = 'running' | 'done' | 'failed' | 'needs_attention' | 'cancelled' | 'lost';
 
@@ -427,7 +487,8 @@ export interface GitHubAccount {
 }
 
 // The agent credential kinds (the vault's names).
-export type AgentKind = 'claude_oauth_token' | 'anthropic_api_key' | 'openai_api_key';
+export type AgentKind =
+  'claude_oauth_token' | 'anthropic_api_key' | 'openai_api_key' | 'endpoint_api_key';
 
 // api.AgentAccount
 export interface AgentAccount {

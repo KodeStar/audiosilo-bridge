@@ -122,12 +122,82 @@ const (
 	// its group, and not because the staging volume refuses that (Detail says
 	// why), so no job can be handed over.
 	ProblemHandoffFailed Problem = "handoff_failed"
+	// ProblemNoEndpoint: the backend is openai-compatible, and no endpoint
+	// address is set (bridge#84).
+	ProblemNoEndpoint Problem = "no_endpoint"
+	// ProblemOwnCredentials: the backend is openai-compatible, and the
+	// endpoint's agent service holds a credential of its own or can reach the
+	// agent home, which an endpoint's run could read or change (the runner
+	// refuses such a run too).
+	ProblemOwnCredentials Problem = "own_credentials"
+	// ProblemEndpointService: the backend is openai-compatible, and its runs
+	// have no agent service of their own apart from the agent container
+	// (service.go: none set, a staging dir or a uid shared with the agent
+	// container, or a runner that isn't --endpoint-only).
+	ProblemEndpointService Problem = "endpoint_service"
+	// ProblemEndpointOnly: the backend is claude or codex, and the runner in
+	// agent.staging_dir is the endpoint's service, which runs nothing else.
+	ProblemEndpointOnly Problem = "endpoint_only"
 )
+
+// noEndpointDetail is the agent's state while the openai-compatible backend
+// has no endpoint address.
+const noEndpointDetail = "no OpenAI-compatible endpoint is set: set its address in Settings > Agent on the Bridge's page"
+
+// ownCredentialsDetail is the agent's state while the endpoint's agent
+// service holds a credential of its own or can reach the agent home. An
+// endpoint's model is whoever answers at the address, and codex runs its
+// commands as the runner's uid with its sandbox off, so the run could read a
+// token, key or login and send it anywhere, or plant a config.toml a later
+// subscription run loads.
+const ownCredentialsDetail = agentproto.OwnCredentialsReason + ": give that service no credential variables " +
+	"and none of those volumes, and a user of its own (the compose example's agent-endpoint; its log says what it " +
+	"found), or choose claude or codex in Settings > Agent"
+
+// ownCredentials reports whether the container holds a credential of its own:
+// the runner says so, or one of its CLIs has one (backend's entry is the
+// Bridge's own making, Status).
+func ownCredentials(rj agentproto.Runner, backend string) bool {
+	if rj.OwnCredentials {
+		return true
+	}
+	for name, c := range rj.CLIs {
+		if name != backend && c.Credential != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// runnerClockSkew is how far ahead of the Bridge's clock a runner.json may be
+// dated: the containers share the host's clock, so a little, never more. A
+// heartbeat further ahead (a run that wrote runner.json, or a clock gone wrong)
+// would otherwise keep the container live long after its runner stopped.
+const runnerClockSkew = 5 * time.Second
+
+// heartbeatAge is how long ago rj's heartbeat was, and whether that is fresh:
+// within agentproto.RunnerFreshFor and not later than now (runnerClockSkew
+// aside).
+func (r *Runner) heartbeatAge(rj agentproto.Runner) (age time.Duration, fresh bool) {
+	age = r.now().Sub(rj.HeartbeatAt)
+	return age, age <= agentproto.RunnerFreshFor && age >= -runnerClockSkew
+}
+
+// live reports whether rj is a runner of this protocol with a fresh heartbeat.
+func (r *Runner) live(rj agentproto.Runner) bool {
+	_, fresh := r.heartbeatAge(rj)
+	return rj.Protocol == agentproto.Protocol && fresh
+}
 
 // Status reads runner.json now. Detail never names a Bridge path: it becomes a
 // parked book's reason, which the server shows in its console. The path goes to
 // the log instead (once per outage, as Status runs on every heartbeat).
 func (r *Runner) Status() Status {
+	if r.backend == agent.IDOpenAICompatible {
+		if why := r.endpointDirProblem(); why != "" {
+			return Status{Problem: ProblemEndpointService, Detail: why}
+		}
+	}
 	st := Status{Problem: ProblemNotRunning}
 	root, err := os.OpenRoot(r.dir)
 	if err != nil {
@@ -153,9 +223,19 @@ func (r *Runner) Status() Status {
 		st.Detail = "the agent container's status is unreadable: " + err.Error()
 		return st
 	}
-	st.Live = rj.Protocol == agentproto.Protocol && r.now().Sub(rj.HeartbeatAt) <= agentproto.RunnerFreshFor
-	if c, ok := rj.CLIs[r.backend]; ok && c.Version != "" && c.Credential == "" && rj.Handoff {
-		if kind, _, since, ok := r.handoffCredential(); ok {
+	st.Live = r.live(rj)
+	if r.cli != r.backend {
+		// An endpoint (bridge#84): codex runs it, with the endpoint's key from
+		// the vault when one is set and none of the container's own, so its
+		// entry starts as codex's version alone and the hand-off below fills in
+		// the key (a runner that can't run an endpoint is outdated, below).
+		if rj.CLIs == nil {
+			rj.CLIs = map[string]agentproto.CLI{}
+		}
+		rj.CLIs[r.backend] = agentproto.CLI{Version: rj.CLIs[r.cli].Version}
+	}
+	if c, ok := rj.CLIs[r.backend]; ok && c.Version != "" && c.Credential == "" && rj.Handoff && (r.cli == r.backend || rj.Endpoints) {
+		if kind, _, since, ok := r.handoffCredential(r.endpointNow()); ok {
 			// The vault's credential stands in for the container's: its kind is what
 			// the runs are billed as, and its time moves when the Accounts tab
 			// replaces it (which ends a refusal of the old one).
@@ -165,9 +245,15 @@ func (r *Runner) Status() Status {
 		}
 	}
 	st.Version, st.Slots, st.HeartbeatAt, st.CLIs = rj.Version, rj.Slots, rj.HeartbeatAt, rj.CLIs
+	if r.backend == agent.IDOpenAICompatible {
+		// One endpoint run at a time, whatever runner.json says: a run can
+		// rewrite it, and a job staged beside a live run holds a key that run
+		// could read (the runner refuses --slots over 1 too).
+		st.Slots = min(st.Slots, 1)
+	}
 	st.groupListed = slices.Contains(rj.Groups, r.gid)
 	st.ShareGroup = r.shareGroup(st.groupListed, info, st.Live)
-	st.Problem, st.Other, st.Detail = r.unavailableBecause(rj)
+	st.Problem, st.Other, st.Detail = r.unavailableBecause(rj, info)
 	if st.Detail == "" && st.Handoff {
 		if why := r.groupRequired(st.ShareGroup); why != "" {
 			st.Problem, st.Detail = ProblemGroupRequired, why
@@ -253,12 +339,13 @@ func (r *Runner) groupRequired(share bool) string {
 }
 
 // handoffCredential is the vault's credential for the backend (ok false for
-// none, or no Credential func).
-func (r *Runner) handoffCredential() (kind, value string, since time.Time, ok bool) {
+// none, or no Credential func), on the openai-compatible backend the key
+// entered for the address endpoint ("" on the others).
+func (r *Runner) handoffCredential(endpoint string) (kind, value string, since time.Time, ok bool) {
 	if r.credential == nil {
 		return "", "", time.Time{}, false
 	}
-	return r.credential(r.backend)
+	return r.credential(r.backend, endpoint)
 }
 
 // CredentialRefusedDetail starts the agent's state while the provider refuses
@@ -267,8 +354,12 @@ const CredentialRefusedDetail = "the agent's credential was refused by the provi
 
 // refusalAdvice is where a refused credential is replaced: on the Accounts tab
 // when it is the one handed over, else in the agent container, whose own
-// credential wins over the Accounts tab's.
-func refusalAdvice(handoff bool) string {
+// credential wins over the Accounts tab's; an endpoint's key in Settings >
+// Agent, whether one is set or not (a local server may take none).
+func (r *Runner) refusalAdvice(handoff bool) string {
+	if r.backend == agent.IDOpenAICompatible {
+		return ": check the endpoint's API key in Settings > Agent on the Bridge's page"
+	}
 	if handoff {
 		return ": replace it on the Bridge's Accounts tab"
 	}
@@ -277,20 +368,32 @@ func refusalAdvice(handoff bool) string {
 }
 
 // refusedCredential is a credential the provider refused: the runner's report of
-// it then (its kind and since when the runner has had it), and the provider's
-// words.
+// it then (its kind and since when the runner has had it), the provider's
+// words, and the endpoint's address the run went to (openai-compatible's: ""
+// for the others).
 type refusedCredential struct {
-	kind   string
-	since  time.Time
-	detail string
+	kind     string
+	since    time.Time
+	detail   string
+	endpoint string
 }
 
 // noteRefusal remembers that the provider refused the credential c (the backend's
-// entry in runner.json when the run was handed over).
-func (r *Runner) noteRefusal(c agentproto.CLI, detail string) {
+// entry in runner.json when the run was handed over), at the endpoint address
+// the run went to ("" off the openai-compatible backend).
+func (r *Runner) noteRefusal(c agentproto.CLI, detail, endpoint string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.refused = &refusedCredential{kind: c.Credential, since: c.CredentialSince, detail: detail}
+	r.refused = &refusedCredential{kind: c.Credential, since: c.CredentialSince, detail: detail, endpoint: endpoint}
+}
+
+// endpointNow is the endpoint's address now on the openai-compatible backend,
+// "" on the others (whose refusals an endpoint edit never clears).
+func (r *Runner) endpointNow() string {
+	if r.backend != agent.IDOpenAICompatible {
+		return ""
+	}
+	return r.endpoint()
 }
 
 // clearRefusal forgets a refusal: a run went through, so the credential works.
@@ -303,35 +406,58 @@ func (r *Runner) clearRefusal() {
 // refusal is the agent's state while the provider refuses the credential the
 // runner reports now as c ("" when it doesn't): a credential the runner reports
 // as changed since (another kind, or seen since another time: replaced, or the
-// container restarted) clears it. handoff says c is the Accounts tab's
-// credential, handed over, rather than the container's own.
+// container restarted), or another endpoint address (Settings > Agent: another
+// provider, maybe one that takes no key), clears it. handoff says c is the
+// Accounts tab's credential, handed over, rather than the container's own.
 func (r *Runner) refusal(c agentproto.CLI, handoff bool) string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.refused == nil {
 		return ""
 	}
-	if c.Credential != r.refused.kind || !c.CredentialSince.Equal(r.refused.since) {
+	if c.Credential != r.refused.kind || !c.CredentialSince.Equal(r.refused.since) || r.endpointNow() != r.refused.endpoint {
 		r.refused = nil
 		return ""
 	}
-	return CredentialRefusedDetail + refusalAdvice(handoff) + " (" + r.refused.detail + ")"
+	return CredentialRefusedDetail + r.refusalAdvice(handoff) + " (" + r.refused.detail + ")"
 }
 
 // unavailableBecause is why runs can't go to the container now, or "". Each
 // reason reads on its own: it is the page's status line and a parked book's
-// reason. The backend is always claude or codex (the app maps the config onto
-// one of them).
-func (r *Runner) unavailableBecause(rj agentproto.Runner) (problem Problem, other, why string) {
+// reason. The backend is claude, codex or openai-compatible (the app maps the
+// config onto one of them).
+func (r *Runner) unavailableBecause(rj agentproto.Runner, info fs.FileInfo) (problem Problem, other, why string) {
 	if rj.Protocol != agentproto.Protocol {
 		return ProblemOutdated, "", fmt.Sprintf("the agent container speaks protocol %d and this Bridge %d: run the same version of both images", rj.Protocol, agentproto.Protocol)
 	}
-	if age := r.now().Sub(rj.HeartbeatAt); age > agentproto.RunnerFreshFor {
-		return ProblemNotRunning, "", fmt.Sprintf("the agent container isn't running (its last heartbeat was %s ago)", age.Round(time.Second))
+	if age, fresh := r.heartbeatAge(rj); !fresh {
+		if age > 0 {
+			return ProblemNotRunning, "", fmt.Sprintf("the agent container isn't running (its last heartbeat was %s ago)", age.Round(time.Second))
+		}
+		return ProblemNotRunning, "", fmt.Sprintf("the agent container's status is dated %s ahead of this Bridge's clock "+
+			"(its runner didn't write it, or the clock is wrong)", (-age).Round(time.Second))
+	}
+	if rj.EndpointOnly && r.backend != agent.IDOpenAICompatible {
+		return ProblemEndpointOnly, "", endpointOnlyDetail
 	}
 	c := rj.CLIs[r.backend]
 	if c.Version == "" {
-		return ProblemNoCLI, "", "the agent container has no " + r.backend + " CLI"
+		return ProblemNoCLI, "", "the agent container has no " + r.cli + " CLI"
+	}
+	if r.backend == agent.IDOpenAICompatible {
+		switch {
+		case !rj.Endpoints:
+			return ProblemOutdated, "", "the agent container is too old to run an OpenAI-compatible endpoint: update the agent image to this Bridge's version"
+		case !rj.EndpointOnly:
+			return ProblemEndpointService, "", notEndpointOnlyDetail
+		case r.sameUserAsAgent(info):
+			return ProblemEndpointService, "", sameUserDetail
+		case r.endpoint() == "":
+			return ProblemNoEndpoint, "", noEndpointDetail
+		case ownCredentials(rj, r.backend):
+			return ProblemOwnCredentials, "", ownCredentialsDetail
+		}
+		return "", "", "" // an endpoint may take no key (a local server)
 	}
 	if c.Credential != "" {
 		return "", "", ""
@@ -346,7 +472,7 @@ func (r *Runner) unavailableBecause(rj agentproto.Runner) (problem Problem, othe
 	}
 	tooOld := false
 	if !rj.Handoff {
-		_, _, _, tooOld = r.handoffCredential()
+		_, _, _, tooOld = r.handoffCredential("")
 	}
 	if tooOld {
 		why = r.backend + " has no credential in the agent container, and the container is too old to take " +

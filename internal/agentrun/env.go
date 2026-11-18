@@ -3,12 +3,15 @@ package agentrun
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/kodestar/audiosilo-bridge/internal/agent"
 	"github.com/kodestar/audiosilo-bridge/internal/agentproto"
 )
 
@@ -20,6 +23,9 @@ const (
 	envOpenAI      = "OPENAI_API_KEY"
 	envCodex       = "CODEX_API_KEY"
 )
+
+// credentialVars are all four, which an endpoint-only runner must not hold.
+var credentialVars = []string{envClaudeToken, envAnthropic, envOpenAI, envCodex}
 
 // defaultPath is the child's PATH when the runner has none.
 const defaultPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
@@ -34,6 +40,14 @@ var passThrough = []string{"LANG", "TZ"}
 // into shell_snapshots/ (spike 2).
 var codexKeep = map[string]bool{"auth.json": true, "config.toml": true}
 
+// codexDir and secretsDir are the agent home's dirs for codex's CODEX_HOME and
+// the credentials' files (the endpoint's service looks for both under its
+// mounts: mounts.go).
+const (
+	codexDir   = "codex"
+	secretsDir = "secrets"
+)
+
 // maxSecretBytes bounds a secrets file read.
 const maxSecretBytes = 64 << 10
 
@@ -47,7 +61,7 @@ func (r *Runner) path() string {
 
 // codexHome is CODEX_HOME: on the agent volume, since codex keeps its login
 // there (and refuses a CODEX_HOME under /tmp).
-func (r *Runner) codexHome() string { return filepath.Join(r.opts.Home, "codex") }
+func (r *Runner) codexHome() string { return filepath.Join(r.opts.Home, codexDir) }
 
 // baseEnv is the allow-listed environment every child starts from: PATH, LANG,
 // TZ, a private TMPDIR and HOME under runDir, and the autoupdater off. Nothing
@@ -100,6 +114,22 @@ func (r *Runner) childEnv(cli, runDir string, handed *agentproto.Credential) []s
 	return env
 }
 
+// endpointEnv is the environment of a codex run against an OpenAI-compatible
+// endpoint (bridge#84): baseEnv, a CODEX_HOME of its own under runDir (empty:
+// no device login), and the endpoint's key, when handed one, in
+// agent.EndpointKeyEnv alone. None of the container's own credentials: they are
+// for OpenAI and must never reach another endpoint.
+func (r *Runner) endpointEnv(runDir string, handed *agentproto.Credential) []string {
+	env := append(r.baseEnv(runDir), "CODEX_HOME="+endpointCodexHome(runDir))
+	if handed != nil && handed.Kind == agentproto.CredentialEndpointKey {
+		env = append(env, agent.EndpointKeyEnv+"="+handed.Value)
+	}
+	return env
+}
+
+// endpointCodexHome is an endpoint run's own CODEX_HOME, under its runDir.
+func endpointCodexHome(runDir string) string { return filepath.Join(runDir, "codex") }
+
 // credentialKind is the credential a CLI's runs use, by presence only (a value
 // is never read for this): a subscription credential first (claude's OAuth
 // token, codex's device login), else an API key, else "". A run gets exactly the
@@ -123,6 +153,66 @@ func (r *Runner) credentialKind(cli string) string {
 	}
 	return ""
 }
+
+// credentialProblem (an endpoint-only runner's) says what puts a credential of
+// the container's own within reach of a run against an endpoint, "" when
+// nothing does (the CLI runs as the runner's uid with its sandbox off; execute
+// refuses an endpoint run while there is one): one of the four credential
+// variables in the runner's environment (a run reads /proc/<runner>/environ
+// only while the runner is dumpable, but the variables are a configuration
+// mistake either way), the agent home (homeReachable), or a mount that is the
+// agent volume or holds a credential's file (credentialMount, mounts.go). It
+// names a variable or a path, never a value: the log says it.
+func (r *Runner) credentialProblem() string {
+	for _, k := range credentialVars {
+		if r.envSecret(k) != "" {
+			return "the variable " + k + " is set"
+		}
+	}
+	if r.homeReachable() {
+		return r.opts.Home + " (the agent home) is reachable"
+	}
+	ms, err := r.mounts()
+	if err != nil {
+		return "the mounts can't be read: " + err.Error()
+	}
+	return credentialMount(ms)
+}
+
+// homeReachable reports whether the runner can list, enter or write the agent
+// home (the subscriptions' secrets, codex's login and its config.toml, which a
+// later subscription run loads). The endpoint's service mounts no /agent, and
+// runs as another uid than the agent container, whose 0700 home (the image's,
+// an anonymous volume where nothing is mounted) is then closed to it. Anything
+// but the home missing or closed counts as reachable: the answer must never be
+// a wrong no.
+func (r *Runner) homeReachable() bool {
+	if _, err := os.Lstat(r.opts.Home); err != nil {
+		return !errors.Is(err, fs.ErrNotExist)
+	}
+	if f, err := os.Open(r.opts.Home); err == nil {
+		_ = f.Close()
+		return true
+	}
+	return enterable(r.opts.Home)
+}
+
+// endpointBlocked is exit.json's error for an endpoint run the container's own
+// credentials stop (the page's status line and a parked book's reason).
+const endpointBlocked = agentproto.OwnCredentialsReason + ": give that service no credential variables and " +
+	"none of those volumes, and run it as its own user (the compose example's agent-endpoint)"
+
+// endpointOnlyRefusal is exit.json's error for a CLI's own run sent to the
+// endpoint's agent service, and endpointElsewhere for an endpoint run sent to
+// the agent container (each staging dir has its own runner: agentbox's Status
+// says which setting points at the wrong one).
+const (
+	endpointOnlyRefusal = "this agent service runs only OpenAI-compatible endpoints (agent-runner --endpoint-only): " +
+		"point agent.staging_dir at the agent container's staging volume"
+	endpointElsewhere = "runs against an OpenAI-compatible endpoint go to their own agent service, never to the agent " +
+		"container that holds the subscriptions: set agent.endpoint_staging_dir to its staging volume (the compose " +
+		"example's agent-endpoint)"
+)
 
 // credentialSince is when the runner first saw the credential cli has now (kind
 // is its credentialKind; zero with none). The credential is compared by a
@@ -179,13 +269,19 @@ func (r *Runner) openAIKey() string {
 
 // secretFile is where a credential's file lives.
 func (r *Runner) secretFile(name string) string {
-	return filepath.Join(r.opts.Home, "secrets", strings.ToLower(name))
+	return filepath.Join(r.opts.Home, secretsDir, strings.ToLower(name))
+}
+
+// envSecret is a credential variable's value, trimmed ("" when unset or blank).
+func (r *Runner) envSecret(name string) string {
+	v, _ := r.opts.Getenv(name)
+	return strings.TrimSpace(v)
 }
 
 // hasSecret reports a credential's presence: a non-empty variable, else a
 // non-empty secrets file. The value isn't read.
 func (r *Runner) hasSecret(name string) bool {
-	if v, ok := r.opts.Getenv(name); ok && strings.TrimSpace(v) != "" {
+	if r.envSecret(name) != "" {
 		return true
 	}
 	info, err := os.Stat(r.secretFile(name))
@@ -195,8 +291,8 @@ func (r *Runner) hasSecret(name string) bool {
 // secret reads a credential for a run. It goes into that run's environment and
 // nowhere else: never argv, a log or a file the Bridge can read.
 func (r *Runner) secret(name string) string {
-	if v, ok := r.opts.Getenv(name); ok && strings.TrimSpace(v) != "" {
-		return strings.TrimSpace(v)
+	if v := r.envSecret(name); v != "" {
+		return v
 	}
 	f, err := os.Open(r.secretFile(name))
 	if err != nil {

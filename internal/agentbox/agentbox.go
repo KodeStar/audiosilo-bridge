@@ -13,6 +13,7 @@
 package agentbox
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -21,6 +22,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -50,8 +52,22 @@ const (
 
 // Options configures a Runner.
 type Options struct {
-	Dir     string // the staging dir (agent.staging_dir)
-	Backend string // "claude" | "codex": which CLI the runs use
+	// Dir is the staging dir the runs go to: the agent container's
+	// (agent.staging_dir), or for the openai-compatible backend the
+	// endpoint's own agent service's (agent.endpoint_staging_dir; "" for
+	// none, which Status reports as ProblemEndpointService).
+	Dir string
+	// AgentDir, on the openai-compatible backend, is the agent container's
+	// staging dir: the endpoint's service must share no dir and no uid with
+	// it (Status).
+	AgentDir string
+	// Backend is "claude" or "codex", the CLI the runs use, or
+	// "openai-compatible": codex against the endpoint Endpoint names (bridge#84).
+	Backend string
+	// Endpoint is the OpenAI-compatible endpoint's base URL now ("" for none
+	// set), read for every status and run so the page's change applies at
+	// once. Only the openai-compatible backend reads it.
+	Endpoint func() string
 	// ClaimTimeout is agent.claim_timeout_seconds, which config defaults and
 	// validates; the app always passes it.
 	ClaimTimeout time.Duration
@@ -60,7 +76,10 @@ type Options struct {
 	// decision 19): its kind (agentproto.Credential*), value and when it was set,
 	// ok false for none. nil: nothing to hand over. It is handed to a run only
 	// when the runner takes a hand-off and has no credential of its own.
-	Credential func(cli string) (kind, value string, since time.Time, ok bool)
+	// endpoint is the address an openai-compatible run goes to ("" for the
+	// others): the key comes back only when it was entered for exactly that
+	// address, so a run never carries another address's key.
+	Credential func(cli, endpoint string) (kind, value string, since time.Time, ok bool)
 	// RequireGroup (agent.require_group) keeps a handed credential to the
 	// Bridge's group in every case: a runner outside the group, a staging
 	// volume that refuses the chown and a runner denied the group's file each
@@ -70,11 +89,15 @@ type Options struct {
 
 // Runner implements agent.Runner over the staging protocol.
 type Runner struct {
-	dir          string
-	backend      string
+	dir      string
+	agentDir string
+	backend  string
+	// cli is the CLI the runs use: the backend's own, codex for an endpoint.
+	cli          string
+	endpoint     func() string
 	claimTimeout time.Duration
 	log          *slog.Logger
-	credential   func(cli string) (kind, value string, since time.Time, ok bool)
+	credential   func(cli, endpoint string) (kind, value string, since time.Time, ok bool)
 	requireGroup bool
 
 	now       func() time.Time
@@ -150,7 +173,10 @@ var _ agent.Runner = (*Runner)(nil)
 func New(opts Options) *Runner {
 	r := &Runner{
 		dir:          opts.Dir,
+		agentDir:     opts.AgentDir,
 		backend:      opts.Backend,
+		cli:          opts.Backend,
+		endpoint:     opts.Endpoint,
 		claimTimeout: opts.ClaimTimeout,
 		log:          opts.Log,
 		credential:   opts.Credential,
@@ -172,6 +198,12 @@ func New(opts Options) *Runner {
 	}
 	if r.log == nil {
 		r.log = slog.New(slog.DiscardHandler)
+	}
+	if r.backend == agent.IDOpenAICompatible {
+		r.cli = agentproto.CLICodex
+	}
+	if r.endpoint == nil {
+		r.endpoint = func() string { return "" }
 	}
 	r.runnerUID.Store(noUID)
 	r.prepare()
@@ -238,16 +270,21 @@ func (r *Runner) reclaim(job string) {
 	}
 }
 
-// ID is the backend the runs use, so telemetry and model routing see the CLI.
+// Dir is the staging dir the runs go to ("" for an endpoint's service not set).
+func (r *Runner) Dir() string { return r.dir }
+
+// ID is the backend the runs use, so telemetry, model routing and pricing see
+// it (openai-compatible for an endpoint, though codex runs it).
 func (r *Runner) ID() string { return r.backend }
 
-// SupportsWeb is true: both CLIs can search the web, and the agent container
-// has its own internet-only network.
-func (r *Runner) SupportsWeb() bool { return true }
+// SupportsWeb is true for both CLIs, which can search the web from the agent
+// container's own network; false for an endpoint, as web search is a tool
+// OpenAI hosts (CodexArgs turns it off there).
+func (r *Runner) SupportsWeb() bool { return r.backend != agent.IDOpenAICompatible }
 
 // EnforcesNoTools reports what the fronted CLI does: claude removes its tool
 // catalogue for a NoTools run, codex can't (its read-only sandbox still reads).
-func (r *Runner) EnforcesNoTools() bool { return r.backend == agent.IDClaude }
+func (r *Runner) EnforcesNoTools() bool { return r.cli == agent.IDClaude }
 
 // Detect maps Status onto the engine's Availability. RetryAfter is always set:
 // whatever makes the container unavailable (down, restarting, too busy to claim
@@ -281,10 +318,29 @@ func (r *Runner) Run(ctx context.Context, req agent.Request) (agent.Result, erro
 	if req.Dir == "" {
 		return agent.Result{}, errors.New("agent container: the request has no staged dir")
 	}
+	// addr is the endpoint address this run goes to, read once: its key and
+	// the refusal it may earn both belong to it, whatever the address is by now.
+	var addr string
+	if r.backend == agent.IDOpenAICompatible {
+		base := r.endpoint()
+		if base == "" {
+			return agent.Result{}, &agent.NotAvailableError{Backend: r.backend, Detail: noEndpointDetail}
+		}
+		if req.Model == "" {
+			// The page's models apply at once and a backend at the next start, so
+			// with another backend saved they may be cleared under this one; the
+			// runner would refuse the request (an endpoint has no default model).
+			stage := cmp.Or(req.Stage, "this stage")
+			return agent.Result{}, &agent.NotAvailableError{Backend: r.backend,
+				Detail: "the OpenAI-compatible endpoint has no model set for " + stage + ": set one in Settings > Agent on the Bridge's page"}
+		}
+		req.Endpoint = &agent.Endpoint{BaseURL: base}
+		addr = base
+	}
 	var handed *agentproto.Credential
 	if st.Handoff {
-		if kind, value, _, ok := r.handoffCredential(); ok {
-			handed = &agentproto.Credential{CLI: r.backend, Kind: kind, Value: value}
+		if kind, value, _, ok := r.handoffCredential(addr); ok {
+			handed = &agentproto.Credential{CLI: r.cli, Kind: kind, Value: value}
 		}
 	}
 	group := noGroup
@@ -339,7 +395,7 @@ func (r *Runner) runJob(ctx context.Context, req agent.Request, st Status, hande
 	}
 	job := filepath.Join(r.dir, id)
 	defer r.remove(job)
-	root, groupErr, err := stage(job, req, r.backend, timeout, handed, group, r.requireGroup)
+	root, groupErr, err := stage(job, req, r.cli, timeout, handed, group, r.requireGroup)
 	var refused *groupRefusedError
 	if errors.As(err, &refused) {
 		return agent.Result{}, r.blockGroup("the staging volume refused to give the credential to the Bridge's group ("+
@@ -367,8 +423,16 @@ func (r *Runner) runJob(ctx context.Context, req agent.Request, st Status, hande
 	if !done {
 		return agent.Result{}, waitErr
 	}
-	res, runErr := r.outcome(root, req.Model, time.Duration(timeout)*time.Second)
-	r.noteCredential(st, runErr)
+	secret := ""
+	if handed != nil {
+		secret = handed.Value
+	}
+	res, runErr := r.outcome(root, req.Model, time.Duration(timeout)*time.Second, secret)
+	endpoint := ""
+	if req.Endpoint != nil {
+		endpoint = req.Endpoint.BaseURL
+	}
+	r.noteCredential(st, runErr, endpoint)
 	if waitErr != nil {
 		// Cancelled: the runner stopped the CLI and finished the job, so the usage
 		// it reported is still worth recording; the outputs aren't harvested.
@@ -501,13 +565,15 @@ const notRunnersDenial = " (not from the runner's uid on the staging volume, so 
 
 // noteCredential remembers a credential the provider refused, and forgets one
 // once a run shows it works (an answer, or a rate limit: the provider took the
-// credential then). st is the runner's report when the run was handed over.
-func (r *Runner) noteCredential(st Status, runErr error) {
+// credential then). st is the runner's report when the run was handed over,
+// endpoint the address the run went to ("" off the openai-compatible backend):
+// a refusal is that address's, whatever the address is by now.
+func (r *Runner) noteCredential(st Status, runErr error, endpoint string) {
 	var na *agent.NotAvailableError
 	var rl *agent.RateLimitError
 	switch {
 	case errors.As(runErr, &na) && na.CredentialRefused:
-		r.noteRefusal(st.CLIs[r.backend], na.Detail)
+		r.noteRefusal(st.CLIs[r.backend], na.Detail, endpoint)
 	case runErr == nil || errors.As(runErr, &rl):
 		r.clearRefusal()
 	}
@@ -638,8 +704,10 @@ func (r *Runner) heartbeatAt(root *os.Root, claimedAt time.Time) time.Time {
 
 // outcome reads exit.json and the CLI's output and interprets them with the same
 // code the local runners use. An unavailable exit still reports the usage the
-// CLI's output shows, so a paid run the container cut short is counted.
-func (r *Runner) outcome(root *os.Root, model string, timeout time.Duration) (agent.Result, error) {
+// CLI's output shows, so a paid run the container cut short is counted. secret
+// is the credential handed to the run ("" for none), cut from the output
+// (parse).
+func (r *Runner) outcome(root *os.Root, model string, timeout time.Duration, secret string) (agent.Result, error) {
 	raw, info, err := agentproto.ReadRegularInfo(root, agentproto.ExitFile, agentproto.MaxExitBytes)
 	if err != nil {
 		return agent.Result{}, r.stagingFailed("read the run's exit.json from", err)
@@ -664,7 +732,7 @@ func (r *Runner) outcome(root *os.Root, model string, timeout time.Duration) (ag
 			// a run that got going may have spent tokens, so whatever usage its
 			// stdout reports rides on the Result beside the error and the budgets
 			// count it. Nothing else of a cut-off run is trusted.
-			res, _ := r.parse(root, model, agent.CLIOutcome{ExitErr: errors.New(ex.Error), Timeout: timeout})
+			res, _ := r.parse(root, model, agent.CLIOutcome{ExitErr: errors.New(ex.Error), Timeout: timeout}, secret)
 			return agent.Result{Usage: res.Usage}, &agent.NotAvailableError{Backend: r.backend, Detail: ex.Error}
 		}
 		return agent.Result{}, errors.New(refusedJob + ex.Error)
@@ -677,19 +745,35 @@ func (r *Runner) outcome(root *os.Root, model string, timeout time.Duration) (ag
 	case ex.ExitCode != 0:
 		out.ExitErr = exitStatus(ex.ExitCode)
 	}
-	return r.parse(root, model, out)
+	return r.parse(root, model, out, secret)
 }
+
+// minCutSecret is the shortest handed credential parse cuts from a run's
+// output. A local server that takes any key is often given a short stand-in
+// ("x", "none", "ollama"): cutting that from the CLI's JSON stream and its
+// last message would cut it out of ordinary words, token counts and event
+// names, so the run's usage, answer and failure would all be misread. A key
+// that short keeps nothing safe; every provider's real key is far longer.
+const minCutSecret = 8
 
 // parse reads the CLI's output files into out and interprets them with the
 // backend's shared result mapping (ClaudeResult/CodexResult). A missing or
-// unreadable file reads as empty.
-func (r *Runner) parse(root *os.Root, model string, out agent.CLIOutcome) (agent.Result, error) {
-	stdout, _ := agentproto.ReadRegular(root, agentproto.StdoutFile, agentproto.MaxStdoutBytes)
-	stderr, _ := agentproto.ReadRegular(root, agentproto.StderrFile, agentproto.MaxStderrBytes)
-	out.Stdout, out.Stderr = string(stdout), string(stderr)
-	if r.backend == agent.IDCodex {
-		last, _ := agentproto.ReadRegular(root, agentproto.LastMessageFile, agentproto.MaxStdoutBytes)
-		out.LastMessage = string(last)
+// unreadable file reads as empty. The handed credential (secret, "" for none;
+// one of minCutSecret bytes or more)
+// is cut from them first: a provider may repeat the key it refused in its
+// error (an OpenAI-compatible endpoint is anyone's server), and the CLI's
+// words become the run's error, a parked book's reason and the log.
+func (r *Runner) parse(root *os.Root, model string, out agent.CLIOutcome, secret string) (agent.Result, error) {
+	read := func(name string, limit int64) string {
+		b, _ := agentproto.ReadRegular(root, name, limit)
+		if len(secret) < minCutSecret {
+			return string(b)
+		}
+		return strings.ReplaceAll(string(b), secret, "[the key]")
+	}
+	out.Stdout, out.Stderr = read(agentproto.StdoutFile, agentproto.MaxStdoutBytes), read(agentproto.StderrFile, agentproto.MaxStderrBytes)
+	if r.cli == agent.IDCodex {
+		out.LastMessage = read(agentproto.LastMessageFile, agentproto.MaxStdoutBytes)
 		return agent.CodexResult(model, out)
 	}
 	return agent.ClaudeResult(model, out)

@@ -1,6 +1,9 @@
 import type {
   Accounts,
   AgentKind,
+  AgentSettings,
+  AgentSettingsUpdate,
+  EndpointCheck,
   AudibleAccounts,
   AudibleMapping,
   AudibleRemoveResponse,
@@ -146,6 +149,24 @@ export class ApiClient {
     return this.request('/api/settings', { method: 'PUT', body: s });
   }
 
+  // --- Settings > Agent ---
+  agentSettings(): Promise<AgentSettings> {
+    return this.request('/api/settings/agent');
+  }
+
+  saveAgentSettings(s: AgentSettingsUpdate): Promise<AgentSettings> {
+    return this.request('/api/settings/agent', { method: 'PUT', body: s });
+  }
+
+  // checkEndpoint lists the endpoint's models from the Bridge, with the key set
+  // only when baseUrl is the saved address (the one the key was entered for).
+  checkEndpoint(baseUrl: string): Promise<EndpointCheck> {
+    return this.request('/api/settings/agent/test', {
+      method: 'POST',
+      body: { base_url: baseUrl },
+    });
+  }
+
   // --- jobs ---
   jobs(before?: number, limit?: number): Promise<JobsResponse> {
     const q = new URLSearchParams();
@@ -213,9 +234,14 @@ export class ApiClient {
   }
 
   // Seals an agent credential; the answer never carries it. 400 = an unknown
-  // kind or a malformed value.
-  setAgentCredential(kind: AgentKind, value: string): Promise<Accounts> {
-    return this.request('/api/accounts/agent', { method: 'PUT', body: { kind, value } });
+  // kind or a malformed value. endpoint is the endpoint address the page shows
+  // beside an endpoint_api_key: 400 too when the Bridge's saved address is
+  // another by now (the key is kept for the address it was entered for).
+  setAgentCredential(kind: AgentKind, value: string, endpoint?: string): Promise<Accounts> {
+    return this.request('/api/accounts/agent', {
+      method: 'PUT',
+      body: endpoint ? { kind, value, endpoint } : { kind, value },
+    });
   }
 
   // Removes one kind (all when none is given).

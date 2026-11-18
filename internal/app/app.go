@@ -28,6 +28,7 @@ import (
 	"github.com/kodestar/audiosilo-bridge/internal/config"
 	"github.com/kodestar/audiosilo-bridge/internal/contrib"
 	"github.com/kodestar/audiosilo-bridge/internal/correct"
+	"github.com/kodestar/audiosilo-bridge/internal/endpoint"
 	"github.com/kodestar/audiosilo-bridge/internal/generate"
 	"github.com/kodestar/audiosilo-bridge/internal/jobs"
 	"github.com/kodestar/audiosilo-bridge/internal/librivoxjob"
@@ -83,9 +84,12 @@ type Bridge struct {
 	librivox *librivoxjob.Handler
 	// box is the agent container runner (decision 15), gen the sidecars.generate
 	// job, engine the sidecars engine once it has started.
-	box    *agentbox.Runner
-	gen    *generate.Handler
-	engine engineState
+	box *agentbox.Runner
+	gen *generate.Handler
+	// endpointClient is Settings > Agent's Test connection's HTTP client
+	// (endpoint.NewClient: bounded, no redirects).
+	endpointClient *http.Client
+	engine         engineState
 	// wakeParked wakes the describe jobs parked with a code a change answers
 	// (gen.WakeParked; a test watches it).
 	wakeParked func(state.ParkCode) int
@@ -186,7 +190,8 @@ func New(ctx context.Context, opts Options) (*Bridge, string, error) {
 	b.cfg.Store(&cfg)
 	b.bg.init()
 	b.newAccounts(cfg)
-	b.box = newAgentBox(cfg, opts.DataDir, opts.Logger, b.agentCredential)
+	b.box = newAgentBox(cfg, opts.DataDir, opts.Logger, b.agentCredential, b.endpointAddress)
+	b.endpointClient = endpoint.NewClient()
 	b.hub = workers.New(workers.Options{DB: db, BridgeVersion: opts.Version, Log: opts.Logger})
 	verifier := verify.New(b.libs, b.mount, func() mapping.BookSource {
 		if cl := b.conn.Client(); cl != nil {

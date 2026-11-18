@@ -29,7 +29,10 @@ func (b *Bridge) newAccounts(cfg config.Config) {
 	b.github = accounts.NewGitHub(accounts.GitHubOptions{Vault: b.vault, DB: b.db, Log: b.log,
 		Client:   &ghauth.Client{ClientID: cfg.GitHubClientID(), WebBase: cfg.GitHubWebBase(), APIBase: cfg.Contribution.APIBaseURL},
 		OnChange: b.githubChanged})
-	b.agentCreds = accounts.NewAgent(b.vault, b.db, nil, b.agentCredentialChanged)
+	b.agentCreds = accounts.NewAgent(b.vault, b.db, nil, b.agentCredentialChanged, b.endpointAddress)
+	// config.yaml or the environment may have moved the endpoint since its key
+	// was entered: that key is for the other address, and goes.
+	b.dropStaleEndpointKey(context.Background())
 	b.tokens = contrib.NewTokenSource(b.github, b.githubChanged)
 }
 
@@ -70,6 +73,13 @@ func (b *Bridge) readmitContributions(ctx context.Context) int {
 // credential: the books and describe jobs parked on a refused or missing one
 // try again, and the heartbeat reports the agent's state at once.
 func (b *Bridge) agentCredentialChanged() {
+	b.agentChanged("the agent's credential changed on the Accounts tab")
+}
+
+// agentChanged wakes the books and describe jobs parked on the agent (a
+// refused credential, or the agent unavailable) after a change that may let
+// them through (why says which), and beats at once.
+func (b *Bridge) agentChanged(why string) {
 	b.Kick()
 	codes := []state.ParkCode{state.ParkAgentCredentialRefused, state.ParkAgentUnavailable}
 	for _, code := range codes {
@@ -78,15 +88,32 @@ func (b *Bridge) agentCredentialChanged() {
 	b.bg.run(func(ctx context.Context) {
 		if e := b.engine.get(); e != nil {
 			for _, code := range codes {
-				e.sched.ReadmitParked(ctx, "the agent's credential changed on the Accounts tab", code)
+				e.sched.ReadmitParked(ctx, why, code)
 			}
 		}
 	})
 }
 
-// agentCredential is the agent box's hand-off source.
-func (b *Bridge) agentCredential(cli string) (kind, value string, since time.Time, ok bool) {
-	return b.agentCreds.Credential(context.Background(), cli)
+// endpointAddress is the OpenAI-compatible endpoint's address now.
+func (b *Bridge) endpointAddress() string { return b.config().Agent.OpenAICompatible.BaseURL }
+
+// dropStaleEndpointKey forgets an endpoint key entered for another address
+// than the endpoint's now. One that can't be deleted stays unused all the same
+// (accounts.Agent hands it to its own address alone).
+func (b *Bridge) dropStaleEndpointKey(ctx context.Context) {
+	dropped, err := b.agentCreds.DropStaleEndpointKey(ctx)
+	switch {
+	case err != nil:
+		b.log.Warn("the endpoint's API key couldn't be checked against its address, or removed as another address's (it isn't used meanwhile)", "err", err)
+	case dropped:
+		b.log.Info("the endpoint's address changed: its API key was for the other address and is removed (enter this address's key in Settings > Agent)")
+	}
+}
+
+// agentCredential is the agent box's hand-off source (endpoint: the address
+// an openai-compatible run goes to).
+func (b *Bridge) agentCredential(cli, endpoint string) (kind, value string, since time.Time, ok bool) {
+	return b.agentCreds.Credential(context.Background(), cli, endpoint)
 }
 
 // canContribute reports whether a GitHub token resolves, which a job with
@@ -160,9 +187,11 @@ func (b *Bridge) SignOutGitHub(ctx context.Context) (string, error) {
 	return "", nil
 }
 
-// SetAgentCredential seals one agent credential.
-func (b *Bridge) SetAgentCredential(ctx context.Context, kind, value string) error {
-	err := b.agentCreds.Set(ctx, kind, value)
+// SetAgentCredential seals one agent credential. endpoint is the endpoint
+// address the page showed beside an endpoint key ("" when it named none): the
+// key is refused when the saved address is another by now.
+func (b *Bridge) SetAgentCredential(ctx context.Context, kind, value, endpoint string) error {
+	err := b.agentCreds.SetFor(ctx, kind, value, config.NormalizeBaseURL(endpoint))
 	if errors.Is(err, accounts.ErrInvalidCredential) {
 		// The message names the kind and the problem, never the value.
 		return api.Errorf(api.ErrInvalid, "%v", err)

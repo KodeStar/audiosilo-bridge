@@ -4,7 +4,10 @@ import userEvent from '@testing-library/user-event';
 import { SettingsTab } from './SettingsTab';
 import { ApiClient } from '@/api/client';
 import { lastCall, mockFetch } from '@/test/fetchMock';
-import { settingsFixture } from '@/test/fixtures';
+import { agentSettingsFixture, settingsFixture } from '@/test/fixtures';
+
+// Every render loads Settings > Agent too (AgentSettingsCard.test.tsx tests it).
+const agentRoute = { 'GET /api/settings/agent': { body: agentSettingsFixture() } };
 
 function api(onSignedOut = vi.fn(), onLanBlocked = vi.fn()) {
   return new ApiClient({ getToken: () => 't', onSignedOut, onLanBlocked });
@@ -14,6 +17,7 @@ describe('SettingsTab', () => {
   it('keeps a locked field read-only and saves the rest', async () => {
     const initial = settingsFixture({ public_url: 'http://10.0.0.5:8091', locked: ['public_url'] });
     const { calls } = mockFetch({
+      ...agentRoute,
       'GET /api/settings': { body: initial },
       'PUT /api/settings': ({ body }) => ({
         body: { ...initial, ...(body as object) },
@@ -48,6 +52,7 @@ describe('SettingsTab', () => {
 
   it('saves the monthly budget, which reviews it, and keeps a locked one out', async () => {
     const { calls } = mockFetch({
+      ...agentRoute,
       'GET /api/settings': { body: settingsFixture({ budget_reviewed: false }) },
       'PUT /api/settings': { body: settingsFixture({ monthly_budget_usd: 25 }) },
     });
@@ -68,6 +73,7 @@ describe('SettingsTab', () => {
 
   it('saves an untouched budget as loaded, even one the field would refuse', async () => {
     const { calls } = mockFetch({
+      ...agentRoute,
       'GET /api/settings': { body: settingsFixture({ monthly_budget_usd: 12.345 }) },
       'PUT /api/settings': { body: settingsFixture({ monthly_budget_usd: 12.345 }) },
     });
@@ -82,6 +88,7 @@ describe('SettingsTab', () => {
 
   it('sends no budget the environment sets', async () => {
     const { calls } = mockFetch({
+      ...agentRoute,
       'GET /api/settings': {
         body: settingsFixture({ monthly_budget_usd: 40, locked: ['agent.monthly_budget_usd'] }),
       },
@@ -96,6 +103,7 @@ describe('SettingsTab', () => {
 
   it('saves the ASR fallback, and keeps a locked one', async () => {
     const { calls } = mockFetch({
+      ...agentRoute,
       'GET /api/settings': { body: settingsFixture() },
       'PUT /api/settings': { body: settingsFixture({ asr_worker_fallback: 'wait' }) },
     });
@@ -111,6 +119,7 @@ describe('SettingsTab', () => {
 
   it('shows a locked ASR fallback as locked', async () => {
     mockFetch({
+      ...agentRoute,
       'GET /api/settings': {
         body: settingsFixture({ asr_worker_fallback: 'wait', locked: ['asr.worker_fallback'] }),
       },
@@ -121,6 +130,7 @@ describe('SettingsTab', () => {
 
   it('shows a 409 from the Bridge verbatim', async () => {
     mockFetch({
+      ...agentRoute,
       'GET /api/settings': { body: settingsFixture() },
       'PUT /api/settings': {
         status: 409,
@@ -140,6 +150,7 @@ describe('SettingsTab', () => {
     const onLanBlocked = vi.fn();
     let first = true;
     const { calls } = mockFetch({
+      ...agentRoute,
       'GET /api/settings': { body: settingsFixture() },
       'POST /api/password': () => {
         if (first) {

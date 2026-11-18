@@ -499,12 +499,32 @@ func TestCancel(t *testing.T) {
 		t.Fatalf("helper pid %q", b)
 	}
 	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
-		if syscall.Kill(pid, 0) != nil {
+		if ended(pid) {
 			return
 		}
 	}
 	_ = syscall.Kill(pid, syscall.SIGKILL)
 	t.Fatal("the CLI's helper outlived the cancelled run")
+}
+
+// ended reports whether pid has exited: gone, or a zombie nobody reaps. Its
+// shell dies with it, so it is reparented to pid 1, which in a container run
+// without an init (docker run without --init, the test binary or go as pid 1)
+// never reaps it, and kill(pid, 0) still finds a zombie.
+func ended(pid int) bool {
+	if syscall.Kill(pid, 0) != nil {
+		return true
+	}
+	b, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "stat")) // Linux; elsewhere kill alone
+	if err != nil {
+		return false
+	}
+	i := strings.LastIndexByte(string(b), ')')
+	if i < 0 {
+		return false
+	}
+	f := strings.Fields(string(b[i+1:]))
+	return len(f) > 0 && f[0] == "Z"
 }
 
 func TestTimeout(t *testing.T) {
@@ -648,10 +668,29 @@ func TestRunnerJSON(t *testing.T) {
 
 func TestNewRefusesBadOptions(t *testing.T) {
 	t.Parallel()
-	for _, o := range []Options{{Home: "/agent"}, {Staging: "/staging"}, {Staging: "/s", Home: "/a", Slots: -1}, {Staging: "/s", Home: "/a", Slots: MaxSlots + 1}} {
+	for _, o := range []Options{{Home: "/agent"}, {Staging: "/staging"}, {Staging: "/s", Home: "/a", Slots: -1}, {Staging: "/s", Home: "/a", Slots: MaxSlots + 1},
+		{Staging: "/s", Home: "/a", Slots: 2, EndpointOnly: true}} {
 		if _, err := New(o); err == nil {
 			t.Errorf("New(%+v) accepted", o)
 		}
+	}
+	// The endpoint's service runs one job at a time (allowed: one slot).
+	if _, err := New(Options{Staging: "/s", Home: "/a", Slots: 1, EndpointOnly: true}); err != nil {
+		t.Errorf("one slot refused: %v", err)
+	}
+}
+
+// The endpoint's service starts only as its container's first process: any
+// other there shares its user (denied: a test process, never pid 1; allowed
+// is the agent image's own start, which the verifier runs).
+func TestEndpointServiceStartsOnlyAsPID1(t *testing.T) {
+	t.Parallel()
+	if !supported || os.Getpid() == 1 {
+		t.Skip("runs where the runner runs, and not as pid 1")
+	}
+	err := Main(context.Background(), Options{Staging: t.TempDir(), Home: filepath.Join(t.TempDir(), "agent"), EndpointOnly: true})
+	if err == nil || !strings.Contains(err.Error(), "first process") {
+		t.Fatalf("Main = %v, want the pid 1 refusal", err)
 	}
 }
 
@@ -928,5 +967,332 @@ func TestHandoffRefused(t *testing.T) {
 	job = te.submit(t, claudeReq)
 	if ex := waitDone(t, job, 30*time.Second); !ex.Unavailable {
 		t.Fatalf("no credential at all: %+v", ex)
+	}
+}
+
+const endpointReq = `{"protocol":1,"cli":"codex","model":"qwen3:32b","effort":"","web":true,"no_tools":false,"max_turns":0,"timeout_seconds":60,` +
+	`"endpoint":{"base_url":"http://192.168.1.20:11434/v1"}}`
+
+// endpointParentEnv is parentEnv without the container's own credentials: the
+// endpoint's service holds none.
+func endpointParentEnv() map[string]string {
+	env := parentEnv()
+	delete(env, "CLAUDE_CODE_OAUTH_TOKEN")
+	delete(env, "OPENAI_API_KEY")
+	return env
+}
+
+// newEndpointEnv is newTestEnv as the endpoint's own service
+// (--endpoint-only): no agent home (te.home names one that doesn't exist),
+// no mount to look through (mounts_test.go gives it some), sweep counts the
+// sweeps instead of killing anything (the tests run in parallel, so a real
+// sweep could reach another test's CLI; TestEndpointSweepEndsStrays runs the
+// real one alone), and the runner's uid is taken for another than this
+// test's, which writes the jobs as the Bridge
+// (TestEndpointServiceRunsOnlyTheBridgesJobs puts it back).
+func newEndpointEnv(t *testing.T, env map[string]string) (te *testEnv, sweeps *atomic.Int32) {
+	t.Helper()
+	te = newTestEnv(t, env)
+	te.home = filepath.Join(t.TempDir(), "agent")
+	te.r.opts.Home, te.r.opts.EndpointOnly, te.r.selfUID = te.home, true, -1
+	te.r.mounts = func() ([]mount, error) { return nil, nil }
+	sweeps = new(atomic.Int32)
+	te.r.sweep = func(func(int) bool) int { sweeps.Add(1); return 0 }
+	return te, sweeps
+}
+
+// An endpoint run (bridge#84) in the endpoint's service gets the handed
+// endpoint key in its own variable, named to codex by env_key, never in argv;
+// its own empty CODEX_HOME; nothing else of the runner's environment; and a
+// sweep before its CLI starts and after it ends.
+func TestEndpointRun(t *testing.T) {
+	t.Parallel()
+	te, sweeps := newEndpointEnv(t, endpointParentEnv())
+	_ = os.WriteFile(filepath.Join(te.codexCap, "behavior"), []byte(`ls -A "$CODEX_HOME" > "$CAP/home"`+"\n"), 0o644)
+	if st := te.r.status(); !st.Endpoints || !st.EndpointOnly || st.OwnCredentials {
+		t.Fatalf("runner.json = %+v, want an endpoint-only runner with no credential of its own", st)
+	}
+	te.start(t)
+	job, cred := te.submitWithCredential(t, endpointReq, `{"cli":"codex","kind":"endpoint_api_key","value":"sk-endpoint-SECRET"}`)
+	if ex := waitDone(t, job, 30*time.Second); ex.Error != "" || ex.ExitCode != 0 {
+		t.Fatalf("exit = %+v", ex)
+	}
+	if _, err := os.Lstat(cred); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatal("credential.json is deleted before the CLI starts")
+	}
+	argv := readLines(t, filepath.Join(te.codexCap, "argv"))
+	joined := strings.Join(argv, "\n")
+	if strings.Contains(joined, "SECRET") {
+		t.Fatalf("the key is in argv: %q", argv)
+	}
+	for _, want := range []string{`model_provider="audiosilo_endpoint"`,
+		`model_providers.audiosilo_endpoint.base_url="http://192.168.1.20:11434/v1"`,
+		`model_providers.audiosilo_endpoint.wire_api="responses"`,
+		`model_providers.audiosilo_endpoint.env_key="AUDIOSILO_ENDPOINT_API_KEY"`, `web_search="disabled"`} {
+		if !slices.Contains(argv, want) {
+			t.Errorf("argv lacks %s: %q", want, argv)
+		}
+	}
+	if i := slices.Index(argv, "--model"); i < 0 || argv[i+1] != "qwen3:32b" {
+		t.Errorf("--model: %q", argv)
+	}
+	got := envMap(readLines(t, filepath.Join(te.codexCap, "env")))
+	if got["AUDIOSILO_ENDPOINT_API_KEY"] != "sk-endpoint-SECRET" {
+		t.Errorf("the endpoint key isn't in its variable: %v", got)
+	}
+	for _, k := range []string{"OPENAI_API_KEY", "CODEX_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "GITHUB_TOKEN"} {
+		if _, ok := got[k]; ok {
+			t.Errorf("an endpoint run got %s", k)
+		}
+	}
+	if !strings.HasPrefix(got["CODEX_HOME"], te.tmp) {
+		t.Errorf("CODEX_HOME = %q, want the run's own under %s", got["CODEX_HOME"], te.tmp)
+	}
+	if home, _ := os.ReadFile(filepath.Join(te.codexCap, "home")); strings.TrimSpace(string(home)) != "" {
+		t.Errorf("the run's CODEX_HOME held %q, want it empty", home)
+	}
+	if _, err := os.Lstat(te.home); !errors.Is(err, fs.ErrNotExist) {
+		t.Error("the endpoint's service made an agent home")
+	}
+	if n := sweeps.Load(); n != 2 {
+		t.Errorf("%d sweeps, want one before the CLI and one after", n)
+	}
+}
+
+// An endpoint's model is whoever answers at the address, and the CLI runs its
+// commands as the runner's uid with its sandbox off: while the endpoint's
+// service holds a credential in its environment, or can reach the agent home
+// (where it could read the subscriptions' secrets or plant a config.toml a
+// later subscription run loads), the run is refused as the agent unavailable,
+// the hand-off taken and deleted all the same and no CLI started (denied);
+// runner.json says so for the Bridge. A home that is there but closed to the
+// runner's uid (the agent container's 0700 one, as an anonymous volume) is
+// out of reach (allowed).
+func TestEndpointRunRefusedBesideOwnCredentials(t *testing.T) {
+	t.Parallel()
+	for name, hold := range map[string]func(t *testing.T, env map[string]string, home string){
+		"claude's token in the environment": func(_ *testing.T, env map[string]string, _ string) {
+			env["CLAUDE_CODE_OAUTH_TOKEN"] = "sk-ant-oat01-claude"
+		},
+		"an Anthropic key in the environment": func(_ *testing.T, env map[string]string, _ string) {
+			env["ANTHROPIC_API_KEY"] = "sk-ant-api03-x"
+		},
+		"an OpenAI key in the environment": func(_ *testing.T, env map[string]string, _ string) {
+			env["OPENAI_API_KEY"] = "sk-openai"
+		},
+		"a codex key in the environment": func(_ *testing.T, env map[string]string, _ string) {
+			env["CODEX_API_KEY"] = "sk-codex"
+		},
+		"the agent home mounted, empty": func(t *testing.T, _ map[string]string, home string) {
+			if err := os.Mkdir(home, 0o700); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"the agent home mounted, writable but not listable": func(t *testing.T, _ map[string]string, home string) {
+			if err := os.Mkdir(home, 0o300); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.Chmod(home, 0o700) })
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			env := endpointParentEnv()
+			te, _ := newEndpointEnv(t, env)
+			if te.r.credentialProblem() != "" || te.r.status().OwnCredentials {
+				t.Fatal("a service with no credential and no home reports one")
+			}
+			hold(t, env, te.home)
+			if !te.r.status().OwnCredentials {
+				t.Fatal("runner.json doesn't say the service holds a credential")
+			}
+			te.start(t)
+			job, cred := te.submitWithCredential(t, endpointReq, `{"cli":"codex","kind":"endpoint_api_key","value":"sk-endpoint-SECRET"}`)
+			ex := waitDone(t, job, 30*time.Second)
+			if !ex.Unavailable || !strings.Contains(ex.Error, "credential of its own") || strings.Contains(ex.Error, "SECRET") {
+				t.Fatalf("exit = %+v, want the run refused as unavailable", ex)
+			}
+			if _, err := os.Lstat(cred); !errors.Is(err, fs.ErrNotExist) {
+				t.Fatal("the endpoint key's credential.json is deleted all the same")
+			}
+			if _, err := os.Stat(filepath.Join(te.codexCap, "argv")); err == nil {
+				t.Fatal("the CLI ran beside the service's own credential")
+			}
+		})
+	}
+	t.Run("the agent home there but closed", func(t *testing.T) {
+		t.Parallel()
+		if os.Geteuid() == 0 {
+			t.Skip("root reaches every dir")
+		}
+		te, _ := newEndpointEnv(t, endpointParentEnv())
+		if err := os.Mkdir(te.home, 0o000); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(te.home, 0o700) })
+		if te.r.status().OwnCredentials {
+			t.Fatal("a home closed to the runner counts as reachable")
+		}
+		te.start(t)
+		if ex := waitDone(t, te.submit(t, endpointReq), 30*time.Second); ex.Error != "" || ex.ExitCode != 0 {
+			t.Fatalf("exit = %+v", ex)
+		}
+	})
+}
+
+// Each kind of run goes to its own service: the agent container (with the
+// subscriptions) refuses an endpoint run, and the endpoint's service a CLI's
+// own run, each as the agent unavailable, the hand-off deleted and no CLI
+// started (denied); each runs its own kind (allowed: TestEndpointRun,
+// TestClaudeRun). runner.json tells them apart.
+func TestRunsGoToTheirOwnService(t *testing.T) {
+	t.Parallel()
+	t.Run("an endpoint run in the agent container", func(t *testing.T) {
+		t.Parallel()
+		te := newTestEnv(t, endpointParentEnv())
+		if st := te.r.status(); !st.Endpoints || st.EndpointOnly || st.OwnCredentials {
+			t.Fatalf("runner.json = %+v", st)
+		}
+		te.start(t)
+		job, cred := te.submitWithCredential(t, endpointReq, `{"cli":"codex","kind":"endpoint_api_key","value":"sk-endpoint-SECRET"}`)
+		ex := waitDone(t, job, 30*time.Second)
+		if !ex.Unavailable || !strings.Contains(ex.Error, "agent.endpoint_staging_dir") || strings.Contains(ex.Error, "SECRET") {
+			t.Fatalf("exit = %+v", ex)
+		}
+		if _, err := os.Lstat(cred); !errors.Is(err, fs.ErrNotExist) {
+			t.Fatal("the endpoint key's credential.json is deleted all the same")
+		}
+		if _, err := os.Stat(filepath.Join(te.codexCap, "argv")); err == nil {
+			t.Fatal("codex ran against the endpoint in the agent container")
+		}
+	})
+	t.Run("a claude run in the endpoint's service", func(t *testing.T) {
+		t.Parallel()
+		te, _ := newEndpointEnv(t, endpointParentEnv())
+		te.start(t)
+		job, cred := te.submitWithCredential(t, claudeReq, `{"cli":"claude","kind":"oauth_token","value":"sk-ant-oat01-HANDED"}`)
+		ex := waitDone(t, job, 30*time.Second)
+		if !ex.Unavailable || !strings.Contains(ex.Error, "only OpenAI-compatible endpoints") || strings.Contains(ex.Error, "HANDED") {
+			t.Fatalf("exit = %+v", ex)
+		}
+		if _, err := os.Lstat(cred); !errors.Is(err, fs.ErrNotExist) {
+			t.Fatal("the handed token's credential.json is deleted all the same")
+		}
+		if _, err := os.Stat(filepath.Join(te.claudeCap, "argv")); err == nil {
+			t.Fatal("claude ran in the endpoint's service")
+		}
+	})
+}
+
+// The endpoint's service runs only the Bridge's jobs: a job dir its own uid
+// made (a run's commands share that uid and can write the staging dir, so it
+// is one a run left there to run again after it) is refused as the agent
+// unavailable, its credential.json left alone and no CLI started (denied),
+// even with the oldest request; a job of another uid's making runs (allowed:
+// TestEndpointRun, where the runner's uid is another than the job's). The
+// agent container's runner is unchanged (TestClaudeRun: a job of its own uid).
+func TestEndpointServiceRunsOnlyTheBridgesJobs(t *testing.T) {
+	t.Parallel()
+	te, _ := newEndpointEnv(t, endpointParentEnv())
+	te.r.selfUID = os.Geteuid() // this test made the job, as a run would
+	te.start(t)
+	job, cred := te.submitWithCredential(t, endpointReq, `{"cli":"codex","kind":"endpoint_api_key","value":"sk-planted"}`)
+	old := time.Unix(1, 0)
+	_ = os.Chtimes(filepath.Join(job, agentproto.RequestFile), old, old)
+	ex := waitDone(t, job, 30*time.Second)
+	if !ex.Unavailable || !strings.Contains(ex.Error, "only the jobs the Bridge stages") {
+		t.Fatalf("exit = %+v, want the planted job refused", ex)
+	}
+	if _, err := os.Lstat(cred); err != nil {
+		t.Fatal("a planted job's credential.json was taken")
+	}
+	if _, err := os.Stat(filepath.Join(te.codexCap, "argv")); err == nil {
+		t.Fatal("codex ran a planted job")
+	}
+}
+
+// onlyStrays: the atomic kill(-1) is for a pid namespace holding nothing but
+// init, the runner and the strays; anything else in it (a CLI running now,
+// the runner's own --version, a docker exec) keeps the sweep to its strays.
+func TestOnlyStrays(t *testing.T) {
+	t.Parallel()
+	const self = 100
+	strays := []proc{{pid: 300, ppid: self, sid: 300}, {pid: 301, ppid: 300, sid: 301}}
+	base := []proc{{pid: 1, ppid: 0, sid: 1}, {pid: self, ppid: 1, sid: 1}}
+	if !onlyStrays(append(slices.Clone(base), strays...), self, strays) {
+		t.Error("init, the runner and its strays alone: the namespace is the strays'")
+	}
+	for name, other := range map[string]proc{
+		"a CLI running now":      {pid: 200, ppid: self, sid: 200},
+		"the runner's --version": {pid: 500, ppid: self, sid: 1},
+		"a docker exec":          {pid: 600, ppid: 0, sid: 600},
+	} {
+		if onlyStrays(append(append(slices.Clone(base), strays...), other), self, strays) {
+			t.Errorf("%s beside the strays: the namespace isn't theirs alone", name)
+		}
+	}
+}
+
+// The sweep ends the runner's children in a session it doesn't keep, with
+// everything under them; a kept session's processes (a CLI running now, the
+// runner's own) are spared with their descendants, whatever sessions those
+// started.
+func TestStrays(t *testing.T) {
+	t.Parallel()
+	const self = 100
+	procs := []proc{
+		{pid: 1, ppid: 0, sid: 1},
+		{pid: self, ppid: 1, sid: 1},
+		{pid: 200, ppid: self, sid: 200},               // a CLI running now
+		{pid: 201, ppid: 200, sid: 200},                // its helper
+		{pid: 202, ppid: 201, sid: 202},                // its helper's own session, still under it
+		{pid: 300, ppid: self, sid: 300},               // an ended run's leftover, reparented
+		{pid: 301, ppid: 300, sid: 301},                // what it started
+		{pid: 400, ppid: self, sid: 400, zombie: true}, // exited, unreaped
+		{pid: 500, ppid: self, sid: 1},                 // the runner's own --version
+		{pid: 600, ppid: 1, sid: 600},                  // not the runner's
+	}
+	keep := func(sid int) bool { return sid == 200 || sid == 1 }
+	var got []int
+	for _, p := range strays(procs, self, keep) {
+		got = append(got, p.pid)
+	}
+	if want := []int{300, 301, 400}; !slices.Equal(got, want) {
+		t.Fatalf("strays = %v, want %v", got, want)
+	}
+}
+
+// An endpoint without a key (a local server) runs with no env_key at all; a
+// handed OpenAI key is refused for it (allowed: keyless; denied: a key of
+// another kind, and an endpoint key for a run against OpenAI).
+func TestEndpointRunKeys(t *testing.T) {
+	t.Parallel()
+	te, _ := newEndpointEnv(t, endpointParentEnv())
+	te.start(t)
+	job := te.submit(t, endpointReq)
+	if ex := waitDone(t, job, 30*time.Second); ex.Error != "" || ex.ExitCode != 0 {
+		t.Fatalf("keyless endpoint: exit = %+v", ex)
+	}
+	argv := readLines(t, filepath.Join(te.codexCap, "argv"))
+	if slices.ContainsFunc(argv, func(a string) bool { return strings.Contains(a, "env_key") }) {
+		t.Errorf("a keyless run names an env_key (codex would fail on the missing variable): %q", argv)
+	}
+	_ = os.Remove(filepath.Join(te.codexCap, "argv"))
+
+	job, _ = te.submitWithCredential(t, endpointReq, `{"cli":"codex","kind":"api_key","value":"sk-openai-SECRET"}`)
+	if ex := waitDone(t, job, 30*time.Second); ex.Error == "" || ex.Unavailable || strings.Contains(ex.Error, "SECRET") {
+		t.Fatalf("an OpenAI key for an endpoint: exit = %+v", ex)
+	}
+	if _, err := os.Stat(filepath.Join(te.codexCap, "argv")); err == nil {
+		t.Fatal("the CLI ran on a refused credential")
+	}
+	sub := newTestEnv(t, endpointParentEnv())
+	sub.start(t)
+	job, _ = sub.submitWithCredential(t, codexReq, `{"cli":"codex","kind":"endpoint_api_key","value":"sk-endpoint-SECRET"}`)
+	if ex := waitDone(t, job, 30*time.Second); ex.Error == "" || strings.Contains(ex.Error, "SECRET") {
+		t.Fatalf("an endpoint key for OpenAI: exit = %+v", ex)
+	}
+	if _, err := os.Stat(filepath.Join(sub.codexCap, "argv")); err == nil {
+		t.Fatal("the CLI ran on a refused credential")
 	}
 }

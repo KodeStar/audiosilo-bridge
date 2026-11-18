@@ -238,17 +238,21 @@ function AgentCard({ client, accounts, onChange }: CardProps) {
   );
 }
 
-function CredentialForm({
+export function CredentialForm({
   client,
   kind,
   set,
   setAt,
+  endpoint,
   onChange,
 }: {
   client: ApiClient;
   kind: AgentKind;
   set: boolean;
   setAt: string;
+  // The endpoint address shown beside an endpoint_api_key (Settings > Agent):
+  // the Bridge refuses the key when its saved address is another by now.
+  endpoint?: string;
   onChange: (a: Accounts) => void;
 }) {
   const [value, setValue] = useState('');
@@ -269,7 +273,7 @@ function CredentialForm({
     setBusy(true);
     setError(null);
     try {
-      const next = await client.setAgentCredential(kind, value.trim());
+      const next = await client.setAgentCredential(kind, value.trim(), endpoint);
       onChange(next);
       setValue('');
       setSaved(savedText(next.agent, kind));

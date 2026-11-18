@@ -34,6 +34,27 @@ cmd/audiblefake/          Phase 4a, ONLY with -tags audiblefake: serves the Audi
                           (--listen 127.0.0.1:8099, --lastpositions-max 10) for a live check.
 internal/
   config/   config.yaml in <data>/ + AUDIOSILO_BRIDGE_* env overrides; Load/Save/Validate.
+            bridge#84: agent.backend takes openai-compatible; agent.openai_compatible
+            {base_url, model, models} (AgentEndpointConfig) is its endpoint, LIVE
+            unlike the rest of agent.* (the box reads the address per run, the
+            engine takes EndpointModels() on a save). Validate: the address by
+            agentproto.CheckBaseURL whenever set, model names by ValidModel, models'
+            keys by state.RoutesModel, and with that backend an address and a model
+            for every stage (ModelStages: the agent stages, then describing): a
+            rule config.yaml alone can't answer when the environment sets one, so a
+            file-only load (fileOnly) leaves it out and SaveFile checks its bytes as
+            the next start reads them (decode with the environment) before writing.
+            normalizeBridge trims them (the address without its trailing slashes, a
+            blank stage model dropped). AUDIOSILO_BRIDGE_AGENT_BACKEND now goes
+            through applyBridgeEnv (locks the page; empty = unset, as the others),
+            as do ..._OPENAI_COMPATIBLE_BASE_URL and ..._OPENAI_COMPATIBLE_MODEL.
+            agent.endpoint_staging_dir (AUDIOSILO_BRIDGE_AGENT_ENDPOINT_STAGING_DIR,
+            absolute, cleaned, restart-to-apply, "" = none) is the endpoint's own
+            agent service's staging dir; AgentRunsDir is where the configured
+            backend's runs go (that dir for openai-compatible, else
+            AgentStagingDir). Sharing a dir with agent.staging_dir is refused by
+            agentbox's Status, not Validate (a Bridge that won't start is worse). The
+            key is a vault secret (secrets.EndpointAPIKey), never config.
             Phase 2c-1: podcasts.allow_networks (CIDR strings, default empty;
             AUDIOSILO_BRIDGE_PODCASTS_ALLOW_NETWORKS comma-separated) and
             podcasts.max_feed_mb (1-64, default 32;
@@ -553,6 +574,20 @@ internal/
             in opening.md, own words, neutral voice, 200-1500 characters, hyphens,
             out/description.json as exactly {"text": ...}); a prompts test renders
             both source branches and holds the output shape.
+            bridge#84 (OpenAI-compatible endpoints, part 1): IDOpenAICompatible
+            ("openai-compatible") is codex run against an endpoint the request
+            names (Request.Endpoint {BaseURL, KeyEnv}); only the agent container
+            runs it and Select never picks it, auto included. CodexArgs adds
+            endpointArgs for it: `-c model_provider="audiosilo_endpoint"` and
+            model_providers.audiosilo_endpoint.{name, base_url, wire_api="responses",
+            env_key} (env_key only with a key, naming EndpointKeyEnv: codex fails a
+            run whose env_key variable is unset), then web_search="disabled" whatever
+            req.Web (web search is a tool OpenAI hosts). The pinned codex (0.162.1,
+            checked live) REFUSES wire_api "chat" ("no longer supported"), so the
+            wire API is not a setting: an endpoint must offer the Responses API.
+            Values go through tomlString (codex parses a -c value as TOML). ModelFor
+            takes a third map, the endpoint's (every stage named: an endpoint has no
+            default model); efforts pass nil for it.
   benchmark/ private, provider-neutral post-ASR evaluation: allow-listed corpus
             preparation with input digests; fresh per-run work trees and databases;
             stage-specific model/effort routes; the real fact/synthesis/audit/fix
@@ -1233,14 +1268,49 @@ internal/
             forgets the pair locally first (so the Bridge stops using it whatever
             GitHub answers), then revokes it, a failed revoke returned for the
             page. Agent: Set/Delete/Credential for the kinds
-            claude_oauth_token, anthropic_api_key, openai_api_key (one printable
+            claude_oauth_token, anthropic_api_key, openai_api_key and
+            endpoint_api_key (bridge#84: AgentEndpointKey, the openai-compatible
+            backend's alone, keyed by agent.IDOpenAICompatible) (one printable
             line, sealed in the vault), handed to the agent container per run by
             agentbox; Credential's set time is that kind's own (agent/<kind>), so
             changing another kind never ends a refusal of the one in use. The
+            endpoint's key is kept for the ADDRESS it was entered for (its row's
+            login; NewAgent's endpoint func is the address now): Set needs an
+            address saved (else invalid), and State, Credential and
+            EndpointKey(baseURL) (Test connection's) treat a key entered for
+            another address as none, however the address changed (the page,
+            config.yaml, the environment), so the key only ever reaches the
+            address it was entered for; Credential(cli, endpoint) (a run's
+            hand-off) takes the address the run goes to, read once by agentbox,
+            and hands the key only when it was entered for exactly that address
+            (not "the address now": no re-read window, and a run that read the
+            address before a save still gets its own address's key);
+            DropStaleEndpointKey deletes such a key
+            (no onChange: it was no credential). The key and its row are one
+            pair under endpointMu (Set, Delete, the reads and the drop), and
+            Set deletes an earlier key's row for another address first, then
+            writes the key, then its row: a failure between them leaves the
+            new key under no address (unused), never under the address of the
+            key before it. A row that can't be read (not ErrNotFound) is an
+            error: the key goes nowhere meanwhile and is NOT dropped.
+            SetFor(kind, value, enteredFor) is Set with the address the page
+            showed beside the key: invalid when the endpoint's address is
+            another by now (a stale page), so a key never lands under an
+            address its owner didn't see. The
             store's accounts table (migration 0006) keeps only what the page
             shows (login, signed_in_at, last_ok_at, refused_at, last_error),
             never a credential.
-  setup/    Phase 2b (FIRST-RUN-PLAN F2): Checklist(Inputs) is the setup checklist
+  setup/    bridge#84: the agent item's problem no_endpoint (AgentNoEndpoint,
+            agentbox.ProblemNoEndpoint) is the openai-compatible backend with no
+            address set, said as "set its address in Settings > Agent";
+            own_credentials (AgentOwnCredentials, agentbox.ProblemOwnCredentials)
+            is that backend while the endpoint's service holds a credential or
+            reaches /agent; endpoint_service (AgentEndpointSvc) that backend
+            with no agent service of its own (none set, shared with the agent
+            container, not --endpoint-only, the agent's user); endpoint_only
+            (AgentEndpointOnly) claude or codex sent to the endpoint's service.
+            Each points at the Accounts tab, which shows agentbox's full detail.
+            Phase 2b (FIRST-RUN-PLAN F2): Checklist(Inputs) is the setup checklist
             (link.Setup) in its fixed order: paired, libraries, asr, agent, budget,
             github, audible (Phase 4a, optional: done with an account signed in and
             none refused; an additive id older servers and pages leave out; with
@@ -3434,6 +3504,21 @@ internal/
             field, trailing data, over 4 KiB, another CLI, a kind that CLI doesn't
             take, or a value that isn't one printable line all refused; the value
             never in an error).
+            bridge#84: Request.endpoint {base_url} (omitempty, codex only, a model
+            required) sends a codex run to an OpenAI-compatible endpoint;
+            runner.json's endpoints says the runner takes one (an older runner
+            refuses the unknown field, so the Bridge sends none to it). Credential
+            kind endpoint_api_key (codex only) is the endpoint's key. CheckBaseURL is
+            the one rule for the address (config, the page's check and the runner):
+            http/https with a host, printable ASCII without spaces, quotes or
+            backslashes (it lands in a -c override), no user info, query or fragment,
+            at most 512 bytes; ValidModel exports the model-name rule.
+            runner.json's endpoint_only: the endpoint's own agent service
+            (agent-runner --endpoint-only), which alone runs endpoint requests
+            and runs nothing else; own_credentials (that service's): it holds a
+            credential in its environment, can reach the agent home or has the
+            agent volume or a CLI's login mounted anywhere (the runner refuses an
+            endpoint run while it does).
   agentbox/ the Bridge's side of the agent container: an agent.Runner that runs no CLI,
             drops each invocation into the staging dir, waits for agentrun, and
             harvests the outputs back into the pipeline's staged dir; the outcome is
@@ -3444,7 +3529,10 @@ internal/
             last run: runs still go through, a refused call costs nothing and the
             first that works clears it; a credential the runner reports as changed,
             by kind or credential_since, clears it too), Live (fresh, whatever its
-            CLIs), each "why not" worded for the page and a park (claude: `claude
+            CLIs; fresh is a heartbeat_at within 30 s before now and at most
+            runnerClockSkew, 5 s, after it: one in the future is a status the runner
+            didn't write, or a clock gone wrong), each "why not" worded for the page
+            and a park (claude: `claude
             setup-token` -> CLAUDE_CODE_OAUTH_TOKEN; codex: agent-login; and when the
             OTHER CLI is signed in, how to switch agent.backend), never naming a
             Bridge path (a Detail becomes a park reason the server's console and
@@ -3567,6 +3655,46 @@ internal/
             nothing and is told to update. A refusal's detail says where to
             replace the credential: the Accounts tab for the handed one, the agent
             container for its own.
+            bridge#84: Backend openai-compatible runs CLI codex (Runner.cli; ID()
+            stays openai-compatible for telemetry, routing and pricing) against
+            Options.Endpoint(), the base URL read for every Status and Run (the page's
+            change applies at once; "" is ProblemNoEndpoint). Status gives the backend
+            its own CLIs entry (codex's version; the credential only the vault's
+            endpoint_api_key, handed over: the container's own codex login or OpenAI
+            key never counts for, nor goes to, an endpoint); no key is no problem (a
+            local server takes none); a runner without endpoints is ProblemOutdated.
+            Run sets req.Endpoint, stage writes it into request.json, and the handed
+            credential's CLI is codex. SupportsWeb is false for it; a refusal's advice
+            points at Settings > Agent, and another address clears it (a refusal is
+            kept with the address its run went to, not the address when it came
+            back). A run with no
+            model (cleared on the page while another backend waits for the restart)
+            is the agent unavailable, never staged. Run reads the address once and
+            asks Options.Credential(cli, endpoint) for that address's own key
+            (accounts.Agent hands one only to the address it was entered for), so
+            no key read after a save can be another address's. The handed credential is cut
+            from the CLI's output before it is read (an endpoint may repeat the key
+            in its error), when it is minCutSecret (8) bytes or more: a short
+            stand-in key ("x", "none", "ollama") would be cut out of codex's JSON
+            stream and its answer, losing the usage and the result. A group probe goes as an endpoint request (probeModel,
+            probeEndpoint), which the runner takes the credential for whatever the
+            container has of its own.
+            An endpoint's model is whoever answers at the address, and codex runs
+            its commands as the runner's uid with its sandbox off, so in the agent
+            container such a run could read the subscriptions' credentials, plant
+            /agent/codex/config.toml for a later subscription run, or leave a
+            process behind. So the backend's runs go to the endpoint's OWN agent
+            service (service.go): Options.Dir is agent.endpoint_staging_dir and
+            Options.AgentDir the agent container's staging dir, and Status is
+            ProblemEndpointService (not ready, nothing staged) with none set, a dir
+            shared with the agent's (one dir, or one inside the other, by path or
+            os.SameFile), a runner.json without endpoint_only, or one owned by the
+            uid of a live runner.json in the agent's dir (the same user); then
+            ProblemOwnCredentials while that service holds a credential or reaches
+            /agent (runner.json's own_credentials, or a CLI entry with one). The
+            claude and codex backends refuse an endpoint-only runner in their dir
+            (ProblemEndpointOnly). Dir() is the dir the runs go to (the page's
+            staging_dir, the engine's log).
   agentrun/ `audiosilo-bridge agent-runner`, the ONLY thing in the agent container (Linux
             only). It sees the staging dir and /agent (secrets/, codex/), never a
             library or the Bridge's data. Main sets umask 077 for the whole process
@@ -3615,6 +3743,77 @@ internal/
             the CLI starts, and childEnv uses it only when the container has no
             credential of its own for the CLI (claude: the OAuth token or
             ANTHROPIC_API_KEY; codex: OPENAI_API_KEY and CODEX_API_KEY).
+            bridge#84: runner.json says endpoints: true. A request with an endpoint
+            takes only an endpoint_api_key credential.json (another kind is refused,
+            and a non-endpoint run refuses an endpoint key), whatever the container
+            has of its own, and runs keyless without one; endpointEnv is baseEnv, a
+            per-run empty CODEX_HOME under the run's tmp dir (the device login out of
+            reach; /tmp works for exec, checked on the image) and
+            AUDIOSILO_ENDPOINT_API_KEY only: never OPENAI_API_KEY, CODEX_API_KEY or
+            the shared CODEX_HOME, whose wipe brackets skip such a run.
+            Options.EndpointOnly (--endpoint-only) makes the runner the
+            endpoint's own agent service: it runs only requests with an endpoint,
+            and any other runner refuses those (both Exit unavailable, after the
+            hand-off is taken and deleted, no CLI started: endpointOnlyRefusal,
+            endpointElsewhere), never touches --home (/agent), and refuses its
+            runs (endpointBlocked) while credentialProblem (logged with each
+            refusal: a variable's name or a path, never a value): one of the
+            four credential variables in its environment, homeReachable (the
+            home listable, writable or searchable by its uid: not missing or
+            closed, the image's 0700 /agent of uid 10002 as an anonymous volume
+            being closed to 10003), or credentialMount (mounts.go, over
+            /proc/self/mountinfo on Linux; unreadable counts as holding): a
+            mount (anywhere, /dev included; only the kernel's own filesystems
+            are passed over, by type) that is compose's agent volume by name,
+            whole or a subpath, is mounted by a credential file's name (at its
+            point or from its source), or holds a credential's file or the
+            agent home's marker .audiosilo-agent-home (markHome writes it into
+            the agent container's home at the start) at its point or one dir
+            below (a tmpfs at its point only; the rules and the file list are
+            in mounts.go). runner.json says
+            endpoint_only and own_credentials for the Bridge's Status. Main
+            makes that runner a child subreaper and not
+            dumpable (endpointHardening, Linux only; elsewhere it refuses to
+            start): whatever a run starts becomes the runner's child however it
+            detaches, and no run reads the runner's memory or environment (later
+            runs' keys pass through it). Every CLI runs in a session of its own
+            (Setsid, so nothing joins another run's group), and the sweep
+            (sweep.go, killStrays over /proc) before each CLI starts and after it
+            ends SIGKILLs the runner's children in a session that isn't a running
+            CLI's or the runner's own, with all they started, and reaps them;
+            where the pid namespace holds nothing else (onlyStrays) a kill(-1)
+            follows, which no fork slips past. The sweep, the CLI's start and
+            its session's record hold sweepMu together, so another slot's sweep
+            never takes a CLI just started for a stray. That service never runs
+            a job its own uid made (planted: the job dir or request.json owned
+            by selfUID): a run could leave one in the staging dir to run again.
+            It runs one job at a time (New refuses --slots over 1, and the
+            Bridge's Status caps the endpoint backend's slots at 1 whatever
+            runner.json says): concurrent runs share its user. Main refuses to
+            start unless it is its container's pid 1 (no tini): any other
+            process there shares its user, dumpable and traceable by a run.
+            Accepted residual risk: a run still going shares the runner's uid,
+            so it can write its job's done and exit.json itself, and the Bridge
+            stages the next job while that run goes on (until its CLI ends and
+            the sweep after it). With one slot and the sweeps, and an endpoint run
+            holding its own key already, all it can reach is the next job's key
+            after the address changes (another endpoint's). Per-run uids would
+            close it: bridge#86.
+  endpoint/ bridge#84: Settings > Agent's Test connection, a leaf (standard library
+            only). Check(ctx, client, base, key): GET <base>/models (Bearer key
+            when set), then POST <base>/responses with {} to learn whether the
+            Responses API is there (404/405 no; 400/422/2xx yes, the route
+            answered; else unknown with the status). NewClient: 15 s, redirects
+            never followed (the key would go along; the error names where to), no
+            proxy from the environment.
+            Bounded: 4 MiB read, 1000 models, printable ids of 200 bytes at most,
+            sorted, deduplicated. What a model says: context from context_length,
+            context_window, max_context_length or max_model_len; tools from
+            supported_parameters, or capabilities (a list, or an object's
+            tools/function_calling/tool_calling). Errors are the page's sentences
+            (refused the key, ends before /models, redirects, answered N, not a
+            model list, couldn't reach), the endpoint's own words cut to 300 bytes,
+            one line, the key replaced by "[the key]".
   workerproto/ Phase 1b: the worker wire protocol, a leaf (standard library only)
             shared by api (the routes), workers (the dispatcher) and worker (the
             worker), so the two sides can't drift. Version (1) rides every call in
@@ -3750,7 +3949,27 @@ internal/
             (and a fake uname for the other OS's service file), each run in a
             temp HOME holding service files rendered by worker.Service, so no
             test reads this computer's own.
-  app/      Phase 4b: audible.go also builds audiblejob's Importer (the
+  app/      bridge#84: agent.go is Settings > Agent. AgentSettings answers the
+            saved backend, the running one (box.ID(); a backend applies at the next
+            start), the endpoint, config.ModelStages, the endpoint key's state
+            (agentCreds, never the key) and the env-locked keys. SaveAgentSettings
+            refuses (ErrLocked) a change to a value the environment sets, saves,
+            hands the engine EndpointModels (SetCompatibleModels) and, when the
+            running endpoint's address or models changed, agentChanged (the books parked on
+            the agent try again; agentCredentialChanged goes through it too).
+            CheckEndpoint runs endpoint.Check from the Bridge (the agent container
+            has no way to be asked; both reach the network alike) with
+            b.endpointClient, and with the endpoint's key ONLY for the saved
+            address the key was entered for (agentCreds.EndpointKey; KeySent says
+            which): an address typed into the form is checked without it. The
+            endpoint failing is the answer's error. A save that changes the
+            address removes the key (dropStaleEndpointKey, also run at the start
+            for an address config.yaml or the environment moved), so the page
+            asks for the new address's. SetAgentCredential passes the address the
+            page showed beside an endpoint key (normalized) to agentCreds.SetFor.
+            engine.go's agentBackend names codex or openai-compatible, else claude;
+            the box takes Endpoint as a func reading config each time.
+            Phase 4b: audible.go also builds audiblejob's Importer (the
             mapping registry, the mount, the engine's ffmpeg else tools.ffmpeg_path,
             <data>/audible/tmp swept at start) and registers audible.import.
             Phase 4a: audible.go wires audibleacct (OnChange kicks a beat) and
@@ -3861,7 +4080,17 @@ internal/
             ErrNotParked and ErrBookChanged -> 409) and Engine (the agent container from
             agentbox.Status, ASR capability, budgets and this month's spend, the
             retention).
-  api/      transport-only HTTP of the Bridge's page (/api/*): login (rate limited),
+  api/      bridge#84: agent.go, behind requireAuth: GET /api/settings/agent
+            (AgentSettings), PUT (backend + openai_compatible; answers the settings
+            saved; 409 locked for an env-set value, 400 for one config refuses) and
+            POST /api/settings/agent/test {base_url} (EndpointCheck: models with
+            context_tokens/tools when the endpoint says, responses yes|no|unknown,
+            or error; key_sent: the check carried the key, which goes to the saved
+            address alone). The key is an agent credential (PUT /api/accounts/agent,
+            kind endpoint_api_key; 400 with no address saved, and 400 when the
+            optional "endpoint", the address the page showed beside the key, is no
+            longer the saved one), never in these answers.
+            transport-only HTTP of the Bridge's page (/api/*): login (rate limited),
             password (a wrong current one is 403, never 401, which signs the page
             out), status, pair/unpair, libraries + mount edits + check now, settings,
             jobs + one job (GET /api/jobs/{id}) + cancel + retry (POST
@@ -3877,7 +4106,8 @@ internal/
             (set_at_by_kind), the container's own
             credential; never a credential), POST /api/accounts/github/device
             (starts a sign-in, answers the code), DELETE /api/accounts/github
-            ({accounts, revoke_error}), PUT /api/accounts/agent {kind, value},
+            ({accounts, revoke_error}), PUT /api/accounts/agent {kind, value,
+            endpoint?},
             DELETE /api/accounts/agent?kind=; status carries setup and
             setup_complete, settings monthly_budget_usd and budget_reviewed.
             Phase 4a: audible.go, GET /api/accounts/audible (accounts, marketplaces,
@@ -4013,13 +4243,19 @@ Dockerfile             multi-stage: node build -> go build (embedui, cross-built
                        cuda amd64; agent -> :<tag>-agent, :latest-agent).
 compose.example.yaml   three services: the server (libraries :ro), the Bridge (the same
                        folders :rw, AUDIOSILO_BRIDGE_AGENT_STAGING_DIR=/staging, the
-                       optional AUDIOSILO_BRIDGE_AGENT_BACKEND and
+                       optional AUDIOSILO_BRIDGE_AGENT_BACKEND, the commented
+                       ..._AGENT_OPENAI_COMPATIBLE_{BASE_URL,MODEL} and
                        AUDIOSILO_BRIDGE_GITHUB_TOKEN) and `agent` (:latest-agent, user
                        10002:10002 with group_add the Bridge's PGID (a YAML alias of
                        the bridge service's PGID, so the two can't differ; the credential
                        hand-off then goes to that group alone), cap_drop ALL,
                        no-new-privileges, read-only root,
-                       tmpfs /tmp, its own internet-only network, the credential
+                       tmpfs /tmp, its own network (a plain bridge network: the
+                       internet and the LAN through the host, not the stack's other
+                       containers; no egress filter, so an OpenAI-compatible endpoint
+                       on the LAN is reached, and host.docker.internal by a commented
+                       extra_hosts line, which the bridge service carries too for Test
+                       connection), the credential
                        variables by NAME only, stop_grace_period 20s). The `staging`
                        volume is the only one both mount, outside /bridge-data (whose
                        first-start chown would otherwise reach it); `agent-config` is
@@ -4028,11 +4264,13 @@ compose.example.yaml   three services: the server (libraries :ro), the Bridge (t
 
 **Dependency direction** (transport-only rule): `cmd -> {app, agentrun, logring,
 config}`; `app -> {api, auth, config, jobs, link, logring, mapping, secrets, store,
-verify, web, generate, agentbox, agentproto, agent}` plus the engine it wires (asr,
+verify, web, generate, agentbox, agentproto, agent, endpoint}` plus the engine it wires (asr,
 contrib, events, metaops, pipeline, scheduler, state, supervisor, toolfetch);
 `api -> {auth, jobs, link, logring, mapping, store}` (types only; it calls the
 injected Backend); `verify -> {jobs, link, mapping}`; `jobs -> {link, store}`;
-`mapping -> link`; `link` is a leaf. `generate -> {jobs, link, mapping, store,
+`mapping -> link`; `link` is a leaf; `endpoint` (the endpoint check, bridge#84) is a
+leaf (standard library only); `config -> {agent, agentproto, fsutil, ghauth,
+pricing, state}`. `generate -> {jobs, link, mapping, store,
 scheduler, state, pipeline, contrib, chapterdetect, audio, scratch, metaops, ebook, agent, fsutil,
 readalong}` (+ the meta
 module's extract/model), its engine and server reached through its own Engine and

@@ -10,6 +10,7 @@ describe('engine wording', () => {
     down.detail = 'no heartbeat from the agent container';
     expect(agentText(down)).toBe('Not ready: no heartbeat from the agent container');
     expect(credentialText('api_key')).toBe('API key');
+    expect(credentialText('endpoint_api_key')).toBe('API key');
     expect(credentialText('')).toBe('no credential');
   });
   it('words the budget and the retention', () => {

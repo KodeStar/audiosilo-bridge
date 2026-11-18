@@ -107,6 +107,16 @@ func (c Config) AgentStagingDir(dataDir string) string {
 	return filepath.Join(dataDir, DefaultStagingDirName)
 }
 
+// AgentRunsDir is the staging dir the configured backend's runs go to: the
+// endpoint's own agent service's (agent.endpoint_staging_dir, "" when unset)
+// for openai-compatible, else the agent container's (AgentStagingDir).
+func (c Config) AgentRunsDir(dataDir string) string {
+	if c.Agent.Backend == AgentBackendOpenAICompatible {
+		return c.Agent.EndpointStagingDir
+	}
+	return c.AgentStagingDir(dataDir)
+}
+
 // ServerConfig is the AudioSilo server the Bridge pairs with.
 type ServerConfig struct {
 	// URL is the server's address as the Bridge reaches it (an absolute http(s)
@@ -161,9 +171,13 @@ const (
 	envMappingChecks         = "AUDIOSILO_BRIDGE_MAPPING_CHECK_MINUTES"
 
 	KeyAgentStagingDir      = "agent.staging_dir"
+	KeyAgentEndpointStaging = "agent.endpoint_staging_dir"
 	KeyAgentClaimTimeout    = "agent.claim_timeout_seconds"
 	KeyAgentMonthlyBudget   = "agent.monthly_budget_usd"
 	KeyAgentRequireGroup    = "agent.require_group"
+	KeyAgentBackend         = "agent.backend"
+	KeyAgentEndpointBaseURL = "agent.openai_compatible.base_url"
+	KeyAgentEndpointModel   = "agent.openai_compatible.model"
 	KeyTranscriptsRetention = "transcripts.retention_days"
 	KeyASRWorkerFallback    = "asr.worker_fallback"
 	KeyGitHubClientID       = "github.client_id"
@@ -171,9 +185,13 @@ const (
 	envGitHubClientID       = "AUDIOSILO_BRIDGE_GITHUB_CLIENT_ID"
 	envGitHubWebBaseURL     = "AUDIOSILO_BRIDGE_GITHUB_WEB_BASE_URL"
 	envAgentStagingDir      = "AUDIOSILO_BRIDGE_AGENT_STAGING_DIR"
+	envAgentEndpointStaging = "AUDIOSILO_BRIDGE_AGENT_ENDPOINT_STAGING_DIR"
 	envAgentClaimTimeout    = "AUDIOSILO_BRIDGE_AGENT_CLAIM_TIMEOUT_SECONDS"
 	envAgentMonthlyBudget   = "AUDIOSILO_BRIDGE_AGENT_MONTHLY_BUDGET_USD"
 	envAgentRequireGroup    = "AUDIOSILO_BRIDGE_AGENT_REQUIRE_GROUP"
+	envAgentBackend         = "AUDIOSILO_BRIDGE_AGENT_BACKEND"
+	envAgentEndpointBaseURL = "AUDIOSILO_BRIDGE_AGENT_OPENAI_COMPATIBLE_BASE_URL"
+	envAgentEndpointModel   = "AUDIOSILO_BRIDGE_AGENT_OPENAI_COMPATIBLE_MODEL"
 	envTranscriptsRetention = "AUDIOSILO_BRIDGE_TRANSCRIPTS_RETENTION_DAYS"
 	envASRWorkerFallback    = "AUDIOSILO_BRIDGE_ASR_WORKER_FALLBACK"
 )
@@ -234,6 +252,10 @@ func applyBridgeEnv(cfg *Config) {
 		cfg.Agent.StagingDir = v
 		cfg.fromEnv[KeyAgentStagingDir] = true
 	}
+	if v, ok := lookupEnv(envAgentEndpointStaging); ok {
+		cfg.Agent.EndpointStagingDir = v
+		cfg.fromEnv[KeyAgentEndpointStaging] = true
+	}
 	if v, ok := lookupEnv(envAgentClaimTimeout); ok {
 		cfg.Agent.ClaimTimeoutSeconds = envInt(v)
 		cfg.fromEnv[KeyAgentClaimTimeout] = true
@@ -253,6 +275,18 @@ func applyBridgeEnv(cfg *Config) {
 		}
 		cfg.Agent.RequireGroup = b
 		cfg.fromEnv[KeyAgentRequireGroup] = true
+	}
+	if v, ok := lookupEnv(envAgentBackend); ok {
+		cfg.Agent.Backend = v
+		cfg.fromEnv[KeyAgentBackend] = true
+	}
+	if v, ok := lookupEnv(envAgentEndpointBaseURL); ok {
+		cfg.Agent.OpenAICompatible.BaseURL = v
+		cfg.fromEnv[KeyAgentEndpointBaseURL] = true
+	}
+	if v, ok := lookupEnv(envAgentEndpointModel); ok {
+		cfg.Agent.OpenAICompatible.Model = v
+		cfg.fromEnv[KeyAgentEndpointModel] = true
 	}
 	if v, ok := lookupEnv(envTranscriptsRetention); ok {
 		cfg.Transcripts.RetentionDays = envInt(v)
@@ -308,6 +342,30 @@ func parseLibraries(v string) []LibraryMapping {
 	return out
 }
 
+// NormalizeBaseURL is an endpoint's base URL as config stores it: trimmed,
+// without its trailing slashes (codex appends /responses).
+func NormalizeBaseURL(raw string) string {
+	return strings.TrimRight(strings.TrimSpace(raw), "/")
+}
+
+// normalizeEndpoint trims agent.openai_compatible: the base URL by
+// NormalizeBaseURL, and a stage model left blank dropped, so the stage takes
+// the endpoint's model.
+func normalizeEndpoint(e *AgentEndpointConfig) {
+	e.BaseURL = NormalizeBaseURL(e.BaseURL)
+	e.Model = strings.TrimSpace(e.Model)
+	for k, v := range e.Models {
+		if v = strings.TrimSpace(v); v == "" {
+			delete(e.Models, k)
+		} else {
+			e.Models[k] = v
+		}
+	}
+	if len(e.Models) == 0 {
+		e.Models = nil
+	}
+}
+
 // normalizeBridge fills the Bridge settings an older or partial file leaves out.
 func normalizeBridge(cfg *Config) {
 	if cfg.Podcasts.AllowNetworks == nil {
@@ -325,12 +383,17 @@ func normalizeBridge(cfg *Config) {
 	if cfg.Agent.ClaimTimeoutSeconds == 0 {
 		cfg.Agent.ClaimTimeoutSeconds = DefaultClaimTimeoutSeconds
 	}
+	cfg.Agent.Backend = strings.TrimSpace(cfg.Agent.Backend)
+	normalizeEndpoint(&cfg.Agent.OpenAICompatible)
 	cfg.ASR.WorkerFallback = strings.ToLower(strings.TrimSpace(cfg.ASR.WorkerFallback))
 	if cfg.ASR.WorkerFallback == "" {
 		cfg.ASR.WorkerFallback = DefaultASRWorkerFallback
 	}
 	if p := strings.TrimSpace(cfg.Agent.StagingDir); p != "" {
 		cfg.Agent.StagingDir = filepath.Clean(p)
+	}
+	if p := strings.TrimSpace(cfg.Agent.EndpointStagingDir); p != "" {
+		cfg.Agent.EndpointStagingDir = filepath.Clean(p)
 	}
 	// Decision 15: the Bridge never runs an agent CLI itself, and a model-assisted
 	// supervisor (or its automatic actions) or a backend failover would. They are
@@ -453,6 +516,9 @@ func (c Config) validateBridge() error {
 	if c.Agent.StagingDir != "" && !filepath.IsAbs(c.Agent.StagingDir) {
 		return fmt.Errorf("agent.staging_dir %q must be an absolute path", c.Agent.StagingDir)
 	}
+	if e := c.Agent.EndpointStagingDir; e != "" && !filepath.IsAbs(e) {
+		return fmt.Errorf("agent.endpoint_staging_dir %q must be an absolute path", e)
+	}
 	if t := c.Agent.ClaimTimeoutSeconds; t < MinClaimTimeoutSeconds || t > MaxClaimTimeoutSeconds {
 		return fmt.Errorf("agent.claim_timeout_seconds must be between %d and %d, got %d", MinClaimTimeoutSeconds, MaxClaimTimeoutSeconds, t)
 	}
@@ -499,7 +565,11 @@ func checkHTTPURL(raw string) error {
 // SaveFile changes config.yaml's own values: it loads the file without the
 // environment, applies edit, validates the result and writes it (0600, a
 // temporary file renamed into place). So a value the environment sets is never
-// written to the file by a save of something else.
+// written to the file by a save of something else. The file is also checked as
+// the next start reads it, the environment's values over it, before it is
+// written: a rule across settings (agent.backend openai-compatible needs an
+// address and a model) may hold only with the environment's values, and must
+// hold with them, or the next start would refuse the file.
 func SaveFile(dataDir string, edit func(*Config) error) error {
 	cfg, err := load(dataDir, false)
 	if err != nil {
@@ -512,17 +582,39 @@ func SaveFile(dataDir string, edit func(*Config) error) error {
 	if err := cfg.Validate(); err != nil {
 		return err
 	}
-	return writeFile(dataDir, cfg)
+	out, err := marshal(cfg)
+	if err != nil {
+		return err
+	}
+	path := filepath.Join(dataDir, FileName)
+	if _, err := decode(path, out, true, true); err != nil {
+		return err
+	}
+	return writeBytes(dataDir, out)
 }
 
 // writeFile writes cfg to config.yaml (0600) through a temporary file.
 func writeFile(dataDir string, cfg Config) error {
-	if err := os.MkdirAll(dataDir, 0o700); err != nil {
-		return fmt.Errorf("create data dir: %w", err)
+	out, err := marshal(cfg)
+	if err != nil {
+		return err
 	}
+	return writeBytes(dataDir, out)
+}
+
+// marshal is cfg as config.yaml holds it.
+func marshal(cfg Config) ([]byte, error) {
 	out, err := yaml.Marshal(cfg)
 	if err != nil {
-		return fmt.Errorf("marshal config: %w", err)
+		return nil, fmt.Errorf("marshal config: %w", err)
+	}
+	return out, nil
+}
+
+// writeBytes writes out as config.yaml (0600) through a temporary file.
+func writeBytes(dataDir string, out []byte) error {
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		return fmt.Errorf("create data dir: %w", err)
 	}
 	return fsutil.WriteFileAtomic(filepath.Join(dataDir, FileName), out, 0o600)
 }

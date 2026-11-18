@@ -204,6 +204,15 @@ func (e *Executor) AgentStatus() agent.Availability {
 	return e.agentAvail
 }
 
+// SetCompatibleModels replaces the OpenAI-compatible endpoint's stage models
+// (bridge#84): the page's Settings > Agent edits them, and the next agent run
+// takes them. An agent stage reads the map once, as it starts.
+func (e *Executor) SetCompatibleModels(models map[string]string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.agentModels.Compatible = models
+}
+
 // ActivateFallback adopts a pre-approved backend/model for subsequent agent
 // invocations. Only the supervisor wiring calls this, and only when the explicit
 // allow_backend_failover configuration gate is enabled.
@@ -487,8 +496,8 @@ func (e *Executor) runAgentWith(ctx context.Context, book store.Book, stage stat
 		return agentUsage{}, scheduler.ParkWithCode(state.ParkAgentUnavailable, AgentUnavailableMsg)
 	}
 	e.mu.Lock()
-	model := agent.ModelFor(e.agentModels.Claude, e.agentModels.OpenAI, runner.ID(), string(stage))
-	effort := agent.ModelFor(e.agentEfforts.Claude, e.agentEfforts.OpenAI, runner.ID(), string(stage))
+	model := agent.ModelFor(e.agentModels.Claude, e.agentModels.OpenAI, e.agentModels.Compatible, runner.ID(), string(stage))
+	effort := agent.ModelFor(e.agentEfforts.Claude, e.agentEfforts.OpenAI, nil, runner.ID(), string(stage))
 	e.mu.Unlock()
 
 	prompt, err := prompts.Render(promptName, promptData)

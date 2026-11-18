@@ -85,10 +85,12 @@ func (s *engineState) sharer() generate.Sharer {
 	return nil
 }
 
-// agentBackend is the CLI the agent container runs (claude unless codex is set).
+// agentBackend is the backend the agent container runs: codex or
+// openai-compatible (codex against the endpoint) when set, else claude.
 func agentBackend(cfg config.Config) string {
-	if cfg.Agent.Backend == config.AgentBackendCodex {
-		return config.AgentBackendCodex
+	switch cfg.Agent.Backend {
+	case config.AgentBackendCodex, config.AgentBackendOpenAICompatible:
+		return cfg.Agent.Backend
 	}
 	return config.AgentBackendClaude
 }
@@ -149,7 +151,8 @@ func (b *Bridge) runEngine(ctx context.Context) {
 		ASR:       pipeline.ASRSetup{Backend: router, Cap: routerCap, Model: asrModel, Language: cfg.ASR.Language},
 		ASRSelect: asrSelect,
 		Agent:     box, AgentAvail: box.Detect(ctx), AgentRedetect: redetect,
-		AgentModels:      pipeline.AgentModels{Claude: cfg.Agent.Claude, OpenAI: cfg.Agent.OpenAI},
+		AgentModels: pipeline.AgentModels{Claude: cfg.Agent.Claude, OpenAI: cfg.Agent.OpenAI,
+			Compatible: cfg.Agent.EndpointModels()},
 		AgentTimeout:     time.Duration(cfg.Agent.TimeoutMinutes) * time.Minute,
 		AgentConcurrency: slots, MaxAgentsPerBook: slots,
 		BookBudgetUSD: cfg.Agent.BookBudgetUSD,
@@ -226,7 +229,7 @@ func (b *Bridge) runEngine(ctx context.Context) {
 	b.engineStarted(ctx, &engine{ffmpeg: tools.FFmpeg, ffprobe: tools.FFprobe, sched: sched, exec: exec}, wg.Go)
 	log.Info("bridge: the engine started", "ffmpeg", tools.FFmpeg != "", "asr", asrCap.Backend, "asr_available", asrCap.Available,
 		"asr_worker_fallback", cfg.ASR.WorkerFallback,
-		"agent_backend", box.ID(), "agent_slots", slots, "staging", cfg.AgentStagingDir(b.dataDir))
+		"agent_backend", box.ID(), "agent_slots", slots, "staging", box.Dir())
 	b.runner.Wake()
 	wg.Wait()
 }
@@ -394,13 +397,16 @@ func (p *eventPersister) Close() {
 	<-p.done
 }
 
-// newAgentBox is the agent container runner for cfg.
-// credential is the vault's agent credential for the hand-off (nil: none).
+// newAgentBox is the agent container runner for cfg: the openai-compatible
+// backend's runs go to the endpoint's own agent service
+// (agent.endpoint_staging_dir), the others' to the agent container.
+// credential is the vault's agent credential for the hand-off (nil: none);
+// endpoint the OpenAI-compatible endpoint's address now (nil: none).
 func newAgentBox(cfg config.Config, dataDir string, log *slog.Logger,
-	credential func(cli string) (kind, value string, since time.Time, ok bool)) *agentbox.Runner {
-	return agentbox.New(agentbox.Options{Dir: cfg.AgentStagingDir(dataDir), Backend: agentBackend(cfg),
+	credential func(cli, endpoint string) (kind, value string, since time.Time, ok bool), endpoint func() string) *agentbox.Runner {
+	return agentbox.New(agentbox.Options{Dir: cfg.AgentRunsDir(dataDir), AgentDir: cfg.AgentStagingDir(dataDir), Backend: agentBackend(cfg),
 		ClaimTimeout: time.Duration(cfg.Agent.ClaimTimeoutSeconds) * time.Second, Log: log, Credential: credential,
-		RequireGroup: cfg.Agent.RequireGroup})
+		RequireGroup: cfg.Agent.RequireGroup, Endpoint: endpoint})
 }
 
 // estimatesEvery is how often the heartbeat's estimates are computed again: they

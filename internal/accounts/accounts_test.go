@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kodestar/audiosilo-bridge/internal/agent"
 	"github.com/kodestar/audiosilo-bridge/internal/agentproto"
 	"github.com/kodestar/audiosilo-bridge/internal/ghauth"
 	"github.com/kodestar/audiosilo-bridge/internal/secrets"
@@ -576,7 +577,7 @@ func TestAgentCredentialSincePerKind(t *testing.T) {
 	}
 	defer func() { _ = db.Close() }()
 	c := &clock{now: time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)}
-	a := NewAgent(secrets.NewMemStore(), db, c.Now, nil)
+	a := NewAgent(secrets.NewMemStore(), db, c.Now, nil, nil)
 	must := func(err error) {
 		t.Helper()
 		if err != nil {
@@ -590,16 +591,16 @@ func TestAgentCredentialSincePerKind(t *testing.T) {
 	must(a.Set(ctx, AgentAnthropicKey, "sk-ant-api-1"))
 	keySet := c.Now()
 	must(a.Delete(ctx, AgentOpenAIKey))
-	if kind, _, since, _ := a.Credential(ctx, "claude"); kind != agentproto.CredentialOAuthToken || !since.Equal(set) {
+	if kind, _, since, _ := a.Credential(ctx, "claude", ""); kind != agentproto.CredentialOAuthToken || !since.Equal(set) {
 		t.Fatalf("claude = %q since %v, want the token's own %v", kind, since, set)
 	}
 	c.Add(time.Hour)
 	must(a.Set(ctx, AgentClaudeToken, "sk-ant-oat01-y"))
-	if _, _, since, _ := a.Credential(ctx, "claude"); !since.Equal(c.Now()) {
+	if _, _, since, _ := a.Credential(ctx, "claude", ""); !since.Equal(c.Now()) {
 		t.Fatalf("a replaced token's time = %v, want %v", since, c.Now())
 	}
 	must(a.Delete(ctx, AgentClaudeToken))
-	if kind, _, since, _ := a.Credential(ctx, "claude"); kind != agentproto.CredentialAPIKey || !since.Equal(keySet) {
+	if kind, _, since, _ := a.Credential(ctx, "claude", ""); kind != agentproto.CredentialAPIKey || !since.Equal(keySet) {
 		t.Fatalf("claude = %q since %v, want the key's own %v", kind, since, keySet)
 	}
 }
@@ -613,8 +614,8 @@ func TestAgentCredential(t *testing.T) {
 	defer func() { _ = db.Close() }()
 	vault := secrets.NewMemStore()
 	var changes int
-	a := NewAgent(vault, db, nil, func() { changes++ })
-	if _, _, _, ok := a.Credential(ctx, "claude"); ok {
+	a := NewAgent(vault, db, nil, func() { changes++ }, nil)
+	if _, _, _, ok := a.Credential(ctx, "claude", ""); ok {
 		t.Fatal("no credential yet")
 	}
 	for _, bad := range []struct{ kind, value string }{
@@ -628,16 +629,16 @@ func TestAgentCredential(t *testing.T) {
 	if err := a.Set(ctx, AgentAnthropicKey, " sk-ant-api-1 "); err != nil {
 		t.Fatal(err)
 	}
-	if kind, v, since, ok := a.Credential(ctx, "claude"); !ok || kind != agentproto.CredentialAPIKey || v != "sk-ant-api-1" || since.IsZero() {
+	if kind, v, since, ok := a.Credential(ctx, "claude", ""); !ok || kind != agentproto.CredentialAPIKey || v != "sk-ant-api-1" || since.IsZero() {
 		t.Fatalf("claude = %q %q %v %v", kind, v, since, ok)
 	}
 	if err := a.Set(ctx, AgentClaudeToken, "sk-ant-oat01-x"); err != nil {
 		t.Fatal(err)
 	}
-	if kind, v, _, _ := a.Credential(ctx, "claude"); kind != agentproto.CredentialOAuthToken || v != "sk-ant-oat01-x" {
+	if kind, v, _, _ := a.Credential(ctx, "claude", ""); kind != agentproto.CredentialOAuthToken || v != "sk-ant-oat01-x" {
 		t.Fatalf("a subscription token comes first: %q %q", kind, v)
 	}
-	if _, _, _, ok := a.Credential(ctx, "codex"); ok {
+	if _, _, _, ok := a.Credential(ctx, "codex", ""); ok {
 		t.Fatal("codex has no credential")
 	}
 	st := a.State(ctx)
@@ -648,7 +649,7 @@ func TestAgentCredential(t *testing.T) {
 	if err := a.Delete(ctx, AgentClaudeToken); err != nil {
 		t.Fatal(err)
 	}
-	if kind, _, _, _ := a.Credential(ctx, "claude"); kind != agentproto.CredentialAPIKey {
+	if kind, _, _, _ := a.Credential(ctx, "claude", ""); kind != agentproto.CredentialAPIKey {
 		t.Fatal("the API key is left")
 	}
 	if err := a.Delete(ctx, ""); err != nil {
@@ -659,5 +660,251 @@ func TestAgentCredential(t *testing.T) {
 	}
 	if changes != 4 {
 		t.Fatalf("changes = %d", changes)
+	}
+}
+
+// The endpoint's key (bridge#84) is the openai-compatible backend's alone:
+// never codex's (a run against OpenAI), and codex's OpenAI key never the
+// endpoint's.
+func TestAgentEndpointKey(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	if got := KindsFor(agent.IDOpenAICompatible); len(got) != 1 || got[0] != AgentEndpointKey {
+		t.Fatalf("KindsFor = %v", got)
+	}
+	addr := "https://openrouter.ai/api/v1"
+	a := NewAgent(secrets.NewMemStore(), db, nil, nil, func() string { return addr })
+	if err := a.Set(ctx, AgentOpenAIKey, "sk-openai"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, ok := a.Credential(ctx, agent.IDOpenAICompatible, addr); ok {
+		t.Fatal("the OpenAI key went to the endpoint")
+	}
+	if err := a.Set(ctx, AgentEndpointKey, "sk-or-v1-endpoint"); err != nil {
+		t.Fatal(err)
+	}
+	if kind, v, since, ok := a.Credential(ctx, agent.IDOpenAICompatible, addr); !ok || kind != agentproto.CredentialEndpointKey ||
+		v != "sk-or-v1-endpoint" || since.IsZero() {
+		t.Fatalf("endpoint = %q %q %v %v", kind, v, since, ok)
+	}
+	if _, v, _, _ := a.Credential(ctx, "codex", ""); v != "sk-openai" {
+		t.Fatalf("codex got %q", v)
+	}
+	if st := a.State(ctx); !st.Set[AgentEndpointKey] || st.SetAtByKind[AgentEndpointKey] == "" {
+		t.Fatalf("state = %+v", st)
+	}
+}
+
+// The endpoint's key is kept for the address it was entered for: it is the
+// endpoint's credential, and goes along with a check, only while that is the
+// endpoint's address, and with a run only to that address (allowed); under
+// any other address, however it changed, it is no credential, isn't shown as
+// set, goes to no check or run there, and is dropped (denied). Without an
+// address there is nothing to enter a key for.
+func TestAgentEndpointKeyIsItsAddressAlone(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	const first, other = "https://openrouter.ai/api/v1", "https://elsewhere.example/v1"
+	addr := ""
+	vault := secrets.NewMemStore()
+	var changes int
+	a := NewAgent(vault, db, nil, func() { changes++ }, func() string { return addr })
+	if err := a.Set(ctx, AgentEndpointKey, "sk-first"); !errors.Is(err, ErrInvalidCredential) || !strings.Contains(err.Error(), "address") {
+		t.Fatalf("a key with no address = %v", err)
+	}
+	if ok, _ := vault.Present(AgentEndpointKey); ok {
+		t.Fatal("a key with no address was stored")
+	}
+	addr = first
+	if err := a.Set(ctx, AgentEndpointKey, "sk-first"); err != nil {
+		t.Fatal(err)
+	}
+	if key, err := a.EndpointKey(ctx, first); err != nil || key != "sk-first" {
+		t.Fatalf("its own address: %q, %v", key, err)
+	}
+	if key, _ := a.EndpointKey(ctx, other); key != "" {
+		t.Fatalf("a check of another address got the key %q", key)
+	}
+	if dropped, err := a.DropStaleEndpointKey(ctx); dropped || err != nil {
+		t.Fatalf("a key for the address now was dropped: %v, %v", dropped, err)
+	}
+
+	// The address moves (the page, config.yaml or the environment).
+	addr = other
+	if _, v, _, ok := a.Credential(ctx, agent.IDOpenAICompatible, addr); ok || v != "" {
+		t.Fatalf("the key went to another address: %q", v)
+	}
+	// A run that read the first address before the move goes there, with that
+	// address's own key (allowed: the key never leaves its address).
+	if _, v, _, ok := a.Credential(ctx, agent.IDOpenAICompatible, first); !ok || v != "sk-first" {
+		t.Fatalf("a run to the key's own address: %q, %v", v, ok)
+	}
+	for _, to := range []string{first, other} {
+		if key, _ := a.EndpointKey(ctx, to); key != "" {
+			t.Fatalf("EndpointKey(%s) = %q after the address moved", to, key)
+		}
+	}
+	if st := a.State(ctx); st.Set[AgentEndpointKey] || st.SetAtByKind[AgentEndpointKey] != "" {
+		t.Fatalf("a key for another address shows as set: %+v", st)
+	}
+	before := changes
+	if dropped, err := a.DropStaleEndpointKey(ctx); !dropped || err != nil {
+		t.Fatalf("drop = %v, %v", dropped, err)
+	}
+	if ok, _ := vault.Present(AgentEndpointKey); ok || changes != before {
+		t.Fatalf("after the drop: present %v, changes %d (want %d)", ok, changes, before)
+	}
+	// Moving back doesn't bring it back, and a key entered now is this address's.
+	addr = first
+	if _, _, _, ok := a.Credential(ctx, agent.IDOpenAICompatible, addr); ok {
+		t.Fatal("a dropped key came back")
+	}
+	addr = other
+	if err := a.Set(ctx, AgentEndpointKey, "sk-other"); err != nil {
+		t.Fatal(err)
+	}
+	if _, v, _, _ := a.Credential(ctx, agent.IDOpenAICompatible, addr); v != "sk-other" {
+		t.Fatalf("the new address's key = %q", v)
+	}
+	// A key replaced after the address moved is the new address's, never the
+	// old key under the new address.
+	addr = first
+	if err := a.Set(ctx, AgentEndpointKey, "sk-first-again"); err != nil {
+		t.Fatal(err)
+	}
+	if key, _ := a.EndpointKey(ctx, first); key != "sk-first-again" {
+		t.Fatalf("replaced = %q", key)
+	}
+}
+
+// flakyStore is a Store whose reads of, or sign-ins to, the endpoint key's row
+// fail while a test says so.
+type flakyStore struct {
+	Store
+	failGet, failSignIn bool
+}
+
+func (s *flakyStore) GetAccount(ctx context.Context, provider string) (store.Account, error) {
+	if s.failGet && provider == kindProvider(AgentEndpointKey) {
+		return store.Account{}, errors.New("database is locked")
+	}
+	return s.Store.GetAccount(ctx, provider)
+}
+
+func (s *flakyStore) SignInAccount(ctx context.Context, provider, login string, at time.Time) error {
+	if s.failSignIn && provider == kindProvider(AgentEndpointKey) {
+		return errors.New("database is locked")
+	}
+	return s.Store.SignInAccount(ctx, provider, login, at)
+}
+
+// A key the page took beside one address is refused once the endpoint has
+// another (a stale page: another tab, config.yaml or the environment moved
+// it), so it never lands under an address its owner didn't see (denied); the
+// address the page shows being the endpoint's, it is stored (allowed).
+func TestAgentEndpointKeyEnteredForAStaleAddress(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	const shown, now = "https://openrouter.ai/api/v1", "https://elsewhere.example/v1"
+	addr := now
+	vault := secrets.NewMemStore()
+	a := NewAgent(vault, db, nil, nil, func() string { return addr })
+	err = a.SetFor(ctx, AgentEndpointKey, "sk-for-the-shown-one", shown)
+	if !errors.Is(err, ErrInvalidCredential) || !strings.Contains(err.Error(), "reload") || strings.Contains(err.Error(), "sk-for") {
+		t.Fatalf("a key entered beside a stale address = %v", err)
+	}
+	if ok, _ := vault.Present(AgentEndpointKey); ok {
+		t.Fatal("the key was stored for an address its owner didn't see")
+	}
+	if err := a.SetFor(ctx, AgentEndpointKey, "sk-now", now); err != nil {
+		t.Fatal(err)
+	}
+	if key, _ := a.EndpointKey(ctx, now); key != "sk-now" {
+		t.Fatalf("key = %q", key)
+	}
+	// The other kinds have no address.
+	if err := a.SetFor(ctx, AgentOpenAIKey, "sk-openai", shown); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A key whose row couldn't be written is under no address: the row of the key
+// before it, entered for another address, is gone first, so moving back to
+// that address never hands it the new key (denied).
+func TestAgentEndpointKeyRowFailureLeavesItUnused(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	const first, other = "https://openrouter.ai/api/v1", "https://elsewhere.example/v1"
+	addr := first
+	fs := &flakyStore{Store: db}
+	a := NewAgent(secrets.NewMemStore(), fs, nil, nil, func() string { return addr })
+	if err := a.Set(ctx, AgentEndpointKey, "sk-first"); err != nil {
+		t.Fatal(err)
+	}
+	addr, fs.failSignIn = other, true
+	if err := a.Set(ctx, AgentEndpointKey, "sk-other"); err == nil {
+		t.Fatal("the row's failure wasn't reported")
+	}
+	fs.failSignIn = false
+	for _, at := range []string{first, other} {
+		addr = at
+		if key, _ := a.EndpointKey(ctx, at); key != "" {
+			t.Fatalf("EndpointKey(%s) = %q after a key whose row failed", at, key)
+		}
+		if _, _, _, ok := a.Credential(ctx, agent.IDOpenAICompatible, at); ok {
+			t.Fatalf("a key with no row is the credential at %s", at)
+		}
+	}
+}
+
+// A row that can't be read says nothing of the key's address: the key goes
+// nowhere meanwhile, and is not dropped (it is the address's own once the row
+// reads again).
+func TestAgentEndpointKeyUnreadRowDropsNothing(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	const addr = "https://openrouter.ai/api/v1"
+	vault := secrets.NewMemStore()
+	fs := &flakyStore{Store: db}
+	a := NewAgent(vault, fs, nil, nil, func() string { return addr })
+	if err := a.Set(ctx, AgentEndpointKey, "sk-mine"); err != nil {
+		t.Fatal(err)
+	}
+	fs.failGet = true
+	if dropped, err := a.DropStaleEndpointKey(ctx); dropped || err == nil {
+		t.Fatalf("drop with the row unread = %v, %v", dropped, err)
+	}
+	if ok, _ := vault.Present(AgentEndpointKey); !ok {
+		t.Fatal("the key was dropped on a read error")
+	}
+	if key, err := a.EndpointKey(ctx, addr); key != "" || err == nil {
+		t.Fatalf("EndpointKey with the row unread = %q, %v", key, err)
+	}
+	if st := a.State(ctx); st.Set[AgentEndpointKey] {
+		t.Fatalf("state = %+v", st)
+	}
+	fs.failGet = false
+	if key, err := a.EndpointKey(ctx, addr); key != "sk-mine" || err != nil {
+		t.Fatalf("once the row reads again: %q, %v", key, err)
 	}
 }

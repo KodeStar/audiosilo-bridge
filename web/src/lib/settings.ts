@@ -11,8 +11,12 @@ export const LOCKED_NOTE = 'Set by the environment';
 export const MIN_CHECK_MINUTES = 1;
 export const MAX_CHECK_MINUTES = 1440;
 
-// isLocked: the environment sets this key, so the page can't change it.
-export function isLocked(s: Pick<Settings, 'locked'> | null | undefined, key: SettingKey): boolean {
+// isLocked: the environment sets this key, so the page can't change it (a
+// Settings key, or Settings > Agent's).
+export function isLocked<K extends string = SettingKey>(
+  s: { locked: K[] } | null | undefined,
+  key: K,
+): boolean {
   return !!s && Array.isArray(s.locked) && s.locked.includes(key);
 }
 

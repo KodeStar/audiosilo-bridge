@@ -52,10 +52,16 @@ const orphanAfter = 30 * time.Second
 // Options configures the runner.
 type Options struct {
 	Staging string // the staging dir (/staging)
-	Home    string // the agent home (/agent): secrets/, codex/
-	Slots   int    // concurrent jobs; 0 = 1
-	Version string // reported in runner.json
-	Log     *slog.Logger
+	// Home is the agent home (/agent): secrets/, codex/. An endpoint-only
+	// runner never uses it, and refuses its runs while it can reach it.
+	Home string
+	// EndpointOnly makes this the endpoint's own agent service (bridge#84):
+	// it runs only requests with an endpoint (the other runner only those
+	// without), reports endpoint_only, and ends whatever a run leaves behind.
+	EndpointOnly bool
+	Slots        int    // concurrent jobs; 0 = 1
+	Version      string // reported in runner.json
+	Log          *slog.Logger
 
 	// Getenv reads the runner's own environment (os.LookupEnv when nil); a test
 	// injects one so it never touches the process environment.
@@ -100,9 +106,24 @@ type Runner struct {
 	codexActive int
 
 	// active holds the ids of the jobs this runner claimed and hasn't finished,
-	// which the orphan recovery never finishes (guarded by activeMu).
+	// which the orphan recovery never finishes, and sessions the sessions of
+	// the CLIs running now (each its own, by its pid), which a sweep spares
+	// (both guarded by activeMu).
 	activeMu sync.Mutex
 	active   map[string]bool
+	sessions map[int]bool
+	// sweep ends the processes a run left behind (sweep.go), set by Main for
+	// an endpoint-only runner (nil: no sweep). sweepMu orders the sweeps
+	// against the CLIs' starts (spawn).
+	sweep   func(keep func(sid int) bool) int
+	sweepMu sync.Mutex
+	// mounts lists the runner's mounts (readMounts; a test injects its own),
+	// which an endpoint-only runner looks through for the agent volume and
+	// credentials' files (mounts.go).
+	mounts func() ([]mount, error)
+	// selfUID is the runner's own uid: a job of its making is a run's
+	// (planted), which the endpoint's service never runs.
+	selfUID int
 
 	// groups are runner.json's groups, read once: a process with no
 	// capabilities can't change them.
@@ -135,6 +156,11 @@ func New(opts Options) (*Runner, error) {
 	if opts.Slots < 1 || opts.Slots > MaxSlots {
 		return nil, fmt.Errorf("agent runner: --slots must be between 1 and %d", MaxSlots)
 	}
+	if opts.EndpointOnly && opts.Slots > 1 {
+		// Concurrent runs would share the service's user: a run's commands
+		// could read the other run's environment, its key with it.
+		return nil, errors.New("agent runner: --endpoint-only runs one job at a time (--slots 1)")
+	}
 	if opts.Getenv == nil {
 		opts.Getenv = os.LookupEnv
 	}
@@ -158,6 +184,9 @@ func New(opts Options) (*Runner, error) {
 		clis:        map[string]cliInfo{},
 		creds:       map[string]credSeen{},
 		active:      map[string]bool{},
+		sessions:    map[int]bool{},
+		mounts:      readMounts,
+		selfUID:     os.Geteuid(),
 		groups:      groups(),
 		killDelay:   10 * time.Second,
 		scanEvery:   scanInterval,
@@ -195,14 +224,21 @@ func (r *Runner) isActive(id string) bool {
 // Run serves the staging dir until ctx ends, then stops the runs in progress
 // (each is cancelled and finished, so the Bridge gets an answer) and returns.
 func (r *Runner) Run(ctx context.Context) error {
-	if err := os.MkdirAll(filepath.Join(r.opts.Home, "codex"), 0o700); err != nil {
-		r.log.Warn("agent runner: create the codex home", "err", err)
+	if !r.opts.EndpointOnly {
+		if err := os.MkdirAll(r.codexHome(), 0o700); err != nil {
+			r.log.Warn("agent runner: create the codex home", "err", err)
+		}
+		if err := r.markHome(); err != nil {
+			r.log.Warn("agent runner: mark the agent home", "err", err)
+		}
+	} else if why := r.credentialProblem(); why != "" {
+		r.log.Warn("agent runner: "+endpointBlocked, "why", why)
 	}
 	r.lastDetect = r.now()
 	r.detect(ctx)
 	r.recoverOrphans()
 	r.writeStatus()
-	r.log.Info("agent runner: started", "staging", r.opts.Staging, "slots", r.opts.Slots)
+	r.log.Info("agent runner: started", "staging", r.opts.Staging, "slots", r.opts.Slots, "endpoint_only", r.opts.EndpointOnly)
 
 	status := time.NewTicker(r.statusEvery)
 	defer status.Stop()
@@ -225,6 +261,25 @@ func (r *Runner) Run(ctx context.Context) error {
 			r.scan(ctx, &wg)
 		}
 	}
+}
+
+// markHome writes agentHomeMarker at the top of the agent home unless it is
+// there already: the endpoint's service refuses its runs while it finds the
+// marker under any of its mounts (mounts.go), whatever the volume is called.
+func (r *Runner) markHome() error {
+	f, err := os.OpenFile(filepath.Join(r.opts.Home, agentHomeMarker), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) //nolint:gosec // the runner's own home
+	if errors.Is(err, fs.ErrExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	_, err = f.WriteString("The AudioSilo agent container's home: the subscriptions' credentials. " +
+		"Never mount this volume in the endpoint's agent service (agent-endpoint).\n")
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	return err
 }
 
 // detectAgain looks for the CLIs again in the background when a run asked for it
@@ -319,14 +374,20 @@ func (r *Runner) version(ctx context.Context, path string) (string, error) {
 
 // status is runner.json now: the CLIs found and the kind of credential each has.
 func (r *Runner) status() agentproto.Runner {
+	// Looked at before the heartbeat is dated: the mounts' walk takes a while
+	// on a slow filesystem, which mustn't age the heartbeat it writes.
+	own := r.opts.EndpointOnly && r.credentialProblem() != ""
 	st := agentproto.Runner{
-		Protocol:    agentproto.Protocol,
-		Version:     r.opts.Version,
-		HeartbeatAt: r.now().UTC(),
-		Slots:       r.opts.Slots,
-		CLIs:        map[string]agentproto.CLI{},
-		Handoff:     true,
-		Groups:      r.groups,
+		Protocol:       agentproto.Protocol,
+		Version:        r.opts.Version,
+		HeartbeatAt:    r.now().UTC(),
+		Slots:          r.opts.Slots,
+		CLIs:           map[string]agentproto.CLI{},
+		Handoff:        true,
+		Groups:         r.groups,
+		Endpoints:      true,
+		EndpointOnly:   r.opts.EndpointOnly,
+		OwnCredentials: own,
 	}
 	for _, name := range []string{agentproto.CLIClaude, agentproto.CLICodex} {
 		c, _ := r.cli(name)

@@ -27,10 +27,26 @@ func Main(ctx context.Context, opts Options) error {
 	if !supported {
 		return errors.New("the agent runner runs in the agent container (Linux)")
 	}
+	if opts.EndpointOnly && os.Getpid() != 1 {
+		// The endpoint's service is its container's first process: any other
+		// (tini, a shell) would share its user, readable and traceable by a
+		// run's commands (its environment through /proc/1/environ, a child of
+		// its own outside the sweep's reach), where the runner is not dumpable.
+		return errors.New("agent runner: --endpoint-only runs as its container's first process " +
+			"(entrypoint audiosilo-bridge, no tini or --init: the compose example's agent-endpoint)")
+	}
 	setUmask(0o077)
 	r, err := New(opts)
 	if err != nil {
 		return err
+	}
+	if opts.EndpointOnly {
+		// It ends whatever its runs leave behind (sweep.go): without that it
+		// runs nothing.
+		if err := endpointHardening(); err != nil {
+			return fmt.Errorf("agent runner: the endpoint's service can't keep its runs' processes: %w", err)
+		}
+		r.sweep = killStrays
 	}
 	return r.Run(ctx)
 }

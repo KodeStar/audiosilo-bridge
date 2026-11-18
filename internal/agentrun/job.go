@@ -43,9 +43,12 @@ func (r *Runner) handle(ctx context.Context, job *os.Root) {
 // execute validates the request and runs the CLI. Only the run's outcome comes
 // back; stdout.txt and stderr.txt are written as it runs.
 func (r *Runner) execute(ctx context.Context, job *os.Root, id string) agentproto.Exit {
-	raw, err := agentproto.ReadRegular(job, agentproto.RequestFile, agentproto.MaxRequestBytes)
+	raw, reqInfo, err := agentproto.ReadRegularInfo(job, agentproto.RequestFile, agentproto.MaxRequestBytes)
 	if err != nil {
 		return refused("read request.json: " + err.Error())
+	}
+	if r.opts.EndpointOnly && r.planted(job, reqInfo) {
+		return unavailable(plantedJob)
 	}
 	req, err := agentproto.DecodeRequest(raw)
 	if err != nil {
@@ -58,13 +61,32 @@ func (r *Runner) execute(ctx context.Context, job *os.Root, id string) agentprot
 	}
 	// The Bridge's credential is taken (and its file deleted) before anything
 	// else can run: the CLI never finds it on disk.
-	handed, err := r.takeCredential(job, req.CLI)
+	endpoint := req.Endpoint != nil
+	handed, err := r.takeCredential(job, req.CLI, endpoint)
 	if err != nil {
 		exit := refused(err.Error())
 		exit.CredentialDenied = errors.Is(err, fs.ErrPermission)
 		return exit
 	}
-	if r.credentialKind(req.CLI) == "" && handed == nil {
+	// An endpoint's model is whoever answers at the address, and the CLI runs
+	// its commands as this uid: its runs have a service of their own (no agent
+	// home, its own uid and staging volume), which runs nothing else, and
+	// nothing of a container's own may be within their reach (the hand-off
+	// above is taken and deleted either way).
+	switch {
+	case r.opts.EndpointOnly && !endpoint:
+		return unavailable(endpointOnlyRefusal)
+	case endpoint && !r.opts.EndpointOnly:
+		return unavailable(endpointElsewhere)
+	}
+	if endpoint {
+		if why := r.credentialProblem(); why != "" {
+			r.log.Warn("agent runner: refused an endpoint run", "why", why)
+			return unavailable(endpointBlocked)
+		}
+	}
+	// An endpoint may take no key (a local server); any other run needs one.
+	if !endpoint && r.credentialKind(req.CLI) == "" && handed == nil {
 		return unavailable(req.CLI + " has no credential: set one on the Bridge's Accounts tab, or give one to the agent container")
 	}
 	prompt, err := agentproto.OpenRegular(job, agentproto.PromptFile)
@@ -96,16 +118,34 @@ func (r *Runner) execute(ctx context.Context, job *os.Root, id string) agentprot
 		}
 		args = agent.ClaudeArgs(areq)
 	case agentproto.CLICodex:
+		if endpoint {
+			// Its own empty CODEX_HOME (the endpoint's service has no shared
+			// one): nothing an earlier run left there reaches this one.
+			if err := os.Mkdir(endpointCodexHome(runDir), 0o700); err != nil {
+				return refused("create the run's codex home: " + err.Error())
+			}
+			areq.Endpoint = &agent.Endpoint{BaseURL: req.Endpoint.BaseURL}
+			if handed != nil {
+				areq.Endpoint.KeyEnv = agent.EndpointKeyEnv
+			}
+		} else {
+			r.codexStart()
+			defer r.codexEnd()
+		}
 		args = agent.CodexArgs(areq, lastMsg, agent.CodexSandboxOff)
-		r.codexStart()
-		defer r.codexEnd()
 	}
 
+	var env []string
+	if endpoint {
+		env = r.endpointEnv(runDir, handed)
+	} else {
+		env = r.childEnv(req.CLI, runDir, handed)
+	}
 	exit := r.spawn(ctx, job, spec{
 		path:    cli.path,
 		args:    args,
 		dir:     work,
-		env:     r.childEnv(req.CLI, runDir, handed),
+		env:     env,
 		stdin:   prompt,
 		timeout: time.Duration(req.TimeoutSeconds) * time.Second,
 	})
@@ -118,6 +158,32 @@ func (r *Runner) execute(ctx context.Context, job *os.Root, id string) agentprot
 		r.copyLastMessage(job, runDir, id)
 	}
 	return exit
+}
+
+// plantedJob is exit.json's error for a job in the endpoint's service that the
+// Bridge didn't stage (planted).
+const plantedJob = "the endpoint's agent service runs only the jobs the Bridge stages, and this job's folder or " +
+	"request belongs to the service's own user (a run's making, or a Bridge running as that same user): " +
+	"run the Bridge and agent-endpoint as different users"
+
+// planted reports whether a job in the endpoint's service is one of its own
+// uid's making (its dir or its request.json, req, owned by selfUID): a run's
+// commands share that uid and can write the staging dir, so such a job is one
+// a run left there to run again after it (the claim is the oldest request's,
+// so it would also hold up the Bridge's jobs and their credentials), never
+// the Bridge's, which runs as another user. A volume that shows every file as
+// one squashed uid can't tell the two apart.
+func (r *Runner) planted(job *os.Root, req fs.FileInfo) bool {
+	dir, err := job.Stat(".")
+	if err != nil {
+		return true
+	}
+	for _, info := range []fs.FileInfo{dir, req} {
+		if uid, ok := ownerUID(info); ok && uid == r.selfUID {
+			return true
+		}
+	}
+	return false
 }
 
 // copyLastMessage copies codex's --output-last-message file from the run's temp
@@ -145,7 +211,11 @@ func (r *Runner) copyLastMessage(job *os.Root, runDir, id string) {
 // files are the headless override). The value is never logged. An error that
 // is fs.ErrPermission is the runner's uid denied the file (execute reports it as
 // Exit.CredentialDenied).
-func (r *Runner) takeCredential(job *os.Root, cli string) (*agentproto.Credential, error) {
+//
+// An endpoint run (bridge#84) takes only an endpoint key, whatever the
+// container has of its own (that is for OpenAI, never another endpoint), and a
+// non-endpoint run never takes one.
+func (r *Runner) takeCredential(job *os.Root, cli string, endpoint bool) (*agentproto.Credential, error) {
 	name := filepath.Join(agentproto.CredentialDir, agentproto.CredentialFile)
 	if _, err := job.Lstat(name); errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
@@ -154,7 +224,7 @@ func (r *Runner) takeCredential(job *os.Root, cli string) (*agentproto.Credentia
 	if err := job.Remove(name); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return nil, fmt.Errorf("couldn't delete the Bridge's credential.json before the run: %w", err)
 	}
-	if r.credentialKind(cli) != "" {
+	if !endpoint && r.credentialKind(cli) != "" {
 		return nil, nil
 	}
 	if rerr != nil {
@@ -163,6 +233,12 @@ func (r *Runner) takeCredential(job *os.Root, cli string) (*agentproto.Credentia
 	c, err := agentproto.DecodeCredential(raw, cli)
 	if err != nil {
 		return nil, err
+	}
+	if endpoint != (c.Kind == agentproto.CredentialEndpointKey) {
+		if endpoint {
+			return nil, fmt.Errorf("credential.json's kind %q isn't an endpoint's key", c.Kind)
+		}
+		return nil, errors.New("credential.json holds an endpoint's key, and the request isn't for an endpoint")
 	}
 	return &c, nil
 }
@@ -186,11 +262,13 @@ type spec struct {
 	timeout time.Duration
 }
 
-// spawn runs one CLI in its own process group, stdout and stderr into the job
-// dir (capped), touching the heartbeat every 5 s and checking for a cancel every
-// second. A cancel, the timeout or the runner stopping sends SIGTERM to the
-// group, SIGKILL killDelay later; whatever of the group is left when the CLI
-// exits is killed too, so no helper outlives its run.
+// spawn runs one CLI in its own session and process group, stdout and stderr
+// into the job dir (capped), touching the heartbeat every 5 s and checking for
+// a cancel every second. A cancel, the timeout or the runner stopping sends
+// SIGTERM to the group, SIGKILL killDelay later; whatever of the group is left
+// when the CLI exits is killed too. In the endpoint's service a sweep before
+// the CLI starts and after it ends also kills what left the group (sweep.go),
+// so no process outlives its run.
 func (r *Runner) spawn(ctx context.Context, job *os.Root, s spec) agentproto.Exit {
 	start := r.now()
 	stdout, err := createOutput(job, agentproto.StdoutFile, agentproto.MaxStdoutBytes)
@@ -212,7 +290,16 @@ func (r *Runner) spawn(ctx context.Context, job *os.Root, s spec) agentproto.Exi
 	cmd.Stderr = stderr
 	cmd.WaitDelay = 5 * time.Second
 	setProcGroup(cmd)
-	if err := cmd.Start(); err != nil {
+	// The sweep, the start and the session's record are one step: another
+	// slot's sweep in between would take the CLI just started for a stray.
+	r.sweepMu.Lock()
+	r.sweepLocked()
+	err = cmd.Start()
+	if err == nil {
+		r.setSession(cmd.Process.Pid, true)
+	}
+	r.sweepMu.Unlock()
+	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			// The binary went (an image updated in place): the CLI is looked for
 			// again, and the Bridge parks the book until it is back.
@@ -222,6 +309,8 @@ func (r *Runner) spawn(ctx context.Context, job *os.Root, s spec) agentproto.Exi
 		return refused("start " + filepath.Base(s.path) + ": " + err.Error())
 	}
 	pid := cmd.Process.Pid
+	defer r.sweepStrays()
+	defer r.setSession(pid, false)
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
 

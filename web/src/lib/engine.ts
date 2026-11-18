@@ -9,6 +9,7 @@ export function credentialText(credential: string): string {
     case 'login':
       return 'subscription login';
     case 'api_key':
+    case 'endpoint_api_key':
       return 'API key';
     case '':
       return 'no credential';

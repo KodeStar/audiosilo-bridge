@@ -359,7 +359,7 @@ func (b *Bridge) Engine(ctx context.Context) api.Engine {
 	backend := b.box.ID()
 	out := api.Engine{
 		Agent: api.EngineAgent{Backend: backend, Available: st.Available, Detail: st.Detail, Version: st.Version, Slots: st.Slots,
-			CLIs: map[string]api.EngineCLI{}, Subscription: st.Subscription(backend), StagingDir: cfg.AgentStagingDir(b.dataDir)},
+			CLIs: map[string]api.EngineCLI{}, Subscription: st.Subscription(backend), StagingDir: b.box.Dir()},
 		MonthlyBudgetUSD: cfg.Agent.MonthlyBudgetUSD, BookBudgetUSD: cfg.Agent.BookBudgetUSD,
 		TranscriptRetentionDays: cfg.Transcripts.RetentionDays,
 	}

@@ -73,10 +73,33 @@ const (
 	// DetailAgentHandoffFailed: the Bridge couldn't hand the Accounts tab's
 	// credential to the agent container (the Accounts tab says why).
 	DetailAgentHandoffFailed = "the Bridge couldn't hand the agent its credential: the Accounts tab says why; " + agentFor
+	// DetailAgentNoEndpoint: the backend is openai-compatible and no endpoint
+	// address is set (bridge#84).
+	DetailAgentNoEndpoint = "set the OpenAI-compatible endpoint's address in Settings > Agent; the agent is needed for " +
+		"characters, recaps and descriptions"
+	// DetailAgentOwnCredentials: the backend is openai-compatible and the
+	// endpoint's agent service holds a credential or reaches the agent home,
+	// which an endpoint's run could read or change, so none is run (the
+	// Accounts tab says more).
+	DetailAgentOwnCredentials = "the endpoint's agent service holds a credential or can reach /agent, which an " +
+		"OpenAI-compatible endpoint's run could read: give it neither, or choose claude or codex in Settings > Agent"
+	// DetailAgentEndpointService: the backend is openai-compatible and its
+	// runs have no agent service of their own apart from the agent container
+	// (the Accounts tab says what is wrong).
+	DetailAgentEndpointService = "an OpenAI-compatible endpoint needs an agent service of its own, apart from the agent " +
+		"container (agent-runner --endpoint-only, its own user, no /agent): the Accounts tab says what to change"
+	// DetailAgentEndpointOnly: the backend is claude or codex, and the
+	// Bridge's agent dir is the endpoint's agent service.
+	DetailAgentEndpointOnly = "for claude or codex the Bridge reaches the OpenAI-compatible endpoint's agent service, " +
+		"not the agent container: the Accounts tab says what to change"
 )
 
-// agentNoCLI is the detail while the agent image has no CLI for backend.
+// agentNoCLI is the detail while the agent image has no CLI for backend
+// (codex for an OpenAI-compatible endpoint, which codex runs: bridge#84).
 func agentNoCLI(backend string) string {
+	if backend == "openai-compatible" {
+		backend = "codex"
+	}
 	return "the agent image has no " + backend + " CLI: use this Bridge's agent image; " + agentFor
 }
 
@@ -93,13 +116,17 @@ type AgentProblem string
 
 // The problems the checklist words.
 const (
-	AgentNotRunning    AgentProblem = "not_running"
-	AgentOutdated      AgentProblem = "outdated"
-	AgentNoCLI         AgentProblem = "no_cli"
-	AgentOtherBackend  AgentProblem = "other_backend"
-	AgentNoCredential  AgentProblem = "no_credential"
-	AgentGroupRequired AgentProblem = "group_required"
-	AgentHandoffFailed AgentProblem = "handoff_failed"
+	AgentNotRunning     AgentProblem = "not_running"
+	AgentOutdated       AgentProblem = "outdated"
+	AgentNoCLI          AgentProblem = "no_cli"
+	AgentOtherBackend   AgentProblem = "other_backend"
+	AgentNoCredential   AgentProblem = "no_credential"
+	AgentGroupRequired  AgentProblem = "group_required"
+	AgentHandoffFailed  AgentProblem = "handoff_failed"
+	AgentNoEndpoint     AgentProblem = "no_endpoint"
+	AgentOwnCredentials AgentProblem = "own_credentials"
+	AgentEndpointSvc    AgentProblem = "endpoint_service"
+	AgentEndpointOnly   AgentProblem = "endpoint_only"
 )
 
 // maxDetail bounds an item's detail (the server keeps 256 characters).
@@ -262,6 +289,14 @@ func Checklist(in Inputs) link.Setup {
 		agentDetail = DetailAgentGroupRequired
 	case in.Agent.Problem == AgentHandoffFailed:
 		agentDetail = DetailAgentHandoffFailed
+	case in.Agent.Problem == AgentNoEndpoint:
+		agentDetail = DetailAgentNoEndpoint
+	case in.Agent.Problem == AgentOwnCredentials:
+		agentDetail = DetailAgentOwnCredentials
+	case in.Agent.Problem == AgentEndpointSvc:
+		agentDetail = DetailAgentEndpointService
+	case in.Agent.Problem == AgentEndpointOnly:
+		agentDetail = DetailAgentEndpointOnly
 	default:
 		agentDetail = DetailAgentNotRunning
 	}

@@ -15,10 +15,12 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 
 	"github.com/kodestar/audiosilo-bridge/internal/agent"
+	"github.com/kodestar/audiosilo-bridge/internal/agentproto"
 	"github.com/kodestar/audiosilo-bridge/internal/pricing"
 	"github.com/kodestar/audiosilo-bridge/internal/state"
 	"gopkg.in/yaml.v3"
@@ -74,13 +76,56 @@ const (
 	DefaultSupervisorBatchBudgetUSD  = 10.0
 )
 
-// Agent backend selector values: the CLI the agent container runs. Empty is
-// claude (the Bridge's app maps it; the engine's own agent.Select reads it as
-// auto, which the Bridge never calls).
+// Agent backend selector values: the CLI the agent container runs, or codex
+// against an OpenAI-compatible endpoint (bridge#84). Empty is claude (the
+// Bridge's app maps it; the engine's own agent.Select reads it as auto, which
+// the Bridge never calls, and which never picks an endpoint).
 const (
-	AgentBackendClaude = agent.IDClaude
-	AgentBackendCodex  = agent.IDCodex
+	AgentBackendClaude           = agent.IDClaude
+	AgentBackendCodex            = agent.IDCodex
+	AgentBackendOpenAICompatible = agent.IDOpenAICompatible
 )
+
+// AgentBackends are the agent.backend values, in the page's order.
+var AgentBackends = []string{AgentBackendClaude, AgentBackendCodex, AgentBackendOpenAICompatible}
+
+// validateEndpoint checks agent.openai_compatible: a base URL by
+// agentproto.CheckBaseURL's rules, model names a request may carry, per-stage
+// keys that name a stage, and, with the openai-compatible backend and complete
+// (the environment's values in: not config.yaml alone, where the environment
+// may set the address or the model), a base URL and a model for every stage.
+func (c AgentConfig) validateEndpoint(complete bool) error {
+	e := c.OpenAICompatible
+	if e.BaseURL != "" {
+		if err := agentproto.CheckBaseURL(e.BaseURL); err != nil {
+			return fmt.Errorf("agent.openai_compatible.base_url: %w", err)
+		}
+	}
+	if e.Model != "" && !agentproto.ValidModel(e.Model) {
+		return fmt.Errorf("agent.openai_compatible.model %q is not a model name", e.Model)
+	}
+	for key, m := range e.Models {
+		if !state.RoutesModel(state.State(key)) {
+			return fmt.Errorf("agent.openai_compatible.models has key %q, which is not an agent stage", key)
+		}
+		if m != "" && !agentproto.ValidModel(m) {
+			return fmt.Errorf("agent.openai_compatible.models[%q] %q is not a model name", key, m)
+		}
+	}
+	if !complete || c.Backend != AgentBackendOpenAICompatible {
+		return nil
+	}
+	if e.BaseURL == "" {
+		return errors.New("agent.backend openai-compatible needs agent.openai_compatible.base_url, the endpoint's address")
+	}
+	models := c.EndpointModels()
+	for _, st := range ModelStages() {
+		if models[st] == "" {
+			return fmt.Errorf("agent.backend openai-compatible needs agent.openai_compatible.model (or a model for %s): an endpoint has no default model", st)
+		}
+	}
+	return nil
+}
 
 // DefaultMetadataBaseURL is the community metadata API the coverage/lookup client
 // queries. Overridable (env / config) so tests can point at a local httptest.
@@ -168,7 +213,7 @@ type ASRConfig struct {
 // resolved once at startup, like asr.backend), unlike cors_origins which the API
 // re-reads live per request.
 type AgentConfig struct {
-	Backend string `yaml:"backend"` // "" (claude) | "claude" | "codex"
+	Backend string `yaml:"backend"` // "" (claude) | "claude" | "codex" | "openai-compatible"
 	// Concurrency is deprecated. It remains readable/writable for compatibility and
 	// is used only by the explicit legacy normalization path. New configurations
 	// should set QueueConcurrency and MaxAgentsPerBook instead.
@@ -186,7 +231,12 @@ type AgentConfig struct {
 	// the dir shared with it ("" = <data>/staging, see Config.AgentStagingDir);
 	// ClaimTimeoutSeconds how long a job waits for it to pick the job up;
 	// MonthlyBudgetUSD the monthly agent spend cap (0 = none).
-	StagingDir          string  `yaml:"staging_dir"`
+	StagingDir string `yaml:"staging_dir"`
+	// EndpointStagingDir is the dir shared with the endpoint's own agent
+	// service (agent-runner --endpoint-only, bridge#84), where the
+	// openai-compatible backend's runs go; "" = none, so they don't run.
+	// Restart-to-apply, like staging_dir.
+	EndpointStagingDir  string  `yaml:"endpoint_staging_dir,omitempty"`
 	ClaimTimeoutSeconds int     `yaml:"claim_timeout_seconds"`
 	MonthlyBudgetUSD    float64 `yaml:"monthly_budget_usd"`
 	// RequireGroup keeps the agent credential handed to the agent container
@@ -199,6 +249,52 @@ type AgentConfig struct {
 	BudgetReviewedAt string            `yaml:"budget_reviewed_at,omitempty"`
 	Claude           map[string]string `yaml:"claude"` // agent-stage name -> model
 	OpenAI           map[string]string `yaml:"openai"` // agent-stage name -> model (empty = codex default)
+	// OpenAICompatible is the endpoint the openai-compatible backend runs codex
+	// against (bridge#84). Unlike the rest of agent.*, it applies live: the
+	// page's Settings > Agent edits it and the next agent run takes it.
+	OpenAICompatible AgentEndpointConfig `yaml:"openai_compatible,omitempty"`
+}
+
+// AgentEndpointConfig is an OpenAI-compatible endpoint (bridge#84): its base URL
+// (ending before /responses: https://api.openai.com/v1, or
+// http://192.168.1.20:11434/v1 for Ollama on the network), the model every agent
+// stage uses, and per-stage models that replace it. An endpoint has no default
+// model codex knows, so every stage resolves to one (EndpointModels). The API
+// key is a vault secret (secrets.EndpointAPIKey), never config.
+type AgentEndpointConfig struct {
+	BaseURL string            `yaml:"base_url,omitempty"`
+	Model   string            `yaml:"model,omitempty"`
+	Models  map[string]string `yaml:"models,omitempty"`
+}
+
+// EndpointModels maps every stage a model routes (state.RoutesModel) to its
+// endpoint model: the stage's own, else Model. A stage with neither is left out.
+func (c AgentConfig) EndpointModels() map[string]string {
+	out := map[string]string{}
+	for _, st := range ModelStages() {
+		m := strings.TrimSpace(c.OpenAICompatible.Models[st])
+		if m == "" {
+			m = strings.TrimSpace(c.OpenAICompatible.Model)
+		}
+		if m != "" {
+			out[st] = m
+		}
+	}
+	return out
+}
+
+// ModelStages are the stages a model map may route (state.RoutesModel): the
+// agent stages in the pipeline's order, then the description step (a stage run
+// outside the machine, so not in state.All). The page lists them for the
+// per-stage models.
+func ModelStages() []string {
+	var out []string
+	for _, st := range state.All() {
+		if state.RoutesModel(st) {
+			out = append(out, string(st))
+		}
+	}
+	return append(out, string(state.Describing))
 }
 
 // AgentCapacity is the normalized runtime capacity model. Legacy is true only
@@ -360,6 +456,11 @@ type Config struct {
 	// badRequireGroup is an AUDIOSILO_BRIDGE_AGENT_REQUIRE_GROUP that isn't a
 	// boolean, for Validate to refuse (a typo must not turn the check off).
 	badRequireGroup string
+	// fileOnly is config.yaml without the environment (SaveFile's): Validate
+	// leaves out the rules the environment's values may answer (the
+	// openai-compatible backend's address and models), which SaveFile checks on
+	// the file as the next start reads it.
+	fileOnly bool
 }
 
 // Deprecations returns the notices Load collected about deprecated settings it
@@ -448,10 +549,23 @@ func Load(dataDir string) (Config, error) { return load(dataDir, true) }
 // load is Load, with or without the environment (SaveFile edits the file's own
 // values, never the environment's).
 func load(dataDir string, withEnv bool) (Config, error) {
-	cfg := Default()
 	path := filepath.Join(dataDir, FileName)
 	raw, err := os.ReadFile(path) //nolint:gosec // path is operator-controlled data dir
-	fileExists := err == nil
+	switch {
+	case err == nil:
+	case errors.Is(err, os.ErrNotExist):
+		// First run: keep defaults.
+	default:
+		return Config{}, fmt.Errorf("read %s: %w", path, err)
+	}
+	return decode(path, raw, err == nil, withEnv)
+}
+
+// decode is load's work on config.yaml's bytes (raw, when fileExists; path
+// names the file in errors). SaveFile runs it on the bytes it is about to
+// write, with the environment, to check the file as the next start reads it.
+func decode(path string, raw []byte, fileExists, withEnv bool) (Config, error) {
+	cfg := Default()
 	var capacityKeys struct {
 		Agent struct {
 			Concurrency      *int `yaml:"concurrency"`
@@ -466,18 +580,13 @@ func load(dataDir string, withEnv bool) (Config, error) {
 			CommunityRepo *string `yaml:"community_repo"`
 		} `yaml:"contribution"`
 	}
-	switch {
-	case err == nil:
+	if fileExists {
 		if uerr := yaml.Unmarshal(raw, &capacityKeys); uerr != nil {
 			return Config{}, fmt.Errorf("parse %s: %w", path, uerr)
 		}
 		if uerr := yaml.Unmarshal(raw, &cfg); uerr != nil {
 			return Config{}, fmt.Errorf("parse %s: %w", path, uerr)
 		}
-	case errors.Is(err, os.ErrNotExist):
-		// First run: keep defaults.
-	default:
-		return Config{}, fmt.Errorf("read %s: %w", path, err)
 	}
 	// Capacity normalization is intentionally presence-aware. yaml.Unmarshal merges
 	// into Default(), so without this explicit path an old `concurrency: N` file
@@ -550,6 +659,7 @@ func load(dataDir string, withEnv bool) (Config, error) {
 	if strings.TrimSpace(cfg.Contribution.APIBaseURL) == "" {
 		cfg.Contribution.APIBaseURL = DefaultContributionAPIBaseURL
 	}
+	cfg.fileOnly = !withEnv
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
 	}
@@ -598,9 +708,6 @@ func applyEnv(cfg *Config) (seen envSeen) {
 			n = -1 // Validate refuses it
 		}
 		cfg.ASR.Threads = n
-	}
-	if v, ok := os.LookupEnv("AUDIOSILO_BRIDGE_AGENT_BACKEND"); ok {
-		cfg.Agent.Backend = v
 	}
 	if v, ok := os.LookupEnv("AUDIOSILO_BRIDGE_AGENT_CONCURRENCY"); ok {
 		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
@@ -829,11 +936,11 @@ func (c Config) Validate() error {
 	if cap.GlobalInvocations < 1 || cap.GlobalInvocations > MaxGlobalAgentInvocations {
 		return fmt.Errorf("effective agent invocation limit must be between 1 and %d, got %d", MaxGlobalAgentInvocations, cap.GlobalInvocations)
 	}
-	switch c.Agent.Backend {
-	case "", AgentBackendClaude, AgentBackendCodex:
-	default:
-		return fmt.Errorf("agent.backend %q must be %q, %q, or empty (claude)",
-			c.Agent.Backend, AgentBackendClaude, AgentBackendCodex)
+	if c.Agent.Backend != "" && !slices.Contains(AgentBackends, c.Agent.Backend) {
+		return fmt.Errorf("agent.backend %q must be one of %q, or empty (claude)", c.Agent.Backend, AgentBackends)
+	}
+	if err := c.Agent.validateEndpoint(!c.fileOnly); err != nil {
+		return err
 	}
 	if c.Agent.TimeoutMinutes < 1 {
 		return fmt.Errorf("agent.timeout_minutes must be >= 1, got %d", c.Agent.TimeoutMinutes)

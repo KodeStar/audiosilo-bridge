@@ -1,4 +1,5 @@
 import type {
+  AgentSettings,
   Accounts,
   AudibleAccount,
   AudibleAccounts,
@@ -146,6 +147,21 @@ export function settingsFixture(over: Partial<Settings> = {}): Settings {
     asr_worker_fallback: 'local',
     monthly_budget_usd: 100,
     budget_reviewed: true,
+    locked: [],
+    ...over,
+  };
+}
+
+// Settings > Agent as a fresh Bridge has it: claude, no endpoint.
+export function agentSettingsFixture(over: Partial<AgentSettings> = {}): AgentSettings {
+  return {
+    backend: 'claude',
+    running_backend: 'claude',
+    backends: ['claude', 'codex', 'openai-compatible'],
+    openai_compatible: { base_url: '', model: '', models: {} },
+    stages: ['fact_pass', 'synthesizing', 'describing'],
+    key_set: false,
+    key_set_at: '',
     locked: [],
     ...over,
   };

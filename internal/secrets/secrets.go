@@ -35,6 +35,10 @@ const (
 	// ClaudeOAuthToken is a `claude setup-token` value (a subscription credential),
 	// set on the Accounts page and handed to the agent container per run.
 	ClaudeOAuthToken = "claude_oauth_token"
+	// EndpointAPIKey is the OpenAI-compatible endpoint's API key (bridge#84),
+	// set in Settings > Agent and handed to the agent container per run, for a
+	// run against that endpoint only.
+	EndpointAPIKey = "endpoint_api_key"
 	// GitHubUserToken is the GitHub sign-in (device flow): the access token, its
 	// refresh token and both expiries sealed together as one JSON value, so a
 	// refresh (which ends the old pair) replaces the pair in one write.
@@ -47,7 +51,7 @@ const (
 // Names returns the secret names an operator sets, in a stable order (drives a
 // settings presence list). The server token is the pairing's, never set by hand.
 func Names() []string {
-	return []string{ClaudeOAuthToken, AnthropicAPIKey, OpenAIAPIKey, GitHubUserToken}
+	return []string{ClaudeOAuthToken, AnthropicAPIKey, OpenAIAPIKey, EndpointAPIKey, GitHubUserToken}
 }
 
 // Store is a named-secret backend. Get returns ("", nil) for an absent name so

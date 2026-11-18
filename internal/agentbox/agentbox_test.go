@@ -542,6 +542,31 @@ func TestRunUnavailableStagesNothing(t *testing.T) {
 	assertNoJobDirs(t, dir)
 }
 
+// A runner.json counts as live only when dated within RunnerFreshFor before
+// now and no further ahead than the clock skew: a heartbeat in the future
+// (a forged status) would otherwise keep a stopped runner live for as long.
+func TestLiveRefusesTheFuture(t *testing.T) {
+	t.Parallel()
+	now := time.Unix(1_800_000_000, 0)
+	r := New(Options{Dir: t.TempDir(), Backend: "claude"})
+	r.now = func() time.Time { return now }
+	for name, tc := range map[string]struct {
+		at   time.Time
+		live bool
+	}{
+		"now":                 {at: now, live: true},
+		"fresh":               {at: now.Add(-agentproto.RunnerFreshFor), live: true},
+		"stale":               {at: now.Add(-agentproto.RunnerFreshFor - time.Second)},
+		"within the skew":     {at: now.Add(runnerClockSkew), live: true},
+		"beyond the skew":     {at: now.Add(runnerClockSkew + time.Second)},
+		"a day in the future": {at: now.Add(24 * time.Hour)},
+	} {
+		if got := r.live(agentproto.Runner{Protocol: agentproto.Protocol, HeartbeatAt: tc.at}); got != tc.live {
+			t.Errorf("%s: live = %v, want %v", name, got, tc.live)
+		}
+	}
+}
+
 func TestStatus(t *testing.T) {
 	t.Parallel()
 	now := time.Now()
@@ -559,10 +584,11 @@ func TestStatus(t *testing.T) {
 		problem   Problem
 		other     string
 	}{
-		"fresh":          {backend: "claude", rj: &agentproto.Runner{Protocol: 1, HeartbeatAt: now, Slots: 1, CLIs: full}, available: true},
-		"fresh codex":    {backend: "codex", rj: &agentproto.Runner{Protocol: 1, HeartbeatAt: now, CLIs: full}, available: true},
-		"stale":          {backend: "claude", rj: &agentproto.Runner{Protocol: 1, HeartbeatAt: now.Add(-time.Minute), CLIs: full}, detail: "isn't running", problem: ProblemNotRunning},
-		"wrong protocol": {backend: "claude", rj: &agentproto.Runner{Protocol: 2, HeartbeatAt: now, CLIs: full}, detail: "protocol 2", problem: ProblemOutdated},
+		"fresh":           {backend: "claude", rj: &agentproto.Runner{Protocol: 1, HeartbeatAt: now, Slots: 1, CLIs: full}, available: true},
+		"fresh codex":     {backend: "codex", rj: &agentproto.Runner{Protocol: 1, HeartbeatAt: now, CLIs: full}, available: true},
+		"stale":           {backend: "claude", rj: &agentproto.Runner{Protocol: 1, HeartbeatAt: now.Add(-time.Minute), CLIs: full}, detail: "isn't running", problem: ProblemNotRunning},
+		"from the future": {backend: "claude", rj: &agentproto.Runner{Protocol: 1, HeartbeatAt: now.Add(time.Hour), CLIs: full}, detail: "ahead of this Bridge's clock", problem: ProblemNotRunning},
+		"wrong protocol":  {backend: "claude", rj: &agentproto.Runner{Protocol: 2, HeartbeatAt: now, CLIs: full}, detail: "protocol 2", problem: ProblemOutdated},
 		"no credential": {backend: "claude", rj: &agentproto.Runner{Protocol: 1, HeartbeatAt: now,
 			CLIs: map[string]agentproto.CLI{"claude": {Version: "2.1.300"}}}, detail: "claude has no credential", problem: ProblemNoCredential},
 		"codex signed in instead": {backend: "claude", rj: &agentproto.Runner{Protocol: 1, HeartbeatAt: now,
@@ -790,6 +816,9 @@ func TestRunStagingTroubleIsUnavailable(t *testing.T) {
 func TestRefusedCredentialIsRemembered(t *testing.T) {
 	t.Parallel()
 	r, dir := newTestRunner(t, agent.IDClaude)
+	var endpointURL atomic.Value
+	endpointURL.Store("http://192.168.1.20:11434/v1")
+	r.endpoint = func() string { return endpointURL.Load().(string) }
 	since := time.Now().Add(-time.Hour).UTC().Truncate(time.Second)
 	rj := func(at time.Time) agentproto.Runner {
 		return agentproto.Runner{Protocol: 1, Version: "0.2.0", HeartbeatAt: time.Now(), Slots: 1,
@@ -827,8 +856,11 @@ func TestRefusedCredentialIsRemembered(t *testing.T) {
 	if !r.Detect(context.Background()).Available {
 		t.Fatal("a refused credential stopped the engine from trying")
 	}
-	// The same credential (runner.json rewritten, nothing changed) stays refused.
+	// The same credential (runner.json rewritten, nothing changed) stays refused,
+	// and so does one whose backend isn't the endpoint's when Settings > Agent
+	// gives the endpoint another address.
 	writeRunnerJSON(t, dir, rj(since))
+	endpointURL.Store("https://openrouter.ai/api/v1")
 	if st := r.Status(); !st.Refused {
 		t.Fatalf("the same credential: %+v", st)
 	}
@@ -908,7 +940,7 @@ func TestHandoffCredentialIsStaged(t *testing.T) {
 	t.Parallel()
 	r, dir := newTestRunner(t, agent.IDClaude)
 	since := time.Date(2026, 10, 19, 9, 0, 0, 0, time.UTC)
-	vault := func(cli string) (string, string, time.Time, bool) {
+	vault := func(cli, _ string) (string, string, time.Time, bool) {
 		if cli != "claude" {
 			return "", "", time.Time{}, false
 		}
@@ -968,7 +1000,7 @@ func stageHandoff(t *testing.T, groups []int) credentialModes {
 func vaultHandoff(t *testing.T, groups []int) (*Runner, string) {
 	t.Helper()
 	r, dir := newTestRunner(t, agent.IDClaude)
-	r.credential = func(string) (string, string, time.Time, bool) {
+	r.credential = func(string, string) (string, string, time.Time, bool) {
 		return agentproto.CredentialOAuthToken, "sk-ant-oat01-vault", time.Now(), true
 	}
 	rj := handoffRunner(true)
@@ -1272,7 +1304,7 @@ func TestHandoffCredentialDeniedButTakenFails(t *testing.T) {
 // credential leaves the agent unavailable.
 func TestHandoffNotStaged(t *testing.T) {
 	t.Parallel()
-	vault := func(string) (string, string, time.Time, bool) {
+	vault := func(string, string) (string, string, time.Time, bool) {
 		return agentproto.CredentialAPIKey, "sk-ant-api-vault", time.Now(), true
 	}
 	t.Run("container has its own", func(t *testing.T) {
@@ -1325,11 +1357,11 @@ func TestHandoffRefusalEndsOnReplace(t *testing.T) {
 	r, dir := newTestRunner(t, agent.IDClaude)
 	var since atomic.Value
 	since.Store(time.Date(2026, 10, 19, 9, 0, 0, 0, time.UTC))
-	r.credential = func(string) (string, string, time.Time, bool) {
+	r.credential = func(string, string) (string, string, time.Time, bool) {
 		return agentproto.CredentialAPIKey, "sk-ant-api-vault", since.Load().(time.Time), true
 	}
 	writeRunnerJSON(t, dir, handoffRunner(true))
-	r.noteRefusal(r.Status().CLIs["claude"], "invalid api key")
+	r.noteRefusal(r.Status().CLIs["claude"], "invalid api key", "")
 	if st := r.Status(); !st.Refused || !strings.Contains(st.Detail, "replace it on the Bridge's Accounts tab") {
 		t.Fatalf("refused: %+v (the handed credential is replaced on the Accounts tab)", st)
 	}
@@ -1346,7 +1378,7 @@ func TestStatusTooOldForTheHandoffIsOutdated(t *testing.T) {
 	dir := t.TempDir()
 	writeRunnerJSON(t, dir, agentproto.Runner{Protocol: 1, HeartbeatAt: time.Now(),
 		CLIs: map[string]agentproto.CLI{"claude": {Version: "2.1.300"}}})
-	r := New(Options{Dir: dir, Backend: agent.IDClaude, Credential: func(string) (string, string, time.Time, bool) {
+	r := New(Options{Dir: dir, Backend: agent.IDClaude, Credential: func(string, string) (string, string, time.Time, bool) {
 		return agentproto.CredentialOAuthToken, "tok", time.Now(), true
 	}})
 	if st := r.Status(); st.Available || st.Problem != ProblemOutdated || !strings.Contains(st.Detail, "too old") {
