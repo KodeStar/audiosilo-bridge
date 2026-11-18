@@ -323,24 +323,52 @@ func TestPushUserUnavailable(t *testing.T) {
 
 // A server with no progress feed (older than 2.6.0: link's ErrNoAudibleSync)
 // pauses the account for an hour and says to update, rather than failing
-// every minute.
+// every minute, once it answers so twice in a row: the first 404 is asked
+// again after errorWait with nothing recorded (a proxy's bare 404 while the
+// server restarts reads the same).
 func TestPushOldServer(t *testing.T) {
 	e := newEnv(t)
 	e.srv.feedErr = link.ErrNoAudibleSync
 	p := NewPusher(e.o)
 	p.Tick(context.Background())
-	if a := e.account(t); !strings.Contains(a.SyncError, "update it to 2.6.0") || a.SyncRetryAt != "" {
-		t.Fatalf("account = %+v", a)
+	if a := e.account(t); a.SyncError != "" || e.changed != 0 {
+		t.Fatalf("after one 404: %+v (changed %d)", a, e.changed)
+	}
+	e.now = e.now.Add(errorWait)
+	p.Tick(context.Background())
+	if a := e.account(t); !strings.Contains(a.SyncError, "update it to 2.6.0") || a.SyncRetryAt != "" || len(e.srv.feedAsks) != 2 {
+		t.Fatalf("after two 404s: %+v, asks %v", a, e.srv.feedAsks)
 	}
 	e.now = e.now.Add(refusedWait + time.Minute)
 	p.Tick(context.Background())
-	if len(e.srv.feedAsks) != 1 {
+	if len(e.srv.feedAsks) != 2 {
 		t.Fatalf("asked again within the hour: %v", e.srv.feedAsks)
 	}
 	e.now = e.now.Add(oldServerWait)
 	p.Tick(context.Background())
-	if len(e.srv.feedAsks) != 2 {
+	if len(e.srv.feedAsks) != 3 {
 		t.Fatalf("not asked again after the hour: %v", e.srv.feedAsks)
+	}
+}
+
+// A 404 between two answers that aren't (a server restarting behind a proxy:
+// a 404, a 502, a 404) never pauses the push for the hour nor says to update
+// it (allowed: the feed is read again within errorWait each time; denied: no
+// old-server pause on 404s that aren't in a row).
+func TestPushRestartingServerIsNotOld(t *testing.T) {
+	e := newEnv(t)
+	p := NewPusher(e.o)
+	for i, err := range []error{link.ErrNoAudibleSync, &link.APIError{Status: http.StatusBadGateway},
+		link.ErrNoAudibleSync, nil} {
+		e.srv.feedErr = err
+		p.Tick(context.Background())
+		if len(e.srv.feedAsks) != i+1 {
+			t.Fatalf("answer %d: asks %v", i, e.srv.feedAsks)
+		}
+		if a := e.account(t); strings.Contains(a.SyncError, "update it to 2.6.0") {
+			t.Fatalf("answer %d: %+v", i, a)
+		}
+		e.now = e.now.Add(errorWait)
 	}
 }
 

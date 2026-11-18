@@ -151,7 +151,10 @@ var (
 	// ErrNoAudibleSync is the 404 for a route the server doesn't have (its
 	// API's not_found, or a bare 404 with no code): a server older than
 	// 2.6.0, before Audible sync. A 404 with another code (unknown_account,
-	// or one a later server adds) is that answer, never this.
+	// or one a later server adds) is that answer, never this. A proxy in
+	// front of a server that is restarting answers a bare 404 too, so a
+	// caller confirms it before acting on it for long (audiblesync's push
+	// waits for a second one in a row).
 	ErrNoAudibleSync = errors.New("the server doesn't sync places with Audible: update it to 2.6.0 or later")
 )
 
