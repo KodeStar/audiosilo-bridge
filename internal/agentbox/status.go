@@ -170,6 +170,12 @@ func ownCredentials(rj agentproto.Runner, backend string) bool {
 	return false
 }
 
+// live reports whether rj is a runner of this protocol that wrote its status
+// within agentproto.RunnerFreshFor.
+func (r *Runner) live(rj agentproto.Runner) bool {
+	return rj.Protocol == agentproto.Protocol && r.now().Sub(rj.HeartbeatAt) <= agentproto.RunnerFreshFor
+}
+
 // Status reads runner.json now. Detail never names a Bridge path: it becomes a
 // parked book's reason, which the server shows in its console. The path goes to
 // the log instead (once per outage, as Status runs on every heartbeat).
@@ -204,7 +210,7 @@ func (r *Runner) Status() Status {
 		st.Detail = "the agent container's status is unreadable: " + err.Error()
 		return st
 	}
-	st.Live = rj.Protocol == agentproto.Protocol && r.now().Sub(rj.HeartbeatAt) <= agentproto.RunnerFreshFor
+	st.Live = r.live(rj)
 	if r.cli != r.backend {
 		// An endpoint (bridge#84): codex runs it, with the endpoint's key from
 		// the vault when one is set and none of the container's own, so its

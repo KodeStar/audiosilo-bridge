@@ -318,6 +318,9 @@ func (r *Runner) Run(ctx context.Context, req agent.Request) (agent.Result, erro
 	if req.Dir == "" {
 		return agent.Result{}, errors.New("agent container: the request has no staged dir")
 	}
+	// addr is the endpoint address this run goes to, read once: its key and
+	// the refusal it may earn both belong to it, whatever the address is by now.
+	var addr string
 	if r.backend == agent.IDOpenAICompatible {
 		base := r.endpoint()
 		if base == "" {
@@ -332,15 +335,10 @@ func (r *Runner) Run(ctx context.Context, req agent.Request) (agent.Result, erro
 				Detail: "the OpenAI-compatible endpoint has no model set for " + stage + ": set one in Settings > Agent on the Bridge's page"}
 		}
 		req.Endpoint = &agent.Endpoint{BaseURL: base}
+		addr = base
 	}
 	var handed *agentproto.Credential
 	if st.Handoff {
-		// An endpoint's key is the one entered for the very address this run
-		// goes to (read once, above), whatever the address is by now.
-		addr := ""
-		if req.Endpoint != nil {
-			addr = req.Endpoint.BaseURL
-		}
 		if kind, value, _, ok := r.handoffCredential(addr); ok {
 			handed = &agentproto.Credential{CLI: r.cli, Kind: kind, Value: value}
 		}

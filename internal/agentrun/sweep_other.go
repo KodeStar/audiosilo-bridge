@@ -7,9 +7,7 @@ import "errors"
 // The endpoint-only runner needs Linux (a child subreaper and /proc); the
 // agent container is Linux, and elsewhere such a runner refuses to start.
 
-const sweepSupported = false
-
-func endpointHardening() error { return errors.New("the endpoint's agent service runs on Linux") }
+func endpointHardening() error { return errors.New("it runs in the agent image (Linux)") }
 
 func ownSession() int { return -1 }
 

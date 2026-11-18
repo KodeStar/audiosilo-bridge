@@ -24,6 +24,9 @@ const (
 	envCodex       = "CODEX_API_KEY"
 )
 
+// credentialVars are all four, which an endpoint-only runner must not hold.
+var credentialVars = []string{envClaudeToken, envAnthropic, envOpenAI, envCodex}
+
 // defaultPath is the child's PATH when the runner has none.
 const defaultPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
@@ -151,8 +154,8 @@ func (r *Runner) credentialKind(cli string) string {
 // The CLI runs as the runner's uid with its sandbox off; execute refuses an
 // endpoint run while this holds.
 func (r *Runner) holdsCredentials() bool {
-	for _, k := range []string{envClaudeToken, envAnthropic, envOpenAI, envCodex} {
-		if v, ok := r.opts.Getenv(k); ok && strings.TrimSpace(v) != "" {
+	for _, k := range credentialVars {
+		if r.envSecret(k) != "" {
 			return true
 		}
 	}
@@ -253,10 +256,16 @@ func (r *Runner) secretFile(name string) string {
 	return filepath.Join(r.opts.Home, "secrets", strings.ToLower(name))
 }
 
+// envSecret is a credential variable's value, trimmed ("" when unset or blank).
+func (r *Runner) envSecret(name string) string {
+	v, _ := r.opts.Getenv(name)
+	return strings.TrimSpace(v)
+}
+
 // hasSecret reports a credential's presence: a non-empty variable, else a
 // non-empty secrets file. The value isn't read.
 func (r *Runner) hasSecret(name string) bool {
-	if v, ok := r.opts.Getenv(name); ok && strings.TrimSpace(v) != "" {
+	if r.envSecret(name) != "" {
 		return true
 	}
 	info, err := os.Stat(r.secretFile(name))
@@ -266,8 +275,8 @@ func (r *Runner) hasSecret(name string) bool {
 // secret reads a credential for a run. It goes into that run's environment and
 // nowhere else: never argv, a log or a file the Bridge can read.
 func (r *Runner) secret(name string) string {
-	if v, ok := r.opts.Getenv(name); ok && strings.TrimSpace(v) != "" {
-		return strings.TrimSpace(v)
+	if v := r.envSecret(name); v != "" {
+		return v
 	}
 	f, err := os.Open(r.secretFile(name))
 	if err != nil {

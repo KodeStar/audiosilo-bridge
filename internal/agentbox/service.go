@@ -4,10 +4,9 @@ import (
 	"encoding/json"
 	"io/fs"
 	"os"
-	"path/filepath"
-	"strings"
 
 	"github.com/kodestar/audiosilo-bridge/internal/agentproto"
+	"github.com/kodestar/audiosilo-bridge/internal/fsutil"
 )
 
 // The endpoint's own agent service (bridge#84). An endpoint's model is
@@ -57,19 +56,12 @@ func (r *Runner) endpointDirProblem() string {
 // sharesDir reports whether a and b are one dir, or one holds the other, by
 // path or (one dir under two names) by the dirs themselves.
 func sharesDir(a, b string) bool {
-	a, b = filepath.Clean(a), filepath.Clean(b)
-	if within(a, b) || within(b, a) {
+	if fsutil.Within(a, b) || fsutil.Within(b, a) {
 		return true
 	}
 	ia, errA := os.Stat(a)
 	ib, errB := os.Stat(b)
 	return errA == nil && errB == nil && os.SameFile(ia, ib)
-}
-
-// within reports whether dir is parent or under it.
-func within(dir, parent string) bool {
-	rel, err := filepath.Rel(parent, dir)
-	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // sameUserAsAgent reports whether the endpoint's runner.json (info) and a live
@@ -94,7 +86,7 @@ func (r *Runner) sameUserAsAgent(info fs.FileInfo) bool {
 		return false
 	}
 	var rj agentproto.Runner
-	if json.Unmarshal(raw, &rj) != nil || rj.Protocol != agentproto.Protocol || r.now().Sub(rj.HeartbeatAt) > agentproto.RunnerFreshFor {
+	if json.Unmarshal(raw, &rj) != nil || !r.live(rj) {
 		return false
 	}
 	otherUID, _, ok := fileOwner(other)

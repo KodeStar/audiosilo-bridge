@@ -13,9 +13,6 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// sweepSupported: the endpoint-only runner can end its runs' strays here.
-const sweepSupported = true
-
 // sweepRounds bounds a sweep: killing a stray hands its children to the
 // runner, so it looks again until none is left.
 const sweepRounds = 20

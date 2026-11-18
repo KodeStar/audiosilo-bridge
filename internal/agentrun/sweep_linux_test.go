@@ -46,9 +46,8 @@ func TestEndpointSweepEndsStrays(t *testing.T) {
 
 	run := func(t *testing.T, sweep bool) int {
 		t.Helper()
-		te := newTestEnv(t, endpointParentEnv())
-		te.home = filepath.Join(t.TempDir(), "agent")
-		te.r.opts.Home, te.r.opts.EndpointOnly = te.home, true
+		te, _ := newEndpointEnv(t, endpointParentEnv())
+		te.r.sweep = nil
 		if sweep {
 			te.r.sweep = killStrays
 		}
