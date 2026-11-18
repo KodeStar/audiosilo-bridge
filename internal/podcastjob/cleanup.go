@@ -95,13 +95,7 @@ func (s *service) cleanOwned(ctx context.Context, root *os.Root, lib link.Librar
 		if !entry.IsDir() {
 			continue
 		}
-		rd, err := podcast.OpenRegular(root, dir+"/"+entry.Name()+"/transaction.json")
-		if err != nil {
-			continue
-		}
-		var j podcast.Journal
-		err = json.NewDecoder(io.LimitReader(rd, 4<<20)).Decode(&j)
-		_ = rd.Close()
+		j, err := podcast.ReadJournal(root, dir+"/"+entry.Name()+"/transaction.json")
 		if err != nil || !podcast.ValidEpisodePath(j.Path) || path.Dir(j.Path) != show || j.TrashDir != ".audiosilo-trash/podcasts/"+entry.Name() || !old(j.Fetch.DeletedAt) || live(j.Path) {
 			continue
 		}

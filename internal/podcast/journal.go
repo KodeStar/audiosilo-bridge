@@ -259,6 +259,13 @@ func ReadJournal(root *os.Root, name string) (Journal, error) {
 	return j, nil
 }
 
+// sameJournal reports whether a and b encode identically.
+func sameJournal(a, b Journal) bool {
+	x, _ := json.Marshal(a)
+	y, _ := json.Marshal(b)
+	return string(x) == string(y)
+}
+
 // complete finishes a journaled transaction. verified means the caller has just
 // checked the staged (install) or named (delete) payload under the same locks;
 // without it a delete only finishes audio that already moved into trash.
@@ -429,16 +436,11 @@ func CleanupTrash(root *os.Root, j Journal) error {
 	if episodeFor(f, j) == nil {
 		return ErrInvalidFile
 	}
-	rd, err := OpenRegular(root, dir+"/transaction.json")
+	saved, err := ReadJournal(root, dir+"/transaction.json")
 	if err != nil {
 		return err
 	}
-	var saved Journal
-	err = json.NewDecoder(io.LimitReader(rd, 4<<20)).Decode(&saved)
-	_ = rd.Close()
-	a, _ := json.Marshal(j)
-	b, _ := json.Marshal(saved)
-	if err != nil || string(a) != string(b) {
+	if !sameJournal(j, saved) {
 		return ErrInvalidFile
 	}
 	audio := dir + "/audio"
@@ -470,16 +472,11 @@ func AbortDelete(root *os.Root, j Journal) error {
 		return ErrInvalidFile
 	}
 	// Only this transaction's own barrier is removed, never another journal.
-	rd, err := OpenRegular(root, AttachmentPath(j.Path, ".publish.json"))
+	saved, err := ReadJournal(root, AttachmentPath(j.Path, ".publish.json"))
 	if err != nil {
 		return err
 	}
-	var saved Journal
-	err = json.NewDecoder(io.LimitReader(rd, 4<<20)).Decode(&saved)
-	_ = rd.Close()
-	a, _ := json.Marshal(j)
-	b, _ := json.Marshal(saved)
-	if err != nil || string(a) != string(b) {
+	if !sameJournal(j, saved) {
 		return ErrInvalidFile
 	}
 	// The empty trash folder goes first: a stop between the two leaves the barrier,
