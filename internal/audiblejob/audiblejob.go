@@ -192,7 +192,7 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 	// store themselves here: a poll the server queued in between reads no
 	// account yet, or the mapping being replaced. Read again past one in
 	// flight before failing for either (a poll that fails waits poll_hours).
-	if errors.Is(err, audibleacct.ErrNotFound) || (err == nil && acct.OnOtherServer(h.o.ServerID())) {
+	if audibleacct.NotHere(acct, err, h.o.ServerID()) {
 		acct, err = h.o.Accounts.AwaitedAccount(ctx, p.Account)
 	}
 	if errors.Is(err, audibleacct.ErrNotFound) {

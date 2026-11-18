@@ -130,6 +130,9 @@ type Accounts interface {
 	// SettledAccount is Account read past a sign-in in flight when the
 	// account reads refused (audibleacct.Manager.SettledAccount).
 	SettledAccount(ctx context.Context, id string) (store.AudibleAccount, error)
+	// AwaitedAccount is Account read past a sign-in, mapping or removal in
+	// flight (audibleacct.Manager.AwaitedAccount).
+	AwaitedAccount(ctx context.Context, id string) (store.AudibleAccount, error)
 	Accounts(ctx context.Context) ([]store.AudibleAccount, error)
 	Positions(ctx context.Context, id string, asins []string) (map[string]audible.Position, error)
 	ContentACR(ctx context.Context, id, asin string) (string, error)
@@ -404,8 +407,13 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (*R
 		return nil, err
 	}
 	// Past a sign-in in flight: answering the refusal it is ending would mark
-	// the account refused again.
+	// the account refused again. And, as the poll's read, past a sign-in or a
+	// mapping the server recorded (and queued this sync for) still storing
+	// itself here before failing unknown_account.
 	acct, err := h.o.Accounts.SettledAccount(ctx, p.Account)
+	if audibleacct.NotHere(acct, err, h.o.ServerID()) {
+		acct, err = h.o.Accounts.AwaitedAccount(ctx, p.Account)
+	}
 	if errors.Is(err, audibleacct.ErrNotFound) {
 		return nil, fail(CodeUnknownAccount, "This Bridge has no Audible account %s: it was removed here, or signed in on another Bridge.", p.Account)
 	}

@@ -796,6 +796,82 @@ func TestSettledAccountWaitsForASignInInFlight(t *testing.T) {
 	}
 }
 
+// finishMu is the Manager's: a job reading its account past another
+// account's change in flight waits for it, but gives up with ctx.Err() once
+// the job is cancelled, rather than sit behind a slow sign-in (its rollback
+// deregisters at Amazon past its page's cancel). AwaitedAccount, a refused
+// account's SettledAccount and a refused signed call (which then records
+// nothing) all give up; the change in flight finishes as it would.
+func TestAccountWaitsFollowTheJobsCtx(t *testing.T) {
+	t.Parallel()
+	for _, c := range []struct {
+		name   string
+		refuse bool // SettledAccount waits only for a refused account
+		wait   func(ctx context.Context, e *env, id string) error
+	}{
+		{"AwaitedAccount", false, func(ctx context.Context, e *env, id string) error {
+			_, err := e.m.AwaitedAccount(ctx, id)
+			return err
+		}},
+		{"SettledAccount", true, func(ctx context.Context, e *env, id string) error {
+			_, err := e.m.SettledAccount(ctx, id)
+			return err
+		}},
+		{"a refused call", false, func(ctx context.Context, e *env, id string) error {
+			_, err := e.m.Library(ctx, id)
+			return err
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			e := newEnv(t)
+			a := e.signIn(t)
+			if c.refuse {
+				if err := e.db.RefuseAudibleAccount(context.Background(), a.ID, store.RefusalSignIn, RefusedText, time.Now()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			e.svc.library = func(audible.Credentials) ([]source.Record, error) {
+				return nil, fmt.Errorf("%w (HTTP 401)", ErrRefused)
+			}
+			// Another Amazon account's sign-in holds finishMu.
+			e.svc.customer = "amzn1.account.OTHER"
+			reached, release := e.holdPut(t)
+			signedIn := make(chan error, 1)
+			go func() {
+				_, err := e.trySignIn()
+				signedIn <- err
+			}()
+			reached("the other account's sign-in")
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			waited := make(chan error, 1)
+			go func() { waited <- c.wait(ctx, e, a.ID) }()
+			select {
+			case err := <-waited:
+				t.Fatalf("answered during the other sign-in: %v", err)
+			case <-time.After(100 * time.Millisecond):
+			}
+			cancel()
+			select {
+			case err := <-waited:
+				if !errors.Is(err, context.Canceled) {
+					t.Fatalf("a cancelled wait = %v", err)
+				}
+			case <-time.After(10 * time.Second):
+				t.Fatal("a cancelled job kept waiting for another account's sign-in")
+			}
+			release()
+			if err := <-signedIn; err != nil {
+				t.Fatalf("the other sign-in = %v", err)
+			}
+			if got, _ := e.m.Account(context.Background(), a.ID); (got.RefusedAt != "") != c.refuse {
+				t.Fatalf("the refusal after the cancel: %+v", got)
+			}
+		})
+	}
+}
+
 // bridge#40: a mapping that comes with no name for the person (the server's
 // people couldn't be read) keeps the stored name when it is the same person,
 // on a remap and on a sign-in again; another person has none to keep.

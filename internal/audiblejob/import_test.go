@@ -46,6 +46,11 @@ type stubImportAccounts struct {
 	acct     store.AudibleAccount
 	acctThen []store.AudibleAccount // each SettledAccount read of a refused account answers the next (Account the current one)
 	acctErr  error
+	// stored is the account once the change in flight is stored: what an
+	// AwaitedAccount read answers and leaves (nil: nothing was in flight).
+	// awaits counts those reads.
+	stored   *store.AudibleAccount
+	awaits   int
 	title    source.Record
 	titleErr error
 	licErr   []error // popped per License call
@@ -78,6 +83,14 @@ func (s *stubImportAccounts) SettledAccount(ctx context.Context, id string) (sto
 	}
 	if len(s.acctThen) > 0 {
 		s.acct, s.acctThen = s.acctThen[0], s.acctThen[1:]
+	}
+	return s.Account(ctx, id)
+}
+
+func (s *stubImportAccounts) AwaitedAccount(ctx context.Context, id string) (store.AudibleAccount, error) {
+	s.awaits++
+	if s.stored != nil {
+		s.acct, s.stored = *s.stored, nil
 	}
 	return s.Account(ctx, id)
 }
@@ -731,6 +744,47 @@ func TestImportOfARefusedAccountFailsFast(t *testing.T) {
 	e.accts.acct.LastError = "could not list the Audible library: connection reset"
 	if _, err := e.run(context.Background(), e.params(nil)); err != nil || e.accts.licenses != 1 {
 		t.Fatalf("an account with a poll error: %v (licenses %d)", err, e.accts.licenses)
+	}
+}
+
+// A sign-in or a mapping records itself on the server, which may queue an
+// import, before it stores itself here: an import claimed in between reads no
+// account yet, or one mapped on another server or to another library. It
+// reads the account again past the change in flight (AwaitedAccount) and
+// imports, rather than fail; an account mapped here never waits, and one
+// still not importable after the wait fails as before.
+func TestImportReadsPastAChangeInFlight(t *testing.T) {
+	cases := []struct {
+		name string
+		now  func(*store.AudibleAccount) // the account as the import first reads it
+		code string                      // the failure when nothing was in flight
+	}{
+		{"a first sign-in", func(a *store.AudibleAccount) { a.ID = "acct0002" }, CodeUnknownAccount},
+		{"a mapping from another server", func(a *store.AudibleAccount) { a.ServerID = "srv0" }, CodeUnknownAccount},
+		{"a mapping to another library", func(a *store.AudibleAccount) { a.LibraryID = 2 }, CodeNotWritable},
+	}
+	for _, c := range cases {
+		e := newImportEnv(t)
+		stored := e.accts.acct
+		c.now(&e.accts.acct)
+		e.accts.stored = &stored
+		if _, err := e.run(context.Background(), e.params(nil)); err != nil || e.accts.awaits != 1 || e.accts.licenses != 1 {
+			t.Fatalf("%s: an import during it = %v (read again %d times, licenses %d)", c.name, err, e.accts.awaits, e.accts.licenses)
+		}
+	}
+	// Denied: still not importable once nothing is in flight.
+	for _, c := range cases {
+		e := newImportEnv(t)
+		c.now(&e.accts.acct)
+		_, err := e.run(context.Background(), e.params(nil))
+		var f *Failure
+		if !errors.As(err, &f) || f.Code != c.code || e.accts.awaits != 1 || e.accts.licenses != 0 {
+			t.Fatalf("%s with nothing in flight: %v (read again %d times, licenses %d)", c.name, err, e.accts.awaits, e.accts.licenses)
+		}
+	}
+	e := newImportEnv(t)
+	if _, err := e.run(context.Background(), e.params(nil)); err != nil || e.accts.awaits != 0 {
+		t.Fatalf("an account mapped here = %v (read again %d times)", err, e.accts.awaits)
 	}
 }
 

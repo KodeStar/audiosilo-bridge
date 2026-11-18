@@ -41,6 +41,8 @@ type stubAccounts struct {
 	onSet     func() // runs as a write reaches Audible (outside the lock)
 	settled   int    // SettledAccount reads of a refused account (its wait)
 	onSettle  func() // runs as SettledAccount waits (a sign-in in flight storing itself)
+	awaits    int    // AwaitedAccount reads (its wait)
+	onAwait   func() // runs as AwaitedAccount waits (a sign-in or mapping in flight storing itself)
 }
 
 func (s *stubAccounts) Account(ctx context.Context, id string) (store.AudibleAccount, error) {
@@ -58,6 +60,17 @@ func (s *stubAccounts) SettledAccount(ctx context.Context, id string) (store.Aud
 	s.mu.Lock()
 	s.settled++
 	hook := s.onSettle
+	s.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
+	return s.Account(ctx, id)
+}
+
+func (s *stubAccounts) AwaitedAccount(ctx context.Context, id string) (store.AudibleAccount, error) {
+	s.mu.Lock()
+	s.awaits++
+	hook := s.onAwait
 	s.mu.Unlock()
 	if hook != nil {
 		hook()
@@ -458,6 +471,48 @@ func TestSyncWaitsForASignInInFlight(t *testing.T) {
 		if err != nil || res.Applied != 1 || e.accts.settled != 1 || e.accts.reads != 1 {
 			t.Fatalf("%s: a sync during a sign-in again = %+v, %v (settled %d, reads %d)", kind, res, err, e.accts.settled, e.accts.reads)
 		}
+	}
+}
+
+// A sign-in or a mapping records itself on the server, which may queue a
+// sync, before it stores itself here: a sync claimed in between reads no
+// account yet, or one mapped on another server. It reads the account again
+// past the change in flight (AwaitedAccount) and syncs, rather than fail
+// unknown_account; an account mapped here never waits, and one still not here
+// after the wait fails (TestSyncRefusedAccount).
+func TestSyncReadsPastAChangeInFlight(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		now  func(e *env, a store.AudibleAccount) error // the account as the sync first reads it
+	}{
+		{"a first sign-in", func(e *env, a store.AudibleAccount) error {
+			return e.db.DeleteAudibleAccount(context.Background(), a.ID)
+		}},
+		{"a mapping from another server", func(e *env, a store.AudibleAccount) error {
+			a.ServerID = "srv-2"
+			return e.db.MapAudibleAccount(context.Background(), a)
+		}},
+	} {
+		e := newEnv(t)
+		e.accts.places["B000000001"] = audible.Position{PositionMs: 60_000, LastUpdated: e.now}
+		stored := e.account(t)
+		if err := c.now(e, stored); err != nil {
+			t.Fatal(err)
+		}
+		e.accts.onAwait = func() {
+			if err := e.db.SignInAudibleAccount(context.Background(), stored, e.now); err != nil {
+				t.Error(err)
+			}
+		}
+		res, err := e.runSync(t, params(t, title("B000000001", "A/One", 3600)))
+		if err != nil || res.Applied != 1 || e.accts.awaits != 1 {
+			t.Fatalf("%s: a sync during it = %+v, %v (read again %d times)", c.name, res, err, e.accts.awaits)
+		}
+	}
+	e := newEnv(t)
+	e.accts.places["B000000001"] = audible.Position{PositionMs: 60_000, LastUpdated: e.now}
+	if res, err := e.runSync(t, params(t, title("B000000001", "A/One", 3600))); err != nil || res.Applied != 1 || e.accts.awaits != 0 {
+		t.Fatalf("an account mapped here = %+v, %v (read again %d times)", res, err, e.accts.awaits)
 	}
 }
 

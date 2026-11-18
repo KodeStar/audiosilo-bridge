@@ -2470,12 +2470,16 @@ internal/
             record a refusal. SettledAccount is Account, read again under finishMu when it reads
             refused: a sign-in again ends the refusal on the server before it stores the new
             sign-in here, and a sync answering the old refusal in between would mark the account
-            refused again (an import would fail). Its wait doesn't follow ctx: finishMu's calls
-            bound it. A signed call's refusal waits the same way (refused, under finishMu): it is
-            retried once with the sign-in that replaced its device, one stored meanwhile or
-            storing itself then, so a poll claimed in that window lists with the new sign-in.
-            AwaitedAccount is the read under finishMu whatever the account reads: for a job
-            about to fail for an account it can't find or one mapped elsewhere (the poll).
+            refused again (an import would fail). A signed call's refusal waits the same way
+            (refused, under finishMu): it is retried once with the sign-in that replaced its
+            device, one stored meanwhile or storing itself then, so a poll claimed in that window
+            lists with the new sign-in. AwaitedAccount is the read under finishMu whatever the
+            account reads: for a job about to fail for an account it can't find or one mapped
+            elsewhere (NotHere: the poll, the import, the sync). finishMu is the Manager's, so
+            these waits follow the job's ctx (a one-slot channel, lockFinishCtx): a cancelled
+            job gives up with ctx.Err() rather than sit behind another account's slow sign-in
+            (its rollback deregisters past its page's cancel), holding nothing while it waits;
+            a refused call that gives up records nothing. Finish, Map and Remove wait as before.
             Deps: audible, link, secrets, source, store.
   audiblejob/ Phase 4a: audible.poll (light lane; params {"account", "template"}
             strict (template, the account's path template, optional, <= 500
@@ -2548,7 +2552,9 @@ internal/
             gate or the mapping check), download, decrypt, place, rescan, enrich.
             Checks the account (this Bridge's, mapped on this server, else
             unknown_account) and the library (the account's, a books one, mapped
-            AND writable at the mount in use, else not_writable). A mapping check
+            AND writable at the mount in use, else not_writable; an account that fails
+            either is read again first with audibleacct AwaitedAccount, as the poll's, past a
+            sign-in or mapping the server has and this Bridge is still storing). A mapping check
             not made yet for that mount is waited for (mappingPoll, 1 s), no park;
             an unwritable mapping refuses a NEW job at once, while a resumed job,
             and any job at the place step (checked again before the copy), parks
@@ -2645,7 +2651,7 @@ internal/
             device refusal fails audible_refused (the server stops
             queueing until a sign-in again maps the account), a sign-in refusal audible_sign_in (the
             server keeps queueing: the next poll Audible answers ends it), another server's or none
-            unknown_account; lists the titles (store.ListAudibleSync) first, then while sync_retry_at
+            unknown_account (read again first with AwaitedAccount, as the poll's); lists the titles (store.ListAudibleSync) first, then while sync_retry_at
             is ahead ends "waiting" without calling Audible; reads the push's rows, then lastpositions
             (in batches of 25 ASINs, split on 400/414, in a new random order each sync; a 429/503 waits Audible's Retry-After from when
             it came back, at least 2 min; a read Audible stops partway still syncs the places it gave,

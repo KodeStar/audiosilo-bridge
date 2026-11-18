@@ -190,6 +190,9 @@ type ImportAccounts interface {
 	// SettledAccount is Account read past a sign-in in flight when the
 	// account reads refused (audibleacct.Manager.SettledAccount).
 	SettledAccount(ctx context.Context, id string) (store.AudibleAccount, error)
+	// AwaitedAccount is Account read past a sign-in, mapping or removal in
+	// flight (audibleacct.Manager.AwaitedAccount).
+	AwaitedAccount(ctx context.Context, id string) (store.AudibleAccount, error)
 	Title(ctx context.Context, id, asin string) (source.Record, error)
 	License(ctx context.Context, id, asin string) (audible.License, error)
 	Download(ctx context.Context, id, url, dest string, opts audible.DownloadOptions) error
@@ -358,6 +361,13 @@ func (h *Importer) run(ctx context.Context, job jobs.Job, p ImportParams, rep *j
 	}()
 
 	acct, err := h.o.Accounts.Account(ctx, p.Account)
+	// As the poll's read: a sign-in or a mapping the server recorded, and
+	// queued this import for, may still be storing itself here (no account
+	// yet, another server's or another library's). Read again past it before
+	// failing for that; an account that passes never waits.
+	if h.importable(acct, err, p) != nil && (err == nil || errors.Is(err, audibleacct.ErrNotFound)) {
+		acct, err = h.o.Accounts.AwaitedAccount(ctx, p.Account)
+	}
 	if err := h.importable(acct, err, p); err != nil {
 		return nil, err
 	}
