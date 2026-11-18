@@ -126,13 +126,17 @@ func (db *DB) SetBookStatusUnlessFollowed(ctx context.Context, id int64, fromSta
 	if err := checkAffected(res, err); !errors.Is(err, ErrNotFound) {
 		return err
 	}
-	var owned bool
+	// Told apart in one read: settled only while g holds and the book did change.
+	// A book still as read means g refused the write (another open job that has
+	// ended since): ErrFollowed, so the caller tries again after its own end.
+	var owned, asRead bool
 	if err := db.sql.QueryRowContext(ctx,
-		`SELECT EXISTS (SELECT 1 FROM books WHERE id = ?4 AND `+stopGuardSQL+`)`,
-		g.JobID, g.Attempt, g.Ended, id).Scan(&owned); err != nil {
+		`SELECT EXISTS (SELECT 1 FROM books WHERE id = ?4 AND `+stopGuardSQL+`),
+		        EXISTS (SELECT 1 FROM books WHERE id = ?4 AND state != 'done' AND status = ?5 AND error = ?6)`,
+		g.JobID, g.Attempt, g.Ended, id, fromStatus, fromErr).Scan(&owned, &asRead); err != nil {
 		return err
 	}
-	if owned {
+	if owned && !asRead {
 		return ErrSettled
 	}
 	return ErrFollowed
