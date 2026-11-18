@@ -882,6 +882,30 @@ func TestHandoffCredentialDenied(t *testing.T) {
 	}
 }
 
+// The Bridge's group probe is taken (deleted) and refused by name: the Bridge
+// reads an exit.json error naming the probe's kind as the runner's take
+// (agentbox's probeJob), so the refusal must keep naming it (allowed: the
+// kind is quoted in the error; denied: the CLI never runs on it).
+func TestGroupProbeRefusalNamesTheKind(t *testing.T) {
+	t.Parallel()
+	env := parentEnv()
+	delete(env, "CLAUDE_CODE_OAUTH_TOKEN")
+	te := newTestEnv(t, env)
+	te.start(t)
+	probe := `{"cli":"claude","kind":"` + agentproto.CredentialGroupProbe + `","value":"` + agentproto.CredentialGroupProbe + `"}`
+	job, cred := te.submitWithCredential(t, claudeReq, probe)
+	ex := waitDone(t, job, 30*time.Second)
+	if ex.Unavailable || ex.CredentialDenied || !strings.Contains(ex.Error, strconv.Quote(agentproto.CredentialGroupProbe)) {
+		t.Fatalf("exit = %+v, want a refusal naming %q", ex, agentproto.CredentialGroupProbe)
+	}
+	if _, err := os.Lstat(cred); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatal("the probe's credential.json is deleted")
+	}
+	if _, err := os.Stat(filepath.Join(te.claudeCap, "argv")); err == nil {
+		t.Fatal("the CLI ran")
+	}
+}
+
 // A malformed hand-off is refused (no run) and still deleted; no credential at
 // all is the agent being unavailable.
 func TestHandoffRefused(t *testing.T) {

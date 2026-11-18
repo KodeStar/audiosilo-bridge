@@ -26,8 +26,13 @@ const (
 	refusedWait = 15 * time.Minute
 	// oldServerWait is how long an account is left when the server has no
 	// progress feed at all (link.ErrNoAudibleSync: a server older than 2.6.0,
-	// before Audible sync), rather than asking every minute.
+	// before Audible sync), rather than asking every minute. Only the second
+	// such answer in a row counts (oldServerStrikes): a proxy in front of a
+	// server that is restarting answers a bare 404 too.
 	oldServerWait = time.Hour
+	// oldServerStrikes is how many route-missing 404s in a row, errorWait
+	// apart, make the server an old one.
+	oldServerStrikes = 2
 	// errorWait is the least wait after a failure (the server's or Audible's).
 	errorWait = 2 * time.Minute
 	// baselineWindow: the first read of an account's feed to its end (the
@@ -48,12 +53,15 @@ type Pusher struct {
 	// paused: accounts left alone until a time (sync off on the server, a
 	// person that can't be synced for), in memory: a restart asks again.
 	paused map[string]time.Time
+	// noFeed counts each account's route-missing 404s in a row
+	// (oldServerStrikes); any other answer ends the run.
+	noFeed map[string]int
 }
 
 // NewPusher returns the push loop.
 func NewPusher(o Options) *Pusher {
 	o.defaults()
-	return &Pusher{o: o, paused: map[string]time.Time{}}
+	return &Pusher{o: o, paused: map[string]time.Time{}, noFeed: map[string]int{}}
 }
 
 // Run pushes every PushEvery until ctx ends.
@@ -116,6 +124,19 @@ func (p *Pusher) pause(id string, until time.Time) {
 	p.mu.Unlock()
 }
 
+// noFeedStrike counts one more route-missing 404 in a row for id when
+// missing, else ends the run, and returns the count.
+func (p *Pusher) noFeedStrike(id string, missing bool) int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !missing {
+		delete(p.noFeed, id)
+		return 0
+	}
+	p.noFeed[id]++
+	return p.noFeed[id]
+}
+
 // account reads a's feed from its cursor, records the places waiting, then
 // writes the ones due.
 func (p *Pusher) account(ctx context.Context, srv Server, a store.AudibleAccount, now time.Time) {
@@ -134,6 +155,7 @@ func (p *Pusher) account(ctx context.Context, srv Server, a store.AudibleAccount
 	unrecorded := false // a row wasn't recorded: the cursor stays, so it is read again
 	for range maxPages {
 		page, err := srv.AudibleProgress(ctx, a.ID, cursor, link.MaxAudibleProgress)
+		strikes := p.noFeedStrike(a.ID, errors.Is(err, link.ErrNoAudibleSync))
 		switch {
 		case errors.Is(err, link.ErrSyncOff):
 			p.pause(a.ID, now.Add(offWait))
@@ -153,7 +175,15 @@ func (p *Pusher) account(ctx context.Context, srv Server, a store.AudibleAccount
 				p.o.Log.Warn("audible: resetting the push's cursor failed", "account", a.ID, "err", err)
 			}
 			return
-		case errors.Is(err, link.ErrNoAudibleSync):
+		case strikes > 0 && strikes < oldServerStrikes:
+			// A bare 404 may be a proxy's while the server restarts: asked
+			// again after errorWait, and only a second one in a row is an old
+			// server (nothing recorded until then).
+			p.o.Log.Info("audible: the server answered 404 for its places feed; asking again shortly before taking it "+
+				"for a server older than 2.6.0", "account", a.ID)
+			p.pause(a.ID, now.Add(errorWait))
+			return
+		case strikes > 0:
 			p.o.Log.Warn("audible: the server has no places feed (it is older than 2.6.0); asking again in an hour", "account", a.ID)
 			p.pause(a.ID, now.Add(oldServerWait))
 			p.o.health(ctx, a, err, time.Time{})

@@ -79,10 +79,12 @@ func mustWrite(t *testing.T, path, body string) {
 
 // fakeRunner plays the agent container: it claims the first job that appears,
 // runs fn on it (fn writes outputs and returns exit.json), then marks it done.
-// skipDone leaves it claimed and unfinished (a dead runner).
+// skipDone leaves it claimed and unfinished (a dead runner); noClaim answers
+// each job once with no claim of its own (fn makes any).
 type fakeRunner struct {
 	fn       func(job string) agentproto.Exit
 	skipDone bool
+	noClaim  bool
 	claimed  atomic.Int32
 }
 
@@ -106,7 +108,7 @@ func (f *fakeRunner) start(t *testing.T, dir string) func() {
 				if handled[e.Name()] || !agentproto.ValidJobID(e.Name()) || !present(job, agentproto.RequestFile) {
 					continue
 				}
-				if err := os.Mkdir(filepath.Join(job, agentproto.ClaimDir), 0o700); err != nil {
+				if !f.noClaim && os.Mkdir(filepath.Join(job, agentproto.ClaimDir), 0o700) != nil {
 					continue
 				}
 				// Run may remove claim before request.json while deleting the job.
@@ -1123,6 +1125,11 @@ func TestHandoffCredentialFallsBackWhenTheGroupIsRefused(t *testing.T) {
 	}
 	if n := strings.Count(logged.String(), "the staging volume refused"); n != 1 {
 		t.Fatalf("the refused group is logged %d times, want once:\n%s", n, logged.String())
+	}
+	// The runner is in the group, yet the volume gave the file to every uid:
+	// the console hears so (bridge#79).
+	if st := r.Status(); !st.ShareGroup || st.HandoffMode != HandoffWorld {
+		t.Fatalf("share group %v, mode %q (want the volume's refusal to read as world)", st.ShareGroup, st.HandoffMode)
 	}
 	if strings.Contains(logged.String(), "isn't in the Bridge's group") {
 		t.Fatalf("the runner is in the group, yet the log says it isn't:\n%s", logged.String())

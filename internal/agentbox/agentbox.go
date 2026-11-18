@@ -101,15 +101,36 @@ type Runner struct {
 	// every uid because the runner isn't in the Bridge's group, warnedVolume
 	// because the staging volume refused the group: each once per process.
 	warnedGroup, warnedVolume atomic.Bool
+	// volumeRefused: the last job staged for the group got the every-uid
+	// modes because the staging volume refused the group (Status.HandoffMode).
+	volumeRefused atomic.Bool
 	// groupDenied is set once the runner, in the Bridge's group by its ids,
-	// couldn't take a credential handed to that group: the rest of this
-	// process hands it to every uid (Run).
+	// couldn't take a credential handed to that group: later runs hand it to
+	// every uid (Run) until a group probe ends it (probe.go).
 	groupDenied atomic.Bool
 	// groupBlocked, with agent.require_group on, is why the credential can't
 	// be kept to the Bridge's group (the runner was denied the group's file,
-	// or the volume refused the chown), learned by a run and kept for the rest
-	// of the process: Status reports the agent unavailable with it.
+	// or the volume refused the chown), learned by a run and kept until a
+	// group probe ends it (probe.go): Status reports the agent unavailable
+	// with it.
 	groupBlocked atomic.Pointer[string]
+	// groupFailed is why the last credential staged for the Bridge's group
+	// couldn't be given to it, when that wasn't the volume refusing (an I/O
+	// error, an errno groupRefused doesn't list: stage's groupFailedError).
+	// Kept until the group can be given again (a group probe, probe.go, or a
+	// job staged meanwhile): Status reports the agent unavailable with it, so
+	// the page and the checklist don't call ready an agent whose every job
+	// fails at the hand-off.
+	groupFailed atomic.Pointer[string]
+	// probeAfter (unix nanoseconds) is when the next group probe may run,
+	// and probing is set while one runs (probe.go).
+	probeAfter atomic.Int64
+	probing    atomic.Bool
+	// probes counts the probes in flight, for Wait.
+	probes sync.WaitGroup
+	// spoiled is who spoiled the last group probe (probe.go), nil once a
+	// probe gets the runner's own answer: Status says so.
+	spoiled atomic.Pointer[probeSpoil]
 	// uid is the Bridge's own (effective) uid, and runnerUID the runner's as
 	// the staging volume shows it, pinned by the first live runner.json
 	// (noUID until then): only the runner's files may move a handed
@@ -270,7 +291,9 @@ func (r *Runner) Run(ctx context.Context, req agent.Request) (agent.Result, erro
 	if st.ShareGroup {
 		group = r.gid
 	}
-	if handed != nil && !st.ShareGroup && !r.groupDenied.Load() && !r.warnedGroup.Swap(true) {
+	// Judged by the runner's report this run goes on (st), not by groupDenied
+	// as it is now: a probe may have ended a denial since Status read it.
+	if handed != nil && !st.ShareGroup && !st.groupListed && !r.warnedGroup.Swap(true) {
 		r.log.Warn("agent container: the runner isn't in the Bridge's group, so the handed credential is readable by every uid "+
 			"until the runner takes it; "+remedyGroupAdd+" (an older one reports no groups)", "bridge_gid", r.gid)
 	}
@@ -282,15 +305,17 @@ func (r *Runner) Run(ctx context.Context, req agent.Request) (agent.Result, erro
 		// ids on the staging volume differently (a user namespace, as rootless
 		// Podman sets up). The CLI never started, so nothing of the job ran: it
 		// is staged again (its first dir already gone) as it was before there
-		// was a group, and every later run of this process goes that way.
+		// was a group, and every later run goes that way until a group probe
+		// finds the runner takes the group's file (probe.go).
 		if r.requireGroup {
 			return res, r.blockGroup("the agent container couldn't take the credential kept to the Bridge's group: "+
-				remedyMapping+", then restart the Bridge", denied.detail)
+				remedyMapping+lookAgain+noRestart, denied.detail)
 		}
 		if !r.groupDenied.Swap(true) {
+			r.deferProbe()
 			r.log.Warn("agent container: the runner couldn't take the credential handed to the Bridge's group alone, so from "+
 				"now on the handed credential is readable by every uid until the runner takes it; "+remedyMapping+
-				" and restart the Bridge to keep it to that group", "bridge_gid", r.gid, "detail", denied.detail)
+				" to keep it to that group"+lookAgain+noRestart, "bridge_gid", r.gid, "detail", denied.detail)
 		}
 		if ctx.Err() != nil {
 			return res, ctx.Err()
@@ -318,7 +343,15 @@ func (r *Runner) runJob(ctx context.Context, req agent.Request, st Status, hande
 	var refused *groupRefusedError
 	if errors.As(err, &refused) {
 		return agent.Result{}, r.blockGroup("the staging volume refused to give the credential to the Bridge's group ("+
-			ioProblem(refused.err)+"): use "+remedyVolume+", then restart the Bridge", refused.err.Error())
+			ioProblem(refused.err)+"): use "+remedyVolume+recreateBoth+lookAgain+volumeInPlace, refused.err.Error())
+	}
+	var failed *groupFailedError
+	if errors.As(err, &failed) {
+		return agent.Result{}, r.failGroup(failed.err)
+	}
+	if err == nil && handed != nil && group != noGroup {
+		r.volumeRefused.Store(groupErr != nil)
+		r.groupFailed.Store(nil)
 	}
 	if groupErr != nil && !r.warnedVolume.Swap(true) {
 		r.log.Warn("agent container: the staging volume refused to hand the credential to the Bridge's group alone, so it is "+
@@ -347,7 +380,7 @@ func (r *Runner) runJob(ctx context.Context, req agent.Request, st Status, hande
 		// couldn't take: a volume that refused the group got the every-uid
 		// modes already, and an exit.json the job's own dir doesn't bear out
 		// must not turn the group off for the rest of the process.
-		borneOut := handed != nil && group != noGroup && groupErr == nil && r.deniedHere(ctx, root)
+		borneOut := handed != nil && group != noGroup && groupErr == nil && r.deniedHere(ctx, root, r.runnerUID.Load())
 		if err := ctx.Err(); err != nil {
 			return res, err
 		}
@@ -381,13 +414,13 @@ func (r *Runner) runJob(ctx context.Context, req agent.Request, st Status, hande
 // that the runner wrote it somewhere (trust.go): any uid can put a job dir of
 // its own making in the staging dir, with a credential the runner can't
 // delete, and move the exit.json the runner then writes into this one. So the
-// runner must have claimed this very job (claimedByRunner) and left the
+// runner (its uid) must have claimed this very job (claimedBy) and left the
 // credential in place, still so takeFor later: a runner that claimed the job
 // this instant takes the credential well within that, which a done marker put
 // there meanwhile by another uid would otherwise pass off as left.
-func (r *Runner) deniedHere(ctx context.Context, root *os.Root) bool {
+func (r *Runner) deniedHere(ctx context.Context, root *os.Root, runner int64) bool {
 	credential := filepath.Join(agentproto.CredentialDir, agentproto.CredentialFile)
-	if !agentproto.Exists(root, credential) || !r.claimedByRunner(root) {
+	if !agentproto.Exists(root, credential) || !claimedBy(root, runner) {
 		return false
 	}
 	select {
@@ -406,18 +439,49 @@ const (
 	remedyMapping = "the two containers see different ids on the staging volume (different user-namespace mappings, as " +
 		"rootless Podman can set up): give both the same mapping"
 	remedyVolume = "a staging volume that allows chown (a local one, not NFS or CIFS)"
+	// lookAgain ends each fix's words: the group probe (probe.go) ends the
+	// fallback once the fix is in place. noRestart follows it only for a fix
+	// that leaves the Bridge's container alone (the agent container's id
+	// mapping). Another staging volume means recreating both containers
+	// (recreateBoth), so there the probe only ever finds a volume changed in
+	// place (volumeInPlace: an export's options).
+	lookAgain     = "; the Bridge looks again every few minutes"
+	noRestart     = ", no Bridge restart needed"
+	recreateBoth  = " and recreate both containers on it"
+	volumeInPlace = ", for a volume fixed in place"
 )
 
-// blockGroup keeps, for the rest of the process, why agent.require_group
-// can't be met (groupBlocked: Status reports the agent unavailable with it,
-// so no later job is staged), logs it once with cause, and returns it as this
-// run's error.
+// blockGroup keeps, until a group probe ends it (probe.go), why
+// agent.require_group can't be met (groupBlocked: Status reports the agent
+// unavailable with it, so no later job is staged), logs it once with cause,
+// and returns it as this run's error.
 func (r *Runner) blockGroup(why, cause string) error {
 	why = "agent.require_group is on, and " + why
 	if r.groupBlocked.CompareAndSwap(nil, &why) {
+		r.deferProbe()
 		r.log.Warn("agent container: "+why, "bridge_gid", r.gid, "cause", cause)
+	} else if kept := r.groupBlocked.Load(); kept != nil {
+		// The reason an earlier run kept. Read once, and this run's own stands
+		// when a probe ended the block in between (probeGroup).
+		why = *kept
 	}
-	return &agent.NotAvailableError{Backend: r.backend, Detail: *r.groupBlocked.Load()}
+	return &agent.NotAvailableError{Backend: r.backend, Detail: why}
+}
+
+// failGroup keeps, until the group can be given again (a group probe,
+// probe.go, or a job staged meanwhile), that the Bridge couldn't give a handed
+// credential to its group for a reason that isn't the volume refusing it
+// (groupFailed: Status reports the agent unavailable with it), logs it once
+// with err, and returns it as this run's error. Worded without the Bridge's
+// own paths, as Status's Detail must be.
+func (r *Runner) failGroup(err error) error {
+	why := "the Bridge couldn't give the agent's credential to its own group on the staging volume it shares with the " +
+		"agent container (" + ioProblem(err) + "): check that volume" + lookAgain
+	if r.groupFailed.Swap(&why) == nil {
+		r.deferProbe()
+		r.log.Warn("agent container: "+why, "bridge_gid", r.gid, "err", err)
+	}
+	return &agent.NotAvailableError{Backend: r.backend, Detail: why}
 }
 
 // credentialDeniedError is a job the runner refused, before the CLI started,

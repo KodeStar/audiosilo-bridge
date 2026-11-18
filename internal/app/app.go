@@ -304,6 +304,11 @@ var listen = func(ctx context.Context, addr string) (net.Listener, error) {
 // Run serves the page and runs the heartbeat and the runner until ctx ends,
 // or the page's server fails (its error is returned once everything stopped).
 func (b *Bridge) Run(ctx context.Context) error {
+	// A group probe the last heartbeat started (Probe) isn't one of the loops
+	// below. Waited for last, once everything else is closed: cut short by ctx
+	// it still removes its job dir from the staging volume, and one another
+	// uid claimed and never finished takes the box's cancel wait to give up.
+	defer b.box.Wait()
 	defer b.podcastHTTP.Close()
 	defer b.librivoxHTTP.Close()
 	defer func() { _ = b.db.Close() }()
@@ -385,6 +390,9 @@ func (b *Bridge) beat(ctx context.Context) {
 		b.retryRefused(ctx)
 		return
 	}
+	// A hand-off's fallback from the Bridge's group ends without a restart once
+	// the agent container takes the group's file again (bridge#79).
+	b.box.Probe(ctx)
 	b.mu.Lock()
 	gen, withSetup := b.beatGen, b.acceptsSetup
 	b.mu.Unlock()

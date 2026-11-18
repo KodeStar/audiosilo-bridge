@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -13,6 +14,8 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/kodestar/audiosilo-bridge/internal/accounts"
+	"github.com/kodestar/audiosilo-bridge/internal/agentbox"
 	"github.com/kodestar/audiosilo-bridge/internal/api"
 	"github.com/kodestar/audiosilo-bridge/internal/contrib"
 	"github.com/kodestar/audiosilo-bridge/internal/events"
@@ -483,5 +486,53 @@ func TestPairingChangesWithdrawClaimPriority(t *testing.T) {
 				t.Fatal("old pairing withdrew current negotiation")
 			}
 		})
+	}
+}
+
+// unrefreshedDevice is a GitHub sign-in whose refresh fails: Token answers
+// accounts.ErrUnrefreshed.
+type unrefreshedDevice struct{}
+
+func (unrefreshedDevice) Token(context.Context) (string, error) {
+	return "", fmt.Errorf("%w: GitHub couldn't be reached", accounts.ErrUnrefreshed)
+}
+func (unrefreshedDevice) Refused(context.Context, string) {}
+func (unrefreshedDevice) OK(context.Context, string)      {}
+
+// The checklist's GitHub input tells a sign-in whose refresh failed apart from
+// none (bridge#25): it is still signed in, waiting for GitHub. A token that
+// resolves (the environment's) wins over it, and with no sign-in at all there
+// is no state (allowed: unrefreshed says so; denied: never for a working token
+// or none).
+func TestGitHubSetupUnrefreshed(t *testing.T) {
+	ctx := context.Background()
+	t.Setenv("PATH", t.TempDir()) // no `gh` to fall back to
+	t.Setenv(contrib.GitHubTokenEnv, "")
+	b := newTestBridge(t)
+	if gh := b.githubSetup(ctx); gh.State != "" || gh.CanContribute {
+		t.Fatalf("no sign-in: %+v", gh)
+	}
+	b.tokens = contrib.NewTokenSource(unrefreshedDevice{}, nil)
+	if gh := b.githubSetup(ctx); gh.State != link.GitHubUnrefreshed || gh.CanContribute {
+		t.Fatalf("unrefreshed: %+v", gh)
+	}
+	if s := b.setup(ctx); s.GitHubState != link.GitHubUnrefreshed {
+		t.Fatalf("the heartbeat's block: %+v", s)
+	}
+	t.Setenv(contrib.GitHubTokenEnv, "ghp_env")
+	if gh := b.githubSetup(ctx); gh.State != "" || !gh.CanContribute || gh.From != contrib.FromEnv {
+		t.Fatalf("an environment token: %+v", gh)
+	}
+}
+
+// The agent box's hand-off modes are the wire's agent_credential values, so
+// the checklist passes them on as they are.
+func TestHandoffModesAreTheWire(t *testing.T) {
+	for box, wire := range map[string]string{agentbox.HandoffGroup: link.AgentCredentialGroup,
+		agentbox.HandoffWorld: link.AgentCredentialWorld, agentbox.HandoffGroupRequired: link.AgentCredentialGroupRequired,
+		agentbox.HandoffFailed: link.AgentCredentialFailed} {
+		if box != wire {
+			t.Errorf("agentbox %q != link %q", box, wire)
+		}
 	}
 }

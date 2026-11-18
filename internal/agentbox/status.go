@@ -33,10 +33,21 @@ type Status struct {
 	// ShareGroup: a handed credential is the Bridge's group's alone, never
 	// every uid's: the runner is in that group (runner.json's groups), or a
 	// runner.json naming no group isn't the runner's (trust.go); false once
-	// the runner couldn't take one so (Run), for the rest of the process.
+	// the runner couldn't take one so (Run), until a group probe finds it
+	// can (probe.go).
 	ShareGroup bool
+	// HandoffMode is how a handed credential reaches the runner now
+	// (HandoffGroup, HandoffWorld, HandoffGroupRequired, HandoffFailed), ""
+	// with no live runner taking a hand-off: the heartbeat's setup block
+	// carries it, for the console (bridge#79).
+	HandoffMode string
 	// Detail says why not, in words for the page and the park hint.
 	Detail string
+	// Warning, for an agent that is otherwise as described, is what the page
+	// says beside it: the handed credential goes to every uid because
+	// something else on the staging volume spoiled the group probe that
+	// could have ended that (SpoiledWarning), "" otherwise.
+	Warning string
 	// Problem is why not as a kind (Problem*: "" when Available or Refused), and
 	// Other, for ProblemOtherBackend, the CLI that is signed in: the setup
 	// checklist words them for a person (internal/setup).
@@ -48,7 +59,37 @@ type Status struct {
 	// CLIs is runner.json's clis as the runner reported them: each CLI's version
 	// ("" = not installed) and credential kind (agentproto.Credential*, or "").
 	CLIs map[string]agentproto.CLI
+
+	// groupListed: runner.json's groups hold the Bridge's, so a probe can
+	// tell whether the group's file reaches the runner now (probe.go).
+	groupListed bool
 }
+
+// The hand-off modes (Status.HandoffMode): the credential is the Bridge's
+// group's alone; readable by every uid on the staging volume until the
+// runner takes it (the runner isn't in the group, the volume refused the
+// group, or the runner was denied the group's file); agent.require_group
+// is on and can't be met, so nothing is handed over; or the Bridge couldn't
+// give the runner its group's file (ProblemHandoffFailed), so nothing is
+// handed over until a group probe gets it through.
+const (
+	HandoffGroup         = "group"
+	HandoffWorld         = "world"
+	HandoffGroupRequired = "group_required"
+	HandoffFailed        = "failed"
+)
+
+// SpoiledWarning is Status.Warning while another uid on the staging volume
+// spoils the group probe, and spoiledBlocked what agent.require_group's block
+// adds then: neither names the uid (the log does).
+const (
+	SpoiledWarning = "the agent's credential is readable by every user on the staging volume until the agent container " +
+		"takes it, not kept to the Bridge's group: something else on the staging volume interfered with the Bridge's " +
+		"check that the agent container can take it there (the Bridge's log names its uid); find what else writes " +
+		"the staging volume, and the next check ends this"
+	spoiledBlocked = "; something else on the staging volume interfered with the Bridge's last check, so it can't " +
+		"tell whether the fix is in place (the Bridge's log names its uid): find what else writes the staging volume"
+)
 
 // Subscription reports whether backend runs on a subscription credential (a
 // claude OAuth token or a codex login), which bills no tokens, rather than an
@@ -77,6 +118,10 @@ const (
 	// ProblemGroupRequired: agent.require_group is on and the handed
 	// credential can't be kept to the Bridge's group (Detail says why).
 	ProblemGroupRequired Problem = "group_required"
+	// ProblemHandoffFailed: the Bridge couldn't give the handed credential to
+	// its group, and not because the staging volume refuses that (Detail says
+	// why), so no job can be handed over.
+	ProblemHandoffFailed Problem = "handoff_failed"
 )
 
 // Status reads runner.json now. Detail never names a Bridge path: it becomes a
@@ -120,11 +165,31 @@ func (r *Runner) Status() Status {
 		}
 	}
 	st.Version, st.Slots, st.HeartbeatAt, st.CLIs = rj.Version, rj.Slots, rj.HeartbeatAt, rj.CLIs
-	st.ShareGroup = r.shareGroup(rj, info, st.Live)
+	st.groupListed = slices.Contains(rj.Groups, r.gid)
+	st.ShareGroup = r.shareGroup(st.groupListed, info, st.Live)
 	st.Problem, st.Other, st.Detail = r.unavailableBecause(rj)
 	if st.Detail == "" && st.Handoff {
 		if why := r.groupRequired(st.ShareGroup); why != "" {
 			st.Problem, st.Detail = ProblemGroupRequired, why
+		}
+	}
+	if st.Detail == "" && st.Handoff && st.ShareGroup && st.groupListed {
+		// Only where a group probe can end it (Probe's gate): a runner.json
+		// that isn't the runner's and names no group leaves each job to say so.
+		if why := r.groupFailed.Load(); why != nil {
+			st.Problem, st.Detail = ProblemHandoffFailed, *why
+		}
+	}
+	if st.Handoff && st.Live {
+		st.HandoffMode = r.handoffMode(st)
+		if r.spoiled.Load() != nil {
+			// Only for the fallbacks a probe could have ended (noteSpoiled).
+			switch {
+			case st.HandoffMode == HandoffWorld && r.groupDenied.Load():
+				st.Warning = SpoiledWarning
+			case st.Problem == ProblemGroupRequired && r.groupBlocked.Load() != nil:
+				st.Detail += spoiledBlocked
+			}
 		}
 	}
 	if st.Detail == "" {
@@ -137,23 +202,38 @@ func (r *Runner) Status() Status {
 }
 
 // shareGroup reports whether a handed credential goes to the Bridge's group
-// alone, by runner.json rj (read from info; live when its heartbeat is fresh
-// in this protocol): when its groups hold the Bridge's, and also when another
-// uid than the runner's wrote it (trust.go), so a forged one can't move the
-// credential to every uid. Never once the runner was denied the group's
-// credential (Run).
-func (r *Runner) shareGroup(rj agentproto.Runner, info fs.FileInfo, live bool) bool {
+// alone, by runner.json (read from info; listed when its groups hold the
+// Bridge's; live when its heartbeat is fresh in this protocol): when listed,
+// and also when another uid than the runner's wrote it (trust.go), so a
+// forged one can't move the credential to every uid. Never while the runner
+// is denied the group's credential (Run, until a group probe ends it).
+func (r *Runner) shareGroup(listed bool, info fs.FileInfo, live bool) bool {
+	// Read (and pinned) first whatever the answer: a group probe believes a
+	// denial only from the pinned runner (probe.go).
+	uid, own := r.fromRunner(info, live)
 	if r.groupDenied.Load() {
 		return false
 	}
-	uid, own := r.fromRunner(info, live)
-	if slices.Contains(rj.Groups, r.gid) {
+	if listed {
 		return true
 	}
 	if !own {
 		r.notFromRunner("runner.json naming no Bridge group", uid)
 	}
 	return !own
+}
+
+// handoffMode is st's HandoffMode, for a live runner taking a hand-off.
+func (r *Runner) handoffMode(st Status) string {
+	switch {
+	case st.Problem == ProblemGroupRequired:
+		return HandoffGroupRequired
+	case st.Problem == ProblemHandoffFailed:
+		return HandoffFailed
+	case st.ShareGroup && !r.volumeRefused.Load():
+		return HandoffGroup
+	}
+	return HandoffWorld
 }
 
 // groupRequired is why agent.require_group stops a handed credential now,

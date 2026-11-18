@@ -17,7 +17,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -263,15 +262,14 @@ func (c *Client) Wait(ctx context.Context, dc DeviceCode, sleep func(context.Con
 }
 
 // unanswered reports whether a poll's err is GitHub not answering it: it
-// couldn't be reached (or timed out), or answered a server error or a rate
-// limit without an OAuth error code.
+// couldn't be reached, timed out or cut its answer short (Unreachable), or
+// answered a server error or a rate limit without an OAuth error code.
 func unanswered(err error) bool {
 	var ge *Error
 	if errors.As(err, &ge) {
 		return ge.Code == "" && (ge.Status >= http.StatusInternalServerError || ge.Status == http.StatusTooManyRequests)
 	}
-	var ne net.Error
-	return errors.As(err, &ne)
+	return Unreachable(err)
 }
 
 // Refresh trades a refresh token for a new pair (grant_type refresh_token, the
@@ -423,12 +421,12 @@ func (c *Client) postForm(ctx context.Context, endpoint string, form url.Values,
 	req.Header.Set("User-Agent", "audiosilo-bridge")
 	resp, err := c.httpc().Do(req)
 	if err != nil {
-		return fmt.Errorf("reach GitHub: %w", stripURL(err))
+		return unreachableError{fmt.Errorf("reach GitHub: %w", stripURL(err))}
 	}
 	defer func() { _ = resp.Body.Close() }()
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxBody))
 	if err != nil {
-		return err
+		return unreachableError{fmt.Errorf("read GitHub's answer: %w", err)}
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		var oe oauthError
@@ -443,6 +441,22 @@ func (c *Client) postForm(ctx context.Context, endpoint string, form url.Values,
 		return fmt.Errorf("GitHub's answer isn't JSON: %w", err)
 	}
 	return nil
+}
+
+// unreachableError is an OAuth call that never got GitHub's whole answer: the
+// request didn't go through, or the answer was cut short (Unreachable).
+type unreachableError struct{ err error }
+
+func (e unreachableError) Error() string { return e.err.Error() }
+func (e unreachableError) Unwrap() error { return e.err }
+
+// Unreachable reports whether err, from an OAuth call (Refresh, Poll,
+// RequestCode), is GitHub not being reached: no answer, or one cut short. Any
+// other error is an answer GitHub gave that wasn't the one asked for (a server
+// error, a rate limit, a page that isn't JSON, an OAuth error).
+func Unreachable(err error) bool {
+	var u unreachableError
+	return errors.As(err, &u)
 }
 
 func apiHeaders(req *http.Request) {

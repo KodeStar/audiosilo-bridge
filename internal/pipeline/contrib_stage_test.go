@@ -858,8 +858,8 @@ func TestContributeNoCredentialParks(t *testing.T) {
 	b := contribBook(t, db, store.NewBook{WorkID: "reacher-01"}, baseChars("x"), baseRecaps("x"))
 
 	// Denied: no credential parks contrib_unavailable and creates no issue; a
-	// sign-in GitHub couldn't be reached to refresh parks the same code, worded for
-	// waiting on GitHub rather than signing in. Either park's Cause is the resolve
+	// sign-in that couldn't be refreshed parks the same code, worded for waiting
+	// on GitHub rather than signing in, with a retry time. Either park's Cause is the resolve
 	// error, which the share job words the two apart by.
 	for _, c := range []struct {
 		err    error
@@ -867,8 +867,15 @@ func TestContributeNoCredentialParks(t *testing.T) {
 	}{{contrib.ErrNoCredential, ContribUnavailableMsg}, {contrib.ErrSignInUnrefreshed, ContribUnrefreshedMsg}} {
 		cfg := contribConfig(t, db, contribModeIssue, gh.srv.URL, "", "", fakeTokenResolver{err: c.err})
 		_, err := NewExecutor(cfg).Execute(context.Background(), b, state.Contributing, scheduler.StageReport{})
-		if pe := assertPark(t, err, state.ParkContribUnavailable); pe.Reason != c.reason || pe.Cause != c.err {
+		pe := assertPark(t, err, state.ParkContribUnavailable)
+		if pe.Reason != c.reason || pe.Cause != c.err {
 			t.Errorf("park = %q (cause %v), want %q (cause %v)", pe.Reason, pe.Cause, c.reason, c.err)
+		}
+		// Only the refresh's park looks again by itself (bridge#25): no
+		// credential at all waits for a sign-in.
+		unrefreshed := c.err == contrib.ErrSignInUnrefreshed
+		if wait := time.Until(pe.RetryAfter); unrefreshed != (wait > contrib.UnrefreshedRetry-time.Minute && wait <= contrib.UnrefreshedRetry) {
+			t.Errorf("%v: retry after %v from now", c.err, wait)
 		}
 		if gh.issueCount() != 0 {
 			t.Errorf("%v: issues created = %d, want 0", c.err, gh.issueCount())

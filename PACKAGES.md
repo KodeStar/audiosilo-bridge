@@ -1126,9 +1126,10 @@ internal/
             Accounts tab's device sign-in, then `gh auth token`; Resolve returns the
             token and where it came from (FromEnv/FromDevice/FromGH), else
             ErrNoCredential, or ErrSignInUnrefreshed (an ErrNoCredential too) when
-            the only credential is a sign-in GitHub couldn't be reached to refresh
-            (accounts.ErrUnrefreshed), which callers word as "once GitHub can be
-            reached" rather than "sign in"; a 401 on a device token marks it refused
+            the only credential is a sign-in whose refresh failed
+            (accounts.ErrUnrefreshed: GitHub unreachable, or no new token in its
+            answer), which callers word as "once it can" rather than "sign in", and
+            whose park retries by itself after UnrefreshedRetry (10 min, bridge#25); a 401 on a device token marks it refused
             (a call that works with one moves the sign-in's last_ok_at: NewClientFor
             wires both hooks) - the token NEVER enters argv/logs/
             errors, leak-canary tested). NewClientFor records where the token came
@@ -1206,6 +1207,8 @@ internal/
             ANY error GitHub answers is ErrBadRefresh: a spent refresh token answers
             incorrect_client_credentials),
             Revoke (POST /credentials/revoke, unauthenticated, 202) and User (/user).
+            Unreachable(err) tells an OAuth call that never got GitHub's whole answer
+            (a failed request, a body cut short) from one GitHub answered (bridge#25).
             Every base URL injectable; fake-server tests for each outcome.
   accounts/ Phase 2b (decision 19): the Bridge's external accounts. GitHub: Start
             runs one device flow at a time in the background (Pending shows the
@@ -1216,7 +1219,11 @@ internal/
             ErrBadRefresh refuses the sign-in, a refresh without GitHub's answer
             keeps the pair (the access token serves until it expires, judged
             after the refresh, which can take ghauth's request timeout; then Token
-            answers ErrUnrefreshed) and is tried again a minute later; a device flow ended meanwhile (sign-out, a newer
+            answers ErrUnrefreshed, saying why: GitHub not reached (ghauth.Unreachable)
+            apart from a server error, a rate limit or an answer that isn't a token,
+            bridge#25; Unrefreshed() keeps those words for the checklist, and a token
+            handed out again after one runs OnChange, so the heartbeat and the parked
+            books hear at once) and is tried again a minute later; a device flow ended meanwhile (sign-out, a newer
             one) stores nothing; Refused marks the account refused (a 401 on a
             token a refresh has since replaced, or on one past its expiry, is
             ignored: the refresh decides then) and OK moves last_ok_at
@@ -1240,7 +1247,13 @@ internal/
             needs_worker (the asr item while it waits for an ASR worker: the page and the console link
             Workers by it, bridge#28; an older console still matches DetailASRWaiting's words)}; details cut to 200
             characters and worded for the console (the budget's "$100 a month" or
-            "no monthly cap"); Complete is every required item done. The heartbeat
+            "no monthly cap"); Complete is every required item done. bridge#25 and #79,
+            two additive block fields an older server ignores: github_state
+            ("unrefreshed": still signed in, github_login kept, the item's detail saying
+            why the refresh failed and that it tries again; "refused": sign in again;
+            omitted while a token resolves or none is signed in) and agent_credential
+            (the hand-off's mode, agentbox.Status.HandoffMode: group, world,
+            group_required or failed; omitted with no hand-off). The heartbeat
             sends it and the page's Status tab shows it (the console shows the
             details as they are). v0.5.0: the libraries item says
             DetailLibrariesChecking from pairing until a heartbeat has listed the
@@ -1252,8 +1265,10 @@ internal/
             (Problem, Other; the app converts it to setup.AgentProblem):
             not running, an image of another version (another protocol, or too old for the
             Accounts tab's credential), no CLI for the backend, the other
-            backend signed in, or no credential (only that one asks for a
-            sign-in); the agentbox detail only for a refused credential, BRIDGE-07.
+            backend signed in, no credential (only that one asks for a
+            sign-in), agent.require_group unmet, or a hand-off the Bridge
+            couldn't make (handoff_failed; those two point at the Accounts
+            tab); the agentbox detail only for a refused credential, BRIDGE-07.
   correct/  Phase 2b (plan D5): the meta.correct job (light lane). ParseParams
             is STRICT (an unknown field refused, work_id required). It reads the
             work's live coverage (FreshCoverageForWork: its title, the recording
@@ -1587,6 +1602,9 @@ internal/
             only, so an unconfigured daemon parks once instead of churning). retry_at
             rides bookView and the book.state SSE frame (the web patch clears it when
             absent); pre-migration parks (retry_at '') never auto-readmit.
+            bridge#25: autoReadmitCodes adds contrib_unavailable, whose park carries a
+            retry_at only for a sign-in whose refresh failed (no credential at all waits
+            for a sign-in).
             Phase 1a: autoReadmitCodes adds agent_credential_refused (looked at again
             every 30 min in case the credential was replaced) and budget_exceeded
             (the monthly park's retry_at is the 1st; the per-book park has none, so it
@@ -1893,7 +1911,8 @@ internal/
             polls, server_time absent before server 2.7.0); 403 sync_off -> ErrSyncOff, 403 user_unavailable -> ErrUserUnavailable, a 400
             on a sent since -> ErrBadCursor (bridge#50), a 404 for a missing route (code not_found,
             or none) -> ErrNoAudibleSync (a server before 2.6.0; a 404 with any other code stays
-            the APIError, bridge#50).
+            the APIError, bridge#50; a proxy's bare 404 while the server restarts reads the same,
+            so the push waits for a second one in a row, bridge#79).
   mapping/  where the Bridge sees each library, CHECKED (decision 13): Check stats the
             server's sample book's files through the mount (SafeJoin: no absolute,
             "..", NUL; a backslash is a name character except on Windows) and
@@ -2579,7 +2598,8 @@ internal/
             per account mapped here, not refused, not waiting, not paused (in memory: sync_off 5 min,
             user_unavailable or unknown 15 min, the server's 429/503 its Retry-After, at least 2 min,
             a feed 404 for a missing route (not_found or no code: a server before 2.6.0) 1 h with a sync_error saying to
-            update, bridge#50; this loop only): reads the feed from push_cursor (it pages in the server's write order, change_seq, and
+            update, bridge#50, but only the second in a row, 2 min apart: the first is asked again with nothing
+            recorded, as a proxy answers a bare 404 while the server restarts, bridge#79; this loop only): reads the feed from push_cursor (it pages in the server's write order, change_seq, and
             may give a row again with updated_at unchanged, so a row is new by its place alone (a new version at the same place is none),
             never its time; the baseline, every read until one reaches the feed's end, takes only rows
             of the last 10 min by updated_at (counted back from the page's server_time, the server's
@@ -3173,8 +3193,8 @@ internal/
             book without a writable mapping (it writes nothing into the library),
             notesBook finds the engine book that keeps the results, holdBook holds
             it, and Options.Sharer (pipeline.Executor.Share) files them. Failures
-            in words: not signed in, a sign-in GitHub couldn't be reached to
-            refresh (Options.ContribCredential answering contrib.ErrSignInUnrefreshed,
+            in words: not signed in, a sign-in whose refresh failed
+            (Options.ContribCredential answering contrib.ErrSignInUnrefreshed,
             or a contrib_unavailable park whose Cause is it), refused, nothing kept
             here, a generate job still running, not matched. Result {library_id, path, work_id,
             contributed, covered}. The hints for agent_unavailable,
@@ -3349,11 +3369,17 @@ internal/
             (Status.ShareGroup), else 0444 in 0777, logged once a process with
             the fix (group_add with the Bridge's PGID); a volume that refuses
             the chown or the ACL drop falls back to those modes too, logged
-            once, never a failed run. A group-only credential the runner is
+            once, never a failed run (bridge#79: only a refusal, EPERM, ENOTSUP or
+            ENOSYS, groupRefused; any other error giving the group, a
+            groupFailedError, fails the stage as the agent unavailable, in both
+            modes, and is kept, groupFailed: Status then says not ready with
+            the reason, Problem handoff_failed, and no later job is staged,
+            until a group probe gives the group again or finds the volume now
+            refuses it). A group-only credential the runner is
             denied (credential_denied: the containers map the volume's ids
             differently, a user namespace) re-stages that job once in those
-            modes (nothing ran) and the rest of the process uses them, logged
-            once (groupDenied). Only the runner's own files may move
+            modes (nothing ran) and later runs use them, logged
+            once (groupDenied), until a group probe ends it (below). Only the runner's own files may move
             the credential off the group (trust.go): the runner's uid as
             the volume shows it is pinned by the first live runner.json
             (never the Bridge's own uid; a live one from a second uid ends
@@ -3378,8 +3404,42 @@ internal/
             group: a runner outside it, a volume refusing the chown (the
             job is never opened to the runner) and a denied runner each
             make the agent unavailable in Status (Problem group_required,
-            the page, heartbeat and checklist saying so; the last two kept
-            for the process, groupBlocked, as only a run learns them). A container
+            the page, heartbeat and checklist saying so; the last two kept,
+            groupBlocked, as only a run learns them, until a group probe ends
+            them). The group probe (probe.go, bridge#79): Probe, called at
+            every heartbeat, runs one in the background while groupDenied,
+            groupBlocked or groupFailed holds, probeEvery (5 min) after the fallback began or
+            the last probe, for a live runner that takes a hand-off and lists
+            the group: a job with a credential.json in the group's modes
+            holding no credential (kind group_probe, which DecodeCredential
+            refuses after the take) and no prompt.txt, so no CLI ever starts;
+            the runner's take ends both fallbacks (logged): its claim, the file
+            gone (not-exist, never another error) and its exit.json refusing
+            the probe's kind by name; the runner is the pinned uid, or
+            runner.json's owner as it is then while the pin is contested or
+            unset (a new id mapping, one user for both), which is safe as the
+            end only ever moves the credential onto the group. A claim,
+            exit.json or done of another uid (the Bridge's own claim aside), a
+            claim open to other uids, an answer with no claim of the runner's
+            or older than that claim (another job's, moved in),
+            or the runner finding the credential already gone spoils the probe
+            (probeSpoiled): the fallback stays (no flap back to the group for
+            the next run to be denied again), a Warn names the uid (once per
+            uid in a row), and while groupDenied holds Status.Warning
+            (SpoiledWarning: the Accounts tab's warning, the checklist's
+            DetailAgentShared) says the credential is every user's because
+            something else on the staging volume interfered, or under
+            agent.require_group the block's Detail says so, until a probe gets
+            the runner's own answer (taken, denied or refused); a denial borne
+            out as a run's is (deniedHere) or a volume still refusing the
+            group keeps them; a probe ends by itself after the claim timeout plus
+            staleFor, and Wait (the app's Run, last) waits for one in flight
+            at a stop, so its job dir still goes. Status.HandoffMode says how a
+            handed credential reaches a live runner: group, world (not in the
+            group, denied, or the last stage's volume refused the group,
+            volumeRefused), group_required, or failed (ProblemHandoffFailed:
+            a non-refusal error giving the runner the group's file); the heartbeat's setup block
+            carries it as agent_credential. A container
             credential always wins; a runner that can't take a hand-off gets
             nothing and is told to update. A refusal's detail says where to
             replace the credential: the Accounts tab for the handed one, the agent
@@ -3606,10 +3666,10 @@ internal/
             the start; the env token is read live), githubChanged kicks a beat
             and re-admits contrib_unavailable books when the Bridge can contribute
             (a sign-in resumes the sidecars.generate job waiting on one; a refresh
-            that works again re-admits nothing, so a book parked on a sign-in GitHub
-            couldn't be reached to refresh waits for Retry; sidecars.contribute
-            never parks: it fails asking for a sign-in, or for GitHub to be
-            reachable, and a share again); generate gets contribCredential (why
+            that works again re-admits them through OnChange, and their park carries a
+            retry_at besides, bridge#25; sidecars.contribute
+            never parks: it fails asking for a sign-in, or for the sign-in's
+            refresh to go through, and a share again); generate gets contribCredential (why
             no token resolves) as Options.ContribCredential,
             agentCredentialChanged re-admits agent_credential_refused and
             agent_unavailable; the Backend adds Accounts, StartGitHubSignIn,

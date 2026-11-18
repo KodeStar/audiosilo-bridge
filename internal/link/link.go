@@ -113,7 +113,36 @@ type Setup struct {
 	// GitHubLogin is the signed-in GitHub user ("" for none, or a token from the
 	// environment); the console shows it to admins only.
 	GitHubLogin string `json:"github_login,omitempty"`
+	// GitHubState is why a GitHub sign-in can't be used now (bridge#25):
+	// GitHubUnrefreshed (its refresh failed: it waits for GitHub, no sign-in
+	// needed; GitHubLogin still names it) or GitHubRefused (sign in again);
+	// omitted otherwise. Additive: the server reads the block leniently.
+	GitHubState string `json:"github_state,omitempty"`
+	// AgentCredential is how the Accounts tab's agent credential reaches the
+	// agent container (bridge#79): AgentCredentialGroup (the Bridge's group
+	// alone), AgentCredentialWorld (every uid on the staging volume until the
+	// runner takes it), AgentCredentialGroupRequired (agent.require_group
+	// can't be met, so nothing is handed over) or AgentCredentialFailed (the
+	// Bridge couldn't give it to the runner, the agent step says why; a
+	// console that doesn't know it shows no hand-off); omitted while no
+	// hand-off is in play (the container's own credential, or no live
+	// container).
+	AgentCredential string `json:"agent_credential,omitempty"`
 }
+
+// The setup block's GitHub states (Setup.GitHubState).
+const (
+	GitHubUnrefreshed = "unrefreshed"
+	GitHubRefused     = "refused"
+)
+
+// The setup block's agent credential hand-off modes (Setup.AgentCredential).
+const (
+	AgentCredentialGroup         = "group"
+	AgentCredentialWorld         = "world"
+	AgentCredentialGroupRequired = "group_required"
+	AgentCredentialFailed        = "failed"
+)
 
 // SetupItem is one checklist item: its id (paired, libraries, asr, agent,
 // budget, github), whether it is done, whether it is required, a short detail,

@@ -73,6 +73,9 @@ type AgentAccount struct {
 	Detail              string `json:"detail"`
 	Handoff             bool   `json:"handoff"`
 	ContainerCredential string `json:"container_credential"`
+	// Warning is what the page says beside the state ("" for nothing):
+	// agentbox.Status.Warning.
+	Warning string `json:"warning"`
 }
 
 // AccountsBackend is the Accounts tab's part of the Backend.

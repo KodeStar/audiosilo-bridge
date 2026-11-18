@@ -222,6 +222,7 @@ function AgentCard({ client, accounts, onChange }: CardProps) {
           </Notice>
         )}
         {!a.available && a.detail && <Notice kind="warn">{a.detail}</Notice>}
+        {a.available && a.warning && <Notice kind="warn">{a.warning}</Notice>}
         {a.kinds.map((kind) => (
           <CredentialForm
             key={kind}

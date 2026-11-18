@@ -44,6 +44,10 @@ const DetailASRWaiting = "waiting for an ASR worker"
 // none.
 const DetailLibrariesChecking = "checking the libraries..."
 
+// DetailGitHubRefused is the github item's detail while GitHub refuses the
+// sign-in (bridge#25: not the same as never signed in).
+const DetailGitHubRefused = "GitHub refused the sign-in: sign in again on the Accounts tab"
+
 // agentFor is what the agent is for, in the agent item's detail while it isn't
 // ready (BRIDGE-07: plain words, never the staging volume).
 const agentFor = "the agent signs in to Claude or ChatGPT and is needed for characters, recaps and descriptions"
@@ -60,6 +64,15 @@ const (
 	// can't be kept to the Bridge's group (the Accounts tab says why).
 	DetailAgentGroupRequired = "agent.require_group is on, and the agent's credential can't be kept to the Bridge's group: " +
 		"the Accounts tab says why"
+	// DetailAgentShared follows the backend while the agent is ready but its
+	// credential goes to every user on the staging volume because something
+	// else there interfered with the Bridge's check (the Accounts tab says
+	// more; the checklist never names the staging volume, BRIDGE-07).
+	DetailAgentShared = ", but its credential is shared with every user on the agent's volume, because something else " +
+		"there interfered with the Bridge's check: the Accounts tab says more"
+	// DetailAgentHandoffFailed: the Bridge couldn't hand the Accounts tab's
+	// credential to the agent container (the Accounts tab says why).
+	DetailAgentHandoffFailed = "the Bridge couldn't hand the agent its credential: the Accounts tab says why; " + agentFor
 )
 
 // agentNoCLI is the detail while the agent image has no CLI for backend.
@@ -86,6 +99,7 @@ const (
 	AgentOtherBackend  AgentProblem = "other_backend"
 	AgentNoCredential  AgentProblem = "no_credential"
 	AgentGroupRequired AgentProblem = "group_required"
+	AgentHandoffFailed AgentProblem = "handoff_failed"
 )
 
 // maxDetail bounds an item's detail (the server keeps 256 characters).
@@ -122,6 +136,14 @@ type Agent struct {
 	Other   string
 	Refused bool
 	Detail  string
+	// Handoff is how the Accounts tab's credential reaches the agent
+	// container (agentbox.Status.HandoffMode, the same strings as
+	// link.AgentCredential*), "" with no hand-off in play.
+	Handoff string
+	// Shared: the credential goes to every user on the staging volume
+	// because something else there spoiled the Bridge's group check
+	// (agentbox.Status.Warning).
+	Shared bool
 }
 
 // GitHub is the contribution credential.
@@ -130,6 +152,11 @@ type GitHub struct {
 	// Login is the signed-in user; From where the token comes from (env, device, gh).
 	Login string
 	From  string
+	// State, when no token resolves, is why a sign-in can't be used
+	// (link.GitHubUnrefreshed, link.GitHubRefused; "" for none), and Why,
+	// for an unrefreshed one, why its refresh failed (accounts' words).
+	State string
+	Why   string
 }
 
 // Audible is the Audible accounts: how many are signed in, how many Audible
@@ -166,7 +193,8 @@ type Inputs struct {
 
 // Checklist is the checklist for in, its items in order.
 func Checklist(in Inputs) link.Setup {
-	out := link.Setup{CanContribute: in.GitHub.CanContribute, GitHubLogin: in.GitHub.Login}
+	out := link.Setup{CanContribute: in.GitHub.CanContribute, GitHubLogin: in.GitHub.Login,
+		AgentCredential: agentCredential(in.Agent.Handoff)}
 	add := func(id string, done, required bool, detail string) *link.SetupItem {
 		out.Items = append(out.Items, link.SetupItem{ID: id, Done: done, Required: required, Detail: cut(detail)})
 		return &out.Items[len(out.Items)-1]
@@ -217,6 +245,8 @@ func Checklist(in Inputs) link.Setup {
 	// agent's full state, the checklist only what to do in plain words.
 	agentDetail := in.Agent.Backend
 	switch {
+	case in.Agent.Available && in.Agent.Shared:
+		agentDetail += DetailAgentShared
 	case in.Agent.Available:
 	case in.Agent.Refused:
 		agentDetail = firstNonEmpty(in.Agent.Detail, DetailAgentNoCredential)
@@ -230,6 +260,8 @@ func Checklist(in Inputs) link.Setup {
 		agentDetail = DetailAgentNoCredential
 	case in.Agent.Problem == AgentGroupRequired:
 		agentDetail = DetailAgentGroupRequired
+	case in.Agent.Problem == AgentHandoffFailed:
+		agentDetail = DetailAgentHandoffFailed
 	default:
 		agentDetail = DetailAgentNotRunning
 	}
@@ -249,6 +281,22 @@ func Checklist(in Inputs) link.Setup {
 		gh = "a token from the environment"
 	case in.GitHub.CanContribute && in.GitHub.From == "gh":
 		gh = "the gh CLI's token"
+	case in.GitHub.CanContribute:
+		// A token resolves with nothing more to say: the State cases are for none.
+	case in.GitHub.State == link.GitHubUnrefreshed:
+		// Signed in still (bridge#25): it waits for GitHub, not for a sign-in.
+		out.GitHubState = link.GitHubUnrefreshed
+		gh = "signed in, but the sign-in couldn't be refreshed"
+		if in.GitHub.Login != "" {
+			gh = "signed in as " + in.GitHub.Login + ", but the sign-in couldn't be refreshed"
+		}
+		if in.GitHub.Why != "" {
+			gh += ": " + in.GitHub.Why
+		}
+		gh += "; the Bridge tries again every minute"
+	case in.GitHub.State == link.GitHubRefused:
+		out.GitHubState = link.GitHubRefused
+		gh = DetailGitHubRefused
 	}
 	add(ItemGitHub, in.GitHub.CanContribute, false, gh)
 
@@ -279,6 +327,16 @@ func Checklist(in Inputs) link.Setup {
 	}
 	add(ItemAudible, a.Accounts > 0 && a.Refused == 0 && a.OldProfile == 0, false, audible)
 	return out
+}
+
+// agentCredential is the setup block's agent_credential for a hand-off mode
+// ("" for none, or one this package doesn't know).
+func agentCredential(mode string) string {
+	switch mode {
+	case link.AgentCredentialGroup, link.AgentCredentialWorld, link.AgentCredentialGroupRequired, link.AgentCredentialFailed:
+		return mode
+	}
+	return ""
 }
 
 // Complete reports whether every required item is done.
