@@ -179,7 +179,13 @@ export function AgentSettingsCard({ client }: { client: ApiClient }) {
                 id="endpoint-url"
                 type="url"
                 value={baseUrl}
-                onChange={(e) => setBaseUrl(e.target.value)}
+                onChange={(e) => {
+                  setBaseUrl(e.target.value);
+                  // A check was of the address it had: another one's models
+                  // and warnings would mislead.
+                  setCheck(null);
+                  setCheckError(null);
+                }}
                 readOnly={urlLocked}
                 disabled={urlLocked}
                 placeholder="http://192.168.1.20:11434/v1"

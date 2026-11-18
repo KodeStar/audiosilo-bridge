@@ -93,6 +93,12 @@ describe('AgentSettingsCard', () => {
 
     await userEvent.click(screen.getByRole('button', { name: 'Save agent settings' }));
     expect(await screen.findByText('Saved.')).toBeInTheDocument();
+
+    // Another address: the check was the old one's, so its models and warnings go.
+    await userEvent.type(screen.getByLabelText('Endpoint address'), 'x');
+    expect(screen.queryByRole('list', { name: "The endpoint's models" })).not.toBeInTheDocument();
+    expect(screen.queryByText(/tiny doesn't call tools/)).not.toBeInTheDocument();
+    expect(screen.queryByText('the endpoint has no /responses (404)')).not.toBeInTheDocument();
   });
 
   it("shows the endpoint's failure, and keeps the key write-only", async () => {
