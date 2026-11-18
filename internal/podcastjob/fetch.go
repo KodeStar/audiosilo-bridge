@@ -11,7 +11,6 @@ import (
 	"io"
 	"os"
 	"path"
-	"strconv"
 	"time"
 
 	"github.com/kodestar/audiosilo-bridge/internal/jobs"
@@ -420,13 +419,7 @@ func (s *service) download(ctx context.Context, b *budget, job jobs.Job, root *o
 			var fetch podcast.Fetch
 			switch {
 			case response.Status != 200 && response.Status != 206 && (response.Status != 416 || c.Offset == 0):
-				code := "http_" + strconv.Itoa(response.Status)
-				if response.Status == 410 {
-					// The feed's own word for it (netguard.Fetch): the server words
-					// an episode's as no longer available, never stopping the show.
-					code = "gone"
-				}
-				err = &netguard.Error{Code: code, Message: fmt.Sprintf("The episode returned HTTP %d.", response.Status), RetryAfterSeconds: response.RetryAfterSeconds}
+				err = &netguard.Error{Code: netguard.StatusCode(response.Status), Message: fmt.Sprintf("The episode returned HTTP %d.", response.Status), RetryAfterSeconds: response.RetryAfterSeconds}
 			case action == "fresh_get":
 				_ = response.Body.Close()
 				s.clearCheckpoint(job, root, c)
@@ -522,7 +515,7 @@ func (s *service) consume(ctx context.Context, b *budget, job jobs.Job, root *os
 	}
 	h := sha256.New()
 	if action == "append" {
-		err := s.fault("partial")
+		err := s.o.Fault.Hit("partial")
 		if err == nil {
 			_, err = io.CopyN(h, file, c.Offset)
 		}

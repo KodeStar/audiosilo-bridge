@@ -133,11 +133,7 @@ func (c *Client) once(ctx context.Context, in Request) (*Response, error) {
 		return out, nil
 	}
 	if resp.StatusCode != 200 {
-		code := "http_" + strconv.Itoa(resp.StatusCode)
-		if resp.StatusCode == 410 {
-			code = "gone"
-		}
-		return nil, &Error{Code: code, Message: "The feed returned HTTP " + strconv.Itoa(resp.StatusCode) + ".", RetryAfterSeconds: retryAfter(resp.Header.Get("Retry-After"), time.Now())}
+		return nil, &Error{Code: StatusCode(resp.StatusCode), Message: "The feed returned HTTP " + strconv.Itoa(resp.StatusCode) + ".", RetryAfterSeconds: retryAfter(resp.Header.Get("Retry-After"), time.Now())}
 	}
 	if resp.ContentLength > in.MaxBytes {
 		return nil, &Error{Code: "too_large", Message: "The response exceeds the size limit."}
@@ -174,6 +170,15 @@ func (c *Client) once(ctx context.Context, in Request) (*Response, error) {
 		return nil, &Error{Code: "too_large", Message: "The response exceeds the size limit."}
 	}
 	return out, nil
+}
+
+// StatusCode is a host's HTTP status as a failure code: gone for a 410 (the
+// server words it as no longer available), else http_<status>.
+func StatusCode(status int) string {
+	if status == 410 {
+		return "gone"
+	}
+	return "http_" + strconv.Itoa(status)
 }
 
 // stripRedirectCredentials keeps source credentials within their original origin.

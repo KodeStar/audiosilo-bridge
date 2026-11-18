@@ -685,7 +685,7 @@ func TestFetchUnreadablePartialRestartsOnce(t *testing.T) {
 			h, job := audioHarness(t)
 			audio := data(t, "chap-v23.mp3")
 			var calls atomic.Int32
-			var fresh []int32
+			var lastFresh atomic.Int32 // the last GET from zero
 			setAudio(h, func(w http.ResponseWriter, r *http.Request) {
 				n := calls.Add(1)
 				w.Header().Set("ETag", `"one"`)
@@ -696,7 +696,7 @@ func TestFetchUnreadablePartialRestartsOnce(t *testing.T) {
 					w.Write(audio[1000:])
 					return
 				}
-				fresh = append(fresh, n)
+				lastFresh.Store(n)
 				w.Header().Set("Content-Length", strconv.Itoa(len(audio)))
 				if scenario == "restarts" && n > 1 {
 					w.Write(audio)
@@ -726,8 +726,8 @@ func TestFetchUnreadablePartialRestartsOnce(t *testing.T) {
 				t.Fatal(result, err)
 			}
 			// The first GET, the resume whose partial failed, then a GET from zero.
-			if got := result.(fetchResult); got.Fetch.Bytes != int64(len(audio)) || calls.Load() != 3 || reads.Load() != 1 || len(fresh) != 2 || fresh[1] != 3 {
-				t.Fatal(got, calls.Load(), reads.Load(), fresh)
+			if got := result.(fetchResult); got.Fetch.Bytes != int64(len(audio)) || calls.Load() != 3 || reads.Load() != 1 || lastFresh.Load() != 3 {
+				t.Fatal(got, calls.Load(), reads.Load(), lastFresh.Load())
 			}
 		})
 	}

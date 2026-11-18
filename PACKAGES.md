@@ -2143,6 +2143,8 @@ internal/
             credential stripping shared with buffered feed/artwork GETs, including
             later hops in a redirect chain. The handler owns the combined
             three-attempt retry/resume budget; ResumeAction validates exact strong identity.
+            StatusCode is a host's status as a code, the feed's and the episode's
+            alike (gone for 410, else http_<status>).
             Phase 2c-1 feed/artwork client: explicit DNS resolution and a socket
             Control check of the exact IP, public addresses or configured CIDRs
             only (including NAT64 embedded IPv4 checks), no environment proxy.

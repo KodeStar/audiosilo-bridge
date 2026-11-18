@@ -29,9 +29,10 @@ type Journal struct {
 // Boundary is an optional fault injection hook, called after durable boundaries.
 type Boundary func(string) error
 
-func hit(fn Boundary, s string) error {
-	if fn != nil {
-		return fn(s)
+// Hit calls the hook at boundary at, if there is one.
+func (b Boundary) Hit(at string) error {
+	if b != nil {
+		return b(at)
 	}
 	return nil
 }
@@ -177,7 +178,7 @@ func Publish(root *os.Root, j Journal, now time.Time, fault Boundary) error {
 	if err := syncDir(root, path.Dir(name)); err != nil {
 		return err
 	}
-	if err := hit(fault, "journal"); err != nil {
+	if err := fault.Hit("journal"); err != nil {
 		return err
 	}
 	// The payload was verified above under the same locks: complete need not hash it again.
@@ -281,7 +282,7 @@ func complete(root *os.Root, j Journal, now time.Time, fault Boundary, verified 
 			if err != nil {
 				return err
 			}
-			if err := hit(fault, "linked"); err != nil {
+			if err := fault.Hit("linked"); err != nil {
 				return err
 			}
 			if linked {
@@ -313,7 +314,7 @@ func complete(root *os.Root, j Journal, now time.Time, fault Boundary, verified 
 			if !verified {
 				return ErrInvalidFile
 			}
-			if err := hit(fault, "deleting"); err != nil {
+			if err := fault.Hit("deleting"); err != nil {
 				return err
 			}
 			if err := root.Rename(j.Path, trash); err != nil {
@@ -331,7 +332,7 @@ func complete(root *os.Root, j Journal, now time.Time, fault Boundary, verified 
 			return err
 		}
 	}
-	if err := hit(fault, "audio"); err != nil {
+	if err := fault.Hit("audio"); err != nil {
 		return err
 	}
 	if j.Op == "install" && j.Chapters != nil {
@@ -360,7 +361,7 @@ func complete(root *os.Root, j Journal, now time.Time, fault Boundary, verified 
 	if err := syncDir(root, path.Dir(side)); err != nil {
 		return err
 	}
-	if err := hit(fault, "sidecar"); err != nil {
+	if err := fault.Hit("sidecar"); err != nil {
 		return err
 	}
 	e.Fetch = &j.Fetch
@@ -382,7 +383,7 @@ func complete(root *os.Root, j Journal, now time.Time, fault Boundary, verified 
 			return err
 		}
 	}
-	if err := hit(fault, "feed"); err != nil {
+	if err := fault.Hit("feed"); err != nil {
 		return err
 	}
 	if err := root.Remove(AttachmentPath(j.Path, ".publish.json")); err != nil {
@@ -391,7 +392,7 @@ func complete(root *os.Root, j Journal, now time.Time, fault Boundary, verified 
 	if err := syncDir(root, path.Dir(side)); err != nil {
 		return err
 	}
-	return hit(fault, "remove")
+	return fault.Hit("remove")
 }
 
 // CleanupTrash runs after a successful rescan, or for an old owned transaction.
