@@ -2997,8 +2997,10 @@ internal/
             returns even when the engine hasn't started (stopBook then cancels the book
             in the store alone, scheduler.CancelStored: nothing runs it yet; and once
             the engine is up, stopStartedStage stops a stage its scheduler began on the
-            book before that write, or a status its reconcile wrote back over it,
-            unless another open job follows the book, bridge#65), and waitEngine for a
+            book before that write, or a status such a stage wrote over it, unless
+            another open job follows the book or a later claim of the same job does:
+            an Attempt higher, or the job's mapping reopened by its attach, as in
+            release, bridge#65), and waitEngine for a
             run cancelled (or taken back) while it waits for the engine, which never
             reaches end(). Retry(job): the engine's RetryAsRead of the parked engine
             book as Retry read it (a Cancel landing since is never taken up as a Retry

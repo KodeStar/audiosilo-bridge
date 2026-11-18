@@ -539,21 +539,30 @@ func (h *Handler) Abandon(ctx context.Context, job jobs.Job) {
 	// and a job waiting for this one's end must find the book stopped (bridge#65).
 	h.release(ctx, job, *m.BookID, true)
 	if !engineUp {
-		go h.stopStartedStage(ctx, job.ID, *m.BookID)
+		go h.stopStartedStage(ctx, job, *m.BookID)
 	}
 }
 
 // stopStartedStage waits for the engine to start, then stops a stage it began on
 // book bookID before the store's cancel landed (its scheduler starts beside the
-// Bridge's jobs) or a status a start's reconcile wrote back over the cancel
-// (stopBook, cancelled books included).
-func (h *Handler) stopStartedStage(ctx context.Context, jobID, bookID int64) {
+// Bridge's jobs), or a status such a stage wrote over the cancel (stopBook,
+// cancelled books included). A later claim of the same job that follows the book
+// now (one already running here, which release left the book to, or one handed
+// out since, whose attach reopened the job's mapping) keeps it, as in release:
+// stopBook only counts other jobs.
+func (h *Handler) stopStartedStage(ctx context.Context, job jobs.Job, bookID int64) {
 	for h.o.Engine() == nil {
 		if agent.SleepCtx(ctx, h.o.Poll) != nil {
 			return
 		}
 	}
-	h.stopBook(ctx, jobID, bookID, true)
+	if sj, err := h.o.DB.GetServerJob(ctx, job.ID); err == nil && sj.Attempt > job.Attempt {
+		return
+	}
+	if m, err := h.o.DB.GetGenerateBook(ctx, job.ID); err != nil || m.EndedAt == "" {
+		return
+	}
+	h.stopBook(ctx, job.ID, bookID, true)
 }
 
 // release ends a job's hold on its engine book: a job that didn't finish stops

@@ -711,8 +711,10 @@ func TestRetryNeverTakesUpABookCancelledAfterItsRead(t *testing.T) {
 // only after Abandon returns, and a job waiting for that end reads the row. With
 // the engine not started yet, Abandon used to leave the book to a goroutine that
 // waited for it; now the book is cancelled in the store and the end recorded
-// before Abandon returns. Once the engine is up, a book the start's reconcile
-// wrote back over the cancel is stopped again, unless another job follows it.
+// before Abandon returns. Once the engine is up, a status written back over the
+// cancel (a stage its scheduler began before the cancel landed parked the book)
+// is stopped again, unless another job, or a later claim of the same job, follows
+// the book.
 func TestAbandonBeforeTheEngineStartsStopsTheBookAtOnce(t *testing.T) {
 	t.Parallel()
 	db, err := store.Open(context.Background(), ":memory:")
@@ -748,8 +750,8 @@ func TestAbandonBeforeTheEngineStartsStopsTheBookAtOnce(t *testing.T) {
 		t.Fatalf("after Abandon with no engine: status %q error %q, ended %q; want cancelled and ended",
 			got.Status, got.Error, g.EndedAt)
 	}
-	// The start's reconcile writes the status it read back over the cancel.
-	if err := db.SetBookStatus(ctx, b.ID, "", "", ""); err != nil {
+	// A stage the engine began before the cancel writes its status over it.
+	if err := db.SetBookStatus(ctx, b.ID, "needs_attention", "parked", "agent_unavailable"); err != nil {
 		t.Fatal(err)
 	}
 	up.Store(true)
@@ -760,16 +762,40 @@ func TestAbandonBeforeTheEngineStartsStopsTheBookAtOnce(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
+	// Each case below is a job whose end Abandon's release recorded.
+	abandoned := func(job int64, slug string) store.Book {
+		b := newBook(job, slug)
+		if err := db.EndGenerateBook(ctx, job, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	kept := func(what string, job jobs.Job, b store.Book) {
+		t.Helper()
+		h.stopStartedStage(ctx, job, b.ID)
+		if got, _ := db.GetBook(ctx, b.ID); got.Status != "" {
+			t.Fatalf("%s was stopped: status %q", what, got.Status)
+		}
+	}
 	// A book another open job follows now (a new job took it up) is left to it.
-	taken := newBook(6, "taken")
+	taken := abandoned(6, "taken")
 	if err := db.RecordClaim(ctx, store.ServerJob{ID: 7, Kind: Kind, Attempt: 1}); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.PutGenerateBook(ctx, store.GenerateBook{ServerJobID: 7, BookID: &taken.ID, LibraryID: 1, RelPath: "taken"}); err != nil {
 		t.Fatal(err)
 	}
-	h.stopStartedStage(ctx, 6, taken.ID)
-	if got, _ := db.GetBook(ctx, taken.ID); got.Status != "" {
-		t.Fatalf("a book another job follows was stopped: status %q", got.Status)
+	kept("a book another job follows", jobs.Job{ID: 6, Kind: Kind, Attempt: 1}, taken)
+	// So is one a later claim of the same job follows: one running here already
+	// (its attempt recorded), or one whose attach reopened the job's mapping.
+	later := abandoned(8, "later")
+	if err := db.RecordClaim(ctx, store.ServerJob{ID: 8, Kind: Kind, Attempt: 2}); err != nil {
+		t.Fatal(err)
 	}
+	kept("a book a later attempt follows", jobs.Job{ID: 8, Kind: Kind, Attempt: 1}, later)
+	reopened := abandoned(9, "reopened")
+	if err := db.ReopenGenerateBook(ctx, 9); err != nil {
+		t.Fatal(err)
+	}
+	kept("a book whose job's mapping was reopened", jobs.Job{ID: 9, Kind: Kind, Attempt: 1}, reopened)
 }
