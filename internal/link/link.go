@@ -320,10 +320,13 @@ var (
 	// ErrNotHeld is a job update's 409: the claim no longer holds the job (it
 	// finished, was cancelled, or its lease ran out and it was claimed again).
 	ErrNotHeld = errors.New("the job is no longer held by this claim")
-	// ErrCancelledHere is ErrNotHeld for a job cancelled while this claim held
-	// it (the 409 not_held's reason "cancelled": an admin cancelled it parked,
-	// which ends it at once, bridge#35). errors.Is reads it as ErrNotHeld too;
-	// an older server never sends it, and its jobs read as lost as before.
+	// ErrCancelledHere is ErrNotHeld for a job cancelled after this claim took
+	// it (the 409 not_held's reason "cancelled", bridge#35). The server sends
+	// it for any cancel of a claimed job: an admin's, parked (which ends the
+	// job at once) or working, the server's own, a move of its book, and a
+	// lease that ran out after a cancel was asked. errors.Is reads it as
+	// ErrNotHeld too; an older server never sends it, and its jobs read as
+	// lost as before.
 	ErrCancelledHere = fmt.Errorf("%w: it was cancelled", ErrNotHeld)
 	// ErrNoBook is the book lookup's 404 no_book.
 	ErrNoBook   = errors.New("no indexed book there")

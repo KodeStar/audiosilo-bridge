@@ -1348,7 +1348,7 @@ func (p *Reporter) answer(got *link.Job, err error) bool {
 	}
 	switch {
 	case err == nil && got.CancelRequested, errors.Is(err, link.ErrCancelledHere):
-		// An admin's cancel, asked for or (a parked job's) already done.
+		// A cancel, asked for or already done on the server (ErrCancelledHere).
 		p.cancel(errCancelRequested)
 	case errors.Is(err, link.ErrNotHeld):
 		p.cancel(errLost)

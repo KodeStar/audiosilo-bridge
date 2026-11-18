@@ -1824,8 +1824,10 @@ internal/
             internal/bridge BY HAND (no codegen): a change there is a change here,
             with a test on both sides. Answers map to ErrUnauthorized (401: the token
             was revoked), ErrNotHeld (409 not_held/finished; ErrCancelledHere, still
-            ErrNotHeld, for a not_held with reason "cancelled": the job was cancelled
-            while this claim held it, bridge#35), ErrNoHeartbeat,
+            ErrNotHeld, for a not_held with reason "cancelled", bridge#35: the job was
+            cancelled after this claim took it, by an admin (parked or working), by
+            the server itself, by a move of its book, or its lease ran out after a
+            cancel was asked), ErrNoHeartbeat,
             ErrNoBook, ErrNotIndexable (a rescan's 404 not_indexable), else *APIError
             (an HTML proxy page never becomes a message; RetryAfter carries a 429's
             Retry-After, seconds or an HTTP date, clamped at a day; RetryAfterSet
@@ -1995,8 +1997,8 @@ internal/
             of: nil while the server holds it, ErrStopped when the answer (a
             cancel, a lost claim) ended it. A reply
             with cancel_requested, or a 409 not_held with reason "cancelled"
-            (link.ErrCancelledHere: a parked job an admin cancelled ends at once,
-            bridge#35), ends its context (errCancelRequested -> reported
+            (link.ErrCancelledHere, bridge#35: any cancel of a claimed job, an
+            admin's of a parked one, which ends at once, among them), ends its context (errCancelRequested -> reported
             cancelled), any other 409 ends it as lost (nothing more sent). A parked
             report carries the park's message for people in progress park.message
             (withParkMessage: the job's park message without the "<code>: " an
