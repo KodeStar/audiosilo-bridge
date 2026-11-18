@@ -1252,8 +1252,8 @@ internal/
             ("unrefreshed": still signed in, github_login kept, the item's detail saying
             why the refresh failed and that it tries again; "refused": sign in again;
             omitted while a token resolves or none is signed in) and agent_credential
-            (the hand-off's mode, agentbox.Status.HandoffMode: group, world or
-            group_required; omitted with no hand-off). The heartbeat
+            (the hand-off's mode, agentbox.Status.HandoffMode: group, world,
+            group_required or failed; omitted with no hand-off). The heartbeat
             sends it and the page's Status tab shows it (the console shows the
             details as they are). v0.5.0: the libraries item says
             DetailLibrariesChecking from pairing until a heartbeat has listed the
@@ -3437,7 +3437,8 @@ internal/
             at a stop, so its job dir still goes. Status.HandoffMode says how a
             handed credential reaches a live runner: group, world (not in the
             group, denied, or the last stage's volume refused the group,
-            volumeRefused) or group_required; the heartbeat's setup block
+            volumeRefused), group_required, or failed (ProblemHandoffFailed:
+            a non-refusal error giving the runner the group's file); the heartbeat's setup block
             carries it as agent_credential. A container
             credential always wins; a runner that can't take a hand-off gets
             nothing and is told to update. A refusal's detail says where to

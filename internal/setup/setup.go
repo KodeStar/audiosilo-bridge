@@ -333,7 +333,7 @@ func Checklist(in Inputs) link.Setup {
 // ("" for none, or one this package doesn't know).
 func agentCredential(mode string) string {
 	switch mode {
-	case link.AgentCredentialGroup, link.AgentCredentialWorld, link.AgentCredentialGroupRequired:
+	case link.AgentCredentialGroup, link.AgentCredentialWorld, link.AgentCredentialGroupRequired, link.AgentCredentialFailed:
 		return mode
 	}
 	return ""

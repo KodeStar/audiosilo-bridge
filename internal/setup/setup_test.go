@@ -342,6 +342,7 @@ func TestChecklistAgentCredential(t *testing.T) {
 		"group":          link.AgentCredentialGroup,
 		"world":          link.AgentCredentialWorld,
 		"group_required": link.AgentCredentialGroupRequired,
+		"failed":         link.AgentCredentialFailed,
 		"other":          "",
 	} {
 		in := done()

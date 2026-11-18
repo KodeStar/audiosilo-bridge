@@ -55,7 +55,7 @@ func TestHandoffCredentialOtherChownErrorFails(t *testing.T) {
 		if r.groupBlocked.Load() != nil || r.groupDenied.Load() || st.Problem == ProblemGroupRequired {
 			t.Fatalf("strict %v: an I/O error blocked or denied the group: %+v", strict, st)
 		}
-		if st.Available || st.Refused || st.Problem != ProblemHandoffFailed || st.Detail != na.Detail || st.HandoffMode != HandoffGroup {
+		if st.Available || st.Refused || st.Problem != ProblemHandoffFailed || st.Detail != na.Detail || st.HandoffMode != HandoffFailed {
 			t.Fatalf("strict %v: after the failed hand-off the status = %+v, want not ready with the reason", strict, st)
 		}
 		if r.Detect(context.Background()).Available {

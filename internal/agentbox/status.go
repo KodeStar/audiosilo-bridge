@@ -37,9 +37,9 @@ type Status struct {
 	// can (probe.go).
 	ShareGroup bool
 	// HandoffMode is how a handed credential reaches the runner now
-	// (HandoffGroup, HandoffWorld, HandoffGroupRequired), "" with no live
-	// runner taking a hand-off: the heartbeat's setup block carries it, for
-	// the console (bridge#79).
+	// (HandoffGroup, HandoffWorld, HandoffGroupRequired, HandoffFailed), ""
+	// with no live runner taking a hand-off: the heartbeat's setup block
+	// carries it, for the console (bridge#79).
 	HandoffMode string
 	// Detail says why not, in words for the page and the park hint.
 	Detail string
@@ -68,12 +68,15 @@ type Status struct {
 // The hand-off modes (Status.HandoffMode): the credential is the Bridge's
 // group's alone; readable by every uid on the staging volume until the
 // runner takes it (the runner isn't in the group, the volume refused the
-// group, or the runner was denied the group's file); or agent.require_group
-// is on and can't be met, so nothing is handed over.
+// group, or the runner was denied the group's file); agent.require_group
+// is on and can't be met, so nothing is handed over; or the Bridge couldn't
+// give the runner its group's file (ProblemHandoffFailed), so nothing is
+// handed over until a group probe gets it through.
 const (
 	HandoffGroup         = "group"
 	HandoffWorld         = "world"
 	HandoffGroupRequired = "group_required"
+	HandoffFailed        = "failed"
 )
 
 // SpoiledWarning is Status.Warning while another uid on the staging volume
@@ -225,6 +228,8 @@ func (r *Runner) handoffMode(st Status) string {
 	switch {
 	case st.Problem == ProblemGroupRequired:
 		return HandoffGroupRequired
+	case st.Problem == ProblemHandoffFailed:
+		return HandoffFailed
 	case st.ShareGroup && !r.volumeRefused.Load():
 		return HandoffGroup
 	}

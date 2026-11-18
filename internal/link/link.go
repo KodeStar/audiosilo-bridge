@@ -121,9 +121,12 @@ type Setup struct {
 	// AgentCredential is how the Accounts tab's agent credential reaches the
 	// agent container (bridge#79): AgentCredentialGroup (the Bridge's group
 	// alone), AgentCredentialWorld (every uid on the staging volume until the
-	// runner takes it) or AgentCredentialGroupRequired (agent.require_group
-	// can't be met, so nothing is handed over); omitted while no hand-off is
-	// in play (the container's own credential, or no live container).
+	// runner takes it), AgentCredentialGroupRequired (agent.require_group
+	// can't be met, so nothing is handed over) or AgentCredentialFailed (the
+	// Bridge couldn't give it to the runner, the agent step says why; a
+	// console that doesn't know it shows no hand-off); omitted while no
+	// hand-off is in play (the container's own credential, or no live
+	// container).
 	AgentCredential string `json:"agent_credential,omitempty"`
 }
 
@@ -138,6 +141,7 @@ const (
 	AgentCredentialGroup         = "group"
 	AgentCredentialWorld         = "world"
 	AgentCredentialGroupRequired = "group_required"
+	AgentCredentialFailed        = "failed"
 )
 
 // SetupItem is one checklist item: its id (paired, libraries, asr, agent,

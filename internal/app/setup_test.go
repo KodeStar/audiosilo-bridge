@@ -529,7 +529,8 @@ func TestGitHubSetupUnrefreshed(t *testing.T) {
 // the checklist passes them on as they are.
 func TestHandoffModesAreTheWire(t *testing.T) {
 	for box, wire := range map[string]string{agentbox.HandoffGroup: link.AgentCredentialGroup,
-		agentbox.HandoffWorld: link.AgentCredentialWorld, agentbox.HandoffGroupRequired: link.AgentCredentialGroupRequired} {
+		agentbox.HandoffWorld: link.AgentCredentialWorld, agentbox.HandoffGroupRequired: link.AgentCredentialGroupRequired,
+		agentbox.HandoffFailed: link.AgentCredentialFailed} {
 		if box != wire {
 			t.Errorf("agentbox %q != link %q", box, wire)
 		}
