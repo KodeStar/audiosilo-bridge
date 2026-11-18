@@ -73,8 +73,9 @@ func (s *service) saveCheckpoint(job jobs.Job, root *os.Root, c *checkpoint, eta
 	if saved, ok := s.readCheckpoint(job); ok && saved.Temp != c.Temp && !s.dropPartial(root, &saved) {
 		// An earlier partial at this path the Bridge still cannot remove: its
 		// record stays (clearCheckpoint tries it again, cleanOwned after a day),
-		// and this download goes unrecorded rather than orphan it. One removed
-		// since (or already gone) no longer holds the record.
+		// and this download goes unrecorded rather than orphan it (left behind,
+		// sweepPartials takes it once old). One removed since (or already gone)
+		// no longer holds the record.
 		return nil
 	}
 	if c.Validator == "" {

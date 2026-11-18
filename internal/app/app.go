@@ -82,6 +82,9 @@ type Bridge struct {
 	librivoxHTTP *netguard.Client
 	// librivox is librivox.fetch's handler (its sweep runs after a mapping check).
 	librivox *librivoxjob.Handler
+	// podcasts is the podcast jobs' handler (its sweep of unrecorded partials
+	// runs after a mapping check).
+	podcasts *podcastjob.Subscribe
 	// box is the agent container runner (decision 15), gen the sidecars.generate
 	// job, engine the sidecars engine once it has started.
 	box *agentbox.Runner
@@ -221,7 +224,7 @@ func New(ctx context.Context, opts Options) (*Bridge, string, error) {
 	if len(networks) > 0 {
 		opts.Logger.Warn("podcast feeds may reach explicitly allowed non-public networks", "allow_networks", cfg.Podcasts.AllowNetworks)
 	}
-	podcasts := podcastjob.New(podcastjob.Options{DB: db, Libraries: b.libs, Mount: b.mount, Vault: vault, Fetcher: b.podcastHTTP, MaxFeedBytes: int64(cfg.Podcasts.MaxFeedMB) << 20, MaxEpisodeBytes: int64(cfg.Podcasts.MaxEpisodeMB) << 20, DataDir: opts.DataDir, Probe: func(ctx context.Context, f *os.File) (podcastjob.ProbeResult, error) {
+	b.podcasts = podcastjob.New(podcastjob.Options{DB: db, Libraries: b.libs, Mount: b.mount, Vault: vault, Fetcher: b.podcastHTTP, MaxFeedBytes: int64(cfg.Podcasts.MaxFeedMB) << 20, MaxEpisodeBytes: int64(cfg.Podcasts.MaxEpisodeMB) << 20, DataDir: opts.DataDir, Probe: func(ctx context.Context, f *os.File) (podcastjob.ProbeResult, error) {
 		program := cfg.Tools.FFprobePath
 		if e := b.engine.get(); e != nil {
 			program = e.ffprobe
@@ -242,7 +245,7 @@ func New(ctx context.Context, opts Options) (*Bridge, string, error) {
 	var audibleSync *audiblesync.Handler
 	audibleSync, b.audiblePush = b.newAudibleSync(db, opts.Logger, serverID)
 	b.runner = jobs.New(db, b.server, b.tokenRefused, jobs.Options{Log: opts.Logger, ServerID: serverID},
-		verifier, b.gen, b.gen.DescribeJob(), b.gen.ChaptersJob(), b.gen.ReadalongJob(), b.gen.ContributeJob(), corrector, podcasts, podcasts.PollJob(), podcasts.FetchJob(), podcasts.RetainJob(),
+		verifier, b.gen, b.gen.DescribeJob(), b.gen.ChaptersJob(), b.gen.ReadalongJob(), b.gen.ContributeJob(), corrector, b.podcasts, b.podcasts.PollJob(), b.podcasts.FetchJob(), b.podcasts.RetainJob(),
 		audiblePoll, audibleImport, audibleSync, b.newLibrivox(meta, opts.Logger, serverID))
 	conn.onChange = b.linkChanged
 	return b, oneTime, nil
@@ -526,6 +529,16 @@ func (b *Bridge) retryRefused(ctx context.Context) {
 	}
 }
 
+// sweepPodcasts removes the old podcast partials no checkpoint records
+// (podcastjob's SweepPartials). Like sweepLibrivox it runs after a mapping
+// check, once the podcast libraries' mounts are known and checked.
+func (b *Bridge) sweepPodcasts(ctx context.Context) {
+	if b.podcasts == nil || ctx.Err() != nil {
+		return
+	}
+	b.podcasts.SweepPartials(ctx)
+}
+
 // CheckMappings checks the libraries ids (every library with none) in the
 // background and beats once the check is done. A check asked for while one runs
 // follows it (mapping.Registry.Check).
@@ -540,6 +553,7 @@ func (b *Bridge) CheckMappings(ctx context.Context, ids ...int64) {
 		if b.libs.Check(ctx, cl, b.mount, time.Now, ids...) {
 			b.Kick()
 			b.sweepLibrivox(ctx)
+			b.sweepPodcasts(ctx)
 		}
 	}()
 }

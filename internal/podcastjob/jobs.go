@@ -30,6 +30,7 @@ const PollKind = "podcast.poll"
 type Libraries interface {
 	Library(int64) (link.Library, bool)
 	Status(int64) (link.LibraryStatus, bool)
+	Statuses() []link.LibraryStatus
 }
 type Server interface {
 	RescanPodcast(context.Context, int64, string) (*link.PodcastRescan, error)

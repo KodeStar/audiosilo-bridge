@@ -2281,7 +2281,12 @@ internal/
             unavailable, stale or protected aggregate. Snapshot freshness lasts five
             seconds from request dispatch on the Bridge's monotonic clock;
             checked_at stays on the wire and does not time freshness. Old cleanup
-            uses only owned checkpoint/trash records, checked mappings and no live matching job. A job claimed
+            uses only owned checkpoint/trash records, checked mappings and no live matching job;
+            then sweepPartials (bridge#87; also after every mapping check, SweepPartials) removes a
+            show's unrecorded partials: regular files directly in the show folder named
+            .audiosilo-tmp-<24 hex> (ownedTempName), older than partialMaxAge (24 h, past the
+            longest download), named by no checkpoint record, in a show with no running job and
+            no pending *.publish.json journal; never a link or a file under one. A job claimed
             before its library's mapping check (a start or re-pair) waits for it
             (CheckPoll). A subscribe's 3-minute ceiling starts once it holds the
             library lock, a poll's once it holds the show lock (the mapping wait and
