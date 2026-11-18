@@ -326,11 +326,17 @@ func parseLibraries(v string) []LibraryMapping {
 	return out
 }
 
-// normalizeEndpoint trims agent.openai_compatible: the base URL without its
-// trailing slashes (codex appends /responses), and a stage model left blank
-// dropped, so the stage takes the endpoint's model.
+// NormalizeBaseURL is an endpoint's base URL as config stores it: trimmed,
+// without its trailing slashes (codex appends /responses).
+func NormalizeBaseURL(raw string) string {
+	return strings.TrimRight(strings.TrimSpace(raw), "/")
+}
+
+// normalizeEndpoint trims agent.openai_compatible: the base URL by
+// NormalizeBaseURL, and a stage model left blank dropped, so the stage takes
+// the endpoint's model.
 func normalizeEndpoint(e *AgentEndpointConfig) {
-	e.BaseURL = strings.TrimRight(strings.TrimSpace(e.BaseURL), "/")
+	e.BaseURL = NormalizeBaseURL(e.BaseURL)
 	e.Model = strings.TrimSpace(e.Model)
 	for k, v := range e.Models {
 		if v = strings.TrimSpace(v); v == "" {

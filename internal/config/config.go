@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -84,6 +85,9 @@ const (
 	AgentBackendCodex            = agent.IDCodex
 	AgentBackendOpenAICompatible = agent.IDOpenAICompatible
 )
+
+// AgentBackends are the agent.backend values, in the page's order.
+var AgentBackends = []string{AgentBackendClaude, AgentBackendCodex, AgentBackendOpenAICompatible}
 
 // validateEndpoint checks agent.openai_compatible: a base URL by
 // agentproto.CheckBaseURL's rules, model names a request may carry, per-stage
@@ -912,11 +916,8 @@ func (c Config) Validate() error {
 	if cap.GlobalInvocations < 1 || cap.GlobalInvocations > MaxGlobalAgentInvocations {
 		return fmt.Errorf("effective agent invocation limit must be between 1 and %d, got %d", MaxGlobalAgentInvocations, cap.GlobalInvocations)
 	}
-	switch c.Agent.Backend {
-	case "", AgentBackendClaude, AgentBackendCodex, AgentBackendOpenAICompatible:
-	default:
-		return fmt.Errorf("agent.backend %q must be %q, %q, %q, or empty (claude)",
-			c.Agent.Backend, AgentBackendClaude, AgentBackendCodex, AgentBackendOpenAICompatible)
+	if c.Agent.Backend != "" && !slices.Contains(AgentBackends, c.Agent.Backend) {
+		return fmt.Errorf("agent.backend %q must be one of %q, or empty (claude)", c.Agent.Backend, AgentBackends)
 	}
 	if err := c.Agent.validateEndpoint(); err != nil {
 		return err

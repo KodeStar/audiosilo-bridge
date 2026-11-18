@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/kodestar/audiosilo-bridge/internal/endpoint"
 )
 
 // fakeAgent is the fake Backend's Settings > Agent.
@@ -36,7 +38,7 @@ func (b *backend) CheckEndpoint(_ context.Context, baseURL string) (EndpointChec
 		return EndpointCheck{}, Errorf(ErrInvalid, "the endpoint's address must start with http:// or https://")
 	}
 	yes := true
-	return EndpointCheck{Models: []EndpointModel{{ID: "qwen3:32b", ContextTokens: 40960, Tools: &yes}}, Responses: "yes"}, nil
+	return EndpointCheck{Report: endpoint.Report{Models: []endpoint.Model{{ID: "qwen3:32b", ContextTokens: 40960, Tools: &yes}}, Responses: "yes"}}, nil
 }
 
 func TestAgentSettingsRoutes(t *testing.T) {

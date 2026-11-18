@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"slices"
 	"sort"
 	"strings"
@@ -57,13 +58,13 @@ type Model struct {
 	Tools         *bool  `json:"tools,omitempty"`
 }
 
-// Report is what the check found.
+// Report is what the check found (the page's answer, api.EndpointCheck).
 type Report struct {
 	Models []Model `json:"models"`
 	// Responses is whether the endpoint offers the Responses API (Responses*),
 	// and ResponsesDetail why it is no or unknown.
 	Responses       string `json:"responses"`
-	ResponsesDetail string `json:"responses_detail,omitempty"`
+	ResponsesDetail string `json:"responses_detail"`
 }
 
 // NewClient is the HTTP client the check uses: bounded, and following no
@@ -170,11 +171,9 @@ func do(ctx context.Context, client *http.Client, method, url string, body []byt
 // unwrapURL drops the *url.Error wrapper, whose text repeats the method and
 // the address the sentence names already.
 func unwrapURL(err error) error {
-	var u interface{ Unwrap() error }
-	if errors.As(err, &u) {
-		if inner := u.Unwrap(); inner != nil {
-			return inner
-		}
+	var ue *url.Error
+	if errors.As(err, &ue) && ue.Err != nil {
+		return ue.Err
 	}
 	return err
 }
@@ -221,10 +220,10 @@ func parseModels(body []byte) ([]Model, error) {
 		seen[e.ID] = true
 		m := Model{ID: e.ID, ContextTokens: max(e.ContextLength, e.ContextWindow, e.MaxContextLength, e.MaxModelLen, 0)}
 		if e.SupportedParameters != nil {
-			m.Tools = ptr(slices.Contains(e.SupportedParameters, "tools"))
+			m.Tools = new(slices.Contains(e.SupportedParameters, "tools"))
 		}
 		if t, ok := capabilityTools(e.Capabilities); ok {
-			m.Tools = ptr(t)
+			m.Tools = new(t)
 		}
 		out = append(out, m)
 		if len(out) == maxModels {
@@ -295,11 +294,7 @@ func clean(text, key string) string {
 	}
 	text = strings.Join(strings.FieldsFunc(text, func(r rune) bool { return r < ' ' || r == 0x7f || r == ' ' }), " ")
 	if len(text) > maxMessage {
-		cut := maxMessage
-		for cut > 0 && text[cut]&0xc0 == 0x80 { // never inside a UTF-8 sequence
-			cut--
-		}
-		text = text[:cut] + "..."
+		text = strings.ToValidUTF8(text[:maxMessage], "") + "..." // never a cut UTF-8 sequence
 	}
 	return text
 }
@@ -312,5 +307,3 @@ func printable(s string) bool {
 	}
 	return true
 }
-
-func ptr(b bool) *bool { return &b }

@@ -16,16 +16,13 @@ import (
 // Settings > Agent (bridge#84): the backend, and the OpenAI-compatible endpoint
 // the openai-compatible backend runs codex against.
 
-// agentBackends are the agent.backend values the page offers, in its order.
-var agentBackends = []string{config.AgentBackendClaude, config.AgentBackendCodex, config.AgentBackendOpenAICompatible}
-
 // AgentSettings is Settings > Agent now.
 func (b *Bridge) AgentSettings(ctx context.Context) api.AgentSettings {
 	cfg := b.config()
 	e := cfg.Agent.OpenAICompatible
 	models := map[string]string{}
 	maps.Copy(models, e.Models)
-	s := api.AgentSettings{Backend: agentBackend(cfg), Running: b.box.ID(), Backends: agentBackends,
+	s := api.AgentSettings{Backend: agentBackend(cfg), Running: b.box.ID(), Backends: config.AgentBackends,
 		Endpoint: api.AgentEndpoint{BaseURL: e.BaseURL, Model: e.Model, Models: models},
 		Stages:   config.ModelStages(), Locked: []string{}}
 	st := b.agentCreds.State(ctx)
@@ -47,9 +44,8 @@ func (b *Bridge) SaveAgentSettings(ctx context.Context, s api.AgentSettings) err
 	if s.Backend == "" {
 		s.Backend = agentBackend(cur)
 	}
-	e := config.AgentEndpointConfig{BaseURL: strings.TrimSpace(s.Endpoint.BaseURL), Model: strings.TrimSpace(s.Endpoint.Model),
+	e := config.AgentEndpointConfig{BaseURL: config.NormalizeBaseURL(s.Endpoint.BaseURL), Model: strings.TrimSpace(s.Endpoint.Model),
 		Models: s.Endpoint.Models}
-	e.BaseURL = strings.TrimRight(e.BaseURL, "/")
 	if cur.EnvSet(config.KeyAgentBackend) && s.Backend != agentBackend(cur) {
 		return api.Errorf(api.ErrLocked, "AUDIOSILO_BRIDGE_AGENT_BACKEND sets agent.backend")
 	}
@@ -93,7 +89,7 @@ func (b *Bridge) SaveAgentSettings(ctx context.Context, s api.AgentSettings) err
 // Bridge (endpoint.Check). The endpoint failing comes back as the result's
 // Error for the page to show.
 func (b *Bridge) CheckEndpoint(ctx context.Context, baseURL string) (api.EndpointCheck, error) {
-	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	baseURL = config.NormalizeBaseURL(baseURL)
 	if err := agentproto.CheckBaseURL(baseURL); err != nil {
 		return api.EndpointCheck{}, api.Errorf(api.ErrInvalid, "%v", err)
 	}
@@ -101,15 +97,9 @@ func (b *Bridge) CheckEndpoint(ctx context.Context, baseURL string) (api.Endpoin
 	if err != nil {
 		return api.EndpointCheck{}, api.Errorf(api.ErrFailed, "the endpoint's API key can't be read from the vault")
 	}
-	out := api.EndpointCheck{Models: []api.EndpointModel{}}
 	rep, err := endpoint.Check(ctx, b.endpointClient, baseURL, key)
 	if err != nil {
-		out.Error = err.Error()
-		return out, nil
+		return api.EndpointCheck{Report: endpoint.Report{Models: []endpoint.Model{}}, Error: err.Error()}, nil
 	}
-	for _, m := range rep.Models {
-		out.Models = append(out.Models, api.EndpointModel{ID: m.ID, ContextTokens: m.ContextTokens, Tools: m.Tools})
-	}
-	out.Responses, out.ResponsesDetail = rep.Responses, rep.ResponsesDetail
-	return out, nil
+	return api.EndpointCheck{Report: rep}, nil
 }

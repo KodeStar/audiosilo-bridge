@@ -4,6 +4,8 @@ import (
 	"context"
 	"net/http"
 	"strings"
+
+	"github.com/kodestar/audiosilo-bridge/internal/endpoint"
 )
 
 // Settings > Agent (bridge#84): which backend the agent container runs (claude,
@@ -44,17 +46,8 @@ type AgentEndpoint struct {
 // whether it offers the Responses API (yes, no, unknown), or Error, the reason
 // the models couldn't be listed. It is checked from the Bridge.
 type EndpointCheck struct {
-	Models          []EndpointModel `json:"models"`
-	Responses       string          `json:"responses"`
-	ResponsesDetail string          `json:"responses_detail"`
-	Error           string          `json:"error"`
-}
-
-// EndpointModel is one model the endpoint lists.
-type EndpointModel struct {
-	ID            string `json:"id"`
-	ContextTokens int    `json:"context_tokens,omitempty"`
-	Tools         *bool  `json:"tools,omitempty"`
+	endpoint.Report
+	Error string `json:"error"`
 }
 
 // AgentBackend is Settings > Agent's part of the Backend.
