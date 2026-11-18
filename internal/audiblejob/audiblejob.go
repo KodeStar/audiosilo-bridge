@@ -50,6 +50,9 @@ const maxAuthors = 20
 // Accounts is the part of the account manager a poll uses (*audibleacct.Manager).
 type Accounts interface {
 	Account(ctx context.Context, id string) (store.AudibleAccount, error)
+	// AwaitedAccount is Account read past a sign-in, mapping or removal in
+	// flight (audibleacct.Manager.AwaitedAccount).
+	AwaitedAccount(ctx context.Context, id string) (store.AudibleAccount, error)
 	// Library lists the account's Audible library (audibleacct.ErrRefused when
 	// Audible refuses the sign-in, which it records).
 	Library(ctx context.Context, id string) ([]source.Record, error)
@@ -185,6 +188,13 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 		return nil, err
 	}
 	acct, err := h.o.Accounts.Account(ctx, p.Account)
+	// A sign-in and a mapping record themselves on the server before they
+	// store themselves here: a poll the server queued in between reads no
+	// account yet, or the mapping being replaced. Read again past one in
+	// flight before failing for either (a poll that fails waits poll_hours).
+	if errors.Is(err, audibleacct.ErrNotFound) || (err == nil && acct.OnOtherServer(h.o.ServerID())) {
+		acct, err = h.o.Accounts.AwaitedAccount(ctx, p.Account)
+	}
 	if errors.Is(err, audibleacct.ErrNotFound) {
 		return nil, fmt.Errorf("this Bridge has no Audible account %s: it was removed here, or signed in on another Bridge", p.Account)
 	}

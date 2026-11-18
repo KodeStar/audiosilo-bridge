@@ -2474,13 +2474,17 @@ internal/
             bound it. A signed call's refusal waits the same way (refused, under finishMu): it is
             retried once with the sign-in that replaced its device, one stored meanwhile or
             storing itself then, so a poll claimed in that window lists with the new sign-in.
+            AwaitedAccount is the read under finishMu whatever the account reads: for a job
+            about to fail for an account it can't find or one mapped elsewhere (the poll).
             Deps: audible, link, secrets, source, store.
   audiblejob/ Phase 4a: audible.poll (light lane; params {"account", "template"}
             strict (template, the account's path template, optional, <= 500
             bytes, the server's bound, bridge#47; an unknown field is refused); the server claims it with no
             library). Checks the account is this
             Bridge's and was mapped on the paired server (else fails asking to map
-            it again), lists the Audible library (a refusal is the account's, the
+            it again; an account that reads unknown or mapped elsewhere is read again
+            first with audibleacct AwaitedAccount, past a sign-in or mapping the server
+            has and this Bridge is still storing), lists the Audible library (a refusal is the account's, the
             job just fails) and appends Accounts.Preorders (never fails; a record
             with no title, a preorder not described yet, matches only by its ASIN
             and is never planned), reads the account's books library on the server page

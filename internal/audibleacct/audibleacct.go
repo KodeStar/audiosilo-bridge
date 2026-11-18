@@ -286,8 +286,8 @@ type Manager struct {
 	// otherwise both find no account and make two (the later now replaces the
 	// earlier, as any sign-in again does; the store's unique index on
 	// (customer_hash, marketplace) backs it). Held across the server call;
-	// sign-ins are rare. SettledAccount and a signed call's refusal (refused)
-	// take it to read past a sign-in in flight. Remove takes it while it
+	// sign-ins are rare. SettledAccount, AwaitedAccount and a signed call's
+	// refusal (refused) take it to read past a sign-in in flight. Remove takes it while it
 	// forgets locally, so a sign-in again finishing meanwhile never stores the
 	// account back after it; Map takes it throughout, so a remap and a sign-in
 	// again of the same account can't record their mappings in one order on
@@ -699,6 +699,17 @@ func (m *Manager) SettledAccount(ctx context.Context, id string) (store.AudibleA
 	if err != nil || a.RefusedAt == "" {
 		return a, err
 	}
+	return m.AwaitedAccount(ctx, id)
+}
+
+// AwaitedAccount is Account read once no sign-in, mapping or removal is in
+// flight, whatever the account reads now (SettledAccount's wait, and its
+// bound). A sign-in and a mapping record themselves on the server before they
+// store themselves here, so a job the server queued in between finds no
+// account yet, or the mapping being replaced. A job reads the account with
+// this before it fails for either, never to begin with: every job would wait
+// for any account's sign-in.
+func (m *Manager) AwaitedAccount(ctx context.Context, id string) (store.AudibleAccount, error) {
 	m.finishMu.Lock()
 	defer m.finishMu.Unlock()
 	return m.Account(ctx, id)

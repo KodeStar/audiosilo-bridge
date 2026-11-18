@@ -703,6 +703,44 @@ func TestMapHoldsTheAccountsLock(t *testing.T) {
 	}
 }
 
+// AwaitedAccount reads past a change in flight whatever the account reads: a
+// remap the server has and this Bridge hasn't stored yet is waited for, where
+// SettledAccount of an account that isn't refused answers the old mapping at
+// once (TestMapHoldsTheAccountsLock).
+func TestAwaitedAccountWaitsForAMappingInFlight(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	a := e.signIn(t)
+	reached, release := e.holdPut(t)
+	mapped := make(chan error, 1)
+	go func() {
+		_, err := e.m.Map(context.Background(), e.srv, "srv-1", a.ID, Mapping{UserID: 4, UserName: "Sam", LibraryID: 2, Policy: "manual"})
+		mapped <- err
+	}()
+	reached("the remap")
+	type read struct {
+		a   store.AudibleAccount
+		err error
+	}
+	awaited := make(chan read, 1)
+	go func() {
+		got, err := e.m.AwaitedAccount(context.Background(), a.ID)
+		awaited <- read{got, err}
+	}()
+	select {
+	case r := <-awaited:
+		t.Fatalf("answered during the remap: %+v, %v", r.a, r.err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	release()
+	if err := <-mapped; err != nil {
+		t.Fatalf("map = %v", err)
+	}
+	if r := <-awaited; r.err != nil || r.a.LibraryID != 2 || r.a.UserID != 4 {
+		t.Fatalf("awaited = %+v, %v (want the new mapping)", r.a, r.err)
+	}
+}
+
 // A sign-in again records itself on the server before it stores the new
 // sign-in here: SettledAccount reads past it (the account signed in, the new
 // device sealed), where Account, read in between, still answers the old
