@@ -77,7 +77,11 @@ one `staging` volume, and nothing else.
    CLI's login, mounted anywhere else) and no credential, as the
    container's first process (`entrypoint: ["audiosilo-bridge"]`, no tini) and one
    run at a time, and it kills whatever a run leaves behind. The Bridge refuses endpoint runs, saying
-   why, while it isn't set up that way (the service's log names what it found). The endpoint's key is kept for the
+   why, while it isn't set up that way (the service's log names what it found). A
+   known limit: a run still going shares that service's user, so it can mark its
+   own job finished early; the Bridge then stages the next job beside it, and all it can
+   read is that job's key, which is only another one if you changed the endpoint's
+   address meanwhile (separate users per run are tracked in bridge#86). The endpoint's key is kept for the
    address it was entered for, so saving another address removes it and the page
    asks for the new one's. The Bridge's page shows the agent as ready within
    about 15 seconds.

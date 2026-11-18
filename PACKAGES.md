@@ -3798,6 +3798,13 @@ internal/
             runner.json says): concurrent runs share its user. Main refuses to
             start unless it is its container's pid 1 (no tini): any other
             process there shares its user, dumpable and traceable by a run.
+            Accepted residual risk: a run still going shares the runner's uid,
+            so it can write its job's done and exit.json itself, and the Bridge
+            stages the next job while that run goes on (until its CLI ends and
+            the sweep after it). With one slot and the sweeps, and an endpoint run
+            holding its own key already, all it can reach is the next job's key
+            after the address changes (another endpoint's). Per-run uids would
+            close it: bridge#86.
   endpoint/ bridge#84: Settings > Agent's Test connection, a leaf (standard library
             only). Check(ctx, client, base, key): GET <base>/models (Bearer key
             when set), then POST <base>/responses with {} to learn whether the
