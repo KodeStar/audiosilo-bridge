@@ -706,10 +706,22 @@ func TestFetchUnreadablePartialRestartsOnce(t *testing.T) {
 				w.WriteHeader(200)
 				w.Write(audio[:1000])
 			})
+			show := filepath.Join(h.mount, filepath.Dir(*job.Path))
+			partials := func() []string {
+				m, _ := filepath.Glob(filepath.Join(show, podcast.TempPrefix+"*"))
+				return m
+			}
 			var reads atomic.Int32
 			h.handler.s.o.Fault = func(at string) error {
 				if at == "partial" {
 					reads.Add(1)
+					// Really unreadable: the restart must still remove it,
+					// never leave it behind with its record gone.
+					for _, p := range partials() {
+						if err := os.Chmod(p, 0); err != nil {
+							t.Error(err)
+						}
+					}
 					return errors.New("unreadable partial")
 				}
 				return nil
@@ -728,6 +740,9 @@ func TestFetchUnreadablePartialRestartsOnce(t *testing.T) {
 			// The first GET, the resume whose partial failed, then a GET from zero.
 			if got := result.(fetchResult); got.Fetch.Bytes != int64(len(audio)) || calls.Load() != 3 || reads.Load() != 1 || lastFresh.Load() != 3 {
 				t.Fatal(got, calls.Load(), reads.Load(), lastFresh.Load())
+			}
+			if left := partials(); len(left) != 0 {
+				t.Fatal("the unreadable partial was left behind:", left)
 			}
 		})
 	}

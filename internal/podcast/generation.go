@@ -59,10 +59,10 @@ func NextFetch(previous *Fetch, received Fetch) (Fetch, error) {
 	return received, nil
 }
 
-// OpenRegular rejects links in every component, including links within the root.
-// As agentproto.OpenRegular does, O_NONBLOCK keeps a FIFO swapped in after the
-// Lstat from blocking the open, and the open file must be the one the Lstat saw.
-func OpenRegular(root *os.Root, name string) (*os.File, error) {
+// LstatRegular is the regular file at name, by OpenRegular's rule (no link in
+// any component), without opening it: what a removal needs, which a file it
+// cannot read must not stop.
+func LstatRegular(root *os.Root, name string) (os.FileInfo, error) {
 	parts := strings.Split(name, "/")
 	var named os.FileInfo
 	for i, p := range parts {
@@ -81,6 +81,17 @@ func OpenRegular(root *os.Root, name string) (*os.File, error) {
 			return nil, ErrInvalidFile
 		}
 		named = st
+	}
+	return named, nil
+}
+
+// OpenRegular rejects links in every component, including links within the root.
+// As agentproto.OpenRegular does, O_NONBLOCK keeps a FIFO swapped in after the
+// Lstat from blocking the open, and the open file must be the one the Lstat saw.
+func OpenRegular(root *os.Root, name string) (*os.File, error) {
+	named, err := LstatRegular(root, name)
+	if err != nil {
+		return nil, err
 	}
 	f, err := root.OpenFile(name, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {

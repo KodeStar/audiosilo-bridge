@@ -141,8 +141,10 @@ func (s *service) clearCheckpoint(job jobs.Job, root *os.Root, c *checkpoint) {
 	}
 	if podcast.OwnedTemp(c.Temp) {
 		p := path.Dir(c.Path) + "/" + c.Temp
-		if f, err := podcast.OpenRegular(root, p); err == nil {
-			_ = f.Close()
+		// Checked, not opened: a partial the Bridge can no longer read (the
+		// restart from zero clears one) is still its own to remove, and the
+		// record that names it is about to go.
+		if _, err := podcast.LstatRegular(root, p); err == nil {
 			_ = root.Remove(p)
 		}
 	}

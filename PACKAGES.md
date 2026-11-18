@@ -2235,9 +2235,12 @@ internal/
             identity_changed), a retry wait it cuts ends on the host's
             last answer, and its own faults (no streamer, its partial) are
             write_failed. A partial it cannot read back restarts the episode from
-            zero once per job first. An episode host's 410 is gone, like the
-            feed's (the server: no longer available). A poll's params may carry `scheduled` (the server's scheduler); read
-            leniently, it changes nothing here.
+            zero once per job first; clearing a checkpoint removes its partial
+            on podcast.LstatRegular, never an open, so an unreadable one is not
+            left behind. An episode host's 410 is gone, like the
+            feed's (the server: no longer available). A poll's params may carry
+            `scheduled` (the server's scheduler); read leniently, it changes
+            nothing here.
   -- Phase 4a: Audible (imported from audiosilo-manager with its history) --
   audible/  the native Audible client (the manager's, ported as is, then extended):
             NewPKCE + NewDeviceSerial + BuildAuthorizeURL (the browser half: the user
