@@ -36,6 +36,10 @@ type Job struct {
 	Path      *string
 	Params    json.RawMessage
 	Attempt   int
+	// Priority is the priority the server gave the job (0 for one recorded
+	// before the Bridge kept it): a resumed job of interactive priority waits
+	// for the reserve it was claimed for.
+	Priority int
 	// Resumed: the runner resumed the job under its claim (after a restart, or
 	// once a refused token works again) instead of claiming it now, so an earlier
 	// run of it may have spent already.
@@ -497,12 +501,13 @@ func sameServer(a, b Server) bool {
 
 // jobOf is a claimed job as a Handler sees it.
 func jobOf(j *link.Job) Job {
-	return Job{ID: j.ID, Kind: j.Kind, LibraryID: j.LibraryID, Path: j.Path, Params: j.Params, Attempt: j.Attempts}
+	return Job{ID: j.ID, Kind: j.Kind, LibraryID: j.LibraryID, Path: j.Path, Params: j.Params, Attempt: j.Attempts, Priority: j.Priority}
 }
 
 // storedJob is a job the store recorded, as a Handler sees it.
 func storedJob(sj store.ServerJob) Job {
-	return Job{ID: sj.ID, Kind: sj.Kind, LibraryID: sj.LibraryID, Path: sj.Path, Params: sj.Params, Attempt: sj.Attempt}
+	return Job{ID: sj.ID, Kind: sj.Kind, LibraryID: sj.LibraryID, Path: sj.Path, Params: sj.Params, Attempt: sj.Attempt,
+		Priority: sj.Priority}
 }
 
 // run is one running job, and the link it runs on. parked is the park message a
@@ -522,7 +527,7 @@ type run struct {
 	yielded bool
 	// stray: a claim answered outside its admission (claimRequest.fallback).
 	// While it waits for its first slot, the dispatcher that took it
-	// (strayReserve) claims no more; Yield clears it.
+	// (strayReserve) claims less (strayWaitingLocked); Yield clears it.
 	stray, strayReserve bool
 }
 
@@ -550,7 +555,7 @@ func (r *Runner) start(ctx context.Context, srv Server, job Job, wg *sync.WaitGr
 	// Recorded even when the runner is stopping: a claim that raced the stop
 	// is then resumed under its lease at the next start, not left to lapse.
 	if err := r.store.RecordClaim(context.WithoutCancel(ctx), store.ServerJob{ID: job.ID, Kind: job.Kind, LibraryID: job.LibraryID, Path: job.Path,
-		Params: job.Params, Attempt: job.Attempt, ServerID: serverID}); err != nil {
+		Params: job.Params, Attempt: job.Attempt, ServerID: serverID, Priority: job.Priority}); err != nil {
 		r.log.Warn("bridge: recording a claim failed", "job", job.ID, "err", err)
 		if sealing {
 			// Fail closed: without its row the sealed secret could be neither
@@ -575,8 +580,11 @@ func (r *Runner) start(ctx context.Context, srv Server, job Job, wg *sync.WaitGr
 // launch runs a recorded job in its lane, parked with message parked when a
 // resumed one was ("" when it wasn't). A job of a kind the Bridge doesn't run is
 // failed at once. claim is nil for a recovered or stranded job, which waits for
-// ordinary admission; a claimed job takes its reservation unless the server
-// ignored the requested filter, in which case it waits for ordinary admission.
+// admission in its kind's ordinary lane, or in the reserve when it is of
+// interactive priority, its kind opts in and the pairing negotiated the reserve
+// (as it was claimed, bridge#13); a claimed job takes its reservation unless the
+// server ignored the requested filter, in which case it waits for ordinary
+// admission.
 func (r *Runner) launch(ctx context.Context, srv Server, job Job, wg *sync.WaitGroup, parked string, progress json.RawMessage, claim *claimRequest) {
 	h, ok := r.handlers[job.Kind]
 	if !ok {
@@ -596,6 +604,9 @@ func (r *Runner) launch(ctx context.Context, srv Server, job Job, wg *sync.WaitG
 		}
 		ru.admitted = true
 	} else {
+		if claim == nil && job.Priority >= int(InteractivePriority) && interactive(h) && supportsPriority(srv) {
+			ru.lane = LaneInteractive
+		}
 		// Behind any job already waiting in the lane (first come, first admitted).
 		ru.admitted = r.waiting[ru.lane] == 0 && r.roomLocked(r.capacities(srv), ru.lane, nil)
 	}
@@ -1204,10 +1215,25 @@ func (p *Reporter) loop(done <-chan struct{}) {
 				continue
 			}
 		}
+		if p.offLink() {
+			continue
+		}
 		if !p.send() {
 			return
 		}
 	}
+}
+
+// offLink reports whether the job still waits for its first slot on a link the
+// Bridge no longer uses (unpaired, refused, or paired again since the job was
+// launched): its lease isn't renewed there, so the server can hand the job out
+// again rather than wait on a claim nothing here will run (bridge#13). A new
+// pairing strands it (awaitAdmission); the same link back renews it again.
+func (p *Reporter) offLink() bool {
+	p.r.mu.Lock()
+	waiting := !p.ru.admitted && !p.ru.yielded
+	p.r.mu.Unlock()
+	return waiting && p.r.server() != p.srv
 }
 
 // send reports the job's state (running, renewing the lease, or needs_attention

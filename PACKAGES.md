@@ -1484,6 +1484,10 @@ internal/
             and error the caller read (ErrStatusChanged otherwise), so a Cancel landing between
             a supervisor action's read and its write is never undone; ClearBookStatusIf is its
             clear (the readmit's).
+            0015 (bridge#13) adds server_jobs.priority (the server's priority for the claim,
+            0 on older rows; ServerJob.Priority, never in the page's JSON): a job resumed
+            after a restart or a refused token waits for the reserve again when it was of
+            interactive priority (jobs.launch).
   state/    per-book pipeline state machine: table-driven states/lanes/transitions,
             CanStart/NextState guards, the audit fix-loop cap. Pure, no I/O. M6 added
             ParkCode (typed park reasons - M7 added contrib_unavailable, core_needed,
@@ -1996,11 +2000,21 @@ internal/
             support, and while a job it took outside admission still waits it
             claims nothing (a server re-advertising a filter it ignores holds one
             waiter, not its queue). An ordinary answer outside the requested kinds
-            backs off like a failed claim. Running promotions keep their
-            pool. Recovery uses ordinary admission because old rows lack priority.
+            backs off like a failed claim; its job waits in its own lane, which no
+            claim asks for meanwhile, while the other lanes go on claiming, and a
+            second such waiter stops the ordinary dispatcher until one has a slot
+            (strayWaitingLocked, bridge#13). Running promotions keep their
+            pool. A resumed job (recovery, resumeStranded) uses ordinary admission,
+            except one of interactive priority (recorded with the claim, store
+            0015; older rows read 0) whose kind opts in: it waits for the reserve
+            while the pairing negotiates it, and moves to its kind's lane if the
+            negotiation is withdrawn while it waits (bridge#13).
             Both recovery and out-of-admission jobs renew leases while waiting
-            for room, queue behind jobs already waiting, and take
-            precedence over fresh claims in that lane. Live parks hold
+            for room, but only on the link in use: unpaired or refused, a waiting
+            job stops renewing (Reporter.offLink), so the server can hand it out
+            again, and paired again it is stranded for resumeStranded, never run on
+            the old link (bridge#13). They queue behind jobs already waiting, and
+            take precedence over fresh claims in that lane. Live parks hold
             admission; terminal parks and releases wake the dispatcher.
             Phase 2c-2a adds the strict Reporter.ConfirmLease publication check
             (network errors deny commit). Phase 2c-1: optional ParamSealer.SealParams runs
