@@ -79,8 +79,10 @@ func (c *Client) Fetch(ctx context.Context, in Request) (*Response, error) {
 		if attempt >= 2 || !retryable(failure) || failure.RetryAfterSeconds > 10 || ctx.Err() != nil {
 			return nil, failure
 		}
-		if err := c.wait(ctx, RetryDelay(attempt, failure.RetryAfterSeconds)); err != nil {
-			return nil, classify(err)
+		// A wait the deadline cuts short ends on what the feed last answered,
+		// not on a timeout of the Bridge's own.
+		if c.wait(ctx, RetryDelay(attempt, failure.RetryAfterSeconds)) != nil {
+			return nil, failure
 		}
 	}
 }
@@ -94,7 +96,7 @@ func (c *Client) once(ctx context.Context, in Request) (*Response, error) {
 	permanent, redirected := true, false
 	httpc := &http.Client{Transport: c.transport, CheckRedirect: func(req *http.Request, via []*http.Request) error {
 		if len(via) > 10 {
-			return &Error{Code: "http_310", Message: "The feed redirected too many times."}
+			return &Error{Code: "redirect_loop", Message: "The feed redirected too many times."}
 		}
 		if !validURL(req.URL.String()) {
 			return &Error{Code: "invalid_feed_url", Message: "The feed redirected to an invalid URL."}

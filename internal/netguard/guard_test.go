@@ -119,7 +119,7 @@ func TestRedirectGuardAndLimit(t *testing.T) {
 	}))
 	defer server.Close()
 	c := localClient(t)
-	for endpoint, code := range map[string]string{"/private": "blocked_address", "/loop": "http_310", "/file": "invalid_feed_url"} {
+	for endpoint, code := range map[string]string{"/private": "blocked_address", "/loop": "redirect_loop", "/file": "invalid_feed_url"} {
 		_, err := c.Fetch(context.Background(), Request{URL: server.URL + endpoint, MaxBytes: 100})
 		errorCode(t, err, code)
 	}
@@ -311,4 +311,20 @@ func TestGzipDataErrorsFailAtOnce(t *testing.T) {
 	if truncated.Load() != 3 {
 		t.Fatal("a broken connection was not retried", truncated.Load())
 	}
+}
+
+// A retry wait the caller's deadline cuts short ends on what the feed last
+// answered (server#403: the server counts a timeout as the Bridge's network,
+// an HTTP 503 as the feed's).
+func TestFetchCutRetryKeepsTheLastFailure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(503)
+	}))
+	defer server.Close()
+	c := localClient(t)
+	c.wait = Wait // the first retry waits about a second, past the deadline
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	_, err := c.Fetch(ctx, Request{URL: server.URL + "/feed", MaxBytes: 100})
+	errorCode(t, err, "http_503")
 }
