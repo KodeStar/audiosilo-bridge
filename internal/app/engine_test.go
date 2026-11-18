@@ -60,7 +60,7 @@ func TestSupervisorApplyOnlyFollowedBooks(t *testing.T) {
 	if err := sched.Cancel(ctx, book.ID); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.EndGenerateBook(ctx, 7, time.Now()); err != nil {
+	if err := db.EndGenerateBook(ctx, 7, 1, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	for _, a := range []supervisor.Action{supervisor.ActionParkEscalate, supervisor.ActionRetry, supervisor.ActionReadmit} {

@@ -675,7 +675,7 @@ func (hr *harness) contributingSettled(id int64, d *fakeDescriber) func() bool {
 	}
 }
 
-// slowCancel is the engine with a Cancel that closes started on its first call,
+// slowCancel is the engine with a cancel that closes started on its first call,
 // then blocks until open is called.
 type slowCancel struct {
 	Engine
@@ -683,10 +683,10 @@ type slowCancel struct {
 	started, gate       chan struct{}
 }
 
-func (e *slowCancel) Cancel(ctx context.Context, id int64) error {
+func (e *slowCancel) CancelUnlessFollowed(ctx context.Context, id int64, g store.StopGuard) error {
 	e.startOnce.Do(func() { close(e.started) })
 	<-e.gate
-	return e.Engine.Cancel(ctx, id)
+	return e.Engine.CancelUnlessFollowed(ctx, id, g)
 }
 
 // open lets every Cancel through; it may be called more than once.

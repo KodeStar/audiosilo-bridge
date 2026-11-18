@@ -72,12 +72,67 @@ func (db *DB) SetGenerateBookPath(ctx context.Context, serverJobID int64, relPat
 	return err
 }
 
-// EndGenerateBook records when a server job ended (done, failed or cancelled):
-// the transcript retention window counts from it.
-func (db *DB) EndGenerateBook(ctx context.Context, serverJobID int64, at time.Time) error {
-	_, err := db.sql.ExecContext(ctx,
-		`UPDATE generate_books SET ended_at = ? WHERE server_job_id = ?`, timestamp(at), serverJobID)
-	return err
+// StopGuard is what a job's end read before it stops its engine book: the job,
+// its attempt, and whether the job's mapping recorded its end already (Ended). A
+// later claim of the same job records its attempt (RecordClaim) before its attach
+// reopens the mapping and re-admits the book, and another open job may follow
+// the book: either way the stop is no longer this end's to make.
+type StopGuard struct {
+	JobID   int64
+	Attempt int
+	Ended   bool
+}
+
+// ErrFollowed is a guarded write (SetBookStatusUnlessFollowed, EndGenerateBook)
+// refused: a later claim of the job, or another open job, follows the engine book
+// now.
+var ErrFollowed = errors.New("a later claim of the job, or another open job, follows the engine book")
+
+// laterClaimSQL is true while a later attempt of server job ?1 than ?2 is
+// recorded here.
+const laterClaimSQL = `EXISTS (SELECT 1 FROM server_jobs WHERE id = ?1 AND attempt > ?2)`
+
+// SetBookStatusUnlessFollowed is SetBookStatus with no park code nor retry, but
+// only while g holds (in the one statement, so a later claim that reopens the
+// mapping between a check and the write is never stopped): no later attempt of
+// g's job is recorded, g's mapping is still ended when g.Ended, and no other open
+// job follows the book (OpenGenerateJobsForBook). ErrFollowed when it doesn't (or
+// the book went).
+func (db *DB) SetBookStatusUnlessFollowed(ctx context.Context, id int64, status, errMsg string, g StopGuard) error {
+	res, err := db.sql.ExecContext(ctx,
+		`UPDATE books SET status = ?4, error = ?5, park_code = ?6, retry_at = ?7, updated_at = ?8
+		  WHERE id = ?9 AND NOT `+laterClaimSQL+`
+		    AND (?3 = 0 OR EXISTS (SELECT 1 FROM generate_books WHERE server_job_id = ?1 AND ended_at != ''))
+		    AND NOT EXISTS (SELECT 1 FROM generate_books g JOIN server_jobs j ON j.id = g.server_job_id
+		         WHERE g.book_id = books.id AND g.server_job_id != ?1 AND g.ended_at = '' AND j.state = 'running')`,
+		g.JobID, g.Attempt, g.Ended, status, errMsg, enforceParkCode(status, ""), enforceRetryAt(status, ""),
+		timestamp(nowFn()), id)
+	if err := checkAffected(res, err); !errors.Is(err, ErrNotFound) {
+		return err
+	}
+	return ErrFollowed
+}
+
+// EndGenerateBook records when attempt of a server job ended (done, failed or
+// cancelled): the transcript retention window counts from it. It is written only
+// while no later attempt of the job is recorded (in the one statement): a later
+// claim whose attach found the mapping open keeps it open. ErrFollowed when one
+// is; nil with nothing written when the job has no mapping.
+func (db *DB) EndGenerateBook(ctx context.Context, serverJobID int64, attempt int, at time.Time) error {
+	res, err := db.sql.ExecContext(ctx,
+		`UPDATE generate_books SET ended_at = ?3 WHERE server_job_id = ?1 AND NOT `+laterClaimSQL,
+		serverJobID, attempt, timestamp(at))
+	if err := checkAffected(res, err); !errors.Is(err, ErrNotFound) {
+		return err
+	}
+	var later bool
+	if err := db.sql.QueryRowContext(ctx, `SELECT `+laterClaimSQL, serverJobID, attempt).Scan(&later); err != nil {
+		return err
+	}
+	if later {
+		return ErrFollowed
+	}
+	return nil
 }
 
 // ReopenGenerateBook marks a server job's mapping open again (a job the server

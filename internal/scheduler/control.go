@@ -303,9 +303,22 @@ func IsCancelled(b store.Book) bool {
 // read the book before the cancel was written never starts a stage on it after
 // cancelInflight found none to stop (bridge#65).
 func (s *Scheduler) Cancel(ctx context.Context, id int64) error {
+	return s.cancel(ctx, id, nil)
+}
+
+// CancelUnlessFollowed is Cancel for a job's end that may no longer own the book:
+// the store's cancel is written only while g holds (store.StopGuard, checked in
+// the same statement), and nothing is stopped when it doesn't (store.ErrFollowed).
+// A later claim of the job that reopens its mapping between the end's checks and
+// the cancel is never stopped.
+func (s *Scheduler) CancelUnlessFollowed(ctx context.Context, id int64, g store.StopGuard) error {
+	return s.cancel(ctx, id, &g)
+}
+
+func (s *Scheduler) cancel(ctx context.Context, id int64, g *store.StopGuard) error {
 	release := s.holdDispatch(id)
 	defer release()
-	b, err := markCancelled(ctx, s.db, id)
+	b, err := markCancelled(ctx, s.db, id, g)
 	if err != nil {
 		return err
 	}
@@ -319,12 +332,20 @@ func (s *Scheduler) Cancel(ctx context.Context, id int64) error {
 // stage runs to interrupt, and the scheduler reads the book cancelled when it
 // starts. ErrInvalidOp for a finished book, as Cancel.
 func CancelStored(ctx context.Context, db *store.DB, id int64) error {
-	_, err := markCancelled(ctx, db, id)
+	_, err := markCancelled(ctx, db, id, nil)
 	return err
 }
 
-// markCancelled marks book id cancelled in the store and returns it as read.
-func markCancelled(ctx context.Context, db *store.DB, id int64) (store.Book, error) {
+// CancelStoredUnlessFollowed is CancelStored written only while g holds, as
+// CancelUnlessFollowed.
+func CancelStoredUnlessFollowed(ctx context.Context, db *store.DB, id int64, g store.StopGuard) error {
+	_, err := markCancelled(ctx, db, id, &g)
+	return err
+}
+
+// markCancelled marks book id cancelled in the store and returns it as read; with
+// g, only while g holds (store.ErrFollowed otherwise).
+func markCancelled(ctx context.Context, db *store.DB, id int64, g *store.StopGuard) (store.Book, error) {
 	b, err := db.GetBook(ctx, id)
 	if err != nil {
 		return b, err
@@ -333,6 +354,9 @@ func markCancelled(ctx context.Context, db *store.DB, id int64) (store.Book, err
 		return b, ErrInvalidOp
 	}
 	// Cancel is not a park (no typed reason), so the park_code stays empty.
+	if g != nil {
+		return b, db.SetBookStatusUnlessFollowed(ctx, id, string(state.StatusFailed), cancelledReason, *g)
+	}
 	return b, db.SetBookStatus(ctx, id, string(state.StatusFailed), cancelledReason, "")
 }
 

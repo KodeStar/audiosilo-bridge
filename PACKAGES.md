@@ -3003,17 +3003,21 @@ internal/
             recorded (ended_at), a book that didn't finish is cancelled (stopBook
             leaves a done or failed one alone: a cancel would overwrite its error),
             and retention 0 purges its transcripts now; a later attempt of the same
-            job running here (Attempt higher) is left alone. Abandon (jobs.Abandoner)
+            job running here (Attempt higher) is left alone: the cancel and the end
+            are guarded writes (store.StopGuard: SetBookStatusUnlessFollowed through
+            the engine's CancelUnlessFollowed or scheduler.CancelStoredUnlessFollowed,
+            EndGenerateBook taking the attempt), so a claim landing between the check
+            and the write is never stopped nor its mapping ended. Abandon (jobs.Abandoner)
             does the same for a job the runner ended without running it, before it
             returns even when the engine hasn't started (stopBook then cancels the book
             in the store alone, scheduler.CancelStored: nothing runs it yet; and once
             the engine is up, stopStartedStage stops a stage its scheduler began on the
             book before that write, or a status such a stage wrote over it, through
-            the engine's Cancel, and only then purges a retention 0 book's
+            the engine's guarded cancel, and only then purges a retention 0 book's
             transcripts (no engine, no hold on the book), unless
             another open job follows the book or a later claim of the same job does:
-            an Attempt higher, or the job's mapping reopened by its attach, as in
-            release, bridge#65; that wait runs through Options.Background, the app's
+            an Attempt higher, or the job's mapping reopened by its attach (checked
+            in the cancel's own write, StopGuard.Ended), as in release, bridge#65; that wait runs through Options.Background, the app's
             Bridge.bg tasks, so it ends with the Bridge), and waitEngine for a
             run cancelled (or taken back) while it waits for the engine, which never
             reaches end(). Retry(job): the engine's RetryAsRead of the parked engine
