@@ -1614,7 +1614,8 @@ internal/
             the two written only while a store.StopGuard holds
             (SetBookStatusUnlessFollowed, store.ErrFollowed otherwise) and the book is
             still as read (store.ErrSettled when a stage failed it or it finished
-            since: its own error stays): generate's job
+            since: its own error stays; a park since is read again and cancelled):
+            generate's job
             ends, its Abandon before the engine starts included; a cancel is published
             only while the book still carries it (publishCancelled, ordered against a
             re-admit's write and publish by readmitMu), so a later claim's re-admit

@@ -360,9 +360,13 @@ func CancelStoredUnlessFollowed(ctx context.Context, db *store.DB, id int64, g s
 }
 
 // markCancelled marks book id cancelled in the store; with g, only while g holds
-// (store.ErrFollowed otherwise), and never over a stage's failure: store.ErrSettled for a book read failed by other than a cancel, or one
-// that finished or changed status between the read and the write (a job's end
-// read the book before this, and a stage may have failed it since).
+// (store.ErrFollowed otherwise), and never over a stage's failure or a finish:
+// store.ErrSettled for a book read failed by other than a cancel, or one that
+// failed or finished between the read and the write (a job's end read the book
+// before this, and a stage may have failed it since). A book whose status
+// changed otherwise meanwhile (a stage parked it) is read again and cancelled as
+// it is now, so a park never outlives the job's end (a timed park would re-admit
+// it with no job to follow it).
 func markCancelled(ctx context.Context, db *store.DB, id int64, g *store.StopGuard) error {
 	b, err := db.GetBook(ctx, id)
 	if err != nil {
@@ -372,14 +376,30 @@ func markCancelled(ctx context.Context, db *store.DB, id int64, g *store.StopGua
 		return ErrInvalidOp
 	}
 	// Cancel is not a park (no typed reason), so the park_code stays empty.
-	if g != nil {
+	if g == nil {
+		return db.SetBookStatus(ctx, id, string(state.StatusFailed), cancelledReason, "")
+	}
+	for range cancelRereads {
 		if state.Status(b.Status) == state.StatusFailed && !IsCancelled(b) {
 			return store.ErrSettled
 		}
-		return db.SetBookStatusUnlessFollowed(ctx, id, b.Status, b.Error, string(state.StatusFailed), cancelledReason, *g)
+		err = db.SetBookStatusUnlessFollowed(ctx, id, b.Status, b.Error, string(state.StatusFailed), cancelledReason, *g)
+		if !errors.Is(err, store.ErrSettled) {
+			return err
+		}
+		if b, err = db.GetBook(ctx, id); err != nil {
+			return err
+		}
+		if state.IsTerminal(state.State(b.State)) {
+			return store.ErrSettled
+		}
 	}
-	return db.SetBookStatus(ctx, id, string(state.StatusFailed), cancelledReason, "")
+	return store.ErrSettled
 }
+
+// cancelRereads bounds markCancelled's guarded write over a book whose status
+// keeps changing under it.
+const cancelRereads = 3
 
 // Delete removes a book, its durable state, and its on-disk work dir. It refuses
 // while the book is actively running a stage (cancel or pause first), so a worker
