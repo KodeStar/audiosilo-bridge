@@ -278,7 +278,9 @@ func (r *Runner) Run(ctx context.Context, req agent.Request) (agent.Result, erro
 	if st.ShareGroup {
 		group = r.gid
 	}
-	if handed != nil && !st.ShareGroup && !r.groupDenied.Load() && !r.warnedGroup.Swap(true) {
+	// Judged by the runner's report this run goes on (st), not by groupDenied
+	// as it is now: a probe may have ended a denial since Status read it.
+	if handed != nil && !st.ShareGroup && !st.groupListed && !r.warnedGroup.Swap(true) {
 		r.log.Warn("agent container: the runner isn't in the Bridge's group, so the handed credential is readable by every uid "+
 			"until the runner takes it; "+remedyGroupAdd+" (an older one reports no groups)", "bridge_gid", r.gid)
 	}
@@ -433,8 +435,12 @@ func (r *Runner) blockGroup(why, cause string) error {
 	if r.groupBlocked.CompareAndSwap(nil, &why) {
 		r.deferProbe()
 		r.log.Warn("agent container: "+why, "bridge_gid", r.gid, "cause", cause)
+	} else if kept := r.groupBlocked.Load(); kept != nil {
+		// The reason an earlier run kept. Read once, and this run's own stands
+		// when a probe ended the block in between (probeGroup).
+		why = *kept
 	}
-	return &agent.NotAvailableError{Backend: r.backend, Detail: *r.groupBlocked.Load()}
+	return &agent.NotAvailableError{Backend: r.backend, Detail: why}
 }
 
 // credentialDeniedError is a job the runner refused, before the CLI started,

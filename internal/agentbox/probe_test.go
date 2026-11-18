@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -306,4 +307,35 @@ func TestProbeStuckClaimEnds(t *testing.T) {
 	close(stopTouch)
 	wg.Wait()
 	assertNoJobDirs(t, dir)
+}
+
+// A run that learns agent.require_group can't be met just as a probe ends an
+// earlier block still answers with its own reason (allowed: the kept reason
+// while one is kept; denied: no read of a block a probe took away).
+func TestBlockGroupAfterAProbeEndedTheBlock(t *testing.T) {
+	t.Parallel()
+	r, _ := vaultHandoff(t, []int{os.Getegid()})
+	r.requireGroup = true
+	first := r.blockGroup("the first reason", "cause")
+	var na *agent.NotAvailableError
+	if !strings.Contains(first.Error(), "the first reason") {
+		t.Fatalf("the first block = %v", first)
+	}
+	if !errors.As(r.blockGroup("a later reason", "cause"), &na) || !strings.Contains(na.Detail, "the first reason") {
+		t.Fatalf("a second block = %v, want the kept reason", na)
+	}
+	var stop atomic.Bool
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		for !stop.Load() {
+			r.groupBlocked.Store(nil) // as probeGroup's Swap(nil)
+		}
+	})
+	for range 2000 {
+		if !errors.As(r.blockGroup("a reason", "cause"), &na) || !strings.Contains(na.Detail, "reason") {
+			t.Fatalf("blockGroup = %v", na)
+		}
+	}
+	stop.Store(true)
+	wg.Wait()
 }
