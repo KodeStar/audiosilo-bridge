@@ -208,19 +208,25 @@ func TestEndpointKeyNeverFollowsAMovedAddress(t *testing.T) {
 	r, dir, base := endpointRunner(t, "")
 	const first, moved = "http://192.168.1.20:11434/v1", "https://elsewhere.example/v1"
 	keys := map[string]string{first: "sk-first-key", moved: "sk-moved-key"}
-	var asked atomic.Value
-	var reads atomic.Int32
 	r.credential = func(_, endpoint string) (string, string, time.Time, bool) {
-		if reads.Add(1) == 2 {
-			// Status reads it first; on Run's own read the address has just
-			// moved: the run's address is the one it read before.
-			asked.Store(endpoint)
-			base.Store(moved)
-		}
 		if k, ok := keys[endpoint]; ok {
 			return agentproto.CredentialEndpointKey, k, time.Time{}, true
 		}
 		return "", "", time.Time{}, false
+	}
+	// The address moves right after Run's own read of it: count a Status's
+	// reads (Run's starts with one), then move it on the read after those.
+	orig := r.endpoint
+	var calls atomic.Int32
+	r.endpoint = func() string { calls.Add(1); return orig() }
+	r.Status()
+	perStatus := calls.Swap(0)
+	r.endpoint = func() string {
+		v := orig()
+		if calls.Add(1) == perStatus+1 {
+			base.Store(moved)
+		}
+		return v
 	}
 	var request, credential atomic.Value
 	stop := (&fakeRunner{fn: func(job string) agentproto.Exit {
@@ -244,8 +250,8 @@ func TestEndpointKeyNeverFollowsAMovedAddress(t *testing.T) {
 	if err != nil || c.Value != "sk-first-key" {
 		t.Fatalf("credential.json = %v, %+v, want the first address's key", err, c)
 	}
-	if asked.Load() != first {
-		t.Fatalf("the key was asked for %v, want the run's address", asked.Load())
+	if base.Load() != moved {
+		t.Fatal("the address never moved under the run")
 	}
 }
 
@@ -437,16 +443,23 @@ func TestEndpointServiceRequired(t *testing.T) {
 		r := New(Options{Backend: agent.IDOpenAICompatible, AgentDir: t.TempDir(), Endpoint: func() string { return "http://h/v1" }})
 		refused(t, r, "", ProblemEndpointService, "agent.endpoint_staging_dir")
 	})
-	for name, layout := range map[string]func(endpoint string) string{
-		"the same dir":                 func(endpoint string) string { return endpoint },
-		"the agent's inside it":        func(endpoint string) string { return filepath.Join(endpoint, "agent") },
-		"inside the agent's":           func(endpoint string) string { return filepath.Dir(endpoint) },
-		"the same dir by another name": func(endpoint string) string { return filepath.Join(endpoint, "..", filepath.Base(endpoint)) },
+	for name, layout := range map[string]func(t *testing.T, endpoint string) string{
+		"the same dir":          func(_ *testing.T, endpoint string) string { return endpoint },
+		"the agent's inside it": func(_ *testing.T, endpoint string) string { return filepath.Join(endpoint, "agent") },
+		"inside the agent's":    func(_ *testing.T, endpoint string) string { return filepath.Dir(endpoint) },
+		"the same dir by another name": func(t *testing.T, endpoint string) string {
+			// A symlink: no path test sees the one dir under both names.
+			link := filepath.Join(t.TempDir(), "agent")
+			if err := os.Symlink(endpoint, link); err != nil {
+				t.Fatal(err)
+			}
+			return link
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			r, dir, _ := endpointRunner(t, "")
-			r.agentDir = layout(dir)
+			r.agentDir = layout(t, dir)
 			refused(t, r, dir, ProblemEndpointService, "shares a folder")
 		})
 	}
