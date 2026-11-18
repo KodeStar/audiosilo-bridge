@@ -566,7 +566,7 @@ func (s *service) consume(ctx context.Context, b *budget, job jobs.Job, root *os
 				return err
 			}
 			c.Offset = received
-			if err := s.saveCheckpoint(job, c, tag); err != nil {
+			if err := s.saveCheckpoint(job, root, c, tag); err != nil {
 				return err
 			}
 			lastCheckpoint = time.Now()
@@ -595,7 +595,7 @@ func (s *service) consume(ctx context.Context, b *budget, job jobs.Job, root *os
 			return podcast.Fetch{}, "", fail("write_failed", "The episode could not be saved.")
 		}
 		if c.Offset > 0 && c.Offset < total && netguard.StrongETag(tag) {
-			if err := s.saveCheckpoint(job, c, tag); err != nil {
+			if err := s.saveCheckpoint(job, root, c, tag); err != nil {
 				return podcast.Fetch{}, "", err
 			}
 		}

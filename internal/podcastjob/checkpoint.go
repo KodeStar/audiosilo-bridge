@@ -64,16 +64,17 @@ func (s *service) checkpointRoot() (*os.Root, error) {
 	}
 	return os.OpenRoot(dir)
 }
-func (s *service) saveCheckpoint(job jobs.Job, c *checkpoint, etag string) error {
-	root, err := s.checkpointRoot()
+func (s *service) saveCheckpoint(job jobs.Job, root *os.Root, c *checkpoint, etag string) error {
+	dir, err := s.checkpointRoot()
 	if err != nil {
 		return err
 	}
-	defer func() { _ = root.Close() }()
-	if saved, ok := s.readCheckpoint(job); ok && saved.Temp != c.Temp {
-		// An earlier partial at this path the Bridge could not remove: its record
-		// stays (clearCheckpoint tries it again, cleanOwned after a day), and
-		// this download goes unrecorded rather than orphan it.
+	defer func() { _ = dir.Close() }()
+	if saved, ok := s.readCheckpoint(job); ok && saved.Temp != c.Temp && !s.dropPartial(root, &saved) {
+		// An earlier partial at this path the Bridge still cannot remove: its
+		// record stays (clearCheckpoint tries it again, cleanOwned after a day),
+		// and this download goes unrecorded rather than orphan it. One removed
+		// since (or already gone) no longer holds the record.
 		return nil
 	}
 	if c.Validator == "" {
@@ -90,7 +91,7 @@ func (s *service) saveCheckpoint(job jobs.Job, c *checkpoint, etag string) error
 	if err != nil {
 		return err
 	}
-	return fsutil.WriteRootAtomic(root, ".", s.checkpointName(job), b, 0o600, nil)
+	return fsutil.WriteRootAtomic(dir, ".", s.checkpointName(job), b, 0o600, nil)
 }
 
 // readCheckpoint is the job's saved record when it is this pairing's, for the

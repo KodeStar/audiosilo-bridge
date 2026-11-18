@@ -2241,8 +2241,8 @@ internal/
             open, so an unreadable one is not left behind, and keeps the record
             and validator (for cleanOwned) when the removal fails: a later clear
             in the job tries that partial again before dropping the record, and
-            a new download's checkpoint never overwrites it (that download goes
-            unrecorded). An episode host's 410 is gone, like the
+            so does a new download's checkpoint, which never overwrites the
+            record while that partial stays (that download goes unrecorded). An episode host's 410 is gone, like the
             feed's (the server: no longer available). A poll's params may carry
             `scheduled` (the server's scheduler); read leniently, it changes
             nothing here.

@@ -282,7 +282,7 @@ func TestPrivateEnclosureIdentityAndNoPlaintextCheckpoint(t *testing.T) {
 	temp := ".audiosilo-tmp-private"
 	root.WriteFile("Fixture Show/"+temp, []byte("prefix"), 0600)
 	c := checkpoint{ServerHash: s.pairHash(), LibraryID: 3, ShowID: f.ShowID, EpisodeID: f.Episodes[0].ID, Path: *job.Path, Temp: temp, Offset: 6, Total: 100}
-	if err := s.saveCheckpoint(job, &c, `"https://private.example/ETAG_CANARY"`); err != nil {
+	if err := s.saveCheckpoint(job, root, &c, `"https://private.example/ETAG_CANARY"`); err != nil {
 		t.Fatal(err)
 	}
 	checkpointRoot, _ := s.checkpointRoot()
