@@ -438,7 +438,7 @@ func (h *Handler) runEngineBook(ctx context.Context, eng Engine, r *run, mapped 
 		// That run's job is gone (its id is this job's now), so nothing follows it.
 		h.o.Log.Warn("generate: the job's id maps to another book's run; this job starts its own",
 			"job", r.job.ID, "mapped", mapped.RelPath, "path", r.rel)
-		h.stopBook(context.WithoutCancel(ctx), r.job.ID, *mapped.BookID)
+		h.stopBook(context.WithoutCancel(ctx), r.job.ID, *mapped.BookID, false)
 		resumed = false
 	}
 	if resumed {
@@ -534,12 +534,9 @@ func (h *Handler) Abandon(ctx context.Context, job jobs.Job) {
 		return
 	}
 	engineUp := h.o.Engine() != nil
-	// Released now, before Abandon returns, even with no engine yet (a restart
-	// resumes its jobs at the first heartbeat, which can come before the engine has
-	// started: its first start may download ffmpeg): stopBook then cancels the book
-	// in the store, which nothing runs yet. The runner records the job lost only
-	// after Abandon returns, and a job waiting for this one's end
-	// (awaitOpenJobEnd) reads that row: it must find the book stopped (bridge#65).
+	// Released before Abandon returns, even with no engine yet (its first start
+	// may download ffmpeg): the runner records the job lost once Abandon returns,
+	// and a job waiting for this one's end must find the book stopped (bridge#65).
 	h.release(ctx, job, *m.BookID, true)
 	if !engineUp {
 		go h.stopStartedStage(ctx, job.ID, *m.BookID)
@@ -548,27 +545,15 @@ func (h *Handler) Abandon(ctx context.Context, job jobs.Job) {
 
 // stopStartedStage waits for the engine to start, then stops a stage it began on
 // book bookID before the store's cancel landed (its scheduler starts beside the
-// Bridge's jobs) or a status a start's reconcile wrote back over the cancel: the
-// book stays stopped unless another open job follows it now (a Retry or a new
-// job took it up).
+// Bridge's jobs) or a status a start's reconcile wrote back over the cancel
+// (stopBook, cancelled books included).
 func (h *Handler) stopStartedStage(ctx context.Context, jobID, bookID int64) {
-	eng := h.o.Engine()
-	for eng == nil {
+	for h.o.Engine() == nil {
 		if agent.SleepCtx(ctx, h.o.Poll) != nil {
 			return
 		}
-		eng = h.o.Engine()
 	}
-	b, err := h.o.DB.GetBook(ctx, bookID)
-	if err != nil || (finished(b.State, b.Status) && !scheduler.IsCancelled(b)) {
-		return
-	}
-	if open, err := h.o.DB.OpenGenerateJobsForBook(ctx, bookID, jobID); err != nil || len(open) > 0 {
-		return
-	}
-	if err := eng.Cancel(ctx, bookID); err != nil && !errors.Is(err, scheduler.ErrInvalidOp) {
-		h.o.Log.Warn("generate: cancelling the engine book failed", "job", jobID, "book", bookID, "err", err)
-	}
+	h.stopBook(ctx, jobID, bookID, true)
 }
 
 // release ends a job's hold on its engine book: a job that didn't finish stops
@@ -586,7 +571,7 @@ func (h *Handler) release(ctx context.Context, job jobs.Job, bookID int64, stop 
 	if sj, err := h.o.DB.GetServerJob(ctx, job.ID); err == nil && sj.Attempt > job.Attempt {
 		return
 	}
-	followed := stop && h.stopBook(ctx, job.ID, bookID)
+	followed := stop && h.stopBook(ctx, job.ID, bookID, false)
 	if h.beforeEnd != nil {
 		h.beforeEnd(job.ID)
 	}
@@ -594,7 +579,7 @@ func (h *Handler) release(ctx context.Context, job jobs.Job, bookID int64, stop 
 		h.o.Log.Warn("generate: recording the job's end failed", "job", job.ID, "err", err)
 	}
 	if followed {
-		h.stopBook(ctx, job.ID, bookID)
+		h.stopBook(ctx, job.ID, bookID, false)
 	}
 	h.signalEnd()
 	if h.o.RetentionDays == 0 {
@@ -608,11 +593,12 @@ func (h *Handler) release(ctx context.Context, job jobs.Job, bookID int64, stop 
 // failed: a cancel would overwrite its error) or another open job follows it now
 // (a generate job continued the chapters run, so a late end of the chapters job
 // leaves it to that job). With no engine yet the cancel is the store's alone
-// (scheduler.CancelStored): nothing runs the book to interrupt. It reports
-// whether it left the book to another open job.
-func (h *Handler) stopBook(ctx context.Context, jobID, bookID int64) (followed bool) {
+// (scheduler.CancelStored): nothing runs the book to interrupt. recancel stops
+// a book already cancelled too (stopStartedStage: a stage the engine began before
+// the cancel landed). It reports whether it left the book to another open job.
+func (h *Handler) stopBook(ctx context.Context, jobID, bookID int64, recancel bool) (followed bool) {
 	b, err := h.o.DB.GetBook(ctx, bookID)
-	if err != nil || finished(b.State, b.Status) {
+	if err != nil || (finished(b.State, b.Status) && (!recancel || !scheduler.IsCancelled(b))) {
 		return false
 	}
 	if open, err := h.o.DB.OpenGenerateJobsForBook(ctx, bookID, jobID); err != nil || len(open) > 0 {
