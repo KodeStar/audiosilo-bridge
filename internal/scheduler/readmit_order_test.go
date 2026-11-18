@@ -245,6 +245,29 @@ func TestWaypointAdvanceKeepsAStatusWrittenSinceItsRead(t *testing.T) {
 	}
 }
 
+// bridge#65: a stage's own park or failure is never written over a cancel (one
+// landing as the stage ended, or written to the store while it ran): a park over
+// it could be re-admitted with no job following the book. Any other book takes it.
+func TestAStagesOutcomeIsNeverWrittenOverACancel(t *testing.T) {
+	h := newHarness(t)
+	db := h.openDB(t)
+	ctx := context.Background()
+	s := New(db, events.NewHub(8), NewStubExecutor(0, 0), 1, h.workRoot, false)
+	cancelled := h.addBook(t, db, "outcome-cancel", "", "")
+	if err := CancelStored(ctx, db, cancelled.ID); err != nil {
+		t.Fatal(err)
+	}
+	s.setStatus(cancelled.ID, state.StatusNeedsAttention, "rate limited", state.ParkAgentRateLimited, time.Now().Add(time.Hour))
+	if got, _ := db.GetBook(ctx, cancelled.ID); !IsCancelled(got) || got.RetryAt != "" {
+		t.Fatalf("the stage's park was written over the cancel: status %q error %q retry_at %q", got.Status, got.Error, got.RetryAt)
+	}
+	running := h.addBook(t, db, "outcome-running", "", "")
+	s.setStatus(running.ID, state.StatusNeedsAttention, "rate limited", state.ParkAgentRateLimited, time.Now().Add(time.Hour))
+	if got, _ := db.GetBook(ctx, running.ID); !state.IsParkedWith(got.Status, got.ParkCode, state.ParkAgentRateLimited) || got.RetryAt == "" {
+		t.Fatalf("a running book's park wasn't written: status %q park %q retry_at %q", got.Status, got.ParkCode, got.RetryAt)
+	}
+}
+
 // bridge#65: a start's reconcile rewinds a book by its state alone, so a cancel
 // written to the store after the reconcile read the book (the Bridge's
 // CancelStored while its engine starts) is never written back over.

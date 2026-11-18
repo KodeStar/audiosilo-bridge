@@ -1361,21 +1361,38 @@ func (s *Scheduler) publishQueueStats(books []store.Book, finished []state.Serie
 // when non-zero, schedules an automatic re-admit (persisted to books.retry_at in UTC
 // RFC3339): the transient-agent parks pass a due time so the dispatch loop heals the
 // book without a human; every other caller passes the zero time (no scheduled retry).
+//
+// It is a stage's own outcome, so it is never written over a cancel: a Cancel
+// landing as the stage ended (before its worker saw the cancel), or one written to
+// the store while the stage ran (CancelStored), ends the book for good, and a park
+// written over it could be re-admitted with no job following the book (bridge#65).
+// The write holds only over the status read (SetBookStatusIf), read again when it
+// changed meanwhile.
 func (s *Scheduler) setStatus(bookID int64, status state.Status, errMsg string, parkCode state.ParkCode, retryAt time.Time) {
 	ctx := context.Background()
-	b, err := s.db.GetBook(ctx, bookID)
-	if err != nil {
-		return
-	}
 	retryStr := ""
 	if !retryAt.IsZero() {
 		retryStr = retryAt.UTC().Format(time.RFC3339)
 	}
-	if err := s.db.SetBookStatusRetry(ctx, bookID, string(status), errMsg, string(parkCode), retryStr); err != nil {
+	for range setStatusTries {
+		b, err := s.db.GetBook(ctx, bookID)
+		if err != nil || IsCancelled(b) {
+			return
+		}
+		err = s.db.SetBookStatusIf(ctx, bookID, b.Status, b.Error, string(status), errMsg, string(parkCode), retryStr)
+		if errors.Is(err, store.ErrStatusChanged) {
+			continue
+		}
+		if err == nil {
+			s.publishState(bookID, b.State, string(status), errMsg, string(parkCode), retryStr)
+		}
 		return
 	}
-	s.publishState(bookID, b.State, string(status), errMsg, string(parkCode), retryStr)
 }
+
+// setStatusTries bounds setStatus's reads of a book whose status keeps changing
+// under it.
+const setStatusTries = 3
 
 func metricsErr(err error) json.RawMessage {
 	b, _ := json.Marshal(map[string]string{"error": err.Error()})

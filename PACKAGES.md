@@ -1611,9 +1611,11 @@ internal/
             status and error (the contrib poller's Readmit too). CancelStored(db, id)
             is Cancel's store write alone, for a caller with no scheduler running
             (generate's Abandon before the engine starts); a start's reconcileBook
-            rewinds by the state alone (SetBookPipelineState), so it never writes the
-            status it read back over such a cancel. ReadmitParked stops at its
-            context's end. readmit supersedes
+            rewinds by the state alone (SetBookPipelineState), and a pass moves a
+            book on from a waypoint the same way (advanceWaypoint), so neither writes
+            the status it read back over such a cancel; a stage's own park or failure
+            (setStatus) is written only over the status read, never over a cancel.
+            ReadmitParked stops at its context's end. readmit supersedes
             the CURRENT stage's successes ONLY for the round-cap park codes
             (qa_no_converge, fix_loop_exhausted - the latter also superseding fixing +
             wiping the audit trajectory files) so an availability park never destroys a
