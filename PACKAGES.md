@@ -3413,13 +3413,25 @@ internal/
             the group: a job with a credential.json in the group's modes
             holding no credential (kind group_probe, which DecodeCredential
             refuses after the take) and no prompt.txt, so no CLI ever starts;
-            a claim with the file gone (not-exist, never another error) ends
-            both fallbacks (logged), whoever claimed it: only a uid in the
-            Bridge's group may delete the file, and the end moves the
-            credential onto the group, so a contested or unset pin (a new id
-            mapping, one user for both) doesn't hold it; a denial borne out as
-            a run's is (deniedHere) or a volume still refusing the group keeps
-            them; a probe ends by itself after the claim timeout plus
+            the runner's take ends both fallbacks (logged): its claim, the file
+            gone (not-exist, never another error) and its exit.json refusing
+            the probe's kind by name; the runner is the pinned uid, or
+            runner.json's owner as it is then while the pin is contested or
+            unset (a new id mapping, one user for both), which is safe as the
+            end only ever moves the credential onto the group. A claim,
+            exit.json or done of another uid (the Bridge's own claim aside), a
+            claim open to other uids, an answer with no claim of the runner's,
+            or the runner finding the credential already gone spoils the probe
+            (probeSpoiled): the fallback stays (no flap back to the group for
+            the next run to be denied again), a Warn names the uid (once per
+            uid in a row), and while groupDenied holds Status.Warning
+            (SpoiledWarning: the Accounts tab's warning, the checklist's
+            DetailAgentShared) says the credential is every user's because
+            something else on the staging volume interfered, or under
+            agent.require_group the block's Detail says so, until a probe gets
+            the runner's own answer (taken, denied or refused); a denial borne
+            out as a run's is (deniedHere) or a volume still refusing the
+            group keeps them; a probe ends by itself after the claim timeout plus
             staleFor, and Wait (the app's Run, last) waits for one in flight
             at a stop, so its job dir still goes. Status.HandoffMode says how a
             handed credential reaches a live runner: group, world (not in the

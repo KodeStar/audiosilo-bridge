@@ -7,6 +7,8 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/kodestar/audiosilo-bridge/internal/agentproto"
@@ -24,8 +26,21 @@ import (
 // credential: a credential.json in the group's modes holding a probe object no
 // runner takes as one, and no prompt.txt, so the runner refuses the job
 // whatever it reads and no CLI ever starts. The runner taking that file (it
-// deletes the file before it decodes it) shows the group's file reaches it now,
-// and the fallback ends; anything else leaves it as it is.
+// deletes the file before it decodes it, and its refusal names the probe's
+// kind) shows the group's file reaches it now, and the fallback ends; anything
+// else leaves it as it is.
+//
+// The staging dir is open to every uid on the volume, so another one can get
+// to a probe first: claim it, delete its credential, or write its exit.json or
+// done. A uid in the Bridge's group that took the probe so would end the
+// fallback while the runner is still denied the group's file, and the next run
+// would start it again (a flap, warned of every probeEvery); any uid could
+// keep each probe from ever ending it. Only the runner's take ends it
+// (probeRunner, spoiler): anything else in the probe's dir is a spoiled probe,
+// warned of with the uid that did it and shown on the page (Status.Warning,
+// or the require_group block's detail) until a probe gets the runner's answer.
+// Ending the fallback only ever moves the credential onto the group, so the
+// rule is about telling the operator, never about who may read the credential.
 
 // probeEvery spaces the probes: the first comes this long after the fallback
 // began, each later one this long after the last.
@@ -48,7 +63,19 @@ const (
 	probeDenied
 	// probeRefused: the staging volume still refuses the group.
 	probeRefused
+	// probeSpoiled: another uid than the runner's claimed or answered the
+	// probe, or took its credential: the fallback stays, and the page says
+	// so (Runner.spoiled).
+	probeSpoiled
 )
+
+// probeSpoil is who spoiled the last group probe: the uid that claimed or
+// answered it, or known false when what is in its dir names no other uid (a
+// done with no claim, a credential gone before the runner read it).
+type probeSpoil struct {
+	uid   int
+	known bool
+}
 
 // holdsFallback reports whether a run's fallback from the group holds for the
 // process (groupDenied, groupBlocked, groupFailed): what a probe can end.
@@ -90,46 +117,79 @@ func (r *Runner) Wait() { r.probes.Wait() }
 // probeGroup runs one probe job and ends the fallback when the runner took the
 // group's file.
 func (r *Runner) probeGroup(ctx context.Context) probeOutcome {
-	out := r.probeJob(ctx)
+	out, spoil := r.probeJob(ctx)
 	switch out {
 	case probeTaken:
 		denied, blocked := r.groupDenied.Swap(false), r.groupBlocked.Swap(nil)
 		r.volumeRefused.Store(false)
+		r.spoiled.Store(nil)
 		if denied || blocked != nil {
 			r.log.Info("agent container: the runner takes a file kept to the Bridge's group again, so a handed credential "+
 				"goes to that group alone from now on", "bridge_gid", r.gid)
 		}
+	case probeSpoiled:
+		r.noteSpoiled(spoil)
+	case probeDenied, probeRefused:
+		// A clean answer: whatever spoiled an earlier probe didn't this one.
+		r.spoiled.Store(nil)
+		fallthrough
 	default:
 		r.log.Debug("agent container: the group probe found the fallback still needed", "outcome", int(out))
 	}
 	return out
 }
 
-// probeJob stages the probe and reads what the runner made of it. The job dir
-// is gone when it returns.
-func (r *Runner) probeJob(ctx context.Context) probeOutcome {
+// noteSpoiled keeps who spoiled a probe, for Status, while a fallback the
+// probe could have ended still holds (a group failure alone is ended by the
+// probe's own write, whoever answers), and warns of it: once for each uid in a
+// row, so a spoiler at every probe doesn't fill the log.
+func (r *Runner) noteSpoiled(s *probeSpoil) {
+	if !r.groupDenied.Load() && r.groupBlocked.Load() == nil {
+		return
+	}
+	if prev := r.spoiled.Swap(s); prev != nil && *prev == *s {
+		r.log.Debug("agent container: the group probe was spoiled again", "uid", s.uid, "uid_known", s.known)
+		return
+	}
+	held := "the handed credential stays readable by every uid on the staging volume until the runner takes it"
+	if r.requireGroup {
+		held = "agent.require_group keeps the agent unavailable"
+	}
+	who := []any{"runner_uid", r.runnerUID.Load()}
+	if s.known {
+		who = append(who, "uid", s.uid)
+	}
+	r.log.Warn("agent container: another uid than the runner's claimed or answered the group probe, or took its "+
+		"credential, so the Bridge can't tell whether the runner takes a file kept to its group: "+held+
+		"; find what else writes the staging dir", who...)
+}
+
+// probeJob stages the probe and reads what the runner made of it, and who
+// spoiled it for probeSpoiled. The job dir is gone when it returns.
+func (r *Runner) probeJob(ctx context.Context) (probeOutcome, *probeSpoil) {
 	// Bounded: a claimed probe that never finishes (a heartbeat kept fresh
 	// in its dir) would otherwise hold probing, and so every later probe, for
 	// the rest of the process. The runner takes and refuses a probe at once,
 	// so the claim timeout and then staleFor are plenty.
+	stopping := ctx
 	ctx, cancel := context.WithTimeout(ctx, r.claimTimeout+r.staleFor)
 	defer cancel()
 	id, err := agentproto.NewJobID()
 	if err != nil {
-		return probeUnknown
+		return probeUnknown, nil
 	}
 	job := filepath.Join(r.dir, id)
 	defer r.remove(job)
 	root, err := makeJob(job)
 	if err != nil {
-		return probeUnknown
+		return probeUnknown, nil
 	}
 	defer func() { _ = root.Close() }()
 	if err := mkdir(root, agentproto.WorkDir, inputDir); err != nil {
-		return probeUnknown
+		return probeUnknown, nil
 	}
 	if err := mkdir(root, filepath.Join(agentproto.WorkDir, agentproto.OutDir), outDirMode); err != nil {
-		return probeUnknown
+		return probeUnknown, nil
 	}
 	// strict: a volume that refuses the group says so, rather than the probe
 	// falling back to the every-uid modes it is there to leave.
@@ -146,50 +206,122 @@ func (r *Runner) probeJob(ctx context.Context) probeOutcome {
 			"jobs go to the agent container again", "bridge_gid", r.gid, "volume_refuses", refused != nil)
 	}
 	if refused != nil {
-		return probeRefused
+		return probeRefused, nil
 	} else if err != nil {
-		return probeUnknown
+		return probeUnknown, nil
 	}
 	if err := openJob(root, agentproto.Request{Protocol: agentproto.Protocol, CLI: r.backend, TimeoutSeconds: 60}); err != nil {
-		return probeUnknown
+		return probeUnknown, nil
 	}
-	if done, _ := r.wait(ctx, root, nil); !done || ctx.Err() != nil {
-		return probeUnknown
+	done, _ := r.wait(ctx, root, nil)
+	if stopping.Err() != nil {
+		return probeUnknown, nil
 	}
-	raw, info, err := agentproto.ReadRegularInfo(root, agentproto.ExitFile, agentproto.MaxExitBytes)
+	runner, ok := r.probeRunner()
+	if !ok {
+		return probeUnknown, nil
+	}
+	if s := r.spoiler(root, runner); s != nil {
+		return probeSpoiled, s
+	}
+	if !done || ctx.Err() != nil {
+		return probeUnknown, nil
+	}
+	raw, err := agentproto.ReadRegular(root, agentproto.ExitFile, agentproto.MaxExitBytes)
 	if err != nil {
-		return probeUnknown
+		return probeUnknown, nil
 	}
 	var ex agentproto.Exit
 	if err := json.Unmarshal(raw, &ex); err != nil {
-		return probeUnknown
+		return probeUnknown, nil
 	}
+	// The claim, exit.json and done are the runner's from here (spoiler).
 	credential := filepath.Join(agentproto.CredentialDir, agentproto.CredentialFile)
 	switch {
 	case ex.CredentialDenied:
 		// Believed as a run's denial is (trust.go): the runner's own exit.json,
 		// borne out by its claim and the file left in place.
-		if _, own := r.fromRunner(info, false); own && r.deniedHere(ctx, root) {
-			return probeDenied
+		if r.deniedHere(ctx, root) {
+			return probeDenied, nil
 		}
-	case claimed(root) && gone(root, credential):
-		// Any uid's claim, unlike a denial (trust.go): only a uid the volume
-		// lets into the Bridge's group can delete the file (its dir is the
-		// Bridge's, 0770, in the sticky job dir), which is what the probe
-		// asks, and ending the fallback moves the credential onto the group,
-		// never off it. The runner's uid as the volume shows it may well have
-		// changed with the fix (a new id mapping contests the pin), or never
-		// been pinned (both containers as one user).
-		return probeTaken
+	case !gone(root, credential):
+		// The file is still there (or unreadable): no take, whatever the
+		// runner says.
+	case strings.Contains(ex.Error, strconv.Quote(probeKind)):
+		// The runner's refusal of the probe's kind: it read the group's file
+		// and deleted it first (agentrun's takeCredential), which only a uid
+		// the volume lets into the Bridge's group can. The runner's uid as
+		// the volume shows it may well have changed with the fix (a new id
+		// mapping contests the pin): probeRunner follows runner.json then.
+		return probeTaken, nil
+	case ex.Unavailable:
+		// The runner found no credential to take: another uid in the group
+		// deleted it first, which would have passed for the runner's take.
+		return probeSpoiled, &probeSpoil{}
 	}
-	return probeUnknown
+	return probeUnknown, nil
 }
 
-// claimed reports whether the job under root was claimed (its claim dir is
-// there), whoever claimed it.
-func claimed(root *os.Root) bool {
-	info, err := root.Lstat(agentproto.ClaimDir)
-	return err == nil && info.IsDir()
+// probeRunner is the runner's uid as a probe judges it: the pinned one, else
+// (none pinned: runner.json is the Bridge's own uid's, or has a second link;
+// or the pin is contested, as an id mapping's fix leaves it) the owner of
+// runner.json as it is now. ok false when there is none to read (or a second
+// link names no one); off Unix, where a file has no owner, any uid does.
+// runner.json can be forged by any uid, so an unpinned runner is believed
+// only for the probe, which can only move the credential onto the group.
+func (r *Runner) probeRunner() (uid int, ok bool) {
+	if pinned := r.runnerUID.Load(); pinned >= 0 {
+		return int(pinned), true
+	}
+	root, err := os.OpenRoot(r.dir)
+	if err != nil {
+		return 0, false
+	}
+	defer func() { _ = root.Close() }()
+	info, err := root.Lstat(agentproto.RunnerFile)
+	if err != nil {
+		return 0, false
+	}
+	uid, links, owned := fileOwner(info)
+	if !owned {
+		return 0, true
+	}
+	return uid, links == 1
+}
+
+// spoiler is who interfered with the probe under root (runner the runner's
+// uid, probeRunner): a claim that isn't the runner's (another uid's, or one
+// open to other uids: a dir the CLI left in work/out/ and moved in), and an
+// exit.json or done that isn't (another uid's, a second link, or with no claim
+// of the runner's: it claims before it answers). A claim of the Bridge's own
+// uid is wait taking an unclaimed probe back. nil when nothing did, and off
+// Unix, where a file has no owner.
+func (r *Runner) spoiler(root *os.Root, runner int) *probeSpoil {
+	runnerClaimed := false
+	if info, err := root.Lstat(agentproto.ClaimDir); err == nil {
+		uid, _, ok := fileOwner(info)
+		if !ok {
+			return nil
+		}
+		runnerClaimed = uid == runner && info.IsDir() && info.Mode().Perm()&0o022 == 0
+		if !runnerClaimed && uid != r.uid {
+			return &probeSpoil{uid: uid, known: uid != runner}
+		}
+	}
+	for _, name := range []string{agentproto.ExitFile, agentproto.DoneFile} {
+		info, err := root.Lstat(name)
+		if err != nil {
+			continue
+		}
+		uid, links, ok := fileOwner(info)
+		if !ok {
+			return nil
+		}
+		if uid != runner || links != 1 || !runnerClaimed {
+			return &probeSpoil{uid: uid, known: uid != runner}
+		}
+	}
+	return nil
 }
 
 // gone reports whether name (under root) is no longer there: only a

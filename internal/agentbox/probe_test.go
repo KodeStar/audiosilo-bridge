@@ -2,11 +2,13 @@ package agentbox
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -57,6 +59,38 @@ func (m *mappedRunner) fn(t *testing.T) func(job string) agentproto.Exit {
 		m.mu.Unlock()
 		mustWrite(t, filepath.Join(job, agentproto.StdoutFile), claudeOK)
 		return agentproto.Exit{}
+	}
+}
+
+// takeProbe is a runner's take of a probe, as agentrun's: the credential read
+// and deleted, then refused by DecodeCredential (it names the probe's kind).
+func takeProbe(job string) agentproto.Exit {
+	name := filepath.Join(job, agentproto.CredentialDir, agentproto.CredentialFile)
+	raw, err := os.ReadFile(name)
+	_ = os.Remove(name)
+	if err == nil {
+		_, err = agentproto.DecodeCredential(raw, agent.IDClaude)
+	}
+	return agentproto.Exit{ExitCode: -1, Error: err.Error()}
+}
+
+// The runner's refusal of a probe names the probe's kind, for either CLI:
+// probeJob's take hangs on it (allowed: the probe kind refused by name;
+// denied: a real credential kind is taken, never refused).
+func TestProbeRefusalNamesTheKind(t *testing.T) {
+	t.Parallel()
+	for _, cli := range []string{agentproto.CLIClaude, agentproto.CLICodex} {
+		raw, err := json.Marshal(agentproto.Credential{CLI: cli, Kind: probeKind, Value: probeKind})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := agentproto.DecodeCredential(raw, cli); err == nil || !strings.Contains(err.Error(), strconv.Quote(probeKind)) {
+			t.Errorf("%s: the probe's refusal = %v, want it naming %q", cli, err, probeKind)
+		}
+	}
+	raw, _ := json.Marshal(agentproto.Credential{CLI: agentproto.CLIClaude, Kind: agentproto.CredentialAPIKey, Value: "sk-ant-x"})
+	if _, err := agentproto.DecodeCredential(raw, agentproto.CLIClaude); err != nil {
+		t.Fatalf("a real credential: %v", err)
 	}
 }
 
@@ -157,10 +191,7 @@ func TestProbeOnlyWhenDue(t *testing.T) {
 		rj.Groups, rj.HeartbeatAt = groups, r.now()
 		writeRunnerJSON(t, dir, rj)
 	}
-	fake := &fakeRunner{fn: func(job string) agentproto.Exit {
-		_ = os.Remove(filepath.Join(job, agentproto.CredentialDir, agentproto.CredentialFile))
-		return agentproto.Exit{ExitCode: -1, Error: "credential.json's kind isn't one claude takes"}
-	}}
+	fake := &fakeRunner{fn: takeProbe}
 	stop := fake.start(t, dir)
 	waitProbe := func() {
 		t.Helper()
@@ -221,7 +252,8 @@ func TestProbeOnlyWhenDue(t *testing.T) {
 
 // A probe ends the fallback whoever the volume shows the runner as: the id
 // mapping's fix gives the runner another uid there, which contests the pin
-// (trust.go), and both containers as one user never pin one (allowed: the
+// (trust.go), and both containers as one user never pin one; runner.json's
+// owner stands for the runner then (probeRunner) (allowed: the
 // take ends the fallback with the pin contested or never set; denied: a
 // runner still denied the group's file keeps it either way).
 func TestProbeEndsTheFallbackWithoutAPin(t *testing.T) {

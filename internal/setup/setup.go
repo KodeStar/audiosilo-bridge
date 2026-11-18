@@ -64,6 +64,12 @@ const (
 	// can't be kept to the Bridge's group (the Accounts tab says why).
 	DetailAgentGroupRequired = "agent.require_group is on, and the agent's credential can't be kept to the Bridge's group: " +
 		"the Accounts tab says why"
+	// DetailAgentShared follows the backend while the agent is ready but its
+	// credential goes to every user on the staging volume because something
+	// else there interfered with the Bridge's check (the Accounts tab says
+	// more; the checklist never names the staging volume, BRIDGE-07).
+	DetailAgentShared = ", but its credential is shared with every user on the agent's volume, because something else " +
+		"there interfered with the Bridge's check: the Accounts tab says more"
 	// DetailAgentHandoffFailed: the Bridge couldn't hand the Accounts tab's
 	// credential to the agent container (the Accounts tab says why).
 	DetailAgentHandoffFailed = "the Bridge couldn't hand the agent its credential: the Accounts tab says why; " + agentFor
@@ -134,6 +140,10 @@ type Agent struct {
 	// container (agentbox.Status.HandoffMode, the same strings as
 	// link.AgentCredential*), "" with no hand-off in play.
 	Handoff string
+	// Shared: the credential goes to every user on the staging volume
+	// because something else there spoiled the Bridge's group check
+	// (agentbox.Status.Warning).
+	Shared bool
 }
 
 // GitHub is the contribution credential.
@@ -235,6 +245,8 @@ func Checklist(in Inputs) link.Setup {
 	// agent's full state, the checklist only what to do in plain words.
 	agentDetail := in.Agent.Backend
 	switch {
+	case in.Agent.Available && in.Agent.Shared:
+		agentDetail = in.Agent.Backend + DetailAgentShared
 	case in.Agent.Available:
 	case in.Agent.Refused:
 		agentDetail = firstNonEmpty(in.Agent.Detail, DetailAgentNoCredential)

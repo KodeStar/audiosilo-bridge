@@ -125,7 +125,7 @@ func (b *Bridge) Accounts(ctx context.Context) api.Accounts {
 	backend := b.box.ID()
 	ag := api.AgentAccount{Backend: backend, Kinds: accounts.KindsFor(backend), Set: as.Set, SetAt: as.SetAt,
 		SetAtByKind: as.SetAtByKind,
-		Available:   st.Available, Detail: st.Detail, Handoff: st.Handoff}
+		Available:   st.Available, Detail: st.Detail, Handoff: st.Handoff, Warning: st.Warning}
 	if !st.Handoff {
 		ag.ContainerCredential = st.CLIs[backend].Credential
 	}
@@ -205,7 +205,7 @@ func (b *Bridge) setup(ctx context.Context) link.Setup {
 	}
 	st := b.box.Status()
 	in.Agent = setup.Agent{Backend: b.box.ID(), Available: st.Available, Problem: setup.AgentProblem(st.Problem), Other: st.Other,
-		Refused: st.Refused, Detail: st.Detail, Handoff: st.HandoffMode}
+		Refused: st.Refused, Detail: st.Detail, Handoff: st.HandoffMode, Shared: st.Warning != ""}
 	in.GitHub = b.githubSetup(ctx)
 	in.Audible = b.audibleSetup(ctx)
 	return setup.Checklist(in)

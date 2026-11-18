@@ -154,7 +154,7 @@ func TestChecklistAgentWords(t *testing.T) {
 	// Each says what the agent is for, but the backend mismatch, which names both.
 	for d, sayFor := range map[string]bool{DetailAgentNotRunning: true, DetailAgentOutdated: true, DetailAgentNoCredential: true,
 		agentNoCLI("claude"): true, agentOtherBackend("claude", "codex"): false, DetailAgentGroupRequired: false,
-		DetailAgentHandoffFailed: true} {
+		DetailAgentHandoffFailed: true, DetailAgentShared: false} {
 		if strings.Contains(d, "staging") || len(d) > maxDetail ||
 			sayFor && (!strings.Contains(d, "Claude or ChatGPT") || !strings.Contains(d, "characters, recaps and descriptions")) {
 			t.Errorf("detail %q", d)
@@ -167,6 +167,12 @@ func TestChecklistAgentWords(t *testing.T) {
 	in.Agent = Agent{Backend: "codex", Available: true}
 	if a := item(t, Checklist(in), ItemAgent); !a.Done || a.Detail != "codex" {
 		t.Fatalf("ready: %+v", a)
+	}
+	// Ready, with the credential shared because something spoiled the
+	// Bridge's group check: still done, the detail says so.
+	in.Agent = Agent{Backend: "claude", Available: true, Handoff: "world", Shared: true}
+	if a := item(t, Checklist(in), ItemAgent); !a.Done || a.Detail != "claude"+DetailAgentShared {
+		t.Fatalf("ready, shared: %+v", a)
 	}
 }
 

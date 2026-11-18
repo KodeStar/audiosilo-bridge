@@ -43,6 +43,11 @@ type Status struct {
 	HandoffMode string
 	// Detail says why not, in words for the page and the park hint.
 	Detail string
+	// Warning, for an agent that is otherwise as described, is what the page
+	// says beside it: the handed credential goes to every uid because
+	// something else on the staging volume spoiled the group probe that
+	// could have ended that (SpoiledWarning), "" otherwise.
+	Warning string
 	// Problem is why not as a kind (Problem*: "" when Available or Refused), and
 	// Other, for ProblemOtherBackend, the CLI that is signed in: the setup
 	// checklist words them for a person (internal/setup).
@@ -69,6 +74,18 @@ const (
 	HandoffGroup         = "group"
 	HandoffWorld         = "world"
 	HandoffGroupRequired = "group_required"
+)
+
+// SpoiledWarning is Status.Warning while another uid on the staging volume
+// spoils the group probe, and spoiledBlocked what agent.require_group's block
+// adds then: neither names the uid (the log does).
+const (
+	SpoiledWarning = "the agent's credential is readable by every user on the staging volume until the agent container " +
+		"takes it, not kept to the Bridge's group: something else on the staging volume interfered with the Bridge's " +
+		"check that the agent container can take it there (the Bridge's log names its uid); find what else writes " +
+		"the staging volume, and the next check ends this"
+	spoiledBlocked = "; something else on the staging volume interfered with the Bridge's last check, so it can't " +
+		"tell whether the fix is in place (the Bridge's log names its uid): find what else writes the staging volume"
 )
 
 // Subscription reports whether backend runs on a subscription credential (a
@@ -162,6 +179,15 @@ func (r *Runner) Status() Status {
 	}
 	if st.Handoff && st.Live {
 		st.HandoffMode = r.handoffMode(st)
+		if r.spoiled.Load() != nil {
+			// Only for the fallbacks a probe could have ended (noteSpoiled).
+			switch {
+			case st.HandoffMode == HandoffWorld && r.groupDenied.Load():
+				st.Warning = SpoiledWarning
+			case st.Problem == ProblemGroupRequired && r.groupBlocked.Load() != nil:
+				st.Detail += spoiledBlocked
+			}
+		}
 	}
 	if st.Detail == "" {
 		if refused := r.refusal(rj.CLIs[r.backend], st.Handoff); refused != "" {

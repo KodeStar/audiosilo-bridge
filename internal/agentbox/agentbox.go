@@ -128,6 +128,10 @@ type Runner struct {
 	probing    atomic.Bool
 	// probes counts the probes in flight, for Wait.
 	probes sync.WaitGroup
+	// spoiled is who spoiled the last group probe while groupDenied or
+	// groupBlocked held (another uid claimed or answered it), nil once a
+	// probe gets the runner's own answer: Status says so (probe.go).
+	spoiled atomic.Pointer[probeSpoil]
 	// uid is the Bridge's own (effective) uid, and runnerUID the runner's as
 	// the staging volume shows it, pinned by the first live runner.json
 	// (noUID until then): only the runner's files may move a handed
