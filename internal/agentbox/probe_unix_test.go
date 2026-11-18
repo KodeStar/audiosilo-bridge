@@ -99,10 +99,10 @@ func TestProbeTakenByAnotherUID(t *testing.T) {
 }
 
 // A probe whose dir holds what the runner could not have left (an answer with
-// no claim, a claim open to other uids, the credential gone before the runner
-// looked) is spoiled, with no uid to name, and keeps the fallback, each as
-// the runner's own uid would leave it otherwise (allowed: none; denied: each
-// keeps the fallback and is noted).
+// no claim, a claim open to other uids, an answer older than the claim, the
+// credential gone before the runner looked) is spoiled, with no uid to name,
+// and keeps the fallback, each as the runner's own uid would leave it
+// otherwise (allowed: none; denied: each keeps the fallback and is noted).
 func TestProbeAnswerTheRunnerCouldNotHaveWritten(t *testing.T) {
 	t.Parallel()
 	for name, answer := range map[string]func(job string) agentproto.Exit{
@@ -111,6 +111,15 @@ func TestProbeAnswerTheRunnerCouldNotHaveWritten(t *testing.T) {
 			claim := filepath.Join(job, agentproto.ClaimDir)
 			_ = os.Mkdir(claim, 0o700)
 			_ = os.Chmod(claim, 0o777)
+			return takeProbe(job)
+		},
+		// The runner's refusal of another job, moved in before its claim here:
+		// its exit.json is older than the claim.
+		"an answer older than the claim": func(job string) agentproto.Exit {
+			claim := filepath.Join(job, agentproto.ClaimDir)
+			_ = os.Mkdir(claim, 0o700)
+			later := time.Now().Add(time.Hour)
+			_ = os.Chtimes(claim, later, later)
 			return takeProbe(job)
 		},
 		"the credential taken first": func(job string) agentproto.Exit {

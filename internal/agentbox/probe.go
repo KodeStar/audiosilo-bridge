@@ -125,7 +125,8 @@ func (r *Runner) Wait() { r.probes.Wait() }
 func (r *Runner) probeGroup(ctx context.Context) probeOutcome {
 	out, spoil := r.probeJob(ctx)
 	if out == probeTaken || out == probeDenied || out == probeRefused {
-		// The runner's own answer: whatever spoiled an earlier probe didn't this one.
+		// The runner's own answer, or the volume's refusal before the runner
+		// saw the probe: whatever spoiled an earlier probe didn't this one.
 		r.spoiled.Store(nil)
 	}
 	switch out {
@@ -296,18 +297,21 @@ func (r *Runner) probeRunner() (uid int, ok bool) {
 // spoiler is who interfered with the probe under root (runner the runner's
 // uid, probeRunner): a claim that isn't the runner's (another uid's, or one
 // open to other uids: a dir the CLI left in work/out/ and moved in), and an
-// exit.json or done that isn't (another uid's, a second link, or with no claim
-// of the runner's: it claims before it answers). A claim of the Bridge's own
-// uid is wait taking an unclaimed probe back. nil when nothing did, and off
-// Unix, where a file has no owner.
+// exit.json or done that isn't (another uid's, a second link, with no claim
+// of the runner's: it claims before it answers, or older than that claim: the
+// runner's answer to another job, a dir of some uid's making, moved in ahead
+// of its own, which then can't be written). A claim of the Bridge's own uid is
+// wait taking an unclaimed probe back. nil when nothing did, and off Unix,
+// where a file has no owner.
 func (r *Runner) spoiler(root *os.Root, runner int) *probeSpoil {
 	runnerClaimed := false
+	var claimedAt time.Time
 	if info, err := root.Lstat(agentproto.ClaimDir); err == nil {
 		uid, _, ok := fileOwner(info)
 		if !ok {
 			return nil
 		}
-		runnerClaimed = runnersClaim(info, int64(runner))
+		runnerClaimed, claimedAt = runnersClaim(info, int64(runner)), info.ModTime()
 		if !runnerClaimed && uid != r.uid {
 			return spoiledBy(uid, runner)
 		}
@@ -321,7 +325,7 @@ func (r *Runner) spoiler(root *os.Root, runner int) *probeSpoil {
 		if !ok {
 			return nil
 		}
-		if uid != runner || links != 1 || !runnerClaimed {
+		if uid != runner || links != 1 || !runnerClaimed || info.ModTime().Before(claimedAt) {
 			return spoiledBy(uid, runner)
 		}
 	}

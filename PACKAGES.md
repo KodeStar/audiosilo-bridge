@@ -3420,7 +3420,8 @@ internal/
             unset (a new id mapping, one user for both), which is safe as the
             end only ever moves the credential onto the group. A claim,
             exit.json or done of another uid (the Bridge's own claim aside), a
-            claim open to other uids, an answer with no claim of the runner's,
+            claim open to other uids, an answer with no claim of the runner's
+            or older than that claim (another job's, moved in),
             or the runner finding the credential already gone spoils the probe
             (probeSpoiled): the fallback stays (no flap back to the group for
             the next run to be denied again), a Warn names the uid (once per
