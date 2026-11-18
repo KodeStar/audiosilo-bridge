@@ -131,16 +131,18 @@ func (r *Runner) request(reserve, hold bool, own *claimRequest) (*claimRequest, 
 // lanes go on claiming (it backs off after the answer); a second means the server
 // keeps ignoring the kinds asked for, so it claims nothing until one has a slot.
 func (r *Runner) strayWaitingLocked(reserve bool) bool {
-	n := 0
+	limit := 2
+	if reserve {
+		limit = 1
+	}
 	for _, ru := range r.running {
 		if ru.stray && !ru.admitted && ru.strayReserve == reserve {
-			n++
+			if limit--; limit == 0 {
+				return true
+			}
 		}
 	}
-	if reserve {
-		return n >= 1
-	}
-	return n >= 2
+	return false
 }
 
 func (r *Runner) unreserveLocked(q *claimRequest) {

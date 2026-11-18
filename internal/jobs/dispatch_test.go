@@ -648,16 +648,13 @@ func TestRecoveredInteractiveJobResumesInTheReserve(t *testing.T) {
 			r := New(db, func() Server { return srv }, nil, opts,
 				optedHandler{blockingHandler("podcast.fetch", LaneDownload, started, gates)})
 			startControlled(t, r)
+			await(t, started)
+			await(t, started)
+			want := map[int64]string{1: LaneInteractive, 2: LaneDownload}
 			if !negotiated {
-				// Both download slots are the legacy pairing's; both run there.
-				await(t, started)
-				await(t, started)
-				assertPools(t, r, map[int64]string{1: LaneDownload, 2: LaneDownload})
-				return
+				want[1] = LaneDownload // a legacy pairing has no reserve
 			}
-			await(t, started)
-			await(t, started)
-			assertPools(t, r, map[int64]string{1: LaneInteractive, 2: LaneDownload})
+			assertPools(t, r, want)
 		})
 	}
 }

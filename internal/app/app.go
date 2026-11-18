@@ -376,11 +376,10 @@ func (b *Bridge) Run(ctx context.Context) error {
 // tasks' context, and stop ends that context and waits for every task started;
 // none starts after stop.
 type bgTasks struct {
-	mu      sync.Mutex
-	wg      sync.WaitGroup
-	ctx     context.Context //nolint:containedctx // the tasks' lifetime, ended by stop
-	cancel  context.CancelFunc
-	stopped bool
+	mu     sync.Mutex
+	wg     sync.WaitGroup
+	ctx    context.Context //nolint:containedctx // the tasks' lifetime, ended by stop
+	cancel context.CancelFunc
 }
 
 func (t *bgTasks) init() { t.ctx, t.cancel = context.WithCancel(context.Background()) }
@@ -389,22 +388,16 @@ func (t *bgTasks) init() { t.ctx, t.cancel = context.WithCancel(context.Backgrou
 func (t *bgTasks) run(fn func(context.Context)) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if t.stopped {
-		return
+	if t.ctx.Err() == nil {
+		t.wg.Go(func() { fn(t.ctx) })
 	}
-	t.wg.Add(1)
-	go func() {
-		defer t.wg.Done()
-		fn(t.ctx)
-	}()
 }
 
 // stop ends the tasks' context and waits for the tasks started.
 func (t *bgTasks) stop() {
 	t.mu.Lock()
-	t.stopped = true
-	t.mu.Unlock()
 	t.cancel()
+	t.mu.Unlock()
 	t.wg.Wait()
 }
 
