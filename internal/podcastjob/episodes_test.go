@@ -622,6 +622,16 @@ func TestEpisodeFailureCodes(t *testing.T) {
 			t.Fatalf("a retry wait cut short: %q, want http_503", c)
 		}
 	})
+	// An episode host's 410 is the feed's word for it, gone (the server says
+	// the episode is no longer available), never a bare http_410.
+	t.Run("gone", func(t *testing.T) {
+		h, job := audioHarness(t)
+		setAudio(h, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(410) })
+		_, err := h.handler.FetchJob().Run(context.Background(), job, jobs.LocalReporter())
+		if c := code(t, err); c != "gone" {
+			t.Fatalf("an episode's 410: %q, want gone", c)
+		}
+	})
 	t.Run("no streamer", func(t *testing.T) {
 		h, job := audioHarness(t)
 		h.handler.s.o.Streamer = nil
@@ -663,4 +673,62 @@ func TestEpisodeFailureCodes(t *testing.T) {
 			t.Fatalf("a stopped probe: %v, want its context's error", err)
 		}
 	})
+}
+
+// A partial the Bridge cannot read back when it resumes is its own fault: the
+// episode starts again from zero once inside the job, and only a second such
+// partial fails the job write_failed.
+func TestFetchUnreadablePartialRestartsOnce(t *testing.T) {
+	requireProbe(t)
+	for _, scenario := range []string{"restarts", "twice"} {
+		t.Run(scenario, func(t *testing.T) {
+			h, job := audioHarness(t)
+			audio := data(t, "chap-v23.mp3")
+			var calls atomic.Int32
+			var fresh []int32
+			setAudio(h, func(w http.ResponseWriter, r *http.Request) {
+				n := calls.Add(1)
+				w.Header().Set("ETag", `"one"`)
+				if r.Header.Get("Range") != "" {
+					w.Header().Set("Content-Range", fmt.Sprintf("bytes 1000-%d/%d", len(audio)-1, len(audio)))
+					w.Header().Set("Content-Length", strconv.Itoa(len(audio)-1000))
+					w.WriteHeader(206)
+					w.Write(audio[1000:])
+					return
+				}
+				fresh = append(fresh, n)
+				w.Header().Set("Content-Length", strconv.Itoa(len(audio)))
+				if scenario == "restarts" && n > 1 {
+					w.Write(audio)
+					return
+				}
+				// Cut after a proven prefix: the next attempt resumes it.
+				w.WriteHeader(200)
+				w.Write(audio[:1000])
+			})
+			var reads atomic.Int32
+			h.handler.s.o.Fault = func(at string) error {
+				if at == "partial" {
+					reads.Add(1)
+					return errors.New("unreadable partial")
+				}
+				return nil
+			}
+			result, err := h.handler.FetchJob().Run(context.Background(), job, jobs.LocalReporter())
+			if scenario == "twice" {
+				var failure *netguard.Error
+				if !errors.As(err, &failure) || failure.Code != "write_failed" || reads.Load() != 2 || calls.Load() != 4 {
+					t.Fatalf("a second unreadable partial: %v, %d reads, %d calls; want write_failed after 2 and 4", err, reads.Load(), calls.Load())
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(result, err)
+			}
+			// The first GET, the resume whose partial failed, then a GET from zero.
+			if got := result.(fetchResult); got.Fetch.Bytes != int64(len(audio)) || calls.Load() != 3 || reads.Load() != 1 || len(fresh) != 2 || fresh[1] != 3 {
+				t.Fatal(got, calls.Load(), reads.Load(), fresh)
+			}
+		})
+	}
 }

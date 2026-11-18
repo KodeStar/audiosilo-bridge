@@ -72,6 +72,10 @@ type budget struct {
 // host's slowness, reported as timeout, not as the Bridge stopping (bridge_lost).
 var errOverBudget = errors.New("the episode download ran past its ceiling")
 
+// errPartialUnreadable is consume's when the proven partial it resumes cannot be
+// read back from disk.
+var errPartialUnreadable = errors.New("the episode partial could not be read")
+
 func (s *service) budget(parent context.Context) (context.Context, *budget) {
 	ctx, cancel := context.WithCancelCause(parent)
 	start := s.o.BudgetNow()
@@ -400,6 +404,7 @@ func (s *service) download(ctx context.Context, b *budget, job jobs.Job, root *o
 		return podcast.Fetch{}, err
 	}
 	var last error
+	restarted := false
 	for attempt := 0; attempt < 3; attempt++ {
 		if ctx.Err() != nil {
 			return podcast.Fetch{}, ctx.Err()
@@ -415,7 +420,13 @@ func (s *service) download(ctx context.Context, b *budget, job jobs.Job, root *o
 			var fetch podcast.Fetch
 			switch {
 			case response.Status != 200 && response.Status != 206 && (response.Status != 416 || c.Offset == 0):
-				err = &netguard.Error{Code: "http_" + strconv.Itoa(response.Status), Message: fmt.Sprintf("The episode returned HTTP %d.", response.Status), RetryAfterSeconds: response.RetryAfterSeconds}
+				code := "http_" + strconv.Itoa(response.Status)
+				if response.Status == 410 {
+					// The feed's own word for it (netguard.Fetch): the server words
+					// an episode's as no longer available, never stopping the show.
+					code = "gone"
+				}
+				err = &netguard.Error{Code: code, Message: fmt.Sprintf("The episode returned HTTP %d.", response.Status), RetryAfterSeconds: response.RetryAfterSeconds}
 			case action == "fresh_get":
 				_ = response.Body.Close()
 				s.clearCheckpoint(job, root, c)
@@ -428,6 +439,19 @@ func (s *service) download(ctx context.Context, b *budget, job jobs.Job, root *o
 			_ = response.Body.Close()
 			if err == nil {
 				return fetch, nil
+			}
+			// A partial the Bridge can no longer read back is started again from
+			// zero, once per job (attempt-- keeps the host's retries): the episode
+			// may well be fine, only the Bridge's own copy of its start is not.
+			if errors.Is(err, errPartialUnreadable) {
+				if restarted {
+					return podcast.Fetch{}, fail("write_failed", "The episode partial is incomplete.")
+				}
+				restarted = true
+				s.clearCheckpoint(job, root, c)
+				tag = ""
+				attempt--
+				continue
 			}
 			// A local file failure (a full disk, a replaced partial) is not a
 			// network interruption: never retried or reported as one.
@@ -498,9 +522,14 @@ func (s *service) consume(ctx context.Context, b *budget, job jobs.Job, root *os
 	}
 	h := sha256.New()
 	if action == "append" {
-		if n, err := io.CopyN(h, file, c.Offset); err != nil || n != c.Offset {
-			// The Bridge's own partial file: a local fault, not the episode host's.
-			return podcast.Fetch{}, "", fail("write_failed", "The episode partial is incomplete.")
+		err := s.fault("partial")
+		if err == nil {
+			_, err = io.CopyN(h, file, c.Offset)
+		}
+		if err != nil {
+			// The Bridge's own partial file: a local fault, not the episode host's
+			// (download restarts the episode once, then fails write_failed).
+			return podcast.Fetch{}, "", errPartialUnreadable
 		}
 	}
 	c.Total = total

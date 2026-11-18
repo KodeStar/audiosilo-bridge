@@ -183,10 +183,7 @@ func (h *Retain) run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (
 						return denied
 					}
 				}
-				if s.o.Fault != nil {
-					return s.o.Fault(at)
-				}
-				return nil
+				return s.fault(at)
 			}
 			if err := podcast.Publish(root, j, s.o.Now(), boundary); err != nil {
 				if errors.Is(err, denied) {

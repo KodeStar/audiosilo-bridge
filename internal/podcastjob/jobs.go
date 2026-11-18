@@ -50,7 +50,7 @@ type Options struct {
 	Probe           ProbeFunc
 	Streamer        Streamer
 	Wait            func(context.Context, time.Duration) error
-	Fault           podcast.Boundary
+	Fault           podcast.Boundary // the journal's boundaries, and "partial" before a resume reads its partial
 	BudgetNow       func() time.Time
 	AfterFunc       func(time.Duration, func()) Timer
 	Version         string
@@ -741,6 +741,14 @@ func (s *service) artwork(ctx context.Context, root *os.Root, lib link.Library, 
 	}
 	success = true
 	f.Show.Image = &podcast.Image{File: name, SourceSHA256: hash, FetchedAt: s.o.Now().UTC().Format(time.RFC3339)}
+}
+
+// fault is the Fault hook at boundary at, if any.
+func (s *service) fault(at string) error {
+	if s.o.Fault == nil {
+		return nil
+	}
+	return s.o.Fault(at)
 }
 func fail(code, message string) *netguard.Error { return &netguard.Error{Code: code, Message: message} }
 func outcome(result any, err error) (any, error) {

@@ -2232,7 +2232,9 @@ internal/
             error, not invalid_audio, and a lease check it cuts is no lost claim,
             identity_changed), a retry wait it cuts ends on the host's
             last answer, and its own faults (no streamer, its partial) are
-            write_failed. A poll's params may carry `scheduled` (the server's scheduler); read
+            write_failed. A partial it cannot read back restarts the episode from
+            zero once per job first. An episode host's 410 is gone, like the
+            feed's (the server: no longer available). A poll's params may carry `scheduled` (the server's scheduler); read
             leniently, it changes nothing here.
   -- Phase 4a: Audible (imported from audiosilo-manager with its history) --
   audible/  the native Audible client (the manager's, ported as is, then extended):
