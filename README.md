@@ -68,7 +68,12 @@ one `staging` volume, and nothing else.
    `AUDIOSILO_BRIDGE_AGENT_BACKEND: codex` on the Bridge. An API key
    (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`) works too, billed per token. Or pick an
    OpenAI-compatible endpoint in the page's **Settings > Agent** (its address, key
-   and models, with **Test connection**) and restart the Bridge. The Bridge's
+   and models, with **Test connection**) and restart the Bridge. An endpoint runs
+   only while the agent container holds no credential of its own (none of the
+   variables above, nothing in `/agent/secrets`, no codex sign-in): the model
+   there runs commands in the container and could read one. The endpoint's key
+   is kept for the address it was entered for, so saving another address removes
+   it and the page asks for the new one's. The Bridge's
    page shows the agent as ready within about 15 seconds.
 6. Generate characters and recaps from a book's page in the console (or the
    player, as an admin). The console shows an estimate first, then the job's stage,
@@ -142,7 +147,7 @@ folder is `/bridge-data` in the images (`AUDIOSILO_BRIDGE_DATA`), else
 | | `AUDIOSILO_BRIDGE_SECRET_KEY` | `<data>/secret.key` | the key that seals the stored secrets (32 bytes, hex or base64) |
 | | `PUID` / `PGID` | `1000` | the user the Bridge runs as (Unraid: 99/100); a start as another user (`--user`) needs a data folder that user owns |
 | `agent.backend` | `AUDIOSILO_BRIDGE_AGENT_BACKEND` | `claude` | what the agent container runs: `claude`, `codex`, or `openai-compatible` (codex against an OpenAI-compatible endpoint: the OpenAI API, a router such as OpenRouter, or Ollama or LM Studio on your network; it must offer the Responses API). Also set on the page (Settings > Agent); a change applies at the next start |
-| `agent.openai_compatible.base_url` | `AUDIOSILO_BRIDGE_AGENT_OPENAI_COMPATIBLE_BASE_URL` | | the endpoint's address up to `/v1` (`https://api.openai.com/v1`, `http://192.168.1.20:11434/v1`); http or https, no user name, password or query. Its API key is set on the page (Settings > Agent), never here. Applies at once |
+| `agent.openai_compatible.base_url` | `AUDIOSILO_BRIDGE_AGENT_OPENAI_COMPATIBLE_BASE_URL` | | the endpoint's address up to `/v1` (`https://api.openai.com/v1`, `http://192.168.1.20:11434/v1`); http or https, no user name, password or query. Its API key is set on the page (Settings > Agent), never here, and is kept for the address it was entered for: another address (here, in config.yaml or on the page) removes it. Applies at once |
 | `agent.openai_compatible.model` | `AUDIOSILO_BRIDGE_AGENT_OPENAI_COMPATIBLE_MODEL` | | the model every agent stage uses on the endpoint (it must call tools and take a long context); `agent.openai_compatible.models` (config or the page) gives a stage its own. Applies at once |
 | `agent.staging_dir` | `AUDIOSILO_BRIDGE_AGENT_STAGING_DIR` | `<data>/staging` | the folder shared with the agent container (an absolute path; compose uses `/staging`) |
 | `agent.claim_timeout_seconds` | `AUDIOSILO_BRIDGE_AGENT_CLAIM_TIMEOUT_SECONDS` | `120` | how long a job waits for the agent container to pick it up before the book waits and tries again (10 to 3600) |

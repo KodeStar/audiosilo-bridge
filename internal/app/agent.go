@@ -10,7 +10,6 @@ import (
 	"github.com/kodestar/audiosilo-bridge/internal/api"
 	"github.com/kodestar/audiosilo-bridge/internal/config"
 	"github.com/kodestar/audiosilo-bridge/internal/endpoint"
-	"github.com/kodestar/audiosilo-bridge/internal/secrets"
 )
 
 // Settings > Agent (bridge#84): the backend, and the OpenAI-compatible endpoint
@@ -38,7 +37,9 @@ func (b *Bridge) AgentSettings(ctx context.Context) api.AgentSettings {
 // SaveAgentSettings saves the backend and the endpoint. A setting the
 // environment sets must keep its value, and keeps config.yaml's own. The
 // endpoint applies at once (the agent box reads its address for every run, the
-// engine takes the models now); a new backend at the next start.
+// engine takes the models now); a new backend at the next start. Another
+// address removes the endpoint's API key: it was entered for the old one, and
+// the page asks for this one's.
 func (b *Bridge) SaveAgentSettings(ctx context.Context, s api.AgentSettings) error {
 	cur := b.config()
 	if s.Backend == "" {
@@ -72,6 +73,9 @@ func (b *Bridge) SaveAgentSettings(ctx context.Context, s api.AgentSettings) err
 		return err
 	}
 	next := b.config()
+	if next.Agent.OpenAICompatible.BaseURL != cur.Agent.OpenAICompatible.BaseURL {
+		b.dropStaleEndpointKey(ctx)
+	}
 	models := next.Agent.EndpointModels()
 	if eng := b.engine.get(); eng != nil {
 		eng.exec.SetCompatibleModels(models)
@@ -88,21 +92,23 @@ func (b *Bridge) SaveAgentSettings(ctx context.Context, s api.AgentSettings) err
 	return nil
 }
 
-// CheckEndpoint lists baseURL's models with the endpoint key set now, from the
-// Bridge (endpoint.Check). The endpoint failing comes back as the result's
-// Error for the page to show.
+// CheckEndpoint lists baseURL's models from the Bridge (endpoint.Check). The
+// endpoint's API key goes along only to the address it was entered for, the
+// saved one: any other address is checked without a key (KeySent says which),
+// so a key never reaches an address typed into the form. The endpoint failing
+// comes back as the result's Error for the page to show.
 func (b *Bridge) CheckEndpoint(ctx context.Context, baseURL string) (api.EndpointCheck, error) {
 	baseURL = config.NormalizeBaseURL(baseURL)
 	if err := agentproto.CheckBaseURL(baseURL); err != nil {
 		return api.EndpointCheck{}, api.Errorf(api.ErrInvalid, "%v", err)
 	}
-	key, err := b.vault.Get(secrets.EndpointAPIKey)
+	key, err := b.agentCreds.EndpointKey(ctx, baseURL)
 	if err != nil {
 		return api.EndpointCheck{}, api.Errorf(api.ErrFailed, "the endpoint's API key can't be read from the vault")
 	}
 	rep, err := endpoint.Check(ctx, b.endpointClient, baseURL, key)
 	if err != nil {
-		return api.EndpointCheck{Report: endpoint.Report{Models: []endpoint.Model{}}, Error: err.Error()}, nil
+		return api.EndpointCheck{Report: endpoint.Report{Models: []endpoint.Model{}}, Error: err.Error(), KeySent: key != ""}, nil
 	}
-	return api.EndpointCheck{Report: rep}, nil
+	return api.EndpointCheck{Report: rep, KeySent: key != ""}, nil
 }

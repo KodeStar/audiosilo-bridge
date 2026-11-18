@@ -190,8 +190,7 @@ func New(ctx context.Context, opts Options) (*Bridge, string, error) {
 	b.cfg.Store(&cfg)
 	b.bg.init()
 	b.newAccounts(cfg)
-	b.box = newAgentBox(cfg, opts.DataDir, opts.Logger, b.agentCredential,
-		func() string { return b.config().Agent.OpenAICompatible.BaseURL })
+	b.box = newAgentBox(cfg, opts.DataDir, opts.Logger, b.agentCredential, b.endpointAddress)
 	b.endpointClient = endpoint.NewClient()
 	b.hub = workers.New(workers.Options{DB: db, BridgeVersion: opts.Version, Log: opts.Logger})
 	verifier := verify.New(b.libs, b.mount, func() mapping.BookSource {

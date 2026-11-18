@@ -197,12 +197,15 @@ export interface EndpointModel {
 }
 
 // POST /api/settings/agent/test: the endpoint's models, whether it offers the
-// Responses API, or error (why the models couldn't be listed).
+// Responses API, or error (why the models couldn't be listed). key_sent: the
+// check carried the endpoint's API key, which the Bridge sends to the saved
+// address alone (the one it was entered for).
 export interface EndpointCheck {
   models: EndpointModel[];
   responses: '' | 'yes' | 'no' | 'unknown';
   responses_detail: string;
   error: string;
+  key_sent: boolean;
 }
 
 // The states a job can have on the Bridge (store.Job*).

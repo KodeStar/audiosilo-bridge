@@ -158,7 +158,8 @@ export class ApiClient {
     return this.request('/api/settings/agent', { method: 'PUT', body: s });
   }
 
-  // checkEndpoint lists the endpoint's models from the Bridge, with the key set.
+  // checkEndpoint lists the endpoint's models from the Bridge, with the key set
+  // only when baseUrl is the saved address (the one the key was entered for).
   checkEndpoint(baseUrl: string): Promise<EndpointCheck> {
     return this.request('/api/settings/agent/test', {
       method: 'POST',

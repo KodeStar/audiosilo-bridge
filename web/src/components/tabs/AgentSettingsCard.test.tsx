@@ -73,6 +73,7 @@ describe('AgentSettingsCard', () => {
           responses: 'no',
           responses_detail: 'the endpoint has no /responses (404)',
           error: '',
+          key_sent: false,
         },
       },
       'PUT /api/settings/agent': ({ body }) => ({ body: agentSettingsFixture(body as object) }),
@@ -120,6 +121,7 @@ describe('AgentSettingsCard', () => {
           responses: '',
           responses_detail: '',
           error: 'the endpoint refused the API key (401 Unauthorized): check the key',
+          key_sent: false,
         },
       },
       'PUT /api/accounts/agent': {
@@ -149,6 +151,62 @@ describe('AgentSettingsCard', () => {
     expect(key).toHaveValue('');
     // The model field kept what it held.
     expect(screen.getByLabelText('Model')).toHaveValue('gpt-5.1');
+  });
+
+  it('keeps the key to the saved address: no key form or key for another one, and a cleared key is said', async () => {
+    const saved = {
+      backend: 'openai-compatible' as const,
+      running_backend: 'openai-compatible' as const,
+      openai_compatible: { base_url: 'https://api.one.example/v1', model: 'm', models: {} },
+      key_set: true,
+      key_set_at: '2026-11-18T09:00:00Z',
+    };
+    const { calls } = mockFetch({
+      'GET /api/settings/agent': { body: agentSettingsFixture(saved) },
+      'POST /api/settings/agent/test': ({ body }) => ({
+        body: {
+          models: [{ id: 'm' }],
+          responses: 'yes',
+          responses_detail: '',
+          error: '',
+          // The Bridge sends the key to the saved address alone.
+          key_sent: (body as { base_url: string }).base_url === 'https://api.one.example/v1',
+        },
+      }),
+      // The Bridge removes the key with its address.
+      'PUT /api/settings/agent': ({ body }) => ({
+        body: agentSettingsFixture({
+          ...saved,
+          ...(body as object),
+          key_set: false,
+          key_set_at: '',
+        }),
+      }),
+    });
+    render(<AgentSettingsCard client={api()} />);
+    // The saved address: tested with its key, which can be replaced here.
+    await userEvent.click(await screen.findByRole('button', { name: 'Test connection' }));
+    expect(await screen.findByText(/answered with 1 model/)).toBeInTheDocument();
+    expect(screen.queryByText(/Tested without the API key/)).not.toBeInTheDocument();
+    expect(screen.getByLabelText('Endpoint API key')).toBeInTheDocument();
+
+    // Another address in the field: no key form, and its test goes without the key.
+    const url = screen.getByLabelText('Endpoint address');
+    await userEvent.clear(url);
+    await userEvent.type(url, 'https://api.two.example/v1');
+    expect(screen.queryByLabelText('Endpoint API key')).not.toBeInTheDocument();
+    expect(screen.getByText(/saving another address removes the key set now/)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Test connection' }));
+    expect(await screen.findByText(/Tested without the API key/)).toBeInTheDocument();
+    expect(lastCall(calls, 'POST', '/api/settings/agent/test')?.body).toEqual({
+      base_url: 'https://api.two.example/v1',
+    });
+
+    // Saved: the key went with the old address, and the page asks for this one's.
+    await userEvent.click(screen.getByRole('button', { name: 'Save agent settings' }));
+    expect(await screen.findByText(/was for the old address and is removed/)).toBeInTheDocument();
+    expect(screen.getByLabelText('Endpoint API key')).toBeInTheDocument();
+    expect(screen.getByText(/Not set/)).toBeInTheDocument();
   });
 
   it('keeps settings the environment sets read-only', async () => {

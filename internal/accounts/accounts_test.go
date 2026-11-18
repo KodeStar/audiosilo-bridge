@@ -577,7 +577,7 @@ func TestAgentCredentialSincePerKind(t *testing.T) {
 	}
 	defer func() { _ = db.Close() }()
 	c := &clock{now: time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)}
-	a := NewAgent(secrets.NewMemStore(), db, c.Now, nil)
+	a := NewAgent(secrets.NewMemStore(), db, c.Now, nil, nil)
 	must := func(err error) {
 		t.Helper()
 		if err != nil {
@@ -614,7 +614,7 @@ func TestAgentCredential(t *testing.T) {
 	defer func() { _ = db.Close() }()
 	vault := secrets.NewMemStore()
 	var changes int
-	a := NewAgent(vault, db, nil, func() { changes++ })
+	a := NewAgent(vault, db, nil, func() { changes++ }, nil)
 	if _, _, _, ok := a.Credential(ctx, "claude"); ok {
 		t.Fatal("no credential yet")
 	}
@@ -676,7 +676,8 @@ func TestAgentEndpointKey(t *testing.T) {
 	if got := KindsFor(agent.IDOpenAICompatible); len(got) != 1 || got[0] != AgentEndpointKey {
 		t.Fatalf("KindsFor = %v", got)
 	}
-	a := NewAgent(secrets.NewMemStore(), db, nil, nil)
+	addr := "https://openrouter.ai/api/v1"
+	a := NewAgent(secrets.NewMemStore(), db, nil, nil, func() string { return addr })
 	if err := a.Set(ctx, AgentOpenAIKey, "sk-openai"); err != nil {
 		t.Fatal(err)
 	}
@@ -695,5 +696,85 @@ func TestAgentEndpointKey(t *testing.T) {
 	}
 	if st := a.State(ctx); !st.Set[AgentEndpointKey] || st.SetAtByKind[AgentEndpointKey] == "" {
 		t.Fatalf("state = %+v", st)
+	}
+}
+
+// The endpoint's key is kept for the address it was entered for: it is the
+// endpoint's credential, and goes along with a check, only while that is the
+// endpoint's address (allowed); under any other address, however it changed,
+// it is no credential, isn't shown as set, goes to no check, and is dropped
+// (denied). Without an address there is nothing to enter a key for.
+func TestAgentEndpointKeyIsItsAddressAlone(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	const first, other = "https://openrouter.ai/api/v1", "https://elsewhere.example/v1"
+	addr := ""
+	vault := secrets.NewMemStore()
+	var changes int
+	a := NewAgent(vault, db, nil, func() { changes++ }, func() string { return addr })
+	if err := a.Set(ctx, AgentEndpointKey, "sk-first"); !errors.Is(err, ErrInvalidCredential) || !strings.Contains(err.Error(), "address") {
+		t.Fatalf("a key with no address = %v", err)
+	}
+	if ok, _ := vault.Present(AgentEndpointKey); ok {
+		t.Fatal("a key with no address was stored")
+	}
+	addr = first
+	if err := a.Set(ctx, AgentEndpointKey, "sk-first"); err != nil {
+		t.Fatal(err)
+	}
+	if key, err := a.EndpointKey(ctx, first); err != nil || key != "sk-first" {
+		t.Fatalf("its own address: %q, %v", key, err)
+	}
+	if key, _ := a.EndpointKey(ctx, other); key != "" {
+		t.Fatalf("a check of another address got the key %q", key)
+	}
+	if dropped, err := a.DropStaleEndpointKey(ctx); dropped || err != nil {
+		t.Fatalf("a key for the address now was dropped: %v, %v", dropped, err)
+	}
+
+	// The address moves (the page, config.yaml or the environment).
+	addr = other
+	if _, v, _, ok := a.Credential(ctx, agent.IDOpenAICompatible); ok || v != "" {
+		t.Fatalf("the key went to another address: %q", v)
+	}
+	for _, to := range []string{first, other} {
+		if key, _ := a.EndpointKey(ctx, to); key != "" {
+			t.Fatalf("EndpointKey(%s) = %q after the address moved", to, key)
+		}
+	}
+	if st := a.State(ctx); st.Set[AgentEndpointKey] || st.SetAtByKind[AgentEndpointKey] != "" {
+		t.Fatalf("a key for another address shows as set: %+v", st)
+	}
+	before := changes
+	if dropped, err := a.DropStaleEndpointKey(ctx); !dropped || err != nil {
+		t.Fatalf("drop = %v, %v", dropped, err)
+	}
+	if ok, _ := vault.Present(AgentEndpointKey); ok || changes != before {
+		t.Fatalf("after the drop: present %v, changes %d (want %d)", ok, changes, before)
+	}
+	// Moving back doesn't bring it back, and a key entered now is this address's.
+	addr = first
+	if _, _, _, ok := a.Credential(ctx, agent.IDOpenAICompatible); ok {
+		t.Fatal("a dropped key came back")
+	}
+	addr = other
+	if err := a.Set(ctx, AgentEndpointKey, "sk-other"); err != nil {
+		t.Fatal(err)
+	}
+	if _, v, _, _ := a.Credential(ctx, agent.IDOpenAICompatible); v != "sk-other" {
+		t.Fatalf("the new address's key = %q", v)
+	}
+	// A key replaced after the address moved is the new address's, never the
+	// old key under the new address.
+	addr = first
+	if err := a.Set(ctx, AgentEndpointKey, "sk-first-again"); err != nil {
+		t.Fatal(err)
+	}
+	if key, _ := a.EndpointKey(ctx, first); key != "sk-first-again" {
+		t.Fatalf("replaced = %q", key)
 	}
 }

@@ -12,7 +12,14 @@ import {
 import type { EndpointCheck } from '@/api/types';
 
 function checkOf(over: Partial<EndpointCheck> = {}): EndpointCheck {
-  return { models: [], responses: 'yes', responses_detail: '', error: '', ...over };
+  return {
+    models: [],
+    responses: 'yes',
+    responses_detail: '',
+    error: '',
+    key_sent: false,
+    ...over,
+  };
 }
 
 describe('checkBaseURL', () => {

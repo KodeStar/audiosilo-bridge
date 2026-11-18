@@ -29,7 +29,10 @@ func (b *Bridge) newAccounts(cfg config.Config) {
 	b.github = accounts.NewGitHub(accounts.GitHubOptions{Vault: b.vault, DB: b.db, Log: b.log,
 		Client:   &ghauth.Client{ClientID: cfg.GitHubClientID(), WebBase: cfg.GitHubWebBase(), APIBase: cfg.Contribution.APIBaseURL},
 		OnChange: b.githubChanged})
-	b.agentCreds = accounts.NewAgent(b.vault, b.db, nil, b.agentCredentialChanged)
+	b.agentCreds = accounts.NewAgent(b.vault, b.db, nil, b.agentCredentialChanged, b.endpointAddress)
+	// config.yaml or the environment may have moved the endpoint since its key
+	// was entered: that key is for the other address, and goes.
+	b.dropStaleEndpointKey(context.Background())
 	b.tokens = contrib.NewTokenSource(b.github, b.githubChanged)
 }
 
@@ -89,6 +92,22 @@ func (b *Bridge) agentChanged(why string) {
 			}
 		}
 	})
+}
+
+// endpointAddress is the OpenAI-compatible endpoint's address now.
+func (b *Bridge) endpointAddress() string { return b.config().Agent.OpenAICompatible.BaseURL }
+
+// dropStaleEndpointKey forgets an endpoint key entered for another address
+// than the endpoint's now. One that can't be deleted stays unused all the same
+// (accounts.Agent hands it to its own address alone).
+func (b *Bridge) dropStaleEndpointKey(ctx context.Context) {
+	dropped, err := b.agentCreds.DropStaleEndpointKey(ctx)
+	switch {
+	case err != nil:
+		b.log.Warn("the endpoint's API key was entered for another address and couldn't be removed (it isn't used)", "err", err)
+	case dropped:
+		b.log.Info("the endpoint's address changed: its API key was for the other address and is removed (enter this address's key in Settings > Agent)")
+	}
 }
 
 // agentCredential is the agent box's hand-off source.

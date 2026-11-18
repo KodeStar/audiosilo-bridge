@@ -44,10 +44,13 @@ type AgentEndpoint struct {
 // EndpointCheck is POST /api/settings/agent/test: the endpoint's models (each
 // with what the endpoint says of its context and tool calling, when it does),
 // whether it offers the Responses API (yes, no, unknown), or Error, the reason
-// the models couldn't be listed. It is checked from the Bridge.
+// the models couldn't be listed. It is checked from the Bridge. KeySent: the
+// check carried the endpoint's API key, which goes to the saved address alone
+// (the one it was entered for); another address is checked without it.
 type EndpointCheck struct {
 	endpoint.Report
-	Error string `json:"error"`
+	Error   string `json:"error"`
+	KeySent bool   `json:"key_sent"`
 }
 
 // AgentBackend is Settings > Agent's part of the Backend.
@@ -57,8 +60,9 @@ type AgentBackend interface {
 	// value config refuses, said; ErrLocked: a change to a setting the
 	// environment sets).
 	SaveAgentSettings(ctx context.Context, s AgentSettings) error
-	// CheckEndpoint lists baseURL's models with the endpoint key set
-	// (ErrInvalid: an address CheckBaseURL refuses). The endpoint failing is
+	// CheckEndpoint lists baseURL's models, with the endpoint key only when
+	// baseURL is the saved address the key was entered for (ErrInvalid: an
+	// address CheckBaseURL refuses). The endpoint failing is
 	// EndpointCheck.Error, not an error.
 	CheckEndpoint(ctx context.Context, baseURL string) (EndpointCheck, error)
 }

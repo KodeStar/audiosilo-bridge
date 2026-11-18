@@ -38,6 +38,11 @@ export function AgentSettingsCard({ client }: { client: ApiClient }) {
   const [check, setCheck] = useState<EndpointCheck | null>(null);
   const [checking, setChecking] = useState(false);
   const [checkError, setCheckError] = useState<string | null>(null);
+  // keyless: the last check went without the API key that is set (the address
+  // tested isn't the saved one). keyCleared: a save moved the address, which
+  // removed the old address's key.
+  const [keyless, setKeyless] = useState(false);
+  const [keyCleared, setKeyCleared] = useState(false);
 
   // fill puts the saved agent settings into the fields.
   function fill(s: AgentSettings) {
@@ -69,6 +74,11 @@ export function AgentSettingsCard({ client }: { client: ApiClient }) {
   const modelLocked = isLocked(settings, KEY_ENDPOINT_MODEL);
   const endpoint = backend === 'openai-compatible';
   const update = endpointUpdate(baseUrl, model, models);
+  // The key is kept for the saved address alone, so it is entered once the
+  // address in the field is the saved one.
+  const addressSaved =
+    settings.openai_compatible.base_url !== '' &&
+    (urlLocked || update.base_url === settings.openai_compatible.base_url);
   const warnings = endpoint ? modelWarnings(check, chosenModels(update, settings.stages)) : [];
   const responses = endpoint ? responsesWarning(check) : null;
 
@@ -94,18 +104,19 @@ export function AgentSettingsCard({ client }: { client: ApiClient }) {
     setError(null);
     try {
       // A locked setting is sent with the value it has, which the Bridge accepts.
-      setSettings(
-        fill(
-          await client.saveAgentSettings({
-            backend: backendLocked ? settings.backend : backend,
-            openai_compatible: {
-              ...update,
-              base_url: urlLocked ? settings.openai_compatible.base_url : update.base_url,
-              model: modelLocked ? settings.openai_compatible.model : update.model,
-            },
-          }),
-        ),
+      const next = fill(
+        await client.saveAgentSettings({
+          backend: backendLocked ? settings.backend : backend,
+          openai_compatible: {
+            ...update,
+            base_url: urlLocked ? settings.openai_compatible.base_url : update.base_url,
+            model: modelLocked ? settings.openai_compatible.model : update.model,
+          },
+        }),
       );
+      // Another address: the Bridge removed the key entered for the old one.
+      setKeyCleared(settings.key_set && !next.key_set);
+      setSettings(next);
       setSaved(true);
     } catch (err) {
       setError(errorText(err, "Couldn't save the agent settings."));
@@ -116,6 +127,7 @@ export function AgentSettingsCard({ client }: { client: ApiClient }) {
   async function test() {
     const problem = checkBaseURL(baseUrl);
     setCheck(null);
+    setKeyless(false);
     if (problem) {
       setCheckError(problem);
       return;
@@ -124,6 +136,7 @@ export function AgentSettingsCard({ client }: { client: ApiClient }) {
     setCheckError(null);
     try {
       const res = await client.checkEndpoint(update.base_url);
+      setKeyless(!!settings?.key_set && !res.key_sent);
       if (res.error) setCheckError(res.error);
       else setCheck(res);
     } catch (err) {
@@ -185,6 +198,7 @@ export function AgentSettingsCard({ client }: { client: ApiClient }) {
                   // and warnings would mislead.
                   setCheck(null);
                   setCheckError(null);
+                  setKeyless(false);
                 }}
                 readOnly={urlLocked}
                 disabled={urlLocked}
@@ -250,6 +264,12 @@ export function AgentSettingsCard({ client }: { client: ApiClient }) {
       {endpoint && (
         <div className="mt-4 flex flex-col gap-3">
           {checkError && <Notice kind="error">{checkError}</Notice>}
+          {keyless && (
+            <Notice kind="warn">
+              Tested without the API key: the key is kept for the saved address and sent nowhere
+              else. Saving this address removes the key, and you enter this address&apos;s key then.
+            </Notice>
+          )}
           {check && (
             <Notice kind="ok">
               The endpoint answered with {check.models.length}{' '}
@@ -275,20 +295,35 @@ export function AgentSettingsCard({ client }: { client: ApiClient }) {
               ))}
             </ul>
           )}
-          <CredentialForm
-            client={client}
-            kind="endpoint_api_key"
-            set={settings.key_set}
-            setAt={settings.key_set_at}
-            onChange={(a) =>
-              // Only the key's state: the fields may hold changes not saved yet.
-              setSettings({
-                ...settings,
-                key_set: !!a.agent.set.endpoint_api_key,
-                key_set_at: a.agent.set_at_by_kind.endpoint_api_key ?? '',
-              })
-            }
-          />
+          {keyCleared && (
+            <Notice kind="warn">
+              The endpoint&apos;s API key was for the old address and is removed. Enter this
+              address&apos;s key below, if it takes one.
+            </Notice>
+          )}
+          {addressSaved ? (
+            <CredentialForm
+              client={client}
+              kind="endpoint_api_key"
+              set={settings.key_set}
+              setAt={settings.key_set_at}
+              onChange={(a) => {
+                setKeyCleared(false);
+                // Only the key's state: the fields may hold changes not saved yet.
+                setSettings({
+                  ...settings,
+                  key_set: !!a.agent.set.endpoint_api_key,
+                  key_set_at: a.agent.set_at_by_kind.endpoint_api_key ?? '',
+                });
+              }}
+            />
+          ) : (
+            <p className="border-t border-edge pt-4 text-sm text-dim">
+              Save the endpoint&apos;s address before its API key: the key is kept for the saved
+              address alone
+              {settings.key_set ? ', and saving another address removes the key set now.' : '.'}
+            </p>
+          )}
         </div>
       )}
     </Card>

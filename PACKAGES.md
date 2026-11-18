@@ -1268,6 +1268,16 @@ internal/
             line, sealed in the vault), handed to the agent container per run by
             agentbox; Credential's set time is that kind's own (agent/<kind>), so
             changing another kind never ends a refusal of the one in use. The
+            endpoint's key is kept for the ADDRESS it was entered for (its row's
+            login; NewAgent's endpoint func is the address now): Set needs an
+            address saved (else invalid), and State, Credential and
+            EndpointKey(baseURL) (Test connection's) treat a key entered for
+            another address as none, however the address changed (the page,
+            config.yaml, the environment), so the key only ever reaches the
+            address it was entered for; DropStaleEndpointKey deletes such a key
+            (no onChange: it was no credential). Set writes the key before its
+            row, so a failure between the two never leaves an old key under a
+            new address. The
             store's accounts table (migration 0006) keeps only what the page
             shows (login, signed_in_at, last_ok_at, refused_at, last_error),
             never a credential.
@@ -3867,8 +3877,14 @@ internal/
             running endpoint's address or models changed, agentChanged (the books parked on
             the agent try again; agentCredentialChanged goes through it too).
             CheckEndpoint runs endpoint.Check from the Bridge (the agent container
-            has no way to be asked; both reach the network alike) with the vault's
-            key and b.endpointClient; the endpoint failing is the answer's error.
+            has no way to be asked; both reach the network alike) with
+            b.endpointClient, and with the endpoint's key ONLY for the saved
+            address the key was entered for (agentCreds.EndpointKey; KeySent says
+            which): an address typed into the form is checked without it. The
+            endpoint failing is the answer's error. A save that changes the
+            address removes the key (dropStaleEndpointKey, also run at the start
+            for an address config.yaml or the environment moved), so the page
+            asks for the new address's.
             engine.go's agentBackend names codex or openai-compatible, else claude;
             the box takes Endpoint as a func reading config each time.
             Phase 4b: audible.go also builds audiblejob's Importer (the
@@ -3987,8 +4003,10 @@ internal/
             saved; 409 locked for an env-set value, 400 for one config refuses) and
             POST /api/settings/agent/test {base_url} (EndpointCheck: models with
             context_tokens/tools when the endpoint says, responses yes|no|unknown,
-            or error). The key is an agent credential (PUT /api/accounts/agent,
-            kind endpoint_api_key), never in these answers.
+            or error; key_sent: the check carried the key, which goes to the saved
+            address alone). The key is an agent credential (PUT /api/accounts/agent,
+            kind endpoint_api_key; 400 with no address saved), never in these
+            answers.
             transport-only HTTP of the Bridge's page (/api/*): login (rate limited),
             password (a wrong current one is 403, never 401, which signs the page
             out), status, pair/unpair, libraries + mount edits + check now, settings,

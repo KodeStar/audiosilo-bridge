@@ -14,6 +14,7 @@ import (
 	"github.com/kodestar/audiosilo-bridge/internal/accounts"
 	"github.com/kodestar/audiosilo-bridge/internal/api"
 	"github.com/kodestar/audiosilo-bridge/internal/config"
+	"github.com/kodestar/audiosilo-bridge/internal/secrets"
 )
 
 // Settings > Agent (bridge#84): the endpoint saves and applies at once, a new
@@ -123,11 +124,14 @@ func TestCheckEndpoint(t *testing.T) {
 		}
 	}))
 	defer srv.Close()
+	if err := b.SaveAgentSettings(ctx, api.AgentSettings{Endpoint: api.AgentEndpoint{BaseURL: srv.URL + "/v1"}}); err != nil {
+		t.Fatal(err)
+	}
 	if err := b.SetAgentCredential(ctx, accounts.AgentEndpointKey, "sk-endpoint-vault"); err != nil {
 		t.Fatal(err)
 	}
 	res, err := b.CheckEndpoint(ctx, srv.URL+"/v1/")
-	if err != nil || res.Error != "" || len(res.Models) != 2 || res.Responses != "yes" {
+	if err != nil || res.Error != "" || len(res.Models) != 2 || res.Responses != "yes" || !res.KeySent {
 		t.Fatalf("check = %+v, %v", res, err)
 	}
 	if m := res.Models[1]; m.ID != "tiny" || m.ContextTokens != 4096 || m.Tools == nil || *m.Tools {
@@ -147,13 +151,142 @@ func TestCheckEndpoint(t *testing.T) {
 		}
 	}
 	res, err = b.CheckEndpoint(ctx, srv.URL+"/nope")
-	if err != nil || res.Error == "" || len(res.Models) != 0 || res.Models == nil {
+	if err != nil || res.Error == "" || len(res.Models) != 0 || res.Models == nil || res.KeySent {
 		t.Fatalf("a wrong path = %+v, %v", res, err)
 	}
 	mu.Lock()
 	defer mu.Unlock()
 	if len(auth) != n+1 {
 		t.Fatalf("requests = %d, want only the wrong path's one more (a refused address is never requested)", len(auth)-n)
+	}
+	if auth[n] != "" {
+		t.Fatalf("an address that isn't the saved one got Authorization %q", auth[n])
+	}
+}
+
+// The endpoint's key only ever reaches the address it was entered for: Test
+// connection sends it to the saved address (allowed) and to no other, typed
+// into the form or saved since (denied); saving another address removes the
+// key, so the page asks for it again, and saving the same one keeps it.
+func TestEndpointKeyStaysWithItsAddress(t *testing.T) {
+	ctx := context.Background()
+	b := newTestBridge(t)
+	type hit struct{ host, auth string }
+	var mu sync.Mutex
+	var hits []hit
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		hits = append(hits, hit{r.Host, r.Header.Get("Authorization")})
+		mu.Unlock()
+		if r.URL.Path == "/v1/models" {
+			_, _ = w.Write([]byte(`{"data":[{"id":"m"}]}`))
+			return
+		}
+		w.WriteHeader(http.StatusBadRequest)
+	})
+	mine, theirs := httptest.NewServer(handler), httptest.NewServer(handler)
+	defer mine.Close()
+	defer theirs.Close()
+	authTo := func(srv *httptest.Server) []string {
+		mu.Lock()
+		defer mu.Unlock()
+		var out []string
+		for _, h := range hits {
+			if h.host == strings.TrimPrefix(srv.URL, "http://") {
+				out = append(out, h.auth)
+			}
+		}
+		return out
+	}
+
+	if err := b.SetAgentCredential(ctx, accounts.AgentEndpointKey, "sk-mine"); !errors.Is(err, api.ErrInvalid) {
+		t.Fatalf("a key before any address = %v", err)
+	}
+	save := func(base string) {
+		t.Helper()
+		if err := b.SaveAgentSettings(ctx, api.AgentSettings{Endpoint: api.AgentEndpoint{BaseURL: base, Model: "m"}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	save(mine.URL + "/v1")
+	if err := b.SetAgentCredential(ctx, accounts.AgentEndpointKey, "sk-mine"); err != nil {
+		t.Fatal(err)
+	}
+	// Saved again as it is (a model changed, say): the key stays.
+	save(mine.URL + "/v1/")
+	if s := b.AgentSettings(ctx); !s.KeySet {
+		t.Fatal("saving the same address removed its key")
+	}
+	if res, err := b.CheckEndpoint(ctx, mine.URL+"/v1"); err != nil || res.Error != "" || !res.KeySent {
+		t.Fatalf("the saved address: %+v, %v", res, err)
+	}
+	// Another address typed into the form: checked, without the key.
+	if res, err := b.CheckEndpoint(ctx, theirs.URL+"/v1"); err != nil || res.Error != "" || res.KeySent || len(res.Models) != 1 {
+		t.Fatalf("another address: %+v, %v", res, err)
+	}
+	for _, a := range authTo(theirs) {
+		if a != "" {
+			t.Fatalf("an address the key wasn't entered for got Authorization %q", a)
+		}
+	}
+	if got := authTo(mine); len(got) == 0 || got[0] != "Bearer sk-mine" {
+		t.Fatalf("the saved address got %q", got)
+	}
+
+	// Saving the other address removes the key: nothing is handed to a run
+	// there, and a check sends none.
+	save(theirs.URL + "/v1")
+	if s := b.AgentSettings(ctx); s.KeySet || s.KeySetAt != "" {
+		t.Fatalf("the key outlived its address: %+v", s)
+	}
+	if ok, _ := b.vault.Present(secrets.EndpointAPIKey); ok {
+		t.Fatal("the key is still in the vault")
+	}
+	if _, v, _, ok := b.agentCredential("openai-compatible"); ok || v != "" {
+		t.Fatalf("a run against the new address would get %q", v)
+	}
+	if res, err := b.CheckEndpoint(ctx, theirs.URL+"/v1"); err != nil || res.KeySent {
+		t.Fatalf("the new address: %+v, %v", res, err)
+	}
+	for _, a := range authTo(theirs) {
+		if a != "" {
+			t.Fatalf("the new address got Authorization %q", a)
+		}
+	}
+	// Back to the first: its key is gone, not waiting.
+	save(mine.URL + "/v1")
+	if s := b.AgentSettings(ctx); s.KeySet {
+		t.Fatal("a removed key came back with its address")
+	}
+}
+
+// config.yaml or the environment can move the endpoint between starts: the key
+// entered for the old address isn't the new one's (denied), and is removed at
+// the start.
+func TestEndpointKeyDroppedWhenTheAddressMovedOutsideThePage(t *testing.T) {
+	ctx := context.Background()
+	b := newTestBridge(t)
+	if err := b.SaveAgentSettings(ctx, api.AgentSettings{Endpoint: api.AgentEndpoint{BaseURL: "http://192.168.1.20:11434/v1", Model: "m"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.SetAgentCredential(ctx, accounts.AgentEndpointKey, "sk-mine"); err != nil {
+		t.Fatal(err)
+	}
+	_ = b.db.Close()
+	t.Setenv("AUDIOSILO_BRIDGE_AGENT_OPENAI_COMPATIBLE_BASE_URL", "http://10.0.0.5:1234/v1")
+	b2, _, err := New(ctx, Options{DataDir: b.dataDir, Version: "0.2.0", Listen: "127.0.0.1:0", Logger: quiet()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = b2.db.Close() }()
+	if s := b2.AgentSettings(ctx); s.Endpoint.BaseURL != "http://10.0.0.5:1234/v1" || s.KeySet {
+		t.Fatalf("after the address moved: %+v", s)
+	}
+	if _, v, _, ok := b2.agentCredential("openai-compatible"); ok || v != "" {
+		t.Fatalf("a run against the new address would get %q", v)
+	}
+	if ok, _ := b2.vault.Present(secrets.EndpointAPIKey); ok {
+		t.Fatal("the old address's key is still in the vault")
 	}
 }
 

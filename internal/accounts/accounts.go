@@ -579,17 +579,64 @@ type Agent struct {
 	db       Store
 	now      func() time.Time
 	onChange func()
+	// endpoint is the OpenAI-compatible endpoint's address now ("" for none).
+	// The endpoint's key is kept for the address it was entered for (its
+	// accounts row's login) and is no credential under any other: whatever
+	// changes the address (the page, config.yaml, the environment), the key
+	// only ever reaches the address it was entered for.
+	endpoint func() string
 }
 
-// NewAgent returns the agent's credential store; onChange runs after a change.
-func NewAgent(vault secrets.Store, db Store, now func() time.Time, onChange func()) *Agent {
+// NewAgent returns the agent's credential store; onChange runs after a change,
+// and endpoint is the OpenAI-compatible endpoint's address now (nil: none, so
+// no endpoint key can be set).
+func NewAgent(vault secrets.Store, db Store, now func() time.Time, onChange func(), endpoint func() string) *Agent {
 	if now == nil {
 		now = time.Now
 	}
 	if onChange == nil {
 		onChange = func() {}
 	}
-	return &Agent{vault: vault, db: db, now: now, onChange: onChange}
+	if endpoint == nil {
+		endpoint = func() string { return "" }
+	}
+	return &Agent{vault: vault, db: db, now: now, onChange: onChange, endpoint: endpoint}
+}
+
+// endpointKeyFor is the address the stored endpoint key was entered for (""
+// with none, or one saved before keys were kept by address).
+func (a *Agent) endpointKeyFor(ctx context.Context) string {
+	acc, err := a.db.GetAccount(ctx, kindProvider(AgentEndpointKey))
+	if err != nil {
+		return ""
+	}
+	return acc.Login
+}
+
+// EndpointKey is the endpoint's API key for a request to baseURL: the stored
+// key only when baseURL is both the endpoint's address now and the address the
+// key was entered for, else "" (the request goes without one).
+func (a *Agent) EndpointKey(ctx context.Context, baseURL string) (string, error) {
+	if baseURL == "" || baseURL != a.endpoint() || baseURL != a.endpointKeyFor(ctx) {
+		return "", nil
+	}
+	return a.vault.Get(AgentEndpointKey)
+}
+
+// DropStaleEndpointKey deletes an endpoint key entered for another address
+// than the endpoint's now (the address changed, so the page asks for the key
+// again). It was no credential already, so onChange doesn't run.
+func (a *Agent) DropStaleEndpointKey(ctx context.Context) (dropped bool, err error) {
+	if ok, err := a.vault.Present(AgentEndpointKey); err != nil || !ok {
+		return false, err
+	}
+	if addr := a.endpoint(); addr != "" && addr == a.endpointKeyFor(ctx) {
+		return false, nil
+	}
+	if err := a.vault.Delete(AgentEndpointKey); err != nil {
+		return false, err
+	}
+	return true, a.db.DeleteAccount(ctx, kindProvider(AgentEndpointKey))
 }
 
 // AgentState is which agent credentials the vault holds (never a value), when
@@ -607,6 +654,11 @@ func (a *Agent) State(ctx context.Context) AgentState {
 	st := AgentState{Set: map[string]bool{}, SetAtByKind: map[string]string{}}
 	for _, k := range AgentKinds {
 		ok, _ := a.vault.Present(k)
+		if k == AgentEndpointKey {
+			// One entered for another address is no key for this one.
+			addr := a.endpoint()
+			ok = ok && addr != "" && addr == a.endpointKeyFor(ctx)
+		}
 		st.Set[k] = ok
 		if !ok {
 			continue
@@ -623,7 +675,8 @@ func (a *Agent) State(ctx context.Context) AgentState {
 
 // Set stores a credential of kind (one of AgentKinds). The value is checked
 // for shape only, by the rules the runner reads credential.json with: one line
-// of printable text, at most agentproto.MaxCredentialValueBytes.
+// of printable text, at most agentproto.MaxCredentialValueBytes. The endpoint's
+// key is entered for the endpoint's address now, so it needs one.
 func (a *Agent) Set(ctx context.Context, kind, value string) error {
 	if !slices.Contains(AgentKinds, kind) {
 		return invalid("unknown credential kind %q", kind)
@@ -637,11 +690,21 @@ func (a *Agent) Set(ctx context.Context, kind, value string) error {
 	case !agentproto.PrintableLine(value):
 		return invalid("the credential holds a space, a line break or a character a key never has (paste it as one line)")
 	}
+	// The address an endpoint key is for, read once: the row below names the
+	// address this very key was entered for.
+	keyFor := ""
+	if kind == AgentEndpointKey {
+		if keyFor = a.endpoint(); keyFor == "" {
+			return invalid("save the endpoint's address in Settings > Agent before its API key: the key is kept for that address alone")
+		}
+	}
+	// The key before its row: a failure between the two leaves the new key
+	// under the old row's address (unused), never an old key under a new one.
 	if err := a.vault.Set(kind, value); err != nil {
 		return err
 	}
 	now := a.now()
-	if err := a.db.SignInAccount(ctx, kindProvider(kind), "", now); err != nil {
+	if err := a.db.SignInAccount(ctx, kindProvider(kind), keyFor, now); err != nil {
 		return err
 	}
 	if err := a.db.SignInAccount(ctx, ProviderAgent, "", now); err != nil {
@@ -709,7 +772,13 @@ func KindsFor(cli string) []string {
 // agentproto kind, its value and when it was set. ok is false when there is none.
 func (a *Agent) Credential(ctx context.Context, cli string) (kind, value string, since time.Time, ok bool) {
 	for _, o := range cliKinds[cli] {
-		v, err := a.vault.Get(o.name)
+		var v string
+		var err error
+		if o.name == AgentEndpointKey {
+			v, err = a.EndpointKey(ctx, a.endpoint())
+		} else {
+			v, err = a.vault.Get(o.name)
+		}
 		if err != nil || v == "" {
 			continue
 		}
