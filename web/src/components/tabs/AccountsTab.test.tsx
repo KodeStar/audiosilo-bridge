@@ -237,4 +237,27 @@ describe('AccountsTab', () => {
     render(<AccountsTab client={api()} />);
     expect(await screen.findByText(/has a credential of its own/)).toBeInTheDocument();
   });
+
+  it('says when a ready agent shares its credential', async () => {
+    const a = accountsFixture();
+    const warning = "the agent's credential is readable by every user on the staging volume";
+    mockTab({
+      'GET /api/accounts': { body: { ...a, agent: { ...a.agent, available: true, warning } } },
+    });
+    render(<AccountsTab client={api()} />);
+    const card = await screen.findByRole('region', { name: 'Agent' });
+    expect(await within(card).findByText(warning)).toBeInTheDocument();
+    expect(within(card).getByText('Ready')).toBeInTheDocument();
+  });
+
+  it('says nothing more for a ready agent with no warning', async () => {
+    const a = accountsFixture();
+    mockTab({
+      'GET /api/accounts': { body: { ...a, agent: { ...a.agent, available: true } } },
+    });
+    render(<AccountsTab client={api()} />);
+    const card = await screen.findByRole('region', { name: 'Agent' });
+    expect(within(card).queryByText(/readable by every user/)).toBeNull();
+    expect(within(card).queryByText(a.agent.detail)).toBeNull();
+  });
 });

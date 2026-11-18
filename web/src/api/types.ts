@@ -441,6 +441,10 @@ export interface AgentAccount {
   detail: string;
   handoff: boolean;
   container_credential: string;
+  // What the tab says beside the state ('' for nothing): the credential
+  // shared with every user because something interfered with the Bridge's
+  // group check.
+  warning: string;
 }
 
 // GET /api/accounts

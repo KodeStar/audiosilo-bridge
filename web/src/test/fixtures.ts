@@ -58,6 +58,7 @@ export function accountsFixture(over: Partial<Accounts> = {}): Accounts {
       detail: "claude has no credential: set one on the Bridge's Accounts tab",
       handoff: false,
       container_credential: '',
+      warning: '',
     },
     ...over,
   };
