@@ -43,7 +43,7 @@ func TestGenerateBooksMapAJobToItsBook(t *testing.T) {
 
 	// Ended jobs are the retention sweep's work list, from the moment they ended.
 	end := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
-	if err := db.EndGenerateBook(ctx, 12, end); err != nil {
+	if err := db.EndGenerateBook(ctx, 12, 1, end); err != nil {
 		t.Fatal(err)
 	}
 	if got, _ := db.UnsweptGenerateBooks(ctx, end.Add(-time.Second)); len(got) != 0 {
@@ -73,7 +73,7 @@ func TestGenerateBooksMapAJobToItsBook(t *testing.T) {
 		t.Fatalf("a reopened job is still listed as ended: %+v", got)
 	}
 	// Once it ends again it is swept again (the mapping cleared swept_at).
-	if err := db.EndGenerateBook(ctx, 12, end); err != nil {
+	if err := db.EndGenerateBook(ctx, 12, 1, end); err != nil {
 		t.Fatal(err)
 	}
 	if got, _ := db.UnsweptGenerateBooks(ctx, end.Add(time.Hour)); len(got) != 1 {
@@ -214,5 +214,148 @@ func TestLatestGenerateBookAtPassesOverTheAudioRun(t *testing.T) {
 	}
 	if id, err := db.LatestGenerateBookAt(ctx, 1, "A/Book"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("only the audio run left = %d, %v; want ErrNotFound", id, err)
+	}
+}
+
+// A job's end stops its engine book only while it still owns it, checked in the
+// write: no later attempt of the job recorded, no other open job on the book, and
+// with Ended the job's mapping still ended (a later claim's attach reopens it).
+func TestSetBookStatusUnlessFollowed(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	b, _ := db.CreateBook(ctx, NewBook{SourcePath: "/s", WorkDir: "/w", Title: "S"})
+	claim := func(job int64, attempt int) {
+		t.Helper()
+		if err := db.RecordClaim(ctx, ServerJob{ID: job, Kind: "sidecars.generate", Attempt: attempt}); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.PutGenerateBook(ctx, GenerateBook{ServerJobID: job, BookID: &b.ID, LibraryID: 1, RelPath: "S"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stop := func(g StopGuard) error {
+		_ = db.SetBookStatus(ctx, b.ID, "", "", "")
+		return db.SetBookStatusUnlessFollowed(ctx, b.ID, "", "", "failed", "cancelled by user", g)
+	}
+	stopped := func(what string, err error, want bool) {
+		t.Helper()
+		got, _ := db.GetBook(ctx, b.ID)
+		if want && (err != nil || got.Status != "failed" || got.Error != "cancelled by user") {
+			t.Fatalf("%s: %v, status %q error %q; want it stopped", what, err, got.Status, got.Error)
+		}
+		if !want && (!errors.Is(err, ErrFollowed) || got.Status != "") {
+			t.Fatalf("%s: %v, status %q; want ErrFollowed and the book untouched", what, err, got.Status)
+		}
+	}
+	claim(1, 1)
+	stopped("the job's own attempt", stop(StopGuard{JobID: 1, Attempt: 1}), true)
+	if err := db.EndGenerateBook(ctx, 1, 1, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	stopped("its mapping still ended", stop(StopGuard{JobID: 1, Attempt: 1, Ended: true}), true)
+	if err := db.ReopenGenerateBook(ctx, 1); err != nil {
+		t.Fatal(err)
+	}
+	stopped("its mapping reopened", stop(StopGuard{JobID: 1, Attempt: 1, Ended: true}), false)
+	claim(1, 2)
+	stopped("a later attempt recorded", stop(StopGuard{JobID: 1, Attempt: 1}), false)
+	claim(2, 1)
+	stopped("another open job on the book", stop(StopGuard{JobID: 1, Attempt: 2}), false)
+	if err := db.FinishServerJob(ctx, 2, 1, JobDone, nil, ""); err != nil {
+		t.Fatal(err)
+	}
+	stopped("the other job finished", stop(StopGuard{JobID: 1, Attempt: 2}), true)
+}
+
+// A job's end never stops its engine book over what a stage wrote since the end
+// read it: a failure keeps its own error and a finished book stays done
+// (ErrSettled, told apart from ErrFollowed), while a later claim still reads as
+// ErrFollowed whatever the book's status.
+func TestSetBookStatusUnlessFollowedLeavesASettledBook(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	b, _ := db.CreateBook(ctx, NewBook{SourcePath: "/s", WorkDir: "/w", Title: "S"})
+	if err := db.RecordClaim(ctx, ServerJob{ID: 1, Kind: "sidecars.generate", Attempt: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.PutGenerateBook(ctx, GenerateBook{ServerJobID: 1, BookID: &b.ID, LibraryID: 1, RelPath: "S"}); err != nil {
+		t.Fatal(err)
+	}
+	g := StopGuard{JobID: 1, Attempt: 1}
+	cancel := func() error {
+		return db.SetBookStatusUnlessFollowed(ctx, b.ID, "", "", "failed", "cancelled by user", g)
+	}
+
+	// The end read the book running; a stage failed it before the cancel's write.
+	if err := db.SetBookStatus(ctx, b.ID, "failed", "asr: out of memory", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := cancel(); !errors.Is(err, ErrSettled) {
+		t.Fatalf("a cancel over a failure written since the read = %v, want ErrSettled", err)
+	}
+	if got, _ := db.GetBook(ctx, b.ID); got.Status != "failed" || got.Error != "asr: out of memory" {
+		t.Fatalf("the failure was overwritten: status %q error %q", got.Status, got.Error)
+	}
+
+	// The book finished meanwhile.
+	if err := db.SetBookStatus(ctx, b.ID, "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetBookState(ctx, b.ID, "done", "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := cancel(); !errors.Is(err, ErrSettled) {
+		t.Fatalf("a cancel over a book done since the read = %v, want ErrSettled", err)
+	}
+	if got, _ := db.GetBook(ctx, b.ID); got.Status != "" {
+		t.Fatalf("a done book was cancelled: status %q error %q", got.Status, got.Error)
+	}
+
+	// Allowed: the book as read is stopped.
+	if err := db.SetBookState(ctx, b.ID, "asr", "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := cancel(); err != nil {
+		t.Fatalf("a cancel of the book as read = %v", err)
+	}
+
+	// A later claim reads as ErrFollowed even with the book changed too.
+	if err := db.SetBookStatus(ctx, b.ID, "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.RecordClaim(ctx, ServerJob{ID: 1, Kind: "sidecars.generate", Attempt: 2}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetBookStatusUnlessFollowed(ctx, b.ID, "failed", "x", "failed", "cancelled by user", g); !errors.Is(err, ErrFollowed) {
+		t.Fatalf("a cancel with a later claim recorded = %v, want ErrFollowed", err)
+	}
+}
+
+// A job's end is recorded only while no later attempt of it is: one whose attach
+// found the mapping open keeps it open.
+func TestEndGenerateBookLeavesALaterClaimOpen(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	b, _ := db.CreateBook(ctx, NewBook{SourcePath: "/s", WorkDir: "/w", Title: "S"})
+	if err := db.EndGenerateBook(ctx, 1, 1, time.Now()); err != nil {
+		t.Fatalf("no mapping = %v, want nil", err)
+	}
+	if err := db.PutGenerateBook(ctx, GenerateBook{ServerJobID: 1, BookID: &b.ID, LibraryID: 1, RelPath: "S"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.RecordClaim(ctx, ServerJob{ID: 1, Kind: "sidecars.generate", Attempt: 2}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.EndGenerateBook(ctx, 1, 1, time.Now()); !errors.Is(err, ErrFollowed) {
+		t.Fatalf("attempt 1's end with attempt 2 recorded = %v, want ErrFollowed", err)
+	}
+	if g, _ := db.GetGenerateBook(ctx, 1); g.EndedAt != "" {
+		t.Fatalf("attempt 1 ended the mapping attempt 2 follows: %q", g.EndedAt)
+	}
+	if err := db.EndGenerateBook(ctx, 1, 2, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if g, _ := db.GetGenerateBook(ctx, 1); g.EndedAt == "" {
+		t.Fatal("attempt 2's own end wasn't recorded")
 	}
 }

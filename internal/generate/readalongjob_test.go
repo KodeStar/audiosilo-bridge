@@ -457,7 +457,7 @@ func TestReadalongReusesTheEarlierRun(t *testing.T) {
 				if err := hr.db.PutGenerateBook(context.Background(), store.GenerateBook{ServerJobID: 99, BookID: &old.ID, LibraryID: 1, RelPath: "Author/Book"}); err != nil {
 					t.Fatal(err)
 				}
-				if err := hr.db.EndGenerateBook(context.Background(), 99, time.Now()); err != nil {
+				if err := hr.db.EndGenerateBook(context.Background(), 99, 1, time.Now()); err != nil {
 					t.Fatal(err)
 				}
 				if err := hr.db.MarkGenerateBookSwept(context.Background(), old.ID, time.Now()); err != nil {
@@ -521,7 +521,7 @@ func TestReadalongKeepsAWholeRunsNotesAfterARewind(t *testing.T) {
 	if err := hr.db.PutGenerateBook(ctx, store.GenerateBook{ServerJobID: 99, BookID: &old.ID, LibraryID: 1, RelPath: "Author/Book"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := hr.db.EndGenerateBook(ctx, 99, time.Now()); err != nil {
+	if err := hr.db.EndGenerateBook(ctx, 99, 1, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	if err := hr.db.MarkGenerateBookSwept(ctx, old.ID, time.Now()); err != nil {

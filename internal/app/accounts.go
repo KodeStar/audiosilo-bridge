@@ -54,7 +54,7 @@ func forgetSealedGitHubPAT(vault secrets.Store, log *slog.Logger) {
 // says so at once, and the books waiting for a credential try again.
 func (b *Bridge) githubChanged() {
 	b.Kick()
-	go b.readmitContributions(context.Background())
+	b.bg.run(func(ctx context.Context) { b.readmitContributions(ctx) })
 }
 
 // readmitContributions re-admits the books parked waiting for a GitHub credential
@@ -75,14 +75,13 @@ func (b *Bridge) agentCredentialChanged() {
 	for _, code := range codes {
 		b.wakeParked(code) // a describe job waits in its own loop
 	}
-	go func() {
-		ctx := context.Background()
+	b.bg.run(func(ctx context.Context) {
 		if e := b.engine.get(); e != nil {
 			for _, code := range codes {
 				e.sched.ReadmitParked(ctx, "the agent's credential changed on the Accounts tab", code)
 			}
 		}
-	}()
+	})
 }
 
 // agentCredential is the agent box's hand-off source.

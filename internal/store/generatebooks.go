@@ -72,12 +72,101 @@ func (db *DB) SetGenerateBookPath(ctx context.Context, serverJobID int64, relPat
 	return err
 }
 
-// EndGenerateBook records when a server job ended (done, failed or cancelled):
-// the transcript retention window counts from it.
-func (db *DB) EndGenerateBook(ctx context.Context, serverJobID int64, at time.Time) error {
-	_, err := db.sql.ExecContext(ctx,
-		`UPDATE generate_books SET ended_at = ? WHERE server_job_id = ?`, timestamp(at), serverJobID)
-	return err
+// StopGuard is what a job's end read before it stops its engine book: the job,
+// its attempt, and whether the job's mapping recorded its end already (Ended). A
+// later claim of the same job records its attempt (RecordClaim) before its attach
+// reopens the mapping and re-admits the book, and another open job may follow
+// the book: either way the stop is no longer this end's to make.
+type StopGuard struct {
+	JobID   int64
+	Attempt int
+	Ended   bool
+}
+
+// ErrFollowed is a guarded write (SetBookStatusUnlessFollowed, EndGenerateBook)
+// refused: a later claim of the job, or another open job, follows the engine book
+// now.
+var ErrFollowed = errors.New("a later claim of the job, or another open job, follows the engine book")
+
+// laterClaimSQL is true while a later attempt of server job ?1 than ?2 is
+// recorded here.
+const laterClaimSQL = `EXISTS (SELECT 1 FROM server_jobs WHERE id = ?1 AND attempt > ?2)`
+
+// openJobsSQL is the open server jobs' mappings (g): the job still running here,
+// its mapping not ended. Callers add the book and the job to leave out.
+const openJobsSQL = `generate_books g JOIN server_jobs j ON j.id = g.server_job_id
+		  WHERE g.ended_at = '' AND j.state = 'running'`
+
+// ErrSettled is SetBookStatusUnlessFollowed for a book that settled since the
+// caller read it while its job still owns it: it finished, or its status or
+// error changed (a stage's real failure written meanwhile is never overwritten).
+var ErrSettled = errors.New("the engine book finished or its status changed since it was read")
+
+// stopGuardSQL is a StopGuard holding on the books row (?1 the job, ?2 its
+// attempt, ?3 Ended): no later attempt of the job, the job's mapping still ended
+// when Ended, and no other open job on the book.
+const stopGuardSQL = `NOT ` + laterClaimSQL + `
+		    AND (?3 = 0 OR EXISTS (SELECT 1 FROM generate_books WHERE server_job_id = ?1 AND ended_at != ''))
+		    AND NOT EXISTS (SELECT 1 FROM ` + openJobsSQL + ` AND g.book_id = books.id AND g.server_job_id != ?1)`
+
+// SetBookStatusUnlessFollowed is SetBookStatus with no park code nor retry, but
+// only while g holds and the book is as the caller read it (in the one statement,
+// so a later claim that reopens the mapping between a check and the write is
+// never stopped, nor a failure written meanwhile overwritten): no later attempt
+// of g's job is recorded, g's mapping is still ended when g.Ended, no other open
+// job follows the book (OpenGenerateJobsForBook), and the book isn't done and
+// still has fromStatus and fromErr. ErrFollowed when g doesn't hold (or the book
+// went), ErrSettled when only the book changed.
+func (db *DB) SetBookStatusUnlessFollowed(ctx context.Context, id int64, fromStatus, fromErr, status, errMsg string, g StopGuard) error {
+	res, err := db.sql.ExecContext(ctx,
+		`UPDATE books SET status = ?4, error = ?5, park_code = ?6, retry_at = ?7, updated_at = ?8
+		  WHERE id = ?9 AND state != 'done' AND status = ?10 AND error = ?11 AND `+stopGuardSQL,
+		g.JobID, g.Attempt, g.Ended, status, errMsg, enforceParkCode(status, ""), enforceRetryAt(status, ""),
+		timestamp(nowFn()), id, fromStatus, fromErr)
+	if err := checkAffected(res, err); !errors.Is(err, ErrNotFound) {
+		return err
+	}
+	// Told apart in one read: settled only while g holds and the book did change.
+	// A book still as read means g refused the write (another open job that has
+	// ended since): ErrFollowed, so the caller tries again after its own end.
+	var owned, asRead bool
+	if err := db.sql.QueryRowContext(ctx,
+		`SELECT EXISTS (SELECT 1 FROM books WHERE id = ?4 AND `+stopGuardSQL+`),
+		        EXISTS (SELECT 1 FROM books WHERE id = ?4 AND state != 'done' AND status = ?5 AND error = ?6)`,
+		g.JobID, g.Attempt, g.Ended, id, fromStatus, fromErr).Scan(&owned, &asRead); err != nil {
+		return err
+	}
+	if owned && !asRead {
+		return ErrSettled
+	}
+	return ErrFollowed
+}
+
+// EndGenerateBook records when attempt of a server job ended (done, failed or
+// cancelled): the transcript retention window counts from it. It is written only
+// while no later attempt of the job is recorded (in the one statement): a later
+// claim whose attach found the mapping open keeps it open. ErrFollowed when one
+// is; nil with nothing written when the job has no mapping.
+func (db *DB) EndGenerateBook(ctx context.Context, serverJobID int64, attempt int, at time.Time) error {
+	res, err := db.sql.ExecContext(ctx,
+		`UPDATE generate_books SET ended_at = ?3 WHERE server_job_id = ?1 AND NOT `+laterClaimSQL,
+		serverJobID, attempt, timestamp(at))
+	if err := checkAffected(res, err); !errors.Is(err, ErrNotFound) {
+		return err
+	}
+	if later, err := db.LaterClaim(ctx, serverJobID, attempt); err != nil || !later {
+		return err
+	}
+	return ErrFollowed
+}
+
+// LaterClaim reports whether a later attempt of server job serverJobID than
+// attempt is recorded here (RecordClaim): that claim follows the job's engine
+// book now, even before its attach reopens the job's mapping.
+func (db *DB) LaterClaim(ctx context.Context, serverJobID int64, attempt int) (bool, error) {
+	var later bool
+	err := db.sql.QueryRowContext(ctx, `SELECT `+laterClaimSQL, serverJobID, attempt).Scan(&later)
+	return later, err
 }
 
 // ReopenGenerateBook marks a server job's mapping open again (a job the server
@@ -102,8 +191,7 @@ func (db *DB) GenerateBookFollowed(ctx context.Context, bookID int64) (bool, err
 // bookID.
 func (db *DB) OpenGenerateJobsForBook(ctx context.Context, bookID, exceptJob int64) ([]int64, error) {
 	rows, err := db.sql.QueryContext(ctx,
-		`SELECT g.server_job_id FROM generate_books g JOIN server_jobs j ON j.id = g.server_job_id
-		  WHERE g.book_id = ? AND g.server_job_id != ? AND g.ended_at = '' AND j.state = 'running'
+		`SELECT g.server_job_id FROM `+openJobsSQL+` AND g.book_id = ? AND g.server_job_id != ?
 		  ORDER BY g.server_job_id`,
 		bookID, exceptJob)
 	if err != nil {

@@ -7,12 +7,14 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"slices"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/kodestar/audiosilo-bridge/internal/accounts"
 	"github.com/kodestar/audiosilo-bridge/internal/agentbox"
@@ -391,6 +393,81 @@ func TestGitHubSignInResumesContributionParks(t *testing.T) {
 	}
 }
 
+// The re-admits a credential change starts run in the Bridge's background tasks,
+// which Run stops (bgTasks.stop: their context ends, and it waits for them) before
+// the store closes (bridge#80): a change after the stop starts nothing, where a
+// bare goroutine re-admitted the book with the store closing under it.
+func TestCredentialReadmitsStopWithTheBridge(t *testing.T) {
+	ctx := context.Background()
+	t.Setenv("PATH", t.TempDir()) // no `gh` to fall back to
+	t.Setenv(contrib.GitHubTokenEnv, "ghp_signed_in")
+	b := newTestBridge(t)
+	sched := scheduler.New(b.db, events.NewHub(64), scheduler.NewStubExecutor(0, 0), 1, t.TempDir(), false)
+	b.engine.cur.Store(&engine{sched: sched})
+	bk, err := b.db.CreateBook(ctx, store.NewBook{SourcePath: "/books/parked.m4b", WorkDir: t.TempDir(), Title: "parked"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.db.SetBookState(ctx, bk.ID, string(state.Contributing), string(state.StatusNeedsAttention), "parked",
+		string(state.ParkContribUnavailable)); err != nil {
+		t.Fatal(err)
+	}
+	b.bg.stop()
+	b.githubChanged()
+	b.agentCredentialChanged()
+	time.Sleep(50 * time.Millisecond)
+	if got, err := b.db.GetBook(ctx, bk.ID); err != nil || got.Status != string(state.StatusNeedsAttention) {
+		t.Fatalf("a re-admit ran after the Bridge stopped: status %q, %v", got.Status, err)
+	}
+}
+
+// bgTasks.stop ends the tasks' context and returns only once every task started
+// has returned.
+func TestBackgroundTasksStopWaitsForThem(t *testing.T) {
+	t.Parallel()
+	var tasks bgTasks
+	tasks.init()
+	started, ended := make(chan struct{}), make(chan struct{})
+	tasks.run(func(ctx context.Context) {
+		close(started)
+		<-ctx.Done()
+		time.Sleep(20 * time.Millisecond)
+		close(ended)
+	})
+	<-started
+	tasks.stop()
+	select {
+	case <-ended:
+	default:
+		t.Fatal("stop returned before the task did")
+	}
+}
+
+// A Run that can't listen still stops the background tasks before it closes the
+// store they write to.
+func TestRunStopsBackgroundTasksWhenItCannotListen(t *testing.T) {
+	taken, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = taken.Close() }()
+	b, _, err := New(context.Background(), Options{DataDir: t.TempDir(), Version: "0.1.0", Listen: taken.Addr().String(),
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ended := make(chan struct{})
+	b.bg.run(func(ctx context.Context) { <-ctx.Done(); close(ended) })
+	if err := b.Run(context.Background()); err == nil {
+		t.Fatal("Run on a taken address returned no error")
+	}
+	select {
+	case <-ended:
+	default:
+		t.Fatal("Run returned with a background task still running")
+	}
+}
+
 // A GitHub sign-in that resolved while the engine was starting (githubChanged
 // re-admits nothing without a running engine) still resumes the books parked
 // waiting for one once the engine is up (bridge#25). Signed out, they wait
@@ -412,7 +489,10 @@ func TestEngineStartResumesContributionParks(t *testing.T) {
 		t.Fatalf("re-admitted %d with no engine", n)
 	}
 	sched := scheduler.New(b.db, events.NewHub(64), scheduler.NewStubExecutor(0, 0), 1, t.TempDir(), false)
-	b.engineStarted(ctx, &engine{sched: sched})
+	engineCtx, stop := context.WithCancel(ctx)
+	var wg sync.WaitGroup
+	t.Cleanup(func() { stop(); wg.Wait() })
+	b.engineStarted(engineCtx, &engine{sched: sched}, wg.Go)
 	waitFor(t, "the contribution park re-admitted at the engine's start", func() bool {
 		got, err := b.db.GetBook(ctx, bk.ID)
 		return err == nil && got.Status == ""

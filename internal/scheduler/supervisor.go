@@ -178,32 +178,54 @@ func (s *Scheduler) supervisorSupersedeRerun(ctx context.Context, b store.Book, 
 			return "", ErrInvalidOp
 		}
 	}
+	// The conditional status write comes first, as in readmit (a deliberate pause
+	// is written back as it is): a Cancel landing since leaves the book as it is
+	// (bridge#65).
+	release := s.holdDispatch(bookID)
+	defer release()
+	paused := b.Status == string(state.StatusPaused)
+	var claim error
+	if paused {
+		claim = s.db.SetBookStatusIf(ctx, bookID, b.Status, b.Error, b.Status, b.Error, b.ParkCode, b.RetryAt)
+	} else {
+		claim = s.db.ClearBookStatusIf(ctx, bookID, b.Status, b.Error)
+	}
+	if errors.Is(claim, store.ErrStatusChanged) {
+		return statusChangedOutcome, nil
+	} else if claim != nil {
+		return "", claim
+	}
 	s.cancelInflight(bookID)
+	// A stage running on the book finishes its last writes (a sentinel the rewind
+	// must drop, or a replay of it would stand for the re-run) before the rewind.
+	s.awaitWorker(ctx, bookID)
+	if err := s.rewind(ctx, b, stage); err != nil {
+		if !paused {
+			s.restoreStatus(ctx, b)
+		}
+		return "", err
+	}
+	status, errMessage, parkCode := "", "", ""
+	if paused {
+		status, errMessage, parkCode = b.Status, b.Error, b.ParkCode
+	}
+	s.publishState(bookID, string(stage), status, errMessage, parkCode, "")
+	return "invalidated stage and later sentinels; rerun queued with released inputs/code", nil
+}
+
+// rewind is supersede_rerun's change to the book: the successes of stage and
+// every later one superseded and their sentinels dropped, and the book's state
+// moved back to stage (the state alone: its status is the caller's).
+func (s *Scheduler) rewind(ctx context.Context, b store.Book, stage state.State) error {
 	for _, candidate := range state.All() {
 		if state.IsStage(candidate) && state.Order(candidate) >= state.Order(stage) {
-			if err := s.db.SupersedeStageSuccesses(ctx, bookID, string(candidate)); err != nil {
-				return "", err
+			if err := s.db.SupersedeStageSuccesses(ctx, b.ID, string(candidate)); err != nil {
+				return err
 			}
 			_ = os.Remove(SentinelPath(b.WorkDir, string(candidate)))
 		}
 	}
-	// The state alone first (a status set since is kept), then a clear of the
-	// status read, unless it is a deliberate pause.
-	if err := s.db.SetBookPipelineState(ctx, bookID, string(stage)); err != nil {
-		return "", err
-	}
-	status, errMessage, parkCode := "", "", ""
-	if b.Status == string(state.StatusPaused) {
-		status, errMessage, parkCode = b.Status, b.Error, b.ParkCode
-	} else if err := s.db.ClearBookStatusIf(ctx, bookID, b.Status, b.Error); errors.Is(err, store.ErrStatusChanged) {
-		s.notify()
-		return statusChangedOutcome, nil
-	} else if err != nil {
-		return "", err
-	}
-	s.publishState(bookID, string(stage), status, errMessage, parkCode, "")
-	s.notify()
-	return "invalidated stage and later sentinels; rerun queued with released inputs/code", nil
+	return s.db.SetBookPipelineState(ctx, b.ID, string(stage))
 }
 
 func (s *Scheduler) supervisorPark(ctx context.Context, b store.Book, code state.ParkCode, reason string) (string, error) {

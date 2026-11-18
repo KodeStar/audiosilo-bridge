@@ -1174,7 +1174,8 @@ internal/
             ServiceDeps.CoreRepo is where SubmitCore opens add-work issues; every
             other call follows the repo a row records.
             Imports neither scheduler nor api - reaches them via injected
-            Readmit/Publish seams.
+            Readmit/Publish seams (Readmit takes the book as the poller read it:
+            scheduler.RetryAsRead, so a Cancel since is never re-admitted, bridge#65).
   auth/     single admin password (argon2id, generated + printed once on first run),
             opaque SHA-256-hashed session tokens, a per-IP login rate limiter; the
             Store interface is storage-agnostic (MemStore for tests; the SQLite
@@ -1483,6 +1484,10 @@ internal/
             and error the caller read (ErrStatusChanged otherwise), so a Cancel landing between
             a supervisor action's read and its write is never undone; ClearBookStatusIf is its
             clear (the readmit's).
+            0015 (bridge#13) adds server_jobs.priority (the server's priority for the claim,
+            0 on older rows; ServerJob.Priority, never in the page's JSON): a job resumed
+            after a restart or a refused token waits for the reserve again when it was of
+            interactive priority (jobs.launch).
   state/    per-book pipeline state machine: table-driven states/lanes/transitions,
             CanStart/NextState guards, the audit fix-loop cap. Pure, no I/O. M6 added
             ParkCode (typed park reasons - M7 added contrib_unavailable, core_needed,
@@ -1585,7 +1590,41 @@ internal/
             Reliability round: Retry's core was extracted into readmit(), shared by
             manual Retry, the contrib poller, and the new autoReadmitDue pass (each
             dispatch tick re-admits books parked agent_unavailable/agent_rate_limited
-            whose retry_at is due, publishing a durable stage.note). readmit supersedes
+            whose retry_at is due, publishing a durable stage.note). bridge#65: readmit
+            and supervisor supersede_rerun write the status FIRST, conditionally on the
+            status and error read (ClearBookStatusIf; a pause written back as it is),
+            then supersede, drop sentinels and audit files or move the state back, so a
+            Cancel winning the race leaves the book wholly as it was; a change that
+            fails after its status write puts the read status back (restoreStatus).
+            holdDispatch keeps the dispatch loop off the book meanwhile (no stage starts
+            between the status clear and the sentinel's removal, which would replay
+            the sentinel), and dispatchableLocked keeps it out of a pass that read its
+            books before the release (beginPass marks where a pass reads). Cancel
+            takes the same hold around its write, so a pass that read the book before
+            the cancel starts no stage on it after cancelInflight found none to stop;
+            supersede_rerun also waits for the stage worker it cancelled to return
+            (awaitWorker, at most workerExitWait) before its rewind, so a sentinel the
+            stage wrote as the cancel landed is dropped too, never replayed. A crash
+            between the two writes replays the stage's outcome at the restart (a
+            round-cap park parks again). RetryAsRead(b) is Retry for a book the caller
+            read (generate's Retry): it re-admits only while the book still has b's
+            status and error (the contrib poller's Readmit too). CancelStored(db, id)
+            is Cancel's store write alone, for a caller with no scheduler running;
+            CancelUnlessFollowed(id, g) and CancelStoredUnlessFollowed(db, id, g) are
+            the two written only while a store.StopGuard holds
+            (SetBookStatusUnlessFollowed, store.ErrFollowed otherwise) and the book is
+            still as read (store.ErrSettled when a stage failed it or it finished
+            since: its own error stays; a park since is read again and cancelled):
+            generate's job
+            ends, its Abandon before the engine starts included; a cancel is published
+            only while the book still carries it (publishCancelled, ordered against a
+            re-admit's write and publish by readmitMu), so a later claim's re-admit
+            is never covered by a stale cancelled frame; a start's reconcileBook
+            rewinds by the state alone (SetBookPipelineState), and a pass moves a
+            book on from a waypoint the same way (advanceWaypoint), so neither writes
+            the status it read back over such a cancel; a stage's own park or failure
+            (setStatus) is written only over the status read, never over a cancel.
+            ReadmitParked stops at its context's end. readmit supersedes
             the CURRENT stage's successes ONLY for the round-cap park codes
             (qa_no_converge, fix_loop_exhausted - the latter also superseding fixing +
             wiping the audit trajectory files) so an availability park never destroys a
@@ -1881,7 +1920,9 @@ internal/
             int32 filter. Ordinary Claim never sends it. Missing accepts disables
             the option, unknown reply keys are tolerated, and a new Client starts
             unnegotiated. WithdrawClaimMinPriority clears it after an ignored
-            filter or pairing change; a later heartbeat must advertise it again.
+            filter or pairing change; a later heartbeat must advertise it again,
+            one sent after the withdrawal (a generation: a reply to a heartbeat that
+            was out when it came is not recorded, bridge#13).
             Deletion snapshots require all protocol fields, tolerate new keys,
             and expose no listener identities.
             Phase 3c-1: BookFile.Duration (the server's indexed seconds; a single-file
@@ -1978,11 +2019,21 @@ internal/
             support, and while a job it took outside admission still waits it
             claims nothing (a server re-advertising a filter it ignores holds one
             waiter, not its queue). An ordinary answer outside the requested kinds
-            backs off like a failed claim. Running promotions keep their
-            pool. Recovery uses ordinary admission because old rows lack priority.
+            backs off like a failed claim; its job waits in its own lane, which no
+            claim asks for meanwhile, while the other lanes go on claiming, and a
+            second such waiter stops the ordinary dispatcher until one has a slot
+            (strayWaitingLocked, bridge#13). Running promotions keep their
+            pool. A resumed job (recovery, resumeStranded) uses ordinary admission,
+            except one of interactive priority (recorded with the claim, store
+            0015; older rows read 0) whose kind opts in: it waits for the reserve
+            while the pairing negotiates it, and moves to its kind's lane if the
+            negotiation is withdrawn while it waits (bridge#13).
             Both recovery and out-of-admission jobs renew leases while waiting
-            for room, queue behind jobs already waiting, and take
-            precedence over fresh claims in that lane. Live parks hold
+            for room, but only on the link in use: unpaired or refused, a waiting
+            job stops renewing (Reporter.offLink), so the server can hand it out
+            again, and paired again it is stranded for resumeStranded, never run on
+            the old link (bridge#13). They queue behind jobs already waiting, and
+            take precedence over fresh claims in that lane. Live parks hold
             admission; terminal parks and releases wake the dispatcher.
             Phase 2c-2a adds the strict Reporter.ConfirmLease publication check
             (network errors deny commit). Phase 2c-1: optional ParamSealer.SealParams runs
@@ -2075,7 +2126,9 @@ internal/
             job), which the runner calls when it ends a job WITHOUT running the
             handler (a resumed job's first report answered with a cancel or a lost
             claim, another server's job dropped), so that work is released as the
-            handler's own end would. Resumes(ctx) tells a handler whether its ended
+            handler's own end would; dropLost records the job lost only once
+            Abandon returned, so Abandon releases before it returns (generate does
+            even with no engine yet, bridge#65). Resumes(ctx) tells a handler whether its ended
             context will run again under the claim (the Bridge stopping, a refused
             token) or ended for good (errCancelRequested, errLost).
   verify/   bridge.verify: params {hold_seconds 0-600}; resolves the library from the
@@ -2929,8 +2982,9 @@ internal/
             own only for the same library AND path (the server's ids repeat across
             servers and reinstalls, and following another book's run would write its
             sidecars into this one); otherwise the old book is stopped and a new one
-            made. attach re-admits a book this job's own cancel stopped (engine
-            Retry), unless its transcripts were swept meanwhile, which starts over,
+            made. attach re-admits a book this job's own cancel stopped (the engine's
+            RetryAsRead of the cancel it read; a status changed since is followed as it
+            is), unless its transcripts were swept meanwhile, which starts over,
             as a deleted book does. follow polls 3 s while a stage runs, 30 s while
             queued/paused/parked, at once on Retry; describe() maps the book to the
             job's progress: the stage as step ("waiting" while queued), a plain-words
@@ -2956,15 +3010,32 @@ internal/
             cost_usd, work_id, contributed {characters|recaps: issue url}}. END: unless
             jobs.Resumes (the Bridge stopping, a refused token), the job's end is
             recorded (ended_at), a book that didn't finish is cancelled (stopBook
-            leaves a done or failed one alone: a cancel would overwrite its error),
+            leaves a done or failed one alone: a cancel would overwrite its error,
+            one failed or done between its read and the cancel's write included,
+            store.ErrSettled),
             and retention 0 purges its transcripts now; a later attempt of the same
-            job running here (Attempt higher) is left alone. Abandon (jobs.Abandoner)
-            does the same for a job the runner ended without running it, waiting for
-            the engine to start when it hasn't, and waitEngine for a run cancelled
-            (or taken back) while it waits for the engine, which never reaches end(). Retry(job): the engine's Retry for a
-            parked engine book, else a poke for a job waiting in its own park
+            job running here (Attempt higher) is left alone: the cancel and the end
+            are guarded writes (store.StopGuard: SetBookStatusUnlessFollowed through
+            the engine's CancelUnlessFollowed or scheduler.CancelStoredUnlessFollowed,
+            EndGenerateBook taking the attempt), so a claim landing between the check
+            and the write is never stopped nor its mapping ended. Abandon (jobs.Abandoner)
+            does the same for a job the runner ended without running it, before it
+            returns even when the engine hasn't started (stopBook then cancels the book
+            in the store alone, scheduler.CancelStoredUnlessFollowed: nothing runs it yet; and once
+            the engine is up, stopStartedStage stops a stage its scheduler began on the
+            book before that write, or a status such a stage wrote over it, through
+            the engine's guarded cancel, and only then purges a retention 0 book's
+            transcripts (no engine, no hold on the book), unless
+            another open job follows the book or a later claim of the same job does:
+            an Attempt higher, or the job's mapping reopened by its attach (checked
+            in the cancel's own write, StopGuard.Ended), as in release, bridge#65; that wait runs through Options.Background, the app's
+            Bridge.bg tasks, so it ends with the Bridge), and waitEngine for a
+            run cancelled (or taken back) while it waits for the engine, which never
+            reaches end(). Retry(job): the engine's RetryAsRead of the parked engine
+            book as Retry read it (a Cancel landing since is never taken up as a Retry
+            of the cancelled book), else a poke for a job waiting in its own park
             (ErrNotParked, store.ErrNotFound otherwise; ErrBookChanged when the book was
-            parked again or cancelled between the engine's read and write, bridge#65).
+            parked again or cancelled after Retry's read, bridge#65).
             ParkHint words every park code
             for the console and the page (a fresh start says to cancel this job first:
             the server keeps one open job per book). The budget_exceeded hint and the
@@ -2990,7 +3061,9 @@ internal/
             Under the hold the book is looked at again (purgeHeld): one no longer
             finished, or that an open job follows again (a later claim of its job
             re-opened and re-admitted it while the purge waited), keeps its
-            transcripts and stays unswept.
+            transcripts and stays unswept; a job end's purge also leaves a book to a
+            later claim of the job recorded before its attach reopened the mapping
+            (store.LaterClaim).
             Phase 1c, DESCRIPTIONS (describejob.go): Options.Describer is the
             engine's description step (pipeline.Executor.Describe). A generate job's
             write() saves the characters and recaps first, then runs it
@@ -3158,8 +3231,8 @@ internal/
             stopping it; one still not stopped when the wait runs out is stopped
             there, stopBook), handing back the open job it last saw (firstOpenJob); a
             job that stays open is refused as before. stopBook leaves alone a book
-            another open job follows (a late end of the chapters job, Abandon's once
-            the engine starts, would stop the continued run). chapters.detect
+            another open job follows (a late end of the chapters job would stop the
+            continued run). chapters.detect
             (ChaptersJob, ChaptersKind, pipeline lane, Abandoner; params any JSON
             object): the same resume and follow as generate (resumeMapping +
             runEngineBook: prepare strict when new, a resumed job's own book found
@@ -3706,7 +3779,14 @@ internal/
             every 30 s, when a worker connects (hub.WhenConnected), at the engine's
             start and after a settings save (kickWaiting). engineStarted also
             re-admits the books parked contrib_unavailable once a GitHub token
-            resolves (a sign-in during the start re-admitted nothing, bridge#25).
+            resolves (a sign-in during the start re-admitted nothing, bridge#25),
+            and starts the daily transcript sweep only once the engine is the
+            running one (its hold on a book goes through the engine; with none it
+            is a no-op). Those re-admits, and githubChanged's and agentCredentialChanged's, run as
+            Bridge.bg tasks (bgTasks), as does an abandoned generate job's wait for
+            the engine (generate.Options.Background): Run stops them (their context
+            ends, none starts after) and waits for them before the store closes, on
+            every return, a failed listen too (bridge#80).
             Phase 1a: engine.go wires the ENGINE the way sidecars' daemon did, minus
             the folder scan, and runs it in the background from Run (the first start
             may download ffmpeg; the generate job waits for it): the event hub with

@@ -476,6 +476,49 @@ func TestOrdinaryOutsideKindsBacksOff(t *testing.T) {
 	})
 }
 
+// bridge#13, #26: an ordinary claim answered outside its kinds waits in its own
+// lane, which the dispatcher stops asking for, but the other lanes go on claiming
+// (after the back-off); a second such answer while one waits stops the
+// dispatcher until one has its slot.
+func TestOrdinaryStrayPausesOnlyItsLane(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		srv := newControlledServer(false)
+		started := make(chan Job, 4)
+		gates := map[int64]chan struct{}{1: make(chan struct{}), 2: make(chan struct{}), 3: make(chan struct{})}
+		opts := testOpts()
+		opts.Lanes = map[string]int{LaneDownload: 1, LaneLight: 2}
+		r := New(openStore(t), func() Server { return srv }, nil, opts,
+			blockingHandler("podcast.fetch", LaneDownload, started, gates),
+			blockingHandler("light", LaneLight, started, gates))
+		startControlled(t, r)
+		srv.next(t, false).answer <- claimed(1, "podcast.fetch", 20)
+		await(t, started) // the download lane is full now
+		lightOnly := srv.next(t, false)
+		if !slices.Equal(lightOnly.kinds, []string{"light"}) {
+			t.Fatal(lightOnly.kinds)
+		}
+		lightOnly.answer <- claimed(2, "podcast.fetch", 20) // outside the kinds asked for
+		again := srv.next(t, false)
+		if !slices.Equal(again.kinds, []string{"light"}) {
+			t.Fatal("a stray waiting for the download lane stopped the light lane's claims", again.kinds)
+		}
+		again.answer <- claimed(3, "podcast.fetch", 20) // and again: the server ignores the kinds
+		synctest.Wait()
+		time.Sleep(time.Minute)
+		synctest.Wait()
+		select {
+		case c := <-srv.calls:
+			t.Fatal("claimed with two strays waiting", c.kinds)
+		default:
+		}
+		close(gates[1])
+		if j := await(t, started); j.ID != 2 && j.ID != 3 {
+			t.Fatal(j)
+		}
+		srv.next(t, false) // one has its slot: claims go on
+	})
+}
+
 func TestUnchangedWakeAndCapacityRefresh(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		srv := newControlledServer(true)
@@ -578,6 +621,74 @@ func TestRecoveryAdmissionRenewsAndReservesInteractive(t *testing.T) {
 		t.Fatal(second)
 	}
 	assertPools(t, r, map[int64]string{second.ID: LaneDownload, 4: LaneInteractive})
+}
+
+// bridge#13: a job claimed into the reserve (interactive priority) resumes there
+// after a restart, its priority recorded with the claim, where it used to wait in
+// the ordinary lane behind background work; one of lower priority resumes in the
+// ordinary lane, and a pairing without the reserve takes both there.
+func TestRecoveredInteractiveJobResumesInTheReserve(t *testing.T) {
+	for _, negotiated := range []bool{true, false} {
+		t.Run(map[bool]string{true: "negotiated", false: "legacy"}[negotiated], func(t *testing.T) {
+			srv := newControlledServer(negotiated)
+			db := openStore(t)
+			for id, priority := range map[int64]int{1: wirePriority(t), 2: 20} {
+				if err := db.RecordClaim(context.Background(), store.ServerJob{ID: id, Kind: "podcast.fetch", Attempt: 1,
+					Priority: priority}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if sj, err := db.GetServerJob(context.Background(), 1); err != nil || sj.Priority != wirePriority(t) {
+				t.Fatalf("the claim's priority wasn't recorded: %+v, %v", sj, err)
+			}
+			started := make(chan Job, 4)
+			gates := map[int64]chan struct{}{1: make(chan struct{}), 2: make(chan struct{})}
+			opts := testOpts()
+			opts.Lanes = DefaultLanes()
+			r := New(db, func() Server { return srv }, nil, opts,
+				optedHandler{blockingHandler("podcast.fetch", LaneDownload, started, gates)})
+			startControlled(t, r)
+			await(t, started)
+			await(t, started)
+			want := map[int64]string{1: LaneInteractive, 2: LaneDownload}
+			if !negotiated {
+				want[1] = LaneDownload // a legacy pairing has no reserve
+			}
+			assertPools(t, r, want)
+		})
+	}
+}
+
+// A resumed job waiting for the reserve when the negotiation is withdrawn waits
+// in its kind's ordinary lane instead, where it runs once there is room.
+func TestRecoveredInteractiveJobFallsBackWhenTheReserveGoes(t *testing.T) {
+	srv := newControlledServer(true)
+	db := openStore(t)
+	if err := db.RecordClaim(context.Background(), store.ServerJob{ID: 1, Kind: "podcast.fetch", Attempt: 1,
+		Priority: wirePriority(t)}); err != nil {
+		t.Fatal(err)
+	}
+	started := make(chan Job, 2)
+	h := optedHandler{blockingHandler("podcast.fetch", LaneDownload, started, nil)}
+	opts := testOpts()
+	opts.Lanes = DefaultLanes()
+	r := New(db, func() Server { return srv }, nil, opts, h)
+	r.use[LaneInteractive] = 1 // the reserve is busy: the resumed job waits for it
+	ctx, cancel := context.WithCancel(context.Background())
+	var wg sync.WaitGroup
+	t.Cleanup(func() { cancel(); wg.Wait() })
+	r.launch(ctx, srv, Job{ID: 1, Kind: h.Kind(), Attempt: 1, Priority: wirePriority(t), Resumed: true}, &wg, "", nil, nil)
+	await(t, srv.updated)
+	if _, waiting := laneCounts(r, LaneInteractive); waiting != 1 {
+		t.Fatal("the resumed job doesn't wait for the reserve")
+	}
+	srv.WithdrawClaimMinPriority()
+	r.Wake()
+	await(t, started)
+	assertPools(t, r, map[int64]string{1: LaneDownload})
+	if _, waiting := laneCounts(r, LaneInteractive); waiting != 0 {
+		t.Fatal("the reserve still counts the job waiting", waiting)
+	}
 }
 
 func TestOrdinaryInteractivePromotionKeepsPool(t *testing.T) {
@@ -722,6 +833,65 @@ func TestWaitingRecoveryRunsOrAbandons(t *testing.T) {
 				t.Fatal("waiting job disposition", h.ran.Load(), h.abandoned())
 			}
 		})
+	}
+}
+
+// bridge#13: a job waiting for its first slot renews its lease only on the link
+// in use. Unpaired, it stops renewing (the server may hand it out again); paired
+// again, it is stranded for resumeStranded, never run on the old link.
+func TestWaitingJobLetsGoOfAnOldLink(t *testing.T) {
+	db, old, next := openStore(t), newControlledServer(false), newControlledServer(false)
+	if err := db.RecordClaim(context.Background(), store.ServerJob{ID: 9, Kind: "light", Attempt: 1}); err != nil {
+		t.Fatal(err)
+	}
+	var current atomic.Pointer[controlledServer]
+	current.Store(old)
+	h := &abandoner{handler: handler{kind: "light", lane: LaneLight, fn: func(context.Context, Job, *Reporter) (any, error) { return nil, nil }}}
+	opts := testOpts()
+	opts.Lanes = map[string]int{LaneLight: 1}
+	r := New(db, func() Server {
+		if srv := current.Load(); srv != nil {
+			return srv
+		}
+		return nil
+	}, nil, opts, h)
+	r.use[LaneLight] = 1 // the lane is full: the job waits
+	ctx, cancel := context.WithCancel(context.Background())
+	var wg sync.WaitGroup
+	t.Cleanup(func() { cancel(); wg.Wait() })
+	r.launch(ctx, old, Job{ID: 9, Kind: h.Kind(), Attempt: 1, Resumed: true}, &wg, "", nil, nil)
+	for range 2 {
+		await(t, old.updated) // the first report, then a renewal while it waits
+	}
+	current.Store(nil) // unpaired
+	r.Wake()
+	time.Sleep(5 * opts.Keepalive) // a renewal already under way may still land
+	for drained := false; !drained; {
+		select {
+		case <-old.updated:
+		default:
+			drained = true
+		}
+	}
+	time.Sleep(5 * opts.Keepalive)
+	select {
+	case <-old.updated:
+		t.Fatal("an unpaired Bridge renewed a waiting job's lease")
+	default:
+	}
+	current.Store(next) // paired again
+	r.Wake()
+	wg.Wait()
+	r.mu.Lock()
+	stranded := len(r.stranded) == 1 && r.stranded[0].job.ID == 9
+	r.mu.Unlock()
+	if !stranded || h.ran.Load() || len(h.abandoned()) != 0 {
+		t.Fatal("the waiting job wasn't stranded for the new link", stranded, h.ran.Load(), h.abandoned())
+	}
+	select {
+	case <-next.updated:
+		t.Fatal("the old link's job reported on the new link")
+	default:
 	}
 }
 
@@ -1008,11 +1178,11 @@ func TestYieldedStrayFreesItsDispatcher(t *testing.T) {
 	r := New(openStore(t), func() Server { return srv }, nil, opts)
 	ctx, cancel := context.WithCancelCause(context.Background())
 	defer cancel(nil)
-	ru := &run{job: Job{ID: 1}, lane: LaneDownload, cancel: cancel, stray: true}
+	ru := &run{job: Job{ID: 1}, srv: srv, lane: LaneDownload, cancel: cancel, stray: true, strayReserve: true}
 	r.mu.Lock()
 	r.running[1] = ru
 	r.waiting[LaneDownload]++
-	if !r.strayWaitingLocked(false) {
+	if !r.strayWaitingLocked(true) {
 		t.Error("a waiting stray doesn't hold its dispatcher")
 	}
 	r.mu.Unlock()
@@ -1022,7 +1192,7 @@ func TestYieldedStrayFreesItsDispatcher(t *testing.T) {
 	rep := &Reporter{r: r, ru: ru}
 	rep.Yield()
 	r.mu.Lock()
-	held := r.strayWaitingLocked(false)
+	held := r.strayWaitingLocked(true)
 	r.use[LaneDownload]++ // another download took the slot
 	r.mu.Unlock()
 	if held {
@@ -1035,7 +1205,7 @@ func TestYieldedStrayFreesItsDispatcher(t *testing.T) {
 		return waiting == 1
 	})
 	r.mu.Lock()
-	held = r.strayWaitingLocked(false)
+	held = r.strayWaitingLocked(true)
 	r.mu.Unlock()
 	if held {
 		t.Fatal("a reclaiming stray holds its dispatcher")

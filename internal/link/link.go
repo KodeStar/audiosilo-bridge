@@ -22,7 +22,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"sync/atomic"
+	"sync"
 	"time"
 )
 
@@ -408,7 +408,17 @@ type Client struct {
 	client           string
 	httpc            *http.Client
 	timeout          time.Duration
-	claimMinPriority *atomic.Bool
+	claimMinPriority *negotiation
+}
+
+// negotiation is a pairing's claim_min_priority: accepted by its last
+// heartbeat reply, unless a withdrawal came after that heartbeat was sent.
+type negotiation struct {
+	mu       sync.Mutex
+	accepted bool
+	// gen counts the withdrawals: a heartbeat records its reply only when none
+	// came while it was out (bridge#13).
+	gen uint64
 }
 
 // New returns a Client of the server at serverURL (an absolute http(s) URL)
@@ -418,7 +428,7 @@ func New(serverURL, token, version string) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Client{base: u, token: token, client: clientValue(version), httpc: &http.Client{}, timeout: requestTimeout, claimMinPriority: &atomic.Bool{}}, nil
+	return &Client{base: u, token: token, client: clientValue(version), httpc: &http.Client{}, timeout: requestTimeout, claimMinPriority: &negotiation{}}, nil
 }
 
 // clientValue is the ClientHeader value: "AudioSilo Bridge/<version> (<os>)",
@@ -469,20 +479,43 @@ func Pair(ctx context.Context, serverURL, code, version string) (*Paired, error)
 // Heartbeat sends the Bridge's status (PUT /bridge/status) and returns the
 // server's libraries.
 func (c *Client) Heartbeat(ctx context.Context, st Status) (*StatusReply, error) {
+	n := c.claimMinPriority
+	n.mu.Lock()
+	gen := n.gen
+	n.mu.Unlock()
 	var out StatusReply
 	if err := c.do(ctx, http.MethodPut, "/api/v1/bridge/status", nil, st, &out); err != nil {
 		return nil, err
 	}
-	c.claimMinPriority.Store(out.Accepting(AcceptClaimMinPriority))
+	// A withdrawal while the heartbeat was out (an ignored filter, a pairing
+	// change) stands: the reply was written before it, so only the next
+	// heartbeat's reply may enable filtered claims again (bridge#13).
+	n.mu.Lock()
+	if n.gen == gen {
+		n.accepted = out.Accepting(AcceptClaimMinPriority)
+	}
+	n.mu.Unlock()
 	return &out, nil
 }
 
 // SupportsClaimMinPriority is true only after this pairing's heartbeat accepted it.
-func (c *Client) SupportsClaimMinPriority() bool { return c.claimMinPriority.Load() }
+func (c *Client) SupportsClaimMinPriority() bool {
+	n := c.claimMinPriority
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.accepted
+}
 
 // WithdrawClaimMinPriority forgets negotiation after an ignored filter or a
-// pairing change. Only a later heartbeat reply can enable filtered claims again.
-func (c *Client) WithdrawClaimMinPriority() { c.claimMinPriority.Store(false) }
+// pairing change. Only the reply to a heartbeat sent after it can enable
+// filtered claims again.
+func (c *Client) WithdrawClaimMinPriority() {
+	n := c.claimMinPriority
+	n.mu.Lock()
+	n.accepted = false
+	n.gen++
+	n.mu.Unlock()
+}
 
 // Claim asks for the next queued job of one of kinds, waiting up to wait for
 // one (at most MaxWait). It returns nil when none came.

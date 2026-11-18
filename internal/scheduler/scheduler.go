@@ -80,6 +80,11 @@ type Scheduler struct {
 
 	mu       sync.Mutex
 	inflight map[int64]*inflightBook
+	// held counts the control changes holding a book off the dispatch loop now,
+	// released the books one let go of since the dispatch pass began reading its
+	// books (holdDispatch, beginPass, dispatchableLocked). Both under mu.
+	held     map[int64]int
+	released map[int64]struct{}
 
 	// lastStats is the most recently published queue.stats, so an idle tick that
 	// recomputes an identical snapshot skips the SSE frame + durable insert. Only
@@ -101,6 +106,11 @@ type Scheduler struct {
 	bookETA  map[int64]int64
 	queueETA int64
 	haveETA  bool
+
+	// readmitMu orders a re-admit's write and publish against a cancel's read of
+	// the book and publish (publishCancelled), so a cancel's frame never lands
+	// after a re-admit that followed it.
+	readmitMu sync.Mutex
 }
 
 // queueStats is the published queue.stats snapshot, compared to suppress
@@ -124,6 +134,9 @@ type inflightBook struct {
 	lane   state.Lane
 	stage  state.State
 	cancel context.CancelFunc
+	// done closes once a stage worker has returned (awaitWorker); nil for a
+	// reservation, which has no worker.
+	done chan struct{}
 }
 
 // QueueBook is the scheduler-owned placement of one runnable book on the Running
@@ -178,6 +191,8 @@ func New(db *store.DB, hub *events.Hub, exec Executor, agentCap int, workRoot st
 		workRoot:  workRoot,
 		wake:      make(chan struct{}, 1),
 		inflight:  map[int64]*inflightBook{},
+		held:      map[int64]int{},
+		released:  map[int64]struct{}{},
 		rates:     map[string]float64{},
 		bookETA:   map[int64]int64{},
 	}
@@ -387,9 +402,11 @@ func (s *Scheduler) reconcileBook(ctx context.Context, b store.Book, succeeded m
 			}
 		}
 	}
-	// Preserve status/error/park_code exactly (a rewind is a position change, not a
-	// status change): a parked book keeps its typed reason across a restart.
-	return s.db.SetBookState(ctx, b.ID, rewind, b.Status, b.Error, b.ParkCode)
+	// The state alone (a rewind is a position change, not a status change): a parked
+	// book keeps its typed reason and retry_at across a restart, and a status written
+	// since b was read (the Bridge cancelling a book in the store while its engine
+	// starts, scheduler.CancelStored, bridge#65) is never written back over.
+	return s.db.SetBookPipelineState(ctx, b.ID, rewind)
 }
 
 // --- dispatch ---
@@ -405,6 +422,7 @@ func (s *Scheduler) dispatch() {
 	// Timed self-resume: re-admit any book whose transient-agent park window has
 	// elapsed BEFORE advancing waypoints, so a healed book is dispatched this same pass.
 	s.autoReadmitDue(ctx)
+	s.beginPass()
 	// advanceWaypoints promotes queued/ready books until none remain and returns
 	// the resulting fresh list, so dispatch never re-queries.
 	books, finished, err := s.advanceWaypoints(ctx)
@@ -726,15 +744,17 @@ func (s *Scheduler) fillLaneLimited(candidates []store.Book, lane state.Lane, fr
 }
 
 // startWorker marks a book in-flight and launches its stage worker. It returns
-// false if the book is already in-flight (a race with a prior pass).
+// false if the book is already in-flight (a race with a prior pass), or a control
+// change held it during this pass (holdDispatch).
 func (s *Scheduler) startWorker(b store.Book, lane state.Lane) bool {
 	s.mu.Lock()
-	if _, busy := s.inflight[b.ID]; busy {
+	if _, busy := s.inflight[b.ID]; busy || !s.dispatchableLocked(b.ID) {
 		s.mu.Unlock()
 		return false
 	}
 	wctx, cancel := context.WithCancel(s.ctx)
-	s.inflight[b.ID] = &inflightBook{lane: lane, stage: state.State(b.State), cancel: cancel}
+	done := make(chan struct{})
+	s.inflight[b.ID] = &inflightBook{lane: lane, stage: state.State(b.State), cancel: cancel, done: done}
 	s.mu.Unlock()
 
 	s.wg.Add(1)
@@ -744,6 +764,7 @@ func (s *Scheduler) startWorker(b store.Book, lane state.Lane) bool {
 			s.mu.Lock()
 			delete(s.inflight, b.ID)
 			s.mu.Unlock()
+			close(done)
 			s.notify()
 		}()
 		s.runStage(wctx, b)
@@ -1019,26 +1040,35 @@ func (s *Scheduler) advanceWaypoints(ctx context.Context) ([]store.Book, []state
 	for {
 		advanced := false
 		for i := range books {
-			b := books[i]
-			st := state.State(b.State)
-			if b.Status != "" || !state.IsWaypoint(st) {
-				continue
+			if next, ok := s.advanceWaypoint(ctx, books[i]); ok {
+				books[i].State = next // mirror the persisted advance in memory
+				advanced = true
 			}
-			next, _, err := state.NextState(state.ParseKind(b.Kind), st, state.Outcome{})
-			if err != nil {
-				continue
-			}
-			if err := s.db.SetBookState(ctx, b.ID, string(next), "", "", ""); err != nil {
-				continue
-			}
-			books[i].State = string(next) // mirror the persisted advance in memory
-			s.publishState(b.ID, string(next), "", "", "", "")
-			advanced = true
 		}
 		if !advanced {
 			return books, finished, nil
 		}
 	}
+}
+
+// advanceWaypoint moves book b, as the pass read it, on from a waypoint it waits
+// at with no status, and reports the state it moved to. It writes the state
+// alone, as advance does: a status written since the read (a Cancel or a Pause
+// landing after the pass read its books) is never written back over (bridge#65).
+func (s *Scheduler) advanceWaypoint(ctx context.Context, b store.Book) (string, bool) {
+	st := state.State(b.State)
+	if b.Status != "" || !state.IsWaypoint(st) {
+		return "", false
+	}
+	next, _, err := state.NextState(state.ParseKind(b.Kind), st, state.Outcome{})
+	if err != nil {
+		return "", false
+	}
+	if err := s.db.SetBookPipelineState(ctx, b.ID, string(next)); err != nil {
+		return "", false
+	}
+	s.publishState(b.ID, string(next), "", "", "", "")
+	return string(next), true
 }
 
 // autoReadmitCodes are the park reasons the timed self-resume acts on: the transient
@@ -1336,21 +1366,38 @@ func (s *Scheduler) publishQueueStats(books []store.Book, finished []state.Serie
 // when non-zero, schedules an automatic re-admit (persisted to books.retry_at in UTC
 // RFC3339): the transient-agent parks pass a due time so the dispatch loop heals the
 // book without a human; every other caller passes the zero time (no scheduled retry).
+//
+// It is a stage's own outcome, so it is never written over a cancel: a Cancel
+// landing as the stage ended (before its worker saw the cancel), or one written to
+// the store while the stage ran (CancelStored), ends the book for good, and a park
+// written over it could be re-admitted with no job following the book (bridge#65).
+// The write holds only over the status read (SetBookStatusIf), read again when it
+// changed meanwhile.
 func (s *Scheduler) setStatus(bookID int64, status state.Status, errMsg string, parkCode state.ParkCode, retryAt time.Time) {
 	ctx := context.Background()
-	b, err := s.db.GetBook(ctx, bookID)
-	if err != nil {
-		return
-	}
 	retryStr := ""
 	if !retryAt.IsZero() {
 		retryStr = retryAt.UTC().Format(time.RFC3339)
 	}
-	if err := s.db.SetBookStatusRetry(ctx, bookID, string(status), errMsg, string(parkCode), retryStr); err != nil {
+	for range setStatusTries {
+		b, err := s.db.GetBook(ctx, bookID)
+		if err != nil || IsCancelled(b) {
+			return
+		}
+		err = s.db.SetBookStatusIf(ctx, bookID, b.Status, b.Error, string(status), errMsg, string(parkCode), retryStr)
+		if errors.Is(err, store.ErrStatusChanged) {
+			continue
+		}
+		if err == nil {
+			s.publishState(bookID, b.State, string(status), errMsg, string(parkCode), retryStr)
+		}
 		return
 	}
-	s.publishState(bookID, b.State, string(status), errMsg, string(parkCode), retryStr)
 }
+
+// setStatusTries bounds setStatus's reads of a book whose status keeps changing
+// under it.
+const setStatusTries = 3
 
 func metricsErr(err error) json.RawMessage {
 	b, _ := json.Marshal(map[string]string{"error": err.Error()})

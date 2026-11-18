@@ -123,13 +123,23 @@ func (r *Runner) request(reserve, hold bool, own *claimRequest) (*claimRequest, 
 	return q, r.changed
 }
 
-// strayWaitingLocked reports whether a job this dispatcher took outside its
-// admission still waits for its lane. A server that keeps advertising a filter
-// it ignores then holds at most one such waiter per dispatcher, not its queue.
+// strayWaitingLocked reports whether the jobs this dispatcher took outside their
+// admission, still waiting for their lane, stop it claiming. The reserve stops at
+// one: a server that keeps advertising a filter it ignores holds one such waiter,
+// not its queue. The ordinary dispatcher stops at two (bridge#13, #26): one waits
+// in its own lane, which no claim asks for while a job waits there, and the other
+// lanes go on claiming (it backs off after the answer); a second means the server
+// keeps ignoring the kinds asked for, so it claims nothing until one has a slot.
 func (r *Runner) strayWaitingLocked(reserve bool) bool {
+	limit := 2
+	if reserve {
+		limit = 1
+	}
 	for _, ru := range r.running {
 		if ru.stray && !ru.admitted && ru.strayReserve == reserve {
-			return true
+			if limit--; limit == 0 {
+				return true
+			}
 		}
 	}
 	return false
@@ -272,9 +282,12 @@ func (r *Runner) pauseClaims(ctx context.Context, previous *claimRequest, delay 
 	}
 }
 
-// Recovery, re-pair and out-of-admission claims use the ordinary lane. Old
-// execution rows do not store priority. A waiting job renews its lease through
-// execute's reporter and takes a slot before any new claims for that lane.
+// Recovery, re-pair and out-of-admission claims use the ordinary lane, but a
+// resumed job of interactive priority waits for the reserve while the pairing
+// negotiates it (launch; rows from before the Bridge kept a job's priority read
+// 0). A waiting job renews its lease through execute's reporter (only while its
+// link is the one in use: Reporter.offLink) and takes a slot before any new
+// claims for that lane.
 func (r *Runner) awaitAdmission(ctx context.Context, ru *run) bool {
 	for ctx.Err() == nil {
 		// The wake channel is taken before the pairing is read (as in request),
@@ -287,7 +300,22 @@ func (r *Runner) awaitAdmission(ctx context.Context, ru *run) bool {
 		changed := r.changed
 		r.mu.Unlock()
 		srv := r.server()
+		if srv != nil && srv != ru.srv {
+			// Paired again since the job was launched: its claim is the old
+			// link's, so it never runs (nor renews its lease) there. Stranded,
+			// resumeStranded takes it up on the new link (the same server) or
+			// drops it (another), as for a refused token (bridge#13).
+			ru.cancel(errUnpaired)
+			return false
+		}
 		r.mu.Lock()
+		if srv != nil && ru.lane == LaneInteractive && !supportsPriority(srv) {
+			// The reserve went (negotiation withdrawn) while a resumed job
+			// waited for it: it waits in its kind's ordinary lane instead.
+			r.waiting[ru.lane]--
+			ru.lane = r.handlers[ru.job.Kind].Lane()
+			r.waiting[ru.lane]++
+		}
 		if srv != nil && r.roomLocked(r.capacities(srv), ru.lane, nil) {
 			r.waiting[ru.lane]--
 			r.use[ru.lane]++

@@ -106,6 +106,11 @@ type Bridge struct {
 	audiblePush *audiblesync.Pusher
 	// est caches the heartbeat's estimates (estimates.go of the engine wiring).
 	est estimatesCache
+	// bg runs the tasks a change starts in the background (the re-admits after a
+	// credential change or the engine's start, an abandoned generate job's wait
+	// for the engine): Run ends their context and waits for them before the store
+	// closes (bridge#80).
+	bg bgTasks
 
 	kick chan struct{}
 	// waitKick asks for a look at the books waiting for a worker now.
@@ -179,6 +184,7 @@ func New(ctx context.Context, opts Options) (*Bridge, string, error) {
 		vault: vault, conn: conn, libs: mapping.NewRegistry(), auth: am, kick: make(chan struct{}, 1), waitKick: make(chan struct{}, 1),
 	}
 	b.cfg.Store(&cfg)
+	b.bg.init()
 	b.newAccounts(cfg)
 	b.box = newAgentBox(cfg, opts.DataDir, opts.Logger, b.agentCredential)
 	b.hub = workers.New(workers.Options{DB: db, BridgeVersion: opts.Version, Log: opts.Logger})
@@ -198,7 +204,7 @@ func New(ctx context.Context, opts Options) (*Bridge, string, error) {
 			return nil
 		},
 		WorkRoot: filepath.Join(opts.DataDir, "work"), Version: opts.Version, RetentionDays: cfg.Transcripts.RetentionDays,
-		ContribCredential: b.contribCredential, Log: opts.Logger})
+		ContribCredential: b.contribCredential, Background: b.bg.run, Log: opts.Logger})
 	b.wakeParked = b.gen.WakeParked
 	serverID := func() string { return b.conn.Pairing().ServerID }
 	networks, err := cfg.Podcasts.Networks()
@@ -312,6 +318,10 @@ func (b *Bridge) Run(ctx context.Context) error {
 	defer b.podcastHTTP.Close()
 	defer b.librivoxHTTP.Close()
 	defer func() { _ = b.db.Close() }()
+	// Before the store closes, on every return (a failed listen too): the
+	// background tasks write to it. The stop below logs after them; a second
+	// stop does nothing.
+	defer b.bg.stop()
 	// The heartbeat and the runner stop with ctx: a failing page server must
 	// stop them too, or Run would wait for them for ever.
 	ctx, stop := context.WithCancel(ctx)
@@ -362,8 +372,38 @@ func (b *Bridge) Run(ctx context.Context) error {
 	defer cancel()
 	_ = srv.Shutdown(shut)
 	wg.Wait()
+	b.bg.stop()
 	b.log.Info("bridge: stopped")
 	return err
+}
+
+// bgTasks are the Bridge's background tasks (Bridge.bg): each runs with the
+// tasks' context, and stop ends that context and waits for every task started;
+// none starts after stop.
+type bgTasks struct {
+	mu     sync.Mutex
+	wg     sync.WaitGroup
+	ctx    context.Context //nolint:containedctx // the tasks' lifetime, ended by stop
+	cancel context.CancelFunc
+}
+
+func (t *bgTasks) init() { t.ctx, t.cancel = context.WithCancel(context.Background()) }
+
+// run starts fn in the background with the tasks' context (nothing once stopped).
+func (t *bgTasks) run(fn func(context.Context)) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.ctx.Err() == nil {
+		t.wg.Go(func() { fn(t.ctx) })
+	}
+}
+
+// stop ends the tasks' context and waits for the tasks started.
+func (t *bgTasks) stop() {
+	t.mu.Lock()
+	t.cancel()
+	t.mu.Unlock()
+	t.wg.Wait()
 }
 
 // heartbeatLoop reports every HeartbeatEvery, and at once when kicked.

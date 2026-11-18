@@ -183,7 +183,7 @@ func (b *Bridge) runEngine(ctx context.Context) {
 	contribSvc := contrib.NewService(contrib.ServiceDeps{
 		DB: b.db, CoreRepo: cfg.Contribution.CoreRepo, BaseURL: cfg.Contribution.APIBaseURL, Tokens: tokens,
 		Publish: func(u contrib.ContribUpdate) { _ = hub.PublishBook("contrib.update", u.BookID, u) },
-		Readmit: sched.Retry,
+		Readmit: sched.RetryAsRead,
 		ResolveWork: func(ctx context.Context, workID string) (string, error) {
 			cov, err := metaClient.FreshCoverageForWork(ctx, workID)
 			switch {
@@ -201,7 +201,7 @@ func (b *Bridge) runEngine(ctx context.Context) {
 	})
 
 	var wg sync.WaitGroup
-	wg.Add(7)
+	wg.Add(6)
 	go func() { defer wg.Done(); b.followWaiting(ctx, router, waitingEvery) }()
 	go func() {
 		defer wg.Done()
@@ -223,8 +223,7 @@ func (b *Bridge) runEngine(ctx context.Context) {
 		contribSvc.RunPoller(ctx, time.Duration(cfg.Contribution.PollMinutes)*time.Minute)
 	}()
 	go func() { defer wg.Done(); b.daily(ctx, b.pruneEvents) }()
-	go func() { defer wg.Done(); b.daily(ctx, b.sweepTranscripts) }()
-	b.engineStarted(ctx, &engine{ffmpeg: tools.FFmpeg, ffprobe: tools.FFprobe, sched: sched, exec: exec})
+	b.engineStarted(ctx, &engine{ffmpeg: tools.FFmpeg, ffprobe: tools.FFprobe, sched: sched, exec: exec}, wg.Go)
 	log.Info("bridge: the engine started", "ffmpeg", tools.FFmpeg != "", "asr", asrCap.Backend, "asr_available", asrCap.Available,
 		"asr_worker_fallback", cfg.ASR.WorkerFallback,
 		"agent_backend", box.ID(), "agent_slots", slots, "staging", cfg.AgentStagingDir(b.dataDir))
@@ -236,11 +235,16 @@ func (b *Bridge) runEngine(ctx context.Context) {
 // book parked waiting for a worker before this start may go on now, and the
 // books parked for a GitHub credential are re-admitted when one resolves (a
 // sign-in while the engine was starting re-admitted nothing: githubChanged
-// needs a running engine, bridge#25).
-func (b *Bridge) engineStarted(ctx context.Context, e *engine) {
+// needs a running engine, bridge#25). The daily transcript sweep starts only
+// now, among the engine's tasks (spawn, the engine's WaitGroup.Go), after the
+// engine is stored: it holds each book through the engine (with none, a hold is
+// a no-op and a stage could start on a book it purges).
+func (b *Bridge) engineStarted(ctx context.Context, e *engine, spawn func(func())) {
 	b.engine.cur.Store(e)
+	spawn(func() { b.daily(ctx, b.sweepTranscripts) })
 	b.kickWaiting()
-	go b.readmitContributions(ctx)
+	// The engine's ctx, which ends before the Bridge's tasks do.
+	b.bg.run(func(context.Context) { b.readmitContributions(ctx) })
 }
 
 // agentSlotsEvery is how often the agent container's slots are looked at: as

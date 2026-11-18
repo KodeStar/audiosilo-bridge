@@ -55,24 +55,26 @@ func (c *capture) all() []ContribUpdate {
 	return out
 }
 
-// readmitSpy records the ids passed to a service's Readmit hook.
+// readmitSpy records the books passed to a service's Readmit hook.
 type readmitSpy struct {
-	mu  sync.Mutex
-	ids []int64
+	mu    sync.Mutex
+	books []store.Book
 }
 
-func (r *readmitSpy) readmit(_ context.Context, id int64) error {
+func (r *readmitSpy) readmit(_ context.Context, b store.Book) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.ids = append(r.ids, id)
+	r.books = append(r.books, b)
 	return nil
 }
 
 func (r *readmitSpy) called() []int64 {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	out := make([]int64, len(r.ids))
-	copy(out, r.ids)
+	out := make([]int64, len(r.books))
+	for i, b := range r.books {
+		out[i] = b.ID
+	}
 	return out
 }
 
@@ -423,6 +425,11 @@ func TestPollCoreMergedResolvesSlug(t *testing.T) {
 	}
 	if got := spy.called(); len(got) != 1 || got[0] != b.ID {
 		t.Fatalf("readmit called with %v, want [%d]", got, b.ID)
+	}
+	// The book goes to the engine as the poller read it (parked core_pending), so
+	// a Cancel landing since is never taken up as its re-admit (bridge#65).
+	if got := spy.books[0]; !state.IsParkedWith(got.Status, got.ParkCode, state.ParkCorePending) {
+		t.Fatalf("readmit got the book %q/%q, want it as read, parked core_pending", got.Status, got.ParkCode)
 	}
 }
 

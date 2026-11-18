@@ -29,7 +29,11 @@ type ServerJob struct {
 	Attempt   int             `json:"attempt"`
 	// ServerID is the id of the server that handed the job out ('' on rows from
 	// before migration 0003).
-	ServerID string          `json:"server_id"`
+	ServerID string `json:"server_id"`
+	// Priority is the priority the server gave the job (0 on rows from before
+	// migration 0015): a resumed job of interactive priority waits for the
+	// reserve again (jobs.launch).
+	Priority int             `json:"-"`
 	State    string          `json:"state"`
 	Progress json.RawMessage `json:"progress"`
 	Result   json.RawMessage `json:"result"`
@@ -42,7 +46,7 @@ type ServerJob struct {
 	FinishedAt *string `json:"finished_at"`
 }
 
-const serverJobColumns = `id, kind, library_id, path, params, attempt, server_id, state, progress, result, error,
+const serverJobColumns = `id, kind, library_id, path, params, attempt, server_id, priority, state, progress, result, error,
 	reported, claimed_at, updated_at, finished_at`
 
 func scanServerJob(row interface{ Scan(...any) error }) (*ServerJob, error) {
@@ -52,7 +56,7 @@ func scanServerJob(row interface{ Scan(...any) error }) (*ServerJob, error) {
 		path, finished           sql.NullString
 		params, progress, result string
 	)
-	if err := row.Scan(&j.ID, &j.Kind, &lib, &path, &params, &j.Attempt, &j.ServerID, &j.State, &progress, &result,
+	if err := row.Scan(&j.ID, &j.Kind, &lib, &path, &params, &j.Attempt, &j.ServerID, &j.Priority, &j.State, &progress, &result,
 		&j.Error, &j.Reported, &j.ClaimedAt, &j.UpdatedAt, &finished); err != nil {
 		return nil, err
 	}
@@ -82,13 +86,14 @@ func jsonOr(raw json.RawMessage) string {
 func (db *DB) RecordClaim(ctx context.Context, j ServerJob) error {
 	now := timestamp(nowFn())
 	_, err := db.sql.ExecContext(ctx,
-		`INSERT INTO server_jobs (id, kind, library_id, path, params, attempt, server_id, state, claimed_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, 'running', ?, ?)
+		`INSERT INTO server_jobs (id, kind, library_id, path, params, attempt, server_id, priority, state, claimed_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?)
 		 ON CONFLICT(id) DO UPDATE SET kind = excluded.kind, library_id = excluded.library_id, path = excluded.path,
-		     params = excluded.params, attempt = excluded.attempt, server_id = excluded.server_id, state = 'running',
+		     params = excluded.params, attempt = excluded.attempt, server_id = excluded.server_id,
+		     priority = excluded.priority, state = 'running',
 		     progress = '{}', result = '{}', error = '', reported = 0, claimed_at = excluded.claimed_at,
 		     updated_at = excluded.updated_at, finished_at = NULL`,
-		j.ID, j.Kind, j.LibraryID, j.Path, jsonOr(j.Params), j.Attempt, j.ServerID, now, now)
+		j.ID, j.Kind, j.LibraryID, j.Path, jsonOr(j.Params), j.Attempt, j.ServerID, j.Priority, now, now)
 	return err
 }
 
