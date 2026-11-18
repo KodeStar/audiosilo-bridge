@@ -92,6 +92,11 @@ var ErrFollowed = errors.New("a later claim of the job, or another open job, fol
 // recorded here.
 const laterClaimSQL = `EXISTS (SELECT 1 FROM server_jobs WHERE id = ?1 AND attempt > ?2)`
 
+// openJobsSQL is the open server jobs' mappings (g): the job still running here,
+// its mapping not ended. Callers add the book and the job to leave out.
+const openJobsSQL = `generate_books g JOIN server_jobs j ON j.id = g.server_job_id
+		  WHERE g.ended_at = '' AND j.state = 'running'`
+
 // SetBookStatusUnlessFollowed is SetBookStatus with no park code nor retry, but
 // only while g holds (in the one statement, so a later claim that reopens the
 // mapping between a check and the write is never stopped): no later attempt of
@@ -103,8 +108,7 @@ func (db *DB) SetBookStatusUnlessFollowed(ctx context.Context, id int64, status,
 		`UPDATE books SET status = ?4, error = ?5, park_code = ?6, retry_at = ?7, updated_at = ?8
 		  WHERE id = ?9 AND NOT `+laterClaimSQL+`
 		    AND (?3 = 0 OR EXISTS (SELECT 1 FROM generate_books WHERE server_job_id = ?1 AND ended_at != ''))
-		    AND NOT EXISTS (SELECT 1 FROM generate_books g JOIN server_jobs j ON j.id = g.server_job_id
-		         WHERE g.book_id = books.id AND g.server_job_id != ?1 AND g.ended_at = '' AND j.state = 'running')`,
+		    AND NOT EXISTS (SELECT 1 FROM `+openJobsSQL+` AND g.book_id = books.id AND g.server_job_id != ?1)`,
 		g.JobID, g.Attempt, g.Ended, status, errMsg, enforceParkCode(status, ""), enforceRetryAt(status, ""),
 		timestamp(nowFn()), id)
 	if err := checkAffected(res, err); !errors.Is(err, ErrNotFound) {
@@ -157,8 +161,7 @@ func (db *DB) GenerateBookFollowed(ctx context.Context, bookID int64) (bool, err
 // bookID.
 func (db *DB) OpenGenerateJobsForBook(ctx context.Context, bookID, exceptJob int64) ([]int64, error) {
 	rows, err := db.sql.QueryContext(ctx,
-		`SELECT g.server_job_id FROM generate_books g JOIN server_jobs j ON j.id = g.server_job_id
-		  WHERE g.book_id = ? AND g.server_job_id != ? AND g.ended_at = '' AND j.state = 'running'
+		`SELECT g.server_job_id FROM `+openJobsSQL+` AND g.book_id = ? AND g.server_job_id != ?
 		  ORDER BY g.server_job_id`,
 		bookID, exceptJob)
 	if err != nil {

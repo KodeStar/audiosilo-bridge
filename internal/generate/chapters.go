@@ -605,7 +605,7 @@ func (h *Handler) awaitChaptersGivingWay(ctx context.Context, r *run, b store.Bo
 		}
 		if !time.Now().Before(deadline) {
 			if openID == 0 {
-				h.stopBook(context.WithoutCancel(ctx), stopGuard(r.job), b.ID, false)
+				h.stopBook(context.WithoutCancel(ctx), stopGuard(r.job, false), b.ID, false)
 				b, err = h.o.DB.GetBook(ctx, b.ID)
 			}
 			return b, openID, kind, err

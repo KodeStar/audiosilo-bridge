@@ -448,7 +448,7 @@ func (h *Handler) runEngineBook(ctx context.Context, eng Engine, r *run, mapped 
 		// That run's job is gone (its id is this job's now), so nothing follows it.
 		h.o.Log.Warn("generate: the job's id maps to another book's run; this job starts its own",
 			"job", r.job.ID, "mapped", mapped.RelPath, "path", r.rel)
-		h.stopBook(context.WithoutCancel(ctx), stopGuard(r.job), *mapped.BookID, false)
+		h.stopBook(context.WithoutCancel(ctx), stopGuard(r.job, false), *mapped.BookID, false)
 		resumed = false
 	}
 	if resumed {
@@ -591,9 +591,7 @@ func (h *Handler) stopStartedStage(ctx context.Context, job jobs.Job, bookID int
 	if m, err := h.o.DB.GetGenerateBook(ctx, job.ID); err != nil || m.EndedAt == "" {
 		return
 	}
-	g := stopGuard(job)
-	g.Ended = true
-	if h.stopBook(ctx, g, bookID, true) {
+	if h.stopBook(ctx, stopGuard(job, true), bookID, true) {
 		return
 	}
 	h.purgeAtEnd(ctx, job.ID, bookID)
@@ -618,7 +616,7 @@ func (h *Handler) release(ctx context.Context, job jobs.Job, bookID int64, stop 
 	if sj, err := h.o.DB.GetServerJob(ctx, job.ID); err == nil && sj.Attempt > job.Attempt {
 		return false
 	}
-	g := stopGuard(job)
+	g := stopGuard(job, false)
 	followed := stop && h.stopBook(ctx, g, bookID, false)
 	if h.beforeEnd != nil {
 		h.beforeEnd(job.ID)
@@ -678,9 +676,10 @@ func (h *Handler) stopBook(ctx context.Context, g store.StopGuard, bookID int64,
 	return false
 }
 
-// stopGuard is the StopGuard of job's end: its id and attempt.
-func stopGuard(job jobs.Job) store.StopGuard {
-	return store.StopGuard{JobID: job.ID, Attempt: job.Attempt}
+// stopGuard is the StopGuard of job's end: its id and attempt, and whether the
+// end read the job's mapping ended already.
+func stopGuard(job jobs.Job, ended bool) store.StopGuard {
+	return store.StopGuard{JobID: job.ID, Attempt: job.Attempt, Ended: ended}
 }
 
 // hold takes the engine's hold on an engine book for work outside its stages (the

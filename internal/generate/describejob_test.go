@@ -689,7 +689,7 @@ func (e *slowCancel) CancelUnlessFollowed(ctx context.Context, id int64, g store
 	return e.Engine.CancelUnlessFollowed(ctx, id, g)
 }
 
-// open lets every Cancel through; it may be called more than once.
+// open lets every CancelUnlessFollowed through; it may be called more than once.
 func (e *slowCancel) open() { e.openOnce.Do(func() { close(e.gate) }) }
 
 // A job's end is visible only once the engine's cancel of its book has returned:
