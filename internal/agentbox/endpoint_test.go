@@ -3,6 +3,7 @@ package agentbox
 import (
 	"context"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -394,6 +395,9 @@ func TestEndpointRefusedBesideOwnCredentials(t *testing.T) {
 		if st.Available || st.Refused || st.Problem != ProblemOwnCredentials || !strings.Contains(st.Detail, "credential of its own") {
 			t.Fatalf("%s: status = %+v", name, st)
 		}
+		if st.Found != "" {
+			t.Fatalf("%s: found %q, with none reported", name, st.Found)
+		}
 		if av := r.Detect(context.Background()); av.Available {
 			t.Fatalf("%s: detect = %+v", name, av)
 		}
@@ -411,6 +415,74 @@ func TestEndpointRefusedBesideOwnCredentials(t *testing.T) {
 				t.Fatalf("%s: a job was staged (%s)", name, e.Name())
 			}
 		}
+	}
+}
+
+// What the endpoint's service found is Status.Found (trimmed: runner.json is
+// the service's, which a run could rewrite), for Settings > Agent to name the
+// file to remove; never in Detail, which a parked book's reason carries. It
+// is reported only with the refusal (a found beside no refusal is dropped).
+func TestEndpointStatusNamesWhatWasFound(t *testing.T) {
+	t.Parallel()
+	r, dir, _ := endpointRunner(t, "sk-endpoint-vault")
+	rj := endpointService()
+	rj.OwnCredentials, rj.Found = true, "/mnt/x holds /mnt/x/agent/.audiosilo-agent-home\x1b[2J"
+	writeRunnerJSON(t, dir, rj)
+	st := r.Status()
+	if st.Problem != ProblemOwnCredentials || st.Found != "/mnt/x holds /mnt/x/agent/.audiosilo-agent-home?[2J" {
+		t.Fatalf("status = %+v", st)
+	}
+	if strings.Contains(st.Detail, "/mnt/x") {
+		t.Fatalf("Detail names the path: %q", st.Detail)
+	}
+	rj.OwnCredentials = false
+	writeRunnerJSON(t, dir, rj)
+	if st := r.Status(); !st.Available || st.Found != "" {
+		t.Fatalf("no refusal: %+v", st)
+	}
+}
+
+// While the endpoint's agent service isn't running, the agent's state names
+// that service and how to start it (its compose profile), never the agent
+// container; the claude and codex backends name the agent container.
+func TestEndpointNotRunningNamesItsService(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct {
+		runnerJSON func(t *testing.T, dir string)
+		want       string
+	}{
+		"no runner.json": {runnerJSON: func(t *testing.T, dir string) {
+			if err := os.Remove(filepath.Join(dir, agentproto.RunnerFile)); err != nil {
+				t.Fatal(err)
+			}
+		}, want: "hasn't written its status"},
+		"a stale heartbeat": {runnerJSON: func(t *testing.T, dir string) {
+			rj := endpointService()
+			rj.HeartbeatAt = time.Now().Add(-time.Hour)
+			writeRunnerJSON(t, dir, rj)
+		}, want: "last heartbeat was"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			r, _, _ := endpointRunner(t, "")
+			r.dir = t.TempDir() // a first read
+			writeRunnerJSON(t, r.dir, endpointService())
+			tc.runnerJSON(t, r.dir)
+			st := r.Status()
+			if st.Problem != ProblemNotRunning || !strings.Contains(st.Detail, tc.want) ||
+				!strings.Contains(st.Detail, "agent-endpoint") || !strings.Contains(st.Detail, "--profile endpoint") ||
+				strings.Contains(st.Detail, "agent container") {
+				t.Fatalf("status = %+v", st)
+			}
+		})
+	}
+	r, dir := newTestRunner(t, agent.IDClaude)
+	if err := os.Remove(filepath.Join(dir, agentproto.RunnerFile)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		t.Fatal(err)
+	}
+	if st := r.Status(); st.Problem != ProblemNotRunning || !strings.Contains(st.Detail, "the agent container isn't running") ||
+		strings.Contains(st.Detail, "agent-endpoint") {
+		t.Fatalf("claude: %+v", st)
 	}
 }
 
@@ -520,7 +592,9 @@ func TestEndpointServiceRequired(t *testing.T) {
 			t.Skip("no file owners here")
 		}
 		refused(t, r, dir, ProblemEndpointService, "same user")
-		// A stopped agent container says nothing of its user (allowed).
+		// A stopped agent container says nothing of its user (allowed): one
+		// that left an hour-old runner.json, read for the first time.
+		r.agentDir = t.TempDir()
 		agentRJ.HeartbeatAt = time.Now().Add(-time.Hour)
 		writeRunnerJSON(t, r.agentDir, agentRJ)
 		if st := r.Status(); !st.Available {

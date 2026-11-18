@@ -57,7 +57,12 @@ const agentFor = "the agent signs in to Claude or ChatGPT and is needed for char
 // take the Accounts tab's credential), and while it runs with no credential;
 // agentNoCLI and agentOtherBackend name the backends.
 const (
-	DetailAgentNotRunning   = "the agent container isn't running yet; " + agentFor
+	DetailAgentNotRunning = "the agent container isn't running yet; " + agentFor
+	// DetailAgentEndpointNotRunning: the backend is openai-compatible and its
+	// own agent service (the compose example's agent-endpoint, in the
+	// endpoint profile) isn't running.
+	DetailAgentEndpointNotRunning = "the endpoint's agent service (agent-endpoint) isn't running yet: start it with " +
+		"docker compose --profile endpoint up -d agent-endpoint; the agent is needed for characters, recaps and descriptions"
 	DetailAgentOutdated     = "the agent image isn't this Bridge's version: run the same version of both images; " + agentFor
 	DetailAgentNoCredential = "set the agent's sign-in on the Accounts tab; " + agentFor
 	// DetailAgentGroupRequired: agent.require_group is on and the credential
@@ -297,6 +302,8 @@ func Checklist(in Inputs) link.Setup {
 		agentDetail = DetailAgentEndpointService
 	case in.Agent.Problem == AgentEndpointOnly:
 		agentDetail = DetailAgentEndpointOnly
+	case in.Agent.Backend == "openai-compatible":
+		agentDetail = DetailAgentEndpointNotRunning
 	default:
 		agentDetail = DetailAgentNotRunning
 	}

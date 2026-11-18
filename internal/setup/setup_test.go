@@ -155,11 +155,18 @@ func TestChecklistAgentWords(t *testing.T) {
 	for d, sayFor := range map[string]bool{DetailAgentNotRunning: true, DetailAgentOutdated: true, DetailAgentNoCredential: true,
 		agentNoCLI("claude"): true, agentOtherBackend("claude", "codex"): false, DetailAgentGroupRequired: false,
 		DetailAgentHandoffFailed: true, DetailAgentShared: false, DetailAgentNoEndpoint: false,
-		DetailAgentOwnCredentials: false, DetailAgentEndpointService: false, DetailAgentEndpointOnly: false} {
+		DetailAgentOwnCredentials: false, DetailAgentEndpointService: false, DetailAgentEndpointOnly: false,
+		DetailAgentEndpointNotRunning: false} {
 		if strings.Contains(d, "staging") || len(d) > maxDetail ||
 			sayFor && (!strings.Contains(d, "Claude or ChatGPT") || !strings.Contains(d, "characters, recaps and descriptions")) {
 			t.Errorf("detail %q", d)
 		}
+	}
+	// The endpoint's own service names itself and its compose profile, and
+	// no subscription (BR-OPENAI-2).
+	if d := DetailAgentEndpointNotRunning; !strings.Contains(d, "agent-endpoint") || !strings.Contains(d, "--profile endpoint") ||
+		strings.Contains(d, "Claude") || strings.Contains(d, "ChatGPT") || strings.Contains(d, "agent container") {
+		t.Errorf("endpoint detail %q", d)
 	}
 	in.Agent = Agent{Backend: "claude", Refused: true, Detail: "the agent's credential was refused by the provider: replace it on the Bridge's Accounts tab"}
 	if a := item(t, Checklist(in), ItemAgent); a.Done || a.Detail != in.Agent.Detail {
@@ -216,6 +223,8 @@ func TestChecklistAgentProblems(t *testing.T) {
 		{Agent{Backend: "claude", Problem: AgentNoCredential}, DetailAgentNoCredential},
 		{Agent{Backend: "claude", Problem: AgentGroupRequired}, DetailAgentGroupRequired},
 		{Agent{Backend: "claude", Problem: AgentHandoffFailed}, DetailAgentHandoffFailed},
+		{Agent{Backend: "openai-compatible"}, DetailAgentEndpointNotRunning},
+		{Agent{Backend: "openai-compatible", Problem: AgentNotRunning}, DetailAgentEndpointNotRunning},
 		{Agent{Backend: "openai-compatible", Problem: AgentNoEndpoint}, DetailAgentNoEndpoint},
 		{Agent{Backend: "openai-compatible", Problem: AgentOwnCredentials}, DetailAgentOwnCredentials},
 		{Agent{Backend: "openai-compatible", Problem: AgentEndpointSvc}, DetailAgentEndpointService},
