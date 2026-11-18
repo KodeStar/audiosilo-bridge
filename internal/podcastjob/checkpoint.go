@@ -174,7 +174,7 @@ func (s *service) dropPartial(root *os.Root, c *checkpoint) bool {
 		p := c.partialName()
 		// Checked, not opened: a partial the Bridge can no longer read (the
 		// restart from zero clears one) is still its own to remove.
-		if _, err := podcast.LstatRegular(root, p); err == nil && !journalStages(root, c) {
+		if st, err := podcast.LstatRegular(root, p); err == nil && !journalStages(root, c, st) {
 			if err := root.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
 				return false
 			}
@@ -187,13 +187,22 @@ func (s *service) dropPartial(root *os.Root, c *checkpoint) bool {
 }
 
 // journalStages reports whether the episode's pending journal names c's partial
-// as its staged audio, or is there but can't be read to tell.
-func journalStages(root *os.Root, c *checkpoint) bool {
+// (st, as LstatRegular saw it) as its staged audio, or is there but can't be
+// read to tell. A name spelt otherwise for the same file (a case-insensitive
+// or normalising filesystem) counts too: RecoverShow would install that file.
+func journalStages(root *os.Root, c *checkpoint, st os.FileInfo) bool {
 	j, err := podcast.ReadJournal(root, podcast.AttachmentPath(c.Path, ".publish.json"))
 	if errors.Is(err, os.ErrNotExist) {
 		return false
 	}
-	return err != nil || j.AudioTemp == c.Temp
+	if err != nil || j.AudioTemp == c.Temp {
+		return true
+	}
+	if j.AudioTemp == "" {
+		return false
+	}
+	staged, err := root.Lstat(path.Dir(c.Path) + "/" + j.AudioTemp)
+	return err == nil && os.SameFile(st, staged)
 }
 func (s *service) fileLock(ctx context.Context, root *os.Root, episode string) (func(), error) {
 	if err := podcast.EnsureDir(root, path.Dir(episode)+"/.audiosilo"); err != nil {

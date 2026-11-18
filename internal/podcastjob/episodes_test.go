@@ -983,3 +983,68 @@ func TestClearRemovesAPartialNoJournalStages(t *testing.T) {
 		t.Fatal("the journal's staged file was removed:", err)
 	}
 }
+
+// A clear keeps a recorded partial beside a journal it cannot read (it may
+// stage that partial), and drops only the record.
+func TestClearKeepsAPartialBesideAnUnreadableJournal(t *testing.T) {
+	h, job := audioHarness(t)
+	s := h.handler.s
+	show := filepath.Join(h.mount, filepath.Dir(*job.Path))
+	if err := os.MkdirAll(filepath.Join(show, ".audiosilo"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(h.mount, podcast.AttachmentPath(*job.Path, ".publish.json")), []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mine := podcast.TempPrefix + strings.Repeat("c", 24)
+	if err := os.WriteFile(filepath.Join(show, mine), []byte("part"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(h.mount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	s.clearCheckpoint(job, root, &checkpoint{ServerHash: s.pairHash(), Path: *job.Path, Temp: mine})
+	if _, err := os.Stat(filepath.Join(show, mine)); err != nil {
+		t.Fatal("a partial an unreadable journal may stage was removed:", err)
+	}
+	if _, ok := s.readCheckpoint(job); ok {
+		t.Fatal("the record was kept")
+	}
+}
+
+// A clear keeps a recorded partial a journal stages under another name for the
+// same file (a case-insensitive or normalising filesystem's other spelling,
+// here a hard link): RecoverShow installs that file.
+func TestClearKeepsAPartialAJournalStagesUnderAnotherName(t *testing.T) {
+	h, job := audioHarness(t)
+	s := h.handler.s
+	show := filepath.Join(h.mount, filepath.Dir(*job.Path))
+	if err := os.MkdirAll(filepath.Join(show, ".audiosilo"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	staged, mine := podcast.TempPrefix+strings.Repeat("d", 24), podcast.TempPrefix+strings.Repeat("e", 24)
+	b, _ := json.Marshal(podcast.Journal{Version: 1, Op: "install", Path: *job.Path, AudioTemp: staged})
+	if err := os.WriteFile(filepath.Join(h.mount, podcast.AttachmentPath(*job.Path, ".publish.json")), b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(show, staged), []byte("part"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(filepath.Join(show, staged), filepath.Join(show, mine)); err != nil {
+		t.Skip("no hard links here:", err)
+	}
+	root, err := os.OpenRoot(h.mount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	s.clearCheckpoint(job, root, &checkpoint{ServerHash: s.pairHash(), Path: *job.Path, Temp: mine})
+	if _, err := os.Stat(filepath.Join(show, mine)); err != nil {
+		t.Fatal("the journal's staged file, recorded under another name, was removed:", err)
+	}
+	if _, ok := s.readCheckpoint(job); ok {
+		t.Fatal("the record was kept")
+	}
+}
