@@ -216,17 +216,11 @@ func RecoverShow(root *os.Root, show string, now time.Time, fault Boundary) erro
 			continue
 		}
 		p := dir + "/" + e.Name()
-		rd, err := OpenRegular(root, p)
+		j, err := ReadJournal(root, p)
 		if err != nil {
 			return err
 		}
-		b, err := io.ReadAll(io.LimitReader(rd, (4<<20)+1))
-		_ = rd.Close()
-		if err != nil {
-			return err
-		}
-		var j Journal
-		if len(b) > 4<<20 || json.Unmarshal(b, &j) != nil || !journalValid(&j, show) || AttachmentPath(j.Path, ".publish.json") != p {
+		if !journalValid(&j, show) || AttachmentPath(j.Path, ".publish.json") != p {
 			return ErrInvalidFile
 		}
 		if j.Op == "delete" {
@@ -243,6 +237,26 @@ func RecoverShow(root *os.Root, show string, now time.Time, fault Boundary) erro
 		}
 	}
 	return nil
+}
+
+// ReadJournal decodes the journal at name (a regular file, no link in any
+// component, at most 4 MiB as Publish writes it); ErrInvalidFile when it is
+// too big or not a journal. It does not check the journal is valid.
+func ReadJournal(root *os.Root, name string) (Journal, error) {
+	var j Journal
+	rd, err := OpenRegular(root, name)
+	if err != nil {
+		return j, err
+	}
+	defer rd.Close()
+	b, err := io.ReadAll(io.LimitReader(rd, (4<<20)+1))
+	if err != nil {
+		return j, err
+	}
+	if len(b) > 4<<20 || json.Unmarshal(b, &j) != nil {
+		return Journal{}, ErrInvalidFile
+	}
+	return j, nil
 }
 
 // complete finishes a journaled transaction. verified means the caller has just

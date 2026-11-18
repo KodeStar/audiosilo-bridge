@@ -2273,11 +2273,13 @@ internal/
             Subscribe implements ParamSealer and Abandoner: job credentials are
             sealed before persistence, resumed from the vault, resealed under
             the show id on success, and removed at every terminal job end.
-            A 304 never rewrites feed.json or artwork. Both handlers preserve retained fetch metadata and recover show journals before
-            writes. Fetch downloads outside the show lock, rehashes proven partials,
-            seals validators, probes local descriptors and confirms its lease before
-            publication. No checkpoint clear removes a partial a pending install
-            journal stages (journalStages): RecoverShow installs it. Per-path process and OS file locks prevent overlap across
+            A 304 never rewrites feed.json or artwork. Both handlers preserve
+            retained fetch metadata and recover show journals before writes.
+            Fetch downloads outside the show lock, rehashes proven partials,
+            seals validators, probes local descriptors and confirms its lease
+            before publication. No checkpoint clear removes a partial a pending
+            install journal stages (journalStages): RecoverShow installs it.
+            Per-path process and OS file locks prevent overlap across
             reclaimed jobs. Retain hashes local candidates and fails closed on an
             unavailable, stale or protected aggregate. Snapshot freshness lasts five
             seconds from request dispatch on the Bridge's monotonic clock;
