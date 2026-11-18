@@ -43,9 +43,12 @@ func (r *Runner) handle(ctx context.Context, job *os.Root) {
 // execute validates the request and runs the CLI. Only the run's outcome comes
 // back; stdout.txt and stderr.txt are written as it runs.
 func (r *Runner) execute(ctx context.Context, job *os.Root, id string) agentproto.Exit {
-	raw, err := agentproto.ReadRegular(job, agentproto.RequestFile, agentproto.MaxRequestBytes)
+	raw, reqInfo, err := agentproto.ReadRegularInfo(job, agentproto.RequestFile, agentproto.MaxRequestBytes)
 	if err != nil {
 		return refused("read request.json: " + err.Error())
+	}
+	if r.opts.EndpointOnly && r.planted(job, reqInfo) {
+		return unavailable(plantedJob)
 	}
 	req, err := agentproto.DecodeRequest(raw)
 	if err != nil {
@@ -153,6 +156,32 @@ func (r *Runner) execute(ctx context.Context, job *os.Root, id string) agentprot
 	return exit
 }
 
+// plantedJob is exit.json's error for a job in the endpoint's service that the
+// Bridge didn't stage (planted).
+const plantedJob = "the endpoint's agent service runs only the jobs the Bridge stages, and this job's folder or " +
+	"request belongs to the service's own user (a run's making, or a Bridge running as that same user): " +
+	"run the Bridge and agent-endpoint as different users"
+
+// planted reports whether a job in the endpoint's service is one of its own
+// uid's making (its dir or its request.json, req, owned by selfUID): a run's
+// commands share that uid and can write the staging dir, so such a job is one
+// a run left there to run again after it (the claim is the oldest request's,
+// so it would also hold up the Bridge's jobs and their credentials), never
+// the Bridge's, which runs as another user. A volume that shows every file as
+// one squashed uid can't tell the two apart.
+func (r *Runner) planted(job *os.Root, req fs.FileInfo) bool {
+	dir, err := job.Stat(".")
+	if err != nil {
+		return true
+	}
+	for _, info := range []fs.FileInfo{dir, req} {
+		if uid, ok := ownerUID(info); ok && uid == r.selfUID {
+			return true
+		}
+	}
+	return false
+}
+
 // copyLastMessage copies codex's --output-last-message file from the run's temp
 // dir into the job dir. codex wrote it, so it is read like any untrusted file:
 // a link there (to a credential, say) is refused, never followed.
@@ -257,8 +286,16 @@ func (r *Runner) spawn(ctx context.Context, job *os.Root, s spec) agentproto.Exi
 	cmd.Stderr = stderr
 	cmd.WaitDelay = 5 * time.Second
 	setProcGroup(cmd)
-	r.sweepStrays()
-	if err := cmd.Start(); err != nil {
+	// The sweep, the start and the session's record are one step: another
+	// slot's sweep in between would take the CLI just started for a stray.
+	r.sweepMu.Lock()
+	r.sweepLocked()
+	err = cmd.Start()
+	if err == nil {
+		r.setSession(cmd.Process.Pid, true)
+	}
+	r.sweepMu.Unlock()
+	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			// The binary went (an image updated in place): the CLI is looked for
 			// again, and the Bridge parks the book until it is back.
@@ -268,7 +305,6 @@ func (r *Runner) spawn(ctx context.Context, job *os.Root, s spec) agentproto.Exi
 		return refused("start " + filepath.Base(s.path) + ": " + err.Error())
 	}
 	pid := cmd.Process.Pid
-	r.setSession(pid, true)
 	defer r.sweepStrays()
 	defer r.setSession(pid, false)
 	done := make(chan error, 1)

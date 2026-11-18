@@ -3,6 +3,7 @@
 package agentrun
 
 import (
+	"io/fs"
 	"os"
 	"os/exec"
 	"syscall"
@@ -35,3 +36,6 @@ func setUmask(int) {}
 
 // enterable can't be told here: count it as reachable.
 func enterable(string) bool { return true }
+
+// ownerUID: a file has no owner here.
+func ownerUID(fs.FileInfo) (int, bool) { return 0, false }

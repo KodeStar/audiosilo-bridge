@@ -3,6 +3,7 @@
 package agentrun
 
 import (
+	"io/fs"
 	"os"
 	"os/exec"
 	"syscall"
@@ -49,4 +50,14 @@ func setUmask(mask int) { syscall.Umask(mask) }
 func enterable(dir string) bool {
 	return unix.Faccessat(unix.AT_FDCWD, dir, unix.W_OK, unix.AT_EACCESS) == nil ||
 		unix.Faccessat(unix.AT_FDCWD, dir, unix.X_OK, unix.AT_EACCESS) == nil
+}
+
+// ownerUID is info's owner, as this process's user namespace shows it; ok
+// false where the OS reports none.
+func ownerUID(info fs.FileInfo) (uid int, ok bool) {
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return 0, false
+	}
+	return int(st.Uid), true
 }

@@ -73,9 +73,32 @@ func (r *Runner) keepSession(sid int) bool {
 	return r.sessions[sid]
 }
 
+// onlyStrays reports whether procs holds nothing but init (pid 1), the runner
+// (self) and found, the strays: then nothing else shares the pid namespace,
+// and one kill(-1) ends the strays at once (sweep_linux.go).
+func onlyStrays(procs []proc, self int, found []proc) bool {
+	stray := make(map[int]bool, len(found))
+	for _, p := range found {
+		stray[p.pid] = true
+	}
+	for _, p := range procs {
+		if p.pid != 1 && p.pid != self && !stray[p.pid] {
+			return false
+		}
+	}
+	return true
+}
+
 // sweepStrays ends what earlier runs left behind (an endpoint-only runner's,
 // set by Main; nothing for the agent container's).
 func (r *Runner) sweepStrays() {
+	r.sweepMu.Lock()
+	defer r.sweepMu.Unlock()
+	r.sweepLocked()
+}
+
+// sweepLocked is sweepStrays, the caller holding sweepMu.
+func (r *Runner) sweepLocked() {
 	if r.sweep == nil {
 		return
 	}

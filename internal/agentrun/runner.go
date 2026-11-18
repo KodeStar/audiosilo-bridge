@@ -113,8 +113,13 @@ type Runner struct {
 	active   map[string]bool
 	sessions map[int]bool
 	// sweep ends the processes a run left behind (sweep.go), set by Main for
-	// an endpoint-only runner (nil: no sweep).
-	sweep func(keep func(sid int) bool) int
+	// an endpoint-only runner (nil: no sweep). sweepMu orders the sweeps
+	// against the CLIs' starts (spawn).
+	sweep   func(keep func(sid int) bool) int
+	sweepMu sync.Mutex
+	// selfUID is the runner's own uid: a job of its making is a run's
+	// (planted), which the endpoint's service never runs.
+	selfUID int
 
 	// groups are runner.json's groups, read once: a process with no
 	// capabilities can't change them.
@@ -171,6 +176,7 @@ func New(opts Options) (*Runner, error) {
 		creds:       map[string]credSeen{},
 		active:      map[string]bool{},
 		sessions:    map[int]bool{},
+		selfUID:     os.Geteuid(),
 		groups:      groups(),
 		killDelay:   10 * time.Second,
 		scanEvery:   scanInterval,

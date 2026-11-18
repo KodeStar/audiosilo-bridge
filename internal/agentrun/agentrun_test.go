@@ -944,15 +944,17 @@ func endpointParentEnv() map[string]string {
 }
 
 // newEndpointEnv is newTestEnv as the endpoint's own service
-// (--endpoint-only): no agent home (te.home names one that doesn't exist), and
+// (--endpoint-only): no agent home (te.home names one that doesn't exist),
 // sweep counts the sweeps instead of killing anything (the tests run in
 // parallel, so a real sweep could reach another test's CLI;
-// TestEndpointSweepEndsStrays runs the real one alone).
+// TestEndpointSweepEndsStrays runs the real one alone), and the runner's uid
+// is taken for another than this test's, which writes the jobs as the Bridge
+// (TestEndpointServiceRunsOnlyTheBridgesJobs puts it back).
 func newEndpointEnv(t *testing.T, env map[string]string) (te *testEnv, sweeps *atomic.Int32) {
 	t.Helper()
 	te = newTestEnv(t, env)
 	te.home = filepath.Join(t.TempDir(), "agent")
-	te.r.opts.Home, te.r.opts.EndpointOnly = te.home, true
+	te.r.opts.Home, te.r.opts.EndpointOnly, te.r.selfUID = te.home, true, -1
 	sweeps = new(atomic.Int32)
 	te.r.sweep = func(func(int) bool) int { sweeps.Add(1); return 0 }
 	return te, sweeps
@@ -1139,6 +1141,55 @@ func TestRunsGoToTheirOwnService(t *testing.T) {
 			t.Fatal("claude ran in the endpoint's service")
 		}
 	})
+}
+
+// The endpoint's service runs only the Bridge's jobs: a job dir its own uid
+// made (a run's commands share that uid and can write the staging dir, so it
+// is one a run left there to run again after it) is refused as the agent
+// unavailable, its credential.json left alone and no CLI started (denied),
+// even with the oldest request; a job of another uid's making runs (allowed:
+// TestEndpointRun, where the runner's uid is another than the job's). The
+// agent container's runner is unchanged (TestClaudeRun: a job of its own uid).
+func TestEndpointServiceRunsOnlyTheBridgesJobs(t *testing.T) {
+	t.Parallel()
+	te, _ := newEndpointEnv(t, endpointParentEnv())
+	te.r.selfUID = os.Geteuid() // this test made the job, as a run would
+	te.start(t)
+	job, cred := te.submitWithCredential(t, endpointReq, `{"cli":"codex","kind":"endpoint_api_key","value":"sk-planted"}`)
+	old := time.Unix(1, 0)
+	_ = os.Chtimes(filepath.Join(job, agentproto.RequestFile), old, old)
+	ex := waitDone(t, job, 30*time.Second)
+	if !ex.Unavailable || !strings.Contains(ex.Error, "only the jobs the Bridge stages") {
+		t.Fatalf("exit = %+v, want the planted job refused", ex)
+	}
+	if _, err := os.Lstat(cred); err != nil {
+		t.Fatal("a planted job's credential.json was taken")
+	}
+	if _, err := os.Stat(filepath.Join(te.codexCap, "argv")); err == nil {
+		t.Fatal("codex ran a planted job")
+	}
+}
+
+// onlyStrays: the atomic kill(-1) is for a pid namespace holding nothing but
+// init, the runner and the strays; anything else in it (a CLI running now,
+// the runner's own --version, a docker exec) keeps the sweep to its strays.
+func TestOnlyStrays(t *testing.T) {
+	t.Parallel()
+	const self = 100
+	strays := []proc{{pid: 300, ppid: self, sid: 300}, {pid: 301, ppid: 300, sid: 301}}
+	base := []proc{{pid: 1, ppid: 0, sid: 1}, {pid: self, ppid: 1, sid: 1}}
+	if !onlyStrays(append(slices.Clone(base), strays...), self, strays) {
+		t.Error("init, the runner and its strays alone: the namespace is the strays'")
+	}
+	for name, other := range map[string]proc{
+		"a CLI running now":      {pid: 200, ppid: self, sid: 200},
+		"the runner's --version": {pid: 500, ppid: self, sid: 1},
+		"a docker exec":          {pid: 600, ppid: 0, sid: 600},
+	} {
+		if onlyStrays(append(append(slices.Clone(base), strays...), other), self, strays) {
+			t.Errorf("%s beside the strays: the namespace isn't theirs alone", name)
+		}
+	}
 }
 
 // The sweep ends the runner's children in a session it doesn't keep, with
