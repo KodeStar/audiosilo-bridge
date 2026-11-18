@@ -2,7 +2,7 @@ import { useState, type FormEvent } from 'react';
 import { errorText, type ApiClient } from '@/api/client';
 import type { AgentBackendName, AgentSettings, EndpointCheck } from '@/api/types';
 import { useLoad } from '@/lib/useLoad';
-import { LOCKED_NOTE } from '@/lib/settings';
+import { LOCKED_NOTE, isLocked } from '@/lib/settings';
 import {
   BACKEND_LABELS,
   KEY_AGENT_BACKEND,
@@ -11,7 +11,6 @@ import {
   checkBaseURL,
   chosenModels,
   endpointUpdate,
-  isLockedAgent,
   missingModel,
   modelNote,
   modelWarnings,
@@ -65,9 +64,9 @@ export function AgentSettingsCard({ client }: { client: ApiClient }) {
     );
   }
 
-  const backendLocked = isLockedAgent(settings, KEY_AGENT_BACKEND);
-  const urlLocked = isLockedAgent(settings, KEY_ENDPOINT_BASE_URL);
-  const modelLocked = isLockedAgent(settings, KEY_ENDPOINT_MODEL);
+  const backendLocked = isLocked(settings, KEY_AGENT_BACKEND);
+  const urlLocked = isLocked(settings, KEY_ENDPOINT_BASE_URL);
+  const modelLocked = isLocked(settings, KEY_ENDPOINT_MODEL);
   const endpoint = backend === 'openai-compatible';
   const update = endpointUpdate(baseUrl, model, models);
   const warnings = endpoint ? modelWarnings(check, chosenModels(update, settings.stages)) : [];
@@ -77,26 +76,19 @@ export function AgentSettingsCard({ client }: { client: ApiClient }) {
     e.preventDefault();
     if (!settings) return;
     setSaved(false);
-    if (endpoint) {
-      const problem = urlLocked ? null : checkBaseURL(baseUrl);
-      if (problem) {
-        setError(problem);
-        return;
-      }
-      const stage = missingModel(update, settings.stages);
-      if (stage) {
-        setError(
-          `Enter the model every stage uses, or one for ${stageLabel(stage)}: an endpoint has no default model.`,
-        );
-        return;
-      }
-    } else if (update.base_url !== '' && !urlLocked) {
-      // Kept for a later switch, but only a usable one.
-      const problem = checkBaseURL(baseUrl);
-      if (problem) {
-        setError(problem);
-        return;
-      }
+    // Another backend keeps an address for a later switch, but only a usable one.
+    const problem =
+      !urlLocked && (endpoint || update.base_url !== '') ? checkBaseURL(baseUrl) : null;
+    if (problem) {
+      setError(problem);
+      return;
+    }
+    const stage = endpoint ? missingModel(update, settings.stages) : null;
+    if (stage) {
+      setError(
+        `Enter the model every stage uses, or one for ${stageLabel(stage)}: an endpoint has no default model.`,
+      );
+      return;
     }
     setBusy(true);
     setError(null);

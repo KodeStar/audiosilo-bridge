@@ -1,10 +1,4 @@
-import type {
-  AgentBackendName,
-  AgentEndpoint,
-  AgentSettingKey,
-  AgentSettings,
-  EndpointCheck,
-} from '@/api/types';
+import type { AgentBackendName, AgentEndpoint, AgentSettingKey, EndpointCheck } from '@/api/types';
 
 // Settings > Agent (bridge#84): the backend, and the OpenAI-compatible endpoint
 // the openai-compatible backend runs codex against.
@@ -64,11 +58,6 @@ export function checkBaseURL(text: string): string | null {
     return 'Leave the query (?...) and the fragment (#...) out of the address.';
   }
   return null;
-}
-
-// isLockedAgent: the environment sets this agent setting.
-export function isLockedAgent(s: AgentSettings | null, key: AgentSettingKey): boolean {
-  return !!s && Array.isArray(s.locked) && s.locked.includes(key);
 }
 
 // endpointUpdate is the endpoint as the form holds it, trimmed, with the
