@@ -1273,7 +1273,10 @@ internal/
             never a credential.
   setup/    bridge#84: the agent item's problem no_endpoint (AgentNoEndpoint,
             agentbox.ProblemNoEndpoint) is the openai-compatible backend with no
-            address set, said as "set its address in Settings > Agent".
+            address set, said as "set its address in Settings > Agent";
+            own_credentials (AgentOwnCredentials, agentbox.ProblemOwnCredentials)
+            is that backend while the agent container holds a credential of its
+            own, said as remove it there or choose claude or codex.
             Phase 2b (FIRST-RUN-PLAN F2): Checklist(Inputs) is the setup checklist
             (link.Setup) in its fixed order: paired, libraries, asr, agent, budget,
             github, audible (Phase 4a, optional: done with an account signed in and
@@ -3477,6 +3480,8 @@ internal/
             http/https with a host, printable ASCII without spaces, quotes or
             backslashes (it lands in a -c override), no user info, query or fragment,
             at most 512 bytes; ValidModel exports the model-name rule.
+            runner.json's own_credentials: the container holds a credential of
+            its own (the runner refuses an endpoint run while it does).
   agentbox/ the Bridge's side of the agent container: an agent.Runner that runs no CLI,
             drops each invocation into the staging dir, waits for agentrun, and
             harvests the outputs back into the pipeline's staged dir; the outcome is
@@ -3627,6 +3632,17 @@ internal/
             in its error). A group probe goes as an endpoint request (probeModel,
             probeEndpoint), which the runner takes the credential for whatever the
             container has of its own.
+            An endpoint's model is whoever answers at the address, and codex runs
+            its commands as the runner's uid with its sandbox off, so such a run
+            could read the container's own token, key or login (its files and the
+            runner's environment) and send it anywhere. Decision 15's container
+            (one fixed uid, cap_drop ALL, no-new-privileges, no user namespaces
+            under the default seccomp profile) can't start a run under a second
+            uid, so the run is REFUSED instead: while runner.json says
+            own_credentials, or any CLI's entry has a credential, Status is
+            ProblemOwnCredentials (not ready, nothing staged, the detail saying
+            to remove it from the container or choose claude or codex), after
+            outdated and no_endpoint.
   agentrun/ `audiosilo-bridge agent-runner`, the ONLY thing in the agent container (Linux
             only). It sees the staging dir and /agent (secrets/, codex/), never a
             library or the Bridge's data. Main sets umask 077 for the whole process
@@ -3683,6 +3699,15 @@ internal/
             reach; /tmp works for exec, checked on the image) and
             AUDIOSILO_ENDPOINT_API_KEY only: never OPENAI_API_KEY, CODEX_API_KEY or
             the shared CODEX_HOME, whose wipe brackets skip such a run.
+            An endpoint run is refused (Exit unavailable, endpointBlocked, after
+            the hand-off is taken and deleted, no CLI started) while
+            holdsCredentials: a CLI's credential (credentialKind: the four
+            variables, their secrets files, codex's login), an auth.json of any
+            shape, or anything in secrets/ but an empty file (an unlistable
+            secrets dir counts). The CLI is this uid with its sandbox off, so the
+            environment allow-list keeps nothing from a model that runs a shell
+            command: it could read those files and /proc/<runner>/environ.
+            runner.json's own_credentials says so for the Bridge's Status.
   endpoint/ bridge#84: Settings > Agent's Test connection, a leaf (standard library
             only). Check(ctx, client, base, key): GET <base>/models (Bearer key
             when set), then POST <base>/responses with {} to learn whether the

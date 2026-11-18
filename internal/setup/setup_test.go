@@ -154,7 +154,8 @@ func TestChecklistAgentWords(t *testing.T) {
 	// Each says what the agent is for, but the backend mismatch, which names both.
 	for d, sayFor := range map[string]bool{DetailAgentNotRunning: true, DetailAgentOutdated: true, DetailAgentNoCredential: true,
 		agentNoCLI("claude"): true, agentOtherBackend("claude", "codex"): false, DetailAgentGroupRequired: false,
-		DetailAgentHandoffFailed: true, DetailAgentShared: false, DetailAgentNoEndpoint: false} {
+		DetailAgentHandoffFailed: true, DetailAgentShared: false, DetailAgentNoEndpoint: false,
+		DetailAgentOwnCredentials: false} {
 		if strings.Contains(d, "staging") || len(d) > maxDetail ||
 			sayFor && (!strings.Contains(d, "Claude or ChatGPT") || !strings.Contains(d, "characters, recaps and descriptions")) {
 			t.Errorf("detail %q", d)
@@ -216,6 +217,7 @@ func TestChecklistAgentProblems(t *testing.T) {
 		{Agent{Backend: "claude", Problem: AgentGroupRequired}, DetailAgentGroupRequired},
 		{Agent{Backend: "claude", Problem: AgentHandoffFailed}, DetailAgentHandoffFailed},
 		{Agent{Backend: "openai-compatible", Problem: AgentNoEndpoint}, DetailAgentNoEndpoint},
+		{Agent{Backend: "openai-compatible", Problem: AgentOwnCredentials}, DetailAgentOwnCredentials},
 		{Agent{Backend: "openai-compatible", Problem: AgentNoCLI}, "the agent image has no codex CLI: use this Bridge's agent image; " + agentFor},
 	} {
 		in := done()

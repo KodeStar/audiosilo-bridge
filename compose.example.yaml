@@ -33,7 +33,10 @@
 #   docker compose exec agent audiosilo-bridge agent-login codex
 # and set AUDIOSILO_BRIDGE_AGENT_BACKEND: codex on the bridge (it runs claude
 # unless told otherwise). Or pick an OpenAI-compatible endpoint (the OpenAI API,
-# a router, Ollama or LM Studio) in the Bridge page's Settings > Agent.
+# a router, Ollama or LM Studio) in the Bridge page's Settings > Agent: it runs
+# only while this container holds no credential of its own (leave the .env
+# values out and /agent/secrets empty, with no codex sign-in), as the
+# endpoint's model runs commands in here and could read one.
 name: audiosilo
 
 services:

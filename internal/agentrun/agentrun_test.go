@@ -934,24 +934,32 @@ func TestHandoffRefused(t *testing.T) {
 const endpointReq = `{"protocol":1,"cli":"codex","model":"qwen3:32b","effort":"","web":true,"no_tools":false,"max_turns":0,"timeout_seconds":60,` +
 	`"endpoint":{"base_url":"http://192.168.1.20:11434/v1"}}`
 
+// endpointParentEnv is parentEnv without the container's own credentials: an
+// endpoint runs only in a container that holds none.
+func endpointParentEnv() map[string]string {
+	env := parentEnv()
+	delete(env, "CLAUDE_CODE_OAUTH_TOKEN")
+	delete(env, "OPENAI_API_KEY")
+	return env
+}
+
 // An endpoint run (bridge#84) gets the handed endpoint key in its own variable,
-// named to codex by env_key, never in argv; its own empty CODEX_HOME; and none
-// of the container's credentials (they are for OpenAI), the shared CODEX_HOME
-// (with its device login) left alone.
+// named to codex by env_key, never in argv; its own empty CODEX_HOME, the
+// shared one (the user's config.toml there) left alone; and nothing else of
+// the runner's environment.
 func TestEndpointRun(t *testing.T) {
 	t.Parallel()
-	env := parentEnv() // the container has OPENAI_API_KEY and CLAUDE_CODE_OAUTH_TOKEN
-	te := newTestEnv(t, env)
+	te := newTestEnv(t, endpointParentEnv())
 	codexHome := filepath.Join(te.home, "codex")
 	if err := os.MkdirAll(codexHome, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(codexHome, "auth.json"), []byte(`{"tokens":"device-login"}`), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(codexHome, "config.toml"), []byte(`model = "the-users-own"`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	_ = os.WriteFile(filepath.Join(te.codexCap, "behavior"), []byte(`ls -A "$CODEX_HOME" > "$CAP/home"`+"\n"), 0o644)
-	if !te.r.status().Endpoints {
-		t.Fatal("runner.json advertises endpoints")
+	if st := te.r.status(); !st.Endpoints || st.OwnCredentials {
+		t.Fatalf("runner.json = %+v, want endpoints and no credential of its own", st)
 	}
 	te.start(t)
 	job, cred := te.submitWithCredential(t, endpointReq, `{"cli":"codex","kind":"endpoint_api_key","value":"sk-endpoint-SECRET"}`)
@@ -990,10 +998,73 @@ func TestEndpointRun(t *testing.T) {
 		t.Errorf("CODEX_HOME = %q, want the run's own under %s", got["CODEX_HOME"], te.tmp)
 	}
 	if home, _ := os.ReadFile(filepath.Join(te.codexCap, "home")); strings.TrimSpace(string(home)) != "" {
-		t.Errorf("the run's CODEX_HOME held %q (the device login must be out of reach)", home)
+		t.Errorf("the run's CODEX_HOME held %q, want it empty", home)
 	}
-	if b, err := os.ReadFile(filepath.Join(codexHome, "auth.json")); err != nil || !strings.Contains(string(b), "device-login") {
-		t.Error("the shared CODEX_HOME's login was touched")
+	if b, err := os.ReadFile(filepath.Join(codexHome, "config.toml")); err != nil || !strings.Contains(string(b), "the-users-own") {
+		t.Error("the shared CODEX_HOME was touched")
+	}
+}
+
+// An endpoint's model is whoever answers at the address, and the CLI runs its
+// commands as the runner's uid with its sandbox off: while the container holds
+// a credential of its own (in its environment, its secrets dir or codex's
+// login) the run could read it, so it is refused as the agent unavailable, the
+// hand-off taken and deleted all the same and no CLI started (denied);
+// runner.json says so for the Bridge. Without one it runs (allowed).
+func TestEndpointRunRefusedBesideOwnCredentials(t *testing.T) {
+	t.Parallel()
+	for name, hold := range map[string]func(t *testing.T, env map[string]string, home string){
+		"claude's token in the environment": func(_ *testing.T, env map[string]string, _ string) {
+			env["CLAUDE_CODE_OAUTH_TOKEN"] = "sk-ant-oat01-claude"
+		},
+		"an OpenAI key in the environment": func(_ *testing.T, env map[string]string, _ string) {
+			env["OPENAI_API_KEY"] = "sk-openai"
+		},
+		"a secrets file": func(t *testing.T, _ map[string]string, home string) {
+			writeSecret(t, filepath.Join(home, "secrets", "anthropic_api_key"), "sk-ant-api03-x")
+		},
+		"a secrets file the runner has no name for": func(t *testing.T, _ map[string]string, home string) {
+			writeSecret(t, filepath.Join(home, "secrets", "something_else"), "s3cret")
+		},
+		"codex's login": func(t *testing.T, _ map[string]string, home string) {
+			writeSecret(t, filepath.Join(home, "codex", "auth.json"), `{"tokens":"device-login"}`)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			env := endpointParentEnv()
+			te := newTestEnv(t, env)
+			if te.r.holdsCredentials() || te.r.status().OwnCredentials {
+				t.Fatal("a container with no credential reports one")
+			}
+			hold(t, env, te.home)
+			if !te.r.status().OwnCredentials {
+				t.Fatal("runner.json doesn't say the container holds a credential")
+			}
+			te.start(t)
+			job, cred := te.submitWithCredential(t, endpointReq, `{"cli":"codex","kind":"endpoint_api_key","value":"sk-endpoint-SECRET"}`)
+			ex := waitDone(t, job, 30*time.Second)
+			if !ex.Unavailable || !strings.Contains(ex.Error, "credential of its own") || strings.Contains(ex.Error, "SECRET") {
+				t.Fatalf("exit = %+v, want the run refused as unavailable", ex)
+			}
+			if _, err := os.Lstat(cred); !errors.Is(err, fs.ErrNotExist) {
+				t.Fatal("the endpoint key's credential.json is deleted all the same")
+			}
+			if _, err := os.Stat(filepath.Join(te.codexCap, "argv")); err == nil {
+				t.Fatal("the CLI ran beside the container's own credential")
+			}
+		})
+	}
+}
+
+// writeSecret writes a 0600 file, making its dir.
+func writeSecret(t *testing.T, path, value string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(value), 0o600); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -1002,9 +1073,7 @@ func TestEndpointRun(t *testing.T) {
 // another kind, and an endpoint key for a run against OpenAI).
 func TestEndpointRunKeys(t *testing.T) {
 	t.Parallel()
-	env := parentEnv()
-	delete(env, "OPENAI_API_KEY")
-	te := newTestEnv(t, env)
+	te := newTestEnv(t, endpointParentEnv())
 	te.start(t)
 	job := te.submit(t, endpointReq)
 	if ex := waitDone(t, job, 30*time.Second); ex.Error != "" || ex.ExitCode != 0 {

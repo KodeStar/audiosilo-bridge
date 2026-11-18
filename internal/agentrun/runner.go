@@ -320,14 +320,15 @@ func (r *Runner) version(ctx context.Context, path string) (string, error) {
 // status is runner.json now: the CLIs found and the kind of credential each has.
 func (r *Runner) status() agentproto.Runner {
 	st := agentproto.Runner{
-		Protocol:    agentproto.Protocol,
-		Version:     r.opts.Version,
-		HeartbeatAt: r.now().UTC(),
-		Slots:       r.opts.Slots,
-		CLIs:        map[string]agentproto.CLI{},
-		Handoff:     true,
-		Groups:      r.groups,
-		Endpoints:   true,
+		Protocol:       agentproto.Protocol,
+		Version:        r.opts.Version,
+		HeartbeatAt:    r.now().UTC(),
+		Slots:          r.opts.Slots,
+		CLIs:           map[string]agentproto.CLI{},
+		Handoff:        true,
+		Groups:         r.groups,
+		Endpoints:      true,
+		OwnCredentials: r.holdsCredentials(),
 	}
 	for _, name := range []string{agentproto.CLIClaude, agentproto.CLICodex} {
 		c, _ := r.cli(name)

@@ -125,11 +125,42 @@ const (
 	// ProblemNoEndpoint: the backend is openai-compatible, and no endpoint
 	// address is set (bridge#84).
 	ProblemNoEndpoint Problem = "no_endpoint"
+	// ProblemOwnCredentials: the backend is openai-compatible, and the agent
+	// container holds a credential of its own, which an endpoint's run could
+	// read (the runner refuses such a run too).
+	ProblemOwnCredentials Problem = "own_credentials"
 )
 
 // noEndpointDetail is the agent's state while the openai-compatible backend
 // has no endpoint address.
 const noEndpointDetail = "no OpenAI-compatible endpoint is set: set its address in Settings > Agent on the Bridge's page"
+
+// ownCredentialsDetail is the agent's state while the openai-compatible
+// backend's container holds a credential of its own. An endpoint's model is
+// whoever answers at the address, and codex runs its commands as the runner's
+// uid with its sandbox off, so the run could read the container's token, key
+// or login and send it anywhere. Decision 15's container (one fixed uid, no
+// capabilities, no-new-privileges) can't start a run under a second uid, so
+// such a run is refused instead.
+const ownCredentialsDetail = "the agent container holds a credential of its own, which a run against an " +
+	"OpenAI-compatible endpoint could read: remove it from the agent container (its environment, its secrets " +
+	"files and codex's login; the Bridge's Accounts tab can hold claude's or OpenAI's instead), or choose " +
+	"claude or codex in Settings > Agent"
+
+// ownCredentials reports whether the container holds a credential of its own:
+// the runner says so, or one of its CLIs has one (backend's entry is the
+// Bridge's own making, Status).
+func ownCredentials(rj agentproto.Runner, backend string) bool {
+	if rj.OwnCredentials {
+		return true
+	}
+	for name, c := range rj.CLIs {
+		if name != backend && c.Credential != "" {
+			return true
+		}
+	}
+	return false
+}
 
 // Status reads runner.json now. Detail never names a Bridge path: it becomes a
 // parked book's reason, which the server shows in its console. The path goes to
@@ -372,6 +403,8 @@ func (r *Runner) unavailableBecause(rj agentproto.Runner) (problem Problem, othe
 			return ProblemOutdated, "", "the agent container is too old to run an OpenAI-compatible endpoint: update the agent image to this Bridge's version"
 		case r.endpoint() == "":
 			return ProblemNoEndpoint, "", noEndpointDetail
+		case ownCredentials(rj, r.backend):
+			return ProblemOwnCredentials, "", ownCredentialsDetail
 		}
 		return "", "", "" // an endpoint may take no key (a local server)
 	}

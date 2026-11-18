@@ -3,7 +3,9 @@ package agentrun
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -140,6 +142,37 @@ func (r *Runner) credentialKind(cli string) string {
 	}
 	return ""
 }
+
+// holdsCredentials reports whether the container holds a credential of its
+// own: a CLI's (credentialKind), a codex auth.json of any shape, or anything
+// else in its secrets dir but an empty file (a secrets dir that can't be listed
+// counts: the answer must never be a wrong no). A CLI runs as the runner's own
+// uid with its sandbox off, so a run could read each of them, and the runner's
+// environment with them; execute refuses an endpoint run while this holds.
+func (r *Runner) holdsCredentials() bool {
+	if r.credentialKind(agentproto.CLIClaude) != "" || r.credentialKind(agentproto.CLICodex) != "" {
+		return true
+	}
+	if _, err := os.Lstat(filepath.Join(r.codexHome(), "auth.json")); err == nil {
+		return true
+	}
+	entries, err := os.ReadDir(filepath.Join(r.opts.Home, "secrets"))
+	if err != nil {
+		return !errors.Is(err, fs.ErrNotExist)
+	}
+	for _, e := range entries {
+		if info, err := e.Info(); err != nil || !info.Mode().IsRegular() || info.Size() > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// endpointBlocked is exit.json's error for an endpoint run the container's own
+// credentials stop (the page's status line and a parked book's reason).
+const endpointBlocked = "the agent container holds a credential of its own, which a run against an OpenAI-compatible " +
+	"endpoint could read: remove it from the agent container (its environment, its secrets files and codex's " +
+	"login), or set the agent's backend to claude or codex"
 
 // credentialSince is when the runner first saw the credential cli has now (kind
 // is its credentialKind; zero with none). The credential is compared by a

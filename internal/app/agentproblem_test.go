@@ -11,14 +11,15 @@ import (
 // container problem must have the checklist's spelling.
 func TestAgentProblem(t *testing.T) {
 	for in, want := range map[agentbox.Problem]setup.AgentProblem{
-		agentbox.ProblemNotRunning:    setup.AgentNotRunning,
-		agentbox.ProblemOutdated:      setup.AgentOutdated,
-		agentbox.ProblemNoCLI:         setup.AgentNoCLI,
-		agentbox.ProblemOtherBackend:  setup.AgentOtherBackend,
-		agentbox.ProblemNoCredential:  setup.AgentNoCredential,
-		agentbox.ProblemGroupRequired: setup.AgentGroupRequired,
-		agentbox.ProblemHandoffFailed: setup.AgentHandoffFailed,
-		agentbox.ProblemNoEndpoint:    setup.AgentNoEndpoint,
+		agentbox.ProblemNotRunning:     setup.AgentNotRunning,
+		agentbox.ProblemOutdated:       setup.AgentOutdated,
+		agentbox.ProblemNoCLI:          setup.AgentNoCLI,
+		agentbox.ProblemOtherBackend:   setup.AgentOtherBackend,
+		agentbox.ProblemNoCredential:   setup.AgentNoCredential,
+		agentbox.ProblemGroupRequired:  setup.AgentGroupRequired,
+		agentbox.ProblemHandoffFailed:  setup.AgentHandoffFailed,
+		agentbox.ProblemNoEndpoint:     setup.AgentNoEndpoint,
+		agentbox.ProblemOwnCredentials: setup.AgentOwnCredentials,
 	} {
 		if got := setup.AgentProblem(in); got != want {
 			t.Errorf("setup.AgentProblem(%q) = %q, want %q", in, got, want)

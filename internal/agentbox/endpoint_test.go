@@ -31,9 +31,8 @@ func endpointRunner(t *testing.T, key string) (*Runner, string, *atomic.Value) {
 	}
 	rj := handoffRunner(true)
 	rj.Endpoints = true
-	// The container's own codex login is for OpenAI: it never makes an endpoint
-	// "signed in", nor goes to one.
-	rj.CLIs["codex"] = agentproto.CLI{Version: "0.162.1", Credential: agentproto.CredentialLogin}
+	// The container has no credential of its own: an endpoint's run could read
+	// one (TestEndpointRefusedBesideOwnCredentials).
 	writeRunnerJSON(t, dir, rj)
 	return r, dir, base
 }
@@ -255,4 +254,51 @@ func TestEndpointRunWithoutModel(t *testing.T) {
 		t.Fatalf("a run with no model = %v", err)
 	}
 	assertNoJobDirs(t, dir)
+}
+
+// An endpoint's model is whoever answers at the address, and codex runs its
+// commands as the runner's uid: while the container holds a credential of its
+// own (a CLI's, or whatever else the runner reports) the agent isn't ready and
+// nothing is staged (denied); without one it is (allowed, TestEndpointStatus).
+func TestEndpointRefusedBesideOwnCredentials(t *testing.T) {
+	t.Parallel()
+	for name, hold := range map[string]func(rj *agentproto.Runner){
+		"codex's login": func(rj *agentproto.Runner) {
+			rj.CLIs["codex"] = agentproto.CLI{Version: "0.162.1", Credential: agentproto.CredentialLogin}
+		},
+		"claude's token": func(rj *agentproto.Runner) {
+			rj.CLIs["claude"] = agentproto.CLI{Version: "2.1.0", Credential: agentproto.CredentialOAuthToken}
+		},
+		"the runner's word": func(rj *agentproto.Runner) { rj.OwnCredentials = true },
+	} {
+		r, dir, _ := endpointRunner(t, "sk-endpoint-vault")
+		rj := handoffRunner(true)
+		rj.Endpoints = true
+		if st := r.Status(); !st.Available {
+			t.Fatalf("%s: no credential of its own: %+v", name, st)
+		}
+		hold(&rj)
+		writeRunnerJSON(t, dir, rj)
+		st := r.Status()
+		if st.Available || st.Refused || st.Problem != ProblemOwnCredentials || !strings.Contains(st.Detail, "credential of its own") {
+			t.Fatalf("%s: status = %+v", name, st)
+		}
+		if av := r.Detect(context.Background()); av.Available {
+			t.Fatalf("%s: detect = %+v", name, av)
+		}
+		var na *agent.NotAvailableError
+		_, err := r.Run(context.Background(), agent.Request{Dir: stagedDir(t), Prompt: "p", Model: "m", Timeout: time.Minute})
+		if !errors.As(err, &na) || na.Detail != st.Detail {
+			t.Fatalf("%s: a run = %v", name, err)
+		}
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range entries {
+			if e.IsDir() {
+				t.Fatalf("%s: a job was staged (%s)", name, e.Name())
+			}
+		}
+	}
 }

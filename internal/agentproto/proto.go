@@ -147,6 +147,12 @@ type Runner struct {
 	// (Request.Endpoint, bridge#84). An older runner sends none and would refuse
 	// such a request (an unknown field), so the Bridge sends it none.
 	Endpoints bool `json:"endpoints,omitempty"`
+	// OwnCredentials: the container holds a credential of its own (a CLI's
+	// token, key or login, or anything else in its secrets dir). A run against
+	// an endpoint could read it (the CLI runs as the runner's uid, its sandbox
+	// off), so the runner refuses endpoint runs while it does and the Bridge
+	// stages none.
+	OwnCredentials bool `json:"own_credentials,omitempty"`
 }
 
 // Credential is credential.json: the agent credential the Bridge holds in its

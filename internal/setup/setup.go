@@ -77,6 +77,11 @@ const (
 	// address is set (bridge#84).
 	DetailAgentNoEndpoint = "set the OpenAI-compatible endpoint's address in Settings > Agent; the agent is needed for " +
 		"characters, recaps and descriptions"
+	// DetailAgentOwnCredentials: the backend is openai-compatible and the
+	// agent container holds a credential of its own, which an endpoint's run
+	// could read, so none is run (the Accounts tab says more).
+	DetailAgentOwnCredentials = "the agent container holds a credential of its own, which an OpenAI-compatible endpoint's " +
+		"run could read: remove it from the agent container, or choose claude or codex in Settings > Agent"
 )
 
 // agentNoCLI is the detail while the agent image has no CLI for backend
@@ -101,14 +106,15 @@ type AgentProblem string
 
 // The problems the checklist words.
 const (
-	AgentNotRunning    AgentProblem = "not_running"
-	AgentOutdated      AgentProblem = "outdated"
-	AgentNoCLI         AgentProblem = "no_cli"
-	AgentOtherBackend  AgentProblem = "other_backend"
-	AgentNoCredential  AgentProblem = "no_credential"
-	AgentGroupRequired AgentProblem = "group_required"
-	AgentHandoffFailed AgentProblem = "handoff_failed"
-	AgentNoEndpoint    AgentProblem = "no_endpoint"
+	AgentNotRunning     AgentProblem = "not_running"
+	AgentOutdated       AgentProblem = "outdated"
+	AgentNoCLI          AgentProblem = "no_cli"
+	AgentOtherBackend   AgentProblem = "other_backend"
+	AgentNoCredential   AgentProblem = "no_credential"
+	AgentGroupRequired  AgentProblem = "group_required"
+	AgentHandoffFailed  AgentProblem = "handoff_failed"
+	AgentNoEndpoint     AgentProblem = "no_endpoint"
+	AgentOwnCredentials AgentProblem = "own_credentials"
 )
 
 // maxDetail bounds an item's detail (the server keeps 256 characters).
@@ -273,6 +279,8 @@ func Checklist(in Inputs) link.Setup {
 		agentDetail = DetailAgentHandoffFailed
 	case in.Agent.Problem == AgentNoEndpoint:
 		agentDetail = DetailAgentNoEndpoint
+	case in.Agent.Problem == AgentOwnCredentials:
+		agentDetail = DetailAgentOwnCredentials
 	default:
 		agentDetail = DetailAgentNotRunning
 	}

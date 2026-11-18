@@ -65,6 +65,12 @@ func (r *Runner) execute(ctx context.Context, job *os.Root, id string) agentprot
 		exit.CredentialDenied = errors.Is(err, fs.ErrPermission)
 		return exit
 	}
+	// An endpoint's model is whoever answers at the address, and the CLI runs
+	// its commands as this uid: nothing of the container's own may be within
+	// its reach (the hand-off above is taken and deleted either way).
+	if endpoint && r.holdsCredentials() {
+		return unavailable(endpointBlocked)
+	}
 	// An endpoint may take no key (a local server); any other run needs one.
 	if !endpoint && r.credentialKind(req.CLI) == "" && handed == nil {
 		return unavailable(req.CLI + " has no credential: set one on the Bridge's Accounts tab, or give one to the agent container")
