@@ -24,13 +24,16 @@
 # The agent container runs the AI CLIs (claude, codex) for characters and
 # recaps. It sees only the staging volume it shares with the Bridge and its own
 # config volume: never a library, the Bridge's data or its secrets, and it is
-# on its own network (internet only), so it can't reach the Bridge or the
-# server. Give it the Bridge's own agent account, not a shared one: put
+# on its own network, so it can't reach the Bridge or the server (it reaches
+# the internet and your LAN through the host, as any container does: an
+# OpenAI-compatible endpoint on your network, like Ollama, needs that). Give it
+# the Bridge's own agent account, not a shared one: put
 # CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`) in a .env file beside
 # this one, or sign codex in once with
 #   docker compose exec agent audiosilo-bridge agent-login codex
 # and set AUDIOSILO_BRIDGE_AGENT_BACKEND: codex on the bridge (it runs claude
-# unless told otherwise).
+# unless told otherwise). Or pick an OpenAI-compatible endpoint (the OpenAI API,
+# a router, Ollama or LM Studio) in the Bridge page's Settings > Agent.
 name: audiosilo
 
 services:
@@ -68,8 +71,13 @@ services:
       # The folder shared with the agent container (below). Kept outside
       # /bridge-data, whose first-start ownership fix would otherwise reach it.
       AUDIOSILO_BRIDGE_AGENT_STAGING_DIR: /staging
-      # The CLI the agent container runs: claude (the default) or codex.
+      # The CLI the agent container runs: claude (the default), codex, or
+      # openai-compatible (codex against the endpoint below, which needs the
+      # Responses API; set its key in Settings > Agent). These lock the
+      # page's Settings > Agent fields; leave them out to set them there.
       # AUDIOSILO_BRIDGE_AGENT_BACKEND: codex
+      # AUDIOSILO_BRIDGE_AGENT_OPENAI_COMPATIBLE_BASE_URL: http://192.168.1.20:11434/v1
+      # AUDIOSILO_BRIDGE_AGENT_OPENAI_COMPATIBLE_MODEL: qwen3:32b
       # Never hand the agent credential to every user on the staging volume
       # (the agent waits instead, saying why, when it can't be kept to the
       # group_add group below):
@@ -108,6 +116,9 @@ services:
       - staging:/staging
       - agent-config:/agent
     networks: [agent]
+    # An OpenAI-compatible server on this same host (Ollama listening on
+    # 0.0.0.0): reach it as http://host.docker.internal:11434/v1.
+    # extra_hosts: ["host.docker.internal:host-gateway"]
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
     read_only: true
@@ -116,7 +127,8 @@ services:
     stop_grace_period: 20s
 
 networks:
-  # The agent's own network: internet access, and nothing else of this stack.
+  # The agent's own network: nothing else of this stack. It reaches out
+  # through the host like any container (the internet and your LAN).
   agent: {}
 
 volumes:

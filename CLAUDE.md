@@ -129,6 +129,7 @@ internal/
   agentproto/ the staging protocol shared with the agent container (a leaf)
   agentbox/   the Bridge's side: an agent.Runner over the staging dir
   agentrun/   the agent container's side: `agent-runner` (claim, run, harvestable out/)
+  endpoint/   Settings > Agent's check of an OpenAI-compatible endpoint (a leaf, bridge#84)
   -- Phase 1b --
   workerproto/ the worker wire protocol (routes, version, task/result shapes; a leaf)
   workers/    the Bridge's side: the segment queue + leases + registry (Hub) and the
@@ -171,7 +172,8 @@ Dockerfile    slim | cuda | agent | full; compose.example.yaml: server, bridge, 
 
 **Dependency direction:** `app -> {api, jobs, link, mapping, verify, generate,
 agentbox, workers, accounts, setup, correct, store, secrets, config, auth, logring,
-web, netguard, podcast, podcastjob, audibleacct, audiblejob, audiblesync, librivoxjob}` plus the engine it wires; `accounts -> {agentproto, ghauth, secrets, store}`; `correct ->
+web, netguard, podcast, podcastjob, audibleacct, audiblejob, audiblesync, librivoxjob,
+endpoint}` plus the engine it wires; `accounts -> {agentproto, ghauth, secrets, store}`; `correct ->
 {contrib, jobs, metaops}`; `setup -> link`;
 `api` calls the injected Backend and the injected `auth.Manager` (login, sessions,
 the password), with types from jobs/link/mapping/store/logring; `verify -> {jobs,
@@ -185,7 +187,8 @@ audiosilo-server/pkg/match}`; `audibleacct -> {audible, link, secrets, source, s
 source, store, transfer}` (app wires both); `librivoxjob -> {fsutil, importjob, jobs, link,
 mapping, metaops, netguard, placement, transfer, audiosilo-server/pkg/match}`; `audiblesync -> {audible, audibleacct, jobs, link, store}`; `transfer -> {fsutil, mapping, progress}`;
 `jobs -> {link, store}`; `mapping -> {fsutil, link}`;
-`link`, `agentproto` and `workerproto` are leaves; `workers -> {asr, fsutil,
+`link`, `agentproto`, `endpoint` and `workerproto` are leaves; `config -> {agent,
+agentproto, fsutil, ghauth, pricing, state}`; `workers -> {asr, fsutil,
 scheduler, state, store, transcript, workerproto}`; `worker -> {asr, fsutil, workerproto}`
 (never `workers`; its tests drive the real `api` + `workers` in-process); `api`
 reaches the hub through its own `WorkerHub` interface and `workerproto`, and
