@@ -463,7 +463,10 @@ func TestEngineStartResumesContributionParks(t *testing.T) {
 		t.Fatalf("re-admitted %d with no engine", n)
 	}
 	sched := scheduler.New(b.db, events.NewHub(64), scheduler.NewStubExecutor(0, 0), 1, t.TempDir(), false)
-	b.engineStarted(ctx, &engine{sched: sched})
+	engineCtx, stop := context.WithCancel(ctx)
+	var wg sync.WaitGroup
+	t.Cleanup(func() { stop(); wg.Wait() })
+	b.engineStarted(engineCtx, &engine{sched: sched}, &wg)
 	waitFor(t, "the contribution park re-admitted at the engine's start", func() bool {
 		got, err := b.db.GetBook(ctx, bk.ID)
 		return err == nil && got.Status == ""
