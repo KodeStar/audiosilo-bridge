@@ -2,7 +2,6 @@ package scheduler
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -12,19 +11,6 @@ import (
 	"github.com/kodestar/audiosilo-bridge/internal/state"
 	"github.com/kodestar/audiosilo-bridge/internal/store"
 )
-
-// finishRun records one succeeded run of stage on book id.
-func finishRun(t *testing.T, db *store.DB, id int64, stage state.State, attempt int) {
-	t.Helper()
-	ctx := context.Background()
-	runID, err := db.StartStageRun(ctx, id, string(stage), attempt)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := db.FinishStageRun(ctx, runID, true, json.RawMessage(`{}`)); err != nil {
-		t.Fatal(err)
-	}
-}
 
 // parkedAudit is a book parked at auditing with its fix budget spent: a fixing
 // success per round, the audit's own success and sentinel, and the audit-loop
@@ -37,10 +23,10 @@ func parkedAudit(t *testing.T, h *harness, db *store.DB, slug string) store.Book
 		"audit failed after maximum fix attempts", string(state.ParkFixLoopExhausted)); err != nil {
 		t.Fatal(err)
 	}
-	for i := range state.MaxFixAttempts {
-		finishRun(t, db, b.ID, state.Fixing, i+1)
+	for range state.MaxFixAttempts {
+		recordSuccess(t, db, b.ID, state.Fixing)
 	}
-	finishRun(t, db, b.ID, state.Auditing, 1)
+	recordSuccess(t, db, b.ID, state.Auditing)
 	if err := WriteSentinel(b.WorkDir, string(state.Auditing), StageResult{}); err != nil {
 		t.Fatal(err)
 	}
@@ -80,18 +66,26 @@ func assertAuditUntouched(t *testing.T, db *store.DB, b store.Book) {
 	}
 }
 
+// cancelledAfterRead is a scheduler over a parked audit (slug) as read, then
+// cancelled: a Cancel landing between a caller's read and its change.
+func cancelledAfterRead(t *testing.T, slug string) (*Scheduler, *harness, *store.DB, store.Book) {
+	t.Helper()
+	h := newHarness(t)
+	db := h.openDB(t)
+	read := parkedAudit(t, h, db, slug)
+	s := New(db, events.NewHub(8), NewStubExecutor(0, 0), 2, h.workRoot, false)
+	if err := s.Cancel(context.Background(), read.ID); err != nil {
+		t.Fatal(err)
+	}
+	return s, h, db, read
+}
+
 // bridge#65: a readmit that met a Cancel landing after its read changes nothing
 // at all: not the status, and not the sentinel, the superseded successes or the
 // audit-loop files it would have wiped for a Retry that went through.
 func TestReadmitOverACancelLeavesTheBookAsItWas(t *testing.T) {
-	h := newHarness(t)
-	db := h.openDB(t)
+	s, _, db, read := cancelledAfterRead(t, "readmit-cancel")
 	ctx := context.Background()
-	read := parkedAudit(t, h, db, "readmit-cancel")
-	s := New(db, events.NewHub(8), NewStubExecutor(0, 0), 2, h.workRoot, false)
-	if err := s.Cancel(ctx, read.ID); err != nil { // the job's end lands after the read
-		t.Fatal(err)
-	}
 	if err := s.readmit(ctx, read); !errors.Is(err, store.ErrStatusChanged) {
 		t.Fatalf("readmit over a cancel = %v, want ErrStatusChanged", err)
 	}
@@ -101,14 +95,8 @@ func TestReadmitOverACancelLeavesTheBookAsItWas(t *testing.T) {
 // bridge#65: the supervisor's supersede_rerun over a Cancel that landed after its
 // read neither moves the book back nor supersedes or drops anything.
 func TestSupersedeRerunOverACancelLeavesTheBookAsItWas(t *testing.T) {
-	h := newHarness(t)
-	db := h.openDB(t)
+	s, _, db, read := cancelledAfterRead(t, "rerun-cancel")
 	ctx := context.Background()
-	read := parkedAudit(t, h, db, "rerun-cancel")
-	s := New(db, events.NewHub(8), NewStubExecutor(0, 0), 2, h.workRoot, false)
-	if err := s.Cancel(ctx, read.ID); err != nil {
-		t.Fatal(err)
-	}
 	outcome, err := s.supervisorSupersedeRerun(ctx, read, string(state.Fixing))
 	if err != nil || outcome != statusChangedOutcome {
 		t.Fatalf("supersede_rerun over a cancel = %q, %v", outcome, err)
@@ -124,14 +112,8 @@ func TestSupersedeRerunOverACancelLeavesTheBookAsItWas(t *testing.T) {
 // book to take up again. RetryAsRead holds the caller's read: the Retry is refused
 // with ErrStatusChanged and the book stays cancelled, untouched.
 func TestRetryAsReadRefusesABookCancelledSinceTheRead(t *testing.T) {
-	h := newHarness(t)
-	db := h.openDB(t)
+	s, h, db, read := cancelledAfterRead(t, "retry-cancel")
 	ctx := context.Background()
-	read := parkedAudit(t, h, db, "retry-cancel")
-	s := New(db, events.NewHub(8), NewStubExecutor(0, 0), 2, h.workRoot, false)
-	if err := s.Cancel(ctx, read.ID); err != nil {
-		t.Fatal(err)
-	}
 	if err := s.RetryAsRead(ctx, read); !errors.Is(err, store.ErrStatusChanged) {
 		t.Fatalf("a Retry of the parked read over a cancel = %v, want ErrStatusChanged", err)
 	}

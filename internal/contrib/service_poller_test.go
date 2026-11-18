@@ -58,14 +58,12 @@ func (c *capture) all() []ContribUpdate {
 // readmitSpy records the books passed to a service's Readmit hook.
 type readmitSpy struct {
 	mu    sync.Mutex
-	ids   []int64
 	books []store.Book
 }
 
 func (r *readmitSpy) readmit(_ context.Context, b store.Book) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.ids = append(r.ids, b.ID)
 	r.books = append(r.books, b)
 	return nil
 }
@@ -73,8 +71,10 @@ func (r *readmitSpy) readmit(_ context.Context, b store.Book) error {
 func (r *readmitSpy) called() []int64 {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	out := make([]int64, len(r.ids))
-	copy(out, r.ids)
+	out := make([]int64, len(r.books))
+	for i, b := range r.books {
+		out[i] = b.ID
+	}
 	return out
 }
 

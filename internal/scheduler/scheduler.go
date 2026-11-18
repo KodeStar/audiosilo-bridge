@@ -80,12 +80,9 @@ type Scheduler struct {
 
 	mu       sync.Mutex
 	inflight map[int64]*inflightBook
-	// held counts the control changes rewriting a book in steps now (readmit,
-	// supersede_rerun: holdDispatch), during which no stage starts on it.
-	// releasedAt is the holdSeq each such change ended at, and passSeq the holdSeq
-	// a dispatch pass began reading its books at: a pass that read a book before
-	// its change ended doesn't start it either (it may have read it half changed);
-	// the release wakes the loop for a fresh read. All under mu.
+	// held counts the control changes rewriting a book in steps now, releasedAt
+	// the holdSeq each ended at, passSeq the holdSeq the dispatch pass began at
+	// (holdDispatch, beginPass, dispatchableLocked). All under mu.
 	held       map[int64]int
 	releasedAt map[int64]uint64
 	holdSeq    uint64

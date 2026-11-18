@@ -178,11 +178,9 @@ func (s *Scheduler) supervisorSupersedeRerun(ctx context.Context, b store.Book, 
 			return "", ErrInvalidOp
 		}
 	}
-	// The status write comes first, and holds only while the book still has the
-	// status and error read (a deliberate pause is written back as it is): a
-	// Cancel landing since leaves the book as it is, its stages and sentinels
-	// too (bridge#65). The dispatch loop is held off the book until the state has
-	// moved back, so no stage starts on it half changed.
+	// The conditional status write comes first, as in readmit (a deliberate pause
+	// is written back as it is): a Cancel landing since leaves the book as it is
+	// (bridge#65).
 	release := s.holdDispatch(bookID)
 	defer release()
 	paused := b.Status == string(state.StatusPaused)
