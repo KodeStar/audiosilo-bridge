@@ -1057,6 +1057,70 @@ func TestEndpointRunRefusedBesideOwnCredentials(t *testing.T) {
 	}
 }
 
+// An endpoint's run never shares the container with a CLI's own run, whose
+// credential (the Bridge's hand-off included) is in that run's environment:
+// while one is in progress the other kind is refused as the agent unavailable
+// and no CLI starts for it (denied), and runs once it has ended (allowed).
+func TestEndpointRunNeverBesideAnotherKind(t *testing.T) {
+	t.Parallel()
+	te := newTestEnv(t, endpointParentEnv())
+	_ = os.WriteFile(filepath.Join(te.claudeCap, "behavior"), []byte(`touch "$CAP/started"; sleep 60`), 0o644)
+	te.r.opts.Slots, te.r.slots = 2, make(chan struct{}, 2) // two runs at a time, or they could never meet
+	te.start(t)
+	claude, _ := te.submitWithCredential(t, claudeReq, `{"cli":"claude","kind":"api_key","value":"sk-ant-api03-HANDED"}`)
+	for deadline := time.Now().Add(30 * time.Second); ; time.Sleep(5 * time.Millisecond) {
+		if _, err := os.Stat(filepath.Join(te.claudeCap, "started")); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the claude run never started")
+		}
+	}
+	job, cred := te.submitWithCredential(t, endpointReq, `{"cli":"codex","kind":"endpoint_api_key","value":"sk-endpoint-SECRET"}`)
+	ex := waitDone(t, job, 30*time.Second)
+	if !ex.Unavailable || !strings.Contains(ex.Error, "another kind") {
+		t.Fatalf("an endpoint run beside a claude run: exit = %+v", ex)
+	}
+	if _, err := os.Lstat(cred); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatal("the endpoint key's credential.json is deleted all the same")
+	}
+	if _, err := os.Stat(filepath.Join(te.codexCap, "argv")); err == nil {
+		t.Fatal("codex ran against the endpoint beside a claude run")
+	}
+	if err := os.WriteFile(filepath.Join(claude, agentproto.CancelFile), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if ex := waitDone(t, claude, 30*time.Second); !ex.Cancelled {
+		t.Fatalf("the claude run: exit = %+v", ex)
+	}
+	if ex := waitDone(t, te.submit(t, endpointReq), 30*time.Second); ex.Error != "" || ex.ExitCode != 0 {
+		t.Fatalf("an endpoint run once the other ended: exit = %+v", ex)
+	}
+}
+
+// What a codex run the container was killed under left in the shared
+// CODEX_HOME (its wipe never ran; codex writes the run's environment, its
+// credential in it, into shell_snapshots/) is gone before an endpoint's CLI
+// starts, the user's config kept.
+func TestEndpointRunSweepsTheSharedCodexHome(t *testing.T) {
+	t.Parallel()
+	te := newTestEnv(t, endpointParentEnv())
+	codexHome := filepath.Join(te.home, "codex")
+	writeSecret(t, filepath.Join(codexHome, "shell_snapshots", "snap.sh"), "export OPENAI_API_KEY=sk-openai-HANDED\n")
+	writeSecret(t, filepath.Join(codexHome, "config.toml"), `model = "the-users-own"`)
+	if te.r.holdsCredentials() {
+		t.Fatal("a snapshot isn't one of the container's own credentials: the run isn't refused for it")
+	}
+	_ = os.WriteFile(filepath.Join(te.codexCap, "behavior"), []byte(`ls -A "`+codexHome+`" > "$CAP/shared"`+"\n"), 0o644)
+	te.start(t)
+	if ex := waitDone(t, te.submit(t, endpointReq), 30*time.Second); ex.Error != "" || ex.ExitCode != 0 {
+		t.Fatalf("exit = %+v", ex)
+	}
+	if shared := readLines(t, filepath.Join(te.codexCap, "shared")); !slices.Equal(shared, []string{"config.toml"}) {
+		t.Fatalf("the shared CODEX_HOME as the endpoint's CLI found it = %q, want only the config", shared)
+	}
+}
+
 // writeSecret writes a 0600 file, making its dir.
 func writeSecret(t *testing.T, path, value string) {
 	t.Helper()

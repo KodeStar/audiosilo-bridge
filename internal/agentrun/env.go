@@ -174,6 +174,43 @@ const endpointBlocked = "the agent container holds a credential of its own, whic
 	"endpoint could read: remove it from the agent container (its environment, its secrets files and codex's " +
 	"login), or set the agent's backend to claude or codex"
 
+// mixedRuns is exit.json's error for a run that would share the container
+// with a run of the other kind (admit).
+const mixedRuns = "the agent container is still ending a run of another kind (an OpenAI-compatible endpoint's runs " +
+	"and the CLIs' own never share it): this one runs once that has ended"
+
+// admit takes a place for a run, or reports a run of the other kind in
+// progress. An endpoint's run could read another run's credential (the
+// container's own or the Bridge's hand-off: holdsCredentials sees only the
+// first) from that run's environment, and a CLI's own run starting beside an
+// endpoint's would put one within its reach. One Bridge sends one kind, so the
+// two meet only as a Bridge that changed its backend starts over a run of the
+// old one still ending (it cancels that run, agentbox's reclaim).
+func (r *Runner) admit(endpoint bool) bool {
+	r.mixMu.Lock()
+	defer r.mixMu.Unlock()
+	switch {
+	case endpoint && r.cliRuns > 0, !endpoint && r.endpointRuns > 0:
+		return false
+	case endpoint:
+		r.endpointRuns++
+	default:
+		r.cliRuns++
+	}
+	return true
+}
+
+// release gives back admit's place.
+func (r *Runner) release(endpoint bool) {
+	r.mixMu.Lock()
+	defer r.mixMu.Unlock()
+	if endpoint {
+		r.endpointRuns--
+	} else {
+		r.cliRuns--
+	}
+}
+
 // credentialSince is when the runner first saw the credential cli has now (kind
 // is its credentialKind; zero with none). The credential is compared by a
 // fingerprint kept in memory: a replaced token, key or login moves the time, so
@@ -291,6 +328,17 @@ func (r *Runner) codexEnd() {
 	r.codexMu.Lock()
 	defer r.codexMu.Unlock()
 	r.codexActive--
+	if r.codexActive == 0 {
+		r.wipeCodexHome()
+	}
+}
+
+// codexSweep wipes the shared CODEX_HOME before an endpoint run, which has a
+// CODEX_HOME of its own and so never brackets the shared one: no codex run
+// uses it then (admit), and whatever one left there goes.
+func (r *Runner) codexSweep() {
+	r.codexMu.Lock()
+	defer r.codexMu.Unlock()
 	if r.codexActive == 0 {
 		r.wipeCodexHome()
 	}

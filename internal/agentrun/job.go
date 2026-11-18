@@ -71,6 +71,11 @@ func (r *Runner) execute(ctx context.Context, job *os.Root, id string) agentprot
 	if endpoint && r.holdsCredentials() {
 		return unavailable(endpointBlocked)
 	}
+	// Nor anything of another run's: its credential is in its environment.
+	if !r.admit(endpoint) {
+		return unavailable(mixedRuns)
+	}
+	defer r.release(endpoint)
 	// An endpoint may take no key (a local server); any other run needs one.
 	if !endpoint && r.credentialKind(req.CLI) == "" && handed == nil {
 		return unavailable(req.CLI + " has no credential: set one on the Bridge's Accounts tab, or give one to the agent container")
@@ -107,6 +112,10 @@ func (r *Runner) execute(ctx context.Context, job *os.Root, id string) agentprot
 		if endpoint {
 			// Its own empty CODEX_HOME, never the shared one: the device login
 			// there must not be within reach of a run against another endpoint.
+			// Nor what a codex run the container was killed under left in the
+			// shared one (its wipe never ran): codex writes the whole shell
+			// environment, that run's credential in it, into shell_snapshots/.
+			r.codexSweep()
 			if err := os.Mkdir(endpointCodexHome(runDir), 0o700); err != nil {
 				return refused("create the run's codex home: " + err.Error())
 			}

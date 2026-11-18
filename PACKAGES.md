@@ -3718,6 +3718,15 @@ internal/
             environment allow-list keeps nothing from a model that runs a shell
             command: it could read those files and /proc/<runner>/environ.
             runner.json's own_credentials says so for the Bridge's Status.
+            Another RUN's credential is as readable (its environment, the
+            Bridge's hand-off included), so admit/release keep an endpoint's
+            runs and the CLIs' own from ever sharing the container: the second
+            kind is Exit unavailable (mixedRuns) until the first has ended
+            (they meet only as a Bridge that changed backend starts over a run
+            still ending). And codexSweep wipes the shared CODEX_HOME (login
+            and config kept) before an endpoint's CLI starts: a codex run the
+            container was killed under never ran its wipe, and its
+            shell_snapshots/ hold that run's environment.
   endpoint/ bridge#84: Settings > Agent's Test connection, a leaf (standard library
             only). Check(ctx, client, base, key): GET <base>/models (Bearer key
             when set), then POST <base>/responses with {} to learn whether the

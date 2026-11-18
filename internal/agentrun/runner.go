@@ -99,6 +99,11 @@ type Runner struct {
 	codexMu     sync.Mutex
 	codexActive int
 
+	// mixMu guards the runs in progress by kind: an endpoint's runs and the
+	// CLIs' own never share the container (admit).
+	mixMu                 sync.Mutex
+	endpointRuns, cliRuns int
+
 	// active holds the ids of the jobs this runner claimed and hasn't finished,
 	// which the orphan recovery never finishes (guarded by activeMu).
 	activeMu sync.Mutex
