@@ -160,9 +160,9 @@ func (r *Runner) credentialKind(cli string) string {
 // refuses an endpoint run while there is one): one of the four credential
 // variables in the runner's environment (a run reads /proc/<runner>/environ
 // only while the runner is dumpable, but the variables are a configuration
-// mistake either way), the agent home (homeReachable), or a mount that is the agent volume or
-// holds a credential's file (credentialMount, mounts.go). It names a variable
-// or a path, never a value: the log says it.
+// mistake either way), the agent home (homeReachable), or a mount that is the
+// agent volume or holds a credential's file (credentialMount, mounts.go). It
+// names a variable or a path, never a value: the log says it.
 func (r *Runner) credentialProblem() string {
 	for _, k := range credentialVars {
 		if r.envSecret(k) != "" {

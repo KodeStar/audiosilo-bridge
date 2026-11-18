@@ -11,8 +11,6 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
-
-	"github.com/kodestar/audiosilo-bridge/internal/fsutil"
 )
 
 // The endpoint's service (--endpoint-only) must have nothing of the
@@ -22,16 +20,22 @@ import (
 // mounts_linux.go) and refuses its runs while one of them
 //
 //   - is the agent volume by compose's name (agent-config, or
-//     <project>_agent-config): a local volume shows in mountinfo as
-//     .../volumes/<name>/_data, so this holds even where the service's user
-//     can't open it; or
+//     <project>_agent-config), whole or a subpath of it: a local volume shows
+//     in mountinfo as .../volumes/<name>/_data, so this holds even where the
+//     service's user can't open it; or
+//   - is mounted by a credential file's name, at its point or from its
+//     source (a login bind-mounted under another name); or
 //   - holds a credential's file or the agent home's marker
 //     (agentHomeMarker, which the agent container's runner writes into its
-//     home) at the mount point or one directory below it: that finds the agent
-//     volume under any name or path, a bind mount of a CLI's login, and a
-//     parent folder holding either. Where the service's user can't enter a
-//     directory, neither can a run's commands (the same uid, no capability),
-//     so a closed one counts as holding nothing.
+//     home) at the mount point or one directory below it (a tmpfs at its
+//     point only): that finds the agent volume under any name or path, a bind
+//     mount of a CLI's login, and a parent folder holding either. Where the
+//     service's user can't enter a directory, neither can a run's commands
+//     (the same uid, no capability), so a closed one counts as holding
+//     nothing.
+//
+// Every mount is looked at wherever it is, /dev included: only the kernel's
+// own filesystems (pseudoFS) are passed over, by type, never by path.
 //
 // The marker is matched by presence rather than by device and inode: those
 // would have to come from the agent container (through the Bridge, a field on
@@ -52,12 +56,13 @@ const agentVolume = "agent-config"
 type mount struct{ root, point, fstype string }
 
 // pseudoFS are filesystems that never hold a file of the host's: the kernel's
-// views and a tmpfs (made empty for this container, so only its own processes
-// write there: a run's per-run files are on one).
+// views. A tmpfs isn't one of them (a host's /run or /dev/shm bound in, a
+// swarm or Kubernetes secret), but the container's own (/tmp) holds a run's
+// per-run files one folder down, so a tmpfs is looked at its point alone.
 var pseudoFS = map[string]bool{
 	"proc": true, "sysfs": true, "cgroup": true, "cgroup2": true, "devpts": true, "mqueue": true,
-	"devtmpfs": true, "tmpfs": true, "securityfs": true, "debugfs": true, "tracefs": true,
-	"pstore": true, "bpf": true, "hugetlbfs": true, "fusectl": true, "configfs": true,
+	"devtmpfs": true, "securityfs": true, "debugfs": true, "tracefs": true, "selinuxfs": true,
+	"efivarfs": true, "pstore": true, "bpf": true, "hugetlbfs": true, "fusectl": true, "configfs": true,
 	"binfmt_misc": true, "nsfs": true, "autofs": true,
 }
 
@@ -66,8 +71,8 @@ var pseudoFS = map[string]bool{
 const maxMountChildren = 1024
 
 // credentialNames are the files that hold a subscription's credential or the
-// agent home's marker, by the name a mount point may carry itself (a compose
-// secret, a single file mounted).
+// agent home's marker, by the name a mount carries itself, at its point or
+// from its source (a compose secret, a single file mounted).
 var credentialNames = func() map[string]bool {
 	out := map[string]bool{agentHomeMarker: true, "auth.json": true, ".credentials.json": true, ".claude.json": true}
 	for _, k := range credentialVars {
@@ -95,12 +100,14 @@ var credentialPaths = func() []string {
 
 // parseMountinfo reads /proc/self/mountinfo's lines: "id parent major:minor
 // root point options [optional...] - fstype source superoptions", the paths
-// with space, tab, newline and backslash escaped as octal (\040). A line it
-// can't read is left out.
+// with space, tab, newline and backslash escaped as octal (\040). The fields
+// are split on a space alone: a path may hold any other blank as it is (a
+// no-break space, a carriage return), which strings.Fields would split on. A
+// line it can't read is left out.
 func parseMountinfo(b []byte) []mount {
 	var out []mount
 	for line := range strings.Lines(string(b)) {
-		f := strings.Fields(line)
+		f := strings.Split(strings.TrimSuffix(line, "\n"), " ")
 		sep := -1
 		for i := 6; i < len(f); i++ {
 			if f[i] == "-" {
@@ -136,31 +143,36 @@ func unescapeMount(s string) string {
 }
 
 // isAgentVolume reports whether root (a mount's path inside its filesystem)
-// is a local volume compose named agent-config: .../volumes/<name>/_data.
+// is a local volume compose named agent-config, or a subpath of one:
+// .../volumes/<name>/_data[/...].
 func isAgentVolume(root string) bool {
-	dir, last := path.Split(path.Clean(root))
-	if last != "_data" {
-		return false
+	parts := strings.Split(path.Clean(root), "/")
+	for i := 2; i < len(parts); i++ {
+		name := parts[i-1]
+		if parts[i] == "_data" && parts[i-2] == "volumes" && (name == agentVolume || strings.HasSuffix(name, "_"+agentVolume)) {
+			return true
+		}
 	}
-	dir = path.Clean(dir)
-	name := path.Base(dir)
-	return path.Base(path.Dir(dir)) == "volumes" && (name == agentVolume || strings.HasSuffix(name, "_"+agentVolume))
+	return false
 }
 
 // credentialMount names the first of mounts that is the agent volume or holds
 // a credential's file (the rules above), "" when none does.
 func credentialMount(mounts []mount) string {
 	for _, m := range mounts {
-		if pseudoFS[m.fstype] || fsutil.Within("/proc", m.point) || fsutil.Within("/sys", m.point) || fsutil.Within("/dev", m.point) {
+		switch {
+		case isAgentVolume(m.root):
+			return m.point + " is the agent volume (" + agentVolume + ")"
+		case credentialNames[filepath.Base(m.point)] || credentialNames[path.Base(m.root)]:
+			return m.point + " is mounted by a credential's name"
+		case pseudoFS[m.fstype]:
 			continue
 		}
-		if isAgentVolume(m.root) {
-			return m.point + " is the agent volume (" + agentVolume + ")"
+		dirs := []string{m.point}
+		if m.fstype != "tmpfs" {
+			dirs = append(dirs, subdirs(m.point)...)
 		}
-		if credentialNames[filepath.Base(m.point)] {
-			return m.point + " is mounted by a credential's name"
-		}
-		for _, dir := range append([]string{m.point}, subdirs(m.point)...) {
+		for _, dir := range dirs {
 			if p := credentialUnder(dir); p != "" {
 				return m.point + " holds " + p
 			}

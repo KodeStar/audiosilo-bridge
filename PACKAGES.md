@@ -3763,11 +3763,14 @@ internal/
             closed, the image's 0700 /agent of uid 10002 as an anonymous volume
             being closed to 10003), or credentialMount (mounts.go, over
             /proc/self/mountinfo on Linux; unreadable counts as holding): a
-            mount that is compose's agent volume by name, is mounted by a
-            credential file's name, or holds a credential's file or the agent
-            home's marker .audiosilo-agent-home (markHome writes it into the
-            agent container's home at the start) at its point or one dir below
-            (the rules and the file list are in mounts.go). runner.json says
+            mount (anywhere, /dev included; only the kernel's own filesystems
+            are passed over, by type) that is compose's agent volume by name,
+            whole or a subpath, is mounted by a credential file's name (at its
+            point or from its source), or holds a credential's file or the
+            agent home's marker .audiosilo-agent-home (markHome writes it into
+            the agent container's home at the start) at its point or one dir
+            below (a tmpfs at its point only; the rules and the file list are
+            in mounts.go). runner.json says
             endpoint_only and own_credentials for the Bridge's Status. Main
             makes that runner a child subreaper and not
             dumpable (endpointHardening, Linux only; elsewhere it refuses to

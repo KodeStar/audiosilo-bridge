@@ -11,20 +11,22 @@ import (
 	"time"
 )
 
-// mountinfo's lines are read with their optional fields and octal escapes; a
-// line cut short is left out.
+// mountinfo's lines are read with their optional fields and octal escapes,
+// split on a space alone (a no-break space or a carriage return in a path is
+// kept as it is); a line cut short is left out.
 func TestParseMountinfo(t *testing.T) {
 	t.Parallel()
 	in := `22 1 0:21 / / rw,relatime - overlay overlay rw,lowerdir=/x
 36 22 8:1 /var/lib/docker/volumes/audiosilo_agent-config/_data /mnt/a\040b rw,relatime shared:1 master:2 - ext4 /dev/sda1 rw
 37 22 0:30 / /tmp rw,nosuid - tmpfs tmpfs rw
 38 22 8:1 /cut short
-`
+` + "39 22 8:1 /srv/my share/agent /mnt/x y\rz rw - ext4 /dev/sda1 rw\n"
 	got := parseMountinfo([]byte(in))
 	want := []mount{
 		{root: "/", point: "/", fstype: "overlay"},
 		{root: "/var/lib/docker/volumes/audiosilo_agent-config/_data", point: "/mnt/a b", fstype: "ext4"},
 		{root: "/", point: "/tmp", fstype: "tmpfs"},
+		{root: "/srv/my share/agent", point: "/mnt/x y\rz", fstype: "ext4"},
 	}
 	if !slices.Equal(got, want) {
 		t.Fatalf("mounts = %+v, want %+v", got, want)
@@ -35,17 +37,19 @@ func TestParseMountinfo(t *testing.T) {
 }
 
 // The agent volume is known by compose's name, prefixed by its project or
-// not, under docker's or podman's volumes; an anonymous volume (the image's
-// own /agent in the endpoint's service) and a look-alike are not it.
+// not, under docker's or podman's volumes, whole or a subpath of it (compose's
+// volume.subpath); an anonymous volume (the image's own /agent in the
+// endpoint's service) and a look-alike are not it.
 func TestIsAgentVolume(t *testing.T) {
 	t.Parallel()
 	for root, want := range map[string]bool{
 		"/var/lib/docker/volumes/audiosilo_agent-config/_data":           true,
 		"/volumes/agent-config/_data":                                    true,
 		"/var/lib/containers/storage/volumes/stack_agent-config/_data/":  true,
+		"/var/lib/docker/volumes/audiosilo_agent-config/_data/codex":     true,
 		"/var/lib/docker/volumes/" + strings.Repeat("ab", 32) + "/_data": false,
 		"/var/lib/docker/volumes/audiosilo_agent-configs/_data":          false,
-		"/var/lib/docker/volumes/audiosilo_agent-config/_data/codex":     false,
+		"/var/lib/docker/volumes/audiosilo_agent-config/data":            false,
 		"/mnt/user/appdata/agent-config/_data":                           false,
 		"/":                                                              false,
 	} {
@@ -125,6 +129,31 @@ func TestEndpointRunRefusedBesideCredentialMounts(t *testing.T) {
 			},
 			why: "by a credential's name",
 		},
+		"a login mounted under another name": {
+			mounts: func(t *testing.T, dir string) ([]mount, error) {
+				return []mount{{root: "/home/chris/.codex/auth.json", point: filepath.Join(dir, "login"), fstype: "ext4"}}, nil
+			},
+			why: "by a credential's name",
+		},
+		"a subpath of the agent volume": {
+			mounts: func(t *testing.T, dir string) ([]mount, error) {
+				return []mount{{root: "/var/lib/docker/volumes/audiosilo_agent-config/_data/codex", point: dir, fstype: "ext4"}}, nil
+			},
+			why: "is the agent volume",
+		},
+		"the agent volume under /dev": {
+			mounts: func(*testing.T, string) ([]mount, error) {
+				return []mount{{root: "/var/lib/docker/volumes/audiosilo_agent-config/_data", point: "/dev/agent", fstype: "ext4"}}, nil
+			},
+			why: "is the agent volume",
+		},
+		"a secret on a tmpfs (swarm, Kubernetes)": {
+			mounts: func(t *testing.T, dir string) ([]mount, error) {
+				mkfile(t, filepath.Join(dir, "openai_api_key"))
+				return []mount{{root: "/", point: dir, fstype: "tmpfs"}}, nil
+			},
+			why: "openai_api_key",
+		},
 		"the mounts unreadable": {
 			mounts: func(*testing.T, string) ([]mount, error) { return nil, errors.New("no /proc") },
 			why:    "can't be read",
@@ -183,7 +212,9 @@ func TestEndpointRunBesideHarmlessMounts(t *testing.T) {
 		at(te.staging),
 		{root: "/", point: tmpfs, fstype: "tmpfs"},
 		{root: "/", point: "/proc", fstype: "proc"},
-		{root: "/", point: "/etc/hosts", fstype: "ext4"},
+		{root: "/", point: "/dev", fstype: "tmpfs"},
+		{root: "/null", point: "/proc/kcore", fstype: "tmpfs"},
+		{root: "/var/lib/docker/containers/" + strings.Repeat("0f", 32) + "/hosts", point: "/etc/hosts", fstype: "ext4"},
 	}
 	if os.Geteuid() != 0 {
 		ms = append(ms, at(closed))
