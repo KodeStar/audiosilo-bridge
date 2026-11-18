@@ -93,9 +93,14 @@ type retainServer struct {
 	policy link.PodcastPolicy
 	check  func(link.PodcastRetentionRequest) *link.PodcastRetentionCheck
 	err    error
+	// policyErr fails the policy read (the server out of reach).
+	policyErr error
 }
 
 func (s *retainServer) PodcastRetention(context.Context, int64, string, string) (*link.PodcastPolicy, error) {
+	if s.policyErr != nil {
+		return nil, s.policyErr
+	}
 	return &s.policy, nil
 }
 func (s *retainServer) CheckPodcastRetention(_ context.Context, _ int64, r link.PodcastRetentionRequest) (*link.PodcastRetentionCheck, error) {
@@ -352,11 +357,32 @@ func TestLeaseFailureKeepsIdentityForLostClaimsOnly(t *testing.T) {
 		{link.ErrNotHeld, "identity_changed"},
 		{link.ErrUnauthorized, "identity_changed"},
 		{context.Canceled, "identity_changed"},
-		{errors.New("connection refused"), "network"},
+		{errors.New("connection refused"), "bridge_lost"}, // the server out of reach, never the episode's network
 	} {
 		var failure *netguard.Error
 		if !errors.As(leaseFailure(ctx, tc.err, "lost"), &failure) || failure.Code != tc.code {
 			t.Fatal(tc.err, failure)
 		}
+		// The job reports that code as given: nothing on the way folds it into
+		// one the server reads as the episode's host.
+		if result, err := outcome(nil, failure); err == nil || fields(t, result)["code"] != tc.code {
+			t.Fatal(tc.err, result, err)
+		}
+	}
+}
+
+// A retention read the server never answered is the Bridge losing its server
+// (bridge_lost), never network: that one is a feed's or an episode's host.
+func TestRetainServerOutOfReachIsBridgeLost(t *testing.T) {
+	h, fetch := audioHarness(t)
+	h.handler.s.o.Server = func() Server {
+		return &retainServer{scanServer: h.scan, policyErr: errors.New("connection refused")}
+	}
+	show := "Fixture Show"
+	params, _ := json.Marshal(map[string]string{"show_id": "a1b2c3d4e5f60718"})
+	job := jobs.Job{ID: 83, Kind: RetainKind, LibraryID: fetch.LibraryID, Path: &show, Params: params, Attempt: 1}
+	result, err := h.handler.RetainJob().Run(context.Background(), job, jobs.LocalReporter())
+	if err == nil || fields(t, result)["code"] != "bridge_lost" {
+		t.Fatal(result, err)
 	}
 }

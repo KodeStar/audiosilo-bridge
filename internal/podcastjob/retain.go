@@ -54,13 +54,14 @@ func (h *Retain) run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (
 	rep.Progress(jobs.Progress{Step: "retaining", Message: "Checking retained episodes"})
 	srv, ok := s.o.Server().(RetentionServer)
 	if !ok {
-		return nil, fail("network", "The retention policy could not be verified.")
+		return nil, fail("bridge_lost", "The retention policy could not be verified.")
 	}
 	policy, err := srv.PodcastRetention(ctx, lib.ID, show, p.ShowID)
 	var apiErr *link.APIError
 	if err != nil && !errors.As(err, &apiErr) {
-		// The server could not be reached: a retryable failure, not a changed show.
-		return nil, fail("network", "The retention policy could not be verified.")
+		// The server could not be reached: a retryable failure, not a changed show
+		// (bridge_lost as leaseFailure's: network is a feed's or an episode's host).
+		return nil, fail("bridge_lost", "The retention policy could not be verified.")
 	}
 	if err != nil || policy == nil || !policy.Valid() {
 		return nil, fail("identity_changed", "The retention policy could not be verified.")

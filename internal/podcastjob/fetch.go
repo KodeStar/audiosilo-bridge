@@ -273,12 +273,14 @@ func (h *Fetch) run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (_
 
 // leaseFailure words a refused publication check. A lost, cancelled or refused
 // claim no longer owns the job; a server that could not be reached denies the
-// commit too, but as a retryable failure rather than a changed identity.
+// commit too, but as a retryable failure rather than a changed identity:
+// bridge_lost (the Bridge and its server lost each other), never network, which
+// the server reads as the episode's host or the feed's being out of reach.
 func leaseFailure(ctx context.Context, err error, lost string) error {
 	if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, link.ErrNotHeld) || errors.Is(err, link.ErrUnauthorized) {
 		return fail("identity_changed", lost)
 	}
-	return fail("network", "The server could not confirm the job before saving.")
+	return fail("bridge_lost", "The server could not confirm the job before saving.")
 }
 func (s *service) showKey(mount, show string) string {
 	return s.o.ServerID() + "|" + mount + "/" + show

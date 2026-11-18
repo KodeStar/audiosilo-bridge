@@ -2224,7 +2224,9 @@ internal/
             failing-feed notice): the netguard's code as given (a refused
             connection is network, not timeout); a local fault before the fetch
             (show path, unreadable feed.json, bad params) is write_failed; the
-            Bridge's own deadline or stop outside the fetch is bridge_lost. An
+            Bridge's own deadline or stop outside the fetch is bridge_lost, as is
+            a server out of reach at a commit's lease check or a retention read
+            (leaseFailure; never network, the feed's or the episode host's). An
             episode download's ceiling is its timeout wherever it surfaces (the
             budget's cause, errOverBudget; a probe it stops answers the context's
             error, not invalid_audio, and a lease check it cuts is no lost claim,
