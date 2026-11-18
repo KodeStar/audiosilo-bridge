@@ -98,3 +98,33 @@ func TestReadDirWithin(t *testing.T) {
 		t.Fatal("a second read of the hung folder was started")
 	}
 }
+
+// LstatWithin answers as os.Lstat does (a link is the link, not its target),
+// and a look a hung mount holds is ErrStatTimeout.
+func TestLstatWithin(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	link := filepath.Join(dir, "link")
+	if err := os.Symlink(filepath.Join(dir, "gone"), link); err != nil {
+		t.Fatal(err)
+	}
+	info, err := LstatWithin(link, 5*time.Second)
+	if err != nil || info.Mode()&fs.ModeSymlink == 0 {
+		t.Fatalf("LstatWithin = %v, %v, want the link itself", info, err)
+	}
+	if _, err := LstatWithin(filepath.Join(dir, "gone"), 5*time.Second); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("a missing file = %v, want ErrNotExist", err)
+	}
+	const path = "/hung/mount/auth.json"
+	c := &lookCall[fs.FileInfo]{done: make(chan struct{}), started: time.Now()}
+	lstats.mu.Lock()
+	lstats.calls[path] = c
+	lstats.mu.Unlock()
+	if _, err := LstatWithin(path, 10*time.Millisecond); !errors.Is(err, ErrStatTimeout) {
+		t.Fatalf("a hung lstat = %v, want ErrStatTimeout", err)
+	}
+	lstats.mu.Lock()
+	delete(lstats.calls, path)
+	lstats.mu.Unlock()
+	close(c.done)
+}

@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -157,14 +158,24 @@ func (r *Runner) credentialKind(cli string) string {
 // credentialProblem (an endpoint-only runner's) says what puts a credential of
 // the container's own within reach of a run against an endpoint, "" when
 // nothing does (the CLI runs as the runner's uid with its sandbox off; execute
-// refuses an endpoint run while there is one): one of the four credential
-// variables in the runner's environment (a run reads /proc/<runner>/environ
-// only while the runner is dumpable, but the variables are a configuration
-// mistake either way), the agent home (homeReachable), or a mount that is the
-// agent volume or holds a credential's file (credentialMount, mounts.go). It
-// names a variable or a path, never a value: the log says it.
-func (r *Runner) credentialProblem() string {
-	for _, k := range credentialVars {
+// refuses an endpoint run while there is one, and spawn ends one when the next
+// check finds one): one of the four credential variables or the Bridge's
+// vault variables in the runner's environment (a run reads
+// /proc/<runner>/environ only while the runner is dumpable, but the variables
+// are a configuration mistake either way), the agent home (homeReachable), or
+// a mount that is the agent volume or holds a credential's file
+// (mountProblem, mounts.go). It names a variable or a path, never a value: the
+// log and runner.json say it.
+//
+// The mounts' walk is the slow part: it runs once per status tick (refreshMounts)
+// and otherwise only when the last is a status interval old (walk set), else
+// its last answer stands.
+func (r *Runner) credentialProblem() string { return r.ownCredential(true) }
+
+// ownCredential is credentialProblem, with the mounts' last answer alone when
+// walk is false (spawn's poll, every second).
+func (r *Runner) ownCredential(walk bool) string {
+	for _, k := range slices.Concat(credentialVars, vaultVars) {
 		if r.envSecret(k) != "" {
 			return "the variable " + k + " is set"
 		}
@@ -172,22 +183,63 @@ func (r *Runner) credentialProblem() string {
 	if r.homeReachable() {
 		return r.opts.Home + " (the agent home) is reachable"
 	}
-	ms, err := r.mounts()
-	if err != nil {
-		return "the mounts can't be read: " + err.Error()
+	return r.mountProblem(walk)
+}
+
+// mountAnswer is one walk of the mounts: when it ended and what it found.
+type mountAnswer struct {
+	at  time.Time
+	why string
+}
+
+// mountProblem is the mounts' walk's answer: the last one, walked again first
+// when walk is set and it is a status interval old (or there is none).
+func (r *Runner) mountProblem(walk bool) string {
+	if walk {
+		r.mountMu.Lock()
+		if last := r.mountLast.Load(); last == nil || r.now().Sub(last.at) >= r.statusEvery {
+			r.walkMountsLocked()
+		}
+		r.mountMu.Unlock()
 	}
-	return credentialMount(ms)
+	if last := r.mountLast.Load(); last != nil {
+		return last.why
+	}
+	return ""
+}
+
+// refreshMounts walks the mounts now, whatever the last walk's age: the
+// status tick's, so each interval has one fresh look.
+func (r *Runner) refreshMounts() {
+	r.mountMu.Lock()
+	defer r.mountMu.Unlock()
+	r.walkMountsLocked()
+}
+
+// walkMountsLocked walks the mounts (mounts.go) and keeps the answer; mountMu
+// is held, so two callers never walk at once.
+func (r *Runner) walkMountsLocked() {
+	why := "the mounts can't be read: "
+	ms, err := r.mounts()
+	if err == nil {
+		w := &mountWalk{looks: r.looks, deadline: time.Now().Add(walkBudget)}
+		why = w.credentialMount(ms)
+	} else {
+		why += err.Error()
+	}
+	r.mountLast.Store(&mountAnswer{at: r.now(), why: why})
 }
 
 // homeReachable reports whether the runner can list, enter or write the agent
 // home (the subscriptions' secrets, codex's login and its config.toml, which a
-// later subscription run loads). The endpoint's service mounts no /agent, and
-// runs as another uid than the agent container, whose 0700 home (the image's,
-// an anonymous volume where nothing is mounted) is then closed to it. Anything
-// but the home missing or closed counts as reachable: the answer must never be
-// a wrong no.
+// later subscription run loads). The endpoint's service mounts no agent volume,
+// and runs as another uid than the agent container, whose 0700 home (the
+// image's, which docker gives the service as an anonymous volume) is then
+// closed to it. Anything but the home missing or closed counts as reachable:
+// the answer must never be a wrong no (a look that doesn't answer in time
+// included).
 func (r *Runner) homeReachable() bool {
-	if _, err := os.Lstat(r.opts.Home); err != nil {
+	if _, err := r.looks.lstat(r.opts.Home); err != nil {
 		return !errors.Is(err, fs.ErrNotExist)
 	}
 	if f, err := os.Open(r.opts.Home); err == nil {

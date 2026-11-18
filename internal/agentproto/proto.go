@@ -22,7 +22,8 @@
 //	         job dir is deleted
 //
 // The runner rewrites <staging>/runner.json every RunnerInterval (15 s); the
-// Bridge treats the container as up while it is under RunnerFreshFor (30 s) old.
+// Bridge treats the container as up while its heartbeat last changed under
+// RunnerFreshFor (30 s) ago, on the Bridge's own clock.
 //
 // Nothing in a job dir is trusted by the side that didn't write it: the runner
 // validates the request, the Bridge treats every output as untrusted, and both
@@ -41,6 +42,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 // Protocol is the staging protocol's version. Both sides refuse another: the
@@ -117,16 +120,17 @@ const (
 // service that a run could take the subscriptions from (exit.json's error for
 // a refused run, the Bridge's status line): each ends it with what to change.
 const OwnCredentialsReason = "the endpoint's agent service holds a credential of its own or can reach the agent " +
-	"home (/agent, or the agent volume or a CLI's login mounted anywhere), which a run against an " +
+	"home (/agent, or the agent volume, a CLI's login or the Bridge's vault mounted anywhere), which a run against an " +
 	"OpenAI-compatible endpoint could read or change"
 
 // Intervals both sides agree on.
 const (
 	// RunnerInterval is how often the runner rewrites runner.json.
 	RunnerInterval = 15 * time.Second
-	// RunnerFreshFor is how young runner.json's heartbeat_at must be for the Bridge
-	// to treat the container as up. Two intervals, so one slow or missed rewrite
-	// doesn't flap the container to unavailable.
+	// RunnerFreshFor is how recently runner.json's heartbeat_at must have
+	// changed (on the Bridge's clock: the runner's may be off) for the Bridge
+	// to treat the container as up. Two intervals, so one slow or missed
+	// rewrite doesn't flap the container to unavailable.
 	RunnerFreshFor = 2 * RunnerInterval
 	// HeartbeatInterval is how often the runner touches a running job's heartbeat
 	// file, and so how often the Bridge needs to look at it.
@@ -168,6 +172,32 @@ type Runner struct {
 	// as the runner's uid, its sandbox off), so the runner refuses endpoint
 	// runs while it does and the Bridge stages none.
 	OwnCredentials bool `json:"own_credentials,omitempty"`
+	// Found, with OwnCredentials, is what the runner found (TrimFound): a
+	// variable's name or a path in its own container (the agent home's marker
+	// file, say), never a value, so the Bridge's page can name what to remove.
+	// An older runner sends none.
+	Found string `json:"found,omitempty"`
+}
+
+// MaxFoundBytes bounds Runner.Found.
+const MaxFoundBytes = 512
+
+// TrimFound is Runner.Found as both sides keep it: its printable characters
+// alone (a path may hold a control character, which the page mustn't get),
+// cut to MaxFoundBytes on a character's edge. The runner writes runner.json,
+// which a run in its service could rewrite, so the Bridge trims it too.
+func TrimFound(s string) string {
+	var b strings.Builder
+	for _, c := range s {
+		if !unicode.IsPrint(c) {
+			c = '?'
+		}
+		if b.Len()+utf8.RuneLen(c) > MaxFoundBytes {
+			break
+		}
+		b.WriteRune(c)
+	}
+	return b.String()
 }
 
 // Credential is credential.json: the agent credential the Bridge holds in its

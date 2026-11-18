@@ -2,15 +2,18 @@ package agentrun
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
 	"maps"
-	"os"
 	"path"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
+
+	"github.com/kodestar/audiosilo-bridge/internal/fsutil"
 )
 
 // The endpoint's service (--endpoint-only) must have nothing of the
@@ -25,14 +28,20 @@ import (
 //     service's user can't open it; or
 //   - is mounted by a credential file's name, at its point or from its
 //     source (a login bind-mounted under another name); or
-//   - holds a credential's file or the agent home's marker
-//     (agentHomeMarker, which the agent container's runner writes into its
-//     home) at the mount point or one directory below it (a tmpfs at its
-//     point only): that finds the agent volume under any name or path, a bind
-//     mount of a CLI's login, and a parent folder holding either. Where the
+//   - holds a credential's file, the agent home's marker (agentHomeMarker,
+//     which the agent container's runner writes into its home) or the
+//     Bridge's own vault (its secret.key, a sealed secret) at the mount point
+//     or one directory below it (a tmpfs at its point only): that finds the
+//     agent volume under any name or path, a bind mount of a CLI's login or
+//     of the Bridge's data, and a parent folder holding either. Where the
 //     service's user can't enter a directory, neither can a run's commands
 //     (the same uid, no capability), so a closed one counts as holding
 //     nothing.
+//
+// The check fails closed: a mount point it can enter but not list, one with
+// more than maxMountChildren entries, or a look that doesn't answer within
+// lookTimeout (a hung NFS or SMB mount) or past walkBudget refuses the runs as
+// a credential found would, rather than pass what it couldn't look at.
 //
 // Every mount is looked at wherever it is, /dev included: only the kernel's
 // own filesystems (pseudoFS) are passed over, by type, never by path.
@@ -66,17 +75,50 @@ var pseudoFS = map[string]bool{
 	"binfmt_misc": true, "nsfs": true, "autofs": true,
 }
 
-// maxMountChildren bounds the directories looked into below one mount point
-// (a large library folder mounted by mistake isn't walked whole).
+// maxMountChildren bounds the entries of one mount point the check looks
+// through: one with more (a large library folder mounted by mistake) refuses
+// the runs rather than be walked whole or in part.
 const maxMountChildren = 1024
+
+// lookTimeout bounds each look of the check (a stat, a folder read), and
+// walkBudget the whole walk: a hung network mount refuses the runs rather than
+// hold the status tick (and runner.json's heartbeat) behind it.
+const (
+	lookTimeout = 5 * time.Second
+	walkBudget  = 20 * time.Second
+)
+
+// The Bridge's own vault (internal/secrets), which the endpoint's service must
+// never see either: its master key's variable and file, the variable holding a
+// GitHub token (contrib.GitHubTokenEnv), and the sealed secrets' files
+// (secrets/<name>.enc, by the names the Bridge always uses). Copied here, as
+// agentrun imports neither package (a test pins them to theirs).
+const (
+	vaultKeyEnv    = "AUDIOSILO_BRIDGE_SECRET_KEY"
+	vaultKeyFile   = "secret.key"
+	githubTokenEnv = "AUDIOSILO_BRIDGE_GITHUB_TOKEN"
+)
+
+// vaultVars are the Bridge's variables an endpoint-only runner must not hold.
+var vaultVars = []string{vaultKeyEnv, githubTokenEnv}
+
+// vaultSealed are the sealed secrets' names (secrets.Names and the server
+// token, which every paired Bridge has), each a <name>.enc file in the vault's
+// folder.
+var vaultSealed = []string{"server_token", "claude_oauth_token", "anthropic_api_key", "openai_api_key",
+	"endpoint_api_key", "github_user_token"}
 
 // credentialNames are the files that hold a subscription's credential or the
 // agent home's marker, by the name a mount carries itself, at its point or
 // from its source (a compose secret, a single file mounted).
 var credentialNames = func() map[string]bool {
-	out := map[string]bool{agentHomeMarker: true, "auth.json": true, ".credentials.json": true, ".claude.json": true}
+	out := map[string]bool{agentHomeMarker: true, "auth.json": true, ".credentials.json": true, ".claude.json": true,
+		vaultKeyFile: true}
 	for _, k := range credentialVars {
 		out[strings.ToLower(k)] = true
+	}
+	for _, n := range vaultSealed {
+		out[n+".enc"] = true
 	}
 	return out
 }()
@@ -84,16 +126,20 @@ var credentialNames = func() map[string]bool {
 // credentialPaths are where, under a directory, such a file sits: the agent
 // home's layout (the marker, secrets/<lowercase variable>, codex/'s login and
 // its config.toml, which a later subscription run loads), a secrets dir or a
-// CODEX_HOME or CLAUDE_CONFIG_DIR mounted alone, and a user's home with the
-// CLIs' own dirs.
+// CODEX_HOME or CLAUDE_CONFIG_DIR mounted alone, a user's home with the CLIs'
+// own dirs, and the Bridge's data folder (secret.key, secrets/<name>.enc) or
+// its vault's folder mounted alone.
 var credentialPaths = func() []string {
 	out := []string{agentHomeMarker, "auth.json", ".credentials.json", ".claude.json", ".claude/.credentials.json",
-		".codex/auth.json"}
+		".codex/auth.json", vaultKeyFile}
 	for _, f := range slices.Sorted(maps.Keys(codexKeep)) {
 		out = append(out, path.Join(codexDir, f))
 	}
 	for _, k := range credentialVars {
 		out = append(out, path.Join(secretsDir, strings.ToLower(k)), strings.ToLower(k))
+	}
+	for _, n := range vaultSealed {
+		out = append(out, path.Join(secretsDir, n+".enc"), n+".enc")
 	}
 	return out
 }()
@@ -156,9 +202,32 @@ func isAgentVolume(root string) bool {
 	return false
 }
 
+// looks are the file system calls the mount check makes, each bounded by
+// lookTimeout (a test injects its own).
+type looks struct {
+	lstat   func(string) (fs.FileInfo, error)
+	readDir func(string) ([]fs.DirEntry, error)
+}
+
+// boundedLooks are the real calls, each bounded by lookTimeout
+// (fsutil.LstatWithin, fsutil.ReadDirWithin: one look in flight per path, so
+// a check every tick over a hung mount never piles up blocked ones).
+var boundedLooks = looks{
+	lstat:   func(p string) (fs.FileInfo, error) { return fsutil.LstatWithin(p, lookTimeout) },
+	readDir: func(p string) ([]fs.DirEntry, error) { return fsutil.ReadDirWithin(p, lookTimeout) },
+}
+
+// mountWalk is one run of the check over the mounts: its looks, and the
+// deadline the whole walk must end by.
+type mountWalk struct {
+	looks
+	deadline time.Time
+}
+
 // credentialMount names the first of mounts that is the agent volume or holds
-// a credential's file (the rules above), "" when none does.
-func credentialMount(mounts []mount) string {
+// a credential's file (the rules above), "" when none does. A mount it can't
+// look through is named too, with why (the check fails closed).
+func (w *mountWalk) credentialMount(mounts []mount) string {
 	for _, m := range mounts {
 		switch {
 		case isAgentVolume(m.root):
@@ -170,10 +239,18 @@ func credentialMount(mounts []mount) string {
 		}
 		dirs := []string{m.point}
 		if m.fstype != "tmpfs" {
-			dirs = append(dirs, subdirs(m.point)...)
+			sub, err := w.subdirs(m.point)
+			if err != nil {
+				return m.point + " can't be checked: " + err.Error()
+			}
+			dirs = append(dirs, sub...)
 		}
 		for _, dir := range dirs {
-			if p := credentialUnder(dir); p != "" {
+			p, err := w.credentialUnder(dir)
+			if err != nil {
+				return m.point + " can't be checked: " + err.Error()
+			}
+			if p != "" {
 				return m.point + " holds " + p
 			}
 		}
@@ -183,45 +260,91 @@ func credentialMount(mounts []mount) string {
 
 // credentialUnder is the first of credentialPaths present under dir, "" when
 // none is.
-func credentialUnder(dir string) string {
+func (w *mountWalk) credentialUnder(dir string) (string, error) {
 	for _, rel := range credentialPaths {
 		p := filepath.Join(dir, rel)
-		if present(p) {
-			return p
+		ok, err := w.present(p)
+		if err != nil {
+			return "", err
+		}
+		if ok {
+			return p, nil
 		}
 	}
-	return ""
+	return "", nil
 }
 
 // present reports whether p is there. Missing, or behind a directory the
 // runner can't enter, is absent (a run, the same uid, can't reach it either);
-// any other answer counts as present: never a wrong no.
-func present(p string) bool {
-	_, err := os.Lstat(p)
+// a look that didn't answer in time, or the walk past its budget, is an
+// error; any other answer counts as present: never a wrong no.
+func (w *mountWalk) present(p string) (bool, error) {
+	if err := w.inTime(); err != nil {
+		return false, err
+	}
+	_, err := w.lstat(p)
 	switch {
 	case err == nil:
-		return true
+		return true, nil
+	case errors.Is(err, fsutil.ErrStatTimeout):
+		return false, timedOut(p)
 	case errors.Is(err, fs.ErrNotExist), errors.Is(err, fs.ErrPermission), errors.Is(err, syscall.ENOTDIR):
-		return false
+		return false, nil
 	default:
-		return true
+		return true, nil
 	}
 }
 
-// subdirs are the directories directly in dir (not links), at most
-// maxMountChildren; none when dir can't be listed.
-func subdirs(dir string) []string {
-	f, err := os.Open(dir) //nolint:gosec // a mount point from mountinfo, only listed
-	if err != nil {
-		return nil
+// subdirs are the directories directly in dir (not links). A mount that is a
+// file, or that the runner can't enter, has none (nor can a run look in); one
+// it can enter but not list, or with more than maxMountChildren entries, is
+// an error: a run could still reach a folder in it by name.
+func (w *mountWalk) subdirs(dir string) ([]string, error) {
+	if err := w.inTime(); err != nil {
+		return nil, err
 	}
-	defer func() { _ = f.Close() }()
-	entries, _ := f.ReadDir(maxMountChildren)
+	info, err := w.lstat(dir)
+	switch {
+	case errors.Is(err, fsutil.ErrStatTimeout):
+		return nil, timedOut(dir)
+	case errors.Is(err, fs.ErrNotExist), errors.Is(err, fs.ErrPermission):
+		return nil, nil // under a later mount, or a closed parent: out of a run's reach too
+	case err != nil:
+		return nil, fmt.Errorf("it can't be looked at (%w)", err)
+	case !info.IsDir():
+		return nil, nil
+	}
+	entries, err := w.readDir(dir)
+	switch {
+	case err == nil:
+	case errors.Is(err, fsutil.ErrStatTimeout):
+		return nil, timedOut(dir)
+	case errors.Is(err, fs.ErrPermission) && !enterable(dir):
+		return nil, nil
+	default:
+		return nil, fmt.Errorf("its folders can't be listed (%w)", err)
+	}
+	if len(entries) > maxMountChildren {
+		return nil, fmt.Errorf("it holds more than %d entries, more than the check looks through", maxMountChildren)
+	}
 	var out []string
 	for _, e := range entries {
 		if e.IsDir() {
 			out = append(out, filepath.Join(dir, e.Name()))
 		}
 	}
-	return out
+	return out, nil
+}
+
+// inTime is an error once the walk is past its deadline.
+func (w *mountWalk) inTime() error {
+	if time.Now().After(w.deadline) {
+		return fmt.Errorf("the check didn't finish within %s (a slow or hung mount?)", walkBudget)
+	}
+	return nil
+}
+
+// timedOut is the error for a look at p that didn't answer in time.
+func timedOut(p string) error {
+	return fmt.Errorf("a look at %s didn't answer within %s (a hung mount?)", p, lookTimeout)
 }

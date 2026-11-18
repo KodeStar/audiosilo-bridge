@@ -344,6 +344,16 @@ wait:
 				exit.Cancelled = true
 				stop()
 			}
+			// The endpoint's service: a credential that came within reach
+			// since the run started (the status tick's walk found it) ends
+			// the run, as one there at the start refuses it.
+			if r.opts.EndpointOnly && kill == nil {
+				if why := r.ownCredential(false); why != "" {
+					r.log.Warn("agent runner: ended an endpoint run", "why", why)
+					exit.Error, exit.Unavailable = endpointBlocked, true
+					stop()
+				}
+			}
 		case <-deadline.C:
 			exit.TimedOut = true
 			stop()

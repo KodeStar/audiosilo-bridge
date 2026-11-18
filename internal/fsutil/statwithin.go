@@ -30,6 +30,7 @@ type looksOut[T any] struct {
 
 var (
 	stats    = &looksOut[fs.FileInfo]{calls: map[string]*lookCall[fs.FileInfo]{}}
+	lstats   = &looksOut[fs.FileInfo]{calls: map[string]*lookCall[fs.FileInfo]{}}
 	readDirs = &looksOut[[]fs.DirEntry]{calls: map[string]*lookCall[[]fs.DirEntry]{}}
 )
 
@@ -77,6 +78,13 @@ func (o *looksOut[T]) within(op, path string, d time.Duration, look func(string)
 // holds past d is ErrStatTimeout.
 func StatWithin(path string, d time.Duration) (fs.FileInfo, error) {
 	return stats.within("stat", path, d, os.Stat)
+}
+
+// LstatWithin is os.Lstat bounded by d, as StatWithin is os.Stat: a look a
+// hung mount holds past d is ErrStatTimeout (the endpoint's agent service's
+// mount check, agentrun).
+func LstatWithin(path string, d time.Duration) (fs.FileInfo, error) {
+	return lstats.within("lstat", path, d, os.Lstat)
 }
 
 // ReadDirWithin is os.ReadDir bounded by d, as StatWithin is os.Stat: a folder
