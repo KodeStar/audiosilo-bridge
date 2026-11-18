@@ -68,6 +68,14 @@ describe('accounts', () => {
         'claude_oauth_token',
       ),
     ).toMatch(/container's own credential/);
+    // The endpoint's key, entered in Settings > Agent while claude still runs:
+    // claude's credentials don't stand in its way, and none is to be removed.
+    const waiting = savedText(
+      { ...a, set: { claude_oauth_token: true, endpoint_api_key: true } },
+      'endpoint_api_key',
+    );
+    expect(waiting).toMatch(/once it runs the OpenAI-compatible endpoint/);
+    expect(waiting).not.toMatch(/remove/);
   });
 
   it('checks a pasted credential', () => {

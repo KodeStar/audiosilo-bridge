@@ -1,8 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
-import { render, screen, within } from '@testing-library/react';
+import { act, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { AgentSettingsCard } from './AgentSettingsCard';
 import { ApiClient } from '@/api/client';
+import type { EndpointCheck } from '@/api/types';
 import { lastCall, mockFetch } from '@/test/fetchMock';
 import { accountsFixture, agentSettingsFixture } from '@/test/fixtures';
 
@@ -143,9 +144,12 @@ describe('AgentSettingsCard', () => {
     expect(screen.getByText(/Not set/)).toBeInTheDocument();
     await userEvent.type(key, 'sk-proj-new');
     await userEvent.click(screen.getByRole('button', { name: 'Save' }));
+    // With the address the page shows beside it: the Bridge refuses the key
+    // when its saved address is another by now (a stale page).
     expect(lastCall(calls, 'PUT', '/api/accounts/agent')?.body).toEqual({
       kind: 'endpoint_api_key',
       value: 'sk-proj-new',
+      endpoint: 'https://api.openai.com/v1',
     });
     expect(await screen.findByRole('button', { name: 'Replace' })).toBeInTheDocument();
     expect(key).toHaveValue('');
@@ -205,8 +209,44 @@ describe('AgentSettingsCard', () => {
     // Saved: the key went with the old address, and the page asks for this one's.
     await userEvent.click(screen.getByRole('button', { name: 'Save agent settings' }));
     expect(await screen.findByText(/was for the old address and is removed/)).toBeInTheDocument();
+    // "Saving this address removes the key" has happened: it isn't said again.
+    expect(screen.queryByText(/Tested without the API key/)).not.toBeInTheDocument();
     expect(screen.getByLabelText('Endpoint API key')).toBeInTheDocument();
     expect(screen.getByText(/Not set/)).toBeInTheDocument();
+  });
+
+  it("drops a check's answer once the address was edited", async () => {
+    mockFetch({
+      'GET /api/settings/agent': {
+        body: agentSettingsFixture({
+          backend: 'openai-compatible',
+          running_backend: 'openai-compatible',
+          openai_compatible: { base_url: 'https://api.one.example/v1', model: 'm', models: {} },
+        }),
+      },
+    });
+    const client = api();
+    let answer: (res: EndpointCheck) => void = () => {};
+    vi.spyOn(client, 'checkEndpoint').mockImplementation(
+      () => new Promise<EndpointCheck>((resolve) => (answer = resolve)),
+    );
+    render(<AgentSettingsCard client={client} />);
+    await userEvent.click(await screen.findByRole('button', { name: 'Test connection' }));
+    expect(screen.getByRole('button', { name: 'Testing...' })).toBeDisabled();
+    // The address changes while the check is out: its answer is the old one's.
+    await userEvent.type(screen.getByLabelText('Endpoint address'), '/other');
+    expect(screen.getByRole('button', { name: 'Test connection' })).toBeEnabled();
+    await act(async () => {
+      answer({
+        models: [{ id: 'm' }],
+        responses: 'yes',
+        responses_detail: '',
+        error: '',
+        key_sent: false,
+      });
+    });
+    expect(screen.queryByText(/answered with 1 model/)).not.toBeInTheDocument();
+    expect(screen.queryByRole('list', { name: "The endpoint's models" })).not.toBeInTheDocument();
   });
 
   it('keeps settings the environment sets read-only', async () => {

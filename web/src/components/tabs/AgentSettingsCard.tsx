@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from 'react';
+import { useRef, useState, type FormEvent } from 'react';
 import { errorText, type ApiClient } from '@/api/client';
 import type { AgentBackendName, AgentSettings, EndpointCheck } from '@/api/types';
 import { useLoad } from '@/lib/useLoad';
@@ -43,6 +43,9 @@ export function AgentSettingsCard({ client }: { client: ApiClient }) {
   // removed the old address's key.
   const [keyless, setKeyless] = useState(false);
   const [keyCleared, setKeyCleared] = useState(false);
+  // checkSeq numbers the checks and the address edits: a check's answer is
+  // shown only while nothing newer came (it is of the address it was sent).
+  const checkSeq = useRef(0);
 
   // fill puts the saved agent settings into the fields.
   function fill(s: AgentSettings) {
@@ -114,8 +117,12 @@ export function AgentSettingsCard({ client }: { client: ApiClient }) {
           },
         }),
       );
-      // Another address: the Bridge removed the key entered for the old one.
+      // Another address: the Bridge removed the key entered for the old one,
+      // so "saving this address removes the key" has happened.
       setKeyCleared(settings.key_set && !next.key_set);
+      if (next.openai_compatible.base_url !== settings.openai_compatible.base_url) {
+        setKeyless(false);
+      }
       setSettings(next);
       setSaved(true);
     } catch (err) {
@@ -134,12 +141,15 @@ export function AgentSettingsCard({ client }: { client: ApiClient }) {
     }
     setChecking(true);
     setCheckError(null);
+    const seq = ++checkSeq.current;
     try {
       const res = await client.checkEndpoint(update.base_url);
+      if (seq !== checkSeq.current) return; // the address was edited meanwhile
       setKeyless(!!settings?.key_set && !res.key_sent);
       if (res.error) setCheckError(res.error);
       else setCheck(res);
     } catch (err) {
+      if (seq !== checkSeq.current) return;
       setCheckError(errorText(err, "Couldn't check the endpoint."));
     }
     setChecking(false);
@@ -195,7 +205,9 @@ export function AgentSettingsCard({ client }: { client: ApiClient }) {
                 onChange={(e) => {
                   setBaseUrl(e.target.value);
                   // A check was of the address it had: another one's models
-                  // and warnings would mislead.
+                  // and warnings would mislead (one still out is dropped).
+                  checkSeq.current++;
+                  setChecking(false);
                   setCheck(null);
                   setCheckError(null);
                   setKeyless(false);
@@ -303,10 +315,14 @@ export function AgentSettingsCard({ client }: { client: ApiClient }) {
           )}
           {addressSaved ? (
             <CredentialForm
+              // A new form for each saved address: nothing typed or said of
+              // the old address's key carries over.
+              key={settings.openai_compatible.base_url}
               client={client}
               kind="endpoint_api_key"
               set={settings.key_set}
               setAt={settings.key_set_at}
+              endpoint={settings.openai_compatible.base_url}
               onChange={(a) => {
                 setKeyCleared(false);
                 // Only the key's state: the fields may hold changes not saved yet.

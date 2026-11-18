@@ -69,6 +69,12 @@ export function minutesLeft(expiresAt: string, now: number = Date.now()): number
 // agent container's own wins, then the first kind set in the CLI's order (a
 // subscription token before an API key for claude).
 export function savedText(a: AgentAccount, kind: AgentKind): string {
+  if (!a.kinds.includes(kind)) {
+    // Not one the running backend takes (the endpoint's key, entered in
+    // Settings > Agent while claude or codex still runs): the others don't
+    // stand in its way, and removing one wouldn't put it to use.
+    return 'Saved. The agent uses it once it runs the OpenAI-compatible endpoint.';
+  }
   if (a.container_credential !== '') {
     return "Saved. The agent container's own credential is used while it has one.";
   }
