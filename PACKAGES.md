@@ -3731,6 +3731,9 @@ internal/
             start and after a settings save (kickWaiting). engineStarted also
             re-admits the books parked contrib_unavailable once a GitHub token
             resolves (a sign-in during the start re-admitted nothing, bridge#25).
+            Those re-admits, and githubChanged's and agentCredentialChanged's, run as
+            Bridge.bg tasks (bgTasks): Run stops them (their context ends, none
+            starts after) and waits for them before the store closes (bridge#80).
             Phase 1a: engine.go wires the ENGINE the way sidecars' daemon did, minus
             the folder scan, and runs it in the background from Run (the first start
             may download ffmpeg; the generate job waits for it): the event hub with

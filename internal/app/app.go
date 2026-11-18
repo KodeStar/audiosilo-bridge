@@ -106,6 +106,10 @@ type Bridge struct {
 	audiblePush *audiblesync.Pusher
 	// est caches the heartbeat's estimates (estimates.go of the engine wiring).
 	est estimatesCache
+	// bg runs the short tasks a change starts in the background (the re-admits
+	// after a credential change or the engine's start): Run ends their context
+	// and waits for them before the store closes (bridge#80).
+	bg bgTasks
 
 	kick chan struct{}
 	// waitKick asks for a look at the books waiting for a worker now.
@@ -179,6 +183,7 @@ func New(ctx context.Context, opts Options) (*Bridge, string, error) {
 		vault: vault, conn: conn, libs: mapping.NewRegistry(), auth: am, kick: make(chan struct{}, 1), waitKick: make(chan struct{}, 1),
 	}
 	b.cfg.Store(&cfg)
+	b.bg.init()
 	b.newAccounts(cfg)
 	b.box = newAgentBox(cfg, opts.DataDir, opts.Logger, b.agentCredential)
 	b.hub = workers.New(workers.Options{DB: db, BridgeVersion: opts.Version, Log: opts.Logger})
@@ -362,8 +367,45 @@ func (b *Bridge) Run(ctx context.Context) error {
 	defer cancel()
 	_ = srv.Shutdown(shut)
 	wg.Wait()
+	b.bg.stop()
 	b.log.Info("bridge: stopped")
 	return err
+}
+
+// bgTasks are the Bridge's background tasks (Bridge.bg): each runs with the
+// tasks' context, and stop ends that context and waits for every task started;
+// none starts after stop.
+type bgTasks struct {
+	mu      sync.Mutex
+	wg      sync.WaitGroup
+	ctx     context.Context //nolint:containedctx // the tasks' lifetime, ended by stop
+	cancel  context.CancelFunc
+	stopped bool
+}
+
+func (t *bgTasks) init() { t.ctx, t.cancel = context.WithCancel(context.Background()) }
+
+// run starts fn in the background with the tasks' context (nothing once stopped).
+func (t *bgTasks) run(fn func(context.Context)) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.stopped {
+		return
+	}
+	t.wg.Add(1)
+	go func() {
+		defer t.wg.Done()
+		fn(t.ctx)
+	}()
+}
+
+// stop ends the tasks' context and waits for the tasks started.
+func (t *bgTasks) stop() {
+	t.mu.Lock()
+	t.stopped = true
+	t.mu.Unlock()
+	t.cancel()
+	t.wg.Wait()
 }
 
 // heartbeatLoop reports every HeartbeatEvery, and at once when kicked.

@@ -240,7 +240,8 @@ func (b *Bridge) runEngine(ctx context.Context) {
 func (b *Bridge) engineStarted(ctx context.Context, e *engine) {
 	b.engine.cur.Store(e)
 	b.kickWaiting()
-	go b.readmitContributions(ctx)
+	// The engine's ctx, which ends before the Bridge's tasks do.
+	b.bg.run(func(context.Context) { b.readmitContributions(ctx) })
 }
 
 // agentSlotsEvery is how often the agent container's slots are looked at: as
