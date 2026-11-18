@@ -85,7 +85,8 @@ export function parkText(job: ServerJob, park: Park): string {
     msg = park.message.trim();
   } else {
     msg = (job.error ?? '').trim();
-    const prefix = `${park.code}: `;
+    // As the Bridge's withParkMessage: the code and its colon, whatever follows.
+    const prefix = `${park.code}:`;
     if (msg.startsWith(prefix)) msg = msg.slice(prefix.length).trim();
   }
   return msg === '' || msg === park.code || msg === park.hint ? '' : msg;

@@ -69,6 +69,7 @@ describe('parkText', () => {
   });
   it('says nothing when the message is only the code or repeats the hint', () => {
     expect(parkText(at('asr_worker_waiting'), park)).toBe('');
+    expect(parkText(at('asr_worker_waiting:'), park)).toBe('');
     expect(parkText(at('Start a worker.'), park)).toBe('');
     expect(parkText(at('asr_worker_waiting: Start a worker.'), park)).toBe('');
     expect(parkText(at(''), park)).toBe('');
