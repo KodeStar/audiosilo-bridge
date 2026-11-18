@@ -59,10 +59,10 @@ func (r *Runner) deferProbe() {
 	r.probeAfter.Store(r.now().Add(probeEvery).UnixNano())
 }
 
-// Probe starts a group probe in the background (ctx bounds it) when a run's
-// fallback from the Bridge's group holds, one is due, none is running, and a
-// live runner that takes a hand-off lists the group: the app calls it at every
-// heartbeat. Nothing to do otherwise.
+// Probe starts a group probe in the background (ctx bounds it, Wait waits for
+// it) when a run's fallback from the Bridge's group holds, one is due, none
+// is running, and a live runner that takes a hand-off lists the group: the
+// app calls it at every heartbeat. Nothing to do otherwise.
 func (r *Runner) Probe(ctx context.Context) {
 	if !r.holdsFallback() || r.now().UnixNano() < r.probeAfter.Load() || !r.probing.CompareAndSwap(false, true) {
 		return
@@ -74,11 +74,16 @@ func (r *Runner) Probe(ctx context.Context) {
 		r.probing.Store(false)
 		return
 	}
-	go func() {
+	r.probes.Go(func() {
 		defer r.probing.Store(false)
 		r.probeGroup(ctx)
-	}()
+	})
 }
+
+// Wait returns once no probe is in flight: the app calls it as it stops (the
+// heartbeat that calls Probe already ended, its ctx cancelled), so a probe cut
+// short still removes its job dir before the process goes.
+func (r *Runner) Wait() { r.probes.Wait() }
 
 // probeGroup runs one probe job and ends the fallback when the runner took the
 // group's file.

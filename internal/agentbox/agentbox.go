@@ -118,6 +118,8 @@ type Runner struct {
 	// and probing is set while one runs (probe.go).
 	probeAfter atomic.Int64
 	probing    atomic.Bool
+	// probes counts the probes in flight, for Wait.
+	probes sync.WaitGroup
 	// uid is the Bridge's own (effective) uid, and runnerUID the runner's as
 	// the staging volume shows it, pinned by the first live runner.json
 	// (noUID until then): only the runner's files may move a handed

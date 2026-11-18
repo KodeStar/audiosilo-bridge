@@ -309,6 +309,33 @@ func TestProbeStuckClaimEnds(t *testing.T) {
 	assertNoJobDirs(t, dir)
 }
 
+// A probe cut short by its ctx (the Bridge stopping) is waited for, so its job
+// dir is gone by the time Wait returns (allowed: Wait returns once the probe
+// took its job back; denied: no job dir outlives it).
+func TestProbeWaitedForAtAStop(t *testing.T) {
+	t.Parallel()
+	r, dir := vaultHandoff(t, []int{os.Getegid()})
+	r.groupDenied.Store(true)
+	ctx, cancel := context.WithCancel(context.Background())
+	r.Probe(ctx) // no runner claims it: it waits for the claim
+	staged := func() bool {
+		entries, _ := os.ReadDir(dir)
+		return slices.ContainsFunc(entries, func(e os.DirEntry) bool { return agentproto.ValidJobID(e.Name()) })
+	}
+	for deadline := time.Now().Add(5 * time.Second); !staged(); {
+		if time.Now().After(deadline) {
+			t.Fatal("the probe never staged its job")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+	r.Wait()
+	if r.probing.Load() || !r.groupDenied.Load() {
+		t.Fatalf("after the wait: probing %v, group denied %v", r.probing.Load(), r.groupDenied.Load())
+	}
+	assertNoJobDirs(t, dir)
+}
+
 // A run that learns agent.require_group can't be met just as a probe ends an
 // earlier block still answers with its own reason (allowed: the kept reason
 // while one is kept; denied: no read of a block a probe took away).

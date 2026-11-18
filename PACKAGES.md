@@ -3414,7 +3414,8 @@ internal/
             mapping, one user for both) doesn't hold it; a denial borne out as
             a run's is (deniedHere) or a volume still refusing the group keeps
             them; a probe ends by itself after the claim timeout plus
-            staleFor. Status.HandoffMode says how a
+            staleFor, and Wait (the app's Run, last) waits for one in flight
+            at a stop, so its job dir still goes. Status.HandoffMode says how a
             handed credential reaches a live runner: group, world (not in the
             group, denied, or the last stage's volume refused the group,
             volumeRefused) or group_required; the heartbeat's setup block
