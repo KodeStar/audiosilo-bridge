@@ -795,6 +795,74 @@ func TestAbandonBeforeTheEngineStartsStopsTheBookAtOnce(t *testing.T) {
 	kept("a book whose job's mapping was reopened", jobs.Job{ID: 9, Kind: Kind, Attempt: 1}, reopened)
 }
 
+// With transcripts.retention_days 0 and no engine yet, Abandon cancels the book
+// in the store and records the job's end at once, but leaves the transcripts:
+// nothing holds the book against a stage its starting scheduler may begin (hold
+// takes none without an engine). They go once the engine is up and its own
+// Cancel has stopped the book, in the task Abandon handed to Background, which
+// ends with that task's context while it still waits for an engine.
+func TestAbandonBeforeTheEngineStartsPurgesOnlyOnceItIsUp(t *testing.T) {
+	t.Parallel()
+	db, err := store.Open(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	ctx := context.Background()
+	root := t.TempDir()
+	sched := scheduler.New(db, events.NewHub(8), scheduler.NewStubExecutor(0, 0), 1, root, false)
+	var up atomic.Bool
+	var tasks []func(context.Context)
+	h := New(Options{DB: db, WorkRoot: root, RetentionDays: 0, Poll: time.Millisecond,
+		Background: func(fn func(context.Context)) { tasks = append(tasks, fn) },
+		Engine: func() Engine {
+			if up.Load() {
+				return sched
+			}
+			return nil
+		}})
+	wd := filepath.Join(root, "dropped")
+	mustWrite(t, filepath.Join(wd, "transcripts-raw", "ch001.json"), "x")
+	b, err := db.CreateBook(ctx, store.NewBook{SourcePath: "/lib/dropped", WorkDir: wd, Title: "dropped"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = db.SetBookState(ctx, b.ID, "asr", "", "", "")
+	if err := db.PutGenerateBook(ctx, store.GenerateBook{ServerJobID: 5, BookID: &b.ID, LibraryID: 1, RelPath: "dropped"}); err != nil {
+		t.Fatal(err)
+	}
+	job := jobs.Job{ID: 5, Kind: Kind, Attempt: 1}
+	h.Abandon(ctx, job)
+	got, _ := db.GetBook(ctx, b.ID)
+	g, _ := db.GetGenerateBook(ctx, 5)
+	if !scheduler.IsCancelled(got) || g.EndedAt == "" {
+		t.Fatalf("after Abandon with no engine: status %q error %q, ended %q; want cancelled and ended",
+			got.Status, got.Error, g.EndedAt)
+	}
+	if !present(wd) || g.SweptAt != "" {
+		t.Fatalf("the transcripts went with no engine to hold the book: present %v, swept %q", present(wd), g.SweptAt)
+	}
+	if len(tasks) != 1 {
+		t.Fatalf("Abandon started %d background tasks, want the wait for the engine", len(tasks))
+	}
+	// The Bridge stopping ends the wait, with nothing touched.
+	stopped, stop := context.WithCancel(ctx)
+	stop()
+	tasks[0](stopped)
+	if !present(wd) {
+		t.Fatal("a wait the Bridge's stop ended deleted the transcripts")
+	}
+	// The engine up: the book is stopped through it, then its transcripts go.
+	up.Store(true)
+	tasks[0](ctx)
+	if g, _ = db.GetGenerateBook(ctx, 5); present(wd) || g.SweptAt == "" {
+		t.Fatalf("once the engine is up: transcripts present %v, swept %q; want them deleted", present(wd), g.SweptAt)
+	}
+	if got, _ = db.GetBook(ctx, b.ID); !scheduler.IsCancelled(got) {
+		t.Fatalf("the book is no longer cancelled: status %q error %q", got.Status, got.Error)
+	}
+}
+
 // parkFirstEngine is the engine with a stage the cancel interrupted parking the
 // book just before attach's re-admit.
 type parkFirstEngine struct {

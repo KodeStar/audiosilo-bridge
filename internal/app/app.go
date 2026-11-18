@@ -106,9 +106,10 @@ type Bridge struct {
 	audiblePush *audiblesync.Pusher
 	// est caches the heartbeat's estimates (estimates.go of the engine wiring).
 	est estimatesCache
-	// bg runs the short tasks a change starts in the background (the re-admits
-	// after a credential change or the engine's start): Run ends their context
-	// and waits for them before the store closes (bridge#80).
+	// bg runs the tasks a change starts in the background (the re-admits after a
+	// credential change or the engine's start, an abandoned generate job's wait
+	// for the engine): Run ends their context and waits for them before the store
+	// closes (bridge#80).
 	bg bgTasks
 
 	kick chan struct{}
@@ -203,7 +204,7 @@ func New(ctx context.Context, opts Options) (*Bridge, string, error) {
 			return nil
 		},
 		WorkRoot: filepath.Join(opts.DataDir, "work"), Version: opts.Version, RetentionDays: cfg.Transcripts.RetentionDays,
-		ContribCredential: b.contribCredential, Log: opts.Logger})
+		ContribCredential: b.contribCredential, Background: b.bg.run, Log: opts.Logger})
 	b.wakeParked = b.gen.WakeParked
 	serverID := func() string { return b.conn.Pairing().ServerID }
 	networks, err := cfg.Podcasts.Networks()

@@ -105,8 +105,13 @@ type Options struct {
 	Poll     time.Duration
 	IdlePoll time.Duration
 	Recheck  time.Duration
-	Log      *slog.Logger
-	Now      func() time.Time
+	// Background starts a task that outlives the call starting it (Abandon's wait
+	// for the engine, stopStartedStage) with a context that ends when the Bridge
+	// stops, which then waits for the task before it closes the store (the app's
+	// bgTasks). Nil: a goroutine nothing waits for, with a context that never ends.
+	Background func(func(context.Context))
+	Log        *slog.Logger
+	Now        func() time.Time
 }
 
 // Handler runs sidecars.generate.
@@ -195,6 +200,9 @@ func New(o Options) *Handler {
 	}
 	if o.Now == nil {
 		o.Now = time.Now
+	}
+	if o.Background == nil {
+		o.Background = func(fn func(context.Context)) { go fn(context.Background()) }
 	}
 	if o.ContribCredential == nil {
 		o.ContribCredential = func(context.Context) error { return nil }
@@ -517,7 +525,12 @@ func (h *Handler) end(ctx context.Context, r *run, res any, err error) (any, err
 		return res, err
 	}
 	if r.bookID != 0 {
-		h.release(context.WithoutCancel(ctx), r.job, r.bookID, err != nil)
+		// The engine made (or took up) the book, so it is up: the transcripts of
+		// a book whose retention is 0 days go now.
+		endCtx := context.WithoutCancel(ctx)
+		if h.release(endCtx, r.job, r.bookID, err != nil) {
+			h.purgeAtEnd(endCtx, r.job.ID, r.bookID)
+		}
 	}
 	return res, err
 }
@@ -532,23 +545,35 @@ func (h *Handler) Abandon(ctx context.Context, job jobs.Job) {
 	if err != nil || m.BookID == nil || m.EndedAt != "" {
 		return
 	}
+	bookID := *m.BookID
 	engineUp := h.o.Engine() != nil
 	// Released before Abandon returns, even with no engine yet (its first start
 	// may download ffmpeg): the runner records the job lost once Abandon returns,
 	// and a job waiting for this one's end must find the book stopped (bridge#65).
-	h.release(ctx, job, *m.BookID, true)
-	if !engineUp {
-		go h.stopStartedStage(ctx, job, *m.BookID)
+	ended := h.release(ctx, job, bookID, true)
+	if engineUp {
+		if ended {
+			h.purgeAtEnd(ctx, job.ID, bookID)
+		}
+		return
 	}
+	// The rest waits for the engine, among the Bridge's background tasks: it stops
+	// with the Bridge, never on a store that has closed (ctx may never end: a job
+	// cancelled while it waited for the engine abandons with one that doesn't).
+	h.o.Background(func(ctx context.Context) { h.stopStartedStage(ctx, job, bookID) })
 }
 
 // stopStartedStage waits for the engine to start, then stops a stage it began on
 // book bookID before the store's cancel landed (its scheduler starts beside the
 // Bridge's jobs), or a status such a stage wrote over the cancel (stopBook,
-// cancelled books included). A later claim of the same job that follows the book
-// now (one already running here, which release left the book to, or one handed
-// out since, whose attach reopened the job's mapping) keeps it, as in release:
-// stopBook only counts other jobs.
+// cancelled books included): the engine's own Cancel, which also keeps a dispatch
+// pass that read the book before the store's cancel from starting a stage on it
+// afterwards. The transcripts of a book whose retention is 0 days go only now
+// (purgeAtEnd): with no engine nothing held the book against such a stage. A
+// later claim of the same job that follows the book now (one already running
+// here, which release left the book to, or one handed out since, whose attach
+// reopened the job's mapping) keeps it, as in release: stopBook only counts other
+// jobs.
 func (h *Handler) stopStartedStage(ctx context.Context, job jobs.Job, bookID int64) {
 	for h.o.Engine() == nil {
 		if agent.SleepCtx(ctx, h.o.Poll) != nil {
@@ -562,22 +587,24 @@ func (h *Handler) stopStartedStage(ctx context.Context, job jobs.Job, bookID int
 		return
 	}
 	h.stopBook(ctx, job.ID, bookID, true)
+	h.purgeAtEnd(ctx, job.ID, bookID)
 }
 
 // release ends a job's hold on its engine book: a job that didn't finish stops
 // the book (nothing follows it any more), then the end is recorded (the
 // transcript retention counts from it, and the supervisor leaves a book no job
-// follows alone), and with retention_days 0 the transcripts go now. The stop
+// follows alone); the caller then deletes the transcripts of a book whose
+// retention is 0 days (purgeAtEnd), once the engine is up. The stop
 // comes first so a job waiting for this one's end (awaitOpenJobEnd) starts only
 // once the engine's cancel has returned. A stop left to another open job is
 // tried again once this end is recorded: two jobs on the book ending at once
 // would each leave it to the other, and the later end then stops it. A later
 // claim of the same job may run here already (the server re-queued it after a
 // lease ran out and handed it out again before this attempt heard it was lost):
-// that attempt follows the book now, so it is left alone.
-func (h *Handler) release(ctx context.Context, job jobs.Job, bookID int64, stop bool) {
+// that attempt follows the book now, so it is left alone, and ended is false.
+func (h *Handler) release(ctx context.Context, job jobs.Job, bookID int64, stop bool) (ended bool) {
 	if sj, err := h.o.DB.GetServerJob(ctx, job.ID); err == nil && sj.Attempt > job.Attempt {
-		return
+		return false
 	}
 	followed := stop && h.stopBook(ctx, job.ID, bookID, false)
 	if h.beforeEnd != nil {
@@ -590,10 +617,19 @@ func (h *Handler) release(ctx context.Context, job jobs.Job, bookID int64, stop 
 		h.stopBook(ctx, job.ID, bookID, false)
 	}
 	h.signalEnd()
-	if h.o.RetentionDays == 0 {
-		if err := h.purgeEnded(ctx, bookID); err != nil {
-			h.o.Log.Warn("generate: deleting the transcripts failed", "job", job.ID, "err", err)
-		}
+	return true
+}
+
+// purgeAtEnd deletes the transcripts of a job's engine book as the job ends, when
+// transcripts.retention_days is 0 (purgeEnded). It needs the engine up: the
+// engine's hold on the book is what keeps a stage from starting on it meanwhile
+// (hold takes none without an engine, and its scheduler may be starting).
+func (h *Handler) purgeAtEnd(ctx context.Context, jobID, bookID int64) {
+	if h.o.RetentionDays != 0 {
+		return
+	}
+	if err := h.purgeEnded(ctx, bookID); err != nil {
+		h.o.Log.Warn("generate: deleting the transcripts failed", "job", jobID, "err", err)
 	}
 }
 

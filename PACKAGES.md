@@ -3008,10 +3008,13 @@ internal/
             returns even when the engine hasn't started (stopBook then cancels the book
             in the store alone, scheduler.CancelStored: nothing runs it yet; and once
             the engine is up, stopStartedStage stops a stage its scheduler began on the
-            book before that write, or a status such a stage wrote over it, unless
+            book before that write, or a status such a stage wrote over it, through
+            the engine's Cancel, and only then purges a retention 0 book's
+            transcripts (no engine, no hold on the book), unless
             another open job follows the book or a later claim of the same job does:
             an Attempt higher, or the job's mapping reopened by its attach, as in
-            release, bridge#65), and waitEngine for a
+            release, bridge#65; that wait runs through Options.Background, the app's
+            Bridge.bg tasks, so it ends with the Bridge), and waitEngine for a
             run cancelled (or taken back) while it waits for the engine, which never
             reaches end(). Retry(job): the engine's RetryAsRead of the parked engine
             book as Retry read it (a Cancel landing since is never taken up as a Retry
@@ -3761,8 +3764,10 @@ internal/
             re-admits the books parked contrib_unavailable once a GitHub token
             resolves (a sign-in during the start re-admitted nothing, bridge#25).
             Those re-admits, and githubChanged's and agentCredentialChanged's, run as
-            Bridge.bg tasks (bgTasks): Run stops them (their context ends, none
-            starts after) and waits for them before the store closes (bridge#80).
+            Bridge.bg tasks (bgTasks), as does an abandoned generate job's wait for
+            the engine (generate.Options.Background): Run stops them (their context
+            ends, none starts after) and waits for them before the store closes
+            (bridge#80).
             Phase 1a: engine.go wires the ENGINE the way sidecars' daemon did, minus
             the folder scan, and runs it in the background from Run (the first start
             may download ffmpeg; the generate job waits for it): the event hub with
