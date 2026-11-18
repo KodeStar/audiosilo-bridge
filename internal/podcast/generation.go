@@ -93,13 +93,14 @@ func OpenRegular(root *os.Root, name string) (*os.File, error) {
 }
 
 // OpenRegularFile is OpenRegular with the open's access flag (os.O_RDWR for an
-// append); it never creates.
+// append); any other flag is dropped, so it never creates, truncates or
+// appends before the file is proven the one the Lstat saw.
 func OpenRegularFile(root *os.Root, name string, flag int) (*os.File, error) {
 	named, err := LstatRegular(root, name)
 	if err != nil {
 		return nil, err
 	}
-	f, err := root.OpenFile(name, flag|syscall.O_NONBLOCK, 0)
+	f, err := root.OpenFile(name, flag&(os.O_WRONLY|os.O_RDWR)|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return nil, err
 	}
