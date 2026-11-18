@@ -79,8 +79,10 @@ func (c *Client) Fetch(ctx context.Context, in Request) (*Response, error) {
 		if attempt >= 2 || !retryable(failure) || failure.RetryAfterSeconds > 10 || ctx.Err() != nil {
 			return nil, failure
 		}
-		if err := c.wait(ctx, RetryDelay(attempt, failure.RetryAfterSeconds)); err != nil {
-			return nil, classify(err)
+		// A wait the deadline cuts short ends on what the feed last answered,
+		// not on a timeout of the Bridge's own.
+		if c.wait(ctx, RetryDelay(attempt, failure.RetryAfterSeconds)) != nil {
+			return nil, failure
 		}
 	}
 }
@@ -94,7 +96,7 @@ func (c *Client) once(ctx context.Context, in Request) (*Response, error) {
 	permanent, redirected := true, false
 	httpc := &http.Client{Transport: c.transport, CheckRedirect: func(req *http.Request, via []*http.Request) error {
 		if len(via) > 10 {
-			return &Error{Code: "http_310", Message: "The feed redirected too many times."}
+			return &Error{Code: "redirect_loop", Message: "The feed redirected too many times."}
 		}
 		if !validURL(req.URL.String()) {
 			return &Error{Code: "invalid_feed_url", Message: "The feed redirected to an invalid URL."}
@@ -131,11 +133,7 @@ func (c *Client) once(ctx context.Context, in Request) (*Response, error) {
 		return out, nil
 	}
 	if resp.StatusCode != 200 {
-		code := "http_" + strconv.Itoa(resp.StatusCode)
-		if resp.StatusCode == 410 {
-			code = "gone"
-		}
-		return nil, &Error{Code: code, Message: "The feed returned HTTP " + strconv.Itoa(resp.StatusCode) + ".", RetryAfterSeconds: retryAfter(resp.Header.Get("Retry-After"), time.Now())}
+		return nil, &Error{Code: StatusCode(resp.StatusCode), Message: "The feed returned HTTP " + strconv.Itoa(resp.StatusCode) + ".", RetryAfterSeconds: retryAfter(resp.Header.Get("Retry-After"), time.Now())}
 	}
 	if resp.ContentLength > in.MaxBytes {
 		return nil, &Error{Code: "too_large", Message: "The response exceeds the size limit."}
@@ -172,6 +170,15 @@ func (c *Client) once(ctx context.Context, in Request) (*Response, error) {
 		return nil, &Error{Code: "too_large", Message: "The response exceeds the size limit."}
 	}
 	return out, nil
+}
+
+// StatusCode is a host's HTTP status as a failure code: gone for a 410 (the
+// server words it as no longer available), else http_<status>.
+func StatusCode(status int) string {
+	if status == 410 {
+		return "gone"
+	}
+	return "http_" + strconv.Itoa(status)
 }
 
 // stripRedirectCredentials keeps source credentials within their original origin.

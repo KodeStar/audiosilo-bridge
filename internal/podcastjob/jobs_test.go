@@ -702,3 +702,63 @@ func TestEmptyPollRetainsRemovedEpisodesAndOccupiedPaths(t *testing.T) {
 		}
 	}
 }
+
+// server#403: a poll reports what failed in codes the server can tell apart. A
+// scheduled poll's params (`scheduled`, server#403) are read leniently, so an
+// older Bridge and this one run it. A local fault (a feed.json it can't read)
+// is write_failed, never the feed's not_a_feed; a refused connection is
+// network, never timeout; a wait of the Bridge's own that runs out is
+// bridge_lost, never a timeout of the feed's.
+func TestPollFailureCodes(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	job := h.claim(h.http.URL+"/feed", false)
+	if _, err := h.handler.Run(context.Background(), job, jobs.LocalReporter()); err != nil {
+		t.Fatal(err)
+	}
+	show := "Example Show"
+	poll := jobs.Job{ID: 10, Kind: PollKind, LibraryID: job.LibraryID, Path: &show, Params: json.RawMessage(`{"etag":"\"abc\"","scheduled":true}`)}
+	code := func(res any, err error) string {
+		t.Helper()
+		if err == nil {
+			return ""
+		}
+		return fields(t, res)["code"].(string)
+	}
+	if c := code(h.handler.PollJob().Run(context.Background(), poll, jobs.LocalReporter())); c != "" {
+		t.Fatalf("a scheduled poll failed with %q", c)
+	}
+
+	feedJSON := filepath.Join(h.mount, show, "feed.json")
+	saved, err := os.ReadFile(feedJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(feedJSON, []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if c := code(h.handler.PollJob().Run(context.Background(), poll, jobs.LocalReporter())); c != "write_failed" {
+		t.Fatalf("an unreadable feed.json: %q, want write_failed", c)
+	}
+	if err := os.WriteFile(feedJSON, saved, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// The feed's host refuses connections (the netguard's network) stays so.
+	if res, err := outcome(nil, fail("network", "The feed could not be reached.")); code(res, err) != "network" {
+		t.Fatalf("a refused connection: %v", err)
+	}
+
+	// The show is locked (another job on it) past the Bridge's own wait.
+	s := h.handler.s
+	unlock, err := s.acquire(context.Background(), s.showKey(h.mount, show))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if c := code(h.handler.PollJob().Run(ctx, poll, jobs.LocalReporter())); c != "bridge_lost" {
+		t.Fatalf("the Bridge's own wait ran out: %q, want bridge_lost", c)
+	}
+}

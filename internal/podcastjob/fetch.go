@@ -11,7 +11,6 @@ import (
 	"io"
 	"os"
 	"path"
-	"strconv"
 	"time"
 
 	"github.com/kodestar/audiosilo-bridge/internal/jobs"
@@ -65,30 +64,51 @@ type budget struct {
 	start, deadline time.Time
 	now             func() time.Time
 	timer           Timer
-	cancel          context.CancelFunc
+	cancel          context.CancelCauseFunc
 }
 
+// errOverBudget is the cause of a download stopped at its ceiling: the episode
+// host's slowness, reported as timeout, not as the Bridge stopping (bridge_lost).
+var errOverBudget = errors.New("the episode download ran past its ceiling")
+
+// errPartialUnreadable is download's and consume's when the proven partial a
+// resume appends to cannot be opened, checked or read back from disk.
+var errPartialUnreadable = errors.New("the episode partial could not be read")
+
 func (s *service) budget(parent context.Context) (context.Context, *budget) {
-	ctx, cancel := context.WithCancel(parent)
+	ctx, cancel := context.WithCancelCause(parent)
 	start := s.o.BudgetNow()
 	d := EpisodeCeiling(s.o.MaxEpisodeBytes)
 	b := &budget{start: start, deadline: start.Add(d), now: s.o.BudgetNow, cancel: cancel}
-	b.timer = s.o.AfterFunc(d, cancel)
+	b.timer = s.o.AfterFunc(d, b.expire)
 	return ctx, b
 }
+func (b *budget) expire() { b.cancel(errOverBudget) }
 func (b *budget) tighten(total int64) {
 	d := b.start.Add(EpisodeCeiling(total))
 	if d.Before(b.deadline) {
 		b.deadline = d
 		left := d.Sub(b.now())
 		if left <= 0 {
-			b.cancel()
+			b.expire()
 		} else {
 			b.timer.Reset(left)
 		}
 	}
 }
-func (b *budget) close() { b.timer.Stop(); b.cancel() }
+func (b *budget) close() { b.timer.Stop(); b.cancel(nil) }
+
+// overBudget reports whether ctx (a budget's) was stopped by its ceiling.
+func overBudget(ctx context.Context) bool { return errors.Is(context.Cause(ctx), errOverBudget) }
+
+// failure is err as the job reports it: a stop the ceiling made (ctx is the
+// budget's) is the episode's timeout wherever it surfaced.
+func (b *budget) failure(ctx context.Context, err error) error {
+	if (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) && overBudget(ctx) {
+		return fail("timeout", "The episode download did not finish in time.")
+	}
+	return err
+}
 
 func (h *Fetch) Run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (any, error) {
 	result, err := h.run(parent, job, rep)
@@ -97,7 +117,7 @@ func (h *Fetch) Run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (a
 	}
 	return outcome(result, err)
 }
-func (h *Fetch) run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (any, error) {
+func (h *Fetch) run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (_ any, err error) {
 	s := h.s
 	var params fetchParams
 	if job.Path == nil || !podcast.ValidEpisodePath(*job.Path) || json.Unmarshal(job.Params, &params) != nil || !podcast.ValidID(params.ShowID) || !podcast.ValidID(params.EpisodeID) {
@@ -149,6 +169,7 @@ func (h *Fetch) run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (a
 	}
 	ctx, b := s.budget(parent)
 	defer b.close()
+	defer func() { err = b.failure(ctx, err) }()
 	s.dropStaleCheckpoint(job, root, f.ShowID, e.ID)
 	c, tag := s.loadCheckpoint(job, root, f.ShowID, e.ID)
 	committed := false
@@ -208,6 +229,9 @@ func (h *Fetch) run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (a
 	err = func() error {
 		defer unlockShow()
 		if err := rep.ConfirmLease(ctx); err != nil {
+			if overBudget(ctx) {
+				return ctx.Err() // the ceiling passed: the episode's timeout (b.failure), not a lost claim
+			}
 			return leaseFailure(ctx, err, "The episode job no longer owns its claim.")
 		}
 		if pairing != s.pairHash() {
@@ -255,12 +279,14 @@ func (h *Fetch) run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (a
 
 // leaseFailure words a refused publication check. A lost, cancelled or refused
 // claim no longer owns the job; a server that could not be reached denies the
-// commit too, but as a retryable failure rather than a changed identity.
+// commit too, but as a retryable failure rather than a changed identity:
+// bridge_lost (the Bridge and its server lost each other), never network, which
+// the server reads as the episode's host or the feed's being out of reach.
 func leaseFailure(ctx context.Context, err error, lost string) error {
 	if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, link.ErrNotHeld) || errors.Is(err, link.ErrUnauthorized) {
 		return fail("identity_changed", lost)
 	}
-	return fail("network", "The server could not confirm the job before saving.")
+	return fail("bridge_lost", "The server could not confirm the job before saving.")
 }
 func (s *service) showKey(mount, show string) string {
 	return s.o.ServerID() + "|" + mount + "/" + show
@@ -369,7 +395,7 @@ func (s *service) enclosure(ctx context.Context, f *podcast.Feed, e podcast.Epis
 
 func (s *service) download(ctx context.Context, b *budget, job jobs.Job, root *os.Root, f *podcast.Feed, e podcast.Episode, c *checkpoint, tag string, rep *jobs.Reporter) (podcast.Fetch, error) {
 	if s.o.Streamer == nil {
-		return podcast.Fetch{}, fail("network", "The episode download is unavailable.")
+		return podcast.Fetch{}, fail("write_failed", "The episode download is unavailable.")
 	}
 	// Resolved once per job and held in memory only; every attempt GETs the same enclosure.
 	raw, err := s.enclosure(ctx, f, e)
@@ -377,9 +403,29 @@ func (s *service) download(ctx context.Context, b *budget, job jobs.Job, root *o
 		return podcast.Fetch{}, err
 	}
 	var last error
+	// A partial the Bridge can no longer open or read back is started again from
+	// zero, once per job: the episode may well be fine, only the Bridge's own
+	// copy of its start is not. A second one fails the job write_failed.
+	restarted := false
+	restart := func() error {
+		if restarted {
+			return fail("write_failed", "The episode partial is incomplete.")
+		}
+		restarted = true
+		s.clearCheckpoint(job, root, c)
+		tag = ""
+		return nil
+	}
 	for attempt := 0; attempt < 3; attempt++ {
 		if ctx.Err() != nil {
 			return podcast.Fetch{}, ctx.Err()
+		}
+		// Checked before the ranged GET, so an unreadable partial costs no request:
+		// the attempt goes out from zero instead.
+		if c.Offset > 0 && !s.partialOK(root, c) {
+			if err := restart(); err != nil {
+				return podcast.Fetch{}, err
+			}
 		}
 		response, err := s.o.Streamer.Stream(ctx, netguard.StreamRequest{URL: raw, Offset: c.Offset, ETag: tag})
 		if err == nil {
@@ -392,7 +438,7 @@ func (s *service) download(ctx context.Context, b *budget, job jobs.Job, root *o
 			var fetch podcast.Fetch
 			switch {
 			case response.Status != 200 && response.Status != 206 && (response.Status != 416 || c.Offset == 0):
-				err = &netguard.Error{Code: "http_" + strconv.Itoa(response.Status), Message: fmt.Sprintf("The episode returned HTTP %d.", response.Status), RetryAfterSeconds: response.RetryAfterSeconds}
+				err = &netguard.Error{Code: netguard.StatusCode(response.Status), Message: fmt.Sprintf("The episode returned HTTP %d.", response.Status), RetryAfterSeconds: response.RetryAfterSeconds}
 			case action == "fresh_get":
 				_ = response.Body.Close()
 				s.clearCheckpoint(job, root, c)
@@ -406,8 +452,17 @@ func (s *service) download(ctx context.Context, b *budget, job jobs.Job, root *o
 			if err == nil {
 				return fetch, nil
 			}
-			// A local file failure (a full disk, a replaced partial) is not a
-			// network interruption: never retried or reported as one.
+			// The partial failed between the check and the append (attempt-- keeps
+			// the host's retries).
+			if errors.Is(err, errPartialUnreadable) {
+				if err := restart(); err != nil {
+					return podcast.Fetch{}, err
+				}
+				attempt--
+				continue
+			}
+			// A local file failure (a full disk) is not a network interruption:
+			// never retried or reported as one.
 			var guard *netguard.Error
 			if !errors.As(err, &guard) && ctx.Err() == nil {
 				return podcast.Fetch{}, err
@@ -422,8 +477,9 @@ func (s *service) download(ctx context.Context, b *budget, job jobs.Job, root *o
 			s.clearCheckpoint(job, root, c)
 			tag = ""
 		}
-		if err := s.o.Wait(ctx, netguard.RetryDelay(attempt, failure.RetryAfterSeconds)); err != nil {
-			return podcast.Fetch{}, err
+		// A wait the ceiling cuts short ends on what the host last answered.
+		if s.o.Wait(ctx, netguard.RetryDelay(attempt, failure.RetryAfterSeconds)) != nil {
+			return podcast.Fetch{}, failure
 		}
 	}
 	return podcast.Fetch{}, last
@@ -450,32 +506,32 @@ func (s *service) consume(ctx context.Context, b *budget, job jobs.Job, root *os
 	if total > 0 {
 		b.tighten(total)
 	}
-	freshTemp := c.Temp == ""
-	if freshTemp {
+	// Only an append keeps c.Temp (any other action cleared it above).
+	appending := c.Temp != ""
+	if !appending {
 		c.Temp = podcast.TempPrefix + nonce()
 	}
-	name := path.Dir(c.Path) + "/" + c.Temp
-	flags := os.O_RDWR
-	if freshTemp {
-		flags |= os.O_EXCL | os.O_CREATE
+	name := c.partialName()
+	var file *os.File
+	var err error
+	if appending {
+		file, err = openPartial(root, name, c.Offset)
+	} else {
+		file, err = root.OpenFile(name, os.O_RDWR|os.O_EXCL|os.O_CREATE, 0o600)
 	}
-	file, err := root.OpenFile(name, flags, 0o600)
 	if err != nil {
 		return podcast.Fetch{}, "", err
 	}
 	defer file.Close()
-	if !freshTemp && !sameRegular(root, name, file, c.Offset) {
-		// The proven partial was replaced (a link, or another file) since it was
-		// checked: never append to it.
-		return podcast.Fetch{}, "", podcast.ErrInvalidFile
-	}
 	if err := file.Chmod(0o600); err != nil {
 		return podcast.Fetch{}, "", err
 	}
 	h := sha256.New()
-	if action == "append" {
-		if n, err := io.CopyN(h, file, c.Offset); err != nil || n != c.Offset {
-			return podcast.Fetch{}, "", fail("network", "The episode partial is incomplete.")
+	if appending {
+		if _, err := io.CopyN(h, file, c.Offset); err != nil {
+			// The Bridge's own partial file: a local fault, not the episode host's
+			// (download restarts the episode once, then fails write_failed).
+			return podcast.Fetch{}, "", errPartialUnreadable
 		}
 	}
 	c.Total = total
@@ -510,7 +566,7 @@ func (s *service) consume(ctx context.Context, b *budget, job jobs.Job, root *os
 				return err
 			}
 			c.Offset = received
-			if err := s.saveCheckpoint(job, c, tag); err != nil {
+			if err := s.saveCheckpoint(job, root, c, tag); err != nil {
 				return err
 			}
 			lastCheckpoint = time.Now()
@@ -539,7 +595,7 @@ func (s *service) consume(ctx context.Context, b *budget, job jobs.Job, root *os
 			return podcast.Fetch{}, "", fail("write_failed", "The episode could not be saved.")
 		}
 		if c.Offset > 0 && c.Offset < total && netguard.StrongETag(tag) {
-			if err := s.saveCheckpoint(job, c, tag); err != nil {
+			if err := s.saveCheckpoint(job, root, c, tag); err != nil {
 				return podcast.Fetch{}, "", err
 			}
 		}
@@ -551,15 +607,31 @@ func (s *service) consume(ctx context.Context, b *budget, job jobs.Job, root *os
 	return podcast.Fetch{Bytes: c.Offset, SHA256: hex.EncodeToString(h.Sum(nil))}, tag, nil
 }
 
-// sameRegular reports whether the open file is the regular file at name with the
-// expected size: not a symlink's target, not a file swapped in after the open.
-func sameRegular(root *os.Root, name string, f *os.File, size int64) bool {
-	opened, err := f.Stat()
-	if err != nil || !opened.Mode().IsRegular() || opened.Size() != size {
+// partialOK reports whether the proven partial c resumes can still be opened for
+// the append and is the regular file it was. A read failing later in the prefix
+// is consume's to find.
+func (s *service) partialOK(root *os.Root, c *checkpoint) bool {
+	file, err := openPartial(root, c.partialName(), c.Offset)
+	if err != nil {
 		return false
 	}
-	named, err := root.Lstat(name)
-	return err == nil && named.Mode().IsRegular() && os.SameFile(opened, named)
+	_ = file.Close()
+	return s.o.Fault.Hit("partial") == nil
+}
+
+// openPartial opens the proven partial at name for the append. Any failure (no
+// permission, gone, replaced by a link or another file since it was proven) is
+// errPartialUnreadable, never a reason to write to whatever is there.
+func openPartial(root *os.Root, name string, size int64) (*os.File, error) {
+	file, err := podcast.OpenRegularFile(root, name, os.O_RDWR)
+	if err != nil {
+		return nil, errPartialUnreadable
+	}
+	if st, err := file.Stat(); err != nil || st.Size() != size {
+		_ = file.Close()
+		return nil, errPartialUnreadable
+	}
+	return file, nil
 }
 
 type downloadWriter struct {

@@ -46,7 +46,7 @@ func (c *Client) Stream(ctx context.Context, in StreamRequest) (*StreamResponse,
 	ctx, cancel := context.WithCancel(ctx)
 	hc := &http.Client{Transport: c.transport, CheckRedirect: func(req *http.Request, via []*http.Request) error {
 		if len(via) > 10 {
-			return &Error{Code: "http_310", Message: "The episode redirected too many times."}
+			return &Error{Code: "redirect_loop", Message: "The episode redirected too many times."}
 		}
 		if !validURL(req.URL.String()) {
 			return &Error{Code: "invalid_feed_url", Message: "The episode redirected to an invalid address."}

@@ -30,7 +30,7 @@ func TestOwnedCleanupHonorsAgeLiveJobAndForeignFiles(t *testing.T) {
 			c := checkpoint{ServerHash: s.pairHash(), LibraryID: 3, ShowID: "a1b2c3d4e5f60718", EpisodeID: "1cc306d831645e2b", Path: *job.Path, Temp: ".audiosilo-tmp-owned", Offset: 6, Total: 100}
 			root.WriteFile("Fixture Show/"+c.Temp, []byte("prefix"), 0600)
 			root.WriteFile("Fixture Show/.audiosilo-tmp-foreign", []byte("keep"), 0600)
-			if err := s.saveCheckpoint(job, &c, `"one"`); err != nil {
+			if err := s.saveCheckpoint(job, root, &c, `"one"`); err != nil {
 				t.Fatal(err)
 			}
 			if scenario == "fresh" {
@@ -158,7 +158,7 @@ func TestLostIdentityAbandonRemovesOnlyOwnedPartial(t *testing.T) {
 	defer root.Close()
 	c := checkpoint{ServerHash: s.pairHash(), LibraryID: 3, ShowID: "a1b2c3d4e5f60718", EpisodeID: "1cc306d831645e2b", Path: *job.Path, Temp: ".audiosilo-tmp-owned", Offset: 6, Total: 100}
 	root.WriteFile(path.Dir(*job.Path)+"/"+c.Temp, []byte("prefix"), 0600)
-	if err := s.saveCheckpoint(job, &c, `"one"`); err != nil {
+	if err := s.saveCheckpoint(job, root, &c, `"one"`); err != nil {
 		t.Fatal(err)
 	}
 	f := h.read("Fixture Show")
@@ -217,7 +217,7 @@ func TestStaleIdentityCheckpointIsDropped(t *testing.T) {
 	defer root.Close()
 	c := checkpoint{ServerHash: s.pairHash(), LibraryID: 3, ShowID: "a1b2c3d4e5f60718", EpisodeID: strings.Repeat("2", 16), Path: *job.Path, Temp: ".audiosilo-tmp-stale", Offset: 6, Total: 100}
 	root.WriteFile("Fixture Show/"+c.Temp, []byte("prefix"), 0600)
-	if err := s.saveCheckpoint(job, &c, `"one"`); err != nil {
+	if err := s.saveCheckpoint(job, root, &c, `"one"`); err != nil {
 		t.Fatal(err)
 	}
 	validator := c.Validator
@@ -231,7 +231,7 @@ func TestStaleIdentityCheckpointIsDropped(t *testing.T) {
 	// The current identity's record is kept.
 	c = checkpoint{ServerHash: s.pairHash(), LibraryID: 3, ShowID: "a1b2c3d4e5f60718", EpisodeID: "1cc306d831645e2b", Path: *job.Path, Temp: ".audiosilo-tmp-current", Offset: 6, Total: 100}
 	root.WriteFile("Fixture Show/"+c.Temp, []byte("prefix"), 0600)
-	s.saveCheckpoint(job, &c, `"one"`)
+	s.saveCheckpoint(job, root, &c, `"one"`)
 	s.dropStaleCheckpoint(job, root, "a1b2c3d4e5f60718", "1cc306d831645e2b")
 	if _, err := root.Lstat("Fixture Show/" + c.Temp); err != nil {
 		t.Fatal("current partial removed", err)
@@ -239,22 +239,106 @@ func TestStaleIdentityCheckpointIsDropped(t *testing.T) {
 }
 
 // A proven partial swapped for a link after its check is never appended to.
-func TestSameRegularRefusesSwappedPartial(t *testing.T) {
+func TestOpenPartialRefusesSwappedPartial(t *testing.T) {
 	dir := t.TempDir()
 	root, _ := os.OpenRoot(dir)
 	defer root.Close()
 	root.WriteFile("victim", []byte("keep"), 0644)
 	root.WriteFile("partial", []byte("prefix"), 0600)
-	f, _ := root.OpenFile("partial", os.O_RDWR, 0)
-	if !sameRegular(root, "partial", f, 6) || sameRegular(root, "partial", f, 5) {
-		t.Fatal("size check")
+	f, err := openPartial(root, "partial", 6)
+	if err != nil {
+		t.Fatal(err)
 	}
 	f.Close()
+	if _, err := openPartial(root, "partial", 5); !errors.Is(err, errPartialUnreadable) {
+		t.Fatal("size check", err)
+	}
 	root.Remove("partial")
 	os.Symlink("victim", filepath.Join(dir, "partial"))
-	f, _ = root.OpenFile("partial", os.O_RDWR, 0)
-	defer f.Close()
-	if sameRegular(root, "partial", f, 4) {
-		t.Fatal("link target accepted as the partial")
+	if _, err := openPartial(root, "partial", 4); !errors.Is(err, errPartialUnreadable) {
+		t.Fatal("link target accepted as the partial", err)
+	}
+}
+
+// A partial the Bridge could not remove keeps its record and validator, so
+// cleanOwned can find it again; once removable, the clear takes all three.
+func TestClearCheckpointKeepsTheRecordOfAPartialItCouldNotRemove(t *testing.T) {
+	requireNonRoot(t)
+	h, job := audioHarness(t)
+	s := h.handler.s
+	root, _ := os.OpenRoot(h.mount)
+	defer root.Close()
+	c := checkpoint{ServerHash: s.pairHash(), LibraryID: 3, ShowID: "a1b2c3d4e5f60718", EpisodeID: "1cc306d831645e2b", Path: *job.Path, Temp: ".audiosilo-tmp-stuck", Offset: 6, Total: 100}
+	partial := "Fixture Show/" + c.Temp
+	root.WriteFile(partial, []byte("prefix"), 0600)
+	if err := s.saveCheckpoint(job, root, &c, `"one"`); err != nil {
+		t.Fatal(err)
+	}
+	show := filepath.Join(h.mount, "Fixture Show")
+	if err := os.Chmod(show, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(show, 0o755) })
+	stuck := c
+	s.clearCheckpoint(job, root, &stuck)
+	if saved, ok := s.readCheckpoint(job); !ok || saved.Temp != c.Temp {
+		t.Fatal("the record of a partial still on disk was dropped")
+	}
+	if v, _ := s.o.Vault.Get(c.Validator); v == "" {
+		t.Fatal("the validator of a partial still on disk was dropped")
+	}
+	os.Chmod(show, 0o755)
+	s.clearCheckpoint(job, root, &c)
+	if _, ok := s.readCheckpoint(job); ok {
+		t.Fatal("record kept once the partial was removed")
+	}
+	if _, err := root.Lstat(partial); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("partial retained", err)
+	}
+}
+
+// A record naming an earlier partial still on disk is not overwritten by a new
+// download's checkpoint: it would orphan that partial. Once that partial can be
+// removed, the next save takes it and records the new download.
+func TestSaveCheckpointKeepsTheRecordOfAnEarlierPartial(t *testing.T) {
+	requireNonRoot(t)
+	h, job := audioHarness(t)
+	s := h.handler.s
+	root, _ := os.OpenRoot(h.mount)
+	defer root.Close()
+	old := checkpoint{ServerHash: s.pairHash(), LibraryID: 3, ShowID: "a1b2c3d4e5f60718", EpisodeID: "1cc306d831645e2b", Path: *job.Path, Temp: ".audiosilo-tmp-stuck", Offset: 6, Total: 100}
+	partial := "Fixture Show/" + old.Temp
+	root.WriteFile(partial, []byte("prefix"), 0600)
+	if err := s.saveCheckpoint(job, root, &old, `"one"`); err != nil {
+		t.Fatal(err)
+	}
+	show := filepath.Join(h.mount, "Fixture Show")
+	if err := os.Chmod(show, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(show, 0o755) })
+	next := old
+	next.Temp, next.Validator = ".audiosilo-tmp-next", ""
+	if err := s.saveCheckpoint(job, root, &next, `"two"`); err != nil {
+		t.Fatal(err)
+	}
+	if saved, ok := s.readCheckpoint(job); !ok || saved.Temp != old.Temp || saved.Validator != old.Validator {
+		t.Fatalf("the earlier record was overwritten: %+v", saved)
+	}
+	if next.Validator != "" {
+		t.Fatal("a validator was sealed for an unrecorded download")
+	}
+	os.Chmod(show, 0o755)
+	if err := s.saveCheckpoint(job, root, &next, `"two"`); err != nil {
+		t.Fatal(err)
+	}
+	if saved, ok := s.readCheckpoint(job); !ok || saved.Temp != next.Temp {
+		t.Fatalf("the new download stayed unrecorded once the earlier partial was removable: %+v", saved)
+	}
+	if _, err := root.Lstat(partial); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("the earlier partial was not removed", err)
+	}
+	if v, _ := s.o.Vault.Get(old.Validator); v != "" {
+		t.Fatal("the earlier validator was kept")
 	}
 }

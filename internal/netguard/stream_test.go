@@ -96,7 +96,7 @@ func TestStreamGuardHeadersRedirectsAndStall(t *testing.T) {
 			t.Fatal(string(b), err)
 		}
 	}
-	for _, tc := range []struct{ p, code string }{{"/blocked", "blocked_address"}, {"/loop", "http_310"}} {
+	for _, tc := range []struct{ p, code string }{{"/blocked", "blocked_address"}, {"/loop", "redirect_loop"}} {
 		_, err := c.Stream(context.Background(), StreamRequest{URL: base + tc.p, Offset: 5, ETag: `"one"`})
 		errorCode(t, err, tc.code)
 	}

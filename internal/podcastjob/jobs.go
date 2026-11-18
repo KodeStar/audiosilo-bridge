@@ -50,7 +50,7 @@ type Options struct {
 	Probe           ProbeFunc
 	Streamer        Streamer
 	Wait            func(context.Context, time.Duration) error
-	Fault           podcast.Boundary
+	Fault           podcast.Boundary // the journal's boundaries, and "partial" when a resume checks its partial before the ranged GET
 	BudgetNow       func() time.Time
 	AfterFunc       func(time.Duration, func()) Timer
 	Version         string
@@ -159,13 +159,14 @@ func (h *Subscribe) Run(parent context.Context, job jobs.Job, rep *jobs.Reporter
 	return outcome(h.run(parent, job, rep))
 }
 func (h *Poll) Run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (any, error) {
-	ctx, cancel := context.WithTimeout(parent, ceiling)
-	defer cancel()
-	return outcome(h.run(ctx, job, rep))
+	return outcome(h.run(parent, job, rep))
 }
 
-// ceiling bounds a job's work (a subscribe's starts once it holds the library
-// lock).
+// ceiling bounds a subscribe's or a poll's work, which starts once it holds its
+// lock: a wait never leaves the feed's own fetch short of time. The wait for
+// the library's mapping check is bounded by one more ceiling, which a poll's
+// wait for its show shares (a subscribe's for its library waits on that
+// follow's own ceiling). A retain's covers its whole run.
 const ceiling = 3 * time.Minute
 
 func (s *service) acquire(ctx context.Context, key string) (func(), error) {
@@ -409,21 +410,28 @@ func (h *Subscribe) run(parent context.Context, job jobs.Job, rep *jobs.Reporter
 	return map[string]any{"library_id": lib.ID, "show_path": show, "show_id": f.ShowID, "created": created, "private": f.Private, "episodes": len(f.Episodes), "skipped": parsed.Skipped, "status": resp.Status, "etag": resp.ETag, "last_modified": resp.LastModified, "next_poll_seconds": podcast.NextPoll(f, resp.CacheControl, s.o.Now())}, nil
 }
 
-func (h *Poll) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (any, error) {
+func (h *Poll) run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (any, error) {
 	s := h.s
-	lib, mount, err := s.library(ctx, job, rep)
+	wait, stop := context.WithTimeout(parent, ceiling)
+	defer stop()
+	lib, mount, err := s.library(wait, job, rep)
 	if err != nil {
 		return nil, err
 	}
+	// The faults before the fetch are the Bridge's or the library's, never
+	// the feed's (write_failed): the server counts only the feed's toward a
+	// failing feed.
 	if job.Path == nil || !podcast.ValidShow(*job.Path) {
-		return nil, fail("not_a_feed", "The podcast show path is invalid.")
+		return nil, fail("write_failed", "The podcast show path is invalid.")
 	}
 	show := *job.Path
-	unlock, err := s.acquire(ctx, s.showKey(mount, show))
+	unlock, err := s.acquire(wait, s.showKey(mount, show))
 	if err != nil {
 		return nil, err
 	}
 	defer unlock()
+	ctx, cancel := context.WithTimeout(parent, ceiling)
+	defer cancel()
 	if _, err := mapping.SafeJoin(mount, show); err != nil {
 		return nil, fail("write_failed", "The show path is invalid.")
 	}
@@ -437,7 +445,7 @@ func (h *Poll) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (any, 
 	}
 	f, err := podcast.Read(root, show)
 	if err != nil {
-		return nil, fail("not_a_feed", "The saved podcast feed could not be read.")
+		return nil, fail("write_failed", "The saved podcast feed could not be read.")
 	}
 	feedURL, err := s.feedURL(f.FeedURL, f.Private, secrets.PodcastFeedName(f.ShowID), "The saved feed URL is invalid.")
 	if err != nil {
@@ -449,7 +457,7 @@ func (h *Poll) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (any, 
 		LastModified string `json:"last_modified"`
 	}
 	if len(job.Params) > 0 && json.Unmarshal(job.Params, &params) != nil || len(params.ETag) > 512 || len(params.LastModified) > 512 {
-		return nil, fail("not_a_feed", "The feed check parameters are invalid.")
+		return nil, fail("write_failed", "The feed check parameters are invalid.")
 	}
 	if params.ShowID != "" && params.ShowID != f.ShowID {
 		return nil, fail("identity_changed", "The podcast show identity changed.")
@@ -741,9 +749,6 @@ func outcome(result any, err error) (any, error) {
 	}
 	var failure *netguard.Error
 	if errors.As(err, &failure) {
-		if failure.Code == "network" {
-			failure = fail("timeout", failure.Message)
-		}
 		return failure, failure
 	}
 	switch {
@@ -756,7 +761,10 @@ func outcome(result any, err error) (any, error) {
 	case errors.Is(err, podcast.ErrTooLarge):
 		failure = fail("too_large", "The podcast feed exceeds its size or episode limit.")
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
-		failure = fail("timeout", "The feed check did not finish in time.")
+		// The Bridge's own deadline or stop outside the feed's fetch (that
+		// one's is the netguard's timeout): no fault of the feed's. Every
+		// podcast job reports through here, so the message names none.
+		failure = fail("bridge_lost", "The Bridge stopped the job before it finished.")
 	default:
 		failure = fail("write_failed", "The podcast show could not be saved.")
 	}

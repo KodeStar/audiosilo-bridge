@@ -34,6 +34,12 @@ type checkpoint struct {
 	UpdatedAt  string `json:"updated_at"`
 }
 
+// partialName is the root-relative name of the partial c records, beside its
+// episode.
+func (c *checkpoint) partialName() string {
+	return path.Dir(c.Path) + "/" + c.Temp
+}
+
 func nonce() string {
 	var b [12]byte
 	if _, err := rand.Read(b[:]); err != nil {
@@ -58,12 +64,19 @@ func (s *service) checkpointRoot() (*os.Root, error) {
 	}
 	return os.OpenRoot(dir)
 }
-func (s *service) saveCheckpoint(job jobs.Job, c *checkpoint, etag string) error {
-	root, err := s.checkpointRoot()
+func (s *service) saveCheckpoint(job jobs.Job, root *os.Root, c *checkpoint, etag string) error {
+	dir, err := s.checkpointRoot()
 	if err != nil {
 		return err
 	}
-	defer func() { _ = root.Close() }()
+	defer func() { _ = dir.Close() }()
+	if saved, ok := s.readCheckpoint(job); ok && saved.Temp != c.Temp && !s.dropPartial(root, &saved) {
+		// An earlier partial at this path the Bridge still cannot remove: its
+		// record stays (clearCheckpoint tries it again, cleanOwned after a day),
+		// and this download goes unrecorded rather than orphan it. One removed
+		// since (or already gone) no longer holds the record.
+		return nil
+	}
 	if c.Validator == "" {
 		c.Validator = secrets.PodcastETagPrefix + nonce()
 	}
@@ -78,7 +91,7 @@ func (s *service) saveCheckpoint(job jobs.Job, c *checkpoint, etag string) error
 	if err != nil {
 		return err
 	}
-	return fsutil.WriteRootAtomic(root, ".", s.checkpointName(job), b, 0o600, nil)
+	return fsutil.WriteRootAtomic(dir, ".", s.checkpointName(job), b, 0o600, nil)
 }
 
 // readCheckpoint is the job's saved record when it is this pairing's, for the
@@ -120,7 +133,7 @@ func (s *service) loadCheckpoint(job jobs.Job, root *os.Root, showID, episodeID 
 		return c, ""
 	}
 	tag, _ := s.o.Vault.Get(saved.Validator)
-	partial, err := podcast.OpenRegular(root, path.Dir(c.Path)+"/"+saved.Temp)
+	partial, err := podcast.OpenRegular(root, saved.partialName())
 	if err == nil {
 		defer partial.Close()
 		st, e := partial.Stat()
@@ -134,25 +147,40 @@ func (s *service) loadCheckpoint(job jobs.Job, root *os.Root, showID, episodeID 
 
 // clearCheckpoint removes the owned partial, its sealed validator and the
 // record (only under the pairing that made them), then resets c to no partial.
+// A partial it cannot remove keeps its validator and the record, for cleanOwned
+// once it is a day old; an earlier such partial the record still names is tried
+// again first, so no later clear in the job drops its record.
 func (s *service) clearCheckpoint(job jobs.Job, root *os.Root, c *checkpoint) {
 	defer func() { c.Temp, c.Offset, c.Total, c.Validator = "", 0, 0, "" }()
-	if c.ServerHash != s.pairHash() {
+	if c.ServerHash != s.pairHash() || !s.dropPartial(root, c) {
 		return
 	}
-	if podcast.OwnedTemp(c.Temp) {
-		p := path.Dir(c.Path) + "/" + c.Temp
-		if f, err := podcast.OpenRegular(root, p); err == nil {
-			_ = f.Close()
-			_ = root.Remove(p)
-		}
-	}
-	if strings.HasPrefix(c.Validator, secrets.PodcastETagPrefix) {
-		_ = s.o.Vault.Delete(c.Validator)
+	if saved, ok := s.readCheckpoint(job); ok && saved.Temp != c.Temp && !s.dropPartial(root, &saved) {
+		return
 	}
 	if dir, err := s.checkpointRoot(); err == nil {
 		_ = dir.Remove(s.checkpointName(job))
 		_ = dir.Close()
 	}
+}
+
+// dropPartial removes c's owned partial, then its sealed validator; false, with
+// both kept, when the partial is still on disk.
+func (s *service) dropPartial(root *os.Root, c *checkpoint) bool {
+	if podcast.OwnedTemp(c.Temp) {
+		p := c.partialName()
+		// Checked, not opened: a partial the Bridge can no longer read (the
+		// restart from zero clears one) is still its own to remove.
+		if _, err := podcast.LstatRegular(root, p); err == nil {
+			if err := root.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return false
+			}
+		}
+	}
+	if strings.HasPrefix(c.Validator, secrets.PodcastETagPrefix) {
+		_ = s.o.Vault.Delete(c.Validator)
+	}
+	return true
 }
 func (s *service) fileLock(ctx context.Context, root *os.Root, episode string) (func(), error) {
 	if err := podcast.EnsureDir(root, path.Dir(episode)+"/.audiosilo"); err != nil {

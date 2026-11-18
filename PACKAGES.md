@@ -2143,6 +2143,8 @@ internal/
             credential stripping shared with buffered feed/artwork GETs, including
             later hops in a redirect chain. The handler owns the combined
             three-attempt retry/resume budget; ResumeAction validates exact strong identity.
+            StatusCode is a host's status as a code, the feed's and the episode's
+            alike (gone for 410, else http_<status>).
             Phase 2c-1 feed/artwork client: explicit DNS resolution and a socket
             Control check of the exact IP, public addresses or configured CIDRs
             only (including NAT64 embedded IPv4 checks), no environment proxy.
@@ -2151,7 +2153,9 @@ internal/
             working one untried. GET, gzip only, 10 redirects (Permanent only when
             one was followed and all were 301/308), connect/header/body-stall
             bounds and decoded size caps; two jittered retries for transient
-            failures, respecting Retry-After. Bad gzip data (empty, header,
+            failures, respecting Retry-After (a wait the caller's deadline cuts
+            ends on the last failure, not a timeout). More than 10 redirects is
+            redirect_loop (server#403; http_310 before). Bad gzip data (empty, header,
             checksum, stream) fails at once as not_a_feed; a read the connection
             broke is retried. Errors never contain remote text or URLs.
             LibriVox L6: Request and StreamRequest take an optional Allow, asked
@@ -2210,13 +2214,38 @@ internal/
             uses only owned checkpoint/trash records, checked mappings and no live matching job. A job claimed
             before its library's mapping check (a start or re-pair) waits for it
             (CheckPoll). A subscribe's 3-minute ceiling starts once it holds the
-            library lock; artwork gets at most a minute and half the time left; a
+            library lock, a poll's once it holds the show lock (the mapping wait and
+            the lock wait get one more); artwork gets at most a minute and half the time left; a
             follow that fails before feed.json takes back the folder it made. A
             poll asks for a rescan of any show the server hasn't indexed since
             this start (one a failed job left owed), 304 or not. An
             itunes:new-feed-url never names a URL the show moved away from nor
             takes https to http. A cover deleted by hand is fetched again, subject to durable artwork backoff.
             No failure-only feed timestamp churn and no artwork work on 304.
+            Failure codes (server#403; the server counts only the feed's toward a
+            failing-feed notice): the netguard's code as given (a refused
+            connection is network, not timeout); a local fault before the fetch
+            (show path, unreadable feed.json, bad params) is write_failed; the
+            Bridge's own deadline or stop outside the fetch is bridge_lost, as is
+            a server out of reach at a commit's lease check or a retention read
+            (leaseFailure; never network, the feed's or the episode host's). An
+            episode download's ceiling is its timeout wherever it surfaces (the
+            budget's cause, errOverBudget; a probe it stops answers the context's
+            error, not invalid_audio, and a lease check it cuts is no lost claim,
+            identity_changed), a retry wait it cuts ends on the host's
+            last answer, and its own faults (no streamer, its partial) are
+            write_failed. A partial it cannot open (podcast.OpenRegularFile, its size) or read
+            back restarts the episode from zero once per job first, checked
+            before the ranged GET so no request is spent on it; clearing a
+            checkpoint removes its partial on podcast.LstatRegular, never an
+            open, so an unreadable one is not left behind, and keeps the record
+            and validator (for cleanOwned) when the removal fails: a later clear
+            in the job tries that partial again before dropping the record, and
+            so does a new download's checkpoint, which never overwrites the
+            record while that partial stays (that download goes unrecorded). An episode host's 410 is gone, like the
+            feed's (the server: no longer available). A poll's params may carry
+            `scheduled` (the server's scheduler); read leniently, it changes
+            nothing here.
   -- Phase 4a: Audible (imported from audiosilo-manager with its history) --
   audible/  the native Audible client (the manager's, ported as is, then extended):
             NewPKCE + NewDeviceSerial + BuildAuthorizeURL (the browser half: the user
