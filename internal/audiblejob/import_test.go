@@ -44,7 +44,7 @@ const (
 type stubImportAccounts struct {
 	mu       sync.Mutex
 	acct     store.AudibleAccount
-	acctThen []store.AudibleAccount // each SettledAccount read answers the next (Account the current one)
+	acctThen []store.AudibleAccount // each SettledAccount read of a refused account answers the next (Account the current one)
 	acctErr  error
 	title    source.Record
 	titleErr error
@@ -70,7 +70,12 @@ func (s *stubImportAccounts) Account(_ context.Context, id string) (store.Audibl
 	return s.acct, nil
 }
 
+// SettledAccount is the manager's: only an account that reads refused is read
+// again (acctThen: what its wait let through).
 func (s *stubImportAccounts) SettledAccount(ctx context.Context, id string) (store.AudibleAccount, error) {
+	if a, err := s.Account(ctx, id); err != nil || a.RefusedAt == "" {
+		return a, err
+	}
 	if len(s.acctThen) > 0 {
 		s.acct, s.acctThen = s.acctThen[0], s.acctThen[1:]
 	}
