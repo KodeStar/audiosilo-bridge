@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"io/fs"
 	"os"
+	"path/filepath"
 
 	"github.com/kodestar/audiosilo-bridge/internal/agentproto"
 	"github.com/kodestar/audiosilo-bridge/internal/fsutil"
@@ -54,9 +55,15 @@ func (r *Runner) endpointDirProblem() string {
 }
 
 // sharesDir reports whether a and b are one dir, or one holds the other, by
-// path or (one dir under two names) by the dirs themselves.
+// path (each with its links resolved, so a link to a dir inside the other
+// counts) or (one dir under two names) by the dirs themselves.
 func sharesDir(a, b string) bool {
 	if fsutil.Within(a, b) || fsutil.Within(b, a) {
+		return true
+	}
+	ra, errA := filepath.EvalSymlinks(a)
+	rb, errB := filepath.EvalSymlinks(b)
+	if errA == nil && errB == nil && (fsutil.Within(ra, rb) || fsutil.Within(rb, ra)) {
 		return true
 	}
 	ia, errA := os.Stat(a)

@@ -455,6 +455,24 @@ func TestEndpointServiceRequired(t *testing.T) {
 			}
 			return link
 		},
+		"a link to a dir inside it": func(t *testing.T, endpoint string) string {
+			inside := filepath.Join(endpoint, "agent")
+			if err := os.Mkdir(inside, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			link := filepath.Join(t.TempDir(), "agent")
+			if err := os.Symlink(inside, link); err != nil {
+				t.Fatal(err)
+			}
+			return link
+		},
+		"inside the agent's, by a link": func(t *testing.T, endpoint string) string {
+			link := filepath.Join(t.TempDir(), "agent")
+			if err := os.Symlink(filepath.Dir(endpoint), link); err != nil {
+				t.Fatal(err)
+			}
+			return link
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
