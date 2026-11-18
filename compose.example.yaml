@@ -1,4 +1,5 @@
-# An AudioSilo server with its Bridge: three services.
+# An AudioSilo server with its Bridge: three services, and a fourth for an
+# OpenAI-compatible endpoint.
 #
 #   audiosilo  the server: the libraries (read-only), the player and the
 #              console, where Bridge jobs are started and watched.
@@ -7,6 +8,9 @@
 #              and writes the results into the book's .audiosilo/ folder.
 #   agent      the agent container: runs the AI CLIs the Bridge's jobs need,
 #              walled off from everything else (see below).
+#   agent-endpoint
+#              only for an OpenAI-compatible endpoint (profile "endpoint"):
+#              the same image, walled off from the agent container too.
 #
 # The server reads the libraries read-only; the Bridge mounts the SAME host
 # folders read-write. Mounting them at the same path in both containers means
@@ -32,11 +36,18 @@
 # this one, or sign codex in once with
 #   docker compose exec agent audiosilo-bridge agent-login codex
 # and set AUDIOSILO_BRIDGE_AGENT_BACKEND: codex on the bridge (it runs claude
-# unless told otherwise). Or pick an OpenAI-compatible endpoint (the OpenAI API,
-# a router, Ollama or LM Studio) in the Bridge page's Settings > Agent: it runs
-# only while this container holds no credential of its own (leave the .env
-# values out and /agent/secrets empty, with no codex sign-in), as the
-# endpoint's model runs commands in here and could read one.
+# unless told otherwise).
+#
+# Or pick an OpenAI-compatible endpoint (the OpenAI API, a router, Ollama or LM
+# Studio) in the Bridge page's Settings > Agent. Its runs go to agent-endpoint,
+# never to the agent container: the endpoint's model runs commands where it
+# runs, so that service has a user of its own, its own staging volume, no
+# /agent volume and no credential, and kills whatever a run leaves behind.
+# Start it with the profile:
+#   docker compose --profile endpoint up -d
+# The Bridge refuses endpoint runs (and says why on its page) while it isn't
+# set up that way. The endpoint's key is set in Settings > Agent and kept for
+# the address it was entered for: another address removes it.
 name: audiosilo
 
 services:
@@ -74,6 +85,9 @@ services:
       # The folder shared with the agent container (below). Kept outside
       # /bridge-data, whose first-start ownership fix would otherwise reach it.
       AUDIOSILO_BRIDGE_AGENT_STAGING_DIR: /staging
+      # The folder shared with agent-endpoint, where an OpenAI-compatible
+      # endpoint's runs go (another volume than the one above).
+      AUDIOSILO_BRIDGE_AGENT_ENDPOINT_STAGING_DIR: /endpoint-staging
       # The CLI the agent container runs: claude (the default), codex, or
       # openai-compatible (codex against the endpoint below, which needs the
       # Responses API; set its key in Settings > Agent). These lock the
@@ -102,6 +116,8 @@ services:
       # Shared with the agent container, at the Bridge's agent.staging_dir.
       # The only volume both mount.
       - staging:/staging
+      # Shared with agent-endpoint, at agent.endpoint_staging_dir.
+      - endpoint-staging:/endpoint-staging
 
   agent:
     image: ghcr.io/kodestar/audiosilo-bridge:latest-agent
@@ -123,9 +139,6 @@ services:
       - staging:/staging
       - agent-config:/agent
     networks: [agent]
-    # An OpenAI-compatible server on this same host (Ollama listening on
-    # 0.0.0.0): reach it as http://host.docker.internal:11434/v1.
-    # extra_hosts: ["host.docker.internal:host-gateway"]
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
     read_only: true
@@ -133,11 +146,39 @@ services:
     # A stop cancels the runs in progress: SIGTERM, then SIGKILL 10 s later.
     stop_grace_period: 20s
 
+  # An OpenAI-compatible endpoint's own agent service: started only with
+  # --profile endpoint. Keep it apart from the agent container: its own user
+  # (never the agent's 10002), its own staging volume, no /agent volume and no
+  # credential in its environment. The runner refuses its runs otherwise.
+  agent-endpoint:
+    image: ghcr.io/kodestar/audiosilo-bridge:latest-agent
+    profiles: [endpoint]
+    restart: unless-stopped
+    user: "10003:10003"
+    # The bridge's PGID, as for the agent container: the endpoint's key is
+    # handed to this group alone.
+    group_add: [*bridge_pgid]
+    command: ["agent-runner", "--endpoint-only", "--staging", "/staging"]
+    volumes:
+      - endpoint-staging:/staging
+    networks: [agent-endpoint]
+    # An OpenAI-compatible server on this same host (Ollama listening on
+    # 0.0.0.0): reach it as http://host.docker.internal:11434/v1.
+    # extra_hosts: ["host.docker.internal:host-gateway"]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    read_only: true
+    tmpfs: ["/tmp"]
+    stop_grace_period: 20s
+
 networks:
   # The agent's own network: nothing else of this stack. It reaches out
   # through the host like any container (the internet and your LAN).
   agent: {}
+  # agent-endpoint's, apart from the agent container's too.
+  agent-endpoint: {}
 
 volumes:
   staging: {}
   agent-config: {}
+  endpoint-staging: {}

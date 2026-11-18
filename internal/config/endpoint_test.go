@@ -176,3 +176,38 @@ func TestEndpointSaveWithEnv(t *testing.T) {
 		t.Fatalf("the next start: %v", err)
 	}
 }
+
+// The openai-compatible backend's runs go to the endpoint's own agent service
+// (agent.endpoint_staging_dir, from config.yaml or the environment, cleaned),
+// never to the agent container's dir: with none set they go nowhere (allowed:
+// the endpoint's dir for openai-compatible, the agent container's for the
+// others; denied: a relative path).
+func TestEndpointStagingDir(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, FileName), []byte("agent:\n  backend: openai-compatible\n"+
+		"  openai_compatible:\n    base_url: http://192.168.1.20:11434/v1\n    model: qwen3:32b\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.AgentRunsDir(dir); got != "" {
+		t.Fatalf("no endpoint service set: runs go to %q", got)
+	}
+	t.Setenv("AUDIOSILO_BRIDGE_AGENT_ENDPOINT_STAGING_DIR", "/endpoint-staging/")
+	if cfg, err = Load(dir); err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.AgentRunsDir(dir); got != "/endpoint-staging" || !cfg.EnvSet(KeyAgentEndpointStaging) {
+		t.Fatalf("runs go to %q (env set %v)", got, cfg.EnvSet(KeyAgentEndpointStaging))
+	}
+	cfg.Agent.Backend = AgentBackendClaude
+	if got := cfg.AgentRunsDir(dir); got != filepath.Join(dir, DefaultStagingDirName) {
+		t.Fatalf("claude's runs go to %q", got)
+	}
+	t.Setenv("AUDIOSILO_BRIDGE_AGENT_ENDPOINT_STAGING_DIR", "endpoint-staging")
+	if _, err := Load(dir); err == nil || !strings.Contains(err.Error(), "agent.endpoint_staging_dir") {
+		t.Fatalf("a relative path = %v", err)
+	}
+}

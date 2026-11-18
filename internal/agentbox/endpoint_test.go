@@ -17,7 +17,8 @@ import (
 // endpointRunner is a Runner on the openai-compatible backend over an endpoint
 // address the test sets (base), with a vault holding key ("" for none) for
 // the first address (accounts.Agent hands a key only to the address it was
-// entered for).
+// entered for), and the endpoint's own service's runner.json in its staging
+// dir: --endpoint-only, no credential of its own.
 func endpointRunner(t *testing.T, key string) (*Runner, string, *atomic.Value) {
 	t.Helper()
 	r, dir := newTestRunner(t, agent.IDOpenAICompatible)
@@ -32,12 +33,15 @@ func endpointRunner(t *testing.T, key string) (*Runner, string, *atomic.Value) {
 		}
 		return agentproto.CredentialEndpointKey, key, since, true
 	}
-	rj := handoffRunner(true)
-	rj.Endpoints = true
-	// The container has no credential of its own: an endpoint's run could read
-	// one (TestEndpointRefusedBesideOwnCredentials).
-	writeRunnerJSON(t, dir, rj)
+	writeRunnerJSON(t, dir, endpointService())
 	return r, dir, base
+}
+
+// endpointService is the endpoint's own agent service's runner.json.
+func endpointService() agentproto.Runner {
+	rj := handoffRunner(true)
+	rj.Endpoints, rj.EndpointOnly = true, true
+	return rj
 }
 
 // The openai-compatible backend runs codex: request.json names codex and the
@@ -358,9 +362,10 @@ func TestEndpointRunWithoutModel(t *testing.T) {
 }
 
 // An endpoint's model is whoever answers at the address, and codex runs its
-// commands as the runner's uid: while the container holds a credential of its
-// own (a CLI's, or whatever else the runner reports) the agent isn't ready and
-// nothing is staged (denied); without one it is (allowed, TestEndpointStatus).
+// commands as the runner's uid: while the endpoint's service holds a
+// credential of its own (a CLI's, or whatever else the runner reports: the
+// agent home within its reach) the agent isn't ready and nothing is staged
+// (denied); without one it is (allowed, TestEndpointStatus).
 func TestEndpointRefusedBesideOwnCredentials(t *testing.T) {
 	t.Parallel()
 	for name, hold := range map[string]func(rj *agentproto.Runner){
@@ -373,8 +378,7 @@ func TestEndpointRefusedBesideOwnCredentials(t *testing.T) {
 		"the runner's word": func(rj *agentproto.Runner) { rj.OwnCredentials = true },
 	} {
 		r, dir, _ := endpointRunner(t, "sk-endpoint-vault")
-		rj := handoffRunner(true)
-		rj.Endpoints = true
+		rj := endpointService()
 		if st := r.Status(); !st.Available {
 			t.Fatalf("%s: no credential of its own: %+v", name, st)
 		}
@@ -402,4 +406,98 @@ func TestEndpointRefusedBesideOwnCredentials(t *testing.T) {
 			}
 		}
 	}
+}
+
+// The openai-compatible backend's runs go only to the endpoint's own agent
+// service: with none set, a staging dir shared with the agent container's
+// (one dir, or one inside the other), a runner that isn't --endpoint-only, or
+// one running as the agent container's user, the agent isn't ready, says why,
+// and nothing is staged (denied); a service of its own is ready (allowed, as
+// is one beside an agent container that isn't running). And the claude and
+// codex backends never send their runs to the endpoint's service.
+func TestEndpointServiceRequired(t *testing.T) {
+	t.Parallel()
+	refused := func(t *testing.T, r *Runner, dir string, want Problem, says string) {
+		t.Helper()
+		st := r.Status()
+		if st.Available || st.Refused || st.Problem != want || !strings.Contains(st.Detail, says) {
+			t.Fatalf("status = %+v, want %s saying %q", st, want, says)
+		}
+		var na *agent.NotAvailableError
+		_, err := r.Run(context.Background(), agent.Request{Dir: stagedDir(t), Prompt: "p", Model: "m", Timeout: time.Minute})
+		if !errors.As(err, &na) || na.Detail != st.Detail {
+			t.Fatalf("a run = %v", err)
+		}
+		if dir != "" {
+			assertNoJobDirs(t, dir)
+		}
+	}
+	t.Run("none set", func(t *testing.T) {
+		t.Parallel()
+		r := New(Options{Backend: agent.IDOpenAICompatible, AgentDir: t.TempDir(), Endpoint: func() string { return "http://h/v1" }})
+		refused(t, r, "", ProblemEndpointService, "agent.endpoint_staging_dir")
+	})
+	for name, layout := range map[string]func(endpoint string) string{
+		"the same dir":                 func(endpoint string) string { return endpoint },
+		"the agent's inside it":        func(endpoint string) string { return filepath.Join(endpoint, "agent") },
+		"inside the agent's":           func(endpoint string) string { return filepath.Dir(endpoint) },
+		"the same dir by another name": func(endpoint string) string { return filepath.Join(endpoint, "..", filepath.Base(endpoint)) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			r, dir, _ := endpointRunner(t, "")
+			r.agentDir = layout(dir)
+			refused(t, r, dir, ProblemEndpointService, "shares a folder")
+		})
+	}
+	t.Run("not --endpoint-only", func(t *testing.T) {
+		t.Parallel()
+		r, dir, _ := endpointRunner(t, "")
+		rj := endpointService()
+		rj.EndpointOnly = false
+		writeRunnerJSON(t, dir, rj)
+		refused(t, r, dir, ProblemEndpointService, "--endpoint-only")
+	})
+	t.Run("the agent container's user", func(t *testing.T) {
+		t.Parallel()
+		r, dir, _ := endpointRunner(t, "")
+		r.agentDir = t.TempDir()
+		agentRJ := handoffRunner(true)
+		writeRunnerJSON(t, r.agentDir, agentRJ) // this test's uid wrote both
+		if _, _, ok := fileOwner(mustStat(t, filepath.Join(dir, agentproto.RunnerFile))); !ok {
+			t.Skip("no file owners here")
+		}
+		refused(t, r, dir, ProblemEndpointService, "same user")
+		// A stopped agent container says nothing of its user (allowed).
+		agentRJ.HeartbeatAt = time.Now().Add(-time.Hour)
+		writeRunnerJSON(t, r.agentDir, agentRJ)
+		if st := r.Status(); !st.Available {
+			t.Fatalf("beside a stopped agent container: %+v", st)
+		}
+	})
+	t.Run("a service of its own", func(t *testing.T) {
+		t.Parallel()
+		r, _, _ := endpointRunner(t, "")
+		r.agentDir = t.TempDir() // no runner.json: the agent container isn't running
+		if st := r.Status(); !st.Available || st.Problem != "" {
+			t.Fatalf("status = %+v", st)
+		}
+	})
+	t.Run("claude's runs to the endpoint's service", func(t *testing.T) {
+		t.Parallel()
+		r, dir := newTestRunner(t, agent.IDClaude)
+		rj := endpointService()
+		rj.CLIs["claude"] = agentproto.CLI{Version: "2.1.300", Credential: agentproto.CredentialOAuthToken}
+		writeRunnerJSON(t, dir, rj)
+		refused(t, r, dir, ProblemEndpointOnly, "agent.staging_dir")
+	})
+}
+
+func mustStat(t *testing.T, path string) os.FileInfo {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return info
 }

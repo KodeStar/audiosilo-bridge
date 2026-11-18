@@ -78,10 +78,20 @@ const (
 	DetailAgentNoEndpoint = "set the OpenAI-compatible endpoint's address in Settings > Agent; the agent is needed for " +
 		"characters, recaps and descriptions"
 	// DetailAgentOwnCredentials: the backend is openai-compatible and the
-	// agent container holds a credential of its own, which an endpoint's run
-	// could read, so none is run (the Accounts tab says more).
-	DetailAgentOwnCredentials = "the agent container holds a credential of its own, which an OpenAI-compatible endpoint's " +
-		"run could read: remove it from the agent container, or choose claude or codex in Settings > Agent"
+	// endpoint's agent service holds a credential or reaches the agent home,
+	// which an endpoint's run could read or change, so none is run (the
+	// Accounts tab says more).
+	DetailAgentOwnCredentials = "the endpoint's agent service holds a credential or can reach /agent, which an " +
+		"OpenAI-compatible endpoint's run could read: give it neither, or choose claude or codex in Settings > Agent"
+	// DetailAgentEndpointService: the backend is openai-compatible and its
+	// runs have no agent service of their own apart from the agent container
+	// (the Accounts tab says what is wrong).
+	DetailAgentEndpointService = "an OpenAI-compatible endpoint needs an agent service of its own, apart from the agent " +
+		"container (agent-runner --endpoint-only, its own user, no /agent): the Accounts tab says what to change"
+	// DetailAgentEndpointOnly: the backend is claude or codex, and the
+	// Bridge's agent dir is the endpoint's agent service.
+	DetailAgentEndpointOnly = "for claude or codex the Bridge reaches the OpenAI-compatible endpoint's agent service, " +
+		"not the agent container: the Accounts tab says what to change"
 )
 
 // agentNoCLI is the detail while the agent image has no CLI for backend
@@ -115,6 +125,8 @@ const (
 	AgentHandoffFailed  AgentProblem = "handoff_failed"
 	AgentNoEndpoint     AgentProblem = "no_endpoint"
 	AgentOwnCredentials AgentProblem = "own_credentials"
+	AgentEndpointSvc    AgentProblem = "endpoint_service"
+	AgentEndpointOnly   AgentProblem = "endpoint_only"
 )
 
 // maxDetail bounds an item's detail (the server keeps 256 characters).
@@ -281,6 +293,10 @@ func Checklist(in Inputs) link.Setup {
 		agentDetail = DetailAgentNoEndpoint
 	case in.Agent.Problem == AgentOwnCredentials:
 		agentDetail = DetailAgentOwnCredentials
+	case in.Agent.Problem == AgentEndpointSvc:
+		agentDetail = DetailAgentEndpointService
+	case in.Agent.Problem == AgentEndpointOnly:
+		agentDetail = DetailAgentEndpointOnly
 	default:
 		agentDetail = DetailAgentNotRunning
 	}

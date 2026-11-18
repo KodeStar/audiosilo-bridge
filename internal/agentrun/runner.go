@@ -52,10 +52,16 @@ const orphanAfter = 30 * time.Second
 // Options configures the runner.
 type Options struct {
 	Staging string // the staging dir (/staging)
-	Home    string // the agent home (/agent): secrets/, codex/
-	Slots   int    // concurrent jobs; 0 = 1
-	Version string // reported in runner.json
-	Log     *slog.Logger
+	// Home is the agent home (/agent): secrets/, codex/. An endpoint-only
+	// runner never uses it, and refuses its runs while it can reach it.
+	Home string
+	// EndpointOnly makes this the endpoint's own agent service (bridge#84):
+	// it runs only requests with an endpoint (the other runner only those
+	// without), reports endpoint_only, and ends whatever a run leaves behind.
+	EndpointOnly bool
+	Slots        int    // concurrent jobs; 0 = 1
+	Version      string // reported in runner.json
+	Log          *slog.Logger
 
 	// Getenv reads the runner's own environment (os.LookupEnv when nil); a test
 	// injects one so it never touches the process environment.
@@ -99,15 +105,16 @@ type Runner struct {
 	codexMu     sync.Mutex
 	codexActive int
 
-	// mixMu guards the runs in progress by kind: an endpoint's runs and the
-	// CLIs' own never share the container (admit).
-	mixMu                 sync.Mutex
-	endpointRuns, cliRuns int
-
 	// active holds the ids of the jobs this runner claimed and hasn't finished,
-	// which the orphan recovery never finishes (guarded by activeMu).
+	// which the orphan recovery never finishes, and sessions the sessions of
+	// the CLIs running now (each its own, by its pid), which a sweep spares
+	// (both guarded by activeMu).
 	activeMu sync.Mutex
 	active   map[string]bool
+	sessions map[int]bool
+	// sweep ends the processes a run left behind (sweep.go), set by Main for
+	// an endpoint-only runner (nil: no sweep).
+	sweep func(keep func(sid int) bool) int
 
 	// groups are runner.json's groups, read once: a process with no
 	// capabilities can't change them.
@@ -163,6 +170,7 @@ func New(opts Options) (*Runner, error) {
 		clis:        map[string]cliInfo{},
 		creds:       map[string]credSeen{},
 		active:      map[string]bool{},
+		sessions:    map[int]bool{},
 		groups:      groups(),
 		killDelay:   10 * time.Second,
 		scanEvery:   scanInterval,
@@ -200,14 +208,18 @@ func (r *Runner) isActive(id string) bool {
 // Run serves the staging dir until ctx ends, then stops the runs in progress
 // (each is cancelled and finished, so the Bridge gets an answer) and returns.
 func (r *Runner) Run(ctx context.Context) error {
-	if err := os.MkdirAll(filepath.Join(r.opts.Home, "codex"), 0o700); err != nil {
-		r.log.Warn("agent runner: create the codex home", "err", err)
+	if !r.opts.EndpointOnly {
+		if err := os.MkdirAll(filepath.Join(r.opts.Home, "codex"), 0o700); err != nil {
+			r.log.Warn("agent runner: create the codex home", "err", err)
+		}
+	} else if r.holdsCredentials() {
+		r.log.Warn("agent runner: " + endpointBlocked)
 	}
 	r.lastDetect = r.now()
 	r.detect(ctx)
 	r.recoverOrphans()
 	r.writeStatus()
-	r.log.Info("agent runner: started", "staging", r.opts.Staging, "slots", r.opts.Slots)
+	r.log.Info("agent runner: started", "staging", r.opts.Staging, "slots", r.opts.Slots, "endpoint_only", r.opts.EndpointOnly)
 
 	status := time.NewTicker(r.statusEvery)
 	defer status.Stop()
@@ -333,7 +345,8 @@ func (r *Runner) status() agentproto.Runner {
 		Handoff:        true,
 		Groups:         r.groups,
 		Endpoints:      true,
-		OwnCredentials: r.holdsCredentials(),
+		EndpointOnly:   r.opts.EndpointOnly,
+		OwnCredentials: r.opts.EndpointOnly && r.holdsCredentials(),
 	}
 	for _, name := range []string{agentproto.CLIClaude, agentproto.CLICodex} {
 		c, _ := r.cli(name)

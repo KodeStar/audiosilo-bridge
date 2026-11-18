@@ -32,6 +32,17 @@ func Main(ctx context.Context, opts Options) error {
 	if err != nil {
 		return err
 	}
+	if opts.EndpointOnly {
+		// The endpoint's service ends whatever its runs leave behind (sweep.go):
+		// without that it runs nothing.
+		if !sweepSupported {
+			return errors.New("the endpoint's agent service runs in the agent image (Linux)")
+		}
+		if err := endpointHardening(); err != nil {
+			return fmt.Errorf("agent runner: the endpoint's service can't keep its runs' processes: %w", err)
+		}
+		r.sweep = killStrays
+	}
 	return r.Run(ctx)
 }
 

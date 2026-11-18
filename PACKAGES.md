@@ -47,7 +47,13 @@ internal/
             normalizeBridge trims them (the address without its trailing slashes, a
             blank stage model dropped). AUDIOSILO_BRIDGE_AGENT_BACKEND now goes
             through applyBridgeEnv (locks the page; empty = unset, as the others),
-            as do ..._OPENAI_COMPATIBLE_BASE_URL and ..._OPENAI_COMPATIBLE_MODEL. The
+            as do ..._OPENAI_COMPATIBLE_BASE_URL and ..._OPENAI_COMPATIBLE_MODEL.
+            agent.endpoint_staging_dir (AUDIOSILO_BRIDGE_AGENT_ENDPOINT_STAGING_DIR,
+            absolute, cleaned, restart-to-apply, "" = none) is the endpoint's own
+            agent service's staging dir; AgentRunsDir is where the configured
+            backend's runs go (that dir for openai-compatible, else
+            AgentStagingDir). Sharing a dir with agent.staging_dir is refused by
+            agentbox's Status, not Validate (a Bridge that won't start is worse). The
             key is a vault secret (secrets.EndpointAPIKey), never config.
             Phase 2c-1: podcasts.allow_networks (CIDR strings, default empty;
             AUDIOSILO_BRIDGE_PODCASTS_ALLOW_NETWORKS comma-separated) and
@@ -1274,7 +1280,12 @@ internal/
             EndpointKey(baseURL) (Test connection's) treat a key entered for
             another address as none, however the address changed (the page,
             config.yaml, the environment), so the key only ever reaches the
-            address it was entered for; DropStaleEndpointKey deletes such a key
+            address it was entered for; Credential(cli, endpoint) (a run's
+            hand-off) takes the address the run goes to, read once by agentbox,
+            and hands the key only when it was entered for exactly that address
+            (not "the address now": no re-read window, and a run that read the
+            address before a save still gets its own address's key);
+            DropStaleEndpointKey deletes such a key
             (no onChange: it was no credential). The key and its row are one
             pair under endpointMu (Set, Delete, the reads and the drop), and
             Set deletes an earlier key's row for another address first, then
@@ -1293,8 +1304,12 @@ internal/
             agentbox.ProblemNoEndpoint) is the openai-compatible backend with no
             address set, said as "set its address in Settings > Agent";
             own_credentials (AgentOwnCredentials, agentbox.ProblemOwnCredentials)
-            is that backend while the agent container holds a credential of its
-            own, said as remove it there or choose claude or codex.
+            is that backend while the endpoint's service holds a credential or
+            reaches /agent; endpoint_service (AgentEndpointSvc) that backend
+            with no agent service of its own (none set, shared with the agent
+            container, not --endpoint-only, the agent's user); endpoint_only
+            (AgentEndpointOnly) claude or codex sent to the endpoint's service.
+            Each points at the Accounts tab, which shows agentbox's full detail.
             Phase 2b (FIRST-RUN-PLAN F2): Checklist(Inputs) is the setup checklist
             (link.Setup) in its fixed order: paired, libraries, asr, agent, budget,
             github, audible (Phase 4a, optional: done with an account signed in and
@@ -3498,8 +3513,11 @@ internal/
             http/https with a host, printable ASCII without spaces, quotes or
             backslashes (it lands in a -c override), no user info, query or fragment,
             at most 512 bytes; ValidModel exports the model-name rule.
-            runner.json's own_credentials: the container holds a credential of
-            its own (the runner refuses an endpoint run while it does).
+            runner.json's endpoint_only: the endpoint's own agent service
+            (agent-runner --endpoint-only), which alone runs endpoint requests
+            and runs nothing else; own_credentials (that service's): it holds a
+            credential in its environment or can reach the agent home (the
+            runner refuses an endpoint run while it does).
   agentbox/ the Bridge's side of the agent container: an agent.Runner that runs no CLI,
             drops each invocation into the staging dir, waits for agentrun, and
             harvests the outputs back into the pipeline's staged dir; the outcome is
@@ -3647,10 +3665,10 @@ internal/
             kept with the address its run went to, not the address when it came
             back). A run with no
             model (cleared on the page while another backend waits for the restart)
-            is the agent unavailable, never staged. Run reads the address, then the
-            key, then the address again: a key read after the address moved is the
-            new address's, so the run isn't staged (endpointMovedDetail, the agent
-            unavailable). The handed credential is cut
+            is the agent unavailable, never staged. Run reads the address once and
+            asks Options.Credential(cli, endpoint) for that address's own key
+            (accounts.Agent hands one only to the address it was entered for), so
+            no key read after a save can be another address's. The handed credential is cut
             from the CLI's output before it is read (an endpoint may repeat the key
             in its error), when it is minCutSecret (8) bytes or more: a short
             stand-in key ("x", "none", "ollama") would be cut out of codex's JSON
@@ -3658,16 +3676,21 @@ internal/
             probeEndpoint), which the runner takes the credential for whatever the
             container has of its own.
             An endpoint's model is whoever answers at the address, and codex runs
-            its commands as the runner's uid with its sandbox off, so such a run
-            could read the container's own token, key or login (its files and the
-            runner's environment) and send it anywhere. Decision 15's container
-            (one fixed uid, cap_drop ALL, no-new-privileges, no user namespaces
-            under the default seccomp profile) can't start a run under a second
-            uid, so the run is REFUSED instead: while runner.json says
-            own_credentials, or any CLI's entry has a credential, Status is
-            ProblemOwnCredentials (not ready, nothing staged, the detail saying
-            to remove it from the container or choose claude or codex), after
-            outdated and no_endpoint.
+            its commands as the runner's uid with its sandbox off, so in the agent
+            container such a run could read the subscriptions' credentials, plant
+            /agent/codex/config.toml for a later subscription run, or leave a
+            process behind. So the backend's runs go to the endpoint's OWN agent
+            service (service.go): Options.Dir is agent.endpoint_staging_dir and
+            Options.AgentDir the agent container's staging dir, and Status is
+            ProblemEndpointService (not ready, nothing staged) with none set, a dir
+            shared with the agent's (one dir, or one inside the other, by path or
+            os.SameFile), a runner.json without endpoint_only, or one owned by the
+            uid of a live runner.json in the agent's dir (the same user); then
+            ProblemOwnCredentials while that service holds a credential or reaches
+            /agent (runner.json's own_credentials, or a CLI entry with one). The
+            claude and codex backends refuse an endpoint-only runner in their dir
+            (ProblemEndpointOnly). Dir() is the dir the runs go to (the page's
+            staging_dir, the engine's log).
   agentrun/ `audiosilo-bridge agent-runner`, the ONLY thing in the agent container (Linux
             only). It sees the staging dir and /agent (secrets/, codex/), never a
             library or the Bridge's data. Main sets umask 077 for the whole process
@@ -3724,24 +3747,27 @@ internal/
             reach; /tmp works for exec, checked on the image) and
             AUDIOSILO_ENDPOINT_API_KEY only: never OPENAI_API_KEY, CODEX_API_KEY or
             the shared CODEX_HOME, whose wipe brackets skip such a run.
-            An endpoint run is refused (Exit unavailable, endpointBlocked, after
-            the hand-off is taken and deleted, no CLI started) while
-            holdsCredentials: a CLI's credential (credentialKind: the four
-            variables, their secrets files, codex's login), an auth.json of any
-            shape, or anything in secrets/ but an empty file (an unlistable
-            secrets dir counts). The CLI is this uid with its sandbox off, so the
-            environment allow-list keeps nothing from a model that runs a shell
-            command: it could read those files and /proc/<runner>/environ.
-            runner.json's own_credentials says so for the Bridge's Status.
-            Another RUN's credential is as readable (its environment, the
-            Bridge's hand-off included), so admit/release keep an endpoint's
-            runs and the CLIs' own from ever sharing the container: the second
-            kind is Exit unavailable (mixedRuns) until the first has ended
-            (they meet only as a Bridge that changed backend starts over a run
-            still ending). And codexSweep wipes the shared CODEX_HOME (login
-            and config kept) before an endpoint's CLI starts: a codex run the
-            container was killed under never ran its wipe, and its
-            shell_snapshots/ hold that run's environment.
+            Options.EndpointOnly (--endpoint-only) makes the runner the
+            endpoint's own agent service: it runs only requests with an endpoint,
+            and any other runner refuses those (both Exit unavailable, after the
+            hand-off is taken and deleted, no CLI started: endpointOnlyRefusal,
+            endpointElsewhere), never touches --home (/agent), and refuses its
+            runs (endpointBlocked) while holdsCredentials: one of the four
+            credential variables in its environment, or homeReachable (the home
+            listable, writable or searchable by its uid: not missing or closed, the
+            image's 0700 /agent of uid 10002 as an anonymous volume being closed to
+            10003). runner.json says endpoint_only and own_credentials for the
+            Bridge's Status. Main makes that runner a child subreaper and not
+            dumpable (endpointHardening, Linux only; elsewhere it refuses to
+            start): whatever a run starts becomes the runner's child however it
+            detaches, and no run reads the runner's memory or environment (later
+            runs' keys pass through it). Every CLI runs in a session of its own
+            (Setsid, so nothing joins another run's group), and the sweep
+            (sweep.go, killStrays over /proc) before each CLI starts and after it
+            ends SIGKILLs the runner's children in a session that isn't a running
+            CLI's or the runner's own, with all they started, and reaps them.
+            Concurrent runs (--slots over 1) of that service still share it: a
+            run's commands could read a concurrent run's environment.
   endpoint/ bridge#84: Settings > Agent's Test connection, a leaf (standard library
             only). Check(ctx, client, base, key): GET <base>/models (Bearer key
             when set), then POST <base>/responses with {} to learn whether the

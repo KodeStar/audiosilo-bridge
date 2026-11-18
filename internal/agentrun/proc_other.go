@@ -32,3 +32,6 @@ func exitCode(ps *os.ProcessState, werr error) int {
 }
 
 func setUmask(int) {}
+
+// enterable can't be told here: count it as reachable.
+func enterable(string) bool { return true }

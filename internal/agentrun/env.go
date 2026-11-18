@@ -143,73 +143,57 @@ func (r *Runner) credentialKind(cli string) string {
 	return ""
 }
 
-// holdsCredentials reports whether the container holds a credential of its
-// own: a CLI's (credentialKind), a codex auth.json of any shape, or anything
-// else in its secrets dir but an empty file (a secrets dir that can't be listed
-// counts: the answer must never be a wrong no). A CLI runs as the runner's own
-// uid with its sandbox off, so a run could read each of them, and the runner's
-// environment with them; execute refuses an endpoint run while this holds.
+// holdsCredentials (an endpoint-only runner's) reports whether a run against
+// an endpoint could reach a credential of the container's own: one of the
+// four credential variables in the runner's environment (a run reads
+// /proc/<runner>/environ only while the runner is dumpable, but the variables
+// are a configuration mistake either way), or the agent home (homeReachable).
+// The CLI runs as the runner's uid with its sandbox off; execute refuses an
+// endpoint run while this holds.
 func (r *Runner) holdsCredentials() bool {
-	if r.credentialKind(agentproto.CLIClaude) != "" || r.credentialKind(agentproto.CLICodex) != "" {
-		return true
-	}
-	if _, err := os.Lstat(filepath.Join(r.codexHome(), "auth.json")); err == nil {
-		return true
-	}
-	entries, err := os.ReadDir(filepath.Join(r.opts.Home, "secrets"))
-	if err != nil {
-		return !errors.Is(err, fs.ErrNotExist)
-	}
-	for _, e := range entries {
-		if info, err := e.Info(); err != nil || !info.Mode().IsRegular() || info.Size() > 0 {
+	for _, k := range []string{envClaudeToken, envAnthropic, envOpenAI, envCodex} {
+		if v, ok := r.opts.Getenv(k); ok && strings.TrimSpace(v) != "" {
 			return true
 		}
 	}
-	return false
+	return r.homeReachable()
+}
+
+// homeReachable reports whether the runner can list, enter or write the agent
+// home (the subscriptions' secrets, codex's login and its config.toml, which a
+// later subscription run loads). The endpoint's service mounts no /agent, and
+// runs as another uid than the agent container, whose 0700 home (the image's,
+// an anonymous volume where nothing is mounted) is then closed to it. Anything
+// but the home missing or closed counts as reachable: the answer must never be
+// a wrong no.
+func (r *Runner) homeReachable() bool {
+	if _, err := os.Lstat(r.opts.Home); err != nil {
+		return !errors.Is(err, fs.ErrNotExist)
+	}
+	if f, err := os.Open(r.opts.Home); err == nil {
+		_ = f.Close()
+		return true
+	}
+	return enterable(r.opts.Home)
 }
 
 // endpointBlocked is exit.json's error for an endpoint run the container's own
 // credentials stop (the page's status line and a parked book's reason).
-const endpointBlocked = "the agent container holds a credential of its own, which a run against an OpenAI-compatible " +
-	"endpoint could read: remove it from the agent container (its environment, its secrets files and codex's " +
-	"login), or set the agent's backend to claude or codex"
+const endpointBlocked = "the endpoint's agent service holds a credential of its own or can reach the agent home " +
+	"(/agent), which a run against an OpenAI-compatible endpoint could read or change: give that service no " +
+	"credential variables and no /agent volume, and run it as its own user (the compose example's agent-endpoint)"
 
-// mixedRuns is exit.json's error for a run that would share the container
-// with a run of the other kind (admit).
-const mixedRuns = "the agent container is still ending a run of another kind (an OpenAI-compatible endpoint's runs " +
-	"and the CLIs' own never share it): this one runs once that has ended"
-
-// admit takes a place for a run, or reports a run of the other kind in
-// progress. An endpoint's run could read another run's credential (the
-// container's own or the Bridge's hand-off: holdsCredentials sees only the
-// first) from that run's environment, and a CLI's own run starting beside an
-// endpoint's would put one within its reach. One Bridge sends one kind, so the
-// two meet only as a Bridge that changed its backend starts over a run of the
-// old one still ending (it cancels that run, agentbox's reclaim).
-func (r *Runner) admit(endpoint bool) bool {
-	r.mixMu.Lock()
-	defer r.mixMu.Unlock()
-	switch {
-	case endpoint && r.cliRuns > 0, !endpoint && r.endpointRuns > 0:
-		return false
-	case endpoint:
-		r.endpointRuns++
-	default:
-		r.cliRuns++
-	}
-	return true
-}
-
-// release gives back admit's place.
-func (r *Runner) release(endpoint bool) {
-	r.mixMu.Lock()
-	defer r.mixMu.Unlock()
-	if endpoint {
-		r.endpointRuns--
-	} else {
-		r.cliRuns--
-	}
-}
+// endpointOnlyRefusal is exit.json's error for a CLI's own run sent to the
+// endpoint's agent service, and endpointElsewhere for an endpoint run sent to
+// the agent container (each staging dir has its own runner: agentbox's Status
+// says which setting points at the wrong one).
+const (
+	endpointOnlyRefusal = "this agent service runs only OpenAI-compatible endpoints (agent-runner --endpoint-only): " +
+		"point agent.staging_dir at the agent container's staging volume"
+	endpointElsewhere = "runs against an OpenAI-compatible endpoint go to their own agent service, never to the agent " +
+		"container that holds the subscriptions: set agent.endpoint_staging_dir to its staging volume (the compose " +
+		"example's agent-endpoint)"
+)
 
 // credentialSince is when the runner first saw the credential cli has now (kind
 // is its credentialKind; zero with none). The credential is compared by a
@@ -328,17 +312,6 @@ func (r *Runner) codexEnd() {
 	r.codexMu.Lock()
 	defer r.codexMu.Unlock()
 	r.codexActive--
-	if r.codexActive == 0 {
-		r.wipeCodexHome()
-	}
-}
-
-// codexSweep wipes the shared CODEX_HOME before an endpoint run, which has a
-// CODEX_HOME of its own and so never brackets the shared one: no codex run
-// uses it then (admit), and whatever one left there goes.
-func (r *Runner) codexSweep() {
-	r.codexMu.Lock()
-	defer r.codexMu.Unlock()
 	if r.codexActive == 0 {
 		r.wipeCodexHome()
 	}

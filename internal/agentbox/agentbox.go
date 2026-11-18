@@ -52,7 +52,15 @@ const (
 
 // Options configures a Runner.
 type Options struct {
-	Dir string // the staging dir (agent.staging_dir)
+	// Dir is the staging dir the runs go to: the agent container's
+	// (agent.staging_dir), or for the openai-compatible backend the
+	// endpoint's own agent service's (agent.endpoint_staging_dir; "" for
+	// none, which Status reports as ProblemEndpointService).
+	Dir string
+	// AgentDir, on the openai-compatible backend, is the agent container's
+	// staging dir: the endpoint's service must share no dir and no uid with
+	// it (Status).
+	AgentDir string
 	// Backend is "claude" or "codex", the CLI the runs use, or
 	// "openai-compatible": codex against the endpoint Endpoint names (bridge#84).
 	Backend string
@@ -81,8 +89,9 @@ type Options struct {
 
 // Runner implements agent.Runner over the staging protocol.
 type Runner struct {
-	dir     string
-	backend string
+	dir      string
+	agentDir string
+	backend  string
 	// cli is the CLI the runs use: the backend's own, codex for an endpoint.
 	cli          string
 	endpoint     func() string
@@ -164,6 +173,7 @@ var _ agent.Runner = (*Runner)(nil)
 func New(opts Options) *Runner {
 	r := &Runner{
 		dir:          opts.Dir,
+		agentDir:     opts.AgentDir,
 		backend:      opts.Backend,
 		cli:          opts.Backend,
 		endpoint:     opts.Endpoint,
@@ -259,6 +269,9 @@ func (r *Runner) reclaim(job string) {
 		r.remove(job)
 	}
 }
+
+// Dir is the staging dir the runs go to ("" for an endpoint's service not set).
+func (r *Runner) Dir() string { return r.dir }
 
 // ID is the backend the runs use, so telemetry, model routing and pricing see
 // it (openai-compatible for an endpoint, though codex runs it).

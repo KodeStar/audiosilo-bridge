@@ -25,7 +25,9 @@ The **Bridge**: the optional, always-on companion to an AudioSilo server that
   staging volume it shares with the Bridge and its own `/agent` volume. The Bridge
   drops typed requests there (`internal/agentproto`), never argv; slim, full and
   cuda carry no agent CLI, and config forces the supervisor's model-assisted lane
-  and backend failover off.
+  and backend failover off. An OpenAI-compatible endpoint's runs (bridge#84) go to
+  a second service of that image, `agent-runner --endpoint-only`: its own user and
+  staging volume (`agent.endpoint_staging_dir`), no `/agent`, no credential.
 - **Internal name** (decision 14): "Bridge" is a working name; rename it with the
   product. The repository and the images are public.
 

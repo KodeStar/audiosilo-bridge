@@ -125,27 +125,35 @@ const (
 	// ProblemNoEndpoint: the backend is openai-compatible, and no endpoint
 	// address is set (bridge#84).
 	ProblemNoEndpoint Problem = "no_endpoint"
-	// ProblemOwnCredentials: the backend is openai-compatible, and the agent
-	// container holds a credential of its own, which an endpoint's run could
-	// read (the runner refuses such a run too).
+	// ProblemOwnCredentials: the backend is openai-compatible, and the
+	// endpoint's agent service holds a credential of its own or can reach the
+	// agent home, which an endpoint's run could read or change (the runner
+	// refuses such a run too).
 	ProblemOwnCredentials Problem = "own_credentials"
+	// ProblemEndpointService: the backend is openai-compatible, and its runs
+	// have no agent service of their own apart from the agent container
+	// (service.go: none set, a staging dir or a uid shared with the agent
+	// container, or a runner that isn't --endpoint-only).
+	ProblemEndpointService Problem = "endpoint_service"
+	// ProblemEndpointOnly: the backend is claude or codex, and the runner in
+	// agent.staging_dir is the endpoint's service, which runs nothing else.
+	ProblemEndpointOnly Problem = "endpoint_only"
 )
 
 // noEndpointDetail is the agent's state while the openai-compatible backend
 // has no endpoint address.
 const noEndpointDetail = "no OpenAI-compatible endpoint is set: set its address in Settings > Agent on the Bridge's page"
 
-// ownCredentialsDetail is the agent's state while the openai-compatible
-// backend's container holds a credential of its own. An endpoint's model is
-// whoever answers at the address, and codex runs its commands as the runner's
-// uid with its sandbox off, so the run could read the container's token, key
-// or login and send it anywhere. Decision 15's container (one fixed uid, no
-// capabilities, no-new-privileges) can't start a run under a second uid, so
-// such a run is refused instead.
-const ownCredentialsDetail = "the agent container holds a credential of its own, which a run against an " +
-	"OpenAI-compatible endpoint could read: remove it from the agent container (its environment, its secrets " +
-	"files and codex's login; the Bridge's Accounts tab can hold claude's or OpenAI's instead), or choose " +
-	"claude or codex in Settings > Agent"
+// ownCredentialsDetail is the agent's state while the endpoint's agent
+// service holds a credential of its own or can reach the agent home. An
+// endpoint's model is whoever answers at the address, and codex runs its
+// commands as the runner's uid with its sandbox off, so the run could read a
+// token, key or login and send it anywhere, or plant a config.toml a later
+// subscription run loads.
+const ownCredentialsDetail = "the endpoint's agent service holds a credential of its own or can reach the agent " +
+	"home (/agent), which a run against an OpenAI-compatible endpoint could read or change: give that service no " +
+	"credential variables and no /agent volume, and a user of its own (the compose example's agent-endpoint), or " +
+	"choose claude or codex in Settings > Agent"
 
 // ownCredentials reports whether the container holds a credential of its own:
 // the runner says so, or one of its CLIs has one (backend's entry is the
@@ -166,6 +174,11 @@ func ownCredentials(rj agentproto.Runner, backend string) bool {
 // parked book's reason, which the server shows in its console. The path goes to
 // the log instead (once per outage, as Status runs on every heartbeat).
 func (r *Runner) Status() Status {
+	if r.backend == agent.IDOpenAICompatible {
+		if why := r.endpointDirProblem(); why != "" {
+			return Status{Problem: ProblemEndpointService, Detail: why}
+		}
+	}
 	st := Status{Problem: ProblemNotRunning}
 	root, err := os.OpenRoot(r.dir)
 	if err != nil {
@@ -215,7 +228,7 @@ func (r *Runner) Status() Status {
 	st.Version, st.Slots, st.HeartbeatAt, st.CLIs = rj.Version, rj.Slots, rj.HeartbeatAt, rj.CLIs
 	st.groupListed = slices.Contains(rj.Groups, r.gid)
 	st.ShareGroup = r.shareGroup(st.groupListed, info, st.Live)
-	st.Problem, st.Other, st.Detail = r.unavailableBecause(rj)
+	st.Problem, st.Other, st.Detail = r.unavailableBecause(rj, info)
 	if st.Detail == "" && st.Handoff {
 		if why := r.groupRequired(st.ShareGroup); why != "" {
 			st.Problem, st.Detail = ProblemGroupRequired, why
@@ -388,12 +401,15 @@ func (r *Runner) refusal(c agentproto.CLI, handoff bool) string {
 // reason reads on its own: it is the page's status line and a parked book's
 // reason. The backend is claude, codex or openai-compatible (the app maps the
 // config onto one of them).
-func (r *Runner) unavailableBecause(rj agentproto.Runner) (problem Problem, other, why string) {
+func (r *Runner) unavailableBecause(rj agentproto.Runner, info fs.FileInfo) (problem Problem, other, why string) {
 	if rj.Protocol != agentproto.Protocol {
 		return ProblemOutdated, "", fmt.Sprintf("the agent container speaks protocol %d and this Bridge %d: run the same version of both images", rj.Protocol, agentproto.Protocol)
 	}
 	if age := r.now().Sub(rj.HeartbeatAt); age > agentproto.RunnerFreshFor {
 		return ProblemNotRunning, "", fmt.Sprintf("the agent container isn't running (its last heartbeat was %s ago)", age.Round(time.Second))
+	}
+	if rj.EndpointOnly && r.backend != agent.IDOpenAICompatible {
+		return ProblemEndpointOnly, "", endpointOnlyDetail
 	}
 	c := rj.CLIs[r.backend]
 	if c.Version == "" {
@@ -403,6 +419,10 @@ func (r *Runner) unavailableBecause(rj agentproto.Runner) (problem Problem, othe
 		switch {
 		case !rj.Endpoints:
 			return ProblemOutdated, "", "the agent container is too old to run an OpenAI-compatible endpoint: update the agent image to this Bridge's version"
+		case !rj.EndpointOnly:
+			return ProblemEndpointService, "", notEndpointOnlyDetail
+		case r.sameUserAsAgent(info):
+			return ProblemEndpointService, "", sameUserDetail
 		case r.endpoint() == "":
 			return ProblemNoEndpoint, "", noEndpointDetail
 		case ownCredentials(rj, r.backend):

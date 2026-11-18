@@ -6,15 +6,20 @@ import (
 	"os"
 	"os/exec"
 	"syscall"
+
+	"golang.org/x/sys/unix"
 )
 
 // supported reports whether the runner can run here (it needs process groups).
 const supported = true
 
-// setProcGroup puts the CLI in its own process group, so a cancel signals every
-// helper it started.
+// setProcGroup puts the CLI in a session of its own (and so a process group of
+// its own, the CLI's pid), so a cancel signals every helper it started, and
+// nothing it starts can join another run's group (a group is joined only
+// within its session): the endpoint service's sweep tells a run's processes by
+// their session (sweep.go).
 func setProcGroup(cmd *exec.Cmd) {
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 }
 
 // signalGroup signals the CLI's whole process group (gone already is fine).
@@ -38,3 +43,10 @@ func exitCode(ps *os.ProcessState, werr error) int {
 
 // setUmask sets the process umask (inherited by every CLI the runner starts).
 func setUmask(mask int) { syscall.Umask(mask) }
+
+// enterable reports whether this process may write or search dir (by its
+// effective ids, as a later open would be judged).
+func enterable(dir string) bool {
+	return unix.Faccessat(unix.AT_FDCWD, dir, unix.W_OK, unix.AT_EACCESS) == nil ||
+		unix.Faccessat(unix.AT_FDCWD, dir, unix.X_OK, unix.AT_EACCESS) == nil
+}

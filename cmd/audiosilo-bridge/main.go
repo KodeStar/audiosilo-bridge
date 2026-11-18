@@ -122,13 +122,16 @@ func agentRunner(args []string, stderr io.Writer) error {
 	staging := fs.String("staging", "/staging", "the staging dir shared with the Bridge")
 	home := fs.String("home", "/agent", "the agent home: secrets/ and codex/ (the agent-config volume)")
 	slots := fs.Int("slots", 1, "jobs run at once")
+	endpointOnly := fs.Bool("endpoint-only", false,
+		"the OpenAI-compatible endpoint's own agent service: endpoint runs only, refused while it can reach --home")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	log := slog.New(slog.NewTextHandler(stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	return agentrun.Main(ctx, agentrun.Options{Staging: *staging, Home: *home, Slots: *slots, Version: version, Log: log})
+	return agentrun.Main(ctx, agentrun.Options{Staging: *staging, Home: *home, Slots: *slots, EndpointOnly: *endpointOnly,
+		Version: version, Log: log})
 }
 
 // agentLogin signs a CLI in, inside the agent container.
@@ -169,7 +172,7 @@ Usage:
   audiosilo-bridge [serve] [--data DIR] [--listen HOST:PORT]
   audiosilo-bridge version
   audiosilo-bridge reset-password [--data DIR]
-  audiosilo-bridge agent-runner [--staging DIR] [--home DIR] [--slots N]
+  audiosilo-bridge agent-runner [--staging DIR] [--home DIR] [--slots N] [--endpoint-only]
   audiosilo-bridge agent-login [--home DIR] claude|codex
   audiosilo-bridge worker --bridge URL [--token T] [--data DIR] [--backend B]
   audiosilo-bridge worker install --bridge URL --token T [--data DIR] [--backend B] [--print]
@@ -185,6 +188,8 @@ Commands:
                 PUID:PGID <container> audiosilo-bridge reset-password).
   agent-runner  Run agent jobs from the staging dir (the agent container's
                 entrypoint; default --staging /staging --home /agent).
+                --endpoint-only makes it the OpenAI-compatible endpoint's own
+                service: endpoint runs only, none while it can reach --home.
   agent-login   Sign a CLI in, inside the agent container: codex runs its
                 device login, claude prints how to provide a token.
   worker        Run an ASR worker: transcribe the Bridge's audio here (a Mac's

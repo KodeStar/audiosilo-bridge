@@ -107,6 +107,16 @@ func (c Config) AgentStagingDir(dataDir string) string {
 	return filepath.Join(dataDir, DefaultStagingDirName)
 }
 
+// AgentRunsDir is the staging dir the configured backend's runs go to: the
+// endpoint's own agent service's (agent.endpoint_staging_dir, "" when unset)
+// for openai-compatible, else the agent container's (AgentStagingDir).
+func (c Config) AgentRunsDir(dataDir string) string {
+	if c.Agent.Backend == AgentBackendOpenAICompatible {
+		return c.Agent.EndpointStagingDir
+	}
+	return c.AgentStagingDir(dataDir)
+}
+
 // ServerConfig is the AudioSilo server the Bridge pairs with.
 type ServerConfig struct {
 	// URL is the server's address as the Bridge reaches it (an absolute http(s)
@@ -161,6 +171,7 @@ const (
 	envMappingChecks         = "AUDIOSILO_BRIDGE_MAPPING_CHECK_MINUTES"
 
 	KeyAgentStagingDir      = "agent.staging_dir"
+	KeyAgentEndpointStaging = "agent.endpoint_staging_dir"
 	KeyAgentClaimTimeout    = "agent.claim_timeout_seconds"
 	KeyAgentMonthlyBudget   = "agent.monthly_budget_usd"
 	KeyAgentRequireGroup    = "agent.require_group"
@@ -174,6 +185,7 @@ const (
 	envGitHubClientID       = "AUDIOSILO_BRIDGE_GITHUB_CLIENT_ID"
 	envGitHubWebBaseURL     = "AUDIOSILO_BRIDGE_GITHUB_WEB_BASE_URL"
 	envAgentStagingDir      = "AUDIOSILO_BRIDGE_AGENT_STAGING_DIR"
+	envAgentEndpointStaging = "AUDIOSILO_BRIDGE_AGENT_ENDPOINT_STAGING_DIR"
 	envAgentClaimTimeout    = "AUDIOSILO_BRIDGE_AGENT_CLAIM_TIMEOUT_SECONDS"
 	envAgentMonthlyBudget   = "AUDIOSILO_BRIDGE_AGENT_MONTHLY_BUDGET_USD"
 	envAgentRequireGroup    = "AUDIOSILO_BRIDGE_AGENT_REQUIRE_GROUP"
@@ -239,6 +251,10 @@ func applyBridgeEnv(cfg *Config) {
 	if v, ok := lookupEnv(envAgentStagingDir); ok {
 		cfg.Agent.StagingDir = v
 		cfg.fromEnv[KeyAgentStagingDir] = true
+	}
+	if v, ok := lookupEnv(envAgentEndpointStaging); ok {
+		cfg.Agent.EndpointStagingDir = v
+		cfg.fromEnv[KeyAgentEndpointStaging] = true
 	}
 	if v, ok := lookupEnv(envAgentClaimTimeout); ok {
 		cfg.Agent.ClaimTimeoutSeconds = envInt(v)
@@ -376,6 +392,9 @@ func normalizeBridge(cfg *Config) {
 	if p := strings.TrimSpace(cfg.Agent.StagingDir); p != "" {
 		cfg.Agent.StagingDir = filepath.Clean(p)
 	}
+	if p := strings.TrimSpace(cfg.Agent.EndpointStagingDir); p != "" {
+		cfg.Agent.EndpointStagingDir = filepath.Clean(p)
+	}
 	// Decision 15: the Bridge never runs an agent CLI itself, and a model-assisted
 	// supervisor (or its automatic actions) or a backend failover would. They are
 	// off whatever the file or the environment says, so what the config shows is
@@ -496,6 +515,9 @@ func (c Config) validateBridge() error {
 	}
 	if c.Agent.StagingDir != "" && !filepath.IsAbs(c.Agent.StagingDir) {
 		return fmt.Errorf("agent.staging_dir %q must be an absolute path", c.Agent.StagingDir)
+	}
+	if e := c.Agent.EndpointStagingDir; e != "" && !filepath.IsAbs(e) {
+		return fmt.Errorf("agent.endpoint_staging_dir %q must be an absolute path", e)
 	}
 	if t := c.Agent.ClaimTimeoutSeconds; t < MinClaimTimeoutSeconds || t > MaxClaimTimeoutSeconds {
 		return fmt.Errorf("agent.claim_timeout_seconds must be between %d and %d, got %d", MinClaimTimeoutSeconds, MaxClaimTimeoutSeconds, t)

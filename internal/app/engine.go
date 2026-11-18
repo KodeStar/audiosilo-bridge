@@ -229,7 +229,7 @@ func (b *Bridge) runEngine(ctx context.Context) {
 	b.engineStarted(ctx, &engine{ffmpeg: tools.FFmpeg, ffprobe: tools.FFprobe, sched: sched, exec: exec}, wg.Go)
 	log.Info("bridge: the engine started", "ffmpeg", tools.FFmpeg != "", "asr", asrCap.Backend, "asr_available", asrCap.Available,
 		"asr_worker_fallback", cfg.ASR.WorkerFallback,
-		"agent_backend", box.ID(), "agent_slots", slots, "staging", cfg.AgentStagingDir(b.dataDir))
+		"agent_backend", box.ID(), "agent_slots", slots, "staging", box.Dir())
 	b.runner.Wake()
 	wg.Wait()
 }
@@ -397,12 +397,14 @@ func (p *eventPersister) Close() {
 	<-p.done
 }
 
-// newAgentBox is the agent container runner for cfg.
+// newAgentBox is the agent container runner for cfg: the openai-compatible
+// backend's runs go to the endpoint's own agent service
+// (agent.endpoint_staging_dir), the others' to the agent container.
 // credential is the vault's agent credential for the hand-off (nil: none);
 // endpoint the OpenAI-compatible endpoint's address now (nil: none).
 func newAgentBox(cfg config.Config, dataDir string, log *slog.Logger,
 	credential func(cli, endpoint string) (kind, value string, since time.Time, ok bool), endpoint func() string) *agentbox.Runner {
-	return agentbox.New(agentbox.Options{Dir: cfg.AgentStagingDir(dataDir), Backend: agentBackend(cfg),
+	return agentbox.New(agentbox.Options{Dir: cfg.AgentRunsDir(dataDir), AgentDir: cfg.AgentStagingDir(dataDir), Backend: agentBackend(cfg),
 		ClaimTimeout: time.Duration(cfg.Agent.ClaimTimeoutSeconds) * time.Second, Log: log, Credential: credential,
 		RequireGroup: cfg.Agent.RequireGroup, Endpoint: endpoint})
 }

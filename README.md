@@ -68,13 +68,17 @@ one `staging` volume, and nothing else.
    `AUDIOSILO_BRIDGE_AGENT_BACKEND: codex` on the Bridge. An API key
    (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`) works too, billed per token. Or pick an
    OpenAI-compatible endpoint in the page's **Settings > Agent** (its address, key
-   and models, with **Test connection**) and restart the Bridge. An endpoint runs
-   only while the agent container holds no credential of its own (none of the
-   variables above, nothing in `/agent/secrets`, no codex sign-in): the model
-   there runs commands in the container and could read one. The endpoint's key
-   is kept for the address it was entered for, so saving another address removes
-   it and the page asks for the new one's. The Bridge's
-   page shows the agent as ready within about 15 seconds.
+   and models, with **Test connection**) and restart the Bridge. An endpoint's runs
+   go to an agent service of their own, never to the agent container: the model
+   there runs commands where it runs, so the compose example's `agent-endpoint`
+   (start it with `docker compose --profile endpoint up -d`) is the same image as
+   `agent-runner --endpoint-only`, with its own user, its own staging volume
+   (`agent.endpoint_staging_dir`), no `/agent` volume and no credential, and it
+   kills whatever a run leaves behind. The Bridge refuses endpoint runs, saying
+   why, while it isn't set up that way. The endpoint's key is kept for the
+   address it was entered for, so saving another address removes it and the page
+   asks for the new one's. The Bridge's page shows the agent as ready within
+   about 15 seconds.
 6. Generate characters and recaps from a book's page in the console (or the
    player, as an admin). The console shows an estimate first, then the job's stage,
    ETA and spend.
@@ -86,7 +90,7 @@ Images (`ghcr.io/kodestar/audiosilo-bridge`, public from v0.3.0, no login needed
 | `latest` | the full image: Go, ffmpeg and a CPU whisper.cpp for transcription | amd64, arm64 |
 | `latest-slim` | Go and ffmpeg only, for a Bridge that never transcribes | amd64, arm64 |
 | `latest-cuda` | transcription on an NVIDIA GPU (`--gpus all`) | amd64 |
-| `latest-agent` | the agent container: the claude and codex CLIs, run by `audiosilo-bridge agent-runner` | amd64, arm64 |
+| `latest-agent` | the agent container: the claude and codex CLIs, run by `audiosilo-bridge agent-runner` (and, with `--endpoint-only`, an OpenAI-compatible endpoint's own agent service) | amd64, arm64 |
 
 Only `latest-agent` carries an AI agent CLI (decision 15). `latest`, `latest-slim`
 and `latest-cuda` also carry the ASR worker builds the Bridge serves. Run it as the compose
@@ -96,7 +100,8 @@ dropped, a read-only root, its own network. The server's console shows which way
 the credential goes (Settings > Bridge), and once a fix is in place (the agent
 container recreated with the group, or with the same id mapping) the Bridge
 notices within a few minutes, with no restart of its own. Moving the staging
-volume means recreating both containers.
+volume means recreating both containers. The endpoint's service runs the same
+way as user 10003 with no `/agent` volume and a staging volume of its own.
 
 ## Add an ASR worker (transcription on another computer)
 
@@ -150,6 +155,7 @@ folder is `/bridge-data` in the images (`AUDIOSILO_BRIDGE_DATA`), else
 | `agent.openai_compatible.base_url` | `AUDIOSILO_BRIDGE_AGENT_OPENAI_COMPATIBLE_BASE_URL` | | the endpoint's address up to `/v1` (`https://api.openai.com/v1`, `http://192.168.1.20:11434/v1`); http or https, no user name, password or query. Its API key is set on the page (Settings > Agent), never here, and is kept for the address it was entered for: another address (here, in config.yaml or on the page) removes it. Applies at once |
 | `agent.openai_compatible.model` | `AUDIOSILO_BRIDGE_AGENT_OPENAI_COMPATIBLE_MODEL` | | the model every agent stage uses on the endpoint (it must call tools and take a long context); `agent.openai_compatible.models` (config or the page) gives a stage its own. Applies at once |
 | `agent.staging_dir` | `AUDIOSILO_BRIDGE_AGENT_STAGING_DIR` | `<data>/staging` | the folder shared with the agent container (an absolute path; compose uses `/staging`) |
+| `agent.endpoint_staging_dir` | `AUDIOSILO_BRIDGE_AGENT_ENDPOINT_STAGING_DIR` | | the folder shared with the endpoint's own agent service (`agent-runner --endpoint-only`), where the `openai-compatible` backend's runs go: an absolute path on another volume than `agent.staging_dir` (compose uses `/endpoint-staging`). Unset, endpoint runs don't run. Applies at the next start |
 | `agent.claim_timeout_seconds` | `AUDIOSILO_BRIDGE_AGENT_CLAIM_TIMEOUT_SECONDS` | `120` | how long a job waits for the agent container to pick it up before the book waits and tries again (10 to 3600) |
 | `agent.require_group` | `AUDIOSILO_BRIDGE_AGENT_REQUIRE_GROUP` | `false` | keep the Accounts tab's agent credential to the Bridge's group in every case: where the Bridge would otherwise hand it to every user on the staging volume (the agent container isn't in the group, the volume refuses the chown, the two containers map ids differently), the agent waits instead, saying why, and goes on by itself once the cause is fixed |
 | `agent.monthly_budget_usd` | `AUDIOSILO_BRIDGE_AGENT_MONTHLY_BUDGET_USD` | `100` | the agent spend cap for a calendar month (UTC), across every book; `0` is no cap. Over it, books wait until the 1st |

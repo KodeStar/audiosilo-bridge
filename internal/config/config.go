@@ -231,7 +231,12 @@ type AgentConfig struct {
 	// the dir shared with it ("" = <data>/staging, see Config.AgentStagingDir);
 	// ClaimTimeoutSeconds how long a job waits for it to pick the job up;
 	// MonthlyBudgetUSD the monthly agent spend cap (0 = none).
-	StagingDir          string  `yaml:"staging_dir"`
+	StagingDir string `yaml:"staging_dir"`
+	// EndpointStagingDir is the dir shared with the endpoint's own agent
+	// service (agent-runner --endpoint-only, bridge#84), where the
+	// openai-compatible backend's runs go; "" = none, so they don't run.
+	// Restart-to-apply, like staging_dir.
+	EndpointStagingDir  string  `yaml:"endpoint_staging_dir,omitempty"`
 	ClaimTimeoutSeconds int     `yaml:"claim_timeout_seconds"`
 	MonthlyBudgetUSD    float64 `yaml:"monthly_budget_usd"`
 	// RequireGroup keeps the agent credential handed to the agent container

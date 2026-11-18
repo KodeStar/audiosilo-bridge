@@ -174,6 +174,9 @@ RUN set -eu; \
 # no-new-privileges, a read-only root, tmpfs /tmp, its own network. /staging is
 # world-writable (the Bridge's uid and the agent's share it; a new named volume
 # copies this mode); /agent holds the agent's credentials and codex's login.
+# The same image is the OpenAI-compatible endpoint's own agent service
+# (`agent-runner --endpoint-only`): user 10003:10003, a staging volume of its
+# own and no /agent volume, so the image's /agent (10002's, 0700) is closed to it.
 FROM debian:bookworm-slim AS agent
 RUN apt-get update \
     && apt-get install -y --no-install-recommends tini ca-certificates \
@@ -185,6 +188,8 @@ RUN ln -s /opt/codex/bin/codex /usr/local/bin/codex \
     && ln -s /opt/codex/codex-path/rg /usr/local/bin/rg \
     && groupadd --gid 10002 agent \
     && useradd --no-create-home --home-dir /tmp --shell /usr/sbin/nologin --uid 10002 --gid 10002 agent \
+    && groupadd --gid 10003 agent-endpoint \
+    && useradd --no-create-home --home-dir /tmp --shell /usr/sbin/nologin --uid 10003 --gid 10003 agent-endpoint \
     && find / -xdev -type f -perm /6000 -exec chmod a-s {} + \
     && install -d -o 10002 -g 10002 -m 0700 /agent /agent/secrets /agent/codex \
     && install -d -m 0777 /staging \

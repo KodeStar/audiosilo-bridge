@@ -155,7 +155,7 @@ func TestChecklistAgentWords(t *testing.T) {
 	for d, sayFor := range map[string]bool{DetailAgentNotRunning: true, DetailAgentOutdated: true, DetailAgentNoCredential: true,
 		agentNoCLI("claude"): true, agentOtherBackend("claude", "codex"): false, DetailAgentGroupRequired: false,
 		DetailAgentHandoffFailed: true, DetailAgentShared: false, DetailAgentNoEndpoint: false,
-		DetailAgentOwnCredentials: false} {
+		DetailAgentOwnCredentials: false, DetailAgentEndpointService: false, DetailAgentEndpointOnly: false} {
 		if strings.Contains(d, "staging") || len(d) > maxDetail ||
 			sayFor && (!strings.Contains(d, "Claude or ChatGPT") || !strings.Contains(d, "characters, recaps and descriptions")) {
 			t.Errorf("detail %q", d)
@@ -218,6 +218,8 @@ func TestChecklistAgentProblems(t *testing.T) {
 		{Agent{Backend: "claude", Problem: AgentHandoffFailed}, DetailAgentHandoffFailed},
 		{Agent{Backend: "openai-compatible", Problem: AgentNoEndpoint}, DetailAgentNoEndpoint},
 		{Agent{Backend: "openai-compatible", Problem: AgentOwnCredentials}, DetailAgentOwnCredentials},
+		{Agent{Backend: "openai-compatible", Problem: AgentEndpointSvc}, DetailAgentEndpointService},
+		{Agent{Backend: "claude", Problem: AgentEndpointOnly}, DetailAgentEndpointOnly},
 		{Agent{Backend: "openai-compatible", Problem: AgentNoCLI}, "the agent image has no codex CLI: use this Bridge's agent image; " + agentFor},
 	} {
 		in := done()

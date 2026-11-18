@@ -66,16 +66,18 @@ func (r *Runner) execute(ctx context.Context, job *os.Root, id string) agentprot
 		return exit
 	}
 	// An endpoint's model is whoever answers at the address, and the CLI runs
-	// its commands as this uid: nothing of the container's own may be within
-	// its reach (the hand-off above is taken and deleted either way).
-	if endpoint && r.holdsCredentials() {
+	// its commands as this uid: its runs have a service of their own (no agent
+	// home, its own uid and staging volume), which runs nothing else, and
+	// nothing of a container's own may be within their reach (the hand-off
+	// above is taken and deleted either way).
+	switch {
+	case r.opts.EndpointOnly && !endpoint:
+		return unavailable(endpointOnlyRefusal)
+	case endpoint && !r.opts.EndpointOnly:
+		return unavailable(endpointElsewhere)
+	case endpoint && r.holdsCredentials():
 		return unavailable(endpointBlocked)
 	}
-	// Nor anything of another run's: its credential is in its environment.
-	if !r.admit(endpoint) {
-		return unavailable(mixedRuns)
-	}
-	defer r.release(endpoint)
 	// An endpoint may take no key (a local server); any other run needs one.
 	if !endpoint && r.credentialKind(req.CLI) == "" && handed == nil {
 		return unavailable(req.CLI + " has no credential: set one on the Bridge's Accounts tab, or give one to the agent container")
@@ -110,12 +112,8 @@ func (r *Runner) execute(ctx context.Context, job *os.Root, id string) agentprot
 		args = agent.ClaudeArgs(areq)
 	case agentproto.CLICodex:
 		if endpoint {
-			// Its own empty CODEX_HOME, never the shared one: the device login
-			// there must not be within reach of a run against another endpoint.
-			// Nor what a codex run the container was killed under left in the
-			// shared one (its wipe never ran): codex writes the whole shell
-			// environment, that run's credential in it, into shell_snapshots/.
-			r.codexSweep()
+			// Its own empty CODEX_HOME (the endpoint's service has no shared
+			// one): nothing an earlier run left there reaches this one.
 			if err := os.Mkdir(endpointCodexHome(runDir), 0o700); err != nil {
 				return refused("create the run's codex home: " + err.Error())
 			}
@@ -231,11 +229,13 @@ type spec struct {
 	timeout time.Duration
 }
 
-// spawn runs one CLI in its own process group, stdout and stderr into the job
-// dir (capped), touching the heartbeat every 5 s and checking for a cancel every
-// second. A cancel, the timeout or the runner stopping sends SIGTERM to the
-// group, SIGKILL killDelay later; whatever of the group is left when the CLI
-// exits is killed too, so no helper outlives its run.
+// spawn runs one CLI in its own session and process group, stdout and stderr
+// into the job dir (capped), touching the heartbeat every 5 s and checking for
+// a cancel every second. A cancel, the timeout or the runner stopping sends
+// SIGTERM to the group, SIGKILL killDelay later; whatever of the group is left
+// when the CLI exits is killed too. In the endpoint's service a sweep before
+// the CLI starts and after it ends also kills what left the group (sweep.go),
+// so no process outlives its run.
 func (r *Runner) spawn(ctx context.Context, job *os.Root, s spec) agentproto.Exit {
 	start := r.now()
 	stdout, err := createOutput(job, agentproto.StdoutFile, agentproto.MaxStdoutBytes)
@@ -257,6 +257,7 @@ func (r *Runner) spawn(ctx context.Context, job *os.Root, s spec) agentproto.Exi
 	cmd.Stderr = stderr
 	cmd.WaitDelay = 5 * time.Second
 	setProcGroup(cmd)
+	r.sweepStrays()
 	if err := cmd.Start(); err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			// The binary went (an image updated in place): the CLI is looked for
@@ -267,6 +268,9 @@ func (r *Runner) spawn(ctx context.Context, job *os.Root, s spec) agentproto.Exi
 		return refused("start " + filepath.Base(s.path) + ": " + err.Error())
 	}
 	pid := cmd.Process.Pid
+	r.setSession(pid, true)
+	defer r.sweepStrays()
+	defer r.setSession(pid, false)
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
 
