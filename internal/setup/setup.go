@@ -64,6 +64,9 @@ const (
 	// can't be kept to the Bridge's group (the Accounts tab says why).
 	DetailAgentGroupRequired = "agent.require_group is on, and the agent's credential can't be kept to the Bridge's group: " +
 		"the Accounts tab says why"
+	// DetailAgentHandoffFailed: the Bridge couldn't hand the Accounts tab's
+	// credential to the agent container (the Accounts tab says why).
+	DetailAgentHandoffFailed = "the Bridge couldn't hand the agent its credential: the Accounts tab says why; " + agentFor
 )
 
 // agentNoCLI is the detail while the agent image has no CLI for backend.
@@ -90,6 +93,7 @@ const (
 	AgentOtherBackend  AgentProblem = "other_backend"
 	AgentNoCredential  AgentProblem = "no_credential"
 	AgentGroupRequired AgentProblem = "group_required"
+	AgentHandoffFailed AgentProblem = "handoff_failed"
 )
 
 // maxDetail bounds an item's detail (the server keeps 256 characters).
@@ -244,6 +248,8 @@ func Checklist(in Inputs) link.Setup {
 		agentDetail = DetailAgentNoCredential
 	case in.Agent.Problem == AgentGroupRequired:
 		agentDetail = DetailAgentGroupRequired
+	case in.Agent.Problem == AgentHandoffFailed:
+		agentDetail = DetailAgentHandoffFailed
 	default:
 		agentDetail = DetailAgentNotRunning
 	}

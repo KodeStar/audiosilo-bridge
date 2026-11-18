@@ -18,6 +18,8 @@ import (
 // (groupDenied), and with agent.require_group the agent stays unavailable
 // (groupBlocked). The operator's fix (the same id mapping for both containers,
 // a staging volume that allows chown) then needed a Bridge restart to be seen.
+// A credential the Bridge couldn't give its group at all (groupFailed: an I/O
+// error, not a refusal) holds the agent unavailable the same way.
 // Probe looks again, at the heartbeat, with a job that hands over no
 // credential: a credential.json in the group's modes holding a probe object no
 // runner takes as one, and no prompt.txt, so the runner refuses the job
@@ -49,9 +51,9 @@ const (
 )
 
 // holdsFallback reports whether a run's fallback from the group holds for the
-// process (groupDenied, groupBlocked): what a probe can end.
+// process (groupDenied, groupBlocked, groupFailed): what a probe can end.
 func (r *Runner) holdsFallback() bool {
-	return r.groupDenied.Load() || r.groupBlocked.Load() != nil
+	return r.groupDenied.Load() || r.groupBlocked.Load() != nil || r.groupFailed.Load() != nil
 }
 
 // deferProbe puts the next probe probeEvery from now.
@@ -133,7 +135,17 @@ func (r *Runner) probeJob(ctx context.Context) probeOutcome {
 	// falling back to the every-uid modes it is there to leave.
 	probe := agentproto.Credential{CLI: r.backend, Kind: probeKind, Value: probeKind}
 	var refused *groupRefusedError
-	if _, err := writeCredential(root, probe, r.gid, true); errors.As(err, &refused) {
+	_, err = writeCredential(root, probe, r.gid, true)
+	if (err == nil || errors.As(err, &refused)) && r.groupFailed.Swap(nil) != nil {
+		// The group was given, or the volume now refuses it outright, which
+		// the next run answers by itself (the every-uid modes, or
+		// agent.require_group's block): either way the failure that was
+		// neither (groupFailed) is over, whatever the runner makes of the
+		// probe.
+		r.log.Info("agent container: giving a handed credential to the Bridge's group no longer fails as it did, so "+
+			"jobs go to the agent container again", "bridge_gid", r.gid, "volume_refuses", refused != nil)
+	}
+	if refused != nil {
 		return probeRefused
 	} else if err != nil {
 		return probeUnknown

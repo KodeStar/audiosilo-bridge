@@ -1265,8 +1265,10 @@ internal/
             (Problem, Other; the app converts it to setup.AgentProblem):
             not running, an image of another version (another protocol, or too old for the
             Accounts tab's credential), no CLI for the backend, the other
-            backend signed in, or no credential (only that one asks for a
-            sign-in); the agentbox detail only for a refused credential, BRIDGE-07.
+            backend signed in, no credential (only that one asks for a
+            sign-in), agent.require_group unmet, or a hand-off the Bridge
+            couldn't make (handoff_failed; those two point at the Accounts
+            tab); the agentbox detail only for a refused credential, BRIDGE-07.
   correct/  Phase 2b (plan D5): the meta.correct job (light lane). ParseParams
             is STRICT (an unknown field refused, work_id required). It reads the
             work's live coverage (FreshCoverageForWork: its title, the recording
@@ -3368,8 +3370,12 @@ internal/
             the fix (group_add with the Bridge's PGID); a volume that refuses
             the chown or the ACL drop falls back to those modes too, logged
             once, never a failed run (bridge#79: only a refusal, EPERM, ENOTSUP or
-            ENOSYS, groupRefused; any other error giving the group fails the stage as the
-            agent unavailable, in both modes). A group-only credential the runner is
+            ENOSYS, groupRefused; any other error giving the group, a
+            groupFailedError, fails the stage as the agent unavailable, in both
+            modes, and is kept, groupFailed: Status then says not ready with
+            the reason, Problem handoff_failed, and no later job is staged,
+            until a group probe gives the group again or finds the volume now
+            refuses it). A group-only credential the runner is
             denied (credential_denied: the containers map the volume's ids
             differently, a user namespace) re-stages that job once in those
             modes (nothing ran) and later runs use them, logged
@@ -3401,8 +3407,8 @@ internal/
             the page, heartbeat and checklist saying so; the last two kept,
             groupBlocked, as only a run learns them, until a group probe ends
             them). The group probe (probe.go, bridge#79): Probe, called at
-            every heartbeat, runs one in the background while groupDenied or
-            groupBlocked holds, probeEvery (5 min) after the fallback began or
+            every heartbeat, runs one in the background while groupDenied,
+            groupBlocked or groupFailed holds, probeEvery (5 min) after the fallback began or
             the last probe, for a live runner that takes a hand-off and lists
             the group: a job with a credential.json in the group's modes
             holding no credential (kind group_probe, which DecodeCredential

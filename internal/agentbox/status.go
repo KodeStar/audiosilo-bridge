@@ -98,6 +98,10 @@ const (
 	// ProblemGroupRequired: agent.require_group is on and the handed
 	// credential can't be kept to the Bridge's group (Detail says why).
 	ProblemGroupRequired Problem = "group_required"
+	// ProblemHandoffFailed: the Bridge couldn't give the handed credential to
+	// its group, and not because the staging volume refuses that (Detail says
+	// why), so no job can be handed over.
+	ProblemHandoffFailed Problem = "handoff_failed"
 )
 
 // Status reads runner.json now. Detail never names a Bridge path: it becomes a
@@ -147,6 +151,13 @@ func (r *Runner) Status() Status {
 	if st.Detail == "" && st.Handoff {
 		if why := r.groupRequired(st.ShareGroup); why != "" {
 			st.Problem, st.Detail = ProblemGroupRequired, why
+		}
+	}
+	if st.Detail == "" && st.Handoff && st.ShareGroup && st.groupListed {
+		// Only where a group probe can end it (Probe's gate): a runner.json
+		// that isn't the runner's and names no group leaves each job to say so.
+		if why := r.groupFailed.Load(); why != nil {
+			st.Problem, st.Detail = ProblemHandoffFailed, *why
 		}
 	}
 	if st.Handoff && st.Live {

@@ -114,6 +114,14 @@ type Runner struct {
 	// group probe ends it (probe.go): Status reports the agent unavailable
 	// with it.
 	groupBlocked atomic.Pointer[string]
+	// groupFailed is why the last credential staged for the Bridge's group
+	// couldn't be given to it, when that wasn't the volume refusing (an I/O
+	// error, an errno groupRefused doesn't list: stage's groupFailedError).
+	// Kept until the group can be given again (a group probe, probe.go, or a
+	// job staged meanwhile): Status reports the agent unavailable with it, so
+	// the page and the checklist don't call ready an agent whose every job
+	// fails at the hand-off.
+	groupFailed atomic.Pointer[string]
 	// probeAfter (unix nanoseconds) is when the next group probe may run,
 	// and probing is set while one runs (probe.go).
 	probeAfter atomic.Int64
@@ -334,8 +342,13 @@ func (r *Runner) runJob(ctx context.Context, req agent.Request, st Status, hande
 		return agent.Result{}, r.blockGroup("the staging volume refused to give the credential to the Bridge's group ("+
 			ioProblem(refused.err)+"): use "+remedyVolume+recreateBoth+lookAgain+volumeInPlace, refused.err.Error())
 	}
+	var failed *groupFailedError
+	if errors.As(err, &failed) {
+		return agent.Result{}, r.failGroup(failed.err)
+	}
 	if err == nil && handed != nil && group != noGroup {
 		r.volumeRefused.Store(groupErr != nil)
+		r.groupFailed.Store(nil)
 	}
 	if groupErr != nil && !r.warnedVolume.Swap(true) {
 		r.log.Warn("agent container: the staging volume refused to hand the credential to the Bridge's group alone, so it is "+
@@ -448,6 +461,22 @@ func (r *Runner) blockGroup(why, cause string) error {
 		// The reason an earlier run kept. Read once, and this run's own stands
 		// when a probe ended the block in between (probeGroup).
 		why = *kept
+	}
+	return &agent.NotAvailableError{Backend: r.backend, Detail: why}
+}
+
+// failGroup keeps, until the group can be given again (a group probe,
+// probe.go, or a job staged meanwhile), that the Bridge couldn't give a handed
+// credential to its group for a reason that isn't the volume refusing it
+// (groupFailed: Status reports the agent unavailable with it), logs it once
+// with err, and returns it as this run's error. Worded without the Bridge's
+// own paths, as Status's Detail must be.
+func (r *Runner) failGroup(err error) error {
+	why := "the Bridge couldn't give the agent's credential to its own group on the staging volume it shares with the " +
+		"agent container (" + ioProblem(err) + "): check that volume" + lookAgain
+	if r.groupFailed.Swap(&why) == nil {
+		r.deferProbe()
+		r.log.Warn("agent container: "+why, "bridge_gid", r.gid, "err", err)
 	}
 	return &agent.NotAvailableError{Backend: r.backend, Detail: why}
 }
