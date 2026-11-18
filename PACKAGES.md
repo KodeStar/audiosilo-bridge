@@ -2255,12 +2255,13 @@ internal/
             Journals are serving barriers. Delete recovery aborts when audio has not
             moved to owned trash; only a moved deletion is completed without a fresh
             aggregate. Install recovery aborts (abortInstall, a warning in the log)
-            when neither the staged audio nor the episode's audio exists and no later
-            step left its trace: the journal goes, the feed keeps the earlier pin and
-            the episode is fetched again. An older Bridge's failed Publish removed
-            that staged audio on exit, leaving the show refusing every write. Exclusive hard-link then unlink installs audio without
-            overwriting a concurrent foreign file; a mount without
-            hard links (SMB/CIFS, some NAS/FUSE shares) falls back to a no-replace
+            when neither the staged audio nor the episode's audio exists, the feed
+            does not pin this fetch and no chapters of it are written: the journal
+            goes, the feed keeps the earlier pin and the episode is fetched again.
+            An older Bridge's failed Publish removed that staged audio on exit,
+            leaving the show refusing every write. Exclusive hard-link then unlink
+            installs audio without overwriting a concurrent foreign file; a mount
+            without hard links (SMB/CIFS, some NAS/FUSE shares) falls back to a no-replace
             rename (renameat2 RENAME_NOREPLACE on Linux, else an absence check
             under the show and path locks). Phase 4b moved the primitive to
             fsutil (InstallNoReplace, RenameNoReplace, RenameIfAbsent); install.go

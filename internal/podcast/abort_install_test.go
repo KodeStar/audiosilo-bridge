@@ -2,6 +2,7 @@ package podcast
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"os"
 	"testing"
@@ -76,6 +77,65 @@ func TestRecoverAbortsAnInstallWhoseStagedAudioIsGone(t *testing.T) {
 	}
 	if !Matches(root, j.Path, &j.Fetch) {
 		t.Fatal("the fetched-again episode was not installed")
+	}
+}
+
+// An episode with an earlier pin (its audio removed by hand) keeps that pin
+// when its stuck install is dropped; the earlier pin's chapters stay, or, when
+// the journal carried none and its removal had already run, are not missed.
+func TestRecoverAbortKeepsTheEarlierPin(t *testing.T) {
+	for _, tc := range []struct {
+		name, boundary string
+		chapters, kept bool
+	}{
+		{"before any step", "journal", true, true},
+		{"earlier chapters removed", "sidecar", false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root, j := journalFixture(t)
+			earlier := j.Fetch
+			earlier.FetchedAt = "2026-10-20T08:00:00Z"
+			f, err := Read(root, "Fixture Show")
+			if err != nil {
+				t.Fatal(err)
+			}
+			episodeFor(f, j).Fetch = &earlier
+			if _, err := Write(root, "Fixture Show", f, time.Now()); err != nil {
+				t.Fatal(err)
+			}
+			old := *j.Chapters
+			old.GeneratedAt = earlier.FetchedAt
+			b, err := json.Marshal(old)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := EnsureDir(root, "Fixture Show/.audiosilo"); err != nil {
+				t.Fatal(err)
+			}
+			if err := root.WriteFile(AttachmentPath(j.Path, ".chapters.json"), b, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if !tc.chapters {
+				j.Chapters = nil
+			}
+			stuckInstall(t, root, j, tc.boundary)
+			if err := RecoverShow(root, "Fixture Show", time.Now(), nil); err != nil {
+				t.Fatal("a stuck install still blocks the show:", err)
+			}
+			if _, err := root.Lstat(AttachmentPath(j.Path, ".publish.json")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatal("the journal was kept:", err)
+			}
+			f, err = Read(root, "Fixture Show")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if e := episodeFor(f, j); e == nil || e.Fetch == nil || *e.Fetch != earlier {
+				t.Fatal("the feed lost the earlier pin", e)
+			}
+			if got := ReadChapters(root, j.Path, &earlier) != nil; got != tc.kept {
+				t.Fatal("the earlier pin's chapters kept:", got)
+			}
+		})
 	}
 }
 

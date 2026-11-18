@@ -188,8 +188,8 @@ func Publish(root *os.Root, j Journal, now time.Time, fault Boundary) error {
 
 // RecoverShow finishes installs and moved deletions before any other show mutation.
 // A delete whose audio has not moved is aborted: its aggregate may now be stale.
-// An install whose staged audio is gone before anything of it was written is
-// aborted too (abortInstall).
+// An install whose staged and installed audio are both gone, with the feed not
+// pinning it, is aborted too (abortInstall).
 func RecoverShow(root *os.Root, show string, now time.Time, fault Boundary) error {
 	if !ValidShow(show) {
 		return ErrInvalidFile
@@ -510,13 +510,16 @@ func stagedAudioGone(root *os.Root, j Journal) bool {
 }
 
 // abortInstall removes an install's barrier when its staged audio is gone and
-// nothing of the install was written. The journal records no step, so each step
-// after staging is proven not to have run by the trace it leaves: the audio at
-// the episode's path, the chapters attachment for this fetch (or any other the
-// episode's current pin does not own, which Publish would have refused), and
-// the feed's pin of this fetch. With any of those present it refuses, as
-// recovery did before. The feed keeps the episode's earlier pin, so the
-// episode stays not installed and is fetched again.
+// the feed does not pin this fetch. The journal records no step, so the steps
+// after staging are told by the trace they leave: the audio at the episode's
+// path, the chapters attachment for this fetch (or any other the episode's
+// current pin does not own, which Publish would have refused), and the feed's
+// pin of this fetch. With any of those present it refuses, as recovery did
+// before. Two steps can run and leave nothing: audio installed and then removed
+// by hand, and (a journal without chapters) the removal of the earlier pin's
+// attachment. Neither matters: Publish required the episode's path empty, so the
+// earlier pin had no audio there. The feed keeps the episode's earlier pin, so
+// the episode stays not installed and is fetched again.
 func abortInstall(root *os.Root, j Journal) error {
 	show := path.Dir(j.Path)
 	if j.Op != "install" || !journalValid(&j, show) {
