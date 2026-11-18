@@ -209,3 +209,12 @@ func TestCleanBounds(t *testing.T) {
 		t.Errorf("clean folds space: %q", got)
 	}
 }
+
+// The check's client goes through no proxy the environment names: the key
+// goes to the address given, as the agent's runs go (denied: a proxy).
+func TestClientUsesNoProxy(t *testing.T) {
+	tr, ok := NewClient().Transport.(*http.Transport)
+	if !ok || tr.Proxy != nil {
+		t.Fatalf("transport %T, proxy set %v", NewClient().Transport, ok && tr.Proxy != nil)
+	}
+}

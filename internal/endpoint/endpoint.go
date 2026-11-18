@@ -67,12 +67,17 @@ type Report struct {
 	ResponsesDetail string `json:"responses_detail"`
 }
 
-// NewClient is the HTTP client the check uses: bounded, and following no
-// redirect (the Authorization header must go to the address given, and a
-// redirect means the address is not the one to set).
+// NewClient is the HTTP client the check uses: bounded, following no redirect
+// (the Authorization header must go to the address given, and a redirect means
+// the address is not the one to set), and through no proxy the environment
+// names (HTTP_PROXY would see a plain-http endpoint's key, and the agent's runs,
+// whose environment has none, go direct).
 func NewClient() *http.Client {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.Proxy = nil
 	return &http.Client{
 		Timeout:       Timeout,
+		Transport:     t,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
 }

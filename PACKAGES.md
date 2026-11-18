@@ -3688,7 +3688,8 @@ internal/
             when set), then POST <base>/responses with {} to learn whether the
             Responses API is there (404/405 no; 400/422/2xx yes, the route
             answered; else unknown with the status). NewClient: 15 s, redirects
-            never followed (the key would go along; the error names where to).
+            never followed (the key would go along; the error names where to), no
+            proxy from the environment.
             Bounded: 4 MiB read, 1000 models, printable ids of 200 bytes at most,
             sorted, deduplicated. What a model says: context from context_length,
             context_window, max_context_length or max_model_len; tools from
