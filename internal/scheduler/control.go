@@ -322,7 +322,7 @@ func (s *Scheduler) CancelUnlessFollowed(ctx context.Context, id int64, g store.
 func (s *Scheduler) cancel(ctx context.Context, id int64, g *store.StopGuard) error {
 	release := s.holdDispatch(id)
 	defer release()
-	if _, err := markCancelled(ctx, s.db, id, g); err != nil {
+	if err := markCancelled(ctx, s.db, id, g); err != nil {
 		return err
 	}
 	s.cancelInflight(id)
@@ -349,38 +349,35 @@ func (s *Scheduler) publishCancelled(ctx context.Context, id int64) {
 // stage runs to interrupt, and the scheduler reads the book cancelled when it
 // starts. ErrInvalidOp for a finished book, as Cancel.
 func CancelStored(ctx context.Context, db *store.DB, id int64) error {
-	_, err := markCancelled(ctx, db, id, nil)
-	return err
+	return markCancelled(ctx, db, id, nil)
 }
 
 // CancelStoredUnlessFollowed is CancelStored written only while g holds, as
 // CancelUnlessFollowed.
 func CancelStoredUnlessFollowed(ctx context.Context, db *store.DB, id int64, g store.StopGuard) error {
-	_, err := markCancelled(ctx, db, id, &g)
-	return err
+	return markCancelled(ctx, db, id, &g)
 }
 
-// markCancelled marks book id cancelled in the store and returns it as read; with
-// g, only while g holds (store.ErrFollowed otherwise), and never over a stage's
-// failure: store.ErrSettled for a book read failed by other than a cancel, or one
+// markCancelled marks book id cancelled in the store; with g, only while g holds
+// (store.ErrFollowed otherwise), and never over a stage's failure: store.ErrSettled for a book read failed by other than a cancel, or one
 // that finished or changed status between the read and the write (a job's end
 // read the book before this, and a stage may have failed it since).
-func markCancelled(ctx context.Context, db *store.DB, id int64, g *store.StopGuard) (store.Book, error) {
+func markCancelled(ctx context.Context, db *store.DB, id int64, g *store.StopGuard) error {
 	b, err := db.GetBook(ctx, id)
 	if err != nil {
-		return b, err
+		return err
 	}
 	if state.IsTerminal(state.State(b.State)) {
-		return b, ErrInvalidOp
+		return ErrInvalidOp
 	}
 	// Cancel is not a park (no typed reason), so the park_code stays empty.
 	if g != nil {
 		if state.Status(b.Status) == state.StatusFailed && !IsCancelled(b) {
-			return b, store.ErrSettled
+			return store.ErrSettled
 		}
-		return b, db.SetBookStatusUnlessFollowed(ctx, id, b.Status, b.Error, string(state.StatusFailed), cancelledReason, *g)
+		return db.SetBookStatusUnlessFollowed(ctx, id, b.Status, b.Error, string(state.StatusFailed), cancelledReason, *g)
 	}
-	return b, db.SetBookStatus(ctx, id, string(state.StatusFailed), cancelledReason, "")
+	return db.SetBookStatus(ctx, id, string(state.StatusFailed), cancelledReason, "")
 }
 
 // Delete removes a book, its durable state, and its on-disk work dir. It refuses
