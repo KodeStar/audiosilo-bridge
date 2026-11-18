@@ -68,6 +68,8 @@ export interface SetupItem {
   required: boolean;
   detail?: string;
   library_ids?: number[];
+  // The item waits for an ASR worker: the Workers tab fixes it (bridge#28).
+  needs_worker?: boolean;
 }
 
 // link.Setup
@@ -157,6 +159,9 @@ export interface Park {
   hint: string;
   // RFC 3339: an availability park resumes by itself then.
   retry_at?: string;
+  // The park's message for people, without its code (bridge#28); absent from
+  // a job parked by an earlier Bridge, whose error carries it.
+  message?: string;
 }
 
 // The sources a sidecars.generate run reads.
@@ -465,7 +470,6 @@ export interface AudibleAccount {
   library_id: number;
   library_name: string;
   policy: AudiblePolicy;
-  sync: boolean;
   created_at: string;
   last_ok_at: string;
   last_poll_at: string;

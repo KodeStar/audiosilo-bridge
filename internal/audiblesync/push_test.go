@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -196,6 +197,39 @@ func TestPushBaselineSkipsHistory(t *testing.T) {
 	}
 }
 
+// The baseline reads a row's updated_at against the server's clock (the feed's
+// server_time, bridge#50): with the Bridge's clock an hour ahead, a place the
+// server changed 2 min ago still waits to be written and one from yesterday
+// stays history; with the Bridge's clock alone (a server before 2.7.0 sends
+// none) the recent one would read as history.
+func TestPushBaselineReadsTheServersClock(t *testing.T) {
+	for name, c := range map[string]struct {
+		serverTime bool
+		want       []string
+	}{
+		"server_time":                      {true, []string{"B000000002@900000"}},
+		"no server_time (an older server)": {false, nil},
+	} {
+		t.Run(name, func(t *testing.T) {
+			e := newEnv(t)
+			e.list(t, st("B000000001", "A/One", 36000), st("B000000002", "A/Two", 36000))
+			server := e.now.Add(-time.Hour) // the Bridge's clock is an hour ahead
+			if c.serverTime {
+				e.srv.clock = server
+			}
+			e.srv.add("A/One", "B000000001", 600, server.Add(-24*time.Hour), "web-1")
+			e.srv.add("A/Two", "B000000002", 900, server.Add(-2*time.Minute), "web-1")
+			p := NewPusher(e.o)
+			p.Tick(context.Background())
+			e.now = e.now.Add(3 * time.Minute)
+			p.Tick(context.Background())
+			if got := e.sets(); !slices.Equal(got, c.want) {
+				t.Fatalf("sets = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
 // Denied: a refused account (the "Sign in again" state) neither reads the feed
 // nor writes; an account the server answers sync_off for is left for a while.
 // A failure writing to Audible that asks to wait keeps the place and records
@@ -367,6 +401,31 @@ func TestPushLeavesAudibleFurtherOn(t *testing.T) {
 	p.Tick(context.Background())
 	if got := e.sets(); len(got) != 2 || got[1] != "B000000001@1200000" {
 		t.Fatalf("a move back wasn't written: %v", got)
+	}
+}
+
+// A read Audible refuses partway (a 4xx after some batches) still keeps the
+// places it gave before the refusal (bridge#50): one Audible moved further on
+// isn't overwritten, and the titles it didn't answer are written as when
+// Audible has no place.
+func TestPushKeepsPlacesReadBeforeARefusal(t *testing.T) {
+	e := newEnv(t)
+	e.list(t, st("B000000001", "A/One", 36000), st("B000000002", "A/Two", 36000))
+	p := NewPusher(e.o)
+	e.started(t, p)
+	e.srv.add("A/One", "B000000001", 3000, e.now, "web-1")
+	e.srv.add("A/Two", "B000000002", 3000, e.now, "web-1")
+	e.read(p)
+	e.accts.mu.Lock()
+	e.accts.places["B000000001"] = audible.Position{PositionMs: 5_000_000, LastUpdated: e.now}
+	e.accts.places["B000000002"] = audible.Position{PositionMs: 5_000_000, LastUpdated: e.now}
+	e.accts.readFirst = []string{"B000000001"}
+	e.accts.placesErr = audibleAnswer(t, http.StatusBadRequest, "")
+	e.accts.mu.Unlock()
+	e.now = e.now.Add(4 * time.Minute)
+	p.Tick(context.Background())
+	if got := e.sets(); len(got) != 1 || got[0] != "B000000002@3000000" {
+		t.Fatalf("sets = %v, want only the title Audible didn't answer", got)
 	}
 }
 

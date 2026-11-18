@@ -418,15 +418,21 @@ var stopwords = map[string]bool{
 
 // Sanitize makes a path segment safe to create on disk without mangling the
 // punctuation that real library folders use (apostrophes, commas, periods).
-// A leading dot goes too ("...And Ladies of the Club", ".hack"): a hidden
-// name is never indexed by the server's scan. librivox.fetch names its
+// The characters an SMB share or a Windows disk can't store go too (bridge#47:
+// "Who Moved My Cheese?" is "Who Moved My Cheese"): ? * < > are dropped, a
+// double quote becomes an apostrophe and | a hyphen, and control characters
+// (NUL among them, which neither stores either) and the runs of spaces a drop
+// leaves are one space. A leading dot goes too ("...And Ladies of the Club", ".hack"): a
+// hidden name is never indexed by the server's scan. librivox.fetch names its
 // section files with it too, so a book's folder and its files follow one rule.
 func Sanitize(s string) string {
-	s = strings.TrimSpace(s)
-	replacer := strings.NewReplacer("/", "-", "\\", "-", ":", " -", "\x00", "")
-	s = replacer.Replace(s)
+	s = segmentReplacer.Replace(s)
+	s = strings.Join(strings.FieldsFunc(s, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }), " ")
 	return strings.Trim(s, " .")
 }
+
+var segmentReplacer = strings.NewReplacer("/", "-", "\\", "-", ":", " -",
+	"?", "", "*", "", "<", "", ">", "", "\"", "'", "|", "-")
 
 func isDigit(b byte) bool { return b >= '0' && b <= '9' }
 func isLetterRune(r rune) bool {

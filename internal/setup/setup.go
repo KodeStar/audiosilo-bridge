@@ -33,8 +33,9 @@ const (
 )
 
 // DetailASRWaiting is the asr item's detail while the engine waits for an ASR
-// worker (asr.worker_fallback: wait). The page matches it (web/src/lib/setup.ts)
-// to link the Workers tab, so keep the words stable.
+// worker (asr.worker_fallback: wait); the item says so in NeedsWorker too, which
+// the page and the console link the Workers tab by (bridge#28). A console older
+// than that flag matches these words, so keep them stable.
 const DetailASRWaiting = "waiting for an ASR worker"
 
 // DetailLibrariesChecking is the libraries item's detail from pairing until the
@@ -209,7 +210,7 @@ func Checklist(in Inputs) link.Setup {
 	case !asrDone:
 		asrDetail = firstNonEmpty(in.ASR.Detail, "speech recognition isn't available")
 	}
-	add(ItemASR, asrDone, true, asrDetail)
+	add(ItemASR, asrDone, true, asrDetail).NeedsWorker = in.ASR.Started && in.ASR.Waiting
 
 	// Optional (the owner's call on bridge#36, reversing FIRST-RUN F2): podcasts,
 	// read-along, chapters and Audible need no agent. The Accounts tab carries the

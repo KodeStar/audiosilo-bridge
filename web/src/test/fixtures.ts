@@ -247,7 +247,6 @@ export function audibleAccountFixture(over: Partial<AudibleAccount> = {}): Audib
     library_id: 1,
     library_name: 'Books',
     policy: 'manual',
-    sync: true,
     created_at: '2026-11-03T10:00:00Z',
     last_ok_at: '2026-11-03T11:00:00Z',
     last_poll_at: '2026-11-03T11:00:00Z',

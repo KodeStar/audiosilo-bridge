@@ -55,46 +55,76 @@ type Position struct {
 // doesn't overflow the query-string length limit; results are merged. onProgress
 // (may be nil) is called with the cumulative count of ASINs fetched after each
 // batch, so a caller can show a progress bar over a large library.
+//
+// A batch that fails ends the read with its error, and the map returned beside
+// it holds every place read before it (bridge#50: a rate limit late in a large
+// library no longer throws away the batches already read). A caller that only
+// trusts a whole read checks the error first.
+//
+// An ASIN Audible refuses asked alone (a 400 for a list of one, so not the
+// list's length) is left out like one with no place, once Audible has answered
+// another list of the read: a title it always refuses no longer ends every read
+// before the titles after it. Until something is answered the refusal is the
+// read's error, at the end of its batch: Audible refusing everything is no read.
 func (c *Client) LastPositions(ctx context.Context, asins []string, onProgress func(done int)) (map[string]Position, error) {
 	out := make(map[string]Position, len(asins))
+	var (
+		answered bool     // Audible answered a list of this read
+		refused  error    // its 400 for an ASIN asked alone
+		left     []string // the ASINs it refused so
+	)
+	fetch := func(batch []string) error {
+		err := c.lastPositionsOf(ctx, batch, out)
+		switch {
+		case err == nil:
+			answered = true
+		case len(batch) == 1 && HTTPStatus(err) == http.StatusBadRequest:
+			refused, err, left = err, nil, append(left, batch[0])
+		}
+		return err
+	}
 	for start := 0; start < len(asins); start += lastPositionsBatch {
 		end := min(start+lastPositionsBatch, len(asins))
-		if err := c.lastPositionsChunk(ctx, asins[start:end], out); err != nil {
-			return nil, err
+		if err := splitOnOverflow(asins[start:end], fetch); err != nil {
+			return out, err
+		}
+		if refused != nil && !answered {
+			return out, refused
 		}
 		if onProgress != nil {
 			onProgress(end)
 		}
 	}
+	if len(left) > 0 && c.set.log != nil {
+		c.set.log.Info("audible: Audible refused the place of some titles asked alone; left out of the read", "asins", left)
+	}
 	return out, nil
 }
 
-// lastPositionsChunk fetches one batch of ASINs and merges the "Exists" positions
-// into out, split by splitOnOverflow.
-func (c *Client) lastPositionsChunk(ctx context.Context, asins []string, out map[string]Position) error {
-	return splitOnOverflow(asins, func(batch []string) error {
-		path := "/1.0/annotations/lastpositions?" + url.Values{"asins": {strings.Join(batch, ",")}}.Encode()
-		var resp struct {
-			Annots []struct {
-				ASIN string `json:"asin"`
-				Last struct {
-					Status      string `json:"status"`
-					PositionMs  flexMS `json:"position_ms"`
-					LastUpdated string `json:"last_updated"`
-				} `json:"last_position_heard"`
-			} `json:"asin_last_position_heard_annots"`
+// lastPositionsOf asks for one list of ASINs and merges the "Exists" positions
+// into out.
+func (c *Client) lastPositionsOf(ctx context.Context, asins []string, out map[string]Position) error {
+	path := "/1.0/annotations/lastpositions?" + url.Values{"asins": {strings.Join(asins, ",")}}.Encode()
+	var resp struct {
+		Annots []struct {
+			ASIN string `json:"asin"`
+			Last struct {
+				Status      string `json:"status"`
+				PositionMs  flexMS `json:"position_ms"`
+				LastUpdated string `json:"last_updated"`
+			} `json:"last_position_heard"`
+		} `json:"asin_last_position_heard_annots"`
+	}
+	if err := c.doSigned(ctx, http.MethodGet, path, nil, &resp); err != nil {
+		return err
+	}
+	for _, a := range resp.Annots {
+		if a.Last.Status != "Exists" {
+			continue
 		}
-		if err := c.doSigned(ctx, http.MethodGet, path, nil, &resp); err != nil {
-			return err
-		}
-		for _, a := range resp.Annots {
-			if a.Last.Status != "Exists" {
-				continue
-			}
-			out[a.ASIN] = Position{PositionMs: int64(a.Last.PositionMs), LastUpdated: parseLastUpdated(a.Last.LastUpdated)}
-		}
-		return nil
-	})
+		out[a.ASIN] = Position{PositionMs: int64(a.Last.PositionMs), LastUpdated: parseLastUpdated(a.Last.LastUpdated)}
+	}
+	return nil
 }
 
 // splitOnOverflow calls fetch with asins, and when Audible refuses a list of

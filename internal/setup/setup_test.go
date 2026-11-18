@@ -74,8 +74,15 @@ func TestChecklistMissing(t *testing.T) {
 	if a := item(t, s, ItemAgent); a.Done || a.Required || a.Detail != DetailAgentNoCredential {
 		t.Fatalf("agent = %+v", a)
 	}
-	if a := item(t, s, ItemASR); a.Done || a.Detail != "waiting for an ASR worker" { // the page matches these words
+	// An older console matches these words; the page and a newer console read
+	// NeedsWorker (bridge#28).
+	if a := item(t, s, ItemASR); a.Done || a.Detail != "waiting for an ASR worker" || !a.NeedsWorker {
 		t.Fatalf("asr = %+v", a)
+	}
+	for _, other := range s.Items {
+		if other.ID != ItemASR && other.NeedsWorker {
+			t.Fatalf("%s needs a worker", other.ID)
+		}
 	}
 	if b := item(t, s, ItemBudget); b.Done || b.Detail != "$12.50 a month" {
 		t.Fatalf("budget = %+v", b)
@@ -91,8 +98,14 @@ func TestChecklistMissing(t *testing.T) {
 	if l := item(t, Checklist(none), ItemLibraries); l.Done || l.Detail != "the server has no libraries yet" {
 		t.Fatalf("no libraries = %+v", l)
 	}
-	if item(t, s, ItemPaired).Done || item(t, s, ItemASR).Detail != "the engine is starting" {
+	if item(t, s, ItemPaired).Done || item(t, s, ItemASR).Detail != "the engine is starting" || item(t, s, ItemASR).NeedsWorker {
 		t.Fatalf("%+v", s.Items)
+	}
+	// Speech recognition of its own: no worker needed.
+	local := done()
+	local.ASR = ASR{Started: true, Available: true}
+	if a := item(t, Checklist(local), ItemASR); a.NeedsWorker {
+		t.Fatalf("local asr needs a worker: %+v", a)
 	}
 	// A refused token isn't paired but keeps its libraries: they are counted,
 	// not called missing a pairing.

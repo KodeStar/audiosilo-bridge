@@ -1248,6 +1248,9 @@ func (p *Reporter) send() bool {
 // error always goes out: the park's message while parked, else "", which clears
 // the one a park left.
 func (p *Reporter) updateOf(pr Progress, parked bool, parkMsg string) (link.Update, json.RawMessage) {
+	if parked {
+		pr = withParkMessage(pr, parkMsg)
+	}
 	raw, _ := json.Marshal(pr)
 	state := link.StateRunning
 	if parked {
@@ -1258,6 +1261,36 @@ func (p *Reporter) updateOf(pr Progress, parked bool, parkMsg string) (link.Upda
 		u.Progress = raw
 	}
 	return u, raw
+}
+
+// withParkMessage puts a parked job's message for people beside its park in pr
+// (progress park.message, bridge#28), so the page reads it there rather than
+// taking the code off the job's error: msg without the "<code>: " the engine
+// may lead it with, none when that leaves only the code (a message an earlier
+// report left there, a park carried over or restored after a restart, goes). A
+// progress naming no park is left as it is; pr's own maps are never changed.
+func withParkMessage(pr Progress, msg string) Progress {
+	named, ok := pr.Extra["park"].(map[string]any)
+	if !ok {
+		return pr
+	}
+	code, _ := named["code"].(string)
+	if code != "" {
+		msg = strings.TrimSpace(strings.TrimPrefix(msg, code+":"))
+	}
+	none := msg == "" || msg == code
+	if _, had := named["message"]; none && !had {
+		return pr
+	}
+	park := maps.Clone(named)
+	if none {
+		delete(park, "message")
+	} else {
+		park["message"] = msg
+	}
+	pr.Extra = maps.Clone(pr.Extra)
+	pr.Extra["park"] = park
+	return pr
 }
 
 // failed notes a report that didn't get through: the job goes on, and its lease
@@ -1314,7 +1347,8 @@ func (p *Reporter) answer(got *link.Job, err error) bool {
 		p.mu.Unlock()
 	}
 	switch {
-	case err == nil && got.CancelRequested:
+	case err == nil && got.CancelRequested, errors.Is(err, link.ErrCancelledHere):
+		// A cancel, asked for or already done on the server (ErrCancelledHere).
 		p.cancel(errCancelRequested)
 	case errors.Is(err, link.ErrNotHeld):
 		p.cancel(errLost)

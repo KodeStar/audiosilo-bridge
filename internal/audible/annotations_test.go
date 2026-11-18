@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -71,6 +72,100 @@ func TestLastPositionsChunks(t *testing.T) {
 	// a single ~all-ASINs query returning HTTP 414, Request-URI Too Long).
 	if maxQueryLen > 2048 {
 		t.Fatalf("max query length = %d, want <= 2048", maxQueryLen)
+	}
+}
+
+// A batch that fails ends the read, and the places of the batches read before
+// it come back with the error (bridge#50), never thrown away.
+func TestLastPositionsKeepsBatchesBeforeAFailure(t *testing.T) {
+	asins := make([]string, 2*lastPositionsBatch+3)
+	for i := range asins {
+		asins[i] = fmt.Sprintf("B%09d", i)
+	}
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 2 {
+			http.Error(w, `{"message":"gone"}`, http.StatusNotFound)
+			return
+		}
+		var annots []string
+		for a := range strings.SplitSeq(r.URL.Query().Get("asins"), ",") {
+			annots = append(annots, fmt.Sprintf(`{"asin":%q,"last_position_heard":{"status":"Exists","position_ms":5000}}`, a))
+		}
+		_, _ = io.WriteString(w, `{"asin_last_position_heard_annots":[`+strings.Join(annots, ",")+`]}`)
+	}))
+	defer srv.Close()
+
+	got, err := testClient(t, srv.URL).LastPositions(context.Background(), asins, nil)
+	if err == nil || HTTPStatus(err) != http.StatusNotFound {
+		t.Fatalf("err = %v, want the second batch's 404", err)
+	}
+	if len(got) != lastPositionsBatch || got[asins[0]].PositionMs != 5000 || calls != 2 {
+		t.Fatalf("places = %d (calls %d), want the first batch's %d", len(got), calls, lastPositionsBatch)
+	}
+	if _, ok := got[asins[lastPositionsBatch]]; ok {
+		t.Fatal("a place of the failed batch came back")
+	}
+}
+
+// An ASIN Audible refuses even asked alone (a 400 for a list of one) is left
+// out and the read goes on: the titles beside and after it are still read.
+// Denied: while Audible has answered nothing the refusal is the read's error,
+// for one ASIN or for every list, and ends the read at its first batch.
+func TestLastPositionsLeavesOutARefusedASIN(t *testing.T) {
+	asins := make([]string, 2*lastPositionsBatch+3)
+	for i := range asins {
+		asins[i] = fmt.Sprintf("B%09d", i)
+	}
+	bad := asins[lastPositionsBatch+4] // in the second batch
+	var calls int
+	refuseAll := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		got := strings.Split(r.URL.Query().Get("asins"), ",")
+		if refuseAll || slices.Contains(got, bad) {
+			http.Error(w, `{"message":"1 validation error detected"}`, http.StatusBadRequest)
+			return
+		}
+		var annots []string
+		for _, a := range got {
+			annots = append(annots, fmt.Sprintf(`{"asin":%q,"last_position_heard":{"status":"Exists","position_ms":5000}}`, a))
+		}
+		_, _ = io.WriteString(w, `{"asin_last_position_heard_annots":[`+strings.Join(annots, ",")+`]}`)
+	}))
+	defer srv.Close()
+	c := testClient(t, srv.URL)
+
+	var done []int
+	got, err := c.LastPositions(context.Background(), asins, func(n int) { done = append(done, n) })
+	if err != nil {
+		t.Fatalf("err = %v, want the read to go on past the refused ASIN", err)
+	}
+	if _, ok := got[bad]; ok || len(got) != len(asins)-1 {
+		t.Fatalf("places = %d (refused one there: %v), want every other title's %d", len(got), ok, len(asins)-1)
+	}
+	if !slices.Equal(done, []int{lastPositionsBatch, 2 * lastPositionsBatch, len(asins)}) {
+		t.Fatalf("progress = %v", done)
+	}
+
+	// Nothing answered yet: the refusal is the error.
+	if got, err := c.LastPositions(context.Background(), []string{bad}, nil); HTTPStatus(err) != http.StatusBadRequest || len(got) != 0 {
+		t.Fatalf("the refused ASIN alone = %v, %v; want its 400", got, err)
+	}
+	// The refused ASIN first, before anything is answered, is still left out:
+	// its batch answers for the others.
+	if got, err := c.LastPositions(context.Background(), []string{bad, asins[0], asins[1]}, nil); err != nil || len(got) != 2 {
+		t.Fatalf("the refused ASIN first = %v, %v; want the other two places", got, err)
+	}
+	// Audible refusing every list ends the read at its first batch.
+	refuseAll, calls = true, 0
+	got, err = c.LastPositions(context.Background(), asins, nil)
+	if HTTPStatus(err) != http.StatusBadRequest || len(got) != 0 {
+		t.Fatalf("every list refused = %v, %v; want the 400", got, err)
+	}
+	if calls >= 2*lastPositionsBatch {
+		t.Fatalf("%d calls with every list refused, want only the first batch's", calls)
 	}
 }
 

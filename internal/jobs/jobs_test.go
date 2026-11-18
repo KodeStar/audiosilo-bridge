@@ -26,6 +26,7 @@ type fakeServer struct {
 	claims   [][]string
 	cancel   map[int64]bool   // answer cancel_requested for these
 	notHeld  map[int64]bool   // answer 409 not_held for these
+	gone     map[int64]bool   // answer 409 not_held, reason cancelled, for these
 	failing  bool             // every update fails with a network error
 	unauthed bool             // every call is a 401
 	hang     chan struct{}    // updates wait for it to close (nil: none)
@@ -36,7 +37,7 @@ type fakeServer struct {
 
 func newFakeServer() *fakeServer {
 	return &fakeServer{updates: map[int64][]link.Update{}, cancel: map[int64]bool{}, notHeld: map[int64]bool{},
-		tries: map[int64]int{}, changed: make(chan struct{})}
+		gone: map[int64]bool{}, tries: map[int64]int{}, changed: make(chan struct{})}
 }
 
 func (f *fakeServer) add(j *link.Job) {
@@ -89,6 +90,9 @@ func (f *fakeServer) UpdateJob(ctx context.Context, id int64, u link.Update) (*l
 	f.updates[id] = append(f.updates[id], u)
 	close(f.changed)
 	f.changed = make(chan struct{})
+	if f.gone[id] {
+		return nil, link.ErrCancelledHere
+	}
 	if f.notHeld[id] {
 		return nil, link.ErrNotHeld
 	}

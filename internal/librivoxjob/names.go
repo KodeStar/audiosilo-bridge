@@ -7,7 +7,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"unicode"
 	"unicode/utf8"
 
 	"github.com/kodestar/audiosilo-bridge/internal/importjob"
@@ -28,12 +27,11 @@ const variousAfter = 3
 // Various is the author folder of a work with more than variousAfter authors.
 const Various = "Various"
 
-// segment is s as one path segment: control characters and runs of spaces as
-// one space, placement's Sanitize (no "/", "\\" or NUL, ":" as " -", no
-// leading or trailing dot or space), cut to maxName bytes on a rune boundary
-// and trimmed again. "" when nothing is left ("..", "   ").
+// segment is s as one path segment: placement's Sanitize (no "/" or "\\", ":"
+// as " -", nothing an SMB share refuses, control characters and runs of spaces
+// as one space, no leading or trailing dot or space), cut to maxName bytes on a
+// rune boundary and trimmed again. "" when nothing is left ("..", "   ").
 func segment(s string) string {
-	s = strings.Join(strings.FieldsFunc(s, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }), " ")
 	s = placement.Sanitize(s)
 	if len(s) > maxName {
 		cut := maxName

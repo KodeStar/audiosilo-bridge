@@ -1236,7 +1236,9 @@ internal/
             (link.Setup) in its fixed order: paired, libraries, asr, agent, budget,
             github, audible (Phase 4a, optional: done with an account signed in and
             none refused; an additive id older servers and pages leave out; with
-            every account mapped on another server it says so, bridge#64), each {id, done, required, detail}; details cut to 200
+            every account mapped on another server it says so, bridge#64), each {id, done, required, detail,
+            needs_worker (the asr item while it waits for an ASR worker: the page and the console link
+            Workers by it, bridge#28; an older console still matches DetailASRWaiting's words)}; details cut to 200
             characters and worded for the console (the budget's "$100 a month" or
             "no monthly cap"); Complete is every required item done. The heartbeat
             sends it and the page's Status tab shows it (the console shows the
@@ -1821,7 +1823,11 @@ internal/
             grammar (a test holds the regex). Wire types mirror the server's
             internal/bridge BY HAND (no codegen): a change there is a change here,
             with a test on both sides. Answers map to ErrUnauthorized (401: the token
-            was revoked), ErrNotHeld (409 not_held/finished), ErrNoHeartbeat,
+            was revoked), ErrNotHeld (409 not_held/finished; ErrCancelledHere, still
+            ErrNotHeld, for a not_held with reason "cancelled", bridge#35: the job was
+            cancelled after this claim took it, by an admin (parked or working), by
+            the server itself, by a move of its book, or its lease ran out after a
+            cancel was asked), ErrNoHeartbeat,
             ErrNoBook, ErrNotIndexable (a rescan's 404 not_indexable), else *APIError
             (an HTML proxy page never becomes a message; RetryAfter carries a 429's
             Retry-After, seconds or an HTTP date, clamped at a day; RetryAfterSet
@@ -1883,8 +1889,8 @@ internal/
             the Wire block's fields. Phase 4c, audiblesync.go: AudibleSyncParams/Title (audible.sync's
             server-built params), PostAudibleListening (POST .../listening {sent_at, events}: a listen of
             no length or a finish, answered {server_time, results, progress}) and AudibleProgress (GET
-            /bridge/progress?account=&since=&limit= -> {rows, next, more}: next opaque and kept between
-            polls); 403 sync_off -> ErrSyncOff, 403 user_unavailable -> ErrUserUnavailable, a 400
+            /bridge/progress?account=&since=&limit= -> {rows, next, more, server_time}: next opaque and kept between
+            polls, server_time absent before server 2.7.0); 403 sync_off -> ErrSyncOff, 403 user_unavailable -> ErrUserUnavailable, a 400
             on a sent since -> ErrBadCursor (bridge#50), a 404 for a missing route (code not_found,
             or none) -> ErrNoAudibleSync (a server before 2.6.0; a 404 with any other code stays
             the APIError, bridge#50).
@@ -1990,8 +1996,13 @@ internal/
             the job now, parked as it is, for another job it stands in the way
             of: nil while the server holds it, ErrStopped when the answer (a
             cancel, a lost claim) ended it. A reply
-            with cancel_requested ends its context (errCancelRequested -> reported
-            cancelled), a 409 ends it as lost (nothing more sent), a 401 is handed to
+            with cancel_requested, or a 409 not_held with reason "cancelled"
+            (link.ErrCancelledHere, bridge#35: any cancel of a claimed job, an
+            admin's of a parked one, which ends at once, among them), ends its context (errCancelRequested -> reported
+            cancelled), any other 409 ends it as lost (nothing more sent). A parked
+            report carries the park's message for people in progress park.message
+            (withParkMessage: the job's park message without the "<code>: " an
+            engine message leads with; bridge#28), which the page shows; a 401 is handed to
             the app WITH the link that got it (onUnauthorized(srv): a job of the
             previous pairing still reporting with its revoked token must not refuse
             a new pairing). A stopping Bridge (base context ended) leaves the row
@@ -2149,7 +2160,12 @@ internal/
             2200-01-01 for some old titles): issue_date stands in, else no date,
             which reads as released; such a title logs its raw date, delivery type
             and rights once through WithLogger, never a token or the customer id); LastPositions
-            (25 ASINs a request, split on a 400; Position{PositionMs, LastUpdated},
+            (25 ASINs a request, split on a 400; a failed batch ends the read and
+            the places read before it come back beside the error, bridge#50; an
+            ASIN still refused 400 asked alone is left out like one with no place
+            once another list of the read was answered, logged through WithLogger,
+            else its 400 is the read's error at the end of its batch;
+            Position{PositionMs, LastUpdated},
             last_updated read as UTC, zero when absent) and SetLastPosition (needs the
             ACR, ContentACR); License + DecryptVoucher (AAXC key/iv) (AAXC only: the
             manager's AAX activation bytes and its sims series watch were dropped on
@@ -2486,7 +2502,11 @@ internal/
             done import whose book isn't the title's). spelled and vacant are free
             functions over a transfer.LibraryFS (the import's methods open the
             mount's os.Root and call them; vacant also returns the conflict:
-            link.ConflictFile|Book|Audio; listedBook is its books-listing part). License (denials mapped as the title's; a title
+            link.ConflictFile|Book|Audio; listedBook is its books-listing part;
+            formerDirs adds the folder the destination's was under the name rule
+            before bridge#47, found on disk as a name Sanitize now turns into
+            the folder's, so a title backed up as "Who Moved My Cheese?" is
+            exists, not downloaded again). License (denials mapped as the title's; a title
             only offered as a DRM-free MP3 fails drm_free: not backed up yet), download to <data>/audible/tmp/<acct>-<asin>.aaxc.part (free
             space: the tmp folder 2.2x the size less what the partial holds, the
             library 1.1x, else disk_full; a free space that can't be read is no
@@ -2542,8 +2562,9 @@ internal/
             server keeps queueing: the next poll Audible answers ends it), another server's or none
             unknown_account; lists the titles (store.ListAudibleSync) first, then while sync_retry_at
             is ahead ends "waiting" without calling Audible; reads the push's rows, then lastpositions
-            (in batches of 25 ASINs, split on 400/414; a 429/503 waits Audible's Retry-After from when
-            it came back, at least 2 min), skips a place under 1 s, past the runtime (5% + 2 min), older than 85 days
+            (in batches of 25 ASINs, split on 400/414, in a new random order each sync; a 429/503 waits Audible's Retry-After from when
+            it came back, at least 2 min; a read Audible stops partway still syncs the places it gave,
+            then fails as a whole failed read does, bridge#50), skips a place under 1 s, past the runtime (5% + 2 min), older than 85 days
             or within 5 s of the place last written (its echo), posts a listen of no length (from_pos =
             to_pos, started_at = ended_at = last_updated, start jump; id EventID: "aud-" + 32 hex of
             sha256(account|asin|position_ms|last_updated|kind|library_id|path), kind "" or "finish", so
@@ -2561,7 +2582,8 @@ internal/
             update, bridge#50; this loop only): reads the feed from push_cursor (it pages in the server's write order, change_seq, and
             may give a row again with updated_at unchanged, so a row is new by its place alone (a new version at the same place is none),
             never its time; the baseline, every read until one reaches the feed's end, takes only rows
-            of the last 10 min by updated_at, history after it is none; a row it fails to record keeps
+            of the last 10 min by updated_at (counted back from the page's server_time, the server's
+            clock, else the Bridge's from a server before 2.7.0, bridge#50), history after it is none; a row it fails to record keeps
             the cursor, so the pass reads it again; a cursor the server refuses,
             400, goes back to the feed's start, bridge#50), skips rows by audible:<account>, keeps a
             row on a title the last sync didn't list for that book pending (listed 0,
@@ -2647,8 +2669,12 @@ internal/
             folder and shortcode convention, else author/title) and templates.
             Phase 4b: a generated segment loses its leading dots too ("...And
             Ladies of the Club", ".hack"): a hidden name is never indexed.
+            bridge#47: Sanitize drops what an SMB share or a Windows disk can't
+            store (? * < > dropped, " as ', | as -, control characters as a
+            space, the spaces a drop leaves closed up).
             LibriVox L6 exports Sanitize (librivoxjob names its section files
-            with it).
+            with it; an Audible backup's file name, audible's safeFileName, is
+            Sanitize too, "audiobook" when it leaves nothing).
   librivoxjob/ LibriVox L6 (LIBRIVOX-PLAN.md), librivox.fetch on the download lane
             (capacity 1, shared with audible.import and an ordinary podcast.fetch:
             one book at a time). Params
@@ -2677,8 +2703,8 @@ internal/
             the work's, or the project's own when the work has more than one
             LibriVox recording; author = the first credit, Various over three;
             no author places at the library root; nothing left of a title is
-            "LibriVox <id>". Names: control characters and space runs folded,
-            Sanitize, cut to 180 bytes on a rune boundary; files "NN - <section
+            "LibriVox <id>". Names: Sanitize (which folds control characters and
+            space runs), cut to 180 bytes on a rune boundary; files "NN - <section
             title>.<ext>" (NN the 1-based position, at least two digits, the
             count's width; never section_number; a title opening with the
             section's own number and a separator ("1 - ", "1. ", "1: ", "1) ",
@@ -2890,7 +2916,8 @@ internal/
             job's progress: the stage as step ("waiting" while queued), a plain-words
             label (stageLabels), the stage's done/total, and Extra {stage, source,
             cost_usd (budget basis, rounded to the cent), eta_seconds (not while parked
-            or paused), park {code, hint, retry_at}}; an engine park is
+            or paused), park {code, hint, retry_at, message (added by the
+            Reporter)}}; an engine park is
             Reporter.Park(code, error), its end Unpark. A book parked AT contributing
             (core_needed and co.) still gets its local files written. FINISH: the
             sidecars (pipeline.FinalSidecarsPaths) must decode into the meta model and
@@ -3617,7 +3644,9 @@ internal/
             plus backend and device), and followWaiting: ONE level-triggered loop that
             re-admits asr_worker_waiting books whenever router.CanRun(), looking
             every 30 s, when a worker connects (hub.WhenConnected), at the engine's
-            start and after a settings save (kickWaiting).
+            start and after a settings save (kickWaiting). engineStarted also
+            re-admits the books parked contrib_unavailable once a GitHub token
+            resolves (a sign-in during the start re-admitted nothing, bridge#25).
             Phase 1a: engine.go wires the ENGINE the way sidecars' daemon did, minus
             the folder scan, and runs it in the background from Run (the first start
             may download ffmpeg; the generate job waits for it): the event hub with

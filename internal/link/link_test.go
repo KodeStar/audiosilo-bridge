@@ -144,8 +144,20 @@ func TestUpdateJob(t *testing.T) {
 	}
 	for _, code := range []string{"not_held", "finished"} {
 		f.status, f.body = http.StatusConflict, `{"error":"x","code":"`+code+`"}`
-		if _, err := c.UpdateJob(context.Background(), 7, Update{Attempt: 1}); !errors.Is(err, ErrNotHeld) {
-			t.Errorf("409 %s = %v, want ErrNotHeld", code, err)
+		if _, err := c.UpdateJob(context.Background(), 7, Update{Attempt: 1}); !errors.Is(err, ErrNotHeld) || errors.Is(err, ErrCancelledHere) {
+			t.Errorf("409 %s = %v, want ErrNotHeld only", code, err)
+		}
+	}
+	// A job cancelled while this claim held it (bridge#35): still ErrNotHeld,
+	// and ErrCancelledHere. Only not_held carries the reason.
+	f.status, f.body = http.StatusConflict, `{"error":"x","code":"not_held","reason":"cancelled"}`
+	if _, err := c.UpdateJob(context.Background(), 7, Update{Attempt: 1}); !errors.Is(err, ErrCancelledHere) || !errors.Is(err, ErrNotHeld) {
+		t.Errorf("409 not_held cancelled = %v, want ErrCancelledHere", err)
+	}
+	for _, body := range []string{`{"code":"finished","reason":"cancelled"}`, `{"code":"not_held","reason":"lapsed"}`} {
+		f.status, f.body = http.StatusConflict, body
+		if _, err := c.UpdateJob(context.Background(), 7, Update{Attempt: 1}); errors.Is(err, ErrCancelledHere) || !errors.Is(err, ErrNotHeld) {
+			t.Errorf("409 %s = %v, want ErrNotHeld only", body, err)
 		}
 	}
 }

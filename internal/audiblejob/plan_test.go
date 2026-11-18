@@ -70,7 +70,16 @@ func TestPlanStates(t *testing.T) {
 	mk("Ada Fenwick/Quiet/cover.jpg")            // no audio: still vacant
 	mk("Blocked")                                // a file where a folder goes
 	mk("Disk Only/Something/Something Else.m4b") // an author folder only on disk
+	// Backed up before bridge#47, under the names the rule gave then.
+	mk("Spencer Johnson/Who Moved My Cheese?/Who Moved My Cheese?.m4b")
+	mk(`Ada "Lace" Fenwick/Why  Not/Why  Not.m4b`)
+	mk("Spencer Johnson/Out of the Maze?/cover.jpg") // no audio: still vacant
 
+	// named is rec with its file named as the Audible client names it now.
+	named := func(file string, r source.Record) source.Record {
+		r.FileName = file
+		return r
+	}
 	cases := []struct {
 		name     string
 		template string
@@ -104,6 +113,14 @@ func TestPlanStates(t *testing.T) {
 			"Theo Marchetti/A Small Hour in Varrow/Varrow Again.m4b", link.PlanStandalone, 0, link.PlanExists, link.ConflictBook},
 		{"a listed book's folder, unmapped", "Theo Marchetti/A Small Hour in Varrow", rec("B0PLAN0009", "Varrow Again", "Theo Marchetti", "", 0), false,
 			"Theo Marchetti/A Small Hour in Varrow/Varrow Again.m4b", link.PlanStandalone, 0, link.PlanExists, link.ConflictBook},
+		{"backed up under the former name", "", named("Who Moved My Cheese.m4b", rec("B0PLAN0012", "Who Moved My Cheese?", "Spencer Johnson", "", 0)), true,
+			"Spencer Johnson/Who Moved My Cheese/Who Moved My Cheese.m4b", link.PlanStandalone, 0, link.PlanExists, link.ConflictAudio},
+		{"backed up under the former name, unmapped", "", named("Who Moved My Cheese.m4b", rec("B0PLAN0012", "Who Moved My Cheese?", "Spencer Johnson", "", 0)), false,
+			"Spencer Johnson/Who Moved My Cheese/Who Moved My Cheese.m4b", link.PlanStandalone, 0, link.PlanNew, ""},
+		{"an author and a title under former names", "", named("Why Not.m4b", rec("B0PLAN0013", "Why  Not", `Ada "Lace" Fenwick`, "", 0)), true,
+			"Ada 'Lace' Fenwick/Why Not/Why Not.m4b", link.PlanStandalone, 0, link.PlanExists, link.ConflictAudio},
+		{"a former name's folder without audio", "", named("Out of the Maze.m4b", rec("B0PLAN0014", "Out of the Maze?", "Spencer Johnson", "", 0)), true,
+			"Spencer Johnson/Out of the Maze/Out of the Maze.m4b", link.PlanStandalone, 0, link.PlanJoins, ""},
 		{"a bad template", "{Author}/{Nope}", rec("B0PLAN0010", "The Copper Grove", "Mara Quill", "Orchard Cycle", 2), true,
 			"", link.PlanSeriesExisting, 2, link.PlanError, "*"},
 		{"a file where a folder goes", "Blocked/{Title}", rec("B0PLAN0011", "Inside", "Ada Fenwick", "", 0), true,
@@ -139,7 +156,8 @@ func (c *countingFS) ReadDir(name string) ([]fs.DirEntry, error) {
 }
 
 // TestPlanReadsEachFolderOnce: a poll's plans read each folder of the library
-// at most once however many titles pass through it, and none for a title
+// at most once however many titles pass through it, and only its root (where
+// an author's folder under a former name would be, bridge#47) for a title
 // whose folders don't exist.
 func TestPlanReadsEachFolderOnce(t *testing.T) {
 	t.Parallel()
@@ -153,8 +171,8 @@ func TestPlanReadsEachFolderOnce(t *testing.T) {
 	tp.fsys = newDirCache(counted)
 
 	tp.plan(rec("B0PLAN0020", "Nowhere Yet", "Nobody Known", "", 0))
-	if len(counted.reads) != 0 {
-		t.Fatalf("a title in folders that don't exist read %v", counted.reads)
+	if len(counted.reads) != 1 || counted.reads["."] != 1 {
+		t.Fatalf("a title in folders that don't exist read %v, want the root once", counted.reads)
 	}
 	for i, title := range []string{"The Copper Grove", "The Fourth Bough", "The Fifth Bough"} {
 		if p := tp.plan(rec("B0PLAN003"+string(rune('0'+i)), title, "Mara Quill", "Orchard Cycle", float64(i+2))); p.State != link.PlanJoins {

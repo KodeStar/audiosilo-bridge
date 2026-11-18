@@ -72,7 +72,9 @@ describe('StatusTab', () => {
       'GET /api/status': {
         body: pairedStatus({
           setup_complete: false,
-          setup: setupFixture({ asr: { done: false, detail: 'waiting for an ASR worker' } }),
+          setup: setupFixture({
+            asr: { done: false, detail: 'waiting for an ASR worker', needs_worker: true },
+          }),
         }),
       },
     });
