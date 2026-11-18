@@ -3367,8 +3367,8 @@ internal/
             (Status.ShareGroup), else 0444 in 0777, logged once a process with
             the fix (group_add with the Bridge's PGID); a volume that refuses
             the chown or the ACL drop falls back to those modes too, logged
-            once, never a failed run (bridge#79: only a refusal, EPERM or ENOTSUP,
-            groupRefused; any other error giving the group fails the stage as the
+            once, never a failed run (bridge#79: only a refusal, EPERM, ENOTSUP or
+            ENOSYS, groupRefused; any other error giving the group fails the stage as the
             agent unavailable, in both modes). A group-only credential the runner is
             denied (credential_denied: the containers map the volume's ids
             differently, a user namespace) re-stages that job once in those

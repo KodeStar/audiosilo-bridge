@@ -165,7 +165,7 @@ func openJob(root *os.Root, req agentproto.Request) error {
 // as every uid's too, with groupErr saying why: the hand-off as it was before
 // there was a group, rather than a run that fails; strict (agent.require_group)
 // returns a groupRefusedError instead. Only a refusal (groupRefused: EPERM,
-// ENOTSUP) falls back so: any other failure to give the group (an I/O error)
+// ENOTSUP, ENOSYS) falls back so: any other failure to give the group (an I/O error)
 // fails the stage, never handing the credential to every uid. The job dir is
 // still private (0700) throughout, so no step leaves a window.
 func writeCredential(root *os.Root, c agentproto.Credential, group int, strict bool) (groupErr, err error) {

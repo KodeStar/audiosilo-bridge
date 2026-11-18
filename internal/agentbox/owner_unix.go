@@ -21,8 +21,10 @@ func fileOwner(info fs.FileInfo) (uid int, links uint64, ok bool) {
 // groupRefused reports whether err, giveGroup's, is the staging volume
 // refusing the group: a chown or an ACL change it doesn't permit (EPERM: NFS
 // with root squash, a CIFS mount's fixed owner) or doesn't support (ENOTSUP,
-// EOPNOTSUPP). Only that falls back to the every-uid hand-off; any other
+// EOPNOTSUPP; ENOSYS, as a FUSE filesystem with no chown of its own
+// answers). Only that falls back to the every-uid hand-off; any other
 // error (an I/O error, a full volume) fails the stage instead.
 func groupRefused(err error) bool {
-	return errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.ENOTSUP) || errors.Is(err, syscall.EOPNOTSUPP)
+	return errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.ENOTSUP) || errors.Is(err, syscall.EOPNOTSUPP) ||
+		errors.Is(err, syscall.ENOSYS)
 }

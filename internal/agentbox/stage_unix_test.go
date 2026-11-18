@@ -46,14 +46,15 @@ func TestHandoffCredentialOtherChownErrorFails(t *testing.T) {
 	}
 }
 
-// groupRefused is a refusal (EPERM, ENOTSUP, EOPNOTSUPP, wrapped or not), never
-// another error.
+// groupRefused is a refusal (EPERM, ENOTSUP, EOPNOTSUPP, ENOSYS, wrapped or
+// not), never another error.
 func TestGroupRefused(t *testing.T) {
 	t.Parallel()
 	for err, want := range map[error]bool{
 		syscall.EPERM: true,
 		&fs.PathError{Op: "chownat", Path: "x", Err: syscall.ENOTSUP}:    true,
 		&fs.PathError{Op: "chownat", Path: "x", Err: syscall.EOPNOTSUPP}: true,
+		&fs.PathError{Op: "chownat", Path: "x", Err: syscall.ENOSYS}:     true,
 		&fs.PathError{Op: "chownat", Path: "x", Err: syscall.EIO}:        false,
 		syscall.ENOSPC:          false,
 		syscall.EACCES:          false,
