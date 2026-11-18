@@ -48,7 +48,7 @@ const (
 	errNoCredential failure = "The Bridge isn't signed in to GitHub: sign in on the Bridge's Accounts tab, then " +
 		"suggest the corrections again."
 	errUnrefreshed failure = "The Bridge's GitHub sign-in couldn't be refreshed (" + contrib.UnrefreshedWhy +
-		"): suggest the corrections again once it can."
+		"): suggest the corrections again once GitHub answers."
 	errRefused failure = "GitHub refused the Bridge's sign-in: sign in again on the Bridge's Accounts tab, then " +
 		"suggest the corrections again."
 	errMetaOff failure = "The Bridge's community metadata service is off (metadata.base_url), so it can't " +

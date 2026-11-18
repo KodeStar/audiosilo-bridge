@@ -490,7 +490,7 @@ var (
 		"contribute set to local")
 	errCantContributeUnrefreshed = errors.New("this job asks to contribute the characters and recaps (contribute: " +
 		"issue), but the Bridge's GitHub sign-in couldn't be refreshed (" + contrib.UnrefreshedWhy + "): generate " +
-		"the book again once it can, or with contribute set to local")
+		"the book again once GitHub answers, or with contribute set to local")
 )
 
 // credFailure words a missing contribution credential (err, from

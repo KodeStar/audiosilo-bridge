@@ -31,7 +31,7 @@ const (
 	errShareCantContribute describeFailure = "The Bridge isn't signed in to GitHub: sign in on the Bridge's Accounts " +
 		"tab, then share the book again."
 	errShareUnrefreshed describeFailure = "The Bridge's GitHub sign-in couldn't be refreshed (" +
-		contrib.UnrefreshedWhy + "): share the book again once it can."
+		contrib.UnrefreshedWhy + "): share the book again once GitHub answers."
 	errShareRefused describeFailure = "GitHub refused the Bridge's sign-in: sign in again on the Bridge's Accounts " +
 		"tab, then share the book again."
 	errShareNothing describeFailure = "The Bridge keeps no characters or recaps for this book (it was not generated " +

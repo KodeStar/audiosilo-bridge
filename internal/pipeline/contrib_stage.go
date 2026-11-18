@@ -75,7 +75,7 @@ const (
 	// looks again by itself after contrib.UnrefreshedRetry, and a refresh that
 	// works again re-admits it at once (bridge#25).
 	ContribUnrefreshedMsg = "the Bridge's GitHub sign-in couldn't be refreshed (" + contrib.UnrefreshedWhy +
-		") - the book carries on by itself once it can"
+		") - the book carries on by itself once GitHub answers"
 	// CoreNeededMsg parks a book whose work does not exist upstream: a core add-work
 	// proposal has been prefilled and awaits completion/confirmation in the UI.
 	CoreNeededMsg = "this book's work does not exist on AudioSilo Meta yet - complete the work proposal, then it contributes automatically"
