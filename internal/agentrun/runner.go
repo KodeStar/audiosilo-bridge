@@ -126,7 +126,7 @@ type Runner struct {
 	// the last one's answer (env.go's mountProblem).
 	looks     looks
 	mountMu   sync.Mutex
-	mountLast atomic.Pointer[mountAnswer]
+	mountLast atomic.Pointer[string]
 	// selfUID is the runner's own uid: a job of its making is a run's
 	// (planted), which the endpoint's service never runs.
 	selfUID int

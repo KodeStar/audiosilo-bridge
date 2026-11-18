@@ -388,31 +388,24 @@ func TestHungHomeCountsAsReachable(t *testing.T) {
 	}
 }
 
-// The mounts are walked once per status interval, not per call: the calls in
-// between take the last walk's answer, a status tick walks again whatever its
-// age, and so does the next call once the last is an interval old.
+// The mounts are walked once per status tick, not per call: the first call
+// walks them, the calls after it take that answer, and a tick walks again.
 func TestMountWalkCachedPerTick(t *testing.T) {
 	t.Parallel()
 	te, _ := newEndpointEnv(t, endpointParentEnv())
 	var walks atomic.Int32
 	te.r.mounts = func() ([]mount, error) { walks.Add(1); return nil, nil }
-	now := time.Unix(1_800_000_000, 0)
-	te.r.now = func() time.Time { return now }
 	for range 3 {
 		_ = te.r.credentialProblem()
 		_ = te.r.status()
 	}
 	if n := walks.Load(); n != 1 {
-		t.Fatalf("%d walks in one interval, want 1", n)
+		t.Fatalf("%d walks before a tick, want 1", n)
 	}
 	te.r.refreshMounts()
+	_ = te.r.credentialProblem()
 	if n := walks.Load(); n != 2 {
 		t.Fatalf("%d walks after a tick, want 2", n)
-	}
-	now = now.Add(te.r.statusEvery)
-	_ = te.r.credentialProblem()
-	if n := walks.Load(); n != 3 {
-		t.Fatalf("%d walks an interval later, want 3", n)
 	}
 }
 

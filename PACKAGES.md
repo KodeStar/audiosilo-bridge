@@ -3832,8 +3832,8 @@ internal/
             maxMountChildren (1024) entries, a look past lookTimeout (5 s, through
             fsutil.LstatWithin/ReadDirWithin: a hung NFS or SMB mount) or the walk
             past walkBudget (20 s) each count as holding. The walk runs once per
-            status tick (refreshMounts) and is cached for one interval between
-            (mountProblem); spawn's poll reads the last answer every second and
+            status tick (refreshMounts); every other call takes the last answer
+            (mountProblem, which walks only when there is none); spawn's poll reads the last answer every second and
             ends a run in progress (exit unavailable, endpointBlocked) once a tick
             finds a credential. runner.json says endpoint_only, own_credentials
             and found for the Bridge's Status. The agent container's runner

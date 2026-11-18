@@ -237,25 +237,30 @@ func (w *mountWalk) credentialMount(mounts []mount) string {
 		case pseudoFS[m.fstype]:
 			continue
 		}
-		dirs := []string{m.point}
-		if m.fstype != "tmpfs" {
-			sub, err := w.subdirs(m.point)
-			if err != nil {
-				return m.point + " can't be checked: " + err.Error()
-			}
-			dirs = append(dirs, sub...)
+		p, err := w.credentialIn(m)
+		if err != nil {
+			return m.point + " can't be checked: " + err.Error()
 		}
-		for _, dir := range dirs {
-			p, err := w.credentialUnder(dir)
-			if err != nil {
-				return m.point + " can't be checked: " + err.Error()
-			}
-			if p != "" {
-				return m.point + " holds " + p
-			}
+		if p != "" {
+			return m.point + " holds " + p
 		}
 	}
 	return ""
+}
+
+// credentialIn is the first credential's file in m, at its point or one
+// directory below it (a tmpfs at its point only), "" when none is.
+func (w *mountWalk) credentialIn(m mount) (string, error) {
+	dirs, err := w.dirsOf(m.point, m.fstype != "tmpfs")
+	if err != nil {
+		return "", err
+	}
+	for _, dir := range dirs {
+		if p, err := w.credentialUnder(dir); err != nil || p != "" {
+			return p, err
+		}
+	}
+	return "", nil
 }
 
 // credentialUnder is the first of credentialPaths present under dir, "" when
@@ -295,11 +300,12 @@ func (w *mountWalk) present(p string) (bool, error) {
 	}
 }
 
-// subdirs are the directories directly in dir (not links). A mount that is a
-// file, or that the runner can't enter, has none (nor can a run look in); one
-// it can enter but not list, or with more than maxMountChildren entries, is
-// an error: a run could still reach a folder in it by name.
-func (w *mountWalk) subdirs(dir string) ([]string, error) {
+// dirsOf are the directories to look in for a mount at dir: dir itself and,
+// when below is set, the directories directly in it (not links). A mount that
+// is a file, or that the runner can't enter, has none (nor can a run look in);
+// one it can enter but not list, or with more than maxMountChildren entries,
+// is an error: a run could still reach a folder in it by name.
+func (w *mountWalk) dirsOf(dir string, below bool) ([]string, error) {
 	if err := w.inTime(); err != nil {
 		return nil, err
 	}
@@ -313,6 +319,8 @@ func (w *mountWalk) subdirs(dir string) ([]string, error) {
 		return nil, fmt.Errorf("it can't be looked at (%w)", err)
 	case !info.IsDir():
 		return nil, nil
+	case !below:
+		return []string{dir}, nil
 	}
 	entries, err := w.readDir(dir)
 	switch {
@@ -327,7 +335,7 @@ func (w *mountWalk) subdirs(dir string) ([]string, error) {
 	if len(entries) > maxMountChildren {
 		return nil, fmt.Errorf("it holds more than %d entries, more than the check looks through", maxMountChildren)
 	}
-	var out []string
+	out := []string{dir}
 	for _, e := range entries {
 		if e.IsDir() {
 			out = append(out, filepath.Join(dir, e.Name()))

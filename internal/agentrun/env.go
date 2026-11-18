@@ -167,15 +167,12 @@ func (r *Runner) credentialKind(cli string) string {
 // (mountProblem, mounts.go). It names a variable or a path, never a value: the
 // log and runner.json say it.
 //
-// The mounts' walk is the slow part: it runs once per status tick (refreshMounts)
-// and otherwise only when the last is a status interval old (walk set), else
-// its last answer stands.
-func (r *Runner) credentialProblem() string { return r.ownCredential(true) }
-
-// ownCredential is credentialProblem, with the mounts' last answer alone when
-// walk is false (spawn's poll, every second).
-func (r *Runner) ownCredential(walk bool) string {
-	for _, k := range slices.Concat(credentialVars, vaultVars) {
+// The mounts' walk is the slow part: each status tick walks them again
+// (refreshMounts), and every other call takes the last walk's answer (the
+// first walks them when there is none yet). So a run in progress, which spawn
+// checks every second, ends at the tick after a credential appears.
+func (r *Runner) credentialProblem() string {
+	for _, k := range ownVars {
 		if r.envSecret(k) != "" {
 			return "the variable " + k + " is set"
 		}
@@ -183,33 +180,29 @@ func (r *Runner) ownCredential(walk bool) string {
 	if r.homeReachable() {
 		return r.opts.Home + " (the agent home) is reachable"
 	}
-	return r.mountProblem(walk)
+	return r.mountProblem()
 }
 
-// mountAnswer is one walk of the mounts: when it ended and what it found.
-type mountAnswer struct {
-	at  time.Time
-	why string
-}
+// ownVars are the variables an endpoint-only runner must not hold: the CLIs'
+// credentials and the Bridge's vault's.
+var ownVars = slices.Concat(credentialVars, vaultVars)
 
-// mountProblem is the mounts' walk's answer: the last one, walked again first
-// when walk is set and it is a status interval old (or there is none).
-func (r *Runner) mountProblem(walk bool) string {
-	if walk {
-		r.mountMu.Lock()
-		if last := r.mountLast.Load(); last == nil || r.now().Sub(last.at) >= r.statusEvery {
-			r.walkMountsLocked()
-		}
-		r.mountMu.Unlock()
-	}
+// mountProblem is the last walk of the mounts' answer, walking them first
+// when there is none yet.
+func (r *Runner) mountProblem() string {
 	if last := r.mountLast.Load(); last != nil {
-		return last.why
+		return *last
 	}
-	return ""
+	r.mountMu.Lock()
+	defer r.mountMu.Unlock()
+	if r.mountLast.Load() == nil {
+		r.walkMountsLocked()
+	}
+	return *r.mountLast.Load()
 }
 
-// refreshMounts walks the mounts now, whatever the last walk's age: the
-// status tick's, so each interval has one fresh look.
+// refreshMounts walks the mounts now: the status tick's, so each interval has
+// one fresh look.
 func (r *Runner) refreshMounts() {
 	r.mountMu.Lock()
 	defer r.mountMu.Unlock()
@@ -219,15 +212,13 @@ func (r *Runner) refreshMounts() {
 // walkMountsLocked walks the mounts (mounts.go) and keeps the answer; mountMu
 // is held, so two callers never walk at once.
 func (r *Runner) walkMountsLocked() {
-	why := "the mounts can't be read: "
-	ms, err := r.mounts()
-	if err == nil {
-		w := &mountWalk{looks: r.looks, deadline: time.Now().Add(walkBudget)}
-		why = w.credentialMount(ms)
+	var why string
+	if ms, err := r.mounts(); err != nil {
+		why = "the mounts can't be read: " + err.Error()
 	} else {
-		why += err.Error()
+		why = (&mountWalk{looks: r.looks, deadline: time.Now().Add(walkBudget)}).credentialMount(ms)
 	}
-	r.mountLast.Store(&mountAnswer{at: r.now(), why: why})
+	r.mountLast.Store(&why)
 }
 
 // homeReachable reports whether the runner can list, enter or write the agent
