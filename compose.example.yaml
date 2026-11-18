@@ -89,6 +89,10 @@ services:
       # AUDIOSILO_BRIDGE_GITHUB_TOKEN: ${AUDIOSILO_BRIDGE_GITHUB_TOKEN}
     ports:
       - "8091:8091"
+    # An OpenAI-compatible server on this same host (the agent's line below):
+    # Settings > Agent's Test connection runs from the Bridge, so it needs the
+    # name too.
+    # extra_hosts: ["host.docker.internal:host-gateway"]
     volumes:
       - ./bridge-data:/bridge-data
       - /path/to/audiobooks:/audiobooks:rw

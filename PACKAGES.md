@@ -4127,7 +4127,8 @@ compose.example.yaml   three services: the server (libraries :ro), the Bridge (t
                        internet and the LAN through the host, not the stack's other
                        containers; no egress filter, so an OpenAI-compatible endpoint
                        on the LAN is reached, and host.docker.internal by a commented
-                       extra_hosts line), the credential
+                       extra_hosts line, which the bridge service carries too for Test
+                       connection), the credential
                        variables by NAME only, stop_grace_period 20s). The `staging`
                        volume is the only one both mount, outside /bridge-data (whose
                        first-start chown would otherwise reach it); `agent-config` is
