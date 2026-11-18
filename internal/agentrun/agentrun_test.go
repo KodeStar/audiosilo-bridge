@@ -499,12 +499,32 @@ func TestCancel(t *testing.T) {
 		t.Fatalf("helper pid %q", b)
 	}
 	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
-		if syscall.Kill(pid, 0) != nil {
+		if ended(pid) {
 			return
 		}
 	}
 	_ = syscall.Kill(pid, syscall.SIGKILL)
 	t.Fatal("the CLI's helper outlived the cancelled run")
+}
+
+// ended reports whether pid has exited: gone, or a zombie nobody reaps. Its
+// shell dies with it, so it is reparented to pid 1, which in a container run
+// without an init (docker run without --init, the test binary or go as pid 1)
+// never reaps it, and kill(pid, 0) still finds a zombie.
+func ended(pid int) bool {
+	if syscall.Kill(pid, 0) != nil {
+		return true
+	}
+	b, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "stat")) // Linux; elsewhere kill alone
+	if err != nil {
+		return false
+	}
+	i := strings.LastIndexByte(string(b), ')')
+	if i < 0 {
+		return false
+	}
+	f := strings.Fields(string(b[i+1:]))
+	return len(f) > 0 && f[0] == "Z"
 }
 
 func TestTimeout(t *testing.T) {
@@ -964,10 +984,11 @@ func endpointParentEnv() map[string]string {
 
 // newEndpointEnv is newTestEnv as the endpoint's own service
 // (--endpoint-only): no agent home (te.home names one that doesn't exist),
-// no mount to look through (mounts_test.go gives it some), sweep counts the sweeps instead of killing anything (the tests run in
-// parallel, so a real sweep could reach another test's CLI;
-// TestEndpointSweepEndsStrays runs the real one alone), and the runner's uid
-// is taken for another than this test's, which writes the jobs as the Bridge
+// no mount to look through (mounts_test.go gives it some), sweep counts the
+// sweeps instead of killing anything (the tests run in parallel, so a real
+// sweep could reach another test's CLI; TestEndpointSweepEndsStrays runs the
+// real one alone), and the runner's uid is taken for another than this
+// test's, which writes the jobs as the Bridge
 // (TestEndpointServiceRunsOnlyTheBridgesJobs puts it back).
 func newEndpointEnv(t *testing.T, env map[string]string) (te *testEnv, sweeps *atomic.Int32) {
 	t.Helper()
