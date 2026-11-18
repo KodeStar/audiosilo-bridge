@@ -238,7 +238,7 @@ function AgentCard({ client, accounts, onChange }: CardProps) {
   );
 }
 
-function CredentialForm({
+export function CredentialForm({
   client,
   kind,
   set,

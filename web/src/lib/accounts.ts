@@ -19,6 +19,10 @@ export const KIND_LABELS: Record<AgentKind, { label: string; note: string }> = {
     label: 'OpenAI API key',
     note: 'An API key from platform.openai.com. Its use is billed to the key.',
   },
+  endpoint_api_key: {
+    label: 'Endpoint API key',
+    note: "The OpenAI-compatible endpoint's API key (Settings > Agent). A local server such as Ollama takes none: leave it unset.",
+  },
 };
 
 // fromText says where a contribution's GitHub token comes from now.

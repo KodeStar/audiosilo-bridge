@@ -1,6 +1,9 @@
 import type {
   Accounts,
   AgentKind,
+  AgentSettings,
+  AgentSettingsUpdate,
+  EndpointCheck,
   AudibleAccounts,
   AudibleMapping,
   AudibleRemoveResponse,
@@ -144,6 +147,23 @@ export class ApiClient {
 
   saveSettings(s: SettingsUpdate): Promise<Settings> {
     return this.request('/api/settings', { method: 'PUT', body: s });
+  }
+
+  // --- Settings > Agent ---
+  agentSettings(): Promise<AgentSettings> {
+    return this.request('/api/settings/agent');
+  }
+
+  saveAgentSettings(s: AgentSettingsUpdate): Promise<AgentSettings> {
+    return this.request('/api/settings/agent', { method: 'PUT', body: s });
+  }
+
+  // checkEndpoint lists the endpoint's models from the Bridge, with the key set.
+  checkEndpoint(baseUrl: string): Promise<EndpointCheck> {
+    return this.request('/api/settings/agent/test', {
+      method: 'POST',
+      body: { base_url: baseUrl },
+    });
   }
 
   // --- jobs ---
