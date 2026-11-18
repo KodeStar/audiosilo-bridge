@@ -147,7 +147,7 @@ func TestEndpointStatus(t *testing.T) {
 // to replace it (Settings > Agent, not the agent container).
 func TestEndpointRefusalAdvice(t *testing.T) {
 	t.Parallel()
-	r, dir, _ := endpointRunner(t, "sk-endpoint-vault")
+	r, dir, base := endpointRunner(t, "sk-endpoint-vault")
 	fake := &fakeRunner{fn: func(job string) agentproto.Exit {
 		mustWrite(t, filepath.Join(job, agentproto.StdoutFile),
 			`{"type":"turn.failed","error":{"message":"unexpected status 401 Unauthorized: invalid_api_key"}}`+"\n")
@@ -163,4 +163,96 @@ func TestEndpointRefusalAdvice(t *testing.T) {
 	if st := r.Status(); !st.Refused || !strings.Contains(st.Detail, "Settings > Agent") || strings.Contains(st.Detail, "sk-endpoint") {
 		t.Fatalf("status = %+v", st)
 	}
+	// Another address is another provider: the refusal was the old one's.
+	base.Store("https://openrouter.ai/api/v1")
+	if st := r.Status(); st.Refused || !st.Available {
+		t.Fatalf("after a new address: %+v", st)
+	}
+}
+
+// A group probe on the openai-compatible backend goes as an endpoint run: the
+// runner reads an endpoint run's credential whatever the container has of its
+// own, and a plain codex run's never while the container is signed in (the
+// fake runner below is), so only so can the probe's take end a fallback
+// (allowed: the endpoint probe taken; denied: a plain codex probe, which the
+// signed-in runner never decodes, would leave the fallback for good).
+func TestEndpointProbe(t *testing.T) {
+	t.Parallel()
+	r, dir, _ := endpointRunner(t, "sk-endpoint-vault")
+	r.Status() // pins the runner's uid, as the heartbeat does
+	r.groupDenied.Store(true)
+	stop := (&fakeRunner{fn: func(job string) agentproto.Exit {
+		raw, _ := os.ReadFile(filepath.Join(job, agentproto.RequestFile))
+		req, err := agentproto.DecodeRequest(raw)
+		if err != nil {
+			return agentproto.Exit{ExitCode: -1, Error: err.Error()}
+		}
+		name := filepath.Join(job, agentproto.CredentialDir, agentproto.CredentialFile)
+		cred, rerr := os.ReadFile(name)
+		_ = os.Remove(name)
+		if req.Endpoint == nil {
+			// agentrun's takeCredential with a codex login of the container's own.
+			return agentproto.Exit{ExitCode: -1, Error: "open prompt.txt: no such file or directory"}
+		}
+		if rerr != nil {
+			return agentproto.Exit{ExitCode: -1, Error: rerr.Error()}
+		}
+		if _, err := agentproto.DecodeCredential(cred, req.CLI); err != nil {
+			return agentproto.Exit{ExitCode: -1, Error: err.Error()}
+		}
+		return agentproto.Exit{}
+	}}).start(t, dir)
+	defer stop()
+	if got := r.probeGroup(context.Background()); got != probeTaken || r.groupDenied.Load() {
+		t.Fatalf("probe = %v, group denied %v", got, r.groupDenied.Load())
+	}
+}
+
+// An endpoint that repeats the key it was sent in its error never gets it into
+// the run's error or the agent's state, refused or not (allowed: the
+// endpoint's words; denied: the key among them).
+func TestEndpointKeyCutFromOutput(t *testing.T) {
+	t.Parallel()
+	const key = "sk-endpoint-vault"
+	for name, c := range map[string]struct {
+		stdout  string
+		refused bool
+	}{
+		"refused": {`{"type":"turn.failed","error":{"message":"unexpected status 401 Unauthorized: bad key ` + key + `"}}`, true},
+		"failed":  {`{"type":"turn.failed","error":{"message":"unexpected status 500: upstream got ` + key + `"}}`, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			r, dir, _ := endpointRunner(t, key)
+			stop := (&fakeRunner{fn: func(job string) agentproto.Exit {
+				mustWrite(t, filepath.Join(job, agentproto.StdoutFile), c.stdout+"\n")
+				mustWrite(t, filepath.Join(job, agentproto.StderrFile), "Authorization: Bearer "+key+"\n")
+				return agentproto.Exit{ExitCode: 1}
+			}}).start(t, dir)
+			_, err := r.Run(context.Background(), agent.Request{Dir: stagedDir(t), Prompt: "p", Model: "m", Timeout: time.Minute})
+			stop()
+			var na *agent.NotAvailableError
+			if err == nil || errors.As(err, &na) != c.refused || strings.Contains(err.Error(), key) ||
+				!strings.Contains(err.Error(), "[the key]") {
+				t.Fatalf("run = %v", err)
+			}
+			if st := r.Status(); strings.Contains(st.Detail, key) {
+				t.Fatalf("status = %+v", st)
+			}
+		})
+	}
+}
+
+// A stage with no endpoint model (cleared on the page while another backend
+// waits for the restart) is the agent unavailable, saying where to set one,
+// and nothing is staged: the runner would refuse the request (denied).
+func TestEndpointRunWithoutModel(t *testing.T) {
+	t.Parallel()
+	r, dir, _ := endpointRunner(t, "sk-endpoint-vault")
+	var na *agent.NotAvailableError
+	_, err := r.Run(context.Background(), agent.Request{Stage: "fact_pass", Dir: stagedDir(t), Prompt: "p", Timeout: time.Minute})
+	if !errors.As(err, &na) || !strings.Contains(na.Detail, "fact_pass") || !strings.Contains(na.Detail, "Settings > Agent") {
+		t.Fatalf("a run with no model = %v", err)
+	}
+	assertNoJobDirs(t, dir)
 }

@@ -13,6 +13,7 @@
 package agentbox
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -21,6 +22,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -305,6 +307,14 @@ func (r *Runner) Run(ctx context.Context, req agent.Request) (agent.Result, erro
 		if base == "" {
 			return agent.Result{}, &agent.NotAvailableError{Backend: r.backend, Detail: noEndpointDetail}
 		}
+		if req.Model == "" {
+			// The page's models apply at once and a backend at the next start, so
+			// with another backend saved they may be cleared under this one; the
+			// runner would refuse the request (an endpoint has no default model).
+			stage := cmp.Or(req.Stage, "this stage")
+			return agent.Result{}, &agent.NotAvailableError{Backend: r.backend,
+				Detail: "the OpenAI-compatible endpoint has no model set for " + stage + ": set one in Settings > Agent on the Bridge's page"}
+		}
 		req.Endpoint = &agent.Endpoint{BaseURL: base}
 	}
 	var handed *agentproto.Credential
@@ -393,7 +403,11 @@ func (r *Runner) runJob(ctx context.Context, req agent.Request, st Status, hande
 	if !done {
 		return agent.Result{}, waitErr
 	}
-	res, runErr := r.outcome(root, req.Model, time.Duration(timeout)*time.Second)
+	secret := ""
+	if handed != nil {
+		secret = handed.Value
+	}
+	res, runErr := r.outcome(root, req.Model, time.Duration(timeout)*time.Second, secret)
 	r.noteCredential(st, runErr)
 	if waitErr != nil {
 		// Cancelled: the runner stopped the CLI and finished the job, so the usage
@@ -664,8 +678,10 @@ func (r *Runner) heartbeatAt(root *os.Root, claimedAt time.Time) time.Time {
 
 // outcome reads exit.json and the CLI's output and interprets them with the same
 // code the local runners use. An unavailable exit still reports the usage the
-// CLI's output shows, so a paid run the container cut short is counted.
-func (r *Runner) outcome(root *os.Root, model string, timeout time.Duration) (agent.Result, error) {
+// CLI's output shows, so a paid run the container cut short is counted. secret
+// is the credential handed to the run ("" for none), cut from the output
+// (parse).
+func (r *Runner) outcome(root *os.Root, model string, timeout time.Duration, secret string) (agent.Result, error) {
 	raw, info, err := agentproto.ReadRegularInfo(root, agentproto.ExitFile, agentproto.MaxExitBytes)
 	if err != nil {
 		return agent.Result{}, r.stagingFailed("read the run's exit.json from", err)
@@ -690,7 +706,7 @@ func (r *Runner) outcome(root *os.Root, model string, timeout time.Duration) (ag
 			// a run that got going may have spent tokens, so whatever usage its
 			// stdout reports rides on the Result beside the error and the budgets
 			// count it. Nothing else of a cut-off run is trusted.
-			res, _ := r.parse(root, model, agent.CLIOutcome{ExitErr: errors.New(ex.Error), Timeout: timeout})
+			res, _ := r.parse(root, model, agent.CLIOutcome{ExitErr: errors.New(ex.Error), Timeout: timeout}, secret)
 			return agent.Result{Usage: res.Usage}, &agent.NotAvailableError{Backend: r.backend, Detail: ex.Error}
 		}
 		return agent.Result{}, errors.New(refusedJob + ex.Error)
@@ -703,19 +719,26 @@ func (r *Runner) outcome(root *os.Root, model string, timeout time.Duration) (ag
 	case ex.ExitCode != 0:
 		out.ExitErr = exitStatus(ex.ExitCode)
 	}
-	return r.parse(root, model, out)
+	return r.parse(root, model, out, secret)
 }
 
 // parse reads the CLI's output files into out and interprets them with the
 // backend's shared result mapping (ClaudeResult/CodexResult). A missing or
-// unreadable file reads as empty.
-func (r *Runner) parse(root *os.Root, model string, out agent.CLIOutcome) (agent.Result, error) {
-	stdout, _ := agentproto.ReadRegular(root, agentproto.StdoutFile, agentproto.MaxStdoutBytes)
-	stderr, _ := agentproto.ReadRegular(root, agentproto.StderrFile, agentproto.MaxStderrBytes)
-	out.Stdout, out.Stderr = string(stdout), string(stderr)
+// unreadable file reads as empty. The handed credential (secret, "" for none)
+// is cut from them first: a provider may repeat the key it refused in its
+// error (an OpenAI-compatible endpoint is anyone's server), and the CLI's
+// words become the run's error, a parked book's reason and the log.
+func (r *Runner) parse(root *os.Root, model string, out agent.CLIOutcome, secret string) (agent.Result, error) {
+	read := func(name string, limit int64) string {
+		b, _ := agentproto.ReadRegular(root, name, limit)
+		if secret == "" {
+			return string(b)
+		}
+		return strings.ReplaceAll(string(b), secret, "[the key]")
+	}
+	out.Stdout, out.Stderr = read(agentproto.StdoutFile, agentproto.MaxStdoutBytes), read(agentproto.StderrFile, agentproto.MaxStderrBytes)
 	if r.cli == agent.IDCodex {
-		last, _ := agentproto.ReadRegular(root, agentproto.LastMessageFile, agentproto.MaxStdoutBytes)
-		out.LastMessage = string(last)
+		out.LastMessage = read(agentproto.LastMessageFile, agentproto.MaxStdoutBytes)
 		return agent.CodexResult(model, out)
 	}
 	return agent.ClaudeResult(model, out)

@@ -72,12 +72,15 @@ func (b *Bridge) SaveAgentSettings(ctx context.Context, s api.AgentSettings) err
 		return err
 	}
 	next := b.config()
+	models := next.Agent.EndpointModels()
 	if eng := b.engine.get(); eng != nil {
-		eng.exec.SetCompatibleModels(next.Agent.EndpointModels())
+		eng.exec.SetCompatibleModels(models)
 	}
-	if next.Agent.OpenAICompatible.BaseURL != cur.Agent.OpenAICompatible.BaseURL && b.box.ID() == config.AgentBackendOpenAICompatible {
-		// The books parked on the agent (no endpoint yet, or one that refused)
-		// try the new address.
+	changed := next.Agent.OpenAICompatible.BaseURL != cur.Agent.OpenAICompatible.BaseURL ||
+		!maps.Equal(models, cur.Agent.EndpointModels())
+	if changed && b.box.ID() == config.AgentBackendOpenAICompatible {
+		// The books parked on the agent (no endpoint or model yet, or one that
+		// refused) try the new address and models.
 		b.agentChanged("the agent's endpoint changed in Settings > Agent")
 	} else {
 		b.Kick()

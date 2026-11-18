@@ -790,6 +790,9 @@ func TestRunStagingTroubleIsUnavailable(t *testing.T) {
 func TestRefusedCredentialIsRemembered(t *testing.T) {
 	t.Parallel()
 	r, dir := newTestRunner(t, agent.IDClaude)
+	var endpointURL atomic.Value
+	endpointURL.Store("http://192.168.1.20:11434/v1")
+	r.endpoint = func() string { return endpointURL.Load().(string) }
 	since := time.Now().Add(-time.Hour).UTC().Truncate(time.Second)
 	rj := func(at time.Time) agentproto.Runner {
 		return agentproto.Runner{Protocol: 1, Version: "0.2.0", HeartbeatAt: time.Now(), Slots: 1,
@@ -827,8 +830,11 @@ func TestRefusedCredentialIsRemembered(t *testing.T) {
 	if !r.Detect(context.Background()).Available {
 		t.Fatal("a refused credential stopped the engine from trying")
 	}
-	// The same credential (runner.json rewritten, nothing changed) stays refused.
+	// The same credential (runner.json rewritten, nothing changed) stays refused,
+	// and so does one whose backend isn't the endpoint's when Settings > Agent
+	// gives the endpoint another address.
 	writeRunnerJSON(t, dir, rj(since))
+	endpointURL.Store("https://openrouter.ai/api/v1")
 	if st := r.Status(); !st.Refused {
 		t.Fatalf("the same credential: %+v", st)
 	}

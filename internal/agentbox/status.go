@@ -298,12 +298,14 @@ func (r *Runner) refusalAdvice(handoff bool) string {
 }
 
 // refusedCredential is a credential the provider refused: the runner's report of
-// it then (its kind and since when the runner has had it), and the provider's
-// words.
+// it then (its kind and since when the runner has had it), the provider's
+// words, and the endpoint's address the run went to (openai-compatible's: ""
+// for the others).
 type refusedCredential struct {
-	kind   string
-	since  time.Time
-	detail string
+	kind     string
+	since    time.Time
+	detail   string
+	endpoint string
 }
 
 // noteRefusal remembers that the provider refused the credential c (the backend's
@@ -311,7 +313,16 @@ type refusedCredential struct {
 func (r *Runner) noteRefusal(c agentproto.CLI, detail string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.refused = &refusedCredential{kind: c.Credential, since: c.CredentialSince, detail: detail}
+	r.refused = &refusedCredential{kind: c.Credential, since: c.CredentialSince, detail: detail, endpoint: r.endpointNow()}
+}
+
+// endpointNow is the endpoint's address now on the openai-compatible backend,
+// "" on the others (whose refusals an endpoint edit never clears).
+func (r *Runner) endpointNow() string {
+	if r.backend != agent.IDOpenAICompatible {
+		return ""
+	}
+	return r.endpoint()
 }
 
 // clearRefusal forgets a refusal: a run went through, so the credential works.
@@ -324,15 +335,16 @@ func (r *Runner) clearRefusal() {
 // refusal is the agent's state while the provider refuses the credential the
 // runner reports now as c ("" when it doesn't): a credential the runner reports
 // as changed since (another kind, or seen since another time: replaced, or the
-// container restarted) clears it. handoff says c is the Accounts tab's
-// credential, handed over, rather than the container's own.
+// container restarted), or another endpoint address (Settings > Agent: another
+// provider, maybe one that takes no key), clears it. handoff says c is the
+// Accounts tab's credential, handed over, rather than the container's own.
 func (r *Runner) refusal(c agentproto.CLI, handoff bool) string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.refused == nil {
 		return ""
 	}
-	if c.Credential != r.refused.kind || !c.CredentialSince.Equal(r.refused.since) {
+	if c.Credential != r.refused.kind || !c.CredentialSince.Equal(r.refused.since) || r.endpointNow() != r.refused.endpoint {
 		r.refused = nil
 		return ""
 	}

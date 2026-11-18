@@ -3620,7 +3620,13 @@ internal/
             local server takes none); a runner without endpoints is ProblemOutdated.
             Run sets req.Endpoint, stage writes it into request.json, and the handed
             credential's CLI is codex. SupportsWeb is false for it; a refusal's advice
-            points at Settings > Agent.
+            points at Settings > Agent, and another address clears it. A run with no
+            model (cleared on the page while another backend waits for the restart)
+            is the agent unavailable, never staged. The handed credential is cut
+            from the CLI's output before it is read (an endpoint may repeat the key
+            in its error). A group probe goes as an endpoint request (probeModel,
+            probeEndpoint), which the runner takes the credential for whatever the
+            container has of its own.
   agentrun/ `audiosilo-bridge agent-runner`, the ONLY thing in the agent container (Linux
             only). It sees the staging dir and /agent (secrets/, codex/), never a
             library or the Bridge's data. Main sets umask 077 for the whole process
@@ -3832,7 +3838,7 @@ internal/
             (agentCreds, never the key) and the env-locked keys. SaveAgentSettings
             refuses (ErrLocked) a change to a value the environment sets, saves,
             hands the engine EndpointModels (SetCompatibleModels) and, when the
-            running endpoint's address changed, agentChanged (the books parked on
+            running endpoint's address or models changed, agentChanged (the books parked on
             the agent try again; agentCredentialChanged goes through it too).
             CheckEndpoint runs endpoint.Check from the Bridge (the agent container
             has no way to be asked; both reach the network alike) with the vault's
