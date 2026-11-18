@@ -3191,8 +3191,8 @@ internal/
             book without a writable mapping (it writes nothing into the library),
             notesBook finds the engine book that keeps the results, holdBook holds
             it, and Options.Sharer (pipeline.Executor.Share) files them. Failures
-            in words: not signed in, a sign-in GitHub couldn't be reached to
-            refresh (Options.ContribCredential answering contrib.ErrSignInUnrefreshed,
+            in words: not signed in, a sign-in whose refresh failed
+            (Options.ContribCredential answering contrib.ErrSignInUnrefreshed,
             or a contrib_unavailable park whose Cause is it), refused, nothing kept
             here, a generate job still running, not matched. Result {library_id, path, work_id,
             contributed, covered}. The hints for agent_unavailable,
@@ -3407,9 +3407,14 @@ internal/
             the group: a job with a credential.json in the group's modes
             holding no credential (kind group_probe, which DecodeCredential
             refuses after the take) and no prompt.txt, so no CLI ever starts;
-            the runner's claim with the file gone ends both fallbacks
-            (logged), a denial borne out as a run's is (deniedHere) or a volume
-            still refusing the group keeps them. Status.HandoffMode says how a
+            a claim with the file gone (not-exist, never another error) ends
+            both fallbacks (logged), whoever claimed it: only a uid in the
+            Bridge's group may delete the file, and the end moves the
+            credential onto the group, so a contested or unset pin (a new id
+            mapping, one user for both) doesn't hold it; a denial borne out as
+            a run's is (deniedHere) or a volume still refusing the group keeps
+            them; a probe ends by itself after the claim timeout plus
+            staleFor. Status.HandoffMode says how a
             handed credential reaches a live runner: group, world (not in the
             group, denied, or the last stage's volume refused the group,
             volumeRefused) or group_required; the heartbeat's setup block
@@ -3642,8 +3647,8 @@ internal/
             (a sign-in resumes the sidecars.generate job waiting on one; a refresh
             that works again re-admits them through OnChange, and their park carries a
             retry_at besides, bridge#25; sidecars.contribute
-            never parks: it fails asking for a sign-in, or for GitHub to be
-            reachable, and a share again); generate gets contribCredential (why
+            never parks: it fails asking for a sign-in, or for the sign-in's
+            refresh to go through, and a share again); generate gets contribCredential (why
             no token resolves) as Options.ContribCredential,
             agentCredentialChanged re-admits agent_credential_refused and
             agent_unavailable; the Backend adds Accounts, StartGitHubSignIn,

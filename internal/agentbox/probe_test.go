@@ -214,5 +214,96 @@ func TestProbeOnlyWhenDue(t *testing.T) {
 	if fake.claimed.Load() != 2 || r.groupDenied.Load() {
 		t.Fatalf("the next due probe: %d jobs, group denied %v", fake.claimed.Load(), r.groupDenied.Load())
 	}
+
+	assertNoJobDirs(t, dir)
+}
+
+// A probe ends the fallback whoever the volume shows the runner as: the id
+// mapping's fix gives the runner another uid there, which contests the pin
+// (trust.go), and both containers as one user never pin one (allowed: the
+// take ends the fallback with the pin contested or never set; denied: a
+// runner still denied the group's file keeps it either way).
+func TestProbeEndsTheFallbackWithoutAPin(t *testing.T) {
+	t.Parallel()
+	for name, pinned := range map[string]int64{"contested": contestedUID, "unpinned": noUID} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			r, dir := vaultHandoff(t, []int{os.Getegid()})
+			m := &mappedRunner{}
+			m.deny.Store(true)
+			stop := (&fakeRunner{fn: m.fn(t)}).start(t, dir)
+			r.groupDenied.Store(true)
+			r.runnerUID.Store(pinned)
+			if got := r.probeGroup(context.Background()); got == probeTaken || !r.groupDenied.Load() {
+				t.Fatalf("probe while denied = %v, group denied %v", got, r.groupDenied.Load())
+			}
+			m.deny.Store(false)
+			if got := r.probeGroup(context.Background()); got != probeTaken || r.groupDenied.Load() {
+				t.Fatalf("probe once mapped = %v, group denied %v", got, r.groupDenied.Load())
+			}
+			stop()
+			if m.ran != 0 {
+				t.Fatalf("a probe reached the CLI %d times", m.ran)
+			}
+			assertNoJobDirs(t, dir)
+		})
+	}
+}
+
+// A probe claimed but never finished (its heartbeat kept fresh) ends by
+// itself after the claim timeout and staleFor, with no ctx deadline of its
+// caller's, leaving the fallback and no job dir (allowed: the probe returns;
+// denied: it never ends the fallback).
+func TestProbeStuckClaimEnds(t *testing.T) {
+	t.Parallel()
+	r, dir := vaultHandoff(t, []int{os.Getegid()})
+	r.groupDenied.Store(true)
+	r.claimTimeout = 50 * time.Millisecond
+	r.staleFor = 200 * time.Millisecond
+	r.cancelFor = 50 * time.Millisecond
+	ctx := context.Background()
+	stopTouch := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		// A claim that stays fresh and never finishes: the claim and the
+		// heartbeat are made once, then only touched (never made again while
+		// the probe removes the dir).
+		defer wg.Done()
+		claimed := map[string]bool{}
+		for {
+			select {
+			case <-stopTouch:
+				return
+			case <-time.After(5 * time.Millisecond):
+			}
+			entries, _ := os.ReadDir(dir)
+			for _, e := range entries {
+				if !e.IsDir() || !agentproto.ValidJobID(e.Name()) {
+					continue
+				}
+				job := filepath.Join(dir, e.Name())
+				if !claimed[job] {
+					claimed[job] = true
+					_ = os.Mkdir(filepath.Join(job, agentproto.ClaimDir), 0o700)
+					_ = os.WriteFile(filepath.Join(job, agentproto.HeartbeatFile), nil, 0o644)
+				}
+				now := time.Now()
+				_ = os.Chtimes(filepath.Join(job, agentproto.HeartbeatFile), now, now)
+			}
+		}
+	}()
+	done := make(chan probeOutcome, 1)
+	go func() { done <- r.probeGroup(ctx) }()
+	select {
+	case got := <-done:
+		if got != probeUnknown || !r.groupDenied.Load() {
+			t.Errorf("stuck probe = %v, group denied %v", got, r.groupDenied.Load())
+		}
+	case <-time.After(10 * time.Second):
+		t.Error("a stuck probe never ended")
+	}
+	close(stopTouch)
+	wg.Wait()
 	assertNoJobDirs(t, dir)
 }

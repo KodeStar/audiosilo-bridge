@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io/fs"
+	"os"
 	"path/filepath"
 	"time"
 
@@ -99,6 +101,12 @@ func (r *Runner) probeGroup(ctx context.Context) probeOutcome {
 // probeJob stages the probe and reads what the runner made of it. The job dir
 // is gone when it returns.
 func (r *Runner) probeJob(ctx context.Context) probeOutcome {
+	// Bounded: a claimed probe that never finishes (a heartbeat kept fresh
+	// in its dir) would otherwise hold probing, and so every later probe, for
+	// the rest of the process. The runner takes and refuses a probe at once,
+	// so the claim timeout and then staleFor are plenty.
+	ctx, cancel := context.WithTimeout(ctx, r.claimTimeout+r.staleFor)
+	defer cancel()
 	id, err := agentproto.NewJobID()
 	if err != nil {
 		return probeUnknown
@@ -147,8 +155,30 @@ func (r *Runner) probeJob(ctx context.Context) probeOutcome {
 		if _, own := r.fromRunner(info, false); own && r.deniedHere(ctx, root) {
 			return probeDenied
 		}
-	case r.claimedByRunner(root) && !agentproto.Exists(root, credential):
+	case claimed(root) && gone(root, credential):
+		// Any uid's claim, unlike a denial (trust.go): only a uid the volume
+		// lets into the Bridge's group can delete the file (its dir is the
+		// Bridge's, 0770, in the sticky job dir), which is what the probe
+		// asks, and ending the fallback moves the credential onto the group,
+		// never off it. The runner's uid as the volume shows it may well have
+		// changed with the fix (a new id mapping contests the pin), or never
+		// been pinned (both containers as one user).
 		return probeTaken
 	}
 	return probeUnknown
+}
+
+// claimed reports whether the job under root was claimed (its claim dir is
+// there), whoever claimed it.
+func claimed(root *os.Root) bool {
+	info, err := root.Lstat(agentproto.ClaimDir)
+	return err == nil && info.IsDir()
+}
+
+// gone reports whether name (under root) is no longer there: only a
+// not-exist answer counts, never another error reading it (an I/O error on
+// the volume), which would otherwise pass for the runner's take.
+func gone(root *os.Root, name string) bool {
+	_, err := root.Lstat(name)
+	return errors.Is(err, fs.ErrNotExist)
 }
