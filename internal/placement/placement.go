@@ -421,8 +421,8 @@ var stopwords = map[string]bool{
 // The characters an SMB share or a Windows disk can't store go too (bridge#47:
 // "Who Moved My Cheese?" is "Who Moved My Cheese"): ? * < > are dropped, a
 // double quote becomes an apostrophe and | a hyphen, and control characters
-// (which neither stores either) and the runs of spaces a drop leaves are one
-// space. A leading dot goes too ("...And Ladies of the Club", ".hack"): a
+// (NUL among them, which neither stores either) and the runs of spaces a drop
+// leaves are one space. A leading dot goes too ("...And Ladies of the Club", ".hack"): a
 // hidden name is never indexed by the server's scan. librivox.fetch names its
 // section files with it too, so a book's folder and its files follow one rule.
 func Sanitize(s string) string {
@@ -431,7 +431,7 @@ func Sanitize(s string) string {
 	return strings.Trim(s, " .")
 }
 
-var segmentReplacer = strings.NewReplacer("/", "-", "\\", "-", ":", " -", "\x00", "",
+var segmentReplacer = strings.NewReplacer("/", "-", "\\", "-", ":", " -",
 	"?", "", "*", "", "<", "", ">", "", "\"", "'", "|", "-")
 
 func isDigit(b byte) bool { return b >= '0' && b <= '9' }

@@ -2694,8 +2694,8 @@ internal/
             the work's, or the project's own when the work has more than one
             LibriVox recording; author = the first credit, Various over three;
             no author places at the library root; nothing left of a title is
-            "LibriVox <id>". Names: control characters and space runs folded,
-            Sanitize, cut to 180 bytes on a rune boundary; files "NN - <section
+            "LibriVox <id>". Names: Sanitize (which folds control characters and
+            space runs), cut to 180 bytes on a rune boundary; files "NN - <section
             title>.<ext>" (NN the 1-based position, at least two digits, the
             count's width; never section_number; a title opening with the
             section's own number and a separator ("1 - ", "1. ", "1: ", "1) ",
