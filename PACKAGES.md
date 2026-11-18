@@ -1238,9 +1238,6 @@ internal/
             (a failed request, a body cut short) from one GitHub answered (bridge#25).
             Every base URL injectable; fake-server tests for each outcome.
   accounts/ Phase 2b (decision 19): the Bridge's external accounts. GitHub: Start
-            (bridge#84: AgentEndpointKey, vault endpoint_api_key, is the
-            openai-compatible backend's alone, EndpointBackend, a literal a test holds
-            equal to agent.IDOpenAICompatible since accounts doesn't import agent.)
             runs one device flow at a time in the background (Pending shows the
             code), the token pair sealed as ONE vault value (github_user_token) so
             a refresh replaces it in one write; Token refreshes single-flight
@@ -1262,7 +1259,9 @@ internal/
             forgets the pair locally first (so the Bridge stops using it whatever
             GitHub answers), then revokes it, a failed revoke returned for the
             page. Agent: Set/Delete/Credential for the kinds
-            claude_oauth_token, anthropic_api_key, openai_api_key (one printable
+            claude_oauth_token, anthropic_api_key, openai_api_key and
+            endpoint_api_key (bridge#84: AgentEndpointKey, the openai-compatible
+            backend's alone, keyed by agent.IDOpenAICompatible) (one printable
             line, sealed in the vault), handed to the agent container per run by
             agentbox; Credential's set time is that kind's own (agent/<kind>), so
             changing another kind never ends a refusal of the one in use. The

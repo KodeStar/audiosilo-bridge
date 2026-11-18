@@ -253,10 +253,8 @@ func CheckBaseURL(raw string) error {
 	if len(raw) > MaxBaseURLBytes {
 		return fmt.Errorf("the endpoint's address is longer than %d characters", MaxBaseURLBytes)
 	}
-	for i := 0; i < len(raw); i++ {
-		if c := raw[i]; c <= ' ' || c > '~' || c == '"' || c == '\\' {
-			return errors.New("the endpoint's address holds a space, a quote, a backslash or a character an address never has")
-		}
+	if !PrintableLine(raw) || strings.ContainsAny(raw, `"\`) {
+		return errors.New("the endpoint's address holds a space, a quote, a backslash or a character an address never has")
 	}
 	u, err := url.Parse(raw)
 	if err != nil {
@@ -265,11 +263,11 @@ func CheckBaseURL(raw string) error {
 	switch {
 	case u.Scheme != "http" && u.Scheme != "https":
 		return errors.New("the endpoint's address must start with http:// or https://")
-	case u.Host == "" || u.Hostname() == "":
+	case u.Hostname() == "":
 		return errors.New("the endpoint's address has no host")
 	case u.User != nil:
 		return errors.New("the endpoint's address must not hold a user name or password: set the API key instead")
-	case u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || strings.Contains(raw, "#"):
+	case strings.ContainsAny(raw, "?#"):
 		return errors.New("the endpoint's address must not have a query or a fragment")
 	}
 	return nil

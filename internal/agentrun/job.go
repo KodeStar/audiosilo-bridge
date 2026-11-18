@@ -101,24 +101,25 @@ func (r *Runner) execute(ctx context.Context, job *os.Root, id string) agentprot
 		if endpoint {
 			// Its own empty CODEX_HOME, never the shared one: the device login
 			// there must not be within reach of a run against another endpoint.
-			if err := os.Mkdir(filepath.Join(runDir, "codex"), 0o700); err != nil {
+			if err := os.Mkdir(endpointCodexHome(runDir), 0o700); err != nil {
 				return refused("create the run's codex home: " + err.Error())
 			}
 			areq.Endpoint = &agent.Endpoint{BaseURL: req.Endpoint.BaseURL}
 			if handed != nil {
 				areq.Endpoint.KeyEnv = agent.EndpointKeyEnv
 			}
-			args = agent.CodexArgs(areq, lastMsg, agent.CodexSandboxOff)
-			break
+		} else {
+			r.codexStart()
+			defer r.codexEnd()
 		}
 		args = agent.CodexArgs(areq, lastMsg, agent.CodexSandboxOff)
-		r.codexStart()
-		defer r.codexEnd()
 	}
 
-	env := r.childEnv(req.CLI, runDir, handed)
+	var env []string
 	if endpoint {
 		env = r.endpointEnv(runDir, handed)
+	} else {
+		env = r.childEnv(req.CLI, runDir, handed)
 	}
 	exit := r.spawn(ctx, job, spec{
 		path:    cli.path,

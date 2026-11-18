@@ -673,23 +673,20 @@ func TestAgentEndpointKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = db.Close() }()
-	if EndpointBackend != agent.IDOpenAICompatible {
-		t.Fatalf("EndpointBackend %q, agent says %q", EndpointBackend, agent.IDOpenAICompatible)
-	}
-	if got := KindsFor(EndpointBackend); len(got) != 1 || got[0] != AgentEndpointKey {
+	if got := KindsFor(agent.IDOpenAICompatible); len(got) != 1 || got[0] != AgentEndpointKey {
 		t.Fatalf("KindsFor = %v", got)
 	}
 	a := NewAgent(secrets.NewMemStore(), db, nil, nil)
 	if err := a.Set(ctx, AgentOpenAIKey, "sk-openai"); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, _, ok := a.Credential(ctx, EndpointBackend); ok {
+	if _, _, _, ok := a.Credential(ctx, agent.IDOpenAICompatible); ok {
 		t.Fatal("the OpenAI key went to the endpoint")
 	}
 	if err := a.Set(ctx, AgentEndpointKey, "sk-or-v1-endpoint"); err != nil {
 		t.Fatal(err)
 	}
-	if kind, v, since, ok := a.Credential(ctx, EndpointBackend); !ok || kind != agentproto.CredentialEndpointKey ||
+	if kind, v, since, ok := a.Credential(ctx, agent.IDOpenAICompatible); !ok || kind != agentproto.CredentialEndpointKey ||
 		v != "sk-or-v1-endpoint" || since.IsZero() {
 		t.Fatalf("endpoint = %q %q %v %v", kind, v, since, ok)
 	}

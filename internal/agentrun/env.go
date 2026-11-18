@@ -107,12 +107,15 @@ func (r *Runner) childEnv(cli, runDir string, handed *agentproto.Credential) []s
 // agent.EndpointKeyEnv alone. None of the container's own credentials: they are
 // for OpenAI and must never reach another endpoint.
 func (r *Runner) endpointEnv(runDir string, handed *agentproto.Credential) []string {
-	env := append(r.baseEnv(runDir), "CODEX_HOME="+filepath.Join(runDir, "codex"))
+	env := append(r.baseEnv(runDir), "CODEX_HOME="+endpointCodexHome(runDir))
 	if handed != nil && handed.Kind == agentproto.CredentialEndpointKey {
 		env = append(env, agent.EndpointKeyEnv+"="+handed.Value)
 	}
 	return env
 }
+
+// endpointCodexHome is an endpoint run's own CODEX_HOME, under its runDir.
+func endpointCodexHome(runDir string) string { return filepath.Join(runDir, "codex") }
 
 // credentialKind is the credential a CLI's runs use, by presence only (a value
 // is never read for this): a subscription credential first (claude's OAuth

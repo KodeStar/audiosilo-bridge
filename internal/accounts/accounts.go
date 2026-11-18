@@ -23,6 +23,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/kodestar/audiosilo-bridge/internal/agent"
 	"github.com/kodestar/audiosilo-bridge/internal/agentproto"
 	"github.com/kodestar/audiosilo-bridge/internal/ghauth"
 	"github.com/kodestar/audiosilo-bridge/internal/secrets"
@@ -688,14 +689,10 @@ func (a *Agent) Delete(ctx context.Context, kind string) error {
 // cliKinds is which vault credentials each backend takes, in the order it uses
 // them (a subscription token first for claude), with agentproto's kind for each.
 var cliKinds = map[string][]struct{ name, kind string }{
-	agentproto.CLIClaude: {{AgentClaudeToken, agentproto.CredentialOAuthToken}, {AgentAnthropicKey, agentproto.CredentialAPIKey}},
-	agentproto.CLICodex:  {{AgentOpenAIKey, agentproto.CredentialAPIKey}},
-	EndpointBackend:      {{AgentEndpointKey, agentproto.CredentialEndpointKey}},
+	agentproto.CLIClaude:     {{AgentClaudeToken, agentproto.CredentialOAuthToken}, {AgentAnthropicKey, agentproto.CredentialAPIKey}},
+	agentproto.CLICodex:      {{AgentOpenAIKey, agentproto.CredentialAPIKey}},
+	agent.IDOpenAICompatible: {{AgentEndpointKey, agentproto.CredentialEndpointKey}},
 }
-
-// EndpointBackend is agent.IDOpenAICompatible, the backend an endpoint's key
-// is for (a test holds the two equal: accounts doesn't import the engine).
-const EndpointBackend = "openai-compatible"
 
 // KindsFor are the vault credentials a backend ("claude", "codex" or
 // "openai-compatible") takes, in its order.
