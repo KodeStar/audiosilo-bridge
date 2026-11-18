@@ -492,7 +492,7 @@ func TestEngineStartResumesContributionParks(t *testing.T) {
 	engineCtx, stop := context.WithCancel(ctx)
 	var wg sync.WaitGroup
 	t.Cleanup(func() { stop(); wg.Wait() })
-	b.engineStarted(engineCtx, &engine{sched: sched}, &wg)
+	b.engineStarted(engineCtx, &engine{sched: sched}, wg.Go)
 	waitFor(t, "the contribution park re-admitted at the engine's start", func() bool {
 		got, err := b.db.GetBook(ctx, bk.ID)
 		return err == nil && got.Status == ""

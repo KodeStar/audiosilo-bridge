@@ -221,8 +221,10 @@ func TestTranscriptSweepStartsWithTheEngine(t *testing.T) {
 		return bk, raw
 	}
 	present := func(dir string) bool { _, err := os.Stat(dir); return err == nil }
-	_, freeRaw := book(1, "free")
+	// The sweep takes the books in id order: the held one first, so the free one
+	// gone means the sweep has been past it.
 	held, heldRaw := book(2, "held")
+	_, freeRaw := book(1, "free")
 	sched := scheduler.New(b.db, events.NewHub(8), scheduler.NewStubExecutor(0, 0), 1, work, false)
 	release, ok := sched.Hold(held.ID)
 	if !ok {
@@ -232,8 +234,13 @@ func TestTranscriptSweepStartsWithTheEngine(t *testing.T) {
 	engineCtx, stop := context.WithCancel(ctx)
 	var wg sync.WaitGroup
 	t.Cleanup(func() { stop(); wg.Wait() })
-	b.engineStarted(engineCtx, &engine{sched: sched}, &wg)
-	waitFor(t, "the first sweep", func() bool { return !present(freeRaw) })
+	// The first sweep runs to the free book before engineStarted goes on: one
+	// started before the engine is stored would find no engine to hold through
+	// and purge the held book too.
+	b.engineStarted(engineCtx, &engine{sched: sched}, func(f func()) {
+		wg.Go(f)
+		waitFor(t, "the first sweep", func() bool { return !present(freeRaw) })
+	})
 	if !present(heldRaw) {
 		t.Fatal("the first sweep purged a book the engine holds")
 	}
