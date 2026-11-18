@@ -145,7 +145,11 @@ func (s *service) clearCheckpoint(job jobs.Job, root *os.Root, c *checkpoint) {
 		// restart from zero clears one) is still its own to remove, and the
 		// record that names it is about to go.
 		if _, err := podcast.LstatRegular(root, p); err == nil {
-			_ = root.Remove(p)
+			if err := root.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
+				// Still on disk: the record and its validator stay, so
+				// cleanOwned can remove the partial once it is a day old.
+				return
+			}
 		}
 	}
 	if strings.HasPrefix(c.Validator, secrets.PodcastETagPrefix) {

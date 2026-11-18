@@ -258,3 +258,40 @@ func TestSameRegularRefusesSwappedPartial(t *testing.T) {
 		t.Fatal("link target accepted as the partial")
 	}
 }
+
+// A partial the Bridge could not remove keeps its record and validator, so
+// cleanOwned can find it again; once removable, the clear takes all three.
+func TestClearCheckpointKeepsTheRecordOfAPartialItCouldNotRemove(t *testing.T) {
+	requireNonRoot(t)
+	h, job := audioHarness(t)
+	s := h.handler.s
+	root, _ := os.OpenRoot(h.mount)
+	defer root.Close()
+	c := checkpoint{ServerHash: s.pairHash(), LibraryID: 3, ShowID: "a1b2c3d4e5f60718", EpisodeID: "1cc306d831645e2b", Path: *job.Path, Temp: ".audiosilo-tmp-stuck", Offset: 6, Total: 100}
+	partial := "Fixture Show/" + c.Temp
+	root.WriteFile(partial, []byte("prefix"), 0600)
+	if err := s.saveCheckpoint(job, &c, `"one"`); err != nil {
+		t.Fatal(err)
+	}
+	show := filepath.Join(h.mount, "Fixture Show")
+	if err := os.Chmod(show, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(show, 0o755) })
+	stuck := c
+	s.clearCheckpoint(job, root, &stuck)
+	if saved, ok := s.readCheckpoint(job); !ok || saved.Temp != c.Temp {
+		t.Fatal("the record of a partial still on disk was dropped")
+	}
+	if v, _ := s.o.Vault.Get(c.Validator); v == "" {
+		t.Fatal("the validator of a partial still on disk was dropped")
+	}
+	os.Chmod(show, 0o755)
+	s.clearCheckpoint(job, root, &c)
+	if _, ok := s.readCheckpoint(job); ok {
+		t.Fatal("record kept once the partial was removed")
+	}
+	if _, err := root.Lstat(partial); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("partial retained", err)
+	}
+}

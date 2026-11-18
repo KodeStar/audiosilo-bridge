@@ -2234,10 +2234,12 @@ internal/
             error, not invalid_audio, and a lease check it cuts is no lost claim,
             identity_changed), a retry wait it cuts ends on the host's
             last answer, and its own faults (no streamer, its partial) are
-            write_failed. A partial it cannot read back restarts the episode from
-            zero once per job first; clearing a checkpoint removes its partial
-            on podcast.LstatRegular, never an open, so an unreadable one is not
-            left behind. An episode host's 410 is gone, like the
+            write_failed. A partial it cannot open, check (sameRegular) or read
+            back restarts the episode from zero once per job first, checked
+            before the ranged GET so no request is spent on it; clearing a
+            checkpoint removes its partial on podcast.LstatRegular, never an
+            open, so an unreadable one is not left behind, and keeps the record
+            (for cleanOwned) when the removal fails. An episode host's 410 is gone, like the
             feed's (the server: no longer available). A poll's params may carry
             `scheduled` (the server's scheduler); read leniently, it changes
             nothing here.

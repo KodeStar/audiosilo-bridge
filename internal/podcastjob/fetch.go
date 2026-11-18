@@ -71,8 +71,8 @@ type budget struct {
 // host's slowness, reported as timeout, not as the Bridge stopping (bridge_lost).
 var errOverBudget = errors.New("the episode download ran past its ceiling")
 
-// errPartialUnreadable is consume's when the proven partial it resumes cannot be
-// read back from disk.
+// errPartialUnreadable is download's and consume's when the proven partial a
+// resume appends to cannot be opened, checked or read back from disk.
 var errPartialUnreadable = errors.New("the episode partial could not be read")
 
 func (s *service) budget(parent context.Context) (context.Context, *budget) {
@@ -403,10 +403,29 @@ func (s *service) download(ctx context.Context, b *budget, job jobs.Job, root *o
 		return podcast.Fetch{}, err
 	}
 	var last error
+	// A partial the Bridge can no longer open or read back is started again from
+	// zero, once per job: the episode may well be fine, only the Bridge's own
+	// copy of its start is not. A second one fails the job write_failed.
 	restarted := false
+	restart := func() error {
+		if restarted {
+			return fail("write_failed", "The episode partial is incomplete.")
+		}
+		restarted = true
+		s.clearCheckpoint(job, root, c)
+		tag = ""
+		return nil
+	}
 	for attempt := 0; attempt < 3; attempt++ {
 		if ctx.Err() != nil {
 			return podcast.Fetch{}, ctx.Err()
+		}
+		// Checked before the ranged GET, so an unreadable partial costs no request:
+		// the attempt goes out from zero instead.
+		if c.Offset > 0 && s.partialReadable(root, c) != nil {
+			if err := restart(); err != nil {
+				return podcast.Fetch{}, err
+			}
 		}
 		response, err := s.o.Streamer.Stream(ctx, netguard.StreamRequest{URL: raw, Offset: c.Offset, ETag: tag})
 		if err == nil {
@@ -433,16 +452,12 @@ func (s *service) download(ctx context.Context, b *budget, job jobs.Job, root *o
 			if err == nil {
 				return fetch, nil
 			}
-			// A partial the Bridge can no longer read back is started again from
-			// zero, once per job (attempt-- keeps the host's retries): the episode
-			// may well be fine, only the Bridge's own copy of its start is not.
+			// The partial failed between the check and the append (attempt-- keeps
+			// the host's retries).
 			if errors.Is(err, errPartialUnreadable) {
-				if restarted {
-					return podcast.Fetch{}, fail("write_failed", "The episode partial is incomplete.")
+				if err := restart(); err != nil {
+					return podcast.Fetch{}, err
 				}
-				restarted = true
-				s.clearCheckpoint(job, root, c)
-				tag = ""
 				attempt--
 				continue
 			}
@@ -496,30 +511,24 @@ func (s *service) consume(ctx context.Context, b *budget, job jobs.Job, root *os
 		c.Temp = podcast.TempPrefix + nonce()
 	}
 	name := path.Dir(c.Path) + "/" + c.Temp
-	flags := os.O_RDWR
+	var file *os.File
+	var err error
 	if freshTemp {
-		flags |= os.O_EXCL | os.O_CREATE
+		file, err = root.OpenFile(name, os.O_RDWR|os.O_EXCL|os.O_CREATE, 0o600)
+	} else {
+		// Only an append keeps c.Temp (any other action cleared it above).
+		file, err = openPartial(root, name, c.Offset)
 	}
-	file, err := root.OpenFile(name, flags, 0o600)
 	if err != nil {
 		return podcast.Fetch{}, "", err
 	}
 	defer file.Close()
-	if !freshTemp && !sameRegular(root, name, file, c.Offset) {
-		// The proven partial was replaced (a link, or another file) since it was
-		// checked: never append to it.
-		return podcast.Fetch{}, "", podcast.ErrInvalidFile
-	}
 	if err := file.Chmod(0o600); err != nil {
 		return podcast.Fetch{}, "", err
 	}
 	h := sha256.New()
-	if action == "append" {
-		err := s.o.Fault.Hit("partial")
-		if err == nil {
-			_, err = io.CopyN(h, file, c.Offset)
-		}
-		if err != nil {
+	if !freshTemp {
+		if _, err := io.CopyN(h, file, c.Offset); err != nil {
 			// The Bridge's own partial file: a local fault, not the episode host's
 			// (download restarts the episode once, then fails write_failed).
 			return podcast.Fetch{}, "", errPartialUnreadable
@@ -596,6 +605,36 @@ func (s *service) consume(ctx context.Context, b *budget, job jobs.Job, root *os
 		return podcast.Fetch{}, tag, fail("network", "The episode download was interrupted.")
 	}
 	return podcast.Fetch{Bytes: c.Offset, SHA256: hex.EncodeToString(h.Sum(nil))}, tag, nil
+}
+
+// partialReadable is errPartialUnreadable when the proven partial c resumes can
+// no longer be opened for the append or is not the regular file it was. A read
+// failing later in the prefix is consume's to find.
+func (s *service) partialReadable(root *os.Root, c *checkpoint) error {
+	file, err := openPartial(root, path.Dir(c.Path)+"/"+c.Temp, c.Offset)
+	if err != nil {
+		return err
+	}
+	_ = file.Close()
+	if s.o.Fault.Hit("partial") != nil {
+		return errPartialUnreadable
+	}
+	return nil
+}
+
+// openPartial opens the proven partial at name for the append. Any failure (no
+// permission, gone, replaced by a link or another file since it was proven) is
+// errPartialUnreadable, never a reason to write to whatever is there.
+func openPartial(root *os.Root, name string, size int64) (*os.File, error) {
+	file, err := root.OpenFile(name, os.O_RDWR, 0)
+	if err != nil {
+		return nil, errPartialUnreadable
+	}
+	if !sameRegular(root, name, file, size) {
+		_ = file.Close()
+		return nil, errPartialUnreadable
+	}
+	return file, nil
 }
 
 // sameRegular reports whether the open file is the regular file at name with the

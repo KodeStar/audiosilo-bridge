@@ -676,8 +676,8 @@ func TestEpisodeFailureCodes(t *testing.T) {
 }
 
 // A partial the Bridge cannot read back when it resumes is its own fault: the
-// episode starts again from zero once inside the job, and only a second such
-// partial fails the job write_failed.
+// episode starts again from zero once inside the job, with no ranged GET sent
+// for it, and only a second such partial fails the job write_failed.
 func TestFetchUnreadablePartialRestartsOnce(t *testing.T) {
 	requireProbe(t)
 	for _, scenario := range []string{"restarts", "twice"} {
@@ -729,21 +729,140 @@ func TestFetchUnreadablePartialRestartsOnce(t *testing.T) {
 			result, err := h.handler.FetchJob().Run(context.Background(), job, jobs.LocalReporter())
 			if scenario == "twice" {
 				var failure *netguard.Error
-				if !errors.As(err, &failure) || failure.Code != "write_failed" || reads.Load() != 2 || calls.Load() != 4 {
-					t.Fatalf("a second unreadable partial: %v, %d reads, %d calls; want write_failed after 2 and 4", err, reads.Load(), calls.Load())
+				if !errors.As(err, &failure) || failure.Code != "write_failed" || reads.Load() != 2 || calls.Load() != 2 {
+					t.Fatalf("a second unreadable partial: %v, %d reads, %d calls; want write_failed after 2 and 2", err, reads.Load(), calls.Load())
 				}
 				return
 			}
 			if err != nil {
 				t.Fatal(result, err)
 			}
-			// The first GET, the resume whose partial failed, then a GET from zero.
-			if got := result.(fetchResult); got.Fetch.Bytes != int64(len(audio)) || calls.Load() != 3 || reads.Load() != 1 || lastFresh.Load() != 3 {
+			// The first GET, then a GET from zero: never the resume's ranged GET.
+			if got := result.(fetchResult); got.Fetch.Bytes != int64(len(audio)) || calls.Load() != 2 || reads.Load() != 1 || lastFresh.Load() != 2 {
 				t.Fatal(got, calls.Load(), reads.Load(), lastFresh.Load())
 			}
 			if left := partials(); len(left) != 0 {
 				t.Fatal("the unreadable partial was left behind:", left)
 			}
 		})
+	}
+}
+
+func requireNonRoot(t *testing.T) {
+	t.Helper()
+	if os.Geteuid() == 0 {
+		t.Skip("runs as root: a mode 000 file or a read-only directory does not stop root")
+	}
+}
+
+// cutThenWhole answers the first GET from zero with a cut proven prefix and every
+// later one in full; a ranged GET is answered 206 after onRange runs.
+func cutThenWhole(t *testing.T, h *harness, onRange func()) (audio []byte, calls, ranged *atomic.Int32) {
+	audio = data(t, "chap-v23.mp3")
+	calls, ranged = new(atomic.Int32), new(atomic.Int32)
+	setAudio(h, func(w http.ResponseWriter, r *http.Request) {
+		n := calls.Add(1)
+		w.Header().Set("ETag", `"one"`)
+		if r.Header.Get("Range") != "" {
+			ranged.Add(1)
+			onRange()
+			w.Header().Set("Content-Range", fmt.Sprintf("bytes 1000-%d/%d", len(audio)-1, len(audio)))
+			w.Header().Set("Content-Length", strconv.Itoa(len(audio)-1000))
+			w.WriteHeader(206)
+			w.Write(audio[1000:])
+			return
+		}
+		w.Header().Set("Content-Length", strconv.Itoa(len(audio)))
+		if n > 1 {
+			w.Write(audio)
+			return
+		}
+		w.WriteHeader(200)
+		w.Write(audio[:1000])
+	})
+	return audio, calls, ranged
+}
+
+// A partial lost between attempts (made unreadable, removed, swapped for a
+// link) is found before the resume's ranged GET: the next attempt goes out
+// from zero and the episode is fetched whole.
+func TestFetchLostPartialRestartsBeforeTheRangedGet(t *testing.T) {
+	requireProbe(t)
+	for _, scenario := range []string{"mode 000", "removed", "link"} {
+		t.Run(scenario, func(t *testing.T) {
+			if scenario == "mode 000" {
+				requireNonRoot(t)
+			}
+			h, job := audioHarness(t)
+			audio, calls, ranged := cutThenWhole(t, h, func() {})
+			show := filepath.Join(h.mount, filepath.Dir(*job.Path))
+			victim := filepath.Join(h.mount, "victim")
+			if err := os.WriteFile(victim, []byte("keep"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			h.handler.s.o.Wait = func(context.Context, time.Duration) error {
+				m, _ := filepath.Glob(filepath.Join(show, podcast.TempPrefix+"*"))
+				for _, p := range m {
+					var err error
+					switch scenario {
+					case "mode 000":
+						err = os.Chmod(p, 0)
+					case "removed":
+						err = os.Remove(p)
+					case "link":
+						if err = os.Remove(p); err == nil {
+							err = os.Symlink("../victim", p)
+						}
+					}
+					if err != nil {
+						t.Error(err)
+					}
+				}
+				return nil
+			}
+			result, err := h.handler.FetchJob().Run(context.Background(), job, jobs.LocalReporter())
+			if err != nil {
+				t.Fatal(result, err)
+			}
+			if got := result.(fetchResult); got.Fetch.Bytes != int64(len(audio)) || calls.Load() != 2 || ranged.Load() != 0 {
+				t.Fatal(got, calls.Load(), ranged.Load())
+			}
+			if b, _ := os.ReadFile(victim); string(b) != "keep" {
+				t.Fatalf("the link's target was written: %q", b)
+			}
+			if scenario != "link" {
+				if m, _ := filepath.Glob(filepath.Join(show, podcast.TempPrefix+"*")); len(m) != 0 {
+					t.Fatal("the lost partial was left behind:", m)
+				}
+			}
+		})
+	}
+}
+
+// A partial made unreadable after its check, while the ranged GET is out, is
+// still the restart from zero (consume's open), never a write_failed job.
+func TestFetchPartialUnreadableAtTheAppendRestarts(t *testing.T) {
+	requireProbe(t)
+	requireNonRoot(t)
+	h, job := audioHarness(t)
+	show := filepath.Join(h.mount, filepath.Dir(*job.Path))
+	audio, calls, ranged := cutThenWhole(t, h, func() {
+		m, _ := filepath.Glob(filepath.Join(show, podcast.TempPrefix+"*"))
+		for _, p := range m {
+			if err := os.Chmod(p, 0); err != nil {
+				t.Error(err)
+			}
+		}
+	})
+	result, err := h.handler.FetchJob().Run(context.Background(), job, jobs.LocalReporter())
+	if err != nil {
+		t.Fatal(result, err)
+	}
+	// The cut GET, the resume whose partial failed at the open, then a GET from zero.
+	if got := result.(fetchResult); got.Fetch.Bytes != int64(len(audio)) || calls.Load() != 3 || ranged.Load() != 1 {
+		t.Fatal(got, calls.Load(), ranged.Load())
+	}
+	if m, _ := filepath.Glob(filepath.Join(show, podcast.TempPrefix+"*")); len(m) != 0 {
+		t.Fatal("the unreadable partial was left behind:", m)
 	}
 }
