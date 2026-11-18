@@ -374,6 +374,9 @@ func (r *Runner) version(ctx context.Context, path string) (string, error) {
 
 // status is runner.json now: the CLIs found and the kind of credential each has.
 func (r *Runner) status() agentproto.Runner {
+	// Looked at before the heartbeat is dated: the mounts' walk takes a while
+	// on a slow filesystem, which mustn't age the heartbeat it writes.
+	own := r.opts.EndpointOnly && r.credentialProblem() != ""
 	st := agentproto.Runner{
 		Protocol:       agentproto.Protocol,
 		Version:        r.opts.Version,
@@ -384,7 +387,7 @@ func (r *Runner) status() agentproto.Runner {
 		Groups:         r.groups,
 		Endpoints:      true,
 		EndpointOnly:   r.opts.EndpointOnly,
-		OwnCredentials: r.opts.EndpointOnly && r.credentialProblem() != "",
+		OwnCredentials: own,
 	}
 	for _, name := range []string{agentproto.CLIClaude, agentproto.CLICodex} {
 		c, _ := r.cli(name)
