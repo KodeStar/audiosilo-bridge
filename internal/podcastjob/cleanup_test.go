@@ -296,3 +296,25 @@ func TestClearCheckpointKeepsTheRecordOfAPartialItCouldNotRemove(t *testing.T) {
 		t.Fatal("partial retained", err)
 	}
 }
+
+// A record naming an earlier partial still on disk is not overwritten by a new
+// download's checkpoint: it would orphan that partial.
+func TestSaveCheckpointKeepsTheRecordOfAnEarlierPartial(t *testing.T) {
+	h, job := audioHarness(t)
+	s := h.handler.s
+	old := checkpoint{ServerHash: s.pairHash(), LibraryID: 3, ShowID: "a1b2c3d4e5f60718", EpisodeID: "1cc306d831645e2b", Path: *job.Path, Temp: ".audiosilo-tmp-stuck", Offset: 6, Total: 100}
+	if err := s.saveCheckpoint(job, &old, `"one"`); err != nil {
+		t.Fatal(err)
+	}
+	next := old
+	next.Temp, next.Validator = ".audiosilo-tmp-next", ""
+	if err := s.saveCheckpoint(job, &next, `"two"`); err != nil {
+		t.Fatal(err)
+	}
+	if saved, ok := s.readCheckpoint(job); !ok || saved.Temp != old.Temp || saved.Validator != old.Validator {
+		t.Fatalf("the earlier record was overwritten: %+v", saved)
+	}
+	if next.Validator != "" {
+		t.Fatal("a validator was sealed for an unrecorded download")
+	}
+}

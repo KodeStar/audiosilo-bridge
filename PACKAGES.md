@@ -2239,7 +2239,10 @@ internal/
             before the ranged GET so no request is spent on it; clearing a
             checkpoint removes its partial on podcast.LstatRegular, never an
             open, so an unreadable one is not left behind, and keeps the record
-            (for cleanOwned) when the removal fails. An episode host's 410 is gone, like the
+            and validator (for cleanOwned) when the removal fails: a later clear
+            in the job tries that partial again before dropping the record, and
+            a new download's checkpoint never overwrites it (that download goes
+            unrecorded). An episode host's 410 is gone, like the
             feed's (the server: no longer available). A poll's params may carry
             `scheduled` (the server's scheduler); read leniently, it changes
             nothing here.

@@ -846,3 +846,48 @@ func TestFetchPartialUnreadableAtTheAppendRestarts(t *testing.T) {
 		t.Fatal("the unreadable partial was left behind:", m)
 	}
 }
+
+// A partial the restart could not remove keeps its record and validator through
+// the rest of the job (the fresh temp's failure and the job's exit clear), so a
+// later clear, here or cleanOwned's, still finds and removes it.
+func TestFetchKeepsTheRecordOfAPartialTheRestartCouldNotRemove(t *testing.T) {
+	requireProbe(t)
+	requireNonRoot(t)
+	h, job := audioHarness(t)
+	s := h.handler.s
+	show := filepath.Join(h.mount, filepath.Dir(*job.Path))
+	t.Cleanup(func() { os.Chmod(show, 0o755) })
+	cutThenWhole(t, h, false, func() {})
+	var stuck []string
+	s.o.Wait = func(context.Context, time.Duration) error {
+		stuck = partials(show)
+		chmodPartials(t, show)
+		if err := os.Chmod(show, 0o500); err != nil {
+			t.Error(err)
+		}
+		return nil
+	}
+	if result, err := h.handler.FetchJob().Run(context.Background(), job, jobs.LocalReporter()); err == nil {
+		t.Fatal("a show folder the Bridge cannot write fetched:", result)
+	}
+	saved, ok := s.readCheckpoint(job)
+	if len(stuck) != 1 || !ok || saved.Temp != filepath.Base(stuck[0]) {
+		t.Fatalf("the record of the partial still on disk was dropped: %v %+v", stuck, saved)
+	}
+	if v, _ := s.o.Vault.Get(saved.Validator); v == "" {
+		t.Fatal("the validator of the partial still on disk was dropped")
+	}
+	os.Chmod(show, 0o755)
+	root, _ := os.OpenRoot(h.mount)
+	defer root.Close()
+	s.clearCheckpoint(job, root, &checkpoint{ServerHash: s.pairHash(), Path: *job.Path})
+	if _, ok := s.readCheckpoint(job); ok {
+		t.Fatal("record kept once the partial was removable")
+	}
+	if left := partials(show); len(left) != 0 {
+		t.Fatal("the earlier partial was not tried again:", left)
+	}
+	if v, _ := s.o.Vault.Get(saved.Validator); v != "" {
+		t.Fatal("validator kept once the partial was removed")
+	}
+}

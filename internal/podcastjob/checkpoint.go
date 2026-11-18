@@ -70,6 +70,12 @@ func (s *service) saveCheckpoint(job jobs.Job, c *checkpoint, etag string) error
 		return err
 	}
 	defer func() { _ = root.Close() }()
+	if saved, ok := s.readCheckpoint(job); ok && saved.Temp != c.Temp {
+		// An earlier partial at this path the Bridge could not remove: its record
+		// stays (clearCheckpoint tries it again, cleanOwned after a day), and
+		// this download goes unrecorded rather than orphan it.
+		return nil
+	}
 	if c.Validator == "" {
 		c.Validator = secrets.PodcastETagPrefix + nonce()
 	}
@@ -140,31 +146,40 @@ func (s *service) loadCheckpoint(job jobs.Job, root *os.Root, showID, episodeID 
 
 // clearCheckpoint removes the owned partial, its sealed validator and the
 // record (only under the pairing that made them), then resets c to no partial.
+// A partial it cannot remove keeps its validator and the record, for cleanOwned
+// once it is a day old; an earlier such partial the record still names is tried
+// again first, so no later clear in the job drops its record.
 func (s *service) clearCheckpoint(job jobs.Job, root *os.Root, c *checkpoint) {
 	defer func() { c.Temp, c.Offset, c.Total, c.Validator = "", 0, 0, "" }()
-	if c.ServerHash != s.pairHash() {
+	if c.ServerHash != s.pairHash() || !s.dropPartial(root, c) {
 		return
 	}
+	if saved, ok := s.readCheckpoint(job); ok && saved.Temp != c.Temp && !s.dropPartial(root, &saved) {
+		return
+	}
+	if dir, err := s.checkpointRoot(); err == nil {
+		_ = dir.Remove(s.checkpointName(job))
+		_ = dir.Close()
+	}
+}
+
+// dropPartial removes c's owned partial, then its sealed validator; false, with
+// both kept, when the partial is still on disk.
+func (s *service) dropPartial(root *os.Root, c *checkpoint) bool {
 	if podcast.OwnedTemp(c.Temp) {
 		p := c.partialName()
 		// Checked, not opened: a partial the Bridge can no longer read (the
-		// restart from zero clears one) is still its own to remove before the
-		// record that names it goes.
+		// restart from zero clears one) is still its own to remove.
 		if _, err := podcast.LstatRegular(root, p); err == nil {
 			if err := root.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
-				// Still on disk: the record and its validator stay, so
-				// cleanOwned can remove the partial once it is a day old.
-				return
+				return false
 			}
 		}
 	}
 	if strings.HasPrefix(c.Validator, secrets.PodcastETagPrefix) {
 		_ = s.o.Vault.Delete(c.Validator)
 	}
-	if dir, err := s.checkpointRoot(); err == nil {
-		_ = dir.Remove(s.checkpointName(job))
-		_ = dir.Close()
-	}
+	return true
 }
 func (s *service) fileLock(ctx context.Context, root *os.Root, episode string) (func(), error) {
 	if err := podcast.EnsureDir(root, path.Dir(episode)+"/.audiosilo"); err != nil {
