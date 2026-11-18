@@ -31,6 +31,28 @@ type AgentSettings struct {
 	// Locked names the settings the environment sets (agent.backend,
 	// agent.openai_compatible.base_url, agent.openai_compatible.model).
 	Locked []string `json:"locked"`
+	// Service is the endpoint's own agent service while the agent runs the
+	// openai-compatible backend, null otherwise.
+	Service *AgentService `json:"service"`
+}
+
+// The states of the endpoint's agent service (AgentService.State).
+const (
+	ServiceRunning    = "running"
+	ServiceNotRunning = "not_running"
+	ServiceRefused    = "refused"
+)
+
+// AgentService is the endpoint's own agent service (the compose example's
+// agent-endpoint) as the Bridge sees it: running, not_running, or refused (it
+// answers, but the Bridge sends it nothing). Detail says why for the last
+// two; Found, while it refuses for a credential within its reach, is what it
+// found (a variable's name or a path in that service, the agent home's
+// marker file say), so the page can name what to remove.
+type AgentService struct {
+	State  string `json:"state"`
+	Detail string `json:"detail"`
+	Found  string `json:"found"`
 }
 
 // AgentEndpoint is agent.openai_compatible: the endpoint's base URL, the model

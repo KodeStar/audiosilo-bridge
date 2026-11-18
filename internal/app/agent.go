@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/kodestar/audiosilo-bridge/internal/accounts"
+	"github.com/kodestar/audiosilo-bridge/internal/agentbox"
 	"github.com/kodestar/audiosilo-bridge/internal/agentproto"
 	"github.com/kodestar/audiosilo-bridge/internal/api"
 	"github.com/kodestar/audiosilo-bridge/internal/config"
@@ -31,7 +32,27 @@ func (b *Bridge) AgentSettings(ctx context.Context) api.AgentSettings {
 			s.Locked = append(s.Locked, k)
 		}
 	}
+	if b.box.ID() == config.AgentBackendOpenAICompatible {
+		s.Service = endpointService(b.box.Status())
+	}
 	return s
+}
+
+// endpointService words the endpoint's agent service for Settings > Agent,
+// from the agent's status on the openai-compatible backend: not running (no
+// fresh runner.json, or no service of its own set up for the Bridge to read),
+// refused (it answers, but isn't one the Bridge sends runs to: a credential
+// within its reach, the wrong kind of runner or user, an older image, no
+// codex), else running (the endpoint's own settings aside).
+func endpointService(st agentbox.Status) *api.AgentService {
+	switch {
+	case st.Problem == agentbox.ProblemNotRunning, st.Problem == agentbox.ProblemEndpointService && !st.Live:
+		return &api.AgentService{State: api.ServiceNotRunning, Detail: st.Detail}
+	case st.Problem == agentbox.ProblemOwnCredentials, st.Problem == agentbox.ProblemEndpointService,
+		st.Problem == agentbox.ProblemOutdated, st.Problem == agentbox.ProblemNoCLI:
+		return &api.AgentService{State: api.ServiceRefused, Detail: st.Detail, Found: st.Found}
+	}
+	return &api.AgentService{State: api.ServiceRunning}
 }
 
 // SaveAgentSettings saves the backend and the endpoint. A setting the

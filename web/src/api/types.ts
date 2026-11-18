@@ -180,6 +180,21 @@ export interface AgentSettings {
   key_set: boolean;
   key_set_at: string;
   locked: AgentSettingKey[];
+  // The endpoint's own agent service while the agent runs the
+  // openai-compatible backend, null otherwise (absent from an older Bridge).
+  service?: AgentService | null;
+}
+
+// api.AgentService: the endpoint's agent service (agent-endpoint) as the
+// Bridge sees it. detail says why it isn't running or is refused; found,
+// while it refuses for a credential within its reach, is what it found there
+// (a variable's name or a path in that service).
+export type AgentServiceState = 'running' | 'not_running' | 'refused';
+
+export interface AgentService {
+  state: AgentServiceState;
+  detail: string;
+  found: string;
 }
 
 // PUT /api/settings/agent

@@ -1,4 +1,10 @@
-import type { AgentBackendName, AgentEndpoint, AgentSettingKey, EndpointCheck } from '@/api/types';
+import type {
+  AgentBackendName,
+  AgentEndpoint,
+  AgentService,
+  AgentSettingKey,
+  EndpointCheck,
+} from '@/api/types';
 
 // Settings > Agent (bridge#84): the backend, and the OpenAI-compatible endpoint
 // the openai-compatible backend runs codex against.
@@ -141,4 +147,50 @@ export function modelNote(m: { context_tokens?: number; tools?: boolean }): stri
   if (m.tools === true) parts.push('tools');
   if (m.tools === false) parts.push('no tools');
   return parts.join(', ');
+}
+
+// AGENT_HOME_MARKER is the file the agent container's runner writes at the top
+// of its home (/agent): the endpoint's service refuses its runs while it finds
+// one within its reach (agentrun's mounts.go).
+export const AGENT_HOME_MARKER = '.audiosilo-agent-home';
+
+// ServiceNote is how Settings > Agent words the endpoint's agent service.
+export interface ServiceNote {
+  kind: 'ok' | 'warn' | 'error';
+  text: string;
+  // found is what the service found within its reach, said as it is, and
+  // marker what to do when that is the agent home's marker file.
+  found: string;
+  marker: string | null;
+}
+
+// serviceNote words the endpoint's agent service's state: running, not
+// running (with how to start it, which the Bridge's detail says), or refused,
+// naming what it found and, for the agent home's marker, the file to remove.
+export function serviceNote(s: AgentService): ServiceNote {
+  switch (s.state) {
+    case 'running':
+      return {
+        kind: 'ok',
+        text: "The endpoint's agent service (agent-endpoint) is running.",
+        found: '',
+        marker: null,
+      };
+    case 'not_running':
+      return {
+        kind: 'warn',
+        text: `The endpoint's agent service (agent-endpoint) isn't running${s.detail ? `: ${s.detail}` : '. Start it with docker compose --profile endpoint up -d agent-endpoint.'}`,
+        found: '',
+        marker: null,
+      };
+    default:
+      return {
+        kind: 'error',
+        text: `The endpoint's agent service (agent-endpoint) runs nothing${s.detail ? `: ${s.detail}` : '.'}`,
+        found: s.found,
+        marker: s.found.includes(AGENT_HOME_MARKER)
+          ? `That is the agent home's marker file (${AGENT_HOME_MARKER}), which the agent container writes into its /agent volume. Remove that volume from agent-endpoint; if the folder isn't the agent volume, delete the ${AGENT_HOME_MARKER} file there.`
+          : null,
+      };
+  }
 }
