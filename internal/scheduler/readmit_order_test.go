@@ -178,3 +178,32 @@ func TestDispatchSkipsABookHeldMidChange(t *testing.T) {
 		t.Fatalf("release marks the pass has passed are kept: %v", s.releasedAt)
 	}
 }
+
+// bridge#65: a start's reconcile rewinds a book by its state alone, so a cancel
+// written to the store after the reconcile read the book (the Bridge's
+// CancelStored while its engine starts) is never written back over.
+func TestReconcileRewindKeepsAStatusWrittenSinceItsRead(t *testing.T) {
+	h := newHarness(t)
+	db := h.openDB(t)
+	ctx := context.Background()
+	b := h.addBook(t, db, "reconcile-cancel", "", "")
+	if err := db.SetBookState(ctx, b.ID, string(state.Auditing), "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	recordSuccess(t, db, b.ID, state.Inspecting) // its sentinel is gone: the rewind goes back there
+	read, err := db.GetBook(ctx, b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := CancelStored(ctx, db, b.ID); err != nil {
+		t.Fatal(err)
+	}
+	s := New(db, events.NewHub(8), NewStubExecutor(0, 0), 1, h.workRoot, false)
+	if err := s.reconcileBook(ctx, read, map[string]bool{string(state.Inspecting): true}); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := db.GetBook(ctx, b.ID); got.State != string(state.Inspecting) || !IsCancelled(got) {
+		t.Fatalf("after the reconcile: state %q, status %q error %q; want rewound and still cancelled",
+			got.State, got.Status, got.Error)
+	}
+}

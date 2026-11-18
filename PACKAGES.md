@@ -1605,7 +1605,10 @@ internal/
             read (generate's Retry): it re-admits only while the book still has b's
             status and error (the contrib poller's Readmit too). CancelStored(db, id)
             is Cancel's store write alone, for a caller with no scheduler running
-            (generate's Abandon before the engine starts). readmit supersedes
+            (generate's Abandon before the engine starts); a start's reconcileBook
+            rewinds by the state alone (SetBookPipelineState), so it never writes the
+            status it read back over such a cancel. ReadmitParked stops at its
+            context's end. readmit supersedes
             the CURRENT stage's successes ONLY for the round-cap park codes
             (qa_no_converge, fix_loop_exhausted - the latter also superseding fixing +
             wiping the audit trajectory files) so an availability park never destroys a

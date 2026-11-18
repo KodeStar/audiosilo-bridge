@@ -396,9 +396,11 @@ func (s *Scheduler) reconcileBook(ctx context.Context, b store.Book, succeeded m
 			}
 		}
 	}
-	// Preserve status/error/park_code exactly (a rewind is a position change, not a
-	// status change): a parked book keeps its typed reason across a restart.
-	return s.db.SetBookState(ctx, b.ID, rewind, b.Status, b.Error, b.ParkCode)
+	// The state alone (a rewind is a position change, not a status change): a parked
+	// book keeps its typed reason and retry_at across a restart, and a status written
+	// since b was read (the Bridge cancelling a book in the store while its engine
+	// starts, scheduler.CancelStored, bridge#65) is never written back over.
+	return s.db.SetBookPipelineState(ctx, b.ID, rewind)
 }
 
 // --- dispatch ---
