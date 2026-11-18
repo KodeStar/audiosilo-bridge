@@ -2234,7 +2234,7 @@ internal/
             error, not invalid_audio, and a lease check it cuts is no lost claim,
             identity_changed), a retry wait it cuts ends on the host's
             last answer, and its own faults (no streamer, its partial) are
-            write_failed. A partial it cannot open, check (sameRegular) or read
+            write_failed. A partial it cannot open (podcast.OpenRegularFile, its size) or read
             back restarts the episode from zero once per job first, checked
             before the ranged GET so no request is spent on it; clearing a
             checkpoint removes its partial on podcast.LstatRegular, never an

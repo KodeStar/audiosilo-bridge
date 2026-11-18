@@ -50,7 +50,7 @@ type Options struct {
 	Probe           ProbeFunc
 	Streamer        Streamer
 	Wait            func(context.Context, time.Duration) error
-	Fault           podcast.Boundary // the journal's boundaries, and "partial" before a resume reads its partial
+	Fault           podcast.Boundary // the journal's boundaries, and "partial" when a resume checks its partial before the ranged GET
 	BudgetNow       func() time.Time
 	AfterFunc       func(time.Duration, func()) Timer
 	Version         string

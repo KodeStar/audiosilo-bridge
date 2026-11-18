@@ -239,23 +239,24 @@ func TestStaleIdentityCheckpointIsDropped(t *testing.T) {
 }
 
 // A proven partial swapped for a link after its check is never appended to.
-func TestSameRegularRefusesSwappedPartial(t *testing.T) {
+func TestOpenPartialRefusesSwappedPartial(t *testing.T) {
 	dir := t.TempDir()
 	root, _ := os.OpenRoot(dir)
 	defer root.Close()
 	root.WriteFile("victim", []byte("keep"), 0644)
 	root.WriteFile("partial", []byte("prefix"), 0600)
-	f, _ := root.OpenFile("partial", os.O_RDWR, 0)
-	if !sameRegular(root, "partial", f, 6) || sameRegular(root, "partial", f, 5) {
-		t.Fatal("size check")
+	f, err := openPartial(root, "partial", 6)
+	if err != nil {
+		t.Fatal(err)
 	}
 	f.Close()
+	if _, err := openPartial(root, "partial", 5); !errors.Is(err, errPartialUnreadable) {
+		t.Fatal("size check", err)
+	}
 	root.Remove("partial")
 	os.Symlink("victim", filepath.Join(dir, "partial"))
-	f, _ = root.OpenFile("partial", os.O_RDWR, 0)
-	defer f.Close()
-	if sameRegular(root, "partial", f, 4) {
-		t.Fatal("link target accepted as the partial")
+	if _, err := openPartial(root, "partial", 4); !errors.Is(err, errPartialUnreadable) {
+		t.Fatal("link target accepted as the partial", err)
 	}
 }
 

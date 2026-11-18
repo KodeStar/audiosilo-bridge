@@ -422,7 +422,7 @@ func (s *service) download(ctx context.Context, b *budget, job jobs.Job, root *o
 		}
 		// Checked before the ranged GET, so an unreadable partial costs no request:
 		// the attempt goes out from zero instead.
-		if c.Offset > 0 && s.partialReadable(root, c) != nil {
+		if c.Offset > 0 && !s.partialOK(root, c) {
 			if err := restart(); err != nil {
 				return podcast.Fetch{}, err
 			}
@@ -461,8 +461,8 @@ func (s *service) download(ctx context.Context, b *budget, job jobs.Job, root *o
 				attempt--
 				continue
 			}
-			// A local file failure (a full disk, a replaced partial) is not a
-			// network interruption: never retried or reported as one.
+			// A local file failure (a full disk) is not a network interruption:
+			// never retried or reported as one.
 			var guard *netguard.Error
 			if !errors.As(err, &guard) && ctx.Err() == nil {
 				return podcast.Fetch{}, err
@@ -506,18 +506,18 @@ func (s *service) consume(ctx context.Context, b *budget, job jobs.Job, root *os
 	if total > 0 {
 		b.tighten(total)
 	}
-	freshTemp := c.Temp == ""
-	if freshTemp {
+	// Only an append keeps c.Temp (any other action cleared it above).
+	appending := c.Temp != ""
+	if !appending {
 		c.Temp = podcast.TempPrefix + nonce()
 	}
-	name := path.Dir(c.Path) + "/" + c.Temp
+	name := c.partialName()
 	var file *os.File
 	var err error
-	if freshTemp {
-		file, err = root.OpenFile(name, os.O_RDWR|os.O_EXCL|os.O_CREATE, 0o600)
-	} else {
-		// Only an append keeps c.Temp (any other action cleared it above).
+	if appending {
 		file, err = openPartial(root, name, c.Offset)
+	} else {
+		file, err = root.OpenFile(name, os.O_RDWR|os.O_EXCL|os.O_CREATE, 0o600)
 	}
 	if err != nil {
 		return podcast.Fetch{}, "", err
@@ -527,7 +527,7 @@ func (s *service) consume(ctx context.Context, b *budget, job jobs.Job, root *os
 		return podcast.Fetch{}, "", err
 	}
 	h := sha256.New()
-	if !freshTemp {
+	if appending {
 		if _, err := io.CopyN(h, file, c.Offset); err != nil {
 			// The Bridge's own partial file: a local fault, not the episode host's
 			// (download restarts the episode once, then fails write_failed).
@@ -607,45 +607,31 @@ func (s *service) consume(ctx context.Context, b *budget, job jobs.Job, root *os
 	return podcast.Fetch{Bytes: c.Offset, SHA256: hex.EncodeToString(h.Sum(nil))}, tag, nil
 }
 
-// partialReadable is errPartialUnreadable when the proven partial c resumes can
-// no longer be opened for the append or is not the regular file it was. A read
-// failing later in the prefix is consume's to find.
-func (s *service) partialReadable(root *os.Root, c *checkpoint) error {
-	file, err := openPartial(root, path.Dir(c.Path)+"/"+c.Temp, c.Offset)
+// partialOK reports whether the proven partial c resumes can still be opened for
+// the append and is the regular file it was. A read failing later in the prefix
+// is consume's to find.
+func (s *service) partialOK(root *os.Root, c *checkpoint) bool {
+	file, err := openPartial(root, c.partialName(), c.Offset)
 	if err != nil {
-		return err
+		return false
 	}
 	_ = file.Close()
-	if s.o.Fault.Hit("partial") != nil {
-		return errPartialUnreadable
-	}
-	return nil
+	return s.o.Fault.Hit("partial") == nil
 }
 
 // openPartial opens the proven partial at name for the append. Any failure (no
 // permission, gone, replaced by a link or another file since it was proven) is
 // errPartialUnreadable, never a reason to write to whatever is there.
 func openPartial(root *os.Root, name string, size int64) (*os.File, error) {
-	file, err := root.OpenFile(name, os.O_RDWR, 0)
+	file, err := podcast.OpenRegularFile(root, name, os.O_RDWR)
 	if err != nil {
 		return nil, errPartialUnreadable
 	}
-	if !sameRegular(root, name, file, size) {
+	if st, err := file.Stat(); err != nil || st.Size() != size {
 		_ = file.Close()
 		return nil, errPartialUnreadable
 	}
 	return file, nil
-}
-
-// sameRegular reports whether the open file is the regular file at name with the
-// expected size: not a symlink's target, not a file swapped in after the open.
-func sameRegular(root *os.Root, name string, f *os.File, size int64) bool {
-	opened, err := f.Stat()
-	if err != nil || !opened.Mode().IsRegular() || opened.Size() != size {
-		return false
-	}
-	named, err := root.Lstat(name)
-	return err == nil && named.Mode().IsRegular() && os.SameFile(opened, named)
 }
 
 type downloadWriter struct {

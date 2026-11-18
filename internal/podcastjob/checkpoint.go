@@ -34,6 +34,12 @@ type checkpoint struct {
 	UpdatedAt  string `json:"updated_at"`
 }
 
+// partialName is the root-relative name of the partial c records, beside its
+// episode.
+func (c *checkpoint) partialName() string {
+	return path.Dir(c.Path) + "/" + c.Temp
+}
+
 func nonce() string {
 	var b [12]byte
 	if _, err := rand.Read(b[:]); err != nil {
@@ -120,7 +126,7 @@ func (s *service) loadCheckpoint(job jobs.Job, root *os.Root, showID, episodeID 
 		return c, ""
 	}
 	tag, _ := s.o.Vault.Get(saved.Validator)
-	partial, err := podcast.OpenRegular(root, path.Dir(c.Path)+"/"+saved.Temp)
+	partial, err := podcast.OpenRegular(root, saved.partialName())
 	if err == nil {
 		defer partial.Close()
 		st, e := partial.Stat()
@@ -140,10 +146,10 @@ func (s *service) clearCheckpoint(job jobs.Job, root *os.Root, c *checkpoint) {
 		return
 	}
 	if podcast.OwnedTemp(c.Temp) {
-		p := path.Dir(c.Path) + "/" + c.Temp
+		p := c.partialName()
 		// Checked, not opened: a partial the Bridge can no longer read (the
-		// restart from zero clears one) is still its own to remove, and the
-		// record that names it is about to go.
+		// restart from zero clears one) is still its own to remove before the
+		// record that names it goes.
 		if _, err := podcast.LstatRegular(root, p); err == nil {
 			if err := root.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
 				// Still on disk: the record and its validator stay, so

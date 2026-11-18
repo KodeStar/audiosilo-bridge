@@ -89,11 +89,17 @@ func LstatRegular(root *os.Root, name string) (os.FileInfo, error) {
 // As agentproto.OpenRegular does, O_NONBLOCK keeps a FIFO swapped in after the
 // Lstat from blocking the open, and the open file must be the one the Lstat saw.
 func OpenRegular(root *os.Root, name string) (*os.File, error) {
+	return OpenRegularFile(root, name, os.O_RDONLY)
+}
+
+// OpenRegularFile is OpenRegular with the open's access flag (os.O_RDWR for an
+// append); it never creates.
+func OpenRegularFile(root *os.Root, name string, flag int) (*os.File, error) {
 	named, err := LstatRegular(root, name)
 	if err != nil {
 		return nil, err
 	}
-	f, err := root.OpenFile(name, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	f, err := root.OpenFile(name, flag|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return nil, err
 	}

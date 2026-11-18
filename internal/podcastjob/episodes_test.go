@@ -683,45 +683,15 @@ func TestFetchUnreadablePartialRestartsOnce(t *testing.T) {
 	for _, scenario := range []string{"restarts", "twice"} {
 		t.Run(scenario, func(t *testing.T) {
 			h, job := audioHarness(t)
-			audio := data(t, "chap-v23.mp3")
-			var calls atomic.Int32
-			var lastFresh atomic.Int32 // the last GET from zero
-			setAudio(h, func(w http.ResponseWriter, r *http.Request) {
-				n := calls.Add(1)
-				w.Header().Set("ETag", `"one"`)
-				if r.Header.Get("Range") != "" {
-					w.Header().Set("Content-Range", fmt.Sprintf("bytes 1000-%d/%d", len(audio)-1, len(audio)))
-					w.Header().Set("Content-Length", strconv.Itoa(len(audio)-1000))
-					w.WriteHeader(206)
-					w.Write(audio[1000:])
-					return
-				}
-				lastFresh.Store(n)
-				w.Header().Set("Content-Length", strconv.Itoa(len(audio)))
-				if scenario == "restarts" && n > 1 {
-					w.Write(audio)
-					return
-				}
-				// Cut after a proven prefix: the next attempt resumes it.
-				w.WriteHeader(200)
-				w.Write(audio[:1000])
-			})
+			audio, calls, ranged := cutThenWhole(t, h, scenario == "twice", func() {})
 			show := filepath.Join(h.mount, filepath.Dir(*job.Path))
-			partials := func() []string {
-				m, _ := filepath.Glob(filepath.Join(show, podcast.TempPrefix+"*"))
-				return m
-			}
 			var reads atomic.Int32
 			h.handler.s.o.Fault = func(at string) error {
 				if at == "partial" {
 					reads.Add(1)
 					// Really unreadable: the restart must still remove it,
 					// never leave it behind with its record gone.
-					for _, p := range partials() {
-						if err := os.Chmod(p, 0); err != nil {
-							t.Error(err)
-						}
-					}
+					chmodPartials(t, show)
 					return errors.New("unreadable partial")
 				}
 				return nil
@@ -738,10 +708,10 @@ func TestFetchUnreadablePartialRestartsOnce(t *testing.T) {
 				t.Fatal(result, err)
 			}
 			// The first GET, then a GET from zero: never the resume's ranged GET.
-			if got := result.(fetchResult); got.Fetch.Bytes != int64(len(audio)) || calls.Load() != 2 || reads.Load() != 1 || lastFresh.Load() != 2 {
-				t.Fatal(got, calls.Load(), reads.Load(), lastFresh.Load())
+			if got := result.(fetchResult); got.Fetch.Bytes != int64(len(audio)) || calls.Load() != 2 || reads.Load() != 1 || ranged.Load() != 0 {
+				t.Fatal(got, calls.Load(), reads.Load(), ranged.Load())
 			}
-			if left := partials(); len(left) != 0 {
+			if left := partials(show); len(left) != 0 {
 				t.Fatal("the unreadable partial was left behind:", left)
 			}
 		})
@@ -755,9 +725,26 @@ func requireNonRoot(t *testing.T) {
 	}
 }
 
-// cutThenWhole answers the first GET from zero with a cut proven prefix and every
-// later one in full; a ranged GET is answered 206 after onRange runs.
-func cutThenWhole(t *testing.T, h *harness, onRange func()) (audio []byte, calls, ranged *atomic.Int32) {
+// partials is the owned temps in the show folder.
+func partials(show string) []string {
+	m, _ := filepath.Glob(filepath.Join(show, podcast.TempPrefix+"*"))
+	return m
+}
+
+// chmodPartials makes every owned temp in the show folder unreadable.
+func chmodPartials(t *testing.T, show string) {
+	t.Helper()
+	for _, p := range partials(show) {
+		if err := os.Chmod(p, 0); err != nil {
+			t.Error(err)
+		}
+	}
+}
+
+// cutThenWhole answers the first GET from zero (every one when cutAll) with a
+// cut proven prefix and every later one in full; a ranged GET is answered 206
+// after onRange runs.
+func cutThenWhole(t *testing.T, h *harness, cutAll bool, onRange func()) (audio []byte, calls, ranged *atomic.Int32) {
 	audio = data(t, "chap-v23.mp3")
 	calls, ranged = new(atomic.Int32), new(atomic.Int32)
 	setAudio(h, func(w http.ResponseWriter, r *http.Request) {
@@ -773,10 +760,11 @@ func cutThenWhole(t *testing.T, h *harness, onRange func()) (audio []byte, calls
 			return
 		}
 		w.Header().Set("Content-Length", strconv.Itoa(len(audio)))
-		if n > 1 {
+		if n > 1 && !cutAll {
 			w.Write(audio)
 			return
 		}
+		// Cut after a proven prefix: the next attempt resumes it.
 		w.WriteHeader(200)
 		w.Write(audio[:1000])
 	})
@@ -794,15 +782,14 @@ func TestFetchLostPartialRestartsBeforeTheRangedGet(t *testing.T) {
 				requireNonRoot(t)
 			}
 			h, job := audioHarness(t)
-			audio, calls, ranged := cutThenWhole(t, h, func() {})
+			audio, calls, ranged := cutThenWhole(t, h, false, func() {})
 			show := filepath.Join(h.mount, filepath.Dir(*job.Path))
 			victim := filepath.Join(h.mount, "victim")
 			if err := os.WriteFile(victim, []byte("keep"), 0o644); err != nil {
 				t.Fatal(err)
 			}
 			h.handler.s.o.Wait = func(context.Context, time.Duration) error {
-				m, _ := filepath.Glob(filepath.Join(show, podcast.TempPrefix+"*"))
-				for _, p := range m {
+				for _, p := range partials(show) {
 					var err error
 					switch scenario {
 					case "mode 000":
@@ -831,7 +818,7 @@ func TestFetchLostPartialRestartsBeforeTheRangedGet(t *testing.T) {
 				t.Fatalf("the link's target was written: %q", b)
 			}
 			if scenario != "link" {
-				if m, _ := filepath.Glob(filepath.Join(show, podcast.TempPrefix+"*")); len(m) != 0 {
+				if m := partials(show); len(m) != 0 {
 					t.Fatal("the lost partial was left behind:", m)
 				}
 			}
@@ -846,14 +833,7 @@ func TestFetchPartialUnreadableAtTheAppendRestarts(t *testing.T) {
 	requireNonRoot(t)
 	h, job := audioHarness(t)
 	show := filepath.Join(h.mount, filepath.Dir(*job.Path))
-	audio, calls, ranged := cutThenWhole(t, h, func() {
-		m, _ := filepath.Glob(filepath.Join(show, podcast.TempPrefix+"*"))
-		for _, p := range m {
-			if err := os.Chmod(p, 0); err != nil {
-				t.Error(err)
-			}
-		}
-	})
+	audio, calls, ranged := cutThenWhole(t, h, false, func() { chmodPartials(t, show) })
 	result, err := h.handler.FetchJob().Run(context.Background(), job, jobs.LocalReporter())
 	if err != nil {
 		t.Fatal(result, err)
@@ -862,7 +842,7 @@ func TestFetchPartialUnreadableAtTheAppendRestarts(t *testing.T) {
 	if got := result.(fetchResult); got.Fetch.Bytes != int64(len(audio)) || calls.Load() != 3 || ranged.Load() != 1 {
 		t.Fatal(got, calls.Load(), ranged.Load())
 	}
-	if m, _ := filepath.Glob(filepath.Join(show, podcast.TempPrefix+"*")); len(m) != 0 {
+	if m := partials(show); len(m) != 0 {
 		t.Fatal("the unreadable partial was left behind:", m)
 	}
 }
