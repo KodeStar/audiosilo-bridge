@@ -1035,26 +1035,35 @@ func (s *Scheduler) advanceWaypoints(ctx context.Context) ([]store.Book, []state
 	for {
 		advanced := false
 		for i := range books {
-			b := books[i]
-			st := state.State(b.State)
-			if b.Status != "" || !state.IsWaypoint(st) {
-				continue
+			if next, ok := s.advanceWaypoint(ctx, books[i]); ok {
+				books[i].State = next // mirror the persisted advance in memory
+				advanced = true
 			}
-			next, _, err := state.NextState(state.ParseKind(b.Kind), st, state.Outcome{})
-			if err != nil {
-				continue
-			}
-			if err := s.db.SetBookState(ctx, b.ID, string(next), "", "", ""); err != nil {
-				continue
-			}
-			books[i].State = string(next) // mirror the persisted advance in memory
-			s.publishState(b.ID, string(next), "", "", "", "")
-			advanced = true
 		}
 		if !advanced {
 			return books, finished, nil
 		}
 	}
+}
+
+// advanceWaypoint moves book b, as the pass read it, on from a waypoint it waits
+// at with no status, and reports the state it moved to. It writes the state
+// alone, as advance does: a status written since the read (a Cancel or a Pause
+// landing after the pass read its books) is never written back over (bridge#65).
+func (s *Scheduler) advanceWaypoint(ctx context.Context, b store.Book) (string, bool) {
+	st := state.State(b.State)
+	if b.Status != "" || !state.IsWaypoint(st) {
+		return "", false
+	}
+	next, _, err := state.NextState(state.ParseKind(b.Kind), st, state.Outcome{})
+	if err != nil {
+		return "", false
+	}
+	if err := s.db.SetBookPipelineState(ctx, b.ID, string(next)); err != nil {
+		return "", false
+	}
+	s.publishState(b.ID, string(next), "", "", "", "")
+	return string(next), true
 }
 
 // autoReadmitCodes are the park reasons the timed self-resume acts on: the transient

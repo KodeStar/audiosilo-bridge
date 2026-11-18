@@ -216,6 +216,35 @@ func TestCancelKeepsAPassThatReadTheBookBeforeItOffTheBook(t *testing.T) {
 	}
 }
 
+// bridge#65: the pass moves a book on from a waypoint by its state alone, so a
+// cancel written after the pass read its books (the Bridge's CancelStored while
+// its engine starts, or a Cancel) is never written back over.
+func TestWaypointAdvanceKeepsAStatusWrittenSinceItsRead(t *testing.T) {
+	h := newHarness(t)
+	db := h.openDB(t)
+	ctx := context.Background()
+	b := h.addBook(t, db, "waypoint-cancel", "", "")
+	read, err := db.GetBook(ctx, b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !state.IsWaypoint(state.State(read.State)) || read.Status != "" {
+		t.Fatalf("a new book waits at %q with status %q, want a waypoint and none", read.State, read.Status)
+	}
+	if err := CancelStored(ctx, db, b.ID); err != nil {
+		t.Fatal(err)
+	}
+	s := New(db, events.NewHub(8), NewStubExecutor(0, 0), 1, h.workRoot, false)
+	next, ok := s.advanceWaypoint(ctx, read)
+	if !ok {
+		t.Fatal("the waypoint wasn't advanced")
+	}
+	if got, _ := db.GetBook(ctx, b.ID); got.State != next || !IsCancelled(got) {
+		t.Fatalf("after the advance: state %q, status %q error %q; want %q and still cancelled",
+			got.State, got.Status, got.Error, next)
+	}
+}
+
 // bridge#65: a start's reconcile rewinds a book by its state alone, so a cancel
 // written to the store after the reconcile read the book (the Bridge's
 // CancelStored while its engine starts) is never written back over.
