@@ -1897,7 +1897,9 @@ internal/
             int32 filter. Ordinary Claim never sends it. Missing accepts disables
             the option, unknown reply keys are tolerated, and a new Client starts
             unnegotiated. WithdrawClaimMinPriority clears it after an ignored
-            filter or pairing change; a later heartbeat must advertise it again.
+            filter or pairing change; a later heartbeat must advertise it again,
+            one sent after the withdrawal (a generation: a reply to a heartbeat that
+            was out when it came is not recorded, bridge#13).
             Deletion snapshots require all protocol fields, tolerate new keys,
             and expose no listener identities.
             Phase 3c-1: BookFile.Duration (the server's indexed seconds; a single-file

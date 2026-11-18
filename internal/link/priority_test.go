@@ -3,8 +3,12 @@ package link
 import (
 	"context"
 	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"strconv"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -103,5 +107,47 @@ func TestWithdrawClaimPriorityUntilHeartbeat(t *testing.T) {
 		} else if err == nil || f.last != before {
 			t.Fatal("heartbeat without accept restored negotiation", err)
 		}
+	}
+}
+
+// bridge#13: a heartbeat that was out when the negotiation was withdrawn (an
+// ignored filter, a pairing change) doesn't enable it again with its reply,
+// written before the withdrawal; the next heartbeat's reply does.
+func TestWithdrawalOutlastsAHeartbeatInFlight(t *testing.T) {
+	t.Parallel()
+	arrived, answer := make(chan struct{}, 1), make(chan struct{})
+	var gated atomic.Bool
+	gated.Store(true)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if gated.Load() {
+			arrived <- struct{}{}
+			<-answer
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"accepts":["claim_min_priority"]}`)
+	}))
+	t.Cleanup(srv.Close)
+	c, err := New(srv.URL, "tok", "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	done := make(chan error, 1)
+	go func() { _, err := c.Heartbeat(ctx, Status{}); done <- err }()
+	<-arrived
+	c.WithdrawClaimMinPriority()
+	close(answer)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if c.SupportsClaimMinPriority() {
+		t.Fatal("a heartbeat sent before the withdrawal enabled the filter again")
+	}
+	gated.Store(false)
+	if _, err := c.Heartbeat(ctx, Status{}); err != nil {
+		t.Fatal(err)
+	}
+	if !c.SupportsClaimMinPriority() {
+		t.Fatal("a heartbeat sent after the withdrawal didn't enable the filter")
 	}
 }
