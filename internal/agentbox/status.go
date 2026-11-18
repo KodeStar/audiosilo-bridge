@@ -131,6 +131,10 @@ const (
 	ProblemOwnCredentials Problem = "own_credentials"
 )
 
+// endpointMovedDetail is a run's error when the endpoint's address changed
+// between the run reading it and reading its key (Run).
+const endpointMovedDetail = "the OpenAI-compatible endpoint's address changed as this run started: it runs again against the new address"
+
 // noEndpointDetail is the agent's state while the openai-compatible backend
 // has no endpoint address.
 const noEndpointDetail = "no OpenAI-compatible endpoint is set: set its address in Settings > Agent on the Bridge's page"
@@ -340,11 +344,12 @@ type refusedCredential struct {
 }
 
 // noteRefusal remembers that the provider refused the credential c (the backend's
-// entry in runner.json when the run was handed over).
-func (r *Runner) noteRefusal(c agentproto.CLI, detail string) {
+// entry in runner.json when the run was handed over), at the endpoint address
+// the run went to ("" off the openai-compatible backend).
+func (r *Runner) noteRefusal(c agentproto.CLI, detail, endpoint string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.refused = &refusedCredential{kind: c.Credential, since: c.CredentialSince, detail: detail, endpoint: r.endpointNow()}
+	r.refused = &refusedCredential{kind: c.Credential, since: c.CredentialSince, detail: detail, endpoint: endpoint}
 }
 
 // endpointNow is the endpoint's address now on the openai-compatible backend,

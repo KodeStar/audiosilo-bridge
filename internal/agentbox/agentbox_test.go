@@ -1335,7 +1335,7 @@ func TestHandoffRefusalEndsOnReplace(t *testing.T) {
 		return agentproto.CredentialAPIKey, "sk-ant-api-vault", since.Load().(time.Time), true
 	}
 	writeRunnerJSON(t, dir, handoffRunner(true))
-	r.noteRefusal(r.Status().CLIs["claude"], "invalid api key")
+	r.noteRefusal(r.Status().CLIs["claude"], "invalid api key", "")
 	if st := r.Status(); !st.Refused || !strings.Contains(st.Detail, "replace it on the Bridge's Accounts tab") {
 		t.Fatalf("refused: %+v (the handed credential is replaced on the Accounts tab)", st)
 	}

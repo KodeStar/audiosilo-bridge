@@ -169,6 +169,88 @@ func TestEndpointRefusalAdvice(t *testing.T) {
 	}
 }
 
+// A refusal is the address's the run went to: one that comes back after the
+// address moved (a run in flight over a save) is no refusal of the new one.
+func TestEndpointRefusalIsItsRunsAddress(t *testing.T) {
+	t.Parallel()
+	r, dir, base := endpointRunner(t, "")
+	stop := (&fakeRunner{fn: func(job string) agentproto.Exit {
+		base.Store("https://openrouter.ai/api/v1") // saved while the run is out
+		mustWrite(t, filepath.Join(job, agentproto.StdoutFile),
+			`{"type":"turn.failed","error":{"message":"unexpected status 401 Unauthorized: no key"}}`+"\n")
+		return agentproto.Exit{ExitCode: 1}
+	}}).start(t, dir)
+	_, err := r.Run(context.Background(), agent.Request{Dir: stagedDir(t), Prompt: "p", Model: "m", Timeout: time.Minute})
+	stop()
+	var na *agent.NotAvailableError
+	if !errors.As(err, &na) || !na.CredentialRefused {
+		t.Fatalf("run = %v", err)
+	}
+	if st := r.Status(); st.Refused || !st.Available {
+		t.Fatalf("the old address's refusal held against the new one: %+v", st)
+	}
+}
+
+// The key handed to a run is read after the run's address: when the address
+// moves in between (a save, then the new address's key), the key read is the
+// new address's and the run is not staged with it (denied: the new key to the
+// old address; the book parks and runs against the new one).
+func TestEndpointKeyNeverFollowsAMovedAddress(t *testing.T) {
+	t.Parallel()
+	r, dir, base := endpointRunner(t, "sk-endpoint-vault")
+	const moved = "https://elsewhere.example/v1"
+	vault := r.credential
+	var reads atomic.Int32
+	r.credential = func(backend string) (string, string, time.Time, bool) {
+		// Status reads it first; Run's own read finds the address just moved.
+		if reads.Add(1) == 2 {
+			base.Store(moved)
+		}
+		return vault(backend)
+	}
+	stop := (&fakeRunner{fn: func(job string) agentproto.Exit {
+		t.Errorf("a run was staged with the moved address's key (job %s)", filepath.Base(job))
+		return agentproto.Exit{}
+	}}).start(t, dir)
+	_, err := r.Run(context.Background(), agent.Request{Dir: stagedDir(t), Prompt: "p", Model: "m", Timeout: time.Minute})
+	stop()
+	var na *agent.NotAvailableError
+	if !errors.As(err, &na) || na.CredentialRefused || !strings.Contains(na.Detail, "address changed") {
+		t.Fatalf("run = %v", err)
+	}
+	assertNoJobDirs(t, dir)
+	// The address as it is now runs with its key as before (allowed).
+	r.credential = vault
+	if st := r.Status(); !st.Available || !st.Handoff {
+		t.Fatalf("status at the new address = %+v", st)
+	}
+}
+
+// A short stand-in key (a local server that takes any) is not cut from the
+// run's output: cutting "e" or "none" out of codex's JSON stream would lose
+// the run's usage and garble its answer (allowed: the output read whole; a
+// real key is cut, TestEndpointKeyCutFromOutput).
+func TestEndpointShortKeyLeavesTheOutputWhole(t *testing.T) {
+	t.Parallel()
+	for _, key := range []string{"e", "none", "ollama"} {
+		t.Run(key, func(t *testing.T) {
+			t.Parallel()
+			r, dir, _ := endpointRunner(t, key)
+			stop := (&fakeRunner{fn: func(job string) agentproto.Exit {
+				mustWrite(t, filepath.Join(job, agentproto.StdoutFile),
+					`{"type":"turn.completed","usage":{"input_tokens":240,"cached_input_tokens":40,"output_tokens":14}}`+"\n")
+				mustWrite(t, filepath.Join(job, agentproto.LastMessageFile), "none of the llamas were done; ollama")
+				return agentproto.Exit{}
+			}}).start(t, dir)
+			res, err := r.Run(context.Background(), agent.Request{Dir: stagedDir(t), Prompt: "p", Model: "m", Timeout: time.Minute})
+			stop()
+			if err != nil || res.Usage.Input != 240 || res.Usage.Output != 14 || res.Text != "none of the llamas were done; ollama" {
+				t.Fatalf("run = %+v, %v", res, err)
+			}
+		})
+	}
+}
+
 // A group probe on the openai-compatible backend goes as an endpoint run: the
 // runner reads an endpoint run's credential whatever the container has of its
 // own, and a plain codex run's never while the container is signed in (the

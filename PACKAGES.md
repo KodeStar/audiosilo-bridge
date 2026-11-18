@@ -3635,11 +3635,18 @@ internal/
             local server takes none); a runner without endpoints is ProblemOutdated.
             Run sets req.Endpoint, stage writes it into request.json, and the handed
             credential's CLI is codex. SupportsWeb is false for it; a refusal's advice
-            points at Settings > Agent, and another address clears it. A run with no
+            points at Settings > Agent, and another address clears it (a refusal is
+            kept with the address its run went to, not the address when it came
+            back). A run with no
             model (cleared on the page while another backend waits for the restart)
-            is the agent unavailable, never staged. The handed credential is cut
+            is the agent unavailable, never staged. Run reads the address, then the
+            key, then the address again: a key read after the address moved is the
+            new address's, so the run isn't staged (endpointMovedDetail, the agent
+            unavailable). The handed credential is cut
             from the CLI's output before it is read (an endpoint may repeat the key
-            in its error). A group probe goes as an endpoint request (probeModel,
+            in its error), when it is minCutSecret (8) bytes or more: a short
+            stand-in key ("x", "none", "ollama") would be cut out of codex's JSON
+            stream and its answer, losing the usage and the result. A group probe goes as an endpoint request (probeModel,
             probeEndpoint), which the runner takes the credential for whatever the
             container has of its own.
             An endpoint's model is whoever answers at the address, and codex runs

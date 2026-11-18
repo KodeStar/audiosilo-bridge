@@ -323,6 +323,13 @@ func (r *Runner) Run(ctx context.Context, req agent.Request) (agent.Result, erro
 			handed = &agentproto.Credential{CLI: r.cli, Kind: kind, Value: value}
 		}
 	}
+	if req.Endpoint != nil && handed != nil && r.endpoint() != req.Endpoint.BaseURL {
+		// The key is the one of the endpoint's address as it was read, after
+		// this run's: an address saved in between has another endpoint's key,
+		// which must not go to this one. The book parks and runs against the
+		// new address.
+		return agent.Result{}, &agent.NotAvailableError{Backend: r.backend, Detail: endpointMovedDetail}
+	}
 	group := noGroup
 	if st.ShareGroup {
 		group = r.gid
@@ -408,7 +415,11 @@ func (r *Runner) runJob(ctx context.Context, req agent.Request, st Status, hande
 		secret = handed.Value
 	}
 	res, runErr := r.outcome(root, req.Model, time.Duration(timeout)*time.Second, secret)
-	r.noteCredential(st, runErr)
+	endpoint := ""
+	if req.Endpoint != nil {
+		endpoint = req.Endpoint.BaseURL
+	}
+	r.noteCredential(st, runErr, endpoint)
 	if waitErr != nil {
 		// Cancelled: the runner stopped the CLI and finished the job, so the usage
 		// it reported is still worth recording; the outputs aren't harvested.
@@ -541,13 +552,15 @@ const notRunnersDenial = " (not from the runner's uid on the staging volume, so 
 
 // noteCredential remembers a credential the provider refused, and forgets one
 // once a run shows it works (an answer, or a rate limit: the provider took the
-// credential then). st is the runner's report when the run was handed over.
-func (r *Runner) noteCredential(st Status, runErr error) {
+// credential then). st is the runner's report when the run was handed over,
+// endpoint the address the run went to ("" off the openai-compatible backend):
+// a refusal is that address's, whatever the address is by now.
+func (r *Runner) noteCredential(st Status, runErr error, endpoint string) {
 	var na *agent.NotAvailableError
 	var rl *agent.RateLimitError
 	switch {
 	case errors.As(runErr, &na) && na.CredentialRefused:
-		r.noteRefusal(st.CLIs[r.backend], na.Detail)
+		r.noteRefusal(st.CLIs[r.backend], na.Detail, endpoint)
 	case runErr == nil || errors.As(runErr, &rl):
 		r.clearRefusal()
 	}
@@ -722,16 +735,25 @@ func (r *Runner) outcome(root *os.Root, model string, timeout time.Duration, sec
 	return r.parse(root, model, out, secret)
 }
 
+// minCutSecret is the shortest handed credential parse cuts from a run's
+// output. A local server that takes any key is often given a short stand-in
+// ("x", "none", "ollama"): cutting that from the CLI's JSON stream and its
+// last message would cut it out of ordinary words, token counts and event
+// names, so the run's usage, answer and failure would all be misread. A key
+// that short keeps nothing safe; every provider's real key is far longer.
+const minCutSecret = 8
+
 // parse reads the CLI's output files into out and interprets them with the
 // backend's shared result mapping (ClaudeResult/CodexResult). A missing or
-// unreadable file reads as empty. The handed credential (secret, "" for none)
+// unreadable file reads as empty. The handed credential (secret, "" for none;
+// one of minCutSecret bytes or more)
 // is cut from them first: a provider may repeat the key it refused in its
 // error (an OpenAI-compatible endpoint is anyone's server), and the CLI's
 // words become the run's error, a parked book's reason and the log.
 func (r *Runner) parse(root *os.Root, model string, out agent.CLIOutcome, secret string) (agent.Result, error) {
 	read := func(name string, limit int64) string {
 		b, _ := agentproto.ReadRegular(root, name, limit)
-		if secret == "" {
+		if len(secret) < minCutSecret {
 			return string(b)
 		}
 		return strings.ReplaceAll(string(b), secret, "[the key]")
