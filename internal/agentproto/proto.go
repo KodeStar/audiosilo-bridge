@@ -120,7 +120,8 @@ const (
 // service that a run could take the subscriptions from (exit.json's error for
 // a refused run, the Bridge's status line): each ends it with what to change.
 const OwnCredentialsReason = "the endpoint's agent service holds a credential of its own or can reach the agent " +
-	"home (/agent, or the agent volume, a CLI's login or the Bridge's vault mounted anywhere), which a run against an " +
+	"home (/agent, or the agent volume, a CLI's login, the Bridge's vault or a container runtime's socket mounted " +
+	"anywhere), which a run against an " +
 	"OpenAI-compatible endpoint could read or change"
 
 // Intervals both sides agree on.

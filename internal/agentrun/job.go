@@ -80,6 +80,10 @@ func (r *Runner) execute(ctx context.Context, job *os.Root, id string) agentprot
 		return unavailable(endpointElsewhere)
 	}
 	if endpoint {
+		// A fresh walk of the mounts for the run about to start: the last
+		// tick's may be an interval old, and a credential that came within
+		// reach since must refuse this run, not end it at the next tick.
+		r.refreshMounts()
 		if why := r.credentialProblem(); why != "" {
 			r.log.Warn("agent runner: refused an endpoint run", "why", why)
 			return unavailable(endpointBlocked)

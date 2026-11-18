@@ -128,3 +128,27 @@ func TestLstatWithin(t *testing.T) {
 	lstats.mu.Unlock()
 	close(c.done)
 }
+
+// ReadDirNWithin reads at most n entries (a large folder isn't read whole),
+// answers an empty folder with none, and a missing one as os.Open does.
+func TestReadDirNWithin(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	if entries, err := ReadDirNWithin(dir, 3, 5*time.Second); err != nil || len(entries) != 0 {
+		t.Fatalf("an empty folder = %v, %v", entries, err)
+	}
+	for _, name := range []string{"a", "b", "c", "d", "e"} {
+		if err := os.WriteFile(filepath.Join(dir, name), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if entries, err := ReadDirNWithin(dir, 3, 5*time.Second); err != nil || len(entries) != 3 {
+		t.Fatalf("five entries read three at most = %d, %v", len(entries), err)
+	}
+	if entries, err := ReadDirNWithin(dir, 10, 5*time.Second); err != nil || len(entries) != 5 {
+		t.Fatalf("five entries read ten at most = %d, %v", len(entries), err)
+	}
+	if _, err := ReadDirNWithin(filepath.Join(dir, "gone"), 3, 5*time.Second); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("a missing folder = %v, want ErrNotExist", err)
+	}
+}

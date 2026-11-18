@@ -168,9 +168,10 @@ func (r *Runner) credentialKind(cli string) string {
 // log and runner.json say it.
 //
 // The mounts' walk is the slow part: each status tick walks them again
-// (refreshMounts), and every other call takes the last walk's answer (the
-// first walks them when there is none yet). So a run in progress, which spawn
-// checks every second, ends at the tick after a credential appears.
+// (refreshMounts), as does execute before each endpoint run starts, and every
+// other call takes the last walk's answer (the first walks them when there is
+// none yet). So a run in progress, which spawn checks every second, ends at
+// the tick after a credential appears.
 func (r *Runner) credentialProblem() string {
 	for _, k := range ownVars {
 		if r.envSecret(k) != "" {

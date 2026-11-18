@@ -409,6 +409,72 @@ func TestMountWalkCachedPerTick(t *testing.T) {
 	}
 }
 
+// A credential that came within reach after the last walk (the status tick's,
+// up to an interval old) refuses the next endpoint run (denied): the run's
+// start walks the mounts afresh rather than take the last answer.
+func TestCredentialSinceTheLastWalkRefusesTheRun(t *testing.T) {
+	t.Parallel()
+	te, _ := newEndpointEnv(t, endpointParentEnv())
+	planted := t.TempDir()
+	mkfile(t, filepath.Join(planted, agentHomeMarker))
+	var appeared atomic.Bool
+	te.r.mounts = func() ([]mount, error) {
+		if appeared.Load() {
+			return []mount{at(planted)}, nil
+		}
+		return nil, nil
+	}
+	if why := te.r.credentialProblem(); why != "" { // the last walk: nothing
+		t.Fatalf("credentialProblem = %q, want none yet", why)
+	}
+	appeared.Store(true)
+	te.start(t)
+	ex := waitDone(t, te.submit(t, endpointReq), 30*time.Second)
+	if !ex.Unavailable || !strings.Contains(ex.Error, "credential of its own") {
+		t.Fatalf("exit = %+v, want the run refused as unavailable", ex)
+	}
+	if _, err := os.Stat(filepath.Join(te.codexCap, "argv")); err == nil {
+		t.Fatal("the CLI ran beside a credential the last walk hadn't seen")
+	}
+}
+
+// A link directly in a mount is looked through as a folder is (denied: a run
+// follows it to the vault), while a link to a file, to nowhere or to itself
+// holds nothing (allowed). A container runtime's socket, mounted or in a
+// mounted folder, counts as a credential's file (denied).
+func TestMountCheckFollowsLinksAndFindsSockets(t *testing.T) {
+	t.Parallel()
+	walk := func(ms ...mount) string {
+		return (&mountWalk{looks: boundedLooks, deadline: time.Now().Add(time.Minute)}).credentialMount(ms)
+	}
+	dir := t.TempDir()
+	mkfile(t, filepath.Join(dir, "appdata", "audiosilo-bridge", "secret.key"))
+	if err := os.Symlink(filepath.Join("appdata", "audiosilo-bridge"), filepath.Join(dir, "bridge")); err != nil {
+		t.Fatal(err)
+	}
+	if why := walk(at(dir)); !strings.Contains(why, filepath.Join(dir, "bridge", "secret.key")) {
+		t.Fatalf("a link to the Bridge's data = %q, want it found", why)
+	}
+	harmless := t.TempDir()
+	mkfile(t, filepath.Join(harmless, "file"))
+	for name, target := range map[string]string{"to-a-file": "file", "to-nowhere": "gone", "loop": "loop"} {
+		if err := os.Symlink(target, filepath.Join(harmless, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if why := walk(at(harmless)); why != "" {
+		t.Fatalf("links to a file, to nowhere and to itself = %q, want none", why)
+	}
+	if why := walk(mount{root: "/run/docker.sock", point: "/var/run/docker.sock", fstype: "tmpfs"}); !strings.Contains(why, "by a credential's name") {
+		t.Fatalf("docker's socket mounted = %q", why)
+	}
+	run := t.TempDir()
+	mkfile(t, filepath.Join(run, "podman", "podman.sock"))
+	if why := walk(at(run)); !strings.Contains(why, "podman.sock") {
+		t.Fatalf("a host's run folder with podman's socket = %q", why)
+	}
+}
+
 // A credential that comes within reach while an endpoint run is in progress
 // (here a mount holding the agent home's marker) is found by the next status
 // tick's walk, which ends the run as the agent unavailable (denied), and

@@ -29,14 +29,15 @@ import (
 //   - is mounted by a credential file's name, at its point or from its
 //     source (a login bind-mounted under another name); or
 //   - holds a credential's file, the agent home's marker (agentHomeMarker,
-//     which the agent container's runner writes into its home) or the
-//     Bridge's own vault (its secret.key, a sealed secret) at the mount point
-//     or one directory below it (a tmpfs at its point only): that finds the
-//     agent volume under any name or path, a bind mount of a CLI's login or
-//     of the Bridge's data, and a parent folder holding either. Where the
-//     service's user can't enter a directory, neither can a run's commands
-//     (the same uid, no capability), so a closed one counts as holding
-//     nothing.
+//     which the agent container's runner writes into its home), the
+//     Bridge's own vault (its secret.key, a sealed secret) or a container
+//     runtime's socket (runtimeSockets: every container's files) at the mount
+//     point or one directory (or link) below it (a tmpfs at its point only):
+//     that finds the agent volume under any name or path, a bind mount of a
+//     CLI's login or of the Bridge's data, and a parent folder holding
+//     either. Where the service's user can't enter a directory, neither can a
+//     run's commands (the same uid, no capability), so a closed one counts as
+//     holding nothing.
 //
 // The check fails closed: a mount point it can enter but not list, one with
 // more than maxMountChildren entries, or a look that doesn't answer within
@@ -108,12 +109,20 @@ var vaultVars = []string{vaultKeyEnv, githubTokenEnv}
 var vaultSealed = []string{"server_token", "claude_oauth_token", "anthropic_api_key", "openai_api_key",
 	"endpoint_api_key", "github_user_token"}
 
+// runtimeSockets are a container runtime's API sockets: one mounted puts
+// every container's files (the agent volume, the Bridge's data) within reach
+// of whoever can open it, so it counts as a credential's file, by name.
+var runtimeSockets = []string{"docker.sock", "podman.sock", "containerd.sock"}
+
 // credentialNames are the files that hold a subscription's credential or the
 // agent home's marker, by the name a mount carries itself, at its point or
 // from its source (a compose secret, a single file mounted).
 var credentialNames = func() map[string]bool {
 	out := map[string]bool{agentHomeMarker: true, "auth.json": true, ".credentials.json": true, ".claude.json": true,
 		vaultKeyFile: true}
+	for _, n := range runtimeSockets {
+		out[n] = true
+	}
 	for _, k := range credentialVars {
 		out[strings.ToLower(k)] = true
 	}
@@ -127,11 +136,13 @@ var credentialNames = func() map[string]bool {
 // home's layout (the marker, secrets/<lowercase variable>, codex/'s login and
 // its config.toml, which a later subscription run loads), a secrets dir or a
 // CODEX_HOME or CLAUDE_CONFIG_DIR mounted alone, a user's home with the CLIs'
-// own dirs, and the Bridge's data folder (secret.key, secrets/<name>.enc) or
-// its vault's folder mounted alone.
+// own dirs, the Bridge's data folder (secret.key, secrets/<name>.enc) or its
+// vault's folder mounted alone, and a host's run folder with a container
+// runtime's socket.
 var credentialPaths = func() []string {
 	out := []string{agentHomeMarker, "auth.json", ".credentials.json", ".claude.json", ".claude/.credentials.json",
 		".codex/auth.json", vaultKeyFile}
+	out = append(out, runtimeSockets...)
 	for _, f := range slices.Sorted(maps.Keys(codexKeep)) {
 		out = append(out, path.Join(codexDir, f))
 	}
@@ -210,11 +221,15 @@ type looks struct {
 }
 
 // boundedLooks are the real calls, each bounded by lookTimeout
-// (fsutil.LstatWithin, fsutil.ReadDirWithin: one look in flight per path, so
-// a check every tick over a hung mount never piles up blocked ones).
+// (fsutil.LstatWithin, fsutil.ReadDirNWithin: one look in flight per path, so
+// a check every tick over a hung mount never piles up blocked ones). A folder
+// is read up to one entry past maxMountChildren, never whole: that one says it
+// holds more than the check looks through.
 var boundedLooks = looks{
-	lstat:   func(p string) (fs.FileInfo, error) { return fsutil.LstatWithin(p, lookTimeout) },
-	readDir: func(p string) ([]fs.DirEntry, error) { return fsutil.ReadDirWithin(p, lookTimeout) },
+	lstat: func(p string) (fs.FileInfo, error) { return fsutil.LstatWithin(p, lookTimeout) },
+	readDir: func(p string) ([]fs.DirEntry, error) {
+		return fsutil.ReadDirNWithin(p, maxMountChildren+1, lookTimeout)
+	},
 }
 
 // mountWalk is one run of the check over the mounts: its looks, and the
@@ -279,10 +294,11 @@ func (w *mountWalk) credentialUnder(dir string) (string, error) {
 	return "", nil
 }
 
-// present reports whether p is there. Missing, or behind a directory the
-// runner can't enter, is absent (a run, the same uid, can't reach it either);
-// a look that didn't answer in time, or the walk past its budget, is an
-// error; any other answer counts as present: never a wrong no.
+// present reports whether p is there. Missing, behind a directory the runner
+// can't enter, or behind a link that never resolves (a loop) is absent (a run,
+// the same uid, can't reach it either); a look that didn't answer in time, or
+// the walk past its budget, is an error; any other answer counts as present:
+// never a wrong no.
 func (w *mountWalk) present(p string) (bool, error) {
 	if err := w.inTime(); err != nil {
 		return false, err
@@ -293,7 +309,8 @@ func (w *mountWalk) present(p string) (bool, error) {
 		return true, nil
 	case errors.Is(err, fsutil.ErrStatTimeout):
 		return false, timedOut(p)
-	case errors.Is(err, fs.ErrNotExist), errors.Is(err, fs.ErrPermission), errors.Is(err, syscall.ENOTDIR):
+	case errors.Is(err, fs.ErrNotExist), errors.Is(err, fs.ErrPermission), errors.Is(err, syscall.ENOTDIR),
+		errors.Is(err, syscall.ELOOP):
 		return false, nil
 	default:
 		return true, nil
@@ -301,10 +318,12 @@ func (w *mountWalk) present(p string) (bool, error) {
 }
 
 // dirsOf are the directories to look in for a mount at dir: dir itself and,
-// when below is set, the directories directly in it (not links). A mount that
-// is a file, or that the runner can't enter, has none (nor can a run look in);
-// one it can enter but not list, or with more than maxMountChildren entries,
-// is an error: a run could still reach a folder in it by name.
+// when below is set, the directories directly in it and the links there (a
+// run follows a link as readily as it enters a folder: the looks under one go
+// through it, and one to a file, nowhere or itself holds nothing). A mount
+// that is a file, or that the runner can't enter, has none (nor can a run look
+// in); one it can enter but not list, or with more than maxMountChildren
+// entries, is an error: a run could still reach a folder in it by name.
 func (w *mountWalk) dirsOf(dir string, below bool) ([]string, error) {
 	if err := w.inTime(); err != nil {
 		return nil, err
@@ -337,7 +356,7 @@ func (w *mountWalk) dirsOf(dir string, below bool) ([]string, error) {
 	}
 	out := []string{dir}
 	for _, e := range entries {
-		if e.IsDir() {
+		if e.IsDir() || e.Type()&fs.ModeSymlink != 0 {
 			out = append(out, filepath.Join(dir, e.Name()))
 		}
 	}

@@ -176,8 +176,10 @@ internal/
             bridge#65: ReadDirWithin(path, d) is os.ReadDir bounded the same way (one
             read in flight per path), and audio.ResolveSourceWithin resolves a book's
             audio through both, as the generate job's markersFile does.
-            BR-OPENAI-2: LstatWithin(path, d) is os.Lstat bounded the same way, for
-            the endpoint's agent service's mount check (agentrun's mounts.go).
+            BR-OPENAI-2: LstatWithin(path, d) is os.Lstat bounded the same way, and
+            ReadDirNWithin(path, n, d) a folder read of at most n entries (never
+            whole; one n per path), for the endpoint's agent service's mount check
+            (agentrun's mounts.go).
   execfile/ writes files the process will exec at once with syscall.ForkLock
             held for reading from open to close, so a concurrent fork can't hold
             the write descriptor and make the exec fail with ETXTBSY (WriteFile).
@@ -3825,15 +3827,20 @@ internal/
             point or from its source), or holds a credential's file or the
             agent home's marker .audiosilo-agent-home (markHome writes it into
             the agent container's home at the start) at its point or one dir
-            below (a tmpfs at its point only; the rules and the file list are
-            in mounts.go), the Bridge's vault (secret.key, secrets/<name>.enc,
-            or those names mounted alone) included. BR-OPENAI-2: the walk fails
-            closed: a mount point it can enter but not list, one with more than
-            maxMountChildren (1024) entries, a look past lookTimeout (5 s, through
-            fsutil.LstatWithin/ReadDirWithin: a hung NFS or SMB mount) or the walk
-            past walkBudget (20 s) each count as holding. The walk runs once per
-            status tick (refreshMounts); every other call takes the last answer
-            (mountProblem, which walks only when there is none); spawn's poll reads the last answer every second and
+            (or link: a run follows one) below (a tmpfs at its point only; the
+            rules and the file list are in mounts.go), the Bridge's vault
+            (secret.key, secrets/<name>.enc, or those names mounted alone) and a
+            container runtime's socket (docker.sock, podman.sock,
+            containerd.sock: every container's files) included. BR-OPENAI-2: the
+            walk fails closed: a mount point it can enter but not list, one with
+            more than maxMountChildren (1024) entries (read up to one past it,
+            never whole), a look past lookTimeout (5 s, through
+            fsutil.LstatWithin/ReadDirNWithin: a hung NFS or SMB mount) or the
+            walk past walkBudget (20 s) each count as holding. The walk runs once
+            per status tick (refreshMounts) and again before each endpoint run
+            starts (execute: a credential that appeared since the tick refuses
+            the run); every other call takes the last answer (mountProblem,
+            which walks only when there is none); spawn's poll reads the last answer every second and
             ends a run in progress (exit unavailable, endpointBlocked) once a tick
             finds a credential. runner.json says endpoint_only, own_credentials
             and found for the Bridge's Status. The agent container's runner

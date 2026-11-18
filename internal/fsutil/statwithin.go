@@ -2,6 +2,7 @@ package fsutil
 
 import (
 	"errors"
+	"io"
 	"io/fs"
 	"os"
 	"sync"
@@ -32,6 +33,9 @@ var (
 	stats    = &looksOut[fs.FileInfo]{calls: map[string]*lookCall[fs.FileInfo]{}}
 	lstats   = &looksOut[fs.FileInfo]{calls: map[string]*lookCall[fs.FileInfo]{}}
 	readDirs = &looksOut[[]fs.DirEntry]{calls: map[string]*lookCall[[]fs.DirEntry]{}}
+	// readDirNs are ReadDirNWithin's, apart from ReadDirWithin's: a read in
+	// flight answers only a later read of its own kind.
+	readDirNs = &looksOut[[]fs.DirEntry]{calls: map[string]*lookCall[[]fs.DirEntry]{}}
 )
 
 // within is look(path) bounded by d: a look a hung mount holds past d returns
@@ -91,4 +95,25 @@ func LstatWithin(path string, d time.Duration) (fs.FileInfo, error) {
 // read a hung mount holds past d is ErrStatTimeout (bridge#65).
 func ReadDirWithin(path string, d time.Duration) ([]fs.DirEntry, error) {
 	return readDirs.within("readdir", path, d, os.ReadDir)
+}
+
+// ReadDirNWithin is ReadDirWithin reading at most n entries (n > 0), in the
+// folder's own order, so a large folder is never read whole: a caller that
+// looks through no more than n-1 learns there are more from n coming back.
+// A read in flight answers a later one of the same path whatever its n, so
+// each path is read with one n (the endpoint's agent service's mount check,
+// agentrun).
+func ReadDirNWithin(path string, n int, d time.Duration) ([]fs.DirEntry, error) {
+	return readDirNs.within("readdir", path, d, func(p string) ([]fs.DirEntry, error) {
+		f, err := os.Open(p) //nolint:gosec // the caller's folder, only listed
+		if err != nil {
+			return nil, err
+		}
+		defer func() { _ = f.Close() }()
+		entries, err := f.ReadDir(n)
+		if errors.Is(err, io.EOF) {
+			err = nil // an empty folder
+		}
+		return entries, err
+	})
 }
