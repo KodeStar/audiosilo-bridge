@@ -2963,8 +2963,9 @@ internal/
             own only for the same library AND path (the server's ids repeat across
             servers and reinstalls, and following another book's run would write its
             sidecars into this one); otherwise the old book is stopped and a new one
-            made. attach re-admits a book this job's own cancel stopped (engine
-            Retry), unless its transcripts were swept meanwhile, which starts over,
+            made. attach re-admits a book this job's own cancel stopped (the engine's
+            RetryAsRead of the cancel it read; a status changed since is followed as it
+            is), unless its transcripts were swept meanwhile, which starts over,
             as a deleted book does. follow polls 3 s while a stage runs, 30 s while
             queued/paused/parked, at once on Retry; describe() maps the book to the
             job's progress: the stage as step ("waiting" while queued), a plain-words

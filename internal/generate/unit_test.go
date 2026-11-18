@@ -666,13 +666,8 @@ func (e retryEngine) RetryAsRead(_ context.Context, b store.Book) error {
 }
 
 // cancelFirstEngine is the engine with a Cancel landing on the book just before
-// each Retry reads it: the job's end racing a person's Retry of the parked job.
+// each re-admit: the job's end racing a person's Retry of the parked job.
 type cancelFirstEngine struct{ *scheduler.Scheduler }
-
-func (e cancelFirstEngine) Retry(ctx context.Context, id int64) error {
-	_ = e.Cancel(ctx, id)
-	return e.Scheduler.Retry(ctx, id)
-}
 
 func (e cancelFirstEngine) RetryAsRead(ctx context.Context, b store.Book) error {
 	_ = e.Cancel(ctx, b.ID)
@@ -798,4 +793,62 @@ func TestAbandonBeforeTheEngineStartsStopsTheBookAtOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	kept("a book whose job's mapping was reopened", jobs.Job{ID: 9, Kind: Kind, Attempt: 1}, reopened)
+}
+
+// parkFirstEngine is the engine with a stage the cancel interrupted parking the
+// book just before attach's re-admit.
+type parkFirstEngine struct {
+	*scheduler.Scheduler
+	db *store.DB
+}
+
+func (e parkFirstEngine) RetryAsRead(ctx context.Context, b store.Book) error {
+	if err := e.db.SetBookStatus(ctx, b.ID, "needs_attention", "parked", "agent_unavailable"); err != nil {
+		return err
+	}
+	return e.Scheduler.RetryAsRead(ctx, b)
+}
+
+// bridge#65: attach takes up the cancel it read, not the book's status at the
+// re-admit: a status changed since is followed as it is, and a cancel still
+// there is re-admitted.
+func TestAttachReadmitsTheCancelItRead(t *testing.T) {
+	t.Parallel()
+	db, err := store.Open(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	ctx := context.Background()
+	sched := scheduler.New(db, events.NewHub(8), scheduler.NewStubExecutor(0, 0), 1, "", false)
+	cancelled := func(slug string) store.Book {
+		b, err := db.CreateBook(ctx, store.NewBook{SourcePath: "/lib/" + slug, WorkDir: t.TempDir(), Title: slug})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = db.SetBookState(ctx, b.ID, "asr", "", "", "")
+		if err := sched.Cancel(ctx, b.ID); err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	h := New(Options{DB: db, RetentionDays: 30, Poll: time.Millisecond})
+
+	parked := cancelled("parked")
+	r := &run{job: jobs.Job{ID: 1, Kind: Kind, Attempt: 2}, bookID: parked.ID}
+	if err := h.attach(ctx, parkFirstEngine{sched, db}, r, store.GenerateBook{ServerJobID: 1, BookID: &parked.ID}); err != nil {
+		t.Fatalf("attach over a status changed since its read = %v, want the book followed", err)
+	}
+	if got, _ := db.GetBook(ctx, parked.ID); got.ParkCode != "agent_unavailable" {
+		t.Fatalf("the park written since was re-admitted: status %q park %q", got.Status, got.ParkCode)
+	}
+
+	back := cancelled("back")
+	r = &run{job: jobs.Job{ID: 2, Kind: Kind, Attempt: 2}, bookID: back.ID}
+	if err := h.attach(ctx, sched, r, store.GenerateBook{ServerJobID: 2, BookID: &back.ID}); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := db.GetBook(ctx, back.ID); got.Status != "" {
+		t.Fatalf("the job's own cancel wasn't re-admitted: status %q error %q", got.Status, got.Error)
+	}
 }

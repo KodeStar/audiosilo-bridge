@@ -43,7 +43,6 @@ const Kind = "sidecars.generate"
 // (*scheduler.Scheduler).
 type Engine interface {
 	Notify()
-	Retry(ctx context.Context, id int64) error
 	// RetryAsRead re-admits book b as the caller read it: store.ErrStatusChanged
 	// when its status or error changed since (a Cancel landing between).
 	RetryAsRead(ctx context.Context, b store.Book) error
@@ -1130,7 +1129,11 @@ func (h *Handler) attach(ctx context.Context, eng Engine, r *run, m store.Genera
 	}
 	r.sourceOf(b)
 	if scheduler.IsCancelled(b) {
-		if err := eng.Retry(ctx, b.ID); err != nil && !errors.Is(err, scheduler.ErrInvalidOp) {
+		// The cancel read here is the one taken up: a book whose status changed
+		// since (re-admitted already, or parked by a stage the cancel interrupted)
+		// is followed as it is (bridge#65).
+		if err := eng.RetryAsRead(ctx, b); err != nil && !errors.Is(err, scheduler.ErrInvalidOp) &&
+			!errors.Is(err, store.ErrStatusChanged) {
 			return err
 		}
 		h.o.Log.Info("generate: the job is back, so its engine book runs again", "job", r.job.ID, "book", b.ID)
