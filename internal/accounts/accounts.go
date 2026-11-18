@@ -636,7 +636,14 @@ func (a *Agent) EndpointKey(ctx context.Context, baseURL string) (string, error)
 	if baseURL != a.endpoint() {
 		return "", nil
 	}
-	if ok, err := a.endpointKeyIsFor(ctx, baseURL); err != nil || !ok {
+	return a.endpointKeyEnteredFor(ctx, baseURL)
+}
+
+// endpointKeyEnteredFor is the stored endpoint key when it was entered for
+// addr, else "": the key and the row naming its address are read as one pair
+// (the caller holds endpointMu).
+func (a *Agent) endpointKeyEnteredFor(ctx context.Context, addr string) (string, error) {
+	if ok, err := a.endpointKeyIsFor(ctx, addr); err != nil || !ok {
 		return "", err
 	}
 	return a.vault.Get(AgentEndpointKey)
@@ -835,14 +842,19 @@ func KindsFor(cli string) []string {
 }
 
 // Credential is the vault's credential for a backend ("claude", "codex" or
-// "openai-compatible"): its
-// agentproto kind, its value and when it was set. ok is false when there is none.
-func (a *Agent) Credential(ctx context.Context, cli string) (kind, value string, since time.Time, ok bool) {
+// "openai-compatible"): its agentproto kind, its value and when it was set. ok
+// is false when there is none. For openai-compatible, endpoint is the address
+// the run goes to, read once by the caller: the key comes back only when it
+// was entered for exactly that address, so a run never carries another
+// address's key, whatever the address is by the time the key is read.
+func (a *Agent) Credential(ctx context.Context, cli, endpoint string) (kind, value string, since time.Time, ok bool) {
 	for _, o := range cliKinds[cli] {
 		var v string
 		var err error
 		if o.name == AgentEndpointKey {
-			v, err = a.EndpointKey(ctx, a.endpoint())
+			a.endpointMu.Lock()
+			v, err = a.endpointKeyEnteredFor(ctx, endpoint)
+			a.endpointMu.Unlock()
 		} else {
 			v, err = a.vault.Get(o.name)
 		}

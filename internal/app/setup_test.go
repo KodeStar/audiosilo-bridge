@@ -328,16 +328,16 @@ func TestAgentCredentialOnTheAccountsTab(t *testing.T) {
 		len(acc.Agent.SetAtByKind) != 1 || strings.Contains(string(raw), "secret") {
 		t.Fatalf("accounts = %s", raw)
 	}
-	if kind, value, _, ok := b.agentCredential("claude"); !ok || kind != "oauth_token" || value != "sk-ant-oat01-secret" {
+	if kind, value, _, ok := b.agentCredential("claude", ""); !ok || kind != "oauth_token" || value != "sk-ant-oat01-secret" {
 		t.Fatalf("hand-off = %q %v", kind, ok)
 	}
-	if _, _, _, ok := b.agentCredential("codex"); ok {
+	if _, _, _, ok := b.agentCredential("codex", ""); ok {
 		t.Fatal("codex got claude's credential")
 	}
 	if err := b.DeleteAgentCredential(ctx, ""); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, _, ok := b.agentCredential("claude"); ok || b.Accounts(ctx).Agent.Set["claude_oauth_token"] {
+	if _, _, _, ok := b.agentCredential("claude", ""); ok || b.Accounts(ctx).Agent.Set["claude_oauth_token"] {
 		t.Fatal("the credential survived its removal")
 	}
 	// The default App client ID: the sign-in is available, and none is stored.

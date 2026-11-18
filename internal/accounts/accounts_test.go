@@ -591,16 +591,16 @@ func TestAgentCredentialSincePerKind(t *testing.T) {
 	must(a.Set(ctx, AgentAnthropicKey, "sk-ant-api-1"))
 	keySet := c.Now()
 	must(a.Delete(ctx, AgentOpenAIKey))
-	if kind, _, since, _ := a.Credential(ctx, "claude"); kind != agentproto.CredentialOAuthToken || !since.Equal(set) {
+	if kind, _, since, _ := a.Credential(ctx, "claude", ""); kind != agentproto.CredentialOAuthToken || !since.Equal(set) {
 		t.Fatalf("claude = %q since %v, want the token's own %v", kind, since, set)
 	}
 	c.Add(time.Hour)
 	must(a.Set(ctx, AgentClaudeToken, "sk-ant-oat01-y"))
-	if _, _, since, _ := a.Credential(ctx, "claude"); !since.Equal(c.Now()) {
+	if _, _, since, _ := a.Credential(ctx, "claude", ""); !since.Equal(c.Now()) {
 		t.Fatalf("a replaced token's time = %v, want %v", since, c.Now())
 	}
 	must(a.Delete(ctx, AgentClaudeToken))
-	if kind, _, since, _ := a.Credential(ctx, "claude"); kind != agentproto.CredentialAPIKey || !since.Equal(keySet) {
+	if kind, _, since, _ := a.Credential(ctx, "claude", ""); kind != agentproto.CredentialAPIKey || !since.Equal(keySet) {
 		t.Fatalf("claude = %q since %v, want the key's own %v", kind, since, keySet)
 	}
 }
@@ -615,7 +615,7 @@ func TestAgentCredential(t *testing.T) {
 	vault := secrets.NewMemStore()
 	var changes int
 	a := NewAgent(vault, db, nil, func() { changes++ }, nil)
-	if _, _, _, ok := a.Credential(ctx, "claude"); ok {
+	if _, _, _, ok := a.Credential(ctx, "claude", ""); ok {
 		t.Fatal("no credential yet")
 	}
 	for _, bad := range []struct{ kind, value string }{
@@ -629,16 +629,16 @@ func TestAgentCredential(t *testing.T) {
 	if err := a.Set(ctx, AgentAnthropicKey, " sk-ant-api-1 "); err != nil {
 		t.Fatal(err)
 	}
-	if kind, v, since, ok := a.Credential(ctx, "claude"); !ok || kind != agentproto.CredentialAPIKey || v != "sk-ant-api-1" || since.IsZero() {
+	if kind, v, since, ok := a.Credential(ctx, "claude", ""); !ok || kind != agentproto.CredentialAPIKey || v != "sk-ant-api-1" || since.IsZero() {
 		t.Fatalf("claude = %q %q %v %v", kind, v, since, ok)
 	}
 	if err := a.Set(ctx, AgentClaudeToken, "sk-ant-oat01-x"); err != nil {
 		t.Fatal(err)
 	}
-	if kind, v, _, _ := a.Credential(ctx, "claude"); kind != agentproto.CredentialOAuthToken || v != "sk-ant-oat01-x" {
+	if kind, v, _, _ := a.Credential(ctx, "claude", ""); kind != agentproto.CredentialOAuthToken || v != "sk-ant-oat01-x" {
 		t.Fatalf("a subscription token comes first: %q %q", kind, v)
 	}
-	if _, _, _, ok := a.Credential(ctx, "codex"); ok {
+	if _, _, _, ok := a.Credential(ctx, "codex", ""); ok {
 		t.Fatal("codex has no credential")
 	}
 	st := a.State(ctx)
@@ -649,7 +649,7 @@ func TestAgentCredential(t *testing.T) {
 	if err := a.Delete(ctx, AgentClaudeToken); err != nil {
 		t.Fatal(err)
 	}
-	if kind, _, _, _ := a.Credential(ctx, "claude"); kind != agentproto.CredentialAPIKey {
+	if kind, _, _, _ := a.Credential(ctx, "claude", ""); kind != agentproto.CredentialAPIKey {
 		t.Fatal("the API key is left")
 	}
 	if err := a.Delete(ctx, ""); err != nil {
@@ -681,17 +681,17 @@ func TestAgentEndpointKey(t *testing.T) {
 	if err := a.Set(ctx, AgentOpenAIKey, "sk-openai"); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, _, ok := a.Credential(ctx, agent.IDOpenAICompatible); ok {
+	if _, _, _, ok := a.Credential(ctx, agent.IDOpenAICompatible, addr); ok {
 		t.Fatal("the OpenAI key went to the endpoint")
 	}
 	if err := a.Set(ctx, AgentEndpointKey, "sk-or-v1-endpoint"); err != nil {
 		t.Fatal(err)
 	}
-	if kind, v, since, ok := a.Credential(ctx, agent.IDOpenAICompatible); !ok || kind != agentproto.CredentialEndpointKey ||
+	if kind, v, since, ok := a.Credential(ctx, agent.IDOpenAICompatible, addr); !ok || kind != agentproto.CredentialEndpointKey ||
 		v != "sk-or-v1-endpoint" || since.IsZero() {
 		t.Fatalf("endpoint = %q %q %v %v", kind, v, since, ok)
 	}
-	if _, v, _, _ := a.Credential(ctx, "codex"); v != "sk-openai" {
+	if _, v, _, _ := a.Credential(ctx, "codex", ""); v != "sk-openai" {
 		t.Fatalf("codex got %q", v)
 	}
 	if st := a.State(ctx); !st.Set[AgentEndpointKey] || st.SetAtByKind[AgentEndpointKey] == "" {
@@ -701,9 +701,10 @@ func TestAgentEndpointKey(t *testing.T) {
 
 // The endpoint's key is kept for the address it was entered for: it is the
 // endpoint's credential, and goes along with a check, only while that is the
-// endpoint's address (allowed); under any other address, however it changed,
-// it is no credential, isn't shown as set, goes to no check, and is dropped
-// (denied). Without an address there is nothing to enter a key for.
+// endpoint's address, and with a run only to that address (allowed); under
+// any other address, however it changed, it is no credential, isn't shown as
+// set, goes to no check or run there, and is dropped (denied). Without an
+// address there is nothing to enter a key for.
 func TestAgentEndpointKeyIsItsAddressAlone(t *testing.T) {
 	ctx := context.Background()
 	db, err := store.Open(ctx, ":memory:")
@@ -738,8 +739,13 @@ func TestAgentEndpointKeyIsItsAddressAlone(t *testing.T) {
 
 	// The address moves (the page, config.yaml or the environment).
 	addr = other
-	if _, v, _, ok := a.Credential(ctx, agent.IDOpenAICompatible); ok || v != "" {
+	if _, v, _, ok := a.Credential(ctx, agent.IDOpenAICompatible, addr); ok || v != "" {
 		t.Fatalf("the key went to another address: %q", v)
+	}
+	// A run that read the first address before the move goes there, with that
+	// address's own key (allowed: the key never leaves its address).
+	if _, v, _, ok := a.Credential(ctx, agent.IDOpenAICompatible, first); !ok || v != "sk-first" {
+		t.Fatalf("a run to the key's own address: %q, %v", v, ok)
 	}
 	for _, to := range []string{first, other} {
 		if key, _ := a.EndpointKey(ctx, to); key != "" {
@@ -758,14 +764,14 @@ func TestAgentEndpointKeyIsItsAddressAlone(t *testing.T) {
 	}
 	// Moving back doesn't bring it back, and a key entered now is this address's.
 	addr = first
-	if _, _, _, ok := a.Credential(ctx, agent.IDOpenAICompatible); ok {
+	if _, _, _, ok := a.Credential(ctx, agent.IDOpenAICompatible, addr); ok {
 		t.Fatal("a dropped key came back")
 	}
 	addr = other
 	if err := a.Set(ctx, AgentEndpointKey, "sk-other"); err != nil {
 		t.Fatal(err)
 	}
-	if _, v, _, _ := a.Credential(ctx, agent.IDOpenAICompatible); v != "sk-other" {
+	if _, v, _, _ := a.Credential(ctx, agent.IDOpenAICompatible, addr); v != "sk-other" {
 		t.Fatalf("the new address's key = %q", v)
 	}
 	// A key replaced after the address moved is the new address's, never the
@@ -861,7 +867,7 @@ func TestAgentEndpointKeyRowFailureLeavesItUnused(t *testing.T) {
 		if key, _ := a.EndpointKey(ctx, at); key != "" {
 			t.Fatalf("EndpointKey(%s) = %q after a key whose row failed", at, key)
 		}
-		if _, _, _, ok := a.Credential(ctx, agent.IDOpenAICompatible); ok {
+		if _, _, _, ok := a.Credential(ctx, agent.IDOpenAICompatible, at); ok {
 			t.Fatalf("a key with no row is the credential at %s", at)
 		}
 	}

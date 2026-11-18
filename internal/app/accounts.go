@@ -110,9 +110,10 @@ func (b *Bridge) dropStaleEndpointKey(ctx context.Context) {
 	}
 }
 
-// agentCredential is the agent box's hand-off source.
-func (b *Bridge) agentCredential(cli string) (kind, value string, since time.Time, ok bool) {
-	return b.agentCreds.Credential(context.Background(), cli)
+// agentCredential is the agent box's hand-off source (endpoint: the address
+// an openai-compatible run goes to).
+func (b *Bridge) agentCredential(cli, endpoint string) (kind, value string, since time.Time, ok bool) {
+	return b.agentCreds.Credential(context.Background(), cli, endpoint)
 }
 
 // canContribute reports whether a GitHub token resolves, which a job with

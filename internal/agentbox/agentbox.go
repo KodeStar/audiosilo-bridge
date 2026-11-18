@@ -68,7 +68,10 @@ type Options struct {
 	// decision 19): its kind (agentproto.Credential*), value and when it was set,
 	// ok false for none. nil: nothing to hand over. It is handed to a run only
 	// when the runner takes a hand-off and has no credential of its own.
-	Credential func(cli string) (kind, value string, since time.Time, ok bool)
+	// endpoint is the address an openai-compatible run goes to ("" for the
+	// others): the key comes back only when it was entered for exactly that
+	// address, so a run never carries another address's key.
+	Credential func(cli, endpoint string) (kind, value string, since time.Time, ok bool)
 	// RequireGroup (agent.require_group) keeps a handed credential to the
 	// Bridge's group in every case: a runner outside the group, a staging
 	// volume that refuses the chown and a runner denied the group's file each
@@ -85,7 +88,7 @@ type Runner struct {
 	endpoint     func() string
 	claimTimeout time.Duration
 	log          *slog.Logger
-	credential   func(cli string) (kind, value string, since time.Time, ok bool)
+	credential   func(cli, endpoint string) (kind, value string, since time.Time, ok bool)
 	requireGroup bool
 
 	now       func() time.Time
@@ -319,16 +322,15 @@ func (r *Runner) Run(ctx context.Context, req agent.Request) (agent.Result, erro
 	}
 	var handed *agentproto.Credential
 	if st.Handoff {
-		if kind, value, _, ok := r.handoffCredential(); ok {
+		// An endpoint's key is the one entered for the very address this run
+		// goes to (read once, above), whatever the address is by now.
+		addr := ""
+		if req.Endpoint != nil {
+			addr = req.Endpoint.BaseURL
+		}
+		if kind, value, _, ok := r.handoffCredential(addr); ok {
 			handed = &agentproto.Credential{CLI: r.cli, Kind: kind, Value: value}
 		}
-	}
-	if req.Endpoint != nil && handed != nil && r.endpoint() != req.Endpoint.BaseURL {
-		// The key is the one of the endpoint's address as it was read, after
-		// this run's: an address saved in between has another endpoint's key,
-		// which must not go to this one. The book parks and runs against the
-		// new address.
-		return agent.Result{}, &agent.NotAvailableError{Backend: r.backend, Detail: endpointMovedDetail}
 	}
 	group := noGroup
 	if st.ShareGroup {

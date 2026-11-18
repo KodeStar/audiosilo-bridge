@@ -131,10 +131,6 @@ const (
 	ProblemOwnCredentials Problem = "own_credentials"
 )
 
-// endpointMovedDetail is a run's error when the endpoint's address changed
-// between the run reading it and reading its key (Run).
-const endpointMovedDetail = "the OpenAI-compatible endpoint's address changed as this run started: it runs again against the new address"
-
 // noEndpointDetail is the agent's state while the openai-compatible backend
 // has no endpoint address.
 const noEndpointDetail = "no OpenAI-compatible endpoint is set: set its address in Settings > Agent on the Bridge's page"
@@ -207,7 +203,7 @@ func (r *Runner) Status() Status {
 		rj.CLIs[r.backend] = agentproto.CLI{Version: rj.CLIs[r.cli].Version}
 	}
 	if c, ok := rj.CLIs[r.backend]; ok && c.Version != "" && c.Credential == "" && rj.Handoff && (r.cli == r.backend || rj.Endpoints) {
-		if kind, _, since, ok := r.handoffCredential(); ok {
+		if kind, _, since, ok := r.handoffCredential(r.endpointNow()); ok {
 			// The vault's credential stands in for the container's: its kind is what
 			// the runs are billed as, and its time moves when the Accounts tab
 			// replaces it (which ends a refusal of the old one).
@@ -305,12 +301,13 @@ func (r *Runner) groupRequired(share bool) string {
 }
 
 // handoffCredential is the vault's credential for the backend (ok false for
-// none, or no Credential func).
-func (r *Runner) handoffCredential() (kind, value string, since time.Time, ok bool) {
+// none, or no Credential func), on the openai-compatible backend the key
+// entered for the address endpoint ("" on the others).
+func (r *Runner) handoffCredential(endpoint string) (kind, value string, since time.Time, ok bool) {
 	if r.credential == nil {
 		return "", "", time.Time{}, false
 	}
-	return r.credential(r.backend)
+	return r.credential(r.backend, endpoint)
 }
 
 // CredentialRefusedDetail starts the agent's state while the provider refuses
@@ -426,7 +423,7 @@ func (r *Runner) unavailableBecause(rj agentproto.Runner) (problem Problem, othe
 	}
 	tooOld := false
 	if !rj.Handoff {
-		_, _, _, tooOld = r.handoffCredential()
+		_, _, _, tooOld = r.handoffCredential("")
 	}
 	if tooOld {
 		why = r.backend + " has no credential in the agent container, and the container is too old to take " +

@@ -914,7 +914,7 @@ func TestHandoffCredentialIsStaged(t *testing.T) {
 	t.Parallel()
 	r, dir := newTestRunner(t, agent.IDClaude)
 	since := time.Date(2026, 10, 19, 9, 0, 0, 0, time.UTC)
-	vault := func(cli string) (string, string, time.Time, bool) {
+	vault := func(cli, _ string) (string, string, time.Time, bool) {
 		if cli != "claude" {
 			return "", "", time.Time{}, false
 		}
@@ -974,7 +974,7 @@ func stageHandoff(t *testing.T, groups []int) credentialModes {
 func vaultHandoff(t *testing.T, groups []int) (*Runner, string) {
 	t.Helper()
 	r, dir := newTestRunner(t, agent.IDClaude)
-	r.credential = func(string) (string, string, time.Time, bool) {
+	r.credential = func(string, string) (string, string, time.Time, bool) {
 		return agentproto.CredentialOAuthToken, "sk-ant-oat01-vault", time.Now(), true
 	}
 	rj := handoffRunner(true)
@@ -1278,7 +1278,7 @@ func TestHandoffCredentialDeniedButTakenFails(t *testing.T) {
 // credential leaves the agent unavailable.
 func TestHandoffNotStaged(t *testing.T) {
 	t.Parallel()
-	vault := func(string) (string, string, time.Time, bool) {
+	vault := func(string, string) (string, string, time.Time, bool) {
 		return agentproto.CredentialAPIKey, "sk-ant-api-vault", time.Now(), true
 	}
 	t.Run("container has its own", func(t *testing.T) {
@@ -1331,7 +1331,7 @@ func TestHandoffRefusalEndsOnReplace(t *testing.T) {
 	r, dir := newTestRunner(t, agent.IDClaude)
 	var since atomic.Value
 	since.Store(time.Date(2026, 10, 19, 9, 0, 0, 0, time.UTC))
-	r.credential = func(string) (string, string, time.Time, bool) {
+	r.credential = func(string, string) (string, string, time.Time, bool) {
 		return agentproto.CredentialAPIKey, "sk-ant-api-vault", since.Load().(time.Time), true
 	}
 	writeRunnerJSON(t, dir, handoffRunner(true))
@@ -1352,7 +1352,7 @@ func TestStatusTooOldForTheHandoffIsOutdated(t *testing.T) {
 	dir := t.TempDir()
 	writeRunnerJSON(t, dir, agentproto.Runner{Protocol: 1, HeartbeatAt: time.Now(),
 		CLIs: map[string]agentproto.CLI{"claude": {Version: "2.1.300"}}})
-	r := New(Options{Dir: dir, Backend: agent.IDClaude, Credential: func(string) (string, string, time.Time, bool) {
+	r := New(Options{Dir: dir, Backend: agent.IDClaude, Credential: func(string, string) (string, string, time.Time, bool) {
 		return agentproto.CredentialOAuthToken, "tok", time.Now(), true
 	}})
 	if st := r.Status(); st.Available || st.Problem != ProblemOutdated || !strings.Contains(st.Detail, "too old") {

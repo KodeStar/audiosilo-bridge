@@ -15,16 +15,19 @@ import (
 )
 
 // endpointRunner is a Runner on the openai-compatible backend over an endpoint
-// address the test sets (base), with a vault holding key ("" for none).
+// address the test sets (base), with a vault holding key ("" for none) for
+// the first address (accounts.Agent hands a key only to the address it was
+// entered for).
 func endpointRunner(t *testing.T, key string) (*Runner, string, *atomic.Value) {
 	t.Helper()
 	r, dir := newTestRunner(t, agent.IDOpenAICompatible)
+	const first = "http://192.168.1.20:11434/v1"
 	base := &atomic.Value{}
-	base.Store("http://192.168.1.20:11434/v1")
+	base.Store(first)
 	r.endpoint = func() string { return base.Load().(string) }
 	since := time.Date(2026, 11, 18, 9, 0, 0, 0, time.UTC)
-	r.credential = func(backend string) (string, string, time.Time, bool) {
-		if backend != agent.IDOpenAICompatible || key == "" {
+	r.credential = func(backend, endpoint string) (string, string, time.Time, bool) {
+		if backend != agent.IDOpenAICompatible || key == "" || endpoint != first {
 			return "", "", time.Time{}, false
 		}
 		return agentproto.CredentialEndpointKey, key, since, true
@@ -191,38 +194,54 @@ func TestEndpointRefusalIsItsRunsAddress(t *testing.T) {
 	}
 }
 
-// The key handed to a run is read after the run's address: when the address
-// moves in between (a save, then the new address's key), the key read is the
-// new address's and the run is not staged with it (denied: the new key to the
-// old address; the book parks and runs against the new one).
+// The key handed to a run is the one entered for the very address the run
+// goes to: when the address moves while the run starts (a save, then the new
+// address's key), the run still goes to the address it read, with that
+// address's own key or none, never the new address's (denied: the new key to
+// the old address; allowed: the old key to the old address).
 func TestEndpointKeyNeverFollowsAMovedAddress(t *testing.T) {
 	t.Parallel()
-	r, dir, base := endpointRunner(t, "sk-endpoint-vault")
-	const moved = "https://elsewhere.example/v1"
-	vault := r.credential
+	r, dir, base := endpointRunner(t, "")
+	const first, moved = "http://192.168.1.20:11434/v1", "https://elsewhere.example/v1"
+	keys := map[string]string{first: "sk-first-key", moved: "sk-moved-key"}
+	var asked atomic.Value
 	var reads atomic.Int32
-	r.credential = func(backend string) (string, string, time.Time, bool) {
-		// Status reads it first; Run's own read finds the address just moved.
+	r.credential = func(_, endpoint string) (string, string, time.Time, bool) {
 		if reads.Add(1) == 2 {
+			// Status reads it first; on Run's own read the address has just
+			// moved: the run's address is the one it read before.
+			asked.Store(endpoint)
 			base.Store(moved)
 		}
-		return vault(backend)
+		if k, ok := keys[endpoint]; ok {
+			return agentproto.CredentialEndpointKey, k, time.Time{}, true
+		}
+		return "", "", time.Time{}, false
 	}
+	var request, credential atomic.Value
 	stop := (&fakeRunner{fn: func(job string) agentproto.Exit {
-		t.Errorf("a run was staged with the moved address's key (job %s)", filepath.Base(job))
+		raw, _ := os.ReadFile(filepath.Join(job, agentproto.RequestFile))
+		request.Store(string(raw))
+		raw, _ = os.ReadFile(filepath.Join(job, agentproto.CredentialDir, agentproto.CredentialFile))
+		credential.Store(string(raw))
+		mustWrite(t, filepath.Join(job, agentproto.StdoutFile), `{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}`+"\n")
 		return agentproto.Exit{}
 	}}).start(t, dir)
 	_, err := r.Run(context.Background(), agent.Request{Dir: stagedDir(t), Prompt: "p", Model: "m", Timeout: time.Minute})
 	stop()
-	var na *agent.NotAvailableError
-	if !errors.As(err, &na) || na.CredentialRefused || !strings.Contains(na.Detail, "address changed") {
-		t.Fatalf("run = %v", err)
+	if err != nil {
+		t.Fatal(err)
 	}
-	assertNoJobDirs(t, dir)
-	// The address as it is now runs with its key as before (allowed).
-	r.credential = vault
-	if st := r.Status(); !st.Available || !st.Handoff {
-		t.Fatalf("status at the new address = %+v", st)
+	req, err := agentproto.DecodeRequest([]byte(request.Load().(string)))
+	if err != nil || req.Endpoint == nil || req.Endpoint.BaseURL != first {
+		t.Fatalf("request.json = %v, %+v", err, req)
+	}
+	c, err := agentproto.DecodeCredential([]byte(credential.Load().(string)), agentproto.CLICodex)
+	if err != nil || c.Value != "sk-first-key" {
+		t.Fatalf("credential.json = %v, %+v, want the first address's key", err, c)
+	}
+	if asked.Load() != first {
+		t.Fatalf("the key was asked for %v, want the run's address", asked.Load())
 	}
 }
 

@@ -251,8 +251,10 @@ func TestEndpointKeyStaysWithItsAddress(t *testing.T) {
 	if ok, _ := b.vault.Present(secrets.EndpointAPIKey); ok {
 		t.Fatal("the key is still in the vault")
 	}
-	if _, v, _, ok := b.agentCredential("openai-compatible"); ok || v != "" {
-		t.Fatalf("a run against the new address would get %q", v)
+	for _, to := range []string{theirs.URL + "/v1", mine.URL + "/v1"} {
+		if _, v, _, ok := b.agentCredential("openai-compatible", to); ok || v != "" {
+			t.Fatalf("a run against %s would get %q", to, v)
+		}
 	}
 	if res, err := b.CheckEndpoint(ctx, theirs.URL+"/v1"); err != nil || res.KeySent {
 		t.Fatalf("the new address: %+v, %v", res, err)
@@ -291,8 +293,10 @@ func TestEndpointKeyDroppedWhenTheAddressMovedOutsideThePage(t *testing.T) {
 	if s := b2.AgentSettings(ctx); s.Endpoint.BaseURL != "http://10.0.0.5:1234/v1" || s.KeySet {
 		t.Fatalf("after the address moved: %+v", s)
 	}
-	if _, v, _, ok := b2.agentCredential("openai-compatible"); ok || v != "" {
-		t.Fatalf("a run against the new address would get %q", v)
+	for _, to := range []string{"http://10.0.0.5:1234/v1", "http://192.168.1.20:11434/v1"} {
+		if _, v, _, ok := b2.agentCredential("openai-compatible", to); ok || v != "" {
+			t.Fatalf("a run against %s would get %q", to, v)
+		}
 	}
 	if ok, _ := b2.vault.Present(secrets.EndpointAPIKey); ok {
 		t.Fatal("the old address's key is still in the vault")

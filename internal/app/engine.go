@@ -401,7 +401,7 @@ func (p *eventPersister) Close() {
 // credential is the vault's agent credential for the hand-off (nil: none);
 // endpoint the OpenAI-compatible endpoint's address now (nil: none).
 func newAgentBox(cfg config.Config, dataDir string, log *slog.Logger,
-	credential func(cli string) (kind, value string, since time.Time, ok bool), endpoint func() string) *agentbox.Runner {
+	credential func(cli, endpoint string) (kind, value string, since time.Time, ok bool), endpoint func() string) *agentbox.Runner {
 	return agentbox.New(agentbox.Options{Dir: cfg.AgentStagingDir(dataDir), Backend: agentBackend(cfg),
 		ClaimTimeout: time.Duration(cfg.Agent.ClaimTimeoutSeconds) * time.Second, Log: log, Credential: credential,
 		RequireGroup: cfg.Agent.RequireGroup, Endpoint: endpoint})
