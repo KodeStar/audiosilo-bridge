@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/kodestar/audiosilo-bridge/internal/scratch"
 	"github.com/kodestar/audiosilo-bridge/internal/state"
@@ -28,6 +29,32 @@ func (s *Scheduler) cancelInflight(id int64) {
 	s.mu.Unlock()
 	if ok {
 		ib.cancel()
+	}
+}
+
+// workerExitWait bounds how long a control change waits for a stage worker it
+// cancelled to return (awaitWorker): one that ignores its cancel is left to it.
+const workerExitWait = 30 * time.Second
+
+// awaitWorker waits for the stage worker running on book id, which the caller
+// cancelled, to return (up to workerExitWait, or ctx's end), so nothing it writes
+// late, a sentinel its executor wrote as the cancel landed, lands after the
+// caller's change (supersede_rerun would replay that sentinel rather than re-run
+// the stage). A reservation has no worker to wait for.
+func (s *Scheduler) awaitWorker(ctx context.Context, id int64) {
+	s.mu.Lock()
+	ib, ok := s.inflight[id]
+	s.mu.Unlock()
+	if !ok || ib.done == nil {
+		return
+	}
+	t := time.NewTimer(workerExitWait)
+	defer t.Stop()
+	select {
+	case <-ib.done:
+	case <-ctx.Done():
+	case <-t.C:
+		slog.Warn("scheduler: a cancelled stage worker hasn't returned; the change goes on without it", "book_id", id)
 	}
 }
 

@@ -196,6 +196,9 @@ func (s *Scheduler) supervisorSupersedeRerun(ctx context.Context, b store.Book, 
 		return "", claim
 	}
 	s.cancelInflight(bookID)
+	// A stage running on the book finishes its last writes (a sentinel the rewind
+	// must drop, or a replay of it would stand for the re-run) before the rewind.
+	s.awaitWorker(ctx, bookID)
 	if err := s.rewind(ctx, b, stage); err != nil {
 		if !paused {
 			s.restoreStatus(ctx, b)

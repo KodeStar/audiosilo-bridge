@@ -5,7 +5,9 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/kodestar/audiosilo-bridge/internal/events"
 	"github.com/kodestar/audiosilo-bridge/internal/state"
@@ -205,5 +207,61 @@ func TestReconcileRewindKeepsAStatusWrittenSinceItsRead(t *testing.T) {
 	if got, _ := db.GetBook(ctx, b.ID); got.State != string(state.Inspecting) || !IsCancelled(got) {
 		t.Fatalf("after the reconcile: state %q, status %q error %q; want rewound and still cancelled",
 			got.State, got.Status, got.Error)
+	}
+}
+
+// lateSentinelExecutor's stage runs until its ctx ends and then, as a stage
+// whose last write lands with the cancel, writes its sentinel and returns
+// success. started and returned close for its first run only.
+type lateSentinelExecutor struct {
+	calls             atomic.Int32
+	started, returned chan struct{}
+}
+
+func (e *lateSentinelExecutor) Execute(ctx context.Context, b store.Book, stage state.State, _ StageReport) (StageResult, error) {
+	if e.calls.Add(1) == 1 {
+		close(e.started)
+		defer close(e.returned)
+	}
+	<-ctx.Done()
+	time.Sleep(20 * time.Millisecond)
+	res := happyPath()
+	return res, WriteSentinel(b.WorkDir, string(stage), res)
+}
+
+// supersede_rerun of the stage running on a book waits for the cancelled worker
+// before it rewinds: a sentinel the stage wrote as the cancel landed is dropped
+// with the others, where it used to outlive the rewind and the re-run replayed it.
+func TestSupersedeRerunWaitsForTheCancelledWorker(t *testing.T) {
+	h := newHarness(t)
+	db := h.openDB(t)
+	b := h.addBook(t, db, "late-sentinel", "", "")
+	exec := &lateSentinelExecutor{started: make(chan struct{}), returned: make(chan struct{})}
+	s := New(db, h.hub, exec, 1, h.workRoot, false)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { _ = s.Start(ctx); close(done) }()
+	t.Cleanup(func() { cancel(); <-done })
+	s.Notify()
+	select {
+	case <-exec.started:
+	case <-time.After(waitLimit):
+		t.Fatal("the stage never started")
+	}
+	running, err := db.GetBook(context.Background(), b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outcome, err := s.supervisorSupersedeRerun(context.Background(), running, running.State)
+	if err != nil || outcome == statusChangedOutcome {
+		t.Fatalf("supersede_rerun = %q, %v", outcome, err)
+	}
+	select {
+	case <-exec.returned:
+	case <-time.After(waitLimit):
+		t.Fatal("the cancelled stage never returned")
+	}
+	if SentinelExists(running.WorkDir, running.State) {
+		t.Fatalf("the cancelled %s run's sentinel outlived the rewind: the re-run would replay it", running.State)
 	}
 }

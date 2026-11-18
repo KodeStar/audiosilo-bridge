@@ -1599,7 +1599,10 @@ internal/
             holdDispatch keeps the dispatch loop off the book meanwhile (no stage starts
             between the status clear and the sentinel's removal, which would replay
             the sentinel), and dispatchableLocked keeps it out of a pass that read its
-            books before the release (beginPass marks where a pass reads). A crash
+            books before the release (beginPass marks where a pass reads);
+            supersede_rerun also waits for the stage worker it cancelled to return
+            (awaitWorker, at most workerExitWait) before its rewind, so a sentinel the
+            stage wrote as the cancel landed is dropped too, never replayed. A crash
             between the two writes replays the stage's outcome at the restart (a
             round-cap park parks again). RetryAsRead(b) is Retry for a book the caller
             read (generate's Retry): it re-admits only while the book still has b's

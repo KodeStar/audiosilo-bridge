@@ -131,6 +131,9 @@ type inflightBook struct {
 	lane   state.Lane
 	stage  state.State
 	cancel context.CancelFunc
+	// done closes once a stage worker has returned (awaitWorker); nil for a
+	// reservation, which has no worker.
+	done chan struct{}
 }
 
 // QueueBook is the scheduler-owned placement of one runnable book on the Running
@@ -747,7 +750,8 @@ func (s *Scheduler) startWorker(b store.Book, lane state.Lane) bool {
 		return false
 	}
 	wctx, cancel := context.WithCancel(s.ctx)
-	s.inflight[b.ID] = &inflightBook{lane: lane, stage: state.State(b.State), cancel: cancel}
+	done := make(chan struct{})
+	s.inflight[b.ID] = &inflightBook{lane: lane, stage: state.State(b.State), cancel: cancel, done: done}
 	s.mu.Unlock()
 
 	s.wg.Add(1)
@@ -757,6 +761,7 @@ func (s *Scheduler) startWorker(b store.Book, lane state.Lane) bool {
 			s.mu.Lock()
 			delete(s.inflight, b.ID)
 			s.mu.Unlock()
+			close(done)
 			s.notify()
 		}()
 		s.runStage(wctx, b)
