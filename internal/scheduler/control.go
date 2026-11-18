@@ -246,9 +246,10 @@ func (s *Scheduler) restoreStatus(ctx context.Context, b store.Book) {
 }
 
 // holdDispatch keeps the dispatch loop from starting a stage on book id while a
-// control change rewrites it in steps (readmit, supersede_rerun): no stage starts
-// on it until release, nor in a pass that read its books before release
-// (dispatchableLocked). release wakes the loop; calling it again does nothing.
+// control change rewrites it (readmit and supersede_rerun in steps, Cancel in
+// one): no stage starts on it until release, nor in a pass that read its books
+// before release (dispatchableLocked). release wakes the loop; calling it again
+// does nothing.
 func (s *Scheduler) holdDispatch(id int64) (release func()) {
 	s.mu.Lock()
 	s.held[id]++
@@ -297,7 +298,13 @@ func IsCancelled(b store.Book) bool {
 // Cancel stops a book: it interrupts any running stage and marks the book failed
 // with a "cancelled" reason (the status enum has no dedicated cancelled state).
 // A cancelled book can later be retried or deleted.
+//
+// The dispatch loop is held off the book meanwhile (holdDispatch): a pass that
+// read the book before the cancel was written never starts a stage on it after
+// cancelInflight found none to stop (bridge#65).
 func (s *Scheduler) Cancel(ctx context.Context, id int64) error {
+	release := s.holdDispatch(id)
+	defer release()
 	b, err := markCancelled(ctx, s.db, id)
 	if err != nil {
 		return err

@@ -181,6 +181,41 @@ func TestDispatchSkipsABookHeldMidChange(t *testing.T) {
 	}
 }
 
+// bridge#65: a Cancel holds the dispatch loop off the book as a readmit does, so
+// a pass that read the book before the cancel was written starts no stage on it
+// once the cancel, finding no stage to stop, has returned. The next pass reads it
+// cancelled.
+func TestCancelKeepsAPassThatReadTheBookBeforeItOffTheBook(t *testing.T) {
+	h := newHarness(t)
+	db := h.openDB(t)
+	ctx := context.Background()
+	b := h.addBook(t, db, "cancel-mid-pass", "", "")
+	if err := db.SetBookState(ctx, b.ID, string(state.Inspecting), "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	s := New(db, events.NewHub(8), NewStubExecutor(0, 0), 1, h.workRoot, false)
+	s.ctx = ctx
+	s.beginPass()
+	read, err := db.GetBook(ctx, b.ID) // the pass's read: runnable
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Cancel(ctx, b.ID); err != nil {
+		t.Fatal(err)
+	}
+	if s.startWorker(read, state.LaneMechanical) {
+		s.wg.Wait()
+		t.Fatal("the pass started a stage on the book after its Cancel returned")
+	}
+	s.beginPass()
+	s.mu.Lock()
+	again := s.dispatchableLocked(b.ID)
+	s.mu.Unlock()
+	if !again {
+		t.Fatal("the cancel keeps the book off every later pass (a Retry could never run it)")
+	}
+}
+
 // bridge#65: a start's reconcile rewinds a book by its state alone, so a cancel
 // written to the store after the reconcile read the book (the Bridge's
 // CancelStored while its engine starts) is never written back over.
