@@ -176,8 +176,8 @@ func TestDispatchSkipsABookHeldMidChange(t *testing.T) {
 	if !dispatchable(7) {
 		t.Fatal("the next pass doesn't take the book")
 	}
-	if len(s.releasedAt) != 0 {
-		t.Fatalf("release marks the pass has passed are kept: %v", s.releasedAt)
+	if len(s.released) != 0 {
+		t.Fatalf("release marks the pass has passed are kept: %v", s.released)
 	}
 }
 

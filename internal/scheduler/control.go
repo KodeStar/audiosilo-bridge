@@ -260,8 +260,7 @@ func (s *Scheduler) holdDispatch(id int64) (release func()) {
 			if s.held[id]--; s.held[id] <= 0 {
 				delete(s.held, id)
 			}
-			s.holdSeq++
-			s.releasedAt[id] = s.holdSeq
+			s.released[id] = struct{}{}
 			s.mu.Unlock()
 			s.notify()
 		})
@@ -269,24 +268,20 @@ func (s *Scheduler) holdDispatch(id int64) (release func()) {
 }
 
 // beginPass marks where a dispatch pass starts reading its books: a hold released
-// after this mark keeps its book out of the pass. Marks the pass has passed are
-// dropped.
+// after this mark keeps its book out of the pass, and the ones released before it
+// are forgotten.
 func (s *Scheduler) beginPass() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.passSeq = s.holdSeq
-	for id, seq := range s.releasedAt {
-		if seq <= s.passSeq {
-			delete(s.releasedAt, id)
-		}
-	}
+	clear(s.released)
 }
 
 // dispatchableLocked reports whether the pass may start a stage on book id: no
 // control change holds it, and none released it after the pass read its books.
 // Called under mu.
 func (s *Scheduler) dispatchableLocked(id int64) bool {
-	return s.held[id] == 0 && s.releasedAt[id] <= s.passSeq
+	_, released := s.released[id]
+	return s.held[id] == 0 && !released
 }
 
 // cancelledReason is the error a cancelled book carries (the status enum has no

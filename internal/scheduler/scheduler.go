@@ -80,13 +80,11 @@ type Scheduler struct {
 
 	mu       sync.Mutex
 	inflight map[int64]*inflightBook
-	// held counts the control changes rewriting a book in steps now, releasedAt
-	// the holdSeq each ended at, passSeq the holdSeq the dispatch pass began at
-	// (holdDispatch, beginPass, dispatchableLocked). All under mu.
-	held       map[int64]int
-	releasedAt map[int64]uint64
-	holdSeq    uint64
-	passSeq    uint64
+	// held counts the control changes holding a book off the dispatch loop now,
+	// released the books one let go of since the dispatch pass began reading its
+	// books (holdDispatch, beginPass, dispatchableLocked). Both under mu.
+	held     map[int64]int
+	released map[int64]struct{}
 
 	// lastStats is the most recently published queue.stats, so an idle tick that
 	// recomputes an identical snapshot skips the SSE frame + durable insert. Only
@@ -181,17 +179,17 @@ func New(db *store.DB, hub *events.Hub, exec Executor, agentCap int, workRoot st
 		agentCap = 1
 	}
 	s := &Scheduler{
-		db:         db,
-		hub:        hub,
-		exec:       exec,
-		autoPurge:  autoPurge,
-		workRoot:   workRoot,
-		wake:       make(chan struct{}, 1),
-		inflight:   map[int64]*inflightBook{},
-		held:       map[int64]int{},
-		releasedAt: map[int64]uint64{},
-		rates:      map[string]float64{},
-		bookETA:    map[int64]int64{},
+		db:        db,
+		hub:       hub,
+		exec:      exec,
+		autoPurge: autoPurge,
+		workRoot:  workRoot,
+		wake:      make(chan struct{}, 1),
+		inflight:  map[int64]*inflightBook{},
+		held:      map[int64]int{},
+		released:  map[int64]struct{}{},
+		rates:     map[string]float64{},
+		bookETA:   map[int64]int64{},
 	}
 	s.agentCap.Store(int64(agentCap))
 	return s
