@@ -73,10 +73,11 @@ one `staging` volume, and nothing else.
    there runs commands where it runs, so the compose example's `agent-endpoint`
    (start it with `docker compose --profile endpoint up -d`) is the same image as
    `agent-runner --endpoint-only`, with its own user, its own staging volume
-   (`agent.endpoint_staging_dir`), no `/agent` volume and no credential, as the
+   (`agent.endpoint_staging_dir`), no `/agent` volume (nor the agent volume, or a
+   CLI's login, mounted anywhere else) and no credential, as the
    container's first process (`entrypoint: ["audiosilo-bridge"]`, no tini) and one
    run at a time, and it kills whatever a run leaves behind. The Bridge refuses endpoint runs, saying
-   why, while it isn't set up that way. The endpoint's key is kept for the
+   why, while it isn't set up that way (the service's log names what it found). The endpoint's key is kept for the
    address it was entered for, so saving another address removes it and the page
    asks for the new one's. The Bridge's page shows the agent as ready within
    about 15 seconds.

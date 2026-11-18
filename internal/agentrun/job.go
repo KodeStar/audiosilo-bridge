@@ -78,8 +78,12 @@ func (r *Runner) execute(ctx context.Context, job *os.Root, id string) agentprot
 		return unavailable(endpointOnlyRefusal)
 	case endpoint && !r.opts.EndpointOnly:
 		return unavailable(endpointElsewhere)
-	case endpoint && r.holdsCredentials():
-		return unavailable(endpointBlocked)
+	}
+	if endpoint {
+		if why := r.credentialProblem(); why != "" {
+			r.log.Warn("agent runner: refused an endpoint run", "why", why)
+			return unavailable(endpointBlocked)
+		}
 	}
 	// An endpoint may take no key (a local server); any other run needs one.
 	if !endpoint && r.credentialKind(req.CLI) == "" && handed == nil {

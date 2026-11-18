@@ -964,7 +964,7 @@ func endpointParentEnv() map[string]string {
 
 // newEndpointEnv is newTestEnv as the endpoint's own service
 // (--endpoint-only): no agent home (te.home names one that doesn't exist),
-// sweep counts the sweeps instead of killing anything (the tests run in
+// no mount to look through (mounts_test.go gives it some), sweep counts the sweeps instead of killing anything (the tests run in
 // parallel, so a real sweep could reach another test's CLI;
 // TestEndpointSweepEndsStrays runs the real one alone), and the runner's uid
 // is taken for another than this test's, which writes the jobs as the Bridge
@@ -974,6 +974,7 @@ func newEndpointEnv(t *testing.T, env map[string]string) (te *testEnv, sweeps *a
 	te = newTestEnv(t, env)
 	te.home = filepath.Join(t.TempDir(), "agent")
 	te.r.opts.Home, te.r.opts.EndpointOnly, te.r.selfUID = te.home, true, -1
+	te.r.mounts = func() ([]mount, error) { return nil, nil }
 	sweeps = new(atomic.Int32)
 	te.r.sweep = func(func(int) bool) int { sweeps.Add(1); return 0 }
 	return te, sweeps

@@ -151,9 +151,10 @@ const noEndpointDetail = "no OpenAI-compatible endpoint is set: set its address 
 // token, key or login and send it anywhere, or plant a config.toml a later
 // subscription run loads.
 const ownCredentialsDetail = "the endpoint's agent service holds a credential of its own or can reach the agent " +
-	"home (/agent), which a run against an OpenAI-compatible endpoint could read or change: give that service no " +
-	"credential variables and no /agent volume, and a user of its own (the compose example's agent-endpoint), or " +
-	"choose claude or codex in Settings > Agent"
+	"home (/agent, or the agent volume or a CLI's login mounted anywhere), which a run against an OpenAI-compatible " +
+	"endpoint could read or change: give that service no credential variables and none of those volumes, and a " +
+	"user of its own (the compose example's agent-endpoint; its log says what it found), or choose claude or codex " +
+	"in Settings > Agent"
 
 // ownCredentials reports whether the container holds a credential of its own:
 // the runner says so, or one of its CLIs has one (backend's entry is the

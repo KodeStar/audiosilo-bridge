@@ -148,8 +148,9 @@ services:
 
   # An OpenAI-compatible endpoint's own agent service: started only with
   # --profile endpoint. Keep it apart from the agent container: its own user
-  # (never the agent's 10002), its own staging volume, no /agent volume and no
-  # credential in its environment. The runner refuses its runs otherwise.
+  # (never the agent's 10002), its own staging volume, no /agent volume (nor
+  # agent-config, or a CLI's login, at any other path) and no credential in its
+  # environment. The runner refuses its runs otherwise.
   agent-endpoint:
     image: ghcr.io/kodestar/audiosilo-bridge:latest-agent
     profiles: [endpoint]

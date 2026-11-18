@@ -117,6 +117,10 @@ type Runner struct {
 	// against the CLIs' starts (spawn).
 	sweep   func(keep func(sid int) bool) int
 	sweepMu sync.Mutex
+	// mounts lists the runner's mounts (readMounts; a test injects its own),
+	// which an endpoint-only runner looks through for the agent volume and
+	// credentials' files (mounts.go).
+	mounts func() ([]mount, error)
 	// selfUID is the runner's own uid: a job of its making is a run's
 	// (planted), which the endpoint's service never runs.
 	selfUID int
@@ -181,6 +185,7 @@ func New(opts Options) (*Runner, error) {
 		creds:       map[string]credSeen{},
 		active:      map[string]bool{},
 		sessions:    map[int]bool{},
+		mounts:      readMounts,
 		selfUID:     os.Geteuid(),
 		groups:      groups(),
 		killDelay:   10 * time.Second,
@@ -223,8 +228,11 @@ func (r *Runner) Run(ctx context.Context) error {
 		if err := os.MkdirAll(filepath.Join(r.opts.Home, "codex"), 0o700); err != nil {
 			r.log.Warn("agent runner: create the codex home", "err", err)
 		}
-	} else if r.holdsCredentials() {
-		r.log.Warn("agent runner: " + endpointBlocked)
+		if err := r.markHome(); err != nil {
+			r.log.Warn("agent runner: mark the agent home", "err", err)
+		}
+	} else if why := r.credentialProblem(); why != "" {
+		r.log.Warn("agent runner: "+endpointBlocked, "why", why)
 	}
 	r.lastDetect = r.now()
 	r.detect(ctx)
@@ -253,6 +261,26 @@ func (r *Runner) Run(ctx context.Context) error {
 			r.scan(ctx, &wg)
 		}
 	}
+}
+
+// markHome writes agentHomeMarker at the top of the agent home unless it is
+// there already: the endpoint's service refuses its runs while it finds the
+// marker under any of its mounts (mounts.go), whatever the volume is called.
+func (r *Runner) markHome() error {
+	p := filepath.Join(r.opts.Home, agentHomeMarker)
+	if _, err := os.Lstat(p); !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	f, err := os.OpenFile(p, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) //nolint:gosec // the runner's own home
+	if err != nil {
+		return err
+	}
+	_, err = f.WriteString("The AudioSilo agent container's home: the subscriptions' credentials. " +
+		"Never mount this volume in the endpoint's agent service (agent-endpoint).\n")
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	return err
 }
 
 // detectAgain looks for the CLIs again in the background when a run asked for it

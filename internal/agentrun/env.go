@@ -147,19 +147,32 @@ func (r *Runner) credentialKind(cli string) string {
 }
 
 // holdsCredentials (an endpoint-only runner's) reports whether a run against
-// an endpoint could reach a credential of the container's own: one of the
-// four credential variables in the runner's environment (a run reads
-// /proc/<runner>/environ only while the runner is dumpable, but the variables
-// are a configuration mistake either way), or the agent home (homeReachable).
-// The CLI runs as the runner's uid with its sandbox off; execute refuses an
-// endpoint run while this holds.
-func (r *Runner) holdsCredentials() bool {
+// an endpoint could reach a credential of the container's own
+// (credentialProblem). The CLI runs as the runner's uid with its sandbox off;
+// execute refuses an endpoint run while this holds.
+func (r *Runner) holdsCredentials() bool { return r.credentialProblem() != "" }
+
+// credentialProblem says what puts a credential of the container's own within
+// a run's reach, "" when nothing does: one of the four credential variables in
+// the runner's environment (a run reads /proc/<runner>/environ only while the
+// runner is dumpable, but the variables are a configuration mistake either
+// way), the agent home (homeReachable), or a mount that is the agent volume or
+// holds a credential's file (credentialMount, mounts.go). It names a variable
+// or a path, never a value: the log says it.
+func (r *Runner) credentialProblem() string {
 	for _, k := range credentialVars {
 		if r.envSecret(k) != "" {
-			return true
+			return "the variable " + k + " is set"
 		}
 	}
-	return r.homeReachable()
+	if r.homeReachable() {
+		return r.opts.Home + " (the agent home) is reachable"
+	}
+	ms, err := r.mounts()
+	if err != nil {
+		return "the mounts can't be read: " + err.Error()
+	}
+	return credentialMount(ms)
 }
 
 // homeReachable reports whether the runner can list, enter or write the agent
@@ -183,8 +196,9 @@ func (r *Runner) homeReachable() bool {
 // endpointBlocked is exit.json's error for an endpoint run the container's own
 // credentials stop (the page's status line and a parked book's reason).
 const endpointBlocked = "the endpoint's agent service holds a credential of its own or can reach the agent home " +
-	"(/agent), which a run against an OpenAI-compatible endpoint could read or change: give that service no " +
-	"credential variables and no /agent volume, and run it as its own user (the compose example's agent-endpoint)"
+	"(/agent, or the agent volume or a CLI's login mounted anywhere), which a run against an OpenAI-compatible " +
+	"endpoint could read or change: give that service no credential variables and none of those volumes, and run " +
+	"it as its own user (the compose example's agent-endpoint)"
 
 // endpointOnlyRefusal is exit.json's error for a CLI's own run sent to the
 // endpoint's agent service, and endpointElsewhere for an endpoint run sent to
