@@ -319,6 +319,23 @@ func (h *Importer) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (a
 	return res, nil
 }
 
+// importable checks an account read of p's import (acct and its error): the
+// account is this Bridge's, mapped on this server, with p's library its books
+// library.
+func (h *Importer) importable(acct store.AudibleAccount, err error, p ImportParams) error {
+	switch {
+	case errors.Is(err, audibleacct.ErrNotFound):
+		return fail(CodeUnknownAccount, "This Bridge has no Audible account %s: it was removed here, or signed in on another Bridge.", p.Account)
+	case err != nil:
+		return err
+	case acct.OnOtherServer(h.o.ServerID()):
+		return fail(CodeUnknownAccount, "The Audible account is mapped on another server: map it again on the Bridge's Accounts tab.")
+	case acct.LibraryID != p.LibraryID:
+		return fail(CodeNotWritable, "Library %d isn't the Audible account's books library: map the account again or queue the import again.", p.LibraryID)
+	}
+	return nil
+}
+
 func (h *Importer) run(ctx context.Context, job jobs.Job, p ImportParams, rep *jobs.Reporter) (res *ImportResult, err error) {
 	// One import of the account at a time: while it holds the gate, the
 	// title's temp files are this job's alone (an older attempt of the same job
@@ -341,17 +358,8 @@ func (h *Importer) run(ctx context.Context, job jobs.Job, p ImportParams, rep *j
 	}()
 
 	acct, err := h.o.Accounts.Account(ctx, p.Account)
-	if errors.Is(err, audibleacct.ErrNotFound) {
-		return nil, fail(CodeUnknownAccount, "This Bridge has no Audible account %s: it was removed here, or signed in on another Bridge.", p.Account)
-	}
-	if err != nil {
+	if err := h.importable(acct, err, p); err != nil {
 		return nil, err
-	}
-	if acct.OnOtherServer(h.o.ServerID()) {
-		return nil, fail(CodeUnknownAccount, "The Audible account is mapped on another server: map it again on the Bridge's Accounts tab.")
-	}
-	if acct.LibraryID != p.LibraryID {
-		return nil, fail(CodeNotWritable, "Library %d isn't the Audible account's books library: map the account again or queue the import again.", p.LibraryID)
 	}
 	var srv ImportServer
 	if h.o.Server != nil {
@@ -388,9 +396,12 @@ func (h *Importer) run(ctx context.Context, job jobs.Job, p ImportParams, rep *j
 	// stays denied) until the owner signs in again, which ends the refusal.
 	// Read again with SettledAccount: the job may have waited for the
 	// library's mapping, and a sign-in again meanwhile, or one still storing
-	// itself, ended the refusal the first read saw.
+	// itself, ended the refusal the first read saw. The read again is checked
+	// as the first was: what it waited for may have removed the account or
+	// mapped it elsewhere.
 	if acct.RefusedAt != "" {
-		if acct, err = h.o.Accounts.SettledAccount(ctx, acct.ID); err != nil {
+		acct, err = h.o.Accounts.SettledAccount(ctx, acct.ID)
+		if err := h.importable(acct, err, p); err != nil {
 			return nil, err
 		}
 	}

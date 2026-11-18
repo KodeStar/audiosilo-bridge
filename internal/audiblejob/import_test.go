@@ -699,6 +699,28 @@ func TestImportOfARefusedAccountFailsFast(t *testing.T) {
 	if _, err := e.run(context.Background(), e.params(nil)); err != nil || e.accts.licenses != 1 {
 		t.Fatalf("an account signed in again meanwhile: %v (licenses %d)", err, e.accts.licenses)
 	}
+	// Denied: what the read again waited for removed the account or mapped it
+	// elsewhere, checked as the first read is.
+	for _, c := range []struct {
+		name string
+		then func(*store.AudibleAccount)
+		code string
+	}{
+		{"removed", func(a *store.AudibleAccount) { a.ID = "acct0002" }, CodeUnknownAccount},
+		{"another server's", func(a *store.AudibleAccount) { a.ServerID = "srv0" }, CodeUnknownAccount},
+		{"another library", func(a *store.AudibleAccount) { a.LibraryID = 2 }, CodeNotWritable},
+	} {
+		e := newImportEnv(t)
+		then := e.accts.acct
+		c.then(&then)
+		e.accts.acct.RefusedAt, e.accts.acct.LastError, e.accts.acct.RefusalKind = "2026-11-03T10:00:00Z", audibleacct.ThrottledText, store.RefusalDevice
+		e.accts.acctThen = []store.AudibleAccount{then}
+		_, err := e.run(context.Background(), e.params(nil))
+		var f *Failure
+		if !errors.As(err, &f) || f.Code != c.code || e.accts.licenses != 0 {
+			t.Fatalf("%s while the read again waited: %v (licenses %d)", c.name, err, e.accts.licenses)
+		}
+	}
 
 	e = newImportEnv(t)
 	e.accts.acct.LastError = "could not list the Audible library: connection reset"
