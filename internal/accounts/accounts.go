@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"slices"
 	"strings"
 	"sync"
@@ -58,10 +59,11 @@ var (
 	// expired); signing in again ends it.
 	ErrRefused = errors.New("GitHub refused the Bridge's sign-in: sign in again on the Accounts tab")
 	// ErrUnrefreshed: the sign-in's access token expired and its refresh got no
-	// answer from GitHub (unreachable, a server error). The sign-in stands and the
-	// refresh is tried again after refreshRetry: waiting for GitHub ends it, not a
-	// new sign-in.
-	ErrUnrefreshed = errors.New("the Bridge's GitHub sign-in couldn't be refreshed: GitHub couldn't be reached")
+	// usable answer from GitHub (unreachable, a server error, a rate limit, an
+	// answer that isn't a token). The sign-in stands and the refresh is tried
+	// again after refreshRetry: waiting for GitHub ends it, not a new sign-in.
+	// The error Token returns says which (Unrefreshed has the words alone).
+	ErrUnrefreshed = errors.New("the Bridge's GitHub sign-in couldn't be refreshed")
 )
 
 // RefusedText is the accounts row's last_error after a 401.
@@ -74,7 +76,8 @@ type GitHubOptions struct {
 	// Client is the App's GitHub client (its client ID and bases).
 	Client *ghauth.Client
 	Log    *slog.Logger
-	// OnChange runs after a sign-in, a sign-out or a refusal (the heartbeat's
+	// OnChange runs after a sign-in, a sign-out, a refusal, or a token handed
+	// out again after a failed refresh had held it back (the heartbeat's
 	// checklist and can_contribute move).
 	OnChange func()
 	// Now and Sleep are the clock and the device flow's wait (tests replace them).
@@ -98,6 +101,11 @@ type GitHub struct {
 	refreshMu       sync.Mutex
 	refreshErr      error
 	refreshFailedAt time.Time
+	// unrefreshedWhy is why the last Token couldn't hand out a token because
+	// the refresh failed ("" when it could, or wasn't asked since a sign-in or
+	// a sign-out), under mu: the heartbeat's checklist reads it without
+	// waiting on a refresh (Unrefreshed).
+	unrefreshedWhy string
 }
 
 type deviceFlow struct {
@@ -249,6 +257,7 @@ func (g *GitHub) keep(ctx context.Context, f *deviceFlow, tok ghauth.Token, logi
 		return context.Canceled
 	}
 	g.refreshErr, g.refreshFailedAt = nil, time.Time{}
+	g.setUnrefreshed("")
 	return g.store(ctx, tok, login)
 }
 
@@ -310,6 +319,7 @@ func (g *GitHub) forget(ctx context.Context) (ghauth.Token, error) {
 	g.refreshMu.Lock()
 	defer g.refreshMu.Unlock()
 	g.refreshErr, g.refreshFailedAt = nil, time.Time{}
+	g.setUnrefreshed("")
 	tok, _ := g.stored()
 	if err := g.o.Vault.Delete(secrets.GitHubUserToken); err != nil {
 		return ghauth.Token{}, err
@@ -337,10 +347,43 @@ func (g *GitHub) stored() (ghauth.Token, error) {
 // expires within refreshBefore (the new pair sealed in one write before it is
 // used). ErrNotSignedIn for none, ErrRefused while GitHub refuses it. A refresh
 // that didn't get GitHub's answer keeps the pair and is tried again a minute
-// later; meanwhile the access token serves until it expires, then it is an error.
+// later; meanwhile the access token serves until it expires, then it is an
+// ErrUnrefreshed saying why (Unrefreshed keeps the words for the checklist).
 func (g *GitHub) Token(ctx context.Context) (string, error) {
 	g.refreshMu.Lock()
 	defer g.refreshMu.Unlock()
+	was := g.Unrefreshed()
+	tok, err := g.token(ctx)
+	why := ""
+	var ue *unrefreshedError
+	if errors.As(err, &ue) {
+		why = ue.problem
+	}
+	g.setUnrefreshed(why)
+	if was != "" && err == nil {
+		// A token again after the refresh had failed: the heartbeat says so at
+		// once and the books parked on the sign-in go on (OnChange, bridge#25).
+		g.o.OnChange()
+	}
+	return tok, err
+}
+
+// Unrefreshed is why the sign-in couldn't hand out a token at the last Token
+// because its refresh failed (refreshProblem's words), "" when it could.
+func (g *GitHub) Unrefreshed() string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.unrefreshedWhy
+}
+
+func (g *GitHub) setUnrefreshed(why string) {
+	g.mu.Lock()
+	g.unrefreshedWhy = why
+	g.mu.Unlock()
+}
+
+// token is Token's work, under refreshMu.
+func (g *GitHub) token(ctx context.Context) (string, error) {
 	tok, err := g.stored()
 	if err != nil {
 		return "", err
@@ -378,8 +421,8 @@ func (g *GitHub) Token(ctx context.Context) (string, error) {
 		return "", ErrRefused
 	}
 	if err != nil {
-		// No answer from GitHub (unreachable, a server error): the pair is kept and
-		// tried again after refreshRetry. A refresh token GitHub did spend meanwhile
+		// No usable answer from GitHub (unreachable, a server error, an answer
+		// that isn't a token): the pair is kept and tried again after refreshRetry. A refresh token GitHub did spend meanwhile
 		// answers bad_refresh_token then, which refuses the sign-in above. The clock
 		// is read again: a refresh GitHub never answers takes ghauth's request
 		// timeout, and the access token may have expired meanwhile.
@@ -409,7 +452,41 @@ func (g *GitHub) unrefreshed(tok ghauth.Token, now time.Time, err error) (string
 	if now.Before(tok.ExpiresAt) {
 		return tok.AccessToken, nil
 	}
-	return "", fmt.Errorf("%w: %w", ErrUnrefreshed, err)
+	return "", &unrefreshedError{problem: refreshProblem(err), err: err}
+}
+
+// unrefreshedError is an ErrUnrefreshed: why in words (problem) and the
+// refresh's own error.
+type unrefreshedError struct {
+	problem string
+	err     error
+}
+
+func (e *unrefreshedError) Error() string {
+	return ErrUnrefreshed.Error() + ": " + e.problem + " (" + e.err.Error() + ")"
+}
+func (e *unrefreshedError) Is(target error) bool { return target == ErrUnrefreshed }
+func (e *unrefreshedError) Unwrap() error        { return e.err }
+
+// refreshProblem words why a refresh got no usable answer (bridge#25): GitHub
+// not reached at all, apart from an answer that wasn't a new token (a server
+// error, a rate limit, a page that isn't JSON), which waiting for the network
+// won't fix by itself as surely.
+func refreshProblem(err error) string {
+	var ge *ghauth.Error
+	switch {
+	case ghauth.Unreachable(err):
+		return "GitHub couldn't be reached"
+	case errors.Is(err, ghauth.ErrNoClientID):
+		return err.Error()
+	case errors.As(err, &ge) && ge.Status >= http.StatusInternalServerError:
+		return fmt.Sprintf("GitHub answered with a server error (%d)", ge.Status)
+	case errors.As(err, &ge) && (ge.Status == http.StatusTooManyRequests || ge.Status == http.StatusForbidden):
+		return fmt.Sprintf("GitHub is limiting the Bridge's requests (%d)", ge.Status)
+	case errors.As(err, &ge) && ge.Status != 0:
+		return fmt.Sprintf("GitHub answered %d instead of a new token", ge.Status)
+	}
+	return "GitHub's answer wasn't a new token"
 }
 
 // Refused records that GitHub refused token (a 401 on a REST call made with it):

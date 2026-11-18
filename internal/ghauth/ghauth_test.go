@@ -304,6 +304,33 @@ func TestRefreshBadToken(t *testing.T) {
 	}
 }
 
+// A refresh that never got GitHub's answer is Unreachable; one GitHub
+// answered with anything but a token (a server error, a page that isn't JSON,
+// an OAuth error) never is (bridge#25).
+func TestRefreshUnreachable(t *testing.T) {
+	gone := httptest.NewServer(http.NotFoundHandler())
+	gone.Close()
+	if _, err := newClient(gone, time.Now()).Refresh(context.Background(), "ghr_1"); !Unreachable(err) {
+		t.Fatalf("closed server: err = %v, want Unreachable", err)
+	}
+	for name, h := range map[string]http.HandlerFunc{
+		"502": func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "<html>bad gateway</html>", http.StatusBadGateway)
+		},
+		"not JSON": func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, "<html>maintenance</html>") },
+		"oauth error": func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(w, http.StatusOK, map[string]any{"error": "bad_refresh_token"})
+		},
+	} {
+		srv := httptest.NewServer(h)
+		_, err := newClient(srv, time.Now()).Refresh(context.Background(), "ghr_1")
+		srv.Close()
+		if err == nil || Unreachable(err) {
+			t.Fatalf("%s: err = %v, want an answer that isn't Unreachable", name, err)
+		}
+	}
+}
+
 func TestRevoke(t *testing.T) {
 	f := &fakeGitHub{}
 	srv := f.server(t)

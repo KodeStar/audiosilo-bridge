@@ -1044,13 +1044,15 @@ func (s *Scheduler) advanceWaypoints(ctx context.Context) ([]store.Book, []state
 // autoReadmitCodes are the park reasons the timed self-resume acts on: the transient
 // agent conditions a wait heals (the CLI symlink blip recovers, or the rate-limit
 // window elapses), a refused agent credential (looked at again in case it was
-// replaced) and the monthly budget (a new month starts). Only a park that carries a
+// replaced), the monthly budget (a new month starts) and a GitHub sign-in that
+// couldn't be refreshed (contrib_unavailable carries a retry_at only then,
+// bridge#25: no credential at all waits for a sign-in). Only a park that carries a
 // retry_at is ever re-admitted here, so the per-book budget park (none) waits for a
 // raised cap and the restart that applies it (restartReadmitCodes), and every
 // other park for a person (a not-confident marker verdict, a spelling gate
 // failure, ...).
 var autoReadmitCodes = []state.ParkCode{state.ParkAgentUnavailable, state.ParkAgentRateLimited,
-	state.ParkAgentCredentialRefused, state.ParkBudgetExceeded}
+	state.ParkAgentCredentialRefused, state.ParkBudgetExceeded, state.ParkContribUnavailable}
 
 // restartReadmitCodes are the parks a daemon start re-admits once
 // (readmitRestartRecoverable): external availability, or a setting read only at

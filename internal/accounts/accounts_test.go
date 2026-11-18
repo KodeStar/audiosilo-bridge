@@ -315,6 +315,11 @@ func TestRefreshWithoutAnswerKeepsSignIn(t *testing.T) {
 	if _, err := r.gh.Token(ctx); !errors.Is(err, ErrUnrefreshed) || errors.Is(err, ErrRefused) || hits() != 2 {
 		t.Fatalf("err = %v, refreshes tried = %d (an expired token without an answer is no refusal)", err, hits())
 	}
+	// GitHub answered (a 502): said so, never "couldn't be reached" (bridge#25).
+	if _, err := r.gh.Token(ctx); !strings.Contains(err.Error(), "server error (502)") ||
+		strings.Contains(err.Error(), "couldn't be reached") || r.gh.Unrefreshed() != "GitHub answered with a server error (502)" {
+		t.Fatalf("err = %v, unrefreshed %q", err, r.gh.Unrefreshed())
+	}
 	if st := r.gh.State(ctx); st.Refused || !st.SignedIn {
 		t.Fatalf("state = %+v", st)
 	}
@@ -322,8 +327,59 @@ func TestRefreshWithoutAnswerKeepsSignIn(t *testing.T) {
 	r.fake.refreshDown = false
 	r.fake.mu.Unlock()
 	r.clock.Add(time.Minute)
+	changes := r.changes.Load()
 	if got, err := r.gh.Token(ctx); err != nil || got != "ghu_r1" {
 		t.Fatalf("token = %q, %v (GitHub answers again)", got, err)
+	}
+	// The token is handed out again: the change is signalled (the heartbeat and
+	// the parked books), once.
+	if r.gh.Unrefreshed() != "" || r.changes.Load() != changes+1 {
+		t.Fatalf("unrefreshed %q, changes %d (want none, %d)", r.gh.Unrefreshed(), r.changes.Load(), changes+1)
+	}
+	if _, err := r.gh.Token(ctx); err != nil || r.changes.Load() != changes+1 {
+		t.Fatalf("a second token: %v, changes %d", err, r.changes.Load())
+	}
+}
+
+// A refresh that never reached GitHub says so, apart from one GitHub answered
+// (allowed: unreachable reads as unreachable; denied: an answer never does,
+// TestRefreshUnanswered), and a sign-out forgets it.
+func TestRefreshUnreachableWording(t *testing.T) {
+	r := newRig(t)
+	ctx := context.Background()
+	r.signIn(t)
+	gone := httptest.NewServer(http.NotFoundHandler())
+	gone.Close()
+	r.gh.o.Client.WebBase = gone.URL
+	r.clock.Add(8*time.Hour + time.Minute) // past the expiry
+	_, err := r.gh.Token(ctx)
+	if !errors.Is(err, ErrUnrefreshed) || !strings.Contains(err.Error(), "GitHub couldn't be reached") ||
+		r.gh.Unrefreshed() != "GitHub couldn't be reached" {
+		t.Fatalf("err = %v, unrefreshed %q", err, r.gh.Unrefreshed())
+	}
+	if _, err := r.gh.SignOut(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if r.gh.Unrefreshed() != "" {
+		t.Fatalf("unrefreshed after a sign-out = %q", r.gh.Unrefreshed())
+	}
+}
+
+// refreshProblem tells each failure apart.
+func TestRefreshProblem(t *testing.T) {
+	for _, tc := range []struct {
+		err  error
+		want string
+	}{
+		{&ghauth.Error{Status: http.StatusBadGateway}, "GitHub answered with a server error (502)"},
+		{&ghauth.Error{Status: http.StatusTooManyRequests}, "GitHub is limiting the Bridge's requests (429)"},
+		{&ghauth.Error{Status: http.StatusNotFound}, "GitHub answered 404 instead of a new token"},
+		{errors.New("GitHub's answer isn't JSON: x"), "GitHub's answer wasn't a new token"},
+		{ghauth.ErrNoClientID, ghauth.ErrNoClientID.Error()},
+	} {
+		if got := refreshProblem(tc.err); got != tc.want {
+			t.Errorf("refreshProblem(%v) = %q, want %q", tc.err, got, tc.want)
+		}
 	}
 }
 

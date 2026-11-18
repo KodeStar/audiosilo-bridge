@@ -25,16 +25,24 @@ var ErrNoCredential = errors.New("contrib: no GitHub credential (sign in to GitH
 
 // ErrSignInUnrefreshed is the ErrNoCredential (errors.Is matches both) of a
 // Bridge that is signed in to GitHub but whose expired sign-in couldn't be
-// refreshed because GitHub couldn't be reached (accounts.ErrUnrefreshed), with
-// nothing else to fall back on. Waiting until GitHub can be reached ends it, not
-// a sign-in, so callers word it apart (and its own text leaves out
-// ErrNoCredential's "sign in" advice).
+// refreshed (accounts.ErrUnrefreshed: GitHub couldn't be reached, or didn't
+// answer with a new token), with nothing else to fall back on. Waiting for
+// GitHub ends it, not a sign-in, so callers word it apart (and its own text
+// leaves out ErrNoCredential's "sign in" advice); a park on it looks again by
+// itself after UnrefreshedRetry.
 var ErrSignInUnrefreshed error = signInUnrefreshed{}
+
+// UnrefreshedRetry is how long a book parked on ErrSignInUnrefreshed waits
+// before it looks again by itself (bridge#25). The refresh is tried every
+// minute and a sign-in that works again re-admits the parked books at once
+// (accounts' OnChange), so this is the backstop for a token that resolves
+// some other way meanwhile (the environment's, gh's).
+const UnrefreshedRetry = 10 * time.Minute
 
 type signInUnrefreshed struct{}
 
 func (signInUnrefreshed) Error() string {
-	return "contrib: no GitHub credential (the sign-in couldn't be refreshed: GitHub couldn't be reached)"
+	return "contrib: no GitHub credential (the sign-in couldn't be refreshed)"
 }
 
 // Is makes ErrSignInUnrefreshed an ErrNoCredential for errors.Is.
@@ -113,8 +121,7 @@ func NewTokenSource(device DeviceTokens, onChange func()) *TokenSource {
 // Resolve returns (token, from, nil) where from is FromEnv, FromDevice or
 // FromGH, trying them in that order. When none yields a usable token it returns
 // ("", "", ErrNoCredential), or ErrSignInUnrefreshed when the sign-in is there
-// but GitHub couldn't be reached to refresh it. The error path never carries a
-// token.
+// but its refresh failed. The error path never carries a token.
 func (t *TokenSource) Resolve(ctx context.Context) (token, from string, err error) {
 	if v := strings.TrimSpace(t.getenv(GitHubTokenEnv)); v != "" && !t.isRefused(v) {
 		return v, FromEnv, nil

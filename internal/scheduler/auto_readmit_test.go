@@ -63,6 +63,33 @@ func TestAutoReadmitDueReadmitsCredentialRefusedPark(t *testing.T) {
 	}
 }
 
+// A book parked on a GitHub sign-in that couldn't be refreshed carries a
+// retry_at (bridge#25) and goes on by itself once the clock passes it; the
+// same code with none (no credential at all: it waits for a sign-in) and one
+// not yet due stay parked (allowed: due re-admits; denied: no retry_at, or a
+// future one).
+func TestAutoReadmitDueContribUnrefreshed(t *testing.T) {
+	h := newHarness(t)
+	db := h.openDB(t)
+	s := New(db, h.hub, NewStubExecutor(0, 0), 1, h.workRoot, false)
+	ctx := context.Background()
+	due := h.addBook(t, db, "due", "", "")
+	parkBook(t, s, due.ID, state.ParkContribUnavailable, time.Now().Add(-time.Minute).UTC().Format(time.RFC3339))
+	none := h.addBook(t, db, "none", "", "")
+	parkBook(t, s, none.ID, state.ParkContribUnavailable, "")
+	later := h.addBook(t, db, "later", "", "")
+	parkBook(t, s, later.ID, state.ParkContribUnavailable, time.Now().Add(10*time.Minute).UTC().Format(time.RFC3339))
+	s.autoReadmitDue(ctx)
+	if cur, _ := db.GetBook(ctx, due.ID); cur.Status != "" || cur.ParkCode != "" {
+		t.Fatalf("due: status=%q park_code=%q, want readmitted", cur.Status, cur.ParkCode)
+	}
+	for _, id := range []int64{none.ID, later.ID} {
+		if cur, _ := db.GetBook(ctx, id); cur.Status != string(state.StatusNeedsAttention) {
+			t.Errorf("book %d status = %q, want still parked", id, cur.Status)
+		}
+	}
+}
+
 // TestAutoReadmitDueSkipsNotDueAndNonAuto: a future retry_at, an empty retry_at
 // (pre-migration park), and a non-auto park code are all left parked.
 func TestAutoReadmitDueSkipsNotDueAndNonAuto(t *testing.T) {

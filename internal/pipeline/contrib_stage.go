@@ -71,9 +71,11 @@ const (
 	// A sign-in on the Accounts tab re-admits it (the app's githubChanged).
 	ContribUnavailableMsg = "GitHub credential unavailable - sign in to GitHub on the Bridge's Accounts tab and the book carries on"
 	// ContribUnrefreshedMsg parks it (same code) when the Bridge is signed in but
-	// GitHub couldn't be reached to refresh the sign-in (contrib.ErrSignInUnrefreshed):
-	// a later refresh re-admits nothing, so Retry does.
-	ContribUnrefreshedMsg = "the Bridge's GitHub sign-in couldn't be refreshed because GitHub couldn't be reached - Retry once it can"
+	// the sign-in couldn't be refreshed (contrib.ErrSignInUnrefreshed): the park
+	// looks again by itself after contrib.UnrefreshedRetry, and a refresh that
+	// works again re-admits it at once (bridge#25).
+	ContribUnrefreshedMsg = "the Bridge's GitHub sign-in couldn't be refreshed (GitHub couldn't be reached, or didn't " +
+		"answer with a new token) - the book carries on by itself once it can"
 	// CoreNeededMsg parks a book whose work does not exist upstream: a core add-work
 	// proposal has been prefilled and awaits completion/confirmation in the UI.
 	CoreNeededMsg = "this book's work does not exist on AudioSilo Meta yet - complete the work proposal, then it contributes automatically"
@@ -547,9 +549,10 @@ func (e *Executor) submitLocal(ctx context.Context, book store.Book, slug string
 
 // contribClient resolves a GitHub credential and builds a REST client. A missing
 // credential is a ParkError (ParkContribUnavailable) whose Cause is the resolve
-// error, so a caller (the share job) tells a sign-in GitHub couldn't be reached to
-// refresh apart without reading the reason's text; any other resolve failure is a
-// transient stage error.
+// error, so a caller (the share job) tells a sign-in that couldn't be refreshed
+// apart without reading the reason's text; that park also carries a retry time
+// (contrib.UnrefreshedRetry), as waiting for GitHub ends it. Any other resolve
+// failure is a transient stage error.
 func (e *Executor) contribClient(ctx context.Context) (*contrib.Client, error) {
 	var token, from string
 	err := contrib.ErrNoCredential // no token source: nothing resolves
@@ -557,11 +560,11 @@ func (e *Executor) contribClient(ctx context.Context) (*contrib.Client, error) {
 		token, from, err = e.tokenSource.Resolve(ctx)
 	}
 	if errors.Is(err, contrib.ErrNoCredential) {
-		reason := ContribUnavailableMsg
+		park := &scheduler.ParkError{Code: state.ParkContribUnavailable, Reason: ContribUnavailableMsg, Cause: err}
 		if errors.Is(err, contrib.ErrSignInUnrefreshed) {
-			reason = ContribUnrefreshedMsg
+			park.Reason, park.RetryAfter = ContribUnrefreshedMsg, time.Now().Add(contrib.UnrefreshedRetry)
 		}
-		return nil, &scheduler.ParkError{Code: state.ParkContribUnavailable, Reason: reason, Cause: err}
+		return nil, park
 	}
 	if err != nil {
 		return nil, fmt.Errorf("contributing: resolve credential: %w", err)

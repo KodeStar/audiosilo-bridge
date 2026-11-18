@@ -483,14 +483,14 @@ func (h *Handler) startRun(job jobs.Job, rep *jobs.Reporter, kind string) (r *ru
 
 // errCantContribute is a contribute=issue job on a Bridge with no GitHub
 // credential; errCantContributeUnrefreshed one on a Bridge signed in to GitHub
-// whose sign-in GitHub couldn't be reached to refresh.
+// whose sign-in couldn't be refreshed.
 var (
 	errCantContribute = errors.New("this job asks to contribute the characters and recaps (contribute: issue), but " +
 		"the Bridge isn't signed in to GitHub: sign in on the Bridge's Accounts tab, or generate the book with " +
 		"contribute set to local")
 	errCantContributeUnrefreshed = errors.New("this job asks to contribute the characters and recaps (contribute: " +
-		"issue), but the Bridge's GitHub sign-in couldn't be refreshed because GitHub couldn't be reached: generate " +
-		"the book again once it can, or with contribute set to local")
+		"issue), but the Bridge's GitHub sign-in couldn't be refreshed (GitHub couldn't be reached, or didn't answer " +
+		"with a new token): generate the book again once it can, or with contribute set to local")
 )
 
 // credFailure words a missing contribution credential (err, from
