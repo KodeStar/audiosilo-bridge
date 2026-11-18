@@ -1078,7 +1078,7 @@ func TestEndpointRunRefusedBesideOwnCredentials(t *testing.T) {
 			t.Parallel()
 			env := endpointParentEnv()
 			te, _ := newEndpointEnv(t, env)
-			if te.r.holdsCredentials() || te.r.status().OwnCredentials {
+			if te.r.credentialProblem() != "" || te.r.status().OwnCredentials {
 				t.Fatal("a service with no credential and no home reports one")
 			}
 			hold(t, env, te.home)

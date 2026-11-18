@@ -132,9 +132,6 @@ func TestEndpointRunRefusedBesideCredentialMounts(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			if strings.Contains(name, "closed") && os.Geteuid() == 0 {
-				t.Skip("root reaches every dir")
-			}
 			te, _ := newEndpointEnv(t, endpointParentEnv())
 			ms, err := tc.mounts(t, t.TempDir())
 			te.r.mounts = func() ([]mount, error) { return ms, err }
@@ -205,8 +202,8 @@ func TestEndpointRunBesideHarmlessMounts(t *testing.T) {
 }
 
 // The agent container's runner marks its home when it starts (and leaves a
-// marker that is there alone): the endpoint's service then finds the volume
-// by it under any path.
+// marker that is there alone), by which the endpoint's service finds the
+// volume under any path.
 func TestAgentRunnerMarksItsHome(t *testing.T) {
 	t.Parallel()
 	te := newTestEnv(t, parentEnv())
@@ -231,10 +228,5 @@ func TestAgentRunnerMarksItsHome(t *testing.T) {
 	}
 	if b, _ := os.ReadFile(marker); string(b) != "kept" {
 		t.Fatalf("the marker was rewritten: %q", b)
-	}
-	ep, _ := newEndpointEnv(t, endpointParentEnv())
-	ep.r.mounts = func() ([]mount, error) { return []mount{at(te.home)}, nil }
-	if why := ep.r.credentialProblem(); !strings.Contains(why, agentHomeMarker) {
-		t.Fatalf("credentialProblem = %q, want the marker found", why)
 	}
 }

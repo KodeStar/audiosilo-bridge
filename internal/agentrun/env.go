@@ -40,6 +40,14 @@ var passThrough = []string{"LANG", "TZ"}
 // into shell_snapshots/ (spike 2).
 var codexKeep = map[string]bool{"auth.json": true, "config.toml": true}
 
+// codexDir and secretsDir are the agent home's dirs for codex's CODEX_HOME and
+// the credentials' files (the endpoint's service looks for both under its
+// mounts: mounts.go).
+const (
+	codexDir   = "codex"
+	secretsDir = "secrets"
+)
+
 // maxSecretBytes bounds a secrets file read.
 const maxSecretBytes = 64 << 10
 
@@ -53,7 +61,7 @@ func (r *Runner) path() string {
 
 // codexHome is CODEX_HOME: on the agent volume, since codex keeps its login
 // there (and refuses a CODEX_HOME under /tmp).
-func (r *Runner) codexHome() string { return filepath.Join(r.opts.Home, "codex") }
+func (r *Runner) codexHome() string { return filepath.Join(r.opts.Home, codexDir) }
 
 // baseEnv is the allow-listed environment every child starts from: PATH, LANG,
 // TZ, a private TMPDIR and HOME under runDir, and the autoupdater off. Nothing
@@ -146,17 +154,13 @@ func (r *Runner) credentialKind(cli string) string {
 	return ""
 }
 
-// holdsCredentials (an endpoint-only runner's) reports whether a run against
-// an endpoint could reach a credential of the container's own
-// (credentialProblem). The CLI runs as the runner's uid with its sandbox off;
-// execute refuses an endpoint run while this holds.
-func (r *Runner) holdsCredentials() bool { return r.credentialProblem() != "" }
-
-// credentialProblem says what puts a credential of the container's own within
-// a run's reach, "" when nothing does: one of the four credential variables in
-// the runner's environment (a run reads /proc/<runner>/environ only while the
-// runner is dumpable, but the variables are a configuration mistake either
-// way), the agent home (homeReachable), or a mount that is the agent volume or
+// credentialProblem (an endpoint-only runner's) says what puts a credential of
+// the container's own within reach of a run against an endpoint, "" when
+// nothing does (the CLI runs as the runner's uid with its sandbox off; execute
+// refuses an endpoint run while there is one): one of the four credential
+// variables in the runner's environment (a run reads /proc/<runner>/environ
+// only while the runner is dumpable, but the variables are a configuration
+// mistake either way), the agent home (homeReachable), or a mount that is the agent volume or
 // holds a credential's file (credentialMount, mounts.go). It names a variable
 // or a path, never a value: the log says it.
 func (r *Runner) credentialProblem() string {
@@ -195,10 +199,8 @@ func (r *Runner) homeReachable() bool {
 
 // endpointBlocked is exit.json's error for an endpoint run the container's own
 // credentials stop (the page's status line and a parked book's reason).
-const endpointBlocked = "the endpoint's agent service holds a credential of its own or can reach the agent home " +
-	"(/agent, or the agent volume or a CLI's login mounted anywhere), which a run against an OpenAI-compatible " +
-	"endpoint could read or change: give that service no credential variables and none of those volumes, and run " +
-	"it as its own user (the compose example's agent-endpoint)"
+const endpointBlocked = agentproto.OwnCredentialsReason + ": give that service no credential variables and " +
+	"none of those volumes, and run it as its own user (the compose example's agent-endpoint)"
 
 // endpointOnlyRefusal is exit.json's error for a CLI's own run sent to the
 // endpoint's agent service, and endpointElsewhere for an endpoint run sent to
@@ -267,7 +269,7 @@ func (r *Runner) openAIKey() string {
 
 // secretFile is where a credential's file lives.
 func (r *Runner) secretFile(name string) string {
-	return filepath.Join(r.opts.Home, "secrets", strings.ToLower(name))
+	return filepath.Join(r.opts.Home, secretsDir, strings.ToLower(name))
 }
 
 // envSecret is a credential variable's value, trimmed ("" when unset or blank).

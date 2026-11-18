@@ -3,12 +3,16 @@ package agentrun
 import (
 	"errors"
 	"io/fs"
+	"maps"
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
+
+	"github.com/kodestar/audiosilo-bridge/internal/fsutil"
 )
 
 // The endpoint's service (--endpoint-only) must have nothing of the
@@ -78,10 +82,13 @@ var credentialNames = func() map[string]bool {
 // CODEX_HOME or CLAUDE_CONFIG_DIR mounted alone, and a user's home with the
 // CLIs' own dirs.
 var credentialPaths = func() []string {
-	out := []string{agentHomeMarker, "codex/auth.json", "codex/config.toml", "auth.json", ".credentials.json",
-		".claude.json", ".claude/.credentials.json", ".codex/auth.json"}
+	out := []string{agentHomeMarker, "auth.json", ".credentials.json", ".claude.json", ".claude/.credentials.json",
+		".codex/auth.json"}
+	for _, f := range slices.Sorted(maps.Keys(codexKeep)) {
+		out = append(out, path.Join(codexDir, f))
+	}
 	for _, k := range credentialVars {
-		out = append(out, "secrets/"+strings.ToLower(k), strings.ToLower(k))
+		out = append(out, path.Join(secretsDir, strings.ToLower(k)), strings.ToLower(k))
 	}
 	return out
 }()
@@ -101,7 +108,7 @@ func parseMountinfo(b []byte) []mount {
 				break
 			}
 		}
-		if len(f) < 5 || sep < 0 || sep+1 >= len(f) {
+		if sep < 0 || sep+1 >= len(f) {
 			continue
 		}
 		out = append(out, mount{root: unescapeMount(f[3]), point: unescapeMount(f[4]), fstype: f[sep+1]})
@@ -144,7 +151,7 @@ func isAgentVolume(root string) bool {
 // a credential's file (the rules above), "" when none does.
 func credentialMount(mounts []mount) string {
 	for _, m := range mounts {
-		if pseudoFS[m.fstype] || under(m.point, "/proc") || under(m.point, "/sys") || under(m.point, "/dev") {
+		if pseudoFS[m.fstype] || fsutil.Within("/proc", m.point) || fsutil.Within("/sys", m.point) || fsutil.Within("/dev", m.point) {
 			continue
 		}
 		if isAgentVolume(m.root) {
@@ -153,20 +160,14 @@ func credentialMount(mounts []mount) string {
 		if credentialNames[filepath.Base(m.point)] {
 			return m.point + " is mounted by a credential's name"
 		}
-		if p := credentialUnder(m.point); p != "" {
-			return m.point + " holds " + p
-		}
-		for _, child := range subdirs(m.point) {
-			if p := credentialUnder(child); p != "" {
+		for _, dir := range append([]string{m.point}, subdirs(m.point)...) {
+			if p := credentialUnder(dir); p != "" {
 				return m.point + " holds " + p
 			}
 		}
 	}
 	return ""
 }
-
-// under reports whether p is dir or inside it.
-func under(p, dir string) bool { return p == dir || strings.HasPrefix(p, dir+"/") }
 
 // credentialUnder is the first of credentialPaths present under dir, "" when
 // none is.

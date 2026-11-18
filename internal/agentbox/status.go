@@ -150,11 +150,9 @@ const noEndpointDetail = "no OpenAI-compatible endpoint is set: set its address 
 // commands as the runner's uid with its sandbox off, so the run could read a
 // token, key or login and send it anywhere, or plant a config.toml a later
 // subscription run loads.
-const ownCredentialsDetail = "the endpoint's agent service holds a credential of its own or can reach the agent " +
-	"home (/agent, or the agent volume or a CLI's login mounted anywhere), which a run against an OpenAI-compatible " +
-	"endpoint could read or change: give that service no credential variables and none of those volumes, and a " +
-	"user of its own (the compose example's agent-endpoint; its log says what it found), or choose claude or codex " +
-	"in Settings > Agent"
+const ownCredentialsDetail = agentproto.OwnCredentialsReason + ": give that service no credential variables " +
+	"and none of those volumes, and a user of its own (the compose example's agent-endpoint; its log says what it " +
+	"found), or choose claude or codex in Settings > Agent"
 
 // ownCredentials reports whether the container holds a credential of its own:
 // the runner says so, or one of its CLIs has one (backend's entry is the
@@ -177,12 +175,18 @@ func ownCredentials(rj agentproto.Runner, backend string) bool {
 // would otherwise keep the container live long after its runner stopped.
 const runnerClockSkew = 5 * time.Second
 
-// live reports whether rj is a runner of this protocol that wrote its status
-// within agentproto.RunnerFreshFor, and not later than now (runnerClockSkew
+// heartbeatAge is how long ago rj's heartbeat was, and whether that is fresh:
+// within agentproto.RunnerFreshFor and not later than now (runnerClockSkew
 // aside).
+func (r *Runner) heartbeatAge(rj agentproto.Runner) (age time.Duration, fresh bool) {
+	age = r.now().Sub(rj.HeartbeatAt)
+	return age, age <= agentproto.RunnerFreshFor && age >= -runnerClockSkew
+}
+
+// live reports whether rj is a runner of this protocol with a fresh heartbeat.
 func (r *Runner) live(rj agentproto.Runner) bool {
-	age := r.now().Sub(rj.HeartbeatAt)
-	return rj.Protocol == agentproto.Protocol && age <= agentproto.RunnerFreshFor && age >= -runnerClockSkew
+	_, fresh := r.heartbeatAge(rj)
+	return rj.Protocol == agentproto.Protocol && fresh
 }
 
 // Status reads runner.json now. Detail never names a Bridge path: it becomes a
@@ -426,9 +430,10 @@ func (r *Runner) unavailableBecause(rj agentproto.Runner, info fs.FileInfo) (pro
 	if rj.Protocol != agentproto.Protocol {
 		return ProblemOutdated, "", fmt.Sprintf("the agent container speaks protocol %d and this Bridge %d: run the same version of both images", rj.Protocol, agentproto.Protocol)
 	}
-	if age := r.now().Sub(rj.HeartbeatAt); age > agentproto.RunnerFreshFor {
-		return ProblemNotRunning, "", fmt.Sprintf("the agent container isn't running (its last heartbeat was %s ago)", age.Round(time.Second))
-	} else if age < -runnerClockSkew {
+	if age, fresh := r.heartbeatAge(rj); !fresh {
+		if age > 0 {
+			return ProblemNotRunning, "", fmt.Sprintf("the agent container isn't running (its last heartbeat was %s ago)", age.Round(time.Second))
+		}
 		return ProblemNotRunning, "", fmt.Sprintf("the agent container's status is dated %s ahead of this Bridge's clock "+
 			"(its runner didn't write it, or the clock is wrong)", (-age).Round(time.Second))
 	}

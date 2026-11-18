@@ -3756,29 +3756,20 @@ internal/
             and any other runner refuses those (both Exit unavailable, after the
             hand-off is taken and deleted, no CLI started: endpointOnlyRefusal,
             endpointElsewhere), never touches --home (/agent), and refuses its
-            runs (endpointBlocked) while holdsCredentials (credentialProblem,
-            logged with each refusal: a variable's name or a path, never a value):
-            one of the four credential variables in its environment,
-            homeReachable (the home listable, writable or searchable by its uid:
-            not missing or closed, the image's 0700 /agent of uid 10002 as an
-            anonymous volume being closed to 10003), or a mount that holds the
-            subscriptions wherever it is (mounts.go, credentialMount over
-            /proc/self/mountinfo, read on Linux only; unreadable counts as
-            holding): kernel views and tmpfs skipped, a mount that is compose's
-            agent volume by name (mountinfo's root .../volumes/agent-config/_data
-            or <project>_agent-config, so even one closed to it), a mount point
-            named like a credential's file, or a credential's file at a mount
-            point or one dir below it (at most 1024 dirs): the agent home's
-            marker .audiosilo-agent-home, which the agent container's runner
-            writes into its home at the start (markHome, so the volume is found
-            under any name or path), secrets/<lowercase variable>, codex/auth.json
-            and config.toml, a CODEX_HOME's auth.json, a claude config dir's
-            .credentials.json, .claude.json, .claude/ and .codex/. A path behind a
-            dir closed to its uid counts as absent (a run, the same uid, can't
-            open it either). Presence, not device and inode: those would come
-            from the agent container through the Bridge on every request, for no
-            case but a renamed volume the service can't open. runner.json says
-            endpoint_only and own_credentials for the Bridge's Status. Main makes that runner a child subreaper and not
+            runs (endpointBlocked) while credentialProblem (logged with each
+            refusal: a variable's name or a path, never a value): one of the
+            four credential variables in its environment, homeReachable (the
+            home listable, writable or searchable by its uid: not missing or
+            closed, the image's 0700 /agent of uid 10002 as an anonymous volume
+            being closed to 10003), or credentialMount (mounts.go, over
+            /proc/self/mountinfo on Linux; unreadable counts as holding): a
+            mount that is compose's agent volume by name, is mounted by a
+            credential file's name, or holds a credential's file or the agent
+            home's marker .audiosilo-agent-home (markHome writes it into the
+            agent container's home at the start) at its point or one dir below
+            (the rules and the file list are in mounts.go). runner.json says
+            endpoint_only and own_credentials for the Bridge's Status. Main
+            makes that runner a child subreaper and not
             dumpable (endpointHardening, Linux only; elsewhere it refuses to
             start): whatever a run starts becomes the runner's child however it
             detaches, and no run reads the runner's memory or environment (later

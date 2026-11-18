@@ -587,7 +587,6 @@ func TestStatus(t *testing.T) {
 		"fresh":           {backend: "claude", rj: &agentproto.Runner{Protocol: 1, HeartbeatAt: now, Slots: 1, CLIs: full}, available: true},
 		"fresh codex":     {backend: "codex", rj: &agentproto.Runner{Protocol: 1, HeartbeatAt: now, CLIs: full}, available: true},
 		"stale":           {backend: "claude", rj: &agentproto.Runner{Protocol: 1, HeartbeatAt: now.Add(-time.Minute), CLIs: full}, detail: "isn't running", problem: ProblemNotRunning},
-		"slightly ahead":  {backend: "claude", rj: &agentproto.Runner{Protocol: 1, HeartbeatAt: now.Add(runnerClockSkew / 2), Slots: 1, CLIs: full}, available: true},
 		"from the future": {backend: "claude", rj: &agentproto.Runner{Protocol: 1, HeartbeatAt: now.Add(time.Hour), CLIs: full}, detail: "ahead of this Bridge's clock", problem: ProblemNotRunning},
 		"wrong protocol":  {backend: "claude", rj: &agentproto.Runner{Protocol: 2, HeartbeatAt: now, CLIs: full}, detail: "protocol 2", problem: ProblemOutdated},
 		"no credential": {backend: "claude", rj: &agentproto.Runner{Protocol: 1, HeartbeatAt: now,

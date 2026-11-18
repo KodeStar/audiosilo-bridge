@@ -225,7 +225,7 @@ func (r *Runner) isActive(id string) bool {
 // (each is cancelled and finished, so the Bridge gets an answer) and returns.
 func (r *Runner) Run(ctx context.Context) error {
 	if !r.opts.EndpointOnly {
-		if err := os.MkdirAll(filepath.Join(r.opts.Home, "codex"), 0o700); err != nil {
+		if err := os.MkdirAll(r.codexHome(), 0o700); err != nil {
 			r.log.Warn("agent runner: create the codex home", "err", err)
 		}
 		if err := r.markHome(); err != nil {
@@ -267,11 +267,10 @@ func (r *Runner) Run(ctx context.Context) error {
 // there already: the endpoint's service refuses its runs while it finds the
 // marker under any of its mounts (mounts.go), whatever the volume is called.
 func (r *Runner) markHome() error {
-	p := filepath.Join(r.opts.Home, agentHomeMarker)
-	if _, err := os.Lstat(p); !errors.Is(err, fs.ErrNotExist) {
-		return err
+	f, err := os.OpenFile(filepath.Join(r.opts.Home, agentHomeMarker), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) //nolint:gosec // the runner's own home
+	if errors.Is(err, fs.ErrExist) {
+		return nil
 	}
-	f, err := os.OpenFile(p, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) //nolint:gosec // the runner's own home
 	if err != nil {
 		return err
 	}
@@ -385,7 +384,7 @@ func (r *Runner) status() agentproto.Runner {
 		Groups:         r.groups,
 		Endpoints:      true,
 		EndpointOnly:   r.opts.EndpointOnly,
-		OwnCredentials: r.opts.EndpointOnly && r.holdsCredentials(),
+		OwnCredentials: r.opts.EndpointOnly && r.credentialProblem() != "",
 	}
 	for _, name := range []string{agentproto.CLIClaude, agentproto.CLICodex} {
 		c, _ := r.cli(name)
