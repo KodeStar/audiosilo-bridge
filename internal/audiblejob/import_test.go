@@ -593,6 +593,74 @@ func TestImportCodes(t *testing.T) {
 	}
 }
 
+// A title backed up before bridge#47 sits under the name the rule gave then
+// ("Who Moved My Cheese?"). Backing it up again (after "Not this book", or as
+// Back up everything retries it) finds it there: exists, before any license or
+// download, and no second copy in "Who Moved My Cheese". Allowed: with no such
+// folder the title is backed up under the name the rule gives now.
+func TestImportFindsABackupUnderTheFormerName(t *testing.T) {
+	const was = "Spencer Johnson/Who Moved My Cheese?/Who Moved My Cheese?.m4b"
+	const now = "Spencer Johnson/Who Moved My Cheese/Who Moved My Cheese.m4b"
+	for name, backedUp := range map[string]bool{"backed up": true, "not backed up": false} {
+		t.Run(name, func(t *testing.T) {
+			e := newImportEnv(t)
+			e.accts.title = rec("B0FAKE0002", "Who Moved My Cheese?", "Spencer Johnson", "", 0)
+			e.accts.title.FileName = "Who Moved My Cheese.m4b" // as the Audible client names it now
+			if backedUp {
+				p := filepath.Join(e.root, filepath.FromSlash(was))
+				if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(p, []byte("the earlier backup"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			_, err := e.run(context.Background(), e.params(nil))
+			if !backedUp {
+				if files := e.libraryFiles(); err != nil || len(files) != 1 || files[0] != now {
+					t.Fatalf("err %v, library %v, want the backup at %s", err, files, now)
+				}
+				return
+			}
+			var f *Failure
+			if !errors.As(err, &f) || f.Code != CodeExists || !strings.Contains(f.Message, path.Dir(was)) {
+				t.Fatalf("err = %v, want exists naming %s", err, path.Dir(was))
+			}
+			if e.accts.licenses != 0 || e.accts.downloads != 0 {
+				t.Fatalf("licenses %d, downloads %d, want none", e.accts.licenses, e.accts.downloads)
+			}
+			if files := e.libraryFiles(); len(files) != 1 || files[0] != was {
+				t.Fatalf("library = %v, want only the earlier backup", files)
+			}
+			e.tmpEmpty(t)
+		})
+	}
+}
+
+// formerName: only a name the rule before bridge#47 could have given, which
+// the rule now turns into the folder's name.
+func TestFormerName(t *testing.T) {
+	for _, c := range []struct {
+		name, seg string
+		want      bool
+	}{
+		{"Who Moved My Cheese?", "Who Moved My Cheese", true},
+		{`The "Real" Story`, "The 'Real' Story", true},
+		{"Title  - Sub", "Title - Sub", true},
+		{"Either | Or", "Either - Or", true},
+		{"Who Moved My Cheese", "Who Moved My Cheese", false},   // the folder itself
+		{"Who Moved My Cheddar?", "Who Moved My Cheese", false}, // another title
+		{".Who Moved My Cheese?", "Who Moved My Cheese", false}, // hidden: never a generated name
+		{"Who Moved My Cheese?.", "Who Moved My Cheese", false},
+		{"Who Moved: My Cheese?", "Who Moved - My Cheese", false},
+		{"Who Moved My Cheese!", "Who Moved My Cheese", false},
+	} {
+		if got := formerName(c.name, c.seg); got != c.want {
+			t.Errorf("formerName(%q, %q) = %v, want %v", c.name, c.seg, got, c.want)
+		}
+	}
+}
+
 // A refused account's import fails before asking Audible anything: a device
 // denied licenses with the throttled advice, a refused sign-in with its own.
 // Allowed: an account with only a poll's error still imports.

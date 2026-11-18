@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/kodestar/audiosilo-bridge/internal/audible"
 	"github.com/kodestar/audiosilo-bridge/internal/audibleacct"
@@ -849,8 +850,77 @@ func listedBook(rel string, books map[string]string) (at, title string, ok bool)
 }
 
 // vacant is Importer.vacant over the library's files, with the conflict that
-// makes rel exists (link.ConflictFile, ConflictBook or ConflictAudio).
+// makes rel exists (link.ConflictFile, ConflictBook or ConflictAudio). The
+// folder rel's would have been under the name rule before bridge#47 counts
+// too (formerDirs): a title backed up as "Who Moved My Cheese?" is there
+// already, and isn't downloaded again into "Who Moved My Cheese".
 func vacant(fsys transfer.LibraryFS, rel string, books map[string]string) (string, error) {
+	if conflict, err := vacantAt(fsys, rel, books); err != nil {
+		return conflict, err
+	}
+	for _, dir := range formerDirs(fsys, path.Dir(rel)) {
+		// Only a book there counts; what can't be read there is no conflict.
+		if conflict, err := vacantAt(fsys, path.Join(dir, path.Base(rel)), books); conflict != "" {
+			return conflict, err
+		}
+	}
+	return "", nil
+}
+
+// formerDirs are the folders in the library that dir would have been under
+// the name rule before bridge#47 (placement.Sanitize kept ? * < > " | and
+// control characters then, and never closed up a run of spaces): dir with one
+// folder or more of its path under a name the rule kept then and gives that
+// folder's name now. None for a folder the library doesn't have.
+func formerDirs(fsys transfer.LibraryFS, dir string) []string {
+	if dir == "." {
+		return nil
+	}
+	type folder struct {
+		path   string
+		former bool
+	}
+	at := []folder{{path: "."}}
+	for _, seg := range strings.Split(dir, "/") {
+		var next []folder
+		for _, f := range at {
+			entries, err := fsys.ReadDir(f.path)
+			if err != nil {
+				continue // vacantAt says what is wrong with rel's own folders
+			}
+			for _, e := range entries {
+				if name := e.Name(); e.IsDir() && (name == seg || formerName(name, seg)) {
+					next = append(next, folder{path.Join(f.path, name), f.former || name != seg})
+				}
+			}
+		}
+		at = next
+	}
+	var out []string
+	for _, f := range at {
+		if f.former {
+			out = append(out, f.path)
+		}
+	}
+	return out
+}
+
+// formerName reports whether name is what the name rule before bridge#47 gave
+// a text the rule now names seg: a name that rule could give (no separator or
+// colon, no dot or space at either end) holding something the rule now drops,
+// replaces or closes up, which placement.Sanitize turns into seg.
+func formerName(name, seg string) bool {
+	if len(name) < len(seg) || strings.ContainsAny(name, "/\\:\x00") || name != strings.Trim(strings.TrimSpace(name), " .") {
+		return false
+	}
+	changed := strings.Contains(name, "  ") || strings.ContainsFunc(name, func(r rune) bool {
+		return strings.ContainsRune("?*<>\"|", r) || unicode.IsControl(r) || (r != ' ' && unicode.IsSpace(r))
+	})
+	return changed && placement.Sanitize(name) == seg
+}
+
+// vacantAt is vacant for rel as it is spelled.
+func vacantAt(fsys transfer.LibraryFS, rel string, books map[string]string) (string, error) {
 	_, err := fsys.Lstat(rel)
 	switch {
 	case err == nil:

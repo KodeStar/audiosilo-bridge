@@ -2497,7 +2497,11 @@ internal/
             done import whose book isn't the title's). spelled and vacant are free
             functions over a transfer.LibraryFS (the import's methods open the
             mount's os.Root and call them; vacant also returns the conflict:
-            link.ConflictFile|Book|Audio; listedBook is its books-listing part). License (denials mapped as the title's; a title
+            link.ConflictFile|Book|Audio; listedBook is its books-listing part;
+            formerDirs adds the folder the destination's was under the name rule
+            before bridge#47, found on disk as a name Sanitize now turns into
+            the folder's, so a title backed up as "Who Moved My Cheese?" is
+            exists, not downloaded again). License (denials mapped as the title's; a title
             only offered as a DRM-free MP3 fails drm_free: not backed up yet), download to <data>/audible/tmp/<acct>-<asin>.aaxc.part (free
             space: the tmp folder 2.2x the size less what the partial holds, the
             library 1.1x, else disk_full; a free space that can't be read is no
