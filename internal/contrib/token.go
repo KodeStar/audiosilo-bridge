@@ -32,6 +32,10 @@ var ErrNoCredential = errors.New("contrib: no GitHub credential (sign in to GitH
 // itself after UnrefreshedRetry.
 var ErrSignInUnrefreshed error = signInUnrefreshed{}
 
+// UnrefreshedWhy words what an unrefreshed sign-in (ErrSignInUnrefreshed)
+// waits for, for the messages that tell it apart from no sign-in at all.
+const UnrefreshedWhy = "GitHub couldn't be reached, or didn't answer with a new token"
+
 // UnrefreshedRetry is how long a book parked on ErrSignInUnrefreshed waits
 // before it looks again by itself (bridge#25). The refresh is tried every
 // minute and a sign-in that works again re-admits the parked books at once

@@ -17,7 +17,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -263,15 +262,14 @@ func (c *Client) Wait(ctx context.Context, dc DeviceCode, sleep func(context.Con
 }
 
 // unanswered reports whether a poll's err is GitHub not answering it: it
-// couldn't be reached (or timed out), or answered a server error or a rate
-// limit without an OAuth error code.
+// couldn't be reached, timed out or cut its answer short (Unreachable), or
+// answered a server error or a rate limit without an OAuth error code.
 func unanswered(err error) bool {
 	var ge *Error
 	if errors.As(err, &ge) {
 		return ge.Code == "" && (ge.Status >= http.StatusInternalServerError || ge.Status == http.StatusTooManyRequests)
 	}
-	var ne net.Error
-	return errors.As(err, &ne)
+	return Unreachable(err)
 }
 
 // Refresh trades a refresh token for a new pair (grant_type refresh_token, the

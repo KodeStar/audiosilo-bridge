@@ -264,6 +264,7 @@ func Checklist(in Inputs) link.Setup {
 	case in.GitHub.CanContribute && in.GitHub.From == "gh":
 		gh = "the gh CLI's token"
 	case in.GitHub.CanContribute:
+		// A token resolves with nothing more to say: the State cases are for none.
 	case in.GitHub.State == link.GitHubUnrefreshed:
 		// Signed in still (bridge#25): it waits for GitHub, not for a sign-in.
 		out.GitHubState = link.GitHubUnrefreshed
