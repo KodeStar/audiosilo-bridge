@@ -166,9 +166,11 @@ func (s *service) clearCheckpoint(job jobs.Job, root *os.Root, c *checkpoint) {
 }
 
 // dropPartial removes c's owned partial, then its sealed validator; false, with
-// both kept, when the partial is still on disk.
+// both kept, when the partial is still on disk. A partial an install journal
+// stages is the journal's (podcast.RecoverShow installs it): it stays on disk
+// and only the record's claim on it goes.
 func (s *service) dropPartial(root *os.Root, c *checkpoint) bool {
-	if podcast.OwnedTemp(c.Temp) {
+	if podcast.OwnedTemp(c.Temp) && !journalStages(root, c) {
 		p := c.partialName()
 		// Checked, not opened: a partial the Bridge can no longer read (the
 		// restart from zero clears one) is still its own to remove.
@@ -182,6 +184,26 @@ func (s *service) dropPartial(root *os.Root, c *checkpoint) bool {
 		_ = s.o.Vault.Delete(c.Validator)
 	}
 	return true
+}
+
+// journalStages reports whether the episode's pending journal names c's partial
+// as its staged audio, or is there but can't be read to tell.
+func journalStages(root *os.Root, c *checkpoint) bool {
+	name := podcast.AttachmentPath(c.Path, ".publish.json")
+	if _, err := root.Lstat(name); errors.Is(err, os.ErrNotExist) {
+		return false
+	}
+	rd, err := podcast.OpenRegular(root, name)
+	if err != nil {
+		return true
+	}
+	defer rd.Close()
+	b, err := io.ReadAll(io.LimitReader(rd, (4<<20)+1))
+	var j podcast.Journal
+	if err != nil || len(b) > 4<<20 || json.Unmarshal(b, &j) != nil {
+		return true
+	}
+	return j.AudioTemp == c.Temp
 }
 func (s *service) fileLock(ctx context.Context, root *os.Root, episode string) (func(), error) {
 	if err := podcast.EnsureDir(root, path.Dir(episode)+"/.audiosilo"); err != nil {

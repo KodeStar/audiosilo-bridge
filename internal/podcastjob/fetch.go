@@ -254,7 +254,9 @@ func (h *Fetch) run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (_
 			return ctx.Err()
 		}
 		j := podcast.Journal{Version: 1, Op: "install", ShowID: params.ShowID, EpisodeID: e.ID, Path: e.Path, AudioTemp: c.Temp, Fetch: received, Chapters: chapters}
-		// Once a journal exists recovery owns the candidate, including on a failed write.
+		// Once a journal exists recovery owns the candidate, including on a failed
+		// write: the exit's clear drops the record but leaves the file
+		// (dropPartial), for RecoverShow to install.
 		err = podcast.Publish(root, j, s.o.Now(), s.o.Fault)
 		if _, e := root.Lstat(podcast.AttachmentPath(j.Path, ".publish.json")); e == nil {
 			c.Temp = ""
