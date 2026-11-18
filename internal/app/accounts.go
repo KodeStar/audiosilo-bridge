@@ -205,13 +205,28 @@ func (b *Bridge) setup(ctx context.Context) link.Setup {
 	}
 	st := b.box.Status()
 	in.Agent = setup.Agent{Backend: b.box.ID(), Available: st.Available, Problem: setup.AgentProblem(st.Problem), Other: st.Other,
-		Refused: st.Refused, Detail: st.Detail}
-	if from := b.contributeFrom(ctx); from != "" {
-		in.GitHub = setup.GitHub{CanContribute: true, From: from}
-		if from == contrib.FromDevice {
-			in.GitHub.Login = b.github.Login(ctx)
-		}
-	}
+		Refused: st.Refused, Detail: st.Detail, Handoff: st.HandoffMode}
+	in.GitHub = b.githubSetup(ctx)
 	in.Audible = b.audibleSetup(ctx)
 	return setup.Checklist(in)
+}
+
+// githubSetup is the checklist's GitHub input: where a token comes from, else
+// why a sign-in can't be used (bridge#25: one whose refresh failed is still
+// signed in and waits for GitHub; one GitHub refused needs signing in again).
+func (b *Bridge) githubSetup(ctx context.Context) setup.GitHub {
+	_, from, err := b.tokens.Resolve(ctx)
+	switch {
+	case err == nil:
+		gh := setup.GitHub{CanContribute: true, From: from}
+		if from == contrib.FromDevice {
+			gh.Login = b.github.Login(ctx)
+		}
+		return gh
+	case errors.Is(err, contrib.ErrSignInUnrefreshed):
+		return setup.GitHub{State: link.GitHubUnrefreshed, Login: b.github.Login(ctx), Why: b.github.Unrefreshed()}
+	case b.github.State(ctx).Refused:
+		return setup.GitHub{State: link.GitHubRefused}
+	}
+	return setup.GitHub{}
 }

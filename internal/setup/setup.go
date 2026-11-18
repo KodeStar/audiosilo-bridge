@@ -44,6 +44,10 @@ const DetailASRWaiting = "waiting for an ASR worker"
 // none.
 const DetailLibrariesChecking = "checking the libraries..."
 
+// DetailGitHubRefused is the github item's detail while GitHub refuses the
+// sign-in (bridge#25: not the same as never signed in).
+const DetailGitHubRefused = "GitHub refused the sign-in: sign in again on the Accounts tab"
+
 // agentFor is what the agent is for, in the agent item's detail while it isn't
 // ready (BRIDGE-07: plain words, never the staging volume).
 const agentFor = "the agent signs in to Claude or ChatGPT and is needed for characters, recaps and descriptions"
@@ -122,6 +126,10 @@ type Agent struct {
 	Other   string
 	Refused bool
 	Detail  string
+	// Handoff is how the Accounts tab's credential reaches the agent
+	// container (agentbox.Status.HandoffMode, the same strings as
+	// link.AgentCredential*), "" with no hand-off in play.
+	Handoff string
 }
 
 // GitHub is the contribution credential.
@@ -130,6 +138,11 @@ type GitHub struct {
 	// Login is the signed-in user; From where the token comes from (env, device, gh).
 	Login string
 	From  string
+	// State, when no token resolves, is why a sign-in can't be used
+	// (link.GitHubUnrefreshed, link.GitHubRefused; "" for none), and Why,
+	// for an unrefreshed one, why its refresh failed (accounts' words).
+	State string
+	Why   string
 }
 
 // Audible is the Audible accounts: how many are signed in, how many Audible
@@ -166,7 +179,8 @@ type Inputs struct {
 
 // Checklist is the checklist for in, its items in order.
 func Checklist(in Inputs) link.Setup {
-	out := link.Setup{CanContribute: in.GitHub.CanContribute, GitHubLogin: in.GitHub.Login}
+	out := link.Setup{CanContribute: in.GitHub.CanContribute, GitHubLogin: in.GitHub.Login,
+		AgentCredential: agentCredential(in.Agent.Handoff)}
 	add := func(id string, done, required bool, detail string) *link.SetupItem {
 		out.Items = append(out.Items, link.SetupItem{ID: id, Done: done, Required: required, Detail: cut(detail)})
 		return &out.Items[len(out.Items)-1]
@@ -249,6 +263,21 @@ func Checklist(in Inputs) link.Setup {
 		gh = "a token from the environment"
 	case in.GitHub.CanContribute && in.GitHub.From == "gh":
 		gh = "the gh CLI's token"
+	case in.GitHub.CanContribute:
+	case in.GitHub.State == link.GitHubUnrefreshed:
+		// Signed in still (bridge#25): it waits for GitHub, not for a sign-in.
+		out.GitHubState = link.GitHubUnrefreshed
+		gh = "signed in, but the sign-in couldn't be refreshed"
+		if in.GitHub.Login != "" {
+			gh = "signed in as " + in.GitHub.Login + ", but the sign-in couldn't be refreshed"
+		}
+		if in.GitHub.Why != "" {
+			gh += ": " + in.GitHub.Why
+		}
+		gh += "; the Bridge tries again every minute"
+	case in.GitHub.State == link.GitHubRefused:
+		out.GitHubState = link.GitHubRefused
+		gh = DetailGitHubRefused
 	}
 	add(ItemGitHub, in.GitHub.CanContribute, false, gh)
 
@@ -279,6 +308,16 @@ func Checklist(in Inputs) link.Setup {
 	}
 	add(ItemAudible, a.Accounts > 0 && a.Refused == 0 && a.OldProfile == 0, false, audible)
 	return out
+}
+
+// agentCredential is the setup block's agent_credential for a hand-off mode
+// ("" for none, or one this package doesn't know).
+func agentCredential(mode string) string {
+	switch mode {
+	case link.AgentCredentialGroup, link.AgentCredentialWorld, link.AgentCredentialGroupRequired:
+		return mode
+	}
+	return ""
 }
 
 // Complete reports whether every required item is done.

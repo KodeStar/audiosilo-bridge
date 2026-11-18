@@ -296,3 +296,50 @@ func TestAgentIsOptional(t *testing.T) {
 		t.Fatal("complete with the budget not reviewed")
 	}
 }
+
+// A sign-in whose refresh failed reads as signed in and waiting for GitHub,
+// not as no sign-in, with why; one GitHub refused says to sign in again; a
+// working one carries no state (bridge#25).
+func TestChecklistGitHubStates(t *testing.T) {
+	in := done()
+	in.GitHub = GitHub{Login: "octocat", State: link.GitHubUnrefreshed, Why: "GitHub answered with a server error (502)"}
+	s := Checklist(in)
+	gh := item(t, s, ItemGitHub)
+	if gh.Done || s.CanContribute || s.GitHubState != link.GitHubUnrefreshed || s.GitHubLogin != "octocat" ||
+		gh.Detail != "signed in as octocat, but the sign-in couldn't be refreshed: GitHub answered with a server error (502); "+
+			"the Bridge tries again every minute" {
+		t.Fatalf("unrefreshed: github = %+v, setup %+v", gh, s)
+	}
+	in.GitHub = GitHub{State: link.GitHubRefused}
+	s = Checklist(in)
+	if gh := item(t, s, ItemGitHub); gh.Done || s.GitHubState != link.GitHubRefused || gh.Detail != DetailGitHubRefused {
+		t.Fatalf("refused: github = %+v, setup %+v", gh, s)
+	}
+	// A token that resolves wins over a state (the environment's, say).
+	in.GitHub = GitHub{CanContribute: true, From: "env", State: link.GitHubUnrefreshed}
+	if s := Checklist(in); s.GitHubState != "" || item(t, s, ItemGitHub).Detail != "a token from the environment" {
+		t.Fatalf("resolving: %+v", s)
+	}
+	in.GitHub = GitHub{}
+	if s := Checklist(in); s.GitHubState != "" || item(t, s, ItemGitHub).Detail != "" {
+		t.Fatalf("signed out: %+v", s)
+	}
+}
+
+// The agent credential's hand-off mode rides on the block as it is, and only
+// a mode the wire names (bridge#79).
+func TestChecklistAgentCredential(t *testing.T) {
+	for mode, want := range map[string]string{
+		"":               "",
+		"group":          link.AgentCredentialGroup,
+		"world":          link.AgentCredentialWorld,
+		"group_required": link.AgentCredentialGroupRequired,
+		"other":          "",
+	} {
+		in := done()
+		in.Agent.Handoff = mode
+		if got := Checklist(in).AgentCredential; got != want {
+			t.Errorf("handoff %q: agent_credential = %q, want %q", mode, got, want)
+		}
+	}
+}
