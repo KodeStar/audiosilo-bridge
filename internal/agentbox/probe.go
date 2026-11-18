@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"os"
 	"path/filepath"
 	"time"
 
@@ -63,16 +62,16 @@ func (r *Runner) deferProbe() {
 // live runner that takes a hand-off lists the group: the app calls it at every
 // heartbeat. Nothing to do otherwise.
 func (r *Runner) Probe(ctx context.Context) {
-	if !r.holdsFallback() || r.now().UnixNano() < r.probeAfter.Load() {
+	if !r.holdsFallback() || r.now().UnixNano() < r.probeAfter.Load() || !r.probing.CompareAndSwap(false, true) {
 		return
 	}
-	if st := r.Status(); !st.Live || !st.Handoff || !st.groupListed {
-		return
-	}
-	if !r.probing.CompareAndSwap(false, true) {
-		return
-	}
+	// Deferred whatever the gate below finds, so a runner that can't take a
+	// probe yet is read again only once per probeEvery.
 	r.deferProbe()
+	if st := r.Status(); !st.Live || !st.Handoff || !st.groupListed {
+		r.probing.Store(false)
+		return
+	}
 	go func() {
 		defer r.probing.Store(false)
 		r.probeGroup(ctx)
@@ -106,10 +105,7 @@ func (r *Runner) probeJob(ctx context.Context) probeOutcome {
 	}
 	job := filepath.Join(r.dir, id)
 	defer r.remove(job)
-	if err := os.Mkdir(job, 0o700); err != nil {
-		return probeUnknown
-	}
-	root, err := openMadeDir(job)
+	root, err := makeJob(job)
 	if err != nil {
 		return probeUnknown
 	}

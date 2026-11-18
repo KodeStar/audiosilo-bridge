@@ -141,8 +141,8 @@ func (r *Runner) Status() Status {
 		}
 	}
 	st.Version, st.Slots, st.HeartbeatAt, st.CLIs = rj.Version, rj.Slots, rj.HeartbeatAt, rj.CLIs
-	st.ShareGroup = r.shareGroup(rj, info, st.Live)
 	st.groupListed = slices.Contains(rj.Groups, r.gid)
+	st.ShareGroup = r.shareGroup(st.groupListed, info, st.Live)
 	st.Problem, st.Other, st.Detail = r.unavailableBecause(rj)
 	if st.Detail == "" && st.Handoff {
 		if why := r.groupRequired(st.ShareGroup); why != "" {
@@ -162,19 +162,20 @@ func (r *Runner) Status() Status {
 }
 
 // shareGroup reports whether a handed credential goes to the Bridge's group
-// alone, by runner.json rj (read from info; live when its heartbeat is fresh
-// in this protocol): when its groups hold the Bridge's, and also when another
+// alone, by runner.json (read from info; listed when its groups hold the
+// Bridge's; live when its heartbeat is fresh in this protocol): when listed,
+// and also when another
 // uid than the runner's wrote it (trust.go), so a forged one can't move the
 // credential to every uid. Never once the runner was denied the group's
 // credential (Run).
-func (r *Runner) shareGroup(rj agentproto.Runner, info fs.FileInfo, live bool) bool {
+func (r *Runner) shareGroup(listed bool, info fs.FileInfo, live bool) bool {
 	// Read (and pinned) first whatever the answer: a group probe believes only
 	// the pinned runner's claim (probe.go).
 	uid, own := r.fromRunner(info, live)
 	if r.groupDenied.Load() {
 		return false
 	}
-	if slices.Contains(rj.Groups, r.gid) {
+	if listed {
 		return true
 	}
 	if !own {

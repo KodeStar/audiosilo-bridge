@@ -63,10 +63,7 @@ const (
 // instead (the staging volume refused), nil when it didn't; strict refuses
 // that instead (writeCredential).
 func stage(job string, req agent.Request, cli string, timeout int, handed *agentproto.Credential, group int, strict bool) (root *os.Root, groupErr, err error) {
-	if err := os.Mkdir(job, 0o700); err != nil {
-		return nil, nil, err
-	}
-	root, err = openMadeDir(job)
+	root, err = makeJob(job)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -75,6 +72,15 @@ func stage(job string, req agent.Request, cli string, timeout int, handed *agent
 		return nil, nil, err
 	}
 	return root, groupErr, nil
+}
+
+// makeJob makes the job dir at job, private (0700), and opens it as an
+// os.Root (openMadeDir): every later step goes through the Root.
+func makeJob(job string) (*os.Root, error) {
+	if err := os.Mkdir(job, 0o700); err != nil {
+		return nil, err
+	}
+	return openMadeDir(job)
 }
 
 // noGroup is stage's group for a credential handed to every uid.

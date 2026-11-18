@@ -142,7 +142,8 @@ func TestProbeEndsTheRequiredGroupBlock(t *testing.T) {
 // Probe runs only while a fallback holds, once probeEvery has passed since it
 // began (or since the last probe), and only for a live runner that takes a
 // hand-off and lists the group (allowed: a due probe stages one job; denied:
-// none with no fallback, before it is due, or for a runner outside the group).
+// none with no fallback, before it is due, or for a runner outside the group,
+// which also puts the next probe probeEvery later).
 func TestProbeOnlyWhenDue(t *testing.T) {
 	t.Parallel()
 	r, dir := vaultHandoff(t, []int{os.Getegid()})
@@ -189,15 +190,29 @@ func TestProbeOnlyWhenDue(t *testing.T) {
 		t.Fatalf("a due probe: %d jobs, group denied %v", fake.claimed.Load(), r.groupDenied.Load())
 	}
 
-	// Outside the group: nothing for a probe to find.
+	// Outside the group: nothing for a probe to find, and runner.json is read
+	// again only once the next probe is due.
 	r.groupDenied.Store(true)
 	clock.Add(int64(probeEvery))
 	beat([]int{os.Getegid() + 1})
 	r.Probe(context.Background())
 	waitProbe()
-	stop()
 	if fake.claimed.Load() != 1 {
 		t.Fatalf("probed a runner outside the group: %d jobs", fake.claimed.Load())
+	}
+	beat([]int{os.Getegid()})
+	r.Probe(context.Background())
+	waitProbe()
+	if fake.claimed.Load() != 1 {
+		t.Fatalf("probed again before it was due after a gate that failed: %d jobs", fake.claimed.Load())
+	}
+	clock.Add(int64(probeEvery))
+	beat([]int{os.Getegid()})
+	r.Probe(context.Background())
+	waitProbe()
+	stop()
+	if fake.claimed.Load() != 2 || r.groupDenied.Load() {
+		t.Fatalf("the next due probe: %d jobs, group denied %v", fake.claimed.Load(), r.groupDenied.Load())
 	}
 	assertNoJobDirs(t, dir)
 }
