@@ -681,16 +681,21 @@ func (m *Manager) Account(ctx context.Context, id string) (store.AudibleAccount,
 	return a, err
 }
 
-// SettledAccount is Account read once no sign-in, mapping or removal is in
-// flight (each holds finishMu until its row is stored). A sign-in again
-// records itself on the server first, which ends the account's refusal there,
-// and only then seals and stores the new sign-in here, so a job claimed in
-// between still reads the old refusal and would answer it, marking the
-// account refused on the server again for a sign-in it never used. A job that
-// finds the account refused reads it again with this before it says so: it
-// then runs with the new sign-in (sealed by then too). It waits for the
-// change in flight, whose server call is bounded by its request.
+// SettledAccount is Account, read again once no sign-in, mapping or removal
+// is in flight (each holds finishMu until its row is stored) when the account
+// reads refused. A sign-in again records itself on the server first, which
+// ends the account's refusal there, and only then seals and stores the new
+// sign-in here, so a job claimed in between still reads the old refusal and
+// would answer it, marking the account refused on the server again for a
+// sign-in it never used. A job reads the account with this before it says it
+// is refused: it then runs with the new sign-in (sealed by then too). Only a
+// refused account waits, for the change in flight, whose server call is
+// bounded by its request.
 func (m *Manager) SettledAccount(ctx context.Context, id string) (store.AudibleAccount, error) {
+	a, err := m.Account(ctx, id)
+	if err != nil || a.RefusedAt == "" {
+		return a, err
+	}
 	m.finishMu.Lock()
 	defer m.finishMu.Unlock()
 	return m.Account(ctx, id)

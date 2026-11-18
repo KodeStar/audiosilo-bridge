@@ -2467,11 +2467,10 @@ internal/
             tagged tests run the whole life against the fake. Phase 4c: the refusal's kind is
             store.RefusalSignIn or RefusalDevice (Throttled reads the kind; ThrottledText is copy);
             Positions, ContentACR and SetPosition are the position sync's signed calls, which never
-            record a refusal. SettledAccount is Account read under finishMu: a sign-in again PUTs
-            on the server (ending the refusal there) before it seals and stores the new sign-in
-            here, so a sync or import that reads the account refused reads it again with this
-            and runs with the new sign-in rather than answer the old refusal (which the server
-            would fold onto the account again). Deps: audible, link,
+            record a refusal. SettledAccount is Account, read again under finishMu when it reads
+            refused: a sign-in again ends the refusal on the server before it stores the new
+            sign-in here, and a sync or import answering the old refusal in between would mark
+            the account refused again. Deps: audible, link,
             secrets, source, store.
   audiblejob/ Phase 4a: audible.poll (light lane; params {"account", "template"}
             strict (template, the account's path template, optional, <= 500
@@ -2633,8 +2632,7 @@ internal/
             Result.SkippedPreorder, its waiting place forgotten) and the push's due skips it until then: the server lists
             a preorder fuzzy-matched to another edition, and Audible denies its content reference.
             audible.sync (light; params
-            link.AudibleSyncParams, strict): a refused account is read again past a sign-in in
-            flight (audibleacct SettledAccount); then a device refusal fails audible_refused (the server stops
+            link.AudibleSyncParams, strict): the account read with audibleacct SettledAccount; a device refusal fails audible_refused (the server stops
             queueing until a sign-in again maps the account), a sign-in refusal audible_sign_in (the
             server keeps queueing: the next poll Audible answers ends it), another server's or none
             unknown_account; lists the titles (store.ListAudibleSync) first, then while sync_retry_at

@@ -249,16 +249,39 @@ func mapping() Mapping {
 
 func (e *env) signIn(t *testing.T) store.AudibleAccount {
 	t.Helper()
-	st, err := e.m.Start("us")
-	if err != nil {
-		t.Fatal(err)
-	}
-	a, err := e.m.Finish(context.Background(), e.srv, "srv-1", Finish{Login: st.Login,
-		RedirectURL: "https://www.amazon.com/ap/maplanding?openid.oa2.authorization_code=" + stubCode, Mapping: mapping()})
+	a, err := e.trySignIn()
 	if err != nil {
 		t.Fatal(err)
 	}
 	return a
+}
+
+// trySignIn is signIn for a goroutine other than the test's.
+func (e *env) trySignIn() (store.AudibleAccount, error) {
+	st, err := e.m.Start("us")
+	if err != nil {
+		return store.AudibleAccount{}, err
+	}
+	return e.m.Finish(context.Background(), e.srv, "srv-1", Finish{Login: st.Login,
+		RedirectURL: "https://www.amazon.com/ap/maplanding?openid.oa2.authorization_code=" + stubCode, Mapping: mapping()})
+}
+
+// holdPut holds the next server PUT once it is reached, until release: start
+// returns once a goroutine's call is held there (what, in the failure).
+func (e *env) holdPut() (start func(t *testing.T, what string), release func()) {
+	entered, held := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	e.srv.onPut = func() { once.Do(func() { close(entered); <-held }) }
+	return func(t *testing.T, what string) {
+			t.Helper()
+			select {
+			case <-entered:
+			case <-time.After(10 * time.Second):
+				t.Fatalf("%s never reached the server", what)
+			}
+		}, func() {
+			close(held)
+		}
 }
 
 // noSecrets fails when any stub secret is anywhere under the data dir but the
@@ -616,22 +639,21 @@ func TestMapRecordsOnTheServerThenHere(t *testing.T) {
 // bridge#40: Map runs one at a time with a sign-in and a removal (finishMu):
 // a removal started while a remap waits on the server waits for it, rather
 // than forget the account between the server's record and this one.
+// SettledAccount of an account that isn't refused doesn't wait.
 func TestMapHoldsTheAccountsLock(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
 	a := e.signIn(t)
-	entered, release := make(chan struct{}), make(chan struct{})
-	var once sync.Once
-	e.srv.onPut = func() { once.Do(func() { close(entered); <-release }) }
+	held, release := e.holdPut()
 	mapped := make(chan error, 1)
 	go func() {
 		_, err := e.m.Map(context.Background(), e.srv, "srv-1", a.ID, Mapping{UserID: 4, UserName: "Sam", LibraryID: 2, Policy: "manual"})
 		mapped <- err
 	}()
-	select {
-	case <-entered:
-	case <-time.After(10 * time.Second):
-		t.Fatal("the remap never reached the server")
+	held(t, "the remap")
+	// An account that isn't refused reads at once: nothing to wait for.
+	if got, err := e.m.SettledAccount(context.Background(), a.ID); err != nil || got.RefusedAt != "" {
+		t.Fatalf("settled, not refused = %+v, %v", got, err)
 	}
 	removed := make(chan error, 1)
 	go func() {
@@ -642,7 +664,7 @@ func TestMapHoldsTheAccountsLock(t *testing.T) {
 	if _, err := e.db.GetAudibleAccount(context.Background(), a.ID); err != nil {
 		t.Fatalf("the removal ran during the remap: %v", err)
 	}
-	close(release)
+	release()
 	if err := <-mapped; err != nil {
 		t.Fatalf("map = %v", err)
 	}
@@ -670,23 +692,13 @@ func TestSettledAccountWaitsForASignInInFlight(t *testing.T) {
 		t.Fatalf("a refusal that stands = %+v, %v", got, err)
 	}
 
-	entered, release := make(chan struct{}), make(chan struct{})
-	var once sync.Once
-	e.srv.onPut = func() { once.Do(func() { close(entered); <-release }) }
+	held, release := e.holdPut()
 	signedIn := make(chan error, 1)
 	go func() {
-		st, err := e.m.Start("us")
-		if err == nil {
-			_, err = e.m.Finish(context.Background(), e.srv, "srv-1", Finish{Login: st.Login,
-				RedirectURL: "https://www.amazon.com/ap/maplanding?openid.oa2.authorization_code=" + stubCode, Mapping: mapping()})
-		}
+		_, err := e.trySignIn()
 		signedIn <- err
 	}()
-	select {
-	case <-entered:
-	case <-time.After(10 * time.Second):
-		t.Fatal("the sign-in again never reached the server")
-	}
+	held(t, "the sign-in again")
 	if got, err := e.m.Account(context.Background(), a.ID); err != nil || !Throttled(got) {
 		t.Fatalf("the window: Account = %+v, %v (want the old refusal)", got, err)
 	}
@@ -704,7 +716,7 @@ func TestSettledAccountWaitsForASignInInFlight(t *testing.T) {
 		t.Fatalf("SettledAccount answered during the sign-in: %+v, %v", r.a, r.err)
 	case <-time.After(100 * time.Millisecond):
 	}
-	close(release)
+	release()
 	if err := <-signedIn; err != nil {
 		t.Fatalf("sign-in again = %v", err)
 	}

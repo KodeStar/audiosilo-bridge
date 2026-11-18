@@ -39,7 +39,7 @@ type stubAccounts struct {
 	setErr    error
 	wrongACR  error  // the answer to a write with another content reference
 	onSet     func() // runs as a write reaches Audible (outside the lock)
-	settled   int    // SettledAccount reads
+	settled   int    // SettledAccount reads of a refused account (its wait)
 	onSettle  func() // runs as SettledAccount waits (a sign-in in flight storing itself)
 }
 
@@ -52,6 +52,9 @@ func (s *stubAccounts) Account(ctx context.Context, id string) (store.AudibleAcc
 }
 
 func (s *stubAccounts) SettledAccount(ctx context.Context, id string) (store.AudibleAccount, error) {
+	if a, err := s.Account(ctx, id); err != nil || a.RefusedAt == "" {
+		return a, err
+	}
 	s.mu.Lock()
 	s.settled++
 	hook := s.onSettle
