@@ -576,3 +576,58 @@ func TestOnlyFetchOptsIntoInteractivePool(t *testing.T) {
 		}
 	}
 }
+
+// server#403: an episode download's codes say whose fault it was. The ceiling
+// passing (anywhere, here while the audio is checked) is the episode's timeout,
+// never the Bridge stopping (bridge_lost); a retry wait the ceiling cuts short
+// ends on what the host last answered; a fault of the Bridge's own (no
+// streaming client) is write_failed, never network.
+func TestEpisodeFailureCodes(t *testing.T) {
+	code := func(t *testing.T, err error) string {
+		t.Helper()
+		var failure *netguard.Error
+		if !errors.As(err, &failure) {
+			t.Fatalf("not a coded failure: %v", err)
+		}
+		return failure.Code
+	}
+	ceiling := func(h *harness) *fakeTimer {
+		timer := &fakeTimer{}
+		h.handler.s.o.AfterFunc = func(d time.Duration, fn func()) Timer { timer.duration, timer.fn = d, fn; return timer }
+		return timer
+	}
+	t.Run("ceiling", func(t *testing.T) {
+		h, job := audioHarness(t)
+		timer := ceiling(h)
+		setAudio(h, func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("audio")) })
+		h.handler.s.o.Probe = func(ctx context.Context, _ *os.File) (ProbeResult, error) {
+			timer.fn()
+			return ProbeResult{}, ctx.Err()
+		}
+		_, err := h.handler.FetchJob().Run(context.Background(), job, jobs.LocalReporter())
+		if c := code(t, err); c != "timeout" {
+			t.Fatalf("the ceiling passed: %q, want timeout", c)
+		}
+	})
+	t.Run("cut retry wait", func(t *testing.T) {
+		h, job := audioHarness(t)
+		timer := ceiling(h)
+		setAudio(h, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(503) })
+		h.handler.s.o.Wait = func(ctx context.Context, _ time.Duration) error {
+			timer.fn()
+			return ctx.Err()
+		}
+		_, err := h.handler.FetchJob().Run(context.Background(), job, jobs.LocalReporter())
+		if c := code(t, err); c != "http_503" {
+			t.Fatalf("a retry wait cut short: %q, want http_503", c)
+		}
+	})
+	t.Run("no streamer", func(t *testing.T) {
+		h, job := audioHarness(t)
+		h.handler.s.o.Streamer = nil
+		_, err := h.handler.FetchJob().Run(context.Background(), job, jobs.LocalReporter())
+		if c := code(t, err); c != "write_failed" {
+			t.Fatalf("no streaming client: %q, want write_failed", c)
+		}
+	})
+}

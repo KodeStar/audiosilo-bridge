@@ -2224,8 +2224,11 @@ internal/
             failing-feed notice): the netguard's code as given (a refused
             connection is network, not timeout); a local fault before the fetch
             (show path, unreadable feed.json, bad params) is write_failed; the
-            Bridge's own deadline or stop outside the fetch is bridge_lost. A
-            poll's params may carry `scheduled` (the server's scheduler); read
+            Bridge's own deadline or stop outside the fetch is bridge_lost. An
+            episode download's ceiling is its timeout wherever it surfaces (the
+            budget's cause, errOverBudget), a retry wait it cuts ends on the host's
+            last answer, and its own faults (no streamer, its partial) are
+            write_failed. A poll's params may carry `scheduled` (the server's scheduler); read
             leniently, it changes nothing here.
   -- Phase 4a: Audible (imported from audiosilo-manager with its history) --
   audible/  the native Audible client (the manager's, ported as is, then extended):

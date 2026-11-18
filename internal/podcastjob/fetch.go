@@ -65,30 +65,44 @@ type budget struct {
 	start, deadline time.Time
 	now             func() time.Time
 	timer           Timer
-	cancel          context.CancelFunc
+	cancel          context.CancelCauseFunc
 }
 
+// errOverBudget is the cause of a download stopped at its ceiling: the episode
+// host's slowness, reported as timeout, not as the Bridge stopping (bridge_lost).
+var errOverBudget = errors.New("the episode download ran past its ceiling")
+
 func (s *service) budget(parent context.Context) (context.Context, *budget) {
-	ctx, cancel := context.WithCancel(parent)
+	ctx, cancel := context.WithCancelCause(parent)
 	start := s.o.BudgetNow()
 	d := EpisodeCeiling(s.o.MaxEpisodeBytes)
 	b := &budget{start: start, deadline: start.Add(d), now: s.o.BudgetNow, cancel: cancel}
-	b.timer = s.o.AfterFunc(d, cancel)
+	b.timer = s.o.AfterFunc(d, b.expire)
 	return ctx, b
 }
+func (b *budget) expire() { b.cancel(errOverBudget) }
 func (b *budget) tighten(total int64) {
 	d := b.start.Add(EpisodeCeiling(total))
 	if d.Before(b.deadline) {
 		b.deadline = d
 		left := d.Sub(b.now())
 		if left <= 0 {
-			b.cancel()
+			b.expire()
 		} else {
 			b.timer.Reset(left)
 		}
 	}
 }
-func (b *budget) close() { b.timer.Stop(); b.cancel() }
+func (b *budget) close() { b.timer.Stop(); b.cancel(nil) }
+
+// failure is err as the job reports it: a stop the ceiling made (ctx is the
+// budget's) is the episode's timeout wherever it surfaced.
+func (b *budget) failure(ctx context.Context, err error) error {
+	if (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) && errors.Is(context.Cause(ctx), errOverBudget) {
+		return fail("timeout", "The episode download did not finish in time.")
+	}
+	return err
+}
 
 func (h *Fetch) Run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (any, error) {
 	result, err := h.run(parent, job, rep)
@@ -97,7 +111,7 @@ func (h *Fetch) Run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (a
 	}
 	return outcome(result, err)
 }
-func (h *Fetch) run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (any, error) {
+func (h *Fetch) run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (_ any, err error) {
 	s := h.s
 	var params fetchParams
 	if job.Path == nil || !podcast.ValidEpisodePath(*job.Path) || json.Unmarshal(job.Params, &params) != nil || !podcast.ValidID(params.ShowID) || !podcast.ValidID(params.EpisodeID) {
@@ -149,6 +163,7 @@ func (h *Fetch) run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (a
 	}
 	ctx, b := s.budget(parent)
 	defer b.close()
+	defer func() { err = b.failure(ctx, err) }()
 	s.dropStaleCheckpoint(job, root, f.ShowID, e.ID)
 	c, tag := s.loadCheckpoint(job, root, f.ShowID, e.ID)
 	committed := false
@@ -369,7 +384,7 @@ func (s *service) enclosure(ctx context.Context, f *podcast.Feed, e podcast.Epis
 
 func (s *service) download(ctx context.Context, b *budget, job jobs.Job, root *os.Root, f *podcast.Feed, e podcast.Episode, c *checkpoint, tag string, rep *jobs.Reporter) (podcast.Fetch, error) {
 	if s.o.Streamer == nil {
-		return podcast.Fetch{}, fail("network", "The episode download is unavailable.")
+		return podcast.Fetch{}, fail("write_failed", "The episode download is unavailable.")
 	}
 	// Resolved once per job and held in memory only; every attempt GETs the same enclosure.
 	raw, err := s.enclosure(ctx, f, e)
@@ -422,8 +437,9 @@ func (s *service) download(ctx context.Context, b *budget, job jobs.Job, root *o
 			s.clearCheckpoint(job, root, c)
 			tag = ""
 		}
-		if err := s.o.Wait(ctx, netguard.RetryDelay(attempt, failure.RetryAfterSeconds)); err != nil {
-			return podcast.Fetch{}, err
+		// A wait the ceiling cuts short ends on what the host last answered.
+		if s.o.Wait(ctx, netguard.RetryDelay(attempt, failure.RetryAfterSeconds)) != nil {
+			return podcast.Fetch{}, failure
 		}
 	}
 	return podcast.Fetch{}, last
@@ -475,7 +491,8 @@ func (s *service) consume(ctx context.Context, b *budget, job jobs.Job, root *os
 	h := sha256.New()
 	if action == "append" {
 		if n, err := io.CopyN(h, file, c.Offset); err != nil || n != c.Offset {
-			return podcast.Fetch{}, "", fail("network", "The episode partial is incomplete.")
+			// The Bridge's own partial file: a local fault, not the episode host's.
+			return podcast.Fetch{}, "", fail("write_failed", "The episode partial is incomplete.")
 		}
 	}
 	c.Total = total
