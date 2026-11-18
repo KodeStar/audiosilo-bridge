@@ -745,13 +745,17 @@ func TestPollFailureCodes(t *testing.T) {
 	}
 
 	// The feed's host refuses connections (the netguard's network) stays so.
-	if res, err := outcome(nil, &netguard.Error{Code: "network", Message: "The feed could not be reached."}); code(res, err) != "network" {
+	if res, err := outcome(nil, fail("network", "The feed could not be reached.")); code(res, err) != "network" {
 		t.Fatalf("a refused connection: %v", err)
 	}
 
 	// The show is locked (another job on it) past the Bridge's own wait.
-	h.libs.SetLibraries(nil) // no mapping check: the poll waits for one
-	h.libs.SetLibraries([]link.Library{{ID: 3, Kind: "podcasts", Root: h.mount}})
+	s := h.handler.s
+	unlock, err := s.acquire(context.Background(), s.showKey(h.mount, show))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
 	if c := code(h.handler.PollJob().Run(ctx, poll, jobs.LocalReporter())); c != "bridge_lost" {

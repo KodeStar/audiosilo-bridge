@@ -162,9 +162,10 @@ func (h *Poll) Run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (an
 	return outcome(h.run(parent, job, rep))
 }
 
-// ceiling bounds a job's work, which starts once it holds its lock (the wait
-// for the library's mapping check is bounded by one more): a wait never leaves
-// the feed's own fetch short of time.
+// ceiling bounds a job's work, which starts once it holds its lock: a wait
+// never leaves the feed's own fetch short of time. The wait for the library's
+// mapping check is bounded by one more ceiling, and so is a poll's wait for its
+// show (a subscribe's for its library waits on that follow's own ceiling).
 const ceiling = 3 * time.Minute
 
 func (s *service) acquire(ctx context.Context, key string) (func(), error) {
