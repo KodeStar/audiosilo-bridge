@@ -2226,7 +2226,9 @@ internal/
             (show path, unreadable feed.json, bad params) is write_failed; the
             Bridge's own deadline or stop outside the fetch is bridge_lost. An
             episode download's ceiling is its timeout wherever it surfaces (the
-            budget's cause, errOverBudget), a retry wait it cuts ends on the host's
+            budget's cause, errOverBudget; a probe it stops answers the context's
+            error, not invalid_audio, and a lease check it cuts is no lost claim,
+            identity_changed), a retry wait it cuts ends on the host's
             last answer, and its own faults (no streamer, its partial) are
             write_failed. A poll's params may carry `scheduled` (the server's scheduler); read
             leniently, it changes nothing here.

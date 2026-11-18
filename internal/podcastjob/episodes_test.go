@@ -630,4 +630,37 @@ func TestEpisodeFailureCodes(t *testing.T) {
 			t.Fatalf("no streaming client: %q, want write_failed", c)
 		}
 	})
+	// The ceiling passing once the audio checked out still stops the commit as
+	// the episode's timeout.
+	t.Run("ceiling before the commit", func(t *testing.T) {
+		h, job := audioHarness(t)
+		timer := ceiling(h)
+		setAudio(h, func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("audio")) })
+		h.handler.s.o.Probe = func(context.Context, *os.File) (ProbeResult, error) {
+			timer.fn()
+			return ProbeResult{DurationMS: 1000, Codec: "mp3", ContentType: "audio/mpeg"}, nil
+		}
+		_, err := h.handler.FetchJob().Run(context.Background(), job, jobs.LocalReporter())
+		if c := code(t, err); c != "timeout" {
+			t.Fatalf("the ceiling passed before the commit: %q, want timeout", c)
+		}
+	})
+	// The real probe the job's context stopped answers that context's error (the
+	// ceiling's timeout above), never invalid_audio.
+	t.Run("probe stopped", func(t *testing.T) {
+		program, err := os.Executable()
+		if err != nil {
+			t.Fatal(err)
+		}
+		f, err := os.CreateTemp(t.TempDir(), "audio")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer f.Close()
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		if _, err := LocalProbe(program)(ctx, f); !errors.Is(err, context.Canceled) {
+			t.Fatalf("a stopped probe: %v, want its context's error", err)
+		}
+	})
 }

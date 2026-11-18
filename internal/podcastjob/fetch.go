@@ -223,6 +223,9 @@ func (h *Fetch) run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (_
 	err = func() error {
 		defer unlockShow()
 		if err := rep.ConfirmLease(ctx); err != nil {
+			if errors.Is(context.Cause(ctx), errOverBudget) {
+				return ctx.Err() // the ceiling passed: the episode's timeout (b.failure), not a lost claim
+			}
 			return leaseFailure(ctx, err, "The episode job no longer owns its claim.")
 		}
 		if pairing != s.pairHash() {

@@ -41,6 +41,11 @@ func LocalProbe(program string) ProbeFunc {
 		out := &boundedOutput{}
 		cmd.Stdout = out
 		if err := cmd.Run(); err != nil {
+			// A probe the job's own context stopped (the episode's ceiling, which
+			// the fetch reports as its timeout) says nothing about the audio.
+			if parent.Err() != nil {
+				return ProbeResult{}, parent.Err()
+			}
 			return ProbeResult{}, fail("invalid_audio", "The episode is not supported audio.")
 		}
 		var data struct {
