@@ -1168,11 +1168,12 @@ func (h *Handler) attach(ctx context.Context, eng Engine, r *run, m store.Genera
 		// The cancel read here is the one taken up: a book whose status changed
 		// since (re-admitted already, or parked by a stage the cancel interrupted)
 		// is followed as it is (bridge#65).
-		if err := eng.RetryAsRead(ctx, b); err != nil && !errors.Is(err, scheduler.ErrInvalidOp) &&
-			!errors.Is(err, store.ErrStatusChanged) {
+		switch err := eng.RetryAsRead(ctx, b); {
+		case err == nil:
+			h.o.Log.Info("generate: the job is back, so its engine book runs again", "job", r.job.ID, "book", b.ID)
+		case !errors.Is(err, scheduler.ErrInvalidOp) && !errors.Is(err, store.ErrStatusChanged):
 			return err
 		}
-		h.o.Log.Info("generate: the job is back, so its engine book runs again", "job", r.job.ID, "book", b.ID)
 	}
 	h.o.Log.Info("generate: following the engine book again", "job", r.job.ID, "book", b.ID, "state", b.State)
 	return nil
