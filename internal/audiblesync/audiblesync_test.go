@@ -354,6 +354,21 @@ func TestEventID(t *testing.T) {
 			t.Fatal("two different places share an id")
 		}
 	}
+	// A place Audible sent no last_updated for hashes an empty last_updated.
+	// The server depends on this form: it re-derives these ids to find the
+	// places the Bridge dated on its own clock and corrects them by its
+	// sent_at (audiosilo-server catalog.audibleUndatedID, CROSS-REPO §23), with
+	// these same vectors in its TestAudibleUndatedID. A change to the formula
+	// must change both.
+	book := link.AudibleSyncTitle{ASIN: "B000000001", LibraryID: 1, Path: "Author/Book"}
+	for kind, want := range map[string]string{
+		"":               "aud-bcba95b12c2bb665a13b0dcc0cb5ddac",
+		link.EventFinish: "aud-71841ac49adbb0c3fce441ddea6c829a",
+	} {
+		if got := EventID("acct0001", book, audible.Position{PositionMs: 500000}, kind); got != want {
+			t.Errorf("undated, kind %q: id %s, want %s", kind, got, want)
+		}
+	}
 }
 
 // Denied: a refused account (the "Sign in again" state) doesn't sync, failing
