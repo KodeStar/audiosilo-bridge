@@ -2159,7 +2159,10 @@ internal/
             which reads as released; such a title logs its raw date, delivery type
             and rights once through WithLogger, never a token or the customer id); LastPositions
             (25 ASINs a request, split on a 400; a failed batch ends the read and
-            the places read before it come back beside the error, bridge#50;
+            the places read before it come back beside the error, bridge#50; an
+            ASIN still refused 400 asked alone is left out like one with no place
+            once another list of the read was answered, logged through WithLogger,
+            else its 400 is the read's error at the end of its batch;
             Position{PositionMs, LastUpdated},
             last_updated read as UTC, zero when absent) and SetLastPosition (needs the
             ACR, ContentACR); License + DecryptVoucher (AAXC key/iv) (AAXC only: the
