@@ -138,6 +138,9 @@ func (s *Scheduler) ReadmitParked(ctx context.Context, msg string, code state.Pa
 	}
 	n := 0
 	for _, b := range books {
+		if ctx.Err() != nil {
+			break // the Bridge stopping (its background tasks' context): no warning per book
+		}
 		if !s.reserve(b.ID) {
 			continue
 		}
