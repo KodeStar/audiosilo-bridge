@@ -3772,8 +3772,8 @@ internal/
             is a no-op). Those re-admits, and githubChanged's and agentCredentialChanged's, run as
             Bridge.bg tasks (bgTasks), as does an abandoned generate job's wait for
             the engine (generate.Options.Background): Run stops them (their context
-            ends, none starts after) and waits for them before the store closes
-            (bridge#80).
+            ends, none starts after) and waits for them before the store closes, on
+            every return, a failed listen too (bridge#80).
             Phase 1a: engine.go wires the ENGINE the way sidecars' daemon did, minus
             the folder scan, and runs it in the background from Run (the first start
             may download ffmpeg; the generate job waits for it): the event hub with

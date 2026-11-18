@@ -318,6 +318,10 @@ func (b *Bridge) Run(ctx context.Context) error {
 	defer b.podcastHTTP.Close()
 	defer b.librivoxHTTP.Close()
 	defer func() { _ = b.db.Close() }()
+	// Before the store closes, on every return (a failed listen too): the
+	// background tasks write to it. The stop below logs after them; a second
+	// stop does nothing.
+	defer b.bg.stop()
 	// The heartbeat and the runner stop with ctx: a failing page server must
 	// stop them too, or Run would wait for them for ever.
 	ctx, stop := context.WithCancel(ctx)

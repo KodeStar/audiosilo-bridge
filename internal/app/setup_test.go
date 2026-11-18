@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -439,6 +440,31 @@ func TestBackgroundTasksStopWaitsForThem(t *testing.T) {
 	case <-ended:
 	default:
 		t.Fatal("stop returned before the task did")
+	}
+}
+
+// A Run that can't listen still stops the background tasks before it closes the
+// store they write to.
+func TestRunStopsBackgroundTasksWhenItCannotListen(t *testing.T) {
+	taken, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = taken.Close() }()
+	b, _, err := New(context.Background(), Options{DataDir: t.TempDir(), Version: "0.1.0", Listen: taken.Addr().String(),
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ended := make(chan struct{})
+	b.bg.run(func(ctx context.Context) { <-ctx.Done(); close(ended) })
+	if err := b.Run(context.Background()); err == nil {
+		t.Fatal("Run on a taken address returned no error")
+	}
+	select {
+	case <-ended:
+	default:
+		t.Fatal("Run returned with a background task still running")
 	}
 }
 
