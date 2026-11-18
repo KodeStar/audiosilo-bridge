@@ -2471,7 +2471,10 @@ internal/
             refused: a sign-in again ends the refusal on the server before it stores the new
             sign-in here, and a sync answering the old refusal in between would mark the account
             refused again (an import would fail). Its wait doesn't follow ctx: finishMu's calls
-            bound it. Deps: audible, link, secrets, source, store.
+            bound it. A signed call's refusal waits the same way (refused, under finishMu): it is
+            retried once with the sign-in that replaced its device, one stored meanwhile or
+            storing itself then, so a poll claimed in that window lists with the new sign-in.
+            Deps: audible, link, secrets, source, store.
   audiblejob/ Phase 4a: audible.poll (light lane; params {"account", "template"}
             strict (template, the account's path template, optional, <= 500
             bytes, the server's bound, bridge#47; an unknown field is refused); the server claims it with no
