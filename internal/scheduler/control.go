@@ -337,7 +337,8 @@ func (s *Scheduler) cancel(ctx context.Context, id int64, g *store.StopGuard) er
 func (s *Scheduler) publishCancelled(ctx context.Context, id int64) {
 	s.readmitMu.Lock()
 	defer s.readmitMu.Unlock()
-	b, err := s.db.GetBook(ctx, id)
+	// The cancel is written: a caller's context ending now must not lose its frame.
+	b, err := s.db.GetBook(context.WithoutCancel(ctx), id)
 	if err != nil || !IsCancelled(b) {
 		return
 	}

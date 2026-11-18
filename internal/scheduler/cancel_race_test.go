@@ -238,4 +238,20 @@ func TestGuardedCancelNeverPublishesOverALaterReadmit(t *testing.T) {
 	if status, errMsg := lastState(readmitted.ID); status != "" || errMsg != "" {
 		t.Fatalf("the page was left at %q %q after the re-admit, want it running", status, errMsg)
 	}
+
+	// The caller's context ending once the cancel is written (a client gone, a
+	// job's end stopping) still publishes it: the store holds the cancel.
+	gone := h.addBook(t, db, "gone", "", "")
+	goneGuard := guard(3, gone)
+	callerCtx, endCaller := context.WithCancel(ctx)
+	defer endCaller()
+	s.mu.Lock()
+	s.inflight[gone.ID] = &inflightBook{cancel: endCaller}
+	s.mu.Unlock()
+	if err := s.CancelUnlessFollowed(callerCtx, gone.ID, goneGuard); err != nil {
+		t.Fatal(err)
+	}
+	if status, errMsg := lastState(gone.ID); status != string(state.StatusFailed) || errMsg != cancelledReason {
+		t.Fatalf("a cancel whose caller's context ended published %q %q, want it cancelled", status, errMsg)
+	}
 }
