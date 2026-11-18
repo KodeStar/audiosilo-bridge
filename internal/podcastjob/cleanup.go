@@ -87,12 +87,7 @@ func (s *service) cleanOwned(ctx context.Context, root *os.Root, lib link.Librar
 		return
 	}
 	// OpenRegular below checks every ancestor before a manifest can authorize IO.
-	d, err := root.Open(dir)
-	if err != nil {
-		return
-	}
-	entries, err := d.ReadDir(-1)
-	_ = d.Close()
+	entries, err := listDir(root, dir)
 	if err != nil {
 		return
 	}
