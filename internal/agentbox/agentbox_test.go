@@ -1124,6 +1124,11 @@ func TestHandoffCredentialFallsBackWhenTheGroupIsRefused(t *testing.T) {
 	if n := strings.Count(logged.String(), "the staging volume refused"); n != 1 {
 		t.Fatalf("the refused group is logged %d times, want once:\n%s", n, logged.String())
 	}
+	// The runner is in the group, yet the volume gave the file to every uid:
+	// the console hears so (bridge#79).
+	if st := r.Status(); !st.ShareGroup || st.HandoffMode != HandoffWorld {
+		t.Fatalf("share group %v, mode %q (want the volume's refusal to read as world)", st.ShareGroup, st.HandoffMode)
+	}
 	if strings.Contains(logged.String(), "isn't in the Bridge's group") {
 		t.Fatalf("the runner is in the group, yet the log says it isn't:\n%s", logged.String())
 	}

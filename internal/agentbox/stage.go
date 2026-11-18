@@ -116,7 +116,7 @@ func fill(root *os.Root, req agent.Request, cli string, timeout int, handed *age
 	if err := createFile(root, agentproto.PromptFile, strings.NewReader(req.Prompt), inputFile, true); err != nil {
 		return nil, err
 	}
-	body, err := json.Marshal(agentproto.Request{
+	return groupErr, openJob(root, agentproto.Request{
 		Protocol:       agentproto.Protocol,
 		CLI:            cli,
 		Model:          req.Model,
@@ -126,19 +126,26 @@ func fill(root *os.Root, req agent.Request, cli string, timeout int, handed *age
 		MaxTurns:       req.MaxTurns,
 		TimeoutSeconds: timeout,
 	})
+}
+
+// openJob writes the request into the (still private) job dir, opens the dir
+// to the agent uid and renames request.json into place: the job is the
+// runner's from then on.
+func openJob(root *os.Root, req agentproto.Request) error {
+	body, err := json.Marshal(req)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	// request.json.tmp is the contract's name for the request in progress: it is
 	// written whole, then renamed to request.json, the ready signal, once the dir
 	// is open to the agent uid.
 	if err := createFile(root, agentproto.RequestTmpFile, bytes.NewReader(body), requestMode, true); err != nil {
-		return nil, err
+		return err
 	}
 	if err := root.Chmod(".", jobDirMode); err != nil { //nolint:gosec // shared with the agent uid by design (decision 15)
-		return nil, err
+		return err
 	}
-	return groupErr, root.Rename(agentproto.RequestTmpFile, agentproto.RequestFile)
+	return root.Rename(agentproto.RequestTmpFile, agentproto.RequestFile)
 }
 
 // writeCredential writes credential.json into its own dir: the dir open to the
@@ -151,8 +158,10 @@ func fill(root *os.Root, req agent.Request, cli string, timeout int, handed *age
 // volume that refuses the chown or the ACL change (NFS, CIFS) gets the file
 // as every uid's too, with groupErr saying why: the hand-off as it was before
 // there was a group, rather than a run that fails; strict (agent.require_group)
-// returns a groupRefusedError instead. The job dir is still private (0700)
-// throughout, so no step leaves a window.
+// returns a groupRefusedError instead. Only a refusal (groupRefused: EPERM,
+// ENOTSUP) falls back so: any other failure to give the group (an I/O error)
+// fails the stage, never handing the credential to every uid. The job dir is
+// still private (0700) throughout, so no step leaves a window.
 func writeCredential(root *os.Root, c agentproto.Credential, group int, strict bool) (groupErr, err error) {
 	body, err := json.Marshal(c)
 	if err != nil {
@@ -171,6 +180,9 @@ func writeCredential(root *os.Root, c agentproto.Credential, group int, strict b
 	}
 	if group != noGroup {
 		if groupErr = giveGroup(root, group, name, agentproto.CredentialDir); groupErr != nil {
+			if !groupRefused(groupErr) {
+				return nil, groupErr
+			}
 			if strict {
 				return nil, &groupRefusedError{err: groupErr}
 			}
@@ -197,7 +209,7 @@ func (e *groupRefusedError) Error() string {
 // mode.
 func giveGroup(root *os.Root, group int, names ...string) error {
 	for _, p := range names {
-		if err := root.Chown(p, -1, group); err != nil {
+		if err := chownGroup(root, p, group); err != nil {
 			return err
 		}
 		if err := dropACLAt(root, p); err != nil {
@@ -206,6 +218,10 @@ func giveGroup(root *os.Root, group int, names ...string) error {
 	}
 	return nil
 }
+
+// chownGroup gives name (under root) to group; a test replaces it to make a
+// volume fail the chown in a way the OS here can't.
+var chownGroup = func(root *os.Root, name string, group int) error { return root.Chown(name, -1, group) }
 
 // dropACLAt removes the POSIX ACLs name (under root) inherited (dropACL).
 func dropACLAt(root *os.Root, name string) error {

@@ -33,8 +33,14 @@ type Status struct {
 	// ShareGroup: a handed credential is the Bridge's group's alone, never
 	// every uid's: the runner is in that group (runner.json's groups), or a
 	// runner.json naming no group isn't the runner's (trust.go); false once
-	// the runner couldn't take one so (Run), for the rest of the process.
+	// the runner couldn't take one so (Run), until a group probe finds it
+	// can (probe.go).
 	ShareGroup bool
+	// HandoffMode is how a handed credential reaches the runner now
+	// (HandoffGroup, HandoffWorld, HandoffGroupRequired), "" with no live
+	// runner taking a hand-off: the heartbeat's setup block carries it, for
+	// the console (bridge#79).
+	HandoffMode string
 	// Detail says why not, in words for the page and the park hint.
 	Detail string
 	// Problem is why not as a kind (Problem*: "" when Available or Refused), and
@@ -48,7 +54,22 @@ type Status struct {
 	// CLIs is runner.json's clis as the runner reported them: each CLI's version
 	// ("" = not installed) and credential kind (agentproto.Credential*, or "").
 	CLIs map[string]agentproto.CLI
+
+	// groupListed: runner.json's groups hold the Bridge's, so a probe can
+	// tell whether the group's file reaches the runner now (probe.go).
+	groupListed bool
 }
+
+// The hand-off modes (Status.HandoffMode): the credential is the Bridge's
+// group's alone; readable by every uid on the staging volume until the
+// runner takes it (the runner isn't in the group, the volume refused the
+// group, or the runner was denied the group's file); or agent.require_group
+// is on and can't be met, so nothing is handed over.
+const (
+	HandoffGroup         = "group"
+	HandoffWorld         = "world"
+	HandoffGroupRequired = "group_required"
+)
 
 // Subscription reports whether backend runs on a subscription credential (a
 // claude OAuth token or a codex login), which bills no tokens, rather than an
@@ -121,11 +142,15 @@ func (r *Runner) Status() Status {
 	}
 	st.Version, st.Slots, st.HeartbeatAt, st.CLIs = rj.Version, rj.Slots, rj.HeartbeatAt, rj.CLIs
 	st.ShareGroup = r.shareGroup(rj, info, st.Live)
+	st.groupListed = slices.Contains(rj.Groups, r.gid)
 	st.Problem, st.Other, st.Detail = r.unavailableBecause(rj)
 	if st.Detail == "" && st.Handoff {
 		if why := r.groupRequired(st.ShareGroup); why != "" {
 			st.Problem, st.Detail = ProblemGroupRequired, why
 		}
+	}
+	if st.Handoff && st.Live {
+		st.HandoffMode = r.handoffMode(st)
 	}
 	if st.Detail == "" {
 		if refused := r.refusal(rj.CLIs[r.backend], st.Handoff); refused != "" {
@@ -143,10 +168,12 @@ func (r *Runner) Status() Status {
 // credential to every uid. Never once the runner was denied the group's
 // credential (Run).
 func (r *Runner) shareGroup(rj agentproto.Runner, info fs.FileInfo, live bool) bool {
+	// Read (and pinned) first whatever the answer: a group probe believes only
+	// the pinned runner's claim (probe.go).
+	uid, own := r.fromRunner(info, live)
 	if r.groupDenied.Load() {
 		return false
 	}
-	uid, own := r.fromRunner(info, live)
 	if slices.Contains(rj.Groups, r.gid) {
 		return true
 	}
@@ -154,6 +181,17 @@ func (r *Runner) shareGroup(rj agentproto.Runner, info fs.FileInfo, live bool) b
 		r.notFromRunner("runner.json naming no Bridge group", uid)
 	}
 	return !own
+}
+
+// handoffMode is st's HandoffMode, for a live runner taking a hand-off.
+func (r *Runner) handoffMode(st Status) string {
+	switch {
+	case st.Problem == ProblemGroupRequired:
+		return HandoffGroupRequired
+	case st.ShareGroup && !r.volumeRefused.Load():
+		return HandoffGroup
+	}
+	return HandoffWorld
 }
 
 // groupRequired is why agent.require_group stops a handed credential now,

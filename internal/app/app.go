@@ -385,6 +385,9 @@ func (b *Bridge) beat(ctx context.Context) {
 		b.retryRefused(ctx)
 		return
 	}
+	// A hand-off's fallback from the Bridge's group ends without a restart once
+	// the agent container takes the group's file again (bridge#79).
+	b.box.Probe(ctx)
 	b.mu.Lock()
 	gen, withSetup := b.beatGen, b.acceptsSetup
 	b.mu.Unlock()
