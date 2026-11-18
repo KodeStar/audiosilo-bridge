@@ -122,7 +122,7 @@ func fill(root *os.Root, req agent.Request, cli string, timeout int, handed *age
 	if err := createFile(root, agentproto.PromptFile, strings.NewReader(req.Prompt), inputFile, true); err != nil {
 		return nil, err
 	}
-	return groupErr, openJob(root, agentproto.Request{
+	pr := agentproto.Request{
 		Protocol:       agentproto.Protocol,
 		CLI:            cli,
 		Model:          req.Model,
@@ -131,7 +131,11 @@ func fill(root *os.Root, req agent.Request, cli string, timeout int, handed *age
 		NoTools:        req.NoTools,
 		MaxTurns:       req.MaxTurns,
 		TimeoutSeconds: timeout,
-	})
+	}
+	if req.Endpoint != nil {
+		pr.Endpoint = &agentproto.Endpoint{BaseURL: req.Endpoint.BaseURL}
+	}
+	return groupErr, openJob(root, pr)
 }
 
 // openJob writes the request into the (still private) job dir, opens the dir

@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kodestar/audiosilo-bridge/internal/agent"
 	"github.com/kodestar/audiosilo-bridge/internal/agentproto"
 	"github.com/kodestar/audiosilo-bridge/internal/ghauth"
 	"github.com/kodestar/audiosilo-bridge/internal/secrets"
@@ -659,5 +660,43 @@ func TestAgentCredential(t *testing.T) {
 	}
 	if changes != 4 {
 		t.Fatalf("changes = %d", changes)
+	}
+}
+
+// The endpoint's key (bridge#84) is the openai-compatible backend's alone:
+// never codex's (a run against OpenAI), and codex's OpenAI key never the
+// endpoint's.
+func TestAgentEndpointKey(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	if EndpointBackend != agent.IDOpenAICompatible {
+		t.Fatalf("EndpointBackend %q, agent says %q", EndpointBackend, agent.IDOpenAICompatible)
+	}
+	if got := KindsFor(EndpointBackend); len(got) != 1 || got[0] != AgentEndpointKey {
+		t.Fatalf("KindsFor = %v", got)
+	}
+	a := NewAgent(secrets.NewMemStore(), db, nil, nil)
+	if err := a.Set(ctx, AgentOpenAIKey, "sk-openai"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, ok := a.Credential(ctx, EndpointBackend); ok {
+		t.Fatal("the OpenAI key went to the endpoint")
+	}
+	if err := a.Set(ctx, AgentEndpointKey, "sk-or-v1-endpoint"); err != nil {
+		t.Fatal(err)
+	}
+	if kind, v, since, ok := a.Credential(ctx, EndpointBackend); !ok || kind != agentproto.CredentialEndpointKey ||
+		v != "sk-or-v1-endpoint" || since.IsZero() {
+		t.Fatalf("endpoint = %q %q %v %v", kind, v, since, ok)
+	}
+	if _, v, _, _ := a.Credential(ctx, "codex"); v != "sk-openai" {
+		t.Fatalf("codex got %q", v)
+	}
+	if st := a.State(ctx); !st.Set[AgentEndpointKey] || st.SetAtByKind[AgentEndpointKey] == "" {
+		t.Fatalf("state = %+v", st)
 	}
 }

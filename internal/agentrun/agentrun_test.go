@@ -930,3 +930,101 @@ func TestHandoffRefused(t *testing.T) {
 		t.Fatalf("no credential at all: %+v", ex)
 	}
 }
+
+const endpointReq = `{"protocol":1,"cli":"codex","model":"qwen3:32b","effort":"","web":true,"no_tools":false,"max_turns":0,"timeout_seconds":60,` +
+	`"endpoint":{"base_url":"http://192.168.1.20:11434/v1"}}`
+
+// An endpoint run (bridge#84) gets the handed endpoint key in its own variable,
+// named to codex by env_key, never in argv; its own empty CODEX_HOME; and none
+// of the container's credentials (they are for OpenAI), the shared CODEX_HOME
+// (with its device login) left alone.
+func TestEndpointRun(t *testing.T) {
+	t.Parallel()
+	env := parentEnv() // the container has OPENAI_API_KEY and CLAUDE_CODE_OAUTH_TOKEN
+	te := newTestEnv(t, env)
+	codexHome := filepath.Join(te.home, "codex")
+	if err := os.MkdirAll(codexHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(codexHome, "auth.json"), []byte(`{"tokens":"device-login"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.WriteFile(filepath.Join(te.codexCap, "behavior"), []byte(`ls -A "$CODEX_HOME" > "$CAP/home"`+"\n"), 0o644)
+	if !te.r.status().Endpoints {
+		t.Fatal("runner.json advertises endpoints")
+	}
+	te.start(t)
+	job, cred := te.submitWithCredential(t, endpointReq, `{"cli":"codex","kind":"endpoint_api_key","value":"sk-endpoint-SECRET"}`)
+	if ex := waitDone(t, job, 30*time.Second); ex.Error != "" || ex.ExitCode != 0 {
+		t.Fatalf("exit = %+v", ex)
+	}
+	if _, err := os.Lstat(cred); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatal("credential.json is deleted before the CLI starts")
+	}
+	argv := readLines(t, filepath.Join(te.codexCap, "argv"))
+	joined := strings.Join(argv, "\n")
+	if strings.Contains(joined, "SECRET") {
+		t.Fatalf("the key is in argv: %q", argv)
+	}
+	for _, want := range []string{`model_provider="audiosilo_endpoint"`,
+		`model_providers.audiosilo_endpoint.base_url="http://192.168.1.20:11434/v1"`,
+		`model_providers.audiosilo_endpoint.wire_api="responses"`,
+		`model_providers.audiosilo_endpoint.env_key="AUDIOSILO_ENDPOINT_API_KEY"`, `web_search="disabled"`} {
+		if !slices.Contains(argv, want) {
+			t.Errorf("argv lacks %s: %q", want, argv)
+		}
+	}
+	if i := slices.Index(argv, "--model"); i < 0 || argv[i+1] != "qwen3:32b" {
+		t.Errorf("--model: %q", argv)
+	}
+	got := envMap(readLines(t, filepath.Join(te.codexCap, "env")))
+	if got["AUDIOSILO_ENDPOINT_API_KEY"] != "sk-endpoint-SECRET" {
+		t.Errorf("the endpoint key isn't in its variable: %v", got)
+	}
+	for _, k := range []string{"OPENAI_API_KEY", "CODEX_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "GITHUB_TOKEN"} {
+		if _, ok := got[k]; ok {
+			t.Errorf("an endpoint run got %s", k)
+		}
+	}
+	if got["CODEX_HOME"] == codexHome || !strings.HasPrefix(got["CODEX_HOME"], te.tmp) {
+		t.Errorf("CODEX_HOME = %q, want the run's own under %s", got["CODEX_HOME"], te.tmp)
+	}
+	if home, _ := os.ReadFile(filepath.Join(te.codexCap, "home")); strings.TrimSpace(string(home)) != "" {
+		t.Errorf("the run's CODEX_HOME held %q (the device login must be out of reach)", home)
+	}
+	if b, err := os.ReadFile(filepath.Join(codexHome, "auth.json")); err != nil || !strings.Contains(string(b), "device-login") {
+		t.Error("the shared CODEX_HOME's login was touched")
+	}
+}
+
+// An endpoint without a key (a local server) runs with no env_key at all; a
+// handed OpenAI key is refused for it (allowed: keyless; denied: a key of
+// another kind, and an endpoint key for a run against OpenAI).
+func TestEndpointRunKeys(t *testing.T) {
+	t.Parallel()
+	env := parentEnv()
+	delete(env, "OPENAI_API_KEY")
+	te := newTestEnv(t, env)
+	te.start(t)
+	job := te.submit(t, endpointReq)
+	if ex := waitDone(t, job, 30*time.Second); ex.Error != "" || ex.ExitCode != 0 {
+		t.Fatalf("keyless endpoint: exit = %+v", ex)
+	}
+	argv := readLines(t, filepath.Join(te.codexCap, "argv"))
+	if slices.ContainsFunc(argv, func(a string) bool { return strings.Contains(a, "env_key") }) {
+		t.Errorf("a keyless run names an env_key (codex would fail on the missing variable): %q", argv)
+	}
+	_ = os.Remove(filepath.Join(te.codexCap, "argv"))
+
+	job, _ = te.submitWithCredential(t, endpointReq, `{"cli":"codex","kind":"api_key","value":"sk-openai-SECRET"}`)
+	if ex := waitDone(t, job, 30*time.Second); ex.Error == "" || ex.Unavailable || strings.Contains(ex.Error, "SECRET") {
+		t.Fatalf("an OpenAI key for an endpoint: exit = %+v", ex)
+	}
+	job, _ = te.submitWithCredential(t, codexReq, `{"cli":"codex","kind":"endpoint_api_key","value":"sk-endpoint-SECRET"}`)
+	if ex := waitDone(t, job, 30*time.Second); ex.Error == "" || strings.Contains(ex.Error, "SECRET") {
+		t.Fatalf("an endpoint key for OpenAI: exit = %+v", ex)
+	}
+	if _, err := os.Stat(filepath.Join(te.codexCap, "argv")); err == nil {
+		t.Fatal("the CLI ran on a refused credential")
+	}
+}

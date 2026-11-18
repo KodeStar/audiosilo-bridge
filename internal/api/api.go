@@ -172,6 +172,7 @@ type Backend interface {
 	CreateWorker(ctx context.Context, name string) (*NewWorker, error)
 	RevokeWorker(ctx context.Context, id int64) error
 	AccountsBackend
+	AgentBackend
 	AudibleBackend
 }
 
@@ -251,6 +252,7 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("POST /api/workers", a.requireAuth(a.handleCreateWorker))
 	mux.HandleFunc("DELETE /api/workers/{id}", a.requireAuth(a.handleRevokeWorker))
 	a.accountRoutes(mux)
+	a.agentRoutes(mux)
 	a.audibleRoutes(mux)
 	a.workerRoutes(mux)
 	a.workerDistRoutes(mux)

@@ -32,6 +32,7 @@ type backend struct {
 	revokedWorker                  int64
 	acc                            fakeAccounts
 	aud                            fakeAudible
+	agent                          fakeAgent
 }
 
 func (b *backend) Status() Status { return Status{Version: "0.1.0", Kinds: []string{"bridge.verify"}} }

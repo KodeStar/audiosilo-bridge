@@ -198,7 +198,7 @@ func (r *Runner) probeJob(ctx context.Context) (probeOutcome, *probeSpoil) {
 	}
 	// strict: a volume that refuses the group says so, rather than the probe
 	// falling back to the every-uid modes it is there to leave.
-	probe := agentproto.Credential{CLI: r.backend, Kind: probeKind, Value: probeKind}
+	probe := agentproto.Credential{CLI: r.cli, Kind: probeKind, Value: probeKind}
 	var refused *groupRefusedError
 	_, err = writeCredential(root, probe, r.gid, true)
 	if (err == nil || errors.As(err, &refused)) && r.groupFailed.Swap(nil) != nil {
@@ -215,7 +215,7 @@ func (r *Runner) probeJob(ctx context.Context) (probeOutcome, *probeSpoil) {
 	} else if err != nil {
 		return probeUnknown, nil
 	}
-	if err := openJob(root, agentproto.Request{Protocol: agentproto.Protocol, CLI: r.backend, TimeoutSeconds: 60}); err != nil {
+	if err := openJob(root, agentproto.Request{Protocol: agentproto.Protocol, CLI: r.cli, TimeoutSeconds: 60}); err != nil {
 		return probeUnknown, nil
 	}
 	done, _ := r.wait(bounded, root, nil)

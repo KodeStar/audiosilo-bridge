@@ -327,6 +327,7 @@ func (r *Runner) status() agentproto.Runner {
 		CLIs:        map[string]agentproto.CLI{},
 		Handoff:     true,
 		Groups:      r.groups,
+		Endpoints:   true,
 	}
 	for _, name := range []string{agentproto.CLIClaude, agentproto.CLICodex} {
 		c, _ := r.cli(name)

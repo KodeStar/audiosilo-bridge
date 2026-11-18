@@ -73,6 +73,10 @@ const (
 	// DetailAgentHandoffFailed: the Bridge couldn't hand the Accounts tab's
 	// credential to the agent container (the Accounts tab says why).
 	DetailAgentHandoffFailed = "the Bridge couldn't hand the agent its credential: the Accounts tab says why; " + agentFor
+	// DetailAgentNoEndpoint: the backend is openai-compatible and no endpoint
+	// address is set (bridge#84).
+	DetailAgentNoEndpoint = "set the OpenAI-compatible endpoint's address in Settings > Agent; the agent is needed for " +
+		"characters, recaps and descriptions"
 )
 
 // agentNoCLI is the detail while the agent image has no CLI for backend.
@@ -100,6 +104,7 @@ const (
 	AgentNoCredential  AgentProblem = "no_credential"
 	AgentGroupRequired AgentProblem = "group_required"
 	AgentHandoffFailed AgentProblem = "handoff_failed"
+	AgentNoEndpoint    AgentProblem = "no_endpoint"
 )
 
 // maxDetail bounds an item's detail (the server keeps 256 characters).
@@ -262,6 +267,8 @@ func Checklist(in Inputs) link.Setup {
 		agentDetail = DetailAgentGroupRequired
 	case in.Agent.Problem == AgentHandoffFailed:
 		agentDetail = DetailAgentHandoffFailed
+	case in.Agent.Problem == AgentNoEndpoint:
+		agentDetail = DetailAgentNoEndpoint
 	default:
 		agentDetail = DetailAgentNotRunning
 	}

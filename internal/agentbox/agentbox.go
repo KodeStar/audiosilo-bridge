@@ -50,8 +50,14 @@ const (
 
 // Options configures a Runner.
 type Options struct {
-	Dir     string // the staging dir (agent.staging_dir)
-	Backend string // "claude" | "codex": which CLI the runs use
+	Dir string // the staging dir (agent.staging_dir)
+	// Backend is "claude" or "codex", the CLI the runs use, or
+	// "openai-compatible": codex against the endpoint Endpoint names (bridge#84).
+	Backend string
+	// Endpoint is the OpenAI-compatible endpoint's base URL now ("" for none
+	// set), read for every status and run so the page's change applies at
+	// once. Only the openai-compatible backend reads it.
+	Endpoint func() string
 	// ClaimTimeout is agent.claim_timeout_seconds, which config defaults and
 	// validates; the app always passes it.
 	ClaimTimeout time.Duration
@@ -70,8 +76,11 @@ type Options struct {
 
 // Runner implements agent.Runner over the staging protocol.
 type Runner struct {
-	dir          string
-	backend      string
+	dir     string
+	backend string
+	// cli is the CLI the runs use: the backend's own, codex for an endpoint.
+	cli          string
+	endpoint     func() string
 	claimTimeout time.Duration
 	log          *slog.Logger
 	credential   func(cli string) (kind, value string, since time.Time, ok bool)
@@ -151,6 +160,8 @@ func New(opts Options) *Runner {
 	r := &Runner{
 		dir:          opts.Dir,
 		backend:      opts.Backend,
+		cli:          opts.Backend,
+		endpoint:     opts.Endpoint,
 		claimTimeout: opts.ClaimTimeout,
 		log:          opts.Log,
 		credential:   opts.Credential,
@@ -172,6 +183,12 @@ func New(opts Options) *Runner {
 	}
 	if r.log == nil {
 		r.log = slog.New(slog.DiscardHandler)
+	}
+	if r.backend == agent.IDOpenAICompatible {
+		r.cli = agentproto.CLICodex
+	}
+	if r.endpoint == nil {
+		r.endpoint = func() string { return "" }
 	}
 	r.runnerUID.Store(noUID)
 	r.prepare()
@@ -238,16 +255,18 @@ func (r *Runner) reclaim(job string) {
 	}
 }
 
-// ID is the backend the runs use, so telemetry and model routing see the CLI.
+// ID is the backend the runs use, so telemetry, model routing and pricing see
+// it (openai-compatible for an endpoint, though codex runs it).
 func (r *Runner) ID() string { return r.backend }
 
-// SupportsWeb is true: both CLIs can search the web, and the agent container
-// has its own internet-only network.
-func (r *Runner) SupportsWeb() bool { return true }
+// SupportsWeb is true for both CLIs, which can search the web from the agent
+// container's own network; false for an endpoint, as web search is a tool
+// OpenAI hosts (CodexArgs turns it off there).
+func (r *Runner) SupportsWeb() bool { return r.backend != agent.IDOpenAICompatible }
 
 // EnforcesNoTools reports what the fronted CLI does: claude removes its tool
 // catalogue for a NoTools run, codex can't (its read-only sandbox still reads).
-func (r *Runner) EnforcesNoTools() bool { return r.backend == agent.IDClaude }
+func (r *Runner) EnforcesNoTools() bool { return r.cli == agent.IDClaude }
 
 // Detect maps Status onto the engine's Availability. RetryAfter is always set:
 // whatever makes the container unavailable (down, restarting, too busy to claim
@@ -281,10 +300,17 @@ func (r *Runner) Run(ctx context.Context, req agent.Request) (agent.Result, erro
 	if req.Dir == "" {
 		return agent.Result{}, errors.New("agent container: the request has no staged dir")
 	}
+	if r.backend == agent.IDOpenAICompatible {
+		base := r.endpoint()
+		if base == "" {
+			return agent.Result{}, &agent.NotAvailableError{Backend: r.backend, Detail: noEndpointDetail}
+		}
+		req.Endpoint = &agent.Endpoint{BaseURL: base}
+	}
 	var handed *agentproto.Credential
 	if st.Handoff {
 		if kind, value, _, ok := r.handoffCredential(); ok {
-			handed = &agentproto.Credential{CLI: r.backend, Kind: kind, Value: value}
+			handed = &agentproto.Credential{CLI: r.cli, Kind: kind, Value: value}
 		}
 	}
 	group := noGroup
@@ -339,7 +365,7 @@ func (r *Runner) runJob(ctx context.Context, req agent.Request, st Status, hande
 	}
 	job := filepath.Join(r.dir, id)
 	defer r.remove(job)
-	root, groupErr, err := stage(job, req, r.backend, timeout, handed, group, r.requireGroup)
+	root, groupErr, err := stage(job, req, r.cli, timeout, handed, group, r.requireGroup)
 	var refused *groupRefusedError
 	if errors.As(err, &refused) {
 		return agent.Result{}, r.blockGroup("the staging volume refused to give the credential to the Bridge's group ("+
@@ -687,7 +713,7 @@ func (r *Runner) parse(root *os.Root, model string, out agent.CLIOutcome) (agent
 	stdout, _ := agentproto.ReadRegular(root, agentproto.StdoutFile, agentproto.MaxStdoutBytes)
 	stderr, _ := agentproto.ReadRegular(root, agentproto.StderrFile, agentproto.MaxStderrBytes)
 	out.Stdout, out.Stderr = string(stdout), string(stderr)
-	if r.backend == agent.IDCodex {
+	if r.cli == agent.IDCodex {
 		last, _ := agentproto.ReadRegular(root, agentproto.LastMessageFile, agentproto.MaxStdoutBytes)
 		out.LastMessage = string(last)
 		return agent.CodexResult(model, out)

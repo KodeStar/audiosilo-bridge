@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 
@@ -152,5 +153,52 @@ func TestCodexDetect(t *testing.T) {
 	av := r.Detect(context.Background())
 	if !av.Available || av.Version != "codex 1.2.3" {
 		t.Fatalf("Detect = %+v", av)
+	}
+}
+
+// An endpoint run (bridge#84) sends codex to a custom provider by `-c`
+// overrides: the base URL and the Responses wire API, env_key naming the
+// variable (never the key) only when there is one, and web search off even for
+// a web stage.
+func TestCodexArgsEndpoint(t *testing.T) {
+	req := Request{Dir: "/w", Model: "qwen3:32b", Web: true,
+		Endpoint: &Endpoint{BaseURL: "http://192.168.1.20:11434/v1", KeyEnv: EndpointKeyEnv}}
+	args := CodexArgs(req, "/tmp/last", CodexSandboxOff)
+	want := []string{
+		"-c", `model_provider="audiosilo_endpoint"`,
+		"-c", `model_providers.audiosilo_endpoint.name="OpenAI-compatible endpoint"`,
+		"-c", `model_providers.audiosilo_endpoint.base_url="http://192.168.1.20:11434/v1"`,
+		"-c", `model_providers.audiosilo_endpoint.wire_api="responses"`,
+		"-c", `model_providers.audiosilo_endpoint.env_key="AUDIOSILO_ENDPOINT_API_KEY"`,
+		"-c", `web_search="disabled"`,
+	}
+	if got := args[len(args)-len(want):]; !slices.Equal(got, want) {
+		t.Fatalf("endpoint overrides = %q\nwant %q", got, want)
+	}
+	if slices.Contains(args, `web_search="live"`) {
+		t.Errorf("an endpoint run turned web search on: %q", args)
+	}
+	if i := slices.Index(args, "--model"); i < 0 || args[i+1] != "qwen3:32b" {
+		t.Errorf("--model: %q", args)
+	}
+
+	req.Endpoint.KeyEnv = ""
+	for _, a := range CodexArgs(req, "/tmp/last", CodexSandboxOff) {
+		if strings.Contains(a, "env_key") {
+			t.Errorf("a keyless endpoint names env_key (codex fails on the unset variable): %q", a)
+		}
+	}
+	// No endpoint: OpenAI as before, web search on for a web stage.
+	if args := CodexArgs(Request{Dir: "/w", Web: true}, "/tmp/last", CodexSandboxOff); !slices.Contains(args, `web_search="live"`) ||
+		slices.ContainsFunc(args, func(a string) bool { return strings.Contains(a, "model_provider") }) {
+		t.Errorf("OpenAI run: %q", args)
+	}
+}
+
+func TestTOMLString(t *testing.T) {
+	for in, want := range map[string]string{`plain`: `"plain"`, `a"b`: `"a\"b"`, `a\b`: `"a\\b"`} {
+		if got := tomlString(in); got != want {
+			t.Errorf("tomlString(%q) = %s, want %s", in, got, want)
+		}
 	}
 }

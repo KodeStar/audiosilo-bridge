@@ -70,6 +70,13 @@ func (b *Bridge) readmitContributions(ctx context.Context) int {
 // credential: the books and describe jobs parked on a refused or missing one
 // try again, and the heartbeat reports the agent's state at once.
 func (b *Bridge) agentCredentialChanged() {
+	b.agentChanged("the agent's credential changed on the Accounts tab")
+}
+
+// agentChanged wakes the books and describe jobs parked on the agent (a
+// refused credential, or the agent unavailable) after a change that may let
+// them through (why says which), and beats at once.
+func (b *Bridge) agentChanged(why string) {
 	b.Kick()
 	codes := []state.ParkCode{state.ParkAgentCredentialRefused, state.ParkAgentUnavailable}
 	for _, code := range codes {
@@ -78,7 +85,7 @@ func (b *Bridge) agentCredentialChanged() {
 	b.bg.run(func(ctx context.Context) {
 		if e := b.engine.get(); e != nil {
 			for _, code := range codes {
-				e.sched.ReadmitParked(ctx, "the agent's credential changed on the Accounts tab", code)
+				e.sched.ReadmitParked(ctx, why, code)
 			}
 		}
 	})

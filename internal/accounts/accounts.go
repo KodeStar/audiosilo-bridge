@@ -545,16 +545,19 @@ func (g *GitHub) refuse(ctx context.Context, why string) {
 // --- the agent's credential ---
 
 // The agent credential kinds the page sets, as vault names: a claude
-// setup-token (a subscription), an Anthropic API key (claude, billed) or an
-// OpenAI API key (codex, billed).
+// setup-token (a subscription), an Anthropic API key (claude, billed), an
+// OpenAI API key (codex, billed) or an OpenAI-compatible endpoint's API key
+// (bridge#84: the openai-compatible backend's, never handed to a run against
+// OpenAI itself).
 const (
 	AgentClaudeToken  = secrets.ClaudeOAuthToken
 	AgentAnthropicKey = secrets.AnthropicAPIKey
 	AgentOpenAIKey    = secrets.OpenAIAPIKey
+	AgentEndpointKey  = secrets.EndpointAPIKey
 )
 
 // AgentKinds are the agent credential kinds, in the page's order.
-var AgentKinds = []string{AgentClaudeToken, AgentAnthropicKey, AgentOpenAIKey}
+var AgentKinds = []string{AgentClaudeToken, AgentAnthropicKey, AgentOpenAIKey, AgentEndpointKey}
 
 // ErrInvalidCredential is a value or kind the page can't store: errors.Is
 // matches it, and the error's text is the problem alone (never the value).
@@ -682,14 +685,20 @@ func (a *Agent) Delete(ctx context.Context, kind string) error {
 	return nil
 }
 
-// cliKinds is which vault credentials each CLI takes, in the order it uses
+// cliKinds is which vault credentials each backend takes, in the order it uses
 // them (a subscription token first for claude), with agentproto's kind for each.
 var cliKinds = map[string][]struct{ name, kind string }{
 	agentproto.CLIClaude: {{AgentClaudeToken, agentproto.CredentialOAuthToken}, {AgentAnthropicKey, agentproto.CredentialAPIKey}},
 	agentproto.CLICodex:  {{AgentOpenAIKey, agentproto.CredentialAPIKey}},
+	EndpointBackend:      {{AgentEndpointKey, agentproto.CredentialEndpointKey}},
 }
 
-// KindsFor are the vault credentials cli ("claude" or "codex") takes, in its order.
+// EndpointBackend is agent.IDOpenAICompatible, the backend an endpoint's key
+// is for (a test holds the two equal: accounts doesn't import the engine).
+const EndpointBackend = "openai-compatible"
+
+// KindsFor are the vault credentials a backend ("claude", "codex" or
+// "openai-compatible") takes, in its order.
 func KindsFor(cli string) []string {
 	var names []string
 	for _, k := range cliKinds[cli] {
@@ -698,7 +707,8 @@ func KindsFor(cli string) []string {
 	return names
 }
 
-// Credential is the vault's credential for cli ("claude" or "codex"): its
+// Credential is the vault's credential for a backend ("claude", "codex" or
+// "openai-compatible"): its
 // agentproto kind, its value and when it was set. ok is false when there is none.
 func (a *Agent) Credential(ctx context.Context, cli string) (kind, value string, since time.Time, ok bool) {
 	for _, o := range cliKinds[cli] {

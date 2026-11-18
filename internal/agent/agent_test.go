@@ -79,6 +79,7 @@ func TestSelectAutoNoneAvailable(t *testing.T) {
 func TestModelFor(t *testing.T) {
 	claude := map[string]string{"fact_pass": "sonnet", "synthesizing": "opus"}
 	openai := map[string]string{"fact_pass": "gpt-5"}
+	compatible := map[string]string{"fact_pass": "qwen3:32b"}
 	cases := []struct {
 		backend, stage, want string
 	}{
@@ -87,10 +88,12 @@ func TestModelFor(t *testing.T) {
 		{"claude", "auditing", ""}, // missing key -> default
 		{"codex", "fact_pass", "gpt-5"},
 		{"codex", "synthesizing", ""},
+		{"openai-compatible", "fact_pass", "qwen3:32b"},
+		{"openai-compatible", "synthesizing", ""},
 		{"unknown", "fact_pass", ""},
 	}
 	for _, c := range cases {
-		if got := ModelFor(claude, openai, c.backend, c.stage); got != c.want {
+		if got := ModelFor(claude, openai, compatible, c.backend, c.stage); got != c.want {
 			t.Errorf("ModelFor(%s,%s) = %q, want %q", c.backend, c.stage, got, c.want)
 		}
 	}

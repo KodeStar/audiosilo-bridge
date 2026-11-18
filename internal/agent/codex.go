@@ -98,9 +98,56 @@ const (
 	CodexSandboxOff     = "danger-full-access"
 )
 
+// Endpoint is an OpenAI-compatible API a codex run talks to instead of OpenAI
+// (bridge#84). BaseURL ends before /responses (https://api.openai.com/v1,
+// http://192.168.1.20:11434/v1) and must pass agentproto.CheckBaseURL's rules
+// (the callers check it). KeyEnv names the child environment variable holding
+// its API key, "" for an endpoint that takes none: the key itself never reaches
+// argv.
+type Endpoint struct {
+	BaseURL string
+	KeyEnv  string
+}
+
+// EndpointProviderID is the model provider id CodexArgs defines for an
+// endpoint run, and EndpointKeyEnv the variable the agent container puts the
+// endpoint's key in.
+const (
+	EndpointProviderID = "audiosilo_endpoint"
+	EndpointKeyEnv     = "AUDIOSILO_ENDPOINT_API_KEY"
+)
+
+// endpointArgs are the `-c` overrides that send a codex run to e: a custom model
+// provider (name, base_url, the Responses wire API, and env_key when it takes a
+// key) selected as model_provider, and web search off (it is a tool OpenAI hosts,
+// which another endpoint would refuse or ignore). The pinned codex (0.162.1)
+// refuses wire_api "chat" outright ("no longer supported"), so an endpoint must
+// offer the Responses API (/responses); the page's Test connection checks that.
+func endpointArgs(e Endpoint) []string {
+	p := "model_providers." + EndpointProviderID + "."
+	args := []string{
+		"-c", "model_provider=" + tomlString(EndpointProviderID),
+		"-c", p + "name=" + tomlString("OpenAI-compatible endpoint"),
+		"-c", p + "base_url=" + tomlString(e.BaseURL),
+		"-c", p + "wire_api=" + tomlString("responses"),
+	}
+	if e.KeyEnv != "" {
+		args = append(args, "-c", p+"env_key="+tomlString(e.KeyEnv))
+	}
+	return append(args, "-c", `web_search="disabled"`)
+}
+
+// tomlString is s as a TOML basic string, which is how codex reads a `-c`
+// value. Only the quote and the backslash need escaping in the values it is
+// given (CheckBaseURL refuses both, and every control character, in a URL).
+func tomlString(s string) string {
+	return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(s) + `"`
+}
+
 // CodexArgs assembles the codex argv for req. --model is omitted when empty (CLI
 // default). lastMsgFile receives the final assistant message. Web search is
-// enabled via the documented `-c web_search="live"` override. Exported so the
+// enabled via the documented `-c web_search="live"` override, except for an
+// endpoint run (req.Endpoint), which gets endpointArgs instead. Exported so the
 // agent container's runner (internal/agentrun) builds the very same flags.
 func CodexArgs(req Request, lastMsgFile, sandbox string) []string {
 	if sandbox == CodexSandboxDefault {
@@ -125,6 +172,9 @@ func CodexArgs(req Request, lastMsgFile, sandbox string) []string {
 	}
 	if req.Effort != "" {
 		args = append(args, "-c", fmt.Sprintf("model_reasoning_effort=%q", req.Effort))
+	}
+	if req.Endpoint != nil {
+		return append(args, endpointArgs(*req.Endpoint)...)
 	}
 	if req.Web {
 		args = append(args, "-c", `web_search="live"`)

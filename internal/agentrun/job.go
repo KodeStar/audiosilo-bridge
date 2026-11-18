@@ -58,13 +58,15 @@ func (r *Runner) execute(ctx context.Context, job *os.Root, id string) agentprot
 	}
 	// The Bridge's credential is taken (and its file deleted) before anything
 	// else can run: the CLI never finds it on disk.
-	handed, err := r.takeCredential(job, req.CLI)
+	endpoint := req.Endpoint != nil
+	handed, err := r.takeCredential(job, req.CLI, endpoint)
 	if err != nil {
 		exit := refused(err.Error())
 		exit.CredentialDenied = errors.Is(err, fs.ErrPermission)
 		return exit
 	}
-	if r.credentialKind(req.CLI) == "" && handed == nil {
+	// An endpoint may take no key (a local server); any other run needs one.
+	if !endpoint && r.credentialKind(req.CLI) == "" && handed == nil {
 		return unavailable(req.CLI + " has no credential: set one on the Bridge's Accounts tab, or give one to the agent container")
 	}
 	prompt, err := agentproto.OpenRegular(job, agentproto.PromptFile)
@@ -96,16 +98,33 @@ func (r *Runner) execute(ctx context.Context, job *os.Root, id string) agentprot
 		}
 		args = agent.ClaudeArgs(areq)
 	case agentproto.CLICodex:
+		if endpoint {
+			// Its own empty CODEX_HOME, never the shared one: the device login
+			// there must not be within reach of a run against another endpoint.
+			if err := os.Mkdir(filepath.Join(runDir, "codex"), 0o700); err != nil {
+				return refused("create the run's codex home: " + err.Error())
+			}
+			areq.Endpoint = &agent.Endpoint{BaseURL: req.Endpoint.BaseURL}
+			if handed != nil {
+				areq.Endpoint.KeyEnv = agent.EndpointKeyEnv
+			}
+			args = agent.CodexArgs(areq, lastMsg, agent.CodexSandboxOff)
+			break
+		}
 		args = agent.CodexArgs(areq, lastMsg, agent.CodexSandboxOff)
 		r.codexStart()
 		defer r.codexEnd()
 	}
 
+	env := r.childEnv(req.CLI, runDir, handed)
+	if endpoint {
+		env = r.endpointEnv(runDir, handed)
+	}
 	exit := r.spawn(ctx, job, spec{
 		path:    cli.path,
 		args:    args,
 		dir:     work,
-		env:     r.childEnv(req.CLI, runDir, handed),
+		env:     env,
 		stdin:   prompt,
 		timeout: time.Duration(req.TimeoutSeconds) * time.Second,
 	})
@@ -145,7 +164,11 @@ func (r *Runner) copyLastMessage(job *os.Root, runDir, id string) {
 // files are the headless override). The value is never logged. An error that
 // is fs.ErrPermission is the runner's uid denied the file (execute reports it as
 // Exit.CredentialDenied).
-func (r *Runner) takeCredential(job *os.Root, cli string) (*agentproto.Credential, error) {
+//
+// An endpoint run (bridge#84) takes only an endpoint key, whatever the
+// container has of its own (that is for OpenAI, never another endpoint), and a
+// non-endpoint run never takes one.
+func (r *Runner) takeCredential(job *os.Root, cli string, endpoint bool) (*agentproto.Credential, error) {
 	name := filepath.Join(agentproto.CredentialDir, agentproto.CredentialFile)
 	if _, err := job.Lstat(name); errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
@@ -154,7 +177,7 @@ func (r *Runner) takeCredential(job *os.Root, cli string) (*agentproto.Credentia
 	if err := job.Remove(name); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return nil, fmt.Errorf("couldn't delete the Bridge's credential.json before the run: %w", err)
 	}
-	if r.credentialKind(cli) != "" {
+	if !endpoint && r.credentialKind(cli) != "" {
 		return nil, nil
 	}
 	if rerr != nil {
@@ -163,6 +186,12 @@ func (r *Runner) takeCredential(job *os.Root, cli string) (*agentproto.Credentia
 	c, err := agentproto.DecodeCredential(raw, cli)
 	if err != nil {
 		return nil, err
+	}
+	if endpoint != (c.Kind == agentproto.CredentialEndpointKey) {
+		if endpoint {
+			return nil, fmt.Errorf("credential.json's kind %q isn't an endpoint's key", c.Kind)
+		}
+		return nil, errors.New("credential.json holds an endpoint's key, and the request isn't for an endpoint")
 	}
 	return &c, nil
 }

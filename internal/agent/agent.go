@@ -30,6 +30,11 @@ import (
 const (
 	IDClaude = "claude"
 	IDCodex  = "codex"
+	// IDOpenAICompatible is codex run against an OpenAI-compatible endpoint
+	// (bridge#84): the OpenAI API with any model, a router, or a local server such
+	// as Ollama or LM Studio. Only the Bridge's agent container runs it (the
+	// endpoint comes with each request); Select never picks it, auto included.
+	IDOpenAICompatible = "openai-compatible"
 )
 
 // maxTurns caps a single agent run's tool-use turns. A generous ceiling: the
@@ -120,9 +125,12 @@ type Request struct {
 	// Empty leaves the CLI default unchanged. Keeping it on the normalized request
 	// lets benchmarks vary model and effort independently without loading a user's
 	// CLI profile into the otherwise-ephemeral pipeline invocation.
-	Effort  string
-	Web     bool          // allow the web search/fetch tools
-	Timeout time.Duration // per-invocation wall-clock cap; 0 = no timeout
+	Effort string
+	// Endpoint, for a codex run, sends it to an OpenAI-compatible endpoint
+	// instead of OpenAI (CodexArgs); nil for OpenAI itself.
+	Endpoint *Endpoint
+	Web      bool          // allow the web search/fetch tools
+	Timeout  time.Duration // per-invocation wall-clock cap; 0 = no timeout
 	// MaxTurns overrides the backend's runaway ceiling when positive. Stages set a
 	// bounded value appropriate to their file set; zero retains maxTurns for callers
 	// outside the pipeline.
@@ -253,15 +261,18 @@ func runnerFor(backend string, cfg SelectConfig, sec secrets.Store) (Runner, str
 }
 
 // ModelFor resolves the model name for a stage: the claude map for the claude
-// backend, the openai map for codex. A missing key returns "" (the backend CLI's
-// default model). Pure and config-free by design - the maps come from
-// config.AgentConfig.Claude / .OpenAI upstream.
-func ModelFor(claudeMap, openaiMap map[string]string, backendID, stage string) string {
+// backend, the openai map for codex, the compatible map for an OpenAI-compatible
+// endpoint. A missing key returns "" (the backend CLI's default model; an
+// endpoint has none, so its map names every stage). Pure and config-free by
+// design - the maps come from config.AgentConfig upstream.
+func ModelFor(claudeMap, openaiMap, compatibleMap map[string]string, backendID, stage string) string {
 	switch backendID {
 	case IDClaude:
 		return claudeMap[stage]
 	case IDCodex:
 		return openaiMap[stage]
+	case IDOpenAICompatible:
+		return compatibleMap[stage]
 	default:
 		return ""
 	}

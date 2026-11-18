@@ -164,6 +164,9 @@ const (
 	KeyAgentClaimTimeout    = "agent.claim_timeout_seconds"
 	KeyAgentMonthlyBudget   = "agent.monthly_budget_usd"
 	KeyAgentRequireGroup    = "agent.require_group"
+	KeyAgentBackend         = "agent.backend"
+	KeyAgentEndpointBaseURL = "agent.openai_compatible.base_url"
+	KeyAgentEndpointModel   = "agent.openai_compatible.model"
 	KeyTranscriptsRetention = "transcripts.retention_days"
 	KeyASRWorkerFallback    = "asr.worker_fallback"
 	KeyGitHubClientID       = "github.client_id"
@@ -174,6 +177,9 @@ const (
 	envAgentClaimTimeout    = "AUDIOSILO_BRIDGE_AGENT_CLAIM_TIMEOUT_SECONDS"
 	envAgentMonthlyBudget   = "AUDIOSILO_BRIDGE_AGENT_MONTHLY_BUDGET_USD"
 	envAgentRequireGroup    = "AUDIOSILO_BRIDGE_AGENT_REQUIRE_GROUP"
+	envAgentBackend         = "AUDIOSILO_BRIDGE_AGENT_BACKEND"
+	envAgentEndpointBaseURL = "AUDIOSILO_BRIDGE_AGENT_OPENAI_COMPATIBLE_BASE_URL"
+	envAgentEndpointModel   = "AUDIOSILO_BRIDGE_AGENT_OPENAI_COMPATIBLE_MODEL"
 	envTranscriptsRetention = "AUDIOSILO_BRIDGE_TRANSCRIPTS_RETENTION_DAYS"
 	envASRWorkerFallback    = "AUDIOSILO_BRIDGE_ASR_WORKER_FALLBACK"
 )
@@ -254,6 +260,18 @@ func applyBridgeEnv(cfg *Config) {
 		cfg.Agent.RequireGroup = b
 		cfg.fromEnv[KeyAgentRequireGroup] = true
 	}
+	if v, ok := lookupEnv(envAgentBackend); ok {
+		cfg.Agent.Backend = v
+		cfg.fromEnv[KeyAgentBackend] = true
+	}
+	if v, ok := lookupEnv(envAgentEndpointBaseURL); ok {
+		cfg.Agent.OpenAICompatible.BaseURL = v
+		cfg.fromEnv[KeyAgentEndpointBaseURL] = true
+	}
+	if v, ok := lookupEnv(envAgentEndpointModel); ok {
+		cfg.Agent.OpenAICompatible.Model = v
+		cfg.fromEnv[KeyAgentEndpointModel] = true
+	}
 	if v, ok := lookupEnv(envTranscriptsRetention); ok {
 		cfg.Transcripts.RetentionDays = envInt(v)
 		cfg.fromEnv[KeyTranscriptsRetention] = true
@@ -308,6 +326,24 @@ func parseLibraries(v string) []LibraryMapping {
 	return out
 }
 
+// normalizeEndpoint trims agent.openai_compatible: the base URL without its
+// trailing slashes (codex appends /responses), and a stage model left blank
+// dropped, so the stage takes the endpoint's model.
+func normalizeEndpoint(e *AgentEndpointConfig) {
+	e.BaseURL = strings.TrimRight(strings.TrimSpace(e.BaseURL), "/")
+	e.Model = strings.TrimSpace(e.Model)
+	for k, v := range e.Models {
+		if v = strings.TrimSpace(v); v == "" {
+			delete(e.Models, k)
+		} else {
+			e.Models[k] = v
+		}
+	}
+	if len(e.Models) == 0 {
+		e.Models = nil
+	}
+}
+
 // normalizeBridge fills the Bridge settings an older or partial file leaves out.
 func normalizeBridge(cfg *Config) {
 	if cfg.Podcasts.AllowNetworks == nil {
@@ -325,6 +361,8 @@ func normalizeBridge(cfg *Config) {
 	if cfg.Agent.ClaimTimeoutSeconds == 0 {
 		cfg.Agent.ClaimTimeoutSeconds = DefaultClaimTimeoutSeconds
 	}
+	cfg.Agent.Backend = strings.TrimSpace(cfg.Agent.Backend)
+	normalizeEndpoint(&cfg.Agent.OpenAICompatible)
 	cfg.ASR.WorkerFallback = strings.ToLower(strings.TrimSpace(cfg.ASR.WorkerFallback))
 	if cfg.ASR.WorkerFallback == "" {
 		cfg.ASR.WorkerFallback = DefaultASRWorkerFallback

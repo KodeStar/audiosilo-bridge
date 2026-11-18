@@ -17,6 +17,8 @@ func TestAgentProblem(t *testing.T) {
 		agentbox.ProblemOtherBackend:  setup.AgentOtherBackend,
 		agentbox.ProblemNoCredential:  setup.AgentNoCredential,
 		agentbox.ProblemGroupRequired: setup.AgentGroupRequired,
+		agentbox.ProblemHandoffFailed: setup.AgentHandoffFailed,
+		agentbox.ProblemNoEndpoint:    setup.AgentNoEndpoint,
 	} {
 		if got := setup.AgentProblem(in); got != want {
 			t.Errorf("setup.AgentProblem(%q) = %q, want %q", in, got, want)

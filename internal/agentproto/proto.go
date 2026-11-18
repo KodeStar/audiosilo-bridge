@@ -37,7 +37,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"regexp"
+	"strings"
 	"time"
 )
 
@@ -82,6 +84,10 @@ const (
 	CredentialOAuthToken = "oauth_token" // claude: CLAUDE_CODE_OAUTH_TOKEN
 	CredentialLogin      = "login"       // codex: a device login in CODEX_HOME/auth.json
 	CredentialAPIKey     = "api_key"     // ANTHROPIC_API_KEY / OPENAI_API_KEY
+	// CredentialEndpointKey is an OpenAI-compatible endpoint's API key (bridge#84):
+	// codex takes it for a run with a Request.Endpoint only, never for one
+	// against OpenAI, and the container's own credentials never go to an endpoint.
+	CredentialEndpointKey = "endpoint_api_key"
 )
 
 // CredentialGroupProbe is the kind of the Bridge's group probe (agentbox's
@@ -137,6 +143,10 @@ type Runner struct {
 	// uid (0777 and 0444): the compose example adds the Bridge's PGID to the
 	// agent container. An older runner sends none.
 	Groups []int `json:"groups,omitempty"`
+	// Endpoints: the runner runs codex against an OpenAI-compatible endpoint
+	// (Request.Endpoint, bridge#84). An older runner sends none and would refuse
+	// such a request (an unknown field), so the Bridge sends it none.
+	Endpoints bool `json:"endpoints,omitempty"`
 }
 
 // Credential is credential.json: the agent credential the Bridge holds in its
@@ -171,7 +181,7 @@ func DecodeCredential(data []byte, cli string) (Credential, error) {
 	}
 	switch {
 	case cli == CLIClaude && (c.Kind == CredentialOAuthToken || c.Kind == CredentialAPIKey):
-	case cli == CLICodex && c.Kind == CredentialAPIKey:
+	case cli == CLICodex && (c.Kind == CredentialAPIKey || c.Kind == CredentialEndpointKey):
 	default:
 		return Credential{}, fmt.Errorf("credential.json's kind %q isn't one %s takes", c.Kind, cli)
 	}
@@ -215,7 +225,58 @@ type Request struct {
 	NoTools        bool   `json:"no_tools"`
 	MaxTurns       int    `json:"max_turns"`       // 0 = the CLI runner's default ceiling
 	TimeoutSeconds int    `json:"timeout_seconds"` // 1 to MaxTimeoutSeconds
+	// Endpoint, for a codex run only, sends it to an OpenAI-compatible endpoint
+	// instead of OpenAI (bridge#84). Left out otherwise, so an older runner
+	// (which refuses an unknown field) still takes every other request.
+	Endpoint *Endpoint `json:"endpoint,omitempty"`
 }
+
+// Endpoint is an OpenAI-compatible API a codex run talks to: its base URL
+// (ending before /responses, like https://api.openai.com/v1). Its API key, when
+// it has one, comes as credential.json of kind CredentialEndpointKey, never here.
+type Endpoint struct {
+	BaseURL string `json:"base_url"`
+}
+
+// MaxBaseURLBytes bounds an endpoint's base URL.
+const MaxBaseURLBytes = 512
+
+// CheckBaseURL reports what is wrong with an OpenAI-compatible endpoint's base
+// URL, or nil: an absolute http or https URL with a host, printable ASCII
+// without spaces, quotes or backslashes, and no user name or password (a key
+// goes by the environment only), query or fragment. Both the Bridge (its
+// config and the page) and the runner check it.
+func CheckBaseURL(raw string) error {
+	if raw == "" {
+		return errors.New("the endpoint's address is empty")
+	}
+	if len(raw) > MaxBaseURLBytes {
+		return fmt.Errorf("the endpoint's address is longer than %d characters", MaxBaseURLBytes)
+	}
+	for i := 0; i < len(raw); i++ {
+		if c := raw[i]; c <= ' ' || c > '~' || c == '"' || c == '\\' {
+			return errors.New("the endpoint's address holds a space, a quote, a backslash or a character an address never has")
+		}
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return errors.New("the endpoint's address isn't a URL")
+	}
+	switch {
+	case u.Scheme != "http" && u.Scheme != "https":
+		return errors.New("the endpoint's address must start with http:// or https://")
+	case u.Host == "" || u.Hostname() == "":
+		return errors.New("the endpoint's address has no host")
+	case u.User != nil:
+		return errors.New("the endpoint's address must not hold a user name or password: set the API key instead")
+	case u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || strings.Contains(raw, "#"):
+		return errors.New("the endpoint's address must not have a query or a fragment")
+	}
+	return nil
+}
+
+// ValidModel reports whether name is a model name a request may carry.
+func ValidModel(name string) bool { return modelRe.MatchString(name) }
 
 // Exit is exit.json: how the run ended. Error is set when the runner couldn't run
 // the job at all (a malformed request, a missing prompt, the CLI's credential
@@ -284,6 +345,17 @@ func (r Request) Validate() error {
 	}
 	if r.TimeoutSeconds < 1 || r.TimeoutSeconds > MaxTimeoutSeconds {
 		return fmt.Errorf("request timeout_seconds %d must be between 1 and %d", r.TimeoutSeconds, MaxTimeoutSeconds)
+	}
+	if r.Endpoint != nil {
+		if r.CLI != CLICodex {
+			return fmt.Errorf("request endpoint is for codex, the request runs %q", r.CLI)
+		}
+		if err := CheckBaseURL(r.Endpoint.BaseURL); err != nil {
+			return fmt.Errorf("request endpoint: %w", err)
+		}
+		if r.Model == "" {
+			return errors.New("request endpoint has no model: an endpoint has no default codex knows")
+		}
 	}
 	return nil
 }

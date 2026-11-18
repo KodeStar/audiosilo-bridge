@@ -122,7 +122,14 @@ const (
 	// its group, and not because the staging volume refuses that (Detail says
 	// why), so no job can be handed over.
 	ProblemHandoffFailed Problem = "handoff_failed"
+	// ProblemNoEndpoint: the backend is openai-compatible, and no endpoint
+	// address is set (bridge#84).
+	ProblemNoEndpoint Problem = "no_endpoint"
 )
+
+// noEndpointDetail is the agent's state while the openai-compatible backend
+// has no endpoint address.
+const noEndpointDetail = "no OpenAI-compatible endpoint is set: set its address in Settings > Agent on the Bridge's page"
 
 // Status reads runner.json now. Detail never names a Bridge path: it becomes a
 // parked book's reason, which the server shows in its console. The path goes to
@@ -154,7 +161,17 @@ func (r *Runner) Status() Status {
 		return st
 	}
 	st.Live = rj.Protocol == agentproto.Protocol && r.now().Sub(rj.HeartbeatAt) <= agentproto.RunnerFreshFor
-	if c, ok := rj.CLIs[r.backend]; ok && c.Version != "" && c.Credential == "" && rj.Handoff {
+	if r.cli != r.backend {
+		// An endpoint (bridge#84): codex runs it, with the endpoint's key from
+		// the vault when one is set and none of the container's own, so its
+		// entry starts as codex's version alone and the hand-off below fills in
+		// the key (a runner that can't run an endpoint is outdated, below).
+		if rj.CLIs == nil {
+			rj.CLIs = map[string]agentproto.CLI{}
+		}
+		rj.CLIs[r.backend] = agentproto.CLI{Version: rj.CLIs[r.cli].Version}
+	}
+	if c, ok := rj.CLIs[r.backend]; ok && c.Version != "" && c.Credential == "" && rj.Handoff && (r.cli == r.backend || rj.Endpoints) {
 		if kind, _, since, ok := r.handoffCredential(); ok {
 			// The vault's credential stands in for the container's: its kind is what
 			// the runs are billed as, and its time moves when the Accounts tab
@@ -267,8 +284,12 @@ const CredentialRefusedDetail = "the agent's credential was refused by the provi
 
 // refusalAdvice is where a refused credential is replaced: on the Accounts tab
 // when it is the one handed over, else in the agent container, whose own
-// credential wins over the Accounts tab's.
-func refusalAdvice(handoff bool) string {
+// credential wins over the Accounts tab's; an endpoint's key in Settings >
+// Agent, whether one is set or not (a local server may take none).
+func (r *Runner) refusalAdvice(handoff bool) string {
+	if r.backend == agent.IDOpenAICompatible {
+		return ": check the endpoint's API key in Settings > Agent on the Bridge's page"
+	}
 	if handoff {
 		return ": replace it on the Bridge's Accounts tab"
 	}
@@ -315,13 +336,13 @@ func (r *Runner) refusal(c agentproto.CLI, handoff bool) string {
 		r.refused = nil
 		return ""
 	}
-	return CredentialRefusedDetail + refusalAdvice(handoff) + " (" + r.refused.detail + ")"
+	return CredentialRefusedDetail + r.refusalAdvice(handoff) + " (" + r.refused.detail + ")"
 }
 
 // unavailableBecause is why runs can't go to the container now, or "". Each
 // reason reads on its own: it is the page's status line and a parked book's
-// reason. The backend is always claude or codex (the app maps the config onto
-// one of them).
+// reason. The backend is claude, codex or openai-compatible (the app maps the
+// config onto one of them).
 func (r *Runner) unavailableBecause(rj agentproto.Runner) (problem Problem, other, why string) {
 	if rj.Protocol != agentproto.Protocol {
 		return ProblemOutdated, "", fmt.Sprintf("the agent container speaks protocol %d and this Bridge %d: run the same version of both images", rj.Protocol, agentproto.Protocol)
@@ -331,7 +352,16 @@ func (r *Runner) unavailableBecause(rj agentproto.Runner) (problem Problem, othe
 	}
 	c := rj.CLIs[r.backend]
 	if c.Version == "" {
-		return ProblemNoCLI, "", "the agent container has no " + r.backend + " CLI"
+		return ProblemNoCLI, "", "the agent container has no " + r.cli + " CLI"
+	}
+	if r.backend == agent.IDOpenAICompatible {
+		switch {
+		case !rj.Endpoints:
+			return ProblemOutdated, "", "the agent container is too old to run an OpenAI-compatible endpoint: update the agent image to this Bridge's version"
+		case r.endpoint() == "":
+			return ProblemNoEndpoint, "", noEndpointDetail
+		}
+		return "", "", "" // an endpoint may take no key (a local server)
 	}
 	if c.Credential != "" {
 		return "", "", ""

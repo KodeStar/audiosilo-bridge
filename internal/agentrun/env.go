@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kodestar/audiosilo-bridge/internal/agent"
 	"github.com/kodestar/audiosilo-bridge/internal/agentproto"
 )
 
@@ -96,6 +97,19 @@ func (r *Runner) childEnv(cli, runDir string, handed *agentproto.Credential) []s
 		case own == "" && handed != nil && handed.Kind == agentproto.CredentialAPIKey:
 			env = append(env, envOpenAI+"="+handed.Value, envCodex+"="+handed.Value)
 		}
+	}
+	return env
+}
+
+// endpointEnv is the environment of a codex run against an OpenAI-compatible
+// endpoint (bridge#84): baseEnv, a CODEX_HOME of its own under runDir (empty:
+// no device login), and the endpoint's key, when handed one, in
+// agent.EndpointKeyEnv alone. None of the container's own credentials: they are
+// for OpenAI and must never reach another endpoint.
+func (r *Runner) endpointEnv(runDir string, handed *agentproto.Credential) []string {
+	env := append(r.baseEnv(runDir), "CODEX_HOME="+filepath.Join(runDir, "codex"))
+	if handed != nil && handed.Kind == agentproto.CredentialEndpointKey {
+		env = append(env, agent.EndpointKeyEnv+"="+handed.Value)
 	}
 	return env
 }
