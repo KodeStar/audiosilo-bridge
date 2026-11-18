@@ -85,7 +85,9 @@ Only `latest-agent` carries an AI agent CLI (decision 15). `latest`, `latest-sli
 and `latest-cuda` also carry the ASR worker builds the Bridge serves. Run it as the compose
 example does: user 10002 with the Bridge's PGID added (`group_add`, so the agent
 credential the Bridge hands it is readable by that group alone), all capabilities
-dropped, a read-only root, its own network.
+dropped, a read-only root, its own network. The server's console shows which way
+the credential goes (Settings > Bridge), and once a fix is in place the Bridge
+notices within a few minutes, no restart needed.
 
 ## Add an ASR worker (transcription on another computer)
 
@@ -138,7 +140,7 @@ folder is `/bridge-data` in the images (`AUDIOSILO_BRIDGE_DATA`), else
 | `agent.backend` | `AUDIOSILO_BRIDGE_AGENT_BACKEND` | `claude` | the CLI the agent container runs: `claude` or `codex` |
 | `agent.staging_dir` | `AUDIOSILO_BRIDGE_AGENT_STAGING_DIR` | `<data>/staging` | the folder shared with the agent container (an absolute path; compose uses `/staging`) |
 | `agent.claim_timeout_seconds` | `AUDIOSILO_BRIDGE_AGENT_CLAIM_TIMEOUT_SECONDS` | `120` | how long a job waits for the agent container to pick it up before the book waits and tries again (10 to 3600) |
-| `agent.require_group` | `AUDIOSILO_BRIDGE_AGENT_REQUIRE_GROUP` | `false` | keep the Accounts tab's agent credential to the Bridge's group in every case: where the Bridge would otherwise hand it to every user on the staging volume (the agent container isn't in the group, the volume refuses the chown, the two containers map ids differently), the agent waits instead, saying why |
+| `agent.require_group` | `AUDIOSILO_BRIDGE_AGENT_REQUIRE_GROUP` | `false` | keep the Accounts tab's agent credential to the Bridge's group in every case: where the Bridge would otherwise hand it to every user on the staging volume (the agent container isn't in the group, the volume refuses the chown, the two containers map ids differently), the agent waits instead, saying why, and goes on by itself once the cause is fixed |
 | `agent.monthly_budget_usd` | `AUDIOSILO_BRIDGE_AGENT_MONTHLY_BUDGET_USD` | `100` | the agent spend cap for a calendar month (UTC), across every book; `0` is no cap. Over it, books wait until the 1st |
 | `agent.book_budget_usd` | `AUDIOSILO_BRIDGE_AGENT_BOOK_BUDGET_USD` | `75` | the agent spend cap for one book |
 | `podcasts.allow_networks` | `AUDIOSILO_BRIDGE_PODCASTS_ALLOW_NETWORKS` (comma-separated CIDRs) | | private networks podcast feeds and artwork may come from; only for trusted feed hosts on your LAN (a list warns at start and on Status). Applies at the next start |
