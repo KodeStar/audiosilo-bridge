@@ -152,6 +152,11 @@ func New(opts Options) (*Runner, error) {
 	if opts.Slots < 1 || opts.Slots > MaxSlots {
 		return nil, fmt.Errorf("agent runner: --slots must be between 1 and %d", MaxSlots)
 	}
+	if opts.EndpointOnly && opts.Slots > 1 {
+		// Concurrent runs would share the service's user: a run's commands
+		// could read the other run's environment, its key with it.
+		return nil, errors.New("agent runner: --endpoint-only runs one job at a time (--slots 1)")
+	}
 	if opts.Getenv == nil {
 		opts.Getenv = os.LookupEnv
 	}

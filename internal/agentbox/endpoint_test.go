@@ -420,6 +420,27 @@ func TestEndpointRefusedBesideOwnCredentials(t *testing.T) {
 // one running as the agent container's user, the agent isn't ready, says why,
 // and nothing is staged (denied); a service of its own is ready (allowed, as
 // is one beside an agent container that isn't running). And the claude and
+// The endpoint backend runs one job at a time whatever runner.json says: a
+// run can rewrite it, and a job staged beside a live run holds a key that run
+// could read (denied: slots 4 read as 1; allowed: claude follows the file).
+func TestEndpointSlotsCappedAtOne(t *testing.T) {
+	t.Parallel()
+	r, dir, _ := endpointRunner(t, "")
+	rj := endpointService()
+	rj.Slots = 4
+	writeRunnerJSON(t, dir, rj)
+	if st := r.Status(); st.Slots != 1 {
+		t.Fatalf("endpoint slots = %d, want 1", st.Slots)
+	}
+	c, cdir := newTestRunner(t, agent.IDClaude)
+	crj := handoffRunner(true)
+	crj.Slots = 4
+	writeRunnerJSON(t, cdir, crj)
+	if st := c.Status(); st.Slots != 4 {
+		t.Fatalf("claude slots = %d, want runner.json's 4", st.Slots)
+	}
+}
+
 // codex backends never send their runs to the endpoint's service.
 func TestEndpointServiceRequired(t *testing.T) {
 	t.Parallel()

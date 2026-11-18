@@ -648,10 +648,29 @@ func TestRunnerJSON(t *testing.T) {
 
 func TestNewRefusesBadOptions(t *testing.T) {
 	t.Parallel()
-	for _, o := range []Options{{Home: "/agent"}, {Staging: "/staging"}, {Staging: "/s", Home: "/a", Slots: -1}, {Staging: "/s", Home: "/a", Slots: MaxSlots + 1}} {
+	for _, o := range []Options{{Home: "/agent"}, {Staging: "/staging"}, {Staging: "/s", Home: "/a", Slots: -1}, {Staging: "/s", Home: "/a", Slots: MaxSlots + 1},
+		{Staging: "/s", Home: "/a", Slots: 2, EndpointOnly: true}} {
 		if _, err := New(o); err == nil {
 			t.Errorf("New(%+v) accepted", o)
 		}
+	}
+	// The endpoint's service runs one job at a time (allowed: one slot).
+	if _, err := New(Options{Staging: "/s", Home: "/a", Slots: 1, EndpointOnly: true}); err != nil {
+		t.Errorf("one slot refused: %v", err)
+	}
+}
+
+// The endpoint's service starts only as its container's first process: any
+// other there shares its user (denied: a test process, never pid 1; allowed
+// is the agent image's own start, which the verifier runs).
+func TestEndpointServiceStartsOnlyAsPID1(t *testing.T) {
+	t.Parallel()
+	if !supported || os.Getpid() == 1 {
+		t.Skip("runs where the runner runs, and not as pid 1")
+	}
+	err := Main(context.Background(), Options{Staging: t.TempDir(), Home: filepath.Join(t.TempDir(), "agent"), EndpointOnly: true})
+	if err == nil || !strings.Contains(err.Error(), "first process") {
+		t.Fatalf("Main = %v, want the pid 1 refusal", err)
 	}
 }
 

@@ -3765,9 +3765,18 @@ internal/
             (Setsid, so nothing joins another run's group), and the sweep
             (sweep.go, killStrays over /proc) before each CLI starts and after it
             ends SIGKILLs the runner's children in a session that isn't a running
-            CLI's or the runner's own, with all they started, and reaps them.
-            Concurrent runs (--slots over 1) of that service still share it: a
-            run's commands could read a concurrent run's environment.
+            CLI's or the runner's own, with all they started, and reaps them;
+            where the pid namespace holds nothing else (onlyStrays) a kill(-1)
+            follows, which no fork slips past. The sweep, the CLI's start and
+            its session's record hold sweepMu together, so another slot's sweep
+            never takes a CLI just started for a stray. That service never runs
+            a job its own uid made (planted: the job dir or request.json owned
+            by selfUID): a run could leave one in the staging dir to run again.
+            It runs one job at a time (New refuses --slots over 1, and the
+            Bridge's Status caps the endpoint backend's slots at 1 whatever
+            runner.json says): concurrent runs share its user. Main refuses to
+            start unless it is its container's pid 1 (no tini): any other
+            process there shares its user, dumpable and traceable by a run.
   endpoint/ bridge#84: Settings > Agent's Test connection, a leaf (standard library
             only). Check(ctx, client, base, key): GET <base>/models (Bearer key
             when set), then POST <base>/responses with {} to learn whether the

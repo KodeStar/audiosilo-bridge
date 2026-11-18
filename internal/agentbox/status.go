@@ -232,6 +232,12 @@ func (r *Runner) Status() Status {
 		}
 	}
 	st.Version, st.Slots, st.HeartbeatAt, st.CLIs = rj.Version, rj.Slots, rj.HeartbeatAt, rj.CLIs
+	if r.backend == agent.IDOpenAICompatible {
+		// One endpoint run at a time, whatever runner.json says: a run can
+		// rewrite it, and a job staged beside a live run holds a key that run
+		// could read (the runner refuses --slots over 1 too).
+		st.Slots = min(st.Slots, 1)
+	}
 	st.groupListed = slices.Contains(rj.Groups, r.gid)
 	st.ShareGroup = r.shareGroup(st.groupListed, info, st.Live)
 	st.Problem, st.Other, st.Detail = r.unavailableBecause(rj, info)

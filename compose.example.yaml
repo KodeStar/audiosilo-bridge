@@ -158,6 +158,9 @@ services:
     # The bridge's PGID, as for the agent container: the endpoint's key is
     # handed to this group alone.
     group_add: [*bridge_pgid]
+    # The runner is the container's first process, with no tini before it: a
+    # run's commands share its user, and could read or trace any other.
+    entrypoint: ["audiosilo-bridge"]
     command: ["agent-runner", "--endpoint-only", "--staging", "/staging"]
     volumes:
       - endpoint-staging:/staging
