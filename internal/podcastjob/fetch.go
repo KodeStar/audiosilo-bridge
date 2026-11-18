@@ -95,10 +95,13 @@ func (b *budget) tighten(total int64) {
 }
 func (b *budget) close() { b.timer.Stop(); b.cancel(nil) }
 
+// overBudget reports whether ctx (a budget's) was stopped by its ceiling.
+func overBudget(ctx context.Context) bool { return errors.Is(context.Cause(ctx), errOverBudget) }
+
 // failure is err as the job reports it: a stop the ceiling made (ctx is the
 // budget's) is the episode's timeout wherever it surfaced.
 func (b *budget) failure(ctx context.Context, err error) error {
-	if (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) && errors.Is(context.Cause(ctx), errOverBudget) {
+	if (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) && overBudget(ctx) {
 		return fail("timeout", "The episode download did not finish in time.")
 	}
 	return err
@@ -223,7 +226,7 @@ func (h *Fetch) run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (_
 	err = func() error {
 		defer unlockShow()
 		if err := rep.ConfirmLease(ctx); err != nil {
-			if errors.Is(context.Cause(ctx), errOverBudget) {
+			if overBudget(ctx) {
 				return ctx.Err() // the ceiling passed: the episode's timeout (b.failure), not a lost claim
 			}
 			return leaseFailure(ctx, err, "The episode job no longer owns its claim.")
