@@ -164,13 +164,12 @@ func (r *Runner) Status() Status {
 // shareGroup reports whether a handed credential goes to the Bridge's group
 // alone, by runner.json (read from info; listed when its groups hold the
 // Bridge's; live when its heartbeat is fresh in this protocol): when listed,
-// and also when another
-// uid than the runner's wrote it (trust.go), so a forged one can't move the
-// credential to every uid. Never once the runner was denied the group's
-// credential (Run).
+// and also when another uid than the runner's wrote it (trust.go), so a
+// forged one can't move the credential to every uid. Never while the runner
+// is denied the group's credential (Run, until a group probe ends it).
 func (r *Runner) shareGroup(listed bool, info fs.FileInfo, live bool) bool {
-	// Read (and pinned) first whatever the answer: a group probe believes only
-	// the pinned runner's claim (probe.go).
+	// Read (and pinned) first whatever the answer: a group probe believes a
+	// denial only from the pinned runner (probe.go).
 	uid, own := r.fromRunner(info, live)
 	if r.groupDenied.Load() {
 		return false
