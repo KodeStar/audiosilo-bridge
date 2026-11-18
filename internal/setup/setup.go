@@ -79,8 +79,12 @@ const (
 		"characters, recaps and descriptions"
 )
 
-// agentNoCLI is the detail while the agent image has no CLI for backend.
+// agentNoCLI is the detail while the agent image has no CLI for backend
+// (codex for an OpenAI-compatible endpoint, which codex runs: bridge#84).
 func agentNoCLI(backend string) string {
+	if backend == "openai-compatible" {
+		backend = "codex"
+	}
 	return "the agent image has no " + backend + " CLI: use this Bridge's agent image; " + agentFor
 }
 

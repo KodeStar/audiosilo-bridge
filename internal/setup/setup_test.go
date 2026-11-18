@@ -216,6 +216,7 @@ func TestChecklistAgentProblems(t *testing.T) {
 		{Agent{Backend: "claude", Problem: AgentGroupRequired}, DetailAgentGroupRequired},
 		{Agent{Backend: "claude", Problem: AgentHandoffFailed}, DetailAgentHandoffFailed},
 		{Agent{Backend: "openai-compatible", Problem: AgentNoEndpoint}, DetailAgentNoEndpoint},
+		{Agent{Backend: "openai-compatible", Problem: AgentNoCLI}, "the agent image has no codex CLI: use this Bridge's agent image; " + agentFor},
 	} {
 		in := done()
 		in.Agent = c.agent
