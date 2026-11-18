@@ -183,7 +183,7 @@ func (b *Bridge) runEngine(ctx context.Context) {
 	contribSvc := contrib.NewService(contrib.ServiceDeps{
 		DB: b.db, CoreRepo: cfg.Contribution.CoreRepo, BaseURL: cfg.Contribution.APIBaseURL, Tokens: tokens,
 		Publish: func(u contrib.ContribUpdate) { _ = hub.PublishBook("contrib.update", u.BookID, u) },
-		Readmit: sched.Retry,
+		Readmit: sched.RetryAsRead,
 		ResolveWork: func(ctx context.Context, workID string) (string, error) {
 			cov, err := metaClient.FreshCoverageForWork(ctx, workID)
 			switch {

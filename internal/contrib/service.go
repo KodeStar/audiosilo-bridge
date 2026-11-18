@@ -63,9 +63,10 @@ type ServiceDeps struct {
 	Tokens TokenResolver
 	// Publish fans a contribution-row change out as an SSE `contrib.update`.
 	Publish func(ContribUpdate)
-	// Readmit re-admits a parked book to the scheduler (scheduler.Retry): used when
-	// a core PR merges (poller) or the work is set manually (SetWork).
-	Readmit func(ctx context.Context, id int64) error
+	// Readmit re-admits a parked book, as the caller read it, to the scheduler
+	// (scheduler.RetryAsRead: never a book cancelled since that read, bridge#65):
+	// used when a core PR merges (poller) or the work is set manually (SetWork).
+	Readmit func(ctx context.Context, b store.Book) error
 	// ResolveWork checks a work id is LIVE in the published catalogue and returns
 	// the slug it is live under: the id itself, or - for a slug a merge retired -
 	// the survivor the catalogue redirects it to. It returns (workID, nil) when the
@@ -286,7 +287,7 @@ func (s *Service) SetWork(ctx context.Context, book store.Book, workID string) e
 		return fmt.Errorf("contrib: set work id: %w", err)
 	}
 	if awaitingWork(book) && s.deps.Readmit != nil {
-		if err := s.deps.Readmit(ctx, book.ID); err != nil {
+		if err := s.deps.Readmit(ctx, book); err != nil {
 			return fmt.Errorf("contrib: re-admit book: %w", err)
 		}
 	}

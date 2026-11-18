@@ -7,9 +7,13 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/kodestar/audiosilo-bridge/internal/events"
+	"github.com/kodestar/audiosilo-bridge/internal/jobs"
+	"github.com/kodestar/audiosilo-bridge/internal/scheduler"
 	"github.com/kodestar/audiosilo-bridge/internal/state"
 	"github.com/kodestar/audiosilo-bridge/internal/store"
 )
@@ -619,7 +623,7 @@ func mustWrite(t *testing.T, path, content string) {
 // between its read and its write (the scheduler's store.ErrStatusChanged).
 type racedRetryEngine struct{ Engine }
 
-func (racedRetryEngine) Retry(context.Context, int64) error { return store.ErrStatusChanged }
+func (racedRetryEngine) RetryAsRead(context.Context, store.Book) error { return store.ErrStatusChanged }
 
 // A person's Retry that races a re-park answers "the book changed, try again"
 // (a conflict on the page), never the store's raw error (bridge#65); one that
@@ -656,7 +660,116 @@ type retryEngine struct {
 	retried *int64
 }
 
-func (e retryEngine) Retry(_ context.Context, id int64) error {
-	*e.retried = id
+func (e retryEngine) RetryAsRead(_ context.Context, b store.Book) error {
+	*e.retried = b.ID
 	return nil
+}
+
+// cancelFirstEngine is the engine with a Cancel landing on the book just before
+// each Retry reads it: the job's end racing a person's Retry of the parked job.
+type cancelFirstEngine struct{ *scheduler.Scheduler }
+
+func (e cancelFirstEngine) Retry(ctx context.Context, id int64) error {
+	_ = e.Cancel(ctx, id)
+	return e.Scheduler.Retry(ctx, id)
+}
+
+func (e cancelFirstEngine) RetryAsRead(ctx context.Context, b store.Book) error {
+	_ = e.Cancel(ctx, b.ID)
+	return e.Scheduler.RetryAsRead(ctx, b)
+}
+
+// bridge#65 (P1): a person's Retry of a parked job reads the book parked; a
+// Cancel landing before the engine re-admits it (the job's end) leaves the book
+// cancelled and the Retry says the book changed, where the engine's own read used
+// to find a cancelled book and take it up again with no job left to follow it.
+func TestRetryNeverTakesUpABookCancelledAfterItsRead(t *testing.T) {
+	t.Parallel()
+	db, err := store.Open(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	ctx := context.Background()
+	b, err := db.CreateBook(ctx, store.NewBook{SourcePath: "/lib/parked", WorkDir: t.TempDir(), Title: "parked"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = db.SetBookState(ctx, b.ID, "fact_pass", "needs_attention", "the fact pass kept failing its checks", "agent_validation_exhausted")
+	_ = db.PutGenerateBook(ctx, store.GenerateBook{ServerJobID: 1, BookID: &b.ID, LibraryID: 1, RelPath: "parked"})
+	sched := scheduler.New(db, events.NewHub(8), scheduler.NewStubExecutor(0, 0), 1, "", false)
+	h := New(Options{DB: db, Engine: func() Engine { return cancelFirstEngine{sched} }, Poll: time.Millisecond})
+	if err := h.Retry(ctx, 1); !errors.Is(err, ErrBookChanged) {
+		t.Fatalf("a Retry over a cancel = %v, want ErrBookChanged", err)
+	}
+	if got, _ := db.GetBook(ctx, b.ID); !scheduler.IsCancelled(got) {
+		t.Fatalf("the cancelled book was taken up again: status %q error %q", got.Status, got.Error)
+	}
+}
+
+// bridge#65: the runner records a job lost (another server's job at a start)
+// only after Abandon returns, and a job waiting for that end reads the row. With
+// the engine not started yet, Abandon used to leave the book to a goroutine that
+// waited for it; now the book is cancelled in the store and the end recorded
+// before Abandon returns. Once the engine is up, a book the start's reconcile
+// wrote back over the cancel is stopped again, unless another job follows it.
+func TestAbandonBeforeTheEngineStartsStopsTheBookAtOnce(t *testing.T) {
+	t.Parallel()
+	db, err := store.Open(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	ctx := context.Background()
+	newBook := func(job int64, slug string) store.Book {
+		b, err := db.CreateBook(ctx, store.NewBook{SourcePath: "/lib/" + slug, WorkDir: t.TempDir(), Title: slug})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = db.SetBookState(ctx, b.ID, "asr", "", "", "")
+		if err := db.PutGenerateBook(ctx, store.GenerateBook{ServerJobID: job, BookID: &b.ID, LibraryID: 1, RelPath: slug}); err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	b := newBook(5, "dropped")
+	sched := scheduler.New(db, events.NewHub(8), scheduler.NewStubExecutor(0, 0), 1, "", false)
+	var up atomic.Bool
+	h := New(Options{DB: db, RetentionDays: 30, Poll: time.Millisecond, Engine: func() Engine {
+		if up.Load() {
+			return sched
+		}
+		return nil
+	}})
+	h.Abandon(ctx, jobs.Job{ID: 5, Kind: Kind, Attempt: 1})
+	got, _ := db.GetBook(ctx, b.ID)
+	g, _ := db.GetGenerateBook(ctx, 5)
+	if !scheduler.IsCancelled(got) || g.EndedAt == "" {
+		t.Fatalf("after Abandon with no engine: status %q error %q, ended %q; want cancelled and ended",
+			got.Status, got.Error, g.EndedAt)
+	}
+	// The start's reconcile writes the status it read back over the cancel.
+	if err := db.SetBookStatus(ctx, b.ID, "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	up.Store(true)
+	deadline := time.Now().Add(10 * time.Second)
+	for got, _ = db.GetBook(ctx, b.ID); !scheduler.IsCancelled(got); got, _ = db.GetBook(ctx, b.ID) {
+		if time.Now().After(deadline) {
+			t.Fatalf("the book runs with no job once the engine is up: status %q", got.Status)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	// A book another open job follows now (a new job took it up) is left to it.
+	taken := newBook(6, "taken")
+	if err := db.RecordClaim(ctx, store.ServerJob{ID: 7, Kind: Kind, Attempt: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.PutGenerateBook(ctx, store.GenerateBook{ServerJobID: 7, BookID: &taken.ID, LibraryID: 1, RelPath: "taken"}); err != nil {
+		t.Fatal(err)
+	}
+	h.stopStartedStage(ctx, 6, taken.ID)
+	if got, _ := db.GetBook(ctx, taken.ID); got.Status != "" {
+		t.Fatalf("a book another job follows was stopped: status %q", got.Status)
+	}
 }

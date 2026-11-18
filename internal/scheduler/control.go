@@ -82,6 +82,15 @@ func (s *Scheduler) Retry(ctx context.Context, id int64) error {
 	if err != nil {
 		return err
 	}
+	return s.RetryAsRead(ctx, b)
+}
+
+// RetryAsRead is Retry for a book the caller has read already (b): it re-admits
+// the book only while it still carries b's status and error, so a Cancel landing
+// after the caller's read (a job's Retry that read the book parked) is never taken
+// up as a Retry of the cancelled book: store.ErrStatusChanged, and nothing changed
+// (bridge#65).
+func (s *Scheduler) RetryAsRead(ctx context.Context, b store.Book) error {
 	switch state.Status(b.Status) {
 	case state.StatusFailed, state.StatusNeedsAttention:
 		return s.readmit(ctx, b)
@@ -129,10 +138,10 @@ func logReadmitFailed(log *slog.Logger, what string, bookID int64, err error) {
 	log.Warn(what+": readmit failed", "book_id", bookID, "err", err)
 }
 
-// readmit is the shared re-admission body: it forces the book's current stage to
-// re-run (drop its sentinel), clears the status/error/park_code (and the scheduled
-// retry_at, via SetBookStatus), and wakes the dispatch loop. Retry (the manual control)
-// gates on status first; the scheduler's timed auto-readmit calls it directly for a due
+// readmit is the shared re-admission body: it clears the status/error/park_code
+// (and the scheduled retry_at), forces the book's current stage to re-run (drops
+// its sentinel), and wakes the dispatch loop. Retry (the manual control) gates on
+// status first; the scheduler's timed auto-readmit calls it directly for a due
 // transient-agent park. It takes b so a caller that already read the book does not
 // re-query.
 //
@@ -144,10 +153,34 @@ func logReadmitFailed(log *slog.Logger, what string, bookID int64, err error) {
 // agent_unavailable) or a budget park readmitted mid-stage (e.g. at auditing) must not wipe the
 // convergence trajectory it had already built. A plain failed-book Retry has no success rows at
 // the current stage anyway, so leaving them alone is a harmless no-op there.
+//
+// The status is cleared FIRST, and only while the book still carries the status
+// and error read into b: a Cancel landing since (a supervisor tick racing it,
+// bridge#37) is never undone, and then nothing else is changed either, the
+// sentinel, the successes and the audit files included (bridge#65). The dispatch
+// loop is held off the book meanwhile (holdDispatch), so it never starts the stage
+// between the clear and the sentinel's removal (it would replay the sentinel). A
+// change that fails after the clear puts the read status back. A crash between the
+// two leaves the book admitted with its sentinel: the restart replays the stage's
+// outcome, which parks a round-cap park again, for the next Retry.
 func (s *Scheduler) readmit(ctx context.Context, b store.Book) error {
-	id := b.ID
-	stage := b.State
-	_ = os.Remove(SentinelPath(b.WorkDir, stage)) // best-effort; force a clean re-run
+	release := s.holdDispatch(b.ID)
+	defer release()
+	if err := s.db.ClearBookStatusIf(ctx, b.ID, b.Status, b.Error); err != nil {
+		return err
+	}
+	if err := s.forceRerun(ctx, b); err != nil {
+		s.restoreStatus(ctx, b)
+		return err
+	}
+	s.publishState(b.ID, b.State, "", "", "", "")
+	return nil
+}
+
+// forceRerun is readmit's change to an admitted book (see readmit): the store's
+// writes first, which can fail, then the files.
+func (s *Scheduler) forceRerun(ctx context.Context, b store.Book) error {
+	id, stage := b.ID, b.State
 	// Reset the current stage's round/fix counter ONLY for the round-cap parks (grant one
 	// fresh round). Availability/budget parks keep their successes so their trajectory survives.
 	if b.ParkCode == string(state.ParkQANoConverge) || b.ParkCode == string(state.ParkFixLoopExhausted) {
@@ -168,16 +201,62 @@ func (s *Scheduler) readmit(ctx context.Context, b store.Book) error {
 		_ = os.Remove(filepath.Join(b.WorkDir, AuditRoundsFile))
 		_ = os.Remove(filepath.Join(b.WorkDir, AuditAcceptedFile))
 	}
-	// Clearing the status clears the error, the typed park_code, and any scheduled
-	// retry_at together, and only while the book still carries the status and error
-	// read into b: a Cancel landing since (a supervisor tick racing it, bridge#37) is
-	// never undone, so a cancelled book never runs again with no job following it.
-	if err := s.db.ClearBookStatusIf(ctx, id, b.Status, b.Error); err != nil {
-		return err
-	}
-	s.publishState(id, b.State, "", "", "", "")
-	s.notify()
+	_ = os.Remove(SentinelPath(b.WorkDir, stage)) // best-effort; force a clean re-run
 	return nil
+}
+
+// restoreStatus puts back the status, error, park code and retry_at a control
+// change cleared from b (as read) when the change then failed, unless the book's
+// status moved on since the clear (a Cancel).
+func (s *Scheduler) restoreStatus(ctx context.Context, b store.Book) {
+	err := s.db.SetBookStatusIf(context.WithoutCancel(ctx), b.ID, "", "", b.Status, b.Error, b.ParkCode, b.RetryAt)
+	if err != nil && !errors.Is(err, store.ErrStatusChanged) {
+		slog.Warn("scheduler: putting a book's status back failed", "book_id", b.ID, "err", err)
+	}
+}
+
+// holdDispatch keeps the dispatch loop from starting a stage on book id while a
+// control change rewrites it in steps (readmit, supersede_rerun): no stage starts
+// on it until release, nor in a pass that read its books before release
+// (dispatchableLocked). release wakes the loop; calling it again does nothing.
+func (s *Scheduler) holdDispatch(id int64) (release func()) {
+	s.mu.Lock()
+	s.held[id]++
+	s.mu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			s.mu.Lock()
+			if s.held[id]--; s.held[id] <= 0 {
+				delete(s.held, id)
+			}
+			s.holdSeq++
+			s.releasedAt[id] = s.holdSeq
+			s.mu.Unlock()
+			s.notify()
+		})
+	}
+}
+
+// beginPass marks where a dispatch pass starts reading its books: a hold released
+// after this mark keeps its book out of the pass. Marks the pass has passed are
+// dropped.
+func (s *Scheduler) beginPass() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.passSeq = s.holdSeq
+	for id, seq := range s.releasedAt {
+		if seq <= s.passSeq {
+			delete(s.releasedAt, id)
+		}
+	}
+}
+
+// dispatchableLocked reports whether the pass may start a stage on book id: no
+// control change holds it, and none released it after the pass read its books.
+// Called under mu.
+func (s *Scheduler) dispatchableLocked(id int64) bool {
+	return s.held[id] == 0 && s.releasedAt[id] <= s.passSeq
 }
 
 // cancelledReason is the error a cancelled book carries (the status enum has no
@@ -194,20 +273,35 @@ func IsCancelled(b store.Book) bool {
 // with a "cancelled" reason (the status enum has no dedicated cancelled state).
 // A cancelled book can later be retried or deleted.
 func (s *Scheduler) Cancel(ctx context.Context, id int64) error {
-	b, err := s.db.GetBook(ctx, id)
+	b, err := markCancelled(ctx, s.db, id)
 	if err != nil {
-		return err
-	}
-	if state.IsTerminal(state.State(b.State)) {
-		return ErrInvalidOp
-	}
-	// Cancel is not a park (no typed reason), so the park_code stays empty.
-	if err := s.db.SetBookStatus(ctx, id, string(state.StatusFailed), cancelledReason, ""); err != nil {
 		return err
 	}
 	s.cancelInflight(id)
 	s.publishState(id, b.State, string(state.StatusFailed), cancelledReason, "", "")
 	return nil
+}
+
+// CancelStored is Cancel for a caller with no scheduler running (the Bridge's
+// engine hasn't started yet): the store's write is the whole cancel, since no
+// stage runs to interrupt, and the scheduler reads the book cancelled when it
+// starts. ErrInvalidOp for a finished book, as Cancel.
+func CancelStored(ctx context.Context, db *store.DB, id int64) error {
+	_, err := markCancelled(ctx, db, id)
+	return err
+}
+
+// markCancelled marks book id cancelled in the store and returns it as read.
+func markCancelled(ctx context.Context, db *store.DB, id int64) (store.Book, error) {
+	b, err := db.GetBook(ctx, id)
+	if err != nil {
+		return b, err
+	}
+	if state.IsTerminal(state.State(b.State)) {
+		return b, ErrInvalidOp
+	}
+	// Cancel is not a park (no typed reason), so the park_code stays empty.
+	return b, db.SetBookStatus(ctx, id, string(state.StatusFailed), cancelledReason, "")
 }
 
 // Delete removes a book, its durable state, and its on-disk work dir. It refuses

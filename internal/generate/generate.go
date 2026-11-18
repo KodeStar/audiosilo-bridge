@@ -44,6 +44,9 @@ const Kind = "sidecars.generate"
 type Engine interface {
 	Notify()
 	Retry(ctx context.Context, id int64) error
+	// RetryAsRead re-admits book b as the caller read it: store.ErrStatusChanged
+	// when its status or error changed since (a Cancel landing between).
+	RetryAsRead(ctx context.Context, b store.Book) error
 	Cancel(ctx context.Context, id int64) error
 	Delete(ctx context.Context, id int64) error
 	ETASeconds(id int64) (int64, bool)
@@ -530,21 +533,42 @@ func (h *Handler) Abandon(ctx context.Context, job jobs.Job) {
 	if err != nil || m.BookID == nil || m.EndedAt != "" {
 		return
 	}
-	if h.o.Engine() != nil {
-		h.release(ctx, job, *m.BookID, true)
+	engineUp := h.o.Engine() != nil
+	// Released now, before Abandon returns, even with no engine yet (a restart
+	// resumes its jobs at the first heartbeat, which can come before the engine has
+	// started: its first start may download ffmpeg): stopBook then cancels the book
+	// in the store, which nothing runs yet. The runner records the job lost only
+	// after Abandon returns, and a job waiting for this one's end
+	// (awaitOpenJobEnd) reads that row: it must find the book stopped (bridge#65).
+	h.release(ctx, job, *m.BookID, true)
+	if !engineUp {
+		go h.stopStartedStage(ctx, job.ID, *m.BookID)
+	}
+}
+
+// stopStartedStage waits for the engine to start, then stops a stage it began on
+// book bookID before the store's cancel landed (its scheduler starts beside the
+// Bridge's jobs) or a status a start's reconcile wrote back over the cancel: the
+// book stays stopped unless another open job follows it now (a Retry or a new
+// job took it up).
+func (h *Handler) stopStartedStage(ctx context.Context, jobID, bookID int64) {
+	eng := h.o.Engine()
+	for eng == nil {
+		if agent.SleepCtx(ctx, h.o.Poll) != nil {
+			return
+		}
+		eng = h.o.Engine()
+	}
+	b, err := h.o.DB.GetBook(ctx, bookID)
+	if err != nil || (finished(b.State, b.Status) && !scheduler.IsCancelled(b)) {
 		return
 	}
-	// A restart resumes its jobs at the first heartbeat, which can come before the
-	// engine has started (its first start may download ffmpeg): the book is
-	// released once it has.
-	go func() {
-		for h.o.Engine() == nil {
-			if agent.SleepCtx(ctx, h.o.Poll) != nil {
-				return
-			}
-		}
-		h.release(ctx, job, *m.BookID, true)
-	}()
+	if open, err := h.o.DB.OpenGenerateJobsForBook(ctx, bookID, jobID); err != nil || len(open) > 0 {
+		return
+	}
+	if err := eng.Cancel(ctx, bookID); err != nil && !errors.Is(err, scheduler.ErrInvalidOp) {
+		h.o.Log.Warn("generate: cancelling the engine book failed", "job", jobID, "book", bookID, "err", err)
+	}
 }
 
 // release ends a job's hold on its engine book: a job that didn't finish stops
@@ -582,14 +606,11 @@ func (h *Handler) release(ctx context.Context, job jobs.Job, bookID int64, stop 
 
 // stopBook cancels a job's engine book unless it already ended (done, or
 // failed: a cancel would overwrite its error) or another open job follows it now
-// (a generate job continued the chapters run, so a late end of the chapters job,
-// one Abandon releases once the engine starts, leaves it to that job). It
-// reports whether it left the book to another open job.
+// (a generate job continued the chapters run, so a late end of the chapters job
+// leaves it to that job). With no engine yet the cancel is the store's alone
+// (scheduler.CancelStored): nothing runs the book to interrupt. It reports
+// whether it left the book to another open job.
 func (h *Handler) stopBook(ctx context.Context, jobID, bookID int64) (followed bool) {
-	eng := h.o.Engine()
-	if eng == nil {
-		return false
-	}
 	b, err := h.o.DB.GetBook(ctx, bookID)
 	if err != nil || finished(b.State, b.Status) {
 		return false
@@ -597,7 +618,12 @@ func (h *Handler) stopBook(ctx context.Context, jobID, bookID int64) (followed b
 	if open, err := h.o.DB.OpenGenerateJobsForBook(ctx, bookID, jobID); err != nil || len(open) > 0 {
 		return err == nil
 	}
-	if err := eng.Cancel(ctx, bookID); err != nil && !errors.Is(err, scheduler.ErrInvalidOp) {
+	if eng := h.o.Engine(); eng != nil {
+		err = eng.Cancel(ctx, bookID)
+	} else {
+		err = scheduler.CancelStored(ctx, h.o.DB, bookID)
+	}
+	if err != nil && !errors.Is(err, scheduler.ErrInvalidOp) {
 		h.o.Log.Warn("generate: cancelling the engine book failed", "job", jobID, "book", bookID, "err", err)
 	}
 	return false
@@ -1596,7 +1622,9 @@ func (h *Handler) Retry(ctx context.Context, jobID int64) error {
 		}
 		return ErrNotParked
 	}
-	if err := eng.Retry(ctx, b.ID); err != nil {
+	// The engine re-admits the book only as read here: a Cancel landing since (the
+	// job's end) is never taken up as a Retry of the cancelled book (bridge#65).
+	if err := eng.RetryAsRead(ctx, b); err != nil {
 		switch {
 		case errors.Is(err, scheduler.ErrInvalidOp):
 			return ErrNotParked

@@ -80,6 +80,16 @@ type Scheduler struct {
 
 	mu       sync.Mutex
 	inflight map[int64]*inflightBook
+	// held counts the control changes rewriting a book in steps now (readmit,
+	// supersede_rerun: holdDispatch), during which no stage starts on it.
+	// releasedAt is the holdSeq each such change ended at, and passSeq the holdSeq
+	// a dispatch pass began reading its books at: a pass that read a book before
+	// its change ended doesn't start it either (it may have read it half changed);
+	// the release wakes the loop for a fresh read. All under mu.
+	held       map[int64]int
+	releasedAt map[int64]uint64
+	holdSeq    uint64
+	passSeq    uint64
 
 	// lastStats is the most recently published queue.stats, so an idle tick that
 	// recomputes an identical snapshot skips the SSE frame + durable insert. Only
@@ -171,15 +181,17 @@ func New(db *store.DB, hub *events.Hub, exec Executor, agentCap int, workRoot st
 		agentCap = 1
 	}
 	s := &Scheduler{
-		db:        db,
-		hub:       hub,
-		exec:      exec,
-		autoPurge: autoPurge,
-		workRoot:  workRoot,
-		wake:      make(chan struct{}, 1),
-		inflight:  map[int64]*inflightBook{},
-		rates:     map[string]float64{},
-		bookETA:   map[int64]int64{},
+		db:         db,
+		hub:        hub,
+		exec:       exec,
+		autoPurge:  autoPurge,
+		workRoot:   workRoot,
+		wake:       make(chan struct{}, 1),
+		inflight:   map[int64]*inflightBook{},
+		held:       map[int64]int{},
+		releasedAt: map[int64]uint64{},
+		rates:      map[string]float64{},
+		bookETA:    map[int64]int64{},
 	}
 	s.agentCap.Store(int64(agentCap))
 	return s
@@ -405,6 +417,7 @@ func (s *Scheduler) dispatch() {
 	// Timed self-resume: re-admit any book whose transient-agent park window has
 	// elapsed BEFORE advancing waypoints, so a healed book is dispatched this same pass.
 	s.autoReadmitDue(ctx)
+	s.beginPass()
 	// advanceWaypoints promotes queued/ready books until none remain and returns
 	// the resulting fresh list, so dispatch never re-queries.
 	books, finished, err := s.advanceWaypoints(ctx)
@@ -726,10 +739,11 @@ func (s *Scheduler) fillLaneLimited(candidates []store.Book, lane state.Lane, fr
 }
 
 // startWorker marks a book in-flight and launches its stage worker. It returns
-// false if the book is already in-flight (a race with a prior pass).
+// false if the book is already in-flight (a race with a prior pass), or a control
+// change held it during this pass (holdDispatch).
 func (s *Scheduler) startWorker(b store.Book, lane state.Lane) bool {
 	s.mu.Lock()
-	if _, busy := s.inflight[b.ID]; busy {
+	if _, busy := s.inflight[b.ID]; busy || !s.dispatchableLocked(b.ID) {
 		s.mu.Unlock()
 		return false
 	}

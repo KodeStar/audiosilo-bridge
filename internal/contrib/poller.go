@@ -162,7 +162,7 @@ func (s *Service) coreVerdictFollowUp(ctx context.Context, row store.Contributio
 	}
 	if v.note == store.ContribNoteIntakeDuplicate {
 		if s.deps.Readmit != nil {
-			if err := s.deps.Readmit(ctx, b.ID); err != nil {
+			if err := s.deps.Readmit(ctx, b); err != nil {
 				s.logf("contrib poller: re-admit book %d after a duplicate verdict: %v", b.ID, err)
 			}
 		}
@@ -508,7 +508,7 @@ func (s *Service) admitWhenLive(ctx context.Context, b store.Book) {
 		}
 	}
 	if pending && s.deps.Readmit != nil {
-		if err := s.deps.Readmit(ctx, b.ID); err != nil {
+		if err := s.deps.Readmit(ctx, b); err != nil {
 			s.logf("contrib poller: re-admit book %d: %v", b.ID, err)
 		}
 	}
