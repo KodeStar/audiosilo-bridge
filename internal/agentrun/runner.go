@@ -25,6 +25,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/kodestar/audiosilo-bridge/internal/agentproto"
@@ -278,19 +279,18 @@ func (r *Runner) Run(ctx context.Context) error {
 }
 
 // closeHome makes the agent home, its secrets and codex's CODEX_HOME 0700
-// (each that is a folder, never through a link): the image makes them so, but
-// a volume or a folder mounted there keeps its own modes, which may let
-// another user (the endpoint's agent service's) read the subscriptions'
-// credentials.
+// (each that is a folder, never through a link: closeDir changes the folder it
+// opened, so a link swapped in after a look is never followed): the image
+// makes them so, but a volume or a folder mounted there keeps its own modes,
+// which may let another user (the endpoint's agent service's) read the
+// subscriptions' credentials. One missing, a link or a file is left as it is.
 func (r *Runner) closeHome() {
 	for _, dir := range []string{r.opts.Home, filepath.Join(r.opts.Home, secretsDir), r.codexHome()} {
-		info, err := os.Lstat(dir)
-		if err != nil || !info.IsDir() || info.Mode().Perm() == 0o700 {
+		err := closeDir(dir)
+		if err == nil || errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ELOOP) || errors.Is(err, syscall.ENOTDIR) {
 			continue
 		}
-		if err := os.Chmod(dir, 0o700); err != nil { //nolint:gosec // a folder: 0700 is its owner's alone
-			r.log.Warn("agent runner: close the agent home to other users", "dir", dir, "err", err)
-		}
+		r.log.Warn("agent runner: close the agent home to other users", "dir", dir, "err", err)
 	}
 }
 

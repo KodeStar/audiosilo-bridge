@@ -3838,7 +3838,8 @@ internal/
             finds a credential. runner.json says endpoint_only, own_credentials
             and found for the Bridge's Status. The agent container's runner
             (not --endpoint-only) chmods its home, secrets/ and codex/ 0700 at
-            the start (closeHome; a folder only, never through a link). Main
+            the start (closeHome; a folder only, never through a link: closeDir
+            opens it O_NOFOLLOW and fchmods what it opened). Main
             makes that runner a child subreaper and not
             dumpable (endpointHardening, Linux only; elsewhere it refuses to
             start): whatever a run starts becomes the runner's child however it

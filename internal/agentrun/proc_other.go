@@ -37,5 +37,15 @@ func setUmask(int) {}
 // enterable can't be told here: count it as reachable.
 func enterable(string) bool { return true }
 
+// closeDir makes the folder dir 0700 unless it is that already (a link or a
+// file is left as it is: the runner refuses to start here anyway).
+func closeDir(dir string) error {
+	info, err := os.Lstat(dir)
+	if err != nil || !info.IsDir() || info.Mode().Perm() == 0o700 {
+		return err
+	}
+	return os.Chmod(dir, 0o700) //nolint:gosec // a folder: 0700 is its owner's alone
+}
+
 // ownerUID: a file has no owner here.
 func ownerUID(fs.FileInfo) (int, bool) { return 0, false }

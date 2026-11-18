@@ -52,6 +52,29 @@ func enterable(dir string) bool {
 		unix.Faccessat(unix.AT_FDCWD, dir, unix.X_OK, unix.AT_EACCESS) == nil
 }
 
+// closeDir makes the folder dir 0700 unless it is that already, through the
+// folder itself opened without following a link: a link swapped in after any
+// earlier look is refused (ELOOP), never followed. Neither a link nor a file
+// is changed (ELOOP, ENOTDIR).
+func closeDir(dir string) error {
+	fd, err := unix.Open(dir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return &fs.PathError{Op: "open", Path: dir, Err: err}
+	}
+	defer func() { _ = unix.Close(fd) }()
+	var st unix.Stat_t
+	if err := unix.Fstat(fd, &st); err != nil {
+		return &fs.PathError{Op: "fstat", Path: dir, Err: err}
+	}
+	if st.Mode&0o777 == 0o700 {
+		return nil
+	}
+	if err := unix.Fchmod(fd, 0o700); err != nil {
+		return &fs.PathError{Op: "fchmod", Path: dir, Err: err}
+	}
+	return nil
+}
+
 // ownerUID is info's owner, as this process's user namespace shows it; ok
 // false where the OS reports none.
 func ownerUID(info fs.FileInfo) (uid int, ok bool) {
