@@ -39,6 +39,8 @@ type stubAccounts struct {
 	setErr    error
 	wrongACR  error  // the answer to a write with another content reference
 	onSet     func() // runs as a write reaches Audible (outside the lock)
+	settled   int    // SettledAccount reads
+	onSettle  func() // runs as SettledAccount waits (a sign-in in flight storing itself)
 }
 
 func (s *stubAccounts) Account(ctx context.Context, id string) (store.AudibleAccount, error) {
@@ -47,6 +49,17 @@ func (s *stubAccounts) Account(ctx context.Context, id string) (store.AudibleAcc
 		return a, audibleacct.ErrNotFound
 	}
 	return a, err
+}
+
+func (s *stubAccounts) SettledAccount(ctx context.Context, id string) (store.AudibleAccount, error) {
+	s.mu.Lock()
+	s.settled++
+	hook := s.onSettle
+	s.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
+	return s.Account(ctx, id)
 }
 
 func (s *stubAccounts) Accounts(ctx context.Context) ([]store.AudibleAccount, error) {
@@ -416,6 +429,37 @@ func TestSyncRefusedAccount(t *testing.T) {
 	e.o.ServerID = func() string { return "srv-2" }
 	if _, err := e.runSync(t, params(t)); !errors.As(err, &f) || f.Code != CodeUnknownAccount {
 		t.Fatalf("another server = %v", err)
+	}
+}
+
+// A sync claimed while a sign-in again is finishing (the server already
+// recorded it, so it ended the refusal there, but the new sign-in isn't stored
+// here yet) reads the account again past it and syncs with the new sign-in:
+// answering the old device refusal would mark the account refused again on
+// the server. A sign-in refusal waits the same way. A refusal that stands
+// once nothing is in flight is still answered (TestSyncRefusedAccount).
+func TestSyncWaitsForASignInInFlight(t *testing.T) {
+	for _, kind := range []string{store.RefusalDevice, store.RefusalSignIn} {
+		e := newEnv(t)
+		e.accts.places["B000000001"] = audible.Position{PositionMs: 60_000, LastUpdated: e.now}
+		if err := e.db.RefuseAudibleAccount(context.Background(), acctID, kind, "refused", e.now); err != nil {
+			t.Fatal(err)
+		}
+		signedIn := e.account(t)
+		e.accts.onSettle = func() {
+			if err := e.db.SignInAudibleAccount(context.Background(), signedIn, e.now); err != nil {
+				t.Error(err)
+			}
+		}
+		res, err := e.runSync(t, params(t, title("B000000001", "A/One", 3600)))
+		if err != nil || res.Applied != 1 || e.accts.settled != 1 || e.accts.reads != 1 {
+			t.Fatalf("%s: a sync during a sign-in again = %+v, %v (settled %d, reads %d)", kind, res, err, e.accts.settled, e.accts.reads)
+		}
+	}
+	// An account that isn't refused reads once: no wait on a sign-in.
+	e := newEnv(t)
+	if _, err := e.runSync(t, params(t)); err != nil || e.accts.settled != 0 {
+		t.Fatalf("a signed-in account = %v (settled %d)", err, e.accts.settled)
 	}
 }
 

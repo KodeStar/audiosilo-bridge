@@ -187,6 +187,9 @@ type ImportFile struct {
 // its download, with the account's sign-in.
 type ImportAccounts interface {
 	Account(ctx context.Context, id string) (store.AudibleAccount, error)
+	// SettledAccount is Account once no sign-in in flight is still to be
+	// stored (audibleacct.Manager.SettledAccount).
+	SettledAccount(ctx context.Context, id string) (store.AudibleAccount, error)
 	Title(ctx context.Context, id, asin string) (source.Record, error)
 	License(ctx context.Context, id, asin string) (audible.License, error)
 	Download(ctx context.Context, id, url, dest string, opts audible.DownloadOptions) error
@@ -383,10 +386,11 @@ func (h *Importer) run(ctx context.Context, job jobs.Job, p ImportParams, rep *j
 	// A refused account fails here, before asking Audible anything: each queued
 	// import would only be refused in turn (a device denied licenses, for one,
 	// stays denied) until the owner signs in again, which ends the refusal.
-	// Read again: the job may have waited for the library's mapping, and a
-	// sign-in again meanwhile ended the refusal the first read saw.
+	// Read again, past a sign-in in flight (SettledAccount): the job may have
+	// waited for the library's mapping, and a sign-in again meanwhile, or one
+	// still storing itself, ended the refusal the first read saw.
 	if acct.RefusedAt != "" {
-		if acct, err = h.o.Accounts.Account(ctx, acct.ID); err != nil {
+		if acct, err = h.o.Accounts.SettledAccount(ctx, acct.ID); err != nil {
 			return nil, err
 		}
 	}

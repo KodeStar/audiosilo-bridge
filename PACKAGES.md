@@ -2467,7 +2467,11 @@ internal/
             tagged tests run the whole life against the fake. Phase 4c: the refusal's kind is
             store.RefusalSignIn or RefusalDevice (Throttled reads the kind; ThrottledText is copy);
             Positions, ContentACR and SetPosition are the position sync's signed calls, which never
-            record a refusal. Deps: audible, link,
+            record a refusal. SettledAccount is Account read under finishMu: a sign-in again PUTs
+            on the server (ending the refusal there) before it seals and stores the new sign-in
+            here, so a sync or import that reads the account refused reads it again with this
+            and runs with the new sign-in rather than answer the old refusal (which the server
+            would fold onto the account again). Deps: audible, link,
             secrets, source, store.
   audiblejob/ Phase 4a: audible.poll (light lane; params {"account", "template"}
             strict (template, the account's path template, optional, <= 500
@@ -2553,8 +2557,8 @@ internal/
             same name), never no_rights; the account then reads refused, and every
             later import of it fails audible_refused at once, before the title read
             or a license (ThrottledText for a throttled account, else the sign-in
-            refusal's; the account read again first, since a sign-in may have ended it
-            while the job waited for the mapping), after a marker's rescan-only resume,
+            refusal's; the account read again first, with SettledAccount, since a sign-in may
+            have ended it while the job waited for the mapping, or be storing itself), after a marker's rescan-only resume,
             until a sign-in again) and the destination (Destination, a wrapper over
             destination(), which also returns the plan's kind and siblings and
             which the poll's plans share: dest_path FIRST, the
@@ -2629,7 +2633,8 @@ internal/
             Result.SkippedPreorder, its waiting place forgotten) and the push's due skips it until then: the server lists
             a preorder fuzzy-matched to another edition, and Audible denies its content reference.
             audible.sync (light; params
-            link.AudibleSyncParams, strict): a device refusal fails audible_refused (the server stops
+            link.AudibleSyncParams, strict): a refused account is read again past a sign-in in
+            flight (audibleacct SettledAccount); then a device refusal fails audible_refused (the server stops
             queueing until a sign-in again maps the account), a sign-in refusal audible_sign_in (the
             server keeps queueing: the next poll Audible answers ends it), another server's or none
             unknown_account; lists the titles (store.ListAudibleSync) first, then while sync_retry_at
@@ -2640,7 +2645,9 @@ internal/
             or within 5 s of the place last written (its echo), posts a listen of no length (from_pos =
             to_pos, started_at = ended_at = last_updated, start jump; id EventID: "aud-" + 32 hex of
             sha256(account|asin|position_ms|last_updated|kind|library_id|path), kind "" or "finish", so
-            a re-matched title's place is a new event) and a finish at the book's end (98%, or 3 min
+            a re-matched title's place is a new event; last_updated "" when Audible gave none, the form
+            the server re-derives to correct those places by the Bridge's sent_at, so TestEventID pins
+            its vectors) and a finish at the book's end (98%, or 3 min
             left past 90%), 200 a call; a place answered (not rejected) records heard_ms
             (store.AudibleHeard: it clears a last_ms written before the job began, and an applied one
             drops a place waiting from the row the push had then, or one not further on recorded since

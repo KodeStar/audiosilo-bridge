@@ -286,7 +286,8 @@ type Manager struct {
 	// otherwise both find no account and make two (the later now replaces the
 	// earlier, as any sign-in again does; the store's unique index on
 	// (customer_hash, marketplace) backs it). Held across the server call;
-	// sign-ins are rare. Remove takes it while it forgets locally, so a sign-in
+	// sign-ins are rare. SettledAccount takes it to read past a sign-in in
+	// flight. Remove takes it while it forgets locally, so a sign-in
 	// again finishing meanwhile never stores the account back after it; Map
 	// takes it throughout, so a remap and a sign-in again of the same account
 	// can't record their mappings in one order on the server and the other
@@ -678,6 +679,21 @@ func (m *Manager) Account(ctx context.Context, id string) (store.AudibleAccount,
 		return store.AudibleAccount{}, ErrNotFound
 	}
 	return a, err
+}
+
+// SettledAccount is Account read once no sign-in, mapping or removal is in
+// flight (each holds finishMu until its row is stored). A sign-in again
+// records itself on the server first, which ends the account's refusal there,
+// and only then seals and stores the new sign-in here, so a job claimed in
+// between still reads the old refusal and would answer it, marking the
+// account refused on the server again for a sign-in it never used. A job that
+// finds the account refused reads it again with this before it says so: it
+// then runs with the new sign-in (sealed by then too). It waits for the
+// change in flight, whose server call is bounded by its request.
+func (m *Manager) SettledAccount(ctx context.Context, id string) (store.AudibleAccount, error) {
+	m.finishMu.Lock()
+	defer m.finishMu.Unlock()
+	return m.Account(ctx, id)
 }
 
 // credentials opens account id's sealed sign-in.

@@ -44,7 +44,7 @@ const (
 type stubImportAccounts struct {
 	mu       sync.Mutex
 	acct     store.AudibleAccount
-	acctThen []store.AudibleAccount // each Account read after the first answers the next
+	acctThen []store.AudibleAccount // each SettledAccount read answers the next (Account the current one)
 	acctErr  error
 	title    source.Record
 	titleErr error
@@ -67,11 +67,14 @@ func (s *stubImportAccounts) Account(_ context.Context, id string) (store.Audibl
 	if id != s.acct.ID {
 		return store.AudibleAccount{}, audibleacct.ErrNotFound
 	}
-	a := s.acct
+	return s.acct, nil
+}
+
+func (s *stubImportAccounts) SettledAccount(ctx context.Context, id string) (store.AudibleAccount, error) {
 	if len(s.acctThen) > 0 {
 		s.acct, s.acctThen = s.acctThen[0], s.acctThen[1:]
 	}
-	return a, nil
+	return s.Account(ctx, id)
 }
 
 func (s *stubImportAccounts) Title(context.Context, string, string) (source.Record, error) {
@@ -686,7 +689,9 @@ func TestImportOfARefusedAccountFailsFast(t *testing.T) {
 		})
 	}
 	// A sign-in again that ended the refusal after the job's first read
-	// (while it waited for the library's mapping) imports.
+	// (while it waited for the library's mapping), or that the read again
+	// waited for (SettledAccount: recorded on the server, not yet here),
+	// imports.
 	e := newImportEnv(t)
 	signedIn := e.accts.acct
 	e.accts.acct.RefusedAt, e.accts.acct.LastError, e.accts.acct.RefusalKind = "2026-11-03T10:00:00Z", audibleacct.ThrottledText, store.RefusalDevice

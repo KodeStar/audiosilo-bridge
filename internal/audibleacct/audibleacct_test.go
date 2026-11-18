@@ -654,6 +654,69 @@ func TestMapHoldsTheAccountsLock(t *testing.T) {
 	}
 }
 
+// A sign-in again records itself on the server before it stores the new
+// sign-in here: SettledAccount reads past it (the account signed in, the new
+// device sealed), where Account, read in between, still answers the old
+// refusal. With nothing in flight it answers the refusal that stands.
+func TestSettledAccountWaitsForASignInInFlight(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	a := e.signIn(t)
+	first, _ := e.m.credentials(a.ID)
+	if err := e.db.RefuseAudibleAccount(context.Background(), a.ID, store.RefusalDevice, ThrottledText, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := e.m.SettledAccount(context.Background(), a.ID); err != nil || !Throttled(got) {
+		t.Fatalf("a refusal that stands = %+v, %v", got, err)
+	}
+
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	e.srv.onPut = func() { once.Do(func() { close(entered); <-release }) }
+	signedIn := make(chan error, 1)
+	go func() {
+		st, err := e.m.Start("us")
+		if err == nil {
+			_, err = e.m.Finish(context.Background(), e.srv, "srv-1", Finish{Login: st.Login,
+				RedirectURL: "https://www.amazon.com/ap/maplanding?openid.oa2.authorization_code=" + stubCode, Mapping: mapping()})
+		}
+		signedIn <- err
+	}()
+	select {
+	case <-entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the sign-in again never reached the server")
+	}
+	if got, err := e.m.Account(context.Background(), a.ID); err != nil || !Throttled(got) {
+		t.Fatalf("the window: Account = %+v, %v (want the old refusal)", got, err)
+	}
+	type read struct {
+		a   store.AudibleAccount
+		err error
+	}
+	settled := make(chan read, 1)
+	go func() {
+		got, err := e.m.SettledAccount(context.Background(), a.ID)
+		settled <- read{got, err}
+	}()
+	select {
+	case r := <-settled:
+		t.Fatalf("SettledAccount answered during the sign-in: %+v, %v", r.a, r.err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(release)
+	if err := <-signedIn; err != nil {
+		t.Fatalf("sign-in again = %v", err)
+	}
+	r := <-settled
+	if r.err != nil || r.a.RefusedAt != "" {
+		t.Fatalf("settled = %+v, %v (want signed in)", r.a, r.err)
+	}
+	if now, _ := e.m.credentials(a.ID); now.DeviceSerial == first.DeviceSerial {
+		t.Fatal("the settled read came before the new device was sealed")
+	}
+}
+
 // bridge#40: a mapping that comes with no name for the person (the server's
 // people couldn't be read) keeps the stored name when it is the same person,
 // on a remap and on a sign-in again; another person has none to keep.

@@ -127,6 +127,9 @@ func DeviceID(account string) string { return "audible:" + account }
 // (*audibleacct.Manager).
 type Accounts interface {
 	Account(ctx context.Context, id string) (store.AudibleAccount, error)
+	// SettledAccount is Account once no sign-in in flight is still to be
+	// stored (audibleacct.Manager.SettledAccount).
+	SettledAccount(ctx context.Context, id string) (store.AudibleAccount, error)
 	Accounts(ctx context.Context) ([]store.AudibleAccount, error)
 	Positions(ctx context.Context, id string, asins []string) (map[string]audible.Position, error)
 	ContentACR(ctx context.Context, id, asin string) (string, error)
@@ -401,6 +404,12 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (*R
 		return nil, err
 	}
 	acct, err := h.o.Accounts.Account(ctx, p.Account)
+	if err == nil && acct.RefusedAt != "" {
+		// Read again past a sign-in in flight (SettledAccount): one the server
+		// already recorded, its refusal ended there, isn't stored here yet, and
+		// answering the old refusal would mark the account refused again.
+		acct, err = h.o.Accounts.SettledAccount(ctx, p.Account)
+	}
 	if errors.Is(err, audibleacct.ErrNotFound) {
 		return nil, fail(CodeUnknownAccount, "This Bridge has no Audible account %s: it was removed here, or signed in on another Bridge.", p.Account)
 	}
