@@ -298,13 +298,13 @@ func (r *Runner) Run(ctx context.Context, req agent.Request) (agent.Result, erro
 		// finds the runner takes the group's file (probe.go).
 		if r.requireGroup {
 			return res, r.blockGroup("the agent container couldn't take the credential kept to the Bridge's group: "+
-				remedyMapping+lookAgain, denied.detail)
+				remedyMapping+lookAgain+noRestart, denied.detail)
 		}
 		if !r.groupDenied.Swap(true) {
 			r.deferProbe()
 			r.log.Warn("agent container: the runner couldn't take the credential handed to the Bridge's group alone, so from "+
 				"now on the handed credential is readable by every uid until the runner takes it; "+remedyMapping+
-				" to keep it to that group"+lookAgain, "bridge_gid", r.gid, "detail", denied.detail)
+				" to keep it to that group"+lookAgain+noRestart, "bridge_gid", r.gid, "detail", denied.detail)
 		}
 		if ctx.Err() != nil {
 			return res, ctx.Err()
@@ -332,7 +332,7 @@ func (r *Runner) runJob(ctx context.Context, req agent.Request, st Status, hande
 	var refused *groupRefusedError
 	if errors.As(err, &refused) {
 		return agent.Result{}, r.blockGroup("the staging volume refused to give the credential to the Bridge's group ("+
-			ioProblem(refused.err)+"): use "+remedyVolume+lookAgain, refused.err.Error())
+			ioProblem(refused.err)+"): use "+remedyVolume+recreateBoth+lookAgain+volumeInPlace, refused.err.Error())
 	}
 	if err == nil && handed != nil && group != noGroup {
 		r.volumeRefused.Store(groupErr != nil)
@@ -424,8 +424,15 @@ const (
 		"rootless Podman can set up): give both the same mapping"
 	remedyVolume = "a staging volume that allows chown (a local one, not NFS or CIFS)"
 	// lookAgain ends each fix's words: the group probe (probe.go) ends the
-	// fallback once the fix is in place.
-	lookAgain = "; the Bridge looks again every few minutes, no restart needed"
+	// fallback once the fix is in place. noRestart follows it only for a fix
+	// that leaves the Bridge's container alone (the agent container's id
+	// mapping). Another staging volume means recreating both containers
+	// (recreateBoth), so there the probe only ever finds a volume changed in
+	// place (volumeInPlace: an export's options).
+	lookAgain     = "; the Bridge looks again every few minutes"
+	noRestart     = ", no Bridge restart needed"
+	recreateBoth  = " and recreate both containers on it"
+	volumeInPlace = ", for a volume fixed in place"
 )
 
 // blockGroup keeps, until a group probe ends it (probe.go), why

@@ -86,8 +86,10 @@ and `latest-cuda` also carry the ASR worker builds the Bridge serves. Run it as 
 example does: user 10002 with the Bridge's PGID added (`group_add`, so the agent
 credential the Bridge hands it is readable by that group alone), all capabilities
 dropped, a read-only root, its own network. The server's console shows which way
-the credential goes (Settings > Bridge), and once a fix is in place the Bridge
-notices within a few minutes, no restart needed.
+the credential goes (Settings > Bridge), and once a fix is in place (the agent
+container recreated with the group, or with the same id mapping) the Bridge
+notices within a few minutes, with no restart of its own. Moving the staging
+volume means recreating both containers.
 
 ## Add an ASR worker (transcription on another computer)
 
