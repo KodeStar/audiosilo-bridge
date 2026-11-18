@@ -365,7 +365,7 @@ func (h *Importer) run(ctx context.Context, job jobs.Job, p ImportParams, rep *j
 	// queued this import for, may still be storing itself here (no account
 	// yet, another server's or another library's). Read again past it before
 	// failing for that; an account that passes never waits.
-	if h.importable(acct, err, p) != nil && (err == nil || errors.Is(err, audibleacct.ErrNotFound)) {
+	if audibleacct.NotHere(acct, err, h.o.ServerID()) || (err == nil && acct.LibraryID != p.LibraryID) {
 		acct, err = h.o.Accounts.AwaitedAccount(ctx, p.Account)
 	}
 	if err := h.importable(acct, err, p); err != nil {
