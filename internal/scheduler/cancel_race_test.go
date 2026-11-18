@@ -3,6 +3,7 @@ package scheduler
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -161,5 +162,80 @@ func TestBatchReadmitStatusChangeLogsAtDebug(t *testing.T) {
 	logReadmitFailed(log, "auto-readmit", 8, errors.New("database is locked"))
 	if out := buf.String(); !strings.Contains(out, "level=WARN") || !strings.Contains(out, "database is locked") {
 		t.Fatalf("a failure logged as %q, want Warn", out)
+	}
+}
+
+// A job's guarded cancel publishes the cancel only while the book still carries
+// it: a later claim of the job that re-admits the book after the cancel's write
+// (here as the cancel stops the running stage) published its own state, and the
+// page must not be left showing the book cancelled. Without a later claim the
+// cancel is published as stored.
+func TestGuardedCancelNeverPublishesOverALaterReadmit(t *testing.T) {
+	h := newHarness(t)
+	db := h.openDB(t)
+	ctx := context.Background()
+	hub := events.NewHub(64)
+	s := New(db, hub, NewStubExecutor(0, 0), 2, h.workRoot, false)
+	lastState := func(id int64) (status, errMsg string) {
+		t.Helper()
+		replay, sub := hub.Subscribe(0)
+		sub.Close()
+		found := false
+		for _, ev := range replay {
+			if ev.Type != "book.state" || ev.BookID != id {
+				continue
+			}
+			var p struct{ Status, Error string }
+			if err := json.Unmarshal(ev.Data, &p); err != nil {
+				t.Fatal(err)
+			}
+			status, errMsg, found = p.Status, p.Error, true
+		}
+		if !found {
+			t.Fatalf("no book.state for book %d", id)
+		}
+		return status, errMsg
+	}
+	guard := func(job int64, b store.Book) store.StopGuard {
+		t.Helper()
+		if err := db.RecordClaim(ctx, store.ServerJob{ID: job, Kind: "sidecars.generate", Attempt: 1}); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.PutGenerateBook(ctx, store.GenerateBook{ServerJobID: job, BookID: &b.ID, LibraryID: 1, RelPath: b.Title}); err != nil {
+			t.Fatal(err)
+		}
+		return store.StopGuard{JobID: job, Attempt: 1}
+	}
+
+	plain := h.addBook(t, db, "plain", "", "")
+	if err := s.CancelUnlessFollowed(ctx, plain.ID, guard(1, plain)); err != nil {
+		t.Fatal(err)
+	}
+	if status, errMsg := lastState(plain.ID); status != string(state.StatusFailed) || errMsg != cancelledReason {
+		t.Fatalf("a guarded cancel published %q %q, want it cancelled", status, errMsg)
+	}
+
+	readmitted := h.addBook(t, db, "readmitted", "", "")
+	g := guard(2, readmitted)
+	s.mu.Lock()
+	s.inflight[readmitted.ID] = &inflightBook{cancel: func() {
+		b, err := db.GetBook(ctx, readmitted.ID)
+		if err != nil || !IsCancelled(b) {
+			t.Errorf("the stage was stopped before the cancel was written: %+v, %v", b, err)
+			return
+		}
+		if err := db.RecordClaim(ctx, store.ServerJob{ID: g.JobID, Kind: "sidecars.generate", Attempt: 2}); err != nil {
+			t.Error(err)
+		}
+		if err := s.RetryAsRead(ctx, b); err != nil {
+			t.Errorf("the later claim's re-admit: %v", err)
+		}
+	}}
+	s.mu.Unlock()
+	if err := s.CancelUnlessFollowed(ctx, readmitted.ID, g); err != nil {
+		t.Fatal(err)
+	}
+	if status, errMsg := lastState(readmitted.ID); status != "" || errMsg != "" {
+		t.Fatalf("the page was left at %q %q after the re-admit, want it running", status, errMsg)
 	}
 }

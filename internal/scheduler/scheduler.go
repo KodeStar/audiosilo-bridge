@@ -106,6 +106,11 @@ type Scheduler struct {
 	bookETA  map[int64]int64
 	queueETA int64
 	haveETA  bool
+
+	// readmitMu orders a re-admit's write and publish against a cancel's read of
+	// the book and publish (publishCancelled), so a cancel's frame never lands
+	// after a re-admit that followed it.
+	readmitMu sync.Mutex
 }
 
 // queueStats is the published queue.stats snapshot, compared to suppress

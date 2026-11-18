@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -982,6 +983,64 @@ func TestJobEndNeverStopsALaterClaimLandingBeforeItsCancel(t *testing.T) {
 		}
 		kept(t, 2, running)
 	})
+}
+
+// failFirstEngine is the engine with a stage failing the book just after the
+// job's end read it running and before its guarded cancel. err records what the
+// cancel returned.
+type failFirstEngine struct {
+	*scheduler.Scheduler
+	db  *store.DB
+	err *error
+}
+
+func (e failFirstEngine) CancelUnlessFollowed(ctx context.Context, id int64, g store.StopGuard) error {
+	if err := e.db.SetBookStatus(ctx, id, "failed", "asr: out of memory", ""); err != nil {
+		return err
+	}
+	*e.err = e.Scheduler.CancelUnlessFollowed(ctx, id, g)
+	return *e.err
+}
+
+// A stage's failure landing between a job's end reading its engine book and the
+// cancel keeps its own error (store.ErrSettled, not ErrFollowed): the end is
+// recorded as the job's, and nothing is logged as a failed cancel.
+func TestJobEndNeverCancelsOverAFailureWrittenSinceItsRead(t *testing.T) {
+	t.Parallel()
+	db, err := store.Open(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	ctx := context.Background()
+	b, err := db.CreateBook(ctx, store.NewBook{SourcePath: "/lib/failing", WorkDir: t.TempDir(), Title: "failing"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = db.SetBookState(ctx, b.ID, "asr", "", "", "")
+	if err := db.RecordClaim(ctx, store.ServerJob{ID: 1, Kind: Kind, Attempt: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.PutGenerateBook(ctx, store.GenerateBook{ServerJobID: 1, BookID: &b.ID, LibraryID: 1, RelPath: "failing"}); err != nil {
+		t.Fatal(err)
+	}
+	var logs strings.Builder
+	var cancelErr error
+	sched := scheduler.New(db, events.NewHub(8), scheduler.NewStubExecutor(0, 0), 1, "", false)
+	h := New(Options{DB: db, RetentionDays: 30, Poll: time.Millisecond, Log: slog.New(slog.NewTextHandler(&logs, nil)),
+		Engine: func() Engine { return failFirstEngine{sched, db, &cancelErr} }})
+	if !h.release(ctx, jobs.Job{ID: 1, Kind: Kind, Attempt: 1}, b.ID, true) {
+		t.Error("release didn't record the end of the job's own attempt")
+	}
+	if !errors.Is(cancelErr, store.ErrSettled) {
+		t.Errorf("the cancel = %v, want store.ErrSettled", cancelErr)
+	}
+	if got, _ := db.GetBook(ctx, b.ID); got.Status != "failed" || got.Error != "asr: out of memory" {
+		t.Fatalf("the failure was overwritten: status %q error %q", got.Status, got.Error)
+	}
+	if strings.Contains(logs.String(), "cancelling the engine book failed") {
+		t.Errorf("a settled book logged a failed cancel: %s", logs.String())
+	}
 }
 
 // parkFirstEngine is the engine with a stage the cancel interrupted parking the

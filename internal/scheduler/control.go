@@ -196,6 +196,8 @@ func logReadmitFailed(log *slog.Logger, what string, bookID int64, err error) {
 func (s *Scheduler) readmit(ctx context.Context, b store.Book) error {
 	release := s.holdDispatch(b.ID)
 	defer release()
+	s.readmitMu.Lock()
+	defer s.readmitMu.Unlock()
 	if err := s.db.ClearBookStatusIf(ctx, b.ID, b.Status, b.Error); err != nil {
 		return err
 	}
@@ -308,7 +310,9 @@ func (s *Scheduler) Cancel(ctx context.Context, id int64) error {
 
 // CancelUnlessFollowed is Cancel for a job's end that may no longer own the book:
 // the store's cancel is written only while g holds (store.StopGuard, checked in
-// the same statement), and nothing is stopped when it doesn't (store.ErrFollowed).
+// the same statement), and nothing is stopped when it doesn't (store.ErrFollowed),
+// nor when the book finished or a stage failed it since it was read
+// (store.ErrSettled: its own error stays).
 // A later claim of the job that reopens its mapping between the end's checks and
 // the cancel is never stopped.
 func (s *Scheduler) CancelUnlessFollowed(ctx context.Context, id int64, g store.StopGuard) error {
@@ -318,13 +322,26 @@ func (s *Scheduler) CancelUnlessFollowed(ctx context.Context, id int64, g store.
 func (s *Scheduler) cancel(ctx context.Context, id int64, g *store.StopGuard) error {
 	release := s.holdDispatch(id)
 	defer release()
-	b, err := markCancelled(ctx, s.db, id, g)
-	if err != nil {
+	if _, err := markCancelled(ctx, s.db, id, g); err != nil {
 		return err
 	}
 	s.cancelInflight(id)
-	s.publishState(id, b.State, string(state.StatusFailed), cancelledReason, "", "")
+	s.publishCancelled(ctx, id)
 	return nil
+}
+
+// publishCancelled publishes book id's cancel as stored, unless the book moved on
+// since the cancel was written: a later claim of its job re-admitting it published
+// its own state, which a stale cancelled frame would cover until the next event.
+// The read and the publish hold readmitMu, as a re-admit's write and publish do.
+func (s *Scheduler) publishCancelled(ctx context.Context, id int64) {
+	s.readmitMu.Lock()
+	defer s.readmitMu.Unlock()
+	b, err := s.db.GetBook(ctx, id)
+	if err != nil || !IsCancelled(b) {
+		return
+	}
+	s.publishState(id, b.State, b.Status, b.Error, "", "")
 }
 
 // CancelStored is Cancel for a caller with no scheduler running (the Bridge's
@@ -344,7 +361,10 @@ func CancelStoredUnlessFollowed(ctx context.Context, db *store.DB, id int64, g s
 }
 
 // markCancelled marks book id cancelled in the store and returns it as read; with
-// g, only while g holds (store.ErrFollowed otherwise).
+// g, only while g holds (store.ErrFollowed otherwise), and never over a stage's
+// failure: store.ErrSettled for a book read failed by other than a cancel, or one
+// that finished or changed status between the read and the write (a job's end
+// read the book before this, and a stage may have failed it since).
 func markCancelled(ctx context.Context, db *store.DB, id int64, g *store.StopGuard) (store.Book, error) {
 	b, err := db.GetBook(ctx, id)
 	if err != nil {
@@ -355,7 +375,10 @@ func markCancelled(ctx context.Context, db *store.DB, id int64, g *store.StopGua
 	}
 	// Cancel is not a park (no typed reason), so the park_code stays empty.
 	if g != nil {
-		return b, db.SetBookStatusUnlessFollowed(ctx, id, string(state.StatusFailed), cancelledReason, *g)
+		if state.Status(b.Status) == state.StatusFailed && !IsCancelled(b) {
+			return b, store.ErrSettled
+		}
+		return b, db.SetBookStatusUnlessFollowed(ctx, id, b.Status, b.Error, string(state.StatusFailed), cancelledReason, *g)
 	}
 	return b, db.SetBookStatus(ctx, id, string(state.StatusFailed), cancelledReason, "")
 }

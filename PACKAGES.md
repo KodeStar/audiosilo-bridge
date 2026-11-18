@@ -1612,8 +1612,13 @@ internal/
             is Cancel's store write alone, for a caller with no scheduler running;
             CancelUnlessFollowed(id, g) and CancelStoredUnlessFollowed(db, id, g) are
             the two written only while a store.StopGuard holds
-            (SetBookStatusUnlessFollowed, store.ErrFollowed otherwise): generate's job
-            ends, its Abandon before the engine starts included; a start's reconcileBook
+            (SetBookStatusUnlessFollowed, store.ErrFollowed otherwise) and the book is
+            still as read (store.ErrSettled when a stage failed it or it finished
+            since: its own error stays): generate's job
+            ends, its Abandon before the engine starts included; a cancel is published
+            only while the book still carries it (publishCancelled, ordered against a
+            re-admit's write and publish by readmitMu), so a later claim's re-admit
+            is never covered by a stale cancelled frame; a start's reconcileBook
             rewinds by the state alone (SetBookPipelineState), and a pass moves a
             book on from a waypoint the same way (advanceWaypoint), so neither writes
             the status it read back over such a cancel; a stage's own park or failure
@@ -3004,7 +3009,9 @@ internal/
             cost_usd, work_id, contributed {characters|recaps: issue url}}. END: unless
             jobs.Resumes (the Bridge stopping, a refused token), the job's end is
             recorded (ended_at), a book that didn't finish is cancelled (stopBook
-            leaves a done or failed one alone: a cancel would overwrite its error),
+            leaves a done or failed one alone: a cancel would overwrite its error,
+            one failed or done between its read and the cancel's write included,
+            store.ErrSettled),
             and retention 0 purges its transcripts now; a later attempt of the same
             job running here (Attempt higher) is left alone: the cancel and the end
             are guarded writes (store.StopGuard: SetBookStatusUnlessFollowed through

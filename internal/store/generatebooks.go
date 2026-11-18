@@ -97,22 +97,43 @@ const laterClaimSQL = `EXISTS (SELECT 1 FROM server_jobs WHERE id = ?1 AND attem
 const openJobsSQL = `generate_books g JOIN server_jobs j ON j.id = g.server_job_id
 		  WHERE g.ended_at = '' AND j.state = 'running'`
 
+// ErrSettled is SetBookStatusUnlessFollowed for a book that settled since the
+// caller read it while its job still owns it: it finished, or its status or
+// error changed (a stage's real failure written meanwhile is never overwritten).
+var ErrSettled = errors.New("the engine book finished or its status changed since it was read")
+
+// stopGuardSQL is a StopGuard holding on the books row (?1 the job, ?2 its
+// attempt, ?3 Ended): no later attempt of the job, the job's mapping still ended
+// when Ended, and no other open job on the book.
+const stopGuardSQL = `NOT ` + laterClaimSQL + `
+		    AND (?3 = 0 OR EXISTS (SELECT 1 FROM generate_books WHERE server_job_id = ?1 AND ended_at != ''))
+		    AND NOT EXISTS (SELECT 1 FROM ` + openJobsSQL + ` AND g.book_id = books.id AND g.server_job_id != ?1)`
+
 // SetBookStatusUnlessFollowed is SetBookStatus with no park code nor retry, but
-// only while g holds (in the one statement, so a later claim that reopens the
-// mapping between a check and the write is never stopped): no later attempt of
-// g's job is recorded, g's mapping is still ended when g.Ended, and no other open
-// job follows the book (OpenGenerateJobsForBook). ErrFollowed when it doesn't (or
-// the book went).
-func (db *DB) SetBookStatusUnlessFollowed(ctx context.Context, id int64, status, errMsg string, g StopGuard) error {
+// only while g holds and the book is as the caller read it (in the one statement,
+// so a later claim that reopens the mapping between a check and the write is
+// never stopped, nor a failure written meanwhile overwritten): no later attempt
+// of g's job is recorded, g's mapping is still ended when g.Ended, no other open
+// job follows the book (OpenGenerateJobsForBook), and the book isn't done and
+// still has fromStatus and fromErr. ErrFollowed when g doesn't hold (or the book
+// went), ErrSettled when only the book changed.
+func (db *DB) SetBookStatusUnlessFollowed(ctx context.Context, id int64, fromStatus, fromErr, status, errMsg string, g StopGuard) error {
 	res, err := db.sql.ExecContext(ctx,
 		`UPDATE books SET status = ?4, error = ?5, park_code = ?6, retry_at = ?7, updated_at = ?8
-		  WHERE id = ?9 AND NOT `+laterClaimSQL+`
-		    AND (?3 = 0 OR EXISTS (SELECT 1 FROM generate_books WHERE server_job_id = ?1 AND ended_at != ''))
-		    AND NOT EXISTS (SELECT 1 FROM `+openJobsSQL+` AND g.book_id = books.id AND g.server_job_id != ?1)`,
+		  WHERE id = ?9 AND state != 'done' AND status = ?10 AND error = ?11 AND `+stopGuardSQL,
 		g.JobID, g.Attempt, g.Ended, status, errMsg, enforceParkCode(status, ""), enforceRetryAt(status, ""),
-		timestamp(nowFn()), id)
+		timestamp(nowFn()), id, fromStatus, fromErr)
 	if err := checkAffected(res, err); !errors.Is(err, ErrNotFound) {
 		return err
+	}
+	var owned bool
+	if err := db.sql.QueryRowContext(ctx,
+		`SELECT EXISTS (SELECT 1 FROM books WHERE id = ?4 AND `+stopGuardSQL+`)`,
+		g.JobID, g.Attempt, g.Ended, id).Scan(&owned); err != nil {
+		return err
+	}
+	if owned {
+		return ErrSettled
 	}
 	return ErrFollowed
 }

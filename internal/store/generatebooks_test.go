@@ -235,7 +235,7 @@ func TestSetBookStatusUnlessFollowed(t *testing.T) {
 	}
 	stop := func(g StopGuard) error {
 		_ = db.SetBookStatus(ctx, b.ID, "", "", "")
-		return db.SetBookStatusUnlessFollowed(ctx, b.ID, "failed", "cancelled by user", g)
+		return db.SetBookStatusUnlessFollowed(ctx, b.ID, "", "", "failed", "cancelled by user", g)
 	}
 	stopped := func(what string, err error, want bool) {
 		t.Helper()
@@ -265,6 +265,70 @@ func TestSetBookStatusUnlessFollowed(t *testing.T) {
 		t.Fatal(err)
 	}
 	stopped("the other job finished", stop(StopGuard{JobID: 1, Attempt: 2}), true)
+}
+
+// A job's end never stops its engine book over what a stage wrote since the end
+// read it: a failure keeps its own error and a finished book stays done
+// (ErrSettled, told apart from ErrFollowed), while a later claim still reads as
+// ErrFollowed whatever the book's status.
+func TestSetBookStatusUnlessFollowedLeavesASettledBook(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	b, _ := db.CreateBook(ctx, NewBook{SourcePath: "/s", WorkDir: "/w", Title: "S"})
+	if err := db.RecordClaim(ctx, ServerJob{ID: 1, Kind: "sidecars.generate", Attempt: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.PutGenerateBook(ctx, GenerateBook{ServerJobID: 1, BookID: &b.ID, LibraryID: 1, RelPath: "S"}); err != nil {
+		t.Fatal(err)
+	}
+	g := StopGuard{JobID: 1, Attempt: 1}
+	cancel := func() error {
+		return db.SetBookStatusUnlessFollowed(ctx, b.ID, "", "", "failed", "cancelled by user", g)
+	}
+
+	// The end read the book running; a stage failed it before the cancel's write.
+	if err := db.SetBookStatus(ctx, b.ID, "failed", "asr: out of memory", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := cancel(); !errors.Is(err, ErrSettled) {
+		t.Fatalf("a cancel over a failure written since the read = %v, want ErrSettled", err)
+	}
+	if got, _ := db.GetBook(ctx, b.ID); got.Status != "failed" || got.Error != "asr: out of memory" {
+		t.Fatalf("the failure was overwritten: status %q error %q", got.Status, got.Error)
+	}
+
+	// The book finished meanwhile.
+	if err := db.SetBookStatus(ctx, b.ID, "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetBookState(ctx, b.ID, "done", "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := cancel(); !errors.Is(err, ErrSettled) {
+		t.Fatalf("a cancel over a book done since the read = %v, want ErrSettled", err)
+	}
+	if got, _ := db.GetBook(ctx, b.ID); got.Status != "" {
+		t.Fatalf("a done book was cancelled: status %q error %q", got.Status, got.Error)
+	}
+
+	// Allowed: the book as read is stopped.
+	if err := db.SetBookState(ctx, b.ID, "asr", "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := cancel(); err != nil {
+		t.Fatalf("a cancel of the book as read = %v", err)
+	}
+
+	// A later claim reads as ErrFollowed even with the book changed too.
+	if err := db.SetBookStatus(ctx, b.ID, "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.RecordClaim(ctx, ServerJob{ID: 1, Kind: "sidecars.generate", Attempt: 2}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetBookStatusUnlessFollowed(ctx, b.ID, "failed", "x", "failed", "cancelled by user", g); !errors.Is(err, ErrFollowed) {
+		t.Fatalf("a cancel with a later claim recorded = %v, want ErrFollowed", err)
+	}
 }
 
 // A job's end is recorded only while no later attempt of it is: one whose attach

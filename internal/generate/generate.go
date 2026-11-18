@@ -48,7 +48,8 @@ type Engine interface {
 	RetryAsRead(ctx context.Context, b store.Book) error
 	// CancelUnlessFollowed stops book id while g holds (store.StopGuard, checked
 	// in the store's cancel write): store.ErrFollowed, and nothing stopped, when a
-	// later claim of g's job or another open job follows the book.
+	// later claim of g's job or another open job follows the book; store.ErrSettled
+	// when the book finished or failed since the cancel read it.
 	CancelUnlessFollowed(ctx context.Context, id int64, g store.StopGuard) error
 	Delete(ctx context.Context, id int64) error
 	ETASeconds(id int64) (int64, bool)
@@ -648,7 +649,8 @@ func (h *Handler) purgeAtEnd(ctx context.Context, job jobs.Job, bookID int64) {
 }
 
 // stopBook cancels a job's engine book unless it already ended (done, or
-// failed: a cancel would overwrite its error) or another open job follows it now
+// failed: a cancel would overwrite its error; one that ends between the read and
+// the cancel's write is left too, store.ErrSettled) or another open job follows it now
 // (a generate job continued the chapters run, so a late end of the chapters job
 // leaves it to that job). With no engine yet the cancel is the store's alone
 // (scheduler.CancelStoredUnlessFollowed): nothing runs the book to interrupt.
@@ -671,7 +673,7 @@ func (h *Handler) stopBook(ctx context.Context, g store.StopGuard, bookID int64,
 	switch {
 	case errors.Is(err, store.ErrFollowed):
 		return true
-	case err != nil && !errors.Is(err, scheduler.ErrInvalidOp):
+	case err != nil && !errors.Is(err, scheduler.ErrInvalidOp) && !errors.Is(err, store.ErrSettled):
 		h.o.Log.Warn("generate: cancelling the engine book failed", "job", g.JobID, "book", bookID, "err", err)
 	}
 	return false
