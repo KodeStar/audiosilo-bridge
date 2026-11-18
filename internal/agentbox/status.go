@@ -170,10 +170,18 @@ func ownCredentials(rj agentproto.Runner, backend string) bool {
 	return false
 }
 
+// runnerClockSkew is how far ahead of the Bridge's clock a runner.json may be
+// dated: the containers share the host's clock, so a little, never more. A
+// heartbeat further ahead (a run that wrote runner.json, or a clock gone wrong)
+// would otherwise keep the container live long after its runner stopped.
+const runnerClockSkew = 5 * time.Second
+
 // live reports whether rj is a runner of this protocol that wrote its status
-// within agentproto.RunnerFreshFor.
+// within agentproto.RunnerFreshFor, and not later than now (runnerClockSkew
+// aside).
 func (r *Runner) live(rj agentproto.Runner) bool {
-	return rj.Protocol == agentproto.Protocol && r.now().Sub(rj.HeartbeatAt) <= agentproto.RunnerFreshFor
+	age := r.now().Sub(rj.HeartbeatAt)
+	return rj.Protocol == agentproto.Protocol && age <= agentproto.RunnerFreshFor && age >= -runnerClockSkew
 }
 
 // Status reads runner.json now. Detail never names a Bridge path: it becomes a
@@ -419,6 +427,9 @@ func (r *Runner) unavailableBecause(rj agentproto.Runner, info fs.FileInfo) (pro
 	}
 	if age := r.now().Sub(rj.HeartbeatAt); age > agentproto.RunnerFreshFor {
 		return ProblemNotRunning, "", fmt.Sprintf("the agent container isn't running (its last heartbeat was %s ago)", age.Round(time.Second))
+	} else if age < -runnerClockSkew {
+		return ProblemNotRunning, "", fmt.Sprintf("the agent container's status is dated %s ahead of this Bridge's clock "+
+			"(its runner didn't write it, or the clock is wrong)", (-age).Round(time.Second))
 	}
 	if rj.EndpointOnly && r.backend != agent.IDOpenAICompatible {
 		return ProblemEndpointOnly, "", endpointOnlyDetail

@@ -3528,7 +3528,10 @@ internal/
             last run: runs still go through, a refused call costs nothing and the
             first that works clears it; a credential the runner reports as changed,
             by kind or credential_since, clears it too), Live (fresh, whatever its
-            CLIs), each "why not" worded for the page and a park (claude: `claude
+            CLIs; fresh is a heartbeat_at within 30 s before now and at most
+            runnerClockSkew, 5 s, after it: one in the future is a status the runner
+            didn't write, or a clock gone wrong), each "why not" worded for the page
+            and a park (claude: `claude
             setup-token` -> CLAUDE_CODE_OAUTH_TOKEN; codex: agent-login; and when the
             OTHER CLI is signed in, how to switch agent.backend), never naming a
             Bridge path (a Detail becomes a park reason the server's console and

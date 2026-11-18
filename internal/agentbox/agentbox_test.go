@@ -542,6 +542,31 @@ func TestRunUnavailableStagesNothing(t *testing.T) {
 	assertNoJobDirs(t, dir)
 }
 
+// A runner.json counts as live only when dated within RunnerFreshFor before
+// now and no further ahead than the clock skew: a heartbeat in the future
+// (a forged status) would otherwise keep a stopped runner live for as long.
+func TestLiveRefusesTheFuture(t *testing.T) {
+	t.Parallel()
+	now := time.Unix(1_800_000_000, 0)
+	r := New(Options{Dir: t.TempDir(), Backend: "claude"})
+	r.now = func() time.Time { return now }
+	for name, tc := range map[string]struct {
+		at   time.Time
+		live bool
+	}{
+		"now":                 {at: now, live: true},
+		"fresh":               {at: now.Add(-agentproto.RunnerFreshFor), live: true},
+		"stale":               {at: now.Add(-agentproto.RunnerFreshFor - time.Second)},
+		"within the skew":     {at: now.Add(runnerClockSkew), live: true},
+		"beyond the skew":     {at: now.Add(runnerClockSkew + time.Second)},
+		"a day in the future": {at: now.Add(24 * time.Hour)},
+	} {
+		if got := r.live(agentproto.Runner{Protocol: agentproto.Protocol, HeartbeatAt: tc.at}); got != tc.live {
+			t.Errorf("%s: live = %v, want %v", name, got, tc.live)
+		}
+	}
+}
+
 func TestStatus(t *testing.T) {
 	t.Parallel()
 	now := time.Now()
@@ -559,10 +584,12 @@ func TestStatus(t *testing.T) {
 		problem   Problem
 		other     string
 	}{
-		"fresh":          {backend: "claude", rj: &agentproto.Runner{Protocol: 1, HeartbeatAt: now, Slots: 1, CLIs: full}, available: true},
-		"fresh codex":    {backend: "codex", rj: &agentproto.Runner{Protocol: 1, HeartbeatAt: now, CLIs: full}, available: true},
-		"stale":          {backend: "claude", rj: &agentproto.Runner{Protocol: 1, HeartbeatAt: now.Add(-time.Minute), CLIs: full}, detail: "isn't running", problem: ProblemNotRunning},
-		"wrong protocol": {backend: "claude", rj: &agentproto.Runner{Protocol: 2, HeartbeatAt: now, CLIs: full}, detail: "protocol 2", problem: ProblemOutdated},
+		"fresh":           {backend: "claude", rj: &agentproto.Runner{Protocol: 1, HeartbeatAt: now, Slots: 1, CLIs: full}, available: true},
+		"fresh codex":     {backend: "codex", rj: &agentproto.Runner{Protocol: 1, HeartbeatAt: now, CLIs: full}, available: true},
+		"stale":           {backend: "claude", rj: &agentproto.Runner{Protocol: 1, HeartbeatAt: now.Add(-time.Minute), CLIs: full}, detail: "isn't running", problem: ProblemNotRunning},
+		"slightly ahead":  {backend: "claude", rj: &agentproto.Runner{Protocol: 1, HeartbeatAt: now.Add(runnerClockSkew / 2), Slots: 1, CLIs: full}, available: true},
+		"from the future": {backend: "claude", rj: &agentproto.Runner{Protocol: 1, HeartbeatAt: now.Add(time.Hour), CLIs: full}, detail: "ahead of this Bridge's clock", problem: ProblemNotRunning},
+		"wrong protocol":  {backend: "claude", rj: &agentproto.Runner{Protocol: 2, HeartbeatAt: now, CLIs: full}, detail: "protocol 2", problem: ProblemOutdated},
 		"no credential": {backend: "claude", rj: &agentproto.Runner{Protocol: 1, HeartbeatAt: now,
 			CLIs: map[string]agentproto.CLI{"claude": {Version: "2.1.300"}}}, detail: "claude has no credential", problem: ProblemNoCredential},
 		"codex signed in instead": {backend: "claude", rj: &agentproto.Runner{Protocol: 1, HeartbeatAt: now,
