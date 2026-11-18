@@ -872,6 +872,51 @@ func TestAccountWaitsFollowTheJobsCtx(t *testing.T) {
 	}
 }
 
+// finishMu released unheld panics, as sync.Mutex's Unlock does, rather than
+// wait to take the next holder's slot; an ended ctx never takes it.
+func TestFinishMuGuards(t *testing.T) {
+	t.Parallel()
+	m := New(Options{})
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("releasing finishMu unheld didn't panic")
+			}
+		}()
+		m.unlockFinish()
+	}()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	// Ended before the wait, and ending as the wait starts: then select may
+	// take finishMu, which must be given back.
+	for i := range 200 {
+		c := ctx
+		if i%2 == 1 {
+			c = &endingCtx{Context: ctx}
+		}
+		if err := m.lockFinishCtx(c); !errors.Is(err, context.Canceled) {
+			t.Fatalf("an ended ctx = %v", err)
+		}
+	}
+	m.lockFinish()
+	m.unlockFinish()
+}
+
+// endingCtx is an ended ctx whose first Err still reads nil: a ctx that ends
+// between lockFinishCtx's check and its wait.
+type endingCtx struct {
+	context.Context
+	asked bool
+}
+
+func (c *endingCtx) Err() error {
+	if !c.asked {
+		c.asked = true
+		return nil
+	}
+	return c.Context.Err()
+}
+
 // bridge#40: a mapping that comes with no name for the person (the server's
 // people couldn't be read) keeps the stored name when it is the same person,
 // on a remap and on a sign-in again; another person has none to keep.

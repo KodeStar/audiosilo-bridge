@@ -302,21 +302,34 @@ type Manager struct {
 func (m *Manager) lockFinish() { m.finishMu <- struct{}{} }
 
 // lockFinishCtx takes finishMu, or gives up with ctx.Err() once ctx ends
-// (an ended ctx never takes it).
+// (an ended ctx never takes it: select picks either ready case at random, so
+// a take that raced the end is given back).
 func (m *Manager) lockFinishCtx(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	select {
 	case m.finishMu <- struct{}{}:
+		if err := ctx.Err(); err != nil {
+			m.unlockFinish()
+			return err
+		}
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
 	}
 }
 
-// unlockFinish releases finishMu.
-func (m *Manager) unlockFinish() { <-m.finishMu }
+// unlockFinish releases finishMu. Releasing it unheld panics, as
+// sync.Mutex's Unlock does: a blocking receive would instead wait to take
+// the next holder's slot, leaving finishMu free while that holder runs.
+func (m *Manager) unlockFinish() {
+	select {
+	case <-m.finishMu:
+	default:
+		panic("audibleacct: unlock of unlocked finishMu")
+	}
+}
 
 // login is a sign-in in progress: what Register needs once the admin pastes
 // the redirect URL back. In memory only.
@@ -922,14 +935,17 @@ func (m *Manager) refused(ctx context.Context, id string, creds audible.Credenti
 	if werr := m.lockFinishCtx(ctx); werr != nil {
 		return audible.Credentials{}, false, werr
 	}
-	fresh, cerr := m.credentials(id)
-	replaced = cerr == nil && fresh.DeviceSerial != creds.DeviceSerial
-	if !replaced {
-		if rerr := m.o.DB.RefuseAudibleAccount(context.WithoutCancel(ctx), id, kind, why, m.o.Now()); rerr != nil {
-			m.o.Log.Warn("audible: recording a refusal failed", "account", id, "err", rerr)
+	func() {
+		defer m.unlockFinish()
+		var cerr error
+		fresh, cerr = m.credentials(id)
+		replaced = cerr == nil && fresh.DeviceSerial != creds.DeviceSerial
+		if !replaced {
+			if rerr := m.o.DB.RefuseAudibleAccount(context.WithoutCancel(ctx), id, kind, why, m.o.Now()); rerr != nil {
+				m.o.Log.Warn("audible: recording a refusal failed", "account", id, "err", rerr)
+			}
 		}
-	}
-	m.unlockFinish()
+	}()
 	if replaced {
 		return fresh, true, nil
 	}
