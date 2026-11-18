@@ -323,6 +323,14 @@ func TestRefreshWithoutAnswerKeepsSignIn(t *testing.T) {
 	if st := r.gh.State(ctx); st.Refused || !st.SignedIn {
 		t.Fatalf("state = %+v", st)
 	}
+	// A Token that fails before the refresh (a request gone away) says
+	// nothing of it: the reason stands, so the next token still signals.
+	gone, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, err := r.gh.Token(gone); err == nil || errors.Is(err, ErrUnrefreshed) ||
+		r.gh.Unrefreshed() != "GitHub answered with a server error (502)" {
+		t.Fatalf("a cancelled token: %v, unrefreshed %q", err, r.gh.Unrefreshed())
+	}
 	r.fake.mu.Lock()
 	r.fake.refreshDown = false
 	r.fake.mu.Unlock()

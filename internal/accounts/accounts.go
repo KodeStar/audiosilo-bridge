@@ -354,12 +354,16 @@ func (g *GitHub) Token(ctx context.Context) (string, error) {
 	defer g.refreshMu.Unlock()
 	was := g.Unrefreshed()
 	tok, err := g.token(ctx)
-	why := ""
 	var ue *unrefreshedError
-	if errors.As(err, &ue) {
-		why = ue.problem
+	switch {
+	case errors.As(err, &ue):
+		g.setUnrefreshed(ue.problem)
+	case err == nil || errors.Is(err, ErrRefused) || errors.Is(err, ErrNotSignedIn):
+		g.setUnrefreshed("")
 	}
-	g.setUnrefreshed(why)
+	// Any other error (a cancelled request, the vault or the account row
+	// unread) says nothing of the refresh: the reason stands, so the next
+	// token still signals the change.
 	if was != "" && err == nil {
 		// A token again after the refresh had failed: the heartbeat says so at
 		// once and the books parked on the sign-in go on (OnChange, bridge#25).
