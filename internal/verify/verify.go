@@ -40,7 +40,7 @@ type Libraries interface {
 const (
 	bookRetryFirst = time.Second
 	bookRetryMax   = 15 * time.Second
-	bookRetryFor   = 2 * time.Minute
+	bookRetryFor   = mapping.BookReadBudget
 )
 
 // Handler runs bridge.verify.

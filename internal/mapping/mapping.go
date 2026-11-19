@@ -150,6 +150,11 @@ type BookSource interface {
 	Book(ctx context.Context, libraryID int64, path string) (*link.Book, error)
 }
 
+// BookReadBudget is how long a job's book read is asked again where it gives
+// up at all: a verify's every retry, and a generate's read of an answer that
+// can't be used (link.ErrUnusableAnswer).
+const BookReadBudget = 2 * time.Minute
+
 // BookReadSettled reports whether a failed book read is a definite answer (no
 // such book, a 4xx other than a refused token, a 408 or a 429) that asking
 // again won't change. No answer at all, a refused token the job runner is

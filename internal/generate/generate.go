@@ -159,6 +159,9 @@ type Handler struct {
 	// readMapping, a seam (tests), stands in for the store's GetGenerateBook in
 	// resumeMapping and Abandon (mappingOf).
 	readMapping func(ctx context.Context, serverJobID int64) (store.GenerateBook, error)
+	// unusableFor is how long a book read keeps asking through answers that
+	// can't be used (mapping.BookReadBudget; shorter in tests).
+	unusableFor time.Duration
 }
 
 // endSignal is the channel the next job end here closes. A waiter takes it
@@ -223,7 +226,7 @@ func New(o Options) *Handler {
 		o.ContribCredential = func(context.Context) error { return nil }
 	}
 	return &Handler{o: o, pokes: map[int64]runHandle{}, loopParks: map[int64]loopPark{},
-		woken: map[state.ParkCode]uint64{}}
+		woken: map[state.ParkCode]uint64{}, unusableFor: mapping.BookReadBudget}
 }
 
 // loopPark is a park a run waits on in its own loop (loopParks): its code, and
@@ -1125,9 +1128,15 @@ func (h *Handler) serverLibrary(r *run) error {
 // (the server unreachable or restarting, a 5xx, a 408 or 429, a refused token the
 // runner is dealing with: mapping.BookReadSettled): only a definite answer (no
 // such book, another 4xx) fails the job,
-// so a restart while the server is down doesn't end a long run.
+// so a restart while the server is down doesn't end a long run. The one answer
+// with an end to its wait is a 2xx the Bridge can't use (link.ErrUnusableAnswer:
+// a proxy's sign-in page at the server's address, which no wait turns into the
+// book): unusableFor of nothing else, the last ask at its end, fails the job.
 func (h *Handler) fetchBook(ctx context.Context, r *run) (*link.Book, error) {
 	wait := h.o.Poll
+	// unusable is when the answers now coming back unusable began (zero: the
+	// last one wasn't).
+	var unusable time.Time
 	for {
 		r.rep.Progress(jobs.Progress{Step: stepWaiting, Message: "Asking the server for the book"})
 		book, err := r.srv.Book(ctx, r.lib.ID, r.rel)
@@ -1139,8 +1148,22 @@ func (h *Handler) fetchBook(ctx context.Context, r *run) (*link.Book, error) {
 		case mapping.BookReadSettled(err):
 			return nil, fmt.Errorf("could not get the book from the server: %w", err)
 		}
+		sleep := wait
+		if !errors.Is(err, link.ErrUnusableAnswer) {
+			unusable = time.Time{}
+		} else {
+			if unusable.IsZero() {
+				unusable = time.Now()
+			}
+			left := h.unusableFor - time.Since(unusable)
+			if left <= 0 {
+				return nil, fmt.Errorf("the server kept giving an answer for the book this Bridge couldn't use (%w): "+
+					"check the server's address is the AudioSilo server's, not a proxy's sign-in page", err)
+			}
+			sleep = min(wait, left)
+		}
 		h.o.Log.Warn("generate: asking the server for the book failed; trying again", "job", r.job.ID, "err", err)
-		if err := agent.SleepCtx(ctx, wait); err != nil {
+		if err := agent.SleepCtx(ctx, sleep); err != nil {
 			return nil, err
 		}
 		wait = min(wait*2, time.Minute)

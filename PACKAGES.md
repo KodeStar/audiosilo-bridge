@@ -2172,7 +2172,9 @@ internal/
             right and a later write job would land in the wrong folder.
             BookReadSettled is the rule verify's and generate's book reads retry
             by: settled is no such book or an answer that isn't a refused token
-            or link's APIError.Transient (asking again won't change it). Podcast
+            or link's APIError.Transient (asking again won't change it);
+            BookReadBudget (2 min) is how long a read is asked again where it
+            gives up at all (verify's every retry, generate's unusable 2xx). Podcast
             libraries use CheckPodcast instead: a root .audiosilo/library.json
             marker (version, matching library id, random nonce) is read back by
             the server. Symlinked marker folders/files and invalid markers are
@@ -3479,7 +3481,10 @@ internal/
             out an answer that may change (unreachable, a refused token, 408, 429,
             5xx: mapping.BookReadSettled) with a backoff to 1 min and fails only
             on a definite one (no_book, another 4xx), so a restart
-            while the server is down doesn't end a long run; CompareFiles through the
+            while the server is down doesn't end a long run; the one wait with
+            an end is a 2xx it can't use (link.ErrUnusableAnswer, a proxy's
+            sign-in page): mapping.BookReadBudget of nothing else, the last ask
+            at its end, fails the job saying to check the address; CompareFiles through the
             mount must match; locate SafeJoins the path (a folder book, or a
             single-file book whose attachments get a "<stem>." prefix); waitWritable
             probes the BOOK's own folder (spike 3), parking book_not_writable and
