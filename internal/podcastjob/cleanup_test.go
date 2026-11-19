@@ -233,7 +233,9 @@ func TestStaleIdentityCheckpointIsDropped(t *testing.T) {
 		t.Fatal(err)
 	}
 	validator := c.Validator
-	s.dropStaleCheckpoint(job, root, "a1b2c3d4e5f60718", "1cc306d831645e2b")
+	if err := s.dropStaleCheckpoint(job, root, "a1b2c3d4e5f60718", "1cc306d831645e2b"); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := root.Lstat("Fixture Show/" + c.Temp); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("stale partial orphaned", err)
 	}
@@ -244,7 +246,9 @@ func TestStaleIdentityCheckpointIsDropped(t *testing.T) {
 	c = checkpoint{ServerHash: s.pairHash(), LibraryID: 3, ShowID: "a1b2c3d4e5f60718", EpisodeID: "1cc306d831645e2b", Path: *job.Path, Temp: ".audiosilo-tmp-current", Offset: 6, Total: 100}
 	root.WriteFile("Fixture Show/"+c.Temp, []byte("prefix"), 0600)
 	s.saveCheckpoint(job, root, &c, `"one"`)
-	s.dropStaleCheckpoint(job, root, "a1b2c3d4e5f60718", "1cc306d831645e2b")
+	if err := s.dropStaleCheckpoint(job, root, "a1b2c3d4e5f60718", "1cc306d831645e2b"); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := root.Lstat("Fixture Show/" + c.Temp); err != nil {
 		t.Fatal("current partial removed", err)
 	}

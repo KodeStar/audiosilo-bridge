@@ -43,10 +43,14 @@ type checkpoint struct {
 	// SourceLength the length the feed gave it, when it gave one. A whole
 	// download is published with no GET (complete): a feed that changed the
 	// episode's audio under the same episode id since is told by these
-	// (sameSource). A record from before them has neither, and is verified
-	// by its hash alone.
+	// (sameSource), and a partial is resumed only from its own enclosure
+	// (resumes). A record from before them has neither: a whole download is
+	// verified by its hash alone, and a partial resumed on its ETag alone.
+	// SourceBase is the hash of that URL's base (sourceBase, for resumes); a
+	// record from before it has none.
 	Source       string `json:"source,omitempty"`
 	SourceLength int64  `json:"source_length,omitempty"`
+	SourceBase   string `json:"source_base,omitempty"`
 	UpdatedAt    string `json:"updated_at"`
 }
 
@@ -60,7 +64,20 @@ func (c *checkpoint) complete() bool {
 
 // setSource records enc as the enclosure c's partial is downloaded from.
 func (c *checkpoint) setSource(enc podcast.Enclosure) {
-	c.Source, c.SourceLength = podcast.FeedURLHash(enc.URL), max(enc.Length, 0)
+	c.Source, c.SourceLength, c.SourceBase = podcast.FeedURLHash(enc.URL), max(enc.Length, 0), sourceBase(enc.URL)
+}
+
+// sourceBase is the hex hash of raw, an enclosure URL, as podcast.EnclosureBase
+// reads it: without its fragment, and without its query (a signature, an
+// expiry, a tracking id) when its path names an audio file; a path naming no
+// file keeps the query that tells its episodes apart. "" when it does not
+// parse. Like Source it is never the URL.
+func sourceBase(raw string) string {
+	base := podcast.EnclosureBase(raw)
+	if base == "" {
+		return ""
+	}
+	return podcast.FeedURLHash(base)
 }
 
 // sameSource reports whether enc is the enclosure c's partial was downloaded
@@ -71,6 +88,20 @@ func (c *checkpoint) sameSource(enc podcast.Enclosure) bool {
 		return true
 	}
 	return c.Source == podcast.FeedURLHash(enc.URL) && (c.SourceLength <= 0 || enc.Length <= 0 || c.SourceLength == enc.Length)
+}
+
+// resumes reports whether c's kept partial may go on from enc: enc is its
+// source (sameSource), or, for a resumable partial, the same URL but for its
+// query (sourceBase) while the feed gives one known length both times. A feed
+// that signs or tags its enclosure URLs anew at every fetch would otherwise
+// restart every resume from zero; the strong ETag still proves the bytes
+// (If-Range). A whole download, published with no GET, never takes that
+// leeway.
+func (c *checkpoint) resumes(enc podcast.Enclosure) bool {
+	if c.sameSource(enc) {
+		return true
+	}
+	return !c.complete() && c.SourceBase != "" && c.SourceBase == sourceBase(enc.URL) && c.SourceLength > 0 && enc.Length == c.SourceLength
 }
 
 // partialName is the root-relative name of the partial c records, beside its
@@ -331,11 +362,15 @@ func (s *service) recordsOf(job jobs.Job, p fetchParams) []string {
 // dropStaleCheckpoint removes this path's owned partial when it was made for
 // an episode the show's feed no longer has there (an episode replaced at the
 // same path): its record is about to be overwritten, which would orphan it.
-// The caller holds the path's file lock and passes the feed's current IDs.
-func (s *service) dropStaleCheckpoint(job jobs.Job, root *os.Root, showID, episodeID string) {
+// One the clear cannot remove is the job's failure (restartPartial,
+// errPartialStuck), its record kept: the episode there now is never
+// downloaded beside it, unrecorded. The caller holds the path's file lock and
+// passes the feed's current IDs.
+func (s *service) dropStaleCheckpoint(job jobs.Job, root *os.Root, showID, episodeID string) error {
 	if saved, ok := s.readCheckpoint(job, showID); ok && saved.EpisodeID != episodeID {
-		s.clearCheckpoint(job, root, &saved)
+		return s.restartPartial(job, root, &saved, errors.New("the partial at the path is another episode's"))
 	}
+	return nil
 }
 
 // loadCheckpoint is the job's saved record of its episode, with the sealed
@@ -345,7 +380,8 @@ func (s *service) dropStaleCheckpoint(job jobs.Job, root *os.Root, showID, episo
 // Bridge may not open (partialLost: not there, not a regular file, no
 // permission, another size), is cleared, and a new record answered; a
 // partial the clear cannot remove fails the attempt write_failed
-// (errPartialStuck) rather than restart beside it, its record left for the
+// (errPartialStuck, answered with the record that names it) rather than
+// restart beside it, its record left for the
 // next attempt or the day-old cleanup (cleanOwned, sweepRecords). One whose partial could not be opened to tell (a network
 // share's hiccup) is kept, partial and all, with errPartialUnreadable: only a
 // definite absence, mismatch or lasting fault may cost a download its bytes.
@@ -367,11 +403,12 @@ func (s *service) loadCheckpoint(job jobs.Job, root *os.Root, showID, episodeID 
 	if err == nil && size == saved.Offset && saved.Total <= s.o.MaxEpisodeBytes && (saved.complete() || resumable) {
 		return saved, tag, nil
 	}
+	stuck := saved // the clear resets it, removed or not
 	if !s.clearCheckpoint(job, root, &saved) {
 		if err == nil {
 			err = errors.New("the episode partial is not the one recorded")
 		}
-		return c, "", fmt.Errorf("%w: %w", errPartialStuck, err)
+		return stuck, "", fmt.Errorf("%w: %w", errPartialStuck, err)
 	}
 	return c, "", nil
 }

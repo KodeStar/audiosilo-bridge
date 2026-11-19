@@ -348,6 +348,12 @@ func TestPrivateEnclosureIdentityAndNoPlaintextCheckpoint(t *testing.T) {
 	}
 }
 
+type streamFunc func(context.Context, netguard.StreamRequest) (*netguard.StreamResponse, error)
+
+func (f streamFunc) Stream(ctx context.Context, r netguard.StreamRequest) (*netguard.StreamResponse, error) {
+	return f(ctx, r)
+}
+
 type feedFetcher func(context.Context, netguard.Request) (*netguard.Response, error)
 
 func (f feedFetcher) Fetch(ctx context.Context, r netguard.Request) (*netguard.Response, error) {
@@ -625,9 +631,9 @@ func TestOnlyFetchOptsIntoInteractivePool(t *testing.T) {
 
 // server#403: an episode download's codes say whose fault it was. The ceiling
 // passing (anywhere, here while the audio is checked) is the episode's timeout,
-// never the Bridge stopping (bridge_lost); a retry wait the ceiling cuts short
-// ends on what the host last answered; a fault of the Bridge's own (no
-// streaming client) is write_failed, never network.
+// never the Bridge stopping (bridge_lost), a retry wait it cuts short
+// included; a fault of the Bridge's own (no streaming client) is write_failed,
+// never network.
 func TestEpisodeFailureCodes(t *testing.T) {
 	ceiling := func(h *harness) *fakeTimer {
 		timer := &fakeTimer{}
@@ -672,8 +678,88 @@ func TestEpisodeFailureCodes(t *testing.T) {
 			return ctx.Err()
 		}
 		_, err := h.handler.FetchJob().Run(context.Background(), job, jobs.LocalReporter())
+		var failure *netguard.Error
+		if !errors.As(err, &failure) || failure.Code != "timeout" || failure.Message != "The episode download did not finish in time." {
+			t.Fatalf("a retry wait the ceiling cut short: %v, want the episode's timeout", err)
+		}
+	})
+	// A job cancelled (or its lease lost) while it waits to try the host again
+	// ends on the cancel, a timeout worded as the stop (never as a feed that
+	// did not respond), never the host's last http_503 or 429: the server
+	// counts an HTTP code of a cancelled job against the feed
+	// (cancelledFailureCodes), though the next try might have had the episode.
+	// So does one cancelled once the host has answered, before the wait.
+	// A host's answer the job ends on with no try left stays its code, a
+	// cancel landing then included.
+	stoppedBy := func(t *testing.T, err error) {
+		t.Helper()
+		var failure *netguard.Error
+		if !errors.As(err, &failure) || failure.Code != "timeout" || failure.Message != "The episode download was stopped before it finished." {
+			t.Fatalf("a download its job's end cut short: %v, want the stop's timeout", err)
+		}
+	}
+	for _, status := range []int{503, 429} {
+		t.Run(fmt.Sprintf("cancelled retry wait %d", status), func(t *testing.T) {
+			h, job := audioHarness(t)
+			var calls atomic.Int32
+			setAudio(h, func(w http.ResponseWriter, _ *http.Request) {
+				calls.Add(1)
+				w.WriteHeader(status)
+			})
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			h.handler.s.o.Wait = func(ctx context.Context, _ time.Duration) error {
+				cancel()
+				return ctx.Err()
+			}
+			_, err := h.handler.FetchJob().Run(ctx, job, jobs.LocalReporter())
+			if stoppedBy(t, err); calls.Load() != 1 {
+				t.Fatalf("a retry wait the job's cancel cut short: %d calls, want 1", calls.Load())
+			}
+		})
+		// cancelAfter cancels the job once the host has answered its nth try.
+		cancelAfter := func(h *harness, n int32) (context.Context, *atomic.Int32) {
+			var calls atomic.Int32
+			setAudio(h, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(status) })
+			ctx, cancel := jobs.CancelContext(context.Background())
+			t.Cleanup(cancel)
+			host := h.handler.s.o.Streamer
+			h.handler.s.o.Streamer = streamFunc(func(ctx context.Context, in netguard.StreamRequest) (*netguard.StreamResponse, error) {
+				r, err := host.Stream(ctx, in)
+				if calls.Add(1) == n {
+					cancel()
+				}
+				return r, err
+			})
+			return ctx, &calls
+		}
+		t.Run(fmt.Sprintf("cancelled before the retry wait %d", status), func(t *testing.T) {
+			h, job := audioHarness(t)
+			ctx, calls := cancelAfter(h, 1)
+			h.handler.s.o.Wait = func(context.Context, time.Duration) error {
+				t.Error("a cancelled job waited to try the host again")
+				return nil
+			}
+			_, err := h.handler.FetchJob().Run(ctx, job, jobs.LocalReporter())
+			if stoppedBy(t, err); calls.Load() != 1 {
+				t.Fatalf("a job cancelled once the host answered: %d calls, want 1", calls.Load())
+			}
+		})
+		t.Run(fmt.Sprintf("cancelled after the last try %d", status), func(t *testing.T) {
+			h, job := audioHarness(t)
+			ctx, calls := cancelAfter(h, 3)
+			_, err := h.handler.FetchJob().Run(ctx, job, jobs.LocalReporter())
+			if c := code(t, err); c != fmt.Sprintf("http_%d", status) || calls.Load() != 3 {
+				t.Fatalf("a job cancelled once the host answered its last try: %q after %d calls, want the host's answer after 3", c, calls.Load())
+			}
+		})
+	}
+	t.Run("host's last answer", func(t *testing.T) {
+		h, job := audioHarness(t)
+		setAudio(h, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(503) })
+		_, err := h.handler.FetchJob().Run(context.Background(), job, jobs.LocalReporter())
 		if c := code(t, err); c != "http_503" {
-			t.Fatalf("a retry wait cut short: %q, want http_503", c)
+			t.Fatalf("a host that answered 503 to every try: %q, want http_503", c)
 		}
 	})
 	// An episode host's 410 is the feed's word for it, gone (the server says
@@ -1420,20 +1506,552 @@ func TestCheckpointSameSource(t *testing.T) {
 	}
 }
 
+// resumes takes a partial's own enclosure, and one whose URL differs only in
+// its query (a signature, a tracking id) while the feed gives the same known
+// length; never another path or host, another length, or a query change with
+// no length to tell by. A record from before SourceBase, with no base, takes
+// only its own URL; one with no source at all cannot tell, and takes any.
+func TestCheckpointResumes(t *testing.T) {
+	var c checkpoint
+	if !c.resumes(podcast.Enclosure{URL: "https://a.example/1.mp3?sig=2"}) {
+		t.Fatal("a record with no source refused an enclosure")
+	}
+	c.setSource(podcast.Enclosure{URL: "https://a.example/1.mp3?sig=1&exp=9", Length: 100})
+	for enc, want := range map[podcast.Enclosure]bool{
+		{URL: "https://a.example/1.mp3?sig=1&exp=9", Length: 100}:  true,
+		{URL: "https://a.example/1.mp3?sig=1&exp=9"}:               true,
+		{URL: "https://a.example/1.mp3?sig=2&exp=10", Length: 100}: true,
+		{URL: "https://a.example/1.mp3", Length: 100}:              true,
+		{URL: "https://a.example/1.mp3?sig=2&exp=10"}:              false,
+		{URL: "https://a.example/1.mp3?sig=2&exp=10", Length: 99}:  false,
+		{URL: "https://a.example/2.mp3?sig=1&exp=9", Length: 100}:  false,
+		{URL: "https://b.example/1.mp3?sig=1&exp=9", Length: 100}:  false,
+	} {
+		if c.resumes(enc) != want {
+			t.Error(enc, "want", want)
+		}
+		if enc.URL != "https://a.example/1.mp3?sig=1&exp=9" && c.sameSource(enc) {
+			t.Error("a whole download took another URL as its own:", enc)
+		}
+	}
+	c.SourceBase = ""
+	if c.resumes(podcast.Enclosure{URL: "https://a.example/1.mp3?sig=2&exp=10", Length: 100}) {
+		t.Fatal("a record with no base took another query")
+	}
+	if sourceBase("https://a.example/secret/1.mp3?token=x#t=5") != podcast.FeedURLHash("https://a.example/secret/1.mp3") || sourceBase("https://a.example/1.mp3?a=1") != sourceBase("https://a.example/1.mp3#t=5") {
+		t.Fatal("the base is not a hash of the URL without its query and fragment")
+	}
+	// A path naming no audio file keeps the query that tells its episodes
+	// apart (podcast.EnclosureBase): another id there is another file, never
+	// resumed, however equal its length.
+	var d checkpoint
+	d.setSource(podcast.Enclosure{URL: "https://a.example/uc?export=download&id=1", Length: 100})
+	if d.resumes(podcast.Enclosure{URL: "https://a.example/uc?export=download&id=2", Length: 100}) {
+		t.Fatal("a partial took another file's query on a path naming no audio file")
+	}
+	if !d.resumes(podcast.Enclosure{URL: "https://a.example/uc?export=download&id=1#t=5", Length: 100}) {
+		t.Fatal("a partial refused its own enclosure with a fragment")
+	}
+	// A whole download takes no query leeway: it is published with no GET.
+	c.setSource(podcast.Enclosure{URL: "https://a.example/1.mp3?sig=1", Length: 100})
+	c.Offset, c.Total, c.SHA256 = 100, 100, strings.Repeat("a", 64)
+	if !c.complete() || c.resumes(podcast.Enclosure{URL: "https://a.example/1.mp3?sig=2", Length: 100}) {
+		t.Fatal("a whole download took another query as its own")
+	}
+}
+
+// A partial kept for a resume is resumed (Range, If-Range with its ETag) only
+// from the enclosure it was downloaded from. One the feed moved (another URL)
+// or remade (another length) under the same episode id since is cleared and
+// the episode downloaded from byte 0 in the one request, never resumed
+// against the new URL with the old ETag; one the clear cannot remove fails
+// write_failed with no request, never a download beside it. A URL whose
+// query alone changed (a signed or tracked enclosure) still resumes while the
+// feed gives the same known length, unless its path names no audio file
+// (podcast.EnclosureBase), where the query tells episodes apart. A record from before the source was kept
+// resumes on its ETag alone, as it did.
+func TestAKeptPartialIsDownloadedAgainWhenItsEnclosureChanged(t *testing.T) {
+	requireProbe(t)
+	for _, scenario := range []string{"same", "path", "query with no length", "length", "query", "query and length", "query on no file", "no base", "legacy", "stuck"} {
+		t.Run(scenario, func(t *testing.T) {
+			if scenario == "stuck" {
+				requireNonRoot(t)
+			}
+			h, job := audioHarness(t)
+			s := h.handler.s
+			root, err := os.OpenRoot(h.mount)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer root.Close()
+			audio := data(t, "chap-v24-reverse.mp3")
+			f := h.read("Fixture Show")
+			enc := f.Episodes[0].Enclosure
+			enc.Length = int64(len(audio))
+			if scenario != "query on no file" {
+				enc.URL = h.http.URL + "/audio.mp3" // a path naming an audio file: its query may change
+			}
+			if scenario == "query with no length" {
+				enc.Length = 0 // no length to tell a query change by
+			}
+			c := checkpoint{ServerHash: s.pairHash(), LibraryID: 3, ShowID: fixtureShowID, EpisodeID: f.Episodes[0].ID, Path: *job.Path, Temp: ".audiosilo-tmp-kept", Offset: 1000, Total: int64(len(audio))}
+			c.setSource(enc)
+			if scenario == "legacy" {
+				c.Source, c.SourceLength, c.SourceBase = "", 0, ""
+			}
+			if scenario == "no base" {
+				c.SourceBase = ""
+			}
+			partial := "Fixture Show/" + c.Temp
+			if err := root.WriteFile(partial, audio[:1000], 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.saveCheckpoint(job, root, &c, `"one"`); err != nil {
+				t.Fatal(err)
+			}
+			f.Episodes[0].Enclosure = enc
+			switch scenario {
+			case "path":
+				f.Episodes[0].Enclosure.URL = h.http.URL + "/audio" // another file at the same host, the same length
+			case "query with no length", "query", "query on no file", "no base", "legacy":
+				f.Episodes[0].Enclosure.URL += "?sig=2"
+			case "length", "stuck":
+				f.Episodes[0].Enclosure.Length = int64(len(audio)) + 1
+			case "query and length":
+				f.Episodes[0].Enclosure.URL += "?sig=2"
+				f.Episodes[0].Enclosure.Length = int64(len(audio)) + 1
+			}
+			if _, err := podcast.Write(root, "Fixture Show", f, s.o.Now()); err != nil {
+				t.Fatal(err)
+			}
+			resumes := scenario == "same" || scenario == "query" || scenario == "legacy"
+			var calls atomic.Int32
+			setAudio(h, func(w http.ResponseWriter, r *http.Request) {
+				calls.Add(1)
+				w.Header().Set("ETag", `"one"`)
+				if ranged := r.Header.Get("Range") != ""; ranged != resumes {
+					t.Errorf("ranged %v, want %v: %v", ranged, resumes, r.Header)
+				}
+				if r.Header.Get("Range") == "" {
+					w.Header().Set("Content-Length", strconv.Itoa(len(audio)))
+					w.WriteHeader(200)
+					w.Write(audio)
+					return
+				}
+				if r.Header.Get("Range") != "bytes=1000-" || r.Header.Get("If-Range") != `"one"` {
+					t.Error("unproven range", r.Header)
+				}
+				w.Header().Set("Content-Range", fmt.Sprintf("bytes 1000-%d/%d", len(audio)-1, len(audio)))
+				w.Header().Set("Content-Length", strconv.Itoa(len(audio)-1000))
+				w.WriteHeader(206)
+				w.Write(audio[1000:])
+			})
+			if scenario == "stuck" {
+				show := barShowAtLoad(t, h)
+				_, err := h.handler.FetchJob().Run(context.Background(), job, jobs.LocalReporter())
+				if code(t, err) != "write_failed" || !strings.Contains(err.Error(), "could not be removed") || calls.Load() != 0 {
+					t.Fatal(err, calls.Load())
+				}
+				if saved, ok := s.readCheckpoint(job, fixtureShowID); !ok || saved.Temp != c.Temp {
+					t.Fatalf("the record of the partial still on disk was dropped: %+v", saved)
+				}
+				if left := partials(show); len(left) != 1 {
+					t.Fatal("a download was started beside the partial:", left)
+				}
+				return
+			}
+			res, err := h.handler.FetchJob().Run(context.Background(), job, jobs.LocalReporter())
+			if _, isResult := res.(fetchResult); err != nil || !isResult {
+				t.Fatal(res, err)
+			}
+			if calls.Load() != 1 {
+				t.Fatalf("%d requests, want 1", calls.Load())
+			}
+			if b, err := os.ReadFile(filepath.Join(h.mount, *job.Path)); err != nil || !bytes.Equal(b, audio) {
+				t.Fatal("the published episode is not the host's audio", err)
+			}
+			if left := partials(filepath.Join(h.mount, "Fixture Show")); len(left) != 0 {
+				t.Fatal("a partial was left behind", left)
+			}
+			noRecords(t, s)
+		})
+	}
+}
+
+// A partial proven changed on disk while it downloaded (a copy made over the
+// show folder in place) is downloaded again from byte 0 only once it is
+// cleared: one the clear cannot remove fails write_failed with no second
+// request, never a download beside it.
+func TestAPartialChangedOnDiskThatCannotBeClearedFails(t *testing.T) {
+	requireProbe(t)
+	requireNonRoot(t)
+	h, job := audioHarness(t)
+	s := h.handler.s
+	audio := data(t, "chap-v24-reverse.mp3")
+	var calls atomic.Int32
+	setAudio(h, func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Header().Set("ETag", `"one"`)
+		w.Header().Set("Content-Length", strconv.Itoa(len(audio)))
+		w.WriteHeader(200)
+		w.Write(audio)
+	})
+	show, bar := barShow(t, h)
+	var once sync.Once
+	s.o.Fault = func(at string) error {
+		if at == "rehash" {
+			once.Do(func() {
+				left := partials(show)
+				if len(left) != 1 {
+					t.Error("no partial to change:", left)
+					return
+				}
+				changed := bytes.Repeat([]byte{0xAA}, len(audio))
+				if err := os.WriteFile(left[0], changed, 0o600); err != nil {
+					t.Error(err)
+				}
+				bar()
+			})
+		}
+		return nil
+	}
+	_, err := h.handler.FetchJob().Run(context.Background(), job, jobs.LocalReporter())
+	if code(t, err) != "write_failed" || !strings.Contains(err.Error(), "could not be removed") || calls.Load() != 1 {
+		t.Fatalf("a changed partial the restart cannot remove: %v after %d calls, want write_failed after 1", err, calls.Load())
+	}
+	if left := partials(show); len(left) != 1 {
+		t.Fatal("a download was started beside the partial:", left)
+	}
+	if _, err := os.Lstat(filepath.Join(h.mount, *job.Path)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("the changed partial was published", err)
+	}
+}
+
+// A host's retry that must start from byte 0 (a resume the host did not
+// prove, a cut with no strong ETag to resume by, a resume the host answered
+// with the whole file) goes out (or is written) only once the
+// partial is cleared: one the clear cannot remove fails write_failed with no
+// further request, never a download beside it.
+func TestARetryFromZeroThatCannotClearItsPartialFails(t *testing.T) {
+	requireProbe(t)
+	requireNonRoot(t)
+	for _, scenario := range []string{"unproven resume", "cut with no etag", "resume answered whole"} {
+		t.Run(scenario, func(t *testing.T) {
+			h, job := audioHarness(t)
+			s := h.handler.s
+			audio := data(t, "chap-v24-reverse.mp3")
+			show, bar := barShow(t, h)
+			if scenario != "cut with no etag" {
+				root, err := os.OpenRoot(h.mount)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer root.Close()
+				c := checkpoint{ServerHash: s.pairHash(), LibraryID: 3, ShowID: fixtureShowID, EpisodeID: "1cc306d831645e2b", Path: *job.Path, Temp: ".audiosilo-tmp-kept", Offset: 1000, Total: int64(len(audio))}
+				if err := root.WriteFile("Fixture Show/"+c.Temp, audio[:1000], 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := s.saveCheckpoint(job, root, &c, `"one"`); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var calls atomic.Int32
+			setAudio(h, func(w http.ResponseWriter, r *http.Request) {
+				calls.Add(1)
+				if scenario == "unproven resume" {
+					bar()
+					w.Header().Set("ETag", `"one"`)
+					w.Header().Set("Content-Range", fmt.Sprintf("bytes 999-%d/%d", len(audio)-1, len(audio)))
+					w.Header().Set("Content-Length", strconv.Itoa(len(audio)-999))
+					w.WriteHeader(206)
+					w.Write(audio[999:])
+					return
+				}
+				if scenario == "resume answered whole" {
+					bar()
+					w.Header().Set("ETag", `"two"`)
+					w.Header().Set("Content-Length", strconv.Itoa(len(audio)))
+					w.WriteHeader(200)
+					w.Write(audio)
+					return
+				}
+				w.Header().Set("Content-Length", strconv.Itoa(len(audio)))
+				w.WriteHeader(200)
+				w.Write(audio[:1000])
+				w.(http.Flusher).Flush()
+				if !partialAt(show, 1000) {
+					t.Error("the download did not start")
+					return
+				}
+				bar() // then cut short of its Content-Length
+			})
+			_, err := h.handler.FetchJob().Run(context.Background(), job, jobs.LocalReporter())
+			if code(t, err) != "write_failed" || !strings.Contains(err.Error(), "could not be removed") || calls.Load() != 1 {
+				t.Fatalf("a retry from zero past a partial it cannot remove: %v after %d calls, want write_failed after 1", err, calls.Load())
+			}
+			if left := partials(show); len(left) != 1 {
+				t.Fatal("a download was started beside the partial:", left)
+			}
+		})
+	}
+}
+
+// A private feed that does not answer just now (DNS, the network, a timeout,
+// a 429 or 5xx) says nothing of the partial a fetch kept: it stays, record
+// and all, with no request to the episode's host, and the next attempt
+// resumes it. So it does when the Bridge stops while the feed is asked. A
+// feed that answers the episode is not there (a 404, a page that is no feed)
+// leaves nothing to resume it from, and a job cancelled for good keeps
+// nothing: the partial and its record go.
+func TestAKeptPartialOutlivesAPrivateFeedThatDidNotAnswer(t *testing.T) {
+	requireProbe(t)
+	for _, scenario := range []string{"http_503", "http_429", "network", "dns", "timeout", "stop", "http_404", "not_a_feed", "cancel", "lost"} {
+		t.Run(scenario, func(t *testing.T) {
+			h, job := audioHarness(t)
+			s := h.handler.s
+			root, err := os.OpenRoot(h.mount)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer root.Close()
+			audio := data(t, "chap-v24-reverse.mp3")
+			f := h.read("Fixture Show")
+			f.Private = true
+			f.Episodes[0].GUID = "sha256:" + podcast.FeedURLHash("https://private.example/guid/1")
+			f.Episodes[0].Enclosure.URL = ""
+			if _, err := podcast.Write(root, "Fixture Show", f, s.o.Now()); err != nil {
+				t.Fatal(err)
+			}
+			s.o.Vault.Set(secrets.PodcastFeedName(f.ShowID), h.http.URL+"/private?token=1")
+			c := checkpoint{ServerHash: s.pairHash(), LibraryID: 3, ShowID: f.ShowID, EpisodeID: f.Episodes[0].ID, Path: *job.Path, Temp: ".audiosilo-tmp-kept", Offset: 1000, Total: int64(len(audio))}
+			c.setSource(podcast.Enclosure{URL: h.http.URL + "/audio.mp3"})
+			if err := root.WriteFile("Fixture Show/"+c.Temp, audio[:1000], 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.saveCheckpoint(job, root, &c, `"one"`); err != nil {
+				t.Fatal(err)
+			}
+			feed := &netguard.Response{Status: 200, URL: h.http.URL, Body: []byte(`<rss version="2.0"><channel><title>Private</title><item><guid>https://private.example/guid/1</guid><title>Episode</title><enclosure url="` + h.http.URL + `/audio.mp3" type="audio/mpeg" /></item></channel></rss>`)}
+			var ctx context.Context
+			var cancel func()
+			switch scenario {
+			case "cancel":
+				ctx, cancel = jobs.CancelContext(context.Background())
+			case "lost":
+				ctx, cancel = jobs.LoseContext(context.Background())
+			default:
+				ctx, cancel = context.WithCancel(context.Background())
+			}
+			defer cancel()
+			s.o.Fetcher = feedFetcher(func(ctx context.Context, _ netguard.Request) (*netguard.Response, error) {
+				switch scenario {
+				case "http_503", "http_429", "http_404":
+					status, _ := strconv.Atoi(strings.TrimPrefix(scenario, "http_"))
+					return nil, netguard.StatusError("feed", status, 0)
+				case "network", "dns":
+					return nil, &netguard.Error{Code: scenario, Message: "The feed could not be reached."}
+				case "not_a_feed":
+					return &netguard.Response{Status: 200, URL: h.http.URL, Body: []byte("<html>busy</html>")}, nil
+				case "stop", "cancel", "lost":
+					cancel()
+				}
+				return nil, netguard.Classify(ctx, context.DeadlineExceeded)
+			})
+			var calls atomic.Int32
+			setAudio(h, func(w http.ResponseWriter, r *http.Request) {
+				calls.Add(1)
+				if r.Header.Get("Range") != "bytes=1000-" || r.Header.Get("If-Range") != `"one"` {
+					t.Error("the kept partial was not resumed", r.Header)
+				}
+				w.Header().Set("ETag", `"one"`)
+				w.Header().Set("Content-Range", fmt.Sprintf("bytes 1000-%d/%d", len(audio)-1, len(audio)))
+				w.Header().Set("Content-Length", strconv.Itoa(len(audio)-1000))
+				w.WriteHeader(206)
+				w.Write(audio[1000:])
+			})
+			_, err = h.handler.FetchJob().Run(ctx, job, jobs.LocalReporter())
+			want := scenario
+			if scenario == "stop" || scenario == "cancel" || scenario == "lost" {
+				want = "timeout"
+			}
+			if got := code(t, err); got != want || calls.Load() != 0 {
+				t.Fatalf("a private feed that failed %s: %q after %d episode requests, want %s after none", scenario, got, calls.Load(), want)
+			}
+			show := filepath.Join(h.mount, "Fixture Show")
+			if scenario == "http_404" || scenario == "not_a_feed" || scenario == "cancel" || scenario == "lost" {
+				if left := partials(show); len(left) != 0 {
+					t.Fatal("a partial nothing resumes was kept:", left)
+				}
+				noRecords(t, s)
+				return
+			}
+			saved, ok := s.readCheckpoint(job, f.ShowID)
+			if !ok || saved.Temp != c.Temp || saved.Offset != 1000 || !partialAt(show, 1000) {
+				t.Fatalf("the kept partial went for a feed that did not answer: %+v %v", saved, partials(show))
+			}
+			if v, _ := s.o.Vault.Get(saved.Validator); v != `"one"` {
+				t.Fatal("the kept partial lost its validator:", v)
+			}
+			s.o.Fetcher = feedFetcher(func(context.Context, netguard.Request) (*netguard.Response, error) { return feed, nil })
+			res, err := h.handler.FetchJob().Run(context.Background(), job, jobs.LocalReporter())
+			if _, isResult := res.(fetchResult); err != nil || !isResult || calls.Load() != 1 {
+				t.Fatal(res, err, calls.Load())
+			}
+			if b, err := os.ReadFile(filepath.Join(h.mount, *job.Path)); err != nil || !bytes.Equal(b, audio) {
+				t.Fatal("the published episode is not the host's audio", err)
+			}
+			if left := partials(show); len(left) != 0 {
+				t.Fatal("a partial was left behind", left)
+			}
+			noRecords(t, s)
+		})
+	}
+}
+
+// A fetch stopped mid-download with a proven prefix keeps it, record and all,
+// only when it runs again under its claim (the Bridge stopping:
+// jobs.Resumes). An admin's cancel or a lost claim ends it for good: its exit
+// clears the partial and the record.
+func TestFetchEndedForGoodClearsItsProvenPrefix(t *testing.T) {
+	for _, end := range []string{"cancel", "lost", "stop"} {
+		t.Run(end, func(t *testing.T) {
+			h, job := audioHarness(t)
+			s := h.handler.s
+			started := make(chan struct{})
+			setAudio(h, func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("ETag", `"one"`)
+				w.Header().Set("Content-Length", "10000")
+				w.WriteHeader(200)
+				w.Write(bytes.Repeat([]byte("a"), 1000))
+				w.(http.Flusher).Flush()
+				close(started)
+				<-r.Context().Done()
+			})
+			var ctx context.Context
+			var cancel func()
+			switch end {
+			case "cancel":
+				ctx, cancel = jobs.CancelContext(context.Background())
+			case "lost":
+				ctx, cancel = jobs.LoseContext(context.Background())
+			default:
+				ctx, cancel = context.WithCancel(context.Background())
+			}
+			defer cancel()
+			done := make(chan error, 1)
+			go func() { _, err := h.handler.FetchJob().Run(ctx, job, jobs.LocalReporter()); done <- err }()
+			<-started
+			show := filepath.Join(h.mount, "Fixture Show")
+			proven := partialAt(show, 1000)
+			cancel()
+			if err := <-done; err == nil || !proven {
+				t.Fatal("the download did not stop on a proven prefix:", err, proven)
+			}
+			left := partials(show)
+			saved, ok := s.readCheckpoint(job, fixtureShowID)
+			if end == "stop" {
+				if len(left) != 1 || !ok || saved.Temp != filepath.Base(left[0]) || saved.Offset != 1000 {
+					t.Fatalf("a stopped Bridge's proven prefix was not kept: %v %+v", left, saved)
+				}
+				return
+			}
+			if len(left) != 0 {
+				t.Fatal("a download ended for good kept its partial:", left)
+			}
+			noRecords(t, s)
+		})
+	}
+}
+
+// Another episode's partial left at the path (the feed replaced the episode
+// there) that the start cannot remove (a show folder the Bridge may not
+// write) fails the attempt write_failed with no GET, its record kept for a
+// later clear, never a download started beside it unrecorded.
+func TestFetchStartFailsOnAnotherEpisodesPartialItCannotRemove(t *testing.T) {
+	requireNonRoot(t)
+	h, job := audioHarness(t)
+	s := h.handler.s
+	root, _ := os.OpenRoot(h.mount)
+	defer root.Close()
+	var calls atomic.Int32
+	setAudio(h, func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(500)
+	})
+	c := checkpoint{ServerHash: s.pairHash(), LibraryID: 3, ShowID: fixtureShowID, EpisodeID: strings.Repeat("2", 16), Path: *job.Path, Temp: ".audiosilo-tmp-stale", Offset: 6, Total: 100}
+	if err := root.WriteFile("Fixture Show/"+c.Temp, []byte("prefix"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.saveCheckpoint(job, root, &c, `"one"`); err != nil {
+		t.Fatal(err)
+	}
+	// Barred once the fetch's own write check has passed: its budget starts
+	// just before it looks for a stale record.
+	show, bar := barShow(t, h)
+	s.o.BudgetNow = func() time.Time { bar(); return time.Now() }
+	_, err := h.handler.FetchJob().Run(context.Background(), job, jobs.LocalReporter())
+	if code(t, err) != "write_failed" || !strings.Contains(err.Error(), "could not be removed") || calls.Load() != 0 {
+		t.Fatalf("another episode's partial the start cannot remove: %v after %d calls, want write_failed after none", err, calls.Load())
+	}
+	if saved, ok := s.readCheckpoint(job, fixtureShowID); !ok || saved.Temp != c.Temp {
+		t.Fatalf("the record of the partial still on disk was dropped: %+v", saved)
+	}
+	if left := partials(show); len(left) != 1 {
+		t.Fatal("a download was started beside the partial:", left)
+	}
+}
+
+// A record whose partial is not the size it records, and that the clear
+// cannot remove, is answered with the stuck failure and the record itself:
+// the start's log names the file an admin has to free.
+func TestLoadCheckpointNamesThePartialItCannotRemove(t *testing.T) {
+	requireNonRoot(t)
+	h, job := audioHarness(t)
+	s := h.handler.s
+	root, err := os.OpenRoot(h.mount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	c := checkpoint{ServerHash: s.pairHash(), LibraryID: 3, ShowID: fixtureShowID, EpisodeID: strings.Repeat("2", 16), Path: *job.Path, Temp: ".audiosilo-tmp-stuck", Offset: 1000, Total: 5000}
+	if err := root.WriteFile("Fixture Show/"+c.Temp, []byte("prefix"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.saveCheckpoint(job, root, &c, `"one"`); err != nil {
+		t.Fatal(err)
+	}
+	_, bar := barShow(t, h)
+	bar()
+	got, _, err := s.loadCheckpoint(job, root, fixtureShowID, c.EpisodeID)
+	if !errors.Is(err, errPartialStuck) || got.partialName() != "Fixture Show/"+c.Temp {
+		t.Fatalf("a partial the start cannot remove: %q %v, want the stuck record's partial", got.partialName(), err)
+	}
+}
+
 // barShowAtLoad makes the fixture show's folder one the Bridge may not write
 // once a fetch's own write check has passed (at its record's load), and
 // answers the folder's path.
 func barShowAtLoad(t *testing.T, h *harness) string {
 	t.Helper()
-	show := filepath.Join(h.mount, "Fixture Show")
-	t.Cleanup(func() { os.Chmod(show, 0o755) })
+	show, bar := barShow(t, h)
 	h.handler.s.o.Fault = func(at string) error {
 		if at == "load" {
-			if err := os.Chmod(show, 0o500); err != nil {
-				t.Error(err)
-			}
+			bar()
 		}
 		return nil
 	}
 	return show
+}
+
+// barShow answers the fixture show's folder and a bar that makes it one the
+// Bridge may not write (lifted when the test ends).
+func barShow(t *testing.T, h *harness) (string, func()) {
+	t.Helper()
+	show := filepath.Join(h.mount, "Fixture Show")
+	t.Cleanup(func() { os.Chmod(show, 0o755) })
+	return show, func() {
+		if err := os.Chmod(show, 0o500); err != nil {
+			t.Error(err)
+		}
+	}
 }

@@ -986,6 +986,69 @@ func TestAFetchFollowsItsShowRenamedMidDownload(t *testing.T) {
 	}
 }
 
+// A private feed whose enclosure changed since a partial was kept, its show
+// folder renamed by hand while the feed is fetched to tell: the partial is
+// cleared where the folder is now (the partial moved with it), never left
+// there unrecorded beside the episode downloaded again from byte 0.
+func TestAChangedEnclosureClearsItsPartialWhereTheShowIsNow(t *testing.T) {
+	requireProbe(t)
+	h, job := audioHarness(t)
+	s := h.handler.s
+	if err := h.db.RecordClaim(context.Background(), store.ServerJob{ID: job.ID, Kind: FetchKind, LibraryID: job.LibraryID, Path: job.Path, Params: job.Params, Attempt: 1, ServerID: "server-1"}); err != nil {
+		t.Fatal(err)
+	}
+	h.scan.knows = func(p string) bool { return strings.HasPrefix(p, "Fixture Show/") }
+	audio := data(t, "chap-v24-reverse.mp3")
+	root, err := os.OpenRoot(h.mount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	f := h.read("Fixture Show")
+	f.Private = true
+	f.Episodes[0].GUID = "sha256:" + podcast.FeedURLHash("https://private.example/guid/1")
+	f.Episodes[0].Enclosure.URL = ""
+	if _, err := podcast.Write(root, "Fixture Show", f, s.o.Now()); err != nil {
+		t.Fatal(err)
+	}
+	s.o.Vault.Set(secrets.PodcastFeedName(f.ShowID), h.http.URL+"/private?token=1")
+	c := checkpoint{ServerHash: s.pairHash(), LibraryID: 3, ShowID: f.ShowID, EpisodeID: f.Episodes[0].ID, Path: *job.Path, Temp: ".audiosilo-tmp-kept", Offset: 1000, Total: int64(len(audio))}
+	c.setSource(podcast.Enclosure{URL: h.http.URL + "/audio.mp3"})
+	if err := root.WriteFile("Fixture Show/"+c.Temp, audio[:1000], 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.saveCheckpoint(job, root, &c, `"one"`); err != nil {
+		t.Fatal(err)
+	}
+	s.o.Fetcher = feedFetcher(func(context.Context, netguard.Request) (*netguard.Response, error) {
+		if err := os.Rename(filepath.Join(h.mount, "Fixture Show"), filepath.Join(h.mount, "Renamed Show")); err != nil {
+			t.Error(err)
+		}
+		return &netguard.Response{Status: 200, URL: h.http.URL, Body: []byte(`<rss version="2.0"><channel><title>Private</title><item><guid>https://private.example/guid/1</guid><title>Episode</title><enclosure url="` + h.http.URL + `/audio" type="audio/mpeg" /></item></channel></rss>`)}, nil
+	})
+	var calls atomic.Int32
+	setAudio(h, func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		if r.Header.Get("Range") != "" {
+			t.Error("a partial was resumed against another enclosure", r.Header)
+		}
+		w.Header().Set("ETag", `"two"`)
+		w.Header().Set("Content-Length", strconv.Itoa(len(audio)))
+		w.WriteHeader(200)
+		w.Write(audio)
+	})
+	res, err := h.handler.FetchJob().Run(context.Background(), job, jobs.LocalReporter())
+	if err != nil || calls.Load() != 1 {
+		t.Fatal(res, err, calls.Load())
+	}
+	if got := res.(fetchResult); !strings.HasPrefix(got.Path, "Renamed Show/") {
+		t.Fatal("the episode was not published where the show is now:", got.Path)
+	}
+	if left := partials(filepath.Join(h.mount, "Renamed Show")); len(left) != 0 {
+		t.Fatal("the kept partial was left in the renamed folder", left)
+	}
+}
+
 // cutAfterRename answers the first episode request with 2000 bytes of audio
 // (a download record saved on the way), renames the show folder by hand and
 // cuts the connection; every later request goes to then.

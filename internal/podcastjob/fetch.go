@@ -241,14 +241,19 @@ func (h *Fetch) run(parent context.Context, claimed *jobs.Job, rep *jobs.Reporte
 	ctx, b := s.budget(parent)
 	defer b.close()
 	defer func() { err = b.failure(ctx, err) }()
-	s.dropStaleCheckpoint(job, root, f.ShowID, e.ID)
+	// Another episode's partial at the path that cannot be removed fails the
+	// attempt as the fetch's own would (errPartialStuck): never a download
+	// beside it, unrecorded.
+	if err := s.dropStaleCheckpoint(job, root, f.ShowID, e.ID); err != nil {
+		return nil, err
+	}
 	// Again now that a stale record at the new path (another episode's) is
 	// gone: the fetch's own, left at the old path for it, moves in and the
 	// download resumes from its partial.
 	s.adoptOwn(job, root, claimedAt, params, "")
 	c, tag, err := s.loadCheckpoint(job, root, f.ShowID, e.ID)
 	if errors.Is(err, errPartialStuck) {
-		return nil, stuckPartial(err)
+		return nil, stuckPartial(c.partialName(), err)
 	}
 	if err != nil {
 		// Not known to have changed: the partial and its record stay for the
@@ -311,6 +316,10 @@ func (h *Fetch) run(parent context.Context, claimed *jobs.Job, rep *jobs.Reporte
 		return follow(ctx)
 	}
 	committed := false
+	// unresolved: the episode's enclosure could not be resolved for a failure
+	// that may pass (resolve), before any GET of this attempt touched the
+	// partial it loaded.
+	unresolved := false
 	defer func() {
 		if s.writable(lib, mount) != nil || pairing != s.pairHash() {
 			return
@@ -319,11 +328,13 @@ func (h *Fetch) run(parent context.Context, claimed *jobs.Job, rep *jobs.Reporte
 		switch {
 		case committed || c.Temp == "" || parent.Err() != nil && !jobs.Resumes(parent):
 			// Published, nothing held, or cancelled (its claim lost): cleared.
-		case c.complete(), errors.Is(err, errPartialUnreadable):
-			// A whole download whose read-back failed (resume-at-total), or a
-			// partial that could not be read to tell whether it changed: kept
-			// for the next attempt, which verifies it (or resumes it) where its
-			// record is now. One proven gone or another size goes.
+		case c.complete(), errors.Is(err, errPartialUnreadable), unresolved:
+			// A whole download whose read-back failed (resume-at-total), a
+			// partial that could not be read to tell whether it changed, or
+			// one whose enclosure a private feed that did not answer just now
+			// could not give (unresolved): kept for the next attempt, which
+			// verifies it (or resumes it) where its record is now. One proven
+			// gone or another size goes.
 			keep = s.keepsPartial(job, root, &c)
 		case parent.Err() != nil:
 			// Read, not loaded: loadCheckpoint drops a record whose partial is
@@ -358,8 +369,12 @@ func (h *Fetch) run(parent context.Context, claimed *jobs.Job, rep *jobs.Reporte
 	}()
 	rep.Progress(jobs.Progress{Step: "resolving", Message: "Resolving the episode"})
 	// The episode's enclosure, resolved once per job (a private feed's is
-	// fetched): before the loop only for a kept whole download its record
-	// names the source of, else when a download needs it.
+	// fetched): before the loop for a kept partial its record names the
+	// source of, else when a download needs it. A failure that may pass (the
+	// private feed's fetch: DNS, the network, a timeout, a 429 or 5xx) says
+	// nothing of the partial the attempt loaded, which the exit keeps for the
+	// next attempt to resume (unresolved); any other (the feed gone, no
+	// enclosure for the episode in it) leaves nothing to resume it from.
 	var enc podcast.Enclosure
 	resolve := func() error {
 		if enc.URL != "" {
@@ -367,20 +382,24 @@ func (h *Fetch) run(parent context.Context, claimed *jobs.Job, rep *jobs.Reporte
 		}
 		got, err := s.enclosure(ctx, f, e)
 		enc = got
+		var failure *netguard.Error
+		unresolved = errors.As(err, &failure) && netguard.Retryable(failure)
 		return err
 	}
-	if c.complete() && c.Source != "" {
+	if c.Temp != "" && c.Source != "" {
 		if err := resolve(); err != nil {
-			return nil, err // the whole download is kept (the exit), for the next attempt
+			return nil, err // a whole download is kept (the exit) for the next attempt, and a partial when the failure may pass
 		}
 		// The feed changed the episode's audio under the same episode id
 		// since it was downloaded (another enclosure URL or length): the old
-		// download is never published, and the episode is downloaded again
-		// from byte 0.
-		if !c.sameSource(enc) {
-			slog.Info("podcasts: an episode's enclosure changed since its download was kept; it is downloaded again", "partial", c.partialName())
-			if !s.clearCheckpoint(job, root, &c) {
-				return nil, stuckPartial(errors.New("the episode's enclosure changed"))
+		// download is never published, nor a partial resumed against
+		// another URL with its old ETag, and the episode is downloaded again
+		// from byte 0 (the loop's one GET).
+		if !c.resumes(enc) {
+			slog.Info("podcasts: an episode's enclosure changed since its partial was kept; it is downloaded again", "partial", c.partialName())
+			_ = settle(ctx) // the clear finds the partial where it is now (a private feed's fetch may take a while)
+			if err := s.restartPartial(job, root, &c, errors.New("the episode's enclosure changed")); err != nil {
+				return nil, err
 			}
 			tag = ""
 		}
@@ -447,7 +466,9 @@ func (h *Fetch) run(parent context.Context, claimed *jobs.Job, rep *jobs.Reporte
 			return nil, fail("write_failed", "The episode download was changed on disk while it was saved.")
 		}
 		slog.Warn("podcasts: an episode's partial changed on disk while it downloaded; it is downloaded again", "partial", c.partialName())
-		s.clearCheckpoint(job, root, &c)
+		if err := s.restartPartial(job, root, &c, errPartialChanged); err != nil {
+			return nil, err
+		}
 		tag = ""
 	}
 	rep.Progress(jobs.Progress{Step: "probing", Message: "Checking episode audio"})
@@ -856,8 +877,8 @@ func (s *service) download(ctx context.Context, b *budget, job *jobs.Job, root *
 				return fail("write_failed", "The episode partial is incomplete.")
 			}
 			restarted = true
-			if !s.clearCheckpoint(*job, root, c) {
-				return stuckPartial(err)
+			if err := s.restartPartial(*job, root, c, err); err != nil {
+				return err
 			}
 			tag = ""
 			return nil
@@ -902,7 +923,9 @@ func (s *service) download(ctx context.Context, b *budget, job *jobs.Job, root *
 				err = netguard.StatusError("episode", response.Status, response.RetryAfterSeconds)
 			case action == "fresh_get":
 				_ = response.Body.Close()
-				s.clearCheckpoint(*job, root, c)
+				if err := s.restartPartial(*job, root, c, errors.New("the episode resume could not be verified")); err != nil {
+					return podcast.Fetch{}, err
+				}
 				tag = ""
 				last = fail("network", "The episode resume could not be verified.")
 				continue
@@ -925,26 +948,40 @@ func (s *service) download(ctx context.Context, b *budget, job *jobs.Job, root *
 				}
 				continue
 			}
-			// A local file failure (a full disk) is not a network interruption:
-			// never retried or reported as one.
+			// A local file failure (a full disk, a partial the restart from
+			// byte 0 could not remove) is not a network interruption: never
+			// retried or reported as one.
 			var guard *netguard.Error
-			if !errors.As(err, &guard) && ctx.Err() == nil {
+			if errors.Is(err, errPartialStuck) || !errors.As(err, &guard) && ctx.Err() == nil {
 				return podcast.Fetch{}, err
 			}
 		}
 		failure := netguard.Classify(ctx, err)
 		last = failure
-		if attempt == 2 || !netguard.Retryable(failure) || failure.RetryAfterSeconds > 10 || ctx.Err() != nil {
+		again := attempt < 2 && netguard.Retryable(failure) && failure.RetryAfterSeconds <= 10
+		// The job's end (a cancel, a lost lease, the Bridge stopping, the
+		// ceiling) with another try still to come is that end (stopped),
+		// never what the host last answered: a cancelled job's http_503
+		// would count against the feed (the server's cancelledFailureCodes),
+		// though the next try might have had the episode. So is a request the
+		// end itself cut short. An answer no try would have followed (the
+		// last one's, a 404) stays the host's.
+		if ctx.Err() != nil && (again || failure.Code == "timeout") {
+			return podcast.Fetch{}, stopped()
+		}
+		if !again {
 			break
 		}
 		if !netguard.StrongETag(tag) || c.Offset <= 0 || c.Total <= c.Offset {
 			_ = settle(ctx) // the clear finds the partial where it is now
-			s.clearCheckpoint(*job, root, c)
+			if err := s.restartPartial(*job, root, c, failure); err != nil {
+				return podcast.Fetch{}, err
+			}
 			tag = ""
 		}
-		// A wait the ceiling cuts short ends on what the host last answered.
+		// A wait the job's end cuts short is that end too.
 		if s.o.Wait(ctx, netguard.RetryDelay(attempt, failure.RetryAfterSeconds)) != nil {
-			return podcast.Fetch{}, failure
+			return podcast.Fetch{}, stopped()
 		}
 	}
 	return podcast.Fetch{}, last
@@ -964,8 +1001,12 @@ func (s *service) consume(ctx context.Context, b *budget, job *jobs.Job, root *o
 		// A body from zero never reuses the old partial's inode: its name is
 		// unlinked and a fresh exclusive temp is made, so nothing swapped in at
 		// that name (a link to another file) is ever truncated or written.
+		// One the clear cannot remove fails the attempt (errPartialStuck),
+		// never a download beside it.
 		if c.Temp != "" {
-			s.clearCheckpoint(*job, root, c)
+			if err := s.restartPartial(*job, root, c, errors.New("the episode host sent it from byte 0")); err != nil {
+				return podcast.Fetch{}, "", err
+			}
 		}
 		total = r.ContentLength
 		c.Offset = 0
@@ -1238,10 +1279,35 @@ func keptPartial(c *checkpoint, err error) error {
 	return fmt.Errorf("%w: %w", err, fail("write_failed", "The episode's partial download could not be read."))
 }
 
+// stopped is the failure of an episode download its job's end (a cancel, a
+// lost lease, the Bridge stopping) cut short between two tries or in one: a
+// timeout, as netguard reads an ended context (never a code the server
+// counts against the feed for a cancelled job), worded as the stop rather
+// than as a feed that did not respond. The ceiling's is the episode's own
+// timeout (budget.failure).
+func stopped() *netguard.Error {
+	return fail("timeout", "The episode download was stopped before it finished.")
+}
+
+// restartPartial clears c's partial for a download from byte 0, or answers
+// stuckPartial when the clear cannot remove it: never a download
+// beside it, its record left for the next attempt or the day-old cleanup.
+func (s *service) restartPartial(job jobs.Job, root *os.Root, c *checkpoint, cause error) error {
+	partial := ""
+	if c.Temp != "" {
+		partial = c.partialName() // the clear resets c, removed or not
+	}
+	if !s.clearCheckpoint(job, root, c) {
+		return stuckPartial(partial, cause)
+	}
+	return nil
+}
+
 // stuckPartial is the job's failure for a partial the restart from zero could
-// not remove (err wraps the clear's cause).
-func stuckPartial(err error) error {
-	slog.Warn("podcasts: an episode's partial could not be removed to download it again", "err", err)
+// not remove (partial, its name when known, logged so it can be found; err
+// wraps the clear's cause).
+func stuckPartial(partial string, err error) error {
+	slog.Warn("podcasts: an episode's partial could not be removed to download it again", "partial", partial, "err", err)
 	return fmt.Errorf("%w: %w", errPartialStuck, fail("write_failed", "The episode's partial download could not be removed."))
 }
 
