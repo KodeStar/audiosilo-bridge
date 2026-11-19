@@ -8,6 +8,7 @@ import (
 	"errors"
 	"hash"
 	"io"
+	"log/slog"
 	"os"
 	"path"
 	"time"
@@ -144,7 +145,11 @@ func (h *Fetch) run(parent context.Context, claimed *jobs.Job, rep *jobs.Reporte
 	// episodeAt may have taken the folder in there (renamed back by hand after
 	// a take-in elsewhere, while the server still names it).
 	if _, _, err = s.readEpisode(root, *job.Path, params); err != nil {
-		if p := s.episodeAt(waitCtx, root, lib, mount, *job.Path, params, job.ID); p != *job.Path {
+		p, err := s.episodeAt(waitCtx, root, lib, mount, *job.Path, params, job.ID)
+		if err != nil {
+			return nil, err
+		}
+		if p != *job.Path {
 			job.Path, claimed.Path = &p, &p
 		}
 		if _, _, err = s.readEpisode(root, *job.Path, params); err != nil {
@@ -305,30 +310,34 @@ func leaseFailure(ctx context.Context, err error, lost string) error {
 }
 
 // episodeAt is where a fetch's episode p is now. The server names p's folder
-// until its rescan, so after a rename by hand that folder is gone or holds
-// another show: the episode is then the same file name in the folder holding
-// the show (lockShow, which takes it in when renamed), and the records of the
-// show's interrupted downloads still under the old folder, this job's own
-// included, follow it (adoptCheckpoints). p when its folder holds the show
-// (the episode itself is missing, or lockShow just took the folder in there)
-// or none does. Its show lock is taken and released before the fetch's own
-// locks.
-func (s *service) episodeAt(ctx context.Context, root *os.Root, lib link.Library, mount, p string, params fetchParams, self int64) string {
+// until its rescan, so after a rename by hand that folder is gone, holds
+// another show or cannot be read: the episode is then the same file name in
+// the folder holding the show (lockShow, which takes it in when renamed), and
+// the records of the show's interrupted downloads still under the old folder,
+// this job's own included, follow it (adoptCheckpoints). p when its folder
+// holds the show (the episode itself is missing, or lockShow just took the
+// folder in there) or none does. write_failed when the records cannot be
+// read: the fetch waits, as a take-in does (adopt), rather than leave its
+// record and partial behind. Its show lock is taken and released before the
+// fetch's own locks.
+func (s *service) episodeAt(ctx context.Context, root *os.Root, lib link.Library, mount, p string, params fetchParams, self int64) (string, error) {
 	from := path.Dir(p)
-	f, err := podcast.Read(root, from)
-	if err == nil && f.ShowID == params.ShowID || err != nil && !errors.Is(err, os.ErrNotExist) && !errors.Is(err, podcast.ErrInvalidFile) {
-		return p
+	if f, err := podcast.Read(root, from); err == nil && f.ShowID == params.ShowID {
+		return p, nil
 	}
 	show, _, unlock, err := s.lockShow(ctx, root, lib, mount, from, params.ShowID, nil)
 	if err != nil {
-		return p
+		return p, nil
 	}
 	defer unlock()
 	if show == from {
-		return p
+		return p, nil
 	}
-	_ = s.adoptCheckpoints(ctx, root, lib, show, from, params.ShowID, self)
-	return show + "/" + path.Base(p)
+	if err := s.adoptCheckpoints(ctx, root, lib, show, from, params.ShowID, self); err != nil {
+		slog.Warn("podcasts: the download records of a show folder renamed by hand could not be read; the fetch waits", "library", lib.ID, "show", show, "err", err)
+		return p, fail("write_failed", "The podcast download records could not be read.")
+	}
+	return show + "/" + path.Base(p), nil
 }
 
 func (s *service) showKey(mount, show string) string {
@@ -720,7 +729,10 @@ func (w *downloadWriter) progress() {
 }
 
 // Abandon handles a terminal cancel/lost claim after a resumable stop. Mapping
-// and identities must still match before any owned partial is removed.
+// and identities must still match before any owned partial is removed. The
+// runner names the job by the server's path: a record moved with a show folder
+// renamed by hand (the job's own relocation, or a take-in since) is cleared
+// where it is now (recordOf).
 func (h *Fetch) Abandon(ctx context.Context, job jobs.Job) {
 	if job.Path == nil || job.LibraryID == nil || !podcast.ValidEpisodePath(*job.Path) {
 		return
@@ -743,7 +755,9 @@ func (h *Fetch) Abandon(ctx context.Context, job jobs.Job) {
 		return
 	}
 	defer func() { _ = root.Close() }()
-	release, err := s.fileLock(ctx, root, *job.Path)
+	at := s.recordOf(job, p)
+	job.Path = &at
+	release, err := s.fileLock(ctx, root, at)
 	if err != nil {
 		return
 	}

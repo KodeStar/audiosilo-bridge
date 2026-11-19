@@ -2381,7 +2381,9 @@ internal/
             A show folder renamed by hand (bridge#13) is taken in under the show
             lock when its read refuses (readShow, adopt: episodes, downloads,
             artwork, secret and cache row kept, the new folder rescanned). A
-            poll, retain or fetch whose folder is gone finds the show by its id
+            poll, retain or fetch whose folder is gone, or cannot be read (an
+            unreadable feed.json, a refused copy of another show; a copy of its
+            own show still fails), finds the show by its id
             (lockShow, relocate: the cache row, then every folder); one whose
             folder holds another show (names swapped by hand) releases that
             show lock and takes the other folder's (lockShow; never two show
@@ -2393,10 +2395,13 @@ internal/
             The records of the show's interrupted downloads move to the new
             paths with it (adoptCheckpoints, before feed.json, so a stop between
             takes the folder in again; records it cannot read stop the
-            adoption; the show's records under a gone earlier name move too;
-            one of another show stays, and one whose download still runs stays
+            adoption, and a fetch that cannot read them where it relocates
+            fails write_failed; the show's records under a gone earlier name
+            move too; one of another show stays, and one whose download still
+            runs, matched by its path or by its fetch's show and episode, stays
             until that fetch relocates and moves its own), or their partials
-            would stay in the folder for good. A job still working under the
+            would stay in the folder for good. A fetch's Abandon, named by the
+            server's old path, clears its record where it moved (recordOf). A job still working under the
             old name never saves over, clears or abandons another show's record
             at its path (one moved there when names were swapped), nor its
             partial. A fetch whose folder lockShow takes in where it is (renamed

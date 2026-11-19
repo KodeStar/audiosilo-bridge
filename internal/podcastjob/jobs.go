@@ -733,12 +733,17 @@ func (s *service) find(root *os.Root, entries []os.DirEntry, rows []store.Podcas
 // lockShow takes the lock of the folder a job naming show, the server's name
 // for show id (kept until its rescan), works in, and reads that folder
 // (readShow), running guard first when given. It is show, or the folder
-// holding id now when show was renamed by hand (relocate): show is gone, or
-// holds another show (names swapped by hand, or another show moved to its old
-// name). A job never holds two show locks: show's is released before the
+// holding id now when show was renamed by hand (relocate): show is gone, holds
+// another show (names swapped by hand, or another show moved to its old name)
+// or cannot be read (a feed.json the Bridge cannot read, or a copy of another
+// show adopt refuses). A show folder that reads as id's but cannot be taken in
+// (a copy of it, refused) is never left for another: its read's failure
+// stands. A job never holds two show locks: show's is released before the
 // other folder's is taken, and id is checked again under it. identity_changed
-// when no other folder holds id. An invalid id (a poll's may be empty) reads
-// show as it is. unlock releases the lock held; it is nil on an error.
+// when show holds another show and no other folder holds id; show's read
+// failure when it cannot be read and none does. An invalid id (a poll's may
+// be empty) reads show as it is. unlock releases the lock held; it is nil on
+// an error.
 func (s *service) lockShow(ctx context.Context, root *os.Root, lib link.Library, mount, show, id string, guard func(string) error) (_ string, _ *podcast.Feed, unlock func(), _ error) {
 	valid := podcast.ValidID(id)
 	if _, err := root.Lstat(show); valid && errors.Is(err, os.ErrNotExist) {
@@ -746,56 +751,64 @@ func (s *service) lockShow(ctx context.Context, root *os.Root, lib link.Library,
 			show = moved
 		}
 	}
-	open := func(show string) (*podcast.Feed, func(), error) {
+	// open reports, with an error, whether it was show's read that failed.
+	open := func(show string) (*podcast.Feed, func(), bool, error) {
 		unlock, err := s.acquire(ctx, s.showKey(mount, show))
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, false, err
 		}
 		if guard != nil {
-			err = guard(show)
+			if err := guard(show); err != nil {
+				unlock()
+				return nil, nil, false, err
+			}
 		}
-		var f *podcast.Feed
-		if err == nil {
-			f, err = s.readShow(ctx, root, lib, mount, show)
-		}
+		f, err := s.readShow(ctx, root, lib, mount, show)
 		if err != nil {
 			unlock()
-			return nil, nil, err
+			return nil, nil, true, err
 		}
-		return f, unlock, nil
+		return f, unlock, false, nil
 	}
-	f, unlock, err := open(show)
-	if err != nil || !valid || f.ShowID == id {
-		return show, f, unlock, err
+	f, unlock, unread, err := open(show)
+	switch {
+	case err == nil && (!valid || f.ShowID == id):
+		return show, f, unlock, nil
+	case err == nil:
+		unlock()
+		err = fail("identity_changed", "The podcast show identity changed.")
+	case !valid || !unread || ctx.Err() != nil || holds(root, show, id):
+		return "", nil, nil, err
 	}
-	unlock()
-	changed := fail("identity_changed", "The podcast show identity changed.")
 	moved := s.relocate(ctx, root, lib, id)
 	if moved == "" || moved == show {
-		return "", nil, nil, changed
+		return "", nil, nil, err
 	}
-	if f, unlock, err = open(moved); err != nil {
+	if f, unlock, _, err = open(moved); err != nil {
 		return "", nil, nil, err
 	}
 	if f.ShowID != id {
 		unlock()
-		return "", nil, nil, changed // moved again since relocate read it
+		return "", nil, nil, fail("identity_changed", "The podcast show identity changed.") // moved again since relocate read it
 	}
 	return moved, f, unlock, nil
 }
 
-// relocate is the folder holding show id, for a job whose show folder is gone
-// or holds another show: one renamed by hand. The folder its cache row names
-// is read first, every show folder only when that one does not hold it. ""
-// when none does.
+// holds reports whether show's feed.json, read as a folder that may have been
+// renamed by hand (podcast.ReadMoved), names show id.
+func holds(root *os.Root, show, id string) bool {
+	f, _, err := podcast.ReadMoved(root, show)
+	return err == nil && f.ShowID == id
+}
+
+// relocate is the folder holding show id, for a job whose show folder is gone,
+// holds another show or cannot be read: one renamed by hand. The folder its
+// cache row names is read first, every show folder only when that one does
+// not hold it. "" when none does.
 func (s *service) relocate(ctx context.Context, root *os.Root, lib link.Library, id string) string {
-	holds := func(name string) bool {
-		f, _, err := podcast.ReadMoved(root, name)
-		return err == nil && f.ShowID == id
-	}
 	tried := ""
 	if row, ok, err := s.o.DB.PodcastShowByID(ctx, s.o.ServerID(), id); err == nil && ok && row.LibraryID == lib.ID {
-		if holds(row.ShowPath) {
+		if holds(root, row.ShowPath, id) {
 			return row.ShowPath
 		}
 		tried = row.ShowPath
@@ -805,7 +818,7 @@ func (s *service) relocate(ctx context.Context, root *os.Root, lib link.Library,
 		return ""
 	}
 	for _, e := range entries {
-		if e.IsDir() && podcast.ValidShow(e.Name()) && e.Name() != tried && holds(e.Name()) {
+		if e.IsDir() && podcast.ValidShow(e.Name()) && e.Name() != tried && holds(root, e.Name(), id) {
 			return e.Name()
 		}
 	}

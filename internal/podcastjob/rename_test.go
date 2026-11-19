@@ -253,7 +253,7 @@ func TestTakingInARenamedShowMovesItsDownloadRecords(t *testing.T) {
 				t.Fatal(err)
 			}
 			lib := link.Library{ID: 3, Kind: "podcasts", Root: h.mount}
-			if got := s.episodeAt(context.Background(), root, lib, h.mount, *job.Path, params, job.ID); got != moved {
+			if got, err := s.episodeAt(context.Background(), root, lib, h.mount, *job.Path, params, job.ID); err != nil || got != moved {
 				t.Fatal("the running download did not find its episode", got)
 			}
 			if _, old = s.readCheckpoint(job); old {
@@ -548,5 +548,218 @@ func TestFetchTakesInAFolderRenamedBack(t *testing.T) {
 	}
 	if got := res.(fetchResult); got.Path != *fetch.Path || got.Fetch.Bytes != int64(len(audio)) {
 		t.Fatal(got)
+	}
+}
+
+// The runner abandons a fetch stopped at a resumable point by the path the
+// server named. When the fetch had found its show in a folder renamed by hand
+// (its record moved there), Abandon clears the record and partial where they
+// are now, rather than leave them for the day-old cleanup; another episode's
+// record that moved with the folder stays.
+func TestAbandonClearsARecordMovedWithItsShow(t *testing.T) {
+	h, job := audioHarness(t)
+	s := h.handler.s
+	root, err := os.OpenRoot(h.mount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	otherPath := "Fixture Show/other.mp3"
+	other := jobs.Job{LibraryID: job.LibraryID, Path: &otherPath}
+	mine := checkpoint{ServerHash: s.pairHash(), LibraryID: 3, ShowID: "a1b2c3d4e5f60718", EpisodeID: "1cc306d831645e2b", Path: *job.Path, Temp: podcast.TempPrefix + strings.Repeat("b", 24), Offset: 6, Total: 100}
+	theirs := checkpoint{ServerHash: s.pairHash(), LibraryID: 3, ShowID: mine.ShowID, EpisodeID: "2cc306d831645e2b", Path: otherPath, Temp: podcast.TempPrefix + strings.Repeat("c", 24), Offset: 6, Total: 100}
+	for _, c := range []struct {
+		job jobs.Job
+		c   *checkpoint
+	}{{job, &mine}, {other, &theirs}} {
+		if err := root.WriteFile("Fixture Show/"+c.c.Temp, []byte("prefix"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.saveCheckpoint(c.job, root, c.c, `"one"`); err != nil {
+			t.Fatal(err)
+		}
+	}
+	renameShow(t, h, "Fixture Show", "Renamed Show")
+	var params fetchParams
+	if err := json.Unmarshal(job.Params, &params); err != nil {
+		t.Fatal(err)
+	}
+	lib := link.Library{ID: 3, Kind: "podcasts", Root: h.mount}
+	moved := "Renamed Show/" + strings.TrimPrefix(*job.Path, "Fixture Show/")
+	if got, err := s.episodeAt(context.Background(), root, lib, h.mount, *job.Path, params, job.ID); err != nil || got != moved {
+		t.Fatal("the fetch did not find its episode", got, err)
+	}
+	h.handler.FetchJob().Abandon(context.Background(), job)
+	if _, ok := s.readCheckpoint(jobs.Job{LibraryID: job.LibraryID, Path: &moved}); ok {
+		t.Fatal("the moved record was left for the day-old cleanup")
+	}
+	if _, err := root.Lstat("Renamed Show/" + mine.Temp); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("the moved partial was left behind", err)
+	}
+	if v, _ := s.o.Vault.Get(mine.Validator); v != "" {
+		t.Fatal("the moved record's validator was left behind")
+	}
+	otherMoved := "Renamed Show/other.mp3"
+	if saved, ok := s.readCheckpoint(jobs.Job{LibraryID: job.LibraryID, Path: &otherMoved}); !ok || saved.Temp != theirs.Temp {
+		t.Fatal("another episode's record went", saved, ok)
+	}
+	if _, err := root.Lstat("Renamed Show/" + theirs.Temp); err != nil {
+		t.Fatal("another episode's partial went", err)
+	}
+}
+
+// A poll the server names by a folder it cannot read finds its show where it
+// is now, as it does a folder that is gone: here the folder holds an
+// unreadable feed.json, or a copy of another show renamed by hand (refused,
+// that show's own folder taken in). The folder is left as it is.
+func TestPollFindsItsShowPastAFolderItCannotRead(t *testing.T) {
+	lib := int64(3)
+	poll := func(t *testing.T, h *harness, show, id string) (any, error) {
+		t.Helper()
+		params, _ := json.Marshal(map[string]string{"show_id": id, "etag": `"abc"`})
+		return h.handler.PollJob().Run(context.Background(), jobs.Job{ID: h.claimID.Add(1), Kind: PollKind, LibraryID: &lib, Path: &show, Params: params}, jobs.LocalReporter())
+	}
+	t.Run("unreadable feed.json", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		show, id := followed(t, h)
+		renameShow(t, h, show, "Renamed Show")
+		if res, err := poll(t, h, show, id); err != nil || fields(t, res)["show_path"] != "Renamed Show" {
+			t.Fatal(res, err)
+		}
+		if err := os.Mkdir(filepath.Join(h.mount, show), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(h.mount, show, "feed.json"), []byte("not a feed"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if res, err := poll(t, h, show, id); err != nil || fields(t, res)["show_path"] != "Renamed Show" {
+			t.Fatal("the poll did not find its show past an unreadable folder", res, err)
+		}
+		if b, err := os.ReadFile(filepath.Join(h.mount, show, "feed.json")); err != nil || string(b) != "not a feed" {
+			t.Fatal("the unreadable folder changed", string(b), err)
+		}
+	})
+	t.Run("a copy of another show", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		a, idA := followed(t, h)
+		res, err := h.handler.Run(context.Background(), h.claim(h.http.URL+"/another", false), jobs.LocalReporter())
+		if err != nil {
+			t.Fatal(res, err)
+		}
+		r := fields(t, res)
+		b, idB := r["show_path"].(string), r["show_id"].(string)
+		renameShow(t, h, a, "A Moved")
+		if res, err := poll(t, h, a, idA); err != nil || fields(t, res)["show_path"] != "A Moved" {
+			t.Fatal(res, err)
+		}
+		renameShow(t, h, b, "B Moved")
+		if err := os.CopyFS(filepath.Join(h.mount, a), os.DirFS(filepath.Join(h.mount, "B Moved"))); err != nil {
+			t.Fatal(err)
+		}
+		if res, err := poll(t, h, b, idB); err != nil || fields(t, res)["show_path"] != "B Moved" {
+			t.Fatal(res, err)
+		}
+		if res, err := poll(t, h, a, idA); err != nil || fields(t, res)["show_path"] != "A Moved" {
+			t.Fatal("the poll did not find its show past a refused copy", res, err)
+		}
+		root, err := os.OpenRoot(h.mount)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer root.Close()
+		if f, from, err := podcast.ReadMoved(root, a); err != nil || from != b || f.ShowID != idB {
+			t.Fatal("the copy changed", from, err)
+		}
+	})
+}
+
+// A take-in after a fetch found its show in a folder renamed by hand leaves
+// that fetch's record alone while it runs, though the fetch's row still names
+// the server's old path: it is matched by its show and episode. Once the
+// fetch ends, the record moves with the folder.
+func TestATakeInLeavesARelocatedFetchsRecord(t *testing.T) {
+	h, job := audioHarness(t)
+	s := h.handler.s
+	root, err := os.OpenRoot(h.mount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	c := checkpoint{ServerHash: s.pairHash(), LibraryID: 3, ShowID: "a1b2c3d4e5f60718", EpisodeID: "1cc306d831645e2b", Path: *job.Path, Temp: ".audiosilo-tmp-owned", Offset: 6, Total: 100}
+	if err := root.WriteFile("Fixture Show/"+c.Temp, []byte("prefix"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.saveCheckpoint(job, root, &c, `"one"`); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.db.RecordClaim(context.Background(), store.ServerJob{ID: job.ID, Kind: FetchKind, LibraryID: job.LibraryID, Path: job.Path, Params: job.Params, Attempt: 1, ServerID: "server-1"}); err != nil {
+		t.Fatal(err)
+	}
+	var params fetchParams
+	if err := json.Unmarshal(job.Params, &params); err != nil {
+		t.Fatal(err)
+	}
+	lib := link.Library{ID: 3, Kind: "podcasts", Root: h.mount}
+	renameShow(t, h, "Fixture Show", "Renamed Show")
+	base := strings.TrimPrefix(*job.Path, "Fixture Show/")
+	relocated, third := "Renamed Show/"+base, "Third Name/"+base
+	if got, err := s.episodeAt(context.Background(), root, lib, h.mount, *job.Path, params, job.ID); err != nil || got != relocated {
+		t.Fatal("the fetch did not find its episode", got, err)
+	}
+	renameShow(t, h, "Renamed Show", "Third Name")
+	if _, err := s.readShow(context.Background(), root, lib, h.mount, "Third Name"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := s.readCheckpoint(jobs.Job{LibraryID: job.LibraryID, Path: &relocated}); !ok {
+		t.Fatal("a running fetch's record was moved")
+	}
+	if err := h.db.FinishServerJob(context.Background(), job.ID, 1, store.JobFailed, nil, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.adoptCheckpoints(context.Background(), root, lib, "Third Name", "Renamed Show", c.ShowID, 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := s.readCheckpoint(jobs.Job{LibraryID: job.LibraryID, Path: &third}); !ok {
+		t.Fatal("the ended fetch's record did not follow the folder")
+	}
+}
+
+// A fetch that finds its show in a folder taken in elsewhere but cannot read
+// the download records waits (write_failed), as a take-in does, rather than
+// run at the new path and leave its record and partial under the old one.
+func TestAFetchThatCannotMoveItsRecordWaits(t *testing.T) {
+	h, job := audioHarness(t)
+	s := h.handler.s
+	root, err := os.OpenRoot(h.mount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	lib := link.Library{ID: 3, Kind: "podcasts", Root: h.mount}
+	renameShow(t, h, "Fixture Show", "Renamed Show")
+	if _, err := s.readShow(context.Background(), root, lib, h.mount, "Renamed Show"); err != nil {
+		t.Fatal(err)
+	}
+	var params fetchParams
+	if err := json.Unmarshal(job.Params, &params); err != nil {
+		t.Fatal(err)
+	}
+	data := s.o.DataDir
+	blocked := filepath.Join(t.TempDir(), "a file")
+	if err := os.WriteFile(blocked, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s.o.DataDir = blocked
+	got, err := s.episodeAt(context.Background(), root, lib, h.mount, *job.Path, params, job.ID)
+	var failure *netguard.Error
+	if !errors.As(err, &failure) || failure.Code != "write_failed" || got != *job.Path {
+		t.Fatal("the fetch moved without its record", got, err)
+	}
+	s.o.DataDir = data
+	moved := "Renamed Show/" + strings.TrimPrefix(*job.Path, "Fixture Show/")
+	if got, err := s.episodeAt(context.Background(), root, lib, h.mount, *job.Path, params, job.ID); err != nil || got != moved {
+		t.Fatal(got, err)
 	}
 }
