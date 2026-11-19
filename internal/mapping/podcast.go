@@ -62,7 +62,7 @@ func (l looks) checkPodcast(ctx context.Context, src MarkerSource, lib link.Libr
 		return st, nil
 	}
 	defer func() {
-		if !st.Mapped {
+		if !st.Mapped && (found.createdMarker || found.createdDir) {
 			// Bounded too, its answer unneeded: one a hung mount holds goes on
 			// in the background (a later one waits on it).
 			_, _ = fsutil.LookWithin(op+" undo", mount, LookTimeout, func(m string) (struct{}, error) {
