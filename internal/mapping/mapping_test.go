@@ -586,6 +586,37 @@ func TestQueuedCheckFollowsARateLimitedPass(t *testing.T) {
 	}
 }
 
+// A refused token ends the pass as a 429 does: every other read would be
+// refused too.
+func TestRefusedTokenEndsThePass(t *testing.T) {
+	t.Parallel()
+	root, files := library(t)
+	mount := func(int64, string) (string, bool) { return root, true }
+	at := time.Date(2026, 11, 19, 10, 0, 0, 0, time.UTC)
+	r := NewRegistry()
+	r.spacing = time.Millisecond
+	r.SetLibraries([]link.Library{{ID: 1, Root: root}, {ID: 2, Root: root}, {ID: 3, Root: root}})
+	src := &scripted{book: &link.Book{Path: "Author/Book", Files: files}, err: map[int64]error{}}
+	r.Check(context.Background(), src, mount, func() time.Time { return at })
+	src.mu.Lock()
+	src.calls = nil
+	src.mu.Unlock()
+	src.answer(1, link.ErrUnauthorized)
+	later := at.Add(time.Hour)
+	r.Check(context.Background(), src, mount, func() time.Time { return later })
+	if !slices.Equal(src.calls, []int64{1}) {
+		t.Fatalf("asked for %v with a refused token, want 1 only", src.calls)
+	}
+	for _, st := range r.Statuses() {
+		if !st.Mapped {
+			t.Fatalf("library %d lost its state: %+v", st.LibraryID, st)
+		}
+	}
+	if r.Due(later.Add(RetryFirst-time.Second), 24*time.Hour) || !r.Due(later.Add(RetryFirst), 24*time.Hour) {
+		t.Fatal("the libraries aren't due again after the hold")
+	}
+}
+
 // The hold without a Retry-After doubles with each unanswered run in a row, at
 // most RetryMax, and a run the server answers ends it.
 func TestHoldBacksOff(t *testing.T) {

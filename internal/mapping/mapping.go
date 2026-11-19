@@ -414,8 +414,9 @@ func (r *Registry) Due(now time.Time, interval time.Duration) bool {
 // one asked for while another runs is done right after it (by that call, with
 // this call's src), so a mapping changed mid-check is never missed. A check the
 // server didn't answer keeps the library's last known state at the same mount
-// (a 429 or a 503 says nothing about the folder), and a 429 ends the
-// pass: the libraries it hadn't reached yet are due again after the hold. The checks queued meanwhile are still made (an admin's mapping edit,
+// (a 429 or a 503 says nothing about the folder), and a 429 or a refused token
+// ends the pass: the libraries it hadn't reached yet are due again after the
+// hold. The checks queued meanwhile are still made (an admin's mapping edit,
 // Check now, a changed library list: they skip the hold, as they do when asked
 // for after the run), ending at their first 429 too. It returns once there is
 // nothing left to check, or ctx ends, and reports whether it checked (false:
@@ -449,7 +450,8 @@ func (r *Registry) Check(ctx context.Context, src BookSource, mount MountFunc, n
 			}
 		}
 		r.mu.Unlock()
-		// ended: a 429, which the rest of the pass would meet too.
+		// ended: a 429 or a refused token, which the rest of the pass would
+		// meet too.
 		ended := false
 		for i, l := range libs {
 			if ctx.Err() != nil {
@@ -468,7 +470,7 @@ func (r *Registry) Check(ctx context.Context, src BookSource, mount MountFunc, n
 			r.record(st, err, now())
 			if err != nil {
 				unanswered = err
-				if _, limited := link.RateLimited(err); limited {
+				if _, limited := link.RateLimited(err); limited || errors.Is(err, link.ErrUnauthorized) {
 					ended = true
 					for _, rest := range libs[i+1:] {
 						r.markRetry(rest.ID)
