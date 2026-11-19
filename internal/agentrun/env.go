@@ -227,9 +227,9 @@ func (r *Runner) tickMounts() {
 // walkMountsLocked walks the mounts (mounts.go), keeps the answer and returns
 // the files a run planted (runMade); mountMu is held, so two callers never
 // walk at once.
-func (r *Runner) walkMountsLocked() []runFile {
+func (r *Runner) walkMountsLocked() []string {
 	var why string
-	var planted []runFile
+	var planted []string
 	if ms, err := r.mounts(); err != nil {
 		why = "the mounts can't be read: " + err.Error()
 	} else {
@@ -276,8 +276,8 @@ func (r *Runner) sweepRunFiles() {
 	r.mountMu.Lock()
 	defer r.mountMu.Unlock()
 	removed := 0
-	for _, f := range r.walkMountsLocked() {
-		if removeRunFile(f, r.selfUID) {
+	for _, rel := range r.walkMountsLocked() {
+		if removeRunFile(r.opts.TmpDir, rel, r.selfUID) {
 			removed++
 		}
 	}

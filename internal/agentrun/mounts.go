@@ -321,16 +321,13 @@ type mountWalk struct {
 	// selfUID is the service's own uid (-1: none), runArea its TmpDir (""
 	// none) and areaHere whether the mount being looked at is runArea's
 	// verified tmpfs (runAreaMount): a file of a credential's name of
-	// selfUID's there is a run's own (runMade), which runFiles collects.
+	// selfUID's there is a run's own (runMade), which runFiles collects by
+	// its path below runArea.
 	selfUID  int
 	runArea  string
 	areaHere bool
-	runFiles []runFile
+	runFiles []string
 }
-
-// runFile is a file of a credential's name a run planted: its area (the
-// walk's runArea) and its path below it.
-type runFile struct{ area, rel string }
 
 // newMountWalk is a check over the mounts starting now, with the walk's
 // bounds (walkBudget, maxWalkEntries), passing nothing over as a run's own.
@@ -420,11 +417,11 @@ func below(dir, p string) (string, bool) {
 // credentialUnder's reaches into), and p owned by the service's uid. It is
 // added to runFiles once. Any look that fails is a no.
 func (w *mountWalk) runMade(p string) bool {
-	if w.selfUID < 0 || !w.areaHere {
+	if !w.areaHere {
 		return false
 	}
 	rel, ok := below(w.runArea, p)
-	if !ok || rel == "." || !w.foldersDown(w.runArea, rel) {
+	if !ok || rel == "." || !w.foldersDown(rel) {
 		return false
 	}
 	info, err := w.lstat(p)
@@ -434,18 +431,18 @@ func (w *mountWalk) runMade(p string) bool {
 	if uid, ok := ownerUID(info); !ok || uid != w.selfUID {
 		return false
 	}
-	if f := (runFile{area: w.runArea, rel: rel}); !slices.Contains(w.runFiles, f) {
-		w.runFiles = append(w.runFiles, f)
+	if !slices.Contains(w.runFiles, rel) {
+		w.runFiles = append(w.runFiles, rel)
 	}
 	return true
 }
 
-// foldersDown reports whether area and each folder between it and rel's last
-// element is a folder, not a link, and neither those folders below area nor
-// rel's last element is another mount's point.
-func (w *mountWalk) foldersDown(area, rel string) bool {
+// foldersDown reports whether runArea and each folder between it and rel's
+// last element is a folder, not a link, and neither those folders below
+// runArea nor rel's last element is another mount's point.
+func (w *mountWalk) foldersDown(rel string) bool {
 	parts := strings.Split(rel, string(filepath.Separator))
-	cur := area
+	cur := w.runArea
 	for i := 0; ; i++ {
 		info, err := w.lstat(cur)
 		if err != nil || !info.IsDir() {

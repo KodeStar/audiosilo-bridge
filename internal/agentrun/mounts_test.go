@@ -965,7 +965,7 @@ func TestRunPlantedCredentialFiles(t *testing.T) {
 		s.ms = []mount{at(s.staging), {root: "/", point: s.tmp, fstype: "tmpfs"}}
 		return s
 	}
-	walk := func(s setup, uid int, extra ...mount) (string, []runFile) {
+	walk := func(s setup, uid int, extra ...mount) (string, []string) {
 		w := newMountWalk(boundedLooks)
 		w.selfUID, w.runArea = uid, s.tmp
 		why := w.credentialMount(append(slices.Clone(s.ms), extra...))
@@ -1153,10 +1153,10 @@ func TestEndpointServiceSweepsRunFiles(t *testing.T) {
 	area := t.TempDir()
 	mkfile(t, filepath.Join(area, "auth.json"))
 	mkfile(t, filepath.Join(area, "secret.key", "inside"))
-	if removeRunFile(runFile{area: area, rel: "auth.json"}, os.Geteuid()+1) || gone(filepath.Join(area, "auth.json")) {
+	if removeRunFile(area, "auth.json", os.Geteuid()+1) || gone(filepath.Join(area, "auth.json")) {
 		t.Fatal("removeRunFile removed a file of another uid's")
 	}
-	if removeRunFile(runFile{area: area, rel: "secret.key"}, os.Geteuid()) {
+	if removeRunFile(area, "secret.key", os.Geteuid()) {
 		t.Fatal("removeRunFile removed a folder with something in it")
 	}
 	// A link on the way, even to a folder in the same area, is never followed.
@@ -1164,14 +1164,14 @@ func TestEndpointServiceSweepsRunFiles(t *testing.T) {
 	if err := os.Symlink("real", filepath.Join(area, "link")); err != nil {
 		t.Fatal(err)
 	}
-	if removeRunFile(runFile{area: area, rel: filepath.Join("link", "auth.json")}, os.Geteuid()) ||
+	if removeRunFile(area, filepath.Join("link", "auth.json"), os.Geteuid()) ||
 		gone(filepath.Join(area, "real", "auth.json")) {
 		t.Fatal("removeRunFile removed a file through a link")
 	}
-	if !removeRunFile(runFile{area: area, rel: filepath.Join("real", "auth.json")}, os.Geteuid()) {
+	if !removeRunFile(area, filepath.Join("real", "auth.json"), os.Geteuid()) {
 		t.Fatal("removeRunFile left the service's own file a folder down")
 	}
-	if !removeRunFile(runFile{area: area, rel: "auth.json"}, os.Geteuid()) || !gone(filepath.Join(area, "auth.json")) {
+	if !removeRunFile(area, "auth.json", os.Geteuid()) || !gone(filepath.Join(area, "auth.json")) {
 		t.Fatal("removeRunFile left the service's own file")
 	}
 }

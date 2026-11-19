@@ -77,39 +77,42 @@ func closeDir(dir string) error {
 	return nil
 }
 
-// removeRunFile removes f (a run's planted file, or an empty folder) when it
-// is still uid's and on the area's own file system: the area and each folder
-// below it on f's way are opened without following a link, so one swapped in
-// since the walk stops it (ELOOP, ENOTDIR) rather than lead anywhere, each
-// must be on the area's device (a mount on the way is another file system:
-// never a host's file), and f's last element is looked at and removed in the
-// folder so opened. A folder goes only when empty.
-func removeRunFile(f runFile, uid int) bool {
-	parts := strings.Split(f.rel, string(filepath.Separator))
+// removeRunFile removes rel below area (a run's planted file, or an empty
+// folder) when it is still uid's and on the area's own file system: the area
+// and each folder below it on rel's way are opened without following a link,
+// so one swapped in since the walk stops it (ELOOP, ENOTDIR) rather than lead
+// anywhere, each must be on the area's device (a mount on the way is another
+// file system: never a host's file), and rel's last element is looked at and
+// removed in the folder so opened. A folder goes only when empty.
+func removeRunFile(area, rel string, uid int) bool {
+	parts := strings.Split(rel, string(filepath.Separator))
 	const dirFlags = unix.O_RDONLY | unix.O_DIRECTORY | unix.O_NOFOLLOW | unix.O_CLOEXEC
-	fd, err := unix.Open(f.area, dirFlags, 0)
+	fd, err := unix.Open(area, dirFlags, 0)
 	if err != nil {
 		return false
 	}
+	defer func() {
+		if fd >= 0 {
+			_ = unix.Close(fd)
+		}
+	}()
 	var st unix.Stat_t
-	if err := unix.Fstat(fd, &st); err != nil {
-		_ = unix.Close(fd)
+	if unix.Fstat(fd, &st) != nil {
 		return false
 	}
 	dev := st.Dev
 	for _, name := range parts[:len(parts)-1] {
 		next, err := unix.Openat(fd, name, dirFlags, 0)
 		_ = unix.Close(fd)
+		fd = -1
 		if err != nil {
 			return false
 		}
 		fd = next
-		if err := unix.Fstat(fd, &st); err != nil || st.Dev != dev {
-			_ = unix.Close(fd)
+		if unix.Fstat(fd, &st) != nil || st.Dev != dev {
 			return false
 		}
 	}
-	defer func() { _ = unix.Close(fd) }()
 	last := parts[len(parts)-1]
 	if err := unix.Fstatat(fd, last, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil || int(st.Uid) != uid || st.Dev != dev {
 		return false
