@@ -217,6 +217,46 @@ func TestReadMovedTakesARenameWhoseOldNameHoldsAnotherShow(t *testing.T) {
 	}
 }
 
+// A show folder that lost its feed.json but still holds the show's audio or a
+// partial of the Bridge's is the show's own: a copy of it elsewhere (a backup)
+// names it as its old folder and must not be taken in, or the show would
+// move to the copy and leave the audio and the downloads behind. A new empty
+// folder at the old name after a rename by hand is still a rename.
+func TestReadMovedRefusesACopyOfAFolderThatLostItsFeed(t *testing.T) {
+	for _, left := range []string{"", "episode", "partial"} {
+		root, j := journalFixture(t)
+		if err := os.CopyFS(root.Name()+"/Backup", os.DirFS(root.Name()+"/Fixture Show")); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.RemoveAll(root.Name() + "/Fixture Show"); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(root.Name()+"/Fixture Show", 0o755); err != nil {
+			t.Fatal(err)
+		}
+		switch left {
+		case "episode":
+			if err := root.WriteFile(j.Path, []byte("audio"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		case "partial":
+			if err := root.WriteFile("Fixture Show/"+TempPrefix+"0123456789abcdef01234567", []byte("audio"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		_, from, err := ReadMoved(root, "Backup")
+		if left == "" {
+			if err != nil || from != "Fixture Show" {
+				t.Fatal("a rename with an empty folder at its old name was refused", from, err)
+			}
+			continue
+		}
+		if !errors.Is(err, ErrInvalidFile) {
+			t.Fatal("a copy was taken in while the show's folder still holds its", left, from, err)
+		}
+	}
+}
+
 // A feed.json over the reader's cap is too large (ErrTooLarge), not an
 // invalid file a rename would explain.
 func TestReadRefusesAnOversizedFeedAsTooLarge(t *testing.T) {

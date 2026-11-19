@@ -560,6 +560,81 @@ func TestFetchTakesInAFolderRenamedBack(t *testing.T) {
 	}
 }
 
+// A show folder that lost its feed.json while it still holds the job's episode
+// file, or the partial its download record names, is the show's own, and a
+// backup copy of it elsewhere (whose feed.json names it) is not a rename: the
+// fetch is not moved to the copy, the copy is not taken in and the show's
+// cache row stays, so the audio and the download are never left behind in
+// the real folder. With the old folder renamed by hand and a new empty one
+// made at its name, the fetch still finds the renamed folder.
+func TestABackupOfAFolderThatLostItsFeedIsNotTakenIn(t *testing.T) {
+	for _, left := range []string{"episode", "record", "nothing"} {
+		t.Run(left, func(t *testing.T) {
+			requireProbe(t)
+			h, job := audioHarness(t)
+			s := h.handler.s
+			audio := data(t, "chap-v24-reverse.mp3")
+			setAudio(h, func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("ETag", `"one"`)
+				w.Write(audio)
+			})
+			root, err := os.OpenRoot(h.mount)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer root.Close()
+			var params fetchParams
+			if err := json.Unmarshal(job.Params, &params); err != nil {
+				t.Fatal(err)
+			}
+			switch left {
+			case "episode":
+				if err := root.WriteFile(*job.Path, audio, 0o644); err != nil {
+					t.Fatal(err)
+				}
+			case "record":
+				c := checkpoint{ServerHash: s.pairHash(), LibraryID: 3, ShowID: params.ShowID, EpisodeID: params.EpisodeID, Path: *job.Path, Temp: podcast.TempPrefix + nonce(), Offset: 1000, Total: int64(len(audio))}
+				if err := root.WriteFile("Fixture Show/"+c.Temp, audio[:1000], 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := s.saveCheckpoint(job, root, &c, `"one"`); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.CopyFS(filepath.Join(h.mount, "Backup"), os.DirFS(filepath.Join(h.mount, "Fixture Show"))); err != nil {
+				t.Fatal(err)
+			}
+			if left == "nothing" {
+				renameShow(t, h, "Fixture Show", "Gone")
+				if err := os.RemoveAll(filepath.Join(h.mount, "Gone")); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Mkdir(filepath.Join(h.mount, "Fixture Show"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := os.Remove(filepath.Join(h.mount, "Fixture Show", "feed.json")); err != nil {
+				t.Fatal(err)
+			}
+			res, err := h.handler.FetchJob().Run(context.Background(), job, jobs.LocalReporter())
+			if left == "nothing" {
+				if got, ok := res.(fetchResult); err != nil || !ok || got.Path != "Backup/"+strings.TrimPrefix(*job.Path, "Fixture Show/") {
+					t.Fatal("a folder renamed by hand with an empty one at its old name was not found", res, err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("the fetch ran in the copy", res)
+			}
+			if f, err := podcast.Read(root, "Backup"); err == nil {
+				t.Fatal("the copy was taken in", f.Episodes[0].Path)
+			}
+			if row, ok, err := h.db.PodcastShowByID(context.Background(), "server-1", params.ShowID); err != nil || ok && row.ShowPath == "Backup" {
+				t.Fatal("the cache row moved to the copy", row, ok, err)
+			}
+		})
+	}
+}
+
 // The runner abandons a fetch stopped at a resumable point by the path the
 // server named. When the fetch had found its show in a folder renamed by hand
 // (its record moved there), Abandon clears the record and partial where they

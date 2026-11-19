@@ -2398,8 +2398,11 @@ internal/
             renamed by hand still names its episodes under the old folder, which
             Read refuses: ReadMoved answers the old name (a folder whose old name
             still holds the same show id is a copy and is refused, as is one
-            whose old name has a feed.json it cannot read; an old name holding
-            another show, names swapped by hand, or none is a rename) and Adopt
+            whose old name has a feed.json it cannot read, or none but still
+            holds one of the show's episode files or an owned temp, a partial:
+            the show's own folder that lost its feed.json, so a backup copy of
+            it is never taken in; an old name holding another show, names
+            swapped by hand, or nothing (a new empty folder) is a rename) and Adopt
             moves the paths of the pending journals, the committed trash
             manifests and then feed.json, so a stop part way through adopts
             again (a manifest it could not rewrite stops it before feed.json).
