@@ -424,7 +424,8 @@ func TestEndpointRefusedBesideOwnCredentials(t *testing.T) {
 // is reported only with the refusal (a found beside no refusal is dropped).
 func TestEndpointStatusNamesWhatWasFound(t *testing.T) {
 	t.Parallel()
-	r, dir, _ := endpointRunner(t, "sk-endpoint-vault")
+	r, dir, base := endpointRunner(t, "sk-endpoint-vault")
+	first := base.Load().(string)
 	rj := endpointService()
 	rj.OwnCredentials, rj.Found = true, "/mnt/x holds /mnt/x/agent/.audiosilo-agent-home\x1b[2J"
 	writeRunnerJSON(t, dir, rj)
@@ -435,6 +436,13 @@ func TestEndpointStatusNamesWhatWasFound(t *testing.T) {
 	if strings.Contains(st.Detail, "/mnt/x") {
 		t.Fatalf("Detail names the path: %q", st.Detail)
 	}
+	// With no endpoint address either, the credential is still what is
+	// reported (denied): no_endpoint reads as a running service on the page.
+	base.Store("")
+	if st := r.Status(); st.Problem != ProblemOwnCredentials || st.Found == "" {
+		t.Fatalf("no address beside a credential: %+v", st)
+	}
+	base.Store(first)
 	rj.OwnCredentials = false
 	writeRunnerJSON(t, dir, rj)
 	if st := r.Status(); !st.Available || st.Found != "" {

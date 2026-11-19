@@ -3744,7 +3744,9 @@ internal/
             uid of a live runner.json in the agent's dir (the same user); then
             ProblemOwnCredentials while that service holds a credential or reaches
             /agent (runner.json's own_credentials, or a CLI entry with one;
-            Status.Found is its found, for Settings > Agent alone, never Detail). A
+            Status.Found is its found, for Settings > Agent alone, never Detail;
+            judged before ProblemNoEndpoint, which Settings > Agent shows as a
+            running service). A
             not-running Detail on this backend names agent-endpoint and its start
             (docker compose --profile endpoint up -d agent-endpoint) and the
             agent.endpoint_staging_dir setting, never the agent container. The

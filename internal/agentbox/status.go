@@ -522,10 +522,13 @@ func (r *Runner) unavailableBecause(rj agentproto.Runner, info fs.FileInfo) (pro
 			return ProblemEndpointService, "", notEndpointOnlyDetail
 		case r.sameUserAsAgent(info):
 			return ProblemEndpointService, "", sameUserDetail
+		case ownCredentials(rj, r.backend):
+			// Before a missing address: the service's state on Settings >
+			// Agent counts that one as running, which it isn't while it
+			// would refuse every run.
+			return ProblemOwnCredentials, "", ownCredentialsDetail
 		case r.endpoint() == "":
 			return ProblemNoEndpoint, "", noEndpointDetail
-		case ownCredentials(rj, r.backend):
-			return ProblemOwnCredentials, "", ownCredentialsDetail
 		}
 		return "", "", "" // an endpoint may take no key (a local server)
 	}
