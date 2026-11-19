@@ -259,7 +259,7 @@ const (
 const KeptChecks = 3
 
 // defaultInterval is config's default mapping.check_minutes, the interval
-// until SetInterval gives the configured one.
+// until the first Due gives the configured one.
 const defaultInterval = 10 * time.Minute
 
 // ProofTimeout bounds the local look that lets an unanswered check keep a
@@ -273,7 +273,7 @@ type Registry struct {
 	libs    []link.Library
 	results map[int64]result
 	// spacing is CheckSpacing (shorter in tests); interval is the configured
-	// check interval, which a kept state's age is capped in. holdUntil is when
+	// check interval (Due's last), which a kept state's age is capped in. holdUntil is when
 	// Due may next start a run after one the server didn't answer, holdWhy
 	// that run's failure; held counts such runs in a row.
 	spacing   time.Duration
@@ -310,17 +310,11 @@ func NewRegistry() *Registry {
 	return &Registry{results: map[int64]result{}, pend: map[int64]bool{}, spacing: CheckSpacing, interval: defaultInterval}
 }
 
-// SetInterval records the configured check interval (mapping.check_minutes):
-// a state unanswered checks keep stands for at most KeptChecks of it.
-func (r *Registry) SetInterval(d time.Duration) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.interval = d
+// keptTooLong reports whether a state set by a check at is past what unanswered
+// checks may keep it for at now: KeptChecks check intervals (r.mu held).
+func (r *Registry) keptTooLong(at, now time.Time) bool {
+	return now.Sub(at) >= KeptChecks*r.interval
 }
-
-// keepFor is how long after the check that set it a state may be kept (r.mu
-// held).
-func (r *Registry) keepFor() time.Duration { return KeptChecks * r.interval }
 
 // SetLibraries records the server's libraries and reports whether they differ
 // from the last list (a library added, removed, renamed or moved). Checks of
@@ -431,14 +425,17 @@ func (r *Registry) Entries(mount MountFunc) []Entry {
 // refreshes them, so asking again would only queue a second pass) and no hold
 // after an unanswered run (asking again at once would meet the same 429). Only
 // the heartbeat's periodic run waits for Due: an admin's mapping edit, Check
-// now and a changed library list call Check at once, hold or not. Due also
-// ends the states unanswered checks have kept past keepFor, hold or not: the
-// library fails closed, so writes wait for a check the server answers.
+// now and a changed library list call Check at once, hold or not. interval is
+// the configured one (mapping.check_minutes), which also caps a kept state:
+// Due ends the states unanswered checks have kept past KeptChecks of it, hold
+// or not, so the library fails closed and writes wait for a check the server
+// answers.
 func (r *Registry) Due(now time.Time, interval time.Duration) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.interval = interval
 	for id, res := range r.results {
-		if !res.unanswered.IsZero() && now.Sub(res.at) >= r.keepFor() {
+		if !res.unanswered.IsZero() && r.keptTooLong(res.at, now) {
 			r.results[id] = result{status: link.LibraryStatus{
 				LibraryID: id, MountPath: res.status.MountPath,
 				Error: "the server hasn't answered a check of this mapping since " + res.at.Format(time.RFC3339) +
@@ -662,14 +659,14 @@ func proveKept(st link.LibraryStatus, unanswered error, last link.LibraryStatus)
 
 // record keeps a library's check (r.mu held). One the server didn't answer
 // (unanswered) leaves the last known state at the same mount in place, due
-// again after the hold, for keepFor after the check that set it; with none
-// there it is recorded, so the page says why, and so is one past keepFor, and
+// again after the hold, for KeptChecks intervals after the check that set it; with none
+// there it is recorded, so the page says why, and so is one past that, and
 // one whose folder no longer showed what proved the last state (unproven).
 func (r *Registry) record(st link.LibraryStatus, unanswered error, at time.Time) {
 	prev, ok := r.results[st.LibraryID]
 	var lost unproven
 	if unanswered != nil && ok && prev.status.MountPath == st.MountPath && !errors.As(unanswered, &lost) &&
-		at.Sub(prev.at) < r.keepFor() {
+		!r.keptTooLong(prev.at, at) {
 		r.markRetry(st.LibraryID, at)
 		return
 	}

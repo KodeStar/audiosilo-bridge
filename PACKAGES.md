@@ -2221,7 +2221,7 @@ internal/
             bare mount point. A first check, one at a moved mount, and one whose
             folder doesn't show it (unproven) record the failure, so writes
             wait. A kept state stands KeptChecks (3) check intervals from the
-            check that set it (SetInterval, from the heartbeat's
+            check that set it (the interval Due last took, the heartbeat's
             mapping.check_minutes): the next unanswered check past that records
             its failure, and Due ends it during a hold. A 429 or a refused token
             ends the pass (the rest are flagged too; checks queued meanwhile are

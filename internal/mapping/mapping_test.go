@@ -933,7 +933,7 @@ func TestKeptStateExpires(t *testing.T) {
 	limited := &link.APIError{Status: http.StatusTooManyRequests, RetryAfter: time.Hour, RetryAfterSet: true}
 	setup := func() (*Registry, *scripted) {
 		r := NewRegistry()
-		r.SetInterval(time.Minute)
+		r.Due(at, time.Minute) // takes the check interval
 		r.SetLibraries([]link.Library{{ID: 1, Root: root}})
 		src := &scripted{book: &link.Book{Path: "Author/Book", Files: files}, err: map[int64]error{}}
 		r.Check(context.Background(), src, mount, func() time.Time { return at })
