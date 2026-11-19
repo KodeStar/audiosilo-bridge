@@ -1678,9 +1678,11 @@ internal/
             books before the release (beginPass marks where a pass reads). Cancel
             takes the same hold around its write, so a pass that read the book before
             the cancel starts no stage on it after cancelInflight found none to stop;
-            supersede_rerun also waits for the stage worker it cancelled to return
-            (awaitWorker, at most workerExitWait) before its rewind, so a sentinel the
-            stage wrote as the cancel landed is dropped too, never replayed. A crash
+            supersede_rerun cancels the stage worker and waits for it to return
+            (awaitWorker, at most workerExitWait) before its status write, so a
+            sentinel the stage wrote as the cancel landed is dropped too, never
+            replayed, and the wait is never under the publish lock the worker's own
+            publish takes. A crash
             between the two writes replays the stage's outcome at the restart (a
             round-cap park parks again). RetryAsRead(b) is Retry for a book the caller
             read (generate's Retry): it re-admits only while the book still has b's
@@ -1700,10 +1702,13 @@ internal/
             published under that book's own lock (lockPublish), so its events go out
             in the order of their reads and the last carries the latest write (a
             cancel's event never lands after the re-admit that followed it, an
-            advance never shows a pause that landed first as running). readmit holds
-            that lock from its status clear to its publish, so one book's re-admits
-            run one at a time: a failed one puts its status back (restoreStatus)
-            before a later one clears anything. No page reads
+            advance never shows a pause that landed first as running). readmit and
+            supersede_rerun hold that lock from their status clear to their publish,
+            so one book's re-admits and rewinds run one at a time: a failed one puts
+            its status back (restoreStatus) before a later Retry clears anything. A
+            publish whose read fails logs nothing for a deleted book or a closed store
+            (store.DB.Closed, the shutdown) and warns only for the first other
+            failure, Debug after. No page reads
             book.state live today (no Hub.Subscribe caller, no SSE route): the hub's
             ring and the durable event log (the supervisor's ListEvents) do.
             generate's continues of a stopped run (which clear its cancel) and the

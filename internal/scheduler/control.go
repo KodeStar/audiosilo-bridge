@@ -231,8 +231,8 @@ func (s *Scheduler) readmit(ctx context.Context, b store.Book) error {
 		return err
 	}
 	defer s.publishLocked(ctx, b.ID)
-	if s.afterReadmitClear != nil {
-		s.afterReadmitClear()
+	if s.afterStatusClear != nil {
+		s.afterStatusClear()
 	}
 	if err := s.forceRerun(ctx, b); err != nil {
 		s.restoreStatus(ctx, b)
@@ -271,7 +271,9 @@ func (s *Scheduler) forceRerun(ctx context.Context, b store.Book) error {
 
 // restoreStatus puts back the status, error, park code and retry_at a control
 // change cleared from b (as read) when the change then failed, unless the book's
-// status moved on since the clear (a Cancel).
+// status moved on since the clear (a Cancel). It cannot tell its own clear from a
+// later Retry's, so its caller holds the book's publish lock from its clear on
+// (readmit, supervisorSupersedeRerun): a Retry waits for that lock to clear.
 func (s *Scheduler) restoreStatus(ctx context.Context, b store.Book) {
 	err := s.db.SetBookStatusIf(context.WithoutCancel(ctx), b.ID, "", "", b.Status, b.Error, b.ParkCode, b.RetryAt)
 	if err != nil && !errors.Is(err, store.ErrStatusChanged) {

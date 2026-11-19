@@ -1,10 +1,14 @@
 package scheduler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -361,7 +365,7 @@ func TestFailedReadmitNeverRestoresOverALaterRetry(t *testing.T) {
 	defer fail()
 	retried := make(chan error, 1)
 	var once sync.Once
-	s.afterReadmitClear = func() {
+	s.afterStatusClear = func() {
 		once.Do(func() {
 			if err := CancelStored(bg, db, b.ID); err != nil {
 				t.Error(err)
@@ -397,5 +401,100 @@ func TestFailedReadmitNeverRestoresOverALaterRetry(t *testing.T) {
 	}
 	if f, ok := lastFrame(t, h.hub, b.ID); !ok || f != storedFrame(t, db, b.ID) {
 		t.Fatalf("last frame %+v (%v), stored %+v", f, ok, storedFrame(t, db, b.ID))
+	}
+}
+
+// supersede_rerun's rewind failing after its status clear puts the park back
+// before a later Retry of the book clears anything, as a failed re-admit does
+// (it holds the book's publish lock from its clear, after the worker it cancelled
+// returned, never across that wait). A Cancel and then a Retry landing while it
+// runs end with the book admitted, never parked again over that Retry.
+func TestFailedSupersedeNeverRestoresOverALaterRetry(t *testing.T) {
+	h := newHarness(t)
+	db := h.openDB(t)
+	bg := context.Background()
+	s := New(db, h.hub, NewStubExecutor(0, 0), 1, h.workRoot, false)
+	read := parkedAudit(t, h, db, "superseded-twice")
+
+	ctx, fail := context.WithCancel(bg)
+	defer fail()
+	retried := make(chan error, 1)
+	var once sync.Once
+	s.afterStatusClear = func() {
+		once.Do(func() {
+			if err := CancelStored(bg, db, read.ID); err != nil {
+				t.Error(err)
+			}
+			cancelled, err := db.GetBook(bg, read.ID) // the Retry's read: cancelled
+			if err != nil {
+				t.Error(err)
+			}
+			go func() { retried <- s.RetryAsRead(bg, cancelled) }()
+			// The Retry waits for this supersede; one that didn't would clear the
+			// cancel here, before the failure below puts the park back.
+			select {
+			case err := <-retried:
+				retried <- err
+			case <-time.After(50 * time.Millisecond):
+			}
+			fail() // the rewind's store write fails
+		})
+	}
+	if _, err := s.supervisorSupersedeRerun(ctx, read, string(state.Fixing)); !errors.Is(err, context.Canceled) {
+		t.Fatalf("the failed supersede_rerun = %v, want context.Canceled", err)
+	}
+	select {
+	case err := <-retried:
+		if err != nil {
+			t.Fatalf("the Retry after the cancel = %v", err)
+		}
+	case <-time.After(waitLimit):
+		t.Fatal("the Retry never ran")
+	}
+	if got := storedFrame(t, db, read.ID); got.Status != "" || got.ParkCode != "" {
+		t.Fatalf("the failed supersede_rerun parked the retried book again: %+v", got)
+	}
+	if f, ok := lastFrame(t, h.hub, read.ID); !ok || f != storedFrame(t, db, read.ID) {
+		t.Fatalf("last frame %+v (%v), stored %+v", f, ok, storedFrame(t, db, read.ID))
+	}
+}
+
+// A publish's failed read of its book warns once, then logs at Debug; a book
+// deleted since and a store closed at shutdown log nothing.
+func TestPublishReadFailureWarnsOnceAndNeverAtShutdown(t *testing.T) {
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	var warned atomic.Bool
+	broken := errors.New("disk I/O error")
+
+	logPublishReadFailed(log, &warned, true, 1, broken)
+	logPublishReadFailed(log, &warned, false, 1, store.ErrNotFound)
+	if buf.Len() != 0 || warned.Load() {
+		t.Fatalf("a closed store or a deleted book logged: %q", buf.String())
+	}
+	logPublishReadFailed(log, &warned, false, 1, broken)
+	logPublishReadFailed(log, &warned, false, 2, broken)
+	out := buf.String()
+	if strings.Count(out, "level=WARN") != 1 || strings.Count(out, "level=DEBUG") != 1 {
+		t.Fatalf("want one warning then one debug line, got %q", out)
+	}
+}
+
+// publishStored after the store closed (a stage's last publish at shutdown)
+// publishes nothing and returns.
+func TestPublishStoredAfterCloseIsQuiet(t *testing.T) {
+	h := newHarness(t)
+	db := h.openDB(t)
+	s := New(db, h.hub, NewStubExecutor(0, 0), 1, h.workRoot, false)
+	b := h.addBook(t, db, "closed", "", "")
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s.publishStored(context.Background(), b.ID)
+	if s.publishReadWarned.Load() {
+		t.Fatal("a publish after the store closed warned")
+	}
+	if _, ok := lastFrame(t, h.hub, b.ID); ok {
+		t.Fatal("a publish after the store closed published a frame")
 	}
 }

@@ -112,9 +112,13 @@ type Scheduler struct {
 	pubMu    sync.Mutex
 	pubLocks map[int64]*publishLock
 
-	// afterReadmitClear, when set (tests), runs in readmit between the status
-	// clear and the forced re-run.
-	afterReadmitClear func()
+	// publishReadWarned is set once a publish's read of its book failed and was
+	// warned about: later failures log at Debug, never a warning per event.
+	publishReadWarned atomic.Bool
+
+	// afterStatusClear, when set (tests), runs in readmit and supersede_rerun
+	// between the status clear and the change that follows it.
+	afterStatusClear func()
 }
 
 // publishLock is one book's publish lock and the number of publishStored calls
@@ -1327,9 +1331,7 @@ func (s *Scheduler) publishStored(ctx context.Context, id int64) {
 func (s *Scheduler) publishLocked(ctx context.Context, id int64) {
 	b, err := s.db.GetBook(context.WithoutCancel(ctx), id)
 	if err != nil {
-		if !errors.Is(err, store.ErrNotFound) {
-			slog.Warn("scheduler: reading a book to publish its state failed", "book_id", id, "err", err)
-		}
+		logPublishReadFailed(slog.Default(), &s.publishReadWarned, s.db.Closed(), id, err)
 		return
 	}
 	_ = s.hub.PublishBook("book.state", id, map[string]any{
@@ -1341,6 +1343,20 @@ func (s *Scheduler) publishLocked(ctx context.Context, id int64) {
 		"park_code": b.ParkCode,
 		"retry_at":  b.RetryAt,
 	})
+}
+
+// logPublishReadFailed logs a publish's failed read of book id: nothing for a
+// book deleted since or a store closed at shutdown (closed), where nothing went
+// wrong; a warning for the first other failure (warned records it) and Debug
+// after, so a failing store never warns once per event.
+func logPublishReadFailed(log *slog.Logger, warned *atomic.Bool, closed bool, id int64, err error) {
+	switch {
+	case errors.Is(err, store.ErrNotFound) || closed:
+	case warned.CompareAndSwap(false, true):
+		log.Warn("scheduler: reading a book to publish its state failed (later failures log at debug)", "book_id", id, "err", err)
+	default:
+		log.Debug("scheduler: reading a book to publish its state failed", "book_id", id, "err", err)
+	}
 }
 
 // PublishStored is publishStored for a change written to the store outside the
