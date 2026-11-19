@@ -23,24 +23,27 @@ func pack() source.Record {
 
 // A backup is a book of its own: a destination inside a book the library
 // already has (a folder the server lists as a book, its own or another, or a
-// folder already holding audio) fails exists before the license, and nothing
-// is written.
+// folder already holding audio) fails exists before the license, saying what
+// is in the way (conflict, which the console reads), and nothing is written.
 func TestImportRefusesJoiningABook(t *testing.T) {
 	copper := link.LibraryBook{Path: "Mara Quill/Orchard Cycle/OC02 - The Copper Grove", Title: "The Copper Grove",
 		Authors: []string{"Mara Quill"}, Series: []link.SeriesRef{{Name: "Orchard Cycle", Position: "2"}}}
 	grove := rec("B0FAKE0002", "The Copper Grove", "Mara Quill", "Orchard Cycle", 2)
 	for _, tc := range []struct {
-		name  string
-		title source.Record
-		books []link.LibraryBook
-		dest  string
-		audio string // a file already in the library (a book not indexed yet)
+		name     string
+		title    source.Record
+		books    []link.LibraryBook
+		dest     string
+		audio    string // a file already in the library (a book not indexed yet)
+		conflict string
 	}{
-		{name: "a pack joins a single volume", title: pack(), dest: "Mara Quill/Orchard Cycle/OC01 - The Glass Orchard"},
-		{name: "a title joins another book", title: grove, dest: "Mara Quill/Orchard Cycle/OC03 - The Iron Thicket"},
-		{name: "a title joins its own book", title: grove, books: append(goldenBooks(), copper), dest: copper.Path},
-		{name: "Auto lands in a book's folder", title: grove, books: append(goldenBooks(), copper)},
-		{name: "a folder holding audio", title: grove, dest: "Loose/Grove", audio: "Loose/Grove/part1.mp3"},
+		{name: "a pack joins a single volume", title: pack(), dest: "Mara Quill/Orchard Cycle/OC01 - The Glass Orchard", conflict: link.ConflictBook},
+		{name: "a title joins another book", title: grove, dest: "Mara Quill/Orchard Cycle/OC03 - The Iron Thicket", conflict: link.ConflictBook},
+		{name: "a title joins its own book", title: grove, books: append(goldenBooks(), copper), dest: copper.Path, conflict: link.ConflictBook},
+		{name: "Auto lands in a book's folder", title: grove, books: append(goldenBooks(), copper), conflict: link.ConflictBook},
+		{name: "a folder holding audio", title: grove, dest: "Loose/Grove", audio: "Loose/Grove/part1.mp3", conflict: link.ConflictAudio},
+		{name: "a file at the destination", title: grove, dest: "Loose/Grove", audio: "Loose/Grove/The Copper Grove.m4b",
+			conflict: link.ConflictFile},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			e := newImportEnv(t)
@@ -54,8 +57,8 @@ func TestImportRefusesJoiningABook(t *testing.T) {
 			before := e.libraryFiles()
 			_, err := e.run(context.Background(), e.params(func(p *ImportParams) { p.ASIN = tc.title.ASIN; p.DestPath = tc.dest }))
 			var f *Failure
-			if !errors.As(err, &f) || f.Code != CodeExists {
-				t.Fatalf("err = %v, want exists", err)
+			if !errors.As(err, &f) || f.Code != CodeExists || f.Conflict != tc.conflict {
+				t.Fatalf("err = %v (%+v), want exists with conflict %q", err, f, tc.conflict)
 			}
 			if e.accts.licenses != 0 || e.accts.downloads != 0 || !slices.Equal(e.libraryFiles(), before) || len(e.srv.enriched) != 0 {
 				t.Fatalf("licenses %d, downloads %d, files %v, enriched %v: nothing may happen",

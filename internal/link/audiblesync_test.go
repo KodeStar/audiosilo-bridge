@@ -50,9 +50,15 @@ func TestAudibleSyncWireMirror(t *testing.T) {
 			case "gone0000":
 				w.WriteHeader(http.StatusNotFound)
 				_, _ = w.Write([]byte(`{"error":"x","code":"unknown_account"}`))
-			case "badbad00":
+			case "badbad00": // a server from 2.7.0 on
 				w.WriteHeader(http.StatusBadRequest)
-				_, _ = w.Write([]byte(`{"error":"x","code":"invalid_request"}`))
+				_, _ = w.Write([]byte(`{"error":"the cursor can't be read: read from the start","code":"invalid_cursor"}`))
+			case "oldbad00": // a server before 2.7.0
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(`{"error":"invalid audible request: bad cursor","code":"invalid_request"}`))
+			case "limit000": // another 400
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(`{"error":"invalid audible request: bad limit","code":"invalid_request"}`))
 			default:
 				_, _ = w.Write([]byte(`{"rows":null,"next":"","more":false}`))
 			}
@@ -124,11 +130,17 @@ func TestAudibleSyncWireMirror(t *testing.T) {
 	if _, err := c.AudibleProgress(ctx, "gone0000", "", 0); !errors.Is(err, ErrUnknownAccount) {
 		t.Fatalf("gone = %v", err)
 	}
-	// A 400 blames the cursor only when one was sent.
-	if _, err := c.AudibleProgress(ctx, "badbad00", "Q9", 0); !errors.Is(err, ErrBadCursor) {
-		t.Fatalf("bad cursor = %v", err)
+	// The cursor is blamed only for the server's answer about it (its code,
+	// or an older server's message), and only when one was sent (bridge#50).
+	for _, account := range []string{"badbad00", "oldbad00"} {
+		if _, err := c.AudibleProgress(ctx, account, "Q9", 0); !errors.Is(err, ErrBadCursor) {
+			t.Fatalf("bad cursor (%s) = %v", account, err)
+		}
+		if _, err := c.AudibleProgress(ctx, account, "", 0); err == nil || errors.Is(err, ErrBadCursor) {
+			t.Fatalf("400 from the start (%s) = %v", account, err)
+		}
 	}
-	if _, err := c.AudibleProgress(ctx, "badbad00", "", 0); err == nil || errors.Is(err, ErrBadCursor) {
-		t.Fatalf("400 from the start = %v", err)
+	if _, err := c.AudibleProgress(ctx, "limit000", "Q9", 0); !errors.As(err, &ae) || errors.Is(err, ErrBadCursor) {
+		t.Fatalf("another 400 with a cursor = %v", err)
 	}
 }

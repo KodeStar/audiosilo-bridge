@@ -267,6 +267,23 @@ func TestAudiblePushCursorRemap(t *testing.T) {
 	if got.PushCursor != "c43" || got.PushFrom != Timestamp(at) {
 		t.Fatalf("cursor = %q from %q", got.PushCursor, got.PushFrom)
 	}
+	// A refused cursor goes back to the feed's start with the baseline kept;
+	// the read from there is marked until one reaches the end (a from).
+	if err := db.ResetAudiblePushCursor(ctx, a.ID); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := db.GetAudibleAccount(ctx, a.ID); got.PushCursor != "" || got.PushFrom != Timestamp(at) || !got.PushReread {
+		t.Fatalf("a reset = %q from %q reread %v", got.PushCursor, got.PushFrom, got.PushReread)
+	}
+	_ = db.SetAudiblePushCursor(ctx, a.ID, "c5", time.Time{})
+	if got, _ := db.GetAudibleAccount(ctx, a.ID); got.PushCursor != "c5" || !got.PushReread {
+		t.Fatalf("a read from the start cut short = %q reread %v", got.PushCursor, got.PushReread)
+	}
+	_ = db.SetAudiblePushCursor(ctx, a.ID, "c43", at.Add(2*time.Hour))
+	got, _ = db.GetAudibleAccount(ctx, a.ID)
+	if got.PushCursor != "c43" || got.PushFrom != Timestamp(at) || got.PushReread {
+		t.Fatalf("the read from the start's end = %q from %q reread %v", got.PushCursor, got.PushFrom, got.PushReread)
+	}
 	a.Label, a.Policy = "Chris again", "all"
 	if err := db.MapAudibleAccount(ctx, a); err != nil {
 		t.Fatal(err)
@@ -286,13 +303,16 @@ func TestAudiblePushCursorRemap(t *testing.T) {
 	} {
 		_ = db.ListAudibleSync(ctx, a.ID, []AudibleSyncTitle{{ASIN: "B000000001", LibraryID: a.LibraryID, Path: "A/One"}})
 		set()
+		// A read from the start under way (a refused cursor) ends with the move too.
+		_ = db.ResetAudiblePushCursor(ctx, a.ID)
+		_ = db.SetAudiblePushCursor(ctx, a.ID, "c42", time.Time{})
 		move(&a)
 		if err := db.MapAudibleAccount(ctx, a); err != nil {
 			t.Fatal(err)
 		}
 		got, _ = db.GetAudibleAccount(ctx, a.ID)
 		p, _ = db.GetAudiblePush(ctx, a.ID, "B000000001")
-		if got.PushCursor != "" || got.PushFrom != "" || p.WantMs != nil || p.Listed || p.RowMs != -1 || p.RowSeen != "" {
+		if got.PushCursor != "" || got.PushFrom != "" || got.PushReread || p.WantMs != nil || p.Listed || p.RowMs != -1 || p.RowSeen != "" {
 			t.Fatalf("%s: a move kept the feed: %+v, %+v", name, got, p)
 		}
 	}
@@ -318,7 +338,7 @@ func TestAudibleSyncHealth(t *testing.T) {
 	if err := db.SignInAudibleAccount(ctx, a, at); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.AudibleSyncFailed(ctx, a.ID, "Audible asked to wait", at.Add(time.Hour)); err != nil {
+	if err := db.AudibleSyncFailed(ctx, a.ID, SyncJob, "Audible asked to wait", at.Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := db.GetAudibleAccount(ctx, a.ID)
@@ -327,28 +347,94 @@ func TestAudibleSyncHealth(t *testing.T) {
 	}
 	// The job and the push share the wait: a failure with no wait of its
 	// own, a shorter one or a success before it has passed never ends it.
-	if err := db.AudibleSyncFailed(ctx, a.ID, "no wait", time.Time{}); err != nil {
+	if err := db.AudibleSyncFailed(ctx, a.ID, SyncJob, "no wait", time.Time{}); err != nil {
 		t.Fatal(err)
 	}
-	_ = db.AudibleSyncFailed(ctx, a.ID, "a shorter wait", at.Add(time.Minute))
+	_ = db.AudibleSyncFailed(ctx, a.ID, SyncJob, "a shorter wait", at.Add(time.Minute))
 	if got, _ = db.GetAudibleAccount(ctx, a.ID); got.SyncRetryAt != Timestamp(at.Add(time.Hour)) || got.SyncError != "a shorter wait" {
 		t.Fatalf("a later failure shortened the wait: %+v", got)
 	}
-	if err := db.AudibleSyncOK(ctx, a.ID, at.Add(30*time.Minute)); err != nil {
+	if err := db.AudibleSyncOK(ctx, a.ID, SyncJob, at.Add(30*time.Minute)); err != nil {
 		t.Fatal(err)
 	}
 	if got, _ = db.GetAudibleAccount(ctx, a.ID); got.SyncError != "" || got.SyncRetryAt != Timestamp(at.Add(time.Hour)) {
 		t.Fatalf("a success ended a wait still ahead: %+v", got)
 	}
-	_ = db.AudibleSyncFailed(ctx, a.ID, "a longer wait", at.Add(90*time.Minute))
+	_ = db.AudibleSyncFailed(ctx, a.ID, SyncJob, "a longer wait", at.Add(90*time.Minute))
 	if got, _ = db.GetAudibleAccount(ctx, a.ID); got.SyncRetryAt != Timestamp(at.Add(90*time.Minute)) {
 		t.Fatalf("a longer wait was not kept: %+v", got)
 	}
-	if err := db.AudibleSyncOK(ctx, a.ID, at.Add(2*time.Hour)); err != nil {
+	if err := db.AudibleSyncOK(ctx, a.ID, SyncJob, at.Add(2*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	if got, _ = db.GetAudibleAccount(ctx, a.ID); got.SyncError != "" || got.SyncRetryAt != "" || got.SyncAt != Timestamp(at.Add(2*time.Hour)) {
 		t.Fatalf("ok = %+v", got)
+	}
+}
+
+// The job and the push keep their own health (bridge#50, bridge#80): one's
+// success never clears the other's failure, nor one's failure overwrites the
+// other's; a sync turned off clears both, and a sign-in again both.
+func TestAudibleSyncHealthSides(t *testing.T) {
+	ctx := context.Background()
+	db := open(t)
+	at := time.Date(2026, 11, 3, 10, 0, 0, 0, time.UTC)
+	a := AudibleAccount{ID: "abcd1234", Label: "Chris", Marketplace: "us", LibraryID: 1, Policy: "manual"}
+	if err := db.SignInAudibleAccount(ctx, a, at); err != nil {
+		t.Fatal(err)
+	}
+	get := func() AudibleAccount {
+		t.Helper()
+		got, err := db.GetAudibleAccount(ctx, a.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	if err := db.AudibleSyncFailed(ctx, a.ID, SyncJob, "the job failed", time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AudibleSyncOK(ctx, a.ID, SyncPush, at.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if got := get(); got.SyncError != "the job failed" || got.PushAt != Timestamp(at.Add(time.Minute)) || got.SyncAt != "" ||
+		got.SyncProblem() != "the job failed" {
+		t.Fatalf("a push that went through masked the job's failure: %+v", got)
+	}
+	if err := db.AudibleSyncFailed(ctx, a.ID, SyncPush, "the push failed", time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := get(); got.SyncError != "the job failed" || got.PushError != "the push failed" {
+		t.Fatalf("a push failure overwrote the job's: %+v", got)
+	}
+	if err := db.AudibleSyncOK(ctx, a.ID, SyncJob, at.Add(2*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if got := get(); got.SyncError != "" || got.PushError != "the push failed" || got.SyncProblem() != "the push failed" ||
+		got.SyncAt != Timestamp(at.Add(2*time.Minute)) {
+		t.Fatalf("a job that went through cleared the push's failure: %+v", got)
+	}
+	if cleared, err := db.ClearAudibleSyncError(ctx, a.ID); err != nil || !cleared {
+		t.Fatalf("sync off: cleared %v, %v", cleared, err)
+	}
+	if got := get(); got.SyncProblem() != "" || got.PushAt == "" || got.SyncAt == "" {
+		t.Fatalf("sync off: %+v", got)
+	}
+	_ = db.AudibleSyncFailed(ctx, a.ID, SyncJob, "the job failed", time.Time{})
+	_ = db.AudibleSyncFailed(ctx, a.ID, SyncPush, "the push failed", time.Time{})
+	if err := db.SignInAudibleAccount(ctx, a, at.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if got := get(); got.SyncError != "" || got.PushError != "" {
+		t.Fatalf("a sign-in again kept a sync error: %+v", got)
+	}
+	_ = db.AudibleSyncFailed(ctx, a.ID, SyncPush, "the push failed", time.Time{})
+	a.LibraryID = 2
+	if err := db.MapAudibleAccount(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+	if got := get(); got.PushError != "" {
+		t.Fatalf("a remap kept the push's error: %+v", got)
 	}
 }
 
@@ -365,10 +451,10 @@ func TestAudibleSyncHealthReset(t *testing.T) {
 			if err := db.SignInAudibleAccount(ctx, a, at); err != nil {
 				t.Fatal(err)
 			}
-			if err := db.AudibleSyncOK(ctx, a.ID, at); err != nil {
+			if err := db.AudibleSyncOK(ctx, a.ID, SyncJob, at); err != nil {
 				t.Fatal(err)
 			}
-			if err := db.AudibleSyncFailed(ctx, a.ID, "old sync error", at.Add(time.Hour)); err != nil {
+			if err := db.AudibleSyncFailed(ctx, a.ID, SyncJob, "old sync error", at.Add(time.Hour)); err != nil {
 				t.Fatal(err)
 			}
 			var err error

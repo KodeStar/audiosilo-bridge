@@ -1479,7 +1479,8 @@ internal/
             read: row_ms and row_seen, when this Bridge first read that place; a sync listing the
             title for another book forgets them) and on audible_accounts
             push_cursor/push_from (push_from '' until a read reaches the feed's end; started again by a mapping to another server, person or
-            library), sync_at/sync_error/sync_retry_at (AudibleSyncFailed and AudibleSyncOK never shorten a
+            library), sync_at/sync_error/sync_retry_at (the push's own since 0017: push_at/push_error;
+            AudibleSyncFailed and AudibleSyncOK never shorten a
             wait still ahead) and refusal_kind (bridge#46: 'sign_in' | 'device'
             in a column, 4b's throttled rows migrated by their text; AudiblePolled keeps a device refusal,
             as RefuseAudibleAccount does over a sign-in one (bridge#64),
@@ -1603,6 +1604,17 @@ internal/
             (it reports whether the book is local now), leaving updated_at alone.
             GenerateShareOff reports whether an open sidecars.generate job following a
             book heard share_off (the contributing stage's check before it files).
+            0017 (bridge#50, bridge#80) adds audible_accounts.push_at/push_error: the
+            push loop's health in columns of its own, so sync_at/sync_error are the
+            audible.sync job's alone (AudibleSyncOK and AudibleSyncFailed take the side,
+            SyncJob or SyncPush; one's success never clears the other's failure nor
+            one's failure overwrites it). sync_retry_at, Audible's wait, stays shared;
+            ClearAudibleSyncError (sync off), a remap and a sign-in again clear both
+            errors; AudibleAccount.SyncProblem (the job's, else the push's) feeds the
+            setup item. 0018 (bridge#50) adds audible_accounts.push_reread: 1 from
+            ResetAudiblePushCursor (the server refused the cursor: push_cursor '' with
+            push_from kept) until SetAudiblePushCursor records a read that reached the
+            feed's end; a remap clears it with the cursor.
   state/    per-book pipeline state machine: table-driven states/lanes/transitions,
             CanStart/NextState guards, the audit fix-loop cap. Pure, no I/O. M6 added
             ParkCode (typed park reasons - M7 added contrib_unavailable, core_needed,
@@ -2094,7 +2106,8 @@ internal/
             null). audible.go mirrors the rest of the server's handlers_audible.go:
             Users (GET /bridge/users: enabled adults and admins, no email),
             PutAudibleAccount / DeleteAudibleAccount (PUT/DELETE
-            /bridge/audible/accounts/{account}; the delete is 204 known or not),
+            /bridge/audible/accounts/{account}; the delete is 204 known or not;
+            AudibleAccountInput sends no sync, the console's alone since 4c, bridge#50),
             PutAudibleTitles (<= MaxAudibleTitles 500 per call, poll_id + final; a
             nil list sent as []; 404 unknown_account -> ErrUnknownAccount; each
             AudibleTitle also carries contested_path (omitempty) and planned
@@ -2109,7 +2122,8 @@ internal/
             no length or a finish, answered {server_time, results, progress}) and AudibleProgress (GET
             /bridge/progress?account=&since=&limit= -> {rows, next, more, server_time}: next opaque and kept between
             polls, server_time absent before server 2.7.0); 403 sync_off -> ErrSyncOff, 403 user_unavailable -> ErrUserUnavailable, a 400
-            on a sent since -> ErrBadCursor (bridge#50), a 404 for a missing route (code not_found,
+            invalid_cursor on a sent since -> ErrBadCursor (a server before 2.7.0: invalid_request with
+            the message "...: bad cursor"; any other 400 stays the APIError, bridge#50), a 404 for a missing route (code not_found,
             or none) -> ErrNoAudibleSync (a server before 2.6.0; a 404 with any other code stays
             the APIError, bridge#50; a proxy's bare 404 while the server restarts reads the same,
             so the push waits for a second one in a row, bridge#79).
@@ -2226,9 +2240,14 @@ internal/
             of: nil while the server holds it, ErrStopped when the answer (a
             cancel, a lost claim) ended it. A reply
             with cancel_requested, or a 409 not_held with reason "cancelled"
-            (link.ErrCancelledHere, bridge#35: any cancel of a claimed job, an
-            admin's of a parked one, which ends at once, among them), ends its context (errCancelRequested -> reported
-            cancelled), any other 409 ends it as lost (nothing more sent). A parked
+            (link.ErrCancelledHere, bridge#35: any cancel that ended the job with no
+            later claim, an admin's or the server's own, a parked one's at once among
+            them, server bridge.cancelledUnder), ends its context (errCancelRequested -> reported
+            cancelled; the cause says by whom when the answer does, bridge#80:
+            cancel_requested with the server's reason as the job's error is the server's
+            ("the job was cancelled by the server: <reason>"), with none an admin's, the 409 and
+            the answer to a parked report (its error is the park's message that report sent) say
+            neither, the page's own Cancel says so), any other 409 ends it as lost (nothing more sent). A parked
             report carries the park's message for people in progress park.message
             (withParkMessage: the job's park message without the "<code>: " an
             engine message leads with; bridge#28), which the page shows; a 401 is handed to
@@ -2885,8 +2904,9 @@ internal/
             holds audio: a backup is a book of its own, and the server refuses a
             done import whose book isn't the title's). spelled and vacant are free
             functions over a transfer.LibraryFS (the import's methods open the
-            mount's os.Root and call them; vacant also returns the conflict:
-            link.ConflictFile|Book|Audio; listedBook is its books-listing part;
+            mount's os.Root and call them; vacant's exists failure carries the
+            conflict, link.ConflictFile|Book|Audio, for the console (conflictOf
+            reads it), bridge#47; listedBook is its books-listing part;
             formerDirs adds the folder the destination's was under the name rule
             before bridge#47, found on disk as a name Sanitize now turns into
             the folder's, so a title backed up as "Who Moved My Cheese?" is
@@ -2951,7 +2971,9 @@ internal/
             is ahead ends "waiting" without calling Audible; reads the push's rows, then lastpositions
             (in batches of 25 ASINs, split on 400/414, in a new random order each sync; a 429/503 waits Audible's Retry-After from when
             it came back, at least 2 min; a read Audible stops partway still syncs the places it gave,
-            then fails as a whole failed read does, bridge#50), skips a place under 1 s, past the runtime (5% + 2 min), older than 85 days
+            then fails as a whole failed read does, bridge#50; a failure after Audible gave places
+            reports the counts so far beside its code and message, the console's "before it
+            stopped", bridge#80), skips a place under 1 s, past the runtime (5% + 2 min), older than 85 days
             or within 5 s of the place last written (its echo), posts a listen of no length (from_pos =
             to_pos, started_at = ended_at = last_updated, start jump; id EventID: "aud-" + 32 hex of
             sha256(account|asin|position_ms|last_updated|kind|library_id|path), kind "" or "finish", so
@@ -2975,7 +2997,10 @@ internal/
             of the last 10 min by updated_at (counted back from the page's server_time, the server's
             clock, else the Bridge's from a server before 2.7.0, bridge#50), history after it is none; a row it fails to record keeps
             the cursor, so the pass reads it again; a cursor the server refuses,
-            400, goes back to the feed's start, bridge#50), skips rows by audible:<account>, keeps a
+            400, goes back to the feed's start, bridge#50, and that read, push_reread until one reaches
+            the feed's end, keeps the baseline's line (historyCutoff: a row changed more than 10 min before push_from
+            is history again whatever its place, so a server restored from a backup has no place
+            from before the baseline written over Audible's; one changed since is a new place)), skips rows by audible:<account>, keeps a
             row on a title the last sync didn't list for that book pending (listed 0,
             store.PendAudiblePush) until a sync lists it; for the places still for StillFor (3 min, since
             row_seen: the Bridge's clock) it drops one under 1 s, within 5 s of last_ms (debounce) or
@@ -2987,11 +3012,13 @@ internal/
             place and waits its Retry-After (at least 2 min) counted from the failure; a 5xx or no
             answer keeps it and leaves the account 2 min (this loop only); another 4xx or a denied
             license (audible.IsDenial) drops it, a throttled device also leaving the account 15 min;
-            never a refusal. Health (sync_at, sync_error; sync_retry_at, which no later call shortens)
-            feeds the setup item's detail only. A sync_off reply or a changed mapping
-            clears a stale sync_error without recording a successful sync, keeping
-            Audible's wait (same device); only a new sign-in (a new device) clears
-            both. bridge#51 (v2.7.0): the Audible app may upload the older place it still
+            never a refusal. Health (the job's sync_at/sync_error, the push's push_at/push_error, each
+            written by its own side only, bridge#50/#80; the push's error also ends at a pass that
+            read the feed and wrote what was due with no failure, as nothing else clears it;
+            sync_retry_at, which no later call shortens) feeds the setup item's detail only. A sync_off reply or a changed mapping
+            clears the stale sync_error and push_error without recording a successful sync,
+            keeping Audible's wait (same device); only a new sign-in (a new device)
+            clears the errors and the wait. bridge#51 (v2.7.0): the Audible app may upload the older place it still
             held over one the push wrote; the sync then answers it behind and, when the
             Bridge wrote the title's last place (last_ms), the server row it last read is
             still that place (within 5 s) and Audible's is behind it by more than 5 s,

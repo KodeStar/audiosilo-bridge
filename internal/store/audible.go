@@ -39,15 +39,42 @@ type AudibleAccount struct {
 	// PushCursor and PushFrom are the push loop's place in the server's
 	// progress feed and the moment a read of it first reached its end for this
 	// mapping (the baseline's end: until then older rows are history); both ""
-	// until then.
+	// until then. PushReread (migration 0018) is set while the loop reads the
+	// feed from its start again after the server refused the cursor
+	// (ResetAudiblePushCursor), until a read reaches the feed's end: rows
+	// changed before PushFrom are history for that read too.
 	PushCursor string `json:"-"`
 	PushFrom   string `json:"-"`
-	// SyncAt is when a sync job or a push last went through, SyncError why the
-	// last one failed ("" when it went through), SyncRetryAt until when Audible
-	// asked the Bridge to wait.
+	PushReread bool   `json:"-"`
+	// SyncAt is when an audible.sync job last went through, SyncError why the
+	// last one failed ("" when it went through); PushAt and PushError the
+	// same for the push loop (migration 0017: each its own, so one's success
+	// never hides the other's failure), where going through is a place
+	// written to Audible, or a pass with no failure that ended PushError (so
+	// PushAt is not only the last write). SyncRetryAt is until when Audible
+	// asked the Bridge to wait (both honour it).
 	SyncAt      string `json:"sync_at"`
 	SyncError   string `json:"sync_error"`
+	PushAt      string `json:"push_at"`
+	PushError   string `json:"push_error"`
 	SyncRetryAt string `json:"sync_retry_at"`
+}
+
+// SyncProblem is why a's places aren't syncing, for the setup item: the
+// job's failure, else the push loop's ("" when neither failed).
+func (a AudibleAccount) SyncProblem() string {
+	if a.SyncError != "" {
+		return a.SyncError
+	}
+	return a.PushError
+}
+
+// ErrorOf is why side's last run failed ("" when it went through).
+func (a AudibleAccount) ErrorOf(side AudibleSyncSide) string {
+	if side == SyncPush {
+		return a.PushError
+	}
+	return a.SyncError
 }
 
 // The kinds of an Audible refusal (AudibleAccount.RefusalKind).
@@ -69,22 +96,22 @@ func (a AudibleAccount) OnOtherServer(serverID string) bool {
 
 const audibleColumns = `id, label, marketplace, customer_hash, server_id, user_id, user_name, library_id, policy, sync,
 	created_at, last_ok_at, last_poll_at, last_titles, last_matched, refused_at, last_error, device_profile, refusal_kind,
-	push_cursor, push_from, sync_at, sync_error, sync_retry_at`
+	push_cursor, push_from, push_reread, sync_at, sync_error, push_at, push_error, sync_retry_at`
 
 func scanAudibleAccount(row interface{ Scan(...any) error }) (AudibleAccount, error) {
 	var a AudibleAccount
 	err := row.Scan(&a.ID, &a.Label, &a.Marketplace, &a.CustomerHash, &a.ServerID, &a.UserID, &a.UserName, &a.LibraryID,
 		&a.Policy, &a.Sync, &a.CreatedAt, &a.LastOKAt, &a.LastPollAt, &a.LastTitles, &a.LastMatched, &a.RefusedAt, &a.LastError,
-		&a.DeviceProfile, &a.RefusalKind, &a.PushCursor, &a.PushFrom, &a.SyncAt, &a.SyncError, &a.SyncRetryAt)
+		&a.DeviceProfile, &a.RefusalKind, &a.PushCursor, &a.PushFrom, &a.PushReread, &a.SyncAt, &a.SyncError, &a.PushAt, &a.PushError, &a.SyncRetryAt)
 	return a, err
 }
 
 // remapAudible starts the push loop's feed again, and forgets the places
 // waiting to be pushed and the listed titles, when a's row (read in tx) is
 // mapped to another server, person or library than a's: the next audible.sync
-// lists its titles again. A stale sync error clears with the mapping; a wait
-// Audible asked for stays (the device is the same). A new account has nothing
-// to forget.
+// lists its titles again. A stale sync error (the job's and the push's) clears
+// with the mapping; a wait Audible asked for stays (the device is the same). A
+// new account has nothing to forget.
 func remapAudible(ctx context.Context, tx *sql.Tx, a AudibleAccount) error {
 	var server string
 	var user, library int64
@@ -96,8 +123,8 @@ func remapAudible(ctx context.Context, tx *sql.Tx, a AudibleAccount) error {
 	if err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE audible_accounts SET push_cursor = '', push_from = '',
-		sync_error = '' WHERE id = ?`, a.ID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE audible_accounts SET push_cursor = '', push_from = '', push_reread = 0,
+		sync_error = '', push_error = '' WHERE id = ?`, a.ID); err != nil {
 		return err
 	}
 	_, err = tx.ExecContext(ctx, `UPDATE audible_push SET want_ms = NULL, listed = 0, row_ms = -1, row_seen = ''
@@ -168,7 +195,7 @@ func (db *DB) SignInAudibleAccount(ctx context.Context, a AudibleAccount, at tim
 			customer_hash = excluded.customer_hash, server_id = excluded.server_id, user_id = excluded.user_id,
 			user_name = excluded.user_name, library_id = excluded.library_id, policy = excluded.policy,
 			sync = excluded.sync, last_ok_at = excluded.last_ok_at, device_profile = excluded.device_profile,
-			refused_at = '', last_error = '', refusal_kind = '', sync_error = '', sync_retry_at = ''`,
+			refused_at = '', last_error = '', refusal_kind = '', sync_error = '', push_error = '', sync_retry_at = ''`,
 		a.ID, a.Label, a.Marketplace, a.CustomerHash, a.ServerID, a.UserID, a.UserName, a.LibraryID, a.Policy, a.Sync, ts, ts,
 		a.DeviceProfile); err != nil {
 		return err

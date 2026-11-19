@@ -188,3 +188,54 @@ func TestCancelContextReadsAsAnAdminsCancel(t *testing.T) {
 		t.Fatal("a stop resumes at the next start")
 	}
 }
+
+// A cancel's cause says by whom when the server's answer does (bridge#80): a
+// cancel_requested with the server's own reason as the job's error is the
+// server's, one with none an admin's, and a 409 not_held "cancelled" (sent
+// for both) says neither. Every one reads as a cancel: Resumes false.
+func TestCancelCauseWordsTheServersReason(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		got  *link.Job
+		err  error
+		want string
+	}{
+		{"the server's", &link.Job{CancelRequested: true, Error: "the Audible account was removed"}, nil,
+			"the job was cancelled by the server: the Audible account was removed"},
+		{"an admin's", &link.Job{CancelRequested: true}, nil, "the job was cancelled by an admin"},
+		{"either", nil, link.ErrCancelledHere, "the job was cancelled"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			stop := (&Reporter{}).answer(c.got, c.err, false)
+			if stop == nil || !errors.Is(stop, errCancelRequested) || stop.Error() != c.want {
+				t.Fatalf("cause = %v, want %q", stop, c.want)
+			}
+			ctx, cancel := context.WithCancelCause(context.Background())
+			cancel(stop)
+			if Resumes(ctx) || Lost(ctx) {
+				t.Fatal("a cancel resumes or reads as lost")
+			}
+		})
+	}
+	if stop := (&Reporter{}).answer(&link.Job{Error: "a park's message"}, nil, true); stop != nil {
+		t.Fatalf("an error with no cancel asked = %v", stop)
+	}
+	// A parked report's own message as the job's error is no server reason:
+	// the cancel says neither, whatever the server's cleaning made of the
+	// message (a tab is a space there) and whether the job is still parked
+	// here when the answer comes.
+	for _, back := range []string{"a park's message", "a park's message: exit 1"} {
+		parked := &Reporter{parked: true, parkMsg: "a park's message:\texit 1"}
+		if stop := parked.answer(&link.Job{CancelRequested: true, Error: back}, nil, true); stop == nil ||
+			stop.Error() != errCancelRequested.Error() {
+			t.Fatalf("a cancel of a parked job (error %q) = %v", back, stop)
+		}
+	}
+	if stop := (&Reporter{}).answer(&link.Job{CancelRequested: true, Error: "a park's message"}, nil, true); stop == nil ||
+		stop.Error() != errCancelRequested.Error() {
+		t.Fatalf("a cancel answering a parked report of a job unparked since = %v", stop)
+	}
+	if !errors.Is(errCancelledOnPage, errCancelRequested) {
+		t.Fatal("a cancel on the Bridge's page isn't a cancel")
+	}
+}

@@ -263,31 +263,72 @@ func (db *DB) SetAudibleACR(ctx context.Context, account, asin, acr string) erro
 
 // SetAudiblePushCursor records the push loop's place in id's progress feed,
 // and when its baseline read the feed to the end (from; kept once set, and a
-// zero from, a baseline still under way, leaves it).
+// zero from, a read that hasn't reached the end, leaves it). A read that
+// reached the end is also the end of a read from the start after a refused
+// cursor (push_reread).
 func (db *DB) SetAudiblePushCursor(ctx context.Context, id, cursor string, from time.Time) error {
-	_, err := db.sql.ExecContext(ctx, `UPDATE audible_accounts SET push_cursor = ?,
-		push_from = CASE WHEN push_from = '' THEN ? ELSE push_from END WHERE id = ?`, cursor, stamp(from), id)
+	_, err := db.sql.ExecContext(ctx, `UPDATE audible_accounts SET push_cursor = ?1,
+		push_from = CASE WHEN push_from = '' THEN ?2 ELSE push_from END,
+		push_reread = CASE WHEN ?2 = '' THEN push_reread ELSE 0 END WHERE id = ?3`, cursor, stamp(from), id)
 	return err
 }
 
-// AudibleSyncOK records that id's sync (a job or a push) went through at at:
-// its error clears, and a wait once it has passed (the job and the push run
-// side by side: one's success never ends a wait Audible gave the other).
-func (db *DB) AudibleSyncOK(ctx context.Context, id string, at time.Time) error {
-	ts := timestamp(at)
-	_, err := db.sql.ExecContext(ctx, `UPDATE audible_accounts SET sync_at = ?1, sync_error = '',
-		sync_retry_at = CASE WHEN sync_retry_at > ?1 THEN sync_retry_at ELSE '' END WHERE id = ?2`, ts, id)
+// ResetAudiblePushCursor sends id's push loop back to the start of the
+// progress feed after the server refused its cursor. The baseline's end
+// (push_from) stays, and push_reread marks the read until one reaches the
+// feed's end, so the rows changed before the baseline are history again
+// rather than new places.
+func (db *DB) ResetAudiblePushCursor(ctx context.Context, id string) error {
+	_, err := db.sql.ExecContext(ctx, `UPDATE audible_accounts SET push_cursor = '', push_reread = 1 WHERE id = ?`, id)
 	return err
 }
 
-// ClearAudibleSyncError forgets id's stale sync error after sync is turned
-// off, reporting whether there was one (what the checklist shows). A wait
-// Audible asked for stays: the device is the same, so the wait still holds
-// (and a passed one is inert). This is not a successful sync, so sync_at stays
-// as it was.
+// AudibleSyncSide is which half of an account's sync a health record is
+// for: each keeps its own (migration 0017), so a push that went through never
+// hides a failed job, nor a job's success a failing push.
+type AudibleSyncSide int
+
+const (
+	// SyncJob is the audible.sync job (Audible to the server): sync_at,
+	// sync_error.
+	SyncJob AudibleSyncSide = iota
+	// SyncPush is the push loop (the server to Audible): push_at, push_error.
+	SyncPush
+)
+
+// healthSQL is each side's health writes, by its column prefix: AudibleSyncOK's
+// (?1 the time, ?2 the account) and AudibleSyncFailed's (?1 the reason, ?2
+// the wait, ?3 the account). The wait, sync_retry_at, is shared.
+var healthSQL = [...]struct{ ok, failed string }{
+	SyncJob:  sideHealthSQL("sync"),
+	SyncPush: sideHealthSQL("push"),
+}
+
+func sideHealthSQL(prefix string) (q struct{ ok, failed string }) {
+	q.ok = `UPDATE audible_accounts SET ` + prefix + `_at = ?1, ` + prefix + `_error = '',
+		sync_retry_at = CASE WHEN sync_retry_at > ?1 THEN sync_retry_at ELSE '' END WHERE id = ?2`
+	q.failed = `UPDATE audible_accounts SET ` + prefix + `_error = ?1,
+		sync_retry_at = CASE WHEN ?2 > sync_retry_at THEN ?2 ELSE sync_retry_at END WHERE id = ?3`
+	return q
+}
+
+// AudibleSyncOK records that id's side of the sync went through at at: that
+// side's error clears (the other's stays), and a wait once it has passed (the
+// job and the push run side by side: one's success never ends a wait Audible
+// gave the other).
+func (db *DB) AudibleSyncOK(ctx context.Context, id string, side AudibleSyncSide, at time.Time) error {
+	_, err := db.sql.ExecContext(ctx, healthSQL[side].ok, timestamp(at), id)
+	return err
+}
+
+// ClearAudibleSyncError forgets id's stale sync errors (the job's and the
+// push's) after sync is turned off, reporting whether there was one (what the
+// checklist shows). A wait Audible asked for stays: the device is the same, so
+// the wait still holds (and a passed one is inert). This is not a successful
+// sync, so sync_at and push_at stay as they were.
 func (db *DB) ClearAudibleSyncError(ctx context.Context, id string) (bool, error) {
-	res, err := db.sql.ExecContext(ctx, `UPDATE audible_accounts SET sync_error = ''
-		WHERE id = ? AND sync_error != ''`, id)
+	res, err := db.sql.ExecContext(ctx, `UPDATE audible_accounts SET sync_error = '', push_error = ''
+		WHERE id = ? AND (sync_error != '' OR push_error != '')`, id)
 	if err != nil {
 		return false, err
 	}
@@ -295,15 +336,15 @@ func (db *DB) ClearAudibleSyncError(ctx context.Context, id string) (bool, error
 	return n > 0, err
 }
 
-// AudibleSyncFailed records why id's sync failed, and until when Audible asked
-// the Bridge to wait (zero: no new wait). A wait is never shortened: the later
-// of the one stored and retryAt stays. It never refuses the account.
-func (db *DB) AudibleSyncFailed(ctx context.Context, id, why string, retryAt time.Time) error {
+// AudibleSyncFailed records why id's side of the sync failed, and until when
+// Audible asked the Bridge to wait (zero: no new wait). A wait is never
+// shortened: the later of the one stored and retryAt stays. It never refuses
+// the account, nor touches the other side's error.
+func (db *DB) AudibleSyncFailed(ctx context.Context, id string, side AudibleSyncSide, why string, retryAt time.Time) error {
 	retry := ""
 	if !retryAt.IsZero() {
 		retry = timestamp(retryAt)
 	}
-	_, err := db.sql.ExecContext(ctx, `UPDATE audible_accounts SET sync_error = ?1,
-		sync_retry_at = CASE WHEN ?2 > sync_retry_at THEN ?2 ELSE sync_retry_at END WHERE id = ?3`, why, retry, id)
+	_, err := db.sql.ExecContext(ctx, healthSQL[side].failed, why, retry, id)
 	return err
 }
