@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -78,13 +79,15 @@ func closeDir(dir string) error {
 }
 
 // removeRunFile removes rel below area (a run's planted file, or an empty
-// folder) when it is still uid's and on the area's own file system: the area
-// and each folder below it on rel's way are opened without following a link,
-// so one swapped in since the walk stops it (ELOOP, ENOTDIR) rather than lead
-// anywhere, each must be on the area's device (a mount on the way is another
-// file system: never a host's file), and rel's last element is looked at and
-// removed in the folder so opened. A folder goes only when empty.
-func removeRunFile(area, rel string, uid int) bool {
+// folder) when it is still uid's and on the device dev (major:minor, the one
+// mountinfo showed for area's tmpfs): the area and each folder below it on
+// rel's way are opened without following a link, so one swapped in since the
+// walk stops it (ELOOP, ENOTDIR) rather than lead anywhere, each must be on
+// dev (a mount on the way, or one over area since mountinfo was read, or a
+// link above area that leads off it, is another file system: never a host's
+// file), and rel's last element is looked at and removed in the folder so
+// opened. A folder goes only when empty.
+func removeRunFile(area, dev, rel string, uid int) bool {
 	parts := strings.Split(rel, string(filepath.Separator))
 	const dirFlags = unix.O_RDONLY | unix.O_DIRECTORY | unix.O_NOFOLLOW | unix.O_CLOEXEC
 	fd, err := unix.Open(area, dirFlags, 0)
@@ -97,10 +100,10 @@ func removeRunFile(area, rel string, uid int) bool {
 		}
 	}()
 	var st unix.Stat_t
-	if unix.Fstat(fd, &st) != nil {
+	if unix.Fstat(fd, &st) != nil || devString(uint64(st.Dev)) != dev { // Dev is an int32 on darwin
 		return false
 	}
-	dev := st.Dev
+	areaDev := st.Dev
 	for _, name := range parts[:len(parts)-1] {
 		next, err := unix.Openat(fd, name, dirFlags, 0)
 		_ = unix.Close(fd)
@@ -109,12 +112,12 @@ func removeRunFile(area, rel string, uid int) bool {
 			return false
 		}
 		fd = next
-		if unix.Fstat(fd, &st) != nil || st.Dev != dev {
+		if unix.Fstat(fd, &st) != nil || st.Dev != areaDev {
 			return false
 		}
 	}
 	last := parts[len(parts)-1]
-	if err := unix.Fstatat(fd, last, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil || int(st.Uid) != uid || st.Dev != dev {
+	if err := unix.Fstatat(fd, last, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil || int(st.Uid) != uid || st.Dev != areaDev {
 		return false
 	}
 	flags := 0
@@ -132,6 +135,21 @@ func ownerUID(info fs.FileInfo) (uid int, ok bool) {
 		return 0, false
 	}
 	return int(st.Uid), true
+}
+
+// deviceOf is info's device as mountinfo writes one (major:minor); ok false
+// where the OS reports none.
+func deviceOf(info fs.FileInfo) (dev string, ok bool) {
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return "", false
+	}
+	return devString(uint64(st.Dev)), true // Dev is an int32 on darwin
+}
+
+// devString is the device d as major:minor.
+func devString(d uint64) string {
+	return strconv.FormatUint(uint64(unix.Major(d)), 10) + ":" + strconv.FormatUint(uint64(unix.Minor(d)), 10)
 }
 
 // fileKey is a file's device and inode: the deep mount walk's mark of a

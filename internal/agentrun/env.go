@@ -225,21 +225,21 @@ func (r *Runner) tickMounts() {
 }
 
 // walkMountsLocked walks the mounts (mounts.go), keeps the answer and returns
-// the files a run planted (runMade); mountMu is held, so two callers never
-// walk at once.
-func (r *Runner) walkMountsLocked() []string {
+// the files a run planted (runMade) with the device of TmpDir's tmpfs they are
+// on, as mountinfo showed it; mountMu is held, so two callers never walk at
+// once.
+func (r *Runner) walkMountsLocked() (dev string, planted []string) {
 	var why string
-	var planted []string
 	if ms, err := r.mounts(); err != nil {
 		why = "the mounts can't be read: " + err.Error()
 	} else {
 		w := newMountWalk(r.looks)
 		w.own, w.selfUID, w.runArea = r.isOwnTmp, r.selfUID, r.opts.TmpDir
 		why = w.credentialMount(ms)
-		planted = w.runFiles
+		dev, planted = w.areaDev, w.runFiles
 	}
 	r.mountLast.Store(&why)
-	return planted
+	return dev, planted
 }
 
 // holdOwnTmp records the per-run folder dir as one of this runner's own, which
@@ -268,16 +268,17 @@ func (r *Runner) isOwnTmp(p string) bool {
 // credential's name a run planted in its TmpDir while that is a tmpfs of the
 // service's own (runMade, runAreaMount; nowhere else: the staging dir's are
 // never deleted), each through the folders on its way opened without
-// following a link and on TmpDir's own file system (removeRunFile,
-// proc_unix.go) and only while it is still the service's own; a folder is
-// removed only when empty, so nothing a host mounted under one is reached. The
-// endpoint's service calls it when it starts and after each run.
+// following a link and on the device mountinfo showed for TmpDir's tmpfs
+// (removeRunFile, proc_unix.go) and only while it is still the service's own;
+// a folder is removed only when empty, so nothing a host mounted under one is
+// reached. The endpoint's service calls it when it starts and after each run.
 func (r *Runner) sweepRunFiles() {
 	r.mountMu.Lock()
 	defer r.mountMu.Unlock()
+	dev, planted := r.walkMountsLocked()
 	removed := 0
-	for _, rel := range r.walkMountsLocked() {
-		if removeRunFile(r.opts.TmpDir, rel, r.selfUID) {
+	for _, rel := range planted {
+		if removeRunFile(r.opts.TmpDir, dev, rel, r.selfUID) {
 			removed++
 		}
 	}

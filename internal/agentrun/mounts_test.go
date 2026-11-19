@@ -33,10 +33,10 @@ func TestParseMountinfo(t *testing.T) {
 ` + "39 22 8:1 /srv/my share/agent /mnt/x y\rz rw - ext4 /dev/sda1 rw\n"
 	got := parseMountinfo([]byte(in))
 	want := []mount{
-		{root: "/", point: "/", fstype: "overlay"},
-		{root: "/var/lib/docker/volumes/audiosilo_agent-config/_data", point: "/mnt/a b", fstype: "ext4"},
-		{root: "/", point: "/tmp", fstype: "tmpfs"},
-		{root: "/srv/my share/agent", point: "/mnt/x y\rz", fstype: "ext4"},
+		{root: "/", point: "/", fstype: "overlay", dev: "0:21"},
+		{root: "/var/lib/docker/volumes/audiosilo_agent-config/_data", point: "/mnt/a b", fstype: "ext4", dev: "8:1"},
+		{root: "/", point: "/tmp", fstype: "tmpfs", dev: "0:30"},
+		{root: "/srv/my share/agent", point: "/mnt/x y\rz", fstype: "ext4", dev: "8:1"},
 	}
 	if !slices.Equal(got, want) {
 		t.Fatalf("mounts = %+v, want %+v", got, want)
@@ -82,6 +82,27 @@ func mkfile(t *testing.T, p string) {
 
 // at is a mount of dir as a plain bind (ext4), its root dir itself.
 func at(dir string) mount { return mount{root: dir, point: dir, fstype: "ext4"} }
+
+// tmpfsAt is a whole tmpfs mounted at dir, with dir's device as mountinfo
+// would show it (a run's files there are held to it: runMade, removeRunFile).
+func tmpfsAt(t *testing.T, dir string) mount {
+	t.Helper()
+	return mount{root: "/", point: dir, fstype: "tmpfs", dev: devOf(t, dir)}
+}
+
+// devOf is p's device as mountinfo writes one (deviceOf).
+func devOf(t *testing.T, p string) string {
+	t.Helper()
+	info, err := os.Lstat(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dev, ok := deviceOf(info)
+	if !ok {
+		t.Fatalf("%s has no device", p)
+	}
+	return dev
+}
 
 // The endpoint's service refuses its runs while any of its mounts is the
 // agent volume or holds a credential's file, wherever it is mounted (denied:
@@ -962,7 +983,7 @@ func TestRunPlantedCredentialFiles(t *testing.T) {
 	}
 	newSetup := func(t *testing.T) setup {
 		s := setup{staging: t.TempDir(), tmp: t.TempDir()}
-		s.ms = []mount{at(s.staging), {root: "/", point: s.tmp, fstype: "tmpfs"}}
+		s.ms = []mount{at(s.staging), tmpfsAt(t, s.tmp)}
 		return s
 	}
 	walk := func(s setup, uid int, extra ...mount) (string, []string) {
@@ -1016,6 +1037,17 @@ func TestRunPlantedCredentialFiles(t *testing.T) {
 		if why, files := walk(s, self); !strings.Contains(why, p) || len(files) != 0 {
 			t.Fatalf("a TmpDir on %+v = %q, %+v, want its file found and nothing listed", m, why, files)
 		}
+	}
+
+	// TmpDir's files on another device than mountinfo shows for its tmpfs (a
+	// file system mounted over TmpDir since mountinfo was read, or one a
+	// mount listed out of order hides it under): never a run's own.
+	s = newSetup(t)
+	s.ms[1].dev = "0:0"
+	p := filepath.Join(s.tmp, "auth.json")
+	mkfile(t, p)
+	if why, files := walk(s, self); !strings.Contains(why, p) || len(files) != 0 {
+		t.Fatalf("a TmpDir off its tmpfs's device = %q, %+v, want its file found and nothing listed", why, files)
 	}
 
 	s = newSetup(t)
@@ -1114,8 +1146,9 @@ func TestEndpointServiceSweepsRunFiles(t *testing.T) {
 	t.Parallel()
 	te, _ := newEndpointEnv(t, endpointParentEnv())
 	te.r.selfUID = os.Geteuid() // the test's files are the service's own (uid 10003 in the agent image)
+	tmpfs := tmpfsAt(t, te.tmp)
 	te.r.mounts = func() ([]mount, error) {
-		return []mount{at(te.staging), {root: "/", point: te.tmp, fstype: "tmpfs"}}, nil
+		return []mount{at(te.staging), tmpfs}, nil
 	}
 	planted := filepath.Join(te.tmp, "x", "openai_api_key")
 	mkfile(t, planted)
@@ -1151,27 +1184,33 @@ func TestEndpointServiceSweepsRunFiles(t *testing.T) {
 	}
 
 	area := t.TempDir()
+	dev := devOf(t, area)
 	mkfile(t, filepath.Join(area, "auth.json"))
 	mkfile(t, filepath.Join(area, "secret.key", "inside"))
-	if removeRunFile(area, "auth.json", os.Geteuid()+1) || gone(filepath.Join(area, "auth.json")) {
+	if removeRunFile(area, dev, "auth.json", os.Geteuid()+1) || gone(filepath.Join(area, "auth.json")) {
 		t.Fatal("removeRunFile removed a file of another uid's")
 	}
-	if removeRunFile(area, "secret.key", os.Geteuid()) {
+	if removeRunFile(area, dev, "secret.key", os.Geteuid()) {
 		t.Fatal("removeRunFile removed a folder with something in it")
+	}
+	// The area on another device than mountinfo showed for its tmpfs (a
+	// file system mounted over it since): nothing there is removed.
+	if removeRunFile(area, "0:0", "auth.json", os.Geteuid()) || gone(filepath.Join(area, "auth.json")) {
+		t.Fatal("removeRunFile removed a file off the tmpfs's device")
 	}
 	// A link on the way, even to a folder in the same area, is never followed.
 	mkfile(t, filepath.Join(area, "real", "auth.json"))
 	if err := os.Symlink("real", filepath.Join(area, "link")); err != nil {
 		t.Fatal(err)
 	}
-	if removeRunFile(area, filepath.Join("link", "auth.json"), os.Geteuid()) ||
+	if removeRunFile(area, dev, filepath.Join("link", "auth.json"), os.Geteuid()) ||
 		gone(filepath.Join(area, "real", "auth.json")) {
 		t.Fatal("removeRunFile removed a file through a link")
 	}
-	if !removeRunFile(area, filepath.Join("real", "auth.json"), os.Geteuid()) {
+	if !removeRunFile(area, dev, filepath.Join("real", "auth.json"), os.Geteuid()) {
 		t.Fatal("removeRunFile left the service's own file a folder down")
 	}
-	if !removeRunFile(area, "auth.json", os.Geteuid()) || !gone(filepath.Join(area, "auth.json")) {
+	if !removeRunFile(area, dev, "auth.json", os.Geteuid()) || !gone(filepath.Join(area, "auth.json")) {
 		t.Fatal("removeRunFile left the service's own file")
 	}
 }
@@ -1184,11 +1223,14 @@ func TestEndpointServiceSweepsRunFiles(t *testing.T) {
 // starts nor after a job (denied).
 func TestEndpointServiceKeepsHostFilesInABoundTmpDir(t *testing.T) {
 	t.Parallel()
-	for _, fstype := range []string{"ext4", "cifs"} {
+	// A bind shows the host folder's path as its root; a share is mounted
+	// whole (root "/"), so its type alone keeps it from passing.
+	for _, m := range []mount{{root: "/srv/share", fstype: "ext4"}, {root: "/", fstype: "cifs"}} {
 		te, _ := newEndpointEnv(t, endpointParentEnv())
 		te.r.selfUID = os.Geteuid() // the share's files show as the service's own
+		m.point, m.dev = te.tmp, devOf(t, te.tmp)
 		te.r.mounts = func() ([]mount, error) {
-			return []mount{at(te.staging), {root: "/srv/share", point: te.tmp, fstype: fstype}}, nil
+			return []mount{at(te.staging), m}, nil
 		}
 		hostKey := filepath.Join(te.tmp, "bridge", vaultKeyFile)
 		mkfile(t, hostKey)
@@ -1197,10 +1239,10 @@ func TestEndpointServiceKeepsHostFilesInABoundTmpDir(t *testing.T) {
 		// folder is of the service's uid).
 		waitDone(t, te.submit(t, endpointReq), 30*time.Second)
 		if why := te.r.credentialProblem(); !strings.Contains(why, hostKey) {
-			t.Fatalf("%s: credentialProblem = %q, want the host's file named", fstype, why)
+			t.Fatalf("%s: credentialProblem = %q, want the host's file named", m.fstype, why)
 		}
 		if _, err := os.Lstat(hostKey); err != nil {
-			t.Fatalf("%s: the host's file after the start and a job: %v, want it kept", fstype, err)
+			t.Fatalf("%s: the host's file after the start and a job: %v, want it kept", m.fstype, err)
 		}
 		te.stop()
 	}

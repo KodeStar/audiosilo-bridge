@@ -3864,10 +3864,13 @@ internal/
             point, hidden by no later mount; the compose example's
             `tmpfs: ["/tmp"]`): owned by the service's uid, reached from
             TmpDir through folders alone, never a link nor another mount's
-            point (runMade). Such files are swept (sweepRunFiles: a fresh walk,
-            then each removed through its folders opened without following a
-            link and on TmpDir's own device, while still the service's, a
-            folder only when empty) when the service starts and after each job
+            point, and on the device mountinfo shows for that tmpfs (its
+            major:minor, mount.dev: never a file system mounted over TmpDir
+            since mountinfo was read; runMade). Such files are swept
+            (sweepRunFiles: a fresh walk, then each removed
+            through its folders opened without following a link and on that
+            same device, while still the service's, a folder only when empty)
+            when the service starts and after each job
             that ends while the service runs (a stopping one leaves them to the
             next start, the heartbeat touched first). Ownership alone is no
             proof (a host folder bound there, or a share squashing owners,

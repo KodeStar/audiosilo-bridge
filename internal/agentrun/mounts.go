@@ -58,7 +58,8 @@ import (
 //     (runAreaMount: the mount holding TmpDir, verified from mountinfo, is a
 //     whole tmpfs, alone at its point, hidden by no later mount): one owned
 //     by the service's own uid, reached from TmpDir through folders alone (no
-//     link, no other mount's point). It is not counted, and sweepRunFiles
+//     link, no other mount's point) and on the device mountinfo shows for
+//     that tmpfs. It is not counted, and sweepRunFiles
 //     removes it when a run ends and when the service starts. Ownership alone
 //     is no proof: a host folder or a share mounted at TmpDir or the staging
 //     dir shows its files as the service's uid where the share squashes
@@ -94,8 +95,9 @@ const agentHomeMarker = ".audiosilo-agent-home"
 const agentVolume = "agent-config"
 
 // mount is one line of /proc/self/mountinfo: the path shown inside its
-// filesystem (root), where it is mounted (point) and the filesystem's type.
-type mount struct{ root, point, fstype string }
+// filesystem (root), where it is mounted (point), the filesystem's type and
+// its device as major:minor (dev, what a stat of its files shows: deviceOf).
+type mount struct{ root, point, fstype, dev string }
 
 // pseudoFS are filesystems that never hold a file of the host's: the kernel's
 // views. A tmpfs isn't one of them (a host's /run, /run/user/<uid> or /dev/shm
@@ -241,7 +243,7 @@ func parseMountinfo(b []byte) []mount {
 		if sep < 0 || sep+1 >= len(f) {
 			continue
 		}
-		out = append(out, mount{root: unescapeMount(f[3]), point: unescapeMount(f[4]), fstype: f[sep+1]})
+		out = append(out, mount{root: unescapeMount(f[3]), point: unescapeMount(f[4]), fstype: f[sep+1], dev: f[2]})
 	}
 	return out
 }
@@ -319,13 +321,15 @@ type mountWalk struct {
 	// its TmpDir, by its exact path (nil: none).
 	own func(string) bool
 	// selfUID is the service's own uid (-1: none), runArea its TmpDir (""
-	// none) and areaHere whether the mount being looked at is runArea's
-	// verified tmpfs (runAreaMount): a file of a credential's name of
-	// selfUID's there is a run's own (runMade), which runFiles collects by
+	// none), areaHere whether the mount being looked at is runArea's
+	// verified tmpfs (runAreaMount) and areaDev that tmpfs's device as
+	// mountinfo shows it: a file of a credential's name of selfUID's there,
+	// on that device, is a run's own (runMade), which runFiles collects by
 	// its path below runArea.
 	selfUID  int
 	runArea  string
 	areaHere bool
+	areaDev  string
 	runFiles []string
 }
 
@@ -348,6 +352,9 @@ func (w *mountWalk) credentialMount(mounts []mount) string {
 		w.points[m.point] = true
 	}
 	areaMount := w.runAreaMount(mounts)
+	if areaMount >= 0 {
+		w.areaDev = mounts[areaMount].dev
+	}
 	for i, m := range mounts {
 		switch {
 		case isAgentVolume(m.root):
@@ -414,8 +421,11 @@ func below(dir, p string) (string, bool) {
 // folder of that mount (never a link: one could lead to a host's file whose
 // owner is the service's uid; nor another mount's point, p included: a host
 // folder or file mounted inside TmpDir, which a look by path such as
-// credentialUnder's reaches into), and p owned by the service's uid. It is
-// added to runFiles once. Any look that fails is a no.
+// credentialUnder's reaches into), p on that tmpfs's device as mountinfo
+// shows it (areaDev: never a file system mounted over TmpDir since mountinfo
+// was read, nor one a mount mountinfo lists out of order hides it under), and
+// p owned by the service's uid. It is added to runFiles once. Any look that
+// fails is a no.
 func (w *mountWalk) runMade(p string) bool {
 	if !w.areaHere {
 		return false
@@ -426,6 +436,9 @@ func (w *mountWalk) runMade(p string) bool {
 	}
 	info, err := w.lstat(p)
 	if err != nil {
+		return false
+	}
+	if dev, ok := deviceOf(info); !ok || dev != w.areaDev {
 		return false
 	}
 	if uid, ok := ownerUID(info); !ok || uid != w.selfUID {
@@ -502,9 +515,10 @@ type walkDir struct {
 // own entry is always walked, as two folders can share a device and inode
 // where a file system merges others (overlayfs over two file systems, Unraid's
 // user shares, mergerfs), and passing the second over would pass over what it
-// holds. A folder it doesn't enter (enters) and a run's planted files
-// (runMade) are passed over. Breadth first, a credential near the top is found
-// before a large folder further down spends the budget.
+// holds. A folder it doesn't enter (enters) is passed over; nothing it finds
+// is a run's own (runMade's tmpfs is looked at shallow: credentialIn).
+// Breadth first, a credential near the top is found before a large folder
+// further down spends the budget.
 func (w *mountWalk) deepCredentialIn(point string) (string, error) {
 	queue := []walkDir{{path: point}}
 	seen := map[fileKey]bool{}
@@ -518,9 +532,7 @@ func (w *mountWalk) deepCredentialIn(point string) (string, error) {
 		parent := filepath.Base(d.path)
 		for _, e := range entries {
 			if credentialRel[e.Name()] || credentialRel[parent+"/"+e.Name()] {
-				if p := filepath.Join(d.path, e.Name()); !w.runMade(p) {
-					return p, nil
-				}
+				return filepath.Join(d.path, e.Name()), nil
 			}
 		}
 		for _, e := range entries {
