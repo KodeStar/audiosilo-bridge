@@ -2167,9 +2167,9 @@ internal/
             crash leaves nothing the server's scan walks). A library with no indexed
             book is NEVER mapped: with nothing to compare, a wrong mount would look
             right and a later write job would land in the wrong folder.
-            BookReadSettled: a failed book read asking again won't change (no
-            such book, a 4xx but 401), the rule verify's and generate's reads
-            retry by. Podcast
+            BookReadSettled is the rule verify's and generate's book reads retry
+            by: settled is no such book or a 4xx but 401, 408 and 429 (asking
+            again won't change it). Podcast
             libraries use CheckPodcast instead: a root .audiosilo/library.json
             marker (version, matching library id, random nonce) is read back by
             the server. Symlinked marker folders/files and invalid markers are
@@ -3473,8 +3473,9 @@ internal/
             registry; waitMapped needs its check mapped AND writable at the mount the
             Bridge uses NOW (a new job fails otherwise; a resumed one parks
             library_not_writable and waits, its engine book going on); fetchBook waits
-            out an answer that may change (unreachable, 5xx) with a backoff to 1 min
-            and fails only on a definite one (no_book, another 4xx), so a restart
+            out an answer that may change (unreachable, a refused token, 408, 429,
+            5xx: mapping.BookReadSettled) with a backoff to 1 min and fails only
+            on a definite one (no_book, another 4xx), so a restart
             while the server is down doesn't end a long run; CompareFiles through the
             mount must match; locate SafeJoins the path (a folder book, or a
             single-file book whose attachments get a "<stem>." prefix); waitWritable

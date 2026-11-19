@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net/http"
 	"os"
 	"path"
 	"path/filepath"
@@ -151,12 +152,23 @@ type BookSource interface {
 }
 
 // BookReadSettled reports whether a failed book read is a definite answer (no
-// such book, a 4xx other than a refused token) that asking again won't change.
-// No answer at all, a refused token the job runner is dealing with and a 5xx
-// may change, so a job's read asks again.
+// such book, a 4xx other than a refused token, a 408 or a 429) that asking
+// again won't change. No answer at all, a refused token the job runner is
+// dealing with, a 408, a 429 (the server's request rate) and a 5xx may change,
+// so a job's read asks again.
 func BookReadSettled(err error) bool {
+	if errors.Is(err, link.ErrNoBook) {
+		return true
+	}
 	var apiErr *link.APIError
-	return errors.Is(err, link.ErrNoBook) || errors.As(err, &apiErr) && apiErr.Status < 500
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	switch apiErr.Status {
+	case http.StatusRequestTimeout, http.StatusTooManyRequests:
+		return false
+	}
+	return apiErr.Status < http.StatusInternalServerError
 }
 
 // Check checks one library's mapping: mount must hold the server's sample book

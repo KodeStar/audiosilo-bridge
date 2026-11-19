@@ -3,6 +3,8 @@ package mapping
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -133,6 +135,33 @@ func TestCheckReadOnly(t *testing.T) {
 	st := Check(context.Background(), books{book: &link.Book{Path: "Author/Book", Files: files}}, link.Library{ID: 1}, root)
 	if !st.Mapped || st.Writable || !strings.Contains(st.Error, "not writable") {
 		t.Fatalf("read-only = %+v", st)
+	}
+}
+
+// BookReadSettled: a definite answer fails a job's book read at once; one that
+// may change (no answer, a refused token, a 408, a 429, a 5xx) is asked again.
+func TestBookReadSettled(t *testing.T) {
+	t.Parallel()
+	status := func(s int) error { return fmt.Errorf("wrapped: %w", &link.APIError{Status: s}) }
+	for name, c := range map[string]struct {
+		err  error
+		want bool
+	}{
+		"no book":   {fmt.Errorf("wrapped: %w", link.ErrNoBook), true},
+		"400":       {status(http.StatusBadRequest), true},
+		"403":       {status(http.StatusForbidden), true},
+		"404":       {status(http.StatusNotFound), true},
+		"refused":   {link.ErrUnauthorized, false},
+		"408":       {status(http.StatusRequestTimeout), false},
+		"429":       {status(http.StatusTooManyRequests), false},
+		"500":       {status(http.StatusInternalServerError), false},
+		"503":       {status(http.StatusServiceUnavailable), false},
+		"no answer": {errors.New("dial tcp: connection refused"), false},
+		"timed out": {context.DeadlineExceeded, false},
+	} {
+		if got := BookReadSettled(c.err); got != c.want {
+			t.Errorf("%s: BookReadSettled = %v, want %v", name, got, c.want)
+		}
 	}
 }
 

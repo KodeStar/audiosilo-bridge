@@ -1122,8 +1122,9 @@ func (h *Handler) serverLibrary(r *run) error {
 }
 
 // fetchBook asks the server for the book, waiting out an answer that may change
-// (the server unreachable or restarting, a 5xx, a refused token the runner is
-// dealing with): only a definite answer (no such book, another 4xx) fails the job,
+// (the server unreachable or restarting, a 5xx, a 408 or 429, a refused token the
+// runner is dealing with: mapping.BookReadSettled): only a definite answer (no
+// such book, another 4xx) fails the job,
 // so a restart while the server is down doesn't end a long run.
 func (h *Handler) fetchBook(ctx context.Context, r *run) (*link.Book, error) {
 	wait := h.o.Poll
