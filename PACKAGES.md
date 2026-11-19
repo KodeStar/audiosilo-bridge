@@ -2229,15 +2229,18 @@ internal/
             check, then is unknown too, keeping that check's time: marked by an
             unanswered check or by Due (every beat, a failed one too: a server
             limiting the checks limits the heartbeat as well, asking for no
-            check then), and worked out again as Status, Statuses and Entries
+            check then), and worked out again as Status, Unchecked and Entries
             read it (a state no check challenges, heartbeats failing from the
             start, ages all the same). Unknown is Status false, as before a
             first check: a write job waits (parks, retries) rather than failing,
             fails only on a standing "not mapped" (the server's answer, or a
             local failure), and LibriVox's "mapping gone" timer starts only on
-            one; the heartbeat and the page see an unknown mapped state as not
-            mapped, an unmapped one keeps its own reason, and Entry.Unknown (the
-            page's unknown) badges it "Waiting for the server". Every look at a
+            one. The page sees an unknown mapped state as not mapped (an unmapped
+            one keeps its own reason) and Entry.Unknown badges it "Waiting for
+            the server"; the heartbeat (Statuses) reports each state as recorded,
+            not aged, since the server takes "not mapped" as definite (it refuses
+            new write jobs and holds a podcast show's polls 30 min), and the jobs
+            it queues wait here. Every look at a
             library's folder (its stat, the book files' stats, the write probe,
             a podcast folder's stat before it is opened) is bounded by
             LookTimeout (5 s, fsutil.StatWithin and fsutil.LookWithin: one look

@@ -458,16 +458,18 @@ func (r *Registry) Status(id int64) (link.LibraryStatus, bool) {
 }
 
 // Statuses returns the last check of every library that has one, for the
-// heartbeat: one that doesn't stand as view reads it (never mapped).
+// heartbeat: the state as recorded, not aged (view). A state too old to stand
+// lets nothing write here (Status), but the server takes an unmapped one as
+// definite: it refuses new write jobs and holds a podcast show's polls for 30
+// minutes, which the next check the server answers would undo. So it keeps
+// seeing the last state, and the jobs it queues wait here for that check.
 func (r *Registry) Statuses() []link.LibraryStatus {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	out := []link.LibraryStatus{}
-	now := r.clock()
 	for _, l := range r.libs {
 		if res, ok := r.results[l.ID]; ok {
-			st, _ := r.view(res, now)
-			out = append(out, st)
+			out = append(out, res.status)
 		}
 	}
 	return out

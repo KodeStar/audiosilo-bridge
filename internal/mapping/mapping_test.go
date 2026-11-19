@@ -970,8 +970,11 @@ func TestKeptStateExpires(t *testing.T) {
 		if ok || st.Mapped || st.Writable || !strings.Contains(st.Error, "hasn't answered") {
 			t.Fatalf("the kept state outlived the cap: %+v, %v", st, ok)
 		}
-		if sts := r.Statuses(); len(sts) != 1 || sts[0].Mapped {
-			t.Fatalf("the heartbeat reports an expired state as mapped: %+v", sts)
+		// The server takes "not mapped" as definite (it refuses new write
+		// jobs, holds podcast polls): it keeps the last state, and its jobs
+		// wait here.
+		if sts := r.Statuses(); len(sts) != 1 || !sts[0].Mapped || !sts[0].Writable {
+			t.Fatalf("the heartbeat reports an expired state as unmapped: %+v", sts)
 		}
 		e := r.Entries(mount)[0]
 		if !e.Unknown || *e.CheckedAt != at || e.UnansweredAt == nil || *e.UnansweredAt != unansweredAt {
@@ -1038,10 +1041,10 @@ func TestStateAgesWhenRead(t *testing.T) {
 	if st, ok := r.Status(2); ok || st.Mapped || !strings.Contains(st.Error, "doesn't hold the server's copy") {
 		t.Fatalf("a not mapped state read past the cap = %+v, %v, want unknown with its own reason", st, ok)
 	}
-	for _, st := range r.Statuses() {
-		if st.Mapped || st.Writable {
-			t.Fatalf("the heartbeat reports an aged state as mapped: %+v", st)
-		}
+	// The heartbeat reports the states as checked, not aged: the server takes
+	// "not mapped" as definite, while its jobs wait here.
+	if sts := r.Statuses(); len(sts) != 2 || !sts[0].Mapped || !sts[0].Writable || sts[1].Mapped {
+		t.Fatalf("the heartbeat reports aged states other than as checked: %+v", sts)
 	}
 	for _, e := range r.Entries(mount) {
 		if !e.Unknown || *e.CheckedAt != at {
