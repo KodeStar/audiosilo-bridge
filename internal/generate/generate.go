@@ -155,7 +155,7 @@ type Handler struct {
 	// job's recorded end: the window another job's end can land in.
 	beforeEnd func(jobID int64)
 	// readMapping, a seam (tests), stands in for the store's GetGenerateBook in
-	// resumeMapping.
+	// resumeMapping and Abandon (mappingOf).
 	readMapping func(ctx context.Context, serverJobID int64) (store.GenerateBook, error)
 }
 
@@ -616,14 +616,12 @@ func (h *Handler) cantContribute(ctx context.Context, r *run) error {
 // (stopTries, a poll apart): a job that failed on it would leave the engine book
 // an earlier run made going on with no job to follow or stop it. A job that
 // ends here anyway (the reads kept failing, or it was cancelled meanwhile)
-// releases that book as Abandon does, unless it resumes later.
+// releases that book as Abandon does (when Abandon's own read of the mapping
+// works by then), unless it resumes later; a book nothing can stop is kept
+// local by its contributing stage all the same (ShareOff: no_share_job).
 func (h *Handler) resumeMapping(ctx context.Context, job jobs.Job) (store.GenerateBook, bool, error) {
-	read := h.o.DB.GetGenerateBook
-	if h.readMapping != nil {
-		read = h.readMapping
-	}
 	for i := 1; ; i++ {
-		mapped, err := read(ctx, job.ID)
+		mapped, err := h.mappingOf(ctx, job.ID)
 		switch {
 		case errors.Is(err, store.ErrNotFound):
 			return store.GenerateBook{}, false, nil
@@ -765,7 +763,7 @@ func (h *Handler) end(ctx context.Context, r *run, res any, err error) (any, err
 // job created is released as end() would, or it would go on with nothing to
 // follow it.
 func (h *Handler) Abandon(ctx context.Context, job jobs.Job) {
-	m, err := h.o.DB.GetGenerateBook(ctx, job.ID)
+	m, err := h.mappingOf(ctx, job.ID)
 	if err != nil || m.BookID == nil || m.EndedAt != "" {
 		return
 	}
@@ -897,7 +895,9 @@ func (h *Handler) stopBook(ctx context.Context, g store.StopGuard, bookID int64,
 		switch {
 		case errors.Is(err, store.ErrFollowed):
 			return true
-		case err == nil || errors.Is(err, scheduler.ErrInvalidOp) || errors.Is(err, store.ErrSettled):
+		case err == nil || errors.Is(err, scheduler.ErrInvalidOp) || errors.Is(err, store.ErrSettled) ||
+			errors.Is(err, store.ErrNotFound):
+			// Stopped, settled, or deleted since the read: nothing runs on.
 			return false
 		}
 		if i == stopTries || agent.SleepCtx(ctx, h.o.Poll) != nil {
@@ -916,6 +916,16 @@ func (h *Handler) stopBook(ctx context.Context, g store.StopGuard, bookID int64,
 // stopTries is how many times stopBook tries a cancel that fails, and
 // resumeMapping a read.
 const stopTries = 3
+
+// mappingOf reads server job id's mapping (store.DB.GetGenerateBook, or the
+// readMapping seam): resumeMapping and Abandon read it alike, so a read that
+// fails fails both.
+func (h *Handler) mappingOf(ctx context.Context, id int64) (store.GenerateBook, error) {
+	if h.readMapping != nil {
+		return h.readMapping(ctx, id)
+	}
+	return h.o.DB.GetGenerateBook(ctx, id)
+}
 
 // stopGuard is the StopGuard of job's end: its id and attempt, and whether the
 // end read the job's mapping ended already.

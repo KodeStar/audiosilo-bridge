@@ -1429,15 +1429,18 @@ func TestJobEndThatCantStopItsBookKeepsItLocal(t *testing.T) {
 }
 
 // A job whose earlier run's mapping can't be read tries again (allowed: a
-// passing blip resumes it); one that still can't is released as Abandon does
-// (denied: the engine book an earlier run made never goes on with no job to
-// follow or stop it).
+// passing blip resumes it); one that still can't is released as Abandon does,
+// once Abandon's own read (the same store read) works (denied: the engine book
+// an earlier run made never goes on with no job to follow or stop it). A store
+// that can't read it at all leaves the book to its contributing stage, which
+// keeps it local (ShareOff: no_share_job).
 func TestResumeMappingReadErrorStopsTheEarlierBook(t *testing.T) {
 	t.Parallel()
 	for _, c := range []struct {
-		name  string
-		fails int32
-	}{{"a blip", 1}, {"failing", 100}} {
+		name    string
+		fails   int32
+		stopped bool
+	}{{"a blip", 1, false}, {"outlasting the tries", stopTries, true}, {"down", 100, false}} {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
 			ctx := context.Background()
@@ -1466,8 +1469,8 @@ func TestResumeMappingReadErrorStopsTheEarlierBook(t *testing.T) {
 				}
 				return
 			}
-			if err == nil || !scheduler.IsCancelled(got) {
-				t.Fatalf("failing = %v, cancelled %v; want the error and the earlier book stopped", err, scheduler.IsCancelled(got))
+			if err == nil || scheduler.IsCancelled(got) != c.stopped {
+				t.Fatalf("%s = %v, cancelled %v; want the error, cancelled %v", c.name, err, scheduler.IsCancelled(got), c.stopped)
 			}
 		})
 	}
