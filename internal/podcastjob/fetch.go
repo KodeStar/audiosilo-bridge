@@ -253,7 +253,7 @@ func (h *Fetch) run(parent context.Context, claimed *jobs.Job, rep *jobs.Reporte
 	s.adoptOwn(job, root, claimedAt, params, "")
 	c, tag, err := s.loadCheckpoint(job, root, f.ShowID, e.ID)
 	if errors.Is(err, errPartialStuck) {
-		return nil, stuckPartial("", err)
+		return nil, stuckPartial(c.partialName(), err)
 	}
 	if err != nil {
 		// Not known to have changed: the partial and its record stay for the

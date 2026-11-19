@@ -1782,6 +1782,33 @@ func TestFetchStartFailsOnAnotherEpisodesPartialItCannotRemove(t *testing.T) {
 	}
 }
 
+// A record whose partial is not the size it records, and that the clear
+// cannot remove, is answered with the stuck failure and the record itself:
+// the start's log names the file an admin has to free.
+func TestLoadCheckpointNamesThePartialItCannotRemove(t *testing.T) {
+	requireNonRoot(t)
+	h, job := audioHarness(t)
+	s := h.handler.s
+	root, err := os.OpenRoot(h.mount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	c := checkpoint{ServerHash: s.pairHash(), LibraryID: 3, ShowID: fixtureShowID, EpisodeID: strings.Repeat("2", 16), Path: *job.Path, Temp: ".audiosilo-tmp-stuck", Offset: 1000, Total: 5000}
+	if err := root.WriteFile("Fixture Show/"+c.Temp, []byte("prefix"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.saveCheckpoint(job, root, &c, `"one"`); err != nil {
+		t.Fatal(err)
+	}
+	_, bar := barShow(t, h)
+	bar()
+	got, _, err := s.loadCheckpoint(job, root, fixtureShowID, c.EpisodeID)
+	if !errors.Is(err, errPartialStuck) || got.partialName() != "Fixture Show/"+c.Temp {
+		t.Fatalf("a partial the start cannot remove: %q %v, want the stuck record's partial", got.partialName(), err)
+	}
+}
+
 // barShowAtLoad makes the fixture show's folder one the Bridge may not write
 // once a fetch's own write check has passed (at its record's load), and
 // answers the folder's path.

@@ -380,7 +380,8 @@ func (s *service) dropStaleCheckpoint(job jobs.Job, root *os.Root, showID, episo
 // Bridge may not open (partialLost: not there, not a regular file, no
 // permission, another size), is cleared, and a new record answered; a
 // partial the clear cannot remove fails the attempt write_failed
-// (errPartialStuck) rather than restart beside it, its record left for the
+// (errPartialStuck, answered with the record that names it) rather than
+// restart beside it, its record left for the
 // next attempt or the day-old cleanup (cleanOwned, sweepRecords). One whose partial could not be opened to tell (a network
 // share's hiccup) is kept, partial and all, with errPartialUnreadable: only a
 // definite absence, mismatch or lasting fault may cost a download its bytes.
@@ -402,11 +403,12 @@ func (s *service) loadCheckpoint(job jobs.Job, root *os.Root, showID, episodeID 
 	if err == nil && size == saved.Offset && saved.Total <= s.o.MaxEpisodeBytes && (saved.complete() || resumable) {
 		return saved, tag, nil
 	}
+	stuck := saved // the clear resets it, removed or not
 	if !s.clearCheckpoint(job, root, &saved) {
 		if err == nil {
 			err = errors.New("the episode partial is not the one recorded")
 		}
-		return c, "", fmt.Errorf("%w: %w", errPartialStuck, err)
+		return stuck, "", fmt.Errorf("%w: %w", errPartialStuck, err)
 	}
 	return c, "", nil
 }
