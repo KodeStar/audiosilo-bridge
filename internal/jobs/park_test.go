@@ -762,17 +762,13 @@ func TestShareOffWriteTriedWhileTheServerIsOut(t *testing.T) {
 	h := handler{kind: "k.v", lane: LaneLight, fn: func(ctx context.Context, j Job, rep *Reporter) (any, error) {
 		srv.setShareOff(map[int64]bool{8: true})
 		waitFor(t, func() bool { return rep.ShareOff() && st.tries.Load() > 0 })
-		srv.mu.Lock()
-		srv.failing = true
-		srv.mu.Unlock()
+		srv.setFailing(true)
 		st.fail.Store(false)
 		waitFor(t, func() bool {
 			sj, err := db.GetServerJob(context.Background(), 8)
 			return err == nil && sj.ShareOff
 		})
-		srv.mu.Lock()
-		srv.failing = false
-		srv.mu.Unlock()
+		srv.setFailing(false)
 		return nil, nil
 	}}
 	r := New(st, func() Server { return srv }, nil, testOpts(), h)
@@ -836,16 +832,12 @@ func TestRunnerShareOff(t *testing.T) {
 	default:
 	}
 
-	srv.mu.Lock()
-	srv.failing = true
-	srv.mu.Unlock()
+	srv.setFailing(true)
 	waitFor(t, func() bool { _, err := r.ShareOff(ctx, running, false); return errors.Is(err, ErrShareNotReachable) })
 	if _, err := r.ShareOff(ctx, running, true); err == nil {
 		t.Fatal("asked with the server out of reach: no error")
 	}
-	srv.mu.Lock()
-	srv.failing = false
-	srv.mu.Unlock()
+	srv.setFailing(false)
 
 	paired.Store(false)
 	for _, ask := range []bool{false, true} {

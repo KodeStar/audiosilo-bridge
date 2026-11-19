@@ -55,12 +55,6 @@ func (f *fakeServer) triesOf(id int64) int {
 	return f.tries[id]
 }
 
-func (p *Reporter) failingNow() bool {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.failing
-}
-
 // While the server is unreachable a job warns once, not at every retry, and
 // says once that its reports get through again (bridge#31).
 func TestFailedReportsWarnOnceAndRecoverOnce(t *testing.T) {
@@ -111,22 +105,22 @@ func TestConfirmLeaseClearsFailing(t *testing.T) {
 		fn: func(ctx context.Context, _ Job, rep *Reporter) (any, error) {
 			srv.setFailing(true)
 			rep.Progress(Progress{Step: "one"})
-			if err := awaitCond(rep.failingNow, "a failed report"); err != nil {
+			if err := awaitCond(rep.unreached, "a failed report"); err != nil {
 				return nil, err
 			}
 			if err := rep.ConfirmLease(ctx); err == nil {
 				return nil, errors.New("ConfirmLease got through an unreachable server")
 			}
-			if !rep.failingNow() {
+			if !rep.unreached() {
 				return nil, errors.New("a failed ConfirmLease cleared failing")
 			}
 			srv.setFailing(false)
 			if err := rep.ConfirmLease(ctx); err != nil {
 				return nil, err
 			}
-			if rep.failingNow() || logs.count("INFO bridge: reporting progress again") != 1 {
+			if rep.unreached() || logs.count("INFO bridge: reporting progress again") != 1 {
 				return nil, fmt.Errorf("after a ConfirmLease got through: failing %v, recovery lines %d",
-					rep.failingNow(), logs.count("INFO bridge: reporting progress again"))
+					rep.unreached(), logs.count("INFO bridge: reporting progress again"))
 			}
 			return nil, nil
 		}})
