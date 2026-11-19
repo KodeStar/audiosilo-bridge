@@ -199,11 +199,19 @@ func RealName(root *os.Root, name string) (string, error) {
 	if slices.Contains(names, base) {
 		return name, nil
 	}
+	sameFile := func(n string) bool {
+		other, err := root.Lstat(dir + n)
+		return err == nil && os.SameFile(st, other)
+	}
+	// name in another normal form first (SameName): one Lstat, not one per
+	// entry, for a folder its feed spells so.
 	for _, n := range names {
-		if other, err := root.Lstat(dir + n); err == nil && os.SameFile(st, other) {
-			if SameName(n, base) {
-				return name, nil
-			}
+		if SameName(n, base) && sameFile(n) {
+			return name, nil
+		}
+	}
+	for _, n := range names {
+		if sameFile(n) {
 			return dir + n, nil
 		}
 	}
