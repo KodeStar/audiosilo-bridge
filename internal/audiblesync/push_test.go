@@ -938,8 +938,8 @@ func TestPushRejectedCursorKeepsTheBaseline(t *testing.T) {
 // for that title (bridge#50): a server restored from a backup taken after the
 // baseline answers a row changed since the baseline, but older than the place
 // handled since. A title's place written on the server after the one handled
-// is still new, the two clocks compared through the page's server_time (here
-// the server's is two hours behind the Bridge's).
+// is still new, the server's updated_at against the server's (here its clock
+// is two hours behind the Bridge's, which moves nothing).
 func TestPushRereadSkipsPlacesOlderThanKnown(t *testing.T) {
 	ctx := context.Background()
 	e := newEnv(t)
@@ -1240,46 +1240,42 @@ func TestPushRereadOtherBookIsNotOlderThanKnown(t *testing.T) {
 	}
 }
 
-// olderThanKnown compares a row's updated_at (the server's clock) with when
-// the Bridge last read the title's place (row_read, its own clock) moved by
-// the skew either way, and never with when it wrote the place to Audible
-// (at) or re-armed it (row_seen): a place another device wrote between the
-// read and either is new.
+// olderThanKnown compares a row's updated_at with the updated_at of the row
+// last recorded for the title (row_read), both the server's clock, and never
+// with when the Bridge wrote the place to Audible (at) or re-armed it
+// (row_seen): a place another device wrote between the read and either is new.
 func TestOlderThanKnown(t *testing.T) {
 	t.Parallel()
-	seen := time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
-	x := store.AudiblePush{RowRead: store.Timestamp(seen), RowSeen: store.Timestamp(seen.Add(10 * time.Minute)),
-		At: store.Timestamp(seen.Add(3 * time.Minute))}
+	read := time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
+	x := store.AudiblePush{RowRead: store.Timestamp(read), RowSeen: store.Timestamp(read.Add(10 * time.Minute)),
+		At: store.Timestamp(read.Add(3 * time.Minute))}
 	for name, c := range map[string]struct {
 		updated time.Time
-		skew    time.Duration
 		want    bool
 	}{
-		"before the read":                {seen.Add(-time.Minute), 0, true},
-		"at the read":                    {seen, 0, true},
-		"between the read and the write": {seen.Add(time.Minute), 0, false},
-		"server ahead, before":           {seen.Add(time.Hour - time.Minute), time.Hour, true},
-		"server ahead, after":            {seen.Add(time.Hour + time.Minute), time.Hour, false},
-		"server behind, before":          {seen.Add(-time.Hour - time.Minute), -time.Hour, true},
-		"server behind, after":           {seen.Add(-time.Hour + time.Minute), -time.Hour, false},
+		"before the read row":                {read.Add(-time.Minute), true},
+		"the read row":                       {read, true},
+		"between the read row and the write": {read.Add(time.Minute), false},
+		"after the re-arm":                   {read.Add(11 * time.Minute), false},
 	} {
-		if got := olderThanKnown(c.updated, x, c.skew); got != c.want {
+		if got := olderThanKnown(c.updated, x); got != c.want {
 			t.Errorf("%s: %v, want %v", name, got, c.want)
 		}
 	}
-	if olderThanKnown(seen.Add(-time.Hour), store.AudiblePush{At: x.At, RowSeen: x.RowSeen}, 0) {
+	if olderThanKnown(read.Add(-time.Hour), store.AudiblePush{At: x.At, RowSeen: x.RowSeen}) {
 		t.Error("a title never read counts as handled")
 	}
 }
 
-// The skew is taken when the page comes back, not at the pass's start: time
-// spent before the read (other accounts, a slow server) is no lead of the
-// server's clock, so a read from the start after a refused cursor still writes
-// a place changed after the one the Bridge last read (bridge#50).
+// The line a read from the start after a refused cursor draws is moved onto
+// the server's clock by the skew taken when the page comes back, not at the
+// pass's start: time spent before the read (other accounts, a slow server) is
+// no lead of the server's clock, so a place changed after the baseline is
+// still written (bridge#50).
 func TestPushRereadSkewAtTheRead(t *testing.T) {
 	ctx := context.Background()
 	e := newEnv(t)
-	e.list(t, st("B000000001", "A/One", 36000))
+	e.list(t, st("B000000001", "A/One", 36000), st("B000000002", "A/Two", 36000))
 	sync := func() {
 		e.srv.mu.Lock()
 		e.srv.clock = e.now
@@ -1288,29 +1284,25 @@ func TestPushRereadSkewAtTheRead(t *testing.T) {
 	sync()
 	p := NewPusher(e.o)
 	e.started(t, p)
+	from := e.now
 
-	e.now = e.now.Add(2 * time.Hour)
+	// One title is read (the push gets a cursor to keep), then another
+	// changes 20 min after the baseline, before the cursor is refused.
+	e.now = e.now.Add(time.Minute)
 	sync()
-	read := e.now
-	e.srv.add("A/One", "B000000001", 18000, read, "web-1")
+	e.srv.add("A/One", "B000000001", 600, e.now, "web-1")
 	e.read(p)
-	e.now = e.now.Add(4 * time.Minute)
+	e.now = from.Add(20 * time.Minute)
 	sync()
-	p.Tick(ctx)
-	if got := e.sets(); len(got) != 1 || got[0] != "B000000001@18000000" {
-		t.Fatalf("sets = %v", got)
-	}
-
-	// One moves on after the read; the cursor is then refused, so the place
-	// is first read from the start, on a pass whose page comes back an hour
-	// after it began.
-	e.srv.add("A/One", "B000000001", 21600, read.Add(5*time.Minute), "web-1")
+	e.srv.add("A/Two", "B000000002", 900, e.now, "web-1")
 	e.srv.mu.Lock()
 	e.srv.badSince = e.account(t).PushCursor
 	e.srv.mu.Unlock()
 	e.now = e.now.Add(time.Minute)
 	sync()
 	e.read(p) // refused: back to the start
+
+	// The read from the start comes back an hour after its pass began.
 	e.srv.mu.Lock()
 	e.srv.badSince = ""
 	e.srv.onFeed = func() {
@@ -1323,8 +1315,60 @@ func TestPushRereadSkewAtTheRead(t *testing.T) {
 	e.now = e.now.Add(4 * time.Minute)
 	sync()
 	p.Tick(ctx)
+	if got := e.sets(); !slices.Contains(got, "B000000002@900000") {
+		t.Fatalf("sets = %v, want the place changed after the baseline written", got)
+	}
+}
+
+// A read from the start after a refused cursor compares a row's updated_at
+// with the one of the row last read for the title, server time with server
+// time: a Bridge clock an hour fast at the read and corrected since still
+// takes a place the server changed after that row as new (bridge#50).
+func TestPushRereadAfterBridgeClockCorrected(t *testing.T) {
+	ctx := context.Background()
+	e := newEnv(t)
+	e.list(t, st("B000000001", "A/One", 36000))
+	server := e.now.Add(-time.Hour) // the Bridge's clock is an hour fast
+	e.srv.clock = server
+	p := NewPusher(e.o)
+	e.started(t, p)
+
+	// One at 5 h is read and written, on the fast clock.
+	server = server.Add(2 * time.Hour)
+	e.now = server.Add(time.Hour)
+	e.srv.mu.Lock()
+	e.srv.clock = server
+	e.srv.mu.Unlock()
+	e.srv.add("A/One", "B000000001", 18000, server, "web-1")
+	e.read(p)
+	e.now = e.now.Add(4 * time.Minute)
+	p.Tick(ctx)
+	if got := e.sets(); len(got) != 1 || got[0] != "B000000001@18000000" {
+		t.Fatalf("sets = %v", got)
+	}
+
+	// The Bridge's clock is put right; half an hour after the row read the
+	// listener moves to 6 h on the server, and the cursor is then refused.
+	server = server.Add(30 * time.Minute)
+	e.now = server
+	e.srv.add("A/One", "B000000001", 21600, server, "web-1")
+	e.now = e.now.Add(time.Minute)
+	e.srv.mu.Lock()
+	e.srv.clock = e.now
+	e.srv.badSince = e.account(t).PushCursor
+	e.srv.mu.Unlock()
+	e.read(p) // refused: back to the start
+	e.srv.mu.Lock()
+	e.srv.badSince = ""
+	e.srv.mu.Unlock()
+	e.read(p)
+	e.now = e.now.Add(4 * time.Minute)
+	e.srv.mu.Lock()
+	e.srv.clock = e.now
+	e.srv.mu.Unlock()
+	p.Tick(ctx)
 	if got := e.sets(); len(got) != 2 || got[1] != "B000000001@21600000" {
-		t.Fatalf("sets = %v, want the place changed after the read written", got)
+		t.Fatalf("sets = %v, want the place changed after the row read written", got)
 	}
 }
 

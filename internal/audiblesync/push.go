@@ -214,10 +214,9 @@ func (p *Pusher) account(ctx context.Context, srv Server, a store.AudibleAccount
 		// the pass's start: a pass (and the accounts before it in the Tick)
 		// can take a while, and that time would count as the server's lead.
 		read := p.o.Now()
-		skew := serverSkew(page.ServerTime, read)
-		cutoff := historyCutoff(a, skew, read)
+		cutoff := historyCutoff(a, serverSkew(page.ServerTime, read), read)
 		for _, row := range page.Rows {
-			if !p.row(ctx, a, titles, row, cutoff, skew, now) {
+			if !p.row(ctx, a, titles, row, cutoff, now) {
 				unrecorded = true
 			}
 		}
@@ -297,19 +296,21 @@ func serverSkew(serverTime string, now time.Time) time.Duration {
 }
 
 // olderThanKnown reports whether a row read again from the start after a
-// refused cursor holds a place from no later than the last place this Bridge
-// read for the title x (row_read): a server restored from a backup answers the
-// row as it was before then, changed after the baseline perhaps but older than
-// the place already handled, and written again it would move Audible back.
+// refused cursor (updated, its updated_at) holds a place from no later than
+// the row last recorded for the title x (row_read, that row's updated_at): a
+// server restored from a backup answers the row as it was before then, changed
+// after the baseline perhaps but older than the place already handled, and
+// written again it would move Audible back. Both are the server's clock, so a
+// Bridge clock that was wrong at the read and corrected since moves nothing.
 // Never by row_seen: a re-arm moves that one, and a place written on the server
 // before the re-arm but not read yet is new.
-// Never by when the place was written to Audible (at): that is after the read,
-// and a place another device wrote between the two was never read, so it is
-// new. skew moves the Bridge's clock onto the server's (serverSkew). A title
-// never read counts as never handled (the baseline's line alone).
-func olderThanKnown(updated time.Time, x store.AudiblePush, skew time.Duration) bool {
+// Never by when the place was written to Audible (at): a place another device
+// wrote after the row read and before the write was never read, so it is new.
+// A title with no row_read (never read, or read before migration 0019) counts
+// as never handled (the baseline's line alone).
+func olderThanKnown(updated time.Time, x store.AudiblePush) bool {
 	read, err := time.Parse(time.RFC3339Nano, x.RowRead)
-	return err == nil && !updated.After(read.Add(skew))
+	return err == nil && !updated.After(read)
 }
 
 // historyCutoff is when a row's place counts as history: while the baseline
@@ -350,13 +351,13 @@ func historyCutoff(a store.AudibleAccount, skew time.Duration, now time.Time) ti
 // restart the wait. Audible's own rows (the server leaves them out too) are left,
 // and history (changed before cutoff, the baseline's, and on a read from the
 // start after a refused cursor, a place no later than the one last read for
-// its title, olderThanKnown by skew) is recorded with no waiting place. A row on a title the last sync didn't list for that book (the
+// its title, olderThanKnown) is recorded with no waiting place. A row on a title the last sync didn't list for that book (the
 // server's feed already syncs it: a new match, a re-match, a title synced
 // again) is kept pending until the next sync lists it, never skipped past.
 // titles is account a's rows by ASIN, kept up to date with what row records.
 // ok is false when recording the row failed.
 func (p *Pusher) row(ctx context.Context, a store.AudibleAccount, titles map[string]store.AudiblePush, row link.AudibleProgressRow,
-	cutoff time.Time, skew time.Duration, now time.Time) (ok bool) {
+	cutoff, now time.Time) (ok bool) {
 	if row.DeviceID == DeviceID(a.ID) {
 		return true
 	}
@@ -372,9 +373,13 @@ func (p *Pusher) row(ctx context.Context, a store.AudibleAccount, titles map[str
 		history = bad != nil || updated.Before(cutoff)
 	}
 	if !history && a.PushReread && sameBook {
-		history = bad != nil || olderThanKnown(updated, x, skew)
+		history = bad != nil || olderThanKnown(updated, x)
 	}
 	rec := store.AudibleRow{Ms: place, Seen: now}
+	rowRead := "" // the store's row_read: the row's updated_at, none when it can't be read
+	if bad == nil {
+		rec.Updated, rowRead = updated, store.Timestamp(updated)
+	}
 	var err error
 	switch {
 	case !sameBook || !x.Listed:
@@ -397,7 +402,7 @@ func (p *Pusher) row(ctx context.Context, a store.AudibleAccount, titles map[str
 		p.o.Log.Warn("audible: recording a server place failed", "account", a.ID, "err", err)
 		return false
 	}
-	x.RowMs, x.RowSeen, x.RowRead = rec.Ms, store.Timestamp(now), store.Timestamp(now)
+	x.RowMs, x.RowSeen, x.RowRead = rec.Ms, store.Timestamp(now), rowRead
 	titles[row.ASIN] = x
 	return true
 }

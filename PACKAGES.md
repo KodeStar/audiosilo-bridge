@@ -1644,10 +1644,12 @@ internal/
             share_off unset and no other generate job mapped to the book has
             share_off (shareResumableSQL; ShareResumable reads the same).
             0019 (bridge#50) adds
-            audible_push.row_read: when the feed row last recorded was read (row_seen
-            until RearmAudiblePush moves that one for the push's wait; set with it by
-            Want/Seen/PendAudiblePush, forgotten with it), what a read from the start
-            compares a row's updated_at with.
+            audible_push.row_read: the updated_at (the server's clock, AudibleRow.Updated)
+            of the feed row last recorded for the title, set with row_seen by
+            Want/Seen/PendAudiblePush ('' when it can't be read), forgotten with it, kept
+            by RearmAudiblePush; what a read from the start compares a row's updated_at
+            with. Rows from before 0019 start with '' (row_seen is the Bridge's clock, so
+            the baseline's line alone applies until the title is read again).
   state/    per-book pipeline state machine: table-driven states/lanes/transitions,
             CanStart/NextState guards, the audit fix-loop cap. Pure, no I/O. M6 added
             ParkCode (typed park reasons - M7 added contrib_unavailable, core_needed,
@@ -3114,7 +3116,9 @@ internal/
             page came back, not the pass's start),
             is history again whatever its place, so a server restored from a backup has no place
             from before the baseline written over Audible's) and drops a title's place no later than the one last
-            read for it (olderThanKnown: updated_at not after row_read, by the server's clock, never at nor row_seen: a place
+            read for it (olderThanKnown: updated_at not after row_read, the updated_at of the row last recorded for the
+            title, server time against server time with no skew (a Bridge clock wrong at the read and put right since
+            moves nothing), never at nor row_seen: a place
             another device wrote between the read and the write to Audible, or a re-arm, is new; so a backup's row changed
             after the baseline but older than the place handled since is history too; a row changed since is a
             new place); refused resetStrikes (3) times with no pass between that had its kept cursor taken (a read
