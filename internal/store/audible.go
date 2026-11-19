@@ -45,7 +45,9 @@ type AudibleAccount struct {
 	// SyncAt is when an audible.sync job last went through, SyncError why the
 	// last one failed ("" when it went through); PushAt and PushError the
 	// same for the push loop (migration 0017: each its own, so one's success
-	// never hides the other's failure). SyncRetryAt is until when Audible
+	// never hides the other's failure), where going through is a place
+	// written to Audible, or a pass with no failure that ended PushError (so
+	// PushAt is not only the last write). SyncRetryAt is until when Audible
 	// asked the Bridge to wait (both honour it).
 	SyncAt      string `json:"sync_at"`
 	SyncError   string `json:"sync_error"`
