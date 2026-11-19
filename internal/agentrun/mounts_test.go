@@ -496,10 +496,45 @@ func TestMountWalkCachedPerTick(t *testing.T) {
 	if n := walks.Load(); n != 1 {
 		t.Fatalf("%d walks before a tick, want 1", n)
 	}
-	te.r.refreshMounts()
+	te.r.tickMounts()
 	_ = te.r.credentialProblem()
 	if n := walks.Load(); n != 2 {
 		t.Fatalf("%d walks after a tick, want 2", n)
+	}
+}
+
+// A tick that finds a walk in flight (an endpoint run's start) returns at once
+// and walks nothing: it never queues behind that walk to walk again, which
+// over a slow mount would hold runner.json's heartbeat past the Bridge's
+// freshness bound. A run's start still waits its turn and walks afresh.
+func TestTickLeavesAWalkInFlight(t *testing.T) {
+	t.Parallel()
+	te, _ := newEndpointEnv(t, endpointParentEnv())
+	var walks atomic.Int32
+	te.r.mounts = func() ([]mount, error) { walks.Add(1); return nil, nil }
+	te.r.mountMu.Lock()
+	ticked := make(chan struct{})
+	go func() { te.r.tickMounts(); close(ticked) }()
+	select {
+	case <-ticked:
+	case <-time.After(10 * time.Second):
+		te.r.mountMu.Unlock()
+		t.Fatal("the tick waited behind a walk in flight")
+	}
+	started := make(chan struct{})
+	go func() { te.r.refreshMounts(); close(started) }()
+	select {
+	case <-started:
+		t.Fatal("a run's start walked beside a walk in flight")
+	case <-time.After(50 * time.Millisecond):
+	}
+	if n := walks.Load(); n != 0 {
+		t.Fatalf("%d walks beside the one in flight, want none", n)
+	}
+	te.r.mountMu.Unlock()
+	<-started
+	if n := walks.Load(); n != 1 {
+		t.Fatalf("%d walks once the one in flight ended, want the run's own", n)
 	}
 }
 

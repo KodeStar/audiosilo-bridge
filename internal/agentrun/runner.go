@@ -269,7 +269,7 @@ func (r *Runner) Run(ctx context.Context) error {
 				// One fresh look at the mounts each tick: a credential that
 				// appeared since the last (a run in progress included, which
 				// spawn then ends) is in this runner.json.
-				r.refreshMounts()
+				r.tickMounts()
 			}
 			r.writeStatus()
 		case <-scan.C:

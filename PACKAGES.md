@@ -3848,9 +3848,12 @@ internal/
             look past lookTimeout (5 s, through fsutil.StatWithin/LstatWithin/
             ReadDirNWithin: a hung NFS or SMB mount) or the walk past walkBudget
             (20 s) each count as holding, saying to mount narrower folders. The walk runs once
-            per status tick (refreshMounts) and again before each endpoint run
-            starts (execute: a credential that appeared since the tick refuses
-            the run); every other call takes the last answer (mountProblem,
+            per status tick (tickMounts, which leaves a walk in flight to stand
+            for its own rather than queue behind it: two slow walks in a row
+            would hold runner.json past RunnerFreshFor) and again before each
+            endpoint run starts (execute's refreshMounts: a credential that
+            appeared since the tick refuses the run); every other call takes
+            the last answer (mountProblem,
             which walks only when there is none); spawn's poll reads the last answer every second and
             ends a run in progress (exit unavailable, endpointBlocked) once a tick
             finds a credential. runner.json says endpoint_only, own_credentials

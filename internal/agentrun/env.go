@@ -168,10 +168,10 @@ func (r *Runner) credentialKind(cli string) string {
 // log and runner.json say it.
 //
 // The mounts' walk is the slow part: each status tick walks them again
-// (refreshMounts), as does execute before each endpoint run starts, and every
-// other call takes the last walk's answer (the first walks them when there is
-// none yet). So a run in progress, which spawn checks every second, ends at
-// the tick after a credential appears.
+// (tickMounts), as does execute before each endpoint run starts
+// (refreshMounts), and every other call takes the last walk's answer (the
+// first walks them when there is none yet). So a run in progress, which spawn
+// checks every second, ends at the tick after a credential appears.
 func (r *Runner) credentialProblem() string {
 	for _, k := range ownVars {
 		if r.envSecret(k) != "" {
@@ -202,10 +202,24 @@ func (r *Runner) mountProblem() string {
 	return *r.mountLast.Load()
 }
 
-// refreshMounts walks the mounts now: the status tick's, so each interval has
-// one fresh look.
+// refreshMounts walks the mounts now, after any walk in flight: an endpoint
+// run's start, which must have a look of its own.
 func (r *Runner) refreshMounts() {
 	r.mountMu.Lock()
+	defer r.mountMu.Unlock()
+	r.walkMountsLocked()
+}
+
+// tickMounts is the status tick's walk, so each interval has one fresh look.
+// It leaves a walk in flight (a run's start) to stand for its own rather than
+// wait behind it and walk again: over a slow mount the two together would
+// hold runner.json's heartbeat past agentproto.RunnerFreshFor, and the Bridge
+// would take a working service for stopped. That walk's answer is the next
+// one every reader takes, a run in progress included.
+func (r *Runner) tickMounts() {
+	if !r.mountMu.TryLock() {
+		return
+	}
 	defer r.mountMu.Unlock()
 	r.walkMountsLocked()
 }
