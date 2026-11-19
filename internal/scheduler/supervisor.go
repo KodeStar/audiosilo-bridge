@@ -200,7 +200,9 @@ func (s *Scheduler) supervisorSupersedeRerun(ctx context.Context, b store.Book, 
 	s.awaitWorker(ctx, bookID)
 	unlock := s.lockPublish(bookID)
 	defer unlock()
-	if now, err := s.db.GetBook(ctx, bookID); err == nil && state.Order(state.State(now.State)) >= state.Order(state.Ready) {
+	if now, err := s.db.GetBook(ctx, bookID); err != nil {
+		return "", err // unread, it is never rewound: it may be at Ready by now
+	} else if state.Order(state.State(now.State)) >= state.Order(state.Ready) {
 		return "", ErrInvalidOp
 	}
 	paused := b.Status == string(state.StatusPaused)

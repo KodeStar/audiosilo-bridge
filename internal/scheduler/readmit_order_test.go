@@ -435,3 +435,27 @@ func TestSupersedeRerunRefusesABookThatReachedReadyMeanwhile(t *testing.T) {
 		t.Fatalf("the book moved back: %+v, %v", got, err)
 	}
 }
+
+// supersede_rerun rewinds only a book it read again once its stage stopped: a
+// read that fails (here the book was deleted meanwhile) is its answer, where the
+// rewind used to go on unread, over a book that may have reached Ready.
+func TestSupersedeRerunRefusesABookItCannotReadAgain(t *testing.T) {
+	h := newHarness(t)
+	db := h.openDB(t)
+	ctx := context.Background()
+	s := New(db, h.hub, NewStubExecutor(0, 0), 1, h.workRoot, false)
+	b := h.addBook(t, db, "unread", "", "")
+	if err := db.SetBookPipelineState(ctx, b.ID, string(state.Auditing)); err != nil {
+		t.Fatal(err)
+	}
+	read, err := db.GetBook(ctx, b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.DeleteBook(ctx, b.ID); err != nil {
+		t.Fatal(err)
+	}
+	if outcome, err := s.supervisorSupersedeRerun(ctx, read, string(state.Auditing)); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("supersede_rerun of a book it could not read = %q, %v, want store.ErrNotFound", outcome, err)
+	}
+}
