@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 )
 
 // Phase 4c: an Audible account's places, both ways (the server's
@@ -145,8 +146,11 @@ var (
 	// ErrUserUnavailable is a 403 user_unavailable: the account's person is
 	// disabled, a kid or a demo account since it was mapped.
 	ErrUserUnavailable = errors.New("the account's person can't be synced for (disabled, a kid or a demo account): map the account to someone else")
-	// ErrBadCursor is AudibleProgress's 400 for a since the server can't read
-	// (a server restored from a backup, its feed rebuilt): read from the start.
+	// ErrBadCursor is AudibleProgress's 400 invalid_cursor for a since the
+	// server can't read (a server restored from a backup, its feed rebuilt):
+	// read from the start. A server before 2.7.0 answered it invalid_request
+	// with the message "...: bad cursor" (badCursor); any other 400 is the
+	// APIError, never this (bridge#50).
 	ErrBadCursor = errors.New("the server refused the progress cursor")
 	// ErrNoAudibleSync is the 404 for a route the server doesn't have (its
 	// API's not_found, or a bare 404 with no code): a server older than
@@ -194,7 +198,7 @@ func (c *Client) PostAudibleListening(ctx context.Context, account string, in Au
 // AudibleProgress reads one page of account's person's places changed after
 // since ("" from the start), at most limit (0 for MaxAudibleProgress).
 // ErrSyncOff, ErrUserUnavailable, ErrUnknownAccount, ErrNoAudibleSync,
-// ErrBadCursor (a 400 when since was sent).
+// ErrBadCursor (the server can't read since: badCursor).
 func (c *Client) AudibleProgress(ctx context.Context, account, since string, limit int) (*AudibleProgress, error) {
 	if limit <= 0 {
 		limit = MaxAudibleProgress
@@ -205,8 +209,7 @@ func (c *Client) AudibleProgress(ctx context.Context, account, since string, lim
 	}
 	var out AudibleProgress
 	if err := c.do(ctx, http.MethodGet, "/api/v1/bridge/progress", q, nil, &out); err != nil {
-		var e *APIError
-		if since != "" && errors.As(err, &e) && e.Status == http.StatusBadRequest {
+		if since != "" && badCursor(err) {
 			return nil, fmt.Errorf("%w: %w", ErrBadCursor, err)
 		}
 		return nil, syncError(err)
@@ -215,4 +218,16 @@ func (c *Client) AudibleProgress(ctx context.Context, account, since string, lim
 		out.Rows = []AudibleProgressRow{}
 	}
 	return &out, nil
+}
+
+// badCursor reports whether err is the progress feed refusing the cursor sent
+// as since: a 400 invalid_cursor, or from a server before 2.7.0 a 400
+// invalid_request whose message ends "bad cursor" (its other 400s, a missing
+// account or a bad limit, say so).
+func badCursor(err error) bool {
+	var e *APIError
+	if !errors.As(err, &e) || e.Status != http.StatusBadRequest {
+		return false
+	}
+	return e.Code == "invalid_cursor" || e.Code == "invalid_request" && strings.HasSuffix(e.Message, "bad cursor")
 }

@@ -2118,7 +2118,8 @@ internal/
             no length or a finish, answered {server_time, results, progress}) and AudibleProgress (GET
             /bridge/progress?account=&since=&limit= -> {rows, next, more, server_time}: next opaque and kept between
             polls, server_time absent before server 2.7.0); 403 sync_off -> ErrSyncOff, 403 user_unavailable -> ErrUserUnavailable, a 400
-            on a sent since -> ErrBadCursor (bridge#50), a 404 for a missing route (code not_found,
+            invalid_cursor on a sent since -> ErrBadCursor (a server before 2.7.0: invalid_request with
+            the message "...: bad cursor"; any other 400 stays the APIError, bridge#50), a 404 for a missing route (code not_found,
             or none) -> ErrNoAudibleSync (a server before 2.6.0; a 404 with any other code stays
             the APIError, bridge#50; a proxy's bare 404 while the server restarts reads the same,
             so the push waits for a second one in a row, bridge#79).
