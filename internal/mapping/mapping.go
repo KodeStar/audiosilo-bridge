@@ -260,6 +260,9 @@ type Registry struct {
 	spacing   time.Duration
 	holdUntil time.Time
 	held      int
+	// gen counts Forget calls (a pair, an unpair, a refused token): a run's
+	// reads from before one were the old link's, so they are dropped.
+	gen int
 	// checking: a Check is running; pendAll/pend are what was asked for
 	// meanwhile, which it checks right after, with pendSrc, the newest caller's
 	// link (a check asked for after a re-pair must not use the old one).
@@ -303,6 +306,21 @@ func (r *Registry) SetLibraries(libs []link.Library) (changed bool) {
 		}
 	}
 	return changed
+}
+
+// Forget drops the libraries, their checks and the hold when the link changes
+// (a pair, an unpair, a refused token): the old link's answers say nothing
+// about the new one. A run still going records nothing more of the old link's
+// and goes on only to the checks queued after this (with the new link).
+func (r *Registry) Forget() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.libs = nil
+	clear(r.results)
+	r.held, r.holdUntil = 0, time.Time{}
+	r.pendAll, r.pendSrc = false, nil
+	clear(r.pend)
+	r.gen++
 }
 
 // Library returns a server library by id.
@@ -419,6 +437,7 @@ func (r *Registry) Check(ctx context.Context, src BookSource, mount MountFunc, n
 	pace := &pacer{spacing: r.spacing}
 	var unanswered error
 	for {
+		gen := r.gen
 		var libs []link.Library
 		listed := map[int64]bool{}
 		for _, l := range r.libs {
@@ -439,6 +458,10 @@ func (r *Registry) Check(ctx context.Context, src BookSource, mount MountFunc, n
 				break // cut short: it says nothing about the library or the server
 			}
 			r.mu.Lock()
+			if r.gen != gen {
+				r.mu.Unlock()
+				break // the link changed: the rest of this pass is the old link's
+			}
 			r.record(st, err, now())
 			if err != nil {
 				unanswered = err
@@ -454,6 +477,11 @@ func (r *Registry) Check(ctx context.Context, src BookSource, mount MountFunc, n
 			}
 		}
 		r.mu.Lock()
+		if r.gen != gen {
+			// The old link's 429 or failures say nothing about the new one: its
+			// queued checks run now, and only their answers set the hold.
+			limited, unanswered, pace.asked = false, nil, false
+		}
 		if limited {
 			// Asking for the queued checks now would meet the same 429.
 			for _, l := range r.libs {
@@ -463,7 +491,9 @@ func (r *Registry) Check(ctx context.Context, src BookSource, mount MountFunc, n
 			}
 		}
 		if limited || ctx.Err() != nil || (!r.pendAll && len(r.pend) == 0) {
-			if ctx.Err() == nil {
+			// A run that asked the server nothing (every folder missing) says
+			// nothing about it either: the hold stands.
+			if ctx.Err() == nil && r.gen == gen && (unanswered != nil || pace.asked) {
 				r.holdAfter(unanswered, now())
 			}
 			r.checking, r.pendAll, r.pendSrc = false, false, nil
@@ -500,9 +530,11 @@ func checkOne(ctx context.Context, src BookSource, pace *pacer, l link.Library, 
 
 // pacer spaces a run's server reads at least spacing apart. Only a read waits:
 // a library whose folder is missing never asks, so it costs the run nothing.
+// asked: the run has asked the server since the link last changed.
 type pacer struct {
 	spacing time.Duration
 	last    time.Time
+	asked   bool
 }
 
 // wait waits out the spacing since the run's last read, or ctx's error.
@@ -512,7 +544,7 @@ func (p *pacer) wait(ctx context.Context) error {
 			return err
 		}
 	}
-	p.last = time.Now()
+	p.last, p.asked = time.Now(), true
 	return nil
 }
 
@@ -572,9 +604,15 @@ func (r *Registry) holdAfter(unanswered error, now time.Time) {
 		return
 	}
 	r.held++
-	apiErr := &link.APIError{} // no answer: no Retry-After
-	errors.As(unanswered, &apiErr)
-	wait, ok := checkHold.Wait(apiErr, r.held)
+	var apiErr *link.APIError
+	retry := link.APIError{} // no answer: no Retry-After
+	if errors.As(unanswered, &apiErr) && apiErr.RetryAfter > 0 {
+		// A zero Retry-After (or a date already past, a skewed clock) would
+		// end the hold at once: the run's Kick would beat, find the libraries
+		// due and ask again, a tight loop. It counts as none.
+		retry = *apiErr
+	}
+	wait, ok := checkHold.Wait(&retry, r.held)
 	if !ok {
 		wait = RetryMax // Backoff gives up past Max; a hold stops there
 	}

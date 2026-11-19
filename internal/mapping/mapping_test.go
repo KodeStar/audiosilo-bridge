@@ -639,3 +639,72 @@ func TestCutShortCheckRecordsNothing(t *testing.T) {
 		t.Fatal("a cut-short check held the next run")
 	}
 }
+
+// A zero Retry-After (or a past date) counts as none: a hold of nothing would
+// let the run's Kick find the libraries due and ask again at once.
+func TestZeroRetryAfterStillHolds(t *testing.T) {
+	t.Parallel()
+	r := NewRegistry()
+	at := time.Date(2026, 11, 19, 10, 0, 0, 0, time.UTC)
+	r.holdAfter(&link.APIError{Status: http.StatusTooManyRequests, RetryAfterSet: true}, at)
+	if got := r.holdUntil.Sub(at); got != RetryFirst {
+		t.Fatalf("a zero Retry-After held %v, want RetryFirst", got)
+	}
+}
+
+// A run that asked the server nothing (every folder missing) leaves the hold:
+// only an answer ends it.
+func TestRunThatAskedNothingKeepsTheHold(t *testing.T) {
+	t.Parallel()
+	missing := filepath.Join(t.TempDir(), "missing")
+	mount := func(int64, string) (string, bool) { return missing, true }
+	at := time.Date(2026, 11, 19, 10, 0, 0, 0, time.UTC)
+	r := NewRegistry()
+	r.SetLibraries([]link.Library{{ID: 1, Root: "/a"}})
+	r.holdAfter(errors.New("no answer"), at)
+	r.holdAfter(errors.New("no answer"), at)
+	r.Check(context.Background(), &scripted{err: map[int64]error{}}, mount, func() time.Time { return at }, 1)
+	if r.held != 2 || r.holdUntil.Sub(at) != 2*RetryFirst {
+		t.Fatalf("a run that asked nothing changed the hold: %d, %v", r.held, r.holdUntil.Sub(at))
+	}
+}
+
+// relinking answers the first read with a 429 after Forget (a re-pair) ran
+// mid-read, and queues a check with the new link.
+type relinking struct {
+	r     *Registry
+	next  BookSource
+	mount MountFunc
+	libs  []link.Library
+}
+
+func (s relinking) Book(context.Context, int64, string) (*link.Book, error) {
+	s.r.Forget()
+	s.r.SetLibraries(s.libs)
+	if s.r.Check(context.Background(), s.next, s.mount, time.Now) {
+		panic("the new link's check ran beside the old one")
+	}
+	return nil, &link.APIError{Status: http.StatusTooManyRequests, RetryAfter: time.Hour, RetryAfterSet: true}
+}
+
+// Forget (a pair, an unpair, a refused token) drops the hold, and an old
+// link's run still going records nothing more and holds nothing: the new
+// link's queued check runs at once.
+func TestForgetEndsTheOldLinksRun(t *testing.T) {
+	t.Parallel()
+	root, files := library(t)
+	mount := func(int64, string) (string, bool) { return root, true }
+	libs := []link.Library{{ID: 1, Root: root}}
+	r := NewRegistry()
+	r.spacing = time.Millisecond
+	r.SetLibraries(libs)
+	r.holdAfter(errors.New("no answer"), time.Now())
+	next := &scripted{book: &link.Book{Path: "Author/Book", Files: files}, err: map[int64]error{}}
+	r.Check(context.Background(), relinking{r: r, next: next, mount: mount, libs: libs}, mount, time.Now)
+	if st, ok := r.Status(1); !ok || !st.Mapped {
+		t.Fatalf("the new link's check = %+v, %v", st, ok)
+	}
+	if r.held != 0 || !r.holdUntil.IsZero() {
+		t.Fatalf("the old link's 429 held the new link: %d, %v", r.held, r.holdUntil)
+	}
+}

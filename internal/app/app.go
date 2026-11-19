@@ -309,7 +309,7 @@ func (b *Bridge) linkChanged() {
 	b.lastBeat, b.beatErr = time.Time{}, ""
 	b.acceptsSetup, b.setupRefusedAt = false, time.Time{}
 	b.libsFitAt, b.libsFitLogged = time.Time{}, false
-	b.libs.SetLibraries(nil)
+	b.libs.Forget()
 	b.mu.Unlock()
 	b.Kick()
 	b.runner.Wake()
