@@ -455,10 +455,12 @@ func putJournal(t *testing.T, root *os.Root, name string, j Journal) {
 }
 
 // caseInsensitive skips t on a filesystem that tells names apart by case
-// (Linux CI): the case-only rename it tests cannot happen there.
+// (Linux CI): the case-only rename it tests cannot happen there. Called after
+// "Fixture Show" is renamed to "fixture show", it probes the old spelling,
+// which opens the folder only when case does not count.
 func caseInsensitive(t *testing.T, root *os.Root) {
 	t.Helper()
-	if _, err := root.Lstat("fixture show"); err != nil {
+	if _, err := root.Lstat("Fixture Show"); err != nil {
 		t.Skip("the filesystem is case-sensitive")
 	}
 }
