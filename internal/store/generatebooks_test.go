@@ -110,6 +110,50 @@ func TestOpenGenerateJobsForBook(t *testing.T) {
 	}
 }
 
+// GenerateShareOff: an open sidecars.generate job that follows the book and
+// heard share_off keeps it local; a finished one, another kind's, or one that
+// never heard it doesn't.
+func TestGenerateShareOff(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	b, _ := db.CreateBook(ctx, NewBook{SourcePath: "/s", WorkDir: "/w", Title: "S"})
+	follow := func(id int64, kind string, shareOff bool) {
+		t.Helper()
+		if err := db.RecordClaim(ctx, ServerJob{ID: id, Kind: kind, Attempt: 1, ShareOff: shareOff}); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.PutGenerateBook(ctx, GenerateBook{ServerJobID: id, BookID: &b.ID, LibraryID: 1, RelPath: "S"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	off := func() bool {
+		t.Helper()
+		got, err := db.GenerateShareOff(ctx, b.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	follow(1, "sidecars.generate", false)
+	follow(2, "chapters.detect", true)
+	if off() {
+		t.Fatal("share_off with no generate job that heard it")
+	}
+	follow(3, "sidecars.generate", true)
+	if !off() {
+		t.Fatal("an open generate job heard share_off, but the book reads as shared")
+	}
+	if got, _ := db.GenerateShareOff(ctx, b.ID+1); got {
+		t.Fatal("another book reads share_off")
+	}
+	if err := db.FinishServerJob(ctx, 3, 1, JobCancelled, nil, ""); err != nil {
+		t.Fatal(err)
+	}
+	if off() {
+		t.Fatal("a finished job's share_off still reads")
+	}
+}
+
 func TestCostSums(t *testing.T) {
 	db := open(t)
 	ctx := context.Background()

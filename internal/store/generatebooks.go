@@ -186,6 +186,19 @@ func (db *DB) GenerateBookFollowed(ctx context.Context, bookID int64) (bool, err
 	return n > 0, err
 }
 
+// GenerateShareOff reports whether an open sidecars.generate job that follows
+// the engine book bookID heard share_off (ServerJob.ShareOff, server#218). The
+// contributing stage asks it before it files, so the book stays local even
+// when no run of that job is up to turn it local (one resumed after a restart
+// still waits for its lane slot).
+func (db *DB) GenerateShareOff(ctx context.Context, bookID int64) (bool, error) {
+	var off bool
+	err := db.sql.QueryRowContext(ctx,
+		`SELECT EXISTS (SELECT 1 FROM `+openJobsSQL+` AND g.book_id = ? AND j.kind = 'sidecars.generate' AND j.share_off = 1)`,
+		bookID).Scan(&off)
+	return off, err
+}
+
 // OpenGenerateJobsForBook returns the ids of the open server jobs (still running
 // here, their mapping not ended) other than exceptJob that follow the engine book
 // bookID.

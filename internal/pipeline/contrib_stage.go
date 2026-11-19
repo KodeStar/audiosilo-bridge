@@ -151,6 +151,17 @@ func (e *Executor) contribute(ctx context.Context, book store.Book, r scheduler.
 			book.ContribMode = now.ContribMode
 		}
 	}
+	// A job that heard share_off whose run isn't up to turn its book local (one
+	// resumed after a restart still waits for its lane slot) keeps it local all
+	// the same, before the work's lookup can park the book for a share.
+	if e.contribModeFor(book) != contribModeLocal {
+		switch local, err := e.turnedLocal(ctx, book.ID); {
+		case err != nil:
+			return scheduler.StageResult{}, fmt.Errorf("contributing: %w", err)
+		case local:
+			book.ContribMode = store.ContribModeLocal
+		}
+	}
 	start := time.Now()
 
 	// 1. Load which sidecars exist. At least one must be present (synthesis normally
@@ -202,8 +213,13 @@ func (e *Executor) contribute(ctx context.Context, book store.Book, r scheduler.
 	// while too. Only a turn to local is taken (a slug resolved in local mode
 	// may be a placeholder, never one to file under), here and before each
 	// dimension's filing (submitIssue).
-	if e.contribModeFor(book) != contribModeLocal && e.turnedLocal(ctx, book.ID) {
-		book.ContribMode = store.ContribModeLocal
+	if e.contribModeFor(book) != contribModeLocal {
+		switch local, err := e.turnedLocal(ctx, book.ID); {
+		case err != nil:
+			return scheduler.StageResult{}, fmt.Errorf("contributing: %w", err)
+		case local:
+			book.ContribMode = store.ContribModeLocal
+		}
 	}
 	err = e.submitContributions(ctx, book, slug, artifacts, placeholderNote, auditNote)
 	if errors.Is(err, errTurnedLocal) {
@@ -497,7 +513,7 @@ func (e *Executor) submitContributions(ctx context.Context, book store.Book, slu
 // with errTurnedLocal.
 func (e *Executor) submitIssue(ctx context.Context, book store.Book, slug string, artifacts []contribArtifact, auditNote string) error {
 	return e.submitIssueWith(ctx, book, slug, artifacts, auditNote, rowSettled,
-		func() bool { return e.turnedLocal(ctx, book.ID) })
+		func() (bool, error) { return e.turnedLocal(ctx, book.ID) })
 }
 
 // errTurnedLocal is a filing the contributing stage stopped short of: the book
@@ -505,20 +521,36 @@ func (e *Executor) submitIssue(ctx context.Context, book store.Book, slug string
 // sidecars.generate job whose share the server turned off).
 var errTurnedLocal = errors.New("contributing: the book turned local while it filed")
 
-// turnedLocal reports whether book id's own mode is local now.
-func (e *Executor) turnedLocal(ctx context.Context, id int64) bool {
+// turnedLocal reports whether book id is local now: its own mode says so, or an
+// open sidecars.generate job that follows it heard share_off
+// (store.GenerateShareOff), which turns it local here (store.KeepBookLocal)
+// whether or not that job's run is up to (its share guard turns it local only
+// once the run starts, and a job resumed after a restart can wait for its lane
+// slot while the engine re-admits the book). An error is the stage's: a book
+// whose mode can't be read is never filed for.
+func (e *Executor) turnedLocal(ctx context.Context, id int64) (bool, error) {
 	if e.db == nil {
-		return false
+		return false, nil
 	}
 	now, err := e.db.GetBook(ctx, id)
-	return err == nil && now.ContribMode == store.ContribModeLocal
+	if err != nil {
+		return false, err
+	}
+	if now.ContribMode == store.ContribModeLocal {
+		return true, nil
+	}
+	off, err := e.db.GenerateShareOff(ctx, id)
+	if err != nil || !off {
+		return false, err
+	}
+	return e.db.KeepBookLocal(ctx, id)
 }
 
 // submitIssueWith is submitIssue with the rule for a row that is already settled
 // (sidecars.contribute files again over a local or covered one) and turnedLocal
 // (nil for sidecars.contribute, which files a local book's sidecars on purpose).
 func (e *Executor) submitIssueWith(ctx context.Context, book store.Book, slug string, artifacts []contribArtifact, auditNote string,
-	settled func([]store.Contribution, string) bool, turnedLocal func() bool) error {
+	settled func([]store.Contribution, string) bool, turnedLocal func() (bool, error)) error {
 	cli, err := e.contribClient(ctx)
 	if err != nil {
 		return err

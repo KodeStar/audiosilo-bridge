@@ -194,9 +194,10 @@ func filingUnknown(kind, what string, err error) error {
 // that can't reach back to a marker over a day old makes it again: refileStale).
 // recorded is the issue the dimension's row names (0 for none), never the one
 // adopted. turnedLocal (nil: never) is asked just before anything is made: true
-// stops the filing with errTurnedLocal.
+// stops the filing with errTurnedLocal, and an error stops it as it is (a book
+// that can't be read is never filed for).
 func (e *Executor) fileIssue(ctx context.Context, cli *contrib.Client, bookID int64, kind, slug string, payload []byte,
-	recorded int, turnedLocal func() bool) (contrib.Issue, error) {
+	recorded int, turnedLocal func() (bool, error)) (contrib.Issue, error) {
 	f, err := e.readFiling(ctx, bookID, kind)
 	if err != nil {
 		return contrib.Issue{}, err
@@ -226,8 +227,13 @@ func (e *Executor) fileIssue(ctx context.Context, cli *contrib.Client, bookID in
 	}
 	// An issue an earlier try filed is adopted above all the same; nothing new is
 	// made for a book turned local since the stage read its mode.
-	if turnedLocal != nil && turnedLocal() {
-		return contrib.Issue{}, errTurnedLocal
+	if turnedLocal != nil {
+		switch local, err := turnedLocal(); {
+		case err != nil:
+			return contrib.Issue{}, err
+		case local:
+			return contrib.Issue{}, errTurnedLocal
+		}
 	}
 	if sum := hexSHA256(payload); f.Payload != sum {
 		f = filing{Payload: sum} // a gist made for other content isn't this one's

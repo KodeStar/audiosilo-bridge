@@ -1279,6 +1279,88 @@ func TestContributeLocalSkipsTheReleaseGate(t *testing.T) {
 	}
 }
 
+// followByShareOffJob maps an open sidecars.generate job to book (as a job
+// resumed after a restart has it before its run starts, so no share guard
+// turned the book local), the job having heard share_off when shareOff.
+func followByShareOffJob(t *testing.T, db *store.DB, jobID int64, book store.Book, shareOff bool) {
+	t.Helper()
+	ctx := context.Background()
+	if err := db.RecordClaim(ctx, store.ServerJob{ID: jobID, Kind: "sidecars.generate", Attempt: 1, ShareOff: shareOff}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.PutGenerateBook(ctx, store.GenerateBook{ServerJobID: jobID, BookID: &book.ID, LibraryID: 1, RelPath: "B"}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestContributeHonoursAStoredShareOff: a book re-admitted at contributing
+// while its sidecars.generate job, which heard share_off (server_jobs.share_off),
+// still waits for its lane slot (no share guard yet: the book is still in
+// issue mode) files nothing: the stage turns it local and exports. Allowed: a
+// job that never heard it files, and sidecars.contribute's Share of the book
+// still files, as the admin asked.
+func TestContributeHonoursAStoredShareOff(t *testing.T) {
+	ctx := context.Background()
+	db := openContribDB(t)
+	gh := newFakeGitHub(t)
+	export := t.TempDir()
+	b := contribBook(t, db, store.NewBook{WorkID: "reacher-01", ContribMode: store.ContribModeIssue}, baseChars("x"), baseRecaps("x"))
+	followByShareOffJob(t, db, 7, b, true)
+	exe := NewExecutor(contribConfig(t, db, contribModeIssue, gh.srv.URL, "", export, fakeTokenResolver{token: "ghp_x"}))
+	if _, err := exe.Execute(ctx, b, state.Contributing, scheduler.StageReport{}); err != nil {
+		t.Fatalf("contribute: %v", err)
+	}
+	if n := gh.issueCount(); n != 0 {
+		t.Fatalf("issues filed = %d, want none", n)
+	}
+	if got, err := db.GetBook(ctx, b.ID); err != nil || got.ContribMode != store.ContribModeLocal {
+		t.Fatalf("book after the stage = %+v %v, want local", got, err)
+	}
+	if _, err := os.Stat(filepath.Join(export, "reacher-01", charactersFileName)); err != nil {
+		t.Fatalf("local export: %v", err)
+	}
+
+	if _, err := exe.Share(ctx, b.ID, "", nil); err != nil || gh.issueCount() != 2 {
+		t.Fatalf("share of the book: %v, issues %d, want 2", err, gh.issueCount())
+	}
+
+	shared := contribBook(t, db, store.NewBook{WorkID: "reacher-02", ContribMode: store.ContribModeIssue}, baseChars("y"), baseRecaps("y"))
+	followByShareOffJob(t, db, 8, shared, false)
+	if _, err := exe.Execute(ctx, shared, state.Contributing, scheduler.StageReport{}); err != nil {
+		t.Fatalf("contribute (share on): %v", err)
+	}
+	if n := gh.issueCount(); n != 4 {
+		t.Fatalf("issues filed = %d, want the shared book's two more", n)
+	}
+}
+
+// TestContributeHonoursAShareOffHeardWhileFiling: share_off stored for the
+// book's job after the stage filed its first dimension (no share guard runs)
+// files no other; the rest is exported locally.
+func TestContributeHonoursAShareOffHeardWhileFiling(t *testing.T) {
+	ctx := context.Background()
+	db := openContribDB(t)
+	gh := newFakeGitHub(t)
+	export := t.TempDir()
+	b := contribBook(t, db, store.NewBook{WorkID: "reacher-01", ContribMode: store.ContribModeIssue}, baseChars("x"), baseRecaps("x"))
+	followByShareOffJob(t, db, 7, b, false)
+	gh.onIssue = func() {
+		if err := db.SetServerJobShareOff(ctx, 7, 1); err != nil {
+			t.Error(err)
+		}
+	}
+	exe := NewExecutor(contribConfig(t, db, contribModeIssue, gh.srv.URL, "", export, fakeTokenResolver{token: "ghp_x"}))
+	if _, err := exe.Execute(ctx, b, state.Contributing, scheduler.StageReport{}); err != nil {
+		t.Fatalf("contribute: %v", err)
+	}
+	if n := gh.issueCount(); n != 1 {
+		t.Fatalf("issues filed = %d, want the first dimension's only", n)
+	}
+	if rows := rowsByKind(t, db, b.ID); rows[store.ContribKindRecaps].Status != store.ContribStatusLocal {
+		t.Fatalf("recaps row = %+v, want local", rows[store.ContribKindRecaps])
+	}
+}
+
 // The contributing stage files through the same marker: a retry after a lost
 // answer adopts the issue rather than filing a second.
 func TestContributeRetryAdoptsALostIssue(t *testing.T) {
