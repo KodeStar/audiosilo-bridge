@@ -380,6 +380,7 @@ func (h *Fetch) run(parent context.Context, claimed *jobs.Job, rep *jobs.Reporte
 		// from byte 0 (the loop's one GET).
 		if !c.resumes(enc) {
 			slog.Info("podcasts: an episode's enclosure changed since its partial was kept; it is downloaded again", "partial", c.partialName())
+			_ = settle(ctx) // the clear finds the partial where it is now (a private feed's fetch may take a while)
 			if err := s.restartPartial(job, root, &c, errors.New("the episode's enclosure changed")); err != nil {
 				return nil, err
 			}
