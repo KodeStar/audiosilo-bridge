@@ -934,7 +934,11 @@ func (r *Runner) report(ctx context.Context, srv Server, sj store.ServerJob) {
 			// log here.
 			r.log.Info("bridge: the server had cancelled a job that failed; it is recorded cancelled", "job", sj.ID, "err", sj.Error)
 			if ferr := r.store.FinishServerJob(ctx, sj.ID, sj.Attempt, store.JobCancelled, sj.Result, ""); ferr != nil {
+				// Still failed and unreported here: sent again, which the
+				// server answers 409 cancelled.
 				r.log.Warn("bridge: recording a job failed", "job", sj.ID, "err", ferr)
+				r.retry.Store(true)
+				return
 			}
 		} else if errors.Is(err, link.ErrNotHeld) {
 			r.log.Info("bridge: the server had moved on from a job; its report is dropped", "job", sj.ID)

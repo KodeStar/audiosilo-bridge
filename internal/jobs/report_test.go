@@ -2,10 +2,12 @@ package jobs
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -435,6 +437,65 @@ func TestRetriedFailureTheServerCancelled(t *testing.T) {
 				t.Fatalf("stored = %+v, %v; want no error on a cancelled job", sj, err)
 			}
 		})
+	}
+}
+
+// cancelFailStore fails the first FinishServerJob that records a cancel.
+type cancelFailStore struct {
+	*store.DB
+	failed atomic.Int32
+}
+
+func (s *cancelFailStore) FinishServerJob(ctx context.Context, id int64, attempt int, state string, result json.RawMessage, errText string) error {
+	if state == store.JobCancelled && s.failed.CompareAndSwap(0, 1) {
+		return errors.New("disk I/O error")
+	}
+	return s.DB.FinishServerJob(ctx, id, attempt, state, result, errText)
+}
+
+// A failure the server stored cancelled, which the Bridge's store then couldn't
+// record as cancelled, stays an unreported failure: its report goes again until
+// the Bridge's page reads cancelled too, never reported and left failed.
+func TestCancelledFailureTheStoreMissed(t *testing.T) {
+	t.Parallel()
+	db, srv := openStore(t), newFakeServer()
+	st := &cancelFailStore{DB: db}
+	srv.add(&link.Job{ID: 26, Kind: "k.store", Attempts: 1})
+	opts := testOpts()
+	opts.Keepalive, opts.ReportRetry = time.Hour, time.Hour
+	r := New(st, func() Server { return srv }, nil, opts, handler{kind: "k.store", lane: LaneLight,
+		fn: func(context.Context, Job, *Reporter) (any, error) {
+			srv.setFailing(true)
+			return nil, errors.New("the download was interrupted")
+		}})
+	var flipped bool
+	runFor(t, r, func() bool {
+		if !flipped {
+			sj, err := db.GetServerJob(context.Background(), 26)
+			if err != nil || sj.State != store.JobFailed || srv.triesOf(26) < 3 { // first report, probe, failed end
+				return false
+			}
+			srv.mu.Lock()
+			srv.cancel[26], srv.failing = true, false
+			srv.mu.Unlock()
+			flipped = true
+		}
+		return storedAs(db, 26, store.JobCancelled)
+	})
+	if st.failed.Load() != 1 {
+		t.Fatal("the store never failed to record the cancel")
+	}
+	// The report whose answer the store missed, then the one that recorded it.
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+	var failures int
+	for _, u := range srv.updates[26] {
+		if u.State != nil && *u.State == link.StateFailed {
+			failures++
+		}
+	}
+	if failures < 2 {
+		t.Fatalf("the failure reached the server %d times, want it sent again", failures)
 	}
 }
 
