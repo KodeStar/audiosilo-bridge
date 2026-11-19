@@ -1162,7 +1162,8 @@ func TestContributeReadsTheBooksModeNow(t *testing.T) {
 	gh := newFakeGitHub(t)
 	export := t.TempDir()
 	b := contribBook(t, db, store.NewBook{WorkID: "reacher-01", ContribMode: store.ContribModeIssue}, baseChars("x"), baseRecaps("x"))
-	if _, err := db.KeepBookLocal(context.Background(), b.ID); err != nil {
+	followByShareOffJob(t, db, 7, b, false)
+	if err := db.SetServerJobShareOff(context.Background(), 7, 1); err != nil {
 		t.Fatal(err)
 	}
 	cfg := contribConfig(t, db, contribModeIssue, gh.srv.URL, "", export, fakeTokenResolver{token: "ghp_x"})
@@ -1180,6 +1181,25 @@ func TestContributeReadsTheBooksModeNow(t *testing.T) {
 	}
 }
 
+// TestContributeTakesAShareResumedSinceTheDispatch: a book the dispatch read
+// local that the store has in issue mode again (a share job that follows it
+// again resumed its no_share_job share) files its issues. Allowed: the issues.
+// A book still local in the store stays local (TestContributeLocalMode).
+func TestContributeTakesAShareResumedSinceTheDispatch(t *testing.T) {
+	db := openContribDB(t)
+	gh := newFakeGitHub(t)
+	b := contribBook(t, db, store.NewBook{WorkID: "reacher-01", ContribMode: store.ContribModeIssue}, baseChars("x"), baseRecaps("x"))
+	stale := b
+	stale.ContribMode = store.ContribModeLocal
+	cfg := contribConfig(t, db, contribModeLocal, gh.srv.URL, "", t.TempDir(), fakeTokenResolver{token: "ghp_x"})
+	if _, err := NewExecutor(cfg).Execute(context.Background(), stale, state.Contributing, scheduler.StageReport{}); err != nil {
+		t.Fatalf("contribute: %v", err)
+	}
+	if n := gh.issueCount(); n != 2 {
+		t.Fatalf("issues filed = %d, want both", n)
+	}
+}
+
 // TestContributeTurnedLocalWhileResolving: a book turned local while the stage
 // looked its work up (after the read that follows the description) still
 // files nothing. Denied: the issues. Allowed: the local export under the slug
@@ -1190,8 +1210,9 @@ func TestContributeTurnedLocalWhileResolving(t *testing.T) {
 	export := t.TempDir()
 	meta := newFakeMeta(t, nil, map[string]metaWorkFixture{"reacher-01": {title: "Killing Floor"}})
 	b := contribBook(t, db, store.NewBook{WorkID: "reacher-01", ContribMode: store.ContribModeIssue}, baseChars("x"), baseRecaps("x"))
+	followByShareOffJob(t, db, 7, b, false)
 	meta.onWork = func() {
-		if _, err := db.KeepBookLocal(context.Background(), b.ID); err != nil {
+		if err := db.SetServerJobShareOff(context.Background(), 7, 1); err != nil {
 			t.Error(err)
 		}
 	}
@@ -1218,8 +1239,9 @@ func TestContributeTurnedLocalWhileFiling(t *testing.T) {
 	gh := newFakeGitHub(t)
 	export := t.TempDir()
 	b := contribBook(t, db, store.NewBook{WorkID: "reacher-01", ContribMode: store.ContribModeIssue}, baseChars("x"), baseRecaps("x"))
+	followByShareOffJob(t, db, 7, b, false)
 	gh.onIssue = func() {
-		if _, err := db.KeepBookLocal(ctx, b.ID); err != nil {
+		if err := db.SetServerJobShareOff(ctx, 7, 1); err != nil {
 			t.Error(err)
 		}
 	}
@@ -1280,9 +1302,10 @@ func TestContributeLocalSkipsTheReleaseGate(t *testing.T) {
 	}
 }
 
-// followByShareOffJob maps an open sidecars.generate job to book (as a job
-// resumed after a restart has it before its run starts, so no share guard
-// turned the book local), the job having heard share_off when shareOff.
+// followByShareOffJob maps an open sidecars.generate job to book, the job
+// having heard share_off when shareOff (the store then turns the book local,
+// whether or not a run of the job is up: one resumed after a restart can still
+// wait for its lane slot).
 func followByShareOffJob(t *testing.T, db *store.DB, jobID int64, book store.Book, shareOff bool) {
 	t.Helper()
 	ctx := context.Background()
@@ -1296,10 +1319,10 @@ func followByShareOffJob(t *testing.T, db *store.DB, jobID int64, book store.Boo
 
 // TestContributeHonoursAStoredShareOff: a book re-admitted at contributing
 // while its sidecars.generate job, which heard share_off (server_jobs.share_off),
-// still waits for its lane slot (no share guard yet: the book is still in
-// issue mode) files nothing: the stage turns it local and exports. Allowed: a
-// job that never heard it files, and sidecars.contribute's Share of the book
-// still files, as the admin asked.
+// still waits for its lane slot files nothing: the store turned it local with
+// the job's share_off, and the stage exports. Allowed: a job that never heard
+// it files, and sidecars.contribute's Share of the book still files, as the
+// admin asked.
 func TestContributeHonoursAStoredShareOff(t *testing.T) {
 	ctx := context.Background()
 	db := openContribDB(t)
@@ -1336,8 +1359,8 @@ func TestContributeHonoursAStoredShareOff(t *testing.T) {
 }
 
 // TestContributeHonoursAShareOffHeardWhileFiling: share_off stored for the
-// book's job after the stage filed its first dimension (no share guard runs)
-// files no other; the rest is exported locally.
+// book's job after the stage filed its first dimension (no run of the job
+// acts on it) files no other; the rest is exported locally.
 func TestContributeHonoursAShareOffHeardWhileFiling(t *testing.T) {
 	ctx := context.Background()
 	db := openContribDB(t)
@@ -1365,9 +1388,11 @@ func TestContributeHonoursAShareOffHeardWhileFiling(t *testing.T) {
 // TestContributeAsksTheServerBeforeFiling: the server turned the share off
 // after the book's job last reported (no answer carried it yet, so nothing
 // here knows), and the stage asks it before filing (Config.ShareOff): nothing
-// is filed, and the book turns local and exports. Allowed: a share still on
-// files, the server asked before each issue, so a turn-off between them keeps
-// the rest local (v2.7.0 verify: the book filed 13 s after the turn-off).
+// is filed, and the book exports locally (the job's own answer turns the book
+// local in the store). Allowed: a share still on files, the server asked before
+// each issue, so a turn-off between them keeps the rest local (v2.7.0 verify:
+// the book filed 13 s after the turn-off). Only asks count: the look before the
+// stage's lookups (ask false) sends nothing.
 func TestContributeAsksTheServerBeforeFiling(t *testing.T) {
 	ctx := context.Background()
 	db := openContribDB(t)
@@ -1376,7 +1401,12 @@ func TestContributeAsksTheServerBeforeFiling(t *testing.T) {
 	var asked atomic.Int32
 	offFrom := int32(1) // the ask from which the server says share_off
 	cfg := contribConfig(t, db, contribModeIssue, gh.srv.URL, "", export, fakeTokenResolver{token: "ghp_x"})
-	cfg.ShareOff = func(context.Context, int64) (bool, error) { return asked.Add(1) >= offFrom, nil }
+	cfg.ShareOff = func(_ context.Context, _ int64, ask bool) (string, error) {
+		if ask && asked.Add(1) >= offFrom {
+			return store.ShareSkippedContributionsOff, nil
+		}
+		return "", nil
+	}
 	exe := NewExecutor(cfg)
 
 	b := contribBook(t, db, store.NewBook{WorkID: "reacher-01", ContribMode: store.ContribModeIssue}, baseChars("x"), baseRecaps("x"))
@@ -1386,11 +1416,17 @@ func TestContributeAsksTheServerBeforeFiling(t *testing.T) {
 	if n := gh.issueCount(); n != 0 || asked.Load() == 0 {
 		t.Fatalf("issues filed = %d (server asked %d times), want none", n, asked.Load())
 	}
-	if got, err := db.GetBook(ctx, b.ID); err != nil || got.ContribMode != store.ContribModeLocal {
-		t.Fatalf("book after the stage = %+v %v, want local", got, err)
+	if rows := rowsByKind(t, db, b.ID); rows[store.ContribKindCharacters].Status != store.ContribStatusLocal {
+		t.Fatalf("characters row = %+v, want local", rows[store.ContribKindCharacters])
 	}
 	if _, err := os.Stat(filepath.Join(export, "reacher-01", charactersFileName)); err != nil {
 		t.Fatalf("local export: %v", err)
+	}
+	// Kept local in the store too, with why: the job's result says so even when
+	// only the answer here (the Reporter's share_off) turned it.
+	if got, err := db.GetBook(ctx, b.ID); err != nil || got.ContribMode != store.ContribModeLocal ||
+		got.ShareSkipped != store.ShareSkippedContributionsOff {
+		t.Fatalf("book after the stage = %+v %v, want local, contributions_off", got, err)
 	}
 
 	// On for the check before filing and the first issue, off before the second.
@@ -1419,7 +1455,12 @@ func TestContributeAsksAgainAfterTheGist(t *testing.T) {
 	var asked atomic.Int32
 	cfg := contribConfig(t, db, contribModeIssue, gh.srv.URL, "", t.TempDir(), fakeTokenResolver{token: "ghp_x"})
 	// On for the check before filing and the one before the gist, off after it.
-	cfg.ShareOff = func(context.Context, int64) (bool, error) { return asked.Add(1) >= 3, nil }
+	cfg.ShareOff = func(_ context.Context, _ int64, ask bool) (string, error) {
+		if ask && asked.Add(1) >= 3 {
+			return store.ShareSkippedContributionsOff, nil
+		}
+		return "", nil
+	}
 	exe := NewExecutor(cfg)
 	b := contribBook(t, db, store.NewBook{WorkID: "reacher-01", ContribMode: store.ContribModeIssue}, hugeChars(), baseRecaps("x"))
 	if _, err := exe.Execute(ctx, b, state.Contributing, scheduler.StageReport{}); err != nil {
@@ -1448,7 +1489,12 @@ func TestContributeWaitsWhenTheServerCantBeAsked(t *testing.T) {
 	db := openContribDB(t)
 	gh := newFakeGitHub(t)
 	cfg := contribConfig(t, db, contribModeIssue, gh.srv.URL, "", t.TempDir(), fakeTokenResolver{token: "ghp_x"})
-	cfg.ShareOff = func(context.Context, int64) (bool, error) { return false, errors.New("dial tcp: connection refused") }
+	cfg.ShareOff = func(_ context.Context, _ int64, ask bool) (string, error) {
+		if !ask {
+			return "", nil // reachable when the stage started
+		}
+		return "", errors.New("dial tcp: connection refused")
+	}
 	exe := NewExecutor(cfg)
 	b := contribBook(t, db, store.NewBook{WorkID: "reacher-01", ContribMode: store.ContribModeIssue}, baseChars("x"), baseRecaps("x"))
 	_, err := exe.Execute(ctx, b, state.Contributing, scheduler.StageReport{})
@@ -1469,6 +1515,99 @@ func TestContributeWaitsWhenTheServerCantBeAsked(t *testing.T) {
 	}
 }
 
+// TestContributeWaitsBeforeItsLookups: a share job that can't be asked at all
+// (no run of it here, the Bridge unpaired or its token refused: known without
+// a request) parks the book share_unconfirmed before the work's lookups, so
+// the park's retry each minute doesn't redo them; nothing is filed. A book
+// whose mode can't be read parks the same way rather than failing the stage.
+// Allowed: a share that can be asked looks the work up and files.
+func TestContributeWaitsBeforeItsLookups(t *testing.T) {
+	ctx := context.Background()
+	db := openContribDB(t)
+	gh := newFakeGitHub(t)
+	meta := newFakeMeta(t, nil, map[string]metaWorkFixture{"reacher-01": {title: "Killing Floor"}})
+	var lookups atomic.Int32
+	meta.onWork = func() { lookups.Add(1) }
+	cfg := contribConfig(t, db, contribModeIssue, gh.srv.URL, meta.srv.URL, t.TempDir(), fakeTokenResolver{token: "ghp_x"})
+	cfg.ShareOff = func(context.Context, int64, bool) (string, error) {
+		return "", errors.New("the Bridge isn't linked to the job's server now")
+	}
+	exe := NewExecutor(cfg)
+	b := contribBook(t, db, store.NewBook{WorkID: "reacher-01", ContribMode: store.ContribModeIssue}, baseChars("x"), baseRecaps("x"))
+	_, err := exe.Execute(ctx, b, state.Contributing, scheduler.StageReport{})
+	var park *scheduler.ParkError
+	if !errors.As(err, &park) || park.Code != state.ParkShareUnconfirmed || park.Reason != ShareUnconfirmedMsg ||
+		park.RetryAfter.IsZero() {
+		t.Fatalf("contribute = %v, want a share_unconfirmed park that looks again", err)
+	}
+	if lookups.Load() != 0 || gh.issueCount() != 0 {
+		t.Fatalf("work lookups %d, issues %d: want none before the share is confirmed", lookups.Load(), gh.issueCount())
+	}
+
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	read, err := exe.askedLocal(ctx, b.ID, false)
+	if !errors.As(err, &park) || park.Code != state.ParkShareUnconfirmed || park.Reason != ShareUnreadMsg || read {
+		t.Fatalf("a mode that can't be read = %v %v, want a share_unconfirmed park", read, err)
+	}
+
+	db2 := openContribDB(t)
+	cfg = contribConfig(t, db2, contribModeIssue, gh.srv.URL, meta.srv.URL, t.TempDir(), fakeTokenResolver{token: "ghp_x"})
+	cfg.ShareOff = func(context.Context, int64, bool) (string, error) { return "", nil }
+	b2 := contribBook(t, db2, store.NewBook{WorkID: "reacher-01", ContribMode: store.ContribModeIssue}, baseChars("x"), baseRecaps("x"))
+	if _, err := NewExecutor(cfg).Execute(ctx, b2, state.Contributing, scheduler.StageReport{}); err != nil {
+		t.Fatalf("contribute (askable): %v", err)
+	}
+	if lookups.Load() == 0 || gh.issueCount() != 2 {
+		t.Fatalf("work lookups %d, issues %d: want the lookup and both issues", lookups.Load(), gh.issueCount())
+	}
+}
+
+// TestContributeKeepsABookNoShareJobFollowsLocal: a book in issue mode that no
+// open generate-and-share job follows (a fault left it running alone: a
+// crash before its job's mapping, a job's end that couldn't stop it) files
+// nothing: it exports locally, and the store keeps it local with why
+// (no_share_job). Allowed: a book whose share job says it still shares files.
+func TestContributeKeepsABookNoShareJobFollowsLocal(t *testing.T) {
+	ctx := context.Background()
+	db := openContribDB(t)
+	gh := newFakeGitHub(t)
+	export := t.TempDir()
+	var shares atomic.Bool
+	cfg := contribConfig(t, db, contribModeIssue, gh.srv.URL, "", export, fakeTokenResolver{token: "ghp_x"})
+	cfg.ShareOff = func(context.Context, int64, bool) (string, error) {
+		if shares.Load() {
+			return "", nil
+		}
+		return store.ShareSkippedNoShareJob, nil
+	}
+	exe := NewExecutor(cfg)
+	b := contribBook(t, db, store.NewBook{WorkID: "reacher-01", ContribMode: store.ContribModeIssue}, baseChars("x"), baseRecaps("x"))
+	if _, err := exe.Execute(ctx, b, state.Contributing, scheduler.StageReport{}); err != nil {
+		t.Fatalf("contribute: %v", err)
+	}
+	if n := gh.issueCount(); n != 0 {
+		t.Fatalf("issues filed = %d, want none", n)
+	}
+	if got, err := db.GetBook(ctx, b.ID); err != nil || got.ContribMode != store.ContribModeLocal ||
+		got.ShareSkipped != store.ShareSkippedNoShareJob {
+		t.Fatalf("book after the stage = %+v %v, want local, no_share_job", got, err)
+	}
+	if _, err := os.Stat(filepath.Join(export, "reacher-01", charactersFileName)); err != nil {
+		t.Fatalf("local export: %v", err)
+	}
+
+	shares.Store(true)
+	shared := contribBook(t, db, store.NewBook{WorkID: "reacher-02", ContribMode: store.ContribModeIssue}, baseChars("y"), baseRecaps("y"))
+	if _, err := exe.Execute(ctx, shared, state.Contributing, scheduler.StageReport{}); err != nil {
+		t.Fatalf("contribute (share on): %v", err)
+	}
+	if n := gh.issueCount(); n != 2 {
+		t.Fatalf("issues filed = %d, want both", n)
+	}
+}
+
 // TestContributeAskEndedWithTheStage: an ask cut short by the stage's own
 // context (a pause, a cancel, the Bridge stopping) is that context's error,
 // not a park saying the server couldn't be asked, and nothing is filed.
@@ -1478,7 +1617,7 @@ func TestContributeAskEndedWithTheStage(t *testing.T) {
 	db := openContribDB(t)
 	gh := newFakeGitHub(t)
 	cfg := contribConfig(t, db, contribModeIssue, gh.srv.URL, "", t.TempDir(), fakeTokenResolver{token: "ghp_x"})
-	cfg.ShareOff = func(ctx context.Context, _ int64) (bool, error) { cancel(); return false, ctx.Err() }
+	cfg.ShareOff = func(ctx context.Context, _ int64, _ bool) (string, error) { cancel(); return "", ctx.Err() }
 	exe := NewExecutor(cfg)
 	b := contribBook(t, db, store.NewBook{WorkID: "reacher-01", ContribMode: store.ContribModeIssue}, baseChars("x"), baseRecaps("x"))
 	_, err := exe.Execute(ctx, b, state.Contributing, scheduler.StageReport{})

@@ -93,8 +93,9 @@ type Bridge struct {
 	// (endpoint.NewClient: bounded, no redirects).
 	endpointClient *http.Client
 	engine         engineState
-	// wakeParked wakes the describe jobs parked with a code a change answers
-	// (gen.WakeParked; a test watches it).
+	// wakeParked wakes the jobs parked in their own loop with a code a change
+	// answers (gen.WakeParked: describe jobs, a generate job's owed share; a
+	// test watches it).
 	wakeParked func(state.ParkCode) int
 	// hub is the ASR workers' queue and registry (Phase 1b); router the
 	// engine's ASR backend over it, once the engine has started.
@@ -255,6 +256,9 @@ func New(ctx context.Context, opts Options) (*Bridge, string, error) {
 	b.runner = jobs.New(db, b.server, b.tokenRefused, jobs.Options{Log: opts.Logger, ServerID: serverID},
 		verifier, b.gen, b.gen.DescribeJob(), b.gen.ChaptersJob(), b.gen.ReadalongJob(), b.gen.ContributeJob(), corrector, b.podcasts, b.podcasts.PollJob(), b.podcasts.FetchJob(), b.podcasts.RetainJob(),
 		audiblePoll, audibleImport, audibleSync, b.newLibrivox(meta, opts.Logger, serverID))
+	// The contributing stage asks a share job's run about its share through the
+	// runner, which finds a job still waiting for its lane slot too.
+	b.gen.AskThrough(b.runner)
 	conn.onChange = b.linkChanged
 	return b, oneTime, nil
 }

@@ -44,6 +44,18 @@ type ShareResult struct {
 // match, else its exact identifiers). A missing GitHub credential is the
 // contributing stage's park (ParkContribUnavailable).
 func (e *Executor) Share(ctx context.Context, bookID int64, workID string, dims []string) (ShareResult, error) {
+	return e.ShareChecked(ctx, bookID, workID, dims, nil)
+}
+
+// ErrShareStopped is ShareChecked's answer when stopped said the share no
+// longer stands: what was filed before stays filed, nothing more is.
+var ErrShareStopped = errTurnedLocal
+
+// ShareChecked is Share with stopped (nil: never) asked just before anything
+// is made for each dimension, as the contributing stage asks before each
+// filing: true stops the share (ErrShareStopped), an error is returned.
+func (e *Executor) ShareChecked(ctx context.Context, bookID int64, workID string, dims []string,
+	stopped func() (bool, error)) (ShareResult, error) {
 	if e.db == nil {
 		return ShareResult{}, errors.New("share: no store")
 	}
@@ -83,7 +95,7 @@ func (e *Executor) Share(ctx context.Context, bookID int64, workID string, dims 
 			filed[a.kind] = true
 		}
 	}
-	if err := e.submitIssueWith(ctx, book, slug, artifacts, auditAcceptanceNote(book.WorkDir), shareSettled, nil); err != nil {
+	if err := e.submitIssueWith(ctx, book, slug, artifacts, auditAcceptanceNote(book.WorkDir), shareSettled, stopped); err != nil {
 		return ShareResult{}, err
 	}
 	for _, r := range e.bookContributions(ctx, book.ID) {

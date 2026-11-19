@@ -21,10 +21,20 @@ type GenerateBook struct {
 	SweptAt     string
 }
 
-// PutGenerateBook records (or replaces) the engine book of a server job. A job
-// that maps to a new book is open again, so its end is cleared.
+// PutGenerateBook records (or replaces) the engine book of a server job: a book
+// that exists already (a new one is mapped as it is made, CreateMappedBook). A
+// job that maps to a new book is open again, so its end is cleared. A job that
+// heard share_off has the book local at once (keepSharedOffLocal).
 func (db *DB) PutGenerateBook(ctx context.Context, g GenerateBook) error {
-	return putGenerateBook(ctx, db.sql, g)
+	tx, err := db.sql.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := putGenerateBook(ctx, tx, g); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // execer is what putGenerateBook writes through: the database or a transaction.
@@ -32,14 +42,108 @@ type execer interface {
 	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
 }
 
+// putGenerateBook writes the mapping, then keeps the book local when the job
+// heard share_off: callers run it in a transaction, so the two land together.
 func putGenerateBook(ctx context.Context, ex execer, g GenerateBook) error {
-	_, err := ex.ExecContext(ctx,
+	if _, err := ex.ExecContext(ctx,
 		`INSERT INTO generate_books (server_job_id, book_id, library_id, rel_path, created_at, ended_at, swept_at)
 		 VALUES (?, ?, ?, ?, ?, '', '')
 		 ON CONFLICT(server_job_id) DO UPDATE SET book_id = excluded.book_id, library_id = excluded.library_id,
 		     rel_path = excluded.rel_path, ended_at = '', swept_at = ''`,
-		g.ServerJobID, g.BookID, g.LibraryID, g.RelPath, timestamp(nowFn()))
+		g.ServerJobID, g.BookID, g.LibraryID, g.RelPath, timestamp(nowFn())); err != nil {
+		return err
+	}
+	return keepSharedOffLocal(ctx, ex, g.ServerJobID)
+}
+
+// keepSharedOffLocal is the store's share_off rule (server#218): every engine
+// book a sidecars.generate job follows (its mapping) is local while the job's
+// row says share_off, so the contributing stage, which reads the book's own
+// mode, files nothing for it whether or not a run of the job is up. It runs
+// wherever either side changes: the claim (RecordClaim), the answer heard since
+// (SetServerJobShareOff) and the mapping (putGenerateBook, the continues). A
+// book done keeps its mode (it shared as asked, and its job reports what it
+// filed), and this rule never turns a book back: a share dropped stays dropped
+// (only a later job's own continue sets the mode it asks for). Like
+// SetBookChapters it leaves updated_at alone: the mode is not a change of
+// pipeline position, and a bump would reorder the Running list. A book kept
+// local only because no share job followed it (ShareSkippedNoShareJob, done or
+// not) takes contributions_off as its reason: the share_off then outlives the
+// job's row, which a later claim of the job writes over (RecordClaim), so
+// ResumeShare never takes that share up again.
+func keepSharedOffLocal(ctx context.Context, ex execer, serverJobID int64) error {
+	_, err := ex.ExecContext(ctx,
+		`UPDATE books SET contrib_mode = ?2, share_skipped = ?3
+		  WHERE ((state <> 'done' AND contrib_mode <> ?2) OR share_skipped = ?4)
+		    AND id IN (SELECT book_id FROM generate_books WHERE server_job_id = ?1)
+		    AND EXISTS (SELECT 1 FROM server_jobs WHERE id = ?1 AND share_off = 1 AND kind = 'sidecars.generate')`,
+		serverJobID, ContribModeLocal, ShareSkippedContributionsOff, ShareSkippedNoShareJob)
 	return err
+}
+
+// Book.ShareSkipped values: why a book that was to be shared was kept local.
+const (
+	// ShareSkippedContributionsOff: the server turned the share of a
+	// sidecars.generate job that follows the book off (its Contributions
+	// module off, server#218).
+	ShareSkippedContributionsOff = "contributions_off"
+	// ShareSkippedNoShareJob: the contributing stage found no open
+	// generate-and-share job following the book in issue mode, so nothing
+	// could say the share still stood (a fault left the book running with no
+	// job: a job's end that couldn't stop it, a lease that lapsed).
+	ShareSkippedNoShareJob = "no_share_job"
+)
+
+// KeepBookLocal turns engine book id local for why (a ShareSkipped value),
+// unless it is local already or done (a done book shared as asked). Like
+// keepSharedOffLocal it never turns a book back and leaves updated_at alone.
+// A book not found, done or local already is no error.
+func (db *DB) KeepBookLocal(ctx context.Context, id int64, why string) error {
+	_, err := db.sql.ExecContext(ctx,
+		`UPDATE books SET contrib_mode = ?2, share_skipped = ?3 WHERE id = ?1 AND state <> 'done' AND contrib_mode <> ?2`,
+		id, ContribModeLocal, why)
+	return err
+}
+
+// shareResumableSQL holds when engine book ?3 was kept local only because no
+// share job followed it (ShareSkippedNoShareJob, ?5), attempt ?2 of server job
+// ?1 follows it again (its mapping open, its row running under that attempt)
+// with its share on, and no sidecars.generate job mapped to the book has
+// share_off (a share_off always wins).
+const shareResumableSQL = `id = ?3 AND share_skipped = ?5
+		    AND EXISTS (SELECT 1 FROM generate_books g JOIN server_jobs j ON j.id = g.server_job_id
+		                 WHERE g.server_job_id = ?1 AND g.book_id = ?3 AND g.ended_at = '' AND j.state = 'running'
+		                   AND j.attempt = ?2 AND j.share_off = 0 AND j.kind = 'sidecars.generate')
+		    AND NOT EXISTS (SELECT 1 FROM generate_books g JOIN server_jobs j ON j.id = g.server_job_id
+		                     WHERE g.book_id = ?3 AND j.share_off = 1 AND j.kind = 'sidecars.generate')`
+
+// ShareResumable reports whether engine book bookID, kept local because no
+// share job followed it, may be shared again by attempt of server job jobID
+// (shareResumableSQL; the caller checks the job's params): a done book's
+// share, which its stage can't file any more, is filed by the job itself
+// before ResumeShare records it.
+func (db *DB) ShareResumable(ctx context.Context, jobID int64, attempt int, bookID int64) (bool, error) {
+	var ok bool
+	err := db.sql.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM books WHERE `+shareResumableSQL+`)`,
+		jobID, attempt, bookID, ContribModeIssue, ShareSkippedNoShareJob).Scan(&ok)
+	return ok, err
+}
+
+// ResumeShare is the one way back from ShareSkippedNoShareJob: engine book
+// bookID is to be shared again (contrib_mode issue, share_skipped cleared)
+// while shareResumableSQL holds for attempt of server job jobID, which shares
+// it (the caller checks the job's params). A book kept local for any other
+// reason is never turned back. Like KeepBookLocal it leaves updated_at alone.
+// It reports whether the book turned.
+func (db *DB) ResumeShare(ctx context.Context, jobID int64, attempt int, bookID int64) (bool, error) {
+	res, err := db.sql.ExecContext(ctx,
+		`UPDATE books SET contrib_mode = ?4, share_skipped = '' WHERE `+shareResumableSQL,
+		jobID, attempt, bookID, ContribModeIssue, ShareSkippedNoShareJob)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
 }
 
 // GetGenerateBook returns a server job's engine book mapping, or ErrNotFound.
@@ -184,19 +288,6 @@ func (db *DB) GenerateBookFollowed(ctx context.Context, bookID int64) (bool, err
 	err := db.sql.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM generate_books WHERE book_id = ? AND ended_at = ''`, bookID).Scan(&n)
 	return n > 0, err
-}
-
-// GenerateShareOff reports whether an open sidecars.generate job that follows
-// the engine book bookID heard share_off (ServerJob.ShareOff, server#218). The
-// contributing stage asks it before it files, so the book stays local even
-// when no run of that job is up to turn it local (one resumed after a restart
-// still waits for its lane slot).
-func (db *DB) GenerateShareOff(ctx context.Context, bookID int64) (bool, error) {
-	var off bool
-	err := db.sql.QueryRowContext(ctx,
-		`SELECT EXISTS (SELECT 1 FROM `+openJobsSQL+` AND g.book_id = ? AND j.kind = 'sidecars.generate' AND j.share_off = 1)`,
-		bookID).Scan(&off)
-	return off, err
 }
 
 // OpenGenerateJobsForBook returns the ids of the open server jobs (still running

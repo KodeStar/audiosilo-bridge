@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/kodestar/audiosilo-bridge/internal/store"
@@ -122,5 +124,87 @@ func TestUnrecordedClaimFailsClosedOnlyForSealers(t *testing.T) {
 	}
 	if sealer.ran || !sealer.abandoned {
 		t.Fatalf("an unrecorded sealed claim ran: %+v", sealer)
+	}
+}
+
+// rowNeeder is a handler that needs its claim's row for some jobs
+// (ClaimRowNeeder): the ones whose params say "share".
+type rowNeeder struct {
+	handler
+	mu        sync.Mutex
+	ran       []int64
+	abandoned []int64
+}
+
+func (h *rowNeeder) NeedsClaimRow(job Job) bool { return string(job.Params) == `"share"` }
+func (h *rowNeeder) Run(ctx context.Context, job Job, rep *Reporter) (any, error) {
+	h.mu.Lock()
+	h.ran = append(h.ran, job.ID)
+	h.mu.Unlock()
+	return nil, nil
+}
+func (h *rowNeeder) Abandon(_ context.Context, job Job) {
+	h.mu.Lock()
+	h.abandoned = append(h.abandoned, job.ID)
+	h.mu.Unlock()
+}
+
+// A claim the store can't record is abandoned when its handler needs the row
+// for it (a share job, whose share_off keeps its books local there: denied),
+// and runs when it doesn't (allowed).
+func TestUnrecordedClaimFailsClosedForARowNeeder(t *testing.T) {
+	db := openStore(t)
+	_ = db.Close() // every write fails
+	srv := newFakeServer()
+	h := &rowNeeder{handler: handler{kind: "k.v", lane: LaneLight}}
+	r := New(db, func() Server { return srv }, nil, testOpts(), h)
+	var wg sync.WaitGroup
+	r.start(context.Background(), srv, Job{ID: 1, Kind: "k.v", Params: json.RawMessage(`"share"`), Attempt: 1}, &wg, nil)
+	r.start(context.Background(), srv, Job{ID: 2, Kind: "k.v", Params: json.RawMessage(`"local"`), Attempt: 1}, &wg, nil)
+	wg.Wait()
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if !slices.Equal(h.ran, []int64{2}) || !slices.Equal(h.abandoned, []int64{1}) {
+		t.Fatalf("ran %v, abandoned %v; want the local job run and the share job abandoned", h.ran, h.abandoned)
+	}
+}
+
+// recordFailStore fails RecordClaim for its first fails calls.
+type recordFailStore struct {
+	*store.DB
+	fails atomic.Int32
+}
+
+func (s *recordFailStore) RecordClaim(ctx context.Context, j store.ServerJob) error {
+	if s.fails.Add(-1) >= 0 {
+		return errors.New("database is locked")
+	}
+	return s.DB.RecordClaim(ctx, j)
+}
+
+// A claim whose store write fails once is tried again and runs, recorded
+// (allowed: a passing blip doesn't spend one of the server's attempts on an
+// abandon); one whose write keeps failing is still abandoned, never run
+// (denied).
+func TestClaimRecordRetriesBeforeAbandoning(t *testing.T) {
+	db := openStore(t)
+	st := &recordFailStore{DB: db}
+	srv := newFakeServer()
+	h := &rowNeeder{handler: handler{kind: "k.v", lane: LaneLight}}
+	r := New(st, func() Server { return srv }, nil, testOpts(), h)
+	var wg sync.WaitGroup
+	st.fails.Store(1)
+	r.start(context.Background(), srv, Job{ID: 1, Kind: "k.v", Params: json.RawMessage(`"share"`), Attempt: 1}, &wg, nil)
+	wg.Wait()
+	if _, err := db.GetServerJob(context.Background(), 1); err != nil {
+		t.Fatalf("the claim retried = %v, want recorded", err)
+	}
+	st.fails.Store(claimRecordTries)
+	r.start(context.Background(), srv, Job{ID: 2, Kind: "k.v", Params: json.RawMessage(`"share"`), Attempt: 1}, &wg, nil)
+	wg.Wait()
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if !slices.Equal(h.ran, []int64{1}) || !slices.Equal(h.abandoned, []int64{2}) {
+		t.Fatalf("ran %v, abandoned %v; want the retried claim run and the unrecordable one abandoned", h.ran, h.abandoned)
 	}
 }

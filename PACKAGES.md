@@ -906,23 +906,33 @@ internal/
             which a sidecars.generate job always sets from its contribute param, else
             the configured contribution.mode); the contributing stage reads it again
             after its description step (a job whose share the server turned off may
-            have turned the book local meanwhile, server#218), again before it files,
-            and before each dimension's gist and issue (turnedLocal: errTurnedLocal
-            keeps the rest local; sidecars.contribute's Share passes none and files a
-            local book's sidecars). Each of those reads (turnedLocal) also asks
-            store.GenerateShareOff: an open sidecars.generate job following the book
-            that heard share_off (server_jobs.share_off) turns it local there
-            (KeepBookLocal) even when no run of the job is up to guard it (one resumed
-            after a restart still waiting for its lane slot); a read that fails stops
-            the filing as a stage error. The checks before it files and before each
-            gist and issue (askedLocal; an issue asks again after its gist's lookup
-            or POST, fileIssue) then ask the server too (Config.ShareOff,
-            generate.Handler.ShareOff): a job hears share_off only in an answer to
-            a report, which can be a keepalive away, so an admin's turn-off just
-            before filing was missed (v2.7.0 verify). A server that couldn't be
-            asked parks the book share_unconfirmed (its own code: the server
-            doesn't word it as a missing GitHub sign-in, nor announce a blip;
-            ShareUnconfirmedMsg, retry_at ShareUnconfirmedRetry) and nothing is filed. runAgent's budget preflight gained the
+            have turned the book local meanwhile, server#218: the store turns a
+            share_off job's books local, whether or not a run of it is up), again
+            before it files, and before each dimension's gist and issue (askedLocal:
+            errTurnedLocal keeps the rest local; sidecars.contribute's Share passes
+            none and files a local book's sidecars). A book still in issue mode also
+            needs the server's word (Config.ShareOff, generate.Handler.ShareOff,
+            asked through jobs.Runner.ShareOff): after the description step only
+            what is known here (ask false: a share job that can't be asked at all,
+            with no run here, the Bridge unpaired or refused, or its reports
+            failing, parks before the work's lookups, so the park's minute retry
+            doesn't redo them), then asked now before it files and before each
+            gist and issue (an issue asks again after its gist's lookup or POST,
+            fileIssue): a job hears share_off only in an answer to a report, which
+            can be a keepalive away, so an admin's turn-off just before filing was
+            missed (v2.7.0 verify). A server that couldn't be asked, or a mode that
+            couldn't be read, parks the book share_unconfirmed (its own code: the
+            server doesn't word it as a missing GitHub sign-in, nor announce a
+            blip; ShareUnconfirmedMsg or ShareUnreadMsg, retry_at
+            ShareUnconfirmedRetry) and nothing is filed. Config.ShareOff answers
+            why a book stays local ("" while it shares): contributions_off, or
+            no_share_job for an issue-mode book no open generate-and-share job
+            follows (fail closed: a fault left it running alone, so nothing can
+            say its share still stands). A book that turns local on that answer
+            is kept so in the store with why (store.DB.KeepBookLocal,
+            books.share_skipped), so its job's result says why, even when only
+            this run's Reporter had heard share_off; a write that fails still
+            files nothing now. runAgent's budget preflight gained the
             MONTHLY half (checkMonthlyBudget, Config.MonthlyBudgetUSD): this calendar
             month's (UTC, MonthBounds) spend across every book, superseded runs and
             deleted books' runs included (store.SumBudgetCostSince), at or over the cap
@@ -1215,8 +1225,8 @@ internal/
             language/narrators/sources required; an ASIN without a region is rejected,
             never silently dropped), Service (SubmitCore: per-book mutex, reuses an
             already-recorded core issue, persists the row BEFORE the park flip,
-            refuses a book turned local, or one whose open sidecars.generate job
-            heard share_off (store.GenerateShareOff) (server#218: ErrNotAwaitingCore);
+            refuses a book turned local (a share_off job's books turn local in the
+            store, server#218: ErrNotAwaitingCore);
             SetWork validates the slug upstream), and the poller. Where things live:
               poller.go  row lifecycle (FindIntakePR -> pr_open -> merged/closed),
                          intake verdicts as the note's last segment (re-checked at
@@ -1600,10 +1610,16 @@ internal/
             claim or SetServerJobShareOff at the first answer that carries it; 0 on
             older rows; ServerJob.ShareOff, never in the page's JSON), so a job resumed
             after a restart or a refused token keeps its results local before any
-            answer. KeepBookLocal sets a book's contrib_mode local unless it is done
-            (it reports whether the book is local now), leaving updated_at alone.
-            GenerateShareOff reports whether an open sidecars.generate job following a
-            book heard share_off (the contributing stage's check before it files).
+            answer. share_off is a store rule (keepSharedOffLocal): every engine book
+            a sidecars.generate job's mapping names is local (unless done, never
+            turned back, updated_at left alone) while its row says share_off, written
+            in the same transaction as RecordClaim, SetServerJobShareOff (for the
+            attempt whatever its state: an answer read after a cancel still counts)
+            and the mapping (PutGenerateBook, CreateMappedBook, ContinueChapters,
+            ContinueReadalong), so books.contrib_mode is the one truth the
+            contributing stage and SubmitCore read. CreateMappedBook inserts a
+            generate job's engine book and its mapping in one transaction (a crash
+            between them left a book that no job followed).
             0017 (bridge#50, bridge#80) adds audible_accounts.push_at/push_error: the
             push loop's health in columns of its own, so sync_at/sync_error are the
             audible.sync job's alone (AudibleSyncOK and AudibleSyncFailed take the side,
@@ -1615,6 +1631,18 @@ internal/
             ResetAudiblePushCursor (the server refused the cursor: push_cursor '' with
             push_from kept) until SetAudiblePushCursor records a read that reached the
             feed's end; a remap clears it with the cursor.
+            0019 adds books.share_skipped (Book.ShareSkipped: why a book that was to
+            be shared was kept local, '' otherwise): contributions_off where
+            keepSharedOffLocal turns it (also over a no_share_job reason, done or
+            not: a later claim resets the row's share_off, so the book keeps the
+            evidence and ResumeShare never takes that share up), the contributing stage's answer
+            (contributions_off or no_share_job) through KeepBookLocal (never a done
+            or local book, updated_at left alone); ContinueChapters clears it with
+            the mode it sets. ResumeShare is the one way back from no_share_job
+            (contrib_mode issue, reason cleared), only while the share job's
+            attempt follows the book again (mapping open, row running) with
+            share_off unset and no other generate job mapped to the book has
+            share_off (shareResumableSQL; ShareResumable reads the same).
   state/    per-book pipeline state machine: table-driven states/lanes/transitions,
             CanStart/NextState guards, the audit fix-loop cap. Pure, no I/O. M6 added
             ParkCode (typed park reasons - M7 added contrib_unavailable, core_needed,
@@ -2217,9 +2245,13 @@ internal/
             BEFORE RecordClaim. A failure records sanitized empty params, fails
             closed without Run, and calls Abandon for any secret already sealed;
             a *SealFailure is reported as its code and message, any other error
-            only as a generic write_failed (its text may hold the secret). A claim
-            the store can't record is abandoned (the server hands it out again)
-            only when its handler seals; other kinds run anyway, as before.
+            only as a generic write_failed (its text may hold the secret). The
+            claim's write is tried claimRecordTries (3) times, 100 ms then 200 ms
+            apart (recordClaim): an abandon spends one of the server's attempts at
+            the job. A claim the store still can't record is abandoned (the server
+            hands it out again) only when its handler seals, or is a
+            ClaimRowNeeder that needs the row for that job (generate's share jobs:
+            their share_off lives on it); other kinds run anyway, as before.
             Handlers declare a kind and a lane (lanes: light=2,
             and Phase 1a's pipeline=25 for the jobs that follow an engine book: the
             engine's scheduler does the throttling, so such a job sits in its lane
@@ -2239,7 +2271,11 @@ internal/
             report warns, the rest log at debug, and the first one through after
             them logs one Info (bridge#31); a ConfirmLease or Refresh that gets
             through clears failing too (under the Reporter's lock: they run on
-            the handler's goroutine). Reporter.Refresh (v0.5.0, BRIDGE-01) reports
+            the handler's goroutine), and a Refresh that doesn't sets it (noted
+            under sendMu like a send's; not when the caller's own context
+            ended), so Runner.ShareOff's check without ask says the job can't
+            be reached before the stage's lookups, not after one more round of
+            them. Reporter.Refresh (v0.5.0, BRIDGE-01) reports
             the job now, parked as it is, for another job it stands in the way
             of: nil while the server holds it, ErrStopped when the answer (a
             cancel, a lost claim) ended it. A reply
@@ -2262,7 +2298,11 @@ internal/
             stopped is left running too and resumed under its claim as soon as a
             link to its server (the same address) works again, a refusal ending or
             a re-pair (resumeStranded; another server's link records it lost, its
-            ids being the old server's). If the lease ran out meanwhile, the first
+            ids being the old server's; one whose row can't be read then stays
+            stranded for the next look, a heartbeat away, and is dropped only
+            when its row is gone, ended or a later attempt's: dropped on a read
+            error it waited for a restart, its share book parked
+            share_unconfirmed meanwhile). If the lease ran out meanwhile, the first
             report gets 409 and the row is lost, and the claim loop takes the job
             again as the next attempt (the kill test in the handoff log). release
             frees only its own run (a later claim of the job may run under its id).
@@ -2272,17 +2312,29 @@ internal/
             (server#218) is the server's share_off: the claim answer's
             (link.Job.ShareOff) or any report answer's since, kept for the run
             once heard (a share dropped is not taken up again) and in the store
-            (server_jobs.share_off, restored by storedJob and resumeStranded).
-            Reporter.OnShareOff calls a handler's func at once if heard, then at
-            every answer that carries it, on the goroutine that read the answer,
-            outside the report lock (sendMu), as is the store write after it (heard,
-            keepShareOff: a failed write is tried again at every answer, warned once
-            a job, then debug; HearShareOff is its test hook), and before a cancel,
-            lost claim or refused token the same answer carries ends the job's
-            context (answer returns the cause, acted applies it after heard). A run
-            a refused token stops carries what it heard to resumeStranded
-            (run.shareOffHeard), which writes it again when the store lacks it, so
-            the stranded resume keeps it.
+            (server_jobs.share_off, restored by storedJob and resumeStranded). The
+            Reporter is its one write after the claim (heard, keepShareOff:
+            SetServerJobShareOff, which turns the job's books local; written at the
+            run's first report whatever the store had, then tried again at every
+            report, answered or not, until it lands, warned once a job, then debug),
+            outside the report lock (sendMu) and before a cancel, lost claim or
+            refused token the same answer carries ends the job's context (answer
+            returns the cause, acted applies it after heard). Reporter.OnShareOff
+            calls a handler's func after that write, at once if heard, then at every
+            answer that carries it (HearShareOff is its test hook). A run a refused
+            token stops carries what it heard to resumeStranded (release reads its
+            Reporter), whose run writes it again. Runner.ShareOff answers the
+            contributing stage for a job through its run's Reporter (one waiting for
+            its lane slot included; a stranded one says what it heard): ask reports
+            now (Reporter.AskShareOff), else only what is known here, an error with
+            no request for a job not running here (ErrShareNotRunning), off the
+            Bridge's current link (ErrShareOffLink) or whose reports fail
+            (ErrShareNotReachable). Reporter.AskShareOff is the one ask a handler
+            files on (generate's shareConfirmed too): Refresh, with the job's link
+            checked against the current one (OnCurrentLink: the same link, or a
+            new pairing with the same address) before the report and again after
+            the answer, so an answer from the old link after a pairing with
+            another server confirms no share (ErrShareOffLink).
             Recovery runs once the link is up: a kind no longer run is failed.
             Nothing is sent that the server refuses for good: a result that isn't a
             JSON object of at most 64 KiB fails the job (errUnreportable) and
@@ -3356,13 +3408,15 @@ internal/
             contribute=issue job keeps its results local instead (keepShareLocal):
             before its engine book exists the book is made in local mode (no GitHub
             check; Run asks once the engine is up, and create again, as prepare
-            can wait), after, the moment the answer is read (shareGuard, through
-            Reporter.OnShareOff: a re-admit at a contributing park before the run's
-            next look, an idle poll away, would otherwise file in issue mode)
-            store.KeepBookLocal turns the book local (a book the run takes up later
-            too, as it takes it up: a resumed or re-claimed job's before prepare,
-            which can wait while the engine runs it, and attach; a chapters or
-            read-along run it continues), the guard waking the run, and a book parked
+            can wait), after, the store turns the book local with the job's
+            share_off (store's keepSharedOffLocal: a book the run takes up later too,
+            in the write that maps it: a resumed or re-claimed job's at the claim,
+            before prepare, which can wait while the engine runs it; a chapters or
+            read-along run it continues), Reporter.OnShareOff waking the run
+            (wakeOnShareOff: a re-admit at a contributing park before the run's next
+            look, an idle poll away, would otherwise file in issue mode; once a run,
+            as every answer carries share_off while the module is off and a wake at
+            each had book_not_writable's save tried again at every report), and a book parked
             at contributing over the share (contrib_unavailable, share_unconfirmed,
             core_needed, core_pending) runs the stage again, once a run, whenever it parks (a stage
             running in issue mode when the answer came parks after it; a lift that
@@ -3370,15 +3424,45 @@ internal/
             already, or a dimension the stage had begun to file, is left as it is (the
             stage reads the book's mode again before each dimension's gist and issue,
             and keeps the rest local, asking the server first: ShareOff has each
-            open generate-and-share job following the book report now
-            (Reporter.Refresh), its answer heard as any other: the first job with
-            its share off answers it, an answer that stopped the job included when
-            it carried share_off, and it errors when one couldn't be asked, its run
-            not up here included). A later
+            open generate-and-share job following the book report now through the
+            runner (AskThrough, jobs.Runner.ShareOff; a job waiting for its lane
+            slot included), its answer heard as any other: the first job with its
+            share off answers contributions_off, an answer that stopped the job
+            included when it carried share_off, and it errors when one couldn't be
+            asked; without ask only what is known here answers; a book no open
+            share job follows, a contribute=local job's or none, answers
+            no_share_job and stays local, nobody asked). A later
             run of the job that finds its engine book local keeps the share dropped
-            (the module on again since). The result says share_skipped
-            "contributions_off" for a book kept local unless something was filed (the
-            console words it).
+            (the module on again since), except no_share_job: a share job that
+            follows the book again (claimed again after a lease lapsed, or resumed)
+            with its share on shares it (keepShareLocal, owesShare): a book not done
+            turns back to issue under the engine's hold (store.ResumeShare) for its
+            stage to file, a done one is filed by finish as sidecars.contribute
+            files (shareOwed, shareConfirmed); a share_off still wins.
+            shareConfirmed files nothing on an answer carrying share_off
+            (errShareOffNow), nor, for shareOwed, once ShareResumable no longer
+            holds when asked again under the hold after the answer; keepShareLocal
+            reads the book again under its hold and leaves one done since to
+            finish. shareOwed files through pipeline.Executor.ShareChecked with
+            stoppedBy asked before each dimension (the server again, its share_off,
+            ShareResumable; the first check asks too, as the share step resolves
+            the sign-in and looks the work up first), as the stage asks before
+            each filing; a share_off heard while a try ran drops the share at
+            once rather than parking it; a park the
+            stage would wait on in the same case (contrib_unavailable for a GitHub
+            sign-in missing or not refreshed, share_unconfirmed for a server not
+            asked or a store not read mid-filing) parks the job with the stage's
+            code, reason and retry_at rather than failing it (shareOwedParked:
+            tries again at the retry_at, on Retry, which pokes a job whose book is
+            done, or on WakeParked, which the app's githubChanged calls for
+            contrib_unavailable); a GitHub rate limit still fails it, as it fails
+            the stage's book (a transient stage error, not a park); the contributing
+            stage takes a book's issue mode back from the store when the dispatch
+            read it local (a share resumed since). The result says share_skipped for a book
+            kept local unless something was filed: the book's own reason
+            (books.share_skipped: no_share_job when the stage found no run of the
+            job to ask), else "contributions_off" (the console words both, an
+            unknown one plainly).
             prepare: the library from the
             registry; waitMapped needs its check mapped AND writable at the mount the
             Bridge uses NOW (a new job fails otherwise; a resumed one parks
@@ -3405,7 +3489,11 @@ internal/
             awaitChaptersGivingWay asks a chapters job to give way at once; the new book takes its identity from the server's book
             block (identity_sources "server"), its work id from params else the
             server's metadata cache, kind ebook with an epub, contrib_mode from the
-            params; generate_books maps the job to it. RESUME: a mapping is the job's
+            params; generate_books maps the job to it in the same write
+            (store.CreateMappedBook). RESUME: a mapping that can't be read is tried
+            again (stopTries, a poll apart); a job that still can't read it, or is
+            cancelled meanwhile, releases the earlier run's book as Abandon does
+            before it fails. A mapping is the job's
             own only for the same library AND path (the server's ids repeat across
             servers and reinstalls, and following another book's run would write its
             sidecars into this one); otherwise the old book is stopped and a new one
@@ -3439,7 +3527,9 @@ internal/
             recorded (ended_at), a book that didn't finish is cancelled (stopBook
             leaves a done or failed one alone: a cancel would overwrite its error,
             one failed or done between its read and the cancel's write included,
-            store.ErrSettled),
+            store.ErrSettled; a cancel that fails is tried stopTries (3) times, a
+            poll apart, then the book is kept local, no_share_job, so a book that
+            runs on alone never files),
             and retention 0 purges its transcripts now; a later attempt of the same
             job running here (Attempt higher) is left alone: the cancel and the end
             are guarded writes (store.StopGuard: SetBookStatusUnlessFollowed through
@@ -3560,7 +3650,8 @@ internal/
             agent credential changed on the Accounts tab for
             agent_credential_refused and agent_unavailable, since these wait in
             their own loop, not as engine books: each park is registered in
-            describeParks with its run's own channel and removed only by that
+            loopParks (parkInLoop, which a generate job's owed share shares)
+            with its run's own channel and removed only by that
             run, and every wake is numbered (wakeSeq, woken per code) so a try
             that parks with a code woken while it ran tries again at once rather
             than lose the wake to the drain below),
@@ -3692,7 +3783,26 @@ internal/
             work id one line of at most 200 characters). prepareRead resolves the
             book without a writable mapping (it writes nothing into the library),
             notesBook finds the engine book that keeps the results, holdBook holds
-            it, and Options.Sharer (pipeline.Executor.Share) files them. Failures
+            it, and Options.Sharer (pipeline.Executor.Share) files them once the
+            server confirms the share still stands (shareConfirmed: asked
+            just before filing, as the server stops a share whose Contributions
+            module was turned off only in an answer to the job's next report, a
+            keepalive away): an answer that stopped the job files nothing, a server
+            that couldn't be asked parks the job share_unconfirmed (ShareUnconfirmedMsg)
+            and asks again every Recheck or on Retry. The ask
+            (jobs.Reporter.AskShareOff: an answer on a link the Bridge no longer
+            uses confirms nothing) comes BEFORE the engine's hold, not under it
+            (an answer can take the request's 30 s, and another job wanting the
+            book gives up as busy after holdTries polls); a busy book is waited
+            for, let go and asked about again, so it is held only right after an
+            answer; under the hold shareHeld reads again, with no request, what
+            changed since (a stop, share_off heard, the link, stands), and
+            anything it can't confirm parks and asks again (an owed share's
+            stoppedBy asks before each dimension, under the hold, as the stage
+            does). A sidecars.contribute park Yields its
+            light-lane slot (two parks would hold both) and Reclaims one once
+            the server confirms, asking again after that wait; a sidecars.generate
+            run keeps its pipeline slot as it does through engine parks. Failures
             in words: not signed in, a sign-in whose refresh failed
             (Options.ContribCredential answering contrib.ErrSignInUnrefreshed,
             or a contrib_unavailable park whose Cause is it), refused, nothing kept
@@ -4404,8 +4514,9 @@ internal/
             earlier Bridge's sealed github_pat once (forgetSealedGitHubPAT, best
             effort: one sealed with another key, or a failed delete, never stops
             the start; the env token is read live), githubChanged kicks a beat
-            and re-admits contrib_unavailable books when the Bridge can contribute
-            (a sign-in resumes the sidecars.generate job waiting on one; a refresh
+            and re-admits contrib_unavailable books when the Bridge can contribute,
+            and wakes a generate job's owed share parked contrib_unavailable in its
+            own loop (wakeParked) (a sign-in resumes the sidecars.generate job waiting on one; a refresh
             that works again re-admits them through OnChange, and their park carries a
             retry_at besides, bridge#25; sidecars.contribute
             never parks: it fails asking for a sign-in, or for the sign-in's

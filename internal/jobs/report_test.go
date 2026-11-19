@@ -55,12 +55,6 @@ func (f *fakeServer) triesOf(id int64) int {
 	return f.tries[id]
 }
 
-func (p *Reporter) failingNow() bool {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.failing
-}
-
 // While the server is unreachable a job warns once, not at every retry, and
 // says once that its reports get through again (bridge#31).
 func TestFailedReportsWarnOnceAndRecoverOnce(t *testing.T) {
@@ -111,22 +105,22 @@ func TestConfirmLeaseClearsFailing(t *testing.T) {
 		fn: func(ctx context.Context, _ Job, rep *Reporter) (any, error) {
 			srv.setFailing(true)
 			rep.Progress(Progress{Step: "one"})
-			if err := awaitCond(rep.failingNow, "a failed report"); err != nil {
+			if err := awaitCond(rep.unreached, "a failed report"); err != nil {
 				return nil, err
 			}
 			if err := rep.ConfirmLease(ctx); err == nil {
 				return nil, errors.New("ConfirmLease got through an unreachable server")
 			}
-			if !rep.failingNow() {
+			if !rep.unreached() {
 				return nil, errors.New("a failed ConfirmLease cleared failing")
 			}
 			srv.setFailing(false)
 			if err := rep.ConfirmLease(ctx); err != nil {
 				return nil, err
 			}
-			if rep.failingNow() || logs.count("INFO bridge: reporting progress again") != 1 {
+			if rep.unreached() || logs.count("INFO bridge: reporting progress again") != 1 {
 				return nil, fmt.Errorf("after a ConfirmLease got through: failing %v, recovery lines %d",
-					rep.failingNow(), logs.count("INFO bridge: reporting progress again"))
+					rep.unreached(), logs.count("INFO bridge: reporting progress again"))
 			}
 			return nil, nil
 		}})
@@ -164,6 +158,55 @@ func TestRefreshHearsACancelAtOnce(t *testing.T) {
 			return nil, ctx.Err()
 		}})
 	runFor(t, r, func() bool { s, _ := srv.finalState(13); return s == link.StateCancelled })
+}
+
+// A Refresh that doesn't reach the server counts as a failed report: the job
+// reads as unreachable until a report gets through, so a check that doesn't
+// ask (Runner.ShareOff without ask, the contributing stage's before its
+// lookups) says so at once rather than after one more round of lookups.
+// Denied: a Refresh that failed because its caller's context ended says
+// nothing about the server.
+func TestFailedRefreshSetsFailing(t *testing.T) {
+	t.Parallel()
+	db, srv := openStore(t), newFakeServer()
+	srv.add(&link.Job{ID: 14, Kind: "k.refresh", Attempts: 1})
+	opts := testOpts()
+	opts.Keepalive, opts.ReportRetry = time.Hour, time.Hour
+	var r *Runner
+	r = New(db, func() Server { return srv }, nil, opts, handler{kind: "k.refresh", lane: LaneLight,
+		fn: func(ctx context.Context, _ Job, rep *Reporter) (any, error) {
+			srv.setFailing(true)
+			defer srv.setFailing(false) // a failure below is still reported
+			ended, end := context.WithCancel(ctx)
+			end()
+			if err := rep.Refresh(ended); err == nil {
+				return nil, errors.New("Refresh got through an unreachable server")
+			}
+			if rep.unreached() {
+				return nil, errors.New("a Refresh whose caller's context ended set failing")
+			}
+			if off, err := r.ShareOff(ctx, 14, false); off || err != nil {
+				return nil, fmt.Errorf("ShareOff, not asked, before a failed Refresh = %v %v, want false", off, err)
+			}
+			if err := rep.Refresh(ctx); err == nil {
+				return nil, errors.New("Refresh got through an unreachable server")
+			}
+			if !rep.unreached() {
+				return nil, errors.New("a failed Refresh didn't set failing")
+			}
+			if _, err := r.ShareOff(ctx, 14, false); !errors.Is(err, ErrShareNotReachable) {
+				return nil, fmt.Errorf("ShareOff, not asked, after a failed Refresh = %v, want ErrShareNotReachable", err)
+			}
+			srv.setFailing(false)
+			if err := rep.Refresh(ctx); err != nil {
+				return nil, err
+			}
+			if rep.unreached() {
+				return nil, errors.New("a Refresh that got through left failing set")
+			}
+			return nil, nil
+		}})
+	wantDone(t, r, srv, 14)
 }
 
 // A LocalReporter has no server to ask.

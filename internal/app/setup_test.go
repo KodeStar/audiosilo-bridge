@@ -260,7 +260,8 @@ func TestSaveBudgetMarksItReviewed(t *testing.T) {
 
 // A budget changed on the page wakes the describe jobs parked on the budget (they
 // wait in their own loop, not as engine books); a save that keeps it doesn't. A
-// changed agent credential wakes the ones parked on a refused or missing one.
+// changed agent credential wakes the ones parked on a refused or missing one,
+// and a GitHub sign-in a generate job's owed share parked waiting for one.
 func TestBudgetAndCredentialChangesWakeParkedDescribeJobs(t *testing.T) {
 	ctx := context.Background()
 	b := newTestBridge(t)
@@ -299,6 +300,11 @@ func TestBudgetAndCredentialChangesWakeParkedDescribeJobs(t *testing.T) {
 	b.agentCredentialChanged()
 	if w := got(); !slices.Equal(w, []state.ParkCode{state.ParkAgentCredentialRefused, state.ParkAgentUnavailable}) {
 		t.Fatalf("a changed credential woke %v", w)
+	}
+	// A GitHub sign-in wakes a generate job's owed share waiting for one.
+	b.githubChanged()
+	if w := got(); !slices.Equal(w, []state.ParkCode{state.ParkContribUnavailable}) {
+		t.Fatalf("a GitHub sign-in woke %v", w)
 	}
 }
 

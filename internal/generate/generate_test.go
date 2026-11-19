@@ -45,13 +45,18 @@ type fakeServer struct {
 	paths map[int64]string
 	// shareOff is a job's share_off in the answers to its reports (server#218).
 	shareOff map[int64]bool
-	// down answers a job's reports 503, as a server that can't be reached.
-	down map[int64]bool
+	// down answers a job's reports 503, as a server that can't be reached;
+	// downHits counts the reports so answered.
+	down     map[int64]bool
+	downHits map[int64]int
+	// atStep runs (under the lock) on each report of a job, with its step,
+	// before it is answered: the server changing its answer at a given step.
+	atStep map[int64]func(f *fakeServer, step string)
 }
 
 func newFakeServer() *fakeServer {
 	return &fakeServer{updates: map[int64][]link.Update{}, cancel: map[int64]bool{}, notHeld: map[int64]bool{}, books: map[string]link.Book{},
-		shareOff: map[int64]bool{}, down: map[int64]bool{}}
+		shareOff: map[int64]bool{}, down: map[int64]bool{}, downHits: map[int64]int{}, atStep: map[int64]func(*fakeServer, string){}}
 }
 
 func (f *fakeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -73,7 +78,15 @@ func (f *fakeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		id, _ := strconv.ParseInt(strings.TrimPrefix(r.URL.Path, "/api/v1/bridge/jobs/"), 10, 64)
 		var u link.Update
 		_ = json.NewDecoder(r.Body).Decode(&u)
+		if fn := f.atStep[id]; fn != nil {
+			var p struct {
+				Step string `json:"step"`
+			}
+			_ = json.Unmarshal(u.Progress, &p)
+			fn(f, p.Step)
+		}
 		if f.down[id] {
+			f.downHits[id]++
 			w.WriteHeader(http.StatusServiceUnavailable)
 			return
 		}
@@ -394,6 +407,11 @@ func (hr *harness) runnerKeepalive(keepalive time.Duration, handlers ...jobs.Han
 	r := jobs.New(hr.db, func() jobs.Server { return hr.cl }, nil, jobs.Options{Keepalive: keepalive,
 		ProgressEvery: 5 * time.Millisecond, Wait: 10 * time.Millisecond, RetryEvery: 20 * time.Millisecond,
 		ServerID: func() string { return "srv" }, Log: slog.New(slog.NewTextHandler(io.Discard, nil))}, handlers...)
+	for _, h := range handlers {
+		if gh, ok := h.(*Handler); ok {
+			gh.AskThrough(r) // as the app wires it
+		}
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { defer close(done); r.Run(ctx) }()
@@ -835,6 +853,56 @@ func TestGenerateAttachDirNotWritableParks(t *testing.T) {
 	if _, u := hr.srv.final(91); u.Error == nil || *u.Error != "" {
 		t.Fatalf("the done report kept the park's error: %v", u.Error)
 	}
+}
+
+// A share job kept local whose attachments can't be saved at the end waits out
+// its book_not_writable park as any other job does: the share_off every answer
+// carries while the module is off doesn't wake the save again (denied: on the
+// first cut each report's answer retried the save, which reported twice more,
+// hundreds of reports a second). A Retry still does (allowed).
+func TestGenerateShareOffLeavesTheSaveParkWaiting(t *testing.T) {
+	t.Parallel()
+	if os.Geteuid() == 0 {
+		t.Skip("root writes through 0555")
+	}
+	hr := newHarness(t)
+	adir := filepath.Join(hr.root, "Author", "Book", AttachDir)
+	if err := os.Mkdir(adir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(adir, 0o555); err != nil { //nolint:gosec // the test's own folder
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(adir, 0o755) }) //nolint:gosec // as above
+	hr.queueShare(92, 1, true)
+	hr.srv.set(func() { hr.srv.shareOff[92] = true })
+	// No keepalive in the test's time: once parked, only a save tried again
+	// reports (its Recheck is an hour here).
+	stop := hr.runnerKeepalive(time.Minute, hr.h)
+	defer stop()
+	reports := func() (n int) {
+		hr.srv.set(func() { n = len(hr.srv.updates[92]) })
+		return n
+	}
+	hr.waitFor("the park", func() bool {
+		return hr.srv.saw(92, func(u link.Update, p map[string]any) bool {
+			park, _ := p["park"].(map[string]any)
+			return u.State != nil && *u.State == link.StateNeedsAttention && park["code"] == "book_not_writable"
+		})
+	})
+	sent := reports()
+	time.Sleep(300 * time.Millisecond)
+	// The park's own reports may still have been on their way.
+	if n := reports() - sent; n > 3 {
+		t.Fatalf("%d reports in 300ms at the park: the save is tried again at every answer", n)
+	}
+	if err := os.Chmod(adir, 0o755); err != nil { //nolint:gosec // as above
+		t.Fatal(err)
+	}
+	if err := hr.h.Retry(context.Background(), 92); err != nil {
+		t.Fatal(err)
+	}
+	hr.waitFor("done", func() bool { s, _ := hr.srv.final(92); return s == link.StateDone })
 }
 
 // A book the server moved mid-run (it carries the open job to the new path, which
@@ -1283,15 +1351,15 @@ func TestGenerateShareOffAskedBeforeFiling(t *testing.T) {
 		return err == nil && b.State == string(state.Contributing)
 	})
 	hr.srv.set(func() { hr.srv.shareOff[74], hr.srv.down[74] = true, true })
-	if off, err := h.ShareOff(ctx, b.ID); err == nil {
-		t.Fatalf("ShareOff with the server down = %v, want an error", off)
+	if why, err := h.ShareOff(ctx, b.ID, true); err == nil {
+		t.Fatalf("ShareOff with the server down = %q, want an error", why)
 	}
 	if got := hr.engineBook(74); got.ContribMode != store.ContribModeIssue {
 		t.Fatalf("engine book mode with the server down = %q, want issue", got.ContribMode)
 	}
 	hr.srv.set(func() { hr.srv.down[74] = false })
-	if off, err := h.ShareOff(ctx, b.ID); err != nil || !off {
-		t.Fatalf("ShareOff = %v %v, want true", off, err)
+	if why, err := h.ShareOff(ctx, b.ID, true); err != nil || why != ShareSkippedContributionsOff {
+		t.Fatalf("ShareOff = %q %v, want contributions_off", why, err)
 	}
 	if got := hr.engineBook(74); got.ContribMode != store.ContribModeLocal {
 		t.Fatalf("engine book mode after the ask = %q, want local", got.ContribMode)
@@ -1328,8 +1396,8 @@ func TestGenerateShareOffHeardInAStoppingAnswer(t *testing.T) {
 		return err == nil && b.State == string(state.Contributing)
 	})
 	hr.srv.set(func() { hr.srv.shareOff[77], hr.srv.cancel[77] = true, true })
-	if off, err := h.ShareOff(ctx, b.ID); err != nil || !off {
-		t.Fatalf("ShareOff, a cancel carrying share_off = %v %v, want true", off, err)
+	if why, err := h.ShareOff(ctx, b.ID, true); err != nil || why != ShareSkippedContributionsOff {
+		t.Fatalf("ShareOff, a cancel carrying share_off = %q %v, want contributions_off", why, err)
 	}
 	if got, err := hr.db.GetBook(ctx, b.ID); err != nil || got.ContribMode != store.ContribModeLocal {
 		t.Fatalf("engine book after the ask = %+v %v, want local", got, err)
@@ -1338,17 +1406,24 @@ func TestGenerateShareOffHeardInAStoppingAnswer(t *testing.T) {
 }
 
 // ShareOff asks only the open generate-and-share jobs that follow the book: a
-// contribute=local one is not asked (false); a share job with no run here to
-// ask (a resumed one waiting for its lane slot) is an error, so the stage
-// waits; one that stored share_off is off without asking.
+// contribute=local one is not asked, and a book with no share job following
+// it at all (none, or only a local one) stays local, fail closed
+// (no_share_job: a fault left it running alone); a share job with no run here
+// to ask (one recorded but not resumed yet) is an error, so the stage waits;
+// one that stored share_off is off without asking.
 func TestGenerateShareOffAsksOnlyShareJobs(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	hr := newHarness(t)
+	stop := hr.runner(hr.h) // started first: it resumes none of the jobs below
+	defer stop()
 	b, err := hr.db.CreateBook(ctx, store.NewBook{Title: "B", SourcePath: "/src/b", WorkDir: t.TempDir(),
 		ContribMode: store.ContribModeIssue})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if why, err := hr.h.ShareOff(ctx, b.ID, true); err != nil || why != ShareSkippedNoShareJob {
+		t.Fatalf("ShareOff, no job following the book = %q %v, want no_share_job", why, err)
 	}
 	follow := func(id int64, params string) {
 		t.Helper()
@@ -1360,18 +1435,20 @@ func TestGenerateShareOffAsksOnlyShareJobs(t *testing.T) {
 		}
 	}
 	follow(75, `{"contribute":"local"}`)
-	if off, err := hr.h.ShareOff(ctx, b.ID); err != nil || off {
-		t.Fatalf("ShareOff, a local job only = %v %v, want false", off, err)
+	if why, err := hr.h.ShareOff(ctx, b.ID, true); err != nil || why != ShareSkippedNoShareJob {
+		t.Fatalf("ShareOff, a local job only = %q %v, want no_share_job", why, err)
 	}
 	follow(76, `{"contribute":"issue"}`)
-	if off, err := hr.h.ShareOff(ctx, b.ID); err == nil {
-		t.Fatalf("ShareOff, a share job with no run here = %v, want an error", off)
+	for _, ask := range []bool{false, true} {
+		if why, err := hr.h.ShareOff(ctx, b.ID, ask); !errors.Is(err, jobs.ErrShareNotRunning) {
+			t.Fatalf("ShareOff, a share job with no run here, ask %v = %q %v, want ErrShareNotRunning", ask, why, err)
+		}
 	}
 	if err := hr.db.SetServerJobShareOff(ctx, 76, 1); err != nil {
 		t.Fatal(err)
 	}
-	if off, err := hr.h.ShareOff(ctx, b.ID); err != nil || !off {
-		t.Fatalf("ShareOff, share_off stored = %v %v, want true", off, err)
+	if why, err := hr.h.ShareOff(ctx, b.ID, true); err != nil || why != ShareSkippedContributionsOff {
+		t.Fatalf("ShareOff, share_off stored = %q %v, want contributions_off", why, err)
 	}
 
 	// Params that don't read are asked as a share's (fails closed): no run here
@@ -1383,8 +1460,8 @@ func TestGenerateShareOffAsksOnlyShareJobs(t *testing.T) {
 	}
 	b = other
 	follow(78, `{"contribute":5}`)
-	if off, err := hr.h.ShareOff(ctx, b.ID); err == nil {
-		t.Fatalf("ShareOff, unreadable params with no run here = %v, want an error", off)
+	if why, err := hr.h.ShareOff(ctx, b.ID, true); err == nil {
+		t.Fatalf("ShareOff, unreadable params with no run here = %q, want an error", why)
 	}
 }
 

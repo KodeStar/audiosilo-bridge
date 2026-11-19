@@ -5,6 +5,8 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/kodestar/audiosilo-bridge/internal/state"
 )
 
 func TestGenerateBooksMapAJobToItsBook(t *testing.T) {
@@ -110,47 +112,314 @@ func TestOpenGenerateJobsForBook(t *testing.T) {
 	}
 }
 
-// GenerateShareOff: an open sidecars.generate job that follows the book and
-// heard share_off keeps it local; a finished one, another kind's, or one that
-// never heard it doesn't.
-func TestGenerateShareOff(t *testing.T) {
+// The share_off rule (keepSharedOffLocal): a sidecars.generate job's books
+// turn local wherever its share_off or its mapping is written: the claim, the
+// answer heard since (even once the job ended, never for another attempt), a
+// mapping put after it and a continue's. A book done keeps its mode, another
+// kind's job turns nothing, and nothing turns back.
+func TestShareOffKeepsTheJobsBooksLocal(t *testing.T) {
 	db := open(t)
 	ctx := context.Background()
-	b, _ := db.CreateBook(ctx, NewBook{SourcePath: "/s", WorkDir: "/w", Title: "S"})
-	follow := func(id int64, kind string, shareOff bool) {
+	book := func(name string) int64 {
 		t.Helper()
-		if err := db.RecordClaim(ctx, ServerJob{ID: id, Kind: kind, Attempt: 1, ShareOff: shareOff}); err != nil {
-			t.Fatal(err)
-		}
-		if err := db.PutGenerateBook(ctx, GenerateBook{ServerJobID: id, BookID: &b.ID, LibraryID: 1, RelPath: "S"}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	off := func() bool {
-		t.Helper()
-		got, err := db.GenerateShareOff(ctx, b.ID)
+		b, err := db.CreateBook(ctx, NewBook{SourcePath: "/s/" + name, WorkDir: "/w/" + name, Title: name, ContribMode: ContribModeIssue})
 		if err != nil {
 			t.Fatal(err)
 		}
-		return got
+		return b.ID
 	}
-	follow(1, "sidecars.generate", false)
-	follow(2, "chapters.detect", true)
-	if off() {
-		t.Fatal("share_off with no generate job that heard it")
+	claim := func(id int64, kind string, attempt int, shareOff bool) {
+		t.Helper()
+		if err := db.RecordClaim(ctx, ServerJob{ID: id, Kind: kind, Attempt: attempt, ShareOff: shareOff}); err != nil {
+			t.Fatal(err)
+		}
 	}
-	follow(3, "sidecars.generate", true)
-	if !off() {
-		t.Fatal("an open generate job heard share_off, but the book reads as shared")
+	mapTo := func(id, bookID int64) {
+		t.Helper()
+		if err := db.PutGenerateBook(ctx, GenerateBook{ServerJobID: id, BookID: &bookID, LibraryID: 1, RelPath: "S"}); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if got, _ := db.GenerateShareOff(ctx, b.ID+1); got {
-		t.Fatal("another book reads share_off")
+	mode := func(id int64) string {
+		t.Helper()
+		b, err := db.GetBook(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b.ContribMode
 	}
-	if err := db.FinishServerJob(ctx, 3, 1, JobCancelled, nil, ""); err != nil {
+
+	// A re-claim with share_off turns the book the job's mapping names local.
+	resumed := book("resumed")
+	claim(1, "sidecars.generate", 1, false)
+	mapTo(1, resumed)
+	if mode(resumed) != ContribModeIssue {
+		t.Fatal("a job without share_off turned its book local")
+	}
+	claim(1, "sidecars.generate", 2, true)
+	if mode(resumed) != ContribModeLocal {
+		t.Fatal("a claim with share_off left the job's book shared")
+	}
+	// A claim later without it turns nothing back.
+	claim(1, "sidecars.generate", 3, false)
+	if mode(resumed) != ContribModeLocal {
+		t.Fatal("a claim without share_off turned the book back")
+	}
+
+	// A mapping put after the claim's share_off turns the new book local.
+	fresh := book("fresh")
+	claim(2, "sidecars.generate", 1, true)
+	mapTo(2, fresh)
+	if mode(fresh) != ContribModeLocal {
+		t.Fatal("a book mapped to a job that heard share_off stayed shared")
+	}
+
+	// An answer heard since: never another attempt's, and not a done book.
+	heard, done := book("heard"), book("done")
+	claim(3, "sidecars.generate", 2, false)
+	mapTo(3, heard)
+	if err := db.SetServerJobShareOff(ctx, 3, 1); err != nil || mode(heard) != ContribModeIssue {
+		t.Fatalf("an earlier attempt's answer: %v, mode %q", err, mode(heard))
+	}
+	if err := db.SetBookState(ctx, done, "done", "", "", ""); err != nil {
 		t.Fatal(err)
 	}
-	if off() {
-		t.Fatal("a finished job's share_off still reads")
+	claim(4, "sidecars.generate", 1, false)
+	mapTo(4, done)
+	if err := db.SetServerJobShareOff(ctx, 4, 1); err != nil || mode(done) != ContribModeIssue {
+		t.Fatalf("a done book: %v, mode %q", err, mode(done))
+	}
+	if err := db.SetServerJobShareOff(ctx, 3, 2); err != nil || mode(heard) != ContribModeLocal {
+		t.Fatalf("the attempt's answer: %v, mode %q", err, mode(heard))
+	}
+
+	// An answer read after the job ended (a Refresh that crossed a cancel).
+	ended := book("ended")
+	claim(5, "sidecars.generate", 1, false)
+	mapTo(5, ended)
+	if err := db.FinishServerJob(ctx, 5, 1, JobCancelled, nil, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetServerJobShareOff(ctx, 5, 1); err != nil || mode(ended) != ContribModeLocal {
+		t.Fatalf("an answer after the cancel: %v, mode %q", err, mode(ended))
+	}
+
+	// Another kind's job turns nothing.
+	other := book("other")
+	claim(6, "chapters.detect", 1, true)
+	mapTo(6, other)
+	if err := db.SetServerJobShareOff(ctx, 6, 1); err != nil || mode(other) != ContribModeIssue {
+		t.Fatalf("a chapters job's share_off: %v, mode %q", err, mode(other))
+	}
+
+	// A continue maps the job in its own write, over the mode it sets.
+	cb, err := db.CreateBook(ctx, NewBook{SourcePath: "/s/cont", WorkDir: "/w/cont", Title: "C", Goal: state.GoalChapters})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cont := cb.ID
+	if err := db.SetBookState(ctx, cont, "done", "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	claim(7, "sidecars.generate", 1, true)
+	if err := db.ContinueChapters(ctx, cont, "done", "splitting", NewBook{Title: "C", ContribMode: ContribModeIssue},
+		GenerateBook{ServerJobID: 7, LibraryID: 1, RelPath: "C"}); err != nil {
+		t.Fatal(err)
+	}
+	if mode(cont) != ContribModeLocal {
+		t.Fatal("a continue for a job that heard share_off left the book shared")
+	}
+	if b, err := db.GetBook(ctx, resumed); err != nil || b.ShareSkipped != ShareSkippedContributionsOff {
+		t.Fatalf("a book share_off turned local = %+v %v, want share_skipped contributions_off", b, err)
+	}
+}
+
+// KeepBookLocal turns a book local with why (the contributing stage found no
+// share job, or the server said share_off): never a done book, nor a local
+// one's reason over, and a continue that sets the mode again clears it.
+func TestKeepBookLocal(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	get := func(id int64) Book {
+		t.Helper()
+		b, err := db.GetBook(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	b, err := db.CreateBook(ctx, NewBook{SourcePath: "/s/k", WorkDir: "/w/k", Title: "K", ContribMode: ContribModeIssue,
+		Goal: state.GoalChapters})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.KeepBookLocal(ctx, b.ID, ShareSkippedNoShareJob); err != nil {
+		t.Fatal(err)
+	}
+	if got := get(b.ID); got.ContribMode != ContribModeLocal || got.ShareSkipped != ShareSkippedNoShareJob {
+		t.Fatalf("kept local = %q %q, want local no_share_job", got.ContribMode, got.ShareSkipped)
+	}
+	if err := db.KeepBookLocal(ctx, b.ID, ShareSkippedContributionsOff); err != nil ||
+		get(b.ID).ShareSkipped != ShareSkippedNoShareJob {
+		t.Fatalf("a local book's reason was written over: %v %q", err, get(b.ID).ShareSkipped)
+	}
+	if err := db.SetBookState(ctx, b.ID, "done", "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.ContinueChapters(ctx, b.ID, "done", "splitting", NewBook{Title: "K", ContribMode: ContribModeIssue},
+		GenerateBook{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := get(b.ID); got.ContribMode != ContribModeIssue || got.ShareSkipped != "" {
+		t.Fatalf("after a continue = %q %q, want issue and no reason", got.ContribMode, got.ShareSkipped)
+	}
+
+	done, err := db.CreateBook(ctx, NewBook{SourcePath: "/s/d", WorkDir: "/w/d", Title: "D", ContribMode: ContribModeIssue})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetBookState(ctx, done.ID, "done", "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.KeepBookLocal(ctx, done.ID, ShareSkippedNoShareJob); err != nil || get(done.ID).ContribMode != ContribModeIssue {
+		t.Fatalf("a done book: %v, mode %q, want issue", err, get(done.ID).ContribMode)
+	}
+}
+
+// ResumeShare turns a book kept local with no_share_job back to issue once
+// its share job follows it again with its share on (allowed), and never while
+// a share_off stands on the book, its job doesn't follow it (mapping ended, or
+// another attempt), or the book is local for any other reason (denied).
+// ShareResumable answers the same, writing nothing.
+func TestResumeShare(t *testing.T) {
+	ctx := context.Background()
+	setup := func(t *testing.T) (*DB, int64) {
+		t.Helper()
+		db := open(t)
+		if err := db.RecordClaim(ctx, ServerJob{ID: 1, Kind: "sidecars.generate", Attempt: 2}); err != nil {
+			t.Fatal(err)
+		}
+		b, err := db.CreateMappedBook(ctx, NewBook{SourcePath: "/s/r", WorkDir: "/w/r", Title: "R", ContribMode: ContribModeIssue},
+			GenerateBook{ServerJobID: 1, LibraryID: 1, RelPath: "R"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := db.KeepBookLocal(ctx, b.ID, ShareSkippedNoShareJob); err != nil {
+			t.Fatal(err)
+		}
+		return db, b.ID
+	}
+	for _, c := range []struct {
+		name    string
+		prep    func(t *testing.T, db *DB, id int64)
+		attempt int
+		want    bool
+	}{
+		{"follows again", func(*testing.T, *DB, int64) {}, 2, true},
+		{"another attempt", func(*testing.T, *DB, int64) {}, 1, false},
+		{"its own share_off", func(t *testing.T, db *DB, _ int64) {
+			if err := db.SetServerJobShareOff(ctx, 1, 2); err != nil {
+				t.Fatal(err)
+			}
+		}, 2, false},
+		{"another job's share_off", func(t *testing.T, db *DB, id int64) {
+			if err := db.RecordClaim(ctx, ServerJob{ID: 2, Kind: "sidecars.generate", Attempt: 1, ShareOff: true}); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.PutGenerateBook(ctx, GenerateBook{ServerJobID: 2, BookID: &id, LibraryID: 1, RelPath: "R"}); err != nil {
+				t.Fatal(err)
+			}
+		}, 2, false},
+		{"mapping ended", func(t *testing.T, db *DB, _ int64) {
+			if err := db.EndGenerateBook(ctx, 1, 2, time.Now()); err != nil {
+				t.Fatal(err)
+			}
+		}, 2, false},
+		{"kept local for share_off", func(t *testing.T, db *DB, id int64) {
+			if _, err := db.sql.ExecContext(ctx, `UPDATE books SET share_skipped = ? WHERE id = ?`,
+				ShareSkippedContributionsOff, id); err != nil {
+				t.Fatal(err)
+			}
+		}, 2, false},
+		{"a share_off a later claim wrote over", func(t *testing.T, db *DB, _ int64) {
+			// The job's attempt heard share_off; its next claim, the module on
+			// again, resets the row's share_off: the book keeps the share dropped.
+			if err := db.SetServerJobShareOff(ctx, 1, 2); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.RecordClaim(ctx, ServerJob{ID: 1, Kind: "sidecars.generate", Attempt: 3}); err != nil {
+				t.Fatal(err)
+			}
+		}, 3, false},
+		{"a done book's share_off", func(t *testing.T, db *DB, id int64) {
+			if err := db.SetBookState(ctx, id, "done", "", "", ""); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.SetServerJobShareOff(ctx, 1, 2); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.RecordClaim(ctx, ServerJob{ID: 1, Kind: "sidecars.generate", Attempt: 3}); err != nil {
+				t.Fatal(err)
+			}
+		}, 3, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			db, id := setup(t)
+			c.prep(t, db, id)
+			ok, err := db.ShareResumable(ctx, 1, c.attempt, id)
+			if err != nil || ok != c.want {
+				t.Fatalf("ShareResumable = %v %v, want %v", ok, err, c.want)
+			}
+			if b, _ := db.GetBook(ctx, id); b.ContribMode != ContribModeLocal {
+				t.Fatalf("ShareResumable wrote the mode: %q", b.ContribMode)
+			}
+			turned, err := db.ResumeShare(ctx, 1, c.attempt, id)
+			if err != nil || turned != c.want {
+				t.Fatalf("ResumeShare = %v %v, want %v", turned, err, c.want)
+			}
+			b, err := db.GetBook(ctx, id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantMode, local := ContribModeIssue, !c.want
+			if local {
+				wantMode = ContribModeLocal
+			}
+			if b.ContribMode != wantMode || (b.ShareSkipped == "") == local {
+				t.Fatalf("book = %q %q, want mode %q", b.ContribMode, b.ShareSkipped, wantMode)
+			}
+		})
+	}
+}
+
+// CreateMappedBook writes the book and its job's mapping together (the job's
+// share_off applied in the same write); a book it can't insert (a duplicate
+// source) leaves no mapping behind.
+func TestCreateMappedBook(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	if err := db.RecordClaim(ctx, ServerJob{ID: 1, Kind: "sidecars.generate", Attempt: 1, ShareOff: true}); err != nil {
+		t.Fatal(err)
+	}
+	b, err := db.CreateMappedBook(ctx, NewBook{SourcePath: "/s/m", WorkDir: "/w/m", Title: "M", ContribMode: ContribModeIssue},
+		GenerateBook{ServerJobID: 1, LibraryID: 1, RelPath: "M"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	g, err := db.GetGenerateBook(ctx, 1)
+	if err != nil || g.BookID == nil || *g.BookID != b.ID {
+		t.Fatalf("mapping = %+v %v, want book %d", g, err, b.ID)
+	}
+	if got, err := db.GetBook(ctx, b.ID); err != nil || got.ContribMode != ContribModeLocal {
+		t.Fatalf("book of a share_off job = %+v %v, want local", got, err)
+	}
+
+	if _, err := db.CreateMappedBook(ctx, NewBook{SourcePath: "/s/m", WorkDir: "/w/m2", Title: "M"},
+		GenerateBook{ServerJobID: 2, LibraryID: 1, RelPath: "M"}); !errors.Is(err, ErrDuplicate) {
+		t.Fatalf("duplicate = %v, want ErrDuplicate", err)
+	}
+	if _, err := db.GetGenerateBook(ctx, 2); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("a duplicate's mapping = %v, want none", err)
 	}
 }
 

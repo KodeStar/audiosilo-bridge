@@ -161,13 +161,20 @@ type Config struct {
 	ContribCommunityRepo string
 	ContribBaseURL       string
 	ExportRoot           string
-	// ShareOff, when set, asks the server, just before the contributing stage files
-	// for an engine book in issue mode, whether a sidecars.generate job that shares
-	// the book has its share turned off (true: the book stays local), with an error
-	// when the server couldn't be asked (the stage then parks and looks again;
-	// nothing is filed). A job hears share_off only in an answer to a report, which
-	// can be a keepalive away (generate.Handler.ShareOff). nil asks nothing.
-	ShareOff func(ctx context.Context, bookID int64) (bool, error)
+	// ShareOff, when set, answers the contributing stage for an engine book in
+	// issue mode why it is to stay local: "" while a sidecars.generate job that
+	// shares the book still shares it, store.ShareSkippedContributionsOff when
+	// one has its share turned off, store.ShareSkippedNoShareJob when no open
+	// generate-and-share job follows the book (nothing can say the share still
+	// stands). The stage keeps a book with a reason local and records it
+	// (store.DB.KeepBookLocal). An error when the server couldn't be asked (the
+	// stage then parks and looks again; nothing is filed). With ask the server
+	// is asked now (just before the stage files): a job hears share_off only in
+	// an answer to a report, which can be a keepalive away. Without, only what
+	// is known here answers, with no request, and an error for a job that can't
+	// be asked at all (the stage asks so before its lookups).
+	// generate.Handler.ShareOff; nil asks nothing (tests).
+	ShareOff func(ctx context.Context, bookID int64, ask bool) (why string, err error)
 }
 
 // Executor is the composite stage executor. ffmpeg/ffprobe are the resolved tool
@@ -219,7 +226,7 @@ type Executor struct {
 	contribCommunityRepo string
 	contribBaseURL       string
 	exportRoot           string
-	shareOff             func(ctx context.Context, bookID int64) (bool, error)
+	shareOff             func(ctx context.Context, bookID int64, ask bool) (string, error)
 
 	// redetectASR re-selects an ASR backend when the frozen one is unavailable. It is
 	// a field so a test can inject a scripted result; NewExecutor sets it to

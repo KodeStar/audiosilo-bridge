@@ -186,17 +186,10 @@ func (s *Service) SubmitCore(ctx context.Context, book store.Book, p CoreProposa
 	// No reusable row: only open an issue while the book is still awaiting a work
 	// (core_needed). If it has moved on with no recorded issue, refuse rather than open a
 	// stray issue for a book that no longer needs one. A book turned local files nothing
-	// (store.KeepBookLocal: a sidecars.generate job whose share the server turned off), so
-	// it needs no work either, though its park waits for the job's next look to lift.
-	// So is one whose open sidecars.generate job heard share_off before a run of it
-	// was up to turn the book local (store.GenerateShareOff, as the contributing
-	// stage asks).
+	// (a sidecars.generate job whose share the server turned off: the store turns its
+	// books local the moment the job's share_off is written), so it needs no work
+	// either, though its park waits for the job's next look to lift.
 	if !state.IsParkedWith(fresh.Status, fresh.ParkCode, state.ParkCoreNeeded) || fresh.ContribMode == store.ContribModeLocal {
-		return store.Contribution{}, ErrNotAwaitingCore
-	}
-	if off, err := s.deps.DB.GenerateShareOff(ctx, book.ID); err != nil {
-		return store.Contribution{}, fmt.Errorf("contrib: read the book's jobs: %w", err)
-	} else if off {
 		return store.Contribution{}, ErrNotAwaitingCore
 	}
 

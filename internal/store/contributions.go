@@ -254,24 +254,6 @@ func (db *DB) TouchContribution(ctx context.Context, id int64, issueSeenAt strin
 	return checkAffected(res, err)
 }
 
-// KeepBookLocal sets a book's own contribution mode to ContribModeLocal, which
-// the contributing stage reads again just before it files: a sidecars.generate
-// job whose share the server turned off keeps its results local (server#218).
-// A book done keeps its mode (it shared as asked, and its job reports what it
-// filed). It reports whether the book is local now: false for one done, or
-// gone. Like SetBookChapters it deliberately does NOT bump updated_at: the mode
-// is not a change of pipeline position, and a bump would reorder the Running
-// list.
-func (db *DB) KeepBookLocal(ctx context.Context, id int64) (bool, error) {
-	res, err := db.sql.ExecContext(ctx,
-		`UPDATE books SET contrib_mode=? WHERE id=? AND state <> 'done'`, ContribModeLocal, id)
-	if err != nil {
-		return false, err
-	}
-	n, err := res.RowsAffected()
-	return n > 0, err
-}
-
 // SetBookWorkID records the resolved upstream work slug on a book (the poller sets it
 // once a core add-work PR merges, and the manual set-work endpoint sets it directly),
 // so the contributing stage can attach the sidecars to the real work. It bumps

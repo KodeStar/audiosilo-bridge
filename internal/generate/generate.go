@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"maps"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -132,15 +133,18 @@ type Handler struct {
 	// latest run's own channel, with its Reporter (another job asks it to
 	// report now when it stands in that job's way, awaitOpenJobEnd).
 	pokes map[int64]runHandle
-	// describeParks is each describe job's park while its loop waits on it
-	// (describeParked), with that run's wake-up channel, so WakeParked finds the
-	// ones a change answers.
-	describeParks map[int64]describePark
+	// loopParks is each park a job waits on in its own loop, not as an engine
+	// book (a describe job's, describeParked; a generate job's owed share,
+	// shareOwed), with that run's wake-up channel, so WakeParked finds the ones
+	// a change answers.
+	loopParks map[int64]loopPark
 	// wakeSeq numbers WakeParked's calls and woken holds each park code's latest,
-	// so a describe try that parks on a code woken while it ran tries again at
-	// once (parkDescribe).
+	// so a try that parks on a code woken while it ran tries again at once
+	// (parkInLoop).
 	wakeSeq uint64
 	woken   map[state.ParkCode]uint64
+	// asker is the runner ShareOff asks the jobs through (AskThrough).
+	asker ShareAsker
 	// doneJobs counts the jobs that finished done here (the heartbeat's
 	// estimates are computed again when it moves).
 	doneJobs atomic.Int64
@@ -152,6 +156,9 @@ type Handler struct {
 	// beforeEnd, a seam (tests), runs in release between its first stop and the
 	// job's recorded end: the window another job's end can land in.
 	beforeEnd func(jobID int64)
+	// readMapping, a seam (tests), stands in for the store's GetGenerateBook in
+	// resumeMapping and Abandon (mappingOf).
+	readMapping func(ctx context.Context, serverJobID int64) (store.GenerateBook, error)
 }
 
 // endSignal is the channel the next job end here closes. A waiter takes it
@@ -215,22 +222,23 @@ func New(o Options) *Handler {
 	if o.ContribCredential == nil {
 		o.ContribCredential = func(context.Context) error { return nil }
 	}
-	return &Handler{o: o, pokes: map[int64]runHandle{}, describeParks: map[int64]describePark{},
+	return &Handler{o: o, pokes: map[int64]runHandle{}, loopParks: map[int64]loopPark{},
 		woken: map[state.ParkCode]uint64{}}
 }
 
-// describePark is a describe run's park (describeParks): its code, and the
-// run's wake-up channel.
-type describePark struct {
+// loopPark is a park a run waits on in its own loop (loopParks): its code, and
+// the run's wake-up channel.
+type loopPark struct {
 	code state.ParkCode
 	poke chan struct{}
 }
 
-// WakeParked wakes every sidecars.describe job parked with code to try again
-// now, and returns how many it woke: a monthly budget raised on the page, or the
-// agent's credential changed on the Accounts tab, re-admits the engine's parked
-// books, while a describe job waits in its own loop (until its retry_at, the 1st
-// for the monthly budget, a Retry, or the Bridge's next start, which runs the job
+// WakeParked wakes every job parked with code in its own loop (loopParks) to
+// try again now, and returns how many it woke: a monthly budget raised on the
+// page, the agent's credential changed or a GitHub sign-in on the Accounts tab,
+// re-admits the engine's parked books, while a describe job (or a generate
+// job's owed share) waits in its own loop (until its retry_at, the 1st for the
+// monthly budget, a Retry, or the Bridge's next start, which runs the job
 // again). A job whose try is running then tries again at once if that try parks
 // with code.
 func (h *Handler) WakeParked(code state.ParkCode) int {
@@ -239,7 +247,7 @@ func (h *Handler) WakeParked(code state.ParkCode) int {
 	h.wakeSeq++
 	h.woken[code] = h.wakeSeq
 	woke := 0
-	for _, p := range h.describeParks {
+	for _, p := range h.loopParks {
 		if p.code == code {
 			nudge(p.poke)
 			woke++
@@ -248,11 +256,61 @@ func (h *Handler) WakeParked(code state.ParkCode) int {
 	return woke
 }
 
-// wakeMark is WakeParked's latest call (describeParked's before a try).
+// wakeMark is WakeParked's latest call (a loop's before a try).
 func (h *Handler) wakeMark() uint64 {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.wakeSeq
+}
+
+// reportPark reports a park as the job's: pr (its step and "Needs attention"
+// message) with the park's code and retry_at (zero: none) in its Extra, then
+// the park itself with reason.
+func reportPark(r *run, pr jobs.Progress, code state.ParkCode, reason string, retryAt time.Time) {
+	at := ""
+	if !retryAt.IsZero() {
+		at = store.Timestamp(retryAt)
+	}
+	extra := maps.Clone(pr.Extra)
+	if extra == nil {
+		extra = map[string]any{}
+	}
+	extra["park"] = parkExtra(string(code), at)
+	pr.Extra = extra
+	r.rep.Progress(pr)
+	r.rep.Park(string(code), reason)
+}
+
+// parkInLoop reports park as the job's (reportPark, with pr) for a run that
+// waits on it in its own loop, and registers it for WakeParked; woken says
+// WakeParked woke its code after mark (wakeMark, taken before the try), so the
+// park was answered while the try ran and the loop tries again at once. A Retry
+// pressed while that try ran was answered by it: a park with a retry_at drains
+// it first, so only one pressed once this park is reported tries again before
+// its retry_at (a park without one waits for a press, so a press made meanwhile
+// is kept).
+func (h *Handler) parkInLoop(r *run, park *scheduler.ParkError, pr jobs.Progress, mark uint64) (woken bool) {
+	if !park.RetryAfter.IsZero() {
+		select {
+		case <-r.poke:
+		default:
+		}
+	}
+	reportPark(r, pr, park.Code, park.Reason, park.RetryAfter)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.loopParks[r.job.ID] = loopPark{code: park.Code, poke: r.poke}
+	return h.woken[park.Code] > mark
+}
+
+// dropLoopPark drops r's parkInLoop registration (a later run of the job may
+// have its own by then).
+func (h *Handler) dropLoopPark(r *run) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.loopParks[r.job.ID].poke == r.poke {
+		delete(h.loopParks, r.job.ID)
+	}
 }
 
 func (h *Handler) now() time.Time { return h.o.Now() }
@@ -262,6 +320,15 @@ func (h *Handler) Kind() string { return Kind }
 
 // Lane is the pipeline lane.
 func (h *Handler) Lane() string { return jobs.LanePipeline }
+
+// NeedsClaimRow is true for a share job (contribute issue, or params that
+// don't read): its share_off is kept on the claim's row, which turns its books
+// local (jobs.ClaimRowNeeder), so it never runs on a claim the store couldn't
+// record.
+func (h *Handler) NeedsClaimRow(job jobs.Job) bool {
+	p, err := ParseParams(job.Params)
+	return err != nil || p.Contribute == ContributeIssue
+}
 
 // Result is what a done job reports (contract section 1). Description says
 // whether description.json was written with the others (Phase 1c); when it
@@ -279,14 +346,21 @@ type Result struct {
 	Description      bool              `json:"description"`
 	DescriptionError string            `json:"description_error,omitempty"`
 	// ShareSkipped is why a job that was to share kept its results local
-	// (ShareSkippedContributionsOff); omitted otherwise.
+	// (ShareSkippedContributionsOff, ShareSkippedNoShareJob); omitted otherwise.
 	ShareSkipped string `json:"share_skipped,omitempty"`
 }
 
-// ShareSkippedContributionsOff is Result.ShareSkipped for a job whose share
-// the server turned off (its Contributions module off: jobs.Reporter.ShareOff,
-// server#218). The console words it.
-const ShareSkippedContributionsOff = "contributions_off"
+// Result.ShareSkipped values (the console words them, and words one it
+// doesn't know plainly).
+const (
+	// ShareSkippedContributionsOff is a job whose share the server turned off
+	// (its Contributions module off: jobs.Reporter.ShareOff, server#218).
+	ShareSkippedContributionsOff = store.ShareSkippedContributionsOff
+	// ShareSkippedNoShareJob is a job whose engine book reached its share with
+	// no run of the job following it (ShareOff: a fault, such as a lapsed
+	// lease, left the book running alone), so the book was kept local.
+	ShareSkippedNoShareJob = store.ShareSkippedNoShareJob
+)
 
 // run is one job's state as it goes.
 type run struct {
@@ -368,76 +442,24 @@ type run struct {
 	// share park's stage again in local mode (once a run).
 	shareSkipped string
 	shareLifted  bool
-	// share is a contribute=issue sidecars.generate run's shareGuard (nil for
-	// any other run).
-	share *shareGuard
 }
 
-// shareGuard turns a generate-and-share run's engine book local the moment the
-// job hears share_off (jobs.Reporter.OnShareOff), not at the run's next look,
-// which can be an idle poll away: a re-admit at a contributing park meanwhile
-// (the poller after a data release, a GitHub sign-in, contrib_unavailable's
-// or share_unconfirmed's auto-retry) would otherwise run the stage in issue mode and file after the
-// admin refused the share. It runs on the Reporter's goroutine as well as the
-// run's (shareBook), so it has its own lock, and does only a store write under
-// it (never the scheduler's, so no lock order with a book's publish or
-// re-admit): keepShareLocal, at the look the nudge brings, still lifts a share
-// park and records why the share was skipped.
-type shareGuard struct {
-	mu sync.Mutex
-	// book is the run's engine book (0 before it has one), local the one the
-	// guard turned local (so later answers write nothing).
-	book, local int64
-}
-
-// guardShare gives a contribute=issue sidecars.generate run its shareGuard
-// and has the job's Reporter call it from now on; stop drops the call.
-func (h *Handler) guardShare(ctx context.Context, r *run) (stop func()) {
+// wakeOnShareOff has a contribute=issue sidecars.generate run look at its
+// engine book at once when the job hears share_off (jobs.Reporter.OnShareOff),
+// not at its next look, which can be an idle poll away: the store has the
+// book local by then (store.DB.SetServerJobShareOff), and keepShareLocal, at
+// the look, lifts a share park and records why the share was skipped. Once a
+// run: the server says share_off in every answer while its module is off, and
+// a wake at each would have a park that waits on the same wake-up as a Retry
+// (book_not_writable's save) try again at every report, each try reporting
+// twice more. stop drops the call.
+func (h *Handler) wakeOnShareOff(r *run) (stop func()) {
 	if r.kind != Kind || r.params.Contribute != ContributeIssue {
 		return func() {}
 	}
-	r.share = &shareGuard{}
-	r.rep.OnShareOff(func() { h.shareLocal(ctx, r) })
+	var once sync.Once
+	r.rep.OnShareOff(func() { once.Do(func() { nudge(r.poke) }) })
 	return func() { r.rep.OnShareOff(nil) }
-}
-
-// shareBook tells the run's shareGuard (if any) its engine book, id, before
-// anything re-admits it: a share_off heard already turns it local at once.
-func (h *Handler) shareBook(ctx context.Context, r *run, id int64) {
-	if g := r.share; g != nil {
-		g.mu.Lock()
-		g.book = id
-		g.mu.Unlock()
-		h.shareLocal(ctx, r)
-	}
-}
-
-// shareLocal turns the run's engine book local once the job heard share_off
-// and the book is known. A book it turned local wakes the run, whose look
-// lifts a share park at once.
-func (h *Handler) shareLocal(ctx context.Context, r *run) {
-	g := r.share
-	g.mu.Lock()
-	if g.book == 0 || g.local == g.book || !r.rep.ShareOff() {
-		g.mu.Unlock()
-		return
-	}
-	book := g.book
-	local, err := h.o.DB.KeepBookLocal(ctx, book)
-	if err == nil {
-		g.local = book // a book done keeps its mode: nothing to write again
-	}
-	g.mu.Unlock()
-	switch {
-	case err != nil && ctx.Err() != nil:
-		// The job ended meanwhile: nothing more runs the book for it.
-	case err != nil:
-		// The next answer that carries share_off, or the run's next look, tries
-		// again.
-		h.o.Log.Warn("generate: keeping the results local failed", "job", r.job.ID, "book", book, "err", err)
-	case local:
-		nudge(r.poke)
-	}
 }
 
 // bookKey is what changes on an engine book row when the scheduler moves it.
@@ -465,7 +487,7 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 	}
 	defer stop()
 	r.params = params
-	defer h.guardShare(ctx, r)()
+	defer h.wakeOnShareOff(r)()
 	eng, err := h.waitEngine(ctx, r)
 	if err != nil {
 		return nil, err
@@ -490,38 +512,71 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 // keepShareLocal keeps the results of a contribute=issue job local once the
 // server says its share is off (jobs.Reporter.ShareOff: its Contributions
 // module was turned off, server#218), or once it finds its engine book kept
-// local by an earlier run of the job (a restart since, the module maybe on
-// again): the run goes on, its share dropped for good, and its result says why
-// (ShareSkippedContributionsOff). Before the engine book exists (b nil) the
-// book is simply made in local mode; after, its contribution mode becomes
-// local, a book the run takes up later included (a resumed job's), so the
-// contributing stage files nothing, and a book parked at that stage over the
-// share (shareParks) runs it again, once a run: a stage that was running in
-// issue mode when the answer came parks there after it. A book done already
-// shared as asked, and a filing the stage had under way when the answer came
-// is not taken back (finish reports what was filed). A failed write, or a lift
-// that failed, is tried again at the next look. It reports whether it lifted a
-// park (b is then as read before the lift).
+// local (by an earlier run of the job, a restart since and the module maybe on
+// again, or by the contributing stage, which found no run of the job to ask:
+// ShareOff): the run goes on, its share dropped for good, and its result says
+// why (the book's own store.Book.ShareSkipped when it has one, else
+// ShareSkippedContributionsOff). Before the engine book exists (b nil) the
+// book is simply made in local mode. The book's own mode is the store's to
+// turn (store.DB.SetServerJobShareOff and the job's mapping: a book the run
+// takes up later, a resumed job's, included), so the contributing stage files
+// nothing; one whose write failed is still asked about before anything is
+// filed (ShareOff). A book parked at that stage over the share (shareParks)
+// runs it again, once a run: a stage that was running in issue mode when the
+// answer came parks there after it. A book done already shared as asked, and a
+// filing the stage had under way when the answer came is not taken back
+// (finish reports what was filed). A lift that failed is tried again at the
+// next look. It reports whether it lifted a park (b is then as read before the
+// lift). A book kept local only because no share job followed it (no_share_job:
+// a lease that lapsed, a job's end that couldn't stop it) is shared again once
+// its job follows it again with its share on (owesShare): one not done yet is
+// turned back to issue mode (store.DB.ResumeShare), so its contributing stage
+// files it; a done one is filed by finish (shareOwed). A share_off still wins.
 func (h *Handler) keepShareLocal(ctx context.Context, eng Engine, r *run, b *store.Book) (lifted bool) {
+	if r.owesShare(b) {
+		if state.State(b.State) == state.Done {
+			return false // finish files it (shareOwed)
+		}
+		// Held, so no stage runs on the book meanwhile: a contributing stage that
+		// read it local would file it locally after the turn (and finish would
+		// then owe nothing). A stage running now leaves it to the next look.
+		release, ok := h.hold(b.ID)
+		if !ok {
+			return false
+		}
+		// Read again under the hold: a stage that ended since the look (the
+		// contributing stage filed locally, the book done) leaves it to finish,
+		// which a turn now would leave owing nothing.
+		now, err := h.o.DB.GetBook(ctx, b.ID)
+		turned := false
+		if err == nil && state.State(now.State) != state.Done {
+			turned, err = h.o.DB.ResumeShare(ctx, r.job.ID, r.job.Attempt, b.ID)
+		}
+		release()
+		switch {
+		case err == nil && state.State(now.State) == state.Done:
+			return false // finish files it (shareOwed)
+		case err != nil:
+			// The share isn't dropped: the next look tries again.
+			h.o.Log.Warn("generate: sharing the engine book again failed", "job", r.job.ID, "book", b.ID, "err", err)
+			return false
+		case turned:
+			h.o.Log.Info("generate: the job follows its engine book again, so it is shared again", "job", r.job.ID, "book", b.ID)
+			return false
+		}
+		// A share_off on the book (another job's, or this job's since) still wins.
+	}
 	if r.shareSkipped == "" {
 		keptLocal := b != nil && b.ContribMode == store.ContribModeLocal
 		if r.params.Contribute != ContributeIssue || (!keptLocal && !r.rep.ShareOff()) {
 			return false
 		}
 	}
-	if b != nil && b.ContribMode != store.ContribModeLocal {
-		switch local, err := h.o.DB.KeepBookLocal(ctx, b.ID); {
-		case err != nil:
-			h.o.Log.Warn("generate: keeping the results local failed", "job", r.job.ID, "book", b.ID, "err", err)
-			return false
-		case !local:
-			return false // done: it shared as asked
-		}
-		b.ContribMode = store.ContribModeLocal
+	if b != nil && b.ContribMode != store.ContribModeLocal && state.State(b.State) == state.Done {
+		return false // it shared as asked
 	}
 	if r.shareSkipped == "" {
-		r.params.Contribute, r.shareSkipped = ContributeLocal, ShareSkippedContributionsOff
-		h.o.Log.Info("generate: the server turned this job's share off; its results stay local", "job", r.job.ID)
+		h.dropShare(r, b)
 	}
 	if b == nil || r.shareLifted || !state.IsParkedWith(b.Status, b.ParkCode, shareParks...) {
 		return false
@@ -539,6 +594,106 @@ func (h *Handler) keepShareLocal(ctx context.Context, eng Engine, r *run, b *sto
 	}
 	r.shareLifted = true
 	return true
+}
+
+// dropShare drops the run's share for good: its results stay local, and its
+// result says why (b's own store.Book.ShareSkipped when it has one and no
+// share_off was heard, else ShareSkippedContributionsOff).
+func (h *Handler) dropShare(r *run, b *store.Book) {
+	why := ShareSkippedContributionsOff
+	if b != nil && b.ShareSkipped != "" && !r.rep.ShareOff() {
+		why = b.ShareSkipped
+	}
+	r.params.Contribute, r.shareSkipped = ContributeLocal, why
+	h.o.Log.Info("generate: this job's share is off; its results stay local", "job", r.job.ID, "why", why)
+}
+
+// owesShare reports whether b was kept local only because no share job
+// followed it (store.ShareSkippedNoShareJob) while this run shares it: a
+// sidecars.generate run with contribute=issue whose share is still on (no
+// share_off heard, nothing dropped yet).
+func (r *run) owesShare(b *store.Book) bool {
+	return b != nil && r.kind == Kind && r.shareSkipped == "" && r.params.Contribute == ContributeIssue &&
+		!r.rep.ShareOff() && b.ContribMode == store.ContribModeLocal && b.ShareSkipped == store.ShareSkippedNoShareJob
+}
+
+// shareOwed files the share of a done engine book that was kept local only
+// because no share job followed it, now that this run does (owesShare): its
+// contributing stage ran in local mode, so the run files the sidecars itself as
+// sidecars.contribute does (shareConfirmed: the server asked just before),
+// once the store agrees the share stands (store.DB.ShareResumable: a share_off
+// on the book still wins), then records the book shared (store.DB.ResumeShare).
+// It reports whether it filed; a book whose share doesn't stand is dropped as
+// keepShareLocal drops it.
+func (h *Handler) shareOwed(ctx context.Context, r *run, b store.Book) (bool, error) {
+	ok, err := h.o.DB.ShareResumable(ctx, r.job.ID, r.job.Attempt, b.ID)
+	if err != nil {
+		return false, err
+	}
+	var sharer Sharer
+	if h.o.Sharer != nil {
+		sharer = h.o.Sharer()
+	}
+	if !ok || sharer == nil {
+		h.dropShare(r, &b)
+		return false, nil
+	}
+	h.o.Log.Info("generate: the job follows its engine book again, so it files the share", "job", r.job.ID, "book", b.ID)
+	r.rep.Progress(jobs.Progress{Step: stepSharing, Message: "Sharing with the community", Total: 1})
+	// Asked again under the hold, after the server's answer: a share_off stored
+	// since the look above (another job's on the book) still wins.
+	stands := func(ctx context.Context) (bool, error) {
+		return h.o.DB.ShareResumable(ctx, r.job.ID, r.job.Attempt, b.ID)
+	}
+	if err := h.shareOwedParked(ctx, r, sharer, b, stands); err != nil {
+		if errors.Is(err, errShareOffNow) || errors.Is(err, pipeline.ErrShareStopped) {
+			h.dropShare(r, &b)
+			return false, nil
+		}
+		return false, err
+	}
+	if _, err := h.o.DB.ResumeShare(ctx, r.job.ID, r.job.Attempt, b.ID); err != nil {
+		h.o.Log.Warn("generate: recording the engine book shared failed", "job", r.job.ID, "book", b.ID, "err", err)
+	}
+	return true, nil
+}
+
+// shareOwedParked files an owed share (shareConfirmed) and waits out the parks
+// the contributing stage would wait on in the same case, so a done book's share
+// ends as a stage's would: a GitHub sign-in missing or not refreshed
+// (contrib_unavailable), a server that couldn't be asked while it filed
+// (share_unconfirmed). The job parks with the stage's code, reason and
+// retry_at, stays parked while it tries again, and tries again at the
+// retry_at, on Retry (which pokes the job, its book being done), or on a
+// WakeParked for its code (a GitHub sign-in). Any other failure is the
+// job's, as before.
+func (h *Handler) shareOwedParked(ctx context.Context, r *run, sharer Sharer, b store.Book,
+	stands func(context.Context) (bool, error)) error {
+	defer h.dropLoopPark(r)
+	for {
+		mark := h.wakeMark()
+		_, err := h.shareConfirmed(ctx, r, sharer, b.ID, ContributeParams{WorkID: b.WorkID}, stands)
+		var park *scheduler.ParkError
+		if !errors.As(err, &park) || ctx.Err() != nil {
+			// Lifts this loop's park (nothing when there is none); the job ends or
+			// goes on to finish.
+			r.rep.Unpark()
+			return err
+		}
+		// A share_off heard while the try ran, or before parkInLoop drained its
+		// wake-up (wakeOnShareOff, once a run), would leave the job parked over
+		// a share that is off until the retry_at: shareConfirmed drops it now.
+		if r.rep.ShareOff() {
+			continue
+		}
+		h.o.Log.Warn("generate: the share it owes waits", "job", r.job.ID, "book", b.ID, "code", park.Code, "err", err)
+		if h.parkInLoop(r, park, sharingParked, mark) || r.rep.ShareOff() {
+			continue // woken while the try ran, or share_off heard since
+		}
+		if err := h.recheckWait(ctx, r, park.RetryAfter); err != nil {
+			return err
+		}
+	}
 }
 
 // shareParks are the contributing stage's parks over the share itself (a
@@ -562,16 +717,33 @@ func (h *Handler) cantContribute(ctx context.Context, r *run) error {
 // runEngineBook checks once prepare knows the path): the ids are the server's, so
 // another server (the Bridge paired anew) or a reinstalled one hands out an id an
 // earlier job's mapping still holds, and following that would write another book's
-// characters and recaps into this one.
+// characters and recaps into this one. A read that fails is tried again
+// (stopTries, a poll apart): a job that failed on it would leave the engine book
+// an earlier run made going on with no job to follow or stop it. A job that
+// ends here anyway (the reads kept failing, or it was cancelled meanwhile)
+// releases that book as Abandon does (when Abandon's own read of the mapping
+// works by then), unless it resumes later; a book nothing can stop is kept
+// local by its contributing stage all the same (ShareOff: no_share_job).
 func (h *Handler) resumeMapping(ctx context.Context, job jobs.Job) (store.GenerateBook, bool, error) {
-	mapped, err := h.o.DB.GetGenerateBook(ctx, job.ID)
-	if errors.Is(err, store.ErrNotFound) {
-		return store.GenerateBook{}, false, nil
-	}
-	if err != nil {
+	for i := 1; ; i++ {
+		mapped, err := h.mappingOf(ctx, job.ID)
+		switch {
+		case errors.Is(err, store.ErrNotFound):
+			return store.GenerateBook{}, false, nil
+		case err == nil:
+			return mapped, mapped.BookID != nil && mapped.LibraryID == *job.LibraryID, nil
+		}
+		if i < stopTries {
+			h.o.Log.Warn("generate: reading the job's earlier run failed; trying again", "job", job.ID, "err", err)
+			if err = agent.SleepCtx(ctx, h.o.Poll); err == nil {
+				continue
+			}
+		}
+		if ctx.Err() == nil || !jobs.Resumes(ctx) {
+			h.Abandon(context.WithoutCancel(ctx), job)
+		}
 		return store.GenerateBook{}, false, err
 	}
-	return mapped, mapped.BookID != nil && mapped.LibraryID == *job.LibraryID, nil
 }
 
 // runEngineBook checks the book (prepare), finds a resumed job's engine book again
@@ -585,13 +757,6 @@ func (h *Handler) runEngineBook(ctx context.Context, eng Engine, r *run, mapped 
 	// moved the job with its book since).
 	ownBook := func() bool { return mapped.RelPath == r.rel || mapped.RelPath == *r.job.Path }
 	r.resuming = resumed
-	if resumed && ownBook() {
-		// The engine runs a resumed job's book while prepare waits (the server
-		// unreachable, the mapping not checked yet), so its share guard has it
-		// first: a share_off heard already (server_jobs.share_off after a
-		// restart) or meanwhile turns it local before a re-admit can file.
-		h.shareBook(ctx, r, *mapped.BookID)
-	}
 	if err := h.prepare(ctx, r, !resumed); err != nil {
 		if resumed && ownBook() {
 			r.bookID = *mapped.BookID // its own book: end() stops it
@@ -612,7 +777,6 @@ func (h *Handler) runEngineBook(ctx context.Context, eng Engine, r *run, mapped 
 	}
 	if resumed {
 		r.bookID = *mapped.BookID
-		h.shareBook(ctx, r, r.bookID) // before attach re-admits it (nothing new when it had it before prepare)
 		if err := h.attach(ctx, eng, r, mapped); err != nil {
 			return h.end(ctx, r, nil, err)
 		}
@@ -704,7 +868,7 @@ func (h *Handler) end(ctx context.Context, r *run, res any, err error) (any, err
 // job created is released as end() would, or it would go on with nothing to
 // follow it.
 func (h *Handler) Abandon(ctx context.Context, job jobs.Job) {
-	m, err := h.o.DB.GetGenerateBook(ctx, job.ID)
+	m, err := h.mappingOf(ctx, job.ID)
 	if err != nil || m.BookID == nil || m.EndedAt != "" {
 		return
 	}
@@ -817,25 +981,55 @@ func (h *Handler) purgeAtEnd(ctx context.Context, job jobs.Job, bookID int64) {
 // engine began before the cancel landed). The cancel is written only while g
 // holds (store.StopGuard: no later attempt of the job, no other open job on the
 // book, the job's mapping still ended when g.Ended), in the store's one
-// statement. It reports whether it left the book to another open job or a later
-// claim.
+// statement. A cancel that fails is tried again (stopTries, a poll apart); one
+// that still fails turns the book local (store.DB.KeepBookLocal, why
+// ShareSkippedNoShareJob), so a book that runs on with nothing following it
+// never files. It reports whether it left the book to another open job or a
+// later claim.
 func (h *Handler) stopBook(ctx context.Context, g store.StopGuard, bookID int64, recancel bool) (followed bool) {
 	b, err := h.o.DB.GetBook(ctx, bookID)
 	if err != nil || (finished(b.State, b.Status) && (!recancel || !scheduler.IsCancelled(b))) {
 		return false
 	}
-	if eng := h.o.Engine(); eng != nil {
-		err = eng.CancelUnlessFollowed(ctx, bookID, g)
-	} else {
-		err = scheduler.CancelStoredUnlessFollowed(ctx, h.o.DB, bookID, g)
+	for i := 1; ; i++ {
+		if eng := h.o.Engine(); eng != nil {
+			err = eng.CancelUnlessFollowed(ctx, bookID, g)
+		} else {
+			err = scheduler.CancelStoredUnlessFollowed(ctx, h.o.DB, bookID, g)
+		}
+		switch {
+		case errors.Is(err, store.ErrFollowed):
+			return true
+		case err == nil || errors.Is(err, scheduler.ErrInvalidOp) || errors.Is(err, store.ErrSettled) ||
+			errors.Is(err, store.ErrNotFound):
+			// Stopped, settled, or deleted since the read: nothing runs on.
+			return false
+		}
+		if i == stopTries || agent.SleepCtx(ctx, h.o.Poll) != nil {
+			break
+		}
 	}
-	switch {
-	case errors.Is(err, store.ErrFollowed):
-		return true
-	case err != nil && !errors.Is(err, scheduler.ErrInvalidOp) && !errors.Is(err, store.ErrSettled):
-		h.o.Log.Warn("generate: cancelling the engine book failed", "job", g.JobID, "book", bookID, "err", err)
+	h.o.Log.Warn("generate: cancelling the engine book failed; it is kept local", "job", g.JobID, "book", bookID, "err", err)
+	// Written even when the Bridge is stopping (ctx ended the tries): the book
+	// may run on at the next start.
+	if err := h.o.DB.KeepBookLocal(context.WithoutCancel(ctx), bookID, ShareSkippedNoShareJob); err != nil {
+		h.o.Log.Warn("generate: keeping the engine book local failed", "job", g.JobID, "book", bookID, "err", err)
 	}
 	return false
+}
+
+// stopTries is how many times stopBook tries a cancel that fails, and
+// resumeMapping a read.
+const stopTries = 3
+
+// mappingOf reads server job id's mapping (store.DB.GetGenerateBook, or the
+// readMapping seam): resumeMapping and Abandon read it alike, so a read that
+// fails fails both.
+func (h *Handler) mappingOf(ctx context.Context, id int64) (store.GenerateBook, error) {
+	if h.readMapping != nil {
+		return h.readMapping(ctx, id)
+	}
+	return h.o.DB.GetGenerateBook(ctx, id)
 }
 
 // stopGuard is the StopGuard of job's end: its id and attempt, and whether the
@@ -1238,33 +1432,59 @@ func (h *Handler) reporter(id int64) *jobs.Reporter {
 	return h.pokes[id].rep
 }
 
-// ShareOff answers the contributing stage just before it files for engine book
-// bookID in issue mode (pipeline.Config.ShareOff): whether an open
-// generate-and-share job that follows the book has its share turned off, asked
-// of the server now. The job hears share_off only in an answer to one of its
-// reports, which can be a keepalive away (or an idle poll, while its run waits
-// for the book), so each such job reports now (jobs.Reporter.Refresh), and the
-// answer acts as any other: its share guard turns the book local. The first
-// job with its share off answers true (the book is local whatever the others
-// say): one that stored or heard share_off already needs no asking, and an
-// answer that stopped the job counts when it carried share_off (heard before
-// the stop). An error when one couldn't be asked (the server not reached, the
-// answer stopped the job, or no run of it is up here yet: a resumed job
-// waiting for its lane slot), for the stage to wait and file nothing. Other
-// jobs (contribute local, or another kind) are not asked; params that don't
-// read are asked as a share's.
-func (h *Handler) ShareOff(ctx context.Context, bookID int64) (bool, error) {
+// ShareAsker asks a job's run here about its share (jobs.Runner.ShareOff).
+type ShareAsker interface {
+	ShareOff(ctx context.Context, id int64, ask bool) (bool, error)
+}
+
+// AskThrough has ShareOff ask the jobs' runs through a (the runner the
+// handler's jobs run in), set before the runner and the engine start. Without
+// one ShareOff can ask no job, so a share job's book waits.
+func (h *Handler) AskThrough(a ShareAsker) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.asker = a
+}
+
+// ShareOff answers the contributing stage for engine book bookID in issue mode
+// (pipeline.Config.ShareOff): why the book is to stay local, "" while an open
+// generate-and-share job that follows it still shares it. The job hears
+// share_off only in an answer to one of its reports, which can be a keepalive
+// away (or an idle poll, while its run waits for the book), so with ask each
+// such job reports now (through the runner, a job still waiting for its lane
+// slot included), and the answer acts as any other: the store turns the book
+// local. Without ask only what is known here answers, with no request: the
+// stage asks so before its lookups, to wait at once on a job that can't be
+// asked. The first job with its share off answers ShareSkippedContributionsOff
+// (the book is local whatever the others say, one that couldn't be asked
+// included): one that stored or heard share_off already needs no asking, and
+// an answer that stopped the job counts when it carried share_off (heard
+// before the stop). Otherwise an error when one couldn't be asked (the server
+// not reached, the Bridge unpaired or its token refused, the answer stopped
+// the job, or no run of it here), for the stage to wait and file nothing.
+// Other jobs (contribute local, or another kind) are not asked; params that
+// don't read are asked as a share's. A book that no open share job follows
+// answers ShareSkippedNoShareJob (fail closed): a fault left it running with
+// nothing to ask (a crash between its creation and its mapping, a job's end
+// that couldn't stop it, a lease that lapsed), and nothing can say the share
+// it was made for still stands.
+func (h *Handler) ShareOff(ctx context.Context, bookID int64, ask bool) (string, error) {
 	open, err := h.o.DB.OpenGenerateJobsForBook(ctx, bookID, 0)
 	if err != nil {
-		return false, err
+		return "", err
 	}
+	h.mu.Lock()
+	asker := h.asker
+	h.mu.Unlock()
+	shares := false
+	var unasked error // the first job that couldn't be asked, once no other is off
 	for _, id := range open {
 		sj, err := h.o.DB.GetServerJob(ctx, id)
 		if errors.Is(err, store.ErrNotFound) {
 			continue
 		}
 		if err != nil {
-			return false, err
+			return "", err
 		}
 		if sj.Kind != Kind {
 			continue
@@ -1272,23 +1492,27 @@ func (h *Handler) ShareOff(ctx context.Context, bookID int64) (bool, error) {
 		if p, err := ParseParams(sj.Params); err == nil && p.Contribute != ContributeIssue {
 			continue
 		}
+		shares = true
 		if sj.ShareOff {
-			return true, nil
+			return ShareSkippedContributionsOff, nil
 		}
-		rep := h.reporter(id)
-		if rep == nil {
-			return false, fmt.Errorf("job %d isn't running here yet to ask the server", id)
+		var off bool
+		if asker == nil {
+			err = fmt.Errorf("job %d can't be asked here", id)
+		} else if off, err = asker.ShareOff(ctx, id, ask); err != nil {
+			err = fmt.Errorf("job %d: %w", id, err)
 		}
-		if !rep.ShareOff() {
-			if err := rep.Refresh(ctx); err != nil && !rep.ShareOff() {
-				return false, fmt.Errorf("job %d: %w", id, err)
-			}
-		}
-		if rep.ShareOff() {
-			return true, nil
+		switch {
+		case off:
+			return ShareSkippedContributionsOff, nil
+		case err != nil && unasked == nil:
+			unasked = err
 		}
 	}
-	return false, nil
+	if !shares {
+		return ShareSkippedNoShareJob, nil
+	}
+	return "", unasked
 }
 
 // errEarlierRunBusy is a new job's refusal while the engine stays busy with the
@@ -1316,26 +1540,20 @@ func (h *Handler) clearEbookRun(ctx context.Context, eng Engine, r *run, id int6
 	return h.clearEarlier(ctx, eng, r, id)
 }
 
-// queueBook makes the job's engine book nb in a batch of its own, maps the job to
-// it and wakes the engine.
+// queueBook makes the job's engine book nb in a batch of its own, mapped to the
+// job in the same write (a crash between the two would leave a book running
+// that no job follows), and wakes the engine.
 func (h *Handler) queueBook(ctx context.Context, eng Engine, r *run, nb store.NewBook) error {
 	batch, err := h.o.DB.CreateBatch(ctx)
 	if err != nil {
 		return err
 	}
 	nb.BatchID = batch.ID
-	b, err := h.o.DB.CreateBook(ctx, nb)
+	b, err := h.o.DB.CreateMappedBook(ctx, nb, r.generateBook())
 	if err != nil {
 		return fmt.Errorf("could not queue the book in the engine: %w", err)
 	}
-	gb := r.generateBook()
-	gb.BookID = &b.ID
-	if err := h.o.DB.PutGenerateBook(ctx, gb); err != nil {
-		_ = h.o.DB.DeleteBook(context.WithoutCancel(ctx), b.ID)
-		return err
-	}
 	r.bookID = b.ID
-	h.shareBook(ctx, r, b.ID)
 	h.o.Log.Info("generate: queued in the engine", "job", r.job.ID, "kind", r.kind, "book", b.ID, "source", r.source, "path", r.rel)
 	eng.Notify()
 	return nil
@@ -1571,6 +1789,20 @@ func (h *Handler) finish(ctx context.Context, r *run, b store.Book, cost float64
 	if err != nil {
 		return nil, err
 	}
+	if r.owesShare(&b) {
+		if _, err := h.shareOwed(ctx, r, b); err != nil {
+			if ctx.Err() != nil || errors.Is(err, jobs.ErrStopped) {
+				return nil, err
+			}
+			h.o.Log.Warn("generate: the share failed", "job", r.job.ID, "path", r.rel, "err", err)
+			return nil, shareError(err)
+		}
+	} else if r.shareSkipped == "" && r.params.Contribute == ContributeIssue && b.ContribMode == store.ContribModeLocal {
+		// A share it owed (keepShareLocal left a done no_share_job book to this
+		// point) that a share_off heard since (the write can wait a long time)
+		// dropped: the result says so.
+		h.dropShare(r, &b)
+	}
 	if r.descTried {
 		// The description step may have spent after the cost was read (a try that
 		// failed its checks is paid for too), and the budgets count it.
@@ -1601,7 +1833,10 @@ func (h *Handler) finish(ctx context.Context, r *run, b store.Book, cost float64
 	}
 	if len(res.Contributed) == 0 && b.ContribMode == store.ContribModeLocal {
 		// A book that ran its share in issue mode (done before the answer came)
-		// shared as asked, whatever it filed.
+		// shared as asked, whatever it filed. One the contributing stage kept
+		// local on an answer only this run had (the Reporter's share_off, its
+		// store write failed) is local in the store too: the stage records it
+		// (store.DB.KeepBookLocal).
 		res.ShareSkipped = r.shareSkipped
 	}
 	h.doneJobs.Add(1)

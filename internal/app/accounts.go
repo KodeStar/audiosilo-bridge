@@ -54,9 +54,11 @@ func forgetSealedGitHubPAT(vault secrets.Store, log *slog.Logger) {
 }
 
 // githubChanged runs after a GitHub sign-in, sign-out or refusal: the heartbeat
-// says so at once, and the books waiting for a credential try again.
+// says so at once, and the books waiting for a credential try again, as does a
+// generate job's owed share waiting for one in its own loop.
 func (b *Bridge) githubChanged() {
 	b.Kick()
+	b.wakeParked(state.ParkContribUnavailable)
 	b.bg.run(func(ctx context.Context) { b.readmitContributions(ctx) })
 }
 
