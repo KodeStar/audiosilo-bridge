@@ -1083,7 +1083,9 @@ func (h *Handler) waitEngine(ctx context.Context, r *run) (Engine, error) {
 // prepare resolves the library and the book through the CHECKED mapping, fetches
 // the book from the server, compares its files and makes sure the book's own
 // folder can be written. strict (a new job) fails on a library that isn't mapped
-// and writable; a resumed one waits for it, parked.
+// and writable; a resumed one waits for it, parked. A library mapped to another
+// folder while the job waited on this one (errRemapped) is looked at through
+// the new mapping, once its check stands.
 func (h *Handler) prepare(ctx context.Context, r *run, strict bool) error {
 	if err := h.serverLibrary(r); err != nil {
 		return err
@@ -1099,7 +1101,24 @@ func (h *Handler) prepare(ctx context.Context, r *run, strict bool) error {
 	if book.Path != "" {
 		r.rel = book.Path
 	}
-	if err := h.compareFiles(ctx, r, book.Files); err != nil {
+	for {
+		err := h.prepareAt(ctx, r, book.Files)
+		if !errors.Is(err, errRemapped) {
+			return err
+		}
+		if err := h.serverLibrary(r); err != nil {
+			return err
+		}
+		if err := h.waitMapped(ctx, r, strict); err != nil {
+			return err
+		}
+	}
+}
+
+// prepareAt compares the book's files through r.mount, locates the book there
+// and makes sure its folder can be written.
+func (h *Handler) prepareAt(ctx context.Context, r *run, files []link.BookFile) error {
+	if err := h.compareFiles(ctx, r, files); err != nil {
 		return err
 	}
 	p, err := locate(r.mount, r.rel)
@@ -1108,6 +1127,21 @@ func (h *Handler) prepare(ctx context.Context, r *run, strict bool) error {
 	}
 	r.place = p
 	return h.waitWritable(ctx, r)
+}
+
+// errRemapped ends a wait on r.mount's folder once the library is mapped to
+// another one (a mapping edited while the folder didn't answer): the old
+// mount is never looked at again.
+var errRemapped = errors.New("the library was mapped to another folder")
+
+// remapped reports whether the library's mount is no longer r.mount.
+func (h *Handler) remapped(r *run) bool {
+	root := r.lib.Root
+	if lib, ok := h.o.Libraries.Library(r.lib.ID); ok {
+		root = lib.Root
+	}
+	mount, _ := h.o.Mount(r.lib.ID, root)
+	return mount != r.mount
 }
 
 // compareFiles compares the book's files through the mount with the server's,
@@ -1132,12 +1166,20 @@ func (h *Handler) compareFiles(ctx context.Context, r *run, files []link.BookFil
 
 // folderWait waits Poll (or for a Retry) before looking again at a folder that
 // didn't answer a look in time, reporting the wait as msg unless the job is
-// parked on a reason of the Bridge's own (its message stays).
+// parked on a reason of the Bridge's own (its message stays). The mapping is
+// read again after each wait: a library mapped to another folder meanwhile
+// ends it (errRemapped).
 func (h *Handler) folderWait(ctx context.Context, r *run, msg string) error {
 	if !r.ownPark {
 		r.rep.Progress(jobs.Progress{Step: stepWaiting, Message: msg})
 	}
-	return h.recheckWait(ctx, r, time.Now().Add(h.o.Poll))
+	if err := h.recheckWait(ctx, r, time.Now().Add(h.o.Poll)); err != nil {
+		return err
+	}
+	if h.remapped(r) {
+		return errRemapped
+	}
+	return nil
 }
 
 // serverLibrary sets the run's server and the job's library as the server
@@ -1243,6 +1285,7 @@ func (h *Handler) waitMapped(ctx context.Context, r *run, strict bool) error {
 // book_not_writable and checking again every Recheck (or on Retry) until it can.
 // A probe the folder didn't answer within mapping.LookTimeout says nothing
 // either way: it is tried again every Poll (or on a Retry), without a park.
+// Either wait ends once the library is mapped to another folder (errRemapped).
 func (h *Handler) waitWritable(ctx context.Context, r *run) error {
 	for {
 		err := h.probe(r.place.dir)
@@ -1259,6 +1302,9 @@ func (h *Handler) waitWritable(ctx context.Context, r *run) error {
 		h.park(r, parkBookNotWritable, "the Bridge can't write in the book's folder ("+writeProblem(err)+")")
 		if err := h.recheckWait(ctx, r, time.Now().Add(h.o.Recheck)); err != nil {
 			return err
+		}
+		if h.remapped(r) {
+			return errRemapped
 		}
 	}
 }

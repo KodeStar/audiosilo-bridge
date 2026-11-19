@@ -2325,7 +2325,9 @@ internal/
             leaves the mismatch definite (CompareFiles' timeout is nil then).
             ProbeWritable and CompareFiles are bounded for their other callers
             too, and CompareFiles returns the stat's timeout as its fourth result:
-            generate's prepare looks again every Poll (no park), verify retries
+            generate's prepare looks again every Poll (no park; a library
+            mapped to another folder meanwhile ends the wait, errRemapped, and
+            prepare goes on through the new mount once its check stands), verify retries
             within its book-read budget, podcastjob's beforeWrite probes again,
             so a slow folder never fails a job. A 429, a refused
             token or a request timeout ends the pass: the rest keep their state

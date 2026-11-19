@@ -796,6 +796,63 @@ func TestGenerateWaitsForASlowFolder(t *testing.T) {
 	}
 }
 
+// remapLibs is the harness's library mapped at mount, which a test moves
+// (the mapping edited to another folder).
+type remapLibs struct{ mount atomic.Pointer[string] }
+
+func (l *remapLibs) Library(id int64) (link.Library, bool) {
+	return link.Library{ID: 1, Name: "Books", Root: "/books"}, id == 1
+}
+
+func (l *remapLibs) Status(id int64) (link.LibraryStatus, bool) {
+	return link.LibraryStatus{LibraryID: 1, MountPath: *l.mount.Load(), Mapped: true, Writable: true}, id == 1
+}
+
+// A library mapped to another folder while the job waits on one that doesn't
+// answer ends the wait: the old mount is never looked at again, and the job
+// compares, locates and probes the book through the new one, then goes on.
+func TestGenerateSlowFolderWaitFollowsARemap(t *testing.T) {
+	t.Parallel()
+	hr := newHarness(t)
+	moved := filepath.Join(t.TempDir(), "lib")
+	mustWrite(t, filepath.Join(moved, "Author", "Book", "01.mp3"), "audio-one")
+	mustWrite(t, filepath.Join(moved, "Author", "Book", "02.mp3"), "audio-two!")
+	libs := &remapLibs{}
+	libs.mount.Store(&hr.root)
+	h := hr.handler()
+	h.o.Libraries = libs
+	h.o.Mount = func(int64, string) (string, bool) { return *libs.mount.Load(), false }
+	var atOld, atNew atomic.Int32
+	h.compare = func(mount string, files []link.BookFile) ([]mapping.FileCheck, bool, string, error) {
+		if mount == hr.root {
+			if atOld.Add(1) == 2 {
+				libs.mount.Store(&moved) // the mapping is edited while the old folder hangs
+			}
+			return nil, false, "Author/Book/01.mp3: not answering", &fs.PathError{Op: "stat", Path: mount, Err: fsutil.ErrStatTimeout}
+		}
+		atNew.Add(1)
+		return mapping.CompareFiles(mount, files)
+	}
+	var probed atomic.Pointer[string]
+	h.probe = func(dir string) error {
+		probed.Store(&dir)
+		return mapping.ProbeWritable(dir)
+	}
+	hr.srv.add(98, "Author/Book", `{}`)
+	stop := hr.runner(h)
+	hr.waitFor("the engine's book through the new mount", func() bool {
+		_, err := hr.db.GetGenerateBook(context.Background(), 98)
+		return err == nil
+	})
+	stop()
+	if atOld.Load() != 2 || atNew.Load() < 1 {
+		t.Fatalf("compared %d times at the old mount and %d at the new one, want 2 and at least 1", atOld.Load(), atNew.Load())
+	}
+	if dir := probed.Load(); dir == nil || !strings.HasPrefix(*dir, moved) {
+		t.Fatalf("the write probe looked at %v, want the book under the new mount", dir)
+	}
+}
+
 // A book read answered with a 2xx that isn't the server's (a proxy's sign-in
 // page at its address) is asked again, and the job goes on once the server
 // answers; one that lasts past the budget fails the job, saying what to check,
