@@ -64,7 +64,7 @@ func (s *service) cleanOwned(ctx context.Context, root *os.Root, lib link.Librar
 			locked(c.Path, func() {
 				// The records were listed before the loop: one a download at
 				// this path saved since is not this one, and stays.
-				if saved, ok := s.readCheckpoint(job); ok && saved.Temp != c.Temp {
+				if saved, ok := s.readCheckpoint(job, c.ShowID); ok && saved.Temp != c.Temp {
 					return
 				}
 				s.clearCheckpoint(job, root, &c)

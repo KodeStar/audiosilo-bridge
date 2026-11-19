@@ -42,7 +42,7 @@ func TestOwnedCleanupHonorsAgeLiveJobAndForeignFiles(t *testing.T) {
 			}
 			dir, _ := s.checkpointRoot()
 			b, _ := json.Marshal(c)
-			dir.WriteFile(s.checkpointName(job), b, 0600)
+			dir.WriteFile(s.checkpointName(job, c.ShowID), b, 0600)
 			dir.Close()
 			if scenario == "live" {
 				if err := h.db.RecordClaim(context.Background(), store.ServerJob{ID: job.ID, Kind: FetchKind, LibraryID: job.LibraryID, Path: job.Path, Attempt: 1, ServerID: "server-1"}); err != nil {
@@ -289,7 +289,7 @@ func TestClearCheckpointKeepsTheRecordOfAPartialItCouldNotRemove(t *testing.T) {
 	t.Cleanup(func() { os.Chmod(show, 0o755) })
 	stuck := c
 	s.clearCheckpoint(job, root, &stuck)
-	if saved, ok := s.readCheckpoint(job); !ok || saved.Temp != c.Temp {
+	if saved, ok := s.readCheckpoint(job, fixtureShowID); !ok || saved.Temp != c.Temp {
 		t.Fatal("the record of a partial still on disk was dropped")
 	}
 	if v, _ := s.o.Vault.Get(c.Validator); v == "" {
@@ -297,7 +297,7 @@ func TestClearCheckpointKeepsTheRecordOfAPartialItCouldNotRemove(t *testing.T) {
 	}
 	os.Chmod(show, 0o755)
 	s.clearCheckpoint(job, root, &c)
-	if _, ok := s.readCheckpoint(job); ok {
+	if _, ok := s.readCheckpoint(job, fixtureShowID); ok {
 		t.Fatal("record kept once the partial was removed")
 	}
 	if _, err := root.Lstat(partial); !errors.Is(err, os.ErrNotExist) {
@@ -330,7 +330,7 @@ func TestSaveCheckpointKeepsTheRecordOfAnEarlierPartial(t *testing.T) {
 	if err := s.saveCheckpoint(job, root, &next, `"two"`); err != nil {
 		t.Fatal(err)
 	}
-	if saved, ok := s.readCheckpoint(job); !ok || saved.Temp != old.Temp || saved.Validator != old.Validator {
+	if saved, ok := s.readCheckpoint(job, fixtureShowID); !ok || saved.Temp != old.Temp || saved.Validator != old.Validator {
 		t.Fatalf("the earlier record was overwritten: %+v", saved)
 	}
 	if next.Validator != "" {
@@ -340,7 +340,7 @@ func TestSaveCheckpointKeepsTheRecordOfAnEarlierPartial(t *testing.T) {
 	if err := s.saveCheckpoint(job, root, &next, `"two"`); err != nil {
 		t.Fatal(err)
 	}
-	if saved, ok := s.readCheckpoint(job); !ok || saved.Temp != next.Temp {
+	if saved, ok := s.readCheckpoint(job, fixtureShowID); !ok || saved.Temp != next.Temp {
 		t.Fatalf("the new download stayed unrecorded once the earlier partial was removable: %+v", saved)
 	}
 	if _, err := root.Lstat(partial); !errors.Is(err, os.ErrNotExist) {

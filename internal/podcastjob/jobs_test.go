@@ -839,3 +839,6 @@ func TestPollFailureCodes(t *testing.T) {
 		t.Fatalf("the Bridge's own wait ran out: %q, want bridge_lost", c)
 	}
 }
+
+// fixtureShowID is the show id of the fixture feed audioHarness writes.
+const fixtureShowID = "a1b2c3d4e5f60718"

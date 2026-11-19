@@ -72,6 +72,10 @@ type service struct {
 	indexed map[string]bool
 	// swept is when SweepPartials last started a whole-library sweep.
 	swept time.Time
+	// recMu guards migrated, the pairings whose records an older Bridge
+	// named by path alone were renamed by show this start (migrateRecords).
+	recMu    sync.Mutex
+	migrated map[string]bool
 }
 type lock struct {
 	gate  chan struct{}
@@ -111,7 +115,7 @@ func New(o Options) *Subscribe {
 	if o.CheckPoll <= 0 {
 		o.CheckPoll = time.Second
 	}
-	return &Subscribe{s: &service{o: o, locks: map[string]*lock{}, indexed: map[string]bool{}}}
+	return &Subscribe{s: &service{o: o, locks: map[string]*lock{}, indexed: map[string]bool{}, migrated: map[string]bool{}}}
 }
 func (h *Subscribe) PollJob() *Poll { return &Poll{s: h.s} }
 func (h *Subscribe) Kind() string   { return SubscribeKind }

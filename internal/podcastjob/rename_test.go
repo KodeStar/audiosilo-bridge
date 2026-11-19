@@ -17,6 +17,7 @@ import (
 	"github.com/kodestar/audiosilo-bridge/internal/link"
 	"github.com/kodestar/audiosilo-bridge/internal/netguard"
 	"github.com/kodestar/audiosilo-bridge/internal/podcast"
+	"github.com/kodestar/audiosilo-bridge/internal/secrets"
 	"github.com/kodestar/audiosilo-bridge/internal/store"
 )
 
@@ -243,8 +244,8 @@ func TestTakingInARenamedShowMovesItsDownloadRecords(t *testing.T) {
 		}
 		moved := "Renamed Show/" + strings.TrimPrefix(*job.Path, "Fixture Show/")
 		there := jobs.Job{LibraryID: job.LibraryID, Path: &moved}
-		_, old := s.readCheckpoint(job)
-		saved, now := s.readCheckpoint(there)
+		_, old := s.readCheckpoint(job, fixtureShowID)
+		saved, now := s.readCheckpoint(there, fixtureShowID)
 		if running {
 			if !old || now {
 				t.Fatal("a running download's record was moved", old, now)
@@ -259,7 +260,7 @@ func TestTakingInARenamedShowMovesItsDownloadRecords(t *testing.T) {
 			if got, err := s.episodeAt(context.Background(), root, lib, h.mount, *job.Path, params, job.ID); err != nil || got != moved {
 				t.Fatal("the running download did not find its episode", got)
 			}
-			if _, old = s.readCheckpoint(job); old {
+			if _, old = s.readCheckpoint(job, fixtureShowID); old {
 				t.Fatal("the running download left its record at the old path")
 			}
 			if resumed, tag := s.loadCheckpoint(there, root, c.ShowID, c.EpisodeID); tag != `"one"` || resumed.Offset != 6 {
@@ -314,7 +315,7 @@ func TestATakeInThatCannotMoveTheRecordsWaits(t *testing.T) {
 		t.Fatal(err)
 	}
 	moved := "Renamed Show/" + strings.TrimPrefix(*job.Path, "Fixture Show/")
-	if _, ok := s.readCheckpoint(jobs.Job{LibraryID: job.LibraryID, Path: &moved}); !ok {
+	if _, ok := s.readCheckpoint(jobs.Job{LibraryID: job.LibraryID, Path: &moved}, fixtureShowID); !ok {
 		t.Fatal("the record did not follow the folder")
 	}
 }
@@ -468,7 +469,7 @@ func TestADownloadUnderAnOldNameLeavesAnotherShowsRecord(t *testing.T) {
 	}
 	kept := func(step string) {
 		t.Helper()
-		if saved, ok := s.readCheckpoint(job); !ok || saved.ShowID != theirs.ShowID || saved.Temp != theirs.Temp {
+		if saved, ok := s.readCheckpoint(job, theirs.ShowID); !ok || saved.ShowID != theirs.ShowID || saved.Temp != theirs.Temp {
 			t.Fatal(step, ": the other show's record went", saved, ok)
 		}
 		if _, err := root.Lstat("Fixture Show/" + theirs.Temp); err != nil {
@@ -515,14 +516,14 @@ func TestTakingInMovesRecordsLeftUnderAGoneEarlierName(t *testing.T) {
 	}
 	base := strings.TrimPrefix(*job.Path, "Fixture Show/")
 	middle, third := "Middle Name/"+base, "Third Name/"+base
-	if _, ok := s.readCheckpoint(jobs.Job{LibraryID: job.LibraryID, Path: &middle}); !ok {
+	if _, ok := s.readCheckpoint(jobs.Job{LibraryID: job.LibraryID, Path: &middle}, fixtureShowID); !ok {
 		t.Fatal("the record did not move to the middle name")
 	}
 	renameShow(t, h, "Middle Name", "Third Name")
 	if _, err := s.readShow(context.Background(), root, lib, h.mount, "Third Name"); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := s.readCheckpoint(jobs.Job{LibraryID: job.LibraryID, Path: &middle}); ok {
+	if _, ok := s.readCheckpoint(jobs.Job{LibraryID: job.LibraryID, Path: &middle}, fixtureShowID); ok {
 		t.Fatal("the record was left under the gone middle name")
 	}
 	if resumed, tag := s.loadCheckpoint(jobs.Job{LibraryID: job.LibraryID, Path: &third}, root, c.ShowID, c.EpisodeID); tag != `"one"` || resumed.Temp != c.Temp {
@@ -674,7 +675,7 @@ func TestAbandonClearsARecordMovedWithItsShow(t *testing.T) {
 		t.Fatal("the fetch did not find its episode", got, err)
 	}
 	h.handler.FetchJob().Abandon(context.Background(), job)
-	if _, ok := s.readCheckpoint(jobs.Job{LibraryID: job.LibraryID, Path: &moved}); ok {
+	if _, ok := s.readCheckpoint(jobs.Job{LibraryID: job.LibraryID, Path: &moved}, fixtureShowID); ok {
 		t.Fatal("the moved record was left for the day-old cleanup")
 	}
 	if _, err := root.Lstat("Renamed Show/" + mine.Temp); !errors.Is(err, os.ErrNotExist) {
@@ -684,7 +685,7 @@ func TestAbandonClearsARecordMovedWithItsShow(t *testing.T) {
 		t.Fatal("the moved record's validator was left behind")
 	}
 	otherMoved := "Renamed Show/other.mp3"
-	if saved, ok := s.readCheckpoint(jobs.Job{LibraryID: job.LibraryID, Path: &otherMoved}); !ok || saved.Temp != theirs.Temp {
+	if saved, ok := s.readCheckpoint(jobs.Job{LibraryID: job.LibraryID, Path: &otherMoved}, fixtureShowID); !ok || saved.Temp != theirs.Temp {
 		t.Fatal("another episode's record went", saved, ok)
 	}
 	if _, err := root.Lstat("Renamed Show/" + theirs.Temp); err != nil {
@@ -720,11 +721,11 @@ func TestAbandonDropsARecordLeftUnderAGoneFolder(t *testing.T) {
 	if _, err := s.readShow(context.Background(), root, lib, h.mount, "Renamed Show"); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := s.readCheckpoint(job); !ok {
+	if _, ok := s.readCheckpoint(job, fixtureShowID); !ok {
 		t.Fatal("the take-in moved a running fetch's record")
 	}
 	h.handler.FetchJob().Abandon(context.Background(), job)
-	if _, ok := s.readCheckpoint(job); ok {
+	if _, ok := s.readCheckpoint(job, fixtureShowID); ok {
 		t.Fatal("the abandoned fetch's record stayed under the gone folder")
 	}
 	if v, _ := s.o.Vault.Get(c.Validator); v != "" {
@@ -840,7 +841,7 @@ func TestATakeInLeavesARelocatedFetchsRecord(t *testing.T) {
 	if _, err := s.readShow(context.Background(), root, lib, h.mount, "Third Name"); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := s.readCheckpoint(jobs.Job{LibraryID: job.LibraryID, Path: &relocated}); !ok {
+	if _, ok := s.readCheckpoint(jobs.Job{LibraryID: job.LibraryID, Path: &relocated}, fixtureShowID); !ok {
 		t.Fatal("a running fetch's record was moved")
 	}
 	if err := h.db.FinishServerJob(context.Background(), job.ID, 1, store.JobFailed, nil, ""); err != nil {
@@ -849,7 +850,7 @@ func TestATakeInLeavesARelocatedFetchsRecord(t *testing.T) {
 	if err := s.adoptCheckpoints(context.Background(), root, lib, "Third Name", "Renamed Show", c.ShowID, 0); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := s.readCheckpoint(jobs.Job{LibraryID: job.LibraryID, Path: &third}); !ok {
+	if _, ok := s.readCheckpoint(jobs.Job{LibraryID: job.LibraryID, Path: &third}, fixtureShowID); !ok {
 		t.Fatal("the ended fetch's record did not follow the folder")
 	}
 }
@@ -931,7 +932,7 @@ func TestAFetchFollowsItsShowRenamedMidDownload(t *testing.T) {
 			t.Error("the download did not go on")
 			return
 		}
-		if _, ok := s.readCheckpoint(job); !ok {
+		if _, ok := s.readCheckpoint(job, fixtureShowID); !ok {
 			t.Error("no download record before the rename")
 		}
 		if err := os.Rename(filepath.Join(h.mount, "Fixture Show"), filepath.Join(h.mount, "Renamed Show")); err != nil {
@@ -1011,7 +1012,7 @@ func cutAfterMove(t *testing.T, h *harness, job jobs.Job, audio []byte, calls *a
 			t.Error("the download did not go on")
 			return
 		}
-		if _, ok := h.handler.s.readCheckpoint(job); !ok {
+		if _, ok := h.handler.s.readCheckpoint(job, fixtureShowID); !ok {
 			t.Error("no download record before the rename")
 		}
 		if err := move(filepath.Join(h.mount, "Fixture Show"), filepath.Join(h.mount, "Renamed Show")); err != nil {
@@ -1236,10 +1237,10 @@ func TestAdoptOwnClearsAnOldRecordPastANewOne(t *testing.T) {
 			writing = podcast.TempPrefix + "old"
 		}
 		s.adoptOwn(there, root, old, params, writing)
-		if _, ok := s.readCheckpoint(job); ok {
+		if _, ok := s.readCheckpoint(job, fixtureShowID); ok {
 			t.Fatal("the old record stayed", tc)
 		}
-		if saved, ok := s.readCheckpoint(there); !ok || saved.Temp != newTemp {
+		if saved, ok := s.readCheckpoint(there, fixtureShowID); !ok || saved.Temp != newTemp {
 			t.Fatal("the new record changed", tc, saved)
 		}
 		_, err = os.Lstat(filepath.Join(h.mount, "Renamed Show", podcast.TempPrefix+"old"))
@@ -1252,8 +1253,9 @@ func TestAdoptOwnClearsAnOldRecordPastANewOne(t *testing.T) {
 // A record at the new path that is not this episode's (another show's, the
 // names of two folders swapped by hand and an episode file name both use, or
 // one no job can read back) costs a fetch found elsewhere nothing of its own.
-// Another show's is cleared as a stale record at the fetch's path is, and the
-// fetch goes on from its own partial rather than from byte 0. Past one it
+// Another show's is another record (named by its show, recordName), left for
+// its show (or the day-old sweep, sweepRecords), and the fetch goes on from
+// its own partial rather than from byte 0. Past one it
 // cannot read the fetch downloads again, and its old record follows at its
 // end, with its partial, rather than stay under the folder that is gone,
 // where nothing would ever clear it or sweep the partial it names.
@@ -1286,7 +1288,7 @@ func TestAFetchKeepsItsPartialPastARecordNotItsOwn(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := dir.WriteFile(recordName(3, moved), []byte("{"), 0o600); err != nil {
+			if err := dir.WriteFile(recordName(3, params.ShowID, moved), []byte("{"), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			dir.Close()
@@ -1313,17 +1315,25 @@ func TestAFetchKeepsItsPartialPastARecordNotItsOwn(t *testing.T) {
 		if got, ok := res.(fetchResult); err != nil || !ok || got.Path != moved || got.Fetch.Bytes != int64(len(audio)) || calls.Load() != 1 {
 			t.Fatal(unreadable, res, err, calls.Load())
 		}
-		if _, ok := s.readCheckpoint(job); ok {
+		if _, ok := s.readCheckpoint(job, fixtureShowID); ok {
 			t.Fatal("a record stayed under the folder that is gone", unreadable)
 		}
 		if !unreadable {
 			if left := partials(filepath.Join(h.mount, "Renamed Show")); len(left) != 0 {
 				t.Fatal("a partial was left behind", left)
 			}
-			noRecords(t, s)
+			dir, err := s.checkpointRoot()
+			if err != nil {
+				t.Fatal(err)
+			}
+			left, err := s.records(dir, 3)
+			dir.Close()
+			if err != nil || len(left) != 1 || left[0].ShowID != "ffffffffffffffff" {
+				t.Fatal("the fetch's own record was left, or the other show's went", left, err)
+			}
 			continue
 		}
-		if saved, ok := s.readCheckpoint(there); !ok || saved.Temp != own.Temp {
+		if saved, ok := s.readCheckpoint(there, fixtureShowID); !ok || saved.Temp != own.Temp {
 			t.Fatal("the fetch's old record did not follow the show", saved, ok)
 		}
 		if _, err := os.Lstat(filepath.Join(h.mount, "Renamed Show", own.Temp)); err != nil {
@@ -1853,5 +1863,97 @@ func TestAFetchResolvesACaseOnlyRename(t *testing.T) {
 	}
 	if r := fields(t, res); r["show_path"] != "fixture show" {
 		t.Fatal(r)
+	}
+}
+
+// Two show folders whose names were swapped by hand, holding episodes of the
+// same file name, each with an interrupted download: a record is named by its
+// show as well as its path (recordName), so taking each folder in moves its
+// show's record to the other name, and each download resumes there. Named by
+// path alone, each record found the other's at its new path and stayed.
+func TestSwappedShowsSharingEpisodeNamesKeepTheirDownloads(t *testing.T) {
+	h, job := audioHarness(t)
+	s := h.handler.s
+	root, err := os.OpenRoot(h.mount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	f := h.read("Fixture Show")
+	f.ShowID = "0123456789abcdef"
+	for i := range f.Episodes {
+		f.Episodes[i].Path = "Other Show/" + filepath.Base(f.Episodes[i].Path)
+	}
+	if err := root.Mkdir("Other Show", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := podcast.Write(root, "Other Show", f, s.o.Now()); err != nil {
+		t.Fatal(err)
+	}
+	base := filepath.Base(*job.Path)
+	mine := checkpoint{ServerHash: s.pairHash(), LibraryID: 3, ShowID: fixtureShowID, EpisodeID: "1cc306d831645e2b", Path: "Fixture Show/" + base, Temp: podcast.TempPrefix + nonce(), Offset: 6, Total: 100}
+	theirs := checkpoint{ServerHash: s.pairHash(), LibraryID: 3, ShowID: f.ShowID, EpisodeID: "1cc306d831645e2b", Path: "Other Show/" + base, Temp: podcast.TempPrefix + nonce(), Offset: 6, Total: 100}
+	for _, c := range []*checkpoint{&mine, &theirs} {
+		if err := root.WriteFile(c.partialName(), []byte("prefix"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		at := c.Path
+		if err := s.saveCheckpoint(jobs.Job{LibraryID: job.LibraryID, Path: &at}, root, c, `"one"`); err != nil {
+			t.Fatal(err)
+		}
+	}
+	renameShow(t, h, "Fixture Show", "Swapping")
+	renameShow(t, h, "Other Show", "Fixture Show")
+	renameShow(t, h, "Swapping", "Other Show")
+	lib := link.Library{ID: 3, Kind: "podcasts", Root: h.mount}
+	for _, show := range []string{"Fixture Show", "Other Show"} {
+		if _, err := s.readShow(context.Background(), root, lib, h.mount, show); err != nil {
+			t.Fatal(show, err)
+		}
+	}
+	for _, c := range []struct {
+		c    checkpoint
+		show string
+	}{{mine, "Other Show"}, {theirs, "Fixture Show"}} {
+		at := c.show + "/" + base
+		resumed, tag := s.loadCheckpoint(jobs.Job{LibraryID: job.LibraryID, Path: &at}, root, c.c.ShowID, c.c.EpisodeID)
+		if tag != `"one"` || resumed.Temp != c.c.Temp || resumed.Offset != 6 {
+			t.Fatal("a show lost its download in the swap", c.c.ShowID, resumed, tag)
+		}
+	}
+}
+
+// A record an older Bridge named by library and path alone is renamed by its
+// show once at the first read of the records, so the interrupted download
+// resumes after the upgrade.
+func TestARecordNamedByPathAloneIsMigrated(t *testing.T) {
+	h, job := audioHarness(t)
+	s := h.handler.s
+	root, err := os.OpenRoot(h.mount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	c := checkpoint{ServerHash: s.pairHash(), LibraryID: 3, ShowID: fixtureShowID, EpisodeID: "1cc306d831645e2b", Path: *job.Path, Temp: podcast.TempPrefix + nonce(), Offset: 6, Total: 100, Validator: secrets.PodcastETagPrefix + nonce()}
+	if err := root.WriteFile(c.partialName(), []byte("prefix"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.o.Vault.Set(c.Validator, `"one"`); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(s.o.DataDir, "podcast-fetch", s.pairHash())
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := json.Marshal(c)
+	if err := os.WriteFile(filepath.Join(dir, legacyRecordName(3, c.Path)), b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	resumed, tag := s.loadCheckpoint(job, root, c.ShowID, c.EpisodeID)
+	if tag != `"one"` || resumed.Temp != c.Temp {
+		t.Fatal("the record was not migrated", resumed, tag)
+	}
+	if _, err := os.Lstat(filepath.Join(dir, legacyRecordName(3, c.Path))); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("the old name was left", err)
 	}
 }

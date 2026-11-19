@@ -329,7 +329,7 @@ func TestPrivateEnclosureIdentityAndNoPlaintextCheckpoint(t *testing.T) {
 		t.Fatal(err)
 	}
 	checkpointRoot, _ := s.checkpointRoot()
-	b, _ := checkpointRoot.ReadFile(s.checkpointName(job))
+	b, _ := checkpointRoot.ReadFile(s.checkpointName(job, c.ShowID))
 	checkpointRoot.Close()
 	if bytes.Contains(b, []byte("ETAG_CANARY")) || bytes.Contains(b, []byte("TOKEN_CANARY")) || bytes.Contains(b, []byte("http")) {
 		t.Fatal("checkpoint leak", string(b))
@@ -929,7 +929,7 @@ func TestFetchKeepsTheRecordOfAPartialTheRestartCouldNotRemove(t *testing.T) {
 	if result, err := h.handler.FetchJob().Run(context.Background(), job, jobs.LocalReporter()); err == nil {
 		t.Fatal("a show folder the Bridge cannot write fetched:", result)
 	}
-	saved, ok := s.readCheckpoint(job)
+	saved, ok := s.readCheckpoint(job, fixtureShowID)
 	if len(stuck) != 1 || !ok || saved.Temp != filepath.Base(stuck[0]) {
 		t.Fatalf("the record of the partial still on disk was dropped: %v %+v", stuck, saved)
 	}
@@ -940,7 +940,7 @@ func TestFetchKeepsTheRecordOfAPartialTheRestartCouldNotRemove(t *testing.T) {
 	root, _ := os.OpenRoot(h.mount)
 	defer root.Close()
 	s.clearCheckpoint(job, root, &checkpoint{ServerHash: s.pairHash(), ShowID: saved.ShowID, EpisodeID: saved.EpisodeID, Path: *job.Path})
-	if _, ok := s.readCheckpoint(job); ok {
+	if _, ok := s.readCheckpoint(job, fixtureShowID); ok {
 		t.Fatal("record kept once the partial was removable")
 	}
 	if left := partials(show); len(left) != 0 {
@@ -990,7 +990,7 @@ func TestFetchFailedPublishKeepsTheJournalsStagedAudio(t *testing.T) {
 	if got, err := os.ReadFile(staged); err != nil || !bytes.Equal(got, audio) {
 		t.Fatal("the journal's staged audio was removed:", err)
 	}
-	if _, ok := s.readCheckpoint(job); ok {
+	if _, ok := s.readCheckpoint(job, fixtureShowID); ok {
 		t.Fatal("the record still claims the journal's staged audio")
 	}
 	// A record naming the staged audio (one left by a stopped process) is
@@ -1121,7 +1121,7 @@ func TestClearKeepsAPartialBesideAnUnreadableJournal(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(show, mine)); err != nil {
 		t.Fatal("a partial an unreadable journal may stage was removed:", err)
 	}
-	if _, ok := s.readCheckpoint(job); ok {
+	if _, ok := s.readCheckpoint(job, fixtureShowID); ok {
 		t.Fatal("the record was kept")
 	}
 }
@@ -1156,7 +1156,7 @@ func TestClearKeepsAPartialAJournalStagesUnderAnotherName(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(show, mine)); err != nil {
 		t.Fatal("the journal's staged file, recorded under another name, was removed:", err)
 	}
-	if _, ok := s.readCheckpoint(job); ok {
+	if _, ok := s.readCheckpoint(job, fixtureShowID); ok {
 		t.Fatal("the record was kept")
 	}
 }

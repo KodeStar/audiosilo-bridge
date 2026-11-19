@@ -203,9 +203,9 @@ func (h *Fetch) run(parent context.Context, claimed *jobs.Job, rep *jobs.Reporte
 	defer b.close()
 	defer func() { err = b.failure(ctx, err) }()
 	s.dropStaleCheckpoint(job, root, f.ShowID, e.ID)
-	// Again now that a record of another identity at the new path is gone
-	// (another show's, names swapped by hand): the fetch's own, left at the
-	// old path for it, moves in and the download resumes from its partial.
+	// Again now that a stale record at the new path (another episode's) is
+	// gone: the fetch's own, left at the old path for it, moves in and the
+	// download resumes from its partial.
 	s.adoptOwn(job, root, claimedAt, params, "")
 	c, tag := s.loadCheckpoint(job, root, f.ShowID, e.ID)
 	// follow moves the fetch to its episode where a show folder renamed by
@@ -269,7 +269,7 @@ func (h *Fetch) run(parent context.Context, claimed *jobs.Job, rep *jobs.Reporte
 			// not at its path, and a show folder renamed by hand mid-download
 			// took the partial with it. The resumed job finds the show there
 			// (episodeAt, its record following) and goes on from the partial.
-			if saved, ok := s.readCheckpoint(job); ok && saved.ShowID == params.ShowID && saved.EpisodeID == params.EpisodeID {
+			if saved, ok := s.readCheckpoint(job, params.ShowID); ok && saved.EpisodeID == params.EpisodeID {
 				validator, _ := s.o.Vault.Get(saved.Validator)
 				keep = saved.Temp == c.Temp && saved.Offset == c.Offset && saved.Total == c.Total && netguard.StrongETag(validator)
 			}
