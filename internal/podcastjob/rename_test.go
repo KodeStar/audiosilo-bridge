@@ -2009,6 +2009,55 @@ func TestAFetchDownloadsAgainAPartialOverwrittenInPlace(t *testing.T) {
 	noRecords(t, h.handler.s)
 }
 
+// A show folder deleted and put back from a copy between two host attempts
+// (the host cut the download; the copy holds the partial as it was and a copy
+// of the lock file, not the file held): the retry goes on from the partial
+// there, holding the lock there, taken anew, rather than append under a
+// copied lock it does not hold beside another download of the episode.
+func TestAFetchRetakesItsLockInAFolderPutBackBetweenAttempts(t *testing.T) {
+	requireProbe(t)
+	h, job := audioHarness(t)
+	s := h.handler.s
+	audio := data(t, "chap-v24-reverse.mp3")
+	lockFile := filepath.Join(h.mount, podcast.AttachmentPath(*job.Path, ".fetch.lock"))
+	show := filepath.Join(h.mount, "Fixture Show")
+	var put atomic.Bool
+	s.o.Wait = func(context.Context, time.Duration) error {
+		// The host's retry wait: the folder is put back from a copy once.
+		if put.CompareAndSwap(false, true) {
+			if err := copyThenDelete(t, show, show); err != nil {
+				t.Error(err)
+			}
+		}
+		return nil
+	}
+	resume := resumeAt(t, audio)
+	var calls atomic.Int32
+	cutAfterMove(t, h, job, audio, &calls, func(string, string) error { return nil }, func(w http.ResponseWriter, r *http.Request) {
+		f, err := os.OpenFile(lockFile, os.O_RDWR, 0)
+		if err != nil {
+			t.Error("no lock file in the folder put back", err)
+		} else {
+			if free, err := tryLock(f); err != nil || free {
+				t.Error("the retry appended under a copied lock it does not hold", err)
+			}
+			f.Close()
+		}
+		resume(w, r)
+	})
+	res, err := h.handler.FetchJob().Run(context.Background(), job, jobs.LocalReporter())
+	if got, ok := res.(fetchResult); err != nil || !ok || got.Path != *job.Path || got.Fetch.Bytes != int64(len(audio)) || calls.Load() != 2 || !put.Load() {
+		t.Fatal(res, err, calls.Load(), put.Load())
+	}
+	if _, err := os.Lstat(lockFile); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("the episode's lock was left", err)
+	}
+	if left := partials(show); len(left) != 0 {
+		t.Fatal("a partial was left behind", left)
+	}
+	noRecords(t, s)
+}
+
 // A re-take of the episode's lock (followLock) at the path it holds already,
 // with the show folder's .audiosilo removed meanwhile (an rm -rf of the show
 // folder under way), makes nothing there: neither the folder (the rm -rf

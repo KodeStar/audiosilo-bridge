@@ -249,9 +249,13 @@ func (h *Fetch) run(parent context.Context, claimed *jobs.Job, rep *jobs.Reporte
 	// that cleared it) it always asks follow, which reads the episode's
 	// feed.json once: the next attempt makes its partial where the show is now,
 	// not in a folder that is gone or that another folder took the name of
-	// meanwhile (a new one, or names swapped by hand).
+	// meanwhile (a new one, or names swapped by hand). So it does when the lock
+	// file at the path is not the one held: a folder deleted and put back from
+	// a copy between two attempts holds a copy of the lock (and of the
+	// partial), and the next attempt would append under a lock it does not
+	// hold; follow takes the lock there anew (followLock).
 	settle := func(ctx context.Context) error {
-		if c.Temp != "" {
+		if c.Temp != "" && lock.held() {
 			if _, err := root.Lstat(c.partialName()); !errors.Is(err, os.ErrNotExist) {
 				return nil
 			}
