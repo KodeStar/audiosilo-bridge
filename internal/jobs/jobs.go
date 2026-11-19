@@ -596,12 +596,6 @@ func (r *Runner) Run(ctx context.Context) {
 // jobs wait for retryReports. srv is the current link, id its server's. It
 // reports whether it could read them.
 func (r *Runner) recover(ctx context.Context, srv Server, id string, wg *sync.WaitGroup) bool {
-	// The look's drops still being released, taken before the rows are read:
-	// one recorded lost (no longer held) since then is still running in the
-	// list, and is no drop of recover's.
-	r.mu.Lock()
-	releasing := maps.Clone(r.dropping)
-	r.mu.Unlock()
 	open, err := r.store.OpenServerJobs(ctx)
 	if err != nil {
 		r.log.Warn("bridge: reading the open jobs failed", "err", err)
@@ -614,9 +608,11 @@ func (r *Runner) recover(ctx context.Context, srv Server, id string, wg *sync.Wa
 			// Another server's job (the Bridge was paired with this one since):
 			// its id means nothing here, so nothing is reported for it. Or an
 			// earlier pairing's, one the sweep couldn't record: the same. One
-			// the sweep is releasing (or released since the list was read) is
-			// left to it.
-			if releasing[sj.ID] > 0 || r.holds(sj.ID) {
+			// the sweep is releasing is left to it; one it recorded lost since
+			// the list was read (no longer held, still running in the list) is
+			// found ended when its turn comes (dropStands), never released
+			// twice.
+			if r.holds(sj.ID) {
 				continue
 			}
 			if d, ok := r.dropRecorded(ctx, sj); ok {
@@ -732,7 +728,8 @@ func (r *Runner) abandonWithin(actx context.Context, job Job, why error) {
 // the same (abandonWithin); one the Bridge's stop reaches first, or cuts short,
 // is left running for the next start's look (sweepPairings), never told past
 // the stop. Each job is held (holdsLocked) until it is recorded, so no look
-// drops it twice. Run waits for the batch.
+// drops it twice, and its row is read again as its turn comes (dropStands).
+// Run waits for the batch.
 func (r *Runner) releaseDropped(ctx context.Context, drops []drop) {
 	if len(drops) == 0 || ctx.Err() != nil {
 		return // a stop's: left running for the next start's look
@@ -756,11 +753,11 @@ func (r *Runner) releaseDropped(ctx context.Context, drops []drop) {
 		for range min(dropConcurrency, len(drops)) {
 			workers.Go(func() {
 				for d := range queue {
-					if ctx.Err() == nil {
+					if ctx.Err() == nil && r.dropStands(ctx, d.job) {
 						r.abandonWithin(actx, d.job, d.why)
-					}
-					if ctx.Err() == nil {
-						r.recordLost(ctx, d.job, nil, d.why)
+						if ctx.Err() == nil {
+							r.recordLost(ctx, d.job, nil, d.why)
+						}
 					}
 					r.mu.Lock()
 					unholdLocked(r.dropping, d.job.ID)
@@ -770,6 +767,27 @@ func (r *Runner) releaseDropped(ctx context.Context, drops []drop) {
 		}
 		workers.Wait()
 	}()
+}
+
+// dropStands reads a dropped job's row again as its turn to be released comes
+// (releaseDropped): it may have waited minutes behind the batch's slower
+// releases while a new pairing claims beside them, and job ids are each
+// server's own. It reports whether the row is still the running claim the job
+// was dropped for: one a later claim took under its id since it was listed,
+// one that ended (a release recorded it since a start's recover listed it) or
+// one that is gone is left alone, its work never released for the job listed
+// (a handler's state may be keyed by the job's id alone: generate's engine
+// book). A row that can't be read stands as it was listed (recordLost checks
+// the claim again in its write).
+func (r *Runner) dropStands(ctx context.Context, job Job) bool {
+	sj, err := r.store.GetServerJob(ctx, job.ID)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		return false
+	case err != nil:
+		return true
+	}
+	return sj.State == store.JobRunning && sj.Attempt == job.Attempt && sj.ServerID == job.serverID && sj.Pairing == job.pairing
 }
 
 // unholdLocked ends one hold of job id in holds (starting, dropping).

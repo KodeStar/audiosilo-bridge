@@ -2594,9 +2594,10 @@ internal/
             being released) is Abandoned and recorded lost (releaseDropped,
             dropCause: errOtherServer for another server's, else
             errPairingEnded), a finished one's end marked
-            reported, never sent; each row is read again first, so one a new
-            pairing's claim took under the listed id (and ended) since the list
-            was read is left to that claim. A run whose pairing the app forgot reports
+            reported, never sent; each row is read again first, and again as its
+            release's turn comes (dropStands), so one a new pairing's claim took
+            under the listed id (and ended) since the list was read is left to
+            that claim. A run whose pairing the app forgot reports
             nothing more and is dropped however it ends (pairingGone in
             Reporter.link and settle), and a claim answered on its link is stale.
             So a restart after an unpair, a pairing with the same server
@@ -2625,10 +2626,14 @@ internal/
             min. A release that gives up at the deadline is logged and
             recorded lost all the same, and one reached only after it is told
             with it passed (Abandon's context ended: a release that needs no
-            wait, a sealed feed URL or temp files, still happens); the jobs are
-            held (Runner.dropping, holdsLocked) until recorded, so recover (by
-            the holds it saw before it read the rows, as the look's release may
-            record one since) and a later look skip them. A run's own drop
+            wait, a sealed feed URL or temp files, still happens). Each job's row
+            is read again as its turn comes (dropStands): one that is no longer
+            the running claim it was dropped for (a new pairing's claim took
+            its id while it waited, or it ended) is neither released nor
+            recorded. The jobs are held (Runner.dropping, holdsLocked) until
+            recorded, so recover and a later look skip them (one the look
+            recorded lost after recover listed it running is found ended at
+            its turn). A run's own drop
             (settle) still releases on its goroutine under its own deadline,
             but never past a stop. Everything runs under the runner's context:
             a stop cuts a batch short (or finds it unstarted) and the rows it

@@ -934,6 +934,40 @@ func TestDroppedJobsShareOneDeadline(t *testing.T) {
 	}
 }
 
+// A dropped job waits its turn behind its batch's slower releases while the
+// new pairing claims: one whose row a claim took under its id meanwhile (job
+// ids are each server's own) is read again as its turn comes and left to that
+// claim (denied: its work released for the job listed, by a handler whose
+// state is keyed by the job's id, and allowed: the rows still the dropped
+// claims' are released and recorded lost).
+func TestDroppedJobIsReadAgainAtItsTurn(t *testing.T) {
+	const n = dropConcurrency + 1
+	release := make(chan struct{})
+	h := newCountingAbandoner(nil, release, n)
+	db := openStore(t)
+	droppedRows(t, db, h.Kind(), n)
+	r := New(db, func() Server { return nil }, nil, testOpts(), h) // unpaired since
+	startControlled(t, r)
+	for range dropConcurrency {
+		if id := await(t, h.entered); id == n {
+			t.Fatal("the last row was released before the ones listed ahead of it")
+		}
+	}
+	// Row n waits its turn: another server's claim takes its id and attempt.
+	ctx := context.Background()
+	if err := db.RecordClaim(ctx, store.ServerJob{ID: n, Kind: h.Kind(), Attempt: 1, ServerID: "other", Pairing: "p2"}); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	waitFor(t, func() bool { return rowsIn(db, n-1, store.JobLost) && !r.holds(n) })
+	if got := h.abandoned(); len(got) != n-1 || slices.Contains(got, n) {
+		t.Fatal("released:", got)
+	}
+	if sj, err := db.GetServerJob(ctx, n); err != nil || sj.State != store.JobRunning || sj.Pairing != "p2" || sj.ServerID != "other" {
+		t.Fatalf("the new claim's row: %+v %v", sj, err)
+	}
+}
+
 // A stop interrupts a job whose pairing is ended on the page just after its
 // end was settled (left running to resume): the stop never waits for its work
 // to be released (denied: a release on a context the stop doesn't end, up to
