@@ -193,9 +193,12 @@ func filingUnknown(kind, what string, err error) error {
 // earlier submit's gist or issue is adopted rather than made again (only a list
 // that can't reach back to a marker over a day old makes it again: refileStale).
 // recorded is the issue the dimension's row names (0 for none), never the one
-// adopted.
+// adopted. turnedLocal (nil: never) is asked just before anything is made, and
+// again before the issue once a gist's lookup or POST ran: true stops the filing
+// with errTurnedLocal, and an error stops it as it is (a book that can't be read
+// is never filed for).
 func (e *Executor) fileIssue(ctx context.Context, cli *contrib.Client, bookID int64, kind, slug string, payload []byte,
-	recorded int) (contrib.Issue, error) {
+	recorded int, turnedLocal func() (bool, error)) (contrib.Issue, error) {
 	f, err := e.readFiling(ctx, bookID, kind)
 	if err != nil {
 		return contrib.Issue{}, err
@@ -223,6 +226,11 @@ func (e *Executor) fileIssue(ctx context.Context, cli *contrib.Client, bookID in
 		}
 		f.IssueSince = time.Time{}
 	}
+	// An issue an earlier try filed is adopted above all the same; nothing new is
+	// made for a book turned local since the stage read its mode.
+	if err := stopIfLocal(turnedLocal); err != nil {
+		return contrib.Issue{}, err
+	}
 	if sum := hexSHA256(payload); f.Payload != sum {
 		f = filing{Payload: sum} // a gist made for other content isn't this one's
 	}
@@ -230,6 +238,8 @@ func (e *Executor) fileIssue(ctx context.Context, cli *contrib.Client, bookID in
 	title, body, labels := composeIssue(kind, slug, payload, "")
 	if contrib.ExceedsBodyLimit(body) {
 		file, desc := fileNameFor(kind), gistDescription(kind, slug, f.Payload)
+		// The gist's lookup and POST take a while: the issue asks again after them.
+		gistCalls := f.Gist == ""
 		if f.Gist == "" && !f.GistSince.IsZero() {
 			raw, found, err := filedGist(ctx, cli, f.GistSince, file, desc)
 			switch {
@@ -256,6 +266,13 @@ func (e *Executor) fileIssue(ctx context.Context, cli *contrib.Client, bookID in
 			// Recorded with the issue's marker, before the issue POST.
 			f.Gist, f.GistSince = raws[file], time.Time{}
 		}
+		if gistCalls {
+			if err := stopIfLocal(turnedLocal); err != nil {
+				// The gist made (or found) stays the dimension's, for a later share.
+				_ = e.writeFiling(ctx, bookID, kind, f)
+				return contrib.Issue{}, err
+			}
+		}
 		title, body, labels = composeIssue(kind, slug, payload, f.Gist)
 	}
 	// A refusal leaves a made gist in the marker for the next try.
@@ -266,4 +283,19 @@ func (e *Executor) fileIssue(ctx context.Context, cli *contrib.Client, bookID in
 		return err
 	})
 	return issue, err
+}
+
+// stopIfLocal asks turnedLocal (nil: never) whether the book turned local:
+// errTurnedLocal when it did, its error when it couldn't tell, nil to go on.
+func stopIfLocal(turnedLocal func() (bool, error)) error {
+	if turnedLocal == nil {
+		return nil
+	}
+	switch local, err := turnedLocal(); {
+	case err != nil:
+		return err
+	case local:
+		return errTurnedLocal
+	}
+	return nil
 }

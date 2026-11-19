@@ -1172,6 +1172,49 @@ func TestSubmitCoreHappyPath(t *testing.T) {
 	}
 }
 
+// TestSubmitCoreRefusesABookTurnedLocal: a book parked core_needed that a
+// sidecars.generate job turned local (the server turned its share off) files no
+// add-work issue: it needs no work to file under. Denied before any GitHub call.
+func TestSubmitCoreRefusesABookTurnedLocal(t *testing.T) {
+	db := openDB(t)
+	b := makeBook(t, db, "Needs Core", string(state.ParkCoreNeeded))
+	if _, err := db.KeepBookLocal(context.Background(), b.ID); err != nil {
+		t.Fatal(err)
+	}
+	svc := newService(t, db, "http://127.0.0.1:0", fakeTokenResolver{token: "ghp_x"}, &capture{}, nil, nil)
+	p := CoreProposal{Title: "T", Authors: []string{"A"}, Language: "en", Narrators: []string{"N"}, Sources: "s"}
+	if _, err := svc.SubmitCore(context.Background(), b, p); err != ErrNotAwaitingCore {
+		t.Fatalf("SubmitCore err = %v, want ErrNotAwaitingCore", err)
+	}
+}
+
+// TestSubmitCoreRefusesABookWhoseJobHeardShareOff: a book parked core_needed
+// whose open sidecars.generate job heard share_off (server_jobs.share_off) while
+// no run of it was up to turn the book local files no add-work issue either.
+// Allowed: the same book once that job has finished is awaiting core again.
+func TestSubmitCoreRefusesABookWhoseJobHeardShareOff(t *testing.T) {
+	ctx := context.Background()
+	db := openDB(t)
+	b := makeBook(t, db, "Needs Core", string(state.ParkCoreNeeded))
+	if err := db.RecordClaim(ctx, store.ServerJob{ID: 9, Kind: "sidecars.generate", Attempt: 1, ShareOff: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.PutGenerateBook(ctx, store.GenerateBook{ServerJobID: 9, BookID: &b.ID, LibraryID: 1, RelPath: "Needs Core"}); err != nil {
+		t.Fatal(err)
+	}
+	svc := newService(t, db, "http://127.0.0.1:0", fakeTokenResolver{token: "ghp_x"}, &capture{}, nil, nil)
+	p := CoreProposal{Title: "T", Authors: []string{"A"}, Language: "en", Narrators: []string{"N"}, Sources: "s"}
+	if _, err := svc.SubmitCore(ctx, b, p); err != ErrNotAwaitingCore {
+		t.Fatalf("SubmitCore err = %v, want ErrNotAwaitingCore", err)
+	}
+	if err := db.FinishServerJob(ctx, 9, 1, store.JobCancelled, nil, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.SubmitCore(ctx, b, p); err == ErrNotAwaitingCore {
+		t.Fatal("SubmitCore refused a book whose share_off job has finished")
+	}
+}
+
 // TestSubmitCoreNoCredential: without a credential SubmitCore refuses before any
 // GitHub call.
 func TestSubmitCoreNoCredential(t *testing.T) {

@@ -32,12 +32,20 @@ type fakeServer struct {
 	hang     chan struct{}    // updates wait for it to close (nil: none)
 	changed  chan struct{}    // closed on every update
 	paths    map[int64]string // the job's path in an update's answer (a book that moved)
+	shareOff map[int64]bool   // share_off in an update's answer (server#218)
 	tries    map[int64]int    // every update asked, failed ones included
 }
 
 func newFakeServer() *fakeServer {
 	return &fakeServer{updates: map[int64][]link.Update{}, cancel: map[int64]bool{}, notHeld: map[int64]bool{},
 		gone: map[int64]bool{}, tries: map[int64]int{}, changed: make(chan struct{})}
+}
+
+// setShareOff sets the jobs whose updates the server answers with share_off.
+func (f *fakeServer) setShareOff(m map[int64]bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.shareOff = m
 }
 
 func (f *fakeServer) add(j *link.Job) {
@@ -100,7 +108,7 @@ func (f *fakeServer) UpdateJob(ctx context.Context, id int64, u link.Update) (*l
 	if u.State != nil {
 		state = *u.State
 	}
-	j := &link.Job{ID: id, State: state, CancelRequested: f.cancel[id]}
+	j := &link.Job{ID: id, State: state, CancelRequested: f.cancel[id], ShareOff: f.shareOff[id]}
 	if p, ok := f.paths[id]; ok {
 		j.Path = &p
 	}

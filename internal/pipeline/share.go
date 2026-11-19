@@ -83,7 +83,7 @@ func (e *Executor) Share(ctx context.Context, bookID int64, workID string, dims 
 			filed[a.kind] = true
 		}
 	}
-	if err := e.submitIssueWith(ctx, book, slug, artifacts, auditAcceptanceNote(book.WorkDir), shareSettled); err != nil {
+	if err := e.submitIssueWith(ctx, book, slug, artifacts, auditAcceptanceNote(book.WorkDir), shareSettled, nil); err != nil {
 		return ShareResult{}, err
 	}
 	for _, r := range e.bookContributions(ctx, book.ID) {

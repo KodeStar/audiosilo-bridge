@@ -90,6 +90,27 @@ func TestAutoReadmitDueContribUnrefreshed(t *testing.T) {
 	}
 }
 
+// A book parked because the server couldn't be asked about its share
+// (share_unconfirmed) carries a short retry_at and goes on by itself once the
+// clock passes it (allowed); one not yet due stays parked (denied).
+func TestAutoReadmitDueShareUnconfirmed(t *testing.T) {
+	h := newHarness(t)
+	db := h.openDB(t)
+	s := New(db, h.hub, NewStubExecutor(0, 0), 1, h.workRoot, false)
+	ctx := context.Background()
+	due := h.addBook(t, db, "due", "", "")
+	parkBook(t, s, due.ID, state.ParkShareUnconfirmed, time.Now().Add(-time.Second).UTC().Format(time.RFC3339))
+	later := h.addBook(t, db, "later", "", "")
+	parkBook(t, s, later.ID, state.ParkShareUnconfirmed, time.Now().Add(10*time.Minute).UTC().Format(time.RFC3339))
+	s.autoReadmitDue(ctx)
+	if cur, _ := db.GetBook(ctx, due.ID); cur.Status != "" || cur.ParkCode != "" {
+		t.Fatalf("due: status=%q park_code=%q, want readmitted", cur.Status, cur.ParkCode)
+	}
+	if cur, _ := db.GetBook(ctx, later.ID); cur.Status != string(state.StatusNeedsAttention) {
+		t.Errorf("later: status = %q, want still parked", cur.Status)
+	}
+}
+
 // TestAutoReadmitDueSkipsNotDueAndNonAuto: a future retry_at, an empty retry_at
 // (pre-migration park), and a non-auto park code are all left parked.
 func TestAutoReadmitDueSkipsNotDueAndNonAuto(t *testing.T) {

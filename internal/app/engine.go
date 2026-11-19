@@ -162,6 +162,7 @@ func (b *Bridge) runEngine(ctx context.Context) {
 		Meta:     metaClient, TokenSource: tokens,
 		ContribMode: cfg.Contribution.Mode, ContribCommunityRepo: cfg.Contribution.CommunityRepo,
 		ContribBaseURL: cfg.Contribution.APIBaseURL, ExportRoot: filepath.Join(b.dataDir, "export"),
+		ShareOff: b.gen.ShareOff,
 	})
 	sched := scheduler.New(b.db, hub, exec, slots, workRoot, cfg.Contribution.AutoPurge)
 

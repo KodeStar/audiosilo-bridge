@@ -278,7 +278,15 @@ type Result struct {
 	Contributed      map[string]string `json:"contributed,omitempty"`
 	Description      bool              `json:"description"`
 	DescriptionError string            `json:"description_error,omitempty"`
+	// ShareSkipped is why a job that was to share kept its results local
+	// (ShareSkippedContributionsOff); omitted otherwise.
+	ShareSkipped string `json:"share_skipped,omitempty"`
 }
+
+// ShareSkippedContributionsOff is Result.ShareSkipped for a job whose share
+// the server turned off (its Contributions module off: jobs.Reporter.ShareOff,
+// server#218). The console words it.
+const ShareSkippedContributionsOff = "contributions_off"
 
 // run is one job's state as it goes.
 type run struct {
@@ -355,6 +363,81 @@ type run struct {
 	// readalongAsked says the run handed its engine book the read-along request
 	// (readalong.align: the ebook and the server's files, written once a run).
 	readalongAsked bool
+	// shareSkipped is why the run kept the results it was to share local
+	// (keepShareLocal), "" while it shares as asked; shareLifted says it ran a
+	// share park's stage again in local mode (once a run).
+	shareSkipped string
+	shareLifted  bool
+	// share is a contribute=issue sidecars.generate run's shareGuard (nil for
+	// any other run).
+	share *shareGuard
+}
+
+// shareGuard turns a generate-and-share run's engine book local the moment the
+// job hears share_off (jobs.Reporter.OnShareOff), not at the run's next look,
+// which can be an idle poll away: a re-admit at a contributing park meanwhile
+// (the poller after a data release, a GitHub sign-in, contrib_unavailable's
+// or share_unconfirmed's auto-retry) would otherwise run the stage in issue mode and file after the
+// admin refused the share. It runs on the Reporter's goroutine as well as the
+// run's (shareBook), so it has its own lock, and does only a store write under
+// it (never the scheduler's, so no lock order with a book's publish or
+// re-admit): keepShareLocal, at the look the nudge brings, still lifts a share
+// park and records why the share was skipped.
+type shareGuard struct {
+	mu sync.Mutex
+	// book is the run's engine book (0 before it has one), local the one the
+	// guard turned local (so later answers write nothing).
+	book, local int64
+}
+
+// guardShare gives a contribute=issue sidecars.generate run its shareGuard
+// and has the job's Reporter call it from now on; stop drops the call.
+func (h *Handler) guardShare(ctx context.Context, r *run) (stop func()) {
+	if r.kind != Kind || r.params.Contribute != ContributeIssue {
+		return func() {}
+	}
+	r.share = &shareGuard{}
+	r.rep.OnShareOff(func() { h.shareLocal(ctx, r) })
+	return func() { r.rep.OnShareOff(nil) }
+}
+
+// shareBook tells the run's shareGuard (if any) its engine book, id, before
+// anything re-admits it: a share_off heard already turns it local at once.
+func (h *Handler) shareBook(ctx context.Context, r *run, id int64) {
+	if g := r.share; g != nil {
+		g.mu.Lock()
+		g.book = id
+		g.mu.Unlock()
+		h.shareLocal(ctx, r)
+	}
+}
+
+// shareLocal turns the run's engine book local once the job heard share_off
+// and the book is known. A book it turned local wakes the run, whose look
+// lifts a share park at once.
+func (h *Handler) shareLocal(ctx context.Context, r *run) {
+	g := r.share
+	g.mu.Lock()
+	if g.book == 0 || g.local == g.book || !r.rep.ShareOff() {
+		g.mu.Unlock()
+		return
+	}
+	book := g.book
+	local, err := h.o.DB.KeepBookLocal(ctx, book)
+	if err == nil {
+		g.local = book // a book done keeps its mode: nothing to write again
+	}
+	g.mu.Unlock()
+	switch {
+	case err != nil && ctx.Err() != nil:
+		// The job ended meanwhile: nothing more runs the book for it.
+	case err != nil:
+		// The next answer that carries share_off, or the run's next look, tries
+		// again.
+		h.o.Log.Warn("generate: keeping the results local failed", "job", r.job.ID, "book", book, "err", err)
+	case local:
+		nudge(r.poke)
+	}
 }
 
 // bookKey is what changes on an engine book row when the scheduler moves it.
@@ -382,6 +465,7 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 	}
 	defer stop()
 	r.params = params
+	defer h.guardShare(ctx, r)()
 	eng, err := h.waitEngine(ctx, r)
 	if err != nil {
 		return nil, err
@@ -390,6 +474,9 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 	if err != nil {
 		return nil, err
 	}
+	// Asked after the wait for the engine, which a share_off can come during: a
+	// share the server turned off needs no GitHub sign-in.
+	h.keepShareLocal(ctx, nil, r, nil)
 	if !resumed {
 		// A new job before prepare can wait on its library; a resumed one that
 		// makes a new engine book after all is checked by create.
@@ -399,6 +486,66 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 	}
 	return h.runEngineBook(ctx, eng, r, mapped, resumed, nil)
 }
+
+// keepShareLocal keeps the results of a contribute=issue job local once the
+// server says its share is off (jobs.Reporter.ShareOff: its Contributions
+// module was turned off, server#218), or once it finds its engine book kept
+// local by an earlier run of the job (a restart since, the module maybe on
+// again): the run goes on, its share dropped for good, and its result says why
+// (ShareSkippedContributionsOff). Before the engine book exists (b nil) the
+// book is simply made in local mode; after, its contribution mode becomes
+// local, a book the run takes up later included (a resumed job's), so the
+// contributing stage files nothing, and a book parked at that stage over the
+// share (shareParks) runs it again, once a run: a stage that was running in
+// issue mode when the answer came parks there after it. A book done already
+// shared as asked, and a filing the stage had under way when the answer came
+// is not taken back (finish reports what was filed). A failed write, or a lift
+// that failed, is tried again at the next look. It reports whether it lifted a
+// park (b is then as read before the lift).
+func (h *Handler) keepShareLocal(ctx context.Context, eng Engine, r *run, b *store.Book) (lifted bool) {
+	if r.shareSkipped == "" {
+		keptLocal := b != nil && b.ContribMode == store.ContribModeLocal
+		if r.params.Contribute != ContributeIssue || (!keptLocal && !r.rep.ShareOff()) {
+			return false
+		}
+	}
+	if b != nil && b.ContribMode != store.ContribModeLocal {
+		switch local, err := h.o.DB.KeepBookLocal(ctx, b.ID); {
+		case err != nil:
+			h.o.Log.Warn("generate: keeping the results local failed", "job", r.job.ID, "book", b.ID, "err", err)
+			return false
+		case !local:
+			return false // done: it shared as asked
+		}
+		b.ContribMode = store.ContribModeLocal
+	}
+	if r.shareSkipped == "" {
+		r.params.Contribute, r.shareSkipped = ContributeLocal, ShareSkippedContributionsOff
+		h.o.Log.Info("generate: the server turned this job's share off; its results stay local", "job", r.job.ID)
+	}
+	if b == nil || r.shareLifted || !state.IsParkedWith(b.Status, b.ParkCode, shareParks...) {
+		return false
+	}
+	switch err := eng.RetryAsRead(ctx, *b); {
+	case errors.Is(err, store.ErrStatusChanged):
+		return false // the book moved meanwhile: the next look sees it as it is
+	case err != nil:
+		// Nothing was lifted (the park is as it was), so the next look tries
+		// again: giving up here would leave the job waiting on a share it no
+		// longer makes.
+		h.o.Log.Warn("generate: running the contributing stage again in local mode failed", "job", r.job.ID,
+			"book", b.ID, "err", err)
+		return false
+	}
+	r.shareLifted = true
+	return true
+}
+
+// shareParks are the contributing stage's parks over the share itself (a
+// GitHub sign-in, the server's word on the share, a core record the community
+// lacks), which local mode doesn't wait on.
+var shareParks = []state.ParkCode{state.ParkContribUnavailable, state.ParkShareUnconfirmed, state.ParkCoreNeeded,
+	state.ParkCorePending}
 
 // cantContribute fails a contribute=issue job before any spend when no GitHub
 // token resolves: the contribution is the last stage, and without a token it
@@ -438,6 +585,13 @@ func (h *Handler) runEngineBook(ctx context.Context, eng Engine, r *run, mapped 
 	// moved the job with its book since).
 	ownBook := func() bool { return mapped.RelPath == r.rel || mapped.RelPath == *r.job.Path }
 	r.resuming = resumed
+	if resumed && ownBook() {
+		// The engine runs a resumed job's book while prepare waits (the server
+		// unreachable, the mapping not checked yet), so its share guard has it
+		// first: a share_off heard already (server_jobs.share_off after a
+		// restart) or meanwhile turns it local before a re-admit can file.
+		h.shareBook(ctx, r, *mapped.BookID)
+	}
 	if err := h.prepare(ctx, r, !resumed); err != nil {
 		if resumed && ownBook() {
 			r.bookID = *mapped.BookID // its own book: end() stops it
@@ -458,6 +612,7 @@ func (h *Handler) runEngineBook(ctx context.Context, eng Engine, r *run, mapped 
 	}
 	if resumed {
 		r.bookID = *mapped.BookID
+		h.shareBook(ctx, r, r.bookID) // before attach re-admits it (nothing new when it had it before prepare)
 		if err := h.attach(ctx, eng, r, mapped); err != nil {
 			return h.end(ctx, r, nil, err)
 		}
@@ -926,6 +1081,10 @@ func (h *Handler) create(ctx context.Context, eng Engine, r *run) error {
 	case ReadalongKind:
 		return h.createReadalong(ctx, eng, r)
 	}
+	// The server may have said share_off since Run asked (prepare can wait a long
+	// time, and a resumed job's first report may not have got through): the book
+	// is then made in local mode, with no GitHub check.
+	h.keepShareLocal(ctx, nil, r, nil)
 	if r.resuming {
 		// A resumed job whose book is another job's (an id reused) or gone (deleted,
 		// or swept since it was cancelled) starts over: a new spend, which Run's
@@ -1068,10 +1227,68 @@ func (h *Handler) awaitOpenJobEnd(ctx context.Context, r *run, bookID int64) (in
 // refreshJob asks open job id, when it runs here, to report now (acting on the
 // answer: a cancel ends it), and reports whether the server still holds it open.
 func (h *Handler) refreshJob(ctx context.Context, id int64) bool {
-	h.mu.Lock()
-	rep := h.pokes[id].rep
-	h.mu.Unlock()
+	rep := h.reporter(id)
 	return rep != nil && rep.Refresh(ctx) == nil
+}
+
+// reporter is the Reporter of open job id's run here, nil when none is up.
+func (h *Handler) reporter(id int64) *jobs.Reporter {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.pokes[id].rep
+}
+
+// ShareOff answers the contributing stage just before it files for engine book
+// bookID in issue mode (pipeline.Config.ShareOff): whether an open
+// generate-and-share job that follows the book has its share turned off, asked
+// of the server now. The job hears share_off only in an answer to one of its
+// reports, which can be a keepalive away (or an idle poll, while its run waits
+// for the book), so each such job reports now (jobs.Reporter.Refresh), and the
+// answer acts as any other: its share guard turns the book local. The first
+// job with its share off answers true (the book is local whatever the others
+// say): one that stored or heard share_off already needs no asking, and an
+// answer that stopped the job counts when it carried share_off (heard before
+// the stop). An error when one couldn't be asked (the server not reached, the
+// answer stopped the job, or no run of it is up here yet: a resumed job
+// waiting for its lane slot), for the stage to wait and file nothing. Other
+// jobs (contribute local, or another kind) are not asked; params that don't
+// read are asked as a share's.
+func (h *Handler) ShareOff(ctx context.Context, bookID int64) (bool, error) {
+	open, err := h.o.DB.OpenGenerateJobsForBook(ctx, bookID, 0)
+	if err != nil {
+		return false, err
+	}
+	for _, id := range open {
+		sj, err := h.o.DB.GetServerJob(ctx, id)
+		if errors.Is(err, store.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return false, err
+		}
+		if sj.Kind != Kind {
+			continue
+		}
+		if p, err := ParseParams(sj.Params); err == nil && p.Contribute != ContributeIssue {
+			continue
+		}
+		if sj.ShareOff {
+			return true, nil
+		}
+		rep := h.reporter(id)
+		if rep == nil {
+			return false, fmt.Errorf("job %d isn't running here yet to ask the server", id)
+		}
+		if !rep.ShareOff() {
+			if err := rep.Refresh(ctx); err != nil && !rep.ShareOff() {
+				return false, fmt.Errorf("job %d: %w", id, err)
+			}
+		}
+		if rep.ShareOff() {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // errEarlierRunBusy is a new job's refusal while the engine stays busy with the
@@ -1118,6 +1335,7 @@ func (h *Handler) queueBook(ctx context.Context, eng Engine, r *run, nb store.Ne
 		return err
 	}
 	r.bookID = b.ID
+	h.shareBook(ctx, r, b.ID)
 	h.o.Log.Info("generate: queued in the engine", "job", r.job.ID, "kind", r.kind, "book", b.ID, "source", r.source, "path", r.rel)
 	eng.Notify()
 	return nil
@@ -1269,6 +1487,15 @@ func (h *Handler) follow(ctx context.Context, eng Engine, r *run) (any, error) {
 // finishes, failed fails, a contributing park (core_needed) still writes the
 // local files first.
 func (h *Handler) step(ctx context.Context, eng Engine, r *run, b store.Book) (any, bool, error) {
+	if r.kind == Kind && h.keepShareLocal(ctx, eng, r, &b) {
+		// The share's park lifted: the look goes on with the book as it is now,
+		// never reporting the park it no longer has, and the next look comes at
+		// once (follow read the book parked, and would wait an idle poll).
+		if now, err := h.o.DB.GetBook(ctx, b.ID); err == nil {
+			b = now
+		}
+		nudge(r.poke)
+	}
 	if k := keyOf(b); k != r.seen || working(b) {
 		r.seen = k
 		r.progress, _ = h.o.DB.ListProgress(ctx, b.ID)
@@ -1357,7 +1584,9 @@ func (h *Handler) finish(ctx context.Context, r *run, b store.Book, cost float64
 	if !res.Description {
 		res.DescriptionError = cmp.Or(r.descErr, "no description was written")
 	}
-	if r.params.Contribute == ContributeIssue {
+	// A share kept local (keepShareLocal) may have filed before the server's
+	// answer came: what was filed is reported, and then it wasn't skipped.
+	if r.params.Contribute == ContributeIssue || r.shareSkipped != "" {
 		rows, err := h.o.DB.ListContributionsByBook(ctx, b.ID)
 		if err == nil {
 			for _, c := range rows {
@@ -1369,6 +1598,11 @@ func (h *Handler) finish(ctx context.Context, r *run, b store.Book, cost float64
 				}
 			}
 		}
+	}
+	if len(res.Contributed) == 0 && b.ContribMode == store.ContribModeLocal {
+		// A book that ran its share in issue mode (done before the answer came)
+		// shared as asked, whatever it filed.
+		res.ShareSkipped = r.shareSkipped
 	}
 	h.doneJobs.Add(1)
 	r.rep.Progress(jobs.Progress{Step: string(state.Done), Message: "Finished",

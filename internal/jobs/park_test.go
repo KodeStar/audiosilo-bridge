@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"slices"
 	"strings"
@@ -521,6 +522,294 @@ func TestReporterPathFollowsTheServer(t *testing.T) {
 	}
 	if LocalReporter().Path() != "" {
 		t.Fatal("a local reporter has a path")
+	}
+}
+
+// ShareOff (server#218): a job whose claim said share_off has it from the
+// start; one told by an answer to a report has it from then on, and keeps it
+// when a later answer says none (a share dropped is not taken up again). A
+// job no answer told never has it.
+func TestReporterShareOff(t *testing.T) {
+	t.Parallel()
+	db, srv := openStore(t), newFakeServer()
+	srv.add(&link.Job{ID: 1, Kind: "k.v", Attempts: 1, ShareOff: true})
+	srv.add(&link.Job{ID: 2, Kind: "k.v", Attempts: 1})
+	srv.add(&link.Job{ID: 3, Kind: "k.v", Attempts: 1})
+	got := map[int64][]bool{}
+	var mu sync.Mutex
+	h := handler{kind: "k.v", lane: LaneLight, fn: func(ctx context.Context, j Job, rep *Reporter) (any, error) {
+		seen := []bool{j.shareOff, rep.ShareOff()}
+		switch j.ID {
+		case 2:
+			srv.setShareOff(map[int64]bool{2: true})
+			waitFor(t, rep.ShareOff)
+			srv.setShareOff(nil)
+			n := srv.triesOf(2)
+			waitFor(t, func() bool { return srv.triesOf(2) > n+1 })
+			seen = append(seen, rep.ShareOff())
+		case 3:
+			n := srv.triesOf(3)
+			waitFor(t, func() bool { return srv.triesOf(3) > n+1 })
+			seen = append(seen, rep.ShareOff())
+		}
+		mu.Lock()
+		got[j.ID] = seen
+		mu.Unlock()
+		return map[string]int{"ok": 1}, nil
+	}}
+	r := New(db, func() Server { return srv }, nil, testOpts(), h)
+	runFor(t, r, func() bool {
+		var n int
+		for id := int64(1); id <= 3; id++ {
+			if s, _ := srv.finalState(id); s == link.StateDone {
+				n++
+			}
+		}
+		return n == 3
+	})
+	mu.Lock()
+	defer mu.Unlock()
+	if want := []bool{true, true}; !slices.Equal(got[1], want) {
+		t.Errorf("claimed with share_off: %v, want %v", got[1], want)
+	}
+	if want := []bool{false, false, true}; !slices.Equal(got[2], want) {
+		t.Errorf("told by an answer: %v, want %v", got[2], want)
+	}
+	if want := []bool{false, false, false}; !slices.Equal(got[3], want) {
+		t.Errorf("never told: %v, want %v", got[3], want)
+	}
+	if LocalReporter().ShareOff() {
+		t.Fatal("a local reporter has share_off")
+	}
+}
+
+// OnShareOff (server#218) is called the moment the job hears share_off: at
+// once for a job whose claim said it, at the answer for one told by an answer
+// (not at the handler's next look), and never for a job no answer told.
+func TestReporterOnShareOff(t *testing.T) {
+	t.Parallel()
+	db, srv := openStore(t), newFakeServer()
+	srv.add(&link.Job{ID: 1, Kind: "k.v", Attempts: 1, ShareOff: true})
+	srv.add(&link.Job{ID: 2, Kind: "k.v", Attempts: 1})
+	srv.add(&link.Job{ID: 3, Kind: "k.v", Attempts: 1})
+	var calls [4]atomic.Int32
+	h := handler{kind: "k.v", lane: LaneLight, fn: func(ctx context.Context, j Job, rep *Reporter) (any, error) {
+		rep.OnShareOff(func() { calls[j.ID].Add(1) })
+		switch j.ID {
+		case 1:
+			if calls[1].Load() != 1 {
+				t.Errorf("claimed with share_off: %d calls at once, want 1", calls[1].Load())
+			}
+		case 2:
+			srv.setShareOff(map[int64]bool{2: true})
+			waitFor(t, func() bool { return calls[2].Load() > 0 })
+		case 3:
+			n := srv.triesOf(3)
+			waitFor(t, func() bool { return srv.triesOf(3) > n+1 })
+		}
+		rep.OnShareOff(nil)
+		return nil, nil
+	}}
+	r := New(db, func() Server { return srv }, nil, testOpts(), h)
+	runFor(t, r, func() bool {
+		var n int
+		for id := int64(1); id <= 3; id++ {
+			if s, _ := srv.finalState(id); s == link.StateDone {
+				n++
+			}
+		}
+		return n == 3
+	})
+	if calls[2].Load() == 0 || calls[3].Load() != 0 {
+		t.Fatalf("told by an answer: %d calls; never told: %d", calls[2].Load(), calls[3].Load())
+	}
+}
+
+// A job's share_off is kept in the store, from its claim or an answer since
+// (server#218), so a job resumed after a restart has it before any answer: one
+// whose server is unreachable at its first report still keeps its results
+// local. Denied: a job no answer told resumes without it.
+func TestShareOffSurvivesARestart(t *testing.T) {
+	t.Parallel()
+	db, srv := openStore(t), newFakeServer()
+	srv.add(&link.Job{ID: 1, Kind: "k.v", Attempts: 1, ShareOff: true})
+	srv.add(&link.Job{ID: 2, Kind: "k.v", Attempts: 1})
+	srv.add(&link.Job{ID: 3, Kind: "k.v", Attempts: 1})
+	var running atomic.Int32
+	first := handler{kind: "k.v", lane: LanePipeline, fn: func(ctx context.Context, j Job, rep *Reporter) (any, error) {
+		if j.ID == 2 {
+			srv.setShareOff(map[int64]bool{2: true})
+			waitFor(t, func() bool {
+				sj, err := db.GetServerJob(context.Background(), 2)
+				return err == nil && sj.ShareOff
+			})
+		}
+		running.Add(1)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}}
+	r := New(db, func() Server { return srv }, nil, testOpts(), first)
+	runFor(t, r, func() bool { return running.Load() == 3 })
+
+	srv.mu.Lock()
+	srv.failing, srv.shareOff = true, nil
+	srv.mu.Unlock()
+	var mu sync.Mutex
+	got := map[int64][2]bool{}
+	second := handler{kind: "k.v", lane: LanePipeline, fn: func(ctx context.Context, j Job, rep *Reporter) (any, error) {
+		mu.Lock()
+		got[j.ID] = [2]bool{j.Resumed, rep.ShareOff()}
+		mu.Unlock()
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}}
+	r2 := New(db, func() Server { return srv }, nil, testOpts(), second)
+	runFor(t, r2, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(got) == 3
+	})
+	mu.Lock()
+	defer mu.Unlock()
+	want := map[int64][2]bool{1: {true, true}, 2: {true, true}, 3: {true, false}}
+	for id, w := range want {
+		if got[id] != w {
+			t.Errorf("job %d resumed: (resumed, share_off) = %v, want %v", id, got[id], w)
+		}
+	}
+}
+
+// shareOffFailStore fails SetServerJobShareOff while fail is set.
+type shareOffFailStore struct {
+	*store.DB
+	fail  atomic.Bool
+	tries atomic.Int32
+}
+
+func (s *shareOffFailStore) SetServerJobShareOff(ctx context.Context, id int64, attempt int) error {
+	s.tries.Add(1)
+	if s.fail.Load() {
+		return errors.New("disk I/O error")
+	}
+	return s.DB.SetServerJobShareOff(ctx, id, attempt)
+}
+
+// A share_off the run heard but couldn't store survives a refused token: the
+// job resumeStranded resumes has it before any answer (the server's answers
+// no longer carry it), and the write is tried again until the store has it.
+func TestShareOffHeardSurvivesARefusedToken(t *testing.T) {
+	t.Parallel()
+	db, srv := openStore(t), newFakeServer()
+	st := &shareOffFailStore{DB: db}
+	st.fail.Store(true)
+	srv.add(&link.Job{ID: 5, Kind: "k.v", Attempts: 1})
+	var paired atomic.Bool
+	paired.Store(true)
+	var runs atomic.Int32
+	var resumedShareOff atomic.Bool
+	h := handler{kind: "k.v", lane: LaneLight, fn: func(ctx context.Context, j Job, rep *Reporter) (any, error) {
+		if runs.Add(1) == 1 {
+			srv.setShareOff(map[int64]bool{5: true})
+			waitFor(t, func() bool { return rep.ShareOff() && st.tries.Load() > 0 })
+			srv.mu.Lock()
+			srv.unauthed = true
+			srv.mu.Unlock()
+			<-ctx.Done() // stopped by the refusal
+			return nil, ctx.Err()
+		}
+		resumedShareOff.Store(rep.ShareOff())
+		st.fail.Store(false)
+		waitFor(t, func() bool {
+			sj, err := db.GetServerJob(context.Background(), 5)
+			return err == nil && sj.ShareOff
+		})
+		return nil, nil
+	}}
+	r := New(st, func() Server {
+		if paired.Load() {
+			return srv
+		}
+		return nil
+	}, func(Server) { paired.Store(false) }, testOpts(), h)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { r.Run(ctx); close(done) }()
+	defer func() { cancel(); <-done }()
+	waitFor(t, func() bool { return !paired.Load() })
+	srv.mu.Lock()
+	srv.unauthed, srv.shareOff = false, nil
+	srv.mu.Unlock()
+	paired.Store(true)
+	r.Wake()
+	waitFor(t, func() bool { s, _ := srv.finalState(5); return s == link.StateDone })
+	if runs.Load() != 2 || !resumedShareOff.Load() {
+		t.Fatalf("runs %d, resumed with share_off %v: want 2 runs, the second with it", runs.Load(), resumedShareOff.Load())
+	}
+}
+
+// An answer that carries share_off and a cancel runs the handler's OnShareOff
+// before the cancel ends the job's context: its act (keeping the book local)
+// writes the store with that context.
+func TestOnShareOffRunsBeforeTheAnswersCancel(t *testing.T) {
+	t.Parallel()
+	db, srv := openStore(t), newFakeServer()
+	srv.add(&link.Job{ID: 7, Kind: "k.v", Attempts: 1})
+	var calls atomic.Int32
+	var live atomic.Bool
+	h := handler{kind: "k.v", lane: LaneLight, fn: func(ctx context.Context, j Job, rep *Reporter) (any, error) {
+		rep.OnShareOff(func() {
+			if calls.Add(1) == 1 {
+				live.Store(ctx.Err() == nil)
+			}
+		})
+		srv.mu.Lock()
+		srv.shareOff, srv.cancel[7] = map[int64]bool{7: true}, true
+		srv.mu.Unlock()
+		rep.Progress(Progress{Step: "next"}) // a new step is reported at once
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}}
+	r := New(db, func() Server { return srv }, nil, testOpts(), h)
+	runFor(t, r, func() bool { s, _ := srv.finalState(7); return s == link.StateCancelled })
+	if calls.Load() == 0 || !live.Load() {
+		t.Fatalf("OnShareOff calls %d, the first with the job's context live: %v", calls.Load(), live.Load())
+	}
+}
+
+// The handler's OnShareOff and the store's write run outside the Reporter's
+// sendMu, and a write that keeps failing warns once a job, then logs at debug.
+func TestShareOffWriteOutsideSendLockWarnsOnce(t *testing.T) {
+	t.Parallel()
+	db, srv := openStore(t), newFakeServer()
+	st := &shareOffFailStore{DB: db}
+	st.fail.Store(true)
+	srv.add(&link.Job{ID: 6, Kind: "k.v", Attempts: 1})
+	logs := &logCounter{n: map[string]int{}}
+	opts := testOpts()
+	opts.Log = slog.New(logs)
+	var locked, calls atomic.Int32
+	h := handler{kind: "k.v", lane: LaneLight, fn: func(ctx context.Context, j Job, rep *Reporter) (any, error) {
+		rep.OnShareOff(func() {
+			calls.Add(1)
+			if !rep.sendMu.TryLock() {
+				locked.Add(1)
+				return
+			}
+			rep.sendMu.Unlock()
+		})
+		srv.setShareOff(map[int64]bool{6: true})
+		waitFor(t, func() bool { return st.tries.Load() >= 3 })
+		rep.OnShareOff(nil)
+		return nil, nil
+	}}
+	r := New(st, func() Server { return srv }, nil, opts, h)
+	runFor(t, r, func() bool { s, _ := srv.finalState(6); return s == link.StateDone })
+	if calls.Load() == 0 || locked.Load() != 0 {
+		t.Fatalf("OnShareOff calls %d, %d of them under sendMu", calls.Load(), locked.Load())
+	}
+	const warn, again = "WARN bridge: recording a job's share_off failed", "DEBUG bridge: recording a job's share_off failed again"
+	if logs.count(warn) != 1 || logs.count(again) < 2 {
+		t.Fatalf("warnings %d (want 1), debug lines %d (want 2 or more)", logs.count(warn), logs.count(again))
 	}
 }
 

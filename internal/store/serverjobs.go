@@ -33,7 +33,11 @@ type ServerJob struct {
 	// Priority is the priority the server gave the job (0 on rows from before
 	// migration 0015): a resumed job of interactive priority waits for the
 	// reserve again (jobs.launch).
-	Priority int             `json:"-"`
+	Priority int `json:"-"`
+	// ShareOff says the server told the job to keep its results local (its
+	// claim's answer or one since, link.Job.ShareOff; false on rows from before
+	// migration 0016), so a resumed job has it before any answer.
+	ShareOff bool            `json:"-"`
 	State    string          `json:"state"`
 	Progress json.RawMessage `json:"progress"`
 	Result   json.RawMessage `json:"result"`
@@ -46,7 +50,7 @@ type ServerJob struct {
 	FinishedAt *string `json:"finished_at"`
 }
 
-const serverJobColumns = `id, kind, library_id, path, params, attempt, server_id, priority, state, progress, result, error,
+const serverJobColumns = `id, kind, library_id, path, params, attempt, server_id, priority, share_off, state, progress, result, error,
 	reported, claimed_at, updated_at, finished_at`
 
 func scanServerJob(row interface{ Scan(...any) error }) (*ServerJob, error) {
@@ -56,7 +60,7 @@ func scanServerJob(row interface{ Scan(...any) error }) (*ServerJob, error) {
 		path, finished           sql.NullString
 		params, progress, result string
 	)
-	if err := row.Scan(&j.ID, &j.Kind, &lib, &path, &params, &j.Attempt, &j.ServerID, &j.Priority, &j.State, &progress, &result,
+	if err := row.Scan(&j.ID, &j.Kind, &lib, &path, &params, &j.Attempt, &j.ServerID, &j.Priority, &j.ShareOff, &j.State, &progress, &result,
 		&j.Error, &j.Reported, &j.ClaimedAt, &j.UpdatedAt, &finished); err != nil {
 		return nil, err
 	}
@@ -86,14 +90,25 @@ func jsonOr(raw json.RawMessage) string {
 func (db *DB) RecordClaim(ctx context.Context, j ServerJob) error {
 	now := timestamp(nowFn())
 	_, err := db.sql.ExecContext(ctx,
-		`INSERT INTO server_jobs (id, kind, library_id, path, params, attempt, server_id, priority, state, claimed_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?)
+		`INSERT INTO server_jobs (id, kind, library_id, path, params, attempt, server_id, priority, share_off, state,
+		     claimed_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?)
 		 ON CONFLICT(id) DO UPDATE SET kind = excluded.kind, library_id = excluded.library_id, path = excluded.path,
 		     params = excluded.params, attempt = excluded.attempt, server_id = excluded.server_id,
-		     priority = excluded.priority, state = 'running',
+		     priority = excluded.priority, share_off = excluded.share_off, state = 'running',
 		     progress = '{}', result = '{}', error = '', reported = 0, claimed_at = excluded.claimed_at,
 		     updated_at = excluded.updated_at, finished_at = NULL`,
-		j.ID, j.Kind, j.LibraryID, j.Path, jsonOr(j.Params), j.Attempt, j.ServerID, j.Priority, now, now)
+		j.ID, j.Kind, j.LibraryID, j.Path, jsonOr(j.Params), j.Attempt, j.ServerID, j.Priority, j.ShareOff, now, now)
+	return err
+}
+
+// SetServerJobShareOff records that the server told a running job (attempt
+// must match) to keep its results local (ServerJob.ShareOff), heard in an
+// answer to one of its reports. It leaves updated_at alone: it
+// is not the job's progress.
+func (db *DB) SetServerJobShareOff(ctx context.Context, id int64, attempt int) error {
+	_, err := db.sql.ExecContext(ctx,
+		`UPDATE server_jobs SET share_off = 1 WHERE id = ? AND attempt = ? AND state = 'running'`, id, attempt)
 	return err
 }
 

@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -98,6 +99,8 @@ type fakeGitHub struct {
 	// userStatus: GET /user answers this status (0 as usual).
 	failFromPage int
 	userStatus   int
+	// onIssue runs after each issue is made (under the fake's lock).
+	onIssue func()
 }
 
 // testCommunityRepo is the repository the stage contributes sidecars to.
@@ -165,6 +168,9 @@ func (g *fakeGitHub) handle(w http.ResponseWriter, r *http.Request) {
 		repo := strings.TrimSuffix(strings.TrimPrefix(path, "/repos/"), "/issues")
 		g.issues = append(g.issues, createdIssue{repo: repo, number: num, title: req.Title, body: req.Body,
 			labels: req.Labels, author: g.user(), created: g.now()})
+		if g.onIssue != nil {
+			g.onIssue()
+		}
 		if g.lostIssues > 0 {
 			g.lostIssues--
 			g.drop(w)
@@ -319,6 +325,8 @@ type fakeMeta struct {
 	works map[string]metaWorkFixture
 	// redirects maps a RETIRED work id -> its survivor (answered 301, as meta does).
 	redirects map[string]string
+	// onWork, when set, runs at each request for a work.
+	onWork func()
 }
 
 type metaWorkFixture struct {
@@ -355,6 +363,9 @@ func (m *fakeMeta) handle(w http.ResponseWriter, r *http.Request) {
 
 	case strings.HasPrefix(r.URL.Path, "/api/v1/works/"):
 		id := strings.TrimPrefix(r.URL.Path, "/api/v1/works/")
+		if m.onWork != nil {
+			m.onWork()
+		}
 		if to, ok := m.redirects[id]; ok {
 			http.Redirect(w, r, "/api/v1/works/"+to, http.StatusMovedPermanently)
 			return
@@ -1139,6 +1150,344 @@ func TestContribModeForBook(t *testing.T) {
 	}
 	if got := e.contribModeFor(store.Book{}); got != "local" {
 		t.Errorf("no book mode under a local Bridge = %q", got)
+	}
+}
+
+// TestContributeReadsTheBooksModeNow: the stage files by the book's mode as it
+// is when it submits, not as the dispatch read it: a sidecars.generate job
+// whose share the server turned off while the stage waited (server#218) turned
+// the book local, and nothing is filed. Allowed: the local export.
+func TestContributeReadsTheBooksModeNow(t *testing.T) {
+	db := openContribDB(t)
+	gh := newFakeGitHub(t)
+	export := t.TempDir()
+	b := contribBook(t, db, store.NewBook{WorkID: "reacher-01", ContribMode: store.ContribModeIssue}, baseChars("x"), baseRecaps("x"))
+	if _, err := db.KeepBookLocal(context.Background(), b.ID); err != nil {
+		t.Fatal(err)
+	}
+	cfg := contribConfig(t, db, contribModeIssue, gh.srv.URL, "", export, fakeTokenResolver{token: "ghp_x"})
+	if _, err := NewExecutor(cfg).Execute(context.Background(), b, state.Contributing, scheduler.StageReport{}); err != nil {
+		t.Fatalf("contribute: %v", err)
+	}
+	if n := gh.issueCount(); n != 0 {
+		t.Fatalf("issues filed = %d, want none", n)
+	}
+	if _, err := os.Stat(filepath.Join(export, "reacher-01", charactersFileName)); err != nil {
+		t.Fatalf("local export: %v", err)
+	}
+	if rows := rowsByKind(t, db, b.ID); rows[store.ContribKindCharacters].Status != store.ContribStatusLocal {
+		t.Fatalf("characters row = %+v, want local", rows[store.ContribKindCharacters])
+	}
+}
+
+// TestContributeTurnedLocalWhileResolving: a book turned local while the stage
+// looked its work up (after the read that follows the description) still
+// files nothing. Denied: the issues. Allowed: the local export under the slug
+// the lookup resolved.
+func TestContributeTurnedLocalWhileResolving(t *testing.T) {
+	db := openContribDB(t)
+	gh := newFakeGitHub(t)
+	export := t.TempDir()
+	meta := newFakeMeta(t, nil, map[string]metaWorkFixture{"reacher-01": {title: "Killing Floor"}})
+	b := contribBook(t, db, store.NewBook{WorkID: "reacher-01", ContribMode: store.ContribModeIssue}, baseChars("x"), baseRecaps("x"))
+	meta.onWork = func() {
+		if _, err := db.KeepBookLocal(context.Background(), b.ID); err != nil {
+			t.Error(err)
+		}
+	}
+	cfg := contribConfig(t, db, contribModeIssue, gh.srv.URL, meta.srv.URL, export, fakeTokenResolver{token: "ghp_x"})
+	if _, err := NewExecutor(cfg).Execute(context.Background(), b, state.Contributing, scheduler.StageReport{}); err != nil {
+		t.Fatalf("contribute: %v", err)
+	}
+	if n := gh.issueCount(); n != 0 {
+		t.Fatalf("issues filed = %d, want none", n)
+	}
+	if _, err := os.Stat(filepath.Join(export, "reacher-01", charactersFileName)); err != nil {
+		t.Fatalf("local export: %v", err)
+	}
+}
+
+// TestContributeTurnedLocalWhileFiling: a book turned local after the stage
+// filed its first dimension (a sidecars.generate job whose share the server
+// turned off meanwhile) files no other: the rest is exported locally, and the
+// dimension filed already keeps its issue. Allowed: sidecars.contribute's
+// share of the now local book still files the rest, as it is asked to.
+func TestContributeTurnedLocalWhileFiling(t *testing.T) {
+	ctx := context.Background()
+	db := openContribDB(t)
+	gh := newFakeGitHub(t)
+	export := t.TempDir()
+	b := contribBook(t, db, store.NewBook{WorkID: "reacher-01", ContribMode: store.ContribModeIssue}, baseChars("x"), baseRecaps("x"))
+	gh.onIssue = func() {
+		if _, err := db.KeepBookLocal(ctx, b.ID); err != nil {
+			t.Error(err)
+		}
+	}
+	exe := NewExecutor(contribConfig(t, db, contribModeIssue, gh.srv.URL, "", export, fakeTokenResolver{token: "ghp_x"}))
+	if _, err := exe.Execute(ctx, b, state.Contributing, scheduler.StageReport{}); err != nil {
+		t.Fatalf("contribute: %v", err)
+	}
+	if n := gh.issueCount(); n != 1 {
+		t.Fatalf("issues filed = %d, want the first dimension's only", n)
+	}
+	rows := rowsByKind(t, db, b.ID)
+	if c, r := rows[store.ContribKindCharacters], rows[store.ContribKindRecaps]; c.Status != store.ContribStatusSubmitted ||
+		c.URL == "" || r.Status != store.ContribStatusLocal || r.URL != "" {
+		t.Fatalf("rows: characters %+v, recaps %+v", c, r)
+	}
+	if _, err := os.Stat(filepath.Join(export, "reacher-01", recapsFileName)); err != nil {
+		t.Fatalf("local export of the rest: %v", err)
+	}
+
+	gh.mu.Lock()
+	gh.onIssue = nil
+	gh.mu.Unlock()
+	got, err := exe.Share(ctx, b.ID, "", nil)
+	if err != nil || got.Contributed[store.ContribKindRecaps] == "" || gh.issueCount() != 2 {
+		t.Fatalf("share of the local book = %+v %v, issues %d", got, err, gh.issueCount())
+	}
+}
+
+// TestContributeLocalSkipsTheReleaseGate: a book turned local after its
+// add-work PR merged (a sidecars.generate job whose share the server turned
+// off) doesn't wait for the data release as an issue-mode book does
+// (TestContributeMergedCoreWaitsForRelease): it files nothing, so it finishes
+// under the merged slug.
+func TestContributeLocalSkipsTheReleaseGate(t *testing.T) {
+	db := openContribDB(t)
+	gh := newFakeGitHub(t)
+	export := t.TempDir()
+	meta := newFakeMeta(t, nil, nil) // every work id 404s
+	b := contribBook(t, db, store.NewBook{WorkID: "reacher-01", ContribMode: store.ContribModeLocal}, baseChars("x"), baseRecaps("x"))
+	if _, err := db.UpsertContribution(context.Background(), store.Contribution{
+		BookID: b.ID, Kind: store.ContribKindCore, Mode: store.ContribModeIssue,
+		Status: store.ContribStatusMerged, Number: 9, URL: "https://x/9",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := contribConfig(t, db, contribModeIssue, gh.srv.URL, meta.srv.URL, export, fakeTokenResolver{token: "ghp_x"})
+	if _, err := NewExecutor(cfg).Execute(context.Background(), b, state.Contributing, scheduler.StageReport{}); err != nil {
+		t.Fatalf("contribute: %v", err)
+	}
+	if n := gh.issueCount(); n != 0 {
+		t.Fatalf("issues filed = %d, want none", n)
+	}
+	if _, err := os.Stat(filepath.Join(export, "reacher-01", charactersFileName)); err != nil {
+		t.Fatalf("local export under the merged slug: %v", err)
+	}
+	if rows := rowsByKind(t, db, b.ID); rows[store.ContribKindCharacters].Status != store.ContribStatusLocal {
+		t.Fatalf("characters row = %+v, want local", rows[store.ContribKindCharacters])
+	}
+}
+
+// followByShareOffJob maps an open sidecars.generate job to book (as a job
+// resumed after a restart has it before its run starts, so no share guard
+// turned the book local), the job having heard share_off when shareOff.
+func followByShareOffJob(t *testing.T, db *store.DB, jobID int64, book store.Book, shareOff bool) {
+	t.Helper()
+	ctx := context.Background()
+	if err := db.RecordClaim(ctx, store.ServerJob{ID: jobID, Kind: "sidecars.generate", Attempt: 1, ShareOff: shareOff}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.PutGenerateBook(ctx, store.GenerateBook{ServerJobID: jobID, BookID: &book.ID, LibraryID: 1, RelPath: "B"}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestContributeHonoursAStoredShareOff: a book re-admitted at contributing
+// while its sidecars.generate job, which heard share_off (server_jobs.share_off),
+// still waits for its lane slot (no share guard yet: the book is still in
+// issue mode) files nothing: the stage turns it local and exports. Allowed: a
+// job that never heard it files, and sidecars.contribute's Share of the book
+// still files, as the admin asked.
+func TestContributeHonoursAStoredShareOff(t *testing.T) {
+	ctx := context.Background()
+	db := openContribDB(t)
+	gh := newFakeGitHub(t)
+	export := t.TempDir()
+	b := contribBook(t, db, store.NewBook{WorkID: "reacher-01", ContribMode: store.ContribModeIssue}, baseChars("x"), baseRecaps("x"))
+	followByShareOffJob(t, db, 7, b, true)
+	exe := NewExecutor(contribConfig(t, db, contribModeIssue, gh.srv.URL, "", export, fakeTokenResolver{token: "ghp_x"}))
+	if _, err := exe.Execute(ctx, b, state.Contributing, scheduler.StageReport{}); err != nil {
+		t.Fatalf("contribute: %v", err)
+	}
+	if n := gh.issueCount(); n != 0 {
+		t.Fatalf("issues filed = %d, want none", n)
+	}
+	if got, err := db.GetBook(ctx, b.ID); err != nil || got.ContribMode != store.ContribModeLocal {
+		t.Fatalf("book after the stage = %+v %v, want local", got, err)
+	}
+	if _, err := os.Stat(filepath.Join(export, "reacher-01", charactersFileName)); err != nil {
+		t.Fatalf("local export: %v", err)
+	}
+
+	if _, err := exe.Share(ctx, b.ID, "", nil); err != nil || gh.issueCount() != 2 {
+		t.Fatalf("share of the book: %v, issues %d, want 2", err, gh.issueCount())
+	}
+
+	shared := contribBook(t, db, store.NewBook{WorkID: "reacher-02", ContribMode: store.ContribModeIssue}, baseChars("y"), baseRecaps("y"))
+	followByShareOffJob(t, db, 8, shared, false)
+	if _, err := exe.Execute(ctx, shared, state.Contributing, scheduler.StageReport{}); err != nil {
+		t.Fatalf("contribute (share on): %v", err)
+	}
+	if n := gh.issueCount(); n != 4 {
+		t.Fatalf("issues filed = %d, want the shared book's two more", n)
+	}
+}
+
+// TestContributeHonoursAShareOffHeardWhileFiling: share_off stored for the
+// book's job after the stage filed its first dimension (no share guard runs)
+// files no other; the rest is exported locally.
+func TestContributeHonoursAShareOffHeardWhileFiling(t *testing.T) {
+	ctx := context.Background()
+	db := openContribDB(t)
+	gh := newFakeGitHub(t)
+	export := t.TempDir()
+	b := contribBook(t, db, store.NewBook{WorkID: "reacher-01", ContribMode: store.ContribModeIssue}, baseChars("x"), baseRecaps("x"))
+	followByShareOffJob(t, db, 7, b, false)
+	gh.onIssue = func() {
+		if err := db.SetServerJobShareOff(ctx, 7, 1); err != nil {
+			t.Error(err)
+		}
+	}
+	exe := NewExecutor(contribConfig(t, db, contribModeIssue, gh.srv.URL, "", export, fakeTokenResolver{token: "ghp_x"}))
+	if _, err := exe.Execute(ctx, b, state.Contributing, scheduler.StageReport{}); err != nil {
+		t.Fatalf("contribute: %v", err)
+	}
+	if n := gh.issueCount(); n != 1 {
+		t.Fatalf("issues filed = %d, want the first dimension's only", n)
+	}
+	if rows := rowsByKind(t, db, b.ID); rows[store.ContribKindRecaps].Status != store.ContribStatusLocal {
+		t.Fatalf("recaps row = %+v, want local", rows[store.ContribKindRecaps])
+	}
+}
+
+// TestContributeAsksTheServerBeforeFiling: the server turned the share off
+// after the book's job last reported (no answer carried it yet, so nothing
+// here knows), and the stage asks it before filing (Config.ShareOff): nothing
+// is filed, and the book turns local and exports. Allowed: a share still on
+// files, the server asked before each issue, so a turn-off between them keeps
+// the rest local (v2.7.0 verify: the book filed 13 s after the turn-off).
+func TestContributeAsksTheServerBeforeFiling(t *testing.T) {
+	ctx := context.Background()
+	db := openContribDB(t)
+	gh := newFakeGitHub(t)
+	export := t.TempDir()
+	var asked atomic.Int32
+	offFrom := int32(1) // the ask from which the server says share_off
+	cfg := contribConfig(t, db, contribModeIssue, gh.srv.URL, "", export, fakeTokenResolver{token: "ghp_x"})
+	cfg.ShareOff = func(context.Context, int64) (bool, error) { return asked.Add(1) >= offFrom, nil }
+	exe := NewExecutor(cfg)
+
+	b := contribBook(t, db, store.NewBook{WorkID: "reacher-01", ContribMode: store.ContribModeIssue}, baseChars("x"), baseRecaps("x"))
+	if _, err := exe.Execute(ctx, b, state.Contributing, scheduler.StageReport{}); err != nil {
+		t.Fatalf("contribute: %v", err)
+	}
+	if n := gh.issueCount(); n != 0 || asked.Load() == 0 {
+		t.Fatalf("issues filed = %d (server asked %d times), want none", n, asked.Load())
+	}
+	if got, err := db.GetBook(ctx, b.ID); err != nil || got.ContribMode != store.ContribModeLocal {
+		t.Fatalf("book after the stage = %+v %v, want local", got, err)
+	}
+	if _, err := os.Stat(filepath.Join(export, "reacher-01", charactersFileName)); err != nil {
+		t.Fatalf("local export: %v", err)
+	}
+
+	// On for the check before filing and the first issue, off before the second.
+	asked.Store(0)
+	offFrom = 3
+	shared := contribBook(t, db, store.NewBook{WorkID: "reacher-02", ContribMode: store.ContribModeIssue}, baseChars("y"), baseRecaps("y"))
+	if _, err := exe.Execute(ctx, shared, state.Contributing, scheduler.StageReport{}); err != nil {
+		t.Fatalf("contribute (share on): %v", err)
+	}
+	rows := rowsByKind(t, db, shared.ID)
+	if c, r := rows[store.ContribKindCharacters], rows[store.ContribKindRecaps]; gh.issueCount() != 1 ||
+		c.Status != store.ContribStatusSubmitted || r.Status != store.ContribStatusLocal {
+		t.Fatalf("issues %d, rows: characters %+v, recaps %+v", gh.issueCount(), c, r)
+	}
+}
+
+// TestContributeAsksAgainAfterTheGist: an oversized dimension's gist lookup and
+// POST take a while, so its issue asks the server again after the gist: a share
+// turned off meanwhile files no issue, the book keeps the rest local, and the
+// gist made stays the dimension's, which a later share links rather than
+// making another. Allowed: that share files both issues.
+func TestContributeAsksAgainAfterTheGist(t *testing.T) {
+	ctx := context.Background()
+	db := openContribDB(t)
+	gh := newFakeGitHub(t)
+	var asked atomic.Int32
+	cfg := contribConfig(t, db, contribModeIssue, gh.srv.URL, "", t.TempDir(), fakeTokenResolver{token: "ghp_x"})
+	// On for the check before filing and the one before the gist, off after it.
+	cfg.ShareOff = func(context.Context, int64) (bool, error) { return asked.Add(1) >= 3, nil }
+	exe := NewExecutor(cfg)
+	b := contribBook(t, db, store.NewBook{WorkID: "reacher-01", ContribMode: store.ContribModeIssue}, hugeChars(), baseRecaps("x"))
+	if _, err := exe.Execute(ctx, b, state.Contributing, scheduler.StageReport{}); err != nil {
+		t.Fatalf("contribute: %v", err)
+	}
+	if gh.gists != 1 || gh.issueCount() != 0 {
+		t.Fatalf("gists %d, issues %d, want the gist and no issue", gh.gists, gh.issueCount())
+	}
+	rows := rowsByKind(t, db, b.ID)
+	if c, r := rows[store.ContribKindCharacters], rows[store.ContribKindRecaps]; c.Status != store.ContribStatusLocal ||
+		r.Status != store.ContribStatusLocal {
+		t.Fatalf("rows: characters %+v, recaps %+v, want both local", c, r)
+	}
+	if _, err := exe.Share(ctx, b.ID, "", nil); err != nil || gh.gists != 1 || gh.issueCount() != 2 {
+		t.Fatalf("share: %v, gists %d, issues %d, want the gist linked and two issues", err, gh.gists, gh.issueCount())
+	}
+}
+
+// TestContributeWaitsWhenTheServerCantBeAsked: a server that can't be asked
+// before filing (unreachable) files nothing: the book parks share_unconfirmed
+// (its own code: no GitHub sign-in is missing) and looks again by itself, still
+// in issue mode. Allowed: sidecars.contribute's
+// explicit Share doesn't ask, and files.
+func TestContributeWaitsWhenTheServerCantBeAsked(t *testing.T) {
+	ctx := context.Background()
+	db := openContribDB(t)
+	gh := newFakeGitHub(t)
+	cfg := contribConfig(t, db, contribModeIssue, gh.srv.URL, "", t.TempDir(), fakeTokenResolver{token: "ghp_x"})
+	cfg.ShareOff = func(context.Context, int64) (bool, error) { return false, errors.New("dial tcp: connection refused") }
+	exe := NewExecutor(cfg)
+	b := contribBook(t, db, store.NewBook{WorkID: "reacher-01", ContribMode: store.ContribModeIssue}, baseChars("x"), baseRecaps("x"))
+	_, err := exe.Execute(ctx, b, state.Contributing, scheduler.StageReport{})
+	var park *scheduler.ParkError
+	if !errors.As(err, &park) || park.Code != state.ParkShareUnconfirmed || park.Reason != ShareUnconfirmedMsg ||
+		park.RetryAfter.IsZero() {
+		t.Fatalf("contribute = %v, want a share_unconfirmed park that looks again", err)
+	}
+	if n := gh.issueCount(); n != 0 {
+		t.Fatalf("issues filed = %d, want none", n)
+	}
+	if got, err := db.GetBook(ctx, b.ID); err != nil || got.ContribMode != store.ContribModeIssue {
+		t.Fatalf("book = %+v %v, want still issue", got, err)
+	}
+
+	if _, err := exe.Share(ctx, b.ID, "", nil); err != nil || gh.issueCount() != 2 {
+		t.Fatalf("share of the book: %v, issues %d, want 2", err, gh.issueCount())
+	}
+}
+
+// TestContributeAskEndedWithTheStage: an ask cut short by the stage's own
+// context (a pause, a cancel, the Bridge stopping) is that context's error,
+// not a park saying the server couldn't be asked, and nothing is filed.
+func TestContributeAskEndedWithTheStage(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	db := openContribDB(t)
+	gh := newFakeGitHub(t)
+	cfg := contribConfig(t, db, contribModeIssue, gh.srv.URL, "", t.TempDir(), fakeTokenResolver{token: "ghp_x"})
+	cfg.ShareOff = func(ctx context.Context, _ int64) (bool, error) { cancel(); return false, ctx.Err() }
+	exe := NewExecutor(cfg)
+	b := contribBook(t, db, store.NewBook{WorkID: "reacher-01", ContribMode: store.ContribModeIssue}, baseChars("x"), baseRecaps("x"))
+	_, err := exe.Execute(ctx, b, state.Contributing, scheduler.StageReport{})
+	var park *scheduler.ParkError
+	if !errors.Is(err, context.Canceled) || errors.As(err, &park) {
+		t.Fatalf("contribute = %v, want the context's cancel, not a park", err)
+	}
+	if n := gh.issueCount(); n != 0 {
+		t.Fatalf("issues filed = %d, want none", n)
 	}
 }
 

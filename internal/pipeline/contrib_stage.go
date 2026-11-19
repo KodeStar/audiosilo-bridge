@@ -59,6 +59,10 @@ const (
 	contribModeLocal = "local"
 )
 
+// ShareUnconfirmedRetry is how soon a book parked with ShareUnconfirmedMsg looks
+// again by itself.
+const ShareUnconfirmedRetry = time.Minute
+
 // defaultContribBaseURL is the GitHub REST base the contrib client uses when the
 // executor was built without an explicit override (tests point it at httptest).
 const defaultContribBaseURL = "https://api.github.com"
@@ -76,6 +80,13 @@ const (
 	// works again re-admits it at once (bridge#25).
 	ContribUnrefreshedMsg = "the Bridge's GitHub sign-in couldn't be refreshed (" + contrib.UnrefreshedWhy +
 		") - the book carries on by itself once GitHub answers"
+	// ShareUnconfirmedMsg parks a book (state.ParkShareUnconfirmed) when the
+	// server couldn't be asked, just before filing, whether the share of the
+	// book's generate-and-share job is still on (Config.ShareOff): the park looks
+	// again by itself after ShareUnconfirmedRetry, and nothing is filed without
+	// the server's word.
+	ShareUnconfirmedMsg = "the server couldn't be asked whether this book is still to be shared - " +
+		"the book tries again by itself in a minute"
 	// CoreNeededMsg parks a book whose work does not exist upstream: a core add-work
 	// proposal has been prefilled and awaits completion/confirmation in the UI.
 	CoreNeededMsg = "this book's work does not exist on AudioSilo Meta yet - complete the work proposal, then it contributes automatically"
@@ -142,6 +153,21 @@ func (e *Executor) contribute(ctx context.Context, book store.Book, r scheduler.
 	// The description first, while the source text is still there (best effort,
 	// outside the stage's rate sample).
 	e.describeAtContributing(ctx, book, r)
+	// The book's own mode as it is now, not as the dispatch read it: the
+	// description above can wait a long time for an agent slot, and a
+	// sidecars.generate job whose share the server turned off meanwhile keeps
+	// its results local (store.KeepBookLocal).
+	if e.db != nil {
+		if now, err := e.db.GetBook(ctx, book.ID); err == nil {
+			book.ContribMode = now.ContribMode
+		}
+	}
+	// A job that heard share_off whose run isn't up to turn its book local (one
+	// resumed after a restart still waits for its lane slot) keeps it local all
+	// the same, before the work's lookup can park the book for a share.
+	if err := e.keepLocalIfTurned(ctx, &book, e.turnedLocal); err != nil {
+		return scheduler.StageResult{}, err
+	}
 	start := time.Now()
 
 	// 1. Load which sidecars exist. At least one must be present (synthesis normally
@@ -189,7 +215,22 @@ func (e *Executor) contribute(ctx context.Context, book store.Book, r scheduler.
 	// so the residual-nits fact rides to the UI; the note is process metadata only and
 	// NEVER enters the public issue/PR payload (metaissue parses the body).
 	auditNote := auditAcceptanceNote(book.WorkDir)
-	if err := e.submitContributions(ctx, book, slug, artifacts, placeholderNote, auditNote); err != nil {
+	// The mode once more, just before filing, and the server's word on the
+	// share (askedLocal): the work's lookups above take a while too. Only a turn
+	// to local is taken (a slug resolved in local mode may be a placeholder,
+	// never one to file under), here and before each dimension's filing
+	// (submitIssue).
+	if err := e.keepLocalIfTurned(ctx, &book, e.askedLocal); err != nil {
+		return scheduler.StageResult{}, err
+	}
+	err = e.submitContributions(ctx, book, slug, artifacts, placeholderNote, auditNote)
+	if errors.Is(err, errTurnedLocal) {
+		// Turned local while it filed: what it hasn't filed yet stays local (a
+		// dimension filed already is settled, and submitLocal skips it).
+		book.ContribMode = store.ContribModeLocal
+		err = e.submitLocal(ctx, book, slug, artifacts, placeholderNote, auditNote)
+	}
+	if err != nil {
 		return scheduler.StageResult{}, err
 	}
 
@@ -246,6 +287,12 @@ func (e *Executor) resolveWorkSlug(ctx context.Context, book store.Book) (slug, 
 			// exists but no data release holds it yet, and the community intake would
 			// refuse its sidecars: wait (the release gate; the poller re-admits).
 			if e.hasMergedCoreRow(ctx, book.ID) {
+				if e.contribModeFor(book) == contribModeLocal {
+					// Nothing is filed, so there is no intake to wait for: a book
+					// turned local after its work merged (a sidecars.generate job
+					// whose share the server turned off) keeps the merged slug.
+					return id, "", nil, nil
+				}
 				return "", "", scheduler.ParkWithCode(state.ParkCorePending, contrib.ReleaseWaitMsg), nil
 			}
 			// stale manual match - fall through to identifier lookup
@@ -463,15 +510,99 @@ func (e *Executor) submitContributions(ctx context.Context, book store.Book, slu
 // issue is adopted; only a list that can't reach back to a marker over a day old
 // files again). A RateLimitError
 // propagates as a transient stage error (not a park); a resume with an already-recorded
-// row skips that dimension.
+// row skips that dimension. A book turned local before a dimension is filed
+// (askedLocal, the server asked too: the credential and the filings before it
+// take a while) stops with errTurnedLocal.
 func (e *Executor) submitIssue(ctx context.Context, book store.Book, slug string, artifacts []contribArtifact, auditNote string) error {
-	return e.submitIssueWith(ctx, book, slug, artifacts, auditNote, rowSettled)
+	return e.submitIssueWith(ctx, book, slug, artifacts, auditNote, rowSettled,
+		func() (bool, error) { return e.askedLocal(ctx, book.ID) })
+}
+
+// errTurnedLocal is a filing the contributing stage stopped short of: the book
+// turned local after the stage read its mode (store.KeepBookLocal: a
+// sidecars.generate job whose share the server turned off).
+var errTurnedLocal = errors.New("contributing: the book turned local while it filed")
+
+// keepLocalIfTurned sets book's mode to local when it isn't and check
+// (turnedLocal or askedLocal) says the book is local now. Its error is the
+// stage's.
+func (e *Executor) keepLocalIfTurned(ctx context.Context, book *store.Book, check func(context.Context, int64) (bool, error)) error {
+	if e.contribModeFor(*book) == contribModeLocal {
+		return nil
+	}
+	local, err := check(ctx, book.ID)
+	if err != nil {
+		return fmt.Errorf("contributing: %w", err)
+	}
+	if local {
+		book.ContribMode = store.ContribModeLocal
+	}
+	return nil
+}
+
+// turnedLocal reports whether book id is local now: its own mode says so, or an
+// open sidecars.generate job that follows it heard share_off
+// (store.GenerateShareOff), which turns it local here (store.KeepBookLocal)
+// whether or not that job's run is up to (its share guard turns it local only
+// once the run starts, and a job resumed after a restart can wait for its lane
+// slot while the engine re-admits the book). An error is the stage's: a book
+// whose mode can't be read is never filed for.
+func (e *Executor) turnedLocal(ctx context.Context, id int64) (bool, error) {
+	if e.db == nil {
+		return false, nil
+	}
+	now, err := e.db.GetBook(ctx, id)
+	if err != nil {
+		return false, err
+	}
+	if now.ContribMode == store.ContribModeLocal {
+		return true, nil
+	}
+	off, err := e.db.GenerateShareOff(ctx, id)
+	if err != nil || !off {
+		return false, err
+	}
+	return e.db.KeepBookLocal(ctx, id)
+}
+
+// askedLocal is turnedLocal, then, for a book it doesn't find local, the
+// server's word now (Config.ShareOff): a generate-and-share job hears share_off
+// only in an answer to one of its reports, which can be a keepalive away, and
+// the stage must not file in between. A share the server turned off turns the
+// book local (store.KeepBookLocal). A server that couldn't be asked parks the
+// book (share_unconfirmed, ShareUnconfirmedMsg) to look again by itself:
+// nothing is filed without its word.
+func (e *Executor) askedLocal(ctx context.Context, id int64) (bool, error) {
+	local, err := e.turnedLocal(ctx, id)
+	if err != nil || local || e.shareOff == nil {
+		return local, err
+	}
+	off, err := e.shareOff(ctx, id)
+	if err != nil && ctx.Err() != nil {
+		return false, ctx.Err() // paused, cancelled or stopping: not a park
+	}
+	if err != nil {
+		e.log.Warn("contributing: the server couldn't be asked whether the book is still to be shared; it waits",
+			"book", id, "err", err)
+		return false, &scheduler.ParkError{Code: state.ParkShareUnconfirmed, Reason: ShareUnconfirmedMsg, Cause: err,
+			RetryAfter: time.Now().Add(ShareUnconfirmedRetry)}
+	}
+	if !off {
+		return false, nil
+	}
+	if e.db != nil {
+		if _, err := e.db.KeepBookLocal(ctx, id); err != nil {
+			return false, err
+		}
+	}
+	return true, nil
 }
 
 // submitIssueWith is submitIssue with the rule for a row that is already settled
-// (sidecars.contribute files again over a local or covered one).
+// (sidecars.contribute files again over a local or covered one) and turnedLocal
+// (nil for sidecars.contribute, which files a local book's sidecars on purpose).
 func (e *Executor) submitIssueWith(ctx context.Context, book store.Book, slug string, artifacts []contribArtifact, auditNote string,
-	settled func([]store.Contribution, string) bool) error {
+	settled func([]store.Contribution, string) bool, turnedLocal func() (bool, error)) error {
 	cli, err := e.contribClient(ctx)
 	if err != nil {
 		return err
@@ -494,7 +625,7 @@ func (e *Executor) submitIssueWith(ctx context.Context, book store.Book, slug st
 		if rerr != nil {
 			return rerr
 		}
-		issue, ierr := e.fileIssue(ctx, cli, book.ID, a.kind, slug, payload, rowIssue(existing, a.kind))
+		issue, ierr := e.fileIssue(ctx, cli, book.ID, a.kind, slug, payload, rowIssue(existing, a.kind), turnedLocal)
 		if ierr != nil {
 			return ierr
 		}

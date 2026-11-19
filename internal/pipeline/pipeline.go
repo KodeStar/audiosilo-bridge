@@ -161,6 +161,13 @@ type Config struct {
 	ContribCommunityRepo string
 	ContribBaseURL       string
 	ExportRoot           string
+	// ShareOff, when set, asks the server, just before the contributing stage files
+	// for an engine book in issue mode, whether a sidecars.generate job that shares
+	// the book has its share turned off (true: the book stays local), with an error
+	// when the server couldn't be asked (the stage then parks and looks again;
+	// nothing is filed). A job hears share_off only in an answer to a report, which
+	// can be a keepalive away (generate.Handler.ShareOff). nil asks nothing.
+	ShareOff func(ctx context.Context, bookID int64) (bool, error)
 }
 
 // Executor is the composite stage executor. ffmpeg/ffprobe are the resolved tool
@@ -212,6 +219,7 @@ type Executor struct {
 	contribCommunityRepo string
 	contribBaseURL       string
 	exportRoot           string
+	shareOff             func(ctx context.Context, bookID int64) (bool, error)
 
 	// redetectASR re-selects an ASR backend when the frozen one is unavailable. It is
 	// a field so a test can inject a scripted result; NewExecutor sets it to
@@ -281,6 +289,7 @@ func NewExecutor(cfg Config) *Executor {
 		contribCommunityRepo: cfg.ContribCommunityRepo,
 		contribBaseURL:       cfg.ContribBaseURL,
 		exportRoot:           cfg.ExportRoot,
+		shareOff:             cfg.ShareOff,
 	}
 	e.agentWorkers.Store(int64(agentWorkers))
 	e.redetectASR = e.defaultRedetectASR
