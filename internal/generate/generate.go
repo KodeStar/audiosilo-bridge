@@ -1053,18 +1053,14 @@ func (h *Handler) ownMapping(ctx context.Context, job jobs.Job) (store.GenerateB
 	return h.mappingOf(ctx, job.ID)
 }
 
-// claimMoved reports whether the row under job's id is another claim's now: a
-// later attempt of the job, or, for a job a runner claimed, a claim of another
-// server or pairing (the guard's own rule, store.OtherClaim). That claim
-// follows the job's engine book and mapping. An earlier attempt's row (this
-// claim's own write failed) is still the job's, and a row that is gone, or
-// that can't be read, is left to the guarded writes.
+// claimMoved reports whether the row under job's id is another claim's now
+// (store.OtherClaim, the guarded writes' own rule): that claim follows the
+// job's engine book and mapping. An earlier attempt's row (this claim's own
+// write failed) is still the job's, and a row that is gone, or that can't be
+// read, is left to the guarded writes.
 func (h *Handler) claimMoved(ctx context.Context, job jobs.Job) bool {
-	sj, err := h.o.DB.GetServerJob(ctx, job.ID)
-	if err != nil {
-		return false
-	}
-	return sj.Attempt > job.Attempt || job.ServerID() != "" && (sj.ServerID != job.ServerID() || sj.Pairing != job.Pairing())
+	other, err := h.o.DB.OtherClaim(ctx, stopGuard(job, false))
+	return err == nil && other
 }
 
 // stopGuard is the StopGuard of job's end: its claim (id, attempt, server and
