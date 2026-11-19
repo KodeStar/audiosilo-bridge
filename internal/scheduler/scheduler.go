@@ -1327,7 +1327,8 @@ func (s *Scheduler) publishStored(ctx context.Context, id int64) {
 }
 
 // publishLocked is publishStored for a caller holding book id's publish lock
-// (readmit, supervisorSupersedeRerun, ContinueStored).
+// (readmit, supervisorSupersedeRerun, ContinueStored and the other status clears,
+// see restoreStatus).
 func (s *Scheduler) publishLocked(ctx context.Context, id int64) {
 	b, err := s.db.GetBook(context.WithoutCancel(ctx), id)
 	if err != nil {

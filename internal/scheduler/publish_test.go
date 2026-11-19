@@ -219,9 +219,9 @@ func TestPublishStoredSkipsADeletedBook(t *testing.T) {
 }
 
 // A change written outside the scheduler (generate's continue clearing a run's
-// cancel) is published as stored through PublishStored: the book's last event
-// is no longer the cancel.
-func TestPublishStoredAfterAContinueClearsTheCancel(t *testing.T) {
+// cancel) is written and published as stored through ContinueStored: the book's
+// last event is no longer the cancel.
+func TestContinueStoredPublishesTheClearedCancel(t *testing.T) {
 	h := newHarness(t)
 	db := h.openDB(t)
 	ctx := context.Background()
@@ -239,11 +239,12 @@ func TestPublishStoredAfterAContinueClearsTheCancel(t *testing.T) {
 	if f, _ := lastFrame(t, h.hub, b.ID); f.Error != cancelledReason {
 		t.Fatalf("the cancel published %+v", f)
 	}
-	if err := db.ContinueChapters(ctx, b.ID, string(state.ChapterDetecting), string(state.ChapterDetecting),
-		store.NewBook{Title: "chapters"}, store.GenerateBook{}); err != nil {
+	if err := s.ContinueStored(ctx, b.ID, func() error {
+		return db.ContinueChapters(ctx, b.ID, string(state.ChapterDetecting), string(state.ChapterDetecting),
+			store.NewBook{Title: "chapters"}, store.GenerateBook{})
+	}); err != nil {
 		t.Fatal(err)
 	}
-	s.PublishStored(ctx, b.ID)
 	if f, _ := lastFrame(t, h.hub, b.ID); f.Status != "" || f.Error != "" || f.State != string(state.ChapterDetecting) {
 		t.Fatalf("after the continue the last frame is %+v, want it running", f)
 	}
@@ -343,11 +344,12 @@ func TestResumeLosingToACancelKeepsTheCancel(t *testing.T) {
 }
 
 // A readmit or supersede_rerun failing after its status clear puts the park back
-// (restoreStatus) before a Retry or generate's continue (ContinueStored) of the
-// book clears anything: the put-back can't tell that clear from its own, so it
-// holds the book's publish lock from its clear (supersede_rerun after the worker
-// it cancelled returned, never across that wait). A Cancel and then the Retry or
-// continue landing while it runs end with the book running, never parked again.
+// (restoreStatus) before a Retry, generate's continue (ContinueStored), a Resume
+// or the supervisor's terminate_requeue of the book clears anything: the
+// put-back can't tell that clear from its own, so it holds the book's publish
+// lock from its clear (supersede_rerun after the worker it cancelled returned,
+// never across that wait). A Cancel (or a Pause) and then the clear landing
+// while it runs end with the book running, never parked again.
 func TestFailedRestoreNeverLandsOverALaterClear(t *testing.T) {
 	changes := []struct {
 		name string
@@ -359,22 +361,38 @@ func TestFailedRestoreNeverLandsOverALaterClear(t *testing.T) {
 			return err
 		}},
 	}
+	cancel := func(db *store.DB, id int64) error { return CancelStored(context.Background(), db, id) }
+	pause := func(db *store.DB, id int64) error {
+		return db.SetBookStatusIf(context.Background(), id, "", "", string(state.StatusPaused), "", "", "")
+	}
 	clears := []struct {
 		name string
+		stop func(db *store.DB, id int64) error // lands after the change's clear
 		run  func(s *Scheduler, db *store.DB, read store.Book) error
 	}{
-		{"retry", func(s *Scheduler, db *store.DB, read store.Book) error {
+		{"retry", cancel, func(s *Scheduler, db *store.DB, read store.Book) error {
 			cancelled, err := db.GetBook(context.Background(), read.ID) // the Retry's read: cancelled
 			if err != nil {
 				return err
 			}
 			return s.RetryAsRead(context.Background(), cancelled)
 		}},
-		{"continue", func(s *Scheduler, db *store.DB, read store.Book) error {
+		{"continue", cancel, func(s *Scheduler, db *store.DB, read store.Book) error {
 			bg := context.Background()
 			return s.ContinueStored(bg, read.ID, func() error {
 				return db.ContinueReadalong(bg, read.ID, read.State, read.State, state.GoalReadalong, store.GenerateBook{})
 			})
+		}},
+		{"resume", pause, func(s *Scheduler, _ *store.DB, read store.Book) error {
+			return s.Resume(context.Background(), read.ID)
+		}},
+		{"terminate_requeue", pause, func(s *Scheduler, db *store.DB, read store.Book) error {
+			paused, err := db.GetBook(context.Background(), read.ID) // the supervisor's read: paused
+			if err != nil {
+				return err
+			}
+			_, err = s.supervisorTerminateRequeue(context.Background(), paused)
+			return err
 		}},
 	}
 	for _, change := range changes {
@@ -392,12 +410,12 @@ func TestFailedRestoreNeverLandsOverALaterClear(t *testing.T) {
 				var once sync.Once
 				s.afterStatusClear = func() {
 					once.Do(func() {
-						if err := CancelStored(bg, db, read.ID); err != nil {
+						if err := clear.stop(db, read.ID); err != nil {
 							t.Error(err)
 						}
 						go func() { cleared <- clear.run(s, db, read) }()
 						// The clear waits for this change; one that didn't would clear
-						// the cancel here, before the failure below puts the park back.
+						// the stop here, before the failure below puts the park back.
 						waitQueuedOnPublish(t, s, read.ID, cleared)
 						fail() // the change's store write fails
 					})

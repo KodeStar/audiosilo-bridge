@@ -1706,9 +1706,10 @@ internal/
             advance never shows a pause that landed first as running). readmit and
             supersede_rerun hold that lock from their status clear to their publish,
             so one book's re-admits and rewinds run one at a time: a failed one puts
-            its status back (restoreStatus) before a later Retry, or generate's
-            continue of the stopped run (ContinueStored: its clear written and
-            published under the lock), clears anything. A
+            its status back (restoreStatus) before any later status clear (a Retry, a
+            Resume, the supervisor's terminate_requeue, or generate's continue of the
+            stopped run, ContinueStored: each clear written and published under the
+            lock) clears anything. A
             publish whose read fails logs nothing for a deleted book or a closed store
             (store.DB.Closed, the shutdown) and warns only for the first other
             failure, Debug after. No page reads
