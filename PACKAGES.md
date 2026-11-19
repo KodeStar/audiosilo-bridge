@@ -1686,8 +1686,11 @@ internal/
             still as read (store.ErrSettled when a stage failed it or it finished
             since: its own error stays; a park since is read again and cancelled):
             generate's job
-            ends, its Abandon before the engine starts included. Every change to a
-            book's state or status publishes book.state through publishStored: the
+            ends, its Abandon before the engine starts included. Every change the
+            engine makes to a book's state or status (the scheduler's, a rewind
+            included, and generate's continues) publishes book.state through
+            publishStored; the contrib service's park-message writes and
+            CancelStored (no engine) publish nothing. publishStored is the
             book read as stored and published under that book's own lock
             (lockPublish), so its frames go out in the order of their reads and the
             last carries the latest write (a cancel's frame never lands after the

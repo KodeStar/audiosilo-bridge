@@ -313,7 +313,8 @@ func recordSuccess(t *testing.T, db *store.DB, bookID int64, stage state.State) 
 func TestPurgeThenRetryReSplitsWithoutRestart(t *testing.T) {
 	h := newHarness(t)
 	db := h.openDB(t)
-	s := New(db, events.NewHub(64), NewStubExecutor(0, 0), 2, h.workRoot, false)
+	hub := events.NewHub(64)
+	s := New(db, hub, NewStubExecutor(0, 0), 2, h.workRoot, false)
 	ctx := context.Background()
 	b := h.addBook(t, db, "failed-at-asr", "", "")
 
@@ -352,6 +353,9 @@ func TestPurgeThenRetryReSplitsWithoutRestart(t *testing.T) {
 	}
 	if got.Status != string(state.StatusFailed) {
 		t.Errorf("after purge Status = %q, want %q (reconcile must preserve status)", got.Status, state.StatusFailed)
+	}
+	if f, ok := lastFrame(t, hub, b.ID); !ok || f != storedFrame(t, db, b.ID) {
+		t.Errorf("after purge the last frame is %+v (%v), want the rewound book as stored", f, ok)
 	}
 	succeeded, err := db.SucceededStages(ctx, b.ID)
 	if err != nil {
