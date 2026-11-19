@@ -16,6 +16,7 @@ import (
 	"github.com/kodestar/audiosilo-bridge/internal/link"
 	"github.com/kodestar/audiosilo-bridge/internal/netguard"
 	"github.com/kodestar/audiosilo-bridge/internal/podcast"
+	"github.com/kodestar/audiosilo-bridge/internal/secrets"
 	"github.com/kodestar/audiosilo-bridge/internal/store"
 )
 
@@ -348,5 +349,82 @@ func TestSaveCheckpointKeepsTheRecordOfAnEarlierPartial(t *testing.T) {
 	}
 	if v, _ := s.o.Vault.Get(old.Validator); v != "" {
 		t.Fatal("the earlier validator was kept")
+	}
+}
+
+// A record left under a folder that is gone (a fetch that ended early after
+// its show folder was renamed by hand) or that holds another show now is read
+// by no job: cleanOwned goes by a show's folder. The day-old sweep drops it
+// and its validator, leaving its partial to sweepPartials. One a day old at
+// its own show's folder (cleanOwned's), a fresh one, one whose download runs
+// and one whose folder cannot be read stay.
+func TestSweepRecordsDropsRecordsWhoseFolderIsGone(t *testing.T) {
+	h, job := audioHarness(t)
+	s := h.handler.s
+	root, err := os.OpenRoot(h.mount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	if err := root.Mkdir("Unreadable Show", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := root.WriteFile("Unreadable Show/feed.json", []byte("{"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	base := path.Base(*job.Path)
+	old := s.o.Now().Add(-25 * time.Hour)
+	type record struct {
+		c     checkpoint
+		fresh bool
+		run   bool
+		swept bool
+	}
+	records := map[string]*record{
+		"gone":       {c: checkpoint{ShowID: fixtureShowID, Path: "Gone Show/" + base}, swept: true},
+		"other show": {c: checkpoint{ShowID: "0123456789abcdef", Path: "Fixture Show/" + base}, swept: true},
+		"own folder": {c: checkpoint{ShowID: fixtureShowID, Path: "Fixture Show/" + base}},
+		"fresh":      {c: checkpoint{ShowID: fixtureShowID, Path: "Fresh Gone/" + base}, fresh: true},
+		"running":    {c: checkpoint{ShowID: fixtureShowID, Path: "Running Gone/" + base}, run: true},
+		"unreadable": {c: checkpoint{ShowID: fixtureShowID, Path: "Unreadable Show/" + base}},
+	}
+	dir, err := s.checkpointRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dir.Close()
+	for name, r := range records {
+		// The running fetch's episode (its row's params) is the running one's
+		// alone: a record of that episode counts as its download wherever.
+		r.c.ServerHash, r.c.LibraryID, r.c.EpisodeID = s.pairHash(), 3, "2cc306d831645e2b"
+		if r.run {
+			r.c.EpisodeID = "1cc306d831645e2b"
+		}
+		r.c.Temp, r.c.Validator, r.c.Offset, r.c.Total = podcast.TempPrefix+nonce(), secrets.PodcastETagPrefix+nonce(), 6, 100
+		r.c.UpdatedAt = old.Format(time.RFC3339)
+		if r.fresh {
+			r.c.UpdatedAt = s.o.Now().Format(time.RFC3339)
+		}
+		if err := s.o.Vault.Set(r.c.Validator, `"one"`); err != nil {
+			t.Fatal(err)
+		}
+		b, _ := json.Marshal(r.c)
+		if err := dir.WriteFile(recordName(3, r.c.ShowID, r.c.Path), b, 0o600); err != nil {
+			t.Fatal(name, err)
+		}
+		if r.run {
+			p := r.c.Path
+			if err := h.db.RecordClaim(context.Background(), store.ServerJob{ID: 99, Kind: FetchKind, LibraryID: job.LibraryID, Path: &p, Params: job.Params, Attempt: 1, ServerID: "server-1"}); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	s.sweepRecords(context.Background(), root, link.Library{ID: 3, Kind: "podcasts", Root: h.mount}, h.mount, 0)
+	for name, r := range records {
+		_, err := dir.Lstat(recordName(3, r.c.ShowID, r.c.Path))
+		v, _ := s.o.Vault.Get(r.c.Validator)
+		if r.swept != errors.Is(err, os.ErrNotExist) || r.swept != (v == "") {
+			t.Fatal(name, ": swept", r.swept, "record", err, "validator", v)
+		}
 	}
 }

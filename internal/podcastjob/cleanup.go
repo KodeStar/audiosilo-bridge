@@ -2,13 +2,16 @@ package podcastjob
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path"
+	"strings"
 	"time"
 
 	"github.com/kodestar/audiosilo-bridge/internal/jobs"
 	"github.com/kodestar/audiosilo-bridge/internal/link"
 	"github.com/kodestar/audiosilo-bridge/internal/podcast"
+	"github.com/kodestar/audiosilo-bridge/internal/secrets"
 	"github.com/kodestar/audiosilo-bridge/internal/store"
 )
 
@@ -92,4 +95,66 @@ func (s *service) cleanOwned(ctx context.Context, root *os.Root, lib link.Librar
 		}
 		locked(j.Path, func() { _ = podcast.CleanupTrash(root, j) })
 	}
+}
+
+// sweepRecords drops this pairing's download records of library lib that no
+// job reads any more: a day old (cleanOwned's age), of no running download
+// (self, the calling job, aside; runningRecords), whose folder is gone or
+// holds another show (podcast.ReadMoved, so a folder renamed by hand and not
+// taken in yet is still its show's). A fetch that ends early (its episode
+// found installed, a file in the way) or a take-in that could not move a
+// record leaves it under a gone folder, and cleanOwned reads a show's records
+// by the show's folder: nothing else would ever clear it, and the partial it
+// names would never be swept. Only the record and its validator go: its
+// partial is not at the record's path or not its show's, and sweepPartials
+// takes it once old, unrecorded. A folder that cannot be read keeps its
+// records, as does a record saved again since the listing.
+func (s *service) sweepRecords(ctx context.Context, root *os.Root, lib link.Library, mount string, self int64) {
+	if s.o.DB == nil || s.o.DataDir == "" || s.writable(lib, mount) != nil {
+		return
+	}
+	rows, err := s.o.DB.OpenServerJobs(ctx)
+	if err != nil {
+		return
+	}
+	dir, err := s.checkpointRoot()
+	if err != nil {
+		return
+	}
+	defer func() { _ = dir.Close() }()
+	records, err := s.records(dir, lib.ID)
+	if err != nil {
+		return
+	}
+	running := s.runningRecords(rows, lib.ID, self)
+	for _, c := range records {
+		if ctx.Err() != nil {
+			return
+		}
+		t, err := time.Parse(time.RFC3339, c.UpdatedAt)
+		if err != nil || s.o.Now().Sub(t) <= 24*time.Hour || running(c) || !orphaned(root, c) {
+			continue
+		}
+		name := recordName(lib.ID, c.ShowID, c.Path)
+		if now, err := readRecord(dir, name); err != nil || now != c {
+			continue
+		}
+		if s.writable(lib, mount) != nil {
+			return
+		}
+		if dir.Remove(name) == nil && strings.HasPrefix(c.Validator, secrets.PodcastETagPrefix) {
+			_ = s.o.Vault.Delete(c.Validator)
+		}
+	}
+}
+
+// orphaned reports whether record c's folder is gone, or holds a show other
+// than c's.
+func orphaned(root *os.Root, c checkpoint) bool {
+	show := path.Dir(c.Path)
+	if _, err := root.Lstat(show); errors.Is(err, os.ErrNotExist) {
+		return true
+	}
+	f, _, err := podcast.ReadMoved(root, show)
+	return err == nil && f.ShowID != c.ShowID
 }
