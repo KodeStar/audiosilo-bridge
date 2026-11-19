@@ -236,11 +236,11 @@ func (h *Handler) shareConfirmed(ctx context.Context, r *run, sharer Sharer, boo
 }
 
 // shareHeld is shareConfirmed's look under the engine's hold, after the
-// server's answer: what changed since, read here with no request (the hold is
-// never kept waiting for an answer). off for a share_off heard since or stands
-// (nil: none) answering false; an error for a stop since (the job's context
-// ended), a pairing changed since (jobs.ErrShareOffLink) or stands that
-// couldn't be read (errShareUnread): the share isn't confirmed.
+// server's answer: what changed since, read here with no request. off for a
+// share_off heard since or stands (nil: none) answering false; an error for a
+// stop since (the job's context ended), a pairing changed since
+// (jobs.ErrShareOffLink) or stands that couldn't be read (errShareUnread): the
+// share isn't confirmed.
 func shareHeld(ctx context.Context, r *run, stands func(context.Context) (bool, error)) (bool, error) {
 	switch {
 	case ctx.Err() != nil:
@@ -274,9 +274,11 @@ func unconfirmedMsg(err error) string {
 // stoppedBy is shareConfirmed's check before each dimension it files when
 // stands is set (shareOwed: a done book's owed share, which sidecars.generate
 // answers can turn off without stopping the job): share_off heard or stands
-// answering false stop the share (pipeline.ErrShareStopped). The first check
-// is shareHeld's alone (the server was asked just before the hold); each later
-// one asks the server again (Reporter.AskShareOff). One that can't confirm the
+// answering false stop the share (pipeline.ErrShareStopped). Each check asks
+// the server again (Reporter.AskShareOff), the first included, as the
+// contributing stage's askedLocal does: the share step resolves the GitHub
+// sign-in and looks the work up before it files, which can take a while after
+// shareConfirmed's ask. One that can't confirm the
 // share (the server not asked, a pairing changed, stands unread) parks it
 // share_unconfirmed as the contributing stage does (a *scheduler.ParkError,
 // which shareOwed waits on), filing nothing more. nil (never) without stands:
@@ -285,14 +287,8 @@ func stoppedBy(ctx context.Context, r *run, stands func(context.Context) (bool, 
 	if stands == nil {
 		return nil
 	}
-	first := true
 	return func() (bool, error) {
-		var off bool
-		var err error
-		if !first {
-			off, err = r.rep.AskShareOff(ctx)
-		}
-		first = false
+		off, err := r.rep.AskShareOff(ctx)
 		if err == nil && !off {
 			off, err = shareHeld(ctx, r, stands)
 		}

@@ -3445,8 +3445,9 @@ internal/
             reads the book again under its hold and leaves one done since to
             finish. shareOwed files through pipeline.Executor.ShareChecked with
             stoppedBy asked before each dimension (the server again, its share_off,
-            ShareResumable; the first check asks no server, which was asked just
-            before the hold), as the stage asks before each filing; a park the
+            ShareResumable; the first check asks too, as the share step resolves
+            the sign-in and looks the work up first), as the stage asks before
+            each filing; a park the
             stage would wait on in the same case (contrib_unavailable for a GitHub
             sign-in missing or not refreshed, share_unconfirmed for a server not
             asked or a store not read mid-filing) parks the job with the stage's

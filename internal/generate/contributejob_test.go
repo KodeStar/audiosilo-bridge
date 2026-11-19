@@ -380,3 +380,42 @@ func TestParseContributeParams(t *testing.T) {
 		}
 	}
 }
+
+// repHandler hands its run's Reporter out and holds the job until it ends.
+type repHandler struct{ reps chan *jobs.Reporter }
+
+func (repHandler) Kind() string { return "test.share" }
+func (repHandler) Lane() string { return jobs.LaneLight }
+func (h repHandler) Run(ctx context.Context, _ jobs.Job, rep *jobs.Reporter) (any, error) {
+	h.reps <- rep
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+// An owed share's first check before it files asks the server too, as the
+// share step looks the work up and resolves the GitHub sign-in between
+// shareConfirmed's ask and its first filing: a share_off the server holds for
+// the job, not yet heard, stops it (denied); a look at what was heard alone
+// would go on.
+func TestStoppedByAsksBeforeTheFirstDimension(t *testing.T) {
+	t.Parallel()
+	hr := newHarness(t)
+	reps := make(chan *jobs.Reporter, 1)
+	// No report but the job's first and the asks.
+	runner := jobs.New(hr.db, func() jobs.Server { return hr.cl }, nil, jobs.Options{Keepalive: time.Hour,
+		ProgressEvery: time.Hour, Wait: 10 * time.Millisecond, RetryEvery: 20 * time.Millisecond,
+		ServerID: func() string { return "srv" }, Log: slog.New(slog.DiscardHandler)}, repHandler{reps})
+	hr.srv.set(func() {
+		hr.srv.queue = append(hr.srv.queue, link.Job{ID: 141, Kind: "test.share", Attempts: 1, State: "claimed"})
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); runner.Run(ctx) }()
+	defer func() { cancel(); <-done }()
+	rep := <-reps // its first report answered
+	hr.srv.set(func() { hr.srv.shareOff[141] = true })
+	stopped := stoppedBy(ctx, &run{rep: rep}, func(context.Context) (bool, error) { return true, nil })
+	if stop, err := stopped(); !stop || err != nil {
+		t.Fatalf("the first check: %v %v, want the share stopped by the server's share_off", stop, err)
+	}
+}
