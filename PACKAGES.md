@@ -901,7 +901,9 @@ internal/
             precise correct verdict.
             Phase 1a: the contribution mode is PER BOOK (contribModeFor: books.contrib_mode,
             which a sidecars.generate job always sets from its contribute param, else
-            the configured contribution.mode). runAgent's budget preflight gained the
+            the configured contribution.mode); the contributing stage reads it again
+            after its description step (a job whose share the server turned off may
+            have turned the book local meanwhile, server#218). runAgent's budget preflight gained the
             MONTHLY half (checkMonthlyBudget, Config.MonthlyBudgetUSD): this calendar
             month's (UTC, MonthBounds) spend across every book, superseded runs and
             deleted books' runs included (store.SumBudgetCostSince), at or over the cap

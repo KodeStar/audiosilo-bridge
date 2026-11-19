@@ -1142,6 +1142,33 @@ func TestContribModeForBook(t *testing.T) {
 	}
 }
 
+// TestContributeReadsTheBooksModeNow: the stage files by the book's mode as it
+// is when it submits, not as the dispatch read it: a sidecars.generate job
+// whose share the server turned off while the stage waited (server#218) turned
+// the book local, and nothing is filed. Allowed: the local export.
+func TestContributeReadsTheBooksModeNow(t *testing.T) {
+	db := openContribDB(t)
+	gh := newFakeGitHub(t)
+	export := t.TempDir()
+	b := contribBook(t, db, store.NewBook{WorkID: "reacher-01", ContribMode: store.ContribModeIssue}, baseChars("x"), baseRecaps("x"))
+	if err := db.SetBookContribMode(context.Background(), b.ID, store.ContribModeLocal); err != nil {
+		t.Fatal(err)
+	}
+	cfg := contribConfig(t, db, contribModeIssue, gh.srv.URL, "", export, fakeTokenResolver{token: "ghp_x"})
+	if _, err := NewExecutor(cfg).Execute(context.Background(), b, state.Contributing, scheduler.StageReport{}); err != nil {
+		t.Fatalf("contribute: %v", err)
+	}
+	if n := gh.issueCount(); n != 0 {
+		t.Fatalf("issues filed = %d, want none", n)
+	}
+	if _, err := os.Stat(filepath.Join(export, "reacher-01", charactersFileName)); err != nil {
+		t.Fatalf("local export: %v", err)
+	}
+	if rows := rowsByKind(t, db, b.ID); rows[store.ContribKindCharacters].Status != store.ContribStatusLocal {
+		t.Fatalf("characters row = %+v, want local", rows[store.ContribKindCharacters])
+	}
+}
+
 // The contributing stage files through the same marker: a retry after a lost
 // answer adopts the issue rather than filing a second.
 func TestContributeRetryAdoptsALostIssue(t *testing.T) {

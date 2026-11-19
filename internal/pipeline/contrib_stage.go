@@ -142,6 +142,15 @@ func (e *Executor) contribute(ctx context.Context, book store.Book, r scheduler.
 	// The description first, while the source text is still there (best effort,
 	// outside the stage's rate sample).
 	e.describeAtContributing(ctx, book, r)
+	// The book's own mode as it is now, not as the dispatch read it: the
+	// description above can wait a long time for an agent slot, and a
+	// sidecars.generate job whose share the server turned off meanwhile keeps
+	// its results local (store.SetBookContribMode).
+	if e.db != nil {
+		if now, err := e.db.GetBook(ctx, book.ID); err == nil {
+			book.ContribMode = now.ContribMode
+		}
+	}
 	start := time.Now()
 
 	// 1. Load which sidecars exist. At least one must be present (synthesis normally
