@@ -125,9 +125,9 @@ func ResumeAction(offset, total int64, etag string, r *StreamResponse) string {
 	return "append"
 }
 
-// Retryable reports whether err, a guarded request's failure, is worth another
-// attempt.
-func Retryable(err error) bool { return retryable(classify(context.Background(), err)) }
+// Retryable reports whether e, a guarded request's classified failure
+// (Classify), is worth another attempt.
+func Retryable(e *Error) bool { return retryable(e) }
 
 // Classify is classify for a caller that ran the request under ctx.
 func Classify(ctx context.Context, err error) *Error { return classify(ctx, err) }
