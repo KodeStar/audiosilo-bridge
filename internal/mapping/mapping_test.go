@@ -455,8 +455,8 @@ func TestUnansweredCheckKeepsLastState(t *testing.T) {
 			src.answer(1, err)
 			later := at.Add(10 * time.Minute)
 			r.Check(context.Background(), src, mount, func() time.Time { return later })
-			if st, _ := r.Status(1); st.Mapped || st.Error == "" {
-				t.Fatalf("a definite answer kept the old state: %+v", st)
+			if st, ok := r.Status(1); !ok || st.Mapped || st.Error == "" {
+				t.Fatalf("a definite answer kept the old state, or reads as unknown: %+v, %v", st, ok)
 			}
 			if r.Due(later, 24*time.Hour) {
 				t.Fatal("a definite answer is due again at once")
@@ -1293,8 +1293,8 @@ func TestUnansweredCheckOfARootBookFailsClosed(t *testing.T) {
 	}
 	src.answer(1, &link.APIError{Status: http.StatusServiceUnavailable})
 	r.Check(context.Background(), src, mount, func() time.Time { return at.Add(time.Minute) })
-	if st, _ := r.Status(1); st.Mapped || st.Writable || !strings.Contains(st.Error, "library folder itself") {
-		t.Fatalf("an unanswered check kept a root book's state: %+v", st)
+	if st, ok := r.Status(1); ok || st.Mapped || st.Writable || !strings.Contains(st.Error, "library folder itself") {
+		t.Fatalf("an unanswered check kept a root book's state, or reads as known: %+v, %v", st, ok)
 	}
 }
 
@@ -1320,7 +1320,15 @@ func TestHungMountFailsOnlyItsLibrary(t *testing.T) {
 	release := make(chan struct{})
 	t.Cleanup(func() { close(release) })
 	var fileStats atomic.Int32
+	// The hung looks are bounded short; the others at LookTimeout, so a slow
+	// moment on a loaded runner never turns a healthy look into a hung one.
 	const bound = 20 * time.Millisecond
+	within := func(hangs bool) time.Duration {
+		if hangs {
+			return bound
+		}
+		return LookTimeout
+	}
 	r := newRegistry()
 	r.spacing = time.Millisecond
 	r.look = looks{
@@ -1328,7 +1336,7 @@ func TestHungMountFailsOnlyItsLibrary(t *testing.T) {
 			if strings.HasPrefix(p, filepath.Join(roots[2], "Author")) {
 				fileStats.Add(1)
 			}
-			return fsutil.LookWithin("test-stat", p, bound, func(p string) (fs.FileInfo, error) {
+			return fsutil.LookWithin("test-stat", p, within(hung[p]), func(p string) (fs.FileInfo, error) {
 				if hung[p] {
 					<-release
 					return nil, errors.New("released") // touches nothing: the folder may be gone
@@ -1337,7 +1345,7 @@ func TestHungMountFailsOnlyItsLibrary(t *testing.T) {
 			})
 		},
 		probe: func(d string) error {
-			_, err := fsutil.LookWithin("test-probe", d, bound, func(d string) (struct{}, error) {
+			_, err := fsutil.LookWithin("test-probe", d, within(d == roots[3]), func(d string) (struct{}, error) {
 				if d == roots[3] {
 					<-release
 					return struct{}{}, errors.New("released")
