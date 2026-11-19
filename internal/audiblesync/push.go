@@ -37,9 +37,9 @@ const (
 	// errorWait is the least wait after a failure (the server's or Audible's).
 	errorWait = 2 * time.Minute
 	// resetStrikes is how many passes in a row the server may refuse the
-	// push's cursor (each a read from the start) before the account is left
-	// for resetWait: a server refusing even the cursors it gave would
-	// otherwise send the push back to the feed's start every pass.
+	// push's cursor (each followed by a read from the start) before the
+	// account is left for resetWait: a server refusing even the cursors it
+	// gave would otherwise send the push back to the feed's start every pass.
 	resetStrikes = 3
 	resetWait    = time.Hour
 	// baselineWindow: the first read of an account's feed to its end (the
@@ -66,8 +66,9 @@ type Pusher struct {
 	// (oldServerStrikes); any other answer ends the run.
 	noFeed map[string]int
 	// resets counts each account's passes that ended on a refused cursor
-	// (resetStrikes); a pass the server took a cursor it gave in ends the
-	// run (a read from the start sends none, so it neither counts nor ends it).
+	// (resetStrikes); a pass the server took the cursor kept from the pass
+	// before ends the run (a read from the start has none to send, so it
+	// neither counts nor ends it).
 	resets map[string]int
 }
 
@@ -165,9 +166,7 @@ func (p *Pusher) account(ctx context.Context, srv Server, a store.AudibleAccount
 	cursor := a.PushCursor
 	end := false        // the feed was read to its end
 	unrecorded := false // a row wasn't recorded: the cursor stays, so it is read again
-	took := false       // the server took a cursor it gave (a read from the start sends none)
 	for range maxPages {
-		asked := cursor
 		page, err := srv.AudibleProgress(ctx, a.ID, cursor, link.MaxAudibleProgress)
 		strikes := p.strike(p.noFeed, a.ID, errors.Is(err, link.ErrNoAudibleSync))
 		switch {
@@ -211,7 +210,6 @@ func (p *Pusher) account(ctx context.Context, srv Server, a store.AudibleAccount
 			}
 			return
 		}
-		took = took || asked != ""
 		// The skew is against the Bridge's clock when the page came back, not
 		// the pass's start: a pass (and the accounts before it in the Tick)
 		// can take a while, and that time would count as the server's lead.
@@ -231,11 +229,12 @@ func (p *Pusher) account(ctx context.Context, srv Server, a store.AudibleAccount
 			break
 		}
 	}
-	if took {
-		// Only a cursor the server gave and then took ends the run of
-		// refusals: a read from the start that fits on a page sends none, so
-		// counting it would end the run every other pass and the wait would
-		// never come.
+	if a.PushCursor != "" {
+		// Only the cursor kept from the pass before, taken (every page of this
+		// pass was answered), ends the run of refusals. A read from the start
+		// has none: counting it, or the cursors it follows to the feed's end,
+		// would end the run every other pass when the server refuses the one
+		// kept at the end, and the wait would never come.
 		p.strike(p.resets, a.ID, false)
 	}
 	// A row that wasn't recorded keeps the cursor where it was: the next pass
@@ -263,11 +262,12 @@ func (p *Pusher) account(ctx context.Context, srv Server, a store.AudibleAccount
 // refused its cursor (err): the rows recorded already read at the same place
 // change nothing, and the ones changed before the account's baseline, or
 // before the place last read for their title, are history again
-// (historyCutoff, olderThanKnown), whatever place they have now. It leaves the account for resetWait once that
-// happened resetStrikes times with no cursor taken between: the first refusal
-// and the one that starts the waits are logged, the ones between and after
-// are not. Each refusal from then on records the push's failure again (the
-// clean read from the start between two ends it).
+// (historyCutoff, olderThanKnown), whatever place they have now. It leaves the
+// account for resetWait once that happened resetStrikes times with no pass
+// between that had its kept cursor taken: the first refusal and the one that
+// starts the waits are logged, the ones between and after are not. Each
+// refusal from then on records the push's failure again (the clean read from
+// the start between two ends it).
 func (p *Pusher) cursorRefused(ctx context.Context, a store.AudibleAccount, err error, now time.Time) {
 	n := p.strike(p.resets, a.ID, true)
 	switch n {

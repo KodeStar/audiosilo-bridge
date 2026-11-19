@@ -3112,10 +3112,11 @@ internal/
             read for it (olderThanKnown: updated_at not after row_seen, by the server's clock, never at: a place
             another device wrote between the read and the write to Audible is new; so a backup's row changed
             after the baseline but older than the place handled since is history too; a row changed since is a
-            new place); refused resetStrikes (3) times with no cursor taken between (a read from the start that
-            fits a page sends none, so it neither counts nor ends the run; a server refusing even the cursors it
+            new place); refused resetStrikes (3) times with no pass between that had its kept cursor taken (a read
+            from the start has none to send, so it neither counts nor ends the run, whatever cursors it follows
+            to the feed's end; a server refusing even the cursors it
             gave), the account waits resetWait (1 h), logged once, a push_error each refusal from then on,
-            until a pass has a cursor it gave taken), skips rows by audible:<account>, keeps a
+            until a pass has the cursor kept from the one before taken), skips rows by audible:<account>, keeps a
             row on a title the last sync didn't list for that book pending (listed 0,
             store.PendAudiblePush) until a sync lists it; for the places still for StillFor (3 min, since
             row_seen: the Bridge's clock) it drops one under 1 s, within 5 s of last_ms (debounce) or

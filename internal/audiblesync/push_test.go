@@ -1050,8 +1050,9 @@ func TestPushRefusedCursorBacksOff(t *testing.T) {
 		t.Fatalf("the waits logged %d times:\n%s", n, logs.String())
 	}
 
-	// The server takes its cursors again: the read reaches the end and the
-	// run is over, so a later refusal is the first again.
+	// The server takes its cursors again: the read reaches the end, and the
+	// pass after it has the cursor kept there taken, so the run is over and a
+	// later refusal is the first again.
 	e.srv.mu.Lock()
 	e.srv.refuseAll = false
 	e.srv.mu.Unlock()
@@ -1060,11 +1061,54 @@ func TestPushRefusedCursorBacksOff(t *testing.T) {
 	if a := e.account(t); a.PushCursor != "c2" || a.PushReread {
 		t.Fatalf("the read after the waits: cursor %q reread %v", a.PushCursor, a.PushReread)
 	}
-	p.mu.Lock()
-	run := p.resets[acctID]
-	p.mu.Unlock()
-	if run != 0 {
-		t.Fatalf("refusals in a row after a clean read = %d", run)
+	run := func() int {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		return p.resets[acctID]
+	}
+	if n := run(); n == 0 {
+		t.Fatal("the read from the start, with no kept cursor to send, ended the run")
+	}
+	p.Tick(ctx)
+	if n := run(); n != 0 {
+		t.Fatalf("refusals in a row after the kept cursor was taken = %d", n)
+	}
+}
+
+// A server that refuses only the cursor kept at the feed's end, with a feed
+// over a page: the read from the start has the cursors it follows taken, and
+// that doesn't end the run of refusals, so the account still waits resetWait
+// after resetStrikes of them rather than reading the whole feed every other
+// pass for good (bridge#50).
+func TestPushRefusedKeptCursorBacksOff(t *testing.T) {
+	ctx := context.Background()
+	e := newEnv(t)
+	var logs strings.Builder
+	e.o.Log = slog.New(slog.NewTextHandler(&logs, nil))
+	e.list(t, st("B000000001", "A/One", 36000))
+	e.srv.pageSize = 2
+	e.srv.badSince = "c3"
+	for _, pos := range []float64{600, 900, 1200} {
+		e.srv.add("A/One", "B000000001", pos, e.now, "web-1")
+	}
+	p := NewPusher(e.o)
+	for i := range 2 * resetStrikes {
+		p.Tick(ctx) // the start and its second page, then the cursor kept at the end refused
+		if a := e.account(t); i < 2*resetStrikes-1 && (a.PushError != "" || p.isPaused(acctID, e.now)) {
+			t.Fatalf("after pass %d: paused %v, %+v", i+1, p.isPaused(acctID, e.now), a)
+		}
+	}
+	e.srv.mu.Lock()
+	asks := len(e.srv.feedAsks)
+	e.srv.mu.Unlock()
+	if asks != 3*resetStrikes {
+		t.Fatalf("feed asks = %d, want %d", asks, 3*resetStrikes)
+	}
+	if a := e.account(t); a.PushError == "" || !p.isPaused(acctID, e.now) {
+		t.Fatalf("after %d refusals of the kept cursor: paused %v, %+v", resetStrikes, p.isPaused(acctID, e.now), a)
+	}
+	if n := strings.Count(logs.String(), "refused the push's cursor"); n != 1 {
+		t.Fatalf("the first refusal logged %d times:\n%s", n, logs.String())
 	}
 }
 
