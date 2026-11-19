@@ -2242,7 +2242,7 @@ internal/
             them, server bridge.cancelledUnder), ends its context (errCancelRequested -> reported
             cancelled; the cause says by whom when the answer does, bridge#80:
             cancel_requested with the server's reason as the job's error is the server's
-            ("the server cancelled the job: <reason>"), with none an admin's, the 409 says
+            ("the job was cancelled by the server: <reason>"), with none an admin's, the 409 says
             neither, the page's own Cancel says so), any other 409 ends it as lost (nothing more sent). A parked
             report carries the park's message for people in progress park.message
             (withParkMessage: the job's park message without the "<code>: " an

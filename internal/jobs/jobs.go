@@ -15,6 +15,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"maps"
 	"net/http"
@@ -136,29 +137,18 @@ type Store interface {
 	PruneServerJobs(ctx context.Context, keep int) (int64, error)
 }
 
-// Why a running job's context ended. errCancelRequested is any cancel (a
-// cancelled cause says by whom when it is known; errors.Is reads every one as
-// it): the server's 409 not_held with reason "cancelled" doesn't say, and is
-// sent for the server's own cancels as for an admin's (bridge#80).
+// Why a running job's context ended. errCancelRequested is any cancel; a
+// cancel that says by whom wraps it (errCancelledHere, cancelCause): the
+// server's 409 not_held with reason "cancelled" doesn't say, and is sent for
+// the server's own cancels as for an admin's (bridge#80).
 var (
 	errCancelRequested = errors.New("the job was cancelled")
 	errLost            = errors.New("the server no longer holds the job for this claim")
 	errStopping        = errors.New("the Bridge is stopping")
 	errUnpaired        = errors.New("the server refused the Bridge's token")
-)
 
-// cancelled is a cancel that says by whom (errors.Is errCancelRequested).
-type cancelled string
-
-func (c cancelled) Error() string { return string(c) }
-
-func (c cancelled) Is(target error) bool { return target == errCancelRequested }
-
-// The cancels that say by whom: an admin's on the server (cancel_requested
-// with no reason), and one on the Bridge's own page (Runner.Cancel).
-const (
-	cancelledByAdmin = cancelled("an admin cancelled the job")
-	cancelledHere    = cancelled("the job was cancelled on the Bridge's page")
+	// errCancelledHere is a cancel on the Bridge's own page (Runner.Cancel).
+	errCancelledHere = fmt.Errorf("%w on the Bridge's page", errCancelRequested)
 )
 
 // cancelCause is the cause of a cancel the server asked for in its answer
@@ -168,9 +158,9 @@ const (
 // is the server's), else an admin's.
 func cancelCause(reason string) error {
 	if reason != "" {
-		return cancelled("the server cancelled the job: " + reason)
+		return fmt.Errorf("%w by the server: %s", errCancelRequested, reason)
 	}
-	return cancelledByAdmin
+	return fmt.Errorf("%w by an admin", errCancelRequested)
 }
 
 // Abandoner is a Handler whose jobs hold work beyond Run (sidecars.generate: an
@@ -930,7 +920,7 @@ func (r *Runner) Cancel(id int64) bool {
 	defer r.mu.Unlock()
 	ru, ok := r.running[id]
 	if ok {
-		ru.cancel(cancelledHere)
+		ru.cancel(errCancelledHere)
 	}
 	return ok
 }

@@ -201,8 +201,8 @@ func TestCancelCauseWordsTheServersReason(t *testing.T) {
 		want string
 	}{
 		{"the server's", &link.Job{CancelRequested: true, Error: "the Audible account was removed"}, nil,
-			"the server cancelled the job: the Audible account was removed"},
-		{"an admin's", &link.Job{CancelRequested: true}, nil, "an admin cancelled the job"},
+			"the job was cancelled by the server: the Audible account was removed"},
+		{"an admin's", &link.Job{CancelRequested: true}, nil, "the job was cancelled by an admin"},
 		{"either", nil, link.ErrCancelledHere, "the job was cancelled"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -220,7 +220,7 @@ func TestCancelCauseWordsTheServersReason(t *testing.T) {
 	if stop := (&Reporter{}).answer(&link.Job{Error: "a park's message"}, nil); stop != nil {
 		t.Fatalf("an error with no cancel asked = %v", stop)
 	}
-	if !errors.Is(cancelledHere, errCancelRequested) {
+	if !errors.Is(errCancelledHere, errCancelRequested) {
 		t.Fatal("a cancel on the Bridge's page isn't a cancel")
 	}
 }
