@@ -195,7 +195,7 @@ func (h *Fetch) run(parent context.Context, claimed *jobs.Job, rep *jobs.Reporte
 		return nil, err
 	}
 	defer unlock()
-	if err := s.beforeWrite(lib, mount, path.Dir(*job.Path)); err != nil {
+	if err := s.beforeWrite(parent, lib, mount, path.Dir(*job.Path)); err != nil {
 		return nil, err
 	}
 	lock, err := s.lockEpisode(parent, root, *job.Path)
@@ -525,7 +525,7 @@ func (h *Fetch) run(parent context.Context, claimed *jobs.Job, rep *jobs.Reporte
 		if pairing != s.pairHash() {
 			return fail("identity_changed", "The Bridge pairing changed.")
 		}
-		if err := s.beforeWrite(lib, mount, path.Dir(e.Path)); err != nil {
+		if err := s.beforeWrite(ctx, lib, mount, path.Dir(e.Path)); err != nil {
 			return err
 		}
 		if err := podcast.RecoverShow(root, path.Dir(e.Path), s.o.Now(), s.o.Fault); err != nil {
@@ -717,7 +717,7 @@ func (s *service) fetchSnapshot(ctx context.Context, root *os.Root, lib link.Lib
 		return nil, podcast.Episode{}, err
 	}
 	defer unlock()
-	if err := s.beforeWrite(lib, mount, path.Dir(p)); err != nil {
+	if err := s.beforeWrite(ctx, lib, mount, path.Dir(p)); err != nil {
 		return nil, podcast.Episode{}, err
 	}
 	if err := podcast.RecoverShow(root, path.Dir(p), s.o.Now(), s.o.Fault); err != nil {
@@ -1106,7 +1106,10 @@ func (s *service) consume(ctx context.Context, b *budget, job *jobs.Job, root *o
 		if !ok {
 			return fail("library_not_writable", "The podcast mapping changed.")
 		}
-		if err := s.writable(lib, root.Name()); err != nil {
+		// A check that doesn't stand says nothing about the mapping: the
+		// download goes on into its partial, and the commit waits for one
+		// (beforeWrite).
+		if err := s.writable(lib, root.Name()); err != nil && !errors.Is(err, errMappingUnknown) {
 			return err
 		}
 		if c.ServerHash != s.pairHash() {

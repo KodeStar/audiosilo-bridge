@@ -75,7 +75,7 @@ func (h *Retain) run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (
 	// The server names the old folder until its rescan, so its answers grant
 	// no deletion there until then (RetentionEligible: show_path).
 	show, feed, unlock, err := s.lockShow(ctx, root, lib, mount, show, p.ShowID, func(show string) error {
-		return s.beforeWrite(lib, mount, show)
+		return s.beforeWrite(ctx, lib, mount, show)
 	})
 	if err != nil {
 		return nil, err
@@ -126,7 +126,7 @@ func (h *Retain) run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (
 				return false, err
 			}
 			defer unlock()
-			if err := s.beforeWrite(lib, mount, show); err != nil {
+			if err := s.beforeWrite(ctx, lib, mount, show); err != nil {
 				return false, err
 			}
 			if pairing != s.pairHash() {
@@ -153,7 +153,7 @@ func (h *Retain) run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (
 			if err != nil || !eligible() {
 				return false, nil
 			}
-			if err := s.beforeWrite(lib, mount, show); err != nil {
+			if err := s.beforeWrite(ctx, lib, mount, show); err != nil {
 				return false, err
 			}
 			// Check the elapsed request age again after the last mapping probe.

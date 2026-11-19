@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kodestar/audiosilo-bridge/internal/fsutil"
 	"github.com/kodestar/audiosilo-bridge/internal/jobs"
 	"github.com/kodestar/audiosilo-bridge/internal/link"
 	"github.com/kodestar/audiosilo-bridge/internal/mapping"
@@ -505,6 +506,80 @@ func TestJobWaitsForTheMappingCheck(t *testing.T) {
 		t.Fatal(err)
 	}
 	h.read("Example Show")
+}
+
+// unknownWhile is the harness's Registry answering Status as unknown (no check
+// stands: the server didn't answer one, a look at the folder timed out) while
+// unknown is set: the state a job meets mid-run when a check goes unanswered.
+type unknownWhile struct {
+	*mapping.Registry
+	unknown atomic.Bool
+	asked   atomic.Int32
+}
+
+func (l *unknownWhile) Status(id int64) (link.LibraryStatus, bool) {
+	st, ok := l.Registry.Status(id)
+	if l.unknown.Load() {
+		l.asked.Add(1)
+		return st, false
+	}
+	return st, ok
+}
+
+// A follow that meets a mapping whose check doesn't stand at its write (the
+// server didn't answer the last check) waits for one, and one whose write
+// probe the folder doesn't answer in time (a disk spinning up) probes again:
+// neither says the library isn't writable, so neither fails the job, which
+// goes on once the state stands and the folder answers. Denied: a probe the
+// folder answers with a refusal still fails it library_not_writable.
+func TestFollowWaitsForAMappingThatStands(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	libs := &unknownWhile{Registry: h.libs}
+	var probes atomic.Int32
+	o := h.handler.s.o
+	o.Libraries = libs
+	o.WriteProbe = func(dir string) error {
+		if probes.Add(1) == 1 {
+			// The library was checked when the job started; its state
+			// stops standing at the first write.
+			libs.unknown.Store(true)
+		}
+		if probes.Load() <= 3 {
+			return &fs.PathError{Op: "probe", Path: dir, Err: fsutil.ErrStatTimeout}
+		}
+		return mapping.ProbeWritable(dir)
+	}
+	h.handler = New(o)
+	done := make(chan error, 1)
+	go func() {
+		_, err := h.handler.Run(context.Background(), h.claim(h.http.URL+"/feed", false), jobs.LocalReporter())
+		done <- err
+	}()
+	for libs.asked.Load() < 3 {
+		select {
+		case err := <-done:
+			t.Fatal("ended while its mapping didn't stand:", err)
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	libs.unknown.Store(false)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	h.read("Example Show")
+	if probes.Load() < 4 {
+		t.Fatalf("%d write probes, want the slow ones tried again", probes.Load())
+	}
+
+	h = newHarness(t)
+	o = h.handler.s.o
+	o.WriteProbe = func(string) error { return fs.ErrPermission }
+	h.handler = New(o)
+	res, err := h.handler.Run(context.Background(), h.claim(h.http.URL+"/feed", false), jobs.LocalReporter())
+	if err == nil || fields(t, res)["code"] != "library_not_writable" {
+		t.Fatal(res, err)
+	}
 }
 
 // The rescan a failed job left owed is asked for by the next poll, even when
