@@ -106,14 +106,19 @@ func (s *Scheduler) Resume(ctx context.Context, id int64) error {
 	if err != nil {
 		return err
 	}
+	return s.resumeAsRead(ctx, b)
+}
+
+// resumeAsRead is Resume for book b as the caller read it.
+func (s *Scheduler) resumeAsRead(ctx context.Context, b store.Book) error {
 	if state.Status(b.Status) != state.StatusPaused {
 		return ErrInvalidOp
 	}
 	// Clearing the status clears the error and the typed park_code together.
-	if err := s.db.ClearBookStatusIf(ctx, id, b.Status, b.Error); err != nil {
+	if err := s.db.ClearBookStatusIf(ctx, b.ID, b.Status, b.Error); err != nil {
 		return err
 	}
-	s.publishStored(ctx, id)
+	s.publishStored(ctx, b.ID)
 	s.notify()
 	return nil
 }

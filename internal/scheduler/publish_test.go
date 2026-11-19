@@ -306,3 +306,34 @@ func TestPauseLosingToAPauseIsANoOpAndToACancelAnError(t *testing.T) {
 		t.Fatalf("the Pause wrote over the cancel: %+v", got)
 	}
 }
+
+// A Cancel landing between a Resume's read of a paused book and its write is
+// kept and reported: the Resume clears only the pause it read, and the book's
+// last frame stays the cancel.
+func TestResumeLosingToACancelKeepsTheCancel(t *testing.T) {
+	h := newHarness(t)
+	db := h.openDB(t)
+	ctx := context.Background()
+	s := New(db, h.hub, NewStubExecutor(0, 0), 1, h.workRoot, false)
+
+	b := h.addBook(t, db, "resumed late", "", "")
+	if err := s.Pause(ctx, b.ID); err != nil {
+		t.Fatal(err)
+	}
+	read, err := db.GetBook(ctx, b.ID) // the Resume's read: paused
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Cancel(ctx, b.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.resumeAsRead(ctx, read); !errors.Is(err, store.ErrStatusChanged) {
+		t.Fatalf("a Resume losing to a Cancel = %v, want ErrStatusChanged", err)
+	}
+	if got, _ := db.GetBook(ctx, b.ID); !IsCancelled(got) {
+		t.Fatalf("the Resume cleared the cancel: %+v", got)
+	}
+	if f, ok := lastFrame(t, h.hub, b.ID); !ok || f.Error != cancelledReason {
+		t.Fatalf("last frame %+v (%v), want the cancel", f, ok)
+	}
+}
