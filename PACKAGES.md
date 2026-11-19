@@ -2362,9 +2362,10 @@ internal/
             Read refuses: ReadMoved answers the old name (a folder whose old name
             still exists is a copy and is refused) and Adopt moves the paths of
             the pending journals, the committed trash manifests and then
-            feed.json, so a stop part way through adopts again. EnsureDir never
-            makes the show folder itself, so a job running on after a rename
-            by hand never brings the old name back.
+            feed.json, so a stop part way through adopts again (a manifest it
+            could not rewrite stops it before feed.json). EnsureDir never makes
+            the show folder itself, so a job running on after a rename by hand
+            never brings the old name back.
   podcastjob/ podcast.fetch opts into the interactive reserve (2c-2b), with
             download as its ordinary lane. Subscribe, poll and retain do not opt in.
             podcast.subscribe and podcast.poll (light lane): require the

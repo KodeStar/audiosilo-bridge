@@ -301,8 +301,15 @@ func Adopt(root *os.Root, show, from string, f *Feed, now time.Time) error {
 		return err
 	}
 	for _, e := range committed {
-		if e.IsDir() {
-			_ = move(trash + "/" + e.Name() + "/transaction.json")
+		if !e.IsDir() {
+			continue
+		}
+		// A manifest that is not the show's (or not there) stays; one that
+		// could not be rewritten fails the adoption before feed.json moves, or
+		// it would name the old folder for good and its trash never go.
+		err := move(trash + "/" + e.Name() + "/transaction.json")
+		if err != nil && !errors.Is(err, ErrInvalidFile) && !errors.Is(err, os.ErrNotExist) {
+			return err
 		}
 	}
 	for i := range f.Episodes {

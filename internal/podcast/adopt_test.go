@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -193,6 +194,54 @@ func TestAdoptRefusesAForeignJournal(t *testing.T) {
 	}
 	if _, from, err := ReadMoved(root, "Renamed Show"); err != nil || from != "Fixture Show" {
 		t.Fatal("feed.json changed after a refused adoption", from, err)
+	}
+}
+
+// A trash manifest that names the old folder but could not be rewritten fails
+// the adoption before feed.json moves (it would name the old folder for good,
+// its trash never cleaned); the next adoption finishes once it can be.
+func TestAdoptStopsOnAManifestItCouldNotRewrite(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs a folder its owner cannot write")
+	}
+	now := time.Date(2026, 10, 21, 8, 0, 0, 0, time.UTC)
+	root, j := journalFixture(t)
+	manifest := j
+	manifest.Op, manifest.AudioTemp, manifest.Chapters = "delete", "", nil
+	manifest.Fetch.DeletedAt = now.Format(time.RFC3339)
+	manifest.TrashDir = ".audiosilo-trash/podcasts/" + j.EpisodeID + "-g1-test"
+	if err := EnsureDir(root, "Fixture Show/"+manifest.TrashDir); err != nil {
+		t.Fatal(err)
+	}
+	putJournal(t, root, "Fixture Show/"+manifest.TrashDir+"/transaction.json", manifest)
+	rename(t, root, "Renamed Show")
+	locked := root.Name() + "/Renamed Show/" + manifest.TrashDir
+	if err := os.Chmod(locked, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+	f, from, err := ReadMoved(root, "Renamed Show")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Adopt(root, "Renamed Show", from, f, now); err == nil {
+		t.Fatal("an adoption left a manifest naming the old folder")
+	}
+	if _, from, err := ReadMoved(root, "Renamed Show"); err != nil || from != "Fixture Show" {
+		t.Fatal("feed.json moved before the manifest", from, err)
+	}
+	if err := os.Chmod(locked, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if f, from, err = ReadMoved(root, "Renamed Show"); err != nil {
+		t.Fatal(err)
+	}
+	if err := Adopt(root, "Renamed Show", from, f, now); err != nil {
+		t.Fatal(err)
+	}
+	committed, err := ReadJournal(root, "Renamed Show/"+manifest.TrashDir+"/transaction.json")
+	if err != nil || !strings.HasPrefix(committed.Path, "Renamed Show/") {
+		t.Fatal("trash manifest", committed.Path, err)
 	}
 }
 
