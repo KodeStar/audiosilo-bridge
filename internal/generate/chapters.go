@@ -464,9 +464,10 @@ func (h *Handler) continueChapters(ctx context.Context, eng Engine, r *run, old 
 // (ContinueChapters, ContinueReadalong) that clears its stop, written under the
 // book's publish lock (Engine.ContinueStored, see scheduler.restoreStatus) and
 // published as stored, so its last book.state event is no longer the cancel; the
-// run's share guard is told the book (shareBook) and the engine is then woken for it. Every continue goes through here, so none can skip
-// the lock or the publish. ok is false, with no error, when write found the book
-// not continuable (store.ErrNotContinuable).
+// run's share guard is told the book (shareBook) and the engine is then woken
+// for it. Every continue goes through here, so none can skip the lock, the
+// publish or the share guard. ok is false, with no error, when write found the
+// book not continuable (store.ErrNotContinuable).
 func (h *Handler) takeUp(ctx context.Context, eng Engine, r *run, id int64, write func() error) (ok bool, err error) {
 	if err := eng.ContinueStored(ctx, id, write); errors.Is(err, store.ErrNotContinuable) {
 		return false, nil
