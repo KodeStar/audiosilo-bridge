@@ -2070,6 +2070,9 @@ internal/
             (an HTML proxy page never becomes a message; RetryAfter carries a 429's
             Retry-After, seconds or an HTTP date, clamped at a day; RetryAfterSet
             distinguishes a valid zero wait from a missing or invalid header;
+            Transient is the status rule a retry goes by: a 5xx, a 408 or a 429
+            may be answered differently if asked again, any other status not
+            (jobs' report retry, mapping.BookReadSettled);
             RateLimited picks a 429 out, Backoff.Wait is the shared wait-out rule:
             Retry-After, else First doubling, Tries asks, each wait at most Max;
             the doubling stops at the first wait over Max, so no count of 429s
@@ -2166,7 +2169,12 @@ internal/
             only then probes writability with an exclusive dot-named probe file (a
             crash leaves nothing the server's scan walks). A library with no indexed
             book is NEVER mapped: with nothing to compare, a wrong mount would look
-            right and a later write job would land in the wrong folder. Podcast
+            right and a later write job would land in the wrong folder.
+            BookReadSettled is the rule verify's and generate's book reads retry
+            by: settled is no such book or an answer that isn't a refused token
+            or link's APIError.Transient (asking again won't change it);
+            BookReadBudget (2 min) is how long a read is asked again where it
+            gives up at all (verify's every retry, generate's unusable 2xx). Podcast
             libraries use CheckPodcast instead: a root .audiosilo/library.json
             marker (version, matching library id, random nonce) is read back by
             the server. Symlinked marker folders/files and invalid markers are
@@ -2381,7 +2389,10 @@ internal/
             token) or ended for good (errCancelRequested, errLost).
   verify/   bridge.verify: params {hold_seconds 0-600}; resolves the library from the
             registry, asks the server for the book's files (path "" = the sample
-            book), CompareFiles through the mount, probes the BOOK's folder for
+            book; no answer, a refused token, a 408, a 429 or a 5xx asked again
+            with backoff for up to 2 min, the last ask at its end, any other 4xx
+            failing at once: mapping.BookReadSettled, generate's fetchBook rule
+            too; each retry a warning in the log), CompareFiles through the mount, probes the BOOK's folder for
             writing (spike 3: a root probe passed while a 0555 book folder refused),
             then holds, reporting each second. A mismatch is a failure WITH a result.
             Result {library_id, mount_path, path, files[{path,size,expected_size,ok}],
@@ -3467,9 +3478,13 @@ internal/
             registry; waitMapped needs its check mapped AND writable at the mount the
             Bridge uses NOW (a new job fails otherwise; a resumed one parks
             library_not_writable and waits, its engine book going on); fetchBook waits
-            out an answer that may change (unreachable, 5xx) with a backoff to 1 min
-            and fails only on a definite one (no_book, another 4xx), so a restart
-            while the server is down doesn't end a long run; CompareFiles through the
+            out an answer that may change (unreachable, a refused token, 408, 429,
+            5xx: mapping.BookReadSettled) with a backoff to 1 min and fails only
+            on a definite one (no_book, another 4xx), so a restart
+            while the server is down doesn't end a long run; the one wait with
+            an end is a 2xx it can't use (link.ErrUnusableAnswer, a proxy's
+            sign-in page): mapping.BookReadBudget of nothing else, the last ask
+            at its end, fails the job saying to check the address; CompareFiles through the
             mount must match; locate SafeJoins the path (a folder book, or a
             single-file book whose attachments get a "<stem>." prefix); waitWritable
             probes the BOOK's own folder (spike 3), parking book_not_writable and

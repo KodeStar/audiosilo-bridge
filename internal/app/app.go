@@ -210,7 +210,7 @@ func New(ctx context.Context, opts Options) (*Bridge, string, error) {
 			return cl
 		}
 		return nil
-	})
+	}, opts.Logger)
 	b.gen = generate.New(generate.Options{DB: db, Engine: b.engine.generateEngine, Describer: b.engine.describer,
 		Sharer:    b.engine.sharer,
 		Libraries: b.libs, Mount: b.mount,

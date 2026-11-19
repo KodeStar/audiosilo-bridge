@@ -18,7 +18,6 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
-	"net/http"
 	"reflect"
 	"sort"
 	"strings"
@@ -1625,11 +1624,7 @@ func (p *Reporter) reached() {
 // way however soon it goes.
 func unreachable(err error) bool {
 	var refused *link.APIError
-	if !errors.As(err, &refused) {
-		return true
-	}
-	return refused.Status >= http.StatusInternalServerError ||
-		refused.Status == http.StatusRequestTimeout || refused.Status == http.StatusTooManyRequests
+	return !errors.As(err, &refused) || refused.Transient()
 }
 
 // answer reads the server's answer to an update: the job follows a moved path,

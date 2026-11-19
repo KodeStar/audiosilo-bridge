@@ -45,6 +45,24 @@ func TestBackoffWait(t *testing.T) {
 	}
 }
 
+func TestAPIErrorTransient(t *testing.T) {
+	for status, want := range map[int]bool{
+		http.StatusBadRequest:          false,
+		http.StatusForbidden:           false,
+		http.StatusNotFound:            false,
+		http.StatusConflict:            false,
+		http.StatusRequestTimeout:      true,
+		http.StatusTooManyRequests:     true,
+		http.StatusInternalServerError: true,
+		http.StatusBadGateway:          true,
+		http.StatusServiceUnavailable:  true,
+	} {
+		if got := (&APIError{Status: status}).Transient(); got != want {
+			t.Errorf("%d: Transient = %v, want %v", status, got, want)
+		}
+	}
+}
+
 func TestRateLimited(t *testing.T) {
 	busy := &APIError{Status: http.StatusTooManyRequests}
 	if e, ok := RateLimited(fmt.Errorf("wrapped: %w", busy)); !ok || e != busy {

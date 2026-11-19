@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"time"
@@ -31,16 +32,36 @@ type Libraries interface {
 	Library(id int64) (link.Library, bool)
 }
 
+// The book read's retry: an answer that may change (mapping.BookReadSettled's:
+// no answer, a refused token, a 408, a 429, a 5xx) is asked again after
+// bookRetryFirst, doubling up to bookRetryMax, until bookRetryFor has passed
+// since the first ask (the last ask at its end), so a server restarting under a
+// verify doesn't fail it, and one that stays down does in a time an admin
+// waits for.
+const (
+	bookRetryFirst = time.Second
+	bookRetryMax   = 15 * time.Second
+	bookRetryFor   = mapping.BookReadBudget
+)
+
 // Handler runs bridge.verify.
 type Handler struct {
 	libs  Libraries
 	mount mapping.MountFunc
 	books func() mapping.BookSource
+	// retryFirst and retryFor are the book read's first wait and budget
+	// (bookRetryFirst, bookRetryFor; shorter in tests).
+	retryFirst, retryFor time.Duration
+	log                  *slog.Logger
 }
 
-// New returns the handler. books returns the server link (nil while unpaired).
-func New(libs Libraries, mount mapping.MountFunc, books func() mapping.BookSource) *Handler {
-	return &Handler{libs: libs, mount: mount, books: books}
+// New returns the handler. books returns the server link (nil while unpaired);
+// log takes the book read's retries (nil: the default logger).
+func New(libs Libraries, mount mapping.MountFunc, books func() mapping.BookSource, log *slog.Logger) *Handler {
+	if log == nil {
+		log = slog.Default()
+	}
+	return &Handler{libs: libs, mount: mount, books: books, retryFirst: bookRetryFirst, retryFor: bookRetryFor, log: log}
 }
 
 // Kind is bridge.verify.
@@ -95,8 +116,7 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 	if job.Path != nil {
 		path = *job.Path
 	}
-	rep.Progress(jobs.Progress{Step: "lookup", Message: "Asking the server for the book's files"})
-	book, err := src.Book(ctx, lib.ID, path)
+	book, err := h.fetchBook(ctx, job.ID, rep, src, lib.ID, path)
 	if err != nil {
 		return nil, fmt.Errorf("could not get the book's files from the server: %w", err)
 	}
@@ -132,6 +152,32 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 		return res, errors.New("the Bridge's copy doesn't match the server's: " + problem)
 	}
 	return res, nil
+}
+
+// fetchBook asks the server for the book's files, asking again with backoff
+// (within retryFor) while the answer may change (mapping.BookReadSettled,
+// generate's fetchBook's rule). A definite answer fails at once, and so does
+// the last transient one once the budget is spent (the wait before the last
+// ask cut to what is left of it, so the server is asked at its end). Each
+// retry is logged: the job's message is the same every round.
+func (h *Handler) fetchBook(ctx context.Context, jobID int64, rep *jobs.Reporter, src mapping.BookSource, libraryID int64, path string) (*link.Book, error) {
+	deadline := time.Now().Add(h.retryFor)
+	wait := h.retryFirst
+	for {
+		rep.Progress(jobs.Progress{Step: "lookup", Message: "Asking the server for the book's files"})
+		book, err := src.Book(ctx, libraryID, path)
+		left := time.Until(deadline)
+		if err == nil || mapping.BookReadSettled(err) || left <= 0 {
+			return book, err
+		}
+		h.log.Warn("verify: asking the server for the book's files failed; trying again", "job", jobID, "err", err)
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(min(wait, left)):
+		}
+		wait = min(wait*2, bookRetryMax)
+	}
 }
 
 // bookFolder is the folder a book's files are in through the mount: the

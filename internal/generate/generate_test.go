@@ -52,6 +52,10 @@ type fakeServer struct {
 	// atStep runs (under the lock) on each report of a job, with its step,
 	// before it is answered: the server changing its answer at a given step.
 	atStep map[int64]func(f *fakeServer, step string)
+	// pages is how many more book reads get a proxy's sign-in page, a 200 that
+	// isn't the server's JSON (negative: every one); bookAsks counts the reads.
+	pages    int
+	bookAsks int
 }
 
 func newFakeServer() *fakeServer {
@@ -102,6 +106,15 @@ func (f *fakeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		_ = json.NewEncoder(w).Encode(j)
 	case r.URL.Path == "/api/v1/bridge/libraries/1/book":
+		f.bookAsks++
+		if f.pages != 0 {
+			if f.pages > 0 {
+				f.pages--
+			}
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = io.WriteString(w, "<html><body>Sign in</body></html>")
+			return
+		}
 		b, ok := f.books[r.URL.Query().Get("path")]
 		if !ok {
 			w.WriteHeader(http.StatusNotFound)
@@ -690,6 +703,51 @@ func TestGenerateLibraryNotWritable(t *testing.T) {
 	hr.waitFor("failed", func() bool { s, _ := hr.srv.final(27); return s == link.StateFailed })
 	if _, final := hr.srv.final(27); final.Error == nil || !strings.Contains(*final.Error, "read-only") {
 		t.Fatalf("error = %v", final.Error)
+	}
+}
+
+// A book read answered with a 2xx that isn't the server's (a proxy's sign-in
+// page at its address) is asked again, and the job goes on once the server
+// answers; one that lasts past the budget fails the job, saying what to check,
+// where it used to be asked for ever.
+func TestGenerateUnusableBookAnswer(t *testing.T) {
+	t.Parallel()
+	hr := newHarness(t)
+	hr.srv.set(func() { hr.srv.pages = 2 })
+	hr.srv.add(97, "Author/Book", `{}`)
+	stop := hr.runner(hr.h)
+	hr.waitFor("the engine's book after two sign-in pages", func() bool {
+		_, err := hr.db.GetGenerateBook(context.Background(), 97)
+		return err == nil
+	})
+	stop()
+	if _, final := hr.srv.final(97); final.Error != nil && *final.Error != "" {
+		t.Fatalf("two sign-in pages failed the job: %s", *final.Error)
+	}
+
+	hr = newHarness(t)
+	hr.h.unusableFor = 60 * time.Millisecond
+	hr.srv.set(func() { hr.srv.pages = -1 })
+	hr.srv.add(99, "Author/Book", `{}`)
+	start := time.Now()
+	stop = hr.runner(hr.h)
+	defer stop()
+	hr.waitFor("failed", func() bool { s, _ := hr.srv.final(99); return s == link.StateFailed })
+	// The last ask is at the budget's end, not a backoff step short of it.
+	if took := time.Since(start); took < hr.h.unusableFor {
+		t.Fatalf("gave up after %v, before the %v budget", took, hr.h.unusableFor)
+	}
+	if _, final := hr.srv.final(99); final.Error == nil || !strings.Contains(*final.Error, "couldn't use") ||
+		!strings.Contains(*final.Error, "sign-in page") {
+		t.Fatalf("error = %v", final.Error)
+	}
+	var asks int
+	hr.srv.set(func() { asks = hr.srv.bookAsks })
+	if asks < 2 {
+		t.Fatalf("a lasting sign-in page was asked %d times, want retries", asks)
+	}
+	if _, err := hr.db.GetGenerateBook(context.Background(), 99); !errors.Is(err, store.ErrNotFound) {
+		t.Fatal("the engine got a book the server never answered for")
 	}
 }
 
