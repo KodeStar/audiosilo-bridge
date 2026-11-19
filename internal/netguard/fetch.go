@@ -133,7 +133,7 @@ func (c *Client) once(ctx context.Context, in Request) (*Response, error) {
 		return out, nil
 	}
 	if resp.StatusCode != 200 {
-		return nil, &Error{Code: StatusCode(resp.StatusCode), Message: "The feed returned HTTP " + strconv.Itoa(resp.StatusCode) + ".", RetryAfterSeconds: retryAfter(resp.Header.Get("Retry-After"), time.Now())}
+		return nil, StatusError("feed", resp.StatusCode, retryAfter(resp.Header.Get("Retry-After"), time.Now()))
 	}
 	if resp.ContentLength > in.MaxBytes {
 		return nil, &Error{Code: "too_large", Message: "The response exceeds the size limit."}
@@ -172,13 +172,20 @@ func (c *Client) once(ctx context.Context, in Request) (*Response, error) {
 	return out, nil
 }
 
-// StatusCode is a host's HTTP status as a failure code: gone for a 410 (the
+// statusCode is a host's HTTP status as a failure code: gone for a 410 (the
 // server words it as no longer available), else http_<status>.
-func StatusCode(status int) string {
+func statusCode(status int) string {
 	if status == 410 {
 		return "gone"
 	}
 	return "http_" + strconv.Itoa(status)
+}
+
+// StatusError is a host's unwanted HTTP answer as the failure a guarded fetch
+// reports: statusCode's code, a message naming what was asked for (the feed,
+// the episode; never its URL) and the Retry-After the host sent, in seconds.
+func StatusError(what string, status, retryAfterSeconds int) *Error {
+	return &Error{Code: statusCode(status), Message: "The " + what + " returned HTTP " + strconv.Itoa(status) + ".", RetryAfterSeconds: retryAfterSeconds}
 }
 
 // stripRedirectCredentials keeps source credentials within their original origin.

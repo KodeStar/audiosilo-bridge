@@ -127,7 +127,7 @@ func TestPublicationFaultRecovery(t *testing.T) {
 		t.Run(boundary, func(t *testing.T) {
 			root, j := journalFixture(t)
 			crash := errors.New("injected stop")
-			err := Publish(root, j, now, func(at string) error {
+			err := Publish(root, nil, j, now, func(at string) error {
 				if at == boundary {
 					return crash
 				}
@@ -155,7 +155,7 @@ func TestPublicationFaultRecovery(t *testing.T) {
 			j.Chapters = nil
 			j.Fetch.DeletedAt = now.Add(time.Hour).Format(time.RFC3339)
 			j.TrashDir = ".audiosilo-trash/podcasts/" + j.EpisodeID + "-g2-test"
-			err = Publish(root, j, now, func(at string) error {
+			err = Publish(root, nil, j, now, func(at string) error {
 				if at == boundary {
 					return crash
 				}
@@ -216,7 +216,7 @@ func TestPublicationRefusesForeignAndSymlinkPaths(t *testing.T) {
 			case "identity":
 				j.ShowID = "1111111111111111"
 			}
-			if err := Publish(root, j, time.Now(), nil); err == nil {
+			if err := Publish(root, nil, j, time.Now(), nil); err == nil {
 				t.Fatal("unsafe publication allowed")
 			}
 		})
@@ -266,7 +266,7 @@ func TestInvalidFetchKeepsEpisodeAndChapterTextBounds(t *testing.T) {
 func TestRecoveryAfterExclusiveLinkBeforeUnlink(t *testing.T) {
 	root, j := journalFixture(t)
 	crash := errors.New("interrupted after link")
-	if err := Publish(root, j, time.Now(), func(at string) error {
+	if err := Publish(root, nil, j, time.Now(), func(at string) error {
 		if at == "linked" {
 			return crash
 		}

@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"hash"
 	"io"
 	"os"
@@ -243,7 +242,7 @@ func (h *Fetch) run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (_
 		if err := podcast.RecoverShow(root, path.Dir(e.Path), s.o.Now(), s.o.Fault); err != nil {
 			return err
 		}
-		_, latest, err := s.readEpisode(root, e.Path, params)
+		feed, latest, err := s.readEpisode(root, e.Path, params)
 		if err != nil {
 			return err
 		}
@@ -257,7 +256,7 @@ func (h *Fetch) run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (_
 		// Once a journal exists recovery owns the candidate, including on a failed
 		// write: the exit's clear drops the record but leaves the file
 		// (dropPartial), for RecoverShow to install.
-		err = podcast.Publish(root, j, s.o.Now(), s.o.Fault)
+		err = podcast.Publish(root, feed, j, s.o.Now(), s.o.Fault)
 		if _, e := root.Lstat(podcast.AttachmentPath(j.Path, ".publish.json")); e == nil {
 			c.Temp = ""
 		}
@@ -440,7 +439,7 @@ func (s *service) download(ctx context.Context, b *budget, job jobs.Job, root *o
 			var fetch podcast.Fetch
 			switch {
 			case response.Status != 200 && response.Status != 206 && (response.Status != 416 || c.Offset == 0):
-				err = &netguard.Error{Code: netguard.StatusCode(response.Status), Message: fmt.Sprintf("The episode returned HTTP %d.", response.Status), RetryAfterSeconds: response.RetryAfterSeconds}
+				err = netguard.StatusError("episode", response.Status, response.RetryAfterSeconds)
 			case action == "fresh_get":
 				_ = response.Body.Close()
 				s.clearCheckpoint(job, root, c)

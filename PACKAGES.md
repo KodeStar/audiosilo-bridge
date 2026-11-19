@@ -1487,7 +1487,9 @@ internal/
             one tolerance of "the same place" (audiblesync's echoMs, the re-assert's
             once-per-place rule). 0007 adds podcast_shows, a credential-free cache keyed by
             (server_id, show_id), indexed by server/library/feed hash. An empty
-            library cache is rebuilt from feed.json before subscription dedupe.
+            library cache is rebuilt from feed.json before subscription dedupe;
+            a follow reads the folders its rows name for the feed first, every
+            show folder only on a miss, and PodcastShowByID finds a renamed show.
             0008 adds podcast_artwork_state keyed by server/library/show, storing
             only source hash, failure count and next retry time (1 h to 24 h).
             0001 is sidecars' 13 migrations squashed at the import (the
@@ -2296,8 +2298,9 @@ internal/
             credential stripping shared with buffered feed/artwork GETs, including
             later hops in a redirect chain. The handler owns the combined
             three-attempt retry/resume budget; ResumeAction validates exact strong identity.
-            StatusCode is a host's status as a code, the feed's and the episode's
-            alike (gone for 410, else http_<status>).
+            StatusError maps a host's HTTP answer to the failure, the feed's and
+            the episode's alike (bridge#26): gone for 410, else http_<status>, a
+            message naming what was asked for and the Retry-After seconds.
             Phase 2c-1 feed/artwork client: explicit DNS resolution and a socket
             Control check of the exact IP, public addresses or configured CIDRs
             only (including NAT64 embedded IPv4 checks), no environment proxy.
@@ -2352,12 +2355,26 @@ internal/
             manifests identify trash for cleanup after rescan or after 24 h.
             Invalid Fetch keeps its episode and grants no file authority. Shared
             phase2c2 fixtures are copied byte-for-byte, checked by manifest hashes.
+            Publish takes the feed its caller read under the show lock and
+            complete writes the new pin without reading feed.json again, so a
+            fetch parses it three times, not six (bridge#13). A show folder
+            renamed by hand still names its episodes under the old folder, which
+            Read refuses: ReadMoved answers the old name (a folder whose old name
+            still exists is a copy and is refused) and Adopt moves the paths of
+            the pending journals, the committed trash manifests and then
+            feed.json, so a stop part way through adopts again.
   podcastjob/ podcast.fetch opts into the interactive reserve (2c-2b), with
             download as its ordinary lane. Subscribe, poll and retain do not opt in.
             podcast.subscribe and podcast.poll (light lane): require the
             heartbeat's podcasts kind and the checked writable mount at each
             write. Per-library subscribe and per-show write locks, hash dedupe,
             cache rebuild, artwork sniffing, permanent moves and targeted rescan.
+            A show folder renamed by hand (bridge#13) is taken in under the show
+            lock when its read refuses (readShow, adopt: episodes, downloads,
+            artwork, secret and cache row kept, the new folder rescanned); a poll
+            whose folder is gone finds the show by its id (relocate: the cache
+            row, then every folder) and a follow joins it rather than starting a
+            new show. The server still names the old folder until its own scan.
             Subscribe implements ParamSealer and Abandoner: job credentials are
             sealed before persistence, resumed from the vault, resealed under
             the show id on success, and removed at every terminal job end.
@@ -2372,7 +2389,10 @@ internal/
             reclaimed jobs. Retain hashes local candidates and fails closed on an
             unavailable, stale or protected aggregate. Snapshot freshness lasts five
             seconds from request dispatch on the Bridge's monotonic clock;
-            checked_at stays on the wire and does not time freshness. Old cleanup
+            checked_at does not time freshness, but it must lie within two minutes
+            of the Bridge's clock (replyWindow, bridge#13): a reply held or
+            replayed on its way grants nothing, and a Bridge whose clock is
+            further off deletes nothing (a warning in the log). Old cleanup
             uses only owned checkpoint/trash records, checked mappings and no live matching job;
             then sweepPartials (bridge#87; also after a mapping check, SweepPartials, at most
             once an hour, sweepEvery) removes a show's unrecorded partials: regular files

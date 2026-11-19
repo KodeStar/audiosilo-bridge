@@ -184,7 +184,7 @@ func TestOldCommittedTrashCleanupPreservesTombstone(t *testing.T) {
 	j.Fetch.FetchedAt = s.o.Now().Add(-48 * time.Hour).Format(time.RFC3339)
 	j.Chapters.GeneratedAt = j.Fetch.FetchedAt
 	root.WriteFile("Fixture Show/"+j.AudioTemp, data(t, "chap-v24-reverse.mp3"), 0600)
-	if err := podcast.Publish(root, j, s.o.Now(), nil); err != nil {
+	if err := podcast.Publish(root, nil, j, s.o.Now(), nil); err != nil {
 		t.Fatal(err)
 	}
 	j.Op = "delete"
@@ -192,7 +192,7 @@ func TestOldCommittedTrashCleanupPreservesTombstone(t *testing.T) {
 	j.Chapters = nil
 	j.Fetch.DeletedAt = s.o.Now().Add(-25 * time.Hour).Format(time.RFC3339)
 	j.TrashDir = ".audiosilo-trash/podcasts/" + j.EpisodeID + "-g2-owned"
-	if err := podcast.Publish(root, j, s.o.Now(), nil); err != nil {
+	if err := podcast.Publish(root, nil, j, s.o.Now(), nil); err != nil {
 		t.Fatal(err)
 	}
 	show, lib := "Fixture Show", int64(3)

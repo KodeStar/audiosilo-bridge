@@ -26,7 +26,7 @@ func TestInstallFallsBackToNoReplaceRenameWithoutHardLinks(t *testing.T) {
 			withLink(t, func(_ *os.Root, oldname, newname string) error {
 				return &os.LinkError{Op: "link", Old: oldname, New: newname, Err: unsupported}
 			})
-			if err := Publish(root, j, time.Now(), nil); err != nil {
+			if err := Publish(root, nil, j, time.Now(), nil); err != nil {
 				t.Fatal(err)
 			}
 			if !Matches(root, j.Path, &j.Fetch) {
@@ -55,7 +55,7 @@ func TestInstallFallbackRefusesAnExistingTarget(t *testing.T) {
 		}
 		return &os.LinkError{Op: "link", Old: oldname, New: newname, Err: fsutil.UnsupportedLinkErrors[0]}
 	})
-	if err := Publish(root, j, time.Now(), nil); !errors.Is(err, ErrInvalidFile) {
+	if err := Publish(root, nil, j, time.Now(), nil); !errors.Is(err, ErrInvalidFile) {
 		t.Fatal("fallback replaced or failed oddly:", err)
 	}
 	if got, err := root.ReadFile(j.Path); err != nil || !bytes.Equal(got, foreign) {
@@ -83,7 +83,7 @@ func TestRecoveryAfterFallbackRenameBeforeFeedCommit(t *testing.T) {
 		return &os.LinkError{Op: "link", Old: oldname, New: newname, Err: fsutil.UnsupportedLinkErrors[0]}
 	})
 	crash := errors.New("interrupted after rename")
-	if err := Publish(root, j, time.Now(), func(at string) error {
+	if err := Publish(root, nil, j, time.Now(), func(at string) error {
 		if at == "linked" {
 			return crash
 		}
@@ -118,7 +118,7 @@ func TestInstallDoesNotFallBackOnOtherLinkErrors(t *testing.T) {
 	root, j := journalFixture(t)
 	refused := &os.LinkError{Op: "link", Err: syscall.EEXIST}
 	withLink(t, func(*os.Root, string, string) error { return refused })
-	if err := Publish(root, j, time.Now(), nil); !errors.Is(err, syscall.EEXIST) {
+	if err := Publish(root, nil, j, time.Now(), nil); !errors.Is(err, syscall.EEXIST) {
 		t.Fatal(err)
 	}
 	if _, err := root.Lstat(j.Path); !errors.Is(err, os.ErrNotExist) {

@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"os"
 	"slices"
@@ -306,10 +307,11 @@ func (h *Subscribe) run(parent context.Context, job jobs.Job, rep *jobs.Reporter
 	if err != nil {
 		return nil, fail("write_failed", "The podcast library could not be read.")
 	}
-	if err := s.rebuild(ctx, root, lib, entries); err != nil {
+	rows, err := s.cache(ctx, root, lib, entries)
+	if err != nil {
 		return nil, fail("write_failed", "The podcast cache could not be rebuilt.")
 	}
-	show, f, err := s.find(root, entries, p, feedURL)
+	show, f, err := s.find(root, entries, rows, p, feedURL)
 	if err != nil {
 		return nil, err
 	}
@@ -388,12 +390,8 @@ func (h *Subscribe) run(parent context.Context, job jobs.Job, rep *jobs.Reporter
 	defer unlockShow()
 	// A poll may have updated it while subscribe was fetching.
 	if !created {
-		if err := podcast.RecoverShow(root, show, s.o.Now(), s.o.Fault); err != nil {
+		if f, err = s.readShow(ctx, root, lib, mount, show); err != nil {
 			return nil, err
-		}
-		f, err = podcast.Read(root, show)
-		if err != nil {
-			return nil, fail("write_failed", "The saved podcast feed could not be read.")
 		}
 	}
 	if p.ShowID != "" && f.ShowID != p.ShowID {
@@ -427,14 +425,15 @@ func (h *Poll) run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (an
 	if job.Path == nil || !podcast.ValidShow(*job.Path) {
 		return nil, fail("write_failed", "The podcast show path is invalid.")
 	}
-	show := *job.Path
-	unlock, err := s.acquire(wait, s.showKey(mount, show))
-	if err != nil {
-		return nil, err
+	var params struct {
+		ShowID       string `json:"show_id"`
+		ETag         string `json:"etag"`
+		LastModified string `json:"last_modified"`
 	}
-	defer unlock()
-	ctx, cancel := context.WithTimeout(parent, ceiling)
-	defer cancel()
+	if len(job.Params) > 0 && json.Unmarshal(job.Params, &params) != nil || len(params.ETag) > 512 || len(params.LastModified) > 512 {
+		return nil, fail("write_failed", "The feed check parameters are invalid.")
+	}
+	show := *job.Path
 	if _, err := mapping.SafeJoin(mount, show); err != nil {
 		return nil, fail("write_failed", "The show path is invalid.")
 	}
@@ -443,24 +442,27 @@ func (h *Poll) run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (an
 		return nil, fail("library_not_writable", "The podcast library could not be opened.")
 	}
 	defer func() { _ = root.Close() }()
-	if err := podcast.RecoverShow(root, show, s.o.Now(), s.o.Fault); err != nil {
+	// A show folder renamed by hand is polled where it is now: the server still
+	// names the old folder until the rescan below indexes the new one.
+	if _, err := root.Lstat(show); errors.Is(err, os.ErrNotExist) && podcast.ValidID(params.ShowID) {
+		if moved := s.relocate(wait, root, lib, params.ShowID); moved != "" {
+			show = moved
+		}
+	}
+	unlock, err := s.acquire(wait, s.showKey(mount, show))
+	if err != nil {
 		return nil, err
 	}
-	f, err := podcast.Read(root, show)
+	defer unlock()
+	ctx, cancel := context.WithTimeout(parent, ceiling)
+	defer cancel()
+	f, err := s.readShow(ctx, root, lib, mount, show)
 	if err != nil {
-		return nil, fail("write_failed", "The saved podcast feed could not be read.")
+		return nil, err
 	}
 	feedURL, err := s.feedURL(f.FeedURL, f.Private, secrets.PodcastFeedName(f.ShowID), "The saved feed URL is invalid.")
 	if err != nil {
 		return nil, err
-	}
-	var params struct {
-		ShowID       string `json:"show_id"`
-		ETag         string `json:"etag"`
-		LastModified string `json:"last_modified"`
-	}
-	if len(job.Params) > 0 && json.Unmarshal(job.Params, &params) != nil || len(params.ETag) > 512 || len(params.LastModified) > 512 {
-		return nil, fail("write_failed", "The feed check parameters are invalid.")
 	}
 	if params.ShowID != "" && params.ShowID != f.ShowID {
 		return nil, fail("identity_changed", "The podcast show identity changed.")
@@ -477,7 +479,7 @@ func (h *Poll) run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (an
 		if err != nil {
 			return nil, err
 		}
-		if err := s.rebuild(ctx, root, lib, entries); err != nil {
+		if _, err := s.cache(ctx, root, lib, entries); err != nil {
 			return nil, err
 		}
 		rep.Progress(jobs.Progress{Step: "parsing", Message: "Reading the podcast feed"})
@@ -632,43 +634,158 @@ func (s *service) merge(root *os.Root, f *podcast.Feed, p *podcast.Parsed, show 
 	}
 	return podcast.Merge(f, p, show, s.o.Now(), names...)
 }
-func (s *service) rebuild(ctx context.Context, root *os.Root, lib link.Library, entries []os.DirEntry) error {
+
+// cache is the library's show cache rows, rebuilt from every show folder's
+// feed.json when the library has none.
+func (s *service) cache(ctx context.Context, root *os.Root, lib link.Library, entries []os.DirEntry) ([]store.PodcastShow, error) {
 	shows, err := s.o.DB.PodcastShows(ctx, s.o.ServerID(), lib.ID)
 	if err != nil || len(shows) > 0 {
-		return err
+		return shows, err
 	}
 	for _, e := range entries {
 		if !e.IsDir() || !podcast.ValidShow(e.Name()) {
 			continue
 		}
-		f, err := podcast.Read(root, e.Name())
+		f, _, err := podcast.ReadMoved(root, e.Name())
 		if err != nil {
 			continue
 		}
-		if err := s.o.DB.UpsertPodcastShow(ctx, s.showRow(lib, e.Name(), f)); err != nil {
-			return err
+		row := s.showRow(lib, e.Name(), f)
+		if err := s.o.DB.UpsertPodcastShow(ctx, row); err != nil {
+			return nil, err
+		}
+		shows = append(shows, row)
+	}
+	return shows, nil
+}
+
+// find is the show folder a follow of feedURL joins, with its feed, or "" for
+// a new show. The folders the cache rows name for the feed (or for the named
+// show's id) are read first, every other show folder only when none of those
+// holds it (a show copied in by hand, a feed URL the show moved from). A
+// folder renamed by hand counts (ReadMoved), so it is never followed again as
+// a new show. A follow naming its show (p.ShowPath: a private feed's secret
+// entered again) joins that folder, or the one holding its id when that folder
+// was renamed.
+func (s *service) find(root *os.Root, entries []os.DirEntry, rows []store.PodcastShow, p subscribeParams, feedURL string) (string, *podcast.Feed, error) {
+	hash := podcast.FeedURLHash(feedURL)
+	named := false
+	if p.ShowPath != "" {
+		_, err := root.Lstat(p.ShowPath)
+		named = !errors.Is(err, os.ErrNotExist)
+	}
+	match := func(name string) *podcast.Feed {
+		if !podcast.ValidShow(name) || named && name != p.ShowPath {
+			return nil
+		}
+		f, _, err := podcast.ReadMoved(root, name)
+		if err != nil || f.FeedURLSHA256 != hash && !slices.Contains(f.PreviousFeedURLSHA256, hash) {
+			return nil
+		}
+		if p.ShowPath != "" && !named && (p.ShowID == "" || f.ShowID != p.ShowID) {
+			return nil
+		}
+		return f
+	}
+	tried := map[string]bool{}
+	for _, r := range rows {
+		if r.FeedURLSHA256 == hash || p.ShowID != "" && r.ShowID == p.ShowID {
+			tried[r.ShowPath] = true
+			if f := match(r.ShowPath); f != nil {
+				return r.ShowPath, f, nil
+			}
 		}
 	}
-	return nil
-}
-func (s *service) find(root *os.Root, entries []os.DirEntry, p subscribeParams, feedURL string) (string, *podcast.Feed, error) {
-	hash := podcast.FeedURLHash(feedURL)
 	for _, e := range entries {
-		if !e.IsDir() || !podcast.ValidShow(e.Name()) || p.ShowPath != "" && p.ShowPath != e.Name() {
-			continue
-		}
-		f, err := podcast.Read(root, e.Name())
-		if err != nil {
-			continue
-		}
-		if f.FeedURLSHA256 == hash || slices.Contains(f.PreviousFeedURLSHA256, hash) {
-			return e.Name(), f, nil
+		if e.IsDir() && !tried[e.Name()] {
+			if f := match(e.Name()); f != nil {
+				return e.Name(), f, nil
+			}
 		}
 	}
 	if p.ShowPath != "" {
 		return "", nil, fail("feed_secret_missing", "The show no longer matches this private feed. Follow the feed again.")
 	}
 	return "", nil, nil
+}
+
+// relocate is the folder holding show id, for a job whose show folder is gone:
+// one renamed by hand. The folder its cache row names is read first, every
+// show folder only when that one does not hold it. "" when none does.
+func (s *service) relocate(ctx context.Context, root *os.Root, lib link.Library, id string) string {
+	holds := func(name string) bool {
+		f, _, err := podcast.ReadMoved(root, name)
+		return err == nil && f.ShowID == id
+	}
+	row, ok, err := s.o.DB.PodcastShowByID(ctx, s.o.ServerID(), id)
+	if err == nil && ok && row.LibraryID == lib.ID && holds(row.ShowPath) {
+		return row.ShowPath
+	}
+	entries, err := readDir(root)
+	if err != nil {
+		return ""
+	}
+	for _, e := range entries {
+		if e.IsDir() && podcast.ValidShow(e.Name()) && e.Name() != row.ShowPath && holds(e.Name()) {
+			return e.Name()
+		}
+	}
+	return ""
+}
+
+// readShow recovers show's pending journals and reads its feed.json, under
+// the show's lock. A folder renamed by hand, whose feed.json and journals
+// still name the old folder, is adopted first (adopt). Only a show either
+// refuses pays for that: the common read parses feed.json once.
+func (s *service) readShow(ctx context.Context, root *os.Root, lib link.Library, mount, show string) (*podcast.Feed, error) {
+	read := func() (*podcast.Feed, error) {
+		if err := podcast.RecoverShow(root, show, s.o.Now(), s.o.Fault); err != nil {
+			return nil, err
+		}
+		return podcast.Read(root, show)
+	}
+	f, err := read()
+	if errors.Is(err, podcast.ErrInvalidFile) {
+		adopted, aerr := s.adopt(ctx, root, lib, mount, show)
+		if aerr != nil {
+			return nil, aerr
+		}
+		if adopted {
+			f, err = read()
+		}
+	}
+	if err != nil {
+		var failure *netguard.Error
+		if errors.As(err, &failure) {
+			return nil, err
+		}
+		return nil, fail("write_failed", "The saved podcast feed could not be read.")
+	}
+	return f, nil
+}
+
+// adopt takes in show when it is a folder renamed by hand (podcast.Adopt):
+// the episodes, their downloads and the show's state stay, the cache row
+// follows, and the server is asked to index the folder again. It reports
+// whether show was such a folder.
+func (s *service) adopt(ctx context.Context, root *os.Root, lib link.Library, mount, show string) (bool, error) {
+	f, from, err := podcast.ReadMoved(root, show)
+	if err != nil || from == "" {
+		return false, nil
+	}
+	if err := s.beforeWrite(lib, mount, show); err != nil {
+		return false, err
+	}
+	if err := podcast.Adopt(root, show, from, f, s.o.Now()); err != nil {
+		slog.Warn("podcasts: a show folder renamed by hand could not be taken in", "library", lib.ID, "show", show, "err", err)
+		return false, nil
+	}
+	s.setIndexed(lib.ID, show, false)
+	if err := s.o.DB.UpsertPodcastShow(ctx, s.showRow(lib, show, f)); err != nil {
+		slog.Warn("podcasts: the show cache could not record a renamed show folder", "library", lib.ID, "err", err)
+	}
+	slog.Info("podcasts: took in a show folder renamed by hand", "library", lib.ID, "show", show, "from", from)
+	return true, nil
 }
 func (s *service) artwork(ctx context.Context, root *os.Root, lib link.Library, mount, show string, f *podcast.Feed, imageURL string) {
 	if imageURL == "" {

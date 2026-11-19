@@ -125,7 +125,9 @@ func episodeFor(f *Feed, j Journal) *Episode {
 }
 
 // Publish requires the caller's show lock and checked mapping. It never replaces audio.
-func Publish(root *os.Root, j Journal, now time.Time, fault Boundary) error {
+// f is the show's feed.json as the caller read it under that lock (nil reads
+// it), so the feed is parsed once per publication; Publish may change f.
+func Publish(root *os.Root, f *Feed, j Journal, now time.Time, fault Boundary) error {
 	show := path.Dir(j.Path)
 	if !journalValid(&j, show) {
 		return ErrInvalidFile
@@ -140,9 +142,11 @@ func Publish(root *os.Root, j Journal, now time.Time, fault Boundary) error {
 	if err := regularOrAbsent(root, AttachmentPath(j.Path, ".chapters.json")); err != nil {
 		return err
 	}
-	f, err := Read(root, show)
-	if err != nil {
-		return err
+	if f == nil {
+		var err error
+		if f, err = Read(root, show); err != nil {
+			return err
+		}
 	}
 	e := episodeFor(f, j)
 	if e == nil {
@@ -183,7 +187,7 @@ func Publish(root *os.Root, j Journal, now time.Time, fault Boundary) error {
 		return err
 	}
 	// The payload was verified above under the same locks: complete need not hash it again.
-	return complete(root, j, now, fault, true)
+	return complete(root, f, j, now, fault, true)
 }
 
 // RecoverShow finishes installs and moved deletions before any other show mutation.
@@ -195,22 +199,7 @@ func RecoverShow(root *os.Root, show string, now time.Time, fault Boundary) erro
 		return ErrInvalidFile
 	}
 	dir := show + "/.audiosilo"
-	st, err := root.Lstat(dir)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	if !st.IsDir() || st.Mode()&os.ModeSymlink != 0 {
-		return ErrInvalidFile
-	}
-	d, err := root.Open(dir)
-	if err != nil {
-		return err
-	}
-	entries, err := d.ReadDir(-1)
-	_ = d.Close()
+	entries, err := listFolder(root, dir)
 	if err != nil {
 		return err
 	}
@@ -243,11 +232,96 @@ func RecoverShow(root *os.Root, show string, now time.Time, fault Boundary) erro
 				continue
 			}
 		}
-		if err := complete(root, j, now, fault, false); err != nil {
+		if err := complete(root, nil, j, now, fault, false); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// listFolder lists dir, a real folder (never a link); nothing when it does
+// not exist.
+func listFolder(root *os.Root, dir string) ([]os.DirEntry, error) {
+	st, err := root.Lstat(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !st.IsDir() || st.Mode()&os.ModeSymlink != 0 {
+		return nil, ErrInvalidFile
+	}
+	d, err := root.Open(dir)
+	if err != nil {
+		return nil, err
+	}
+	defer d.Close()
+	return d.ReadDir(-1)
+}
+
+// Adopt takes in show, a folder renamed by hand from its old name from
+// (ReadMoved answered both, and f): every path its transactions and feed.json
+// still carry under from moves to show. The pending journals and committed
+// trash manifests go first and feed.json last, so a stop part way through
+// leaves a folder ReadMoved finds renamed again, and a journal adopted already
+// is left as it is. A pending journal that is not the show's fails the
+// adoption (RecoverShow would refuse it under either name); a manifest that is
+// not stays, as cleanup ignores it. The caller holds the show's lock and has
+// checked the mapping.
+func Adopt(root *os.Root, show, from string, f *Feed, now time.Time) error {
+	if !ValidShow(show) || !ValidShow(from) || show == from || !episodesIn(f, from) {
+		return ErrInvalidFile
+	}
+	move := func(name string) error {
+		j, err := ReadJournal(root, name)
+		if err != nil {
+			return err
+		}
+		if journalValid(&j, show) {
+			return nil
+		}
+		if !journalValid(&j, from) {
+			return ErrInvalidFile
+		}
+		j.Path = show + "/" + path.Base(j.Path)
+		b, err := json.Marshal(j)
+		if err != nil {
+			return err
+		}
+		if err := fsutil.WriteRootAtomic(root, path.Dir(name), path.Base(name), b, 0o644, nil); err != nil {
+			return err
+		}
+		return syncDir(root, path.Dir(name))
+	}
+	pending, err := listFolder(root, show+"/.audiosilo")
+	if err != nil {
+		return err
+	}
+	for _, e := range pending {
+		if strings.HasSuffix(e.Name(), ".publish.json") {
+			if err := move(show + "/.audiosilo/" + e.Name()); err != nil {
+				return err
+			}
+		}
+	}
+	trash := show + "/.audiosilo-trash/podcasts"
+	committed, err := listFolder(root, trash)
+	if err != nil {
+		return err
+	}
+	for _, e := range committed {
+		if e.IsDir() {
+			_ = move(trash + "/" + e.Name() + "/transaction.json")
+		}
+	}
+	for i := range f.Episodes {
+		f.Episodes[i].Path = show + "/" + path.Base(f.Episodes[i].Path)
+	}
+	if err := writeChanged(root, show, f, now); err != nil {
+		return err
+	}
+	return syncDir(root, show)
 }
 
 // ReadJournal decodes the journal at name (a regular file, no link in any
@@ -280,11 +354,15 @@ func sameJournal(a, b Journal) bool {
 // complete finishes a journaled transaction. verified means the caller has just
 // checked the staged (install) or named (delete) payload under the same locks;
 // without it a delete only finishes audio that already moved into trash.
-func complete(root *os.Root, j Journal, now time.Time, fault Boundary, verified bool) error {
+//
+// f is the show's feed.json read under the same lock (nil reads it).
+func complete(root *os.Root, f *Feed, j Journal, now time.Time, fault Boundary, verified bool) error {
 	show := path.Dir(j.Path)
-	f, err := Read(root, show)
-	if err != nil {
-		return err
+	if f == nil {
+		var err error
+		if f, err = Read(root, show); err != nil {
+			return err
+		}
 	}
 	e := episodeFor(f, j)
 	if e == nil {
@@ -396,9 +474,19 @@ func complete(root *os.Root, j Journal, now time.Time, fault Boundary, verified 
 	if err := fault.Hit("sidecar"); err != nil {
 		return err
 	}
-	e.Fetch = &j.Fetch
-	if _, err := Write(root, show, f, now); err != nil {
-		return err
+	if e.Fetch != nil && *e.Fetch == j.Fetch {
+		// Pinned already (a recovery after the feed was written): Write
+		// compares, keeping updated_at.
+		if _, err := Write(root, show, f, now); err != nil {
+			return err
+		}
+	} else {
+		// f was read under this lock: the new pin is the change, so it is
+		// written without reading the file again to compare.
+		e.Fetch = &j.Fetch
+		if err := writeChanged(root, show, f, now); err != nil {
+			return err
+		}
 	}
 	if err := syncDir(root, show); err != nil {
 		return err
