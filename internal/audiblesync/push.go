@@ -41,6 +41,8 @@ const (
 	// (by the row's updated_at) as waiting to be pushed; older ones are
 	// history and stay where they are. After it, every row the feed gives is
 	// new: it pages in the order the server wrote them, not by updated_at.
+	// A read from the start after a refused cursor (push_reread) keeps the
+	// same line: the window before the baseline's end, push_from.
 	baselineWindow = 10 * time.Minute
 	// maxPages bounds one read of an account's feed (200 rows a page).
 	maxPages = 50
@@ -141,7 +143,6 @@ func (p *Pusher) noFeedStrike(id string, missing bool) int {
 // account reads a's feed from its cursor, records the places waiting, then
 // writes the ones due.
 func (p *Pusher) account(ctx context.Context, srv Server, a store.AudibleAccount, now time.Time) {
-	baseline := a.PushFrom == ""
 	list, err := p.o.DB.AudiblePushes(ctx, a.ID)
 	if err != nil {
 		p.o.Log.Warn("audible: listing the places to push failed", "account", a.ID, "err", err)
@@ -170,9 +171,11 @@ func (p *Pusher) account(ctx context.Context, srv Server, a store.AudibleAccount
 			// The server refused the cursor (a server restored from a backup,
 			// its feed rebuilt): sent again it fails the same way every pass,
 			// stopping the push for good. Read the feed again from its start;
-			// the rows recorded already read at the same place change nothing.
+			// the rows recorded already read at the same place change nothing,
+			// and the ones changed before the account's baseline are history
+			// again (historyCutoff), whatever place they have now.
 			p.o.Log.Warn("audible: the server refused the push's cursor, reading its places from the start", "account", a.ID, "err", err)
-			if err := p.o.DB.SetAudiblePushCursor(ctx, a.ID, "", time.Time{}); err != nil {
+			if err := p.o.DB.ResetAudiblePushCursor(ctx, a.ID); err != nil {
 				p.o.Log.Warn("audible: resetting the push's cursor failed", "account", a.ID, "err", err)
 			}
 			return
@@ -202,7 +205,7 @@ func (p *Pusher) account(ctx context.Context, srv Server, a store.AudibleAccount
 			}
 			return
 		}
-		cutoff := baselineCutoff(baseline, page.ServerTime, now)
+		cutoff := historyCutoff(a, page.ServerTime, now)
 		for _, row := range page.Rows {
 			if !p.row(ctx, a, titles, row, cutoff, now) {
 				unrecorded = true
@@ -237,15 +240,29 @@ func (p *Pusher) account(ctx context.Context, srv Server, a store.AudibleAccount
 	}
 }
 
-// baselineCutoff is when a row's place counts as history: while the baseline
+// historyCutoff is when a row's place counts as history: while the baseline
 // reads the feed (push_from unset, perhaps over several passes) a row changed
 // before it is history, after it none is (zero). The rows' updated_at are the
 // server's clock, so the window is counted back from the page's server_time
 // (bridge#50: a Bridge clock minutes off misjudged recent places), else, from a
 // server before 2.7.0, from the Bridge's own clock.
-func baselineCutoff(baseline bool, serverTime string, now time.Time) time.Time {
-	if !baseline {
-		return time.Time{}
+//
+// A read from the start after a refused cursor (push_reread, perhaps over
+// several passes too) is the baseline's again, at the line the baseline drew:
+// the window before push_from. The feed then gives every row the account has,
+// and one that differs from the place recorded here is not thereby new: a
+// server restored from a backup answers older places than the ones this Bridge
+// read and wrote to Audible, and written again they would move Audible back.
+// A row changed since the baseline is still a new place. (push_from is the
+// Bridge's clock; one that can't be read draws the line again, as a baseline.)
+func historyCutoff(a store.AudibleAccount, serverTime string, now time.Time) time.Time {
+	if a.PushFrom != "" {
+		if !a.PushReread {
+			return time.Time{}
+		}
+		if from, err := time.Parse(time.RFC3339Nano, a.PushFrom); err == nil {
+			return from.Add(-baselineWindow)
+		}
 	}
 	if at, err := time.Parse(time.RFC3339Nano, serverTime); err == nil {
 		return at.Add(-baselineWindow)
@@ -261,8 +278,8 @@ func baselineCutoff(baseline bool, serverTime string, now time.Time) time.Time {
 // its place, never its time: one read again at the same place (whatever else
 // changed: its version, finish, length or device) is no new place and doesn't
 // restart the wait. Audible's own rows (the server leaves them out too) are left,
-// and history (changed before cutoff, the baseline's only) is recorded with no
-// waiting place. A row on a title the last sync didn't list for that book (the
+// and history (changed before cutoff: the baseline's, and a read from the start
+// after a refused cursor) is recorded with no waiting place. A row on a title the last sync didn't list for that book (the
 // server's feed already syncs it: a new match, a re-match, a title synced
 // again) is kept pending until the next sync lists it, never skipped past.
 // titles is account a's rows by ASIN, kept up to date with what row records.

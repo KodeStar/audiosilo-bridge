@@ -267,6 +267,23 @@ func TestAudiblePushCursorRemap(t *testing.T) {
 	if got.PushCursor != "c43" || got.PushFrom != Timestamp(at) {
 		t.Fatalf("cursor = %q from %q", got.PushCursor, got.PushFrom)
 	}
+	// A refused cursor goes back to the feed's start with the baseline kept;
+	// the read from there is marked until one reaches the end (a from).
+	if err := db.ResetAudiblePushCursor(ctx, a.ID); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := db.GetAudibleAccount(ctx, a.ID); got.PushCursor != "" || got.PushFrom != Timestamp(at) || !got.PushReread {
+		t.Fatalf("a reset = %q from %q reread %v", got.PushCursor, got.PushFrom, got.PushReread)
+	}
+	_ = db.SetAudiblePushCursor(ctx, a.ID, "c5", time.Time{})
+	if got, _ := db.GetAudibleAccount(ctx, a.ID); got.PushCursor != "c5" || !got.PushReread {
+		t.Fatalf("a read from the start cut short = %q reread %v", got.PushCursor, got.PushReread)
+	}
+	_ = db.SetAudiblePushCursor(ctx, a.ID, "c43", at.Add(2*time.Hour))
+	got, _ = db.GetAudibleAccount(ctx, a.ID)
+	if got.PushCursor != "c43" || got.PushFrom != Timestamp(at) || got.PushReread {
+		t.Fatalf("the read from the start's end = %q from %q reread %v", got.PushCursor, got.PushFrom, got.PushReread)
+	}
 	a.Label, a.Policy = "Chris again", "all"
 	if err := db.MapAudibleAccount(ctx, a); err != nil {
 		t.Fatal(err)
@@ -286,13 +303,16 @@ func TestAudiblePushCursorRemap(t *testing.T) {
 	} {
 		_ = db.ListAudibleSync(ctx, a.ID, []AudibleSyncTitle{{ASIN: "B000000001", LibraryID: a.LibraryID, Path: "A/One"}})
 		set()
+		// A read from the start under way (a refused cursor) ends with the move too.
+		_ = db.ResetAudiblePushCursor(ctx, a.ID)
+		_ = db.SetAudiblePushCursor(ctx, a.ID, "c42", time.Time{})
 		move(&a)
 		if err := db.MapAudibleAccount(ctx, a); err != nil {
 			t.Fatal(err)
 		}
 		got, _ = db.GetAudibleAccount(ctx, a.ID)
 		p, _ = db.GetAudiblePush(ctx, a.ID, "B000000001")
-		if got.PushCursor != "" || got.PushFrom != "" || p.WantMs != nil || p.Listed || p.RowMs != -1 || p.RowSeen != "" {
+		if got.PushCursor != "" || got.PushFrom != "" || got.PushReread || p.WantMs != nil || p.Listed || p.RowMs != -1 || p.RowSeen != "" {
 			t.Fatalf("%s: a move kept the feed: %+v, %+v", name, got, p)
 		}
 	}

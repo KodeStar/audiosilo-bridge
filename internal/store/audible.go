@@ -39,9 +39,13 @@ type AudibleAccount struct {
 	// PushCursor and PushFrom are the push loop's place in the server's
 	// progress feed and the moment a read of it first reached its end for this
 	// mapping (the baseline's end: until then older rows are history); both ""
-	// until then.
+	// until then. PushReread (migration 0018) is set while the loop reads the
+	// feed from its start again after the server refused the cursor
+	// (ResetAudiblePushCursor), until a read reaches the feed's end: rows
+	// changed before PushFrom are history for that read too.
 	PushCursor string `json:"-"`
 	PushFrom   string `json:"-"`
+	PushReread bool   `json:"-"`
 	// SyncAt is when an audible.sync job last went through, SyncError why the
 	// last one failed ("" when it went through); PushAt and PushError the
 	// same for the push loop (migration 0017: each its own, so one's success
@@ -92,13 +96,13 @@ func (a AudibleAccount) OnOtherServer(serverID string) bool {
 
 const audibleColumns = `id, label, marketplace, customer_hash, server_id, user_id, user_name, library_id, policy, sync,
 	created_at, last_ok_at, last_poll_at, last_titles, last_matched, refused_at, last_error, device_profile, refusal_kind,
-	push_cursor, push_from, sync_at, sync_error, push_at, push_error, sync_retry_at`
+	push_cursor, push_from, push_reread, sync_at, sync_error, push_at, push_error, sync_retry_at`
 
 func scanAudibleAccount(row interface{ Scan(...any) error }) (AudibleAccount, error) {
 	var a AudibleAccount
 	err := row.Scan(&a.ID, &a.Label, &a.Marketplace, &a.CustomerHash, &a.ServerID, &a.UserID, &a.UserName, &a.LibraryID,
 		&a.Policy, &a.Sync, &a.CreatedAt, &a.LastOKAt, &a.LastPollAt, &a.LastTitles, &a.LastMatched, &a.RefusedAt, &a.LastError,
-		&a.DeviceProfile, &a.RefusalKind, &a.PushCursor, &a.PushFrom, &a.SyncAt, &a.SyncError, &a.PushAt, &a.PushError, &a.SyncRetryAt)
+		&a.DeviceProfile, &a.RefusalKind, &a.PushCursor, &a.PushFrom, &a.PushReread, &a.SyncAt, &a.SyncError, &a.PushAt, &a.PushError, &a.SyncRetryAt)
 	return a, err
 }
 
@@ -119,7 +123,7 @@ func remapAudible(ctx context.Context, tx *sql.Tx, a AudibleAccount) error {
 	if err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE audible_accounts SET push_cursor = '', push_from = '',
+	if _, err := tx.ExecContext(ctx, `UPDATE audible_accounts SET push_cursor = '', push_from = '', push_reread = 0,
 		sync_error = '', push_error = '' WHERE id = ?`, a.ID); err != nil {
 		return err
 	}

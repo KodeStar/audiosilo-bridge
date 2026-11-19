@@ -154,6 +154,7 @@ type Store interface {
 	RearmAudiblePush(ctx context.Context, x store.AudiblePush, now time.Time) (bool, error)
 	SetAudibleACR(ctx context.Context, account, asin, acr string) error
 	SetAudiblePushCursor(ctx context.Context, id, cursor string, from time.Time) error
+	ResetAudiblePushCursor(ctx context.Context, id string) error
 	AudibleSyncOK(ctx context.Context, id string, side store.AudibleSyncSide, at time.Time) error
 	AudibleSyncFailed(ctx context.Context, id string, side store.AudibleSyncSide, why string, retryAt time.Time) error
 	ClearAudibleSyncError(ctx context.Context, id string) (bool, error)

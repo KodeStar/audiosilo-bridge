@@ -1611,7 +1611,10 @@ internal/
             one's failure overwrites it). sync_retry_at, Audible's wait, stays shared;
             ClearAudibleSyncError (sync off), a remap and a sign-in again clear both
             errors; AudibleAccount.SyncProblem (the job's, else the push's) feeds the
-            setup item.
+            setup item. 0018 (bridge#50) adds audible_accounts.push_reread: 1 from
+            ResetAudiblePushCursor (the server refused the cursor: push_cursor '' with
+            push_from kept) until SetAudiblePushCursor records a read that reached the
+            feed's end; a remap clears it with the cursor.
   state/    per-book pipeline state machine: table-driven states/lanes/transitions,
             CanStart/NextState guards, the audit fix-loop cap. Pure, no I/O. M6 added
             ParkCode (typed park reasons - M7 added contrib_unavailable, core_needed,
@@ -2994,7 +2997,10 @@ internal/
             of the last 10 min by updated_at (counted back from the page's server_time, the server's
             clock, else the Bridge's from a server before 2.7.0, bridge#50), history after it is none; a row it fails to record keeps
             the cursor, so the pass reads it again; a cursor the server refuses,
-            400, goes back to the feed's start, bridge#50), skips rows by audible:<account>, keeps a
+            400, goes back to the feed's start, bridge#50, and that read, push_reread until one reaches
+            the feed's end, keeps the baseline's line (historyCutoff: a row changed more than 10 min before push_from
+            is history again whatever its place, so a server restored from a backup has no place
+            from before the baseline written over Audible's; one changed since is a new place)), skips rows by audible:<account>, keeps a
             row on a title the last sync didn't list for that book pending (listed 0,
             store.PendAudiblePush) until a sync lists it; for the places still for StillFor (3 min, since
             row_seen: the Bridge's clock) it drops one under 1 s, within 5 s of last_ms (debounce) or

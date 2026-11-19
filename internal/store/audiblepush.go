@@ -263,10 +263,23 @@ func (db *DB) SetAudibleACR(ctx context.Context, account, asin, acr string) erro
 
 // SetAudiblePushCursor records the push loop's place in id's progress feed,
 // and when its baseline read the feed to the end (from; kept once set, and a
-// zero from, a baseline still under way, leaves it).
+// zero from, a read that hasn't reached the end, leaves it). A read that
+// reached the end is also the end of a read from the start after a refused
+// cursor (push_reread).
 func (db *DB) SetAudiblePushCursor(ctx context.Context, id, cursor string, from time.Time) error {
-	_, err := db.sql.ExecContext(ctx, `UPDATE audible_accounts SET push_cursor = ?,
-		push_from = CASE WHEN push_from = '' THEN ? ELSE push_from END WHERE id = ?`, cursor, stamp(from), id)
+	_, err := db.sql.ExecContext(ctx, `UPDATE audible_accounts SET push_cursor = ?1,
+		push_from = CASE WHEN push_from = '' THEN ?2 ELSE push_from END,
+		push_reread = CASE WHEN ?2 = '' THEN push_reread ELSE 0 END WHERE id = ?3`, cursor, stamp(from), id)
+	return err
+}
+
+// ResetAudiblePushCursor sends id's push loop back to the start of the
+// progress feed after the server refused its cursor. The baseline's end
+// (push_from) stays, and push_reread marks the read until one reaches the
+// feed's end, so the rows changed before the baseline are history again
+// rather than new places.
+func (db *DB) ResetAudiblePushCursor(ctx context.Context, id string) error {
+	_, err := db.sql.ExecContext(ctx, `UPDATE audible_accounts SET push_cursor = '', push_reread = 1 WHERE id = ?`, id)
 	return err
 }
 
