@@ -1686,10 +1686,15 @@ internal/
             still as read (store.ErrSettled when a stage failed it or it finished
             since: its own error stays; a park since is read again and cancelled):
             generate's job
-            ends, its Abandon before the engine starts included; a cancel is published
-            only while the book still carries it (publishCancelled, ordered against a
-            re-admit's write and publish by readmitMu), so a later claim's re-admit
-            is never covered by a stale cancelled frame; a start's reconcileBook
+            ends, its Abandon before the engine starts included. Every change to a
+            book's state or status publishes book.state through publishStored: the
+            book read as stored and published under that book's own lock
+            (lockPublish), so its frames go out in the order of their reads and the
+            last carries the latest write (a cancel's frame never lands after the
+            re-admit that followed it, an advance never shows a pause that landed
+            first as running); generate's continues of a stopped run (which clear its
+            cancel) publish through Engine.PublishStored. Pause and Resume write only
+            over the status read (store.ErrStatusChanged). A start's reconcileBook
             rewinds by the state alone (SetBookPipelineState), and a pass moves a
             book on from a waypoint the same way (advanceWaypoint), so neither writes
             the status it read back over such a cancel; a stage's own park or failure

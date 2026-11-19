@@ -60,7 +60,9 @@ func (s *Scheduler) awaitWorker(ctx context.Context, id int64) {
 
 // Pause parks a running or queued book: it stops being dispatched. A stage
 // already executing is allowed to finish (its result is kept), after which the
-// book waits in its next state. Pausing an already-paused book is a no-op.
+// book waits in its next state. Pausing an already-paused book is a no-op. The
+// pause is written only while the book still has the status read
+// (store.ErrStatusChanged otherwise), so a Cancel landing in between stays.
 func (s *Scheduler) Pause(ctx context.Context, id int64) error {
 	b, err := s.db.GetBook(ctx, id)
 	if err != nil {
@@ -72,17 +74,19 @@ func (s *Scheduler) Pause(ctx context.Context, id int64) error {
 	case state.StatusNone:
 		// Preserve error/park_code (a pause is not a status clear); a pausable book
 		// has no park code anyway, but mirror b.Error's preservation.
-		if err := s.db.SetBookStatus(ctx, id, string(state.StatusPaused), b.Error, b.ParkCode); err != nil {
+		if err := s.db.SetBookStatusIf(ctx, id, b.Status, b.Error, string(state.StatusPaused), b.Error, b.ParkCode, ""); err != nil {
 			return err
 		}
-		s.publishState(id, b.State, string(state.StatusPaused), b.Error, b.ParkCode, "")
+		s.publishStored(ctx, id)
 		return nil
 	default:
 		return ErrInvalidOp
 	}
 }
 
-// Resume clears a pause and re-admits the book to scheduling.
+// Resume clears a pause and re-admits the book to scheduling, only while the
+// book is still paused as read (store.ErrStatusChanged otherwise: a Cancel
+// landing in between is never cleared).
 func (s *Scheduler) Resume(ctx context.Context, id int64) error {
 	b, err := s.db.GetBook(ctx, id)
 	if err != nil {
@@ -92,10 +96,10 @@ func (s *Scheduler) Resume(ctx context.Context, id int64) error {
 		return ErrInvalidOp
 	}
 	// Clearing the status clears the error and the typed park_code together.
-	if err := s.db.SetBookStatus(ctx, id, string(state.StatusNone), "", ""); err != nil {
+	if err := s.db.ClearBookStatusIf(ctx, id, b.Status, b.Error); err != nil {
 		return err
 	}
-	s.publishState(id, b.State, "", "", "", "")
+	s.publishStored(ctx, id)
 	s.notify()
 	return nil
 }
@@ -192,20 +196,19 @@ func logReadmitFailed(log *slog.Logger, what string, bookID int64, err error) {
 // between the clear and the sentinel's removal (it would replay the sentinel). A
 // change that fails after the clear puts the read status back. A crash between the
 // two leaves the book admitted with its sentinel: the restart replays the stage's
-// outcome, which parks a round-cap park again, for the next Retry.
+// outcome, which parks a round-cap park again, for the next Retry. Once the clear
+// is written the book is published as stored, the status put back included.
 func (s *Scheduler) readmit(ctx context.Context, b store.Book) error {
 	release := s.holdDispatch(b.ID)
 	defer release()
-	s.readmitMu.Lock()
-	defer s.readmitMu.Unlock()
 	if err := s.db.ClearBookStatusIf(ctx, b.ID, b.Status, b.Error); err != nil {
 		return err
 	}
+	defer s.publishStored(ctx, b.ID)
 	if err := s.forceRerun(ctx, b); err != nil {
 		s.restoreStatus(ctx, b)
 		return err
 	}
-	s.publishState(b.ID, b.State, "", "", "", "")
 	return nil
 }
 
@@ -326,23 +329,10 @@ func (s *Scheduler) cancel(ctx context.Context, id int64, g *store.StopGuard) er
 		return err
 	}
 	s.cancelInflight(id)
-	s.publishCancelled(ctx, id)
+	// As stored (publishStored): a later claim of the book's job re-admitting it
+	// since the write is published as running, never covered by a stale cancel.
+	s.publishStored(ctx, id)
 	return nil
-}
-
-// publishCancelled publishes book id's cancel as stored, unless the book moved on
-// since the cancel was written: a later claim of its job re-admitting it published
-// its own state, which a stale cancelled frame would cover until the next event.
-// The read and the publish hold readmitMu, as a re-admit's write and publish do.
-func (s *Scheduler) publishCancelled(ctx context.Context, id int64) {
-	s.readmitMu.Lock()
-	defer s.readmitMu.Unlock()
-	// The cancel is written: a caller's context ending now must not lose its frame.
-	b, err := s.db.GetBook(context.WithoutCancel(ctx), id)
-	if err != nil || !IsCancelled(b) {
-		return
-	}
-	s.publishState(id, b.State, b.Status, b.Error, "", "")
 }
 
 // CancelStored is Cancel for a caller with no scheduler running (the Bridge's
