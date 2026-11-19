@@ -2378,6 +2378,8 @@ internal/
             whose folder is gone finds the show by its id (relocate: the cache
             row, then every folder) and a follow joins it rather than starting a
             new show. The server still names the old folder until its own scan.
+            A copy of a renamed folder made before either was taken in is
+            refused once another folder (its cache row's) holds the show.
             Subscribe implements ParamSealer and Abandoner: job credentials are
             sealed before persistence, resumed from the vault, resealed under
             the show id on success, and removed at every terminal job end.

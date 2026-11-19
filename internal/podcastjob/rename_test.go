@@ -137,3 +137,41 @@ func TestFollowAgainAsksTheCacheFirst(t *testing.T) {
 		t.Fatal("the follow joined", got, "not the cached", show)
 	}
 }
+
+// A copy of a show folder renamed by hand, made before either was taken in,
+// names the same gone folder: the poll takes in one, and the copy is then
+// refused (two folders would hold one show) and left as it is.
+func TestACopyOfARenamedShowFolderIsNotTakenIn(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	show, id := followed(t, h)
+	renameShow(t, h, show, "Renamed Show")
+	if err := os.CopyFS(filepath.Join(h.mount, "Some Copy"), os.DirFS(filepath.Join(h.mount, "Renamed Show"))); err != nil {
+		t.Fatal(err)
+	}
+	params, _ := json.Marshal(map[string]string{"show_id": id, "etag": `"abc"`})
+	lib := int64(3)
+	poll := jobs.Job{ID: 20, Kind: PollKind, LibraryID: &lib, Path: &show, Params: params}
+	res, err := h.handler.PollJob().Run(context.Background(), poll, jobs.LocalReporter())
+	if err != nil || fields(t, res)["show_path"] != "Renamed Show" {
+		t.Fatal(res, err)
+	}
+	copied := "Some Copy"
+	poll.ID, poll.Path = 21, &copied
+	res, err = h.handler.PollJob().Run(context.Background(), poll, jobs.LocalReporter())
+	var failure *netguard.Error
+	if !errors.As(err, &failure) || failure.Code != "write_failed" {
+		t.Fatal("a copy of a renamed show was taken in", res, err)
+	}
+	root, err := os.OpenRoot(h.mount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	if _, from, err := podcast.ReadMoved(root, copied); err != nil || from != show {
+		t.Fatal("the copy changed", from, err)
+	}
+	if row, ok, err := h.db.PodcastShowByID(context.Background(), "server-1", id); err != nil || !ok || row.ShowPath != "Renamed Show" {
+		t.Fatal("cache row", row, ok, err)
+	}
+}

@@ -779,6 +779,16 @@ func (s *service) adopt(ctx context.Context, root *os.Root, lib link.Library, mo
 	if err != nil || from == "" {
 		return false, nil
 	}
+	// A copy of a renamed folder made before either was taken in also names
+	// the gone folder: once one of them holds the show in its own right (the
+	// folder its cache row names), the other is a copy, never taken in (two
+	// folders would hold one show).
+	if row, ok, err := s.o.DB.PodcastShowByID(ctx, s.o.ServerID(), f.ShowID); err == nil && ok && row.LibraryID == lib.ID && row.ShowPath != show {
+		if held, err := podcast.Read(root, row.ShowPath); err == nil && held.ShowID == f.ShowID {
+			slog.Warn("podcasts: a show folder naming a gone folder is a copy of a show another folder holds; it is not taken in", "library", lib.ID, "show", show, "holder", row.ShowPath)
+			return false, nil
+		}
+	}
 	if err := s.beforeWrite(lib, mount, show); err != nil {
 		return false, err
 	}
