@@ -2471,7 +2471,7 @@ internal/
             a copy of the lock file, not the one held: the fetch takes the lock
             there anew before it moves (followLock, one ceiling's wait for a
             holder, then write_failed where it was) rather than go on with
-            none. Under the
+            none. The exit's settle is bounded by one ceiling. Under the
             episode's lock its own record moves even when a duplicate claim's
             open row names it (adoptOwn, also after a relocation before the
             download); one at the new path already wins and the old one is

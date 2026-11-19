@@ -248,7 +248,13 @@ func (h *Fetch) run(parent context.Context, claimed *jobs.Job, rep *jobs.Reporte
 		}
 		if !keep {
 			if !committed && parent.Err() == nil {
-				_ = settle(parent)
+				// Bounded as the fetch's first search for its show is: the
+				// job has failed already (its own ceiling may be what ended
+				// it), and a show lock another job holds, or a library slow
+				// to read, must not keep its slot and locks for good.
+				sctx, stop := context.WithTimeout(parent, ceiling)
+				_ = settle(sctx)
+				stop()
 			}
 			s.clearCheckpoint(job, root, &c)
 		}
