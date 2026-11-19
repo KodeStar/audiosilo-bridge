@@ -3200,7 +3200,7 @@ internal/
             steps. The manager's serverapi client went: the Bridge holds
             the paged listing. AllBooks (books.go, LibriVox L6) reads that listing
             whole for audiblejob and librivoxjob (a cursor the server refuses,
-            link.ErrBadCursor, sends it back to the start once, bridge#50). Deps: link, placement, source,
+            link.ErrBadCursor, sends it back to the start once with the whole page bound again, bridge#50). Deps: link, placement, source,
             audiosilo-server/pkg/match.
   placement/ where a new book goes (the manager's): Auto (series siblings'
             folder and shortcode convention, else author/title) and templates.

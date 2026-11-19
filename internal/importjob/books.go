@@ -19,15 +19,16 @@ type BookLister interface {
 // AllBooks reads every page of the library's books (the server's paged
 // listing, read whole), as Plan and the matcher take them. A cursor the server
 // refuses (link.ErrBadCursor: one it gave, refused mid-read) sends the read
-// back to the start once; a second refusal is the error.
+// back to the start once, with the whole maxBookPages again; a second refusal
+// is the error.
 func AllBooks(ctx context.Context, srv BookLister, libraryID int64) ([]link.LibraryBook, error) {
 	var books []link.LibraryBook
 	after := ""
 	restarted := false
-	for range maxBookPages {
+	for pages := 0; pages < maxBookPages; pages++ {
 		page, err := srv.LibraryBooks(ctx, libraryID, after, link.MaxLibraryBooks)
 		if errors.Is(err, link.ErrBadCursor) && !restarted {
-			books, after, restarted = nil, "", true
+			books, after, restarted, pages = nil, "", true, -1
 			continue
 		}
 		if err != nil {

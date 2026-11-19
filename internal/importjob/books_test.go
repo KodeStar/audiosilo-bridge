@@ -49,6 +49,16 @@ func TestAllBooksRestartsOnARefusedCursor(t *testing.T) {
 		t.Fatalf("asks = %q, want %q", srv.asks, want)
 	}
 
+	// The read from the start has the whole page bound again: the pages read
+	// before the refusal don't count against a library of maxBookPages pages.
+	full := &pagedBooks{refuse: 1}
+	for i := range maxBookPages {
+		full.paths = append(full.paths, fmt.Sprintf("b%d", i))
+	}
+	if books, err := AllBooks(ctx, full, 1); err != nil || len(books) != maxBookPages {
+		t.Fatalf("a library of %d pages, refused once: %d books, %v", maxBookPages, len(books), err)
+	}
+
 	again := &pagedBooks{paths: []string{"A", "B"}, refuse: 2}
 	if _, err := AllBooks(ctx, again, 1); !errors.Is(err, link.ErrBadCursor) {
 		t.Fatalf("refused twice = %v, want ErrBadCursor", err)
