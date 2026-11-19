@@ -3836,9 +3836,10 @@ internal/
             point, breadth first, matched by name from the listings
             (credentialRel), a folder another mount is mounted at left to that
             one's walk (Unraid's /mnt/user mounted whole: the vault at
-            appdata/audiosilo-bridge/secret.key); a tmpfs at its point only and
-            the container's own root at its point and one dir below (the
-            rules and the file list are in mounts.go), the Bridge's vault
+            appdata/audiosilo-bridge/secret.key); a tmpfs (a host's /dev/shm
+            or /run/user/<uid> bound in) and the container's own root at
+            their point and one dir below (the rules and the file list are
+            in mounts.go), the Bridge's vault
             (secret.key, secrets/<name>.enc, or those names mounted alone) and a
             container runtime's socket (docker.sock, podman.sock,
             containerd.sock: every container's files; runtimeSocketPaths names
@@ -3851,7 +3852,22 @@ internal/
             staging volume), the root with more than maxMountChildren (1024), a
             look past lookTimeout (5 s, through fsutil.StatWithin/LstatWithin/
             ReadDirNWithin: a hung NFS or SMB mount) or the walk past walkBudget
-            (20 s) each count as holding, saying to mount narrower folders. The walk runs once
+            (20 s) each count as holding, saying to mount narrower folders.
+            Passed over as a run's own, never a host's: the per-run folders
+            the service holds in its TmpDir (run-<id>, version-*), by their
+            exact paths (Runner.ownTmp, held from before each is made until
+            it is gone; codex keeps config.toml there), and a file of a
+            credential's name a run planted to lock the service out (prompt
+            injection: `touch /staging/auth.json`): owned by the service's
+            uid, in its staging dir or TmpDir (writableAreas), reached from
+            there through folders alone, never a link, and walked as part of
+            the mount holding that area (a host folder mounted inside it is
+            its own mount; runMade). Such files are swept (sweepRunFiles: a
+            fresh walk, then each removed through an os.Root over its area
+            while still the service's, a folder only when empty) when the
+            service starts and after each job; another uid's file, or one
+            outside those areas (a host mount of uid 10003 files included),
+            still refuses. The walk runs once
             per status tick (tickMounts, which leaves a walk in flight to stand
             for its own rather than queue behind it: two slow walks in a row
             would hold runner.json past RunnerFreshFor) and again before each

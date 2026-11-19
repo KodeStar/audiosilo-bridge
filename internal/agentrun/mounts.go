@@ -40,11 +40,27 @@ import (
 //     enter a directory, neither can a run's commands (the same uid, no
 //     capability), so a closed one counts as holding nothing.
 //
-// Two kinds of mount are looked at shallower: a tmpfs at its point alone
-// (pseudoFS says why), and the container's own root at its point and one
-// folder (or link) below, as before the deep walk: it holds the image's files
-// and its writable layer (deeper than maxMountDepth in places), and the host's
-// files reach the container only through a mount, each walked on its own.
+// Two kinds of mount are looked at shallower, at their point and one folder
+// (or link) below: a tmpfs (pseudoFS says why) and the container's own root,
+// as before the deep walk: it holds the image's files and its writable layer
+// (deeper than maxMountDepth in places), and the host's files reach the
+// container only through a mount, each walked on its own.
+//
+// Two things a run makes itself are not a host's credential:
+//
+//   - the per-run folders the service makes in its TmpDir (run-<id>, where
+//     codex keeps codex/config.toml, and version-*), passed over by their
+//     exact paths while the service holds them (own), never by a name a
+//     host's tmpfs could hold too; and
+//   - a file of a credential's name that a run planted (prompt injection
+//     from a book's text could ask for one) to lock the service out: one
+//     owned by the service's own uid, in its own staging dir or TmpDir
+//     (writableAreas), reached from there through folders alone (no link)
+//     and walked as part of the mount that holds that area (a host folder
+//     mounted inside it is its own mount, judged on its own). It is not
+//     counted, and sweepRunFiles removes it when a run ends and when the
+//     service starts. A file of any other uid, or outside those areas, still
+//     refuses the runs: ownership alone passes nothing.
 //
 // The check fails closed: a folder it can enter but not list, a mount deeper
 // than maxMountDepth, more than maxWalkEntries entries over the whole walk (a
@@ -75,9 +91,10 @@ const agentVolume = "agent-config"
 type mount struct{ root, point, fstype string }
 
 // pseudoFS are filesystems that never hold a file of the host's: the kernel's
-// views. A tmpfs isn't one of them (a host's /run or /dev/shm bound in, a
-// swarm or Kubernetes secret), but the container's own (/tmp) holds a run's
-// per-run files one folder down, so a tmpfs is looked at its point alone.
+// views. A tmpfs isn't one of them (a host's /run, /run/user/<uid> or /dev/shm
+// bound in, a swarm or Kubernetes secret), so it is looked at its point and
+// one folder below, the container's own /tmp included, where the service's
+// own per-run folders are passed over by their exact paths (own).
 var pseudoFS = map[string]bool{
 	"proc": true, "sysfs": true, "cgroup": true, "cgroup2": true, "devpts": true, "mqueue": true,
 	"devtmpfs": true, "securityfs": true, "debugfs": true, "tracefs": true, "selinuxfs": true,
@@ -85,8 +102,9 @@ var pseudoFS = map[string]bool{
 	"binfmt_misc": true, "nsfs": true, "autofs": true,
 }
 
-// maxMountChildren bounds the entries of the container's root the check
-// looks through (its shallow walk lists the root alone): more refuses the runs.
+// maxMountChildren bounds the entries of the container's root or a tmpfs the
+// check looks through (its shallow walk lists the point alone): more refuses
+// the runs.
 const maxMountChildren = 1024
 
 // maxMountDepth is how many folders below a mount's point the check lists,
@@ -138,8 +156,8 @@ var vaultSealed = []string{"server_token", "claude_oauth_token", "anthropic_api_
 var runtimeSockets = []string{"docker.sock", "podman.sock", "containerd.sock"}
 
 // runtimeSocketPaths are where a host's run folder keeps those sockets a
-// folder or two down: /run is a tmpfs, looked at its point alone (pseudoFS),
-// so mounted whole it shows them only by these paths.
+// folder or two down: /run is a tmpfs, looked at shallow (pseudoFS), so
+// mounted whole it shows them only by these paths.
 var runtimeSocketPaths = []string{"podman/podman.sock", "containerd/containerd.sock",
 	"docker/containerd/containerd.sock"}
 
@@ -290,12 +308,28 @@ type mountWalk struct {
 	// points are the mounts' points: the deep walk of one mount leaves another
 	// mounted in it to that one's own walk.
 	points map[string]bool
+	// own reports whether a folder is one of the service's per-run folders in
+	// its TmpDir, by its exact path (nil: none).
+	own func(string) bool
+	// selfUID is the service's own uid (-1: none), areas its writable folders
+	// (the staging dir and TmpDir) and areasHere those the mount being looked
+	// at holds: a file of a credential's name of selfUID's in one is a run's
+	// own (runMade), which runFiles collects.
+	selfUID   int
+	areas     []string
+	areasHere []string
+	runFiles  []runFile
 }
 
+// runFile is a file of a credential's name a run planted: its area (one of
+// mountWalk.areas) and its path below it.
+type runFile struct{ area, rel string }
+
 // newMountWalk is a check over the mounts starting now, with the walk's
-// bounds (walkBudget, maxWalkEntries).
+// bounds (walkBudget, maxWalkEntries), passing nothing over as a run's own.
 func newMountWalk(l looks) *mountWalk {
-	return &mountWalk{looks: l, deadline: time.Now().Add(walkBudget), maxEntries: maxWalkEntries, rootPoint: "/"}
+	return &mountWalk{looks: l, deadline: time.Now().Add(walkBudget), maxEntries: maxWalkEntries, rootPoint: "/",
+		selfUID: -1}
 }
 
 // narrower ends the error of a bound the walk ran into: what the admin can do.
@@ -318,6 +352,7 @@ func (w *mountWalk) credentialMount(mounts []mount) string {
 		case pseudoFS[m.fstype]:
 			continue
 		}
+		w.areasHere = w.areasHeldBy(m.point)
 		p, err := w.credentialIn(m)
 		if err != nil {
 			return m.point + " can't be checked: " + err.Error()
@@ -329,14 +364,94 @@ func (w *mountWalk) credentialMount(mounts []mount) string {
 	return ""
 }
 
+// areasHeldBy are the writable areas whose mount is the one at point: the
+// mount with the longest point that is the area or a folder above it.
+func (w *mountWalk) areasHeldBy(point string) []string {
+	var out []string
+	for _, area := range w.areas {
+		holder := ""
+		for p := range w.points {
+			if _, ok := below(p, area); ok && len(p) > len(holder) {
+				holder = p
+			}
+		}
+		if holder == point {
+			out = append(out, area)
+		}
+	}
+	return out
+}
+
+// below is p's path relative to dir when p is dir or inside it.
+func below(dir, p string) (string, bool) {
+	dir, p = filepath.Clean(dir), filepath.Clean(p)
+	if dir == p {
+		return ".", true
+	}
+	prefix := dir
+	if !strings.HasSuffix(prefix, string(filepath.Separator)) {
+		prefix += string(filepath.Separator)
+	}
+	if !strings.HasPrefix(p, prefix) {
+		return "", false
+	}
+	return p[len(prefix):], true
+}
+
+// runMade reports whether p, a file of a credential's name the walk found, is
+// a run's own (the rules above): in one of the areas the mount being looked at
+// holds, the area and every folder from it down to p a folder (never a link:
+// one could lead to a host's file whose owner is the service's uid), and owned
+// by the service's uid. It is added to runFiles. Any look that fails is a no.
+func (w *mountWalk) runMade(p string) bool {
+	if w.selfUID < 0 {
+		return false
+	}
+	for _, area := range w.areasHere {
+		rel, ok := below(area, p)
+		if !ok || rel == "." || !w.foldersDown(area, rel) {
+			continue
+		}
+		info, err := w.lstat(p)
+		if err != nil {
+			continue
+		}
+		if uid, ok := ownerUID(info); ok && uid == w.selfUID {
+			w.runFiles = append(w.runFiles, runFile{area: area, rel: rel})
+			return true
+		}
+	}
+	return false
+}
+
+// foldersDown reports whether area and each folder between it and rel's last
+// element is a folder, not a link.
+func (w *mountWalk) foldersDown(area, rel string) bool {
+	cur := area
+	parts := strings.Split(rel, string(filepath.Separator))
+	for i := range parts {
+		if i > 0 {
+			cur = filepath.Join(cur, parts[i-1])
+		}
+		info, err := w.lstat(cur)
+		if err != nil || !info.IsDir() {
+			return false
+		}
+	}
+	return true
+}
+
+// isOwn reports whether p is one of the service's own per-run folders.
+func (w *mountWalk) isOwn(p string) bool { return w.own != nil && w.own(p) }
+
 // credentialIn is the first credential's file in m, "" when none is: the deep
-// walk's, or for a tmpfs (at its point) and the container's root (at its point
-// and one directory below) the shallow look's.
+// walk's, or for a tmpfs and the container's root (at its point and one
+// directory below) the shallow look's.
 func (w *mountWalk) credentialIn(m mount) (string, error) {
 	if m.fstype != "tmpfs" && m.point != w.rootPoint {
 		return w.deepCredentialIn(m.point)
 	}
-	dirs, err := w.dirsOf(m.point, m.fstype != "tmpfs")
+	dirs, err := w.dirsOf(m.point)
 	if err != nil {
 		return "", err
 	}
@@ -366,8 +481,9 @@ type walkDir struct {
 // own entry is always walked, as two folders can share a device and inode
 // where a file system merges others (overlayfs over two file systems, Unraid's
 // user shares, mergerfs), and passing the second over would pass over what it
-// holds. A folder another mount is mounted at is left to that one's walk.
-// Breadth first, a credential near the top is found before a large folder
+// holds. A folder another mount is mounted at is left to that one's walk, and
+// the service's own per-run folders (own) and a run's planted files (runMade)
+// are passed over. Breadth first, a credential near the top is found before a large folder
 // further down spends the budget.
 func (w *mountWalk) deepCredentialIn(point string) (string, error) {
 	queue := []walkDir{{path: point}}
@@ -382,13 +498,15 @@ func (w *mountWalk) deepCredentialIn(point string) (string, error) {
 		parent := filepath.Base(d.path)
 		for _, e := range entries {
 			if credentialRel[e.Name()] || credentialRel[parent+"/"+e.Name()] {
-				return filepath.Join(d.path, e.Name()), nil
+				if p := filepath.Join(d.path, e.Name()); !w.runMade(p) {
+					return p, nil
+				}
 			}
 		}
 		for _, e := range entries {
 			p := filepath.Join(d.path, e.Name())
 			link := e.Type()&fs.ModeSymlink != 0
-			if (e.IsDir() || link) && !w.points[p] {
+			if (e.IsDir() || link) && !w.points[p] && !w.isOwn(p) {
 				queue = append(queue, walkDir{path: p, depth: d.depth + 1, link: link})
 			}
 		}
@@ -451,8 +569,8 @@ func (w *mountWalk) listDir(d walkDir, seen map[fileKey]bool) ([]fs.DirEntry, er
 	return entries, nil
 }
 
-// credentialUnder is the first of credentialPaths present under dir, "" when
-// none is.
+// credentialUnder is the first of credentialPaths present under dir and not
+// a run's own (runMade), "" when none is.
 func (w *mountWalk) credentialUnder(dir string) (string, error) {
 	for _, rel := range credentialPaths {
 		p := filepath.Join(dir, rel)
@@ -460,7 +578,7 @@ func (w *mountWalk) credentialUnder(dir string) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		if ok {
+		if ok && !w.runMade(p) {
 			return p, nil
 		}
 	}
@@ -490,14 +608,15 @@ func (w *mountWalk) present(p string) (bool, error) {
 	}
 }
 
-// dirsOf are the directories to look in for a mount at dir: dir itself and,
-// when below is set, the directories directly in it and the links there (a
-// run follows a link as readily as it enters a folder: the looks under one go
-// through it, and one to a file, nowhere or itself holds nothing). A mount
+// dirsOf are the directories to look in for a mount at dir: dir itself and
+// the directories directly in it and the links there (a run follows a link as
+// readily as it enters a folder: the looks under one go through it, and one to
+// a file, nowhere or itself holds nothing), but for another mount's point
+// (left to its own look) and the service's own per-run folders (own). A mount
 // that is a file, or that the runner can't enter, has none (nor can a run look
 // in); one it can enter but not list, or with more than maxMountChildren
 // entries, is an error: a run could still reach a folder in it by name.
-func (w *mountWalk) dirsOf(dir string, below bool) ([]string, error) {
+func (w *mountWalk) dirsOf(dir string) ([]string, error) {
 	if err := w.inTime(); err != nil {
 		return nil, err
 	}
@@ -511,8 +630,6 @@ func (w *mountWalk) dirsOf(dir string, below bool) ([]string, error) {
 		return nil, fmt.Errorf("it can't be looked at (%w)", err)
 	case !info.IsDir():
 		return nil, nil
-	case !below:
-		return []string{dir}, nil
 	}
 	entries, err := w.readDir(dir)
 	switch {
@@ -530,8 +647,9 @@ func (w *mountWalk) dirsOf(dir string, below bool) ([]string, error) {
 	}
 	out := []string{dir}
 	for _, e := range entries {
-		if e.IsDir() || e.Type()&fs.ModeSymlink != 0 {
-			out = append(out, filepath.Join(dir, e.Name()))
+		p := filepath.Join(dir, e.Name())
+		if (e.IsDir() || e.Type()&fs.ModeSymlink != 0) && !w.points[p] && !w.isOwn(p) {
+			out = append(out, p)
 		}
 	}
 	return out, nil

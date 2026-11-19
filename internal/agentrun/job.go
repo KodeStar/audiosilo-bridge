@@ -35,6 +35,11 @@ func (r *Runner) handle(ctx context.Context, job *os.Root) {
 	}()
 	touch(job, agentproto.HeartbeatFile)
 	exit := r.execute(ctx, job, id)
+	if r.opts.EndpointOnly {
+		// The run's processes are gone (spawn's sweep): what it planted
+		// goes before the Bridge reads its output.
+		r.sweepRunFiles()
+	}
 	r.log.Info("agent runner: job finished", "job", id, "exit_code", exit.ExitCode,
 		"timed_out", exit.TimedOut, "cancelled", exit.Cancelled, "duration_ms", exit.DurationMS, "error", exit.Error)
 	r.finish(job, exit)
@@ -103,6 +108,10 @@ func (r *Runner) execute(ctx context.Context, job *os.Root, id string) agentprot
 	}
 
 	runDir := filepath.Join(r.opts.TmpDir, "run-"+id)
+	// Held from before it exists until it is gone: the mount walk passes over
+	// it by this exact path (codex keeps its config.toml there).
+	r.holdOwnTmp(runDir, true)
+	defer r.holdOwnTmp(runDir, false)
 	if err := os.Mkdir(runDir, 0o700); err != nil {
 		return refused("create the run's temp dir: " + err.Error())
 	}

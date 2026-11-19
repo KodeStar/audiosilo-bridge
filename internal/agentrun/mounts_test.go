@@ -252,9 +252,9 @@ func TestEndpointRunRefusedBesideCredentialMounts(t *testing.T) {
 
 // What the endpoint's service has mounted in the compose example runs
 // (allowed): the image's own /agent as an anonymous volume, closed to it; its
-// staging volume with job dirs; a tmpfs (made empty for the container: a
-// run's own files are there) and the kernel's views; a closed folder holding
-// the agent home's marker, which a run can't open either.
+// staging volume with job dirs; its TmpDir on a tmpfs (made empty for the
+// container) and the kernel's views; a closed folder holding the agent
+// home's marker, which a run can't open either.
 func TestEndpointRunBesideHarmlessMounts(t *testing.T) {
 	t.Parallel()
 	te, _ := newEndpointEnv(t, endpointParentEnv())
@@ -263,8 +263,6 @@ func TestEndpointRunBesideHarmlessMounts(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chmod(anon, 0o700) })
-	tmpfs := t.TempDir()
-	mkfile(t, filepath.Join(tmpfs, "run-1", "auth.json"))
 	closed := t.TempDir()
 	mkfile(t, filepath.Join(closed, "agent", agentHomeMarker))
 	if err := os.Chmod(filepath.Join(closed, "agent"), 0o000); err != nil {
@@ -274,7 +272,7 @@ func TestEndpointRunBesideHarmlessMounts(t *testing.T) {
 	ms := []mount{
 		{root: "/var/lib/docker/volumes/" + strings.Repeat("0f", 32) + "/_data", point: anon, fstype: "ext4"},
 		at(te.staging),
-		{root: "/", point: tmpfs, fstype: "tmpfs"},
+		{root: "/", point: te.tmp, fstype: "tmpfs"},
 		{root: "/", point: "/proc", fstype: "proc"},
 		{root: "/", point: "/dev", fstype: "tmpfs"},
 		{root: "/null", point: "/proc/kcore", fstype: "tmpfs"},
@@ -602,9 +600,9 @@ func TestMountCheckFollowsLinksAndFindsSockets(t *testing.T) {
 	if why := walk(at(run)); !strings.Contains(why, "podman.sock") {
 		t.Fatalf("a host's run folder with podman's socket = %q", why)
 	}
-	// A host's /run is a tmpfs, looked at its point alone: the sockets a
-	// folder or two down are still found, by their paths (denied), and a run
-	// folder with none passes (allowed).
+	// A host's /run is a tmpfs, looked at shallow: the sockets a folder or
+	// two down are still found, by their paths (denied), and a run folder
+	// with none passes (allowed).
 	for _, sock := range runtimeSocketPaths {
 		tmpfs := t.TempDir()
 		mkfile(t, filepath.Join(tmpfs, "user", "1000", "bus"))
@@ -736,8 +734,8 @@ func TestVaultNamesMatchTheVault(t *testing.T) {
 
 // A deep tree with nothing of the subscriptions or the vault in it passes
 // (allowed): a library to maxMountDepth folders down, files at the bottom, and
-// a tmpfs mounted inside it, left to its own look (its point alone), with a
-// run's files one folder down.
+// a tmpfs mounted inside it, left to its own look (its point and one folder
+// down), with the service's own per-run folder there.
 func TestDeepCleanMountAllowed(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -750,7 +748,9 @@ func TestDeepCleanMountAllowed(t *testing.T) {
 	tmp := filepath.Join(dir, "tmp")
 	mkfile(t, filepath.Join(tmp, "run-1", "codex", "auth.json"))
 	ms := []mount{at(dir), {root: "/", point: tmp, fstype: "tmpfs"}}
-	if why := newMountWalk(boundedLooks).credentialMount(ms); why != "" {
+	w := newMountWalk(boundedLooks)
+	w.own = func(p string) bool { return p == filepath.Join(tmp, "run-1") }
+	if why := w.credentialMount(ms); why != "" {
 		t.Fatalf("a deep clean tree = %q, want none", why)
 	}
 	// The same tree with the vault at its bottom is refused (denied).
@@ -881,5 +881,181 @@ func TestRootMountShallow(t *testing.T) {
 	mkfile(t, filepath.Join(root, "home", ".codex", "auth.json"))
 	if why := walk(); !strings.Contains(why, "auth.json") {
 		t.Fatalf("a login in the root = %q, want it found", why)
+	}
+}
+
+// A tmpfs is looked at its point and one folder below, as the container's
+// root is: a credential a folder down a host's /dev/shm, /run/user/<uid> or a
+// tmpfs /tmp's parent is found (denied), and the service's own per-run folder
+// is passed over by its exact path (allowed), never by its name: the same
+// tree in a folder the service doesn't hold is refused (denied).
+func TestTmpfsLookedOneFolderDown(t *testing.T) {
+	t.Parallel()
+	walk := func(point, own string) string {
+		w := newMountWalk(boundedLooks)
+		w.own = func(p string) bool { return p == own }
+		return w.credentialMount([]mount{{root: "/", point: point, fstype: "tmpfs"}})
+	}
+	for _, rel := range []string{"session/auth.json", "1000/.codex/auth.json", "bridge/secrets/server_token.enc",
+		"app/openai_api_key"} {
+		tmpfs := t.TempDir()
+		mkfile(t, filepath.Join(tmpfs, filepath.FromSlash(rel)))
+		if why := walk(tmpfs, ""); !strings.Contains(why, filepath.Join(tmpfs, filepath.FromSlash(rel))) {
+			t.Errorf("a tmpfs with %s = %q, want it found", rel, why)
+		}
+	}
+	tmpfs := t.TempDir()
+	mkfile(t, filepath.Join(tmpfs, "run-1", "codex", "config.toml"))
+	if why := walk(tmpfs, filepath.Join(tmpfs, "run-1")); why != "" {
+		t.Fatalf("the service's own run folder = %q, want none", why)
+	}
+	for _, own := range []string{"", filepath.Join(tmpfs, "run-2"), filepath.Join(tmpfs, "run-1", "codex")} {
+		if why := walk(tmpfs, own); !strings.Contains(why, "config.toml") {
+			t.Fatalf("a run folder the service doesn't hold (own %q) = %q, want it found", own, why)
+		}
+	}
+}
+
+// A real endpoint run keeps codex's files in its own folder of a tmpfs TmpDir
+// (allowed): the status ticks during the run pass it over by its exact path
+// (the run's uid is taken for another, so ownership plays no part) and the
+// run ends as it should. A run folder the service doesn't hold, the same
+// files in it, refuses the runs (denied).
+func TestEndpointRunKeepsItsTmpFiles(t *testing.T) {
+	t.Parallel()
+	te, _ := newEndpointEnv(t, endpointParentEnv())
+	te.r.statusEvery = 20 * time.Millisecond
+	te.r.mounts = func() ([]mount, error) {
+		return []mount{at(te.staging), {root: "/", point: te.tmp, fstype: "tmpfs"}}, nil
+	}
+	behavior := `touch "$CODEX_HOME/config.toml" "$CODEX_HOME/auth.json"; sleep 1.5` + "\n"
+	if err := os.WriteFile(filepath.Join(te.codexCap, "behavior"), []byte(behavior), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	te.start(t)
+	if ex := waitDone(t, te.submit(t, endpointReq), 30*time.Second); ex.Error != "" || ex.ExitCode != 0 {
+		t.Fatalf("exit = %+v, want the run to end as it should", ex)
+	}
+	mkfile(t, filepath.Join(te.tmp, "run-left", "codex", "config.toml"))
+	te.r.refreshMounts()
+	if why := te.r.credentialProblem(); !strings.Contains(why, filepath.Join("run-left", "codex", "config.toml")) {
+		t.Fatalf("credentialProblem = %q, want the folder it doesn't hold found", why)
+	}
+}
+
+// A file of a credential's name a run planted (owned by the service's uid, in
+// its staging dir or TmpDir, reached through folders alone) is the run's own
+// (allowed, and listed for the sweep); the same files owned by another uid, a
+// file of the service's uid on a host mount outside those areas or mounted
+// inside the staging dir, and one reached through a link out of an area each
+// refuse the runs (denied).
+func TestRunPlantedCredentialFiles(t *testing.T) {
+	t.Parallel()
+	self := os.Geteuid()
+	type setup struct {
+		staging, tmp string
+		ms           []mount
+	}
+	newSetup := func(t *testing.T) setup {
+		s := setup{staging: t.TempDir(), tmp: t.TempDir()}
+		s.ms = []mount{at(s.staging), {root: "/", point: s.tmp, fstype: "tmpfs"}}
+		return s
+	}
+	walk := func(s setup, uid int, extra ...mount) (string, []runFile) {
+		w := newMountWalk(boundedLooks)
+		w.selfUID, w.areas = uid, []string{s.staging, s.tmp}
+		why := w.credentialMount(append(slices.Clone(s.ms), extra...))
+		return why, w.runFiles
+	}
+
+	s := newSetup(t)
+	planted := []string{
+		filepath.Join(s.staging, "auth.json"),
+		filepath.Join(s.staging, "job-1", "work", "out", vaultKeyFile),
+		filepath.Join(s.tmp, "auth.json"),
+		filepath.Join(s.tmp, "x", "openai_api_key"),
+	}
+	for _, p := range planted {
+		mkfile(t, p)
+	}
+	why, files := walk(s, self)
+	if why != "" || len(files) != len(planted) {
+		t.Fatalf("a run's planted files = %q, %+v, want none refused and all %d listed", why, files, len(planted))
+	}
+	if why, _ := walk(s, self+1); !strings.Contains(why, "auth.json") {
+		t.Fatalf("the same files owned by another uid = %q, want them found", why)
+	}
+
+	s = newSetup(t)
+	host := t.TempDir()
+	mkfile(t, filepath.Join(host, "auth.json"))
+	if why, _ := walk(s, self, at(host)); !strings.Contains(why, filepath.Join(host, "auth.json")) {
+		t.Fatalf("a host mount's file of the service's uid = %q, want it found", why)
+	}
+
+	s = newSetup(t)
+	inside := filepath.Join(s.staging, "share")
+	mkfile(t, filepath.Join(inside, ".codex", "auth.json"))
+	if why, _ := walk(s, self, at(inside)); !strings.Contains(why, filepath.Join(inside, ".codex", "auth.json")) {
+		t.Fatalf("a host folder mounted inside the staging dir = %q, want it found", why)
+	}
+
+	s = newSetup(t)
+	elsewhere := t.TempDir()
+	mkfile(t, filepath.Join(elsewhere, "auth.json"))
+	if err := os.Symlink(elsewhere, filepath.Join(s.staging, "link")); err != nil {
+		t.Fatal(err)
+	}
+	if why, _ := walk(s, self); !strings.Contains(why, filepath.Join(s.staging, "link", "auth.json")) {
+		t.Fatalf("a file reached through a link out of the staging dir = %q, want it found", why)
+	}
+}
+
+// The endpoint's service doesn't count what a run planted in its own areas
+// (allowed: no refusal) and removes it when it starts and after each run;
+// removeRunFile leaves a file of another uid's and a folder with something
+// in it (denied).
+func TestEndpointServiceSweepsRunFiles(t *testing.T) {
+	t.Parallel()
+	te, _ := newEndpointEnv(t, endpointParentEnv())
+	te.r.selfUID = os.Geteuid() // the test's files are the service's own
+	te.r.mounts = func() ([]mount, error) {
+		return []mount{at(te.staging), {root: "/", point: te.tmp, fstype: "tmpfs"}}, nil
+	}
+	planted := []string{filepath.Join(te.staging, "auth.json"), filepath.Join(te.tmp, "x", "openai_api_key")}
+	for _, p := range planted {
+		mkfile(t, p)
+	}
+	if why := te.r.credentialProblem(); why != "" {
+		t.Fatalf("credentialProblem = %q, want none", why)
+	}
+	gone := func(p string) bool { _, err := os.Lstat(p); return errors.Is(err, fs.ErrNotExist) }
+	te.start(t)
+	deadline := time.Now().Add(10 * time.Second)
+	for !gone(planted[0]) || !gone(planted[1]) {
+		if time.Now().After(deadline) {
+			t.Fatal("the files a run planted are still there after the service started")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	// After a job (here one of the service's own uid, refused: the sweep
+	// follows every job), a file planted since is gone too.
+	mkfile(t, planted[0])
+	waitDone(t, te.submit(t, endpointReq), 30*time.Second)
+	if !gone(planted[0]) {
+		t.Fatal("a file a run planted is still there after the job")
+	}
+
+	area := t.TempDir()
+	mkfile(t, filepath.Join(area, "auth.json"))
+	mkfile(t, filepath.Join(area, "secret.key", "inside"))
+	if removeRunFile(runFile{area: area, rel: "auth.json"}, os.Geteuid()+1) || gone(filepath.Join(area, "auth.json")) {
+		t.Fatal("removeRunFile removed a file of another uid's")
+	}
+	if removeRunFile(runFile{area: area, rel: "secret.key"}, os.Geteuid()) {
+		t.Fatal("removeRunFile removed a folder with something in it")
+	}
+	if !removeRunFile(runFile{area: area, rel: "auth.json"}, os.Geteuid()) || !gone(filepath.Join(area, "auth.json")) {
+		t.Fatal("removeRunFile left the service's own file")
 	}
 }

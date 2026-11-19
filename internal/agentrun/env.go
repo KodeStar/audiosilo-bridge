@@ -224,16 +224,91 @@ func (r *Runner) tickMounts() {
 	r.walkMountsLocked()
 }
 
-// walkMountsLocked walks the mounts (mounts.go) and keeps the answer; mountMu
-// is held, so two callers never walk at once.
+// walkMountsLocked walks the mounts (mounts.go) and keeps the answer and the
+// files a run planted; mountMu is held, so two callers never walk at once.
 func (r *Runner) walkMountsLocked() {
 	var why string
+	r.runFiles = nil
 	if ms, err := r.mounts(); err != nil {
 		why = "the mounts can't be read: " + err.Error()
 	} else {
-		why = newMountWalk(r.looks).credentialMount(ms)
+		w := newMountWalk(r.looks)
+		w.own, w.selfUID, w.areas = r.isOwnTmp, r.selfUID, r.writableAreas()
+		why = w.credentialMount(ms)
+		r.runFiles = w.runFiles
 	}
 	r.mountLast.Store(&why)
+}
+
+// writableAreas are the folders a run of the endpoint's service can write
+// that are the service's own: its staging dir and TmpDir (mounts.go's
+// runMade).
+func (r *Runner) writableAreas() []string {
+	var out []string
+	for _, dir := range []string{r.opts.Staging, r.opts.TmpDir} {
+		if abs, err := filepath.Abs(dir); err == nil {
+			out = append(out, abs)
+		}
+	}
+	return out
+}
+
+// holdOwnTmp records (on) or forgets the per-run folder dir as one of this
+// runner's own, which the mount walk passes over by its exact path.
+func (r *Runner) holdOwnTmp(dir string, on bool) {
+	r.ownTmpMu.Lock()
+	defer r.ownTmpMu.Unlock()
+	if on {
+		r.ownTmp[filepath.Clean(dir)] = true
+	} else {
+		delete(r.ownTmp, filepath.Clean(dir))
+	}
+}
+
+// isOwnTmp reports whether p is a per-run folder this runner holds.
+func (r *Runner) isOwnTmp(p string) bool {
+	r.ownTmpMu.Lock()
+	defer r.ownTmpMu.Unlock()
+	return r.ownTmp[filepath.Clean(p)]
+}
+
+// sweepRunFiles walks the mounts afresh and removes the files of a
+// credential's name a run planted in the service's own areas (runMade), each
+// through an os.Root over its area (a link swapped in can't lead out) and
+// only while it is still the service's own; a folder is removed only when
+// empty, so nothing a host mounted under one is reached. The endpoint's
+// service calls it when it starts and after each run.
+func (r *Runner) sweepRunFiles() {
+	r.mountMu.Lock()
+	defer r.mountMu.Unlock()
+	r.walkMountsLocked()
+	removed := 0
+	for _, f := range r.runFiles {
+		if removeRunFile(f, r.selfUID) {
+			removed++
+		}
+	}
+	r.runFiles = nil
+	if removed > 0 {
+		r.log.Warn("agent runner: removed files of a credential's name a run left", "count", removed)
+	}
+}
+
+// removeRunFile removes f when it is still uid's (an empty folder included).
+func removeRunFile(f runFile, uid int) bool {
+	root, err := os.OpenRoot(f.area)
+	if err != nil {
+		return false
+	}
+	defer func() { _ = root.Close() }()
+	info, err := root.Lstat(f.rel)
+	if err != nil {
+		return false
+	}
+	if owner, ok := ownerUID(info); !ok || owner != uid {
+		return false
+	}
+	return root.Remove(f.rel) == nil
 }
 
 // homeReachable reports whether the runner can list, enter or write the agent

@@ -128,6 +128,15 @@ type Runner struct {
 	looks     looks
 	mountMu   sync.Mutex
 	mountLast atomic.Pointer[string]
+	// runFiles are the files of a credential's name the last walk found a run
+	// had planted (mounts.go's runMade), which sweepRunFiles removes (guarded
+	// by mountMu).
+	runFiles []runFile
+	// ownTmp holds the per-run folders this runner has made in its TmpDir and
+	// not yet removed, by their exact paths, which the mount walk passes over
+	// (guarded by ownTmpMu).
+	ownTmpMu sync.Mutex
+	ownTmp   map[string]bool
 	// selfUID is the runner's own uid: a job of its making is a run's
 	// (planted), which the endpoint's service never runs.
 	selfUID int
@@ -192,6 +201,7 @@ func New(opts Options) (*Runner, error) {
 		creds:       map[string]credSeen{},
 		active:      map[string]bool{},
 		sessions:    map[int]bool{},
+		ownTmp:      map[string]bool{},
 		mounts:      readMounts,
 		looks:       boundedLooks,
 		selfUID:     os.Geteuid(),
@@ -240,8 +250,13 @@ func (r *Runner) Run(ctx context.Context) error {
 		if err := r.markHome(); err != nil {
 			r.log.Warn("agent runner: mark the agent home", "err", err)
 		}
-	} else if why := r.credentialProblem(); why != "" {
-		r.log.Warn("agent runner: "+endpointBlocked, "why", why)
+	} else {
+		// What an earlier run planted (before a crash or a restart) goes
+		// before the first answer.
+		r.sweepRunFiles()
+		if why := r.credentialProblem(); why != "" {
+			r.log.Warn("agent runner: "+endpointBlocked, "why", why)
+		}
 	}
 	r.lastDetect = r.now()
 	r.detect(ctx)
@@ -389,7 +404,12 @@ func (r *Runner) version(ctx context.Context, path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer func() { _ = os.RemoveAll(dir) }()
+	// Held from before the CLI writes anything there until it is gone.
+	r.holdOwnTmp(dir, true)
+	defer func() {
+		_ = os.RemoveAll(dir)
+		r.holdOwnTmp(dir, false)
+	}()
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, path, "--version")
