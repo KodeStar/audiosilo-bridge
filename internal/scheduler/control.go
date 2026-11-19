@@ -348,8 +348,8 @@ func (s *Scheduler) Cancel(ctx context.Context, id int64) error {
 // the same statement), and nothing is stopped when it doesn't (store.ErrFollowed),
 // nor when the book finished or a stage failed it since it was read
 // (store.ErrSettled: its own error stays).
-// A later claim of the job that reopens its mapping between the end's checks and
-// the cancel is never stopped.
+// Another claim of the job's id (a later attempt, or another server's) that
+// reopens its mapping between the end's checks and the cancel is never stopped.
 func (s *Scheduler) CancelUnlessFollowed(ctx context.Context, id int64, g store.StopGuard) error {
 	return s.cancel(ctx, id, &g)
 }

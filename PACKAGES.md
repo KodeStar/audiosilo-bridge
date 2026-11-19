@@ -4064,12 +4064,18 @@ internal/
             store.ErrSettled; a cancel that fails is tried stopTries (3) times, a
             poll apart, then the book is kept local, no_share_job, so a book that
             runs on alone never files),
-            and retention 0 purges its transcripts now; a later attempt of the same
-            job running here (Attempt higher) is left alone: the cancel and the end
-            are guarded writes (store.StopGuard: SetBookStatusUnlessFollowed through
-            the engine's CancelUnlessFollowed or scheduler.CancelStoredUnlessFollowed,
-            EndGenerateBook taking the attempt), so a claim landing between the check
-            and the write is never stopped nor its mapping ended. Abandon (jobs.Abandoner)
+            and retention 0 purges its transcripts now; another claim of the job's
+            id holding its row (claimMoved: a later attempt running here, or,
+            BR-LINK-RULE-2, another server's or pairing's claim of the same id and
+            attempt) is left alone: the cancel and the end are
+            guarded writes (store.StopGuard, the claim's id, attempt, server and
+            pairing: SetBookStatusUnlessFollowed through the engine's
+            CancelUnlessFollowed or scheduler.CancelStoredUnlessFollowed,
+            EndGenerateBook taking the guard), so a claim landing between the check
+            and the write is never stopped nor its mapping ended. Abandon reads the
+            mapping only while the row is its claim's (ownMapping: the mapping is
+            keyed by the job's id alone, and a new pairing's claim may have mapped
+            its own book there). Abandon (jobs.Abandoner)
             does the same for a job the runner ended without running it, before it
             returns even when the engine hasn't started (stopBook then cancels the book
             in the store alone, scheduler.CancelStoredUnlessFollowed: nothing runs it yet; and once
@@ -4077,8 +4083,9 @@ internal/
             book before that write, or a status such a stage wrote over it, through
             the engine's guarded cancel, and only then purges a retention 0 book's
             transcripts (no engine, no hold on the book), unless
-            another open job follows the book or a later claim of the same job does:
-            an Attempt higher, or the job's mapping reopened by its attach (checked
+            another open job follows the book or another claim of the job's id does:
+            an Attempt higher, another server's or pairing's claim, or the job's
+            mapping reopened by its attach (checked
             in the cancel's own write, StopGuard.Ended), as in release, bridge#65; that wait runs through Options.Background, the app's
             Bridge.bg tasks, so it ends with the Bridge), and waitEngine for a
             run cancelled (or taken back) while it waits for the engine, which never
@@ -4112,9 +4119,9 @@ internal/
             Under the hold the book is looked at again (purgeHeld): one no longer
             finished, or that an open job follows again (a later claim of its job
             re-opened and re-admitted it while the purge waited), keeps its
-            transcripts and stays unswept; a job end's purge also leaves a book to a
-            later claim of the job recorded before its attach reopened the mapping
-            (store.LaterClaim).
+            transcripts and stays unswept; a job end's purge also leaves a book to
+            another claim of the job's id recorded before its attach reopened the
+            mapping (store.OtherClaim).
             Phase 1c, DESCRIPTIONS (describejob.go): Options.Describer is the
             engine's description step (pipeline.Executor.Describe). A generate job's
             write() saves the characters and recaps first, then runs it

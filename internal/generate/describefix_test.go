@@ -522,7 +522,7 @@ func TestDescribeJobIgnoresAnotherServersRun(t *testing.T) {
 	if err := hr.db.PutGenerateBook(ctx, store.GenerateBook{ServerJobID: 9, BookID: &b.ID, LibraryID: 1, RelPath: "Author/Book"}); err != nil {
 		t.Fatal(err)
 	}
-	_ = hr.db.EndGenerateBook(ctx, 9, 1, time.Now())
+	_ = hr.db.EndGenerateBook(ctx, store.StopGuard{JobID: 9, Attempt: 1}, time.Now())
 	d := &fakeDescriber{db: hr.db}
 	stop := hr.runAll(hr.describeHandler(d))
 	defer stop()

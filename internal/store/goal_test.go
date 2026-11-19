@@ -178,14 +178,14 @@ func TestUnsweptCountsFromTheLatestJob(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := db.EndGenerateBook(ctx, 100, 1, chaptersEnd); err != nil {
+	if err := db.EndGenerateBook(ctx, StopGuard{JobID: 100, Attempt: 1}, chaptersEnd); err != nil {
 		t.Fatal(err)
 	}
 	// Denied while the later job is still open.
 	if got, _ := db.UnsweptGenerateBooks(ctx, chaptersEnd.Add(time.Hour)); len(got) != 0 {
 		t.Fatalf("a book a job still follows was listed: %+v", got)
 	}
-	if err := db.EndGenerateBook(ctx, 200, 1, generateEnd); err != nil {
+	if err := db.EndGenerateBook(ctx, StopGuard{JobID: 200, Attempt: 1}, generateEnd); err != nil {
 		t.Fatal(err)
 	}
 	// Denied: a day after the generate job ended, with 30 days' retention.
