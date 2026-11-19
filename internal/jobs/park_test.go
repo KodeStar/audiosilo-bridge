@@ -850,6 +850,28 @@ func TestRunnerShareOff(t *testing.T) {
 	}
 }
 
+// What a stranded attempt heard answers for the job only while no later claim
+// of it runs here: that claim's share is its own (denied: the stranded
+// attempt's share_off is not the new claim's), asked through its own run.
+func TestRunnerShareOffStrandedOnlyWithoutALaterClaim(t *testing.T) {
+	t.Parallel()
+	srv := newFakeServer()
+	r := New(openStore(t), func() Server { return srv }, nil, testOpts())
+	r.mu.Lock()
+	r.stranded = append(r.stranded, strandedJob{job: Job{ID: 4, Attempt: 1, shareOff: true}, srv: srv})
+	r.running[4] = &run{job: Job{ID: 4, Attempt: 2}, srv: srv} // launched, its Reporter not made yet
+	r.mu.Unlock()
+	if off, err := r.ShareOff(context.Background(), 4, false); off || !errors.Is(err, ErrShareNotRunning) {
+		t.Fatalf("a later claim running: %v %v, want ErrShareNotRunning", off, err)
+	}
+	r.mu.Lock()
+	delete(r.running, 4)
+	r.mu.Unlock()
+	if off, err := r.ShareOff(context.Background(), 4, false); !off || err != nil {
+		t.Fatalf("stranded alone: %v %v, want true", off, err)
+	}
+}
+
 // An answer that carries share_off and a cancel runs the handler's OnShareOff
 // before the cancel ends the job's context: its act (keeping the book local)
 // writes the store with that context.

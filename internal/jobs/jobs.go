@@ -957,12 +957,16 @@ var (
 func (r *Runner) ShareOff(ctx context.Context, id int64, ask bool) (bool, error) {
 	r.mu.Lock()
 	var rep *Reporter
-	if ru, ok := r.running[id]; ok {
+	ru, running := r.running[id]
+	if running {
 		rep = ru.rep
 	}
 	stranded, heard := false, false
 	for _, s := range r.stranded {
-		if s.job.ID == id {
+		// A run of the job up here is a later claim (resumeStranded takes a
+		// stranded job off the list before it launches it): what the stranded
+		// attempt heard isn't that claim's.
+		if s.job.ID == id && !running {
 			stranded, heard = true, s.job.shareOff
 		}
 	}
