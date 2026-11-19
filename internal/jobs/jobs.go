@@ -44,7 +44,9 @@ type Job struct {
 	// once a refused token works again) instead of claiming it now, so an earlier
 	// run of it may have spent already.
 	Resumed bool
-	// shareOff: the claim's answer said share_off (Reporter.ShareOff).
+	// shareOff: the claim's answer said share_off, or, for a job resumed after
+	// a restart, the claim or an answer since did (store.ServerJob.ShareOff):
+	// Reporter.ShareOff.
 	shareOff bool
 }
 
@@ -122,6 +124,7 @@ type Store interface {
 	RecordClaim(ctx context.Context, j store.ServerJob) error
 	SetServerJobProgress(ctx context.Context, id int64, attempt int, progress json.RawMessage) error
 	SetServerJobReport(ctx context.Context, id int64, attempt int, progress json.RawMessage, parkMsg string) error
+	SetServerJobShareOff(ctx context.Context, id int64, attempt int) error
 	FinishServerJob(ctx context.Context, id int64, attempt int, state string, result json.RawMessage, errText string) error
 	MarkServerJobReported(ctx context.Context, id int64, attempt int) error
 	OpenServerJobs(ctx context.Context) ([]store.ServerJob, error)
@@ -479,6 +482,7 @@ func (r *Runner) resumeStranded(ctx context.Context, srv Server, wg *sync.WaitGr
 		}
 		r.log.Info("bridge: resuming a job its refused token stopped", "job", job.ID, "kind", job.Kind, "attempt", job.Attempt)
 		job.Resumed = true
+		job.shareOff = job.shareOff || sj.ShareOff // an answer since the claim may have said it
 		r.launch(ctx, srv, job, wg, sj.Error, sj.Progress, nil)
 	}
 }
@@ -510,7 +514,7 @@ func jobOf(j *link.Job) Job {
 // storedJob is a job the store recorded, as a Handler sees it.
 func storedJob(sj store.ServerJob) Job {
 	return Job{ID: sj.ID, Kind: sj.Kind, LibraryID: sj.LibraryID, Path: sj.Path, Params: sj.Params, Attempt: sj.Attempt,
-		Priority: sj.Priority}
+		Priority: sj.Priority, shareOff: sj.ShareOff}
 }
 
 // run is one running job, and the link it runs on. parked is the park message a
@@ -558,7 +562,7 @@ func (r *Runner) start(ctx context.Context, srv Server, job Job, wg *sync.WaitGr
 	// Recorded even when the runner is stopping: a claim that raced the stop
 	// is then resumed under its lease at the next start, not left to lapse.
 	if err := r.store.RecordClaim(context.WithoutCancel(ctx), store.ServerJob{ID: job.ID, Kind: job.Kind, LibraryID: job.LibraryID, Path: job.Path,
-		Params: job.Params, Attempt: job.Attempt, ServerID: serverID, Priority: job.Priority}); err != nil {
+		Params: job.Params, Attempt: job.Attempt, ServerID: serverID, Priority: job.Priority, ShareOff: job.shareOff}); err != nil {
 		r.log.Warn("bridge: recording a claim failed", "job", job.ID, "err", err)
 		if sealing {
 			// Fail closed: without its row the sealed secret could be neither
@@ -656,8 +660,10 @@ func (r *Runner) release(ru *run, stranded bool) {
 // which must go out after the job's own context ended). It reports whether a
 // refused token stopped the job (left running, to resume under its claim).
 func (r *Runner) execute(ctx, base context.Context, srv Server, h Handler, ru *run) (stranded bool) {
+	// A job claimed or resumed with share_off has it stored already (RecordClaim,
+	// or the row it was resumed from).
 	rep := &Reporter{r: r, ru: ru, srv: srv, job: ru.job, cancel: ru.cancel, ctx: ctx, nudge: make(chan struct{}, 1),
-		shareOff: ru.job.shareOff}
+		shareOff: ru.job.shareOff, shareOffKept: ru.job.shareOff}
 	if ru.parked != "" {
 		rep.parked, rep.parkMsg = true, ru.parked
 		// The server hears a park whose code changes as a new park (a bell
@@ -977,8 +983,12 @@ type Reporter struct {
 	// one did): the server moves an open job with its book (a rename the scan
 	// noticed), and the job hears it here.
 	path string
-	// shareOff: the claim or an answer since said share_off (ShareOff).
-	shareOff bool
+	// shareOff: the claim or an answer since said share_off (ShareOff);
+	// shareOffKept that the store has it for a restart; onShareOff is the
+	// handler's OnShareOff.
+	shareOff     bool
+	shareOffKept bool
+	onShareOff   func()
 	// localYielded is a LocalReporter's Yield, for Yielded (a handler's tests).
 	localYielded bool
 }
@@ -1027,6 +1037,35 @@ func (p *Reporter) ShareOff() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.shareOff
+}
+
+// OnShareOff has fn called the moment the job hears share_off (ShareOff): at
+// once when it has already, then at every answer that carries it, so a
+// handler that acts on it from there (keeping what it already made local) need
+// not wait for its own next look, and an act that failed is tried again at the
+// next answer. fn runs on the goroutine that read the answer (the keepalive's,
+// a ConfirmLease's, or another job's Refresh): it must be quick, safe to run
+// beside the handler and more than once, and must not report.
+func (p *Reporter) OnShareOff(fn func()) {
+	p.mu.Lock()
+	p.onShareOff = fn
+	heard := p.shareOff
+	p.mu.Unlock()
+	if heard && fn != nil {
+		fn()
+	}
+}
+
+// HearShareOff acts as an answer that carries share_off does (ShareOff,
+// OnShareOff), without recording it: a handler's tests, on a LocalReporter.
+func HearShareOff(p *Reporter) {
+	p.mu.Lock()
+	p.shareOff = true
+	fn := p.onShareOff
+	p.mu.Unlock()
+	if fn != nil {
+		fn()
+	}
 }
 
 // Last is the progress last recorded.
@@ -1389,7 +1428,24 @@ func (p *Reporter) answer(got *link.Job, err error) bool {
 			p.path = *got.Path
 		}
 		p.shareOff = p.shareOff || got.ShareOff
+		keep := got.ShareOff && !p.shareOffKept
+		fn := p.onShareOff
 		p.mu.Unlock()
+		if got.ShareOff && fn != nil {
+			fn() // first: the handler acts on it before anything else is written
+		}
+		if keep {
+			// Kept for a restart: a job resumed before the server answers again
+			// keeps its results local all the same. A failed write is tried
+			// again at the next answer that carries it.
+			if err := p.r.store.SetServerJobShareOff(context.WithoutCancel(p.ctx), p.job.ID, p.job.Attempt); err != nil {
+				p.r.log.Warn("bridge: recording a job's share_off failed", "job", p.job.ID, "err", err)
+			} else {
+				p.mu.Lock()
+				p.shareOffKept = true
+				p.mu.Unlock()
+			}
+		}
 	}
 	switch {
 	case err == nil && got.CancelRequested, errors.Is(err, link.ErrCancelledHere):

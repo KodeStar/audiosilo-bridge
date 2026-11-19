@@ -1156,7 +1156,7 @@ func TestContributeReadsTheBooksModeNow(t *testing.T) {
 	gh := newFakeGitHub(t)
 	export := t.TempDir()
 	b := contribBook(t, db, store.NewBook{WorkID: "reacher-01", ContribMode: store.ContribModeIssue}, baseChars("x"), baseRecaps("x"))
-	if err := db.SetBookContribMode(context.Background(), b.ID, store.ContribModeLocal); err != nil {
+	if _, err := db.KeepBookLocal(context.Background(), b.ID); err != nil {
 		t.Fatal(err)
 	}
 	cfg := contribConfig(t, db, contribModeIssue, gh.srv.URL, "", export, fakeTokenResolver{token: "ghp_x"})
@@ -1185,7 +1185,7 @@ func TestContributeTurnedLocalWhileResolving(t *testing.T) {
 	meta := newFakeMeta(t, nil, map[string]metaWorkFixture{"reacher-01": {title: "Killing Floor"}})
 	b := contribBook(t, db, store.NewBook{WorkID: "reacher-01", ContribMode: store.ContribModeIssue}, baseChars("x"), baseRecaps("x"))
 	meta.onWork = func() {
-		if err := db.SetBookContribMode(context.Background(), b.ID, store.ContribModeLocal); err != nil {
+		if _, err := db.KeepBookLocal(context.Background(), b.ID); err != nil {
 			t.Error(err)
 		}
 	}

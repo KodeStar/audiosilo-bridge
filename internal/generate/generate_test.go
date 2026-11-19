@@ -1189,6 +1189,36 @@ func TestGenerateShareOffLooksAgainAtOnceAfterALift(t *testing.T) {
 	hr.waitFor("done", func() bool { s, _ := hr.srv.final(71); return s == link.StateDone })
 }
 
+// A share_off heard while the job sits at a share park is acted on at once,
+// not at the job's next look (an idle poll away, an hour here): the park lifts
+// and the job finishes in local mode. On the old code the job waited out the
+// idle poll, and a re-admit meanwhile filed in issue mode.
+func TestGenerateShareOffActsBeforeTheNextLook(t *testing.T) {
+	t.Parallel()
+	hr := newHarness(t)
+	hr.exec.parks["contributing"] = 1
+	h := hr.handler()
+	h.o.IdlePoll = time.Hour
+	hr.srv.add(72, "Author/Book", `{"contribute":"issue"}`)
+	stop := hr.runner(h)
+	defer stop()
+	hr.waitFor("the core_needed park", func() bool {
+		m, err := hr.db.GetGenerateBook(context.Background(), 72)
+		if err != nil || m.BookID == nil {
+			return false
+		}
+		b, err := hr.db.GetBook(context.Background(), *m.BookID)
+		return err == nil && state.IsParkedWith(b.Status, b.ParkCode, state.ParkCoreNeeded)
+	})
+	hr.srv.set(func() { hr.srv.shareOff[72] = true })
+	hr.waitFor("done", func() bool { s, _ := hr.srv.final(72); return s == link.StateDone })
+	var r Result
+	hr.result(72, &r)
+	if b := hr.engineBook(72); b.ContribMode != store.ContribModeLocal || r.ShareSkipped != ShareSkippedContributionsOff {
+		t.Fatalf("engine book mode = %q, result = %+v", b.ContribMode, r)
+	}
+}
+
 // queueShare hands generate-and-share job id (Author/Book) out under attempt,
 // its claim saying shareOff.
 func (hr *harness) queueShare(id int64, attempt int, shareOff bool) {

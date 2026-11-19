@@ -145,7 +145,7 @@ func (e *Executor) contribute(ctx context.Context, book store.Book, r scheduler.
 	// The book's own mode as it is now, not as the dispatch read it: the
 	// description above can wait a long time for an agent slot, and a
 	// sidecars.generate job whose share the server turned off meanwhile keeps
-	// its results local (store.SetBookContribMode).
+	// its results local (store.KeepBookLocal).
 	if e.db != nil {
 		if now, err := e.db.GetBook(ctx, book.ID); err == nil {
 			book.ContribMode = now.ContribMode

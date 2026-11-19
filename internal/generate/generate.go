@@ -368,6 +368,80 @@ type run struct {
 	// share park's stage again in local mode (once a run).
 	shareSkipped string
 	shareLifted  bool
+	// share is a contribute=issue sidecars.generate run's shareGuard (nil for
+	// any other run).
+	share *shareGuard
+}
+
+// shareGuard turns a generate-and-share run's engine book local the moment the
+// job hears share_off (jobs.Reporter.OnShareOff), not at the run's next look,
+// which can be an idle poll away: a re-admit at a contributing park meanwhile
+// (the poller after a data release, a GitHub sign-in, contrib_unavailable's
+// auto-retry) would otherwise run the stage in issue mode and file after the
+// admin refused the share. It runs on the Reporter's goroutine as well as the
+// run's (shareBook), so it has its own lock, and does only a store write under
+// it (never the scheduler's, so no lock order with a book's publish or
+// re-admit): keepShareLocal, at the look the nudge brings, still lifts a share
+// park and records why the share was skipped.
+type shareGuard struct {
+	mu    sync.Mutex
+	heard bool
+	// book is the run's engine book (0 before it has one), local the one the
+	// guard turned local (so later answers write nothing).
+	book, local int64
+}
+
+// guardShare gives a contribute=issue sidecars.generate run its shareGuard
+// and has the job's Reporter call it from now on; stop drops the call.
+func (h *Handler) guardShare(ctx context.Context, r *run) (stop func()) {
+	if r.kind != Kind || r.params.Contribute != ContributeIssue {
+		return func() {}
+	}
+	r.share = &shareGuard{}
+	r.rep.OnShareOff(func() { h.shareHeard(ctx, r, 0) })
+	return func() { r.rep.OnShareOff(nil) }
+}
+
+// shareBook tells the run's shareGuard (if any) its engine book, id, before
+// anything re-admits it: a share_off heard already turns it local at once.
+func (h *Handler) shareBook(ctx context.Context, r *run, id int64) {
+	if r.share != nil {
+		h.shareHeard(ctx, r, id)
+	}
+}
+
+// shareHeard turns the run's engine book local once share_off was heard and
+// the book is known: called with id 0 for an answer that carried share_off,
+// with the book's id once the run has one. A book it turned local wakes the
+// run, whose look lifts a share park at once.
+func (h *Handler) shareHeard(ctx context.Context, r *run, id int64) {
+	g := r.share
+	g.mu.Lock()
+	if id == 0 {
+		g.heard = true
+	} else {
+		g.book = id
+	}
+	if !g.heard || g.book == 0 || g.local == g.book {
+		g.mu.Unlock()
+		return
+	}
+	book := g.book
+	local, err := h.o.DB.KeepBookLocal(ctx, book)
+	if err == nil {
+		g.local = book // a book done keeps its mode: nothing to write again
+	}
+	g.mu.Unlock()
+	switch {
+	case err != nil && ctx.Err() != nil:
+		// The job ended meanwhile: nothing more runs the book for it.
+	case err != nil:
+		// The next answer that carries share_off, or the run's next look, tries
+		// again.
+		h.o.Log.Warn("generate: keeping the results local failed", "job", r.job.ID, "book", book, "err", err)
+	case local:
+		nudge(r.poke)
+	}
 }
 
 // bookKey is what changes on an engine book row when the scheduler moves it.
@@ -395,6 +469,7 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 	}
 	defer stop()
 	r.params = params
+	defer h.guardShare(ctx, r)()
 	eng, err := h.waitEngine(ctx, r)
 	if err != nil {
 		return nil, err
@@ -442,9 +517,12 @@ func (h *Handler) keepShareLocal(ctx context.Context, eng Engine, r *run, b *sto
 		if state.State(b.State) == state.Done {
 			return false
 		}
-		if err := h.o.DB.SetBookContribMode(ctx, b.ID, store.ContribModeLocal); err != nil {
+		switch local, err := h.o.DB.KeepBookLocal(ctx, b.ID); {
+		case err != nil:
 			h.o.Log.Warn("generate: keeping the results local failed", "job", r.job.ID, "book", b.ID, "err", err)
 			return false
+		case !local:
+			return false // done since it was read: it shared as asked
 		}
 		b.ContribMode = store.ContribModeLocal
 	}
@@ -533,6 +611,7 @@ func (h *Handler) runEngineBook(ctx context.Context, eng Engine, r *run, mapped 
 	}
 	if resumed {
 		r.bookID = *mapped.BookID
+		h.shareBook(ctx, r, r.bookID) // before attach re-admits it
 		if err := h.attach(ctx, eng, r, mapped); err != nil {
 			return h.end(ctx, r, nil, err)
 		}
@@ -1197,6 +1276,7 @@ func (h *Handler) queueBook(ctx context.Context, eng Engine, r *run, nb store.Ne
 		return err
 	}
 	r.bookID = b.ID
+	h.shareBook(ctx, r, b.ID)
 	h.o.Log.Info("generate: queued in the engine", "job", r.job.ID, "kind", r.kind, "book", b.ID, "source", r.source, "path", r.rel)
 	eng.Notify()
 	return nil

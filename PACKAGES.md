@@ -1575,6 +1575,12 @@ internal/
             0 on older rows; ServerJob.Priority, never in the page's JSON): a job resumed
             after a restart or a refused token waits for the reserve again when it was of
             interactive priority (jobs.launch).
+            0016 (server#218) adds server_jobs.share_off (the server's share_off, from the
+            claim or SetServerJobShareOff at the first answer that carries it; 0 on
+            older rows; ServerJob.ShareOff, never in the page's JSON), so a job resumed
+            after a restart or a refused token keeps its results local before any
+            answer. KeepBookLocal sets a book's contrib_mode local unless it is done
+            (it reports whether the book is local now), leaving updated_at alone.
   state/    per-book pipeline state machine: table-driven states/lanes/transitions,
             CanStart/NextState guards, the audit fix-loop cap. Pure, no I/O. M6 added
             ParkCode (typed park reasons - M7 added contrib_unavailable, core_needed,
@@ -2201,7 +2207,11 @@ internal/
             now, so an earlier run of it may have spent already. Reporter.ShareOff
             (server#218) is the server's share_off: the claim answer's
             (link.Job.ShareOff) or any report answer's since, kept for the run
-            once heard (a share dropped is not taken up again).
+            once heard (a share dropped is not taken up again) and in the store
+            (server_jobs.share_off, restored by storedJob and resumeStranded).
+            Reporter.OnShareOff calls a handler's func at once if heard, then at
+            every answer that carries it, on the goroutine that read the answer
+            (HearShareOff is its test hook).
             Recovery runs once the link is up: a kind no longer run is failed.
             Nothing is sent that the server refuses for good: a result that isn't a
             JSON object of at most 64 KiB fails the job (errUnreportable) and
@@ -3139,9 +3149,12 @@ internal/
             contribute=issue job keeps its results local instead (keepShareLocal):
             before its engine book exists the book is made in local mode (no GitHub
             check; Run asks once the engine is up, and create again, as prepare
-            can wait), after,
-            store.SetBookContribMode turns the book local (a book the
-            run takes up later too: a resumed or re-claimed job's), and a book parked
+            can wait), after, the moment the answer is read (shareGuard, through
+            Reporter.OnShareOff: a re-admit at a contributing park before the run's
+            next look, an idle poll away, would otherwise file in issue mode)
+            store.KeepBookLocal turns the book local (a book the run takes up later
+            too, as it takes it up: a resumed or re-claimed job's, before attach
+            re-admits it), the guard waking the run, and a book parked
             at contributing over the share (contrib_unavailable, core_needed,
             core_pending) runs the stage again, once a run, whenever it parks (a stage
             running in issue mode when the answer came parks after it; a lift that

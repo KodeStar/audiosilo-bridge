@@ -586,6 +586,106 @@ func TestReporterShareOff(t *testing.T) {
 	}
 }
 
+// OnShareOff (server#218) is called the moment the job hears share_off: at
+// once for a job whose claim said it, at the answer for one told by an answer
+// (not at the handler's next look), and never for a job no answer told.
+func TestReporterOnShareOff(t *testing.T) {
+	t.Parallel()
+	db, srv := openStore(t), newFakeServer()
+	srv.add(&link.Job{ID: 1, Kind: "k.v", Attempts: 1, ShareOff: true})
+	srv.add(&link.Job{ID: 2, Kind: "k.v", Attempts: 1})
+	srv.add(&link.Job{ID: 3, Kind: "k.v", Attempts: 1})
+	var calls [4]atomic.Int32
+	h := handler{kind: "k.v", lane: LaneLight, fn: func(ctx context.Context, j Job, rep *Reporter) (any, error) {
+		rep.OnShareOff(func() { calls[j.ID].Add(1) })
+		switch j.ID {
+		case 1:
+			if calls[1].Load() != 1 {
+				t.Errorf("claimed with share_off: %d calls at once, want 1", calls[1].Load())
+			}
+		case 2:
+			srv.mu.Lock()
+			srv.shareOff = map[int64]bool{2: true}
+			srv.mu.Unlock()
+			waitFor(t, func() bool { return calls[2].Load() > 0 })
+		case 3:
+			n := srv.triesOf(3)
+			waitFor(t, func() bool { return srv.triesOf(3) > n+1 })
+		}
+		rep.OnShareOff(nil)
+		return nil, nil
+	}}
+	r := New(db, func() Server { return srv }, nil, testOpts(), h)
+	runFor(t, r, func() bool {
+		var n int
+		for id := int64(1); id <= 3; id++ {
+			if s, _ := srv.finalState(id); s == link.StateDone {
+				n++
+			}
+		}
+		return n == 3
+	})
+	if calls[2].Load() == 0 || calls[3].Load() != 0 {
+		t.Fatalf("told by an answer: %d calls; never told: %d", calls[2].Load(), calls[3].Load())
+	}
+}
+
+// A job's share_off is kept in the store, from its claim or an answer since
+// (server#218), so a job resumed after a restart has it before any answer: one
+// whose server is unreachable at its first report still keeps its results
+// local. Denied: a job no answer told resumes without it.
+func TestShareOffSurvivesARestart(t *testing.T) {
+	t.Parallel()
+	db, srv := openStore(t), newFakeServer()
+	srv.add(&link.Job{ID: 1, Kind: "k.v", Attempts: 1, ShareOff: true})
+	srv.add(&link.Job{ID: 2, Kind: "k.v", Attempts: 1})
+	srv.add(&link.Job{ID: 3, Kind: "k.v", Attempts: 1})
+	var running atomic.Int32
+	first := handler{kind: "k.v", lane: LanePipeline, fn: func(ctx context.Context, j Job, rep *Reporter) (any, error) {
+		if j.ID == 2 {
+			srv.mu.Lock()
+			srv.shareOff = map[int64]bool{2: true}
+			srv.mu.Unlock()
+			waitFor(t, func() bool {
+				sj, err := db.GetServerJob(context.Background(), 2)
+				return err == nil && sj.ShareOff
+			})
+		}
+		running.Add(1)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}}
+	r := New(db, func() Server { return srv }, nil, testOpts(), first)
+	runFor(t, r, func() bool { return running.Load() == 3 })
+
+	srv.mu.Lock()
+	srv.failing, srv.shareOff = true, nil
+	srv.mu.Unlock()
+	var mu sync.Mutex
+	got := map[int64][2]bool{}
+	second := handler{kind: "k.v", lane: LanePipeline, fn: func(ctx context.Context, j Job, rep *Reporter) (any, error) {
+		mu.Lock()
+		got[j.ID] = [2]bool{j.Resumed, rep.ShareOff()}
+		mu.Unlock()
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}}
+	r2 := New(db, func() Server { return srv }, nil, testOpts(), second)
+	runFor(t, r2, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(got) == 3
+	})
+	mu.Lock()
+	defer mu.Unlock()
+	want := map[int64][2]bool{1: {true, true}, 2: {true, true}, 3: {true, false}}
+	for id, w := range want {
+		if got[id] != w {
+			t.Errorf("job %d resumed: (resumed, share_off) = %v, want %v", id, got[id], w)
+		}
+	}
+}
+
 func TestPublicationRequiresSuccessfulLease(t *testing.T) {
 	for _, mode := range []string{"allowed", "network", "lost", "cancel", "unauthorized"} {
 		t.Run(mode, func(t *testing.T) {
