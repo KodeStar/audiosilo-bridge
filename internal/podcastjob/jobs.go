@@ -803,7 +803,9 @@ func (s *service) lockShow(ctx context.Context, root *os.Root, lib link.Library,
 	}
 	moved := s.relocate(ctx, root, lib, id)
 	if moved == "" || moved == show {
-		s.markUnfound(lib.ID, show, id)
+		if unread { // the only failure wasUnfound answers for
+			s.markUnfound(lib.ID, show, id)
+		}
 		return "", nil, nil, err
 	}
 	if f, unlock, _, err = open(moved); err != nil {
