@@ -814,12 +814,14 @@ func TestUnpairedDoesNotWaitForAbandon(t *testing.T) {
 }
 
 // countingAbandoner's Abandon sends the job's id on entered, waits for release
-// (nil: for its context to end) and counts how many wait at once.
+// (nil: for its context to end) and counts how many wait at once, and how many
+// were told under a context that had ended already (toldEnded).
 type countingAbandoner struct {
 	abandoner
 	release          <-chan struct{}
 	entered          chan int64
 	inFlight, maxers atomic.Int32
+	toldEnded        atomic.Int32
 }
 
 // newCountingAbandoner is a podcast.fetch countingAbandoner running fn (nil:
@@ -833,6 +835,9 @@ func newCountingAbandoner(fn func(context.Context, Job, *Reporter) (any, error),
 }
 
 func (a *countingAbandoner) Abandon(ctx context.Context, j Job) {
+	if ctx.Err() != nil {
+		a.toldEnded.Add(1)
+	}
 	n := a.inFlight.Add(1)
 	for m := a.maxers.Load(); n > m && !a.maxers.CompareAndSwap(m, n); m = a.maxers.Load() {
 	}
@@ -905,32 +910,53 @@ func TestDroppedJobsReleaseOffTheClaimLoop(t *testing.T) {
 	}
 }
 
-// A batch of dropped jobs shares one deadline: releases still waiting at it
-// give up together, and those reached only after it are told with it passed
-// (denied: a deadline each, the batch taking one per round of
-// dropConcurrency; and denied: never told, so a release that needs no wait,
-// such as a sealed feed URL, would never happen). Every row is recorded lost
-// all the same, and each give-up is logged.
-func TestDroppedJobsShareOneDeadline(t *testing.T) {
-	const n = 6
-	h := newCountingAbandoner(nil, nil, n) // waits for its deadline
+// A round of dropped jobs shares one deadline, and a job is recorded lost only
+// once its release returned inside it. Releases still waiting at the deadline
+// give up together and are tried again, their rows still running and held;
+// the jobs the round never reached are told in the next one, ahead of those
+// (denied: a deadline each, the batch taking one per job; denied: recorded
+// lost at the deadline with the work unreleased, where generate's engine book
+// would run on beside the job that waited for the row's end; denied: told
+// under a context that had ended already, where a release that reads the
+// store first releases nothing; and denied: the ones that gave up told first
+// again, the rest never reached).
+func TestDroppedJobsAreRecordedOnlyOnceReleased(t *testing.T) {
+	const n = dropConcurrency + 2
+	release := make(chan struct{})
+	h := newCountingAbandoner(nil, release, 1024) // each waits for release, or its round's deadline
 	db := openStore(t)
 	droppedRows(t, db, h.Kind(), n)
 	logs := &logCounter{n: map[string]int{}}
 	opts := testOpts()
 	opts.Log = slog.New(logs)
 	r := New(db, func() Server { return nil }, nil, opts, h) // unpaired since
-	r.dropDeadline = 200 * time.Millisecond
+	r.dropDeadline = 300 * time.Millisecond
 	startControlled(t, r)
-	waitFor(t, func() bool { return rowsIn(db, n, store.JobLost) })
-	if got := len(h.abandoned()); got != n {
-		t.Fatal("releases told:", got)
+	// The first round's releases wait until its deadline, so the last two rows
+	// are reached only in a later round: told there, though the first ones
+	// give up again in every round.
+	told := map[int64]int{}
+	for told[n-1] == 0 || told[n] == 0 {
+		told[await(t, h.entered)]++
 	}
-	if got := h.maxers.Load(); got != dropConcurrency {
+	if got := logs.count("WARN bridge: releasing a dropped job's work gave up at its deadline"); got == 0 {
+		t.Fatal("no release gave up at a round's deadline")
+	}
+	if got := h.toldEnded.Load(); got != 0 {
+		t.Fatal("releases told under a context that had ended:", got)
+	}
+	if !rowsIn(db, n, store.JobRunning) {
+		t.Fatal("a row was recorded lost before its work was released")
+	}
+	for id := int64(1); id <= n; id++ {
+		if !r.holds(id) {
+			t.Fatal("a job whose work isn't released yet is no longer held:", id)
+		}
+	}
+	close(release)
+	waitFor(t, func() bool { return rowsIn(db, n, store.JobLost) && !r.holds(1) && !r.holds(n) })
+	if got := h.maxers.Load(); got > dropConcurrency {
 		t.Fatal("most releases at once:", got)
-	}
-	if got := logs.count("WARN bridge: releasing a dropped job's work gave up at its deadline"); got != n {
-		t.Fatal("give-ups logged:", got)
 	}
 }
 

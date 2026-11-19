@@ -404,7 +404,7 @@ type Runner struct {
 	// dropping are the dropped jobs whose work is being released, until each
 	// is recorded lost (releaseDropped): no look drops one twice.
 	dropping map[int64]int
-	// dropDeadline bounds one batch of dropped jobs' releases, and a run's own
+	// dropDeadline bounds one round of dropped jobs' releases, and a run's own
 	// (abandonTimeout; tests shorten it).
 	dropDeadline time.Duration
 	// drops are the batches releaseDropped runs; Run waits for them.
@@ -671,10 +671,10 @@ func (r *Runner) dropCause(serverID string) error {
 }
 
 // abandonTimeout bounds the release of dropped jobs' work: a run's own
-// (abandonDropped), and one batch of jobs no run holds (releaseDropped), all
-// of them together. A handler's release may wait on a lock its own run holds
-// (podcast.fetch's file lock), and the run's goroutine the Bridge's stop waits
-// for must go on.
+// (abandonDropped), and one round of the jobs no run holds (releaseDropped),
+// all of them together. A handler's release may wait on a lock its own run
+// holds (podcast.fetch's file lock), and the run's goroutine the Bridge's stop
+// waits for must go on.
 const abandonTimeout = 2 * time.Minute
 
 // dropConcurrency is how many of a batch's dropped jobs release their work at
@@ -698,12 +698,10 @@ func (r *Runner) abandonDropped(ctx context.Context, job Job, why error) {
 
 // abandonWithin releases the work of a job dropped for why under actx, a
 // deadline's context, and logs a slow release and one that gave up at the
-// deadline. One reached only once the deadline passed is told all the same,
-// under the ended context: a release that needs no wait (a sealed feed URL,
-// temp files) still happens, and one that waits gives up at once. A job whose
-// handler holds no work (not an Abandoner) has nothing to release.
+// deadline. A job whose handler holds no work (not an Abandoner) has nothing
+// to release.
 func (r *Runner) abandonWithin(actx context.Context, job Job, why error) {
-	if _, ok := r.handlers[job.Kind].(Abandoner); !ok {
+	if !r.holdsWork(job) {
 		return
 	}
 	start := time.Now()
@@ -717,19 +715,30 @@ func (r *Runner) abandonWithin(actx context.Context, job Job, why error) {
 	}
 }
 
+// holdsWork reports whether job's handler holds work beyond Run that a drop
+// releases (an Abandoner).
+func (r *Runner) holdsWork(job Job) bool {
+	_, ok := r.handlers[job.Kind].(Abandoner)
+	return ok
+}
+
 // releaseDropped releases the work of drops (Abandon) and then records each
 // lost, so a job waiting for one to end (generate's awaitOpenJobEnd reads the
 // row's running state) starts only once its engine book is stopped, as the
 // runner's own ends order it (bridge#37). It runs off the caller's goroutine
-// (a start's look or recover, the claim loop), dropConcurrency at a time, all
-// under one deadline (the drop deadline from the call), so N slow releases
-// hold up neither the start nor the claiming, nor take N deadlines. One that
-// gives up at the deadline, or is reached only after it, is recorded lost all
-// the same (abandonWithin); one the Bridge's stop reaches first, or cuts short,
-// is left running for the next start's look (sweepPairings), never told past
-// the stop. Each job is held (holdsLocked) until it is recorded, so no look
-// drops it twice, and its row is read again as its turn comes (dropStands).
-// Run waits for the batch.
+// (a start's look or recover, the claim loop), dropConcurrency at a time, in
+// rounds of one deadline each (the drop deadline, releaseRound), so N slow
+// releases hold up neither the start nor the claiming, nor take N deadlines.
+// A job is recorded lost only once its release returned inside its round's
+// deadline: one the deadline cut short, or that the round never reached, is
+// still running and held, and goes to the next round, never told under a
+// context that had ended already (generate's Abandon reads the job's engine
+// book first: told so, it would release nothing and the book would run on
+// beside the job that waited for this one's end). One the Bridge's stop
+// reaches first, or cuts short, is left running for the next start's look
+// (sweepPairings), never told past the stop. Each job is held (holdsLocked)
+// until it is recorded, so no look drops it twice, and its row is read again
+// as its turn comes (dropStands). Run waits for the rounds.
 func (r *Runner) releaseDropped(ctx context.Context, drops []drop) {
 	if len(drops) == 0 || ctx.Err() != nil {
 		return // a stop's: left running for the next start's look
@@ -739,34 +748,101 @@ func (r *Runner) releaseDropped(ctx context.Context, drops []drop) {
 		r.dropping[d.job.ID]++
 	}
 	r.mu.Unlock()
-	queue := make(chan drop, len(drops))
-	for _, d := range drops {
-		queue <- d
-	}
-	close(queue)
 	r.drops.Add(1)
 	go func() {
 		defer r.drops.Done()
-		actx, cancel := context.WithTimeout(ctx, r.dropDeadline)
-		defer cancel()
-		var workers sync.WaitGroup
-		for range min(dropConcurrency, len(drops)) {
-			workers.Go(func() {
-				for d := range queue {
-					if ctx.Err() == nil && r.dropStands(ctx, d.job) {
-						r.abandonWithin(actx, d.job, d.why)
-						if ctx.Err() == nil {
-							r.recordLost(ctx, d.job, nil, d.why)
-						}
-					}
-					r.mu.Lock()
-					unholdLocked(r.dropping, d.job.ID)
-					r.mu.Unlock()
-				}
-			})
+		for len(drops) > 0 && ctx.Err() == nil {
+			if drops = r.releaseRound(ctx, drops); len(drops) > 0 && ctx.Err() == nil {
+				r.log.Info("bridge: dropped jobs whose work isn't released yet are tried again", "jobs", len(drops))
+			}
 		}
-		workers.Wait()
+		r.unhold(drops) // a stop's
 	}()
+}
+
+// releaseRound is one round of releaseDropped: each of drops has its turn
+// (releaseTurn), dropConcurrency at a time, all under one deadline. It returns
+// the jobs to try again in the next round, still held: first those the round
+// never reached, in their order, then those whose release the deadline cut
+// short, so a release that keeps giving up never keeps the others waiting.
+func (r *Runner) releaseRound(ctx context.Context, drops []drop) []drop {
+	actx, cancel := context.WithTimeout(ctx, r.dropDeadline)
+	defer cancel()
+	// outcomes[i] is drops[i]'s: each written by the one worker that took it.
+	outcomes := make([]turn, len(drops))
+	queue := make(chan int, len(drops))
+	for i := range drops {
+		queue <- i
+	}
+	close(queue)
+	var workers sync.WaitGroup
+	for range min(dropConcurrency, len(drops)) {
+		workers.Go(func() {
+			for i := range queue {
+				if outcomes[i] = r.releaseTurn(ctx, actx, drops[i]); outcomes[i] == turnDone {
+					r.unhold(drops[i : i+1])
+				}
+			}
+		})
+	}
+	workers.Wait()
+	var unreached, cut []drop
+	for i, d := range drops {
+		switch outcomes[i] {
+		case turnUnreached:
+			unreached = append(unreached, d)
+		case turnCut:
+			cut = append(cut, d)
+		}
+	}
+	return append(unreached, cut...)
+}
+
+// turn is how a dropped job's turn in a round ended (releaseTurn).
+type turn int
+
+const (
+	// turnDone: released and recorded lost, or no longer the claim it was
+	// dropped for (dropStands). Nothing more is done for it.
+	turnDone turn = iota
+	// turnUnreached: the round's deadline passed (or the Bridge stopped)
+	// before its turn came. Its release was never told.
+	turnUnreached
+	// turnCut: its release was told and the round's deadline (or the Bridge's
+	// stop) ended it. Its work may not be released.
+	turnCut
+)
+
+// releaseTurn is one dropped job's turn in a round (releaseRound), whose
+// deadline is actx's: its work released, then the job recorded lost. A job
+// that holds work (holdsWork) is recorded only when its release returned
+// inside the deadline, and is never told once it passed. Nothing is done for
+// a row that is no longer the job's claim (dropStands), nor once the Bridge
+// stops (ctx, the runner's).
+func (r *Runner) releaseTurn(ctx, actx context.Context, d drop) turn {
+	holds := r.holdsWork(d.job)
+	if holds && actx.Err() != nil {
+		return turnUnreached
+	}
+	if ctx.Err() != nil || !r.dropStands(ctx, d.job) {
+		return turnDone
+	}
+	if holds {
+		if r.abandonWithin(actx, d.job, d.why); actx.Err() != nil {
+			return turnCut
+		}
+	}
+	r.recordLost(ctx, d.job, nil, d.why)
+	return turnDone
+}
+
+// unhold ends releaseDropped's hold of drops (dropping).
+func (r *Runner) unhold(drops []drop) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, d := range drops {
+		unholdLocked(r.dropping, d.job.ID)
+	}
 }
 
 // dropStands reads a dropped job's row again as its turn to be released comes

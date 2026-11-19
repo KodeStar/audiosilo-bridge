@@ -2620,13 +2620,19 @@ internal/
             of them. RELEASING DROPPED JOBS (BR-LINK-RULE-2): every drop of a job
             no run holds (the look, recover, resumeStranded, dropUnpaired) goes
             to releaseDropped, which Abandons them off the caller's goroutine,
-            4 at a time (dropConcurrency), all under ONE deadline per batch
-            (abandonTimeout, 2 min), then records each lost; so N slow releases
-            hold up neither a start's resumes nor the claiming, nor take N x 2
-            min. A release that gives up at the deadline is logged and
-            recorded lost all the same, and one reached only after it is told
-            with it passed (Abandon's context ended: a release that needs no
-            wait, a sealed feed URL or temp files, still happens). Each job's row
+            4 at a time (dropConcurrency), in rounds of ONE deadline each
+            (abandonTimeout, 2 min; releaseRound), then records each lost; so N
+            slow releases hold up neither a start's resumes nor the claiming,
+            nor take N x 2 min. A job is recorded lost ONLY once its release
+            returned inside its round's deadline: one the deadline cut short
+            (logged) or that the round never reached stays running and held,
+            and goes to the next round, the unreached first (a release that
+            keeps giving up never starves the rest), never told under a
+            context that had ended already. generate's Abandon reads the job's
+            engine book first: recorded lost with that release cut or never
+            run, the book would run on beside a job that waited for the row's
+            end (awaitOpenJobEnd). A kind that holds no work (not an Abandoner)
+            is recorded at its turn. Each job's row
             is read again as its turn comes (dropStands): one that is no longer
             the running claim it was dropped for (a new pairing's claim took
             its id while it waited, or it ended) is neither released nor
@@ -2634,9 +2640,10 @@ internal/
             recorded, so recover and a later look skip them (one the look
             recorded lost after recover listed it running is found ended at
             its turn). A run's own drop
-            (settle) still releases on its goroutine under its own deadline,
+            (settle) still releases on its goroutine under its own deadline
+            (one that gives up there is recorded lost all the same),
             but never past a stop. Everything runs under the runner's context:
-            a stop cuts a batch short (or finds it unstarted) and the rows it
+            a stop cuts a round short (or finds it unstarted) and the rows it
             left running are the next start's look (a job the stop interrupted
             as the pairing was ended included, before settle looked or after:
             left running, in no list of the runner's, never released on the
