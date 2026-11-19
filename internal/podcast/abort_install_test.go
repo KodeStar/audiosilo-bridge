@@ -25,7 +25,7 @@ func stopAt(boundary string) Boundary {
 // any installed audio, as an older Bridge's exit (or a hand) left them.
 func stuckInstall(t *testing.T, root *os.Root, j Journal, boundary string) {
 	t.Helper()
-	if err := Publish(root, j, time.Now(), stopAt(boundary)); !errors.Is(err, errStop) {
+	if err := Publish(root, nil, j, time.Now(), stopAt(boundary)); !errors.Is(err, errStop) {
 		t.Fatal(err)
 	}
 	for _, p := range []string{"Fixture Show/" + j.AudioTemp, j.Path} {
@@ -72,7 +72,7 @@ func TestRecoverAbortsAnInstallWhoseStagedAudioIsGone(t *testing.T) {
 	if err := root.WriteFile("Fixture Show/"+j.AudioTemp, staged, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := Publish(root, j, time.Now(), nil); err != nil {
+	if err := Publish(root, nil, j, time.Now(), nil); err != nil {
 		t.Fatal("the episode could not be fetched again:", err)
 	}
 	if !Matches(root, j.Path, &j.Fetch) {
@@ -142,7 +142,7 @@ func TestRecoverAbortKeepsTheEarlierPin(t *testing.T) {
 // With its staged audio in place recovery installs it, as before.
 func TestRecoverStillInstallsAPresentStagedAudio(t *testing.T) {
 	root, j := journalFixture(t)
-	if err := Publish(root, j, time.Now(), stopAt("journal")); !errors.Is(err, errStop) {
+	if err := Publish(root, nil, j, time.Now(), stopAt("journal")); !errors.Is(err, errStop) {
 		t.Fatal(err)
 	}
 	if err := abortInstall(root, j); !errors.Is(err, ErrInvalidFile) {

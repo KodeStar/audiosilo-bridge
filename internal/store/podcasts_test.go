@@ -29,6 +29,16 @@ func TestPodcastCacheServerAndLibraryIsolation(t *testing.T) {
 	if len(after) != 1 || after[0].ShowPath != "Renamed" || after[0].CreatedAt != s.CreatedAt {
 		t.Fatal(after)
 	}
+	// By id: per server, and false (no error) for an id it does not hold.
+	if row, ok, err := db.PodcastShowByID(ctx, "a", "one"); err != nil || !ok || row.ShowPath != "Renamed" || row.LibraryID != 3 {
+		t.Fatal(row, ok, err)
+	}
+	if row, ok, err := db.PodcastShowByID(ctx, "b", "one"); err != nil || !ok || row.ShowPath != "Other" {
+		t.Fatal(row, ok, err)
+	}
+	if _, ok, err := db.PodcastShowByID(ctx, "a", "missing"); err != nil || ok {
+		t.Fatal(ok, err)
+	}
 }
 
 func TestArtworkStateIsolationAndReopen(t *testing.T) {

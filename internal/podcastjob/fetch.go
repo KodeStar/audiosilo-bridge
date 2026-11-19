@@ -6,9 +6,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"hash"
 	"io"
+	"log/slog"
 	"os"
 	"path"
 	"time"
@@ -111,46 +111,64 @@ func (b *budget) failure(ctx context.Context, err error) error {
 }
 
 func (h *Fetch) Run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (any, error) {
-	result, err := h.run(parent, job, rep)
+	result, err := h.run(parent, &job, rep)
 	if err != nil && (parent.Err() == nil || !jobs.Resumes(parent)) {
 		h.Abandon(parent, job)
 	}
 	return outcome(result, err)
 }
-func (h *Fetch) run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (_ any, err error) {
+
+// run fetches claimed's episode, moving claimed.Path to where the episode is
+// now when its show folder was renamed by hand (episodeAt), before the
+// download or while it ran, so Abandon clears the record there.
+func (h *Fetch) run(parent context.Context, claimed *jobs.Job, rep *jobs.Reporter) (_ any, err error) {
 	s := h.s
+	job := *claimed
 	var params fetchParams
 	if job.Path == nil || !podcast.ValidEpisodePath(*job.Path) || json.Unmarshal(job.Params, &params) != nil || !podcast.ValidID(params.ShowID) || !podcast.ValidID(params.EpisodeID) {
 		return nil, fail("episode_not_found", "The podcast episode was not found.")
 	}
 	waitCtx, cancel := context.WithTimeout(parent, ceiling)
+	defer cancel()
 	lib, mount, err := s.library(waitCtx, job, rep)
-	cancel()
 	if err != nil {
 		return nil, err
+	}
+	root, err := os.OpenRoot(mount)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = root.Close() }()
+	// Read the show before creating lock artifacts, so invalid paths write
+	// nothing; one the server still names by a show folder renamed by hand is
+	// fetched where it is now. It is read again even at the same path:
+	// episodeAt may have taken the folder in there (renamed back by hand after
+	// a take-in elsewhere, while the server still names it).
+	if _, _, err = s.readEpisode(root, *job.Path, params); err != nil {
+		var p string
+		if p, err = s.episodeAt(waitCtx, root, lib, mount, *job.Path, params, job.ID); err != nil {
+			return nil, err
+		}
+		if p != *job.Path {
+			job.Path, claimed.Path = &p, &p
+		}
+		if _, _, err = s.readEpisode(root, *job.Path, params); err != nil {
+			return nil, err
+		}
 	}
 	unlock, err := s.acquire(parent, s.o.ServerID()+"|fetch|"+mount+"/"+*job.Path)
 	if err != nil {
 		return nil, err
 	}
 	defer unlock()
-	root, err := os.OpenRoot(mount)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = root.Close() }()
-	// Read the show before creating lock artifacts, so invalid paths write nothing.
-	if _, _, err = s.readEpisode(root, *job.Path, params); err != nil {
-		return nil, err
-	}
 	if err := s.beforeWrite(lib, mount, path.Dir(*job.Path)); err != nil {
 		return nil, err
 	}
-	release, err := s.fileLock(parent, root, *job.Path)
+	lock, err := s.lockEpisode(parent, root, *job.Path)
 	if err != nil {
 		return nil, err
 	}
-	defer release()
+	defer lock.release()
 	pairing := s.pairHash()
 	f, e, err := s.fetchSnapshot(parent, root, lib, mount, *job.Path, params)
 	if err != nil {
@@ -179,8 +197,14 @@ func (h *Fetch) run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (_
 		}
 		keep := false
 		if !committed && parent.Err() != nil && jobs.Resumes(parent) && c.Temp != "" {
-			saved, validator := s.loadCheckpoint(job, root, params.ShowID, params.EpisodeID)
-			keep = saved.Temp == c.Temp && saved.Offset == c.Offset && saved.Total == c.Total && netguard.StrongETag(validator)
+			// Read, not loaded: loadCheckpoint drops a record whose partial is
+			// not at its path, and a show folder renamed by hand mid-download
+			// took the partial with it. The resumed job finds the show there
+			// (episodeAt, its record following) and goes on from the partial.
+			if saved, ok := s.readCheckpoint(job); ok && saved.ShowID == params.ShowID && saved.EpisodeID == params.EpisodeID {
+				validator, _ := s.o.Vault.Get(saved.Validator)
+				keep = saved.Temp == c.Temp && saved.Offset == c.Offset && saved.Total == c.Total && netguard.StrongETag(validator)
+			}
 		}
 		if !keep {
 			s.clearCheckpoint(job, root, &c)
@@ -191,8 +215,21 @@ func (h *Fetch) run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (_
 	if err != nil {
 		return nil, err
 	}
+	// A show folder renamed by hand while the episode downloaded took the
+	// partial and the episode's lock with it: the episode is published where
+	// the show is now, its record following it (episodeAt), never downloaded
+	// again.
+	p, err := s.episodeAt(ctx, root, lib, mount, e.Path, params, job.ID)
+	if err != nil {
+		return nil, err
+	}
+	if p != e.Path {
+		e.Path, c.Path = p, p
+		job.Path, claimed.Path = &p, &p
+		lock.follow(p)
+	}
 	rep.Progress(jobs.Progress{Step: "probing", Message: "Checking episode audio"})
-	rd, err := podcast.OpenRegular(root, path.Dir(e.Path)+"/"+c.Temp)
+	rd, err := podcast.OpenRegular(root, c.partialName())
 	if err != nil {
 		return nil, err
 	}
@@ -243,7 +280,7 @@ func (h *Fetch) run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (_
 		if err := podcast.RecoverShow(root, path.Dir(e.Path), s.o.Now(), s.o.Fault); err != nil {
 			return err
 		}
-		_, latest, err := s.readEpisode(root, e.Path, params)
+		feed, latest, err := s.readEpisode(root, e.Path, params)
 		if err != nil {
 			return err
 		}
@@ -257,7 +294,7 @@ func (h *Fetch) run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (_
 		// Once a journal exists recovery owns the candidate, including on a failed
 		// write: the exit's clear drops the record but leaves the file
 		// (dropPartial), for RecoverShow to install.
-		err = podcast.Publish(root, j, s.o.Now(), s.o.Fault)
+		err = podcast.Publish(root, feed, j, s.o.Now(), s.o.Fault)
 		if _, e := root.Lstat(podcast.AttachmentPath(j.Path, ".publish.json")); e == nil {
 			c.Temp = ""
 		}
@@ -290,6 +327,43 @@ func leaseFailure(ctx context.Context, err error, lost string) error {
 	}
 	return fail("bridge_lost", "The server could not confirm the job before saving.")
 }
+
+// episodeAt is where a fetch's episode p is now. The server names p's folder
+// until its rescan, so after a rename by hand that folder is gone, holds
+// another show or cannot be read: the episode is then the same file name in
+// the folder holding the show (lockShow, which takes it in when renamed), and
+// the records of the show's interrupted downloads still under the old folder,
+// this job's own included, follow it (adoptCheckpoints). p when its folder
+// holds the show (the episode itself is missing, or lockShow just took the
+// folder in there) or none does. write_failed when the records cannot be
+// read: the fetch waits, as a take-in does (adopt), rather than leave its
+// record and partial behind. ctx's error when it ended while the show lock
+// was awaited. Before a download its show lock is taken and released before
+// the fetch's own locks; after one, under them (the episode's lock before
+// the show's, as the publication takes them).
+func (s *service) episodeAt(ctx context.Context, root *os.Root, lib link.Library, mount, p string, params fetchParams, self int64) (string, error) {
+	from := path.Dir(p)
+	if f, err := podcast.Read(root, from); err == nil && f.ShowID == params.ShowID {
+		return p, nil
+	}
+	show, _, unlock, err := s.lockShow(ctx, root, lib, mount, from, params.ShowID, nil)
+	if err != nil {
+		if ctx.Err() != nil {
+			return p, ctx.Err() // a stop or the ceiling, not a show that is gone
+		}
+		return p, nil
+	}
+	defer unlock()
+	if show == from {
+		return p, nil
+	}
+	if err := s.adoptCheckpoints(ctx, root, lib, show, from, params.ShowID, self); err != nil {
+		slog.Warn("podcasts: the download records of a show folder renamed by hand could not be read; the fetch waits", "library", lib.ID, "show", show, "err", err)
+		return p, fail("write_failed", "The podcast download records could not be read.")
+	}
+	return show + "/" + path.Base(p), nil
+}
+
 func (s *service) showKey(mount, show string) string {
 	return s.o.ServerID() + "|" + mount + "/" + show
 }
@@ -342,12 +416,20 @@ func (s *service) reuse(ctx context.Context, root *os.Root, lib link.Library, e 
 	}
 	return fetchResult{lib.ID, e.Path, showID, e.ID, *e.Fetch, n, true}, nil
 }
+
+// episodeRescan asks the server to index episode p. One whose show folder was
+// renamed by hand since the server last read it is a path the server does not
+// know (it answers not_indexable), so the show folder is rescanned instead.
 func (s *service) episodeRescan(ctx context.Context, id int64, p string) error {
 	srv := s.o.Server()
 	if srv == nil {
 		return fail("index_failed", "The episode could not be indexed. Retry the job.")
 	}
-	if _, err := srv.RescanPodcast(ctx, id, p); err != nil {
+	_, err := srv.RescanPodcast(ctx, id, p)
+	if errors.Is(err, link.ErrNotIndexable) {
+		_, err = srv.RescanPodcast(ctx, id, path.Dir(p))
+	}
+	if err != nil {
 		return fail("index_failed", "The episode could not be indexed. Retry the job.")
 	}
 	s.setIndexed(id, path.Dir(p), true)
@@ -440,7 +522,7 @@ func (s *service) download(ctx context.Context, b *budget, job jobs.Job, root *o
 			var fetch podcast.Fetch
 			switch {
 			case response.Status != 200 && response.Status != 206 && (response.Status != 416 || c.Offset == 0):
-				err = &netguard.Error{Code: netguard.StatusCode(response.Status), Message: fmt.Sprintf("The episode returned HTTP %d.", response.Status), RetryAfterSeconds: response.RetryAfterSeconds}
+				err = netguard.StatusError("episode", response.Status, response.RetryAfterSeconds)
 			case action == "fresh_get":
 				_ = response.Body.Close()
 				s.clearCheckpoint(job, root, c)
@@ -679,7 +761,11 @@ func (w *downloadWriter) progress() {
 }
 
 // Abandon handles a terminal cancel/lost claim after a resumable stop. Mapping
-// and identities must still match before any owned partial is removed.
+// and identities must still match before any owned partial is removed. The
+// runner names the job by the server's path: a record moved with a show folder
+// renamed by hand (the job's own relocation, or a take-in since) is cleared
+// where it is now (recordOf), and one left under a folder that is gone goes
+// too.
 func (h *Fetch) Abandon(ctx context.Context, job jobs.Job) {
 	if job.Path == nil || job.LibraryID == nil || !podcast.ValidEpisodePath(*job.Path) {
 		return
@@ -702,8 +788,18 @@ func (h *Fetch) Abandon(ctx context.Context, job jobs.Job) {
 		return
 	}
 	defer func() { _ = root.Close() }()
-	release, err := s.fileLock(ctx, root, *job.Path)
+	at := s.recordOf(job, p)
+	job.Path = &at
+	release, err := s.fileLock(ctx, root, at)
 	if err != nil {
+		// Its folder is gone (renamed by hand while this job's row ran, so the
+		// take-in left its record here): no download works at this path, so
+		// the record goes rather than stay for good. Its partial, moved with
+		// the folder, is unrecorded then, and sweepPartials takes it once old.
+		if _, e := root.Lstat(path.Dir(at)); errors.Is(e, os.ErrNotExist) {
+			c, _ := s.loadCheckpoint(job, root, p.ShowID, p.EpisodeID)
+			s.clearCheckpoint(job, root, &c)
+		}
 		return
 	}
 	defer release()

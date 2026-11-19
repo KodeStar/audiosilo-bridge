@@ -20,7 +20,7 @@ import (
 )
 
 func TestOwnedCleanupHonorsAgeLiveJobAndForeignFiles(t *testing.T) {
-	for _, scenario := range []string{"old", "fresh", "live", "foreign", "identity"} {
+	for _, scenario := range []string{"old", "fresh", "live", "relocated", "foreign", "identity"} {
 		t.Run(scenario, func(t *testing.T) {
 			h, job := audioHarness(t)
 			s := h.handler.s
@@ -46,6 +46,14 @@ func TestOwnedCleanupHonorsAgeLiveJobAndForeignFiles(t *testing.T) {
 			dir.Close()
 			if scenario == "live" {
 				if err := h.db.RecordClaim(context.Background(), store.ServerJob{ID: job.ID, Kind: FetchKind, LibraryID: job.LibraryID, Path: job.Path, Attempt: 1, ServerID: "server-1"}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if scenario == "relocated" {
+				// A fetch claimed under the folder's old name that found the show
+				// here (Fetch's relocation): its row names a path the record does not.
+				claimed := "Old Name/" + path.Base(*job.Path)
+				if err := h.db.RecordClaim(context.Background(), store.ServerJob{ID: job.ID, Kind: FetchKind, LibraryID: job.LibraryID, Path: &claimed, Params: job.Params, Attempt: 1, ServerID: "server-1"}); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -184,7 +192,7 @@ func TestOldCommittedTrashCleanupPreservesTombstone(t *testing.T) {
 	j.Fetch.FetchedAt = s.o.Now().Add(-48 * time.Hour).Format(time.RFC3339)
 	j.Chapters.GeneratedAt = j.Fetch.FetchedAt
 	root.WriteFile("Fixture Show/"+j.AudioTemp, data(t, "chap-v24-reverse.mp3"), 0600)
-	if err := podcast.Publish(root, j, s.o.Now(), nil); err != nil {
+	if err := podcast.Publish(root, nil, j, s.o.Now(), nil); err != nil {
 		t.Fatal(err)
 	}
 	j.Op = "delete"
@@ -192,7 +200,7 @@ func TestOldCommittedTrashCleanupPreservesTombstone(t *testing.T) {
 	j.Chapters = nil
 	j.Fetch.DeletedAt = s.o.Now().Add(-25 * time.Hour).Format(time.RFC3339)
 	j.TrashDir = ".audiosilo-trash/podcasts/" + j.EpisodeID + "-g2-owned"
-	if err := podcast.Publish(root, j, s.o.Now(), nil); err != nil {
+	if err := podcast.Publish(root, nil, j, s.o.Now(), nil); err != nil {
 		t.Fatal(err)
 	}
 	show, lib := "Fixture Show", int64(3)

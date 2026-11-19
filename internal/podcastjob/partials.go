@@ -2,9 +2,7 @@ package podcastjob
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"io"
 	"os"
 	"path"
 	"regexp"
@@ -184,21 +182,16 @@ func (s *service) recordedPartials() (map[string]bool, bool) {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
 			continue
 		}
-		rd, err := podcast.OpenRegular(dir, entry.Name())
-		if errors.Is(err, podcast.ErrInvalidFile) || errors.Is(err, os.ErrNotExist) {
-			continue // not a regular file (never read as a record), or cleared since the listing
+		c, err := readRecord(dir, entry.Name())
+		// Not a regular file (never read as a record), cleared since the
+		// listing, or a record no job can read back: it holds nothing.
+		if errors.Is(err, podcast.ErrInvalidFile) || errors.Is(err, os.ErrNotExist) || errors.Is(err, errBadRecord) {
+			continue
 		}
 		if err != nil {
 			return nil, false
 		}
-		b, err := io.ReadAll(io.LimitReader(rd, 16385))
-		_ = rd.Close()
-		if err != nil {
-			return nil, false
-		}
-		// A record no job can read back (readCheckpoint's limit) holds nothing.
-		var c checkpoint
-		if len(b) <= 16384 && json.Unmarshal(b, &c) == nil && podcast.OwnedTemp(c.Temp) {
+		if podcast.OwnedTemp(c.Temp) {
 			recorded[c.Temp] = true
 		}
 	}

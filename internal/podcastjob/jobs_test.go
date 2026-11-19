@@ -48,12 +48,23 @@ type scanServer struct {
 	mount string
 	calls atomic.Int32
 	fail  atomic.Bool
+	// knows, when set, is whether the server has indexed an episode path: like
+	// the server, an episode it has not is refused (not_indexable).
+	knows func(episode string) bool
+	mu    sync.Mutex
+	asked []string
 }
 
 func (s *scanServer) RescanPodcast(_ context.Context, _ int64, show string) (*link.PodcastRescan, error) {
 	s.calls.Add(1)
+	s.mu.Lock()
+	s.asked = append(s.asked, show)
+	s.mu.Unlock()
 	if s.fail.Load() {
 		return nil, errors.New("server unavailable")
+	}
+	if strings.Contains(show, "/") && s.knows != nil && !s.knows(show) {
+		return nil, link.ErrNotIndexable
 	}
 	root, err := os.OpenRoot(s.mount)
 	if err != nil {
@@ -68,6 +79,16 @@ func (s *scanServer) RescanPodcast(_ context.Context, _ int64, show string) (*li
 		return nil, err
 	}
 	return &link.PodcastRescan{Path: show, Episodes: len(f.Episodes)}, nil
+}
+
+// last is the path of the server's last rescan request.
+func (s *scanServer) last() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.asked) == 0 {
+		return ""
+	}
+	return s.asked[len(s.asked)-1]
 }
 
 type harness struct {

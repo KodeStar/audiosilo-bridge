@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"os"
 	"path"
 	"strconv"
@@ -50,7 +51,6 @@ func (h *Retain) run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (
 		return nil, err
 	}
 	show := *job.Path
-	result := retainResult{LibraryID: lib.ID, ShowPath: show, ShowID: p.ShowID}
 	rep.Progress(jobs.Progress{Step: "retaining", Message: "Checking retained episodes"})
 	srv, ok := s.o.Server().(RetentionServer)
 	if !ok {
@@ -71,35 +71,28 @@ func (h *Retain) run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (
 		return nil, err
 	}
 	defer func() { _ = root.Close() }()
-	unlock, err := s.acquire(ctx, s.showKey(mount, show))
+	// A show folder renamed by hand is checked where it is now (as a poll is).
+	// The server names the old folder until its rescan, so its answers grant
+	// no deletion there until then (RetentionEligible: show_path).
+	show, feed, unlock, err := s.lockShow(ctx, root, lib, mount, show, p.ShowID, func(show string) error {
+		return s.beforeWrite(lib, mount, show)
+	})
 	if err != nil {
 		return nil, err
 	}
-	var feed *podcast.Feed
-	err = func() error {
-		defer unlock()
-		if err := s.beforeWrite(lib, mount, show); err != nil {
-			return err
-		}
-		if err := podcast.RecoverShow(root, show, s.o.Now(), s.o.Fault); err != nil {
-			return err
-		}
-		var err error
-		feed, err = podcast.Read(root, show)
-		return err
-	}()
-	if err != nil {
-		return nil, err
-	}
-	if feed.ShowID != p.ShowID {
-		return nil, fail("identity_changed", "The podcast show identity changed.")
-	}
+	unlock()
+	result := retainResult{LibraryID: lib.ID, ShowPath: show, ShowID: p.ShowID}
 	s.cleanOwned(ctx, root, lib, mount, show, job.ID)
 	pairing := s.pairHash()
 	// ask stamps dispatch on the Bridge's monotonic clock: a snapshot's age runs from there.
+	warned := false
 	ask := func(r link.PodcastRetentionRequest) (*link.PodcastRetentionCheck, time.Time, error) {
 		sent := s.o.BudgetNow()
 		check, err := srv.CheckPodcastRetention(ctx, lib.ID, r)
+		if err == nil && check != nil && !warned && !replyCurrent(check.CheckedAt, s.o.Now()) {
+			warned = true
+			slog.Warn("podcasts: the server's retention answer is dated too far from the Bridge's clock; nothing is deleted until the clocks agree", "library", lib.ID, "checked_at", check.CheckedAt)
+		}
 		return check, sent, err
 	}
 	for _, candidate := range feed.Episodes {
@@ -141,7 +134,7 @@ func (h *Retain) run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (
 			if err := podcast.RecoverShow(root, show, s.o.Now(), s.o.Fault); err != nil {
 				return false, err
 			}
-			_, current, err := s.readEpisode(root, candidate.Path, fetchParams{p.ShowID, candidate.ID})
+			latest, current, err := s.readEpisode(root, candidate.Path, fetchParams{p.ShowID, candidate.ID})
 			if err != nil {
 				return false, err
 			}
@@ -185,7 +178,7 @@ func (h *Retain) run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (
 				}
 				return s.o.Fault.Hit(at)
 			}
-			if err := podcast.Publish(root, j, s.o.Now(), boundary); err != nil {
+			if err := podcast.Publish(root, latest, j, s.o.Now(), boundary); err != nil {
 				if errors.Is(err, denied) {
 					if err := podcast.AbortDelete(root, j); err != nil {
 						return false, err
@@ -224,14 +217,33 @@ func (h *Retain) run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (
 	return result, nil
 }
 
+// replyWindow bounds how far the server's checked_at may lie from the Bridge's
+// clock. Freshness is the round trip (age, five seconds); this caps the
+// reply's own age, which the round trip cannot see (a reply held or replayed
+// on its way), while leaving room for two clocks that differ a little. A
+// Bridge whose clock is further off deletes nothing (a warning in the log).
+const replyWindow = 5 * time.Minute
+
+// replyCurrent reports whether checkedAt (the server's) lies within
+// replyWindow of now (the Bridge's).
+func replyCurrent(checkedAt string, now time.Time) bool {
+	t, err := time.Parse(time.RFC3339, checkedAt)
+	if err != nil {
+		return false
+	}
+	d := now.Sub(t)
+	return d <= replyWindow && d >= -replyWindow
+}
+
 // RetentionEligible independently checks the server snapshot. Missing, stale or
 // inconsistent aggregate fields cannot grant deletion authority. Age is measured
-// from request dispatch on the Bridge's monotonic clock, independently of checked_at.
+// from request dispatch on the Bridge's monotonic clock; checked_at must also
+// lie within replyWindow of now.
 func RetentionEligible(c *link.PodcastRetentionCheck, library int64, show string, r link.PodcastRetentionRequest, f *podcast.Fetch, now time.Time, age time.Duration) bool {
 	if c == nil || !f.Valid() || f.DeletedAt != "" || !c.Eligible || !c.Policy.Valid() || c.Policy.Mode == "archive" || c.Policy.Mode == "keep" && !c.OutsideKeepWindow || c.LibraryID != library || c.ShowPath != show || c.ShowID != r.ShowID || c.Path != r.Path || c.Generation != r.Generation || c.SHA256 != r.SHA256 || c.Bytes != r.Bytes || c.Followers <= 0 || !c.AllFinished || c.AllFinishedAt == nil || c.DeleteAfter == nil || c.Starred || c.Queued || c.ActiveStream || c.FetchOpen {
 		return false
 	}
-	if age < 0 || age > 5*time.Second {
+	if age < 0 || age > 5*time.Second || !replyCurrent(c.CheckedAt, now) {
 		return false
 	}
 	finished, err := time.Parse(time.RFC3339, *c.AllFinishedAt)

@@ -84,6 +84,13 @@ func TestRetentionSharedVectorsAndStaleness(t *testing.T) {
 					t.Fatal("invalid snapshot age authorized deletion", age)
 				}
 			}
+			// The reply's own age: checked_at within replyWindow of the Bridge's clock.
+			if got := RetentionEligible(&c, 3, "Fixture Show", wire.Request, f, now.Add(replyWindow), 0); got != v.Eligible {
+				t.Fatal("a reply inside the window was refused", got)
+			}
+			if RetentionEligible(&c, 3, "Fixture Show", wire.Request, f, now.Add(replyWindow+time.Second), 0) {
+				t.Fatal("a reply older than the window authorized deletion")
+			}
 		})
 	}
 }
@@ -118,7 +125,7 @@ func eligibleCheck(r link.PodcastRetentionRequest, keep link.PodcastPolicy, now 
 
 func TestRetainDeletesOnlyVerifiedOwnedGeneration(t *testing.T) {
 	requireProbe(t)
-	for _, protection := range []string{"none", "clock-ahead", "clock-behind", "fresh-refresh", "starred", "queued", "stream", "fetch", "zero", "unfinished", "stale", "slow-final", "slow-refresh", "error", "archive", "identity", "changed-bytes"} {
+	for _, protection := range []string{"none", "clock-ahead", "clock-behind", "reply-old", "reply-future", "reply-undated", "fresh-refresh", "starred", "queued", "stream", "fetch", "zero", "unfinished", "stale", "slow-final", "slow-refresh", "error", "archive", "identity", "changed-bytes"} {
 		t.Run(protection, func(t *testing.T) {
 			h, fetch := audioHarness(t)
 			audio := data(t, "chap-v24-reverse.mp3")
@@ -162,10 +169,16 @@ func TestRetainDeletesOnlyVerifiedOwnedGeneration(t *testing.T) {
 					c.Followers = 0
 				case "unfinished":
 					c.AllFinished = false
-				case "clock-ahead":
-					c.CheckedAt = now.Add(time.Hour).Format(time.RFC3339)
+				case "clock-ahead": // a server clock a few minutes ahead or behind still deletes
+					c.CheckedAt = now.Add(4 * time.Minute).Format(time.RFC3339)
 				case "clock-behind":
+					c.CheckedAt = now.Add(-4 * time.Minute).Format(time.RFC3339)
+				case "reply-old": // an aggregate older than the round trip grants nothing (bridge#13)
 					c.CheckedAt = now.Add(-time.Hour).Format(time.RFC3339)
+				case "reply-future":
+					c.CheckedAt = now.Add(time.Hour).Format(time.RFC3339)
+				case "reply-undated":
+					c.CheckedAt = ""
 				case "identity":
 					c.ShowID = "1111111111111111"
 				}

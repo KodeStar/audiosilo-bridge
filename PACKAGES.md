@@ -1487,7 +1487,9 @@ internal/
             one tolerance of "the same place" (audiblesync's echoMs, the re-assert's
             once-per-place rule). 0007 adds podcast_shows, a credential-free cache keyed by
             (server_id, show_id), indexed by server/library/feed hash. An empty
-            library cache is rebuilt from feed.json before subscription dedupe.
+            library cache is rebuilt from feed.json before subscription dedupe;
+            a follow reads the folders its rows name for the feed first, every
+            show folder only on a miss, and PodcastShowByID finds a renamed show.
             0008 adds podcast_artwork_state keyed by server/library/show, storing
             only source hash, failure count and next retry time (1 h to 24 h).
             0001 is sidecars' 13 migrations squashed at the import (the
@@ -2296,8 +2298,9 @@ internal/
             credential stripping shared with buffered feed/artwork GETs, including
             later hops in a redirect chain. The handler owns the combined
             three-attempt retry/resume budget; ResumeAction validates exact strong identity.
-            StatusCode is a host's status as a code, the feed's and the episode's
-            alike (gone for 410, else http_<status>).
+            StatusError maps a host's HTTP answer to the failure, the feed's and
+            the episode's alike (bridge#26): gone for 410, else http_<status>, a
+            message naming what was asked for and the Retry-After seconds.
             Phase 2c-1 feed/artwork client: explicit DNS resolution and a socket
             Control check of the exact IP, public addresses or configured CIDRs
             only (including NAT64 embedded IPv4 checks), no environment proxy.
@@ -2352,12 +2355,74 @@ internal/
             manifests identify trash for cleanup after rescan or after 24 h.
             Invalid Fetch keeps its episode and grants no file authority. Shared
             phase2c2 fixtures are copied byte-for-byte, checked by manifest hashes.
+            Publish takes the feed its caller read under the show lock and
+            complete writes the new pin without reading feed.json again, so a
+            fetch parses it three times, not six (bridge#13). A show folder
+            renamed by hand still names its episodes under the old folder, which
+            Read refuses: ReadMoved answers the old name (a folder whose old name
+            still holds the same show id is a copy and is refused, as is one
+            whose old name has a feed.json it cannot read; an old name holding
+            another show, names swapped by hand, or none is a rename) and Adopt
+            moves the paths of the pending journals, the committed trash
+            manifests and then feed.json, so a stop part way through adopts
+            again (a manifest it could not rewrite stops it before feed.json).
+            A journal naming a gone third folder moves too when its show id
+            and its episode's id and file name are the show's (renamed again
+            after an adoption that stopped part way); a pending one of another
+            show still fails it. A feed.json over the 32 MiB read cap is
+            ErrTooLarge. EnsureDir never makes the show folder itself, so a job
+            running on after a rename by hand never brings the old name back.
   podcastjob/ podcast.fetch opts into the interactive reserve (2c-2b), with
             download as its ordinary lane. Subscribe, poll and retain do not opt in.
             podcast.subscribe and podcast.poll (light lane): require the
             heartbeat's podcasts kind and the checked writable mount at each
             write. Per-library subscribe and per-show write locks, hash dedupe,
             cache rebuild, artwork sniffing, permanent moves and targeted rescan.
+            A show folder renamed by hand (bridge#13) is taken in under the show
+            lock when its read refuses (readShow, adopt: episodes, downloads,
+            artwork, secret and cache row kept, the new folder rescanned). A
+            poll, retain or fetch whose folder is gone, or cannot be read (an
+            unreadable feed.json, a refused copy of another show; a copy of its
+            own show still fails), finds the show by its id
+            (lockShow, relocate: the cache row, then every folder); one whose
+            folder holds another show (names swapped by hand) releases that
+            show lock and takes the other folder's (lockShow; never two show
+            locks, and a fetch does this before its own locks); a follow joins
+            it rather than starting a new show. The server still names the old
+            folder until its own scan, so a retain there deletes nothing until
+            then. A copy of a renamed folder made before either was taken in is
+            refused once another folder (its cache row's) holds the show.
+            The records of the show's interrupted downloads move to the new
+            paths with it (adoptCheckpoints, before feed.json, so a stop between
+            takes the folder in again; records it cannot list stop the
+            adoption, and a fetch that cannot list them where it relocates
+            fails write_failed; the show's records under a gone earlier name
+            move too; one of another show stays, and one whose download still
+            runs, matched by its path or by its fetch's show and episode, stays
+            until that fetch relocates and moves its own; the day-old cleanup
+            matches a running download alike), or their partials would stay in
+            the folder for good. A fetch's Abandon, named by the server's old
+            path, clears its record where it moved (recordOf), and drops one
+            left under a folder that is gone (its partial, unrecorded then, is
+            swept once old). A job still working under the
+            old name never saves over, clears or abandons another show's record
+            at its path (one moved there when names were swapped), nor its
+            partial. A fetch whose folder lockShow takes in where it is (renamed
+            back by hand after a take-in) reads its episode again there rather
+            than failing as not found. A fetch whose folder is renamed while it
+            downloads finds the show again after the download (episodeAt) and
+            publishes there from its partial, its record and lock following
+            (heldLock.follow), never downloading again; one the Bridge stops
+            meanwhile keeps its record (read, not loaded, at the stop), and
+            the resumed job goes on from the partial there. An episode path the
+            server answers not_indexable (its show folder renamed since the
+            server read it) is indexed by rescanning the show folder. A saved feed.json over
+            the read cap fails as too_large, not write_failed. A new show never
+            takes the old name of a renamed folder not taken in yet (find
+            answers those names): the server indexes that name as the renamed
+            show until its rescan.
+            The library's entries are read by name (readDir), so which of
+            several folders a job picks never depends on the listing order.
             Subscribe implements ParamSealer and Abandoner: job credentials are
             sealed before persistence, resumed from the vault, resealed under
             the show id on success, and removed at every terminal job end.
@@ -2372,7 +2437,10 @@ internal/
             reclaimed jobs. Retain hashes local candidates and fails closed on an
             unavailable, stale or protected aggregate. Snapshot freshness lasts five
             seconds from request dispatch on the Bridge's monotonic clock;
-            checked_at stays on the wire and does not time freshness. Old cleanup
+            checked_at does not time freshness, but it must lie within five minutes
+            of the Bridge's clock (replyWindow, bridge#13): a reply held or
+            replayed on its way grants nothing, and a Bridge whose clock is
+            further off deletes nothing (a warning in the log, on the page's Logs tab). Old cleanup
             uses only owned checkpoint/trash records, checked mappings and no live matching job;
             then sweepPartials (bridge#87; also after a mapping check, SweepPartials, at most
             once an hour, sweepEvery) removes a show's unrecorded partials: regular files

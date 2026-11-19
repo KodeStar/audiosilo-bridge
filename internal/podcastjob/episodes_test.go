@@ -880,7 +880,7 @@ func TestFetchKeepsTheRecordOfAPartialTheRestartCouldNotRemove(t *testing.T) {
 	os.Chmod(show, 0o755)
 	root, _ := os.OpenRoot(h.mount)
 	defer root.Close()
-	s.clearCheckpoint(job, root, &checkpoint{ServerHash: s.pairHash(), Path: *job.Path})
+	s.clearCheckpoint(job, root, &checkpoint{ServerHash: s.pairHash(), ShowID: saved.ShowID, EpisodeID: saved.EpisodeID, Path: *job.Path})
 	if _, ok := s.readCheckpoint(job); ok {
 		t.Fatal("record kept once the partial was removable")
 	}

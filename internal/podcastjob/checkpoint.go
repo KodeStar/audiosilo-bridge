@@ -16,9 +16,11 @@ import (
 
 	"github.com/kodestar/audiosilo-bridge/internal/fsutil"
 	"github.com/kodestar/audiosilo-bridge/internal/jobs"
+	"github.com/kodestar/audiosilo-bridge/internal/link"
 	"github.com/kodestar/audiosilo-bridge/internal/netguard"
 	"github.com/kodestar/audiosilo-bridge/internal/podcast"
 	"github.com/kodestar/audiosilo-bridge/internal/secrets"
+	"github.com/kodestar/audiosilo-bridge/internal/store"
 )
 
 type checkpoint struct {
@@ -52,7 +54,12 @@ func (s *service) pairHash() string {
 	return podcast.FeedURLHash(s.o.ServerID() + "|" + token)
 }
 func (s *service) checkpointName(job jobs.Job) string {
-	return podcast.FeedURLHash(strconv.FormatInt(*job.LibraryID, 10)+"|"+*job.Path) + ".json"
+	return recordName(*job.LibraryID, *job.Path)
+}
+
+// recordName is the file name of library lib's download record for episode p.
+func recordName(lib int64, p string) string {
+	return podcast.FeedURLHash(strconv.FormatInt(lib, 10)+"|"+p) + ".json"
 }
 func (s *service) checkpointRoot() (*os.Root, error) {
 	if s.o.DataDir == "" {
@@ -70,12 +77,13 @@ func (s *service) saveCheckpoint(job jobs.Job, root *os.Root, c *checkpoint, eta
 		return err
 	}
 	defer func() { _ = dir.Close() }()
-	if saved, ok := s.readCheckpoint(job); ok && saved.Temp != c.Temp && !s.dropPartial(root, &saved) {
+	if saved, ok := s.readCheckpoint(job); ok && saved.Temp != c.Temp && (saved.ShowID != c.ShowID || !s.dropPartial(root, &saved)) {
 		// An earlier partial at this path the Bridge still cannot remove: its
 		// record stays (clearCheckpoint tries it again, cleanOwned after a day),
 		// and this download goes unrecorded rather than orphan it (left behind,
 		// sweepPartials takes it once old). One removed since (or already gone)
-		// no longer holds the record.
+		// no longer holds the record. Another show's record at this path stays
+		// too (clearCheckpoint).
 		return nil
 	}
 	if c.Validator == "" {
@@ -98,23 +106,82 @@ func (s *service) saveCheckpoint(job jobs.Job, root *os.Root, c *checkpoint, eta
 // readCheckpoint is the job's saved record when it is this pairing's, for the
 // job's library and path, naming an owned temp and a sealed validator.
 func (s *service) readCheckpoint(job jobs.Job) (checkpoint, bool) {
-	var saved checkpoint
 	dir, err := s.checkpointRoot()
 	if err != nil {
-		return saved, false
+		return checkpoint{}, false
 	}
 	defer func() { _ = dir.Close() }()
-	rd, err := podcast.OpenRegular(dir, s.checkpointName(job))
+	saved, err := readRecord(dir, s.checkpointName(job))
+	ok := err == nil && saved.ServerHash == s.pairHash() && saved.LibraryID == *job.LibraryID && saved.Path == *job.Path && podcast.OwnedTemp(saved.Temp) && strings.HasPrefix(saved.Validator, secrets.PodcastETagPrefix)
+	return saved, ok
+}
+
+// errBadRecord is a download record no job can read back: over the size
+// limit, or not a record's JSON.
+var errBadRecord = errors.New("podcastjob: malformed download record")
+
+// readRecord parses the download record named name, unchecked: errBadRecord
+// when it is malformed, or the error opening or reading it.
+func readRecord(dir *os.Root, name string) (checkpoint, error) {
+	var c checkpoint
+	rd, err := podcast.OpenRegular(dir, name)
 	if err != nil {
-		return saved, false
+		return c, err
 	}
 	defer rd.Close()
 	b, err := io.ReadAll(io.LimitReader(rd, 16385))
-	if err != nil || len(b) > 16384 || json.Unmarshal(b, &saved) != nil {
-		return checkpoint{}, false
+	if err != nil {
+		return checkpoint{}, err
 	}
-	ok := saved.ServerHash == s.pairHash() && saved.LibraryID == *job.LibraryID && saved.Path == *job.Path && podcast.OwnedTemp(saved.Temp) && strings.HasPrefix(saved.Validator, secrets.PodcastETagPrefix)
-	return saved, ok
+	if len(b) > 16384 || json.Unmarshal(b, &c) != nil {
+		return checkpoint{}, errBadRecord
+	}
+	return c, nil
+}
+
+// records is this pairing's download records for library lib, in name order:
+// each one under its own path's name (recordName), naming an episode path and
+// an owned partial. An error means the records could not be listed.
+func (s *service) records(dir *os.Root, lib int64) ([]checkpoint, error) {
+	entries, err := readDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	pairing := s.pairHash()
+	var out []checkpoint
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		c, err := readRecord(dir, entry.Name())
+		if err == nil && c.ServerHash == pairing && c.LibraryID == lib && podcast.ValidEpisodePath(c.Path) && podcast.OwnedTemp(c.Temp) && entry.Name() == recordName(lib, c.Path) {
+			out = append(out, c)
+		}
+	}
+	return out, nil
+}
+
+// recordOf is the episode path of a fetch's download record: the job's path,
+// or where adoptCheckpoints moved the record with a show folder renamed by
+// hand (the runner abandons a job by the path the server named, the old
+// one). A moved record is this show's, for this episode, under the same file
+// name.
+func (s *service) recordOf(job jobs.Job, p fetchParams) string {
+	if saved, ok := s.readCheckpoint(job); ok && saved.ShowID == p.ShowID && saved.EpisodeID == p.EpisodeID {
+		return *job.Path
+	}
+	dir, err := s.checkpointRoot()
+	if err != nil {
+		return *job.Path
+	}
+	defer func() { _ = dir.Close() }()
+	records, _ := s.records(dir, *job.LibraryID)
+	for _, c := range records {
+		if c.ShowID == p.ShowID && c.EpisodeID == p.EpisodeID && path.Base(c.Path) == path.Base(*job.Path) {
+			return c.Path
+		}
+	}
+	return *job.Path
 }
 
 // dropStaleCheckpoint removes this path's owned partial when it was made for an
@@ -150,18 +217,111 @@ func (s *service) loadCheckpoint(job jobs.Job, root *os.Root, showID, episodeID 
 // record (only under the pairing that made them), then resets c to no partial.
 // A partial it cannot remove keeps its validator and the record, for cleanOwned
 // once it is a day old; an earlier such partial the record still names is tried
-// again first, so no later clear in the job drops its record.
+// again first, so no later clear in the job drops its record. A record of
+// another show at the path is left with its partial: adoptCheckpoints put it
+// there for a show folder renamed by hand to this job's folder name (names
+// swapped, or another show moved to it, an episode file name both shows use),
+// while this job still works under that name.
 func (s *service) clearCheckpoint(job jobs.Job, root *os.Root, c *checkpoint) {
 	defer func() { c.Temp, c.Offset, c.Total, c.Validator = "", 0, 0, "" }()
 	if c.ServerHash != s.pairHash() || !s.dropPartial(root, c) {
 		return
 	}
-	if saved, ok := s.readCheckpoint(job); ok && saved.Temp != c.Temp && !s.dropPartial(root, &saved) {
+	if saved, ok := s.readCheckpoint(job); ok && saved.Temp != c.Temp && (saved.ShowID != c.ShowID || !s.dropPartial(root, &saved)) {
 		return
 	}
 	if dir, err := s.checkpointRoot(); err == nil {
 		_ = dir.Remove(s.checkpointName(job))
 		_ = dir.Close()
+	}
+}
+
+// adoptCheckpoints moves this pairing's download records for the episodes of
+// show id in a show folder taken in under show (adopt) from their paths under
+// its old name from. A record names its episode's path twice (its own name is
+// the path's hash), and its partial moved with the folder: left as it was, no
+// fetch at the new path would resume it, cleanOwned (which reads a show's
+// records by their folder) would never clear it and sweepPartials would leave
+// its partial for good, as one a record names. adopt moves them before
+// feed.json, so a stop between the two leaves a folder that is taken in again,
+// moving what is left. The show's records under a gone folder move too: one
+// such stop, or a take-in podcast.Adopt refused after the records moved, then
+// the folder renamed again by hand, leaves them under that earlier name
+// (podcast.Adopt's journals alike). A record whose download is still running
+// (a fetch claimed at its path, or one of its episode that found the show
+// elsewhere since its claim), other than self's, stays: that job moves it when
+// it finds the folder (Fetch's relocation) or drops it as it ends. A record of
+// another show (names swapped by hand) stays too. An error means the records
+// could not be listed (or the open jobs read); one that could not be read or
+// moved is left as it was.
+func (s *service) adoptCheckpoints(ctx context.Context, root *os.Root, lib link.Library, show, from, id string, self int64) error {
+	if s.o.DB == nil || s.o.DataDir == "" {
+		return nil
+	}
+	dir, err := s.checkpointRoot()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = dir.Close() }()
+	records, err := s.records(dir, lib.ID)
+	if err != nil {
+		return err
+	}
+	rows, err := s.o.DB.OpenServerJobs(ctx)
+	if err != nil {
+		return err
+	}
+	running := s.runningRecords(rows, lib.ID, self)
+	for _, c := range records {
+		if c.ShowID != id {
+			continue
+		}
+		if at := path.Dir(c.Path); at != from {
+			if _, err := root.Lstat(at); at == show || !errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+		}
+		if running(c) {
+			continue
+		}
+		old := recordName(lib.ID, c.Path)
+		c.Path = show + "/" + path.Base(c.Path)
+		name := recordName(lib.ID, c.Path)
+		if _, err := dir.Lstat(name); !errors.Is(err, os.ErrNotExist) {
+			continue // never over a record a download at the new path already made
+		}
+		b, err := json.Marshal(c)
+		if err != nil {
+			continue
+		}
+		if fsutil.WriteRootAtomic(dir, ".", name, b, 0o600, nil) == nil {
+			_ = dir.Remove(old)
+		}
+	}
+	return nil
+}
+
+// runningRecords reports, by the open job rows, whether a download record of
+// library lib is a running download's (self, the calling job, aside): a job
+// of this Bridge claimed at its path, or a fetch of its episode (one that
+// found the show elsewhere since its claim, Fetch's relocation, works at a
+// path its row does not name).
+func (s *service) runningRecords(rows []store.ServerJob, lib, self int64) func(checkpoint) bool {
+	paths, episodes := map[string]bool{}, map[fetchParams]bool{}
+	for _, r := range rows {
+		if r.ID == self || r.State != store.JobRunning || r.ServerID != s.o.ServerID() || r.LibraryID == nil || *r.LibraryID != lib {
+			continue
+		}
+		if r.Path != nil {
+			paths[*r.Path] = true
+		}
+		var p fetchParams
+		if r.Kind == FetchKind && json.Unmarshal(r.Params, &p) == nil {
+			episodes[p] = true
+		}
+	}
+	return func(c checkpoint) bool {
+		return paths[c.Path] || episodes[fetchParams{c.ShowID, c.EpisodeID}]
 	}
 }
 
@@ -205,6 +365,34 @@ func journalStages(root *os.Root, c *checkpoint, st os.FileInfo) bool {
 	return err == nil && os.SameFile(st, staged)
 }
 func (s *service) fileLock(ctx context.Context, root *os.Root, episode string) (func(), error) {
+	l, err := s.lockEpisode(ctx, root, episode)
+	if err != nil {
+		return nil, err
+	}
+	return l.release, nil
+}
+
+// heldLock is an episode's .fetch.lock a job holds (lockEpisode).
+type heldLock struct {
+	root *os.Root
+	p    string
+	f    *os.File
+}
+
+func (l *heldLock) release() { releaseLock(l.root, l.p, l.f) }
+
+// follow points l at episode's lock when the file there is the one held: a
+// show folder renamed by hand took the lock with it, and letting go removes
+// it there rather than leave it in the folder.
+func (l *heldLock) follow(episode string) {
+	if p := podcast.AttachmentPath(episode, ".fetch.lock"); lockedAt(l.root, p, l.f) {
+		l.p = p
+	}
+}
+
+// lockEpisode takes episode's .fetch.lock (fileLock), as a heldLock a fetch
+// can follow to a show folder renamed by hand.
+func (s *service) lockEpisode(ctx context.Context, root *os.Root, episode string) (*heldLock, error) {
 	if err := podcast.EnsureDir(root, path.Dir(episode)+"/.audiosilo"); err != nil {
 		return nil, err
 	}
@@ -236,7 +424,7 @@ func (s *service) fileLock(ctx context.Context, root *os.Root, episode string) (
 			// we got may be on a file no longer at p (one another job has since
 			// made again and locked): only the file still at p counts.
 			if lockedAt(root, p, f) {
-				return func() { releaseLock(root, p, f) }, nil
+				return &heldLock{root, p, f}, nil
 			}
 			unlockFile(f)
 			_ = f.Close()
@@ -264,8 +452,12 @@ func (s *service) fileLock(ctx context.Context, root *os.Root, episode string) (
 // Windows too: os.Root opens files with FILE_SHARE_DELETE and removes them
 // with POSIX semantics, so removing after letting go would let a waiter lock
 // the file just before it goes while a third job makes and locks a new one.
+// Only the held file is removed: one at p since (its show folder renamed by
+// hand, the lock moving with it, and the name taken again) is another job's.
 func releaseLock(root *os.Root, p string, f *os.File) {
-	_ = root.Remove(p)
+	if lockedAt(root, p, f) {
+		_ = root.Remove(p)
+	}
 	unlockFile(f)
 	_ = f.Close()
 }

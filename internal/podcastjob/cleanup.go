@@ -2,11 +2,8 @@ package podcastjob
 
 import (
 	"context"
-	"encoding/json"
-	"io"
 	"os"
 	"path"
-	"strings"
 	"time"
 
 	"github.com/kodestar/audiosilo-bridge/internal/jobs"
@@ -18,7 +15,8 @@ import (
 // cleanOwned considers named checkpoint records and committed trash manifests
 // older than a day, then sweeps the show's unrecorded partials
 // (sweepPartials). self is the calling job, whose own running row (at the
-// show's path) is not a live writer of these records.
+// show's path) is not a live writer of these records. A record a running
+// fetch relocated to the show (runningRecords) stays too.
 func (s *service) cleanOwned(ctx context.Context, root *os.Root, lib link.Library, mount, show string, self int64) {
 	if s.o.DB == nil || s.o.DataDir == "" || s.writable(lib, mount) != nil {
 		return
@@ -51,33 +49,26 @@ func (s *service) cleanOwned(ctx context.Context, root *os.Root, lib link.Librar
 			fn()
 		}
 	}
-	pairing := s.pairHash()
 	if checkpoints, err := s.checkpointRoot(); err == nil {
-		defer func() { _ = checkpoints.Close() }()
-		if entries, err := readDir(checkpoints); err == nil {
-			for _, entry := range entries {
-				if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
-					continue
-				}
-				rd, err := podcast.OpenRegular(checkpoints, entry.Name())
-				if err != nil {
-					continue
-				}
-				var c checkpoint
-				err = json.NewDecoder(io.LimitReader(rd, 16384)).Decode(&c)
-				_ = rd.Close()
-				if err != nil || c.ServerHash != pairing || c.LibraryID != lib.ID || !podcast.ValidEpisodePath(c.Path) || path.Dir(c.Path) != show || !old(c.UpdatedAt) || live(c.Path) || !podcast.ValidID(c.ShowID) || !podcast.ValidID(c.EpisodeID) || !podcast.OwnedTemp(c.Temp) {
-					continue
-				}
-				job := jobs.Job{LibraryID: &lib.ID, Path: &c.Path}
-				if entry.Name() != s.checkpointName(job) {
-					continue
-				}
-				if _, _, err := s.readEpisode(root, c.Path, fetchParams{c.ShowID, c.EpisodeID}); err != nil {
-					continue
-				}
-				locked(c.Path, func() { s.clearCheckpoint(job, root, &c) })
+		records, _ := s.records(checkpoints, lib.ID)
+		_ = checkpoints.Close()
+		running := s.runningRecords(rows, lib.ID, self)
+		for _, c := range records {
+			if path.Dir(c.Path) != show || !old(c.UpdatedAt) || live(c.Path) || running(c) || !podcast.ValidID(c.ShowID) || !podcast.ValidID(c.EpisodeID) {
+				continue
 			}
+			if _, _, err := s.readEpisode(root, c.Path, fetchParams{c.ShowID, c.EpisodeID}); err != nil {
+				continue
+			}
+			job := jobs.Job{LibraryID: &lib.ID, Path: &c.Path}
+			locked(c.Path, func() {
+				// The records were listed before the loop: one a download at
+				// this path saved since is not this one, and stays.
+				if saved, ok := s.readCheckpoint(job); ok && saved.Temp != c.Temp {
+					return
+				}
+				s.clearCheckpoint(job, root, &c)
+			})
 		}
 	}
 	s.sweepPartials(ctx, root, lib, mount, []string{show}, self)

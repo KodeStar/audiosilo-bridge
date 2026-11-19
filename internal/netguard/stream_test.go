@@ -115,3 +115,24 @@ func TestStreamGuardHeadersRedirectsAndStall(t *testing.T) {
 		t.Fatal("stalled body accepted")
 	}
 }
+
+// TestStatusErrorNamesWhatWasAsked: every guarded fetch (the feed's, an
+// episode's) maps a host's HTTP answer here, never by hand (bridge#26).
+func TestStatusErrorNamesWhatWasAsked(t *testing.T) {
+	for _, c := range []struct {
+		what          string
+		status, after int
+		code, message string
+		retryable     bool
+	}{
+		{"episode", 404, 0, "http_404", "The episode returned HTTP 404.", false},
+		{"episode", 410, 0, "gone", "The episode returned HTTP 410.", false},
+		{"episode", 503, 7, "http_503", "The episode returned HTTP 503.", true},
+		{"feed", 429, 60, "http_429", "The feed returned HTTP 429.", true},
+	} {
+		e := StatusError(c.what, c.status, c.after)
+		if e.Code != c.code || e.Message != c.message || e.RetryAfterSeconds != c.after || Retryable(e) != c.retryable {
+			t.Fatalf("%+v: %+v", c, e)
+		}
+	}
+}
