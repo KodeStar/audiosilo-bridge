@@ -15,7 +15,8 @@ import (
 // cleanOwned considers named checkpoint records and committed trash manifests
 // older than a day, then sweeps the show's unrecorded partials
 // (sweepPartials). self is the calling job, whose own running row (at the
-// show's path) is not a live writer of these records.
+// show's path) is not a live writer of these records. A record a running
+// fetch relocated to the show (runningRecords) stays too.
 func (s *service) cleanOwned(ctx context.Context, root *os.Root, lib link.Library, mount, show string, self int64) {
 	if s.o.DB == nil || s.o.DataDir == "" || s.writable(lib, mount) != nil {
 		return
@@ -51,15 +52,23 @@ func (s *service) cleanOwned(ctx context.Context, root *os.Root, lib link.Librar
 	if checkpoints, err := s.checkpointRoot(); err == nil {
 		records, _ := s.records(checkpoints, lib.ID)
 		_ = checkpoints.Close()
+		running := s.runningRecords(rows, lib.ID, self)
 		for _, c := range records {
-			if path.Dir(c.Path) != show || !old(c.UpdatedAt) || live(c.Path) || !podcast.ValidID(c.ShowID) || !podcast.ValidID(c.EpisodeID) {
+			if path.Dir(c.Path) != show || !old(c.UpdatedAt) || live(c.Path) || running(c) || !podcast.ValidID(c.ShowID) || !podcast.ValidID(c.EpisodeID) {
 				continue
 			}
 			if _, _, err := s.readEpisode(root, c.Path, fetchParams{c.ShowID, c.EpisodeID}); err != nil {
 				continue
 			}
 			job := jobs.Job{LibraryID: &lib.ID, Path: &c.Path}
-			locked(c.Path, func() { s.clearCheckpoint(job, root, &c) })
+			locked(c.Path, func() {
+				// The records were listed before the loop: one a download at
+				// this path saved since is not this one, and stays.
+				if saved, ok := s.readCheckpoint(job); ok && saved.Temp != c.Temp {
+					return
+				}
+				s.clearCheckpoint(job, root, &c)
+			})
 		}
 	}
 	s.sweepPartials(ctx, root, lib, mount, []string{show}, self)

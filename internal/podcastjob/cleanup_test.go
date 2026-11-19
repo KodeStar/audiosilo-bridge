@@ -20,7 +20,7 @@ import (
 )
 
 func TestOwnedCleanupHonorsAgeLiveJobAndForeignFiles(t *testing.T) {
-	for _, scenario := range []string{"old", "fresh", "live", "foreign", "identity"} {
+	for _, scenario := range []string{"old", "fresh", "live", "relocated", "foreign", "identity"} {
 		t.Run(scenario, func(t *testing.T) {
 			h, job := audioHarness(t)
 			s := h.handler.s
@@ -46,6 +46,14 @@ func TestOwnedCleanupHonorsAgeLiveJobAndForeignFiles(t *testing.T) {
 			dir.Close()
 			if scenario == "live" {
 				if err := h.db.RecordClaim(context.Background(), store.ServerJob{ID: job.ID, Kind: FetchKind, LibraryID: job.LibraryID, Path: job.Path, Attempt: 1, ServerID: "server-1"}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if scenario == "relocated" {
+				// A fetch claimed under the folder's old name that found the show
+				// here (Fetch's relocation): its row names a path the record does not.
+				claimed := "Old Name/" + path.Base(*job.Path)
+				if err := h.db.RecordClaim(context.Background(), store.ServerJob{ID: job.ID, Kind: FetchKind, LibraryID: job.LibraryID, Path: &claimed, Params: job.Params, Attempt: 1, ServerID: "server-1"}); err != nil {
 					t.Fatal(err)
 				}
 			}

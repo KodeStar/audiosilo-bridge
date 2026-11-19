@@ -252,7 +252,8 @@ func (s *service) clearCheckpoint(job jobs.Job, root *os.Root, c *checkpoint) {
 // elsewhere since its claim), other than self's, stays: that job moves it when
 // it finds the folder (Fetch's relocation) or drops it as it ends. A record of
 // another show (names swapped by hand) stays too. An error means the records
-// could not be read; one that could not be moved is left as it was.
+// could not be listed (or the open jobs read); one that could not be read or
+// moved is left as it was.
 func (s *service) adoptCheckpoints(ctx context.Context, root *os.Root, lib link.Library, show, from, id string, self int64) error {
 	if s.o.DB == nil || s.o.DataDir == "" {
 		return nil
@@ -270,25 +271,7 @@ func (s *service) adoptCheckpoints(ctx context.Context, root *os.Root, lib link.
 	if err != nil {
 		return err
 	}
-	// running reports whether c's download still runs: a job claimed at its
-	// path, or a fetch of its episode (one that found the show elsewhere since
-	// its claim, Fetch's relocation, works at a path its row does not name).
-	paths, episodes := map[string]bool{}, map[fetchParams]bool{}
-	for _, r := range rows {
-		if r.ID == self || r.State != store.JobRunning || r.ServerID != s.o.ServerID() || r.LibraryID == nil || *r.LibraryID != lib.ID {
-			continue
-		}
-		if r.Path != nil {
-			paths[*r.Path] = true
-		}
-		var p fetchParams
-		if r.Kind == FetchKind && json.Unmarshal(r.Params, &p) == nil {
-			episodes[p] = true
-		}
-	}
-	running := func(c checkpoint) bool {
-		return paths[c.Path] || episodes[fetchParams{c.ShowID, c.EpisodeID}]
-	}
+	running := s.runningRecords(rows, lib.ID, self)
 	for _, c := range records {
 		if c.ShowID != id {
 			continue
@@ -316,6 +299,30 @@ func (s *service) adoptCheckpoints(ctx context.Context, root *os.Root, lib link.
 		}
 	}
 	return nil
+}
+
+// runningRecords reports, by the open job rows, whether a download record of
+// library lib is a running download's (self, the calling job, aside): a job
+// of this Bridge claimed at its path, or a fetch of its episode (one that
+// found the show elsewhere since its claim, Fetch's relocation, works at a
+// path its row does not name).
+func (s *service) runningRecords(rows []store.ServerJob, lib, self int64) func(checkpoint) bool {
+	paths, episodes := map[string]bool{}, map[fetchParams]bool{}
+	for _, r := range rows {
+		if r.ID == self || r.State != store.JobRunning || r.ServerID != s.o.ServerID() || r.LibraryID == nil || *r.LibraryID != lib {
+			continue
+		}
+		if r.Path != nil {
+			paths[*r.Path] = true
+		}
+		var p fetchParams
+		if r.Kind == FetchKind && json.Unmarshal(r.Params, &p) == nil {
+			episodes[p] = true
+		}
+	}
+	return func(c checkpoint) bool {
+		return paths[c.Path] || episodes[fetchParams{c.ShowID, c.EpisodeID}]
+	}
 }
 
 // dropPartial removes c's owned partial, then its sealed validator; false, with
