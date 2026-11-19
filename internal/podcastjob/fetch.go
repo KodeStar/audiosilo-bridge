@@ -212,7 +212,13 @@ func (h *Fetch) run(parent context.Context, claimed *jobs.Job, rep *jobs.Reporte
 			return err
 		}
 		if p == e.Path {
-			if _, err := root.Lstat(podcast.AttachmentPath(p, ".fetch.lock")); err != nil {
+			if _, err := root.Lstat(podcast.AttachmentPath(p, ".fetch.lock")); err != nil || lock.follow(p) {
+				return nil
+			}
+			// episodeAt says p too when no folder holds the show: a lock there
+			// in another show's folder (an episode file name both use) is
+			// never taken.
+			if f, err := podcast.Read(root, path.Dir(p)); err != nil || f.ShowID != params.ShowID {
 				return nil
 			}
 			return s.followLock(ctx, lock, p)

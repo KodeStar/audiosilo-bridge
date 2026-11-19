@@ -1736,3 +1736,75 @@ func TestAFetchCopiedAndDeletedJustBeforeACutResumesFromAllItsBytes(t *testing.T
 	}
 	noRecords(t, h.handler.s)
 }
+
+// A show folder deleted mid-download and another show's folder renamed to its
+// name by hand, with an episode of the same file name and its lock file. The
+// fetch, finding no folder that holds its show, never takes that lock: it
+// would wait on the other show's fetch, or hold its lock, while it writes.
+func TestAFetchNeverTakesAnotherShowsLockAtItsPath(t *testing.T) {
+	requireProbe(t)
+	h, job := audioHarness(t)
+	h.scan.knows = func(p string) bool { return strings.HasPrefix(p, "Fixture Show/") }
+	audio := data(t, "chap-v24-reverse.mp3")
+	show := filepath.Join(h.mount, "Fixture Show")
+	other := filepath.Join(h.mount, podcast.AttachmentPath(*job.Path, ".fetch.lock"))
+	var taken atomic.Bool
+	setAudio(h, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("ETag", `"one"`)
+		w.Header().Set("Content-Length", strconv.Itoa(len(audio)))
+		w.WriteHeader(200)
+		w.Write(audio[:2000])
+		w.(http.Flusher).Flush()
+		if !partialAt(show, 2000) {
+			t.Error("the download did not start")
+			return
+		}
+		if err := os.RemoveAll(show); err != nil {
+			t.Error(err)
+			return
+		}
+		if err := os.MkdirAll(filepath.Dir(other), 0o755); err != nil {
+			t.Error(err)
+			return
+		}
+		root, err := os.OpenRoot(h.mount)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		defer root.Close()
+		var f podcast.Feed
+		if err := json.Unmarshal(data(t, "feed-fetch-v1.json"), &f); err != nil {
+			t.Error(err)
+			return
+		}
+		f.ShowID, f.Episodes[0].Fetch = "0123456789abcdef", nil
+		if _, err := podcast.Write(root, "Fixture Show", &f, h.handler.s.o.Now()); err != nil {
+			t.Error(err)
+		}
+		if err := os.WriteFile(other, nil, 0o600); err != nil {
+			t.Error(err)
+		}
+		w.Write(audio[2000:3000])
+		w.(http.Flusher).Flush()
+		time.Sleep(1100 * time.Millisecond) // past the once-a-second check
+		lf, err := os.OpenFile(other, os.O_RDWR, 0)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		if ok, err := tryLock(lf); err != nil || !ok {
+			taken.Store(true)
+		} else {
+			unlockFile(lf)
+		}
+		_ = lf.Close()
+		w.Write(audio[3000:])
+	})
+	if res, err := h.handler.FetchJob().Run(context.Background(), job, jobs.LocalReporter()); err == nil {
+		t.Fatal("the episode was published without its show", res)
+	}
+	if taken.Load() {
+		t.Fatal("the fetch took the other show's lock")
+	}
+}
