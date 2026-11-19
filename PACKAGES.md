@@ -179,7 +179,9 @@ internal/
             BR-OPENAI-2: LstatWithin(path, d) is os.Lstat bounded the same way, and
             ReadDirNWithin(path, n, d) a folder read of at most n entries (never
             whole; one n per path), for the endpoint's agent service's mount check
-            (agentrun's mounts.go).
+            (agentrun's mounts.go). LookWithin(op, path, d, look) bounds any other
+            look the same way, one in flight per op and path (mapping's write
+            probe, ProbeWritable).
   execfile/ writes files the process will exec at once with syscall.ForkLock
             held for reading from open to close, so a concurrent fork can't hold
             the write descriptor and make the exec fail with ETXTBSY (WriteFile).
@@ -1374,7 +1376,8 @@ internal/
             details as they are). v0.5.0: the libraries item says
             DetailLibrariesChecking from pairing until a heartbeat has listed the
             libraries and each is checked (LibrariesPending: no beat since the
-            link changed, or mapping.Registry.Unchecked), BRIDGE-14; the agent
+            link changed, or mapping.Registry.Unchecked: a library with no check,
+            or none that stands, unknown as Status reads it), BRIDGE-14; the agent
             item (optional since v2.7.0, bridge#36: podcasts, read-along,
             chapters and Audible need no agent) says in plain words what to do and what the
             agent is for, by the kind of problem agentbox.Status reports
@@ -2206,7 +2209,67 @@ internal/
             asking again and beating again was a tight loop of heartbeats. A mapping
             edit re-checks only its library (each check stats files and writes a
             probe). Status(id) is one library's last check (a write job needs it
-            mapped AND writable at the mount it uses now).
+            mapped AND writable at the mount it uses now). A run asks for one
+            library at a time, its server reads CheckSpacing (250 ms) apart (a
+            library whose folder is missing asks nothing and waits for nothing).
+            Check and CheckPodcast also return the server's failure when it gave
+            no definite answer (not BookReadSettled: a 429, a 5xx, a 408, a
+            refused token, a timeout, no answer); the Registry then keeps the
+            library's last state at the same mount and flags it due again, but
+            only while the folder still shows what that state's check found
+            (proveKept: the book's folder or file, or the podcast marker, one
+            stat bounded by LookTimeout, outside the lock): a share that
+            isn't mounted leaves an empty folder, and a kept "mapped, writable"
+            there would let LibriVox and Audible imports create folders on the
+            bare mount point. A first check, one at a moved mount, and one whose
+            folder doesn't show it (unproven; a book found at the mount itself
+            never does) record the failure as UNKNOWN. A state stands KeptChecks
+            (3) check intervals from the check that set it (the interval Due last
+            took, the heartbeat's mapping.check_minutes) without an answered
+            check, then is unknown too, keeping that check's time: marked by an
+            unanswered check or by Due (every beat, a failed one too: a server
+            limiting the checks limits the heartbeat as well, asking for no
+            check then), and worked out again as Status, Unchecked and Entries
+            read it (a state no check challenges, heartbeats failing from the
+            start, ages all the same). Unknown is Status false, as before a
+            first check: a write job waits (parks, retries) rather than failing,
+            fails only on a standing "not mapped" (the server's answer, or a
+            local failure), and LibriVox's "mapping gone" timer starts only on
+            one. The page sees an unknown mapped state as not mapped (an unmapped
+            one keeps its own reason) and Entry.Unknown badges it "Waiting for
+            the server"; the heartbeat (Statuses) reports each state as recorded,
+            not aged, since the server takes "not mapped" as definite (it refuses
+            new write jobs and holds a podcast show's polls 30 min), and the jobs
+            it queues wait here. Every look at a
+            library's folder (its stat, the book files' stats, the write probe,
+            a podcast folder's stat before it is opened) is bounded by
+            LookTimeout (5 s, fsutil.StatWithin and fsutil.LookWithin: one look
+            per path out, a later one waits on it): a hung mount fails that
+            library's check, recorded (a hung file stat ends the comparison),
+            and the run goes on; ProbeWritable and CompareFiles are bounded for
+            their other callers too. A 429, a refused
+            token or a request timeout ends the pass: the rest keep their state
+            only as an unanswered check would (keepUnreached: same mount, the
+            folder still showing it, else the failure); checks
+            queued meanwhile are still made, as an edit after the run is, and end
+            at their first 429.
+            Due waits out a hold after such a run: the longest Retry-After of
+            its failures (a zero one, or a past date, counts as none), else
+            RetryFirst (1 min) doubling per such run in a row, at most RetryMax
+            (30 min); a run the server answered ends it (one that asked nothing
+            leaves it), and a failure without a Retry-After (a check made through
+            the hold) never shortens it, nor counts toward the doubling. A kept state carries when the check left it in place
+            (Entry.UnansweredAt, the page API's unanswered_at, null once a check
+            is answered; never on the server's wire): the Libraries tab says the
+            last check got no answer and the results are the earlier ones. Held
+            is the hold and its failure, which CheckMappings logs. Only the
+            heartbeat's periodic run waits for Due: a mapping edit, Check now and
+            a changed library list check at once (the page's two on the Bridge's
+            background context, so shutdown ends them). A check cut short by its
+            context records nothing and holds nothing. Forget (linkChanged: a
+            pair, an unpair, a refused token) drops the libraries, checks, hold
+            and queued checks; a run of the old link still going records nothing
+            more and holds nothing.
   jobs/     the generic runner. Phase 4b: CancelContext(parent) is a context
             whose cancel reads as an admin's cancel (Resumes false), for handler
             tests; Lost(ctx) says a job ended because the server no longer holds
@@ -3452,7 +3515,8 @@ internal/
             The mapping is checked again before each section, before the cover
             and marker, and before the rename (recheck): not writable parks; a
             mapping moved to another mount fails not_writable (bridge#69: a
-            parked fetch gives its download-lane slot back with
+            parked fetch, or one waiting on a mapping check that doesn't stand
+            (mapping's unknown), gives its download-lane slot back with
             jobs.Reporter.Yield, so Audible imports and podcast downloads run
             while it waits, and takes one again with Reclaim once the mapping is
             back, then looks at the mapping again, since the slot's wait may be

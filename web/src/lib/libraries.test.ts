@@ -15,6 +15,9 @@ describe('libraries', () => {
     const bad = libraryFixture();
     bad.status = { ...bad.status!, mapped: false, writable: true };
     expect(checkBadges(bad).map((b) => b.label)).toEqual(['Not mapped', 'Writable']);
+    expect(checkBadges(libraryFixture({ unknown: true })).map((b) => b.label)).toEqual([
+      'Waiting for the server',
+    ]);
   });
   it('wants an absolute path or nothing', () => {
     expect(checkMountPath('')).toBeNull();

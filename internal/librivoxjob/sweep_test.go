@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/kodestar/audiosilo-bridge/internal/jobs"
+	"github.com/kodestar/audiosilo-bridge/internal/link"
+	"github.com/kodestar/audiosilo-bridge/internal/mapping"
 	"github.com/kodestar/audiosilo-bridge/internal/metaops"
 )
 
@@ -680,5 +682,31 @@ func TestParseStateName(t *testing.T) {
 		if _, ok := parseStateName(name); ok {
 			t.Errorf("%s parsed", name)
 		}
+	}
+}
+
+// bookErr answers every book read with err.
+type bookErr struct{ err error }
+
+func (b bookErr) Book(context.Context, int64, string) (*link.Book, error) { return nil, b.err }
+
+// The "mapping gone" timer starts only on a definite "not mapped": a check the
+// server didn't answer leaves the library's state unknown (the registry's
+// Status false), which isn't gone (denied), while the server's own "no indexed
+// book" is (allowed).
+func TestMappingGoneNeedsADefiniteAnswer(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	reg := mapping.NewRegistry()
+	reg.SetLibraries([]link.Library{{ID: 1, Root: root}})
+	mount := func(int64, string) (string, bool) { return root, true }
+	h := &Handler{o: Options{Libraries: reg}}
+	reg.Check(context.Background(), bookErr{&link.APIError{Status: 429}}, mount, time.Now)
+	if h.mappingGone(1) {
+		t.Fatal("denied: a check the server didn't answer counts as the mapping gone")
+	}
+	reg.Check(context.Background(), bookErr{link.ErrNoBook}, mount, time.Now)
+	if !h.mappingGone(1) {
+		t.Fatal("allowed: the server's definite answer doesn't count as the mapping gone")
 	}
 }

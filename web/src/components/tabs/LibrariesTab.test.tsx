@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { LibrariesTab } from './LibrariesTab';
+import { LIBRARIES_POLL_MS, LibrariesTab } from './LibrariesTab';
 import { ApiClient } from '@/api/client';
 import { lastCall, mockFetch } from '@/test/fetchMock';
 import { libraryFixture } from '@/test/fixtures';
@@ -55,6 +55,37 @@ describe('LibrariesTab', () => {
     expect(screen.getByText('Checked book')).toBeInTheDocument();
   });
 
+  it('says when the last check got no answer and the results are the earlier ones', async () => {
+    const kept = libraryFixture({ unanswered_at: new Date(Date.now() - 120_000).toISOString() });
+    const answered = libraryFixture({
+      library: { id: 2, name: 'More books', root: '/more', kind: 'books' },
+    });
+    mockFetch({ 'GET /api/libraries': { body: { libraries: [kept, answered] } } });
+    render(<LibrariesTab client={api()} />);
+    const notes = await screen.findAllByText(/The server gave no answer/);
+    expect(notes).toHaveLength(1);
+    expect(notes[0]).toHaveTextContent(
+      'The server gave no answer (2 min ago). These are the results of the check before it. The Bridge will check again.',
+    );
+    // The earlier result still shows.
+    expect(screen.getAllByText('Mapped')).toHaveLength(2);
+  });
+
+  it('says writes wait while no check stands', async () => {
+    const lib = libraryFixture({
+      unanswered_at: new Date(Date.now() - 120_000).toISOString(),
+      unknown: true,
+    });
+    lib.status = { ...lib.status!, mapped: false, writable: false, error: 'no answer since then' };
+    mockFetch({ 'GET /api/libraries': { body: { libraries: [lib] } } });
+    render(<LibrariesTab client={api()} />);
+    expect(await screen.findByText(/The server gave no answer/)).toHaveTextContent(
+      'The server gave no answer (2 min ago). Writes wait for a check it answers. The Bridge will check again.',
+    );
+    expect(screen.getByText('Waiting for the server')).toBeInTheDocument();
+    expect(screen.queryByText('Not mapped')).not.toBeInTheDocument();
+  });
+
   it('locks the folder when the environment sets it', async () => {
     mockFetch({
       'GET /api/libraries': { body: { libraries: [libraryFixture({ locked: true })] } },
@@ -77,6 +108,29 @@ describe('LibrariesTab', () => {
     expect(lastCall(calls, 'POST', '/api/libraries/check')).toBeDefined();
     // The check runs in the background: no reload of the old results.
     expect(calls.filter((c) => c.url === '/api/libraries')).toHaveLength(1);
+  });
+
+  it('clears the checking note once the results are in', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    let checked = false;
+    mockFetch({
+      'GET /api/libraries': () => ({
+        body: {
+          libraries: [libraryFixture(checked ? { checked_at: '2026-10-15T10:05:00Z' } : {})],
+        },
+      }),
+      'POST /api/libraries/check': () => {
+        checked = true;
+        return { status: 202 };
+      },
+    });
+    render(<LibrariesTab client={api()} />);
+    await userEvent.click(await screen.findByRole('button', { name: 'Check now' }));
+    expect(await screen.findByText(/Checking/)).toBeInTheDocument();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(LIBRARIES_POLL_MS + 100);
+    });
+    await waitFor(() => expect(screen.queryByText(/Checking/)).toBeNull());
   });
 
   it('says why there are no libraries', async () => {

@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -150,5 +151,37 @@ func TestReadDirNWithin(t *testing.T) {
 	}
 	if _, err := ReadDirNWithin(filepath.Join(dir, "gone"), 3, 5*time.Second); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("a missing folder = %v, want ErrNotExist", err)
+	}
+}
+
+// LookWithin answers as its look does, and a look a hung mount holds is
+// ErrStatTimeout naming the path: a second ask of the same op and path waits on
+// the look already out, while another op at that path starts its own.
+func TestLookWithin(t *testing.T) {
+	t.Parallel()
+	const path = "/hung/mount/library"
+	if n, err := LookWithin("count", path, 5*time.Second, func(string) (int, error) { return 7, nil }); n != 7 || err != nil {
+		t.Fatalf("an answered look = %v, %v", n, err)
+	}
+	release := make(chan struct{})
+	defer close(release)
+	var started atomic.Int32
+	hung := func(string) (struct{}, error) {
+		started.Add(1)
+		<-release
+		return struct{}{}, nil
+	}
+	for range 3 {
+		_, err := LookWithin("probe", path, 10*time.Millisecond, hung)
+		var pe *fs.PathError
+		if !errors.Is(err, ErrStatTimeout) || !errors.As(err, &pe) || pe.Path != path || pe.Op != "probe" {
+			t.Fatalf("a hung look = %v, want probe's ErrStatTimeout at %s", err, path)
+		}
+	}
+	if n := started.Load(); n != 1 {
+		t.Fatalf("%d looks of the hung path started, want 1", n)
+	}
+	if _, err := LookWithin("other", path, 5*time.Second, func(string) (struct{}, error) { return struct{}{}, fs.ErrPermission }); !errors.Is(err, fs.ErrPermission) {
+		t.Fatalf("another op at the hung path = %v, want its own answer", err)
 	}
 }

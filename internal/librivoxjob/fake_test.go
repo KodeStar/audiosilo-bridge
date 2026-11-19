@@ -228,6 +228,8 @@ type fakeLibs struct {
 	kind     string
 	// second, when set, is library 4's mount: a second books library.
 	second string
+	// unknown: no check stands (the registry's Status false, saying why).
+	unknown bool
 }
 
 // mountOf is library id's mount, "" for none.
@@ -262,6 +264,9 @@ func (l *fakeLibs) Status(id int64) (link.LibraryStatus, bool) {
 	mount := l.mountOf(id)
 	if mount == "" {
 		return link.LibraryStatus{}, false
+	}
+	if l.unknown {
+		return link.LibraryStatus{LibraryID: id, MountPath: mount, Error: "the server hasn't answered a check"}, false
 	}
 	return link.LibraryStatus{LibraryID: id, MountPath: mount, Mapped: true, Writable: l.writable}, true
 }

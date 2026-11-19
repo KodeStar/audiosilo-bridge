@@ -36,6 +36,8 @@ var (
 	// readDirNs are ReadDirNWithin's, apart from ReadDirWithin's: a read in
 	// flight answers only a later read of its own kind.
 	readDirNs = &looksOut[[]fs.DirEntry]{calls: map[string]*lookCall[[]fs.DirEntry]{}}
+	// others are LookWithin's, by op and path.
+	others = &looksOut[any]{calls: map[string]*lookCall[any]{}}
 )
 
 // within is look(path) bounded by d: a look a hung mount holds past d returns
@@ -45,16 +47,21 @@ var (
 // for what is left of d since it started, so a loop that polls a hung path
 // never piles up blocked looks nor waits d again at every turn (bridge#24).
 func (o *looksOut[T]) within(op, path string, d time.Duration, look func(string) (T, error)) (T, error) {
+	return o.withinKey(path, op, path, d, look)
+}
+
+// withinKey is within with the looks out kept by key rather than by path.
+func (o *looksOut[T]) withinKey(key, op, path string, d time.Duration, look func(string) (T, error)) (T, error) {
 	o.mu.Lock()
-	c, ok := o.calls[path]
+	c, ok := o.calls[key]
 	if !ok {
 		c = &lookCall[T]{done: make(chan struct{}), started: time.Now()}
-		o.calls[path] = c
+		o.calls[key] = c
 		go func() {
 			val, err := look(path)
 			o.mu.Lock()
 			c.val, c.err = val, err
-			delete(o.calls, path)
+			delete(o.calls, key)
 			o.mu.Unlock()
 			close(c.done)
 		}()
@@ -95,6 +102,17 @@ func LstatWithin(path string, d time.Duration) (fs.FileInfo, error) {
 // read a hung mount holds past d is ErrStatTimeout (bridge#65).
 func ReadDirWithin(path string, d time.Duration) ([]fs.DirEntry, error) {
 	return readDirs.within("readdir", path, d, os.ReadDir)
+}
+
+// LookWithin is look(path) bounded by d, as StatWithin is os.Stat, for a look
+// of a kind the others don't cover (op names it: a mapping check's write probe):
+// a look a hung mount holds past d is ErrStatTimeout, and while one of op at
+// path is out a later one waits on it. Every look of one op at one path must
+// answer the same T.
+func LookWithin[T any](op, path string, d time.Duration, look func(string) (T, error)) (T, error) {
+	val, err := others.withinKey(op+"\x00"+path, op, path, d, func(p string) (any, error) { return look(p) })
+	t, _ := val.(T)
+	return t, err
 }
 
 // ReadDirNWithin is ReadDirWithin reading at most n entries (n > 0), in the

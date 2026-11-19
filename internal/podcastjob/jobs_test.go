@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"image"
 	"image/png"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -35,8 +36,14 @@ type markerReader struct{ mount string }
 func (m markerReader) Book(context.Context, int64, string) (*link.Book, error) {
 	return nil, link.ErrNoBook
 }
+
+// Marker answers as the link does: no marker there is ErrNoMarker (the
+// server's 404 no_marker), a definite answer the mapping check records.
 func (m markerReader) Marker(context.Context, int64) (string, error) {
 	b, err := os.ReadFile(filepath.Join(m.mount, mapping.MarkerPath))
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", link.ErrNoMarker
+	}
 	var data struct{ Nonce string }
 	if err == nil {
 		err = json.Unmarshal(b, &data)

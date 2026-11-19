@@ -39,22 +39,76 @@ func TestPodcastMarkerRoundTripAndRegistry(t *testing.T) {
 		}
 		return marker.Nonce, nil
 	})
-	st := CheckPodcast(context.Background(), source, lib, mount, func(id int64) bool { return id == 4 })
-	if !st.Mapped || !st.Writable || st.CheckedPath != MarkerPath {
+	st, unanswered := CheckPodcast(context.Background(), source, lib, mount, func(id int64) bool { return id == 4 })
+	if !st.Mapped || !st.Writable || st.CheckedPath != MarkerPath || unanswered != nil {
 		t.Fatalf("check: %+v", st)
 	}
 	b, _ := os.ReadFile(filepath.Join(mount, MarkerPath))
-	st = CheckPodcast(context.Background(), source, lib, mount, func(id int64) bool { return id == 4 })
+	st, _ = CheckPodcast(context.Background(), source, lib, mount, func(id int64) bool { return id == 4 })
 	after, _ := os.ReadFile(filepath.Join(mount, MarkerPath))
 	if !st.Mapped || string(b) != string(after) {
 		t.Fatal("changed an existing marker")
 	}
-	r := NewRegistry()
+	r := newRegistry()
 	r.SetLibraries([]link.Library{lib})
 	r.Check(context.Background(), source, func(int64, string) (string, bool) { return mount, true }, time.Now)
 	st, ok := r.Status(3)
 	if !ok || !st.Writable {
 		t.Fatalf("registry: %+v", st)
+	}
+}
+
+// An unanswered marker read keeps a podcast library's last state only while
+// the folder still holds its marker. With the marker gone (the share isn't
+// mounted, or the folder was swapped) nothing proves that state any more, so
+// the failure is recorded and podcast writes wait.
+func TestPodcastUnansweredCheckNeedsTheMarker(t *testing.T) {
+	t.Parallel()
+	mount := t.TempDir()
+	lib := link.Library{ID: 3, Root: mount, Kind: "podcasts"}
+	var down error
+	source := markerSourceFunc(func(context.Context, int64) (string, error) {
+		if down != nil {
+			return "", down
+		}
+		b, err := os.ReadFile(filepath.Join(mount, MarkerPath))
+		if err != nil {
+			return "", link.ErrNoMarker
+		}
+		var marker libraryMarker
+		if err := json.Unmarshal(b, &marker); err != nil {
+			return "", err
+		}
+		return marker.Nonce, nil
+	})
+	mountFn := func(int64, string) (string, bool) { return mount, true }
+	at := time.Date(2026, 11, 19, 10, 0, 0, 0, time.UTC)
+	r := newRegistry()
+	r.SetLibraries([]link.Library{lib})
+	r.Check(context.Background(), source, mountFn, func() time.Time { return at })
+	if st, _ := r.Status(3); !st.Mapped || !st.Writable {
+		t.Fatalf("the first check = %+v", st)
+	}
+
+	down = &link.APIError{Status: 503}
+	r.Check(context.Background(), source, mountFn, func() time.Time { return at })
+	if st, _ := r.Status(3); !st.Mapped || !st.Writable {
+		t.Fatalf("an unanswered check with the marker in place replaced the state: %+v", st)
+	}
+
+	if err := os.RemoveAll(filepath.Join(mount, ".audiosilo")); err != nil {
+		t.Fatal(err)
+	}
+	r.Check(context.Background(), source, mountFn, func() time.Time { return at })
+	st, ok := r.Status(3)
+	if ok || st.Mapped || st.Writable || st.Error != "could not verify this folder with the server" {
+		t.Fatalf("an unanswered check of a folder without the marker kept the old state, or reads as known: %+v, %v", st, ok)
+	}
+	if _, err := os.Lstat(filepath.Join(mount, ".audiosilo")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the marker written for the failed read was left behind: %v", err)
+	}
+	if r.Due(at, 24*time.Hour) || !r.Due(at.Add(RetryMax), 24*time.Hour) {
+		t.Fatal("the library isn't due again after the hold")
 	}
 }
 func TestPodcastMarkerRefusalsAndCleanup(t *testing.T) {
@@ -88,8 +142,8 @@ func TestPodcastMarkerRefusalsAndCleanup(t *testing.T) {
 					}
 				}
 			}
-			st := CheckPodcast(context.Background(), source, lib, mount, func(id int64) bool { return id == 4 })
-			if st.Mapped || st.Writable || st.Error == "" {
+			st, unanswered := CheckPodcast(context.Background(), source, lib, mount, func(id int64) bool { return id == 4 })
+			if st.Mapped || st.Writable || st.Error == "" || unanswered != nil {
 				t.Fatalf("allowed %s: %+v", scenario, st)
 			}
 			_, err := os.Lstat(filepath.Join(mount, ".audiosilo"))
@@ -122,7 +176,7 @@ func TestPodcastMarkerOfARemovedLibraryIsReplaced(t *testing.T) {
 		return marker.Nonce, err
 	})
 	mount := func(id int64, _ string) (string, bool) { return mounts[id], true }
-	r := NewRegistry()
+	r := newRegistry()
 	r.SetLibraries([]link.Library{{ID: 4, Kind: "podcasts"}, {ID: 5, Kind: "podcasts"}})
 	r.Check(context.Background(), source, mount, time.Now)
 	st, _ := r.Status(5)
@@ -142,15 +196,17 @@ func TestPodcastMarkerOfARemovedLibraryIsReplaced(t *testing.T) {
 func TestPodcastMarkerErrorSplit(t *testing.T) {
 	for _, preexisting := range []bool{false, true} {
 		for _, tc := range []struct {
-			name    string
-			err     error
-			message string
+			name       string
+			err        error
+			message    string
+			unanswered bool // the server gave no definite answer
 		}{
-			{"absent", link.ErrNoMarker, "this folder isn't the library the server sees"},
-			{"removed", &link.APIError{Status: 404, Code: "library_not_found"}, "the library was removed from the server"},
-			{"unauthorized", link.ErrUnauthorized, "could not verify this folder with the server"},
-			{"unavailable", &link.APIError{Status: 503}, "could not verify this folder with the server"},
-			{"network", errors.New("https://PRIVATE_CANARY/token"), "could not verify this folder with the server"},
+			{"absent", link.ErrNoMarker, "this folder isn't the library the server sees", false},
+			{"removed", &link.APIError{Status: 404, Code: "library_not_found"}, "the library was removed from the server", false},
+			{"unauthorized", link.ErrUnauthorized, "could not verify this folder with the server", true},
+			{"unavailable", &link.APIError{Status: 503}, "could not verify this folder with the server", true},
+			{"limited", &link.APIError{Status: 429}, "could not verify this folder with the server", true},
+			{"network", errors.New("https://PRIVATE_CANARY/token"), "could not verify this folder with the server", true},
 		} {
 			t.Run(fmt.Sprintf("%s/%t", tc.name, preexisting), func(t *testing.T) {
 				mount := t.TempDir()
@@ -160,9 +216,9 @@ func TestPodcastMarkerErrorSplit(t *testing.T) {
 					os.WriteFile(filepath.Join(mount, MarkerPath), marker, 0644)
 				}
 				source := markerSourceFunc(func(context.Context, int64) (string, error) { return "", tc.err })
-				st := CheckPodcast(context.Background(), source, link.Library{ID: 3, Kind: "podcasts"}, mount, func(int64) bool { return true })
-				if st.Mapped || st.Writable || st.Error != tc.message {
-					t.Fatal(st)
+				st, unanswered := CheckPodcast(context.Background(), source, link.Library{ID: 3, Kind: "podcasts"}, mount, func(int64) bool { return true })
+				if st.Mapped || st.Writable || st.Error != tc.message || (unanswered != nil) != tc.unanswered {
+					t.Fatal(st, unanswered)
 				}
 				b, err := os.ReadFile(filepath.Join(mount, MarkerPath))
 				if preexisting {

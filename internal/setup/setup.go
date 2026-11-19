@@ -212,7 +212,8 @@ type Audible struct {
 type Inputs struct {
 	Paired bool
 	// LibrariesPending: paired, but no heartbeat has listed the server's
-	// libraries yet, or one listed has no check yet.
+	// libraries yet, or one listed has no check that stands yet (none, or an
+	// unknown one: mapping.Registry.Unchecked).
 	LibrariesPending bool
 	Libraries        []Library
 	ASR              ASR

@@ -106,6 +106,12 @@ export interface Library {
   configured: boolean;
   status: LibraryStatus | null;
   checked_at: string | null;
+  // When a check since checked_at last got no answer from the server (null
+  // when none did): status is the result before it.
+  unanswered_at: string | null;
+  // No state stands (a check the server didn't answer, or one too old): writes
+  // wait for a check it answers, and status.error says why.
+  unknown: boolean;
   // AUDIOSILO_BRIDGE_LIBRARIES sets the mappings.
   locked: boolean;
 }

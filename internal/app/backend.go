@@ -197,12 +197,16 @@ func (b *Bridge) SetMount(ctx context.Context, id int64, path string) error {
 	if err != nil {
 		return err
 	}
-	b.CheckMappings(context.WithoutCancel(ctx), id)
+	// The check outlives the request, not the Bridge: shutdown ends its spacing
+	// waits and reads.
+	b.bg.run(func(ctx context.Context) { b.CheckMappings(ctx, id) })
 	return nil
 }
 
 // CheckNow checks every mapping again now.
-func (b *Bridge) CheckNow(ctx context.Context) { b.CheckMappings(context.WithoutCancel(ctx)) }
+func (b *Bridge) CheckNow(context.Context) {
+	b.bg.run(func(ctx context.Context) { b.CheckMappings(ctx) })
+}
 
 // Settings are the page's editable settings.
 func (b *Bridge) Settings() api.Settings {

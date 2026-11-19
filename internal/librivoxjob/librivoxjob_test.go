@@ -798,6 +798,38 @@ func TestFetchParksMidDownload(t *testing.T) {
 	}
 }
 
+// A mapping no check stands for mid-download (checks the server didn't answer)
+// is waited out, not parked as not writable, with the download-lane slot given
+// back meanwhile (the wait may be an outage long): the fetch takes a slot again
+// before its next write.
+func TestFetchYieldsWhileTheMappingIsUnknown(t *testing.T) {
+	x := newHarness(t)
+	x.fetch.files[sectionURL(2)].cut = []int{100}
+	x.fetch.files[sectionURL(2)].onCut = func() { x.libs.unknown = true }
+	rep := jobs.LocalReporter()
+	waits, yieldedWaiting := 0, false
+	x.h.o.Wait = func(context.Context, time.Duration) error {
+		// The first wait is the cut section's retry; the next the mapping's.
+		if waits++; waits > 1 {
+			yieldedWaiting = rep.Yielded()
+			x.libs.unknown = false
+		}
+		return nil
+	}
+	out, err := x.h.Run(context.Background(), x.job(false), rep)
+	if err != nil || out.(*Result).Bytes != 6014 {
+		t.Fatalf("%#v %v", out, err)
+	}
+	for _, p := range x.progress {
+		if _, ok := p.Extra["park"]; ok {
+			t.Fatalf("an unknown mapping parked the fetch: %+v", p)
+		}
+	}
+	if !yieldedWaiting || rep.Yielded() {
+		t.Fatalf("yielded while waiting %v, after %v", yieldedWaiting, rep.Yielded())
+	}
+}
+
 // A mapping that went away again while the fetch waited for its slot back
 // parks it again (the slot's wait may be long): it never writes on the
 // mapping it saw before the wait.

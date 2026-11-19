@@ -309,7 +309,7 @@ func (b *Bridge) linkChanged() {
 	b.lastBeat, b.beatErr = time.Time{}, ""
 	b.acceptsSetup, b.setupRefusedAt = false, time.Time{}
 	b.libsFitAt, b.libsFitLogged = time.Time{}, false
-	b.libs.SetLibraries(nil)
+	b.libs.Forget()
 	b.mu.Unlock()
 	b.Kick()
 	b.runner.Wake()
@@ -539,19 +539,24 @@ func (b *Bridge) beat(ctx context.Context) {
 	if accepts && !withSetup {
 		b.Kick() // the server takes the checklist: send it now, not in 30 s
 	}
+	// Due runs every beat, a changed list or not, and a failed heartbeat too: it
+	// takes the interval that caps a kept mapping state, and ends the states
+	// kept past it (a server rate-limiting the checks limits the heartbeat as
+	// well, and those states must still end).
+	interval := time.Duration(cfg.Mapping.CheckMinutes) * time.Minute
 	switch {
 	case errors.Is(err, link.ErrUnauthorized):
 		b.conn.Refuse(ctx, cl, refusedReason)
 		return
 	case err != nil:
 		b.log.Warn("bridge: heartbeat failed", "err", err)
+		b.libs.Due(time.Now(), interval) // no check while the server fails it
 		return
 	}
 	// The dispatcher compares eligibility, so an unchanged heartbeat leaves
 	// outstanding claims alone while capability changes refresh them now.
 	b.runner.Wake()
-	interval := time.Duration(cfg.Mapping.CheckMinutes) * time.Minute
-	if changed || b.libs.Due(time.Now(), interval) {
+	if due := b.libs.Due(time.Now(), interval); changed || due {
 		b.CheckMappings(ctx)
 	}
 }
@@ -599,6 +604,12 @@ func (b *Bridge) CheckMappings(ctx context.Context, ids ...int64) {
 		// A check queued behind a running one is run (and beaten) by that one:
 		// beating here too would ask for it again while it is still due.
 		if b.libs.Check(ctx, cl, b.mount, time.Now, ids...) {
+			// A check the server didn't answer keeps the last results: the
+			// page says so per library, the log says why.
+			if until, why := b.libs.Held(); why != "" && ctx.Err() == nil {
+				b.log.Warn("bridge: the server didn't answer a mapping check; keeping the last results and checking again later",
+					"err", why, "again_at", until.Format(time.RFC3339))
+			}
 			b.Kick()
 			b.sweepLibrivox(ctx)
 			b.sweepPodcasts(ctx)
