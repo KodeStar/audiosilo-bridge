@@ -669,10 +669,14 @@ func (s *service) cache(ctx context.Context, root *os.Root, lib link.Library, en
 // was renamed.
 func (s *service) find(root *os.Root, entries []os.DirEntry, rows []store.PodcastShow, p subscribeParams, feedURL string) (string, *podcast.Feed, error) {
 	hash := podcast.FeedURLHash(feedURL)
+	missing := fail("feed_secret_missing", "The show no longer matches this private feed. Follow the feed again.")
 	gone := false
 	if p.ShowPath != "" {
 		_, err := root.Lstat(p.ShowPath)
 		gone = errors.Is(err, os.ErrNotExist)
+		if gone && p.ShowID == "" {
+			return "", nil, missing // no id to find the renamed folder by
+		}
 	}
 	match := func(name string) *podcast.Feed {
 		if !podcast.ValidShow(name) {
@@ -682,7 +686,7 @@ func (s *service) find(root *os.Root, entries []os.DirEntry, rows []store.Podcas
 		if err != nil || f.FeedURLSHA256 != hash && !slices.Contains(f.PreviousFeedURLSHA256, hash) {
 			return nil
 		}
-		if gone && (p.ShowID == "" || f.ShowID != p.ShowID) {
+		if gone && f.ShowID != p.ShowID {
 			return nil
 		}
 		return f
@@ -691,7 +695,7 @@ func (s *service) find(root *os.Root, entries []os.DirEntry, rows []store.Podcas
 		if f := match(p.ShowPath); f != nil {
 			return p.ShowPath, f, nil
 		}
-		return "", nil, fail("feed_secret_missing", "The show no longer matches this private feed. Follow the feed again.")
+		return "", nil, missing
 	}
 	tried := map[string]bool{}
 	for _, r := range rows {
@@ -710,7 +714,7 @@ func (s *service) find(root *os.Root, entries []os.DirEntry, rows []store.Podcas
 		}
 	}
 	if p.ShowPath != "" {
-		return "", nil, fail("feed_secret_missing", "The show no longer matches this private feed. Follow the feed again.")
+		return "", nil, missing
 	}
 	return "", nil, nil
 }
@@ -723,16 +727,19 @@ func (s *service) relocate(ctx context.Context, root *os.Root, lib link.Library,
 		f, _, err := podcast.ReadMoved(root, name)
 		return err == nil && f.ShowID == id
 	}
-	row, ok, err := s.o.DB.PodcastShowByID(ctx, s.o.ServerID(), id)
-	if err == nil && ok && row.LibraryID == lib.ID && holds(row.ShowPath) {
-		return row.ShowPath
+	tried := ""
+	if row, ok, err := s.o.DB.PodcastShowByID(ctx, s.o.ServerID(), id); err == nil && ok && row.LibraryID == lib.ID {
+		if holds(row.ShowPath) {
+			return row.ShowPath
+		}
+		tried = row.ShowPath
 	}
 	entries, err := readDir(root)
 	if err != nil {
 		return ""
 	}
 	for _, e := range entries {
-		if e.IsDir() && podcast.ValidShow(e.Name()) && e.Name() != row.ShowPath && holds(e.Name()) {
+		if e.IsDir() && podcast.ValidShow(e.Name()) && e.Name() != tried && holds(e.Name()) {
 			return e.Name()
 		}
 	}
@@ -761,10 +768,6 @@ func (s *service) readShow(ctx context.Context, root *os.Root, lib link.Library,
 		}
 	}
 	if err != nil {
-		var failure *netguard.Error
-		if errors.As(err, &failure) {
-			return nil, err
-		}
 		return nil, fail("write_failed", "The saved podcast feed could not be read.")
 	}
 	return f, nil
