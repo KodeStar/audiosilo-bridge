@@ -1019,8 +1019,13 @@ func TestPushRefusedCursorBacksOff(t *testing.T) {
 		defer e.srv.mu.Unlock()
 		return len(e.srv.feedAsks)
 	}
-	for range resetStrikes {
+	for i := range resetStrikes {
 		p.Tick(ctx) // the start, then the next page's cursor refused
+		// A refusal before the last of the run is no failure and no wait: a
+		// server restored from a backup refuses once.
+		if a := e.account(t); i < resetStrikes-1 && (a.PushError != "" || p.isPaused(acctID, e.now)) {
+			t.Fatalf("after refusal %d of %d: paused %v, %+v", i+1, resetStrikes, p.isPaused(acctID, e.now), a)
+		}
 	}
 	if n := asks(); n != 2*resetStrikes {
 		t.Fatalf("feed asks = %d, want %d", n, 2*resetStrikes)
@@ -1130,6 +1135,67 @@ func TestPushRefusedCursorBacksOffOnAPage(t *testing.T) {
 	}
 }
 
+// A cursor the server took earlier in a pass doesn't end the run when a later
+// one of the same pass is refused: a server refusing one of the cursors it
+// gave every pass still waits after resetStrikes of them (bridge#50).
+func TestPushRefusedCursorLaterInThePassCounts(t *testing.T) {
+	ctx := context.Background()
+	e := newEnv(t)
+	e.list(t, st("B000000001", "A/One", 36000))
+	e.srv.pageSize = 1
+	e.srv.badSince = "c2"
+	for _, pos := range []float64{600, 900, 1200} {
+		e.srv.add("A/One", "B000000001", pos, e.now, "web-1")
+	}
+	p := NewPusher(e.o)
+	for range resetStrikes {
+		p.Tick(ctx) // the start, its cursor taken, then the next one refused
+	}
+	e.srv.mu.Lock()
+	asks := len(e.srv.feedAsks)
+	e.srv.mu.Unlock()
+	if asks != 3*resetStrikes {
+		t.Fatalf("feed asks = %d, want %d", asks, 3*resetStrikes)
+	}
+	if a := e.account(t); a.PushError == "" || !p.isPaused(acctID, e.now) {
+		t.Fatalf("after %d refusals, each after a cursor taken in its pass: paused %v, %+v", resetStrikes, p.isPaused(acctID, e.now), a)
+	}
+}
+
+// A title matched to another book since the Bridge last read its place is not
+// older than known on a read from the start after a refused cursor: the place
+// last read was the other book's, so the new book's row (changed after the
+// baseline) waits for the next sync to list it, whenever the other was read.
+func TestPushRereadOtherBookIsNotOlderThanKnown(t *testing.T) {
+	ctx := context.Background()
+	e := newEnv(t)
+	e.list(t, st("B000000001", "A/One", 36000))
+	p := NewPusher(e.o)
+	e.started(t, p)
+	baseline := e.now
+	e.now = e.now.Add(time.Hour)
+	e.srv.add("A/One", "B000000001", 18000, e.now, "web-1")
+	e.read(p)
+
+	// The cursor is refused, and from the start the feed has the title on
+	// another book, at a place from before that read.
+	e.srv.mu.Lock()
+	e.srv.badSince = e.account(t).PushCursor
+	e.srv.rows = nil
+	e.srv.mu.Unlock()
+	e.srv.add("A/One (right)", "B000000001", 1500, baseline.Add(30*time.Minute), "web-1")
+	e.now = e.now.Add(time.Minute)
+	e.read(p) // refused: back to the start
+	e.srv.mu.Lock()
+	e.srv.badSince = ""
+	e.srv.mu.Unlock()
+	e.read(p)
+	x, err := e.db.GetAudiblePush(ctx, acctID, "B000000001")
+	if err != nil || x.Path != "A/One (right)" || x.Listed || x.WantMs == nil || *x.WantMs != 1_500_000 {
+		t.Fatalf("the title on its new book = %+v (%v), want its place waiting, not listed", x, err)
+	}
+}
+
 // olderThanKnown compares a row's updated_at (the server's clock) with when
 // the Bridge last read the title's place (row_seen, its own clock) moved by
 // the skew either way, and never with when it wrote the place to Audible
@@ -1144,6 +1210,7 @@ func TestOlderThanKnown(t *testing.T) {
 		want    bool
 	}{
 		"before the read":                {seen.Add(-time.Minute), 0, true},
+		"at the read":                    {seen, 0, true},
 		"between the read and the write": {seen.Add(time.Minute), 0, false},
 		"server ahead, before":           {seen.Add(time.Hour - time.Minute), time.Hour, true},
 		"server ahead, after":            {seen.Add(time.Hour + time.Minute), time.Hour, false},
