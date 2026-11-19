@@ -223,8 +223,8 @@ const engineKindsSQL = `('sidecars.generate', 'chapters.detect', 'readalong.alig
 // (RecordClaim failed), it would otherwise keep that claim from ever stopping
 // or ending its own book.
 const otherClaimSQL = `EXISTS (SELECT 1 FROM server_jobs WHERE id = ?1 AND kind IN ` + engineKindsSQL + `
-		    AND (attempt > ?2 AND server_id = ?4 AND pairing = ?5
-		         OR state = 'running' AND (attempt > ?2 OR (?4 != '' AND (server_id != ?4 OR pairing != ?5)))))`
+		    AND ((attempt > ?2 AND server_id = ?4 AND pairing = ?5)
+		         OR (state = 'running' AND (attempt > ?2 OR (?4 != '' AND (server_id != ?4 OR pairing != ?5))))))`
 
 // openJobsSQL is the open server jobs' mappings (g): the job still running here,
 // its mapping not ended. Callers add the book and the job to leave out.
