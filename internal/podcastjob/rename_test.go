@@ -1648,3 +1648,60 @@ func TestAFetchCopiedAndDeletedMidDownloadResumesFromAllItsBytes(t *testing.T) {
 	noRecords(t, h.handler.s)
 }
 
+// A show folder renamed by hand while the fetch waits to retry a host that
+// failed before any audio arrived, and another folder taking its old name
+// meanwhile (a new one, or another show's: names swapped by hand). The retry
+// reads the episode's feed.json, finds the show where it is now and makes its
+// partial there, rather than in the folder at the old name, then fail.
+func TestAFetchRetryFindsItsShowPastAFolderAtItsOldName(t *testing.T) {
+	for _, other := range []bool{false, true} {
+		requireProbe(t)
+		h, job := audioHarness(t)
+		h.scan.knows = func(p string) bool { return strings.HasPrefix(p, "Fixture Show/") }
+		audio := data(t, "chap-v24-reverse.mp3")
+		var calls atomic.Int32
+		setAudio(h, func(w http.ResponseWriter, r *http.Request) {
+			if calls.Add(1) == 1 {
+				renameShow(t, h, "Fixture Show", "Renamed Show")
+				if err := os.Mkdir(filepath.Join(h.mount, "Fixture Show"), 0o755); err != nil {
+					t.Error(err)
+				}
+				if other {
+					root, err := os.OpenRoot(h.mount)
+					if err != nil {
+						t.Error(err)
+						return
+					}
+					defer root.Close()
+					var f podcast.Feed
+					if err := json.Unmarshal(data(t, "feed-fetch-v1.json"), &f); err != nil {
+						t.Error(err)
+						return
+					}
+					f.ShowID, f.Episodes[0].Fetch = "0123456789abcdef", nil
+					if _, err := podcast.Write(root, "Fixture Show", &f, h.handler.s.o.Now()); err != nil {
+						t.Error(err)
+					}
+				}
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
+			w.Header().Set("ETag", `"one"`)
+			w.Write(audio)
+		})
+		res, err := h.handler.FetchJob().Run(context.Background(), job, jobs.LocalReporter())
+		moved := "Renamed Show/" + strings.TrimPrefix(*job.Path, "Fixture Show/")
+		if got, ok := res.(fetchResult); err != nil || !ok || got.Path != moved || got.Fetch.Bytes != int64(len(audio)) || calls.Load() != 2 {
+			t.Fatal(other, res, err, calls.Load())
+		}
+		for _, show := range []string{"Fixture Show", "Renamed Show"} {
+			if left := partials(filepath.Join(h.mount, show)); len(left) != 0 {
+				t.Fatal(other, "a partial was left behind", left)
+			}
+		}
+		if _, err := os.Lstat(filepath.Join(h.mount, "Fixture Show", ".audiosilo", strings.TrimPrefix(podcast.AttachmentPath(moved, ".fetch.lock"), "Renamed Show/.audiosilo/"))); !errors.Is(err, os.ErrNotExist) {
+			t.Fatal(other, "a lock was made in the folder at the old name", err)
+		}
+		noRecords(t, h.handler.s)
+	}
+}

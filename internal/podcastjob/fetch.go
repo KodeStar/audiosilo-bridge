@@ -230,16 +230,15 @@ func (h *Fetch) run(parent context.Context, claimed *jobs.Job, rep *jobs.Reporte
 	// path, so a host's retry goes on from the partial where it is now rather
 	// than from byte 0, and a clear removes it there rather than drop its
 	// record and leave it for the day-old sweep. With no partial yet (a retry
-	// that cleared it) it follows when the episode's folder is gone, so the
-	// next attempt makes its partial where the show is now rather than fail
-	// in a folder that is no longer there.
+	// that cleared it) it always asks follow, which reads the episode's
+	// feed.json once: the next attempt makes its partial where the show is now,
+	// not in a folder that is gone or that another folder took the name of
+	// meanwhile (a new one, or names swapped by hand).
 	settle := func(ctx context.Context) error {
-		at := path.Dir(e.Path)
 		if c.Temp != "" {
-			at = c.partialName()
-		}
-		if _, err := root.Lstat(at); !errors.Is(err, os.ErrNotExist) {
-			return nil
+			if _, err := root.Lstat(c.partialName()); !errors.Is(err, os.ErrNotExist) {
+				return nil
+			}
 		}
 		return follow(ctx)
 	}
