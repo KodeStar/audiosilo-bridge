@@ -180,12 +180,15 @@ func (h *Fetch) run(parent context.Context, claimed *jobs.Job, rep *jobs.Reporte
 	if err != nil {
 		return nil, err
 	}
+	// settled: the exit below followed the show already (settle), the lock with
+	// it, so letting go does not search the library for the show a second time.
+	settled := false
 	defer func() {
 		// A show folder renamed by hand since the lock was taken took its file
 		// along, and a failure before the download (which follows the show)
 		// leaves it there: it is let go where the show is now, its file
 		// removed, rather than left in the folder.
-		if !lock.held() && parent.Err() == nil {
+		if !settled && !lock.held() && parent.Err() == nil {
 			sctx, stop := context.WithTimeout(parent, ceiling)
 			if p, err := s.episodeAt(sctx, root, lib, mount, *job.Path, params, job.ID); err == nil {
 				lock.follow(p)
@@ -301,6 +304,7 @@ func (h *Fetch) run(parent context.Context, claimed *jobs.Job, rep *jobs.Reporte
 				sctx, stop := context.WithTimeout(parent, ceiling)
 				_ = settle(sctx)
 				stop()
+				settled = true
 			}
 			s.clearCheckpoint(job, root, &c)
 		}

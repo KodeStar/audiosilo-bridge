@@ -2616,7 +2616,8 @@ internal/
             gone, and the fetch fails as the publication would rather than
             download into that folder). A failure before the download whose
             lock file moved with a folder renamed by hand lets go of it where
-            the show is now (episodeAt at the exit), its file removed. The exit's settle is
+            the show is now (episodeAt at the exit, unless the exit's settle
+            followed the show already), its file removed. The exit's settle is
             bounded by one ceiling. Under the
             episode's lock its own record moves even when a duplicate claim's
             open row names it (adoptOwn, also after a relocation before the
