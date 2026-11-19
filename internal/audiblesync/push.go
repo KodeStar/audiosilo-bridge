@@ -306,7 +306,7 @@ func serverSkew(serverTime string, now time.Time) time.Duration {
 // before the re-arm but not read yet is new.
 // Never by when the place was written to Audible (at): a place another device
 // wrote after the row read and before the write was never read, so it is new.
-// A title with no row_read (never read, or read before migration 0019) counts
+// A title with no row_read (never read, or read before migration 0020) counts
 // as never handled (the baseline's line alone).
 func olderThanKnown(updated time.Time, x store.AudiblePush) bool {
 	read, err := time.Parse(time.RFC3339Nano, x.RowRead)

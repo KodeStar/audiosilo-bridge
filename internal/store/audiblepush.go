@@ -33,7 +33,7 @@ type AudiblePush struct {
 	RowMs   int64
 	RowSeen string
 	// RowRead is the latest updated_at (the server's clock) of the rows read
-	// from the server's feed for the title's book (migration 0019, "" none or
+	// from the server's feed for the title's book (migration 0020, "" none or
 	// not known). It never moves back while the book stays: a row the server
 	// wrote later with an earlier updated_at (a restored backup's, an older
 	// server's offline backlog) or one whose updated_at can't be read leaves

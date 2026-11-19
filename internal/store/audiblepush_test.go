@@ -707,7 +707,7 @@ func TestMigrationReasserted(t *testing.T) {
 	if err != nil || x.ReassertedMs != -1 {
 		t.Fatalf("migrated row = %+v, %v", x, err)
 	}
-	// Migration 0019: the row's updated_at isn't known (row_seen is the
+	// Migration 0020: the row's updated_at isn't known (row_seen is the
 	// Bridge's clock, never the server's), so the baseline's line alone applies.
 	if x.RowRead != "" {
 		t.Fatalf("migrated row's updated_at = %q, want none", x.RowRead)

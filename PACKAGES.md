@@ -1643,15 +1643,14 @@ internal/
             attempt follows the book again (mapping open, row running) with
             share_off unset and no other generate job mapped to the book has
             share_off (shareResumableSQL; ShareResumable reads the same).
-            0019 (bridge#50) adds
-            audible_push.row_read: the latest updated_at (the server's clock,
-            AudibleRow.Updated) of the feed rows read for the title's book, moved on by
-            Want/Seen/PendAudiblePush and, for a row read again at the place recorded,
-            ReadAudibleRow (SQL max: never back, an unreadable '' leaves it; another book
-            starts it again), forgotten with row_seen, kept by RearmAudiblePush; what a
-            read from the start compares a row's updated_at with. Rows from before 0019
-            start with '' (row_seen is the Bridge's clock, so the baseline's line alone
-            applies until the title is read again).
+            0020 (bridge#50) adds audible_push.row_read: the latest updated_at (the
+            server's clock, AudibleRow.Updated) of the feed rows read for the title's
+            book, moved on by Want/Seen/PendAudiblePush and, for a row read again at
+            the place recorded, ReadAudibleRow (SQL max: never back, an unreadable ''
+            leaves it; another book starts it again), forgotten with row_seen, kept by
+            RearmAudiblePush; what a read from the start compares a row's updated_at
+            with. Rows from before 0020 start with '' (row_seen is the Bridge's clock,
+            so the baseline's line alone applies until the title is read again).
   state/    per-book pipeline state machine: table-driven states/lanes/transitions,
             CanStart/NextState guards, the audit fix-loop cap. Pure, no I/O. M6 added
             ParkCode (typed park reasons - M7 added contrib_unavailable, core_needed,
