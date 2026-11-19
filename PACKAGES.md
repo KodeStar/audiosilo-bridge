@@ -2381,7 +2381,8 @@ internal/
             token) or ended for good (errCancelRequested, errLost).
   verify/   bridge.verify: params {hold_seconds 0-600}; resolves the library from the
             registry, asks the server for the book's files (path "" = the sample
-            book), CompareFiles through the mount, probes the BOOK's folder for
+            book; no answer or a 5xx asked again with backoff for up to 2 min,
+            generate's fetchBook rule, a 4xx failing at once), CompareFiles through the mount, probes the BOOK's folder for
             writing (spike 3: a root probe passed while a 0555 book folder refused),
             then holds, reporting each second. A mismatch is a failure WITH a result.
             Result {library_id, mount_path, path, files[{path,size,expected_size,ok}],

@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -148,5 +150,60 @@ func TestVerifyHoldStopsOnCancel(t *testing.T) {
 	}
 	if out.(Result).ElapsedMS <= 0 {
 		t.Fatal("no elapsed time")
+	}
+}
+
+// flaky answers the book read with err for its first fails asks, then as src.
+type flaky struct {
+	src   mapping.BookSource
+	err   error
+	fails int32
+	asks  atomic.Int32
+}
+
+func (f *flaky) Book(ctx context.Context, lib int64, path string) (*link.Book, error) {
+	if f.asks.Add(1) <= f.fails {
+		return nil, f.err
+	}
+	return f.src.Book(ctx, lib, path)
+}
+
+// A 5xx from the server's book read (a restart, a moment's fault) is asked
+// again with backoff and the verify goes on; one that lasts past the budget
+// fails it with the server's answer, and a definite 4xx fails it at once.
+func TestVerifyRetriesATransientBookRead(t *testing.T) {
+	t.Parallel()
+	h, _ := setup(t)
+	h.retryFirst, h.retryFor = time.Millisecond, 200*time.Millisecond
+	src := h.books()
+	job := jobs.Job{LibraryID: ptr(int64(1)), Path: ptr("Author/Book")}
+	use := func(f *flaky) { h.books = func() mapping.BookSource { return f } }
+
+	down := &flaky{src: src, err: &link.APIError{Status: http.StatusInternalServerError}, fails: 2}
+	use(down)
+	if out, err := h.Run(context.Background(), job, jobs.LocalReporter()); err != nil || !out.(Result).Writable {
+		t.Fatalf("after two 500s = %+v, %v; want verified", out, err)
+	}
+	if n := down.asks.Load(); n != 3 {
+		t.Fatalf("asks = %d, want 3", n)
+	}
+
+	gone := &flaky{src: src, err: &link.APIError{Status: http.StatusBadGateway}, fails: 1 << 30}
+	use(gone)
+	var apiErr *link.APIError
+	if _, err := h.Run(context.Background(), job, jobs.LocalReporter()); !errors.As(err, &apiErr) || apiErr.Status != http.StatusBadGateway {
+		t.Fatalf("a lasting 502 = %v; want it as the failure", err)
+	}
+	if n := gone.asks.Load(); n < 2 {
+		t.Fatalf("a lasting 502 was asked %d times, want retries", n)
+	}
+
+	refused := &flaky{src: src, err: &link.APIError{Status: http.StatusForbidden}, fails: 1}
+	use(refused)
+	if _, err := h.Run(context.Background(), job, jobs.LocalReporter()); err == nil {
+		t.Fatal("a 403 verified")
+	}
+	if n := refused.asks.Load(); n != 1 {
+		t.Fatalf("a 403 was asked %d times, want once", n)
 	}
 }

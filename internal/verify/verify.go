@@ -31,16 +31,29 @@ type Libraries interface {
 	Library(id int64) (link.Library, bool)
 }
 
+// The book read's retry: an answer that may change (no answer, a 5xx) is asked
+// again after bookRetryFirst, doubling up to bookRetryMax, until bookRetryFor
+// has passed since the first ask, so a server restarting under a verify
+// doesn't fail it, and one that stays down does in a time an admin waits for.
+const (
+	bookRetryFirst = time.Second
+	bookRetryMax   = 15 * time.Second
+	bookRetryFor   = 2 * time.Minute
+)
+
 // Handler runs bridge.verify.
 type Handler struct {
 	libs  Libraries
 	mount mapping.MountFunc
 	books func() mapping.BookSource
+	// retryFirst and retryFor are the book read's first wait and budget
+	// (bookRetryFirst, bookRetryFor; shorter in tests).
+	retryFirst, retryFor time.Duration
 }
 
 // New returns the handler. books returns the server link (nil while unpaired).
 func New(libs Libraries, mount mapping.MountFunc, books func() mapping.BookSource) *Handler {
-	return &Handler{libs: libs, mount: mount, books: books}
+	return &Handler{libs: libs, mount: mount, books: books, retryFirst: bookRetryFirst, retryFor: bookRetryFor}
 }
 
 // Kind is bridge.verify.
@@ -95,8 +108,7 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 	if job.Path != nil {
 		path = *job.Path
 	}
-	rep.Progress(jobs.Progress{Step: "lookup", Message: "Asking the server for the book's files"})
-	book, err := src.Book(ctx, lib.ID, path)
+	book, err := h.fetchBook(ctx, rep, src, lib.ID, path)
 	if err != nil {
 		return nil, fmt.Errorf("could not get the book's files from the server: %w", err)
 	}
@@ -132,6 +144,34 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 		return res, errors.New("the Bridge's copy doesn't match the server's: " + problem)
 	}
 	return res, nil
+}
+
+// fetchBook asks the server for the book's files, asking again with backoff
+// (within retryFor) while the answer may change: no answer at all, a refused
+// token the runner is dealing with, a 5xx (generate's fetchBook's rule). A
+// definite answer (no such book, another 4xx) fails at once, and so does the
+// last transient one once the budget is spent.
+func (h *Handler) fetchBook(ctx context.Context, rep *jobs.Reporter, src mapping.BookSource, libraryID int64, path string) (*link.Book, error) {
+	deadline := time.Now().Add(h.retryFor)
+	wait := h.retryFirst
+	for {
+		rep.Progress(jobs.Progress{Step: "lookup", Message: "Asking the server for the book's files"})
+		book, err := src.Book(ctx, libraryID, path)
+		var apiErr *link.APIError
+		switch {
+		case err == nil:
+			return book, nil
+		case errors.Is(err, link.ErrNoBook), errors.As(err, &apiErr) && apiErr.Status < 500,
+			ctx.Err() != nil, time.Now().Add(wait).After(deadline):
+			return nil, err
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(wait):
+		}
+		wait = min(wait*2, bookRetryMax)
+	}
 }
 
 // bookFolder is the folder a book's files are in through the mount: the
