@@ -2,12 +2,14 @@ package podcastjob
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path"
 	"time"
 
 	"github.com/kodestar/audiosilo-bridge/internal/jobs"
 	"github.com/kodestar/audiosilo-bridge/internal/link"
+	"github.com/kodestar/audiosilo-bridge/internal/mapping"
 	"github.com/kodestar/audiosilo-bridge/internal/podcast"
 	"github.com/kodestar/audiosilo-bridge/internal/store"
 )
@@ -93,18 +95,23 @@ func (s *service) cleanOwned(ctx context.Context, root *os.Root, lib link.Librar
 
 // sweepRecords drops this pairing's download records of library lib that no
 // job reads any more: a day old (cleanOwned's age), of no running download
-// (runningRecords), whose folder is gone or
-// holds another show (podcast.ReadMoved, so a folder renamed by hand and not
-// taken in yet is still its show's). A fetch that ends early (its episode
-// found installed, a file in the way) or a take-in that could not move a
-// record leaves it under a gone folder, and cleanOwned reads a show's records
-// by the show's folder: nothing else would ever clear it, and the partial it
-// names would never be swept. Only the record and its validator go: its
-// partial is not at the record's path or not its show's, and sweepPartials
-// takes it once old, unrecorded. A folder that cannot be read keeps its
-// records, as does a record saved again since the listing.
-func (s *service) sweepRecords(ctx context.Context, root *os.Root, lib link.Library, mount string) {
-	if s.o.DB == nil || s.o.DataDir == "" || s.writable(lib, mount) != nil {
+// (runningRecords), whose folder is gone, holds another show or holds the
+// show taken in under another spelling of its name (orphaned; podcast.ReadMoved,
+// so a folder renamed by hand to the record's folder name and not taken in
+// yet is still its show's). A fetch that ends early (its episode found
+// installed, a file in the way) or a take-in that could not move a record
+// leaves it under a gone folder, and cleanOwned reads a show's records by the
+// show's folder: nothing else would ever clear it, and the partial it names
+// would never be swept. A record whose partial is in one of shows, a folder
+// of its show renamed by hand and not taken in yet, stays: that take-in moves
+// it (adoptCheckpoints) and the download resumes there. Only the record and
+// its validator go: its partial is not at the record's path or not its
+// show's, and sweepPartials takes it once old, unrecorded. A folder that
+// cannot be read keeps its records, as does a record saved again since the
+// listing, and nothing goes once the library's marker is not there (a share
+// unmounted since the mapping check, its empty mount point holding no show).
+func (s *service) sweepRecords(ctx context.Context, root *os.Root, lib link.Library, mount string, shows []string) {
+	if s.o.DB == nil || s.o.DataDir == "" || s.writable(lib, mount) != nil || !markerThere(root) {
 		return
 	}
 	rows, err := s.o.DB.OpenServerJobs(ctx)
@@ -121,23 +128,49 @@ func (s *service) sweepRecords(ctx context.Context, root *os.Root, lib link.Libr
 		return
 	}
 	running := s.runningRecords(rows, lib.ID, 0)
+	read := movedReader(root)
 	for _, c := range records {
 		if ctx.Err() != nil {
 			return
 		}
-		if !s.dayOld(c.UpdatedAt) || running(c) || !orphaned(root, c) {
+		if !s.dayOld(c.UpdatedAt) || running(c) || !orphaned(root, c, read) || awaitsTakeIn(root, shows, c, read) {
 			continue
 		}
 		name := recordName(lib.ID, c.ShowID, c.Path)
 		if now, err := readRecord(dir, name); err != nil || now != c {
 			continue
 		}
-		if s.writable(lib, mount) != nil {
+		if s.writable(lib, mount) != nil || !markerThere(root) {
 			return
 		}
 		if dir.Remove(name) == nil {
 			s.dropValidator(c.Validator)
 		}
+	}
+}
+
+// markerThere reports whether root holds its library's marker (or cannot
+// say): a mount point whose share is gone holds none.
+func markerThere(root *os.Root) bool {
+	_, err := root.Lstat(mapping.MarkerPath)
+	return !errors.Is(err, os.ErrNotExist)
+}
+
+// movedReader is podcast.ReadMoved in root, each show folder read once.
+func movedReader(root *os.Root) func(string) (*podcast.Feed, string, error) {
+	type answer struct {
+		f    *podcast.Feed
+		from string
+		err  error
+	}
+	read := map[string]answer{}
+	return func(show string) (*podcast.Feed, string, error) {
+		a, ok := read[show]
+		if !ok {
+			a.f, a.from, a.err = podcast.ReadMoved(root, show)
+			read[show] = a
+		}
+		return a.f, a.from, a.err
 	}
 }
 
@@ -148,13 +181,33 @@ func (s *service) dayOld(stamp string) bool {
 	return err == nil && s.o.Now().Sub(t) > 24*time.Hour
 }
 
-// orphaned reports whether record c's folder is gone, or holds a show other
-// than c's.
-func orphaned(root *os.Root, c checkpoint) bool {
+// orphaned reports whether record c's folder is gone, holds a show other
+// than c's, or holds c's show taken in under another spelling of its name (a
+// case-only rename by hand: every job resolves the spelling on disk, so none
+// reads the record at its path). One that cannot be read is not.
+func orphaned(root *os.Root, c checkpoint, read func(string) (*podcast.Feed, string, error)) bool {
 	show := path.Dir(c.Path)
-	if !folderThere(root, show) {
+	real, err := podcast.RealName(root, show)
+	if errors.Is(err, os.ErrNotExist) {
 		return true
 	}
-	f, _, err := podcast.ReadMoved(root, show)
-	return err == nil && f.ShowID != c.ShowID
+	if err != nil {
+		return false
+	}
+	f, from, err := read(real)
+	return err == nil && (f.ShowID != c.ShowID || real != show && from == "")
+}
+
+// awaitsTakeIn reports whether record c's partial is in one of shows whose
+// folder holds c's show renamed by hand and not taken in yet (or cannot be
+// read to tell): its take-in moves the record.
+func awaitsTakeIn(root *os.Root, shows []string, c checkpoint, read func(string) (*podcast.Feed, string, error)) bool {
+	for _, show := range shows {
+		if _, err := podcast.LstatRegular(root, show+"/"+c.Temp); err != nil {
+			continue
+		}
+		f, from, err := read(show)
+		return err != nil || f.ShowID == c.ShowID && from != ""
+	}
+	return false
 }

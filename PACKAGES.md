@@ -2613,8 +2613,12 @@ internal/
             resumes from its own partial, and the end once more, so no record
             stays under a folder that is gone. The hourly sweep (SweepPartials)
             first drops the day-old records of no running download whose
-            folder is gone or holds another show (sweepRecords; a folder that
-            cannot be read keeps them), with their validators: an early end
+            folder is gone, holds another show or holds the show taken in
+            under another spelling (sweepRecords; a folder that cannot be read
+            keeps them, as does a record whose partial is in a folder of its
+            show renamed by hand and not taken in yet, which that take-in
+            moves, and nothing goes while the library's marker is not there),
+            with their validators: an early end
             (an episode found installed, a file in the way) or a take-in that
             could not move one leaves it there, and cleanOwned reads a show's
             records by its folder; the partials, unrecorded then, are swept

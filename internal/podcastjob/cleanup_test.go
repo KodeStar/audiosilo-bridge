@@ -419,12 +419,92 @@ func TestSweepRecordsDropsRecordsWhoseFolderIsGone(t *testing.T) {
 			}
 		}
 	}
-	s.sweepRecords(context.Background(), root, link.Library{ID: 3, Kind: "podcasts", Root: h.mount}, h.mount)
+	s.sweepRecords(context.Background(), root, link.Library{ID: 3, Kind: "podcasts", Root: h.mount}, h.mount, nil)
 	for name, r := range records {
 		_, err := dir.Lstat(recordName(3, r.c.ShowID, r.c.Path))
 		v, _ := s.o.Vault.Get(r.c.Validator)
 		if r.swept != errors.Is(err, os.ErrNotExist) || r.swept != (v == "") {
 			t.Fatal(name, ": swept", r.swept, "record", err, "validator", v)
 		}
+	}
+}
+
+// A record of a show whose folder was renamed by hand and not taken in yet
+// is gone at its path but not orphaned: the show's take-in moves it, and the
+// download resumes from the partial the folder took along. The sweep leaves
+// it (and its partial recorded) until then, and drops it once the folder is
+// taken in without it. Nothing is dropped while the library's marker is not
+// there (a share unmounted since the mapping check).
+func TestSweepRecordsLeavesARecordAwaitingItsTakeIn(t *testing.T) {
+	h, job := audioHarness(t)
+	s := h.handler.s
+	root, err := os.OpenRoot(h.mount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	var f podcast.Feed
+	if err := json.Unmarshal(data(t, "feed-fetch-v1.json"), &f); err != nil {
+		t.Fatal(err)
+	}
+	const id = "fedcba9876543210"
+	f.ShowID = id
+	for i := range f.Episodes {
+		f.Episodes[i].Path = "Away Old/" + path.Base(f.Episodes[i].Path)
+	}
+	if err := root.Mkdir("Away Old", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := podcast.Write(root, "Away Old", &f, s.o.Now()); err != nil {
+		t.Fatal(err)
+	}
+	renameShow(t, h, "Away Old", "Away New")
+	c := checkpoint{ServerHash: s.pairHash(), LibraryID: 3, ShowID: id, EpisodeID: f.Episodes[0].ID, Path: f.Episodes[0].Path, Temp: podcast.TempPrefix + nonce(), Validator: secrets.PodcastETagPrefix + nonce(), Offset: 6, Total: 100, UpdatedAt: s.o.Now().Add(-25 * time.Hour).Format(time.RFC3339)}
+	if err := root.WriteFile("Away New/"+c.Temp, []byte("abcdef"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.o.Vault.Set(c.Validator, `"one"`); err != nil {
+		t.Fatal(err)
+	}
+	dir, err := s.checkpointRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dir.Close()
+	if err := writeRecord(dir, recordName(3, id, c.Path), c); err != nil {
+		t.Fatal(err)
+	}
+	lib := link.Library{ID: 3, Kind: "podcasts", Root: h.mount}
+	shows := []string{"Away New", path.Dir(*job.Path)}
+	kept := func() bool {
+		_, err := dir.Lstat(recordName(3, id, c.Path))
+		v, _ := s.o.Vault.Get(c.Validator)
+		return err == nil && v != ""
+	}
+	s.sweepRecords(context.Background(), root, lib, h.mount, shows)
+	if !kept() {
+		t.Fatal("the record of a show awaiting its take-in was dropped")
+	}
+	marker, err := root.ReadFile(".audiosilo/library.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := root.Remove(".audiosilo/library.json"); err != nil {
+		t.Fatal(err)
+	}
+	// The folder taken in (its feed.json naming it), the record left behind.
+	if err := podcast.Adopt(root, "Away New", "Away Old", &f, s.o.Now()); err != nil {
+		t.Fatal(err)
+	}
+	s.sweepRecords(context.Background(), root, lib, h.mount, shows)
+	if !kept() {
+		t.Fatal("a record was dropped with the library's marker gone")
+	}
+	if err := root.WriteFile(".audiosilo/library.json", marker, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s.sweepRecords(context.Background(), root, lib, h.mount, shows)
+	if kept() {
+		t.Fatal("the record a take-in left behind was kept")
 	}
 }
