@@ -107,9 +107,11 @@ type shared struct {
 // anything (BR-LINK-RULE). The service itself for a job no runner claimed.
 func (s *service) forJob(job jobs.Job) *service {
 	id := job.ServerID()
+	// A view's own (a run's, which may have pinned the pairing it started
+	// under over its claim's) wins over the one sealed in the params.
 	hash := s.claimHash
-	if h := claimHashOf(job); h != "" {
-		hash = h
+	if hash == "" {
+		hash = claimHashOf(job)
 	}
 	if id == "" {
 		if hash == s.claimHash {

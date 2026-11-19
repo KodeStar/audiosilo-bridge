@@ -42,8 +42,10 @@ func (h *Fetch) Interactive() bool    { return true }
 // same server or another) is released there (Abandon), where the pairing now
 // would name another folder. A claim whose link no longer reaches its
 // pairing records none (one in the params is never the server's to set), and
-// its job is dropped before it runs. Params that are not an object go as they
-// are: the run fails them as an episode not found.
+// its job is dropped before it runs; so does one whose server token could not
+// be read (a vault's fault names no pairing: its run pins the one it starts
+// under). Params that are not an object go as they are: the run fails them as
+// an episode not found.
 func (h *Fetch) SealParams(job jobs.Job) (json.RawMessage, error) {
 	var fields map[string]json.RawMessage
 	if json.Unmarshal(job.Params, &fields) != nil || fields == nil {
@@ -51,11 +53,25 @@ func (h *Fetch) SealParams(job jobs.Job) (json.RawMessage, error) {
 	}
 	delete(fields, podcast.ClaimHashParam)
 	s := h.s.forJob(job)
-	hash := s.livePairHash()
-	if s.o.Server == nil || s.o.Server() != nil { // the token read was the claim's pairing's
+	if hash, known := s.livePair(); known && s.linked() { // the token read was the claim's pairing's
 		fields[podcast.ClaimHashParam], _ = json.Marshal(hash)
 	}
 	return json.Marshal(fields)
+}
+
+// runView is job's view (forJob) for its run, its records' pairing pinned:
+// the claim's (SealParams), or the pairing's token the run starts under when
+// the claim recorded none (claimed before claims recorded their pairing, or
+// while the token could not be read) or when its link still reaches the
+// claim's pairing under a new token (a refused token's re-pair with the same
+// server keeps the pairing, and its jobs resume on the new link). The run's
+// release reads it even once that pairing has ended.
+func (s *service) runView(job jobs.Job) *service {
+	view := *s.forJob(job)
+	if live, known := view.livePair(); view.claimHash == "" || known && live != view.claimHash && view.linked() {
+		view.claimHash = live
+	}
+	return &view
 }
 
 type fetchParams struct {
@@ -157,14 +173,7 @@ func (b *budget) failure(ctx context.Context, err error) error {
 
 func (h *Fetch) Run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (any, error) {
 	kept := ""
-	view := *h.s.forJob(job)
-	own := &Fetch{s: &view}
-	if own.s.claimHash == "" {
-		// Claimed before claims recorded their pairing (SealParams): its
-		// records are kept under the pairing it starts under, which its
-		// release below reads even once that pairing has ended.
-		own.s.claimHash = own.s.livePairHash()
-	}
+	own := &Fetch{s: h.s.runView(job)}
 	result, err := own.run(parent, &job, rep, &kept)
 	if err != nil && (parent.Err() == nil || !jobs.Resumes(parent)) {
 		own.abandon(parent, job, kept)

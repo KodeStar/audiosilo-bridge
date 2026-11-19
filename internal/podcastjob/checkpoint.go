@@ -147,6 +147,11 @@ func (s *service) livePair() (hash string, known bool) {
 	return podcast.FeedURLHash(s.o.ServerID() + "|" + token), err == nil
 }
 
+// linked reports whether the view's link still reaches the pairing its job
+// was claimed under (always, for a view with no link to tell): the server
+// token read just before it is that pairing's.
+func (s *service) linked() bool { return s.o.Server == nil || s.o.Server() != nil }
+
 // pairingEnded reports whether the pairing the view's records are kept under
 // (pairHash) is no longer the Bridge's: unpaired, or paired again (with the
 // same server or another) since the claim. Nothing more is written for it.

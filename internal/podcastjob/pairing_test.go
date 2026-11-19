@@ -325,3 +325,47 @@ func TestNoRecordIsSavedForAnEndedPairing(t *testing.T) {
 		t.Fatal("an ended pairing's save left:", left)
 	}
 }
+
+// A claim made while the server token cannot be read records no pairing (a
+// vault's fault names none: denied), and its run pins the pairing's token it
+// starts under once it reads (allowed), so the job is never kept under a
+// pairing that was never the Bridge's.
+func TestFetchClaimWithAnUnreadableTokenRecordsNoPairing(t *testing.T) {
+	h, job := audioHarness(t)
+	pairings(t, h)
+	job = jobs.ClaimedUnder(job, "server-1", "p1")
+	vault := h.handler.s.o.Vault
+	h.handler.s.o.Vault = lockedVault{vault}
+	sealed := claimFetchUnder(t, h, job)
+	if claimHashOf(sealed) != "" {
+		t.Fatalf("a claim whose token could not be read recorded a pairing: %s", sealed.Params)
+	}
+	h.handler.s.o.Vault = vault
+	if got, want := h.handler.s.runView(sealed).pairHash(), podcast.FeedURLHash("server-1|t1"); got != want {
+		t.Fatal("the run did not pin the pairing it starts under", got)
+	}
+}
+
+// A refused token's re-pair with the same server keeps the pairing (the jobs
+// it stopped resume on the new link) under a new token: a resumed fetch's run
+// keeps its records under the token now (allowed), as a run did before claims
+// recorded their pairing, rather than fail identity_changed and clear its
+// work. A pairing made again (a new identity) is still the claim's ended one
+// (denied).
+func TestAFetchResumedOnItsPairingsNewTokenRuns(t *testing.T) {
+	h, job := audioHarness(t)
+	end := pairings(t, h)
+	job = claimFetchUnder(t, h, jobs.ClaimedUnder(job, "server-1", "p1"))
+	if err := h.vault.Set(secrets.ServerToken, "t2"); err != nil { // link still p1
+		t.Fatal(err)
+	}
+	v := h.handler.s.runView(job)
+	if v.pairHash() != podcast.FeedURLHash("server-1|t2") || v.pairingEnded() {
+		t.Fatal("a fetch resumed on its own pairing's new token is taken for an ended pairing's")
+	}
+	end(repairedSame)
+	v = h.handler.s.runView(job)
+	if v.pairHash() != podcast.FeedURLHash("server-1|t1") || !v.pairingEnded() {
+		t.Fatal("a fetch of a pairing made again is not its claim's ended pairing's")
+	}
+}
