@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/kodestar/audiosilo-bridge/internal/accounts"
+	"github.com/kodestar/audiosilo-bridge/internal/agentbox"
 	"github.com/kodestar/audiosilo-bridge/internal/api"
 	"github.com/kodestar/audiosilo-bridge/internal/config"
 	"github.com/kodestar/audiosilo-bridge/internal/secrets"
@@ -68,8 +69,41 @@ func TestAgentSettingsSave(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = b2.db.Close() }()
-	if got := b2.AgentSettings(ctx); got.Running != "openai-compatible" {
+	got := b2.AgentSettings(ctx)
+	if got.Running != "openai-compatible" {
 		t.Fatalf("after a restart = %+v", got)
+	}
+	// No endpoint staging dir set: the page says the service isn't running,
+	// and why (BR-OPENAI-2); the claude backend has no such service.
+	if got.Service == nil || got.Service.State != api.ServiceNotRunning || !strings.Contains(got.Service.Detail, "agent.endpoint_staging_dir") {
+		t.Fatalf("the endpoint's service = %+v", got.Service)
+	}
+	if s.Service != nil {
+		t.Fatalf("the claude backend reports an endpoint service: %+v", s.Service)
+	}
+}
+
+// The endpoint's agent service's state on Settings > Agent: not running,
+// refused with why and what it found (only for a credential within its
+// reach), or running whatever the endpoint's own settings say.
+func TestEndpointServiceState(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct {
+		st   agentbox.Status
+		want api.AgentService
+	}{
+		"stale":             {agentbox.Status{Problem: agentbox.ProblemNotRunning, Detail: "d"}, api.AgentService{State: api.ServiceNotRunning, Detail: "d"}},
+		"none set up":       {agentbox.Status{Problem: agentbox.ProblemEndpointService, Detail: "d"}, api.AgentService{State: api.ServiceNotRunning, Detail: "d"}},
+		"not its own":       {agentbox.Status{Live: true, Problem: agentbox.ProblemEndpointService, Detail: "d", Found: "x"}, api.AgentService{State: api.ServiceRefused, Detail: "d", Found: "x"}},
+		"a credential":      {agentbox.Status{Live: true, Problem: agentbox.ProblemOwnCredentials, Detail: "d", Found: "/m holds /m/.audiosilo-agent-home"}, api.AgentService{State: api.ServiceRefused, Detail: "d", Found: "/m holds /m/.audiosilo-agent-home"}},
+		"an older image":    {agentbox.Status{Problem: agentbox.ProblemOutdated, Detail: "d"}, api.AgentService{State: api.ServiceRefused, Detail: "d"}},
+		"ready":             {agentbox.Status{Live: true, Available: true}, api.AgentService{State: api.ServiceRunning}},
+		"no endpoint yet":   {agentbox.Status{Live: true, Problem: agentbox.ProblemNoEndpoint, Detail: "d"}, api.AgentService{State: api.ServiceRunning}},
+		"its key held back": {agentbox.Status{Live: true, Problem: agentbox.ProblemGroupRequired, Detail: "d"}, api.AgentService{State: api.ServiceRefused, Detail: "d"}},
+	} {
+		if got := endpointService(tc.st); *got != tc.want {
+			t.Errorf("%s: %+v, want %+v", name, *got, tc.want)
+		}
 	}
 }
 

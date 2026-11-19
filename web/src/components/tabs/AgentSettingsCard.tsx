@@ -15,6 +15,7 @@ import {
   modelNote,
   modelWarnings,
   responsesWarning,
+  serviceNote,
   stageLabel,
 } from '@/lib/agent';
 import { CredentialForm } from './AccountsTab';
@@ -155,6 +156,9 @@ export function AgentSettingsCard({ client }: { client: ApiClient }) {
     setChecking(false);
   }
 
+  // The endpoint's agent service, while the agent runs the endpoint.
+  const service = settings.service ? serviceNote(settings.service) : null;
+
   const restart =
     settings.backend !== settings.running_backend
       ? `The agent runs ${BACKEND_LABELS[settings.running_backend] ?? settings.running_backend} until the Bridge restarts: restart it to use ${BACKEND_LABELS[settings.backend] ?? settings.backend}.`
@@ -187,6 +191,17 @@ export function AgentSettingsCard({ client }: { client: ApiClient }) {
           </select>
         </Field>
         {restart && <Notice kind="warn">{restart}</Notice>}
+        {service && (
+          <Notice kind={service.kind}>
+            <span>{service.text}</span>
+            {service.found && (
+              <span className="mt-1 block">
+                It found: <span className="font-mono break-all">{service.found}</span>
+              </span>
+            )}
+            {service.marker && <span className="mt-1 block">{service.marker}</span>}
+          </Notice>
+        )}
         {endpoint && (
           <>
             <Field

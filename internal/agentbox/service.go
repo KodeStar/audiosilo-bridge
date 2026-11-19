@@ -93,7 +93,7 @@ func (r *Runner) sameUserAsAgent(info fs.FileInfo) bool {
 		return false
 	}
 	var rj agentproto.Runner
-	if json.Unmarshal(raw, &rj) != nil || !r.live(rj) {
+	if json.Unmarshal(raw, &rj) != nil || !r.live(r.agentDir, rj) {
 		return false
 	}
 	otherUID, _, ok := fileOwner(other)

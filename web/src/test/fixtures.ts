@@ -163,6 +163,7 @@ export function agentSettingsFixture(over: Partial<AgentSettings> = {}): AgentSe
     key_set: false,
     key_set_at: '',
     locked: [],
+    service: null,
     ...over,
   };
 }

@@ -102,6 +102,24 @@ func (te *testEnv) start(t *testing.T) {
 	t.Cleanup(te.stop)
 }
 
+// startAndWait starts the runner and waits for its first runner.json, which
+// it writes once its start (the endpoint's service's look at its TmpDir
+// included) is behind it.
+func (te *testEnv) startAndWait(t *testing.T) {
+	t.Helper()
+	te.start(t)
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if _, err := os.Stat(filepath.Join(te.staging, agentproto.RunnerFile)); err == nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the runner wrote no runner.json")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 func (te *testEnv) stop() {
 	if te.cancel != nil {
 		te.cancel()
@@ -979,6 +997,7 @@ func endpointParentEnv() map[string]string {
 	env := parentEnv()
 	delete(env, "CLAUDE_CODE_OAUTH_TOKEN")
 	delete(env, "OPENAI_API_KEY")
+	delete(env, "AUDIOSILO_BRIDGE_SECRET_KEY") // the Bridge's vault: refused there too
 	return env
 }
 
@@ -1082,6 +1101,12 @@ func TestEndpointRunRefusedBesideOwnCredentials(t *testing.T) {
 		},
 		"a codex key in the environment": func(_ *testing.T, env map[string]string, _ string) {
 			env["CODEX_API_KEY"] = "sk-codex"
+		},
+		"the Bridge's vault key in the environment": func(_ *testing.T, env map[string]string, _ string) {
+			env["AUDIOSILO_BRIDGE_SECRET_KEY"] = "bridge-key"
+		},
+		"the Bridge's GitHub token in the environment": func(_ *testing.T, env map[string]string, _ string) {
+			env["AUDIOSILO_BRIDGE_GITHUB_TOKEN"] = "ghp_bridge"
 		},
 		"the agent home mounted, empty": func(t *testing.T, _ map[string]string, home string) {
 			if err := os.Mkdir(home, 0o700); err != nil {

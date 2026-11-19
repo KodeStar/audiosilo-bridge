@@ -59,6 +59,11 @@ type Status struct {
 	// CLIs is runner.json's clis as the runner reported them: each CLI's version
 	// ("" = not installed) and credential kind (agentproto.Credential*, or "").
 	CLIs map[string]agentproto.CLI
+	// Found, with ProblemOwnCredentials, is what the endpoint's service found
+	// (runner.json's found, trimmed): a variable's name or a path in that
+	// service, for Settings > Agent alone. Detail never carries it (a
+	// parked book's reason names no path).
+	Found string
 
 	// groupListed: runner.json's groups hold the Bridge's, so a probe can
 	// tell whether the group's file reaches the runner now (probe.go).
@@ -169,24 +174,86 @@ func ownCredentials(rj agentproto.Runner, backend string) bool {
 	return false
 }
 
-// runnerClockSkew is how far ahead of the Bridge's clock a runner.json may be
-// dated: the containers share the host's clock, so a little, never more. A
-// heartbeat further ahead (a run that wrote runner.json, or a clock gone wrong)
-// would otherwise keep the container live long after its runner stopped.
+// runnerClockSkew is how far ahead of the Bridge's clock the first runner.json
+// it reads may be dated and still count as fresh (heartbeatAge).
 const runnerClockSkew = 5 * time.Second
 
-// heartbeatAge is how long ago rj's heartbeat was, and whether that is fresh:
-// within agentproto.RunnerFreshFor and not later than now (runnerClockSkew
-// aside).
-func (r *Runner) heartbeatAge(rj agentproto.Runner) (age time.Duration, fresh bool) {
-	age = r.now().Sub(rj.HeartbeatAt)
-	return age, age <= agentproto.RunnerFreshFor && age >= -runnerClockSkew
+// beatSeen is a runner.json's heartbeat as this Bridge last read it (beat, the
+// runner's clock) and when it last changed on the Bridge's own clock (at);
+// ahead, for a first read dated past runnerClockSkew ahead, by how much.
+type beatSeen struct {
+	beat  time.Time
+	at    time.Time
+	ahead time.Duration
 }
 
-// live reports whether rj is a runner of this protocol with a fresh heartbeat.
-func (r *Runner) live(rj agentproto.Runner) bool {
-	_, fresh := r.heartbeatAge(rj)
+// heartbeatAge is how long ago rj's heartbeat (the runner.json in dir) last
+// changed, and whether that is fresh (within agentproto.RunnerFreshFor), on
+// the Bridge's clock: the runner's own may be off (another host's, a VM that
+// slept), which would make a live runner look stopped or a stopped one live.
+// A heartbeat that changed since the last read is fresh now. The first read
+// can't tell when it was written, so its own date stands then (on one host
+// the clocks agree): a runner.json a stopped runner left isn't live, and one
+// dated past runnerClockSkew ahead (a run that wrote it, or a clock gone
+// wrong) isn't either, until it changes.
+func (r *Runner) heartbeatAge(dir string, rj agentproto.Runner) (age time.Duration, fresh bool) {
+	now := r.now()
+	r.beatMu.Lock()
+	defer r.beatMu.Unlock()
+	s, seen := r.beats[dir]
+	if !seen || !s.beat.Equal(rj.HeartbeatAt) {
+		s = beatSeen{beat: rj.HeartbeatAt, at: now}
+		if !seen {
+			switch dated := now.Sub(rj.HeartbeatAt); {
+			case dated > 0:
+				s.at = now.Add(-dated)
+			case dated < -runnerClockSkew:
+				s.ahead = -dated
+			}
+		}
+		r.beats[dir] = s
+	}
+	if s.ahead > 0 {
+		return -s.ahead, false
+	}
+	age = now.Sub(s.at)
+	return age, age <= agentproto.RunnerFreshFor
+}
+
+// live reports whether rj, the runner.json in dir, is a runner of this
+// protocol with a fresh heartbeat.
+func (r *Runner) live(dir string, rj agentproto.Runner) bool {
+	_, fresh := r.heartbeatAge(dir, rj)
 	return rj.Protocol == agentproto.Protocol && fresh
+}
+
+// notRunning is the agent's state while its runner isn't running, why being
+// what the Bridge saw. For the openai-compatible backend that is the
+// endpoint's own service (the compose example's agent-endpoint, in its
+// endpoint profile), never the agent container.
+func (r *Runner) notRunning(why string) string {
+	if r.backend == agent.IDOpenAICompatible {
+		return r.service() + " isn't running (" + why + "): start it with " +
+			"docker compose --profile endpoint up -d agent-endpoint"
+	}
+	return r.service() + " isn't running (" + why + ")"
+}
+
+// service names where the runs go in the agent's state: the endpoint's own
+// agent service on the openai-compatible backend, else the agent container.
+func (r *Runner) service() string {
+	if r.backend == agent.IDOpenAICompatible {
+		return "the endpoint's agent service (agent-endpoint)"
+	}
+	return "the agent container"
+}
+
+// stagingSetting is the setting naming the staging dir the runs go to.
+func (r *Runner) stagingSetting() string {
+	if r.backend == agent.IDOpenAICompatible {
+		return "agent.endpoint_staging_dir"
+	}
+	return "agent.staging_dir"
 }
 
 // Status reads runner.json now. Detail never names a Bridge path: it becomes a
@@ -204,26 +271,26 @@ func (r *Runner) Status() Status {
 		if !r.dirMissing.Swap(true) {
 			r.log.Warn("agent container: the staging dir can't be opened", "dir", r.dir, "err", err)
 		}
-		st.Detail = "the agent container isn't running (the Bridge can't open its staging dir: check agent.staging_dir and the staging volume)"
+		st.Detail = r.notRunning("the Bridge can't open its staging dir: check " + r.stagingSetting() + " and the staging volume")
 		return st
 	}
 	r.dirMissing.Store(false)
 	defer func() { _ = root.Close() }()
 	raw, info, err := agentproto.ReadRegularInfo(root, agentproto.RunnerFile, agentproto.MaxRunnerBytes)
 	if errors.Is(err, fs.ErrNotExist) {
-		st.Detail = "the agent container isn't running (it hasn't written its status into the staging dir; check that both containers mount the same staging volume)"
+		st.Detail = r.notRunning("it hasn't written its status into the staging dir; check that both containers mount the same staging volume")
 		return st
 	}
 	if err != nil {
-		st.Detail = "the agent container's status can't be read (" + ioProblem(err) + ")"
+		st.Detail = "the status of " + r.service() + " can't be read (" + ioProblem(err) + ")"
 		return st
 	}
 	var rj agentproto.Runner
 	if err := json.Unmarshal(raw, &rj); err != nil {
-		st.Detail = "the agent container's status is unreadable: " + err.Error()
+		st.Detail = "the status of " + r.service() + " is unreadable: " + err.Error()
 		return st
 	}
-	st.Live = r.live(rj)
+	st.Live = r.live(r.dir, rj)
 	if r.cli != r.backend {
 		// An endpoint (bridge#84): codex runs it, with the endpoint's key from
 		// the vault when one is set and none of the container's own, so its
@@ -254,6 +321,9 @@ func (r *Runner) Status() Status {
 	st.groupListed = slices.Contains(rj.Groups, r.gid)
 	st.ShareGroup = r.shareGroup(st.groupListed, info, st.Live)
 	st.Problem, st.Other, st.Detail = r.unavailableBecause(rj, info)
+	if st.Problem == ProblemOwnCredentials {
+		st.Found = agentproto.TrimFound(rj.Found)
+	}
 	if st.Detail == "" && st.Handoff {
 		if why := r.groupRequired(st.ShareGroup); why != "" {
 			st.Problem, st.Detail = ProblemGroupRequired, why
@@ -428,34 +498,37 @@ func (r *Runner) refusal(c agentproto.CLI, handoff bool) string {
 // config onto one of them).
 func (r *Runner) unavailableBecause(rj agentproto.Runner, info fs.FileInfo) (problem Problem, other, why string) {
 	if rj.Protocol != agentproto.Protocol {
-		return ProblemOutdated, "", fmt.Sprintf("the agent container speaks protocol %d and this Bridge %d: run the same version of both images", rj.Protocol, agentproto.Protocol)
+		return ProblemOutdated, "", fmt.Sprintf("%s speaks protocol %d and this Bridge %d: run the same version of both images", r.service(), rj.Protocol, agentproto.Protocol)
 	}
-	if age, fresh := r.heartbeatAge(rj); !fresh {
+	if age, fresh := r.heartbeatAge(r.dir, rj); !fresh {
 		if age > 0 {
-			return ProblemNotRunning, "", fmt.Sprintf("the agent container isn't running (its last heartbeat was %s ago)", age.Round(time.Second))
+			return ProblemNotRunning, "", r.notRunning(fmt.Sprintf("its last heartbeat was %s ago", age.Round(time.Second)))
 		}
-		return ProblemNotRunning, "", fmt.Sprintf("the agent container's status is dated %s ahead of this Bridge's clock "+
-			"(its runner didn't write it, or the clock is wrong)", (-age).Round(time.Second))
+		return ProblemNotRunning, "", r.notRunning(fmt.Sprintf("its status is dated %s ahead of this Bridge's clock and "+
+			"hasn't changed since: its runner didn't write it, or the clock is wrong", (-age).Round(time.Second)))
 	}
 	if rj.EndpointOnly && r.backend != agent.IDOpenAICompatible {
 		return ProblemEndpointOnly, "", endpointOnlyDetail
 	}
 	c := rj.CLIs[r.backend]
 	if c.Version == "" {
-		return ProblemNoCLI, "", "the agent container has no " + r.cli + " CLI"
+		return ProblemNoCLI, "", r.service() + " has no " + r.cli + " CLI"
 	}
 	if r.backend == agent.IDOpenAICompatible {
 		switch {
 		case !rj.Endpoints:
-			return ProblemOutdated, "", "the agent container is too old to run an OpenAI-compatible endpoint: update the agent image to this Bridge's version"
+			return ProblemOutdated, "", r.service() + " is too old to run an OpenAI-compatible endpoint: update the agent image to this Bridge's version"
 		case !rj.EndpointOnly:
 			return ProblemEndpointService, "", notEndpointOnlyDetail
 		case r.sameUserAsAgent(info):
 			return ProblemEndpointService, "", sameUserDetail
+		case ownCredentials(rj, r.backend):
+			// Before a missing address: the service's state on Settings >
+			// Agent counts that one as running, which it isn't while it
+			// would refuse every run.
+			return ProblemOwnCredentials, "", ownCredentialsDetail
 		case r.endpoint() == "":
 			return ProblemNoEndpoint, "", noEndpointDetail
-		case ownCredentials(rj, r.backend):
-			return ProblemOwnCredentials, "", ownCredentialsDetail
 		}
 		return "", "", "" // an endpoint may take no key (a local server)
 	}

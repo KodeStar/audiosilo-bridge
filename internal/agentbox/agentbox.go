@@ -39,9 +39,10 @@ const RetryAfter = 10 * time.Minute
 // Timings of the Bridge side (contract section 7). The default* ones are copied
 // into Runner's fields by New so a test can shorten them without a
 // package-level race; sweepAge stays a constant. The container counts as up
-// while runner.json is under agentproto.RunnerFreshFor old.
+// while runner.json's heartbeat last changed under agentproto.RunnerFreshFor
+// ago on the Bridge's clock (status.go's heartbeatAge).
 const (
-	defaultStaleFor  = 60 * time.Second             // a claimed job's heartbeat older than this = the runner died
+	defaultStaleFor  = 60 * time.Second             // a claimed job's heartbeat unchanged this long = the runner died
 	defaultPoll      = time.Second                  // polling, not inotify: shfs may not deliver events
 	defaultBeatCheck = agentproto.HeartbeatInterval // the runner's heartbeat can't change faster than it touches it
 	defaultBeatEvery = 60 * time.Second             // Request.Heartbeat cadence, as the local runners
@@ -112,6 +113,12 @@ type Runner struct {
 	// goes through or the runner reports another (status.go).
 	mu      sync.Mutex
 	refused *refusedCredential
+
+	// beats are the runner.json heartbeats read, by staging dir, and when each
+	// last changed on the Bridge's clock (guarded by beatMu; status.go's
+	// heartbeatAge).
+	beatMu sync.Mutex
+	beats  map[string]beatSeen
 
 	// dirMissing is set while the staging dir can't be opened, so Status logs
 	// its path once per outage rather than on every call.
@@ -190,6 +197,7 @@ func New(opts Options) *Runner {
 		beatEvery:    defaultBeatEvery,
 		cancelFor:    defaultCancelFor,
 		takeFor:      defaultTakeFor,
+		beats:        map[string]beatSeen{},
 	}
 	if r.claimTimeout <= 0 {
 		// Only a caller that skipped config gets here: the same 2 minutes as
@@ -620,10 +628,16 @@ func requestTimeout(d time.Duration) int {
 //
 // done is looked for every poll, so a finished run is picked up at once; the
 // runner's heartbeat only every beatCheck, as it can't change faster than the
-// runner touches it.
+// runner touches it. The heartbeat counts as a sign of life when it CHANGES,
+// timed on the Bridge's clock: its mtime is the runner's (or its file
+// system's) clock, which may be off from this one.
 func (r *Runner) wait(ctx context.Context, root *os.Root, beat func(time.Duration)) (bool, error) {
 	start := r.now()
 	var claimedAt, lastBeat, lastCheck time.Time
+	// hb is the job's signs of life as last read (the runner's clock), alive
+	// when this Bridge last saw one change (its own).
+	var hb [2]time.Time
+	var alive time.Time
 	tick := time.NewTicker(r.poll)
 	defer tick.Stop()
 	for {
@@ -633,21 +647,24 @@ func (r *Runner) wait(ctx context.Context, root *os.Root, beat func(time.Duratio
 		now := r.now()
 		if claimedAt.IsZero() {
 			if agentproto.Exists(root, agentproto.ClaimDir) {
-				claimedAt, lastBeat, lastCheck = now, now, now
+				claimedAt, lastBeat, lastCheck, alive = now, now, now, now
 			} else if now.Sub(start) >= r.claimTimeout {
 				if r.unclaimable(root) {
 					return false, &agent.NotAvailableError{Backend: r.backend,
 						Detail: fmt.Sprintf("the agent container didn't pick the job up within %s", r.claimTimeout)}
 				}
-				claimedAt, lastBeat, lastCheck = now, now, now // the runner claimed it just now
+				claimedAt, lastBeat, lastCheck, alive = now, now, now, now // the runner claimed it just now
 			}
 		}
 		if !claimedAt.IsZero() {
 			if now.Sub(lastCheck) >= r.beatCheck {
 				lastCheck = now
-				if hb := r.heartbeatAt(root, claimedAt); now.Sub(hb) > r.staleFor {
+				if at := r.heartbeatAt(root); at != hb {
+					hb, alive = at, now
+				}
+				if now.Sub(alive) > r.staleFor {
 					_ = root.WriteFile(agentproto.CancelFile, nil, 0o644)
-					return false, fmt.Errorf("agent container: the runner stopped answering (no heartbeat for %s)", now.Sub(hb).Round(time.Second))
+					return false, fmt.Errorf("agent container: the runner stopped answering (no heartbeat for %s)", now.Sub(alive).Round(time.Second))
 				}
 			}
 			if beat != nil && now.Sub(lastBeat) >= r.beatEvery {
@@ -690,16 +707,19 @@ func (r *Runner) cancel(root *os.Root, unclaimed bool, cause error) (bool, error
 	return false, cause
 }
 
-// heartbeatAt is the job's last sign of life: the heartbeat file's mtime, else the
-// claim's, else when the Bridge saw the claim.
-func (r *Runner) heartbeatAt(root *os.Root, claimedAt time.Time) time.Time {
-	latest := claimedAt
-	for _, name := range []string{agentproto.HeartbeatFile, agentproto.ClaimDir} {
-		if info, err := root.Lstat(name); err == nil && info.ModTime().After(latest) {
-			latest = info.ModTime()
+// heartbeatAt is the job's signs of life as its files show them, on the
+// runner's clock: the heartbeat file's mtime and the claim's (zero for one
+// missing). wait looks for either to change, never at their values. They are
+// stripped of the monotonic reading and the location, so == compares the
+// instants alone.
+func (r *Runner) heartbeatAt(root *os.Root) [2]time.Time {
+	var out [2]time.Time
+	for i, name := range []string{agentproto.HeartbeatFile, agentproto.ClaimDir} {
+		if info, err := root.Lstat(name); err == nil {
+			out[i] = info.ModTime().UTC().Round(0)
 		}
 	}
-	return latest
+	return out
 }
 
 // outcome reads exit.json and the CLI's output and interprets them with the same

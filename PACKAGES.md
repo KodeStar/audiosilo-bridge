@@ -176,6 +176,10 @@ internal/
             bridge#65: ReadDirWithin(path, d) is os.ReadDir bounded the same way (one
             read in flight per path), and audio.ResolveSourceWithin resolves a book's
             audio through both, as the generate job's markersFile does.
+            BR-OPENAI-2: LstatWithin(path, d) is os.Lstat bounded the same way, and
+            ReadDirNWithin(path, n, d) a folder read of at most n entries (never
+            whole; one n per path), for the endpoint's agent service's mount check
+            (agentrun's mounts.go).
   execfile/ writes files the process will exec at once with syscall.ForkLock
             held for reading from open to close, so a concurrent fork can't hold
             the write descriptor and make the exec fail with ETXTBSY (WriteFile).
@@ -1316,6 +1320,8 @@ internal/
             container, not --endpoint-only, the agent's user); endpoint_only
             (AgentEndpointOnly) claude or codex sent to the endpoint's service.
             Each points at the Accounts tab, which shows agentbox's full detail.
+            Not running on that backend is DetailAgentEndpointNotRunning (names
+            agent-endpoint and --profile endpoint, never Claude or ChatGPT).
             Phase 2b (FIRST-RUN-PLAN F2): Checklist(Inputs) is the setup checklist
             (link.Setup) in its fixed order: paired, libraries, asr, agent, budget,
             github, audible (Phase 4a, optional: done with an account signed in and
@@ -3562,8 +3568,11 @@ internal/
             (agent-runner --endpoint-only), which alone runs endpoint requests
             and runs nothing else; own_credentials (that service's): it holds a
             credential in its environment, can reach the agent home or has the
-            agent volume or a CLI's login mounted anywhere (the runner refuses an
-            endpoint run while it does).
+            agent volume, a CLI's login or the Bridge's vault mounted anywhere
+            (the runner refuses an endpoint run while it does); found (BR-OPENAI-2,
+            with own_credentials): what it found, a variable's name or a path in
+            that service, never a value, TrimFound (printable, MaxFoundBytes 512)
+            on both sides, as runner.json is that service's to rewrite.
   agentbox/ the Bridge's side of the agent container: an agent.Runner that runs no CLI,
             drops each invocation into the staging dir, waits for agentrun, and
             harvests the outputs back into the pipeline's staged dir; the outcome is
@@ -3574,9 +3583,15 @@ internal/
             last run: runs still go through, a refused call costs nothing and the
             first that works clears it; a credential the runner reports as changed,
             by kind or credential_since, clears it too), Live (fresh, whatever its
-            CLIs; fresh is a heartbeat_at within 30 s before now and at most
-            runnerClockSkew, 5 s, after it: one in the future is a status the runner
-            didn't write, or a clock gone wrong), each "why not" worded for the page
+            CLIs; fresh is judged on the Bridge's clock (BR-OPENAI-2, heartbeatAge):
+            a heartbeat_at that changed since the last read is fresh now and stays
+            so for 30 s, whatever date it carries (a runner on another clock, a VM
+            that slept); the first read of a dir's runner.json goes by its own date,
+            within 30 s before now and at most runnerClockSkew, 5 s, after it, so a
+            stopped runner's file or a future-dated one isn't live until it
+            changes; a job's heartbeat likewise counts when its or the claim's
+            mtime changes, staleFor after the last change on the Bridge's clock),
+            each "why not" worded for the page
             and a park (claude: `claude
             setup-token` -> CLAUDE_CODE_OAUTH_TOKEN; codex: agent-login; and when the
             OTHER CLI is signed in, how to switch agent.backend), never naming a
@@ -3736,7 +3751,13 @@ internal/
             os.SameFile), a runner.json without endpoint_only, or one owned by the
             uid of a live runner.json in the agent's dir (the same user); then
             ProblemOwnCredentials while that service holds a credential or reaches
-            /agent (runner.json's own_credentials, or a CLI entry with one). The
+            /agent (runner.json's own_credentials, or a CLI entry with one;
+            Status.Found is its found, for Settings > Agent alone, never Detail;
+            judged before ProblemNoEndpoint, which Settings > Agent shows as a
+            running service). A
+            not-running Detail on this backend names agent-endpoint and its start
+            (docker compose --profile endpoint up -d agent-endpoint) and the
+            agent.endpoint_staging_dir setting, never the agent container. The
             claude and codex backends refuse an endpoint-only runner in their dir
             (ProblemEndpointOnly). Dir() is the dir the runs go to (the page's
             staging_dir, the engine's log).
@@ -3803,7 +3824,9 @@ internal/
             endpointElsewhere), never touches --home (/agent), and refuses its
             runs (endpointBlocked) while credentialProblem (logged with each
             refusal: a variable's name or a path, never a value): one of the
-            four credential variables in its environment, homeReachable (the
+            four credential variables or the Bridge's vault variables
+            (AUDIOSILO_BRIDGE_SECRET_KEY, AUDIOSILO_BRIDGE_GITHUB_TOKEN) in its
+            environment, homeReachable (the
             home listable, writable or searchable by its uid: not missing or
             closed, the image's 0700 /agent of uid 10002 as an anonymous volume
             being closed to 10003), or credentialMount (mounts.go, over
@@ -3813,10 +3836,81 @@ internal/
             whole or a subpath, is mounted by a credential file's name (at its
             point or from its source), or holds a credential's file or the
             agent home's marker .audiosilo-agent-home (markHome writes it into
-            the agent container's home at the start) at its point or one dir
-            below (a tmpfs at its point only; the rules and the file list are
-            in mounts.go). runner.json says
-            endpoint_only and own_credentials for the Bridge's Status. Main
+            the agent container's home at the start) anywhere within
+            maxMountDepth (8) folders (or links: a run follows one; a link to a
+            folder already walked, by device and inode, is not walked again,
+            while a folder's own entry always is, as two folders can share an
+            inode on overlayfs, Unraid's user shares or mergerfs) below its
+            point, breadth first, matched by name from the listings
+            (credentialRel), a folder another mount is mounted at left to that
+            one's walk (Unraid's /mnt/user mounted whole: the vault at
+            appdata/audiosilo-bridge/secret.key); a tmpfs (a host's /dev/shm
+            or /run/user/<uid> bound in) and the container's own root at
+            their point and one dir below (the rules and the file list are
+            in mounts.go), the Bridge's vault
+            (secret.key, secrets/<name>.enc, or those names mounted alone) and a
+            container runtime's socket (docker.sock, podman.sock,
+            containerd.sock: every container's files; runtimeSocketPaths names
+            them where a host's /run, a tmpfs, keeps them a folder or two down:
+            podman/, containerd/, docker/containerd/) included. BR-OPENAI-2: the
+            walk fails closed: a folder it can enter but not list, one deeper
+            than maxMountDepth, more than maxWalkEntries (100,000) entries over
+            the whole walk (each folder read up to one past it, never whole; a
+            library mounted by mistake: the compose example mounts only the
+            staging volume), the root with more than maxMountChildren (1024), a
+            look past lookTimeout (5 s, through fsutil.StatWithin/LstatWithin/
+            ReadDirNWithin: a hung NFS or SMB mount) or the walk past walkBudget
+            (20 s) each count as holding, saying to mount narrower folders.
+            Passed over as a run's own, never a host's: the per-run folders
+            the service holds in its TmpDir (run-<id>, version-*), by their
+            exact paths (Runner.ownTmp, held from before each is made until
+            it is gone; codex keeps config.toml there), and a file of a
+            credential's name a run planted to lock the service out (prompt
+            injection: `touch /tmp/auth.json`), in its TmpDir alone and only
+            while that is a tmpfs of its own (runAreaMount, from mountinfo:
+            the mount holding TmpDir a whole tmpfs, root "/", mounted at
+            TmpDir itself, alone at its point, hidden by no later mount; the
+            compose example's `tmpfs: ["/tmp"]`) that held no entry at all
+            when the service started and is still on the device it showed then
+            (Runner.tmpFresh, tmpFreshDev: looked at before detect makes its
+            version-* there), and never while the service runs as uid 0 or as
+            the overflow uid 65534 (runFilesPass; mountinfo can't tell the
+            container's own tmpfs from a host's bound whole at TmpDir,
+            /dev/shm, /run/user/<uid>, a shared emptyDir: the service is pid 1
+            and its tmpfs starts empty, so one that doesn't held a host's
+            files; root owns a host's files, and a user namespace shows every
+            unmapped owner's as nobody's): owned by the service's uid,
+            reached from TmpDir through folders alone, never a link nor
+            another mount's point, and on the device mountinfo shows for that
+            tmpfs (its major:minor, mount.dev: never a file system mounted
+            over TmpDir since mountinfo was read; runMade). Such files are
+            swept (sweepRunFiles: a fresh walk, then each removed, deepest
+            first, through its folders opened without following a link and on
+            that same device, while still the service's, a folder only when
+            empty) after each job that ends while the service runs (a stopping
+            one leaves them, the heartbeat touched first), never when it
+            starts: a file found then refuses the runs, named on the Settings
+            card, and stays. Ownership alone is no
+            proof (a host folder bound there, or a share squashing owners,
+            CIFS uid=10003 or NFS all_squash, shows a host's secret.key as the
+            service's), so the staging dir, on any file system, passes no such
+            file and sweeps none: it refuses the runs and the Settings card
+            names its path for the admin to remove (fail closed); a TmpDir that
+            is not a verified tmpfs passes and sweeps nothing either, nor does
+            any other place. Another uid's file still refuses. The walk runs once
+            per status tick (tickMounts, which leaves a walk in flight to stand
+            for its own rather than queue behind it: two slow walks in a row
+            would hold runner.json past RunnerFreshFor) and again before each
+            endpoint run starts (execute's refreshMounts: a credential that
+            appeared since the tick refuses the run); every other call takes
+            the last answer (mountProblem,
+            which walks only when there is none); spawn's poll reads the last answer every second and
+            ends a run in progress (exit unavailable, endpointBlocked) once a tick
+            finds a credential. runner.json says endpoint_only, own_credentials
+            and found for the Bridge's Status. The agent container's runner
+            (not --endpoint-only) chmods its home, secrets/ and codex/ 0700 at
+            the start (closeHome; a folder only, never through a link: closeDir
+            opens it O_NOFOLLOW and fchmods what it opened). Main
             makes that runner a child subreaper and not
             dumpable (endpointHardening, Linux only; elsewhere it refuses to
             start): whatever a run starts becomes the runner's child however it
@@ -3997,7 +4091,10 @@ internal/
   app/      bridge#84: agent.go is Settings > Agent. AgentSettings answers the
             saved backend, the running one (box.ID(); a backend applies at the next
             start), the endpoint, config.ModelStages, the endpoint key's state
-            (agentCreds, never the key) and the env-locked keys. SaveAgentSettings
+            (agentCreds, never the key), the env-locked keys and, while the
+            openai-compatible backend runs, Service (endpointService over
+            box.Status(): not_running, running (no problem, or no endpoint set),
+            else refused with detail and found). SaveAgentSettings
             refuses (ErrLocked) a change to a value the environment sets, saves,
             hands the engine EndpointModels (SetCompatibleModels) and, when the
             running endpoint's address or models changed, agentChanged (the books parked on
@@ -4129,6 +4226,8 @@ internal/
   api/      bridge#84: agent.go, behind requireAuth: GET /api/settings/agent
             (AgentSettings), PUT (backend + openai_compatible; answers the settings
             saved; 409 locked for an env-set value, 400 for one config refuses) and
+            service (AgentService {state: running|not_running|refused, detail,
+            found}, null unless the endpoint backend runs);
             POST /api/settings/agent/test {base_url} (EndpointCheck: models with
             context_tokens/tools when the endpoint says, responses yes|no|unknown,
             or error; key_sent: the check carried the key, which goes to the saved

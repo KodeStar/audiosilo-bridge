@@ -265,4 +265,53 @@ describe('AgentSettingsCard', () => {
     expect(screen.getByLabelText('Endpoint address')).toBeDisabled();
     expect(screen.getByLabelText('Model')).toBeEnabled();
   });
+
+  it("shows the endpoint's agent service, and names the marker file it refuses for", async () => {
+    mockFetch({
+      'GET /api/settings/agent': {
+        body: agentSettingsFixture({
+          backend: 'openai-compatible',
+          running_backend: 'openai-compatible',
+          openai_compatible: { base_url: 'http://192.168.1.20:11434/v1', model: 'm', models: {} },
+          service: {
+            state: 'refused',
+            detail:
+              "the endpoint's agent service holds a credential of its own or can reach the agent home",
+            found: '/data holds /data/agent/.audiosilo-agent-home',
+          },
+        }),
+      },
+    });
+    render(<AgentSettingsCard client={api()} />);
+    const alert = await screen.findByText(/runs nothing/);
+    const note = alert.closest('[role="alert"]');
+    expect(note).not.toBeNull();
+    expect(note).toHaveTextContent('It found: /data holds /data/agent/.audiosilo-agent-home');
+    expect(note).toHaveTextContent('delete the .audiosilo-agent-home file');
+  });
+
+  it('says when the endpoint service is not running, and nothing for a subscription', async () => {
+    mockFetch({
+      'GET /api/settings/agent': {
+        body: agentSettingsFixture({
+          backend: 'openai-compatible',
+          running_backend: 'openai-compatible',
+          service: {
+            state: 'not_running',
+            detail:
+              "the endpoint's agent service (agent-endpoint) isn't running (its last heartbeat was 2m0s ago): start it with docker compose --profile endpoint up -d agent-endpoint",
+            found: '',
+          },
+        }),
+      },
+    });
+    const { unmount } = render(<AgentSettingsCard client={api()} />);
+    expect(await screen.findByText(/--profile endpoint/)).toBeInTheDocument();
+    unmount();
+
+    mockFetch({ 'GET /api/settings/agent': { body: agentSettingsFixture() } });
+    render(<AgentSettingsCard client={api()} />);
+    await screen.findByLabelText('The agent runs');
+    expect(screen.queryByText(/agent-endpoint/)).not.toBeInTheDocument();
+  });
 });

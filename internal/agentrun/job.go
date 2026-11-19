@@ -35,6 +35,16 @@ func (r *Runner) handle(ctx context.Context, job *os.Root) {
 	}()
 	touch(job, agentproto.HeartbeatFile)
 	exit := r.execute(ctx, job, id)
+	if r.opts.EndpointOnly && ctx.Err() == nil {
+		// The run's processes are gone (spawn's sweep): what it planted
+		// goes before the Bridge reads its output. The walk may wait behind
+		// a tick's on a slow mount, so the heartbeat is fresh first (the
+		// Bridge's stale limit); a stopping service leaves it, so exit.json
+		// lands within the stop's grace (its container's tmpfs goes with it;
+		// one still there at the next start refuses the runs: Run).
+		touch(job, agentproto.HeartbeatFile)
+		r.sweepRunFiles()
+	}
 	r.log.Info("agent runner: job finished", "job", id, "exit_code", exit.ExitCode,
 		"timed_out", exit.TimedOut, "cancelled", exit.Cancelled, "duration_ms", exit.DurationMS, "error", exit.Error)
 	r.finish(job, exit)
@@ -80,6 +90,10 @@ func (r *Runner) execute(ctx context.Context, job *os.Root, id string) agentprot
 		return unavailable(endpointElsewhere)
 	}
 	if endpoint {
+		// A fresh walk of the mounts for the run about to start: the last
+		// tick's may be an interval old, and a credential that came within
+		// reach since must refuse this run, not end it at the next tick.
+		r.refreshMounts()
 		if why := r.credentialProblem(); why != "" {
 			r.log.Warn("agent runner: refused an endpoint run", "why", why)
 			return unavailable(endpointBlocked)
@@ -99,6 +113,9 @@ func (r *Runner) execute(ctx context.Context, job *os.Root, id string) agentprot
 	}
 
 	runDir := filepath.Join(r.opts.TmpDir, "run-"+id)
+	// Held from before it exists until it is gone: the mount walk passes over
+	// it by this exact path (codex keeps its config.toml there).
+	defer r.holdOwnTmp(runDir)()
 	if err := os.Mkdir(runDir, 0o700); err != nil {
 		return refused("create the run's temp dir: " + err.Error())
 	}
@@ -343,6 +360,16 @@ wait:
 			if agentproto.Exists(job, agentproto.CancelFile) {
 				exit.Cancelled = true
 				stop()
+			}
+			// The endpoint's service: a credential that came within reach
+			// since the run started (the status tick's walk found it) ends
+			// the run, as one there at the start refuses it.
+			if r.opts.EndpointOnly && kill == nil {
+				if why := r.credentialProblem(); why != "" {
+					r.log.Warn("agent runner: ended an endpoint run", "why", why)
+					exit.Error, exit.Unavailable = endpointBlocked, true
+					stop()
+				}
 			}
 		case <-deadline.C:
 			exit.TimedOut = true

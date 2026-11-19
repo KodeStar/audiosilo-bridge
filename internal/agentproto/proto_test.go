@@ -3,6 +3,7 @@ package agentproto
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestDecodeRequestAccepts(t *testing.T) {
@@ -143,5 +144,22 @@ func TestCheckBaseURL(t *testing.T) {
 		if strings.Contains(err.Error(), "sk-secret") {
 			t.Errorf("%s: the error repeats the address's secret: %v", name, err)
 		}
+	}
+}
+
+// TrimFound keeps a found path's printable characters alone, cut to
+// MaxFoundBytes on a character's edge.
+func TestTrimFound(t *testing.T) {
+	t.Parallel()
+	if got := TrimFound("/mnt/x holds /mnt/x/.audiosilo-agent-home"); got != "/mnt/x holds /mnt/x/.audiosilo-agent-home" {
+		t.Fatalf("TrimFound = %q", got)
+	}
+	if got := TrimFound("/mnt/a\nb\x1b[31m"); got != "/mnt/a?b?[31m" {
+		t.Fatalf("control characters = %q", got)
+	}
+	long := strings.Repeat("é", MaxFoundBytes)
+	got := TrimFound(long)
+	if len(got) > MaxFoundBytes || !utf8.ValidString(got) || len(got) < MaxFoundBytes-1 {
+		t.Fatalf("a long one = %d bytes, valid %v", len(got), utf8.ValidString(got))
 	}
 }

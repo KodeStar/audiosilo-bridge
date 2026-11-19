@@ -25,6 +25,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/kodestar/audiosilo-bridge/internal/agentproto"
@@ -121,9 +122,26 @@ type Runner struct {
 	// which an endpoint-only runner looks through for the agent volume and
 	// credentials' files (mounts.go).
 	mounts func() ([]mount, error)
+	// looks are the mount check's file system calls, each bounded (mounts.go;
+	// a test injects its own). mountMu orders the walks and mountLast holds
+	// the last one's answer (env.go's mountProblem).
+	looks     looks
+	mountMu   sync.Mutex
+	mountLast atomic.Pointer[string]
+	// ownTmp holds the per-run folders this runner has made in its TmpDir and
+	// not yet removed, by their exact paths, which the mount walk passes over
+	// (guarded by ownTmpMu).
+	ownTmpMu sync.Mutex
+	ownTmp   map[string]bool
 	// selfUID is the runner's own uid: a job of its making is a run's
 	// (planted), which the endpoint's service never runs.
 	selfUID int
+	// tmpFresh is TmpDir's device (major:minor) when it was a folder holding
+	// nothing as the endpoint's service started (Run), nil otherwise: only
+	// then, and only while mountinfo shows that same device's tmpfs mounted
+	// at TmpDir itself, may a file there pass as a run's own and be swept
+	// (runFilesPass, runAreaMount).
+	tmpFresh atomic.Pointer[string]
 
 	// groups are runner.json's groups, read once: a process with no
 	// capabilities can't change them.
@@ -167,6 +185,11 @@ func New(opts Options) (*Runner, error) {
 	if opts.TmpDir == "" {
 		opts.TmpDir = os.TempDir()
 	}
+	// Absolute, as the mount walk's paths are: the per-run folders it passes
+	// over (ownTmp) are matched by their exact paths.
+	if abs, err := filepath.Abs(opts.TmpDir); err == nil {
+		opts.TmpDir = abs
+	}
 	if opts.ClaudeBin == "" {
 		opts.ClaudeBin = agentproto.CLIClaude
 	}
@@ -185,7 +208,9 @@ func New(opts Options) (*Runner, error) {
 		creds:       map[string]credSeen{},
 		active:      map[string]bool{},
 		sessions:    map[int]bool{},
+		ownTmp:      map[string]bool{},
 		mounts:      readMounts,
+		looks:       boundedLooks,
 		selfUID:     os.Geteuid(),
 		groups:      groups(),
 		killDelay:   10 * time.Second,
@@ -228,11 +253,22 @@ func (r *Runner) Run(ctx context.Context) error {
 		if err := os.MkdirAll(r.codexHome(), 0o700); err != nil {
 			r.log.Warn("agent runner: create the codex home", "err", err)
 		}
+		r.closeHome()
 		if err := r.markHome(); err != nil {
 			r.log.Warn("agent runner: mark the agent home", "err", err)
 		}
-	} else if why := r.credentialProblem(); why != "" {
-		r.log.Warn("agent runner: "+endpointBlocked, "why", why)
+	} else {
+		// Nothing is swept here: a file of a credential's name already in
+		// TmpDir came from outside, refuses the runs and stays, and a TmpDir
+		// that held anything passes nothing as a run's own while the service
+		// runs (runFilesPass says why). This look comes before the runner
+		// makes anything there (detect's version-*).
+		if dev := r.tmpFreshDev(); dev != "" {
+			r.tmpFresh.Store(&dev)
+		}
+		if why := r.credentialProblem(); why != "" {
+			r.log.Warn("agent runner: "+endpointBlocked, "why", why)
+		}
 	}
 	r.lastDetect = r.now()
 	r.detect(ctx)
@@ -256,10 +292,32 @@ func (r *Runner) Run(ctx context.Context) error {
 			// old enough to call orphaned.
 			r.recoverOrphans()
 			r.detectAgain(ctx, &wg)
+			if r.opts.EndpointOnly {
+				// One fresh look at the mounts each tick: a credential that
+				// appeared since the last (a run in progress included, which
+				// spawn then ends) is in this runner.json.
+				r.tickMounts()
+			}
 			r.writeStatus()
 		case <-scan.C:
 			r.scan(ctx, &wg)
 		}
+	}
+}
+
+// closeHome makes the agent home, its secrets and codex's CODEX_HOME 0700
+// (each that is a folder, never through a link: closeDir changes the folder it
+// opened, so a link swapped in after a look is never followed): the image
+// makes them so, but a volume or a folder mounted there keeps its own modes,
+// which may let another user (the endpoint's agent service's) read the
+// subscriptions' credentials. One missing, a link or a file is left as it is.
+func (r *Runner) closeHome() {
+	for _, dir := range []string{r.opts.Home, filepath.Join(r.opts.Home, secretsDir), r.codexHome()} {
+		err := closeDir(dir)
+		if err == nil || errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ELOOP) || errors.Is(err, syscall.ENOTDIR) {
+			continue
+		}
+		r.log.Warn("agent runner: close the agent home to other users", "dir", dir, "err", err)
 	}
 }
 
@@ -358,6 +416,8 @@ func (r *Runner) version(ctx context.Context, path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// Held from before the CLI writes anything there until it is gone.
+	defer r.holdOwnTmp(dir)()
 	defer func() { _ = os.RemoveAll(dir) }()
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
@@ -376,7 +436,10 @@ func (r *Runner) version(ctx context.Context, path string) (string, error) {
 func (r *Runner) status() agentproto.Runner {
 	// Looked at before the heartbeat is dated: the mounts' walk takes a while
 	// on a slow filesystem, which mustn't age the heartbeat it writes.
-	own := r.opts.EndpointOnly && r.credentialProblem() != ""
+	var found string
+	if r.opts.EndpointOnly {
+		found = r.credentialProblem()
+	}
 	st := agentproto.Runner{
 		Protocol:       agentproto.Protocol,
 		Version:        r.opts.Version,
@@ -387,7 +450,8 @@ func (r *Runner) status() agentproto.Runner {
 		Groups:         r.groups,
 		Endpoints:      true,
 		EndpointOnly:   r.opts.EndpointOnly,
-		OwnCredentials: own,
+		OwnCredentials: found != "",
+		Found:          agentproto.TrimFound(found),
 	}
 	for _, name := range []string{agentproto.CLIClaude, agentproto.CLICodex} {
 		c, _ := r.cli(name)

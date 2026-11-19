@@ -7,6 +7,7 @@ import {
   modelNote,
   modelWarnings,
   responsesWarning,
+  serviceNote,
   stageLabel,
 } from './agent';
 import type { EndpointCheck } from '@/api/types';
@@ -117,5 +118,51 @@ describe('warnings', () => {
   it('notes what the endpoint says of a model', () => {
     expect(modelNote({ context_tokens: 40960, tools: true })).toBe('40,960 tokens, tools');
     expect(modelNote({})).toBe('');
+  });
+});
+
+describe('serviceNote', () => {
+  it('words a running service, and one not running with how to start it', () => {
+    expect(serviceNote({ state: 'running', detail: '', found: '' })).toMatchObject({
+      kind: 'ok',
+      found: '',
+      marker: null,
+    });
+    const off = serviceNote({
+      state: 'not_running',
+      detail:
+        "the endpoint's agent service (agent-endpoint) isn't running (its last heartbeat was 2m0s ago): start it with docker compose --profile endpoint up -d agent-endpoint",
+      found: '',
+    });
+    expect(off.kind).toBe('warn');
+    expect(off.text).toMatch(
+      /^The endpoint's agent service \(agent-endpoint\) isn't running \(its last/,
+    );
+    expect(off.text.match(/isn't running/g)).toHaveLength(1);
+    expect(off.text).toContain('--profile endpoint');
+    expect(off.text).not.toMatch(/Claude|ChatGPT|agent container/);
+    // An older Bridge's empty detail still says how.
+    expect(serviceNote({ state: 'not_running', detail: '', found: '' }).text).toContain(
+      '--profile endpoint',
+    );
+  });
+
+  it('names what a refusing service found, and the marker file to remove', () => {
+    const marker = serviceNote({
+      state: 'refused',
+      detail: "the endpoint's agent service holds a credential of its own",
+      found: '/mnt/x holds /mnt/x/agent/.audiosilo-agent-home',
+    });
+    expect(marker.kind).toBe('error');
+    expect(marker.found).toBe('/mnt/x holds /mnt/x/agent/.audiosilo-agent-home');
+    expect(marker.marker).toContain('.audiosilo-agent-home');
+    expect(marker.marker).toContain('delete');
+    const variable = serviceNote({
+      state: 'refused',
+      detail: 'd',
+      found: 'the variable OPENAI_API_KEY is set',
+    });
+    expect(variable.found).toBe('the variable OPENAI_API_KEY is set');
+    expect(variable.marker).toBeNull();
   });
 });

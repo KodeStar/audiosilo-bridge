@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -157,14 +158,22 @@ func (r *Runner) credentialKind(cli string) string {
 // credentialProblem (an endpoint-only runner's) says what puts a credential of
 // the container's own within reach of a run against an endpoint, "" when
 // nothing does (the CLI runs as the runner's uid with its sandbox off; execute
-// refuses an endpoint run while there is one): one of the four credential
-// variables in the runner's environment (a run reads /proc/<runner>/environ
-// only while the runner is dumpable, but the variables are a configuration
-// mistake either way), the agent home (homeReachable), or a mount that is the
-// agent volume or holds a credential's file (credentialMount, mounts.go). It
-// names a variable or a path, never a value: the log says it.
+// refuses an endpoint run while there is one, and spawn ends one when the next
+// check finds one): one of the four credential variables or the Bridge's
+// vault variables in the runner's environment (a run reads
+// /proc/<runner>/environ only while the runner is dumpable, but the variables
+// are a configuration mistake either way), the agent home (homeReachable), or
+// a mount that is the agent volume or holds a credential's file
+// (mountProblem, mounts.go). It names a variable or a path, never a value: the
+// log and runner.json say it.
+//
+// The mounts' walk is the slow part: each status tick walks them again
+// (tickMounts), as does execute before each endpoint run starts
+// (refreshMounts), and every other call takes the last walk's answer (the
+// first walks them when there is none yet). So a run in progress, which spawn
+// checks every second, ends at the tick after a credential appears.
 func (r *Runner) credentialProblem() string {
-	for _, k := range credentialVars {
+	for _, k := range ownVars {
 		if r.envSecret(k) != "" {
 			return "the variable " + k + " is set"
 		}
@@ -172,22 +181,175 @@ func (r *Runner) credentialProblem() string {
 	if r.homeReachable() {
 		return r.opts.Home + " (the agent home) is reachable"
 	}
-	ms, err := r.mounts()
-	if err != nil {
-		return "the mounts can't be read: " + err.Error()
+	return r.mountProblem()
+}
+
+// ownVars are the variables an endpoint-only runner must not hold: the CLIs'
+// credentials and the Bridge's vault's.
+var ownVars = slices.Concat(credentialVars, vaultVars)
+
+// mountProblem is the last walk of the mounts' answer, walking them first
+// when there is none yet.
+func (r *Runner) mountProblem() string {
+	if last := r.mountLast.Load(); last != nil {
+		return *last
 	}
-	return credentialMount(ms)
+	r.mountMu.Lock()
+	defer r.mountMu.Unlock()
+	if r.mountLast.Load() == nil {
+		r.walkMountsLocked()
+	}
+	return *r.mountLast.Load()
+}
+
+// refreshMounts walks the mounts now, after any walk in flight: an endpoint
+// run's start, which must have a look of its own.
+func (r *Runner) refreshMounts() {
+	r.mountMu.Lock()
+	defer r.mountMu.Unlock()
+	r.walkMountsLocked()
+}
+
+// tickMounts is the status tick's walk, so each interval has one fresh look.
+// It leaves a walk in flight (a run's start) to stand for its own rather than
+// wait behind it and walk again: over a slow mount the two together would
+// hold runner.json's heartbeat past agentproto.RunnerFreshFor, and the Bridge
+// would take a working service for stopped. That walk's answer is the next
+// one every reader takes, a run in progress included.
+func (r *Runner) tickMounts() {
+	if !r.mountMu.TryLock() {
+		return
+	}
+	defer r.mountMu.Unlock()
+	r.walkMountsLocked()
+}
+
+// walkMountsLocked walks the mounts (mounts.go), keeps the answer and returns
+// the files a run planted (runMade) with the device of TmpDir's tmpfs they are
+// on, as mountinfo showed it; mountMu is held, so two callers never walk at
+// once.
+func (r *Runner) walkMountsLocked() (dev string, planted []string) {
+	var why string
+	if ms, err := r.mounts(); err != nil {
+		why = "the mounts can't be read: " + err.Error()
+	} else {
+		w := newMountWalk(r.looks)
+		w.own = r.isOwnTmp
+		if dev, ok := r.runFilesPass(); ok {
+			w.selfUID, w.runArea, w.runDev = r.selfUID, r.opts.TmpDir, dev
+		}
+		why = w.credentialMount(ms)
+		dev, planted = w.areaDev, w.runFiles
+	}
+	r.mountLast.Store(&why)
+	return dev, planted
+}
+
+// runFilesPass reports whether a file of a credential's name in TmpDir may
+// pass as a run's own at all, with the device TmpDir showed at the service's
+// start (runMade's rules then decide, runAreaMount holding TmpDir's tmpfs to
+// that device; false: none passes and none is swept). Only when TmpDir held
+// nothing at the service's start (tmpFresh): a host's tmpfs bound whole at
+// TmpDir (/dev/shm, /run/user/<uid>, a shared emptyDir) shows in mountinfo as
+// the container's own would, while the service is its container's first
+// process (Main) and a container's tmpfs starts empty, so one that held
+// nothing then held no host file either. And never as root, nor as the
+// kernel's overflow uid (nobody): uid 0 owns a host's files wherever they come
+// from, and in a user namespace every file of an unmapped owner shows as
+// nobody's.
+func (r *Runner) runFilesPass() (dev string, ok bool) {
+	fresh := r.tmpFresh.Load()
+	if r.selfUID <= 0 || r.selfUID == overflowUID || fresh == nil {
+		return "", false
+	}
+	return *fresh, true
+}
+
+// overflowUID is the kernel's default overflowuid, nobody: the owner a user
+// namespace shows for every file whose own owner it doesn't map.
+const overflowUID = 65534
+
+// tmpFreshDev is TmpDir's device (major:minor) when it is a folder (never a
+// link) holding no entry at all, "" otherwise; a look that fails (missing,
+// closed, past lookTimeout) is "". The device is looked at before the folder
+// is read, so a file system mounted over TmpDir between the two shows another
+// device than the one kept (runAreaMount). Both looks are the mount walk's
+// own (each path read with one n: fsutil.ReadDirNWithin).
+func (r *Runner) tmpFreshDev() string {
+	info, err := r.looks.lstat(r.opts.TmpDir)
+	if err != nil || !info.IsDir() {
+		return ""
+	}
+	dev, ok := deviceOf(info)
+	if !ok {
+		return ""
+	}
+	if entries, err := r.looks.readDir(r.opts.TmpDir); err != nil || len(entries) != 0 {
+		return ""
+	}
+	return dev
+}
+
+// holdOwnTmp records the per-run folder dir as one of this runner's own, which
+// the mount walk passes over by its exact path, until the returned release is
+// called (once the folder is gone).
+func (r *Runner) holdOwnTmp(dir string) (release func()) {
+	dir = filepath.Clean(dir)
+	r.ownTmpMu.Lock()
+	r.ownTmp[dir] = true
+	r.ownTmpMu.Unlock()
+	return func() {
+		r.ownTmpMu.Lock()
+		delete(r.ownTmp, dir)
+		r.ownTmpMu.Unlock()
+	}
+}
+
+// isOwnTmp reports whether p is a per-run folder this runner holds.
+func (r *Runner) isOwnTmp(p string) bool {
+	r.ownTmpMu.Lock()
+	defer r.ownTmpMu.Unlock()
+	return r.ownTmp[filepath.Clean(p)]
+}
+
+// sweepRunFiles walks the mounts afresh and removes the files of a
+// credential's name a run planted in its TmpDir while that is a tmpfs of the
+// service's own (runMade, runAreaMount; nowhere else: the staging dir's are
+// never deleted; and only while runFilesPass), each through the folders on
+// its way opened without following a link and on the device mountinfo showed
+// for TmpDir's tmpfs (removeRunFile, proc_unix.go) and only while it is still
+// the service's own;
+// a folder is removed only when empty (deepest first, so a planted folder
+// goes after what was planted in it), so nothing a host mounted under one is
+// reached. The endpoint's service calls it after each run, never at its start
+// (Run: what is there then came from outside).
+func (r *Runner) sweepRunFiles() {
+	r.mountMu.Lock()
+	defer r.mountMu.Unlock()
+	dev, planted := r.walkMountsLocked()
+	sep := string(filepath.Separator)
+	slices.SortStableFunc(planted, func(a, b string) int { return strings.Count(b, sep) - strings.Count(a, sep) })
+	removed := 0
+	for _, rel := range planted {
+		if removeRunFile(r.opts.TmpDir, dev, rel, r.selfUID) {
+			removed++
+		}
+	}
+	if removed > 0 {
+		r.log.Warn("agent runner: removed files of a credential's name a run left", "count", removed)
+	}
 }
 
 // homeReachable reports whether the runner can list, enter or write the agent
 // home (the subscriptions' secrets, codex's login and its config.toml, which a
-// later subscription run loads). The endpoint's service mounts no /agent, and
-// runs as another uid than the agent container, whose 0700 home (the image's,
-// an anonymous volume where nothing is mounted) is then closed to it. Anything
-// but the home missing or closed counts as reachable: the answer must never be
-// a wrong no.
+// later subscription run loads). The endpoint's service mounts no agent volume,
+// and runs as another uid than the agent container, whose 0700 home (the
+// image's, which docker gives the service as an anonymous volume) is then
+// closed to it. Anything but the home missing or closed counts as reachable:
+// the answer must never be a wrong no (a look that doesn't answer in time
+// included).
 func (r *Runner) homeReachable() bool {
-	if _, err := os.Lstat(r.opts.Home); err != nil {
+	if _, err := r.looks.lstat(r.opts.Home); err != nil {
 		return !errors.Is(err, fs.ErrNotExist)
 	}
 	if f, err := os.Open(r.opts.Home); err == nil {

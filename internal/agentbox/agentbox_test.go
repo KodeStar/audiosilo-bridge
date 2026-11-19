@@ -484,6 +484,37 @@ func TestRunStaleHeartbeat(t *testing.T) {
 	}
 }
 
+// A job's heartbeat is a sign of life when it changes, on the Bridge's clock
+// (BR-OPENAI-2): a runner whose clock is an hour behind, touching the
+// heartbeat with its own dates, finishes its run (allowed); one that stops
+// touching it is stale staleFor later all the same (TestRunStaleHeartbeat).
+func TestRunHeartbeatOnTheBridgesClock(t *testing.T) {
+	t.Parallel()
+	r, dir := newTestRunner(t, agent.IDClaude)
+	r.staleFor = 300 * time.Millisecond
+	fake := &fakeRunner{fn: func(job string) agentproto.Exit {
+		hb := filepath.Join(job, agentproto.HeartbeatFile)
+		behind := time.Now().Add(-time.Hour)
+		end := time.Now().Add(time.Second)
+		for time.Now().Before(end) {
+			behind = behind.Add(5 * time.Millisecond)
+			if err := os.Chtimes(hb, behind, behind); err != nil {
+				_ = os.WriteFile(hb, nil, 0o644)
+				_ = os.Chtimes(hb, behind, behind)
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		mustWrite(t, filepath.Join(job, agentproto.StdoutFile), claudeOK)
+		return agentproto.Exit{}
+	}}
+	stop := fake.start(t, dir)
+	_, err := r.Run(context.Background(), agent.Request{Dir: stagedDir(t), Prompt: "p", Timeout: time.Minute})
+	stop()
+	if err != nil {
+		t.Fatalf("a runner beating on a clock an hour behind: %v", err)
+	}
+}
+
 func TestRunCancel(t *testing.T) {
 	t.Parallel()
 	r, dir := newTestRunner(t, agent.IDClaude)
@@ -542,9 +573,10 @@ func TestRunUnavailableStagesNothing(t *testing.T) {
 	assertNoJobDirs(t, dir)
 }
 
-// A runner.json counts as live only when dated within RunnerFreshFor before
-// now and no further ahead than the clock skew: a heartbeat in the future
-// (a forged status) would otherwise keep a stopped runner live for as long.
+// The first runner.json the Bridge reads counts as live only when dated
+// within RunnerFreshFor before now and no further ahead than the clock skew:
+// a heartbeat in the future (a forged status) would otherwise keep a stopped
+// runner live for as long.
 func TestLiveRefusesTheFuture(t *testing.T) {
 	t.Parallel()
 	now := time.Unix(1_800_000_000, 0)
@@ -561,9 +593,50 @@ func TestLiveRefusesTheFuture(t *testing.T) {
 		"beyond the skew":     {at: now.Add(runnerClockSkew + time.Second)},
 		"a day in the future": {at: now.Add(24 * time.Hour)},
 	} {
-		if got := r.live(agentproto.Runner{Protocol: agentproto.Protocol, HeartbeatAt: tc.at}); got != tc.live {
+		// Each its own dir: a first read.
+		if got := r.live(name, agentproto.Runner{Protocol: agentproto.Protocol, HeartbeatAt: tc.at}); got != tc.live {
 			t.Errorf("%s: live = %v, want %v", name, got, tc.live)
 		}
+	}
+}
+
+// Liveness is judged on the Bridge's clock (BR-OPENAI-2): a runner whose
+// clock is off (an hour behind, a day ahead: another host's, a VM that
+// slept) is live while its heartbeat keeps changing, and stops being live
+// RunnerFreshFor after its last change, whatever the date it writes; one that
+// never changes stays as its first read said.
+func TestLiveOnTheBridgesClock(t *testing.T) {
+	t.Parallel()
+	for name, skew := range map[string]time.Duration{
+		"an hour behind": -time.Hour, "a day ahead": 24 * time.Hour, "in step": 0,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			now := time.Unix(1_800_000_000, 0)
+			r := New(Options{Dir: t.TempDir(), Backend: "claude"})
+			r.now = func() time.Time { return now }
+			rj := agentproto.Runner{Protocol: agentproto.Protocol}
+			beat := func() { rj.HeartbeatAt = now.Add(skew) }
+			beat()
+			_ = r.live(r.dir, rj) // the first read: its own date stands
+			for range 4 {
+				now = now.Add(agentproto.RunnerInterval)
+				beat()
+				if !r.live(r.dir, rj) {
+					t.Fatalf("a runner beating every %s isn't live", agentproto.RunnerInterval)
+				}
+			}
+			// It stops: fresh until RunnerFreshFor after the last change.
+			now = now.Add(agentproto.RunnerFreshFor)
+			if !r.live(r.dir, rj) {
+				t.Fatal("live ended before RunnerFreshFor")
+			}
+			now = now.Add(time.Second)
+			st, fresh := r.heartbeatAge(r.dir, rj)
+			if fresh || st != agentproto.RunnerFreshFor+time.Second {
+				t.Fatalf("a stopped runner = %v fresh %v, want stale on the Bridge's clock", st, fresh)
+			}
+		})
 	}
 }
 

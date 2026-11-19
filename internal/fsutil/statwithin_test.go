@@ -98,3 +98,57 @@ func TestReadDirWithin(t *testing.T) {
 		t.Fatal("a second read of the hung folder was started")
 	}
 }
+
+// LstatWithin answers as os.Lstat does (a link is the link, not its target),
+// and a look a hung mount holds is ErrStatTimeout.
+func TestLstatWithin(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	link := filepath.Join(dir, "link")
+	if err := os.Symlink(filepath.Join(dir, "gone"), link); err != nil {
+		t.Fatal(err)
+	}
+	info, err := LstatWithin(link, 5*time.Second)
+	if err != nil || info.Mode()&fs.ModeSymlink == 0 {
+		t.Fatalf("LstatWithin = %v, %v, want the link itself", info, err)
+	}
+	if _, err := LstatWithin(filepath.Join(dir, "gone"), 5*time.Second); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("a missing file = %v, want ErrNotExist", err)
+	}
+	const path = "/hung/mount/auth.json"
+	c := &lookCall[fs.FileInfo]{done: make(chan struct{}), started: time.Now()}
+	lstats.mu.Lock()
+	lstats.calls[path] = c
+	lstats.mu.Unlock()
+	if _, err := LstatWithin(path, 10*time.Millisecond); !errors.Is(err, ErrStatTimeout) {
+		t.Fatalf("a hung lstat = %v, want ErrStatTimeout", err)
+	}
+	lstats.mu.Lock()
+	delete(lstats.calls, path)
+	lstats.mu.Unlock()
+	close(c.done)
+}
+
+// ReadDirNWithin reads at most n entries (a large folder isn't read whole),
+// answers an empty folder with none, and a missing one as os.Open does.
+func TestReadDirNWithin(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	if entries, err := ReadDirNWithin(dir, 3, 5*time.Second); err != nil || len(entries) != 0 {
+		t.Fatalf("an empty folder = %v, %v", entries, err)
+	}
+	for _, name := range []string{"a", "b", "c", "d", "e"} {
+		if err := os.WriteFile(filepath.Join(dir, name), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if entries, err := ReadDirNWithin(dir, 3, 5*time.Second); err != nil || len(entries) != 3 {
+		t.Fatalf("five entries read three at most = %d, %v", len(entries), err)
+	}
+	if entries, err := ReadDirNWithin(dir, 10, 5*time.Second); err != nil || len(entries) != 5 {
+		t.Fatalf("five entries read ten at most = %d, %v", len(entries), err)
+	}
+	if _, err := ReadDirNWithin(filepath.Join(dir, "gone"), 3, 5*time.Second); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("a missing folder = %v, want ErrNotExist", err)
+	}
+}

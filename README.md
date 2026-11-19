@@ -73,11 +73,16 @@ one `staging` volume, and nothing else.
    there runs commands where it runs, so the compose example's `agent-endpoint`
    (start it with `docker compose --profile endpoint up -d`) is the same image as
    `agent-runner --endpoint-only`, with its own user, its own staging volume
-   (`agent.endpoint_staging_dir`), no `/agent` volume (nor the agent volume, or a
-   CLI's login, mounted anywhere else) and no credential, as the
+   (`agent.endpoint_staging_dir`), never the agent volume (at `/agent` or
+   anywhere else; docker gives it an anonymous `/agent` volume from the image,
+   empty and closed to its user), nor a CLI's login or the Bridge's data, and no
+   credential (nor the Bridge's `AUDIOSILO_BRIDGE_SECRET_KEY` or GitHub token), as the
    container's first process (`entrypoint: ["audiosilo-bridge"]`, no tini) and one
    run at a time, and it kills whatever a run leaves behind. The Bridge refuses endpoint runs, saying
-   why, while it isn't set up that way (the service's log names what it found). A
+   why, while it isn't set up that way (Settings > Agent shows whether the service
+   is running and names what it found, the agent home's marker file
+   `.audiosilo-agent-home` included), and the service ends a run when a credential
+   comes within its reach mid-run. A
    known limit: a run still going shares that service's user, so it can mark its
    own job finished early; the Bridge then stages the next job beside it, and all it can
    read is that job's key, which is only another one if you changed the endpoint's
@@ -107,7 +112,8 @@ the credential goes (Settings > Bridge), and once a fix is in place (the agent
 container recreated with the group, or with the same id mapping) the Bridge
 notices within a few minutes, with no restart of its own. Moving the staging
 volume means recreating both containers. The endpoint's service runs the same
-way as user 10003 with no `/agent` volume and a staging volume of its own.
+way as user 10003 with a staging volume of its own and never the agent volume
+(its `/agent` is an anonymous volume from the image, closed to 10003).
 
 ## Add an ASR worker (transcription on another computer)
 
