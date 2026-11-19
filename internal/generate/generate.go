@@ -1056,8 +1056,10 @@ func (h *Handler) ownMapping(ctx context.Context, job jobs.Job) (store.GenerateB
 // claimMoved reports whether the row under job's id is another claim's now
 // (store.OtherClaim, the guarded writes' own rule): that claim follows the
 // job's engine book and mapping. An earlier attempt's row (this claim's own
-// write failed) is still the job's, and a row that is gone, or that can't be
-// read, is left to the guarded writes.
+// write failed) is still the job's, as is another server's claim of a kind
+// that follows no engine book (its podcast.fetch under the same id: the book
+// would run on with nothing to stop it), and a row that is gone, or that
+// can't be read, is left to the guarded writes.
 func (h *Handler) claimMoved(ctx context.Context, job jobs.Job) bool {
 	other, err := h.o.DB.OtherClaim(ctx, stopGuard(job, false))
 	return err == nil && other

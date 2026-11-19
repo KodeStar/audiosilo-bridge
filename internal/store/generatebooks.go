@@ -181,7 +181,8 @@ func (db *DB) SetGenerateBookPath(ctx context.Context, serverJobID int64, relPat
 // mapping recorded its end already (Ended). A later claim of the same job
 // records its attempt (RecordClaim) before its attach reopens the mapping and
 // re-admits the book, so does another server's claim of the same id (job ids
-// are each server's own, its attempt maybe the same), and another open job
+// are each server's own, its attempt maybe the same; a claim of a kind that
+// follows no engine book is none, engineKindsSQL), and another open job
 // may follow the book: either way the stop is no longer this end's to make.
 // ServerID "" is a claim no runner made (a test's, a local run's): only a
 // later attempt is another claim then.
@@ -205,10 +206,18 @@ func (g StopGuard) args(more ...any) []any {
 // engine book now.
 var ErrFollowed = errors.New("another claim of the job, or another open job, follows the engine book")
 
+// engineKindsSQL are the job kinds whose claims follow an engine book under
+// their id (their mapping: sidecars.generate, chapters.detect and
+// readalong.align). A claim of any other kind under the same id (another
+// server's podcast.fetch) follows no engine book, so the book the id's mapping
+// holds is still the earlier claim's to stop and end.
+const engineKindsSQL = `('sidecars.generate', 'chapters.detect', 'readalong.align')`
+
 // otherClaimSQL is true while the row of server job ?1 is another claim than
-// the guard's (StopGuard.args): a later attempt than ?2, or, for a claim of a
-// server (?4, its pairing ?5), a claim of another server or pairing.
-const otherClaimSQL = `EXISTS (SELECT 1 FROM server_jobs WHERE id = ?1
+// the guard's (StopGuard.args), of a kind that follows an engine book
+// (engineKindsSQL): a later attempt than ?2, or, for a claim of a server (?4,
+// its pairing ?5), a claim of another server or pairing.
+const otherClaimSQL = `EXISTS (SELECT 1 FROM server_jobs WHERE id = ?1 AND kind IN ` + engineKindsSQL + `
 		    AND (attempt > ?2 OR (?4 != '' AND (server_id != ?4 OR pairing != ?5))))`
 
 // openJobsSQL is the open server jobs' mappings (g): the job still running here,
@@ -282,8 +291,9 @@ func (db *DB) EndGenerateBook(ctx context.Context, g StopGuard, at time.Time) er
 
 // OtherClaim reports whether the row of g's job is another claim than g's (a
 // later attempt, or another server's or pairing's claim of the same id,
-// RecordClaim): that claim follows the job's engine book now, even before its
-// attach reopens the job's mapping. g.Ended is not read.
+// RecordClaim) of a kind that follows an engine book (engineKindsSQL): that
+// claim follows the job's engine book now, even before its attach reopens the
+// job's mapping. g.Ended is not read.
 func (db *DB) OtherClaim(ctx context.Context, g StopGuard) (bool, error) {
 	var other bool
 	err := db.sql.QueryRowContext(ctx, `SELECT `+otherClaimSQL, g.args()...).Scan(&other)

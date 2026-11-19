@@ -4067,7 +4067,9 @@ internal/
             and retention 0 purges its transcripts now; another claim of the job's
             id holding its row (claimMoved: a later attempt running here, or,
             BR-LINK-RULE-2, another server's or pairing's claim of the same id and
-            attempt) is left alone: the cancel and the end are
+            attempt, of a kind that follows an engine book: a podcast.fetch under
+            the id follows none, so the book is still this claim's to stop) is
+            left alone: the cancel and the end are
             guarded writes (store.StopGuard, the claim's id, attempt, server and
             pairing: SetBookStatusUnlessFollowed through the engine's
             CancelUnlessFollowed or scheduler.CancelStoredUnlessFollowed,

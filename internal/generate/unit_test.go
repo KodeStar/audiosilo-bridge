@@ -1080,6 +1080,26 @@ func TestReleaseLeavesAnotherServersClaimOfTheSameJob(t *testing.T) {
 		}
 		running(t, db, b)
 	})
+	// Allowed: another server's claim of a kind that follows no engine book
+	// (its podcast.fetch) leaves the mapping's book the dropped claim's, which
+	// would otherwise run on with its mapping open and nothing to stop it.
+	t.Run("another server's claim of a kind with no engine book", func(t *testing.T) {
+		t.Parallel()
+		db := open(t)
+		sched := scheduler.New(db, events.NewHub(8), scheduler.NewStubExecutor(0, 0), 1, "", false)
+		h := New(Options{DB: db, RetentionDays: 30, Poll: time.Millisecond, Engine: func() Engine { return sched }})
+		b := claim(t, db, "a", "p1", "ours")
+		if err := db.RecordClaim(ctx, store.ServerJob{ID: 5, Kind: "podcast.fetch", Attempt: 1, ServerID: "b", Pairing: "p2"}); err != nil {
+			t.Fatal(err)
+		}
+		h.Abandon(ctx, dropped)
+		if got, _ := db.GetBook(ctx, b.ID); !scheduler.IsCancelled(got) {
+			t.Fatalf("the dropped claim's book wasn't stopped: status %q", got.Status)
+		}
+		if g, _ := db.GetGenerateBook(ctx, 5); g.EndedAt == "" {
+			t.Fatal("the dropped claim's mapping wasn't ended")
+		}
+	})
 }
 
 // failFirstEngine is the engine with a stage failing the book just after the

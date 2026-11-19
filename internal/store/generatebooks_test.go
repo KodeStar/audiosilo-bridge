@@ -731,3 +731,43 @@ func TestStopGuardTellsClaimsOfTheSameIDApart(t *testing.T) {
 		t.Fatal("the claim's own end wasn't recorded")
 	}
 }
+
+// Another server's claim of the same id and attempt of a kind that follows no
+// engine book (its podcast.fetch) never takes the mapping's book over: the
+// earlier claim's guarded cancel and end still pass (allowed), where refused
+// the book would run on with its mapping open and nothing left to stop it; a
+// claim of an engine kind still refuses them (denied).
+func TestStopGuardIgnoresAClaimThatFollowsNoEngineBook(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	b, _ := db.CreateBook(ctx, NewBook{SourcePath: "/s", WorkDir: "/w", Title: "S"})
+	if err := db.PutGenerateBook(ctx, GenerateBook{ServerJobID: 1, BookID: &b.ID, LibraryID: 1, RelPath: "S"}); err != nil {
+		t.Fatal(err)
+	}
+	dropped := StopGuard{JobID: 1, Attempt: 1, ServerID: "a", Pairing: "p1"}
+	record := func(kind string) {
+		t.Helper()
+		if err := db.RecordClaim(ctx, ServerJob{ID: 1, Kind: kind, Attempt: 1, ServerID: "b", Pairing: "p2"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, kind := range []string{"sidecars.generate", "chapters.detect", "readalong.align"} {
+		record(kind)
+		if other, err := db.OtherClaim(ctx, dropped); err != nil || !other {
+			t.Fatalf("%s: OtherClaim = %v %v, want true", kind, other, err)
+		}
+	}
+	record("podcast.fetch")
+	if other, err := db.OtherClaim(ctx, dropped); err != nil || other {
+		t.Fatalf("OtherClaim = %v %v, want false", other, err)
+	}
+	if err := db.SetBookStatusUnlessFollowed(ctx, b.ID, "", "", "failed", "cancelled by user", dropped); err != nil {
+		t.Fatalf("cancel = %v", err)
+	}
+	if err := db.EndGenerateBook(ctx, dropped, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if m, _ := db.GetGenerateBook(ctx, 1); m.EndedAt == "" {
+		t.Fatal("the earlier claim's end wasn't recorded")
+	}
+}
