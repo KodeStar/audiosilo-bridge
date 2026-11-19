@@ -1083,7 +1083,7 @@ func TestHistoryCutoffClocks(t *testing.T) {
 		"baseline":                 {store.AudibleAccount{}, behind, now.Add(-2*time.Hour - baselineWindow)},
 		"after the baseline's end": {store.AudibleAccount{PushFrom: store.Timestamp(from)}, behind, time.Time{}},
 	} {
-		if got := historyCutoff(c.a, c.serverTime, now); !got.Equal(c.want) {
+		if got := historyCutoff(c.a, serverSkew(c.serverTime, now), now); !got.Equal(c.want) {
 			t.Errorf("%s: cutoff %v, want %v", name, got, c.want)
 		}
 	}
