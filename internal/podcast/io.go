@@ -106,10 +106,10 @@ func episodesIn(f *Feed, show string) bool {
 // another show moved there) or no show at all is a rename. An old-name folder
 // whose own feed.json cannot be read refuses too: it may be the show's. So
 // does one still there without a feed.json that holds one of the show's
-// episode files or a partial of the Bridge's (stillHolds): the show's own
-// folder that lost its feed.json, show a copy of it (a backup) that taking in
-// would leave the audio and the downloads behind. A new empty folder made at
-// the old name after a rename by hand holds neither.
+// episode files or a partial of the Bridge's (stillHolds): that is the show's
+// own folder that lost its feed.json, so a copy of it (a backup) is never
+// taken in, which would leave the audio and the downloads behind. A new empty
+// folder made at the old name after a rename by hand holds neither.
 func ReadMoved(root *os.Root, show string) (*Feed, string, error) {
 	f, err := readFile(root, show)
 	if err != nil {
@@ -123,7 +123,12 @@ func ReadMoved(root *os.Root, show string) (*Feed, string, error) {
 		return nil, "", ErrInvalidFile
 	}
 	held, err := readFile(root, from)
-	if err == nil && held.ShowID == f.ShowID || err != nil && (!errors.Is(err, os.ErrNotExist) || stillHolds(root, from, f)) {
+	switch {
+	case err == nil:
+		if held.ShowID == f.ShowID {
+			return nil, "", ErrInvalidFile
+		}
+	case !errors.Is(err, os.ErrNotExist), stillHolds(root, from, f):
 		return nil, "", ErrInvalidFile
 	}
 	return f, from, nil
@@ -132,17 +137,10 @@ func ReadMoved(root *os.Root, show string) (*Feed, string, error) {
 // stillHolds reports whether from, the old name of a folder f's feed.json
 // names its episodes under, is still there holding one of those episode files
 // or an owned temp (a download's partial, an install's staged audio), or
-// cannot be listed to tell. A folder that is gone holds nothing.
+// cannot be listed to tell (listFolder: a link or a file there refuses too).
+// A folder that is gone holds nothing.
 func stillHolds(root *os.Root, from string, f *Feed) bool {
-	dir, err := root.Open(from)
-	if errors.Is(err, os.ErrNotExist) {
-		return false
-	}
-	if err != nil {
-		return true
-	}
-	defer dir.Close()
-	entries, err := dir.ReadDir(-1)
+	entries, err := listFolder(root, from)
 	if err != nil {
 		return true
 	}

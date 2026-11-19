@@ -111,8 +111,14 @@ func (s *service) readCheckpoint(job jobs.Job) (checkpoint, bool) {
 		return checkpoint{}, false
 	}
 	defer func() { _ = dir.Close() }()
-	saved, err := readRecord(dir, s.checkpointName(job))
-	ok := err == nil && saved.ServerHash == s.pairHash() && saved.LibraryID == *job.LibraryID && saved.Path == *job.Path && podcast.OwnedTemp(saved.Temp) && strings.HasPrefix(saved.Validator, secrets.PodcastETagPrefix)
+	return s.readOwnRecord(dir, *job.LibraryID, *job.Path)
+}
+
+// readOwnRecord is readCheckpoint's record of library lib's episode p, read
+// from the open records folder dir.
+func (s *service) readOwnRecord(dir *os.Root, lib int64, p string) (checkpoint, bool) {
+	saved, err := readRecord(dir, recordName(lib, p))
+	ok := err == nil && saved.ServerHash == s.pairHash() && saved.LibraryID == lib && saved.Path == p && podcast.OwnedTemp(saved.Temp) && strings.HasPrefix(saved.Validator, secrets.PodcastETagPrefix)
 	return saved, ok
 }
 
@@ -318,11 +324,8 @@ func moveRecord(dir *os.Root, lib int64, c checkpoint, to string) {
 // record at the new path already wins (adoptCheckpoints'), and the one at
 // from is cleared with its partial, rather than left.
 func (s *service) adoptOwn(job jobs.Job, root *os.Root, from string, p fetchParams) {
-	if from == *job.Path {
-		return
-	}
-	saved, ok := s.readCheckpoint(jobs.Job{LibraryID: job.LibraryID, Path: &from})
-	if !ok || saved.ShowID != p.ShowID || saved.EpisodeID != p.EpisodeID || path.Base(from) != path.Base(*job.Path) {
+	lib, to := *job.LibraryID, *job.Path
+	if from == to {
 		return
 	}
 	dir, err := s.checkpointRoot()
@@ -330,16 +333,22 @@ func (s *service) adoptOwn(job jobs.Job, root *os.Root, from string, p fetchPara
 		return
 	}
 	defer func() { _ = dir.Close() }()
-	if _, err := dir.Lstat(s.checkpointName(job)); errors.Is(err, os.ErrNotExist) {
-		moveRecord(dir, *job.LibraryID, saved, *job.Path)
+	saved, ok := s.readOwnRecord(dir, lib, from)
+	if !ok || saved.ShowID != p.ShowID || saved.EpisodeID != p.EpisodeID || path.Base(from) != path.Base(to) {
+		return
+	}
+	if _, err := dir.Lstat(recordName(lib, to)); errors.Is(err, os.ErrNotExist) {
+		moveRecord(dir, lib, saved, to)
 		return
 	}
 	// Its partial is in the episode's folder now; one the record at the new
 	// path names too (a move that wrote there and could not remove this one)
 	// stays for that record.
-	saved.Path = *job.Path
-	if there, ok := s.readCheckpoint(job); ok && there.Temp == saved.Temp || s.dropPartial(root, &saved) {
-		_ = dir.Remove(recordName(*job.LibraryID, from))
+	there, ok := s.readOwnRecord(dir, lib, to)
+	saved.Path = to
+	shared := ok && there.Temp == saved.Temp
+	if shared || s.dropPartial(root, &saved) {
+		_ = dir.Remove(recordName(lib, from))
 	}
 }
 

@@ -1148,7 +1148,10 @@ func TestAFetchTakesItsOwnRecordPastADuplicateClaim(t *testing.T) {
 			setAudio(h, func(w http.ResponseWriter, r *http.Request) { calls.Add(1); resume(w, r) })
 		}
 		res, err := h.handler.FetchJob().Run(context.Background(), job, jobs.LocalReporter())
-		want := map[bool]int32{false: 1, true: 2}[during]
+		want := int32(1)
+		if during {
+			want = 2
+		}
 		if got, ok := res.(fetchResult); err != nil || !ok || got.Fetch.Bytes != int64(len(audio)) || calls.Load() != want {
 			t.Fatal(during, res, err, calls.Load())
 		}
