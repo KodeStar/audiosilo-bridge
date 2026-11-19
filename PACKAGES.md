@@ -1376,7 +1376,8 @@ internal/
             details as they are). v0.5.0: the libraries item says
             DetailLibrariesChecking from pairing until a heartbeat has listed the
             libraries and each is checked (LibrariesPending: no beat since the
-            link changed, or mapping.Registry.Unchecked), BRIDGE-14; the agent
+            link changed, or mapping.Registry.Unchecked: a library with no check,
+            or none that stands, unknown as Status reads it), BRIDGE-14; the agent
             item (optional since v2.7.0, bridge#36: podcasts, read-along,
             chapters and Audible need no agent) says in plain words what to do and what the
             agent is for, by the kind of problem agentbox.Status reports

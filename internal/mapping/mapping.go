@@ -473,12 +473,19 @@ func (r *Registry) Statuses() []link.LibraryStatus {
 	return out
 }
 
-// Unchecked reports whether a library listed has no check yet.
+// Unchecked reports whether a library listed has no check yet, or none that
+// stands (view: unknown reads as unchecked, as Status says), so the setup
+// checklist says the libraries are being checked rather than not writable.
 func (r *Registry) Unchecked() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	now := r.clock()
 	for _, l := range r.libs {
-		if _, ok := r.results[l.ID]; !ok {
+		res, ok := r.results[l.ID]
+		if !ok {
+			return true
+		}
+		if _, known := r.view(res, now); !known {
 			return true
 		}
 	}

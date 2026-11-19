@@ -482,12 +482,18 @@ func TestUnansweredCheckWithoutAState(t *testing.T) {
 	if st, ok := r.Status(1); ok || st.Mapped || !strings.Contains(st.Error, "could not ask the server") {
 		t.Fatalf("a first unanswered check = %+v, %v, want an unknown state saying why", st, ok)
 	}
+	if !r.Unchecked() {
+		t.Fatal("an unknown state counts as checked for the setup checklist")
+	}
 	if !r.Due(at.Add(RetryFirst), 24*time.Hour) {
 		t.Fatal("a first unanswered check is not due again after the hold")
 	}
 
 	src.answer(1, nil)
 	r.Check(context.Background(), src, mount, func() time.Time { return at })
+	if r.Unchecked() {
+		t.Fatal("an answered check still counts as unchecked")
+	}
 	cur = other
 	src.answer(1, &link.APIError{Status: http.StatusBadGateway})
 	r.Check(context.Background(), src, mount, func() time.Time { return at }, 1)
