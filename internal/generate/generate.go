@@ -1087,10 +1087,7 @@ func (h *Handler) waitEngine(ctx context.Context, r *run) (Engine, error) {
 // folder while the job waited on this one (errRemapped) is looked at through
 // the new mapping, once its check stands.
 func (h *Handler) prepare(ctx context.Context, r *run, strict bool) error {
-	if err := h.serverLibrary(r); err != nil {
-		return err
-	}
-	if err := h.waitMapped(ctx, r, strict); err != nil {
+	if err := h.mapLibrary(ctx, r, strict); err != nil {
 		return err
 	}
 	book, err := h.fetchBook(ctx, r)
@@ -1102,23 +1099,29 @@ func (h *Handler) prepare(ctx context.Context, r *run, strict bool) error {
 		r.rel = book.Path
 	}
 	for {
-		err := h.prepareAt(ctx, r, book.Files)
+		err := h.prepareAt(ctx, r)
 		if !errors.Is(err, errRemapped) {
 			return err
 		}
-		if err := h.serverLibrary(r); err != nil {
-			return err
-		}
-		if err := h.waitMapped(ctx, r, strict); err != nil {
+		if err := h.mapLibrary(ctx, r, strict); err != nil {
 			return err
 		}
 	}
 }
 
-// prepareAt compares the book's files through r.mount, locates the book there
-// and makes sure its folder can be written.
-func (h *Handler) prepareAt(ctx context.Context, r *run, files []link.BookFile) error {
-	if err := h.compareFiles(ctx, r, files); err != nil {
+// mapLibrary sets the run's server and library (serverLibrary) and waits for
+// the library's mapping (waitMapped), r.mount then the mount it stands at.
+func (h *Handler) mapLibrary(ctx context.Context, r *run, strict bool) error {
+	if err := h.serverLibrary(r); err != nil {
+		return err
+	}
+	return h.waitMapped(ctx, r, strict)
+}
+
+// prepareAt compares the book's files (r.files) through r.mount, locates the
+// book there and makes sure its folder can be written.
+func (h *Handler) prepareAt(ctx context.Context, r *run) error {
+	if err := h.compareFiles(ctx, r, r.files); err != nil {
 		return err
 	}
 	p, err := locate(r.mount, r.rel)
@@ -1173,7 +1176,13 @@ func (h *Handler) folderWait(ctx context.Context, r *run, msg string) error {
 	if !r.ownPark {
 		r.rep.Progress(jobs.Progress{Step: stepWaiting, Message: msg})
 	}
-	if err := h.recheckWait(ctx, r, time.Now().Add(h.o.Poll)); err != nil {
+	return h.mountWait(ctx, r, time.Now().Add(h.o.Poll))
+}
+
+// mountWait is recheckWait for a look at r.mount's folder: a library mapped
+// to another folder meanwhile ends it (errRemapped).
+func (h *Handler) mountWait(ctx context.Context, r *run, at time.Time) error {
+	if err := h.recheckWait(ctx, r, at); err != nil {
 		return err
 	}
 	if h.remapped(r) {
@@ -1300,11 +1309,8 @@ func (h *Handler) waitWritable(ctx context.Context, r *run) error {
 			continue
 		}
 		h.park(r, parkBookNotWritable, "the Bridge can't write in the book's folder ("+writeProblem(err)+")")
-		if err := h.recheckWait(ctx, r, time.Now().Add(h.o.Recheck)); err != nil {
+		if err := h.mountWait(ctx, r, time.Now().Add(h.o.Recheck)); err != nil {
 			return err
-		}
-		if h.remapped(r) {
-			return errRemapped
 		}
 	}
 }
