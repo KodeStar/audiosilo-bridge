@@ -1080,6 +1080,31 @@ func TestGenerateShareOffTriesAFailedLiftAgain(t *testing.T) {
 	}
 }
 
+// The look after a lifted share park comes at once: the job doesn't sit out an
+// idle poll (the look that lifted the park read the book parked) before it
+// sees the stage it ran again finish.
+func TestGenerateShareOffLooksAgainAtOnceAfterALift(t *testing.T) {
+	t.Parallel()
+	hr := newHarness(t)
+	contributing := hr.exec.gate("contributing")
+	hr.exec.parks["contributing"] = 1
+	h := hr.handler()
+	h.o.IdlePoll = time.Hour
+	hr.srv.add(71, "Author/Book", `{"contribute":"issue"}`)
+	stop := hr.runner(h)
+	defer stop()
+	hr.waitFor("contributing", func() bool {
+		// A Retry of a book that isn't parked only wakes the job: its looks at
+		// the queued book, which an idle poll would otherwise space out.
+		_ = h.Retry(context.Background(), 71)
+		return hr.srv.saw(71, func(_ link.Update, p map[string]any) bool { return p["stage"] == "contributing" })
+	})
+	hr.srv.set(func() { hr.srv.shareOff[71] = true })
+	hr.waitFor("the engine book kept local", func() bool { return hr.engineBook(71).ContribMode == store.ContribModeLocal })
+	close(contributing)
+	hr.waitFor("done", func() bool { s, _ := hr.srv.final(71); return s == link.StateDone })
+}
+
 // queueShare hands generate-and-share job id (Author/Book) out under attempt,
 // its claim saying shareOff.
 func (hr *harness) queueShare(id int64, attempt int, shareOff bool) {

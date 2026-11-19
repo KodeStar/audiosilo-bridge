@@ -1344,10 +1344,12 @@ func (h *Handler) follow(ctx context.Context, eng Engine, r *run) (any, error) {
 func (h *Handler) step(ctx context.Context, eng Engine, r *run, b store.Book) (any, bool, error) {
 	if r.kind == Kind && h.keepShareLocal(ctx, eng, r, &b) {
 		// The share's park lifted: the look goes on with the book as it is now,
-		// never reporting the park it no longer has.
+		// never reporting the park it no longer has, and the next look comes at
+		// once (follow read the book parked, and would wait an idle poll).
 		if now, err := h.o.DB.GetBook(ctx, b.ID); err == nil {
 			b = now
 		}
+		nudge(r.poke)
 	}
 	if k := keyOf(b); k != r.seen || working(b) {
 		r.seen = k
