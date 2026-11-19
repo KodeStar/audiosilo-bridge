@@ -62,7 +62,8 @@ func putGenerateBook(ctx context.Context, ex execer, g GenerateBook) error {
 // wherever either side changes: the claim (RecordClaim), the answer heard since
 // (SetServerJobShareOff) and the mapping (putGenerateBook, the continues). A
 // book done keeps its mode (it shared as asked, and its job reports what it
-// filed), and a book is never turned back: a share dropped stays dropped. Like
+// filed), and this rule never turns a book back: a share dropped stays dropped
+// (only a later job's own continue sets the mode it asks for). Like
 // SetBookChapters it leaves updated_at alone: the mode is not a change of
 // pipeline position, and a bump would reorder the Running list.
 func keepSharedOffLocal(ctx context.Context, ex execer, serverJobID int64) error {
