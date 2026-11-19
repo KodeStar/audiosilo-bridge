@@ -870,19 +870,26 @@ func (r *Runner) unhold(drops []drop) {
 // dropStands reads a dropped job's row again as its turn to be released comes
 // (releaseDropped): it may have waited minutes behind the batch's slower
 // releases while a new pairing claims beside them, and job ids are each
-// server's own. It reports whether the row is still the running claim the job
-// was dropped for: one a later claim took under its id since it was listed,
-// one that ended (a release recorded it since a start's recover listed it) or
-// one that is gone is left alone, its work never released for the job listed
-// (a handler's state may be keyed by the job's id alone: generate's engine
-// book). A row that can't be read stands as it was listed (recordLost checks
-// the claim again in its write).
+// server's own. It reports whether the job's work is still its own to release:
+// the row is still the running claim the job was dropped for, or another
+// server's or pairing's claim of another kind took the id (that claim's
+// handler keeps no state of the job's kind, so nothing else would release the
+// job's work, and the job's handler guards what it shares under the id by its
+// claim: generate's StopGuard). One a later claim of the same kind took, one
+// that ended (a release recorded it since a start's recover listed it) or one
+// that is gone is left alone, its work never released for the job listed (a
+// handler's state may be keyed by the job's id alone: generate's engine book,
+// which that claim follows). A row that can't be read stands as it was listed
+// (recordLost checks the claim again in its write, and leaves another claim's
+// row alone).
 func (r *Runner) dropStands(ctx context.Context, job Job) bool {
 	sj, err := r.store.GetServerJob(ctx, job.ID)
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		return false
 	case err != nil:
+		return true
+	case sj.Kind != job.Kind:
 		return true
 	}
 	return sj.State == store.JobRunning && sj.Attempt == job.Attempt && sj.ServerID == job.serverID && sj.Pairing == job.pairing

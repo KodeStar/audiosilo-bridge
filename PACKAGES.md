@@ -2634,9 +2634,12 @@ internal/
             end (awaitOpenJobEnd). A kind that holds no work (not an Abandoner)
             is recorded at its turn. Each job's row
             is read again as its turn comes (dropStands): one that is no longer
-            the running claim it was dropped for (a new pairing's claim took
-            its id while it waited, or it ended) is neither released nor
-            recorded. The jobs are held (Runner.dropping, holdsLocked) until
+            the running claim it was dropped for (a new pairing's claim of its
+            kind took its id while it waited, or it ended) is neither released
+            nor recorded; one another server's or pairing's claim of another
+            kind took is still released (that claim's handler keeps none of its
+            state; generate guards its mapping by the claim, store.StopGuard)
+            and its row left to that claim. The jobs are held (Runner.dropping, holdsLocked) until
             recorded, so recover and a later look skip them (one the look
             recorded lost after recover listed it running is found ended at
             its turn). A run's own drop whose handler still holds work (it

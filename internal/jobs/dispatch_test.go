@@ -1059,6 +1059,39 @@ func TestDroppedJobIsReadAgainAtItsTurn(t *testing.T) {
 		t.Fatalf("the new claim's row: %+v %v", sj, err)
 	}
 }
+// A dropped job whose id another server's claim of another kind took while
+// it waited its turn still has its work released (denied: left alone as a
+// claim of its own kind is, its work then released by nothing, as that
+// claim's handler keeps none of the job's state), and the new claim's row is
+// left alone (allowed: never recorded lost for the dropped job).
+func TestDroppedJobWhoseIDAnotherKindTookIsStillReleased(t *testing.T) {
+	const n = dropConcurrency + 1
+	release := make(chan struct{})
+	h := newCountingAbandoner(nil, release, n)
+	db := openStore(t)
+	droppedRows(t, db, h.Kind(), n)
+	r := New(db, func() Server { return nil }, nil, testOpts(), h) // unpaired since
+	startControlled(t, r)
+	for range dropConcurrency {
+		if id := await(t, h.entered); id == n {
+			t.Fatal("the last row was released before the ones listed ahead of it")
+		}
+	}
+	// Row n waits its turn: another server's claim of another kind takes its id.
+	ctx := context.Background()
+	if err := db.RecordClaim(ctx, store.ServerJob{ID: n, Kind: "sidecars.generate", Attempt: 1, ServerID: "other", Pairing: "p2"}); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	waitFor(t, func() bool { return rowsIn(db, n-1, store.JobLost) && !r.holds(n) })
+	if got := h.abandoned(); len(got) != n || !slices.Contains(got, n) {
+		t.Fatal("released:", got)
+	}
+	if sj, err := db.GetServerJob(ctx, n); err != nil || sj.State != store.JobRunning || sj.Kind != "sidecars.generate" || sj.ServerID != "other" {
+		t.Fatalf("the new claim's row: %+v %v", sj, err)
+	}
+}
+
 
 // A stop interrupts a job whose pairing is ended on the page just after its
 // end was settled (left running to resume): the stop never waits for its work
