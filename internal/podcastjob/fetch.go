@@ -398,11 +398,17 @@ func (h *Fetch) run(parent context.Context, claimed *jobs.Job, rep *jobs.Reporte
 		// record says it is whole (resume-at-total), with the hash it was
 		// written with, so the exit keeps it and the next attempt verifies and
 		// publishes it with no GET.
+		// One kept so already keeps its record as it is: saved again, its
+		// age would start over at each attempt, and a partial that is never
+		// read back (a lasting fault) would never be a day old for cleanOwned,
+		// failing every attempt with no download for good.
 		if unread {
 			slog.Warn("podcasts: an episode's download could not be read back to check it; it is kept for the next attempt", "partial", c.partialName(), "err", err)
-			c.Total, c.SHA256 = c.Offset, received.SHA256
-			if err := s.saveCheckpoint(job, root, &c, ""); err != nil {
-				c.SHA256 = "" // unrecorded: the exit clears it
+			if !c.complete() {
+				c.Total, c.SHA256 = c.Offset, received.SHA256
+				if err := s.saveCheckpoint(job, root, &c, ""); err != nil {
+					c.SHA256 = "" // unrecorded: the exit clears it
+				}
 			}
 			return nil, fail("write_failed", "The episode download could not be read back.")
 		}

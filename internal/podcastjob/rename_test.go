@@ -2513,6 +2513,46 @@ func TestAFetchKeepsAWholeDownloadItCannotReadBack(t *testing.T) {
 	}
 }
 
+// A kept whole download that still cannot be read back keeps its record as it
+// was, its age included: saved again at each attempt, a partial never read
+// back (a lasting fault) would never be a day old for cleanOwned, and every
+// attempt would fail with no download for good.
+func TestAKeptWholeDownloadStillUnreadKeepsItsRecordsAge(t *testing.T) {
+	requireProbe(t)
+	h, job := audioHarness(t)
+	s := h.handler.s
+	audio := data(t, "chap-v24-reverse.mp3")
+	var calls atomic.Int32
+	setAudio(h, func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Header().Set("ETag", `"one"`)
+		w.Header().Set("Content-Length", strconv.Itoa(len(audio)))
+		w.WriteHeader(200)
+		w.Write(audio)
+	})
+	s.o.Fault = func(at string) error {
+		if at == "rehash" {
+			return syscall.EIO
+		}
+		return nil
+	}
+	start := s.o.Now()
+	if _, err := h.handler.FetchJob().Run(context.Background(), job, jobs.LocalReporter()); code(t, err) != "write_failed" {
+		t.Fatal(err)
+	}
+	first, ok := s.readCheckpoint(job, fixtureShowID)
+	if !ok || !first.complete() {
+		t.Fatalf("the whole download was not kept: %+v", first)
+	}
+	s.o.Now = func() time.Time { return start.Add(time.Hour) }
+	if _, err := h.handler.FetchJob().Run(context.Background(), job, jobs.LocalReporter()); code(t, err) != "write_failed" || calls.Load() != 1 {
+		t.Fatal(err, calls.Load())
+	}
+	if again, ok := s.readCheckpoint(job, fixtureShowID); !ok || again != first {
+		t.Fatalf("the kept record was saved again: %+v, was %+v", again, first)
+	}
+}
+
 // A show folder renamed by hand between the fetch's last follow and the read
 // of its download leaves no partial at the path read: not a changed download.
 // The fetch follows the show and reads the partial there, publishing it from
