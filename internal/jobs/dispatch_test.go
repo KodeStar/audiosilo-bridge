@@ -786,9 +786,7 @@ func TestUnpairedDoesNotWaitForAbandon(t *testing.T) {
 	srv := newControlledServer(false)
 	srv.pairing = "p1"
 	release := make(chan struct{})
-	h := &blockingAbandoner{abandoner: abandoner{handler: handler{kind: "podcast.fetch", lane: LaneDownload, fn: func(context.Context, Job, *Reporter) (any, error) {
-		return nil, nil
-	}}}, release: release, entered: make(chan struct{}, 1)}
+	h := newCountingAbandoner(nil, release, 1)
 	db := openStore(t)
 	ctx := context.Background()
 	if err := db.RecordClaim(ctx, store.ServerJob{ID: 5, Kind: h.Kind(), Attempt: 1, ServerID: testServer, Pairing: "p1"}); err != nil {
@@ -815,13 +813,23 @@ func TestUnpairedDoesNotWaitForAbandon(t *testing.T) {
 	})
 }
 
-// countingAbandoner's Abandon waits for release (nil: for its context to end)
-// and counts how many wait at once.
+// countingAbandoner's Abandon sends the job's id on entered, waits for release
+// (nil: for its context to end) and counts how many wait at once.
 type countingAbandoner struct {
 	abandoner
 	release          <-chan struct{}
 	entered          chan int64
 	inFlight, maxers atomic.Int32
+}
+
+// newCountingAbandoner is a podcast.fetch countingAbandoner running fn (nil:
+// one that ends at once), with room on entered for n jobs.
+func newCountingAbandoner(fn func(context.Context, Job, *Reporter) (any, error), release <-chan struct{}, n int) *countingAbandoner {
+	if fn == nil {
+		fn = func(context.Context, Job, *Reporter) (any, error) { return nil, nil }
+	}
+	return &countingAbandoner{abandoner: abandoner{handler: handler{kind: "podcast.fetch", lane: LaneDownload, fn: fn}},
+		release: release, entered: make(chan int64, n)}
 }
 
 func (a *countingAbandoner) Abandon(ctx context.Context, j Job) {
@@ -837,8 +845,8 @@ func (a *countingAbandoner) Abandon(ctx context.Context, j Job) {
 	a.abandoner.Abandon(ctx, j)
 }
 
-// droppedRows records running rows 1..n of pairing p1 for a podcast.fetch
-// handler, a pairing the Bridge no longer has.
+// droppedRows records running rows 1..n of kind for pairing p1, a pairing the
+// Bridge no longer has.
 func droppedRows(t *testing.T, db *store.DB, kind string, n int64) {
 	t.Helper()
 	for id := int64(1); id <= n; id++ {
@@ -848,10 +856,10 @@ func droppedRows(t *testing.T, db *store.DB, kind string, n int64) {
 	}
 }
 
-// rowsLost reports whether rows 1..n are all recorded lost.
-func rowsLost(db *store.DB, n int64) bool {
+// rowsIn reports whether rows 1..n are all in state.
+func rowsIn(db *store.DB, n int64, state string) bool {
 	for id := int64(1); id <= n; id++ {
-		if sj, err := db.GetServerJob(context.Background(), id); err != nil || sj.State != store.JobLost {
+		if sj, err := db.GetServerJob(context.Background(), id); err != nil || sj.State != state {
 			return false
 		}
 	}
@@ -866,9 +874,7 @@ func rowsLost(db *store.DB, n int64) bool {
 func TestDroppedJobsReleaseOffTheClaimLoop(t *testing.T) {
 	const n = 6
 	release := make(chan struct{})
-	h := &countingAbandoner{abandoner: abandoner{handler: handler{kind: "podcast.fetch", lane: LaneDownload, fn: func(context.Context, Job, *Reporter) (any, error) {
-		return nil, nil
-	}}}, release: release, entered: make(chan int64, n)}
+	h := newCountingAbandoner(nil, release, n)
 	db := openStore(t)
 	droppedRows(t, db, h.Kind(), n)
 	srv := newControlledServer(false)
@@ -886,13 +892,11 @@ func TestDroppedJobsReleaseOffTheClaimLoop(t *testing.T) {
 	if got := h.inFlight.Load(); got != dropConcurrency {
 		t.Fatal("releases at once:", got)
 	}
-	for id := int64(1); id <= n; id++ {
-		if sj, err := db.GetServerJob(context.Background(), id); err != nil || sj.State != store.JobRunning {
-			t.Fatalf("row %d recorded before its work was released: %+v %v", id, sj, err)
-		}
+	if !rowsIn(db, n, store.JobRunning) {
+		t.Fatal("a row was recorded before its work was released")
 	}
 	close(release)
-	waitFor(t, func() bool { return rowsLost(db, n) })
+	waitFor(t, func() bool { return rowsIn(db, n, store.JobLost) })
 	if got := h.abandoned(); len(got) != n {
 		t.Fatal("released:", got)
 	}
@@ -907,9 +911,7 @@ func TestDroppedJobsReleaseOffTheClaimLoop(t *testing.T) {
 // row is recorded lost all the same, and each give-up is logged.
 func TestDroppedJobsShareOneDeadline(t *testing.T) {
 	const n = 6
-	h := &countingAbandoner{abandoner: abandoner{handler: handler{kind: "podcast.fetch", lane: LaneDownload, fn: func(context.Context, Job, *Reporter) (any, error) {
-		return nil, nil
-	}}}, entered: make(chan int64, n)} // waits for its deadline
+	h := newCountingAbandoner(nil, nil, n) // waits for its deadline
 	db := openStore(t)
 	droppedRows(t, db, h.Kind(), n)
 	logs := &logCounter{n: map[string]int{}}
@@ -918,7 +920,7 @@ func TestDroppedJobsShareOneDeadline(t *testing.T) {
 	r := New(db, func() Server { return nil }, nil, opts, h) // unpaired since
 	r.dropDeadline = 200 * time.Millisecond
 	startControlled(t, r)
-	waitFor(t, func() bool { return rowsLost(db, n) })
+	waitFor(t, func() bool { return rowsIn(db, n, store.JobLost) })
 	if got := len(h.abandoned()); got != dropConcurrency {
 		t.Fatal("releases started:", got)
 	}
@@ -935,10 +937,10 @@ func TestDroppedJobsShareOneDeadline(t *testing.T) {
 func TestStopNeverWaitsForAnUnpairedJobsRelease(t *testing.T) {
 	srv := newControlledServer(false)
 	srv.pairing = "p1"
-	h := &countingAbandoner{abandoner: abandoner{handler: handler{kind: "podcast.fetch", lane: LaneDownload, fn: func(ctx context.Context, _ Job, _ *Reporter) (any, error) {
+	h := newCountingAbandoner(func(ctx context.Context, _ Job, _ *Reporter) (any, error) {
 		<-ctx.Done()
 		return nil, ctx.Err()
-	}}}, entered: make(chan int64, 1)} // waits for its context to end
+	}, nil, 1) // waits for its context to end
 	db := openStore(t)
 	var cur atomic.Pointer[controlledServer]
 	cur.Store(srv)
@@ -996,22 +998,6 @@ func (h *hookLog) Handle(_ context.Context, r slog.Record) error {
 }
 func (h *hookLog) WithAttrs([]slog.Attr) slog.Handler { return h }
 func (h *hookLog) WithGroup(string) slog.Handler      { return h }
-
-// blockingAbandoner's Abandon waits for release.
-type blockingAbandoner struct {
-	abandoner
-	release <-chan struct{}
-	entered chan struct{}
-}
-
-func (a *blockingAbandoner) Abandon(ctx context.Context, j Job) {
-	a.entered <- struct{}{}
-	select {
-	case <-a.release:
-	case <-ctx.Done():
-	}
-	a.abandoner.Abandon(ctx, j)
-}
 
 // A start drops the open rows of an earlier pairing before it resumes
 // anything, as the pairing is the store's, not this process's: unpaired since
@@ -1990,7 +1976,7 @@ func TestYieldedStrayFreesItsDispatcher(t *testing.T) {
 	if err := await(t, reclaimed); err == nil {
 		t.Fatal("a cancelled reclaim succeeded")
 	}
-	r.release(context.Background(), ru, false)
+	r.release(ru, false)
 	if use, waiting := laneCounts(r, LaneDownload); use != 1 || waiting != 0 {
 		t.Fatalf("released: use %d waiting %d", use, waiting)
 	}

@@ -2627,9 +2627,10 @@ internal/
             look skip them. A run's own drop (settle) still releases on its
             goroutine under its own deadline. Everything runs under the runner's
             context: a stop cuts a batch short and the rows it left running are
-            the next start's look (release's dropUnpaired, for a job the stop
-            interrupted as the pairing was ended, included: before, on
-            context.Background, it could hold the stop up to 2 min).
+            the next start's look (a job the stop interrupted as the pairing
+            was ended included: release leaves it in unpaired for the claim
+            loop's dropUnpaired, never dropping it on the run's goroutine,
+            where it could hold the stop up to 2 min).
             retryReports sends only the current server's and pairing's
             ends. HANDLERS key a job's durable state and filings by its own server,
             never the pairing's now (Job.ServerID, Job.KeyServer: correct's result
