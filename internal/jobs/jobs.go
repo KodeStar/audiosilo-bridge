@@ -1111,9 +1111,6 @@ type run struct {
 	// under r.mu): it reports nothing more (Reporter.link) and is recorded lost
 	// however it ends (settle), never kept to resume (release).
 	ended atomic.Bool
-	// left: settle left the job's row running for the next start (the Bridge
-	// stopping). Set and read on the run's own goroutine (settle, release).
-	left bool
 }
 
 // start records a claimed job and runs it. claim is the dispatcher's request
@@ -1256,11 +1253,12 @@ func (r *Runner) launch(ctx context.Context, srv Server, job Job, wg *sync.WaitG
 }
 
 // release frees a job's lane slot, keeps a job a refused token stopped for
-// resumeStranded, and wakes the claim loop. One left running by a stop or a
-// refused token as the pairing was ended on the page (after settle looked,
-// while it was held) waits in unpaired for the claim loop's dropUnpaired; once
-// the Bridge stops, for the next start's look (sweepPairings), never holding
-// up the stop.
+// resumeStranded, and wakes the claim loop. One a refused token left running
+// as the pairing was ended on the page (after settle looked, while it was
+// held) waits in unpaired for the claim loop's dropUnpaired. One the Bridge's
+// stop left running is in no list (the claim loop has ended): the next start
+// resumes it, or drops it when its pairing was ended meanwhile (sweepPairings),
+// so it never holds up the stop.
 func (r *Runner) release(ru *run, stranded bool) {
 	ru.cancel(nil)
 	heard := ru.rep != nil && ru.rep.ShareOff() // set on this goroutine (execute)
@@ -1280,8 +1278,7 @@ func (r *Runner) releaseLocked(ru *run, stranded, heard bool) {
 	case !ru.yielded:
 		r.waiting[ru.lane]--
 	}
-	switch {
-	case stranded:
+	if stranded {
 		job := ru.job
 		job.shareOff = job.shareOff || heard // carried to resumeStranded
 		if ru.ended.Load() {
@@ -1290,8 +1287,6 @@ func (r *Runner) releaseLocked(ru *run, stranded, heard bool) {
 		} else {
 			r.stranded = append(r.stranded, job)
 		}
-	case ru.left && ru.ended.Load():
-		r.unpaired = append(r.unpaired, ru.job)
 	}
 	r.wakeLocked()
 }
@@ -1411,7 +1406,6 @@ func (r *Runner) settle(base context.Context, ru *run, rep *Reporter, result any
 				r.abandonDropped(base, job, why)
 			}
 			if base.Err() != nil {
-				ru.left = true
 				r.log.Info("bridge: a job of an ended pairing is left for the next start to drop", "job", job.ID, "kind", job.Kind, "why", why)
 				return false
 			}
@@ -1463,10 +1457,10 @@ func (r *Runner) settle(base context.Context, ru *run, rep *Reporter, result any
 
 // interrupted leaves a job the stopping Bridge ended running: the next start
 // resumes it under its claim, with the share_off it heard if the store takes it
-// now (unless the pairing is ended on the page meanwhile: release).
+// now (unless the pairing is ended on the page meanwhile: that start's look
+// drops it, sweepPairings).
 func (r *Runner) interrupted(rep *Reporter, ru *run, why error) {
 	rep.keepShareOff()
-	ru.left = true
 	r.log.Info("bridge: a job was interrupted; it resumes at the next start", "job", ru.job.ID, "why", why)
 }
 

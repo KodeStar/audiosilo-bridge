@@ -2634,9 +2634,9 @@ internal/
             a stop cuts a batch short (or finds it unstarted) and the rows it
             left running are the next start's look (a job the stop interrupted
             as the pairing was ended included, before settle looked or after:
-            left running, in unpaired for the claim loop's dropUnpaired, never
-            released on the run's goroutine past the stop, where it could hold
-            the stop up to 2 min).
+            left running, in no list of the runner's, never released on the
+            run's goroutine past the stop, where it could hold the stop up to
+            2 min).
             retryReports sends only the current server's and pairing's
             ends. HANDLERS key a job's durable state and filings by its own server,
             never the pairing's now (Job.ServerID, Job.KeyServer: correct's result
