@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -157,12 +156,13 @@ func TestVerifyHoldStopsOnCancel(t *testing.T) {
 type flaky struct {
 	src   mapping.BookSource
 	err   error
-	fails int32
-	asks  atomic.Int32
+	fails int
+	asks  int
 }
 
 func (f *flaky) Book(ctx context.Context, lib int64, path string) (*link.Book, error) {
-	if f.asks.Add(1) <= f.fails {
+	f.asks++
+	if f.asks <= f.fails {
 		return nil, f.err
 	}
 	return f.src.Book(ctx, lib, path)
@@ -184,7 +184,7 @@ func TestVerifyRetriesATransientBookRead(t *testing.T) {
 	if out, err := h.Run(context.Background(), job, jobs.LocalReporter()); err != nil || !out.(Result).Writable {
 		t.Fatalf("after two 500s = %+v, %v; want verified", out, err)
 	}
-	if n := down.asks.Load(); n != 3 {
+	if n := down.asks; n != 3 {
 		t.Fatalf("asks = %d, want 3", n)
 	}
 
@@ -194,7 +194,7 @@ func TestVerifyRetriesATransientBookRead(t *testing.T) {
 	if _, err := h.Run(context.Background(), job, jobs.LocalReporter()); !errors.As(err, &apiErr) || apiErr.Status != http.StatusBadGateway {
 		t.Fatalf("a lasting 502 = %v; want it as the failure", err)
 	}
-	if n := gone.asks.Load(); n < 2 {
+	if n := gone.asks; n < 2 {
 		t.Fatalf("a lasting 502 was asked %d times, want retries", n)
 	}
 
@@ -203,7 +203,7 @@ func TestVerifyRetriesATransientBookRead(t *testing.T) {
 	if _, err := h.Run(context.Background(), job, jobs.LocalReporter()); err == nil {
 		t.Fatal("a 403 verified")
 	}
-	if n := refused.asks.Load(); n != 1 {
+	if n := refused.asks; n != 1 {
 		t.Fatalf("a 403 was asked %d times, want once", n)
 	}
 }

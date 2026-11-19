@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/kodestar/audiosilo-bridge/internal/agent"
 	"github.com/kodestar/audiosilo-bridge/internal/jobs"
 	"github.com/kodestar/audiosilo-bridge/internal/link"
 	"github.com/kodestar/audiosilo-bridge/internal/mapping"
@@ -147,28 +148,20 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 }
 
 // fetchBook asks the server for the book's files, asking again with backoff
-// (within retryFor) while the answer may change: no answer at all, a refused
-// token the runner is dealing with, a 5xx (generate's fetchBook's rule). A
-// definite answer (no such book, another 4xx) fails at once, and so does the
-// last transient one once the budget is spent.
+// (within retryFor) while the answer may change (mapping.BookReadSettled,
+// generate's fetchBook's rule). A definite answer fails at once, and so does
+// the last transient one once the budget is spent.
 func (h *Handler) fetchBook(ctx context.Context, rep *jobs.Reporter, src mapping.BookSource, libraryID int64, path string) (*link.Book, error) {
 	deadline := time.Now().Add(h.retryFor)
 	wait := h.retryFirst
 	for {
 		rep.Progress(jobs.Progress{Step: "lookup", Message: "Asking the server for the book's files"})
 		book, err := src.Book(ctx, libraryID, path)
-		var apiErr *link.APIError
-		switch {
-		case err == nil:
-			return book, nil
-		case errors.Is(err, link.ErrNoBook), errors.As(err, &apiErr) && apiErr.Status < 500,
-			ctx.Err() != nil, time.Now().Add(wait).After(deadline):
-			return nil, err
+		if err == nil || mapping.BookReadSettled(err) || time.Now().Add(wait).After(deadline) {
+			return book, err
 		}
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-time.After(wait):
+		if err := agent.SleepCtx(ctx, wait); err != nil {
+			return nil, err
 		}
 		wait = min(wait*2, bookRetryMax)
 	}

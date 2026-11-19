@@ -150,6 +150,15 @@ type BookSource interface {
 	Book(ctx context.Context, libraryID int64, path string) (*link.Book, error)
 }
 
+// BookReadSettled reports whether a failed book read is a definite answer (no
+// such book, a 4xx other than a refused token) that asking again won't change.
+// No answer at all, a refused token the job runner is dealing with and a 5xx
+// may change, so a job's read asks again.
+func BookReadSettled(err error) bool {
+	var apiErr *link.APIError
+	return errors.Is(err, link.ErrNoBook) || errors.As(err, &apiErr) && apiErr.Status < 500
+}
+
 // Check checks one library's mapping: mount must hold the server's sample book
 // with the server's sizes, and only then is the folder probed for writing.
 func Check(ctx context.Context, src BookSource, lib link.Library, mount string) link.LibraryStatus {

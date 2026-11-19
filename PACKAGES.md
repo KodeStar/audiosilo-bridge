@@ -2166,7 +2166,10 @@ internal/
             only then probes writability with an exclusive dot-named probe file (a
             crash leaves nothing the server's scan walks). A library with no indexed
             book is NEVER mapped: with nothing to compare, a wrong mount would look
-            right and a later write job would land in the wrong folder. Podcast
+            right and a later write job would land in the wrong folder.
+            BookReadSettled: a failed book read asking again won't change (no
+            such book, a 4xx but 401), the rule verify's and generate's reads
+            retry by. Podcast
             libraries use CheckPodcast instead: a root .audiosilo/library.json
             marker (version, matching library id, random nonce) is read back by
             the server. Symlinked marker folders/files and invalid markers are
@@ -2381,9 +2384,11 @@ internal/
             token) or ended for good (errCancelRequested, errLost).
   verify/   bridge.verify: params {hold_seconds 0-600}; resolves the library from the
             registry, asks the server for the book's files (path "" = the sample
-            book; no answer or a 5xx asked again with backoff for up to 2 min,
-            generate's fetchBook rule, a 4xx failing at once), CompareFiles through the mount, probes the BOOK's folder for
-            writing (spike 3: a root probe passed while a 0555 book folder refused),
+            book; no answer, a refused token or a 5xx asked again with backoff
+            for up to 2 min, a 4xx failing at once: mapping.BookReadSettled,
+            generate's fetchBook rule too), CompareFiles through the mount, probes
+            the BOOK's folder for writing (spike 3: a root probe passed while a
+            0555 book folder refused),
             then holds, reporting each second. A mismatch is a failure WITH a result.
             Result {library_id, mount_path, path, files[{path,size,expected_size,ok}],
             writable, writable_error, elapsed_ms}: the server's console renders it.

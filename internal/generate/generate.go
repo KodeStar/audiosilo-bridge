@@ -1130,13 +1130,12 @@ func (h *Handler) fetchBook(ctx context.Context, r *run) (*link.Book, error) {
 	for {
 		r.rep.Progress(jobs.Progress{Step: stepWaiting, Message: "Asking the server for the book"})
 		book, err := r.srv.Book(ctx, r.lib.ID, r.rel)
-		var apiErr *link.APIError
 		switch {
 		case err == nil:
 			return book, nil
 		case errors.Is(err, link.ErrNoBook):
 			return nil, fmt.Errorf("the server has no indexed book at %s", r.rel)
-		case errors.As(err, &apiErr) && apiErr.Status < 500:
+		case mapping.BookReadSettled(err):
 			return nil, fmt.Errorf("could not get the book from the server: %w", err)
 		}
 		h.o.Log.Warn("generate: asking the server for the book failed; trying again", "job", r.job.ID, "err", err)
