@@ -2120,3 +2120,39 @@ func TestALockRetakeNeverMakesTheFolder(t *testing.T) {
 		t.Fatal("the lock was not taken at the new path", err)
 	}
 }
+
+// Abandon clears every download record of the episode: one moved with its
+// show folder renamed by hand, and one still at the job's path beside it (a
+// folder put back there), not only the first it finds.
+func TestAbandonClearsBothRecordsOfTheEpisode(t *testing.T) {
+	h, job := audioHarness(t)
+	s := h.handler.s
+	root, err := os.OpenRoot(h.mount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	if err := os.CopyFS(filepath.Join(h.mount, "Renamed Show"), os.DirFS(filepath.Join(h.mount, "Fixture Show"))); err != nil {
+		t.Fatal(err)
+	}
+	moved := "Renamed Show/" + path.Base(*job.Path)
+	var temps []string
+	for _, at := range []string{*job.Path, moved} {
+		c := checkpoint{ServerHash: s.pairHash(), LibraryID: 3, ShowID: fixtureShowID, EpisodeID: "1cc306d831645e2b", Path: at, Temp: podcast.TempPrefix + nonce(), Offset: 6, Total: 100}
+		if err := root.WriteFile(c.partialName(), []byte("prefix"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		p := at
+		if err := s.saveCheckpoint(jobs.Job{LibraryID: job.LibraryID, Path: &p}, root, &c, `"one"`); err != nil {
+			t.Fatal(err)
+		}
+		temps = append(temps, c.partialName())
+	}
+	h.handler.FetchJob().Abandon(context.Background(), job)
+	noRecords(t, s)
+	for _, p := range temps {
+		if _, err := root.Lstat(p); !errors.Is(err, os.ErrNotExist) {
+			t.Fatal("a partial was left", p, err)
+		}
+	}
+}

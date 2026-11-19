@@ -227,27 +227,30 @@ func (s *service) records(dir *os.Root, lib int64) ([]checkpoint, error) {
 	return out, nil
 }
 
-// recordOf is the episode path of a fetch's download record: the job's path,
-// or where adoptCheckpoints moved the record with a show folder renamed by
-// hand (the runner abandons a job by the path the server named, the old
-// one). A moved record is this show's, for this episode, under the same file
-// name.
-func (s *service) recordOf(job jobs.Job, p fetchParams) string {
+// recordsOf is the episode paths of a fetch's download records: the job's
+// path, and wherever adoptCheckpoints moved a record with a show folder
+// renamed by hand (the runner abandons a job by the path the server named,
+// the old one). A moved record is this show's, for this episode, under the
+// same file name. Two can be left: one at the job's path (a folder put back
+// there) beside one moved away. The job's path when there is none.
+func (s *service) recordsOf(job jobs.Job, p fetchParams) []string {
+	var out []string
 	if saved, ok := s.readCheckpoint(job, p.ShowID); ok && saved.EpisodeID == p.EpisodeID {
-		return *job.Path
+		out = append(out, *job.Path)
 	}
-	dir, err := s.checkpointRoot()
-	if err != nil {
-		return *job.Path
-	}
-	defer func() { _ = dir.Close() }()
-	records, _ := s.records(dir, *job.LibraryID)
-	for _, c := range records {
-		if c.ShowID == p.ShowID && c.EpisodeID == p.EpisodeID && path.Base(c.Path) == path.Base(*job.Path) {
-			return c.Path
+	if dir, err := s.checkpointRoot(); err == nil {
+		records, _ := s.records(dir, *job.LibraryID)
+		_ = dir.Close()
+		for _, c := range records {
+			if c.ShowID == p.ShowID && c.EpisodeID == p.EpisodeID && c.Path != *job.Path && path.Base(c.Path) == path.Base(*job.Path) {
+				out = append(out, c.Path)
+			}
 		}
 	}
-	return *job.Path
+	if len(out) == 0 {
+		out = []string{*job.Path}
+	}
+	return out
 }
 
 // dropStaleCheckpoint removes this path's owned partial when it was made for
