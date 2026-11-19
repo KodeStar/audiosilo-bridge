@@ -74,7 +74,7 @@ type service struct {
 	o Options
 	*shared
 	// claimHash is the pairing hash a fetch's claim was made under
-	// (claimParams, recorded at its claim by SealParams; a run started
+	// (recorded at its claim by SealParams; a run started
 	// without one pins the hash it starts under): its download records are
 	// that pairing's (pairHash), so a job whose pairing has ended since is
 	// still released where its records are. "" for every other view.
@@ -108,8 +108,8 @@ type shared struct {
 func (s *service) forJob(job jobs.Job) *service {
 	id := job.ServerID()
 	hash := s.claimHash
-	if c, ok := claimOf(job); ok {
-		hash = c.ServerHash
+	if h := claimHashOf(job); h != "" {
+		hash = h
 	}
 	if id == "" {
 		if hash == s.claimHash {

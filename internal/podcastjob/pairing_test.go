@@ -78,12 +78,7 @@ func pairings(t *testing.T, h *harness) func(int32) {
 // sealed (SealParams records the pairing hash) and its row recorded.
 func claimFetch(t *testing.T, h *harness, job jobs.Job) jobs.Job {
 	t.Helper()
-	job = jobs.ClaimedUnder(job, "server-1", "p1")
-	sealed, err := h.handler.FetchJob().SealParams(job)
-	if err != nil {
-		t.Fatal(err)
-	}
-	job.Params = sealed
+	job = claimFetchUnder(t, h, jobs.ClaimedUnder(job, "server-1", "p1"))
 	if err := h.db.RecordClaim(context.Background(), store.ServerJob{ID: job.ID, Kind: FetchKind, LibraryID: job.LibraryID, Path: job.Path,
 		Params: job.Params, Attempt: job.Attempt, ServerID: "server-1", Pairing: "p1"}); err != nil {
 		t.Fatal(err)
@@ -124,12 +119,9 @@ func TestFetchClaimRecordsItsPairing(t *testing.T) {
 	forged[podcast.ClaimHashParam] = "forged"
 	job.Params, _ = json.Marshal(forged)
 	job = jobs.ClaimedUnder(job, "server-1", "p1")
-	sealed, err := h.handler.FetchJob().SealParams(job)
-	if err != nil {
-		t.Fatal(err)
-	}
+	sealed := claimFetchUnder(t, h, job).Params
 	want := podcast.FeedURLHash("server-1|t1")
-	if c, ok := claimOf(jobs.Job{Kind: FetchKind, Params: sealed}); !ok || c.ServerHash != want {
+	if claimHashOf(jobs.Job{Kind: FetchKind, Params: sealed}) != want {
 		t.Fatalf("the claim's pairing was not recorded: %s", sealed)
 	}
 	if v := h.handler.s.forJob(jobs.Job{Kind: FetchKind, Params: sealed}); v.pairHash() != want {
@@ -139,11 +131,8 @@ func TestFetchClaimRecordsItsPairing(t *testing.T) {
 		t.Fatalf("the page sees the claim's pairing hash: %s", red)
 	}
 	end(unpaired)
-	sealed, err = h.handler.FetchJob().SealParams(job)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := claimOf(jobs.Job{Kind: FetchKind, Params: sealed}); ok || bytes.Contains(sealed, []byte("forged")) {
+	sealed = claimFetchUnder(t, h, job).Params
+	if claimHashOf(jobs.Job{Kind: FetchKind, Params: sealed}) != "" || bytes.Contains(sealed, []byte("forged")) {
 		t.Fatalf("a claim whose pairing ended recorded one: %s", sealed)
 	}
 }

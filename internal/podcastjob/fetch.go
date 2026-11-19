@@ -37,7 +37,7 @@ func (h *Fetch) Lane() string         { return jobs.LaneDownload }
 func (h *Fetch) Interactive() bool    { return true }
 
 // SealParams records, beside the server's params, the pairing hash the claim
-// is made under (claimParams): its download records are kept under it, and a
+// is made under (podcast.ClaimHashParam): its download records are kept under it, and a
 // job whose pairing has ended since (an unpair, a pairing made again with the
 // same server or another) is released there (Abandon), where the pairing now
 // would name another folder. A claim whose link no longer reaches its
@@ -51,12 +51,9 @@ func (h *Fetch) SealParams(job jobs.Job) (json.RawMessage, error) {
 	}
 	delete(fields, podcast.ClaimHashParam)
 	s := h.s.forJob(job)
-	reaches := func() bool { return s.o.Server == nil || s.o.Server() != nil }
-	if reaches() {
-		hash := s.livePairHash()
-		if reaches() { // the token read for the pairing the claim was made under
-			fields[podcast.ClaimHashParam], _ = json.Marshal(hash)
-		}
+	hash := s.livePairHash()
+	if s.o.Server == nil || s.o.Server() != nil { // the token read was the claim's pairing's
+		fields[podcast.ClaimHashParam], _ = json.Marshal(hash)
 	}
 	return json.Marshal(fields)
 }
@@ -356,7 +353,8 @@ func (h *Fetch) run(parent context.Context, claimed *jobs.Job, rep *jobs.Reporte
 	// partial it loaded.
 	unresolved := false
 	defer func() {
-		if s.pairingEndedForSure() {
+		live, known := s.livePair()
+		if known && live != s.pairHash() {
 			// Dropped mid-run (unpaired, or paired again): no attempt resumes
 			// under that pairing, and no mapping of its library is the
 			// Bridge's to check any more. Its own partial and record go now,
@@ -368,7 +366,7 @@ func (h *Fetch) run(parent context.Context, claimed *jobs.Job, rep *jobs.Reporte
 			}
 			return
 		}
-		if s.writable(lib, mount) != nil || s.pairingEnded() {
+		if s.writable(lib, mount) != nil || live != s.pairHash() {
 			return
 		}
 		keep := false
@@ -1495,26 +1493,35 @@ func (h *Fetch) abandon(ctx context.Context, job jobs.Job, kept string) {
 		if running(checkpoint{ShowID: p.ShowID, EpisodeID: p.EpisodeID, Path: at}) {
 			continue
 		}
-		wait, stop := context.WithTimeout(ctx, abandonWait)
-		release, err := s.fileLock(wait, root, at)
-		stop()
-		if err != nil {
-			// Its folder is gone (renamed by hand while this job's row ran, so
-			// the take-in left its record here): no download works at this
-			// path, so the record goes rather than stay for good. Its partial,
-			// moved with the folder, is unrecorded then, and sweepPartials takes
-			// it once old. A lock still held after the wait is a download's,
-			// and so is the record.
-			if folderThere(root, path.Dir(at)) {
-				continue
-			}
-			release = func() {}
+		release, ok := s.abandonLock(ctx, root, at)
+		if !ok {
+			continue
 		}
 		if c, _, err := s.loadCheckpoint(job, root, p.ShowID, p.EpisodeID); err == nil && (kept == "" || c.Temp != kept) {
 			s.clearCheckpoint(job, root, &c)
 		}
 		release()
 	}
+}
+
+// abandonLock takes episode at's lock for a release, waiting abandonWait at
+// most. Its folder gone (renamed by hand while the job's row ran, so the
+// take-in left its record here), no download works at the path: the release
+// goes ahead unlocked, so the record goes rather than stay for good (its
+// partial, moved with the folder, is unrecorded then, and sweepPartials takes
+// it once old). ok is false while the lock is still held after the wait: a
+// download's, and so is the record.
+func (s *service) abandonLock(ctx context.Context, root *os.Root, at string) (release func(), ok bool) {
+	wait, stop := context.WithTimeout(ctx, abandonWait)
+	defer stop()
+	release, err := s.fileLock(wait, root, at)
+	if err != nil {
+		if folderThere(root, path.Dir(at)) {
+			return nil, false
+		}
+		return func() {}, true
+	}
+	return release, true
 }
 
 // abandonEnded is Abandon for a job whose pairing has ended (unpaired, or
@@ -1530,27 +1537,23 @@ func (h *Fetch) abandon(ctx context.Context, job jobs.Job, kept string) {
 // before records named their mount goes with its ETag, its partial left for
 // a sweep. The pairing's records folder goes once nothing is left in it.
 func (s *service) abandonEnded(ctx context.Context, job jobs.Job, p fetchParams) {
-	if s.o.DataDir == "" {
-		return
-	}
-	folder := filepath.Join(s.o.DataDir, "podcast-fetch", s.pairHash())
-	dir, err := os.OpenRoot(folder)
+	dir, err := s.checkpointRoot()
 	if err != nil {
 		return
 	}
 	defer func() {
 		_ = dir.Close()
-		_ = os.Remove(folder) // only once empty
+		_ = os.Remove(dir.Name()) // only once empty
 	}()
 	records, err := s.records(dir, *job.LibraryID)
 	if err != nil {
 		return
 	}
 	for _, c := range records {
-		if c.ShowID != p.ShowID || c.EpisodeID != p.EpisodeID || path.Base(c.Path) != path.Base(*job.Path) {
+		if !p.recordOf(c, *job.Path) {
 			continue
 		}
-		if c.Mount == "" || !filepath.IsAbs(c.Mount) {
+		if !filepath.IsAbs(c.Mount) {
 			s.forgetRecord(dir, records, c)
 			continue
 		}
@@ -1569,14 +1572,9 @@ func (s *service) releaseEnded(ctx context.Context, job jobs.Job, c checkpoint) 
 	if !markerThere(root) {
 		return
 	}
-	wait, stop := context.WithTimeout(ctx, abandonWait)
-	release, err := s.fileLock(wait, root, c.Path)
-	stop()
-	if err != nil {
-		if folderThere(root, path.Dir(c.Path)) {
-			return
-		}
-		release = func() {}
+	release, ok := s.abandonLock(ctx, root, c.Path)
+	if !ok {
+		return
 	}
 	defer release()
 	job.Path = &c.Path

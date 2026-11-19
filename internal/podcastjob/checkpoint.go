@@ -136,8 +136,15 @@ func (s *service) pairHash() string {
 // server: its server token is new at each pairing and gone once unpaired. A
 // token that cannot be read counts as none.
 func (s *service) livePairHash() string {
-	token, _ := s.o.Vault.Get(secrets.ServerToken)
-	return podcast.FeedURLHash(s.o.ServerID() + "|" + token)
+	hash, _ := s.livePair()
+	return hash
+}
+
+// livePair is livePairHash, and whether the server token could be read to
+// tell it (absent counts as read).
+func (s *service) livePair() (hash string, known bool) {
+	token, err := s.o.Vault.Get(secrets.ServerToken)
+	return podcast.FeedURLHash(s.o.ServerID() + "|" + token), err == nil
 }
 
 // pairingEnded reports whether the pairing the view's records are kept under
@@ -150,23 +157,19 @@ func (s *service) pairingEnded() bool { return s.pairHash() != s.livePairHash() 
 // nothing of the pairing, and a job's live records are never released as an
 // ended pairing's for it.
 func (s *service) pairingEndedForSure() bool {
-	token, err := s.o.Vault.Get(secrets.ServerToken)
-	return err == nil && s.pairHash() != podcast.FeedURLHash(s.o.ServerID()+"|"+token)
+	hash, known := s.livePair()
+	return known && s.pairHash() != hash
 }
 
-// claimParams is what a fetch's claim records beside the server's params
-// (SealParams): the pairing hash its download records are kept under.
-type claimParams struct {
-	ServerHash string `json:"bridge_server_hash"`
-}
-
-// claimOf is the claim record in job's params, when it has one.
-func claimOf(job jobs.Job) (claimParams, bool) {
-	var c claimParams
-	if job.Kind != FetchKind || json.Unmarshal(job.Params, &c) != nil || c.ServerHash == "" {
-		return claimParams{}, false
+// claimHashOf is the pairing hash a fetch's claim recorded in job's params
+// (SealParams), "" when it has none.
+func claimHashOf(job jobs.Job) string {
+	var fields map[string]json.RawMessage
+	var hash string
+	if job.Kind != FetchKind || json.Unmarshal(job.Params, &fields) != nil || json.Unmarshal(fields[podcast.ClaimHashParam], &hash) != nil {
+		return ""
 	}
-	return c, true
+	return hash
 }
 func (s *service) checkpointName(job jobs.Job, show string) string {
 	return recordName(*job.LibraryID, show, *job.Path)
@@ -401,7 +404,7 @@ func (s *service) recordsOf(job jobs.Job, p fetchParams) []string {
 		records, _ := s.records(dir, *job.LibraryID)
 		_ = dir.Close()
 		for _, c := range records {
-			if c.ShowID == p.ShowID && c.EpisodeID == p.EpisodeID && c.Path != *job.Path && path.Base(c.Path) == path.Base(*job.Path) {
+			if c.Path != *job.Path && p.recordOf(c, *job.Path) {
 				out = append(out, c.Path)
 			}
 		}
@@ -410,6 +413,12 @@ func (s *service) recordsOf(job jobs.Job, p fetchParams) []string {
 		out = []string{*job.Path}
 	}
 	return out
+}
+
+// recordOf reports whether c records p's episode for a job at jobPath: at
+// that path, or moved with its show folder (the same file name).
+func (p fetchParams) recordOf(c checkpoint, jobPath string) bool {
+	return c.ShowID == p.ShowID && c.EpisodeID == p.EpisodeID && path.Base(c.Path) == path.Base(jobPath)
 }
 
 // dropStaleCheckpoint removes this path's owned partial when it was made for
