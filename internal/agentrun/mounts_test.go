@@ -836,14 +836,15 @@ func TestDeepWalkFolderGoneMidWalk(t *testing.T) {
 	}
 }
 
-// sharedInode is a folder's FileInfo showing another's device and inode, as a
-// file system that merges others can for two different folders.
-type sharedInode struct {
+// withSys is a file's FileInfo with another Sys: a folder showing another's
+// device and inode, as a file system that merges others can for two different
+// folders, or a file shown as another uid's.
+type withSys struct {
 	fs.FileInfo
 	sys any
 }
 
-func (s sharedInode) Sys() any { return s.sys }
+func (s withSys) Sys() any { return s.sys }
 
 // Two folders that share a device and inode (overlayfs over two file systems,
 // Unraid's user shares, mergerfs) are both walked: the second isn't taken for
@@ -868,7 +869,7 @@ func TestDeepWalkFoldersSharingAnInode(t *testing.T) {
 			if err != nil || !info.IsDir() {
 				return info, err
 			}
-			return sharedInode{FileInfo: info, sys: top.Sys()}, nil
+			return withSys{FileInfo: info, sys: top.Sys()}, nil
 		}
 		return w.credentialMount([]mount{at(dir)})
 	}
@@ -1126,7 +1127,7 @@ func TestRunAreaMount(t *testing.T) {
 	}
 	for _, c := range cases {
 		w := newMountWalk(boundedLooks)
-		w.selfUID, w.runArea = os.Geteuid(), c.area
+		w.selfUID, w.runArea = 10003, c.area // the agent image's uid: passes whoever runs the test
 		if got := w.runAreaMount(c.mounts); got != c.want {
 			t.Errorf("%s: runAreaMount = %d, want %d", c.name, got, c.want)
 		}
@@ -1221,14 +1222,6 @@ func TestEndpointServiceSweepsRunFiles(t *testing.T) {
 	}
 }
 
-// rootOwned is a file's look with its owner shown as uid 0 (root's).
-type rootOwned struct {
-	fs.FileInfo
-	st syscall.Stat_t
-}
-
-func (f rootOwned) Sys() any { return &f.st }
-
 // Nothing is swept when the endpoint's service starts, and a tmpfs TmpDir
 // passes nothing as a run's own unless it held nothing then and the service
 // isn't root: mountinfo shows a host's tmpfs bound whole there (/dev/shm,
@@ -1271,9 +1264,9 @@ func TestEndpointServiceKeepsTmpFilesItCantTell(t *testing.T) {
 					if !ok {
 						return info, nil
 					}
-					owned := rootOwned{FileInfo: info, st: *st}
-					owned.st.Uid = 0
-					return owned, nil
+					owned := *st
+					owned.Uid = 0
+					return withSys{FileInfo: info, sys: &owned}, nil
 				}
 			}
 			var kept string

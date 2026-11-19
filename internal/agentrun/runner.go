@@ -256,13 +256,11 @@ func (r *Runner) Run(ctx context.Context) error {
 			r.log.Warn("agent runner: mark the agent home", "err", err)
 		}
 	} else {
-		// Nothing is swept here: the service is its container's first
-		// process (Main) and a container's tmpfs starts empty, so a file of
-		// a credential's name already in TmpDir came from outside (a host's
-		// tmpfs bound whole there looks the same in mountinfo). It refuses
-		// the runs and stays, and a TmpDir that held anything now passes
-		// nothing as a run's own for as long as the service runs. This look
-		// comes before the runner makes anything there (detect's version-*).
+		// Nothing is swept here: a file of a credential's name already in
+		// TmpDir came from outside, refuses the runs and stays, and a TmpDir
+		// that held anything passes nothing as a run's own while the service
+		// runs (runFilesPass says why). This look comes before the runner
+		// makes anything there (detect's version-*).
 		r.tmpFresh.Store(r.tmpEmpty())
 		if why := r.credentialProblem(); why != "" {
 			r.log.Warn("agent runner: "+endpointBlocked, "why", why)

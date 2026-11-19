@@ -325,11 +325,11 @@ type mountWalk struct {
 	// its TmpDir, by its exact path (nil: none).
 	own func(string) bool
 	// selfUID is the service's own uid (-1: none; 0, root, passes nothing),
-	// runArea its TmpDir ("" none), areaHere whether the mount being looked at is runArea's
-	// verified tmpfs (runAreaMount) and areaDev that tmpfs's device as
-	// mountinfo shows it: a file of a credential's name of selfUID's there,
-	// on that device, is a run's own (runMade), which runFiles collects by
-	// its path below runArea.
+	// runArea its TmpDir ("" none), areaHere whether the mount being looked
+	// at is runArea's verified tmpfs (runAreaMount) and areaDev that tmpfs's
+	// device as mountinfo shows it: a file of a credential's name of
+	// selfUID's there, on that device, is a run's own (runMade), which
+	// runFiles collects by its path below runArea.
 	selfUID  int
 	runArea  string
 	areaHere bool
@@ -382,10 +382,11 @@ func (w *mountWalk) credentialMount(mounts []mount) string {
 
 // runAreaMount is the index in mounts of the mount holding runArea when it is
 // a tmpfs of the service's own, -1 when it isn't or the service is root (no
-// file is then a run's own): the mount with the longest point at or above runArea is a tmpfs
-// mounted whole (root "/", never a folder of a host's tmpfs bound in), the
-// only mount at its point (nothing stacked on or under it) and no mount listed
-// after it is at or above its point (one over a parent hides it). A host
+// file is then a run's own): the mount with the longest point at or above
+// runArea is a tmpfs mounted whole (root "/", never a folder of a host's
+// tmpfs bound in), the only mount at its point (nothing stacked on or under
+// it) and no mount listed after it is at or above its point (one over a
+// parent hides it). A host
 // folder or a share mounted at TmpDir (a bind, CIFS, NFS) never passes, nor
 // does a TmpDir whose path mountinfo doesn't show.
 func (w *mountWalk) runAreaMount(mounts []mount) int {

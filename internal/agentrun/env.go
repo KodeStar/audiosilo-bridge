@@ -14,6 +14,7 @@ import (
 
 	"github.com/kodestar/audiosilo-bridge/internal/agent"
 	"github.com/kodestar/audiosilo-bridge/internal/agentproto"
+	"github.com/kodestar/audiosilo-bridge/internal/fsutil"
 )
 
 // The credential variables. The runner reads each from its own environment, else
@@ -249,17 +250,19 @@ func (r *Runner) walkMountsLocked() (dev string, planted []string) {
 // pass as a run's own at all (runMade's rules then decide; false: none passes
 // and none is swept). Only when TmpDir held nothing at the service's start
 // (tmpFresh): a host's tmpfs bound whole at TmpDir (/dev/shm, /run/user/<uid>,
-// a shared emptyDir) shows in mountinfo as the container's own would, and one
-// that held nothing then held no host file either. And never as root: uid 0
-// owns a host's files wherever they come from.
+// a shared emptyDir) shows in mountinfo as the container's own would, while
+// the service is its container's first process (Main) and a container's tmpfs
+// starts empty, so one that held nothing then held no host file either. And
+// never as root: uid 0 owns a host's files wherever they come from.
 func (r *Runner) runFilesPass() bool {
 	return r.selfUID > 0 && r.tmpFresh.Load()
 }
 
-// tmpEmpty reports whether TmpDir holds no entry at all; a look that fails
-// (missing, closed, past lookTimeout) is a no.
+// tmpEmpty reports whether TmpDir holds no entry at all (one entry read is
+// enough to say no); a look that fails (missing, closed, past lookTimeout) is
+// a no.
 func (r *Runner) tmpEmpty() bool {
-	entries, err := r.looks.readDir(r.opts.TmpDir)
+	entries, err := fsutil.ReadDirNWithin(r.opts.TmpDir, 1, lookTimeout)
 	return err == nil && len(entries) == 0
 }
 
@@ -288,10 +291,10 @@ func (r *Runner) isOwnTmp(p string) bool {
 // sweepRunFiles walks the mounts afresh and removes the files of a
 // credential's name a run planted in its TmpDir while that is a tmpfs of the
 // service's own (runMade, runAreaMount; nowhere else: the staging dir's are
-// never deleted; and only while runFilesPass: never as root, nor when TmpDir
-// held anything at the service's start), each through the folders on its way opened without
-// following a link and on the device mountinfo showed for TmpDir's tmpfs
-// (removeRunFile, proc_unix.go) and only while it is still the service's own;
+// never deleted; and only while runFilesPass), each through the folders on
+// its way opened without following a link and on the device mountinfo showed
+// for TmpDir's tmpfs (removeRunFile, proc_unix.go) and only while it is still
+// the service's own;
 // a folder is removed only when empty (deepest first, so a planted folder
 // goes after what was planted in it), so nothing a host mounted under one is
 // reached. The endpoint's service calls it after each run, never at its start
