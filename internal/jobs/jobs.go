@@ -1492,7 +1492,15 @@ func (p *Reporter) answer(got *link.Job, err error) (stop error) {
 	}
 	switch {
 	case err == nil && got.CancelRequested:
-		// A cancel asked for: by whom, from the job's error (cancelCause).
+		// A cancel asked for: by whom, from the job's error (cancelCause),
+		// unless that is the park message this report sent (a park's report
+		// replaces the server's reason too), which says neither.
+		p.mu.Lock()
+		ownPark := p.parked && got.Error != "" && got.Error == p.parkMsg
+		p.mu.Unlock()
+		if ownPark {
+			return errCancelRequested
+		}
 		return cancelCause(got.Error)
 	case errors.Is(err, link.ErrCancelledHere):
 		// Already cancelled on the server, by an admin or by the server

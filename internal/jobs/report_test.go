@@ -220,6 +220,13 @@ func TestCancelCauseWordsTheServersReason(t *testing.T) {
 	if stop := (&Reporter{}).answer(&link.Job{Error: "a park's message"}, nil); stop != nil {
 		t.Fatalf("an error with no cancel asked = %v", stop)
 	}
+	// A parked report's own message as the job's error is no server reason:
+	// the cancel says neither.
+	parked := &Reporter{parked: true, parkMsg: "a park's message"}
+	if stop := parked.answer(&link.Job{CancelRequested: true, Error: "a park's message"}, nil); stop == nil ||
+		stop.Error() != errCancelRequested.Error() {
+		t.Fatalf("a cancel of a parked job = %v", stop)
+	}
 	if !errors.Is(errCancelledHere, errCancelRequested) {
 		t.Fatal("a cancel on the Bridge's page isn't a cancel")
 	}
