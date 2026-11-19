@@ -206,7 +206,7 @@ func TestCancelCauseWordsTheServersReason(t *testing.T) {
 		{"either", nil, link.ErrCancelledHere, "the job was cancelled"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			stop := (&Reporter{}).answer(c.got, c.err)
+			stop := (&Reporter{}).answer(c.got, c.err, false)
 			if stop == nil || !errors.Is(stop, errCancelRequested) || stop.Error() != c.want {
 				t.Fatalf("cause = %v, want %q", stop, c.want)
 			}
@@ -217,15 +217,23 @@ func TestCancelCauseWordsTheServersReason(t *testing.T) {
 			}
 		})
 	}
-	if stop := (&Reporter{}).answer(&link.Job{Error: "a park's message"}, nil); stop != nil {
+	if stop := (&Reporter{}).answer(&link.Job{Error: "a park's message"}, nil, true); stop != nil {
 		t.Fatalf("an error with no cancel asked = %v", stop)
 	}
 	// A parked report's own message as the job's error is no server reason:
-	// the cancel says neither.
-	parked := &Reporter{parked: true, parkMsg: "a park's message"}
-	if stop := parked.answer(&link.Job{CancelRequested: true, Error: "a park's message"}, nil); stop == nil ||
+	// the cancel says neither, whatever the server's cleaning made of the
+	// message (a tab is a space there) and whether the job is still parked
+	// here when the answer comes.
+	for _, back := range []string{"a park's message", "a park's message: exit 1"} {
+		parked := &Reporter{parked: true, parkMsg: "a park's message:\texit 1"}
+		if stop := parked.answer(&link.Job{CancelRequested: true, Error: back}, nil, true); stop == nil ||
+			stop.Error() != errCancelRequested.Error() {
+			t.Fatalf("a cancel of a parked job (error %q) = %v", back, stop)
+		}
+	}
+	if stop := (&Reporter{}).answer(&link.Job{CancelRequested: true, Error: "a park's message"}, nil, true); stop == nil ||
 		stop.Error() != errCancelRequested.Error() {
-		t.Fatalf("a cancel of a parked job = %v", stop)
+		t.Fatalf("a cancel answering a parked report of a job unparked since = %v", stop)
 	}
 	if !errors.Is(errCancelledHere, errCancelRequested) {
 		t.Fatal("a cancel on the Bridge's page isn't a cancel")

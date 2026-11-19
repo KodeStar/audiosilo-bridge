@@ -1372,7 +1372,7 @@ func (p *Reporter) sendLocked() (goOn bool, got *link.Job, stop, err error) {
 		}
 	}
 	got, err = p.srv.UpdateJob(ctx, p.job.ID, u)
-	if stop = p.answer(got, err); stop != nil {
+	if stop = p.answer(got, err, parked); stop != nil {
 		return false, got, stop, err
 	}
 	switch {
@@ -1483,8 +1483,9 @@ func unreachable(err error) bool {
 // answer reads the server's answer to an update: the job follows a moved path,
 // and a cancel request, a lost claim or a refused token is the cause it returns
 // (nil while the job goes on), which acted ends the job's context with. Its
-// share_off is heard's.
-func (p *Reporter) answer(got *link.Job, err error) (stop error) {
+// share_off is heard's. parked: the update reported the job parked (or, sending
+// no error of its own, went out while it was).
+func (p *Reporter) answer(got *link.Job, err error, parked bool) (stop error) {
 	if err == nil && got.Path != nil && *got.Path != "" {
 		p.mu.Lock()
 		p.path = *got.Path
@@ -1492,13 +1493,11 @@ func (p *Reporter) answer(got *link.Job, err error) (stop error) {
 	}
 	switch {
 	case err == nil && got.CancelRequested:
-		// A cancel asked for: by whom, from the job's error (cancelCause),
-		// unless that is the park message this report sent (a park's report
-		// replaces the server's reason too), which says neither.
-		p.mu.Lock()
-		ownPark := p.parked && got.Error != "" && got.Error == p.parkMsg
-		p.mu.Unlock()
-		if ownPark {
+		// A cancel asked for: by whom, from the job's error (cancelCause).
+		// A parked report's answer says neither: the job's error is then
+		// the park's message that report sent (it replaces the server's
+		// reason too), as the server cleaned it, so it is never compared.
+		if parked {
 			return errCancelRequested
 		}
 		return cancelCause(got.Error)
@@ -1589,7 +1588,9 @@ func (p *Reporter) ConfirmLease(ctx context.Context) error {
 	}
 	state := link.StateRunning
 	got, err := p.srv.UpdateJob(ctx, p.job.ID, link.Update{Attempt: p.job.Attempt, State: &state})
-	if p.acted(got, p.answer(got, err), err) {
+	// It sends no error, so a parked job's stays its park's message.
+	parked, _ := p.parkState()
+	if p.acted(got, p.answer(got, err, parked), err) {
 		if err != nil {
 			return err
 		}
@@ -1629,7 +1630,7 @@ func (p *Reporter) Refresh(ctx context.Context) error {
 		p.mu.Unlock()
 		u, _ := p.updateOf(pr, parked, parkMsg)
 		got, err := p.srv.UpdateJob(ctx, p.job.ID, u)
-		return got, p.answer(got, err), err
+		return got, p.answer(got, err, parked), err
 	}()
 	if p.acted(got, stop, err) {
 		return ErrStopped
