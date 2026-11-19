@@ -3066,9 +3066,13 @@ internal/
             (CheckPoll). A fetch's download records are kept under the pairing
             its claim was made under (BR-LINK-RULE-2): SealParams records that
             pairing's hash in the claim's params (bridge_server_hash, never on
-            the page: podcast.RedactParams), forJob keys the job's records by it
-            (claimHash; a claim from before it pins the hash its run starts
-            under), and each record names the mount it was written under
+            the page: podcast.RedactParams; no secret, so NeedsClaimRow is false
+            and a claim the store could not record still runs), forJob keys the
+            job's records by it
+            (claimHash; a claim from before it, or made while the token
+            could not be read, or resumed on its own pairing under a new
+            token (a refused token's re-pair), pins the hash its run starts
+            under: runView), and each record names the mount it was written under
             (checkpoint.Mount). A fetch whose pairing ended (unpaired, or paired
             again with its server or another) saves no record after it
             (identity_changed); its run's exit clears its own partial and record

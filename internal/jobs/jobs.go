@@ -171,7 +171,8 @@ type ParamSealer interface {
 // its row, which keeps its books local (store.DB.SetServerJobShareOff), so a
 // share the server turned off after the claim could otherwise still be filed.
 // Such a claim whose write failed is abandoned like a sealed one, for the
-// server to hand out again.
+// server to hand out again. A ParamSealer needs its row unless it says
+// otherwise here (a podcast.fetch seals no secret, only its claim's pairing).
 type ClaimRowNeeder interface {
 	NeedsClaimRow(job Job) bool
 }
@@ -1278,7 +1279,11 @@ func (r *Runner) start(ctx context.Context, srv Server, job Job, wg *sync.WaitGr
 	if err := r.recordClaim(context.WithoutCancel(ctx), store.ServerJob{ID: job.ID, Kind: job.Kind, LibraryID: job.LibraryID, Path: job.Path,
 		Params: job.Params, Attempt: job.Attempt, ServerID: job.serverID, Pairing: job.pairing, Priority: job.Priority, ShareOff: job.shareOff}); err != nil {
 		r.log.Warn("bridge: recording a claim failed", "job", job.ID, "err", err)
-		if needer, ok := r.handlers[job.Kind].(ClaimRowNeeder); sealing || ok && needer.NeedsClaimRow(job) {
+		needs := sealing
+		if needer, ok := r.handlers[job.Kind].(ClaimRowNeeder); ok {
+			needs = needer.NeedsClaimRow(job) // a sealer may answer for itself
+		}
+		if needs {
 			// Fail closed: without its row the sealed secret could be neither
 			// resumed nor released later, and a share job's share_off could
 			// keep nothing local. The server hands the job out again.

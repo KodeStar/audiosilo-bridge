@@ -59,6 +59,12 @@ func (h *Fetch) SealParams(job jobs.Job) (json.RawMessage, error) {
 	return json.Marshal(fields)
 }
 
+// NeedsClaimRow is false: a fetch's sealed params hold no secret (only its
+// claim's pairing), so a claim the store could not record runs as it did
+// before fetches sealed their params, rather than be abandoned and its
+// earlier attempt's resumable download cleared.
+func (h *Fetch) NeedsClaimRow(jobs.Job) bool { return false }
+
 // runView is job's view (forJob) for its run, its records' pairing pinned:
 // the claim's (SealParams), or the pairing's token the run starts under when
 // the claim recorded none (claimed before claims recorded their pairing, or
@@ -1590,4 +1596,7 @@ func (s *service) releaseEnded(ctx context.Context, job jobs.Job, c checkpoint) 
 	s.clearCheckpoint(job, root, &c)
 }
 
-var _ jobs.Abandoner = (*Fetch)(nil)
+var (
+	_ jobs.Abandoner      = (*Fetch)(nil)
+	_ jobs.ClaimRowNeeder = (*Fetch)(nil)
+)

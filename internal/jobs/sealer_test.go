@@ -127,6 +127,35 @@ func TestUnrecordedClaimFailsClosedOnlyForSealers(t *testing.T) {
 	}
 }
 
+// rowlessSealer seals its params but needs no claim row (ClaimRowNeeder):
+// what it seals is no secret.
+type rowlessSealer struct{ plainSealer }
+
+func (h *rowlessSealer) Kind() string           { return "podcast.fetch" }
+func (h *rowlessSealer) NeedsClaimRow(Job) bool { return false }
+
+// A sealer that says it needs no claim row runs on a claim the store can't
+// record (allowed), as a kind that seals nothing does; one that says nothing
+// is still abandoned (denied, TestUnrecordedClaimFailsClosedOnlyForSealers).
+func TestUnrecordedClaimRunsForASealerThatNeedsNoRow(t *testing.T) {
+	db := openStore(t)
+	_ = db.Close() // every write fails
+	srv := newFakeServer()
+	h := &rowlessSealer{}
+	sealer := &plainSealer{}
+	r := New(db, func() Server { return srv }, nil, testOpts(), h, sealer)
+	var wg sync.WaitGroup
+	r.start(context.Background(), srv, Job{ID: 1, Kind: h.Kind(), Params: json.RawMessage(`{}`), Attempt: 1}, &wg, nil)
+	r.start(context.Background(), srv, Job{ID: 2, Kind: sealer.Kind(), Params: json.RawMessage(`{}`), Attempt: 1}, &wg, nil)
+	wg.Wait()
+	if !h.ran || h.abandoned {
+		t.Fatalf("an unrecorded claim of a sealer that needs no row did not run: %+v", h.plainSealer)
+	}
+	if sealer.ran || !sealer.abandoned {
+		t.Fatalf("an unrecorded sealed claim ran: %+v", sealer)
+	}
+}
+
 // rowNeeder is a handler that needs its claim's row for some jobs
 // (ClaimRowNeeder): the ones whose params say "share".
 type rowNeeder struct {
