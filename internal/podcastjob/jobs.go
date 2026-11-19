@@ -616,7 +616,15 @@ func (s *service) setIndexed(id int64, show string, indexed bool) {
 func (s *service) indexKey(id int64, show string) string {
 	return s.o.ServerID() + "|" + strconv.FormatInt(id, 10) + "|" + show
 }
-func readDir(root *os.Root) ([]os.DirEntry, error) { return listDir(root, ".") }
+
+// readDir is root's own entries by name: a folder a job picks among several
+// that would do (relocate, find) never depends on the order the filesystem
+// lists them in.
+func readDir(root *os.Root) ([]os.DirEntry, error) {
+	entries, err := listDir(root, ".")
+	slices.SortFunc(entries, func(a, b os.DirEntry) int { return strings.Compare(a.Name(), b.Name()) })
+	return entries, err
+}
 
 func (s *service) merge(root *os.Root, f *podcast.Feed, p *podcast.Parsed, show string) (int, error) {
 	dir, err := root.Open(show)

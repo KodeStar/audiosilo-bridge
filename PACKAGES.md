@@ -2380,6 +2380,8 @@ internal/
             new show. The server still names the old folder until its own scan.
             A copy of a renamed folder made before either was taken in is
             refused once another folder (its cache row's) holds the show.
+            The library's entries are read by name (readDir), so which of
+            several folders a job picks never depends on the listing order.
             Subscribe implements ParamSealer and Abandoner: job credentials are
             sealed before persistence, resumed from the vault, resealed under
             the show id on success, and removed at every terminal job end.
