@@ -406,14 +406,13 @@ type Registry struct {
 // expired: the state was found older than KeptChecks intervals (Due, record),
 // which view also works out as it reads it. slow is unanswered's counterpart for
 // a check whose look at the folder timed out (folderSlow; one of the two is
-// set, the later), and lookAgain when that library is due again (LookAgain).
+// set, the later): that library is due again LookAgain after it.
 type result struct {
 	status     link.LibraryStatus
 	at         time.Time
 	retry      bool
 	unanswered time.Time
 	slow       time.Time
-	lookAgain  time.Time
 	unknown    bool
 	expired    bool
 }
@@ -608,7 +607,7 @@ func (r *Registry) Due(now time.Time, interval time.Duration) bool {
 	}
 	for _, l := range r.libs {
 		res, ok := r.results[l.ID]
-		if !ok || res.retry || now.Sub(res.at) >= interval || (!res.lookAgain.IsZero() && !now.Before(res.lookAgain)) {
+		if !ok || res.retry || now.Sub(res.at) >= interval || (!res.slow.IsZero() && !now.Before(res.slow.Add(LookAgain))) {
 			return true
 		}
 	}
@@ -874,39 +873,29 @@ func (r *Registry) record(st link.LibraryStatus, unanswered error, at time.Time)
 	isSlow := errors.As(unanswered, &slow)
 	if unanswered != nil && ok && prev.status.MountPath == st.MountPath && !errors.As(unanswered, &lost) &&
 		(!isSlow || !prev.unknown) {
-		if isSlow {
-			r.markSlow(st.LibraryID, at)
-		} else {
-			r.markRetry(st.LibraryID, at)
-		}
+		r.keep(st.LibraryID, at, isSlow)
 		return
 	}
 	res := result{status: st, at: at, retry: unanswered != nil && !isSlow, unknown: unanswered != nil}
 	if isSlow {
-		res.slow, res.lookAgain = at, at.Add(LookAgain)
+		res.slow = at
 	}
 	r.results[st.LibraryID] = res
 }
 
-// markRetry makes a checked library due again after the hold (r.mu held), its
-// state the one from before the check at that the server didn't answer, and
-// expired once it is past KeptChecks intervals; one with no check yet is due
-// anyway.
-func (r *Registry) markRetry(id int64, at time.Time) {
+// keep keeps a checked library's state from before the check at that got no
+// definite answer (r.mu held), expired once it is past KeptChecks intervals;
+// one with no check yet is due anyway. The library is due again after the
+// hold (retry), or, when the check's look at the folder timed out (slow),
+// LookAgain after at: a retry would make it due at once when no hold stands,
+// and the run's beat would check again straight away, a tight loop on a hung
+// mount.
+func (r *Registry) keep(id int64, at time.Time, slow bool) {
 	if res, ok := r.results[id]; ok {
 		res.retry, res.unanswered, res.slow = true, at, time.Time{}
-		res.expired = res.expired || r.keptTooLong(res.at, at)
-		r.results[id] = res
-	}
-}
-
-// markSlow is markRetry for a check whose look at the folder timed out at at
-// (r.mu held): due again after LookAgain, not after the hold (a retry left set
-// would make it due at once when no hold stands, and the run's beat would
-// check again straight away, a tight loop on a hung mount).
-func (r *Registry) markSlow(id int64, at time.Time) {
-	if res, ok := r.results[id]; ok {
-		res.slow, res.lookAgain, res.unanswered, res.retry = at, at.Add(LookAgain), time.Time{}, false
+		if slow {
+			res.retry, res.unanswered, res.slow = false, time.Time{}, at
+		}
 		res.expired = res.expired || r.keptTooLong(res.at, at)
 		r.results[id] = res
 	}

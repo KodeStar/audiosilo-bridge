@@ -2292,7 +2292,7 @@ internal/
             answering), with Entry.SlowAt (slow_at; it and UnansweredAt are
             exclusive, the later stands) for the page's "The folder did not
             answer within 5 s" note. It neither ends the run nor sets the hold:
-            the library is due again after LookAgain (1 min, result.lookAgain;
+            the library is due again after LookAgain (1 min, result.slow;
             no retry flag, or the run's beat would check again at once, a tight
             loop on a hung mount). A hung file stat ends the comparison.
             ProbeWritable and CompareFiles are bounded for their other callers
