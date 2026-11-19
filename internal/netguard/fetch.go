@@ -75,7 +75,7 @@ func (c *Client) Fetch(ctx context.Context, in Request) (*Response, error) {
 		if err == nil {
 			return out, nil
 		}
-		failure := classify(err)
+		failure := classify(ctx, err)
 		if attempt >= 2 || !retryable(failure) || failure.RetryAfterSeconds > 10 || ctx.Err() != nil {
 			return nil, failure
 		}
@@ -262,7 +262,13 @@ func retryAfter(s string, now time.Time) int {
 func retryable(e *Error) bool {
 	return e.Code == "dns" || e.Code == "timeout" || e.Code == "network" || e.Code == "http_408" || e.Code == "http_429" || strings.HasPrefix(e.Code, "http_5")
 }
-func classify(err error) *Error {
+
+// classify names a failed request's code. A request whose context ended (its
+// deadline, a stall, the job's cancel) is a timeout, never a network failure:
+// net/http reports a context cancelled with a cause as that cause, not as
+// context.Canceled, so ctx's own cause is checked too. The server counts a
+// cancelled poll's network as the feed's failure (BR-CANCEL-RACE).
+func classify(ctx context.Context, err error) *Error {
 	var e *Error
 	if errors.As(err, &e) {
 		return e
@@ -271,7 +277,7 @@ func classify(err error) *Error {
 		return &Error{Code: "blocked_address", Message: "The feed address is not public or explicitly allowed."}
 	}
 	var ne net.Error
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &ne) && ne.Timeout()) {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || context.Cause(ctx) != nil || (errors.As(err, &ne) && ne.Timeout()) {
 		return &Error{Code: "timeout", Message: "The feed did not respond in time."}
 	}
 	var cert *tls.CertificateVerificationError

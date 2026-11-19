@@ -332,3 +332,41 @@ func TestFetchCutRetryKeepsTheLastFailure(t *testing.T) {
 	_, err := c.Fetch(ctx, Request{URL: server.URL + "/feed", MaxBytes: 100})
 	errorCode(t, err, "http_503")
 }
+
+// A request the job's cancel ends is a timeout, never the feed's network
+// failure, also when the context is cancelled with a cause (the Bridge's job
+// runner does, and net/http then reports the cause, not context.Canceled):
+// the server counts a cancelled poll's network as a feed failure
+// (BR-CANCEL-RACE). An unreachable feed with a live context stays network.
+func TestCancelledWithCauseIsATimeout(t *testing.T) {
+	arrived := make(chan struct{}, 4)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		arrived <- struct{}{}
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+	c := localClient(t)
+	cause := errors.New("the job was cancelled")
+	run := func(do func(context.Context) error) error {
+		ctx, cancel := context.WithCancelCause(context.Background())
+		defer cancel(nil)
+		go func() { <-arrived; cancel(cause) }()
+		return do(ctx)
+	}
+	err := run(func(ctx context.Context) error {
+		_, err := c.Fetch(ctx, Request{URL: server.URL + "/feed", MaxBytes: 100})
+		return err
+	})
+	errorCode(t, err, "timeout")
+	err = run(func(ctx context.Context) error {
+		r, err := c.Stream(ctx, StreamRequest{URL: server.URL + "/episode"})
+		if err == nil {
+			_ = r.Body.Close()
+		}
+		return err
+	})
+	errorCode(t, err, "timeout")
+	if got := Classify(context.Background(), errors.New("connection reset")); got.Code != "network" {
+		t.Fatal("a live context's failure", got.Code)
+	}
+}

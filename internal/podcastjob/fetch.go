@@ -665,7 +665,7 @@ func (s *service) download(ctx context.Context, b *budget, job *jobs.Job, root *
 				return podcast.Fetch{}, err
 			}
 		}
-		failure := netguard.Classify(err)
+		failure := netguard.Classify(ctx, err)
 		last = failure
 		if attempt == 2 || !netguard.Retryable(failure) || failure.RetryAfterSeconds > 10 || ctx.Err() != nil {
 			break

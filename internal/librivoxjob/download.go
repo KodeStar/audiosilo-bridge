@@ -157,8 +157,8 @@ func (h *Handler) attempt(ctx context.Context, root *os.Root, f *fetch, i int, r
 	}
 	resp, err := h.o.Fetcher.Stream(ctx, netguard.StreamRequest{URL: rawURL, Offset: offset, ETag: prev.ETag, Allow: AllowedURL})
 	if err != nil {
-		e := netguard.Classify(err)
-		if netguard.Retryable(err) {
+		e := netguard.Classify(ctx, err)
+		if netguard.Retryable(e) {
 			return &retry{retryAfter: e.RetryAfterSeconds, cause: e.Code}
 		}
 		return fail(CodeArchiveUnavailable, "The Bridge can't download section %d of LibriVox recording %d from archive.org (%s).",
@@ -377,7 +377,7 @@ func (h *Handler) cover(ctx context.Context, f *fetch, book metaops.LibrivoxBook
 	resp, err := h.o.Fetcher.Fetch(ctx, netguard.Request{URL: *book.CoverartJPG, MaxBytes: maxCoverBytes, Allow: AllowedURL})
 	switch {
 	case err != nil:
-		log.Info("librivox: the cover couldn't be downloaded; the book goes without one", "cause", netguard.Classify(err).Code)
+		log.Info("librivox: the cover couldn't be downloaded; the book goes without one", "cause", netguard.Classify(ctx, err).Code)
 		return
 	case resp.Status != http.StatusOK || http.DetectContentType(resp.Body) != "image/jpeg":
 		log.Info("librivox: the cover isn't a JPEG; the book goes without one")
