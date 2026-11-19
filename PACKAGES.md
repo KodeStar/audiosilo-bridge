@@ -2450,9 +2450,16 @@ internal/
             partial. A fetch whose folder lockShow takes in where it is (renamed
             back by hand after a take-in) reads its episode again there rather
             than failing as not found. A fetch whose folder is renamed while it
-            downloads finds the show again after the download (episodeAt) and
-            publishes there from its partial, its record and lock following
-            (heldLock.follow), never downloading again; one the Bridge stops
+            downloads finds the show again (episodeAt) whenever its partial is
+            no longer at its path (settle: before each host attempt, before a
+            retry's clear and at a failure's exit, so a host retry resumes from
+            the partial there and a failure clears it there) and after the
+            download, and publishes there from its partial, its record and lock
+            following (heldLock.follow), never downloading again. Under the
+            episode's lock its own record moves even when a duplicate claim's
+            open row names it (adoptOwn, also after a relocation before the
+            download); one at the new path already wins and the old one is
+            cleared with its partial. One the Bridge stops
             meanwhile keeps its record (read, not loaded, at the stop), and
             the resumed job goes on from the partial there. An episode path the
             server answers not_indexable (its show folder renamed since the

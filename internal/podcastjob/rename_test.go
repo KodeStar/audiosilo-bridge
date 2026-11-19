@@ -988,6 +988,227 @@ func TestAFetchFollowsItsShowRenamedMidDownload(t *testing.T) {
 	}
 }
 
+// cutAfterRename answers the first episode request with 2000 bytes of audio
+// (a download record saved on the way), renames the show folder by hand and
+// cuts the connection; every later request goes to then.
+func cutAfterRename(t *testing.T, h *harness, job jobs.Job, audio []byte, calls *atomic.Int32, then http.HandlerFunc) {
+	t.Helper()
+	written := func(n int64) bool {
+		for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+			if matches := partials(filepath.Join(h.mount, "Fixture Show")); len(matches) == 1 {
+				if st, err := os.Stat(matches[0]); err == nil && st.Size() >= n {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	setAudio(h, func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) > 1 {
+			then(w, r)
+			return
+		}
+		w.Header().Set("ETag", `"one"`)
+		w.Header().Set("Content-Length", strconv.Itoa(len(audio)))
+		w.WriteHeader(200)
+		w.Write(audio[:1000])
+		w.(http.Flusher).Flush()
+		if !written(1000) {
+			t.Error("the download did not start")
+			return
+		}
+		w.Write(audio[1000:2000])
+		w.(http.Flusher).Flush()
+		if !written(2000) {
+			t.Error("the download did not go on")
+			return
+		}
+		if _, ok := h.handler.s.readCheckpoint(job); !ok {
+			t.Error("no download record before the rename")
+		}
+		if err := os.Rename(filepath.Join(h.mount, "Fixture Show"), filepath.Join(h.mount, "Renamed Show")); err != nil {
+			t.Error(err)
+		}
+	})
+}
+
+// resumeAt answers a ranged request for the rest of audio from 2000 bytes,
+// as the host does; a request for the whole episode is an error.
+func resumeAt(t *testing.T, audio []byte) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Range") != "bytes=2000-" || r.Header.Get("If-Range") != `"one"` {
+			t.Error("the episode was downloaded again from byte 0", r.Header.Get("Range"))
+		}
+		w.Header().Set("ETag", `"one"`)
+		w.Header().Set("Content-Range", "bytes 2000-"+strconv.Itoa(len(audio)-1)+"/"+strconv.Itoa(len(audio)))
+		w.Header().Set("Content-Length", strconv.Itoa(len(audio)-2000))
+		w.WriteHeader(206)
+		w.Write(audio[2000:])
+	}
+}
+
+// noRecords fails t when any download record of the library is left.
+func noRecords(t *testing.T, s *service) {
+	t.Helper()
+	dir, err := s.checkpointRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dir.Close()
+	if records, err := s.records(dir, 3); err != nil || len(records) != 0 {
+		t.Fatal("a download record was left", records, err)
+	}
+}
+
+// A show folder renamed by hand while its episode downloads, then the host
+// cutting the connection: the partial moved with the folder. The host's
+// retry inside the download finds the show there and goes on from the bytes
+// it has (a ranged request), never from byte 0; a host that then fails for
+// good fails the job with the partial and its record cleared where they are
+// now, not left for the day-old sweep.
+func TestAFetchRenamedMidDownloadRetriesFromItsPartialThere(t *testing.T) {
+	for _, fails := range []bool{false, true} {
+		requireProbe(t)
+		h, job := audioHarness(t)
+		s := h.handler.s
+		if err := h.db.RecordClaim(context.Background(), store.ServerJob{ID: job.ID, Kind: FetchKind, LibraryID: job.LibraryID, Path: job.Path, Params: job.Params, Attempt: 1, ServerID: "server-1"}); err != nil {
+			t.Fatal(err)
+		}
+		h.scan.knows = func(p string) bool { return strings.HasPrefix(p, "Fixture Show/") }
+		audio := data(t, "chap-v24-reverse.mp3")
+		then := resumeAt(t, audio)
+		var ranged atomic.Bool
+		if fails {
+			then = func(w http.ResponseWriter, r *http.Request) {
+				ranged.Store(r.Header.Get("Range") == "bytes=2000-")
+				w.WriteHeader(404)
+			}
+		}
+		var calls atomic.Int32
+		cutAfterRename(t, h, job, audio, &calls, then)
+		res, err := h.handler.FetchJob().Run(context.Background(), job, jobs.LocalReporter())
+		moved := "Renamed Show/" + strings.TrimPrefix(*job.Path, "Fixture Show/")
+		if fails {
+			if err == nil || calls.Load() != 2 || !ranged.Load() {
+				t.Fatal("the failing host was not asked to resume", res, err, calls.Load())
+			}
+		} else if got, ok := res.(fetchResult); err != nil || !ok || got.Path != moved || got.Fetch.Bytes != int64(len(audio)) || calls.Load() != 2 {
+			t.Fatal(res, err, calls.Load())
+		}
+		if left := partials(filepath.Join(h.mount, "Renamed Show")); len(left) != 0 {
+			t.Fatal("a partial was left behind", fails, left)
+		}
+		if _, err := os.Lstat(filepath.Join(h.mount, "Fixture Show")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatal("the old folder came back", err)
+		}
+		noRecords(t, s)
+	}
+}
+
+// Another open row of the same episode (a duplicate claim) does not keep a
+// fetch from its own download record when its show folder was renamed by
+// hand, before the download or while it ran: adoptCheckpoints leaves a record
+// a running row names, but the fetch holds the episode's lock, so the record
+// is its own. It goes on from the partial (never from byte 0) and leaves no
+// record at the old path for the day-old cleanup.
+func TestAFetchTakesItsOwnRecordPastADuplicateClaim(t *testing.T) {
+	for _, during := range []bool{false, true} {
+		requireProbe(t)
+		h, job := audioHarness(t)
+		s := h.handler.s
+		for _, id := range []int64{job.ID, job.ID + 1} {
+			if err := h.db.RecordClaim(context.Background(), store.ServerJob{ID: id, Kind: FetchKind, LibraryID: job.LibraryID, Path: job.Path, Params: job.Params, Attempt: 1, ServerID: "server-1"}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		h.scan.knows = func(p string) bool { return strings.HasPrefix(p, "Fixture Show/") }
+		audio := data(t, "chap-v24-reverse.mp3")
+		var calls atomic.Int32
+		if during {
+			cutAfterRename(t, h, job, audio, &calls, resumeAt(t, audio))
+		} else {
+			root, err := os.OpenRoot(h.mount)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var params fetchParams
+			if err := json.Unmarshal(job.Params, &params); err != nil {
+				t.Fatal(err)
+			}
+			c := checkpoint{ServerHash: s.pairHash(), LibraryID: 3, ShowID: params.ShowID, EpisodeID: params.EpisodeID, Path: *job.Path, Temp: podcast.TempPrefix + nonce(), Offset: 2000, Total: int64(len(audio))}
+			if err := root.WriteFile("Fixture Show/"+c.Temp, audio[:2000], 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.saveCheckpoint(job, root, &c, `"one"`); err != nil {
+				t.Fatal(err)
+			}
+			root.Close()
+			renameShow(t, h, "Fixture Show", "Renamed Show")
+			resume := resumeAt(t, audio)
+			setAudio(h, func(w http.ResponseWriter, r *http.Request) { calls.Add(1); resume(w, r) })
+		}
+		res, err := h.handler.FetchJob().Run(context.Background(), job, jobs.LocalReporter())
+		want := map[bool]int32{false: 1, true: 2}[during]
+		if got, ok := res.(fetchResult); err != nil || !ok || got.Fetch.Bytes != int64(len(audio)) || calls.Load() != want {
+			t.Fatal(during, res, err, calls.Load())
+		}
+		if left := partials(filepath.Join(h.mount, "Renamed Show")); len(left) != 0 {
+			t.Fatal("a partial was left behind", during, left)
+		}
+		noRecords(t, s)
+	}
+}
+
+// A fetch's own record left at the old path while one is at the new path
+// already: the new one wins and the old one goes, its partial (in the
+// renamed folder now) with it, unless the new record names the same partial
+// (a move that wrote there and could not remove the old one).
+func TestAdoptOwnClearsAnOldRecordPastANewOne(t *testing.T) {
+	for _, same := range []bool{false, true} {
+		h, job := audioHarness(t)
+		s := h.handler.s
+		root, err := os.OpenRoot(h.mount)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer root.Close()
+		var params fetchParams
+		if err := json.Unmarshal(job.Params, &params); err != nil {
+			t.Fatal(err)
+		}
+		old := *job.Path
+		mk := func(at string, temp string) {
+			c := checkpoint{ServerHash: s.pairHash(), LibraryID: 3, ShowID: params.ShowID, EpisodeID: params.EpisodeID, Path: at, Temp: temp, Offset: 6, Total: 100}
+			if err := root.WriteFile("Fixture Show/"+temp, []byte("prefix"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.saveCheckpoint(jobs.Job{LibraryID: job.LibraryID, Path: &at}, root, &c, `"one"`); err != nil {
+				t.Fatal(err)
+			}
+		}
+		mk(old, podcast.TempPrefix+"old")
+		moved := "Renamed Show/" + strings.TrimPrefix(old, "Fixture Show/")
+		newTemp := podcast.TempPrefix + "new"
+		if same {
+			newTemp = podcast.TempPrefix + "old"
+		}
+		mk(moved, newTemp)
+		renameShow(t, h, "Fixture Show", "Renamed Show")
+		there := jobs.Job{LibraryID: job.LibraryID, Path: &moved}
+		s.adoptOwn(there, root, old, params)
+		if _, ok := s.readCheckpoint(job); ok {
+			t.Fatal("the old record stayed", same)
+		}
+		if saved, ok := s.readCheckpoint(there); !ok || saved.Temp != newTemp {
+			t.Fatal("the new record changed", same, saved)
+		}
+		_, err = os.Lstat(filepath.Join(h.mount, "Renamed Show", podcast.TempPrefix+"old"))
+		if same != (err == nil) {
+			t.Fatal("the old partial", same, err)
+		}
+	}
+}
+
 // An episode already fetched whose show folder was renamed by hand since is
 // taken as it is (reuse), and the server, which knows it only at the old
 // path, is asked to index the folder; one that never moved is indexed by its

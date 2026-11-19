@@ -250,7 +250,8 @@ func (s *service) clearCheckpoint(job jobs.Job, root *os.Root, c *checkpoint) {
 // (podcast.Adopt's journals alike). A record whose download is still running
 // (a fetch claimed at its path, or one of its episode that found the show
 // elsewhere since its claim), other than self's, stays: that job moves it when
-// it finds the folder (Fetch's relocation) or drops it as it ends. A record of
+// it finds the folder (Fetch's relocation; adoptOwn, under the episode's lock,
+// past another open row of its episode) or drops it as it ends. A record of
 // another show (names swapped by hand) stays too. An error means the records
 // could not be listed (or the open jobs read); one that could not be read or
 // moved is left as it was.
@@ -284,21 +285,62 @@ func (s *service) adoptCheckpoints(ctx context.Context, root *os.Root, lib link.
 		if running(c) {
 			continue
 		}
-		old := recordName(lib.ID, c.Path)
-		c.Path = show + "/" + path.Base(c.Path)
-		name := recordName(lib.ID, c.Path)
-		if _, err := dir.Lstat(name); !errors.Is(err, os.ErrNotExist) {
-			continue // never over a record a download at the new path already made
-		}
-		b, err := json.Marshal(c)
-		if err != nil {
-			continue
-		}
-		if fsutil.WriteRootAtomic(dir, ".", name, b, 0o600, nil) == nil {
-			_ = dir.Remove(old)
-		}
+		moveRecord(dir, lib.ID, c, show+"/"+path.Base(c.Path))
 	}
 	return nil
+}
+
+// moveRecord moves download record c of library lib to episode path to: its
+// record there first, then the old one removed. Nothing moves when a record
+// is at to already (one a download at the new path made, never overwritten)
+// or the new one could not be written.
+func moveRecord(dir *os.Root, lib int64, c checkpoint, to string) {
+	old := recordName(lib, c.Path)
+	c.Path = to
+	name := recordName(lib, to)
+	if _, err := dir.Lstat(name); !errors.Is(err, os.ErrNotExist) {
+		return
+	}
+	b, err := json.Marshal(c)
+	if err != nil || fsutil.WriteRootAtomic(dir, ".", name, b, 0o600, nil) != nil {
+		return
+	}
+	_ = dir.Remove(old)
+}
+
+// adoptOwn takes the download record of a fetch's episode left at from, its
+// path before a show folder renamed by hand (the episode's partial moved
+// with the folder), to the job's path where the show holds the episode now.
+// The fetch holds the episode's lock there, so no other download of it runs
+// and the record is its own, though adoptCheckpoints leaves it to any open
+// row naming it (a duplicate claim of the episode): left at from, the fetch
+// would download again from byte 0 and the record would stay for a day. A
+// record at the new path already wins (adoptCheckpoints'), and the one at
+// from is cleared with its partial, rather than left.
+func (s *service) adoptOwn(job jobs.Job, root *os.Root, from string, p fetchParams) {
+	if from == *job.Path {
+		return
+	}
+	saved, ok := s.readCheckpoint(jobs.Job{LibraryID: job.LibraryID, Path: &from})
+	if !ok || saved.ShowID != p.ShowID || saved.EpisodeID != p.EpisodeID || path.Base(from) != path.Base(*job.Path) {
+		return
+	}
+	dir, err := s.checkpointRoot()
+	if err != nil {
+		return
+	}
+	defer func() { _ = dir.Close() }()
+	if _, err := dir.Lstat(s.checkpointName(job)); errors.Is(err, os.ErrNotExist) {
+		moveRecord(dir, *job.LibraryID, saved, *job.Path)
+		return
+	}
+	// Its partial is in the episode's folder now; one the record at the new
+	// path names too (a move that wrote there and could not remove this one)
+	// stays for that record.
+	saved.Path = *job.Path
+	if there, ok := s.readCheckpoint(job); ok && there.Temp == saved.Temp || s.dropPartial(root, &saved) {
+		_ = dir.Remove(recordName(*job.LibraryID, from))
+	}
 }
 
 // runningRecords reports, by the open job rows, whether a download record of
