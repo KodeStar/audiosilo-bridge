@@ -188,7 +188,15 @@ func (s *Service) SubmitCore(ctx context.Context, book store.Book, p CoreProposa
 	// stray issue for a book that no longer needs one. A book turned local files nothing
 	// (store.KeepBookLocal: a sidecars.generate job whose share the server turned off), so
 	// it needs no work either, though its park waits for the job's next look to lift.
+	// So is one whose open sidecars.generate job heard share_off before a run of it
+	// was up to turn the book local (store.GenerateShareOff, as the contributing
+	// stage asks).
 	if !state.IsParkedWith(fresh.Status, fresh.ParkCode, state.ParkCoreNeeded) || fresh.ContribMode == store.ContribModeLocal {
+		return store.Contribution{}, ErrNotAwaitingCore
+	}
+	if off, err := s.deps.DB.GenerateShareOff(ctx, book.ID); err != nil {
+		return store.Contribution{}, fmt.Errorf("contrib: read the book's jobs: %w", err)
+	} else if off {
 		return store.Contribution{}, ErrNotAwaitingCore
 	}
 

@@ -1207,7 +1207,8 @@ internal/
             language/narrators/sources required; an ASIN without a region is rejected,
             never silently dropped), Service (SubmitCore: per-book mutex, reuses an
             already-recorded core issue, persists the row BEFORE the park flip,
-            refuses a book turned local (server#218: ErrNotAwaitingCore);
+            refuses a book turned local, or one whose open sidecars.generate job
+            heard share_off (store.GenerateShareOff) (server#218: ErrNotAwaitingCore);
             SetWork validates the slug upstream), and the poller. Where things live:
               poller.go  row lifecycle (FindIntakePR -> pr_open -> merged/closed),
                          intake verdicts as the note's last segment (re-checked at
@@ -2224,9 +2225,12 @@ internal/
             every answer that carries it, on the goroutine that read the answer,
             outside the report lock (sendMu), as is the store write after it (heard,
             keepShareOff: a failed write is tried again at every answer, warned once
-            a job, then debug; HearShareOff is its test hook). A run a refused token
-            stops carries what it heard to resumeStranded (run.shareOffHeard), which
-            writes it again when the store lacks it, so the stranded resume keeps it.
+            a job, then debug; HearShareOff is its test hook), and before a cancel,
+            lost claim or refused token the same answer carries ends the job's
+            context (answer returns the cause, acted applies it after heard). A run
+            a refused token stops carries what it heard to resumeStranded
+            (run.shareOffHeard), which writes it again when the store lacks it, so
+            the stranded resume keeps it.
             Recovery runs once the link is up: a kind no longer run is failed.
             Nothing is sent that the server refuses for good: a result that isn't a
             JSON object of at most 64 KiB fails the job (errUnreportable) and
