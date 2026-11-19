@@ -49,9 +49,8 @@ type Job struct {
 	// shareOff: the claim's answer said share_off, or, for a job resumed after
 	// a restart or a refused token, the claim or an answer since did
 	// (store.ServerJob.ShareOff, or the stopped run's Reporter): Reporter.ShareOff.
-	// shareOffStored says the store has it (its Reporter writes it again at the
-	// next answer when it doesn't).
-	shareOff, shareOffStored bool
+	// Its Reporter writes it to the store at its first report (keepShareOff).
+	shareOff bool
 }
 
 // Handler runs one job kind.
@@ -508,16 +507,9 @@ func (r *Runner) resumeStranded(ctx context.Context, srv Server, wg *sync.WaitGr
 		r.log.Info("bridge: resuming a job its refused token stopped", "job", job.ID, "kind", job.Kind, "attempt", job.Attempt)
 		job.Resumed = true
 		// An answer since the claim may have said share_off: the store has it,
-		// or the stopped run heard it and its write failed (tried again here,
-		// and at the resumed run's first answer if this fails too).
-		job.shareOff, job.shareOffStored = job.shareOff || sj.ShareOff, sj.ShareOff
-		if job.shareOff && !job.shareOffStored {
-			if err := r.store.SetServerJobShareOff(ctx, job.ID, job.Attempt); err != nil {
-				r.log.Warn("bridge: recording a job's share_off failed", "job", job.ID, "err", err)
-			} else {
-				job.shareOffStored = true
-			}
-		}
+		// or the stopped run heard it and its write failed (the resumed run's
+		// Reporter writes it at its first report).
+		job.shareOff = job.shareOff || sj.ShareOff
 		r.launch(ctx, srv, job, wg, sj.Error, sj.Progress, nil)
 	}
 }
@@ -543,13 +535,13 @@ func sameServer(a, b Server) bool {
 // jobOf is a claimed job as a Handler sees it.
 func jobOf(j *link.Job) Job {
 	return Job{ID: j.ID, Kind: j.Kind, LibraryID: j.LibraryID, Path: j.Path, Params: j.Params, Attempt: j.Attempts, Priority: j.Priority,
-		shareOff: j.ShareOff, shareOffStored: j.ShareOff}
+		shareOff: j.ShareOff}
 }
 
 // storedJob is a job the store recorded, as a Handler sees it.
 func storedJob(sj store.ServerJob) Job {
 	return Job{ID: sj.ID, Kind: sj.Kind, LibraryID: sj.LibraryID, Path: sj.Path, Params: sj.Params, Attempt: sj.Attempt,
-		Priority: sj.Priority, shareOff: sj.ShareOff, shareOffStored: sj.ShareOff}
+		Priority: sj.Priority, shareOff: sj.ShareOff}
 }
 
 // run is one running job, and the link it runs on. parked is the park message a
@@ -571,10 +563,9 @@ type run struct {
 	// While it waits for its first slot, the dispatcher that took it
 	// (strayReserve) claims less (strayWaitingLocked); Yield clears it.
 	stray, strayReserve bool
-	// shareOffHeard: a run a refused token stopped had heard share_off (its
-	// Reporter.ShareOff), which its stranded job carries to resumeStranded.
-	// Written by settle and read by release, both on the run's goroutine.
-	shareOffHeard bool
+	// rep is the run's Reporter (nil until execute makes it): ShareOff asks
+	// through it, a job waiting for its slot included. Written under r.mu.
+	rep *Reporter
 }
 
 // strandedJob is a job a refused token stopped, with the link it ran on.
@@ -677,6 +668,7 @@ func (r *Runner) launch(ctx context.Context, srv Server, job Job, wg *sync.WaitG
 // resumeStranded, and wakes the claim loop.
 func (r *Runner) release(ru *run, stranded bool) {
 	ru.cancel(nil)
+	heard := ru.rep != nil && ru.rep.ShareOff() // set on this goroutine (execute)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.running[ru.job.ID] == ru { // a later claim of the same job may run under its id
@@ -690,7 +682,7 @@ func (r *Runner) release(ru *run, stranded bool) {
 	}
 	if stranded {
 		job := ru.job
-		job.shareOff = job.shareOff || ru.shareOffHeard
+		job.shareOff = job.shareOff || heard // carried to resumeStranded
 		r.stranded = append(r.stranded, strandedJob{job: job, srv: ru.srv})
 	}
 	r.wakeLocked()
@@ -702,10 +694,14 @@ func (r *Runner) release(ru *run, stranded bool) {
 // refused token stopped the job (left running, to resume under its claim).
 func (r *Runner) execute(ctx, base context.Context, srv Server, h Handler, ru *run) (stranded bool) {
 	// A job claimed or resumed with share_off mostly has it stored already
-	// (RecordClaim, or the row it was resumed from); one whose write failed has
-	// it written at its first answer.
+	// (RecordClaim, or the row it was resumed from); its first report writes it
+	// all the same (keepShareOff, the one write after the claim), so one whose
+	// write failed, or that a refused token stopped, has it stored again.
 	rep := &Reporter{r: r, ru: ru, srv: srv, job: ru.job, cancel: ru.cancel, ctx: ctx, nudge: make(chan struct{}, 1),
-		shareOff: ru.job.shareOff, shareOffKept: ru.job.shareOffStored}
+		shareOff: ru.job.shareOff}
+	r.mu.Lock()
+	ru.rep = rep
+	r.mu.Unlock()
 	if ru.parked != "" {
 		rep.parked, rep.parkMsg = true, ru.parked
 		// The server hears a park whose code changes as a new park (a bell
@@ -789,9 +785,8 @@ func (r *Runner) settle(base context.Context, srv Server, ru *run, rep *Reporter
 	case errors.Is(err, errUnpaired):
 		// Left running: resumed under its claim once a link works again (or at
 		// the next start), with the share_off it heard (release carries it to
-		// resumeStranded, which writes it again if this write fails too).
+		// resumeStranded, whose run writes it again if this write fails too).
 		rep.keepShareOff()
-		ru.shareOffHeard = rep.ShareOff()
 		r.log.Info("bridge: the server refused a job's token; it resumes once the link works again", "job", job.ID)
 		return true
 	case errors.Is(err, errLost):
@@ -926,6 +921,64 @@ func (r *Runner) Cancel(id int64) bool {
 	return ok
 }
 
+// Why ShareOff couldn't ask the server for a job: no run of it is up here (a
+// resumed job not launched yet, or one that ended), its link isn't the one the
+// Bridge uses now (unpaired, refused, or paired again), or its reports don't
+// get through.
+var (
+	ErrShareNotRunning   = errors.New("the job isn't running here")
+	ErrShareOffLink      = errors.New("the Bridge isn't linked to the job's server now (unpaired, or its token refused)")
+	ErrShareNotReachable = errors.New("the job's reports aren't reaching the server")
+)
+
+// ShareOff reports whether the server turned job id's share off
+// (Reporter.ShareOff), for the contributing stage before it files
+// (generate.Handler.ShareOff). It finds the job's run here, one still waiting
+// for its lane slot included (its Reporter keeps reporting), and one a refused
+// token stopped (what it heard). With ask, the job reports now and the answer
+// acts as any other (Reporter.Refresh): true once it says share_off. Without,
+// only what is known here: true when heard, false when the job could be asked,
+// and an error, with no request made, when it couldn't be (ErrShareNotRunning,
+// ErrShareOffLink, ErrShareNotReachable), so the stage waits before its
+// lookups rather than after them.
+func (r *Runner) ShareOff(ctx context.Context, id int64, ask bool) (bool, error) {
+	r.mu.Lock()
+	var rep *Reporter
+	if ru, ok := r.running[id]; ok {
+		rep = ru.rep
+	}
+	stranded, heard := false, false
+	for _, s := range r.stranded {
+		if s.job.ID == id {
+			stranded, heard = true, s.job.shareOff
+		}
+	}
+	r.mu.Unlock()
+	switch {
+	case rep == nil && heard:
+		return true, nil
+	case rep == nil && stranded:
+		return false, ErrShareOffLink
+	case rep == nil:
+		return false, ErrShareNotRunning
+	case rep.ShareOff():
+		return true, nil
+	}
+	if srv := r.server(); srv == nil || !sameServer(srv, rep.srv) {
+		return false, ErrShareOffLink
+	}
+	if !ask {
+		if rep.unreached() {
+			return false, ErrShareNotReachable
+		}
+		return false, nil
+	}
+	if err := rep.Refresh(ctx); err != nil && !rep.ShareOff() {
+		return false, err
+	}
+	return rep.ShareOff(), nil
+}
+
 // Progress is a job's progress as the server shows it: a step, a sentence, and
 // a count where there is one. Extra carries a kind's own fields (sidecars.generate's
 // stage, eta_seconds, cost_usd, source, park), sent in the same object beside
@@ -1032,9 +1085,9 @@ type Reporter struct {
 	// noticed), and the job hears it here.
 	path string
 	// shareOff: the claim or an answer since said share_off (ShareOff);
-	// shareOffKept that the store has it for a restart (shareOffWarned: a
-	// failed write was logged, so the next are quiet); onShareOff is the
-	// handler's OnShareOff.
+	// shareOffKept that this run wrote it to the store (keepShareOff;
+	// shareOffWarned: a failed write was logged, so the next are quiet);
+	// onShareOff is the handler's OnShareOff.
 	shareOff       bool
 	shareOffKept   bool
 	shareOffWarned bool
@@ -1091,14 +1144,14 @@ func (p *Reporter) ShareOff() bool {
 
 // OnShareOff has fn called the moment the job hears share_off (ShareOff): at
 // once when it has already, then at every answer that carries it, so a
-// handler that acts on it from there (keeping what it already made local) need
-// not wait for its own next look, and an act that failed is tried again at the
-// next answer. fn runs on the goroutine that read the answer (the keepalive's,
-// a ConfirmLease's, or a Refresh's: another job's, or the engine's contributing
-// stage asking before it files), after the report's lock is let
-// go and before a cancel the same answer carries ends the job's context: it
-// must be quick, safe to run beside the handler and more than once, and must
-// not report.
+// handler that acts on it from there (its next look) need not wait for an idle
+// poll. The store has the job's books local by then when its write worked
+// (keepShareOff). fn runs on the goroutine that read the answer (the
+// keepalive's, a ConfirmLease's, or a Refresh's: another job's, or the
+// engine's contributing stage asking before it files), after the report's lock
+// is let go and before a cancel the same answer carries ends the job's
+// context: it must be quick, safe to run beside the handler and more than
+// once, and must not report.
 func (p *Reporter) OnShareOff(fn func()) {
 	p.mu.Lock()
 	p.onShareOff = fn
@@ -1456,6 +1509,14 @@ func (p *Reporter) failed(err error) {
 	}
 }
 
+// unreached reports whether the job's last report didn't reach the server
+// (failed: no answer, a 5xx, a 408 or a 429), until one does.
+func (p *Reporter) unreached() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.failing
+}
+
 // reached notes a report that got through: the next goes after the Keepalive,
 // and a failure logged before it gets its recovery line.
 func (p *Reporter) reached() {
@@ -1532,29 +1593,29 @@ func (p *Reporter) acted(got *link.Job, stop, err error) bool {
 }
 
 // heard acts on an answer's share_off, after answer and outside sendMu (the
-// handler's OnShareOff and the write below touch the store, and a report must
-// not wait on them): the job keeps it for the run, the handler's func runs
-// first, then the store keeps it for a restart. A write that failed
-// (resumeStranded's, or at an earlier answer) is tried again at every answer,
-// and logged once a job.
+// write below and the handler's OnShareOff touch the store, and a report must
+// not wait on them): the job keeps it for the run, the store keeps it (and the
+// job's books local) for a restart, then the handler's func runs. A write that
+// failed is tried again at every report, answered or not (a Bridge stopped
+// while the server is out of reach must not lose it), and logged once a job.
 func (p *Reporter) heard(got *link.Job, err error) {
-	if err != nil || got == nil {
-		return
-	}
+	said := err == nil && got != nil && got.ShareOff
 	p.mu.Lock()
-	p.shareOff = p.shareOff || got.ShareOff
+	p.shareOff = p.shareOff || said
 	fn := p.onShareOff
 	p.mu.Unlock()
-	if got.ShareOff && fn != nil {
-		fn() // first: the handler acts on it before anything else is written
-	}
 	p.keepShareOff()
+	if said && fn != nil {
+		fn()
+	}
 }
 
-// keepShareOff writes the job's share_off to the store (server_jobs.share_off)
-// when it heard it and the store doesn't have it yet, so a job resumed before
-// the server answers again keeps its results local all the same. The first
-// failure is a warning, the rest debug.
+// keepShareOff writes the job's share_off to the store
+// (store.DB.SetServerJobShareOff, which turns the job's engine books local in
+// the same write) once the run heard it and hasn't written it yet, so the
+// contributing stage files nothing for those books whether or not a run of the
+// job is up, and a job resumed before the server answers again keeps its
+// results local all the same. The first failure is a warning, the rest debug.
 func (p *Reporter) keepShareOff() {
 	p.mu.Lock()
 	keep := p.shareOff && !p.shareOffKept

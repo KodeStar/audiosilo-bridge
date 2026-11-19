@@ -255,6 +255,9 @@ func New(ctx context.Context, opts Options) (*Bridge, string, error) {
 	b.runner = jobs.New(db, b.server, b.tokenRefused, jobs.Options{Log: opts.Logger, ServerID: serverID},
 		verifier, b.gen, b.gen.DescribeJob(), b.gen.ChaptersJob(), b.gen.ReadalongJob(), b.gen.ContributeJob(), corrector, b.podcasts, b.podcasts.PollJob(), b.podcasts.FetchJob(), b.podcasts.RetainJob(),
 		audiblePoll, audibleImport, audibleSync, b.newLibrivox(meta, opts.Logger, serverID))
+	// The contributing stage asks a share job's run about its share through the
+	// runner, which finds a job still waiting for its lane slot too.
+	b.gen.AskThrough(b.runner)
 	conn.onChange = b.linkChanged
 	return b, oneTime, nil
 }

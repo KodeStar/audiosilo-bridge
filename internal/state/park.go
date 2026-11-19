@@ -53,8 +53,8 @@ const (
 	// ParkShareUnconfirmed: the book's generate-and-share job couldn't ask the
 	// server, just before filing, whether its share is still on (server#218: the
 	// server not reached, the Bridge's token refused, or no run of the job up here
-	// yet). Nothing is filed without the server's word; the park carries a short
-	// retry_at, so a blip heals by itself. Its own code, not contrib_unavailable,
+	// yet; or the book's own mode couldn't be read). Nothing is filed without the
+	// server's word; the park carries a short retry_at, so a blip heals by itself. Its own code, not contrib_unavailable,
 	// so the server doesn't word it as a missing GitHub sign-in (it lists it as a
 	// transient park, not one it announces).
 	ParkShareUnconfirmed ParkCode = "share_unconfirmed"

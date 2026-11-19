@@ -463,10 +463,10 @@ func (h *Handler) continueChapters(ctx context.Context, eng Engine, r *run, old 
 // takeUp makes engine book id run r's book through write, the continue
 // (ContinueChapters, ContinueReadalong) that clears its stop, written under the
 // book's publish lock (Engine.ContinueStored, see scheduler.restoreStatus) and
-// published as stored, so its last book.state event is no longer the cancel; the
-// run's share guard is told the book (shareBook) and the engine is then woken
-// for it. Every continue goes through here, so none can skip the lock, the
-// publish or the share guard. ok is false, with no error, when write found the
+// published as stored, so its last book.state event is no longer the cancel
+// (the write maps the job to the book, which keeps it local for a job that
+// heard share_off); the engine is then woken for it. Every continue goes
+// through here, so none can skip the lock or the publish. ok is false, with no error, when write found the
 // book not continuable (store.ErrNotContinuable).
 func (h *Handler) takeUp(ctx context.Context, eng Engine, r *run, id int64, write func() error) (ok bool, err error) {
 	if err := eng.ContinueStored(ctx, id, write); errors.Is(err, store.ErrNotContinuable) {
@@ -475,7 +475,6 @@ func (h *Handler) takeUp(ctx context.Context, eng Engine, r *run, id int64, writ
 		return false, err
 	}
 	r.bookID = id
-	h.shareBook(ctx, r, id) // the run's share guard has the book before it runs on
 	eng.Notify()
 	return true, nil
 }

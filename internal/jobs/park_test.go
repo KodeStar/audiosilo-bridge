@@ -736,6 +736,9 @@ func TestShareOffHeardSurvivesARefusedToken(t *testing.T) {
 	go func() { r.Run(ctx); close(done) }()
 	defer func() { cancel(); <-done }()
 	waitFor(t, func() bool { return !paired.Load() })
+	// Stranded, it answers the contributing stage what it heard, with no
+	// request (the link refused).
+	waitFor(t, func() bool { off, err := r.ShareOff(context.Background(), 5, false); return off && err == nil })
 	srv.mu.Lock()
 	srv.unauthed, srv.shareOff = false, nil
 	srv.mu.Unlock()
@@ -744,6 +747,114 @@ func TestShareOffHeardSurvivesARefusedToken(t *testing.T) {
 	waitFor(t, func() bool { s, _ := srv.finalState(5); return s == link.StateDone })
 	if runs.Load() != 2 || !resumedShareOff.Load() {
 		t.Fatalf("runs %d, resumed with share_off %v: want 2 runs, the second with it", runs.Load(), resumedShareOff.Load())
+	}
+}
+
+// A share_off whose write failed is written again at every report, answered
+// or not: a Bridge stopped while the server is out of reach must not lose it
+// (the next start resumes the job from the store alone).
+func TestShareOffWriteTriedWhileTheServerIsOut(t *testing.T) {
+	t.Parallel()
+	db, srv := openStore(t), newFakeServer()
+	st := &shareOffFailStore{DB: db}
+	st.fail.Store(true)
+	srv.add(&link.Job{ID: 8, Kind: "k.v", Attempts: 1})
+	h := handler{kind: "k.v", lane: LaneLight, fn: func(ctx context.Context, j Job, rep *Reporter) (any, error) {
+		srv.setShareOff(map[int64]bool{8: true})
+		waitFor(t, func() bool { return rep.ShareOff() && st.tries.Load() > 0 })
+		srv.mu.Lock()
+		srv.failing = true
+		srv.mu.Unlock()
+		st.fail.Store(false)
+		waitFor(t, func() bool {
+			sj, err := db.GetServerJob(context.Background(), 8)
+			return err == nil && sj.ShareOff
+		})
+		srv.mu.Lock()
+		srv.failing = false
+		srv.mu.Unlock()
+		return nil, nil
+	}}
+	r := New(st, func() Server { return srv }, nil, testOpts(), h)
+	runFor(t, r, func() bool { s, _ := srv.finalState(8); return s == link.StateDone })
+}
+
+// Runner.ShareOff (the contributing stage's ask, server#218) reaches a job
+// waiting for its lane slot through its Reporter, so a resumed job that never
+// gets a slot doesn't keep the book parked. Without asking it answers only
+// what is known here, and an error with no request for a job it can't ask: one
+// not running here, one whose reports fail, or with the Bridge unpaired.
+func TestRunnerShareOff(t *testing.T) {
+	t.Parallel()
+	db, srv := openStore(t), newFakeServer()
+	ctx := context.Background()
+	for _, id := range []int64{1, 2} {
+		if err := db.RecordClaim(ctx, store.ServerJob{ID: id, Kind: "k.v", Attempt: 1}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var paired atomic.Bool
+	paired.Store(true)
+	started := make(chan int64, 2)
+	h := handler{kind: "k.v", lane: LaneLight, fn: func(ctx context.Context, j Job, rep *Reporter) (any, error) {
+		started <- j.ID
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}}
+	opts := testOpts()
+	opts.Lanes = map[string]int{LaneLight: 1}
+	r := New(db, func() Server {
+		if paired.Load() {
+			return srv
+		}
+		return nil
+	}, nil, opts, h)
+	rctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() { r.Run(rctx); close(done) }()
+	defer func() { cancel(); <-done }()
+	running := <-started // the job given the slot; the other waits for it
+	waiting := 3 - running
+
+	if _, err := r.ShareOff(ctx, 9, true); !errors.Is(err, ErrShareNotRunning) {
+		t.Fatalf("a job not running here: %v, want ErrShareNotRunning", err)
+	}
+	waitFor(t, func() bool { _, err := r.ShareOff(ctx, waiting, false); return err == nil })
+	if off, err := r.ShareOff(ctx, waiting, false); off || err != nil {
+		t.Fatalf("the waiting job, not asked: %v %v, want false", off, err)
+	}
+	srv.setShareOff(map[int64]bool{waiting: true})
+	if off, err := r.ShareOff(ctx, waiting, true); !off || err != nil {
+		t.Fatalf("the waiting job, asked: %v %v, want true", off, err)
+	}
+	if sj, err := db.GetServerJob(ctx, waiting); err != nil || !sj.ShareOff {
+		t.Fatalf("the answer's share_off isn't stored: %+v %v", sj, err)
+	}
+	select {
+	case id := <-started:
+		t.Fatalf("job %d ran without a slot", id)
+	default:
+	}
+
+	srv.mu.Lock()
+	srv.failing = true
+	srv.mu.Unlock()
+	waitFor(t, func() bool { _, err := r.ShareOff(ctx, running, false); return errors.Is(err, ErrShareNotReachable) })
+	if _, err := r.ShareOff(ctx, running, true); err == nil {
+		t.Fatal("asked with the server out of reach: no error")
+	}
+	srv.mu.Lock()
+	srv.failing = false
+	srv.mu.Unlock()
+
+	paired.Store(false)
+	for _, ask := range []bool{false, true} {
+		if _, err := r.ShareOff(ctx, running, ask); !errors.Is(err, ErrShareOffLink) {
+			t.Fatalf("unpaired, ask %v: %v, want ErrShareOffLink", ask, err)
+		}
+	}
+	if off, err := r.ShareOff(ctx, waiting, true); !off || err != nil {
+		t.Fatalf("unpaired, a job that heard share_off: %v %v, want true", off, err)
 	}
 }
 

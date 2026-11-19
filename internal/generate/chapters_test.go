@@ -808,11 +808,11 @@ func TestContinueChaptersForACancelledJobLeavesTheRun(t *testing.T) {
 	}
 }
 
-// A generate-and-share job's share guard has the chapters run the job
-// continues: a share_off heard before the continue (after create read it)
-// turns the continued book local at once, though the continue wrote the job's
-// issue mode.
-func TestContinueChaptersTellsTheShareGuard(t *testing.T) {
+// A generate-and-share job that heard share_off before it continues a
+// chapters run (after create read it) has the continued book local at once:
+// the continue maps the job to the book in its own write, which the store's
+// share_off rule turns local over the job's issue mode.
+func TestContinueChaptersKeepsAShareOffJobsBookLocal(t *testing.T) {
 	t.Parallel()
 	hr := newHarness(t)
 	stop := hr.runner(hr.h, hr.h.ChaptersJob())
@@ -826,10 +826,11 @@ func TestContinueChaptersTellsTheShareGuard(t *testing.T) {
 		return err == nil && scheduler.IsCancelled(b)
 	})
 	ctx := context.Background()
-	r := &run{job: jobs.Job{ID: 60}, kind: Kind, params: Params{Contribute: ContributeIssue}, rep: jobs.LocalReporter(),
+	if err := hr.db.RecordClaim(ctx, store.ServerJob{ID: 60, Kind: Kind, Attempt: 1, ShareOff: true}); err != nil {
+		t.Fatal(err)
+	}
+	r := &run{job: jobs.Job{ID: 60, Attempt: 1}, kind: Kind, params: Params{Contribute: ContributeIssue}, rep: jobs.LocalReporter(),
 		poke: make(chan struct{}, 1), lib: link.Library{ID: 1}, rel: "Loose.m4b", source: SourceAudio, place: place{single: true}}
-	defer hr.h.guardShare(ctx, r)()
-	jobs.HearShareOff(r.rep)
 	if ok, err := hr.h.continueChapters(ctx, hr.sched, r, b, 0); !ok || err != nil {
 		t.Fatalf("continue = %v, %v", ok, err)
 	}

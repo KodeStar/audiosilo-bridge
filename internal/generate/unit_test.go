@@ -1112,96 +1112,45 @@ func TestAttachReadmitsTheCancelItRead(t *testing.T) {
 	}
 }
 
-// The share guard turns a generate-and-share run's engine book local the
-// moment the job hears share_off, with no look of the run's, so a re-admit
-// right after (the poller, a GitHub sign-in) runs the contributing stage in
-// local mode; a book the run takes up after it heard is turned local as it is
-// taken up, and the run is woken to lift a share park. Denied: a book done
-// keeps its mode (it shared as asked), and a run not asked to share has no
-// guard.
-func TestShareGuardTurnsTheBookLocalAtOnce(t *testing.T) {
+// A contribute=issue sidecars.generate run is woken the moment its job hears
+// share_off (the store has the book local by then), so its look lifts a share
+// park at once rather than an idle poll later. Denied: a run not asked to
+// share isn't woken, nor one whose call was dropped.
+func TestShareOffWakesTheRun(t *testing.T) {
 	t.Parallel()
-	db, err := store.Open(context.Background(), ":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	ctx := context.Background()
-	h := New(Options{DB: db, WorkRoot: t.TempDir()})
-	newBook := func(title string) store.Book {
-		t.Helper()
-		b, err := db.CreateBook(ctx, store.NewBook{SourcePath: "/lib/" + title, WorkDir: filepath.Join(t.TempDir(), title),
-			Title: title, ContribMode: store.ContribModeIssue})
-		if err != nil {
-			t.Fatal(err)
-		}
-		return b
-	}
-	mode := func(id int64) string {
-		t.Helper()
-		b, err := db.GetBook(ctx, id)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return b.ContribMode
-	}
+	h := New(Options{WorkRoot: t.TempDir()})
 	newRun := func(contribute string) *run {
 		return &run{job: jobs.Job{ID: 1}, kind: Kind, rep: jobs.LocalReporter(), poke: make(chan struct{}, 1),
 			params: Params{Contribute: contribute}}
 	}
-
-	parked := newBook("parked")
-	if err := db.SetBookState(ctx, parked.ID, "contributing", "needs_attention", "core needed", "core_needed"); err != nil {
-		t.Fatal(err)
+	woken := func(r *run) bool {
+		select {
+		case <-r.poke:
+			return true
+		default:
+			return false
+		}
 	}
 	r := newRun(ContributeIssue)
-	stop := h.guardShare(ctx, r)
-	h.shareBook(ctx, r, parked.ID)
-	if got := mode(parked.ID); got != store.ContribModeIssue {
-		t.Fatalf("mode before share_off = %q", got)
+	stop := h.wakeOnShareOff(r)
+	if woken(r) {
+		t.Fatal("woken before share_off")
 	}
 	jobs.HearShareOff(r.rep)
-	if got := mode(parked.ID); got != store.ContribModeLocal {
-		t.Fatalf("mode at share_off = %q, want local", got)
-	}
-	select {
-	case <-r.poke:
-	default:
+	if !woken(r) {
 		t.Fatal("the run wasn't woken to lift the park")
 	}
-	jobs.HearShareOff(r.rep) // a later answer writes nothing more, and wakes nothing
-	select {
-	case <-r.poke:
-		t.Fatal("a later answer woke the run again")
-	default:
-	}
-	// A book the run takes up after it heard (a resumed job's, or one made anew).
-	later := newBook("later")
-	h.shareBook(ctx, r, later.ID)
-	if got := mode(later.ID); got != store.ContribModeLocal {
-		t.Fatalf("mode of a book taken up after share_off = %q, want local", got)
-	}
 	stop()
-
-	done := newBook("done")
-	if err := db.SetBookState(ctx, done.ID, "done", "", "", ""); err != nil {
-		t.Fatal(err)
-	}
-	r = newRun(ContributeIssue)
-	defer h.guardShare(ctx, r)()
-	h.shareBook(ctx, r, done.ID)
 	jobs.HearShareOff(r.rep)
-	if got := mode(done.ID); got != store.ContribModeIssue {
-		t.Fatalf("mode of a book done = %q, want issue", got)
+	if woken(r) {
+		t.Fatal("woken after its call was dropped")
 	}
 
-	other := newBook("other")
-	r = newRun(ContributeLocal)
-	defer h.guardShare(ctx, r)()
-	h.shareBook(ctx, r, other.ID)
-	jobs.HearShareOff(r.rep)
-	if r.share != nil || mode(other.ID) != store.ContribModeIssue {
-		t.Fatalf("a run not asked to share: guard %v, mode %q", r.share, mode(other.ID))
+	local := newRun(ContributeLocal)
+	defer h.wakeOnShareOff(local)()
+	jobs.HearShareOff(local.rep)
+	if woken(local) {
+		t.Fatal("a run not asked to share was woken")
 	}
 }
 

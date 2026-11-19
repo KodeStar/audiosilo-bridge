@@ -22,9 +22,18 @@ type GenerateBook struct {
 }
 
 // PutGenerateBook records (or replaces) the engine book of a server job. A job
-// that maps to a new book is open again, so its end is cleared.
+// that maps to a new book is open again, so its end is cleared. A job that heard
+// share_off has the book local at once (keepSharedOffLocal).
 func (db *DB) PutGenerateBook(ctx context.Context, g GenerateBook) error {
-	return putGenerateBook(ctx, db.sql, g)
+	tx, err := db.sql.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := putGenerateBook(ctx, tx, g); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // execer is what putGenerateBook writes through: the database or a transaction.
@@ -32,13 +41,37 @@ type execer interface {
 	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
 }
 
+// putGenerateBook writes the mapping, then keeps the book local when the job
+// heard share_off: callers run it in a transaction, so the two land together.
 func putGenerateBook(ctx context.Context, ex execer, g GenerateBook) error {
-	_, err := ex.ExecContext(ctx,
+	if _, err := ex.ExecContext(ctx,
 		`INSERT INTO generate_books (server_job_id, book_id, library_id, rel_path, created_at, ended_at, swept_at)
 		 VALUES (?, ?, ?, ?, ?, '', '')
 		 ON CONFLICT(server_job_id) DO UPDATE SET book_id = excluded.book_id, library_id = excluded.library_id,
 		     rel_path = excluded.rel_path, ended_at = '', swept_at = ''`,
-		g.ServerJobID, g.BookID, g.LibraryID, g.RelPath, timestamp(nowFn()))
+		g.ServerJobID, g.BookID, g.LibraryID, g.RelPath, timestamp(nowFn())); err != nil {
+		return err
+	}
+	return keepSharedOffLocal(ctx, ex, g.ServerJobID)
+}
+
+// keepSharedOffLocal is the store's share_off rule (server#218): every engine
+// book a sidecars.generate job follows (its mapping) is local while the job's
+// row says share_off, so the contributing stage, which reads the book's own
+// mode, files nothing for it whether or not a run of the job is up. It runs
+// wherever either side changes: the claim (RecordClaim), the answer heard since
+// (SetServerJobShareOff) and the mapping (putGenerateBook, the continues). A
+// book done keeps its mode (it shared as asked, and its job reports what it
+// filed), and a book is never turned back: a share dropped stays dropped. Like
+// SetBookChapters it leaves updated_at alone: the mode is not a change of
+// pipeline position, and a bump would reorder the Running list.
+func keepSharedOffLocal(ctx context.Context, ex execer, serverJobID int64) error {
+	_, err := ex.ExecContext(ctx,
+		`UPDATE books SET contrib_mode = ?2
+		  WHERE state <> 'done' AND contrib_mode <> ?2
+		    AND id IN (SELECT book_id FROM generate_books WHERE server_job_id = ?1)
+		    AND EXISTS (SELECT 1 FROM server_jobs WHERE id = ?1 AND share_off = 1 AND kind = 'sidecars.generate')`,
+		serverJobID, ContribModeLocal)
 	return err
 }
 
@@ -184,19 +217,6 @@ func (db *DB) GenerateBookFollowed(ctx context.Context, bookID int64) (bool, err
 	err := db.sql.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM generate_books WHERE book_id = ? AND ended_at = ''`, bookID).Scan(&n)
 	return n > 0, err
-}
-
-// GenerateShareOff reports whether an open sidecars.generate job that follows
-// the engine book bookID heard share_off (ServerJob.ShareOff, server#218). The
-// contributing stage asks it before it files, so the book stays local even
-// when no run of that job is up to turn it local (one resumed after a restart
-// still waits for its lane slot).
-func (db *DB) GenerateShareOff(ctx context.Context, bookID int64) (bool, error) {
-	var off bool
-	err := db.sql.QueryRowContext(ctx,
-		`SELECT EXISTS (SELECT 1 FROM `+openJobsSQL+` AND g.book_id = ? AND j.kind = 'sidecars.generate' AND j.share_off = 1)`,
-		bookID).Scan(&off)
-	return off, err
 }
 
 // OpenGenerateJobsForBook returns the ids of the open server jobs (still running

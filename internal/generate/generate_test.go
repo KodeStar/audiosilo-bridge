@@ -394,6 +394,11 @@ func (hr *harness) runnerKeepalive(keepalive time.Duration, handlers ...jobs.Han
 	r := jobs.New(hr.db, func() jobs.Server { return hr.cl }, nil, jobs.Options{Keepalive: keepalive,
 		ProgressEvery: 5 * time.Millisecond, Wait: 10 * time.Millisecond, RetryEvery: 20 * time.Millisecond,
 		ServerID: func() string { return "srv" }, Log: slog.New(slog.NewTextHandler(io.Discard, nil))}, handlers...)
+	for _, h := range handlers {
+		if gh, ok := h.(*Handler); ok {
+			gh.AskThrough(r) // as the app wires it
+		}
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { defer close(done); r.Run(ctx) }()
@@ -1283,14 +1288,14 @@ func TestGenerateShareOffAskedBeforeFiling(t *testing.T) {
 		return err == nil && b.State == string(state.Contributing)
 	})
 	hr.srv.set(func() { hr.srv.shareOff[74], hr.srv.down[74] = true, true })
-	if off, err := h.ShareOff(ctx, b.ID); err == nil {
+	if off, err := h.ShareOff(ctx, b.ID, true); err == nil {
 		t.Fatalf("ShareOff with the server down = %v, want an error", off)
 	}
 	if got := hr.engineBook(74); got.ContribMode != store.ContribModeIssue {
 		t.Fatalf("engine book mode with the server down = %q, want issue", got.ContribMode)
 	}
 	hr.srv.set(func() { hr.srv.down[74] = false })
-	if off, err := h.ShareOff(ctx, b.ID); err != nil || !off {
+	if off, err := h.ShareOff(ctx, b.ID, true); err != nil || !off {
 		t.Fatalf("ShareOff = %v %v, want true", off, err)
 	}
 	if got := hr.engineBook(74); got.ContribMode != store.ContribModeLocal {
@@ -1328,7 +1333,7 @@ func TestGenerateShareOffHeardInAStoppingAnswer(t *testing.T) {
 		return err == nil && b.State == string(state.Contributing)
 	})
 	hr.srv.set(func() { hr.srv.shareOff[77], hr.srv.cancel[77] = true, true })
-	if off, err := h.ShareOff(ctx, b.ID); err != nil || !off {
+	if off, err := h.ShareOff(ctx, b.ID, true); err != nil || !off {
 		t.Fatalf("ShareOff, a cancel carrying share_off = %v %v, want true", off, err)
 	}
 	if got, err := hr.db.GetBook(ctx, b.ID); err != nil || got.ContribMode != store.ContribModeLocal {
@@ -1339,12 +1344,14 @@ func TestGenerateShareOffHeardInAStoppingAnswer(t *testing.T) {
 
 // ShareOff asks only the open generate-and-share jobs that follow the book: a
 // contribute=local one is not asked (false); a share job with no run here to
-// ask (a resumed one waiting for its lane slot) is an error, so the stage
-// waits; one that stored share_off is off without asking.
+// ask (one recorded but not resumed yet) is an error, so the stage waits; one
+// that stored share_off is off without asking.
 func TestGenerateShareOffAsksOnlyShareJobs(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	hr := newHarness(t)
+	stop := hr.runner(hr.h) // started first: it resumes none of the jobs below
+	defer stop()
 	b, err := hr.db.CreateBook(ctx, store.NewBook{Title: "B", SourcePath: "/src/b", WorkDir: t.TempDir(),
 		ContribMode: store.ContribModeIssue})
 	if err != nil {
@@ -1360,17 +1367,19 @@ func TestGenerateShareOffAsksOnlyShareJobs(t *testing.T) {
 		}
 	}
 	follow(75, `{"contribute":"local"}`)
-	if off, err := hr.h.ShareOff(ctx, b.ID); err != nil || off {
+	if off, err := hr.h.ShareOff(ctx, b.ID, true); err != nil || off {
 		t.Fatalf("ShareOff, a local job only = %v %v, want false", off, err)
 	}
 	follow(76, `{"contribute":"issue"}`)
-	if off, err := hr.h.ShareOff(ctx, b.ID); err == nil {
-		t.Fatalf("ShareOff, a share job with no run here = %v, want an error", off)
+	for _, ask := range []bool{false, true} {
+		if off, err := hr.h.ShareOff(ctx, b.ID, ask); !errors.Is(err, jobs.ErrShareNotRunning) {
+			t.Fatalf("ShareOff, a share job with no run here, ask %v = %v %v, want ErrShareNotRunning", ask, off, err)
+		}
 	}
 	if err := hr.db.SetServerJobShareOff(ctx, 76, 1); err != nil {
 		t.Fatal(err)
 	}
-	if off, err := hr.h.ShareOff(ctx, b.ID); err != nil || !off {
+	if off, err := hr.h.ShareOff(ctx, b.ID, true); err != nil || !off {
 		t.Fatalf("ShareOff, share_off stored = %v %v, want true", off, err)
 	}
 
@@ -1383,7 +1392,7 @@ func TestGenerateShareOffAsksOnlyShareJobs(t *testing.T) {
 	}
 	b = other
 	follow(78, `{"contribute":5}`)
-	if off, err := hr.h.ShareOff(ctx, b.ID); err == nil {
+	if off, err := hr.h.ShareOff(ctx, b.ID, true); err == nil {
 		t.Fatalf("ShareOff, unreadable params with no run here = %v, want an error", off)
 	}
 }

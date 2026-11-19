@@ -36,7 +36,8 @@ type ServerJob struct {
 	Priority int `json:"-"`
 	// ShareOff says the server told the job to keep its results local (its
 	// claim's answer or one since, link.Job.ShareOff; false on rows from before
-	// migration 0016), so a resumed job has it before any answer.
+	// migration 0016), so a resumed job has it before any answer. While it is
+	// set the job's engine books are local (keepSharedOffLocal).
 	ShareOff bool            `json:"-"`
 	State    string          `json:"state"`
 	Progress json.RawMessage `json:"progress"`
@@ -86,10 +87,17 @@ func jsonOr(raw json.RawMessage) string {
 }
 
 // RecordClaim records a claimed job as running under attempt (from the server
-// j.ServerID), replacing the row of an earlier attempt of the same job.
+// j.ServerID), replacing the row of an earlier attempt of the same job. A claim
+// with share_off has the job's engine book local in the same write
+// (keepSharedOffLocal): a resumed job's mapping names it already.
 func (db *DB) RecordClaim(ctx context.Context, j ServerJob) error {
 	now := timestamp(nowFn())
-	_, err := db.sql.ExecContext(ctx,
+	tx, err := db.sql.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO server_jobs (id, kind, library_id, path, params, attempt, server_id, priority, share_off, state,
 		     claimed_at, updated_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?)
@@ -98,18 +106,42 @@ func (db *DB) RecordClaim(ctx context.Context, j ServerJob) error {
 		     priority = excluded.priority, share_off = excluded.share_off, state = 'running',
 		     progress = '{}', result = '{}', error = '', reported = 0, claimed_at = excluded.claimed_at,
 		     updated_at = excluded.updated_at, finished_at = NULL`,
-		j.ID, j.Kind, j.LibraryID, j.Path, jsonOr(j.Params), j.Attempt, j.ServerID, j.Priority, j.ShareOff, now, now)
-	return err
+		j.ID, j.Kind, j.LibraryID, j.Path, jsonOr(j.Params), j.Attempt, j.ServerID, j.Priority, j.ShareOff, now, now); err != nil {
+		return err
+	}
+	if j.ShareOff {
+		if err := keepSharedOffLocal(ctx, tx, j.ID); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
-// SetServerJobShareOff records that the server told a running job (attempt
-// must match) to keep its results local (ServerJob.ShareOff), heard in an
-// answer to one of its reports. It leaves updated_at alone: it
-// is not the job's progress.
+// SetServerJobShareOff records that the server told attempt of a job to keep
+// its results local (ServerJob.ShareOff), heard in an answer to one of its
+// reports, and has the job's engine books local in the same write
+// (keepSharedOffLocal). It holds for the attempt whatever its state: an answer
+// read after the job ended (a Refresh that crossed a cancel) still keeps the
+// book local, so a later Retry of it on the Bridge's page files nothing; a
+// later claim of the job (another attempt) is left alone. It leaves updated_at
+// alone: it is not the job's progress.
 func (db *DB) SetServerJobShareOff(ctx context.Context, id int64, attempt int) error {
-	_, err := db.sql.ExecContext(ctx,
-		`UPDATE server_jobs SET share_off = 1 WHERE id = ? AND attempt = ? AND state = 'running'`, id, attempt)
-	return err
+	tx, err := db.sql.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	res, err := tx.ExecContext(ctx, `UPDATE server_jobs SET share_off = 1 WHERE id = ? AND attempt = ?`, id, attempt)
+	if err != nil {
+		return err
+	}
+	if n, err := res.RowsAffected(); err != nil || n == 0 {
+		return err
+	}
+	if err := keepSharedOffLocal(ctx, tx, id); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // SetServerJobReport records a running job's progress and park message ("" when

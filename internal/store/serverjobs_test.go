@@ -162,8 +162,9 @@ func TestServerJobServerAndPark(t *testing.T) {
 }
 
 // A job's share_off (server#218) is kept for its attempt only: a stale
-// attempt's answer, or a finished job, records nothing, and a new claim
-// carries its own (a re-claim the server no longer says it for clears it).
+// attempt's answer records nothing, and a new claim carries its own (a re-claim
+// the server no longer says it for clears it). An answer read once the attempt
+// ended still records it (the book stays local for a later Retry).
 func TestServerJobShareOff(t *testing.T) {
 	db := open(t)
 	ctx := context.Background()
@@ -203,7 +204,7 @@ func TestServerJobShareOff(t *testing.T) {
 	if err := db.FinishServerJob(ctx, 42, 4, JobDone, nil, ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.SetServerJobShareOff(ctx, 42, 4); err != nil || shareOff() {
-		t.Fatalf("a finished job's share_off: %v, kept %v", err, shareOff())
+	if err := db.SetServerJobShareOff(ctx, 42, 4); err != nil || !shareOff() {
+		t.Fatalf("a finished attempt's share_off: %v, kept %v", err, shareOff())
 	}
 }

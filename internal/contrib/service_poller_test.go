@@ -1172,27 +1172,12 @@ func TestSubmitCoreHappyPath(t *testing.T) {
 	}
 }
 
-// TestSubmitCoreRefusesABookTurnedLocal: a book parked core_needed that a
-// sidecars.generate job turned local (the server turned its share off) files no
-// add-work issue: it needs no work to file under. Denied before any GitHub call.
+// TestSubmitCoreRefusesABookTurnedLocal: a book parked core_needed whose
+// sidecars.generate job heard share_off (the server turned its share off: the
+// store turns the job's books local, whether or not a run of it is up) files
+// no add-work issue: it needs no work to file under. Denied before any GitHub
+// call, and still once the job finished (a share dropped stays dropped).
 func TestSubmitCoreRefusesABookTurnedLocal(t *testing.T) {
-	db := openDB(t)
-	b := makeBook(t, db, "Needs Core", string(state.ParkCoreNeeded))
-	if _, err := db.KeepBookLocal(context.Background(), b.ID); err != nil {
-		t.Fatal(err)
-	}
-	svc := newService(t, db, "http://127.0.0.1:0", fakeTokenResolver{token: "ghp_x"}, &capture{}, nil, nil)
-	p := CoreProposal{Title: "T", Authors: []string{"A"}, Language: "en", Narrators: []string{"N"}, Sources: "s"}
-	if _, err := svc.SubmitCore(context.Background(), b, p); err != ErrNotAwaitingCore {
-		t.Fatalf("SubmitCore err = %v, want ErrNotAwaitingCore", err)
-	}
-}
-
-// TestSubmitCoreRefusesABookWhoseJobHeardShareOff: a book parked core_needed
-// whose open sidecars.generate job heard share_off (server_jobs.share_off) while
-// no run of it was up to turn the book local files no add-work issue either.
-// Allowed: the same book once that job has finished is awaiting core again.
-func TestSubmitCoreRefusesABookWhoseJobHeardShareOff(t *testing.T) {
 	ctx := context.Background()
 	db := openDB(t)
 	b := makeBook(t, db, "Needs Core", string(state.ParkCoreNeeded))
@@ -1210,8 +1195,8 @@ func TestSubmitCoreRefusesABookWhoseJobHeardShareOff(t *testing.T) {
 	if err := db.FinishServerJob(ctx, 9, 1, store.JobCancelled, nil, ""); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.SubmitCore(ctx, b, p); err == ErrNotAwaitingCore {
-		t.Fatal("SubmitCore refused a book whose share_off job has finished")
+	if _, err := svc.SubmitCore(ctx, b, p); err != ErrNotAwaitingCore {
+		t.Fatalf("SubmitCore once the job finished: err = %v, want ErrNotAwaitingCore", err)
 	}
 }
 
