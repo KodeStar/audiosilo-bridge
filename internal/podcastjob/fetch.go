@@ -197,16 +197,19 @@ func (h *Fetch) run(parent context.Context, claimed *jobs.Job, rep *jobs.Reporte
 	// follow moves the fetch to its episode where a show folder renamed by
 	// hand has it now (episodeAt), taking the episode's lock and its own
 	// record along (adoptOwn, never dropping the partial it writes): the
-	// partial moved with the folder.
+	// partial moved with the folder. The lock first (followLock): a fetch
+	// that cannot hold it there stays where it was, and fails.
 	follow := func(ctx context.Context) error {
 		p, err := s.episodeAt(ctx, root, lib, mount, e.Path, params, job.ID)
 		if err != nil || p == e.Path {
 			return err
 		}
+		if err := s.followLock(ctx, lock, p); err != nil {
+			return err
+		}
 		from := e.Path
 		e.Path, c.Path = p, p
 		job.Path, claimed.Path = &p, &p
-		lock.follow(p)
 		s.adoptOwn(job, root, from, params, c.Temp)
 		return nil
 	}
@@ -373,7 +376,8 @@ func leaseFailure(ctx context.Context, err error, lost string) error {
 // record and partial behind. ctx's error when it ended while the show lock
 // was awaited. Before a download its show lock is taken and released before
 // the fetch's own locks; during one (settle) and after it, under them (the
-// episode's lock before the show's, as the publication takes them).
+// episode's lock before the show's, as the publication takes them), the
+// episode's lock then following to the new path (followLock).
 func (s *service) episodeAt(ctx context.Context, root *os.Root, lib link.Library, mount, p string, params fetchParams, self int64) (string, error) {
 	from := path.Dir(p)
 	if f, err := podcast.Read(root, from); err == nil && f.ShowID == params.ShowID {

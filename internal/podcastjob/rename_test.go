@@ -993,6 +993,13 @@ func TestAFetchFollowsItsShowRenamedMidDownload(t *testing.T) {
 // cuts the connection; every later request goes to then.
 func cutAfterRename(t *testing.T, h *harness, job jobs.Job, audio []byte, calls *atomic.Int32, then http.HandlerFunc) {
 	t.Helper()
+	cutAfterMove(t, h, job, audio, calls, os.Rename, then)
+}
+
+// cutAfterMove is cutAfterRename with the show folder moved by move (given
+// its path and the new one).
+func cutAfterMove(t *testing.T, h *harness, job jobs.Job, audio []byte, calls *atomic.Int32, move func(from, to string) error, then http.HandlerFunc) {
+	t.Helper()
 	written := func(n int64) bool {
 		for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
 			if matches := partials(filepath.Join(h.mount, "Fixture Show")); len(matches) == 1 {
@@ -1026,10 +1033,55 @@ func cutAfterRename(t *testing.T, h *harness, job jobs.Job, audio []byte, calls 
 		if _, ok := h.handler.s.readCheckpoint(job); !ok {
 			t.Error("no download record before the rename")
 		}
-		if err := os.Rename(filepath.Join(h.mount, "Fixture Show"), filepath.Join(h.mount, "Renamed Show")); err != nil {
+		if err := move(filepath.Join(h.mount, "Fixture Show"), filepath.Join(h.mount, "Renamed Show")); err != nil {
 			t.Error(err)
 		}
 	})
+}
+
+// A show folder "renamed" by a copy and a delete while its episode downloads
+// (a move across filesystems, a file manager's): the lock file in the new
+// folder is a copy, not the file the fetch holds, so the lock cannot follow
+// the folder. The fetch takes the episode's lock there before it goes on from
+// the copied partial, rather than checkpoint, clear and publish there holding
+// none, and lets it go (the file removed) at its end.
+func TestAFetchFollowingACopiedFolderLocksItsEpisodeThere(t *testing.T) {
+	requireProbe(t)
+	h, job := audioHarness(t)
+	h.scan.knows = func(p string) bool { return strings.HasPrefix(p, "Fixture Show/") }
+	audio := data(t, "chap-v24-reverse.mp3")
+	moved := "Renamed Show/" + strings.TrimPrefix(*job.Path, "Fixture Show/")
+	lockFile := filepath.Join(h.mount, podcast.AttachmentPath(moved, ".fetch.lock"))
+	resume := resumeAt(t, audio)
+	var calls atomic.Int32
+	cutAfterMove(t, h, job, audio, &calls, func(from, to string) error {
+		if err := os.CopyFS(to, os.DirFS(from)); err != nil {
+			return err
+		}
+		return os.RemoveAll(from)
+	}, func(w http.ResponseWriter, r *http.Request) {
+		f, err := os.OpenFile(lockFile, os.O_RDWR, 0)
+		if err != nil {
+			t.Error("no lock file where the show is now", err)
+		} else {
+			if free, err := tryLock(f); err != nil || free {
+				t.Error("the fetch went on holding no lock on its episode where the show is now", err)
+			}
+			f.Close()
+		}
+		resume(w, r)
+	})
+	res, err := h.handler.FetchJob().Run(context.Background(), job, jobs.LocalReporter())
+	if got, ok := res.(fetchResult); err != nil || !ok || got.Path != moved || got.Fetch.Bytes != int64(len(audio)) || calls.Load() != 2 {
+		t.Fatal(res, err, calls.Load())
+	}
+	if _, err := os.Lstat(lockFile); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("the episode's lock was left in the copied folder", err)
+	}
+	if left := partials(filepath.Join(h.mount, "Renamed Show")); len(left) != 0 {
+		t.Fatal("a partial was left behind", left)
+	}
+	noRecords(t, h.handler.s)
 }
 
 // resumeAt answers a ranged request for the rest of audio from 2000 bytes,

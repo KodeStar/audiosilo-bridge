@@ -437,11 +437,50 @@ func (l *heldLock) release() { releaseLock(l.root, l.p, l.f) }
 
 // follow points l at episode's lock when the file there is the one held: a
 // show folder renamed by hand took the lock with it, and letting go removes
-// it there rather than leave it in the folder.
-func (l *heldLock) follow(episode string) {
-	if p := podcast.AttachmentPath(episode, ".fetch.lock"); lockedAt(l.root, p, l.f) {
-		l.p = p
+// it there rather than leave it in the folder. false when the file there is
+// not the one held (followLock).
+func (l *heldLock) follow(episode string) bool {
+	p := podcast.AttachmentPath(episode, ".fetch.lock")
+	if !lockedAt(l.root, p, l.f) {
+		return false
 	}
+	l.p = p
+	return true
+}
+
+// followLock moves l, the lock a fetch holds on its episode, to episode, the
+// path a show folder renamed by hand has it at now: the lock file moved with
+// the folder (follow), or, when the file there is not the one held (a folder
+// "renamed" by a copy and a delete, as a move across filesystems or a file
+// manager's is, or a lock file removed by hand), the lock there is taken
+// anew and the old one let go. Without it the fetch would go on, checkpoint,
+// clear and publish at the new path holding no lock there, beside a second
+// fetch of the episode or an Abandon clearing the partial it writes. It waits
+// one ceiling for a holder there (another download of the episode, which this
+// one would only repeat), then fails write_failed; l is unchanged on an error
+// (ctx ended, or the lock could not be taken).
+func (s *service) followLock(ctx context.Context, l *heldLock, episode string) error {
+	if l.follow(episode) {
+		return nil
+	}
+	wait, stop := context.WithTimeout(ctx, ceiling)
+	defer stop()
+	next, err := s.lockEpisode(wait, l.root, episode)
+	switch {
+	case err == nil:
+		l.release()
+		*l = *next
+		return nil
+	case ctx.Err() != nil:
+		return ctx.Err()
+	case l.follow(episode):
+		// The file there was the one held after all (a check the library
+		// failed just then): waited on, it could never be taken.
+		return nil
+	case wait.Err() != nil:
+		return fail("write_failed", "The episode could not be locked where its show folder is now.")
+	}
+	return err
 }
 
 // lockEpisode takes episode's .fetch.lock (fileLock), as a heldLock a fetch

@@ -2466,7 +2466,12 @@ internal/
             failure's exit, so a host retry resumes from the partial there, or
             makes its first one there, and a failure clears it there) and after the
             download, and publishes there from its partial, its record and lock
-            following (heldLock.follow), never downloading again. Under the
+            following (heldLock.follow), never downloading again. A folder
+            "renamed" by a copy and a delete (a move across filesystems) leaves
+            a copy of the lock file, not the one held: the fetch takes the lock
+            there anew before it moves (followLock, one ceiling's wait for a
+            holder, then write_failed where it was) rather than go on with
+            none. Under the
             episode's lock its own record moves even when a duplicate claim's
             open row names it (adoptOwn, also after a relocation before the
             download); one at the new path already wins and the old one is
