@@ -369,6 +369,13 @@ func (h *Fetch) run(parent context.Context, claimed *jobs.Job, rep *jobs.Reporte
 	chapters := podcast.ReadCHAP(rd, e.Path, received)
 	_ = rd.Close()
 	rep.Progress(jobs.Progress{Step: "writing", Message: "Saving the episode"})
+	// A case-only rename by hand since the follow above: the show lock is
+	// taken under the folder's spelling on disk, as every other job takes it.
+	if realPath(root, e.Path) != e.Path {
+		if err := follow(ctx); err != nil {
+			return nil, err
+		}
+	}
 	unlockShow, err := s.acquire(ctx, s.showKey(mount, path.Dir(e.Path)))
 	if err != nil {
 		return nil, err
@@ -454,8 +461,14 @@ func leaseFailure(ctx context.Context, err error, lost string) error {
 // episode's lock then following to the new path (followLock).
 func (s *service) episodeAt(ctx context.Context, root *os.Root, lib link.Library, mount, p string, params fetchParams, self int64) (string, error) {
 	from := path.Dir(p)
+	// Only under its spelling on disk: on a case-insensitive filesystem the
+	// old spelling of a folder renamed by hand only in case still reads its
+	// feed.json (not taken in yet), and the fetch would publish under a show
+	// lock keyed apart from every other job's (lockShow, realPath).
 	if f, err := podcast.Read(root, from); err == nil && f.ShowID == params.ShowID {
-		return p, nil
+		if real, err := podcast.RealName(root, from); err != nil || real == from {
+			return p, nil
+		}
 	}
 	show, _, unlock, err := s.lockShow(ctx, root, lib, mount, from, params.ShowID, nil)
 	if err != nil {

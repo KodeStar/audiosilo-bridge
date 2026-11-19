@@ -2136,6 +2136,44 @@ func TestALockRetakeNeverMakesTheFolder(t *testing.T) {
 	}
 }
 
+// A show folder renamed by hand only in case on a case-insensitive
+// filesystem, its cache row naming the old spelling (as the follow left it):
+// the row names this very folder, not another holding the show, so a poll
+// naming the old spelling takes the folder in under its spelling on disk
+// rather than refuse it as a copy for good. A running fetch naming the old
+// spelling finds its episode there too (episodeAt), never reading on under
+// the old one, whose show lock no other job takes.
+func TestACaseOnlyRenameWithACacheRowIsTakenIn(t *testing.T) {
+	h := newHarness(t)
+	show, id := followed(t, h)
+	lower := strings.ToLower(show)
+	renameShow(t, h, show, lower)
+	if _, err := os.Lstat(filepath.Join(h.mount, show)); err != nil {
+		t.Skip("the filesystem is case-sensitive")
+	}
+	root, err := os.OpenRoot(h.mount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	f := h.read(show)
+	episode := f.Episodes[0]
+	lib := link.Library{ID: 3, Kind: "podcasts", Root: h.mount}
+	want := lower + "/" + path.Base(episode.Path)
+	if got, err := h.handler.s.episodeAt(context.Background(), root, lib, h.mount, episode.Path, fetchParams{id, episode.ID}, 0); err != nil || got != want {
+		t.Fatal("the fetch stayed under the old spelling", got, err)
+	}
+	if f := h.read(lower); !strings.HasPrefix(f.Episodes[0].Path, lower+"/") {
+		t.Fatal("feed.json still names the old spelling", f.Episodes[0].Path)
+	}
+	params, _ := json.Marshal(map[string]string{"show_id": id, "etag": `"abc"`})
+	poll := jobs.Job{ID: 20, Kind: PollKind, LibraryID: &lib.ID, Path: &show, Params: params}
+	res, err := h.handler.PollJob().Run(context.Background(), poll, jobs.LocalReporter())
+	if err != nil || fields(t, res)["show_path"] != lower {
+		t.Fatal(res, err)
+	}
+}
+
 // A show folder whose feed.json cannot be read, its show held by no other
 // folder: the first job there searches the library for the show, and the
 // next ones within a minute fail the same way without searching again (a

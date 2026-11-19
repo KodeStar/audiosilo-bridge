@@ -2567,8 +2567,11 @@ internal/
             (one moved there when names were swapped), nor its partial. Every
             job resolves its show folder's spelling on disk (podcast.RealName:
             realPath at a fetch's start, lockShow, relocate's cache row,
-            find) before it locks it, so a case-only rename by hand never
-            leaves two jobs locking one folder under two names. A fetch whose folder lockShow takes in where it is (renamed
+            find, adopt's cache row, episodeAt's quick check and the
+            publication) before it locks it, so a case-only rename by hand
+            never leaves two jobs locking one folder under two names, and a
+            cache row naming the old spelling never makes the folder pass for
+            a copy of itself. A fetch whose folder lockShow takes in where it is (renamed
             back by hand after a take-in) reads its episode again there rather
             than failing as not found. A fetch whose folder is renamed while it
             downloads finds the show again (episodeAt) whenever its partial is
