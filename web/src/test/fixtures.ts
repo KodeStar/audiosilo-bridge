@@ -114,6 +114,7 @@ export function libraryFixture(over: Partial<Library> = {}): Library {
       error: '',
     },
     checked_at: '2026-10-15T10:00:00.123456789Z',
+    unanswered_at: null,
     locked: false,
     ...over,
   };

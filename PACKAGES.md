@@ -2223,7 +2223,11 @@ internal/
             its failures (a zero one, or a past date, counts as none), else
             RetryFirst (1 min) doubling per such run in a row, at most RetryMax
             (30 min); a run the server answered ends it (one that asked nothing
-            leaves it). Only the
+            leaves it). A kept state carries when the check left it in place
+            (Entry.UnansweredAt, the page API's unanswered_at, null once a check
+            is answered; never on the server's wire): the Libraries tab says the
+            last check got no answer and the results are the earlier ones. Held
+            is the hold and its failure, which CheckMappings logs. Only the
             heartbeat's periodic run waits for Due: a mapping edit, Check now and
             a changed library list check at once (the page's two on the Bridge's
             background context, so shutdown ends them). A check cut short by its

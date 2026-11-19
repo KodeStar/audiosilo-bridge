@@ -55,6 +55,22 @@ describe('LibrariesTab', () => {
     expect(screen.getByText('Checked book')).toBeInTheDocument();
   });
 
+  it('says when the last check got no answer and the results are the earlier ones', async () => {
+    const kept = libraryFixture({ unanswered_at: new Date(Date.now() - 120_000).toISOString() });
+    const answered = libraryFixture({
+      library: { id: 2, name: 'More books', root: '/more', kind: 'books' },
+    });
+    mockFetch({ 'GET /api/libraries': { body: { libraries: [kept, answered] } } });
+    render(<LibrariesTab client={api()} />);
+    const notes = await screen.findAllByText(/The server gave no answer/);
+    expect(notes).toHaveLength(1);
+    expect(notes[0]).toHaveTextContent(
+      'The server gave no answer (2 min ago). These are the results of the check before it. The Bridge will check again.',
+    );
+    // The earlier result still shows.
+    expect(screen.getAllByText('Mapped')).toHaveLength(2);
+  });
+
   it('locks the folder when the environment sets it', async () => {
     mockFetch({
       'GET /api/libraries': { body: { libraries: [libraryFixture({ locked: true })] } },

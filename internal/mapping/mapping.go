@@ -229,6 +229,9 @@ type Entry struct {
 	Configured bool                `json:"configured"`
 	Status     *link.LibraryStatus `json:"status"`
 	CheckedAt  *time.Time          `json:"checked_at"`
+	// UnansweredAt is when a check since CheckedAt last got no definite answer
+	// from the server (nil when none did): Status is the result before it.
+	UnansweredAt *time.Time `json:"unanswered_at"`
 }
 
 // MountFunc says where the Bridge sees a library (config.Config.MountFor).
@@ -255,10 +258,11 @@ type Registry struct {
 	libs    []link.Library
 	results map[int64]result
 	// spacing is CheckSpacing (shorter in tests). holdUntil is when Due may
-	// next start a run after one the server didn't answer; held counts such
-	// runs in a row.
+	// next start a run after one the server didn't answer, holdWhy that run's
+	// failure; held counts such runs in a row.
 	spacing   time.Duration
 	holdUntil time.Time
+	holdWhy   string
 	held      int
 	// gen counts Forget calls (a pair, an unpair, a refused token): a run's
 	// reads from before one were the old link's, so they are dropped.
@@ -275,11 +279,13 @@ type Registry struct {
 // result is a library's last known state. retry: a check since then got no
 // definite answer from the server, so the library is due again once the hold
 // ends (status and at are still the state before it, or that failure when the
-// library had none at its mount).
+// library had none at its mount). unanswered is when the last such check left
+// an earlier state in place (zero when status is the last check's own).
 type result struct {
-	status link.LibraryStatus
-	at     time.Time
-	retry  bool
+	status     link.LibraryStatus
+	at         time.Time
+	retry      bool
+	unanswered time.Time
 }
 
 // NewRegistry returns an empty Registry.
@@ -317,7 +323,7 @@ func (r *Registry) Forget() {
 	defer r.mu.Unlock()
 	r.libs = nil
 	clear(r.results)
-	r.held, r.holdUntil = 0, time.Time{}
+	r.held, r.holdUntil, r.holdWhy = 0, time.Time{}, ""
 	r.pendAll, r.pendSrc = false, nil
 	clear(r.pend)
 	r.gen++
@@ -382,6 +388,9 @@ func (r *Registry) Entries(mount MountFunc) []Entry {
 		if res, ok := r.results[l.ID]; ok {
 			st, at := res.status, res.at
 			e.Status, e.CheckedAt = &st, &at
+			if unanswered := res.unanswered; !unanswered.IsZero() {
+				e.UnansweredAt = &unanswered
+			}
 		}
 		out = append(out, e)
 	}
@@ -468,7 +477,8 @@ func (r *Registry) Check(ctx context.Context, src BookSource, mount MountFunc, n
 				r.mu.Unlock()
 				break // the link changed: the rest of this pass is the old link's
 			}
-			r.record(st, err, now())
+			at := now()
+			r.record(st, err, at)
 			if err != nil {
 				if unanswered == nil || retryAfter(err) >= retryAfter(unanswered) {
 					unanswered = err
@@ -476,7 +486,7 @@ func (r *Registry) Check(ctx context.Context, src BookSource, mount MountFunc, n
 				if _, limited := link.RateLimited(err); limited || errors.Is(err, link.ErrUnauthorized) {
 					ended = true
 					for _, rest := range libs[i+1:] {
-						r.markRetry(rest.ID)
+						r.markRetry(rest.ID, at)
 					}
 				}
 			}
@@ -583,17 +593,18 @@ func (r *Registry) record(st link.LibraryStatus, unanswered error, at time.Time)
 	prev, ok := r.results[st.LibraryID]
 	var lost unproven
 	if unanswered != nil && ok && prev.status.MountPath == st.MountPath && !errors.As(unanswered, &lost) {
-		r.markRetry(st.LibraryID)
+		r.markRetry(st.LibraryID, at)
 		return
 	}
 	r.results[st.LibraryID] = result{status: st, at: at, retry: unanswered != nil}
 }
 
-// markRetry makes a checked library due again after the hold (r.mu held); one
+// markRetry makes a checked library due again after the hold (r.mu held), its
+// state the one from before the check at that the server didn't answer; one
 // with no check yet is due anyway.
-func (r *Registry) markRetry(id int64) {
+func (r *Registry) markRetry(id int64, at time.Time) {
 	if res, ok := r.results[id]; ok {
-		res.retry = true
+		res.retry, res.unanswered = true, at
 		r.results[id] = res
 	}
 }
@@ -604,7 +615,7 @@ func (r *Registry) markRetry(id int64) {
 // such run in a row, at most RetryMax.
 func (r *Registry) holdAfter(unanswered error, now time.Time) {
 	if unanswered == nil {
-		r.held, r.holdUntil = 0, time.Time{}
+		r.held, r.holdUntil, r.holdWhy = 0, time.Time{}, ""
 		return
 	}
 	r.held++
@@ -619,7 +630,7 @@ func (r *Registry) holdAfter(unanswered error, now time.Time) {
 	if !ok {
 		wait = RetryMax // Backoff gives up past Max; a hold stops there
 	}
-	r.holdUntil = now.Add(wait)
+	r.holdUntil, r.holdWhy = now.Add(wait), unanswered.Error()
 }
 
 // retryAfter is the wait a failure's answer asked for (its Retry-After), 0
@@ -630,6 +641,14 @@ func retryAfter(err error) time.Duration {
 		return apiErr.RetryAfter
 	}
 	return 0
+}
+
+// Held reports the hold a run the server didn't answer left: when Due may next
+// start a run, and that run's failure ("" when there is no hold).
+func (r *Registry) Held() (until time.Time, why string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.holdUntil, r.holdWhy
 }
 
 // checkHold is the hold's policy as a link.Backoff that never runs out of

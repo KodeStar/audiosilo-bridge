@@ -145,6 +145,14 @@ function LibraryCard({
           </>
         )}
         <Row label="Checked">{lib.checked_at ? <Ago at={lib.checked_at} /> : 'Not yet'}</Row>
+        {lib.unanswered_at && (
+          <Row label="Last check">
+            <span className="text-amber-300">
+              The server gave no answer (<Ago at={lib.unanswered_at} />
+              ). These are the results of the check before it. The Bridge will check again.
+            </span>
+          </Row>
+        )}
       </dl>
       <div className="mt-4">
         {lib.locked ? (

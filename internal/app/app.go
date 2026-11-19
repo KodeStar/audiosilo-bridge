@@ -599,6 +599,12 @@ func (b *Bridge) CheckMappings(ctx context.Context, ids ...int64) {
 		// A check queued behind a running one is run (and beaten) by that one:
 		// beating here too would ask for it again while it is still due.
 		if b.libs.Check(ctx, cl, b.mount, time.Now, ids...) {
+			// A check the server didn't answer keeps the last results: the
+			// page says so per library, the log says why.
+			if until, why := b.libs.Held(); why != "" && ctx.Err() == nil {
+				b.log.Warn("bridge: the server didn't answer a mapping check; keeping the last results and checking again later",
+					"err", why, "again_at", until.Format(time.RFC3339))
+			}
 			b.Kick()
 			b.sweepLibrivox(ctx)
 			b.sweepPodcasts(ctx)

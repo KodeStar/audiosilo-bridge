@@ -638,6 +638,63 @@ func TestHoldKeepsTheLongestRetryAfter(t *testing.T) {
 	}
 }
 
+// The page's entries say when a check left an earlier state in place: for the
+// library the server didn't answer and for those the 429 kept the pass from,
+// not for one whose check is its own result (answered, or a first failure),
+// and no longer once a check is answered.
+func TestEntriesSayWhenACheckWentUnanswered(t *testing.T) {
+	t.Parallel()
+	root, files := library(t)
+	mount := func(int64, string) (string, bool) { return root, true }
+	at := time.Date(2026, 11, 19, 10, 0, 0, 0, time.UTC)
+	r := NewRegistry()
+	r.spacing = time.Millisecond
+	r.SetLibraries([]link.Library{{ID: 1, Root: root}, {ID: 2, Root: root}, {ID: 3, Root: root}})
+	src := &scripted{book: &link.Book{Path: "Author/Book", Files: files}, err: map[int64]error{
+		3: &link.APIError{Status: http.StatusBadGateway},
+	}}
+	r.Check(context.Background(), src, mount, func() time.Time { return at })
+	for _, e := range r.Entries(mount) {
+		if e.UnansweredAt != nil {
+			t.Fatalf("library %d: a check that is its own result is marked unanswered at %v", e.Library.ID, e.UnansweredAt)
+		}
+	}
+	if e := r.Entries(mount)[2]; e.Status == nil || e.Status.Mapped || e.Status.Error == "" {
+		t.Fatalf("a first unanswered check = %+v", e.Status)
+	}
+
+	src.answer(2, &link.APIError{Status: http.StatusTooManyRequests})
+	later := at.Add(time.Hour)
+	r.Check(context.Background(), src, mount, func() time.Time { return later })
+	entries := r.Entries(mount)
+	if entries[0].UnansweredAt != nil || *entries[0].CheckedAt != later {
+		t.Fatalf("the answered library: checked %v, unanswered %v", entries[0].CheckedAt, entries[0].UnansweredAt)
+	}
+	for _, e := range entries[1:] {
+		if e.UnansweredAt == nil || *e.UnansweredAt != later || *e.CheckedAt != at {
+			t.Fatalf("library %d: checked %v, unanswered %v, want the earlier result and the 429's time", e.Library.ID, e.CheckedAt, e.UnansweredAt)
+		}
+	}
+	if !entries[1].Status.Mapped || entries[2].Status.Mapped {
+		t.Fatalf("the earlier results were replaced: %+v, %+v", entries[1].Status, entries[2].Status)
+	}
+	if until, why := r.Held(); !strings.Contains(why, "429") || !until.Equal(later.Add(RetryFirst*2)) {
+		t.Fatalf("held until %v for %q, want the second unanswered run's two minutes and the 429", until, why)
+	}
+
+	src.answer(2, nil)
+	src.answer(3, nil)
+	r.Check(context.Background(), src, mount, func() time.Time { return later.Add(time.Minute) })
+	for _, e := range r.Entries(mount) {
+		if e.UnansweredAt != nil || !e.Status.Mapped {
+			t.Fatalf("library %d after an answered check: %+v, unanswered %v", e.Library.ID, e.Status, e.UnansweredAt)
+		}
+	}
+	if until, why := r.Held(); why != "" || !until.IsZero() {
+		t.Fatalf("still held until %v for %q after an answered run", until, why)
+	}
+}
+
 // The hold without a Retry-After doubles with each unanswered run in a row, at
 // most RetryMax, and a run the server answers ends it.
 func TestHoldBacksOff(t *testing.T) {
