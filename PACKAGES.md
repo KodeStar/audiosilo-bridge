@@ -2502,7 +2502,8 @@ internal/
             moves the paths of the pending journals, the committed trash
             manifests and then feed.json, so a stop part way through adopts
             again (a manifest it could not rewrite stops it before feed.json).
-            A journal naming a gone third folder moves too when its show id
+            A journal naming a gone third folder (or the folder itself under
+            a third spelling) moves too when its show id
             and its episode's id and file name are the show's (renamed again
             after an adoption that stopped part way); a pending one of another
             show still fails it. A feed.json over the 32 MiB read cap is

@@ -302,7 +302,8 @@ func listFolder(root *os.Root, dir string) ([]os.DirEntry, error) {
 // still carry under from moves to show. The pending journals and committed
 // trash manifests go first and feed.json last, so a stop part way through
 // leaves a folder ReadMoved finds renamed again, and a journal adopted already
-// is left as it is. A journal may also name a third folder that is gone: the
+// is left as it is. A journal may also name a third folder that is gone (or
+// is show itself spelt otherwise, a case-insensitive filesystem): the
 // folder was renamed again by hand after an adoption that moved its journals
 // stopped before feed.json. It moves too when it is this show's (its show id)
 // and names one of its episodes by id and file name. A pending journal that is
@@ -323,7 +324,9 @@ func Adopt(root *os.Root, show, from string, f *Feed, now time.Time) error {
 		if dir == show || !journalValid(j, dir) {
 			return false
 		}
-		if _, err := root.Lstat(dir); !errors.Is(err, os.ErrNotExist) {
+		// Gone, or show itself spelt otherwise (a case-insensitive filesystem:
+		// a second case-only rename after such a stop), as rehome takes it.
+		if _, err := root.Lstat(dir); !errors.Is(err, os.ErrNotExist) && !sameFolder(root, dir, show) {
 			return false
 		}
 		// f's episodes are all under from (episodesIn).

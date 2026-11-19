@@ -493,6 +493,43 @@ func TestACaseOnlyRenameIsTakenIn(t *testing.T) {
 	}
 }
 
+// A take-in that moved the journals to one spelling and stopped before
+// feed.json, then a second case-only rename by hand: the journal names the
+// folder under a spelling that is neither feed.json's nor the one on disk,
+// and still opens it. It is the folder's own, and moves with the take-in
+// rather than refuse it for good.
+func TestACaseOnlyRenameTakesInAJournalOfAnEarlierSpelling(t *testing.T) {
+	now := time.Date(2026, 10, 21, 8, 0, 0, 0, time.UTC)
+	root, j := journalFixture(t)
+	if err := Publish(root, nil, j, now, stopAt("journal")); !errors.Is(err, errStop) {
+		t.Fatal(err)
+	}
+	earlier := j
+	earlier.Path = "FIXTURE SHOW/" + strings.TrimPrefix(j.Path, "Fixture Show/")
+	putJournal(t, root, AttachmentPath(j.Path, ".publish.json"), earlier)
+	if err := os.Rename(root.Name()+"/Fixture Show", root.Name()+"/fixture show"); err != nil {
+		t.Fatal(err)
+	}
+	caseInsensitive(t, root)
+	f, from, err := ReadMoved(root, "fixture show")
+	if err != nil || from != "Fixture Show" {
+		t.Fatal(from, err)
+	}
+	if err := Adopt(root, "fixture show", from, f, now); err != nil {
+		t.Fatal(err)
+	}
+	at := "fixture show/" + strings.TrimPrefix(j.Path, "Fixture Show/")
+	if got, err := ReadJournal(root, AttachmentPath(at, ".publish.json")); err != nil || got.Path != at {
+		t.Fatal(got.Path, err)
+	}
+	if err := RecoverShow(root, "fixture show", now, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := root.Lstat(AttachmentPath(at, ".publish.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("the journal was left", err)
+	}
+}
+
 // RealName on a filesystem that tells names apart: the name as given, and the
 // Lstat's error for a name that is not there.
 func TestRealNameKeepsAnExactName(t *testing.T) {
