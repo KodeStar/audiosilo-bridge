@@ -111,6 +111,10 @@ type Scheduler struct {
 	// publishStored holds or waits for it.
 	pubMu    sync.Mutex
 	pubLocks map[int64]*publishLock
+
+	// afterReadmitClear, when set (tests), runs in readmit between the status
+	// clear and the forced re-run.
+	afterReadmitClear func()
 }
 
 // publishLock is one book's publish lock and the number of publishStored calls
@@ -1315,6 +1319,12 @@ func seriesLess(a, b store.Book) bool {
 func (s *Scheduler) publishStored(ctx context.Context, id int64) {
 	unlock := s.lockPublish(id)
 	defer unlock()
+	s.publishLocked(ctx, id)
+}
+
+// publishLocked is publishStored for a caller holding book id's publish lock
+// (readmit).
+func (s *Scheduler) publishLocked(ctx context.Context, id int64) {
 	b, err := s.db.GetBook(context.WithoutCancel(ctx), id)
 	if err != nil {
 		if !errors.Is(err, store.ErrNotFound) {

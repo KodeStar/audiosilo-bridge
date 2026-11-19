@@ -217,13 +217,23 @@ func logReadmitFailed(log *slog.Logger, what string, bookID int64, err error) {
 // two leaves the book admitted with its sentinel: the restart replays the stage's
 // outcome, which parks a round-cap park again, for the next Retry. Once the clear
 // is written the book is published as stored, the status put back included.
+//
+// The book's publish lock is held from the clear to that publish, so one book's
+// re-admits run one at a time: a failed one puts its status back before a later
+// one clears anything, never over the cleared status of a Retry that followed a
+// Cancel (restoreStatus could not tell that clear from its own).
 func (s *Scheduler) readmit(ctx context.Context, b store.Book) error {
 	release := s.holdDispatch(b.ID)
 	defer release()
+	unlock := s.lockPublish(b.ID)
+	defer unlock()
 	if err := s.db.ClearBookStatusIf(ctx, b.ID, b.Status, b.Error); err != nil {
 		return err
 	}
-	defer s.publishStored(ctx, b.ID)
+	defer s.publishLocked(ctx, b.ID)
+	if s.afterReadmitClear != nil {
+		s.afterReadmitClear()
+	}
 	if err := s.forceRerun(ctx, b); err != nil {
 		s.restoreStatus(ctx, b)
 		return err

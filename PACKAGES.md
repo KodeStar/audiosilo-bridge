@@ -1700,7 +1700,10 @@ internal/
             published under that book's own lock (lockPublish), so its events go out
             in the order of their reads and the last carries the latest write (a
             cancel's event never lands after the re-admit that followed it, an
-            advance never shows a pause that landed first as running). No page reads
+            advance never shows a pause that landed first as running). readmit holds
+            that lock from its status clear to its publish, so one book's re-admits
+            run one at a time: a failed one puts its status back (restoreStatus)
+            before a later one clears anything. No page reads
             book.state live today (no Hub.Subscribe caller, no SSE route): the hub's
             ring and the durable event log (the supervisor's ListEvents) do.
             generate's continues of a stopped run (which clear its cancel) and the

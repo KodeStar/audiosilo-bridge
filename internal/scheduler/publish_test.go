@@ -337,3 +337,65 @@ func TestResumeLosingToACancelKeepsTheCancel(t *testing.T) {
 		t.Fatalf("last frame %+v (%v), want the cancel", f, ok)
 	}
 }
+
+// A re-admit that fails after its clear puts its park back before a later Retry
+// of the book clears anything. A Cancel and then a Retry landing while it runs
+// end with the book admitted: the failed re-admit's put-back never lands over
+// the status that Retry cleared.
+func TestFailedReadmitNeverRestoresOverALaterRetry(t *testing.T) {
+	h := newHarness(t)
+	db := h.openDB(t)
+	bg := context.Background()
+	s := New(db, h.hub, NewStubExecutor(0, 0), 1, h.workRoot, false)
+
+	b := h.addBook(t, db, "twice", "", "")
+	if err := db.SetBookStatus(bg, b.ID, string(state.StatusNeedsAttention), "no convergence", string(state.ParkQANoConverge)); err != nil {
+		t.Fatal(err)
+	}
+	read, err := db.GetBook(bg, b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, fail := context.WithCancel(bg)
+	defer fail()
+	retried := make(chan error, 1)
+	var once sync.Once
+	s.afterReadmitClear = func() {
+		once.Do(func() {
+			if err := CancelStored(bg, db, b.ID); err != nil {
+				t.Error(err)
+			}
+			cancelled, err := db.GetBook(bg, b.ID) // the Retry's read: cancelled
+			if err != nil {
+				t.Error(err)
+			}
+			go func() { retried <- s.RetryAsRead(bg, cancelled) }()
+			// The Retry waits for this re-admit; one that didn't would clear the
+			// cancel here, before the failure below puts the park back.
+			select {
+			case err := <-retried:
+				retried <- err
+			case <-time.After(50 * time.Millisecond):
+			}
+			fail() // the forced re-run's store write fails
+		})
+	}
+	if err := s.readmit(ctx, read); !errors.Is(err, context.Canceled) {
+		t.Fatalf("the failed re-admit = %v, want context.Canceled", err)
+	}
+	select {
+	case err := <-retried:
+		if err != nil {
+			t.Fatalf("the Retry after the cancel = %v", err)
+		}
+	case <-time.After(waitLimit):
+		t.Fatal("the Retry never ran")
+	}
+	if got := storedFrame(t, db, b.ID); got.Status != "" || got.ParkCode != "" {
+		t.Fatalf("the failed re-admit parked the retried book again: %+v", got)
+	}
+	if f, ok := lastFrame(t, h.hub, b.ID); !ok || f != storedFrame(t, db, b.ID) {
+		t.Fatalf("last frame %+v (%v), stored %+v", f, ok, storedFrame(t, db, b.ID))
+	}
+}
