@@ -2310,9 +2310,10 @@ internal/
             A job that FAILS before it heard a cancel asks once more, for at most 5 s
             (Reporter.heldCancel): a cancel held there ends it cancelled, no cancel or no
             answer leaves it failed, a Bridge stopping meanwhile leaves it running; a done job
-            never asks. A failed end the server answers as cancelled (the job in its answer
-            stored cancelled: a cancel it held that the ask missed; or a 409 cancelled: a
-            retried report) is recorded cancelled (Runner.report; its error only in the log).
+            never asks. A failed or parked end the server answers as cancelled (the job in its
+            answer stored cancelled: a cancel it held that the ask missed, or one a park never
+            asks about; or a 409 cancelled: a retried report) is recorded cancelled
+            (Runner.report; its error only in the log).
             A parked report carries the park's
             message for people in progress park.message
             (withParkMessage: the job's park message without the "<code>: " an

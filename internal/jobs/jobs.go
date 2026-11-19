@@ -923,19 +923,20 @@ func (r *Runner) report(ctx context.Context, srv Server, sj store.ServerJob) {
 	got, err := srv.UpdateJob(ctx, sj.ID, u)
 	switch {
 	case err == nil, errors.Is(err, link.ErrNotHeld):
-		// The server ends a failure it had asked to stop as cancelled: its
-		// answer is the job as it stored it (a cancel heldCancel missed, or
-		// got no answer about), and its 409 cancelled a job it had ended
-		// first (a retried report among them).
+		// The server ends a failure or a park it had asked to stop as
+		// cancelled: its answer is the job as it stored it (a cancel
+		// heldCancel missed, or got no answer about; a park never asks), and
+		// its 409 cancelled a job it had ended first (a retried report among
+		// them).
 		cancelled := errors.Is(err, link.ErrCancelledHere) || (err == nil && got != nil && got.State == link.StateCancelled)
-		if sj.State == store.JobFailed && cancelled {
-			// A failure is recorded cancelled, as the server has it. A job
-			// that got its work done stays done here. Its error stays in the
-			// log here.
-			r.log.Info("bridge: the server had cancelled a job that failed; it is recorded cancelled", "job", sj.ID, "err", sj.Error)
+		if (sj.State == store.JobFailed || sj.State == store.JobNeedsAttention) && cancelled {
+			// A failure or a park is recorded cancelled, as the server has
+			// it: a parked job waits for no one now. A job that got its work
+			// done stays done here. Its error stays in the log here.
+			r.log.Info("bridge: the server had cancelled a job that failed or parked; it is recorded cancelled", "job", sj.ID, "state", sj.State, "err", sj.Error)
 			if ferr := r.store.FinishServerJob(ctx, sj.ID, sj.Attempt, store.JobCancelled, sj.Result, ""); ferr != nil {
-				// Still failed and unreported here: sent again, which the
-				// server answers 409 cancelled.
+				// Still failed or parked and unreported here: sent again,
+				// which the server answers 409 cancelled.
 				r.log.Warn("bridge: recording a job failed", "job", sj.ID, "err", ferr)
 				r.retry.Store(true)
 				return

@@ -345,6 +345,52 @@ func TestCancelRacingTheJobsEnd(t *testing.T) {
 	}
 }
 
+// A job that parks after a cancel was asked for (a park never asks about one)
+// is stored cancelled by the server, which says so in its answer (the job as it
+// stored it) or its 409 cancelled (it had ended the job): the Bridge's page
+// records it cancelled too, not parked waiting for someone. A park with no
+// cancel stays parked.
+func TestParkTheServerCancelled(t *testing.T) {
+	t.Parallel()
+	for name, c := range map[string]struct {
+		cancel, gone bool
+		want         string
+	}{
+		"park after a cancel":          {cancel: true, want: store.JobCancelled},
+		"park after a server's cancel": {gone: true, want: store.JobCancelled},
+		"park before any cancel":       {want: store.JobNeedsAttention},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			db, srv := openStore(t), newFakeServer()
+			srv.add(&link.Job{ID: 25, Kind: "k.park", Attempts: 1})
+			opts := testOpts()
+			// No keepalive goes before the job ends: only the end hears the cancel.
+			opts.Keepalive, opts.ReportRetry = time.Hour, time.Hour
+			r := New(db, func() Server { return srv }, nil, opts, handler{kind: "k.park", lane: LaneLight,
+				fn: func(context.Context, Job, *Reporter) (any, error) {
+					srv.mu.Lock()
+					srv.cancel[25], srv.gone[25] = c.cancel, c.gone
+					srv.mu.Unlock()
+					return nil, &ParkError{Code: "budget_exceeded", Message: "over the budget"}
+				}})
+			runFor(t, r, func() bool { return storedAs(db, 25, c.want) })
+			// The park went out as it was: the server's answer alone made it a cancel.
+			if state, _ := srv.finalState(25); state != link.StateNeedsAttention {
+				t.Fatalf("reported %q, want the park", state)
+			}
+			sj, err := db.GetServerJob(context.Background(), 25)
+			wantErr := "budget_exceeded: over the budget"
+			if c.want == store.JobCancelled {
+				wantErr = ""
+			}
+			if err != nil || sj.Error != wantErr {
+				t.Fatalf("stored = %+v, %v; want error %q", sj, err, wantErr)
+			}
+		})
+	}
+}
+
 // heldCancel's cause says by whom as a keepalive's answer would; no cancel, a
 // lost claim or no answer is none (the failure stands).
 func TestHeldCancel(t *testing.T) {
