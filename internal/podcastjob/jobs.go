@@ -1335,7 +1335,7 @@ func (s *service) adopt(ctx context.Context, root *os.Root, lib link.Library, mo
 	if err := s.writeNow(lib, mount, show); err != nil {
 		return false, err
 	}
-	if err := s.adoptCheckpoints(ctx, root, lib, show, from, f.ShowID, 0); err != nil {
+	if err := s.adoptCheckpoints(ctx, root, lib, show, from, f.ShowID, jobs.Job{}); err != nil {
 		slog.Warn("podcasts: the download records of a show folder renamed by hand could not be read; it is taken in later", "library", lib.ID, "show", show, "err", err)
 		return false, nil
 	}

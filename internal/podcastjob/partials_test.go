@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kodestar/audiosilo-bridge/internal/jobs"
 	"github.com/kodestar/audiosilo-bridge/internal/link"
 	"github.com/kodestar/audiosilo-bridge/internal/podcast"
 	"github.com/kodestar/audiosilo-bridge/internal/secrets"
@@ -141,9 +142,9 @@ func TestSweepPartialsRemovesOnlyOldUnrecordedOwnedTemps(t *testing.T) {
 						t.Fatal(err)
 					}
 					lib := link.Library{ID: 3, Kind: "podcasts", Root: h.mount}
-					s.cleanOwned(ctx, root, lib, h.mount, show, 82)
+					s.cleanOwned(ctx, root, lib, h.mount, show, jobs.Job{ID: 82})
 					if scenario == "linked show" || scenario == "no show" {
-						s.sweepPartials(ctx, root, lib, h.mount, []string{"Linked Show", "Loose Folder"}, 82)
+						s.sweepPartials(ctx, root, lib, h.mount, []string{"Linked Show", "Loose Folder"}, jobs.Job{ID: 82})
 					}
 				}
 				_, err = root.Lstat(target)

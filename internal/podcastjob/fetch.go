@@ -185,7 +185,7 @@ func (h *Fetch) run(parent context.Context, claimed *jobs.Job, rep *jobs.Reporte
 	}
 	if _, _, err = s.readEpisode(root, *job.Path, params); err != nil {
 		var p string
-		if p, err = s.episodeAt(waitCtx, root, lib, mount, *job.Path, params, job.ID); err != nil {
+		if p, err = s.episodeAt(waitCtx, root, lib, mount, *job.Path, params, job); err != nil {
 			return nil, err
 		}
 		if p != *job.Path {
@@ -214,7 +214,7 @@ func (h *Fetch) run(parent context.Context, claimed *jobs.Job, rep *jobs.Reporte
 		// removed, rather than left in the folder.
 		if !settled && !lock.held() && parent.Err() == nil {
 			sctx, stop := context.WithTimeout(parent, ceiling)
-			if p, err := s.episodeAt(sctx, root, lib, mount, *job.Path, params, job.ID); err == nil {
+			if p, err := s.episodeAt(sctx, root, lib, mount, *job.Path, params, job); err == nil {
 				lock.follow(p)
 			}
 			stop()
@@ -272,7 +272,7 @@ func (h *Fetch) run(parent context.Context, claimed *jobs.Job, rep *jobs.Reporte
 	// lock file, not the one held: the lock there is taken anew (followLock).
 	// No lock file there (a folder being deleted) is left so, never made again.
 	follow := func(ctx context.Context) error {
-		p, err := s.episodeAt(ctx, root, lib, mount, e.Path, params, job.ID)
+		p, err := s.episodeAt(ctx, root, lib, mount, e.Path, params, job)
 		if err != nil {
 			return err
 		}
@@ -606,7 +606,7 @@ func leaseFailure(ctx context.Context, err error, lost string) error {
 // own locks; during one (settle) and after it, under them (the
 // episode's lock before the show's, as the publication takes them), the
 // episode's lock then following to the new path (followLock).
-func (s *service) episodeAt(ctx context.Context, root *os.Root, lib link.Library, mount, p string, params fetchParams, self int64) (string, error) {
+func (s *service) episodeAt(ctx context.Context, root *os.Root, lib link.Library, mount, p string, params fetchParams, self jobs.Job) (string, error) {
 	from := path.Dir(p)
 	// Only under its spelling on disk: on a case-insensitive filesystem the
 	// old spelling of a folder renamed by hand only in case still reads its
@@ -1439,7 +1439,7 @@ func (h *Fetch) abandon(ctx context.Context, job jobs.Job, kept string) {
 		if err != nil {
 			return // not known: nothing is cleared (the day-old cleanup's then)
 		}
-		running = s.runningRecords(rows, lib.ID, job.ID)
+		running = s.runningRecords(rows, lib.ID, job)
 	}
 	for _, at := range s.recordsOf(job, p) {
 		job.Path = &at

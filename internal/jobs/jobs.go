@@ -77,6 +77,34 @@ func ClaimedFrom(job Job, serverID string) Job {
 	return job
 }
 
+// ClaimedUnder is ClaimedFrom for a job claimed under pairing (its Pairing):
+// for a handler's tests.
+func ClaimedUnder(job Job, serverID, pairing string) Job {
+	job.serverID, job.pairing = serverID, pairing
+	return job
+}
+
+// Pairing is the Bridge's pairing the job was claimed under, "" for a job no
+// runner claimed. With the job's server, id and attempt it names one claim:
+// a server hands a job out again under a later attempt (to a later pairing
+// too, once its lease on the earlier one lapsed), and job ids are each
+// server's own, so the id alone tells neither apart.
+func (j Job) Pairing() string { return j.pairing }
+
+// OwnRow reports whether sj is the row of this claim of the job: its id and,
+// for a job the runner claimed, its attempt, server and pairing. A row is
+// keyed by the job's id alone, so by the time a job looks (its work still
+// being released after its pairing ended) the row under its id may be a later
+// claim's, running here: that row is another job's to a handler, never its
+// own. A job no runner claimed (a test's, a local run's) owns the row of its
+// id.
+func (j Job) OwnRow(sj store.ServerJob) bool {
+	if sj.ID != j.ID {
+		return false
+	}
+	return j.serverID == "" || sj.Attempt == j.Attempt && sj.ServerID == j.serverID && sj.Pairing == j.pairing
+}
+
 // KeyServer is the server id the job's durable state and filings are keyed by:
 // its own (ServerID), or current (the pairing's) for a job no runner claimed.
 func (j Job) KeyServer(current string) string {

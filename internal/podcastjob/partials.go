@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kodestar/audiosilo-bridge/internal/jobs"
 	"github.com/kodestar/audiosilo-bridge/internal/link"
 	"github.com/kodestar/audiosilo-bridge/internal/podcast"
 	"github.com/kodestar/audiosilo-bridge/internal/secrets"
@@ -79,7 +80,7 @@ func (h *Subscribe) SweepPartials(ctx context.Context) {
 				}
 			}
 			s.sweepRecords(ctx, root, lib, mount, shows)
-			s.sweepPartials(ctx, root, lib, mount, shows, 0)
+			s.sweepPartials(ctx, root, lib, mount, shows, jobs.Job{})
 		}()
 	}
 }
@@ -97,7 +98,7 @@ func (h *Subscribe) SweepPartials(ctx context.Context) {
 // costs one folder listing; for any other the open jobs and the records are
 // read then, show by show, so a job claimed or a record written while an
 // earlier show was swept counts. Nothing is swept when either can't be read.
-func (s *service) sweepPartials(ctx context.Context, root *os.Root, lib link.Library, mount string, shows []string, self int64) {
+func (s *service) sweepPartials(ctx context.Context, root *os.Root, lib link.Library, mount string, shows []string, self jobs.Job) {
 	if s.o.DB == nil || s.o.DataDir == "" || s.writable(lib, mount) != nil {
 		return
 	}
@@ -144,16 +145,17 @@ func (s *service) sweepPartials(ctx context.Context, root *os.Root, lib link.Lib
 	}
 }
 
-// busy reports whether a job of this Bridge other than self is running in
-// library id's show (at the show's path or an episode's), or the open jobs
-// can't be read to tell. A claimed job's row is running from its claim.
-func (s *service) busy(ctx context.Context, id int64, show string, self int64) bool {
+// busy reports whether a job of this Bridge other than self (its own claim's
+// row, jobs.Job.OwnRow) is running in library id's show (at the show's path
+// or an episode's), or the open jobs can't be read to tell. A claimed job's
+// row is running from its claim.
+func (s *service) busy(ctx context.Context, id int64, show string, self jobs.Job) bool {
 	rows, err := s.o.DB.OpenServerJobs(ctx)
 	if err != nil {
 		return true
 	}
 	for _, r := range rows {
-		if r.ID != self && r.State == store.JobRunning && r.LibraryID != nil && *r.LibraryID == id && r.Path != nil && (*r.Path == show || path.Dir(*r.Path) == show) {
+		if !self.OwnRow(r) && r.State == store.JobRunning && r.LibraryID != nil && *r.LibraryID == id && r.Path != nil && (*r.Path == show || path.Dir(*r.Path) == show) {
 			return true
 		}
 	}

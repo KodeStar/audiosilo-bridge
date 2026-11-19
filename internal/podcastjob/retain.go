@@ -85,7 +85,7 @@ func (h *Retain) run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (
 	}
 	unlock()
 	result := retainResult{LibraryID: lib.ID, ShowPath: show, ShowID: p.ShowID}
-	s.cleanOwned(ctx, root, lib, mount, show, job.ID)
+	s.cleanOwned(ctx, root, lib, mount, show, job)
 	pairing := s.pairHash()
 	// ask stamps dispatch on the Bridge's monotonic clock: a snapshot's age runs from there.
 	warned := false

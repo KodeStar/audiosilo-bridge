@@ -2650,7 +2650,11 @@ internal/
             run's goroutine past the stop, where it could hold the stop up to
             2 min).
             retryReports sends only the current server's and pairing's
-            ends. HANDLERS key a job's durable state and filings by its own server,
+            ends. ONE CLAIM is a job's server, id, attempt and pairing
+            (Job.ServerID, Job.Pairing): a handler that asks whether the row
+            under its job's id is its own asks Job.OwnRow, never the id alone
+            (podcastjob's runningRecords, librivox's state.claimedBy keeps the
+            same four). HANDLERS key a job's durable state and filings by its own server,
             never the pairing's now (Job.ServerID, Job.KeyServer: correct's result
             and filing keys, podcastjob's show rows, artwork, locks and records
             through service.forJob, librivox's state, audible's account checks),
@@ -2875,7 +2879,12 @@ internal/
             is swept once old). It never clears the record of a download still
             running (a duplicate claim's, which shares it): one another running
             row names stays (runningRecords, as a take-in and the day-old
-            cleanup leave it), and the episode's lock is waited on for
+            cleanup leave it; only the row of the calling job's OWN claim is
+            set aside, jobs.Job.OwnRow: the row under its id may be a later
+            claim of the job by then, handed out again at a later attempt
+            while this one's release was on its way, and that download is a
+            running one like any other; cleanOwned and busy read "other than
+            self" the same way), and the episode's lock is waited on for
             abandonWait (10 s) at most, a record whose lock is still held
             staying too. A job still working under the old name never
             saves over, clears or abandons another show's record at its path
@@ -3817,9 +3826,14 @@ internal/
             (adopt), never fetched again. A stop or a lost claim keeps staging
             and state; a cancel, a
             failure or Abandon (not on a lost claim; only a state proven the
-            abandoned job's own: its server's id and job id recorded, in its own
+            abandoned CLAIM's own: its server's id, job id, attempt and pairing
+            recorded (state.claimedBy; a run takes a state up for its claim,
+            state.claim), in its own
             library, and the pairing's server the job's, so the libraries listed
-            are its server's, while unpaired too; a state of another job, of none
+            are its server's, while unpaired too; a state of another job, of a
+            later claim of the same job (handed out again at a later attempt,
+            under a pairing made since too, while this claim's release was on
+            its way), of none
             recorded, or a job of another server is left to the sweep) removes
             the staging folder, the author folder it made when empty, and the
             state (removeStaging reports whether the folder went: one that

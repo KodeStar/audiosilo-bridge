@@ -1590,6 +1590,40 @@ func TestUnknownServerIsNeverTheSame(t *testing.T) {
 	}
 }
 
+// A claim is a job's id, attempt, server and pairing: the row under a job's
+// id is its own only while all four are the claim's (allowed). A later
+// attempt, another pairing's claim of the same attempt, and another server's
+// job of the same id are other claims (denied). A job no runner claimed owns
+// the row of its id.
+func TestOwnRowIsTheClaimsNotTheIds(t *testing.T) {
+	job := ClaimedUnder(Job{ID: 5, Attempt: 1}, "a", "p1")
+	if job.ServerID() != "a" || job.Pairing() != "p1" {
+		t.Fatalf("claimed under %q, %q", job.ServerID(), job.Pairing())
+	}
+	for name, c := range map[string]struct {
+		row store.ServerJob
+		own bool
+	}{
+		"its own claim":       {store.ServerJob{ID: 5, Attempt: 1, ServerID: "a", Pairing: "p1"}, true},
+		"a later attempt":     {store.ServerJob{ID: 5, Attempt: 2, ServerID: "a", Pairing: "p1"}, false},
+		"another pairing":     {store.ServerJob{ID: 5, Attempt: 1, ServerID: "a", Pairing: "p2"}, false},
+		"re-paired, attempt2": {store.ServerJob{ID: 5, Attempt: 2, ServerID: "a", Pairing: "p2"}, false},
+		"another server":      {store.ServerJob{ID: 5, Attempt: 1, ServerID: "b", Pairing: "p1"}, false},
+		"another job":         {store.ServerJob{ID: 6, Attempt: 1, ServerID: "a", Pairing: "p1"}, false},
+	} {
+		if got := job.OwnRow(c.row); got != c.own {
+			t.Errorf("%s: OwnRow = %v, want %v", name, got, c.own)
+		}
+	}
+	local := Job{ID: 5}
+	if !local.OwnRow(store.ServerJob{ID: 5, Attempt: 3, ServerID: "a", Pairing: "p1"}) || local.OwnRow(store.ServerJob{ID: 6}) {
+		t.Error("a job no runner claimed doesn't own the row of its id, or owns another's")
+	}
+	if (Job{}).OwnRow(store.ServerJob{ID: 5}) {
+		t.Error("no job owns a row")
+	}
+}
+
 // Link hands a job's handler the link only while it reaches the job's server:
 // another server's link, or one that names no server, is no link at all.
 func TestLinkOnlyReachesTheJobsServer(t *testing.T) {

@@ -23,9 +23,9 @@ import (
 // good. A show folder the Bridge may not write never gets here: retain's own
 // write check (lockShow's guard, writeNow) refuses it first, and its records stay
 // until the folder may be written again. self is the calling job, whose own running row (at the
-// show's path) is not a live writer of these records. A record a running
+// show's path; its own claim's, jobs.Job.OwnRow) is not a live writer of these records. A record a running
 // fetch relocated to the show (runningRecords) stays too.
-func (s *service) cleanOwned(ctx context.Context, root *os.Root, lib link.Library, mount, show string, self int64) {
+func (s *service) cleanOwned(ctx context.Context, root *os.Root, lib link.Library, mount, show string, self jobs.Job) {
 	if s.o.DB == nil || s.o.DataDir == "" || s.writable(lib, mount) != nil {
 		return
 	}
@@ -35,7 +35,7 @@ func (s *service) cleanOwned(ctx context.Context, root *os.Root, lib link.Librar
 	}
 	live := func(p string) bool {
 		for _, r := range rows {
-			if r.ID != self && r.ServerID == s.o.ServerID() && r.LibraryID != nil && *r.LibraryID == lib.ID && r.Path != nil && (*r.Path == p || *r.Path == show) && r.State == store.JobRunning {
+			if !self.OwnRow(r) && r.ServerID == s.o.ServerID() && r.LibraryID != nil && *r.LibraryID == lib.ID && r.Path != nil && (*r.Path == p || *r.Path == show) && r.State == store.JobRunning {
 				return true
 			}
 		}
@@ -140,7 +140,7 @@ func (s *service) sweepRecords(ctx context.Context, root *os.Root, lib link.Libr
 	if err != nil {
 		return
 	}
-	running := s.runningRecords(rows, lib.ID, 0)
+	running := s.runningRecords(rows, lib.ID, jobs.Job{})
 	read := movedReader(root)
 	// Each record's folder spelt as it is on disk (podcast.RealName lists the
 	// library's root), found once per folder.
@@ -178,7 +178,7 @@ func (s *service) sweepRecords(ctx context.Context, root *os.Root, lib link.Libr
 		if rows, err = s.o.DB.OpenServerJobs(ctx); err != nil {
 			return
 		}
-		if running = s.runningRecords(rows, lib.ID, 0); running(c) {
+		if running = s.runningRecords(rows, lib.ID, jobs.Job{}); running(c) {
 			continue
 		}
 		if s.forgetRecord(dir, records, c) && !gone {

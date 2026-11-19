@@ -495,7 +495,7 @@ func (s *service) clearCheckpoint(job jobs.Job, root *os.Root, c *checkpoint) bo
 // other's way. An error means the records
 // could not be listed (or the open jobs read); one that could not be read or
 // moved is left as it was.
-func (s *service) adoptCheckpoints(ctx context.Context, root *os.Root, lib link.Library, show, from, id string, self int64) error {
+func (s *service) adoptCheckpoints(ctx context.Context, root *os.Root, lib link.Library, show, from, id string, self jobs.Job) error {
 	if s.o.DB == nil || s.o.DataDir == "" {
 		return nil
 	}
@@ -614,11 +614,15 @@ func (s *service) adoptOwn(job jobs.Job, root *os.Root, from string, p fetchPara
 // library lib is a running download's (self, the calling job, aside): a job
 // of this Bridge claimed at its path, or a fetch of its episode (one that
 // found the show elsewhere since its claim, Fetch's relocation, works at a
-// path its row does not name).
-func (s *service) runningRecords(rows []store.ServerJob, lib, self int64) func(checkpoint) bool {
+// path its row does not name). Only the row of self's own claim is set aside
+// (jobs.Job.OwnRow; the zero Job for no calling job): the row under its id
+// may be a later claim of the job by now (handed out again, at a later
+// attempt, to a pairing made since, while the earlier one's work is still
+// being released), and that claim's download is a running one like any other.
+func (s *service) runningRecords(rows []store.ServerJob, lib int64, self jobs.Job) func(checkpoint) bool {
 	paths, episodes := map[string]bool{}, map[fetchParams]bool{}
 	for _, r := range rows {
-		if r.ID == self || r.State != store.JobRunning || r.ServerID != s.o.ServerID() || r.LibraryID == nil || *r.LibraryID != lib {
+		if self.OwnRow(r) || r.State != store.JobRunning || r.ServerID != s.o.ServerID() || r.LibraryID == nil || *r.LibraryID != lib {
 			continue
 		}
 		if r.Path != nil {

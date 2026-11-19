@@ -264,7 +264,7 @@ func TestTakingInARenamedShowMovesItsDownloadRecords(t *testing.T) {
 				t.Fatal(err)
 			}
 			lib := link.Library{ID: 3, Kind: "podcasts", Root: h.mount}
-			if got, err := s.episodeAt(context.Background(), root, lib, h.mount, *job.Path, params, job.ID); err != nil || got != moved {
+			if got, err := s.episodeAt(context.Background(), root, lib, h.mount, *job.Path, params, job); err != nil || got != moved {
 				t.Fatal("the running download did not find its episode", got)
 			}
 			if _, old = s.readCheckpoint(job, fixtureShowID); old {
@@ -518,7 +518,7 @@ func TestTakingInMovesRecordsLeftUnderAGoneEarlierName(t *testing.T) {
 	}
 	lib := link.Library{ID: 3, Kind: "podcasts", Root: h.mount}
 	renameShow(t, h, "Fixture Show", "Middle Name")
-	if err := s.adoptCheckpoints(context.Background(), root, lib, "Middle Name", "Fixture Show", c.ShowID, 0); err != nil {
+	if err := s.adoptCheckpoints(context.Background(), root, lib, "Middle Name", "Fixture Show", c.ShowID, jobs.Job{}); err != nil {
 		t.Fatal(err)
 	}
 	base := strings.TrimPrefix(*job.Path, "Fixture Show/")
@@ -678,7 +678,7 @@ func TestAbandonClearsARecordMovedWithItsShow(t *testing.T) {
 	}
 	lib := link.Library{ID: 3, Kind: "podcasts", Root: h.mount}
 	moved := "Renamed Show/" + strings.TrimPrefix(*job.Path, "Fixture Show/")
-	if got, err := s.episodeAt(context.Background(), root, lib, h.mount, *job.Path, params, job.ID); err != nil || got != moved {
+	if got, err := s.episodeAt(context.Background(), root, lib, h.mount, *job.Path, params, job); err != nil || got != moved {
 		t.Fatal("the fetch did not find its episode", got, err)
 	}
 	h.handler.FetchJob().Abandon(context.Background(), job)
@@ -841,7 +841,7 @@ func TestATakeInLeavesARelocatedFetchsRecord(t *testing.T) {
 	renameShow(t, h, "Fixture Show", "Renamed Show")
 	base := strings.TrimPrefix(*job.Path, "Fixture Show/")
 	relocated, third := "Renamed Show/"+base, "Third Name/"+base
-	if got, err := s.episodeAt(context.Background(), root, lib, h.mount, *job.Path, params, job.ID); err != nil || got != relocated {
+	if got, err := s.episodeAt(context.Background(), root, lib, h.mount, *job.Path, params, job); err != nil || got != relocated {
 		t.Fatal("the fetch did not find its episode", got, err)
 	}
 	renameShow(t, h, "Renamed Show", "Third Name")
@@ -854,7 +854,7 @@ func TestATakeInLeavesARelocatedFetchsRecord(t *testing.T) {
 	if err := h.db.FinishServerJob(context.Background(), job.ID, 1, store.JobFailed, nil, ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.adoptCheckpoints(context.Background(), root, lib, "Third Name", "Renamed Show", c.ShowID, 0); err != nil {
+	if err := s.adoptCheckpoints(context.Background(), root, lib, "Third Name", "Renamed Show", c.ShowID, jobs.Job{}); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := s.readCheckpoint(jobs.Job{LibraryID: job.LibraryID, Path: &third}, fixtureShowID); !ok {
@@ -888,14 +888,14 @@ func TestAFetchThatCannotMoveItsRecordWaits(t *testing.T) {
 		t.Fatal(err)
 	}
 	s.o.DataDir = blocked
-	got, err := s.episodeAt(context.Background(), root, lib, h.mount, *job.Path, params, job.ID)
+	got, err := s.episodeAt(context.Background(), root, lib, h.mount, *job.Path, params, job)
 	var failure *netguard.Error
 	if !errors.As(err, &failure) || failure.Code != "write_failed" || got != *job.Path {
 		t.Fatal("the fetch moved without its record", got, err)
 	}
 	s.o.DataDir = data
 	moved := "Renamed Show/" + strings.TrimPrefix(*job.Path, "Fixture Show/")
-	if got, err := s.episodeAt(context.Background(), root, lib, h.mount, *job.Path, params, job.ID); err != nil || got != moved {
+	if got, err := s.episodeAt(context.Background(), root, lib, h.mount, *job.Path, params, job); err != nil || got != moved {
 		t.Fatal(got, err)
 	}
 }
@@ -2309,7 +2309,7 @@ func TestACaseOnlyRenameWithACacheRowIsTakenIn(t *testing.T) {
 	episode := f.Episodes[0]
 	lib := link.Library{ID: 3, Kind: "podcasts", Root: h.mount}
 	want := lower + "/" + path.Base(episode.Path)
-	if got, err := h.handler.s.episodeAt(context.Background(), root, lib, h.mount, episode.Path, fetchParams{id, episode.ID}, 0); err != nil || got != want {
+	if got, err := h.handler.s.episodeAt(context.Background(), root, lib, h.mount, episode.Path, fetchParams{id, episode.ID}, jobs.Job{}); err != nil || got != want {
 		t.Fatal("the fetch stayed under the old spelling", got, err)
 	}
 	if f := h.read(lower); !strings.HasPrefix(f.Episodes[0].Path, lower+"/") {
@@ -2883,6 +2883,60 @@ func TestAbandonLeavesTheRecordOfARunningFetchOfItsEpisode(t *testing.T) {
 			}
 			if !ok || saved.Temp != rec.Temp || v == "" || perr != nil {
 				t.Fatal("the record of a fetch still running was cleared", ok, v, perr)
+			}
+		})
+	}
+}
+
+// pairedScan is the harness's link as pairing p1's: a job claimed under p1
+// reaches its server's libraries through it (jobs.Link).
+type pairedScan struct{ *scanServer }
+
+func (pairedScan) PairingID() string { return "p1" }
+
+// The row under an abandoned job's id may be a later claim of the same job by
+// the time its work is released: the server took the job back and handed it
+// out again, at a later attempt, while the earlier claim's release was still
+// on its way. That claim's download is a running one like any other: its
+// record, partial and validator stay (denied: taken for the abandoned job's
+// own row by its id alone, and cleared under the running download). The
+// record goes when the row is still the abandoned claim's own (allowed).
+func TestAbandonLeavesTheRecordOfALaterClaimOfItsJob(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		attempt int
+		stays   bool
+	}{
+		{"a later attempt", 2, true},
+		{"its own claim", 1, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			h, job := audioHarness(t)
+			s := h.handler.s
+			s.o.Server = func() Server { return pairedScan{h.scan} }
+			root, err := os.OpenRoot(h.mount)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer root.Close()
+			job = jobs.ClaimedUnder(job, "server-1", "p1")
+			if err := h.db.RecordClaim(context.Background(), store.ServerJob{ID: job.ID, Kind: FetchKind, LibraryID: job.LibraryID, Path: job.Path,
+				Params: job.Params, Attempt: c.attempt, ServerID: "server-1", Pairing: "p1"}); err != nil {
+				t.Fatal(err)
+			}
+			rec := abandonRecord(t, s, root, job)
+			h.handler.FetchJob().Abandon(context.Background(), job)
+			saved, ok := s.readCheckpoint(job, rec.ShowID)
+			v, _ := s.o.Vault.Get(rec.Validator)
+			_, perr := root.Lstat(rec.partialName())
+			if !c.stays {
+				if ok || v != "" || !errors.Is(perr, os.ErrNotExist) {
+					t.Fatal("the abandoned claim's own record was left", ok, v, perr)
+				}
+				return
+			}
+			if !ok || saved.Temp != rec.Temp || v == "" || perr != nil {
+				t.Fatal("the record of a later claim's running download was cleared", ok, v, perr)
 			}
 		})
 	}

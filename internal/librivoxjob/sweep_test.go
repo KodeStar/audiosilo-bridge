@@ -315,6 +315,59 @@ func TestAbandonRemovesOnlyItsOwnJobsStaging(t *testing.T) {
 	}
 }
 
+// The state under an abandoned job's id may be a later claim's of the same
+// job by the time its work is released: the server handed the job out again,
+// at a later attempt (under a pairing made since, too: the Bridge unpaired
+// and paired again with the same server), and that claim's run took the
+// state up while the earlier claim's release was still on its way. The job's
+// id alone doesn't tell the two apart: the later claim's staging and state
+// stay (denied), and its own Abandon removes them (allowed).
+func TestAbandonLeavesTheStagingALaterClaimTookUp(t *testing.T) {
+	ctx := jobs.AbandonContext(context.Background(), false)
+	x := newHarness(t)
+	x.stageAndStop(t)
+	first := x.job(true)
+	if st := x.h.loadState(3, testID, testServer); st == nil || st.JobID != first.ID || st.Attempt != first.Attempt {
+		t.Fatalf("the first claim's state: %+v", st)
+	}
+	// The job handed out again: its run takes the state up, and stops.
+	second := first
+	second.Attempt = 2
+	x.fetch.files[sectionURL(3)].cut = []int{0, 0, 0}
+	if _, err := x.h.Run(context.Background(), second, jobs.LocalReporter()); err == nil {
+		t.Fatal("the outage didn't fail the run")
+	}
+	x.fetch.files[sectionURL(3)].cut = nil
+	if st := x.h.loadState(3, testID, testServer); st == nil || st.JobID != second.ID || st.Attempt != 2 {
+		t.Fatalf("the later claim's state: %+v", st)
+	}
+	x.h.Abandon(ctx, first)
+	if !x.exists(stagingDir) || !x.hasState() {
+		t.Fatal("Abandon of the earlier claim removed the staging a later claim took up")
+	}
+	x.h.Abandon(ctx, second)
+	if x.exists(stagingDir) || x.hasState() {
+		t.Fatal("Abandon left its own claim's staging")
+	}
+
+	// The same attempt number under another pairing is another claim too (a
+	// row of the old pairing dropped as the new one claims the job).
+	for pairing, removed := range map[string]bool{"p2": false, "p1": true} {
+		x = newHarness(t)
+		x.stageAndStop(t)
+		st := x.h.loadState(3, testID, testServer)
+		st.Pairing = pairing // the claim that last took the state up
+		if err := x.h.saveState(testID, st); err != nil {
+			t.Fatal(err)
+		}
+		x.srv = nil // unpaired: the libraries listed are still its server's
+		x.h.Abandon(ctx, jobs.ClaimedUnder(x.job(true), testServer, "p1"))
+		if gone := !x.exists(stagingDir) && !x.hasState(); gone != removed {
+			t.Fatalf("a state of pairing %q: Abandon of p1's claim removed the staging %v, want %v", pairing, gone, removed)
+		}
+	}
+}
+
 // A job of a server the Bridge is no longer paired with (dropped by the
 // runner) follows its state into no library of the new pairing, whose
 // libraries share ids with its own: Abandon removes nothing there (denied).
