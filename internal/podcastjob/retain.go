@@ -74,31 +74,14 @@ func (h *Retain) run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (
 	// A show folder renamed by hand is checked where it is now (as a poll is).
 	// The server names the old folder until its rescan, so its answers grant
 	// no deletion there until then (RetentionEligible: show_path).
-	show = s.where(ctx, root, lib, show, p.ShowID)
-	unlock, err := s.acquire(ctx, s.showKey(mount, show))
+	show, feed, unlock, err := s.lockShow(ctx, root, lib, mount, show, p.ShowID, func(show string) error {
+		return s.beforeWrite(lib, mount, show)
+	})
 	if err != nil {
 		return nil, err
 	}
-	var feed *podcast.Feed
-	err = func() error {
-		defer func() { unlock() }()
-		if err := s.beforeWrite(lib, mount, show); err != nil {
-			return err
-		}
-		var err error
-		if feed, err = s.readShow(ctx, root, lib, mount, show); err != nil || feed.ShowID == p.ShowID {
-			return err
-		}
-		show, feed, err = s.swapped(ctx, ctx, root, lib, mount, show, p.ShowID, &unlock)
-		return err
-	}()
-	if err != nil {
-		return nil, err
-	}
+	unlock()
 	result := retainResult{LibraryID: lib.ID, ShowPath: show, ShowID: p.ShowID}
-	if feed.ShowID != p.ShowID {
-		return nil, fail("identity_changed", "The podcast show identity changed.")
-	}
 	s.cleanOwned(ctx, root, lib, mount, show, job.ID)
 	pairing := s.pairHash()
 	// ask stamps dispatch on the Bridge's monotonic clock: a snapshot's age runs from there.

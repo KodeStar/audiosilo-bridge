@@ -307,31 +307,23 @@ func leaseFailure(ctx context.Context, err error, lost string) error {
 // episodeAt is where a fetch's episode p is now. The server names p's folder
 // until its rescan, so after a rename by hand that folder is gone or holds
 // another show: the episode is then the same file name in the folder holding
-// the show (where, swapped), read under that folder's lock and taken in first
-// when renamed, and the records of the show's interrupted downloads still
-// under the old folder, this job's own included, follow it (adoptCheckpoints).
-// p when its folder holds the show (the episode itself is missing) or none
-// does.
-// Its show locks are taken and released before the fetch's own locks.
+// the show (lockShow, which takes it in when renamed), and the records of the
+// show's interrupted downloads still under the old folder, this job's own
+// included, follow it (adoptCheckpoints). p when its folder holds the show
+// (the episode itself is missing) or none does. Its show lock is taken and
+// released before the fetch's own locks.
 func (s *service) episodeAt(ctx context.Context, root *os.Root, lib link.Library, mount, p string, params fetchParams, self int64) string {
 	from := path.Dir(p)
 	f, err := podcast.Read(root, from)
 	if err == nil && f.ShowID == params.ShowID || err != nil && !errors.Is(err, os.ErrNotExist) && !errors.Is(err, podcast.ErrInvalidFile) {
 		return p
 	}
-	show := s.where(ctx, root, lib, from, params.ShowID)
-	if _, err := root.Lstat(show); err != nil {
-		return p // gone, and no folder holds the show
-	}
-	unlock, err := s.acquire(ctx, s.showKey(mount, show))
+	show, _, unlock, err := s.lockShow(ctx, root, lib, mount, from, params.ShowID, nil)
 	if err != nil {
 		return p
 	}
-	defer func() { unlock() }()
-	if f, err = s.readShow(ctx, root, lib, mount, show); err == nil && f.ShowID != params.ShowID {
-		show, _, err = s.swapped(ctx, ctx, root, lib, mount, show, params.ShowID, &unlock)
-	}
-	if err != nil || show == from {
+	defer unlock()
+	if show == from {
 		return p
 	}
 	_ = s.adoptCheckpoints(ctx, lib, show, from, params.ShowID, self)

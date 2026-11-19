@@ -2382,9 +2382,9 @@ internal/
             lock when its read refuses (readShow, adopt: episodes, downloads,
             artwork, secret and cache row kept, the new folder rescanned). A
             poll, retain or fetch whose folder is gone finds the show by its id
-            (where, relocate: the cache row, then every folder); one whose
+            (lockShow, relocate: the cache row, then every folder); one whose
             folder holds another show (names swapped by hand) releases that
-            show lock and takes the other folder's (swapped; never two show
+            show lock and takes the other folder's (lockShow; never two show
             locks, and a fetch does this before its own locks); a follow joins
             it rather than starting a new show. The server still names the old
             folder until its own scan, so a retain there deletes nothing until

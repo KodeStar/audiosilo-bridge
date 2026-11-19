@@ -418,19 +418,17 @@ func TestAnOversizedSavedFeedIsTooLarge(t *testing.T) {
 	show := "Fixture Show"
 	params, _ := json.Marshal(map[string]string{"show_id": "a1b2c3d4e5f60718"})
 	lib := int64(3)
-	for _, job := range []jobs.Job{
-		{ID: 40, Kind: PollKind, LibraryID: &lib, Path: &show, Params: params},
-		{ID: 41, Kind: RetainKind, LibraryID: &lib, Path: &show, Params: params},
+	for _, c := range []struct {
+		handler jobs.Handler
+		job     jobs.Job
+	}{
+		{h.handler.PollJob(), jobs.Job{ID: 40, Kind: PollKind, LibraryID: &lib, Path: &show, Params: params}},
+		{h.handler.RetainJob(), jobs.Job{ID: 41, Kind: RetainKind, LibraryID: &lib, Path: &show, Params: params}},
 	} {
-		var err error
-		if job.Kind == PollKind {
-			_, err = h.handler.PollJob().Run(context.Background(), job, jobs.LocalReporter())
-		} else {
-			_, err = h.handler.RetainJob().Run(context.Background(), job, jobs.LocalReporter())
-		}
+		_, err := c.handler.Run(context.Background(), c.job, jobs.LocalReporter())
 		var failure *netguard.Error
 		if !errors.As(err, &failure) || failure.Code != "too_large" {
-			t.Fatal(job.Kind, err)
+			t.Fatal(c.job.Kind, err)
 		}
 	}
 }

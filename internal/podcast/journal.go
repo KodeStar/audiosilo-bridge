@@ -8,7 +8,6 @@ import (
 	"os"
 	"path"
 	"runtime"
-	"slices"
 	"strings"
 	"time"
 
@@ -281,15 +280,16 @@ func Adopt(root *os.Root, show, from string, f *Feed, now time.Time) error {
 		if dir == from {
 			return journalValid(j, from)
 		}
-		if dir == show || !journalValid(j, dir) || j.ShowID != f.ShowID {
+		if dir == show || !journalValid(j, dir) {
 			return false
 		}
 		if _, err := root.Lstat(dir); !errors.Is(err, os.ErrNotExist) {
 			return false
 		}
-		return slices.ContainsFunc(f.Episodes, func(e Episode) bool {
-			return e.ID == j.EpisodeID && path.Base(e.Path) == path.Base(j.Path)
-		})
+		// f's episodes are all under from (episodesIn).
+		at := *j
+		at.Path = from + "/" + path.Base(j.Path)
+		return episodeFor(f, at) != nil
 	}
 	move := func(name string) error {
 		j, err := ReadJournal(root, name)
