@@ -736,10 +736,11 @@ func (s *service) consume(ctx context.Context, b *budget, job *jobs.Job, root *o
 	out := &downloadWriter{file: file, hash: h, rep: rep, received: c.Offset, total: total}
 	var lastCheck, lastCheckpoint, lastFollow time.Time
 	// home keeps the partial written the one at its path (keepHome), following
-	// at most every 10 s while it is nowhere to be found, and at the end.
-	home := func(received int64, end bool) error {
+	// at most every 10 s while it is nowhere to be found (the end clears
+	// lastFollow, so it follows then).
+	home := func(received int64) error {
 		next, err := s.keepHome(ctx, root, c, file, received, func(ctx context.Context) error {
-			if !end && time.Since(lastFollow) < 10*time.Second {
+			if time.Since(lastFollow) < 10*time.Second {
 				return nil
 			}
 			lastFollow = time.Now()
@@ -748,7 +749,7 @@ func (s *service) consume(ctx context.Context, b *budget, job *jobs.Job, root *o
 		if err != nil {
 			return err
 		}
-		file, out.file, name = next, next, c.partialName()
+		file, out.file = next, next
 		return nil
 	}
 	out.check = func(received int64) error {
@@ -772,10 +773,10 @@ func (s *service) consume(ctx context.Context, b *budget, job *jobs.Job, root *o
 		if c.ServerHash != s.pairHash() {
 			return fail("identity_changed", "The Bridge pairing changed.")
 		}
-		if err := home(received, false); err != nil {
+		if err := home(received); err != nil {
 			return err
 		}
-		if _, err := mapping.SafeJoin(root.Name(), name); err != nil {
+		if _, err := mapping.SafeJoin(root.Name(), c.partialName()); err != nil {
 			return err
 		}
 		if checkpointDue {
@@ -806,7 +807,8 @@ func (s *service) consume(ctx context.Context, b *budget, job *jobs.Job, root *o
 	// its path: a show folder copied and deleted since the last check must not
 	// leave only the copy of its start there.
 	if copyErr == nil {
-		if err := home(c.Offset, true); err != nil {
+		lastFollow = time.Time{}
+		if err := home(c.Offset); err != nil {
 			return podcast.Fetch{}, "", err
 		}
 	}
@@ -856,11 +858,11 @@ func (s *service) partialOK(root *os.Root, c *checkpoint) bool {
 // finds it so) or it is not a regular file. An error is follow's, or a
 // failure writing the new partial.
 func (s *service) keepHome(ctx context.Context, root *os.Root, c *checkpoint, file *os.File, received int64, follow func(context.Context) error) (*os.File, error) {
-	held, err := file.Stat()
-	if err != nil {
+	if lockedAt(root, c.partialName(), file) {
 		return file, nil
 	}
-	if st, err := root.Lstat(c.partialName()); err == nil && os.SameFile(held, st) {
+	held, err := file.Stat()
+	if err != nil {
 		return file, nil
 	}
 	if err := follow(ctx); err != nil {
@@ -878,7 +880,9 @@ func (s *service) keepHome(ctx context.Context, root *os.Root, c *checkpoint, fi
 	if err != nil {
 		return file, fail("write_failed", "The episode could not be saved.")
 	}
-	if _, err := io.Copy(next, io.NewSectionReader(file, 0, received)); err != nil || next.Sync() != nil {
+	// A large buffer: os.File cannot copy from a SectionReader in the kernel,
+	// and this may be the whole episode.
+	if _, err := io.CopyBuffer(next, io.NewSectionReader(file, 0, received), make([]byte, 1<<20)); err != nil || next.Sync() != nil {
 		_ = next.Close()
 		_ = root.Remove(name)
 		return file, fail("write_failed", "The episode could not be saved.")

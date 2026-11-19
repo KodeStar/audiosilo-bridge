@@ -908,17 +908,7 @@ func TestAFetchFollowsItsShowRenamedMidDownload(t *testing.T) {
 	audio := data(t, "chap-v24-reverse.mp3")
 	old := *job.Path
 	// written waits until the partial in the show folder holds n bytes.
-	written := func(n int64) bool {
-		for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
-			matches := partials(filepath.Join(h.mount, "Fixture Show"))
-			if len(matches) == 1 {
-				if st, err := os.Stat(matches[0]); err == nil && st.Size() >= n {
-					return true
-				}
-			}
-		}
-		return false
-	}
+	written := func(n int64) bool { return partialAt(filepath.Join(h.mount, "Fixture Show"), n) }
 	var calls atomic.Int32
 	setAudio(h, func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
@@ -1000,16 +990,7 @@ func cutAfterRename(t *testing.T, h *harness, job jobs.Job, audio []byte, calls 
 // its path and the new one).
 func cutAfterMove(t *testing.T, h *harness, job jobs.Job, audio []byte, calls *atomic.Int32, move func(from, to string) error, then http.HandlerFunc) {
 	t.Helper()
-	written := func(n int64) bool {
-		for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
-			if matches := partials(filepath.Join(h.mount, "Fixture Show")); len(matches) == 1 {
-				if st, err := os.Stat(matches[0]); err == nil && st.Size() >= n {
-					return true
-				}
-			}
-		}
-		return false
-	}
+	written := func(n int64) bool { return partialAt(filepath.Join(h.mount, "Fixture Show"), n) }
 	setAudio(h, func(w http.ResponseWriter, r *http.Request) {
 		if calls.Add(1) > 1 {
 			then(w, r)
@@ -1055,10 +1036,7 @@ func TestAFetchFollowingACopiedFolderLocksItsEpisodeThere(t *testing.T) {
 	resume := resumeAt(t, audio)
 	var calls atomic.Int32
 	cutAfterMove(t, h, job, audio, &calls, func(from, to string) error {
-		if err := os.CopyFS(to, os.DirFS(from)); err != nil {
-			return err
-		}
-		return os.RemoveAll(from)
+		return copyThenDelete(t, from, to)
 	}, func(w http.ResponseWriter, r *http.Request) {
 		f, err := os.OpenFile(lockFile, os.O_RDWR, 0)
 		if err != nil {
@@ -1498,23 +1476,18 @@ func TestAFetchStoppedAfterItsShowWasRenamedResumesThere(t *testing.T) {
 // a file manager does: a copy, then the original deleted. to may be from
 // itself (the folder put back from a copy made elsewhere).
 func copyThenDelete(t *testing.T, from, to string) error {
-	src := from
+	stage := to
 	if to == from {
-		src = filepath.Join(t.TempDir(), "copy")
-		if err := os.CopyFS(src, os.DirFS(from)); err != nil {
-			return err
-		}
+		stage = filepath.Join(t.TempDir(), "copy")
 	}
-	if to != from {
-		if err := os.CopyFS(to, os.DirFS(src)); err != nil {
-			return err
-		}
+	if err := os.CopyFS(stage, os.DirFS(from)); err != nil {
+		return err
 	}
 	if err := os.RemoveAll(from); err != nil {
 		return err
 	}
-	if to == from {
-		return os.CopyFS(to, os.DirFS(src))
+	if stage != to {
+		return os.CopyFS(to, os.DirFS(stage))
 	}
 	return nil
 }
@@ -1699,7 +1672,7 @@ func TestAFetchRetryFindsItsShowPastAFolderAtItsOldName(t *testing.T) {
 				t.Fatal(other, "a partial was left behind", left)
 			}
 		}
-		if _, err := os.Lstat(filepath.Join(h.mount, "Fixture Show", ".audiosilo", strings.TrimPrefix(podcast.AttachmentPath(moved, ".fetch.lock"), "Renamed Show/.audiosilo/"))); !errors.Is(err, os.ErrNotExist) {
+		if _, err := os.Lstat(filepath.Join(h.mount, podcast.AttachmentPath(*job.Path, ".fetch.lock"))); !errors.Is(err, os.ErrNotExist) {
 			t.Fatal(other, "a lock was made in the folder at the old name", err)
 		}
 		noRecords(t, h.handler.s)
