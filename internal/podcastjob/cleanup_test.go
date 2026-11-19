@@ -429,6 +429,59 @@ func TestSweepRecordsDropsRecordsWhoseFolderIsGone(t *testing.T) {
 	}
 }
 
+// A move that wrote a record at its new path and could not remove the old one
+// leaves two records naming one validator (moveRecord). The sweep drops the
+// one under the gone folder and keeps the validator the moved record still
+// resumes by; alone, it goes with its record.
+func TestSweepRecordsKeepsAValidatorAMovedRecordNames(t *testing.T) {
+	h, job := audioHarness(t)
+	s := h.handler.s
+	root, err := os.OpenRoot(h.mount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	dir, err := s.checkpointRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dir.Close()
+	left := checkpoint{ServerHash: s.pairHash(), LibraryID: 3, ShowID: fixtureShowID, EpisodeID: "2cc306d831645e2b", Path: "Gone Show/" + path.Base(*job.Path), Temp: podcast.TempPrefix + nonce(), Validator: secrets.PodcastETagPrefix + nonce(), Offset: 6, Total: 100, UpdatedAt: s.o.Now().Add(-25 * time.Hour).Format(time.RFC3339)}
+	moved := left
+	moved.Path = *job.Path
+	if err := s.o.Vault.Set(left.Validator, `"one"`); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []checkpoint{left, moved} {
+		if err := writeRecord(dir, recordName(3, c.ShowID, c.Path), c); err != nil {
+			t.Fatal(err)
+		}
+	}
+	lib := link.Library{ID: 3, Kind: "podcasts", Root: h.mount}
+	sweep := func() (gone bool, validator string) {
+		s.sweepRecords(context.Background(), root, lib, h.mount, []string{path.Dir(*job.Path)})
+		_, err := dir.Lstat(recordName(3, left.ShowID, left.Path))
+		v, _ := s.o.Vault.Get(left.Validator)
+		return errors.Is(err, os.ErrNotExist), v
+	}
+	if gone, v := sweep(); !gone || v == "" {
+		t.Fatal("the validator a moved record names went with the record left behind:", gone, v)
+	}
+	if _, ok := s.readOwnRecord(dir, 3, moved.ShowID, moved.Path); !ok {
+		t.Fatal("the moved record was dropped")
+	}
+	// Left behind again, the moved record gone: nothing names the validator.
+	if err := writeRecord(dir, recordName(3, left.ShowID, left.Path), left); err != nil {
+		t.Fatal(err)
+	}
+	if err := dir.Remove(recordName(3, moved.ShowID, moved.Path)); err != nil {
+		t.Fatal(err)
+	}
+	if gone, v := sweep(); !gone || v != "" {
+		t.Fatal("a validator no record names was kept:", gone, v)
+	}
+}
+
 // A record of a show whose folder was renamed by hand and not taken in yet
 // is gone at its path but not orphaned: the show's take-in moves it, and the
 // download resumes from the partial the folder took along. The sweep leaves

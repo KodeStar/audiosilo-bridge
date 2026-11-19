@@ -143,18 +143,33 @@ func (s *service) sweepRecords(ctx context.Context, root *os.Root, lib link.Libr
 		if s.writable(lib, mount) != nil || !markerThere(root) {
 			return
 		}
-		if dir.Remove(name) == nil {
+		if dir.Remove(name) == nil && !validatorNamed(dir, records, c) {
 			s.dropValidator(c.Validator)
 		}
 	}
 }
 
+// validatorNamed reports whether another of records (as listed, read again
+// now) names record c's validator: a move that wrote the record at its new
+// path and could not remove the old one (moveRecord) leaves two naming one
+// validator and one partial, and dropping it with the old record would cost
+// the moved one its resume (loadCheckpoint clears a partial with no
+// validator), as migrateRecords never does either.
+func validatorNamed(dir *os.Root, records []checkpoint, c checkpoint) bool {
+	for _, o := range records {
+		if o.Validator != c.Validator || o.ShowID == c.ShowID && o.Path == c.Path {
+			continue
+		}
+		if now, err := readRecord(dir, recordName(o.LibraryID, o.ShowID, o.Path)); err == nil && now.Validator == c.Validator {
+			return true
+		}
+	}
+	return false
+}
+
 // markerThere reports whether root holds its library's marker (or cannot
 // say): a mount point whose share is gone holds none.
-func markerThere(root *os.Root) bool {
-	_, err := root.Lstat(mapping.MarkerPath)
-	return !errors.Is(err, os.ErrNotExist)
-}
+func markerThere(root *os.Root) bool { return folderThere(root, mapping.MarkerPath) }
 
 // movedReader is podcast.ReadMoved in root, each show folder read once.
 func movedReader(root *os.Root) func(string) (*podcast.Feed, string, error) {

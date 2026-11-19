@@ -2623,7 +2623,8 @@ internal/
             keeps them, as does a record whose partial is in a folder of its
             show renamed by hand and not taken in yet, which that take-in
             moves, and nothing goes while the library's marker is not there),
-            with their validators: an early end
+            with their validators (one a moved record still names stays,
+            validatorNamed): an early end
             (an episode found installed, a file in the way) or a take-in that
             could not move one leaves it there, and cleanOwned reads a show's
             records by its folder; the partials, unrecorded then, are swept
