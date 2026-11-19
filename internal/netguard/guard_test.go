@@ -148,6 +148,10 @@ func TestCapsStallAndConditional(t *testing.T) {
 		case "/stall":
 			w.(http.Flusher).Flush()
 			<-r.Context().Done()
+		case "/gzip-stall":
+			w.Header().Set("Content-Encoding", "gzip")
+			w.(http.Flusher).Flush()
+			<-r.Context().Done()
 		case "/304":
 			w.Header().Set("ETag", "abc")
 			w.WriteHeader(304)
@@ -167,9 +171,11 @@ func TestCapsStallAndConditional(t *testing.T) {
 		_, err := c.Fetch(context.Background(), Request{URL: server.URL + endpoint, MaxBytes: 100})
 		errorCode(t, err, "too_large")
 	}
-	_, err := c.Fetch(context.Background(), Request{URL: server.URL + "/stall", MaxBytes: 100})
-	errorCode(t, err, "timeout")
-	_, err = c.Fetch(context.Background(), Request{URL: server.URL + "/unsupported", MaxBytes: 100})
+	for _, endpoint := range []string{"/stall", "/gzip-stall"} {
+		_, err := c.Fetch(context.Background(), Request{URL: server.URL + endpoint, MaxBytes: 100})
+		errorCode(t, err, "timeout")
+	}
+	_, err := c.Fetch(context.Background(), Request{URL: server.URL + "/unsupported", MaxBytes: 100})
 	errorCode(t, err, "not_a_feed")
 	out, err := c.Fetch(context.Background(), Request{URL: server.URL + "/304", MaxBytes: 100})
 	if err != nil || out.Status != 304 || out.ETag != "abc" || len(out.Body) != 0 {

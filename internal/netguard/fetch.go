@@ -149,6 +149,9 @@ func (c *Client) once(ctx context.Context, in Request) (*Response, error) {
 			if corrupt(e) {
 				return nil, &Error{Code: "not_a_feed", Message: "The response has invalid gzip data."}
 			}
+			if ctx.Err() != nil {
+				return nil, &Error{Code: "timeout", Message: "The feed stopped responding."}
+			}
 			return nil, e // the connection's fault (classify): retried
 		}
 		defer func() { _ = gz.Close() }()
@@ -264,7 +267,7 @@ func retryable(e *Error) bool {
 }
 
 // classify names a failed request's code. A request whose context ended (its
-// deadline, a stall, the job's cancel) is a timeout, never a network failure:
+// deadline, the job's cancel or ceiling) is a timeout, never a network failure:
 // net/http reports a context cancelled with a cause as that cause, not as
 // context.Canceled, so ctx itself is checked too. The server counts a
 // cancelled poll's network as the feed's failure (BR-CANCEL-RACE).

@@ -2424,8 +2424,8 @@ internal/
             StatusError maps a host's HTTP answer to the failure, the feed's and
             the episode's alike (bridge#26): gone for 410, else http_<status>, a
             message naming what was asked for and the Retry-After seconds.
-            Classify(ctx, err): a request whose context ended (a deadline, a
-            stall, the job's cancel, with a cause too: net/http then reports the
+            Classify(ctx, err): a request whose context ended (a deadline, the
+            job's cancel or ceiling, with a cause too: net/http then reports the
             cause, not context.Canceled) is timeout, never network, which the
             server would count as the feed's failure (BR-CANCEL-RACE).
             Phase 2c-1 feed/artwork client: explicit DNS resolution and a socket
