@@ -2810,7 +2810,13 @@ internal/
             reports the library mapped (writable or not) at Options.Mount's path,
             through a per-poll dirCache (each folder listed once, a folder that
             doesn't exist never read); otherwise the books listing alone (a
-            listed book's folder, in any case, is exists/book). No Amazon request. Cuts a title's authors to 20 (the
+            listed book's folder, in any case, is exists/book). Two titles of
+            one poll planned into one folder (two editions at one position, a
+            template that doesn't tell them apart): the first plans as if alone,
+            each later one is exists with the conflict its backup would meet
+            once the first is there (file for the same file, else audio;
+            titlePlanner.claim), since the import places a title in a taken
+            folder nowhere else. No Amazon request. Cuts a title's authors to 20 (the
             server refuses a whole call over more), PUTs the titles in calls of 500
             under ONE poll id (job, attempt and a random suffix), the last final (an
             empty library sends one empty final call, so the server marks every

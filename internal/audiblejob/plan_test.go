@@ -305,3 +305,38 @@ func runParams(t *testing.T, h *Handler, params json.RawMessage) (Result, error)
 	}
 	return out.(Result), nil
 }
+
+// TestPlanTwoEditionsInOneFolder: two titles a poll's placement gives one
+// folder (two editions at one position of a series the library has none of)
+// can't both be backed up there, so the second's plan says exists, by what
+// its backup would meet once the first is there: the same file, or the
+// folder's audio. The first plans as if alone.
+func TestPlanTwoEditionsInOneFolder(t *testing.T) {
+	t.Parallel()
+	recs := []source.Record{
+		rec("B0EDIT0001", "First Dawn", "New Writer", "Dawn Road", 1),
+		rec("B0EDIT0002", "First Dawn", "New Writer", "Dawn Road", 1),
+		rec("B0EDIT0003", "First Dawn (Unabridged)", "New Writer", "Dawn Road", 1),
+		rec("B0EDIT0004", "Second Dawn", "New Writer", "Dawn Road", 2),
+	}
+	for _, mount := range []string{t.TempDir(), ""} {
+		tp := newTitlePlanner(1, "", nil, mount)
+		tp.planner.Expect(recs)
+		var got []link.AudiblePlan
+		for _, r := range recs {
+			got = append(got, *tp.plan(r))
+		}
+		tp.close()
+		const dir = "New Writer/Dawn Road/DR01 - First Dawn/"
+		for i, want := range []struct{ path, state, conflict string }{
+			{dir + "First Dawn.m4b", link.PlanNew, ""},
+			{dir + "First Dawn.m4b", link.PlanExists, link.ConflictFile},
+			{dir + "First Dawn (Unabridged).m4b", link.PlanExists, link.ConflictAudio},
+			{"New Writer/Dawn Road/DR02 - Second Dawn/Second Dawn.m4b", link.PlanJoins, ""},
+		} {
+			if p := got[i]; p.Path != want.path || p.State != want.state || p.Conflict != want.conflict {
+				t.Errorf("mount %q, %s: %+v, want %+v", mount, recs[i].ASIN, p, want)
+			}
+		}
+	}
+}
