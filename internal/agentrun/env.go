@@ -270,12 +270,15 @@ func (r *Runner) isOwnTmp(p string) bool {
 // never deleted), each through the folders on its way opened without
 // following a link and on the device mountinfo showed for TmpDir's tmpfs
 // (removeRunFile, proc_unix.go) and only while it is still the service's own;
-// a folder is removed only when empty, so nothing a host mounted under one is
+// a folder is removed only when empty (deepest first, so a planted folder
+// goes after what was planted in it), so nothing a host mounted under one is
 // reached. The endpoint's service calls it when it starts and after each run.
 func (r *Runner) sweepRunFiles() {
 	r.mountMu.Lock()
 	defer r.mountMu.Unlock()
 	dev, planted := r.walkMountsLocked()
+	sep := string(filepath.Separator)
+	slices.SortStableFunc(planted, func(a, b string) int { return strings.Count(b, sep) - strings.Count(a, sep) })
 	removed := 0
 	for _, rel := range planted {
 		if removeRunFile(r.opts.TmpDir, dev, rel, r.selfUID) {

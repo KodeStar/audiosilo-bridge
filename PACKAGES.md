@@ -3867,7 +3867,7 @@ internal/
             point, and on the device mountinfo shows for that tmpfs (its
             major:minor, mount.dev: never a file system mounted over TmpDir
             since mountinfo was read; runMade). Such files are swept
-            (sweepRunFiles: a fresh walk, then each removed
+            (sweepRunFiles: a fresh walk, then each removed, deepest first,
             through its folders opened without following a link and on that
             same device, while still the service's, a folder only when empty)
             when the service starts and after each job

@@ -1152,15 +1152,19 @@ func TestEndpointServiceSweepsRunFiles(t *testing.T) {
 	}
 	planted := filepath.Join(te.tmp, "x", "openai_api_key")
 	mkfile(t, planted)
+	// A folder of a credential's name with a file of one in it, both
+	// planted: the sweep takes the file first, so the folder goes with it.
+	plantedDir := filepath.Join(te.tmp, "auth.json")
+	mkfile(t, filepath.Join(plantedDir, "auth.json"))
 	if why := te.r.credentialProblem(); why != "" {
 		t.Fatalf("credentialProblem = %q, want none", why)
 	}
 	gone := func(p string) bool { _, err := os.Lstat(p); return errors.Is(err, fs.ErrNotExist) }
 	te.start(t)
 	deadline := time.Now().Add(10 * time.Second)
-	for !gone(planted) {
+	for !gone(planted) || !gone(plantedDir) {
 		if time.Now().After(deadline) {
-			t.Fatal("the file a run planted in the TmpDir is still there after the service started")
+			t.Fatal("the files a run planted in the TmpDir are still there after the service started")
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
