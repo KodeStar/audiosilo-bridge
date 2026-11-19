@@ -57,15 +57,15 @@ func (db *DB) SetAudiblePreorders(ctx context.Context, account string, ps []Audi
 	}
 	defer func() { _ = ins.Close() }()
 	for _, p := range ps {
-		if _, err := ins.ExecContext(ctx, account, p.ASIN, stamp(p.OrderedAt), stamp(p.LastSeenAt), p.Record); err != nil {
+		if _, err := ins.ExecContext(ctx, account, p.ASIN, Stamp(p.OrderedAt), Stamp(p.LastSeenAt), p.Record); err != nil {
 			return err
 		}
 	}
 	return tx.Commit()
 }
 
-// stamp is t as the store writes it, "" for a zero time.
-func stamp(t time.Time) string {
+// Stamp is t as the store writes it, "" for a zero time.
+func Stamp(t time.Time) string {
 	if t.IsZero() {
 		return ""
 	}

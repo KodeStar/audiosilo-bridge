@@ -43,6 +43,16 @@ func TestAudibleWireMirror(t *testing.T) {
 			w.WriteHeader(http.StatusNotFound)
 			_, _ = w.Write([]byte(`{"error":"no such Audible account","code":"unknown_account"}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/bridge/libraries/1/books":
+			switch r.URL.Query().Get("after") {
+			case "gone":
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(`{"error":"invalid cursor","code":"invalid_cursor"}`))
+				return
+			case "old":
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(`{"error":"invalid audible request: bad cursor","code":"invalid_request"}`))
+				return
+			}
 			if r.URL.Query().Get("after") == "" {
 				_, _ = w.Write([]byte(`{"books":[{"path":"A/One","title":"One","authors":["A"],"narrators":[],
 					"series":[{"name":"S","position":"1-3"}],"asin":"B000000001","isbn":"","duration":36012.4}],"next":"QQ"}`))
@@ -166,6 +176,13 @@ func TestAudibleWireMirror(t *testing.T) {
 	}
 	if q := calls[len(calls)-1].query; q != "after=QQ" {
 		t.Fatalf("query = %q", q)
+	}
+	// A refused after is ErrBadCursor: the code, or a server before 2.7.0's
+	// message (bridge#50).
+	for _, after := range []string{"gone", "old"} {
+		if _, err := c.LibraryBooks(ctx, 1, after, 0); !errors.Is(err, ErrBadCursor) {
+			t.Fatalf("refused after %q = %v", after, err)
+		}
 	}
 
 	if err := c.Enrich(ctx, 1, "A/One", "B000000001"); err != nil {

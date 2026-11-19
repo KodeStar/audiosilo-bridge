@@ -1643,6 +1643,14 @@ internal/
             attempt follows the book again (mapping open, row running) with
             share_off unset and no other generate job mapped to the book has
             share_off (shareResumableSQL; ShareResumable reads the same).
+            0020 (bridge#50) adds audible_push.row_read: the latest updated_at (the
+            server's clock, AudibleRow.Updated) of the feed rows read for the title's
+            book, moved on by Want/Seen/PendAudiblePush and, for a row read again at
+            the place recorded, ReadAudibleRow (SQL max: never back, an unreadable ''
+            leaves it; another book starts it again), forgotten with row_seen, kept by
+            RearmAudiblePush; what a read from the start compares a row's updated_at
+            with. Rows from before 0020 start with '' (row_seen is the Bridge's clock,
+            so the baseline's line alone applies until the title is read again).
   state/    per-book pipeline state machine: table-driven states/lanes/transitions,
             CanStart/NextState guards, the audit fix-loop cap. Pure, no I/O. M6 added
             ParkCode (typed park reasons - M7 added contrib_unavailable, core_needed,
@@ -2149,14 +2157,17 @@ internal/
             (AudiblePlan {library_id, path, file, kind, siblings, state, conflict,
             template}, null when matched; the Plan*/Conflict* constants), 4b owner
             fixes, unreleased on both sides so no capability gate),
-            LibraryBooks (limit <= MaxLibraryBooks 500) and Enrich (PUT
+            LibraryBooks (limit <= MaxLibraryBooks 500; a refused after -> ErrBadCursor, as the
+            feed's since, bridge#50) and Enrich (PUT
             .../enrichment?path= {"asin"}: 409 asin_set -> ErrASINSet, any 404 ->
             ErrNoBook). The server decodes titles and accounts strictly: send only
             the Wire block's fields. Phase 4c, audiblesync.go: AudibleSyncParams/Title (audible.sync's
             server-built params), PostAudibleListening (POST .../listening {sent_at, events}: a listen of
             no length or a finish, answered {server_time, results, progress}) and AudibleProgress (GET
-            /bridge/progress?account=&since=&limit= -> {rows, next, more, server_time}: next opaque and kept between
-            polls, server_time absent before server 2.7.0); 403 sync_off -> ErrSyncOff, 403 user_unavailable -> ErrUserUnavailable, a 400
+            /bridge/progress?account=&since=&limit=&refuse_stale=1 -> {rows, next, more, server_time}: next opaque
+            and kept between polls, server_time absent before server 2.7.0; refuse_stale=1 says this Bridge
+            handles a refused stale cursor, so a 2.7.0 server refuses one from another feed or past the end,
+            answering it as before 2.7.0 to a Bridge without the flag, v0.6.0, which would retry it for ever); 403 sync_off -> ErrSyncOff, 403 user_unavailable -> ErrUserUnavailable, a 400
             invalid_cursor on a sent since -> ErrBadCursor (a server before 2.7.0: invalid_request with
             the message "...: bad cursor"; any other 400 stays the APIError, bridge#50), a 404 for a missing route (code not_found,
             or none) -> ErrNoAudibleSync (a server before 2.6.0; a 404 with any other code stays
@@ -3101,11 +3112,23 @@ internal/
             never its time; the baseline, every read until one reaches the feed's end, takes only rows
             of the last 10 min by updated_at (counted back from the page's server_time, the server's
             clock, else the Bridge's from a server before 2.7.0, bridge#50), history after it is none; a row it fails to record keeps
-            the cursor, so the pass reads it again; a cursor the server refuses,
-            400, goes back to the feed's start, bridge#50, and that read, push_reread until one reaches
-            the feed's end, keeps the baseline's line (historyCutoff: a row changed more than 10 min before push_from
+            the cursor, so the pass reads it again; a cursor the server refuses
+            (ErrBadCursor: unreadable, another feed's, past the feed's end), goes back to the feed's start, bridge#50, and that read, push_reread until one reaches
+            the feed's end, keeps the baseline's line (historyCutoff: a row changed more than 10 min before push_from,
+            moved onto the server's clock by the page's server_time (skew against the Bridge's clock when the
+            page came back, not the pass's start),
             is history again whatever its place, so a server restored from a backup has no place
-            from before the baseline written over Audible's; one changed since is a new place)), skips rows by audible:<account>, keeps a
+            from before the baseline written over Audible's) and drops a title's place no later than the one last
+            read for it (olderThanKnown: updated_at not after row_read, the latest updated_at read for the title's book,
+            never moved back by a row written later with an earlier one, server time against server time with no skew (a Bridge clock wrong at the read and put right since
+            moves nothing), never at nor row_seen: a place
+            another device wrote between the read and the write to Audible, or a re-arm, is new; so a backup's row changed
+            after the baseline but older than the place handled since is history too; a row changed since is a
+            new place); refused resetStrikes (3) times with no pass between that had its kept cursor taken (a read
+            from the start has none to send, so it neither counts nor ends the run, whatever cursors it follows
+            to the feed's end; a server refusing even the cursors it
+            gave), the account waits resetWait (1 h), logged once, a push_error each refusal from then on,
+            until a pass has the cursor kept from the one before taken), skips rows by audible:<account>, keeps a
             row on a title the last sync didn't list for that book pending (listed 0,
             store.PendAudiblePush) until a sync lists it; for the places still for StillFor (3 min, since
             row_seen: the Bridge's clock) it drops one under 1 s, within 5 s of last_ms (debounce) or
@@ -3128,7 +3151,7 @@ internal/
             Bridge wrote the title's last place (last_ms), the server row it last read is
             still that place (within 5 s) and Audible's is behind it by more than 5 s,
             re-arms the push (store.RearmAudiblePush: want_ms = row_ms, row_seen the time of the
-            re-arm, last_ms -1 so the debounce keeps it, only while listed, nothing waiting, no push and no new row since the job read it;
+            re-arm, row_read kept, last_ms -1 so the debounce keeps it, only while listed, nothing waiting, no push and no new row since the job read it;
             Result.Reasserted). The push's read before the write still drops it if Audible
             moved further on. At most once per place the Bridge wrote (reasserted_ms, within 5 s,
             migration 0014; owner decision after review): a sync can't tell the app's stale
@@ -3192,7 +3215,8 @@ internal/
             and ApplyDestinations went in Phase 4b: audiblejob's import runs the
             steps. The manager's serverapi client went: the Bridge holds
             the paged listing. AllBooks (books.go, LibriVox L6) reads that listing
-            whole for audiblejob and librivoxjob. Deps: link, placement, source,
+            whole for audiblejob and librivoxjob (a cursor the server refuses,
+            link.ErrBadCursor, sends it back to the start once with the whole page bound again, bridge#50). Deps: link, placement, source,
             audiosilo-server/pkg/match.
   placement/ where a new book goes (the manager's): Auto (series siblings'
             folder and shortcode convention, else author/title) and templates.

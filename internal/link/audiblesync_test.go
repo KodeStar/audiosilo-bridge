@@ -118,10 +118,12 @@ func TestAudibleSyncWireMirror(t *testing.T) {
 			UpdatedAt: "2026-11-03T11:00:00Z", DeviceID: "web-1", Version: 42}) {
 		t.Fatalf("page = %+v, %v", page, err)
 	}
-	if queries[0] != "account=abcd1234&limit=200&since=Q0" {
+	// refuse_stale=1 on every poll: this Bridge handles a refused cursor, so a
+	// 2.7.0 server refuses a stale one rather than answering it as before.
+	if queries[0] != "account=abcd1234&limit=200&refuse_stale=1&since=Q0" {
 		t.Fatalf("query = %q", queries[0])
 	}
-	if page, err := c.AudibleProgress(ctx, "empty000", "", 5); err != nil || page.Rows == nil || queries[1] != "account=empty000&limit=5" {
+	if page, err := c.AudibleProgress(ctx, "empty000", "", 5); err != nil || page.Rows == nil || queries[1] != "account=empty000&limit=5&refuse_stale=1" {
 		t.Fatalf("empty = %+v, %v (%q)", page, err, queries[1])
 	}
 	if _, err := c.AudibleProgress(ctx, "kidkid00", "", 0); !errors.Is(err, ErrUserUnavailable) {

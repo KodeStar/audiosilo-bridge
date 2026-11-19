@@ -147,6 +147,7 @@ type Store interface {
 	AudibleWaiting(ctx context.Context, account string) ([]store.AudiblePush, error)
 	WantAudiblePush(ctx context.Context, account, asin string, row store.AudibleRow) error
 	SeenAudibleRow(ctx context.Context, account, asin string, row store.AudibleRow) error
+	ReadAudibleRow(ctx context.Context, account, asin string, updated time.Time) error
 	PendAudiblePush(ctx context.Context, account, asin string, libraryID int64, path string, want bool, row store.AudibleRow) error
 	AudiblePushed(ctx context.Context, account, asin string, ms int64, at time.Time) error
 	DropAudiblePush(ctx context.Context, account, asin string) error
