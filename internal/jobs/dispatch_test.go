@@ -757,8 +757,7 @@ func TestUnpairDropsRowsNoRunHolds(t *testing.T) {
 	startControlled(t, r)
 	cur.Store(nil)
 	r.Unpaired(srv)
-	// Each row is waited on for its own end: the running row's release and the
-	// finished row's mark land in either order.
+	// Each row is waited on for its own end, never inferred from the other's.
 	waitFor(t, func() bool {
 		sj, err := db.GetServerJob(ctx, 5)
 		return err == nil && sj.State == store.JobLost && sj.Error == errPairingEnded.Error()
@@ -1059,6 +1058,7 @@ func TestDroppedJobIsReadAgainAtItsTurn(t *testing.T) {
 		t.Fatalf("the new claim's row: %+v %v", sj, err)
 	}
 }
+
 // A dropped job whose id another server's claim of another kind took while
 // it waited its turn still has its work released (denied: left alone as a
 // claim of its own kind is, its work then released by nothing, as that
@@ -1091,7 +1091,6 @@ func TestDroppedJobWhoseIDAnotherKindTookIsStillReleased(t *testing.T) {
 		t.Fatalf("the new claim's row: %+v %v", sj, err)
 	}
 }
-
 
 // A stop interrupts a job whose pairing is ended on the page just after its
 // end was settled (left running to resume): the stop never waits for its work
