@@ -24,8 +24,7 @@ type titlePlanner struct {
 	libraryID int64
 	template  string // as the poll's params gave it
 	planner   *importjob.Planner
-	books     map[string]string // bookPaths
-	folded    map[string]string // bookPaths with each path folded, for an unmapped library
+	books     map[string]string // bookPaths; each path folded for an unmapped library
 	tops      map[string]bool   // the listed books' top folders, folded
 	fsys      transfer.LibraryFS
 	root      *os.Root
@@ -35,7 +34,7 @@ type titlePlanner struct {
 // isn't mapped at the Bridge (no disk checks).
 func newTitlePlanner(libraryID int64, template string, books []link.LibraryBook, mount string) *titlePlanner {
 	t := &titlePlanner{libraryID: libraryID, template: template, planner: importjob.NewPlanner(books),
-		books: bookPaths(books), tops: map[string]bool{}}
+		tops: map[string]bool{}}
 	for _, b := range books {
 		if top, _, ok := strings.Cut(b.Path, "/"); ok {
 			t.tops[strings.ToLower(top)] = true
@@ -46,16 +45,18 @@ func newTitlePlanner(libraryID int64, template string, books []link.LibraryBook,
 			t.root, t.fsys = root, newDirCache(transfer.RootFS(root))
 		}
 	}
-	if t.fsys == nil {
-		// Without the disk, a listed book under another case is the same
-		// folder on a case-insensitive disk (an SMB share, macOS, Windows;
-		// bridge#47): the plan warns rather than says a new folder.
-		t.folded = make(map[string]string, len(books))
-		for _, b := range books {
-			k := strings.ToLower(b.Path)
-			if _, ok := t.folded[k]; !ok {
-				t.folded[k] = b.Title
-			}
+	if t.fsys != nil {
+		t.books = bookPaths(books)
+		return t
+	}
+	// Without the disk, a listed book under another case is the same folder on
+	// a case-insensitive disk (an SMB share, macOS, Windows; bridge#47): the
+	// plan warns rather than says a new folder.
+	t.books = make(map[string]string, len(books))
+	for _, b := range books {
+		k := strings.ToLower(b.Path)
+		if _, ok := t.books[k]; !ok {
+			t.books[k] = b.Title
 		}
 	}
 	return t
@@ -94,7 +95,7 @@ func (t *titlePlanner) plan(rec source.Record) *link.AudiblePlan {
 		}
 		p.Conflict = conflict
 	default:
-		if _, _, ok := listedBook(strings.ToLower(rel), t.folded); ok {
+		if _, _, ok := listedBook(strings.ToLower(rel), t.books); ok {
 			p.Conflict = link.ConflictBook
 		}
 	}
