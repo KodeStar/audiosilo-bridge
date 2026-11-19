@@ -2070,6 +2070,9 @@ internal/
             (an HTML proxy page never becomes a message; RetryAfter carries a 429's
             Retry-After, seconds or an HTTP date, clamped at a day; RetryAfterSet
             distinguishes a valid zero wait from a missing or invalid header;
+            Transient is the status rule a retry goes by: a 5xx, a 408 or a 429
+            may be answered differently if asked again, any other status not
+            (jobs' report retry, mapping.BookReadSettled);
             RateLimited picks a 429 out, Backoff.Wait is the shared wait-out rule:
             Retry-After, else First doubling, Tries asks, each wait at most Max;
             the doubling stops at the first wait over Max, so no count of 429s
@@ -2168,8 +2171,8 @@ internal/
             book is NEVER mapped: with nothing to compare, a wrong mount would look
             right and a later write job would land in the wrong folder.
             BookReadSettled is the rule verify's and generate's book reads retry
-            by: settled is no such book or a 4xx but 401, 408 and 429 (asking
-            again won't change it). Podcast
+            by: settled is no such book or an answer that isn't a refused token
+            or link's APIError.Transient (asking again won't change it). Podcast
             libraries use CheckPodcast instead: a root .audiosilo/library.json
             marker (version, matching library id, random nonce) is read back by
             the server. Symlinked marker folders/files and invalid markers are
@@ -2387,9 +2390,8 @@ internal/
             book; no answer, a refused token, a 408, a 429 or a 5xx asked again
             with backoff for up to 2 min, the last ask at its end, any other 4xx
             failing at once: mapping.BookReadSettled, generate's fetchBook rule
-            too), CompareFiles through the mount, probes
-            the BOOK's folder for writing (spike 3: a root probe passed while a
-            0555 book folder refused),
+            too), CompareFiles through the mount, probes the BOOK's folder for
+            writing (spike 3: a root probe passed while a 0555 book folder refused),
             then holds, reporting each second. A mismatch is a failure WITH a result.
             Result {library_id, mount_path, path, files[{path,size,expected_size,ok}],
             writable, writable_error, elapsed_ms}: the server's console renders it.

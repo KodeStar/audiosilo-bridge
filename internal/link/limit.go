@@ -40,6 +40,14 @@ func (b Backoff) Wait(e *APIError, limited int) (time.Duration, bool) {
 	return wait, true
 }
 
+// Transient reports whether the same call may be answered differently if made
+// again soon: a 5xx, a 408 or a 429. Any other status is the server's answer
+// however soon it is asked again.
+func (e *APIError) Transient() bool {
+	return e.Status >= http.StatusInternalServerError ||
+		e.Status == http.StatusRequestTimeout || e.Status == http.StatusTooManyRequests
+}
+
 // RateLimited reports whether err is the server's 429 (for Backoff.Wait).
 func RateLimited(err error) (*APIError, bool) {
 	var e *APIError

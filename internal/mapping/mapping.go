@@ -16,7 +16,6 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"net/http"
 	"os"
 	"path"
 	"path/filepath"
@@ -161,14 +160,7 @@ func BookReadSettled(err error) bool {
 		return true
 	}
 	var apiErr *link.APIError
-	if !errors.As(err, &apiErr) {
-		return false
-	}
-	switch apiErr.Status {
-	case http.StatusRequestTimeout, http.StatusTooManyRequests:
-		return false
-	}
-	return apiErr.Status < http.StatusInternalServerError
+	return errors.As(err, &apiErr) && !apiErr.Transient()
 }
 
 // Check checks one library's mapping: mount must hold the server's sample book
