@@ -309,6 +309,10 @@ type harness struct {
 	root  string
 	work  string
 	h     *Handler
+	// bgCtx and bg are the handlers' Background tasks (Abandon's wait for an
+	// engine still starting): ended, and waited for, before the store closes.
+	bgCtx context.Context
+	bg    sync.WaitGroup
 }
 
 func newHarness(t *testing.T) *harness {
@@ -322,7 +326,20 @@ func newHarness(t *testing.T) *harness {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = db.Close() })
+	t.Cleanup(func() {
+		// Runs after the engine, the server and the handlers' background
+		// tasks stopped (cleanups run last first). A stop interrupts a query,
+		// and an interrupted SQLite connection is discarded: database/sql
+		// closes it, and opens another for a request waiting on the one
+		// connection, on goroutines Close doesn't wait for. Late, that
+		// leaves a bridge.db (or its -wal, -shm) in the folder TempDir is
+		// removing ("directory not empty"). A query here waits for the
+		// connection to settle, so Close below closes the last one.
+		ctx, cancel := context.WithTimeout(context.Background(), testwait.Scaled(10*time.Second))
+		defer cancel()
+		_, _ = db.ListRates(ctx)
+		_ = db.Close()
+	})
 	srv := newFakeServer()
 	srv.books["Author/Book"] = link.Book{LibraryID: 1, Path: "Author/Book", Files: []link.BookFile{
 		{Path: "Author/Book/01.mp3", Size: 9, ModTime: 1700000000}, {Path: "Author/Book/02.mp3", Size: 10, ModTime: 1700000001}},
@@ -355,8 +372,19 @@ func newHarness(t *testing.T) *harness {
 		t.Fatal("the scheduler never started")
 	}
 	hr := &harness{t: t, db: db, srv: srv, cl: cl, libs: libs, exec: exec, sched: sched, root: root, work: work}
+	bgCtx, bgStop := context.WithCancel(context.Background())
+	hr.bgCtx = bgCtx
+	t.Cleanup(func() { bgStop(); hr.bg.Wait() })
 	hr.h = hr.handler()
 	return hr
+}
+
+// background is the harness's Options.Background: the task runs on the
+// harness's context and the harness waits for it, where the default's
+// goroutine would go on polling the store (and its folder) after the test.
+func (hr *harness) background(fn func(context.Context)) {
+	hr.bg.Add(1)
+	go func() { defer hr.bg.Done(); fn(hr.bgCtx) }()
 }
 
 func (hr *harness) handler() *Handler {
@@ -368,7 +396,8 @@ func (hr *harness) handlerWith(engine func() Engine) *Handler {
 	return New(Options{DB: hr.db, Engine: engine, Libraries: hr.libs,
 		Mount:  func(int64, string) (string, bool) { return hr.libs.root, false },
 		Server: func() Server { return hr.cl }, WorkRoot: hr.work, Version: "0.2.0", RetentionDays: 30,
-		Poll: 10 * time.Millisecond, IdlePoll: 10 * time.Millisecond, Recheck: time.Hour, Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
+		Poll: 10 * time.Millisecond, IdlePoll: 10 * time.Millisecond, Recheck: time.Hour, Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Background: hr.background})
 }
 
 // publishRecorder is the harness's scheduler recording the books a change made
