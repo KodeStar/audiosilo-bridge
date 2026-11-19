@@ -371,7 +371,7 @@ func (w *mountWalk) areasHeldBy(point string) []string {
 	for _, area := range w.areas {
 		holder := ""
 		for p := range w.points {
-			if _, ok := below(p, area); ok && len(p) > len(holder) {
+			if fsutil.Within(p, area) && len(p) > len(holder) {
 				holder = p
 			}
 		}
@@ -382,20 +382,14 @@ func (w *mountWalk) areasHeldBy(point string) []string {
 	return out
 }
 
-// below is p's path relative to dir when p is dir or inside it.
+// below is p's path relative to dir when p is dir or inside it (fsutil.Within's
+// rule).
 func below(dir, p string) (string, bool) {
-	dir, p = filepath.Clean(dir), filepath.Clean(p)
-	if dir == p {
-		return ".", true
-	}
-	prefix := dir
-	if !strings.HasSuffix(prefix, string(filepath.Separator)) {
-		prefix += string(filepath.Separator)
-	}
-	if !strings.HasPrefix(p, prefix) {
+	if !fsutil.Within(dir, p) {
 		return "", false
 	}
-	return p[len(prefix):], true
+	rel, err := filepath.Rel(dir, p)
+	return rel, err == nil
 }
 
 // runMade reports whether p, a file of a credential's name the walk found, is
@@ -427,22 +421,26 @@ func (w *mountWalk) runMade(p string) bool {
 // foldersDown reports whether area and each folder between it and rel's last
 // element is a folder, not a link.
 func (w *mountWalk) foldersDown(area, rel string) bool {
-	cur := area
 	parts := strings.Split(rel, string(filepath.Separator))
-	for i := range parts {
-		if i > 0 {
-			cur = filepath.Join(cur, parts[i-1])
-		}
+	cur := area
+	for i := 0; ; i++ {
 		info, err := w.lstat(cur)
 		if err != nil || !info.IsDir() {
 			return false
 		}
+		if i == len(parts)-1 {
+			return true
+		}
+		cur = filepath.Join(cur, parts[i])
 	}
-	return true
 }
 
-// isOwn reports whether p is one of the service's own per-run folders.
-func (w *mountWalk) isOwn(p string) bool { return w.own != nil && w.own(p) }
+// enters reports whether the walk looks into p, a folder or a link it found:
+// not when another mount is mounted there (left to that one's look) nor when
+// it is one of the service's own per-run folders (own).
+func (w *mountWalk) enters(p string) bool {
+	return !w.points[p] && (w.own == nil || !w.own(p))
+}
 
 // credentialIn is the first credential's file in m, "" when none is: the deep
 // walk's, or for a tmpfs and the container's root (at its point and one
@@ -481,10 +479,9 @@ type walkDir struct {
 // own entry is always walked, as two folders can share a device and inode
 // where a file system merges others (overlayfs over two file systems, Unraid's
 // user shares, mergerfs), and passing the second over would pass over what it
-// holds. A folder another mount is mounted at is left to that one's walk, and
-// the service's own per-run folders (own) and a run's planted files (runMade)
-// are passed over. Breadth first, a credential near the top is found before a large folder
-// further down spends the budget.
+// holds. A folder it doesn't enter (enters) and a run's planted files
+// (runMade) are passed over. Breadth first, a credential near the top is found
+// before a large folder further down spends the budget.
 func (w *mountWalk) deepCredentialIn(point string) (string, error) {
 	queue := []walkDir{{path: point}}
 	seen := map[fileKey]bool{}
@@ -506,7 +503,7 @@ func (w *mountWalk) deepCredentialIn(point string) (string, error) {
 		for _, e := range entries {
 			p := filepath.Join(d.path, e.Name())
 			link := e.Type()&fs.ModeSymlink != 0
-			if (e.IsDir() || link) && !w.points[p] && !w.isOwn(p) {
+			if (e.IsDir() || link) && w.enters(p) {
 				queue = append(queue, walkDir{path: p, depth: d.depth + 1, link: link})
 			}
 		}
@@ -648,7 +645,7 @@ func (w *mountWalk) dirsOf(dir string) ([]string, error) {
 	out := []string{dir}
 	for _, e := range entries {
 		p := filepath.Join(dir, e.Name())
-		if (e.IsDir() || e.Type()&fs.ModeSymlink != 0) && !w.points[p] && !w.isOwn(p) {
+		if (e.IsDir() || e.Type()&fs.ModeSymlink != 0) && w.enters(p) {
 			out = append(out, p)
 		}
 	}

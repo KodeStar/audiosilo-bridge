@@ -128,10 +128,6 @@ type Runner struct {
 	looks     looks
 	mountMu   sync.Mutex
 	mountLast atomic.Pointer[string]
-	// runFiles are the files of a credential's name the last walk found a run
-	// had planted (mounts.go's runMade), which sweepRunFiles removes (guarded
-	// by mountMu).
-	runFiles []runFile
 	// ownTmp holds the per-run folders this runner has made in its TmpDir and
 	// not yet removed, by their exact paths, which the mount walk passes over
 	// (guarded by ownTmpMu).
@@ -405,11 +401,8 @@ func (r *Runner) version(ctx context.Context, path string) (string, error) {
 		return "", err
 	}
 	// Held from before the CLI writes anything there until it is gone.
-	r.holdOwnTmp(dir, true)
-	defer func() {
-		_ = os.RemoveAll(dir)
-		r.holdOwnTmp(dir, false)
-	}()
+	defer r.holdOwnTmp(dir)()
+	defer func() { _ = os.RemoveAll(dir) }()
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, path, "--version")

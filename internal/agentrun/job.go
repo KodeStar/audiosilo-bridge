@@ -110,8 +110,7 @@ func (r *Runner) execute(ctx context.Context, job *os.Root, id string) agentprot
 	runDir := filepath.Join(r.opts.TmpDir, "run-"+id)
 	// Held from before it exists until it is gone: the mount walk passes over
 	// it by this exact path (codex keeps its config.toml there).
-	r.holdOwnTmp(runDir, true)
-	defer r.holdOwnTmp(runDir, false)
+	defer r.holdOwnTmp(runDir)()
 	if err := os.Mkdir(runDir, 0o700); err != nil {
 		return refused("create the run's temp dir: " + err.Error())
 	}

@@ -224,20 +224,22 @@ func (r *Runner) tickMounts() {
 	r.walkMountsLocked()
 }
 
-// walkMountsLocked walks the mounts (mounts.go) and keeps the answer and the
-// files a run planted; mountMu is held, so two callers never walk at once.
-func (r *Runner) walkMountsLocked() {
+// walkMountsLocked walks the mounts (mounts.go), keeps the answer and returns
+// the files a run planted (runMade); mountMu is held, so two callers never
+// walk at once.
+func (r *Runner) walkMountsLocked() []runFile {
 	var why string
-	r.runFiles = nil
+	var planted []runFile
 	if ms, err := r.mounts(); err != nil {
 		why = "the mounts can't be read: " + err.Error()
 	} else {
 		w := newMountWalk(r.looks)
 		w.own, w.selfUID, w.areas = r.isOwnTmp, r.selfUID, r.writableAreas()
 		why = w.credentialMount(ms)
-		r.runFiles = w.runFiles
+		planted = w.runFiles
 	}
 	r.mountLast.Store(&why)
+	return planted
 }
 
 // writableAreas are the folders a run of the endpoint's service can write
@@ -253,15 +255,18 @@ func (r *Runner) writableAreas() []string {
 	return out
 }
 
-// holdOwnTmp records (on) or forgets the per-run folder dir as one of this
-// runner's own, which the mount walk passes over by its exact path.
-func (r *Runner) holdOwnTmp(dir string, on bool) {
+// holdOwnTmp records the per-run folder dir as one of this runner's own, which
+// the mount walk passes over by its exact path, until the returned release is
+// called (once the folder is gone).
+func (r *Runner) holdOwnTmp(dir string) (release func()) {
+	dir = filepath.Clean(dir)
 	r.ownTmpMu.Lock()
-	defer r.ownTmpMu.Unlock()
-	if on {
-		r.ownTmp[filepath.Clean(dir)] = true
-	} else {
-		delete(r.ownTmp, filepath.Clean(dir))
+	r.ownTmp[dir] = true
+	r.ownTmpMu.Unlock()
+	return func() {
+		r.ownTmpMu.Lock()
+		delete(r.ownTmp, dir)
+		r.ownTmpMu.Unlock()
 	}
 }
 
@@ -281,14 +286,12 @@ func (r *Runner) isOwnTmp(p string) bool {
 func (r *Runner) sweepRunFiles() {
 	r.mountMu.Lock()
 	defer r.mountMu.Unlock()
-	r.walkMountsLocked()
 	removed := 0
-	for _, f := range r.runFiles {
+	for _, f := range r.walkMountsLocked() {
 		if removeRunFile(f, r.selfUID) {
 			removed++
 		}
 	}
-	r.runFiles = nil
 	if removed > 0 {
 		r.log.Warn("agent runner: removed files of a credential's name a run left", "count", removed)
 	}
