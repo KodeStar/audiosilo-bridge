@@ -198,6 +198,14 @@ func (e *Executor) contribute(ctx context.Context, book store.Book, r scheduler.
 	// so the residual-nits fact rides to the UI; the note is process metadata only and
 	// NEVER enters the public issue/PR payload (metaissue parses the body).
 	auditNote := auditAcceptanceNote(book.WorkDir)
+	// The mode once more, just before filing: the work's lookups above take a
+	// while too. Only a turn to local is taken (a slug resolved in local mode
+	// may be a placeholder, never one to file under).
+	if e.db != nil && e.contribModeFor(book) != contribModeLocal {
+		if now, err := e.db.GetBook(ctx, book.ID); err == nil && now.ContribMode == store.ContribModeLocal {
+			book.ContribMode = now.ContribMode
+		}
+	}
 	if err := e.submitContributions(ctx, book, slug, artifacts, placeholderNote, auditNote); err != nil {
 		return scheduler.StageResult{}, err
 	}

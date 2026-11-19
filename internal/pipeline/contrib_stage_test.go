@@ -319,6 +319,8 @@ type fakeMeta struct {
 	works map[string]metaWorkFixture
 	// redirects maps a RETIRED work id -> its survivor (answered 301, as meta does).
 	redirects map[string]string
+	// onWork, when set, runs at each request for a work.
+	onWork func()
 }
 
 type metaWorkFixture struct {
@@ -355,6 +357,9 @@ func (m *fakeMeta) handle(w http.ResponseWriter, r *http.Request) {
 
 	case strings.HasPrefix(r.URL.Path, "/api/v1/works/"):
 		id := strings.TrimPrefix(r.URL.Path, "/api/v1/works/")
+		if m.onWork != nil {
+			m.onWork()
+		}
 		if to, ok := m.redirects[id]; ok {
 			http.Redirect(w, r, "/api/v1/works/"+to, http.StatusMovedPermanently)
 			return
@@ -1166,6 +1171,33 @@ func TestContributeReadsTheBooksModeNow(t *testing.T) {
 	}
 	if rows := rowsByKind(t, db, b.ID); rows[store.ContribKindCharacters].Status != store.ContribStatusLocal {
 		t.Fatalf("characters row = %+v, want local", rows[store.ContribKindCharacters])
+	}
+}
+
+// TestContributeTurnedLocalWhileResolving: a book turned local while the stage
+// looked its work up (after the read that follows the description) still
+// files nothing. Denied: the issues. Allowed: the local export under the slug
+// the lookup resolved.
+func TestContributeTurnedLocalWhileResolving(t *testing.T) {
+	db := openContribDB(t)
+	gh := newFakeGitHub(t)
+	export := t.TempDir()
+	meta := newFakeMeta(t, nil, map[string]metaWorkFixture{"reacher-01": {title: "Killing Floor"}})
+	b := contribBook(t, db, store.NewBook{WorkID: "reacher-01", ContribMode: store.ContribModeIssue}, baseChars("x"), baseRecaps("x"))
+	meta.onWork = func() {
+		if err := db.SetBookContribMode(context.Background(), b.ID, store.ContribModeLocal); err != nil {
+			t.Error(err)
+		}
+	}
+	cfg := contribConfig(t, db, contribModeIssue, gh.srv.URL, meta.srv.URL, export, fakeTokenResolver{token: "ghp_x"})
+	if _, err := NewExecutor(cfg).Execute(context.Background(), b, state.Contributing, scheduler.StageReport{}); err != nil {
+		t.Fatalf("contribute: %v", err)
+	}
+	if n := gh.issueCount(); n != 0 {
+		t.Fatalf("issues filed = %d, want none", n)
+	}
+	if _, err := os.Stat(filepath.Join(export, "reacher-01", charactersFileName)); err != nil {
+		t.Fatalf("local export: %v", err)
 	}
 }
 
