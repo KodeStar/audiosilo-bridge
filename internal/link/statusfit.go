@@ -16,7 +16,8 @@ const (
 
 // FitLibraries returns st with its library list cut so the whole body is at
 // most maxBytes and the list at most maxLibraries long, and how many mappings
-// were left out (0: st fits as it is, and is returned unchanged). What a job
+// were left out (0: st fits as it is, or the rest of its body is over
+// maxBytes alone so no cut can fit it, and is returned unchanged). What a job
 // needs is kept first: the writable libraries, then the mapped ones, then the
 // rest, each in list order; those kept stay in their list order. A server
 // without a library's mapping counts it as not mapped, so a cut library only
@@ -34,9 +35,14 @@ func FitLibraries(st Status, maxBytes, maxLibraries int) (Status, int) {
 	base.Libraries = []LibraryStatus{}
 	b, err := json.Marshal(base)
 	if err != nil {
-		return base, len(st.Libraries)
+		return st, 0
 	}
 	room := maxBytes - len(b) // the list's "[]" is already counted
+	if room < 0 {
+		// The rest of the body is over the bound alone: no cut makes it fit,
+		// and an empty list taken by a laxer server would unmap every library.
+		return st, 0
+	}
 	rank := func(l LibraryStatus) int {
 		switch {
 		case l.Writable:

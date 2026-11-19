@@ -72,3 +72,15 @@ func TestFitLibrariesCutsToTheCount(t *testing.T) {
 		t.Fatalf("kept %d, cut %d", len(got.Libraries), cut)
 	}
 }
+
+// A body over the bound without its list can't be cut to fit: the list is left
+// whole rather than sent empty (a laxer server taking it would unmap every
+// library).
+func TestFitLibrariesLeavesAListNoCutCanFit(t *testing.T) {
+	st := statusWith(600)
+	st.UIURL = "http://" + strings.Repeat("h", LegacyStatusBytes)
+	got, cut := FitLibraries(st, LegacyStatusBytes, LegacyStatusLibraries)
+	if cut != 0 || len(got.Libraries) != 600 {
+		t.Fatalf("cut %d, kept %d, want the list left whole", cut, len(got.Libraries))
+	}
+}
