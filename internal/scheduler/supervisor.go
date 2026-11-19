@@ -152,6 +152,7 @@ func (s *Scheduler) supervisorTerminateRequeue(ctx context.Context, b store.Book
 		} else if err != nil {
 			return "", err
 		}
+		s.publishStored(ctx, bookID)
 	}
 	s.notify()
 	if closed {
@@ -195,6 +196,7 @@ func (s *Scheduler) supervisorSupersedeRerun(ctx context.Context, b store.Book, 
 	} else if claim != nil {
 		return "", claim
 	}
+	defer s.publishStored(ctx, bookID)
 	s.cancelInflight(bookID)
 	// A stage running on the book finishes its last writes (a sentinel the rewind
 	// must drop, or a replay of it would stand for the re-run) before the rewind.
@@ -205,11 +207,6 @@ func (s *Scheduler) supervisorSupersedeRerun(ctx context.Context, b store.Book, 
 		}
 		return "", err
 	}
-	status, errMessage, parkCode := "", "", ""
-	if paused {
-		status, errMessage, parkCode = b.Status, b.Error, b.ParkCode
-	}
-	s.publishState(bookID, string(stage), status, errMessage, parkCode, "")
 	return "invalidated stage and later sentinels; rerun queued with released inputs/code", nil
 }
 
@@ -264,6 +261,6 @@ func (s *Scheduler) supervisorPark(ctx context.Context, b store.Book, code state
 		return "", err
 	}
 	s.cancelInflight(bookID)
-	s.publishState(bookID, b.State, string(state.StatusNeedsAttention), reason, string(effectiveCode), retryAt)
+	s.publishStored(ctx, bookID)
 	return "book parked and escalated", nil
 }

@@ -107,10 +107,21 @@ type Scheduler struct {
 	queueETA int64
 	haveETA  bool
 
-	// readmitMu orders a re-admit's write and publish against a cancel's read of
-	// the book and publish (publishCancelled), so a cancel's frame never lands
-	// after a re-admit that followed it.
-	readmitMu sync.Mutex
+	// pubMu guards pubLocks, each book's publish lock (lockPublish) while a
+	// publishStored holds or waits for it.
+	pubMu    sync.Mutex
+	pubLocks map[int64]*publishLock
+
+	// afterReadmitClear, when set (tests), runs in readmit between the status
+	// clear and the forced re-run.
+	afterReadmitClear func()
+}
+
+// publishLock is one book's publish lock and the number of publishStored calls
+// holding or waiting for it (the entry goes when none do).
+type publishLock struct {
+	mu   sync.Mutex
+	refs int
 }
 
 // queueStats is the published queue.stats snapshot, compared to suppress
@@ -195,6 +206,7 @@ func New(db *store.DB, hub *events.Hub, exec Executor, agentCap int, workRoot st
 		released:  map[int64]struct{}{},
 		rates:     map[string]float64{},
 		bookETA:   map[int64]int64{},
+		pubLocks:  map[int64]*publishLock{},
 	}
 	s.agentCap.Store(int64(agentCap))
 	return s
@@ -405,8 +417,13 @@ func (s *Scheduler) reconcileBook(ctx context.Context, b store.Book, succeeded m
 	// The state alone (a rewind is a position change, not a status change): a parked
 	// book keeps its typed reason and retry_at across a restart, and a status written
 	// since b was read (the Bridge cancelling a book in the store while its engine
-	// starts, scheduler.CancelStored, bridge#65) is never written back over.
-	return s.db.SetBookPipelineState(ctx, b.ID, rewind)
+	// starts, scheduler.CancelStored, bridge#65) is never written back over. The
+	// rewind is published as stored, as every other change to the book is.
+	if err := s.db.SetBookPipelineState(ctx, b.ID, rewind); err != nil {
+		return err
+	}
+	s.publishStored(ctx, b.ID)
+	return nil
 }
 
 // --- dispatch ---
@@ -950,11 +967,12 @@ func (s *Scheduler) advance(ctx context.Context, b store.Book, stage state.State
 	// Advance the pipeline state ONLY: status and error belong to the control path
 	// (pause/cancel/fail). Writing them here would clobber a pause/cancel that
 	// landed while this stage was finishing, and would wipe any error. The book was
-	// dispatched under StatusNone, so a normal advance publishes StatusNone.
+	// dispatched under StatusNone, but a pause or cancel may have landed since, so
+	// the frame is the stored book (publishStored), never StatusNone assumed.
 	if err := s.db.SetBookPipelineState(ctx, b.ID, string(next)); err != nil {
 		return
 	}
-	s.publishState(b.ID, string(next), "", "", "", "")
+	s.publishStored(ctx, b.ID)
 
 	// Auto-purge: a book that just reached done no longer needs its scratch. The worker
 	// already holds this book's in-flight slot, so reclaim WITHOUT reserving (that would
@@ -1067,7 +1085,7 @@ func (s *Scheduler) advanceWaypoint(ctx context.Context, b store.Book) (string, 
 	if err := s.db.SetBookPipelineState(ctx, b.ID, string(next)); err != nil {
 		return "", false
 	}
-	s.publishState(b.ID, string(next), "", "", "", "")
+	s.publishStored(ctx, b.ID)
 	return string(next), true
 }
 
@@ -1286,20 +1304,69 @@ func seriesLess(a, b store.Book) bool {
 
 // --- events ---
 
-// publishState emits a book.state SSE frame. retryAt is the scheduled auto-readmit
-// instant (RFC3339 UTC) when the write set one, else "" - it rides the patch so a client
-// can flip a parked book's hint to "retries automatically" (and clear it on re-admit)
-// without a separate GET. Every caller but setStatus passes "" (no scheduled retry).
-func (s *Scheduler) publishState(bookID int64, st, status, errMsg, parkCode, retryAt string) {
-	_ = s.hub.PublishBook("book.state", bookID, map[string]any{
-		"book_id":   bookID,
-		"state":     st,
-		"lane":      string(state.LaneOf(state.State(st))),
-		"status":    status,
-		"error":     errMsg,
-		"park_code": parkCode,
-		"retry_at":  retryAt,
+// publishStored publishes book id's book.state event as the store holds the
+// book now. Every change to a book's state or status publishes through it after
+// its write: the read and the publish hold the book's own lock (lockPublish), so
+// the book's events go out in the order of their reads and the last one carries
+// the latest write. A change that published the values it wrote instead could
+// land its event after a later change's (an advance finishing as a Pause lands, a
+// cancel's after the re-admit that followed it), and the book's last event would
+// not be its state. No page follows these events live today: the hub's replay
+// ring and the durable event log (the supervisor's ListEvents) are their readers.
+// retry_at is the scheduled auto-readmit instant (RFC3339 UTC) of a timed park,
+// "" otherwise. The write is done before this, so a caller's context ending now
+// never loses its event; a book deleted since publishes nothing.
+func (s *Scheduler) publishStored(ctx context.Context, id int64) {
+	unlock := s.lockPublish(id)
+	defer unlock()
+	s.publishLocked(ctx, id)
+}
+
+// publishLocked is publishStored for a caller holding book id's publish lock
+// (readmit).
+func (s *Scheduler) publishLocked(ctx context.Context, id int64) {
+	b, err := s.db.GetBook(context.WithoutCancel(ctx), id)
+	if err != nil {
+		if !errors.Is(err, store.ErrNotFound) {
+			slog.Warn("scheduler: reading a book to publish its state failed", "book_id", id, "err", err)
+		}
+		return
+	}
+	_ = s.hub.PublishBook("book.state", id, map[string]any{
+		"book_id":   id,
+		"state":     b.State,
+		"lane":      string(state.LaneOf(state.State(b.State))),
+		"status":    b.Status,
+		"error":     b.Error,
+		"park_code": b.ParkCode,
+		"retry_at":  b.RetryAt,
 	})
+}
+
+// PublishStored is publishStored for a change written to the store outside the
+// scheduler (generate's continue of a stopped run, which clears its cancel).
+func (s *Scheduler) PublishStored(ctx context.Context, id int64) { s.publishStored(ctx, id) }
+
+// lockPublish takes book id's publish lock and returns its unlock. Books publish
+// independently: only one book's frames are ordered against each other.
+func (s *Scheduler) lockPublish(id int64) (unlock func()) {
+	s.pubMu.Lock()
+	l := s.pubLocks[id]
+	if l == nil {
+		l = &publishLock{}
+		s.pubLocks[id] = l
+	}
+	l.refs++
+	s.pubMu.Unlock()
+	l.mu.Lock()
+	return func() {
+		l.mu.Unlock()
+		s.pubMu.Lock()
+		if l.refs--; l.refs == 0 {
+			delete(s.pubLocks, id)
+		}
+		s.pubMu.Unlock()
+	}
 }
 
 // publishQueueStats publishes queue.stats from the counts dispatch already
@@ -1389,7 +1456,7 @@ func (s *Scheduler) setStatus(bookID int64, status state.Status, errMsg string, 
 			continue
 		}
 		if err == nil {
-			s.publishState(bookID, b.State, string(status), errMsg, string(parkCode), retryStr)
+			s.publishStored(ctx, bookID)
 		}
 		return
 	}

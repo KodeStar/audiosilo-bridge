@@ -3,7 +3,6 @@ package scheduler
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -168,7 +167,7 @@ func TestBatchReadmitStatusChangeLogsAtDebug(t *testing.T) {
 // A job's guarded cancel publishes the cancel only while the book still carries
 // it: a later claim of the job that re-admits the book after the cancel's write
 // (here as the cancel stops the running stage) published its own state, and the
-// page must not be left showing the book cancelled. Without a later claim the
+// book's last event must not show it cancelled. Without a later claim the
 // cancel is published as stored.
 func TestGuardedCancelNeverPublishesOverALaterReadmit(t *testing.T) {
 	h := newHarness(t)
@@ -178,23 +177,11 @@ func TestGuardedCancelNeverPublishesOverALaterReadmit(t *testing.T) {
 	s := New(db, hub, NewStubExecutor(0, 0), 2, h.workRoot, false)
 	lastState := func(id int64) (status, errMsg string) {
 		t.Helper()
-		replay, sub := hub.Subscribe(0)
-		sub.Close()
-		found := false
-		for _, ev := range replay {
-			if ev.Type != "book.state" || ev.BookID != id {
-				continue
-			}
-			var p struct{ Status, Error string }
-			if err := json.Unmarshal(ev.Data, &p); err != nil {
-				t.Fatal(err)
-			}
-			status, errMsg, found = p.Status, p.Error, true
-		}
-		if !found {
+		f, ok := lastFrame(t, hub, id)
+		if !ok {
 			t.Fatalf("no book.state for book %d", id)
 		}
-		return status, errMsg
+		return f.Status, f.Error
 	}
 	guard := func(job int64, b store.Book) store.StopGuard {
 		t.Helper()
@@ -236,7 +223,7 @@ func TestGuardedCancelNeverPublishesOverALaterReadmit(t *testing.T) {
 		t.Fatal(err)
 	}
 	if status, errMsg := lastState(readmitted.ID); status != "" || errMsg != "" {
-		t.Fatalf("the page was left at %q %q after the re-admit, want it running", status, errMsg)
+		t.Fatalf("the last event was %q %q after the re-admit, want it running", status, errMsg)
 	}
 
 	// The caller's context ending once the cancel is written (a client gone, a

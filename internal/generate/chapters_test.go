@@ -586,6 +586,7 @@ func stageRuns(hr *harness, bookID int64, stage state.State) (runs, ok int) {
 func TestGenerateContinuesACancelledChaptersRun(t *testing.T) {
 	t.Parallel()
 	hr := newHarness(t)
+	rec := hr.recordPublishes()
 	hr.h.o.Poll = 250 * time.Millisecond // giveWayTries polls: ten seconds to give way in
 	stop := hr.runner(hr.h, hr.h.ChaptersJob())
 	defer stop()
@@ -610,6 +611,9 @@ func TestGenerateContinuesACancelledChaptersRun(t *testing.T) {
 	b := hr.engineBook(52)
 	if b.ID != first.ID || b.Goal != "" || b.Title != "The Loose One" || b.Series != "The Saga" || b.SeriesPos != "3" {
 		t.Fatalf("the generate job's book = %+v, want the chapters run (%d) continued", b, first.ID)
+	}
+	if !rec.published(b.ID) {
+		t.Fatal("the continue cleared the run's cancel without publishing it: its last event still shows it cancelled")
 	}
 	if asr, _ := stageRuns(hr, b.ID, state.ASR); asr != 1 {
 		t.Fatalf("asr runs = %d: the continue transcribed again", asr)
@@ -1518,6 +1522,7 @@ func TestJobEndWakesGiveWayWaiters(t *testing.T) {
 func TestChaptersJobTakesUpItsCancelledRun(t *testing.T) {
 	t.Parallel()
 	hr := newHarness(t)
+	rec := hr.recordPublishes()
 	stop := hr.runner(hr.h, hr.h.ChaptersJob())
 	defer stop()
 	first := parkChaptersAtASR(hr, 91)
@@ -1536,6 +1541,9 @@ func TestChaptersJobTakesUpItsCancelledRun(t *testing.T) {
 	b := hr.engineBook(92)
 	if b.ID != first.ID || b.WorkDir != first.WorkDir || b.Goal != state.GoalChapters {
 		t.Fatalf("the second chapters job's book = %+v, want the cancelled run (%d) taken up", b, first.ID)
+	}
+	if !rec.published(b.ID) {
+		t.Fatal("taking up the run cleared its cancel without publishing it")
 	}
 	if got, err := os.ReadFile(kept); err != nil || string(got) != string(want) { //nolint:gosec // test
 		t.Fatalf("the transcribed window = %q, %v: the run was thrown away", got, err)

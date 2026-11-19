@@ -1209,8 +1209,14 @@ internal/
             ServiceDeps.CoreRepo is where SubmitCore opens add-work issues; every
             other call follows the repo a row records.
             Imports neither scheduler nor api - reaches them via injected
-            Readmit/Publish seams (Readmit takes the book as the poller read it:
-            scheduler.RetryAsRead, so a Cancel since is never re-admitted, bridge#65).
+            Readmit/PublishStored/Publish seams (Readmit takes the book as the poller
+            read it: scheduler.RetryAsRead, so a Cancel since is never re-admitted,
+            bridge#65). Every park-message write (parkCorePending: the verdict,
+            unresolved-slug and release-wait messages, SubmitCore's core_pending
+            flip, which leaves a book no longer core_needed alone) is written only
+            over the status and error read (store.SetBookStatusIf) and published
+            through PublishStored (scheduler.PublishStored); a Cancel landing since
+            wins, and the book, no longer core_pending, is never re-admitted.
   auth/     single admin password (argon2id, generated + printed once on first run),
             opaque SHA-256-hashed session tokens, a per-IP login rate limiter; the
             Store interface is storage-agnostic (MemStore for tests; the SQLite
@@ -1686,10 +1692,24 @@ internal/
             still as read (store.ErrSettled when a stage failed it or it finished
             since: its own error stays; a park since is read again and cancelled):
             generate's job
-            ends, its Abandon before the engine starts included; a cancel is published
-            only while the book still carries it (publishCancelled, ordered against a
-            re-admit's write and publish by readmitMu), so a later claim's re-admit
-            is never covered by a stale cancelled frame; a start's reconcileBook
+            ends, its Abandon before the engine starts included. Every change the
+            engine makes to a book's state or status (the scheduler's, a rewind
+            included, generate's continues and the contrib service's park-message
+            writes) publishes book.state through publishStored; CancelStored (no
+            engine) publishes nothing. publishStored is the book read as stored and
+            published under that book's own lock (lockPublish), so its events go out
+            in the order of their reads and the last carries the latest write (a
+            cancel's event never lands after the re-admit that followed it, an
+            advance never shows a pause that landed first as running). readmit holds
+            that lock from its status clear to its publish, so one book's re-admits
+            run one at a time: a failed one puts its status back (restoreStatus)
+            before a later one clears anything. No page reads
+            book.state live today (no Hub.Subscribe caller, no SSE route): the hub's
+            ring and the durable event log (the supervisor's ListEvents) do.
+            generate's continues of a stopped run (which clear its cancel) and the
+            contrib service publish through PublishStored. Pause and Resume write
+            only over the status read (store.ErrStatusChanged when it moved; a Pause
+            finding the book paused by another is a no-op). A start's reconcileBook
             rewinds by the state alone (SetBookPipelineState), and a pass moves a
             book on from a waypoint the same way (advanceWaypoint), so neither writes
             the status it read back over such a cancel; a stage's own park or failure

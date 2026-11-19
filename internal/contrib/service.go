@@ -43,8 +43,8 @@ type ContribUpdate struct {
 // ServiceDeps are the injected collaborators shared by the core-submit endpoint
 // logic and the intake poller. contrib depends only on store/state (+ the meta
 // module's slug rules, and accounts' ErrUnrefreshed for the token source); the
-// scheduler and event hub are reached through the Readmit/Publish function seams
-// so contrib imports neither.
+// scheduler and event hub are reached through the Readmit, PublishStored and
+// Publish function seams so contrib imports neither.
 type ServiceDeps struct {
 	// DB is the scheduling/state store (books + contribution rows).
 	DB *store.DB
@@ -67,6 +67,10 @@ type ServiceDeps struct {
 	// (scheduler.RetryAsRead: never a book cancelled since that read, bridge#65):
 	// used when a core PR merges (poller) or the work is set manually (SetWork).
 	Readmit func(ctx context.Context, b store.Book) error
+	// PublishStored publishes a book's book.state as the store holds it
+	// (scheduler.PublishStored), after a park-message write here, so the book's
+	// state events stay in the order of their writes. nil publishes nothing.
+	PublishStored func(ctx context.Context, id int64)
 	// ResolveWork checks a work id is LIVE in the published catalogue and returns
 	// the slug it is live under: the id itself, or - for a slug a merge retired -
 	// the survivor the catalogue redirects it to. It returns (workID, nil) when the
@@ -99,6 +103,10 @@ type Service struct {
 	// while different books proceed in parallel.
 	mu        sync.Mutex
 	bookLocks map[int64]*sync.Mutex
+
+	// beforePark, when set (tests), runs in parkCorePending between the caller's
+	// read of the book and the conditional write.
+	beforePark func(bookID int64)
 }
 
 // NewService constructs a Service from its dependencies.
@@ -212,7 +220,7 @@ func (s *Service) SubmitCore(ctx context.Context, book store.Book, p CoreProposa
 	}
 
 	// Flip the park core_needed -> core_pending (state stays contributing, status
-	// stays needs_attention). SetBookStatus preserves the pipeline state.
+	// stays needs_attention), only while the book is as fresh read it.
 	if err := s.ensureCorePending(ctx, fresh); err != nil {
 		return store.Contribution{}, err
 	}
@@ -245,16 +253,46 @@ func (s *Service) existingCoreRow(ctx context.Context, bookID int64) (store.Cont
 	return findCore(rows)
 }
 
-// ensureCorePending flips a book's park from core_needed to core_pending, unless it is
-// already core_pending (idempotent - a concurrent/prior submit may have flipped it). The
-// pipeline state stays contributing; SetBookStatus preserves it.
+// ensureCorePending flips a book's park from core_needed to core_pending. A book
+// already core_pending (a concurrent/prior submit flipped it) or no longer
+// core_needed (a Cancel, a re-admit) is left as it is, as is one whose status
+// changed after book was read (parkCorePending: the Cancel wins). The pipeline
+// state stays contributing.
 func (s *Service) ensureCorePending(ctx context.Context, book store.Book) error {
-	if state.IsParkedWith(book.Status, book.ParkCode, state.ParkCorePending) {
+	if !state.IsParkedWith(book.Status, book.ParkCode, state.ParkCoreNeeded) {
 		return nil
 	}
-	if err := s.deps.DB.SetBookStatus(ctx, book.ID, string(state.StatusNeedsAttention),
-		s.deps.CorePendingMsg, string(state.ParkCorePending)); err != nil {
+	if err := s.parkCorePending(ctx, book, s.deps.CorePendingMsg); err != nil {
 		return fmt.Errorf("contrib: park core_pending: %w", err)
+	}
+	return nil
+}
+
+// parkCorePending parks book b (needs_attention, core_pending) with msg, only
+// while it still carries the status and error it was read with
+// (store.SetBookStatusIf), and publishes the write as stored. A status written
+// since (a Cancel) wins: nothing is written, nil is returned, and the book, no
+// longer core_pending, is never re-admitted by the poller. The pipeline state is
+// kept.
+func (s *Service) parkCorePending(ctx context.Context, b store.Book, msg string) error {
+	if s.beforePark != nil {
+		s.beforePark(b.ID)
+	}
+	err := s.deps.DB.SetBookStatusIf(ctx, b.ID, b.Status, b.Error,
+		string(state.StatusNeedsAttention), msg, string(state.ParkCorePending), "")
+	if errors.Is(err, store.ErrStatusChanged) {
+		// Nothing went wrong, so at Debug, as the scheduler logs a re-admit that
+		// met a changed status (logReadmitFailed, bridge#65).
+		if s.deps.Log != nil {
+			s.deps.Log.Debug("contrib: the book's status changed since it was read; its park message is left as it is", "book_id", b.ID)
+		}
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if s.deps.PublishStored != nil {
+		s.deps.PublishStored(ctx, b.ID)
 	}
 	return nil
 }
