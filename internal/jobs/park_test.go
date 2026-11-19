@@ -524,6 +524,70 @@ func TestReporterPathFollowsTheServer(t *testing.T) {
 	}
 }
 
+// ShareOff (server#218): a job whose claim said share_off has it from the
+// start; one told by an answer to a report has it from then on, and keeps it
+// when a later answer says none (a share dropped is not taken up again). A
+// job no answer told never has it.
+func TestReporterShareOff(t *testing.T) {
+	t.Parallel()
+	db, srv := openStore(t), newFakeServer()
+	srv.add(&link.Job{ID: 1, Kind: "k.v", Attempts: 1, ShareOff: true})
+	srv.add(&link.Job{ID: 2, Kind: "k.v", Attempts: 1})
+	srv.add(&link.Job{ID: 3, Kind: "k.v", Attempts: 1})
+	got := map[int64][]bool{}
+	var mu sync.Mutex
+	h := handler{kind: "k.v", lane: LaneLight, fn: func(ctx context.Context, j Job, rep *Reporter) (any, error) {
+		seen := []bool{j.ShareOff, rep.ShareOff()}
+		switch j.ID {
+		case 2:
+			srv.mu.Lock()
+			srv.shareOff = map[int64]bool{2: true}
+			srv.mu.Unlock()
+			waitFor(t, rep.ShareOff)
+			srv.mu.Lock()
+			srv.shareOff = nil
+			n := len(srv.updates[2])
+			srv.mu.Unlock()
+			waitFor(t, func() bool { srv.mu.Lock(); defer srv.mu.Unlock(); return len(srv.updates[2]) > n+1 })
+			seen = append(seen, rep.ShareOff())
+		case 3:
+			srv.mu.Lock()
+			n := len(srv.updates[3])
+			srv.mu.Unlock()
+			waitFor(t, func() bool { srv.mu.Lock(); defer srv.mu.Unlock(); return len(srv.updates[3]) > n+1 })
+			seen = append(seen, rep.ShareOff())
+		}
+		mu.Lock()
+		got[j.ID] = seen
+		mu.Unlock()
+		return map[string]int{"ok": 1}, nil
+	}}
+	r := New(db, func() Server { return srv }, nil, testOpts(), h)
+	runFor(t, r, func() bool {
+		var n int
+		for id := int64(1); id <= 3; id++ {
+			if s, _ := srv.finalState(id); s == link.StateDone {
+				n++
+			}
+		}
+		return n == 3
+	})
+	mu.Lock()
+	defer mu.Unlock()
+	if want := []bool{true, true}; !slices.Equal(got[1], want) {
+		t.Errorf("claimed with share_off: %v, want %v", got[1], want)
+	}
+	if want := []bool{false, false, true}; !slices.Equal(got[2], want) {
+		t.Errorf("told by an answer: %v, want %v", got[2], want)
+	}
+	if want := []bool{false, false, false}; !slices.Equal(got[3], want) {
+		t.Errorf("never told: %v, want %v", got[3], want)
+	}
+	if LocalReporter().ShareOff() {
+		t.Fatal("a local reporter has share_off")
+	}
+}
+
 func TestPublicationRequiresSuccessfulLease(t *testing.T) {
 	for _, mode := range []string{"allowed", "network", "lost", "cancel", "unauthorized"} {
 		t.Run(mode, func(t *testing.T) {

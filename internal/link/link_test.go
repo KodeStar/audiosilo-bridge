@@ -116,14 +116,19 @@ func TestClaim(t *testing.T) {
 		t.Fatalf("204 = %+v, %v", job, err)
 	}
 	q := f.last.URL.Query()
-	if q.Get("wait") != "25" || strings.Join(q["kind"], ",") != "bridge.verify,sidecars.generate" {
+	// share_off=1: this Bridge honours a job's share_off (server#218).
+	if q.Get("wait") != "25" || strings.Join(q["kind"], ",") != "bridge.verify,sidecars.generate" || q.Get("share_off") != "1" {
 		t.Fatalf("query = %v", q)
 	}
 	f.status, f.body = http.StatusOK, `{"id":7,"kind":"bridge.verify","library_id":1,"path":null,"params":{"hold_seconds":3},"state":"claimed","attempts":2,"requested_by":{"id":3,"username":"admin"}}`
 	job, err = c.Claim(context.Background(), []string{"bridge.verify"}, time.Second)
 	if err != nil || job.ID != 7 || job.Attempts != 2 || job.Path != nil || *job.LibraryID != 1 || string(job.Params) != `{"hold_seconds":3}` ||
-		job.RequestedBy == nil || job.RequestedBy.Username != "admin" {
+		job.RequestedBy == nil || job.RequestedBy.Username != "admin" || job.ShareOff {
 		t.Fatalf("claim = %+v, %v", job, err)
+	}
+	f.body = `{"id":8,"kind":"sidecars.generate","library_id":1,"path":"A/B","params":{"contribute":"issue"},"state":"claimed","attempts":1,"share_off":true}`
+	if job, err = c.Claim(context.Background(), []string{"sidecars.generate"}, time.Second); err != nil || job.ID != 8 || !job.ShareOff {
+		t.Fatalf("claim with share_off = %+v, %v", job, err)
 	}
 	f.status, f.body = http.StatusConflict, `{"error":"send a status first","code":"no_heartbeat"}`
 	if _, err := c.Claim(context.Background(), []string{"bridge.verify"}, 0); !errors.Is(err, ErrNoHeartbeat) {
@@ -133,10 +138,10 @@ func TestClaim(t *testing.T) {
 
 func TestUpdateJob(t *testing.T) {
 	t.Parallel()
-	f, c := newFake(t, http.StatusOK, `{"id":7,"state":"running","cancel_requested":true}`)
+	f, c := newFake(t, http.StatusOK, `{"id":7,"state":"running","cancel_requested":true,"share_off":true}`)
 	running := StateRunning
 	job, err := c.UpdateJob(context.Background(), 7, Update{Attempt: 1, State: &running, Progress: json.RawMessage(`{"step":"stat"}`)})
-	if err != nil || !job.CancelRequested {
+	if err != nil || !job.CancelRequested || !job.ShareOff {
 		t.Fatalf("update = %+v, %v", job, err)
 	}
 	if f.last.Method != http.MethodPatch || f.last.URL.Path != "/api/v1/bridge/jobs/7" || f.sent != `{"attempt":1,"state":"running","progress":{"step":"stat"}}` {

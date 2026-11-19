@@ -254,6 +254,17 @@ func (db *DB) TouchContribution(ctx context.Context, id int64, issueSeenAt strin
 	return checkAffected(res, err)
 }
 
+// SetBookContribMode sets a book's own contribution mode (ContribModeLocal,
+// ContribModeIssue), which the contributing stage reads when it runs: a
+// sidecars.generate job whose share the server turned off keeps its results
+// local (server#218). It bumps updated_at.
+func (db *DB) SetBookContribMode(ctx context.Context, id int64, mode string) error {
+	res, err := db.sql.ExecContext(ctx,
+		`UPDATE books SET contrib_mode=?, updated_at=? WHERE id=?`,
+		mode, timestamp(nowFn()), id)
+	return checkAffected(res, err)
+}
+
 // SetBookWorkID records the resolved upstream work slug on a book (the poller sets it
 // once a core add-work PR merges, and the manual set-work endpoint sets it directly),
 // so the contributing stage can attach the sidecars to the real work. It bumps

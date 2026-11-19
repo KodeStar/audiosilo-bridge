@@ -43,10 +43,13 @@ type fakeServer struct {
 	// paths is a job's path in the answers to its reports: the server moved the
 	// job with its book.
 	paths map[int64]string
+	// shareOff is a job's share_off in the answers to its reports (server#218).
+	shareOff map[int64]bool
 }
 
 func newFakeServer() *fakeServer {
-	return &fakeServer{updates: map[int64][]link.Update{}, cancel: map[int64]bool{}, notHeld: map[int64]bool{}, books: map[string]link.Book{}}
+	return &fakeServer{updates: map[int64][]link.Update{}, cancel: map[int64]bool{}, notHeld: map[int64]bool{}, books: map[string]link.Book{},
+		shareOff: map[int64]bool{}}
 }
 
 func (f *fakeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -74,7 +77,7 @@ func (f *fakeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			_, _ = io.WriteString(w, `{"error":"not held","code":"not_held"}`)
 			return
 		}
-		j := link.Job{ID: id, State: *u.State, CancelRequested: f.cancel[id]}
+		j := link.Job{ID: id, State: *u.State, CancelRequested: f.cancel[id], ShareOff: f.shareOff[id]}
 		if p, ok := f.paths[id]; ok {
 			j.Path = &p
 		}
@@ -936,4 +939,103 @@ func TestGenerateIssueNeedsAGitHubToken(t *testing.T) {
 		_, err := hr.db.GetGenerateBook(context.Background(), 95)
 		return err == nil
 	})
+}
+
+// result is the done report's result for id.
+func (f *fakeServer) result(t *testing.T, id int64) Result {
+	t.Helper()
+	_, final := f.final(id)
+	var r Result
+	if err := json.Unmarshal(final.Result, &r); err != nil {
+		t.Fatalf("result %s: %v", final.Result, err)
+	}
+	return r
+}
+
+// A generate-and-share job whose claim says share_off (the server's
+// Contributions module is off, server#218) runs in local mode from the start:
+// no GitHub sign-in is asked for, its engine book keeps the results local, and
+// its result says why. Denied: the share. Allowed: the generation.
+func TestGenerateShareOffAtTheClaim(t *testing.T) {
+	t.Parallel()
+	hr := newHarness(t)
+	h := hr.handler()
+	h.o.ContribCredential = func(context.Context) error { return contrib.ErrNoCredential }
+	hr.srv.set(func() {
+		lib, path := int64(1), "Author/Book"
+		hr.srv.queue = append(hr.srv.queue, link.Job{ID: 61, Kind: Kind, LibraryID: &lib, Path: &path,
+			Params: json.RawMessage(`{"contribute":"issue"}`), Attempts: 1, State: "claimed", ShareOff: true})
+	})
+	stop := hr.runner(h)
+	defer stop()
+	hr.waitFor("done", func() bool { s, _ := hr.srv.final(61); return s == link.StateDone })
+	if b := hr.engineBook(61); b.ContribMode != store.ContribModeLocal {
+		t.Fatalf("engine book mode = %q, want local", b.ContribMode)
+	}
+	if r := hr.srv.result(t, 61); r.ShareSkipped != ShareSkippedContributionsOff || len(r.Contributed) != 0 || r.Characters == 0 {
+		t.Fatalf("result = %+v", r)
+	}
+}
+
+// A generate-and-share job told share_off at a report (the module turned off
+// mid-run) keeps its results local from then on: its engine book's mode turns
+// local before the contributing stage, the run goes on to the end, and the
+// result says why. A job no answer told shares as asked (issue mode, no
+// share_skipped).
+func TestGenerateShareOffMidRun(t *testing.T) {
+	t.Parallel()
+	hr := newHarness(t)
+	asr := hr.exec.gate("asr")
+	hr.srv.add(62, "Author/Book", `{"contribute":"issue"}`)
+	stop := hr.runner(hr.h)
+	defer stop()
+	hr.waitFor("asr", func() bool {
+		return hr.srv.saw(62, func(_ link.Update, p map[string]any) bool { return p["stage"] == "asr" })
+	})
+	if b := hr.engineBook(62); b.ContribMode != store.ContribModeIssue {
+		t.Fatalf("engine book mode before = %q, want issue", b.ContribMode)
+	}
+	hr.srv.set(func() { hr.srv.shareOff[62] = true })
+	hr.waitFor("the engine book kept local", func() bool { return hr.engineBook(62).ContribMode == store.ContribModeLocal })
+	close(asr)
+	hr.waitFor("done", func() bool { s, _ := hr.srv.final(62); return s == link.StateDone })
+	if r := hr.srv.result(t, 62); r.ShareSkipped != ShareSkippedContributionsOff || len(r.Contributed) != 0 {
+		t.Fatalf("result = %+v", r)
+	}
+
+	hr.srv.add(63, "Loose.m4b", `{"contribute":"issue"}`)
+	hr.waitFor("the other job done", func() bool { s, _ := hr.srv.final(63); return s == link.StateDone })
+	if b := hr.engineBook(63); b.ContribMode != store.ContribModeIssue {
+		t.Fatalf("engine book mode, never told = %q, want issue", b.ContribMode)
+	}
+	if r := hr.srv.result(t, 63); r.ShareSkipped != "" {
+		t.Fatalf("result, never told = %+v", r)
+	}
+}
+
+// A generate-and-share job parked at contributing over the share (core_needed:
+// the community lacks the work) and then told share_off runs the stage again
+// in local mode and finishes, rather than waiting on a share it no longer
+// makes.
+func TestGenerateShareOffLiftsASharePark(t *testing.T) {
+	t.Parallel()
+	hr := newHarness(t)
+	hr.exec.parks["contributing"] = 1
+	hr.srv.add(64, "Author/Book", `{"contribute":"issue"}`)
+	stop := hr.runner(hr.h)
+	defer stop()
+	hr.waitFor("the core_needed park", func() bool {
+		return hr.srv.saw(64, func(u link.Update, p map[string]any) bool {
+			park, _ := p["park"].(map[string]any)
+			return u.State != nil && *u.State == link.StateNeedsAttention && park["code"] == "core_needed"
+		})
+	})
+	hr.srv.set(func() { hr.srv.shareOff[64] = true })
+	hr.waitFor("done", func() bool { s, _ := hr.srv.final(64); return s == link.StateDone })
+	if b := hr.engineBook(64); b.ContribMode != store.ContribModeLocal {
+		t.Fatalf("engine book mode = %q, want local", b.ContribMode)
+	}
+	if r := hr.srv.result(t, 64); r.ShareSkipped != ShareSkippedContributionsOff {
+		t.Fatalf("result = %+v", r)
+	}
 }

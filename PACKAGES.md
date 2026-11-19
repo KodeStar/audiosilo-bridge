@@ -1976,7 +1976,10 @@ internal/
             Last-Event-ID, ephemeral heartbeats, slow-subscriber eviction, optional
             durable-sink persister (feeds store.events)
   link/     the client of the server's Bridge routes (pairing exchange, heartbeat,
-            long-poll claim narrowed by ?kind= to the kinds with room, job updates,
+            long-poll claim narrowed by ?kind= to the kinds with room, always with
+            share_off=1 (this Bridge honours a job's share_off, so the server hands it
+            a generate-and-share job while its Contributions module is off; an older
+            server ignores it; Job.ShareOff on the claim and update answers), job updates,
             a book's files, targeted rescan). Phase 2c-1: Library.Kind (missing
             means books), Marker (no_marker -> ErrNoMarker), RescanPodcast
             (path and episode count). Every request sends X-AudioSilo-Client:
@@ -2190,7 +2193,10 @@ internal/
             frees only its own run (a later claim of the job may run under its id).
             Job.Resumed (Phase 1c) tells a handler the runner resumed the job under
             its claim (a restart's recovery, resumeStranded) rather than claimed it
-            now, so an earlier run of it may have spent already.
+            now, so an earlier run of it may have spent already. Reporter.ShareOff
+            (server#218) is the server's share_off: the claim's (Job.ShareOff) or
+            any report answer's since, kept for the run once heard (a share
+            dropped is not taken up again).
             Recovery runs once the link is up: a kind no longer run is failed.
             Nothing is sent that the server refuses for good: a result that isn't a
             JSON object of at most 64 KiB fails the job (errUnreportable) and
@@ -3123,7 +3129,16 @@ internal/
             apart when the sign-in only couldn't be refreshed (errCantContributeUnrefreshed);
             so does a resumed one that makes a new engine book after all (its id
             reused from another job's mapping, its book deleted or swept: create
-            checks, cantContribute). prepare: the library from the
+            checks, cantContribute). Once the server says share_off (the claim, or
+            any report answer: its Contributions module is off, server#218), a
+            contribute=issue job keeps its results local instead (keepShareLocal):
+            before its engine book exists the book is made in local mode (no GitHub
+            check), after, store.SetBookContribMode turns the book local, and a book
+            parked at contributing over the share (contrib_unavailable, core_needed,
+            core_pending) runs the stage again; a book done already, or a filing the
+            stage had under way, is left as it is. The result says share_skipped
+            "contributions_off" unless something was filed (the console words it).
+            prepare: the library from the
             registry; waitMapped needs its check mapped AND writable at the mount the
             Bridge uses NOW (a new job fails otherwise; a resumed one parks
             library_not_writable and waits, its engine book going on); fetchBook waits

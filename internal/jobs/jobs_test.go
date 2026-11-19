@@ -32,6 +32,7 @@ type fakeServer struct {
 	hang     chan struct{}    // updates wait for it to close (nil: none)
 	changed  chan struct{}    // closed on every update
 	paths    map[int64]string // the job's path in an update's answer (a book that moved)
+	shareOff map[int64]bool   // share_off in an update's answer (server#218)
 	tries    map[int64]int    // every update asked, failed ones included
 }
 
@@ -100,7 +101,7 @@ func (f *fakeServer) UpdateJob(ctx context.Context, id int64, u link.Update) (*l
 	if u.State != nil {
 		state = *u.State
 	}
-	j := &link.Job{ID: id, State: state, CancelRequested: f.cancel[id]}
+	j := &link.Job{ID: id, State: state, CancelRequested: f.cancel[id], ShareOff: f.shareOff[id]}
 	if p, ok := f.paths[id]; ok {
 		j.Path = &p
 	}

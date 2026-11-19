@@ -44,6 +44,10 @@ type Job struct {
 	// once a refused token works again) instead of claiming it now, so an earlier
 	// run of it may have spent already.
 	Resumed bool
+	// ShareOff: the claim's answer told the job to keep its results local
+	// (link.Job.ShareOff); a resumed job hears it at its first report
+	// (Reporter.ShareOff).
+	ShareOff bool
 }
 
 // Handler runs one job kind.
@@ -501,7 +505,8 @@ func sameServer(a, b Server) bool {
 
 // jobOf is a claimed job as a Handler sees it.
 func jobOf(j *link.Job) Job {
-	return Job{ID: j.ID, Kind: j.Kind, LibraryID: j.LibraryID, Path: j.Path, Params: j.Params, Attempt: j.Attempts, Priority: j.Priority}
+	return Job{ID: j.ID, Kind: j.Kind, LibraryID: j.LibraryID, Path: j.Path, Params: j.Params, Attempt: j.Attempts, Priority: j.Priority,
+		ShareOff: j.ShareOff}
 }
 
 // storedJob is a job the store recorded, as a Handler sees it.
@@ -973,6 +978,10 @@ type Reporter struct {
 	// one did): the server moves an open job with its book (a rename the scan
 	// noticed), and the job hears it here.
 	path string
+	// shareOff: an answer told the job to keep its results local
+	// (link.Job.ShareOff). It stays heard for the run: a share dropped is not
+	// taken up again if the server's module is turned back on.
+	shareOff bool
 	// localYielded is a LocalReporter's Yield, for Yielded (a handler's tests).
 	localYielded bool
 }
@@ -1011,6 +1020,15 @@ func (p *Reporter) Path() string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.path
+}
+
+// ShareOff reports whether the server told the job to keep its results local,
+// filing nothing to the community: its claim's answer said so (Job.ShareOff),
+// or any answer to its reports since.
+func (p *Reporter) ShareOff() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.job.ShareOff || p.shareOff
 }
 
 // Last is the progress last recorded.
@@ -1367,9 +1385,12 @@ func unreachable(err error) bool {
 // and a cancel request, a lost claim or a refused token ends its context. It
 // reports whether the answer stopped the job.
 func (p *Reporter) answer(got *link.Job, err error) bool {
-	if err == nil && got.Path != nil && *got.Path != "" {
+	if err == nil {
 		p.mu.Lock()
-		p.path = *got.Path
+		if got.Path != nil && *got.Path != "" {
+			p.path = *got.Path
+		}
+		p.shareOff = p.shareOff || got.ShareOff
 		p.mu.Unlock()
 	}
 	switch {

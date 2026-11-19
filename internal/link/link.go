@@ -63,6 +63,11 @@ type Job struct {
 	UpdatedAt       string     `json:"updated_at"`
 	ClaimedAt       *string    `json:"claimed_at"`
 	FinishedAt      *string    `json:"finished_at"`
+	// ShareOff tells the Bridge to keep the job's results local, filing nothing
+	// to the community: the server's Contributions module is off while a
+	// sidecars.generate job with contribute "issue" runs (server#218). On the
+	// claim and report answers only; an older server sends none.
+	ShareOff bool `json:"share_off,omitempty"`
 }
 
 // Requester names the admin who queued a job.
@@ -534,7 +539,10 @@ func (c *Client) ClaimMinPriority(ctx context.Context, kinds []string, wait time
 
 func (c *Client) claim(ctx context.Context, kinds []string, wait time.Duration, priority *int32) (*Job, error) {
 	wait = min(max(wait, 0), MaxWait)
-	q := url.Values{"wait": {strconv.Itoa(int(wait / time.Second))}}
+	// share_off=1: this Bridge honours a job's ShareOff, so the server may hand
+	// it a generate-and-share job while its Contributions module is off (it
+	// holds one from a claim without it). An older server ignores it.
+	q := url.Values{"wait": {strconv.Itoa(int(wait / time.Second))}, "share_off": {"1"}}
 	if priority != nil {
 		q.Set("min_priority", strconv.FormatInt(int64(*priority), 10))
 	}
