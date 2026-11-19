@@ -669,23 +669,29 @@ func (s *service) cache(ctx context.Context, root *os.Root, lib link.Library, en
 // was renamed.
 func (s *service) find(root *os.Root, entries []os.DirEntry, rows []store.PodcastShow, p subscribeParams, feedURL string) (string, *podcast.Feed, error) {
 	hash := podcast.FeedURLHash(feedURL)
-	named := false
+	gone := false
 	if p.ShowPath != "" {
 		_, err := root.Lstat(p.ShowPath)
-		named = !errors.Is(err, os.ErrNotExist)
+		gone = errors.Is(err, os.ErrNotExist)
 	}
 	match := func(name string) *podcast.Feed {
-		if !podcast.ValidShow(name) || named && name != p.ShowPath {
+		if !podcast.ValidShow(name) {
 			return nil
 		}
 		f, _, err := podcast.ReadMoved(root, name)
 		if err != nil || f.FeedURLSHA256 != hash && !slices.Contains(f.PreviousFeedURLSHA256, hash) {
 			return nil
 		}
-		if p.ShowPath != "" && !named && (p.ShowID == "" || f.ShowID != p.ShowID) {
+		if gone && (p.ShowID == "" || f.ShowID != p.ShowID) {
 			return nil
 		}
 		return f
+	}
+	if p.ShowPath != "" && !gone {
+		if f := match(p.ShowPath); f != nil {
+			return p.ShowPath, f, nil
+		}
+		return "", nil, fail("feed_secret_missing", "The show no longer matches this private feed. Follow the feed again.")
 	}
 	tried := map[string]bool{}
 	for _, r := range rows {
