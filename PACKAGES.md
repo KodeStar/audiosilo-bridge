@@ -2461,7 +2461,9 @@ internal/
             episode's lock its own record moves even when a duplicate claim's
             open row names it (adoptOwn, also after a relocation before the
             download); one at the new path already wins and the old one is
-            cleared with its partial. One the Bridge stops
+            cleared with its partial, never the partial the download is
+            writing (a stale record or another show's there must not delete
+            it). One the Bridge stops
             meanwhile keeps its record (read, not loaded, at the stop), and
             the resumed job goes on from the partial there. An episode path the
             server answers not_indexable (its show folder renamed since the

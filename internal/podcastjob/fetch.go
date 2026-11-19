@@ -172,7 +172,7 @@ func (h *Fetch) run(parent context.Context, claimed *jobs.Job, rep *jobs.Reporte
 	defer lock.release()
 	// Found elsewhere: its record, under the episode's lock now, is taken
 	// along even when another open row names it (adoptOwn).
-	s.adoptOwn(job, root, claimedAt, params)
+	s.adoptOwn(job, root, claimedAt, params, "")
 	pairing := s.pairHash()
 	f, e, err := s.fetchSnapshot(parent, root, lib, mount, *job.Path, params)
 	if err != nil {
@@ -196,7 +196,8 @@ func (h *Fetch) run(parent context.Context, claimed *jobs.Job, rep *jobs.Reporte
 	c, tag := s.loadCheckpoint(job, root, f.ShowID, e.ID)
 	// follow moves the fetch to its episode where a show folder renamed by
 	// hand has it now (episodeAt), taking the episode's lock and its own
-	// record along (adoptOwn): the partial moved with the folder.
+	// record along (adoptOwn, never dropping the partial it writes): the
+	// partial moved with the folder.
 	follow := func(ctx context.Context) error {
 		p, err := s.episodeAt(ctx, root, lib, mount, e.Path, params, job.ID)
 		if err != nil || p == e.Path {
@@ -206,7 +207,7 @@ func (h *Fetch) run(parent context.Context, claimed *jobs.Job, rep *jobs.Reporte
 		e.Path, c.Path = p, p
 		job.Path, claimed.Path = &p, &p
 		lock.follow(p)
-		s.adoptOwn(job, root, from, params)
+		s.adoptOwn(job, root, from, params, c.Temp)
 		return nil
 	}
 	// settle follows the fetch (follow) when its partial is no longer at its

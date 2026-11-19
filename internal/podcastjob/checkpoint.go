@@ -322,8 +322,11 @@ func moveRecord(dir *os.Root, lib int64, c checkpoint, to string) {
 // row naming it (a duplicate claim of the episode): left at from, the fetch
 // would download again from byte 0 and the record would stay for a day. A
 // record at the new path already wins (adoptCheckpoints'), and the one at
-// from is cleared with its partial, rather than left.
-func (s *service) adoptOwn(job jobs.Job, root *os.Root, from string, p fetchParams) {
+// from is cleared with its partial, rather than left; never live, the partial
+// the fetch is writing (follow's), whose next checkpoint records it there
+// (saveCheckpoint), as the record there may be a stale one or another show's
+// (names swapped by hand, an episode file name both shows use).
+func (s *service) adoptOwn(job jobs.Job, root *os.Root, from string, p fetchParams, live string) {
 	lib, to := *job.LibraryID, *job.Path
 	if from == to {
 		return
@@ -343,11 +346,11 @@ func (s *service) adoptOwn(job jobs.Job, root *os.Root, from string, p fetchPara
 	}
 	// Its partial is in the episode's folder now; one the record at the new
 	// path names too (a move that wrote there and could not remove this one)
-	// stays for that record.
+	// stays for that record, and the live one for the download writing it.
 	there, ok := s.readOwnRecord(dir, lib, to)
 	saved.Path = to
 	shared := ok && there.Temp == saved.Temp
-	if shared || s.dropPartial(root, &saved) {
+	if shared || live != "" && saved.Temp == live || s.dropPartial(root, &saved) {
 		_ = dir.Remove(recordName(lib, from))
 	}
 }

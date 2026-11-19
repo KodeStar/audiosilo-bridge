@@ -1165,9 +1165,12 @@ func TestAFetchTakesItsOwnRecordPastADuplicateClaim(t *testing.T) {
 // A fetch's own record left at the old path while one is at the new path
 // already: the new one wins and the old one goes, its partial (in the
 // renamed folder now) with it, unless the new record names the same partial
-// (a move that wrote there and could not remove the old one).
+// (a move that wrote there and could not remove the old one) or the partial
+// is the one the fetch is writing (live: a download that followed the folder,
+// whose record at the new path may be a stale one or another show's).
 func TestAdoptOwnClearsAnOldRecordPastANewOne(t *testing.T) {
-	for _, same := range []bool{false, true} {
+	for _, tc := range []struct{ same, live bool }{{false, false}, {true, false}, {false, true}} {
+		same, live := tc.same, tc.live
 		h, job := audioHarness(t)
 		s := h.handler.s
 		root, err := os.OpenRoot(h.mount)
@@ -1198,16 +1201,20 @@ func TestAdoptOwnClearsAnOldRecordPastANewOne(t *testing.T) {
 		mk(moved, newTemp)
 		renameShow(t, h, "Fixture Show", "Renamed Show")
 		there := jobs.Job{LibraryID: job.LibraryID, Path: &moved}
-		s.adoptOwn(there, root, old, params)
+		writing := ""
+		if live {
+			writing = podcast.TempPrefix + "old"
+		}
+		s.adoptOwn(there, root, old, params, writing)
 		if _, ok := s.readCheckpoint(job); ok {
-			t.Fatal("the old record stayed", same)
+			t.Fatal("the old record stayed", tc)
 		}
 		if saved, ok := s.readCheckpoint(there); !ok || saved.Temp != newTemp {
-			t.Fatal("the new record changed", same, saved)
+			t.Fatal("the new record changed", tc, saved)
 		}
 		_, err = os.Lstat(filepath.Join(h.mount, "Renamed Show", podcast.TempPrefix+"old"))
-		if same != (err == nil) {
-			t.Fatal("the old partial", same, err)
+		if (same || live) != (err == nil) {
+			t.Fatal("the old partial", tc, err)
 		}
 	}
 }
