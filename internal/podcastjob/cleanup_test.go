@@ -247,7 +247,10 @@ func TestStaleIdentityCheckpointIsDropped(t *testing.T) {
 	}
 }
 
-// A proven partial swapped for a link after its check is never appended to.
+// A proven partial swapped for a link after its check is never appended to:
+// like one of another size or one gone, it is proven changed
+// (errPartialChanged), which restarts the episode. Only a partial that could
+// not be opened to tell is errPartialUnreadable, kept.
 func TestOpenPartialRefusesSwappedPartial(t *testing.T) {
 	dir := t.TempDir()
 	root, _ := os.OpenRoot(dir)
@@ -259,12 +262,22 @@ func TestOpenPartialRefusesSwappedPartial(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.Close()
-	if _, err := openPartial(root, "partial", 5); !errors.Is(err, errPartialUnreadable) {
+	if _, err := openPartial(root, "partial", 5); !errors.Is(err, errPartialChanged) {
 		t.Fatal("size check", err)
 	}
+	if os.Geteuid() != 0 {
+		os.Chmod(filepath.Join(dir, "partial"), 0)
+		if _, err := openPartial(root, "partial", 6); !errors.Is(err, errPartialUnreadable) || errors.Is(err, errPartialChanged) {
+			t.Fatal("a partial that could not be opened taken for a changed one", err)
+		}
+		os.Chmod(filepath.Join(dir, "partial"), 0o600)
+	}
 	root.Remove("partial")
+	if _, err := openPartial(root, "partial", 6); !errors.Is(err, errPartialChanged) {
+		t.Fatal("a partial gone", err)
+	}
 	os.Symlink("victim", filepath.Join(dir, "partial"))
-	if _, err := openPartial(root, "partial", 4); !errors.Is(err, errPartialUnreadable) {
+	if _, err := openPartial(root, "partial", 4); !errors.Is(err, errPartialChanged) {
 		t.Fatal("link target accepted as the partial", err)
 	}
 }
@@ -273,36 +286,42 @@ func TestOpenPartialRefusesSwappedPartial(t *testing.T) {
 // cleanOwned can find it again; once removable, the clear takes all three.
 func TestClearCheckpointKeepsTheRecordOfAPartialItCouldNotRemove(t *testing.T) {
 	requireNonRoot(t)
-	h, job := audioHarness(t)
-	s := h.handler.s
-	root, _ := os.OpenRoot(h.mount)
-	defer root.Close()
-	c := checkpoint{ServerHash: s.pairHash(), LibraryID: 3, ShowID: "a1b2c3d4e5f60718", EpisodeID: "1cc306d831645e2b", Path: *job.Path, Temp: ".audiosilo-tmp-stuck", Offset: 6, Total: 100}
-	partial := "Fixture Show/" + c.Temp
-	root.WriteFile(partial, []byte("prefix"), 0600)
-	if err := s.saveCheckpoint(job, root, &c, `"one"`); err != nil {
-		t.Fatal(err)
-	}
-	show := filepath.Join(h.mount, "Fixture Show")
-	if err := os.Chmod(show, 0o500); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { os.Chmod(show, 0o755) })
-	stuck := c
-	s.clearCheckpoint(job, root, &stuck)
-	if saved, ok := s.readCheckpoint(job, fixtureShowID); !ok || saved.Temp != c.Temp {
-		t.Fatal("the record of a partial still on disk was dropped")
-	}
-	if v, _ := s.o.Vault.Get(c.Validator); v == "" {
-		t.Fatal("the validator of a partial still on disk was dropped")
-	}
-	os.Chmod(show, 0o755)
-	s.clearCheckpoint(job, root, &c)
-	if _, ok := s.readCheckpoint(job, fixtureShowID); ok {
-		t.Fatal("record kept once the partial was removed")
-	}
-	if _, err := root.Lstat(partial); !errors.Is(err, os.ErrNotExist) {
-		t.Fatal("partial retained", err)
+	// 0o500: the partial cannot be removed. 0o600: it cannot even be checked
+	// (a share's hiccup), which proves nothing gone (partialGone).
+	for name, mode := range map[string]os.FileMode{"cannot remove": 0o500, "cannot check": 0o600} {
+		t.Run(name, func(t *testing.T) {
+			h, job := audioHarness(t)
+			s := h.handler.s
+			root, _ := os.OpenRoot(h.mount)
+			defer root.Close()
+			c := checkpoint{ServerHash: s.pairHash(), LibraryID: 3, ShowID: "a1b2c3d4e5f60718", EpisodeID: "1cc306d831645e2b", Path: *job.Path, Temp: ".audiosilo-tmp-stuck", Offset: 6, Total: 100}
+			partial := "Fixture Show/" + c.Temp
+			root.WriteFile(partial, []byte("prefix"), 0600)
+			if err := s.saveCheckpoint(job, root, &c, `"one"`); err != nil {
+				t.Fatal(err)
+			}
+			show := filepath.Join(h.mount, "Fixture Show")
+			if err := os.Chmod(show, mode); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { os.Chmod(show, 0o755) })
+			stuck := c
+			s.clearCheckpoint(job, root, &stuck)
+			if saved, ok := s.readCheckpoint(job, fixtureShowID); !ok || saved.Temp != c.Temp {
+				t.Fatal("the record of a partial still on disk was dropped")
+			}
+			if v, _ := s.o.Vault.Get(c.Validator); v == "" {
+				t.Fatal("the validator of a partial still on disk was dropped")
+			}
+			os.Chmod(show, 0o755)
+			s.clearCheckpoint(job, root, &c)
+			if _, ok := s.readCheckpoint(job, fixtureShowID); ok {
+				t.Fatal("record kept once the partial was removed")
+			}
+			if _, err := root.Lstat(partial); !errors.Is(err, os.ErrNotExist) {
+				t.Fatal("partial retained", err)
+			}
+		})
 	}
 }
 

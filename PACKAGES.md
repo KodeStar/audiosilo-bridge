@@ -2630,7 +2630,13 @@ internal/
             the library failed, a folder renamed between the follow and the
             read) is not a changed one: the show is followed and the partial
             read again, four reads 1 s, 2 s and 4 s apart, then write_failed
-            with no second download. Never downloaded again either when its
+            with no second download, the whole download kept (resume-at-total:
+            its record has Offset == Total and the hash it was written with,
+            checkpoint.complete; run's exit and Run's Abandon leave it). The
+            next attempt verifies it and publishes it with no GET; one proven
+            changed by then is downloaded again from byte 0, once; it is never
+            published unverified. A cancel (the runner's Abandon) or
+            invalid_audio still clears it, as does the day-old cleanup. Never downloaded again either when its
             folder no longer holds the show (a
             folder deleted outright, another show's at its name: the partial is
             gone, and the fetch fails as the publication would rather than
@@ -2732,12 +2738,20 @@ internal/
             error, not invalid_audio, and a lease check it cuts is no lost claim,
             identity_changed), a retry wait it cuts ends on the host's
             last answer, and its own faults (no streamer, its partial) are
-            write_failed. A partial it cannot open (podcast.OpenRegularFile, its size) or read
-            back restarts the episode from zero once per job first, checked
-            before the ranged GET so no request is spent on it; clearing a
-            checkpoint removes its partial on podcast.LstatRegular, never an
-            open, so an unreadable one is not left behind, and keeps the record
-            and validator (for cleanOwned) when the removal fails: a later clear
+            write_failed. A partial proven changed (gone, not a regular file,
+            another size, shorter than its prefix: partialGone,
+            errPartialChanged) restarts the episode from zero once per job
+            first, checked before the ranged GET so no request is spent on it.
+            One that could not be opened or read to tell (a share's hiccup, a
+            permission: errPartialUnreadable) is never cleared: at the start
+            (loadCheckpoint) the job fails write_failed with no GET, in the
+            download the attempt is tried again as a host's failure is, and a
+            job that ends so keeps the partial and its record (run's exit,
+            Run's Abandon) for the next attempt. Clearing a checkpoint removes
+            its partial on podcast.LstatRegular, never an open, so an
+            unreadable one is not left behind, and keeps the record and
+            validator (for cleanOwned) when the removal fails or the check
+            cannot tell: a later clear
             in the job tries that partial again before dropping the record, and
             so does a new download's checkpoint, which never overwrites the
             record while that partial stays (that download goes unrecorded). An episode host's 410 is gone, like the

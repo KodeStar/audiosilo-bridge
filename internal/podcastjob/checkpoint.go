@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path"
@@ -33,7 +34,22 @@ type checkpoint struct {
 	Offset     int64  `json:"offset"`
 	Total      int64  `json:"total"`
 	Validator  string `json:"validator"`
-	UpdatedAt  string `json:"updated_at"`
+	// SHA256 is the hex hash of a whole download (complete), as it was
+	// written: what the next attempt verifies the partial against.
+	SHA256    string `json:"sha256,omitempty"`
+	UpdatedAt string `json:"updated_at"`
+}
+
+// complete reports whether c records a whole download, its partial holding
+// every byte (Offset == Total) as hashed while it was written (SHA256): a
+// fetch whose read-back failed keeps it (resume-at-total), and the next
+// attempt verifies and publishes it with no GET (Fetch.run).
+func (c *checkpoint) complete() bool {
+	if c.Offset <= 0 || c.Offset != c.Total || len(c.SHA256) != 64 {
+		return false
+	}
+	_, err := hex.DecodeString(c.SHA256)
+	return err == nil
 }
 
 // partialName is the root-relative name of the partial c records, beside its
@@ -185,11 +201,16 @@ func (s *service) saveCheckpoint(job jobs.Job, root *os.Root, c *checkpoint, eta
 	if c.Validator == "" {
 		c.Validator = secrets.PodcastETagPrefix + nonce()
 	}
-	if !netguard.StrongETag(etag) {
-		return errors.New("unproven validator")
-	}
-	if err := s.o.Vault.Set(c.Validator, etag); err != nil {
-		return err
+	// A whole download is proven by its hash, not the host's ETag (no GET
+	// resumes it): etag is not asked for, and a validator the download did
+	// not seal one under names none.
+	if !c.complete() {
+		if !netguard.StrongETag(etag) {
+			return errors.New("unproven validator")
+		}
+		if err := s.o.Vault.Set(c.Validator, etag); err != nil {
+			return err
+		}
 	}
 	c.UpdatedAt = s.o.Now().UTC().Format(time.RFC3339)
 	return writeRecord(dir, s.checkpointName(job, c.ShowID), *c)
@@ -296,23 +317,59 @@ func (s *service) dropStaleCheckpoint(job jobs.Job, root *os.Root, showID, episo
 	}
 }
 
-func (s *service) loadCheckpoint(job jobs.Job, root *os.Root, showID, episodeID string) (checkpoint, string) {
+// loadCheckpoint is the job's saved record of its episode, with the sealed
+// ETag a resume sends, when its partial is still the one it records: a
+// resumable prefix (Offset < Total, a strong ETag) or a whole download
+// (complete). A record whose partial is proven gone or changed (partialGone:
+// not there, not a regular file, another size) is cleared, and a new record
+// answered. One whose partial could not be opened to tell (a network share's
+// hiccup) is kept, partial and all, with errPartialUnreadable: only a
+// definite absence or mismatch may cost a download its bytes.
+func (s *service) loadCheckpoint(job jobs.Job, root *os.Root, showID, episodeID string) (checkpoint, string, error) {
 	c := checkpoint{ServerHash: s.pairHash(), LibraryID: *job.LibraryID, ShowID: showID, EpisodeID: episodeID, Path: *job.Path}
 	saved, ok := s.readCheckpoint(job, showID)
 	if !ok || saved.EpisodeID != episodeID {
-		return c, ""
+		return c, "", nil
 	}
 	tag, _ := s.o.Vault.Get(saved.Validator)
-	partial, err := podcast.OpenRegular(root, saved.partialName())
-	if err == nil {
-		defer partial.Close()
-		st, e := partial.Stat()
-		if e == nil && st.Size() == saved.Offset && saved.Offset > 0 && saved.Offset < saved.Total && saved.Total <= s.o.MaxEpisodeBytes && netguard.StrongETag(tag) {
-			return saved, tag
+	size, err := partialSize(root, saved.partialName())
+	if err != nil && !partialGone(err) {
+		return saved, "", fmt.Errorf("%w: %w", errPartialUnreadable, err)
+	}
+	if err == nil && size == saved.Offset && saved.Total <= s.o.MaxEpisodeBytes {
+		if saved.complete() {
+			return saved, tag, nil
+		}
+		if saved.Offset > 0 && saved.Offset < saved.Total && netguard.StrongETag(tag) {
+			return saved, tag, nil
 		}
 	}
 	s.clearCheckpoint(job, root, &saved)
-	return c, ""
+	return c, "", nil
+}
+
+// partialSize is the size of the partial at name, opened as OpenRegular
+// opens it (so a partial the Bridge cannot read is not taken for one it can
+// resume).
+func partialSize(root *os.Root, name string) (int64, error) {
+	f, err := podcast.OpenRegular(root, name)
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return 0, err
+	}
+	return st.Size(), nil
+}
+
+// partialGone reports whether err, a partial's open or check, proves it gone
+// or not the Bridge's file any more: not there (ENOENT), or not a regular
+// file (a link, a folder, a file swapped in since its check). Any other error
+// (a share's hiccup, a permission) does not tell, and keeps it.
+func partialGone(err error) bool {
+	return errors.Is(err, os.ErrNotExist) || errors.Is(err, podcast.ErrInvalidFile) || errors.Is(err, errPartialChanged)
 }
 
 // clearCheckpoint removes the owned partial, its sealed validator and the
@@ -325,7 +382,7 @@ func (s *service) loadCheckpoint(job jobs.Job, root *os.Root, showID, episodeID 
 // job's folder name, an episode file name both shows use) is another record,
 // named by its own show (recordName), and never read here.
 func (s *service) clearCheckpoint(job jobs.Job, root *os.Root, c *checkpoint) {
-	defer func() { c.Temp, c.Offset, c.Total, c.Validator = "", 0, 0, "" }()
+	defer func() { c.Temp, c.Offset, c.Total, c.Validator, c.SHA256 = "", 0, 0, "", "" }()
 	if c.ServerHash != s.pairHash() || !s.dropPartial(root, c) {
 		return
 	}
@@ -499,7 +556,8 @@ func (s *service) runningRecords(rows []store.ServerJob, lib, self int64) func(c
 }
 
 // dropPartial removes c's owned partial, then its sealed validator; false, with
-// both kept, when the partial is still on disk. A partial an install journal
+// both kept, when the partial is still on disk or could not be checked to tell
+// (partialGone: a share's hiccup proves nothing gone). A partial an install journal
 // stages is the journal's (podcast.RecoverShow installs it): it stays on disk
 // and only the record's claim on it goes.
 func (s *service) dropPartial(root *os.Root, c *checkpoint) bool {
@@ -507,7 +565,11 @@ func (s *service) dropPartial(root *os.Root, c *checkpoint) bool {
 		p := c.partialName()
 		// Checked, not opened: a partial the Bridge can no longer read (the
 		// restart from zero clears one) is still its own to remove.
-		if st, err := podcast.LstatRegular(root, p); err == nil && !journalStages(root, c, st) {
+		st, err := podcast.LstatRegular(root, p)
+		switch {
+		case err != nil && !partialGone(err):
+			return false
+		case err == nil && !journalStages(root, c, st):
 			if err := root.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
 				return false
 			}

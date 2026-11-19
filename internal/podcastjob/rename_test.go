@@ -3,6 +3,8 @@ package podcastjob
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -268,7 +270,7 @@ func TestTakingInARenamedShowMovesItsDownloadRecords(t *testing.T) {
 			if _, old = s.readCheckpoint(job, fixtureShowID); old {
 				t.Fatal("the running download left its record at the old path")
 			}
-			if resumed, tag := s.loadCheckpoint(there, root, c.ShowID, c.EpisodeID); tag != `"one"` || resumed.Offset != 6 {
+			if resumed, tag, _ := s.loadCheckpoint(there, root, c.ShowID, c.EpisodeID); tag != `"one"` || resumed.Offset != 6 {
 				t.Fatal("the running download's record did not follow it", resumed, tag)
 			}
 			continue
@@ -276,7 +278,7 @@ func TestTakingInARenamedShowMovesItsDownloadRecords(t *testing.T) {
 		if old || !now || saved.Temp != c.Temp || saved.Validator != c.Validator {
 			t.Fatal("the record did not follow the folder", old, now, saved)
 		}
-		if resumed, tag := s.loadCheckpoint(there, root, c.ShowID, c.EpisodeID); tag != `"one"` || resumed.Offset != 6 || resumed.Temp != c.Temp {
+		if resumed, tag, _ := s.loadCheckpoint(there, root, c.ShowID, c.EpisodeID); tag != `"one"` || resumed.Offset != 6 || resumed.Temp != c.Temp {
 			t.Fatal("a fetch at the new path would not resume the partial", resumed, tag)
 		}
 	}
@@ -531,7 +533,7 @@ func TestTakingInMovesRecordsLeftUnderAGoneEarlierName(t *testing.T) {
 	if _, ok := s.readCheckpoint(jobs.Job{LibraryID: job.LibraryID, Path: &middle}, fixtureShowID); ok {
 		t.Fatal("the record was left under the gone middle name")
 	}
-	if resumed, tag := s.loadCheckpoint(jobs.Job{LibraryID: job.LibraryID, Path: &third}, root, c.ShowID, c.EpisodeID); tag != `"one"` || resumed.Temp != c.Temp {
+	if resumed, tag, _ := s.loadCheckpoint(jobs.Job{LibraryID: job.LibraryID, Path: &third}, root, c.ShowID, c.EpisodeID); tag != `"one"` || resumed.Temp != c.Temp {
 		t.Fatal("the record did not follow the folder", resumed, tag)
 	}
 }
@@ -2021,7 +2023,7 @@ func TestSwappedShowsSharingEpisodeNamesKeepTheirDownloads(t *testing.T) {
 		show string
 	}{{mine, "Other Show"}, {theirs, "Fixture Show"}} {
 		at := c.show + "/" + base
-		resumed, tag := s.loadCheckpoint(jobs.Job{LibraryID: job.LibraryID, Path: &at}, root, c.c.ShowID, c.c.EpisodeID)
+		resumed, tag, _ := s.loadCheckpoint(jobs.Job{LibraryID: job.LibraryID, Path: &at}, root, c.c.ShowID, c.c.EpisodeID)
 		if tag != `"one"` || resumed.Temp != c.c.Temp || resumed.Offset != 6 {
 			t.Fatal("a show lost its download in the swap", c.c.ShowID, resumed, tag)
 		}
@@ -2054,7 +2056,7 @@ func TestARecordNamedByPathAloneIsMigrated(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, legacyRecordName(3, c.Path)), b, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	resumed, tag := s.loadCheckpoint(job, root, c.ShowID, c.EpisodeID)
+	resumed, tag, _ := s.loadCheckpoint(job, root, c.ShowID, c.EpisodeID)
 	if tag != `"one"` || resumed.Temp != c.Temp {
 		t.Fatal("the record was not migrated", resumed, tag)
 	}
@@ -2430,6 +2432,84 @@ func TestAFetchNeverDownloadsAgainADownloadItCannotRead(t *testing.T) {
 	}
 	if _, err := os.Lstat(filepath.Join(h.mount, *job.Path)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("an episode was published unread", err)
+	}
+}
+
+// A whole download whose read-back failed every time (resume-at-total) is
+// kept, its record saying so with the hash it was written with, even from a
+// host that sends no ETag: the next attempt verifies it and publishes it with
+// no GET. Proven changed by then (other bytes at its size), it is downloaded
+// again from byte 0, once; it is never published unverified. A cancelled job
+// (the runner's Abandon) still clears it.
+func TestAFetchKeepsAWholeDownloadItCannotReadBack(t *testing.T) {
+	requireProbe(t)
+	for _, scenario := range []string{"published", "no etag", "changed", "abandoned"} {
+		t.Run(scenario, func(t *testing.T) {
+			h, job := audioHarness(t)
+			s := h.handler.s
+			audio := data(t, "chap-v24-reverse.mp3")
+			var calls atomic.Int32
+			setAudio(h, func(w http.ResponseWriter, r *http.Request) {
+				calls.Add(1)
+				if scenario != "no etag" {
+					w.Header().Set("ETag", `"one"`)
+				}
+				w.Header().Set("Content-Length", strconv.Itoa(len(audio)))
+				w.WriteHeader(200)
+				w.Write(audio)
+			})
+			s.o.Fault = func(at string) error {
+				if at == "rehash" {
+					return syscall.EIO
+				}
+				return nil
+			}
+			_, err := h.handler.FetchJob().Run(context.Background(), job, jobs.LocalReporter())
+			if code(t, err) != "write_failed" || calls.Load() != 1 {
+				t.Fatal(err, calls.Load())
+			}
+			saved, ok := s.readCheckpoint(job, fixtureShowID)
+			sum := sha256.Sum256(audio)
+			if !ok || !saved.complete() || saved.Total != int64(len(audio)) || saved.SHA256 != hex.EncodeToString(sum[:]) {
+				t.Fatalf("the whole download was not kept: %+v", saved)
+			}
+			partial := filepath.Join(h.mount, saved.partialName())
+			if b, err := os.ReadFile(partial); err != nil || !bytes.Equal(b, audio) {
+				t.Fatal("the kept partial is not the download", err)
+			}
+			s.o.Fault = nil
+			switch scenario {
+			case "abandoned":
+				h.handler.FetchJob().Abandon(context.Background(), job)
+				if _, err := os.Lstat(partial); !errors.Is(err, os.ErrNotExist) {
+					t.Fatal("a cancelled fetch kept its partial", err)
+				}
+				noRecords(t, s)
+				return
+			case "changed":
+				other := bytes.Clone(audio)
+				other[len(other)/2] ^= 0xff
+				if err := os.WriteFile(partial, other, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			res, err := h.handler.FetchJob().Run(context.Background(), job, jobs.LocalReporter())
+			got, isResult := res.(fetchResult)
+			if err != nil || !isResult || got.Fetch.Bytes != int64(len(audio)) {
+				t.Fatal(res, err)
+			}
+			want := int32(1)
+			if scenario == "changed" {
+				want = 2
+			}
+			if calls.Load() != want {
+				t.Fatalf("%d requests, want %d", calls.Load(), want)
+			}
+			if b, err := os.ReadFile(filepath.Join(h.mount, *job.Path)); err != nil || !bytes.Equal(b, audio) {
+				t.Fatal("the published episode is not the host's", err)
+			}
+			noRecords(t, s)
+		})
 	}
 }
 
