@@ -270,24 +270,54 @@ func (db *DB) SetAudiblePushCursor(ctx context.Context, id, cursor string, from 
 	return err
 }
 
-// AudibleSyncOK records that id's sync (a job or a push) went through at at:
-// its error clears, and a wait once it has passed (the job and the push run
-// side by side: one's success never ends a wait Audible gave the other).
-func (db *DB) AudibleSyncOK(ctx context.Context, id string, at time.Time) error {
-	ts := timestamp(at)
-	_, err := db.sql.ExecContext(ctx, `UPDATE audible_accounts SET sync_at = ?1, sync_error = '',
-		sync_retry_at = CASE WHEN sync_retry_at > ?1 THEN sync_retry_at ELSE '' END WHERE id = ?2`, ts, id)
+// AudibleSyncSide is which half of an account's sync a health record is
+// for: each keeps its own (migration 0017), so a push that went through never
+// hides a failed job, nor a job's success a failing push.
+type AudibleSyncSide int
+
+const (
+	// SyncJob is the audible.sync job (Audible to the server): sync_at,
+	// sync_error.
+	SyncJob AudibleSyncSide = iota
+	// SyncPush is the push loop (the server to Audible): push_at, push_error.
+	SyncPush
+)
+
+// The health writes of each side: AudibleSyncOK's (?1 the time, ?2 the
+// account) and AudibleSyncFailed's (?1 the reason, ?2 the wait, ?3 the
+// account).
+const (
+	syncOKSQL = `UPDATE audible_accounts SET sync_at = ?1, sync_error = '',
+		sync_retry_at = CASE WHEN sync_retry_at > ?1 THEN sync_retry_at ELSE '' END WHERE id = ?2`
+	pushOKSQL = `UPDATE audible_accounts SET push_at = ?1, push_error = '',
+		sync_retry_at = CASE WHEN sync_retry_at > ?1 THEN sync_retry_at ELSE '' END WHERE id = ?2`
+	syncFailedSQL = `UPDATE audible_accounts SET sync_error = ?1,
+		sync_retry_at = CASE WHEN ?2 > sync_retry_at THEN ?2 ELSE sync_retry_at END WHERE id = ?3`
+	pushFailedSQL = `UPDATE audible_accounts SET push_error = ?1,
+		sync_retry_at = CASE WHEN ?2 > sync_retry_at THEN ?2 ELSE sync_retry_at END WHERE id = ?3`
+)
+
+// AudibleSyncOK records that id's side of the sync went through at at: that
+// side's error clears (the other's stays), and a wait once it has passed (the
+// job and the push run side by side: one's success never ends a wait Audible
+// gave the other).
+func (db *DB) AudibleSyncOK(ctx context.Context, id string, side AudibleSyncSide, at time.Time) error {
+	query := syncOKSQL
+	if side == SyncPush {
+		query = pushOKSQL
+	}
+	_, err := db.sql.ExecContext(ctx, query, timestamp(at), id)
 	return err
 }
 
-// ClearAudibleSyncError forgets id's stale sync error after sync is turned
-// off, reporting whether there was one (what the checklist shows). A wait
-// Audible asked for stays: the device is the same, so the wait still holds
-// (and a passed one is inert). This is not a successful sync, so sync_at stays
-// as it was.
+// ClearAudibleSyncError forgets id's stale sync errors (the job's and the
+// push's) after sync is turned off, reporting whether there was one (what the
+// checklist shows). A wait Audible asked for stays: the device is the same, so
+// the wait still holds (and a passed one is inert). This is not a successful
+// sync, so sync_at and push_at stay as they were.
 func (db *DB) ClearAudibleSyncError(ctx context.Context, id string) (bool, error) {
-	res, err := db.sql.ExecContext(ctx, `UPDATE audible_accounts SET sync_error = ''
-		WHERE id = ? AND sync_error != ''`, id)
+	res, err := db.sql.ExecContext(ctx, `UPDATE audible_accounts SET sync_error = '', push_error = ''
+		WHERE id = ? AND (sync_error != '' OR push_error != '')`, id)
 	if err != nil {
 		return false, err
 	}
@@ -295,15 +325,19 @@ func (db *DB) ClearAudibleSyncError(ctx context.Context, id string) (bool, error
 	return n > 0, err
 }
 
-// AudibleSyncFailed records why id's sync failed, and until when Audible asked
-// the Bridge to wait (zero: no new wait). A wait is never shortened: the later
-// of the one stored and retryAt stays. It never refuses the account.
-func (db *DB) AudibleSyncFailed(ctx context.Context, id, why string, retryAt time.Time) error {
+// AudibleSyncFailed records why id's side of the sync failed, and until when
+// Audible asked the Bridge to wait (zero: no new wait). A wait is never
+// shortened: the later of the one stored and retryAt stays. It never refuses
+// the account, nor touches the other side's error.
+func (db *DB) AudibleSyncFailed(ctx context.Context, id string, side AudibleSyncSide, why string, retryAt time.Time) error {
 	retry := ""
 	if !retryAt.IsZero() {
 		retry = timestamp(retryAt)
 	}
-	_, err := db.sql.ExecContext(ctx, `UPDATE audible_accounts SET sync_error = ?1,
-		sync_retry_at = CASE WHEN ?2 > sync_retry_at THEN ?2 ELSE sync_retry_at END WHERE id = ?3`, why, retry, id)
+	query := syncFailedSQL
+	if side == SyncPush {
+		query = pushFailedSQL
+	}
+	_, err := db.sql.ExecContext(ctx, query, why, retry, id)
 	return err
 }

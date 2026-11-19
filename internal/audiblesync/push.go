@@ -3,6 +3,7 @@ package audiblesync
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"sync"
 	"time"
@@ -163,7 +164,7 @@ func (p *Pusher) account(ctx context.Context, srv Server, a store.AudibleAccount
 			return
 		case errors.Is(err, link.ErrUserUnavailable), errors.Is(err, link.ErrUnknownAccount):
 			p.pause(a.ID, now.Add(refusedWait))
-			p.o.health(ctx, a, err, time.Time{})
+			p.o.health(ctx, store.SyncPush, a, err, time.Time{})
 			return
 		case errors.Is(err, link.ErrBadCursor):
 			// The server refused the cursor (a server restored from a backup,
@@ -186,12 +187,12 @@ func (p *Pusher) account(ctx context.Context, srv Server, a store.AudibleAccount
 		case strikes > 0:
 			p.o.Log.Warn("audible: the server has no places feed (it is older than 2.6.0); asking again in an hour", "account", a.ID)
 			p.pause(a.ID, now.Add(oldServerWait))
-			p.o.health(ctx, a, err, time.Time{})
+			p.o.health(ctx, store.SyncPush, a, err, time.Time{})
 			return
 		case err != nil:
 			if ctx.Err() == nil {
 				p.o.Log.Warn("audible: reading the server's places failed", "account", a.ID, "err", err)
-				p.o.health(ctx, a, errors.New("reading the server's places failed: "+err.Error()), time.Time{})
+				p.o.health(ctx, store.SyncPush, a, fmt.Errorf("reading the server's places failed: %w", err), time.Time{})
 				// The server asking to wait pauses this loop only: it is no
 				// reason to leave Audible alone (the sync's wait).
 				var e *link.APIError
@@ -437,7 +438,7 @@ func (p *Pusher) push(ctx context.Context, a store.AudibleAccount, x store.Audib
 		p.o.Log.Warn("audible: recording a push failed", "account", a.ID, "err", err)
 	}
 	p.o.Log.Info("audible: place written to Audible", "account", a.ID, "asin", x.ASIN, "position_ms", want)
-	p.o.health(ctx, a, nil, time.Time{})
+	p.o.health(ctx, store.SyncPush, a, nil, time.Time{})
 	return false
 }
 
@@ -482,10 +483,10 @@ func (p *Pusher) failed(ctx context.Context, a store.AudibleAccount, x *store.Au
 	}
 	p.o.Log.Warn("audible: "+what+" failed", "account", a.ID, "asin", asin, "err", audible.RedactedError(err))
 	if _, ok := audible.RetryWait(err); ok {
-		p.o.health(ctx, a, errors.New(what+": Audible asked the Bridge to wait"), retryAt(err, now, errorWait))
+		p.o.health(ctx, store.SyncPush, a, fmt.Errorf("%s: Audible asked the Bridge to wait", what), retryAt(err, now, errorWait))
 		return true
 	}
-	p.o.health(ctx, a, errors.New(what+": "+err.Error()), time.Time{})
+	p.o.health(ctx, store.SyncPush, a, fmt.Errorf("%s: %w", what, err), time.Time{})
 	if !titleAnswer(err) {
 		p.pause(a.ID, now.Add(errorWait))
 		return true

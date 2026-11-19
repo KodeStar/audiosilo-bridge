@@ -53,8 +53,13 @@ func TestAudibleSetupSyncHealth(t *testing.T) {
 		if err := b.db.SignInAudibleAccount(ctx, a, at); err != nil {
 			t.Fatal(err)
 		}
+		// syncfail02's push failed, not its job: it counts the same.
+		side := store.SyncJob
+		if id == "syncfail02" {
+			side = store.SyncPush
+		}
 		if id != "healthy001" {
-			if err := b.db.AudibleSyncFailed(ctx, id, "sync failed", at.Add(time.Hour)); err != nil {
+			if err := b.db.AudibleSyncFailed(ctx, id, side, "sync failed", at.Add(time.Hour)); err != nil {
 				t.Fatal(err)
 			}
 		}

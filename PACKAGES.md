@@ -1479,7 +1479,8 @@ internal/
             read: row_ms and row_seen, when this Bridge first read that place; a sync listing the
             title for another book forgets them) and on audible_accounts
             push_cursor/push_from (push_from '' until a read reaches the feed's end; started again by a mapping to another server, person or
-            library), sync_at/sync_error/sync_retry_at (AudibleSyncFailed and AudibleSyncOK never shorten a
+            library), sync_at/sync_error/sync_retry_at (the push's own since 0017: push_at/push_error;
+            AudibleSyncFailed and AudibleSyncOK never shorten a
             wait still ahead) and refusal_kind (bridge#46: 'sign_in' | 'device'
             in a column, 4b's throttled rows migrated by their text; AudiblePolled keeps a device refusal,
             as RefuseAudibleAccount does over a sign-in one (bridge#64),
@@ -1603,6 +1604,14 @@ internal/
             (it reports whether the book is local now), leaving updated_at alone.
             GenerateShareOff reports whether an open sidecars.generate job following a
             book heard share_off (the contributing stage's check before it files).
+            0017 (bridge#50, bridge#80) adds audible_accounts.push_at/push_error: the
+            push loop's health in columns of its own, so sync_at/sync_error are the
+            audible.sync job's alone (AudibleSyncOK and AudibleSyncFailed take the side,
+            SyncJob or SyncPush; one's success never clears the other's failure nor
+            one's failure overwrites it). sync_retry_at, Audible's wait, stays shared;
+            ClearAudibleSyncError (sync off), a remap and a sign-in again clear both
+            errors; AudibleAccount.SyncProblem (the job's, else the push's) feeds the
+            setup item.
   state/    per-book pipeline state machine: table-driven states/lanes/transitions,
             CanStart/NextState guards, the audit fix-loop cap. Pure, no I/O. M6 added
             ParkCode (typed park reasons - M7 added contrib_unavailable, core_needed,
@@ -2951,7 +2960,9 @@ internal/
             is ahead ends "waiting" without calling Audible; reads the push's rows, then lastpositions
             (in batches of 25 ASINs, split on 400/414, in a new random order each sync; a 429/503 waits Audible's Retry-After from when
             it came back, at least 2 min; a read Audible stops partway still syncs the places it gave,
-            then fails as a whole failed read does, bridge#50), skips a place under 1 s, past the runtime (5% + 2 min), older than 85 days
+            then fails as a whole failed read does, bridge#50; a failure after Audible gave places
+            reports the counts so far beside its code and message, the console's "before it
+            stopped", bridge#80), skips a place under 1 s, past the runtime (5% + 2 min), older than 85 days
             or within 5 s of the place last written (its echo), posts a listen of no length (from_pos =
             to_pos, started_at = ended_at = last_updated, start jump; id EventID: "aud-" + 32 hex of
             sha256(account|asin|position_ms|last_updated|kind|library_id|path), kind "" or "finish", so
@@ -2987,7 +2998,8 @@ internal/
             place and waits its Retry-After (at least 2 min) counted from the failure; a 5xx or no
             answer keeps it and leaves the account 2 min (this loop only); another 4xx or a denied
             license (audible.IsDenial) drops it, a throttled device also leaving the account 15 min;
-            never a refusal. Health (sync_at, sync_error; sync_retry_at, which no later call shortens)
+            never a refusal. Health (the job's sync_at/sync_error, the push's push_at/push_error, each
+            written by its own side only, bridge#50/#80; sync_retry_at, which no later call shortens)
             feeds the setup item's detail only. A sync_off reply or a changed mapping
             clears a stale sync_error without recording a successful sync, keeping
             Audible's wait (same device); only a new sign-in (a new device) clears

@@ -462,7 +462,7 @@ func TestSignInAgainReplacesTheDevice(t *testing.T) {
 	if err := e.db.RefuseAudibleAccount(context.Background(), a.ID, store.RefusalSignIn, RefusedText, time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	if err := e.db.AudibleSyncFailed(context.Background(), a.ID, "old sync failure", time.Now().Add(time.Hour)); err != nil {
+	if err := e.db.AudibleSyncFailed(context.Background(), a.ID, store.SyncJob, "old sync failure", time.Now().Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	b := e.signIn(t)
@@ -570,7 +570,7 @@ func TestSignInAgainThatFailsKeepsTheEarlierSignIn(t *testing.T) {
 	e := newEnv(t)
 	a := e.signIn(t)
 	retry := time.Now().Add(time.Hour)
-	if err := e.db.AudibleSyncFailed(context.Background(), a.ID, "previous sync failure", retry); err != nil {
+	if err := e.db.AudibleSyncFailed(context.Background(), a.ID, store.SyncJob, "previous sync failure", retry); err != nil {
 		t.Fatal(err)
 	}
 	first, _ := e.m.credentials(a.ID)

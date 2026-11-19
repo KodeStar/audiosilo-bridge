@@ -98,7 +98,7 @@ func TestPushDebounce(t *testing.T) {
 	if got := e.sets(); len(got) != 2 || got[1] != "B000000001@900000" || e.accts.acrs != 1 {
 		t.Fatalf("sets = %v (acr reads %d)", got, e.accts.acrs)
 	}
-	if a := e.account(t); a.SyncAt == "" || a.SyncError != "" || a.PushCursor == "" {
+	if a := e.account(t); a.PushAt == "" || a.PushError != "" || a.PushCursor == "" {
 		t.Fatalf("account = %+v", a)
 	}
 }
@@ -256,7 +256,7 @@ func TestPushRefusedOffAndBackoff(t *testing.T) {
 	if len(e.srv.feedAsks) != 1 {
 		t.Fatalf("a sync-off account was asked again at once: %v", e.srv.feedAsks)
 	}
-	if a := e.account(t); a.SyncError != "" {
+	if a := e.account(t); a.PushError != "" {
 		t.Fatalf("sync off is no error: %+v", a)
 	}
 	e.srv.feedErr = nil
@@ -269,7 +269,7 @@ func TestPushRefusedOffAndBackoff(t *testing.T) {
 	e.accts.setErr = audibleAnswer(t, http.StatusServiceUnavailable, "900")
 	p.Tick(context.Background())
 	a := e.account(t)
-	if a.RefusedAt != "" || !strings.Contains(a.SyncError, "wait") || a.SyncRetryAt != store.Timestamp(e.now.Add(15*time.Minute)) {
+	if a.RefusedAt != "" || !strings.Contains(a.PushError, "wait") || a.SyncRetryAt != store.Timestamp(e.now.Add(15*time.Minute)) {
 		t.Fatalf("after a 503: %+v", a)
 	}
 	if x, _ := e.db.GetAudiblePush(context.Background(), acctID, "B000000001"); x.WantMs == nil {
@@ -288,7 +288,7 @@ func TestPushRefusedOffAndBackoff(t *testing.T) {
 	if got := e.sets(); len(got) != 1 {
 		t.Fatalf("sets = %v", got)
 	}
-	if a := e.account(t); a.SyncError != "" || a.SyncRetryAt != "" {
+	if a := e.account(t); a.PushError != "" || a.SyncRetryAt != "" {
 		t.Fatalf("after the write: %+v", a)
 	}
 
@@ -300,7 +300,7 @@ func TestPushRefusedOffAndBackoff(t *testing.T) {
 	e.accts.setErr = audibleAnswer(t, http.StatusForbidden, "")
 	p.Tick(context.Background())
 	x, _ := e.db.GetAudiblePush(context.Background(), acctID, "B000000001")
-	if a := e.account(t); a.RefusedAt != "" || a.SyncError == "" || x.WantMs != nil {
+	if a := e.account(t); a.RefusedAt != "" || a.PushError == "" || x.WantMs != nil {
 		t.Fatalf("after a 403: %+v, %+v", a, x)
 	}
 }
@@ -311,7 +311,7 @@ func TestPushUserUnavailable(t *testing.T) {
 	e.srv.feedErr = link.ErrUserUnavailable
 	p := NewPusher(e.o)
 	p.Tick(context.Background())
-	if a := e.account(t); !errors.Is(e.srv.feedErr, link.ErrUserUnavailable) || a.SyncError == "" || e.changed != 1 {
+	if a := e.account(t); !errors.Is(e.srv.feedErr, link.ErrUserUnavailable) || a.PushError == "" || e.changed != 1 {
 		t.Fatalf("account = %+v (changed %d)", a, e.changed)
 	}
 	e.now = e.now.Add(time.Minute)
@@ -331,12 +331,12 @@ func TestPushOldServer(t *testing.T) {
 	e.srv.feedErr = link.ErrNoAudibleSync
 	p := NewPusher(e.o)
 	p.Tick(context.Background())
-	if a := e.account(t); a.SyncError != "" || e.changed != 0 {
+	if a := e.account(t); a.PushError != "" || e.changed != 0 {
 		t.Fatalf("after one 404: %+v (changed %d)", a, e.changed)
 	}
 	e.now = e.now.Add(errorWait)
 	p.Tick(context.Background())
-	if a := e.account(t); !strings.Contains(a.SyncError, "update it to 2.6.0") || a.SyncRetryAt != "" || len(e.srv.feedAsks) != 2 {
+	if a := e.account(t); !strings.Contains(a.PushError, "update it to 2.6.0") || a.SyncRetryAt != "" || len(e.srv.feedAsks) != 2 {
 		t.Fatalf("after two 404s: %+v, asks %v", a, e.srv.feedAsks)
 	}
 	e.now = e.now.Add(refusedWait + time.Minute)
@@ -365,7 +365,7 @@ func TestPushRestartingServerIsNotOld(t *testing.T) {
 		if len(e.srv.feedAsks) != i+1 {
 			t.Fatalf("answer %d: asks %v", i, e.srv.feedAsks)
 		}
-		if a := e.account(t); strings.Contains(a.SyncError, "update it to 2.6.0") {
+		if a := e.account(t); strings.Contains(a.PushError, "update it to 2.6.0") {
 			t.Fatalf("answer %d: %+v", i, a)
 		}
 		e.now = e.now.Add(errorWait)
@@ -574,7 +574,7 @@ func TestPushAudibleAnswers(t *testing.T) {
 	if x, _ := e.db.GetAudiblePush(ctx, acctID, "B000000001"); x.WantMs == nil {
 		t.Fatal("a 502 dropped the place")
 	}
-	if a := e.account(t); a.SyncError == "" || a.SyncRetryAt != "" {
+	if a := e.account(t); a.PushError == "" || a.SyncRetryAt != "" {
 		t.Fatalf("after a 502: %+v", a)
 	}
 	e.accts.setErr = nil
@@ -642,7 +642,7 @@ func TestPushServerWait(t *testing.T) {
 	p := NewPusher(e.o)
 	e.srv.feedErr = &link.APIError{Status: http.StatusServiceUnavailable, Code: "unavailable", RetryAfter: 10 * time.Minute}
 	p.Tick(context.Background())
-	if a := e.account(t); a.SyncRetryAt != "" || a.SyncError == "" {
+	if a := e.account(t); a.SyncRetryAt != "" || a.PushError == "" {
 		t.Fatalf("after the server's 503: %+v", a)
 	}
 	e.now = e.now.Add(5 * time.Minute)
@@ -840,7 +840,7 @@ func TestPushRejectedCursorReadsFromTheStart(t *testing.T) {
 	e2 := newEnv(t)
 	e2.srv.feedErr = &link.APIError{Status: http.StatusBadRequest, Code: "invalid_request"}
 	NewPusher(e2.o).Tick(context.Background())
-	if a := e2.account(t); a.SyncError == "" || a.PushCursor != "" {
+	if a := e2.account(t); a.PushError == "" || a.PushCursor != "" {
 		t.Fatalf("a 400 on the feed's start: %+v", a)
 	}
 }

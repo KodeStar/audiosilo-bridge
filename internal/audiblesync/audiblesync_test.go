@@ -614,6 +614,66 @@ func TestSyncKeepsPlacesReadBeforeAFailure(t *testing.T) {
 	}
 }
 
+// A sync that fails after Audible gave places reports what it did before it
+// stopped beside its failure (bridge#80: the console's "before it stopped"
+// line): the code and message as before, and the counts. One that failed
+// before any place was read reports the failure alone.
+func TestSyncFailureCarriesCounts(t *testing.T) {
+	e := newEnv(t)
+	e.accts.places["B000000001"] = audible.Position{PositionMs: 60_000, LastUpdated: e.now}
+	e.accts.places["B000000002"] = audible.Position{PositionMs: 90_000, LastUpdated: e.now}
+	raw := params(t, title("B000000001", "A/One", 3600), title("B000000002", "A/Two", 3600))
+	run := func() map[string]any {
+		t.Helper()
+		out, err := New(e.o).Run(context.Background(), jobs.Job{ID: 7, Kind: Kind, Params: raw, Attempt: 1}, jobs.LocalReporter())
+		if err == nil {
+			t.Fatal("the sync went through")
+		}
+		b, merr := json.Marshal(out)
+		if merr != nil {
+			t.Fatal(merr)
+		}
+		var got map[string]any
+		if err := json.Unmarshal(b, &got); err != nil {
+			t.Fatalf("result %s: %v", b, err)
+		}
+		if msg, _ := got["message"].(string); msg == "" || msg != err.Error() {
+			t.Fatalf("result %s carries another message than the error %q", b, err)
+		}
+		return got
+	}
+
+	// Audible stops partway: the place read is synced and counted.
+	e.accts.placesErr = retryErr(t, http.StatusTooManyRequests, "600")
+	e.accts.readFirst = []string{"B000000001"}
+	got := run()
+	if got["code"] != CodeAudible || got["titles"] != 2.0 || got["heard"] != 1.0 || got["sent"] != 1.0 || got["applied"] != 1.0 {
+		t.Fatalf("a partial read's result = %v", got)
+	}
+
+	// Nothing read: the failure alone.
+	e.accts.readFirst = nil
+	e.now = e.now.Add(11 * time.Minute)
+	if got := run(); got["code"] != CodeAudible || got["titles"] != nil {
+		t.Fatalf("a read that failed whole = %v", got)
+	}
+
+	// The server's person can't be synced for, after Audible answered.
+	e.accts.placesErr = nil
+	e.now = e.now.Add(11 * time.Minute)
+	e.srv.postErr = link.ErrUserUnavailable
+	if got := run(); got["code"] != CodeUserUnavailable || got["heard"] != 2.0 || got["sent"] != 0.0 {
+		t.Fatalf("user unavailable = %v", got)
+	}
+
+	// Any other failure sending them: the counts alone (no code).
+	e.srv.postErr = &link.APIError{Status: http.StatusBadGateway, Message: "bad gateway"}
+	out, err := New(e.o).Run(context.Background(), jobs.Job{ID: 8, Kind: Kind, Params: raw, Attempt: 1}, jobs.LocalReporter())
+	if res, ok := out.(*Result); err == nil || !ok || res.Heard != 2 || res.Sent != 0 {
+		t.Fatalf("a failed post = %#v, %v", out, err)
+	}
+}
+
 // retryErr is an Audible 429/503 answer the client gave up on, made by the
 // real client against a server that answers it.
 func retryErr(t *testing.T, status int, retryAfter string) error {
@@ -746,7 +806,7 @@ func TestSyncOffClearsStaleHealth(t *testing.T) {
 			e := newEnv(t)
 			ctx := context.Background()
 			wantWait := store.Timestamp(e.now.Add(-time.Minute)) // passed: inert, left as it is
-			if err := e.db.AudibleSyncFailed(ctx, acctID, "previous failure", e.now.Add(-time.Minute)); err != nil {
+			if err := e.db.AudibleSyncFailed(ctx, acctID, store.SyncJob, "previous failure", e.now.Add(-time.Minute)); err != nil {
 				t.Fatal(err)
 			}
 			e.srv.postErr, e.srv.feedErr = link.ErrSyncOff, link.ErrSyncOff
@@ -757,7 +817,7 @@ func TestSyncOffClearsStaleHealth(t *testing.T) {
 				// does: the server's switch never shortens Audible's wait.
 				wantWait = store.Timestamp(e.now.Add(time.Hour))
 				e.accts.onRead = func() {
-					if err := e.db.AudibleSyncFailed(ctx, acctID, "asked to wait", e.now.Add(time.Hour)); err != nil {
+					if err := e.db.AudibleSyncFailed(ctx, acctID, store.SyncJob, "asked to wait", e.now.Add(time.Hour)); err != nil {
 						t.Fatal(err)
 					}
 				}

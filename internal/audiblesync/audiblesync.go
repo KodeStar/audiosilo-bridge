@@ -19,7 +19,8 @@
 // this book, no match), nor a place past Audible's runtime (the match looks
 // wrong), nor a refused account (it must sign in again first). A sync error
 // never refuses the account: it backs off (honouring Audible's Retry-After)
-// and shows in the setup item's detail. No credential, title or listening
+// and shows in the setup item's detail, the job's and the push's each kept on
+// its own (store.SyncJob, SyncPush). No credential, title or listening
 // time leaves here; params, results and errors carry ids, ASINs, paths and
 // counts only.
 package audiblesync
@@ -153,8 +154,8 @@ type Store interface {
 	RearmAudiblePush(ctx context.Context, x store.AudiblePush, now time.Time) (bool, error)
 	SetAudibleACR(ctx context.Context, account, asin, acr string) error
 	SetAudiblePushCursor(ctx context.Context, id, cursor string, from time.Time) error
-	AudibleSyncOK(ctx context.Context, id string, at time.Time) error
-	AudibleSyncFailed(ctx context.Context, id, why string, retryAt time.Time) error
+	AudibleSyncOK(ctx context.Context, id string, side store.AudibleSyncSide, at time.Time) error
+	AudibleSyncFailed(ctx context.Context, id string, side store.AudibleSyncSide, why string, retryAt time.Time) error
 	ClearAudibleSyncError(ctx context.Context, id string) (bool, error)
 	// AudiblePreorders are the pending preorders a poll remembers (migration
 	// 0012): neither direction syncs one (it isn't out, so Audible has no
@@ -220,37 +221,41 @@ func (o *Options) server() Server {
 	return o.Server()
 }
 
-// health records how account a's sync went (err nil: it went through),
-// honouring a wait Audible asked for, and runs OnChange when that changes
-// what the checklist says (an error appears or clears). It never refuses the
+// health records how side's run for account a went (err nil: it went
+// through), honouring a wait Audible asked for, and runs OnChange when that
+// side's error appears or clears (the checklist may move). Each side keeps
+// its own error (store.SyncJob, SyncPush, bridge#50): one's success never
+// clears the other's, nor one's failure overwrites it. It never refuses the
 // account.
-func (o *Options) health(ctx context.Context, a store.AudibleAccount, err error, retryAt time.Time) {
+func (o *Options) health(ctx context.Context, side store.AudibleSyncSide, a store.AudibleAccount, err error, retryAt time.Time) {
 	ctx = context.WithoutCancel(ctx)
-	before := a.SyncError
+	before := a
 	if cur, cerr := o.Accounts.Account(ctx, a.ID); cerr == nil {
-		before = cur.SyncError
+		before = cur
 	}
+	var rerr error
 	if err == nil {
-		if rerr := o.DB.AudibleSyncOK(ctx, a.ID, o.Now()); rerr != nil {
-			o.Log.Warn("audible: recording a sync failed", "account", a.ID, "err", rerr)
-		}
-		if before != "" {
-			o.OnChange()
-		}
+		rerr = o.DB.AudibleSyncOK(ctx, a.ID, side, o.Now())
+	} else {
+		rerr = o.DB.AudibleSyncFailed(ctx, a.ID, side, audible.RedactedError(err).Error(), retryAt)
+	}
+	if rerr != nil {
+		o.Log.Warn("audible: recording how a sync went failed", "account", a.ID, "err", rerr)
 		return
 	}
-	why := audible.RedactedError(err).Error()
-	if rerr := o.DB.AudibleSyncFailed(ctx, a.ID, why, retryAt); rerr != nil {
-		o.Log.Warn("audible: recording a sync failure failed", "account", a.ID, "err", rerr)
+	was := before.SyncError
+	if side == store.SyncPush {
+		was = before.PushError
 	}
-	if before == "" {
+	if (was == "") != (err == nil) {
 		o.OnChange()
 	}
 }
 
-// syncOff clears a sync error that no longer applies, without recording a
-// sync success (a wait Audible asked for stays), and runs OnChange when there
-// was one to clear.
+// syncOff clears the sync errors that no longer apply (the job's and the
+// push's: the server's sync is off for both), without recording a sync
+// success (a wait Audible asked for stays), and runs OnChange when there was
+// one to clear.
 func (o *Options) syncOff(ctx context.Context, a store.AudibleAccount) {
 	cleared, err := o.DB.ClearAudibleSyncError(context.WithoutCancel(ctx), a.ID)
 	if err != nil {
@@ -388,17 +393,32 @@ type Result struct {
 	SyncOff   bool   `json:"sync_off,omitempty"`
 }
 
-// Run syncs the account's places on Audible to the server.
+// failedResult is the result of a sync that failed after Audible gave it
+// places: the failure's code and message beside the counts of what it did
+// before it stopped (the console's "before it stopped" line, bridge#80).
+type failedResult struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+	*Result
+}
+
+// Run syncs the account's places on Audible to the server. A coded failure's
+// result is its code and message (Failure), with the counts so far once
+// Audible gave places (failedResult); another failure's, those counts alone.
 func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (any, error) {
 	res, err := h.run(ctx, job, rep)
 	var f *Failure
-	if errors.As(err, &f) {
+	switch {
+	case err == nil:
+		return res, nil
+	case errors.As(err, &f) && res != nil:
+		return failedResult{Code: f.Code, Message: f.Message, Result: res}, f
+	case f != nil:
 		return f, f
+	case res != nil:
+		return res, audible.RedactedError(err)
 	}
-	if err != nil {
-		return nil, audible.RedactedError(err)
-	}
-	return res, nil
+	return nil, audible.RedactedError(err)
 }
 
 func (h *Handler) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (*Result, error) {
@@ -458,7 +478,7 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (*R
 		return res, nil
 	}
 	if len(asins) == 0 {
-		h.o.health(ctx, acct, nil, time.Time{})
+		h.o.health(ctx, store.SyncJob, acct, nil, time.Time{})
 		return res, nil
 	}
 
@@ -486,10 +506,10 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (*R
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		h.o.health(ctx, acct, fmt.Errorf("reading the places on Audible: %w", err), retryAt(err, h.o.Now(), errorWait))
+		h.o.health(ctx, store.SyncJob, acct, fmt.Errorf("reading the places on Audible: %w", err), retryAt(err, h.o.Now(), errorWait))
 		partial = fail(CodeAudible, "Audible didn't answer the places: %v", err)
 		if len(places) == 0 {
-			return nil, partial
+			return nil, partial // nothing read, so nothing done
 		}
 		h.o.Log.Warn("audible: Audible answered only some of the places; syncing those", "account", acct.ID,
 			"read", len(places), "titles", len(asins), "err", audible.RedactedError(err))
@@ -552,16 +572,16 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (*R
 			h.o.syncOff(ctx, acct)
 			return res, nil
 		case errors.Is(err, link.ErrUserUnavailable):
-			h.o.health(ctx, acct, err, time.Time{})
-			return nil, fail(CodeUserUnavailable, "%v", err)
+			h.o.health(ctx, store.SyncJob, acct, err, time.Time{})
+			return res, fail(CodeUserUnavailable, "%v", err)
 		case errors.Is(err, link.ErrUnknownAccount):
-			return nil, fail(CodeUnknownAccount, "The server has no such Audible account: sign in or map the account again on the Bridge's Accounts tab.")
+			return res, fail(CodeUnknownAccount, "The server has no such Audible account: sign in or map the account again on the Bridge's Accounts tab.")
 		case err != nil:
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
 			}
-			h.o.health(ctx, acct, fmt.Errorf("sending the places to the server: %w", err), time.Time{})
-			return nil, fmt.Errorf("sending the places to the server: %w", err)
+			h.o.health(ctx, store.SyncJob, acct, fmt.Errorf("sending the places to the server: %w", err), time.Time{})
+			return res, fmt.Errorf("sending the places to the server: %w", err)
 		}
 		res.Sent += len(batch)
 		for _, r := range ans.Results {
@@ -607,9 +627,9 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (*R
 	}
 	if partial != nil {
 		h.o.Log.Info("audible: some places synced", "account", acct.ID, "heard", res.Heard, "sent", res.Sent, "applied", res.Applied)
-		return nil, partial
+		return res, partial
 	}
-	h.o.health(ctx, acct, nil, time.Time{})
+	h.o.health(ctx, store.SyncJob, acct, nil, time.Time{})
 	h.o.Log.Info("audible: places synced", "account", acct.ID, "titles", res.Titles, "heard", res.Heard, "sent", res.Sent,
 		"applied", res.Applied, "behind", res.Behind, "duplicate", res.Duplicate, "reasserted", res.Reasserted)
 	return res, nil

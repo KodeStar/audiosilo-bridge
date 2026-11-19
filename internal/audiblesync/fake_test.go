@@ -187,7 +187,7 @@ func TestSyncBothWaysAgainstTheFake(t *testing.T) {
 
 // The push loop's failures carry no credential: Audible answering a license
 // request (a 500) and a place (a 400) with a body quoting the account's real
-// tokens, customer id and serial leaves none in sync_error, the log, or any file under the data
+// tokens, customer id and serial leaves none in push_error, the log, or any file under the data
 // dir but the vault's sealed one (bridge#50: the sync job's walk is in
 // internal/app; this is the push loop's).
 func TestPushFailuresHoldNoCredential(t *testing.T) {
@@ -239,10 +239,10 @@ func TestPushFailuresHoldNoCredential(t *testing.T) {
 	clean := func(step, want string) {
 		t.Helper()
 		a, err := fa.db.GetAudibleAccount(ctx, fa.acct.ID)
-		if err != nil || !strings.Contains(a.SyncError, want) {
-			t.Fatalf("%s: sync_error = %q, %v (want %q)", step, a.SyncError, err, want)
+		if err != nil || !strings.Contains(a.PushError, want) {
+			t.Fatalf("%s: push_error = %q, %v (want %q)", step, a.PushError, err, want)
 		}
-		texts := map[string]string{"sync_error": a.SyncError, "log": fa.logs.String()}
+		texts := map[string]string{"push_error": a.PushError, "log": fa.logs.String()}
 		// A file or dir the walk can't read fails the test: it would leave a
 		// credential written there unseen.
 		if err := filepath.WalkDir(fa.data, func(path string, d fs.DirEntry, err error) error {

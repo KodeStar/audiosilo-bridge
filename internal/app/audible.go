@@ -255,9 +255,9 @@ func (b *Bridge) audibleSetup(ctx context.Context) setup.Audible {
 		case audibleacct.OldProfile(a):
 			out.OldProfile++
 		}
-		if a.SyncError != "" {
+		if why := a.SyncProblem(); why != "" {
 			if out.SyncFailing++; out.SyncError == "" {
-				out.SyncError = a.SyncError
+				out.SyncError = why
 			}
 		}
 	}
