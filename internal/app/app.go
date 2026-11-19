@@ -505,6 +505,10 @@ func (b *Bridge) beat(ctx context.Context) {
 		changed = b.libs.SetLibraries(reply.Libraries)
 		b.lastBeat, b.beatErr = time.Now(), ""
 		switch {
+		case fitNow && dropped:
+			// The cut list was refused too, until the setup block went: the
+			// size isn't known to be why, so the next beat sends the whole
+			// list (without setup) and a refusal of that is the size's.
 		case fitNow:
 			b.libsFitAt = time.Now()
 			logFit, b.libsFitLogged = !b.libsFitLogged, true

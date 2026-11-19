@@ -216,6 +216,33 @@ func TestHeartbeatRefusedNotForSizeIsNotResent(t *testing.T) {
 	}
 }
 
+// A refusal that lasts until the setup block goes isn't known to be the
+// size's, though the list went cut by then: the cut isn't kept or logged, and
+// the next beat sends the whole list, which this server takes.
+func TestHeartbeatRefusedForItsSetupDoesNotKeepTheCut(t *testing.T) {
+	f := &boundedServer{maxBytes: 2 << 20, maxLibs: 4096, refuseSetup: true}
+	b, ctx, logs := boundedBridge(t, f, 600)
+	b.beat(ctx) // the whole list, no setup yet: accepts listed
+	drainKick(b)
+	b.beat(ctx) // with setup: refused whole, refused cut, taken cut without it
+	sizes, codes := f.beats()
+	if len(codes) != 4 || codes[1] != http.StatusBadRequest || codes[2] != http.StatusBadRequest || codes[3] != http.StatusOK ||
+		sizes[1] != 600 || sizes[2] >= 600 {
+		t.Fatalf("sizes %v, codes %v, want the setup beat refused whole and cut, then taken", sizes, codes)
+	}
+	b.mu.Lock()
+	fitAt := b.libsFitAt
+	b.mu.Unlock()
+	if !fitAt.IsZero() || logs.count(fitLog) != 0 {
+		t.Fatalf("the cut was kept (libsFitAt %v) or logged (%d)", fitAt, logs.count(fitLog))
+	}
+	b.beat(ctx)
+	sizes, codes = f.beats()
+	if len(codes) != 5 || codes[4] != http.StatusOK || sizes[4] != 600 {
+		t.Fatalf("the next beat: sizes %v, codes %v, want the whole list taken", sizes, codes)
+	}
+}
+
 // A 400 that names something other than the size takes the setup path though
 // the list is over an older server's bounds: the whole list goes again
 // without the setup block, nothing is cut, and the warning names the setup

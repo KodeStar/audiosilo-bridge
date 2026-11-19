@@ -2069,7 +2069,9 @@ internal/
             takes the setup path.
             app sends the cut list for an hour, then the whole list again, logs
             the cut once per link, and resets on every pair or unpair. Tried
-            before the setup block is dropped.
+            before the setup block is dropped; a cut list that only went
+            through once the setup block went too isn't kept (the size isn't
+            known to be why: the next beat sends the whole list).
             Phase 2c-2a mirrors PodcastRetention and CheckPodcastRetention.
             Phase 2c-2b: Heartbeat records claim_min_priority per Client;
             SupportsClaimMinPriority and ClaimMinPriority expose the negotiated
