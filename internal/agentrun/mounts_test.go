@@ -1099,7 +1099,8 @@ func TestRunPlantedCredentialFiles(t *testing.T) {
 // runAreaMount takes the TmpDir's mount for the service's own only when it is
 // a whole tmpfs alone at its point and hidden by no later mount (allowed);
 // a TmpDir with no mount shown, under a bind, a host tmpfs's folder, two
-// mounts stacked at its point, or a later mount over a parent passes nothing
+// mounts stacked at its point, or a later mount over a parent passes nothing,
+// nor does any for a service with no uid of its own or running as root
 // (denied).
 func TestRunAreaMount(t *testing.T) {
 	t.Parallel()
@@ -1135,45 +1136,46 @@ func TestRunAreaMount(t *testing.T) {
 	if got := w.runAreaMount([]mount{root, tmpfs}); got != -1 {
 		t.Errorf("no uid of its own: runAreaMount = %d, want -1", got)
 	}
+	w.selfUID = 0
+	if got := w.runAreaMount([]mount{root, tmpfs}); got != -1 {
+		t.Errorf("root: runAreaMount = %d, want -1", got)
+	}
 }
 
-// The endpoint's service doesn't count what a run planted in its tmpfs TmpDir
-// and removes it when it starts and after each run (allowed). A file of a
-// credential's name in its staging dir refuses the runs, naming its path, and
-// is never removed, the service's uid or not (denied); removeRunFile leaves a
-// file of another uid's and a folder with something in it (denied).
+// The endpoint's service doesn't count what a run planted in its tmpfs TmpDir,
+// empty when the service started, and removes it after each run (allowed). A
+// file of a credential's name in its staging dir refuses the runs, naming its
+// path, and is never removed, the service's uid or not (denied);
+// removeRunFile leaves a file of another uid's and a folder with something in
+// it (denied).
 func TestEndpointServiceSweepsRunFiles(t *testing.T) {
 	t.Parallel()
+	if os.Geteuid() == 0 {
+		t.Skip("the service passes nothing as root")
+	}
 	te, _ := newEndpointEnv(t, endpointParentEnv())
 	te.r.selfUID = os.Geteuid() // the test's files are the service's own (uid 10003 in the agent image)
 	tmpfs := tmpfsAt(t, te.tmp)
 	te.r.mounts = func() ([]mount, error) {
 		return []mount{at(te.staging), tmpfs}, nil
 	}
+	te.startAndWait(t)
 	planted := filepath.Join(te.tmp, "x", "openai_api_key")
 	mkfile(t, planted)
 	// A folder of a credential's name with a file of one in it, both
 	// planted: the sweep takes the file first, so the folder goes with it.
 	plantedDir := filepath.Join(te.tmp, "auth.json")
 	mkfile(t, filepath.Join(plantedDir, "auth.json"))
+	te.r.refreshMounts()
 	if why := te.r.credentialProblem(); why != "" {
 		t.Fatalf("credentialProblem = %q, want none", why)
 	}
 	gone := func(p string) bool { _, err := os.Lstat(p); return errors.Is(err, fs.ErrNotExist) }
-	te.start(t)
-	deadline := time.Now().Add(10 * time.Second)
-	for !gone(planted) || !gone(plantedDir) {
-		if time.Now().After(deadline) {
-			t.Fatal("the files a run planted in the TmpDir are still there after the service started")
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
 	// After a job (refused: its folder is of the service's uid), the sweep
-	// has run again: a file planted in the TmpDir since is gone.
-	mkfile(t, planted)
+	// has run: what a run planted in the TmpDir is gone.
 	waitDone(t, te.submit(t, endpointReq), 30*time.Second)
-	if !gone(planted) {
-		t.Fatal("a file a run planted in the TmpDir is still there after the job")
+	if !gone(planted) || !gone(plantedDir) {
+		t.Fatal("the files a run planted in the TmpDir are still there after the job")
 	}
 	// The staging dir's file refuses the runs, named, and stays after a job.
 	staged := filepath.Join(te.staging, "auth.json")
@@ -1216,6 +1218,83 @@ func TestEndpointServiceSweepsRunFiles(t *testing.T) {
 	}
 	if !removeRunFile(area, dev, "auth.json", os.Geteuid()) || !gone(filepath.Join(area, "auth.json")) {
 		t.Fatal("removeRunFile left the service's own file")
+	}
+}
+
+// rootOwned is a file's look with its owner shown as uid 0 (root's).
+type rootOwned struct {
+	fs.FileInfo
+	st syscall.Stat_t
+}
+
+func (f rootOwned) Sys() any { return &f.st }
+
+// Nothing is swept when the endpoint's service starts, and a tmpfs TmpDir
+// passes nothing as a run's own unless it held nothing then and the service
+// isn't root: mountinfo shows a host's tmpfs bound whole there (/dev/shm,
+// /run/user/<uid>) as the container's own would, with a host's files of the
+// service's uid in it. Denied, each a file of a credential's name that
+// refuses the runs, named, and is kept through the start and a job: one
+// already there at the start; one a run could have planted, in a TmpDir that
+// held something else at the start; one of the service's own uid while that
+// is root.
+func TestEndpointServiceKeepsTmpFilesItCantTell(t *testing.T) {
+	t.Parallel()
+	if os.Geteuid() == 0 {
+		t.Skip("the test's files must be of another uid than root")
+	}
+	type tc struct {
+		before string // a file in TmpDir before the service starts
+		after  string // a file made after it started, as a run would
+		root   bool   // the service runs as root, its files shown as root's
+	}
+	cases := map[string]tc{
+		"found at the start":            {before: "auth.json"},
+		"TmpDir not empty at the start": {before: "notes.txt", after: filepath.Join("x", "auth.json")},
+		"the service is root":           {after: "auth.json", root: true},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			te, _ := newEndpointEnv(t, endpointParentEnv())
+			te.r.selfUID = os.Geteuid()
+			tmpfs := tmpfsAt(t, te.tmp)
+			te.r.mounts = func() ([]mount, error) { return []mount{at(te.staging), tmpfs}, nil }
+			if c.root {
+				te.r.selfUID = 0
+				te.r.looks.lstat = func(p string) (fs.FileInfo, error) {
+					info, err := boundedLooks.lstat(p)
+					if err != nil || !fsutil.Within(te.tmp, p) {
+						return info, err
+					}
+					st, ok := info.Sys().(*syscall.Stat_t)
+					if !ok {
+						return info, nil
+					}
+					owned := rootOwned{FileInfo: info, st: *st}
+					owned.st.Uid = 0
+					return owned, nil
+				}
+			}
+			var kept string
+			if c.before != "" {
+				kept = filepath.Join(te.tmp, c.before)
+				mkfile(t, kept)
+			}
+			te.startAndWait(t)
+			if c.after != "" {
+				kept = filepath.Join(te.tmp, c.after)
+				mkfile(t, kept)
+			}
+			// A job, so the sweep after it runs too.
+			waitDone(t, te.submit(t, endpointReq), 30*time.Second)
+			if why := te.r.credentialProblem(); !strings.Contains(why, kept) {
+				t.Fatalf("credentialProblem = %q, want %s named", why, kept)
+			}
+			if _, err := os.Lstat(kept); err != nil {
+				t.Fatalf("%s after the start and a job: %v, want it kept", kept, err)
+			}
+		})
 	}
 }
 

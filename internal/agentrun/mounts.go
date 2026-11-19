@@ -56,11 +56,15 @@ import (
 //     from a book's text could ask for one) to lock the service out, in its
 //     TmpDir alone and only while that is a tmpfs of the service's own
 //     (runAreaMount: the mount holding TmpDir, verified from mountinfo, is a
-//     whole tmpfs, alone at its point, hidden by no later mount): one owned
-//     by the service's own uid, reached from TmpDir through folders alone (no
-//     link, no other mount's point) and on the device mountinfo shows for
-//     that tmpfs. It is not counted, and sweepRunFiles
-//     removes it when a run ends and when the service starts. Ownership alone
+//     whole tmpfs, alone at its point, hidden by no later mount) that held
+//     nothing when the service started, and never while the service runs as
+//     root (Runner.runFilesPass: mountinfo shows a host's tmpfs bound whole
+//     at TmpDir, /dev/shm or /run/user/<uid>, just as the container's own):
+//     one owned by the service's own uid, reached from TmpDir through folders
+//     alone (no link, no other mount's point) and on the device mountinfo
+//     shows for that tmpfs. It is not counted, and sweepRunFiles removes it
+//     when a run ends; nothing is swept when the service starts, so what is
+//     there then refuses the runs and stays. Ownership alone
 //     is no proof: a host folder or a share mounted at TmpDir or the staging
 //     dir shows its files as the service's uid where the share squashes
 //     owners (CIFS uid=, NFS all_squash), and sweeping one would delete a
@@ -320,8 +324,8 @@ type mountWalk struct {
 	// own reports whether a folder is one of the service's per-run folders in
 	// its TmpDir, by its exact path (nil: none).
 	own func(string) bool
-	// selfUID is the service's own uid (-1: none), runArea its TmpDir (""
-	// none), areaHere whether the mount being looked at is runArea's
+	// selfUID is the service's own uid (-1: none; 0, root, passes nothing),
+	// runArea its TmpDir ("" none), areaHere whether the mount being looked at is runArea's
 	// verified tmpfs (runAreaMount) and areaDev that tmpfs's device as
 	// mountinfo shows it: a file of a credential's name of selfUID's there,
 	// on that device, is a run's own (runMade), which runFiles collects by
@@ -377,15 +381,15 @@ func (w *mountWalk) credentialMount(mounts []mount) string {
 }
 
 // runAreaMount is the index in mounts of the mount holding runArea when it is
-// a tmpfs of the service's own, -1 when it isn't (no file is then a run's
-// own): the mount with the longest point at or above runArea is a tmpfs
+// a tmpfs of the service's own, -1 when it isn't or the service is root (no
+// file is then a run's own): the mount with the longest point at or above runArea is a tmpfs
 // mounted whole (root "/", never a folder of a host's tmpfs bound in), the
 // only mount at its point (nothing stacked on or under it) and no mount listed
 // after it is at or above its point (one over a parent hides it). A host
 // folder or a share mounted at TmpDir (a bind, CIFS, NFS) never passes, nor
 // does a TmpDir whose path mountinfo doesn't show.
 func (w *mountWalk) runAreaMount(mounts []mount) int {
-	if w.runArea == "" || w.selfUID < 0 {
+	if w.runArea == "" || w.selfUID <= 0 {
 		return -1
 	}
 	held, point := -1, ""

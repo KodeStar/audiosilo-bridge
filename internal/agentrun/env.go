@@ -234,12 +234,33 @@ func (r *Runner) walkMountsLocked() (dev string, planted []string) {
 		why = "the mounts can't be read: " + err.Error()
 	} else {
 		w := newMountWalk(r.looks)
-		w.own, w.selfUID, w.runArea = r.isOwnTmp, r.selfUID, r.opts.TmpDir
+		w.own = r.isOwnTmp
+		if r.runFilesPass() {
+			w.selfUID, w.runArea = r.selfUID, r.opts.TmpDir
+		}
 		why = w.credentialMount(ms)
 		dev, planted = w.areaDev, w.runFiles
 	}
 	r.mountLast.Store(&why)
 	return dev, planted
+}
+
+// runFilesPass reports whether a file of a credential's name in TmpDir may
+// pass as a run's own at all (runMade's rules then decide; false: none passes
+// and none is swept). Only when TmpDir held nothing at the service's start
+// (tmpFresh): a host's tmpfs bound whole at TmpDir (/dev/shm, /run/user/<uid>,
+// a shared emptyDir) shows in mountinfo as the container's own would, and one
+// that held nothing then held no host file either. And never as root: uid 0
+// owns a host's files wherever they come from.
+func (r *Runner) runFilesPass() bool {
+	return r.selfUID > 0 && r.tmpFresh.Load()
+}
+
+// tmpEmpty reports whether TmpDir holds no entry at all; a look that fails
+// (missing, closed, past lookTimeout) is a no.
+func (r *Runner) tmpEmpty() bool {
+	entries, err := r.looks.readDir(r.opts.TmpDir)
+	return err == nil && len(entries) == 0
 }
 
 // holdOwnTmp records the per-run folder dir as one of this runner's own, which
@@ -267,12 +288,14 @@ func (r *Runner) isOwnTmp(p string) bool {
 // sweepRunFiles walks the mounts afresh and removes the files of a
 // credential's name a run planted in its TmpDir while that is a tmpfs of the
 // service's own (runMade, runAreaMount; nowhere else: the staging dir's are
-// never deleted), each through the folders on its way opened without
+// never deleted; and only while runFilesPass: never as root, nor when TmpDir
+// held anything at the service's start), each through the folders on its way opened without
 // following a link and on the device mountinfo showed for TmpDir's tmpfs
 // (removeRunFile, proc_unix.go) and only while it is still the service's own;
 // a folder is removed only when empty (deepest first, so a planted folder
 // goes after what was planted in it), so nothing a host mounted under one is
-// reached. The endpoint's service calls it when it starts and after each run.
+// reached. The endpoint's service calls it after each run, never at its start
+// (Run: what is there then came from outside).
 func (r *Runner) sweepRunFiles() {
 	r.mountMu.Lock()
 	defer r.mountMu.Unlock()

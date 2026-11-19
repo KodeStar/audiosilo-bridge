@@ -136,6 +136,10 @@ type Runner struct {
 	// selfUID is the runner's own uid: a job of its making is a run's
 	// (planted), which the endpoint's service never runs.
 	selfUID int
+	// tmpFresh records that TmpDir held nothing when the endpoint's service
+	// started (Run): only then may a file there pass as a run's own and be
+	// swept (runFilesPass).
+	tmpFresh atomic.Bool
 
 	// groups are runner.json's groups, read once: a process with no
 	// capabilities can't change them.
@@ -252,9 +256,14 @@ func (r *Runner) Run(ctx context.Context) error {
 			r.log.Warn("agent runner: mark the agent home", "err", err)
 		}
 	} else {
-		// What an earlier run planted (before a crash or a restart) goes
-		// before the first answer.
-		r.sweepRunFiles()
+		// Nothing is swept here: the service is its container's first
+		// process (Main) and a container's tmpfs starts empty, so a file of
+		// a credential's name already in TmpDir came from outside (a host's
+		// tmpfs bound whole there looks the same in mountinfo). It refuses
+		// the runs and stays, and a TmpDir that held anything now passes
+		// nothing as a run's own for as long as the service runs. This look
+		// comes before the runner makes anything there (detect's version-*).
+		r.tmpFresh.Store(r.tmpEmpty())
 		if why := r.credentialProblem(); why != "" {
 			r.log.Warn("agent runner: "+endpointBlocked, "why", why)
 		}

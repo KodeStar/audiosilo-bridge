@@ -3862,17 +3862,24 @@ internal/
             while that is a tmpfs of its own (runAreaMount, from mountinfo:
             the mount holding TmpDir a whole tmpfs, root "/", alone at its
             point, hidden by no later mount; the compose example's
-            `tmpfs: ["/tmp"]`): owned by the service's uid, reached from
-            TmpDir through folders alone, never a link nor another mount's
-            point, and on the device mountinfo shows for that tmpfs (its
-            major:minor, mount.dev: never a file system mounted over TmpDir
-            since mountinfo was read; runMade). Such files are swept
-            (sweepRunFiles: a fresh walk, then each removed, deepest first,
-            through its folders opened without following a link and on that
-            same device, while still the service's, a folder only when empty)
-            when the service starts and after each job
-            that ends while the service runs (a stopping one leaves them to the
-            next start, the heartbeat touched first). Ownership alone is no
+            `tmpfs: ["/tmp"]`) that held no entry at all when the service
+            started (Runner.tmpFresh, looked at before detect makes its
+            version-* there), and never while the service runs as uid 0
+            (runFilesPass; mountinfo can't tell the container's own tmpfs from
+            a host's bound whole at TmpDir, /dev/shm, /run/user/<uid>, a shared
+            emptyDir: the service is pid 1 and its tmpfs starts empty, so one
+            that doesn't held a host's files): owned by the service's uid,
+            reached from TmpDir through folders alone, never a link nor
+            another mount's point, and on the device mountinfo shows for that
+            tmpfs (its major:minor, mount.dev: never a file system mounted
+            over TmpDir since mountinfo was read; runMade). Such files are
+            swept (sweepRunFiles: a fresh walk, then each removed, deepest
+            first, through its folders opened without following a link and on
+            that same device, while still the service's, a folder only when
+            empty) after each job that ends while the service runs (a stopping
+            one leaves them, the heartbeat touched first), never when it
+            starts: a file found then refuses the runs, named on the Settings
+            card, and stays. Ownership alone is no
             proof (a host folder bound there, or a share squashing owners,
             CIFS uid=10003 or NFS all_squash, shows a host's secret.key as the
             service's), so the staging dir, on any file system, passes no such

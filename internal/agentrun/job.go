@@ -39,8 +39,9 @@ func (r *Runner) handle(ctx context.Context, job *os.Root) {
 		// The run's processes are gone (spawn's sweep): what it planted
 		// goes before the Bridge reads its output. The walk may wait behind
 		// a tick's on a slow mount, so the heartbeat is fresh first (the
-		// Bridge's stale limit); a stopping service leaves it to the next
-		// start's sweep (Run), so exit.json lands within the stop's grace.
+		// Bridge's stale limit); a stopping service leaves it, so exit.json
+		// lands within the stop's grace (its container's tmpfs goes with it;
+		// one still there at the next start refuses the runs: Run).
 		touch(job, agentproto.HeartbeatFile)
 		r.sweepRunFiles()
 	}

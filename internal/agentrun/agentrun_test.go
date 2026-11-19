@@ -102,6 +102,24 @@ func (te *testEnv) start(t *testing.T) {
 	t.Cleanup(te.stop)
 }
 
+// startAndWait starts the runner and waits for its first runner.json, which
+// it writes once its start (the endpoint's service's look at its TmpDir
+// included) is behind it.
+func (te *testEnv) startAndWait(t *testing.T) {
+	t.Helper()
+	te.start(t)
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if _, err := os.Stat(filepath.Join(te.staging, agentproto.RunnerFile)); err == nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the runner wrote no runner.json")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 func (te *testEnv) stop() {
 	if te.cancel != nil {
 		te.cancel()
