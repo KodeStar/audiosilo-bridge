@@ -371,22 +371,17 @@ func (h *Fetch) run(parent context.Context, claimed *jobs.Job, rep *jobs.Reporte
 	}
 	if c.Temp != "" && c.Source != "" {
 		if err := resolve(); err != nil {
-			return nil, err // a whole download is kept (the exit), for the next attempt
+			return nil, err // a whole download is kept (the exit) for the next attempt; a partial goes, as before any GET
 		}
 		// The feed changed the episode's audio under the same episode id
 		// since it was downloaded (another enclosure URL or length): the old
 		// download is never published, nor a partial resumed against
 		// another URL with its old ETag, and the episode is downloaded again
-		// from byte 0 (the loop's one GET). A partial still resumes past a
-		// query signed or tagged anew (resumes).
-		same := c.sameSource(enc)
-		if !c.complete() {
-			same = c.resumes(enc)
-		}
-		if !same {
+		// from byte 0 (the loop's one GET).
+		if !c.resumes(enc) {
 			slog.Info("podcasts: an episode's enclosure changed since its partial was kept; it is downloaded again", "partial", c.partialName())
-			if !s.clearCheckpoint(job, root, &c) {
-				return nil, stuckPartial(errors.New("the episode's enclosure changed"))
+			if err := s.restartPartial(job, root, &c, errors.New("the episode's enclosure changed")); err != nil {
+				return nil, err
 			}
 			tag = ""
 		}
@@ -453,8 +448,8 @@ func (h *Fetch) run(parent context.Context, claimed *jobs.Job, rep *jobs.Reporte
 			return nil, fail("write_failed", "The episode download was changed on disk while it was saved.")
 		}
 		slog.Warn("podcasts: an episode's partial changed on disk while it downloaded; it is downloaded again", "partial", c.partialName())
-		if !s.clearCheckpoint(job, root, &c) {
-			return nil, stuckPartial(errPartialChanged)
+		if err := s.restartPartial(job, root, &c, errPartialChanged); err != nil {
+			return nil, err
 		}
 		tag = ""
 	}
@@ -864,8 +859,8 @@ func (s *service) download(ctx context.Context, b *budget, job *jobs.Job, root *
 				return fail("write_failed", "The episode partial is incomplete.")
 			}
 			restarted = true
-			if !s.clearCheckpoint(*job, root, c) {
-				return stuckPartial(err)
+			if err := s.restartPartial(*job, root, c, err); err != nil {
+				return err
 			}
 			tag = ""
 			return nil
@@ -910,8 +905,8 @@ func (s *service) download(ctx context.Context, b *budget, job *jobs.Job, root *
 				err = netguard.StatusError("episode", response.Status, response.RetryAfterSeconds)
 			case action == "fresh_get":
 				_ = response.Body.Close()
-				if !s.clearCheckpoint(*job, root, c) {
-					return podcast.Fetch{}, stuckPartial(errors.New("the episode resume could not be verified"))
+				if err := s.restartPartial(*job, root, c, errors.New("the episode resume could not be verified")); err != nil {
+					return podcast.Fetch{}, err
 				}
 				tag = ""
 				last = fail("network", "The episode resume could not be verified.")
@@ -949,8 +944,8 @@ func (s *service) download(ctx context.Context, b *budget, job *jobs.Job, root *
 		}
 		if !netguard.StrongETag(tag) || c.Offset <= 0 || c.Total <= c.Offset {
 			_ = settle(ctx) // the clear finds the partial where it is now
-			if !s.clearCheckpoint(*job, root, c) {
-				return podcast.Fetch{}, stuckPartial(failure)
+			if err := s.restartPartial(*job, root, c, failure); err != nil {
+				return podcast.Fetch{}, err
 			}
 			tag = ""
 		}
@@ -1252,6 +1247,16 @@ func openPartial(root *os.Root, name string, size int64) (*os.File, error) {
 func keptPartial(c *checkpoint, err error) error {
 	slog.Warn("podcasts: an episode's partial could not be read to resume it; it is kept", "partial", c.partialName(), "err", err)
 	return fmt.Errorf("%w: %w", err, fail("write_failed", "The episode's partial download could not be read."))
+}
+
+// restartPartial clears c's partial for a download from byte 0, or answers
+// stuckPartial(cause) when the clear cannot remove it: never a download
+// beside it, its record left for the next attempt or the day-old cleanup.
+func (s *service) restartPartial(job jobs.Job, root *os.Root, c *checkpoint, cause error) error {
+	if !s.clearCheckpoint(job, root, c) {
+		return stuckPartial(cause)
+	}
+	return nil
 }
 
 // stuckPartial is the job's failure for a partial the restart from zero could

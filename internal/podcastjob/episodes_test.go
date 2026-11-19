@@ -1621,8 +1621,7 @@ func TestAPartialChangedOnDiskThatCannotBeClearedFails(t *testing.T) {
 		w.WriteHeader(200)
 		w.Write(audio)
 	})
-	show := filepath.Join(h.mount, "Fixture Show")
-	t.Cleanup(func() { os.Chmod(show, 0o755) })
+	show, bar := barShow(t, h)
 	var once sync.Once
 	s.o.Fault = func(at string) error {
 		if at == "rehash" {
@@ -1636,9 +1635,7 @@ func TestAPartialChangedOnDiskThatCannotBeClearedFails(t *testing.T) {
 				if err := os.WriteFile(left[0], changed, 0o600); err != nil {
 					t.Error(err)
 				}
-				if err := os.Chmod(show, 0o500); err != nil {
-					t.Error(err)
-				}
+				bar()
 			})
 		}
 		return nil
@@ -1667,13 +1664,7 @@ func TestARetryFromZeroThatCannotClearItsPartialFails(t *testing.T) {
 			h, job := audioHarness(t)
 			s := h.handler.s
 			audio := data(t, "chap-v24-reverse.mp3")
-			show := filepath.Join(h.mount, "Fixture Show")
-			t.Cleanup(func() { os.Chmod(show, 0o755) })
-			bar := func() {
-				if err := os.Chmod(show, 0o500); err != nil {
-					t.Error(err)
-				}
-			}
+			show, bar := barShow(t, h)
 			if scenario == "unproven resume" {
 				root, err := os.OpenRoot(h.mount)
 				if err != nil {
@@ -1704,16 +1695,9 @@ func TestARetryFromZeroThatCannotClearItsPartialFails(t *testing.T) {
 				w.WriteHeader(200)
 				w.Write(audio[:1000])
 				w.(http.Flusher).Flush()
-				for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(time.Millisecond) {
-					if left := partials(show); len(left) == 1 {
-						if st, err := os.Stat(left[0]); err == nil && st.Size() == 1000 {
-							break
-						}
-					}
-					if time.Now().After(deadline) {
-						t.Error("the download did not start")
-						return
-					}
+				if !partialAt(show, 1000) {
+					t.Error("the download did not start")
+					return
 				}
 				bar() // then cut short of its Content-Length
 			})
@@ -1733,15 +1717,25 @@ func TestARetryFromZeroThatCannotClearItsPartialFails(t *testing.T) {
 // answers the folder's path.
 func barShowAtLoad(t *testing.T, h *harness) string {
 	t.Helper()
-	show := filepath.Join(h.mount, "Fixture Show")
-	t.Cleanup(func() { os.Chmod(show, 0o755) })
+	show, bar := barShow(t, h)
 	h.handler.s.o.Fault = func(at string) error {
 		if at == "load" {
-			if err := os.Chmod(show, 0o500); err != nil {
-				t.Error(err)
-			}
+			bar()
 		}
 		return nil
 	}
 	return show
+}
+
+// barShow answers the fixture show's folder and a bar that makes it one the
+// Bridge may not write (lifted when the test ends).
+func barShow(t *testing.T, h *harness) (string, func()) {
+	t.Helper()
+	show := filepath.Join(h.mount, "Fixture Show")
+	t.Cleanup(func() { os.Chmod(show, 0o755) })
+	return show, func() {
+		if err := os.Chmod(show, 0o500); err != nil {
+			t.Error(err)
+		}
+	}
 }

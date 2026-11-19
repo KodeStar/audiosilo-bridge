@@ -47,9 +47,8 @@ type checkpoint struct {
 	// (sameSource), and a partial is resumed only from its own enclosure
 	// (resumes). A record from before them has neither: a whole download is
 	// verified by its hash alone, and a partial resumed on its ETag alone.
-	// SourceBase is the hash of that URL without its query (sourceBase), so a
-	// feed whose enclosure URLs are signed or tracked anew at every fetch
-	// still resumes (resumes); a record from before it has none.
+	// SourceBase is the hash of that URL's base (sourceBase, for resumes); a
+	// record from before it has none.
 	Source       string `json:"source,omitempty"`
 	SourceLength int64  `json:"source_length,omitempty"`
 	SourceBase   string `json:"source_base,omitempty"`
@@ -91,17 +90,18 @@ func (c *checkpoint) sameSource(enc podcast.Enclosure) bool {
 	return c.Source == podcast.FeedURLHash(enc.URL) && (c.SourceLength <= 0 || enc.Length <= 0 || c.SourceLength == enc.Length)
 }
 
-// resumes reports whether c's resumable partial may go on from enc, with its
-// ETag: enc is its source (sameSource), or the same URL but for its query
-// while the feed gives one known length both times. A feed that signs or tags
-// its enclosure URLs anew at every fetch would otherwise restart every resume
-// from zero; the ETag still proves the bytes (If-Range). A whole download,
-// published with no GET, never takes that leeway (sameSource alone).
+// resumes reports whether c's kept partial may go on from enc: enc is its
+// source (sameSource), or, for a resumable partial, the same URL but for its
+// query (sourceBase) while the feed gives one known length both times. A feed
+// that signs or tags its enclosure URLs anew at every fetch would otherwise
+// restart every resume from zero; the strong ETag still proves the bytes
+// (If-Range). A whole download, published with no GET, never takes that
+// leeway.
 func (c *checkpoint) resumes(enc podcast.Enclosure) bool {
 	if c.sameSource(enc) {
 		return true
 	}
-	return c.SourceBase != "" && c.SourceBase == sourceBase(enc.URL) && c.SourceLength > 0 && enc.Length == c.SourceLength
+	return !c.complete() && c.SourceBase != "" && c.SourceBase == sourceBase(enc.URL) && c.SourceLength > 0 && enc.Length == c.SourceLength
 }
 
 // partialName is the root-relative name of the partial c records, beside its
