@@ -57,6 +57,9 @@ type fakeServer struct {
 	// isn't the server's JSON (negative: every one); bookAsks counts the reads.
 	pages    int
 	bookAsks int
+	// claims counts the claim polls: a runner polls only once its start-up
+	// recovery (resuming the jobs the store has open) is over.
+	claims int
 }
 
 func newFakeServer() *fakeServer {
@@ -70,6 +73,7 @@ func (f *fakeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer f.mu.Unlock()
 	switch {
 	case r.URL.Path == "/api/v1/bridge/jobs/next":
+		f.claims++
 		kinds := r.URL.Query()["kind"]
 		for i, j := range f.queue {
 			if slices.Contains(kinds, j.Kind) {
@@ -1508,6 +1512,13 @@ func TestGenerateShareOffAsksOnlyShareJobs(t *testing.T) {
 	hr := newHarness(t)
 	stop := hr.runner(hr.h) // started first: it resumes none of the jobs below
 	defer stop()
+	// Its recovery read the store before the claims below: a runner slow to
+	// start would otherwise resume them, and they would have a run here.
+	hr.waitFor("the runner's first claim poll", func() bool {
+		hr.srv.mu.Lock()
+		defer hr.srv.mu.Unlock()
+		return hr.srv.claims > 0
+	})
 	b, err := hr.db.CreateBook(ctx, store.NewBook{Title: "B", SourcePath: "/src/b", WorkDir: t.TempDir(),
 		ContribMode: store.ContribModeIssue})
 	if err != nil {
