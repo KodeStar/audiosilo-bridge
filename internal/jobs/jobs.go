@@ -1071,8 +1071,9 @@ func (p *Reporter) ShareOff() bool {
 // not wait for its own next look, and an act that failed is tried again at the
 // next answer. fn runs on the goroutine that read the answer (the keepalive's,
 // a ConfirmLease's, or another job's Refresh), after the report's lock is let
-// go: it must be quick, safe to run beside the handler and more than once, and
-// must not report.
+// go and before a cancel the same answer carries ends the job's context: it
+// must be quick, safe to run beside the handler and more than once, and must
+// not report.
 func (p *Reporter) OnShareOff(fn func()) {
 	p.mu.Lock()
 	p.onShareOff = fn
@@ -1323,14 +1324,15 @@ func (p *Reporter) offLink() bool {
 // answer: a cancel request or a lost claim ends the job's context. It reports
 // whether the job goes on.
 func (p *Reporter) send() bool {
-	goOn, got, err := p.sendLocked()
-	p.heard(got, err)
+	goOn, got, stop, err := p.sendLocked()
+	p.acted(got, stop, err)
 	return goOn
 }
 
-// sendLocked is send under sendMu; it returns the answer too, for heard (which
-// runs after it, outside sendMu: the handler's OnShareOff writes the store).
-func (p *Reporter) sendLocked() (goOn bool, got *link.Job, err error) {
+// sendLocked is send under sendMu; it returns the answer and the cause that
+// stops the job (answer) too, for acted (which runs after it, outside sendMu:
+// the handler's OnShareOff writes the store).
+func (p *Reporter) sendLocked() (goOn bool, got *link.Job, stop, err error) {
 	ctx := p.ctx
 	p.sendMu.Lock()
 	defer p.sendMu.Unlock()
@@ -1346,17 +1348,18 @@ func (p *Reporter) sendLocked() (goOn bool, got *link.Job, err error) {
 		}
 	}
 	got, err = p.srv.UpdateJob(ctx, p.job.ID, u)
+	if stop = p.answer(got, err); stop != nil {
+		return false, got, stop, err
+	}
 	switch {
-	case p.answer(got, err):
-		return false, got, err
 	case err == nil:
 		p.reached()
-		return true, got, err
+		return true, got, nil, nil
 	case ctx.Err() != nil:
-		return false, got, err
+		return false, got, nil, err
 	default:
 		p.failed(err)
-		return true, got, err
+		return true, got, nil, err
 	}
 }
 
@@ -1453,10 +1456,11 @@ func unreachable(err error) bool {
 		refused.Status == http.StatusRequestTimeout || refused.Status == http.StatusTooManyRequests
 }
 
-// answer acts on the server's answer to an update: the job follows a moved path,
-// and a cancel request, a lost claim or a refused token ends its context. It
-// reports whether the answer stopped the job. Its share_off is heard's.
-func (p *Reporter) answer(got *link.Job, err error) bool {
+// answer reads the server's answer to an update: the job follows a moved path,
+// and a cancel request, a lost claim or a refused token is the cause it returns
+// (nil while the job goes on), which acted ends the job's context with. Its
+// share_off is heard's.
+func (p *Reporter) answer(got *link.Job, err error) (stop error) {
 	if err == nil && got.Path != nil && *got.Path != "" {
 		p.mu.Lock()
 		p.path = *got.Path
@@ -1465,14 +1469,28 @@ func (p *Reporter) answer(got *link.Job, err error) bool {
 	switch {
 	case err == nil && got.CancelRequested, errors.Is(err, link.ErrCancelledHere):
 		// A cancel, asked for or already done on the server (ErrCancelledHere).
-		p.cancel(errCancelRequested)
+		return errCancelRequested
 	case errors.Is(err, link.ErrNotHeld):
-		p.cancel(errLost)
+		return errLost
 	case errors.Is(err, link.ErrUnauthorized):
-		p.cancel(errUnpaired)
-		p.r.onUnauthorized(p.srv)
-	default:
+		return errUnpaired
+	}
+	return nil
+}
+
+// acted acts on an answer once answer has read it, outside sendMu: heard first,
+// then stop (answer's cause, nil for none) ends the job's context, so a handler's
+// OnShareOff acts on an answer that carries share_off and a cancel while the
+// job's context still works (its store write would fail on an ended one). It
+// reports whether the answer stopped the job.
+func (p *Reporter) acted(got *link.Job, stop, err error) bool {
+	p.heard(got, err)
+	if stop == nil {
 		return false
+	}
+	p.cancel(stop)
+	if errors.Is(stop, errUnpaired) {
+		p.r.onUnauthorized(p.srv)
 	}
 	return true
 }
@@ -1480,9 +1498,9 @@ func (p *Reporter) answer(got *link.Job, err error) bool {
 // heard acts on an answer's share_off, after answer and outside sendMu (the
 // handler's OnShareOff and the write below touch the store, and a report must
 // not wait on them): the job keeps it for the run, the handler's func runs
-// first, then the store keeps it for a restart. A write that failed (from the
-// claim, or an earlier answer) is tried again at every answer, and logged
-// once a job.
+// first, then the store keeps it for a restart. A write that failed
+// (resumeStranded's, or at an earlier answer) is tried again at every answer,
+// and logged once a job.
 func (p *Reporter) heard(got *link.Job, err error) {
 	if err != nil || got == nil {
 		return
@@ -1535,9 +1553,7 @@ func (p *Reporter) ConfirmLease(ctx context.Context) error {
 	}
 	state := link.StateRunning
 	got, err := p.srv.UpdateJob(ctx, p.job.ID, link.Update{Attempt: p.job.Attempt, State: &state})
-	stopped := p.answer(got, err)
-	p.heard(got, err)
-	if stopped {
+	if p.acted(got, p.answer(got, err), err) {
 		if err != nil {
 			return err
 		}
@@ -1568,7 +1584,7 @@ func (p *Reporter) Refresh(ctx context.Context) error {
 	if p.r == nil {
 		return nil
 	}
-	stopped, got, err := func() (bool, *link.Job, error) {
+	got, stop, err := func() (*link.Job, error, error) {
 		p.sendMu.Lock()
 		defer p.sendMu.Unlock()
 		p.mu.Lock()
@@ -1576,10 +1592,9 @@ func (p *Reporter) Refresh(ctx context.Context) error {
 		p.mu.Unlock()
 		u, _ := p.updateOf(pr, parked, parkMsg)
 		got, err := p.srv.UpdateJob(ctx, p.job.ID, u)
-		return p.answer(got, err), got, err
+		return got, p.answer(got, err), err
 	}()
-	p.heard(got, err)
-	if stopped {
+	if p.acted(got, stop, err) {
 		return ErrStopped
 	}
 	if err != nil {

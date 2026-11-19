@@ -747,6 +747,35 @@ func TestShareOffHeardSurvivesARefusedToken(t *testing.T) {
 	}
 }
 
+// An answer that carries share_off and a cancel runs the handler's OnShareOff
+// before the cancel ends the job's context: its act (keeping the book local)
+// writes the store with that context.
+func TestOnShareOffRunsBeforeTheAnswersCancel(t *testing.T) {
+	t.Parallel()
+	db, srv := openStore(t), newFakeServer()
+	srv.add(&link.Job{ID: 7, Kind: "k.v", Attempts: 1})
+	var calls atomic.Int32
+	var live atomic.Bool
+	h := handler{kind: "k.v", lane: LaneLight, fn: func(ctx context.Context, j Job, rep *Reporter) (any, error) {
+		rep.OnShareOff(func() {
+			if calls.Add(1) == 1 {
+				live.Store(ctx.Err() == nil)
+			}
+		})
+		srv.mu.Lock()
+		srv.shareOff, srv.cancel[7] = map[int64]bool{7: true}, true
+		srv.mu.Unlock()
+		rep.Progress(Progress{Step: "next"}) // a new step is reported at once
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}}
+	r := New(db, func() Server { return srv }, nil, testOpts(), h)
+	runFor(t, r, func() bool { s, _ := srv.finalState(7); return s == link.StateCancelled })
+	if calls.Load() == 0 || !live.Load() {
+		t.Fatalf("OnShareOff calls %d, the first with the job's context live: %v", calls.Load(), live.Load())
+	}
+}
+
 // The handler's OnShareOff and the store's write run outside the Reporter's
 // sendMu, and a write that keeps failing warns once a job, then logs at debug.
 func TestShareOffWriteOutsideSendLockWarnsOnce(t *testing.T) {
