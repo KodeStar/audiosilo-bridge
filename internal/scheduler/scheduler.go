@@ -113,7 +113,8 @@ type Scheduler struct {
 	pubLocks map[int64]*publishLock
 
 	// publishReadWarned is set once a publish's read of its book failed and was
-	// warned about: later failures log at Debug, never a warning per event.
+	// warned about: the failures after it log at Debug, never a warning per
+	// event, until a read succeeds again (the next failure is a new fault).
 	publishReadWarned atomic.Bool
 
 	// afterStatusClear, when set (tests), runs in readmit and supersede_rerun
@@ -1335,6 +1336,9 @@ func (s *Scheduler) publishLocked(ctx context.Context, id int64) {
 		logPublishReadFailed(slog.Default(), &s.publishReadWarned, s.db.Closed(), id, err)
 		return
 	}
+	if s.publishReadWarned.Load() {
+		s.publishReadWarned.Store(false) // the store reads again: its next failure warns
+	}
 	_ = s.hub.PublishBook("book.state", id, map[string]any{
 		"book_id":   id,
 		"state":     b.State,
@@ -1349,7 +1353,8 @@ func (s *Scheduler) publishLocked(ctx context.Context, id int64) {
 // logPublishReadFailed logs a publish's failed read of book id: nothing for a
 // book deleted since or a store closed at shutdown (closed), where nothing went
 // wrong; a warning for the first other failure (warned records it) and Debug
-// after, so a failing store never warns once per event.
+// after, so a failing store never warns once per event. The caller clears warned
+// when a read succeeds, so a later fault warns again.
 func logPublishReadFailed(log *slog.Logger, warned *atomic.Bool, closed bool, id int64, err error) {
 	switch {
 	case errors.Is(err, store.ErrNotFound) || closed:

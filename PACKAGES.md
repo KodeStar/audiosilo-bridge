@@ -1712,7 +1712,7 @@ internal/
             lock) clears anything. A
             publish whose read fails logs nothing for a deleted book or a closed store
             (store.DB.Closed, the shutdown) and warns only for the first other
-            failure, Debug after. No page reads
+            failure, Debug after, until a read succeeds again. No page reads
             book.state live today (no Hub.Subscribe caller, no SSE route): the hub's
             ring and the durable event log (the supervisor's ListEvents) do.
             The contrib service publishes through PublishStored. Pause and Resume write

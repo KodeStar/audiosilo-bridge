@@ -506,6 +506,24 @@ func TestPublishStoredAfterCloseIsQuiet(t *testing.T) {
 	}
 }
 
+// A publish that reads its book again after a warned failure clears the
+// warn-once flag: the store's next failure is a new fault and warns, where a
+// flag never cleared left every later one at Debug for the scheduler's lifetime.
+func TestPublishReadSucceedingWarnsAgainNextTime(t *testing.T) {
+	h := newHarness(t)
+	db := h.openDB(t)
+	s := New(db, h.hub, NewStubExecutor(0, 0), 1, h.workRoot, false)
+	b := h.addBook(t, db, "recovered", "", "")
+	s.publishReadWarned.Store(true) // an earlier read failed and warned
+	s.publishStored(context.Background(), b.ID)
+	if s.publishReadWarned.Load() {
+		t.Fatal("a successful read left the warn-once flag set")
+	}
+	if _, ok := lastFrame(t, h.hub, b.ID); !ok {
+		t.Fatal("the publish published no frame")
+	}
+}
+
 // ContinueStored publishes nothing when its write fails: the book is as it was.
 func TestContinueStoredPublishesOnlyAWrite(t *testing.T) {
 	h := newHarness(t)
