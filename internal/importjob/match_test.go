@@ -92,17 +92,17 @@ func recWith(title, author, series string, seq float64) source.Record {
 	}
 }
 
-func TestSiblingsFromBooks(t *testing.T) {
+func TestPlannerSiblings(t *testing.T) {
 	books := []link.LibraryBook{
 		{Path: "Kinney/Diary of a Wimpy Kid/DWK01", Authors: []string{"Jeff Kinney"}, Series: []link.SeriesRef{{Name: "Diary of a Wimpy Kid", Position: "1"}}},
 		{Path: "Kinney/Diary of a Wimpy Kid/DWK09", Authors: []string{"Jeff Kinney"}, Series: []link.SeriesRef{{Name: "Diary of a Wimpy Kid", Position: "9"}}},
 		{Path: "Other/Book", Authors: []string{"Someone Else"}, Series: []link.SeriesRef{{Name: "Other Series"}}},
 	}
-	got := SiblingsFromBooks(books, "Jeff Kinney", "Diary of a Wimpy Kid")
+	got := NewPlanner(books).siblings("Jeff Kinney", "Diary of a Wimpy Kid")
 	if len(got) != 2 {
 		t.Fatalf("want 2 siblings, got %d: %+v", len(got), got)
 	}
-	if SiblingsFromBooks(books, "Jeff Kinney", "") != nil {
+	if NewPlanner(books).siblings("Jeff Kinney", "") != nil {
 		t.Fatal("a standalone (no series) should have no siblings")
 	}
 }
@@ -117,7 +117,7 @@ func TestPlanUsesLocalBooksNoQueries(t *testing.T) {
 		{ASIN: "B1", Title: "The First", Author: "Jeff Kinney", Series: "Diary of a Wimpy Kid", Sequence: 1, HasSequence: true, FileName: "a.m4b"},
 		{ASIN: "B5", Title: "The Ugly Truth", Author: "Jeff Kinney", Series: "Diary of a Wimpy Kid", Sequence: 5, HasSequence: true, FileName: "b.m4b"},
 	}
-	items, err := Plan(recs, PlanOptions{Mode: placement.ModeAuto, Books: books})
+	items, err := planAll(recs, planOptions{Mode: placement.ModeAuto, Books: books})
 	if err != nil {
 		t.Fatalf("Plan: %v", err)
 	}

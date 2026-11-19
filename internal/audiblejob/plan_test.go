@@ -74,6 +74,8 @@ func TestPlanStates(t *testing.T) {
 	mk("Spencer Johnson/Who Moved My Cheese?/Who Moved My Cheese?.m4b")
 	mk(`Ada "Lace" Fenwick/Why  Not/Why  Not.m4b`)
 	mk("Spencer Johnson/Out of the Maze?/cover.jpg") // no audio: still vacant
+	mk("Lost Things?.m4b")                           // a root-level file under its former name
+	mk("Ada Fenwick/Con/Con.m4b")                    // a name Windows reserves, before bridge#80
 
 	// named is rec with its file named as the Audible client names it now.
 	named := func(file string, r source.Record) source.Record {
@@ -121,6 +123,16 @@ func TestPlanStates(t *testing.T) {
 			"Ada 'Lace' Fenwick/Why Not/Why Not.m4b", link.PlanStandalone, 0, link.PlanExists, link.ConflictAudio},
 		{"a former name's folder without audio", "", named("Out of the Maze.m4b", rec("B0PLAN0014", "Out of the Maze?", "Spencer Johnson", "", 0)), true,
 			"Spencer Johnson/Out of the Maze/Out of the Maze.m4b", link.PlanStandalone, 0, link.PlanJoins, ""},
+		{"a root-level file under its former name", "{Title}.m4b", rec("B0PLAN0015", "Lost Things?", "Ada Fenwick", "", 0), true,
+			"Lost Things.m4b", link.PlanStandalone, 0, link.PlanExists, link.ConflictFile},
+		{"a root-level file, none under a former name", "{Title}.m4b", rec("B0PLAN0016", "Found Things?", "Ada Fenwick", "", 0), true,
+			"Found Things.m4b", link.PlanStandalone, 0, link.PlanNew, ""},
+		{"a reserved name backed up before", "", named("Con_.m4b", rec("B0PLAN0017", "Con", "Ada Fenwick", "", 0)), true,
+			"Ada Fenwick/Con_/Con_.m4b", link.PlanStandalone, 0, link.PlanExists, link.ConflictAudio},
+		{"a title with nothing to name a folder by", "", named("audiobook.m4b", rec("B0PLAN0018", "???", "Ada Fenwick", "", 0)), true,
+			"Ada Fenwick/B0PLAN0018/audiobook.m4b", link.PlanStandalone, 0, link.PlanJoins, ""},
+		{"a listed book's folder in another case, unmapped", "theo marchetti/a small hour in varrow", rec("B0PLAN0009", "Varrow Again", "Theo Marchetti", "", 0), false,
+			"theo marchetti/a small hour in varrow/Varrow Again.m4b", link.PlanStandalone, 0, link.PlanExists, link.ConflictBook},
 		{"a bad template", "{Author}/{Nope}", rec("B0PLAN0010", "The Copper Grove", "Mara Quill", "Orchard Cycle", 2), true,
 			"", link.PlanSeriesExisting, 2, link.PlanError, "*"},
 		{"a file where a folder goes", "Blocked/{Title}", rec("B0PLAN0011", "Inside", "Ada Fenwick", "", 0), true,
@@ -207,6 +219,9 @@ func TestPollPlansTheUnmatched(t *testing.T) {
 		rec("B0PLAN0101", "The Glass Orchard", "Mara Quill", "Orchard Cycle", 1),
 		rec("B0PLAN0102", "Taken", "Ada Fenwick", "", 0),
 		rec("B0PLAN0103", "Lone Star", "New Writer", "", 0),
+		// Two of a series the library has none of (bridge#43): the second joins the first.
+		rec("B0PLAN0105", "Second Dawn", "New Writer", "Dawn Road", 2),
+		rec("B0PLAN0104", "First Dawn", "New Writer", "Dawn Road", 1),
 	}}
 	h := setup(t, fs, accts)
 	h.o.Libraries = &stubLibs{known: true, lib: link.Library{ID: 1, Name: "Books", Root: "/srv/books"},
@@ -230,6 +245,10 @@ func TestPollPlansTheUnmatched(t *testing.T) {
 			State: link.PlanExists, Conflict: link.ConflictFile, Template: tmpl},
 		"B0PLAN0103": {LibraryID: 1, Path: "Library/New Writer/Lone Star/Lone Star.m4b", File: "Lone Star.m4b", Kind: link.PlanStandalone,
 			State: link.PlanJoins, Template: tmpl}, // "Library" is a folder at the mount
+		"B0PLAN0104": {LibraryID: 1, Path: "Library/New Writer/First Dawn/First Dawn.m4b", File: "First Dawn.m4b", Kind: link.PlanSeriesNew,
+			State: link.PlanJoins, Template: tmpl},
+		"B0PLAN0105": {LibraryID: 1, Path: "Library/New Writer/Second Dawn/Second Dawn.m4b", File: "Second Dawn.m4b", Kind: link.PlanSeriesExisting,
+			Siblings: 1, State: link.PlanJoins, Template: tmpl},
 	}
 	for asin, w := range want {
 		if p := byASIN[asin].Planned; p == nil || *p != w {
@@ -285,4 +304,39 @@ func runParams(t *testing.T, h *Handler, params json.RawMessage) (Result, error)
 		return Result{}, err
 	}
 	return out.(Result), nil
+}
+
+// TestPlanTwoEditionsInOneFolder: two titles a poll's placement gives one
+// folder (two editions at one position of a series the library has none of)
+// can't both be backed up there, so the second's plan says exists, by what
+// its backup would meet once the first is there: the same file, or the
+// folder's audio. The first plans as if alone.
+func TestPlanTwoEditionsInOneFolder(t *testing.T) {
+	t.Parallel()
+	recs := []source.Record{
+		rec("B0EDIT0001", "First Dawn", "New Writer", "Dawn Road", 1),
+		rec("B0EDIT0002", "First Dawn", "New Writer", "Dawn Road", 1),
+		rec("B0EDIT0003", "First Dawn (Unabridged)", "New Writer", "Dawn Road", 1),
+		rec("B0EDIT0004", "Second Dawn", "New Writer", "Dawn Road", 2),
+	}
+	for _, mount := range []string{t.TempDir(), ""} {
+		tp := newTitlePlanner(1, "", nil, mount)
+		tp.planner.Expect(recs)
+		var got []link.AudiblePlan
+		for _, r := range recs {
+			got = append(got, *tp.plan(r))
+		}
+		tp.close()
+		const dir = "New Writer/Dawn Road/DR01 - First Dawn/"
+		for i, want := range []struct{ path, state, conflict string }{
+			{dir + "First Dawn.m4b", link.PlanNew, ""},
+			{dir + "First Dawn.m4b", link.PlanExists, link.ConflictFile},
+			{dir + "First Dawn (Unabridged).m4b", link.PlanExists, link.ConflictAudio},
+			{"New Writer/Dawn Road/DR02 - Second Dawn/Second Dawn.m4b", link.PlanJoins, ""},
+		} {
+			if p := got[i]; p.Path != want.path || p.State != want.state || p.Conflict != want.conflict {
+				t.Errorf("mount %q, %s: %+v, want %+v", mount, recs[i].ASIN, p, want)
+			}
+		}
+	}
 }

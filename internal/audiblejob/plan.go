@@ -17,24 +17,29 @@ import (
 // would go: the import's own Destination (no dest_path: the console's override
 // is checked when the backup starts) over the books the poll read, spelled and
 // checked as the import does when the library is mapped at the Bridge (else
-// against the books listing only). It asks Audible nothing, and reads each
-// folder of the library at most once (dirCache), only folders a plan's path
-// passes through that exist.
+// against the books listing only, its paths compared in any case). It asks
+// Audible nothing, and reads each folder of the library at most once
+// (dirCache), only folders a plan's path passes through that exist. Two
+// titles it gives one folder can't both be backed up there: the second's plan
+// says so (claim).
 type titlePlanner struct {
 	libraryID int64
 	template  string // as the poll's params gave it
 	planner   *importjob.Planner
-	books     map[string]string // bookPaths
+	books     map[string]string // bookPaths; each path folded for an unmapped library
 	tops      map[string]bool   // the listed books' top folders, folded
 	fsys      transfer.LibraryFS
 	root      *os.Root
+	// planned is each book folder (a loose file at the root: the file) this
+	// poll's plans took, by the file planned there; folded as books is.
+	planned map[string]string
 }
 
 // newTitlePlanner plans over books in libraryID; mount is "" when the library
 // isn't mapped at the Bridge (no disk checks).
 func newTitlePlanner(libraryID int64, template string, books []link.LibraryBook, mount string) *titlePlanner {
 	t := &titlePlanner{libraryID: libraryID, template: template, planner: importjob.NewPlanner(books),
-		books: bookPaths(books), tops: map[string]bool{}}
+		tops: map[string]bool{}, planned: map[string]string{}}
 	for _, b := range books {
 		if top, _, ok := strings.Cut(b.Path, "/"); ok {
 			t.tops[strings.ToLower(top)] = true
@@ -43,6 +48,20 @@ func newTitlePlanner(libraryID int64, template string, books []link.LibraryBook,
 	if mount != "" {
 		if root, err := os.OpenRoot(mount); err == nil {
 			t.root, t.fsys = root, newDirCache(transfer.RootFS(root))
+		}
+	}
+	if t.fsys != nil {
+		t.books = bookPaths(books)
+		return t
+	}
+	// Without the disk, a listed book under another case is the same folder on
+	// a case-insensitive disk (an SMB share, macOS, Windows; bridge#47): the
+	// plan warns rather than says a new folder.
+	t.books = make(map[string]string, len(books))
+	for _, b := range books {
+		k := strings.ToLower(b.Path)
+		if _, ok := t.books[k]; !ok {
+			t.books[k] = b.Title
 		}
 	}
 	return t
@@ -81,9 +100,12 @@ func (t *titlePlanner) plan(rec source.Record) *link.AudiblePlan {
 		}
 		p.Conflict = conflict
 	default:
-		if _, _, ok := listedBook(rel, t.books); ok {
+		if _, _, ok := listedBook(strings.ToLower(rel), t.books); ok {
 			p.Conflict = link.ConflictBook
 		}
+	}
+	if p.Conflict == "" {
+		p.Conflict = t.claim(rel)
 	}
 	switch {
 	case p.Conflict != "":
@@ -94,6 +116,31 @@ func (t *titlePlanner) plan(rec source.Record) *link.AudiblePlan {
 		p.State = link.PlanNew
 	}
 	return p
+}
+
+// claim takes rel's book folder for this plan, or returns the conflict with
+// the plan of this poll that took it first: two titles the placement gives one
+// folder (two editions at one position of a series, or a template that doesn't
+// tell its titles apart) would otherwise both read as joining, and the second
+// backup would end exists once the first is there. The conflict is the one
+// that backup would meet: the same file (link.ConflictFile), or a folder that
+// holds another title's audio by then (link.ConflictAudio).
+func (t *titlePlanner) claim(rel string) string {
+	if t.fsys == nil {
+		rel = strings.ToLower(rel)
+	}
+	folder := path.Dir(rel)
+	if folder == "." {
+		folder = rel // a loose file at the root is a book of its own
+	}
+	switch first, taken := t.planned[folder]; {
+	case !taken:
+		t.planned[folder] = rel
+		return ""
+	case first == rel:
+		return link.ConflictFile
+	}
+	return link.ConflictAudio
 }
 
 // topExists reports whether rel's top folder (the author's, in Auto) is one

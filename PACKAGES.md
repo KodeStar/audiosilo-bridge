@@ -2055,6 +2055,24 @@ internal/
             server would refuse an unknown field); app kicks a beat when it first
             appears, resends once without it on a 400, then ignores accepts for an
             hour, and resets that on every pair or unpair.
+            FitLibraries (server#445): a heartbeat refused for its size whose
+            library list doesn't fit an older server's bounds (LegacyStatusBytes
+            64 KiB, LegacyStatusLibraries 512) goes again at once cut to fit, the
+            writable then mapped mappings kept first, so the reply still teaches
+            the Bridge the server's libraries (it only learns them from a reply);
+            a list no cut can fit (room for none of its mappings) is left whole,
+            never sent empty. SizeRefusal says which refusals are the size's, by
+            the answer: a 413, a 400 with code too_large (no server sends it on
+            this route yet), a 400 "too many libraries" (the older server's list
+            bound, no code), or a 400 "invalid status" (a body the server couldn't
+            read: over its byte bound, but also an unknown field, so it counts
+            only for a body over 64 KiB); any other 400 leaves the list whole and
+            takes the setup path.
+            app sends the cut list for an hour, then the whole list again, logs
+            the cut once per link, and resets on every pair or unpair. Tried
+            before the setup block is dropped; a cut list that only went
+            through once the setup block went too isn't kept (the size isn't
+            known to be why: the next beat sends the whole list).
             Phase 2c-2a mirrors PodcastRetention and CheckPodcastRetention.
             Phase 2c-2b: Heartbeat records claim_min_priority per Client;
             SupportsClaimMinPriority and ClaimMinPriority expose the negotiated
@@ -2781,7 +2799,10 @@ internal/
             params' template (no dest_path: the console's override is checked
             when the backup starts), {library_id, path (after spelled), file, kind
             series_existing|series_new|standalone (the placement's), siblings
-            (the series' books listed), state new|joins|exists|error, conflict
+            (the series' books listed; for a series the library has none of, the
+            poll's other unmatched titles of it: they are planned together,
+            Planner.Expect, the first by position series_new and the rest beside
+            it, bridge#43), state new|joins|exists|error, conflict
             (exists: file|book|audio, vacant's refusal; error: the message, path
             and file ""), template (as the params gave it)}; joins = siblings, or
             the path's top folder is a listed book's or (mapped) a folder at the
@@ -2789,7 +2810,13 @@ internal/
             reports the library mapped (writable or not) at Options.Mount's path,
             through a per-poll dirCache (each folder listed once, a folder that
             doesn't exist never read); otherwise the books listing alone (a
-            listed book's folder is exists/book). No Amazon request. Cuts a title's authors to 20 (the
+            listed book's folder, in any case, is exists/book). Two titles of
+            one poll planned into one folder (two editions at one position, a
+            template that doesn't tell them apart): the first plans as if alone,
+            each later one is exists with the conflict its backup would meet
+            once the first is there (file for the same file, else audio;
+            titlePlanner.claim), since the import places a title in a taken
+            folder nowhere else. No Amazon request. Cuts a title's authors to 20 (the
             server refuses a whole call over more), PUTs the titles in calls of 500
             under ONE poll id (job, attempt and a random suffix), the last final (an
             empty library sends one empty final call, so the server marks every
@@ -2863,7 +2890,9 @@ internal/
             formerDirs adds the folder the destination's was under the name rule
             before bridge#47, found on disk as a name Sanitize now turns into
             the folder's, so a title backed up as "Who Moved My Cheese?" is
-            exists, not downloaded again). License (denials mapped as the title's; a title
+            exists, not downloaded again; formerFile does the same for a file at
+            the library's root ("{Title}.m4b"), and a name Windows reserves
+            ("Con", now "Con_") counts as a former name, bridge#80). License (denials mapped as the title's; a title
             only offered as a DRM-free MP3 fails drm_free: not backed up yet), download to <data>/audible/tmp/<acct>-<asin>.aaxc.part (free
             space: the tmp folder 2.2x the size less what the partial holds, the
             library 1.1x, else disk_full; a free space that can't be read is no
@@ -3010,13 +3039,20 @@ internal/
             it), SpanMismatch (a range record on a book with no
             range: no enrichment), Twins (the paths of books listed more than once:
             folded title, authors and series alike, positions by value; no
-            enrichment by words), Plan(records, {Mode, Template, Books}) (destinations
-            only, each item's RelPath, Kind (placement.Kind) and Siblings (the
-            series' books listed); Planner (NewPlanner(books), Plan(rec, mode,
-            template)) is Plan for many records over one library: AuthorFolders
-            once and the books indexed by normalized series, the same siblings in
-            the same order as SiblingsFromBooks; a template error keeps the
-            item's Kind and Siblings: siblings by tolerant author + series, AuthorFolders reusing an
+            enrichment by words), Planner (NewPlanner(books), Plan(rec, mode,
+            template): destinations only, each item's RelPath, Kind
+            (placement.Kind) and Siblings (the series' books listed), over one
+            library: AuthorFolders once and the books indexed by normalized
+            series, siblings by tolerant author + series in list order (the one
+            sibling rule; bridge#47 removed SiblingsFromBooks and the batch Plan,
+            which only tests used); Expect(recs) names a batch, so the records
+            of a series the library has none of (one author by the sibling
+            rule) are planned beside each other, the first by position as its
+            series' first and each other one beside the ones before it (as a
+            backup in that order leaves them: bookPath, the folder a template
+            names alone or the file's, a loose file at the root itself), its
+            Siblings the group's others, each placed once, bridge#43; a template
+            error keeps the item's Kind and Siblings; AuthorFolders reusing an
             existing author folder spelling; the name is match.CleanTitle with
             the series as the title opens it, article included (seriesAsTitled:
             "The Orchard Cycle: Books 1-3" is "Books 1-3", not "The  - Books 1-3"); no per-record server query; whether
@@ -3033,6 +3069,12 @@ internal/
             bridge#47: Sanitize drops what an SMB share or a Windows disk can't
             store (? * < > dropped, " as ', | as -, control characters as a
             space, the spaces a drop leaves closed up).
+            bridge#80: a name Windows reserves (Reserved: CON, PRN, AUX, NUL,
+            COM0-9, LPT0-9, CONIN$, CONOUT$, alone or before an extension, any
+            case) gets an
+            underscore after its stem; a standalone title Sanitize leaves empty
+            ("???") is named by its ASIN (named); Suggest drops the book's own
+            leading position from its titles as SuggestWith does (bridge#47).
             LibriVox L6 exports Sanitize (librivoxjob names its section files
             with it; an Audible backup's file name, audible's safeFileName, is
             Sanitize too, "audiobook" when it leaves nothing).

@@ -675,6 +675,11 @@ func TestFormerName(t *testing.T) {
 		{"Who Moved My Cheese?.", "Who Moved My Cheese", false},
 		{"Who Moved: My Cheese?", "Who Moved - My Cheese", false},
 		{"Who Moved My Cheese!", "Who Moved My Cheese", false},
+		// A name Windows reserves, which the rule names with an underscore since bridge#80.
+		{"Con", "Con_", true},
+		{"nul.m4b", "nul_.m4b", true},
+		{"Con", "Con", false},
+		{"Cone", "Cone_", false},
 	} {
 		if got := formerName(c.name, c.seg); got != c.want {
 			t.Errorf("formerName(%q, %q) = %v, want %v", c.name, c.seg, got, c.want)

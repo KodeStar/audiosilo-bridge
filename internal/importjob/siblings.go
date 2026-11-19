@@ -1,7 +1,8 @@
 // Package importjob orchestrates getting books onto a server: matching import
 // candidates against the library's books, computing their placement, transferring
-// them, and asking for a rescan. This file holds series-sibling detection - finding
-// the existing books a new book's placement should anchor on.
+// them, and asking for a rescan. This file holds what finds the existing books a
+// new book's placement anchors on: author folders and the author rule
+// (Planner.siblings applies it).
 package importjob
 
 import (
@@ -11,32 +12,6 @@ import (
 	"github.com/kodestar/audiosilo-bridge/internal/link"
 	"github.com/kodestar/audiosilo-server/pkg/match"
 )
-
-// SiblingsFromBooks filters a library's books to the same author and
-// (tolerantly-normalized) series as the target - the existing entries a placement
-// anchors on. It matches client-side because exact author and series filters
-// would miss "The Primal Hunter" vs "Primal Hunter", or an Audible "Shirtaloon"
-// against a tagged "Shirtaloon, Travis Deverell". A book in several series is a
-// sibling when any of them is the target. Returns nil for a standalone (no series).
-func SiblingsFromBooks(books []link.LibraryBook, author, series string) []link.LibraryBook {
-	if strings.TrimSpace(series) == "" {
-		return nil
-	}
-	target := match.NormalizeSeries(series)
-	var out []link.LibraryBook
-	for _, b := range books {
-		if !sameAuthor(Credit(b.Authors), author) {
-			continue
-		}
-		for _, s := range b.Series {
-			if match.NormalizeSeries(s.Name) == target {
-				out = append(out, b)
-				break
-			}
-		}
-	}
-	return out
-}
 
 // AuthorFolders maps each author (normalized via normalize) to the author-folder
 // spelling already used on the server for their books, so a new book reuses the

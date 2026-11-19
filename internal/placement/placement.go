@@ -83,8 +83,11 @@ func (s Suggestion) FullPath() string {
 	return s.RelPath + "/" + s.Filename
 }
 
-// Suggest computes the destination for a book.
+// Suggest computes the destination for a book (Auto mode). The book's own
+// position is dropped from the front of its titles first (dropLeadingSequence),
+// and a title with nothing to name a folder by falls back to the ASIN (named).
 func Suggest(in Input) Suggestion {
+	in = withoutLeadingSequence(named(in))
 	switch {
 	case in.SeriesName == "":
 		return standalone(in)
@@ -174,6 +177,23 @@ func buildLeaf(prefix string, width int, in Input) string {
 	return Sanitize(prefix + num + " - " + in.Title)
 }
 
+// named is in with a title that Sanitize leaves empty ("???") replaced by the
+// ASIN, so a standalone isn't placed in an empty folder (the author's, as a
+// loose file); a series book is named by its series already (bareTitle). Without
+// an ASIN the title stays as it is (bridge#80).
+func named(in Input) Input {
+	if in.ASIN == "" || in.SeriesName != "" {
+		return in
+	}
+	if Sanitize(in.Title) == "" {
+		in.Title = in.ASIN
+	}
+	if Sanitize(in.TitleShort) == "" {
+		in.TitleShort = in.Title
+	}
+	return in
+}
+
 // bareTitle reports whether a cleaned title has nothing of its own to name a folder
 // by - no letters at all, e.g. the "13" left of "He Who Fights with Monsters 13: A
 // LitRPG Adventure" once the series name and genre subtitle are stripped.
@@ -207,6 +227,13 @@ func dropLeadingSequence(t string, in Input) string {
 		return t
 	}
 	return m[2]
+}
+
+// withoutLeadingSequence is in with its own position dropped from the front
+// of its titles (dropLeadingSequence).
+func withoutLeadingSequence(in Input) Input {
+	in.Title, in.TitleShort = dropLeadingSequence(in.Title, in), dropLeadingSequence(in.TitleShort, in)
+	return in
 }
 
 // seriesTitle names a bare-titled book by its series: "He Who Fights with Monsters
@@ -423,12 +450,52 @@ var stopwords = map[string]bool{
 // double quote becomes an apostrophe and | a hyphen, and control characters
 // (NUL among them, which neither stores either) and the runs of spaces a drop
 // leaves are one space. A leading dot goes too ("...And Ladies of the Club", ".hack"): a
-// hidden name is never indexed by the server's scan. librivox.fetch names its
-// section files with it too, so a book's folder and its files follow one rule.
+// hidden name is never indexed by the server's scan. A name Windows reserves for
+// a device (CON, NUL, COM1, CONIN$, "aux.m4b": Reserved) gets an underscore after its
+// stem ("CON_", "aux_.m4b"), as it can't be created there (bridge#80).
+// librivox.fetch names its section files with it too, so a book's folder and
+// its files follow one rule.
 func Sanitize(s string) string {
 	s = segmentReplacer.Replace(s)
 	s = strings.Join(strings.FieldsFunc(s, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }), " ")
-	return strings.Trim(s, " .")
+	s = strings.Trim(s, " .")
+	if Reserved(s) {
+		stem, ext, _ := strings.Cut(s, ".")
+		s = strings.TrimRight(stem, " ") + "_"
+		if ext != "" {
+			s += "." + ext
+		}
+	}
+	return s
+}
+
+// Reserved reports whether name is one Windows reserves for a device: CON,
+// PRN, AUX, NUL, COM0-9 or LPT0-9 (with the superscript digits too), or the
+// console's CONIN$ and CONOUT$, in any case, alone or before an extension
+// ("nul.txt", "COM1 .m4b").
+func Reserved(name string) bool {
+	stem, _, _ := strings.Cut(name, ".")
+	stem = strings.TrimRight(stem, " ")
+	if len(stem) < 3 || len(stem) > 7 {
+		return false // a reserved stem is 3 to 7 bytes ("CON" to "CONOUT$")
+	}
+	stem = strings.ToUpper(stem)
+	switch stem {
+	case "CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$":
+		return true
+	}
+	if rest, ok := strings.CutPrefix(stem, "COM"); ok {
+		return isPortDigit(rest)
+	}
+	if rest, ok := strings.CutPrefix(stem, "LPT"); ok {
+		return isPortDigit(rest)
+	}
+	return false
+}
+
+// isPortDigit is one digit or superscript digit, as a COM or LPT port takes.
+func isPortDigit(s string) bool {
+	return (len(s) == 1 && isDigit(s[0])) || s == "\u00b9" || s == "\u00b2" || s == "\u00b3"
 }
 
 var segmentReplacer = strings.NewReplacer("/", "-", "\\", "-", ":", " -",

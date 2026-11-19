@@ -878,18 +878,44 @@ func listedBook(rel string, books map[string]string) (at, title string, ok bool)
 // makes rel exists (link.ConflictFile, ConflictBook or ConflictAudio). The
 // folder rel's would have been under the name rule before bridge#47 counts
 // too (formerDirs): a title backed up as "Who Moved My Cheese?" is there
-// already, and isn't downloaded again into "Who Moved My Cheese".
+// already, and isn't downloaded again into "Who Moved My Cheese". So does a
+// file at the library's root under its former name (formerFile; bridge#80: a
+// "{Title}.m4b" template has no folder to find it by, and a file in a folder
+// is that folder's audio already).
 func vacant(fsys transfer.LibraryFS, rel string, books map[string]string) (string, error) {
 	if conflict, err := vacantAt(fsys, rel, books); err != nil {
 		return conflict, err
 	}
-	for _, dir := range formerDirs(fsys, path.Dir(rel)) {
+	dir := path.Dir(rel)
+	if dir == "." {
+		if at := formerFile(fsys, dir, rel); at != "" {
+			return vacantAt(fsys, at, books) // a file is there: ConflictFile
+		}
+		return "", nil
+	}
+	for _, dir := range formerDirs(fsys, dir) {
 		// Only a book there counts; what can't be read there is no conflict.
 		if conflict, err := vacantAt(fsys, path.Join(dir, path.Base(rel)), books); conflict != "" {
 			return conflict, err
 		}
 	}
 	return "", nil
+}
+
+// formerFile is the file in dir the name rule before bridge#47 gave what it
+// names base now (formerName), or "" (also when dir can't be read: vacantAt
+// says what is wrong with rel's own folders).
+func formerFile(fsys transfer.LibraryFS, dir, base string) string {
+	entries, err := fsys.ReadDir(dir)
+	if err != nil {
+		return ""
+	}
+	for _, e := range entries {
+		if name := e.Name(); !e.IsDir() && formerName(name, base) {
+			return path.Join(dir, name)
+		}
+	}
+	return ""
 }
 
 // formerDirs are the folders in the library that dir would have been under
@@ -933,8 +959,13 @@ func formerDirs(fsys transfer.LibraryFS, dir string) []string {
 // formerName reports whether name is what the name rule before bridge#47 gave
 // a text the rule now names seg: a name that rule could give (no separator or
 // colon, no dot or space at either end) holding something the rule now drops,
-// replaces or closes up, which placement.Sanitize turns into seg.
+// replaces or closes up, which placement.Sanitize turns into seg. A name
+// Windows reserves (placement.Reserved: "Con", which Sanitize names "Con_"
+// since bridge#80) is one too.
 func formerName(name, seg string) bool {
+	if placement.Reserved(name) {
+		return placement.Sanitize(name) == seg
+	}
 	if len(name) < len(seg) || strings.ContainsAny(name, "/\\:\x00") || name != strings.Trim(strings.TrimSpace(name), " .") {
 		return false
 	}

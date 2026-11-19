@@ -142,9 +142,17 @@ type Bridge struct {
 	// block: its accepts is ignored for setupRefusedFor after, so a server that
 	// lists setup but refuses it can't make every beat go twice.
 	setupRefusedAt time.Time
+	// libsFitAt is when the server last refused the heartbeat's library list
+	// for its size and took it cut to fit (link.FitLibraries): for
+	// setupRefusedFor after, beats send the cut list at once, then the whole
+	// list is tried again (the server may have been upgraded). libsFitLogged:
+	// the cut was logged on this link, so it is logged once, not every hour.
+	libsFitAt     time.Time
+	libsFitLogged bool
 }
 
-// setupRefusedFor is how long a refused setup block stays off.
+// setupRefusedFor is how long a refused setup block stays off, and how long a
+// library list cut to fit is sent cut before the whole list is tried again.
 const setupRefusedFor = time.Hour
 
 // New opens the Bridge's state in opts.DataDir.
@@ -296,6 +304,7 @@ func (b *Bridge) linkChanged() {
 	b.beatGen++
 	b.lastBeat, b.beatErr = time.Time{}, ""
 	b.acceptsSetup, b.setupRefusedAt = false, time.Time{}
+	b.libsFitAt, b.libsFitLogged = time.Time{}, false
 	b.libs.SetLibraries(nil)
 	b.mu.Unlock()
 	b.Kick()
@@ -443,6 +452,7 @@ func (b *Bridge) beat(ctx context.Context) {
 	b.box.Probe(ctx)
 	b.mu.Lock()
 	gen, withSetup := b.beatGen, b.acceptsSetup
+	fitting := !b.libsFitAt.IsZero() && time.Since(b.libsFitAt) < setupRefusedFor
 	b.mu.Unlock()
 	cfg := b.config()
 	st := link.Status{Version: b.version, Kinds: b.runner.Kinds(), Libraries: b.libs.Statuses(), Workers: b.linkWorkers(ctx),
@@ -451,9 +461,26 @@ func (b *Bridge) beat(ctx context.Context) {
 		s := b.setup(ctx)
 		st.Setup = &s
 	}
+	whole, cut := len(st.Libraries), 0
+	if fitting {
+		st, cut = link.FitLibraries(st, link.LegacyStatusBytes, link.LegacyStatusLibraries)
+	}
 	reply, err := cl.Heartbeat(ctx, st)
-	dropped := false
+	// A list refused for its size (an older server's 64 KiB or 512 libraries,
+	// a newer one's 2 MiB, a proxy's 413) would be refused on every beat: the
+	// Bridge only learns the server's libraries from a reply. The beat goes
+	// again at once with a list cut to fit (server#445). Only a refusal that
+	// says it is the size's (link.SizeRefusal): any other 400 leaves the list
+	// whole, and the setup block is what goes next.
+	fitNow := false
 	var apiErr *link.APIError
+	if err != nil && cut == 0 && link.SizeRefusal(err, st) {
+		if fitted, n := link.FitLibraries(st, link.LegacyStatusBytes, link.LegacyStatusLibraries); n > 0 {
+			st, cut, fitNow = fitted, n, true
+			reply, err = cl.Heartbeat(ctx, st)
+		}
+	}
+	dropped := false
 	if err != nil && st.Setup != nil && errors.As(err, &apiErr) && apiErr.Status == http.StatusBadRequest {
 		// A server that listed setup refuses it (a downgrade, or a bad block):
 		// the beat goes again without it, and accepts is ignored for an hour.
@@ -470,13 +497,25 @@ func (b *Bridge) beat(ctx context.Context) {
 		b.mu.Unlock()
 		return
 	}
-	changed, accepts := false, false
+	changed, accepts, logFit := false, false, false
 	if err == nil {
 		// The libraries are recorded before the link counts as ready (server),
 		// and under the lock, so a reply from before a pair or an unpair can't
 		// land after it.
 		changed = b.libs.SetLibraries(reply.Libraries)
 		b.lastBeat, b.beatErr = time.Now(), ""
+		switch {
+		case fitNow && dropped:
+			// The cut list was refused too, until the setup block went: the
+			// size isn't known to be why, so the next beat sends the whole
+			// list (without setup) and a refusal of that is the size's.
+		case fitNow:
+			b.libsFitAt = time.Now()
+			logFit, b.libsFitLogged = !b.libsFitLogged, true
+		case !fitting:
+			// The whole list went through: a later refusal is news again.
+			b.libsFitAt, b.libsFitLogged = time.Time{}, false
+		}
 		if dropped {
 			b.setupRefusedAt = time.Now()
 		}
@@ -489,6 +528,10 @@ func (b *Bridge) beat(ctx context.Context) {
 		}
 	}
 	b.mu.Unlock()
+	if logFit {
+		b.log.Warn("bridge: the server refused the heartbeat's library list for its size; sending the mappings that fit until it takes them all",
+			"libraries", whole, "left_out", cut)
+	}
 	if accepts && !withSetup {
 		b.Kick() // the server takes the checklist: send it now, not in 30 s
 	}
