@@ -797,15 +797,28 @@ func (s *service) consume(ctx context.Context, b *budget, job *jobs.Job, root *o
 	out := &downloadWriter{file: file, hash: h, rep: rep, received: c.Offset, total: total}
 	var lastCheck, lastCheckpoint, lastFollow time.Time
 	// home keeps the partial written the one at its path (keepHome), following
-	// at most every 10 s while it is nowhere to be found (the end clears
-	// lastFollow, so it follows then).
+	// at most every 10 s while it is nowhere to be found, then less often
+	// (twice the wait each time a follow finds no new place, up to
+	// followMaxEvery): a show folder deleted outright makes each follow search
+	// the whole library for its show. The end clears lastFollow, so it follows
+	// then.
+	every := followEvery
 	home := func(received int64) error {
 		next, err := s.keepHome(ctx, root, c, file, received, func(ctx context.Context) error {
-			if time.Since(lastFollow) < 10*time.Second {
+			if time.Since(lastFollow) < every {
 				return nil
 			}
 			lastFollow = time.Now()
-			return follow(ctx)
+			at := c.partialName()
+			if err := follow(ctx); err != nil {
+				return err
+			}
+			if c.partialName() == at {
+				every = min(2*every, followMaxEvery)
+			} else {
+				every = followEvery
+			}
+			return nil
 		})
 		if err != nil {
 			return err
@@ -908,6 +921,13 @@ func (s *service) consume(ctx context.Context, b *budget, job *jobs.Job, root *o
 	}
 	return podcast.Fetch{Bytes: c.Offset, SHA256: hex.EncodeToString(h.Sum(nil))}, tag, nil
 }
+
+// followEvery and followMaxEvery bound how often a download whose partial is
+// nowhere to be found follows its show (consume's home).
+const (
+	followEvery    = 10 * time.Second
+	followMaxEvery = 5 * time.Minute
+)
 
 // partialOK reports whether the proven partial c resumes can still be opened for
 // the append and is the regular file it was. A read failing later in the prefix
