@@ -404,6 +404,11 @@ func TestUnchangedProgressIsNotSent(t *testing.T) {
 			return nil, nil
 		}})
 	wantDone(t, r, srv, 8)
+	// Exactly three: a repeat sent late (after the loop's check) would make a
+	// fourth, which "reached three" above can't see.
+	if n := countState(srv, 8, link.StateRunning); n != 3 {
+		t.Fatalf("running reports = %d, want 3 (the start, the first progress, the changed one)", n)
+	}
 }
 
 // abandoner is a handler that hears of the jobs the runner ends without it.
