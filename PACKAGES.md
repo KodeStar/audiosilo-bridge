@@ -3829,8 +3829,10 @@ internal/
             point or from its source), or holds a credential's file or the
             agent home's marker .audiosilo-agent-home (markHome writes it into
             the agent container's home at the start) anywhere within
-            maxMountDepth (8) folders (or links: a run follows one; a folder
-            already walked, by device and inode, is not walked again) below its
+            maxMountDepth (8) folders (or links: a run follows one; a link to a
+            folder already walked, by device and inode, is not walked again,
+            while a folder's own entry always is, as two folders can share an
+            inode on overlayfs, Unraid's user shares or mergerfs) below its
             point, breadth first, matched by name from the listings
             (credentialRel), a folder another mount is mounted at left to that
             one's walk (Unraid's /mnt/user mounted whole: the vault at

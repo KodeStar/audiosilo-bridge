@@ -790,6 +790,52 @@ func TestDeepWalkLinkLoops(t *testing.T) {
 	}
 }
 
+// sharedInode is a folder's FileInfo showing another's device and inode, as a
+// file system that merges others can for two different folders.
+type sharedInode struct {
+	fs.FileInfo
+	sys any
+}
+
+func (s sharedInode) Sys() any { return s.sys }
+
+// Two folders that share a device and inode (overlayfs over two file systems,
+// Unraid's user shares, mergerfs) are both walked: the second isn't taken for
+// the first walked again, so the vault in it is found (denied), while a link
+// back up such a tree still ends the walk there (allowed).
+func TestDeepWalkFoldersSharingAnInode(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	mkfile(t, filepath.Join(dir, "disk1", "Books", "01.mp3"))
+	mkfile(t, filepath.Join(dir, "disk2", "appdata", "notes.txt"))
+	if err := os.Symlink("..", filepath.Join(dir, "disk1", "up")); err != nil {
+		t.Fatal(err)
+	}
+	top, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	walk := func() string {
+		w := newMountWalk(boundedLooks)
+		w.stat = func(p string) (fs.FileInfo, error) {
+			info, err := boundedLooks.stat(p)
+			if err != nil || !info.IsDir() {
+				return info, err
+			}
+			return sharedInode{FileInfo: info, sys: top.Sys()}, nil
+		}
+		return w.credentialMount([]mount{at(dir)})
+	}
+	if why := walk(); why != "" {
+		t.Fatalf("folders sharing an inode, none a credential's = %q, want none", why)
+	}
+	key := filepath.Join(dir, "disk2", "appdata", "audiosilo-bridge", vaultKeyFile)
+	mkfile(t, key)
+	if why := walk(); !strings.Contains(why, key) {
+		t.Fatalf("the vault in a folder sharing another's inode = %q, want it found", why)
+	}
+}
+
 // The container's own root is looked at shallow, as before the deep walk: its
 // point and one folder below (allowed: the image's trees are deeper than
 // maxMountDepth), still finding a login there (denied).

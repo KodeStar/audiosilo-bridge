@@ -349,10 +349,12 @@ func (w *mountWalk) credentialIn(m mount) (string, error) {
 }
 
 // walkDir is a folder the deep walk is to list: its path as walked (through
-// links) and how many folders below the mount's point it is.
+// links), how many folders below the mount's point it is, and whether its own
+// entry is a link (the only way to a folder already walked).
 type walkDir struct {
 	path  string
 	depth int
+	link  bool
 }
 
 // deepCredentialIn walks the mount at point breadth first, its folders and the
@@ -360,9 +362,13 @@ type walkDir struct {
 // a folder; one to a file, nowhere or itself holds nothing, and one to a folder
 // the walk has been in, by device and inode, is not walked again: no loop),
 // and returns the first entry that is a credential's file (credentialRel),
-// "" when none is. A folder another mount is mounted at is left to that one's
-// walk. Breadth first, a credential near the top is found before a large
-// folder further down spends the budget.
+// "" when none is. Only a link is held against the folders walked: a folder's
+// own entry is always walked, as two folders can share a device and inode
+// where a file system merges others (overlayfs over two file systems, Unraid's
+// user shares, mergerfs), and passing the second over would pass over what it
+// holds. A folder another mount is mounted at is left to that one's walk.
+// Breadth first, a credential near the top is found before a large folder
+// further down spends the budget.
 func (w *mountWalk) deepCredentialIn(point string) (string, error) {
 	queue := []walkDir{{path: point}}
 	seen := map[fileKey]bool{}
@@ -381,8 +387,9 @@ func (w *mountWalk) deepCredentialIn(point string) (string, error) {
 		}
 		for _, e := range entries {
 			p := filepath.Join(d.path, e.Name())
-			if (e.IsDir() || e.Type()&fs.ModeSymlink != 0) && !w.points[p] {
-				queue = append(queue, walkDir{path: p, depth: d.depth + 1})
+			link := e.Type()&fs.ModeSymlink != 0
+			if (e.IsDir() || link) && !w.points[p] {
+				queue = append(queue, walkDir{path: p, depth: d.depth + 1, link: link})
 			}
 		}
 	}
@@ -391,10 +398,10 @@ func (w *mountWalk) deepCredentialIn(point string) (string, error) {
 
 // listDir is the entries of d for the deep walk, none when it holds nothing a
 // run could reach: missing, not a folder (a file, a link to one or to
-// nowhere), a link loop, closed to the runner, or a folder already walked. A
-// folder deeper than maxMountDepth, entries past the walk's budget, one the
-// runner can enter but not list, a look that didn't answer and the walk past
-// its deadline are errors (fail closed).
+// nowhere), a link loop, closed to the runner, or a link to a folder already
+// walked. A folder deeper than maxMountDepth, entries past the walk's budget,
+// one the runner can enter but not list, a look that didn't answer and the
+// walk past its deadline are errors (fail closed).
 func (w *mountWalk) listDir(d walkDir, seen map[fileKey]bool) ([]fs.DirEntry, error) {
 	if err := w.inTime(); err != nil {
 		return nil, err
@@ -412,7 +419,7 @@ func (w *mountWalk) listDir(d walkDir, seen map[fileKey]bool) ([]fs.DirEntry, er
 		return nil, nil
 	}
 	if k, ok := fileKeyOf(info); ok {
-		if seen[k] {
+		if d.link && seen[k] {
 			return nil, nil
 		}
 		seen[k] = true
