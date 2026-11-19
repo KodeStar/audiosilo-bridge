@@ -66,14 +66,18 @@ func putGenerateBook(ctx context.Context, ex execer, g GenerateBook) error {
 // filed), and this rule never turns a book back: a share dropped stays dropped
 // (only a later job's own continue sets the mode it asks for). Like
 // SetBookChapters it leaves updated_at alone: the mode is not a change of
-// pipeline position, and a bump would reorder the Running list.
+// pipeline position, and a bump would reorder the Running list. A book kept
+// local only because no share job followed it (ShareSkippedNoShareJob, done or
+// not) takes contributions_off as its reason: the share_off then outlives the
+// job's row, which a later claim of the job writes over (RecordClaim), so
+// ResumeShare never takes that share up again.
 func keepSharedOffLocal(ctx context.Context, ex execer, serverJobID int64) error {
 	_, err := ex.ExecContext(ctx,
 		`UPDATE books SET contrib_mode = ?2, share_skipped = ?3
-		  WHERE state <> 'done' AND contrib_mode <> ?2
+		  WHERE ((state <> 'done' AND contrib_mode <> ?2) OR share_skipped = ?4)
 		    AND id IN (SELECT book_id FROM generate_books WHERE server_job_id = ?1)
 		    AND EXISTS (SELECT 1 FROM server_jobs WHERE id = ?1 AND share_off = 1 AND kind = 'sidecars.generate')`,
-		serverJobID, ContribModeLocal, ShareSkippedContributionsOff)
+		serverJobID, ContribModeLocal, ShareSkippedContributionsOff, ShareSkippedNoShareJob)
 	return err
 }
 

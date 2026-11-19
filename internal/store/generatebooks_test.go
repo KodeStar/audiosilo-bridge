@@ -341,6 +341,27 @@ func TestResumeShare(t *testing.T) {
 				t.Fatal(err)
 			}
 		}, 2, false},
+		{"a share_off a later claim wrote over", func(t *testing.T, db *DB, _ int64) {
+			// The job's attempt heard share_off; its next claim, the module on
+			// again, resets the row's share_off: the book keeps the share dropped.
+			if err := db.SetServerJobShareOff(ctx, 1, 2); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.RecordClaim(ctx, ServerJob{ID: 1, Kind: "sidecars.generate", Attempt: 3}); err != nil {
+				t.Fatal(err)
+			}
+		}, 3, false},
+		{"a done book's share_off", func(t *testing.T, db *DB, id int64) {
+			if err := db.SetBookState(ctx, id, "done", "", "", ""); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.SetServerJobShareOff(ctx, 1, 2); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.RecordClaim(ctx, ServerJob{ID: 1, Kind: "sidecars.generate", Attempt: 3}); err != nil {
+				t.Fatal(err)
+			}
+		}, 3, false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			db, id := setup(t)
