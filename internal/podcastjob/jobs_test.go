@@ -51,8 +51,12 @@ type scanServer struct {
 	// knows, when set, is whether the server has indexed an episode path: like
 	// the server, an episode it has not is refused (not_indexable).
 	knows func(episode string) bool
-	mu    sync.Mutex
-	asked []string
+	// limited, while above 0, answers that many rescans 429 with limit as
+	// their Retry-After (none when limit is nil).
+	limited atomic.Int32
+	limit   *time.Duration
+	mu      sync.Mutex
+	asked   []string
 }
 
 func (s *scanServer) RescanPodcast(_ context.Context, _ int64, show string) (*link.PodcastRescan, error) {
@@ -62,6 +66,13 @@ func (s *scanServer) RescanPodcast(_ context.Context, _ int64, show string) (*li
 	s.mu.Unlock()
 	if s.fail.Load() {
 		return nil, errors.New("server unavailable")
+	}
+	if s.limited.Add(-1) >= 0 {
+		e := &link.APIError{Status: http.StatusTooManyRequests, Code: "rate_limited"}
+		if s.limit != nil {
+			e.RetryAfter, e.RetryAfterSet = *s.limit, true
+		}
+		return nil, e
 	}
 	if strings.Contains(show, "/") && s.knows != nil && !s.knows(show) {
 		return nil, link.ErrNotIndexable

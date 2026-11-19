@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -108,6 +109,48 @@ func TestFetchProbePublishPinAndIndexRepair(t *testing.T) {
 	}
 	if _, err := root.Lstat(podcast.AttachmentPath(*job.Path, ".publish.json")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal(err)
+	}
+}
+
+// The server's 429 to an episode's rescan is waited out (its Retry-After, or
+// a doubling backoff when it sends none) and asked again; past the bounds (a
+// wait over rescanMaxWait, rescanTries asks) the fetch succeeds with the
+// episode saved and the show left for the next poll's rescan, never failing
+// index_failed (which would fetch the episode again).
+func TestEpisodeRescanWaitsOutTheServersLimit(t *testing.T) {
+	second, hour := time.Second, time.Hour
+	for _, tc := range []struct {
+		name    string
+		limited int32
+		limit   *time.Duration
+		asks    int32
+		waits   []time.Duration
+		indexed bool
+	}{
+		{"retry-after", 1, &second, 2, []time.Duration{time.Second}, true},
+		{"no retry-after", 2, nil, 3, []time.Duration{rescanBackoff, 2 * rescanBackoff}, true},
+		{"too long a wait", 1, &hour, 1, nil, false},
+		{"still limited", 100, &second, rescanTries, []time.Duration{time.Second, time.Second}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, job := audioHarness(t)
+			s := h.handler.s
+			var waits []time.Duration
+			s.o.Wait = func(_ context.Context, d time.Duration) error { waits = append(waits, d); return nil }
+			h.scan.limited.Store(tc.limited)
+			h.scan.limit = tc.limit
+			// One left for the poll is marked not indexed, whatever it was.
+			s.setIndexed(3, "Fixture Show", !tc.indexed)
+			if err := s.episodeRescan(context.Background(), 3, *job.Path); err != nil {
+				t.Fatal("a limited rescan failed the job", err)
+			}
+			if got := h.scan.calls.Load(); got != tc.asks || !slices.Equal(waits, tc.waits) {
+				t.Fatal("asks", got, "waits", waits)
+			}
+			if s.isIndexed(3, "Fixture Show") != tc.indexed {
+				t.Fatal("indexed", !tc.indexed)
+			}
+		})
 	}
 }
 func TestFetchInterruptedStrongResumeAndFreshFallback(t *testing.T) {

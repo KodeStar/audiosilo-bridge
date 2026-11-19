@@ -9,6 +9,7 @@ import (
 	"hash"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"path"
 	"time"
@@ -445,23 +446,55 @@ func (s *service) reuse(ctx context.Context, root *os.Root, lib link.Library, e 
 	return fetchResult{lib.ID, e.Path, showID, e.ID, *e.Fetch, n, true}, nil
 }
 
+// rescanTries, rescanMaxWait and rescanBackoff bound how long an episode's
+// rescan waits out the server's 429s (episodeRescan).
+const (
+	rescanTries   = 3
+	rescanMaxWait = 30 * time.Second
+	rescanBackoff = 2 * time.Second
+)
+
 // episodeRescan asks the server to index episode p. One whose show folder was
 // renamed by hand since the server last read it is a path the server does not
 // know (it answers not_indexable), so the show folder is rescanned instead.
+// A 429 is waited out, as audiblejob's enrichment does: the server's
+// Retry-After (an explicit 0 asks again at once, none waits rescanBackoff,
+// doubling), rescanTries asks in all, each wait at most rescanMaxWait. Past
+// that, or a stop meanwhile, the episode, saved already, is left for the
+// show's next poll, which rescans a show not indexed since (isIndexed),
+// rather than fail the job index_failed and fetch it again.
 func (s *service) episodeRescan(ctx context.Context, id int64, p string) error {
 	srv := s.o.Server()
 	if srv == nil {
 		return fail("index_failed", "The episode could not be indexed. Retry the job.")
 	}
-	_, err := srv.RescanPodcast(ctx, id, p)
-	if errors.Is(err, link.ErrNotIndexable) {
-		_, err = srv.RescanPodcast(ctx, id, path.Dir(p))
+	show, target := path.Dir(p), p
+	for limited := 0; ; {
+		_, err := srv.RescanPodcast(ctx, id, target)
+		if errors.Is(err, link.ErrNotIndexable) && target == p {
+			target = show
+			continue
+		}
+		var busy *link.APIError
+		if errors.As(err, &busy) && busy.Status == http.StatusTooManyRequests {
+			limited++
+			wait := busy.RetryAfter
+			if !busy.RetryAfterSet {
+				wait = rescanBackoff << (limited - 1)
+			}
+			if limited < rescanTries && wait <= rescanMaxWait && ctx.Err() == nil && s.o.Wait(ctx, wait) == nil {
+				continue
+			}
+			s.setIndexed(id, show, false)
+			slog.Info("podcasts: the server asked the Bridge to slow down; the episode is indexed at its show's next poll", "library", id, "show", show)
+			return nil
+		}
+		if err != nil {
+			return fail("index_failed", "The episode could not be indexed. Retry the job.")
+		}
+		s.setIndexed(id, show, true)
+		return nil
 	}
-	if err != nil {
-		return fail("index_failed", "The episode could not be indexed. Retry the job.")
-	}
-	s.setIndexed(id, path.Dir(p), true)
-	return nil
 }
 
 func (s *service) enclosure(ctx context.Context, f *podcast.Feed, e podcast.Episode) (string, error) {

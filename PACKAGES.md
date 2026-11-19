@@ -2463,7 +2463,12 @@ internal/
             meanwhile keeps its record (read, not loaded, at the stop), and
             the resumed job goes on from the partial there. An episode path the
             server answers not_indexable (its show folder renamed since the
-            server read it) is indexed by rescanning the show folder. A saved feed.json over
+            server read it) is indexed by rescanning the show folder. The
+            server's 429 to an episode's rescan is waited out (its Retry-After,
+            else 2 s doubling; 3 asks, each wait at most 30 s, as audiblejob's
+            enrichment), then the saved episode is left for the show's next
+            poll's rescan (isIndexed) and the fetch succeeds, never
+            index_failed. A saved feed.json over
             the read cap fails as too_large, not write_failed. A new show never
             takes the old name of a renamed folder not taken in yet (find
             answers those names): the server indexes that name as the renamed
