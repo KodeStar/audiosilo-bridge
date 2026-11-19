@@ -344,9 +344,9 @@ func (h *Subscribe) run(parent context.Context, job jobs.Job, rep *jobs.Reporter
 	}
 	if created {
 		// The names a new show cannot take: every entry's, and the old name of
-		// every folder renamed by hand and not taken in yet. A show made at
-		// that old name would leave the renamed folder a copy (ReadMoved),
-		// never taken in.
+		// every folder renamed by hand and not taken in yet, which the server
+		// still indexes as that show until its rescan: a new show there would
+		// stand in for it, and its jobs would find another show at that name.
 		names := renamed
 		for _, e := range entries {
 			names = append(names, e.Name())
@@ -448,21 +448,22 @@ func (h *Poll) run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (an
 	defer func() { _ = root.Close() }()
 	// A show folder renamed by hand is polled where it is now: the server still
 	// names the old folder until the rescan below indexes the new one.
-	if _, err := root.Lstat(show); errors.Is(err, os.ErrNotExist) && podcast.ValidID(params.ShowID) {
-		if moved := s.relocate(wait, root, lib, params.ShowID); moved != "" {
-			show = moved
-		}
-	}
+	show = s.where(wait, root, lib, show, params.ShowID)
 	unlock, err := s.acquire(wait, s.showKey(mount, show))
 	if err != nil {
 		return nil, err
 	}
-	defer unlock()
+	defer func() { unlock() }()
 	ctx, cancel := context.WithTimeout(parent, ceiling)
 	defer cancel()
 	f, err := s.readShow(ctx, root, lib, mount, show)
 	if err != nil {
 		return nil, err
+	}
+	if podcast.ValidID(params.ShowID) && f.ShowID != params.ShowID {
+		if show, f, err = s.swapped(wait, ctx, root, lib, mount, show, params.ShowID, &unlock); err != nil {
+			return nil, err
+		}
 	}
 	feedURL, err := s.feedURL(f.FeedURL, f.Private, secrets.PodcastFeedName(f.ShowID), "The saved feed URL is invalid.")
 	if err != nil {
@@ -739,9 +740,54 @@ func (s *service) find(root *os.Root, entries []os.DirEntry, rows []store.Podcas
 	return "", nil, renamed, nil
 }
 
-// relocate is the folder holding show id, for a job whose show folder is gone:
-// one renamed by hand. The folder its cache row names is read first, every
-// show folder only when that one does not hold it. "" when none does.
+// where is the folder a job naming show, the server's name for show id
+// (which it keeps until its rescan), works in: show, or the folder holding id
+// now when show is gone (renamed by hand, relocate), or show again when no
+// folder holds it.
+func (s *service) where(ctx context.Context, root *os.Root, lib link.Library, show, id string) string {
+	if _, err := root.Lstat(show); !errors.Is(err, os.ErrNotExist) || !podcast.ValidID(id) {
+		return show
+	}
+	if moved := s.relocate(ctx, root, lib, id); moved != "" {
+		return moved
+	}
+	return show
+}
+
+// swapped is for a job whose show folder, read under its lock, holds another
+// show than id: names swapped by hand between two show folders, or another
+// show moved to this one's old name. It releases that lock (*unlock: a job
+// never holds two show locks), finds the folder holding id (relocate) and
+// reads it under its own lock, taking it in when renamed (readShow), whose
+// release it leaves in *unlock. identity_changed when no other folder holds
+// id. Locks are waited for under wait; the reads run under ctx.
+func (s *service) swapped(wait, ctx context.Context, root *os.Root, lib link.Library, mount, show, id string, unlock *func()) (string, *podcast.Feed, error) {
+	(*unlock)()
+	*unlock = func() {}
+	changed := fail("identity_changed", "The podcast show identity changed.")
+	moved := s.relocate(ctx, root, lib, id)
+	if moved == "" || moved == show {
+		return "", nil, changed
+	}
+	release, err := s.acquire(wait, s.showKey(mount, moved))
+	if err != nil {
+		return "", nil, err
+	}
+	*unlock = release
+	f, err := s.readShow(ctx, root, lib, mount, moved)
+	if err != nil {
+		return "", nil, err
+	}
+	if f.ShowID != id {
+		return "", nil, changed // moved again since relocate read it
+	}
+	return moved, f, nil
+}
+
+// relocate is the folder holding show id, for a job whose show folder is gone
+// or holds another show: one renamed by hand. The folder its cache row names
+// is read first, every show folder only when that one does not hold it. ""
+// when none does.
 func (s *service) relocate(ctx context.Context, root *os.Root, lib link.Library, id string) string {
 	holds := func(name string) bool {
 		f, _, err := podcast.ReadMoved(root, name)
@@ -787,6 +833,9 @@ func (s *service) readShow(ctx context.Context, root *os.Root, lib link.Library,
 			f, err = read()
 		}
 	}
+	if errors.Is(err, podcast.ErrTooLarge) {
+		return nil, err // too_large (outcome), not a write fault
+	}
 	if err != nil {
 		return nil, fail("write_failed", "The saved podcast feed could not be read.")
 	}
@@ -794,10 +843,11 @@ func (s *service) readShow(ctx context.Context, root *os.Root, lib link.Library,
 }
 
 // adopt takes in show when it is a folder renamed by hand (podcast.Adopt):
-// the episodes, their downloads and the show's state stay, the cache row and
-// the records of its interrupted downloads follow (adoptCheckpoints), and the
-// server is asked to index the folder again. It reports whether show was such
-// a folder.
+// the episodes, their downloads and the show's state stay, the records of its
+// interrupted downloads (adoptCheckpoints, first: a stop before feed.json
+// moves takes the folder in again) and the cache row follow, and the server
+// is asked to index the folder again. It reports whether show was such a
+// folder.
 func (s *service) adopt(ctx context.Context, root *os.Root, lib link.Library, mount, show string) (bool, error) {
 	f, from, err := podcast.ReadMoved(root, show)
 	if err != nil || from == "" {
@@ -816,12 +866,15 @@ func (s *service) adopt(ctx context.Context, root *os.Root, lib link.Library, mo
 	if err := s.beforeWrite(lib, mount, show); err != nil {
 		return false, err
 	}
+	if err := s.adoptCheckpoints(ctx, lib, show, from, f.ShowID, 0); err != nil {
+		slog.Warn("podcasts: the download records of a show folder renamed by hand could not be read; it is taken in later", "library", lib.ID, "show", show, "err", err)
+		return false, nil
+	}
 	if err := podcast.Adopt(root, show, from, f, s.o.Now()); err != nil {
 		slog.Warn("podcasts: a show folder renamed by hand could not be taken in", "library", lib.ID, "show", show, "err", err)
 		return false, nil
 	}
 	s.setIndexed(lib.ID, show, false)
-	s.adoptCheckpoints(ctx, lib, show, from)
 	if err := s.o.DB.UpsertPodcastShow(ctx, s.showRow(lib, show, f)); err != nil {
 		slog.Warn("podcasts: the show cache could not record a renamed show folder", "library", lib.ID, "err", err)
 	}

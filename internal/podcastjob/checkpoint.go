@@ -168,32 +168,36 @@ func (s *service) clearCheckpoint(job jobs.Job, root *os.Root, c *checkpoint) {
 	}
 }
 
-// adoptCheckpoints moves this pairing's download records for the episodes of a
-// show folder taken in under show (adopt) from their paths under its old name
-// from. A record names its episode's path twice (its own name is the path's
-// hash), and its partial moved with the folder: left as it was, no fetch at the
-// new path would resume it, cleanOwned (which reads a show's records by their
-// folder) would never clear it and sweepPartials would leave its partial for
-// good, as one a record names. A record whose download is still running (a
-// fetch claimed under the old name) stays: that job drops it as it ends, and
-// its partial is then the sweep's. Best effort: a record that could not be
-// moved is left as it was.
-func (s *service) adoptCheckpoints(ctx context.Context, lib link.Library, show, from string) {
+// adoptCheckpoints moves this pairing's download records for the episodes of
+// show id in a show folder taken in under show (adopt) from their paths under
+// its old name from. A record names its episode's path twice (its own name is
+// the path's hash), and its partial moved with the folder: left as it was, no
+// fetch at the new path would resume it, cleanOwned (which reads a show's
+// records by their folder) would never clear it and sweepPartials would leave
+// its partial for good, as one a record names. adopt moves them before
+// feed.json, so a stop between the two leaves a folder that is taken in again,
+// moving what is left. A record whose download is still running (a fetch
+// claimed under the old name), other than self's, stays: that job moves it
+// when it finds the folder (Fetch's relocation) or drops it as it ends. A
+// record of another show (names swapped by hand) stays too. An error means
+// the records could not be read; one that could not be moved is left as it
+// was.
+func (s *service) adoptCheckpoints(ctx context.Context, lib link.Library, show, from, id string, self int64) error {
 	if s.o.DB == nil || s.o.DataDir == "" {
-		return
+		return nil
 	}
 	dir, err := s.checkpointRoot()
 	if err != nil {
-		return
+		return err
 	}
 	defer func() { _ = dir.Close() }()
 	entries, err := readDir(dir)
 	if err != nil {
-		return
+		return err
 	}
 	rows, err := s.o.DB.OpenServerJobs(ctx)
 	if err != nil {
-		return
+		return err
 	}
 	pairing := s.pairHash()
 	for _, entry := range entries {
@@ -207,7 +211,7 @@ func (s *service) adoptCheckpoints(ctx context.Context, lib link.Library, show, 
 		b, err := io.ReadAll(io.LimitReader(rd, 16385))
 		_ = rd.Close()
 		var c checkpoint
-		if err != nil || len(b) > 16384 || json.Unmarshal(b, &c) != nil || c.ServerHash != pairing || c.LibraryID != lib.ID || !podcast.ValidEpisodePath(c.Path) || path.Dir(c.Path) != from || !podcast.OwnedTemp(c.Temp) {
+		if err != nil || len(b) > 16384 || json.Unmarshal(b, &c) != nil || c.ServerHash != pairing || c.LibraryID != lib.ID || c.ShowID != id || !podcast.ValidEpisodePath(c.Path) || path.Dir(c.Path) != from || !podcast.OwnedTemp(c.Temp) {
 			continue
 		}
 		old := c.Path
@@ -215,7 +219,7 @@ func (s *service) adoptCheckpoints(ctx context.Context, lib link.Library, show, 
 			continue
 		}
 		if slices.ContainsFunc(rows, func(r store.ServerJob) bool {
-			return r.State == store.JobRunning && r.ServerID == s.o.ServerID() && r.LibraryID != nil && *r.LibraryID == lib.ID && r.Path != nil && *r.Path == old
+			return r.ID != self && r.State == store.JobRunning && r.ServerID == s.o.ServerID() && r.LibraryID != nil && *r.LibraryID == lib.ID && r.Path != nil && *r.Path == old
 		}) {
 			continue
 		}
@@ -231,6 +235,7 @@ func (s *service) adoptCheckpoints(ctx context.Context, lib link.Library, show, 
 			_ = dir.Remove(entry.Name())
 		}
 	}
+	return nil
 }
 
 // dropPartial removes c's owned partial, then its sealed validator; false, with

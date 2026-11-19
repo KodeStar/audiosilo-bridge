@@ -51,7 +51,6 @@ func (h *Retain) run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (
 		return nil, err
 	}
 	show := *job.Path
-	result := retainResult{LibraryID: lib.ID, ShowPath: show, ShowID: p.ShowID}
 	rep.Progress(jobs.Progress{Step: "retaining", Message: "Checking retained episodes"})
 	srv, ok := s.o.Server().(RetentionServer)
 	if !ok {
@@ -72,23 +71,31 @@ func (h *Retain) run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (
 		return nil, err
 	}
 	defer func() { _ = root.Close() }()
+	// A show folder renamed by hand is checked where it is now (as a poll is).
+	// The server names the old folder until its rescan, so its answers grant
+	// no deletion there until then (RetentionEligible: show_path).
+	show = s.where(ctx, root, lib, show, p.ShowID)
 	unlock, err := s.acquire(ctx, s.showKey(mount, show))
 	if err != nil {
 		return nil, err
 	}
 	var feed *podcast.Feed
 	err = func() error {
-		defer unlock()
+		defer func() { unlock() }()
 		if err := s.beforeWrite(lib, mount, show); err != nil {
 			return err
 		}
 		var err error
-		feed, err = s.readShow(ctx, root, lib, mount, show)
+		if feed, err = s.readShow(ctx, root, lib, mount, show); err != nil || feed.ShowID == p.ShowID {
+			return err
+		}
+		show, feed, err = s.swapped(ctx, ctx, root, lib, mount, show, p.ShowID, &unlock)
 		return err
 	}()
 	if err != nil {
 		return nil, err
 	}
+	result := retainResult{LibraryID: lib.ID, ShowPath: show, ShowID: p.ShowID}
 	if feed.ShowID != p.ShowID {
 		return nil, fail("identity_changed", "The podcast show identity changed.")
 	}

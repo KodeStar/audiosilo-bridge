@@ -110,38 +110,52 @@ func (b *budget) failure(ctx context.Context, err error) error {
 }
 
 func (h *Fetch) Run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (any, error) {
-	result, err := h.run(parent, job, rep)
+	result, err := h.run(parent, &job, rep)
 	if err != nil && (parent.Err() == nil || !jobs.Resumes(parent)) {
 		h.Abandon(parent, job)
 	}
 	return outcome(result, err)
 }
-func (h *Fetch) run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (_ any, err error) {
+
+// run fetches claimed's episode, moving claimed.Path to where the episode is
+// now when its show folder was renamed by hand (episodeAt), so Abandon clears
+// the record there.
+func (h *Fetch) run(parent context.Context, claimed *jobs.Job, rep *jobs.Reporter) (_ any, err error) {
 	s := h.s
+	job := *claimed
 	var params fetchParams
 	if job.Path == nil || !podcast.ValidEpisodePath(*job.Path) || json.Unmarshal(job.Params, &params) != nil || !podcast.ValidID(params.ShowID) || !podcast.ValidID(params.EpisodeID) {
 		return nil, fail("episode_not_found", "The podcast episode was not found.")
 	}
 	waitCtx, cancel := context.WithTimeout(parent, ceiling)
+	defer cancel()
 	lib, mount, err := s.library(waitCtx, job, rep)
-	cancel()
 	if err != nil {
 		return nil, err
+	}
+	root, err := os.OpenRoot(mount)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = root.Close() }()
+	// Read the show before creating lock artifacts, so invalid paths write
+	// nothing; one the server still names by a show folder renamed by hand is
+	// fetched where it is now.
+	if _, _, err = s.readEpisode(root, *job.Path, params); err != nil {
+		p := s.episodeAt(waitCtx, root, lib, mount, *job.Path, params, job.ID)
+		if p == *job.Path {
+			return nil, err
+		}
+		job.Path, claimed.Path = &p, &p
+		if _, _, err = s.readEpisode(root, p, params); err != nil {
+			return nil, err
+		}
 	}
 	unlock, err := s.acquire(parent, s.o.ServerID()+"|fetch|"+mount+"/"+*job.Path)
 	if err != nil {
 		return nil, err
 	}
 	defer unlock()
-	root, err := os.OpenRoot(mount)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = root.Close() }()
-	// Read the show before creating lock artifacts, so invalid paths write nothing.
-	if _, _, err = s.readEpisode(root, *job.Path, params); err != nil {
-		return nil, err
-	}
 	if err := s.beforeWrite(lib, mount, path.Dir(*job.Path)); err != nil {
 		return nil, err
 	}
@@ -289,6 +303,41 @@ func leaseFailure(ctx context.Context, err error, lost string) error {
 	}
 	return fail("bridge_lost", "The server could not confirm the job before saving.")
 }
+
+// episodeAt is where a fetch's episode p is now. The server names p's folder
+// until its rescan, so after a rename by hand that folder is gone or holds
+// another show: the episode is then the same file name in the folder holding
+// the show (where, swapped), read under that folder's lock and taken in first
+// when renamed, and the records of the show's interrupted downloads still
+// under the old folder, this job's own included, follow it (adoptCheckpoints).
+// p when its folder holds the show (the episode itself is missing) or none
+// does.
+// Its show locks are taken and released before the fetch's own locks.
+func (s *service) episodeAt(ctx context.Context, root *os.Root, lib link.Library, mount, p string, params fetchParams, self int64) string {
+	from := path.Dir(p)
+	f, err := podcast.Read(root, from)
+	if err == nil && f.ShowID == params.ShowID || err != nil && !errors.Is(err, os.ErrNotExist) && !errors.Is(err, podcast.ErrInvalidFile) {
+		return p
+	}
+	show := s.where(ctx, root, lib, from, params.ShowID)
+	if _, err := root.Lstat(show); err != nil {
+		return p // gone, and no folder holds the show
+	}
+	unlock, err := s.acquire(ctx, s.showKey(mount, show))
+	if err != nil {
+		return p
+	}
+	defer func() { unlock() }()
+	if f, err = s.readShow(ctx, root, lib, mount, show); err == nil && f.ShowID != params.ShowID {
+		show, _, err = s.swapped(ctx, ctx, root, lib, mount, show, params.ShowID, &unlock)
+	}
+	if err != nil || show == from {
+		return p
+	}
+	_ = s.adoptCheckpoints(ctx, lib, show, from, params.ShowID, self)
+	return show + "/" + path.Base(p)
+}
+
 func (s *service) showKey(mount, show string) string {
 	return s.o.ServerID() + "|" + mount + "/" + show
 }

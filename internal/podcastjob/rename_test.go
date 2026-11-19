@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -245,6 +246,22 @@ func TestTakingInARenamedShowMovesItsDownloadRecords(t *testing.T) {
 			if !old || now {
 				t.Fatal("a running download's record was moved", old, now)
 			}
+			// That download, still naming the old folder, finds the episode
+			// where it is now and takes its own record along.
+			var params fetchParams
+			if err := json.Unmarshal(job.Params, &params); err != nil {
+				t.Fatal(err)
+			}
+			lib := link.Library{ID: 3, Kind: "podcasts", Root: h.mount}
+			if got := s.episodeAt(context.Background(), root, lib, h.mount, *job.Path, params, job.ID); got != moved {
+				t.Fatal("the running download did not find its episode", got)
+			}
+			if _, old = s.readCheckpoint(job); old {
+				t.Fatal("the running download left its record at the old path")
+			}
+			if resumed, tag := s.loadCheckpoint(there, root, c.ShowID, c.EpisodeID); tag != `"one"` || resumed.Offset != 6 {
+				t.Fatal("the running download's record did not follow it", resumed, tag)
+			}
 			continue
 		}
 		if old || !now || saved.Temp != c.Temp || saved.Validator != c.Validator {
@@ -252,6 +269,168 @@ func TestTakingInARenamedShowMovesItsDownloadRecords(t *testing.T) {
 		}
 		if resumed, tag := s.loadCheckpoint(there, root, c.ShowID, c.EpisodeID); tag != `"one"` || resumed.Offset != 6 || resumed.Temp != c.Temp {
 			t.Fatal("a fetch at the new path would not resume the partial", resumed, tag)
+		}
+	}
+}
+
+// The records move before feed.json does: an adoption that cannot read them
+// (here, the Bridge's data folder) leaves the folder as it was, and the next
+// read takes it in with them. Moved after feed.json, a stop between the two
+// left the records at the old paths for good.
+func TestATakeInThatCannotMoveTheRecordsWaits(t *testing.T) {
+	h, job := audioHarness(t)
+	s := h.handler.s
+	root, err := os.OpenRoot(h.mount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	c := checkpoint{ServerHash: s.pairHash(), LibraryID: 3, ShowID: "a1b2c3d4e5f60718", EpisodeID: "1cc306d831645e2b", Path: *job.Path, Temp: ".audiosilo-tmp-owned", Offset: 6, Total: 100}
+	if err := root.WriteFile("Fixture Show/"+c.Temp, []byte("prefix"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.saveCheckpoint(job, root, &c, `"one"`); err != nil {
+		t.Fatal(err)
+	}
+	renameShow(t, h, "Fixture Show", "Renamed Show")
+	lib := link.Library{ID: 3, Kind: "podcasts", Root: h.mount}
+	data := s.o.DataDir
+	blocked := filepath.Join(t.TempDir(), "a file")
+	if err := os.WriteFile(blocked, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s.o.DataDir = blocked
+	if _, err := s.readShow(context.Background(), root, lib, h.mount, "Renamed Show"); err == nil {
+		t.Fatal("a folder was taken in without its download records")
+	}
+	s.o.DataDir = data
+	if _, from, err := podcast.ReadMoved(root, "Renamed Show"); err != nil || from != "Fixture Show" {
+		t.Fatal("feed.json moved without the records", from, err)
+	}
+	if _, err := s.readShow(context.Background(), root, lib, h.mount, "Renamed Show"); err != nil {
+		t.Fatal(err)
+	}
+	moved := "Renamed Show/" + strings.TrimPrefix(*job.Path, "Fixture Show/")
+	if _, ok := s.readCheckpoint(jobs.Job{LibraryID: job.LibraryID, Path: &moved}); !ok {
+		t.Fatal("the record did not follow the folder")
+	}
+}
+
+// Two show folders whose names were swapped by hand: each old name now holds
+// the other show, so each folder is a rename, not a copy. A poll naming one
+// show by its old folder finds another show there, takes that folder in, then
+// finds its own show in the other folder (never holding both locks) and polls
+// it there.
+func TestPollFollowsShowFoldersWhoseNamesWereSwapped(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	a, idA := followed(t, h)
+	res, err := h.handler.Run(context.Background(), h.claim(h.http.URL+"/another", false), jobs.LocalReporter())
+	if err != nil {
+		t.Fatal(res, err)
+	}
+	r := fields(t, res)
+	b, idB := r["show_path"].(string), r["show_id"].(string)
+	renameShow(t, h, a, "Swapping")
+	renameShow(t, h, b, a)
+	renameShow(t, h, "Swapping", b)
+	lib := int64(3)
+	for i, c := range []struct{ show, id, want string }{{a, idA, b}, {b, idB, a}} {
+		params, _ := json.Marshal(map[string]string{"show_id": c.id, "etag": `"abc"`})
+		poll := jobs.Job{ID: int64(30 + i), Kind: PollKind, LibraryID: &lib, Path: &c.show, Params: params}
+		res, err := h.handler.PollJob().Run(context.Background(), poll, jobs.LocalReporter())
+		if err != nil {
+			t.Fatal(c, res, err)
+		}
+		if r := fields(t, res); r["show_path"] != c.want || r["show_id"] != c.id {
+			t.Fatal(c, r)
+		}
+	}
+	for show, id := range map[string]string{a: idB, b: idA} {
+		f := h.read(show)
+		if f.ShowID != id || !strings.HasPrefix(f.Episodes[0].Path, show+"/") {
+			t.Fatal("folder", show, f.ShowID, f.Episodes[0].Path)
+		}
+		if row, ok, err := h.db.PodcastShowByID(context.Background(), "server-1", id); err != nil || !ok || row.ShowPath != show {
+			t.Fatal("cache row", row, ok, err)
+		}
+	}
+}
+
+// A fetch or a retention check the server still names by the old folder of a
+// show folder renamed by hand runs where the show is now, as a poll does,
+// rather than failing at a folder that is gone. The server's answers name the
+// old folder until its rescan, so a retention check there deletes nothing.
+func TestFetchAndRetainFindAShowFolderRenamedByHand(t *testing.T) {
+	requireProbe(t)
+	h, fetch := audioHarness(t)
+	audio := data(t, "chap-v24-reverse.mp3")
+	setAudio(h, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("ETag", `"one"`)
+		w.Write(audio)
+	})
+	renameShow(t, h, "Fixture Show", "Renamed Show")
+	moved := "Renamed Show/" + strings.TrimPrefix(*fetch.Path, "Fixture Show/")
+	res, err := h.handler.FetchJob().Run(context.Background(), fetch, jobs.LocalReporter())
+	if err != nil {
+		t.Fatal(res, err)
+	}
+	if got := res.(fetchResult); got.Path != moved || got.Fetch.Bytes != int64(len(audio)) {
+		t.Fatal(got)
+	}
+	if _, err := os.Stat(filepath.Join(h.mount, moved)); err != nil {
+		t.Fatal("the episode was not saved in the renamed folder", err)
+	}
+	if _, err := os.Lstat(filepath.Join(h.mount, "Fixture Show")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("the old folder came back", err)
+	}
+	keep := link.PodcastPolicy{Mode: "keep", Keep: 3, Days: 0}
+	server := &retainServer{scanServer: h.scan, policy: keep}
+	server.check = func(r link.PodcastRetentionRequest) *link.PodcastRetentionCheck {
+		return eligibleCheck(r, keep, h.handler.s.o.Now()) // names "Fixture Show"
+	}
+	h.handler.s.o.Server = func() Server { return server }
+	show := "Fixture Show"
+	params, _ := json.Marshal(map[string]string{"show_id": "a1b2c3d4e5f60718"})
+	retain := jobs.Job{ID: 82, Kind: RetainKind, LibraryID: fetch.LibraryID, Path: &show, Params: params, Attempt: 1}
+	res, err = h.handler.RetainJob().Run(context.Background(), retain, jobs.LocalReporter())
+	if err != nil {
+		t.Fatal(res, err)
+	}
+	if got := res.(retainResult); got.ShowPath != "Renamed Show" || got.Deleted != 0 {
+		t.Fatal(got)
+	}
+	if _, err := os.Stat(filepath.Join(h.mount, moved)); err != nil {
+		t.Fatal("an episode was deleted on an answer naming the old folder", err)
+	}
+}
+
+// A saved feed.json over the reader's cap fails a poll and a retention check
+// as too_large, as it did before either took in renamed folders, never
+// write_failed.
+func TestAnOversizedSavedFeedIsTooLarge(t *testing.T) {
+	h, _ := audioHarness(t)
+	if err := os.Truncate(filepath.Join(h.mount, "Fixture Show", "feed.json"), 32<<20+1); err != nil {
+		t.Fatal(err)
+	}
+	server := &retainServer{scanServer: h.scan, policy: link.PodcastPolicy{Mode: "keep", Keep: 3}}
+	h.handler.s.o.Server = func() Server { return server }
+	show := "Fixture Show"
+	params, _ := json.Marshal(map[string]string{"show_id": "a1b2c3d4e5f60718"})
+	lib := int64(3)
+	for _, job := range []jobs.Job{
+		{ID: 40, Kind: PollKind, LibraryID: &lib, Path: &show, Params: params},
+		{ID: 41, Kind: RetainKind, LibraryID: &lib, Path: &show, Params: params},
+	} {
+		var err error
+		if job.Kind == PollKind {
+			_, err = h.handler.PollJob().Run(context.Background(), job, jobs.LocalReporter())
+		} else {
+			_, err = h.handler.RetainJob().Run(context.Background(), job, jobs.LocalReporter())
+		}
+		var failure *netguard.Error
+		if !errors.As(err, &failure) || failure.Code != "too_large" {
+			t.Fatal(job.Kind, err)
 		}
 	}
 }

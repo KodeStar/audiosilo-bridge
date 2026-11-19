@@ -2360,12 +2360,18 @@ internal/
             fetch parses it three times, not six (bridge#13). A show folder
             renamed by hand still names its episodes under the old folder, which
             Read refuses: ReadMoved answers the old name (a folder whose old name
-            still exists is a copy and is refused) and Adopt moves the paths of
-            the pending journals, the committed trash manifests and then
-            feed.json, so a stop part way through adopts again (a manifest it
-            could not rewrite stops it before feed.json). EnsureDir never makes
-            the show folder itself, so a job running on after a rename by hand
-            never brings the old name back.
+            still holds the same show id is a copy and is refused, as is one
+            whose old name has a feed.json it cannot read; an old name holding
+            another show, names swapped by hand, or none is a rename) and Adopt
+            moves the paths of the pending journals, the committed trash
+            manifests and then feed.json, so a stop part way through adopts
+            again (a manifest it could not rewrite stops it before feed.json).
+            A journal naming a gone third folder moves too when its show id
+            and its episode's id and file name are the show's (renamed again
+            after an adoption that stopped part way); a pending one of another
+            show still fails it. A feed.json over the 32 MiB read cap is
+            ErrTooLarge. EnsureDir never makes the show folder itself, so a job
+            running on after a rename by hand never brings the old name back.
   podcastjob/ podcast.fetch opts into the interactive reserve (2c-2b), with
             download as its ordinary lane. Subscribe, poll and retain do not opt in.
             podcast.subscribe and podcast.poll (light lane): require the
@@ -2374,17 +2380,26 @@ internal/
             cache rebuild, artwork sniffing, permanent moves and targeted rescan.
             A show folder renamed by hand (bridge#13) is taken in under the show
             lock when its read refuses (readShow, adopt: episodes, downloads,
-            artwork, secret and cache row kept, the new folder rescanned); a poll
-            whose folder is gone finds the show by its id (relocate: the cache
-            row, then every folder) and a follow joins it rather than starting a
-            new show. The server still names the old folder until its own scan.
-            A copy of a renamed folder made before either was taken in is
+            artwork, secret and cache row kept, the new folder rescanned). A
+            poll, retain or fetch whose folder is gone finds the show by its id
+            (where, relocate: the cache row, then every folder); one whose
+            folder holds another show (names swapped by hand) releases that
+            show lock and takes the other folder's (swapped; never two show
+            locks, and a fetch does this before its own locks); a follow joins
+            it rather than starting a new show. The server still names the old
+            folder until its own scan, so a retain there deletes nothing until
+            then. A copy of a renamed folder made before either was taken in is
             refused once another folder (its cache row's) holds the show.
             The records of the show's interrupted downloads move to the new
-            paths with it (adoptCheckpoints; one whose download still runs
-            stays), or their partials would stay in the folder for good. A new
-            show never takes the old name of a renamed folder not taken in yet
-            (find answers those names), which would leave that folder a copy.
+            paths with it (adoptCheckpoints, before feed.json, so a stop between
+            takes the folder in again; records it cannot read stop the
+            adoption; one of another show stays, and one whose download still
+            runs stays until that fetch relocates and moves its own), or their
+            partials would stay in the folder for good. A saved feed.json over
+            the read cap fails as too_large, not write_failed. A new show never
+            takes the old name of a renamed folder not taken in yet (find
+            answers those names): the server indexes that name as the renamed
+            show until its rescan.
             The library's entries are read by name (readDir), so which of
             several folders a job picks never depends on the listing order.
             Subscribe implements ParamSealer and Abandoner: job credentials are
