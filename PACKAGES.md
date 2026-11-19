@@ -2307,14 +2307,10 @@ internal/
             ("the job was cancelled by the server: <reason>"), with none an admin's, the 409 and
             the answer to a parked report (its error is the park's message that report sent) say
             neither, the page's own Cancel says so), any other 409 ends it as lost (nothing more sent).
-            A job that FAILS before it heard a cancel asks once more before its end goes
-            out (Reporter.heldCancel, a keepalive's report): a cancel held there ends it
-            cancelled, its cause saying by whom as above, since the failure may be the
-            stop itself; no cancel (or no answer) leaves it failed, and a job that ended
-            done before it heard a cancel reports done. A failed end the server
-            answers 409 cancelled (a retried report) is recorded cancelled, as the
-            server has it. A parked
-            report carries the park's message for people in progress park.message
+            A job that FAILS before it heard a cancel asks once more, for at most 5 s
+            (Reporter.heldCancel): a cancel held there ends it cancelled, no cancel or no
+            answer leaves it failed; a done job never asks. A failed end the server answers
+            409 cancelled (a retried report) is recorded cancelled. A parked report carries the park's message for people in progress park.message
             (withParkMessage: the job's park message without the "<code>: " an
             engine message leads with; bridge#28), which the page shows; a 401 is handed to
             the app WITH the link that got it (onUnauthorized(srv): a job of the

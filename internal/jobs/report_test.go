@@ -376,6 +376,24 @@ func TestHeldCancel(t *testing.T) {
 	}
 }
 
+// A server that doesn't answer holds a failed job's end for heldCancelWait at
+// most: no answer is no cancel.
+func TestHeldCancelWaitsBriefly(t *testing.T) {
+	t.Parallel()
+	srv := newFakeServer()
+	srv.hang = make(chan struct{})
+	defer close(srv.hang)
+	srv.cancel[24] = true // what the answer would say, had it come
+	rep := &Reporter{srv: srv, job: Job{ID: 24, Attempt: 1}}
+	start := time.Now()
+	if cause := rep.heldCancel(context.Background()); cause != nil {
+		t.Fatalf("no answer = %v", cause)
+	}
+	if took := time.Since(start); took > heldCancelWait+2*time.Second {
+		t.Fatalf("waited %v for an answer, want at most %v", took, heldCancelWait)
+	}
+}
+
 // A failure whose report didn't get through, which the server ended cancelled
 // meanwhile (its 409 cancelled to the retried report), is recorded cancelled:
 // the Bridge's page reads what the server's does.
