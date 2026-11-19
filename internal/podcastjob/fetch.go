@@ -601,8 +601,9 @@ func leaseFailure(ctx context.Context, err error, lost string) error {
 // folder in there) or none does. write_failed when the records cannot be
 // read: the fetch waits, as a take-in does (adopt), rather than leave its
 // record and partial behind. ctx's error when it ended while the show lock
-// was awaited. Before a download its show lock is taken and released before
-// the fetch's own locks; during one (settle) and after it, under them (the
+// was awaited, or while a take-in waited for the folder (lockShowToWrite).
+// Before a download its show lock is taken and released before the fetch's
+// own locks; during one (settle) and after it, under them (the
 // episode's lock before the show's, as the publication takes them), the
 // episode's lock then following to the new path (followLock).
 func (s *service) episodeAt(ctx context.Context, root *os.Root, lib link.Library, mount, p string, params fetchParams, self int64) (string, error) {
@@ -616,10 +617,15 @@ func (s *service) episodeAt(ctx context.Context, root *os.Root, lib link.Library
 			return p, nil
 		}
 	}
-	show, _, unlock, err := s.lockShow(ctx, root, lib, mount, from, params.ShowID, nil)
+	// A take-in that cannot tell whether the folder may be written waits
+	// without the show's lock (lockShowToWrite).
+	show, _, unlock, err := s.lockShowToWrite(ctx, root, lib, mount, from, params.ShowID, nil)
 	if err != nil {
 		if ctx.Err() != nil {
 			return p, ctx.Err() // a stop or the ceiling, not a show that is gone
+		}
+		if errors.Is(err, context.DeadlineExceeded) {
+			return p, err // that wait's own ceiling passed
 		}
 		return p, nil
 	}

@@ -76,27 +76,14 @@ func (h *Retain) run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (
 	// no deletion there until then (RetentionEligible: show_path).
 	// Its write check never waits under the show's lock: while nothing says
 	// whether the folder may be written, the lock is let go, the wait made
-	// without it (beforeWrite), and the show found and read again.
-	claimed := show
-	var feed *podcast.Feed
-	for {
-		at := claimed // the folder the check last looked at
-		var unlock func()
-		show, feed, unlock, err = s.lockShow(ctx, root, lib, mount, claimed, p.ShowID, func(show string) error {
-			at = show
-			return s.writeNow(lib, mount, show)
-		})
-		if err == nil {
-			unlock()
-			break
-		}
-		if !undecided(err) {
-			return nil, err
-		}
-		if err := s.beforeWrite(ctx, lib, mount, at); err != nil {
-			return nil, err
-		}
+	// without it, and the show found and read again (lockShowToWrite).
+	show, feed, unlock, err := s.lockShowToWrite(ctx, root, lib, mount, show, p.ShowID, func(show string) error {
+		return s.writeNow(lib, mount, show)
+	})
+	if err != nil {
+		return nil, err
 	}
+	unlock()
 	result := retainResult{LibraryID: lib.ID, ShowPath: show, ShowID: p.ShowID}
 	s.cleanOwned(ctx, root, lib, mount, show, job.ID)
 	pairing := s.pairHash()

@@ -4,16 +4,22 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/kodestar/audiosilo-bridge/internal/fsutil"
 	"github.com/kodestar/audiosilo-bridge/internal/jobs"
 	"github.com/kodestar/audiosilo-bridge/internal/link"
 	"github.com/kodestar/audiosilo-bridge/internal/mapping"
+	"github.com/kodestar/audiosilo-bridge/internal/netguard"
+	"github.com/kodestar/audiosilo-bridge/internal/podcast"
+	"github.com/kodestar/audiosilo-bridge/internal/store"
 )
 
 // outage is the harness's Registry while the library's mapping is unknown:
@@ -281,5 +287,132 @@ func TestRetainLeavesAnEpisodeItsMappingNoLongerBacks(t *testing.T) {
 	}
 	if f := h.read("Fixture Show"); f.Episodes[0].Fetch == nil || f.Episodes[0].Fetch.DeletedAt != "" {
 		t.Fatal("the episode's record says deleted", f.Episodes[0])
+	}
+}
+
+// showLockHeld reports whether a job holds the show's lock now.
+func showLockHeld(s *service, mount, show string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	l := s.locks[s.showKey(mount, show)]
+	return l != nil && len(l.gate) == 1
+}
+
+// A fetch whose show folder was renamed by hand takes it in (adopt) under the
+// show's lock: a write probe of the folder that doesn't answer in time (a disk
+// spinning up) is waited for without that lock, so the show's other jobs go
+// on (a poll of the show takes the lock and looks at the folder while the
+// fetch waits), and the fetch takes the folder in and publishes there once it
+// answers.
+func TestATakeInWaitsForASlowFolderWithoutTheShowLock(t *testing.T) {
+	requireProbe(t)
+	h, job := audioHarness(t)
+	s := h.handler.s
+	s.o.CheckPoll = 2 * time.Millisecond
+	audio := data(t, "chap-v24-reverse.mp3")
+	setAudio(h, func(w http.ResponseWriter, _ *http.Request) { w.Write(audio) })
+	var slow atomic.Bool
+	var slowProbes, underLock atomic.Int32
+	slow.Store(true)
+	s.o.WriteProbe = func(dir string) error {
+		if !slow.Load() || !strings.Contains(dir, "Renamed Show") {
+			return mapping.ProbeWritable(dir)
+		}
+		slowProbes.Add(1)
+		if showLockHeld(s, h.mount, "Renamed Show") {
+			underLock.Add(1) // a take-in's one look, under the lock
+		}
+		return &fs.PathError{Op: "probe", Path: dir, Err: fsutil.ErrStatTimeout}
+	}
+	renameShow(t, h, "Fixture Show", "Renamed Show")
+	h.scan.knows = func(p string) bool { return strings.HasPrefix(p, "Fixture Show/") }
+	done := make(chan error, 1)
+	go func() {
+		_, err := h.handler.FetchJob().Run(context.Background(), job, jobs.LocalReporter())
+		done <- err
+	}()
+	awaitTrue(t, "the take-in waited on its folder", done, func() bool { return slowProbes.Load() >= 5 })
+	if !showLockFree(s, h.mount, "Renamed Show") {
+		t.Fatal("the fetch holds its show's lock while it waits for the folder to answer")
+	}
+	if n := underLock.Load(); n != 1 {
+		t.Fatalf("%d looks under the show's lock, want the take-in's one", n)
+	}
+	// A poll of the show gets its lock and makes its own take-in's look
+	// while the fetch waits.
+	show := "Fixture Show"
+	params, _ := json.Marshal(map[string]string{"show_id": "a1b2c3d4e5f60718"})
+	poll := jobs.Job{ID: 11, Kind: PollKind, LibraryID: job.LibraryID, Path: &show, Params: params}
+	pollCtx, stopPoll := context.WithCancel(context.Background())
+	polled := make(chan error, 1)
+	go func() {
+		_, err := h.handler.PollJob().Run(pollCtx, poll, jobs.LocalReporter())
+		polled <- err
+	}()
+	awaitTrue(t, "the poll looked at the folder under the show's lock", done, func() bool { return underLock.Load() >= 2 })
+	// Its feed's host is not the harness's (and a poll holds the show's lock
+	// through its feed's fetch): it has shown what it had to.
+	stopPoll()
+	<-polled
+	slow.Store(false)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	moved := "Renamed Show/" + strings.TrimPrefix(*job.Path, "Fixture Show/")
+	if _, err := os.Stat(filepath.Join(h.mount, moved)); err != nil {
+		t.Fatal("the episode was not published in the folder taken in", err)
+	}
+}
+
+// Artwork is written under the show's lock its poll or follow holds, so its
+// look at the folder never waits there: a probe the folder doesn't answer in
+// time leaves the image for the next poll at once, counting no failure toward
+// its backoff, and the next look that answers writes it. Denied: a probe the
+// folder refuses still counts as a failed attempt.
+func TestArtworkNeverWaitsForASlowFolder(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	s := h.handler.s
+	s.o.CheckPoll = time.Hour // a wait would outlast the test
+	jpeg := append([]byte{0xff, 0xd8, 0xff, 0xe0}, make([]byte, 64)...)
+	s.o.Fetcher = feedFetcher(func(context.Context, netguard.Request) (*netguard.Response, error) {
+		return &netguard.Response{Status: 200, Body: jpeg}, nil
+	})
+	var probe error = &fs.PathError{Op: "probe", Path: "Show", Err: fsutil.ErrStatTimeout}
+	s.o.WriteProbe = func(string) error { return probe }
+	root, err := os.OpenRoot(h.mount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	root.Mkdir("Show", 0o755)
+	lib, _ := s.o.Libraries.Library(3)
+	f := &podcast.Feed{ShowID: "a1b2c3d4e5f60718"}
+	const image = "https://art.example/cover"
+
+	s.artwork(context.Background(), root, lib, h.mount, "Show", f, image)
+	if state, err := h.db.PodcastArtwork(context.Background(), "server-1", 3, f.ShowID); err != nil || state.Failures != 0 || state.NextAttemptAt != "" {
+		t.Fatal("a slow folder counted against the artwork", state, err)
+	}
+	if f.Show.Image != nil {
+		t.Fatal("artwork recorded with no write", f.Show.Image)
+	}
+
+	probe = fs.ErrPermission
+	s.artwork(context.Background(), root, lib, h.mount, "Show", f, image)
+	if state, err := h.db.PodcastArtwork(context.Background(), "server-1", 3, f.ShowID); err != nil || state.Failures != 1 {
+		t.Fatal("a refused folder was not counted", state, err)
+	}
+	if err := h.db.SavePodcastArtwork(context.Background(), "server-1", 3, f.ShowID, store.PodcastArtworkState{}); err != nil {
+		t.Fatal(err)
+	}
+
+	s.o.WriteProbe = mapping.ProbeWritable
+	s.artwork(context.Background(), root, lib, h.mount, "Show", f, image)
+	if f.Show.Image == nil || f.Show.Image.File != "cover.jpg" {
+		t.Fatal("the artwork was not written once the folder answered", f.Show.Image)
+	}
+	if _, err := os.Stat(filepath.Join(h.mount, "Show", "cover.jpg")); err != nil {
+		t.Fatal(err)
 	}
 }
