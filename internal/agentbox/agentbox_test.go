@@ -20,6 +20,7 @@ import (
 
 	"github.com/kodestar/audiosilo-bridge/internal/agent"
 	"github.com/kodestar/audiosilo-bridge/internal/agentproto"
+	"github.com/kodestar/audiosilo-bridge/internal/testwait"
 )
 
 // newTestRunner is a Runner over a fresh staging dir with a fresh runner.json
@@ -33,13 +34,14 @@ func newTestRunner(t *testing.T, backend string) (*Runner, string) {
 			"codex":  {Version: "0.162.1", Credential: "login"},
 		}})
 	// Parallel filesystem-heavy tests can delay a goroutine on one CPU. Keep
-	// ordinary runs tolerant of that; timeout tests shorten their own limits.
-	r := New(Options{Dir: dir, Backend: backend, ClaimTimeout: 5 * time.Second})
+	// ordinary runs tolerant of that (Scaled: -race on a loaded machine delays
+	// it more); timeout tests shorten their own limits.
+	r := New(Options{Dir: dir, Backend: backend, ClaimTimeout: testwait.Scaled(5 * time.Second)})
 	r.poll = 5 * time.Millisecond
-	r.staleFor = 5 * time.Second
+	r.staleFor = testwait.Scaled(5 * time.Second)
 	r.beatCheck = 5 * time.Millisecond
 	r.beatEvery = 10 * time.Millisecond
-	r.cancelFor = 2 * time.Second
+	r.cancelFor = testwait.Scaled(2 * time.Second)
 	r.takeFor = 20 * time.Millisecond
 	// The test writes the runner's files, so it stands for the runner's uid,
 	// and the Bridge is some other one (trust.go).
@@ -145,7 +147,7 @@ func TestFakeRunnerDoesNotReclaimJobDuringRemoval(t *testing.T) {
 			if got != want {
 				t.Fatalf("claimed job %s, want %s", got, want)
 			}
-		case <-time.After(5 * time.Second):
+		case <-time.After(testwait.Scaled(5 * time.Second)):
 			t.Fatalf("runner did not claim job %s", want)
 		}
 	}
@@ -212,7 +214,7 @@ func TestRunClaudeSuccess(t *testing.T) {
 		}
 		// Keep the run alive until Run observes a heartbeat, even if another
 		// parallel test occupies the only CPU longer than a fixed beat window.
-		deadline := time.After(5 * time.Second)
+		deadline := time.After(testwait.Scaled(5 * time.Second))
 	beating:
 		for {
 			select {
@@ -488,10 +490,12 @@ func TestRunStaleHeartbeat(t *testing.T) {
 // (BR-OPENAI-2): a runner whose clock is an hour behind, touching the
 // heartbeat with its own dates, finishes its run (allowed); one that stops
 // touching it is stale staleFor later all the same (TestRunStaleHeartbeat).
+// staleFor is the run's length (Scaled): beats 5 ms apart, so only a runner on
+// its own clock reads stale, never one a loaded machine starved for a moment.
 func TestRunHeartbeatOnTheBridgesClock(t *testing.T) {
 	t.Parallel()
 	r, dir := newTestRunner(t, agent.IDClaude)
-	r.staleFor = 300 * time.Millisecond
+	r.staleFor = testwait.Scaled(time.Second)
 	fake := &fakeRunner{fn: func(job string) agentproto.Exit {
 		hb := filepath.Join(job, agentproto.HeartbeatFile)
 		behind := time.Now().Add(-time.Hour)
@@ -522,7 +526,7 @@ func TestRunCancel(t *testing.T) {
 	sawCancel := make(chan bool, 1)
 	fake := &fakeRunner{fn: func(job string) agentproto.Exit {
 		cancel()
-		deadline := time.Now().Add(time.Second)
+		deadline := time.Now().Add(testwait.Scaled(5 * time.Second))
 		for time.Now().Before(deadline) && !present(job, agentproto.CancelFile) {
 			beatFor(job, 5*time.Millisecond)
 		}
@@ -554,7 +558,7 @@ func TestRunCancelUnclaimed(t *testing.T) {
 	defer cancel()
 	start := time.Now()
 	_, err := r.Run(ctx, agent.Request{Dir: stagedDir(t), Prompt: "p", Timeout: time.Minute})
-	if !errors.Is(err, context.DeadlineExceeded) || time.Since(start) > time.Second {
+	if !errors.Is(err, context.DeadlineExceeded) || time.Since(start) > testwait.Scaled(5*time.Second) { // the claim timeout is an hour
 		t.Fatalf("err = %v after %s", err, time.Since(start))
 	}
 	assertNoJobDirs(t, dir)

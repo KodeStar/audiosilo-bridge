@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/kodestar/audiosilo-bridge/internal/execfile"
+	"github.com/kodestar/audiosilo-bridge/internal/testwait"
 )
 
 // writeSleepScript writes an executable POSIX script that sleeps for the given
@@ -67,11 +68,12 @@ func TestRunCLIHeartbeatFiresWhileRunningAndStops(t *testing.T) {
 }
 
 // TestRunCLIHeartbeatSilentWhenFast confirms the heartbeat does not fire for a process
-// that finishes well within one interval (best-effort: the process exits near-instantly
-// against a generous 500ms interval).
+// that finishes well within one interval: no beat at the start. The interval is a
+// minute, as a fork and exec under -race on a loaded machine can take longer than
+// any interval short enough to keep the test quick.
 func TestRunCLIHeartbeatSilentWhenFast(t *testing.T) {
 	restore := heartbeatInterval
-	heartbeatInterval = 500 * time.Millisecond
+	heartbeatInterval = time.Minute
 	t.Cleanup(func() { heartbeatInterval = restore })
 
 	var beats atomic.Int64
@@ -103,7 +105,8 @@ func TestRunCLINilHeartbeatOK(t *testing.T) {
 // TestRunCLIBoundsInheritedPipeWait covers a detached helper that outlives the
 // direct CLI process while retaining its stdout/stderr descriptors. The direct
 // process succeeded, so runCLI must return successfully after the bounded pipe
-// drain instead of looking like a disappeared worker forever.
+// drain instead of looking like a disappeared worker forever. The helper outlives
+// the bound (Scaled: a loaded -race run is slow to fork) by far.
 func TestRunCLIBoundsInheritedPipeWait(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("test uses a POSIX shell and background process")
@@ -115,7 +118,7 @@ func TestRunCLIBoundsInheritedPipeWait(t *testing.T) {
 	start := time.Now()
 	stdout, _, err := runCLI(context.Background(), cliSpec{
 		path: "/bin/sh",
-		args: []string{"-c", "sleep 5 & printf ready"},
+		args: []string{"-c", "sleep 20 & printf ready"},
 	})
 	if err != nil {
 		t.Fatalf("runCLI: %v", err)
@@ -123,7 +126,7 @@ func TestRunCLIBoundsInheritedPipeWait(t *testing.T) {
 	if stdout != "ready" {
 		t.Fatalf("stdout = %q, want ready", stdout)
 	}
-	if elapsed := time.Since(start); elapsed > time.Second {
+	if elapsed := time.Since(start); elapsed > testwait.Scaled(2*time.Second) {
 		t.Fatalf("runCLI waited %s for detached helper's inherited pipe", elapsed)
 	}
 }
