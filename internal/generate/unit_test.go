@@ -1162,14 +1162,207 @@ func TestShareOffWakesTheRun(t *testing.T) {
 	}
 }
 
-// fakeAsker answers ShareOff per job: an error, else off.
+// fakeAsker answers ShareOff per job: an error, else off. asked, when set,
+// counts the jobs asked.
 type fakeAsker struct {
-	off  map[int64]bool
-	errs map[int64]error
+	off   map[int64]bool
+	errs  map[int64]error
+	asked *atomic.Int32
 }
 
 func (a fakeAsker) ShareOff(_ context.Context, id int64, _ bool) (bool, error) {
+	if a.asked != nil {
+		a.asked.Add(1)
+	}
 	return a.off[id], a.errs[id]
+}
+
+// A book that no open generate-and-share job follows stays local (fail
+// closed, no_share_job), with no job asked: none follows it, or only a
+// contribute=local job, which is never asked (denied: never "share on"). A
+// share job that says its share still stands keeps it shared (allowed).
+func TestShareOffWithNoShareJobKeepsTheBookLocal(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db, err := store.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	b, err := db.CreateBook(ctx, store.NewBook{Title: "B", SourcePath: "/src/b", WorkDir: t.TempDir(),
+		ContribMode: store.ContribModeIssue})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := New(Options{DB: db, WorkRoot: t.TempDir()})
+	var asked atomic.Int32
+	h.AskThrough(fakeAsker{asked: &asked})
+	if why, err := h.ShareOff(ctx, b.ID, true); why != ShareSkippedNoShareJob || err != nil {
+		t.Fatalf("no job follows the book = %q %v, want no_share_job", why, err)
+	}
+	follow := func(id int64, params string) {
+		t.Helper()
+		if err := db.RecordClaim(ctx, store.ServerJob{ID: id, Kind: Kind, Params: json.RawMessage(params), Attempt: 1}); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.PutGenerateBook(ctx, store.GenerateBook{ServerJobID: id, BookID: &b.ID, LibraryID: 1, RelPath: "B"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	follow(1, `{"contribute":"local"}`)
+	if why, err := h.ShareOff(ctx, b.ID, true); why != ShareSkippedNoShareJob || err != nil || asked.Load() != 0 {
+		t.Fatalf("a local job only = %q %v (asked %d), want no_share_job with none asked", why, err, asked.Load())
+	}
+	follow(2, `{"contribute":"issue"}`)
+	if why, err := h.ShareOff(ctx, b.ID, true); why != "" || err != nil || asked.Load() != 1 {
+		t.Fatalf("a share job still sharing = %q %v (asked %d), want shared, the share job asked", why, err, asked.Load())
+	}
+}
+
+// keepShareLocal takes why the share was skipped from a book the stage kept
+// local (store.Book.ShareSkipped: no run of the job was there to ask), and
+// says contributions_off for one with no reason recorded.
+func TestKeepShareLocalTakesTheBooksReason(t *testing.T) {
+	t.Parallel()
+	h := New(Options{WorkRoot: t.TempDir()})
+	for _, c := range []struct{ recorded, want string }{
+		{store.ShareSkippedNoShareJob, ShareSkippedNoShareJob},
+		{"", ShareSkippedContributionsOff},
+	} {
+		r := &run{job: jobs.Job{ID: 1, Kind: Kind}, kind: Kind, rep: jobs.LocalReporter(),
+			params: Params{Contribute: ContributeIssue}}
+		b := store.Book{ID: 1, State: string(state.Done), ContribMode: store.ContribModeLocal, ShareSkipped: c.recorded}
+		h.keepShareLocal(context.Background(), nil, r, &b)
+		if r.shareSkipped != c.want || r.params.Contribute != ContributeLocal {
+			t.Errorf("recorded %q: share skipped %q (contribute %q), want %q", c.recorded, r.shareSkipped, r.params.Contribute, c.want)
+		}
+	}
+}
+
+// failingCancelEngine is the engine with its guarded cancel failing while
+// fails is above zero (each call takes one).
+type failingCancelEngine struct {
+	*scheduler.Scheduler
+	fails *atomic.Int32
+}
+
+func (e failingCancelEngine) CancelUnlessFollowed(ctx context.Context, id int64, g store.StopGuard) error {
+	if e.fails.Add(-1) >= 0 {
+		return errors.New("database is locked")
+	}
+	return e.Scheduler.CancelUnlessFollowed(ctx, id, g)
+}
+
+// A job's end whose cancel of its engine book fails tries it again (allowed:
+// a passing blip still stops the book); one that keeps failing turns the book
+// local with no_share_job (denied: a book running on with no job following it
+// never files in issue mode).
+func TestJobEndThatCantStopItsBookKeepsItLocal(t *testing.T) {
+	t.Parallel()
+	for _, c := range []struct {
+		name      string
+		fails     int32
+		cancelled bool
+	}{{"a blip", 1, true}, {"failing", 100, false}} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			db, err := store.Open(ctx, ":memory:")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = db.Close() })
+			if err := db.RecordClaim(ctx, store.ServerJob{ID: 1, Kind: Kind, Attempt: 1}); err != nil {
+				t.Fatal(err)
+			}
+			b, err := db.CreateMappedBook(ctx, store.NewBook{SourcePath: "/lib/b", WorkDir: t.TempDir(), Title: "b",
+				ContribMode: store.ContribModeIssue}, store.GenerateBook{ServerJobID: 1, LibraryID: 1, RelPath: "b"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = db.SetBookState(ctx, b.ID, "asr", "", "", "")
+			fails := &atomic.Int32{}
+			fails.Store(c.fails)
+			sched := scheduler.New(db, events.NewHub(8), scheduler.NewStubExecutor(0, 0), 1, "", false)
+			h := New(Options{DB: db, RetentionDays: 30, Poll: time.Millisecond, Log: slog.New(slog.DiscardHandler),
+				Engine: func() Engine { return failingCancelEngine{sched, fails} }})
+			if !h.release(ctx, jobs.Job{ID: 1, Kind: Kind, Attempt: 1}, b.ID, true) {
+				t.Fatal("release didn't record the job's end")
+			}
+			got, err := db.GetBook(ctx, b.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if scheduler.IsCancelled(got) != c.cancelled {
+				t.Fatalf("cancelled = %v, want %v (book %+v)", scheduler.IsCancelled(got), c.cancelled, got)
+			}
+			wantMode, wantWhy := store.ContribModeIssue, ""
+			if !c.cancelled {
+				wantMode, wantWhy = store.ContribModeLocal, store.ShareSkippedNoShareJob
+			}
+			if got.ContribMode != wantMode || got.ShareSkipped != wantWhy {
+				t.Fatalf("mode %q why %q, want %q %q", got.ContribMode, got.ShareSkipped, wantMode, wantWhy)
+			}
+		})
+	}
+}
+
+// A job whose earlier run's mapping can't be read tries again (allowed: a
+// passing blip resumes it); one that still can't is released as Abandon does
+// (denied: the engine book an earlier run made never goes on with no job to
+// follow or stop it).
+func TestResumeMappingReadErrorStopsTheEarlierBook(t *testing.T) {
+	t.Parallel()
+	for _, c := range []struct {
+		name  string
+		fails int32
+	}{{"a blip", 1}, {"failing", 100}} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			db, err := store.Open(ctx, ":memory:")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = db.Close() })
+			if err := db.RecordClaim(ctx, store.ServerJob{ID: 1, Kind: Kind, Attempt: 1}); err != nil {
+				t.Fatal(err)
+			}
+			b, err := db.CreateMappedBook(ctx, store.NewBook{SourcePath: "/lib/b", WorkDir: t.TempDir(), Title: "b",
+				ContribMode: store.ContribModeIssue}, store.GenerateBook{ServerJobID: 1, LibraryID: 1, RelPath: "b"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = db.SetBookState(ctx, b.ID, "asr", "", "", "")
+			sched := scheduler.New(db, events.NewHub(8), scheduler.NewStubExecutor(0, 0), 1, "", false)
+			h := New(Options{DB: db, RetentionDays: 30, Poll: time.Millisecond, Log: slog.New(slog.DiscardHandler),
+				Engine: func() Engine { return sched }})
+			var fails atomic.Int32
+			fails.Store(c.fails)
+			h.readMapping = func(ctx context.Context, id int64) (store.GenerateBook, error) {
+				if fails.Add(-1) >= 0 {
+					return store.GenerateBook{}, errors.New("database is locked")
+				}
+				return db.GetGenerateBook(ctx, id)
+			}
+			lib := int64(1)
+			mapped, resumed, err := h.resumeMapping(ctx, jobs.Job{ID: 1, Kind: Kind, Attempt: 1, LibraryID: &lib})
+			got, gerr := db.GetBook(ctx, b.ID)
+			if gerr != nil {
+				t.Fatal(gerr)
+			}
+			if c.fails == 1 {
+				if err != nil || !resumed || mapped.BookID == nil || *mapped.BookID != b.ID || scheduler.IsCancelled(got) {
+					t.Fatalf("a blip = %+v %v %v, cancelled %v; want the mapping resumed", mapped, resumed, err,
+						scheduler.IsCancelled(got))
+				}
+				return
+			}
+			if err == nil || !scheduler.IsCancelled(got) {
+				t.Fatalf("failing = %v, cancelled %v; want the error and the earlier book stopped", err, scheduler.IsCancelled(got))
+			}
+		})
+	}
 }
 
 // ShareOff answers true when any share job following the book is off, even
@@ -1201,12 +1394,12 @@ func TestShareOffAnyJobOffWinsOverOneUnasked(t *testing.T) {
 	h := New(Options{DB: db, WorkRoot: t.TempDir()})
 	unasked := map[int64]error{1: jobs.ErrShareNotRunning}
 	h.AskThrough(fakeAsker{off: map[int64]bool{2: true}, errs: unasked})
-	if off, err := h.ShareOff(ctx, b.ID, true); !off || err != nil {
-		t.Fatalf("one job off after one that couldn't be asked = %v %v, want true", off, err)
+	if why, err := h.ShareOff(ctx, b.ID, true); why != ShareSkippedContributionsOff || err != nil {
+		t.Fatalf("one job off after one that couldn't be asked = %q %v, want contributions_off", why, err)
 	}
 	h.AskThrough(fakeAsker{errs: unasked})
-	if off, err := h.ShareOff(ctx, b.ID, true); off || !errors.Is(err, jobs.ErrShareNotRunning) {
-		t.Fatalf("none off, one couldn't be asked = %v %v, want ErrShareNotRunning", off, err)
+	if why, err := h.ShareOff(ctx, b.ID, true); why != "" || !errors.Is(err, jobs.ErrShareNotRunning) {
+		t.Fatalf("none off, one couldn't be asked = %q %v, want ErrShareNotRunning", why, err)
 	}
 }
 

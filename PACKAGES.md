@@ -924,7 +924,15 @@ internal/
             couldn't be read, parks the book share_unconfirmed (its own code: the
             server doesn't word it as a missing GitHub sign-in, nor announce a
             blip; ShareUnconfirmedMsg or ShareUnreadMsg, retry_at
-            ShareUnconfirmedRetry) and nothing is filed. runAgent's budget preflight gained the
+            ShareUnconfirmedRetry) and nothing is filed. Config.ShareOff answers
+            why a book stays local ("" while it shares): contributions_off, or
+            no_share_job for an issue-mode book no open generate-and-share job
+            follows (fail closed: a fault left it running alone, so nothing can
+            say its share still stands). A book that turns local on that answer
+            is kept so in the store with why (store.DB.KeepBookLocal,
+            books.share_skipped), so its job's result says why, even when only
+            this run's Reporter had heard share_off; a write that fails still
+            files nothing now. runAgent's budget preflight gained the
             MONTHLY half (checkMonthlyBudget, Config.MonthlyBudgetUSD): this calendar
             month's (UTC, MonthBounds) spend across every book, superseded runs and
             deleted books' runs included (store.SumBudgetCostSince), at or over the cap
@@ -1607,9 +1615,11 @@ internal/
             turned back, updated_at left alone) while its row says share_off, written
             in the same transaction as RecordClaim, SetServerJobShareOff (for the
             attempt whatever its state: an answer read after a cancel still counts)
-            and the mapping (PutGenerateBook, ContinueChapters, ContinueReadalong), so
-            books.contrib_mode is the one truth the contributing stage and SubmitCore
-            read.
+            and the mapping (PutGenerateBook, CreateMappedBook, ContinueChapters,
+            ContinueReadalong), so books.contrib_mode is the one truth the
+            contributing stage and SubmitCore read. CreateMappedBook inserts a
+            generate job's engine book and its mapping in one transaction (a crash
+            between them left a book that no job followed).
             0017 (bridge#50, bridge#80) adds audible_accounts.push_at/push_error: the
             push loop's health in columns of its own, so sync_at/sync_error are the
             audible.sync job's alone (AudibleSyncOK and AudibleSyncFailed take the side,
@@ -1621,6 +1631,12 @@ internal/
             ResetAudiblePushCursor (the server refused the cursor: push_cursor '' with
             push_from kept) until SetAudiblePushCursor records a read that reached the
             feed's end; a remap clears it with the cursor.
+            0019 adds books.share_skipped (Book.ShareSkipped: why a book that was to
+            be shared was kept local, '' otherwise): contributions_off where
+            keepSharedOffLocal turns it, the contributing stage's answer
+            (contributions_off or no_share_job) through KeepBookLocal (never a done
+            or local book, updated_at left alone); ContinueChapters clears it with
+            the mode it sets.
   state/    per-book pipeline state machine: table-driven states/lanes/transitions,
             CanStart/NextState guards, the audit fix-loop cap. Pure, no I/O. M6 added
             ParkCode (typed park reasons - M7 added contrib_unavailable, core_needed,
@@ -3400,13 +3416,17 @@ internal/
             open generate-and-share job following the book report now through the
             runner (AskThrough, jobs.Runner.ShareOff; a job waiting for its lane
             slot included), its answer heard as any other: the first job with its
-            share off answers it, an answer that stopped the job included when it
-            carried share_off, and it errors when one couldn't be asked; without
-            ask only what is known here answers). A later
+            share off answers contributions_off, an answer that stopped the job
+            included when it carried share_off, and it errors when one couldn't be
+            asked; without ask only what is known here answers; a book no open
+            share job follows, a contribute=local job's or none, answers
+            no_share_job and stays local, nobody asked). A later
             run of the job that finds its engine book local keeps the share dropped
-            (the module on again since). The result says share_skipped
-            "contributions_off" for a book kept local unless something was filed (the
-            console words it).
+            (the module on again since). The result says share_skipped for a book
+            kept local unless something was filed: the book's own reason
+            (books.share_skipped: no_share_job when the stage found no run of the
+            job to ask), else "contributions_off" (the console words both, an
+            unknown one plainly).
             prepare: the library from the
             registry; waitMapped needs its check mapped AND writable at the mount the
             Bridge uses NOW (a new job fails otherwise; a resumed one parks
@@ -3433,7 +3453,11 @@ internal/
             awaitChaptersGivingWay asks a chapters job to give way at once; the new book takes its identity from the server's book
             block (identity_sources "server"), its work id from params else the
             server's metadata cache, kind ebook with an epub, contrib_mode from the
-            params; generate_books maps the job to it. RESUME: a mapping is the job's
+            params; generate_books maps the job to it in the same write
+            (store.CreateMappedBook). RESUME: a mapping that can't be read is tried
+            again (stopTries, a poll apart); a job that still can't read it, or is
+            cancelled meanwhile, releases the earlier run's book as Abandon does
+            before it fails. A mapping is the job's
             own only for the same library AND path (the server's ids repeat across
             servers and reinstalls, and following another book's run would write its
             sidecars into this one); otherwise the old book is stopped and a new one
@@ -3467,7 +3491,9 @@ internal/
             recorded (ended_at), a book that didn't finish is cancelled (stopBook
             leaves a done or failed one alone: a cancel would overwrite its error,
             one failed or done between its read and the cancel's write included,
-            store.ErrSettled),
+            store.ErrSettled; a cancel that fails is tried stopTries (3) times, a
+            poll apart, then the book is kept local, no_share_job, so a book that
+            runs on alone never files),
             and retention 0 purges its transcripts now; a later attempt of the same
             job running here (Attempt higher) is left alone: the cancel and the end
             are guarded writes (store.StopGuard: SetBookStatusUnlessFollowed through

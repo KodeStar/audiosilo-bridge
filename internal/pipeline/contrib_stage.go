@@ -547,9 +547,13 @@ func (e *Executor) keepLocalIfTurned(ctx context.Context, book *store.Book, ask 
 // in an answer to one of its reports, which can be a keepalive away, so with
 // ask the stage has the server asked now and files nothing in between; without,
 // only what is known here answers (a job that can't be asked at all is an
-// error at once, with no request). A book whose mode can't be read, or whose
-// share the server couldn't be asked about, parks (share_unconfirmed) to look
-// again by itself: nothing is filed without both.
+// error at once, with no request). A book with no open share job following it
+// stays local too (fail closed: nothing can say its share still stands). A
+// book that turns local here is kept so in the store with why
+// (store.DB.KeepBookLocal), so its job's result can say why it wasn't shared;
+// a write that fails still files nothing now. A book whose mode can't be read,
+// or whose share the server couldn't be asked about, parks (share_unconfirmed)
+// to look again by itself: nothing is filed without both.
 func (e *Executor) askedLocal(ctx context.Context, id int64, ask bool) (bool, error) {
 	if e.db != nil {
 		now, err := e.db.GetBook(ctx, id)
@@ -563,11 +567,20 @@ func (e *Executor) askedLocal(ctx context.Context, id int64, ask bool) (bool, er
 	if e.shareOff == nil {
 		return false, nil
 	}
-	off, err := e.shareOff(ctx, id, ask)
+	why, err := e.shareOff(ctx, id, ask)
 	if err != nil {
 		return false, e.shareUnconfirmed(ctx, id, ShareUnconfirmedMsg, err)
 	}
-	return off, nil
+	if why == "" {
+		return false, nil
+	}
+	e.log.Info("contributing: the book's share is off; it stays local", "book", id, "why", why)
+	if e.db != nil {
+		if err := e.db.KeepBookLocal(ctx, id, why); err != nil {
+			e.log.Warn("contributing: recording the book as local failed", "book", id, "err", err)
+		}
+	}
+	return true, nil
 }
 
 // shareUnconfirmed is askedLocal's park over err (reason one of

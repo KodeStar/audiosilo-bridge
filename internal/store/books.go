@@ -171,6 +171,10 @@ type Book struct {
 	// ContribMode is this book's contribution mode ("" = the executor's configured
 	// contribution.mode; "local" | "issue"): a sidecars.generate job sets it.
 	ContribMode string
+	// ShareSkipped is why a book that was to be shared was kept local
+	// (migration 0019: ShareSkippedContributionsOff or ShareSkippedNoShareJob),
+	// "" while it shares as asked or was never to.
+	ShareSkipped string
 	// Goal is how far the book runs (migration 0005): "" the whole pipeline,
 	// "chapters" (state.GoalChapters) only until its chapters are found. Opaque
 	// here, as State is.
@@ -222,6 +226,10 @@ type NewBook struct {
 	State    string // "" defaults to queued
 	// ContribMode is the book's own contribution mode ("" = the configured one).
 	ContribMode string
+	// ShareSkipped is why a book that was to be shared was kept local
+	// (migration 0019: ShareSkippedContributionsOff or ShareSkippedNoShareJob),
+	// "" while it shares as asked or was never to.
+	ShareSkipped string
 	// Goal is how far the book runs ("" the whole pipeline, "chapters").
 	Goal string
 }
@@ -303,6 +311,37 @@ func marshalJSONDefault(v any, fallback string) (string, error) {
 // CreateBook inserts a queued book. It returns ErrDuplicate if source_path is
 // already tracked, so the API can report a per-item conflict.
 func (db *DB) CreateBook(ctx context.Context, nb NewBook) (Book, error) {
+	return insertBook(ctx, db.sql, nb)
+}
+
+// CreateMappedBook is CreateBook with server job g mapped to the new book
+// (PutGenerateBook) in the same transaction: a crash or a failed write between
+// the two never leaves an engine book that no job follows (it would run on with
+// nothing to ask about its share, nor to stop it). The book is returned as
+// inserted: a job that heard share_off has it local in the store
+// (keepSharedOffLocal), which a read of the book shows.
+func (db *DB) CreateMappedBook(ctx context.Context, nb NewBook, g GenerateBook) (Book, error) {
+	tx, err := db.sql.BeginTx(ctx, nil)
+	if err != nil {
+		return Book{}, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	b, err := insertBook(ctx, tx, nb)
+	if err != nil {
+		return Book{}, err
+	}
+	g.BookID = &b.ID
+	if err := putGenerateBook(ctx, tx, g); err != nil {
+		return Book{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Book{}, err
+	}
+	return b, nil
+}
+
+// insertBook is CreateBook's insert through ex (the database or a transaction).
+func insertBook(ctx context.Context, ex execer, nb NewBook) (Book, error) {
 	authors, err := marshalJSONDefault(nb.Authors, "[]")
 	if err != nil {
 		return Book{}, err
@@ -328,7 +367,7 @@ func (db *DB) CreateBook(ctx context.Context, nb NewBook) (Book, error) {
 		batchID = LegacyBatchID
 	}
 	now := timestamp(nowFn())
-	res, err := db.sql.ExecContext(ctx,
+	res, err := ex.ExecContext(ctx,
 		`INSERT INTO books
 		 (batch_id, source_path, work_dir, title, authors, narrators, series, series_pos, asin, isbn,
 		  identity_sources, work_id, kind, ebook_path, state, status, error, coverage, contrib_mode,
@@ -376,7 +415,7 @@ func (db *DB) CreateBook(ctx context.Context, nb NewBook) (Book, error) {
 
 const bookCols = `id, batch_id, source_path, work_dir, title, authors, narrators, series, series_pos,
 	asin, isbn, identity_sources, work_id, kind, ebook_path, state, status, error, coverage,
-	scratch_bytes, chapters, duration_sec, words, park_code, retry_at, contrib_mode, goal, created_at, updated_at`
+	scratch_bytes, chapters, duration_sec, words, park_code, retry_at, contrib_mode, share_skipped, goal, created_at, updated_at`
 
 func scanBook(sc interface{ Scan(...any) error }) (Book, error) {
 	var b Book
@@ -384,7 +423,7 @@ func scanBook(sc interface{ Scan(...any) error }) (Book, error) {
 	if err := sc.Scan(&b.ID, &b.BatchID, &b.SourcePath, &b.WorkDir, &b.Title, &authors, &narrators,
 		&b.Series, &b.SeriesPos, &b.ASIN, &b.ISBN, &idsrc, &b.WorkID, &b.Kind, &b.EbookPath,
 		&b.State, &b.Status, &b.Error, &coverage, &b.ScratchBytes, &b.Chapters, &b.DurationSec,
-		&b.Words, &b.ParkCode, &b.RetryAt, &b.ContribMode, &b.Goal, &b.CreatedAt, &b.UpdatedAt); err != nil {
+		&b.Words, &b.ParkCode, &b.RetryAt, &b.ContribMode, &b.ShareSkipped, &b.Goal, &b.CreatedAt, &b.UpdatedAt); err != nil {
 		return Book{}, err
 	}
 	if authors != "" {
@@ -698,7 +737,7 @@ func (db *DB) ContinueChapters(ctx context.Context, id int64, from, to string, n
 	defer func() { _ = tx.Rollback() }()
 	res, err := tx.ExecContext(ctx,
 		`UPDATE books SET goal='', source_path=COALESCE(NULLIF(?, ''), source_path), title=?, authors=?, narrators=?, series=?, series_pos=?, asin=?, isbn=?,
-		     identity_sources=?, contrib_mode=?, work_id=?, state=?, status='', error='', park_code='', retry_at='',
+		     identity_sources=?, contrib_mode=?, share_skipped='', work_id=?, state=?, status='', error='', park_code='', retry_at='',
 		     updated_at=?
 		  WHERE id=? AND goal!='' AND state=? AND (state='done' OR status='failed')
 		    AND NOT EXISTS (SELECT 1 FROM generate_books WHERE book_id=? AND swept_at!='')`,

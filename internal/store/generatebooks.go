@@ -21,9 +21,10 @@ type GenerateBook struct {
 	SweptAt     string
 }
 
-// PutGenerateBook records (or replaces) the engine book of a server job. A job
-// that maps to a new book is open again, so its end is cleared. A job that heard
-// share_off has the book local at once (keepSharedOffLocal).
+// PutGenerateBook records (or replaces) the engine book of a server job: a book
+// that exists already (a new one is mapped as it is made, CreateMappedBook). A
+// job that maps to a new book is open again, so its end is cleared. A job that
+// heard share_off has the book local at once (keepSharedOffLocal).
 func (db *DB) PutGenerateBook(ctx context.Context, g GenerateBook) error {
 	tx, err := db.sql.BeginTx(ctx, nil)
 	if err != nil {
@@ -68,11 +69,35 @@ func putGenerateBook(ctx context.Context, ex execer, g GenerateBook) error {
 // pipeline position, and a bump would reorder the Running list.
 func keepSharedOffLocal(ctx context.Context, ex execer, serverJobID int64) error {
 	_, err := ex.ExecContext(ctx,
-		`UPDATE books SET contrib_mode = ?2
+		`UPDATE books SET contrib_mode = ?2, share_skipped = ?3
 		  WHERE state <> 'done' AND contrib_mode <> ?2
 		    AND id IN (SELECT book_id FROM generate_books WHERE server_job_id = ?1)
 		    AND EXISTS (SELECT 1 FROM server_jobs WHERE id = ?1 AND share_off = 1 AND kind = 'sidecars.generate')`,
-		serverJobID, ContribModeLocal)
+		serverJobID, ContribModeLocal, ShareSkippedContributionsOff)
+	return err
+}
+
+// Book.ShareSkipped values: why a book that was to be shared was kept local.
+const (
+	// ShareSkippedContributionsOff: the server turned the share of a
+	// sidecars.generate job that follows the book off (its Contributions
+	// module off, server#218).
+	ShareSkippedContributionsOff = "contributions_off"
+	// ShareSkippedNoShareJob: the contributing stage found no open
+	// generate-and-share job following the book in issue mode, so nothing
+	// could say the share still stood (a fault left the book running with no
+	// job: a job's end that couldn't stop it, a lease that lapsed).
+	ShareSkippedNoShareJob = "no_share_job"
+)
+
+// KeepBookLocal turns engine book id local for why (a ShareSkipped value),
+// unless it is local already or done (a done book shared as asked). Like
+// keepSharedOffLocal it never turns a book back and leaves updated_at alone.
+// A book not found, done or local already is no error.
+func (db *DB) KeepBookLocal(ctx context.Context, id int64, why string) error {
+	_, err := db.sql.ExecContext(ctx,
+		`UPDATE books SET contrib_mode = ?2, share_skipped = ?3 WHERE id = ?1 AND state <> 'done' AND contrib_mode <> ?2`,
+		id, ContribModeLocal, why)
 	return err
 }
 
