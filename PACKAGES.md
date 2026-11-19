@@ -3515,7 +3515,8 @@ internal/
             The mapping is checked again before each section, before the cover
             and marker, and before the rename (recheck): not writable parks; a
             mapping moved to another mount fails not_writable (bridge#69: a
-            parked fetch gives its download-lane slot back with
+            parked fetch, or one waiting on a mapping check that doesn't stand
+            (mapping's unknown), gives its download-lane slot back with
             jobs.Reporter.Yield, so Audible imports and podcast downloads run
             while it waits, and takes one again with Reclaim once the mapping is
             back, then looks at the mapping again, since the slot's wait may be

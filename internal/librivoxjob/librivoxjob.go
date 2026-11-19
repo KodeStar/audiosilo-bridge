@@ -953,7 +953,9 @@ func (h *Handler) recheck(ctx context.Context, f *fetch, step string) error {
 // (strict) and parks a resumed one, or one past its download, not_writable
 // until it comes back.
 //
-// A parked fetch gives its download-lane slot back (jobs.Reporter.Yield), so
+// A parked fetch, or one waiting on a check that doesn't stand (the server
+// didn't answer it, or it is too old), gives its download-lane slot back
+// (jobs.Reporter.Yield), so
 // the Audible imports and podcast downloads that share the lane run while it
 // waits; once the mapping is back it takes a slot again (Reclaim) before it
 // writes anything, so downloads still go one at a time.
@@ -981,6 +983,12 @@ func (h *Handler) mapped(ctx context.Context, id int64, rep *jobs.Reporter, step
 			continue
 		case !checked || st.MountPath != mount:
 			h.report(rep, jobs.Progress{Step: step, Message: "Waiting for the library's mapping check"})
+			if !checked && st.Error != "" {
+				// A check that doesn't stand (the server didn't answer it, or
+				// it is too old) may wait out an outage: the lane is free
+				// meanwhile, as for a park.
+				rep.Yield()
+			}
 		case strict:
 			return link.Library{}, "", fail(CodeNotWritable, "%s", why)
 		default:
