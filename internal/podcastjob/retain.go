@@ -207,7 +207,8 @@ func (h *Retain) run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (
 		}
 		result.Deleted++
 		s.setIndexed(lib.ID, show, false)
-		if err := s.episodeRescan(ctx, lib.ID, candidate.Path); err != nil {
+		// Never a moved path: the server granted the deletion naming this folder.
+		if err := s.episodeRescan(ctx, lib.ID, candidate.Path, false); err != nil {
 			return nil, err
 		}
 		if err := podcast.CleanupTrash(root, transaction); err != nil {

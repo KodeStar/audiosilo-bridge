@@ -7,8 +7,11 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/kodestar/audiosilo-bridge/internal/jobs"
 	"github.com/kodestar/audiosilo-bridge/internal/link"
@@ -371,12 +374,18 @@ func TestFetchAndRetainFindAShowFolderRenamedByHand(t *testing.T) {
 	})
 	renameShow(t, h, "Fixture Show", "Renamed Show")
 	moved := "Renamed Show/" + strings.TrimPrefix(*fetch.Path, "Fixture Show/")
+	// The server knows the episode only at the old path until it reads the
+	// renamed folder: the fetch asks it to index the folder.
+	h.scan.knows = func(p string) bool { return strings.HasPrefix(p, "Fixture Show/") }
 	res, err := h.handler.FetchJob().Run(context.Background(), fetch, jobs.LocalReporter())
 	if err != nil {
 		t.Fatal(res, err)
 	}
 	if got := res.(fetchResult); got.Path != moved || got.Fetch.Bytes != int64(len(audio)) {
 		t.Fatal(got)
+	}
+	if asked := h.scan.last(); asked != "Renamed Show" {
+		t.Fatal("the server was not asked to index the renamed folder", asked)
 	}
 	if _, err := os.Stat(filepath.Join(h.mount, moved)); err != nil {
 		t.Fatal("the episode was not saved in the renamed folder", err)
@@ -805,5 +814,133 @@ func TestAFetchThatCannotMoveItsRecordWaits(t *testing.T) {
 	moved := "Renamed Show/" + strings.TrimPrefix(*job.Path, "Fixture Show/")
 	if got, err := s.episodeAt(context.Background(), root, lib, h.mount, *job.Path, params, job.ID); err != nil || got != moved {
 		t.Fatal(got, err)
+	}
+}
+
+// A show folder renamed by hand while its episode downloads (bridge#13): the
+// partial, its record and the episode's lock moved with the folder. The fetch
+// publishes the episode there from the bytes it has (one request, never from
+// byte 0 again), clears the record and the lock there, and asks the server to
+// index the show folder (the episode's new path it does not know yet).
+func TestAFetchFollowsItsShowRenamedMidDownload(t *testing.T) {
+	requireProbe(t)
+	h, job := audioHarness(t)
+	s := h.handler.s
+	if err := h.db.RecordClaim(context.Background(), store.ServerJob{ID: job.ID, Kind: FetchKind, LibraryID: job.LibraryID, Path: job.Path, Params: job.Params, Attempt: 1, ServerID: "server-1"}); err != nil {
+		t.Fatal(err)
+	}
+	h.scan.knows = func(p string) bool { return strings.HasPrefix(p, "Fixture Show/") }
+	audio := data(t, "chap-v24-reverse.mp3")
+	old := *job.Path
+	// written waits until the partial in the show folder holds n bytes.
+	written := func(n int64) bool {
+		for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+			matches, _ := filepath.Glob(filepath.Join(h.mount, "Fixture Show", podcast.TempPrefix+"*"))
+			if len(matches) == 1 {
+				if st, err := os.Stat(matches[0]); err == nil && st.Size() >= n {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	var calls atomic.Int32
+	setAudio(h, func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		if r.Header.Get("Range") != "" {
+			t.Error("the episode was downloaded again", r.Header.Get("Range"))
+		}
+		w.Header().Set("ETag", `"one"`)
+		w.Header().Set("Content-Length", strconv.Itoa(len(audio)))
+		w.WriteHeader(200)
+		w.Write(audio[:1000])
+		w.(http.Flusher).Flush()
+		if !written(1000) {
+			t.Error("the download did not start")
+			return
+		}
+		// The next part's write saves the download record first.
+		w.Write(audio[1000:2000])
+		w.(http.Flusher).Flush()
+		if !written(2000) {
+			t.Error("the download did not go on")
+			return
+		}
+		if _, ok := s.readCheckpoint(job); !ok {
+			t.Error("no download record before the rename")
+		}
+		if err := os.Rename(filepath.Join(h.mount, "Fixture Show"), filepath.Join(h.mount, "Renamed Show")); err != nil {
+			t.Error(err)
+		}
+		w.Write(audio[2000:])
+	})
+	res, err := h.handler.FetchJob().Run(context.Background(), job, jobs.LocalReporter())
+	if err != nil {
+		t.Fatal(res, err)
+	}
+	moved := "Renamed Show/" + strings.TrimPrefix(old, "Fixture Show/")
+	got := res.(fetchResult)
+	if got.Path != moved || got.Reused || got.Fetch.Bytes != int64(len(audio)) || calls.Load() != 1 {
+		t.Fatal(got, calls.Load())
+	}
+	root, err := os.OpenRoot(h.mount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	if !podcast.Matches(root, moved, &got.Fetch) {
+		t.Fatal("the episode was not published in the renamed folder")
+	}
+	if _, err := os.Lstat(filepath.Join(h.mount, "Fixture Show")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("the old folder came back", err)
+	}
+	if left, _ := filepath.Glob(filepath.Join(h.mount, "Renamed Show", podcast.TempPrefix+"*")); len(left) != 0 {
+		t.Fatal("a partial was left behind", left)
+	}
+	if _, err := root.Lstat(podcast.AttachmentPath(moved, ".fetch.lock")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("the episode's lock was left in the renamed folder", err)
+	}
+	dir, err := s.checkpointRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dir.Close()
+	if records, err := s.records(dir, 3); err != nil || len(records) != 0 {
+		t.Fatal("a download record was left", records, err)
+	}
+	if asked := h.scan.last(); asked != "Renamed Show" {
+		t.Fatal("the server was not asked to index the renamed folder", asked)
+	}
+}
+
+// An episode already fetched whose show folder was renamed by hand since is
+// taken as it is (reuse), and the server, which knows it only at the old
+// path, is asked to index the folder; one that never moved is indexed by its
+// own path.
+func TestAReusedFetchOfARenamedShowIndexesItsFolder(t *testing.T) {
+	requireProbe(t)
+	h, job := audioHarness(t)
+	audio := data(t, "chap-v24-reverse.mp3")
+	setAudio(h, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("ETag", `"one"`)
+		w.Write(audio)
+	})
+	if res, err := h.handler.FetchJob().Run(context.Background(), job, jobs.LocalReporter()); err != nil {
+		t.Fatal(res, err)
+	}
+	if asked := h.scan.last(); asked != *job.Path {
+		t.Fatal("an episode that never moved was not indexed by its path", asked)
+	}
+	renameShow(t, h, "Fixture Show", "Renamed Show")
+	h.scan.knows = func(p string) bool { return strings.HasPrefix(p, "Fixture Show/") }
+	res, err := h.handler.FetchJob().Run(context.Background(), job, jobs.LocalReporter())
+	if err != nil {
+		t.Fatal(res, err)
+	}
+	if got := res.(fetchResult); !got.Reused || got.Path != "Renamed Show/"+strings.TrimPrefix(*job.Path, "Fixture Show/") {
+		t.Fatal(got)
+	}
+	if asked := h.scan.last(); asked != "Renamed Show" {
+		t.Fatal("the server was not asked to index the renamed folder", asked)
 	}
 }

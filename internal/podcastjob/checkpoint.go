@@ -365,6 +365,34 @@ func journalStages(root *os.Root, c *checkpoint, st os.FileInfo) bool {
 	return err == nil && os.SameFile(st, staged)
 }
 func (s *service) fileLock(ctx context.Context, root *os.Root, episode string) (func(), error) {
+	l, err := s.lockEpisode(ctx, root, episode)
+	if err != nil {
+		return nil, err
+	}
+	return l.release, nil
+}
+
+// heldLock is an episode's .fetch.lock a job holds (lockEpisode).
+type heldLock struct {
+	root *os.Root
+	p    string
+	f    *os.File
+}
+
+func (l *heldLock) release() { releaseLock(l.root, l.p, l.f) }
+
+// follow points l at episode's lock when the file there is the one held: a
+// show folder renamed by hand took the lock with it, and letting go removes
+// it there rather than leave it in the folder.
+func (l *heldLock) follow(episode string) {
+	if p := podcast.AttachmentPath(episode, ".fetch.lock"); lockedAt(l.root, p, l.f) {
+		l.p = p
+	}
+}
+
+// lockEpisode takes episode's .fetch.lock (fileLock), as a heldLock a fetch
+// can follow to a show folder renamed by hand.
+func (s *service) lockEpisode(ctx context.Context, root *os.Root, episode string) (*heldLock, error) {
 	if err := podcast.EnsureDir(root, path.Dir(episode)+"/.audiosilo"); err != nil {
 		return nil, err
 	}
@@ -396,7 +424,7 @@ func (s *service) fileLock(ctx context.Context, root *os.Root, episode string) (
 			// we got may be on a file no longer at p (one another job has since
 			// made again and locked): only the file still at p counts.
 			if lockedAt(root, p, f) {
-				return func() { releaseLock(root, p, f) }, nil
+				return &heldLock{root, p, f}, nil
 			}
 			unlockFile(f)
 			_ = f.Close()

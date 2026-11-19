@@ -119,8 +119,8 @@ func (h *Fetch) Run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (a
 }
 
 // run fetches claimed's episode, moving claimed.Path to where the episode is
-// now when its show folder was renamed by hand (episodeAt), so Abandon clears
-// the record there.
+// now when its show folder was renamed by hand (episodeAt), before the
+// download or while it ran, so Abandon clears the record there.
 func (h *Fetch) run(parent context.Context, claimed *jobs.Job, rep *jobs.Reporter) (_ any, err error) {
 	s := h.s
 	job := *claimed
@@ -128,6 +128,7 @@ func (h *Fetch) run(parent context.Context, claimed *jobs.Job, rep *jobs.Reporte
 	if job.Path == nil || !podcast.ValidEpisodePath(*job.Path) || json.Unmarshal(job.Params, &params) != nil || !podcast.ValidID(params.ShowID) || !podcast.ValidID(params.EpisodeID) {
 		return nil, fail("episode_not_found", "The podcast episode was not found.")
 	}
+	named := *job.Path // the server's path, until its rescan of the show
 	waitCtx, cancel := context.WithTimeout(parent, ceiling)
 	defer cancel()
 	lib, mount, err := s.library(waitCtx, job, rep)
@@ -164,18 +165,18 @@ func (h *Fetch) run(parent context.Context, claimed *jobs.Job, rep *jobs.Reporte
 	if err := s.beforeWrite(lib, mount, path.Dir(*job.Path)); err != nil {
 		return nil, err
 	}
-	release, err := s.fileLock(parent, root, *job.Path)
+	lock, err := s.lockEpisode(parent, root, *job.Path)
 	if err != nil {
 		return nil, err
 	}
-	defer release()
+	defer lock.release()
 	pairing := s.pairHash()
 	f, e, err := s.fetchSnapshot(parent, root, lib, mount, *job.Path, params)
 	if err != nil {
 		return nil, err
 	}
 	if e.Fetch.Valid() && e.Fetch.DeletedAt == "" && podcast.Matches(root, e.Path, e.Fetch) {
-		return s.reuse(parent, root, lib, e, f.ShowID)
+		return s.reuse(parent, root, lib, e, f.ShowID, e.Path != named)
 	}
 	if _, err := root.Lstat(e.Path); !errors.Is(err, os.ErrNotExist) {
 		return nil, fail("write_failed", "An unverified episode file needs administrator repair.")
@@ -209,8 +210,19 @@ func (h *Fetch) run(parent context.Context, claimed *jobs.Job, rep *jobs.Reporte
 	if err != nil {
 		return nil, err
 	}
+	// A show folder renamed by hand while the episode downloaded took the
+	// partial and the episode's lock with it: the episode is published where
+	// the show is now, its record following it (episodeAt), never downloaded
+	// again.
+	if p, err := s.episodeAt(ctx, root, lib, mount, e.Path, params, job.ID); err != nil {
+		return nil, err
+	} else if p != e.Path {
+		e.Path, c.Path = p, p
+		job.Path, claimed.Path = &p, &p
+		lock.follow(p)
+	}
 	rep.Progress(jobs.Progress{Step: "probing", Message: "Checking episode audio"})
-	rd, err := podcast.OpenRegular(root, path.Dir(e.Path)+"/"+c.Temp)
+	rd, err := podcast.OpenRegular(root, c.partialName())
 	if err != nil {
 		return nil, err
 	}
@@ -287,7 +299,7 @@ func (h *Fetch) run(parent context.Context, claimed *jobs.Job, rep *jobs.Reporte
 	committed = true
 	s.setIndexed(lib.ID, path.Dir(e.Path), false)
 	rep.Progress(jobs.Progress{Step: "indexing", Message: "Indexing the episode"})
-	if err := s.episodeRescan(ctx, lib.ID, e.Path); err != nil {
+	if err := s.episodeRescan(ctx, lib.ID, e.Path, e.Path != named); err != nil {
 		return nil, err
 	}
 	n := 0
@@ -381,8 +393,8 @@ func sameFetch(a, b *podcast.Fetch) bool {
 	}
 	return *a == *b
 }
-func (s *service) reuse(ctx context.Context, root *os.Root, lib link.Library, e podcast.Episode, showID string) (any, error) {
-	if err := s.episodeRescan(ctx, lib.ID, e.Path); err != nil {
+func (s *service) reuse(ctx context.Context, root *os.Root, lib link.Library, e podcast.Episode, showID string, moved bool) (any, error) {
+	if err := s.episodeRescan(ctx, lib.ID, e.Path, moved); err != nil {
 		return nil, err
 	}
 	n := 0
@@ -392,12 +404,21 @@ func (s *service) reuse(ctx context.Context, root *os.Root, lib link.Library, e 
 	}
 	return fetchResult{lib.ID, e.Path, showID, e.ID, *e.Fetch, n, true}, nil
 }
-func (s *service) episodeRescan(ctx context.Context, id int64, p string) error {
+
+// episodeRescan asks the server to index episode p. One whose show folder was
+// renamed by hand since the server named it (moved) is a path the server
+// does not know until it reads the folder again (it answers not_indexable),
+// so the show folder is rescanned instead.
+func (s *service) episodeRescan(ctx context.Context, id int64, p string, moved bool) error {
 	srv := s.o.Server()
 	if srv == nil {
 		return fail("index_failed", "The episode could not be indexed. Retry the job.")
 	}
-	if _, err := srv.RescanPodcast(ctx, id, p); err != nil {
+	target := p
+	if moved {
+		target = path.Dir(p)
+	}
+	if _, err := srv.RescanPodcast(ctx, id, target); err != nil {
 		return fail("index_failed", "The episode could not be indexed. Retry the job.")
 	}
 	s.setIndexed(id, path.Dir(p), true)
