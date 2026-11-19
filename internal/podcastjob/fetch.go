@@ -293,15 +293,33 @@ func (h *Fetch) run(parent context.Context, claimed *jobs.Job, rep *jobs.Reporte
 		s.adoptOwn(job, root, claimedAt, params, c.Temp)
 	}()
 	rep.Progress(jobs.Progress{Step: "resolving", Message: "Resolving the episode"})
-	received, err := s.download(ctx, b, &job, root, f, e, &c, tag, settle, follow, rep)
-	if err != nil {
-		return nil, err
-	}
-	// A show folder renamed by hand while the episode downloaded took the
-	// partial and the episode's lock with it: the episode is published where
-	// the show is now, its record following it, never downloaded again.
-	if err := follow(ctx); err != nil {
-		return nil, err
+	var received podcast.Fetch
+	for again := false; ; again = true {
+		received, err = s.download(ctx, b, &job, root, f, e, &c, tag, settle, follow, rep)
+		if err != nil {
+			return nil, err
+		}
+		// A show folder renamed by hand while the episode downloaded took the
+		// partial and the episode's lock with it: the episode is published where
+		// the show is now, its record following it, never downloaded again.
+		if err := follow(ctx); err != nil {
+			return nil, err
+		}
+		// A copy of the show folder made over it in place (cp into the same
+		// folder) rewrites the partial under the file the download holds open:
+		// the same file, so nothing above sees it, with other bytes. The
+		// partial is hashed again before the probe and the publication read it,
+		// and one that is not what was written is downloaded again from byte 0
+		// (once), rather than probed as broken audio or refused at publication.
+		if podcast.Holds(root, c.partialName(), received.Bytes, received.SHA256) {
+			break
+		}
+		if again {
+			return nil, fail("write_failed", "The episode download was changed on disk while it was saved.")
+		}
+		slog.Warn("podcasts: an episode's partial changed on disk while it downloaded; it is downloaded again", "partial", c.partialName())
+		s.clearCheckpoint(job, root, &c)
+		tag = ""
 	}
 	rep.Progress(jobs.Progress{Step: "probing", Message: "Checking episode audio"})
 	rd, err := podcast.OpenRegular(root, c.partialName())

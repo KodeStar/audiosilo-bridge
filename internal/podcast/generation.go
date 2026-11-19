@@ -113,21 +113,24 @@ func OpenRegularFile(root *os.Root, name string, flag int) (*os.File, error) {
 }
 
 func Matches(root *os.Root, name string, fetch *Fetch) bool {
-	if !fetch.Valid() {
-		return false
-	}
+	return fetch.Valid() && Holds(root, name, fetch.Bytes, fetch.SHA256)
+}
+
+// Holds reports whether name is a regular file of size bytes whose hex
+// sha256 is sum.
+func Holds(root *os.Root, name string, size int64, sum string) bool {
 	f, err := OpenRegular(root, name)
 	if err != nil {
 		return false
 	}
 	defer f.Close()
 	st, err := f.Stat()
-	if err != nil || st.Size() != fetch.Bytes {
+	if err != nil || st.Size() != size {
 		return false
 	}
 	h := sha256.New()
-	n, err := io.Copy(h, io.LimitReader(f, fetch.Bytes+1))
-	return err == nil && n == fetch.Bytes && hex.EncodeToString(h.Sum(nil)) == fetch.SHA256
+	n, err := io.Copy(h, io.LimitReader(f, size+1))
+	return err == nil && n == size && hex.EncodeToString(h.Sum(nil)) == sum
 }
 
 func AttachmentPath(episode, suffix string) string {

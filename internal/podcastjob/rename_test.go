@@ -1,6 +1,7 @@
 package podcastjob
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -1956,4 +1957,53 @@ func TestARecordNamedByPathAloneIsMigrated(t *testing.T) {
 	if _, err := os.Lstat(filepath.Join(dir, legacyRecordName(3, c.Path))); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("the old name was left", err)
 	}
+}
+
+// A copy of the show folder made over it in place (cp into the same folder)
+// while its episode downloads rewrites the partial under the file the fetch
+// holds open: the same file (no check by path sees it), the same size once
+// the download ends, other bytes. The fetch hashes the partial again before
+// it probes and publishes it and, finding it changed, downloads the episode
+// again from byte 0, publishing the episode's own bytes, never the copy's.
+func TestAFetchDownloadsAgainAPartialOverwrittenInPlace(t *testing.T) {
+	requireProbe(t)
+	h, job := audioHarness(t)
+	audio := data(t, "chap-v24-reverse.mp3")
+	show := filepath.Join(h.mount, "Fixture Show")
+	var calls atomic.Int32
+	setAudio(h, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("ETag", `"one"`)
+		w.Header().Set("Content-Length", strconv.Itoa(len(audio)))
+		w.WriteHeader(200)
+		if calls.Add(1) > 1 {
+			w.Write(audio)
+			return
+		}
+		w.Write(audio[:1000])
+		w.(http.Flusher).Flush()
+		if !partialAt(show, 1000) {
+			t.Error("the download did not start")
+			return
+		}
+		left := partials(show)
+		f, err := os.OpenFile(left[0], os.O_WRONLY|os.O_TRUNC, 0)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		f.Write(bytes.Repeat([]byte{0x55}, 1000))
+		f.Close()
+		w.Write(audio[1000:])
+	})
+	res, err := h.handler.FetchJob().Run(context.Background(), job, jobs.LocalReporter())
+	if got, ok := res.(fetchResult); err != nil || !ok || got.Fetch.Bytes != int64(len(audio)) || calls.Load() != 2 {
+		t.Fatal(res, err, calls.Load())
+	}
+	if saved, err := os.ReadFile(filepath.Join(h.mount, *job.Path)); err != nil || !bytes.Equal(saved, audio) {
+		t.Fatal("the published episode is not the host's", err)
+	}
+	if left := partials(show); len(left) != 0 {
+		t.Fatal("a partial was left behind", left)
+	}
+	noRecords(t, h.handler.s)
 }
