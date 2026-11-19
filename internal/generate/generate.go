@@ -474,8 +474,36 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 // filing the stage had under way when the answer came is not taken back
 // (finish reports what was filed). A lift that failed is tried again at the
 // next look. It reports whether it lifted a park (b is then as read before the
-// lift).
+// lift). A book kept local only because no share job followed it (no_share_job:
+// a lease that lapsed, a job's end that couldn't stop it) is shared again once
+// its job follows it again with its share on (owesShare): one not done yet is
+// turned back to issue mode (store.DB.ResumeShare), so its contributing stage
+// files it; a done one is filed by finish (shareOwed). A share_off still wins.
 func (h *Handler) keepShareLocal(ctx context.Context, eng Engine, r *run, b *store.Book) (lifted bool) {
+	if r.owesShare(b) {
+		if state.State(b.State) == state.Done {
+			return false // finish files it (shareOwed)
+		}
+		// Held, so no stage runs on the book meanwhile: a contributing stage that
+		// read it local would file it locally after the turn (and finish would
+		// then owe nothing). A stage running now leaves it to the next look.
+		release, ok := h.hold(b.ID)
+		if !ok {
+			return false
+		}
+		turned, err := h.o.DB.ResumeShare(ctx, r.job.ID, r.job.Attempt, b.ID)
+		release()
+		switch {
+		case err != nil:
+			// The share isn't dropped: the next look tries again.
+			h.o.Log.Warn("generate: sharing the engine book again failed", "job", r.job.ID, "book", b.ID, "err", err)
+			return false
+		case turned:
+			h.o.Log.Info("generate: the job follows its engine book again, so it is shared again", "job", r.job.ID, "book", b.ID)
+			return false
+		}
+		// A share_off on the book (another job's, or this job's since) still wins.
+	}
 	if r.shareSkipped == "" {
 		keptLocal := b != nil && b.ContribMode == store.ContribModeLocal
 		if r.params.Contribute != ContributeIssue || (!keptLocal && !r.rep.ShareOff()) {
@@ -486,12 +514,7 @@ func (h *Handler) keepShareLocal(ctx context.Context, eng Engine, r *run, b *sto
 		return false // it shared as asked
 	}
 	if r.shareSkipped == "" {
-		why := ShareSkippedContributionsOff
-		if b != nil && b.ShareSkipped != "" {
-			why = b.ShareSkipped
-		}
-		r.params.Contribute, r.shareSkipped = ContributeLocal, why
-		h.o.Log.Info("generate: this job's share is off; its results stay local", "job", r.job.ID, "why", why)
+		h.dropShare(r, b)
 	}
 	if b == nil || r.shareLifted || !state.IsParkedWith(b.Status, b.ParkCode, shareParks...) {
 		return false
@@ -509,6 +532,63 @@ func (h *Handler) keepShareLocal(ctx context.Context, eng Engine, r *run, b *sto
 	}
 	r.shareLifted = true
 	return true
+}
+
+// dropShare drops the run's share for good: its results stay local, and its
+// result says why (b's own store.Book.ShareSkipped when it has one and no
+// share_off was heard, else ShareSkippedContributionsOff).
+func (h *Handler) dropShare(r *run, b *store.Book) {
+	why := ShareSkippedContributionsOff
+	if b != nil && b.ShareSkipped != "" && !r.rep.ShareOff() {
+		why = b.ShareSkipped
+	}
+	r.params.Contribute, r.shareSkipped = ContributeLocal, why
+	h.o.Log.Info("generate: this job's share is off; its results stay local", "job", r.job.ID, "why", why)
+}
+
+// owesShare reports whether b was kept local only because no share job
+// followed it (store.ShareSkippedNoShareJob) while this run shares it: a
+// sidecars.generate run with contribute=issue whose share is still on (no
+// share_off heard, nothing dropped yet).
+func (r *run) owesShare(b *store.Book) bool {
+	return b != nil && r.kind == Kind && r.shareSkipped == "" && r.params.Contribute == ContributeIssue &&
+		!r.rep.ShareOff() && b.ContribMode == store.ContribModeLocal && b.ShareSkipped == store.ShareSkippedNoShareJob
+}
+
+// shareOwed files the share of a done engine book that was kept local only
+// because no share job followed it, now that this run does (owesShare): its
+// contributing stage ran in local mode, so the run files the sidecars itself as
+// sidecars.contribute does (shareConfirmed: the server asked just before),
+// once the store agrees the share stands (store.DB.ShareResumable: a share_off
+// on the book still wins), then records the book shared (store.DB.ResumeShare).
+// It reports whether it filed; a book whose share doesn't stand is dropped as
+// keepShareLocal drops it.
+func (h *Handler) shareOwed(ctx context.Context, r *run, b store.Book) (bool, error) {
+	ok, err := h.o.DB.ShareResumable(ctx, r.job.ID, r.job.Attempt, b.ID)
+	if err != nil {
+		return false, err
+	}
+	var sharer Sharer
+	if h.o.Sharer != nil {
+		sharer = h.o.Sharer()
+	}
+	if !ok || sharer == nil {
+		h.dropShare(r, &b)
+		return false, nil
+	}
+	h.o.Log.Info("generate: the job follows its engine book again, so it files the share", "job", r.job.ID, "book", b.ID)
+	r.rep.Progress(jobs.Progress{Step: stepSharing, Message: "Sharing with the community", Total: 1})
+	if _, err := h.shareConfirmed(ctx, r, sharer, b.ID, ContributeParams{WorkID: b.WorkID}); err != nil {
+		if errors.Is(err, errShareOffNow) {
+			h.dropShare(r, nil)
+			return false, nil
+		}
+		return false, err
+	}
+	if _, err := h.o.DB.ResumeShare(ctx, r.job.ID, r.job.Attempt, b.ID); err != nil {
+		h.o.Log.Warn("generate: recording the engine book shared failed", "job", r.job.ID, "book", b.ID, "err", err)
+	}
+	return true, nil
 }
 
 // shareParks are the contributing stage's parks over the share itself (a
@@ -1593,6 +1673,15 @@ func (h *Handler) finish(ctx context.Context, r *run, b store.Book, cost float64
 	s, err := h.write(ctx, r, b, true)
 	if err != nil {
 		return nil, err
+	}
+	if r.owesShare(&b) {
+		if _, err := h.shareOwed(ctx, r, b); err != nil {
+			if ctx.Err() != nil || errors.Is(err, jobs.ErrStopped) {
+				return nil, err
+			}
+			h.o.Log.Warn("generate: the share failed", "job", r.job.ID, "path", r.rel, "err", err)
+			return nil, shareError(err)
+		}
 	}
 	if r.descTried {
 		// The description step may have spent after the cost was read (a try that

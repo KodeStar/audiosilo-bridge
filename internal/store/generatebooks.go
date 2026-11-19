@@ -101,6 +101,47 @@ func (db *DB) KeepBookLocal(ctx context.Context, id int64, why string) error {
 	return err
 }
 
+// shareResumableSQL holds when engine book ?3 was kept local only because no
+// share job followed it (ShareSkippedNoShareJob, ?5), attempt ?2 of server job
+// ?1 follows it again (its mapping open, its row running under that attempt)
+// with its share on, and no sidecars.generate job mapped to the book has
+// share_off (a share_off always wins).
+const shareResumableSQL = `id = ?3 AND share_skipped = ?5
+		    AND EXISTS (SELECT 1 FROM generate_books g JOIN server_jobs j ON j.id = g.server_job_id
+		                 WHERE g.server_job_id = ?1 AND g.book_id = ?3 AND g.ended_at = '' AND j.state = 'running'
+		                   AND j.attempt = ?2 AND j.share_off = 0 AND j.kind = 'sidecars.generate')
+		    AND NOT EXISTS (SELECT 1 FROM generate_books g JOIN server_jobs j ON j.id = g.server_job_id
+		                     WHERE g.book_id = ?3 AND j.share_off = 1 AND j.kind = 'sidecars.generate')`
+
+// ShareResumable reports whether engine book bookID, kept local because no
+// share job followed it, may be shared again by attempt of server job jobID
+// (shareResumableSQL; the caller checks the job's params): a done book's
+// share, which its stage can't file any more, is filed by the job itself
+// before ResumeShare records it.
+func (db *DB) ShareResumable(ctx context.Context, jobID int64, attempt int, bookID int64) (bool, error) {
+	var ok bool
+	err := db.sql.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM books WHERE `+shareResumableSQL+`)`,
+		jobID, attempt, bookID, ContribModeIssue, ShareSkippedNoShareJob).Scan(&ok)
+	return ok, err
+}
+
+// ResumeShare is the one way back from ShareSkippedNoShareJob: engine book
+// bookID is to be shared again (contrib_mode issue, share_skipped cleared)
+// while shareResumableSQL holds for attempt of server job jobID, which shares
+// it (the caller checks the job's params). A book kept local for any other
+// reason is never turned back. Like KeepBookLocal it leaves updated_at alone.
+// It reports whether the book turned.
+func (db *DB) ResumeShare(ctx context.Context, jobID int64, attempt int, bookID int64) (bool, error) {
+	res, err := db.sql.ExecContext(ctx,
+		`UPDATE books SET contrib_mode = ?4, share_skipped = '' WHERE `+shareResumableSQL,
+		jobID, attempt, bookID, ContribModeIssue, ShareSkippedNoShareJob)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
 // GetGenerateBook returns a server job's engine book mapping, or ErrNotFound.
 func (db *DB) GetGenerateBook(ctx context.Context, serverJobID int64) (GenerateBook, error) {
 	var (

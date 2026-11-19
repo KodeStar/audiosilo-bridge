@@ -115,6 +115,32 @@ func TestContributeJobAsksBeforeFiling(t *testing.T) {
 	}
 }
 
+// An answer just before filing that carries share_off without stopping the
+// job (as a sidecars.generate run's answers do, shareOwed) files nothing
+// either (denied).
+func TestShareConfirmedFilesNothingOnShareOff(t *testing.T) {
+	t.Parallel()
+	hr := newHarness(t)
+	hr.generated(95)
+	s := &fakeSharer{}
+	hr.srv.set(func() {
+		hr.srv.atStep[96] = func(f *fakeServer, step string) {
+			if step == stepSharing {
+				f.shareOff[96] = true
+			}
+		}
+	})
+	hr.srv.addContribute(96, "Author/Book", `{}`)
+	stop := hr.shareRunner(s, func(context.Context) error { return nil })
+	defer stop()
+	hr.waitFor("failed", func() bool { st, _ := hr.srv.final(96); return st == link.StateFailed })
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.calls) != 0 {
+		t.Fatalf("share calls = %v, want none after a share_off answer", s.calls)
+	}
+}
+
 // A share whose server can't be asked just before filing files nothing: the
 // job parks share_unconfirmed and asks again, filing once the server answers
 // (denied while it can't, allowed after).

@@ -159,7 +159,8 @@ const stepSharing = "sharing"
 // confirms the share still stands: it is asked (Reporter.Refresh) just before
 // filing, as the server stops a share whose Contributions module was turned
 // off only in an answer to the job's next report, which can be a keepalive
-// away. An answer that stopped the job files nothing (the job ends); a server
+// away. An answer that stopped the job, or carried share_off (errShareOffNow),
+// files nothing (the job ends); a server
 // that couldn't be asked parks the job share_unconfirmed and asks again every
 // Recheck, or at once on Retry, filing nothing meanwhile.
 func (h *Handler) shareConfirmed(ctx context.Context, r *run, sharer Sharer, bookID int64,
@@ -170,6 +171,12 @@ func (h *Handler) shareConfirmed(ctx context.Context, r *run, sharer Sharer, boo
 			return pipeline.ShareResult{}, err
 		}
 		err = r.rep.Refresh(ctx)
+		if err == nil && r.rep.ShareOff() {
+			// A sidecars.generate run filing a share it owes (shareOwed) hears
+			// share_off without being stopped: nothing is filed.
+			release()
+			return pipeline.ShareResult{}, errShareOffNow
+		}
 		if err == nil {
 			if parked {
 				r.rep.Unpark()
@@ -196,6 +203,10 @@ func (h *Handler) shareConfirmed(ctx context.Context, r *run, sharer Sharer, boo
 		}
 	}
 }
+
+// errShareOffNow is shareConfirmed's answer when the server's answer carried
+// share_off: nothing was filed.
+var errShareOffNow = errors.New("the server turned the share off")
 
 // shareError words a share's failure for the console.
 func shareError(err error) error {

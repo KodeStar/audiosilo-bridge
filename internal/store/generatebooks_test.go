@@ -286,6 +286,91 @@ func TestKeepBookLocal(t *testing.T) {
 	}
 }
 
+// ResumeShare turns a book kept local with no_share_job back to issue once
+// its share job follows it again with its share on (allowed), and never while
+// a share_off stands on the book, its job doesn't follow it (mapping ended, or
+// another attempt), or the book is local for any other reason (denied).
+// ShareResumable answers the same, writing nothing.
+func TestResumeShare(t *testing.T) {
+	ctx := context.Background()
+	setup := func(t *testing.T) (*DB, int64) {
+		t.Helper()
+		db := open(t)
+		if err := db.RecordClaim(ctx, ServerJob{ID: 1, Kind: "sidecars.generate", Attempt: 2}); err != nil {
+			t.Fatal(err)
+		}
+		b, err := db.CreateMappedBook(ctx, NewBook{SourcePath: "/s/r", WorkDir: "/w/r", Title: "R", ContribMode: ContribModeIssue},
+			GenerateBook{ServerJobID: 1, LibraryID: 1, RelPath: "R"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := db.KeepBookLocal(ctx, b.ID, ShareSkippedNoShareJob); err != nil {
+			t.Fatal(err)
+		}
+		return db, b.ID
+	}
+	for _, c := range []struct {
+		name    string
+		prep    func(t *testing.T, db *DB, id int64)
+		attempt int
+		want    bool
+	}{
+		{"follows again", func(*testing.T, *DB, int64) {}, 2, true},
+		{"another attempt", func(*testing.T, *DB, int64) {}, 1, false},
+		{"its own share_off", func(t *testing.T, db *DB, _ int64) {
+			if err := db.SetServerJobShareOff(ctx, 1, 2); err != nil {
+				t.Fatal(err)
+			}
+		}, 2, false},
+		{"another job's share_off", func(t *testing.T, db *DB, id int64) {
+			if err := db.RecordClaim(ctx, ServerJob{ID: 2, Kind: "sidecars.generate", Attempt: 1, ShareOff: true}); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.PutGenerateBook(ctx, GenerateBook{ServerJobID: 2, BookID: &id, LibraryID: 1, RelPath: "R"}); err != nil {
+				t.Fatal(err)
+			}
+		}, 2, false},
+		{"mapping ended", func(t *testing.T, db *DB, _ int64) {
+			if err := db.EndGenerateBook(ctx, 1, 2, time.Now()); err != nil {
+				t.Fatal(err)
+			}
+		}, 2, false},
+		{"kept local for share_off", func(t *testing.T, db *DB, id int64) {
+			if _, err := db.sql.ExecContext(ctx, `UPDATE books SET share_skipped = ? WHERE id = ?`,
+				ShareSkippedContributionsOff, id); err != nil {
+				t.Fatal(err)
+			}
+		}, 2, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			db, id := setup(t)
+			c.prep(t, db, id)
+			ok, err := db.ShareResumable(ctx, 1, c.attempt, id)
+			if err != nil || ok != c.want {
+				t.Fatalf("ShareResumable = %v %v, want %v", ok, err, c.want)
+			}
+			if b, _ := db.GetBook(ctx, id); b.ContribMode != ContribModeLocal {
+				t.Fatalf("ShareResumable wrote the mode: %q", b.ContribMode)
+			}
+			turned, err := db.ResumeShare(ctx, 1, c.attempt, id)
+			if err != nil || turned != c.want {
+				t.Fatalf("ResumeShare = %v %v, want %v", turned, err, c.want)
+			}
+			b, err := db.GetBook(ctx, id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantMode, local := ContribModeIssue, !c.want
+			if local {
+				wantMode = ContribModeLocal
+			}
+			if b.ContribMode != wantMode || (b.ShareSkipped == "") == local {
+				t.Fatalf("book = %q %q, want mode %q", b.ContribMode, b.ShareSkipped, wantMode)
+			}
+		})
+	}
+}
+
 // CreateMappedBook writes the book and its job's mapping together (the job's
 // share_off applied in the same write); a book it can't insert (a duplicate
 // source) leaves no mapping behind.

@@ -1636,7 +1636,11 @@ internal/
             keepSharedOffLocal turns it, the contributing stage's answer
             (contributions_off or no_share_job) through KeepBookLocal (never a done
             or local book, updated_at left alone); ContinueChapters clears it with
-            the mode it sets.
+            the mode it sets. ResumeShare is the one way back from no_share_job
+            (contrib_mode issue, reason cleared), only while the share job's
+            attempt follows the book again (mapping open, row running) with
+            share_off unset and no other generate job mapped to the book has
+            share_off (shareResumableSQL; ShareResumable reads the same).
   state/    per-book pipeline state machine: table-driven states/lanes/transitions,
             CanStart/NextState guards, the audit fix-loop cap. Pure, no I/O. M6 added
             ParkCode (typed park reasons - M7 added contrib_unavailable, core_needed,
@@ -3422,7 +3426,14 @@ internal/
             share job follows, a contribute=local job's or none, answers
             no_share_job and stays local, nobody asked). A later
             run of the job that finds its engine book local keeps the share dropped
-            (the module on again since). The result says share_skipped for a book
+            (the module on again since), except no_share_job: a share job that
+            follows the book again (claimed again after a lease lapsed, or resumed)
+            with its share on shares it (keepShareLocal, owesShare): a book not done
+            turns back to issue under the engine's hold (store.ResumeShare) for its
+            stage to file, a done one is filed by finish as sidecars.contribute
+            files (shareOwed, shareConfirmed); a share_off still wins.
+            shareConfirmed files nothing on an answer carrying share_off
+            (errShareOffNow). The result says share_skipped for a book
             kept local unless something was filed: the book's own reason
             (books.share_skipped: no_share_job when the stage found no run of the
             job to ask), else "contributions_off" (the console words both, an
