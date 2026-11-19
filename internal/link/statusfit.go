@@ -21,8 +21,9 @@ const (
 
 // FitLibraries returns st with its library list cut so the whole body is at
 // most maxBytes and the list at most maxLibraries long, and how many mappings
-// were left out (0: st fits as it is, or the rest of its body is over
-// maxBytes alone so no cut can fit it, and is returned unchanged). What a job
+// were left out (0: st fits as it is, or no cut can fit it, the rest of its
+// body being over maxBytes alone or leaving room for none of its mappings,
+// and it is returned unchanged). What a job
 // needs is kept first: the writable libraries, then the mapped ones, then the
 // rest, each in list order; those kept stay in their list order. A server
 // without a library's mapping counts it as not mapped, so a cut library only
@@ -80,6 +81,10 @@ func FitLibraries(st Status, maxBytes, maxLibraries int) (Status, int) {
 			room -= size
 			keep[i], kept = true, kept+1
 		}
+	}
+	if kept == 0 {
+		// Room for none of them: an empty list is no cut either (as above).
+		return st, 0
 	}
 	out := make([]LibraryStatus, 0, kept)
 	for i, l := range st.Libraries {

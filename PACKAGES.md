@@ -2060,7 +2060,8 @@ internal/
             64 KiB, LegacyStatusLibraries 512) goes again at once cut to fit, the
             writable then mapped mappings kept first, so the reply still teaches
             the Bridge the server's libraries (it only learns them from a reply);
-            SizeRefusal says which refusals are the size's, by
+            a list no cut can fit (room for none of its mappings) is left whole,
+            never sent empty. SizeRefusal says which refusals are the size's, by
             the answer: a 413, a 400 with code too_large (no server sends it on
             this route yet), a 400 "too many libraries" (the older server's list
             bound, no code), or a 400 "invalid status" (a body the server couldn't

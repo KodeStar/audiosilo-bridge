@@ -87,6 +87,23 @@ func TestFitLibrariesLeavesAListNoCutCanFit(t *testing.T) {
 	}
 }
 
+// Room left for none of the mappings is no cut either: the list is left whole
+// rather than sent empty.
+func TestFitLibrariesLeavesAListWithRoomForNone(t *testing.T) {
+	st := statusWith(600)
+	base := st
+	base.Libraries = []LibraryStatus{}
+	st.UIURL = "http://" + strings.Repeat("h", LegacyStatusBytes-bodySize(t, base)-len("http://")-20)
+	base.UIURL = st.UIURL
+	if room := LegacyStatusBytes - bodySize(t, base); room < 0 || room > 40 {
+		t.Fatalf("the fixture leaves %d bytes, want a little room", room)
+	}
+	got, cut := FitLibraries(st, LegacyStatusBytes, LegacyStatusLibraries)
+	if cut != 0 || len(got.Libraries) != 600 {
+		t.Fatalf("cut %d, kept %d, want the list left whole", cut, len(got.Libraries))
+	}
+}
+
 // A refusal is the size's only when its answer says so: a 413, the server's
 // too_large code, an older server's "too many libraries", or "invalid status"
 // (a body the server couldn't read) for a body over the smallest byte bound.
