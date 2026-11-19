@@ -80,6 +80,16 @@ type ParamSealer interface {
 	SealParams(job Job) (stored json.RawMessage, err error)
 }
 
+// ClaimRowNeeder is a handler that runs a job only on a claim the store
+// recorded (NeedsClaimRow): a sidecars.generate share job's share_off lives on
+// its row, which keeps its books local (store.DB.SetServerJobShareOff), so a
+// share the server turned off after the claim could otherwise still be filed.
+// Such a claim whose write failed is abandoned like a sealed one, for the
+// server to hand out again.
+type ClaimRowNeeder interface {
+	NeedsClaimRow(job Job) bool
+}
+
 // SealFailure is a ParamSealer's failure that is safe to report: it becomes
 // the failed job's result ({"code","message"}) and its message the error.
 type SealFailure struct {
@@ -594,9 +604,10 @@ func (r *Runner) start(ctx context.Context, srv Server, job Job, wg *sync.WaitGr
 	if err := r.store.RecordClaim(context.WithoutCancel(ctx), store.ServerJob{ID: job.ID, Kind: job.Kind, LibraryID: job.LibraryID, Path: job.Path,
 		Params: job.Params, Attempt: job.Attempt, ServerID: serverID, Priority: job.Priority, ShareOff: job.shareOff}); err != nil {
 		r.log.Warn("bridge: recording a claim failed", "job", job.ID, "err", err)
-		if sealing {
+		if needer, ok := r.handlers[job.Kind].(ClaimRowNeeder); sealing || ok && needer.NeedsClaimRow(job) {
 			// Fail closed: without its row the sealed secret could be neither
-			// resumed nor released later. The server hands the job out again.
+			// resumed nor released later, and a share job's share_off could
+			// keep nothing local. The server hands the job out again.
 			r.abandon(ctx, job)
 			return
 		}

@@ -265,6 +265,15 @@ func (h *Handler) Kind() string { return Kind }
 // Lane is the pipeline lane.
 func (h *Handler) Lane() string { return jobs.LanePipeline }
 
+// NeedsClaimRow is true for a share job (contribute issue, or params that
+// don't read): its share_off is kept on the claim's row, which turns its books
+// local (jobs.ClaimRowNeeder), so it never runs on a claim the store couldn't
+// record.
+func (h *Handler) NeedsClaimRow(job jobs.Job) bool {
+	p, err := ParseParams(job.Params)
+	return err != nil || p.Contribute == ContributeIssue
+}
+
 // Result is what a done job reports (contract section 1). Description says
 // whether description.json was written with the others (Phase 1c); when it
 // wasn't, DescriptionError says why in a few plain words.

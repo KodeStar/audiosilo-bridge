@@ -1169,3 +1169,21 @@ func TestShareUnconfirmedIsASharePark(t *testing.T) {
 		t.Error("agent_validation_exhausted counts as a share park")
 	}
 }
+
+// A share job never runs on a claim the store couldn't record (its share_off
+// lives on the row): contribute issue, or params that don't read, need the
+// row; a local job doesn't.
+func TestNeedsClaimRowForShareJobs(t *testing.T) {
+	t.Parallel()
+	h := New(Options{WorkRoot: t.TempDir()})
+	for params, want := range map[string]bool{
+		`{"contribute":"issue"}`: true,
+		`{"contribute":"bogus"}`: true,
+		`{"contribute":"local"}`: false,
+		`{}`:                     false,
+	} {
+		if got := h.NeedsClaimRow(jobs.Job{Kind: Kind, Params: json.RawMessage(params)}); got != want {
+			t.Errorf("NeedsClaimRow(%s) = %v, want %v", params, got, want)
+		}
+	}
+}
