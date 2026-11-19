@@ -555,12 +555,16 @@ func TestRunCancel(t *testing.T) {
 func TestRunCancelUnclaimed(t *testing.T) {
 	t.Parallel()
 	r, dir := newTestRunner(t, agent.IDClaude)
+	// "At once" is well under both the claim timeout and cancelFor (a running
+	// job's wait for its cancel), so neither path passes for a withdrawal.
+	bound := testwait.Scaled(5 * time.Second)
 	r.claimTimeout = time.Hour
+	r.cancelFor = 2 * bound
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 	start := time.Now()
 	_, err := r.Run(ctx, agent.Request{Dir: stagedDir(t), Prompt: "p", Timeout: time.Minute})
-	if !errors.Is(err, context.DeadlineExceeded) || time.Since(start) > testwait.Scaled(5*time.Second) { // the claim timeout is an hour
+	if !errors.Is(err, context.DeadlineExceeded) || time.Since(start) > bound {
 		t.Fatalf("err = %v after %s", err, time.Since(start))
 	}
 	assertNoJobDirs(t, dir)
