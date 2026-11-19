@@ -2474,10 +2474,16 @@ internal/
             none. The exit's settle is bounded by one ceiling. Under the
             episode's lock its own record moves even when a duplicate claim's
             open row names it (adoptOwn, also after a relocation before the
-            download); one at the new path already wins and the old one is
-            cleared with its partial, never the partial the download is
-            writing (a stale record or another show's there must not delete
-            it). One the Bridge stops
+            download); one of the episode at the new path already wins and
+            the old one is cleared with its partial, never the partial the
+            download is writing. A record there that is not the episode's
+            (another show's, names swapped by hand, or one that cannot be
+            read) costs the fetch nothing of its own, nor does a records
+            folder that could not say whether one is there: the start asks
+            again once dropStaleCheckpoint cleared another identity's, so
+            the fetch resumes from its own partial, and the end once more,
+            so no record stays under a folder that is gone, where nothing
+            would clear it or sweep its partial. One the Bridge stops
             meanwhile keeps its record (read, not loaded, at the stop), and
             the resumed job goes on from the partial there. An episode path the
             server answers not_indexable (its show folder renamed since the

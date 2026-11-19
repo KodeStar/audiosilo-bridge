@@ -321,11 +321,19 @@ func moveRecord(dir *os.Root, lib int64, c checkpoint, to string) {
 // and the record is its own, though adoptCheckpoints leaves it to any open
 // row naming it (a duplicate claim of the episode): left at from, the fetch
 // would download again from byte 0 and the record would stay for a day. A
-// record at the new path already wins (adoptCheckpoints'), and the one at
-// from is cleared with its partial, rather than left; never live, the partial
-// the fetch is writing (follow's), whose next checkpoint records it there
-// (saveCheckpoint), as the record there may be a stale one or another show's
-// (names swapped by hand, an episode file name both shows use).
+// record of this episode at the new path already wins (adoptCheckpoints'),
+// and the one at from is cleared with its partial, rather than left; never
+// live, the partial the fetch is writing (follow's), whose next checkpoint
+// records it there (saveCheckpoint). Its partial is dropped for no other
+// record there: a stale one, another show's (names swapped by hand, an
+// episode file name both shows use) or one that cannot be read leaves the
+// fetch's own record and partial as they were, as does a records folder that
+// cannot say whether one is there. A fetch's start calls it again once the
+// record of another identity at its path is cleared (dropStaleCheckpoint), so
+// its own then moves in and the download resumes; its end calls it for a
+// record still at from, as nothing else reads one under a folder that is
+// gone (cleanOwned goes by a show's folder) and its partial, a recorded one,
+// would never be swept.
 func (s *service) adoptOwn(job jobs.Job, root *os.Root, from string, p fetchParams, live string) {
 	lib, to := *job.LibraryID, *job.Path
 	if from == to {
@@ -343,16 +351,29 @@ func (s *service) adoptOwn(job jobs.Job, root *os.Root, from string, p fetchPara
 	if _, err := dir.Lstat(recordName(lib, to)); errors.Is(err, os.ErrNotExist) {
 		moveRecord(dir, lib, saved, to)
 		return
+	} else if err != nil {
+		// Not known to be there: the record and its partial stay as they are
+		// (the fetch's end tries again), rather than go for a records folder
+		// that could not be read just now.
+		return
 	}
-	// Its partial is in the episode's folder now; one the record at the new
-	// path names too (a move that wrote there and could not remove this one)
-	// stays for that record, and the live one for the download writing it.
 	there, ok := s.readOwnRecord(dir, lib, to)
-	saved.Path = to
-	shared := ok && there.Temp == saved.Temp
-	if shared || live != "" && saved.Temp == live || s.dropPartial(root, &saved) {
-		_ = dir.Remove(recordName(lib, from))
+	saved.Path = to // its partial is in the episode's folder now
+	switch {
+	case ok && there.Temp == saved.Temp, live != "" && saved.Temp == live:
+		// The partial stays: for the record at the new path naming it too (a
+		// move that wrote there and could not remove this one), or for the
+		// download writing it. Only the record goes.
+	case ok && there.ShowID == p.ShowID && there.EpisodeID == p.EpisodeID:
+		if !s.dropPartial(root, &saved) {
+			return
+		}
+	default:
+		// Not this episode's record there: nothing of the fetch's own goes
+		// for it.
+		return
 	}
+	_ = dir.Remove(recordName(lib, from))
 }
 
 // runningRecords reports, by the open job rows, whether a download record of

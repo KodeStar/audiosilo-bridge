@@ -1271,6 +1271,89 @@ func TestAdoptOwnClearsAnOldRecordPastANewOne(t *testing.T) {
 	}
 }
 
+// A record at the new path that is not this episode's (another show's, the
+// names of two folders swapped by hand and an episode file name both use, or
+// one no job can read back) costs a fetch found elsewhere nothing of its own.
+// Another show's is cleared as a stale record at the fetch's path is, and the
+// fetch goes on from its own partial rather than from byte 0. Past one it
+// cannot read the fetch downloads again, and its old record follows at its
+// end, with its partial, rather than stay under the folder that is gone,
+// where nothing would ever clear it or sweep the partial it names.
+func TestAFetchKeepsItsPartialPastARecordNotItsOwn(t *testing.T) {
+	for _, unreadable := range []bool{false, true} {
+		requireProbe(t)
+		h, job := audioHarness(t)
+		s := h.handler.s
+		h.scan.knows = func(p string) bool { return strings.HasPrefix(p, "Fixture Show/") }
+		audio := data(t, "chap-v24-reverse.mp3")
+		root, err := os.OpenRoot(h.mount)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var params fetchParams
+		if err := json.Unmarshal(job.Params, &params); err != nil {
+			t.Fatal(err)
+		}
+		own := checkpoint{ServerHash: s.pairHash(), LibraryID: 3, ShowID: params.ShowID, EpisodeID: params.EpisodeID, Path: *job.Path, Temp: podcast.TempPrefix + nonce(), Offset: 2000, Total: int64(len(audio))}
+		if err := root.WriteFile("Fixture Show/"+own.Temp, audio[:2000], 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.saveCheckpoint(job, root, &own, `"one"`); err != nil {
+			t.Fatal(err)
+		}
+		moved := "Renamed Show/" + strings.TrimPrefix(*job.Path, "Fixture Show/")
+		there := jobs.Job{LibraryID: job.LibraryID, Path: &moved}
+		if unreadable {
+			dir, err := s.checkpointRoot()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := dir.WriteFile(recordName(3, moved), []byte("{"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			dir.Close()
+		} else {
+			other := checkpoint{ServerHash: s.pairHash(), LibraryID: 3, ShowID: "ffffffffffffffff", EpisodeID: params.EpisodeID, Path: moved, Temp: podcast.TempPrefix + nonce(), Offset: 6, Total: 100}
+			if err := s.saveCheckpoint(there, root, &other, `"two"`); err != nil {
+				t.Fatal(err)
+			}
+		}
+		root.Close()
+		renameShow(t, h, "Fixture Show", "Renamed Show")
+		var calls atomic.Int32
+		resume := resumeAt(t, audio)
+		setAudio(h, func(w http.ResponseWriter, r *http.Request) {
+			calls.Add(1)
+			if unreadable {
+				w.Header().Set("ETag", `"one"`)
+				w.Write(audio)
+				return
+			}
+			resume(w, r)
+		})
+		res, err := h.handler.FetchJob().Run(context.Background(), job, jobs.LocalReporter())
+		if got, ok := res.(fetchResult); err != nil || !ok || got.Path != moved || got.Fetch.Bytes != int64(len(audio)) || calls.Load() != 1 {
+			t.Fatal(unreadable, res, err, calls.Load())
+		}
+		if _, ok := s.readCheckpoint(job); ok {
+			t.Fatal("a record stayed under the folder that is gone", unreadable)
+		}
+		if !unreadable {
+			if left := partials(filepath.Join(h.mount, "Renamed Show")); len(left) != 0 {
+				t.Fatal("a partial was left behind", left)
+			}
+			noRecords(t, s)
+			continue
+		}
+		if saved, ok := s.readCheckpoint(there); !ok || saved.Temp != own.Temp {
+			t.Fatal("the fetch's old record did not follow the show", saved, ok)
+		}
+		if _, err := os.Lstat(filepath.Join(h.mount, "Renamed Show", own.Temp)); err != nil {
+			t.Fatal("the partial went for a record that could not be read", err)
+		}
+	}
+}
+
 // A show folder renamed by hand while the fetch waits to retry a host that
 // failed before any audio arrived (no partial yet): the retry finds the show
 // where it is now and makes its partial there, rather than fail in the folder

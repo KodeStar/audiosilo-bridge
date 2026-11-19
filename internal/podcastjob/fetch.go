@@ -193,6 +193,10 @@ func (h *Fetch) run(parent context.Context, claimed *jobs.Job, rep *jobs.Reporte
 	defer b.close()
 	defer func() { err = b.failure(ctx, err) }()
 	s.dropStaleCheckpoint(job, root, f.ShowID, e.ID)
+	// Again now that a record of another identity at the new path is gone
+	// (another show's, names swapped by hand): the fetch's own, left at the
+	// old path for it, moves in and the download resumes from its partial.
+	s.adoptOwn(job, root, claimedAt, params, "")
 	c, tag := s.loadCheckpoint(job, root, f.ShowID, e.ID)
 	// follow moves the fetch to its episode where a show folder renamed by
 	// hand has it now (episodeAt), taking the episode's lock and its own
@@ -258,6 +262,11 @@ func (h *Fetch) run(parent context.Context, claimed *jobs.Job, rep *jobs.Reporte
 			}
 			s.clearCheckpoint(job, root, &c)
 		}
+		// Its own record still at the path it was claimed at (the start could
+		// not take it past a record it could not read at the new path): it
+		// follows now, for a retry to resume or the day-old cleanup to clear
+		// where the show is, rather than stay under a folder that is gone.
+		s.adoptOwn(job, root, claimedAt, params, c.Temp)
 	}()
 	rep.Progress(jobs.Progress{Step: "resolving", Message: "Resolving the episode"})
 	received, err := s.download(ctx, b, &job, root, f, e, &c, tag, settle, rep)
