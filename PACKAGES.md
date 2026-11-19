@@ -3377,7 +3377,9 @@ internal/
             before prepare, which can wait while the engine runs it; a chapters or
             read-along run it continues), Reporter.OnShareOff waking the run
             (wakeOnShareOff: a re-admit at a contributing park before the run's next
-            look, an idle poll away, would otherwise file in issue mode), and a book parked
+            look, an idle poll away, would otherwise file in issue mode; once a run,
+            as every answer carries share_off while the module is off and a wake at
+            each had book_not_writable's save tried again at every report), and a book parked
             at contributing over the share (contrib_unavailable, share_unconfirmed,
             core_needed, core_pending) runs the stage again, once a run, whenever it parks (a stage
             running in issue mode when the answer came parks after it; a lift that

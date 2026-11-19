@@ -385,13 +385,17 @@ type run struct {
 // engine book at once when the job hears share_off (jobs.Reporter.OnShareOff),
 // not at its next look, which can be an idle poll away: the store has the
 // book local by then (store.DB.SetServerJobShareOff), and keepShareLocal, at
-// the look, lifts a share park and records why the share was skipped. stop
-// drops the call.
+// the look, lifts a share park and records why the share was skipped. Once a
+// run: the server says share_off in every answer while its module is off, and
+// a wake at each would have a park that waits on the same wake-up as a Retry
+// (book_not_writable's save) try again at every report, each try reporting
+// twice more. stop drops the call.
 func (h *Handler) wakeOnShareOff(r *run) (stop func()) {
 	if r.kind != Kind || r.params.Contribute != ContributeIssue {
 		return func() {}
 	}
-	r.rep.OnShareOff(func() { nudge(r.poke) })
+	var once sync.Once
+	r.rep.OnShareOff(func() { once.Do(func() { nudge(r.poke) }) })
 	return func() { r.rep.OnShareOff(nil) }
 }
 

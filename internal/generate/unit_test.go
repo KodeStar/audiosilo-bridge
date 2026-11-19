@@ -1116,8 +1116,10 @@ func TestAttachReadmitsTheCancelItRead(t *testing.T) {
 
 // A contribute=issue sidecars.generate run is woken the moment its job hears
 // share_off (the store has the book local by then), so its look lifts a share
-// park at once rather than an idle poll later. Denied: a run not asked to
-// share isn't woken, nor one whose call was dropped.
+// park at once rather than an idle poll later. Denied: an answer after the
+// first doesn't wake it again (every answer carries share_off while the
+// module is off), a run not asked to share isn't woken, nor one whose call was
+// dropped.
 func TestShareOffWakesTheRun(t *testing.T) {
 	t.Parallel()
 	h := New(Options{WorkRoot: t.TempDir()})
@@ -1141,6 +1143,10 @@ func TestShareOffWakesTheRun(t *testing.T) {
 	jobs.HearShareOff(r.rep)
 	if !woken(r) {
 		t.Fatal("the run wasn't woken to lift the park")
+	}
+	jobs.HearShareOff(r.rep)
+	if woken(r) {
+		t.Fatal("woken again by a later answer that carries share_off")
 	}
 	stop()
 	jobs.HearShareOff(r.rep)
