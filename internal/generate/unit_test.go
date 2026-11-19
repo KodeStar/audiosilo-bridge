@@ -1444,6 +1444,44 @@ func TestFollowedAgainSharesANoShareJobBook(t *testing.T) {
 			t.Fatalf("book mode %q, want shared", got.ContribMode)
 		}
 	})
+	t.Run("done, share_off heard while a try parks", func(t *testing.T) {
+		// A share_off heard while a try runs that then parks with a retry_at
+		// (a sign-in whose refresh failed) drops the share at once (allowed):
+		// the park's drain of a Retry pressed meanwhile takes the run's one
+		// wake-up for share_off, and the job would otherwise sit parked over a
+		// share that is off until the retry_at (denied).
+		t.Parallel()
+		db, h, sharer, b := setup(t, true, false)
+		r := newRun()
+		r.poke = make(chan struct{}, 1)
+		defer h.wakeOnShareOff(r)()
+		sharer.err = &scheduler.ParkError{Code: state.ParkContribUnavailable, Reason: pipeline.ContribUnrefreshedMsg,
+			Cause: contrib.ErrSignInUnrefreshed, RetryAfter: time.Now().Add(time.Hour)}
+		sharer.filing = func() { jobs.HearShareOff(r.rep) }
+		type owed struct {
+			filed bool
+			err   error
+		}
+		out := make(chan owed, 1)
+		go func() {
+			filed, err := h.shareOwed(ctx, r, b)
+			out <- owed{filed, err}
+		}()
+		select {
+		case o := <-out:
+			if o.err != nil || o.filed {
+				t.Fatalf("shareOwed = %v %v, want the share dropped", o.filed, o.err)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatalf("the job stayed parked over a share that is off (progress %+v)", r.rep.Last())
+		}
+		if r.shareSkipped != ShareSkippedContributionsOff || r.params.Contribute != ContributeLocal {
+			t.Fatalf("share skipped %q (contribute %q), want contributions_off, local", r.shareSkipped, r.params.Contribute)
+		}
+		if got := book(t, db, b.ID); got.ContribMode != store.ContribModeLocal {
+			t.Fatalf("book mode %q, want local", got.ContribMode)
+		}
+	})
 	t.Run("done, share_off", func(t *testing.T) {
 		t.Parallel()
 		db, h, sharer, b := setup(t, true, true)

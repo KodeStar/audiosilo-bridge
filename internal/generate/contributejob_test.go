@@ -27,6 +27,8 @@ type fakeSharer struct {
 	mu    sync.Mutex
 	err   error
 	calls []string
+	// filing, when set, runs as a share files, after its checks.
+	filing func()
 }
 
 func (f *fakeSharer) ShareChecked(_ context.Context, bookID int64, workID string, dims []string,
@@ -38,6 +40,9 @@ func (f *fakeSharer) ShareChecked(_ context.Context, bookID int64, workID string
 				return pipeline.ShareResult{}, cmp.Or(err, pipeline.ErrShareStopped)
 			}
 		}
+	}
+	if f.filing != nil {
+		f.filing()
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()

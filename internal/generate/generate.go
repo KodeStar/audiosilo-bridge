@@ -680,9 +680,15 @@ func (h *Handler) shareOwedParked(ctx context.Context, r *run, sharer Sharer, b 
 			r.rep.Unpark()
 			return err
 		}
+		// A share_off heard while the try ran, or before parkInLoop drained its
+		// wake-up (wakeOnShareOff, once a run), would leave the job parked over
+		// a share that is off until the retry_at: shareConfirmed drops it now.
+		if r.rep.ShareOff() {
+			continue
+		}
 		h.o.Log.Warn("generate: the share it owes waits", "job", r.job.ID, "book", b.ID, "code", park.Code, "err", err)
-		if h.parkInLoop(r, park, sharingParked, mark) {
-			continue // woken while the try ran
+		if h.parkInLoop(r, park, sharingParked, mark) || r.rep.ShareOff() {
+			continue // woken while the try ran, or share_off heard since
 		}
 		if err := h.recheckWait(ctx, r, park.RetryAfter); err != nil {
 			return err
