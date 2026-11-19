@@ -551,6 +551,7 @@ func (b *Bridge) beat(ctx context.Context) {
 	// outstanding claims alone while capability changes refresh them now.
 	b.runner.Wake()
 	interval := time.Duration(cfg.Mapping.CheckMinutes) * time.Minute
+	b.libs.SetInterval(interval)
 	if changed || b.libs.Due(time.Now(), interval) {
 		b.CheckMappings(ctx)
 	}

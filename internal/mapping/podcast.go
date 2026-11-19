@@ -136,11 +136,12 @@ func CheckPodcast(ctx context.Context, src MarkerSource, lib link.Library, mount
 	return st, nil
 }
 
-// unproven is an unanswered marker read of a folder that held no marker of the
-// library (CheckPodcast wrote one for the read, and removed it again): what
-// proved the library's last state is gone, so the Registry records the failure
-// instead of keeping that state, and podcast writes wait for a check the
-// server answers.
+// unproven is an unanswered check of a folder that no longer shows what proved
+// the library's last state: a podcast folder that held no marker of the library
+// (CheckPodcast wrote one for the read, and removed it again), or one without
+// the book or marker the last check found (proveKept). The Registry records the
+// failure instead of keeping that state, so writes wait for a check the server
+// answers.
 type unproven struct{ error }
 
 func (e unproven) Unwrap() error { return e.error }

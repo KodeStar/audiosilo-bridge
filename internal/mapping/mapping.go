@@ -6,8 +6,10 @@
 // (spike 3), so a library with no indexed book is never reported mapped. A
 // podcast library has no books: a marker the server reads back proves it
 // instead (CheckPodcast). A check the server doesn't answer (a 429, a 5xx, a
-// timeout) says nothing about the folder, so the Registry keeps the library's
-// last known state and asks again later, pacing its checks.
+// timeout) says nothing about the server's side, so the Registry keeps the
+// library's last known state while the folder still shows what that state's
+// check found there (proveKept), for at most KeptChecks check intervals, and
+// asks again later, pacing its checks.
 package mapping
 
 import (
@@ -186,7 +188,7 @@ func unsettled(err error) error {
 // with the server's sizes, and only then is the folder probed for writing.
 // unanswered is the server's failure when it gave no definite answer (a 429, a
 // 5xx, a timeout, no answer at all): the status says so too, and the Registry
-// keeps the library's last known state instead of it.
+// may keep the library's last known state instead of it (proveKept).
 func Check(ctx context.Context, src BookSource, lib link.Library, mount string) (st link.LibraryStatus, unanswered error) {
 	st = link.LibraryStatus{LibraryID: lib.ID, MountPath: mount}
 	info, err := os.Stat(mount)
@@ -251,16 +253,31 @@ const (
 	RetryMax   = 30 * time.Minute
 )
 
+// KeptChecks is how many check intervals a library's state stands once checks
+// go unanswered: counted from the last check that set it, after that the
+// library reads as failed, so writes wait for a check the server answers.
+const KeptChecks = 3
+
+// defaultInterval is config's default mapping.check_minutes, the interval
+// until SetInterval gives the configured one.
+const defaultInterval = 10 * time.Minute
+
+// ProofTimeout bounds the local look that lets an unanswered check keep a
+// state (proveKept): a hung mount fails it rather than holding the run.
+const ProofTimeout = 5 * time.Second
+
 // Registry holds the server's libraries (from the last heartbeat) and each
 // one's last check. It is safe for concurrent use.
 type Registry struct {
 	mu      sync.Mutex
 	libs    []link.Library
 	results map[int64]result
-	// spacing is CheckSpacing (shorter in tests). holdUntil is when Due may
-	// next start a run after one the server didn't answer, holdWhy that run's
-	// failure; held counts such runs in a row.
+	// spacing is CheckSpacing (shorter in tests); interval is the configured
+	// check interval, which a kept state's age is capped in. holdUntil is when
+	// Due may next start a run after one the server didn't answer, holdWhy
+	// that run's failure; held counts such runs in a row.
 	spacing   time.Duration
+	interval  time.Duration
 	holdUntil time.Time
 	holdWhy   string
 	held      int
@@ -290,8 +307,20 @@ type result struct {
 
 // NewRegistry returns an empty Registry.
 func NewRegistry() *Registry {
-	return &Registry{results: map[int64]result{}, pend: map[int64]bool{}, spacing: CheckSpacing}
+	return &Registry{results: map[int64]result{}, pend: map[int64]bool{}, spacing: CheckSpacing, interval: defaultInterval}
 }
+
+// SetInterval records the configured check interval (mapping.check_minutes):
+// a state unanswered checks keep stands for at most KeptChecks of it.
+func (r *Registry) SetInterval(d time.Duration) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.interval = d
+}
+
+// keepFor is how long after the check that set it a state may be kept (r.mu
+// held).
+func (r *Registry) keepFor() time.Duration { return KeptChecks * r.interval }
 
 // SetLibraries records the server's libraries and reports whether they differ
 // from the last list (a library added, removed, renamed or moved). Checks of
@@ -402,10 +431,21 @@ func (r *Registry) Entries(mount MountFunc) []Entry {
 // refreshes them, so asking again would only queue a second pass) and no hold
 // after an unanswered run (asking again at once would meet the same 429). Only
 // the heartbeat's periodic run waits for Due: an admin's mapping edit, Check
-// now and a changed library list call Check at once, hold or not.
+// now and a changed library list call Check at once, hold or not. Due also
+// ends the states unanswered checks have kept past keepFor, hold or not: the
+// library fails closed, so writes wait for a check the server answers.
 func (r *Registry) Due(now time.Time, interval time.Duration) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	for id, res := range r.results {
+		if !res.unanswered.IsZero() && now.Sub(res.at) >= r.keepFor() {
+			r.results[id] = result{status: link.LibraryStatus{
+				LibraryID: id, MountPath: res.status.MountPath,
+				Error: "the server hasn't answered a check of this mapping since " + res.at.Format(time.RFC3339) +
+					", so writes wait for one it answers",
+			}, at: now, retry: true}
+		}
+	}
 	if r.checking || now.Before(r.holdUntil) {
 		return false
 	}
@@ -453,10 +493,16 @@ func (r *Registry) Check(ctx context.Context, src BookSource, mount MountFunc, n
 		gen := r.gen
 		var libs []link.Library
 		listed := map[int64]bool{}
+		// prev: the state each library's check may keep (only this run records
+		// one, so it is still the state when the check ends).
+		prev := map[int64]link.LibraryStatus{}
 		for _, l := range r.libs {
 			listed[l.ID] = true
 			if len(ids) == 0 || slices.Contains(ids, l.ID) {
 				libs = append(libs, l)
+				if res, ok := r.results[l.ID]; ok {
+					prev[l.ID] = res.status
+				}
 			}
 		}
 		r.mu.Unlock()
@@ -471,6 +517,9 @@ func (r *Registry) Check(ctx context.Context, src BookSource, mount MountFunc, n
 			st, err := checkOne(ctx, src, pace, l, path, listed)
 			if ctx.Err() != nil {
 				break // cut short: it says nothing about the library or the server
+			}
+			if last, ok := prev[l.ID]; ok && err != nil {
+				st, err = proveKept(st, err, last) // a look at the folder: not under r.mu
 			}
 			r.mu.Lock()
 			if r.gen != gen {
@@ -584,15 +633,43 @@ func (m pacedMarkers) Marker(ctx context.Context, libraryID int64) (string, erro
 	return m.src.Marker(ctx, libraryID)
 }
 
+// proveKept lets a check the server didn't answer keep last, the library's
+// state at the same mount, only while the folder still shows what last's check
+// found there (its book's folder or file, or the podcast marker): a share that
+// isn't mounted leaves an empty folder at the mount, where a kept "mapped,
+// writable" would let an import create folders on the bare mount point. A
+// folder that doesn't show it (gone, or a mount that doesn't answer within
+// ProofTimeout) makes the failure unproven, so the Registry records it and
+// writes wait for a check the server answers. A kept state that wasn't mapped
+// lets nothing write, so it needs no proof.
+func proveKept(st link.LibraryStatus, unanswered error, last link.LibraryStatus) (link.LibraryStatus, error) {
+	var lost unproven
+	if !last.Mapped || last.MountPath != st.MountPath || errors.As(unanswered, &lost) {
+		return st, unanswered
+	}
+	full, err := SafeJoin(st.MountPath, last.CheckedPath)
+	if err == nil {
+		_, err = fsutil.StatWithin(full, ProofTimeout)
+	}
+	if err == nil {
+		return st, unanswered
+	}
+	st.Mapped, st.Writable = false, false
+	st.Error = "the folder no longer shows " + cmp.Or(last.CheckedPath, "itself") + ", which the last check found (" +
+		describeStatError(err) + "), and the server didn't answer this one"
+	return st, unproven{unanswered}
+}
+
 // record keeps a library's check (r.mu held). One the server didn't answer
 // (unanswered) leaves the last known state at the same mount in place, due
-// again after the hold; with none there it is recorded, so the page says why,
-// and so is one whose folder had lost the marker that proved the last state
-// (unproven).
+// again after the hold, for keepFor after the check that set it; with none
+// there it is recorded, so the page says why, and so is one past keepFor, and
+// one whose folder no longer showed what proved the last state (unproven).
 func (r *Registry) record(st link.LibraryStatus, unanswered error, at time.Time) {
 	prev, ok := r.results[st.LibraryID]
 	var lost unproven
-	if unanswered != nil && ok && prev.status.MountPath == st.MountPath && !errors.As(unanswered, &lost) {
+	if unanswered != nil && ok && prev.status.MountPath == st.MountPath && !errors.As(unanswered, &lost) &&
+		at.Sub(prev.at) < r.keepFor() {
 		r.markRetry(st.LibraryID, at)
 		return
 	}
@@ -612,7 +689,9 @@ func (r *Registry) markRetry(id int64, at time.Time) {
 // holdAfter sets when Due may next start a run (r.mu held): nothing to wait
 // for after a run the server answered throughout; after one it didn't
 // (unanswered), the answer's Retry-After, else RetryFirst doubling with each
-// such run in a row, at most RetryMax.
+// such run in a row, at most RetryMax. A failure without a Retry-After (a
+// manual check's, run through a hold) never shortens a longer hold in place:
+// only the server's own answer moves that.
 func (r *Registry) holdAfter(unanswered error, now time.Time) {
 	if unanswered == nil {
 		r.held, r.holdUntil, r.holdWhy = 0, time.Time{}, ""
@@ -630,7 +709,9 @@ func (r *Registry) holdAfter(unanswered error, now time.Time) {
 	if !ok {
 		wait = RetryMax // Backoff gives up past Max; a hold stops there
 	}
-	r.holdUntil, r.holdWhy = now.Add(wait), unanswered.Error()
+	if until := now.Add(wait); retry.RetryAfterSet || until.After(r.holdUntil) {
+		r.holdUntil, r.holdWhy = until, unanswered.Error()
+	}
 }
 
 // retryAfter is the wait a failure's answer asked for (its Retry-After), 0

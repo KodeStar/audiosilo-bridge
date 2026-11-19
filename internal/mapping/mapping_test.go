@@ -412,7 +412,7 @@ func TestUnansweredCheckKeepsLastState(t *testing.T) {
 			src := &scripted{book: &link.Book{Path: "Author/Book", Files: files}, err: map[int64]error{}}
 			r.Check(context.Background(), src, mount, func() time.Time { return at })
 			src.answer(1, tc.err)
-			later := at.Add(time.Hour)
+			later := at.Add(10 * time.Minute)
 			r.Check(context.Background(), src, mount, func() time.Time { return later })
 			st, ok := r.Status(1)
 			if !ok || !st.Mapped || !st.Writable || st.Error != "" {
@@ -441,7 +441,7 @@ func TestUnansweredCheckKeepsLastState(t *testing.T) {
 			src := &scripted{book: &link.Book{Path: "Author/Book", Files: files}, err: map[int64]error{}}
 			r.Check(context.Background(), src, mount, func() time.Time { return at })
 			src.answer(1, err)
-			later := at.Add(time.Hour)
+			later := at.Add(10 * time.Minute)
 			r.Check(context.Background(), src, mount, func() time.Time { return later })
 			if st, _ := r.Status(1); st.Mapped || st.Error == "" {
 				t.Fatalf("a definite answer kept the old state: %+v", st)
@@ -500,7 +500,7 @@ func TestRateLimitEndsTheRun(t *testing.T) {
 	src.calls = nil
 	src.mu.Unlock()
 	src.answer(2, &link.APIError{Status: http.StatusTooManyRequests, RetryAfter: 2 * time.Minute, RetryAfterSet: true})
-	later := at.Add(time.Hour)
+	later := at.Add(10 * time.Minute)
 	r.Check(context.Background(), src, mount, func() time.Time { return later })
 	if !slices.Equal(src.calls, []int64{1, 2}) {
 		t.Fatalf("asked for %v after the 429, want 1 and 2 only", src.calls)
@@ -570,7 +570,7 @@ func TestQueuedCheckFollowsARateLimitedPass(t *testing.T) {
 	mounts[2] = moved
 	mu.Unlock()
 	limited := &link.APIError{Status: http.StatusTooManyRequests, RetryAfter: 2 * time.Minute, RetryAfterSet: true}
-	later := at.Add(time.Hour)
+	later := at.Add(10 * time.Minute)
 	r.Check(context.Background(), &queueing{scripted: src, r: r, mount: mount, err: limited}, mount, func() time.Time { return later })
 	if !slices.Equal(src.calls, []int64{1, 2}) {
 		t.Fatalf("asked for %v, want 1 (the 429) then the queued 2, never 3", src.calls)
@@ -602,7 +602,7 @@ func TestRefusedTokenEndsThePass(t *testing.T) {
 	src.calls = nil
 	src.mu.Unlock()
 	src.answer(1, link.ErrUnauthorized)
-	later := at.Add(time.Hour)
+	later := at.Add(10 * time.Minute)
 	r.Check(context.Background(), src, mount, func() time.Time { return later })
 	if !slices.Equal(src.calls, []int64{1}) {
 		t.Fatalf("asked for %v with a refused token, want 1 only", src.calls)
@@ -664,7 +664,7 @@ func TestEntriesSayWhenACheckWentUnanswered(t *testing.T) {
 	}
 
 	src.answer(2, &link.APIError{Status: http.StatusTooManyRequests})
-	later := at.Add(time.Hour)
+	later := at.Add(10 * time.Minute)
 	r.Check(context.Background(), src, mount, func() time.Time { return later })
 	entries := r.Entries(mount)
 	if entries[0].UnansweredAt != nil || *entries[0].CheckedAt != later {
@@ -883,5 +883,116 @@ func TestForgetEndsTheOldLinksRun(t *testing.T) {
 	}
 	if r.held != 0 || !r.holdUntil.IsZero() {
 		t.Fatalf("the old link's 429 held the new link: %d, %v", r.held, r.holdUntil)
+	}
+}
+
+// An unanswered check keeps a book library's state only while the folder still
+// shows the book the last check found (allowed): an unmounted share leaves an
+// empty folder at the mount, and a kept "mapped, writable" there would let an
+// import create folders on the bare mount point (denied: the failure is
+// recorded and writes wait).
+func TestUnansweredCheckNeedsTheBook(t *testing.T) {
+	t.Parallel()
+	root, files := library(t)
+	mount := func(int64, string) (string, bool) { return root, true }
+	at := time.Date(2026, 11, 19, 10, 0, 0, 0, time.UTC)
+	r := NewRegistry()
+	r.SetLibraries([]link.Library{{ID: 1, Root: root}})
+	src := &scripted{book: &link.Book{Path: "Author/Book", Files: files}, err: map[int64]error{}}
+	r.Check(context.Background(), src, mount, func() time.Time { return at })
+	src.answer(1, &link.APIError{Status: http.StatusTooManyRequests, RetryAfter: time.Minute, RetryAfterSet: true})
+	r.Check(context.Background(), src, mount, func() time.Time { return at.Add(time.Minute) }, 1)
+	if st, _ := r.Status(1); !st.Mapped || !st.Writable {
+		t.Fatalf("allowed: a 429 with the book in place replaced the state: %+v", st)
+	}
+
+	if err := os.RemoveAll(filepath.Join(root, "Author")); err != nil {
+		t.Fatal(err)
+	}
+	r.Check(context.Background(), src, mount, func() time.Time { return at.Add(2 * time.Minute) }, 1)
+	st, ok := r.Status(1)
+	if !ok || st.Mapped || st.Writable || !strings.Contains(st.Error, "no longer shows Author/Book") {
+		t.Fatalf("denied: a 429 at an emptied folder kept the old state: %+v", st)
+	}
+	if e := r.Entries(mount)[0]; e.UnansweredAt != nil || *e.CheckedAt != at.Add(2*time.Minute) {
+		t.Fatalf("the failure isn't the check's own result: checked %v, unanswered %v", e.CheckedAt, e.UnansweredAt)
+	}
+	if !r.Due(at.Add(4*time.Minute), 24*time.Hour) {
+		t.Fatal("the failure isn't due again after the hold")
+	}
+}
+
+// A state unanswered checks keep stands for KeptChecks check intervals from the
+// check that set it, then fails closed: at the next unanswered check, or at
+// Due (the heartbeat) while the hold keeps checks from running.
+func TestKeptStateExpires(t *testing.T) {
+	t.Parallel()
+	root, files := library(t)
+	mount := func(int64, string) (string, bool) { return root, true }
+	at := time.Date(2026, 11, 19, 10, 0, 0, 0, time.UTC)
+	limited := &link.APIError{Status: http.StatusTooManyRequests, RetryAfter: time.Hour, RetryAfterSet: true}
+	setup := func() (*Registry, *scripted) {
+		r := NewRegistry()
+		r.SetInterval(time.Minute)
+		r.SetLibraries([]link.Library{{ID: 1, Root: root}})
+		src := &scripted{book: &link.Book{Path: "Author/Book", Files: files}, err: map[int64]error{}}
+		r.Check(context.Background(), src, mount, func() time.Time { return at })
+		src.answer(1, limited)
+		r.Check(context.Background(), src, mount, func() time.Time { return at.Add(time.Minute) }, 1)
+		if st, _ := r.Status(1); !st.Mapped || !st.Writable {
+			t.Fatalf("a 429 within the cap replaced the state: %+v", st)
+		}
+		return r, src
+	}
+
+	r, src := setup()
+	r.Check(context.Background(), src, mount, func() time.Time { return at.Add(KeptChecks * time.Minute) }, 1)
+	if st, _ := r.Status(1); st.Mapped || st.Writable || !strings.Contains(st.Error, "429") {
+		t.Fatalf("a 429 past the cap kept the state: %+v", st)
+	}
+
+	r, _ = setup()
+	if r.Due(at.Add(KeptChecks*time.Minute-time.Second), time.Minute) {
+		t.Fatal("due inside the hold")
+	}
+	if st, _ := r.Status(1); !st.Mapped {
+		t.Fatalf("the state ended before the cap: %+v", st)
+	}
+	r.Due(at.Add(KeptChecks*time.Minute), time.Minute)
+	st, _ := r.Status(1)
+	if st.Mapped || st.Writable || !strings.Contains(st.Error, "hasn't answered") {
+		t.Fatalf("the kept state outlived the cap during the hold: %+v", st)
+	}
+	if e := r.Entries(mount)[0]; e.UnansweredAt != nil {
+		t.Fatalf("an ended state is still marked as an earlier result: %v", e.UnansweredAt)
+	}
+}
+
+// A check made through the hold (Check now, a mapping edit) that fails without
+// a Retry-After never shortens the hold the server asked for; one with a
+// Retry-After is the server's newer word and sets it.
+func TestManualCheckKeepsALongerHold(t *testing.T) {
+	t.Parallel()
+	root, files := library(t)
+	mount := func(int64, string) (string, bool) { return root, true }
+	at := time.Date(2026, 11, 19, 10, 0, 0, 0, time.UTC)
+	r := NewRegistry()
+	r.SetLibraries([]link.Library{{ID: 1, Root: root}})
+	r.holdAfter(&link.APIError{Status: http.StatusTooManyRequests, RetryAfter: 20 * time.Minute, RetryAfterSet: true}, at)
+	src := &scripted{book: &link.Book{Path: "Author/Book", Files: files}, err: map[int64]error{
+		1: &url.Error{Op: "Get", URL: "https://server/api", Err: context.DeadlineExceeded},
+	}}
+	r.Check(context.Background(), src, mount, func() time.Time { return at.Add(time.Minute) }, 1)
+	if until, why := r.Held(); !until.Equal(at.Add(20*time.Minute)) || !strings.Contains(why, "429") {
+		t.Fatalf("held until %v for %q, want the 429's twenty minutes", until.Sub(at), why)
+	}
+	if r.Due(at.Add(19*time.Minute), 24*time.Hour) {
+		t.Fatal("a manual check's timeout shortened the hold")
+	}
+
+	src.answer(1, &link.APIError{Status: http.StatusTooManyRequests, RetryAfter: 2 * time.Minute, RetryAfterSet: true})
+	r.Check(context.Background(), src, mount, func() time.Time { return at.Add(time.Minute) }, 1)
+	if until, _ := r.Held(); !until.Equal(at.Add(3 * time.Minute)) {
+		t.Fatalf("held until %v, want the newer Retry-After's", until.Sub(at))
 	}
 }
