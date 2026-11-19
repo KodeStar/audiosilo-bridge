@@ -154,13 +154,8 @@ func (e *Executor) contribute(ctx context.Context, book store.Book, r scheduler.
 	// A job that heard share_off whose run isn't up to turn its book local (one
 	// resumed after a restart still waits for its lane slot) keeps it local all
 	// the same, before the work's lookup can park the book for a share.
-	if e.contribModeFor(book) != contribModeLocal {
-		switch local, err := e.turnedLocal(ctx, book.ID); {
-		case err != nil:
-			return scheduler.StageResult{}, fmt.Errorf("contributing: %w", err)
-		case local:
-			book.ContribMode = store.ContribModeLocal
-		}
+	if err := e.keepLocalIfTurned(ctx, &book); err != nil {
+		return scheduler.StageResult{}, err
 	}
 	start := time.Now()
 
@@ -213,13 +208,8 @@ func (e *Executor) contribute(ctx context.Context, book store.Book, r scheduler.
 	// while too. Only a turn to local is taken (a slug resolved in local mode
 	// may be a placeholder, never one to file under), here and before each
 	// dimension's filing (submitIssue).
-	if e.contribModeFor(book) != contribModeLocal {
-		switch local, err := e.turnedLocal(ctx, book.ID); {
-		case err != nil:
-			return scheduler.StageResult{}, fmt.Errorf("contributing: %w", err)
-		case local:
-			book.ContribMode = store.ContribModeLocal
-		}
+	if err := e.keepLocalIfTurned(ctx, &book); err != nil {
+		return scheduler.StageResult{}, err
 	}
 	err = e.submitContributions(ctx, book, slug, artifacts, placeholderNote, auditNote)
 	if errors.Is(err, errTurnedLocal) {
@@ -520,6 +510,22 @@ func (e *Executor) submitIssue(ctx context.Context, book store.Book, slug string
 // turned local after the stage read its mode (store.KeepBookLocal: a
 // sidecars.generate job whose share the server turned off).
 var errTurnedLocal = errors.New("contributing: the book turned local while it filed")
+
+// keepLocalIfTurned sets book's mode to local when it isn't and turnedLocal
+// says the book is local now. Its error is the stage's.
+func (e *Executor) keepLocalIfTurned(ctx context.Context, book *store.Book) error {
+	if e.contribModeFor(*book) == contribModeLocal {
+		return nil
+	}
+	local, err := e.turnedLocal(ctx, book.ID)
+	if err != nil {
+		return fmt.Errorf("contributing: %w", err)
+	}
+	if local {
+		book.ContribMode = store.ContribModeLocal
+	}
+	return nil
+}
 
 // turnedLocal reports whether book id is local now: its own mode says so, or an
 // open sidecars.generate job that follows it heard share_off
