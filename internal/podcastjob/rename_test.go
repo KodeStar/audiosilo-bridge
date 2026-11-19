@@ -432,3 +432,50 @@ func TestAnOversizedSavedFeedIsTooLarge(t *testing.T) {
 		}
 	}
 }
+
+// A show folder renamed by hand to the name of another show's folder (names
+// swapped, or another show moved there) brings that show's download records
+// to the paths under the name, one per episode file name both shows use. A
+// download of the first show still running under the old name, or abandoned
+// there by the runner, leaves that record and its partial alone: they are the
+// other show's, in its folder now.
+func TestADownloadUnderAnOldNameLeavesAnotherShowsRecord(t *testing.T) {
+	h, job := audioHarness(t)
+	s := h.handler.s
+	root, err := os.OpenRoot(h.mount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	theirs := checkpoint{ServerHash: s.pairHash(), LibraryID: 3, ShowID: "0123456789abcdef", EpisodeID: "1cc306d831645e2b", Path: *job.Path, Temp: podcast.TempPrefix + strings.Repeat("a", 24), Offset: 6, Total: 100}
+	mine := checkpoint{ServerHash: s.pairHash(), LibraryID: 3, ShowID: "a1b2c3d4e5f60718", EpisodeID: "1cc306d831645e2b", Path: *job.Path, Temp: podcast.TempPrefix + strings.Repeat("b", 24), Offset: 6, Total: 100}
+	for _, c := range []checkpoint{theirs, mine} {
+		if err := root.WriteFile("Fixture Show/"+c.Temp, []byte("prefix"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.saveCheckpoint(job, root, &theirs, `"one"`); err != nil {
+		t.Fatal(err)
+	}
+	kept := func(step string) {
+		t.Helper()
+		if saved, ok := s.readCheckpoint(job); !ok || saved.ShowID != theirs.ShowID || saved.Temp != theirs.Temp {
+			t.Fatal(step, ": the other show's record went", saved, ok)
+		}
+		if _, err := root.Lstat("Fixture Show/" + theirs.Temp); err != nil {
+			t.Fatal(step, ": the other show's partial went", err)
+		}
+	}
+	if err := s.saveCheckpoint(job, root, &mine, `"two"`); err != nil {
+		t.Fatal(err)
+	}
+	kept("save")
+	own := "Fixture Show/" + mine.Temp
+	s.clearCheckpoint(job, root, &mine)
+	kept("clear")
+	if _, err := root.Lstat(own); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("its own partial is still the job's to remove", err)
+	}
+	h.handler.FetchJob().Abandon(context.Background(), job)
+	kept("abandon")
+}

@@ -73,12 +73,13 @@ func (s *service) saveCheckpoint(job jobs.Job, root *os.Root, c *checkpoint, eta
 		return err
 	}
 	defer func() { _ = dir.Close() }()
-	if saved, ok := s.readCheckpoint(job); ok && saved.Temp != c.Temp && !s.dropPartial(root, &saved) {
+	if saved, ok := s.readCheckpoint(job); ok && saved.Temp != c.Temp && (saved.ShowID != c.ShowID || !s.dropPartial(root, &saved)) {
 		// An earlier partial at this path the Bridge still cannot remove: its
 		// record stays (clearCheckpoint tries it again, cleanOwned after a day),
 		// and this download goes unrecorded rather than orphan it (left behind,
 		// sweepPartials takes it once old). One removed since (or already gone)
-		// no longer holds the record.
+		// no longer holds the record. Another show's record at this path stays
+		// too (clearCheckpoint).
 		return nil
 	}
 	if c.Validator == "" {
@@ -153,13 +154,17 @@ func (s *service) loadCheckpoint(job jobs.Job, root *os.Root, showID, episodeID 
 // record (only under the pairing that made them), then resets c to no partial.
 // A partial it cannot remove keeps its validator and the record, for cleanOwned
 // once it is a day old; an earlier such partial the record still names is tried
-// again first, so no later clear in the job drops its record.
+// again first, so no later clear in the job drops its record. A record of
+// another show at the path is left with its partial: adoptCheckpoints put it
+// there for a show folder renamed by hand to this job's folder name (names
+// swapped, or another show moved to it, an episode file name both shows use),
+// while this job still works under that name.
 func (s *service) clearCheckpoint(job jobs.Job, root *os.Root, c *checkpoint) {
 	defer func() { c.Temp, c.Offset, c.Total, c.Validator = "", 0, 0, "" }()
 	if c.ServerHash != s.pairHash() || !s.dropPartial(root, c) {
 		return
 	}
-	if saved, ok := s.readCheckpoint(job); ok && saved.Temp != c.Temp && !s.dropPartial(root, &saved) {
+	if saved, ok := s.readCheckpoint(job); ok && saved.Temp != c.Temp && (saved.ShowID != c.ShowID || !s.dropPartial(root, &saved)) {
 		return
 	}
 	if dir, err := s.checkpointRoot(); err == nil {

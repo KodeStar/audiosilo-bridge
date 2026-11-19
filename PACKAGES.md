@@ -2395,7 +2395,10 @@ internal/
             takes the folder in again; records it cannot read stop the
             adoption; one of another show stays, and one whose download still
             runs stays until that fetch relocates and moves its own), or their
-            partials would stay in the folder for good. A saved feed.json over
+            partials would stay in the folder for good. A job still working
+            under the old name never saves over, clears or abandons another
+            show's record at its path (one moved there when names were
+            swapped), nor its partial. A saved feed.json over
             the read cap fails as too_large, not write_failed. A new show never
             takes the old name of a renamed folder not taken in yet (find
             answers those names): the server indexes that name as the renamed
