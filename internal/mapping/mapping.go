@@ -13,7 +13,10 @@
 // kept past that, or a failure the server didn't answer) Status says the
 // library isn't checked, so a write job waits rather than failing. Every look
 // at a library's folder is bounded by LookTimeout: a hung mount fails that
-// library's check rather than holding the run.
+// library's check rather than holding the run, and since a look that times out
+// says nothing definite either (an array disk spinning up answers in about 8 s),
+// it is unknown as an unanswered check is: the state stands if there was one,
+// and the library is looked at again after LookAgain.
 package mapping
 
 import (
@@ -78,13 +81,17 @@ type FileCheck struct {
 // CompareFiles stats each file (at most MaxFilesChecked) through mount and
 // compares its size with the server's. ok is true when every file matched;
 // problem describes the first that didn't. Each stat is bounded by LookTimeout,
-// and the first a hung mount holds past it ends the comparison.
-func CompareFiles(mount string, files []link.BookFile) (checks []FileCheck, ok bool, problem string) {
+// and the first a hung mount holds past it ends the comparison: timeout is that
+// stat's fsutil.ErrStatTimeout when it is the first file that didn't match
+// (nil when every stat answered, or an earlier file's answer already said the
+// copy differs), which says nothing definite about the copy, so a caller looks
+// again later rather than taking the mismatch as one.
+func CompareFiles(mount string, files []link.BookFile) (checks []FileCheck, ok bool, problem string, timeout error) {
 	return compareFiles(mount, files, bounded.stat)
 }
 
 // compareFiles is CompareFiles with its stat.
-func compareFiles(mount string, files []link.BookFile, stat func(string) (fs.FileInfo, error)) (checks []FileCheck, ok bool, problem string) {
+func compareFiles(mount string, files []link.BookFile, stat func(string) (fs.FileInfo, error)) (checks []FileCheck, ok bool, problem string, timeout error) {
 	ok = len(files) > 0
 	if !ok {
 		problem = "the server listed no files for the book"
@@ -113,15 +120,21 @@ func compareFiles(mount string, files []link.BookFile, stat func(string) (fs.Fil
 		default:
 			c.OK = true
 		}
-		if !c.OK && ok {
+		first := !c.OK && ok
+		if first {
 			ok, problem = false, f.Path+": "+c.Error
 		}
 		checks = append(checks, c)
 		if errors.Is(err, fsutil.ErrStatTimeout) {
+			if first {
+				// Only a silence before any definite mismatch is unknown: a file
+				// the folder answered with another size already settled it.
+				timeout = err
+			}
 			break // the mount hangs: every file after would cost LookTimeout too
 		}
 	}
-	return checks, ok, problem
+	return checks, ok, problem, timeout
 }
 
 // describeStatError words a stat failure without the absolute path.
@@ -143,6 +156,16 @@ func describeStatError(err error) string {
 	return err.Error()
 }
 
+// lostSight says why a stat of what (something an earlier check found in the
+// folder) failed: a mount that didn't answer within LookTimeout says nothing
+// about what is there, so it isn't reported as gone.
+func lostSight(what string, err error) string {
+	if errors.Is(err, fsutil.ErrStatTimeout) {
+		return "the folder didn't answer within " + LookTimeout.String() + " to show " + what
+	}
+	return "the folder no longer shows " + what + " (" + describeStatError(err) + ")"
+}
+
 // ProbePrefix starts a probe file's name. The leading dot keeps a probe a
 // crash leaves behind out of the server's scan (it never walks hidden names).
 const ProbePrefix = ".audiosilo-bridge-probe-"
@@ -158,18 +181,24 @@ func ProbeWritable(dir string) error {
 }
 
 // probeWritable is ProbeWritable without its bound.
-func probeWritable(dir string) error {
+func probeWritable(dir string) error { return probeWritableLaps(dir, func() {}) }
+
+// probeWritableLaps is probeWritable calling lap after the probe's creation
+// and after its write (a podcast look times its steps: lookPace).
+func probeWritableLaps(dir string, lap func()) error {
 	var b [8]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		return err
 	}
 	name := filepath.Join(dir, ProbePrefix+hex.EncodeToString(b[:]))
 	f, err := os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644) //nolint:gosec // a fixed name in the checked folder
+	lap()
 	if err != nil {
 		return err
 	}
 	_, werr := f.WriteString("audiosilo-bridge write check\n")
 	cerr := f.Close()
+	lap()
 	rerr := os.Remove(name)
 	return errors.Join(werr, cerr, rerr)
 }
@@ -208,21 +237,69 @@ func unsettled(err error) error {
 }
 
 // LookTimeout bounds each look a check makes at a library's folder (a stat, the
-// write probe) and the one that lets an unanswered check keep a state
-// (proveKept): a hung mount fails the library's check, recorded, rather than
+// write probe, its wait for a podcast check's whole look before the server's
+// read) and the one that lets an unanswered check keep a state (proveKept): a
+// hung mount ends the library's check, unknown (folderSlow), rather than
 // holding the run and every check after it.
 const LookTimeout = 5 * time.Second
 
+// LookAgain is how soon a library whose folder didn't answer a check's look
+// within LookTimeout is due again: the run goes on without it, and the next one
+// looks again (a disk spinning up answers by then). It neither holds the other
+// libraries' checks nor doubles: the folder's slowness says nothing about the
+// server.
+const LookAgain = time.Minute
+
 // looks are the looks at a library's folder a check makes, each bounded by
-// LookTimeout (bounded), unless a test hangs one.
+// LookTimeout (bounded), unless a test hangs one. podcast is a podcast check's
+// whole look before the server's read (lookPodcast), waited for as one change
+// (podcastWithin: one that answers after every caller gave up is kept for the
+// next check, or what it wrote undone).
 type looks struct {
-	stat  func(path string) (fs.FileInfo, error)
-	probe func(dir string) error
+	stat    func(path string) (fs.FileInfo, error)
+	probe   func(dir string) error
+	podcast func(op, mount string, look func(string) (podcastFound, error)) (podcastFound, error)
 }
 
 var bounded = looks{
-	stat:  func(p string) (fs.FileInfo, error) { return fsutil.StatWithin(p, LookTimeout) },
-	probe: ProbeWritable,
+	stat:    func(p string) (fs.FileInfo, error) { return fsutil.StatWithin(p, LookTimeout) },
+	probe:   ProbeWritable,
+	podcast: podcastWithin(LookTimeout, LookKeptFor),
+}
+
+// folderSlow is a check whose look at the library's folder got no answer within
+// LookTimeout: like a check the server didn't answer it says nothing definite,
+// so the Registry keeps the library's state (or records it unknown), but the
+// folder was slow, not the server, so it neither ends the run nor holds the
+// next one, and the library is due again after LookAgain.
+//
+// wrote is set when the look that timed out may still write to the folder (a
+// podcast check's, whose marker is what proveKept looks for): it reports
+// whether a marker written there since isn't settled, so the marker the folder
+// shows may be the look's own, which proves nothing (markerWrites).
+type folderSlow struct {
+	error
+	wrote func() bool
+}
+
+func (e folderSlow) Unwrap() error { return e.error }
+
+// slowLook is err as a check's second result: folderSlow when the look timed
+// out, else nil (the folder's answer is definite).
+func slowLook(err error) error {
+	if errors.Is(err, fsutil.ErrStatTimeout) {
+		return folderSlow{error: err}
+	}
+	return nil
+}
+
+// noAnswer says who didn't answer a check that left no definite result.
+func noAnswer(err error) string {
+	var slow folderSlow
+	if errors.As(err, &slow) {
+		return "the folder didn't answer this one within " + LookTimeout.String()
+	}
+	return "the server didn't answer this one"
 }
 
 // Check checks one library's mapping: mount must hold the server's sample book
@@ -230,7 +307,8 @@ var bounded = looks{
 // unanswered is the server's failure when it gave no definite answer (a 429, a
 // 5xx, a timeout, no answer at all): the status says so too, and the Registry
 // may keep the library's last known state instead of it (proveKept). A look at
-// the folder that a hung mount holds past LookTimeout fails the check.
+// the folder that a hung mount holds past LookTimeout is no definite answer
+// either: unanswered is then folderSlow.
 func Check(ctx context.Context, src BookSource, lib link.Library, mount string) (st link.LibraryStatus, unanswered error) {
 	return bounded.check(ctx, src, lib, mount)
 }
@@ -242,7 +320,7 @@ func (l looks) check(ctx context.Context, src BookSource, lib link.Library, moun
 	switch {
 	case err != nil:
 		st.Error = "the folder " + mount + " is " + describeStatError(err)
-		return st, nil
+		return st, slowLook(err)
 	case !info.IsDir():
 		st.Error = mount + " is not a folder"
 		return st, nil
@@ -257,15 +335,20 @@ func (l looks) check(ctx context.Context, src BookSource, lib link.Library, moun
 		return st, unsettled(err)
 	}
 	st.CheckedPath = book.Path
-	_, ok, problem := compareFiles(mount, book.Files, l.stat)
-	if !ok {
+	_, ok, problem, timeout := compareFiles(mount, book.Files, l.stat)
+	switch {
+	case timeout != nil:
+		// Not a mismatch: the folder went silent before any file differed.
+		st.Error = "the folder didn't answer while the book's files were compared with the server's (" + problem + ")"
+		return st, slowLook(timeout)
+	case !ok:
 		st.Error = "this folder doesn't hold the server's copy of the library (" + problem + ")"
 		return st, nil
 	}
 	st.Mapped = true
 	if err := l.probe(mount); err != nil {
 		st.Error = "mapped, but not writable here: " + describeStatError(err)
-		return st, nil
+		return st, slowLook(err)
 	}
 	st.Writable = true
 	return st, nil
@@ -281,6 +364,10 @@ type Entry struct {
 	// UnansweredAt is when a check since CheckedAt last got no definite answer
 	// from the server (nil when none did): Status is the result before it.
 	UnansweredAt *time.Time `json:"unanswered_at"`
+	// SlowAt is when a check since CheckedAt last found the folder not
+	// answering within LookTimeout (nil when none did; never with UnansweredAt,
+	// the later of the two stands): Status is the result before it.
+	SlowAt *time.Time `json:"slow_at"`
 	// Unknown: no state stands (Registry.Status says unchecked), Status says why.
 	Unknown bool `json:"unknown"`
 }
@@ -352,12 +439,15 @@ type Registry struct {
 // unknown: status is such a check's own failure, which says nothing definite
 // (no state at the mount to keep, or one the folder no longer proved).
 // expired: the state was found older than KeptChecks intervals (Due, record),
-// which view also works out as it reads it.
+// which view also works out as it reads it. slow is unanswered's counterpart for
+// a check whose look at the folder timed out (folderSlow; one of the two is
+// set, the later): that library is due again LookAgain after it.
 type result struct {
 	status     link.LibraryStatus
 	at         time.Time
 	retry      bool
 	unanswered time.Time
+	slow       time.Time
 	unknown    bool
 	expired    bool
 }
@@ -388,6 +478,11 @@ func (r *Registry) view(res result, now time.Time) (st link.LibraryStatus, known
 		return res.status, true
 	case !res.status.Mapped:
 		return res.status, false
+	}
+	if !res.slow.IsZero() {
+		return link.LibraryStatus{LibraryID: res.status.LibraryID, MountPath: res.status.MountPath,
+			Error: "the folder hasn't answered a check of this mapping within " + LookTimeout.String() + " since " +
+				res.at.Format(time.RFC3339) + ", so writes wait for one it answers"}, false
 	}
 	return link.LibraryStatus{LibraryID: res.status.LibraryID, MountPath: res.status.MountPath,
 		Error: "the server hasn't answered a check of this mapping since " + res.at.Format(time.RFC3339) +
@@ -511,6 +606,9 @@ func (r *Registry) Entries(mount MountFunc) []Entry {
 			if unanswered := res.unanswered; !unanswered.IsZero() {
 				e.UnansweredAt = &unanswered
 			}
+			if slow := res.slow; !slow.IsZero() {
+				e.SlowAt = &slow
+			}
 		}
 		out = append(out, e)
 	}
@@ -518,7 +616,8 @@ func (r *Registry) Entries(mount MountFunc) []Entry {
 }
 
 // Due reports whether a check is due: a library with none, one older than
-// interval or one the server last left unanswered, with no check running (it
+// interval, one the server last left unanswered or one whose folder didn't
+// answer in time LookAgain ago, with no check running (it
 // refreshes them, so asking again would only queue a second pass) and no hold
 // after an unanswered run (asking again at once would meet the same 429). Only
 // the heartbeat's periodic run waits for Due: an admin's mapping edit, Check
@@ -529,6 +628,19 @@ func (r *Registry) Entries(mount MountFunc) []Entry {
 // writes wait for a check the server answers. view ages them as it reads them
 // too, for a Registry no beat reaches.
 func (r *Registry) Due(now time.Time, interval time.Duration) bool {
+	due, _ := r.DueIDs(now, interval)
+	return due
+}
+
+// DueIDs is Due with the libraries the run is due for: nil for every library
+// (one has no check, a retry or a check older than interval), else only the
+// ones whose folder was slow LookAgain ago, so a folder that keeps timing out
+// never runs every other library's check (a server read each) every
+// LookAgain. A slow library is due by LookAgain alone: the state a slow look
+// kept is as old as the check that set it, often past interval (that is why it
+// was checked), and its age would make it due again at once, the run's beat
+// checking it in a tight loop.
+func (r *Registry) DueIDs(now time.Time, interval time.Duration) (due bool, ids []int64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.interval = interval
@@ -539,15 +651,22 @@ func (r *Registry) Due(now time.Time, interval time.Duration) bool {
 		}
 	}
 	if r.checking || now.Before(r.holdUntil) {
-		return false
+		return false, nil
 	}
 	for _, l := range r.libs {
 		res, ok := r.results[l.ID]
-		if !ok || res.retry || now.Sub(res.at) >= interval {
-			return true
+		switch {
+		case !ok || res.retry:
+			return true, nil
+		case !res.slow.IsZero():
+			if !now.Before(res.slow.Add(LookAgain)) {
+				ids = append(ids, l.ID)
+			}
+		case now.Sub(res.at) >= interval:
+			return true, nil
 		}
 	}
-	return false
+	return len(ids) > 0, ids
 }
 
 // Check checks the libraries ids (every library with none) now, one at a time
@@ -555,7 +674,9 @@ func (r *Registry) Due(now time.Time, interval time.Duration) bool {
 // one asked for while another runs is done right after it (by that call, with
 // this call's src), so a mapping changed mid-check is never missed. A check the
 // server didn't answer keeps the library's last known state at the same mount
-// (a 429 or a 503 says nothing about the folder), and a 429, a refused token or a timeout
+// (a 429 or a 503 says nothing about the folder), as does one whose look at the
+// folder timed out (folderSlow: that library is due again after LookAgain, and
+// the run goes on, unheld), and a 429, a refused token or a timeout
 // ends the pass: the libraries it hadn't reached yet are due again after the
 // hold, keeping their state only as such a check would (keepUnreached). The
 // checks queued meanwhile are still made (an admin's mapping edit,
@@ -622,7 +743,8 @@ func (r *Registry) Check(ctx context.Context, src BookSource, mount MountFunc, n
 			}
 			at := now()
 			r.record(st, err, at)
-			if err != nil {
+			var slow folderSlow
+			if err != nil && !errors.As(err, &slow) {
 				if unanswered == nil || retryAfter(err) >= retryAfter(unanswered) {
 					unanswered = err
 				}
@@ -725,7 +847,8 @@ func (m pacedMarkers) Marker(ctx context.Context, libraryID int64) (string, erro
 	return m.src.Marker(ctx, libraryID)
 }
 
-// proveKept lets a check the server didn't answer keep last, the library's
+// proveKept lets a check the server didn't answer (or whose look at the folder
+// timed out, folderSlow) keep last, the library's
 // state at the same mount, only while the folder still shows what last's check
 // found there (its book's folder or file, or the podcast marker, through stat):
 // a share that isn't mounted leaves an empty folder at the mount, where a kept
@@ -734,8 +857,10 @@ func (m pacedMarkers) Marker(ctx context.Context, libraryID int64) (string, erro
 // within LookTimeout) makes the failure unproven, so the Registry records it
 // and writes wait for a check the server answers, as does a book the last
 // check found at the mount itself (nothing there tells it from an empty mount
-// point). A kept state that wasn't mapped lets nothing write, so it needs no
-// proof.
+// point), and a podcast marker that a look still out may have written itself
+// (folderSlow.wrote: a look that timed out goes on, and writes a marker where
+// it finds none). A kept state that wasn't mapped lets nothing write, so it
+// needs no proof.
 func proveKept(st link.LibraryStatus, unanswered error, last link.LibraryStatus, stat func(string) (fs.FileInfo, error)) (link.LibraryStatus, error) {
 	var lost unproven
 	if !last.Mapped || last.MountPath != st.MountPath || errors.As(unanswered, &lost) {
@@ -745,18 +870,23 @@ func proveKept(st link.LibraryStatus, unanswered error, last link.LibraryStatus,
 	if last.CheckedPath == "" {
 		// A book at the library's own folder: an unmounted share's empty
 		// mount point shows that folder too, so nothing here proves it.
-		st.Error = "the last check found the book at the library folder itself, which proves nothing without the server, and the server didn't answer this one"
+		st.Error = "the last check found the book at the library folder itself, which proves nothing without the server, and " + noAnswer(unanswered)
 		return st, unproven{unanswered}
 	}
 	full, err := SafeJoin(st.MountPath, last.CheckedPath)
 	if err == nil {
 		_, err = stat(full)
 	}
-	if err == nil {
+	var slow folderSlow
+	switch {
+	case err != nil:
+		st.Error = lostSight(last.CheckedPath+", which the last check found", err) + ", and " + noAnswer(unanswered)
+	case errors.As(unanswered, &slow) && slow.wrote != nil && slow.wrote():
+		// Asked only once the stat answered: a marker it saw was begun before.
+		st.Error = "the folder shows " + last.CheckedPath + ", but a look of this check may have written it, which proves nothing, and " + noAnswer(unanswered)
+	default:
 		return st, unanswered
 	}
-	st.Error = "the folder no longer shows " + last.CheckedPath + ", which the last check found (" +
-		describeStatError(err) + "), and the server didn't answer this one"
 	return st, unproven{unanswered}
 }
 
@@ -794,24 +924,40 @@ func (r *Registry) keepUnreached(rest []link.Library, prev map[int64]link.Librar
 // check that set it have passed (view reads it as unknown, with its own time).
 // With no state there, or one whose folder no longer showed what proved it
 // (unproven), the failure is recorded, unknown, so the page says why and
-// writes wait for a check the server answers.
+// writes wait for a check the server answers. One whose look at the folder
+// timed out (folderSlow) is the same, due again after LookAgain rather than
+// after the hold, and recorded afresh over an unknown failure (its reason is
+// the newer).
 func (r *Registry) record(st link.LibraryStatus, unanswered error, at time.Time) {
 	prev, ok := r.results[st.LibraryID]
 	var lost unproven
-	if unanswered != nil && ok && prev.status.MountPath == st.MountPath && !errors.As(unanswered, &lost) {
-		r.markRetry(st.LibraryID, at)
+	var slow folderSlow
+	isSlow := errors.As(unanswered, &slow)
+	if unanswered != nil && ok && prev.status.MountPath == st.MountPath && !errors.As(unanswered, &lost) &&
+		(!isSlow || !prev.unknown) {
+		r.keep(st.LibraryID, at, isSlow)
 		return
 	}
-	r.results[st.LibraryID] = result{status: st, at: at, retry: unanswered != nil, unknown: unanswered != nil}
+	res := result{status: st, at: at, retry: unanswered != nil && !isSlow, unknown: unanswered != nil}
+	if isSlow {
+		res.slow = at
+	}
+	r.results[st.LibraryID] = res
 }
 
-// markRetry makes a checked library due again after the hold (r.mu held), its
-// state the one from before the check at that the server didn't answer, and
-// expired once it is past KeptChecks intervals; one with no check yet is due
-// anyway.
-func (r *Registry) markRetry(id int64, at time.Time) {
+// keep keeps a checked library's state from before the check at that got no
+// definite answer (r.mu held), expired once it is past KeptChecks intervals;
+// one with no check yet is due anyway. The library is due again after the
+// hold (retry), or, when the check's look at the folder timed out (slow),
+// LookAgain after at: a retry would make it due at once when no hold stands,
+// and the run's beat would check again straight away, a tight loop on a hung
+// mount.
+func (r *Registry) keep(id int64, at time.Time, slow bool) {
 	if res, ok := r.results[id]; ok {
-		res.retry, res.unanswered = true, at
+		res.retry, res.unanswered, res.slow = true, at, time.Time{}
+		if slow {
+			res.retry, res.unanswered, res.slow = false, time.Time{}, at
+		}
 		res.expired = res.expired || r.keptTooLong(res.at, at)
 		r.results[id] = res
 	}

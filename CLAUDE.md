@@ -185,9 +185,9 @@ web, netguard, podcast, podcastjob, audibleacct, audiblejob, audiblesync, libriv
 endpoint}` plus the engine it wires; `accounts -> {agent, agentproto, ghauth, secrets, store}`; `correct ->
 {contrib, jobs, metaops}`; `setup -> link`;
 `api` calls the injected Backend and the injected `auth.Manager` (login, sessions,
-the password), with types from jobs/link/mapping/store/logring/endpoint; `verify -> {jobs,
-link, mapping}`; `generate -> {jobs, link, mapping, store, scheduler, pipeline, ...}`
-through its own Engine/Server interfaces; `podcastjob -> {jobs, link, mapping, netguard, podcast, secrets, store}`;
+the password), with types from jobs/link/mapping/store/logring/endpoint; `verify -> {fsutil,
+jobs, link, mapping}`; `generate -> {jobs, link, mapping, store, scheduler, pipeline, ...}`
+through its own Engine/Server interfaces; `podcastjob -> {fsutil, jobs, link, mapping, netguard, podcast, secrets, store}`;
 `podcast -> {fsutil, gofeed, x/net/html, x/text}`; `logring -> podcast`;
 `audible -> {progress, source}` (its tagged build also `audiblefake`, which never
 imports `audible`); `importjob -> {link, placement, source,
@@ -231,7 +231,10 @@ in PACKAGES.md.
   then one no-replace rename,
   never into an existing book. Podcast writers
   require a podcast-kind library and its checked marker mapping (a job claimed
-  before the check waits for it); they write only the root marker, show folders,
+  before the check waits for it, as does a write while no check stands, never
+  under a show's lock in a fetch or a retain; only a download already under way
+  goes on into its own partial, and its publication waits); they write only the
+  root marker, show folders,
   feed.json and sniffed JPEG/PNG artwork. Book writers refuse podcast libraries.
   Episode publication and retention use recovery journals and owned trash.
 - **The agent container's files are untrusted** (and the Bridge's are to it): every

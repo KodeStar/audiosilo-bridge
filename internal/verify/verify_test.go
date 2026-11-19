@@ -5,14 +5,18 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/kodestar/audiosilo-bridge/internal/fsutil"
 	"github.com/kodestar/audiosilo-bridge/internal/jobs"
 	"github.com/kodestar/audiosilo-bridge/internal/link"
 	"github.com/kodestar/audiosilo-bridge/internal/mapping"
@@ -271,5 +275,45 @@ func TestVerifyBookReadBackoffStopsOnCancel(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("the verify waited out its backoff after a cancel")
+	}
+}
+
+// A comparison or a write probe the library's folder doesn't answer within
+// mapping.LookTimeout (a disk spinning up) is tried again, as a transient book
+// read is, rather than failing the verify: once the folder answers, it
+// passes. Denied: a folder that stays silent past the budget fails it, saying
+// so.
+func TestVerifyLooksAgainAtASlowFolder(t *testing.T) {
+	t.Parallel()
+	slow := func(op, path string) error {
+		return &fs.PathError{Op: op, Path: path, Err: fsutil.ErrStatTimeout}
+	}
+	h, _ := setup(t)
+	h.retryFirst, h.retryFor = time.Millisecond, time.Minute
+	h.log = slog.New(slog.NewTextHandler(io.Discard, nil))
+	var compares, probes atomic.Int32
+	h.compare = func(mount string, files []link.BookFile) ([]mapping.FileCheck, bool, string, error) {
+		if compares.Add(1) <= 2 {
+			return nil, false, "Author/Book/1.mp3: not answering", slow("stat", mount)
+		}
+		return mapping.CompareFiles(mount, files)
+	}
+	h.probe = func(dir string) error {
+		if probes.Add(1) <= 2 {
+			return slow("probe", dir)
+		}
+		return mapping.ProbeWritable(dir)
+	}
+	out, err := h.Run(context.Background(), jobs.Job{ID: 1, Kind: Kind, LibraryID: ptr(int64(1)), Path: ptr("Author/Book")}, jobs.LocalReporter())
+	if err != nil || !out.(Result).Writable || compares.Load() != 3 || probes.Load() != 3 {
+		t.Fatalf("a folder slow twice = %+v, %v after %d compares and %d probes", out, err, compares.Load(), probes.Load())
+	}
+
+	h.retryFor = 30 * time.Millisecond
+	h.compare = func(mount string, _ []link.BookFile) ([]mapping.FileCheck, bool, string, error) {
+		return nil, false, "Author/Book/1.mp3: not answering", slow("stat", mount)
+	}
+	if _, err := h.Run(context.Background(), jobs.Job{ID: 2, Kind: Kind, LibraryID: ptr(int64(1)), Path: ptr("Author/Book")}, jobs.LocalReporter()); err == nil || !strings.Contains(err.Error(), "not answering") {
+		t.Fatalf("a folder silent past the budget = %v", err)
 	}
 }

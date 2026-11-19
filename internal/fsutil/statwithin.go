@@ -135,3 +135,148 @@ func ReadDirNWithin(path string, n int, d time.Duration) ([]fs.DirEntry, error) 
 		return entries, err
 	})
 }
+
+// change is one ChangeWithin call out: done is closed (under changesMu) once
+// val and err hold its answer. waiting counts the callers still waiting for it; one
+// that gives up leaves the count, so a change that finishes with none left has
+// nobody to hand its answer to. kept: it finished so, and its answer waits in
+// val and err for the next call (Late.Keep).
+type change struct {
+	done    chan struct{}
+	started time.Time
+	waiting int
+	kept    bool
+	val     any
+	err     error
+}
+
+var (
+	changesMu sync.Mutex
+	changes   = map[string]*change{}
+)
+
+// Late is what becomes of a change that finishes once every caller gave up
+// (past ChangeWithin's bound), so nobody is left to take its answer.
+type Late[T any] struct {
+	// Undo undoes what the change left behind (nil: nothing to undo).
+	Undo func(T)
+	// Keep (nil: never) reports whether the answer is one the next call may
+	// still take instead, and returns it as that call gets it (marked late,
+	// say): it is then kept for that call, for at most For, and undone only
+	// when none came. It is called with the changes locked, so it only reads
+	// the answer.
+	Keep func(T, error) (T, bool)
+	For  time.Duration
+}
+
+// ChangeWithin is LookWithin for a look that changes what it looks at (a
+// mapping check's podcast marker, written for the server to read back): bounded
+// by d, ErrStatTimeout past it, and one out per op and path, a later call
+// waiting on it for what is left of d (ErrStatTimeout at once when none is).
+// Unlike a look, a change may leave something behind, so its answer is handed
+// to every caller still waiting when it finishes. When none is (every caller
+// gave up past d, so nobody will ever clean up after it), late says what
+// becomes of it: an answer late.Keep takes is kept, and the next call of op at
+// path within late.For gets it at once, rather than a change of its own (a
+// mount too slow for d would otherwise never get one through); any other, and
+// a kept one no call came for, goes to late.Undo in the background. The change
+// stays out until its undo is done: a later call meanwhile gets ErrStatTimeout,
+// never a change of its own racing the undo (it would see what the undo is
+// about to remove) nor the undone answer.
+func ChangeWithin[T any](op, path string, d time.Duration, do func(string) (T, error), late Late[T]) (T, error) {
+	key := op + "\x00" + path
+	timeout := func() (T, error) {
+		var zero T
+		return zero, &fs.PathError{Op: op, Path: path, Err: ErrStatTimeout}
+	}
+	// undone ends c, out and already unlocked, as undone: its answer is
+	// ErrStatTimeout for whoever waited on it meanwhile.
+	undone := func(c *change, val T) {
+		if late.Undo != nil {
+			late.Undo(val)
+		}
+		changesMu.Lock()
+		c.val, c.err = timeout()
+		delete(changes, key)
+		close(c.done)
+		changesMu.Unlock()
+	}
+	changesMu.Lock()
+	c, ok := changes[key]
+	if ok && c.kept {
+		// A change that finished after its callers gave up: this call's.
+		c.kept = false
+		delete(changes, key)
+		changesMu.Unlock()
+		t, _ := c.val.(T)
+		return t, c.err
+	}
+	if ok && time.Since(c.started) >= d {
+		// Out for longer than this call may wait: its answer is late's when
+		// it comes, never handed to a call that only just asked (it would
+		// take a look that old for its own).
+		changesMu.Unlock()
+		return timeout()
+	}
+	if !ok {
+		c = &change{done: make(chan struct{}), started: time.Now()}
+		changes[key] = c
+		go func() {
+			val, err := do(path)
+			changesMu.Lock()
+			keep := false
+			if c.waiting == 0 && late.Keep != nil && late.For > 0 {
+				if v, ok := late.Keep(val, err); ok {
+					val, keep = v, true
+				}
+			}
+			switch {
+			case c.waiting > 0:
+				c.val, c.err = val, err
+				delete(changes, key)
+				close(c.done)
+				changesMu.Unlock()
+			case keep:
+				c.val, c.err, c.kept = val, err, true
+				changesMu.Unlock()
+				time.AfterFunc(late.For, func() {
+					changesMu.Lock()
+					if !c.kept {
+						changesMu.Unlock()
+						return // a call took it
+					}
+					c.kept = false // out again, as its undo
+					changesMu.Unlock()
+					undone(c, val)
+				})
+			default:
+				changesMu.Unlock()
+				undone(c, val)
+			}
+		}()
+	}
+	c.waiting++
+	changesMu.Unlock()
+	answer := func() (T, error) {
+		t, _ := c.val.(T)
+		return t, c.err
+	}
+	t := time.NewTimer(d - time.Since(c.started))
+	defer t.Stop()
+	select {
+	case <-c.done:
+		return answer()
+	case <-t.C:
+	}
+	changesMu.Lock()
+	defer changesMu.Unlock()
+	select {
+	case <-c.done:
+		// It finished as the bound ran out: this caller still counted, so the
+		// change handed its answer here rather than to late.
+		return answer()
+	default:
+	}
+	c.waiting--
+	return timeout()
+}

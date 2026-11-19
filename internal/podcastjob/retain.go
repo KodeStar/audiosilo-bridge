@@ -74,8 +74,11 @@ func (h *Retain) run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (
 	// A show folder renamed by hand is checked where it is now (as a poll is).
 	// The server names the old folder until its rescan, so its answers grant
 	// no deletion there until then (RetentionEligible: show_path).
-	show, feed, unlock, err := s.lockShow(ctx, root, lib, mount, show, p.ShowID, func(show string) error {
-		return s.beforeWrite(lib, mount, show)
+	// Its write check never waits under the show's lock: while nothing says
+	// whether the folder may be written, the lock is let go, the wait made
+	// without it, and the show found and read again (lockShowToWrite).
+	show, feed, unlock, err := s.lockShowToWrite(ctx, root, lib, mount, show, p.ShowID, func(show string) error {
+		return s.writeNow(lib, mount, show)
 	})
 	if err != nil {
 		return nil, err
@@ -121,14 +124,11 @@ func (h *Retain) run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (
 		var transaction podcast.Journal
 		deleted, err := func() (bool, error) {
 			defer release()
-			unlock, err := s.acquire(ctx, s.showKey(mount, show))
+			unlock, err := s.lockForWrite(ctx, nil, s.showKey(mount, show), lib, mount, show)
 			if err != nil {
 				return false, err
 			}
 			defer unlock()
-			if err := s.beforeWrite(lib, mount, show); err != nil {
-				return false, err
-			}
 			if pairing != s.pairHash() {
 				return false, fail("identity_changed", "The Bridge pairing changed.")
 			}
@@ -153,7 +153,11 @@ func (h *Retain) run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (
 			if err != nil || !eligible() {
 				return false, nil
 			}
-			if err := s.beforeWrite(lib, mount, show); err != nil {
+			// Looked at again without a wait (the show's lock is held): an
+			// episode nothing says may be deleted now is left for the next run.
+			if err := s.writeNow(lib, mount, show); undecided(err) {
+				return false, nil
+			} else if err != nil {
 				return false, err
 			}
 			// Check the elapsed request age again after the last mapping probe.

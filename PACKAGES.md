@@ -181,7 +181,18 @@ internal/
             whole; one n per path), for the endpoint's agent service's mount check
             (agentrun's mounts.go). LookWithin(op, path, d, look) bounds any other
             look the same way, one in flight per op and path (mapping's write
-            probe, ProbeWritable).
+            probe, ProbeWritable). ChangeWithin(op, path, d, do, late) is
+            LookWithin for a look that writes (a podcast check's marker): its
+            answer goes to every caller still waiting (a call that finds the
+            change already out past d is ErrStatTimeout at once, never handed a
+            look that old), and when every caller gave up past d, late says what
+            becomes of it: one late.Keep takes is kept for the next call of that
+            op and path within late.For, which gets it at once instead of a
+            change of its own (a mount too slow for d still gets one through);
+            any other, and a kept one no call came for, goes to late.Undo, so
+            nothing it made is left with nobody to clean it up; the change stays
+            out until the undo is done (a call meanwhile is ErrStatTimeout,
+            never a change of its own racing the undo).
   execfile/ writes files the process will exec at once with syscall.ForkLock
             held for reading from open to close, so a concurrent fork can't hold
             the write descriptor and make the exec fail with ETXTBSY (WriteFile).
@@ -2269,17 +2280,56 @@ internal/
             local failure), and LibriVox's "mapping gone" timer starts only on
             one. The page sees an unknown mapped state as not mapped (an unmapped
             one keeps its own reason) and Entry.Unknown badges it "Waiting for
-            the server"; the heartbeat (Statuses) reports each state as recorded,
+            the server" ("Waiting for the folder" with slow_at); the heartbeat (Statuses) reports each state as recorded,
             not aged, since the server takes "not mapped" as definite (it refuses
             new write jobs and holds a podcast show's polls 30 min), and the jobs
             it queues wait here. Every look at a
-            library's folder (its stat, the book files' stats, the write probe,
-            a podcast folder's stat before it is opened) is bounded by
-            LookTimeout (5 s, fsutil.StatWithin and fsutil.LookWithin: one look
-            per path out, a later one waits on it): a hung mount fails that
-            library's check, recorded (a hung file stat ends the comparison),
-            and the run goes on; ProbeWritable and CompareFiles are bounded for
-            their other callers too. A 429, a refused
+            library's folder (its stat, the book files' stats, the write probe)
+            is bounded by LookTimeout (5 s, fsutil.StatWithin and
+            fsutil.LookWithin: one look per path out, a later one waits on it),
+            and a podcast check waits that long for its whole look before the
+            server's read (open, marker read, a stale marker's removal, write
+            probe, marker write: lookPodcast), ONE change (fsutil.ChangeWithin,
+            one per library and mount; a failed check's own undo of its marker
+            is that change too, so a look meanwhile is slow rather than read a
+            marker about to go). The look goes on past the check's wait and
+            bounds itself (lookPace): each step by LookTimeout, the whole by
+            LookCeiling (30 s); past either it ends as a timeout, what it made
+            undone, never a definite problem. A whole look that answered late
+            (a mount that is slow but working, about 18 round trips for a first
+            marker) is KEPT with the marker it wrote for the library's next
+            check (LookKeptFor, 3 min; podcastFound.kept), which takes it
+            instead of looking again, first making sure the folder still shows
+            the marker (a share unmounted in between: unknown, the server not
+            asked), so such a mount is mapped one check later instead of never;
+            a kept look no check came for is undone. A
+            look past LookTimeout is UNKNOWN, never a definite answer (an Unraid
+            array disk spinning up takes about 8 s): the check returns folderSlow
+            as its unanswered error, and the Registry keeps the last state as
+            for an unanswered check (same mount, proveKept, the KeptChecks cap;
+            else the failure, unknown, whose reason says the folder is not
+            answering; a podcast look that timed out goes on and writes a marker
+            where it finds none, so the marker proveKept then sees keeps a state
+            only while no marker write at that folder is unsettled, i.e. not yet
+            removed again or read back by the server: markerWrites,
+            folderSlow.wrote, never the look's own marker on a bare mount
+            point), with Entry.SlowAt (slow_at; it and UnansweredAt are
+            exclusive, the later stands) for the page's "The folder did not
+            answer within 5 s" note. It neither ends the run nor sets the hold:
+            the library is due again after LookAgain (1 min, result.slow;
+            by LookAgain alone: no retry flag, and not by the kept state's age,
+            often past the interval, or the run's beat would check again at once,
+            a tight loop), and a run due only for slow folders checks just those
+            (DueIDs; the heartbeat passes them to CheckMappings). A hung file stat
+            ends the comparison; one after a file that answered with another size
+            leaves the mismatch definite (CompareFiles' timeout is nil then).
+            ProbeWritable and CompareFiles are bounded for their other callers
+            too, and CompareFiles returns the stat's timeout as its fourth result:
+            generate's prepare looks again every Poll (no park; a library
+            mapped to another folder meanwhile ends the wait, errRemapped, and
+            prepare goes on through the new mount once its check stands), verify retries
+            within its book-read budget, podcastjob's beforeWrite probes again,
+            so a slow folder never fails a job. A 429, a refused
             token or a request timeout ends the pass: the rest keep their state
             only as an unanswered check would (keepUnreached: same mount, the
             folder still showing it, else the failure); checks
@@ -2593,7 +2643,9 @@ internal/
             failing at once: mapping.BookReadSettled, generate's fetchBook rule
             too; each retry a warning in the log), CompareFiles through the mount, probes the BOOK's folder for
             writing (spike 3: a root probe passed while a 0555 book folder refused),
-            then holds, reporting each second. A mismatch is a failure WITH a result.
+            then holds, reporting each second. A comparison or probe the folder
+            doesn't answer within mapping.LookTimeout is tried again with the
+            book read's backoff and budget (whileSlow). A mismatch is a failure WITH a result.
             Result {library_id, mount_path, path, files[{path,size,expected_size,ok}],
             writable, writable_error, elapsed_ms}: the server's console renders it.
   netguard/ Stream adds a one-attempt audio GET over the same guard and transport,
@@ -2720,7 +2772,36 @@ internal/
             download as its ordinary lane. Subscribe, poll and retain do not opt in.
             podcast.subscribe and podcast.poll (light lane): require the
             heartbeat's podcasts kind and the checked writable mount at each
-            write. Per-library subscribe and per-show write locks, hash dedupe,
+            write. While no check stands at that mount (none yet, unanswered, a
+            look past LookTimeout, aged past the cap: writable's
+            errMappingUnknown) a job waits, CheckPoll apart, at most a ceiling
+            per wait (library, beforeWrite; a wait cut short is
+            ctx's error, bridge_lost), and so does a write probe the folder
+            doesn't answer in time (errFolderSlow; writeNow is the one look,
+            undecided either of the two); only a standing "not mapped"/"not
+            writable" or a refused probe fails it library_not_writable. A
+            fetch and a retain never make that wait under a show's lock
+            (lockForWrite: wait without the lock, take it, look once more under
+            it, let it go and wait again when undecided; the fetch's
+            publication confirms its lease after the wait and does it all again
+            when nothing stands by then; a retain leaves an episode whose last
+            look before the deletion is undecided for the next run), so the
+            show's polls and other episodes go on; a follow's and a poll's
+            save still waits under the lock its feed fetch already holds for up
+            to the same ceiling. A take-in of a renamed folder (adopt, under
+            the lock) looks once (writeNow): undecided, every job lets the lock
+            go, waits without it and finds the show again (lockShowToWrite, a
+            folder renamed again meanwhile included; a follow re-reads its show
+            the same way, by the id it found), and artwork's look never
+            waits (an undecided one leaves the image for the next poll, no
+            failure counted). A fetch also gives its download-lane slot back
+            while such a wait may last (yieldSlot: a check that doesn't stand
+            or a slow folder, not a library with no check yet) and takes one
+            again within its own context before it goes on (reclaim, as
+            librivoxjob.mapped does), so the lane's one download is never held
+            by a job waiting for a folder. A download's
+            per-second check goes on through an unknown state (its publication
+            waits), and the sweeps skip such a library. Per-library subscribe and per-show write locks, hash dedupe,
             cache rebuild, artwork sniffing, permanent moves and targeted rescan.
             A show folder renamed by hand (bridge#13) is taken in under the show
             lock when its read refuses (readShow, adopt: episodes, downloads,
@@ -3873,7 +3954,10 @@ internal/
             mount must match; locate SafeJoins the path (a folder book, or a
             single-file book whose attachments get a "<stem>." prefix); waitWritable
             probes the BOOK's own folder (spike 3), parking book_not_writable and
-            checking again every minute or on Retry. create: chooseSource (auto takes
+            checking again every minute or on Retry. A comparison or probe the
+            folder doesn't answer within mapping.LookTimeout waits instead,
+            looking again every Poll (or on Retry), unparked (compareFiles,
+            waitWritable). create: chooseSource (auto takes
             exactly one readable .epub directly in the book's folder, dot files
             skipped, or "<stem>.epub" beside a single file; readable = its OPF parses,
             so a DRM-wrapped file falls back to the audio with a note; several .epub

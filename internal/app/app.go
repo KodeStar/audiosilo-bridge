@@ -566,8 +566,12 @@ func (b *Bridge) beat(ctx context.Context) {
 	// The dispatcher compares eligibility, so an unchanged heartbeat leaves
 	// outstanding claims alone while capability changes refresh them now.
 	b.runner.Wake()
-	if due := b.libs.Due(time.Now(), interval); changed || due {
-		b.CheckMappings(ctx)
+	// A run due only for slow folders checks just those (DueIDs).
+	if due, ids := b.libs.DueIDs(time.Now(), interval); changed || due {
+		if changed {
+			ids = nil
+		}
+		b.CheckMappings(ctx, ids...)
 	}
 }
 

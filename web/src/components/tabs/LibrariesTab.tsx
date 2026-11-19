@@ -79,9 +79,11 @@ export function LibrariesTab({ client }: { client: ApiClient }) {
 }
 
 // resultsKey changes when any library's check results do: an answered check
-// moves checked_at, an unanswered one unanswered_at.
+// moves checked_at, an unanswered one unanswered_at, a slow folder slow_at.
 function resultsKey(libraries: Library[]): string {
-  return JSON.stringify(libraries.map((l) => [l.library.id, l.checked_at, l.unanswered_at]));
+  return JSON.stringify(
+    libraries.map((l) => [l.library.id, l.checked_at, l.unanswered_at, l.slow_at]),
+  );
 }
 
 function LibraryCard({
@@ -165,6 +167,19 @@ function LibraryCard({
                 ? 'Writes wait for a check it answers.'
                 : 'These are the results of the check before it.'}{' '}
               The Bridge will check again.
+            </span>
+          </Row>
+        )}
+        {lib.slow_at && (
+          <Row label="Last check">
+            <span className="text-amber-300">
+              {/* 5 s: the Bridge's mapping.LookTimeout. */}
+              The folder did not answer within 5 s (<Ago at={lib.slow_at} />
+              ).{' '}
+              {lib.unknown
+                ? 'Writes wait until it does.'
+                : 'These are the results of the check before it.'}{' '}
+              The Bridge will look again.
             </span>
           </Row>
         )}

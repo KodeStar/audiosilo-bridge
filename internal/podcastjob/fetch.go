@@ -154,12 +154,17 @@ func (h *Fetch) run(parent context.Context, claimed *jobs.Job, rep *jobs.Reporte
 	if job.Path == nil || !podcast.ValidEpisodePath(*job.Path) || json.Unmarshal(job.Params, &params) != nil || !podcast.ValidID(params.ShowID) || !podcast.ValidID(params.EpisodeID) {
 		return nil, fail("episode_not_found", "The podcast episode was not found.")
 	}
-	waitCtx, cancel := context.WithTimeout(parent, ceiling)
-	defer cancel()
-	lib, mount, err := s.library(waitCtx, job, rep)
+	// The lane holds one download: a fetch gives its slot back while it waits
+	// for its library's mapping, here and at each write below (fetchLibrary,
+	// lockForWrite).
+	lib, mount, err := s.fetchLibrary(parent, job, rep)
 	if err != nil {
 		return nil, err
 	}
+	// The show's wait has a ceiling of its own: the library's may have gone
+	// on a wait for a lane slot.
+	waitCtx, cancel := context.WithTimeout(parent, ceiling)
+	defer cancel()
 	root, err := os.OpenRoot(mount)
 	if err != nil {
 		return nil, err
@@ -190,14 +195,11 @@ func (h *Fetch) run(parent context.Context, claimed *jobs.Job, rep *jobs.Reporte
 			return nil, err
 		}
 	}
-	unlock, err := s.acquire(parent, s.o.ServerID()+"|fetch|"+mount+"/"+*job.Path)
+	unlock, err := s.lockForWrite(parent, rep, s.o.ServerID()+"|fetch|"+mount+"/"+*job.Path, lib, mount, path.Dir(*job.Path))
 	if err != nil {
 		return nil, err
 	}
 	defer unlock()
-	if err := s.beforeWrite(lib, mount, path.Dir(*job.Path)); err != nil {
-		return nil, err
-	}
 	lock, err := s.lockEpisode(parent, root, *job.Path)
 	if err != nil {
 		return nil, err
@@ -223,7 +225,7 @@ func (h *Fetch) run(parent context.Context, claimed *jobs.Job, rep *jobs.Reporte
 	// along even when another open row names it (adoptOwn).
 	s.adoptOwn(job, root, claimedAt, params, "")
 	pairing := s.pairHash()
-	f, e, err := s.fetchSnapshot(parent, root, lib, mount, *job.Path, params)
+	f, e, err := s.fetchSnapshot(parent, rep, root, lib, mount, *job.Path, params)
 	if err != nil {
 		return nil, err
 	}
@@ -510,36 +512,43 @@ func (h *Fetch) run(parent context.Context, claimed *jobs.Job, rep *jobs.Reporte
 			return nil, err
 		}
 	}
-	unlockShow, err := s.acquire(ctx, s.showKey(mount, path.Dir(e.Path)))
-	if err != nil {
-		return nil, err
-	}
-	err = func() error {
+	// publish saves the episode under its show's lock, taken once the show's
+	// folder may be written: a mapping whose check stopped standing while the
+	// episode downloaded is waited for without the lock (lockForWrite), so the
+	// show's polls and its other episodes go on meanwhile, and the lease is
+	// confirmed after that wait, right before the publication. again: nothing
+	// stood any more once the lease was confirmed, so it is all done again.
+	publish := func() (again bool, _ error) {
+		unlockShow, err := s.lockForWrite(ctx, rep, s.showKey(mount, path.Dir(e.Path)), lib, mount, path.Dir(e.Path))
+		if err != nil {
+			return false, err
+		}
 		defer unlockShow()
 		if err := rep.ConfirmLease(ctx); err != nil {
 			if overBudget(ctx) {
-				return ctx.Err() // the ceiling passed: the episode's timeout (b.failure), not a lost claim
+				return false, ctx.Err() // the ceiling passed: the episode's timeout (b.failure), not a lost claim
 			}
-			return leaseFailure(ctx, err, "The episode job no longer owns its claim.")
+			return false, leaseFailure(ctx, err, "The episode job no longer owns its claim.")
 		}
 		if pairing != s.pairHash() {
-			return fail("identity_changed", "The Bridge pairing changed.")
+			return false, fail("identity_changed", "The Bridge pairing changed.")
 		}
-		if err := s.beforeWrite(lib, mount, path.Dir(e.Path)); err != nil {
-			return err
+		// The lease's round trip since the lock's own look (lockForWrite).
+		if err := s.writable(lib, mount); err != nil {
+			return errors.Is(err, errMappingUnknown), err
 		}
 		if err := podcast.RecoverShow(root, path.Dir(e.Path), s.o.Now(), s.o.Fault); err != nil {
-			return err
+			return false, err
 		}
 		feed, latest, err := s.readEpisode(root, e.Path, params)
 		if err != nil {
-			return err
+			return false, err
 		}
 		if !sameFetch(latest.Fetch, e.Fetch) {
-			return fail("identity_changed", "The episode generation changed.")
+			return false, fail("identity_changed", "The episode generation changed.")
 		}
 		if ctx.Err() != nil {
-			return ctx.Err()
+			return false, ctx.Err()
 		}
 		j := podcast.Journal{Version: 1, Op: "install", ShowID: params.ShowID, EpisodeID: e.ID, Path: e.Path, AudioTemp: c.Temp, Fetch: received, Chapters: chapters}
 		// Once a journal exists recovery owns the candidate, including on a failed
@@ -549,8 +558,11 @@ func (h *Fetch) run(parent context.Context, claimed *jobs.Job, rep *jobs.Reporte
 		if _, e := root.Lstat(podcast.AttachmentPath(j.Path, ".publish.json")); e == nil {
 			c.Temp = ""
 		}
-		return err
-	}()
+		return false, err
+	}
+	for again := true; again; {
+		again, err = publish()
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -589,8 +601,9 @@ func leaseFailure(ctx context.Context, err error, lost string) error {
 // folder in there) or none does. write_failed when the records cannot be
 // read: the fetch waits, as a take-in does (adopt), rather than leave its
 // record and partial behind. ctx's error when it ended while the show lock
-// was awaited. Before a download its show lock is taken and released before
-// the fetch's own locks; during one (settle) and after it, under them (the
+// was awaited, or while a take-in waited for the folder (lockShowToWrite).
+// Before a download its show lock is taken and released before the fetch's
+// own locks; during one (settle) and after it, under them (the
 // episode's lock before the show's, as the publication takes them), the
 // episode's lock then following to the new path (followLock).
 func (s *service) episodeAt(ctx context.Context, root *os.Root, lib link.Library, mount, p string, params fetchParams, self int64) (string, error) {
@@ -604,10 +617,15 @@ func (s *service) episodeAt(ctx context.Context, root *os.Root, lib link.Library
 			return p, nil
 		}
 	}
-	show, _, unlock, err := s.lockShow(ctx, root, lib, mount, from, params.ShowID, nil)
+	// A take-in that cannot tell whether the folder may be written waits
+	// without the show's lock (lockShowToWrite).
+	show, _, unlock, err := s.lockShowToWrite(ctx, root, lib, mount, from, params.ShowID, nil)
 	if err != nil {
 		if ctx.Err() != nil {
 			return p, ctx.Err() // a stop or the ceiling, not a show that is gone
+		}
+		if errors.Is(err, context.DeadlineExceeded) {
+			return p, err // that wait's own ceiling passed
 		}
 		return p, nil
 	}
@@ -711,15 +729,17 @@ func (s *service) readEpisode(root *os.Root, p string, params fetchParams) (*pod
 	}
 	return nil, podcast.Episode{}, fail("episode_not_found", "The podcast episode was not found.")
 }
-func (s *service) fetchSnapshot(ctx context.Context, root *os.Root, lib link.Library, mount, p string, params fetchParams) (*podcast.Feed, podcast.Episode, error) {
-	unlock, err := s.acquire(ctx, s.showKey(mount, path.Dir(p)))
+
+// fetchSnapshot recovers the show's pending journals and reads the fetch's
+// episode under the show's lock, taken once the show's folder may be written
+// (lockForWrite: the fetch waits for that without the lock, its lane slot,
+// rep's, given back meanwhile).
+func (s *service) fetchSnapshot(ctx context.Context, rep *jobs.Reporter, root *os.Root, lib link.Library, mount, p string, params fetchParams) (*podcast.Feed, podcast.Episode, error) {
+	unlock, err := s.lockForWrite(ctx, rep, s.showKey(mount, path.Dir(p)), lib, mount, path.Dir(p))
 	if err != nil {
 		return nil, podcast.Episode{}, err
 	}
 	defer unlock()
-	if err := s.beforeWrite(lib, mount, path.Dir(p)); err != nil {
-		return nil, podcast.Episode{}, err
-	}
 	if err := podcast.RecoverShow(root, path.Dir(p), s.o.Now(), s.o.Fault); err != nil {
 		return nil, podcast.Episode{}, err
 	}
@@ -1106,7 +1126,10 @@ func (s *service) consume(ctx context.Context, b *budget, job *jobs.Job, root *o
 		if !ok {
 			return fail("library_not_writable", "The podcast mapping changed.")
 		}
-		if err := s.writable(lib, root.Name()); err != nil {
+		// A check that doesn't stand says nothing about the mapping: the
+		// download goes on into its partial, and the publication waits for
+		// one (lockForWrite).
+		if err := s.writable(lib, root.Name()); err != nil && !errors.Is(err, errMappingUnknown) {
 			return err
 		}
 		if c.ServerHash != s.pairHash() {

@@ -7,11 +7,16 @@ export function mountSource(lib: Library): string {
 }
 
 // checkBadges are the mapped and writable badges of a library's last check
-// (none before its first check, and none while no check stands: unknown).
+// (none before its first check, and none while no check stands: unknown, then
+// waiting for whichever didn't answer, the folder or the server).
 export function checkBadges(lib: Library): { label: string; tone: Tone }[] {
   const st = lib.status;
   if (!st) return [{ label: 'Not checked yet', tone: 'muted' }];
-  if (lib.unknown) return [{ label: 'Waiting for the server', tone: 'warn' }];
+  if (lib.unknown) {
+    return [
+      { label: lib.slow_at ? 'Waiting for the folder' : 'Waiting for the server', tone: 'warn' },
+    ];
+  }
   return [
     st.mapped ? { label: 'Mapped', tone: 'good' } : { label: 'Not mapped', tone: 'bad' },
     st.writable ? { label: 'Writable', tone: 'good' } : { label: 'Read only', tone: 'warn' },

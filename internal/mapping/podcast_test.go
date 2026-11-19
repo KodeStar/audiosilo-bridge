@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -231,4 +233,70 @@ func TestPodcastMarkerErrorSplit(t *testing.T) {
 			})
 		}
 	}
+}
+
+// The undo of the marker a failed check wrote is the look's own change: a
+// look of the library asked for while the mount holds that undo waits on it
+// and is slow, rather than read the marker the undo is about to remove (the
+// server's read of it would then fail, a definite "not mapped", or pass and
+// leave a mapped library with no marker). Once the undo is done a look answers
+// again.
+func TestPodcastLookWaitsOnItsUndo(t *testing.T) {
+	t.Parallel()
+	mount := t.TempDir()
+	lib := link.Library{ID: 7, Root: mount, Kind: "podcasts"}
+	release := make(chan struct{})
+	var calls atomic.Int32
+	l := bounded
+	l.podcast = func(op, m string, look func(string) (podcastFound, error)) (podcastFound, error) {
+		n := calls.Add(1)
+		bound := LookTimeout
+		if n == 2 || n == 3 {
+			bound = 20 * time.Millisecond // the held undo, and the look meanwhile
+		}
+		return podcastWithin(bound, LookKeptFor)(op+" (undo test)", m, func(m string) (podcastFound, error) {
+			if n == 2 {
+				<-release // the mount holds the failed check's undo
+			}
+			return look(m)
+		})
+	}
+	var down atomic.Bool
+	down.Store(true)
+	src := markerSourceFunc(func(context.Context, int64) (string, error) {
+		if down.Load() {
+			return "", &link.APIError{Status: http.StatusServiceUnavailable}
+		}
+		b, err := os.ReadFile(filepath.Join(mount, MarkerPath))
+		if err != nil {
+			return "", link.ErrNoMarker
+		}
+		var marker libraryMarker
+		if err := json.Unmarshal(b, &marker); err != nil {
+			return "", err
+		}
+		return marker.Nonce, nil
+	})
+	current := func(int64) bool { return false }
+	var lost unproven
+	if st, unanswered := l.checkPodcast(context.Background(), src, lib, mount, current); st.Mapped || !errors.As(unanswered, &lost) {
+		t.Fatalf("a check the server didn't answer = %+v, %v", st, unanswered)
+	}
+	if _, err := os.Stat(filepath.Join(mount, MarkerPath)); err != nil {
+		t.Fatalf("the held undo already removed the marker: %v", err)
+	}
+	down.Store(false)
+	var slow folderSlow
+	if st, unanswered := l.checkPodcast(context.Background(), src, lib, mount, current); st.Mapped || !errors.As(unanswered, &slow) {
+		t.Fatalf("a look while the undo is held = %+v, %v; want slow", st, unanswered)
+	}
+	close(release)
+	waitUntil(t, "the undo's removal of the marker folder", func() bool {
+		_, err := os.Lstat(filepath.Join(mount, ".audiosilo"))
+		return errors.Is(err, os.ErrNotExist)
+	})
+	waitUntil(t, "a look that answers once the undo is done", func() bool {
+		st, unanswered := l.checkPodcast(context.Background(), src, lib, mount, current)
+		return st.Mapped && st.Writable && unanswered == nil
+	})
 }

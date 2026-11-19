@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -22,8 +23,10 @@ import (
 	"github.com/kodestar/audiosilo-bridge/internal/audio"
 	"github.com/kodestar/audiosilo-bridge/internal/contrib"
 	"github.com/kodestar/audiosilo-bridge/internal/events"
+	"github.com/kodestar/audiosilo-bridge/internal/fsutil"
 	"github.com/kodestar/audiosilo-bridge/internal/jobs"
 	"github.com/kodestar/audiosilo-bridge/internal/link"
+	"github.com/kodestar/audiosilo-bridge/internal/mapping"
 	"github.com/kodestar/audiosilo-bridge/internal/scheduler"
 	"github.com/kodestar/audiosilo-bridge/internal/state"
 	"github.com/kodestar/audiosilo-bridge/internal/store"
@@ -736,6 +739,117 @@ func TestGenerateLibraryNotWritable(t *testing.T) {
 	hr.waitFor("failed", func() bool { s, _ := hr.srv.final(27); return s == link.StateFailed })
 	if _, final := hr.srv.final(27); final.Error == nil || !strings.Contains(*final.Error, "read-only") {
 		t.Fatalf("error = %v", final.Error)
+	}
+}
+
+// A comparison or a write probe the library's folder doesn't answer within
+// mapping.LookTimeout (an array disk spinning up) says nothing about the copy:
+// the job looks again rather than failing or parking, and goes on once the
+// folder answers. Denied: a comparison the folder answers with another size
+// still fails the job.
+func TestGenerateWaitsForASlowFolder(t *testing.T) {
+	t.Parallel()
+	slow := func(op, path string) error {
+		return &fs.PathError{Op: op, Path: path, Err: fsutil.ErrStatTimeout}
+	}
+	hr := newHarness(t)
+	var compares, probes atomic.Int32
+	hr.h.compare = func(mount string, files []link.BookFile) ([]mapping.FileCheck, bool, string, error) {
+		if compares.Add(1) <= 2 {
+			return nil, false, "Author/Book/01.mp3: not answering", slow("stat", mount)
+		}
+		return mapping.CompareFiles(mount, files)
+	}
+	hr.h.probe = func(dir string) error {
+		if probes.Add(1) <= 2 {
+			return slow("probe", dir)
+		}
+		return mapping.ProbeWritable(dir)
+	}
+	hr.srv.add(98, "Author/Book", `{}`)
+	stop := hr.runner(hr.h)
+	hr.waitFor("the engine's book once the folder answered", func() bool {
+		_, err := hr.db.GetGenerateBook(context.Background(), 98)
+		return err == nil
+	})
+	stop()
+	if _, final := hr.srv.final(98); final.Error != nil && *final.Error != "" {
+		t.Fatalf("a slow folder failed the job: %s", *final.Error)
+	}
+	if hr.srv.saw(98, func(u link.Update, p map[string]any) bool { return p["park"] != nil }) {
+		t.Fatal("a slow folder parked the job")
+	}
+	if compares.Load() < 3 || probes.Load() < 3 {
+		t.Fatalf("looked %d and %d times, want the slow looks tried again", compares.Load(), probes.Load())
+	}
+
+	hr = newHarness(t)
+	hr.h.compare = func(mount string, files []link.BookFile) ([]mapping.FileCheck, bool, string, error) {
+		return nil, false, "Author/Book/01.mp3: size differs", nil
+	}
+	hr.srv.add(99, "Author/Book", `{}`)
+	stop = hr.runner(hr.h)
+	defer stop()
+	hr.waitFor("failed", func() bool { s, _ := hr.srv.final(99); return s == link.StateFailed })
+	if _, final := hr.srv.final(99); final.Error == nil || !strings.Contains(*final.Error, "doesn't match the server's") {
+		t.Fatalf("error = %v", final.Error)
+	}
+}
+
+// remapLibs is the harness's library mapped at mount, which a test moves
+// (the mapping edited to another folder).
+type remapLibs struct{ mount atomic.Pointer[string] }
+
+func (l *remapLibs) Library(id int64) (link.Library, bool) {
+	return link.Library{ID: 1, Name: "Books", Root: "/books"}, id == 1
+}
+
+func (l *remapLibs) Status(id int64) (link.LibraryStatus, bool) {
+	return link.LibraryStatus{LibraryID: 1, MountPath: *l.mount.Load(), Mapped: true, Writable: true}, id == 1
+}
+
+// A library mapped to another folder while the job waits on one that doesn't
+// answer ends the wait: the old mount is never looked at again, and the job
+// compares, locates and probes the book through the new one, then goes on.
+func TestGenerateSlowFolderWaitFollowsARemap(t *testing.T) {
+	t.Parallel()
+	hr := newHarness(t)
+	moved := filepath.Join(t.TempDir(), "lib")
+	mustWrite(t, filepath.Join(moved, "Author", "Book", "01.mp3"), "audio-one")
+	mustWrite(t, filepath.Join(moved, "Author", "Book", "02.mp3"), "audio-two!")
+	libs := &remapLibs{}
+	libs.mount.Store(&hr.root)
+	h := hr.handler()
+	h.o.Libraries = libs
+	h.o.Mount = func(int64, string) (string, bool) { return *libs.mount.Load(), false }
+	var atOld, atNew atomic.Int32
+	h.compare = func(mount string, files []link.BookFile) ([]mapping.FileCheck, bool, string, error) {
+		if mount == hr.root {
+			if atOld.Add(1) == 2 {
+				libs.mount.Store(&moved) // the mapping is edited while the old folder hangs
+			}
+			return nil, false, "Author/Book/01.mp3: not answering", &fs.PathError{Op: "stat", Path: mount, Err: fsutil.ErrStatTimeout}
+		}
+		atNew.Add(1)
+		return mapping.CompareFiles(mount, files)
+	}
+	var probed atomic.Pointer[string]
+	h.probe = func(dir string) error {
+		probed.Store(&dir)
+		return mapping.ProbeWritable(dir)
+	}
+	hr.srv.add(98, "Author/Book", `{}`)
+	stop := hr.runner(h)
+	hr.waitFor("the engine's book through the new mount", func() bool {
+		_, err := hr.db.GetGenerateBook(context.Background(), 98)
+		return err == nil
+	})
+	stop()
+	if atOld.Load() != 2 || atNew.Load() < 1 {
+		t.Fatalf("compared %d times at the old mount and %d at the new one, want 2 and at least 1", atOld.Load(), atNew.Load())
+	}
+	if dir := probed.Load(); dir == nil || !strings.HasPrefix(*dir, moved) {
+		t.Fatalf("the write probe looked at %v, want the book under the new mount", dir)
 	}
 }
 

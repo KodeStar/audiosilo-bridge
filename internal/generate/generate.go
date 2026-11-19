@@ -162,6 +162,10 @@ type Handler struct {
 	// unusableFor is how long a book read keeps asking through answers that
 	// can't be used (mapping.BookReadBudget; shorter in tests).
 	unusableFor time.Duration
+	// compare and probe, seams (tests), are mapping.CompareFiles and
+	// mapping.ProbeWritable, each bounded by mapping.LookTimeout.
+	compare func(mount string, files []link.BookFile) ([]mapping.FileCheck, bool, string, error)
+	probe   func(dir string) error
 }
 
 // endSignal is the channel the next job end here closes. A waiter takes it
@@ -226,7 +230,8 @@ func New(o Options) *Handler {
 		o.ContribCredential = func(context.Context) error { return nil }
 	}
 	return &Handler{o: o, pokes: map[int64]runHandle{}, loopParks: map[int64]loopPark{},
-		woken: map[state.ParkCode]uint64{}, unusableFor: mapping.BookReadBudget}
+		woken: map[state.ParkCode]uint64{}, unusableFor: mapping.BookReadBudget,
+		compare: mapping.CompareFiles, probe: mapping.ProbeWritable}
 }
 
 // loopPark is a park a run waits on in its own loop (loopParks): its code, and
@@ -1078,12 +1083,11 @@ func (h *Handler) waitEngine(ctx context.Context, r *run) (Engine, error) {
 // prepare resolves the library and the book through the CHECKED mapping, fetches
 // the book from the server, compares its files and makes sure the book's own
 // folder can be written. strict (a new job) fails on a library that isn't mapped
-// and writable; a resumed one waits for it, parked.
+// and writable; a resumed one waits for it, parked. A library mapped to another
+// folder while the job waited on this one (errRemapped) is looked at through
+// the new mapping, once its check stands.
 func (h *Handler) prepare(ctx context.Context, r *run, strict bool) error {
-	if err := h.serverLibrary(r); err != nil {
-		return err
-	}
-	if err := h.waitMapped(ctx, r, strict); err != nil {
+	if err := h.mapLibrary(ctx, r, strict); err != nil {
 		return err
 	}
 	book, err := h.fetchBook(ctx, r)
@@ -1094,8 +1098,31 @@ func (h *Handler) prepare(ctx context.Context, r *run, strict bool) error {
 	if book.Path != "" {
 		r.rel = book.Path
 	}
-	if _, ok, problem := mapping.CompareFiles(r.mount, book.Files); !ok {
-		return errors.New("the Bridge's copy of the book doesn't match the server's: " + problem)
+	for {
+		err := h.prepareAt(ctx, r)
+		if !errors.Is(err, errRemapped) {
+			return err
+		}
+		if err := h.mapLibrary(ctx, r, strict); err != nil {
+			return err
+		}
+	}
+}
+
+// mapLibrary sets the run's server and library (serverLibrary) and waits for
+// the library's mapping (waitMapped), r.mount then the mount it stands at.
+func (h *Handler) mapLibrary(ctx context.Context, r *run, strict bool) error {
+	if err := h.serverLibrary(r); err != nil {
+		return err
+	}
+	return h.waitMapped(ctx, r, strict)
+}
+
+// prepareAt compares the book's files (r.files) through r.mount, locates the
+// book there and makes sure its folder can be written.
+func (h *Handler) prepareAt(ctx context.Context, r *run) error {
+	if err := h.compareFiles(ctx, r, r.files); err != nil {
+		return err
 	}
 	p, err := locate(r.mount, r.rel)
 	if err != nil {
@@ -1103,6 +1130,65 @@ func (h *Handler) prepare(ctx context.Context, r *run, strict bool) error {
 	}
 	r.place = p
 	return h.waitWritable(ctx, r)
+}
+
+// errRemapped ends a wait on r.mount's folder once the library is mapped to
+// another one (a mapping edited while the folder didn't answer): the old
+// mount is never looked at again.
+var errRemapped = errors.New("the library was mapped to another folder")
+
+// remapped reports whether the library's mount is no longer r.mount.
+func (h *Handler) remapped(r *run) bool {
+	root := r.lib.Root
+	if lib, ok := h.o.Libraries.Library(r.lib.ID); ok {
+		root = lib.Root
+	}
+	mount, _ := h.o.Mount(r.lib.ID, root)
+	return mount != r.mount
+}
+
+// compareFiles compares the book's files through the mount with the server's,
+// looking again every Poll (or on a Retry) while a stat gets no answer within
+// mapping.LookTimeout (a disk spinning up, a mount that hangs): that says
+// nothing about the copy, so only a comparison the folder answered fails the
+// job.
+func (h *Handler) compareFiles(ctx context.Context, r *run, files []link.BookFile) error {
+	for {
+		_, ok, problem, timeout := h.compare(r.mount, files)
+		switch {
+		case ok:
+			return nil
+		case timeout == nil:
+			return errors.New("the Bridge's copy of the book doesn't match the server's: " + problem)
+		}
+		if err := h.folderWait(ctx, r, "Waiting for the library's folder to answer"); err != nil {
+			return err
+		}
+	}
+}
+
+// folderWait waits Poll (or for a Retry) before looking again at a folder that
+// didn't answer a look in time, reporting the wait as msg unless the job is
+// parked on a reason of the Bridge's own (its message stays). The mapping is
+// read again after each wait: a library mapped to another folder meanwhile
+// ends it (errRemapped).
+func (h *Handler) folderWait(ctx context.Context, r *run, msg string) error {
+	if !r.ownPark {
+		r.rep.Progress(jobs.Progress{Step: stepWaiting, Message: msg})
+	}
+	return h.mountWait(ctx, r, time.Now().Add(h.o.Poll))
+}
+
+// mountWait is recheckWait for a look at r.mount's folder: a library mapped
+// to another folder meanwhile ends it (errRemapped).
+func (h *Handler) mountWait(ctx context.Context, r *run, at time.Time) error {
+	if err := h.recheckWait(ctx, r, at); err != nil {
+		return err
+	}
+	if h.remapped(r) {
+		return errRemapped
+	}
+	return nil
 }
 
 // serverLibrary sets the run's server and the job's library as the server
@@ -1206,15 +1292,24 @@ func (h *Handler) waitMapped(ctx context.Context, r *run, strict bool) error {
 // waitWritable checks the book's own folder can be written (a library root that
 // is writable says nothing about a 0555 book folder, spike 3), parking
 // book_not_writable and checking again every Recheck (or on Retry) until it can.
+// A probe the folder didn't answer within mapping.LookTimeout says nothing
+// either way: it is tried again every Poll (or on a Retry), without a park.
+// Either wait ends once the library is mapped to another folder (errRemapped).
 func (h *Handler) waitWritable(ctx context.Context, r *run) error {
 	for {
-		err := mapping.ProbeWritable(r.place.dir)
+		err := h.probe(r.place.dir)
 		if err == nil {
 			r.unparkOwn()
 			return nil
 		}
+		if errors.Is(err, fsutil.ErrStatTimeout) {
+			if err := h.folderWait(ctx, r, "Waiting for the book's folder to answer"); err != nil {
+				return err
+			}
+			continue
+		}
 		h.park(r, parkBookNotWritable, "the Bridge can't write in the book's folder ("+writeProblem(err)+")")
-		if err := h.recheckWait(ctx, r, time.Now().Add(h.o.Recheck)); err != nil {
+		if err := h.mountWait(ctx, r, time.Now().Add(h.o.Recheck)); err != nil {
 			return err
 		}
 	}
