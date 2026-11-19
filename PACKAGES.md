@@ -1643,6 +1643,11 @@ internal/
             attempt follows the book again (mapping open, row running) with
             share_off unset and no other generate job mapped to the book has
             share_off (shareResumableSQL; ShareResumable reads the same).
+            0019 (bridge#50) adds
+            audible_push.row_read: when the feed row last recorded was read (row_seen
+            until RearmAudiblePush moves that one for the push's wait; set with it by
+            Want/Seen/PendAudiblePush, forgotten with it), what a read from the start
+            compares a row's updated_at with.
   state/    per-book pipeline state machine: table-driven states/lanes/transitions,
             CanStart/NextState guards, the audit fix-loop cap. Pure, no I/O. M6 added
             ParkCode (typed park reasons - M7 added contrib_unavailable, core_needed,
@@ -3109,8 +3114,8 @@ internal/
             page came back, not the pass's start),
             is history again whatever its place, so a server restored from a backup has no place
             from before the baseline written over Audible's) and drops a title's place no later than the one last
-            read for it (olderThanKnown: updated_at not after row_seen, by the server's clock, never at: a place
-            another device wrote between the read and the write to Audible is new; so a backup's row changed
+            read for it (olderThanKnown: updated_at not after row_read, by the server's clock, never at nor row_seen: a place
+            another device wrote between the read and the write to Audible, or a re-arm, is new; so a backup's row changed
             after the baseline but older than the place handled since is history too; a row changed since is a
             new place); refused resetStrikes (3) times with no pass between that had its kept cursor taken (a read
             from the start has none to send, so it neither counts nor ends the run, whatever cursors it follows
@@ -3139,7 +3144,7 @@ internal/
             Bridge wrote the title's last place (last_ms), the server row it last read is
             still that place (within 5 s) and Audible's is behind it by more than 5 s,
             re-arms the push (store.RearmAudiblePush: want_ms = row_ms, row_seen the time of the
-            re-arm, last_ms -1 so the debounce keeps it, only while listed, nothing waiting, no push and no new row since the job read it;
+            re-arm, row_read kept, last_ms -1 so the debounce keeps it, only while listed, nothing waiting, no push and no new row since the job read it;
             Result.Reasserted). The push's read before the write still drops it if Audible
             moved further on. At most once per place the Bridge wrote (reasserted_ms, within 5 s,
             migration 0014; owner decision after review): a sync can't tell the app's stale

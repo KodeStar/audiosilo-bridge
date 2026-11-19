@@ -1241,13 +1241,15 @@ func TestPushRereadOtherBookIsNotOlderThanKnown(t *testing.T) {
 }
 
 // olderThanKnown compares a row's updated_at (the server's clock) with when
-// the Bridge last read the title's place (row_seen, its own clock) moved by
+// the Bridge last read the title's place (row_read, its own clock) moved by
 // the skew either way, and never with when it wrote the place to Audible
-// (at): a place another device wrote between the read and the write is new.
+// (at) or re-armed it (row_seen): a place another device wrote between the
+// read and either is new.
 func TestOlderThanKnown(t *testing.T) {
 	t.Parallel()
 	seen := time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
-	x := store.AudiblePush{RowSeen: store.Timestamp(seen), At: store.Timestamp(seen.Add(3 * time.Minute))}
+	x := store.AudiblePush{RowRead: store.Timestamp(seen), RowSeen: store.Timestamp(seen.Add(10 * time.Minute)),
+		At: store.Timestamp(seen.Add(3 * time.Minute))}
 	for name, c := range map[string]struct {
 		updated time.Time
 		skew    time.Duration
@@ -1265,7 +1267,7 @@ func TestOlderThanKnown(t *testing.T) {
 			t.Errorf("%s: %v, want %v", name, got, c.want)
 		}
 	}
-	if olderThanKnown(seen.Add(-time.Hour), store.AudiblePush{At: x.At}, 0) {
+	if olderThanKnown(seen.Add(-time.Hour), store.AudiblePush{At: x.At, RowSeen: x.RowSeen}, 0) {
 		t.Error("a title never read counts as handled")
 	}
 }
@@ -1323,5 +1325,56 @@ func TestPushRereadSkewAtTheRead(t *testing.T) {
 	p.Tick(ctx)
 	if got := e.sets(); len(got) != 2 || got[1] != "B000000001@21600000" {
 		t.Fatalf("sets = %v, want the place changed after the read written", got)
+	}
+}
+
+// A re-arm (bridge#51) moves when the title's place was first seen, for the
+// push's wait, never when its row was read: a place the server took before the
+// re-arm that this Bridge hasn't read yet is still new on a read from the
+// start after a refused cursor, and is written to Audible (bridge#50).
+func TestPushRereadAfterRearmKeepsUnreadPlace(t *testing.T) {
+	ctx := context.Background()
+	e := newEnv(t)
+	e.list(t, st("B000000001", "A/One", 36000))
+	p := NewPusher(e.o)
+	e.started(t, p)
+
+	// One at 5 h is read and written.
+	e.now = e.now.Add(time.Hour)
+	e.srv.add("A/One", "B000000001", 18000, e.now, "web-1")
+	e.read(p)
+	e.now = e.now.Add(4 * time.Minute)
+	p.Tick(ctx)
+	if got := e.sets(); len(got) != 1 || got[0] != "B000000001@18000000" {
+		t.Fatalf("sets = %v", got)
+	}
+
+	// An hour on the listener moves to 6 h on the server; before the push
+	// reads it, a sync finds Audible behind the place written and re-arms it.
+	e.now = e.now.Add(time.Hour)
+	e.srv.add("A/One", "B000000001", 21600, e.now, "web-1")
+	e.now = e.now.Add(5 * time.Minute)
+	x, err := e.db.GetAudiblePush(ctx, acctID, "B000000001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := e.db.RearmAudiblePush(ctx, x, e.now); err != nil || !ok {
+		t.Fatalf("not re-armed: %v, %v", ok, err)
+	}
+
+	// The cursor is refused: the read from the start gives the place at 6 h,
+	// changed before the re-arm and after the last read.
+	e.srv.mu.Lock()
+	e.srv.badSince = e.account(t).PushCursor
+	e.srv.mu.Unlock()
+	e.read(p) // refused: back to the start
+	e.srv.mu.Lock()
+	e.srv.badSince = ""
+	e.srv.mu.Unlock()
+	e.read(p)
+	e.now = e.now.Add(4 * time.Minute)
+	p.Tick(ctx)
+	if got := e.sets(); len(got) != 2 || got[1] != "B000000001@21600000" {
+		t.Fatalf("sets = %v, want the place written before the re-arm and never read", got)
 	}
 }

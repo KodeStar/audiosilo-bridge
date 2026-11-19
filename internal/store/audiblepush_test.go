@@ -41,7 +41,7 @@ func TestAudiblePushRows(t *testing.T) {
 		t.Fatal(err)
 	}
 	p, err := db.GetAudiblePush(ctx, a.ID, "B000000001")
-	if err != nil || !p.Listed || p.WantMs == nil || *p.WantMs != 60_000 || p.RowMs != 60_000 || p.RowSeen != Timestamp(at) || p.LastMs != -1 ||
+	if err != nil || !p.Listed || p.WantMs == nil || *p.WantMs != 60_000 || p.RowMs != 60_000 || p.RowSeen != Timestamp(at) || p.RowRead != Timestamp(at) || p.LastMs != -1 ||
 		p.ACR != "CR!ACR1" || p.HeardMs != 30_000 || p.RuntimeS != 3600 || p.Path != "A/One" {
 		t.Fatalf("push = %+v, %v", p, err)
 	}
@@ -98,7 +98,7 @@ func TestAudiblePushRows(t *testing.T) {
 		t.Fatal(err)
 	}
 	if p, _ = db.GetAudiblePush(ctx, a.ID, "B000000001"); p.WantMs != nil || p.RowMs != 7 ||
-		p.RowSeen != Timestamp(at.Add(time.Hour)) {
+		p.RowSeen != Timestamp(at.Add(time.Hour)) || p.RowRead != p.RowSeen {
 		t.Fatalf("seen = %+v", p)
 	}
 	list, err := db.AudiblePushes(ctx, a.ID)
@@ -180,7 +180,7 @@ func TestAudiblePushMarkers(t *testing.T) {
 		AudibleRow{Ms: 5_000, Seen: at.Add(2 * time.Minute)}); err != nil {
 		t.Fatal(err)
 	}
-	if p := get(); p.Listed || p.Path != "A/One (right)" || p.WantMs == nil || p.RowSeen != Timestamp(at.Add(2*time.Minute)) ||
+	if p := get(); p.Listed || p.Path != "A/One (right)" || p.WantMs == nil || p.RowSeen != Timestamp(at.Add(2*time.Minute)) || p.RowRead != p.RowSeen ||
 		p.LastMs != 100_000 {
 		t.Fatalf("re-matched = %+v", p)
 	}
@@ -227,7 +227,7 @@ func TestAudiblePushMarkers(t *testing.T) {
 	}
 	// A job listing the title for another book forgets the row last read.
 	_ = db.ListAudibleSync(ctx, a.ID, []AudibleSyncTitle{{ASIN: "B000000003", LibraryID: 1, Path: "A/Elsewhere", RuntimeS: 60}})
-	if p, _ := db.GetAudiblePush(ctx, a.ID, "B000000003"); p.WantMs != nil || p.RowMs != -1 || p.RowSeen != "" {
+	if p, _ := db.GetAudiblePush(ctx, a.ID, "B000000003"); p.WantMs != nil || p.RowMs != -1 || p.RowSeen != "" || p.RowRead != "" {
 		t.Fatalf("re-listed for another book = %+v", p)
 	}
 }
@@ -312,7 +312,7 @@ func TestAudiblePushCursorRemap(t *testing.T) {
 		}
 		got, _ = db.GetAudibleAccount(ctx, a.ID)
 		p, _ = db.GetAudiblePush(ctx, a.ID, "B000000001")
-		if got.PushCursor != "" || got.PushFrom != "" || got.PushReread || p.WantMs != nil || p.Listed || p.RowMs != -1 || p.RowSeen != "" {
+		if got.PushCursor != "" || got.PushFrom != "" || got.PushReread || p.WantMs != nil || p.Listed || p.RowMs != -1 || p.RowSeen != "" || p.RowRead != "" {
 			t.Fatalf("%s: a move kept the feed: %+v, %+v", name, got, p)
 		}
 	}
@@ -592,6 +592,11 @@ func TestRearmAudiblePush(t *testing.T) {
 		y.ReassertedMs != 6_000_000 {
 		t.Fatalf("re-armed row = %+v", y)
 	}
+	// When the row was read stays: the wait counts from the re-arm, but a
+	// place the server wrote before it and after that read is still new.
+	if y := read(); y.RowRead != Timestamp(now) {
+		t.Fatalf("the re-arm moved the row's read to %q, want %q", y.RowRead, Timestamp(now))
+	}
 	// At most once per written place: written again, the same place is never
 	// re-armed a second time...
 	if err := db.AudiblePushed(ctx, a.ID, "B000000001", 6_000_000, later.Add(4*time.Minute)); err != nil {
@@ -669,6 +674,10 @@ func TestMigrationReasserted(t *testing.T) {
 	x, err := db.GetAudiblePush(ctx, "abcd1234", "B000000001")
 	if err != nil || x.ReassertedMs != -1 {
 		t.Fatalf("migrated row = %+v, %v", x, err)
+	}
+	// Migration 0019: the row's read is when it was first seen.
+	if x.RowRead != "2026-11-03T10:00:00.000000000Z" {
+		t.Fatalf("migrated row read at %q, want its row_seen", x.RowRead)
 	}
 	if ok, err := db.RearmAudiblePush(ctx, x, time.Date(2026, 11, 3, 11, 0, 0, 0, time.UTC)); err != nil || !ok {
 		t.Fatalf("a migrated row wasn't re-armed: %v, %v", ok, err)

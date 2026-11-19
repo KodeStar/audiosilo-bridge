@@ -298,16 +298,18 @@ func serverSkew(serverTime string, now time.Time) time.Duration {
 
 // olderThanKnown reports whether a row read again from the start after a
 // refused cursor holds a place from no later than the last place this Bridge
-// read for the title x (row_seen): a server restored from a backup answers the
+// read for the title x (row_read): a server restored from a backup answers the
 // row as it was before then, changed after the baseline perhaps but older than
 // the place already handled, and written again it would move Audible back.
+// Never by row_seen: a re-arm moves that one, and a place written on the server
+// before the re-arm but not read yet is new.
 // Never by when the place was written to Audible (at): that is after the read,
 // and a place another device wrote between the two was never read, so it is
 // new. skew moves the Bridge's clock onto the server's (serverSkew). A title
 // never read counts as never handled (the baseline's line alone).
 func olderThanKnown(updated time.Time, x store.AudiblePush, skew time.Duration) bool {
-	seen, err := time.Parse(time.RFC3339Nano, x.RowSeen)
-	return err == nil && !updated.After(seen.Add(skew))
+	read, err := time.Parse(time.RFC3339Nano, x.RowRead)
+	return err == nil && !updated.After(read.Add(skew))
 }
 
 // historyCutoff is when a row's place counts as history: while the baseline
@@ -395,7 +397,7 @@ func (p *Pusher) row(ctx context.Context, a store.AudibleAccount, titles map[str
 		p.o.Log.Warn("audible: recording a server place failed", "account", a.ID, "err", err)
 		return false
 	}
-	x.RowMs, x.RowSeen = rec.Ms, store.Timestamp(now)
+	x.RowMs, x.RowSeen, x.RowRead = rec.Ms, store.Timestamp(now), store.Timestamp(now)
 	titles[row.ASIN] = x
 	return true
 }
