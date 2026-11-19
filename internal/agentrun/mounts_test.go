@@ -974,6 +974,9 @@ func TestRunPlantedCredentialFiles(t *testing.T) {
 		filepath.Join(s.staging, "job-1", "work", "out", vaultKeyFile),
 		filepath.Join(s.tmp, "auth.json"),
 		filepath.Join(s.tmp, "x", "openai_api_key"),
+		// Looked at twice (codex/auth.json in the tmpfs, auth.json in its
+		// codex folder), listed once.
+		filepath.Join(s.tmp, "codex", "auth.json"),
 	}
 	for _, p := range planted {
 		mkfile(t, p)
@@ -1008,6 +1011,25 @@ func TestRunPlantedCredentialFiles(t *testing.T) {
 	}
 	if why, _ := walk(s, self); !strings.Contains(why, filepath.Join(s.staging, "link", "auth.json")) {
 		t.Fatalf("a file reached through a link out of the staging dir = %q, want it found", why)
+	}
+
+	// A host folder mounted inside the tmpfs TmpDir, which the tmpfs's look
+	// by path reaches into (.codex/auth.json): refused, and never listed for
+	// the sweep, which would remove the host's file.
+	s = newSetup(t)
+	nested := filepath.Join(s.tmp, ".codex")
+	mkfile(t, filepath.Join(nested, "auth.json"))
+	if why, files := walk(s, self, at(nested)); !strings.Contains(why, filepath.Join(nested, "auth.json")) ||
+		len(files) != 0 {
+		t.Fatalf("a host folder mounted inside the TmpDir = %q, %+v, want it found and nothing listed", why, files)
+	}
+	// A host file mounted inside the staging dir by a name the mount check
+	// passes (codex/config.toml): a mount's point is never a run's file.
+	s = newSetup(t)
+	cfg := filepath.Join(s.staging, "codex", "config.toml")
+	mkfile(t, cfg)
+	if why, files := walk(s, self, at(cfg)); !strings.Contains(why, cfg) || len(files) != 0 {
+		t.Fatalf("a host file mounted inside the staging dir = %q, %+v, want it found and nothing listed", why, files)
 	}
 }
 

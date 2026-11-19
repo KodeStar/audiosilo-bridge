@@ -55,9 +55,10 @@ import (
 //   - a file of a credential's name that a run planted (prompt injection
 //     from a book's text could ask for one) to lock the service out: one
 //     owned by the service's own uid, in its own staging dir or TmpDir
-//     (writableAreas), reached from there through folders alone (no link)
-//     and walked as part of the mount that holds that area (a host folder
-//     mounted inside it is its own mount, judged on its own). It is not
+//     (writableAreas), reached from there through folders alone (no link,
+//     no other mount's point) and walked as part of the mount that holds
+//     that area (a host folder mounted inside it is its own mount, judged on
+//     its own, never a run's, nor swept). It is not
 //     counted, and sweepRunFiles removes it when a run ends and when the
 //     service starts. A file of any other uid, or outside those areas, still
 //     refuses the runs: ownership alone passes nothing.
@@ -394,9 +395,12 @@ func below(dir, p string) (string, bool) {
 
 // runMade reports whether p, a file of a credential's name the walk found, is
 // a run's own (the rules above): in one of the areas the mount being looked at
-// holds, the area and every folder from it down to p a folder (never a link:
-// one could lead to a host's file whose owner is the service's uid), and owned
-// by the service's uid. It is added to runFiles. Any look that fails is a no.
+// holds, the area and every folder from it down to p a folder of that mount
+// (never a link: one could lead to a host's file whose owner is the service's
+// uid; nor another mount's point, p included: a host folder or file mounted
+// inside the area, which a look by path such as credentialUnder's reaches
+// into), and owned by the service's uid. It is added to runFiles once. Any look
+// that fails is a no.
 func (w *mountWalk) runMade(p string) bool {
 	if w.selfUID < 0 {
 		return false
@@ -411,7 +415,9 @@ func (w *mountWalk) runMade(p string) bool {
 			continue
 		}
 		if uid, ok := ownerUID(info); ok && uid == w.selfUID {
-			w.runFiles = append(w.runFiles, runFile{area: area, rel: rel})
+			if f := (runFile{area: area, rel: rel}); !slices.Contains(w.runFiles, f) {
+				w.runFiles = append(w.runFiles, f)
+			}
 			return true
 		}
 	}
@@ -419,7 +425,8 @@ func (w *mountWalk) runMade(p string) bool {
 }
 
 // foldersDown reports whether area and each folder between it and rel's last
-// element is a folder, not a link.
+// element is a folder, not a link, and neither those folders below area nor
+// rel's last element is another mount's point.
 func (w *mountWalk) foldersDown(area, rel string) bool {
 	parts := strings.Split(rel, string(filepath.Separator))
 	cur := area
@@ -428,10 +435,13 @@ func (w *mountWalk) foldersDown(area, rel string) bool {
 		if err != nil || !info.IsDir() {
 			return false
 		}
+		cur = filepath.Join(cur, parts[i])
+		if w.points[cur] {
+			return false
+		}
 		if i == len(parts)-1 {
 			return true
 		}
-		cur = filepath.Join(cur, parts[i])
 	}
 }
 

@@ -3860,12 +3860,15 @@ internal/
             credential's name a run planted to lock the service out (prompt
             injection: `touch /staging/auth.json`): owned by the service's
             uid, in its staging dir or TmpDir (writableAreas), reached from
-            there through folders alone, never a link, and walked as part of
-            the mount holding that area (a host folder mounted inside it is
-            its own mount; runMade). Such files are swept (sweepRunFiles: a
-            fresh walk, then each removed through an os.Root over its area
-            while still the service's, a folder only when empty) when the
-            service starts and after each job; another uid's file, or one
+            there through folders alone, never a link nor another mount's
+            point, and walked as part of the mount holding that area (a host
+            folder or file mounted inside it is its own mount, never a run's
+            nor swept; runMade). Such files are swept (sweepRunFiles: a
+            fresh walk, then each removed through its folders opened without
+            following a link, while still the service's, a folder only when
+            empty) when the service starts and after each job that ends
+            while the service runs (a stopping one leaves them to the next
+            start, the heartbeat touched first); another uid's file, or one
             outside those areas (a host mount of uid 10003 files included),
             still refuses. The walk runs once
             per status tick (tickMounts, which leaves a walk in flight to stand
