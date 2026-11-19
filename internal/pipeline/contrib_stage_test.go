@@ -1407,6 +1407,37 @@ func TestContributeAsksTheServerBeforeFiling(t *testing.T) {
 	}
 }
 
+// TestContributeAsksAgainAfterTheGist: an oversized dimension's gist lookup and
+// POST take a while, so its issue asks the server again after the gist: a share
+// turned off meanwhile files no issue, the book keeps the rest local, and the
+// gist made stays the dimension's, which a later share links rather than
+// making another. Allowed: that share files both issues.
+func TestContributeAsksAgainAfterTheGist(t *testing.T) {
+	ctx := context.Background()
+	db := openContribDB(t)
+	gh := newFakeGitHub(t)
+	var asked atomic.Int32
+	cfg := contribConfig(t, db, contribModeIssue, gh.srv.URL, "", t.TempDir(), fakeTokenResolver{token: "ghp_x"})
+	// On for the check before filing and the one before the gist, off after it.
+	cfg.ShareOff = func(context.Context, int64) (bool, error) { return asked.Add(1) >= 3, nil }
+	exe := NewExecutor(cfg)
+	b := contribBook(t, db, store.NewBook{WorkID: "reacher-01", ContribMode: store.ContribModeIssue}, hugeChars(), baseRecaps("x"))
+	if _, err := exe.Execute(ctx, b, state.Contributing, scheduler.StageReport{}); err != nil {
+		t.Fatalf("contribute: %v", err)
+	}
+	if gh.gists != 1 || gh.issueCount() != 0 {
+		t.Fatalf("gists %d, issues %d, want the gist and no issue", gh.gists, gh.issueCount())
+	}
+	rows := rowsByKind(t, db, b.ID)
+	if c, r := rows[store.ContribKindCharacters], rows[store.ContribKindRecaps]; c.Status != store.ContribStatusLocal ||
+		r.Status != store.ContribStatusLocal {
+		t.Fatalf("rows: characters %+v, recaps %+v, want both local", c, r)
+	}
+	if _, err := exe.Share(ctx, b.ID, "", nil); err != nil || gh.gists != 1 || gh.issueCount() != 2 {
+		t.Fatalf("share: %v, gists %d, issues %d, want the gist linked and two issues", err, gh.gists, gh.issueCount())
+	}
+}
+
 // TestContributeWaitsWhenTheServerCantBeAsked: a server that can't be asked
 // before filing (unreachable) files nothing: the book parks contrib_unavailable
 // and looks again by itself, still in issue mode. Allowed: sidecars.contribute's
@@ -1434,6 +1465,28 @@ func TestContributeWaitsWhenTheServerCantBeAsked(t *testing.T) {
 
 	if _, err := exe.Share(ctx, b.ID, "", nil); err != nil || gh.issueCount() != 2 {
 		t.Fatalf("share of the book: %v, issues %d, want 2", err, gh.issueCount())
+	}
+}
+
+// TestContributeAskEndedWithTheStage: an ask cut short by the stage's own
+// context (a pause, a cancel, the Bridge stopping) is that context's error,
+// not a park saying the server couldn't be asked, and nothing is filed.
+func TestContributeAskEndedWithTheStage(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	db := openContribDB(t)
+	gh := newFakeGitHub(t)
+	cfg := contribConfig(t, db, contribModeIssue, gh.srv.URL, "", t.TempDir(), fakeTokenResolver{token: "ghp_x"})
+	cfg.ShareOff = func(ctx context.Context, _ int64) (bool, error) { cancel(); return false, ctx.Err() }
+	exe := NewExecutor(cfg)
+	b := contribBook(t, db, store.NewBook{WorkID: "reacher-01", ContribMode: store.ContribModeIssue}, baseChars("x"), baseRecaps("x"))
+	_, err := exe.Execute(ctx, b, state.Contributing, scheduler.StageReport{})
+	var park *scheduler.ParkError
+	if !errors.Is(err, context.Canceled) || errors.As(err, &park) {
+		t.Fatalf("contribute = %v, want the context's cancel, not a park", err)
+	}
+	if n := gh.issueCount(); n != 0 {
+		t.Fatalf("issues filed = %d, want none", n)
 	}
 }
 

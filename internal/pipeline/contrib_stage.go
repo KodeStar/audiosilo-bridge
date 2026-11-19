@@ -577,6 +577,9 @@ func (e *Executor) askedLocal(ctx context.Context, id int64) (bool, error) {
 		return local, err
 	}
 	off, err := e.shareOff(ctx, id)
+	if err != nil && ctx.Err() != nil {
+		return false, ctx.Err() // paused, cancelled or stopping: not a park
+	}
 	if err != nil {
 		e.log.Warn("contributing: the server couldn't be asked whether the book is still to be shared; it waits",
 			"book", id, "err", err)

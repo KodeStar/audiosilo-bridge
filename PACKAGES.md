@@ -915,7 +915,8 @@ internal/
             (KeepBookLocal) even when no run of the job is up to guard it (one resumed
             after a restart still waiting for its lane slot); a read that fails stops
             the filing as a stage error. The checks before it files and before each
-            gist and issue (askedLocal) then ask the server too (Config.ShareOff,
+            gist and issue (askedLocal; an issue asks again after its gist's lookup
+            or POST, fileIssue) then ask the server too (Config.ShareOff,
             generate.Handler.ShareOff): a job hears share_off only in an answer to
             a report, which can be a keepalive away, so an admin's turn-off just
             before filing was missed (v2.7.0 verify). A server that couldn't be
