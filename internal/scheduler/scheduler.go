@@ -112,9 +112,14 @@ type Scheduler struct {
 	pubMu    sync.Mutex
 	pubLocks map[int64]*publishLock
 
-	// afterReadmitClear, when set (tests), runs in readmit between the status
-	// clear and the forced re-run.
-	afterReadmitClear func()
+	// publishReadWarned is set once a publish's read of its book failed and was
+	// warned about: the failures after it log at Debug, never a warning per
+	// event, until a read succeeds again (the next failure is a new fault).
+	publishReadWarned atomic.Bool
+
+	// afterStatusClear, when set (tests), runs in readmit and supersede_rerun
+	// between the status clear and the change that follows it.
+	afterStatusClear func()
 }
 
 // publishLock is one book's publish lock and the number of publishStored calls
@@ -1323,14 +1328,16 @@ func (s *Scheduler) publishStored(ctx context.Context, id int64) {
 }
 
 // publishLocked is publishStored for a caller holding book id's publish lock
-// (readmit).
+// (readmit, supervisorSupersedeRerun, ContinueStored and the other status clears,
+// see restoreStatus).
 func (s *Scheduler) publishLocked(ctx context.Context, id int64) {
 	b, err := s.db.GetBook(context.WithoutCancel(ctx), id)
 	if err != nil {
-		if !errors.Is(err, store.ErrNotFound) {
-			slog.Warn("scheduler: reading a book to publish its state failed", "book_id", id, "err", err)
-		}
+		logPublishReadFailed(slog.Default(), &s.publishReadWarned, s.db.Closed(), id, err)
 		return
+	}
+	if s.publishReadWarned.Load() {
+		s.publishReadWarned.Store(false) // the store reads again: its next failure warns
 	}
 	_ = s.hub.PublishBook("book.state", id, map[string]any{
 		"book_id":   id,
@@ -1343,9 +1350,50 @@ func (s *Scheduler) publishLocked(ctx context.Context, id int64) {
 	})
 }
 
+// logPublishReadFailed logs a publish's failed read of book id: nothing for a
+// book deleted since or a store closed at shutdown (closed), where nothing went
+// wrong; a warning for the first other failure (warned records it) and Debug
+// after, so a failing store never warns once per event. The caller clears warned
+// when a read succeeds, so a later fault warns again.
+func logPublishReadFailed(log *slog.Logger, warned *atomic.Bool, closed bool, id int64, err error) {
+	switch {
+	case errors.Is(err, store.ErrNotFound) || closed:
+	case warned.CompareAndSwap(false, true):
+		log.Warn("scheduler: reading a book to publish its state failed (later failures log at debug)", "book_id", id, "err", err)
+	default:
+		log.Debug("scheduler: reading a book to publish its state failed", "book_id", id, "err", err)
+	}
+}
+
 // PublishStored is publishStored for a change written to the store outside the
-// scheduler (generate's continue of a stopped run, which clears its cancel).
+// scheduler (contrib's park-message write).
 func (s *Scheduler) PublishStored(ctx context.Context, id int64) { s.publishStored(ctx, id) }
+
+// ContinueStored runs write, a change that clears book id's status (outside the
+// scheduler, generate's continue of a stopped run, which clears its cancel;
+// inside it, clearStatusAsRead), under the book's publish lock, and publishes the
+// book as stored once write succeeded.
+// readmit and supersede_rerun hold that lock from their status clear to their
+// publish, so a failed one puts its status back before this clear, never over it
+// (restoreStatus cannot tell this clear from its own). write only writes the
+// store: nothing waits under the lock.
+func (s *Scheduler) ContinueStored(ctx context.Context, id int64, write func() error) error {
+	unlock := s.lockPublish(id)
+	defer unlock()
+	if err := write(); err != nil {
+		return err
+	}
+	s.publishLocked(ctx, id)
+	return nil
+}
+
+// clearStatusAsRead clears b's status, error, park code and retry_at while the
+// book still has the status and error read into b (store.ErrStatusChanged
+// otherwise), under its publish lock as every status clear (see restoreStatus),
+// and publishes the book as stored.
+func (s *Scheduler) clearStatusAsRead(ctx context.Context, b store.Book) error {
+	return s.ContinueStored(ctx, b.ID, func() error { return s.db.ClearBookStatusIf(ctx, b.ID, b.Status, b.Error) })
+}
 
 // lockPublish takes book id's publish lock and returns its unlock. Books publish
 // independently: only one book's frames are ordered against each other.

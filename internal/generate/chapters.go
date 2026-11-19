@@ -401,8 +401,8 @@ func sidecarsWithoutChapters(p place) bool {
 // and the job's mapping are one transaction, on the job's context (a job
 // cancelled meanwhile leaves the run as it was, for the next one): a continued
 // book always has its job to follow it and is never left stopped. The book is
-// published as stored once continued (Engine.PublishStored), so its last
-// book.state event is no longer the cancel. It reports whether it continued it.
+// published as stored once continued (takeUp), so its last book.state event is
+// no longer the cancel. It reports whether it continued it.
 func (h *Handler) continueChapters(ctx context.Context, eng Engine, r *run, old store.Book, ebookRun int64) (bool, error) {
 	if r.source != SourceAudio || !continuable(old) {
 		return false, nil
@@ -449,27 +449,39 @@ func (h *Handler) continueChapters(ctx context.Context, eng Engine, r *run, old 
 	if err := h.clearEbookRun(ctx, eng, r, ebookRun); err != nil {
 		return false, err
 	}
-	err = h.o.DB.ContinueChapters(ctx, old.ID, old.State, string(to), h.newBook(r, old.AudioSource(), ""),
-		store.GenerateBook{ServerJobID: r.job.ID, LibraryID: r.lib.ID, RelPath: r.rel})
-	if errors.Is(err, store.ErrNotContinuable) {
+	nb, job := h.newBook(r, old.AudioSource(), ""), r.generateBook()
+	if ok, err := takeUp(ctx, eng, r, old.ID, func() error {
+		return h.o.DB.ContinueChapters(ctx, old.ID, old.State, string(to), nb, job)
+	}); !ok || err != nil {
+		return ok, err
+	}
+	h.o.Log.Info("generate: continuing the book's chapters run, its transcription kept", "job", r.job.ID, "book", old.ID,
+		"from", old.State)
+	return true, nil
+}
+
+// takeUp makes engine book id run r's book through write, the continue
+// (ContinueChapters, ContinueReadalong) that clears its stop, written under the
+// book's publish lock (Engine.ContinueStored, see scheduler.restoreStatus) and
+// published as stored, so its last book.state event is no longer the cancel; the
+// engine is then woken for it. Every continue goes through here, so none can skip
+// the lock or the publish. ok is false, with no error, when write found the book
+// not continuable (store.ErrNotContinuable).
+func takeUp(ctx context.Context, eng Engine, r *run, id int64, write func() error) (ok bool, err error) {
+	if err := eng.ContinueStored(ctx, id, write); errors.Is(err, store.ErrNotContinuable) {
 		return false, nil
 	} else if err != nil {
 		return false, err
 	}
-	h.o.Log.Info("generate: continuing the book's chapters run, its transcription kept", "job", r.job.ID, "book", old.ID,
-		"from", old.State)
-	tookUp(ctx, eng, r, old.ID)
+	r.bookID = id
+	eng.Notify()
 	return true, nil
 }
 
-// tookUp makes engine book id run r's book once a continue (ContinueChapters,
-// ContinueReadalong) has cleared its stop: it publishes the book as stored
-// (Engine.PublishStored), so its last book.state event is no longer the cancel,
-// and wakes the engine for it. Every continue ends here, so none can skip the publish.
-func tookUp(ctx context.Context, eng Engine, r *run, id int64) {
-	r.bookID = id
-	eng.PublishStored(ctx, id)
-	eng.Notify()
+// generateBook is r's job's mapping to an engine book, its book id left to the
+// caller (a continue's store write sets the book it takes up).
+func (r *run) generateBook() store.GenerateBook {
+	return store.GenerateBook{ServerJobID: r.job.ID, LibraryID: r.lib.ID, RelPath: r.rel}
 }
 
 // resumesAt is where an engine book stopped at asr or chapter_detecting goes on
@@ -530,16 +542,14 @@ func (h *Handler) resumeChapters(ctx context.Context, eng Engine, r *run, old st
 	if !ok {
 		return false, nil
 	}
-	err = h.o.DB.ContinueReadalong(ctx, old.ID, old.State, string(to), state.GoalChapters,
-		store.GenerateBook{ServerJobID: r.job.ID, LibraryID: r.lib.ID, RelPath: r.rel})
-	if errors.Is(err, store.ErrNotContinuable) {
-		return false, nil
-	} else if err != nil {
-		return false, err
+	job := r.generateBook()
+	if ok, err := takeUp(ctx, eng, r, old.ID, func() error {
+		return h.o.DB.ContinueReadalong(ctx, old.ID, old.State, string(to), state.GoalChapters, job)
+	}); !ok || err != nil {
+		return ok, err
 	}
 	h.o.Log.Info("chapters: taking up the book's stopped chapters run, its transcription kept", "job", r.job.ID,
 		"book", old.ID, "from", old.State, "at", to)
-	tookUp(ctx, eng, r, old.ID)
 	return true, nil
 }
 

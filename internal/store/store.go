@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	_ "modernc.org/sqlite" // pure-Go SQLite driver
@@ -35,7 +36,8 @@ const FileName = "bridge.db"
 // writes (SQLite's model), which is ample for a single-user local daemon and
 // avoids "database is locked" churn.
 type DB struct {
-	sql *sql.DB
+	sql    *sql.DB
+	closed atomic.Bool
 }
 
 // nowFn is overridable in tests.
@@ -88,7 +90,14 @@ func pragmaSep(dsn string) string {
 }
 
 // Close closes the database.
-func (db *DB) Close() error { return db.sql.Close() }
+func (db *DB) Close() error {
+	db.closed.Store(true)
+	return db.sql.Close()
+}
+
+// Closed reports whether Close was called: a read failing after it is the
+// shutdown's, not a fault.
+func (db *DB) Closed() bool { return db.closed.Load() }
 
 // migrate applies embedded migrations in filename order, recording each in
 // schema_migrations so they run exactly once.

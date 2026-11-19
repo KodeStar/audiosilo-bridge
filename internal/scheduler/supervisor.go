@@ -147,12 +147,11 @@ func (s *Scheduler) supervisorTerminateRequeue(ctx context.Context, b store.Book
 		}
 	}
 	if b.Status != "" {
-		if err := s.db.ClearBookStatusIf(ctx, b.ID, b.Status, b.Error); errors.Is(err, store.ErrStatusChanged) {
+		if err := s.clearStatusAsRead(ctx, b); errors.Is(err, store.ErrStatusChanged) {
 			return statusChangedOutcome, nil
 		} else if err != nil {
 			return "", err
 		}
-		s.publishStored(ctx, bookID)
 	}
 	s.notify()
 	if closed {
@@ -179,11 +178,26 @@ func (s *Scheduler) supervisorSupersedeRerun(ctx context.Context, b store.Book, 
 			return "", ErrInvalidOp
 		}
 	}
-	// The conditional status write comes first, as in readmit (a deliberate pause
-	// is written back as it is): a Cancel landing since leaves the book as it is
-	// (bridge#65).
+	// A stage running on the book is stopped and finishes its last writes (a
+	// sentinel the rewind must drop) first, with the dispatch loop held off the
+	// book, and before the book's publish lock, which that worker's own publish
+	// takes. Then, under that lock to the publish as in readmit (see
+	// restoreStatus), the conditional status write (a deliberate pause is written
+	// back as it is): a Cancel landing since leaves the book as it is (bridge#65),
+	// its worker stopped already, a stage this rewind would discard anyway. The
+	// claim matches the read's status alone, so a book the stopped stage advanced
+	// to Ready meanwhile (and maybe purged at done) is refused here, as at the read.
 	release := s.holdDispatch(bookID)
 	defer release()
+	s.cancelInflight(bookID)
+	s.awaitWorker(ctx, bookID)
+	unlock := s.lockPublish(bookID)
+	defer unlock()
+	if now, err := s.db.GetBook(ctx, bookID); err != nil {
+		return "", err // unread, it is never rewound: it may be at Ready by now
+	} else if state.Order(state.State(now.State)) >= state.Order(state.Ready) {
+		return "", ErrInvalidOp
+	}
 	paused := b.Status == string(state.StatusPaused)
 	var claim error
 	if paused {
@@ -196,11 +210,10 @@ func (s *Scheduler) supervisorSupersedeRerun(ctx context.Context, b store.Book, 
 	} else if claim != nil {
 		return "", claim
 	}
-	defer s.publishStored(ctx, bookID)
-	s.cancelInflight(bookID)
-	// A stage running on the book finishes its last writes (a sentinel the rewind
-	// must drop, or a replay of it would stand for the re-run) before the rewind.
-	s.awaitWorker(ctx, bookID)
+	defer s.publishLocked(ctx, bookID)
+	if s.afterStatusClear != nil {
+		s.afterStatusClear()
+	}
 	if err := s.rewind(ctx, b, stage); err != nil {
 		if !paused {
 			s.restoreStatus(ctx, b)

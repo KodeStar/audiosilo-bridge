@@ -1678,9 +1678,12 @@ internal/
             books before the release (beginPass marks where a pass reads). Cancel
             takes the same hold around its write, so a pass that read the book before
             the cancel starts no stage on it after cancelInflight found none to stop;
-            supersede_rerun also waits for the stage worker it cancelled to return
-            (awaitWorker, at most workerExitWait) before its rewind, so a sentinel the
-            stage wrote as the cancel landed is dropped too, never replayed. A crash
+            supersede_rerun cancels the stage worker and waits for it to return
+            (awaitWorker, at most workerExitWait) before its status write, so a
+            sentinel the stage wrote as the cancel landed is dropped too, never
+            replayed, and the wait is never under the publish lock the worker's own
+            publish takes; it then reads the book again and refuses one the stopped
+            stage moved on to Ready, as at the read. A crash
             between the two writes replays the stage's outcome at the restart (a
             round-cap park parks again). RetryAsRead(b) is Retry for a book the caller
             read (generate's Retry): it re-admits only while the book still has b's
@@ -1700,14 +1703,19 @@ internal/
             published under that book's own lock (lockPublish), so its events go out
             in the order of their reads and the last carries the latest write (a
             cancel's event never lands after the re-admit that followed it, an
-            advance never shows a pause that landed first as running). readmit holds
-            that lock from its status clear to its publish, so one book's re-admits
-            run one at a time: a failed one puts its status back (restoreStatus)
-            before a later one clears anything. No page reads
+            advance never shows a pause that landed first as running). readmit and
+            supersede_rerun hold that lock from their status clear to their publish,
+            so one book's re-admits and rewinds run one at a time: a failed one puts
+            its status back (restoreStatus) before any later status clear (a Retry, a
+            Resume, the supervisor's terminate_requeue, or generate's continue of the
+            stopped run, ContinueStored: each clear written and published under the
+            lock, the scheduler's own through clearStatusAsRead) clears anything. A
+            publish whose read fails logs nothing for a deleted book or a closed store
+            (store.DB.Closed, the shutdown) and warns only for the first other
+            failure, Debug after, until a read succeeds again. No page reads
             book.state live today (no Hub.Subscribe caller, no SSE route): the hub's
             ring and the durable event log (the supervisor's ListEvents) do.
-            generate's continues of a stopped run (which clear its cancel) and the
-            contrib service publish through PublishStored. Pause and Resume write
+            The contrib service publishes through PublishStored. Pause and Resume write
             only over the status read (store.ErrStatusChanged when it moved; a Pause
             finding the book paused by another is a no-op). A start's reconcileBook
             rewinds by the state alone (SetBookPipelineState), and a pass moves a
@@ -4088,7 +4096,8 @@ internal/
             resolves (a sign-in during the start re-admitted nothing, bridge#25),
             and starts the daily transcript sweep only once the engine is the
             running one (its hold on a book goes through the engine; with none it
-            is a no-op). Those re-admits, and githubChanged's and agentCredentialChanged's, run as
+            is a no-op). Those re-admits, githubChanged's and agentCredentialChanged's, and
+            a changed monthly budget's (SaveSettings), run as
             Bridge.bg tasks (bgTasks), as does an abandoned generate job's wait for
             the engine (generate.Options.Background): Run stops them (their context
             ends, none starts after) and waits for them before the store closes, on

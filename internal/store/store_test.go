@@ -32,6 +32,20 @@ func TestMigrateIdempotent(t *testing.T) {
 	}
 }
 
+// Closed is false while the store is open and true once Close ran.
+func TestClosedReportsClose(t *testing.T) {
+	db := open(t)
+	if db.Closed() {
+		t.Fatal("an open store reports Closed")
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if !db.Closed() {
+		t.Fatal("a closed store doesn't report Closed")
+	}
+}
+
 func TestBookCRUDAndDedup(t *testing.T) {
 	db := open(t)
 	ctx := context.Background()
