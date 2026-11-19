@@ -2103,7 +2103,8 @@ internal/
             null). audible.go mirrors the rest of the server's handlers_audible.go:
             Users (GET /bridge/users: enabled adults and admins, no email),
             PutAudibleAccount / DeleteAudibleAccount (PUT/DELETE
-            /bridge/audible/accounts/{account}; the delete is 204 known or not),
+            /bridge/audible/accounts/{account}; the delete is 204 known or not;
+            AudibleAccountInput sends no sync, the console's alone since 4c, bridge#50),
             PutAudibleTitles (<= MaxAudibleTitles 500 per call, poll_id + final; a
             nil list sent as []; 404 unknown_account -> ErrUnknownAccount; each
             AudibleTitle also carries contested_path (omitempty) and planned

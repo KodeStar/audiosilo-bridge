@@ -622,7 +622,7 @@ func (m *Manager) Finish(ctx context.Context, srv Server, serverID string, f Fin
 // input is the server's mapping of a.
 func input(a store.AudibleAccount) link.AudibleAccountInput {
 	return link.AudibleAccountInput{Label: a.Label, Marketplace: a.Marketplace, UserID: a.UserID, LibraryID: a.LibraryID,
-		Policy: a.Policy, Sync: a.Sync}
+		Policy: a.Policy}
 }
 
 // Map records a new mapping of account id: on the server (srv, paired with

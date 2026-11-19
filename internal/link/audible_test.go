@@ -73,7 +73,7 @@ func TestAudibleWireMirror(t *testing.T) {
 		t.Fatalf("users = %+v, %v", users, err)
 	}
 
-	in := AudibleAccountInput{Label: "Chris (US)", Marketplace: "us", UserID: 3, LibraryID: 1, Policy: "manual", Sync: true}
+	in := AudibleAccountInput{Label: "Chris (US)", Marketplace: "us", UserID: 3, LibraryID: 1, Policy: "manual"}
 	acct, err := c.PutAudibleAccount(ctx, "abcd1234", in)
 	if err != nil || acct.ID != "abcd1234" || acct.User.DisplayName != "Chris" || acct.LibraryID == nil || *acct.LibraryID != 1 ||
 		acct.PollHours != 6 || acct.Paused {
@@ -81,10 +81,15 @@ func TestAudibleWireMirror(t *testing.T) {
 	}
 	var body map[string]any
 	_ = json.Unmarshal([]byte(calls[len(calls)-1].body), &body)
-	for _, k := range []string{"label", "marketplace", "user_id", "library_id", "policy", "sync"} {
+	for _, k := range []string{"label", "marketplace", "user_id", "library_id", "policy"} {
 		if _, ok := body[k]; !ok {
 			t.Errorf("account body has no %q: %v", k, body)
 		}
+	}
+	// Whether the places sync is the console's: the server ignores a sync
+	// sent here, so none is (bridge#50).
+	if _, ok := body["sync"]; ok || len(body) != 5 {
+		t.Errorf("account body = %v, want the mapping alone", body)
 	}
 	var apiErr *APIError
 	if _, err := c.PutAudibleAccount(ctx, "badbad99", in); !errors.As(err, &apiErr) || apiErr.Code != "unknown_user" {

@@ -26,15 +26,15 @@ type User struct {
 
 // AudibleAccountInput is an account's mapping (PUT
 // /bridge/audible/accounts/{account}): the server user it belongs to, the books
-// library its titles go to, the policy (all | series | manual) and whether its
-// places sync.
+// library its titles go to and the policy (all | series | manual). Whether its
+// places sync is the console's alone (Phase 4c): the server reads and ignores
+// a sync sent here, so none is (bridge#50).
 type AudibleAccountInput struct {
 	Label       string `json:"label"`
 	Marketplace string `json:"marketplace"`
 	UserID      int64  `json:"user_id"`
 	LibraryID   int64  `json:"library_id"`
 	Policy      string `json:"policy"`
-	Sync        bool   `json:"sync"`
 }
 
 // AudibleAccount is the server's record of an account (the part the Bridge
