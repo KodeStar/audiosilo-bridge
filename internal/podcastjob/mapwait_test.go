@@ -103,6 +103,9 @@ func TestFetchWaitsToPublishWithoutTheShowLockOrItsSlot(t *testing.T) {
 	if !showLockFree(s, h.mount, "Fixture Show") {
 		t.Fatal("the fetch holds its show's lock while it waits for the mapping")
 	}
+	if p := rep.Last(); p.Step != "waiting" || p.Message != mappingWait {
+		t.Fatalf("a fetch waiting for its mapping reports %+v", p)
+	}
 	if _, err := os.Stat(filepath.Join(h.mount, *job.Path)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("the episode was published while no check stood: %v", err)
 	}
@@ -185,6 +188,72 @@ func TestFetchYieldsItsSlotOnlyThroughAnOutage(t *testing.T) {
 	libs.down.Store(false)
 	if err := <-followed; err != nil {
 		t.Fatal(err)
+	}
+}
+
+// A fetch whose folder stops answering while its episode downloads reports
+// that it waits for the folder, not the save it is about to make, and once the
+// folder answers it reports that step again and publishes.
+func TestAFetchWaitingForItsFolderSaysSo(t *testing.T) {
+	requireProbe(t)
+	h, job := audioHarness(t)
+	s := h.handler.s
+	s.o.CheckPoll = 2 * time.Millisecond
+	var slow atomic.Bool
+	var slowProbes atomic.Int32
+	s.o.WriteProbe = func(dir string) error {
+		if !slow.Load() {
+			return mapping.ProbeWritable(dir)
+		}
+		slowProbes.Add(1)
+		return &fs.PathError{Op: "probe", Path: dir, Err: fsutil.ErrStatTimeout}
+	}
+	audio := data(t, "plain.mp3")
+	setAudio(h, func(w http.ResponseWriter, _ *http.Request) {
+		slow.Store(true) // the mount hangs mid-download
+		w.Write(audio)
+	})
+	rep := jobs.LocalReporter()
+	done := make(chan error, 1)
+	go func() {
+		_, err := h.handler.FetchJob().Run(context.Background(), job, rep)
+		done <- err
+	}()
+	awaitTrue(t, "the fetch waited on its folder", done, func() bool { return slowProbes.Load() >= 3 })
+	if p := rep.Last(); p.Step != "waiting" || p.Message != "Waiting for the folder" {
+		t.Fatalf("a fetch waiting for its folder reports %+v", p)
+	}
+	slow.Store(false)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if f := h.read("Fixture Show"); f.Episodes[0].Fetch == nil {
+		t.Fatal("the episode was not published once the folder answered")
+	}
+
+	// The step before the wait is reported again once the folder answers;
+	// a wait that never started changes nothing.
+	lib, _ := s.o.Libraries.Library(*job.LibraryID)
+	saving := jobs.Progress{Step: "writing", Message: "Saving the episode"}
+	rep = jobs.LocalReporter()
+	rep.Progress(saving)
+	slow.Store(true)
+	var seen atomic.Value
+	s.o.WriteProbe = func(dir string) error {
+		if slow.CompareAndSwap(true, false) {
+			return &fs.PathError{Op: "probe", Path: dir, Err: fsutil.ErrStatTimeout}
+		}
+		seen.Store(rep.Last())
+		return mapping.ProbeWritable(dir)
+	}
+	if err := s.awaitWrite(context.Background(), rep, lib, h.mount, "Fixture Show"); err != nil {
+		t.Fatal(err)
+	}
+	if p, _ := seen.Load().(jobs.Progress); p.Step != "waiting" {
+		t.Fatalf("the look after a slow one saw %+v; want the wait reported", p)
+	}
+	if p := rep.Last(); p.Step != saving.Step || p.Message != saving.Message {
+		t.Fatalf("after the wait the fetch reports %+v; want %+v", p, saving)
 	}
 }
 

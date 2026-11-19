@@ -348,7 +348,7 @@ func (s *service) libraryFor(ctx context.Context, slot bool, job jobs.Job, rep *
 		if !errors.Is(err, errMappingUnknown) {
 			return lib, mount, err
 		}
-		rep.Progress(jobs.Progress{Step: "waiting", Message: "Waiting for the library's mapping check"})
+		rep.Progress(jobs.Progress{Step: "waiting", Message: mappingWait})
 		if slot {
 			s.yieldSlot(rep, lib, err)
 		}
@@ -400,6 +400,10 @@ func (s *service) reclaim(ctx context.Context, rep *jobs.Reporter) error {
 	rep.Progress(jobs.Progress{Step: "waiting", Message: "Waiting for the Bridge's other download to finish"})
 	return rep.Reclaim(ctx)
 }
+
+// mappingWait is the progress message of a job waiting for a mapping check
+// that stands (errMappingUnknown).
+const mappingWait = "Waiting for the library's mapping check"
 
 // errMappingUnknown is writable's answer while no check of the library's
 // mapping stands at the mount the job writes at (none yet, one the server
@@ -481,11 +485,20 @@ func (s *service) beforeWrite(ctx context.Context, lib link.Library, mount, rel 
 // back: slot is a podcast.fetch's reporter (nil for the light jobs), whose
 // slot is given back while the wait may last (yieldSlot) and taken again
 // before the job goes on (reclaim, within ctx, the job's own), the folder then
-// looked at once more, with a ceiling of its own.
+// looked at once more, with a ceiling of its own. The slot's job reports a
+// waiting step while it waits (waitingFor), and the step it was at again once
+// the folder may be written.
 func (s *service) awaitWrite(ctx context.Context, slot *jobs.Reporter, lib link.Library, mount, rel string) error {
+	var was jobs.Progress
+	if slot != nil {
+		was = slot.Last()
+	}
 	for {
 		err := s.writeDecided(ctx, slot, lib, mount, rel)
 		if err != nil || slot == nil || !slot.Yielded() {
+			if err == nil && slot != nil && was.Step != "" {
+				slot.Progress(was) // the same progress again is no change (Reporter.Progress)
+			}
 			return err
 		}
 		if err := s.reclaim(ctx, slot); err != nil {
@@ -504,12 +517,23 @@ func (s *service) writeDecided(ctx context.Context, slot *jobs.Reporter, lib lin
 			return err
 		}
 		if slot != nil {
+			slot.Progress(waitingFor(err))
 			s.yieldSlot(slot, lib, err)
 		}
 		if err := netguard.Wait(wait, s.o.CheckPoll); err != nil {
 			return err
 		}
 	}
+}
+
+// waitingFor is the progress of a job waiting on undecided: the folder's
+// answer (the page's "Waiting for the folder" too), or a mapping check that
+// stands, as library reports it.
+func waitingFor(undecided error) jobs.Progress {
+	if errors.Is(undecided, errFolderSlow) {
+		return jobs.Progress{Step: "waiting", Message: "Waiting for the folder"}
+	}
+	return jobs.Progress{Step: "waiting", Message: mappingWait}
 }
 
 // lockForWrite takes the lock at key (a show's, or a fetch's own) once rel's
