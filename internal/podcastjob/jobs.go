@@ -697,9 +697,12 @@ func (s *service) find(root *os.Root, entries []os.DirEntry, rows []store.Podcas
 		}
 	}
 	var renamed []string
-	match := func(name string) *podcast.Feed {
+	// match answers the folder name, as its feed spells it (a normalising
+	// filesystem may list or open it in another normal form, FeedFolder),
+	// with its feed when it holds the show the follow joins.
+	match := func(name string) (string, *podcast.Feed) {
 		if !podcast.ValidShow(name) {
-			return nil
+			return "", nil
 		}
 		f, from, err := podcast.ReadMoved(root, name)
 		warnHeld(name, from, err)
@@ -707,16 +710,16 @@ func (s *service) find(root *os.Root, entries []os.DirEntry, rows []store.Podcas
 			renamed = append(renamed, from)
 		}
 		if err != nil || f.FeedURLSHA256 != hash && !slices.Contains(f.PreviousFeedURLSHA256, hash) {
-			return nil
+			return "", nil
 		}
 		if gone && f.ShowID != p.ShowID {
-			return nil
+			return "", nil
 		}
-		return f
+		return podcast.FeedFolder(f, name), f
 	}
 	if p.ShowPath != "" && !gone {
-		if f := match(p.ShowPath); f != nil {
-			return podcast.FeedFolder(f, p.ShowPath), f, nil, nil
+		if show, f := match(p.ShowPath); f != nil {
+			return show, f, nil, nil
 		}
 		return "", nil, nil, missing
 	}
@@ -725,17 +728,15 @@ func (s *service) find(root *os.Root, entries []os.DirEntry, rows []store.Podcas
 		if r.FeedURLSHA256 == hash || p.ShowID != "" && r.ShowID == p.ShowID {
 			at, _ := podcast.RealName(root, r.ShowPath) // spelt as on disk, as entries are
 			tried[at] = true
-			if f := match(at); f != nil {
-				return podcast.FeedFolder(f, at), f, nil, nil
+			if show, f := match(at); f != nil {
+				return show, f, nil, nil
 			}
 		}
 	}
 	for _, e := range entries {
 		if e.IsDir() && !tried[e.Name()] {
-			if f := match(e.Name()); f != nil {
-				// Listed as on disk: a normalising filesystem may list the
-				// folder in another normal form than its feed spells it.
-				return podcast.FeedFolder(f, e.Name()), f, nil, nil
+			if show, f := match(e.Name()); f != nil {
+				return show, f, nil, nil
 			}
 		}
 	}

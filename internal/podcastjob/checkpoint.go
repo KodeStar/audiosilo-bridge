@@ -45,11 +45,7 @@ type checkpoint struct {
 // fetch whose read-back failed keeps it (resume-at-total), and the next
 // attempt verifies and publishes it with no GET (Fetch.run).
 func (c *checkpoint) complete() bool {
-	if c.Offset <= 0 || c.Offset != c.Total || len(c.SHA256) != 64 {
-		return false
-	}
-	_, err := hex.DecodeString(c.SHA256)
-	return err == nil
+	return c.Offset > 0 && c.Offset == c.Total && podcast.ValidSHA256(c.SHA256)
 }
 
 // partialName is the root-relative name of the partial c records, beside its
@@ -336,13 +332,9 @@ func (s *service) loadCheckpoint(job jobs.Job, root *os.Root, showID, episodeID 
 	if err != nil && !partialGone(err) {
 		return saved, "", fmt.Errorf("%w: %w", errPartialUnreadable, err)
 	}
-	if err == nil && size == saved.Offset && saved.Total <= s.o.MaxEpisodeBytes {
-		if saved.complete() {
-			return saved, tag, nil
-		}
-		if saved.Offset > 0 && saved.Offset < saved.Total && netguard.StrongETag(tag) {
-			return saved, tag, nil
-		}
+	resumable := saved.Offset > 0 && saved.Offset < saved.Total && netguard.StrongETag(tag)
+	if err == nil && size == saved.Offset && saved.Total <= s.o.MaxEpisodeBytes && (saved.complete() || resumable) {
+		return saved, tag, nil
 	}
 	s.clearCheckpoint(job, root, &saved)
 	return c, "", nil

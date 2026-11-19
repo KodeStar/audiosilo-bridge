@@ -15,6 +15,10 @@ import (
 
 var shaPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
+// ValidSHA256 reports whether s is a SHA-256 as a Fetch records it: 64
+// lowercase hex digits.
+func ValidSHA256(s string) bool { return shaPattern.MatchString(s) }
+
 func ValidID(s string) bool { return showIDPattern.MatchString(s) }
 func ValidEpisodePath(s string) bool {
 	p := strings.Split(s, "/")

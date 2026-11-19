@@ -241,9 +241,8 @@ func (h *Fetch) run(parent context.Context, claimed *jobs.Job, rep *jobs.Reporte
 	if err != nil {
 		// Not known to have changed: the partial and its record stay for the
 		// next attempt (a share's hiccup passes), and no GET is spent.
-		slog.Warn("podcasts: an episode's partial could not be read to resume it; it is kept", "partial", c.partialName(), "err", err)
 		*kept = c.Temp
-		return nil, fail("write_failed", "The episode's partial download could not be read.")
+		return nil, keptPartial(&c, err)
 	}
 	// follow moves the fetch to its episode where a show folder renamed by
 	// hand has it now (episodeAt), taking the episode's lock and its own
@@ -796,24 +795,24 @@ func (s *service) download(ctx context.Context, b *budget, job *jobs.Job, root *
 	// again as a host's failure is, and the last one fails write_failed with
 	// the partial and its record kept (run's exit) for the next attempt.
 	restarted := false
-	// onPartial answers attempt's partial failure err: restart to go on from
-	// zero, neither to try the attempt again, or the job's error.
-	onPartial := func(err error, attempt int) (restart bool, _ error) {
+	// onPartial answers attempt's partial failure err with the job's error,
+	// or nil to go on: from zero for one proven changed (errPartialChanged),
+	// else with the attempt tried again.
+	onPartial := func(err error, attempt int) error {
 		if errors.Is(err, errPartialChanged) {
 			if restarted {
-				return false, fail("write_failed", "The episode partial is incomplete.")
+				return fail("write_failed", "The episode partial is incomplete.")
 			}
 			restarted = true
 			s.clearCheckpoint(*job, root, c)
 			tag = ""
-			return true, nil
+			return nil
 		}
-		slog.Warn("podcasts: an episode's partial could not be read to resume it; it is kept", "partial", c.partialName(), "err", err)
-		last = fmt.Errorf("%w: %w", err, fail("write_failed", "The episode's partial download could not be read."))
+		last = keptPartial(c, err)
 		if attempt == 2 || s.o.Wait(ctx, netguard.RetryDelay(attempt, 0)) != nil {
-			return false, last
+			return last
 		}
-		return false, nil
+		return nil
 	}
 	for attempt := 0; attempt < 3; attempt++ {
 		if ctx.Err() != nil {
@@ -827,11 +826,10 @@ func (s *service) download(ctx context.Context, b *budget, job *jobs.Job, root *
 		// not be read to tell.
 		if c.Offset > 0 {
 			if err := s.partialOK(root, c); err != nil {
-				restart, err := onPartial(err, attempt)
-				if err != nil {
+				if err := onPartial(err, attempt); err != nil {
 					return podcast.Fetch{}, err
 				}
-				if !restart {
+				if !errors.Is(err, errPartialChanged) {
 					continue
 				}
 			}
@@ -855,11 +853,7 @@ func (s *service) download(ctx context.Context, b *budget, job *jobs.Job, root *
 				last = fail("network", "The episode resume could not be verified.")
 				continue
 			default:
-				held := tag
 				fetch, tag, err = s.consume(ctx, b, job, root, c, tag, response, action, follow, rep)
-				if errors.Is(err, errPartialUnreadable) {
-					tag = held // the partial kept is still the one it validates
-				}
 			}
 			_ = response.Body.Close()
 			if err == nil {
@@ -869,11 +863,10 @@ func (s *service) download(ctx context.Context, b *budget, job *jobs.Job, root *
 			// changed, it restarts (attempt-- keeps the host's retries); not
 			// read to tell, the attempt is tried again with it kept.
 			if errors.Is(err, errPartialChanged) || errors.Is(err, errPartialUnreadable) {
-				restart, err := onPartial(err, attempt)
-				if err != nil {
+				if err := onPartial(err, attempt); err != nil {
 					return podcast.Fetch{}, err
 				}
-				if restart {
+				if errors.Is(err, errPartialChanged) {
 					attempt--
 				}
 				continue
@@ -944,7 +937,7 @@ func (s *service) consume(ctx context.Context, b *budget, job *jobs.Job, root *o
 		file, err = root.OpenFile(name, os.O_RDWR|os.O_EXCL|os.O_CREATE, 0o600)
 	}
 	if err != nil {
-		return podcast.Fetch{}, "", err
+		return podcast.Fetch{}, tag, err // a partial kept is still the one tag validates
 	}
 	defer func() { _ = file.Close() }() // file, as keepHome last replaced it
 	if err := file.Chmod(0o600); err != nil {
@@ -957,9 +950,9 @@ func (s *service) consume(ctx context.Context, b *budget, job *jobs.Job, root *o
 			// Shorter than its prefix, it changed (download restarts the episode
 			// once, then fails write_failed); a read that failed tells nothing.
 			if errors.Is(err, io.EOF) {
-				return podcast.Fetch{}, "", errPartialChanged
+				return podcast.Fetch{}, tag, errPartialChanged
 			}
-			return podcast.Fetch{}, "", fmt.Errorf("%w: %w", errPartialUnreadable, err)
+			return podcast.Fetch{}, tag, fmt.Errorf("%w: %w", errPartialUnreadable, err)
 		}
 	}
 	c.Total = total
@@ -1178,6 +1171,13 @@ func openPartial(root *os.Root, name string, size int64) (*os.File, error) {
 		return nil, errPartialChanged
 	}
 	return file, nil
+}
+
+// keptPartial logs err, why c's partial could not be read to resume it (not
+// known to have changed, so kept with its record), and is the job's failure.
+func keptPartial(c *checkpoint, err error) error {
+	slog.Warn("podcasts: an episode's partial could not be read to resume it; it is kept", "partial", c.partialName(), "err", err)
+	return fmt.Errorf("%w: %w", err, fail("write_failed", "The episode's partial download could not be read."))
 }
 
 // partialError is err, a partial's open or check, as errPartialChanged when it
