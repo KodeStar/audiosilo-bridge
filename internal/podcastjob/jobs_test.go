@@ -69,6 +69,10 @@ type scanServer struct {
 	asked   []string
 }
 
+// ServerID is the harness's pairing's server, which a job a runner claimed
+// from it (jobs.ClaimedFrom) reaches (jobs.Link).
+func (s *scanServer) ServerID() string { return "server-1" }
+
 func (s *scanServer) RescanPodcast(_ context.Context, _ int64, show string) (*link.PodcastRescan, error) {
 	s.calls.Add(1)
 	s.mu.Lock()
