@@ -146,12 +146,13 @@ var (
 	// ErrUserUnavailable is a 403 user_unavailable: the account's person is
 	// disabled, a kid or a demo account since it was mapped.
 	ErrUserUnavailable = errors.New("the account's person can't be synced for (disabled, a kid or a demo account): map the account to someone else")
-	// ErrBadCursor is AudibleProgress's 400 invalid_cursor for a since the
-	// server can't read (a server restored from a backup, its feed rebuilt):
-	// read from the start. A server before 2.7.0 answered it invalid_request
-	// with the message "...: bad cursor" (badCursor); any other 400 is the
-	// APIError, never this (bridge#50).
-	ErrBadCursor = errors.New("the server refused the progress cursor")
+	// ErrBadCursor is a 400 invalid_cursor for a paging cursor the server
+	// won't read (AudibleProgress's since: a server restored from a backup,
+	// its feed rebuilt, another server's feed, a cursor past the feed's end;
+	// LibraryBooks's after): read from the start. A server before 2.7.0
+	// answered it invalid_request with the message "...: bad cursor"
+	// (badCursor); any other 400 is the APIError, never this (bridge#50).
+	ErrBadCursor = errors.New("the server refused the paging cursor")
 	// ErrNoAudibleSync is the 404 for a route the server doesn't have (its
 	// API's not_found, or a bare 404 with no code): a server older than
 	// 2.6.0, before Audible sync. A 404 with another code (unknown_account,
@@ -220,10 +221,10 @@ func (c *Client) AudibleProgress(ctx context.Context, account, since string, lim
 	return &out, nil
 }
 
-// badCursor reports whether err is the progress feed refusing the cursor sent
-// as since: a 400 invalid_cursor, or from a server before 2.7.0 a 400
-// invalid_request whose message ends "bad cursor" (its other 400s, a missing
-// account or a bad limit, say so).
+// badCursor reports whether err is the server refusing the paging cursor sent
+// (the progress feed's since, the books' after): a 400 invalid_cursor, or from
+// a server before 2.7.0 a 400 invalid_request whose message ends "bad cursor"
+// (its other 400s, a missing account or a bad limit, say so).
 func badCursor(err error) bool {
 	var e *APIError
 	if !errors.As(err, &e) || e.Status != http.StatusBadRequest {

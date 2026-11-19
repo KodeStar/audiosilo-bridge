@@ -3,6 +3,7 @@ package link
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -230,6 +231,7 @@ func (c *Client) PutAudibleTitles(ctx context.Context, account string, t Audible
 // LibraryBooks reads one page of a books library's indexed books, by path:
 // after is the previous page's Next ("" for the first), limit at most
 // MaxLibraryBooks (0 for the server's default). Next is "" on the last page.
+// ErrBadCursor when the server refused after (badCursor): read from the start.
 func (c *Client) LibraryBooks(ctx context.Context, libraryID int64, after string, limit int) (*LibraryBooks, error) {
 	q := url.Values{}
 	if after != "" {
@@ -240,6 +242,9 @@ func (c *Client) LibraryBooks(ctx context.Context, libraryID int64, after string
 	}
 	var out LibraryBooks
 	if err := c.do(ctx, http.MethodGet, "/api/v1/bridge/libraries/"+strconv.FormatInt(libraryID, 10)+"/books", q, nil, &out); err != nil {
+		if after != "" && badCursor(err) {
+			return nil, fmt.Errorf("%w: %w", ErrBadCursor, err)
+		}
 		return nil, err
 	}
 	if out.Books == nil {
