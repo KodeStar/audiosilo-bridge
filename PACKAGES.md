@@ -4096,7 +4096,8 @@ internal/
             resolves (a sign-in during the start re-admitted nothing, bridge#25),
             and starts the daily transcript sweep only once the engine is the
             running one (its hold on a book goes through the engine; with none it
-            is a no-op). Those re-admits, and githubChanged's and agentCredentialChanged's, run as
+            is a no-op). Those re-admits, githubChanged's and agentCredentialChanged's, and
+            a changed monthly budget's (SaveSettings), run as
             Bridge.bg tasks (bgTasks), as does an abandoned generate job's wait for
             the engine (generate.Options.Background): Run stops them (their context
             ends, none starts after) and waits for them before the store closes, on

@@ -271,9 +271,13 @@ func (b *Bridge) SaveSettings(ctx context.Context, s api.Settings) error {
 		// still over it parks again until the next month), and so do the
 		// describe jobs parked on it (they wait in their own loop).
 		b.wakeParked(state.ParkBudgetExceeded)
-		if e := b.engine.get(); e != nil {
-			go e.sched.ReadmitParked(context.WithoutCancel(ctx), "the monthly budget changed", state.ParkBudgetExceeded)
-		}
+		// Among the background tasks, as every re-admit a change starts: Run ends
+		// their context and waits for them before the store closes (bridge#80).
+		b.bg.run(func(ctx context.Context) {
+			if e := b.engine.get(); e != nil {
+				e.sched.ReadmitParked(ctx, "the monthly budget changed", state.ParkBudgetExceeded)
+			}
+		})
 	}
 	b.Kick()
 	return nil

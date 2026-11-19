@@ -393,7 +393,7 @@ func TestGitHubSignInResumesContributionParks(t *testing.T) {
 	}
 }
 
-// The re-admits a credential change starts run in the Bridge's background tasks,
+// The re-admits a credential or budget change starts run in the Bridge's background tasks,
 // which Run stops (bgTasks.stop: their context ends, and it waits for them) before
 // the store closes (bridge#80): a change after the stop starts nothing, where a
 // bare goroutine re-admitted the book with the store closing under it.
@@ -412,12 +412,29 @@ func TestCredentialReadmitsStopWithTheBridge(t *testing.T) {
 		string(state.ParkContribUnavailable)); err != nil {
 		t.Fatal(err)
 	}
+	overBudget, err := b.db.CreateBook(ctx, store.NewBook{SourcePath: "/books/budget.m4b", WorkDir: t.TempDir(), Title: "budget"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.db.SetBookState(ctx, overBudget.ID, string(state.Auditing), string(state.StatusNeedsAttention), "over budget",
+		string(state.ParkBudgetExceeded)); err != nil {
+		t.Fatal(err)
+	}
 	b.bg.stop()
 	b.githubChanged()
 	b.agentCredentialChanged()
+	// A changed monthly budget re-admits among the same tasks.
+	settings := b.Settings()
+	raised := *settings.MonthlyBudgetUSD + 50
+	settings.MonthlyBudgetUSD = &raised
+	if err := b.SaveSettings(ctx, settings); err != nil {
+		t.Fatal(err)
+	}
 	time.Sleep(50 * time.Millisecond)
-	if got, err := b.db.GetBook(ctx, bk.ID); err != nil || got.Status != string(state.StatusNeedsAttention) {
-		t.Fatalf("a re-admit ran after the Bridge stopped: status %q, %v", got.Status, err)
+	for _, id := range []int64{bk.ID, overBudget.ID} {
+		if got, err := b.db.GetBook(ctx, id); err != nil || got.Status != string(state.StatusNeedsAttention) {
+			t.Fatalf("a re-admit of book %d ran after the Bridge stopped: status %q, %v", id, got.Status, err)
+		}
 	}
 }
 
