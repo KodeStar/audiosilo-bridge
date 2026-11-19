@@ -82,9 +82,10 @@ type FileCheck struct {
 // compares its size with the server's. ok is true when every file matched;
 // problem describes the first that didn't. Each stat is bounded by LookTimeout,
 // and the first a hung mount holds past it ends the comparison: timeout is that
-// stat's fsutil.ErrStatTimeout (nil when every stat answered), which says
-// nothing definite about the copy, so a caller looks again later rather than
-// taking the mismatch as one.
+// stat's fsutil.ErrStatTimeout when it is the first file that didn't match
+// (nil when every stat answered, or an earlier file's answer already said the
+// copy differs), which says nothing definite about the copy, so a caller looks
+// again later rather than taking the mismatch as one.
 func CompareFiles(mount string, files []link.BookFile) (checks []FileCheck, ok bool, problem string, timeout error) {
 	return compareFiles(mount, files, bounded.stat)
 }
@@ -119,12 +120,17 @@ func compareFiles(mount string, files []link.BookFile, stat func(string) (fs.Fil
 		default:
 			c.OK = true
 		}
-		if !c.OK && ok {
+		first := !c.OK && ok
+		if first {
 			ok, problem = false, f.Path+": "+c.Error
 		}
 		checks = append(checks, c)
 		if errors.Is(err, fsutil.ErrStatTimeout) {
-			timeout = err
+			if first {
+				// Only a silence before any definite mismatch is unknown: a file
+				// the folder answered with another size already settled it.
+				timeout = err
+			}
 			break // the mount hangs: every file after would cost LookTimeout too
 		}
 	}
@@ -306,9 +312,14 @@ func (l looks) check(ctx context.Context, src BookSource, lib link.Library, moun
 	}
 	st.CheckedPath = book.Path
 	_, ok, problem, timeout := compareFiles(mount, book.Files, l.stat)
-	if !ok {
-		st.Error = "this folder doesn't hold the server's copy of the library (" + problem + ")"
+	switch {
+	case timeout != nil:
+		// Not a mismatch: the folder went silent before any file differed.
+		st.Error = "the folder didn't answer while the book's files were compared with the server's (" + problem + ")"
 		return st, slowLook(timeout)
+	case !ok:
+		st.Error = "this folder doesn't hold the server's copy of the library (" + problem + ")"
+		return st, nil
 	}
 	st.Mapped = true
 	if err := l.probe(mount); err != nil {

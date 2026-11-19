@@ -205,6 +205,26 @@ func TestCompareFilesCapsAndReports(t *testing.T) {
 	if _, ok, problem, timeout := CompareFiles(root, []link.BookFile{{Path: "Author/Dir.mp3", Size: 0}}); ok || !strings.Contains(problem, "not a regular file") || timeout != nil {
 		t.Fatalf("a folder named like a file = %v %q", ok, problem)
 	}
+
+	// A stat that times out is unknown only when it is the first file that
+	// didn't match: one the folder answered with another size before it is a
+	// definite mismatch (a stale copy), never a slow folder whose last state a
+	// check keeps.
+	one := link.BookFile{Path: "Author/Book/01.mp3", Size: 3}
+	two := link.BookFile{Path: "Author/Book/02.mp3", Size: 6}
+	stat := func(p string) (fs.FileInfo, error) {
+		if p == filepath.Join(root, "Author", "Book", "02.mp3") {
+			return nil, &fs.PathError{Op: "stat", Path: p, Err: fsutil.ErrStatTimeout}
+		}
+		return os.Stat(p)
+	}
+	if _, ok, _, timeout := compareFiles(root, []link.BookFile{one, two}, stat); ok || timeout == nil {
+		t.Fatalf("a hung stat after a match = %v, timeout %v; want unknown", ok, timeout)
+	}
+	stale := []link.BookFile{{Path: one.Path, Size: one.Size + 1}, two}
+	if _, ok, problem, timeout := compareFiles(root, stale, stat); ok || timeout != nil || !strings.Contains(problem, "size differs") {
+		t.Fatalf("a hung stat after a size mismatch = %v %q, timeout %v; want the mismatch, definite", ok, problem, timeout)
+	}
 }
 
 func TestRegistry(t *testing.T) {
