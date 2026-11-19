@@ -191,12 +191,8 @@ internal/
             is not fork-safe for an executable run at once. execfile/forktest is
             the shared fork-stress test (execfile's and toolfetch's).
   testwait/ tests only, a leaf (the server's internal/testwait, server#492): Race,
-            a build-tag const, and Scaled(d), d x4 under -race. A deadline that
-            only ends a failed test is Scaled; a test of a time bound (a stall, a
-            budget) scales all its times alike so their ratios hold. A test that
-            can wait for the event itself (a channel closed by the handler, an
-            engine wrapper's hook) does that instead of sleeping: a fixed sleep
-            racing a goroutine is the flake, a longer one only hides it.
+            a build-tag const, and Scaled(d), d x4 under -race. When to Scale a
+            wait and when to wait for the event instead: the package doc.
   audio/    the mechanical audio stages: Inspect (ffprobe -> probe.json + normalized
             manifest.json; marker parsing + contiguity ported from audio_extract.py;
             single-file marker books AND multi-file "files" books) and Split (ffmpeg

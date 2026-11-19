@@ -509,11 +509,7 @@ func TestRefusedJobResumes(t *testing.T) {
 	// The job's own report hears the refusal: the claim loop's poll can hear it
 	// first (unpairing), and a refusal lifted before the job's next keepalive
 	// would never stop it.
-	select {
-	case <-stopped:
-	case <-time.After(testwait.Scaled(5 * time.Second)):
-		t.Fatal("the refusal never stopped the job")
-	}
+	await(t, stopped)
 	waitFor(t, func() bool { return !paired.Load() })
 	srv.mu.Lock()
 	srv.unauthed = false
@@ -657,12 +653,8 @@ func TestLocalCancel(t *testing.T) {
 
 func waitFor(t *testing.T, cond func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(testwait.Scaled(5 * time.Second))
-	for !cond() {
-		if time.Now().After(deadline) {
-			t.Fatal("timed out")
-		}
-		time.Sleep(5 * time.Millisecond)
+	if err := awaitCond(cond, "a condition"); err != nil {
+		t.Fatal(err)
 	}
 }
 
