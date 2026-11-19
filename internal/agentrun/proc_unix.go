@@ -78,10 +78,12 @@ func closeDir(dir string) error {
 }
 
 // removeRunFile removes f (a run's planted file, or an empty folder) when it
-// is still uid's: the area and each folder below it on f's way are opened
-// without following a link, so one swapped in since the walk stops it (ELOOP,
-// ENOTDIR) rather than lead anywhere, and f's last element is looked at and
-// removed in the folder so opened. A folder goes only when empty.
+// is still uid's and on the area's own file system: the area and each folder
+// below it on f's way are opened without following a link, so one swapped in
+// since the walk stops it (ELOOP, ENOTDIR) rather than lead anywhere, each
+// must be on the area's device (a mount on the way is another file system:
+// never a host's file), and f's last element is looked at and removed in the
+// folder so opened. A folder goes only when empty.
 func removeRunFile(f runFile, uid int) bool {
 	parts := strings.Split(f.rel, string(filepath.Separator))
 	const dirFlags = unix.O_RDONLY | unix.O_DIRECTORY | unix.O_NOFOLLOW | unix.O_CLOEXEC
@@ -89,6 +91,12 @@ func removeRunFile(f runFile, uid int) bool {
 	if err != nil {
 		return false
 	}
+	var st unix.Stat_t
+	if err := unix.Fstat(fd, &st); err != nil {
+		_ = unix.Close(fd)
+		return false
+	}
+	dev := st.Dev
 	for _, name := range parts[:len(parts)-1] {
 		next, err := unix.Openat(fd, name, dirFlags, 0)
 		_ = unix.Close(fd)
@@ -96,11 +104,14 @@ func removeRunFile(f runFile, uid int) bool {
 			return false
 		}
 		fd = next
+		if err := unix.Fstat(fd, &st); err != nil || st.Dev != dev {
+			_ = unix.Close(fd)
+			return false
+		}
 	}
 	defer func() { _ = unix.Close(fd) }()
 	last := parts[len(parts)-1]
-	var st unix.Stat_t
-	if err := unix.Fstatat(fd, last, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil || int(st.Uid) != uid {
+	if err := unix.Fstatat(fd, last, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil || int(st.Uid) != uid || st.Dev != dev {
 		return false
 	}
 	flags := 0

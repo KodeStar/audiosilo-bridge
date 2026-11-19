@@ -53,15 +53,21 @@ import (
 //     exact paths while the service holds them (own), never by a name a
 //     host's tmpfs could hold too; and
 //   - a file of a credential's name that a run planted (prompt injection
-//     from a book's text could ask for one) to lock the service out: one
-//     owned by the service's own uid, in its own staging dir or TmpDir
-//     (writableAreas), reached from there through folders alone (no link,
-//     no other mount's point) and walked as part of the mount that holds
-//     that area (a host folder mounted inside it is its own mount, judged on
-//     its own, never a run's, nor swept). It is not
-//     counted, and sweepRunFiles removes it when a run ends and when the
-//     service starts. A file of any other uid, or outside those areas, still
-//     refuses the runs: ownership alone passes nothing.
+//     from a book's text could ask for one) to lock the service out, in its
+//     TmpDir alone and only while that is a tmpfs of the service's own
+//     (runAreaMount: the mount holding TmpDir, verified from mountinfo, is a
+//     whole tmpfs, alone at its point, hidden by no later mount): one owned
+//     by the service's own uid, reached from TmpDir through folders alone (no
+//     link, no other mount's point). It is not counted, and sweepRunFiles
+//     removes it when a run ends and when the service starts. Ownership alone
+//     is no proof: a host folder or a share mounted at TmpDir or the staging
+//     dir shows its files as the service's uid where the share squashes
+//     owners (CIFS uid=, NFS all_squash), and sweeping one would delete a
+//     host's file (the Bridge's secret.key). So a TmpDir that is not such a
+//     tmpfs passes nothing, and the staging dir (any filesystem) passes
+//     nothing either: a run's file there refuses the runs, names its path
+//     for the admin to remove, and is never deleted. A file of any other
+//     uid, or anywhere else, still refuses the runs.
 //
 // The check fails closed: a folder it can enter but not list, a mount deeper
 // than maxMountDepth, more than maxWalkEntries entries over the whole walk (a
@@ -312,18 +318,18 @@ type mountWalk struct {
 	// own reports whether a folder is one of the service's per-run folders in
 	// its TmpDir, by its exact path (nil: none).
 	own func(string) bool
-	// selfUID is the service's own uid (-1: none), areas its writable folders
-	// (the staging dir and TmpDir) and areasHere those the mount being looked
-	// at holds: a file of a credential's name of selfUID's in one is a run's
-	// own (runMade), which runFiles collects.
-	selfUID   int
-	areas     []string
-	areasHere []string
-	runFiles  []runFile
+	// selfUID is the service's own uid (-1: none), runArea its TmpDir (""
+	// none) and areaHere whether the mount being looked at is runArea's
+	// verified tmpfs (runAreaMount): a file of a credential's name of
+	// selfUID's there is a run's own (runMade), which runFiles collects.
+	selfUID  int
+	runArea  string
+	areaHere bool
+	runFiles []runFile
 }
 
-// runFile is a file of a credential's name a run planted: its area (one of
-// mountWalk.areas) and its path below it.
+// runFile is a file of a credential's name a run planted: its area (the
+// walk's runArea) and its path below it.
 type runFile struct{ area, rel string }
 
 // newMountWalk is a check over the mounts starting now, with the walk's
@@ -344,7 +350,8 @@ func (w *mountWalk) credentialMount(mounts []mount) string {
 	for _, m := range mounts {
 		w.points[m.point] = true
 	}
-	for _, m := range mounts {
+	areaMount := w.runAreaMount(mounts)
+	for i, m := range mounts {
 		switch {
 		case isAgentVolume(m.root):
 			return m.point + " is the agent volume (" + agentVolume + ")"
@@ -353,7 +360,7 @@ func (w *mountWalk) credentialMount(mounts []mount) string {
 		case pseudoFS[m.fstype]:
 			continue
 		}
-		w.areasHere = w.areasHeldBy(m.point)
+		w.areaHere = i == areaMount
 		p, err := w.credentialIn(m)
 		if err != nil {
 			return m.point + " can't be checked: " + err.Error()
@@ -365,22 +372,33 @@ func (w *mountWalk) credentialMount(mounts []mount) string {
 	return ""
 }
 
-// areasHeldBy are the writable areas whose mount is the one at point: the
-// mount with the longest point that is the area or a folder above it.
-func (w *mountWalk) areasHeldBy(point string) []string {
-	var out []string
-	for _, area := range w.areas {
-		holder := ""
-		for p := range w.points {
-			if fsutil.Within(p, area) && len(p) > len(holder) {
-				holder = p
-			}
-		}
-		if holder == point {
-			out = append(out, area)
+// runAreaMount is the index in mounts of the mount holding runArea when it is
+// a tmpfs of the service's own, -1 when it isn't (no file is then a run's
+// own): the mount with the longest point at or above runArea is a tmpfs
+// mounted whole (root "/", never a folder of a host's tmpfs bound in), the
+// only mount at its point (nothing stacked on or under it) and no mount listed
+// after it is at or above its point (one over a parent hides it). A host
+// folder or a share mounted at TmpDir (a bind, CIFS, NFS) never passes, nor
+// does a TmpDir whose path mountinfo doesn't show.
+func (w *mountWalk) runAreaMount(mounts []mount) int {
+	if w.runArea == "" || w.selfUID < 0 {
+		return -1
+	}
+	held, point := -1, ""
+	for i, m := range mounts {
+		if fsutil.Within(m.point, w.runArea) && (held < 0 || len(m.point) > len(point)) {
+			held, point = i, m.point
 		}
 	}
-	return out
+	if held < 0 || mounts[held].fstype != "tmpfs" || mounts[held].root != "/" {
+		return -1
+	}
+	for i, m := range mounts {
+		if i != held && (m.point == point || (i > held && fsutil.Within(m.point, point))) {
+			return -1
+		}
+	}
+	return held
 }
 
 // below is p's path relative to dir when p is dir or inside it (fsutil.Within's
@@ -394,34 +412,32 @@ func below(dir, p string) (string, bool) {
 }
 
 // runMade reports whether p, a file of a credential's name the walk found, is
-// a run's own (the rules above): in one of the areas the mount being looked at
-// holds, the area and every folder from it down to p a folder of that mount
-// (never a link: one could lead to a host's file whose owner is the service's
-// uid; nor another mount's point, p included: a host folder or file mounted
-// inside the area, which a look by path such as credentialUnder's reaches
-// into), and owned by the service's uid. It is added to runFiles once. Any look
-// that fails is a no.
+// a run's own (the rules above): the mount being looked at is runArea's
+// verified tmpfs (areaHere), runArea and every folder from it down to p a
+// folder of that mount (never a link: one could lead to a host's file whose
+// owner is the service's uid; nor another mount's point, p included: a host
+// folder or file mounted inside TmpDir, which a look by path such as
+// credentialUnder's reaches into), and p owned by the service's uid. It is
+// added to runFiles once. Any look that fails is a no.
 func (w *mountWalk) runMade(p string) bool {
-	if w.selfUID < 0 {
+	if w.selfUID < 0 || !w.areaHere {
 		return false
 	}
-	for _, area := range w.areasHere {
-		rel, ok := below(area, p)
-		if !ok || rel == "." || !w.foldersDown(area, rel) {
-			continue
-		}
-		info, err := w.lstat(p)
-		if err != nil {
-			continue
-		}
-		if uid, ok := ownerUID(info); ok && uid == w.selfUID {
-			if f := (runFile{area: area, rel: rel}); !slices.Contains(w.runFiles, f) {
-				w.runFiles = append(w.runFiles, f)
-			}
-			return true
-		}
+	rel, ok := below(w.runArea, p)
+	if !ok || rel == "." || !w.foldersDown(w.runArea, rel) {
+		return false
 	}
-	return false
+	info, err := w.lstat(p)
+	if err != nil {
+		return false
+	}
+	if uid, ok := ownerUID(info); !ok || uid != w.selfUID {
+		return false
+	}
+	if f := (runFile{area: w.runArea, rel: rel}); !slices.Contains(w.runFiles, f) {
+		w.runFiles = append(w.runFiles, f)
+	}
+	return true
 }
 
 // foldersDown reports whether area and each folder between it and rel's last

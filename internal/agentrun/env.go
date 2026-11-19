@@ -234,25 +234,12 @@ func (r *Runner) walkMountsLocked() []runFile {
 		why = "the mounts can't be read: " + err.Error()
 	} else {
 		w := newMountWalk(r.looks)
-		w.own, w.selfUID, w.areas = r.isOwnTmp, r.selfUID, r.writableAreas()
+		w.own, w.selfUID, w.runArea = r.isOwnTmp, r.selfUID, r.opts.TmpDir
 		why = w.credentialMount(ms)
 		planted = w.runFiles
 	}
 	r.mountLast.Store(&why)
 	return planted
-}
-
-// writableAreas are the folders a run of the endpoint's service can write
-// that are the service's own: its staging dir and TmpDir (mounts.go's
-// runMade).
-func (r *Runner) writableAreas() []string {
-	var out []string
-	for _, dir := range []string{r.opts.Staging, r.opts.TmpDir} {
-		if abs, err := filepath.Abs(dir); err == nil {
-			out = append(out, abs)
-		}
-	}
-	return out
 }
 
 // holdOwnTmp records the per-run folder dir as one of this runner's own, which
@@ -278,11 +265,13 @@ func (r *Runner) isOwnTmp(p string) bool {
 }
 
 // sweepRunFiles walks the mounts afresh and removes the files of a
-// credential's name a run planted in the service's own areas (runMade), each
-// through the folders on its way opened without following a link
-// (removeRunFile, proc_unix.go) and only while it is still the service's own;
-// a folder is removed only when empty, so nothing a host mounted under one is
-// reached. The endpoint's service calls it when it starts and after each run.
+// credential's name a run planted in its TmpDir while that is a tmpfs of the
+// service's own (runMade, runAreaMount; nowhere else: the staging dir's are
+// never deleted), each through the folders on its way opened without
+// following a link and on TmpDir's own file system (removeRunFile,
+// proc_unix.go) and only while it is still the service's own; a folder is
+// removed only when empty, so nothing a host mounted under one is reached. The
+// endpoint's service calls it when it starts and after each run.
 func (r *Runner) sweepRunFiles() {
 	r.mountMu.Lock()
 	defer r.mountMu.Unlock()

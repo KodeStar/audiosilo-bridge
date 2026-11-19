@@ -3858,19 +3858,25 @@ internal/
             exact paths (Runner.ownTmp, held from before each is made until
             it is gone; codex keeps config.toml there), and a file of a
             credential's name a run planted to lock the service out (prompt
-            injection: `touch /staging/auth.json`): owned by the service's
-            uid, in its staging dir or TmpDir (writableAreas), reached from
-            there through folders alone, never a link nor another mount's
-            point, and walked as part of the mount holding that area (a host
-            folder or file mounted inside it is its own mount, never a run's
-            nor swept; runMade). Such files are swept (sweepRunFiles: a
-            fresh walk, then each removed through its folders opened without
-            following a link, while still the service's, a folder only when
-            empty) when the service starts and after each job that ends
-            while the service runs (a stopping one leaves them to the next
-            start, the heartbeat touched first); another uid's file, or one
-            outside those areas (a host mount of uid 10003 files included),
-            still refuses. The walk runs once
+            injection: `touch /tmp/auth.json`), in its TmpDir alone and only
+            while that is a tmpfs of its own (runAreaMount, from mountinfo:
+            the mount holding TmpDir a whole tmpfs, root "/", alone at its
+            point, hidden by no later mount; the compose example's
+            `tmpfs: ["/tmp"]`): owned by the service's uid, reached from
+            TmpDir through folders alone, never a link nor another mount's
+            point (runMade). Such files are swept (sweepRunFiles: a fresh walk,
+            then each removed through its folders opened without following a
+            link and on TmpDir's own device, while still the service's, a
+            folder only when empty) when the service starts and after each job
+            that ends while the service runs (a stopping one leaves them to the
+            next start, the heartbeat touched first). Ownership alone is no
+            proof (a host folder bound there, or a share squashing owners,
+            CIFS uid=10003 or NFS all_squash, shows a host's secret.key as the
+            service's), so the staging dir, on any file system, passes no such
+            file and sweeps none: it refuses the runs and the Settings card
+            names its path for the admin to remove (fail closed); a TmpDir that
+            is not a verified tmpfs passes and sweeps nothing either, nor does
+            any other place. Another uid's file still refuses. The walk runs once
             per status tick (tickMounts, which leaves a walk in flight to stand
             for its own rather than queue behind it: two slow walks in a row
             would hold runner.json past RunnerFreshFor) and again before each
