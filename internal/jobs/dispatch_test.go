@@ -757,15 +757,18 @@ func TestUnpairDropsRowsNoRunHolds(t *testing.T) {
 	startControlled(t, r)
 	cur.Store(nil)
 	r.Unpaired(srv)
+	// Each row is waited on for its own end: the running row's release and the
+	// finished row's mark land in either order.
 	waitFor(t, func() bool {
 		sj, err := db.GetServerJob(ctx, 5)
 		return err == nil && sj.State == store.JobLost && sj.Error == errPairingEnded.Error()
 	})
+	waitFor(t, func() bool {
+		sj, err := db.GetServerJob(ctx, 6)
+		return err == nil && sj.State == store.JobDone && sj.Reported
+	})
 	if got := h.abandoned(); len(got) != 1 || got[0] != 5 {
 		t.Fatal("the dropped row's work wasn't released once", got)
-	}
-	if sj, err := db.GetServerJob(ctx, 6); err != nil || sj.State != store.JobDone || !sj.Reported {
-		t.Fatalf("a finished row: %+v %v, want done and never to be reported", sj, err)
 	}
 	next := newControlledServer(false) // paired again with the same server: a new pairing
 	next.pairing = "p2"
