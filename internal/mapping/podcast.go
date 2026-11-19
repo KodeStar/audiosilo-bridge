@@ -37,8 +37,19 @@ type libraryMarker struct {
 // the library's last known state. Not when the folder held no marker of the
 // library and one was written for the read (unproven): the folder may be
 // another one now (a share that isn't mounted), so the failure is recorded.
+// The folder is stat-ed before it is opened, and probed, within LookTimeout: a
+// hung mount fails the check (a mount that answered the stat answers the open).
 func CheckPodcast(ctx context.Context, src MarkerSource, lib link.Library, mount string, current func(int64) bool) (st link.LibraryStatus, unanswered error) {
+	return bounded.checkPodcast(ctx, src, lib, mount, current)
+}
+
+// checkPodcast is CheckPodcast with these looks.
+func (l looks) checkPodcast(ctx context.Context, src MarkerSource, lib link.Library, mount string, current func(int64) bool) (st link.LibraryStatus, unanswered error) {
 	st = link.LibraryStatus{LibraryID: lib.ID, MountPath: mount, CheckedPath: MarkerPath}
+	if _, err := l.stat(mount); err != nil {
+		st.Error = "the library folder is " + describeStatError(err)
+		return st, nil
+	}
 	root, err := os.OpenRoot(mount)
 	if err != nil {
 		st.Error = "the library folder is " + describeStatError(err)
@@ -76,7 +87,7 @@ func CheckPodcast(ctx context.Context, src MarkerSource, lib link.Library, mount
 		err = os.ErrNotExist
 	}
 	if errors.Is(err, os.ErrNotExist) {
-		if err := ProbeWritable(mount); err != nil {
+		if err := l.probe(mount); err != nil {
 			st.Error = "the library is not writable here"
 			return st, nil
 		}
@@ -128,7 +139,7 @@ func CheckPodcast(ctx context.Context, src MarkerSource, lib link.Library, mount
 		return st, unanswered
 	}
 	st.Mapped = true
-	if err := ProbeWritable(mount); err != nil {
+	if err := l.probe(mount); err != nil {
 		st.Error = "mapped, but not writable here: " + describeStatError(err)
 		return st, nil
 	}

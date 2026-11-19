@@ -71,6 +71,21 @@ describe('LibrariesTab', () => {
     expect(screen.getAllByText('Mapped')).toHaveLength(2);
   });
 
+  it('says writes wait while no check stands', async () => {
+    const lib = libraryFixture({
+      unanswered_at: new Date(Date.now() - 120_000).toISOString(),
+      unknown: true,
+    });
+    lib.status = { ...lib.status!, mapped: false, writable: false, error: 'no answer since then' };
+    mockFetch({ 'GET /api/libraries': { body: { libraries: [lib] } } });
+    render(<LibrariesTab client={api()} />);
+    expect(await screen.findByText(/The server gave no answer/)).toHaveTextContent(
+      'The server gave no answer (2 min ago). Writes wait for a check it answers. The Bridge will check again.',
+    );
+    expect(screen.getByText('Waiting for the server')).toBeInTheDocument();
+    expect(screen.queryByText('Not mapped')).not.toBeInTheDocument();
+  });
+
   it('locks the folder when the environment sets it', async () => {
     mockFetch({
       'GET /api/libraries': { body: { libraries: [libraryFixture({ locked: true })] } },

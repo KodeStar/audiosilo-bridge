@@ -134,7 +134,9 @@ func (h *Handler) sweepOne(k key, now time.Time) {
 
 // mappingGone reports whether library id's mapping is gone: the server no
 // longer lists the library, or its last check found it unmapped here. A
-// library that is mapped but not writable now, or not checked yet, isn't gone.
+// library that is mapped but not writable now, not checked yet, or whose state
+// no answered check backs (the registry's Status false: a check the server
+// didn't answer, a state too old), isn't gone.
 func (h *Handler) mappingGone(id int64) bool {
 	if _, ok := h.o.Libraries.Library(id); !ok {
 		return true

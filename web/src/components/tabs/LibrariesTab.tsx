@@ -160,7 +160,11 @@ function LibraryCard({
           <Row label="Last check">
             <span className="text-amber-300">
               The server gave no answer (<Ago at={lib.unanswered_at} />
-              ). These are the results of the check before it. The Bridge will check again.
+              ).{' '}
+              {lib.unknown
+                ? 'Writes wait for a check it answers.'
+                : 'These are the results of the check before it.'}{' '}
+              The Bridge will check again.
             </span>
           </Row>
         )}

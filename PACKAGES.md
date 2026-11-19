@@ -179,7 +179,9 @@ internal/
             BR-OPENAI-2: LstatWithin(path, d) is os.Lstat bounded the same way, and
             ReadDirNWithin(path, n, d) a folder read of at most n entries (never
             whole; one n per path), for the endpoint's agent service's mount check
-            (agentrun's mounts.go).
+            (agentrun's mounts.go). LookWithin(op, path, d, look) bounds any other
+            look the same way, one in flight per op and path (mapping's write
+            probe, ProbeWritable).
   execfile/ writes files the process will exec at once with syscall.ForkLock
             held for reading from open to close, so a concurrent fork can't hold
             the write descriptor and make the exec fail with ETXTBSY (WriteFile).
@@ -2215,21 +2217,36 @@ internal/
             library's last state at the same mount and flags it due again, but
             only while the folder still shows what that state's check found
             (proveKept: the book's folder or file, or the podcast marker, one
-            stat bounded by ProofTimeout, 5 s, outside the lock): a share that
+            stat bounded by LookTimeout, outside the lock): a share that
             isn't mounted leaves an empty folder, and a kept "mapped, writable"
             there would let LibriVox and Audible imports create folders on the
             bare mount point. A first check, one at a moved mount, and one whose
             folder doesn't show it (unproven; a book found at the mount itself
-            never does) record the failure, so writes wait. A kept state stands KeptChecks (3) check intervals from the
-            check that set it (the interval Due last took, the heartbeat's
-            mapping.check_minutes): the next unanswered check past that records
-            its failure, and Due ends a mapped one during a hold (an unmapped one
-            lets nothing write and keeps its own reason). The heartbeat calls Due
-            on every beat, a failed one too (a server limiting the checks limits
-            the heartbeat as well), asking for no check then. A 429, a refused
+            never does) record the failure as UNKNOWN. A state stands KeptChecks
+            (3) check intervals from the check that set it (the interval Due last
+            took, the heartbeat's mapping.check_minutes) without an answered
+            check, then is unknown too, keeping that check's time: marked by an
+            unanswered check or by Due (every beat, a failed one too: a server
+            limiting the checks limits the heartbeat as well, asking for no
+            check then), and worked out again as Status, Statuses and Entries
+            read it (a state no check challenges, heartbeats failing from the
+            start, ages all the same). Unknown is Status false, as before a
+            first check: a write job waits (parks, retries) rather than failing,
+            fails only on a standing "not mapped" (the server's answer, or a
+            local failure), and LibriVox's "mapping gone" timer starts only on
+            one; the heartbeat and the page see an unknown mapped state as not
+            mapped, an unmapped one keeps its own reason, and Entry.Unknown (the
+            page's unknown) badges it "Waiting for the server". Every look at a
+            library's folder (its stat, the book files' stats, the write probe,
+            a podcast folder's stat before it is opened) is bounded by
+            LookTimeout (5 s, fsutil.StatWithin and fsutil.LookWithin: one look
+            per path out, a later one waits on it): a hung mount fails that
+            library's check, recorded (a hung file stat ends the comparison),
+            and the run goes on; ProbeWritable and CompareFiles are bounded for
+            their other callers too. A 429, a refused
             token or a request timeout ends the pass: the rest keep their state
-            only as an unanswered check would (keepUnreached: same mount, within
-            the cap, the folder still showing it, else the failure); checks
+            only as an unanswered check would (keepUnreached: same mount, the
+            folder still showing it, else the failure); checks
             queued meanwhile are still made, as an edit after the run is, and end
             at their first 429.
             Due waits out a hold after such a run: the longest Retry-After of
@@ -2237,7 +2254,7 @@ internal/
             RetryFirst (1 min) doubling per such run in a row, at most RetryMax
             (30 min); a run the server answered ends it (one that asked nothing
             leaves it), and a failure without a Retry-After (a check made through
-            the hold) never shortens it. A kept state carries when the check left it in place
+            the hold) never shortens it, nor counts toward the doubling. A kept state carries when the check left it in place
             (Entry.UnansweredAt, the page API's unanswered_at, null once a check
             is answered; never on the server's wire): the Libraries tab says the
             last check got no answer and the results are the earlier ones. Held

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"net/url"
 	"os"
@@ -16,8 +17,18 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kodestar/audiosilo-bridge/internal/fsutil"
 	"github.com/kodestar/audiosilo-bridge/internal/link"
 )
+
+// newRegistry is a Registry whose reads never age a state (its clock is the zero
+// time): the tests check at fixed times, and those of the ageing set clock or
+// call Due.
+func newRegistry() *Registry {
+	r := NewRegistry()
+	r.clock = func() time.Time { return time.Time{} }
+	return r
+}
 
 // Security: SafeJoin keeps every server path inside the mount (allowed: plain
 // relative paths; denied: anything that could leave it).
@@ -198,7 +209,7 @@ func TestCompareFilesCapsAndReports(t *testing.T) {
 
 func TestRegistry(t *testing.T) {
 	t.Parallel()
-	r := NewRegistry()
+	r := newRegistry()
 	root, files := library(t)
 	if !r.SetLibraries([]link.Library{{ID: 2, Name: "B", Root: "/b"}, {ID: 1, Name: "A", Root: root}}) {
 		t.Fatal("the first list is a change")
@@ -255,7 +266,7 @@ func TestRegistry(t *testing.T) {
 // done right after it, never at the same time.
 func TestCheckOneAndQueued(t *testing.T) {
 	t.Parallel()
-	r := NewRegistry()
+	r := newRegistry()
 	root, files := library(t)
 	r.SetLibraries([]link.Library{{ID: 1, Root: root}, {ID: 2, Root: root}})
 	now := time.Date(2026, 10, 15, 10, 0, 0, 0, time.UTC)
@@ -312,7 +323,7 @@ func TestCheckOneAndQueued(t *testing.T) {
 // the new link it maps (allowed).
 func TestQueuedCheckUsesItsOwnLink(t *testing.T) {
 	t.Parallel()
-	r := NewRegistry()
+	r := newRegistry()
 	root, files := library(t)
 	r.SetLibraries([]link.Library{{ID: 1, Root: root}})
 	now := time.Date(2026, 10, 15, 10, 0, 0, 0, time.UTC)
@@ -408,7 +419,7 @@ func TestUnansweredCheckKeepsLastState(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			r := NewRegistry()
+			r := newRegistry()
 			r.SetLibraries([]link.Library{{ID: 1, Root: root}})
 			src := &scripted{book: &link.Book{Path: "Author/Book", Files: files}, err: map[int64]error{}}
 			r.Check(context.Background(), src, mount, func() time.Time { return at })
@@ -437,7 +448,7 @@ func TestUnansweredCheckKeepsLastState(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			r := NewRegistry()
+			r := newRegistry()
 			r.SetLibraries([]link.Library{{ID: 1, Root: root}})
 			src := &scripted{book: &link.Book{Path: "Author/Book", Files: files}, err: map[int64]error{}}
 			r.Check(context.Background(), src, mount, func() time.Time { return at })
@@ -464,12 +475,12 @@ func TestUnansweredCheckWithoutAState(t *testing.T) {
 	cur := root
 	mount := func(int64, string) (string, bool) { return cur, true }
 	at := time.Date(2026, 11, 19, 10, 0, 0, 0, time.UTC)
-	r := NewRegistry()
+	r := newRegistry()
 	r.SetLibraries([]link.Library{{ID: 1, Root: root}})
 	src := &scripted{book: &link.Book{Path: "Author/Book", Files: files}, err: map[int64]error{1: &link.APIError{Status: http.StatusBadGateway}}}
 	r.Check(context.Background(), src, mount, func() time.Time { return at })
-	if st, ok := r.Status(1); !ok || st.Mapped || !strings.Contains(st.Error, "could not ask the server") {
-		t.Fatalf("a first unanswered check = %+v, %v", st, ok)
+	if st, ok := r.Status(1); ok || st.Mapped || !strings.Contains(st.Error, "could not ask the server") {
+		t.Fatalf("a first unanswered check = %+v, %v, want an unknown state saying why", st, ok)
 	}
 	if !r.Due(at.Add(RetryFirst), 24*time.Hour) {
 		t.Fatal("a first unanswered check is not due again after the hold")
@@ -492,7 +503,7 @@ func TestRateLimitEndsTheRun(t *testing.T) {
 	root, files := library(t)
 	mount := func(int64, string) (string, bool) { return root, true }
 	at := time.Date(2026, 11, 19, 10, 0, 0, 0, time.UTC)
-	r := NewRegistry()
+	r := newRegistry()
 	r.spacing = time.Millisecond
 	r.SetLibraries([]link.Library{{ID: 1, Root: root}, {ID: 2, Root: root}, {ID: 3, Root: root}})
 	src := &scripted{book: &link.Book{Path: "Author/Book", Files: files}, err: map[int64]error{}}
@@ -559,7 +570,7 @@ func TestQueuedCheckFollowsARateLimitedPass(t *testing.T) {
 		return mounts[id], true
 	}
 	at := time.Date(2026, 11, 19, 10, 0, 0, 0, time.UTC)
-	r := NewRegistry()
+	r := newRegistry()
 	r.spacing = time.Millisecond
 	r.SetLibraries([]link.Library{{ID: 1, Root: root}, {ID: 2, Root: root}, {ID: 3, Root: root}})
 	src := &scripted{book: &link.Book{Path: "Author/Book", Files: files}, err: map[int64]error{}}
@@ -594,7 +605,7 @@ func TestRefusedTokenEndsThePass(t *testing.T) {
 	root, files := library(t)
 	mount := func(int64, string) (string, bool) { return root, true }
 	at := time.Date(2026, 11, 19, 10, 0, 0, 0, time.UTC)
-	r := NewRegistry()
+	r := newRegistry()
 	r.spacing = time.Millisecond
 	r.SetLibraries([]link.Library{{ID: 1, Root: root}, {ID: 2, Root: root}, {ID: 3, Root: root}})
 	src := &scripted{book: &link.Book{Path: "Author/Book", Files: files}, err: map[int64]error{}}
@@ -625,7 +636,7 @@ func TestHoldKeepsTheLongestRetryAfter(t *testing.T) {
 	root, files := library(t)
 	mount := func(int64, string) (string, bool) { return root, true }
 	at := time.Date(2026, 11, 19, 10, 0, 0, 0, time.UTC)
-	r := NewRegistry()
+	r := newRegistry()
 	r.spacing = time.Millisecond
 	r.SetLibraries([]link.Library{{ID: 1, Root: root}, {ID: 2, Root: root}, {ID: 3, Root: root}})
 	src := &scripted{book: &link.Book{Path: "Author/Book", Files: files}, err: map[int64]error{
@@ -648,7 +659,7 @@ func TestEntriesSayWhenACheckWentUnanswered(t *testing.T) {
 	root, files := library(t)
 	mount := func(int64, string) (string, bool) { return root, true }
 	at := time.Date(2026, 11, 19, 10, 0, 0, 0, time.UTC)
-	r := NewRegistry()
+	r := newRegistry()
 	r.spacing = time.Millisecond
 	r.SetLibraries([]link.Library{{ID: 1, Root: root}, {ID: 2, Root: root}, {ID: 3, Root: root}})
 	src := &scripted{book: &link.Book{Path: "Author/Book", Files: files}, err: map[int64]error{
@@ -700,7 +711,7 @@ func TestEntriesSayWhenACheckWentUnanswered(t *testing.T) {
 // most RetryMax, and a run the server answers ends it.
 func TestHoldBacksOff(t *testing.T) {
 	t.Parallel()
-	r := NewRegistry()
+	r := newRegistry()
 	at := time.Date(2026, 11, 19, 10, 0, 0, 0, time.UTC)
 	for _, want := range []time.Duration{time.Minute, 2 * time.Minute, 4 * time.Minute, 8 * time.Minute, 16 * time.Minute, RetryMax, RetryMax} {
 		r.holdAfter(errors.New("no answer"), at)
@@ -725,7 +736,7 @@ func TestChecksArePaced(t *testing.T) {
 	t.Parallel()
 	root, files := library(t)
 	mount := func(int64, string) (string, bool) { return root, true }
-	r := NewRegistry()
+	r := newRegistry()
 	r.spacing = 40 * time.Millisecond
 	r.SetLibraries([]link.Library{{ID: 1, Root: root}, {ID: 2, Root: root}, {ID: 3, Root: root}})
 	src := &scripted{book: &link.Book{Path: "Author/Book", Files: files}, err: map[int64]error{}}
@@ -769,7 +780,7 @@ func TestPacingSkipsUnaskedChecks(t *testing.T) {
 	t.Parallel()
 	missing := filepath.Join(t.TempDir(), "missing")
 	mount := func(int64, string) (string, bool) { return missing, true }
-	r := NewRegistry()
+	r := newRegistry()
 	r.spacing = time.Hour
 	r.SetLibraries([]link.Library{{ID: 1, Root: "/a"}, {ID: 2, Root: "/b"}, {ID: 3, Root: "/c"}})
 	done := make(chan struct{})
@@ -801,7 +812,7 @@ func TestCutShortCheckRecordsNothing(t *testing.T) {
 	root, _ := library(t)
 	mount := func(int64, string) (string, bool) { return root, true }
 	at := time.Date(2026, 11, 19, 10, 0, 0, 0, time.UTC)
-	r := NewRegistry()
+	r := newRegistry()
 	r.SetLibraries([]link.Library{{ID: 1, Root: root}})
 	ctx, cancel := context.WithCancel(context.Background())
 	src := ctxBooks{started: make(chan struct{})}
@@ -822,7 +833,7 @@ func TestCutShortCheckRecordsNothing(t *testing.T) {
 // let the run's Kick find the libraries due and ask again at once.
 func TestZeroRetryAfterStillHolds(t *testing.T) {
 	t.Parallel()
-	r := NewRegistry()
+	r := newRegistry()
 	at := time.Date(2026, 11, 19, 10, 0, 0, 0, time.UTC)
 	r.holdAfter(&link.APIError{Status: http.StatusTooManyRequests, RetryAfterSet: true}, at)
 	if got := r.holdUntil.Sub(at); got != RetryFirst {
@@ -837,7 +848,7 @@ func TestRunThatAskedNothingKeepsTheHold(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "missing")
 	mount := func(int64, string) (string, bool) { return missing, true }
 	at := time.Date(2026, 11, 19, 10, 0, 0, 0, time.UTC)
-	r := NewRegistry()
+	r := newRegistry()
 	r.SetLibraries([]link.Library{{ID: 1, Root: "/a"}})
 	r.holdAfter(errors.New("no answer"), at)
 	r.holdAfter(errors.New("no answer"), at)
@@ -873,7 +884,7 @@ func TestForgetEndsTheOldLinksRun(t *testing.T) {
 	root, files := library(t)
 	mount := func(int64, string) (string, bool) { return root, true }
 	libs := []link.Library{{ID: 1, Root: root}}
-	r := NewRegistry()
+	r := newRegistry()
 	r.spacing = time.Millisecond
 	r.SetLibraries(libs)
 	r.holdAfter(errors.New("no answer"), time.Now())
@@ -897,7 +908,7 @@ func TestUnansweredCheckNeedsTheBook(t *testing.T) {
 	root, files := library(t)
 	mount := func(int64, string) (string, bool) { return root, true }
 	at := time.Date(2026, 11, 19, 10, 0, 0, 0, time.UTC)
-	r := NewRegistry()
+	r := newRegistry()
 	r.SetLibraries([]link.Library{{ID: 1, Root: root}})
 	src := &scripted{book: &link.Book{Path: "Author/Book", Files: files}, err: map[int64]error{}}
 	r.Check(context.Background(), src, mount, func() time.Time { return at })
@@ -912,8 +923,8 @@ func TestUnansweredCheckNeedsTheBook(t *testing.T) {
 	}
 	r.Check(context.Background(), src, mount, func() time.Time { return at.Add(2 * time.Minute) }, 1)
 	st, ok := r.Status(1)
-	if !ok || st.Mapped || st.Writable || !strings.Contains(st.Error, "no longer shows Author/Book") {
-		t.Fatalf("denied: a 429 at an emptied folder kept the old state: %+v", st)
+	if ok || st.Mapped || st.Writable || !strings.Contains(st.Error, "no longer shows Author/Book") {
+		t.Fatalf("denied: a 429 at an emptied folder kept the old state, or reads as known: %+v, %v", st, ok)
 	}
 	if e := r.Entries(mount)[0]; e.UnansweredAt != nil || *e.CheckedAt != at.Add(2*time.Minute) {
 		t.Fatalf("the failure isn't the check's own result: checked %v, unanswered %v", e.CheckedAt, e.UnansweredAt)
@@ -924,8 +935,9 @@ func TestUnansweredCheckNeedsTheBook(t *testing.T) {
 }
 
 // A state unanswered checks keep stands for KeptChecks check intervals from the
-// check that set it, then fails closed: at the next unanswered check, or at
-// Due (the heartbeat) while the hold keeps checks from running.
+// check that set it, then reads as unknown (Status false, so a write job waits
+// rather than failing), keeping that check's time: at the next unanswered
+// check, or at Due (the heartbeat) while the hold keeps checks from running.
 func TestKeptStateExpires(t *testing.T) {
 	t.Parallel()
 	root, files := library(t)
@@ -933,7 +945,7 @@ func TestKeptStateExpires(t *testing.T) {
 	at := time.Date(2026, 11, 19, 10, 0, 0, 0, time.UTC)
 	limited := &link.APIError{Status: http.StatusTooManyRequests, RetryAfter: time.Hour, RetryAfterSet: true}
 	setup := func() (*Registry, *scripted) {
-		r := NewRegistry()
+		r := newRegistry()
 		r.Due(at, time.Minute) // takes the check interval
 		r.SetLibraries([]link.Library{{ID: 1, Root: root}})
 		src := &scripted{book: &link.Book{Path: "Author/Book", Files: files}, err: map[int64]error{}}
@@ -946,38 +958,101 @@ func TestKeptStateExpires(t *testing.T) {
 		return r, src
 	}
 
+	expired := func(r *Registry, unansweredAt time.Time) {
+		t.Helper()
+		st, ok := r.Status(1)
+		if ok || st.Mapped || st.Writable || !strings.Contains(st.Error, "hasn't answered") {
+			t.Fatalf("the kept state outlived the cap: %+v, %v", st, ok)
+		}
+		if sts := r.Statuses(); len(sts) != 1 || sts[0].Mapped {
+			t.Fatalf("the heartbeat reports an expired state as mapped: %+v", sts)
+		}
+		e := r.Entries(mount)[0]
+		if !e.Unknown || *e.CheckedAt != at || e.UnansweredAt == nil || *e.UnansweredAt != unansweredAt {
+			t.Fatalf("an expired state: unknown %v, checked %v, unanswered %v; want unknown, the setting check's time and the last 429's",
+				e.Unknown, e.CheckedAt, e.UnansweredAt)
+		}
+	}
+
 	r, src := setup()
 	r.Check(context.Background(), src, mount, func() time.Time { return at.Add(KeptChecks * time.Minute) }, 1)
-	if st, _ := r.Status(1); st.Mapped || st.Writable || !strings.Contains(st.Error, "429") {
-		t.Fatalf("a 429 past the cap kept the state: %+v", st)
-	}
+	expired(r, at.Add(KeptChecks*time.Minute))
 
 	r, _ = setup()
 	if r.Due(at.Add(KeptChecks*time.Minute-time.Second), time.Minute) {
 		t.Fatal("due inside the hold")
 	}
-	if st, _ := r.Status(1); !st.Mapped {
-		t.Fatalf("the state ended before the cap: %+v", st)
+	if st, ok := r.Status(1); !ok || !st.Mapped {
+		t.Fatalf("the state ended before the cap: %+v, %v", st, ok)
 	}
 	r.Due(at.Add(KeptChecks*time.Minute), time.Minute)
-	st, _ := r.Status(1)
-	if st.Mapped || st.Writable || !strings.Contains(st.Error, "hasn't answered") {
-		t.Fatalf("the kept state outlived the cap during the hold: %+v", st)
+	expired(r, at.Add(time.Minute))
+
+	// A check the server answers ends it.
+	src.answer(1, nil)
+	r.Check(context.Background(), src, mount, func() time.Time { return at.Add(KeptChecks*time.Minute + time.Second) }, 1)
+	if st, ok := r.Status(1); !ok || !st.Mapped || !st.Writable {
+		t.Fatalf("an answered check after the cap = %+v, %v", st, ok)
 	}
-	if e := r.Entries(mount)[0]; e.UnansweredAt != nil {
-		t.Fatalf("an ended state is still marked as an earlier result: %v", e.UnansweredAt)
+}
+
+// A state no check challenges ages too: read past KeptChecks intervals from
+// the check that set it (heartbeats failing from the start of an outage, so no
+// check runs and Due may not either), it is unknown, mapped or not, so writes
+// wait and a LibriVox fetch's "mapping gone" never starts on it.
+func TestStateAgesWhenRead(t *testing.T) {
+	t.Parallel()
+	root, files := library(t)
+	other := t.TempDir() // holds no book: a definite "not mapped"
+	mount := func(id int64, _ string) (string, bool) {
+		if id == 2 {
+			return other, true
+		}
+		return root, true
+	}
+	at := time.Date(2026, 11, 19, 10, 0, 0, 0, time.UTC)
+	read := at
+	r := NewRegistry()
+	r.clock = func() time.Time { return read }
+	r.SetLibraries([]link.Library{{ID: 1, Root: root}, {ID: 2, Root: other}})
+	r.Check(context.Background(), books{book: &link.Book{Path: "Author/Book", Files: files}}, mount, func() time.Time { return at })
+
+	read = at.Add(KeptChecks*defaultInterval - time.Second)
+	if st, ok := r.Status(1); !ok || !st.Mapped || !st.Writable {
+		t.Fatalf("allowed: a mapped state within the cap = %+v, %v", st, ok)
+	}
+	if st, ok := r.Status(2); !ok || st.Mapped {
+		t.Fatalf("a definite not mapped within the cap = %+v, %v", st, ok)
+	}
+
+	read = at.Add(KeptChecks * defaultInterval)
+	if st, ok := r.Status(1); ok || st.Mapped || st.Writable || !strings.Contains(st.Error, "hasn't answered") {
+		t.Fatalf("denied: a mapped state read past the cap = %+v, %v", st, ok)
+	}
+	if st, ok := r.Status(2); ok || st.Mapped || !strings.Contains(st.Error, "doesn't hold the server's copy") {
+		t.Fatalf("a not mapped state read past the cap = %+v, %v, want unknown with its own reason", st, ok)
+	}
+	for _, st := range r.Statuses() {
+		if st.Mapped || st.Writable {
+			t.Fatalf("the heartbeat reports an aged state as mapped: %+v", st)
+		}
+	}
+	for _, e := range r.Entries(mount) {
+		if !e.Unknown || *e.CheckedAt != at {
+			t.Fatalf("library %d's entry: unknown %v, checked %v", e.Library.ID, e.Unknown, e.CheckedAt)
+		}
 	}
 }
 
 // A check made through the hold (Check now, a mapping edit) that fails without
-// a Retry-After never shortens the hold the server asked for; one with a
-// Retry-After is the server's newer word and sets it.
+// a Retry-After never shortens the hold the server asked for, nor grows the
+// backoff; one with a Retry-After is the server's newer word and sets it.
 func TestManualCheckKeepsALongerHold(t *testing.T) {
 	t.Parallel()
 	root, files := library(t)
 	mount := func(int64, string) (string, bool) { return root, true }
 	at := time.Date(2026, 11, 19, 10, 0, 0, 0, time.UTC)
-	r := NewRegistry()
+	r := newRegistry()
 	r.SetLibraries([]link.Library{{ID: 1, Root: root}})
 	r.holdAfter(&link.APIError{Status: http.StatusTooManyRequests, RetryAfter: 20 * time.Minute, RetryAfterSet: true}, at)
 	src := &scripted{book: &link.Book{Path: "Author/Book", Files: files}, err: map[int64]error{
@@ -989,6 +1064,9 @@ func TestManualCheckKeepsALongerHold(t *testing.T) {
 	}
 	if r.Due(at.Add(19*time.Minute), 24*time.Hour) {
 		t.Fatal("a manual check's timeout shortened the hold")
+	}
+	if r.held != 1 {
+		t.Fatalf("a manual check that left the hold counted toward the backoff: %d runs in a row, want 1", r.held)
 	}
 
 	src.answer(1, &link.APIError{Status: http.StatusTooManyRequests, RetryAfter: 2 * time.Minute, RetryAfterSet: true})
@@ -1011,7 +1089,7 @@ func TestRateLimitedPassProvesTheUnreached(t *testing.T) {
 	}
 	mount := func(id int64, _ string) (string, bool) { return roots[id], true }
 	at := time.Date(2026, 11, 19, 10, 0, 0, 0, time.UTC)
-	r := NewRegistry()
+	r := newRegistry()
 	r.spacing = time.Millisecond
 	r.SetLibraries([]link.Library{{ID: 1, Root: "/a"}, {ID: 2, Root: "/b"}, {ID: 3, Root: "/c"}})
 	src := &scripted{book: &link.Book{Path: "Author/Book", Files: files}, err: map[int64]error{}}
@@ -1039,14 +1117,14 @@ func TestRateLimitedPassProvesTheUnreached(t *testing.T) {
 	}
 }
 
-// Due ends only a kept state that let something write: one that wasn't mapped
-// keeps its own reason, which says more than the server's silence does.
+// A kept state that wasn't mapped is unknown past the cap too, but keeps its
+// own reason, which says more than the server's silence does.
 func TestDueKeepsAnUnmappedState(t *testing.T) {
 	t.Parallel()
 	root, files := library(t)
 	mount := func(int64, string) (string, bool) { return root, true }
 	at := time.Date(2026, 11, 19, 10, 0, 0, 0, time.UTC)
-	r := NewRegistry()
+	r := newRegistry()
 	r.Due(at, time.Minute)
 	r.SetLibraries([]link.Library{{ID: 1, Root: root}})
 	wrong := slices.Clone(files)
@@ -1056,8 +1134,8 @@ func TestDueKeepsAnUnmappedState(t *testing.T) {
 	src.answer(1, &link.APIError{Status: http.StatusTooManyRequests, RetryAfter: time.Hour, RetryAfterSet: true})
 	r.Check(context.Background(), src, mount, func() time.Time { return at.Add(time.Minute) }, 1)
 	r.Due(at.Add(KeptChecks*time.Minute), time.Minute)
-	if st, _ := r.Status(1); st.Mapped || !strings.Contains(st.Error, "doesn't hold the server's copy") {
-		t.Fatalf("Due replaced an unmapped state's reason: %+v", st)
+	if st, ok := r.Status(1); ok || st.Mapped || !strings.Contains(st.Error, "doesn't hold the server's copy") {
+		t.Fatalf("Due replaced an unmapped state's reason, or left it known: %+v, %v", st, ok)
 	}
 }
 
@@ -1097,7 +1175,7 @@ func TestRateLimitedPassProvesTheUnreachedPodcasts(t *testing.T) {
 	roots := map[int64]string{1: bookRoot, 4: t.TempDir(), 5: t.TempDir()}
 	mount := func(id int64, _ string) (string, bool) { return roots[id], true }
 	at := time.Date(2026, 11, 19, 10, 0, 0, 0, time.UTC)
-	r := NewRegistry()
+	r := newRegistry()
 	r.spacing = time.Millisecond
 	r.SetLibraries([]link.Library{{ID: 1, Root: "/a"}, {ID: 4, Root: "/p", Kind: "podcasts"}, {ID: 5, Root: "/q", Kind: "podcasts"}})
 	src := &bookAndMarkers{scripted: &scripted{book: &link.Book{Path: "Author/Book", Files: files}, err: map[int64]error{}}, roots: roots}
@@ -1142,7 +1220,7 @@ func TestRateLimitedPassDropsAMovedUnreachedState(t *testing.T) {
 		return mounts[id], true
 	}
 	at := time.Date(2026, 11, 19, 10, 0, 0, 0, time.UTC)
-	r := NewRegistry()
+	r := newRegistry()
 	r.spacing = time.Millisecond
 	r.SetLibraries([]link.Library{{ID: 1, Root: "/a"}, {ID: 2, Root: "/b"}})
 	src := &scripted{book: &link.Book{Path: "Author/Book", Files: files}, err: map[int64]error{}}
@@ -1166,7 +1244,7 @@ func TestTimeoutEndsThePass(t *testing.T) {
 	root, files := library(t)
 	mount := func(int64, string) (string, bool) { return root, true }
 	at := time.Date(2026, 11, 19, 10, 0, 0, 0, time.UTC)
-	r := NewRegistry()
+	r := newRegistry()
 	r.spacing = time.Millisecond
 	r.SetLibraries([]link.Library{{ID: 1, Root: root}, {ID: 2, Root: root}, {ID: 3, Root: root}})
 	src := &scripted{book: &link.Book{Path: "Author/Book", Files: files}, err: map[int64]error{}}
@@ -1197,7 +1275,7 @@ func TestUnansweredCheckOfARootBookFailsClosed(t *testing.T) {
 	root, files := library(t)
 	mount := func(int64, string) (string, bool) { return root, true }
 	at := time.Date(2026, 11, 19, 10, 0, 0, 0, time.UTC)
-	r := NewRegistry()
+	r := newRegistry()
 	r.SetLibraries([]link.Library{{ID: 1, Root: root}})
 	src := &scripted{book: &link.Book{Path: "", Files: files}, err: map[int64]error{}}
 	r.Check(context.Background(), src, mount, func() time.Time { return at })
@@ -1208,5 +1286,88 @@ func TestUnansweredCheckOfARootBookFailsClosed(t *testing.T) {
 	r.Check(context.Background(), src, mount, func() time.Time { return at.Add(time.Minute) })
 	if st, _ := r.Status(1); st.Mapped || st.Writable || !strings.Contains(st.Error, "library folder itself") {
 		t.Fatalf("an unanswered check kept a root book's state: %+v", st)
+	}
+}
+
+// A look at a library's folder that a hung mount holds (the folder's stat, a
+// book file's stat, the write probe, a podcast folder's open) fails that
+// library's check within its bound, recorded as a definite local failure, and
+// the run goes on to the next library: one hung mount never holds every check
+// after it. A hung file stat ends the comparison (each would cost the bound).
+func TestHungMountFailsOnlyItsLibrary(t *testing.T) {
+	t.Parallel()
+	roots := map[int64]string{}
+	var files []link.BookFile
+	for id := int64(1); id <= 5; id++ {
+		roots[id], files = library(t)
+	}
+	roots[4] = t.TempDir() // a podcast library
+	hung := map[string]bool{
+		roots[1]: true, // the folder itself
+		filepath.Join(roots[2], "Author", "Book", "01.mp3"): true,
+		filepath.Join(roots[2], "Author", "Book", "02.mp3"): true,
+		roots[4]: true,
+	}
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	var fileStats atomic.Int32
+	const bound = 20 * time.Millisecond
+	r := newRegistry()
+	r.spacing = time.Millisecond
+	r.look = looks{
+		stat: func(p string) (fs.FileInfo, error) {
+			if strings.HasPrefix(p, filepath.Join(roots[2], "Author")) {
+				fileStats.Add(1)
+			}
+			return fsutil.LookWithin("test-stat", p, bound, func(p string) (fs.FileInfo, error) {
+				if hung[p] {
+					<-release
+					return nil, errors.New("released") // touches nothing: the folder may be gone
+				}
+				return os.Stat(p)
+			})
+		},
+		probe: func(d string) error {
+			_, err := fsutil.LookWithin("test-probe", d, bound, func(d string) (struct{}, error) {
+				if d == roots[3] {
+					<-release
+					return struct{}{}, errors.New("released")
+				}
+				return struct{}{}, probeWritable(d)
+			})
+			return err
+		},
+	}
+	r.SetLibraries([]link.Library{{ID: 1, Root: "/a"}, {ID: 2, Root: "/b"}, {ID: 3, Root: "/c"},
+		{ID: 4, Root: "/d", Kind: "podcasts"}, {ID: 5, Root: "/e"}})
+	src := &bookAndMarkers{scripted: &scripted{book: &link.Book{Path: "Author/Book", Files: files}, err: map[int64]error{}}, roots: roots}
+	mount := func(id int64, _ string) (string, bool) { return roots[id], true }
+	done := make(chan struct{})
+	go func() {
+		r.Check(context.Background(), src, mount, time.Now)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("a hung mount held the run")
+	}
+	for id, want := range map[int64]struct {
+		mapped, writable bool
+		why              string
+	}{
+		1: {why: "the folder " + roots[1] + " is not answering"},
+		2: {why: ".mp3: not answering"},
+		3: {mapped: true, why: "not writable here: not answering"},
+		4: {why: "the library folder is not answering"},
+		5: {mapped: true, writable: true},
+	} {
+		st, ok := r.Status(id)
+		if !ok || st.Mapped != want.mapped || st.Writable != want.writable || !strings.Contains(st.Error, want.why) {
+			t.Errorf("library %d = %+v, %v; want mapped %v, writable %v, a known failure saying %q", id, st, ok, want.mapped, want.writable, want.why)
+		}
+	}
+	if n := fileStats.Load(); n != 1 {
+		t.Errorf("%d file stats at the hung mount, want the comparison to end at the first", n)
 	}
 }

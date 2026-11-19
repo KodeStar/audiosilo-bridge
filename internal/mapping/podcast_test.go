@@ -49,7 +49,7 @@ func TestPodcastMarkerRoundTripAndRegistry(t *testing.T) {
 	if !st.Mapped || string(b) != string(after) {
 		t.Fatal("changed an existing marker")
 	}
-	r := NewRegistry()
+	r := newRegistry()
 	r.SetLibraries([]link.Library{lib})
 	r.Check(context.Background(), source, func(int64, string) (string, bool) { return mount, true }, time.Now)
 	st, ok := r.Status(3)
@@ -83,7 +83,7 @@ func TestPodcastUnansweredCheckNeedsTheMarker(t *testing.T) {
 	})
 	mountFn := func(int64, string) (string, bool) { return mount, true }
 	at := time.Date(2026, 11, 19, 10, 0, 0, 0, time.UTC)
-	r := NewRegistry()
+	r := newRegistry()
 	r.SetLibraries([]link.Library{lib})
 	r.Check(context.Background(), source, mountFn, func() time.Time { return at })
 	if st, _ := r.Status(3); !st.Mapped || !st.Writable {
@@ -101,8 +101,8 @@ func TestPodcastUnansweredCheckNeedsTheMarker(t *testing.T) {
 	}
 	r.Check(context.Background(), source, mountFn, func() time.Time { return at })
 	st, ok := r.Status(3)
-	if !ok || st.Mapped || st.Writable || st.Error != "could not verify this folder with the server" {
-		t.Fatalf("an unanswered check of a folder without the marker kept the old state: %+v", st)
+	if ok || st.Mapped || st.Writable || st.Error != "could not verify this folder with the server" {
+		t.Fatalf("an unanswered check of a folder without the marker kept the old state, or reads as known: %+v, %v", st, ok)
 	}
 	if _, err := os.Lstat(filepath.Join(mount, ".audiosilo")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("the marker written for the failed read was left behind: %v", err)
@@ -176,7 +176,7 @@ func TestPodcastMarkerOfARemovedLibraryIsReplaced(t *testing.T) {
 		return marker.Nonce, err
 	})
 	mount := func(id int64, _ string) (string, bool) { return mounts[id], true }
-	r := NewRegistry()
+	r := newRegistry()
 	r.SetLibraries([]link.Library{{ID: 4, Kind: "podcasts"}, {ID: 5, Kind: "podcasts"}})
 	r.Check(context.Background(), source, mount, time.Now)
 	st, _ := r.Status(5)
