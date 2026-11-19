@@ -2713,8 +2713,9 @@ internal/
             and downloaded from byte 0 in the attempt's one GET (stuck:
             write_failed, errPartialStuck); a URL whose query alone changed
             (signed or tracked anew at each fetch) still resumes while the feed
-            gives one known length both times (SourceBase, the hash of the URL
-            without its query and fragment), the strong ETag still proving the
+            gives one known length both times (SourceBase, the hash of its
+            podcast.EnclosureBase: a path naming no audio file keeps its query),
+            the strong ETag still proving the
             bytes; a whole download, published with no GET, never takes that
             leeway; a record from before Source resumes on its ETag alone. A cancel (the runner's Abandon) or
             invalid_audio still clears it, as does the day-old cleanup. Never downloaded again either when its

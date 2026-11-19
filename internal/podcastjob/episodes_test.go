@@ -1489,6 +1489,23 @@ func TestCheckpointResumes(t *testing.T) {
 	if strings.Contains(sourceBase("https://a.example/secret/1.mp3?token=x"), "secret") || sourceBase("https://a.example/1.mp3?a=1") != sourceBase("https://a.example/1.mp3#t=5") {
 		t.Fatal("the base is not a hash of the URL without its query and fragment")
 	}
+	// A path naming no audio file keeps the query that tells its episodes
+	// apart (podcast.EnclosureBase): another id there is another file, never
+	// resumed, however equal its length.
+	var d checkpoint
+	d.setSource(podcast.Enclosure{URL: "https://a.example/uc?export=download&id=1", Length: 100})
+	if d.resumes(podcast.Enclosure{URL: "https://a.example/uc?export=download&id=2", Length: 100}) {
+		t.Fatal("a partial took another file's query on a path naming no audio file")
+	}
+	if !d.resumes(podcast.Enclosure{URL: "https://a.example/uc?export=download&id=1#t=5", Length: 100}) {
+		t.Fatal("a partial refused its own enclosure with a fragment")
+	}
+	// A whole download takes no query leeway: it is published with no GET.
+	c.setSource(podcast.Enclosure{URL: "https://a.example/1.mp3?sig=1", Length: 100})
+	c.Offset, c.Total, c.SHA256 = 100, 100, strings.Repeat("a", 64)
+	if !c.complete() || c.resumes(podcast.Enclosure{URL: "https://a.example/1.mp3?sig=2", Length: 100}) {
+		t.Fatal("a whole download took another query as its own")
+	}
 }
 
 // A partial kept for a resume is resumed (Range, If-Range with its ETag) only
@@ -1498,11 +1515,12 @@ func TestCheckpointResumes(t *testing.T) {
 // against the new URL with the old ETag; one the clear cannot remove fails
 // write_failed with no request, never a download beside it. A URL whose
 // query alone changed (a signed or tracked enclosure) still resumes while the
-// feed gives the same known length. A record from before the source was kept
+// feed gives the same known length, unless its path names no audio file
+// (podcast.EnclosureBase), where the query tells episodes apart. A record from before the source was kept
 // resumes on its ETag alone, as it did.
 func TestAKeptPartialIsDownloadedAgainWhenItsEnclosureChanged(t *testing.T) {
 	requireProbe(t)
-	for _, scenario := range []string{"same", "url", "length", "query", "query and length", "no base", "legacy", "stuck"} {
+	for _, scenario := range []string{"same", "url", "length", "query", "query and length", "query on no file", "no base", "legacy", "stuck"} {
 		t.Run(scenario, func(t *testing.T) {
 			if scenario == "stuck" {
 				requireNonRoot(t)
@@ -1518,6 +1536,9 @@ func TestAKeptPartialIsDownloadedAgainWhenItsEnclosureChanged(t *testing.T) {
 			f := h.read("Fixture Show")
 			enc := f.Episodes[0].Enclosure
 			enc.Length = int64(len(audio))
+			if scenario != "query on no file" {
+				enc.URL = h.http.URL + "/audio.mp3" // a path naming an audio file: its query may change
+			}
 			if scenario == "url" {
 				enc.Length = 0 // no length to tell a query change by
 			}
@@ -1538,7 +1559,7 @@ func TestAKeptPartialIsDownloadedAgainWhenItsEnclosureChanged(t *testing.T) {
 			}
 			f.Episodes[0].Enclosure = enc
 			switch scenario {
-			case "url", "query", "no base", "legacy":
+			case "url", "query", "query on no file", "no base", "legacy":
 				f.Episodes[0].Enclosure.URL += "?sig=2"
 			case "length", "stuck":
 				f.Episodes[0].Enclosure.Length = int64(len(audio)) + 1

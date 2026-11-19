@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -68,16 +67,17 @@ func (c *checkpoint) setSource(enc podcast.Enclosure) {
 	c.Source, c.SourceLength, c.SourceBase = podcast.FeedURLHash(enc.URL), max(enc.Length, 0), sourceBase(enc.URL)
 }
 
-// sourceBase is the hex hash of raw, an enclosure URL, without its query and
-// fragment (a signature, an expiry, a tracking id), or "" when it does not
+// sourceBase is the hex hash of raw, an enclosure URL, as podcast.EnclosureBase
+// reads it: without its fragment, and without its query (a signature, an
+// expiry, a tracking id) when its path names an audio file; a path naming no
+// file keeps the query that tells its episodes apart. "" when it does not
 // parse. Like Source it is never the URL.
 func sourceBase(raw string) string {
-	u, err := url.Parse(raw)
-	if err != nil {
+	base := podcast.EnclosureBase(raw)
+	if base == "" {
 		return ""
 	}
-	u.RawQuery, u.ForceQuery, u.Fragment, u.RawFragment = "", false, "", ""
-	return podcast.FeedURLHash(u.String())
+	return podcast.FeedURLHash(base)
 }
 
 // sameSource reports whether enc is the enclosure c's partial was downloaded

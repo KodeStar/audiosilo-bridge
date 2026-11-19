@@ -150,7 +150,7 @@ func newHarness(t *testing.T) *harness {
 	h.client = netguard.New(netguard.Options{AllowNetworks: []netip.Prefix{netip.MustParsePrefix("127.0.0.1/32")}, Version: "0.9.0"})
 	t.Cleanup(h.client.Close)
 	h.http = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/audio" {
+		if r.URL.Path == "/audio" || r.URL.Path == "/audio.mp3" {
 			if fn := h.audio.Load(); fn != nil {
 				(*fn)(w, r)
 			} else {
