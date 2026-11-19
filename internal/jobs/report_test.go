@@ -349,16 +349,18 @@ func TestCancelRacingTheJobsEnd(t *testing.T) {
 // is stored cancelled by the server, which says so in its answer (the job as it
 // stored it) or its 409 cancelled (it had ended the job): the Bridge's page
 // records it cancelled too, not parked waiting for someone. A park with no
-// cancel stays parked.
+// cancel stays parked, as does one the server moved on from for another
+// reason (a plain 409 not_held).
 func TestParkTheServerCancelled(t *testing.T) {
 	t.Parallel()
 	for name, c := range map[string]struct {
-		cancel, gone bool
-		want         string
+		cancel, gone, notHeld bool
+		want                  string
 	}{
-		"park after a cancel":          {cancel: true, want: store.JobCancelled},
-		"park after a server's cancel": {gone: true, want: store.JobCancelled},
-		"park before any cancel":       {want: store.JobNeedsAttention},
+		"park after a cancel":           {cancel: true, want: store.JobCancelled},
+		"park after a server's cancel":  {gone: true, want: store.JobCancelled},
+		"park before any cancel":        {want: store.JobNeedsAttention},
+		"park the server moved on from": {notHeld: true, want: store.JobNeedsAttention},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -370,7 +372,7 @@ func TestParkTheServerCancelled(t *testing.T) {
 			r := New(db, func() Server { return srv }, nil, opts, handler{kind: "k.park", lane: LaneLight,
 				fn: func(context.Context, Job, *Reporter) (any, error) {
 					srv.mu.Lock()
-					srv.cancel[25], srv.gone[25] = c.cancel, c.gone
+					srv.cancel[25], srv.gone[25], srv.notHeld[25] = c.cancel, c.gone, c.notHeld
 					srv.mu.Unlock()
 					return nil, &ParkError{Code: "budget_exceeded", Message: "over the budget"}
 				}})
