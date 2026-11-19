@@ -15,6 +15,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/kodestar/audiosilo-bridge/internal/testwait"
 )
 
 // recordSleeps is a backoff wait that records each wait instead of sleeping.
@@ -626,14 +628,16 @@ func TestDownloadLengthlessBodyCutShort(t *testing.T) {
 
 // A connection that goes quiet (no answer, or a body that stops) ends the
 // attempt with ErrStalled once nothing has arrived for the stall time, keeping
-// what arrived; the caller resumes it.
+// what arrived; the caller resumes it. The stall times are Scaled: under -race
+// on a loaded machine the answer's headers, or a slow body's next bytes, can
+// take longer than a stall time sized for a plain build.
 func TestDownloadStalls(t *testing.T) {
-	stallClient := func(t *testing.T, base string) *Client {
+	stallClient := func(t *testing.T, base string, stall time.Duration) *Client {
 		t.Helper()
 		keyPEM, _ := pemKey(t, false)
 		c, err := NewClient(Credentials{ADPToken: "ADP", DevicePrivateKey: keyPEM, DeviceType: deviceType,
 			DeviceSerial: "SER", CustomerID: "CUST", Marketplace: "us"},
-			WithEndpoints(Endpoints{API: base}), noSleep(), withStall(150*time.Millisecond))
+			WithEndpoints(Endpoints{API: base}), noSleep(), withStall(stall))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -658,7 +662,7 @@ func TestDownloadStalls(t *testing.T) {
 			defer close(release)
 			dest := filepath.Join(t.TempDir(), "book.aaxc")
 			start := time.Now()
-			err := stallClient(t, ts.URL).Download(context.Background(), ts.URL+"/f", dest, DownloadOptions{ExpectedSize: 2000})
+			err := stallClient(t, ts.URL, testwait.Scaled(300*time.Millisecond)).Download(context.Background(), ts.URL+"/f", dest, DownloadOptions{ExpectedSize: 2000})
 			if !errors.Is(err, ErrStalled) || time.Since(start) > 10*time.Second {
 				t.Fatalf("err = %v after %v", err, time.Since(start))
 			}
@@ -667,7 +671,8 @@ func TestDownloadStalls(t *testing.T) {
 			}
 		})
 	}
-	// A body that keeps coming, however slowly, is no stall.
+	// A body that keeps coming, however slowly, is no stall: 40 ms apart against
+	// a stall time fifty times that, so a starved scheduler can't fake one.
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Length", "10")
 		for i := range 10 {
@@ -678,7 +683,7 @@ func TestDownloadStalls(t *testing.T) {
 	}))
 	defer ts.Close()
 	dest := filepath.Join(t.TempDir(), "slow.aaxc")
-	if err := stallClient(t, ts.URL).Download(context.Background(), ts.URL+"/f", dest, DownloadOptions{}); err != nil {
+	if err := stallClient(t, ts.URL, testwait.Scaled(2*time.Second)).Download(context.Background(), ts.URL+"/f", dest, DownloadOptions{}); err != nil {
 		t.Fatalf("a slow body: %v", err)
 	}
 }

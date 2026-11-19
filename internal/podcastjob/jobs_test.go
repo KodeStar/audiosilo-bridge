@@ -29,6 +29,7 @@ import (
 	"github.com/kodestar/audiosilo-bridge/internal/podcast"
 	"github.com/kodestar/audiosilo-bridge/internal/secrets"
 	"github.com/kodestar/audiosilo-bridge/internal/store"
+	"github.com/kodestar/audiosilo-bridge/internal/testwait"
 )
 
 type markerReader struct{ mount string }
@@ -625,12 +626,14 @@ func TestFailedFollowTakesBackItsFolder(t *testing.T) {
 }
 
 // Artwork is best effort: a slow image host gets at most half of the time a
-// job has left, so feed.json, the cache and the rescan still get theirs.
+// job has left, so feed.json, the cache and the rescan still get theirs. The
+// job's time is Scaled: the half left after the artwork, a second, can be too
+// little for the rest under -race on a loaded machine.
 func TestSlowArtworkLeavesTimeForTheFeed(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
 	h.slowCover.Store(true)
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), testwait.Scaled(2*time.Second))
 	defer cancel()
 	res, err := h.handler.Run(ctx, h.claim(h.http.URL+"/feed", false), jobs.LocalReporter())
 	if err != nil || h.covers.Load() == 0 {
