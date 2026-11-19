@@ -185,9 +185,9 @@ web, netguard, podcast, podcastjob, audibleacct, audiblejob, audiblesync, libriv
 endpoint}` plus the engine it wires; `accounts -> {agent, agentproto, ghauth, secrets, store}`; `correct ->
 {contrib, jobs, metaops}`; `setup -> link`;
 `api` calls the injected Backend and the injected `auth.Manager` (login, sessions,
-the password), with types from jobs/link/mapping/store/logring/endpoint; `verify -> {jobs,
-link, mapping}`; `generate -> {jobs, link, mapping, store, scheduler, pipeline, ...}`
-through its own Engine/Server interfaces; `podcastjob -> {jobs, link, mapping, netguard, podcast, secrets, store}`;
+the password), with types from jobs/link/mapping/store/logring/endpoint; `verify -> {fsutil,
+jobs, link, mapping}`; `generate -> {jobs, link, mapping, store, scheduler, pipeline, ...}`
+through its own Engine/Server interfaces; `podcastjob -> {fsutil, jobs, link, mapping, netguard, podcast, secrets, store}`;
 `podcast -> {fsutil, gofeed, x/net/html, x/text}`; `logring -> podcast`;
 `audible -> {progress, source}` (its tagged build also `audiblefake`, which never
 imports `audible`); `importjob -> {link, placement, source,

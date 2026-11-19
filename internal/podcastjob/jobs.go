@@ -342,7 +342,7 @@ func (s *service) library(ctx context.Context, job jobs.Job, rep *jobs.Reporter)
 			return lib, mount, err
 		}
 		rep.Progress(jobs.Progress{Step: "waiting", Message: "Waiting for the library's mapping check"})
-		if err := s.pause(ctx); err != nil {
+		if err := netguard.Wait(ctx, s.o.CheckPoll); err != nil {
 			return lib, "", err
 		}
 	}
@@ -404,21 +404,9 @@ func (s *service) beforeWrite(ctx context.Context, lib link.Library, mount, rel 
 		} else if !errors.Is(err, errMappingUnknown) {
 			return err
 		}
-		if err := s.pause(ctx); err != nil {
+		if err := netguard.Wait(ctx, s.o.CheckPoll); err != nil {
 			return err
 		}
-	}
-}
-
-// pause waits CheckPoll, or ctx's end (its error).
-func (s *service) pause(ctx context.Context) error {
-	t := time.NewTimer(s.o.CheckPoll)
-	defer t.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-t.C:
-		return nil
 	}
 }
 
