@@ -91,7 +91,7 @@ var errPartialChanged = errors.New("the episode partial changed on disk")
 // clear could not remove (a show folder the Bridge may not write): the
 // attempt fails write_failed rather than restart beside it, and the record
 // stays for the next attempt or the day-old cleanup (cleanOwned,
-// sweepRecords), which drops it then even when the partial stays.
+// sweepRecords).
 var errPartialStuck = errors.New("the episode partial could not be removed")
 
 func (s *service) budget(parent context.Context) (context.Context, *budget) {

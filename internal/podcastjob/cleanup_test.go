@@ -701,14 +701,8 @@ func TestOwnedCleanupDropsADayOldRecordWhosePartialItCannotRemove(t *testing.T) 
 	s := h.handler.s
 	root, _ := os.OpenRoot(h.mount)
 	defer root.Close()
-	c := checkpoint{ServerHash: s.pairHash(), LibraryID: 3, ShowID: fixtureShowID, EpisodeID: "1cc306d831645e2b", Path: *job.Path, Temp: ".audiosilo-tmp-stuck", Offset: 6, Total: 100}
-	partial := "Fixture Show/" + c.Temp
-	if err := root.WriteFile(partial, []byte("prefix"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.saveCheckpoint(job, root, &c, `"one"`); err != nil {
-		t.Fatal(err)
-	}
+	c := abandonRecord(t, s, root, job)
+	partial := c.partialName()
 	c.UpdatedAt = s.o.Now().Add(-25 * time.Hour).Format(time.RFC3339)
 	dir, _ := s.checkpointRoot()
 	defer dir.Close()

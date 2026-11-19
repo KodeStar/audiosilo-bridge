@@ -1173,17 +1173,7 @@ func TestFetchStartFailsOnAWrongSizePartialItCannotRemove(t *testing.T) {
 	if err := s.saveCheckpoint(job, root, &c, `"one"`); err != nil {
 		t.Fatal(err)
 	}
-	show := filepath.Join(h.mount, "Fixture Show")
-	t.Cleanup(func() { os.Chmod(show, 0o755) })
-	// Barred once the fetch's own write check has passed.
-	s.o.Fault = func(at string) error {
-		if at == "load" {
-			if err := os.Chmod(show, 0o500); err != nil {
-				t.Error(err)
-			}
-		}
-		return nil
-	}
+	show := barShowAtLoad(t, h)
 	_, err := h.handler.FetchJob().Run(context.Background(), job, jobs.LocalReporter())
 	if code(t, err) != "write_failed" || !strings.Contains(err.Error(), "could not be removed") || calls.Load() != 0 {
 		t.Fatalf("a wrong-size partial the start cannot remove: %v after %d calls, want write_failed after none", err, calls.Load())
@@ -1428,4 +1418,22 @@ func TestCheckpointSameSource(t *testing.T) {
 	if c.SourceLength != 0 || !c.sameSource(podcast.Enclosure{URL: "https://a.example/1.mp3", Length: 5}) {
 		t.Fatal("an unknown length was recorded as one", c.SourceLength)
 	}
+}
+
+// barShowAtLoad makes the fixture show's folder one the Bridge may not write
+// once a fetch's own write check has passed (at its record's load), and
+// answers the folder's path.
+func barShowAtLoad(t *testing.T, h *harness) string {
+	t.Helper()
+	show := filepath.Join(h.mount, "Fixture Show")
+	t.Cleanup(func() { os.Chmod(show, 0o755) })
+	h.handler.s.o.Fault = func(at string) error {
+		if at == "load" {
+			if err := os.Chmod(show, 0o500); err != nil {
+				t.Error(err)
+			}
+		}
+		return nil
+	}
+	return show
 }

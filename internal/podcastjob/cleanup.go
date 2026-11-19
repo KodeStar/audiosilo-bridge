@@ -140,6 +140,13 @@ func (s *service) sweepRecords(ctx context.Context, root *os.Root, lib link.Libr
 	}
 	running := s.runningRecords(rows, lib.ID, 0)
 	read := movedReader(root)
+	// Each record's folder spelt as it is on disk (podcast.RealName lists the
+	// library's root), found once per folder.
+	type spelling struct {
+		real string
+		err  error
+	}
+	spelt := map[string]spelling{}
 	for _, c := range records {
 		if ctx.Err() != nil {
 			return
@@ -147,8 +154,14 @@ func (s *service) sweepRecords(ctx context.Context, root *os.Root, lib link.Libr
 		if !s.dayOld(c.UpdatedAt) || running(c) {
 			continue
 		}
-		gone := orphaned(root, c, read)
-		if !gone && !outlived(root, c, read) || awaitsTakeIn(root, shows, c, read) {
+		show := path.Dir(c.Path)
+		sp, ok := spelt[show]
+		if !ok {
+			sp.real, sp.err = podcast.RealName(root, show)
+			spelt[show] = sp
+		}
+		gone := orphaned(c, sp.real, sp.err, read)
+		if !gone && !outlived(root, c, sp.real, sp.err, read) || awaitsTakeIn(root, shows, c, read) {
 			continue
 		}
 		if s.writable(lib, mount) != nil || !markerThere(root) {
@@ -184,12 +197,11 @@ func (s *service) forgetRecord(dir *os.Root, records []checkpoint, c checkpoint)
 // lock there), or a partial that cannot be opened to tell (EIO, ESTALE, no
 // permission: loadCheckpoint keeps the first two for good, and dropPartial
 // cannot check them). A partial proven gone is not: the next fetch clears
-// its record.
-func outlived(root *os.Root, c checkpoint, read func(string) (*podcast.Feed, string, error)) bool {
+// its record. real and err are podcast.RealName's answer for c's folder.
+func outlived(root *os.Root, c checkpoint, real string, err error, read func(string) (*podcast.Feed, string, error)) bool {
 	if c.complete() {
 		return true
 	}
-	real, err := podcast.RealName(root, path.Dir(c.Path))
 	if err == nil {
 		_, _, err = read(real)
 	}
@@ -250,10 +262,9 @@ func (s *service) dayOld(stamp string) bool {
 // orphaned reports whether record c's folder is gone, holds a show other
 // than c's, or holds c's show taken in under another spelling of its name (a
 // case-only rename by hand: every job resolves the spelling on disk, so none
-// reads the record at its path). One that cannot be read is not.
-func orphaned(root *os.Root, c checkpoint, read func(string) (*podcast.Feed, string, error)) bool {
-	show := path.Dir(c.Path)
-	real, err := podcast.RealName(root, show)
+// reads the record at its path). One that cannot be read is not. real and
+// err are podcast.RealName's answer for c's folder.
+func orphaned(c checkpoint, real string, err error, read func(string) (*podcast.Feed, string, error)) bool {
 	if errors.Is(err, os.ErrNotExist) {
 		return true
 	}
@@ -261,7 +272,7 @@ func orphaned(root *os.Root, c checkpoint, read func(string) (*podcast.Feed, str
 		return false
 	}
 	f, from, err := read(real)
-	return err == nil && (f.ShowID != c.ShowID || real != show && from == "")
+	return err == nil && (f.ShowID != c.ShowID || real != path.Dir(c.Path) && from == "")
 }
 
 // awaitsTakeIn reports whether record c's partial is in one of shows whose

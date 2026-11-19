@@ -369,16 +369,12 @@ func (s *service) loadCheckpoint(job jobs.Job, root *os.Root, showID, episodeID 
 	}
 	if !s.clearCheckpoint(job, root, &saved) {
 		if err == nil {
-			err = errPartialNotRecorded
+			err = errors.New("the episode partial is not the one recorded")
 		}
 		return c, "", fmt.Errorf("%w: %w", errPartialStuck, err)
 	}
 	return c, "", nil
 }
-
-// errPartialNotRecorded is why loadCheckpoint clears a partial it could read:
-// not the one its record names (another size), or one no GET may resume.
-var errPartialNotRecorded = errors.New("the episode partial is not the one recorded")
 
 // partialSize is the size of the partial at name, opened as OpenRegular
 // opens it (so a partial the Bridge cannot read is not taken for one it can
