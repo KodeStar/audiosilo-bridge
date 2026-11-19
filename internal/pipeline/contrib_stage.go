@@ -263,6 +263,12 @@ func (e *Executor) resolveWorkSlug(ctx context.Context, book store.Book) (slug, 
 			// exists but no data release holds it yet, and the community intake would
 			// refuse its sidecars: wait (the release gate; the poller re-admits).
 			if e.hasMergedCoreRow(ctx, book.ID) {
+				if e.contribModeFor(book) == contribModeLocal {
+					// Nothing is filed, so there is no intake to wait for: a book
+					// turned local after its work merged (a sidecars.generate job
+					// whose share the server turned off) keeps the merged slug.
+					return id, "", nil, nil
+				}
 				return "", "", scheduler.ParkWithCode(state.ParkCorePending, contrib.ReleaseWaitMsg), nil
 			}
 			// stale manual match - fall through to identifier lookup

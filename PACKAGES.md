@@ -692,7 +692,8 @@ internal/
             Config.ContribCommunityRepo (issue mode) or <export>/<slug>/<kind>.json
             (local mode, also the zip layout). resolveWorkSlug adopts a 301 survivor
             (contrib.AdoptLiveWork) and parks core_pending with contrib.ReleaseWaitMsg
-            while a merged core row's work is unreleased; a duplicate-answered core
+            while a merged core row's work is unreleased (issue mode only: a local
+            book files nothing and keeps the merged slug); a duplicate-answered core
             row parks core_needed with CoreDuplicateMsg. The stage reads the book's
             mode again after its description and once more before it files (then
             only a turn to local counts).

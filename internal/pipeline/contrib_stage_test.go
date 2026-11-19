@@ -1201,6 +1201,38 @@ func TestContributeTurnedLocalWhileResolving(t *testing.T) {
 	}
 }
 
+// TestContributeLocalSkipsTheReleaseGate: a book turned local after its
+// add-work PR merged (a sidecars.generate job whose share the server turned
+// off) doesn't wait for the data release as an issue-mode book does
+// (TestContributeMergedCoreWaitsForRelease): it files nothing, so it finishes
+// under the merged slug.
+func TestContributeLocalSkipsTheReleaseGate(t *testing.T) {
+	db := openContribDB(t)
+	gh := newFakeGitHub(t)
+	export := t.TempDir()
+	meta := newFakeMeta(t, nil, nil) // every work id 404s
+	b := contribBook(t, db, store.NewBook{WorkID: "reacher-01", ContribMode: store.ContribModeLocal}, baseChars("x"), baseRecaps("x"))
+	if _, err := db.UpsertContribution(context.Background(), store.Contribution{
+		BookID: b.ID, Kind: store.ContribKindCore, Mode: store.ContribModeIssue,
+		Status: store.ContribStatusMerged, Number: 9, URL: "https://x/9",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := contribConfig(t, db, contribModeIssue, gh.srv.URL, meta.srv.URL, export, fakeTokenResolver{token: "ghp_x"})
+	if _, err := NewExecutor(cfg).Execute(context.Background(), b, state.Contributing, scheduler.StageReport{}); err != nil {
+		t.Fatalf("contribute: %v", err)
+	}
+	if n := gh.issueCount(); n != 0 {
+		t.Fatalf("issues filed = %d, want none", n)
+	}
+	if _, err := os.Stat(filepath.Join(export, "reacher-01", charactersFileName)); err != nil {
+		t.Fatalf("local export under the merged slug: %v", err)
+	}
+	if rows := rowsByKind(t, db, b.ID); rows[store.ContribKindCharacters].Status != store.ContribStatusLocal {
+		t.Fatalf("characters row = %+v, want local", rows[store.ContribKindCharacters])
+	}
+}
+
 // The contributing stage files through the same marker: a retry after a lost
 // answer adopts the issue rather than filing a second.
 func TestContributeRetryAdoptsALostIssue(t *testing.T) {
