@@ -909,7 +909,12 @@ internal/
             have turned the book local meanwhile, server#218), again before it files,
             and before each dimension's gist and issue (turnedLocal: errTurnedLocal
             keeps the rest local; sidecars.contribute's Share passes none and files a
-            local book's sidecars). runAgent's budget preflight gained the
+            local book's sidecars). Each of those reads (turnedLocal) also asks
+            store.GenerateShareOff: an open sidecars.generate job following the book
+            that heard share_off (server_jobs.share_off) turns it local there
+            (KeepBookLocal) even when no run of the job is up to guard it (one resumed
+            after a restart still waiting for its lane slot); a read that fails stops
+            the filing as a stage error. runAgent's budget preflight gained the
             MONTHLY half (checkMonthlyBudget, Config.MonthlyBudgetUSD): this calendar
             month's (UTC, MonthBounds) spend across every book, superseded runs and
             deleted books' runs included (store.SumBudgetCostSince), at or over the cap
@@ -1585,6 +1590,8 @@ internal/
             after a restart or a refused token keeps its results local before any
             answer. KeepBookLocal sets a book's contrib_mode local unless it is done
             (it reports whether the book is local now), leaving updated_at alone.
+            GenerateShareOff reports whether an open sidecars.generate job following a
+            book heard share_off (the contributing stage's check before it files).
   state/    per-book pipeline state machine: table-driven states/lanes/transitions,
             CanStart/NextState guards, the audit fix-loop cap. Pure, no I/O. M6 added
             ParkCode (typed park reasons - M7 added contrib_unavailable, core_needed,
@@ -2214,8 +2221,12 @@ internal/
             once heard (a share dropped is not taken up again) and in the store
             (server_jobs.share_off, restored by storedJob and resumeStranded).
             Reporter.OnShareOff calls a handler's func at once if heard, then at
-            every answer that carries it, on the goroutine that read the answer
-            (HearShareOff is its test hook).
+            every answer that carries it, on the goroutine that read the answer,
+            outside the report lock (sendMu), as is the store write after it (heard,
+            keepShareOff: a failed write is tried again at every answer, warned once
+            a job, then debug; HearShareOff is its test hook). A run a refused token
+            stops carries what it heard to resumeStranded (run.shareOffHeard), which
+            writes it again when the store lacks it, so the stranded resume keeps it.
             Recovery runs once the link is up: a kind no longer run is failed.
             Nothing is sent that the server refuses for good: a result that isn't a
             JSON object of at most 64 KiB fails the job (errUnreportable) and
