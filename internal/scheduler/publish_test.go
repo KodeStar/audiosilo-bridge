@@ -342,121 +342,110 @@ func TestResumeLosingToACancelKeepsTheCancel(t *testing.T) {
 	}
 }
 
-// A re-admit that fails after its clear puts its park back before a later Retry
-// of the book clears anything. A Cancel and then a Retry landing while it runs
-// end with the book admitted: the failed re-admit's put-back never lands over
-// the status that Retry cleared.
-func TestFailedReadmitNeverRestoresOverALaterRetry(t *testing.T) {
-	h := newHarness(t)
-	db := h.openDB(t)
-	bg := context.Background()
-	s := New(db, h.hub, NewStubExecutor(0, 0), 1, h.workRoot, false)
-
-	b := h.addBook(t, db, "twice", "", "")
-	if err := db.SetBookStatus(bg, b.ID, string(state.StatusNeedsAttention), "no convergence", string(state.ParkQANoConverge)); err != nil {
-		t.Fatal(err)
+// A readmit or supersede_rerun failing after its status clear puts the park back
+// (restoreStatus) before a Retry or generate's continue (ContinueStored) of the
+// book clears anything: the put-back can't tell that clear from its own, so it
+// holds the book's publish lock from its clear (supersede_rerun after the worker
+// it cancelled returned, never across that wait). A Cancel and then the Retry or
+// continue landing while it runs end with the book running, never parked again.
+func TestFailedRestoreNeverLandsOverALaterClear(t *testing.T) {
+	changes := []struct {
+		name string
+		run  func(s *Scheduler, ctx context.Context, b store.Book) error
+	}{
+		{"readmit", func(s *Scheduler, ctx context.Context, b store.Book) error { return s.readmit(ctx, b) }},
+		{"supersede_rerun", func(s *Scheduler, ctx context.Context, b store.Book) error {
+			_, err := s.supervisorSupersedeRerun(ctx, b, string(state.Fixing))
+			return err
+		}},
 	}
-	read, err := db.GetBook(bg, b.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	ctx, fail := context.WithCancel(bg)
-	defer fail()
-	retried := make(chan error, 1)
-	var once sync.Once
-	s.afterStatusClear = func() {
-		once.Do(func() {
-			if err := CancelStored(bg, db, b.ID); err != nil {
-				t.Error(err)
-			}
-			cancelled, err := db.GetBook(bg, b.ID) // the Retry's read: cancelled
+	clears := []struct {
+		name string
+		run  func(s *Scheduler, db *store.DB, read store.Book) error
+	}{
+		{"retry", func(s *Scheduler, db *store.DB, read store.Book) error {
+			cancelled, err := db.GetBook(context.Background(), read.ID) // the Retry's read: cancelled
 			if err != nil {
-				t.Error(err)
+				return err
 			}
-			go func() { retried <- s.RetryAsRead(bg, cancelled) }()
-			// The Retry waits for this re-admit; one that didn't would clear the
-			// cancel here, before the failure below puts the park back.
-			select {
-			case err := <-retried:
-				retried <- err
-			case <-time.After(50 * time.Millisecond):
-			}
-			fail() // the forced re-run's store write fails
-		})
+			return s.RetryAsRead(context.Background(), cancelled)
+		}},
+		{"continue", func(s *Scheduler, db *store.DB, read store.Book) error {
+			bg := context.Background()
+			return s.ContinueStored(bg, read.ID, func() error {
+				return db.ContinueReadalong(bg, read.ID, read.State, read.State, state.GoalReadalong, store.GenerateBook{})
+			})
+		}},
 	}
-	if err := s.readmit(ctx, read); !errors.Is(err, context.Canceled) {
-		t.Fatalf("the failed re-admit = %v, want context.Canceled", err)
-	}
-	select {
-	case err := <-retried:
-		if err != nil {
-			t.Fatalf("the Retry after the cancel = %v", err)
+	for _, change := range changes {
+		for _, clear := range clears {
+			t.Run(change.name+"/"+clear.name, func(t *testing.T) {
+				h := newHarness(t)
+				db := h.openDB(t)
+				bg := context.Background()
+				s := New(db, h.hub, NewStubExecutor(0, 0), 1, h.workRoot, false)
+				read := parkedAudit(t, h, db, "cleared")
+
+				ctx, fail := context.WithCancel(bg)
+				defer fail()
+				cleared := make(chan error, 1)
+				var once sync.Once
+				s.afterStatusClear = func() {
+					once.Do(func() {
+						if err := CancelStored(bg, db, read.ID); err != nil {
+							t.Error(err)
+						}
+						go func() { cleared <- clear.run(s, db, read) }()
+						// The clear waits for this change; one that didn't would clear
+						// the cancel here, before the failure below puts the park back.
+						waitQueuedOnPublish(t, s, read.ID, cleared)
+						fail() // the change's store write fails
+					})
+				}
+				if err := change.run(s, ctx, read); !errors.Is(err, context.Canceled) {
+					t.Fatalf("the failed %s = %v, want context.Canceled", change.name, err)
+				}
+				select {
+				case err := <-cleared:
+					if err != nil {
+						t.Fatalf("the %s after the cancel = %v", clear.name, err)
+					}
+				case <-time.After(waitLimit):
+					t.Fatalf("the %s never ran", clear.name)
+				}
+				if got := storedFrame(t, db, read.ID); got.Status != "" || got.ParkCode != "" {
+					t.Fatalf("the failed %s parked the book again over the %s: %+v", change.name, clear.name, got)
+				}
+				if f, ok := lastFrame(t, h.hub, read.ID); !ok || f != storedFrame(t, db, read.ID) {
+					t.Fatalf("last frame %+v (%v), stored %+v", f, ok, storedFrame(t, db, read.ID))
+				}
+			})
 		}
-	case <-time.After(waitLimit):
-		t.Fatal("the Retry never ran")
-	}
-	if got := storedFrame(t, db, b.ID); got.Status != "" || got.ParkCode != "" {
-		t.Fatalf("the failed re-admit parked the retried book again: %+v", got)
-	}
-	if f, ok := lastFrame(t, h.hub, b.ID); !ok || f != storedFrame(t, db, b.ID) {
-		t.Fatalf("last frame %+v (%v), stored %+v", f, ok, storedFrame(t, db, b.ID))
 	}
 }
 
-// supersede_rerun's rewind failing after its status clear puts the park back
-// before a later Retry of the book clears anything, as a failed re-admit does
-// (it holds the book's publish lock from its clear, after the worker it cancelled
-// returned, never across that wait). A Cancel and then a Retry landing while it
-// runs end with the book admitted, never parked again over that Retry.
-func TestFailedSupersedeNeverRestoresOverALaterRetry(t *testing.T) {
-	h := newHarness(t)
-	db := h.openDB(t)
-	bg := context.Background()
-	s := New(db, h.hub, NewStubExecutor(0, 0), 1, h.workRoot, false)
-	read := parkedAudit(t, h, db, "superseded-twice")
-
-	ctx, fail := context.WithCancel(bg)
-	defer fail()
-	retried := make(chan error, 1)
-	var once sync.Once
-	s.afterStatusClear = func() {
-		once.Do(func() {
-			if err := CancelStored(bg, db, read.ID); err != nil {
-				t.Error(err)
-			}
-			cancelled, err := db.GetBook(bg, read.ID) // the Retry's read: cancelled
-			if err != nil {
-				t.Error(err)
-			}
-			go func() { retried <- s.RetryAsRead(bg, cancelled) }()
-			// The Retry waits for this supersede; one that didn't would clear the
-			// cancel here, before the failure below puts the park back.
-			select {
-			case err := <-retried:
-				retried <- err
-			case <-time.After(50 * time.Millisecond):
-			}
-			fail() // the rewind's store write fails
-		})
-	}
-	if _, err := s.supervisorSupersedeRerun(ctx, read, string(state.Fixing)); !errors.Is(err, context.Canceled) {
-		t.Fatalf("the failed supersede_rerun = %v, want context.Canceled", err)
-	}
-	select {
-	case err := <-retried:
-		if err != nil {
-			t.Fatalf("the Retry after the cancel = %v", err)
+// waitQueuedOnPublish waits until a second caller waits for book id's publish
+// lock (the test holds it), or until done has its result: a caller that never
+// waited for the lock. The result is put back for the test to read.
+func waitQueuedOnPublish(t *testing.T, s *Scheduler, id int64, done chan error) {
+	t.Helper()
+	deadline := time.Now().Add(waitLimit)
+	for time.Now().Before(deadline) {
+		s.pubMu.Lock()
+		l := s.pubLocks[id]
+		queued := l != nil && l.refs >= 2
+		s.pubMu.Unlock()
+		if queued {
+			return
 		}
-	case <-time.After(waitLimit):
-		t.Fatal("the Retry never ran")
+		select {
+		case err := <-done:
+			done <- err
+			return
+		case <-time.After(time.Millisecond):
+		}
 	}
-	if got := storedFrame(t, db, read.ID); got.Status != "" || got.ParkCode != "" {
-		t.Fatalf("the failed supersede_rerun parked the retried book again: %+v", got)
-	}
-	if f, ok := lastFrame(t, h.hub, read.ID); !ok || f != storedFrame(t, db, read.ID) {
-		t.Fatalf("last frame %+v (%v), stored %+v", f, ok, storedFrame(t, db, read.ID))
-	}
+	t.Error("nothing waited for the publish lock")
 }
 
 // A publish's failed read of its book warns once, then logs at Debug; a book
@@ -496,74 +485,6 @@ func TestPublishStoredAfterCloseIsQuiet(t *testing.T) {
 	}
 	if _, ok := lastFrame(t, h.hub, b.ID); ok {
 		t.Fatal("a publish after the store closed published a frame")
-	}
-}
-
-// generate's continue of a stopped run (ContinueStored) clears its cancel only
-// once a failed re-admit or supersede_rerun of the book has put its park back:
-// that put-back can't tell the continue's clear from its own, so a continue
-// landing in between would end parked again. A Cancel and then a continue
-// landing while either runs end with the book continued.
-func TestFailedRestoreNeverLandsOverAContinue(t *testing.T) {
-	for _, tc := range []struct {
-		name   string
-		change func(s *Scheduler, ctx context.Context, b store.Book) error
-	}{
-		{"readmit", func(s *Scheduler, ctx context.Context, b store.Book) error { return s.readmit(ctx, b) }},
-		{"supersede_rerun", func(s *Scheduler, ctx context.Context, b store.Book) error {
-			_, err := s.supervisorSupersedeRerun(ctx, b, string(state.Fixing))
-			return err
-		}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			h := newHarness(t)
-			db := h.openDB(t)
-			bg := context.Background()
-			s := New(db, h.hub, NewStubExecutor(0, 0), 1, h.workRoot, false)
-			read := parkedAudit(t, h, db, "continued")
-
-			ctx, fail := context.WithCancel(bg)
-			defer fail()
-			continued := make(chan error, 1)
-			var once sync.Once
-			s.afterStatusClear = func() {
-				once.Do(func() {
-					if err := CancelStored(bg, db, read.ID); err != nil {
-						t.Error(err)
-					}
-					go func() {
-						continued <- s.ContinueStored(bg, read.ID, func() error {
-							return db.ContinueReadalong(bg, read.ID, read.State, read.State, state.GoalReadalong, store.GenerateBook{})
-						})
-					}()
-					// The continue waits for this change; one that didn't would clear
-					// the cancel here, before the failure below puts the park back.
-					select {
-					case err := <-continued:
-						continued <- err
-					case <-time.After(50 * time.Millisecond):
-					}
-					fail() // the change's store write fails
-				})
-			}
-			if err := tc.change(s, ctx, read); !errors.Is(err, context.Canceled) {
-				t.Fatalf("the failed %s = %v, want context.Canceled", tc.name, err)
-			}
-			select {
-			case err := <-continued:
-				if err != nil {
-					t.Fatalf("the continue after the cancel = %v", err)
-				}
-			case <-time.After(waitLimit):
-				t.Fatal("the continue never ran")
-			}
-			if got := storedFrame(t, db, read.ID); got.Status != "" || got.ParkCode != "" {
-				t.Fatalf("the failed %s parked the continued book again: %+v", tc.name, got)
-			}
-			if f, ok := lastFrame(t, h.hub, read.ID); !ok || f != storedFrame(t, db, read.ID) {
-				t.Fatalf("last frame %+v (%v), stored %+v", f, ok, storedFrame(t, db, read.ID))
-			}
-		})
 	}
 }
 
