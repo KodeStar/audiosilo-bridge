@@ -27,6 +27,7 @@ import (
 	"github.com/kodestar/audiosilo-bridge/internal/scheduler"
 	"github.com/kodestar/audiosilo-bridge/internal/state"
 	"github.com/kodestar/audiosilo-bridge/internal/store"
+	"github.com/kodestar/audiosilo-bridge/internal/testwait"
 )
 
 // fakeServer implements the server's Bridge routes the job calls: the claim,
@@ -56,6 +57,9 @@ type fakeServer struct {
 	// isn't the server's JSON (negative: every one); bookAsks counts the reads.
 	pages    int
 	bookAsks int
+	// claims counts the claim polls: a runner polls only once its start-up
+	// recovery (resuming the jobs the store has open) is over.
+	claims int
 }
 
 func newFakeServer() *fakeServer {
@@ -69,6 +73,7 @@ func (f *fakeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer f.mu.Unlock()
 	switch {
 	case r.URL.Path == "/api/v1/bridge/jobs/next":
+		f.claims++
 		kinds := r.URL.Query()["kind"]
 		for i, j := range f.queue {
 			if slices.Contains(kinds, j.Kind) {
@@ -308,6 +313,10 @@ type harness struct {
 	root  string
 	work  string
 	h     *Handler
+	// bg is the handlers' Background tasks (Abandon's wait for an engine
+	// still starting): ended with the test's context, waited for before the
+	// store closes.
+	bg sync.WaitGroup
 }
 
 func newHarness(t *testing.T) *harness {
@@ -321,7 +330,17 @@ func newHarness(t *testing.T) *harness {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = db.Close() })
+	t.Cleanup(func() {
+		// Runs last (after the engine, server and background tasks stop). A
+		// stop interrupts a query, and database/sql replaces the discarded
+		// connection on goroutines Close doesn't wait for, which can leave a
+		// bridge.db in the folder TempDir removes. A query here waits for
+		// the connection to settle, so Close closes the last one.
+		ctx, cancel := context.WithTimeout(context.Background(), testwait.Scaled(10*time.Second))
+		defer cancel()
+		_, _ = db.ListRates(ctx)
+		_ = db.Close()
+	})
 	srv := newFakeServer()
 	srv.books["Author/Book"] = link.Book{LibraryID: 1, Path: "Author/Book", Files: []link.BookFile{
 		{Path: "Author/Book/01.mp3", Size: 9, ModTime: 1700000000}, {Path: "Author/Book/02.mp3", Size: 10, ModTime: 1700000001}},
@@ -354,8 +373,18 @@ func newHarness(t *testing.T) *harness {
 		t.Fatal("the scheduler never started")
 	}
 	hr := &harness{t: t, db: db, srv: srv, cl: cl, libs: libs, exec: exec, sched: sched, root: root, work: work}
+	t.Cleanup(hr.bg.Wait)
 	hr.h = hr.handler()
 	return hr
+}
+
+// background is the harness's Options.Background: the task runs on the
+// test's context and the harness waits for it, where the default's goroutine
+// would go on polling the store (and its folder) after the test.
+func (hr *harness) background(fn func(context.Context)) {
+	ctx := hr.t.Context()
+	hr.bg.Add(1)
+	go func() { defer hr.bg.Done(); fn(ctx) }()
 }
 
 func (hr *harness) handler() *Handler {
@@ -367,7 +396,8 @@ func (hr *harness) handlerWith(engine func() Engine) *Handler {
 	return New(Options{DB: hr.db, Engine: engine, Libraries: hr.libs,
 		Mount:  func(int64, string) (string, bool) { return hr.libs.root, false },
 		Server: func() Server { return hr.cl }, WorkRoot: hr.work, Version: "0.2.0", RetentionDays: 30,
-		Poll: 10 * time.Millisecond, IdlePoll: 10 * time.Millisecond, Recheck: time.Hour, Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
+		Poll: 10 * time.Millisecond, IdlePoll: 10 * time.Millisecond, Recheck: time.Hour, Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Background: hr.background})
 }
 
 // publishRecorder is the harness's scheduler recording the books a change made
@@ -451,10 +481,12 @@ func published(hub *events.Hub, typ string) bool {
 	return false
 }
 
-// poll waits up to 10 s for cond and reports whether it held. It never fails the
-// test, so it can run off the test's goroutine (in a fake a job calls).
+// poll waits up to 10 s (Scaled) for cond and reports whether it held. It never
+// fails the test, so it can run off the test's goroutine (in a fake a job
+// calls). Each test runs a whole engine and runner, so a gate running every
+// package under -race starves them for seconds at a time.
 func poll(cond func() bool) bool {
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(testwait.Scaled(10 * time.Second))
 	for !cond() {
 		if time.Now().After(deadline) {
 			return false
@@ -1476,6 +1508,13 @@ func TestGenerateShareOffAsksOnlyShareJobs(t *testing.T) {
 	hr := newHarness(t)
 	stop := hr.runner(hr.h) // started first: it resumes none of the jobs below
 	defer stop()
+	// Its recovery read the store before the claims below: a runner slow to
+	// start would otherwise resume them, and they would have a run here.
+	hr.waitFor("the runner's first claim poll", func() bool {
+		hr.srv.mu.Lock()
+		defer hr.srv.mu.Unlock()
+		return hr.srv.claims > 0
+	})
 	b, err := hr.db.CreateBook(ctx, store.NewBook{Title: "B", SourcePath: "/src/b", WorkDir: t.TempDir(),
 		ContribMode: store.ContribModeIssue})
 	if err != nil {

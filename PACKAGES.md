@@ -190,6 +190,9 @@ internal/
             binary: every fork in the process waits for it. fsutil.WriteFileAtomic
             is not fork-safe for an executable run at once. execfile/forktest is
             the shared fork-stress test (execfile's and toolfetch's).
+  testwait/ tests only, a leaf (the server's internal/testwait, server#492): Race,
+            a build-tag const, and Scaled(d), d x4 under -race. When to Scale a
+            wait and when to wait for the event instead: the package doc.
   audio/    the mechanical audio stages: Inspect (ffprobe -> probe.json + normalized
             manifest.json; marker parsing + contiguity ported from audio_extract.py;
             single-file marker books AND multi-file "files" books) and Split (ffmpeg

@@ -71,17 +71,18 @@ func (hr *harness) shareRunner(s Sharer, cred func(context.Context) error) (stop
 
 // shareRunnerRecheck is shareRunner with a park's recheck every recheck.
 func (hr *harness) shareRunnerRecheck(s Sharer, cred func(context.Context) error, recheck time.Duration) (stop func()) {
-	return hr.shareRunnerOn(s, cred, recheck, func() jobs.Server { return hr.cl })
+	return hr.shareRunnerOn(s, cred, recheck, func() jobs.Server { return hr.cl }, hr.sched)
 }
 
 // shareRunnerOn is shareRunnerRecheck with the runner's link to the server
-// from server (the Bridge paired anew when it changes).
+// from server (the Bridge paired anew when it changes), over eng.
 func (hr *harness) shareRunnerOn(s Sharer, cred func(context.Context) error, recheck time.Duration,
-	server func() jobs.Server) (stop func()) {
-	h := New(Options{DB: hr.db, Engine: func() Engine { return hr.sched }, Sharer: func() Sharer { return s },
+	server func() jobs.Server, eng Engine) (stop func()) {
+	h := New(Options{DB: hr.db, Engine: func() Engine { return eng }, Sharer: func() Sharer { return s },
 		Libraries: hr.libs, Mount: func(int64, string) (string, bool) { return hr.libs.root, false },
 		Server: func() Server { return hr.cl }, WorkRoot: hr.work, Version: "0.2.0", RetentionDays: 30, ContribCredential: cred,
-		Poll: 10 * time.Millisecond, IdlePoll: 10 * time.Millisecond, Recheck: recheck, Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
+		Poll: 10 * time.Millisecond, IdlePoll: 10 * time.Millisecond, Recheck: recheck, Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Background: hr.background})
 	r := jobs.New(hr.db, server, nil, jobs.Options{Keepalive: 30 * time.Millisecond,
 		ProgressEvery: 5 * time.Millisecond, Wait: 10 * time.Millisecond, RetryEvery: 20 * time.Millisecond,
 		Log: slog.New(slog.NewTextHandler(io.Discard, nil))}, h, h.ContributeJob())
@@ -268,23 +269,18 @@ func TestContributeJobAsksAgainAfterWaitingForTheHold(t *testing.T) {
 	if !ok {
 		t.Fatal("the book couldn't be held")
 	}
-	asked := make(chan struct{})
-	var once sync.Once
-	hr.srv.set(func() {
-		hr.srv.atStep[132] = func(_ *fakeServer, step string) {
-			if step == stepSharing {
-				once.Do(func() { close(asked) })
-			}
-		}
-	})
+	// The job asks first, then finds the book held: at that refusal, while
+	// the job waits for the book, the share is turned off and the book let go.
+	// Done in the refusal itself, not after a sleep, so the job's wait (a few
+	// polls) can't run out before the book is free.
+	eng := &refusedHold{Engine: hr.sched, onRefused: func() {
+		hr.srv.set(func() { hr.srv.shareOff[132] = true })
+		release()
+	}}
 	s := &fakeSharer{}
 	hr.srv.addContribute(132, "Author/Book", `{}`)
-	stop := hr.shareRunner(s, func(context.Context) error { return nil })
+	stop := hr.shareRunnerOn(s, func(context.Context) error { return nil }, time.Hour, func() jobs.Server { return hr.cl }, eng)
 	defer stop()
-	<-asked
-	time.Sleep(50 * time.Millisecond) // the job waits for the book
-	hr.srv.set(func() { hr.srv.shareOff[132] = true })
-	release()
 	hr.waitFor("failed", func() bool { st, _ := hr.srv.final(132); return st == link.StateFailed })
 	if calls := s.count(); calls != 0 {
 		t.Fatalf("share calls = %d after a share_off set while the job waited for the book, want none", calls)
@@ -292,6 +288,22 @@ func TestContributeJobAsksAgainAfterWaitingForTheHold(t *testing.T) {
 	if _, u := hr.srv.final(132); u.Error == nil || !strings.Contains(*u.Error, errShareOffNow.Error()) {
 		t.Fatalf("failed with %v, want the share_off heard by the second ask", u.Error)
 	}
+}
+
+// refusedHold is an engine whose first refused Hold runs onRefused, on the
+// job's goroutine, before the job hears the refusal.
+type refusedHold struct {
+	Engine
+	once      sync.Once
+	onRefused func()
+}
+
+func (e *refusedHold) Hold(id int64) (func(), bool) {
+	release, ok := e.Engine.Hold(id)
+	if !ok {
+		e.once.Do(e.onRefused)
+	}
+	return release, ok
 }
 
 // A share parked share_unconfirmed gives its light-lane slot back: two such
@@ -376,7 +388,7 @@ func TestContributeJobConfirmsOnlyOnTheJobsServer(t *testing.T) {
 					return next
 				}
 				return hr.cl
-			})
+			}, hr.sched)
 			defer stop()
 			if sameServer {
 				hr.waitFor("done", func() bool { st, _ := hr.srv.final(122); return st == link.StateDone })

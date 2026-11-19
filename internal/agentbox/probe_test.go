@@ -17,6 +17,7 @@ import (
 
 	"github.com/kodestar/audiosilo-bridge/internal/agent"
 	"github.com/kodestar/audiosilo-bridge/internal/agentproto"
+	"github.com/kodestar/audiosilo-bridge/internal/testwait"
 )
 
 // mappedRunner is a fake runner in the Bridge's group by its ids that, while
@@ -194,7 +195,7 @@ func TestProbeOnlyWhenDue(t *testing.T) {
 	stop := fake.start(t, dir)
 	waitProbe := func() {
 		t.Helper()
-		for deadline := time.Now().Add(5 * time.Second); r.probing.Load(); {
+		for deadline := time.Now().Add(testwait.Scaled(5 * time.Second)); r.probing.Load(); {
 			if time.Now().After(deadline) {
 				t.Fatal("the probe never finished")
 			}
@@ -334,7 +335,7 @@ func TestProbeStuckClaimEnds(t *testing.T) {
 		if got != probeUnknown || !r.groupDenied.Load() {
 			t.Errorf("stuck probe = %v, group denied %v", got, r.groupDenied.Load())
 		}
-	case <-time.After(10 * time.Second):
+	case <-time.After(testwait.Scaled(10 * time.Second)):
 		t.Error("a stuck probe never ended")
 	}
 	close(stopTouch)
@@ -355,7 +356,7 @@ func TestProbeWaitedForAtAStop(t *testing.T) {
 		entries, _ := os.ReadDir(dir)
 		return slices.ContainsFunc(entries, func(e os.DirEntry) bool { return agentproto.ValidJobID(e.Name()) })
 	}
-	for deadline := time.Now().Add(5 * time.Second); !staged(); {
+	for deadline := time.Now().Add(testwait.Scaled(5 * time.Second)); !staged(); {
 		if time.Now().After(deadline) {
 			t.Fatal("the probe never staged its job")
 		}

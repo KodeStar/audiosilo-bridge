@@ -10,6 +10,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/kodestar/audiosilo-bridge/internal/testwait"
 )
 
 // bridge.json read back for a description-only job is never read through a FIFO
@@ -35,7 +37,7 @@ func TestDescribedProvenanceRefusesSpecialFiles(t *testing.T) {
 		if m != nil {
 			t.Fatalf("a FIFO read as %v", m)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(testwait.Scaled(5 * time.Second)):
 		t.Fatal("reading a FIFO blocked")
 	}
 

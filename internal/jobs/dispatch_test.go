@@ -15,6 +15,7 @@ import (
 
 	"github.com/kodestar/audiosilo-bridge/internal/link"
 	"github.com/kodestar/audiosilo-bridge/internal/store"
+	"github.com/kodestar/audiosilo-bridge/internal/testwait"
 )
 
 type controlledClaim struct {
@@ -84,7 +85,7 @@ func await[T any](t *testing.T, ch <-chan T) T {
 	select {
 	case value := <-ch:
 		return value
-	case <-time.After(3 * time.Second):
+	case <-time.After(testwait.Scaled(3 * time.Second)):
 		t.Fatal("timed out waiting for channel")
 		var zero T
 		return zero

@@ -13,6 +13,7 @@ import (
 
 	"github.com/kodestar/audiosilo-bridge/internal/link"
 	"github.com/kodestar/audiosilo-bridge/internal/store"
+	"github.com/kodestar/audiosilo-bridge/internal/testwait"
 )
 
 // logCounter counts log records by message.
@@ -38,7 +39,7 @@ func (c *logCounter) count(key string) int {
 }
 
 func awaitCond(cond func() bool, what string) error {
-	for deadline := time.Now().Add(5 * time.Second); !cond(); time.Sleep(5 * time.Millisecond) {
+	for deadline := time.Now().Add(testwait.Scaled(5 * time.Second)); !cond(); time.Sleep(5 * time.Millisecond) {
 		if time.Now().After(deadline) {
 			return fmt.Errorf("timed out waiting for %s", what)
 		}
