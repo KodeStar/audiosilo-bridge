@@ -3032,7 +3032,10 @@ internal/
             which only tests used); Expect(recs) names a batch, so the records
             of a series the library has none of (one author by the sibling
             rule) are planned beside each other, the first by position as its
-            series' first, each placed once, bridge#43; a template
+            series' first and each other one beside the ones before it (as a
+            backup in that order leaves them: bookPath, the folder a template
+            names alone or the file's, a loose file at the root itself), its
+            Siblings the group's others, each placed once, bridge#43; a template
             error keeps the item's Kind and Siblings; AuthorFolders reusing an
             existing author folder spelling; the name is match.CleanTitle with
             the series as the title opens it, article included (seriesAsTitled:

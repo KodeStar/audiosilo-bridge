@@ -291,3 +291,68 @@ func TestPlannerExpectGroupsByTheSiblingAuthorRule(t *testing.T) {
 		}
 	}
 }
+
+// A batch's titles anchor on the ones before them by position, each where it
+// is planned beside those: what backing them up in that order leaves. So a
+// later title's own credit or a three-digit position never moves an earlier
+// one, a template that names the folder alone anchors on that folder (not its
+// parent, whose name may read as a code), and a loose file at the library's
+// root is a book to join.
+func TestPlannerExpectAnchorsOnTheTitlesBefore(t *testing.T) {
+	rec := func(asin, title, author, series string, seq float64) source.Record {
+		return source.Record{ASIN: asin, FileName: title + ".m4b", Title: title, Author: author, Series: series, Sequence: seq, HasSequence: true}
+	}
+	for _, c := range []struct {
+		name, template string
+		recs           []source.Record
+		want           []string
+		siblings       []int
+	}{
+		{"a co-credited title between two", "", []source.Record{
+			rec("B1", "One", "New Writer", "Dawn Road", 1),
+			rec("B2", "Two", "New Writer & Co Author", "Dawn Road", 2),
+			rec("B3", "Three", "New Writer", "Dawn Road", 3),
+		}, []string{
+			"New Writer/Dawn Road/DR01 - One/One.m4b",
+			"New Writer/Dawn Road/DR02 - Two/Two.m4b",
+			"New Writer/Dawn Road/DR03 - Three/Three.m4b",
+		}, []int{0, 2, 2}},
+		{"a three-digit position after", "", []source.Record{
+			rec("B100", "Hundred", "New Writer", "Dawn Road", 100),
+			rec("B1", "One", "New Writer", "Dawn Road", 1),
+			rec("B2", "Two", "New Writer", "Dawn Road", 2),
+		}, []string{
+			"New Writer/Dawn Road/DR100 - Hundred/Hundred.m4b",
+			"New Writer/Dawn Road/DR01 - One/One.m4b",
+			"New Writer/Dawn Road/DR02 - Two/Two.m4b",
+		}, []int{2, 0, 2}},
+		{"a template naming the folder alone", "{Author}/{Series}/{SHORTCODE}{PaddedSeq} - {Title}", []source.Record{
+			rec("B1", "One", "New Writer", "Area 51", 1),
+			rec("B2", "Two", "New Writer", "Area 51", 2),
+		}, []string{"New Writer/Area 51/A01 - One", "New Writer/Area 51/A02 - Two"}, []int{0, 1}},
+		{"a template naming the file", "{Author}/{Series}/{SHORTCODE}{PaddedSeq} - {Title}/{OriginalFilename}", []source.Record{
+			rec("B1", "One", "New Writer", "Area 51", 1),
+			rec("B2", "Two", "New Writer", "Area 51", 2),
+		}, []string{"New Writer/Area 51/A01 - One/One.m4b", "New Writer/Area 51/A02 - Two/Two.m4b"}, []int{0, 1}},
+		{"loose files at the root", "{Title}.m4b", []source.Record{
+			rec("B1", "One", "New Writer", "Dawn Road", 1),
+			rec("B2", "Two", "New Writer", "Dawn Road", 2),
+		}, []string{"One.m4b", "Two.m4b"}, []int{0, 1}},
+	} {
+		mode := placement.ModeAuto
+		if c.template != "" {
+			mode = placement.ModeTemplate
+		}
+		p := NewPlanner(nil)
+		p.Expect(c.recs)
+		for i, r := range c.recs {
+			item, err := p.Plan(r, mode, c.template)
+			if err != nil || item.RelPath != c.want[i] || item.Siblings != c.siblings[i] {
+				t.Errorf("%s, %s: %q with %d siblings, %v; want %q with %d", c.name, r.ASIN, item.RelPath, item.Siblings, err, c.want[i], c.siblings[i])
+			}
+			if wantKind := placement.SeriesExisting; c.siblings[i] > 0 && item.Kind != wantKind {
+				t.Errorf("%s, %s: kind %v, want %v", c.name, r.ASIN, item.Kind, wantKind)
+			}
+		}
+	}
+}
