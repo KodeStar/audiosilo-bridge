@@ -46,11 +46,11 @@ func CheckPodcast(ctx context.Context, src MarkerSource, lib link.Library, mount
 // checkPodcast is CheckPodcast with these looks.
 func (l looks) checkPodcast(ctx context.Context, src MarkerSource, lib link.Library, mount string, current func(int64) bool) (st link.LibraryStatus, unanswered error) {
 	st = link.LibraryStatus{LibraryID: lib.ID, MountPath: mount, CheckedPath: MarkerPath}
-	if _, err := l.stat(mount); err != nil {
-		st.Error = "the library folder is " + describeStatError(err)
-		return st, nil
+	var root *os.Root
+	_, err := l.stat(mount)
+	if err == nil {
+		root, err = os.OpenRoot(mount)
 	}
-	root, err := os.OpenRoot(mount)
 	if err != nil {
 		st.Error = "the library folder is " + describeStatError(err)
 		return st, nil
