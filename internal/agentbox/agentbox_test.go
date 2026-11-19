@@ -490,16 +490,18 @@ func TestRunStaleHeartbeat(t *testing.T) {
 // (BR-OPENAI-2): a runner whose clock is an hour behind, touching the
 // heartbeat with its own dates, finishes its run (allowed); one that stops
 // touching it is stale staleFor later all the same (TestRunStaleHeartbeat).
-// staleFor is the run's length (Scaled): beats 5 ms apart, so only a runner on
-// its own clock reads stale, never one a loaded machine starved for a moment.
+// The run lasts twice staleFor (Scaled), beating 5 ms apart: only a runner
+// read on its own clock, or timed from its claim, goes stale; a moment's
+// starvation on a loaded machine doesn't.
 func TestRunHeartbeatOnTheBridgesClock(t *testing.T) {
 	t.Parallel()
 	r, dir := newTestRunner(t, agent.IDClaude)
-	r.staleFor = testwait.Scaled(time.Second)
+	stale := testwait.Scaled(500 * time.Millisecond)
+	r.staleFor = stale
 	fake := &fakeRunner{fn: func(job string) agentproto.Exit {
 		hb := filepath.Join(job, agentproto.HeartbeatFile)
 		behind := time.Now().Add(-time.Hour)
-		end := time.Now().Add(time.Second)
+		end := time.Now().Add(2 * stale)
 		for time.Now().Before(end) {
 			behind = behind.Add(5 * time.Millisecond)
 			if err := os.Chtimes(hb, behind, behind); err != nil {

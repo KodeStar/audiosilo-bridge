@@ -645,6 +645,7 @@ func TestDownloadStalls(t *testing.T) {
 	}
 	for name, headers := range map[string]bool{"mid-body": true, "no answer": false} {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			release := make(chan struct{})
 			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if headers {
@@ -671,19 +672,21 @@ func TestDownloadStalls(t *testing.T) {
 			}
 		})
 	}
-	// A body that keeps coming, however slowly, is no stall: 40 ms apart against
-	// a stall time fifty times that, so a starved scheduler can't fake one.
+	// A body that keeps coming, however slowly, is no stall: bytes a tenth of
+	// the stall time apart, over twice the stall time in all, so only a
+	// watchdog every byte resets lets it finish.
+	stall := testwait.Scaled(300 * time.Millisecond)
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Length", "10")
-		for i := range 10 {
-			_, _ = io.WriteString(w, strconv.Itoa(i))
+		w.Header().Set("Content-Length", "20")
+		for i := range 20 {
+			_, _ = io.WriteString(w, strconv.Itoa(i%10))
 			w.(http.Flusher).Flush()
-			time.Sleep(40 * time.Millisecond)
+			time.Sleep(stall / 10)
 		}
 	}))
 	defer ts.Close()
 	dest := filepath.Join(t.TempDir(), "slow.aaxc")
-	if err := stallClient(t, ts.URL, testwait.Scaled(2*time.Second)).Download(context.Background(), ts.URL+"/f", dest, DownloadOptions{}); err != nil {
+	if err := stallClient(t, ts.URL, stall).Download(context.Background(), ts.URL+"/f", dest, DownloadOptions{}); err != nil {
 		t.Fatalf("a slow body: %v", err)
 	}
 }

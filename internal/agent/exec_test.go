@@ -68,12 +68,11 @@ func TestRunCLIHeartbeatFiresWhileRunningAndStops(t *testing.T) {
 }
 
 // TestRunCLIHeartbeatSilentWhenFast confirms the heartbeat does not fire for a process
-// that finishes well within one interval: no beat at the start. The interval is a
-// minute, as a fork and exec under -race on a loaded machine can take longer than
-// any interval short enough to keep the test quick.
+// that finishes well within one interval (a second, Scaled: a fork and exec under
+// -race on a loaded machine is slow).
 func TestRunCLIHeartbeatSilentWhenFast(t *testing.T) {
 	restore := heartbeatInterval
-	heartbeatInterval = time.Minute
+	heartbeatInterval = testwait.Scaled(time.Second)
 	t.Cleanup(func() { heartbeatInterval = restore })
 
 	var beats atomic.Int64
