@@ -1204,9 +1204,10 @@ func (h *Handler) AskThrough(a ShareAsker) {
 // ask only what is known here answers, with no request: the stage asks so
 // before its lookups, to wait at once on a job that can't be asked. The first
 // job with its share off answers true (the book is local whatever the others
-// say): one that stored or heard share_off already needs no asking, and an
-// answer that stopped the job counts when it carried share_off (heard before
-// the stop). An error when one couldn't be asked (the server not reached, the
+// say, one that couldn't be asked included): one that stored or heard
+// share_off already needs no asking, and an answer that stopped the job counts
+// when it carried share_off (heard before the stop). Otherwise an error when
+// one couldn't be asked (the server not reached, the
 // Bridge unpaired or its token refused, the answer stopped the job, or no run
 // of it here), for the stage to wait and file nothing. Other jobs (contribute
 // local, or another kind) are not asked; params that don't read are asked as a
@@ -1219,6 +1220,7 @@ func (h *Handler) ShareOff(ctx context.Context, bookID int64, ask bool) (bool, e
 	h.mu.Lock()
 	asker := h.asker
 	h.mu.Unlock()
+	var unasked error // the first job that couldn't be asked, once no other is off
 	for _, id := range open {
 		sj, err := h.o.DB.GetServerJob(ctx, id)
 		if errors.Is(err, store.ErrNotFound) {
@@ -1236,17 +1238,20 @@ func (h *Handler) ShareOff(ctx context.Context, bookID int64, ask bool) (bool, e
 		if sj.ShareOff {
 			return true, nil
 		}
+		var off bool
 		if asker == nil {
-			return false, fmt.Errorf("job %d can't be asked here", id)
+			err = fmt.Errorf("job %d can't be asked here", id)
+		} else if off, err = asker.ShareOff(ctx, id, ask); err != nil {
+			err = fmt.Errorf("job %d: %w", id, err)
 		}
-		switch off, err := asker.ShareOff(ctx, id, ask); {
-		case err != nil:
-			return false, fmt.Errorf("job %d: %w", id, err)
+		switch {
 		case off:
 			return true, nil
+		case err != nil && unasked == nil:
+			unasked = err
 		}
 	}
-	return false, nil
+	return false, unasked
 }
 
 // errEarlierRunBusy is a new job's refusal while the engine stays busy with the

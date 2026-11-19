@@ -1156,6 +1156,54 @@ func TestShareOffWakesTheRun(t *testing.T) {
 	}
 }
 
+// fakeAsker answers ShareOff per job: an error, else off.
+type fakeAsker struct {
+	off  map[int64]bool
+	errs map[int64]error
+}
+
+func (a fakeAsker) ShareOff(_ context.Context, id int64, _ bool) (bool, error) {
+	return a.off[id], a.errs[id]
+}
+
+// ShareOff answers true when any share job following the book is off, even
+// when one asked before it couldn't be (the book is local whatever the others
+// say); with none off, a job that couldn't be asked is the error, so the stage
+// waits (denied: never "not off").
+func TestShareOffAnyJobOffWinsOverOneUnasked(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db, err := store.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	b, err := db.CreateBook(ctx, store.NewBook{Title: "B", SourcePath: "/src/b", WorkDir: t.TempDir(),
+		ContribMode: store.ContribModeIssue})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []int64{1, 2} {
+		if err := db.RecordClaim(ctx, store.ServerJob{ID: id, Kind: Kind, Params: json.RawMessage(`{"contribute":"issue"}`),
+			Attempt: 1}); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.PutGenerateBook(ctx, store.GenerateBook{ServerJobID: id, BookID: &b.ID, LibraryID: 1, RelPath: "B"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h := New(Options{DB: db, WorkRoot: t.TempDir()})
+	unasked := map[int64]error{1: jobs.ErrShareNotRunning}
+	h.AskThrough(fakeAsker{off: map[int64]bool{2: true}, errs: unasked})
+	if off, err := h.ShareOff(ctx, b.ID, true); !off || err != nil {
+		t.Fatalf("one job off after one that couldn't be asked = %v %v, want true", off, err)
+	}
+	h.AskThrough(fakeAsker{errs: unasked})
+	if off, err := h.ShareOff(ctx, b.ID, true); off || !errors.Is(err, jobs.ErrShareNotRunning) {
+		t.Fatalf("none off, one couldn't be asked = %v %v, want ErrShareNotRunning", off, err)
+	}
+}
+
 // A book parked because the server couldn't be asked about its share is a
 // share park: a share_off lifts it into local mode like a sign-in's (allowed),
 // while a park that isn't over the share is left alone (denied).
