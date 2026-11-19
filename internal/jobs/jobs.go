@@ -702,16 +702,16 @@ func (r *Runner) abandonDropped(ctx context.Context, job Job, why error) {
 
 // abandonWithin releases the work of a job dropped for why under actx, a
 // deadline's context, and logs a slow release and one that gave up at the
-// deadline (one never started once it passed). A job whose handler holds no
-// work (not an Abandoner) has nothing to release.
+// deadline. One reached only once the deadline passed is told all the same,
+// under the ended context: a release that needs no wait (a sealed feed URL,
+// temp files) still happens, and one that waits gives up at once. A job whose
+// handler holds no work (not an Abandoner) has nothing to release.
 func (r *Runner) abandonWithin(actx context.Context, job Job, why error) {
 	if _, ok := r.handlers[job.Kind].(Abandoner); !ok {
 		return
 	}
 	start := time.Now()
-	if actx.Err() == nil {
-		r.abandonFor(actx, job, why)
-	}
+	r.abandonFor(actx, job, why)
 	switch took := time.Since(start); {
 	case errors.Is(actx.Err(), context.DeadlineExceeded):
 		r.log.Warn("bridge: releasing a dropped job's work gave up at its deadline", "job", job.ID, "kind", job.Kind,
@@ -725,16 +725,17 @@ func (r *Runner) abandonWithin(actx context.Context, job Job, why error) {
 // lost, so a job waiting for one to end (generate's awaitOpenJobEnd reads the
 // row's running state) starts only once its engine book is stopped, as the
 // runner's own ends order it (bridge#37). It runs off the caller's goroutine
-// (a start's look, the claim loop, a run's end), dropConcurrency at a time,
-// all under one deadline (the drop deadline from the call), so N slow releases
+// (a start's look or recover, the claim loop), dropConcurrency at a time, all
+// under one deadline (the drop deadline from the call), so N slow releases
 // hold up neither the start nor the claiming, nor take N deadlines. One that
-// gives up at the deadline is recorded lost all the same (abandonWithin logs
-// it); one the Bridge's stop cuts short is left running for the next start's
-// look (sweepPairings). Each job is held (holdsLocked) until it is recorded,
-// so no look drops it twice. Run waits for the batch.
+// gives up at the deadline, or is reached only after it, is recorded lost all
+// the same (abandonWithin); one the Bridge's stop reaches first, or cuts short,
+// is left running for the next start's look (sweepPairings), never told past
+// the stop. Each job is held (holdsLocked) until it is recorded, so no look
+// drops it twice. Run waits for the batch.
 func (r *Runner) releaseDropped(ctx context.Context, drops []drop) {
-	if len(drops) == 0 {
-		return
+	if len(drops) == 0 || ctx.Err() != nil {
+		return // a stop's: left running for the next start's look
 	}
 	r.mu.Lock()
 	for _, d := range drops {
@@ -755,7 +756,9 @@ func (r *Runner) releaseDropped(ctx context.Context, drops []drop) {
 		for range min(dropConcurrency, len(drops)) {
 			workers.Go(func() {
 				for d := range queue {
-					r.abandonWithin(actx, d.job, d.why)
+					if ctx.Err() == nil {
+						r.abandonWithin(actx, d.job, d.why)
+					}
 					if ctx.Err() == nil {
 						r.recordLost(ctx, d.job, nil, d.why)
 					}

@@ -2622,16 +2622,21 @@ internal/
             4 at a time (dropConcurrency), all under ONE deadline per batch
             (abandonTimeout, 2 min), then records each lost; so N slow releases
             hold up neither a start's resumes nor the claiming, nor take N x 2
-            min. A release that gives up at the deadline (or never started by
-            then) is logged and recorded lost all the same; the jobs are held
-            (Runner.dropping, holdsLocked) until recorded, so recover and a later
-            look skip them. A run's own drop (settle) still releases on its
-            goroutine under its own deadline. Everything runs under the runner's
-            context: a stop cuts a batch short and the rows it left running are
-            the next start's look (a job the stop interrupted as the pairing
-            was ended included: release leaves it in unpaired for the claim
-            loop's dropUnpaired, never dropping it on the run's goroutine,
-            where it could hold the stop up to 2 min).
+            min. A release that gives up at the deadline is logged and
+            recorded lost all the same, and one reached only after it is told
+            with it passed (Abandon's context ended: a release that needs no
+            wait, a sealed feed URL or temp files, still happens); the jobs are
+            held (Runner.dropping, holdsLocked) until recorded, so recover (by
+            the holds it saw before it read the rows, as the look's release may
+            record one since) and a later look skip them. A run's own drop
+            (settle) still releases on its goroutine under its own deadline,
+            but never past a stop. Everything runs under the runner's context:
+            a stop cuts a batch short (or finds it unstarted) and the rows it
+            left running are the next start's look (a job the stop interrupted
+            as the pairing was ended included, before settle looked or after:
+            left running, in unpaired for the claim loop's dropUnpaired, never
+            released on the run's goroutine past the stop, where it could hold
+            the stop up to 2 min).
             retryReports sends only the current server's and pairing's
             ends. HANDLERS key a job's durable state and filings by its own server,
             never the pairing's now (Job.ServerID, Job.KeyServer: correct's result

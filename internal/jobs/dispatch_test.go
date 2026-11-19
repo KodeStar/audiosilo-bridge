@@ -906,9 +906,11 @@ func TestDroppedJobsReleaseOffTheClaimLoop(t *testing.T) {
 }
 
 // A batch of dropped jobs shares one deadline: releases still waiting at it
-// give up together, and those that never started go without one (denied: a
-// deadline each, the batch taking one per round of dropConcurrency). Every
-// row is recorded lost all the same, and each give-up is logged.
+// give up together, and those reached only after it are told with it passed
+// (denied: a deadline each, the batch taking one per round of
+// dropConcurrency; and denied: never told, so a release that needs no wait,
+// such as a sealed feed URL, would never happen). Every row is recorded lost
+// all the same, and each give-up is logged.
 func TestDroppedJobsShareOneDeadline(t *testing.T) {
 	const n = 6
 	h := newCountingAbandoner(nil, nil, n) // waits for its deadline
@@ -921,8 +923,11 @@ func TestDroppedJobsShareOneDeadline(t *testing.T) {
 	r.dropDeadline = 200 * time.Millisecond
 	startControlled(t, r)
 	waitFor(t, func() bool { return rowsIn(db, n, store.JobLost) })
-	if got := len(h.abandoned()); got != dropConcurrency {
-		t.Fatal("releases started:", got)
+	if got := len(h.abandoned()); got != n {
+		t.Fatal("releases told:", got)
+	}
+	if got := h.maxers.Load(); got != dropConcurrency {
+		t.Fatal("most releases at once:", got)
 	}
 	if got := logs.count("WARN bridge: releasing a dropped job's work gave up at its deadline"); got != n {
 		t.Fatal("give-ups logged:", got)
