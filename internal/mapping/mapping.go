@@ -171,18 +171,24 @@ func ProbeWritable(dir string) error {
 }
 
 // probeWritable is ProbeWritable without its bound.
-func probeWritable(dir string) error {
+func probeWritable(dir string) error { return probeWritableLaps(dir, func() {}) }
+
+// probeWritableLaps is probeWritable calling lap after the probe's creation
+// and after its write (a podcast look times its steps: lookPace).
+func probeWritableLaps(dir string, lap func()) error {
 	var b [8]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		return err
 	}
 	name := filepath.Join(dir, ProbePrefix+hex.EncodeToString(b[:]))
 	f, err := os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644) //nolint:gosec // a fixed name in the checked folder
+	lap()
 	if err != nil {
 		return err
 	}
 	_, werr := f.WriteString("audiosilo-bridge write check\n")
 	cerr := f.Close()
+	lap()
 	rerr := os.Remove(name)
 	return errors.Join(werr, cerr, rerr)
 }
@@ -221,10 +227,10 @@ func unsettled(err error) error {
 }
 
 // LookTimeout bounds each look a check makes at a library's folder (a stat, the
-// write probe, a podcast check's whole look before the server's read) and the
-// one that lets an unanswered check keep a state (proveKept): a hung mount ends
-// the library's check, unknown (folderSlow), rather than holding the run and
-// every check after it.
+// write probe, its wait for a podcast check's whole look before the server's
+// read) and the one that lets an unanswered check keep a state (proveKept): a
+// hung mount ends the library's check, unknown (folderSlow), rather than
+// holding the run and every check after it.
 const LookTimeout = 5 * time.Second
 
 // LookAgain is how soon a library whose folder didn't answer a check's look
@@ -236,9 +242,9 @@ const LookAgain = time.Minute
 
 // looks are the looks at a library's folder a check makes, each bounded by
 // LookTimeout (bounded), unless a test hangs one. podcast is a podcast check's
-// whole look before the server's read (lookPodcast), bounded as one change
-// (fsutil.ChangeWithin: what it wrote is undone if it answers after every
-// caller gave up).
+// whole look before the server's read (lookPodcast), waited for as one change
+// (podcastWithin: one that answers after every caller gave up is kept for the
+// next check, or what it wrote undone).
 type looks struct {
 	stat    func(path string) (fs.FileInfo, error)
 	probe   func(dir string) error
@@ -248,7 +254,7 @@ type looks struct {
 var bounded = looks{
 	stat:    func(p string) (fs.FileInfo, error) { return fsutil.StatWithin(p, LookTimeout) },
 	probe:   ProbeWritable,
-	podcast: podcastWithin(LookTimeout),
+	podcast: podcastWithin(LookTimeout, LookKeptFor),
 }
 
 // folderSlow is a check whose look at the library's folder got no answer within

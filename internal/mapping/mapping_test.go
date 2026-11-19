@@ -1322,7 +1322,9 @@ func TestUnansweredCheckOfARootBookFailsClosed(t *testing.T) {
 // by bound (each phase its own ops, so a look still out from an earlier phase
 // is never joined); the others answer, bounded at LookTimeout, so a slow
 // moment on a loaded runner never turns a healthy look into a hung one. A hung
-// podcast look runs the real look (it writes the marker) and only then hangs.
+// podcast look runs the real look (it writes the marker) and only then hangs:
+// once released it answers as a whole look, late, so it is kept for the next
+// check of the same phase.
 func hangLooks(r *Registry, phase string, hung map[string]bool, bound time.Duration, release chan struct{}, fileStats *atomic.Int32, files string) {
 	within := func(p string) time.Duration {
 		if hung[p] {
@@ -1354,7 +1356,7 @@ func hangLooks(r *Registry, phase string, hung map[string]bool, bound time.Durat
 			return err
 		},
 		podcast: func(op, mount string, look func(string) (podcastFound, error)) (podcastFound, error) {
-			return podcastWithin(within(mount))(op+"-"+phase, mount, func(m string) (podcastFound, error) {
+			return podcastWithin(within(mount), LookKeptFor)(op+"-"+phase, mount, func(m string) (podcastFound, error) {
 				f, err := look(m)
 				if hung[m] {
 					<-release
@@ -1506,8 +1508,8 @@ func TestSlowLookKeepsTheState(t *testing.T) {
 }
 
 // A podcast look that times out goes on, and writes a marker where it finds
-// none: the marker the folder then shows is the look's own (there only until
-// its undo), which proves nothing of the folder. So a slow look keeps a mapped
+// none: the marker the folder then shows is the look's own (not read back by
+// the server yet), which proves nothing of the folder. So a slow look keeps a mapped
 // state only on a marker no look wrote; at a folder that lost its marker (a
 // share that isn't mounted leaves a bare mount point) the library is unknown,
 // never "mapped, writable". Allowed: TestSlowLookKeepsTheState keeps the state
@@ -1554,19 +1556,21 @@ func TestSlowPodcastLookIsNotProvedByItsOwnMarker(t *testing.T) {
 	if e := r.Entries(mount)[0]; !e.Unknown || e.SlowAt == nil {
 		t.Fatalf("its entry: unknown %v, slow_at %v", e.Unknown, e.SlowAt)
 	}
-	// Once the look answers its marker is undone, and the write is settled:
-	// the next slow look at a folder holding the library's marker keeps a state.
+	// Once the look answers, whole but late, it is kept for the next check,
+	// its marker standing but still proving nothing: only the server's read of
+	// it does, which settles the write. From then on a slow look at the folder
+	// holding the library's marker keeps a state.
 	answer()
-	waitUntil(t, "the hung look's marker removed", func() bool {
-		_, err := os.Lstat(filepath.Join(podcasts, ".audiosilo"))
-		return errors.Is(err, os.ErrNotExist)
+	r.look.probe = bounded.probe
+	waitUntil(t, "the check that takes the late look", func() bool {
+		at = at.Add(time.Minute)
+		r.Check(context.Background(), src, mount, clock)
+		st, ok := r.Status(2)
+		if !ok && (st.Mapped || st.Writable) {
+			t.Fatalf("a check before the server read the late look's marker = %+v", st)
+		}
+		return ok && st.Mapped && st.Writable
 	})
-	r.look = bounded
-	at = at.Add(time.Minute)
-	r.Check(context.Background(), src, mount, clock)
-	if st, ok := r.Status(2); !ok || !st.Mapped || !st.Writable {
-		t.Fatalf("an answered check after the undo = %+v, %v", st, ok)
-	}
 	release = make(chan struct{})
 	t.Cleanup(func() { close(release) })
 	hangLooks(r, "slow again", map[string]bool{podcasts: true}, 20*time.Millisecond, release, nil, "")
@@ -1623,17 +1627,31 @@ func TestSlowLookIsDueAgainAfterLookAgainAlone(t *testing.T) {
 	}
 }
 
-// A podcast check's whole look before the server's read is bounded as one: a
-// mount that hangs after the marker's open, read or write (here, once the look
-// wrote it) ends the check unknown within the bound, and the marker the look
-// wrote is removed once the mount answers, since nobody else will.
-func TestHungPodcastLookIsBoundedAndUndone(t *testing.T) {
+// A check waits LookTimeout for a podcast look, as one: a mount that holds it
+// longer (here, once the look wrote the marker) ends the check unknown within
+// the bound, the run going on, and the server is not asked. The look goes on,
+// and when it answers whole (a mount that is slow but working: the first
+// marker's write takes about three times the round trips a marker's read
+// does) it is kept with its marker, and the library's next check takes it
+// rather than looking again, so such a mount is mapped one check later, never
+// stuck writing a marker each look and removing it.
+func TestLatePodcastLookIsKeptForTheNextCheck(t *testing.T) {
 	t.Parallel()
 	mount := t.TempDir()
 	r := newRegistry()
 	r.SetLibraries([]link.Library{{ID: 2, Root: "/p", Kind: "podcasts"}})
 	release := make(chan struct{})
-	hangLooks(r, "1", map[string]bool{mount: true}, 20*time.Millisecond, release, nil, "")
+	answer := sync.OnceFunc(func() { close(release) })
+	t.Cleanup(answer)
+	var looked atomic.Int32
+	r.look.podcast = func(op, m string, look func(string) (podcastFound, error)) (podcastFound, error) {
+		return podcastWithin(20*time.Millisecond, LookKeptFor)(op+" (late test)", m, func(m string) (podcastFound, error) {
+			looked.Add(1)
+			f, err := look(m)
+			<-release // the slow mount: the look answers past the check's wait
+			return f, err
+		})
+	}
 	src := &bookAndMarkers{scripted: &scripted{err: map[int64]error{}}, roots: map[int64]string{2: mount}}
 	mountFn := func(int64, string) (string, bool) { return mount, true }
 	done := make(chan struct{})
@@ -1644,7 +1662,6 @@ func TestHungPodcastLookIsBoundedAndUndone(t *testing.T) {
 	select {
 	case <-done:
 	case <-time.After(10 * time.Second):
-		close(release)
 		t.Fatal("a podcast folder that hangs after its marker's write held the run")
 	}
 	if st, ok := r.Status(2); ok || st.Mapped || !strings.Contains(st.Error, "not answering") {
@@ -1653,15 +1670,208 @@ func TestHungPodcastLookIsBoundedAndUndone(t *testing.T) {
 	if len(src.calls) != 0 {
 		t.Fatal("the server was asked to read a marker the look never handed over")
 	}
-	// The look goes on past the bound: it writes the marker, then hangs.
-	waitUntil(t, "the hung look's marker", func() bool {
+	// The look goes on past the bound: it writes the marker, then answers.
+	waitUntil(t, "the late look's marker", func() bool {
+		_, err := os.Stat(filepath.Join(mount, MarkerPath))
+		return err == nil
+	})
+	wrote, err := os.ReadFile(filepath.Join(mount, MarkerPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	answer()
+	waitUntil(t, "the check that takes the late look", func() bool {
+		r.Check(context.Background(), src, mountFn, time.Now)
+		st, ok := r.Status(2)
+		return ok && st.Mapped && st.Writable
+	})
+	if n := looked.Load(); n != 1 {
+		t.Fatalf("%d looks at the folder, want the late one alone", n)
+	}
+	if now, err := os.ReadFile(filepath.Join(mount, MarkerPath)); err != nil || string(now) != string(wrote) {
+		t.Fatalf("the late look's marker did not stand: %q, %v (it wrote %q)", now, err, wrote)
+	}
+}
+
+// A late look kept for the next check is an old look by then: the folder may
+// be another one since (a share unmounted leaves a bare mount point, where the
+// server's read of its own copy would still pass). So the check that takes it
+// needs the folder to still show the marker, and is unknown otherwise (never
+// "mapped, writable", and the server is not asked); the check after looks
+// afresh. Allowed: TestLatePodcastLookIsKeptForTheNextCheck.
+func TestKeptPodcastLookNeedsItsMarkerStill(t *testing.T) {
+	t.Parallel()
+	library, bare := t.TempDir(), t.TempDir()
+	lib := link.Library{ID: 7, Root: "/p", Kind: "podcasts"}
+	release := make(chan struct{})
+	var looked atomic.Int32
+	l := bounded
+	l.podcast = func(op, m string, look func(string) (podcastFound, error)) (podcastFound, error) {
+		return podcastWithin(20*time.Millisecond, LookKeptFor)(op+" (kept test)", m, func(m string) (podcastFound, error) {
+			f, err := look(m)
+			if looked.Add(1) == 1 {
+				<-release
+			}
+			return f, err
+		})
+	}
+	var asked atomic.Int32
+	// The server reads its own copy of the library, wherever the Bridge looks.
+	src := markerSourceFunc(func(context.Context, int64) (string, error) {
+		asked.Add(1)
+		b, err := os.ReadFile(filepath.Join(library, MarkerPath))
+		if err != nil {
+			return "", link.ErrNoMarker
+		}
+		var marker libraryMarker
+		if err := json.Unmarshal(b, &marker); err != nil {
+			return "", err
+		}
+		return marker.Nonce, nil
+	})
+	// mount is where the Bridge sees the library: a link the test repoints.
+	mount := filepath.Join(t.TempDir(), "mount")
+	if err := os.Symlink(library, mount); err != nil {
+		t.Skip("no symlinks here:", err)
+	}
+	current := func(int64) bool { return false }
+	var slow folderSlow
+	if st, unanswered := l.checkPodcast(context.Background(), src, lib, mount, current); st.Mapped || !errors.As(unanswered, &slow) {
+		t.Fatalf("a look past the bound = %+v, %v; want slow", st, unanswered)
+	}
+	waitUntil(t, "the late look's marker", func() bool {
+		_, err := os.Stat(filepath.Join(library, MarkerPath))
+		return err == nil
+	})
+	// The share goes away before the next check: a bare folder at the mount.
+	if err := os.Remove(mount); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(bare, mount); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	var st link.LibraryStatus
+	var unanswered error
+	waitUntil(t, "the check that takes the late look", func() bool {
+		st, unanswered = l.checkPodcast(context.Background(), src, lib, mount, current)
+		return strings.Contains(st.Error, "no longer shows the marker")
+	})
+	if st.Mapped || st.Writable || !errors.As(unanswered, &slow) {
+		t.Fatalf("a kept look at a folder that lost its marker = %+v, %v; want unknown", st, unanswered)
+	}
+	if n := asked.Load(); n != 0 {
+		t.Fatalf("the server was asked %d times for a marker the folder no longer shows", n)
+	}
+	// The next check looks afresh, at the bare folder: it writes a marker
+	// there, which the server's copy does not hold, and removes it again.
+	if st, unanswered := l.checkPodcast(context.Background(), src, lib, mount, current); st.Mapped || unanswered != nil || !strings.Contains(st.Error, "isn't the library the server sees") {
+		t.Fatalf("a fresh look at the bare folder = %+v, %v; want a definite not mapped", st, unanswered)
+	}
+	if _, err := os.Lstat(filepath.Join(bare, ".audiosilo")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the failed check left its marker folder on the bare folder: %v", err)
+	}
+}
+
+// A kept look no check comes for (the library removed, or mapped elsewhere
+// meanwhile) is undone after all once keptFor has passed: the marker it wrote
+// is not left on a folder nobody checks.
+func TestKeptPodcastLookNobodyTakesIsUndone(t *testing.T) {
+	t.Parallel()
+	mount := t.TempDir()
+	lib := link.Library{ID: 7, Root: "/p", Kind: "podcasts"}
+	release := make(chan struct{})
+	l := bounded
+	l.podcast = func(op, m string, look func(string) (podcastFound, error)) (podcastFound, error) {
+		return podcastWithin(20*time.Millisecond, 50*time.Millisecond)(op+" (untaken test)", m, func(m string) (podcastFound, error) {
+			f, err := look(m)
+			<-release
+			return f, err
+		})
+	}
+	src := markerSourceFunc(func(context.Context, int64) (string, error) { return "", link.ErrNoMarker })
+	var slow folderSlow
+	if st, unanswered := l.checkPodcast(context.Background(), src, lib, mount, func(int64) bool { return false }); st.Mapped || !errors.As(unanswered, &slow) {
+		t.Fatalf("a look past the bound = %+v, %v; want slow", st, unanswered)
+	}
+	waitUntil(t, "the late look's marker", func() bool {
 		_, err := os.Stat(filepath.Join(mount, MarkerPath))
 		return err == nil
 	})
 	close(release)
-	waitUntil(t, "the hung look's marker removed once the mount answered", func() bool {
+	waitUntil(t, "the untaken look's marker removed", func() bool {
 		_, err := os.Lstat(filepath.Join(mount, ".audiosilo"))
 		return errors.Is(err, os.ErrNotExist)
+	})
+	waitUntil(t, "the undone marker's write settled", func() bool {
+		return !markerWritesAt("podcast marker 7", mount).unsettled()()
+	})
+}
+
+// stepClock is a clock that moves on by step each time it is read: a podcast
+// look reads it once per step, so every step of the look takes step.
+func stepClock(step time.Duration) func() time.Time {
+	var mu sync.Mutex
+	at := time.Date(2026, 11, 19, 10, 0, 0, 0, time.UTC)
+	return func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		at = at.Add(step)
+		return at
+	}
+}
+
+// A podcast look bounds itself: each step by LookTimeout, the whole look by
+// LookCeiling. On a mount that is slow but working (a second a step, so far
+// more than LookTimeout in all) it still answers whole, its marker written; a
+// step past LookTimeout (a disk spinning up, a hung mount) or a look past
+// LookCeiling ends it as fsutil.ErrStatTimeout with nothing left behind, and
+// never as a definite failure (a missing folder that took that long to say so).
+func TestPodcastLookBoundsItsSteps(t *testing.T) {
+	t.Parallel()
+	current := func(int64) bool { return false }
+	t.Run("slow but working", func(t *testing.T) {
+		t.Parallel()
+		mount := t.TempDir()
+		f, err := lookPodcast(mount, 7, current, &markerWrites{}, stepClock(time.Second))
+		if err != nil || f.problem != "" || !f.createdMarker || !f.createdDir {
+			t.Fatalf("a look of one-second steps = %+v, %v; want a whole look that wrote its marker", f, err)
+		}
+		if _, err := os.Stat(filepath.Join(mount, MarkerPath)); err != nil {
+			t.Fatalf("its marker: %v", err)
+		}
+		// The marker is there now: the look after it reads it, as slowly.
+		if f, err := lookPodcast(mount, 7, current, &markerWrites{}, stepClock(4*time.Second)); err != nil || f.problem != "" || f.createdMarker {
+			t.Fatalf("a slow read of the marker = %+v, %v; want a whole look", f, err)
+		}
+	})
+	for name, step := range map[string]time.Duration{"a step past LookTimeout": LookTimeout + time.Second, "a look past LookCeiling": 4 * time.Second} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			mount := t.TempDir()
+			w := &markerWrites{}
+			f, err := lookPodcast(mount, 7, current, w, stepClock(step))
+			if !errors.Is(err, fsutil.ErrStatTimeout) || f.createdMarker || f.createdDir || f.write != nil || f.problem != "" {
+				t.Fatalf("a look too slow = %+v, %v; want ErrStatTimeout alone", f, err)
+			}
+			if _, err := os.Lstat(filepath.Join(mount, ".audiosilo")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("it left its marker folder behind: %v", err)
+			}
+			if w.unsettled()() {
+				t.Fatal("its marker's write still counts as unsettled")
+			}
+		})
+	}
+	t.Run("a slow definite answer", func(t *testing.T) {
+		t.Parallel()
+		gone := filepath.Join(t.TempDir(), "gone")
+		if f, err := lookPodcast(gone, 7, current, &markerWrites{}, stepClock(LookTimeout+time.Second)); !errors.Is(err, fsutil.ErrStatTimeout) || f.problem != "" {
+			t.Fatalf("a missing folder that took too long to say so = %+v, %v; want ErrStatTimeout, not a problem", f, err)
+		}
+		// Answered in time it is the definite failure.
+		if f, err := lookPodcast(gone, 7, current, &markerWrites{}, time.Now); err != nil || !strings.Contains(f.problem, "not found here") {
+			t.Fatalf("a missing folder = %+v, %v; want its problem", f, err)
+		}
 	})
 }
 

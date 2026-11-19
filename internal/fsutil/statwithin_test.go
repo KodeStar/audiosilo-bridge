@@ -195,7 +195,7 @@ func TestChangeWithin(t *testing.T) {
 	const path = "/hung/mount/podcasts"
 	undone := make(chan int, 2)
 	undo := func(n int) { undone <- n }
-	if n, err := ChangeWithin("answers", path, 5*time.Second, func(string) (int, error) { return 7, nil }, undo); n != 7 || err != nil {
+	if n, err := ChangeWithin("answers", path, 5*time.Second, func(string) (int, error) { return 7, nil }, Late[int]{Undo: undo}); n != 7 || err != nil {
 		t.Fatalf("an answered change = %v, %v", n, err)
 	}
 	release := make(chan struct{})
@@ -206,7 +206,7 @@ func TestChangeWithin(t *testing.T) {
 		return 9, nil
 	}
 	for range 3 {
-		_, err := ChangeWithin("marker", path, 10*time.Millisecond, hung, undo)
+		_, err := ChangeWithin("marker", path, 10*time.Millisecond, hung, Late[int]{Undo: undo})
 		var pe *fs.PathError
 		if !errors.Is(err, ErrStatTimeout) || !errors.As(err, &pe) || pe.Path != path || pe.Op != "marker" {
 			t.Fatalf("a hung change = %v, want marker's ErrStatTimeout at %s", err, path)
@@ -247,14 +247,14 @@ func TestChangeWithinHoldsTheChangeWhileUndoing(t *testing.T) {
 	const path = "/hung/mount/undoing"
 	release, undoing, undone := make(chan struct{}), make(chan struct{}), make(chan struct{})
 	undo := func(int) { close(undoing); <-undone }
-	if _, err := ChangeWithin("marker", path, 10*time.Millisecond, func(string) (int, error) { <-release; return 1, nil }, undo); !errors.Is(err, ErrStatTimeout) {
+	if _, err := ChangeWithin("marker", path, 10*time.Millisecond, func(string) (int, error) { <-release; return 1, nil }, Late[int]{Undo: undo}); !errors.Is(err, ErrStatTimeout) {
 		t.Fatalf("a hung change = %v", err)
 	}
 	close(release)
 	<-undoing
 	var started atomic.Int32
 	again := func(string) (int, error) { started.Add(1); return 2, nil }
-	if n, err := ChangeWithin("marker", path, 10*time.Millisecond, again, nil); !errors.Is(err, ErrStatTimeout) || n != 0 {
+	if n, err := ChangeWithin("marker", path, 10*time.Millisecond, again, Late[int]{}); !errors.Is(err, ErrStatTimeout) || n != 0 {
 		t.Fatalf("a change asked for while the undo runs = %v, %v; want ErrStatTimeout", n, err)
 	}
 	if started.Load() != 0 {
@@ -263,7 +263,7 @@ func TestChangeWithinHoldsTheChangeWhileUndoing(t *testing.T) {
 	close(undone)
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		n, err := ChangeWithin("marker", path, time.Second, again, nil)
+		n, err := ChangeWithin("marker", path, time.Second, again, Late[int]{})
 		if err == nil {
 			if n != 2 {
 				t.Fatalf("the change after the undo = %d, want its own answer", n)
@@ -272,6 +272,99 @@ func TestChangeWithinHoldsTheChangeWhileUndoing(t *testing.T) {
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("no change once the undo was done: %v", err)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// A change that finishes once every caller gave up, and that Late.Keep takes,
+// is kept rather than undone: the next call gets its answer at once, without a
+// change of its own (a mount too slow for the bound gets one through), and it
+// is that call's from then on (never undone). One Keep refuses is undone.
+func TestChangeWithinKeepsALateAnswerForTheNextCall(t *testing.T) {
+	t.Parallel()
+	const path = "/slow/mount/kept"
+	undone := make(chan int, 4)
+	late := Late[int]{Undo: func(n int) { undone <- n }, Keep: func(n int, err error) (int, bool) { return n * 10, err == nil && n > 0 }, For: time.Minute}
+	var started atomic.Int32
+	slow := func(answer int) func(string) (int, error) {
+		return func(string) (int, error) {
+			started.Add(1)
+			time.Sleep(60 * time.Millisecond)
+			return answer, nil
+		}
+	}
+	if _, err := ChangeWithin("marker", path, 10*time.Millisecond, slow(5), late); !errors.Is(err, ErrStatTimeout) {
+		t.Fatalf("a slow change = %v, want ErrStatTimeout", err)
+	}
+	// The next call takes the late answer, however short its own bound.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		n, err := ChangeWithin("marker", path, time.Millisecond, slow(6), late)
+		if err == nil {
+			if n != 5 && n != 50 { // 5: it answered as this call joined it
+				t.Fatalf("the next call = %d, want the late change's own answer, as kept", n)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the late answer was never handed over: %v", err)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if n := started.Load(); n != 1 {
+		t.Fatalf("%d changes started, want only the slow one", n)
+	}
+	select {
+	case n := <-undone:
+		t.Fatalf("undid %d, the answer a call took", n)
+	default:
+	}
+	// A late answer Keep refuses is undone.
+	if _, err := ChangeWithin("marker", path, 10*time.Millisecond, slow(-1), late); !errors.Is(err, ErrStatTimeout) {
+		t.Fatalf("a slow change = %v, want ErrStatTimeout", err)
+	}
+	select {
+	case n := <-undone:
+		if n != -1 {
+			t.Fatalf("undid %d, want only the answer Keep refused (the kept one was taken)", n)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a late answer Keep refused was not undone")
+	}
+}
+
+// A kept answer no call comes for within Late.For is undone after all (nobody
+// else will clean up after it), and the call after that changes again.
+func TestChangeWithinUndoesAKeptAnswerNobodyTook(t *testing.T) {
+	t.Parallel()
+	const path = "/slow/mount/untaken"
+	undone := make(chan int, 1)
+	late := Late[int]{Undo: func(n int) { undone <- n }, Keep: func(n int, _ error) (int, bool) { return n, true }, For: 30 * time.Millisecond}
+	release := make(chan struct{})
+	if _, err := ChangeWithin("marker", path, 10*time.Millisecond, func(string) (int, error) { <-release; return 3, nil }, late); !errors.Is(err, ErrStatTimeout) {
+		t.Fatalf("a hung change = %v, want ErrStatTimeout", err)
+	}
+	close(release)
+	select {
+	case n := <-undone:
+		if n != 3 {
+			t.Fatalf("undid %d, want the kept answer", n)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a kept answer nobody took was never undone")
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		n, err := ChangeWithin("marker", path, time.Second, func(string) (int, error) { return 4, nil }, late)
+		if err == nil {
+			if n != 4 {
+				t.Fatalf("the call after the undo = %d, want a change of its own", n)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no change once the kept answer was undone: %v", err)
 		}
 		time.Sleep(time.Millisecond)
 	}

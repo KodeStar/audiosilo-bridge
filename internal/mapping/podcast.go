@@ -43,10 +43,15 @@ type libraryMarker struct {
 // library and one was written for the read (unproven): the folder may be
 // another one now (a share that isn't mounted), so the failure is recorded.
 // The whole look at the folder before the server's read (its open, the marker
-// read, a stale marker's removal, the write probe and the marker's write) is
-// bounded by LookTimeout as one (lookPodcast), as is the write probe after it:
-// a hung mount ends the check, unanswered folderSlow, and what the look wrote
-// is undone once it answers.
+// read, a stale marker's removal, the write probe and the marker's write,
+// lookPodcast) is one unit the check waits LookTimeout for, as it does for the
+// write probe after it: past that the check ends, unanswered folderSlow, and
+// the look goes on. A mount that is slow but working (each step within
+// LookTimeout, the look within LookCeiling) still finishes it: that answer,
+// with the marker it wrote, is kept for the library's next check (LookKeptFor),
+// which takes it instead of looking again, so such a mount is mapped one check
+// later rather than never. What any other late look wrote is undone once it
+// answers.
 func CheckPodcast(ctx context.Context, src MarkerSource, lib link.Library, mount string, current func(int64) bool) (st link.LibraryStatus, unanswered error) {
 	return bounded.checkPodcast(ctx, src, lib, mount, current)
 }
@@ -56,7 +61,9 @@ func (l looks) checkPodcast(ctx context.Context, src MarkerSource, lib link.Libr
 	st = link.LibraryStatus{LibraryID: lib.ID, MountPath: mount, CheckedPath: MarkerPath}
 	op := "podcast marker " + strconv.FormatInt(lib.ID, 10)
 	writes := markerWritesAt(op, mount)
-	found, err := l.podcast(op, mount, func(m string) (podcastFound, error) { return lookPodcast(m, lib.ID, current, writes), nil })
+	found, err := l.podcast(op, mount, func(m string) (podcastFound, error) {
+		return lookPodcast(m, lib.ID, current, writes, time.Now)
+	})
 	if err != nil {
 		st.Error = "the library folder is " + describeStatError(err)
 		if !errors.Is(err, fsutil.ErrStatTimeout) {
@@ -86,6 +93,20 @@ func (l looks) checkPodcast(ctx context.Context, src MarkerSource, lib link.Libr
 			return podcastFound{}, &fs.PathError{Op: op, Path: m, Err: fsutil.ErrStatTimeout}
 		})
 	}()
+	if found.kept {
+		// An earlier check's look, which answered after that check had moved
+		// on: the folder may be another one since (a share unmounted in
+		// between leaves a bare mount point, which the server's read of its
+		// own copy would not notice), so it must still show the marker.
+		full, err := SafeJoin(mount, MarkerPath)
+		if err == nil {
+			_, err = l.stat(full)
+		}
+		if err != nil {
+			st.Error = "the folder no longer shows the marker an earlier look found (" + describeStatError(err) + ")"
+			return st, folderSlow{error: err, wrote: writes.unsettled()}
+		}
+	}
 	nonce, err := src.Marker(ctx, lib.ID)
 	if err != nil || nonce != found.marker.Nonce {
 		var api *link.APIError
@@ -124,6 +145,9 @@ type podcastFound struct {
 	// write is the marker's write (createdMarker), to settle once the marker
 	// is removed again or the server read it back.
 	write *markerWrite
+	// kept: the look answered after its check had moved on, and was kept for
+	// this one (podcastWithin), which looks at the marker again first.
+	kept bool
 }
 
 // markerWrites counts the markers the looks at one library's folder began to
@@ -170,15 +194,34 @@ func (m *markerWrite) settle() {
 	}
 }
 
-// podcastWithin bounds a podcast check's look (lookPodcast) by d as one change
-// (fsutil.ChangeWithin, one out per library and mount): a look that answers
-// after every caller gave up is undone, so a marker it wrote is not left for
-// nobody to clean up.
-func podcastWithin(d time.Duration) func(op, mount string, look func(string) (podcastFound, error)) (podcastFound, error) {
+// LookCeiling bounds a podcast check's whole look at its folder (lookPodcast),
+// each step of which may take LookTimeout: a mount slower than either is not
+// answering, and what the look wrote there is undone.
+const LookCeiling = 30 * time.Second
+
+// LookKeptFor is how long a podcast look that answered after its check had
+// moved on is kept for the library's next check (due LookAgain after that one,
+// at the heartbeat's next beat), before it is undone instead.
+const LookKeptFor = 3 * LookAgain
+
+// podcastWithin bounds a check's wait for a podcast look (lookPodcast) by d, as
+// one change (fsutil.ChangeWithin, one out per library and mount). A look that
+// answers after every caller gave up is kept for the next check, for keptFor,
+// when it is a whole one (no problem, and within lookPodcast's own bounds: the
+// marker it wrote stands until then), and otherwise undone, as is a kept one
+// no check came for, so a marker is never left for nobody to clean up.
+func podcastWithin(d, keptFor time.Duration) func(op, mount string, look func(string) (podcastFound, error)) (podcastFound, error) {
 	return func(op, mount string, look func(string) (podcastFound, error)) (podcastFound, error) {
-		return fsutil.ChangeWithin(op, mount, d, look, func(f podcastFound) {
-			f.undo(mount)
-			f.write.settle()
+		return fsutil.ChangeWithin(op, mount, d, look, fsutil.Late[podcastFound]{
+			Undo: func(f podcastFound) {
+				f.undo(mount)
+				f.write.settle()
+			},
+			Keep: func(f podcastFound, err error) (podcastFound, bool) {
+				f.kept = true
+				return f, err == nil && f.problem == ""
+			},
+			For: keptFor,
 		})
 	}
 }
@@ -200,7 +243,7 @@ func (f podcastFound) undo(mount string) {
 // undoIn is undo in the mount's root, already open.
 func (f podcastFound) undoIn(root *os.Root) {
 	if f.createdMarker {
-		if current, err := readMarker(root); err == nil && current.Nonce == f.marker.Nonce {
+		if current, err := readMarker(root, nil); err == nil && current.Nonce == f.marker.Nonce {
 			_ = root.Remove(MarkerPath)
 		}
 	}
@@ -209,46 +252,114 @@ func (f podcastFound) undoIn(root *os.Root) {
 	}
 }
 
-// lookPodcast is a podcast check's look at mount before the server's read,
-// unbounded (checkPodcast bounds it as one): it opens the folder, reads the
-// marker, replaces one of a removed library, and when there is none probes
-// the folder for writing and writes one for library id, its write counted in
-// writes.
-func lookPodcast(mount string, id int64, current func(int64) bool, writes *markerWrites) (f podcastFound) {
+// lookPace times a podcast look's steps: late once one took more than
+// LookTimeout, or the look more than LookCeiling (a hung mount, a disk
+// spinning up), which says nothing definite about the folder.
+type lookPace struct {
+	now         func() time.Time
+	start, last time.Time
+	late        bool
+}
+
+func newLookPace(now func() time.Time) *lookPace {
+	t := now()
+	return &lookPace{now: now, start: t, last: t}
+}
+
+// lap ends a step, and reports whether the look is late (nil: never).
+func (p *lookPace) lap() bool {
+	if p == nil {
+		return false
+	}
+	t := p.now()
+	if t.Sub(p.last) > LookTimeout || t.Sub(p.start) > LookCeiling {
+		p.late = true
+	}
+	p.last = t
+	return p.late
+}
+
+// lookPodcast is a podcast check's look at mount before the server's read: it
+// opens the folder, reads the marker, replaces one of a removed library, and
+// when there is none probes the folder for writing and writes one for library
+// id, its write counted in writes. The check bounds its own wait for the look
+// (checkPodcast), not the look, which bounds itself by now's clock: a step
+// that took more than LookTimeout, or a look past LookCeiling, ends it as
+// fsutil.ErrStatTimeout whatever the step answered, what it made undone, so a
+// folder that slow is never a definite failure nor a marker left behind.
+func lookPodcast(mount string, id int64, current func(int64) bool, writes *markerWrites, now func() time.Time) (f podcastFound, _ error) {
+	pace := newLookPace(now)
+	slow := &fs.PathError{Op: "podcast look", Path: mount, Err: fsutil.ErrStatTimeout}
 	root, err := os.OpenRoot(mount)
+	if pace.lap() {
+		if err == nil {
+			_ = root.Close()
+		}
+		return podcastFound{}, slow
+	}
 	if err != nil {
 		f.problem = "the library folder is " + describeStatError(err)
-		return f
+		return f, nil
 	}
 	defer func() { _ = root.Close() }()
-	fail := func(problem string) podcastFound {
+	fail := func(problem string) (podcastFound, error) {
 		f.undoIn(root)
-		return podcastFound{problem: problem}
+		f.write.settle()
+		if pace.lap() || problem == "" {
+			return podcastFound{}, slow
+		}
+		return podcastFound{problem: problem}, nil
 	}
+	// late ends a step: the look is too slow to say anything (fail("")).
+	late := pace.lap
 	info, err := root.Lstat(".audiosilo")
+	if late() {
+		return fail("")
+	}
 	if err == nil && (!info.IsDir() || info.Mode()&os.ModeSymlink != 0) {
 		return fail("the marker folder must not be a symlink")
 	}
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fail("could not read the marker folder")
 	}
-	marker, err := readMarker(root)
+	marker, err := readMarker(root, pace)
+	if late() {
+		return fail("")
+	}
 	if err == nil && marker.LibraryID != id && !current(marker.LibraryID) {
-		if err := root.Remove(MarkerPath); err != nil {
+		err = root.Remove(MarkerPath)
+		if late() {
+			return fail("")
+		}
+		if err != nil {
 			return fail("could not replace the marker of a removed library")
 		}
 		err = os.ErrNotExist
 	}
 	if errors.Is(err, os.ErrNotExist) {
-		if err := probeWritable(mount); err != nil {
+		err := probeWritableLaps(mount, func() { pace.lap() })
+		if late() {
+			return fail("")
+		}
+		if err != nil {
 			return fail("the library is not writable here: " + describeStatError(err))
 		}
 		if info == nil {
-			if err := root.Mkdir(".audiosilo", 0o755); err != nil {
+			err := root.Mkdir(".audiosilo", 0o755)
+			if err == nil {
+				f.createdDir = true
+			}
+			if late() {
+				return fail("")
+			}
+			if err != nil {
 				return fail("could not create the marker folder")
 			}
-			f.createdDir = true
-			if err := root.Chmod(".audiosilo", 0o755); err != nil {
+			err = root.Chmod(".audiosilo", 0o755)
+			if late() {
+				return fail("")
+			}
+			if err != nil {
 				return fail("could not set marker folder permissions")
 			}
 		}
@@ -257,13 +368,18 @@ func lookPodcast(mount string, id int64, current func(int64) bool, writes *marke
 			return fail("could not create a marker nonce")
 		}
 		marker = libraryMarker{Version: 1, LibraryID: id, Nonce: hex.EncodeToString(nonce[:])}
-		write := writes.begin()
-		if err := writeMarker(root, marker); err != nil {
-			defer write.settle() // once fail has undone what the look made
+		f.write = writes.begin()
+		err = writeMarker(root, marker, pace)
+		if err == nil {
+			f.marker, f.createdMarker = marker, true
+		}
+		if late() {
+			return fail("")
+		}
+		if err != nil {
 			return fail("could not write the library marker")
 		}
-		f.marker, f.createdMarker, f.write = marker, true, write
-		return f
+		return f, nil
 	} else if err != nil {
 		return fail("the library marker is invalid")
 	}
@@ -271,7 +387,7 @@ func lookPodcast(mount string, id int64, current func(int64) bool, writes *marke
 		return fail("the local marker names another library")
 	}
 	f.marker = marker
-	return f
+	return f, nil
 }
 
 // unproven is an unanswered check of a folder that no longer shows what proved
@@ -284,9 +400,12 @@ type unproven struct{ error }
 
 func (e unproven) Unwrap() error { return e.error }
 
-func readMarker(root *os.Root) (libraryMarker, error) {
+// readMarker reads the folder's marker, each of its steps timed by pace (nil:
+// untimed).
+func readMarker(root *os.Root, pace *lookPace) (libraryMarker, error) {
 	var m libraryMarker
 	info, err := root.Lstat(MarkerPath)
+	pace.lap()
 	if err != nil {
 		return m, err
 	}
@@ -294,6 +413,7 @@ func readMarker(root *os.Root) (libraryMarker, error) {
 		return m, errors.New("invalid marker")
 	}
 	f, err := root.Open(MarkerPath)
+	pace.lap()
 	if err != nil {
 		return m, err
 	}
@@ -307,13 +427,19 @@ func readMarker(root *os.Root) (libraryMarker, error) {
 	}
 	return m, nil
 }
-func writeMarker(root *os.Root, m libraryMarker) error {
+
+// writeMarker writes the folder's marker, its temp file's write and the look
+// before the rename timed by pace as a step each (the rename is the caller's).
+func writeMarker(root *os.Root, m libraryMarker, pace *lookPace) error {
 	b, err := json.Marshal(m)
 	if err != nil {
 		return err
 	}
 	return fsutil.WriteRootAtomic(root, ".audiosilo", "library.json", b, 0o644, func() error {
-		if _, err := root.Lstat(MarkerPath); !errors.Is(err, os.ErrNotExist) {
+		pace.lap()
+		_, err := root.Lstat(MarkerPath)
+		pace.lap()
+		if !errors.Is(err, os.ErrNotExist) {
 			return errors.New("marker appeared during the check")
 		}
 		return nil

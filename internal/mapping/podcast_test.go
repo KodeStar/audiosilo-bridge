@@ -254,7 +254,7 @@ func TestPodcastLookWaitsOnItsUndo(t *testing.T) {
 		if n == 2 || n == 3 {
 			bound = 20 * time.Millisecond // the held undo, and the look meanwhile
 		}
-		return podcastWithin(bound)(op+" (undo test)", m, func(m string) (podcastFound, error) {
+		return podcastWithin(bound, LookKeptFor)(op+" (undo test)", m, func(m string) (podcastFound, error) {
 			if n == 2 {
 				<-release // the mount holds the failed check's undo
 			}

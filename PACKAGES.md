@@ -181,13 +181,18 @@ internal/
             whole; one n per path), for the endpoint's agent service's mount check
             (agentrun's mounts.go). LookWithin(op, path, d, look) bounds any other
             look the same way, one in flight per op and path (mapping's write
-            probe, ProbeWritable). ChangeWithin(op, path, d, do, undo) is
+            probe, ProbeWritable). ChangeWithin(op, path, d, do, late) is
             LookWithin for a look that writes (a podcast check's marker): its
-            answer goes to every caller still waiting, and when every caller gave
-            up past d, undo gets it in the change's goroutine, so nothing it made
-            is left with nobody to clean it up; the change stays out until the
-            undo is done (a call meanwhile is ErrStatTimeout, never a change of
-            its own racing the undo).
+            answer goes to every caller still waiting (a call that finds the
+            change already out past d is ErrStatTimeout at once, never handed a
+            look that old), and when every caller gave up past d, late says what
+            becomes of it: one late.Keep takes is kept for the next call of that
+            op and path within late.For, which gets it at once instead of a
+            change of its own (a mount too slow for d still gets one through);
+            any other, and a kept one no call came for, goes to late.Undo, so
+            nothing it made is left with nobody to clean it up; the change stays
+            out until the undo is done (a call meanwhile is ErrStatTimeout,
+            never a change of its own racing the undo).
   execfile/ writes files the process will exec at once with syscall.ForkLock
             held for reading from open to close, so a concurrent fork can't hold
             the write descriptor and make the exec fail with ETXTBSY (WriteFile).
@@ -2282,12 +2287,22 @@ internal/
             library's folder (its stat, the book files' stats, the write probe)
             is bounded by LookTimeout (5 s, fsutil.StatWithin and
             fsutil.LookWithin: one look per path out, a later one waits on it),
-            and a podcast check's whole look before the server's read (open,
-            marker read, a stale marker's removal, write probe, marker write:
-            lookPodcast) as ONE change (fsutil.ChangeWithin, one per library and
-            mount; a marker it wrote after every caller gave up is undone, and a
-            failed check's own undo of its marker is that change too, so a look
-            meanwhile is slow rather than read a marker about to go). A
+            and a podcast check waits that long for its whole look before the
+            server's read (open, marker read, a stale marker's removal, write
+            probe, marker write: lookPodcast), ONE change (fsutil.ChangeWithin,
+            one per library and mount; a failed check's own undo of its marker
+            is that change too, so a look meanwhile is slow rather than read a
+            marker about to go). The look goes on past the check's wait and
+            bounds itself (lookPace): each step by LookTimeout, the whole by
+            LookCeiling (30 s); past either it ends as a timeout, what it made
+            undone, never a definite problem. A whole look that answered late
+            (a mount that is slow but working, about 18 round trips for a first
+            marker) is KEPT with the marker it wrote for the library's next
+            check (LookKeptFor, 3 min; podcastFound.kept), which takes it
+            instead of looking again, first making sure the folder still shows
+            the marker (a share unmounted in between: unknown, the server not
+            asked), so such a mount is mapped one check later instead of never;
+            a kept look no check came for is undone. A
             look past LookTimeout is UNKNOWN, never a definite answer (an Unraid
             array disk spinning up takes about 8 s): the check returns folderSlow
             as its unanswered error, and the Registry keeps the last state as
