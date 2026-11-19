@@ -523,7 +523,8 @@ func (r *Runner) wakeLocked() {
 // started has stopped.
 func (r *Runner) Run(ctx context.Context) {
 	var wg sync.WaitGroup
-	// Then the dropped jobs' releases, the runs' ends' included (release).
+	// Then the dropped jobs' releases (releaseDropped, started only on this
+	// goroutine, so none starts once this waits).
 	defer r.drops.Wait()
 	defer wg.Wait()
 	ctx, stop := context.WithCancelCause(ctx)
@@ -900,7 +901,8 @@ func (r *Runner) holds(id int64) bool {
 // (releaseDropped, off the claim loop), so a later
 // pairing, with its server or another, never resumes it; a finished one's end
 // is never reported. A held one is ended by its own path (settle,
-// dropUnpaired, resumeStranded). Each row is read again before it is dropped:
+// dropUnpaired, resumeStranded, releaseDropped). Each row is read again before
+// it is dropped:
 // the list is read once while the new pairing claims beside the look, and
 // job ids are each server's own, so a claim of
 // the new pairing may hold the row under the listed id by then, run and
@@ -1386,17 +1388,26 @@ func (r *Runner) settle(base context.Context, ru *run, rep *Reporter, result any
 		// however the job ended (done, failed, cancelled, its token refused,
 		// the Bridge stopping): nothing more goes to its server, and it is no
 		// job of the server the Bridge pairs with next. One that stopped to
-		// resume kept its work for that: released.
+		// resume kept its work for that: released, but never past a stop (the
+		// Bridge's stop waits for this goroutine): one the stop ended, or whose
+		// release it cut short, is left running for the next start's look
+		// (sweepPairings), its pairing gone from the store.
 		why := errPairingEnded
 		if !ru.ended.Load() {
 			why = r.dropCause(job.serverID)
 		}
-		r.log.Info("bridge: a job of an ended pairing is dropped", "job", job.ID, "kind", job.Kind, "why", why)
-		end := context.WithoutCancel(base)
 		if cause := context.Cause(rep.ctx); cause != nil && !endsForGood(cause) {
-			r.abandonDropped(end, job, why)
+			if base.Err() == nil {
+				r.abandonDropped(base, job, why)
+			}
+			if base.Err() != nil {
+				ru.left = true
+				r.log.Info("bridge: a job of an ended pairing is left for the next start to drop", "job", job.ID, "kind", job.Kind, "why", why)
+				return false
+			}
 		}
-		r.recordLost(end, job, raw, why)
+		r.log.Info("bridge: a job of an ended pairing is dropped", "job", job.ID, "kind", job.Kind, "why", why)
+		r.recordLost(context.WithoutCancel(base), job, raw, why)
 	case base.Err() != nil, errors.Is(err, errStopping):
 		r.interrupted(rep, ru, err)
 	case errors.Is(err, errUnpaired), errors.Is(err, errRelinked):

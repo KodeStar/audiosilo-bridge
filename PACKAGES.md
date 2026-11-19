@@ -2609,7 +2609,8 @@ internal/
             once): every run is cancelled
             (errPairingEnded: Resumes false, Lost false) and recorded lost
             however it ends (run.ended; one the Bridge's stop interrupted
-            too, its kept work Abandoned), Reporter.link answers nil so nothing
+            is left running for the next start's look, which drops it),
+            Reporter.link answers nil so nothing
             more goes to that server (no report, no end; its leases lapse the
             jobs), stranded jobs are dropped by the claim loop (dropUnpaired),
             the rows still running that no run holds are the claim loop's look

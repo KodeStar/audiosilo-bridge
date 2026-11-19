@@ -1257,21 +1257,28 @@ func TestPairingLookLeavesARowANewClaimTook(t *testing.T) {
 }
 
 // A job the Bridge's stop interrupts, its pairing ended on the page before its
-// end is settled, is dropped (lost, its kept work released) rather than left
-// running for the next start to resume (denied); one the stop leaves running
-// with no unpair is kept to resume (allowed: TestStopAndResume's
-// rule).
+// end is settled, is never released on its run's goroutine, which the stop
+// waits for (denied: a release on a context the stop doesn't end, up to 2
+// minutes): it is left running, and the next start, its pairing gone from the
+// store, drops it (released, recorded lost) rather than resuming it (denied);
+// one the stop leaves running with no unpair is kept to resume (allowed:
+// TestStopAndResume's rule).
 func TestUnpairWhileStoppingDropsTheJob(t *testing.T) {
 	srv := newControlledServer(false)
+	srv.pairing = "p1"
+	var cur atomic.Pointer[controlledServer]
+	cur.Store(srv)
 	stopped, settle := make(chan struct{}), make(chan struct{})
-	h := &abandoner{handler: handler{kind: "podcast.fetch", lane: LaneDownload, fn: func(ctx context.Context, _ Job, _ *Reporter) (any, error) {
+	h := newCountingAbandoner(func(ctx context.Context, _ Job, _ *Reporter) (any, error) {
 		<-ctx.Done()
 		close(stopped)
 		<-settle // the unpair comes as the stop is under way
 		return nil, ctx.Err()
-	}}}
+	}, nil, 1) // a release waits for its context to end
 	db := openStore(t)
-	r := New(db, func() Server { return srv }, nil, testOpts(), h)
+	opts := testOpts()
+	opts.Pairing = linkPairing(&cur)
+	r := New(db, linkOf(&cur), nil, opts, h)
 	ctx, stop := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { r.Run(ctx); close(done) }()
@@ -1279,14 +1286,24 @@ func TestUnpairWhileStoppingDropsTheJob(t *testing.T) {
 	waitFor(t, func() bool { return h.ran.Load() && srv.triesOf(1) > 0 })
 	stop()
 	await(t, stopped)
+	cur.Store(nil) // the unpair forgets the pairing first
 	r.Unpaired(srv)
 	close(settle)
 	await(t, done)
-	if sj, err := db.GetServerJob(context.Background(), 1); err != nil || sj.State != store.JobLost {
-		t.Fatalf("a job unpaired as the Bridge stopped: %+v %v, want lost", sj, err)
+	if got := h.abandoned(); len(got) != 0 {
+		t.Fatal("its work was released as the Bridge stopped", got)
 	}
-	if got := h.abandoned(); len(got) != 1 || got[0] != 1 {
-		t.Fatal("the work it kept to resume wasn't released", got)
+	if sj, err := db.GetServerJob(context.Background(), 1); err != nil || sj.State != store.JobRunning {
+		t.Fatalf("a job unpaired as the Bridge stopped: %+v %v, want left running for the next start", sj, err)
+	}
+	// The next start: unpaired, the row of the ended pairing is dropped.
+	next := &abandoner{handler: h.handler}
+	runFor(t, New(db, func() Server { return nil }, nil, testOpts(), next), func() bool {
+		sj, err := db.GetServerJob(context.Background(), 1)
+		return err == nil && sj.State == store.JobLost && sj.Error == errPairingEnded.Error()
+	})
+	if got := next.abandoned(); len(got) != 1 || got[0] != 1 || next.ran.Load() {
+		t.Fatal("the next start didn't release its kept work once, or resumed it", got)
 	}
 	if s, _ := srv.finalState(1); s != "" {
 		t.Fatal("the unpaired server was sent its end", s)
