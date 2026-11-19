@@ -348,6 +348,12 @@ func TestPrivateEnclosureIdentityAndNoPlaintextCheckpoint(t *testing.T) {
 	}
 }
 
+type streamFunc func(context.Context, netguard.StreamRequest) (*netguard.StreamResponse, error)
+
+func (f streamFunc) Stream(ctx context.Context, r netguard.StreamRequest) (*netguard.StreamResponse, error) {
+	return f(ctx, r)
+}
+
 type feedFetcher func(context.Context, netguard.Request) (*netguard.Response, error)
 
 func (f feedFetcher) Fetch(ctx context.Context, r netguard.Request) (*netguard.Response, error) {
@@ -678,10 +684,20 @@ func TestEpisodeFailureCodes(t *testing.T) {
 		}
 	})
 	// A job cancelled (or its lease lost) while it waits to try the host again
-	// ends on the cancel, a timeout, never the host's last http_503 or 429:
-	// the server counts an HTTP code of a cancelled job against the feed
+	// ends on the cancel, a timeout worded as the stop (never as a feed that
+	// did not respond), never the host's last http_503 or 429: the server
+	// counts an HTTP code of a cancelled job against the feed
 	// (cancelledFailureCodes), though the next try might have had the episode.
-	// A host's answer the job ends on with no wait cut short stays its code.
+	// So does one cancelled once the host has answered, before the wait.
+	// A host's answer the job ends on with no try left stays its code, a
+	// cancel landing then included.
+	stoppedBy := func(t *testing.T, err error) {
+		t.Helper()
+		var failure *netguard.Error
+		if !errors.As(err, &failure) || failure.Code != "timeout" || failure.Message != "The episode download was stopped before it finished." {
+			t.Fatalf("a download its job's end cut short: %v, want the stop's timeout", err)
+		}
+	}
 	for _, status := range []int{503, 429} {
 		t.Run(fmt.Sprintf("cancelled retry wait %d", status), func(t *testing.T) {
 			h, job := audioHarness(t)
@@ -697,8 +713,44 @@ func TestEpisodeFailureCodes(t *testing.T) {
 				return ctx.Err()
 			}
 			_, err := h.handler.FetchJob().Run(ctx, job, jobs.LocalReporter())
-			if c := code(t, err); c != "timeout" || calls.Load() != 1 {
-				t.Fatalf("a retry wait the job's cancel cut short: %q after %d calls, want timeout after 1", c, calls.Load())
+			if stoppedBy(t, err); calls.Load() != 1 {
+				t.Fatalf("a retry wait the job's cancel cut short: %d calls, want 1", calls.Load())
+			}
+		})
+		// cancelAfter cancels the job once the host has answered its nth try.
+		cancelAfter := func(h *harness, n int32) (context.Context, *atomic.Int32) {
+			var calls atomic.Int32
+			setAudio(h, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(status) })
+			ctx, cancel := jobs.CancelContext(context.Background())
+			t.Cleanup(cancel)
+			host := h.handler.s.o.Streamer
+			h.handler.s.o.Streamer = streamFunc(func(ctx context.Context, in netguard.StreamRequest) (*netguard.StreamResponse, error) {
+				r, err := host.Stream(ctx, in)
+				if calls.Add(1) == n {
+					cancel()
+				}
+				return r, err
+			})
+			return ctx, &calls
+		}
+		t.Run(fmt.Sprintf("cancelled before the retry wait %d", status), func(t *testing.T) {
+			h, job := audioHarness(t)
+			ctx, calls := cancelAfter(h, 1)
+			h.handler.s.o.Wait = func(context.Context, time.Duration) error {
+				t.Error("a cancelled job waited to try the host again")
+				return nil
+			}
+			_, err := h.handler.FetchJob().Run(ctx, job, jobs.LocalReporter())
+			if stoppedBy(t, err); calls.Load() != 1 {
+				t.Fatalf("a job cancelled once the host answered: %d calls, want 1", calls.Load())
+			}
+		})
+		t.Run(fmt.Sprintf("cancelled after the last try %d", status), func(t *testing.T) {
+			h, job := audioHarness(t)
+			ctx, calls := cancelAfter(h, 3)
+			_, err := h.handler.FetchJob().Run(ctx, job, jobs.LocalReporter())
+			if c := code(t, err); c != fmt.Sprintf("http_%d", status) || calls.Load() != 3 {
+				t.Fatalf("a job cancelled once the host answered its last try: %q after %d calls, want the host's answer after 3", c, calls.Load())
 			}
 		})
 	}

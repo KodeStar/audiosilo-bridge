@@ -958,7 +958,18 @@ func (s *service) download(ctx context.Context, b *budget, job *jobs.Job, root *
 		}
 		failure := netguard.Classify(ctx, err)
 		last = failure
-		if attempt == 2 || !netguard.Retryable(failure) || failure.RetryAfterSeconds > 10 || ctx.Err() != nil {
+		again := attempt < 2 && netguard.Retryable(failure) && failure.RetryAfterSeconds <= 10
+		// The job's end (a cancel, a lost lease, the Bridge stopping, the
+		// ceiling) with another try still to come is that end (stopped),
+		// never what the host last answered: a cancelled job's http_503
+		// would count against the feed (the server's cancelledFailureCodes),
+		// though the next try might have had the episode. So is a request the
+		// end itself cut short. An answer no try would have followed (the
+		// last one's, a 404) stays the host's.
+		if ctx.Err() != nil && (again || failure.Code == "timeout") {
+			return podcast.Fetch{}, stopped()
+		}
+		if !again {
 			break
 		}
 		if !netguard.StrongETag(tag) || c.Offset <= 0 || c.Total <= c.Offset {
@@ -968,13 +979,9 @@ func (s *service) download(ctx context.Context, b *budget, job *jobs.Job, root *
 			}
 			tag = ""
 		}
-		// A wait the job's end (a cancel, a lost lease, the ceiling) cuts
-		// short is that end, never what the host last answered: a cancelled
-		// job's http_503 would count against the feed (the server's
-		// cancelledFailureCodes), though the next try might have had it. The
-		// ceiling's is the episode's timeout (budget.failure).
-		if err := s.o.Wait(ctx, netguard.RetryDelay(attempt, failure.RetryAfterSeconds)); err != nil {
-			return podcast.Fetch{}, netguard.Classify(ctx, err)
+		// A wait the job's end cuts short is that end too.
+		if s.o.Wait(ctx, netguard.RetryDelay(attempt, failure.RetryAfterSeconds)) != nil {
+			return podcast.Fetch{}, stopped()
 		}
 	}
 	return podcast.Fetch{}, last
@@ -1270,6 +1277,16 @@ func openPartial(root *os.Root, name string, size int64) (*os.File, error) {
 func keptPartial(c *checkpoint, err error) error {
 	slog.Warn("podcasts: an episode's partial could not be read to resume it; it is kept", "partial", c.partialName(), "err", err)
 	return fmt.Errorf("%w: %w", err, fail("write_failed", "The episode's partial download could not be read."))
+}
+
+// stopped is the failure of an episode download its job's end (a cancel, a
+// lost lease, the Bridge stopping) cut short between two tries or in one: a
+// timeout, as netguard reads an ended context (never a code the server
+// counts against the feed for a cancelled job), worded as the stop rather
+// than as a feed that did not respond. The ceiling's is the episode's own
+// timeout (budget.failure).
+func stopped() *netguard.Error {
+	return fail("timeout", "The episode download was stopped before it finished.")
 }
 
 // restartPartial clears c's partial for a download from byte 0, or answers

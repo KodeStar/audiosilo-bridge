@@ -2832,12 +2832,16 @@ internal/
             episode download's ceiling is its timeout wherever it surfaces (the
             budget's cause, errOverBudget; a probe it stops answers the context's
             error, not invalid_audio, and a lease check it cuts is no lost claim,
-            identity_changed), a retry wait it cuts included; a retry wait the
-            job's cancel or a lost lease cuts ends as netguard.Classify reads
-            the ended context (timeout), never on the host's last http_503 or
-            429, which the server would count against the feed for a cancelled
-            job (BR-PODCAST-4); its own faults (no streamer, its partial) are
-            write_failed. A partial proven changed or barred to the Bridge
+            identity_changed), a retry wait it cuts included; a download the
+            job's end (a cancel, a lost lease, the Bridge stopping) cuts short
+            with another try still to come, in its retry wait or once the host
+            has answered, ends as the stop (stopped: timeout, as netguard
+            reads an ended context, worded as the stop and not as a feed that
+            did not respond), never on the host's last http_503 or 429, which
+            the server would count against the feed for a cancelled job
+            (BR-PODCAST-4); an answer no try would have followed (the last
+            try's, a 404) stays the host's; its own faults (no streamer, its
+            partial) are write_failed. A partial proven changed or barred to the Bridge
             (gone, not a regular file, EACCES/EPERM as a lasting fault, another
             size, shorter than its prefix: partialLost, errPartialChanged)
             restarts the episode from zero once per job first, checked before
