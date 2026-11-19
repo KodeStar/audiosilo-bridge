@@ -365,14 +365,15 @@ func (p *Pusher) row(ctx context.Context, a store.AudibleAccount, titles map[str
 		return true
 	}
 	history := false
-	updated, err := time.Parse(time.RFC3339Nano, row.UpdatedAt)
+	updated, bad := time.Parse(time.RFC3339Nano, row.UpdatedAt)
 	if !cutoff.IsZero() {
-		history = err != nil || updated.Before(cutoff)
+		history = bad != nil || updated.Before(cutoff)
 	}
 	if !history && a.PushReread && sameBook {
-		history = err != nil || olderThanKnown(updated, x, skew)
+		history = bad != nil || olderThanKnown(updated, x, skew)
 	}
 	rec := store.AudibleRow{Ms: place, Seen: now}
+	var err error
 	switch {
 	case !sameBook || !x.Listed:
 		err = p.o.DB.PendAudiblePush(ctx, a.ID, row.ASIN, row.LibraryID, row.Path, !history, rec)
