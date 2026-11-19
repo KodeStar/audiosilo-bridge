@@ -891,3 +891,213 @@ func TestFetchKeepsTheRecordOfAPartialTheRestartCouldNotRemove(t *testing.T) {
 		t.Fatal("validator kept once the partial was removed")
 	}
 }
+
+// A Publish that fails once its journal is written leaves the staged audio to
+// the journal: the job's exit drops the record of the resumed partial without
+// removing the file, and so does any later clear of a record naming it
+// (cleanOwned's), so RecoverShow then installs the episode.
+func TestFetchFailedPublishKeepsTheJournalsStagedAudio(t *testing.T) {
+	requireProbe(t)
+	h, job := audioHarness(t)
+	s := h.handler.s
+	audio, _, ranged := cutThenWhole(t, h, false, func() {})
+	show := filepath.Join(h.mount, filepath.Dir(*job.Path))
+	s.o.Fault = func(at string) error {
+		if at == "journal" {
+			return errors.New("stopped after the journal")
+		}
+		return nil
+	}
+	if result, err := h.handler.FetchJob().Run(context.Background(), job, jobs.LocalReporter()); err == nil {
+		t.Fatal("a failed publish succeeded:", result)
+	}
+	if ranged.Load() != 1 {
+		t.Fatal("the episode was not resumed from a recorded partial:", ranged.Load())
+	}
+	root, err := os.OpenRoot(h.mount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	b, err := root.ReadFile(podcast.AttachmentPath(*job.Path, ".publish.json"))
+	if err != nil {
+		t.Fatal("no journal after the failed publish:", err)
+	}
+	var j podcast.Journal
+	if err := json.Unmarshal(b, &j); err != nil {
+		t.Fatal(err)
+	}
+	staged := filepath.Join(show, j.AudioTemp)
+	if got, err := os.ReadFile(staged); err != nil || !bytes.Equal(got, audio) {
+		t.Fatal("the journal's staged audio was removed:", err)
+	}
+	if _, ok := s.readCheckpoint(job); ok {
+		t.Fatal("the record still claims the journal's staged audio")
+	}
+	// A record naming the staged audio (one left by a stopped process) is
+	// cleared without it.
+	s.clearCheckpoint(job, root, &checkpoint{ServerHash: s.pairHash(), Path: *job.Path, Temp: j.AudioTemp})
+	if _, err := os.Stat(staged); err != nil {
+		t.Fatal("a clear removed the journal's staged audio:", err)
+	}
+	s.o.Fault = nil
+	if err := podcast.RecoverShow(root, filepath.Dir(*job.Path), s.o.Now(), nil); err != nil {
+		t.Fatal("recovery after the failed publish:", err)
+	}
+	if !podcast.Matches(root, *job.Path, &j.Fetch) {
+		t.Fatal("recovery did not install the staged audio")
+	}
+	if left := partials(show); len(left) != 0 {
+		t.Fatal("partials left after recovery:", left)
+	}
+}
+
+// A show an older Bridge left stuck (a journal whose staged audio its failed
+// publish removed) is recovered by the next fetch: the journal goes and the
+// episode is downloaded again and installed.
+func TestFetchAfterAStuckJournalFetchesTheEpisodeAgain(t *testing.T) {
+	requireProbe(t)
+	h, job := audioHarness(t)
+	s := h.handler.s
+	audio := data(t, "chap-v24-reverse.mp3")
+	var calls atomic.Int32
+	setAudio(h, func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Write(audio)
+	})
+	show := filepath.Join(h.mount, filepath.Dir(*job.Path))
+	s.o.Fault = func(at string) error {
+		if at == "journal" {
+			return errors.New("stopped after the journal")
+		}
+		return nil
+	}
+	if result, err := h.handler.FetchJob().Run(context.Background(), job, jobs.LocalReporter()); err == nil {
+		t.Fatal("a failed publish succeeded:", result)
+	}
+	for _, p := range partials(show) {
+		if err := os.Remove(p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s.o.Fault = nil
+	result, err := h.handler.FetchJob().Run(context.Background(), job, jobs.LocalReporter())
+	if err != nil {
+		t.Fatal("the stuck show still refuses the fetch:", err)
+	}
+	got := result.(fetchResult)
+	if got.Reused || calls.Load() != 2 {
+		t.Fatal("the episode was not downloaded again:", got, calls.Load())
+	}
+	root, err := os.OpenRoot(h.mount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	if !podcast.Matches(root, *job.Path, &got.Fetch) {
+		t.Fatal("the episode was not installed")
+	}
+	if _, err := root.Lstat(podcast.AttachmentPath(*job.Path, ".publish.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("the stuck journal was kept:", err)
+	}
+	if f := h.read("Fixture Show"); f.Episodes[0].Fetch == nil || *f.Episodes[0].Fetch != got.Fetch {
+		t.Fatal("the feed does not pin the installed episode", f.Episodes[0].Fetch)
+	}
+}
+
+// A clear removes a recorded partial beside a journal that stages another file.
+func TestClearRemovesAPartialNoJournalStages(t *testing.T) {
+	h, job := audioHarness(t)
+	s := h.handler.s
+	show := filepath.Join(h.mount, filepath.Dir(*job.Path))
+	if err := os.MkdirAll(filepath.Join(show, ".audiosilo"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	other, mine := podcast.TempPrefix+strings.Repeat("a", 24), podcast.TempPrefix+strings.Repeat("b", 24)
+	b, _ := json.Marshal(podcast.Journal{Version: 1, Op: "install", Path: *job.Path, AudioTemp: other})
+	if err := os.WriteFile(filepath.Join(h.mount, podcast.AttachmentPath(*job.Path, ".publish.json")), b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{other, mine} {
+		if err := os.WriteFile(filepath.Join(show, name), []byte("part"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	root, err := os.OpenRoot(h.mount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	s.clearCheckpoint(job, root, &checkpoint{ServerHash: s.pairHash(), Path: *job.Path, Temp: mine})
+	if _, err := os.Stat(filepath.Join(show, mine)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("a partial no journal stages was kept:", err)
+	}
+	if _, err := os.Stat(filepath.Join(show, other)); err != nil {
+		t.Fatal("the journal's staged file was removed:", err)
+	}
+}
+
+// A clear keeps a recorded partial beside a journal it cannot read (it may
+// stage that partial), and drops only the record.
+func TestClearKeepsAPartialBesideAnUnreadableJournal(t *testing.T) {
+	h, job := audioHarness(t)
+	s := h.handler.s
+	show := filepath.Join(h.mount, filepath.Dir(*job.Path))
+	if err := os.MkdirAll(filepath.Join(show, ".audiosilo"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(h.mount, podcast.AttachmentPath(*job.Path, ".publish.json")), []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mine := podcast.TempPrefix + strings.Repeat("c", 24)
+	if err := os.WriteFile(filepath.Join(show, mine), []byte("part"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(h.mount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	s.clearCheckpoint(job, root, &checkpoint{ServerHash: s.pairHash(), Path: *job.Path, Temp: mine})
+	if _, err := os.Stat(filepath.Join(show, mine)); err != nil {
+		t.Fatal("a partial an unreadable journal may stage was removed:", err)
+	}
+	if _, ok := s.readCheckpoint(job); ok {
+		t.Fatal("the record was kept")
+	}
+}
+
+// A clear keeps a recorded partial a journal stages under another name for the
+// same file (a case-insensitive or normalising filesystem's other spelling,
+// here a hard link): RecoverShow installs that file.
+func TestClearKeepsAPartialAJournalStagesUnderAnotherName(t *testing.T) {
+	h, job := audioHarness(t)
+	s := h.handler.s
+	show := filepath.Join(h.mount, filepath.Dir(*job.Path))
+	if err := os.MkdirAll(filepath.Join(show, ".audiosilo"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	staged, mine := podcast.TempPrefix+strings.Repeat("d", 24), podcast.TempPrefix+strings.Repeat("e", 24)
+	b, _ := json.Marshal(podcast.Journal{Version: 1, Op: "install", Path: *job.Path, AudioTemp: staged})
+	if err := os.WriteFile(filepath.Join(h.mount, podcast.AttachmentPath(*job.Path, ".publish.json")), b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(show, staged), []byte("part"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(filepath.Join(show, staged), filepath.Join(show, mine)); err != nil {
+		t.Skip("no hard links here:", err)
+	}
+	root, err := os.OpenRoot(h.mount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	s.clearCheckpoint(job, root, &checkpoint{ServerHash: s.pairHash(), Path: *job.Path, Temp: mine})
+	if _, err := os.Stat(filepath.Join(show, mine)); err != nil {
+		t.Fatal("the journal's staged file, recorded under another name, was removed:", err)
+	}
+	if _, ok := s.readCheckpoint(job); ok {
+		t.Fatal("the record was kept")
+	}
+}

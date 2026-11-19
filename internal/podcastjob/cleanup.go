@@ -15,10 +15,10 @@ import (
 	"github.com/kodestar/audiosilo-bridge/internal/store"
 )
 
-// cleanOwned considers only named checkpoint records and committed trash
-// manifests older than a day. Unrecorded hidden files are never swept. self is
-// the calling job, whose own running row (at the show's path) is not a live
-// writer of these records.
+// cleanOwned considers named checkpoint records and committed trash manifests
+// older than a day, then sweeps the show's unrecorded partials
+// (sweepPartials). self is the calling job, whose own running row (at the
+// show's path) is not a live writer of these records.
 func (s *service) cleanOwned(ctx context.Context, root *os.Root, lib link.Library, mount, show string, self int64) {
 	if s.o.DB == nil || s.o.DataDir == "" || s.writable(lib, mount) != nil {
 		return
@@ -80,18 +80,14 @@ func (s *service) cleanOwned(ctx context.Context, root *os.Root, lib link.Librar
 			}
 		}
 	}
+	s.sweepPartials(ctx, root, lib, mount, []string{show}, self)
 	dir := show + "/.audiosilo-trash/podcasts"
 	st, err := root.Lstat(dir)
 	if err != nil || !st.IsDir() || st.Mode()&os.ModeSymlink != 0 {
 		return
 	}
 	// OpenRegular below checks every ancestor before a manifest can authorize IO.
-	d, err := root.Open(dir)
-	if err != nil {
-		return
-	}
-	entries, err := d.ReadDir(-1)
-	_ = d.Close()
+	entries, err := listDir(root, dir)
 	if err != nil {
 		return
 	}
@@ -99,13 +95,7 @@ func (s *service) cleanOwned(ctx context.Context, root *os.Root, lib link.Librar
 		if !entry.IsDir() {
 			continue
 		}
-		rd, err := podcast.OpenRegular(root, dir+"/"+entry.Name()+"/transaction.json")
-		if err != nil {
-			continue
-		}
-		var j podcast.Journal
-		err = json.NewDecoder(io.LimitReader(rd, 4<<20)).Decode(&j)
-		_ = rd.Close()
+		j, err := podcast.ReadJournal(root, dir+"/"+entry.Name()+"/transaction.json")
 		if err != nil || !podcast.ValidEpisodePath(j.Path) || path.Dir(j.Path) != show || j.TrashDir != ".audiosilo-trash/podcasts/"+entry.Name() || !old(j.Fetch.DeletedAt) || live(j.Path) {
 			continue
 		}

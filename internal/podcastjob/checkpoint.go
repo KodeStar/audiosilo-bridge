@@ -73,8 +73,9 @@ func (s *service) saveCheckpoint(job jobs.Job, root *os.Root, c *checkpoint, eta
 	if saved, ok := s.readCheckpoint(job); ok && saved.Temp != c.Temp && !s.dropPartial(root, &saved) {
 		// An earlier partial at this path the Bridge still cannot remove: its
 		// record stays (clearCheckpoint tries it again, cleanOwned after a day),
-		// and this download goes unrecorded rather than orphan it. One removed
-		// since (or already gone) no longer holds the record.
+		// and this download goes unrecorded rather than orphan it (left behind,
+		// sweepPartials takes it once old). One removed since (or already gone)
+		// no longer holds the record.
 		return nil
 	}
 	if c.Validator == "" {
@@ -165,13 +166,15 @@ func (s *service) clearCheckpoint(job jobs.Job, root *os.Root, c *checkpoint) {
 }
 
 // dropPartial removes c's owned partial, then its sealed validator; false, with
-// both kept, when the partial is still on disk.
+// both kept, when the partial is still on disk. A partial an install journal
+// stages is the journal's (podcast.RecoverShow installs it): it stays on disk
+// and only the record's claim on it goes.
 func (s *service) dropPartial(root *os.Root, c *checkpoint) bool {
 	if podcast.OwnedTemp(c.Temp) {
 		p := c.partialName()
 		// Checked, not opened: a partial the Bridge can no longer read (the
 		// restart from zero clears one) is still its own to remove.
-		if _, err := podcast.LstatRegular(root, p); err == nil {
+		if st, err := podcast.LstatRegular(root, p); err == nil && !journalStages(root, c, st) {
 			if err := root.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
 				return false
 			}
@@ -181,6 +184,25 @@ func (s *service) dropPartial(root *os.Root, c *checkpoint) bool {
 		_ = s.o.Vault.Delete(c.Validator)
 	}
 	return true
+}
+
+// journalStages reports whether the episode's pending journal names c's partial
+// (st, as LstatRegular saw it) as its staged audio, or is there but can't be
+// read to tell. A name spelt otherwise for the same file (a case-insensitive
+// or normalising filesystem) counts too: RecoverShow would install that file.
+func journalStages(root *os.Root, c *checkpoint, st os.FileInfo) bool {
+	j, err := podcast.ReadJournal(root, podcast.AttachmentPath(c.Path, ".publish.json"))
+	if errors.Is(err, os.ErrNotExist) {
+		return false
+	}
+	if err != nil || j.AudioTemp == c.Temp {
+		return true
+	}
+	if j.AudioTemp == "" {
+		return false
+	}
+	staged, err := root.Lstat(path.Dir(c.Path) + "/" + j.AudioTemp)
+	return err == nil && os.SameFile(st, staged)
 }
 func (s *service) fileLock(ctx context.Context, root *os.Root, episode string) (func(), error) {
 	if err := podcast.EnsureDir(root, path.Dir(episode)+"/.audiosilo"); err != nil {

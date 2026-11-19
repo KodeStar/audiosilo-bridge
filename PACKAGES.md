@@ -2254,9 +2254,14 @@ internal/
             chronological ID3 CHAP attachments and pure install/delete journals.
             Journals are serving barriers. Delete recovery aborts when audio has not
             moved to owned trash; only a moved deletion is completed without a fresh
-            aggregate. Exclusive hard-link then unlink installs audio without
-            overwriting a concurrent foreign file; a mount without
-            hard links (SMB/CIFS, some NAS/FUSE shares) falls back to a no-replace
+            aggregate. Install recovery aborts (abortInstall, a warning in the log)
+            when neither the staged audio nor the episode's audio exists, the feed
+            does not pin this fetch and no chapters of it are written: the journal
+            goes, the feed keeps the earlier pin and the episode is fetched again.
+            An older Bridge's failed Publish removed that staged audio on exit,
+            leaving the show refusing every write. Exclusive hard-link then unlink
+            installs audio without overwriting a concurrent foreign file; a mount
+            without hard links (SMB/CIFS, some NAS/FUSE shares) falls back to a no-replace
             rename (renameat2 RENAME_NOREPLACE on Linux, else an absence check
             under the show and path locks). Phase 4b moved the primitive to
             fsutil (InstallNoReplace, RenameNoReplace, RenameIfAbsent); install.go
@@ -2273,15 +2278,27 @@ internal/
             Subscribe implements ParamSealer and Abandoner: job credentials are
             sealed before persistence, resumed from the vault, resealed under
             the show id on success, and removed at every terminal job end.
-            A 304 never rewrites feed.json or artwork. Both handlers preserve retained fetch metadata and recover show journals before
-            writes. Fetch downloads outside the show lock, rehashes proven partials,
-            seals validators, probes local descriptors and confirms its lease before
-            publication. Per-path process and OS file locks prevent overlap across
+            A 304 never rewrites feed.json or artwork. Both handlers preserve
+            retained fetch metadata and recover show journals before writes.
+            Fetch downloads outside the show lock, rehashes proven partials,
+            seals validators, probes local descriptors and confirms its lease
+            before publication. No checkpoint clear removes a partial a pending
+            install journal stages (journalStages): RecoverShow installs it
+            (or, with it gone, drops the journal).
+            Per-path process and OS file locks prevent overlap across
             reclaimed jobs. Retain hashes local candidates and fails closed on an
             unavailable, stale or protected aggregate. Snapshot freshness lasts five
             seconds from request dispatch on the Bridge's monotonic clock;
             checked_at stays on the wire and does not time freshness. Old cleanup
-            uses only owned checkpoint/trash records, checked mappings and no live matching job. A job claimed
+            uses only owned checkpoint/trash records, checked mappings and no live matching job;
+            then sweepPartials (bridge#87; also after a mapping check, SweepPartials, at most
+            once an hour, sweepEvery) removes a show's unrecorded partials: regular files
+            directly in a folder holding a feed.json named .audiosilo-tmp-<24 hex>
+            (ownedTempName), older than partialMaxAge (24 h, past the longest download), whose
+            name no checkpoint record of the pairing holds, in a show with no running job and
+            no pending *.publish.json journal; never a link or a file under one. The open jobs
+            and the records are read show by show, only for a show holding such a name, and
+            nothing goes while the pairing's token can't be read. A job claimed
             before its library's mapping check (a start or re-pair) waits for it
             (CheckPoll). A subscribe's 3-minute ceiling starts once it holds the
             library lock, a poll's once it holds the show lock (the mapping wait and

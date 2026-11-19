@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"os"
 	"path"
 	"runtime"
@@ -187,6 +188,8 @@ func Publish(root *os.Root, j Journal, now time.Time, fault Boundary) error {
 
 // RecoverShow finishes installs and moved deletions before any other show mutation.
 // A delete whose audio has not moved is aborted: its aggregate may now be stale.
+// An install whose staged and installed audio are both gone, with the feed not
+// pinning it, is aborted too (abortInstall).
 func RecoverShow(root *os.Root, show string, now time.Time, fault Boundary) error {
 	if !ValidShow(show) {
 		return ErrInvalidFile
@@ -216,18 +219,20 @@ func RecoverShow(root *os.Root, show string, now time.Time, fault Boundary) erro
 			continue
 		}
 		p := dir + "/" + e.Name()
-		rd, err := OpenRegular(root, p)
+		j, err := ReadJournal(root, p)
 		if err != nil {
 			return err
 		}
-		b, err := io.ReadAll(io.LimitReader(rd, (4<<20)+1))
-		_ = rd.Close()
-		if err != nil {
-			return err
-		}
-		var j Journal
-		if len(b) > 4<<20 || json.Unmarshal(b, &j) != nil || !journalValid(&j, show) || AttachmentPath(j.Path, ".publish.json") != p {
+		if !journalValid(&j, show) || AttachmentPath(j.Path, ".publish.json") != p {
 			return ErrInvalidFile
+		}
+		if j.Op == "install" && stagedAudioGone(root, j) {
+			// An older Bridge's failed Publish removed this staged audio.
+			if err := abortInstall(root, j); err != nil {
+				return err
+			}
+			slog.Warn("podcasts: an episode's staged download was gone; it will be fetched again", "show", show, "episode_id", j.EpisodeID)
+			continue
 		}
 		if j.Op == "delete" {
 			// An unmoved deletion's aggregate may be stale: leave the episode installed.
@@ -243,6 +248,33 @@ func RecoverShow(root *os.Root, show string, now time.Time, fault Boundary) erro
 		}
 	}
 	return nil
+}
+
+// ReadJournal decodes the journal at name (a regular file, no link in any
+// component, at most 4 MiB as Publish writes it); ErrInvalidFile when it is
+// too big or not a journal. It does not check the journal is valid.
+func ReadJournal(root *os.Root, name string) (Journal, error) {
+	var j Journal
+	rd, err := OpenRegular(root, name)
+	if err != nil {
+		return j, err
+	}
+	defer rd.Close()
+	b, err := io.ReadAll(io.LimitReader(rd, (4<<20)+1))
+	if err != nil {
+		return j, err
+	}
+	if len(b) > 4<<20 || json.Unmarshal(b, &j) != nil {
+		return Journal{}, ErrInvalidFile
+	}
+	return j, nil
+}
+
+// sameJournal reports whether a and b encode identically.
+func sameJournal(a, b Journal) bool {
+	x, _ := json.Marshal(a)
+	y, _ := json.Marshal(b)
+	return string(x) == string(y)
 }
 
 // complete finishes a journaled transaction. verified means the caller has just
@@ -415,16 +447,11 @@ func CleanupTrash(root *os.Root, j Journal) error {
 	if episodeFor(f, j) == nil {
 		return ErrInvalidFile
 	}
-	rd, err := OpenRegular(root, dir+"/transaction.json")
+	saved, err := ReadJournal(root, dir+"/transaction.json")
 	if err != nil {
 		return err
 	}
-	var saved Journal
-	err = json.NewDecoder(io.LimitReader(rd, 4<<20)).Decode(&saved)
-	_ = rd.Close()
-	a, _ := json.Marshal(j)
-	b, _ := json.Marshal(saved)
-	if err != nil || string(a) != string(b) {
+	if !sameJournal(j, saved) {
 		return ErrInvalidFile
 	}
 	audio := dir + "/audio"
@@ -455,26 +482,91 @@ func AbortDelete(root *os.Root, j Journal) error {
 	if _, err := root.Lstat(show + "/" + j.TrashDir + "/audio"); !errors.Is(err, os.ErrNotExist) {
 		return ErrInvalidFile
 	}
-	// Only this transaction's own barrier is removed, never another journal.
-	rd, err := OpenRegular(root, AttachmentPath(j.Path, ".publish.json"))
+	barrier, err := ownJournal(root, j)
 	if err != nil {
 		return err
-	}
-	var saved Journal
-	err = json.NewDecoder(io.LimitReader(rd, 4<<20)).Decode(&saved)
-	_ = rd.Close()
-	a, _ := json.Marshal(j)
-	b, _ := json.Marshal(saved)
-	if err != nil || string(a) != string(b) {
-		return ErrInvalidFile
 	}
 	// The empty trash folder goes first: a stop between the two leaves the barrier,
 	// and the next recovery aborts again instead of orphaning an unowned folder.
 	if err := root.Remove(show + "/" + j.TrashDir); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	if err := root.Remove(AttachmentPath(j.Path, ".publish.json")); err != nil {
+	if err := root.Remove(barrier); err != nil {
 		return err
 	}
 	return syncDir(root, show+"/.audiosilo")
+}
+
+// stagedAudioGone reports whether neither an install's staged audio nor its
+// target exists (neither name is anything, a link included). Otherwise
+// complete decides as before: it finishes an install whose audio is in place
+// and refuses anything else.
+func stagedAudioGone(root *os.Root, j Journal) bool {
+	if _, err := root.Lstat(path.Dir(j.Path) + "/" + j.AudioTemp); !errors.Is(err, os.ErrNotExist) {
+		return false
+	}
+	_, err := root.Lstat(j.Path)
+	return errors.Is(err, os.ErrNotExist)
+}
+
+// abortInstall removes an install's barrier when its staged audio is gone and
+// the feed does not pin this fetch. The journal records no step, so the steps
+// after staging are told by the trace they leave: the audio at the episode's
+// path, the chapters attachment for this fetch (or any other the episode's
+// current pin does not own, which Publish would have refused), and the feed's
+// pin of this fetch. With any of those present it refuses, as recovery did
+// before. Two steps can run and leave nothing: audio installed and then removed
+// by hand, and (a journal without chapters) the removal of the earlier pin's
+// attachment. Neither matters: Publish required the episode's path empty, so the
+// earlier pin had no audio there. The feed keeps the episode's earlier pin, so
+// the episode stays not installed and is fetched again.
+func abortInstall(root *os.Root, j Journal) error {
+	show := path.Dir(j.Path)
+	if j.Op != "install" || !journalValid(&j, show) {
+		return ErrInvalidFile
+	}
+	// Read rejects a link in any component of the show's feed.json: the show
+	// folder is a real folder for the absence checks below.
+	f, err := Read(root, show)
+	if err != nil {
+		return err
+	}
+	e := episodeFor(f, j)
+	if e == nil || (e.Fetch != nil && *e.Fetch == j.Fetch) {
+		return ErrInvalidFile
+	}
+	if !stagedAudioGone(root, j) {
+		return ErrInvalidFile
+	}
+	side := AttachmentPath(j.Path, ".chapters.json")
+	if err := regularOrAbsent(root, side); err != nil {
+		return err
+	}
+	if _, err := root.Lstat(side); err == nil && (ReadChapters(root, j.Path, &j.Fetch) != nil || ReadChapters(root, j.Path, e.Fetch) == nil) {
+		return ErrInvalidFile
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	barrier, err := ownJournal(root, j)
+	if err != nil {
+		return err
+	}
+	if err := root.Remove(barrier); err != nil {
+		return err
+	}
+	return syncDir(root, show+"/.audiosilo")
+}
+
+// ownJournal returns the name of j's journal when the journal there is j's own:
+// an abort removes only this transaction's barrier, never another journal.
+func ownJournal(root *os.Root, j Journal) (string, error) {
+	name := AttachmentPath(j.Path, ".publish.json")
+	saved, err := ReadJournal(root, name)
+	if err != nil {
+		return "", err
+	}
+	if !sameJournal(j, saved) {
+		return "", ErrInvalidFile
+	}
+	return name, nil
 }
