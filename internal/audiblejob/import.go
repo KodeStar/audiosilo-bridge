@@ -855,8 +855,7 @@ func (h *Importer) vacant(mount, rel string, books []link.LibraryBook) error {
 		return fail(CodeNotWritable, "The Bridge can't open the library at its mount: %v", err)
 	}
 	defer func() { _ = root.Close() }()
-	_, err = vacant(transfer.RootFS(root), rel, bookPaths(books))
-	return err
+	return vacant(transfer.RootFS(root), rel, bookPaths(books))
 }
 
 // bookPaths is each listed book's title by its path.
@@ -885,32 +884,42 @@ func listedBook(rel string, books map[string]string) (at, title string, ok bool)
 	return "", "", false
 }
 
-// vacant is Importer.vacant over the library's files, with the conflict that
-// makes rel exists (link.ConflictFile, ConflictBook or ConflictAudio). The
+// vacant is Importer.vacant over the library's files: a CodeExists failure
+// names what is in the way (conflictOf). The
 // folder rel's would have been under the name rule before bridge#47 counts
 // too (formerDirs): a title backed up as "Who Moved My Cheese?" is there
 // already, and isn't downloaded again into "Who Moved My Cheese". So does a
 // file at the library's root under its former name (formerFile; bridge#80: a
 // "{Title}.m4b" template has no folder to find it by, and a file in a folder
 // is that folder's audio already).
-func vacant(fsys transfer.LibraryFS, rel string, books map[string]string) (string, error) {
-	if conflict, err := vacantAt(fsys, rel, books); err != nil {
-		return conflict, err
+func vacant(fsys transfer.LibraryFS, rel string, books map[string]string) error {
+	if err := vacantAt(fsys, rel, books); err != nil {
+		return err
 	}
 	dir := path.Dir(rel)
 	if dir == "." {
 		if at := formerFile(fsys, dir, rel); at != "" {
 			return vacantAt(fsys, at, books) // a file is there: ConflictFile
 		}
-		return "", nil
+		return nil
 	}
 	for _, dir := range formerDirs(fsys, dir) {
 		// Only a book there counts; what can't be read there is no conflict.
-		if conflict, err := vacantAt(fsys, path.Join(dir, path.Base(rel)), books); conflict != "" {
-			return conflict, err
+		if err := vacantAt(fsys, path.Join(dir, path.Base(rel)), books); conflictOf(err) != "" {
+			return err
 		}
 	}
-	return "", nil
+	return nil
+}
+
+// conflictOf is what is in the way when err is a CodeExists failure
+// (link.ConflictFile, ConflictBook or ConflictAudio), else "".
+func conflictOf(err error) string {
+	var f *Failure
+	if errors.As(err, &f) {
+		return f.Conflict
+	}
+	return ""
 }
 
 // formerFile is the file in dir the name rule before bridge#47 gave what it
@@ -987,34 +996,34 @@ func formerName(name, seg string) bool {
 }
 
 // vacantAt is vacant for rel as it is spelled.
-func vacantAt(fsys transfer.LibraryFS, rel string, books map[string]string) (string, error) {
+func vacantAt(fsys transfer.LibraryFS, rel string, books map[string]string) error {
 	_, err := fsys.Lstat(rel)
 	switch {
 	case err == nil:
-		return link.ConflictFile, exists(link.ConflictFile, "A file is already at %s: nothing was overwritten. Choose another destination, or move that file.", rel)
+		return exists(link.ConflictFile, "A file is already at %s: nothing was overwritten. Choose another destination, or move that file.", rel)
 	case !errors.Is(err, fs.ErrNotExist):
-		return "", fail(CodeNotWritable, "The Bridge can't place the book at %s in the library: %v", rel, err)
+		return fail(CodeNotWritable, "The Bridge can't place the book at %s in the library: %v", rel, err)
 	}
 	if dir, title, ok := listedBook(rel, books); ok {
-		return link.ConflictBook, exists(link.ConflictBook, "%s is already the library's book %q: a backup goes in a folder of its own. Choose another destination.", dir, title)
+		return exists(link.ConflictBook, "%s is already the library's book %q: a backup goes in a folder of its own. Choose another destination.", dir, title)
 	}
 	dir := path.Dir(rel)
 	if dir == "." {
-		return "", nil
+		return nil
 	}
 	entries, err := fsys.ReadDir(dir)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
-		return "", nil
+		return nil
 	case err != nil:
-		return "", fail(CodeNotWritable, "The Bridge can't read the folder %s in the library: %v", dir, err)
+		return fail(CodeNotWritable, "The Bridge can't read the folder %s in the library: %v", dir, err)
 	}
 	for _, e := range entries {
 		if ext := strings.ToLower(path.Ext(e.Name())); !e.IsDir() && (mp4Names[ext] || otherAudio[ext]) {
-			return link.ConflictAudio, exists(link.ConflictAudio, "%s already holds audio (%s), a book of its own: a backup goes in a folder of its own. Choose another destination.", dir, e.Name())
+			return exists(link.ConflictAudio, "%s already holds audio (%s), a book of its own: a backup goes in a folder of its own. Choose another destination.", dir, e.Name())
 		}
 	}
-	return "", nil
+	return nil
 }
 
 // license asks Audible for the title's license, saying why it was denied.

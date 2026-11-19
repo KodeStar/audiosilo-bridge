@@ -94,7 +94,8 @@ func (t *titlePlanner) plan(rec source.Record) *link.AudiblePlan {
 	p.Path, p.File = rel, path.Base(rel)
 	switch {
 	case t.fsys != nil:
-		conflict, err := vacant(t.fsys, rel, t.books)
+		err := vacant(t.fsys, rel, t.books)
+		conflict := conflictOf(err)
 		if err != nil && conflict == "" {
 			return failed(err)
 		}

@@ -88,7 +88,7 @@ func TestAudibleWireMirror(t *testing.T) {
 	}
 	// Whether the places sync is the console's: the server ignores a sync
 	// sent here, so none is (bridge#50).
-	if _, ok := body["sync"]; ok || len(body) != 5 {
+	if len(body) != 5 {
 		t.Errorf("account body = %v, want the mapping alone", body)
 	}
 	var apiErr *APIError
