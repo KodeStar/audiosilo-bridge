@@ -23,16 +23,18 @@ export function LibrariesTab({ client }: { client: ApiClient }) {
     setError,
   } = useLoad(async () => (await client.libraries()).libraries, LIBRARIES_POLL_MS);
   const [checking, setChecking] = useState(false);
-  const [checkNote, setCheckNote] = useState<string | null>(null);
+  // The results Check now was asked over: its note shows until the poll brings
+  // others.
+  const [checkedOver, setCheckedOver] = useState<string | null>(null);
 
   // The check runs in the background (a 202), so reloading now would show the
   // old results: the poll picks the new ones up.
   async function checkNow() {
     setChecking(true);
-    setCheckNote(null);
+    setCheckedOver(null);
     try {
       await client.checkLibraries();
-      setCheckNote('Checking. The results show here when they are in.');
+      setCheckedOver(libraries && resultsKey(libraries));
     } catch (err) {
       setError(errorText(err, "Couldn't start the check."));
     }
@@ -40,6 +42,7 @@ export function LibrariesTab({ client }: { client: ApiClient }) {
   }
 
   if (libraries === null) return <Loading error={error} />;
+  const checkPending = checkedOver !== null && checkedOver === resultsKey(libraries);
 
   return (
     <div className="flex flex-col gap-5">
@@ -58,7 +61,9 @@ export function LibrariesTab({ client }: { client: ApiClient }) {
         </button>
       </div>
       {error && <Notice kind="error">{error}</Notice>}
-      {checkNote && <Notice kind="info">{checkNote}</Notice>}
+      {checkPending && (
+        <Notice kind="info">Checking. The results show here when they are in.</Notice>
+      )}
       {libraries.length === 0 ? (
         <EmptyState title="No libraries yet">
           The server lists its libraries in its answer to the Bridge&apos;s heartbeat. Pair the
@@ -71,6 +76,12 @@ export function LibrariesTab({ client }: { client: ApiClient }) {
       )}
     </div>
   );
+}
+
+// resultsKey changes when any library's check results do: an answered check
+// moves checked_at, an unanswered one unanswered_at.
+function resultsKey(libraries: Library[]): string {
+  return JSON.stringify(libraries.map((l) => [l.library.id, l.checked_at, l.unanswered_at]));
 }
 
 function LibraryCard({
