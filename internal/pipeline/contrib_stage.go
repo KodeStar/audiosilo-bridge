@@ -200,13 +200,19 @@ func (e *Executor) contribute(ctx context.Context, book store.Book, r scheduler.
 	auditNote := auditAcceptanceNote(book.WorkDir)
 	// The mode once more, just before filing: the work's lookups above take a
 	// while too. Only a turn to local is taken (a slug resolved in local mode
-	// may be a placeholder, never one to file under).
-	if e.db != nil && e.contribModeFor(book) != contribModeLocal {
-		if now, err := e.db.GetBook(ctx, book.ID); err == nil && now.ContribMode == store.ContribModeLocal {
-			book.ContribMode = now.ContribMode
-		}
+	// may be a placeholder, never one to file under), here and before each
+	// dimension's filing (submitIssue).
+	if e.contribModeFor(book) != contribModeLocal && e.turnedLocal(ctx, book.ID) {
+		book.ContribMode = store.ContribModeLocal
 	}
-	if err := e.submitContributions(ctx, book, slug, artifacts, placeholderNote, auditNote); err != nil {
+	err = e.submitContributions(ctx, book, slug, artifacts, placeholderNote, auditNote)
+	if errors.Is(err, errTurnedLocal) {
+		// Turned local while it filed: what it hasn't filed yet stays local (a
+		// dimension filed already is settled, and submitLocal skips it).
+		book.ContribMode = store.ContribModeLocal
+		err = e.submitLocal(ctx, book, slug, artifacts, placeholderNote, auditNote)
+	}
+	if err != nil {
 		return scheduler.StageResult{}, err
 	}
 
@@ -486,15 +492,33 @@ func (e *Executor) submitContributions(ctx context.Context, book store.Book, slu
 // issue is adopted; only a list that can't reach back to a marker over a day old
 // files again). A RateLimitError
 // propagates as a transient stage error (not a park); a resume with an already-recorded
-// row skips that dimension.
+// row skips that dimension. A book turned local before a dimension is filed
+// (turnedLocal: the credential and the filings before it take a while) stops
+// with errTurnedLocal.
 func (e *Executor) submitIssue(ctx context.Context, book store.Book, slug string, artifacts []contribArtifact, auditNote string) error {
-	return e.submitIssueWith(ctx, book, slug, artifacts, auditNote, rowSettled)
+	return e.submitIssueWith(ctx, book, slug, artifacts, auditNote, rowSettled,
+		func() bool { return e.turnedLocal(ctx, book.ID) })
+}
+
+// errTurnedLocal is a filing the contributing stage stopped short of: the book
+// turned local after the stage read its mode (store.KeepBookLocal: a
+// sidecars.generate job whose share the server turned off).
+var errTurnedLocal = errors.New("contributing: the book turned local while it filed")
+
+// turnedLocal reports whether book id's own mode is local now.
+func (e *Executor) turnedLocal(ctx context.Context, id int64) bool {
+	if e.db == nil {
+		return false
+	}
+	now, err := e.db.GetBook(ctx, id)
+	return err == nil && now.ContribMode == store.ContribModeLocal
 }
 
 // submitIssueWith is submitIssue with the rule for a row that is already settled
-// (sidecars.contribute files again over a local or covered one).
+// (sidecars.contribute files again over a local or covered one) and turnedLocal
+// (nil for sidecars.contribute, which files a local book's sidecars on purpose).
 func (e *Executor) submitIssueWith(ctx context.Context, book store.Book, slug string, artifacts []contribArtifact, auditNote string,
-	settled func([]store.Contribution, string) bool) error {
+	settled func([]store.Contribution, string) bool, turnedLocal func() bool) error {
 	cli, err := e.contribClient(ctx)
 	if err != nil {
 		return err
@@ -517,7 +541,7 @@ func (e *Executor) submitIssueWith(ctx context.Context, book store.Book, slug st
 		if rerr != nil {
 			return rerr
 		}
-		issue, ierr := e.fileIssue(ctx, cli, book.ID, a.kind, slug, payload, rowIssue(existing, a.kind))
+		issue, ierr := e.fileIssue(ctx, cli, book.ID, a.kind, slug, payload, rowIssue(existing, a.kind), turnedLocal)
 		if ierr != nil {
 			return ierr
 		}

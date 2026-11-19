@@ -98,6 +98,8 @@ type fakeGitHub struct {
 	// userStatus: GET /user answers this status (0 as usual).
 	failFromPage int
 	userStatus   int
+	// onIssue runs after each issue is made (under the fake's lock).
+	onIssue func()
 }
 
 // testCommunityRepo is the repository the stage contributes sidecars to.
@@ -165,6 +167,9 @@ func (g *fakeGitHub) handle(w http.ResponseWriter, r *http.Request) {
 		repo := strings.TrimSuffix(strings.TrimPrefix(path, "/repos/"), "/issues")
 		g.issues = append(g.issues, createdIssue{repo: repo, number: num, title: req.Title, body: req.Body,
 			labels: req.Labels, author: g.user(), created: g.now()})
+		if g.onIssue != nil {
+			g.onIssue()
+		}
 		if g.lostIssues > 0 {
 			g.lostIssues--
 			g.drop(w)
@@ -1198,6 +1203,47 @@ func TestContributeTurnedLocalWhileResolving(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(export, "reacher-01", charactersFileName)); err != nil {
 		t.Fatalf("local export: %v", err)
+	}
+}
+
+// TestContributeTurnedLocalWhileFiling: a book turned local after the stage
+// filed its first dimension (a sidecars.generate job whose share the server
+// turned off meanwhile) files no other: the rest is exported locally, and the
+// dimension filed already keeps its issue. Allowed: sidecars.contribute's
+// share of the now local book still files the rest, as it is asked to.
+func TestContributeTurnedLocalWhileFiling(t *testing.T) {
+	ctx := context.Background()
+	db := openContribDB(t)
+	gh := newFakeGitHub(t)
+	export := t.TempDir()
+	b := contribBook(t, db, store.NewBook{WorkID: "reacher-01", ContribMode: store.ContribModeIssue}, baseChars("x"), baseRecaps("x"))
+	gh.onIssue = func() {
+		if _, err := db.KeepBookLocal(ctx, b.ID); err != nil {
+			t.Error(err)
+		}
+	}
+	exe := NewExecutor(contribConfig(t, db, contribModeIssue, gh.srv.URL, "", export, fakeTokenResolver{token: "ghp_x"}))
+	if _, err := exe.Execute(ctx, b, state.Contributing, scheduler.StageReport{}); err != nil {
+		t.Fatalf("contribute: %v", err)
+	}
+	if n := gh.issueCount(); n != 1 {
+		t.Fatalf("issues filed = %d, want the first dimension's only", n)
+	}
+	rows := rowsByKind(t, db, b.ID)
+	if c, r := rows[store.ContribKindCharacters], rows[store.ContribKindRecaps]; c.Status != store.ContribStatusSubmitted ||
+		c.URL == "" || r.Status != store.ContribStatusLocal || r.URL != "" {
+		t.Fatalf("rows: characters %+v, recaps %+v", c, r)
+	}
+	if _, err := os.Stat(filepath.Join(export, "reacher-01", recapsFileName)); err != nil {
+		t.Fatalf("local export of the rest: %v", err)
+	}
+
+	gh.mu.Lock()
+	gh.onIssue = nil
+	gh.mu.Unlock()
+	got, err := exe.Share(ctx, b.ID, "", nil)
+	if err != nil || got.Contributed[store.ContribKindRecaps] == "" || gh.issueCount() != 2 {
+		t.Fatalf("share of the local book = %+v %v, issues %d", got, err, gh.issueCount())
 	}
 }
 

@@ -906,7 +906,10 @@ internal/
             which a sidecars.generate job always sets from its contribute param, else
             the configured contribution.mode); the contributing stage reads it again
             after its description step (a job whose share the server turned off may
-            have turned the book local meanwhile, server#218). runAgent's budget preflight gained the
+            have turned the book local meanwhile, server#218), again before it files,
+            and before each dimension's gist and issue (turnedLocal: errTurnedLocal
+            keeps the rest local; sidecars.contribute's Share passes none and files a
+            local book's sidecars). runAgent's budget preflight gained the
             MONTHLY half (checkMonthlyBudget, Config.MonthlyBudgetUSD): this calendar
             month's (UTC, MonthBounds) spend across every book, superseded runs and
             deleted books' runs included (store.SumBudgetCostSince), at or over the cap
