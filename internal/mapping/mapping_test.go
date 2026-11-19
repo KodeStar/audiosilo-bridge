@@ -1188,3 +1188,25 @@ func TestTimeoutEndsThePass(t *testing.T) {
 		t.Fatal("the libraries aren't due again after the hold")
 	}
 }
+
+// A book the last check found at the library folder itself proves nothing on
+// its own (an unmounted share's empty mount point is that folder too), so an
+// unanswered check there records the failure.
+func TestUnansweredCheckOfARootBookFailsClosed(t *testing.T) {
+	t.Parallel()
+	root, files := library(t)
+	mount := func(int64, string) (string, bool) { return root, true }
+	at := time.Date(2026, 11, 19, 10, 0, 0, 0, time.UTC)
+	r := NewRegistry()
+	r.SetLibraries([]link.Library{{ID: 1, Root: root}})
+	src := &scripted{book: &link.Book{Path: "", Files: files}, err: map[int64]error{}}
+	r.Check(context.Background(), src, mount, func() time.Time { return at })
+	if st, _ := r.Status(1); !st.Mapped || st.CheckedPath != "" {
+		t.Fatalf("the first check = %+v", st)
+	}
+	src.answer(1, &link.APIError{Status: http.StatusServiceUnavailable})
+	r.Check(context.Background(), src, mount, func() time.Time { return at.Add(time.Minute) })
+	if st, _ := r.Status(1); st.Mapped || st.Writable || !strings.Contains(st.Error, "library folder itself") {
+		t.Fatalf("an unanswered check kept a root book's state: %+v", st)
+	}
+}

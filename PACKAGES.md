@@ -2219,8 +2219,8 @@ internal/
             isn't mounted leaves an empty folder, and a kept "mapped, writable"
             there would let LibriVox and Audible imports create folders on the
             bare mount point. A first check, one at a moved mount, and one whose
-            folder doesn't show it (unproven) record the failure, so writes
-            wait. A kept state stands KeptChecks (3) check intervals from the
+            folder doesn't show it (unproven; a book found at the mount itself
+            never does) record the failure, so writes wait. A kept state stands KeptChecks (3) check intervals from the
             check that set it (the interval Due last took, the heartbeat's
             mapping.check_minutes): the next unanswered check past that records
             its failure, and Due ends a mapped one during a hold (an unmapped one

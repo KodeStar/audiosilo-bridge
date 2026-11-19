@@ -639,12 +639,21 @@ func (m pacedMarkers) Marker(ctx context.Context, libraryID int64) (string, erro
 // writable" would let an import create folders on the bare mount point. A
 // folder that doesn't show it (gone, or a mount that doesn't answer within
 // ProofTimeout) makes the failure unproven, so the Registry records it and
-// writes wait for a check the server answers. A kept state that wasn't mapped
-// lets nothing write, so it needs no proof.
+// writes wait for a check the server answers, as does a book the last check
+// found at the mount itself (nothing there tells it from an empty mount
+// point). A kept state that wasn't mapped lets nothing write, so it needs no
+// proof.
 func proveKept(st link.LibraryStatus, unanswered error, last link.LibraryStatus) (link.LibraryStatus, error) {
 	var lost unproven
 	if !last.Mapped || last.MountPath != st.MountPath || errors.As(unanswered, &lost) {
 		return st, unanswered
+	}
+	st.Mapped, st.Writable = false, false
+	if last.CheckedPath == "" {
+		// A book at the library's own folder: an unmounted share's empty
+		// mount point shows that folder too, so nothing here proves it.
+		st.Error = "the last check found the book at the library folder itself, which proves nothing without the server, and the server didn't answer this one"
+		return st, unproven{unanswered}
 	}
 	full, err := SafeJoin(st.MountPath, last.CheckedPath)
 	if err == nil {
@@ -653,8 +662,7 @@ func proveKept(st link.LibraryStatus, unanswered error, last link.LibraryStatus)
 	if err == nil {
 		return st, unanswered
 	}
-	st.Mapped, st.Writable = false, false
-	st.Error = "the folder no longer shows " + cmp.Or(last.CheckedPath, "itself") + ", which the last check found (" +
+	st.Error = "the folder no longer shows " + last.CheckedPath + ", which the last check found (" +
 		describeStatError(err) + "), and the server didn't answer this one"
 	return st, unproven{unanswered}
 }
