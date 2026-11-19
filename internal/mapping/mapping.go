@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"math"
 	"os"
 	"path"
 	"path/filepath"
@@ -28,6 +29,7 @@ import (
 
 	"github.com/kodestar/audiosilo-bridge/internal/fsutil"
 	"github.com/kodestar/audiosilo-bridge/internal/link"
+	"github.com/kodestar/audiosilo-bridge/internal/netguard"
 )
 
 // MaxFilesChecked bounds how many of the sample book's files are stat-ed.
@@ -157,18 +159,13 @@ type BookSource interface {
 // can't be used (link.ErrUnusableAnswer).
 const BookReadBudget = 2 * time.Minute
 
-// BookReadSettled reports whether a failed book read is a definite answer (no
-// such book, a 4xx other than a refused token, a 408 or a 429) that asking
-// again won't change. No answer at all, a refused token the job runner is
-// dealing with, a 408, a 429 (the server's request rate) and a 5xx may change,
-// so a job's read asks again.
-func BookReadSettled(err error) bool { return settled(err) }
-
-// settled reports whether a failed server read is a definite answer: no such
-// book or marker, or an APIError that isn't Transient. Anything else (a 408, a
-// 429, a 5xx, a refused token, a timeout, no answer at all) may change if
-// asked again.
-func settled(err error) bool {
+// BookReadSettled reports whether a failed server read (a book, or a podcast
+// library's marker) is a definite answer (no such book or marker, a 4xx other
+// than a refused token, a 408 or a 429) that asking again won't change. No
+// answer at all, a refused token the job runner is dealing with, a 408, a 429
+// (the server's request rate) and a 5xx may change, so a job's read asks again
+// and a mapping check keeps the library's last state.
+func BookReadSettled(err error) bool {
 	if errors.Is(err, link.ErrNoBook) || errors.Is(err, link.ErrNoMarker) {
 		return true
 	}
@@ -179,7 +176,7 @@ func settled(err error) bool {
 // unsettled is err when it is a server failure that may change if asked again,
 // else nil: a check's second result.
 func unsettled(err error) error {
-	if err == nil || settled(err) {
+	if err == nil || BookReadSettled(err) {
 		return nil
 	}
 	return err
@@ -376,7 +373,9 @@ func (r *Registry) Entries(mount MountFunc) []Entry {
 // Due reports whether a check is due: a library with none, one older than
 // interval or one the server last left unanswered, with no check running (it
 // refreshes them, so asking again would only queue a second pass) and no hold
-// after an unanswered run (asking again at once would meet the same 429).
+// after an unanswered run (asking again at once would meet the same 429). Only
+// the heartbeat's periodic run waits for Due: an admin's mapping edit, Check
+// now and a changed library list call Check at once, hold or not.
 func (r *Registry) Due(now time.Time, interval time.Duration) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -415,9 +414,9 @@ func (r *Registry) Check(ctx context.Context, src BookSource, mount MountFunc, n
 		return false
 	}
 	r.checking = true
-	// last is when the run's previous library was checked (spacing);
-	// unanswered is its last failure the server didn't answer (the hold).
-	var last time.Time
+	// pace spaces the run's server reads; unanswered is its last failure the
+	// server didn't answer (the hold).
+	pace := &pacer{spacing: r.spacing}
 	var unanswered error
 	for {
 		var libs []link.Library
@@ -431,12 +430,11 @@ func (r *Registry) Check(ctx context.Context, src BookSource, mount MountFunc, n
 		r.mu.Unlock()
 		limited := false
 		for i, l := range libs {
-			if ctx.Err() != nil || (!last.IsZero() && !sleep(ctx, time.Until(last.Add(r.spacing)))) {
+			if ctx.Err() != nil {
 				break
 			}
-			last = time.Now()
 			path, _ := mount(l.ID, l.Root)
-			st, err := checkOne(ctx, src, l, path, listed)
+			st, err := checkOne(ctx, src, pace, l, path, listed)
 			if ctx.Err() != nil {
 				break // cut short: it says nothing about the library or the server
 			}
@@ -487,16 +485,60 @@ func (r *Registry) Check(ctx context.Context, src BookSource, mount MountFunc, n
 	}
 }
 
-// checkOne checks one library by its kind (Check, or CheckPodcast).
-func checkOne(ctx context.Context, src BookSource, l link.Library, path string, listed map[int64]bool) (link.LibraryStatus, error) {
+// checkOne checks one library by its kind (Check, or CheckPodcast), its server
+// read paced by pace.
+func checkOne(ctx context.Context, src BookSource, pace *pacer, l link.Library, path string, listed map[int64]bool) (link.LibraryStatus, error) {
 	if l.LibraryKind() != "podcasts" {
-		return Check(ctx, src, l, path)
+		return Check(ctx, pacedBooks{src, pace}, l, path)
 	}
 	marker, ok := src.(MarkerSource)
 	if !ok {
 		return link.LibraryStatus{LibraryID: l.ID, MountPath: path, Error: "the server link cannot check a library marker"}, nil
 	}
-	return CheckPodcast(ctx, marker, l, path, func(id int64) bool { return listed[id] })
+	return CheckPodcast(ctx, pacedMarkers{marker, pace}, l, path, func(id int64) bool { return listed[id] })
+}
+
+// pacer spaces a run's server reads at least spacing apart. Only a read waits:
+// a library whose folder is missing never asks, so it costs the run nothing.
+type pacer struct {
+	spacing time.Duration
+	last    time.Time
+}
+
+// wait waits out the spacing since the run's last read, or ctx's error.
+func (p *pacer) wait(ctx context.Context) error {
+	if !p.last.IsZero() {
+		if err := netguard.Wait(ctx, time.Until(p.last.Add(p.spacing))); err != nil {
+			return err
+		}
+	}
+	p.last = time.Now()
+	return nil
+}
+
+// pacedBooks and pacedMarkers are a source whose reads a pacer spaces.
+type pacedBooks struct {
+	src  BookSource
+	pace *pacer
+}
+
+func (b pacedBooks) Book(ctx context.Context, libraryID int64, path string) (*link.Book, error) {
+	if err := b.pace.wait(ctx); err != nil {
+		return nil, err
+	}
+	return b.src.Book(ctx, libraryID, path)
+}
+
+type pacedMarkers struct {
+	src  MarkerSource
+	pace *pacer
+}
+
+func (m pacedMarkers) Marker(ctx context.Context, libraryID int64) (string, error) {
+	if err := m.pace.wait(ctx); err != nil {
+		return "", err
+	}
+	return m.src.Marker(ctx, libraryID)
 }
 
 // record keeps a library's check (r.mu held). One the server didn't answer
@@ -505,8 +547,7 @@ func checkOne(ctx context.Context, src BookSource, l link.Library, path string, 
 func (r *Registry) record(st link.LibraryStatus, unanswered error, at time.Time) {
 	prev, ok := r.results[st.LibraryID]
 	if unanswered != nil && ok && prev.status.MountPath == st.MountPath {
-		prev.retry = true
-		r.results[st.LibraryID] = prev
+		r.markRetry(st.LibraryID)
 		return
 	}
 	r.results[st.LibraryID] = result{status: st, at: at, retry: unanswered != nil}
@@ -531,28 +572,15 @@ func (r *Registry) holdAfter(unanswered error, now time.Time) {
 		return
 	}
 	r.held++
-	wait := RetryFirst
-	for n := 1; n < r.held && wait < RetryMax; n++ {
-		wait *= 2
+	apiErr := &link.APIError{} // no answer: no Retry-After
+	errors.As(unanswered, &apiErr)
+	wait, ok := checkHold.Wait(apiErr, r.held)
+	if !ok {
+		wait = RetryMax // Backoff gives up past Max; a hold stops there
 	}
-	var apiErr *link.APIError
-	if errors.As(unanswered, &apiErr) && apiErr.RetryAfterSet {
-		wait = apiErr.RetryAfter
-	}
-	r.holdUntil = now.Add(min(wait, RetryMax))
+	r.holdUntil = now.Add(wait)
 }
 
-// sleep waits d, false when ctx ends first.
-func sleep(ctx context.Context, d time.Duration) bool {
-	if d <= 0 {
-		return ctx.Err() == nil
-	}
-	t := time.NewTimer(d)
-	defer t.Stop()
-	select {
-	case <-ctx.Done():
-		return false
-	case <-t.C:
-		return true
-	}
-}
+// checkHold is the hold's policy as a link.Backoff that never runs out of
+// tries.
+var checkHold = link.Backoff{Tries: math.MaxInt, First: RetryFirst, Max: RetryMax}

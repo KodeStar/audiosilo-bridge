@@ -460,9 +460,8 @@ func TestUnansweredCheckWithoutAState(t *testing.T) {
 	t.Parallel()
 	root, files := library(t)
 	other, _ := library(t)
-	mounts := map[string]string{"": root}
-	var mu sync.Mutex
-	mount := func(int64, string) (string, bool) { mu.Lock(); defer mu.Unlock(); return mounts[""], true }
+	cur := root
+	mount := func(int64, string) (string, bool) { return cur, true }
 	at := time.Date(2026, 11, 19, 10, 0, 0, 0, time.UTC)
 	r := NewRegistry()
 	r.SetLibraries([]link.Library{{ID: 1, Root: root}})
@@ -477,9 +476,7 @@ func TestUnansweredCheckWithoutAState(t *testing.T) {
 
 	src.answer(1, nil)
 	r.Check(context.Background(), src, mount, func() time.Time { return at })
-	mu.Lock()
-	mounts[""] = other
-	mu.Unlock()
+	cur = other
 	src.answer(1, &link.APIError{Status: http.StatusBadGateway})
 	r.Check(context.Background(), src, mount, func() time.Time { return at }, 1)
 	if st, _ := r.Status(1); st.Mapped || st.MountPath != other {
@@ -585,6 +582,27 @@ func TestChecksArePaced(t *testing.T) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("the run kept waiting after ctx ended")
+	}
+}
+
+// Only a server read waits for the spacing: a run over libraries whose folders
+// are missing asks nothing, so it doesn't wait at all.
+func TestPacingSkipsUnaskedChecks(t *testing.T) {
+	t.Parallel()
+	missing := filepath.Join(t.TempDir(), "missing")
+	mount := func(int64, string) (string, bool) { return missing, true }
+	r := NewRegistry()
+	r.spacing = time.Hour
+	r.SetLibraries([]link.Library{{ID: 1, Root: "/a"}, {ID: 2, Root: "/b"}, {ID: 3, Root: "/c"}})
+	done := make(chan struct{})
+	go func() { r.Check(context.Background(), &scripted{err: map[int64]error{}}, mount, time.Now); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("a run that asked nothing waited for the spacing")
+	}
+	if len(r.Statuses()) != 3 {
+		t.Fatalf("recorded %d checks, want 3", len(r.Statuses()))
 	}
 }
 
