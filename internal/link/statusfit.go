@@ -1,10 +1,6 @@
 package link
 
-import (
-	"cmp"
-	"encoding/json"
-	"slices"
-)
+import "encoding/json"
 
 // The heartbeat bounds of a server before v2.7.0: it refuses a body over
 // LegacyStatusBytes and a list of more than LegacyStatusLibraries mappings (a
@@ -41,10 +37,6 @@ func FitLibraries(st Status, maxBytes, maxLibraries int) (Status, int) {
 		return base, len(st.Libraries)
 	}
 	room := maxBytes - len(b) // the list's "[]" is already counted
-	order := make([]int, len(st.Libraries))
-	for i := range order {
-		order[i] = i
-	}
 	rank := func(l LibraryStatus) int {
 		switch {
 		case l.Writable:
@@ -54,32 +46,35 @@ func FitLibraries(st Status, maxBytes, maxLibraries int) (Status, int) {
 		}
 		return 2
 	}
-	slices.SortStableFunc(order, func(a, c int) int {
-		return cmp.Compare(rank(st.Libraries[a]), rank(st.Libraries[c]))
-	})
-	kept := make([]int, 0, min(len(order), maxLibraries))
-	for _, i := range order {
-		if len(kept) == maxLibraries {
-			break
+	keep, kept := make([]bool, len(st.Libraries)), 0
+	for r := 0; r < 3 && kept < maxLibraries; r++ {
+		for i, l := range st.Libraries {
+			if kept == maxLibraries {
+				break
+			}
+			if rank(l) != r {
+				continue
+			}
+			lb, err := json.Marshal(l)
+			if err != nil {
+				continue
+			}
+			size := len(lb)
+			if kept > 0 {
+				size++ // the comma
+			}
+			if size > room {
+				continue // a smaller mapping further on may still fit
+			}
+			room -= size
+			keep[i], kept = true, kept+1
 		}
-		lb, err := json.Marshal(st.Libraries[i])
-		if err != nil {
-			continue
-		}
-		size := len(lb)
-		if len(kept) > 0 {
-			size++ // the comma
-		}
-		if size > room {
-			continue // a smaller mapping further on may still fit
-		}
-		room -= size
-		kept = append(kept, i)
 	}
-	slices.Sort(kept)
-	out := make([]LibraryStatus, 0, len(kept))
-	for _, i := range kept {
-		out = append(out, st.Libraries[i])
+	out := make([]LibraryStatus, 0, kept)
+	for i, l := range st.Libraries {
+		if keep[i] {
+			out = append(out, l)
+		}
 	}
 	base.Libraries = out
 	return base, len(st.Libraries) - len(out)
