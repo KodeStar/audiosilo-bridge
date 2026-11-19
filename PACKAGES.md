@@ -2219,8 +2219,8 @@ internal/
             it due again, and a 429 or a refused token ends the pass (the rest
             are flagged too; checks queued meanwhile are still made, as an edit
             after the run is, and end at their first 429).
-            Due waits out a hold after such a run: the answer's Retry-After (a zero
-            one, or a past date, counts as none), else
+            Due waits out a hold after such a run: the longest Retry-After of
+            its failures (a zero one, or a past date, counts as none), else
             RetryFirst (1 min) doubling per such run in a row, at most RetryMax
             (30 min); a run the server answered ends it (one that asked nothing
             leaves it). Only the

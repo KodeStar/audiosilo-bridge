@@ -617,6 +617,27 @@ func TestRefusedTokenEndsThePass(t *testing.T) {
 	}
 }
 
+// The hold is the longest Retry-After of a run's failures: a later failure
+// without one (a timeout) doesn't shorten what the server asked for.
+func TestHoldKeepsTheLongestRetryAfter(t *testing.T) {
+	t.Parallel()
+	root, files := library(t)
+	mount := func(int64, string) (string, bool) { return root, true }
+	at := time.Date(2026, 11, 19, 10, 0, 0, 0, time.UTC)
+	r := NewRegistry()
+	r.spacing = time.Millisecond
+	r.SetLibraries([]link.Library{{ID: 1, Root: root}, {ID: 2, Root: root}, {ID: 3, Root: root}})
+	src := &scripted{book: &link.Book{Path: "Author/Book", Files: files}, err: map[int64]error{
+		1: &link.APIError{Status: http.StatusServiceUnavailable, RetryAfter: 10 * time.Minute, RetryAfterSet: true},
+		2: &url.Error{Op: "Get", URL: "https://server/api", Err: context.DeadlineExceeded},
+		3: &link.APIError{Status: http.StatusTooManyRequests, RetryAfter: time.Minute, RetryAfterSet: true},
+	}}
+	r.Check(context.Background(), src, mount, func() time.Time { return at })
+	if r.Due(at.Add(10*time.Minute-time.Second), 24*time.Hour) || !r.Due(at.Add(10*time.Minute), 24*time.Hour) {
+		t.Fatalf("held until %v, want the 503's ten minutes", r.holdUntil.Sub(at))
+	}
+}
+
 // The hold without a Retry-After doubles with each unanswered run in a row, at
 // most RetryMax, and a run the server answers ends it.
 func TestHoldBacksOff(t *testing.T) {

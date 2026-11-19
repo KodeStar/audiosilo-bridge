@@ -435,8 +435,9 @@ func (r *Registry) Check(ctx context.Context, src BookSource, mount MountFunc, n
 		return false
 	}
 	r.checking = true
-	// pace spaces the run's server reads; unanswered is its last failure the
-	// server didn't answer (the hold).
+	// pace spaces the run's server reads; unanswered is the failure the hold
+	// is set by: of those the server didn't answer, the one asking for the
+	// longest wait (the latest when none asked).
 	pace := &pacer{spacing: r.spacing}
 	var unanswered error
 	for {
@@ -469,7 +470,9 @@ func (r *Registry) Check(ctx context.Context, src BookSource, mount MountFunc, n
 			}
 			r.record(st, err, now())
 			if err != nil {
-				unanswered = err
+				if unanswered == nil || retryAfter(err) >= retryAfter(unanswered) {
+					unanswered = err
+				}
 				if _, limited := link.RateLimited(err); limited || errors.Is(err, link.ErrUnauthorized) {
 					ended = true
 					for _, rest := range libs[i+1:] {
@@ -605,19 +608,28 @@ func (r *Registry) holdAfter(unanswered error, now time.Time) {
 		return
 	}
 	r.held++
-	var apiErr *link.APIError
 	retry := link.APIError{} // no answer: no Retry-After
-	if errors.As(unanswered, &apiErr) && apiErr.RetryAfter > 0 {
+	if wait := retryAfter(unanswered); wait > 0 {
 		// A zero Retry-After (or a date already past, a skewed clock) would
 		// end the hold at once: the run's Kick would beat, find the libraries
 		// due and ask again, a tight loop. It counts as none.
-		retry = *apiErr
+		retry.RetryAfter, retry.RetryAfterSet = wait, true
 	}
 	wait, ok := checkHold.Wait(&retry, r.held)
 	if !ok {
 		wait = RetryMax // Backoff gives up past Max; a hold stops there
 	}
 	r.holdUntil = now.Add(wait)
+}
+
+// retryAfter is the wait a failure's answer asked for (its Retry-After), 0
+// when it sent none or there was no answer.
+func retryAfter(err error) time.Duration {
+	var apiErr *link.APIError
+	if errors.As(err, &apiErr) {
+		return apiErr.RetryAfter
+	}
+	return 0
 }
 
 // checkHold is the hold's policy as a link.Backoff that never runs out of
