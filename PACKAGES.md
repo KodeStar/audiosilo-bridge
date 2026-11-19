@@ -2649,9 +2649,9 @@ internal/
             for one, as it returns: a release that blocks, tried again round
             after round, never keeps a new pairing's claims out of the lane.
             So does a run a cancel or a lost claim ends before its handler ran
-            (releaseOwed): its release goes there too, its row running and held
-            until it returns, then the end recorded (cancelled and reported, or
-            lost) in place of the drop's lost record (drop.end).
+            (settle's owed): its release goes there too, its row running and held
+            until it returns, then the end recorded (lost, as a drop's, or for a
+            cancel cancelled and reported, drop.end).
             Never past a stop. Everything runs under the runner's context:
             a stop cuts a round short (or finds it unstarted) and the rows it
             left running are the next start's look (a job the stop interrupted

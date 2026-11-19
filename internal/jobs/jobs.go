@@ -711,8 +711,7 @@ const dropConcurrency = 4
 // releaseRun), dropped for why (a server the Bridge is no longer paired with,
 // or a pairing ended on its page). raw is the result its run had, recorded
 // with it. end, when set, records the job's end in place of the lost record
-// (a run that a cancel or a lost claim ended before its handler ran:
-// releaseOwed).
+// (a run that a cancel ended before its handler ran: settle's owed).
 type drop struct {
 	job Job
 	why error
@@ -1513,9 +1512,14 @@ func (r *Runner) settle(base context.Context, ru *run, rep *Reporter, result any
 	srv, _ := rep.link()
 	// owed: ended for good before its handler ran (a cancel, a lost claim or
 	// a drop), so what an earlier run of it left is still to be released: off
-	// this goroutine (releaseRun, releaseOwed), so a release that blocks
-	// never keeps the job's lane slot, or its place first in line for one,
-	// from other work.
+	// this goroutine (releaseDropped, directly or through releaseRun), so a
+	// release that blocks never keeps the job's lane slot, or its place first
+	// in line for one, from other work. The row stays running and held until
+	// the release returns, then the end is recorded (a cancel's through
+	// drop.end), so a job that waits for the row's end (generate's
+	// awaitOpenJobEnd) starts only once the work is released. Never past a
+	// stop: the job is left running, and the next start resumes it, its first
+	// report hearing the cancel or the lost claim again.
 	owed := !rep.started.Load() && endsForGood(context.Cause(rep.ctx)) && r.holdsWork(job)
 	var park *ParkError
 	switch {
@@ -1558,14 +1562,14 @@ func (r *Runner) settle(base context.Context, ru *run, rep *Reporter, result any
 	case errors.Is(err, errLost):
 		r.log.Info("bridge: the server took a job back", "job", job.ID, "kind", job.Kind)
 		if owed {
-			r.releaseOwed(base, job, err, func(ctx context.Context) { r.recordLost(ctx, job, raw, err) })
+			r.releaseDropped(base, []drop{{job: job, why: err, raw: raw}})
 			return false
 		}
 		r.recordLost(base, job, raw, err)
 	case errors.Is(err, errCancelRequested):
 		r.log.Info("bridge: a job was cancelled", "job", job.ID, "kind", job.Kind, "why", err)
 		if owed {
-			r.releaseOwed(base, job, err, func(ctx context.Context) {
+			r.releaseDropped(base, []drop{{job: job, why: err, end: func(ctx context.Context) {
 				if r.pairingGone(job) {
 					// Unpaired, or paired with another server, while its work
 					// was released: its end goes to no server.
@@ -1573,7 +1577,7 @@ func (r *Runner) settle(base context.Context, ru *run, rep *Reporter, result any
 					return
 				}
 				r.finish(ctx, srv, job, store.JobCancelled, progress, raw, "")
-			})
+			}}})
 			return false
 		}
 		r.finish(base, srv, job, store.JobCancelled, progress, raw, "")
@@ -1617,20 +1621,6 @@ func (r *Runner) releaseRun(base context.Context, job Job, raw json.RawMessage, 
 	}
 	r.log.Info("bridge: a dropped job's work is released before it is recorded lost", "job", job.ID, "kind", job.Kind, "why", why)
 	r.releaseDropped(base, []drop{{job: job, why: why, raw: raw}})
-}
-
-// releaseOwed releases the work of a run that a cancel or a lost claim (why)
-// ended before its handler ran, as releaseRun does a drop's: through
-// releaseDropped, the run's row running and held until end records the job's
-// end, so the run frees its lane slot as it returns, and a job that waits for
-// the row's end (generate's awaitOpenJobEnd) still starts only once the work
-// is released. Never past a stop: the job is left running, and the next start
-// resumes it, its first report hearing the cancel or the lost claim again.
-func (r *Runner) releaseOwed(base context.Context, job Job, why error, end func(context.Context)) {
-	if base.Err() != nil {
-		return
-	}
-	r.releaseDropped(base, []drop{{job: job, why: why, end: end}})
 }
 
 // interrupted leaves a job the stopping Bridge ended running: the next start
