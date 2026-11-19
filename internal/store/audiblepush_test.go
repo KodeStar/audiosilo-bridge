@@ -104,6 +104,22 @@ func TestAudiblePushRows(t *testing.T) {
 		p.RowSeen != Timestamp(at.Add(time.Hour)) || p.RowRead != Timestamp(updated) {
 		t.Fatalf("seen = %+v", p)
 	}
+	// row_read never moves back on the same book: a row with an earlier
+	// updated_at, or one that can't be read, leaves it, and a row read again
+	// at its place (ReadAudibleRow) moves it on, never back.
+	_ = db.SeenAudibleRow(ctx, a.ID, "B000000001", AudibleRow{Ms: 8, Seen: at.Add(time.Hour)})
+	_ = db.SeenAudibleRow(ctx, a.ID, "B000000001", AudibleRow{Ms: 9, Seen: at.Add(time.Hour), Updated: updated.Add(-time.Minute)})
+	if p, _ = db.GetAudiblePush(ctx, a.ID, "B000000001"); p.RowMs != 9 || p.RowRead != Timestamp(updated) {
+		t.Fatalf("an earlier or unknown updated_at moved row_read: %+v", p)
+	}
+	if err := db.ReadAudibleRow(ctx, a.ID, "B000000001", updated.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	_ = db.ReadAudibleRow(ctx, a.ID, "B000000001", updated)
+	_ = db.ReadAudibleRow(ctx, a.ID, "B000000001", time.Time{})
+	if p, _ = db.GetAudiblePush(ctx, a.ID, "B000000001"); p.RowMs != 9 || p.RowRead != Timestamp(updated.Add(time.Minute)) {
+		t.Fatalf("read again = %+v", p)
+	}
 	list, err := db.AudiblePushes(ctx, a.ID)
 	if err != nil || len(list) != 2 || list[0].ASIN != "B000000001" {
 		t.Fatalf("list = %+v, %v", list, err)
@@ -181,7 +197,9 @@ func TestAudiblePushMarkers(t *testing.T) {
 	if w, _ := db.AudibleWaiting(ctx, a.ID); len(w) != 1 || w[0].ASIN != "B000000001" {
 		t.Fatalf("a pending place is waiting to be pushed: %+v", w)
 	}
-	// A re-match: the listed title's book changes on the server first.
+	// A re-match: the listed title's book changes on the server first. The
+	// other book's row_read goes, even a later one.
+	_ = db.ReadAudibleRow(ctx, a.ID, "B000000001", at.Add(time.Hour))
 	if err := db.PendAudiblePush(ctx, a.ID, "B000000001", 1, "A/One (right)", true,
 		AudibleRow{Ms: 5_000, Seen: at.Add(2 * time.Minute), Updated: at}); err != nil {
 		t.Fatal(err)
@@ -189,6 +207,14 @@ func TestAudiblePushMarkers(t *testing.T) {
 	if p := get(); p.Listed || p.Path != "A/One (right)" || p.WantMs == nil || p.RowSeen != Timestamp(at.Add(2*time.Minute)) || p.RowRead != Timestamp(at) ||
 		p.LastMs != 100_000 {
 		t.Fatalf("re-matched = %+v", p)
+	}
+	// Pending again on that book with an earlier updated_at: row_read stays.
+	if err := db.PendAudiblePush(ctx, a.ID, "B000000001", 1, "A/One (right)", true,
+		AudibleRow{Ms: 6_000, Seen: at.Add(3 * time.Minute), Updated: at.Add(-time.Minute)}); err != nil {
+		t.Fatal(err)
+	}
+	if p := get(); p.RowMs != 6_000 || p.RowRead != Timestamp(at) {
+		t.Fatalf("pending again on the book moved row_read back: %+v", p)
 	}
 	// The next job lists both for those books: kept, and now waiting.
 	if err := db.ListAudibleSync(ctx, a.ID, []AudibleSyncTitle{{ASIN: "B000000001", LibraryID: 1, Path: "A/One (right)", RuntimeS: 3600},

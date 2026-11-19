@@ -297,7 +297,7 @@ func serverSkew(serverTime string, now time.Time) time.Duration {
 
 // olderThanKnown reports whether a row read again from the start after a
 // refused cursor (updated, its updated_at) holds a place from no later than
-// the row last recorded for the title x (row_read, that row's updated_at): a
+// the rows read for the title x (row_read, the latest of their updated_at): a
 // server restored from a backup answers the row as it was before then, changed
 // after the baseline perhaps but older than the place already handled, and
 // written again it would move Audible back. Both are the server's clock, so a
@@ -364,21 +364,36 @@ func (p *Pusher) row(ctx context.Context, a store.AudibleAccount, titles map[str
 	place := ms(row.Position)
 	x, known := titles[row.ASIN]
 	sameBook := known && x.LibraryID == row.LibraryID && x.Path == row.Path
+	updated, bad := time.Parse(time.RFC3339Nano, row.UpdatedAt) // zero when it can't be read
+	// row_read never moves back on the same book (AudiblePush.RowRead): a row
+	// the server wrote later with an earlier updated_at, or one that can't be
+	// read, leaves the latest.
+	read := store.Stamp(updated)
+	if sameBook {
+		read = max(x.RowRead, read)
+	}
 	if sameBook && x.RowMs == place {
+		// No new place, but a later updated_at still counts: left behind, a
+		// backup's row from between the two would be a new place on a read
+		// from the start (olderThanKnown).
+		if read != x.RowRead {
+			if err := p.o.DB.ReadAudibleRow(ctx, a.ID, row.ASIN, updated); err != nil {
+				p.o.Log.Warn("audible: recording a server place failed", "account", a.ID, "err", err)
+				return false
+			}
+			x.RowRead = read
+			titles[row.ASIN] = x
+		}
 		return true
 	}
 	history := false
-	updated, bad := time.Parse(time.RFC3339Nano, row.UpdatedAt)
 	if !cutoff.IsZero() {
 		history = bad != nil || updated.Before(cutoff)
 	}
 	if !history && a.PushReread && sameBook {
 		history = bad != nil || olderThanKnown(updated, x)
 	}
-	rec := store.AudibleRow{Ms: place, Seen: now}
-	if bad == nil {
-		rec.Updated = updated
-	}
+	rec := store.AudibleRow{Ms: place, Seen: now, Updated: updated}
 	var err error
 	switch {
 	case !sameBook || !x.Listed:
@@ -401,7 +416,7 @@ func (p *Pusher) row(ctx context.Context, a store.AudibleAccount, titles map[str
 		p.o.Log.Warn("audible: recording a server place failed", "account", a.ID, "err", err)
 		return false
 	}
-	x.RowMs, x.RowSeen, x.RowRead = rec.Ms, store.Timestamp(now), store.Stamp(rec.Updated)
+	x.RowMs, x.RowSeen, x.RowRead = rec.Ms, store.Timestamp(now), read
 	titles[row.ASIN] = x
 	return true
 }

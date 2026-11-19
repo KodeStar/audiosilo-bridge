@@ -1370,6 +1370,67 @@ func TestPushRereadAfterBridgeClockCorrected(t *testing.T) {
 	}
 }
 
+// row_read never moves back (bridge#50): a row read again at the place already
+// recorded moves it on to that row's updated_at, and a row the server wrote
+// later with an earlier updated_at, or one whose updated_at can't be read,
+// leaves it. So a backup's place from between the two is still history on a
+// read from the start after a refused cursor.
+func TestPushRereadRowReadNeverMovesBack(t *testing.T) {
+	ctx := context.Background()
+	e := newEnv(t)
+	e.list(t, st("B000000001", "A/One", 36000))
+	clock := func(d time.Duration) {
+		e.now = e.now.Add(d)
+		e.serverClock(e.now)
+	}
+	clock(0)
+	p := NewPusher(e.o)
+	e.started(t, p)
+
+	// An hour on, One at 5 h is read and written.
+	clock(time.Hour)
+	e.srv.add("A/One", "B000000001", 18000, e.now, "web-1")
+	e.read(p)
+	clock(4 * time.Minute)
+	p.Tick(ctx)
+	// One moves on to 6 h (the backup is taken then), and back to 5 h before
+	// the next read: the server's one row for the book is at 5 h again.
+	clock(10 * time.Minute)
+	backup := []link.AudibleProgressRow{{LibraryID: 1, Path: "A/One", ASIN: "B000000001", Position: 21600,
+		UpdatedAt: e.now.UTC().Format(time.RFC3339Nano), DeviceID: "web-1", Version: 2}}
+	clock(10 * time.Minute)
+	rewound := e.now
+	e.srv.add("A/One", "B000000001", 18000, rewound, "web-1")
+	// A row written late with an earlier updated_at, and one whose updated_at
+	// can't be read, both at the same place.
+	e.srv.add("A/One", "B000000001", 18000, rewound.Add(-30*time.Minute), "web-1")
+	e.srv.resend(len(e.srv.rows)-1, func(r *link.AudibleProgressRow) { r.UpdatedAt = "yesterday" })
+	e.read(p)
+	if x, err := e.db.GetAudiblePush(ctx, acctID, "B000000001"); err != nil || x.RowRead != store.Timestamp(rewound) {
+		t.Fatalf("row_read = %q (%v), want the latest row's %q", x.RowRead, err, store.Timestamp(rewound))
+	}
+
+	// The server is restored from the backup and refuses the cursor.
+	clock(time.Minute)
+	e.srv.mu.Lock()
+	e.srv.badSince = e.account(t).PushCursor
+	e.srv.rows = backup
+	e.srv.mu.Unlock()
+	e.read(p) // refused: back to the start
+	e.srv.mu.Lock()
+	e.srv.badSince = ""
+	e.srv.mu.Unlock()
+	e.read(p)
+	clock(4 * time.Minute)
+	p.Tick(ctx)
+	if got := e.sets(); len(got) != 1 {
+		t.Fatalf("sets = %v, want the backup's 6 h (older than the rewind to 5 h) not written", got)
+	}
+	if x, err := e.db.GetAudiblePush(ctx, acctID, "B000000001"); err != nil || x.WantMs != nil || x.RowRead != store.Timestamp(rewound) {
+		t.Fatalf("One after the read = %+v (%v), want no place waiting and row_read kept", x, err)
+	}
+}
+
 // A re-arm (bridge#51) moves when the title's place was first seen, for the
 // push's wait, never when its row was read: a place the server took before the
 // re-arm that this Bridge hasn't read yet is still new on a read from the

@@ -32,9 +32,14 @@ type AudiblePush struct {
 	// that place (its own clock).
 	RowMs   int64
 	RowSeen string
-	// RowRead is the updated_at (the server's clock) of the row last recorded
-	// from the server's feed for the title (migration 0019, "" none or not
-	// known): a re-arm (RearmAudiblePush) keeps it.
+	// RowRead is the latest updated_at (the server's clock) of the rows read
+	// from the server's feed for the title's book (migration 0019, "" none or
+	// not known). It never moves back while the book stays: a row the server
+	// wrote later with an earlier updated_at (a restored backup's, an older
+	// server's offline backlog) or one whose updated_at can't be read leaves
+	// it, and a row read again at the same place moves it on
+	// (ReadAudibleRow). A re-arm (RearmAudiblePush) keeps it; another book
+	// starts it again.
 	RowRead string
 	// ReassertedMs is the written place an audible.sync already re-armed once
 	// (migration 0014, -1 none): never re-armed again until a new place is
@@ -153,9 +158,10 @@ func (db *DB) GetAudiblePush(ctx context.Context, account, asin string) (Audible
 }
 
 // WantAudiblePush records a server place waiting to be pushed: row's place,
-// with the row. Only a listed row takes one.
+// with the row (row_read only ever moves on: AudiblePush.RowRead). Only a
+// listed row takes one.
 func (db *DB) WantAudiblePush(ctx context.Context, account, asin string, row AudibleRow) error {
-	_, err := db.sql.ExecContext(ctx, `UPDATE audible_push SET want_ms = ?1, row_ms = ?1, row_seen = ?2, row_read = ?3
+	_, err := db.sql.ExecContext(ctx, `UPDATE audible_push SET want_ms = ?1, row_ms = ?1, row_seen = ?2, row_read = max(row_read, ?3)
 		WHERE account = ?4 AND asin = ?5 AND listed = 1`, row.Ms, timestamp(row.Seen), Stamp(row.Updated), account, asin)
 	return err
 }
@@ -163,8 +169,17 @@ func (db *DB) WantAudiblePush(ctx context.Context, account, asin string, row Aud
 // SeenAudibleRow records a server row that was read and needs no push
 // (history: changed before the feed's baseline): the waiting place goes.
 func (db *DB) SeenAudibleRow(ctx context.Context, account, asin string, row AudibleRow) error {
-	_, err := db.sql.ExecContext(ctx, `UPDATE audible_push SET want_ms = NULL, row_ms = ?1, row_seen = ?2, row_read = ?3
+	_, err := db.sql.ExecContext(ctx, `UPDATE audible_push SET want_ms = NULL, row_ms = ?1, row_seen = ?2, row_read = max(row_read, ?3)
 		WHERE account = ?4 AND asin = ?5`, row.Ms, timestamp(row.Seen), Stamp(row.Updated), account, asin)
+	return err
+}
+
+// ReadAudibleRow records the updated_at of a server row read again at the
+// place already recorded for the title (no new place, nothing else changes):
+// row_read moves on to it, never back.
+func (db *DB) ReadAudibleRow(ctx context.Context, account, asin string, updated time.Time) error {
+	_, err := db.sql.ExecContext(ctx, `UPDATE audible_push SET row_read = max(row_read, ?1) WHERE account = ?2 AND asin = ?3`,
+		Stamp(updated), account, asin)
 	return err
 }
 
@@ -173,7 +188,8 @@ func (db *DB) SeenAudibleRow(ctx context.Context, account, asin string, row Audi
 // the last audible.sync didn't list for it (a new match, a re-match, a title
 // synced again, a remap): it waits unlisted, never pushed, until the next
 // sync lists the title for that book (ListAudibleSync keeps it) or doesn't
-// (it goes). Another book forgets the re-asserted place (reasserted_ms).
+// (it goes). Another book forgets the re-asserted place (reasserted_ms) and
+// starts row_read again; the same book's only moves on.
 func (db *DB) PendAudiblePush(ctx context.Context, account, asin string, libraryID int64, path string, want bool,
 	row AudibleRow) error {
 	var ms *int64
@@ -183,7 +199,9 @@ func (db *DB) PendAudiblePush(ctx context.Context, account, asin string, library
 	_, err := db.sql.ExecContext(ctx, `INSERT INTO audible_push (account, asin, library_id, path, listed, want_ms, row_ms, row_seen, row_read)
 		VALUES (?1, ?2, ?3, ?4, 0, ?5, ?6, ?7, ?8)
 		ON CONFLICT(account, asin) DO UPDATE SET library_id = excluded.library_id, path = excluded.path, listed = 0,
-			want_ms = excluded.want_ms, row_ms = excluded.row_ms, row_seen = excluded.row_seen, row_read = excluded.row_read,
+			want_ms = excluded.want_ms, row_ms = excluded.row_ms, row_seen = excluded.row_seen,
+			row_read = CASE WHEN library_id = excluded.library_id AND path = excluded.path THEN max(row_read, excluded.row_read)
+				ELSE excluded.row_read END,
 			reasserted_ms = CASE WHEN library_id = excluded.library_id AND path = excluded.path THEN reasserted_ms ELSE -1 END`,
 		account, asin, libraryID, path, ms, row.Ms, timestamp(row.Seen), Stamp(row.Updated))
 	return err

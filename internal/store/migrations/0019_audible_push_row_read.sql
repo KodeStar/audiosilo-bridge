@@ -1,5 +1,5 @@
--- bridge#50: the updated_at (the server's clock) of the feed row last recorded
--- for the title (row_read, '' none or not known). A read from the feed's start
+-- bridge#50: the latest updated_at (the server's clock) of the feed rows read
+-- for the title's book (row_read, '' none or not known, never moved back). A read from the feed's start
 -- after a refused cursor drops a row no later than it, server time against
 -- server time; a re-arm (RearmAudiblePush) moves row_seen, never this. A row
 -- recorded before this migration starts with none (the baseline's line alone
