@@ -790,6 +790,29 @@ func TestDeepWalkLinkLoops(t *testing.T) {
 	}
 }
 
+// A folder that goes between the walk's two looks at it (the Bridge removing a
+// finished job's folder from the staging volume, a run clearing its own temp
+// folder) holds nothing, as one already gone does (allowed): it never refuses
+// the runs as a folder that can't be listed does.
+func TestDeepWalkFolderGoneMidWalk(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	mkfile(t, filepath.Join(dir, "job-1", "work", "out", "characters.json"))
+	mkfile(t, filepath.Join(dir, "job-2", "request.json"))
+	for name, gone := range map[string]error{"removed": syscall.ENOENT, "a file by now": syscall.ENOTDIR} {
+		w := newMountWalk(boundedLooks)
+		w.readDir = func(p string) ([]fs.DirEntry, error) {
+			if filepath.Base(p) == "work" {
+				return nil, &fs.PathError{Op: "open", Path: p, Err: gone}
+			}
+			return boundedLooks.readDir(p)
+		}
+		if why := w.credentialMount([]mount{at(dir)}); why != "" {
+			t.Fatalf("a folder %s under the walk = %q, want none", name, why)
+		}
+	}
+}
+
 // sharedInode is a folder's FileInfo showing another's device and inode, as a
 // file system that merges others can for two different folders.
 type sharedInode struct {

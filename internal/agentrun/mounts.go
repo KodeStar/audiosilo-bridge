@@ -397,7 +397,8 @@ func (w *mountWalk) deepCredentialIn(point string) (string, error) {
 }
 
 // listDir is the entries of d for the deep walk, none when it holds nothing a
-// run could reach: missing, not a folder (a file, a link to one or to
+// run could reach: missing (at either look: the staging volume's job folders
+// come and go under the walk), not a folder (a file, a link to one or to
 // nowhere), a link loop, closed to the runner, or a link to a folder already
 // walked. A folder deeper than maxMountDepth, entries past the walk's budget,
 // one the runner can enter but not list, a look that didn't answer and the
@@ -433,6 +434,10 @@ func (w *mountWalk) listDir(d walkDir, seen map[fileKey]bool) ([]fs.DirEntry, er
 	case err == nil:
 	case errors.Is(err, fsutil.ErrStatTimeout):
 		return nil, timedOut(d.path)
+	case errors.Is(err, fs.ErrNotExist), errors.Is(err, syscall.ENOTDIR):
+		// Gone, or a file by now, since the look above: a job's folder the
+		// Bridge removed, a run's own temp folder. Not there for a run either.
+		return nil, nil
 	case errors.Is(err, fs.ErrPermission) && !enterable(d.path):
 		return nil, nil
 	default:
