@@ -426,9 +426,9 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 // share (shareParks) runs it again, once a run: a stage that was running in
 // issue mode when the answer came parks there after it. A book done already
 // shared as asked, and a filing the stage had under way when the answer came
-// is not taken back (finish reports what was filed). A failed write is tried
-// again at the next look. It reports whether it lifted a park (b is then as
-// read before the lift).
+// is not taken back (finish reports what was filed). A failed write, or a lift
+// that failed, is tried again at the next look. It reports whether it lifted a
+// park (b is then as read before the lift).
 func (h *Handler) keepShareLocal(ctx context.Context, eng Engine, r *run, b *store.Book) (lifted bool) {
 	if r.shareSkipped == "" {
 		keptLocal := b != nil && b.ContribMode == store.ContribModeLocal
@@ -457,7 +457,9 @@ func (h *Handler) keepShareLocal(ctx context.Context, eng Engine, r *run, b *sto
 	case errors.Is(err, store.ErrStatusChanged):
 		return false // the book moved meanwhile: the next look sees it as it is
 	case err != nil:
-		r.shareLifted = true
+		// Nothing was lifted (the park is as it was), so the next look tries
+		// again: giving up here would leave the job waiting on a share it no
+		// longer makes.
 		h.o.Log.Warn("generate: running the contributing stage again in local mode failed", "job", r.job.ID,
 			"book", b.ID, "err", err)
 		return false

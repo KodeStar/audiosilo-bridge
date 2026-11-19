@@ -1037,6 +1037,49 @@ func TestGenerateShareOffLiftsASharePark(t *testing.T) {
 	}
 }
 
+// failFirstRetryEngine is the engine whose first re-admit fails (the store busy
+// for a moment), nothing changed.
+type failFirstRetryEngine struct {
+	*scheduler.Scheduler
+	failed *atomic.Bool
+}
+
+func (e failFirstRetryEngine) RetryAsRead(ctx context.Context, b store.Book) error {
+	if e.failed.CompareAndSwap(false, true) {
+		return errors.New("database is locked")
+	}
+	return e.Scheduler.RetryAsRead(ctx, b)
+}
+
+// A share park's lift that fails is tried again at the next look: the job never
+// stays parked on a share it no longer makes.
+func TestGenerateShareOffTriesAFailedLiftAgain(t *testing.T) {
+	t.Parallel()
+	hr := newHarness(t)
+	hr.exec.parks["contributing"] = 1
+	failed := &atomic.Bool{}
+	h := hr.handlerWith(func() Engine { return failFirstRetryEngine{hr.sched, failed} })
+	hr.srv.add(68, "Author/Book", `{"contribute":"issue"}`)
+	stop := hr.runner(h)
+	defer stop()
+	hr.waitFor("the core_needed park", func() bool {
+		return hr.srv.saw(68, func(u link.Update, p map[string]any) bool {
+			park, _ := p["park"].(map[string]any)
+			return u.State != nil && *u.State == link.StateNeedsAttention && park["code"] == "core_needed"
+		})
+	})
+	hr.srv.set(func() { hr.srv.shareOff[68] = true })
+	hr.waitFor("done", func() bool { s, _ := hr.srv.final(68); return s == link.StateDone })
+	if !failed.Load() {
+		t.Fatal("the lift never failed")
+	}
+	var r Result
+	hr.result(68, &r)
+	if r.ShareSkipped != ShareSkippedContributionsOff {
+		t.Fatalf("result = %+v", r)
+	}
+}
+
 // queueShare hands generate-and-share job id (Author/Book) out under attempt,
 // its claim saying shareOff.
 func (hr *harness) queueShare(id int64, attempt int, shareOff bool) {

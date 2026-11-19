@@ -3139,7 +3139,8 @@ internal/
             run takes up later too: a resumed or re-claimed job's), and a book parked
             at contributing over the share (contrib_unavailable, core_needed,
             core_pending) runs the stage again, once a run, whenever it parks (a stage
-            running in issue mode when the answer came parks after it); a book done
+            running in issue mode when the answer came parks after it; a lift that
+            failed doesn't count); a book done
             already, or a filing the stage had under way, is left as it is. A later
             run of the job that finds its engine book local keeps the share dropped
             (the module on again since). The result says share_skipped
