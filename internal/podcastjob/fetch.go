@@ -975,8 +975,12 @@ func (s *service) consume(ctx context.Context, b *budget, job *jobs.Job, root *o
 		// A body from zero never reuses the old partial's inode: its name is
 		// unlinked and a fresh exclusive temp is made, so nothing swapped in at
 		// that name (a link to another file) is ever truncated or written.
+		// One the clear cannot remove fails the attempt (errPartialStuck),
+		// never a download beside it.
 		if c.Temp != "" {
-			s.clearCheckpoint(*job, root, c)
+			if err := s.restartPartial(*job, root, c, errors.New("the episode host sent it from byte 0")); err != nil {
+				return podcast.Fetch{}, "", err
+			}
 		}
 		total = r.ContentLength
 		c.Offset = 0

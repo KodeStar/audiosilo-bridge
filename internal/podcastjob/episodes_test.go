@@ -1674,19 +1674,20 @@ func TestAPartialChangedOnDiskThatCannotBeClearedFails(t *testing.T) {
 }
 
 // A host's retry that must start from byte 0 (a resume the host did not
-// prove, a cut with no strong ETag to resume by) goes out only once the
+// prove, a cut with no strong ETag to resume by, a resume the host answered
+// with the whole file) goes out (or is written) only once the
 // partial is cleared: one the clear cannot remove fails write_failed with no
 // further request, never a download beside it.
 func TestARetryFromZeroThatCannotClearItsPartialFails(t *testing.T) {
 	requireProbe(t)
 	requireNonRoot(t)
-	for _, scenario := range []string{"unproven resume", "cut with no etag"} {
+	for _, scenario := range []string{"unproven resume", "cut with no etag", "resume answered whole"} {
 		t.Run(scenario, func(t *testing.T) {
 			h, job := audioHarness(t)
 			s := h.handler.s
 			audio := data(t, "chap-v24-reverse.mp3")
 			show, bar := barShow(t, h)
-			if scenario == "unproven resume" {
+			if scenario != "cut with no etag" {
 				root, err := os.OpenRoot(h.mount)
 				if err != nil {
 					t.Fatal(err)
@@ -1710,6 +1711,14 @@ func TestARetryFromZeroThatCannotClearItsPartialFails(t *testing.T) {
 					w.Header().Set("Content-Length", strconv.Itoa(len(audio)-999))
 					w.WriteHeader(206)
 					w.Write(audio[999:])
+					return
+				}
+				if scenario == "resume answered whole" {
+					bar()
+					w.Header().Set("ETag", `"two"`)
+					w.Header().Set("Content-Length", strconv.Itoa(len(audio)))
+					w.WriteHeader(200)
+					w.Write(audio)
 					return
 				}
 				w.Header().Set("Content-Length", strconv.Itoa(len(audio)))
