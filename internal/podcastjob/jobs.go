@@ -681,7 +681,8 @@ func (s *service) find(root *os.Root, entries []os.DirEntry, rows []store.Podcas
 	missing := fail("feed_secret_missing", "The show no longer matches this private feed. Follow the feed again.")
 	gone := false
 	if p.ShowPath != "" {
-		_, err := root.Lstat(p.ShowPath)
+		var err error
+		p.ShowPath, err = podcast.RealName(root, p.ShowPath)
 		gone = errors.Is(err, os.ErrNotExist)
 		if gone && p.ShowID == "" {
 			return "", nil, nil, missing // no id to find the renamed folder by
@@ -714,9 +715,10 @@ func (s *service) find(root *os.Root, entries []os.DirEntry, rows []store.Podcas
 	tried := map[string]bool{}
 	for _, r := range rows {
 		if r.FeedURLSHA256 == hash || p.ShowID != "" && r.ShowID == p.ShowID {
-			tried[r.ShowPath] = true
-			if f := match(r.ShowPath); f != nil {
-				return r.ShowPath, f, nil, nil
+			at, _ := podcast.RealName(root, r.ShowPath) // spelt as on disk, as entries are
+			tried[at] = true
+			if f := match(at); f != nil {
+				return at, f, nil, nil
 			}
 		}
 	}
@@ -748,6 +750,8 @@ func (s *service) find(root *os.Root, entries []os.DirEntry, rows []store.Podcas
 // be empty) reads show as it is. unlock releases the lock held; it is nil on
 // an error.
 func (s *service) lockShow(ctx context.Context, root *os.Root, lib link.Library, mount, show, id string, guard func(string) error) (_ string, _ *podcast.Feed, unlock func(), _ error) {
+	// Keyed and read under its spelling on disk (a case-only rename by hand).
+	show, _ = podcast.RealName(root, show)
 	valid := podcast.ValidID(id)
 	// searched: show is gone and no folder holds id, so the read of show that
 	// then fails does not search every folder a second time.
@@ -829,10 +833,13 @@ func warnHeld(show, held string, err error) {
 func (s *service) relocate(ctx context.Context, root *os.Root, lib link.Library, id string) string {
 	tried := ""
 	if row, ok, err := s.o.DB.PodcastShowByID(ctx, s.o.ServerID(), id); err == nil && ok && row.LibraryID == lib.ID {
-		if holds(root, row.ShowPath, id) {
-			return row.ShowPath
+		// A row written before a case-only rename by hand names the folder
+		// under its old spelling, which still opens it.
+		at, _ := podcast.RealName(root, row.ShowPath)
+		if holds(root, at, id) {
+			return at
 		}
-		tried = row.ShowPath
+		tried = at
 	}
 	entries, err := readDir(root)
 	if err != nil {

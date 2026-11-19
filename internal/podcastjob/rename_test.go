@@ -1808,3 +1808,50 @@ func TestAFetchNeverTakesAnotherShowsLockAtItsPath(t *testing.T) {
 		t.Fatal("the fetch took the other show's lock")
 	}
 }
+
+// A show folder renamed by hand only in case ("Fixture Show" to "fixture
+// show") on a case-insensitive filesystem (macOS APFS, SMB), where the
+// server's spelling still opens the folder: a fetch naming the old spelling
+// works under the folder's name on disk (its feed.json taken in, the episode
+// saved there, the server asked to index that folder), and a poll naming it
+// does too, so no two jobs lock the folder under two names.
+func TestAFetchResolvesACaseOnlyRename(t *testing.T) {
+	requireProbe(t)
+	h, fetch := audioHarness(t)
+	renameShow(t, h, "Fixture Show", "fixture show")
+	if _, err := os.Lstat(filepath.Join(h.mount, "Fixture Show")); err != nil {
+		t.Skip("the filesystem is case-sensitive")
+	}
+	audio := data(t, "chap-v24-reverse.mp3")
+	setAudio(h, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("ETag", `"one"`)
+		w.Write(audio)
+	})
+	moved := "fixture show/" + strings.TrimPrefix(*fetch.Path, "Fixture Show/")
+	res, err := h.handler.FetchJob().Run(context.Background(), fetch, jobs.LocalReporter())
+	if err != nil {
+		t.Fatal(res, err)
+	}
+	if got := res.(fetchResult); got.Path != moved || got.Fetch.Bytes != int64(len(audio)) {
+		t.Fatal(got)
+	}
+	if f := h.read("fixture show"); !strings.HasPrefix(f.Episodes[0].Path, "fixture show/") {
+		t.Fatal("feed.json still names the old spelling", f.Episodes[0].Path)
+	}
+	if asked := h.scan.last(); !strings.HasPrefix(asked, "fixture show") {
+		t.Fatal("the server was asked to index the old spelling", asked)
+	}
+	show := "Fixture Show"
+	params, _ := json.Marshal(map[string]string{"show_id": "a1b2c3d4e5f60718", "etag": `"abc"`})
+	poll := jobs.Job{ID: 90, Kind: PollKind, LibraryID: fetch.LibraryID, Path: &show, Params: params}
+	h.handler.s.o.Fetcher = feedFetcher(func(context.Context, netguard.Request) (*netguard.Response, error) {
+		return &netguard.Response{Status: 304}, nil
+	})
+	res, err = h.handler.PollJob().Run(context.Background(), poll, jobs.LocalReporter())
+	if err != nil {
+		t.Fatal(res, err)
+	}
+	if r := fields(t, res); r["show_path"] != "fixture show" {
+		t.Fatal(r)
+	}
+}

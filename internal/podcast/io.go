@@ -9,6 +9,7 @@ import (
 	"os"
 	"path"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -123,6 +124,16 @@ func ReadMoved(root *os.Root, show string) (*Feed, string, error) {
 	if from == show || !ValidShow(from) || !episodesIn(f, from) {
 		return nil, "", ErrInvalidFile
 	}
+	if sameFolder(root, from, show) {
+		// The old name spells this very folder otherwise: a rename that changed
+		// only its case on a case-insensitive filesystem (APFS, SMB), or its
+		// normal form on a normalising one. A rename, when show is the folder's
+		// name on disk; the old spelling is never adopted back.
+		if real, err := RealName(root, show); err != nil || real != show {
+			return nil, "", ErrInvalidFile
+		}
+		return f, from, nil
+	}
 	held, err := readFile(root, from)
 	switch {
 	case err == nil:
@@ -135,6 +146,54 @@ func ReadMoved(root *os.Root, show string) (*Feed, string, error) {
 		return nil, from, ErrHeld
 	}
 	return f, from, nil
+}
+
+// sameFolder reports whether a and b, two spellings of a folder's name in
+// root, name the same folder (a case-insensitive or normalising filesystem).
+func sameFolder(root *os.Root, a, b string) bool {
+	x, err := root.Lstat(a)
+	if err != nil {
+		return false
+	}
+	y, err := root.Lstat(b)
+	return err == nil && os.SameFile(x, y)
+}
+
+// RealName is name (a show folder, or any path in root) as its parent folder
+// spells its last component on disk. A case-insensitive filesystem (macOS
+// APFS, SMB shares) opens "Show" for a folder renamed by hand to "show", so a
+// job naming the old spelling would read, lock and write the folder under a
+// name that is no longer its own. name itself when that is how it is spelt,
+// or when no entry of its parent is the same file; the Lstat's error when
+// name is not there.
+func RealName(root *os.Root, name string) (string, error) {
+	st, err := root.Lstat(name)
+	if err != nil {
+		return name, err
+	}
+	dir, base := path.Split(name)
+	parent := strings.TrimSuffix(dir, "/")
+	if parent == "" {
+		parent = "."
+	}
+	d, err := root.Open(parent)
+	if err != nil {
+		return name, err
+	}
+	names, err := d.Readdirnames(-1)
+	_ = d.Close()
+	if err != nil {
+		return name, err
+	}
+	if slices.Contains(names, base) {
+		return name, nil
+	}
+	for _, n := range names {
+		if other, err := root.Lstat(dir + n); err == nil && os.SameFile(st, other) {
+			return dir + n, nil
+		}
+	}
+	return name, nil
 }
 
 // ErrHeld is ReadMoved's refusal of a folder whose old name is still there

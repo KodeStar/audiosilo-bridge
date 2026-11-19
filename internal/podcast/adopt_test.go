@@ -451,3 +451,58 @@ func putJournal(t *testing.T, root *os.Root, name string, j Journal) {
 		t.Fatal(err)
 	}
 }
+
+// caseInsensitive skips t on a filesystem that tells names apart by case
+// (Linux CI): the case-only rename it tests cannot happen there.
+func caseInsensitive(t *testing.T, root *os.Root) {
+	t.Helper()
+	if _, err := root.Lstat("fixture show"); err != nil {
+		t.Skip("the filesystem is case-sensitive")
+	}
+}
+
+// A show folder renamed by hand only in case ("Fixture Show" to "fixture
+// show") on a case-insensitive filesystem (APFS, SMB): the old name still
+// opens the folder, so it is no copy. ReadMoved takes it as a rename under its
+// spelling on disk, never under the old one (which would adopt it back), and
+// RealName answers that spelling for either. (The old spelling still reads as
+// the folder's own: the jobs resolve the name on disk first, podcastjob.)
+func TestACaseOnlyRenameIsTakenIn(t *testing.T) {
+	now := time.Date(2026, 10, 21, 8, 0, 0, 0, time.UTC)
+	root, _ := journalFixture(t)
+	if err := os.Rename(root.Name()+"/Fixture Show", root.Name()+"/fixture show"); err != nil {
+		t.Fatal(err)
+	}
+	caseInsensitive(t, root)
+	for _, name := range []string{"Fixture Show", "fixture show"} {
+		if real, err := RealName(root, name); err != nil || real != "fixture show" {
+			t.Fatal(name, real, err)
+		}
+	}
+	f, from, err := ReadMoved(root, "fixture show")
+	if err != nil || from != "Fixture Show" {
+		t.Fatal(from, err)
+	}
+	if err := Adopt(root, "fixture show", from, f, now); err != nil {
+		t.Fatal(err)
+	}
+	after, err := Read(root, "fixture show")
+	if err != nil || !strings.HasPrefix(after.Episodes[0].Path, "fixture show/") {
+		t.Fatal(err)
+	}
+}
+
+// RealName on a filesystem that tells names apart: the name as given, and the
+// Lstat's error for a name that is not there.
+func TestRealNameKeepsAnExactName(t *testing.T) {
+	root, _ := journalFixture(t)
+	if real, err := RealName(root, "Fixture Show"); err != nil || real != "Fixture Show" {
+		t.Fatal(real, err)
+	}
+	if real, err := RealName(root, "Fixture Show/feed.json"); err != nil || real != "Fixture Show/feed.json" {
+		t.Fatal(real, err)
+	}
+	if _, err := RealName(root, "Gone Show"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal(err)
+	}
+}

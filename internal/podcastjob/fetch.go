@@ -148,6 +148,13 @@ func (h *Fetch) run(parent context.Context, claimed *jobs.Job, rep *jobs.Reporte
 	// episodeAt may have taken the folder in there (renamed back by hand after
 	// a take-in elsewhere, while the server still names it).
 	claimedAt := *job.Path
+	// The folder's name as it is spelt on disk: on a case-insensitive
+	// filesystem a show folder renamed by hand only in case still opens under
+	// the server's spelling, and the locks below would be keyed apart from a
+	// job naming the new one (realPath).
+	if p := realPath(root, *job.Path); p != *job.Path {
+		job.Path, claimed.Path = &p, &p
+	}
 	if _, _, err = s.readEpisode(root, *job.Path, params); err != nil {
 		var p string
 		if p, err = s.episodeAt(waitCtx, root, lib, mount, *job.Path, params, job.ID); err != nil {
@@ -431,6 +438,16 @@ func (s *service) episodeAt(ctx context.Context, root *os.Root, lib link.Library
 		return p, fail("write_failed", "The podcast download records could not be read.")
 	}
 	return show + "/" + path.Base(p), nil
+}
+
+// realPath is episode p with its show folder spelt as it is on disk
+// (podcast.RealName): p when it is, or its folder is not there.
+func realPath(root *os.Root, p string) string {
+	show, err := podcast.RealName(root, path.Dir(p))
+	if err != nil {
+		return p
+	}
+	return show + "/" + path.Base(p)
 }
 
 func (s *service) showKey(mount, show string) string {
