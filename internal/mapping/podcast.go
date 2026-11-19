@@ -11,6 +11,8 @@ import (
 	"os"
 	"regexp"
 	"strconv"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/kodestar/audiosilo-bridge/internal/fsutil"
@@ -53,27 +55,36 @@ func CheckPodcast(ctx context.Context, src MarkerSource, lib link.Library, mount
 func (l looks) checkPodcast(ctx context.Context, src MarkerSource, lib link.Library, mount string, current func(int64) bool) (st link.LibraryStatus, unanswered error) {
 	st = link.LibraryStatus{LibraryID: lib.ID, MountPath: mount, CheckedPath: MarkerPath}
 	op := "podcast marker " + strconv.FormatInt(lib.ID, 10)
-	found, err := l.podcast(op, mount, func(m string) (podcastFound, error) { return lookPodcast(m, lib.ID, current), nil })
+	writes := markerWritesAt(op, mount)
+	found, err := l.podcast(op, mount, func(m string) (podcastFound, error) { return lookPodcast(m, lib.ID, current, writes), nil })
 	if err != nil {
 		st.Error = "the library folder is " + describeStatError(err)
-		return st, slowLook(err)
+		if !errors.Is(err, fsutil.ErrStatTimeout) {
+			return st, nil
+		}
+		// The look goes on, and writes a marker where it finds none: one the
+		// folder shows from here on may be its own (proveKept asks wrote).
+		return st, folderSlow{error: err, wrote: writes.unsettled()}
 	}
 	if found.problem != "" {
 		st.Error = found.problem
 		return st, nil
 	}
 	defer func() {
-		if !st.Mapped && (found.createdMarker || found.createdDir) {
-			// Bounded as the look is, and as the look's own change (one out per
-			// library and mount): one a hung mount holds goes on in the
-			// background, and a later look meanwhile waits on it and is slow,
-			// rather than read the marker it is about to remove (and have the
-			// server's read of it fail, a definite "not mapped").
-			_, _ = l.podcast(op, mount, func(m string) (podcastFound, error) {
-				found.undo(m)
-				return podcastFound{}, &fs.PathError{Op: op, Path: m, Err: fsutil.ErrStatTimeout}
-			})
+		if st.Mapped || (!found.createdMarker && !found.createdDir) {
+			found.write.settle() // the server read it back: the library's marker now
+			return
 		}
+		// Bounded as the look is, and as the look's own change (one out per
+		// library and mount): one a hung mount holds goes on in the
+		// background, and a later look meanwhile waits on it and is slow,
+		// rather than read the marker it is about to remove (and have the
+		// server's read of it fail, a definite "not mapped").
+		_, _ = l.podcast(op, mount, func(m string) (podcastFound, error) {
+			found.undo(m)
+			found.write.settle()
+			return podcastFound{}, &fs.PathError{Op: op, Path: m, Err: fsutil.ErrStatTimeout}
+		})
 	}()
 	nonce, err := src.Marker(ctx, lib.ID)
 	if err != nil || nonce != found.marker.Nonce {
@@ -110,6 +121,53 @@ type podcastFound struct {
 	createdDir    bool
 	createdMarker bool
 	problem       string
+	// write is the marker's write (createdMarker), to settle once the marker
+	// is removed again or the server read it back.
+	write *markerWrite
+}
+
+// markerWrites counts the markers the looks at one library's folder began to
+// write (begun, before the write) and those settled since: removed again, or
+// read back by the server (the library's marker then). A look that timed out
+// goes on, so until every write is settled a marker the folder shows may be a
+// look's own, there only until its undo, and proves nothing of the folder
+// (proveKept, through folderSlow.wrote).
+type markerWrites struct{ begun, settled atomic.Int64 }
+
+// podcastWrites are the markerWrites by library and mount (a look's op and
+// path): one per mapping ever checked.
+var podcastWrites sync.Map
+
+func markerWritesAt(op, mount string) *markerWrites {
+	w, _ := podcastWrites.LoadOrStore(op+"\x00"+mount, &markerWrites{})
+	return w.(*markerWrites)
+}
+
+// unsettled returns a func reporting whether a marker's write was unsettled
+// now, or has begun since. Called once a stat saw a marker, it tells one a
+// look wrote: that write began before the stat's answer, and a write settled
+// before now left no marker of its own for the stat to see.
+func (w *markerWrites) unsettled() func() bool {
+	settled := w.settled.Load()
+	return func() bool { return w.begun.Load() != settled }
+}
+
+// begin counts a marker's write begun, before it is made.
+func (w *markerWrites) begin() *markerWrite {
+	w.begun.Add(1)
+	return &markerWrite{writes: w}
+}
+
+// markerWrite is one marker's write, settled once (nil: no marker written).
+type markerWrite struct {
+	writes *markerWrites
+	once   sync.Once
+}
+
+func (m *markerWrite) settle() {
+	if m != nil {
+		m.once.Do(func() { m.writes.settled.Add(1) })
+	}
 }
 
 // podcastWithin bounds a podcast check's look (lookPodcast) by d as one change
@@ -118,7 +176,10 @@ type podcastFound struct {
 // nobody to clean up.
 func podcastWithin(d time.Duration) func(op, mount string, look func(string) (podcastFound, error)) (podcastFound, error) {
 	return func(op, mount string, look func(string) (podcastFound, error)) (podcastFound, error) {
-		return fsutil.ChangeWithin(op, mount, d, look, func(f podcastFound) { f.undo(mount) })
+		return fsutil.ChangeWithin(op, mount, d, look, func(f podcastFound) {
+			f.undo(mount)
+			f.write.settle()
+		})
 	}
 }
 
@@ -151,8 +212,9 @@ func (f podcastFound) undoIn(root *os.Root) {
 // lookPodcast is a podcast check's look at mount before the server's read,
 // unbounded (checkPodcast bounds it as one): it opens the folder, reads the
 // marker, replaces one of a removed library, and when there is none probes
-// the folder for writing and writes one for library id.
-func lookPodcast(mount string, id int64, current func(int64) bool) (f podcastFound) {
+// the folder for writing and writes one for library id, its write counted in
+// writes.
+func lookPodcast(mount string, id int64, current func(int64) bool, writes *markerWrites) (f podcastFound) {
 	root, err := os.OpenRoot(mount)
 	if err != nil {
 		f.problem = "the library folder is " + describeStatError(err)
@@ -195,10 +257,12 @@ func lookPodcast(mount string, id int64, current func(int64) bool) (f podcastFou
 			return fail("could not create a marker nonce")
 		}
 		marker = libraryMarker{Version: 1, LibraryID: id, Nonce: hex.EncodeToString(nonce[:])}
+		write := writes.begin()
 		if err := writeMarker(root, marker); err != nil {
+			defer write.settle() // once fail has undone what the look made
 			return fail("could not write the library marker")
 		}
-		f.marker, f.createdMarker = marker, true
+		f.marker, f.createdMarker, f.write = marker, true, write
 		return f
 	} else if err != nil {
 		return fail("the library marker is invalid")

@@ -256,7 +256,15 @@ var bounded = looks{
 // so the Registry keeps the library's state (or records it unknown), but the
 // folder was slow, not the server, so it neither ends the run nor holds the
 // next one, and the library is due again after LookAgain.
-type folderSlow struct{ error }
+//
+// wrote is set when the look that timed out may still write to the folder (a
+// podcast check's, whose marker is what proveKept looks for): it reports
+// whether a marker written there since isn't settled, so the marker the folder
+// shows may be the look's own, which proves nothing (markerWrites).
+type folderSlow struct {
+	error
+	wrote func() bool
+}
 
 func (e folderSlow) Unwrap() error { return e.error }
 
@@ -264,7 +272,7 @@ func (e folderSlow) Unwrap() error { return e.error }
 // out, else nil (the folder's answer is definite).
 func slowLook(err error) error {
 	if errors.Is(err, fsutil.ErrStatTimeout) {
-		return folderSlow{err}
+		return folderSlow{error: err}
 	}
 	return nil
 }
@@ -833,8 +841,10 @@ func (m pacedMarkers) Marker(ctx context.Context, libraryID int64) (string, erro
 // within LookTimeout) makes the failure unproven, so the Registry records it
 // and writes wait for a check the server answers, as does a book the last
 // check found at the mount itself (nothing there tells it from an empty mount
-// point). A kept state that wasn't mapped lets nothing write, so it needs no
-// proof.
+// point), and a podcast marker that a look still out may have written itself
+// (folderSlow.wrote: a look that timed out goes on, and writes a marker where
+// it finds none). A kept state that wasn't mapped lets nothing write, so it
+// needs no proof.
 func proveKept(st link.LibraryStatus, unanswered error, last link.LibraryStatus, stat func(string) (fs.FileInfo, error)) (link.LibraryStatus, error) {
 	var lost unproven
 	if !last.Mapped || last.MountPath != st.MountPath || errors.As(unanswered, &lost) {
@@ -851,11 +861,17 @@ func proveKept(st link.LibraryStatus, unanswered error, last link.LibraryStatus,
 	if err == nil {
 		_, err = stat(full)
 	}
-	if err == nil {
+	var slow folderSlow
+	switch {
+	case err != nil:
+		st.Error = "the folder no longer shows " + last.CheckedPath + ", which the last check found (" +
+			describeStatError(err) + "), and " + noAnswer(unanswered)
+	case errors.As(unanswered, &slow) && slow.wrote != nil && slow.wrote():
+		// Asked only once the stat answered: a marker it saw was begun before.
+		st.Error = "the folder shows " + last.CheckedPath + ", but a look of this check may have written it, which proves nothing, and " + noAnswer(unanswered)
+	default:
 		return st, unanswered
 	}
-	st.Error = "the folder no longer shows " + last.CheckedPath + ", which the last check found (" +
-		describeStatError(err) + "), and " + noAnswer(unanswered)
 	return st, unproven{unanswered}
 }
 

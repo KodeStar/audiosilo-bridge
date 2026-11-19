@@ -2293,7 +2293,12 @@ internal/
             as its unanswered error, and the Registry keeps the last state as
             for an unanswered check (same mount, proveKept, the KeptChecks cap;
             else the failure, unknown, whose reason says the folder is not
-            answering), with Entry.SlowAt (slow_at; it and UnansweredAt are
+            answering; a podcast look that timed out goes on and writes a marker
+            where it finds none, so the marker proveKept then sees keeps a state
+            only while no marker write at that folder is unsettled, i.e. not yet
+            removed again or read back by the server: markerWrites,
+            folderSlow.wrote, never the look's own marker on a bare mount
+            point), with Entry.SlowAt (slow_at; it and UnansweredAt are
             exclusive, the later stands) for the page's "The folder did not
             answer within 5 s" note. It neither ends the run nor sets the hold:
             the library is due again after LookAgain (1 min, result.slow;
