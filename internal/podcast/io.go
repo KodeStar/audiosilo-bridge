@@ -9,10 +9,12 @@ import (
 	"os"
 	"path"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/kodestar/audiosilo-bridge/internal/fsutil"
+	"golang.org/x/text/unicode/norm"
 )
 
 var ErrInvalidFile = errors.New("invalid feed.json")
@@ -100,7 +102,11 @@ func episodesIn(f *Feed, show string) bool {
 
 // ReadMoved is Read for a show folder that may have been renamed by hand: its
 // feed.json still names every episode under the folder's old name. It answers
-// that old name, or "" when the episodes live in show (as Read). A feed whose
+// that old name, or "" when the episodes live in show (as Read) or in show
+// spelt in another Unicode normal form that opens the same folder (a
+// normalising filesystem's, SameName): not a rename, and nothing is
+// rewritten, as the server compares the feed's paths byte for byte. The
+// caller then works under the feed's spelling (FeedFolder). A feed whose
 // old-name folder still holds the same show is a copy, not a rename:
 // ErrInvalidFile, as is a feed whose episodes name no single folder. An old
 // name that now holds another show (two folders' names swapped by hand, or
@@ -123,6 +129,20 @@ func ReadMoved(root *os.Root, show string) (*Feed, string, error) {
 	if from == show || !ValidShow(from) || !episodesIn(f, from) {
 		return nil, "", ErrInvalidFile
 	}
+	if sameFolder(root, from, show) {
+		// The old name spells this very folder otherwise. Only in its normal
+		// form (NFC and NFD, on a normalising filesystem): the same name, kept
+		// as the feed spells it. In case on a case-insensitive filesystem
+		// (APFS, SMB): a rename, when show is the folder's name on disk; the
+		// old spelling is never adopted back.
+		if SameName(from, show) {
+			return f, "", nil
+		}
+		if real, err := RealName(root, show); err != nil || real != show {
+			return nil, "", ErrInvalidFile
+		}
+		return f, from, nil
+	}
 	held, err := readFile(root, from)
 	switch {
 	case err == nil:
@@ -135,6 +155,92 @@ func ReadMoved(root *os.Root, show string) (*Feed, string, error) {
 		return nil, from, ErrHeld
 	}
 	return f, from, nil
+}
+
+// sameFolder reports whether a and b, two spellings of a folder's name in
+// root, name the same folder (a case-insensitive or normalising filesystem).
+func sameFolder(root *os.Root, a, b string) bool {
+	x, err := root.Lstat(a)
+	if err != nil {
+		return false
+	}
+	y, err := root.Lstat(b)
+	return err == nil && os.SameFile(x, y)
+}
+
+// RealName is name (a show folder, or any path in root) as its parent folder
+// spells its last component on disk. A case-insensitive filesystem (macOS
+// APFS, SMB shares) opens "Show" for a folder renamed by hand to "show", so a
+// job naming the old spelling would read, lock and write the folder under a
+// name that is no longer its own. name itself when that is how it is spelt,
+// when it is spelt so but for its Unicode normal form (SameName: the same
+// name, which a normalising filesystem stores in either form; the feed's
+// paths keep name's), or when no entry of its parent is the same file; the
+// Lstat's error when name is not there.
+func RealName(root *os.Root, name string) (string, error) {
+	st, err := root.Lstat(name)
+	if err != nil {
+		return name, err
+	}
+	dir, base := path.Split(name)
+	parent := strings.TrimSuffix(dir, "/")
+	if parent == "" {
+		parent = "."
+	}
+	d, err := root.Open(parent)
+	if err != nil {
+		return name, err
+	}
+	names, err := d.Readdirnames(-1)
+	_ = d.Close()
+	if err != nil {
+		return name, err
+	}
+	if slices.Contains(names, base) {
+		return name, nil
+	}
+	sameFile := func(n string) bool {
+		other, err := root.Lstat(dir + n)
+		return err == nil && os.SameFile(st, other)
+	}
+	// name in another normal form first (SameName): one Lstat, not one per
+	// entry, for a folder its feed spells so.
+	for _, n := range names {
+		if SameName(n, base) && sameFile(n) {
+			return name, nil
+		}
+	}
+	for _, n := range names {
+		if sameFile(n) {
+			return dir + n, nil
+		}
+	}
+	return name, nil
+}
+
+// SameName reports whether a and b are one name: spelt alike, or in two
+// Unicode normal forms (NFC and NFD). A normalising filesystem (APFS, SMB)
+// opens either and may list either, so a folder whose spelling differs from
+// its feed's only so was never renamed.
+func SameName(a, b string) bool {
+	return a == b || norm.NFC.String(a) == norm.NFC.String(b)
+}
+
+// FeedFolder is show, a folder f was read from (ReadMoved), as f's episodes
+// spell it: their folder when it is show in another normal form (SameName)
+// that opens this very folder (a normalising filesystem), else show. A job
+// works under that spelling, so no episode path it writes spells the folder
+// otherwise than the feed already does. On a filesystem that keeps names as
+// given (Linux), the two forms are two names: a folder renamed by hand from
+// one to the other, or a second folder in the other form, is never answered
+// by a spelling that is not there or is another folder's.
+func FeedFolder(root *os.Root, f *Feed, show string) string {
+	if len(f.Episodes) > 0 {
+		if from := path.Dir(f.Episodes[0].Path); from != show && SameName(from, show) && sameFolder(root, from, show) {
+			return from
+		}
+	}
+	return show
 }
 
 // ErrHeld is ReadMoved's refusal of a folder whose old name is still there
@@ -214,14 +320,19 @@ func prepare(show string, f *Feed) error {
 	return nil
 }
 
-// save writes f, already scrubbed, as show's feed.json updated at now.
+// save writes f, already scrubbed, as show's feed.json updated at now. The
+// cap, MaxFileBytes, is measured without the folder's name: every episode's
+// path repeats it, so a show folder renamed by hand to a longer name would
+// push a feed near the cap over it, and the take-in (Adopt) and every write
+// after it would fail for good (sizeLimit).
 func save(root *os.Root, show string, f *Feed, now time.Time) error {
 	f.UpdatedAt = now.UTC().Format(time.RFC3339)
 	b, err := json.MarshalIndent(f, "", "  ")
 	if err != nil {
 		return err
 	}
-	if len(b)+1 > MaxFileBytes {
+	limit := sizeLimit(show, len(f.Episodes))
+	if len(b)+1 > limit {
 		for i := range f.Episodes {
 			if f.Episodes[i].RemovedAt != "" {
 				f.Episodes[i].Description = ""
@@ -232,10 +343,18 @@ func save(root *os.Root, show string, f *Feed, now time.Time) error {
 			return err
 		}
 	}
-	if len(b)+1 > MaxFileBytes {
+	if len(b)+1 > limit {
 		return ErrTooLarge
 	}
 	return WriteAtomic(root, show, "feed.json", append(b, '\n'))
+}
+
+// sizeLimit is the most a feed.json of n episodes in show may hold:
+// MaxFileBytes plus the folder's name (as JSON spells it) once per episode
+// path, never more than a reader takes (maxReadBytes, the server's too).
+func sizeLimit(show string, n int) int {
+	name, _ := json.Marshal(show)
+	return min(MaxFileBytes+n*(len(name)-2), maxReadBytes)
 }
 
 // WriteAtomic is rooted at the checked mount, with exclusive hidden temporary

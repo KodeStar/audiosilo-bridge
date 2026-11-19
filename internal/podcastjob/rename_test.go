@@ -1,15 +1,22 @@
 package podcastjob
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -17,6 +24,7 @@ import (
 	"github.com/kodestar/audiosilo-bridge/internal/link"
 	"github.com/kodestar/audiosilo-bridge/internal/netguard"
 	"github.com/kodestar/audiosilo-bridge/internal/podcast"
+	"github.com/kodestar/audiosilo-bridge/internal/secrets"
 	"github.com/kodestar/audiosilo-bridge/internal/store"
 )
 
@@ -243,8 +251,8 @@ func TestTakingInARenamedShowMovesItsDownloadRecords(t *testing.T) {
 		}
 		moved := "Renamed Show/" + strings.TrimPrefix(*job.Path, "Fixture Show/")
 		there := jobs.Job{LibraryID: job.LibraryID, Path: &moved}
-		_, old := s.readCheckpoint(job)
-		saved, now := s.readCheckpoint(there)
+		_, old := s.readCheckpoint(job, fixtureShowID)
+		saved, now := s.readCheckpoint(there, fixtureShowID)
 		if running {
 			if !old || now {
 				t.Fatal("a running download's record was moved", old, now)
@@ -259,10 +267,10 @@ func TestTakingInARenamedShowMovesItsDownloadRecords(t *testing.T) {
 			if got, err := s.episodeAt(context.Background(), root, lib, h.mount, *job.Path, params, job.ID); err != nil || got != moved {
 				t.Fatal("the running download did not find its episode", got)
 			}
-			if _, old = s.readCheckpoint(job); old {
+			if _, old = s.readCheckpoint(job, fixtureShowID); old {
 				t.Fatal("the running download left its record at the old path")
 			}
-			if resumed, tag := s.loadCheckpoint(there, root, c.ShowID, c.EpisodeID); tag != `"one"` || resumed.Offset != 6 {
+			if resumed, tag, _ := s.loadCheckpoint(there, root, c.ShowID, c.EpisodeID); tag != `"one"` || resumed.Offset != 6 {
 				t.Fatal("the running download's record did not follow it", resumed, tag)
 			}
 			continue
@@ -270,7 +278,7 @@ func TestTakingInARenamedShowMovesItsDownloadRecords(t *testing.T) {
 		if old || !now || saved.Temp != c.Temp || saved.Validator != c.Validator {
 			t.Fatal("the record did not follow the folder", old, now, saved)
 		}
-		if resumed, tag := s.loadCheckpoint(there, root, c.ShowID, c.EpisodeID); tag != `"one"` || resumed.Offset != 6 || resumed.Temp != c.Temp {
+		if resumed, tag, _ := s.loadCheckpoint(there, root, c.ShowID, c.EpisodeID); tag != `"one"` || resumed.Offset != 6 || resumed.Temp != c.Temp {
 			t.Fatal("a fetch at the new path would not resume the partial", resumed, tag)
 		}
 	}
@@ -314,7 +322,7 @@ func TestATakeInThatCannotMoveTheRecordsWaits(t *testing.T) {
 		t.Fatal(err)
 	}
 	moved := "Renamed Show/" + strings.TrimPrefix(*job.Path, "Fixture Show/")
-	if _, ok := s.readCheckpoint(jobs.Job{LibraryID: job.LibraryID, Path: &moved}); !ok {
+	if _, ok := s.readCheckpoint(jobs.Job{LibraryID: job.LibraryID, Path: &moved}, fixtureShowID); !ok {
 		t.Fatal("the record did not follow the folder")
 	}
 }
@@ -468,7 +476,7 @@ func TestADownloadUnderAnOldNameLeavesAnotherShowsRecord(t *testing.T) {
 	}
 	kept := func(step string) {
 		t.Helper()
-		if saved, ok := s.readCheckpoint(job); !ok || saved.ShowID != theirs.ShowID || saved.Temp != theirs.Temp {
+		if saved, ok := s.readCheckpoint(job, theirs.ShowID); !ok || saved.ShowID != theirs.ShowID || saved.Temp != theirs.Temp {
 			t.Fatal(step, ": the other show's record went", saved, ok)
 		}
 		if _, err := root.Lstat("Fixture Show/" + theirs.Temp); err != nil {
@@ -515,17 +523,17 @@ func TestTakingInMovesRecordsLeftUnderAGoneEarlierName(t *testing.T) {
 	}
 	base := strings.TrimPrefix(*job.Path, "Fixture Show/")
 	middle, third := "Middle Name/"+base, "Third Name/"+base
-	if _, ok := s.readCheckpoint(jobs.Job{LibraryID: job.LibraryID, Path: &middle}); !ok {
+	if _, ok := s.readCheckpoint(jobs.Job{LibraryID: job.LibraryID, Path: &middle}, fixtureShowID); !ok {
 		t.Fatal("the record did not move to the middle name")
 	}
 	renameShow(t, h, "Middle Name", "Third Name")
 	if _, err := s.readShow(context.Background(), root, lib, h.mount, "Third Name"); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := s.readCheckpoint(jobs.Job{LibraryID: job.LibraryID, Path: &middle}); ok {
+	if _, ok := s.readCheckpoint(jobs.Job{LibraryID: job.LibraryID, Path: &middle}, fixtureShowID); ok {
 		t.Fatal("the record was left under the gone middle name")
 	}
-	if resumed, tag := s.loadCheckpoint(jobs.Job{LibraryID: job.LibraryID, Path: &third}, root, c.ShowID, c.EpisodeID); tag != `"one"` || resumed.Temp != c.Temp {
+	if resumed, tag, _ := s.loadCheckpoint(jobs.Job{LibraryID: job.LibraryID, Path: &third}, root, c.ShowID, c.EpisodeID); tag != `"one"` || resumed.Temp != c.Temp {
 		t.Fatal("the record did not follow the folder", resumed, tag)
 	}
 }
@@ -674,7 +682,7 @@ func TestAbandonClearsARecordMovedWithItsShow(t *testing.T) {
 		t.Fatal("the fetch did not find its episode", got, err)
 	}
 	h.handler.FetchJob().Abandon(context.Background(), job)
-	if _, ok := s.readCheckpoint(jobs.Job{LibraryID: job.LibraryID, Path: &moved}); ok {
+	if _, ok := s.readCheckpoint(jobs.Job{LibraryID: job.LibraryID, Path: &moved}, fixtureShowID); ok {
 		t.Fatal("the moved record was left for the day-old cleanup")
 	}
 	if _, err := root.Lstat("Renamed Show/" + mine.Temp); !errors.Is(err, os.ErrNotExist) {
@@ -684,7 +692,7 @@ func TestAbandonClearsARecordMovedWithItsShow(t *testing.T) {
 		t.Fatal("the moved record's validator was left behind")
 	}
 	otherMoved := "Renamed Show/other.mp3"
-	if saved, ok := s.readCheckpoint(jobs.Job{LibraryID: job.LibraryID, Path: &otherMoved}); !ok || saved.Temp != theirs.Temp {
+	if saved, ok := s.readCheckpoint(jobs.Job{LibraryID: job.LibraryID, Path: &otherMoved}, fixtureShowID); !ok || saved.Temp != theirs.Temp {
 		t.Fatal("another episode's record went", saved, ok)
 	}
 	if _, err := root.Lstat("Renamed Show/" + theirs.Temp); err != nil {
@@ -720,11 +728,11 @@ func TestAbandonDropsARecordLeftUnderAGoneFolder(t *testing.T) {
 	if _, err := s.readShow(context.Background(), root, lib, h.mount, "Renamed Show"); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := s.readCheckpoint(job); !ok {
+	if _, ok := s.readCheckpoint(job, fixtureShowID); !ok {
 		t.Fatal("the take-in moved a running fetch's record")
 	}
 	h.handler.FetchJob().Abandon(context.Background(), job)
-	if _, ok := s.readCheckpoint(job); ok {
+	if _, ok := s.readCheckpoint(job, fixtureShowID); ok {
 		t.Fatal("the abandoned fetch's record stayed under the gone folder")
 	}
 	if v, _ := s.o.Vault.Get(c.Validator); v != "" {
@@ -840,7 +848,7 @@ func TestATakeInLeavesARelocatedFetchsRecord(t *testing.T) {
 	if _, err := s.readShow(context.Background(), root, lib, h.mount, "Third Name"); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := s.readCheckpoint(jobs.Job{LibraryID: job.LibraryID, Path: &relocated}); !ok {
+	if _, ok := s.readCheckpoint(jobs.Job{LibraryID: job.LibraryID, Path: &relocated}, fixtureShowID); !ok {
 		t.Fatal("a running fetch's record was moved")
 	}
 	if err := h.db.FinishServerJob(context.Background(), job.ID, 1, store.JobFailed, nil, ""); err != nil {
@@ -849,7 +857,7 @@ func TestATakeInLeavesARelocatedFetchsRecord(t *testing.T) {
 	if err := s.adoptCheckpoints(context.Background(), root, lib, "Third Name", "Renamed Show", c.ShowID, 0); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := s.readCheckpoint(jobs.Job{LibraryID: job.LibraryID, Path: &third}); !ok {
+	if _, ok := s.readCheckpoint(jobs.Job{LibraryID: job.LibraryID, Path: &third}, fixtureShowID); !ok {
 		t.Fatal("the ended fetch's record did not follow the folder")
 	}
 }
@@ -931,7 +939,7 @@ func TestAFetchFollowsItsShowRenamedMidDownload(t *testing.T) {
 			t.Error("the download did not go on")
 			return
 		}
-		if _, ok := s.readCheckpoint(job); !ok {
+		if _, ok := s.readCheckpoint(job, fixtureShowID); !ok {
 			t.Error("no download record before the rename")
 		}
 		if err := os.Rename(filepath.Join(h.mount, "Fixture Show"), filepath.Join(h.mount, "Renamed Show")); err != nil {
@@ -1011,7 +1019,7 @@ func cutAfterMove(t *testing.T, h *harness, job jobs.Job, audio []byte, calls *a
 			t.Error("the download did not go on")
 			return
 		}
-		if _, ok := h.handler.s.readCheckpoint(job); !ok {
+		if _, ok := h.handler.s.readCheckpoint(job, fixtureShowID); !ok {
 			t.Error("no download record before the rename")
 		}
 		if err := move(filepath.Join(h.mount, "Fixture Show"), filepath.Join(h.mount, "Renamed Show")); err != nil {
@@ -1236,10 +1244,10 @@ func TestAdoptOwnClearsAnOldRecordPastANewOne(t *testing.T) {
 			writing = podcast.TempPrefix + "old"
 		}
 		s.adoptOwn(there, root, old, params, writing)
-		if _, ok := s.readCheckpoint(job); ok {
+		if _, ok := s.readCheckpoint(job, fixtureShowID); ok {
 			t.Fatal("the old record stayed", tc)
 		}
-		if saved, ok := s.readCheckpoint(there); !ok || saved.Temp != newTemp {
+		if saved, ok := s.readCheckpoint(there, fixtureShowID); !ok || saved.Temp != newTemp {
 			t.Fatal("the new record changed", tc, saved)
 		}
 		_, err = os.Lstat(filepath.Join(h.mount, "Renamed Show", podcast.TempPrefix+"old"))
@@ -1252,8 +1260,9 @@ func TestAdoptOwnClearsAnOldRecordPastANewOne(t *testing.T) {
 // A record at the new path that is not this episode's (another show's, the
 // names of two folders swapped by hand and an episode file name both use, or
 // one no job can read back) costs a fetch found elsewhere nothing of its own.
-// Another show's is cleared as a stale record at the fetch's path is, and the
-// fetch goes on from its own partial rather than from byte 0. Past one it
+// Another show's is another record (named by its show, recordName), left for
+// its show (or the day-old sweep, sweepRecords), and the fetch goes on from
+// its own partial rather than from byte 0. Past one it
 // cannot read the fetch downloads again, and its old record follows at its
 // end, with its partial, rather than stay under the folder that is gone,
 // where nothing would ever clear it or sweep the partial it names.
@@ -1286,7 +1295,7 @@ func TestAFetchKeepsItsPartialPastARecordNotItsOwn(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := dir.WriteFile(recordName(3, moved), []byte("{"), 0o600); err != nil {
+			if err := dir.WriteFile(recordName(3, params.ShowID, moved), []byte("{"), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			dir.Close()
@@ -1313,17 +1322,25 @@ func TestAFetchKeepsItsPartialPastARecordNotItsOwn(t *testing.T) {
 		if got, ok := res.(fetchResult); err != nil || !ok || got.Path != moved || got.Fetch.Bytes != int64(len(audio)) || calls.Load() != 1 {
 			t.Fatal(unreadable, res, err, calls.Load())
 		}
-		if _, ok := s.readCheckpoint(job); ok {
+		if _, ok := s.readCheckpoint(job, fixtureShowID); ok {
 			t.Fatal("a record stayed under the folder that is gone", unreadable)
 		}
 		if !unreadable {
 			if left := partials(filepath.Join(h.mount, "Renamed Show")); len(left) != 0 {
 				t.Fatal("a partial was left behind", left)
 			}
-			noRecords(t, s)
+			dir, err := s.checkpointRoot()
+			if err != nil {
+				t.Fatal(err)
+			}
+			left, err := s.records(dir, 3)
+			dir.Close()
+			if err != nil || len(left) != 1 || left[0].ShowID != "ffffffffffffffff" {
+				t.Fatal("the fetch's own record was left, or the other show's went", left, err)
+			}
 			continue
 		}
-		if saved, ok := s.readCheckpoint(there); !ok || saved.Temp != own.Temp {
+		if saved, ok := s.readCheckpoint(there, fixtureShowID); !ok || saved.Temp != own.Temp {
 			t.Fatal("the fetch's old record did not follow the show", saved, ok)
 		}
 		if _, err := os.Lstat(filepath.Join(h.mount, "Renamed Show", own.Temp)); err != nil {
@@ -1515,7 +1532,26 @@ func TestAFetchFollowsItsShowCopiedAndDeletedMidDownload(t *testing.T) {
 	for _, to := range []string{"Renamed Show", "Fixture Show"} {
 		requireProbe(t)
 		h, job := audioHarness(t)
-		h.scan.knows = func(p string) bool { return strings.HasPrefix(p, "Fixture Show/") }
+		moved := to + "/" + strings.TrimPrefix(*job.Path, "Fixture Show/")
+		lockFile := filepath.Join(h.mount, podcast.AttachmentPath(moved, ".fetch.lock"))
+		var checked atomic.Bool
+		h.scan.knows = func(p string) bool {
+			// The episode's rescan, after the publication: the fetch holds the
+			// lock in the folder it followed, taken anew there (a copy of the
+			// file it held) at the same path as at a new one.
+			if p == moved {
+				checked.Store(true)
+				if f, err := os.OpenFile(lockFile, os.O_RDWR, 0); err != nil {
+					t.Error(to, "no lock file where the show is now", err)
+				} else {
+					if free, err := tryLock(f); err != nil || free {
+						t.Error(to, "the fetch published holding no lock where the show is now", err)
+					}
+					f.Close()
+				}
+			}
+			return strings.HasPrefix(p, "Fixture Show/")
+		}
 		audio := data(t, "chap-v24-reverse.mp3")
 		show := filepath.Join(h.mount, "Fixture Show")
 		var calls atomic.Int32
@@ -1539,10 +1575,9 @@ func TestAFetchFollowsItsShowCopiedAndDeletedMidDownload(t *testing.T) {
 			w.Write(audio[2000:])
 		})
 		res, err := h.handler.FetchJob().Run(context.Background(), job, jobs.LocalReporter())
-		moved := to + "/" + strings.TrimPrefix(*job.Path, "Fixture Show/")
 		got, ok := res.(fetchResult)
-		if err != nil || !ok || got.Path != moved || got.Fetch.Bytes != int64(len(audio)) || calls.Load() != 1 {
-			t.Fatal(to, res, err, calls.Load())
+		if err != nil || !ok || got.Path != moved || got.Fetch.Bytes != int64(len(audio)) || calls.Load() != 1 || !checked.Load() {
+			t.Fatal(to, res, err, calls.Load(), checked.Load())
 		}
 		root, err := os.OpenRoot(h.mount)
 		if err != nil {
@@ -1741,6 +1776,8 @@ func TestAFetchCopiedAndDeletedJustBeforeACutResumesFromAllItsBytes(t *testing.T
 // name by hand, with an episode of the same file name and its lock file. The
 // fetch, finding no folder that holds its show, never takes that lock: it
 // would wait on the other show's fetch, or hold its lock, while it writes.
+// Nor does it download the episode again there once the partial it wrote is
+// found gone (the hash before the probe).
 func TestAFetchNeverTakesAnotherShowsLockAtItsPath(t *testing.T) {
 	requireProbe(t)
 	h, job := audioHarness(t)
@@ -1749,7 +1786,9 @@ func TestAFetchNeverTakesAnotherShowsLockAtItsPath(t *testing.T) {
 	show := filepath.Join(h.mount, "Fixture Show")
 	other := filepath.Join(h.mount, podcast.AttachmentPath(*job.Path, ".fetch.lock"))
 	var taken atomic.Bool
+	var calls atomic.Int32
 	setAudio(h, func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
 		w.Header().Set("ETag", `"one"`)
 		w.Header().Set("Content-Length", strconv.Itoa(len(audio)))
 		w.WriteHeader(200)
@@ -1806,5 +1845,1077 @@ func TestAFetchNeverTakesAnotherShowsLockAtItsPath(t *testing.T) {
 	}
 	if taken.Load() {
 		t.Fatal("the fetch took the other show's lock")
+	}
+	// Its partial gone with the folder, the episode is not downloaded a second
+	// time into the other show's folder.
+	if calls.Load() != 1 {
+		t.Fatal("the episode was downloaded again where its show is not:", calls.Load())
+	}
+	if left := partials(show); len(left) != 0 {
+		t.Fatal("a partial was left in the other show's folder", left)
+	}
+}
+
+// A show folder renamed by hand only in case ("Fixture Show" to "fixture
+// show") on a case-insensitive filesystem (macOS APFS, SMB), where the
+// server's spelling still opens the folder: a fetch naming the old spelling
+// works under the folder's name on disk (its feed.json taken in, the episode
+// saved there, the server asked to index that folder), and a poll naming it
+// does too, so no two jobs lock the folder under two names.
+func TestAFetchResolvesACaseOnlyRename(t *testing.T) {
+	requireProbe(t)
+	h, fetch := audioHarness(t)
+	renameShow(t, h, "Fixture Show", "fixture show")
+	if _, err := os.Lstat(filepath.Join(h.mount, "Fixture Show")); err != nil {
+		t.Skip("the filesystem is case-sensitive")
+	}
+	audio := data(t, "chap-v24-reverse.mp3")
+	setAudio(h, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("ETag", `"one"`)
+		w.Write(audio)
+	})
+	moved := "fixture show/" + strings.TrimPrefix(*fetch.Path, "Fixture Show/")
+	res, err := h.handler.FetchJob().Run(context.Background(), fetch, jobs.LocalReporter())
+	if err != nil {
+		t.Fatal(res, err)
+	}
+	if got := res.(fetchResult); got.Path != moved || got.Fetch.Bytes != int64(len(audio)) {
+		t.Fatal(got)
+	}
+	if f := h.read("fixture show"); !strings.HasPrefix(f.Episodes[0].Path, "fixture show/") {
+		t.Fatal("feed.json still names the old spelling", f.Episodes[0].Path)
+	}
+	if asked := h.scan.last(); !strings.HasPrefix(asked, "fixture show") {
+		t.Fatal("the server was asked to index the old spelling", asked)
+	}
+	show := "Fixture Show"
+	params, _ := json.Marshal(map[string]string{"show_id": "a1b2c3d4e5f60718", "etag": `"abc"`})
+	poll := jobs.Job{ID: 90, Kind: PollKind, LibraryID: fetch.LibraryID, Path: &show, Params: params}
+	h.handler.s.o.Fetcher = feedFetcher(func(context.Context, netguard.Request) (*netguard.Response, error) {
+		return &netguard.Response{Status: 304}, nil
+	})
+	res, err = h.handler.PollJob().Run(context.Background(), poll, jobs.LocalReporter())
+	if err != nil {
+		t.Fatal(res, err)
+	}
+	if r := fields(t, res); r["show_path"] != "fixture show" {
+		t.Fatal(r)
+	}
+}
+
+// A show folder whose name on disk differs from its feed's only in Unicode
+// normal form (a Mac tool wrote it NFD; the Bridge named it NFC) on a
+// normalising filesystem: no rename. A fetch naming the feed's spelling
+// saves its episode there, and a poll naming the spelling on disk (as a
+// listing has it) works under the feed's spelling too; feed.json keeps its
+// paths, which the server compares byte for byte.
+func TestANormalFormOnlyDifferenceIsNoRename(t *testing.T) {
+	requireProbe(t)
+	const nfc, nfd = "Caf\u00e9 Show", "Cafe\u0301 Show"
+	h, fetch := audioHarness(t)
+	s := h.handler.s
+	root, err := os.OpenRoot(h.mount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	renameShow(t, h, "Fixture Show", nfc)
+	lib := link.Library{ID: 3, Kind: "podcasts", Root: h.mount}
+	if _, err := s.readShow(context.Background(), root, lib, h.mount, nfc); err != nil {
+		t.Fatal(err)
+	}
+	renameShow(t, h, nfc, nfd)
+	if _, err := os.Lstat(filepath.Join(h.mount, nfc)); err != nil {
+		t.Skip("the filesystem does not normalise names")
+	}
+	if held := holds(root, nfd, fixtureShowID); held != nfc {
+		t.Fatalf("the folder as listed holds the show as %+q, want the feed's spelling", held)
+	}
+	audio := data(t, "chap-v24-reverse.mp3")
+	setAudio(h, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("ETag", `"one"`)
+		w.Write(audio)
+	})
+	p := nfc + "/" + path.Base(*fetch.Path)
+	fetch.Path = &p
+	res, err := h.handler.FetchJob().Run(context.Background(), fetch, jobs.LocalReporter())
+	if err != nil {
+		t.Fatal(res, err)
+	}
+	if got := res.(fetchResult); got.Path != p {
+		t.Fatalf("saved at %+q, want %+q", got.Path, p)
+	}
+	for _, e := range h.read(nfc).Episodes {
+		if !strings.HasPrefix(e.Path, nfc+"/") {
+			t.Fatalf("feed.json was rewritten: %+q", e.Path)
+		}
+	}
+	if asked := h.scan.last(); !strings.HasPrefix(asked, nfc) {
+		t.Fatalf("the server was asked to index %+q", asked)
+	}
+	show := nfd
+	params, _ := json.Marshal(map[string]string{"show_id": fixtureShowID, "etag": `"abc"`})
+	poll := jobs.Job{ID: 90, Kind: PollKind, LibraryID: fetch.LibraryID, Path: &show, Params: params}
+	s.o.Fetcher = feedFetcher(func(context.Context, netguard.Request) (*netguard.Response, error) {
+		return &netguard.Response{Status: 304}, nil
+	})
+	res, err = h.handler.PollJob().Run(context.Background(), poll, jobs.LocalReporter())
+	if err != nil {
+		t.Fatal(res, err)
+	}
+	if r := fields(t, res); r["show_path"] != nfc {
+		t.Fatalf("the poll worked under %+q", r["show_path"])
+	}
+	for _, e := range h.read(nfc).Episodes {
+		if !strings.HasPrefix(e.Path, nfc+"/") {
+			t.Fatalf("feed.json was rewritten by the poll: %+q", e.Path)
+		}
+	}
+}
+
+// Two show folders whose names were swapped by hand, holding episodes of the
+// same file name, each with an interrupted download: a record is named by its
+// show as well as its path (recordName), so taking each folder in moves its
+// show's record to the other name, and each download resumes there. Named by
+// path alone, each record found the other's at its new path and stayed.
+func TestSwappedShowsSharingEpisodeNamesKeepTheirDownloads(t *testing.T) {
+	h, job := audioHarness(t)
+	s := h.handler.s
+	root, err := os.OpenRoot(h.mount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	f := h.read("Fixture Show")
+	f.ShowID = "0123456789abcdef"
+	for i := range f.Episodes {
+		f.Episodes[i].Path = "Other Show/" + filepath.Base(f.Episodes[i].Path)
+	}
+	if err := root.Mkdir("Other Show", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := podcast.Write(root, "Other Show", f, s.o.Now()); err != nil {
+		t.Fatal(err)
+	}
+	base := filepath.Base(*job.Path)
+	mine := checkpoint{ServerHash: s.pairHash(), LibraryID: 3, ShowID: fixtureShowID, EpisodeID: "1cc306d831645e2b", Path: "Fixture Show/" + base, Temp: podcast.TempPrefix + nonce(), Offset: 6, Total: 100}
+	theirs := checkpoint{ServerHash: s.pairHash(), LibraryID: 3, ShowID: f.ShowID, EpisodeID: "1cc306d831645e2b", Path: "Other Show/" + base, Temp: podcast.TempPrefix + nonce(), Offset: 6, Total: 100}
+	for _, c := range []*checkpoint{&mine, &theirs} {
+		if err := root.WriteFile(c.partialName(), []byte("prefix"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		at := c.Path
+		if err := s.saveCheckpoint(jobs.Job{LibraryID: job.LibraryID, Path: &at}, root, c, `"one"`); err != nil {
+			t.Fatal(err)
+		}
+	}
+	renameShow(t, h, "Fixture Show", "Swapping")
+	renameShow(t, h, "Other Show", "Fixture Show")
+	renameShow(t, h, "Swapping", "Other Show")
+	lib := link.Library{ID: 3, Kind: "podcasts", Root: h.mount}
+	for _, show := range []string{"Fixture Show", "Other Show"} {
+		if _, err := s.readShow(context.Background(), root, lib, h.mount, show); err != nil {
+			t.Fatal(show, err)
+		}
+	}
+	for _, c := range []struct {
+		c    checkpoint
+		show string
+	}{{mine, "Other Show"}, {theirs, "Fixture Show"}} {
+		at := c.show + "/" + base
+		resumed, tag, _ := s.loadCheckpoint(jobs.Job{LibraryID: job.LibraryID, Path: &at}, root, c.c.ShowID, c.c.EpisodeID)
+		if tag != `"one"` || resumed.Temp != c.c.Temp || resumed.Offset != 6 {
+			t.Fatal("a show lost its download in the swap", c.c.ShowID, resumed, tag)
+		}
+	}
+}
+
+// A record an older Bridge named by library and path alone is renamed by its
+// show once at the first read of the records, so the interrupted download
+// resumes after the upgrade.
+func TestARecordNamedByPathAloneIsMigrated(t *testing.T) {
+	h, job := audioHarness(t)
+	s := h.handler.s
+	root, err := os.OpenRoot(h.mount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	c := checkpoint{ServerHash: s.pairHash(), LibraryID: 3, ShowID: fixtureShowID, EpisodeID: "1cc306d831645e2b", Path: *job.Path, Temp: podcast.TempPrefix + nonce(), Offset: 6, Total: 100, Validator: secrets.PodcastETagPrefix + nonce()}
+	if err := root.WriteFile(c.partialName(), []byte("prefix"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.o.Vault.Set(c.Validator, `"one"`); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(s.o.DataDir, "podcast-fetch", s.pairHash())
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := json.Marshal(c)
+	if err := os.WriteFile(filepath.Join(dir, legacyRecordName(3, c.Path)), b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	resumed, tag, _ := s.loadCheckpoint(job, root, c.ShowID, c.EpisodeID)
+	if tag != `"one"` || resumed.Temp != c.Temp {
+		t.Fatal("the record was not migrated", resumed, tag)
+	}
+	if _, err := os.Lstat(filepath.Join(dir, legacyRecordName(3, c.Path))); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("the old name was left", err)
+	}
+}
+
+// A copy of the show folder made over it in place (cp into the same folder)
+// while its episode downloads rewrites the partial under the file the fetch
+// holds open: the same file (no check by path sees it), the same size once
+// the download ends, other bytes. The fetch hashes the partial again before
+// it probes and publishes it and, finding it changed, downloads the episode
+// again from byte 0, publishing the episode's own bytes, never the copy's.
+func TestAFetchDownloadsAgainAPartialOverwrittenInPlace(t *testing.T) {
+	requireProbe(t)
+	h, job := audioHarness(t)
+	audio := data(t, "chap-v24-reverse.mp3")
+	show := filepath.Join(h.mount, "Fixture Show")
+	var calls atomic.Int32
+	setAudio(h, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("ETag", `"one"`)
+		w.Header().Set("Content-Length", strconv.Itoa(len(audio)))
+		w.WriteHeader(200)
+		if calls.Add(1) > 1 {
+			w.Write(audio)
+			return
+		}
+		w.Write(audio[:1000])
+		w.(http.Flusher).Flush()
+		if !partialAt(show, 1000) {
+			t.Error("the download did not start")
+			return
+		}
+		left := partials(show)
+		f, err := os.OpenFile(left[0], os.O_WRONLY|os.O_TRUNC, 0)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		f.Write(bytes.Repeat([]byte{0x55}, 1000))
+		f.Close()
+		w.Write(audio[1000:])
+	})
+	res, err := h.handler.FetchJob().Run(context.Background(), job, jobs.LocalReporter())
+	if got, ok := res.(fetchResult); err != nil || !ok || got.Fetch.Bytes != int64(len(audio)) || calls.Load() != 2 {
+		t.Fatal(res, err, calls.Load())
+	}
+	if saved, err := os.ReadFile(filepath.Join(h.mount, *job.Path)); err != nil || !bytes.Equal(saved, audio) {
+		t.Fatal("the published episode is not the host's", err)
+	}
+	if left := partials(show); len(left) != 0 {
+		t.Fatal("a partial was left behind", left)
+	}
+	noRecords(t, h.handler.s)
+}
+
+// A show folder deleted and put back from a copy between two host attempts
+// (the host cut the download; the copy holds the partial as it was and a copy
+// of the lock file, not the file held): the retry goes on from the partial
+// there, holding the lock there, taken anew, rather than append under a
+// copied lock it does not hold beside another download of the episode.
+func TestAFetchRetakesItsLockInAFolderPutBackBetweenAttempts(t *testing.T) {
+	requireProbe(t)
+	h, job := audioHarness(t)
+	s := h.handler.s
+	audio := data(t, "chap-v24-reverse.mp3")
+	lockFile := filepath.Join(h.mount, podcast.AttachmentPath(*job.Path, ".fetch.lock"))
+	show := filepath.Join(h.mount, "Fixture Show")
+	var put atomic.Bool
+	s.o.Wait = func(context.Context, time.Duration) error {
+		// The host's retry wait: the folder is put back from a copy once.
+		if put.CompareAndSwap(false, true) {
+			if err := copyThenDelete(t, show, show); err != nil {
+				t.Error(err)
+			}
+		}
+		return nil
+	}
+	resume := resumeAt(t, audio)
+	var calls atomic.Int32
+	cutAfterMove(t, h, job, audio, &calls, func(string, string) error { return nil }, func(w http.ResponseWriter, r *http.Request) {
+		f, err := os.OpenFile(lockFile, os.O_RDWR, 0)
+		if err != nil {
+			t.Error("no lock file in the folder put back", err)
+		} else {
+			if free, err := tryLock(f); err != nil || free {
+				t.Error("the retry appended under a copied lock it does not hold", err)
+			}
+			f.Close()
+		}
+		resume(w, r)
+	})
+	res, err := h.handler.FetchJob().Run(context.Background(), job, jobs.LocalReporter())
+	if got, ok := res.(fetchResult); err != nil || !ok || got.Path != *job.Path || got.Fetch.Bytes != int64(len(audio)) || calls.Load() != 2 || !put.Load() {
+		t.Fatal(res, err, calls.Load(), put.Load())
+	}
+	if _, err := os.Lstat(lockFile); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("the episode's lock was left", err)
+	}
+	if left := partials(show); len(left) != 0 {
+		t.Fatal("a partial was left behind", left)
+	}
+	noRecords(t, s)
+}
+
+// A re-take of the episode's lock (followLock) at the path it holds already,
+// with the show folder's .audiosilo removed meanwhile (an rm -rf of the show
+// folder under way), makes nothing there: neither the folder (the rm -rf
+// would then fail to remove the show folder) nor the lock file. One whose
+// .audiosilo is there but whose lock file went makes no file either; at a
+// new path the lock is taken, the file made in a .audiosilo there.
+func TestALockRetakeNeverMakesTheFolder(t *testing.T) {
+	h, job := audioHarness(t)
+	s := h.handler.s
+	root, err := os.OpenRoot(h.mount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	ctx := context.Background()
+	for _, gone := range []string{"Fixture Show/.audiosilo", podcast.AttachmentPath(*job.Path, ".fetch.lock")} {
+		l, err := s.lockEpisode(ctx, root, *job.Path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.RemoveAll(filepath.Join(h.mount, gone)); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.followLock(ctx, l, *job.Path); err != nil {
+			t.Fatal(gone, err)
+		}
+		if _, err := root.Lstat(gone); !errors.Is(err, os.ErrNotExist) {
+			t.Fatal("the re-take made", gone, err)
+		}
+		l.release()
+	}
+	l, err := s.lockEpisode(ctx, root, *job.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.release()
+	if err := os.MkdirAll(filepath.Join(h.mount, "Moved Show", ".audiosilo"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// At a new path with no .audiosilo folder the follow fails, making
+	// nothing there and keeping the lock it holds, rather than go on there
+	// holding none.
+	bare := "Bare Show/" + path.Base(*job.Path)
+	if err := os.Mkdir(filepath.Join(h.mount, "Bare Show"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var failure *netguard.Error
+	if err := s.followLock(ctx, l, bare); !errors.As(err, &failure) || failure.Code != "write_failed" || !l.held() || l.p != podcast.AttachmentPath(*job.Path, ".fetch.lock") {
+		t.Fatal("a follow to a path with nothing to lock went on", err)
+	}
+	if _, err := root.Lstat("Bare Show/.audiosilo"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("the follow made the .audiosilo folder", err)
+	}
+	moved := "Moved Show/" + path.Base(*job.Path)
+	if err := s.followLock(ctx, l, moved); err != nil || !l.held() || l.p != podcast.AttachmentPath(moved, ".fetch.lock") {
+		t.Fatal("the lock was not taken at the new path", err)
+	}
+}
+
+// A show folder renamed by hand only in case on a case-insensitive
+// filesystem, its cache row naming the old spelling (as the follow left it):
+// the row names this very folder, not another holding the show, so a poll
+// naming the old spelling takes the folder in under its spelling on disk
+// rather than refuse it as a copy for good. A running fetch naming the old
+// spelling finds its episode there too (episodeAt), never reading on under
+// the old one, whose show lock no other job takes.
+func TestACaseOnlyRenameWithACacheRowIsTakenIn(t *testing.T) {
+	h := newHarness(t)
+	show, id := followed(t, h)
+	lower := strings.ToLower(show)
+	renameShow(t, h, show, lower)
+	if _, err := os.Lstat(filepath.Join(h.mount, show)); err != nil {
+		t.Skip("the filesystem is case-sensitive")
+	}
+	root, err := os.OpenRoot(h.mount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	f := h.read(show)
+	episode := f.Episodes[0]
+	lib := link.Library{ID: 3, Kind: "podcasts", Root: h.mount}
+	want := lower + "/" + path.Base(episode.Path)
+	if got, err := h.handler.s.episodeAt(context.Background(), root, lib, h.mount, episode.Path, fetchParams{id, episode.ID}, 0); err != nil || got != want {
+		t.Fatal("the fetch stayed under the old spelling", got, err)
+	}
+	if f := h.read(lower); !strings.HasPrefix(f.Episodes[0].Path, lower+"/") {
+		t.Fatal("feed.json still names the old spelling", f.Episodes[0].Path)
+	}
+	params, _ := json.Marshal(map[string]string{"show_id": id, "etag": `"abc"`})
+	poll := jobs.Job{ID: 20, Kind: PollKind, LibraryID: &lib.ID, Path: &show, Params: params}
+	res, err := h.handler.PollJob().Run(context.Background(), poll, jobs.LocalReporter())
+	if err != nil || fields(t, res)["show_path"] != lower {
+		t.Fatal(res, err)
+	}
+}
+
+// A show folder whose feed.json cannot be read, its show held by no other
+// folder: the first job there searches the library for the show, and the
+// next ones within a minute fail the same way without searching again (a
+// fetch per episode would each read every show's feed.json).
+func TestAnUnreadableShowIsSearchedForOnce(t *testing.T) {
+	h, job := audioHarness(t)
+	if err := os.WriteFile(filepath.Join(h.mount, "Fixture Show", "feed.json"), []byte("not a feed"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	searches := 0
+	searchHook = func() { searches++ }
+	t.Cleanup(func() { searchHook = nil })
+	show := "Fixture Show"
+	params, _ := json.Marshal(map[string]string{"show_id": fixtureShowID})
+	for i := range 3 {
+		poll := jobs.Job{ID: int64(40 + i), Kind: PollKind, LibraryID: job.LibraryID, Path: &show, Params: params}
+		res, err := h.handler.PollJob().Run(context.Background(), poll, jobs.LocalReporter())
+		var failure *netguard.Error
+		if !errors.As(err, &failure) || failure.Code != "write_failed" {
+			t.Fatal(i, res, err)
+		}
+	}
+	if searches != 1 {
+		t.Fatal("library searches:", searches)
+	}
+}
+
+// Abandon clears every download record of the episode: one moved with its
+// show folder renamed by hand, and one still at the job's path beside it (a
+// folder put back there), not only the first it finds.
+func TestAbandonClearsBothRecordsOfTheEpisode(t *testing.T) {
+	h, job := audioHarness(t)
+	s := h.handler.s
+	root, err := os.OpenRoot(h.mount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	if err := os.CopyFS(filepath.Join(h.mount, "Renamed Show"), os.DirFS(filepath.Join(h.mount, "Fixture Show"))); err != nil {
+		t.Fatal(err)
+	}
+	moved := "Renamed Show/" + path.Base(*job.Path)
+	var temps []string
+	for _, at := range []string{*job.Path, moved} {
+		c := checkpoint{ServerHash: s.pairHash(), LibraryID: 3, ShowID: fixtureShowID, EpisodeID: "1cc306d831645e2b", Path: at, Temp: podcast.TempPrefix + nonce(), Offset: 6, Total: 100}
+		if err := root.WriteFile(c.partialName(), []byte("prefix"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		p := at
+		if err := s.saveCheckpoint(jobs.Job{LibraryID: job.LibraryID, Path: &p}, root, &c, `"one"`); err != nil {
+			t.Fatal(err)
+		}
+		temps = append(temps, c.partialName())
+	}
+	h.handler.FetchJob().Abandon(context.Background(), job)
+	noRecords(t, s)
+	for _, p := range temps {
+		if _, err := root.Lstat(p); !errors.Is(err, os.ErrNotExist) {
+			t.Fatal("a partial was left", p, err)
+		}
+	}
+}
+
+// renamingVault renames the show folder by hand at the first read of the
+// pairing's token (the fetch's first, after it took the episode's lock).
+type renamingVault struct {
+	secrets.Store
+	once sync.Once
+	move func()
+}
+
+func (v *renamingVault) Get(name string) (string, error) {
+	if name == secrets.ServerToken {
+		v.once.Do(v.move)
+	}
+	return v.Store.Get(name)
+}
+
+// A show folder renamed by hand just after a fetch took the episode's lock,
+// the fetch then failing before its download (the folder gone at the
+// snapshot): the lock file moved with the folder, and the fetch lets it go
+// there, its file removed, rather than leave it in the renamed folder.
+func TestAFetchFailingEarlyLetsGoOfItsLockWhereTheShowIsNow(t *testing.T) {
+	h, job := audioHarness(t)
+	s := h.handler.s
+	s.o.Vault = &renamingVault{Store: s.o.Vault, move: func() { renameShow(t, h, "Fixture Show", "Renamed Show") }}
+	if res, err := h.handler.FetchJob().Run(context.Background(), job, jobs.LocalReporter()); err == nil {
+		t.Fatal("the fetch did not fail", res)
+	}
+	if _, err := os.Lstat(filepath.Join(h.mount, "Renamed Show")); err != nil {
+		t.Fatal("the folder was not renamed", err)
+	}
+	lockFile := filepath.Join(h.mount, podcast.AttachmentPath("Renamed Show/"+path.Base(*job.Path), ".fetch.lock"))
+	if _, err := os.Lstat(lockFile); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("the episode's lock was left in the renamed folder", err)
+	}
+}
+
+// A download read back before its probe (the hash that catches a partial
+// overwritten in place) whose read fails, as a network share's does for a
+// moment, is not a changed one: it is read again, and published from the
+// bytes it holds. One request, never the whole episode again from byte 0.
+func TestAFetchReadsItsDownloadAgainAfterAFailedRead(t *testing.T) {
+	requireProbe(t)
+	h, job := audioHarness(t)
+	s := h.handler.s
+	audio := data(t, "chap-v24-reverse.mp3")
+	var calls, reads atomic.Int32
+	setAudio(h, func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Header().Set("ETag", `"one"`)
+		w.Header().Set("Content-Length", strconv.Itoa(len(audio)))
+		w.WriteHeader(200)
+		w.Write(audio)
+	})
+	s.o.Fault = func(at string) error {
+		if at == "rehash" && reads.Add(1) <= 2 {
+			return syscall.EIO
+		}
+		return nil
+	}
+	var waits []time.Duration
+	s.o.Wait = func(_ context.Context, d time.Duration) error { waits = append(waits, d); return nil }
+	res, err := h.handler.FetchJob().Run(context.Background(), job, jobs.LocalReporter())
+	if got, ok := res.(fetchResult); err != nil || !ok || got.Fetch.Bytes != int64(len(audio)) {
+		t.Fatal(res, err)
+	}
+	if calls.Load() != 1 || reads.Load() != 3 {
+		t.Fatal("a read that failed cost the download:", calls.Load(), reads.Load())
+	}
+	if !slices.Equal(waits, []time.Duration{time.Second, 2 * time.Second}) {
+		t.Fatal("waits:", waits)
+	}
+	if saved, err := os.ReadFile(filepath.Join(h.mount, *job.Path)); err != nil || !bytes.Equal(saved, audio) {
+		t.Fatal("the published episode is not the host's", err)
+	}
+	noRecords(t, s)
+}
+
+// A download that cannot be read back at all is never taken for a changed
+// one either: the fetch fails write_failed after its bounded reads, with no
+// second request for the episode.
+func TestAFetchNeverDownloadsAgainADownloadItCannotRead(t *testing.T) {
+	requireProbe(t)
+	h, job := audioHarness(t)
+	s := h.handler.s
+	audio := data(t, "chap-v24-reverse.mp3")
+	var calls, reads atomic.Int32
+	setAudio(h, func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Header().Set("ETag", `"one"`)
+		w.Header().Set("Content-Length", strconv.Itoa(len(audio)))
+		w.WriteHeader(200)
+		w.Write(audio)
+	})
+	s.o.Fault = func(at string) error {
+		if at == "rehash" {
+			reads.Add(1)
+			return syscall.EIO
+		}
+		return nil
+	}
+	_, err := h.handler.FetchJob().Run(context.Background(), job, jobs.LocalReporter())
+	var failure *netguard.Error
+	if !errors.As(err, &failure) || failure.Code != "write_failed" {
+		t.Fatal(err)
+	}
+	if calls.Load() != 1 || reads.Load() != rehashTries {
+		t.Fatal("requests and reads:", calls.Load(), reads.Load())
+	}
+	if _, err := os.Lstat(filepath.Join(h.mount, *job.Path)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("an episode was published unread", err)
+	}
+}
+
+// A whole download whose read-back failed every time (resume-at-total) is
+// kept, its record saying so with the hash it was written with, even from a
+// host that sends no ETag: the next attempt verifies it and publishes it with
+// no GET. Proven changed by then (other bytes at its size), it is downloaded
+// again from byte 0, once; it is never published unverified. A cancelled job
+// (the runner's Abandon) still clears it.
+func TestAFetchKeepsAWholeDownloadItCannotReadBack(t *testing.T) {
+	requireProbe(t)
+	for _, scenario := range []string{"published", "no etag", "changed", "abandoned"} {
+		t.Run(scenario, func(t *testing.T) {
+			h, job := audioHarness(t)
+			s := h.handler.s
+			audio := data(t, "chap-v24-reverse.mp3")
+			var calls atomic.Int32
+			setAudio(h, func(w http.ResponseWriter, r *http.Request) {
+				calls.Add(1)
+				if scenario != "no etag" {
+					w.Header().Set("ETag", `"one"`)
+				}
+				w.Header().Set("Content-Length", strconv.Itoa(len(audio)))
+				w.WriteHeader(200)
+				w.Write(audio)
+			})
+			s.o.Fault = func(at string) error {
+				if at == "rehash" {
+					return syscall.EIO
+				}
+				return nil
+			}
+			_, err := h.handler.FetchJob().Run(context.Background(), job, jobs.LocalReporter())
+			if code(t, err) != "write_failed" || calls.Load() != 1 {
+				t.Fatal(err, calls.Load())
+			}
+			saved, ok := s.readCheckpoint(job, fixtureShowID)
+			sum := sha256.Sum256(audio)
+			if !ok || !saved.complete() || saved.Total != int64(len(audio)) || saved.SHA256 != hex.EncodeToString(sum[:]) {
+				t.Fatalf("the whole download was not kept: %+v", saved)
+			}
+			partial := filepath.Join(h.mount, saved.partialName())
+			if b, err := os.ReadFile(partial); err != nil || !bytes.Equal(b, audio) {
+				t.Fatal("the kept partial is not the download", err)
+			}
+			s.o.Fault = nil
+			switch scenario {
+			case "abandoned":
+				h.handler.FetchJob().Abandon(context.Background(), job)
+				if _, err := os.Lstat(partial); !errors.Is(err, os.ErrNotExist) {
+					t.Fatal("a cancelled fetch kept its partial", err)
+				}
+				noRecords(t, s)
+				return
+			case "changed":
+				other := bytes.Clone(audio)
+				other[len(other)/2] ^= 0xff
+				if err := os.WriteFile(partial, other, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			res, err := h.handler.FetchJob().Run(context.Background(), job, jobs.LocalReporter())
+			got, isResult := res.(fetchResult)
+			if err != nil || !isResult || got.Fetch.Bytes != int64(len(audio)) {
+				t.Fatal(res, err)
+			}
+			want := int32(1)
+			if scenario == "changed" {
+				want = 2
+			}
+			if calls.Load() != want {
+				t.Fatalf("%d requests, want %d", calls.Load(), want)
+			}
+			if b, err := os.ReadFile(filepath.Join(h.mount, *job.Path)); err != nil || !bytes.Equal(b, audio) {
+				t.Fatal("the published episode is not the host's", err)
+			}
+			noRecords(t, s)
+		})
+	}
+}
+
+// A kept whole download that still cannot be read back keeps its record as it
+// was, its age included: saved again at each attempt, a partial never read
+// back (a lasting fault) would never be a day old for cleanOwned, and every
+// attempt would fail with no download for good.
+func TestAKeptWholeDownloadStillUnreadKeepsItsRecordsAge(t *testing.T) {
+	requireProbe(t)
+	h, job := audioHarness(t)
+	s := h.handler.s
+	audio := data(t, "chap-v24-reverse.mp3")
+	var calls atomic.Int32
+	setAudio(h, func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Header().Set("ETag", `"one"`)
+		w.Header().Set("Content-Length", strconv.Itoa(len(audio)))
+		w.WriteHeader(200)
+		w.Write(audio)
+	})
+	s.o.Fault = func(at string) error {
+		if at == "rehash" {
+			return syscall.EIO
+		}
+		return nil
+	}
+	start := s.o.Now()
+	if _, err := h.handler.FetchJob().Run(context.Background(), job, jobs.LocalReporter()); code(t, err) != "write_failed" {
+		t.Fatal(err)
+	}
+	first, ok := s.readCheckpoint(job, fixtureShowID)
+	if !ok || !first.complete() {
+		t.Fatalf("the whole download was not kept: %+v", first)
+	}
+	s.o.Now = func() time.Time { return start.Add(time.Hour) }
+	if _, err := h.handler.FetchJob().Run(context.Background(), job, jobs.LocalReporter()); code(t, err) != "write_failed" || calls.Load() != 1 {
+		t.Fatal(err, calls.Load())
+	}
+	if again, ok := s.readCheckpoint(job, fixtureShowID); !ok || again != first {
+		t.Fatalf("the kept record was saved again: %+v, was %+v", again, first)
+	}
+}
+
+// A kept whole download (resume-at-total) is published with no GET only while
+// the feed still has the enclosure it was downloaded from. One the feed moved
+// (another URL) or remade (another length) under the same episode id since is
+// cleared and the episode downloaded again from byte 0, the old audio never
+// published; one whose partial the clear cannot remove fails write_failed
+// with no GET, never a download beside it. A record from before the source
+// was kept has none, and is still verified by its hash alone.
+func TestAKeptWholeDownloadIsDownloadedAgainWhenItsEnclosureChanged(t *testing.T) {
+	requireProbe(t)
+	for _, scenario := range []string{"same", "url", "length", "legacy", "stuck"} {
+		t.Run(scenario, func(t *testing.T) {
+			if scenario == "stuck" {
+				requireNonRoot(t)
+			}
+			h, job := audioHarness(t)
+			s := h.handler.s
+			root, err := os.OpenRoot(h.mount)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer root.Close()
+			old, remade := data(t, "chap-v24-reverse.mp3"), data(t, "chap-v23.mp3")
+			writeFeed := func(f *podcast.Feed) {
+				if _, err := podcast.Write(root, "Fixture Show", f, s.o.Now()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			f := h.read("Fixture Show")
+			f.Episodes[0].Enclosure.Length = int64(len(old))
+			writeFeed(f)
+			var calls atomic.Int32
+			serving := old
+			setAudio(h, func(w http.ResponseWriter, r *http.Request) {
+				calls.Add(1)
+				body := serving
+				if r.URL.Query().Get("v") == "2" {
+					body = remade
+				}
+				w.Header().Set("ETag", `"one"`)
+				w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+				w.WriteHeader(200)
+				w.Write(body)
+			})
+			s.o.Fault = func(at string) error {
+				if at == "rehash" {
+					return syscall.EIO
+				}
+				return nil
+			}
+			if _, err := h.handler.FetchJob().Run(context.Background(), job, jobs.LocalReporter()); code(t, err) != "write_failed" || calls.Load() != 1 {
+				t.Fatal(err, calls.Load())
+			}
+			s.o.Fault = nil
+			saved, ok := s.readCheckpoint(job, fixtureShowID)
+			if !ok || !saved.complete() || saved.Source == "" || saved.SourceLength != int64(len(old)) {
+				t.Fatalf("the kept whole download does not name its enclosure: %+v", saved)
+			}
+			f = h.read("Fixture Show")
+			switch scenario {
+			case "url", "legacy", "stuck":
+				f.Episodes[0].Enclosure.URL += "?v=2"
+			case "length":
+				f.Episodes[0].Enclosure.Length = int64(len(remade))
+				serving = remade
+			}
+			writeFeed(f)
+			if scenario == "legacy" {
+				saved.Source, saved.SourceLength = "", 0
+				dir, err := s.checkpointRoot()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := writeRecord(dir, s.checkpointName(job, fixtureShowID), saved); err != nil {
+					t.Fatal(err)
+				}
+				dir.Close()
+			}
+			if scenario == "stuck" {
+				barShowAtLoad(t, h)
+				_, err := h.handler.FetchJob().Run(context.Background(), job, jobs.LocalReporter())
+				if code(t, err) != "write_failed" || !strings.Contains(err.Error(), "could not be removed") || calls.Load() != 1 {
+					t.Fatal(err, calls.Load())
+				}
+				if again, ok := s.readCheckpoint(job, fixtureShowID); !ok || again != saved {
+					t.Fatalf("the record of the partial still on disk was dropped: %+v", again)
+				}
+				if _, err := os.Lstat(filepath.Join(h.mount, *job.Path)); !errors.Is(err, os.ErrNotExist) {
+					t.Fatal("the old download was published", err)
+				}
+				return
+			}
+			res, err := h.handler.FetchJob().Run(context.Background(), job, jobs.LocalReporter())
+			if _, isResult := res.(fetchResult); err != nil || !isResult {
+				t.Fatal(res, err)
+			}
+			want, published := int32(2), remade
+			if scenario == "same" || scenario == "legacy" {
+				want, published = 1, old
+			}
+			if calls.Load() != want {
+				t.Fatalf("%d requests, want %d", calls.Load(), want)
+			}
+			if b, err := os.ReadFile(filepath.Join(h.mount, *job.Path)); err != nil || !bytes.Equal(b, published) {
+				t.Fatal("the published episode is not the feed's current audio", err)
+			}
+			noRecords(t, s)
+		})
+	}
+}
+
+// A show folder renamed by hand between the fetch's last follow and the read
+// of its download leaves no partial at the path read: not a changed download.
+// The fetch follows the show and reads the partial there, publishing it from
+// the one request.
+func TestAFetchFollowsAShowRenamedWhileItsDownloadIsReadBack(t *testing.T) {
+	requireProbe(t)
+	h, job := audioHarness(t)
+	s := h.handler.s
+	if err := h.db.RecordClaim(context.Background(), store.ServerJob{ID: job.ID, Kind: FetchKind, LibraryID: job.LibraryID, Path: job.Path, Params: job.Params, Attempt: 1, ServerID: "server-1"}); err != nil {
+		t.Fatal(err)
+	}
+	h.scan.knows = func(p string) bool { return strings.HasPrefix(p, "Fixture Show/") }
+	audio := data(t, "chap-v24-reverse.mp3")
+	var calls atomic.Int32
+	setAudio(h, func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Header().Set("ETag", `"one"`)
+		w.Header().Set("Content-Length", strconv.Itoa(len(audio)))
+		w.WriteHeader(200)
+		w.Write(audio)
+	})
+	var once sync.Once
+	s.o.Fault = func(at string) error {
+		if at == "rehash" {
+			once.Do(func() { renameShow(t, h, "Fixture Show", "Renamed Show") })
+		}
+		return nil
+	}
+	res, err := h.handler.FetchJob().Run(context.Background(), job, jobs.LocalReporter())
+	moved := "Renamed Show/" + path.Base(*job.Path)
+	got, ok := res.(fetchResult)
+	if err != nil || !ok || got.Path != moved || got.Fetch.Bytes != int64(len(audio)) || calls.Load() != 1 {
+		t.Fatal(res, err, calls.Load())
+	}
+	if saved, err := os.ReadFile(filepath.Join(h.mount, moved)); err != nil || !bytes.Equal(saved, audio) {
+		t.Fatal("the episode was not published in the renamed folder", err)
+	}
+	if left := partials(filepath.Join(h.mount, "Renamed Show")); len(left) != 0 {
+		t.Fatal("a partial was left behind", left)
+	}
+	noRecords(t, s)
+}
+
+// abandonRecord saves a download record and its partial for job's episode and
+// answers the record.
+func abandonRecord(t *testing.T, s *service, root *os.Root, job jobs.Job) checkpoint {
+	t.Helper()
+	var p fetchParams
+	if err := json.Unmarshal(job.Params, &p); err != nil {
+		t.Fatal(err)
+	}
+	c := checkpoint{ServerHash: s.pairHash(), LibraryID: *job.LibraryID, ShowID: p.ShowID, EpisodeID: p.EpisodeID, Path: *job.Path, Temp: podcast.TempPrefix + nonce(), Offset: 6, Total: 100}
+	if err := root.WriteFile(c.partialName(), []byte("prefix"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.saveCheckpoint(job, root, &c, `"one"`); err != nil {
+		t.Fatal(err)
+	}
+	return c
+}
+
+// Abandon's wait for the episode's lock is bounded: a running download of the
+// episode (a duplicate claim's) holds it for as long as it runs, and the
+// abandoned job would keep its runner slot until then. The lock still held
+// after the wait, the record and the partial are that download's, and stay.
+func TestAbandonNeverWaitsOutARunningFetchOfItsEpisode(t *testing.T) {
+	h, job := audioHarness(t)
+	s := h.handler.s
+	root, err := os.OpenRoot(h.mount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	c := abandonRecord(t, s, root, job)
+	held, err := s.lockEpisode(context.Background(), root, *job.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.release()
+	was := abandonWait
+	abandonWait = 50 * time.Millisecond
+	defer func() { abandonWait = was }()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		h.handler.FetchJob().Abandon(context.Background(), job)
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Abandon waited on the lock of a running download")
+	}
+	if saved, ok := s.readCheckpoint(job, c.ShowID); !ok || saved.Temp != c.Temp {
+		t.Fatal("the running download's record was cleared", saved, ok)
+	}
+	if _, err := root.Lstat(c.partialName()); err != nil {
+		t.Fatal("the running download's partial was removed", err)
+	}
+	if v, _ := s.o.Vault.Get(c.Validator); v == "" {
+		t.Fatal("the running download's validator was dropped")
+	}
+}
+
+// Another open row of the episode (a duplicate claim) shares the abandoned
+// job's download record. While that fetch's row runs, the record is its own
+// to resume from, whoever holds the lock: stopped at a resumable point it
+// holds none, and neither does one whose show folder was renamed by hand
+// before it followed. Abandon leaves the record, its partial and its
+// validator; alone, the abandoned job's record goes.
+func TestAbandonLeavesTheRecordOfARunningFetchOfItsEpisode(t *testing.T) {
+	for _, c := range []struct {
+		name      string
+		duplicate bool
+		gone      bool
+	}{
+		{"lock free", true, false},
+		{"folder gone", true, true},
+		{"no other fetch", false, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			h, job := audioHarness(t)
+			s := h.handler.s
+			root, err := os.OpenRoot(h.mount)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer root.Close()
+			ids := []int64{job.ID}
+			if c.duplicate {
+				ids = append(ids, job.ID+1)
+			}
+			for _, id := range ids {
+				if err := h.db.RecordClaim(context.Background(), store.ServerJob{ID: id, Kind: FetchKind, LibraryID: job.LibraryID, Path: job.Path, Params: job.Params, Attempt: 1, ServerID: "server-1"}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			rec := abandonRecord(t, s, root, job)
+			partial := rec.partialName()
+			if c.gone {
+				renameShow(t, h, "Fixture Show", "Renamed Show")
+				partial = "Renamed Show/" + rec.Temp
+			}
+			// Ended already, as a cancelled job's own Run calls it.
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			h.handler.FetchJob().Abandon(ctx, job)
+			saved, ok := s.readCheckpoint(job, rec.ShowID)
+			v, _ := s.o.Vault.Get(rec.Validator)
+			_, perr := root.Lstat(partial)
+			if !c.duplicate {
+				if ok || v != "" || !errors.Is(perr, os.ErrNotExist) {
+					t.Fatal("the abandoned job's own record was left", ok, v, perr)
+				}
+				return
+			}
+			if !ok || saved.Temp != rec.Temp || v == "" || perr != nil {
+				t.Fatal("the record of a fetch still running was cleared", ok, v, perr)
+			}
+		})
+	}
+}
+
+// The migration of the records an older Bridge named by path alone is done
+// only once every one of them moved. A pass that could not move one (its new
+// name not free to write) leaves the pairing for the next read of the
+// records, which moves what is left, touching nothing the first pass moved;
+// marked done after the failure, that download would never resume and its
+// partial, a recorded one, would never be swept.
+func TestAMigrationThatCouldNotMoveARecordIsTriedAgain(t *testing.T) {
+	h, job := audioHarness(t)
+	s := h.handler.s
+	dir := filepath.Join(s.o.DataDir, "podcast-fetch", s.pairHash())
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	legacy := func(p string) checkpoint {
+		c := checkpoint{ServerHash: s.pairHash(), LibraryID: 3, ShowID: fixtureShowID, EpisodeID: "1cc306d831645e2b", Path: p, Temp: podcast.TempPrefix + nonce(), Offset: 6, Total: 100, Validator: secrets.PodcastETagPrefix + nonce()}
+		if err := s.o.Vault.Set(c.Validator, `"one"`); err != nil {
+			t.Fatal(err)
+		}
+		b, _ := json.Marshal(c)
+		if err := os.WriteFile(filepath.Join(dir, legacyRecordName(3, p)), b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return c
+	}
+	moved, stuck := legacy(*job.Path), legacy("Fixture Show/other.mp3")
+	// Something in the way of the second record's new name.
+	block := filepath.Join(dir, recordName(3, stuck.ShowID, stuck.Path))
+	if err := os.Mkdir(block, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	at := func(c checkpoint) (legacyThere, there bool) {
+		t.Helper()
+		records, err := s.checkpointRoot() // a read of the records: one pass
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer records.Close()
+		_, err = os.Lstat(filepath.Join(dir, legacyRecordName(3, c.Path)))
+		saved, ok := s.readOwnRecord(records, 3, c.ShowID, c.Path)
+		v, _ := s.o.Vault.Get(c.Validator)
+		return err == nil, ok && saved.Temp == c.Temp && v == `"one"`
+	}
+	if old, ok := at(moved); old || !ok {
+		t.Fatal("the record that could move did not", old, ok)
+	}
+	if old, ok := at(stuck); !old || ok {
+		t.Fatal("the record in the way moved", old, ok)
+	}
+	if err := os.Remove(block); err != nil {
+		t.Fatal(err)
+	}
+	if old, ok := at(stuck); old || !ok {
+		t.Fatal("the migration was not tried again", old, ok)
+	}
+	if old, ok := at(moved); old || !ok {
+		t.Fatal("the second pass undid the first", old, ok)
+	}
+}
+
+// A pass that wrote a record at its new name and could not remove the old one
+// (a stop between the two) is finished by the next: the old name goes, the
+// record and the validator both names share stay.
+func TestAMigrationStoppedBetweenItsWriteAndItsRemoveIsFinished(t *testing.T) {
+	h, job := audioHarness(t)
+	s := h.handler.s
+	dir := filepath.Join(s.o.DataDir, "podcast-fetch", s.pairHash())
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	c := checkpoint{ServerHash: s.pairHash(), LibraryID: 3, ShowID: fixtureShowID, EpisodeID: "1cc306d831645e2b", Path: *job.Path, Temp: podcast.TempPrefix + nonce(), Offset: 6, Total: 100, Validator: secrets.PodcastETagPrefix + nonce()}
+	if err := s.o.Vault.Set(c.Validator, `"one"`); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := json.Marshal(c)
+	for _, name := range []string{legacyRecordName(3, c.Path), recordName(3, c.ShowID, c.Path)} {
+		if err := os.WriteFile(filepath.Join(dir, name), b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	records, err := s.checkpointRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer records.Close()
+	if _, err := os.Lstat(filepath.Join(dir, legacyRecordName(3, c.Path))); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("the old name was left", err)
+	}
+	if saved, ok := s.readOwnRecord(records, 3, c.ShowID, c.Path); !ok || saved.Temp != c.Temp {
+		t.Fatal("the moved record went", saved, ok)
+	}
+	if v, _ := s.o.Vault.Get(c.Validator); v != `"one"` {
+		t.Fatal("the validator both names shared was dropped")
 	}
 }

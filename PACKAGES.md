@@ -2502,11 +2502,39 @@ internal/
             moves the paths of the pending journals, the committed trash
             manifests and then feed.json, so a stop part way through adopts
             again (a manifest it could not rewrite stops it before feed.json).
-            A journal naming a gone third folder moves too when its show id
+            A journal naming a gone third folder (or the folder itself under
+            a third spelling) moves too when its show id
             and its episode's id and file name are the show's (renamed again
             after an adoption that stopped part way); a pending one of another
             show still fails it. A feed.json over the 32 MiB read cap is
-            ErrTooLarge. EnsureDir never makes the show folder itself, so a job
+            ErrTooLarge. The 24 MiB write cap is measured without the folder's
+            name (sizeLimit allows the name, as JSON spells it, once per
+            episode path, never past the read cap), so a folder renamed by hand
+            to a longer name never makes its show unadoptable or unwritable.
+            An old name that is the same folder (sameFolder) by a case-only
+            rename on a case-insensitive filesystem (APFS or SMB) is a rename,
+            taken in only under the spelling on disk (RealName, which the jobs
+            resolve first: the old spelling still opens, and reads as, the
+            folder). One that differs only in Unicode normal form (NFC and NFD
+            on a normalising filesystem, SameName) is the same name: no rename,
+            feed.json never rewritten (the server compares its paths byte for
+            byte); RealName keeps the spelling it is asked for, and a caller
+            that found the folder by a listing works under its feed's spelling
+            (FeedFolder), only when that spelling opens the same folder: on a
+            filesystem that keeps names as given (Linux) the two forms are two
+            folders, and a rename by hand from one to the other is a rename.
+            RecoverShow
+            resolves a journal naming a folder that is gone (or this one spelt
+            otherwise) to the show's folder when it is the show's by its show
+            id and its episode's id and file name (rehome: a take-in that moved
+            the journals and stopped before feed.json, then the folder renamed
+            back); another show's, or one naming a folder still there, still
+            refuses, while a feed.json that cannot be read for it (over the
+            read cap, a read the library failed) fails with the read's error,
+            never ErrInvalidFile. Holds is Matches' size and hash check without
+            a pin; Verify tells a file proven to hold other content from one
+            that could not be read to tell (its error).
+            EnsureDir never makes the show folder itself, so a job
             running on after a rename by hand never brings the old name back.
   podcastjob/ podcast.fetch opts into the interactive reserve (2c-2b), with
             download as its ordinary lane. Subscribe, poll and retain do not opt in.
@@ -2537,13 +2565,39 @@ internal/
             runs, matched by its path or by its fetch's show and episode, stays
             until that fetch relocates and moves its own; the day-old cleanup
             matches a running download alike), or their partials would stay in
-            the folder for good. A fetch's Abandon, named by the server's old
-            path, clears its record where it moved (recordOf), and drops one
-            left under a folder that is gone (its partial, unrecorded then, is
-            swept once old). A job still working under the
-            old name never saves over, clears or abandons another show's record
-            at its path (one moved there when names were swapped), nor its
-            partial. A fetch whose folder lockShow takes in where it is (renamed
+            the folder for good. A record's name hashes the library, the show
+            id and the episode path (recordName), so two folders whose names
+            were swapped by hand, with an episode file name both shows use,
+            never find each other's record at their path, and both move with
+            their shows; a record an older Bridge named by library and path
+            (legacyRecordName) is renamed once per pairing and start at the
+            first open of the records folder (migrateRecords); the pairing is
+            done only once every such record moved, so a pass that could not
+            read, write or remove one is run again by the next open, repeating
+            nothing it did. A fetch's
+            Abandon, named by the server's old path, clears every record of
+            its episode: at its path and where one moved (recordsOf), and drops
+            one left under a folder that is gone (its partial, unrecorded then,
+            is swept once old). It never clears the record of a download still
+            running (a duplicate claim's, which shares it): one another running
+            row names stays (runningRecords, as a take-in and the day-old
+            cleanup leave it), and the episode's lock is waited on for
+            abandonWait (10 s) at most, a record whose lock is still held
+            staying too. A job still working under the old name never
+            saves over, clears or abandons another show's record at its path
+            (one moved there when names were swapped), nor its partial. Every
+            job resolves its show folder's spelling on disk (podcast.RealName:
+            realPath at a fetch's start, lockShow, relocate's cache row,
+            find, adopt's cache row, episodeAt's quick check and the
+            publication) before it locks it, so a case-only rename by hand
+            never leaves two jobs locking one folder under two names, and a
+            cache row naming the old spelling never makes the folder pass for
+            a copy of itself. A spelling that differs only in Unicode normal
+            form is the same name (podcast.SameName): nothing is taken in or
+            rewritten, and a folder a listing spells so is worked under its
+            feed's spelling (podcast.FeedFolder: find, the cache rebuild and
+            holds, so relocate, and lockShow, which relocates a job naming the
+            spelling on disk to it). A fetch whose folder lockShow takes in where it is (renamed
             back by hand after a take-in) reads its episode again there rather
             than failing as not found. A fetch whose folder is renamed while it
             downloads finds the show again (episodeAt) whenever its partial is
@@ -2557,19 +2611,84 @@ internal/
             a copy of the lock file, not the one held: the fetch takes the lock
             there anew before it moves (followLock, one ceiling's wait for a
             holder, then write_failed where it was) rather than go on with
-            none. The exit's settle is bounded by one ceiling. Under the
+            none. A re-take never makes the episode's .audiosilo folder, and at
+            the path it holds already never the lock file (takeLock without
+            create: the file was there, so one gone is a folder being deleted,
+            and an rm -rf would find it made again); nothing is made and the
+            fetch goes on there. At a new path with no .audiosilo folder
+            nothing is made either, and the follow fails write_failed rather
+            than go on there holding no lock. A folder put back from a copy between two host
+            attempts is caught by settle too, which follows when the lock file
+            at the path is not the one held (heldLock.held), so the next
+            attempt never appends under a copied lock. A partial that is not
+            at its path is followed every 10 s, the wait doubling up to 5 min
+            while a follow finds no new place (a show folder deleted outright
+            costs each one a search of the library). After the download the
+            partial is hashed again (written, podcast.Verify) before the probe:
+            a copy of
+            the folder made over it in place (cp into the same folder) rewrites
+            the open file, the same inode, so no check by path sees it, and a
+            partial proven not as written is downloaded again from byte 0,
+            once, then write_failed. One that could not be read to tell (a read
+            the library failed, a folder renamed between the follow and the
+            read) is not a changed one: the show is followed and the partial
+            read again, four reads 1 s, 2 s and 4 s apart, then write_failed
+            with no second download, the whole download kept (resume-at-total:
+            its record has Offset == Total and the hash it was written with,
+            checkpoint.complete; run's exit and Run's Abandon leave it). The
+            next attempt verifies it and publishes it with no GET; one proven
+            changed by then is downloaded again from byte 0, once; it is never
+            published unverified. The record names the enclosure it came from
+            (Source, the URL's hash, never the URL, and SourceLength when the
+            feed gave one): a feed that has since moved the episode's audio
+            (another URL) or remade it (another length, both known) under the
+            same episode id has it cleared and downloaded again from byte 0,
+            or failed write_failed (errPartialStuck) when the clear cannot
+            remove it; a record from before Source is verified by its hash
+            alone. A cancel (the runner's Abandon) or
+            invalid_audio still clears it, as does the day-old cleanup. Never downloaded again either when its
+            folder no longer holds the show (a
+            folder deleted outright, another show's at its name: the partial is
+            gone, and the fetch fails as the publication would rather than
+            download into that folder). A failure before the download whose
+            lock file moved with a folder renamed by hand lets go of it where
+            the show is now (episodeAt at the exit, unless the exit's settle
+            followed the show already), its file removed. The exit's settle is
+            bounded by one ceiling. Under the
             episode's lock its own record moves even when a duplicate claim's
             open row names it (adoptOwn, also after a relocation before the
             download); one of the episode at the new path already wins and
             the old one is cleared with its partial, never the partial the
             download is writing. A record there that is not the episode's
-            (another show's, names swapped by hand, or one that cannot be
-            read) costs the fetch nothing of its own, nor does a records
-            folder that could not say whether one is there: the start asks
-            again once dropStaleCheckpoint cleared another identity's, so
-            the fetch resumes from its own partial, and the end once more,
-            so no record stays under a folder that is gone, where nothing
-            would clear it or sweep its partial. One the Bridge stops
+            (another episode's, or one that cannot be read) costs the fetch
+            nothing of its own, nor does a records folder that could not say
+            whether one is there: the start asks again once
+            dropStaleCheckpoint cleared another episode's, so the fetch
+            resumes from its own partial, and the end once more, so no record
+            stays under a folder that is gone. The hourly sweep (SweepPartials)
+            first drops the day-old records of no running download whose
+            folder is gone, holds another show or holds the show taken in
+            under another spelling, and those no job could resume or clear
+            where they are (outlived: a show folder the Bridge may not search,
+            a partial that cannot be opened, EIO/ESTALE/EACCES, or of
+            another size than the record's, a whole download never read
+            back), their partials left on disk
+            unrecorded and logged (sweepRecords, which takes no episode lock
+            and so reads the open jobs again just before each drop; a failure
+            of the library folder's own listing (RealName) tells nothing; a
+            folder that cannot be read
+            for any other cause keeps them, as does a record whose partial is in a folder of its
+            show renamed by hand and not taken in yet, which that take-in
+            moves, and nothing goes while the library's marker is not there),
+            with their validators (one a moved record still names stays,
+            validatorNamed): an early end
+            (an episode found installed, a file in the way) or a take-in that
+            could not move one leaves it there, and cleanOwned reads a show's
+            records by its folder; the partials, unrecorded then, are swept
+            once old. A show folder that cannot be read and whose show no
+            other folder holds is searched for once a minute (lockShow's
+            unfound, on the monotonic clock): the jobs meanwhile fail as the
+            first did without reading every show's feed.json again. One the Bridge stops
             meanwhile keeps its record (read, not loaded, at the stop), and
             the resumed job goes on from the partial there. An episode path the
             server answers not_indexable (its show folder renamed since the
@@ -2637,12 +2756,28 @@ internal/
             error, not invalid_audio, and a lease check it cuts is no lost claim,
             identity_changed), a retry wait it cuts ends on the host's
             last answer, and its own faults (no streamer, its partial) are
-            write_failed. A partial it cannot open (podcast.OpenRegularFile, its size) or read
-            back restarts the episode from zero once per job first, checked
-            before the ranged GET so no request is spent on it; clearing a
-            checkpoint removes its partial on podcast.LstatRegular, never an
-            open, so an unreadable one is not left behind, and keeps the record
-            and validator (for cleanOwned) when the removal fails: a later clear
+            write_failed. A partial proven changed or barred to the Bridge
+            (gone, not a regular file, EACCES/EPERM as a lasting fault, another
+            size, shorter than its prefix: partialLost, errPartialChanged)
+            restarts the episode from zero once per job first, checked before
+            the ranged GET so no request is spent on it; one the restart (or
+            the start's clear of a partial of another size) cannot remove fails
+            the attempt write_failed (errPartialStuck), never a download
+            beside it, its record left for the next attempt or the day-old
+            cleanup, which drops the record then even when the partial stays
+            (cleanOwned, sweepRecords; cleanOwned runs only in a show folder
+            retain may write, so a folder the Bridge may not write keeps its
+            records until it may again). One that could not be
+            opened or read to tell (a share's hiccup: errPartialUnreadable) is
+            never cleared: at the start
+            (loadCheckpoint) the job fails write_failed with no GET, in the
+            download the attempt is tried again as a host's failure is, and a
+            job that ends so keeps the partial and its record (run's exit,
+            Run's Abandon) for the next attempt. Clearing a checkpoint removes
+            its partial on podcast.LstatRegular, never an open, so an
+            unreadable one is not left behind, and keeps the record and
+            validator (for cleanOwned) when the removal fails or the check
+            cannot tell: a later clear
             in the job tries that partial again before dropping the record, and
             so does a new download's checkpoint, which never overwrites the
             record while that partial stays (that download goes unrecorded). An episode host's 410 is gone, like the

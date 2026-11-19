@@ -190,7 +190,14 @@ func Publish(root *os.Root, f *Feed, j Journal, now time.Time, fault Boundary) e
 // RecoverShow finishes installs and moved deletions before any other show mutation.
 // A delete whose audio has not moved is aborted: its aggregate may now be stale.
 // An install whose staged and installed audio are both gone, with the feed not
-// pinning it, is aborted too (abortInstall).
+// pinning it, is aborted too (abortInstall). A journal naming a folder that is
+// gone is the show's own when its show id and its episode (id and file name)
+// are the show's: a take-in that moved the journals to a new name and stopped
+// before feed.json, then the folder renamed back by hand. It is resolved
+// against the show's folder (rehome) rather than refused for good, as feed.json
+// names this folder and no take-in would run. A feed.json that cannot be read
+// for it then fails with the read's error (ErrTooLarge, or the library's),
+// never ErrInvalidFile.
 func RecoverShow(root *os.Root, show string, now time.Time, fault Boundary) error {
 	if !ValidShow(show) {
 		return ErrInvalidFile
@@ -200,6 +207,7 @@ func RecoverShow(root *os.Root, show string, now time.Time, fault Boundary) erro
 	if err != nil {
 		return err
 	}
+	var feed *Feed // read once, for a journal that names another folder
 	for _, e := range entries {
 		if !strings.HasSuffix(e.Name(), ".publish.json") {
 			continue
@@ -209,7 +217,21 @@ func RecoverShow(root *os.Root, show string, now time.Time, fault Boundary) erro
 		if err != nil {
 			return err
 		}
-		if !journalValid(&j, show) || AttachmentPath(j.Path, ".publish.json") != p {
+		if !journalValid(&j, show) {
+			if feed == nil {
+				// The read's own error: a feed.json over the read cap or one
+				// the library failed to read just now is not an invalid show
+				// (the job reports too_large, or tries again), and one naming
+				// another folder is ErrInvalidFile already (a take-in's).
+				if feed, err = Read(root, show); err != nil {
+					return err
+				}
+			}
+			if j, err = rehome(root, show, p, j, feed); err != nil {
+				return err
+			}
+		}
+		if AttachmentPath(j.Path, ".publish.json") != p {
 			return ErrInvalidFile
 		}
 		if j.Op == "install" && stagedAudioGone(root, j) {
@@ -234,6 +256,35 @@ func RecoverShow(root *os.Root, show string, now time.Time, fault Boundary) erro
 		}
 	}
 	return nil
+}
+
+// rehome rewrites j, the journal at name in show's folder that names another
+// folder, to name show: when that folder is gone (or is show itself spelt
+// otherwise, a case-insensitive filesystem) and j is the show's (f, its
+// feed.json read under the same lock: its id, and an episode of j's id and
+// file name). ErrInvalidFile otherwise, as before; the library's error when
+// it could not say whether that folder is there.
+func rehome(root *os.Root, show, name string, j Journal, f *Feed) (Journal, error) {
+	dir := path.Dir(j.Path)
+	if dir == show || !journalValid(&j, dir) {
+		return j, ErrInvalidFile
+	}
+	if _, err := root.Lstat(dir); err == nil {
+		if !sameFolder(root, dir, show) {
+			return j, ErrInvalidFile
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return j, err // not known to be gone: asked again, never refused for it
+	}
+	at := j
+	at.Path = show + "/" + path.Base(j.Path)
+	if episodeFor(f, at) == nil {
+		return j, ErrInvalidFile
+	}
+	if err := writeJournal(root, name, at); err != nil {
+		return j, err
+	}
+	return at, nil
 }
 
 // listFolder lists dir, a real folder (never a link); nothing when it does
@@ -262,7 +313,8 @@ func listFolder(root *os.Root, dir string) ([]os.DirEntry, error) {
 // still carry under from moves to show. The pending journals and committed
 // trash manifests go first and feed.json last, so a stop part way through
 // leaves a folder ReadMoved finds renamed again, and a journal adopted already
-// is left as it is. A journal may also name a third folder that is gone: the
+// is left as it is. A journal may also name a third folder that is gone (or
+// is show itself spelt otherwise, a case-insensitive filesystem): the
 // folder was renamed again by hand after an adoption that moved its journals
 // stopped before feed.json. It moves too when it is this show's (its show id)
 // and names one of its episodes by id and file name. A pending journal that is
@@ -283,7 +335,9 @@ func Adopt(root *os.Root, show, from string, f *Feed, now time.Time) error {
 		if dir == show || !journalValid(j, dir) {
 			return false
 		}
-		if _, err := root.Lstat(dir); !errors.Is(err, os.ErrNotExist) {
+		// Gone, or show itself spelt otherwise (a case-insensitive filesystem:
+		// a second case-only rename after such a stop), as rehome takes it.
+		if _, err := root.Lstat(dir); !errors.Is(err, os.ErrNotExist) && !sameFolder(root, dir, show) {
 			return false
 		}
 		// f's episodes are all under from (episodesIn).

@@ -52,7 +52,7 @@ type Options struct {
 	Probe           ProbeFunc
 	Streamer        Streamer
 	Wait            func(context.Context, time.Duration) error
-	Fault           podcast.Boundary // the journal's boundaries, and "partial" when a resume checks its partial before the ranged GET
+	Fault           podcast.Boundary // the journal's boundaries, "load" when a resume's start checks its partial (loadCheckpoint), "partial" when a resume checks it before the ranged GET, "append" before the append opens it, and "rehash" before a download is read back (written)
 	BudgetNow       func() time.Time
 	AfterFunc       func(time.Duration, func()) Timer
 	Version         string
@@ -72,6 +72,14 @@ type service struct {
 	indexed map[string]bool
 	// swept is when SweepPartials last started a whole-library sweep.
 	swept time.Time
+	// recMu guards migrated, the pairings whose records an older Bridge
+	// named by path alone were renamed by show this start (migrateRecords).
+	recMu    sync.Mutex
+	migrated map[string]bool
+	// unfound holds, until when, the show folders that could not be read and
+	// whose show no other folder held (lockShow): the next jobs there fail
+	// without searching the whole library again.
+	unfound map[string]time.Time
 }
 type lock struct {
 	gate  chan struct{}
@@ -111,7 +119,7 @@ func New(o Options) *Subscribe {
 	if o.CheckPoll <= 0 {
 		o.CheckPoll = time.Second
 	}
-	return &Subscribe{s: &service{o: o, locks: map[string]*lock{}, indexed: map[string]bool{}}}
+	return &Subscribe{s: &service{o: o, locks: map[string]*lock{}, indexed: map[string]bool{}, migrated: map[string]bool{}, unfound: map[string]time.Time{}}}
 }
 func (h *Subscribe) PollJob() *Poll { return &Poll{s: h.s} }
 func (h *Subscribe) Kind() string   { return SubscribeKind }
@@ -655,7 +663,7 @@ func (s *service) cache(ctx context.Context, root *os.Root, lib link.Library, en
 		if err != nil {
 			continue
 		}
-		row := s.showRow(lib, e.Name(), f)
+		row := s.showRow(lib, podcast.FeedFolder(root, f, e.Name()), f)
 		if err := s.o.DB.UpsertPodcastShow(ctx, row); err != nil {
 			return nil, err
 		}
@@ -681,16 +689,20 @@ func (s *service) find(root *os.Root, entries []os.DirEntry, rows []store.Podcas
 	missing := fail("feed_secret_missing", "The show no longer matches this private feed. Follow the feed again.")
 	gone := false
 	if p.ShowPath != "" {
-		_, err := root.Lstat(p.ShowPath)
+		var err error
+		p.ShowPath, err = podcast.RealName(root, p.ShowPath)
 		gone = errors.Is(err, os.ErrNotExist)
 		if gone && p.ShowID == "" {
 			return "", nil, nil, missing // no id to find the renamed folder by
 		}
 	}
 	var renamed []string
-	match := func(name string) *podcast.Feed {
+	// match answers the folder name, as its feed spells it (a normalising
+	// filesystem may list or open it in another normal form, FeedFolder),
+	// with its feed when it holds the show the follow joins.
+	match := func(name string) (string, *podcast.Feed) {
 		if !podcast.ValidShow(name) {
-			return nil
+			return "", nil
 		}
 		f, from, err := podcast.ReadMoved(root, name)
 		warnHeld(name, from, err)
@@ -698,32 +710,33 @@ func (s *service) find(root *os.Root, entries []os.DirEntry, rows []store.Podcas
 			renamed = append(renamed, from)
 		}
 		if err != nil || f.FeedURLSHA256 != hash && !slices.Contains(f.PreviousFeedURLSHA256, hash) {
-			return nil
+			return "", nil
 		}
 		if gone && f.ShowID != p.ShowID {
-			return nil
+			return "", nil
 		}
-		return f
+		return podcast.FeedFolder(root, f, name), f
 	}
 	if p.ShowPath != "" && !gone {
-		if f := match(p.ShowPath); f != nil {
-			return p.ShowPath, f, nil, nil
+		if show, f := match(p.ShowPath); f != nil {
+			return show, f, nil, nil
 		}
 		return "", nil, nil, missing
 	}
 	tried := map[string]bool{}
 	for _, r := range rows {
 		if r.FeedURLSHA256 == hash || p.ShowID != "" && r.ShowID == p.ShowID {
-			tried[r.ShowPath] = true
-			if f := match(r.ShowPath); f != nil {
-				return r.ShowPath, f, nil, nil
+			at, _ := podcast.RealName(root, r.ShowPath) // spelt as on disk, as entries are
+			tried[at] = true
+			if show, f := match(at); f != nil {
+				return show, f, nil, nil
 			}
 		}
 	}
 	for _, e := range entries {
 		if e.IsDir() && !tried[e.Name()] {
-			if f := match(e.Name()); f != nil {
-				return e.Name(), f, nil, nil
+			if show, f := match(e.Name()); f != nil {
+				return show, f, nil, nil
 			}
 		}
 	}
@@ -748,11 +761,13 @@ func (s *service) find(root *os.Root, entries []os.DirEntry, rows []store.Podcas
 // be empty) reads show as it is. unlock releases the lock held; it is nil on
 // an error.
 func (s *service) lockShow(ctx context.Context, root *os.Root, lib link.Library, mount, show, id string, guard func(string) error) (_ string, _ *podcast.Feed, unlock func(), _ error) {
+	// Keyed and read under its spelling on disk (a case-only rename by hand).
+	show, lerr := podcast.RealName(root, show)
 	valid := podcast.ValidID(id)
 	// searched: show is gone and no folder holds id, so the read of show that
 	// then fails does not search every folder a second time.
 	searched := false
-	if _, err := root.Lstat(show); valid && errors.Is(err, os.ErrNotExist) {
+	if valid && errors.Is(lerr, os.ErrNotExist) {
 		if moved := s.relocate(ctx, root, lib, id); moved != "" {
 			show = moved
 		} else {
@@ -786,11 +801,14 @@ func (s *service) lockShow(ctx context.Context, root *os.Root, lib link.Library,
 	case err == nil:
 		unlock()
 		err = changed
-	case !valid || !unread || searched || ctx.Err() != nil || holds(root, show, id):
+	case !valid || !unread || searched || ctx.Err() != nil || holds(root, show, id) == show || s.wasUnfound(lib.ID, show, id):
 		return "", nil, nil, err
 	}
 	moved := s.relocate(ctx, root, lib, id)
 	if moved == "" || moved == show {
+		if unread { // the only failure wasUnfound answers for
+			s.markUnfound(lib.ID, show, id)
+		}
 		return "", nil, nil, err
 	}
 	if f, unlock, _, err = open(moved); err != nil {
@@ -803,12 +821,50 @@ func (s *service) lockShow(ctx context.Context, root *os.Root, lib link.Library,
 	return moved, f, unlock, nil
 }
 
-// holds reports whether show's feed.json, read as a folder that may have been
-// renamed by hand (podcast.ReadMoved), names show id.
-func holds(root *os.Root, show, id string) bool {
+// unfoundFor is how long a show folder that could not be read, its show held
+// by no other folder, fails its jobs without a search of the library: a
+// feed.json the Bridge cannot read would otherwise cost every job of the
+// show (a fetch per episode) a read of every show's feed.json.
+const unfoundFor = time.Minute
+
+// wasUnfound reports whether lockShow searched the library for show id within
+// unfoundFor, its folder show unreadable, and no folder held it.
+func (s *service) wasUnfound(lib int64, show, id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	until, ok := s.unfound[s.unfoundKey(lib, show, id)]
+	return ok && s.o.BudgetNow().Before(until)
+}
+
+// markUnfound records such a search, dropping the records past their time.
+func (s *service) markUnfound(lib int64, show, id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := s.o.BudgetNow() // the monotonic clock: a clock set back never extends one
+	for k, until := range s.unfound {
+		if !now.Before(until) {
+			delete(s.unfound, k)
+		}
+	}
+	s.unfound[s.unfoundKey(lib, show, id)] = now.Add(unfoundFor)
+}
+
+func (s *service) unfoundKey(lib int64, show, id string) string {
+	return s.o.ServerID() + "|" + strconv.FormatInt(lib, 10) + "|" + show + "|" + id
+}
+
+// holds is the folder show, as its feed.json spells it (podcast.FeedFolder),
+// when that feed.json, read as a folder that may have been renamed by hand
+// (podcast.ReadMoved), names show id; "" when it does not. A folder its feed
+// spells in another normal form than show is read under that spelling
+// (lockShow relocates to it).
+func holds(root *os.Root, show, id string) string {
 	f, from, err := podcast.ReadMoved(root, show)
 	warnHeld(show, from, err)
-	return err == nil && f.ShowID == id
+	if err != nil || f.ShowID != id {
+		return ""
+	}
+	return podcast.FeedFolder(root, f, show)
 }
 
 // warnHeld logs a show folder podcast.ReadMoved refused because held, the
@@ -822,6 +878,10 @@ func warnHeld(show, held string, err error) {
 	}
 }
 
+// searchHook, when a test sets it, is called once per library search
+// (relocate reading every show folder).
+var searchHook func()
+
 // relocate is the folder holding show id, for a job whose show folder is gone,
 // holds another show or cannot be read: one renamed by hand. The folder its
 // cache row names is read first, every show folder only when that one does
@@ -829,18 +889,27 @@ func warnHeld(show, held string, err error) {
 func (s *service) relocate(ctx context.Context, root *os.Root, lib link.Library, id string) string {
 	tried := ""
 	if row, ok, err := s.o.DB.PodcastShowByID(ctx, s.o.ServerID(), id); err == nil && ok && row.LibraryID == lib.ID {
-		if holds(root, row.ShowPath, id) {
-			return row.ShowPath
+		// A row written before a case-only rename by hand names the folder
+		// under its old spelling, which still opens it.
+		at, _ := podcast.RealName(root, row.ShowPath)
+		if held := holds(root, at, id); held != "" {
+			return held
 		}
-		tried = row.ShowPath
+		tried = at
+	}
+	if searchHook != nil {
+		searchHook()
 	}
 	entries, err := readDir(root)
 	if err != nil {
 		return ""
 	}
 	for _, e := range entries {
-		if e.IsDir() && podcast.ValidShow(e.Name()) && e.Name() != tried && holds(root, e.Name(), id) {
-			return e.Name()
+		if !e.IsDir() || !podcast.ValidShow(e.Name()) || e.Name() == tried {
+			continue
+		}
+		if held := holds(root, e.Name(), id); held != "" {
+			return held // as its feed spells it, which a normalising filesystem may list otherwise
 		}
 	}
 	return ""
@@ -891,11 +960,15 @@ func (s *service) adopt(ctx context.Context, root *os.Root, lib link.Library, mo
 	// A copy of a renamed folder made before either was taken in also names
 	// the gone folder: once one of them holds the show in its own right (the
 	// folder its cache row names), the other is a copy, never taken in (two
-	// folders would hold one show).
-	if row, ok, err := s.o.DB.PodcastShowByID(ctx, s.o.ServerID(), f.ShowID); err == nil && ok && row.LibraryID == lib.ID && row.ShowPath != show {
-		if held, err := podcast.Read(root, row.ShowPath); err == nil && held.ShowID == f.ShowID {
-			slog.Warn("podcasts: a show folder naming a gone folder is a copy of a show another folder holds; it is not taken in", "library", lib.ID, "show", show, "holder", row.ShowPath)
-			return false, nil
+	// folders would hold one show). A row naming this very folder under its
+	// old spelling (a case-only rename by hand, which that spelling still
+	// opens) names no other folder: resolved as it is spelt on disk first.
+	if row, ok, err := s.o.DB.PodcastShowByID(ctx, s.o.ServerID(), f.ShowID); err == nil && ok && row.LibraryID == lib.ID {
+		if at, _ := podcast.RealName(root, row.ShowPath); at != show {
+			if held, err := podcast.Read(root, at); err == nil && held.ShowID == f.ShowID {
+				slog.Warn("podcasts: a show folder naming a gone folder is a copy of a show another folder holds; it is not taken in", "library", lib.ID, "show", show, "holder", at)
+				return false, nil
+			}
 		}
 	}
 	if err := s.beforeWrite(lib, mount, show); err != nil {

@@ -34,7 +34,8 @@ var ownedTempName = regexp.MustCompile(`^` + regexp.QuoteMeta(podcast.TempPrefix
 const sweepEvery = time.Hour
 
 // SweepPartials sweeps every show of every checked, mapped and writable
-// podcast library (sweepPartials): the Bridge calls it after a mapping check,
+// podcast library (sweepPartials), after the records no job reads any more
+// (sweepRecords): the Bridge calls it after a mapping check,
 // so at start and then at most once per sweepEvery, beside a retain's
 // cleanOwned.
 func (h *Subscribe) SweepPartials(ctx context.Context) {
@@ -77,6 +78,7 @@ func (h *Subscribe) SweepPartials(ctx context.Context) {
 					shows = append(shows, e.Name())
 				}
 			}
+			s.sweepRecords(ctx, root, lib, mount, shows)
 			s.sweepPartials(ctx, root, lib, mount, shows, 0)
 		}()
 	}

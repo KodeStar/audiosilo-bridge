@@ -15,6 +15,10 @@ import (
 
 var shaPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
+// ValidSHA256 reports whether s is a SHA-256 as a Fetch records it: 64
+// lowercase hex digits.
+func ValidSHA256(s string) bool { return shaPattern.MatchString(s) }
+
 func ValidID(s string) bool { return showIDPattern.MatchString(s) }
 func ValidEpisodePath(s string) bool {
 	p := strings.Split(s, "/")
@@ -113,21 +117,41 @@ func OpenRegularFile(root *os.Root, name string, flag int) (*os.File, error) {
 }
 
 func Matches(root *os.Root, name string, fetch *Fetch) bool {
-	if !fetch.Valid() {
-		return false
-	}
+	return fetch.Valid() && Holds(root, name, fetch.Bytes, fetch.SHA256)
+}
+
+// Holds reports whether name is a regular file of size bytes whose hex
+// sha256 is sum. A file that could not be read to tell does not hold them
+// (Verify tells the two apart).
+func Holds(root *os.Root, name string, size int64, sum string) bool {
+	ok, err := Verify(root, name, size, sum)
+	return ok && err == nil
+}
+
+// Verify is Holds for a caller that must tell a file proven to hold other
+// content (false, no error: another size, or read in full to another hash)
+// from one that could not be read to tell (the error: not there, not a
+// regular file, or a read that failed, as a network share's does for a
+// moment). Only the first says the content changed.
+func Verify(root *os.Root, name string, size int64, sum string) (bool, error) {
 	f, err := OpenRegular(root, name)
 	if err != nil {
-		return false
+		return false, err
 	}
 	defer f.Close()
 	st, err := f.Stat()
-	if err != nil || st.Size() != fetch.Bytes {
-		return false
+	if err != nil {
+		return false, err
+	}
+	if st.Size() != size {
+		return false, nil
 	}
 	h := sha256.New()
-	n, err := io.Copy(h, io.LimitReader(f, fetch.Bytes+1))
-	return err == nil && n == fetch.Bytes && hex.EncodeToString(h.Sum(nil)) == fetch.SHA256
+	n, err := io.Copy(h, io.LimitReader(f, size+1))
+	if err != nil {
+		return false, err
+	}
+	return n == size && hex.EncodeToString(h.Sum(nil)) == sum, nil
 }
 
 func AttachmentPath(episode, suffix string) string {

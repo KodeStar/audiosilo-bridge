@@ -1,8 +1,10 @@
 package podcast
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
+	"path/filepath"
 	"reflect"
 	"runtime"
 	"strings"
@@ -449,5 +451,354 @@ func putJournal(t *testing.T, root *os.Root, name string, j Journal) {
 	t.Helper()
 	if err := writeJournal(root, name, j); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// caseInsensitive skips t on a filesystem that tells names apart by case
+// (Linux CI): the case-only rename it tests cannot happen there. Called after
+// "Fixture Show" is renamed to "fixture show", it probes the old spelling,
+// which opens the folder only when case does not count.
+func caseInsensitive(t *testing.T, root *os.Root) {
+	t.Helper()
+	if _, err := root.Lstat("Fixture Show"); err != nil {
+		t.Skip("the filesystem is case-sensitive")
+	}
+}
+
+// A show folder renamed by hand only in case ("Fixture Show" to "fixture
+// show") on a case-insensitive filesystem (APFS, SMB): the old name still
+// opens the folder, so it is no copy. ReadMoved takes it as a rename under its
+// spelling on disk, never under the old one (which would adopt it back), and
+// RealName answers that spelling for either. (The old spelling still reads as
+// the folder's own: the jobs resolve the name on disk first, podcastjob.)
+func TestACaseOnlyRenameIsTakenIn(t *testing.T) {
+	now := time.Date(2026, 10, 21, 8, 0, 0, 0, time.UTC)
+	root, _ := journalFixture(t)
+	if err := os.Rename(root.Name()+"/Fixture Show", root.Name()+"/fixture show"); err != nil {
+		t.Fatal(err)
+	}
+	caseInsensitive(t, root)
+	for _, name := range []string{"Fixture Show", "fixture show"} {
+		if real, err := RealName(root, name); err != nil || real != "fixture show" {
+			t.Fatal(name, real, err)
+		}
+	}
+	f, from, err := ReadMoved(root, "fixture show")
+	if err != nil || from != "Fixture Show" {
+		t.Fatal(from, err)
+	}
+	if err := Adopt(root, "fixture show", from, f, now); err != nil {
+		t.Fatal(err)
+	}
+	after, err := Read(root, "fixture show")
+	if err != nil || !strings.HasPrefix(after.Episodes[0].Path, "fixture show/") {
+		t.Fatal(err)
+	}
+}
+
+// The show folder names a normal-form test spells in NFC (as the Bridge
+// names folders, naming.go) and in NFD (as a Mac tool may write one).
+const (
+	nfcShow = "Caf\u00e9 Show"
+	nfdShow = "Cafe\u0301 Show"
+)
+
+// A show folder whose name on disk differs from its feed's only in Unicode
+// normal form (NFC and NFD, on a normalising filesystem such as APFS or SMB)
+// was not renamed: RealName keeps the spelling it is asked for, ReadMoved
+// answers no old name (the caller works under the feed's spelling,
+// FeedFolder), and feed.json is never rewritten, as the server compares its
+// paths byte for byte. A case-only rename still is one (above).
+func TestANormalFormOnlyDifferenceIsNoRename(t *testing.T) {
+	now := time.Date(2026, 10, 21, 8, 0, 0, 0, time.UTC)
+	root, _ := journalFixture(t)
+	if err := os.Rename(root.Name()+"/Fixture Show", root.Name()+"/"+nfcShow); err != nil {
+		t.Fatal(err)
+	}
+	f, from, err := ReadMoved(root, nfcShow)
+	if err != nil || from != "Fixture Show" {
+		t.Fatal(from, err)
+	}
+	if err := Adopt(root, nfcShow, from, f, now); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(root.Name() + "/" + nfcShow + "/feed.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(root.Name()+"/"+nfcShow, root.Name()+"/"+nfdShow); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := root.Lstat(nfcShow); err != nil {
+		t.Skip("the filesystem does not normalise names")
+	}
+	if real, err := RealName(root, nfcShow); err != nil || real != nfcShow {
+		t.Fatalf("RealName of the feed's spelling: %q %v", real, err)
+	}
+	if real, err := RealName(root, nfdShow); err != nil || real != nfdShow {
+		t.Fatalf("RealName of the spelling on disk: %q %v", real, err)
+	}
+	for _, show := range []string{nfcShow, nfdShow} {
+		f, from, err := ReadMoved(root, show)
+		if err != nil || from != "" || FeedFolder(root, f, show) != nfcShow {
+			t.Fatalf("%+q read as a rename: %q %v", show, from, err)
+		}
+	}
+	if f, err := Read(root, nfcShow); err != nil || !strings.HasPrefix(f.Episodes[0].Path, nfcShow+"/") {
+		t.Fatal("the feed's spelling no longer reads its folder", err)
+	}
+	if after, err := os.ReadFile(root.Name() + "/" + nfcShow + "/feed.json"); err != nil || string(after) != string(before) {
+		t.Fatal("feed.json was rewritten", err)
+	}
+}
+
+// SameName tells one name in two normal forms from two names; FeedFolder
+// answers the feed's spelling only for the first, and only when it opens the
+// folder itself: on a filesystem that keeps names as given (Linux), a folder
+// renamed by hand from NFC to NFD is answered as it is spelt on disk, never
+// by a name that is not there.
+func TestSameNameAndFeedFolder(t *testing.T) {
+	if !SameName(nfcShow, nfdShow) || !SameName(nfcShow, nfcShow) || SameName(nfcShow, "caf\u00e9 show") || SameName("Show", "show") {
+		t.Fatal("SameName")
+	}
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, nfdShow), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	f := &Feed{Episodes: []Episode{{Path: nfcShow + "/a.mp3"}}}
+	want := nfdShow
+	if _, err := root.Lstat(nfcShow); err == nil {
+		want = nfcShow // a normalising filesystem: the feed's spelling opens it
+	}
+	if got := FeedFolder(root, f, nfdShow); got != want {
+		t.Fatalf("FeedFolder: %+q, want %+q", got, want)
+	}
+	if FeedFolder(root, f, "caf\u00e9 show") != "caf\u00e9 show" || FeedFolder(root, &Feed{}, nfdShow) != nfdShow {
+		t.Fatal("FeedFolder")
+	}
+}
+
+// A take-in that moved the journals to one spelling and stopped before
+// feed.json, then a second case-only rename by hand: the journal names the
+// folder under a spelling that is neither feed.json's nor the one on disk,
+// and still opens it. It is the folder's own, and moves with the take-in
+// rather than refuse it for good.
+func TestACaseOnlyRenameTakesInAJournalOfAnEarlierSpelling(t *testing.T) {
+	now := time.Date(2026, 10, 21, 8, 0, 0, 0, time.UTC)
+	root, j := journalFixture(t)
+	if err := Publish(root, nil, j, now, stopAt("journal")); !errors.Is(err, errStop) {
+		t.Fatal(err)
+	}
+	earlier := j
+	earlier.Path = "FIXTURE SHOW/" + strings.TrimPrefix(j.Path, "Fixture Show/")
+	putJournal(t, root, AttachmentPath(j.Path, ".publish.json"), earlier)
+	if err := os.Rename(root.Name()+"/Fixture Show", root.Name()+"/fixture show"); err != nil {
+		t.Fatal(err)
+	}
+	caseInsensitive(t, root)
+	f, from, err := ReadMoved(root, "fixture show")
+	if err != nil || from != "Fixture Show" {
+		t.Fatal(from, err)
+	}
+	if err := Adopt(root, "fixture show", from, f, now); err != nil {
+		t.Fatal(err)
+	}
+	at := "fixture show/" + strings.TrimPrefix(j.Path, "Fixture Show/")
+	if got, err := ReadJournal(root, AttachmentPath(at, ".publish.json")); err != nil || got.Path != at {
+		t.Fatal(got.Path, err)
+	}
+	if err := RecoverShow(root, "fixture show", now, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := root.Lstat(AttachmentPath(at, ".publish.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("the journal was left", err)
+	}
+}
+
+// RealName on a filesystem that tells names apart: the name as given, and the
+// Lstat's error for a name that is not there.
+func TestRealNameKeepsAnExactName(t *testing.T) {
+	root, _ := journalFixture(t)
+	if real, err := RealName(root, "Fixture Show"); err != nil || real != "Fixture Show" {
+		t.Fatal(real, err)
+	}
+	if real, err := RealName(root, "Fixture Show/feed.json"); err != nil || real != "Fixture Show/feed.json" {
+		t.Fatal(real, err)
+	}
+	if _, err := RealName(root, "Gone Show"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal(err)
+	}
+}
+
+// A feed.json just under the cap in a folder renamed by hand to a longer
+// name: every episode path grows with the name, but the cap is measured
+// without it, so the take-in still writes it (it used to fail ErrTooLarge
+// for good) and so does the next write. Past the reader's own cap it is
+// still too large.
+func TestALongerNameNeverMakesAShowUnadoptable(t *testing.T) {
+	now := time.Date(2026, 10, 21, 8, 0, 0, 0, time.UTC)
+	root, _ := journalFixture(t)
+	f, err := Read(root, "Fixture Show")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Show.Description = strings.Repeat("x", MaxFileBytes)
+	b, _ := json.MarshalIndent(f, "", "  ")
+	f.Show.Description = f.Show.Description[:MaxFileBytes-(len(b)+1-MaxFileBytes)-8]
+	if _, err := Write(root, "Fixture Show", f, now); err != nil {
+		t.Fatal(err)
+	}
+	long := "Fixture Show With A Much Longer Name Given By Hand"
+	rename(t, root, long)
+	moved, from, err := ReadMoved(root, long)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Adopt(root, long, from, moved, now); err != nil {
+		t.Fatal("a longer name made the show unadoptable:", err)
+	}
+	after, err := Read(root, long)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := root.Stat(long + "/feed.json"); st.Size() <= MaxFileBytes {
+		t.Fatal("the test did not cross the cap", st.Size())
+	}
+	after.Episodes[0].Title += " (edited)"
+	if _, err := Write(root, long, after, now.Add(time.Hour)); err != nil {
+		t.Fatal("the next write failed:", err)
+	}
+	after.Show.Description = strings.Repeat("x", maxReadBytes)
+	if _, err := Write(root, long, after, now.Add(2*time.Hour)); !errors.Is(err, ErrTooLarge) {
+		t.Fatal("past the reader's cap:", err)
+	}
+}
+
+// A take-in that moved a pending journal to the folder's new name and stopped
+// before feed.json, then the folder renamed back by hand: feed.json names the
+// folder again, the journal the gone middle name. RecoverShow resolves it to
+// the show's folder and finishes the install, rather than refusing the show
+// for good. A journal naming a middle folder that is still there, or another
+// show's, still refuses.
+func TestRecoverShowResolvesAJournalOfAGoneMiddleName(t *testing.T) {
+	now := time.Date(2026, 10, 21, 8, 0, 0, 0, time.UTC)
+	for _, c := range []struct {
+		name  string
+		edit  func(*Journal)
+		there bool
+		ok    bool
+	}{
+		{"gone", nil, false, true},
+		{"still there", nil, true, false},
+		{"another show", func(j *Journal) { j.ShowID = "0123456789abcdef" }, false, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			root, j := journalFixture(t)
+			if err := Publish(root, nil, j, now, stopAt("journal")); !errors.Is(err, errStop) {
+				t.Fatal(err)
+			}
+			middle := j
+			middle.Path = "Middle Name/" + strings.TrimPrefix(j.Path, "Fixture Show/")
+			if c.edit != nil {
+				c.edit(&middle)
+			}
+			putJournal(t, root, AttachmentPath(j.Path, ".publish.json"), middle)
+			if c.there {
+				if err := os.Mkdir(root.Name()+"/Middle Name", 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			err := RecoverShow(root, "Fixture Show", now, nil)
+			if !c.ok {
+				if !errors.Is(err, ErrInvalidFile) {
+					t.Fatal("refusal:", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			f, err := Read(root, "Fixture Show")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if e := episodeFor(f, j); e == nil || !reflect.DeepEqual(e.Fetch, &j.Fetch) || !Matches(root, j.Path, &j.Fetch) {
+				t.Fatal("the install did not finish in the show's folder", e)
+			}
+			if _, err := root.Lstat(AttachmentPath(j.Path, ".publish.json")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatal("the journal was left", err)
+			}
+		})
+	}
+}
+
+// A journal naming a gone folder is resolved against the show's feed.json.
+// When that file cannot be read for it (over the read cap, or a read the
+// library fails just now) the show is not an invalid one: RecoverShow fails
+// with the read's error, the journal is left as it is, and the next recovery
+// finishes the install once the file reads again.
+func TestRecoverShowKeepsAFeedReadErrorPastAJournalOfAGoneFolder(t *testing.T) {
+	now := time.Date(2026, 10, 21, 8, 0, 0, 0, time.UTC)
+	for _, c := range []struct {
+		name   string
+		damage func(t *testing.T, feed string)
+		want   error
+	}{
+		{"too large", func(t *testing.T, feed string) {
+			if err := os.Truncate(feed, maxReadBytes+1); err != nil {
+				t.Fatal(err)
+			}
+		}, ErrTooLarge},
+		{"unreadable", func(t *testing.T, feed string) {
+			if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+				t.Skip("the file cannot be made unreadable here")
+			}
+			if err := os.Chmod(feed, 0); err != nil {
+				t.Fatal(err)
+			}
+		}, os.ErrPermission},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			root, j := journalFixture(t)
+			if err := Publish(root, nil, j, now, stopAt("journal")); !errors.Is(err, errStop) {
+				t.Fatal(err)
+			}
+			middle := j
+			middle.Path = "Middle Name/" + strings.TrimPrefix(j.Path, "Fixture Show/")
+			name := AttachmentPath(j.Path, ".publish.json")
+			putJournal(t, root, name, middle)
+			feed := root.Name() + "/Fixture Show/feed.json"
+			saved, err := os.ReadFile(feed)
+			if err != nil {
+				t.Fatal(err)
+			}
+			c.damage(t, feed)
+			if err := RecoverShow(root, "Fixture Show", now, nil); !errors.Is(err, c.want) || errors.Is(err, ErrInvalidFile) {
+				t.Fatal("a feed.json that could not be read made the show invalid:", err)
+			}
+			if got, err := ReadJournal(root, name); err != nil || got.Path != middle.Path {
+				t.Fatal("the journal did not stay as it was", got.Path, err)
+			}
+			if err := os.Chmod(feed, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(feed, saved, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := RecoverShow(root, "Fixture Show", now, nil); err != nil {
+				t.Fatal(err)
+			}
+			if !Matches(root, j.Path, &j.Fetch) {
+				t.Fatal("the install did not finish once feed.json read again")
+			}
+			if _, err := root.Lstat(name); !errors.Is(err, os.ErrNotExist) {
+				t.Fatal("the journal was left", err)
+			}
+		})
 	}
 }
