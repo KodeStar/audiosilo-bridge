@@ -1426,7 +1426,7 @@ func (p *Reporter) send() bool {
 
 // sendLocked is send under sendMu; it returns the answer and the cause that
 // stops the job (answer) too, for acted (which runs after it, outside sendMu:
-// the handler's OnShareOff writes the store).
+// heard writes the store).
 func (p *Reporter) sendLocked() (goOn bool, got *link.Job, stop, err error) {
 	ctx := p.ctx
 	p.sendMu.Lock()
@@ -1594,9 +1594,9 @@ func (p *Reporter) answer(got *link.Job, err error, parked bool) (stop error) {
 
 // acted acts on an answer once answer has read it, outside sendMu: heard first,
 // then stop (answer's cause, nil for none) ends the job's context, so a handler's
-// OnShareOff acts on an answer that carries share_off and a cancel while the
-// job's context still works (its store write would fail on an ended one). It
-// reports whether the answer stopped the job.
+// OnShareOff runs for an answer that carries share_off and a cancel while the
+// job's context still works (the Reporter's own write, keepShareOff, doesn't
+// need it). It reports whether the answer stopped the job.
 func (p *Reporter) acted(got *link.Job, stop, err error) bool {
 	p.heard(got, err)
 	if stop == nil {
