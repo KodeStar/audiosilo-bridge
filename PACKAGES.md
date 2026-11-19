@@ -2775,9 +2775,24 @@ internal/
             errMappingUnknown) a job waits, CheckPoll apart, at most a ceiling
             per wait (library, beforeWrite; a wait cut short is
             ctx's error, bridge_lost), and so does a write probe the folder
-            doesn't answer in time; only a standing "not mapped"/"not writable"
-            or a refused probe fails it library_not_writable. A download's
-            per-second check goes on through an unknown state (its commit
+            doesn't answer in time (errFolderSlow; writeNow is the one look,
+            undecided either of the two); only a standing "not mapped"/"not
+            writable" or a refused probe fails it library_not_writable. A
+            fetch and a retain never make that wait under a show's lock
+            (lockForWrite: wait without the lock, take it, look once more under
+            it, let it go and wait again when undecided; the fetch's
+            publication confirms its lease after the wait and does it all again
+            when nothing stands by then; a retain leaves an episode whose last
+            look before the deletion is undecided for the next run), so the
+            show's polls and other episodes go on; a follow's and a poll's
+            save still waits under the lock its feed fetch already holds for up
+            to the same ceiling. A fetch also gives its download-lane slot back
+            while such a wait may last (yieldSlot: a check that doesn't stand
+            or a slow folder, not a library with no check yet) and takes one
+            again within its own context before it goes on (reclaim, as
+            librivoxjob.mapped does), so the lane's one download is never held
+            by a job waiting for a folder. A download's
+            per-second check goes on through an unknown state (its publication
             waits), and the sweeps skip such a library. Per-library subscribe and per-show write locks, hash dedupe,
             cache rebuild, artwork sniffing, permanent moves and targeted rescan.
             A show folder renamed by hand (bridge#13) is taken in under the show

@@ -329,6 +329,12 @@ func (s *service) acquire(ctx context.Context, key string) (func(), error) {
 // generate's waitMapped does, within the job's ceiling, and so does one whose
 // check doesn't stand (errMappingUnknown).
 func (s *service) library(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (link.Library, string, error) {
+	return s.libraryFor(ctx, false, job, rep)
+}
+
+// libraryFor is library; slot (a podcast.fetch) gives the job's lane slot back
+// while its wait may last (yieldSlot), for the caller to take again.
+func (s *service) libraryFor(ctx context.Context, slot bool, job jobs.Job, rep *jobs.Reporter) (link.Library, string, error) {
 	if job.LibraryID == nil {
 		return link.Library{}, "", fail("not_podcast_library", "This job needs a podcast library.")
 	}
@@ -338,22 +344,80 @@ func (s *service) library(ctx context.Context, job jobs.Job, rep *jobs.Reporter)
 			return lib, "", fail("not_podcast_library", "This job needs a podcast library.")
 		}
 		mount, _ := s.o.Mount(lib.ID, lib.Root)
-		if err := s.writable(lib, mount); !errors.Is(err, errMappingUnknown) {
+		err := s.writable(lib, mount)
+		if !errors.Is(err, errMappingUnknown) {
 			return lib, mount, err
 		}
 		rep.Progress(jobs.Progress{Step: "waiting", Message: "Waiting for the library's mapping check"})
+		if slot {
+			s.yieldSlot(rep, lib, err)
+		}
 		if err := netguard.Wait(ctx, s.o.CheckPoll); err != nil {
 			return lib, "", err
 		}
 	}
 }
 
+// fetchLibrary is library for a podcast.fetch, which holds the lane's one
+// download slot: it gives the slot back while its wait may last, and takes one
+// again before it goes on, then looks at the mapping again (the wait for the
+// slot may have been long), each look's wait within a ceiling of its own.
+func (s *service) fetchLibrary(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (link.Library, string, error) {
+	for {
+		wait, stop := context.WithTimeout(ctx, ceiling)
+		lib, mount, err := s.libraryFor(wait, true, job, rep)
+		stop()
+		if err != nil || !rep.Yielded() {
+			return lib, mount, err
+		}
+		if err := s.reclaim(ctx, rep); err != nil {
+			return lib, "", err
+		}
+	}
+}
+
+// yieldSlot gives a podcast.fetch's lane slot back (jobs.Reporter.Yield) while
+// it waits on undecided, a wait that may last as long as an outage does: a
+// folder that doesn't answer, or a mapping whose last check doesn't stand (the
+// server or the folder didn't answer it, or it is too old). The lane holds one
+// download, so an Audible import or a LibriVox recording into another library
+// runs meanwhile, as it does beside a waiting librivox.fetch. Not while the
+// library merely has no check yet (the first one after a start is seconds
+// away): the fetch would only queue behind a download claimed after it.
+func (s *service) yieldSlot(rep *jobs.Reporter, lib link.Library, undecided error) {
+	if !errors.Is(undecided, errFolderSlow) {
+		if st, stands := s.o.Libraries.Status(lib.ID); stands || st.Error == "" {
+			return
+		}
+	}
+	rep.Yield()
+}
+
+// reclaim takes a lane slot again after yieldSlot, before the fetch goes on,
+// so downloads still go one at a time. ctx is the job's own, not a wait's
+// ceiling: the Bridge's other download may take long.
+func (s *service) reclaim(ctx context.Context, rep *jobs.Reporter) error {
+	rep.Progress(jobs.Progress{Step: "waiting", Message: "Waiting for the Bridge's other download to finish"})
+	return rep.Reclaim(ctx)
+}
+
 // errMappingUnknown is writable's answer while no check of the library's
 // mapping stands at the mount the job writes at (none yet, one the server
 // didn't answer, one whose look at the folder timed out, or one too old:
 // mapping.Registry.Status), which says nothing about the mapping: a job waits
-// for one (library, beforeWrite), a sweep skips the library.
+// for one (library, beforeWrite, lockForWrite), a sweep skips the library.
 var errMappingUnknown = fail("library_not_writable", "The podcast library's mapping has no check that stands yet.")
+
+// errFolderSlow is writeNow's answer when a folder gave its write probe no
+// answer within mapping.LookTimeout (a disk spinning up, a mount that hangs),
+// which says nothing about the folder: a job waits and probes again.
+var errFolderSlow = fail("library_not_writable", "The podcast folder did not answer in time.")
+
+// undecided reports whether err says nothing either way about a write
+// (errMappingUnknown, errFolderSlow): the job waits and looks again.
+func undecided(err error) bool {
+	return errors.Is(err, errMappingUnknown) || errors.Is(err, errFolderSlow)
+}
 
 // writable is nil when the library is still a podcast library at mount, its
 // check standing, mapped and writable there; errMappingUnknown while no check
@@ -377,35 +441,101 @@ func (s *service) writable(lib link.Library, mount string) error {
 	return nil
 }
 
-// beforeWrite is writable, then a write probe of rel's folder. Neither a
-// mapping with no check standing (errMappingUnknown) nor a probe the folder
-// doesn't answer within mapping.LookTimeout (a disk spinning up) says anything,
-// so either is tried again every CheckPoll, for at most a ceiling within ctx:
-// only a standing "not mapped" or "not writable", or a failed probe, fails the
-// job. A wait that ends unanswered is ctx's error (bridge_lost, outcome), not
-// library_not_writable.
-func (s *service) beforeWrite(ctx context.Context, lib link.Library, mount, rel string) error {
-	ctx, stop := context.WithTimeout(ctx, ceiling)
-	defer stop()
+// writeNow is one look at whether rel's folder may be written, without a wait:
+// writable, then a write probe of the folder. It is nil, the job's failure (a
+// standing "not mapped" or "not writable", a probe the folder refused), or,
+// when nothing says either way, errMappingUnknown or errFolderSlow (undecided).
+func (s *service) writeNow(lib link.Library, mount, rel string) error {
 	full, err := mapping.SafeJoin(mount, rel)
 	if err != nil {
 		return fail("write_failed", "The podcast path is invalid.")
 	}
+	if err := s.writable(lib, mount); err != nil {
+		return err
+	}
+	switch err := s.o.WriteProbe(full); {
+	case err == nil:
+		return nil
+	case errors.Is(err, fsutil.ErrStatTimeout):
+		return errFolderSlow
+	}
+	return fail("library_not_writable", "The podcast folder is not writable.")
+}
+
+// beforeWrite is writeNow, looked at again every CheckPoll while it is
+// undecided, for at most a ceiling within ctx: neither a mapping with no check
+// standing nor a probe the folder doesn't answer in time says anything, so
+// only a standing "not mapped" or "not writable", or a refused probe, fails
+// the job. A wait that ends unanswered is ctx's error (bridge_lost, outcome),
+// not library_not_writable. A caller that holds a show's lock keeps it through
+// the wait, so only the jobs whose time under that lock one ceiling bounds
+// anyway wait here (a follow's and a poll's save); a fetch, whose work is
+// bounded by its episode's hours, and a retain wait without the lock
+// (lockForWrite).
+func (s *service) beforeWrite(ctx context.Context, lib link.Library, mount, rel string) error {
+	return s.awaitWrite(ctx, nil, lib, mount, rel)
+}
+
+// awaitWrite is beforeWrite for a job that may hold a lane slot worth giving
+// back: slot is a podcast.fetch's reporter (nil for the light jobs), whose
+// slot is given back while the wait may last (yieldSlot) and taken again
+// before the job goes on (reclaim, within ctx, the job's own), the folder then
+// looked at once more, with a ceiling of its own.
+func (s *service) awaitWrite(ctx context.Context, slot *jobs.Reporter, lib link.Library, mount, rel string) error {
 	for {
-		err := s.writable(lib, mount)
-		if err == nil {
-			err = s.o.WriteProbe(full)
-			switch {
-			case err == nil:
-				return nil
-			case !errors.Is(err, fsutil.ErrStatTimeout):
-				return fail("library_not_writable", "The podcast folder is not writable.")
-			}
-		} else if !errors.Is(err, errMappingUnknown) {
+		err := s.writeDecided(ctx, slot, lib, mount, rel)
+		if err != nil || slot == nil || !slot.Yielded() {
 			return err
 		}
-		if err := netguard.Wait(ctx, s.o.CheckPoll); err != nil {
+		if err := s.reclaim(ctx, slot); err != nil {
 			return err
+		}
+	}
+}
+
+// writeDecided waits until writeNow is decided, at most a ceiling within ctx.
+func (s *service) writeDecided(ctx context.Context, slot *jobs.Reporter, lib link.Library, mount, rel string) error {
+	wait, stop := context.WithTimeout(ctx, ceiling)
+	defer stop()
+	for {
+		err := s.writeNow(lib, mount, rel)
+		if !undecided(err) {
+			return err
+		}
+		if slot != nil {
+			s.yieldSlot(slot, lib, err)
+		}
+		if err := netguard.Wait(wait, s.o.CheckPoll); err != nil {
+			return err
+		}
+	}
+}
+
+// lockForWrite takes the lock at key (a show's, or a fetch's own) once rel's
+// folder may be written, and never waits for that under the lock, where every
+// other job of the show would wait behind it: it waits without the lock
+// (awaitWrite), takes the lock, and looks once more under it (writeNow);
+// undecided again, it lets the lock go and waits again. slot is as
+// awaitWrite's: a fetch never holds the lock while it waits for a lane slot
+// either.
+func (s *service) lockForWrite(ctx context.Context, slot *jobs.Reporter, key string, lib link.Library, mount, rel string) (unlock func(), _ error) {
+	for {
+		if err := s.awaitWrite(ctx, slot, lib, mount, rel); err != nil {
+			return nil, err
+		}
+		unlock, err := s.acquire(ctx, key)
+		if err != nil {
+			return nil, err
+		}
+		if err = s.writeNow(lib, mount, rel); err == nil {
+			return unlock, nil
+		}
+		unlock()
+		if !undecided(err) {
+			return nil, err
+		}
+		if err := netguard.Wait(ctx, s.o.CheckPoll); err != nil {
+			return nil, err
 		}
 	}
 }

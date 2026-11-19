@@ -21,7 +21,7 @@ import (
 // share's lock or a file flag keeps, or whose check keeps failing) goes all
 // the same, its partial left unrecorded and logged: kept, it would stay for
 // good. A show folder the Bridge may not write never gets here: retain's own
-// write check (lockShow's beforeWrite) refuses it first, and its records stay
+// write check (lockShow's guard, writeNow) refuses it first, and its records stay
 // until the folder may be written again. self is the calling job, whose own running row (at the
 // show's path) is not a live writer of these records. A record a running
 // fetch relocated to the show (runningRecords) stays too.

@@ -231,7 +231,10 @@ in PACKAGES.md.
   then one no-replace rename,
   never into an existing book. Podcast writers
   require a podcast-kind library and its checked marker mapping (a job claimed
-  before the check waits for it); they write only the root marker, show folders,
+  before the check waits for it, as does a write while no check stands, never
+  under a show's lock in a fetch or a retain; only a download already under way
+  goes on into its own partial, and its publication waits); they write only the
+  root marker, show folders,
   feed.json and sniffed JPEG/PNG artwork. Book writers refuse podcast libraries.
   Episode publication and retention use recovery journals and owned trash.
 - **The agent container's files are untrusted** (and the Bridge's are to it): every
