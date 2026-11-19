@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -56,11 +57,18 @@ func (hr *harness) shareRunner(s Sharer, cred func(context.Context) error) (stop
 
 // shareRunnerRecheck is shareRunner with a park's recheck every recheck.
 func (hr *harness) shareRunnerRecheck(s Sharer, cred func(context.Context) error, recheck time.Duration) (stop func()) {
+	return hr.shareRunnerOn(s, cred, recheck, func() jobs.Server { return hr.cl })
+}
+
+// shareRunnerOn is shareRunnerRecheck with the runner's link to the server
+// from server (the Bridge paired anew when it changes).
+func (hr *harness) shareRunnerOn(s Sharer, cred func(context.Context) error, recheck time.Duration,
+	server func() jobs.Server) (stop func()) {
 	h := New(Options{DB: hr.db, Engine: func() Engine { return hr.sched }, Sharer: func() Sharer { return s },
 		Libraries: hr.libs, Mount: func(int64, string) (string, bool) { return hr.libs.root, false },
 		Server: func() Server { return hr.cl }, WorkRoot: hr.work, Version: "0.2.0", RetentionDays: 30, ContribCredential: cred,
 		Poll: 10 * time.Millisecond, IdlePoll: 10 * time.Millisecond, Recheck: recheck, Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
-	r := jobs.New(hr.db, func() jobs.Server { return hr.cl }, nil, jobs.Options{Keepalive: 30 * time.Millisecond,
+	r := jobs.New(hr.db, server, nil, jobs.Options{Keepalive: 30 * time.Millisecond,
 		ProgressEvery: 5 * time.Millisecond, Wait: 10 * time.Millisecond, RetryEvery: 20 * time.Millisecond,
 		ServerID: func() string { return "srv" }, Log: slog.New(slog.NewTextHandler(io.Discard, nil))}, h, h.ContributeJob())
 	ctx, cancel := context.WithCancel(context.Background())
@@ -192,6 +200,143 @@ func TestContributeJobWaitsWhenTheServerCantBeAsked(t *testing.T) {
 	if len(s.calls) != 1 {
 		t.Fatalf("share calls = %v, want one once the server answered", s.calls)
 	}
+}
+
+// The server is asked whether the share still stands before the engine's hold
+// on the book is taken: an answer slow to come keeps no other job that wants
+// the book from it (allowed), and the share files once the answer comes.
+func TestContributeJobAsksBeforeTheHold(t *testing.T) {
+	t.Parallel()
+	hr := newHarness(t)
+	hr.generated(101)
+	mapped, err := hr.db.GetGenerateBook(context.Background(), 101)
+	if err != nil || mapped.BookID == nil {
+		t.Fatalf("the generate job's book: %+v %v", mapped, err)
+	}
+	s := &fakeSharer{}
+	entered, answer := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	hr.srv.set(func() {
+		hr.srv.atStep[102] = func(_ *fakeServer, step string) {
+			if step == stepSharing {
+				// The server is slow to answer the job's reports from here.
+				once.Do(func() { close(entered) })
+				<-answer
+			}
+		}
+	})
+	hr.srv.addContribute(102, "Author/Book", `{}`)
+	stop := hr.shareRunner(s, func(context.Context) error { return nil })
+	defer stop()
+	<-entered
+	// The job's ask waits behind the slow report (or is it): the book is free.
+	time.Sleep(50 * time.Millisecond)
+	release, ok := hr.sched.Hold(*mapped.BookID)
+	if ok {
+		release()
+	}
+	close(answer)
+	if !ok {
+		t.Fatal("the book was held while the job waited for the server's answer")
+	}
+	hr.waitFor("done", func() bool { st, _ := hr.srv.final(102); return st == link.StateDone })
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.calls) != 1 {
+		t.Fatalf("share calls = %v, want one", s.calls)
+	}
+}
+
+// A share parked share_unconfirmed gives its light-lane slot back: two such
+// parks leave the lane (two slots) free for another light job (allowed), and
+// neither files while it can't ask (denied).
+func TestContributeParksGiveTheLightLaneBack(t *testing.T) {
+	t.Parallel()
+	hr := newHarness(t)
+	hr.generated(111)
+	s := &fakeSharer{}
+	hr.srv.set(func() {
+		for _, id := range []int64{112, 113} {
+			hr.srv.atStep[id] = func(f *fakeServer, step string) {
+				if step == stepSharing {
+					f.down[id] = true
+				}
+			}
+		}
+	})
+	hr.srv.addContribute(112, "Author/Book", `{}`)
+	hr.srv.addContribute(113, "Author/Book", `{}`)
+	stop := hr.shareRunnerRecheck(s, func(context.Context) error { return nil }, 20*time.Millisecond)
+	defer stop()
+	hr.waitFor("both parked", func() bool {
+		hr.srv.mu.Lock()
+		defer hr.srv.mu.Unlock()
+		return hr.srv.downHits[112] >= 2 && hr.srv.downHits[113] >= 2
+	})
+	hr.srv.addContribute(114, "Author/Book", `{}`)
+	hr.waitFor("the third share done", func() bool { st, _ := hr.srv.final(114); return st == link.StateDone })
+	s.mu.Lock()
+	calls := len(s.calls)
+	s.mu.Unlock()
+	if calls != 1 {
+		t.Fatalf("share calls = %d, want only the third job's", calls)
+	}
+	// Back once the server answers: each takes a slot again and files.
+	hr.srv.set(func() {
+		for _, id := range []int64{112, 113} {
+			delete(hr.srv.atStep, id)
+			hr.srv.down[id] = false
+		}
+	})
+	for _, id := range []int64{112, 113} {
+		hr.waitFor("a parked share done", func() bool { st, _ := hr.srv.final(id); return st == link.StateDone })
+	}
+}
+
+// An answer on a link the Bridge no longer uses (paired with another server
+// while the ask was on its way) confirms no share: the job parks
+// share_unconfirmed and files nothing (denied), and files once the Bridge is
+// back on the job's server (allowed).
+func TestContributeJobConfirmsOnlyOnTheCurrentLink(t *testing.T) {
+	t.Parallel()
+	hr := newHarness(t)
+	hr.generated(121)
+	other, err := link.New("http://127.0.0.1:1", "tok", "0.2.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var onOther atomic.Bool
+	hr.srv.set(func() {
+		hr.srv.atStep[122] = func(_ *fakeServer, step string) {
+			if step == stepSharing {
+				onOther.Store(true) // paired with another server as the answer goes back
+			}
+		}
+	})
+	s := &fakeSharer{}
+	hr.srv.addContribute(122, "Author/Book", `{}`)
+	stop := hr.shareRunnerOn(s, func(context.Context) error { return nil }, 20*time.Millisecond, func() jobs.Server {
+		if onOther.Load() {
+			return other
+		}
+		return hr.cl
+	})
+	defer stop()
+	hr.waitFor("the park", func() bool {
+		return hr.srv.saw(122, func(u link.Update, _ map[string]any) bool {
+			return u.State != nil && *u.State == link.StateNeedsAttention
+		})
+	})
+	time.Sleep(100 * time.Millisecond) // a few rechecks
+	s.mu.Lock()
+	calls := len(s.calls)
+	s.mu.Unlock()
+	if calls != 0 {
+		t.Fatalf("share calls = %d on another server's link, want none", calls)
+	}
+	hr.srv.set(func() { delete(hr.srv.atStep, 122) })
+	onOther.Store(false)
+	hr.waitFor("done", func() bool { st, _ := hr.srv.final(122); return st == link.StateDone })
 }
 
 func TestContributeJobRefusals(t *testing.T) {

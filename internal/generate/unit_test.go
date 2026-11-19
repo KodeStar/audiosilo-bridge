@@ -12,8 +12,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kodestar/audiosilo-bridge/internal/contrib"
 	"github.com/kodestar/audiosilo-bridge/internal/events"
 	"github.com/kodestar/audiosilo-bridge/internal/jobs"
+	"github.com/kodestar/audiosilo-bridge/internal/pipeline"
 	"github.com/kodestar/audiosilo-bridge/internal/scheduler"
 	"github.com/kodestar/audiosilo-bridge/internal/state"
 	"github.com/kodestar/audiosilo-bridge/internal/store"
@@ -1395,6 +1397,53 @@ func TestFollowedAgainSharesANoShareJobBook(t *testing.T) {
 			t.Fatalf("shareConfirmed = %v (calls %v), want errShareOffNow with nothing filed", err, sharer.calls)
 		}
 	})
+	t.Run("done, no GitHub sign-in", func(t *testing.T) {
+		// A share it owes that can't file for want of a sign-in parks the job
+		// as the contributing stage parks the book (contrib_unavailable), with
+		// nothing filed (denied), and files once a sign-in wakes it (allowed),
+		// rather than failing the whole job.
+		t.Parallel()
+		db, h, sharer, b := setup(t, true, false)
+		sharer.err = &scheduler.ParkError{Code: state.ParkContribUnavailable, Reason: pipeline.ContribUnavailableMsg,
+			Cause: contrib.ErrNoCredential}
+		r := newRun()
+		r.poke = make(chan struct{}, 1)
+		type owed struct {
+			filed bool
+			err   error
+		}
+		out := make(chan owed, 1)
+		go func() {
+			filed, err := h.shareOwed(ctx, r, b)
+			out <- owed{filed, err}
+		}()
+		parkedWith := func() string {
+			p, _ := r.rep.Last().Extra["park"].(map[string]any)
+			code, _ := p["code"].(string)
+			return code
+		}
+		if !poll(func() bool { return parkedWith() == string(state.ParkContribUnavailable) }) {
+			t.Fatalf("the job never parked contrib_unavailable (progress %+v)", r.rep.Last())
+		}
+		select {
+		case o := <-out:
+			t.Fatalf("shareOwed ended while parked: %v %v", o.filed, o.err)
+		default:
+		}
+		sharer.mu.Lock()
+		sharer.err = nil
+		sharer.mu.Unlock()
+		if n := h.WakeParked(state.ParkContribUnavailable); n != 1 {
+			t.Fatalf("a sign-in woke %d jobs, want the parked share", n)
+		}
+		o := <-out
+		if o.err != nil || !o.filed || len(sharer.calls) != 2 {
+			t.Fatalf("shareOwed = %v %v (calls %v), want filed on the second try", o.filed, o.err, sharer.calls)
+		}
+		if got := book(t, db, b.ID); got.ContribMode != store.ContribModeIssue {
+			t.Fatalf("book mode %q, want shared", got.ContribMode)
+		}
+	})
 	t.Run("done, share_off", func(t *testing.T) {
 		t.Parallel()
 		db, h, sharer, b := setup(t, true, true)
@@ -1582,5 +1631,35 @@ func TestNeedsClaimRowForShareJobs(t *testing.T) {
 		if got := h.NeedsClaimRow(jobs.Job{Kind: Kind, Params: json.RawMessage(params)}); got != want {
 			t.Errorf("NeedsClaimRow(%s) = %v, want %v", params, got, want)
 		}
+	}
+}
+
+// An owed share's check before each dimension it files (stoppedBy) stops it
+// on stands answering false, and parks it share_unconfirmed, as the
+// contributing stage parks a book, when the store can't say whether it stands
+// (denied: nothing more is filed either way); one that stands goes on
+// (allowed).
+func TestStoppedByParksAShareItCantConfirm(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	answers := []error{nil, errors.New("database is locked")}
+	stands := func(context.Context) (bool, error) {
+		err := answers[0]
+		answers = answers[1:]
+		return true, err
+	}
+	stopped := stoppedBy(ctx, &run{rep: jobs.LocalReporter()}, stands)
+	if stop, err := stopped(); stop || err != nil {
+		t.Fatalf("a share that stands: %v %v, want it to go on", stop, err)
+	}
+	_, err := stopped()
+	var park *scheduler.ParkError
+	if !errors.As(err, &park) || park.Code != state.ParkShareUnconfirmed || park.Reason != pipeline.ShareUnreadMsg ||
+		park.RetryAfter.IsZero() {
+		t.Fatalf("stands unread: %v, want a share_unconfirmed park that looks again by itself", err)
+	}
+	off := stoppedBy(ctx, &run{rep: jobs.LocalReporter()}, func(context.Context) (bool, error) { return false, nil })
+	if stop, err := off(); !stop || err != nil {
+		t.Fatalf("stands false: %v %v, want the share stopped", stop, err)
 	}
 }

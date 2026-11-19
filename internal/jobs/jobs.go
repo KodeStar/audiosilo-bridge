@@ -987,7 +987,8 @@ var (
 // (generate.Handler.ShareOff). It finds the job's run here, one still waiting
 // for its lane slot included (its Reporter keeps reporting), and one a refused
 // token stopped (what it heard). With ask, the job reports now and the answer
-// acts as any other (Reporter.Refresh): true once it says share_off. Without,
+// acts as any other (Reporter.AskShareOff: true once it says share_off, and an
+// answer from a link the Bridge no longer uses confirms nothing). Without,
 // only what is known here: true when heard, false when the job could be asked,
 // and an error, with no request made, when it couldn't be (ErrShareNotRunning,
 // ErrShareOffLink, ErrShareNotReachable), so the stage waits before its
@@ -1018,20 +1019,53 @@ func (r *Runner) ShareOff(ctx context.Context, id int64, ask bool) (bool, error)
 		return false, ErrShareNotRunning
 	case rep.ShareOff():
 		return true, nil
+	case ask:
+		return rep.AskShareOff(ctx)
+	case !rep.OnCurrentLink():
+		return false, ErrShareOffLink
+	case rep.unreached():
+		return false, ErrShareNotReachable
 	}
-	if srv := r.server(); srv == nil || !sameServer(srv, rep.srv) {
+	return false, nil
+}
+
+// OnCurrentLink reports whether the job's link reaches the server the Bridge
+// is linked to now: the same link, or a new pairing with the same address.
+// After an unpairing, a refused token or a pairing with another server, the
+// job's link answers for a server the Bridge no longer works for, so nothing
+// it says confirms a share. True for a LocalReporter.
+func (p *Reporter) OnCurrentLink() bool {
+	if p.r == nil {
+		return true
+	}
+	srv := p.r.server()
+	return srv != nil && sameServer(srv, p.srv)
+}
+
+// AskShareOff asks the server now whether the job's share is off (Refresh),
+// for a handler about to file it to the community: true once the job heard
+// share_off (an answer that stopped the job counts when it carried it). An
+// answer from a link that isn't the Bridge's current one confirms nothing
+// (ErrShareOffLink, asked before the report and again after the answer, as a
+// pairing can change while it is on its way); a report that didn't get
+// through is its error (ErrStopped for an answer that stopped the job).
+func (p *Reporter) AskShareOff(ctx context.Context) (bool, error) {
+	if p.ShareOff() {
+		return true, nil
+	}
+	if !p.OnCurrentLink() {
 		return false, ErrShareOffLink
 	}
-	if !ask {
-		if rep.unreached() {
-			return false, ErrShareNotReachable
-		}
-		return false, nil
-	}
-	if err := rep.Refresh(ctx); err != nil && !rep.ShareOff() {
+	err := p.Refresh(ctx)
+	switch {
+	case p.ShareOff():
+		return true, nil
+	case err != nil:
 		return false, err
+	case !p.OnCurrentLink():
+		return false, ErrShareOffLink
 	}
-	return rep.ShareOff(), nil
+	return false, nil
 }
 
 // Progress is a job's progress as the server shows it: a step, a sentence, and

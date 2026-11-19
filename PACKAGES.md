@@ -2326,10 +2326,15 @@ internal/
             Reporter), whose run writes it again. Runner.ShareOff answers the
             contributing stage for a job through its run's Reporter (one waiting for
             its lane slot included; a stranded one says what it heard): ask reports
-            now (Refresh), else only what is known here, an error with no request
-            for a job not running here (ErrShareNotRunning), off the Bridge's
-            current link (ErrShareOffLink) or whose reports fail
-            (ErrShareNotReachable).
+            now (Reporter.AskShareOff), else only what is known here, an error with
+            no request for a job not running here (ErrShareNotRunning), off the
+            Bridge's current link (ErrShareOffLink) or whose reports fail
+            (ErrShareNotReachable). Reporter.AskShareOff is the one ask a handler
+            files on (generate's shareConfirmed too): Refresh, with the job's link
+            checked against the current one (OnCurrentLink: the same link, or a
+            new pairing with the same address) before the report and again after
+            the answer, so an answer from the old link after a pairing with
+            another server confirms no share (ErrShareOffLink).
             Recovery runs once the link is up: a kind no longer run is failed.
             Nothing is sent that the server refuses for good: a result that isn't a
             JSON object of at most 64 KiB fails the job (errUnreportable) and
@@ -3440,7 +3445,16 @@ internal/
             reads the book again under its hold and leaves one done since to
             finish. shareOwed files through pipeline.Executor.ShareChecked with
             stoppedBy asked before each dimension (the server again, its share_off,
-            ShareResumable), as the stage asks before each filing; the contributing
+            ShareResumable; the first check asks no server, which was asked just
+            before the hold), as the stage asks before each filing; a park the
+            stage would wait on in the same case (contrib_unavailable for a GitHub
+            sign-in missing or not refreshed, share_unconfirmed for a server not
+            asked or a store not read mid-filing) parks the job with the stage's
+            code, reason and retry_at rather than failing it (shareOwedParked:
+            tries again at the retry_at, on Retry, which pokes a job whose book is
+            done, or on WakeParked, which the app's githubChanged calls for
+            contrib_unavailable); a GitHub rate limit still fails it, as it fails
+            the stage's book (a transient stage error, not a park); the contributing
             stage takes a book's issue mode back from the store when the dispatch
             read it local (a share resumed since). The result says share_skipped for a book
             kept local unless something was filed: the book's own reason
@@ -3634,7 +3648,7 @@ internal/
             agent credential changed on the Accounts tab for
             agent_credential_refused and agent_unavailable, since these wait in
             their own loop, not as engine books: each park is registered in
-            describeParks with its run's own channel and removed only by that
+            loopParks with its run's own channel and removed only by that
             run, and every wake is numbered (wakeSeq, woken per code) so a try
             that parks with a code woken while it ran tries again at once rather
             than lose the wake to the drain below),
@@ -3772,7 +3786,17 @@ internal/
             module was turned off only in an answer to the job's next report, a
             keepalive away): an answer that stopped the job files nothing, a server
             that couldn't be asked parks the job share_unconfirmed (ShareUnconfirmedMsg)
-            and asks again every Recheck or on Retry. Failures
+            and asks again every Recheck or on Retry. The ask
+            (jobs.Reporter.AskShareOff: an answer on a link the Bridge no longer
+            uses confirms nothing) comes BEFORE the engine's hold, never under it
+            (an answer can take the request's 30 s, and another job wanting the
+            book gives up as busy after holdTries polls); under the hold
+            shareHeld reads again, with no request, what changed since (a stop,
+            share_off heard, the link, stands), and anything it can't confirm
+            parks and asks again. A sidecars.contribute park Yields its
+            light-lane slot (two parks would hold both) and Reclaims one once
+            the server confirms, asking again after that wait; a sidecars.generate
+            run keeps its pipeline slot as it does through engine parks. Failures
             in words: not signed in, a sign-in whose refresh failed
             (Options.ContribCredential answering contrib.ErrSignInUnrefreshed,
             or a contrib_unavailable park whose Cause is it), refused, nothing kept
@@ -4484,8 +4508,9 @@ internal/
             earlier Bridge's sealed github_pat once (forgetSealedGitHubPAT, best
             effort: one sealed with another key, or a failed delete, never stops
             the start; the env token is read live), githubChanged kicks a beat
-            and re-admits contrib_unavailable books when the Bridge can contribute
-            (a sign-in resumes the sidecars.generate job waiting on one; a refresh
+            and re-admits contrib_unavailable books when the Bridge can contribute,
+            and wakes a generate job's owed share parked contrib_unavailable in its
+            own loop (wakeParked) (a sign-in resumes the sidecars.generate job waiting on one; a refresh
             that works again re-admits them through OnChange, and their park carries a
             retry_at besides, bridge#25; sidecars.contribute
             never parks: it fails asking for a sign-in, or for the sign-in's

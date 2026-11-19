@@ -132,13 +132,14 @@ type Handler struct {
 	// latest run's own channel, with its Reporter (another job asks it to
 	// report now when it stands in that job's way, awaitOpenJobEnd).
 	pokes map[int64]runHandle
-	// describeParks is each describe job's park while its loop waits on it
-	// (describeParked), with that run's wake-up channel, so WakeParked finds the
-	// ones a change answers.
-	describeParks map[int64]describePark
+	// loopParks is each park a job waits on in its own loop, not as an engine
+	// book (a describe job's, describeParked; a generate job's owed share,
+	// shareOwed), with that run's wake-up channel, so WakeParked finds the ones
+	// a change answers.
+	loopParks map[int64]loopPark
 	// wakeSeq numbers WakeParked's calls and woken holds each park code's latest,
-	// so a describe try that parks on a code woken while it ran tries again at
-	// once (parkDescribe).
+	// so a try that parks on a code woken while it ran tries again at once
+	// (loopParked).
 	wakeSeq uint64
 	woken   map[state.ParkCode]uint64
 	// asker is the runner ShareOff asks the jobs through (AskThrough).
@@ -220,22 +221,23 @@ func New(o Options) *Handler {
 	if o.ContribCredential == nil {
 		o.ContribCredential = func(context.Context) error { return nil }
 	}
-	return &Handler{o: o, pokes: map[int64]runHandle{}, describeParks: map[int64]describePark{},
+	return &Handler{o: o, pokes: map[int64]runHandle{}, loopParks: map[int64]loopPark{},
 		woken: map[state.ParkCode]uint64{}}
 }
 
-// describePark is a describe run's park (describeParks): its code, and the
-// run's wake-up channel.
-type describePark struct {
+// loopPark is a park a run waits on in its own loop (loopParks): its code, and
+// the run's wake-up channel.
+type loopPark struct {
 	code state.ParkCode
 	poke chan struct{}
 }
 
-// WakeParked wakes every sidecars.describe job parked with code to try again
-// now, and returns how many it woke: a monthly budget raised on the page, or the
-// agent's credential changed on the Accounts tab, re-admits the engine's parked
-// books, while a describe job waits in its own loop (until its retry_at, the 1st
-// for the monthly budget, a Retry, or the Bridge's next start, which runs the job
+// WakeParked wakes every job parked with code in its own loop (loopParks) to
+// try again now, and returns how many it woke: a monthly budget raised on the
+// page, the agent's credential changed or a GitHub sign-in on the Accounts tab,
+// re-admits the engine's parked books, while a describe job (or a generate
+// job's owed share) waits in its own loop (until its retry_at, the 1st for the
+// monthly budget, a Retry, or the Bridge's next start, which runs the job
 // again). A job whose try is running then tries again at once if that try parks
 // with code.
 func (h *Handler) WakeParked(code state.ParkCode) int {
@@ -244,7 +246,7 @@ func (h *Handler) WakeParked(code state.ParkCode) int {
 	h.wakeSeq++
 	h.woken[code] = h.wakeSeq
 	woke := 0
-	for _, p := range h.describeParks {
+	for _, p := range h.loopParks {
 		if p.code == code {
 			nudge(p.poke)
 			woke++
@@ -253,11 +255,31 @@ func (h *Handler) WakeParked(code state.ParkCode) int {
 	return woke
 }
 
-// wakeMark is WakeParked's latest call (describeParked's before a try).
+// wakeMark is WakeParked's latest call (a loop's before a try).
 func (h *Handler) wakeMark() uint64 {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.wakeSeq
+}
+
+// loopParked registers r's park with code for WakeParked while its own loop
+// waits on it; woken says WakeParked woke code after mark (wakeMark, taken
+// before the try), so the park was answered while the try ran.
+func (h *Handler) loopParked(r *run, code state.ParkCode, mark uint64) (woken bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.loopParks[r.job.ID] = loopPark{code: code, poke: r.poke}
+	return h.woken[code] > mark
+}
+
+// dropLoopPark drops r's loopParked registration (a later run of the job may
+// have its own by then).
+func (h *Handler) dropLoopPark(r *run) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.loopParks[r.job.ID].poke == r.poke {
+		delete(h.loopParks, r.job.ID)
+	}
 }
 
 func (h *Handler) now() time.Time { return h.o.Now() }
@@ -592,7 +614,7 @@ func (h *Handler) shareOwed(ctx context.Context, r *run, b store.Book) (bool, er
 	stands := func(ctx context.Context) (bool, error) {
 		return h.o.DB.ShareResumable(ctx, r.job.ID, r.job.Attempt, b.ID)
 	}
-	if _, err := h.shareConfirmed(ctx, r, sharer, b.ID, ContributeParams{WorkID: b.WorkID}, stands); err != nil {
+	if err := h.shareOwedParked(ctx, r, sharer, b, stands); err != nil {
 		if errors.Is(err, errShareOffNow) || errors.Is(err, pipeline.ErrShareStopped) {
 			h.dropShare(r, &b)
 			return false, nil
@@ -603,6 +625,51 @@ func (h *Handler) shareOwed(ctx context.Context, r *run, b store.Book) (bool, er
 		h.o.Log.Warn("generate: recording the engine book shared failed", "job", r.job.ID, "book", b.ID, "err", err)
 	}
 	return true, nil
+}
+
+// shareOwedParked files an owed share (shareConfirmed) and waits out the parks
+// the contributing stage would wait on in the same case, so a done book's share
+// ends as a stage's would: a GitHub sign-in missing or not refreshed
+// (contrib_unavailable), a server that couldn't be asked while it filed
+// (share_unconfirmed). The job parks with the stage's code, reason and
+// retry_at, stays parked while it tries again, and tries again at the
+// retry_at, on Retry (which pokes the job, its book being done), or on a
+// WakeParked for its code (a GitHub sign-in). Any other failure is the
+// job's, as before.
+func (h *Handler) shareOwedParked(ctx context.Context, r *run, sharer Sharer, b store.Book,
+	stands func(context.Context) (bool, error)) error {
+	defer h.dropLoopPark(r)
+	for {
+		mark := h.wakeMark()
+		_, err := h.shareConfirmed(ctx, r, sharer, b.ID, ContributeParams{WorkID: b.WorkID}, stands)
+		var park *scheduler.ParkError
+		if !errors.As(err, &park) || ctx.Err() != nil {
+			// Lifts this loop's park (nothing when there is none); the job ends or
+			// goes on to finish.
+			r.rep.Unpark()
+			return err
+		}
+		h.o.Log.Warn("generate: the share it owes waits", "job", r.job.ID, "book", b.ID, "code", park.Code, "err", err)
+		retryAt := ""
+		if !park.RetryAfter.IsZero() {
+			retryAt = store.Timestamp(park.RetryAfter)
+			// A Retry pressed while the try ran was answered by it (as
+			// describeParked drains it).
+			select {
+			case <-r.poke:
+			default:
+			}
+		}
+		r.rep.Progress(jobs.Progress{Step: stepSharing, Message: "Needs attention: Sharing with the community", Total: 1,
+			Extra: map[string]any{"park": parkExtra(string(park.Code), retryAt)}})
+		r.rep.Park(string(park.Code), park.Reason)
+		if h.loopParked(r, park.Code, mark) {
+			continue // woken while the try ran
+		}
+		if err := h.recheckWait(ctx, r, park.RetryAfter); err != nil {
+			return err
+		}
+	}
 }
 
 // shareParks are the contributing stage's parks over the share itself (a

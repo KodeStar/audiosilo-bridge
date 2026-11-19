@@ -93,8 +93,9 @@ type Bridge struct {
 	// (endpoint.NewClient: bounded, no redirects).
 	endpointClient *http.Client
 	engine         engineState
-	// wakeParked wakes the describe jobs parked with a code a change answers
-	// (gen.WakeParked; a test watches it).
+	// wakeParked wakes the jobs parked in their own loop with a code a change
+	// answers (gen.WakeParked: describe jobs, a generate job's owed share; a
+	// test watches it).
 	wakeParked func(state.ParkCode) int
 	// hub is the ASR workers' queue and registry (Phase 1b); router the
 	// engine's ASR backend over it, once the engine has started.

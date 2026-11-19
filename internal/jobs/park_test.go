@@ -1301,3 +1301,66 @@ func TestStrandedJobOfAnotherServerIsReleasedBeforeItIsLost(t *testing.T) {
 		t.Fatalf("job state at Abandon = %v, want [running] (released before it is recorded lost)", got)
 	}
 }
+
+// switchingServer is a link that has the Bridge paired with another server
+// as it answers the next report once armed.
+type switchingServer struct {
+	*fakeServer
+	armed    atomic.Bool
+	onUpdate func()
+}
+
+func (s *switchingServer) UpdateJob(ctx context.Context, id int64, u link.Update) (*link.Job, error) {
+	if s.armed.CompareAndSwap(true, false) {
+		s.onUpdate()
+	}
+	return s.fakeServer.UpdateJob(ctx, id, u)
+}
+
+// A handler's ask before it files (Reporter.AskShareOff) is answered on the
+// Bridge's current link (allowed), and confirms nothing on a link it no
+// longer uses (denied): paired with another server before the ask, or while
+// its answer was on its way. Runner.ShareOff asks the same way.
+func TestAskShareOffOnlyOnTheCurrentLink(t *testing.T) {
+	t.Parallel()
+	db, other := openStore(t), newFakeServer()
+	srv := &switchingServer{fakeServer: newFakeServer()}
+	var cur atomic.Pointer[Server]
+	setCur := func(s Server) { cur.Store(&s) }
+	setCur(srv)
+	srv.onUpdate = func() { setCur(other) }
+	reps := make(chan *Reporter, 1)
+	h := handler{kind: "k.v", lane: LaneLight, fn: func(ctx context.Context, _ Job, rep *Reporter) (any, error) {
+		reps <- rep
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}}
+	opts := testOpts()
+	opts.Keepalive = time.Hour // only the asks report
+	r := New(db, func() Server { return *cur.Load() }, nil, opts, h)
+	srv.add(&link.Job{ID: 1, Kind: "k.v", Attempts: 1, State: "claimed"})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { r.Run(ctx); close(done) }()
+	defer func() { cancel(); <-done }()
+	rep := <-reps
+
+	if off, err := rep.AskShareOff(ctx); off || err != nil {
+		t.Fatalf("on the job's link: %v %v, want false, nil", off, err)
+	}
+	srv.armed.Store(true)
+	if _, err := rep.AskShareOff(ctx); !errors.Is(err, ErrShareOffLink) {
+		t.Fatalf("paired with another server while the answer came: %v, want ErrShareOffLink", err)
+	}
+	if rep.OnCurrentLink() {
+		t.Fatal("the job's link counts as the current one after a pairing with another server")
+	}
+	if _, err := r.ShareOff(ctx, 1, true); !errors.Is(err, ErrShareOffLink) {
+		t.Fatalf("Runner.ShareOff on another server's link: %v, want ErrShareOffLink", err)
+	}
+	setCur(srv)
+	srv.setShareOff(map[int64]bool{1: true})
+	if off, err := rep.AskShareOff(ctx); !off || err != nil {
+		t.Fatalf("back on the job's link, share_off: %v %v, want true", off, err)
+	}
+}

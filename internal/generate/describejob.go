@@ -299,13 +299,7 @@ func (h *Handler) holdBook(ctx context.Context, bookID int64) (func(), error) {
 func (h *Handler) describeParked(ctx context.Context, r *run, d Describer, bookID int64) (described, float64, error) {
 	var spent float64
 	parked := false
-	defer func() {
-		h.mu.Lock()
-		if h.describeParks[r.job.ID].poke == r.poke { // a later run of the job may have its own
-			delete(h.describeParks, r.job.ID)
-		}
-		h.mu.Unlock()
-	}()
+	defer h.dropLoopPark(r)
 	for {
 		if !parked {
 			r.rep.Progress(jobs.Progress{Step: pipeline.DescribeStage, Message: "Writing a description", Total: 1,
@@ -357,9 +351,7 @@ func (h *Handler) describeParked(ctx context.Context, r *run, d Describer, bookI
 }
 
 // parkDescribe reports an agent park as the job's, with its hint and retry_at,
-// and registers it for WakeParked; woken says WakeParked woke its code after
-// mark (wakeMark, taken before the try), so the park was answered while the try
-// ran.
+// and registers it for WakeParked (loopParked, whose woken it returns).
 func (h *Handler) parkDescribe(r *run, park *scheduler.ParkError, spent float64, mark uint64) (woken bool) {
 	code, retryAt := string(park.Code), ""
 	if !park.RetryAfter.IsZero() {
@@ -370,10 +362,7 @@ func (h *Handler) parkDescribe(r *run, park *scheduler.ParkError, spent float64,
 	r.rep.Progress(jobs.Progress{Step: pipeline.DescribeStage, Message: "Needs attention: Writing a description", Total: 1,
 		Extra: extra})
 	r.rep.Park(code, park.Reason)
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.describeParks[r.job.ID] = describePark{code: park.Code, poke: r.poke}
-	return h.woken[park.Code] > mark
+	return h.loopParked(r, park.Code, mark)
 }
 
 // describeExtra is a description-only job's progress Extra: the describing
