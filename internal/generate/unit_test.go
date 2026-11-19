@@ -118,12 +118,14 @@ func TestParkHintsNameAnActionThatWorks(t *testing.T) {
 	}
 	// A server that couldn't be asked about the share isn't a GitHub sign-in: each
 	// park's hint names only its own cause, and the share's says it goes on by
-	// itself, a refused token included (once the Bridge is paired again).
+	// itself, and what to do when the server refuses the Bridge's token (pair it
+	// again).
 	if h := ParkHint(string(state.ParkContribUnavailable)); strings.Contains(h, "server") {
 		t.Errorf("contrib unavailable hint = %q", h)
 	}
 	if h := ParkHint(string(state.ParkShareUnconfirmed)); strings.Contains(h, "GitHub") ||
-		!strings.Contains(h, "by itself") || !strings.Contains(h, "paired again") {
+		!strings.Contains(h, "by itself") || !strings.Contains(h, "refuses the Bridge's token") ||
+		!strings.Contains(h, "pair it again") {
 		t.Errorf("share unconfirmed hint = %q", h)
 	}
 	// A chapters.detect job parks this too: the hint can't call it a generate job.
