@@ -2790,8 +2790,9 @@ internal/
             save still waits under the lock its feed fetch already holds for up
             to the same ceiling. A take-in of a renamed folder (adopt, under
             the lock) looks once (writeNow): undecided, every job lets the lock
-            go, waits without it and finds the show again (lockShowToWrite; a
-            follow re-reads its show the same way), and artwork's look never
+            go, waits without it and finds the show again (lockShowToWrite, a
+            folder renamed again meanwhile included; a follow re-reads its show
+            the same way, by the id it found), and artwork's look never
             waits (an undecided one leaves the image for the next poll, no
             failure counted). A fetch also gives its download-lane slot back
             while such a wait may last (yieldSlot: a check that doesn't stand

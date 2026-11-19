@@ -685,10 +685,12 @@ func (h *Subscribe) run(parent context.Context, job jobs.Job, rep *jobs.Reporter
 		unlockShow, err = s.acquire(ctx, s.showKey(mount, show))
 	} else {
 		// A poll may have updated it while subscribe was fetching: it is read
-		// again under the show's lock, and a take-in there (adopt) that
-		// cannot tell whether the folder may be written is waited for
-		// without the lock (lockShowToWrite).
-		show, f, unlockShow, err = s.lockShowToWrite(ctx, root, lib, mount, show, "", nil)
+		// again under the show's lock, as the show find matched (a folder
+		// renamed by hand meanwhile is followed, another show moved to its
+		// name is identity_changed), and a take-in there (adopt) that cannot
+		// tell whether the folder may be written is waited for without the
+		// lock (lockShowToWrite).
+		show, f, unlockShow, err = s.lockShowToWrite(ctx, root, lib, mount, show, f.ShowID, nil)
 	}
 	if err != nil {
 		return nil, err
@@ -1116,9 +1118,12 @@ func (s *service) lockShow(ctx context.Context, root *os.Root, lib link.Library,
 // written: a take-in (adopt) or guard that cannot tell (undecided) lets the
 // lock go, the wait is made without it (beforeWrite, at the folder last
 // looked at), and the show is found and read again, so the show's other jobs
-// go on meanwhile.
+// go on meanwhile. A folder renamed or removed during that wait is found
+// again (lockShow) rather than failing the probe of its old name, and a look
+// undecided again under the lock right after a wait that stood waits
+// CheckPoll before the next, as lockForWrite does.
 func (s *service) lockShowToWrite(ctx context.Context, root *os.Root, lib link.Library, mount, show, id string, guard func(string) error) (string, *podcast.Feed, func(), error) {
-	for {
+	for again := false; ; again = true {
 		at := show // the folder lockShow last looked at
 		got, f, unlock, err := s.lockShow(ctx, root, lib, mount, show, id, func(folder string) error {
 			at = folder
@@ -1130,10 +1135,18 @@ func (s *service) lockShowToWrite(ctx context.Context, root *os.Root, lib link.L
 		if !undecided(err) {
 			return got, f, unlock, err
 		}
+		show = at // lockShow still finds the show elsewhere if at lost it
+		if again {
+			if err := netguard.Wait(ctx, s.o.CheckPoll); err != nil {
+				return "", nil, nil, err
+			}
+		}
 		if err := s.beforeWrite(ctx, lib, mount, at); err != nil {
+			if _, gone := root.Lstat(at); ctx.Err() == nil && !errors.Is(err, context.DeadlineExceeded) && errors.Is(gone, os.ErrNotExist) {
+				continue // renamed or removed while waited for: found again
+			}
 			return "", nil, nil, err
 		}
-		show = at // lockShow still finds the show elsewhere if at lost it
 	}
 }
 

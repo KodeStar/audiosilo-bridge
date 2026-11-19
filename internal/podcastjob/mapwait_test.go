@@ -364,6 +364,46 @@ func TestATakeInWaitsForASlowFolderWithoutTheShowLock(t *testing.T) {
 	}
 }
 
+// A show folder renamed by hand again while a take-in waits for it (without
+// the show's lock) is found again where it is now, not failed as a folder
+// that may not be written: the fetch takes the new folder in and publishes
+// there.
+func TestATakeInFollowsAFolderRenamedWhileItWaits(t *testing.T) {
+	requireProbe(t)
+	h, job := audioHarness(t)
+	s := h.handler.s
+	s.o.CheckPoll = 2 * time.Millisecond
+	audio := data(t, "chap-v24-reverse.mp3")
+	setAudio(h, func(w http.ResponseWriter, _ *http.Request) { w.Write(audio) })
+	var slow atomic.Bool
+	var slowProbes atomic.Int32
+	slow.Store(true)
+	s.o.WriteProbe = func(dir string) error {
+		if !slow.Load() || !strings.Contains(dir, "Renamed Show") {
+			return mapping.ProbeWritable(dir)
+		}
+		slowProbes.Add(1)
+		return &fs.PathError{Op: "probe", Path: dir, Err: fsutil.ErrStatTimeout}
+	}
+	renameShow(t, h, "Fixture Show", "Renamed Show")
+	h.scan.knows = func(p string) bool { return strings.HasPrefix(p, "Fixture Show/") }
+	done := make(chan error, 1)
+	go func() {
+		_, err := h.handler.FetchJob().Run(context.Background(), job, jobs.LocalReporter())
+		done <- err
+	}()
+	awaitTrue(t, "the take-in waited on its folder", done, func() bool { return slowProbes.Load() >= 3 })
+	renameShow(t, h, "Renamed Show", "Renamed Again")
+	slow.Store(false)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	moved := "Renamed Again/" + strings.TrimPrefix(*job.Path, "Fixture Show/")
+	if _, err := os.Stat(filepath.Join(h.mount, moved)); err != nil {
+		t.Fatal("the episode was not published in the folder it was renamed to", err)
+	}
+}
+
 // Artwork is written under the show's lock its poll or follow holds, so its
 // look at the folder never waits there: a probe the folder doesn't answer in
 // time leaves the image for the next poll at once, counting no failure toward
