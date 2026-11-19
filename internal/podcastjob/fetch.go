@@ -337,8 +337,10 @@ func leaseFailure(ctx context.Context, err error, lost string) error {
 // holds the show (the episode itself is missing, or lockShow just took the
 // folder in there) or none does. write_failed when the records cannot be
 // read: the fetch waits, as a take-in does (adopt), rather than leave its
-// record and partial behind. Its show lock is taken and released before the
-// fetch's own locks.
+// record and partial behind. ctx's error when it ended while the show lock
+// was awaited. Before a download its show lock is taken and released before
+// the fetch's own locks; after one, under them (the episode's lock before
+// the show's, as the publication takes them).
 func (s *service) episodeAt(ctx context.Context, root *os.Root, lib link.Library, mount, p string, params fetchParams, self int64) (string, error) {
 	from := path.Dir(p)
 	if f, err := podcast.Read(root, from); err == nil && f.ShowID == params.ShowID {
@@ -346,6 +348,9 @@ func (s *service) episodeAt(ctx context.Context, root *os.Root, lib link.Library
 	}
 	show, _, unlock, err := s.lockShow(ctx, root, lib, mount, from, params.ShowID, nil)
 	if err != nil {
+		if ctx.Err() != nil {
+			return p, ctx.Err() // a stop or the ceiling, not a show that is gone
+		}
 		return p, nil
 	}
 	defer unlock()
