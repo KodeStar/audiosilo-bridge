@@ -23,6 +23,7 @@ import (
 	"github.com/kodestar/audiosilo-bridge/internal/scheduler"
 	"github.com/kodestar/audiosilo-bridge/internal/state"
 	"github.com/kodestar/audiosilo-bridge/internal/store"
+	"github.com/kodestar/audiosilo-bridge/internal/testwait"
 	"github.com/kodestar/audiosilo-bridge/internal/transcript"
 )
 
@@ -1534,7 +1535,7 @@ func TestJobEndWakesGiveWayWaiters(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(testwait.Scaled(5 * time.Second)):
 		t.Fatal("a job's end didn't wake the waiter")
 	}
 	// A signal taken after the end waits for the next one (or the poll).

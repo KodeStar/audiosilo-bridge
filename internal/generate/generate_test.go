@@ -27,6 +27,7 @@ import (
 	"github.com/kodestar/audiosilo-bridge/internal/scheduler"
 	"github.com/kodestar/audiosilo-bridge/internal/state"
 	"github.com/kodestar/audiosilo-bridge/internal/store"
+	"github.com/kodestar/audiosilo-bridge/internal/testwait"
 )
 
 // fakeServer implements the server's Bridge routes the job calls: the claim,
@@ -451,10 +452,12 @@ func published(hub *events.Hub, typ string) bool {
 	return false
 }
 
-// poll waits up to 10 s for cond and reports whether it held. It never fails the
-// test, so it can run off the test's goroutine (in a fake a job calls).
+// poll waits up to 10 s (Scaled) for cond and reports whether it held. It never
+// fails the test, so it can run off the test's goroutine (in a fake a job
+// calls). Each test runs a whole engine and runner, so a gate running every
+// package under -race starves them for seconds at a time.
 func poll(cond func() bool) bool {
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(testwait.Scaled(10 * time.Second))
 	for !cond() {
 		if time.Now().After(deadline) {
 			return false

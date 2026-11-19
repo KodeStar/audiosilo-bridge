@@ -20,6 +20,7 @@ import (
 	"github.com/kodestar/audiosilo-bridge/internal/scheduler"
 	"github.com/kodestar/audiosilo-bridge/internal/state"
 	"github.com/kodestar/audiosilo-bridge/internal/store"
+	"github.com/kodestar/audiosilo-bridge/internal/testwait"
 )
 
 // testDescription is a composed description as the pipeline keeps it.
@@ -714,7 +715,7 @@ func TestDescribeWaitsForTheEnginesCancel(t *testing.T) {
 	hr.srv.addDescribe(312, "Author/Book")
 	select {
 	case <-eng.started:
-	case <-time.After(10 * time.Second):
+	case <-time.After(testwait.Scaled(10 * time.Second)):
 		t.Fatal("the engine was never asked to cancel the book")
 	}
 	time.Sleep(100 * time.Millisecond) // ten polls of the description's wait

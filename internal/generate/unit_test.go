@@ -19,6 +19,7 @@ import (
 	"github.com/kodestar/audiosilo-bridge/internal/scheduler"
 	"github.com/kodestar/audiosilo-bridge/internal/state"
 	"github.com/kodestar/audiosilo-bridge/internal/store"
+	"github.com/kodestar/audiosilo-bridge/internal/testwait"
 )
 
 func TestParseParams(t *testing.T) {
@@ -805,7 +806,7 @@ func TestAbandonBeforeTheEngineStartsStopsTheBookAtOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	up.Store(true)
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(testwait.Scaled(10 * time.Second))
 	for got, _ = db.GetBook(ctx, b.ID); !scheduler.IsCancelled(got); got, _ = db.GetBook(ctx, b.ID) {
 		if time.Now().After(deadline) {
 			t.Fatalf("the book runs with no job once the engine is up: status %q", got.Status)
@@ -1472,7 +1473,7 @@ func TestFollowedAgainSharesANoShareJobBook(t *testing.T) {
 			if o.err != nil || o.filed {
 				t.Fatalf("shareOwed = %v %v, want the share dropped", o.filed, o.err)
 			}
-		case <-time.After(10 * time.Second):
+		case <-time.After(testwait.Scaled(10 * time.Second)):
 			t.Fatalf("the job stayed parked over a share that is off (progress %+v)", r.rep.Last())
 		}
 		if r.shareSkipped != ShareSkippedContributionsOff || r.params.Contribute != ContributeLocal {
