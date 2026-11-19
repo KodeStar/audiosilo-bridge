@@ -680,27 +680,18 @@ func (h *Subscribe) run(parent context.Context, job jobs.Job, rep *jobs.Reporter
 		// moveURL below sets FeedURL and FeedHost.
 		f = &podcast.Feed{Version: 1, Generator: "audiosilo-bridge/" + s.o.Version, ShowID: hex.EncodeToString(random[:]), FeedURLSHA256: podcast.FeedURLHash(feedURL), PreviousFeedURLSHA256: []string{}, Private: p.Private || podcast.IsPrivateFeedURL(feedURL), SubscribedAt: s.o.Now().UTC().Format(time.RFC3339), Episodes: []podcast.Episode{}}
 	}
-	// A poll may have updated it while subscribe was fetching: it is read
-	// again under the show's lock, and a take-in there (adopt) that cannot
-	// tell whether the folder may be written is waited for without the lock.
 	var unlockShow func()
-	for {
-		if unlockShow, err = s.acquire(ctx, s.showKey(mount, show)); err != nil {
-			return nil, err
-		}
-		if created {
-			break
-		}
-		if f, err = s.readShow(ctx, root, lib, mount, show); err == nil {
-			break
-		}
-		unlockShow()
-		if !undecided(err) {
-			return nil, err
-		}
-		if err := s.beforeWrite(ctx, lib, mount, show); err != nil {
-			return nil, err
-		}
+	if created {
+		unlockShow, err = s.acquire(ctx, s.showKey(mount, show))
+	} else {
+		// A poll may have updated it while subscribe was fetching: it is read
+		// again under the show's lock, and a take-in there (adopt) that
+		// cannot tell whether the folder may be written is waited for
+		// without the lock (lockShowToWrite).
+		show, f, unlockShow, err = s.lockShowToWrite(ctx, root, lib, mount, show, "", nil)
+	}
+	if err != nil {
+		return nil, err
 	}
 	defer unlockShow()
 	if p.ShowID != "" && f.ShowID != p.ShowID {
@@ -1142,6 +1133,7 @@ func (s *service) lockShowToWrite(ctx context.Context, root *os.Root, lib link.L
 		if err := s.beforeWrite(ctx, lib, mount, at); err != nil {
 			return "", nil, nil, err
 		}
+		show = at // lockShow still finds the show elsewhere if at lost it
 	}
 }
 
@@ -1337,11 +1329,16 @@ func (s *service) artwork(ctx context.Context, root *os.Root, lib link.Library, 
 	} else if due, e := time.Parse(time.RFC3339, state.NextAttemptAt); e == nil && s.o.Now().Before(due) {
 		return
 	}
-	success, untried := false, false
+	// One look, no wait under the show's lock its caller holds: a folder that
+	// cannot say whether it may be written leaves the image for the next poll,
+	// no failure counted toward its backoff (the feed's save waits for it), and
+	// nothing is downloaded meanwhile.
+	werr := s.writeNow(lib, mount, show)
+	if undecided(werr) {
+		return
+	}
+	success := false
 	defer func() {
-		if untried {
-			return
-		}
 		if success {
 			state.Failures = 0
 			state.NextAttemptAt = ""
@@ -1353,6 +1350,9 @@ func (s *service) artwork(ctx context.Context, root *os.Root, lib link.Library, 
 		}
 		_ = s.o.DB.SavePodcastArtwork(ctx, s.o.ServerID(), lib.ID, f.ShowID, state)
 	}()
+	if werr != nil {
+		return
+	}
 	// Best effort: at most a minute, and half of what the job has left, so a
 	// slow image host can't use up the time feed.json, the cache and the
 	// rescan still need.
@@ -1373,15 +1373,6 @@ func (s *service) artwork(ctx context.Context, root *os.Root, lib link.Library, 
 	case "image/png":
 		name = "cover.png"
 	default:
-		return
-	}
-	// One look, no wait under the show's lock its caller holds: a folder that
-	// cannot say whether it may be written leaves the image for the next poll,
-	// no failure counted toward its backoff (the feed's save waits for it).
-	if err := s.writeNow(lib, mount, show); err != nil {
-		if undecided(err) {
-			untried = true
-		}
 		return
 	}
 	if podcast.WriteAtomic(root, show, name, resp.Body) != nil {
