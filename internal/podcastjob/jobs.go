@@ -352,7 +352,7 @@ func (s *service) library(ctx context.Context, job jobs.Job, rep *jobs.Reporter)
 // mapping stands at the mount the job writes at (none yet, one the server
 // didn't answer, one whose look at the folder timed out, or one too old:
 // mapping.Registry.Status), which says nothing about the mapping: a job waits
-// for one (library, awaitWritable, beforeWrite), a sweep skips the library.
+// for one (library, beforeWrite), a sweep skips the library.
 var errMappingUnknown = fail("library_not_writable", "The podcast library's mapping has no check that stands yet.")
 
 // writable is nil when the library is still a podcast library at mount, its
@@ -377,27 +377,13 @@ func (s *service) writable(lib link.Library, mount string) error {
 	return nil
 }
 
-// awaitWritable is writable, waiting (every CheckPoll, for at most a ceiling
-// within ctx) while no check of the mapping stands: only a standing "not
-// mapped" or "not writable" fails the job. A wait that ends unanswered is
-// ctx's error (bridge_lost, outcome), not library_not_writable.
-func (s *service) awaitWritable(ctx context.Context, lib link.Library, mount string) error {
-	ctx, stop := context.WithTimeout(ctx, ceiling)
-	defer stop()
-	for {
-		if err := s.writable(lib, mount); !errors.Is(err, errMappingUnknown) {
-			return err
-		}
-		if err := s.pause(ctx); err != nil {
-			return err
-		}
-	}
-}
-
-// beforeWrite is awaitWritable, then a write probe of rel's folder: one the
-// folder doesn't answer within mapping.LookTimeout (a disk spinning up) says
-// nothing either, so it is tried again every CheckPoll, for at most a ceiling
-// within ctx.
+// beforeWrite is writable, then a write probe of rel's folder. Neither a
+// mapping with no check standing (errMappingUnknown) nor a probe the folder
+// doesn't answer within mapping.LookTimeout (a disk spinning up) says anything,
+// so either is tried again every CheckPoll, for at most a ceiling within ctx:
+// only a standing "not mapped" or "not writable", or a failed probe, fails the
+// job. A wait that ends unanswered is ctx's error (bridge_lost, outcome), not
+// library_not_writable.
 func (s *service) beforeWrite(ctx context.Context, lib link.Library, mount, rel string) error {
 	ctx, stop := context.WithTimeout(ctx, ceiling)
 	defer stop()
@@ -406,15 +392,17 @@ func (s *service) beforeWrite(ctx context.Context, lib link.Library, mount, rel 
 		return fail("write_failed", "The podcast path is invalid.")
 	}
 	for {
-		if err := s.awaitWritable(ctx, lib, mount); err != nil {
+		err := s.writable(lib, mount)
+		if err == nil {
+			err = s.o.WriteProbe(full)
+			switch {
+			case err == nil:
+				return nil
+			case !errors.Is(err, fsutil.ErrStatTimeout):
+				return fail("library_not_writable", "The podcast folder is not writable.")
+			}
+		} else if !errors.Is(err, errMappingUnknown) {
 			return err
-		}
-		err := s.o.WriteProbe(full)
-		switch {
-		case err == nil:
-			return nil
-		case !errors.Is(err, fsutil.ErrStatTimeout):
-			return fail("library_not_writable", "The podcast folder is not writable.")
 		}
 		if err := s.pause(ctx); err != nil {
 			return err

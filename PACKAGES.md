@@ -2745,7 +2745,7 @@ internal/
             write. While no check stands at that mount (none yet, unanswered, a
             look past LookTimeout, aged past the cap: writable's
             errMappingUnknown) a job waits, CheckPoll apart, at most a ceiling
-            per wait (library, awaitWritable, beforeWrite; a wait cut short is
+            per wait (library, beforeWrite; a wait cut short is
             ctx's error, bridge_lost), and so does a write probe the folder
             doesn't answer in time; only a standing "not mapped"/"not writable"
             or a refused probe fails it library_not_writable. A download's
