@@ -646,3 +646,69 @@ func TestRecoverShowResolvesAJournalOfAGoneMiddleName(t *testing.T) {
 		})
 	}
 }
+
+// A journal naming a gone folder is resolved against the show's feed.json.
+// When that file cannot be read for it (over the read cap, or a read the
+// library fails just now) the show is not an invalid one: RecoverShow fails
+// with the read's error, the journal is left as it is, and the next recovery
+// finishes the install once the file reads again.
+func TestRecoverShowKeepsAFeedReadErrorPastAJournalOfAGoneFolder(t *testing.T) {
+	now := time.Date(2026, 10, 21, 8, 0, 0, 0, time.UTC)
+	for _, c := range []struct {
+		name   string
+		damage func(t *testing.T, feed string)
+		want   error
+	}{
+		{"too large", func(t *testing.T, feed string) {
+			if err := os.Truncate(feed, maxReadBytes+1); err != nil {
+				t.Fatal(err)
+			}
+		}, ErrTooLarge},
+		{"unreadable", func(t *testing.T, feed string) {
+			if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+				t.Skip("the file cannot be made unreadable here")
+			}
+			if err := os.Chmod(feed, 0); err != nil {
+				t.Fatal(err)
+			}
+		}, os.ErrPermission},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			root, j := journalFixture(t)
+			if err := Publish(root, nil, j, now, stopAt("journal")); !errors.Is(err, errStop) {
+				t.Fatal(err)
+			}
+			middle := j
+			middle.Path = "Middle Name/" + strings.TrimPrefix(j.Path, "Fixture Show/")
+			name := AttachmentPath(j.Path, ".publish.json")
+			putJournal(t, root, name, middle)
+			feed := root.Name() + "/Fixture Show/feed.json"
+			saved, err := os.ReadFile(feed)
+			if err != nil {
+				t.Fatal(err)
+			}
+			c.damage(t, feed)
+			if err := RecoverShow(root, "Fixture Show", now, nil); !errors.Is(err, c.want) || errors.Is(err, ErrInvalidFile) {
+				t.Fatal("a feed.json that could not be read made the show invalid:", err)
+			}
+			if got, err := ReadJournal(root, name); err != nil || got.Path != middle.Path {
+				t.Fatal("the journal did not stay as it was", got.Path, err)
+			}
+			if err := os.Chmod(feed, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(feed, saved, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := RecoverShow(root, "Fixture Show", now, nil); err != nil {
+				t.Fatal(err)
+			}
+			if !Matches(root, j.Path, &j.Fetch) {
+				t.Fatal("the install did not finish once feed.json read again")
+			}
+			if _, err := root.Lstat(name); !errors.Is(err, os.ErrNotExist) {
+				t.Fatal("the journal was left", err)
+			}
+		})
+	}
+}

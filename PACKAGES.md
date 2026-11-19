@@ -2521,7 +2521,9 @@ internal/
             id and its episode's id and file name (rehome: a take-in that moved
             the journals and stopped before feed.json, then the folder renamed
             back); another show's, or one naming a folder still there, still
-            refuses. Holds is Matches' size and hash check without
+            refuses, while a feed.json that cannot be read for it (over the
+            read cap, a read the library failed) fails with the read's error,
+            never ErrInvalidFile. Holds is Matches' size and hash check without
             a pin; Verify tells a file proven to hold other content from one
             that could not be read to tell (its error).
             EnsureDir never makes the show folder itself, so a job

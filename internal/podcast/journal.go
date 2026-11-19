@@ -195,7 +195,9 @@ func Publish(root *os.Root, f *Feed, j Journal, now time.Time, fault Boundary) e
 // are the show's: a take-in that moved the journals to a new name and stopped
 // before feed.json, then the folder renamed back by hand. It is resolved
 // against the show's folder (rehome) rather than refused for good, as feed.json
-// names this folder and no take-in would run.
+// names this folder and no take-in would run. A feed.json that cannot be read
+// for it then fails with the read's error (ErrTooLarge, or the library's),
+// never ErrInvalidFile.
 func RecoverShow(root *os.Root, show string, now time.Time, fault Boundary) error {
 	if !ValidShow(show) {
 		return ErrInvalidFile
@@ -217,8 +219,12 @@ func RecoverShow(root *os.Root, show string, now time.Time, fault Boundary) erro
 		}
 		if !journalValid(&j, show) {
 			if feed == nil {
+				// The read's own error: a feed.json over the read cap or one
+				// the library failed to read just now is not an invalid show
+				// (the job reports too_large, or tries again), and one naming
+				// another folder is ErrInvalidFile already (a take-in's).
 				if feed, err = Read(root, show); err != nil {
-					return ErrInvalidFile
+					return err
 				}
 			}
 			if j, err = rehome(root, show, p, j, feed); err != nil {
@@ -256,14 +262,19 @@ func RecoverShow(root *os.Root, show string, now time.Time, fault Boundary) erro
 // folder, to name show: when that folder is gone (or is show itself spelt
 // otherwise, a case-insensitive filesystem) and j is the show's (f, its
 // feed.json read under the same lock: its id, and an episode of j's id and
-// file name). ErrInvalidFile otherwise, as before.
+// file name). ErrInvalidFile otherwise, as before; the library's error when
+// it could not say whether that folder is there.
 func rehome(root *os.Root, show, name string, j Journal, f *Feed) (Journal, error) {
 	dir := path.Dir(j.Path)
 	if dir == show || !journalValid(&j, dir) {
 		return j, ErrInvalidFile
 	}
-	if _, err := root.Lstat(dir); !errors.Is(err, os.ErrNotExist) && !sameFolder(root, dir, show) {
-		return j, ErrInvalidFile
+	if _, err := root.Lstat(dir); err == nil {
+		if !sameFolder(root, dir, show) {
+			return j, ErrInvalidFile
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return j, err // not known to be gone: asked again, never refused for it
 	}
 	at := j
 	at.Path = show + "/" + path.Base(j.Path)
