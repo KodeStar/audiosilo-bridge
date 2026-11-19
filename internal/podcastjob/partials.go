@@ -78,7 +78,7 @@ func (h *Subscribe) SweepPartials(ctx context.Context) {
 					shows = append(shows, e.Name())
 				}
 			}
-			s.sweepRecords(ctx, root, lib, mount, 0)
+			s.sweepRecords(ctx, root, lib, mount)
 			s.sweepPartials(ctx, root, lib, mount, shows, 0)
 		}()
 	}

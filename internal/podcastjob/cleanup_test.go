@@ -419,7 +419,7 @@ func TestSweepRecordsDropsRecordsWhoseFolderIsGone(t *testing.T) {
 			}
 		}
 	}
-	s.sweepRecords(context.Background(), root, link.Library{ID: 3, Kind: "podcasts", Root: h.mount}, h.mount, 0)
+	s.sweepRecords(context.Background(), root, link.Library{ID: 3, Kind: "podcasts", Root: h.mount}, h.mount)
 	for name, r := range records {
 		_, err := dir.Lstat(recordName(3, r.c.ShowID, r.c.Path))
 		v, _ := s.o.Vault.Get(r.c.Validator)

@@ -115,21 +115,37 @@ func (s *service) migrateRecords(dir *os.Root, pairing string) {
 		}
 		name := recordName(c.LibraryID, c.ShowID, c.Path)
 		if there, err := readRecord(dir, name); err == nil {
-			if there.Validator != c.Validator && strings.HasPrefix(c.Validator, secrets.PodcastETagPrefix) {
-				_ = s.o.Vault.Delete(c.Validator)
+			if there.Validator != c.Validator {
+				s.dropValidator(c.Validator)
 			}
 			_ = dir.Remove(entry.Name())
 			continue
 		} else if !errors.Is(err, os.ErrNotExist) {
 			continue
 		}
-		b, err := json.Marshal(c)
-		if err != nil || fsutil.WriteRootAtomic(dir, ".", name, b, 0o600, nil) != nil {
+		if writeRecord(dir, name, c) != nil {
 			continue
 		}
 		_ = dir.Remove(entry.Name())
 	}
 	s.migrated[pairing] = true
+}
+
+// writeRecord writes download record c under name in the records folder dir.
+func writeRecord(dir *os.Root, name string, c checkpoint) error {
+	b, err := json.Marshal(c)
+	if err != nil {
+		return err
+	}
+	return fsutil.WriteRootAtomic(dir, ".", name, b, 0o600, nil)
+}
+
+// dropValidator removes validator v's sealed ETag from the vault, when v
+// names one.
+func (s *service) dropValidator(v string) {
+	if strings.HasPrefix(v, secrets.PodcastETagPrefix) {
+		_ = s.o.Vault.Delete(v)
+	}
 }
 func (s *service) saveCheckpoint(job jobs.Job, root *os.Root, c *checkpoint, etag string) error {
 	dir, err := s.checkpointRoot()
@@ -155,11 +171,7 @@ func (s *service) saveCheckpoint(job jobs.Job, root *os.Root, c *checkpoint, eta
 		return err
 	}
 	c.UpdatedAt = s.o.Now().UTC().Format(time.RFC3339)
-	b, err := json.Marshal(c)
-	if err != nil {
-		return err
-	}
-	return fsutil.WriteRootAtomic(dir, ".", s.checkpointName(job, c.ShowID), b, 0o600, nil)
+	return writeRecord(dir, s.checkpointName(job, c.ShowID), *c)
 }
 
 // readCheckpoint is the job's saved record of show id show when it is this
@@ -372,8 +384,7 @@ func moveRecord(dir *os.Root, lib int64, c checkpoint, to string) {
 	if _, err := dir.Lstat(name); !errors.Is(err, os.ErrNotExist) {
 		return
 	}
-	b, err := json.Marshal(c)
-	if err != nil || fsutil.WriteRootAtomic(dir, ".", name, b, 0o600, nil) != nil {
+	if writeRecord(dir, name, c) != nil {
 		return
 	}
 	_ = dir.Remove(old)
@@ -481,9 +492,7 @@ func (s *service) dropPartial(root *os.Root, c *checkpoint) bool {
 			}
 		}
 	}
-	if strings.HasPrefix(c.Validator, secrets.PodcastETagPrefix) {
-		_ = s.o.Vault.Delete(c.Validator)
-	}
+	s.dropValidator(c.Validator)
 	return true
 }
 

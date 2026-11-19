@@ -1081,11 +1081,10 @@ func (h *Fetch) Abandon(ctx context.Context, job jobs.Job) {
 			// path, so the record goes rather than stay for good. Its partial,
 			// moved with the folder, is unrecorded then, and sweepPartials takes
 			// it once old.
-			if _, e := root.Lstat(path.Dir(at)); errors.Is(e, os.ErrNotExist) {
-				c, _ := s.loadCheckpoint(job, root, p.ShowID, p.EpisodeID)
-				s.clearCheckpoint(job, root, &c)
+			if folderThere(root, path.Dir(at)) {
+				continue
 			}
-			continue
+			release = func() {}
 		}
 		c, _ := s.loadCheckpoint(job, root, p.ShowID, p.EpisodeID)
 		s.clearCheckpoint(job, root, &c)
