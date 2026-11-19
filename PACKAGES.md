@@ -3059,7 +3059,22 @@ internal/
             and the records are read show by show, only for a show holding such a name, and
             nothing goes while the pairing's token can't be read. A job claimed
             before its library's mapping check (a start or re-pair) waits for it
-            (CheckPoll). A subscribe's 3-minute ceiling starts once it holds the
+            (CheckPoll). A fetch's download records are kept under the pairing
+            its claim was made under (BR-LINK-RULE-2): SealParams records that
+            pairing's hash in the claim's params (bridge_server_hash, never on
+            the page: podcast.RedactParams), forJob keys the job's records by it
+            (claimHash; a claim from before it pins the hash its run starts
+            under), and each record names the mount it was written under
+            (checkpoint.Mount). A fetch whose pairing ended (unpaired, or paired
+            again with its server or another) saves no record after it
+            (identity_changed); its run's exit clears its own partial and record
+            under the lock it holds, and its Abandon (abandonEnded, only when the
+            server token could be read to tell) clears the claim's records of
+            the episode, their partials and ETags at the records' mounts while
+            the library's marker is there, never through a mapping no longer
+            the Bridge's, then the ended pairing's records folder once empty;
+            the pairing now's records of the episode are another folder's and
+            stay. A subscribe's 3-minute ceiling starts once it holds the
             library lock, a poll's once it holds the show lock (the mapping wait and
             the lock wait get one more); artwork gets at most a minute and half the time left; a
             follow that fails before feed.json takes back the folder it made. A

@@ -73,6 +73,12 @@ type Options struct {
 type service struct {
 	o Options
 	*shared
+	// claimHash is the pairing hash a fetch's claim was made under
+	// (claimParams, recorded at its claim by SealParams; a run started
+	// without one pins the hash it starts under): its download records are
+	// that pairing's (pairHash), so a job whose pairing has ended since is
+	// still released where its records are. "" for every other view.
+	claimHash string
 }
 type shared struct {
 	mu    sync.Mutex
@@ -101,8 +107,17 @@ type shared struct {
 // anything (BR-LINK-RULE). The service itself for a job no runner claimed.
 func (s *service) forJob(job jobs.Job) *service {
 	id := job.ServerID()
+	hash := s.claimHash
+	if c, ok := claimOf(job); ok {
+		hash = c.ServerHash
+	}
 	if id == "" {
-		return s
+		if hash == s.claimHash {
+			return s
+		}
+		v := *s
+		v.claimHash = hash
+		return &v
 	}
 	o := s.o
 	o.ServerID = func() string { return id }
@@ -116,7 +131,7 @@ func (s *service) forJob(job jobs.Job) *service {
 	if s.o.Libraries != nil {
 		o.Libraries = jobLibraries{s.o.Libraries, reaches}
 	}
-	return &service{o: o, shared: s.shared}
+	return &service{o: o, shared: s.shared, claimHash: hash}
 }
 
 // jobLibraries are a job's view of the server's libraries: none while the

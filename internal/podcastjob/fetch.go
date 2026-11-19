@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"os"
 	"path"
+	"path/filepath"
 	"time"
 
 	"github.com/kodestar/audiosilo-bridge/internal/jobs"
@@ -34,6 +35,31 @@ func (h *Subscribe) FetchJob() *Fetch { return &Fetch{s: h.s} }
 func (h *Fetch) Kind() string         { return FetchKind }
 func (h *Fetch) Lane() string         { return jobs.LaneDownload }
 func (h *Fetch) Interactive() bool    { return true }
+
+// SealParams records, beside the server's params, the pairing hash the claim
+// is made under (claimParams): its download records are kept under it, and a
+// job whose pairing has ended since (an unpair, a pairing made again with the
+// same server or another) is released there (Abandon), where the pairing now
+// would name another folder. A claim whose link no longer reaches its
+// pairing records none (one in the params is never the server's to set), and
+// its job is dropped before it runs. Params that are not an object go as they
+// are: the run fails them as an episode not found.
+func (h *Fetch) SealParams(job jobs.Job) (json.RawMessage, error) {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(job.Params, &fields) != nil || fields == nil {
+		return job.Params, nil
+	}
+	delete(fields, podcast.ClaimHashParam)
+	s := h.s.forJob(job)
+	reaches := func() bool { return s.o.Server == nil || s.o.Server() != nil }
+	if reaches() {
+		hash := s.livePairHash()
+		if reaches() { // the token read for the pairing the claim was made under
+			fields[podcast.ClaimHashParam], _ = json.Marshal(hash)
+		}
+	}
+	return json.Marshal(fields)
+}
 
 type fetchParams struct {
 	ShowID    string `json:"show_id"`
@@ -134,9 +160,17 @@ func (b *budget) failure(ctx context.Context, err error) error {
 
 func (h *Fetch) Run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (any, error) {
 	kept := ""
-	result, err := (&Fetch{s: h.s.forJob(job)}).run(parent, &job, rep, &kept)
+	view := *h.s.forJob(job)
+	own := &Fetch{s: &view}
+	if own.s.claimHash == "" {
+		// Claimed before claims recorded their pairing (SealParams): its
+		// records are kept under the pairing it starts under, which its
+		// release below reads even once that pairing has ended.
+		own.s.claimHash = own.s.livePairHash()
+	}
+	result, err := own.run(parent, &job, rep, &kept)
 	if err != nil && (parent.Err() == nil || !jobs.Resumes(parent)) {
-		h.abandon(parent, job, kept)
+		own.abandon(parent, job, kept)
 	}
 	return outcome(result, err)
 }
@@ -224,7 +258,6 @@ func (h *Fetch) run(parent context.Context, claimed *jobs.Job, rep *jobs.Reporte
 	// Found elsewhere: its record, under the episode's lock now, is taken
 	// along even when another open row names it (adoptOwn).
 	s.adoptOwn(job, root, claimedAt, params, "")
-	pairing := s.pairHash()
 	f, e, err := s.fetchSnapshot(parent, rep, root, lib, mount, *job.Path, params)
 	if err != nil {
 		return nil, err
@@ -323,7 +356,19 @@ func (h *Fetch) run(parent context.Context, claimed *jobs.Job, rep *jobs.Reporte
 	// partial it loaded.
 	unresolved := false
 	defer func() {
-		if s.writable(lib, mount) != nil || pairing != s.pairHash() {
+		if s.pairingEndedForSure() {
+			// Dropped mid-run (unpaired, or paired again): no attempt resumes
+			// under that pairing, and no mapping of its library is the
+			// Bridge's to check any more. Its own partial and record go now,
+			// under the episode's lock it holds, in the library it wrote
+			// them in while its marker is still there (a share unmounted
+			// since leaves them for Abandon, which reads the record's mount).
+			if !committed && markerThere(root) {
+				s.clearCheckpoint(job, root, &c)
+			}
+			return
+		}
+		if s.writable(lib, mount) != nil || s.pairingEnded() {
 			return
 		}
 		keep := false
@@ -530,7 +575,7 @@ func (h *Fetch) run(parent context.Context, claimed *jobs.Job, rep *jobs.Reporte
 			}
 			return false, leaseFailure(ctx, err, "The episode job no longer owns its claim.")
 		}
-		if pairing != s.pairHash() {
+		if s.pairingEnded() {
 			return false, fail("identity_changed", "The Bridge pairing changed.")
 		}
 		// The lease's round trip since the lock's own look (lockForWrite).
@@ -1132,7 +1177,7 @@ func (s *service) consume(ctx context.Context, b *budget, job *jobs.Job, root *o
 		if err := s.writable(lib, root.Name()); err != nil && !errors.Is(err, errMappingUnknown) {
 			return err
 		}
-		if c.ServerHash != s.pairHash() {
+		if c.ServerHash != s.pairHash() || s.pairingEnded() {
 			return fail("identity_changed", "The Bridge pairing changed.")
 		}
 		if err := home(received); err != nil {
@@ -1419,6 +1464,10 @@ func (h *Fetch) abandon(ctx context.Context, job jobs.Job, kept string) {
 		return
 	}
 	s := h.s.forJob(job)
+	if s.claimHash != "" && s.pairingEndedForSure() {
+		s.abandonEnded(ctx, job, p)
+		return
+	}
 	lib, ok := s.o.Libraries.Library(*job.LibraryID)
 	if !ok {
 		return
@@ -1466,6 +1515,72 @@ func (h *Fetch) abandon(ctx context.Context, job jobs.Job, kept string) {
 		}
 		release()
 	}
+}
+
+// abandonEnded is Abandon for a job whose pairing has ended (unpaired, or
+// paired again with the same server or another): its server's libraries are
+// no longer the Bridge's to read, and no job resumes under that pairing, so
+// every download record the claim's pairing kept of the episode (pairHash,
+// at the job's path and wherever one moved with its show) goes with its
+// partial and its sealed ETag, under the mount the record names
+// (checkpoint.Mount) rather than a mapping. The library's marker must still
+// be at that mount (a share unmounted since leaves its record), and the
+// episode's lock is waited on for abandonWait, as Abandon's own: a lock still
+// held is a download's, whose own end clears what it shares. A record from
+// before records named their mount goes with its ETag, its partial left for
+// a sweep. The pairing's records folder goes once nothing is left in it.
+func (s *service) abandonEnded(ctx context.Context, job jobs.Job, p fetchParams) {
+	if s.o.DataDir == "" {
+		return
+	}
+	folder := filepath.Join(s.o.DataDir, "podcast-fetch", s.pairHash())
+	dir, err := os.OpenRoot(folder)
+	if err != nil {
+		return
+	}
+	defer func() {
+		_ = dir.Close()
+		_ = os.Remove(folder) // only once empty
+	}()
+	records, err := s.records(dir, *job.LibraryID)
+	if err != nil {
+		return
+	}
+	for _, c := range records {
+		if c.ShowID != p.ShowID || c.EpisodeID != p.EpisodeID || path.Base(c.Path) != path.Base(*job.Path) {
+			continue
+		}
+		if c.Mount == "" || !filepath.IsAbs(c.Mount) {
+			s.forgetRecord(dir, records, c)
+			continue
+		}
+		s.releaseEnded(ctx, job, c)
+	}
+}
+
+// releaseEnded clears record c of an ended pairing's job, its partial and its
+// ETag, at the mount it names (abandonEnded).
+func (s *service) releaseEnded(ctx context.Context, job jobs.Job, c checkpoint) {
+	root, err := os.OpenRoot(c.Mount)
+	if err != nil {
+		return
+	}
+	defer func() { _ = root.Close() }()
+	if !markerThere(root) {
+		return
+	}
+	wait, stop := context.WithTimeout(ctx, abandonWait)
+	release, err := s.fileLock(wait, root, c.Path)
+	stop()
+	if err != nil {
+		if folderThere(root, path.Dir(c.Path)) {
+			return
+		}
+		release = func() {}
+	}
+	defer release()
+	job.Path = &c.Path
+	s.clearCheckpoint(job, root, &c)
 }
 
 var _ jobs.Abandoner = (*Fetch)(nil)

@@ -2005,6 +2005,13 @@ func LoseContext(parent context.Context) (context.Context, func()) {
 	return ctx, func() { cancel(errLost) }
 }
 
+// DropContext returns a child of parent and a func that ends it as an unpair
+// on the Bridge's page does (Resumes is false after it): a handler's tests.
+func DropContext(parent context.Context) (context.Context, func()) {
+	ctx, cancel := context.WithCancelCause(parent)
+	return ctx, func() { cancel(errPairingEnded) }
+}
+
 // AbandonContext is the context the runner hands Abandon for a job whose claim
 // was lost (lost true) or cancelled: a handler's tests.
 func AbandonContext(parent context.Context, lost bool) context.Context {

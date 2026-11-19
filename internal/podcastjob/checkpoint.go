@@ -52,6 +52,11 @@ type checkpoint struct {
 	SourceLength int64  `json:"source_length,omitempty"`
 	SourceBase   string `json:"source_base,omitempty"`
 	UpdatedAt    string `json:"updated_at"`
+	// Mount is the library mount the partial was written under (the root's
+	// name at its save): a job whose pairing has ended has no mapping of its
+	// library to read any more, and is released here (abandonEnded). A record
+	// from before it has none.
+	Mount string `json:"mount,omitempty"`
 }
 
 // complete reports whether c records a whole download, its partial holding
@@ -117,9 +122,51 @@ func nonce() string {
 	}
 	return hex.EncodeToString(b[:])
 }
+
+// pairHash is the pairing hash the view's download records are kept under:
+// its fetch claim's (claimHash), else the Bridge's pairing now (livePairHash).
 func (s *service) pairHash() string {
+	if s.claimHash != "" {
+		return s.claimHash
+	}
+	return s.livePairHash()
+}
+
+// livePairHash is the hash of the Bridge's pairing now, with the view's
+// server: its server token is new at each pairing and gone once unpaired. A
+// token that cannot be read counts as none.
+func (s *service) livePairHash() string {
 	token, _ := s.o.Vault.Get(secrets.ServerToken)
 	return podcast.FeedURLHash(s.o.ServerID() + "|" + token)
+}
+
+// pairingEnded reports whether the pairing the view's records are kept under
+// (pairHash) is no longer the Bridge's: unpaired, or paired again (with the
+// same server or another) since the claim. Nothing more is written for it.
+func (s *service) pairingEnded() bool { return s.pairHash() != s.livePairHash() }
+
+// pairingEndedForSure is pairingEnded only when the server token could be
+// read to tell (absent counts as read): a vault that fails a read says
+// nothing of the pairing, and a job's live records are never released as an
+// ended pairing's for it.
+func (s *service) pairingEndedForSure() bool {
+	token, err := s.o.Vault.Get(secrets.ServerToken)
+	return err == nil && s.pairHash() != podcast.FeedURLHash(s.o.ServerID()+"|"+token)
+}
+
+// claimParams is what a fetch's claim records beside the server's params
+// (SealParams): the pairing hash its download records are kept under.
+type claimParams struct {
+	ServerHash string `json:"bridge_server_hash"`
+}
+
+// claimOf is the claim record in job's params, when it has one.
+func claimOf(job jobs.Job) (claimParams, bool) {
+	var c claimParams
+	if job.Kind != FetchKind || json.Unmarshal(job.Params, &c) != nil || c.ServerHash == "" {
+		return claimParams{}, false
+	}
+	return c, true
 }
 func (s *service) checkpointName(job jobs.Job, show string) string {
 	return recordName(*job.LibraryID, show, *job.Path)
@@ -237,6 +284,11 @@ func (s *service) dropValidator(v string) {
 	}
 }
 func (s *service) saveCheckpoint(job jobs.Job, root *os.Root, c *checkpoint, etag string) error {
+	if s.pairingEnded() {
+		// Dropped (unpaired, or paired again) since the claim: nothing is
+		// recorded for a pairing no job resumes under, nor under the one now.
+		return fail("identity_changed", "The Bridge pairing changed.")
+	}
 	dir, err := s.checkpointRoot()
 	if err != nil {
 		return err
@@ -265,6 +317,7 @@ func (s *service) saveCheckpoint(job jobs.Job, root *os.Root, c *checkpoint, eta
 		}
 	}
 	c.UpdatedAt = s.o.Now().UTC().Format(time.RFC3339)
+	c.Mount = root.Name()
 	return writeRecord(dir, s.checkpointName(job, c.ShowID), *c)
 }
 

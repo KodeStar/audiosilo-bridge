@@ -108,12 +108,18 @@ func (f *Feed) ScrubPrivate() {
 	}
 }
 
+// ClaimHashParam is the param under which a podcast.fetch claim records the
+// pairing hash it was made under (podcastjob's SealParams): derived from the
+// server token, so the page never shows it (RedactParams).
+const ClaimHashParam = "bridge_server_hash"
+
 // RedactParams is also used at the page API boundary, including legacy rows.
 func RedactParams(raw json.RawMessage) json.RawMessage {
 	var fields map[string]json.RawMessage
 	if json.Unmarshal(raw, &fields) != nil {
 		return json.RawMessage(`{}`)
 	}
+	delete(fields, ClaimHashParam)
 	if v, ok := fields["feed_url"]; ok {
 		var s string
 		if json.Unmarshal(v, &s) == nil && s != "" {
