@@ -1493,3 +1493,158 @@ func TestAFetchStoppedAfterItsShowWasRenamedResumesThere(t *testing.T) {
 		t.Fatal("the old folder came back", err)
 	}
 }
+
+// copyThenDelete "renames" folder from to to as a move across filesystems or
+// a file manager does: a copy, then the original deleted. to may be from
+// itself (the folder put back from a copy made elsewhere).
+func copyThenDelete(t *testing.T, from, to string) error {
+	src := from
+	if to == from {
+		src = filepath.Join(t.TempDir(), "copy")
+		if err := os.CopyFS(src, os.DirFS(from)); err != nil {
+			return err
+		}
+	}
+	if to != from {
+		if err := os.CopyFS(to, os.DirFS(src)); err != nil {
+			return err
+		}
+	}
+	if err := os.RemoveAll(from); err != nil {
+		return err
+	}
+	if to == from {
+		return os.CopyFS(to, os.DirFS(src))
+	}
+	return nil
+}
+
+// partialAt waits until the one partial in show holds at least n bytes.
+func partialAt(show string, n int64) bool {
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+		if matches := partials(show); len(matches) == 1 {
+			if st, err := os.Stat(matches[0]); err == nil && st.Size() >= n {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// A show folder "renamed" by a copy and a delete while its episode downloads
+// and the host goes on sending: the partial the fetch writes is deleted, a
+// copy of its start in the new folder. The fetch notices before it publishes
+// and writes the whole episode where the show is now (one request), rather
+// than fail on the stale copy and fetch again from byte 0; nothing is left,
+// the lock it takes there (a copy, not the file held) included. A folder put
+// back at its own name from a copy is the same case at the same path.
+func TestAFetchFollowsItsShowCopiedAndDeletedMidDownload(t *testing.T) {
+	for _, to := range []string{"Renamed Show", "Fixture Show"} {
+		requireProbe(t)
+		h, job := audioHarness(t)
+		h.scan.knows = func(p string) bool { return strings.HasPrefix(p, "Fixture Show/") }
+		audio := data(t, "chap-v24-reverse.mp3")
+		show := filepath.Join(h.mount, "Fixture Show")
+		var calls atomic.Int32
+		setAudio(h, func(w http.ResponseWriter, r *http.Request) {
+			calls.Add(1)
+			if r.Header.Get("Range") != "" {
+				t.Error("the episode was downloaded again", r.Header.Get("Range"))
+			}
+			w.Header().Set("ETag", `"one"`)
+			w.Header().Set("Content-Length", strconv.Itoa(len(audio)))
+			w.WriteHeader(200)
+			w.Write(audio[:2000])
+			w.(http.Flusher).Flush()
+			if !partialAt(show, 2000) {
+				t.Error("the download did not start")
+				return
+			}
+			if err := copyThenDelete(t, show, filepath.Join(h.mount, to)); err != nil {
+				t.Error(err)
+			}
+			w.Write(audio[2000:])
+		})
+		res, err := h.handler.FetchJob().Run(context.Background(), job, jobs.LocalReporter())
+		moved := to + "/" + strings.TrimPrefix(*job.Path, "Fixture Show/")
+		got, ok := res.(fetchResult)
+		if err != nil || !ok || got.Path != moved || got.Fetch.Bytes != int64(len(audio)) || calls.Load() != 1 {
+			t.Fatal(to, res, err, calls.Load())
+		}
+		root, err := os.OpenRoot(h.mount)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !podcast.Matches(root, moved, &got.Fetch) {
+			t.Fatal(to, "the episode was not published where the show is now")
+		}
+		root.Close()
+		if left := partials(filepath.Join(h.mount, to)); len(left) != 0 {
+			t.Fatal(to, "a partial was left behind", left)
+		}
+		if _, err := os.Lstat(filepath.Join(h.mount, podcast.AttachmentPath(moved, ".fetch.lock"))); !errors.Is(err, os.ErrNotExist) {
+			t.Fatal(to, "the episode's lock was left in the copied folder", err)
+		}
+		noRecords(t, h.handler.s)
+	}
+}
+
+// The same copy and delete caught on the way (the partial is checked against
+// its path once a second): the bytes so far are written where the show is
+// now, so when the host then cuts the connection the retry resumes from all
+// of them there (a ranged request), not from the stale copy's size, which no
+// longer matches the record, or from byte 0.
+func TestAFetchCopiedAndDeletedMidDownloadResumesFromAllItsBytes(t *testing.T) {
+	requireProbe(t)
+	h, job := audioHarness(t)
+	h.scan.knows = func(p string) bool { return strings.HasPrefix(p, "Fixture Show/") }
+	audio := data(t, "chap-v24-reverse.mp3")
+	show := filepath.Join(h.mount, "Fixture Show")
+	moved := "Renamed Show/" + strings.TrimPrefix(*job.Path, "Fixture Show/")
+	var calls atomic.Int32
+	setAudio(h, func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) > 1 {
+			if r.Header.Get("Range") != "bytes=4000-" || r.Header.Get("If-Range") != `"one"` {
+				t.Error("the retry did not resume from the bytes the fetch held", r.Header.Get("Range"))
+			}
+			w.Header().Set("ETag", `"one"`)
+			w.Header().Set("Content-Range", "bytes 4000-"+strconv.Itoa(len(audio)-1)+"/"+strconv.Itoa(len(audio)))
+			w.Header().Set("Content-Length", strconv.Itoa(len(audio)-4000))
+			w.WriteHeader(206)
+			w.Write(audio[4000:])
+			return
+		}
+		w.Header().Set("ETag", `"one"`)
+		w.Header().Set("Content-Length", strconv.Itoa(len(audio)))
+		w.WriteHeader(200)
+		w.Write(audio[:2000])
+		w.(http.Flusher).Flush()
+		if !partialAt(show, 2000) {
+			t.Error("the download did not start")
+			return
+		}
+		if err := copyThenDelete(t, show, filepath.Join(h.mount, "Renamed Show")); err != nil {
+			t.Error(err)
+		}
+		w.Write(audio[2000:3000])
+		w.(http.Flusher).Flush()
+		time.Sleep(1100 * time.Millisecond) // a write checks the partial at most once a second
+		w.Write(audio[3000:4000])
+		w.(http.Flusher).Flush()
+		if !partialAt(filepath.Join(h.mount, "Renamed Show"), 4000) {
+			t.Error("the partial was not written where the show is now")
+		}
+	})
+	res, err := h.handler.FetchJob().Run(context.Background(), job, jobs.LocalReporter())
+	if got, ok := res.(fetchResult); err != nil || !ok || got.Path != moved || got.Fetch.Bytes != int64(len(audio)) || calls.Load() != 2 {
+		t.Fatal(res, err, calls.Load())
+	}
+	if left := partials(filepath.Join(h.mount, "Renamed Show")); len(left) != 0 {
+		t.Fatal("a partial was left behind", left)
+	}
+	if _, err := os.Lstat(filepath.Join(h.mount, podcast.AttachmentPath(moved, ".fetch.lock"))); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("the episode's lock was left in the copied folder", err)
+	}
+	noRecords(t, h.handler.s)
+}
+

@@ -203,10 +203,19 @@ func (h *Fetch) run(parent context.Context, claimed *jobs.Job, rep *jobs.Reporte
 	// record along (adoptOwn, never dropping the partial it writes): the
 	// partial moved with the folder. The lock first (followLock): a fetch
 	// that cannot hold it there stays where it was, and fails.
+	// At the same path, a folder put back there from a copy has a copy of the
+	// lock file, not the one held: the lock there is taken anew (followLock).
+	// No lock file there (a folder being deleted) is left so, never made again.
 	follow := func(ctx context.Context) error {
 		p, err := s.episodeAt(ctx, root, lib, mount, e.Path, params, job.ID)
-		if err != nil || p == e.Path {
+		if err != nil {
 			return err
+		}
+		if p == e.Path {
+			if _, err := root.Lstat(podcast.AttachmentPath(p, ".fetch.lock")); err != nil {
+				return nil
+			}
+			return s.followLock(ctx, lock, p)
 		}
 		if err := s.followLock(ctx, lock, p); err != nil {
 			return err
@@ -269,7 +278,7 @@ func (h *Fetch) run(parent context.Context, claimed *jobs.Job, rep *jobs.Reporte
 		s.adoptOwn(job, root, claimedAt, params, c.Temp)
 	}()
 	rep.Progress(jobs.Progress{Step: "resolving", Message: "Resolving the episode"})
-	received, err := s.download(ctx, b, &job, root, f, e, &c, tag, settle, rep)
+	received, err := s.download(ctx, b, &job, root, f, e, &c, tag, settle, follow, rep)
 	if err != nil {
 		return nil, err
 	}
@@ -571,7 +580,9 @@ func (s *service) enclosure(ctx context.Context, f *podcast.Feed, e podcast.Epis
 // download fetches episode e into its partial (c), retrying the host. settle
 // (run's) follows the fetch, job and c, to a show folder renamed by hand that
 // took the partial: checked before each attempt and before a retry's clear.
-func (s *service) download(ctx context.Context, b *budget, job *jobs.Job, root *os.Root, f *podcast.Feed, e podcast.Episode, c *checkpoint, tag string, settle func(context.Context) error, rep *jobs.Reporter) (podcast.Fetch, error) {
+// follow (run's) is consume's, for a partial no longer at its path while it
+// is written (keepHome).
+func (s *service) download(ctx context.Context, b *budget, job *jobs.Job, root *os.Root, f *podcast.Feed, e podcast.Episode, c *checkpoint, tag string, settle, follow func(context.Context) error, rep *jobs.Reporter) (podcast.Fetch, error) {
 	if s.o.Streamer == nil {
 		return podcast.Fetch{}, fail("write_failed", "The episode download is unavailable.")
 	}
@@ -627,7 +638,7 @@ func (s *service) download(ctx context.Context, b *budget, job *jobs.Job, root *
 				last = fail("network", "The episode resume could not be verified.")
 				continue
 			default:
-				fetch, tag, err = s.consume(ctx, b, *job, root, c, tag, response, action, rep)
+				fetch, tag, err = s.consume(ctx, b, job, root, c, tag, response, action, follow, rep)
 			}
 			_ = response.Body.Close()
 			if err == nil {
@@ -666,7 +677,13 @@ func (s *service) download(ctx context.Context, b *budget, job *jobs.Job, root *
 	}
 	return podcast.Fetch{}, last
 }
-func (s *service) consume(ctx context.Context, b *budget, job jobs.Job, root *os.Root, c *checkpoint, tag string, r *netguard.StreamResponse, action string, rep *jobs.Reporter) (podcast.Fetch, string, error) {
+
+// consume writes response r into the partial c, from its offset (an append)
+// or from byte 0. job is run's, so a checkpoint goes under the path follow
+// (run's) moved the fetch to: the partial is checked against its path at most
+// once a second and at the end (keepHome), and one a copy and a delete of its
+// show folder left behind is written where the show is now.
+func (s *service) consume(ctx context.Context, b *budget, job *jobs.Job, root *os.Root, c *checkpoint, tag string, r *netguard.StreamResponse, action string, follow func(context.Context) error, rep *jobs.Reporter) (podcast.Fetch, string, error) {
 	if r.Encoding != "" && r.Encoding != "identity" {
 		return podcast.Fetch{}, "", fail("unsupported_encoding", "The episode uses an unsupported encoding.")
 	}
@@ -676,7 +693,7 @@ func (s *service) consume(ctx context.Context, b *budget, job jobs.Job, root *os
 		// unlinked and a fresh exclusive temp is made, so nothing swapped in at
 		// that name (a link to another file) is ever truncated or written.
 		if c.Temp != "" {
-			s.clearCheckpoint(job, root, c)
+			s.clearCheckpoint(*job, root, c)
 		}
 		total = r.ContentLength
 		c.Offset = 0
@@ -704,7 +721,7 @@ func (s *service) consume(ctx context.Context, b *budget, job jobs.Job, root *os
 	if err != nil {
 		return podcast.Fetch{}, "", err
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }() // file, as keepHome last replaced it
 	if err := file.Chmod(0o600); err != nil {
 		return podcast.Fetch{}, "", err
 	}
@@ -718,7 +735,23 @@ func (s *service) consume(ctx context.Context, b *budget, job jobs.Job, root *os
 	}
 	c.Total = total
 	out := &downloadWriter{file: file, hash: h, rep: rep, received: c.Offset, total: total}
-	var lastCheck, lastCheckpoint time.Time
+	var lastCheck, lastCheckpoint, lastFollow time.Time
+	// home keeps the partial written the one at its path (keepHome), following
+	// at most every 10 s while it is nowhere to be found, and at the end.
+	home := func(received int64, end bool) error {
+		next, err := s.keepHome(ctx, root, c, file, received, func(ctx context.Context) error {
+			if !end && time.Since(lastFollow) < 10*time.Second {
+				return nil
+			}
+			lastFollow = time.Now()
+			return follow(ctx)
+		})
+		if err != nil {
+			return err
+		}
+		file, out.file, name = next, next, c.partialName()
+		return nil
+	}
 	out.check = func(received int64) error {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -740,6 +773,9 @@ func (s *service) consume(ctx context.Context, b *budget, job jobs.Job, root *os
 		if c.ServerHash != s.pairHash() {
 			return fail("identity_changed", "The Bridge pairing changed.")
 		}
+		if err := home(received, false); err != nil {
+			return err
+		}
 		if _, err := mapping.SafeJoin(root.Name(), name); err != nil {
 			return err
 		}
@@ -748,7 +784,7 @@ func (s *service) consume(ctx context.Context, b *budget, job jobs.Job, root *os
 				return err
 			}
 			c.Offset = received
-			if err := s.saveCheckpoint(job, root, c, tag); err != nil {
+			if err := s.saveCheckpoint(*job, root, c, tag); err != nil {
 				return err
 			}
 			lastCheckpoint = time.Now()
@@ -767,6 +803,14 @@ func (s *service) consume(ctx context.Context, b *budget, job jobs.Job, root *os
 	if copyErr == nil && (c.Offset == 0 || total >= 0 && c.Offset != total) {
 		copyErr = io.ErrUnexpectedEOF
 	}
+	// The whole episode is in file, and it is published from the partial at
+	// its path: a show folder copied and deleted since the last check must not
+	// leave only the copy of its start there.
+	if copyErr == nil {
+		if err := home(c.Offset, true); err != nil {
+			return podcast.Fetch{}, "", err
+		}
+	}
 	if copyErr != nil {
 		var guard *netguard.Error
 		if errors.As(copyErr, &guard) {
@@ -777,7 +821,7 @@ func (s *service) consume(ctx context.Context, b *budget, job jobs.Job, root *os
 			return podcast.Fetch{}, "", fail("write_failed", "The episode could not be saved.")
 		}
 		if c.Offset > 0 && c.Offset < total && netguard.StrongETag(tag) {
-			if err := s.saveCheckpoint(job, root, c, tag); err != nil {
+			if err := s.saveCheckpoint(*job, root, c, tag); err != nil {
 				return podcast.Fetch{}, "", err
 			}
 		}
@@ -799,6 +843,50 @@ func (s *service) partialOK(root *os.Root, c *checkpoint) bool {
 	}
 	_ = file.Close()
 	return s.o.Fault.Hit("partial") == nil
+}
+
+// keepHome checks that file, the partial a download writes (received bytes so
+// far), is still the file at its path (c.partialName()), and returns the file
+// to go on writing. A show folder renamed by hand took it along: follow moves
+// the fetch (and c) there, the same file. One "renamed" by a copy and a delete
+// (a move across filesystems, a file manager's) left file unlinked, written
+// to no folder, and a stale copy of its start where the show is now: the bytes
+// file holds replace that copy (a fresh exclusive file at its name, never the
+// copy written over), so the download goes on, and publishes, there. file
+// itself when nothing is at the path (a folder deleted outright, the job's end
+// finds it so) or it is not a regular file. An error is follow's, or a
+// failure writing the new partial.
+func (s *service) keepHome(ctx context.Context, root *os.Root, c *checkpoint, file *os.File, received int64, follow func(context.Context) error) (*os.File, error) {
+	held, err := file.Stat()
+	if err != nil {
+		return file, nil
+	}
+	if st, err := root.Lstat(c.partialName()); err == nil && os.SameFile(held, st) {
+		return file, nil
+	}
+	if err := follow(ctx); err != nil {
+		return file, err
+	}
+	name := c.partialName()
+	st, err := podcast.LstatRegular(root, name)
+	if err != nil || os.SameFile(held, st) {
+		return file, nil
+	}
+	if err := root.Remove(name); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return file, fail("write_failed", "The episode could not be saved.")
+	}
+	next, err := root.OpenFile(name, os.O_RDWR|os.O_EXCL|os.O_CREATE, 0o600)
+	if err != nil {
+		return file, fail("write_failed", "The episode could not be saved.")
+	}
+	if _, err := io.Copy(next, io.NewSectionReader(file, 0, received)); err != nil || next.Sync() != nil {
+		_ = next.Close()
+		_ = root.Remove(name)
+		return file, fail("write_failed", "The episode could not be saved.")
+	}
+	slog.Info("podcasts: a download's partial was copied with its show folder and the original deleted; it goes on where the show is now", "partial", name, "bytes", received)
+	_ = file.Close()
+	return next, nil
 }
 
 // openPartial opens the proven partial at name for the append. Any failure (no
