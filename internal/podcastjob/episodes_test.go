@@ -1577,21 +1577,17 @@ func TestCheckpointResumes(t *testing.T) {
 // rules through its own server's view of the service (forJob).
 func TestAKeptPartialIsDownloadedAgainWhenItsEnclosureChanged(t *testing.T) {
 	requireProbe(t)
-	scenarios := []string{"same", "path", "query with no length", "length", "query", "query and length", "query on no file", "no base", "legacy", "stuck"}
-	for _, claimed := range []bool{false, true} {
-		for _, scenario := range scenarios {
-			if claimed && scenario != "same" && scenario != "path" && scenario != "stuck" {
-				continue
-			}
-			name := scenario
-			if claimed {
-				name = "claimed " + scenario
-			}
-			t.Run(name, func(t *testing.T) { keptPartialScenario(t, scenario, claimed) })
-		}
+	for _, scenario := range []string{"same", "path", "query with no length", "length", "query", "query and length", "query on no file", "no base", "legacy", "stuck"} {
+		t.Run(scenario, func(t *testing.T) { keptPartialScenario(t, scenario, false) })
+	}
+	for _, scenario := range []string{"same", "path", "stuck"} {
+		t.Run("claimed "+scenario, func(t *testing.T) { keptPartialScenario(t, scenario, true) })
 	}
 }
 
+// keptPartialScenario is one scenario of
+// TestAKeptPartialIsDownloadedAgainWhenItsEnclosureChanged, for a job a runner
+// claimed when claimed.
 func keptPartialScenario(t *testing.T, scenario string, claimed bool) {
 	if scenario == "stuck" {
 		requireNonRoot(t)
