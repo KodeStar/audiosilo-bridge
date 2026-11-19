@@ -42,6 +42,14 @@ func (e *env) started(t *testing.T, p *Pusher) {
 // the moment their stillness counts from.
 func (e *env) read(p *Pusher) { p.Tick(context.Background()) }
 
+// serverClock sets the server's clock, what its rows' updated_at and its
+// pages' server_time read.
+func (e *env) serverClock(at time.Time) {
+	e.srv.mu.Lock()
+	defer e.srv.mu.Unlock()
+	e.srv.clock = at
+}
+
 func (e *env) sets() []string {
 	e.accts.mu.Lock()
 	defer e.accts.mu.Unlock()
@@ -947,9 +955,7 @@ func TestPushRereadSkipsPlacesOlderThanKnown(t *testing.T) {
 	const skew = -2 * time.Hour
 	clock := func(d time.Duration) {
 		e.now = e.now.Add(d)
-		e.srv.mu.Lock()
-		e.srv.clock = e.now.Add(skew)
-		e.srv.mu.Unlock()
+		e.serverClock(e.now.Add(skew))
 	}
 	clock(0)
 	p := NewPusher(e.o)
@@ -1276,11 +1282,7 @@ func TestPushRereadSkewAtTheRead(t *testing.T) {
 	ctx := context.Background()
 	e := newEnv(t)
 	e.list(t, st("B000000001", "A/One", 36000), st("B000000002", "A/Two", 36000))
-	sync := func() {
-		e.srv.mu.Lock()
-		e.srv.clock = e.now
-		e.srv.mu.Unlock()
-	}
+	sync := func() { e.serverClock(e.now) }
 	sync()
 	p := NewPusher(e.o)
 	e.started(t, p)
@@ -1329,16 +1331,14 @@ func TestPushRereadAfterBridgeClockCorrected(t *testing.T) {
 	e := newEnv(t)
 	e.list(t, st("B000000001", "A/One", 36000))
 	server := e.now.Add(-time.Hour) // the Bridge's clock is an hour fast
-	e.srv.clock = server
+	e.serverClock(server)
 	p := NewPusher(e.o)
 	e.started(t, p)
 
 	// One at 5 h is read and written, on the fast clock.
 	server = server.Add(2 * time.Hour)
 	e.now = server.Add(time.Hour)
-	e.srv.mu.Lock()
-	e.srv.clock = server
-	e.srv.mu.Unlock()
+	e.serverClock(server)
 	e.srv.add("A/One", "B000000001", 18000, server, "web-1")
 	e.read(p)
 	e.now = e.now.Add(4 * time.Minute)
@@ -1353,8 +1353,8 @@ func TestPushRereadAfterBridgeClockCorrected(t *testing.T) {
 	e.now = server
 	e.srv.add("A/One", "B000000001", 21600, server, "web-1")
 	e.now = e.now.Add(time.Minute)
+	e.serverClock(e.now)
 	e.srv.mu.Lock()
-	e.srv.clock = e.now
 	e.srv.badSince = e.account(t).PushCursor
 	e.srv.mu.Unlock()
 	e.read(p) // refused: back to the start
@@ -1363,9 +1363,7 @@ func TestPushRereadAfterBridgeClockCorrected(t *testing.T) {
 	e.srv.mu.Unlock()
 	e.read(p)
 	e.now = e.now.Add(4 * time.Minute)
-	e.srv.mu.Lock()
-	e.srv.clock = e.now
-	e.srv.mu.Unlock()
+	e.serverClock(e.now)
 	p.Tick(ctx)
 	if got := e.sets(); len(got) != 2 || got[1] != "B000000001@21600000" {
 		t.Fatalf("sets = %v, want the place changed after the row read written", got)

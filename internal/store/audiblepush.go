@@ -156,7 +156,7 @@ func (db *DB) GetAudiblePush(ctx context.Context, account, asin string) (Audible
 // with the row. Only a listed row takes one.
 func (db *DB) WantAudiblePush(ctx context.Context, account, asin string, row AudibleRow) error {
 	_, err := db.sql.ExecContext(ctx, `UPDATE audible_push SET want_ms = ?1, row_ms = ?1, row_seen = ?2, row_read = ?3
-		WHERE account = ?4 AND asin = ?5 AND listed = 1`, row.Ms, timestamp(row.Seen), stamp(row.Updated), account, asin)
+		WHERE account = ?4 AND asin = ?5 AND listed = 1`, row.Ms, timestamp(row.Seen), Stamp(row.Updated), account, asin)
 	return err
 }
 
@@ -164,7 +164,7 @@ func (db *DB) WantAudiblePush(ctx context.Context, account, asin string, row Aud
 // (history: changed before the feed's baseline): the waiting place goes.
 func (db *DB) SeenAudibleRow(ctx context.Context, account, asin string, row AudibleRow) error {
 	_, err := db.sql.ExecContext(ctx, `UPDATE audible_push SET want_ms = NULL, row_ms = ?1, row_seen = ?2, row_read = ?3
-		WHERE account = ?4 AND asin = ?5`, row.Ms, timestamp(row.Seen), stamp(row.Updated), account, asin)
+		WHERE account = ?4 AND asin = ?5`, row.Ms, timestamp(row.Seen), Stamp(row.Updated), account, asin)
 	return err
 }
 
@@ -185,7 +185,7 @@ func (db *DB) PendAudiblePush(ctx context.Context, account, asin string, library
 		ON CONFLICT(account, asin) DO UPDATE SET library_id = excluded.library_id, path = excluded.path, listed = 0,
 			want_ms = excluded.want_ms, row_ms = excluded.row_ms, row_seen = excluded.row_seen, row_read = excluded.row_read,
 			reasserted_ms = CASE WHEN library_id = excluded.library_id AND path = excluded.path THEN reasserted_ms ELSE -1 END`,
-		account, asin, libraryID, path, ms, row.Ms, timestamp(row.Seen), stamp(row.Updated))
+		account, asin, libraryID, path, ms, row.Ms, timestamp(row.Seen), Stamp(row.Updated))
 	return err
 }
 
@@ -280,7 +280,7 @@ func (db *DB) SetAudibleACR(ctx context.Context, account, asin, acr string) erro
 func (db *DB) SetAudiblePushCursor(ctx context.Context, id, cursor string, from time.Time) error {
 	_, err := db.sql.ExecContext(ctx, `UPDATE audible_accounts SET push_cursor = ?1,
 		push_from = CASE WHEN push_from = '' THEN ?2 ELSE push_from END,
-		push_reread = CASE WHEN ?2 = '' THEN push_reread ELSE 0 END WHERE id = ?3`, cursor, stamp(from), id)
+		push_reread = CASE WHEN ?2 = '' THEN push_reread ELSE 0 END WHERE id = ?3`, cursor, Stamp(from), id)
 	return err
 }
 

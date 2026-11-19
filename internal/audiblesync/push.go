@@ -376,9 +376,8 @@ func (p *Pusher) row(ctx context.Context, a store.AudibleAccount, titles map[str
 		history = bad != nil || olderThanKnown(updated, x)
 	}
 	rec := store.AudibleRow{Ms: place, Seen: now}
-	rowRead := "" // the store's row_read: the row's updated_at, none when it can't be read
 	if bad == nil {
-		rec.Updated, rowRead = updated, store.Timestamp(updated)
+		rec.Updated = updated
 	}
 	var err error
 	switch {
@@ -402,7 +401,7 @@ func (p *Pusher) row(ctx context.Context, a store.AudibleAccount, titles map[str
 		p.o.Log.Warn("audible: recording a server place failed", "account", a.ID, "err", err)
 		return false
 	}
-	x.RowMs, x.RowSeen, x.RowRead = rec.Ms, store.Timestamp(now), rowRead
+	x.RowMs, x.RowSeen, x.RowRead = rec.Ms, store.Timestamp(now), store.Stamp(rec.Updated)
 	titles[row.ASIN] = x
 	return true
 }
