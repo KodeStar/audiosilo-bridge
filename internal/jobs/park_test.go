@@ -540,13 +540,9 @@ func TestReporterShareOff(t *testing.T) {
 		seen := []bool{j.shareOff, rep.ShareOff()}
 		switch j.ID {
 		case 2:
-			srv.mu.Lock()
-			srv.shareOff = map[int64]bool{2: true}
-			srv.mu.Unlock()
+			srv.setShareOff(map[int64]bool{2: true})
 			waitFor(t, rep.ShareOff)
-			srv.mu.Lock()
-			srv.shareOff = nil
-			srv.mu.Unlock()
+			srv.setShareOff(nil)
 			n := srv.triesOf(2)
 			waitFor(t, func() bool { return srv.triesOf(2) > n+1 })
 			seen = append(seen, rep.ShareOff())
@@ -604,9 +600,7 @@ func TestReporterOnShareOff(t *testing.T) {
 				t.Errorf("claimed with share_off: %d calls at once, want 1", calls[1].Load())
 			}
 		case 2:
-			srv.mu.Lock()
-			srv.shareOff = map[int64]bool{2: true}
-			srv.mu.Unlock()
+			srv.setShareOff(map[int64]bool{2: true})
 			waitFor(t, func() bool { return calls[2].Load() > 0 })
 		case 3:
 			n := srv.triesOf(3)
@@ -643,9 +637,7 @@ func TestShareOffSurvivesARestart(t *testing.T) {
 	var running atomic.Int32
 	first := handler{kind: "k.v", lane: LanePipeline, fn: func(ctx context.Context, j Job, rep *Reporter) (any, error) {
 		if j.ID == 2 {
-			srv.mu.Lock()
-			srv.shareOff = map[int64]bool{2: true}
-			srv.mu.Unlock()
+			srv.setShareOff(map[int64]bool{2: true})
 			waitFor(t, func() bool {
 				sj, err := db.GetServerJob(context.Background(), 2)
 				return err == nil && sj.ShareOff

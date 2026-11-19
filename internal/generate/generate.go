@@ -384,8 +384,7 @@ type run struct {
 // re-admit): keepShareLocal, at the look the nudge brings, still lifts a share
 // park and records why the share was skipped.
 type shareGuard struct {
-	mu    sync.Mutex
-	heard bool
+	mu sync.Mutex
 	// book is the run's engine book (0 before it has one), local the one the
 	// guard turned local (so later answers write nothing).
 	book, local int64
@@ -398,31 +397,28 @@ func (h *Handler) guardShare(ctx context.Context, r *run) (stop func()) {
 		return func() {}
 	}
 	r.share = &shareGuard{}
-	r.rep.OnShareOff(func() { h.shareHeard(ctx, r, 0) })
+	r.rep.OnShareOff(func() { h.shareLocal(ctx, r) })
 	return func() { r.rep.OnShareOff(nil) }
 }
 
 // shareBook tells the run's shareGuard (if any) its engine book, id, before
 // anything re-admits it: a share_off heard already turns it local at once.
 func (h *Handler) shareBook(ctx context.Context, r *run, id int64) {
-	if r.share != nil {
-		h.shareHeard(ctx, r, id)
+	if g := r.share; g != nil {
+		g.mu.Lock()
+		g.book = id
+		g.mu.Unlock()
+		h.shareLocal(ctx, r)
 	}
 }
 
-// shareHeard turns the run's engine book local once share_off was heard and
-// the book is known: called with id 0 for an answer that carried share_off,
-// with the book's id once the run has one. A book it turned local wakes the
-// run, whose look lifts a share park at once.
-func (h *Handler) shareHeard(ctx context.Context, r *run, id int64) {
+// shareLocal turns the run's engine book local once the job heard share_off
+// and the book is known. A book it turned local wakes the run, whose look
+// lifts a share park at once.
+func (h *Handler) shareLocal(ctx context.Context, r *run) {
 	g := r.share
 	g.mu.Lock()
-	if id == 0 {
-		g.heard = true
-	} else {
-		g.book = id
-	}
-	if !g.heard || g.book == 0 || g.local == g.book {
+	if g.book == 0 || g.local == g.book || !r.rep.ShareOff() {
 		g.mu.Unlock()
 		return
 	}
@@ -514,15 +510,12 @@ func (h *Handler) keepShareLocal(ctx context.Context, eng Engine, r *run, b *sto
 		}
 	}
 	if b != nil && b.ContribMode != store.ContribModeLocal {
-		if state.State(b.State) == state.Done {
-			return false
-		}
 		switch local, err := h.o.DB.KeepBookLocal(ctx, b.ID); {
 		case err != nil:
 			h.o.Log.Warn("generate: keeping the results local failed", "job", r.job.ID, "book", b.ID, "err", err)
 			return false
 		case !local:
-			return false // done since it was read: it shared as asked
+			return false // done: it shared as asked
 		}
 		b.ContribMode = store.ContribModeLocal
 	}

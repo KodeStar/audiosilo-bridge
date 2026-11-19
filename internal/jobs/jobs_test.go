@@ -41,6 +41,13 @@ func newFakeServer() *fakeServer {
 		gone: map[int64]bool{}, tries: map[int64]int{}, changed: make(chan struct{})}
 }
 
+// setShareOff sets the jobs whose updates the server answers with share_off.
+func (f *fakeServer) setShareOff(m map[int64]bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.shareOff = m
+}
+
 func (f *fakeServer) add(j *link.Job) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
