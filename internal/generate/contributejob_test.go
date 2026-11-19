@@ -335,10 +335,12 @@ func TestContributeParksGiveTheLightLaneBack(t *testing.T) {
 	}
 }
 
-// An answer on a link the Bridge no longer uses (paired with another server
-// while the ask was on its way) confirms no share: the job parks
+// A link the Bridge no longer uses (paired with another server as the job
+// reports its sharing step: before its ask, or while the answer is on its way,
+// whichever report comes first) confirms no share: the job parks
 // share_unconfirmed and files nothing (denied), and files once the Bridge is
-// back on the job's server (allowed).
+// back on the job's server (allowed). jobs' TestAskShareOffOnlyOnTheCurrentLink
+// pins the pairing that changes while the answer is on its way.
 func TestContributeJobConfirmsOnlyOnTheCurrentLink(t *testing.T) {
 	t.Parallel()
 	hr := newHarness(t)
@@ -351,7 +353,7 @@ func TestContributeJobConfirmsOnlyOnTheCurrentLink(t *testing.T) {
 	hr.srv.set(func() {
 		hr.srv.atStep[122] = func(_ *fakeServer, step string) {
 			if step == stepSharing {
-				onOther.Store(true) // paired with another server as the answer goes back
+				onOther.Store(true) // paired with another server from this report on
 			}
 		}
 	})
