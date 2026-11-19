@@ -110,7 +110,7 @@ func TestSweepPartialsRemovesOnlyOldUnrecordedOwnedTemps(t *testing.T) {
 				case "linked show":
 					// A show folder that is a link (to a folder no show is in):
 					// nothing under it is swept.
-					if err := podcast.EnsureDir(root, "Elsewhere/Inner"); err != nil {
+					if err := os.MkdirAll(filepath.Join(h.mount, "Elsewhere", "Inner"), 0o755); err != nil {
 						t.Fatal(err)
 					}
 					write("Elsewhere/Inner/feed.json", old)
@@ -121,7 +121,7 @@ func TestSweepPartialsRemovesOnlyOldUnrecordedOwnedTemps(t *testing.T) {
 					target = "Elsewhere/Inner/" + partial
 				case "no show":
 					// A folder of the library that holds no feed.json.
-					if err := podcast.EnsureDir(root, "Loose Folder"); err != nil {
+					if err := os.Mkdir(filepath.Join(h.mount, "Loose Folder"), 0o755); err != nil {
 						t.Fatal(err)
 					}
 					target = "Loose Folder/" + partial

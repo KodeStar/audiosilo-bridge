@@ -46,6 +46,10 @@ func OwnedTemp(s string) bool {
 	return strings.HasPrefix(s, TempPrefix) && path.Base(s) == s && !strings.ContainsAny(s, "\\\x00")
 }
 
+// EnsureDir makes the folders of name below its first component, a show
+// folder that must be there already (a real folder, as every component): a
+// show folder renamed by hand while a job ran is never made again at its old
+// name, where ReadMoved would take the renamed folder for a copy.
 func EnsureDir(root *os.Root, name string) error {
 	parts := strings.Split(name, "/")
 	for i, part := range parts {
@@ -54,7 +58,7 @@ func EnsureDir(root *os.Root, name string) error {
 			return ErrInvalidFile
 		}
 		st, err := root.Lstat(p)
-		if errors.Is(err, os.ErrNotExist) {
+		if errors.Is(err, os.ErrNotExist) && i > 0 {
 			if err = root.Mkdir(p, 0o755); err != nil {
 				return err
 			}

@@ -196,6 +196,26 @@ func TestAdoptRefusesAForeignJournal(t *testing.T) {
 	}
 }
 
+// EnsureDir never makes the show folder itself: a job that runs on after its
+// show folder was renamed by hand must not make the old name again, where
+// ReadMoved would then take the renamed folder for a copy.
+func TestEnsureDirNeverMakesTheShowFolder(t *testing.T) {
+	root, _ := journalFixture(t)
+	rename(t, root, "Renamed Show")
+	if err := EnsureDir(root, "Fixture Show/.audiosilo"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("a show folder was made again:", err)
+	}
+	if _, err := root.Lstat("Fixture Show"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("the old folder came back", err)
+	}
+	if _, from, err := ReadMoved(root, "Renamed Show"); err != nil || from != "Fixture Show" {
+		t.Fatal(from, err)
+	}
+	if err := EnsureDir(root, "Renamed Show/.audiosilo-trash/podcasts"); err != nil {
+		t.Fatal("folders below a show folder:", err)
+	}
+}
+
 func putJournal(t *testing.T, root *os.Root, name string, j Journal) {
 	t.Helper()
 	if err := writeJournal(root, name, j); err != nil {
