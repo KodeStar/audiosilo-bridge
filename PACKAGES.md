@@ -2384,9 +2384,10 @@ internal/
             token) or ended for good (errCancelRequested, errLost).
   verify/   bridge.verify: params {hold_seconds 0-600}; resolves the library from the
             registry, asks the server for the book's files (path "" = the sample
-            book; no answer, a refused token or a 5xx asked again with backoff
-            for up to 2 min, a 4xx failing at once: mapping.BookReadSettled,
-            generate's fetchBook rule too), CompareFiles through the mount, probes
+            book; no answer, a refused token, a 408, a 429 or a 5xx asked again
+            with backoff for up to 2 min, the last ask at its end, any other 4xx
+            failing at once: mapping.BookReadSettled, generate's fetchBook rule
+            too), CompareFiles through the mount, probes
             the BOOK's folder for writing (spike 3: a root probe passed while a
             0555 book folder refused),
             then holds, reporting each second. A mismatch is a failure WITH a result.

@@ -32,10 +32,12 @@ type Libraries interface {
 	Library(id int64) (link.Library, bool)
 }
 
-// The book read's retry: an answer that may change (no answer, a 5xx) is asked
-// again after bookRetryFirst, doubling up to bookRetryMax, until bookRetryFor
-// has passed since the first ask, so a server restarting under a verify
-// doesn't fail it, and one that stays down does in a time an admin waits for.
+// The book read's retry: an answer that may change (mapping.BookReadSettled's:
+// no answer, a refused token, a 408, a 429, a 5xx) is asked again after
+// bookRetryFirst, doubling up to bookRetryMax, until bookRetryFor has passed
+// since the first ask (the last ask at its end), so a server restarting under a
+// verify doesn't fail it, and one that stays down does in a time an admin
+// waits for.
 const (
 	bookRetryFirst = time.Second
 	bookRetryMax   = 15 * time.Second
@@ -150,17 +152,19 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 // fetchBook asks the server for the book's files, asking again with backoff
 // (within retryFor) while the answer may change (mapping.BookReadSettled,
 // generate's fetchBook's rule). A definite answer fails at once, and so does
-// the last transient one once the budget is spent.
+// the last transient one once the budget is spent (the wait before the last
+// ask cut to what is left of it, so the server is asked at its end).
 func (h *Handler) fetchBook(ctx context.Context, rep *jobs.Reporter, src mapping.BookSource, libraryID int64, path string) (*link.Book, error) {
 	deadline := time.Now().Add(h.retryFor)
 	wait := h.retryFirst
 	for {
 		rep.Progress(jobs.Progress{Step: "lookup", Message: "Asking the server for the book's files"})
 		book, err := src.Book(ctx, libraryID, path)
-		if err == nil || mapping.BookReadSettled(err) || time.Now().Add(wait).After(deadline) {
+		left := time.Until(deadline)
+		if err == nil || mapping.BookReadSettled(err) || left <= 0 {
 			return book, err
 		}
-		if err := agent.SleepCtx(ctx, wait); err != nil {
+		if err := agent.SleepCtx(ctx, min(wait, left)); err != nil {
 			return nil, err
 		}
 		wait = min(wait*2, bookRetryMax)
