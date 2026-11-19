@@ -604,6 +604,19 @@ func (r *Registry) Entries(mount MountFunc) []Entry {
 // writes wait for a check the server answers. view ages them as it reads them
 // too, for a Registry no beat reaches.
 func (r *Registry) Due(now time.Time, interval time.Duration) bool {
+	due, _ := r.DueIDs(now, interval)
+	return due
+}
+
+// DueIDs is Due with the libraries the run is due for: nil for every library
+// (one has no check, a retry or a check older than interval), else only the
+// ones whose folder was slow LookAgain ago, so a folder that keeps timing out
+// never runs every other library's check (a server read each) every
+// LookAgain. A slow library is due by LookAgain alone: the state a slow look
+// kept is as old as the check that set it, often past interval (that is why it
+// was checked), and its age would make it due again at once, the run's beat
+// checking it in a tight loop.
+func (r *Registry) DueIDs(now time.Time, interval time.Duration) (due bool, ids []int64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.interval = interval
@@ -614,15 +627,22 @@ func (r *Registry) Due(now time.Time, interval time.Duration) bool {
 		}
 	}
 	if r.checking || now.Before(r.holdUntil) {
-		return false
+		return false, nil
 	}
 	for _, l := range r.libs {
 		res, ok := r.results[l.ID]
-		if !ok || res.retry || now.Sub(res.at) >= interval || (!res.slow.IsZero() && !now.Before(res.slow.Add(LookAgain))) {
-			return true
+		switch {
+		case !ok || res.retry:
+			return true, nil
+		case !res.slow.IsZero():
+			if !now.Before(res.slow.Add(LookAgain)) {
+				ids = append(ids, l.ID)
+			}
+		case now.Sub(res.at) >= interval:
+			return true, nil
 		}
 	}
-	return false
+	return len(ids) > 0, ids
 }
 
 // Check checks the libraries ids (every library with none) now, one at a time

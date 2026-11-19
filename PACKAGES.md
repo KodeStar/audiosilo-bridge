@@ -2293,8 +2293,12 @@ internal/
             exclusive, the later stands) for the page's "The folder did not
             answer within 5 s" note. It neither ends the run nor sets the hold:
             the library is due again after LookAgain (1 min, result.slow;
-            no retry flag, or the run's beat would check again at once, a tight
-            loop on a hung mount). A hung file stat ends the comparison.
+            by LookAgain alone: no retry flag, and not by the kept state's age,
+            often past the interval, or the run's beat would check again at once,
+            a tight loop), and a run due only for slow folders checks just those
+            (DueIDs; the heartbeat passes them to CheckMappings). A hung file stat
+            ends the comparison; one after a file that answered with another size
+            leaves the mismatch definite (CompareFiles' timeout is nil then).
             ProbeWritable and CompareFiles are bounded for their other callers
             too, and CompareFiles returns the stat's timeout as its fourth result:
             generate's prepare looks again every Poll (no park), verify retries

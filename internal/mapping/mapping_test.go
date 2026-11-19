@@ -1505,6 +1505,51 @@ func TestSlowLookKeepsTheState(t *testing.T) {
 	}
 }
 
+// A slow look made because the library's interval had passed keeps a state as
+// old as that: the library is due again after LookAgain, not at once by the
+// kept state's age (the run's beat would check it again straight away, a tight
+// loop for as long as the folder stays slow), and only it is due then, not
+// every library (each a server read, every LookAgain).
+func TestSlowLookIsDueAgainAfterLookAgainAlone(t *testing.T) {
+	t.Parallel()
+	slowRoot, files := library(t)
+	fastRoot, _ := library(t)
+	roots := map[int64]string{1: slowRoot, 2: fastRoot}
+	r := newRegistry()
+	r.spacing = time.Millisecond
+	r.SetLibraries([]link.Library{{ID: 1, Root: "/a"}, {ID: 2, Root: "/b"}})
+	src := &scripted{book: &link.Book{Path: "Author/Book", Files: files}, err: map[int64]error{}}
+	mount := func(id int64, _ string) (string, bool) { return roots[id], true }
+	at := time.Date(2026, 11, 19, 10, 0, 0, 0, time.UTC)
+	clock := func() time.Time { return at }
+	r.Check(context.Background(), src, mount, clock)
+
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	hangLooks(r, "slow", map[string]bool{slowRoot: true}, 20*time.Millisecond, release, nil, "")
+	stat := r.look.stat
+	r.look.stat = func(p string) (fs.FileInfo, error) {
+		if p != slowRoot {
+			return os.Stat(p) // the proof: the book's folder answers
+		}
+		return stat(p)
+	}
+	at = at.Add(defaultInterval)
+	if due, ids := r.DueIDs(at, defaultInterval); !due || ids != nil {
+		t.Fatalf("libraries past their interval = %v, %v; want every one due", due, ids)
+	}
+	r.Check(context.Background(), src, mount, clock)
+	if st, ok := r.Status(1); !ok || !st.Mapped || !st.Writable {
+		t.Fatalf("the slow library's state = %+v, %v; want it kept", st, ok)
+	}
+	if due, ids := r.DueIDs(at.Add(time.Second), defaultInterval); due {
+		t.Fatalf("a slow look that kept an old state is due again at once (%v): a tight loop", ids)
+	}
+	if due, ids := r.DueIDs(at.Add(LookAgain), defaultInterval); !due || !slices.Equal(ids, []int64{1}) {
+		t.Fatalf("after LookAgain = %v, %v; want only the slow library due", due, ids)
+	}
+}
+
 // A podcast check's whole look before the server's read is bounded as one: a
 // mount that hangs after the marker's open, read or write (here, once the look
 // wrote it) ends the check unknown within the bound, and the marker the look
