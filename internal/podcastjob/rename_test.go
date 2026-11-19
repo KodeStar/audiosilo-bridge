@@ -9,10 +9,12 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -1772,6 +1774,8 @@ func TestAFetchCopiedAndDeletedJustBeforeACutResumesFromAllItsBytes(t *testing.T
 // name by hand, with an episode of the same file name and its lock file. The
 // fetch, finding no folder that holds its show, never takes that lock: it
 // would wait on the other show's fetch, or hold its lock, while it writes.
+// Nor does it download the episode again there once the partial it wrote is
+// found gone (the hash before the probe).
 func TestAFetchNeverTakesAnotherShowsLockAtItsPath(t *testing.T) {
 	requireProbe(t)
 	h, job := audioHarness(t)
@@ -1780,7 +1784,9 @@ func TestAFetchNeverTakesAnotherShowsLockAtItsPath(t *testing.T) {
 	show := filepath.Join(h.mount, "Fixture Show")
 	other := filepath.Join(h.mount, podcast.AttachmentPath(*job.Path, ".fetch.lock"))
 	var taken atomic.Bool
+	var calls atomic.Int32
 	setAudio(h, func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
 		w.Header().Set("ETag", `"one"`)
 		w.Header().Set("Content-Length", strconv.Itoa(len(audio)))
 		w.WriteHeader(200)
@@ -1837,6 +1843,14 @@ func TestAFetchNeverTakesAnotherShowsLockAtItsPath(t *testing.T) {
 	}
 	if taken.Load() {
 		t.Fatal("the fetch took the other show's lock")
+	}
+	// Its partial gone with the folder, the episode is not downloaded a second
+	// time into the other show's folder.
+	if calls.Load() != 1 {
+		t.Fatal("the episode was downloaded again where its show is not:", calls.Load())
+	}
+	if left := partials(show); len(left) != 0 {
+		t.Fatal("a partial was left in the other show's folder", left)
 	}
 }
 
@@ -2270,4 +2284,124 @@ func TestAFetchFailingEarlyLetsGoOfItsLockWhereTheShowIsNow(t *testing.T) {
 	if _, err := os.Lstat(lockFile); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("the episode's lock was left in the renamed folder", err)
 	}
+}
+
+// A download read back before its probe (the hash that catches a partial
+// overwritten in place) whose read fails, as a network share's does for a
+// moment, is not a changed one: it is read again, and published from the
+// bytes it holds. One request, never the whole episode again from byte 0.
+func TestAFetchReadsItsDownloadAgainAfterAFailedRead(t *testing.T) {
+	requireProbe(t)
+	h, job := audioHarness(t)
+	s := h.handler.s
+	audio := data(t, "chap-v24-reverse.mp3")
+	var calls, reads atomic.Int32
+	setAudio(h, func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Header().Set("ETag", `"one"`)
+		w.Header().Set("Content-Length", strconv.Itoa(len(audio)))
+		w.WriteHeader(200)
+		w.Write(audio)
+	})
+	s.o.Fault = func(at string) error {
+		if at == "rehash" && reads.Add(1) <= 2 {
+			return syscall.EIO
+		}
+		return nil
+	}
+	var waits []time.Duration
+	s.o.Wait = func(_ context.Context, d time.Duration) error { waits = append(waits, d); return nil }
+	res, err := h.handler.FetchJob().Run(context.Background(), job, jobs.LocalReporter())
+	if got, ok := res.(fetchResult); err != nil || !ok || got.Fetch.Bytes != int64(len(audio)) {
+		t.Fatal(res, err)
+	}
+	if calls.Load() != 1 || reads.Load() != 3 {
+		t.Fatal("a read that failed cost the download:", calls.Load(), reads.Load())
+	}
+	if !slices.Equal(waits, []time.Duration{time.Second, 2 * time.Second}) {
+		t.Fatal("waits:", waits)
+	}
+	if saved, err := os.ReadFile(filepath.Join(h.mount, *job.Path)); err != nil || !bytes.Equal(saved, audio) {
+		t.Fatal("the published episode is not the host's", err)
+	}
+	noRecords(t, s)
+}
+
+// A download that cannot be read back at all is never taken for a changed
+// one either: the fetch fails write_failed after its bounded reads, with no
+// second request for the episode.
+func TestAFetchNeverDownloadsAgainADownloadItCannotRead(t *testing.T) {
+	requireProbe(t)
+	h, job := audioHarness(t)
+	s := h.handler.s
+	audio := data(t, "chap-v24-reverse.mp3")
+	var calls, reads atomic.Int32
+	setAudio(h, func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Header().Set("ETag", `"one"`)
+		w.Header().Set("Content-Length", strconv.Itoa(len(audio)))
+		w.WriteHeader(200)
+		w.Write(audio)
+	})
+	s.o.Fault = func(at string) error {
+		if at == "rehash" {
+			reads.Add(1)
+			return syscall.EIO
+		}
+		return nil
+	}
+	_, err := h.handler.FetchJob().Run(context.Background(), job, jobs.LocalReporter())
+	var failure *netguard.Error
+	if !errors.As(err, &failure) || failure.Code != "write_failed" {
+		t.Fatal(err)
+	}
+	if calls.Load() != 1 || reads.Load() != rehashTries {
+		t.Fatal("requests and reads:", calls.Load(), reads.Load())
+	}
+	if _, err := os.Lstat(filepath.Join(h.mount, *job.Path)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("an episode was published unread", err)
+	}
+}
+
+// A show folder renamed by hand between the fetch's last follow and the read
+// of its download leaves no partial at the path read: not a changed download.
+// The fetch follows the show and reads the partial there, publishing it from
+// the one request.
+func TestAFetchFollowsAShowRenamedWhileItsDownloadIsReadBack(t *testing.T) {
+	requireProbe(t)
+	h, job := audioHarness(t)
+	s := h.handler.s
+	if err := h.db.RecordClaim(context.Background(), store.ServerJob{ID: job.ID, Kind: FetchKind, LibraryID: job.LibraryID, Path: job.Path, Params: job.Params, Attempt: 1, ServerID: "server-1"}); err != nil {
+		t.Fatal(err)
+	}
+	h.scan.knows = func(p string) bool { return strings.HasPrefix(p, "Fixture Show/") }
+	audio := data(t, "chap-v24-reverse.mp3")
+	var calls atomic.Int32
+	setAudio(h, func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Header().Set("ETag", `"one"`)
+		w.Header().Set("Content-Length", strconv.Itoa(len(audio)))
+		w.WriteHeader(200)
+		w.Write(audio)
+	})
+	var once sync.Once
+	s.o.Fault = func(at string) error {
+		if at == "rehash" {
+			once.Do(func() { renameShow(t, h, "Fixture Show", "Renamed Show") })
+		}
+		return nil
+	}
+	res, err := h.handler.FetchJob().Run(context.Background(), job, jobs.LocalReporter())
+	moved := "Renamed Show/" + path.Base(*job.Path)
+	got, ok := res.(fetchResult)
+	if err != nil || !ok || got.Path != moved || got.Fetch.Bytes != int64(len(audio)) || calls.Load() != 1 {
+		t.Fatal(res, err, calls.Load())
+	}
+	if saved, err := os.ReadFile(filepath.Join(h.mount, moved)); err != nil || !bytes.Equal(saved, audio) {
+		t.Fatal("the episode was not published in the renamed folder", err)
+	}
+	if left := partials(filepath.Join(h.mount, "Renamed Show")); len(left) != 0 {
+		t.Fatal("a partial was left behind", left)
+	}
+	noRecords(t, s)
 }

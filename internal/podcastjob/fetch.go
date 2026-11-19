@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"hash"
 	"io"
 	"log/slog"
@@ -319,17 +320,35 @@ func (h *Fetch) run(parent context.Context, claimed *jobs.Job, rep *jobs.Reporte
 		// A show folder renamed by hand while the episode downloaded took the
 		// partial and the episode's lock with it: the episode is published where
 		// the show is now, its record following it, never downloaded again.
-		if err := follow(ctx); err != nil {
-			return nil, err
-		}
+		//
 		// A copy of the show folder made over it in place (cp into the same
 		// folder) rewrites the partial under the file the download holds open:
 		// the same file, so nothing above sees it, with other bytes. The
 		// partial is hashed again before the probe and the publication read it,
-		// and one that is not what was written is downloaded again from byte 0
-		// (once), rather than probed as broken audio or refused at publication.
-		if podcast.Holds(root, c.partialName(), received.Bytes, received.SHA256) {
+		// and one proven not to be what was written is downloaded again from
+		// byte 0 (once), rather than probed as broken audio or refused at
+		// publication (written, which follows the show first).
+		held, err := s.written(ctx, root, &c, received, follow)
+		unread := errors.Is(err, errPartialUnread)
+		if err != nil && !unread {
+			return nil, err
+		}
+		if held {
 			break
+		}
+		// Only where the show still is: a show folder deleted outright (follow
+		// found it nowhere) has no partial to hash either, and a second
+		// download would be written into whatever is at its name now, another
+		// show's folder taking that name included. It fails as the publication
+		// would.
+		if _, _, err := s.readEpisode(root, e.Path, params); err != nil {
+			return nil, err
+		}
+		// A partial that could not be read back is not known to have changed:
+		// the whole download is never thrown away for a read that failed.
+		if unread {
+			slog.Warn("podcasts: an episode's download could not be read back to check it", "partial", c.partialName(), "err", err)
+			return nil, fail("write_failed", "The episode download could not be read back.")
 		}
 		if again {
 			return nil, fail("write_failed", "The episode download was changed on disk while it was saved.")
@@ -496,6 +515,47 @@ func realPath(root *os.Root, p string) string {
 		return p
 	}
 	return show + "/" + path.Base(p)
+}
+
+// rehashTries and rehashWait bound how long a download that cannot be read
+// back is asked again (written): four reads, 1 s, 2 s and 4 s apart.
+const (
+	rehashTries = 4
+	rehashWait  = time.Second
+)
+
+// errPartialUnread is written's answer for a partial it could not read back
+// to tell whether it holds what the download wrote.
+var errPartialUnread = errors.New("podcastjob: the episode download could not be read back")
+
+// written reports whether the partial c names holds what the download wrote
+// (received: its size and hash), where its show folder is now (follow, run's,
+// first). false with no error only for a partial proven to hold other content
+// (podcast.Verify). One that could not be read to tell (a read the library
+// failed for a moment, as a network share does, or a show folder renamed by
+// hand between the follow and the read, its partial gone from the path) is
+// not a changed one: the show is followed and the partial read again, up to
+// rehashTries times, then errPartialUnread (wrapping the read's error).
+// follow's error, or ctx's when it ended in a wait.
+func (s *service) written(ctx context.Context, root *os.Root, c *checkpoint, received podcast.Fetch, follow func(context.Context) error) (bool, error) {
+	for try := 1; ; try++ {
+		if err := follow(ctx); err != nil {
+			return false, err
+		}
+		err := s.o.Fault.Hit("rehash")
+		if err == nil {
+			var ok bool
+			if ok, err = podcast.Verify(root, c.partialName(), received.Bytes, received.SHA256); err == nil {
+				return ok, nil
+			}
+		}
+		if try == rehashTries {
+			return false, fmt.Errorf("%w: %w", errPartialUnread, err)
+		}
+		if err := s.o.Wait(ctx, rehashWait<<(try-1)); err != nil {
+			return false, err
+		}
+	}
 }
 
 func (s *service) showKey(mount, show string) string {

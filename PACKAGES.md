@@ -2521,7 +2521,9 @@ internal/
             id and its episode's id and file name (rehome: a take-in that moved
             the journals and stopped before feed.json, then the folder renamed
             back); another show's, or one naming a folder still there, still
-            refuses. Holds is Matches' size and hash check without a pin.
+            refuses. Holds is Matches' size and hash check without
+            a pin; Verify tells a file proven to hold other content from one
+            that could not be read to tell (its error).
             EnsureDir never makes the show folder itself, so a job
             running on after a rename by hand never brings the old name back.
   podcastjob/ podcast.fetch opts into the interactive reserve (2c-2b), with
@@ -2599,13 +2601,22 @@ internal/
             at its path is followed every 10 s, the wait doubling up to 5 min
             while a follow finds no new place (a show folder deleted outright
             costs each one a search of the library). After the download the
-            partial is hashed again (podcast.Holds) before the probe: a copy of
+            partial is hashed again (written, podcast.Verify) before the probe:
+            a copy of
             the folder made over it in place (cp into the same folder) rewrites
             the open file, the same inode, so no check by path sees it, and a
-            partial not as written is downloaded again from byte 0, once, then
-            write_failed. A failure before the download whose lock file moved
-            with a folder renamed by hand lets go of it where the show is now
-            (episodeAt at the exit), its file removed. The exit's settle is
+            partial proven not as written is downloaded again from byte 0,
+            once, then write_failed. One that could not be read to tell (a read
+            the library failed, a folder renamed between the follow and the
+            read) is not a changed one: the show is followed and the partial
+            read again, four reads 1 s, 2 s and 4 s apart, then write_failed
+            with no second download. Never downloaded again either when its
+            folder no longer holds the show (a
+            folder deleted outright, another show's at its name: the partial is
+            gone, and the fetch fails as the publication would rather than
+            download into that folder). A failure before the download whose
+            lock file moved with a folder renamed by hand lets go of it where
+            the show is now (episodeAt at the exit), its file removed. The exit's settle is
             bounded by one ceiling. Under the
             episode's lock its own record moves even when a duplicate claim's
             open row names it (adoptOwn, also after a relocation before the
