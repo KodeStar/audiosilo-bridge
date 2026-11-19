@@ -16,6 +16,7 @@ import (
 
 	"github.com/kodestar/audiosilo-bridge/internal/link"
 	"github.com/kodestar/audiosilo-bridge/internal/store"
+	"github.com/kodestar/audiosilo-bridge/internal/testwait"
 )
 
 // fakeServer hands out queued jobs and records every update.
@@ -179,13 +180,13 @@ func testOpts() Options {
 		RetryEvery: 20 * time.Millisecond, Log: quietLog()}
 }
 
-// runFor runs r until cond holds (or fails the test after 5 s), then stops it.
+// runFor runs r until cond holds (or fails the test after 5 s, Scaled), then stops it.
 func runFor(t *testing.T, r *Runner, cond func() bool) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { r.Run(ctx); close(done) }()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(testwait.Scaled(5 * time.Second))
 	for !cond() {
 		if time.Now().After(deadline) {
 			cancel()
@@ -482,9 +483,11 @@ func TestRefusedJobResumes(t *testing.T) {
 	var paired atomic.Bool
 	paired.Store(true)
 	var runs atomic.Int32
+	stopped := make(chan struct{})
 	h := handler{kind: "k.v", lane: LaneLight, fn: func(ctx context.Context, j Job, rep *Reporter) (any, error) {
 		if runs.Add(1) == 1 {
 			<-ctx.Done() // stopped by the refusal
+			close(stopped)
 			return nil, ctx.Err()
 		}
 		return nil, nil
@@ -503,6 +506,14 @@ func TestRefusedJobResumes(t *testing.T) {
 	srv.mu.Lock()
 	srv.unauthed = true
 	srv.mu.Unlock()
+	// The job's own report hears the refusal: the claim loop's poll can hear it
+	// first (unpairing), and a refusal lifted before the job's next keepalive
+	// would never stop it.
+	select {
+	case <-stopped:
+	case <-time.After(testwait.Scaled(5 * time.Second)):
+		t.Fatal("the refusal never stopped the job")
+	}
 	waitFor(t, func() bool { return !paired.Load() })
 	srv.mu.Lock()
 	srv.unauthed = false
@@ -646,7 +657,7 @@ func TestLocalCancel(t *testing.T) {
 
 func waitFor(t *testing.T, cond func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(testwait.Scaled(5 * time.Second))
 	for !cond() {
 		if time.Now().After(deadline) {
 			t.Fatal("timed out")

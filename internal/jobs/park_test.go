@@ -379,19 +379,27 @@ func TestUnchangedProgressIsNotSent(t *testing.T) {
 	}
 	r := New(db, func() Server { return srv }, nil, opts, handler{kind: "k.v", lane: LaneLight,
 		fn: func(_ context.Context, _ Job, rep *Reporter) (any, error) {
+			running := func(n int) func() bool { return func() bool { return countState(srv, 8, link.StateRunning) == n } }
+			// A new step is sent at once: waited for, as a send under load can
+			// take longer than the polls below.
+			rep.Progress(same())
+			if err := awaitCond(running(2), "the start and the first progress"); err != nil {
+				return nil, err
+			}
+			// The same progress again: every 1 ms tick could send it, none does.
 			for range 30 {
 				rep.Progress(same())
 				time.Sleep(2 * time.Millisecond)
 			}
-			running := countState(srv, 8, link.StateRunning)
+			if n := countState(srv, 8, link.StateRunning); n != 2 {
+				return nil, fmt.Errorf("running reports = %d after the same progress again, want 2 (the start and the first progress)", n)
+			}
 			// Changed Extra only: a report again.
 			changed := same()
 			changed.Extra["eta_seconds"] = 60
 			rep.Progress(changed)
-			time.Sleep(20 * time.Millisecond)
-			if running != 2 || countState(srv, 8, link.StateRunning) != 3 {
-				return nil, fmt.Errorf("running reports = %d then %d, want 2 (the start and the first progress) then 3",
-					running, countState(srv, 8, link.StateRunning))
+			if err := awaitCond(running(3), "the changed progress"); err != nil {
+				return nil, err
 			}
 			return nil, nil
 		}})
