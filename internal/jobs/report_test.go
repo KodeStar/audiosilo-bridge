@@ -235,7 +235,7 @@ func TestCancelCauseWordsTheServersReason(t *testing.T) {
 		stop.Error() != errCancelRequested.Error() {
 		t.Fatalf("a cancel answering a parked report of a job unparked since = %v", stop)
 	}
-	if !errors.Is(errCancelledHere, errCancelRequested) {
+	if !errors.Is(errCancelledOnPage, errCancelRequested) {
 		t.Fatal("a cancel on the Bridge's page isn't a cancel")
 	}
 }

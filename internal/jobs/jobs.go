@@ -138,7 +138,7 @@ type Store interface {
 }
 
 // Why a running job's context ended. errCancelRequested is any cancel; a
-// cancel that says by whom wraps it (errCancelledHere, cancelCause): the
+// cancel that says by whom wraps it (errCancelledOnPage, cancelCause): the
 // server's 409 not_held with reason "cancelled" doesn't say, and is sent for
 // the server's own cancels as for an admin's (bridge#80).
 var (
@@ -147,8 +147,9 @@ var (
 	errStopping        = errors.New("the Bridge is stopping")
 	errUnpaired        = errors.New("the server refused the Bridge's token")
 
-	// errCancelledHere is a cancel on the Bridge's own page (Runner.Cancel).
-	errCancelledHere = fmt.Errorf("%w on the Bridge's page", errCancelRequested)
+	// errCancelledOnPage is a cancel on the Bridge's own page (Runner.Cancel);
+	// not link.ErrCancelledHere, the server's 409 for a job cancelled there.
+	errCancelledOnPage = fmt.Errorf("%w on the Bridge's page", errCancelRequested)
 )
 
 // cancelCause is the cause of a cancel the server asked for in its answer
@@ -920,7 +921,7 @@ func (r *Runner) Cancel(id int64) bool {
 	defer r.mu.Unlock()
 	ru, ok := r.running[id]
 	if ok {
-		ru.cancel(errCancelledHere)
+		ru.cancel(errCancelledOnPage)
 	}
 	return ok
 }
