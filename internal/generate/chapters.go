@@ -400,8 +400,9 @@ func sidecarsWithoutChapters(p place) bool {
 // purge or stage starts on it in between; the identity swap, the cleared status
 // and the job's mapping are one transaction, on the job's context (a job
 // cancelled meanwhile leaves the run as it was, for the next one): a continued
-// book always has its job to follow it and is never left stopped. It reports
-// whether it continued it.
+// book always has its job to follow it and is never left stopped. The book is
+// published as stored once continued (Engine.PublishStored), so the page leaves
+// its cancelled frame. It reports whether it continued it.
 func (h *Handler) continueChapters(ctx context.Context, eng Engine, r *run, old store.Book, ebookRun int64) (bool, error) {
 	if r.source != SourceAudio || !continuable(old) {
 		return false, nil
@@ -456,6 +457,7 @@ func (h *Handler) continueChapters(ctx context.Context, eng Engine, r *run, old 
 		return false, err
 	}
 	r.bookID = old.ID
+	eng.PublishStored(ctx, old.ID)
 	h.o.Log.Info("generate: continuing the book's chapters run, its transcription kept", "job", r.job.ID, "book", old.ID,
 		"from", old.State)
 	eng.Notify()
@@ -528,6 +530,7 @@ func (h *Handler) resumeChapters(ctx context.Context, eng Engine, r *run, old st
 		return false, err
 	}
 	r.bookID = old.ID
+	eng.PublishStored(ctx, old.ID)
 	h.o.Log.Info("chapters: taking up the book's stopped chapters run, its transcription kept", "job", r.job.ID,
 		"book", old.ID, "from", old.State, "at", to)
 	eng.Notify()

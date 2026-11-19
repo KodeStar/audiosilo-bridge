@@ -452,6 +452,7 @@ func TestReadalongReusesTheEarlierRun(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			hr := readalongHarness(t)
+			rec := hr.recordPublishes()
 			old := seedEarlier(hr, tc.goal, tc.st, tc.status)
 			if tc.swept {
 				if err := hr.db.PutGenerateBook(context.Background(), store.GenerateBook{ServerJobID: 99, BookID: &old.ID, LibraryID: 1, RelPath: "Author/Book"}); err != nil {
@@ -472,6 +473,9 @@ func TestReadalongReusesTheEarlierRun(t *testing.T) {
 			b := hr.engineBook(210)
 			if (b.ID == old.ID) != tc.sameBook || b.Goal != tc.goalAfter {
 				t.Fatalf("engine book %d (earlier %d), goal %q", b.ID, old.ID, b.Goal)
+			}
+			if rec.published(old.ID) != tc.sameBook {
+				t.Fatalf("the earlier run published = %v, want it published only when continued", !tc.sameBook)
 			}
 			stages := hr.stagesRun(b.ID)
 			if b.ID == old.ID {
@@ -566,6 +570,7 @@ func TestReadalongRefusedWhileGenerating(t *testing.T) {
 func TestGenerateContinuesAReadalongRun(t *testing.T) {
 	t.Parallel()
 	hr := readalongHarness(t)
+	rec := hr.recordPublishes()
 	old := seedEarlier(hr, state.GoalReadalong, state.Done, "")
 	before := len(hr.stagesRun(old.ID))
 	hr.srv.add(213, "Author/Book", `{"source":"audio"}`)
@@ -575,6 +580,9 @@ func TestGenerateContinuesAReadalongRun(t *testing.T) {
 	b := hr.engineBook(213)
 	if b.ID != old.ID || b.Goal != "" || b.Series != "The Saga" {
 		t.Fatalf("engine book = %+v (earlier %d)", b, old.ID)
+	}
+	if !rec.published(b.ID) {
+		t.Fatal("the continue wasn't published")
 	}
 	stages := hr.stagesRun(b.ID)[before:]
 	if len(stages) == 0 || stages[0] != string(state.QASweep) || slices.Contains(stages, string(state.ASR)) {

@@ -334,6 +334,36 @@ func (hr *harness) handlerWith(engine func() Engine) *Handler {
 		Poll: 10 * time.Millisecond, IdlePoll: 10 * time.Millisecond, Recheck: time.Hour, Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
 }
 
+// publishRecorder is the harness's scheduler recording the books a change made
+// outside it published (Engine.PublishStored).
+type publishRecorder struct {
+	*scheduler.Scheduler
+	mu  sync.Mutex
+	ids []int64
+}
+
+func (p *publishRecorder) PublishStored(ctx context.Context, id int64) {
+	p.mu.Lock()
+	p.ids = append(p.ids, id)
+	p.mu.Unlock()
+	p.Scheduler.PublishStored(ctx, id)
+}
+
+// published reports whether book id's state was published through the engine.
+func (p *publishRecorder) published(id int64) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return slices.Contains(p.ids, id)
+}
+
+// recordPublishes swaps the harness's handler for one whose engine records the
+// books published through it; call it before the runner starts.
+func (hr *harness) recordPublishes() *publishRecorder {
+	rec := &publishRecorder{Scheduler: hr.sched}
+	hr.h = hr.handlerWith(func() Engine { return rec })
+	return rec
+}
+
 // runner runs h's jobs (and more's) until stopped (the returned func), as the
 // Bridge would.
 func (hr *harness) runner(h *Handler, more ...jobs.Handler) (stop func()) {
