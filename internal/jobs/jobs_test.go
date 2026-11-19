@@ -31,6 +31,7 @@ type fakeServer struct {
 	failing  bool             // every update fails with a network error
 	unauthed bool             // every call is a 401
 	hang     chan struct{}    // updates wait for it to close (nil: none)
+	hung     int              // updates that waited on hang
 	changed  chan struct{}    // closed on every update
 	paths    map[int64]string // the job's path in an update's answer (a book that moved)
 	shareOff map[int64]bool   // share_off in an update's answer (server#218)
@@ -80,6 +81,7 @@ func (f *fakeServer) Claim(ctx context.Context, kinds []string, wait time.Durati
 func (f *fakeServer) UpdateJob(ctx context.Context, id int64, u link.Update) (*link.Job, error) {
 	f.mu.Lock()
 	if hang := f.hang; hang != nil {
+		f.hung++
 		f.mu.Unlock()
 		select {
 		case <-hang:

@@ -423,3 +423,41 @@ func TestRetriedFailureTheServerCancelled(t *testing.T) {
 		return storedAs(db, 23, store.JobCancelled)
 	})
 }
+
+// A Bridge that stops while a failed job asks for a held cancel leaves the job
+// running, to resume at the next start, as one stopped before its end does:
+// no end is recorded or reported.
+func TestStopDuringHeldCancel(t *testing.T) {
+	t.Parallel()
+	db, srv := openStore(t), newFakeServer()
+	srv.add(&link.Job{ID: 25, Kind: "k.stop", Attempts: 1})
+	logs := &logCounter{n: map[string]int{}}
+	opts := testOpts()
+	opts.Keepalive, opts.ReportRetry, opts.Log = time.Hour, time.Hour, slog.New(logs)
+	r := New(db, func() Server { return srv }, nil, opts, handler{kind: "k.stop", lane: LaneLight,
+		fn: func(context.Context, Job, *Reporter) (any, error) {
+			srv.mu.Lock()
+			srv.hang = make(chan struct{})
+			srv.mu.Unlock()
+			return nil, errors.New("the download was interrupted")
+		}})
+	t.Cleanup(func() { close(srv.hang) })
+	runFor(t, r, func() bool {
+		srv.mu.Lock()
+		defer srv.mu.Unlock()
+		return srv.hung > 0 // the cancel check waits on the server
+	})
+	sj, err := db.GetServerJob(context.Background(), 25)
+	if err != nil || sj.State != store.JobRunning {
+		t.Fatalf("job = %+v, %v; want it left running", sj, err)
+	}
+	if n := logs.count("INFO bridge: a job was interrupted; it resumes at the next start"); n != 1 {
+		t.Fatalf("interrupted logged %d times", n)
+	}
+	if n := logs.count("WARN bridge: recording a job failed"); n != 0 {
+		t.Fatalf("an end was recorded %d times", n)
+	}
+	if state, _ := srv.finalState(25); state != "" {
+		t.Fatalf("reported %q", state)
+	}
+}

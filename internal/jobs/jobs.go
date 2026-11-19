@@ -828,10 +828,7 @@ func (r *Runner) settle(base context.Context, srv Server, ru *run, rep *Reporter
 	var park *ParkError
 	switch {
 	case base.Err() != nil, errors.Is(err, errStopping):
-		// Left running: the next start resumes it under its claim, with the
-		// share_off it heard if the store takes it now.
-		rep.keepShareOff()
-		r.log.Info("bridge: a job was interrupted; it resumes at the next start", "job", job.ID, "why", err)
+		r.interrupted(rep, job, err)
 	case errors.Is(err, errUnpaired):
 		// Left running: resumed under its claim once a link works again (or at
 		// the next start), with the share_off it heard (release carries it to
@@ -855,15 +852,28 @@ func (r *Runner) settle(base context.Context, srv Server, ru *run, rep *Reporter
 		// A cancel asked for since the last report, which the failure beat to
 		// the next keepalive, ends it cancelled: the failure may be the stop
 		// itself, and the admin asked for the job to end anyway. A failure
-		// with no cancel held stays a failure.
-		if cause := rep.heldCancel(base); cause != nil {
+		// with no cancel held stays a failure. A Bridge that stopped while it
+		// asked leaves the job running, as one stopped before settle does.
+		cause := rep.heldCancel(base)
+		switch {
+		case base.Err() != nil:
+			r.interrupted(rep, job, err)
+		case cause != nil:
 			r.log.Info("bridge: a job was cancelled", "job", job.ID, "kind", job.Kind, "why", cause, "err", err)
 			r.finish(base, srv, job, store.JobCancelled, progress, raw, "")
-		} else {
+		default:
 			r.finish(base, srv, job, store.JobFailed, progress, raw, err.Error())
 		}
 	}
 	return false
+}
+
+// interrupted leaves a job the stopping Bridge ended running: the next start
+// resumes it under its claim, with the share_off it heard if the store takes it
+// now.
+func (r *Runner) interrupted(rep *Reporter, job Job, why error) {
+	rep.keepShareOff()
+	r.log.Info("bridge: a job was interrupted; it resumes at the next start", "job", job.ID, "why", why)
 }
 
 // Bounds on what the Bridge reports, inside the server's (its error limit is
@@ -917,7 +927,8 @@ func (r *Runner) report(ctx context.Context, srv Server, sj store.ServerJob) {
 			// The server ended it cancelled first (a cancel the job never
 			// heard): a failure is recorded cancelled, as the server has it.
 			// A job that got its work done stays done here.
-			r.log.Info("bridge: the server had cancelled a job that failed; it is recorded cancelled", "job", sj.ID)
+			// Its error, which only the Bridge held, is logged here.
+			r.log.Info("bridge: the server had cancelled a job that failed; it is recorded cancelled", "job", sj.ID, "err", sj.Error)
 			if ferr := r.store.FinishServerJob(ctx, sj.ID, sj.Attempt, store.JobCancelled, sj.Result, ""); ferr != nil {
 				r.log.Warn("bridge: recording a job failed", "job", sj.ID, "err", ferr)
 			}
