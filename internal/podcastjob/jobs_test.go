@@ -9,6 +9,7 @@ import (
 	"image"
 	"image/png"
 	"io/fs"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -985,3 +986,30 @@ func TestPollFailureCodes(t *testing.T) {
 
 // fixtureShowID is the show id of the fixture feed audioHarness writes.
 const fixtureShowID = "a1b2c3d4e5f60718"
+
+// A failure outcome cannot name (a raw filesystem error) keeps its message for
+// the job and logs its cause at warn; one it names logs nothing.
+func TestOutcomeLogsTheCauseItDoesNotName(t *testing.T) {
+	var buf bytes.Buffer
+	was := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	defer slog.SetDefault(was)
+	cause := &fs.PathError{Op: "open", Path: "Show/feed.json", Err: errors.New("input/output error")}
+	_, err := outcome(nil, cause)
+	var failure *netguard.Error
+	if !errors.As(err, &failure) || failure.Code != "write_failed" || failure.Message != "The podcast show could not be saved." {
+		t.Fatalf("a raw filesystem error = %v", err)
+	}
+	if got := buf.String(); !strings.Contains(got, "level=WARN") || !strings.Contains(got, "Show/feed.json") || !strings.Contains(got, "input/output error") {
+		t.Fatalf("the cause was not logged at warn: %q", got)
+	}
+	buf.Reset()
+	for _, named := range []error{fail("network", "The feed could not be reached."), context.Canceled, podcast.ErrNotFeed} {
+		if _, err := outcome(nil, named); err == nil {
+			t.Fatalf("%v: no failure", named)
+		}
+	}
+	if got := buf.String(); strings.Contains(got, "a job failed") {
+		t.Fatalf("a failure outcome names was logged: %q", got)
+	}
+}

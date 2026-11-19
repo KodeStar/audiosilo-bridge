@@ -1445,6 +1445,9 @@ func outcome(result any, err error) (any, error) {
 		// podcast job reports through here, so the message names none.
 		failure = fail("bridge_lost", "The Bridge stopped the job before it finished.")
 	default:
+		// A cause the job's message doesn't name (a filesystem error, mostly):
+		// the log keeps it for an admin.
+		slog.Warn("podcasts: a job failed", "err", err)
 		failure = fail("write_failed", "The podcast show could not be saved.")
 	}
 	return failure, failure
