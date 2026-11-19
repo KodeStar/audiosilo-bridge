@@ -464,10 +464,8 @@ func (h *Handler) reuseForReadalong(ctx context.Context, eng Engine, r *run, old
 	} else if err != nil {
 		return false, err
 	}
-	r.bookID = old.ID
-	eng.PublishStored(ctx, old.ID)
 	h.o.Log.Info("readalong: continuing the book's earlier run", "job", r.job.ID, "book", old.ID, "from", old.State, "at", to)
-	eng.Notify()
+	tookUp(ctx, eng, r, old.ID)
 	return true, nil
 }
 
@@ -525,10 +523,8 @@ func (h *Handler) continueReadalongRun(ctx context.Context, eng Engine, r *run, 
 	} else if err != nil {
 		return false, err
 	}
-	r.bookID = old.ID
-	eng.PublishStored(ctx, old.ID)
 	h.o.Log.Info("generate: continuing the book's read-along run, its transcription kept", "job", r.job.ID, "book", old.ID)
-	eng.Notify()
+	tookUp(ctx, eng, r, old.ID)
 	return true, nil
 }
 

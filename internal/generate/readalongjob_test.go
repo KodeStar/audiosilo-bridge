@@ -474,8 +474,8 @@ func TestReadalongReusesTheEarlierRun(t *testing.T) {
 			if (b.ID == old.ID) != tc.sameBook || b.Goal != tc.goalAfter {
 				t.Fatalf("engine book %d (earlier %d), goal %q", b.ID, old.ID, b.Goal)
 			}
-			if rec.published(old.ID) != tc.sameBook {
-				t.Fatalf("the earlier run published = %v, want it published only when continued", !tc.sameBook)
+			if got := rec.published(old.ID); got != tc.sameBook {
+				t.Fatalf("the earlier run published = %v, want %v (published only when continued)", got, tc.sameBook)
 			}
 			stages := hr.stagesRun(b.ID)
 			if b.ID == old.ID {

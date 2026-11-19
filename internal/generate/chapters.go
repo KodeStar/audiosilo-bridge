@@ -456,12 +456,20 @@ func (h *Handler) continueChapters(ctx context.Context, eng Engine, r *run, old 
 	} else if err != nil {
 		return false, err
 	}
-	r.bookID = old.ID
-	eng.PublishStored(ctx, old.ID)
 	h.o.Log.Info("generate: continuing the book's chapters run, its transcription kept", "job", r.job.ID, "book", old.ID,
 		"from", old.State)
-	eng.Notify()
+	tookUp(ctx, eng, r, old.ID)
 	return true, nil
+}
+
+// tookUp makes engine book id run r's book once a continue (ContinueChapters,
+// ContinueReadalong) has cleared its stop: it publishes the book as stored
+// (Engine.PublishStored), so the page leaves its cancelled frame, and wakes the
+// engine for it. Every continue ends here, so none can skip the publish.
+func tookUp(ctx context.Context, eng Engine, r *run, id int64) {
+	r.bookID = id
+	eng.PublishStored(ctx, id)
+	eng.Notify()
 }
 
 // resumesAt is where an engine book stopped at asr or chapter_detecting goes on
@@ -529,11 +537,9 @@ func (h *Handler) resumeChapters(ctx context.Context, eng Engine, r *run, old st
 	} else if err != nil {
 		return false, err
 	}
-	r.bookID = old.ID
-	eng.PublishStored(ctx, old.ID)
 	h.o.Log.Info("chapters: taking up the book's stopped chapters run, its transcription kept", "job", r.job.ID,
 		"book", old.ID, "from", old.State, "at", to)
-	eng.Notify()
+	tookUp(ctx, eng, r, old.ID)
 	return true, nil
 }
 

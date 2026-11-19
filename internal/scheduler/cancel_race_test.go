@@ -3,7 +3,6 @@ package scheduler
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -178,23 +177,11 @@ func TestGuardedCancelNeverPublishesOverALaterReadmit(t *testing.T) {
 	s := New(db, hub, NewStubExecutor(0, 0), 2, h.workRoot, false)
 	lastState := func(id int64) (status, errMsg string) {
 		t.Helper()
-		replay, sub := hub.Subscribe(0)
-		sub.Close()
-		found := false
-		for _, ev := range replay {
-			if ev.Type != "book.state" || ev.BookID != id {
-				continue
-			}
-			var p struct{ Status, Error string }
-			if err := json.Unmarshal(ev.Data, &p); err != nil {
-				t.Fatal(err)
-			}
-			status, errMsg, found = p.Status, p.Error, true
-		}
-		if !found {
+		f, ok := lastFrame(t, hub, id)
+		if !ok {
 			t.Fatalf("no book.state for book %d", id)
 		}
-		return status, errMsg
+		return f.Status, f.Error
 	}
 	guard := func(job int64, b store.Book) store.StopGuard {
 		t.Helper()
