@@ -474,7 +474,11 @@ func Sanitize(s string) string {
 // case, alone or before an extension ("nul.txt", "COM1 .m4b").
 func Reserved(name string) bool {
 	stem, _, _ := strings.Cut(name, ".")
-	stem = strings.ToUpper(strings.TrimRight(stem, " "))
+	stem = strings.TrimRight(stem, " ")
+	if len(stem) < 3 || len(stem) > 5 {
+		return false // a reserved stem is 3 to 5 bytes ("CON", "COM1", "COM" and a superscript digit)
+	}
+	stem = strings.ToUpper(stem)
 	switch stem {
 	case "CON", "PRN", "AUX", "NUL":
 		return true
