@@ -3190,8 +3190,10 @@ internal/
             stage reads the book's mode again before each dimension's gist and issue,
             and keeps the rest local, asking the server first: ShareOff has each
             open generate-and-share job following the book report now
-            (Reporter.Refresh), its answer heard as any other, and errors when one
-            couldn't be asked, its run not up here included). A later
+            (Reporter.Refresh), its answer heard as any other: the first job with
+            its share off answers it, an answer that stopped the job included when
+            it carried share_off, and it errors when one couldn't be asked, its run
+            not up here included). A later
             run of the job that finds its engine book local keeps the share dropped
             (the module on again since). The result says share_skipped
             "contributions_off" for a book kept local unless something was filed (the

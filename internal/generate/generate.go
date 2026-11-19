@@ -1243,17 +1243,20 @@ func (h *Handler) reporter(id int64) *jobs.Reporter {
 // of the server now. The job hears share_off only in an answer to one of its
 // reports, which can be a keepalive away (or an idle poll, while its run waits
 // for the book), so each such job reports now (jobs.Reporter.Refresh), and the
-// answer acts as any other: its share guard turns the book local. A job that
-// stored share_off already needs no asking. An error when one couldn't be asked
-// (the server not reached, the answer stopped the job, or no run of it is up
-// here yet: a resumed job waiting for its lane slot), for the stage to wait and
-// file nothing. Other jobs (contribute local, or another kind) are not asked.
+// answer acts as any other: its share guard turns the book local. The first
+// job with its share off answers true (the book is local whatever the others
+// say): one that stored or heard share_off already needs no asking, and an
+// answer that stopped the job counts when it carried share_off (heard before
+// the stop). An error when one couldn't be asked (the server not reached, the
+// answer stopped the job, or no run of it is up here yet: a resumed job
+// waiting for its lane slot), for the stage to wait and file nothing. Other
+// jobs (contribute local, or another kind) are not asked; params that don't
+// read are asked as a share's.
 func (h *Handler) ShareOff(ctx context.Context, bookID int64) (bool, error) {
 	open, err := h.o.DB.OpenGenerateJobsForBook(ctx, bookID, 0)
 	if err != nil {
 		return false, err
 	}
-	off := false
 	for _, id := range open {
 		sj, err := h.o.DB.GetServerJob(ctx, id)
 		if errors.Is(err, store.ErrNotFound) {
@@ -1265,23 +1268,26 @@ func (h *Handler) ShareOff(ctx context.Context, bookID int64) (bool, error) {
 		if sj.Kind != Kind {
 			continue
 		}
-		if p, err := ParseParams(sj.Params); err != nil || p.Contribute != ContributeIssue {
+		if p, err := ParseParams(sj.Params); err == nil && p.Contribute != ContributeIssue {
 			continue
 		}
 		if sj.ShareOff {
-			off = true
-			continue
+			return true, nil
 		}
 		rep := h.reporter(id)
 		if rep == nil {
 			return false, fmt.Errorf("job %d isn't running here yet to ask the server", id)
 		}
-		if err := rep.Refresh(ctx); err != nil {
-			return false, fmt.Errorf("job %d: %w", id, err)
+		if !rep.ShareOff() {
+			if err := rep.Refresh(ctx); err != nil && !rep.ShareOff() {
+				return false, fmt.Errorf("job %d: %w", id, err)
+			}
 		}
-		off = off || rep.ShareOff()
+		if rep.ShareOff() {
+			return true, nil
+		}
 	}
-	return off, nil
+	return false, nil
 }
 
 // errEarlierRunBusy is a new job's refusal while the engine stays busy with the

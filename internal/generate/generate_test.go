@@ -1305,6 +1305,38 @@ func TestGenerateShareOffAskedBeforeFiling(t *testing.T) {
 	}
 }
 
+// An answer to the ask that stops the job (an admin's cancel) and carries
+// share_off is heard before the stop: ShareOff says off and the book is local,
+// rather than the stage waiting on a job that is ending.
+func TestGenerateShareOffHeardInAStoppingAnswer(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	hr := newHarness(t)
+	hr.exec.gate("contributing")
+	h := hr.handler()
+	h.o.IdlePoll = time.Hour
+	hr.srv.add(77, "Author/Book", `{"contribute":"issue"}`)
+	stop := hr.runnerKeepalive(time.Hour, h)
+	defer stop()
+	var b store.Book
+	hr.waitFor("contributing", func() bool {
+		m, err := hr.db.GetGenerateBook(ctx, 77)
+		if err != nil || m.BookID == nil {
+			return false
+		}
+		b, err = hr.db.GetBook(ctx, *m.BookID)
+		return err == nil && b.State == string(state.Contributing)
+	})
+	hr.srv.set(func() { hr.srv.shareOff[77], hr.srv.cancel[77] = true, true })
+	if off, err := h.ShareOff(ctx, b.ID); err != nil || !off {
+		t.Fatalf("ShareOff, a cancel carrying share_off = %v %v, want true", off, err)
+	}
+	if got, err := hr.db.GetBook(ctx, b.ID); err != nil || got.ContribMode != store.ContribModeLocal {
+		t.Fatalf("engine book after the ask = %+v %v, want local", got, err)
+	}
+	hr.waitFor("cancelled", func() bool { s, _ := hr.srv.final(77); return s == link.StateCancelled })
+}
+
 // ShareOff asks only the open generate-and-share jobs that follow the book: a
 // contribute=local one is not asked (false); a share job with no run here to
 // ask (a resumed one waiting for its lane slot) is an error, so the stage
@@ -1340,6 +1372,19 @@ func TestGenerateShareOffAsksOnlyShareJobs(t *testing.T) {
 	}
 	if off, err := hr.h.ShareOff(ctx, b.ID); err != nil || !off {
 		t.Fatalf("ShareOff, share_off stored = %v %v, want true", off, err)
+	}
+
+	// Params that don't read are asked as a share's (fails closed): no run here
+	// to ask is an error, not "not off".
+	other, err := hr.db.CreateBook(ctx, store.NewBook{Title: "C", SourcePath: "/src/c", WorkDir: t.TempDir(),
+		ContribMode: store.ContribModeIssue})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b = other
+	follow(78, `{"contribute":5}`)
+	if off, err := hr.h.ShareOff(ctx, b.ID); err == nil {
+		t.Fatalf("ShareOff, unreadable params with no run here = %v, want an error", off)
 	}
 }
 

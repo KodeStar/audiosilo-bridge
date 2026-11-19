@@ -991,7 +991,7 @@ type Reporter struct {
 	// failing: the last report didn't reach the server (unreachable), so the
 	// next goes after ReportRetry rather than Keepalive; any report that gets
 	// through clears it (a ConfirmLease's too, on the handler's goroutine, and a
-	// Refresh's, on the goroutine of the job that asked for it). warned: a failed report was logged and none has got through
+	// Refresh's, on the goroutine that asked for it). warned: a failed report was logged and none has got through
 	// since, so the next failures are quiet until one does (bridge#31).
 	failing bool
 	warned  bool
@@ -1070,7 +1070,8 @@ func (p *Reporter) ShareOff() bool {
 // handler that acts on it from there (keeping what it already made local) need
 // not wait for its own next look, and an act that failed is tried again at the
 // next answer. fn runs on the goroutine that read the answer (the keepalive's,
-// a ConfirmLease's, or another job's Refresh), after the report's lock is let
+// a ConfirmLease's, or a Refresh's: another job's, or the engine's contributing
+// stage asking before it files), after the report's lock is let
 // go and before a cancel the same answer carries ends the job's context: it
 // must be quick, safe to run beside the handler and more than once, and must
 // not report.
@@ -1577,7 +1578,8 @@ var ErrStopped = errors.New("the server stopped the job")
 // Refresh reports the job now, as its next keepalive would (parked or not, with
 // its progress), and acts on the answer as that report would. Another job asks
 // for it when this one stands in its way: the server may have cancelled it since
-// its last report, and would otherwise say so only at the next keepalive. nil
+// its last report, and would otherwise say so only at the next keepalive; the
+// contributing stage asks it just before it files, for a share_off since. nil
 // when the server holds the job open; ErrStopped when the answer stopped it; the
 // error when the report didn't get through.
 func (p *Reporter) Refresh(ctx context.Context) error {
