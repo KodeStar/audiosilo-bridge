@@ -2520,7 +2520,10 @@ internal/
             feed.json never rewritten (the server compares its paths byte for
             byte); RealName keeps the spelling it is asked for, and a caller
             that found the folder by a listing works under its feed's spelling
-            (FeedFolder). RecoverShow
+            (FeedFolder), only when that spelling opens the same folder: on a
+            filesystem that keeps names as given (Linux) the two forms are two
+            folders, and a rename by hand from one to the other is a rename.
+            RecoverShow
             resolves a journal naming a folder that is gone (or this one spelt
             otherwise) to the show's folder when it is the show's by its show
             id and its episode's id and file name (rehome: a take-in that moved

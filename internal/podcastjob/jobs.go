@@ -663,7 +663,7 @@ func (s *service) cache(ctx context.Context, root *os.Root, lib link.Library, en
 		if err != nil {
 			continue
 		}
-		row := s.showRow(lib, podcast.FeedFolder(f, e.Name()), f)
+		row := s.showRow(lib, podcast.FeedFolder(root, f, e.Name()), f)
 		if err := s.o.DB.UpsertPodcastShow(ctx, row); err != nil {
 			return nil, err
 		}
@@ -715,7 +715,7 @@ func (s *service) find(root *os.Root, entries []os.DirEntry, rows []store.Podcas
 		if gone && f.ShowID != p.ShowID {
 			return "", nil
 		}
-		return podcast.FeedFolder(f, name), f
+		return podcast.FeedFolder(root, f, name), f
 	}
 	if p.ShowPath != "" && !gone {
 		if show, f := match(p.ShowPath); f != nil {
@@ -864,7 +864,7 @@ func holds(root *os.Root, show, id string) string {
 	if err != nil || f.ShowID != id {
 		return ""
 	}
-	return podcast.FeedFolder(f, show)
+	return podcast.FeedFolder(root, f, show)
 }
 
 // warnHeld logs a show folder podcast.ReadMoved refused because held, the

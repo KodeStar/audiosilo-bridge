@@ -227,12 +227,16 @@ func SameName(a, b string) bool {
 }
 
 // FeedFolder is show, a folder f was read from (ReadMoved), as f's episodes
-// spell it: their folder when it is show in another normal form (SameName),
-// else show. A job works under that spelling, so no episode path it writes
-// spells the folder otherwise than the feed already does.
-func FeedFolder(f *Feed, show string) string {
+// spell it: their folder when it is show in another normal form (SameName)
+// that opens this very folder (a normalising filesystem), else show. A job
+// works under that spelling, so no episode path it writes spells the folder
+// otherwise than the feed already does. On a filesystem that keeps names as
+// given (Linux), the two forms are two names: a folder renamed by hand from
+// one to the other, or a second folder in the other form, is never answered
+// by a spelling that is not there or is another folder's.
+func FeedFolder(root *os.Root, f *Feed, show string) string {
 	if len(f.Episodes) > 0 {
-		if from := path.Dir(f.Episodes[0].Path); from != show && SameName(from, show) {
+		if from := path.Dir(f.Episodes[0].Path); from != show && SameName(from, show) && sameFolder(root, from, show) {
 			return from
 		}
 	}

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"path/filepath"
 	"reflect"
 	"runtime"
 	"strings"
@@ -537,7 +538,7 @@ func TestANormalFormOnlyDifferenceIsNoRename(t *testing.T) {
 	}
 	for _, show := range []string{nfcShow, nfdShow} {
 		f, from, err := ReadMoved(root, show)
-		if err != nil || from != "" || FeedFolder(f, show) != nfcShow {
+		if err != nil || from != "" || FeedFolder(root, f, show) != nfcShow {
 			t.Fatalf("%+q read as a rename: %q %v", show, from, err)
 		}
 	}
@@ -550,13 +551,32 @@ func TestANormalFormOnlyDifferenceIsNoRename(t *testing.T) {
 }
 
 // SameName tells one name in two normal forms from two names; FeedFolder
-// answers the feed's spelling only for the first.
+// answers the feed's spelling only for the first, and only when it opens the
+// folder itself: on a filesystem that keeps names as given (Linux), a folder
+// renamed by hand from NFC to NFD is answered as it is spelt on disk, never
+// by a name that is not there.
 func TestSameNameAndFeedFolder(t *testing.T) {
 	if !SameName(nfcShow, nfdShow) || !SameName(nfcShow, nfcShow) || SameName(nfcShow, "caf\u00e9 show") || SameName("Show", "show") {
 		t.Fatal("SameName")
 	}
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, nfdShow), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
 	f := &Feed{Episodes: []Episode{{Path: nfcShow + "/a.mp3"}}}
-	if FeedFolder(f, nfdShow) != nfcShow || FeedFolder(f, "caf\u00e9 show") != "caf\u00e9 show" || FeedFolder(&Feed{}, nfdShow) != nfdShow {
+	want := nfdShow
+	if _, err := root.Lstat(nfcShow); err == nil {
+		want = nfcShow // a normalising filesystem: the feed's spelling opens it
+	}
+	if got := FeedFolder(root, f, nfdShow); got != want {
+		t.Fatalf("FeedFolder: %+q, want %+q", got, want)
+	}
+	if FeedFolder(root, f, "caf\u00e9 show") != "caf\u00e9 show" || FeedFolder(root, &Feed{}, nfdShow) != nfdShow {
 		t.Fatal("FeedFolder")
 	}
 }
