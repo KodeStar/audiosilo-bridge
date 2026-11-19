@@ -1908,6 +1908,61 @@ func TestAKeptPartialOutlivesAPrivateFeedThatDidNotAnswer(t *testing.T) {
 	}
 }
 
+// A fetch stopped mid-download with a proven prefix keeps it, record and all,
+// only when it runs again under its claim (the Bridge stopping:
+// jobs.Resumes). An admin's cancel or a lost claim ends it for good: its exit
+// clears the partial and the record.
+func TestFetchEndedForGoodClearsItsProvenPrefix(t *testing.T) {
+	for _, end := range []string{"cancel", "lost", "stop"} {
+		t.Run(end, func(t *testing.T) {
+			h, job := audioHarness(t)
+			s := h.handler.s
+			started := make(chan struct{})
+			setAudio(h, func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("ETag", `"one"`)
+				w.Header().Set("Content-Length", "10000")
+				w.WriteHeader(200)
+				w.Write(bytes.Repeat([]byte("a"), 1000))
+				w.(http.Flusher).Flush()
+				close(started)
+				<-r.Context().Done()
+			})
+			var ctx context.Context
+			var cancel func()
+			switch end {
+			case "cancel":
+				ctx, cancel = jobs.CancelContext(context.Background())
+			case "lost":
+				ctx, cancel = jobs.LoseContext(context.Background())
+			default:
+				ctx, cancel = context.WithCancel(context.Background())
+			}
+			defer cancel()
+			done := make(chan error, 1)
+			go func() { _, err := h.handler.FetchJob().Run(ctx, job, jobs.LocalReporter()); done <- err }()
+			<-started
+			show := filepath.Join(h.mount, "Fixture Show")
+			proven := partialAt(show, 1000)
+			cancel()
+			if err := <-done; err == nil || !proven {
+				t.Fatal("the download did not stop on a proven prefix:", err, proven)
+			}
+			left := partials(show)
+			saved, ok := s.readCheckpoint(job, fixtureShowID)
+			if end == "stop" {
+				if len(left) != 1 || !ok || saved.Temp != filepath.Base(left[0]) || saved.Offset != 1000 {
+					t.Fatalf("a stopped Bridge's proven prefix was not kept: %v %+v", left, saved)
+				}
+				return
+			}
+			if len(left) != 0 {
+				t.Fatal("a download ended for good kept its partial:", left)
+			}
+			noRecords(t, s)
+		})
+	}
+}
+
 // Another episode's partial left at the path (the feed replaced the episode
 // there) that the start cannot remove (a show folder the Bridge may not
 // write) fails the attempt write_failed with no GET, its record kept for a
