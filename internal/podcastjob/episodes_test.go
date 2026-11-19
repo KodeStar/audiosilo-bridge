@@ -1486,7 +1486,7 @@ func TestCheckpointResumes(t *testing.T) {
 	if c.resumes(podcast.Enclosure{URL: "https://a.example/1.mp3?sig=2&exp=10", Length: 100}) {
 		t.Fatal("a record with no base took another query")
 	}
-	if strings.Contains(sourceBase("https://a.example/secret/1.mp3?token=x"), "secret") || sourceBase("https://a.example/1.mp3?a=1") != sourceBase("https://a.example/1.mp3#t=5") {
+	if sourceBase("https://a.example/secret/1.mp3?token=x#t=5") != podcast.FeedURLHash("https://a.example/secret/1.mp3") || sourceBase("https://a.example/1.mp3?a=1") != sourceBase("https://a.example/1.mp3#t=5") {
 		t.Fatal("the base is not a hash of the URL without its query and fragment")
 	}
 	// A path naming no audio file keeps the query that tells its episodes
@@ -1520,7 +1520,7 @@ func TestCheckpointResumes(t *testing.T) {
 // resumes on its ETag alone, as it did.
 func TestAKeptPartialIsDownloadedAgainWhenItsEnclosureChanged(t *testing.T) {
 	requireProbe(t)
-	for _, scenario := range []string{"same", "url", "length", "query", "query and length", "query on no file", "no base", "legacy", "stuck"} {
+	for _, scenario := range []string{"same", "path", "query with no length", "length", "query", "query and length", "query on no file", "no base", "legacy", "stuck"} {
 		t.Run(scenario, func(t *testing.T) {
 			if scenario == "stuck" {
 				requireNonRoot(t)
@@ -1539,7 +1539,7 @@ func TestAKeptPartialIsDownloadedAgainWhenItsEnclosureChanged(t *testing.T) {
 			if scenario != "query on no file" {
 				enc.URL = h.http.URL + "/audio.mp3" // a path naming an audio file: its query may change
 			}
-			if scenario == "url" {
+			if scenario == "query with no length" {
 				enc.Length = 0 // no length to tell a query change by
 			}
 			c := checkpoint{ServerHash: s.pairHash(), LibraryID: 3, ShowID: fixtureShowID, EpisodeID: f.Episodes[0].ID, Path: *job.Path, Temp: ".audiosilo-tmp-kept", Offset: 1000, Total: int64(len(audio))}
@@ -1559,7 +1559,9 @@ func TestAKeptPartialIsDownloadedAgainWhenItsEnclosureChanged(t *testing.T) {
 			}
 			f.Episodes[0].Enclosure = enc
 			switch scenario {
-			case "url", "query", "query on no file", "no base", "legacy":
+			case "path":
+				f.Episodes[0].Enclosure.URL = h.http.URL + "/audio" // another file at the same host, the same length
+			case "query with no length", "query", "query on no file", "no base", "legacy":
 				f.Episodes[0].Enclosure.URL += "?sig=2"
 			case "length", "stuck":
 				f.Episodes[0].Enclosure.Length = int64(len(audio)) + 1
