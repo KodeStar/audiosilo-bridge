@@ -2511,11 +2511,16 @@ internal/
             name (sizeLimit allows the name, as JSON spells it, once per
             episode path, never past the read cap), so a folder renamed by hand
             to a longer name never makes its show unadoptable or unwritable.
-            An old name that is the same folder (sameFolder: a case-only rename
-            on a case-insensitive filesystem, APFS or SMB, or another normal
-            form on a normalising one) is a rename, taken in only under the
-            spelling on disk (RealName, which the jobs resolve first: the old
-            spelling still opens, and reads as, the folder). RecoverShow
+            An old name that is the same folder (sameFolder) by a case-only
+            rename on a case-insensitive filesystem (APFS or SMB) is a rename,
+            taken in only under the spelling on disk (RealName, which the jobs
+            resolve first: the old spelling still opens, and reads as, the
+            folder). One that differs only in Unicode normal form (NFC and NFD
+            on a normalising filesystem, SameName) is the same name: no rename,
+            feed.json never rewritten (the server compares its paths byte for
+            byte); RealName keeps the spelling it is asked for, and a caller
+            that found the folder by a listing works under its feed's spelling
+            (FeedFolder). RecoverShow
             resolves a journal naming a folder that is gone (or this one spelt
             otherwise) to the show's folder when it is the show's by its show
             id and its episode's id and file name (rehome: a take-in that moved
@@ -2584,7 +2589,12 @@ internal/
             publication) before it locks it, so a case-only rename by hand
             never leaves two jobs locking one folder under two names, and a
             cache row naming the old spelling never makes the folder pass for
-            a copy of itself. A fetch whose folder lockShow takes in where it is (renamed
+            a copy of itself. A spelling that differs only in Unicode normal
+            form is the same name (podcast.SameName): nothing is taken in or
+            rewritten, and a folder a listing spells so is worked under its
+            feed's spelling (podcast.FeedFolder: find, the cache rebuild and
+            holds, so relocate, and lockShow, which relocates a job naming the
+            spelling on disk to it). A fetch whose folder lockShow takes in where it is (renamed
             back by hand after a take-in) reads its episode again there rather
             than failing as not found. A fetch whose folder is renamed while it
             downloads finds the show again (episodeAt) whenever its partial is

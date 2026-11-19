@@ -1901,6 +1901,76 @@ func TestAFetchResolvesACaseOnlyRename(t *testing.T) {
 	}
 }
 
+// A show folder whose name on disk differs from its feed's only in Unicode
+// normal form (a Mac tool wrote it NFD; the Bridge named it NFC) on a
+// normalising filesystem: no rename. A fetch naming the feed's spelling
+// saves its episode there, and a poll naming the spelling on disk (as a
+// listing has it) works under the feed's spelling too; feed.json keeps its
+// paths, which the server compares byte for byte.
+func TestANormalFormOnlyDifferenceIsNoRename(t *testing.T) {
+	requireProbe(t)
+	const nfc, nfd = "Caf\u00e9 Show", "Cafe\u0301 Show"
+	h, fetch := audioHarness(t)
+	s := h.handler.s
+	root, err := os.OpenRoot(h.mount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	renameShow(t, h, "Fixture Show", nfc)
+	lib := link.Library{ID: 3, Kind: "podcasts", Root: h.mount}
+	if _, err := s.readShow(context.Background(), root, lib, h.mount, nfc); err != nil {
+		t.Fatal(err)
+	}
+	renameShow(t, h, nfc, nfd)
+	if _, err := os.Lstat(filepath.Join(h.mount, nfc)); err != nil {
+		t.Skip("the filesystem does not normalise names")
+	}
+	if held := holds(root, nfd, fixtureShowID); held != nfc {
+		t.Fatalf("the folder as listed holds the show as %+q, want the feed's spelling", held)
+	}
+	audio := data(t, "chap-v24-reverse.mp3")
+	setAudio(h, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("ETag", `"one"`)
+		w.Write(audio)
+	})
+	p := nfc + "/" + path.Base(*fetch.Path)
+	fetch.Path = &p
+	res, err := h.handler.FetchJob().Run(context.Background(), fetch, jobs.LocalReporter())
+	if err != nil {
+		t.Fatal(res, err)
+	}
+	if got := res.(fetchResult); got.Path != p {
+		t.Fatalf("saved at %+q, want %+q", got.Path, p)
+	}
+	for _, e := range h.read(nfc).Episodes {
+		if !strings.HasPrefix(e.Path, nfc+"/") {
+			t.Fatalf("feed.json was rewritten: %+q", e.Path)
+		}
+	}
+	if asked := h.scan.last(); !strings.HasPrefix(asked, nfc) {
+		t.Fatalf("the server was asked to index %+q", asked)
+	}
+	show := nfd
+	params, _ := json.Marshal(map[string]string{"show_id": fixtureShowID, "etag": `"abc"`})
+	poll := jobs.Job{ID: 90, Kind: PollKind, LibraryID: fetch.LibraryID, Path: &show, Params: params}
+	s.o.Fetcher = feedFetcher(func(context.Context, netguard.Request) (*netguard.Response, error) {
+		return &netguard.Response{Status: 304}, nil
+	})
+	res, err = h.handler.PollJob().Run(context.Background(), poll, jobs.LocalReporter())
+	if err != nil {
+		t.Fatal(res, err)
+	}
+	if r := fields(t, res); r["show_path"] != nfc {
+		t.Fatalf("the poll worked under %+q", r["show_path"])
+	}
+	for _, e := range h.read(nfc).Episodes {
+		if !strings.HasPrefix(e.Path, nfc+"/") {
+			t.Fatalf("feed.json was rewritten by the poll: %+q", e.Path)
+		}
+	}
+}
+
 // Two show folders whose names were swapped by hand, holding episodes of the
 // same file name, each with an interrupted download: a record is named by its
 // show as well as its path (recordName), so taking each folder in moves its

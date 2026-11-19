@@ -493,6 +493,74 @@ func TestACaseOnlyRenameIsTakenIn(t *testing.T) {
 	}
 }
 
+// The show folder names a normal-form test spells in NFC (as the Bridge
+// names folders, naming.go) and in NFD (as a Mac tool may write one).
+const (
+	nfcShow = "Caf\u00e9 Show"
+	nfdShow = "Cafe\u0301 Show"
+)
+
+// A show folder whose name on disk differs from its feed's only in Unicode
+// normal form (NFC and NFD, on a normalising filesystem such as APFS or SMB)
+// was not renamed: RealName keeps the spelling it is asked for, ReadMoved
+// answers no old name (the caller works under the feed's spelling,
+// FeedFolder), and feed.json is never rewritten, as the server compares its
+// paths byte for byte. A case-only rename still is one (above).
+func TestANormalFormOnlyDifferenceIsNoRename(t *testing.T) {
+	now := time.Date(2026, 10, 21, 8, 0, 0, 0, time.UTC)
+	root, _ := journalFixture(t)
+	if err := os.Rename(root.Name()+"/Fixture Show", root.Name()+"/"+nfcShow); err != nil {
+		t.Fatal(err)
+	}
+	f, from, err := ReadMoved(root, nfcShow)
+	if err != nil || from != "Fixture Show" {
+		t.Fatal(from, err)
+	}
+	if err := Adopt(root, nfcShow, from, f, now); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(root.Name() + "/" + nfcShow + "/feed.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(root.Name()+"/"+nfcShow, root.Name()+"/"+nfdShow); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := root.Lstat(nfcShow); err != nil {
+		t.Skip("the filesystem does not normalise names")
+	}
+	if real, err := RealName(root, nfcShow); err != nil || real != nfcShow {
+		t.Fatalf("RealName of the feed's spelling: %q %v", real, err)
+	}
+	if real, err := RealName(root, nfdShow); err != nil || real != nfdShow {
+		t.Fatalf("RealName of the spelling on disk: %q %v", real, err)
+	}
+	for _, show := range []string{nfcShow, nfdShow} {
+		f, from, err := ReadMoved(root, show)
+		if err != nil || from != "" || FeedFolder(f, show) != nfcShow {
+			t.Fatalf("%+q read as a rename: %q %v", show, from, err)
+		}
+	}
+	if f, err := Read(root, nfcShow); err != nil || !strings.HasPrefix(f.Episodes[0].Path, nfcShow+"/") {
+		t.Fatal("the feed's spelling no longer reads its folder", err)
+	}
+	if after, err := os.ReadFile(root.Name() + "/" + nfcShow + "/feed.json"); err != nil || string(after) != string(before) {
+		t.Fatal("feed.json was rewritten", err)
+	}
+}
+
+// SameName tells one name in two normal forms from two names; FeedFolder
+// answers the feed's spelling only for the first.
+func TestSameNameAndFeedFolder(t *testing.T) {
+	if !SameName(nfcShow, nfdShow) || !SameName(nfcShow, nfcShow) || SameName(nfcShow, "caf\u00e9 show") || SameName("Show", "show") {
+		t.Fatal("SameName")
+	}
+	f := &Feed{Episodes: []Episode{{Path: nfcShow + "/a.mp3"}}}
+	if FeedFolder(f, nfdShow) != nfcShow || FeedFolder(f, "caf\u00e9 show") != "caf\u00e9 show" || FeedFolder(&Feed{}, nfdShow) != nfdShow {
+		t.Fatal("FeedFolder")
+	}
+}
+
 // A take-in that moved the journals to one spelling and stopped before
 // feed.json, then a second case-only rename by hand: the journal names the
 // folder under a spelling that is neither feed.json's nor the one on disk,

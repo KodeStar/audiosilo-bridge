@@ -663,7 +663,7 @@ func (s *service) cache(ctx context.Context, root *os.Root, lib link.Library, en
 		if err != nil {
 			continue
 		}
-		row := s.showRow(lib, e.Name(), f)
+		row := s.showRow(lib, podcast.FeedFolder(f, e.Name()), f)
 		if err := s.o.DB.UpsertPodcastShow(ctx, row); err != nil {
 			return nil, err
 		}
@@ -716,7 +716,7 @@ func (s *service) find(root *os.Root, entries []os.DirEntry, rows []store.Podcas
 	}
 	if p.ShowPath != "" && !gone {
 		if f := match(p.ShowPath); f != nil {
-			return p.ShowPath, f, nil, nil
+			return podcast.FeedFolder(f, p.ShowPath), f, nil, nil
 		}
 		return "", nil, nil, missing
 	}
@@ -726,14 +726,16 @@ func (s *service) find(root *os.Root, entries []os.DirEntry, rows []store.Podcas
 			at, _ := podcast.RealName(root, r.ShowPath) // spelt as on disk, as entries are
 			tried[at] = true
 			if f := match(at); f != nil {
-				return at, f, nil, nil
+				return podcast.FeedFolder(f, at), f, nil, nil
 			}
 		}
 	}
 	for _, e := range entries {
 		if e.IsDir() && !tried[e.Name()] {
 			if f := match(e.Name()); f != nil {
-				return e.Name(), f, nil, nil
+				// Listed as on disk: a normalising filesystem may list the
+				// folder in another normal form than its feed spells it.
+				return podcast.FeedFolder(f, e.Name()), f, nil, nil
 			}
 		}
 	}
@@ -798,7 +800,7 @@ func (s *service) lockShow(ctx context.Context, root *os.Root, lib link.Library,
 	case err == nil:
 		unlock()
 		err = changed
-	case !valid || !unread || searched || ctx.Err() != nil || holds(root, show, id) || s.wasUnfound(lib.ID, show, id):
+	case !valid || !unread || searched || ctx.Err() != nil || holds(root, show, id) == show || s.wasUnfound(lib.ID, show, id):
 		return "", nil, nil, err
 	}
 	moved := s.relocate(ctx, root, lib, id)
@@ -850,12 +852,18 @@ func (s *service) unfoundKey(lib int64, show, id string) string {
 	return s.o.ServerID() + "|" + strconv.FormatInt(lib, 10) + "|" + show + "|" + id
 }
 
-// holds reports whether show's feed.json, read as a folder that may have been
-// renamed by hand (podcast.ReadMoved), names show id.
-func holds(root *os.Root, show, id string) bool {
+// holds is the folder show, as its feed.json spells it (podcast.FeedFolder),
+// when that feed.json, read as a folder that may have been renamed by hand
+// (podcast.ReadMoved), names show id; "" when it does not. A folder its feed
+// spells in another normal form than show is read under that spelling
+// (lockShow relocates to it).
+func holds(root *os.Root, show, id string) string {
 	f, from, err := podcast.ReadMoved(root, show)
 	warnHeld(show, from, err)
-	return err == nil && f.ShowID == id
+	if err != nil || f.ShowID != id {
+		return ""
+	}
+	return podcast.FeedFolder(f, show)
 }
 
 // warnHeld logs a show folder podcast.ReadMoved refused because held, the
@@ -883,8 +891,8 @@ func (s *service) relocate(ctx context.Context, root *os.Root, lib link.Library,
 		// A row written before a case-only rename by hand names the folder
 		// under its old spelling, which still opens it.
 		at, _ := podcast.RealName(root, row.ShowPath)
-		if holds(root, at, id) {
-			return at
+		if held := holds(root, at, id); held != "" {
+			return held
 		}
 		tried = at
 	}
@@ -896,8 +904,11 @@ func (s *service) relocate(ctx context.Context, root *os.Root, lib link.Library,
 		return ""
 	}
 	for _, e := range entries {
-		if e.IsDir() && podcast.ValidShow(e.Name()) && e.Name() != tried && holds(root, e.Name(), id) {
-			return e.Name()
+		if !e.IsDir() || !podcast.ValidShow(e.Name()) || e.Name() == tried {
+			continue
+		}
+		if held := holds(root, e.Name(), id); held != "" {
+			return held // as its feed spells it, which a normalising filesystem may list otherwise
 		}
 	}
 	return ""

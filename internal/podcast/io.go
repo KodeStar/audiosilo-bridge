@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/kodestar/audiosilo-bridge/internal/fsutil"
+	"golang.org/x/text/unicode/norm"
 )
 
 var ErrInvalidFile = errors.New("invalid feed.json")
@@ -101,7 +102,11 @@ func episodesIn(f *Feed, show string) bool {
 
 // ReadMoved is Read for a show folder that may have been renamed by hand: its
 // feed.json still names every episode under the folder's old name. It answers
-// that old name, or "" when the episodes live in show (as Read). A feed whose
+// that old name, or "" when the episodes live in show (as Read) or in show
+// spelt in another Unicode normal form that opens the same folder (a
+// normalising filesystem's, SameName): not a rename, and nothing is
+// rewritten, as the server compares the feed's paths byte for byte. The
+// caller then works under the feed's spelling (FeedFolder). A feed whose
 // old-name folder still holds the same show is a copy, not a rename:
 // ErrInvalidFile, as is a feed whose episodes name no single folder. An old
 // name that now holds another show (two folders' names swapped by hand, or
@@ -125,10 +130,14 @@ func ReadMoved(root *os.Root, show string) (*Feed, string, error) {
 		return nil, "", ErrInvalidFile
 	}
 	if sameFolder(root, from, show) {
-		// The old name spells this very folder otherwise: a rename that changed
-		// only its case on a case-insensitive filesystem (APFS, SMB), or its
-		// normal form on a normalising one. A rename, when show is the folder's
-		// name on disk; the old spelling is never adopted back.
+		// The old name spells this very folder otherwise. Only in its normal
+		// form (NFC and NFD, on a normalising filesystem): the same name, kept
+		// as the feed spells it. In case on a case-insensitive filesystem
+		// (APFS, SMB): a rename, when show is the folder's name on disk; the
+		// old spelling is never adopted back.
+		if SameName(from, show) {
+			return f, "", nil
+		}
 		if real, err := RealName(root, show); err != nil || real != show {
 			return nil, "", ErrInvalidFile
 		}
@@ -164,8 +173,10 @@ func sameFolder(root *os.Root, a, b string) bool {
 // APFS, SMB shares) opens "Show" for a folder renamed by hand to "show", so a
 // job naming the old spelling would read, lock and write the folder under a
 // name that is no longer its own. name itself when that is how it is spelt,
-// or when no entry of its parent is the same file; the Lstat's error when
-// name is not there.
+// when it is spelt so but for its Unicode normal form (SameName: the same
+// name, which a normalising filesystem stores in either form; the feed's
+// paths keep name's), or when no entry of its parent is the same file; the
+// Lstat's error when name is not there.
 func RealName(root *os.Root, name string) (string, error) {
 	st, err := root.Lstat(name)
 	if err != nil {
@@ -190,10 +201,34 @@ func RealName(root *os.Root, name string) (string, error) {
 	}
 	for _, n := range names {
 		if other, err := root.Lstat(dir + n); err == nil && os.SameFile(st, other) {
+			if SameName(n, base) {
+				return name, nil
+			}
 			return dir + n, nil
 		}
 	}
 	return name, nil
+}
+
+// SameName reports whether a and b are one name: spelt alike, or in two
+// Unicode normal forms (NFC and NFD). A normalising filesystem (APFS, SMB)
+// opens either and may list either, so a folder whose spelling differs from
+// its feed's only so was never renamed.
+func SameName(a, b string) bool {
+	return a == b || norm.NFC.String(a) == norm.NFC.String(b)
+}
+
+// FeedFolder is show, a folder f was read from (ReadMoved), as f's episodes
+// spell it: their folder when it is show in another normal form (SameName),
+// else show. A job works under that spelling, so no episode path it writes
+// spells the folder otherwise than the feed already does.
+func FeedFolder(f *Feed, show string) string {
+	if len(f.Episodes) > 0 {
+		if from := path.Dir(f.Episodes[0].Path); from != show && SameName(from, show) {
+			return from
+		}
+	}
+	return show
 }
 
 // ErrHeld is ReadMoved's refusal of a folder whose old name is still there
