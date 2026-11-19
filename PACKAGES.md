@@ -3720,7 +3720,13 @@ internal/
             work id one line of at most 200 characters). prepareRead resolves the
             book without a writable mapping (it writes nothing into the library),
             notesBook finds the engine book that keeps the results, holdBook holds
-            it, and Options.Sharer (pipeline.Executor.Share) files them. Failures
+            it, and Options.Sharer (pipeline.Executor.Share) files them once the
+            server confirms the share still stands (shareConfirmed: Reporter.Refresh
+            just before filing, as the server stops a share whose Contributions
+            module was turned off only in an answer to the job's next report, a
+            keepalive away): an answer that stopped the job files nothing, a server
+            that couldn't be asked parks the job share_unconfirmed (ShareUnconfirmedMsg)
+            and asks again every Recheck or on Retry. Failures
             in words: not signed in, a sign-in whose refresh failed
             (Options.ContribCredential answering contrib.ErrSignInUnrefreshed,
             or a contrib_unavailable park whose Cause is it), refused, nothing kept

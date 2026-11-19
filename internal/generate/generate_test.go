@@ -45,13 +45,18 @@ type fakeServer struct {
 	paths map[int64]string
 	// shareOff is a job's share_off in the answers to its reports (server#218).
 	shareOff map[int64]bool
-	// down answers a job's reports 503, as a server that can't be reached.
-	down map[int64]bool
+	// down answers a job's reports 503, as a server that can't be reached;
+	// downHits counts the reports so answered.
+	down     map[int64]bool
+	downHits map[int64]int
+	// atStep runs (under the lock) on each report of a job, with its step,
+	// before it is answered: the server changing its answer at a given step.
+	atStep map[int64]func(f *fakeServer, step string)
 }
 
 func newFakeServer() *fakeServer {
 	return &fakeServer{updates: map[int64][]link.Update{}, cancel: map[int64]bool{}, notHeld: map[int64]bool{}, books: map[string]link.Book{},
-		shareOff: map[int64]bool{}, down: map[int64]bool{}}
+		shareOff: map[int64]bool{}, down: map[int64]bool{}, downHits: map[int64]int{}, atStep: map[int64]func(*fakeServer, string){}}
 }
 
 func (f *fakeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -73,7 +78,15 @@ func (f *fakeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		id, _ := strconv.ParseInt(strings.TrimPrefix(r.URL.Path, "/api/v1/bridge/jobs/"), 10, 64)
 		var u link.Update
 		_ = json.NewDecoder(r.Body).Decode(&u)
+		if fn := f.atStep[id]; fn != nil {
+			var p struct {
+				Step string `json:"step"`
+			}
+			_ = json.Unmarshal(u.Progress, &p)
+			fn(f, p.Step)
+		}
 		if f.down[id] {
+			f.downHits[id]++
 			w.WriteHeader(http.StatusServiceUnavailable)
 			return
 		}

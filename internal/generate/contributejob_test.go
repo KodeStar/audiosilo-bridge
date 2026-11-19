@@ -41,10 +41,15 @@ func (f *fakeSharer) Share(_ context.Context, bookID int64, workID string, dims 
 
 // shareRunner runs the generate and contribute jobs with s as the share step.
 func (hr *harness) shareRunner(s Sharer, cred func(context.Context) error) (stop func()) {
+	return hr.shareRunnerRecheck(s, cred, time.Hour)
+}
+
+// shareRunnerRecheck is shareRunner with a park's recheck every recheck.
+func (hr *harness) shareRunnerRecheck(s Sharer, cred func(context.Context) error, recheck time.Duration) (stop func()) {
 	h := New(Options{DB: hr.db, Engine: func() Engine { return hr.sched }, Sharer: func() Sharer { return s },
 		Libraries: hr.libs, Mount: func(int64, string) (string, bool) { return hr.libs.root, false },
 		Server: func() Server { return hr.cl }, WorkRoot: hr.work, Version: "0.2.0", RetentionDays: 30, ContribCredential: cred,
-		Poll: 10 * time.Millisecond, IdlePoll: 10 * time.Millisecond, Recheck: time.Hour, Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
+		Poll: 10 * time.Millisecond, IdlePoll: 10 * time.Millisecond, Recheck: recheck, Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
 	r := jobs.New(hr.db, func() jobs.Server { return hr.cl }, nil, jobs.Options{Keepalive: 30 * time.Millisecond,
 		ProgressEvery: 5 * time.Millisecond, Wait: 10 * time.Millisecond, RetryEvery: 20 * time.Millisecond,
 		ServerID: func() string { return "srv" }, Log: slog.New(slog.NewTextHandler(io.Discard, nil))}, h, h.ContributeJob())
@@ -80,6 +85,76 @@ func TestContributeJob(t *testing.T) {
 	}
 	if s.calls[0] != "the-book|characters,recaps" {
 		t.Fatalf("share calls = %v", s.calls)
+	}
+}
+
+// A share asks the server just before it files: a stop the server holds for
+// the job (its Contributions module turned off since the last report, heard
+// only in an answer) files nothing, and the job ends cancelled (denied).
+// TestContributeJob is the allowed half: a share still on files.
+func TestContributeJobAsksBeforeFiling(t *testing.T) {
+	t.Parallel()
+	hr := newHarness(t)
+	hr.generated(91)
+	s := &fakeSharer{}
+	hr.srv.set(func() {
+		hr.srv.atStep[92] = func(f *fakeServer, step string) {
+			if step == stepSharing {
+				f.cancel[92] = true
+			}
+		}
+	})
+	hr.srv.addContribute(92, "Author/Book", `{}`)
+	stop := hr.shareRunner(s, func(context.Context) error { return nil })
+	defer stop()
+	hr.waitFor("cancelled", func() bool { st, _ := hr.srv.final(92); return st == link.StateCancelled })
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.calls) != 0 {
+		t.Fatalf("share calls = %v, want none after the server stopped the job", s.calls)
+	}
+}
+
+// A share whose server can't be asked just before filing files nothing: the
+// job parks share_unconfirmed and asks again, filing once the server answers
+// (denied while it can't, allowed after).
+func TestContributeJobWaitsWhenTheServerCantBeAsked(t *testing.T) {
+	t.Parallel()
+	hr := newHarness(t)
+	hr.generated(93)
+	s := &fakeSharer{}
+	hr.srv.set(func() {
+		hr.srv.atStep[94] = func(f *fakeServer, step string) {
+			if step == stepSharing && f.downHits[94] == 0 {
+				f.down[94] = true
+			}
+		}
+	})
+	hr.srv.addContribute(94, "Author/Book", `{}`)
+	stop := hr.shareRunnerRecheck(s, func(context.Context) error { return nil }, 20*time.Millisecond)
+	defer stop()
+	hr.waitFor("asks that fail", func() bool {
+		hr.srv.mu.Lock()
+		defer hr.srv.mu.Unlock()
+		return hr.srv.downHits[94] >= 3
+	})
+	s.mu.Lock()
+	calls := len(s.calls)
+	s.mu.Unlock()
+	if calls != 0 {
+		t.Fatalf("share calls = %d while the server can't be asked, want none", calls)
+	}
+	hr.srv.set(func() { hr.srv.down[94] = false })
+	hr.waitFor("done", func() bool { st, _ := hr.srv.final(94); return st == link.StateDone })
+	if !hr.srv.saw(94, func(u link.Update, _ map[string]any) bool {
+		return u.State != nil && *u.State == link.StateNeedsAttention
+	}) {
+		t.Fatal("the job never reported its share_unconfirmed park")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.calls) != 1 {
+		t.Fatalf("share calls = %v, want one once the server answered", s.calls)
 	}
 }
 

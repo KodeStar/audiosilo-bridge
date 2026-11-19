@@ -1,18 +1,21 @@
 package generate
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/kodestar/audiosilo-bridge/internal/contrib"
 	"github.com/kodestar/audiosilo-bridge/internal/jobs"
 	"github.com/kodestar/audiosilo-bridge/internal/pipeline"
 	"github.com/kodestar/audiosilo-bridge/internal/scheduler"
 	"github.com/kodestar/audiosilo-bridge/internal/state"
+	"github.com/kodestar/audiosilo-bridge/internal/store"
 )
 
 // ContributeKind is "Share with the community" (BRIDGE-PLAN.md Phase 2b, plan
@@ -135,13 +138,8 @@ func (c *ContributeJob) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporte
 	case err != nil:
 		return nil, err
 	}
-	rep.Progress(jobs.Progress{Step: "sharing", Message: "Sharing with the community", Total: 1})
-	release, err := h.holdBook(ctx, b.ID)
-	if err != nil {
-		return nil, err
-	}
-	res, err := sharer.Share(ctx, b.ID, p.WorkID, p.Dimensions)
-	release()
+	rep.Progress(jobs.Progress{Step: stepSharing, Message: "Sharing with the community", Total: 1})
+	res, err := h.shareConfirmed(ctx, r, sharer, b.ID, p)
 	if err != nil {
 		// The console gets shareError's words; the log keeps the cause.
 		h.o.Log.Warn("generate: the share failed", "job", job.ID, "path", r.rel, "err", err)
@@ -152,6 +150,51 @@ func (c *ContributeJob) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporte
 	rep.Progress(jobs.Progress{Step: string(state.Done), Message: "Shared", Done: 1, Total: 1})
 	return ContributeResult{LibraryID: r.lib.ID, Path: r.rel, WorkID: res.WorkID, Contributed: res.Contributed,
 		Covered: res.Covered}, nil
+}
+
+// stepSharing is a share's step while it files.
+const stepSharing = "sharing"
+
+// shareConfirmed holds the engine book and files its sidecars once the server
+// confirms the share still stands: it is asked (Reporter.Refresh) just before
+// filing, as the server stops a share whose Contributions module was turned
+// off only in an answer to the job's next report, which can be a keepalive
+// away. An answer that stopped the job files nothing (the job ends); a server
+// that couldn't be asked parks the job share_unconfirmed and asks again every
+// Recheck, or at once on Retry, filing nothing meanwhile.
+func (h *Handler) shareConfirmed(ctx context.Context, r *run, sharer Sharer, bookID int64,
+	p ContributeParams) (pipeline.ShareResult, error) {
+	for parked := false; ; parked = true {
+		release, err := h.holdBook(ctx, bookID)
+		if err != nil {
+			return pipeline.ShareResult{}, err
+		}
+		err = r.rep.Refresh(ctx)
+		if err == nil {
+			if parked {
+				r.rep.Unpark()
+				r.rep.Progress(jobs.Progress{Step: stepSharing, Message: "Sharing with the community", Total: 1})
+			}
+			res, err := sharer.Share(ctx, bookID, p.WorkID, p.Dimensions)
+			release()
+			return res, err
+		}
+		release()
+		if ctx.Err() != nil || errors.Is(err, jobs.ErrStopped) {
+			// The answer stopped the job (a cancel, the module off): its context
+			// has ended, and the runner reports how.
+			return pipeline.ShareResult{}, cmp.Or(context.Cause(ctx), err)
+		}
+		h.o.Log.Warn("generate: the server couldn't be asked whether the share still stands; it waits",
+			"job", r.job.ID, "err", err)
+		at := time.Now().Add(h.o.Recheck)
+		r.rep.Progress(jobs.Progress{Step: stepSharing, Message: "Needs attention: Sharing with the community", Total: 1,
+			Extra: map[string]any{"park": parkExtra(string(state.ParkShareUnconfirmed), store.Timestamp(at))}})
+		r.rep.Park(string(state.ParkShareUnconfirmed), pipeline.ShareUnconfirmedMsg)
+		if err := h.recheckWait(ctx, r, at); err != nil {
+			return pipeline.ShareResult{}, err
+		}
+	}
 }
 
 // shareError words a share's failure for the console.
