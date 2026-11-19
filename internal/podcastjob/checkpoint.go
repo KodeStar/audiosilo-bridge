@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/kodestar/audiosilo-bridge/internal/fsutil"
@@ -365,10 +366,11 @@ func partialSize(root *os.Root, name string) (int64, error) {
 }
 
 // partialGone reports whether err, a partial's open or check, proves it gone
-// or not the Bridge's file any more: not there (ENOENT), or not a regular
-// file (a link, a folder, a file swapped in since its check).
+// or not the Bridge's file any more: not there (ENOENT, or ENOTDIR: its show
+// folder is a file now), or not a regular file (a link, a folder, a file
+// swapped in since its check).
 func partialGone(err error) bool {
-	return errors.Is(err, os.ErrNotExist) || errors.Is(err, podcast.ErrInvalidFile)
+	return errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) || errors.Is(err, podcast.ErrInvalidFile)
 }
 
 // partialLost reports whether err, a partial's open or check, means its bytes

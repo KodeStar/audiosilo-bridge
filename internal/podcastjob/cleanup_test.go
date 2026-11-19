@@ -279,6 +279,9 @@ func TestOpenPartialRefusesSwappedPartial(t *testing.T) {
 			t.Fatal("a lasting fault kept the partial", lasting, err)
 		}
 	}
+	if err := partialError(&os.PathError{Op: "open", Path: "show/partial", Err: syscall.ENOTDIR}); !errors.Is(err, errPartialChanged) {
+		t.Fatal("a partial whose show folder is a file now kept", err)
+	}
 	if err := partialError(&os.PathError{Op: "read", Path: "partial", Err: syscall.EIO}); !errors.Is(err, errPartialUnreadable) || errors.Is(err, errPartialChanged) {
 		t.Fatal("a partial that could not be read taken for a changed one", err)
 	}
