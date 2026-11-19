@@ -1731,15 +1731,28 @@ func TestKeptPodcastLookNeedsItsMarkerStill(t *testing.T) {
 	lib := link.Library{ID: 7, Root: "/p", Kind: "podcasts"}
 	release := make(chan struct{})
 	var looked atomic.Int32
+	// Only the first look is late, and that one by the release, not by the
+	// machine's speed: every look after the kept one is taken gets a bound no
+	// look here comes near. Until then the short bound stands, so a check
+	// while the late look is still out gets no answer rather than take it.
+	var taken atomic.Bool
 	l := bounded
 	l.podcast = func(op, m string, look func(string) (podcastFound, error)) (podcastFound, error) {
-		return podcastWithin(20*time.Millisecond, LookKeptFor)(op+" (kept test)", m, func(m string) (podcastFound, error) {
+		bound := 20 * time.Millisecond
+		if taken.Load() {
+			bound = time.Minute
+		}
+		f, err := podcastWithin(bound, LookKeptFor)(op+" (kept test)", m, func(m string) (podcastFound, error) {
 			f, err := look(m)
 			if looked.Add(1) == 1 {
 				<-release
 			}
 			return f, err
 		})
+		if f.kept {
+			taken.Store(true)
+		}
+		return f, err
 	}
 	var asked atomic.Int32
 	// The server reads its own copy of the library, wherever the Bridge looks.
