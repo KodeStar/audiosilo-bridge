@@ -1,9 +1,11 @@
 package verify
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -47,7 +49,7 @@ func setup(t *testing.T) (*Handler, string) {
 	src := books{"": folder, "Author/Book": folder, "Loose.m4b": single}
 	h := New(libs{1: {ID: 1, Name: "Books", Root: "/books"}},
 		func(int64, string) (string, bool) { return root, true },
-		func() mapping.BookSource { return src })
+		func() mapping.BookSource { return src }, nil)
 	return h, root
 }
 
@@ -178,6 +180,8 @@ func TestVerifyRetriesATransientBookRead(t *testing.T) {
 	h, _ := setup(t)
 	// A budget no stall on a loaded runner reaches: the waits are 1 and 2 ms.
 	h.retryFirst, h.retryFor = time.Millisecond, time.Minute
+	var logged bytes.Buffer
+	h.log = slog.New(slog.NewTextHandler(&logged, nil))
 	src := h.books()
 	job := jobs.Job{LibraryID: ptr(int64(1)), Path: ptr("Author/Book")}
 	use := func(f *flaky) { h.books = func() mapping.BookSource { return f } }
@@ -198,6 +202,11 @@ func TestVerifyRetriesATransientBookRead(t *testing.T) {
 		if n := down.asks; n != 3 {
 			t.Fatalf("%s: asks = %d, want 3", name, n)
 		}
+		// Each retry is in the log: the job's message doesn't change.
+		if n := strings.Count(logged.String(), "level=WARN"); n != 2 || !strings.Contains(logged.String(), "trying again") {
+			t.Fatalf("%s: %d retries logged, want 2: %s", name, n, logged.String())
+		}
+		logged.Reset()
 	}
 
 	h.retryFor = 50 * time.Millisecond

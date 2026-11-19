@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"time"
@@ -51,11 +52,16 @@ type Handler struct {
 	// retryFirst and retryFor are the book read's first wait and budget
 	// (bookRetryFirst, bookRetryFor; shorter in tests).
 	retryFirst, retryFor time.Duration
+	log                  *slog.Logger
 }
 
-// New returns the handler. books returns the server link (nil while unpaired).
-func New(libs Libraries, mount mapping.MountFunc, books func() mapping.BookSource) *Handler {
-	return &Handler{libs: libs, mount: mount, books: books, retryFirst: bookRetryFirst, retryFor: bookRetryFor}
+// New returns the handler. books returns the server link (nil while unpaired);
+// log takes the book read's retries (nil: the default logger).
+func New(libs Libraries, mount mapping.MountFunc, books func() mapping.BookSource, log *slog.Logger) *Handler {
+	if log == nil {
+		log = slog.Default()
+	}
+	return &Handler{libs: libs, mount: mount, books: books, retryFirst: bookRetryFirst, retryFor: bookRetryFor, log: log}
 }
 
 // Kind is bridge.verify.
@@ -110,7 +116,7 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 	if job.Path != nil {
 		path = *job.Path
 	}
-	book, err := h.fetchBook(ctx, rep, src, lib.ID, path)
+	book, err := h.fetchBook(ctx, job.ID, rep, src, lib.ID, path)
 	if err != nil {
 		return nil, fmt.Errorf("could not get the book's files from the server: %w", err)
 	}
@@ -152,8 +158,9 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 // (within retryFor) while the answer may change (mapping.BookReadSettled,
 // generate's fetchBook's rule). A definite answer fails at once, and so does
 // the last transient one once the budget is spent (the wait before the last
-// ask cut to what is left of it, so the server is asked at its end).
-func (h *Handler) fetchBook(ctx context.Context, rep *jobs.Reporter, src mapping.BookSource, libraryID int64, path string) (*link.Book, error) {
+// ask cut to what is left of it, so the server is asked at its end). Each
+// retry is logged: the job's message is the same every round.
+func (h *Handler) fetchBook(ctx context.Context, jobID int64, rep *jobs.Reporter, src mapping.BookSource, libraryID int64, path string) (*link.Book, error) {
 	deadline := time.Now().Add(h.retryFor)
 	wait := h.retryFirst
 	for {
@@ -163,6 +170,7 @@ func (h *Handler) fetchBook(ctx context.Context, rep *jobs.Reporter, src mapping
 		if err == nil || mapping.BookReadSettled(err) || left <= 0 {
 			return book, err
 		}
+		h.log.Warn("verify: asking the server for the book's files failed; trying again", "job", jobID, "err", err)
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()

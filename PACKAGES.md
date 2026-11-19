@@ -2392,7 +2392,7 @@ internal/
             book; no answer, a refused token, a 408, a 429 or a 5xx asked again
             with backoff for up to 2 min, the last ask at its end, any other 4xx
             failing at once: mapping.BookReadSettled, generate's fetchBook rule
-            too), CompareFiles through the mount, probes the BOOK's folder for
+            too; each retry a warning in the log), CompareFiles through the mount, probes the BOOK's folder for
             writing (spike 3: a root probe passed while a 0555 book folder refused),
             then holds, reporting each second. A mismatch is a failure WITH a result.
             Result {library_id, mount_path, path, files[{path,size,expected_size,ok}],
