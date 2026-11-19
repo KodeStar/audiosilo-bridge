@@ -2900,9 +2900,9 @@ internal/
             holds audio: a backup is a book of its own, and the server refuses a
             done import whose book isn't the title's). spelled and vacant are free
             functions over a transfer.LibraryFS (the import's methods open the
-            mount's os.Root and call them; vacant also returns the conflict:
-            link.ConflictFile|Book|Audio, which the exists failure carries as
-            conflict for the console, bridge#47; listedBook is its books-listing part;
+            mount's os.Root and call them; vacant's exists failure carries the
+            conflict, link.ConflictFile|Book|Audio, for the console (conflictOf
+            reads it), bridge#47; listedBook is its books-listing part;
             formerDirs adds the folder the destination's was under the name rule
             before bridge#47, found on disk as a name Sanitize now turns into
             the folder's, so a title backed up as "Who Moved My Cheese?" is
@@ -3006,11 +3006,12 @@ internal/
             answer keeps it and leaves the account 2 min (this loop only); another 4xx or a denied
             license (audible.IsDenial) drops it, a throttled device also leaving the account 15 min;
             never a refusal. Health (the job's sync_at/sync_error, the push's push_at/push_error, each
-            written by its own side only, bridge#50/#80; sync_retry_at, which no later call shortens)
-            feeds the setup item's detail only. A sync_off reply or a changed mapping
-            clears a stale sync_error without recording a successful sync, keeping
-            Audible's wait (same device); only a new sign-in (a new device) clears
-            both. bridge#51 (v2.7.0): the Audible app may upload the older place it still
+            written by its own side only, bridge#50/#80; the push's error also ends at a pass that
+            read the feed and wrote what was due with no failure, as nothing else clears it;
+            sync_retry_at, which no later call shortens) feeds the setup item's detail only. A sync_off reply or a changed mapping
+            clears the stale sync_error and push_error without recording a successful sync,
+            keeping Audible's wait (same device); only a new sign-in (a new device)
+            clears the errors and the wait. bridge#51 (v2.7.0): the Audible app may upload the older place it still
             held over one the push wrote; the sync then answers it behind and, when the
             Bridge wrote the title's last place (last_ms), the server row it last read is
             still that place (within 5 s) and Audible's is behind it by more than 5 s,

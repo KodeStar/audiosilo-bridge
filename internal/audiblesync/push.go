@@ -228,7 +228,13 @@ func (p *Pusher) account(ctx context.Context, srv Server, a store.AudibleAccount
 			p.o.Log.Warn("audible: recording the push's cursor failed", "account", a.ID, "err", err)
 		}
 	}
-	p.due(ctx, a, now)
+	// A pass that read the feed and wrote what was due without a failure ends
+	// the push's last error (the feed back after a server's outage, the
+	// person syncable again, a dropped title's): with nothing to write, no
+	// push would clear it, and the job's success no longer does (SyncPush).
+	if p.due(ctx, a, now) && a.PushError != "" {
+		p.o.health(ctx, store.SyncPush, a, nil, time.Time{})
+	}
 }
 
 // baselineCutoff is when a row's place counts as history: while the baseline
@@ -311,12 +317,13 @@ func (p *Pusher) row(ctx context.Context, a store.AudibleAccount, titles map[str
 // since the Bridge last wrote or heard it (listening in the Audible app that
 // no sync has brought in yet, or during a pause) isn't overwritten. Furthest
 // wins, as on the server: the waiting place goes, and the next sync sends
-// Audible's.
-func (p *Pusher) due(ctx context.Context, a store.AudibleAccount, now time.Time) {
+// Audible's. clean: nothing failed (nothing due counts), so the push's last
+// error no longer holds.
+func (p *Pusher) due(ctx context.Context, a store.AudibleAccount, now time.Time) (clean bool) {
 	list, err := p.o.DB.AudibleWaiting(ctx, a.ID)
 	if err != nil {
 		p.o.Log.Warn("audible: listing the places to push failed", "account", a.ID, "err", err)
-		return
+		return false
 	}
 	// A remembered pending preorder is never pushed (Audible denies its
 	// content reference: a false sync error every pass). Its place waits
@@ -339,8 +346,11 @@ func (p *Pusher) due(ctx context.Context, a store.AudibleAccount, now time.Time)
 		}
 		ready = append(ready, x)
 	}
-	if len(ready) == 0 || ctx.Err() != nil {
-		return
+	if ctx.Err() != nil {
+		return false
+	}
+	if len(ready) == 0 {
+		return true
 	}
 	asins := make([]string, len(ready))
 	for i, x := range ready {
@@ -350,7 +360,7 @@ func (p *Pusher) due(ctx context.Context, a store.AudibleAccount, now time.Time)
 	if err != nil {
 		if !titleAnswer(err) {
 			p.failed(ctx, a, nil, "reading the places on Audible", err)
-			return
+			return false
 		}
 		// Audible refused the read itself (a 4xx): the places are written as
 		// they were before this check, as when Audible has none, but for the
@@ -358,9 +368,10 @@ func (p *Pusher) due(ctx context.Context, a store.AudibleAccount, now time.Time)
 		// further-on places on Audible still win (bridge#50).
 		p.o.Log.Warn("audible: reading the places on Audible before writing failed", "account", a.ID, "err", audible.RedactedError(err))
 	}
+	clean = true
 	for _, x := range ready {
 		if ctx.Err() != nil {
-			return
+			return false
 		}
 		if pl, ok := places[x.ASIN]; ok && movedOn(pl.PositionMs, x) {
 			p.o.Log.Info("audible: the place on Audible is further on and new; left for the sync, not overwritten",
@@ -368,10 +379,13 @@ func (p *Pusher) due(ctx context.Context, a store.AudibleAccount, now time.Time)
 			p.drop(ctx, a, x)
 			continue
 		}
-		if stop := p.push(ctx, a, x); stop {
-			return
+		stop, ok := p.push(ctx, a, x)
+		if stop {
+			return false
 		}
+		clean = clean && ok
 	}
+	return clean
 }
 
 // movedOn reports whether Audible's place (ms) is further on than x's waiting
@@ -410,14 +424,13 @@ func (p *Pusher) drop(ctx context.Context, a store.AudibleAccount, x store.Audib
 // push writes x's waiting place to Audible: the content reference (cached; a
 // cached one Audible no longer takes is read again once), then the place.
 // stop: Audible asked to wait or didn't answer, so the account's other places
-// wait too.
-func (p *Pusher) push(ctx context.Context, a store.AudibleAccount, x store.AudiblePush) (stop bool) {
+// wait too; ok: the place was written.
+func (p *Pusher) push(ctx context.Context, a store.AudibleAccount, x store.AudiblePush) (stop, ok bool) {
 	want := *x.WantMs
 	acr, cached := x.ACR, x.ACR != ""
 	if !cached {
-		var stop, ok bool
 		if acr, stop, ok = p.contentACR(ctx, a, x); !ok {
-			return stop
+			return stop, false
 		}
 	}
 	err := p.o.Accounts.SetPosition(ctx, a.ID, x.ASIN, acr, want)
@@ -425,21 +438,20 @@ func (p *Pusher) push(ctx context.Context, a store.AudibleAccount, x store.Audib
 		// A cached content reference Audible no longer takes: read it again
 		// and write once more.
 		_ = p.o.DB.SetAudibleACR(ctx, a.ID, x.ASIN, "")
-		var stop, ok bool
 		if acr, stop, ok = p.contentACR(ctx, a, x); !ok {
-			return stop
+			return stop, false
 		}
 		err = p.o.Accounts.SetPosition(ctx, a.ID, x.ASIN, acr, want)
 	}
 	if err != nil {
-		return p.failed(ctx, a, &x, "writing the place to Audible", err)
+		return p.failed(ctx, a, &x, "writing the place to Audible", err), false
 	}
 	if err := p.o.DB.AudiblePushed(ctx, a.ID, x.ASIN, want, p.o.Now()); err != nil {
 		p.o.Log.Warn("audible: recording a push failed", "account", a.ID, "err", err)
 	}
 	p.o.Log.Info("audible: place written to Audible", "account", a.ID, "asin", x.ASIN, "position_ms", want)
 	p.o.health(ctx, store.SyncPush, a, nil, time.Time{})
-	return false
+	return false, true
 }
 
 // contentACR reads and caches x's content reference; !ok: it failed (stop as

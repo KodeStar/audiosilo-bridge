@@ -650,6 +650,15 @@ func TestPushServerWait(t *testing.T) {
 	if len(e.srv.feedAsks) != 1 {
 		t.Fatalf("the server's wait wasn't kept: %v", e.srv.feedAsks)
 	}
+	// The feed back with nothing to write: the push's error ends (no push
+	// would clear it, nor the job's success).
+	e.srv.feedErr = nil
+	e.now = e.now.Add(10 * time.Minute)
+	changed := e.changed
+	p.Tick(context.Background())
+	if a := e.account(t); len(e.srv.feedAsks) != 2 || a.PushError != "" || e.changed != changed+1 {
+		t.Fatalf("after the feed came back: %+v, asks %v (changed %d)", a, e.srv.feedAsks, e.changed-changed)
+	}
 }
 
 // The feed pages in the order the server wrote rows, so a row comes again
