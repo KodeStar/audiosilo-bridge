@@ -173,14 +173,7 @@ func Publish(root *os.Root, f *Feed, j Journal, now time.Time, fault Boundary) e
 	if err := syncDir(root, show); err != nil {
 		return err
 	}
-	b, err := json.Marshal(j)
-	if err != nil || len(b) > 4<<20 {
-		return ErrInvalidFile
-	}
-	if err := fsutil.WriteRootAtomic(root, path.Dir(name), path.Base(name), b, 0o644, nil); err != nil {
-		return err
-	}
-	if err := syncDir(root, path.Dir(name)); err != nil {
+	if err := writeJournal(root, name, j); err != nil {
 		return err
 	}
 	if err := fault.Hit("journal"); err != nil {
@@ -285,14 +278,7 @@ func Adopt(root *os.Root, show, from string, f *Feed, now time.Time) error {
 			return ErrInvalidFile
 		}
 		j.Path = show + "/" + path.Base(j.Path)
-		b, err := json.Marshal(j)
-		if err != nil {
-			return err
-		}
-		if err := fsutil.WriteRootAtomic(root, path.Dir(name), path.Base(name), b, 0o644, nil); err != nil {
-			return err
-		}
-		return syncDir(root, path.Dir(name))
+		return writeJournal(root, name, j)
 	}
 	pending, err := listFolder(root, show+"/.audiosilo")
 	if err != nil {
@@ -322,6 +308,19 @@ func Adopt(root *os.Root, show, from string, f *Feed, now time.Time) error {
 		return err
 	}
 	return syncDir(root, show)
+}
+
+// writeJournal writes j at name (at most 4 MiB, as ReadJournal reads it) and
+// flushes its folder.
+func writeJournal(root *os.Root, name string, j Journal) error {
+	b, err := json.Marshal(j)
+	if err != nil || len(b) > 4<<20 {
+		return ErrInvalidFile
+	}
+	if err := fsutil.WriteRootAtomic(root, path.Dir(name), path.Base(name), b, 0o644, nil); err != nil {
+		return err
+	}
+	return syncDir(root, path.Dir(name))
 }
 
 // ReadJournal decodes the journal at name (a regular file, no link in any
@@ -492,14 +491,7 @@ func complete(root *os.Root, f *Feed, j Journal, now time.Time, fault Boundary, 
 		return err
 	}
 	if j.Op == "delete" {
-		data, err := json.Marshal(j)
-		if err != nil {
-			return err
-		}
-		if err := fsutil.WriteRootAtomic(root, show+"/"+j.TrashDir, "transaction.json", data, 0o644, nil); err != nil {
-			return err
-		}
-		if err := syncDir(root, show+"/"+j.TrashDir); err != nil {
+		if err := writeJournal(root, show+"/"+j.TrashDir+"/transaction.json", j); err != nil {
 			return err
 		}
 	}

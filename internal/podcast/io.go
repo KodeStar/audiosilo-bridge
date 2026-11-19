@@ -120,13 +120,9 @@ func ReadMoved(root *os.Root, show string) (*Feed, string, error) {
 // Write changes updated_at only when another field changed. Removed episode
 // descriptions are expendable when the serialized file reaches its cap.
 func Write(root *os.Root, show string, f *Feed, now time.Time) (bool, error) {
-	if !ValidShow(show) {
-		return false, ErrInvalidFile
+	if err := prepare(show, f); err != nil {
+		return false, err
 	}
-	if len(f.Episodes) > MaxEpisodes {
-		return false, ErrTooLarge
-	}
-	f.ScrubPrivate()
 	old, err := Read(root, show)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return false, err
@@ -151,6 +147,14 @@ func Write(root *os.Root, show string, f *Feed, now time.Time) (bool, error) {
 // feed.json on disk (it changed a feed it read under the same show lock), so
 // the file is not read again to compare.
 func writeChanged(root *os.Root, show string, f *Feed, now time.Time) error {
+	if err := prepare(show, f); err != nil {
+		return err
+	}
+	return save(root, show, f, now)
+}
+
+// prepare checks f can be written as show's feed.json and scrubs it.
+func prepare(show string, f *Feed) error {
 	if !ValidShow(show) {
 		return ErrInvalidFile
 	}
@@ -158,7 +162,7 @@ func writeChanged(root *os.Root, show string, f *Feed, now time.Time) error {
 		return ErrTooLarge
 	}
 	f.ScrubPrivate()
-	return save(root, show, f, now)
+	return nil
 }
 
 // save writes f, already scrubbed, as show's feed.json updated at now.

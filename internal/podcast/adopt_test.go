@@ -1,7 +1,6 @@
 package podcast
 
 import (
-	"encoding/json"
 	"errors"
 	"os"
 	"reflect"
@@ -78,7 +77,7 @@ func TestAdoptARenamedShowFolder(t *testing.T) {
 	if err := EnsureDir(root, "Fixture Show/"+manifest.TrashDir); err != nil {
 		t.Fatal(err)
 	}
-	writeJournal(t, root, "Fixture Show/"+manifest.TrashDir+"/transaction.json", manifest)
+	putJournal(t, root, "Fixture Show/"+manifest.TrashDir+"/transaction.json", manifest)
 	rename(t, root, "Renamed Show")
 
 	if _, err := Read(root, "Renamed Show"); !errors.Is(err, ErrInvalidFile) {
@@ -135,7 +134,7 @@ func TestAdoptAgainAfterAStop(t *testing.T) {
 	rename(t, root, "Renamed Show")
 	moved := j
 	moved.Path = "Renamed Show/" + strings.TrimPrefix(j.Path, "Fixture Show/")
-	writeJournal(t, root, AttachmentPath(moved.Path, ".publish.json"), moved)
+	putJournal(t, root, AttachmentPath(moved.Path, ".publish.json"), moved)
 	f, from, err := ReadMoved(root, "Renamed Show")
 	if err != nil || from != "Fixture Show" {
 		t.Fatal(from, err)
@@ -184,7 +183,7 @@ func TestAdoptRefusesAForeignJournal(t *testing.T) {
 	rename(t, root, "Renamed Show")
 	foreign := j
 	foreign.Path = "Elsewhere/" + strings.TrimPrefix(j.Path, "Fixture Show/")
-	writeJournal(t, root, AttachmentPath("Renamed Show/"+strings.TrimPrefix(j.Path, "Fixture Show/"), ".publish.json"), foreign)
+	putJournal(t, root, AttachmentPath("Renamed Show/"+strings.TrimPrefix(j.Path, "Fixture Show/"), ".publish.json"), foreign)
 	f, from, err := ReadMoved(root, "Renamed Show")
 	if err != nil {
 		t.Fatal(err)
@@ -197,13 +196,9 @@ func TestAdoptRefusesAForeignJournal(t *testing.T) {
 	}
 }
 
-func writeJournal(t *testing.T, root *os.Root, name string, j Journal) {
+func putJournal(t *testing.T, root *os.Root, name string, j Journal) {
 	t.Helper()
-	b, err := json.Marshal(j)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := root.WriteFile(name, b, 0o644); err != nil {
+	if err := writeJournal(root, name, j); err != nil {
 		t.Fatal(err)
 	}
 }
