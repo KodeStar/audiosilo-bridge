@@ -449,14 +449,11 @@ func (h *Handler) continueChapters(ctx context.Context, eng Engine, r *run, old 
 	if err := h.clearEbookRun(ctx, eng, r, ebookRun); err != nil {
 		return false, err
 	}
-	err = takeUp(ctx, eng, r, old.ID, func() error {
-		return h.o.DB.ContinueChapters(ctx, old.ID, old.State, string(to), h.newBook(r, old.AudioSource(), ""),
-			store.GenerateBook{ServerJobID: r.job.ID, LibraryID: r.lib.ID, RelPath: r.rel})
-	})
-	if errors.Is(err, store.ErrNotContinuable) {
-		return false, nil
-	} else if err != nil {
-		return false, err
+	nb, job := h.newBook(r, old.AudioSource(), ""), r.generateBook()
+	if ok, err := takeUp(ctx, eng, r, old.ID, func() error {
+		return h.o.DB.ContinueChapters(ctx, old.ID, old.State, string(to), nb, job)
+	}); !ok || err != nil {
+		return ok, err
 	}
 	h.o.Log.Info("generate: continuing the book's chapters run, its transcription kept", "job", r.job.ID, "book", old.ID,
 		"from", old.State)
@@ -464,20 +461,27 @@ func (h *Handler) continueChapters(ctx context.Context, eng Engine, r *run, old 
 }
 
 // takeUp makes engine book id run r's book through write, the continue
-// (ContinueChapters, ContinueReadalong) that clears its stop. write runs under the
-// book's publish lock (Engine.ContinueStored), so a failed Retry or rewind of the
-// book puts its status back before this clear, never over it, and the book is
-// published as stored once it succeeded: its last book.state event is no longer
-// the cancel. The engine is then woken for it. Every continue goes through here,
-// so none can skip the lock or the publish. write's error is returned as it is
-// (store.ErrNotContinuable included).
-func takeUp(ctx context.Context, eng Engine, r *run, id int64, write func() error) error {
-	if err := eng.ContinueStored(ctx, id, write); err != nil {
-		return err
+// (ContinueChapters, ContinueReadalong) that clears its stop, written under the
+// book's publish lock (Engine.ContinueStored, see scheduler.restoreStatus) and
+// published as stored, so its last book.state event is no longer the cancel; the
+// engine is then woken for it. Every continue goes through here, so none can skip
+// the lock or the publish. ok is false, with no error, when write found the book
+// not continuable (store.ErrNotContinuable).
+func takeUp(ctx context.Context, eng Engine, r *run, id int64, write func() error) (ok bool, err error) {
+	if err := eng.ContinueStored(ctx, id, write); errors.Is(err, store.ErrNotContinuable) {
+		return false, nil
+	} else if err != nil {
+		return false, err
 	}
 	r.bookID = id
 	eng.Notify()
-	return nil
+	return true, nil
+}
+
+// generateBook is r's job mapped to the engine book a continue takes up (the
+// book id is the continue's).
+func (r *run) generateBook() store.GenerateBook {
+	return store.GenerateBook{ServerJobID: r.job.ID, LibraryID: r.lib.ID, RelPath: r.rel}
 }
 
 // resumesAt is where an engine book stopped at asr or chapter_detecting goes on
@@ -538,14 +542,11 @@ func (h *Handler) resumeChapters(ctx context.Context, eng Engine, r *run, old st
 	if !ok {
 		return false, nil
 	}
-	err = takeUp(ctx, eng, r, old.ID, func() error {
-		return h.o.DB.ContinueReadalong(ctx, old.ID, old.State, string(to), state.GoalChapters,
-			store.GenerateBook{ServerJobID: r.job.ID, LibraryID: r.lib.ID, RelPath: r.rel})
-	})
-	if errors.Is(err, store.ErrNotContinuable) {
-		return false, nil
-	} else if err != nil {
-		return false, err
+	job := r.generateBook()
+	if ok, err := takeUp(ctx, eng, r, old.ID, func() error {
+		return h.o.DB.ContinueReadalong(ctx, old.ID, old.State, string(to), state.GoalChapters, job)
+	}); !ok || err != nil {
+		return ok, err
 	}
 	h.o.Log.Info("chapters: taking up the book's stopped chapters run, its transcription kept", "job", r.job.ID,
 		"book", old.ID, "from", old.State, "at", to)

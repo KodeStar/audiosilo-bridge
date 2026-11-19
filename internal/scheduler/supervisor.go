@@ -180,21 +180,16 @@ func (s *Scheduler) supervisorSupersedeRerun(ctx context.Context, b store.Book, 
 		}
 	}
 	// A stage running on the book is stopped and finishes its last writes (a
-	// sentinel the rewind must drop, or a replay of it would stand for the re-run)
-	// first, with the dispatch loop held off the book: the rest holds the book's
-	// publish lock, which that worker's own publish takes. Only then the
-	// conditional status write, as in readmit (a deliberate pause is written back
-	// as it is): a Cancel landing since leaves the book as it is (bridge#65); the
-	// worker it would have stopped is stopped already, and its stage was this
-	// rewind's to discard anyway.
+	// sentinel the rewind must drop) first, with the dispatch loop held off the
+	// book, and before the book's publish lock, which that worker's own publish
+	// takes. Then, under that lock to the publish as in readmit (see
+	// restoreStatus), the conditional status write (a deliberate pause is written
+	// back as it is): a Cancel landing since leaves the book as it is (bridge#65),
+	// its worker stopped already, a stage this rewind would discard anyway.
 	release := s.holdDispatch(bookID)
 	defer release()
 	s.cancelInflight(bookID)
 	s.awaitWorker(ctx, bookID)
-	// The publish lock is held from the status write to its publish, as readmit
-	// holds it, so a failed rewind puts its status back before a Retry that
-	// followed a Cancel clears it, never over that Retry (restoreStatus cannot
-	// tell the Retry's clear from its own).
 	unlock := s.lockPublish(bookID)
 	defer unlock()
 	paused := b.Status == string(state.StatusPaused)
