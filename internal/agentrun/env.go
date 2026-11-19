@@ -279,10 +279,10 @@ func (r *Runner) isOwnTmp(p string) bool {
 
 // sweepRunFiles walks the mounts afresh and removes the files of a
 // credential's name a run planted in the service's own areas (runMade), each
-// through an os.Root over its area (a link swapped in can't lead out) and
-// only while it is still the service's own; a folder is removed only when
-// empty, so nothing a host mounted under one is reached. The endpoint's
-// service calls it when it starts and after each run.
+// through the folders on its way opened without following a link
+// (removeRunFile, proc_unix.go) and only while it is still the service's own;
+// a folder is removed only when empty, so nothing a host mounted under one is
+// reached. The endpoint's service calls it when it starts and after each run.
 func (r *Runner) sweepRunFiles() {
 	r.mountMu.Lock()
 	defer r.mountMu.Unlock()
@@ -295,23 +295,6 @@ func (r *Runner) sweepRunFiles() {
 	if removed > 0 {
 		r.log.Warn("agent runner: removed files of a credential's name a run left", "count", removed)
 	}
-}
-
-// removeRunFile removes f when it is still uid's (an empty folder included).
-func removeRunFile(f runFile, uid int) bool {
-	root, err := os.OpenRoot(f.area)
-	if err != nil {
-		return false
-	}
-	defer func() { _ = root.Close() }()
-	info, err := root.Lstat(f.rel)
-	if err != nil {
-		return false
-	}
-	if owner, ok := ownerUID(info); !ok || owner != uid {
-		return false
-	}
-	return root.Remove(f.rel) == nil
 }
 
 // homeReachable reports whether the runner can list, enter or write the agent

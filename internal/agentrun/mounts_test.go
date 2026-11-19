@@ -1077,6 +1077,18 @@ func TestEndpointServiceSweepsRunFiles(t *testing.T) {
 	if removeRunFile(runFile{area: area, rel: "secret.key"}, os.Geteuid()) {
 		t.Fatal("removeRunFile removed a folder with something in it")
 	}
+	// A link on the way, even to a folder in the same area, is never followed.
+	mkfile(t, filepath.Join(area, "real", "auth.json"))
+	if err := os.Symlink("real", filepath.Join(area, "link")); err != nil {
+		t.Fatal(err)
+	}
+	if removeRunFile(runFile{area: area, rel: filepath.Join("link", "auth.json")}, os.Geteuid()) ||
+		gone(filepath.Join(area, "real", "auth.json")) {
+		t.Fatal("removeRunFile removed a file through a link")
+	}
+	if !removeRunFile(runFile{area: area, rel: filepath.Join("real", "auth.json")}, os.Geteuid()) {
+		t.Fatal("removeRunFile left the service's own file a folder down")
+	}
 	if !removeRunFile(runFile{area: area, rel: "auth.json"}, os.Geteuid()) || !gone(filepath.Join(area, "auth.json")) {
 		t.Fatal("removeRunFile left the service's own file")
 	}

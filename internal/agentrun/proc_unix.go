@@ -6,6 +6,8 @@ import (
 	"io/fs"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
 	"syscall"
 
 	"golang.org/x/sys/unix"
@@ -73,6 +75,39 @@ func closeDir(dir string) error {
 		return &fs.PathError{Op: "fchmod", Path: dir, Err: err}
 	}
 	return nil
+}
+
+// removeRunFile removes f (a run's planted file, or an empty folder) when it
+// is still uid's: the area and each folder below it on f's way are opened
+// without following a link, so one swapped in since the walk stops it (ELOOP,
+// ENOTDIR) rather than lead anywhere, and f's last element is looked at and
+// removed in the folder so opened. A folder goes only when empty.
+func removeRunFile(f runFile, uid int) bool {
+	parts := strings.Split(f.rel, string(filepath.Separator))
+	const dirFlags = unix.O_RDONLY | unix.O_DIRECTORY | unix.O_NOFOLLOW | unix.O_CLOEXEC
+	fd, err := unix.Open(f.area, dirFlags, 0)
+	if err != nil {
+		return false
+	}
+	for _, name := range parts[:len(parts)-1] {
+		next, err := unix.Openat(fd, name, dirFlags, 0)
+		_ = unix.Close(fd)
+		if err != nil {
+			return false
+		}
+		fd = next
+	}
+	defer func() { _ = unix.Close(fd) }()
+	last := parts[len(parts)-1]
+	var st unix.Stat_t
+	if err := unix.Fstatat(fd, last, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil || int(st.Uid) != uid {
+		return false
+	}
+	flags := 0
+	if st.Mode&unix.S_IFMT == unix.S_IFDIR {
+		flags = unix.AT_REMOVEDIR
+	}
+	return unix.Unlinkat(fd, last, flags) == nil
 }
 
 // ownerUID is info's owner, as this process's user namespace shows it; ok

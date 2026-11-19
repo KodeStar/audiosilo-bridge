@@ -50,6 +50,9 @@ func closeDir(dir string) error {
 // ownerUID: a file has no owner here.
 func ownerUID(fs.FileInfo) (int, bool) { return 0, false }
 
+// removeRunFile removes nothing here: with no owner, no file is a run's.
+func removeRunFile(runFile, int) bool { return false }
+
 // fileKey is a file's device and inode where the system gives them; here it
 // gives none, so the deep mount walk stops a link loop by its depth alone.
 type fileKey struct{}
