@@ -878,6 +878,80 @@ func TestDroppedRunFreesItsLaneWhileItsReleaseWaits(t *testing.T) {
 	}
 }
 
+// A run that a cancel or a lost claim ends before its handler ran (its first
+// report answered so while it waited for the lane's one slot) whose work takes
+// long to release gives its place in the lane back at once: the next claim
+// starts there while the release still waits (denied: released on the run's
+// goroutine, the run first in line for the slot until it returns), and its
+// row stays running and held until the release returns, then is recorded
+// cancelled or lost (allowed), so a job waiting for the row's end still starts
+// only once the work is released.
+func TestEndedRunFreesItsLaneWhileItsReleaseWaits(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		state string
+	}{{"cancelled", store.JobCancelled}, {"lost", store.JobLost}} {
+		t.Run(c.name, func(t *testing.T) {
+			srv := newControlledServer(false)
+			var cur atomic.Pointer[controlledServer]
+			cur.Store(srv)
+			started := make(chan Job, 4)
+			release := make(chan struct{})
+			h := newCountingAbandoner(func(ctx context.Context, j Job, _ *Reporter) (any, error) {
+				started <- j
+				<-ctx.Done()
+				return nil, ctx.Err()
+			}, release, 4)
+			db := openStore(t)
+			opts := testOpts()
+			opts.Lanes = map[string]int{LaneDownload: 1}
+			r := New(db, linkOf(&cur), nil, opts, h)
+			startControlled(t, r)
+			var wg sync.WaitGroup
+			defer wg.Wait()
+			runCtx, stop := context.WithCancel(context.Background())
+			defer stop()
+			// Job 1 runs in the lane's one slot; job 2 waits for it, and its
+			// first report hears the cancel or the lost claim.
+			srv.next(t, false).answer <- claimed(1, h.Kind(), 0)
+			if j := await(t, started); j.ID != 1 {
+				t.Fatal(j)
+			}
+			srv.mu.Lock()
+			if c.state == store.JobCancelled {
+				srv.cancel[2] = true
+			} else {
+				srv.notHeld[2] = true
+			}
+			srv.mu.Unlock()
+			r.start(runCtx, srv, Job{ID: 2, Kind: h.Kind(), Attempt: 1}, &wg, nil)
+			if id := await(t, h.entered); id != 2 {
+				t.Fatal("released:", id)
+			}
+			waitFor(t, func() bool { _, waiting := laneCounts(r, LaneDownload); return waiting == 0 })
+			if !r.Cancel(1) {
+				t.Fatal("job 1 isn't running")
+			}
+			srv.next(t, false).answer <- claimed(10, h.Kind(), 0)
+			if j := await(t, started); j.ID != 10 {
+				t.Fatal("the next claim didn't run", j)
+			}
+			ctx := context.Background()
+			if sj, err := db.GetServerJob(ctx, 2); err != nil || sj.State != store.JobRunning || !r.holds(2) || h.inFlight.Load() != 1 {
+				t.Fatalf("the ended run whose release waits: %+v %v, held %v; want running and held", sj, err, r.holds(2))
+			}
+			close(release)
+			waitFor(t, func() bool {
+				sj, err := db.GetServerJob(ctx, 2)
+				return err == nil && sj.State == c.state && !r.holds(2)
+			})
+			if got := h.abandoned(); !slices.Equal(got, []int64{2}) {
+				t.Fatal("released:", got)
+			}
+		})
+	}
+}
+
 // countingAbandoner's Abandon sends the job's id on entered, waits for release
 // (nil: for its context to end) and counts how many wait at once, and how many
 // were told under a context that had ended already (toldEnded).
@@ -1796,6 +1870,7 @@ func TestWaitingRecoveryRunsOrAbandons(t *testing.T) {
 				r.mu.Unlock()
 			}
 			await(t, done)
+			r.drops.Wait() // a cancel's release, off its run's goroutine
 			if h.ran.Load() == cancelled || (len(h.abandoned()) == 1) != cancelled {
 				t.Fatal("waiting job disposition", h.ran.Load(), h.abandoned())
 			}
