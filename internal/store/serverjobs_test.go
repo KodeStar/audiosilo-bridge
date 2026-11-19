@@ -160,3 +160,50 @@ func TestServerJobServerAndPark(t *testing.T) {
 		t.Fatalf("a finished job's error = %q", got.Error)
 	}
 }
+
+// A job's share_off (server#218) is kept for its attempt only: a stale
+// attempt's answer, or a finished job, records nothing, and a new claim
+// carries its own (a re-claim the server no longer says it for clears it).
+func TestServerJobShareOff(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	job := ServerJob{ID: 42, Kind: "sidecars.generate", Attempt: 1}
+	if err := db.RecordClaim(ctx, job); err != nil {
+		t.Fatal(err)
+	}
+	shareOff := func() bool {
+		t.Helper()
+		got, err := db.GetServerJob(ctx, 42)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got.ShareOff
+	}
+	if err := db.SetServerJobShareOff(ctx, 42, 9); err != nil || shareOff() {
+		t.Fatalf("a stale attempt's share_off: %v, kept %v", err, shareOff())
+	}
+	if err := db.SetServerJobShareOff(ctx, 42, 1); err != nil || !shareOff() {
+		t.Fatalf("the attempt's share_off: %v, kept %v", err, shareOff())
+	}
+	job.Attempt = 2
+	if err := db.RecordClaim(ctx, job); err != nil || shareOff() {
+		t.Fatalf("a re-claim without share_off: %v, kept %v", err, shareOff())
+	}
+	job.Attempt, job.ShareOff = 3, true
+	if err := db.RecordClaim(ctx, job); err != nil || !shareOff() {
+		t.Fatalf("a claim with share_off: %v, kept %v", err, shareOff())
+	}
+	if err := db.FinishServerJob(ctx, 42, 3, JobDone, nil, ""); err != nil {
+		t.Fatal(err)
+	}
+	job.Attempt, job.ShareOff = 4, false
+	if err := db.RecordClaim(ctx, job); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.FinishServerJob(ctx, 42, 4, JobDone, nil, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetServerJobShareOff(ctx, 42, 4); err != nil || shareOff() {
+		t.Fatalf("a finished job's share_off: %v, kept %v", err, shareOff())
+	}
+}
