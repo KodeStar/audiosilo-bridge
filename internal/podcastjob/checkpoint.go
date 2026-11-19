@@ -452,8 +452,12 @@ func (s *service) lockEpisode(ctx context.Context, root *os.Root, episode string
 // Windows too: os.Root opens files with FILE_SHARE_DELETE and removes them
 // with POSIX semantics, so removing after letting go would let a waiter lock
 // the file just before it goes while a third job makes and locks a new one.
+// Only the held file is removed: one at p since (its show folder renamed by
+// hand, the lock moving with it, and the name taken again) is another job's.
 func releaseLock(root *os.Root, p string, f *os.File) {
-	_ = root.Remove(p)
+	if lockedAt(root, p, f) {
+		_ = root.Remove(p)
+	}
 	unlockFile(f)
 	_ = f.Close()
 }
