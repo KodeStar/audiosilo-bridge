@@ -2708,7 +2708,15 @@ internal/
             same episode id has it cleared and downloaded again from byte 0,
             or failed write_failed (errPartialStuck) when the clear cannot
             remove it; a record from before Source is verified by its hash
-            alone. A cancel (the runner's Abandon) or
+            alone. So does every kept partial (BR-PODCAST-4): one is resumed
+            with its ETag only from its own enclosure (resumes), else cleared
+            and downloaded from byte 0 in the attempt's one GET (stuck:
+            write_failed, errPartialStuck); a URL whose query alone changed
+            (signed or tracked anew at each fetch) still resumes while the feed
+            gives one known length both times (SourceBase, the hash of the URL
+            without its query and fragment), the strong ETag still proving the
+            bytes; a whole download, published with no GET, never takes that
+            leeway; a record from before Source resumes on its ETag alone. A cancel (the runner's Abandon) or
             invalid_audio still clears it, as does the day-old cleanup. Never downloaded again either when its
             folder no longer holds the show (a
             folder deleted outright, another show's at its name: the partial is
@@ -2817,14 +2825,19 @@ internal/
             episode download's ceiling is its timeout wherever it surfaces (the
             budget's cause, errOverBudget; a probe it stops answers the context's
             error, not invalid_audio, and a lease check it cuts is no lost claim,
-            identity_changed), a retry wait it cuts ends on the host's
-            last answer, and its own faults (no streamer, its partial) are
+            identity_changed), a retry wait it cuts included; a retry wait the
+            job's cancel or a lost lease cuts ends as netguard.Classify reads
+            the ended context (timeout), never on the host's last http_503 or
+            429, which the server would count against the feed for a cancelled
+            job (BR-PODCAST-4); its own faults (no streamer, its partial) are
             write_failed. A partial proven changed or barred to the Bridge
             (gone, not a regular file, EACCES/EPERM as a lasting fault, another
             size, shorter than its prefix: partialLost, errPartialChanged)
             restarts the episode from zero once per job first, checked before
             the ranged GET so no request is spent on it; one the restart (or
-            the start's clear of a partial of another size) cannot remove fails
+            the start's clear of a partial of another size or source, a host
+            retry from zero, a resume the host did not prove, or the restart
+            of a partial changed on disk while it downloaded) cannot remove fails
             the attempt write_failed (errPartialStuck), never a download
             beside it, its record left for the next attempt or the day-old
             cleanup, which drops the record then even when the partial stays

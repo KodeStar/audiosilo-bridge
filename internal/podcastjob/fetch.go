@@ -358,8 +358,8 @@ func (h *Fetch) run(parent context.Context, claimed *jobs.Job, rep *jobs.Reporte
 	}()
 	rep.Progress(jobs.Progress{Step: "resolving", Message: "Resolving the episode"})
 	// The episode's enclosure, resolved once per job (a private feed's is
-	// fetched): before the loop only for a kept whole download its record
-	// names the source of, else when a download needs it.
+	// fetched): before the loop for a kept partial its record names the
+	// source of, else when a download needs it.
 	var enc podcast.Enclosure
 	resolve := func() error {
 		if enc.URL != "" {
@@ -369,16 +369,22 @@ func (h *Fetch) run(parent context.Context, claimed *jobs.Job, rep *jobs.Reporte
 		enc = got
 		return err
 	}
-	if c.complete() && c.Source != "" {
+	if c.Temp != "" && c.Source != "" {
 		if err := resolve(); err != nil {
-			return nil, err // the whole download is kept (the exit), for the next attempt
+			return nil, err // a whole download is kept (the exit), for the next attempt
 		}
 		// The feed changed the episode's audio under the same episode id
 		// since it was downloaded (another enclosure URL or length): the old
-		// download is never published, and the episode is downloaded again
-		// from byte 0.
-		if !c.sameSource(enc) {
-			slog.Info("podcasts: an episode's enclosure changed since its download was kept; it is downloaded again", "partial", c.partialName())
+		// download is never published, nor a partial resumed against
+		// another URL with its old ETag, and the episode is downloaded again
+		// from byte 0 (the loop's one GET). A partial still resumes past a
+		// query signed or tagged anew (resumes).
+		same := c.sameSource(enc)
+		if !c.complete() {
+			same = c.resumes(enc)
+		}
+		if !same {
+			slog.Info("podcasts: an episode's enclosure changed since its partial was kept; it is downloaded again", "partial", c.partialName())
 			if !s.clearCheckpoint(job, root, &c) {
 				return nil, stuckPartial(errors.New("the episode's enclosure changed"))
 			}
@@ -447,7 +453,9 @@ func (h *Fetch) run(parent context.Context, claimed *jobs.Job, rep *jobs.Reporte
 			return nil, fail("write_failed", "The episode download was changed on disk while it was saved.")
 		}
 		slog.Warn("podcasts: an episode's partial changed on disk while it downloaded; it is downloaded again", "partial", c.partialName())
-		s.clearCheckpoint(job, root, &c)
+		if !s.clearCheckpoint(job, root, &c) {
+			return nil, stuckPartial(errPartialChanged)
+		}
 		tag = ""
 	}
 	rep.Progress(jobs.Progress{Step: "probing", Message: "Checking episode audio"})
@@ -902,7 +910,9 @@ func (s *service) download(ctx context.Context, b *budget, job *jobs.Job, root *
 				err = netguard.StatusError("episode", response.Status, response.RetryAfterSeconds)
 			case action == "fresh_get":
 				_ = response.Body.Close()
-				s.clearCheckpoint(*job, root, c)
+				if !s.clearCheckpoint(*job, root, c) {
+					return podcast.Fetch{}, stuckPartial(errors.New("the episode resume could not be verified"))
+				}
 				tag = ""
 				last = fail("network", "The episode resume could not be verified.")
 				continue
@@ -939,12 +949,18 @@ func (s *service) download(ctx context.Context, b *budget, job *jobs.Job, root *
 		}
 		if !netguard.StrongETag(tag) || c.Offset <= 0 || c.Total <= c.Offset {
 			_ = settle(ctx) // the clear finds the partial where it is now
-			s.clearCheckpoint(*job, root, c)
+			if !s.clearCheckpoint(*job, root, c) {
+				return podcast.Fetch{}, stuckPartial(failure)
+			}
 			tag = ""
 		}
-		// A wait the ceiling cuts short ends on what the host last answered.
-		if s.o.Wait(ctx, netguard.RetryDelay(attempt, failure.RetryAfterSeconds)) != nil {
-			return podcast.Fetch{}, failure
+		// A wait the job's end (a cancel, a lost lease, the ceiling) cuts
+		// short is that end, never what the host last answered: a cancelled
+		// job's http_503 would count against the feed (the server's
+		// cancelledFailureCodes), though the next try might have had it. The
+		// ceiling's is the episode's timeout (budget.failure).
+		if err := s.o.Wait(ctx, netguard.RetryDelay(attempt, failure.RetryAfterSeconds)); err != nil {
+			return podcast.Fetch{}, netguard.Classify(ctx, err)
 		}
 	}
 	return podcast.Fetch{}, last

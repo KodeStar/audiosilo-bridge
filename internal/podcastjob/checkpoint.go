@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -43,10 +44,15 @@ type checkpoint struct {
 	// SourceLength the length the feed gave it, when it gave one. A whole
 	// download is published with no GET (complete): a feed that changed the
 	// episode's audio under the same episode id since is told by these
-	// (sameSource). A record from before them has neither, and is verified
-	// by its hash alone.
+	// (sameSource), and a partial is resumed only from its own enclosure
+	// (resumes). A record from before them has neither: a whole download is
+	// verified by its hash alone, and a partial resumed on its ETag alone.
+	// SourceBase is the hash of that URL without its query (sourceBase), so a
+	// feed whose enclosure URLs are signed or tracked anew at every fetch
+	// still resumes (resumes); a record from before it has none.
 	Source       string `json:"source,omitempty"`
 	SourceLength int64  `json:"source_length,omitempty"`
+	SourceBase   string `json:"source_base,omitempty"`
 	UpdatedAt    string `json:"updated_at"`
 }
 
@@ -60,7 +66,19 @@ func (c *checkpoint) complete() bool {
 
 // setSource records enc as the enclosure c's partial is downloaded from.
 func (c *checkpoint) setSource(enc podcast.Enclosure) {
-	c.Source, c.SourceLength = podcast.FeedURLHash(enc.URL), max(enc.Length, 0)
+	c.Source, c.SourceLength, c.SourceBase = podcast.FeedURLHash(enc.URL), max(enc.Length, 0), sourceBase(enc.URL)
+}
+
+// sourceBase is the hex hash of raw, an enclosure URL, without its query and
+// fragment (a signature, an expiry, a tracking id), or "" when it does not
+// parse. Like Source it is never the URL.
+func sourceBase(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	u.RawQuery, u.ForceQuery, u.Fragment, u.RawFragment = "", false, "", ""
+	return podcast.FeedURLHash(u.String())
 }
 
 // sameSource reports whether enc is the enclosure c's partial was downloaded
@@ -71,6 +89,19 @@ func (c *checkpoint) sameSource(enc podcast.Enclosure) bool {
 		return true
 	}
 	return c.Source == podcast.FeedURLHash(enc.URL) && (c.SourceLength <= 0 || enc.Length <= 0 || c.SourceLength == enc.Length)
+}
+
+// resumes reports whether c's resumable partial may go on from enc, with its
+// ETag: enc is its source (sameSource), or the same URL but for its query
+// while the feed gives one known length both times. A feed that signs or tags
+// its enclosure URLs anew at every fetch would otherwise restart every resume
+// from zero; the ETag still proves the bytes (If-Range). A whole download,
+// published with no GET, never takes that leeway (sameSource alone).
+func (c *checkpoint) resumes(enc podcast.Enclosure) bool {
+	if c.sameSource(enc) {
+		return true
+	}
+	return c.SourceBase != "" && c.SourceBase == sourceBase(enc.URL) && c.SourceLength > 0 && enc.Length == c.SourceLength
 }
 
 // partialName is the root-relative name of the partial c records, beside its
