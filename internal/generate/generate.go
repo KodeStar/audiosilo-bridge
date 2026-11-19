@@ -377,7 +377,7 @@ type run struct {
 // job hears share_off (jobs.Reporter.OnShareOff), not at the run's next look,
 // which can be an idle poll away: a re-admit at a contributing park meanwhile
 // (the poller after a data release, a GitHub sign-in, contrib_unavailable's
-// auto-retry) would otherwise run the stage in issue mode and file after the
+// or share_unconfirmed's auto-retry) would otherwise run the stage in issue mode and file after the
 // admin refused the share. It runs on the Reporter's goroutine as well as the
 // run's (shareBook), so it has its own lock, and does only a store write under
 // it (never the scheduler's, so no lock order with a book's publish or
@@ -542,9 +542,10 @@ func (h *Handler) keepShareLocal(ctx context.Context, eng Engine, r *run, b *sto
 }
 
 // shareParks are the contributing stage's parks over the share itself (a
-// GitHub sign-in, a core record the community lacks), which local mode doesn't
-// wait on.
-var shareParks = []state.ParkCode{state.ParkContribUnavailable, state.ParkCoreNeeded, state.ParkCorePending}
+// GitHub sign-in, the server's word on the share, a core record the community
+// lacks), which local mode doesn't wait on.
+var shareParks = []state.ParkCode{state.ParkContribUnavailable, state.ParkShareUnconfirmed, state.ParkCoreNeeded,
+	state.ParkCorePending}
 
 // cantContribute fails a contribute=issue job before any spend when no GitHub
 // token resolves: the contribution is the last stage, and without a token it

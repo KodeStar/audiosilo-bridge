@@ -1439,8 +1439,9 @@ func TestContributeAsksAgainAfterTheGist(t *testing.T) {
 }
 
 // TestContributeWaitsWhenTheServerCantBeAsked: a server that can't be asked
-// before filing (unreachable) files nothing: the book parks contrib_unavailable
-// and looks again by itself, still in issue mode. Allowed: sidecars.contribute's
+// before filing (unreachable) files nothing: the book parks share_unconfirmed
+// (its own code: no GitHub sign-in is missing) and looks again by itself, still
+// in issue mode. Allowed: sidecars.contribute's
 // explicit Share doesn't ask, and files.
 func TestContributeWaitsWhenTheServerCantBeAsked(t *testing.T) {
 	ctx := context.Background()
@@ -1452,9 +1453,9 @@ func TestContributeWaitsWhenTheServerCantBeAsked(t *testing.T) {
 	b := contribBook(t, db, store.NewBook{WorkID: "reacher-01", ContribMode: store.ContribModeIssue}, baseChars("x"), baseRecaps("x"))
 	_, err := exe.Execute(ctx, b, state.Contributing, scheduler.StageReport{})
 	var park *scheduler.ParkError
-	if !errors.As(err, &park) || park.Code != state.ParkContribUnavailable || park.Reason != ShareUnconfirmedMsg ||
+	if !errors.As(err, &park) || park.Code != state.ParkShareUnconfirmed || park.Reason != ShareUnconfirmedMsg ||
 		park.RetryAfter.IsZero() {
-		t.Fatalf("contribute = %v, want a contrib_unavailable park that looks again", err)
+		t.Fatalf("contribute = %v, want a share_unconfirmed park that looks again", err)
 	}
 	if n := gh.issueCount(); n != 0 {
 		t.Fatalf("issues filed = %d, want none", n)

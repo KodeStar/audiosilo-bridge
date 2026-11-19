@@ -81,7 +81,8 @@ func TestEveryParkCodeHasAHint(t *testing.T) {
 		state.ParkAgentValidationExhausted,
 		state.ParkMarkersNotConfident, state.ParkChaptersNotDetected, state.ParkQANoConverge, state.ParkSpellingGateFailure, state.ParkMediaToolsUnavailable,
 		state.ParkASRUnavailable, state.ParkManifestChanged, state.ParkFixLoopExhausted, state.ParkASRDecodeTimeout,
-		state.ParkContribUnavailable, state.ParkCoreNeeded, state.ParkCorePending, state.ParkEbookUnreadable,
+		state.ParkContribUnavailable, state.ParkShareUnconfirmed, state.ParkCoreNeeded, state.ParkCorePending,
+		state.ParkEbookUnreadable,
 		state.ParkEbookNoChapters, state.ParkEbookChaptersNotConfident, state.ParkBudgetExceeded,
 		state.ParkSupervisorEscalated, state.ParkSupervisorBudget, parkBookNotWritable, parkLibraryNotWritable} {
 		if ParkHint(string(code)) == "" {
@@ -114,6 +115,16 @@ func TestParkHintsNameAnActionThatWorks(t *testing.T) {
 	}
 	if h := ParkHint(string(state.ParkAgentCredentialRefused)); !strings.Contains(h, "claude setup-token / agent-login codex") {
 		t.Errorf("credential refused hint = %q", h)
+	}
+	// A server that couldn't be asked about the share isn't a GitHub sign-in: each
+	// park's hint names only its own cause, and the share's says it goes on by
+	// itself, a refused token included (once the Bridge is paired again).
+	if h := ParkHint(string(state.ParkContribUnavailable)); strings.Contains(h, "server") {
+		t.Errorf("contrib unavailable hint = %q", h)
+	}
+	if h := ParkHint(string(state.ParkShareUnconfirmed)); strings.Contains(h, "GitHub") ||
+		!strings.Contains(h, "by itself") || !strings.Contains(h, "paired again") {
+		t.Errorf("share unconfirmed hint = %q", h)
 	}
 	// A chapters.detect job parks this too: the hint can't call it a generate job.
 	if h := ParkHint(string(state.ParkChaptersNotDetected)); strings.Contains(h, "generate") || !strings.Contains(h, "match the book to a recording") {
@@ -1191,5 +1202,19 @@ func TestShareGuardTurnsTheBookLocalAtOnce(t *testing.T) {
 	jobs.HearShareOff(r.rep)
 	if r.share != nil || mode(other.ID) != store.ContribModeIssue {
 		t.Fatalf("a run not asked to share: guard %v, mode %q", r.share, mode(other.ID))
+	}
+}
+
+// A book parked because the server couldn't be asked about its share is a
+// share park: a share_off lifts it into local mode like a sign-in's (allowed),
+// while a park that isn't over the share is left alone (denied).
+func TestShareUnconfirmedIsASharePark(t *testing.T) {
+	t.Parallel()
+	na := string(state.StatusNeedsAttention)
+	if !state.IsParkedWith(na, string(state.ParkShareUnconfirmed), shareParks...) {
+		t.Error("share_unconfirmed isn't a share park")
+	}
+	if state.IsParkedWith(na, string(state.ParkAgentValidationExhausted), shareParks...) {
+		t.Error("agent_validation_exhausted counts as a share park")
 	}
 }

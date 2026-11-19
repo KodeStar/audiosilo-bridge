@@ -80,10 +80,11 @@ const (
 	// works again re-admits it at once (bridge#25).
 	ContribUnrefreshedMsg = "the Bridge's GitHub sign-in couldn't be refreshed (" + contrib.UnrefreshedWhy +
 		") - the book carries on by itself once GitHub answers"
-	// ShareUnconfirmedMsg parks it (same code) when the server couldn't be asked,
-	// just before filing, whether the share of the book's generate-and-share job
-	// is still on (Config.ShareOff): the park looks again by itself after
-	// ShareUnconfirmedRetry, and nothing is filed without the server's word.
+	// ShareUnconfirmedMsg parks a book (state.ParkShareUnconfirmed) when the
+	// server couldn't be asked, just before filing, whether the share of the
+	// book's generate-and-share job is still on (Config.ShareOff): the park looks
+	// again by itself after ShareUnconfirmedRetry, and nothing is filed without
+	// the server's word.
 	ShareUnconfirmedMsg = "the server couldn't be asked whether this book is still to be shared - " +
 		"the book tries again by itself in a minute"
 	// CoreNeededMsg parks a book whose work does not exist upstream: a core add-work
@@ -569,7 +570,7 @@ func (e *Executor) turnedLocal(ctx context.Context, id int64) (bool, error) {
 // only in an answer to one of its reports, which can be a keepalive away, and
 // the stage must not file in between. A share the server turned off turns the
 // book local (store.KeepBookLocal). A server that couldn't be asked parks the
-// book (contrib_unavailable, ShareUnconfirmedMsg) to look again by itself:
+// book (share_unconfirmed, ShareUnconfirmedMsg) to look again by itself:
 // nothing is filed without its word.
 func (e *Executor) askedLocal(ctx context.Context, id int64) (bool, error) {
 	local, err := e.turnedLocal(ctx, id)
@@ -583,7 +584,7 @@ func (e *Executor) askedLocal(ctx context.Context, id int64) (bool, error) {
 	if err != nil {
 		e.log.Warn("contributing: the server couldn't be asked whether the book is still to be shared; it waits",
 			"book", id, "err", err)
-		return false, &scheduler.ParkError{Code: state.ParkContribUnavailable, Reason: ShareUnconfirmedMsg, Cause: err,
+		return false, &scheduler.ParkError{Code: state.ParkShareUnconfirmed, Reason: ShareUnconfirmedMsg, Cause: err,
 			RetryAfter: time.Now().Add(ShareUnconfirmedRetry)}
 	}
 	if !off {

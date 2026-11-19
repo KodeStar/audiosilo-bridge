@@ -920,8 +920,9 @@ internal/
             generate.Handler.ShareOff): a job hears share_off only in an answer to
             a report, which can be a keepalive away, so an admin's turn-off just
             before filing was missed (v2.7.0 verify). A server that couldn't be
-            asked parks the book contrib_unavailable (ShareUnconfirmedMsg, retry_at
-            ShareUnconfirmedRetry) and nothing is filed. runAgent's budget preflight gained the
+            asked parks the book share_unconfirmed (its own code: the server
+            doesn't word it as a missing GitHub sign-in, nor announce a blip;
+            ShareUnconfirmedMsg, retry_at ShareUnconfirmedRetry) and nothing is filed. runAgent's budget preflight gained the
             MONTHLY half (checkMonthlyBudget, Config.MonthlyBudgetUSD): this calendar
             month's (UTC, MonthBounds) spend across every book, superseded runs and
             deleted books' runs included (store.SumBudgetCostSince), at or over the cap
@@ -1606,7 +1607,8 @@ internal/
             core_pending; the reliability round added budget_exceeded; the ASR
             decode-timeout hotfix added asr_decode_timeout, and M9 added
             ebook_unreadable / ebook_no_chapters / ebook_chapters_not_confident,
-            and Phase 1a agent_credential_refused, so 21 now; generate's own
+            Phase 1a agent_credential_refused and v2.7.0 share_unconfirmed (the
+            server not asked about a share before filing); generate's own
             book_not_writable and library_not_writable are job parks, not ParkCodes),
             MainlineNext (the optimistic mainline
             successor the ETA engine walks - the table's Next ordering is load-bearing:
@@ -1777,7 +1779,7 @@ internal/
             absent); pre-migration parks (retry_at '') never auto-readmit.
             bridge#25: autoReadmitCodes adds contrib_unavailable, whose park carries a
             retry_at only for a sign-in whose refresh failed (no credential at all waits
-            for a sign-in).
+            for a sign-in). v2.7.0 adds share_unconfirmed (a minute's retry_at).
             Phase 1a: autoReadmitCodes adds agent_credential_refused (looked at again
             every 30 min in case the credential was replaced) and budget_exceeded
             (the monthly park's retry_at is the 1st; the per-book park has none, so it
@@ -3182,8 +3184,8 @@ internal/
             too, as it takes it up: a resumed or re-claimed job's before prepare,
             which can wait while the engine runs it, and attach; a chapters or
             read-along run it continues), the guard waking the run, and a book parked
-            at contributing over the share (contrib_unavailable, core_needed,
-            core_pending) runs the stage again, once a run, whenever it parks (a stage
+            at contributing over the share (contrib_unavailable, share_unconfirmed,
+            core_needed, core_pending) runs the stage again, once a run, whenever it parks (a stage
             running in issue mode when the answer came parks after it; a lift that
             failed doesn't count, and the look after a lift comes at once); a book done
             already, or a dimension the stage had begun to file, is left as it is (the
