@@ -770,13 +770,14 @@ func (s *service) lockShow(ctx context.Context, root *os.Root, lib link.Library,
 		}
 		return f, unlock, false, nil
 	}
+	changed := fail("identity_changed", "The podcast show identity changed.")
 	f, unlock, unread, err := open(show)
 	switch {
 	case err == nil && (!valid || f.ShowID == id):
 		return show, f, unlock, nil
 	case err == nil:
 		unlock()
-		err = fail("identity_changed", "The podcast show identity changed.")
+		err = changed
 	case !valid || !unread || ctx.Err() != nil || holds(root, show, id):
 		return "", nil, nil, err
 	}
@@ -789,7 +790,7 @@ func (s *service) lockShow(ctx context.Context, root *os.Root, lib link.Library,
 	}
 	if f.ShowID != id {
 		unlock()
-		return "", nil, nil, fail("identity_changed", "The podcast show identity changed.") // moved again since relocate read it
+		return "", nil, nil, changed // moved again since relocate read it
 	}
 	return moved, f, unlock, nil
 }

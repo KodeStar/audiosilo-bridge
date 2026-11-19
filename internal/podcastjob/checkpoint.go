@@ -10,7 +10,6 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -112,24 +111,32 @@ func (s *service) readCheckpoint(job jobs.Job) (checkpoint, bool) {
 		return checkpoint{}, false
 	}
 	defer func() { _ = dir.Close() }()
-	saved, ok := readRecord(dir, s.checkpointName(job))
-	ok = ok && saved.ServerHash == s.pairHash() && saved.LibraryID == *job.LibraryID && saved.Path == *job.Path && podcast.OwnedTemp(saved.Temp) && strings.HasPrefix(saved.Validator, secrets.PodcastETagPrefix)
+	saved, err := readRecord(dir, s.checkpointName(job))
+	ok := err == nil && saved.ServerHash == s.pairHash() && saved.LibraryID == *job.LibraryID && saved.Path == *job.Path && podcast.OwnedTemp(saved.Temp) && strings.HasPrefix(saved.Validator, secrets.PodcastETagPrefix)
 	return saved, ok
 }
 
-// readRecord parses the download record named name, unchecked.
-func readRecord(dir *os.Root, name string) (checkpoint, bool) {
+// errBadRecord is a download record no job can read back: over the size
+// limit, or not a record's JSON.
+var errBadRecord = errors.New("podcastjob: malformed download record")
+
+// readRecord parses the download record named name, unchecked: errBadRecord
+// when it is malformed, or the error opening or reading it.
+func readRecord(dir *os.Root, name string) (checkpoint, error) {
 	var c checkpoint
 	rd, err := podcast.OpenRegular(dir, name)
 	if err != nil {
-		return c, false
+		return c, err
 	}
 	defer rd.Close()
 	b, err := io.ReadAll(io.LimitReader(rd, 16385))
-	if err != nil || len(b) > 16384 || json.Unmarshal(b, &c) != nil {
-		return checkpoint{}, false
+	if err != nil {
+		return checkpoint{}, err
 	}
-	return c, true
+	if len(b) > 16384 || json.Unmarshal(b, &c) != nil {
+		return checkpoint{}, errBadRecord
+	}
+	return c, nil
 }
 
 // records is this pairing's download records for library lib, in name order:
@@ -146,8 +153,8 @@ func (s *service) records(dir *os.Root, lib int64) ([]checkpoint, error) {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
 			continue
 		}
-		c, ok := readRecord(dir, entry.Name())
-		if ok && c.ServerHash == pairing && c.LibraryID == lib && podcast.ValidEpisodePath(c.Path) && podcast.OwnedTemp(c.Temp) && entry.Name() == recordName(lib, c.Path) {
+		c, err := readRecord(dir, entry.Name())
+		if err == nil && c.ServerHash == pairing && c.LibraryID == lib && podcast.ValidEpisodePath(c.Path) && podcast.OwnedTemp(c.Temp) && entry.Name() == recordName(lib, c.Path) {
 			out = append(out, c)
 		}
 	}
@@ -266,17 +273,21 @@ func (s *service) adoptCheckpoints(ctx context.Context, root *os.Root, lib link.
 	// running reports whether c's download still runs: a job claimed at its
 	// path, or a fetch of its episode (one that found the show elsewhere since
 	// its claim, Fetch's relocation, works at a path its row does not name).
+	paths, episodes := map[string]bool{}, map[fetchParams]bool{}
+	for _, r := range rows {
+		if r.ID == self || r.State != store.JobRunning || r.ServerID != s.o.ServerID() || r.LibraryID == nil || *r.LibraryID != lib.ID {
+			continue
+		}
+		if r.Path != nil {
+			paths[*r.Path] = true
+		}
+		var p fetchParams
+		if r.Kind == FetchKind && json.Unmarshal(r.Params, &p) == nil {
+			episodes[p] = true
+		}
+	}
 	running := func(c checkpoint) bool {
-		return slices.ContainsFunc(rows, func(r store.ServerJob) bool {
-			if r.ID == self || r.State != store.JobRunning || r.ServerID != s.o.ServerID() || r.LibraryID == nil || *r.LibraryID != lib.ID {
-				return false
-			}
-			if r.Path != nil && *r.Path == c.Path {
-				return true
-			}
-			var p fetchParams
-			return r.Kind == FetchKind && json.Unmarshal(r.Params, &p) == nil && p.ShowID == c.ShowID && p.EpisodeID == c.EpisodeID
-		})
+		return paths[c.Path] || episodes[fetchParams{c.ShowID, c.EpisodeID}]
 	}
 	for _, c := range records {
 		if c.ShowID != id {

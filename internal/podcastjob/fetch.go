@@ -145,8 +145,8 @@ func (h *Fetch) run(parent context.Context, claimed *jobs.Job, rep *jobs.Reporte
 	// episodeAt may have taken the folder in there (renamed back by hand after
 	// a take-in elsewhere, while the server still names it).
 	if _, _, err = s.readEpisode(root, *job.Path, params); err != nil {
-		p, err := s.episodeAt(waitCtx, root, lib, mount, *job.Path, params, job.ID)
-		if err != nil {
+		var p string
+		if p, err = s.episodeAt(waitCtx, root, lib, mount, *job.Path, params, job.ID); err != nil {
 			return nil, err
 		}
 		if p != *job.Path {
