@@ -164,10 +164,13 @@ var sharingParked = jobs.Progress{Step: stepSharing, Message: "Needs attention: 
 // confirms the share still stands: it is asked (Reporter.AskShareOff) just
 // before filing, as the server stops a share whose Contributions module was
 // turned off only in an answer to the job's next report, which can be a
-// keepalive away. The ask comes before the engine's hold is taken, never under
+// keepalive away. This ask comes before the engine's hold is taken, not under
 // it: an answer can take the request's whole timeout, and another job that
-// wants the book would give up on it as busy meanwhile. Under the hold what
-// changed since the answer is read again with no request (shareHeld). An
+// wants the book would give up on it as busy meanwhile. A book that is busy is
+// waited for, let go and the server asked again, as the answer is as old as
+// the wait; it is held only right after an answer. Under the hold what
+// changed since the answer is read again with no request (shareHeld), and an
+// owed share asks again before each dimension it files (stoppedBy). An
 // answer that stopped the job, or carried share_off (errShareOffNow), files
 // nothing (the job ends); so does stands (nil: none) answering false
 // (errShareOffNow). A server that couldn't be asked, a link the Bridge no
@@ -191,9 +194,17 @@ func (h *Handler) shareConfirmed(ctx context.Context, r *run, sharer Sharer, boo
 				}
 				continue // the wait for the slot can be long: ask again
 			}
-			release, herr := h.holdBook(ctx, bookID)
-			if herr != nil {
-				return pipeline.ShareResult{}, herr
+			release, held := h.hold(bookID)
+			if !held {
+				// The answer would be as old as the wait for the book (up to
+				// holdTries polls, longer than a keepalive): once the book is
+				// free it is let go, and the server asked again outside the hold.
+				waited, herr := h.holdBook(ctx, bookID)
+				if herr != nil {
+					return pipeline.ShareResult{}, herr
+				}
+				waited()
+				continue
 			}
 			off, err = shareHeld(ctx, r, stands)
 			if err == nil && !off {

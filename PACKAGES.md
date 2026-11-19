@@ -3783,19 +3783,22 @@ internal/
             book without a writable mapping (it writes nothing into the library),
             notesBook finds the engine book that keeps the results, holdBook holds
             it, and Options.Sharer (pipeline.Executor.Share) files them once the
-            server confirms the share still stands (shareConfirmed: Reporter.Refresh
+            server confirms the share still stands (shareConfirmed: asked
             just before filing, as the server stops a share whose Contributions
             module was turned off only in an answer to the job's next report, a
             keepalive away): an answer that stopped the job files nothing, a server
             that couldn't be asked parks the job share_unconfirmed (ShareUnconfirmedMsg)
             and asks again every Recheck or on Retry. The ask
             (jobs.Reporter.AskShareOff: an answer on a link the Bridge no longer
-            uses confirms nothing) comes BEFORE the engine's hold, never under it
+            uses confirms nothing) comes BEFORE the engine's hold, not under it
             (an answer can take the request's 30 s, and another job wanting the
-            book gives up as busy after holdTries polls); under the hold
-            shareHeld reads again, with no request, what changed since (a stop,
-            share_off heard, the link, stands), and anything it can't confirm
-            parks and asks again. A sidecars.contribute park Yields its
+            book gives up as busy after holdTries polls); a busy book is waited
+            for, let go and asked about again, so it is held only right after an
+            answer; under the hold shareHeld reads again, with no request, what
+            changed since (a stop, share_off heard, the link, stands), and
+            anything it can't confirm parks and asks again (an owed share's
+            stoppedBy asks before each dimension, under the hold, as the stage
+            does). A sidecars.contribute park Yields its
             light-lane slot (two parks would hold both) and Reclaims one once
             the server confirms, asking again after that wait; a sidecars.generate
             run keeps its pipeline slot as it does through engine parks. Failures

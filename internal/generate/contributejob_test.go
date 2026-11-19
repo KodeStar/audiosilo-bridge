@@ -248,6 +248,45 @@ func TestContributeJobAsksBeforeTheHold(t *testing.T) {
 	}
 }
 
+// A share that had to wait for the book's hold asks the server again before it
+// files, as its first answer is as old as the wait: a share_off set while it
+// waited files nothing (denied). TestContributeJobAsksBeforeTheHold is the
+// allowed half.
+func TestContributeJobAsksAgainAfterWaitingForTheHold(t *testing.T) {
+	t.Parallel()
+	hr := newHarness(t)
+	hr.generated(131)
+	bookID := hr.engineBook(131).ID
+	release, ok := hr.sched.Hold(bookID)
+	if !ok {
+		t.Fatal("the book couldn't be held")
+	}
+	asked := make(chan struct{})
+	var once sync.Once
+	hr.srv.set(func() {
+		hr.srv.atStep[132] = func(_ *fakeServer, step string) {
+			if step == stepSharing {
+				once.Do(func() { close(asked) })
+			}
+		}
+	})
+	s := &fakeSharer{}
+	hr.srv.addContribute(132, "Author/Book", `{}`)
+	stop := hr.shareRunner(s, func(context.Context) error { return nil })
+	defer stop()
+	<-asked
+	time.Sleep(50 * time.Millisecond) // the job waits for the book
+	hr.srv.set(func() { hr.srv.shareOff[132] = true })
+	release()
+	hr.waitFor("failed", func() bool { st, _ := hr.srv.final(132); return st == link.StateFailed })
+	if calls := s.count(); calls != 0 {
+		t.Fatalf("share calls = %d after a share_off set while the job waited for the book, want none", calls)
+	}
+	if _, u := hr.srv.final(132); u.Error == nil || !strings.Contains(*u.Error, errShareOffNow.Error()) {
+		t.Fatalf("failed with %v, want the share_off heard by the second ask", u.Error)
+	}
+}
+
 // A share parked share_unconfirmed gives its light-lane slot back: two such
 // parks leave the lane (two slots) free for another light job (allowed), and
 // neither files while it can't ask (denied).
