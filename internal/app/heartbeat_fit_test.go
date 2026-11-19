@@ -2,6 +2,7 @@ package app
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -18,9 +19,16 @@ import (
 )
 
 // boundedServer answers the heartbeat as a server with a body cap and a library
-// count cap (an older server: 64 KiB and 512, both a 400), listing libs.
+// count cap (an older server: 64 KiB and 512), listing libs. It refuses as the
+// server does, a 400 with no code: "invalid status" for a body over the cap (a
+// body it couldn't read), "invalid: too many libraries" for a list over it.
+// refuseSetup: it lists setup in accepts, then refuses a beat carrying it,
+// with setupRefusal ("" is "invalid status": a server that no longer knows
+// the field).
 type boundedServer struct {
 	maxBytes, maxLibs int
+	refuseSetup       bool
+	setupRefusal      string
 	libs              []link.Library
 	mu                sync.Mutex
 	sizes             []int // libraries per beat
@@ -40,20 +48,33 @@ func (f *boundedServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	raw, _ := io.ReadAll(r.Body)
 	var st link.Status
 	_ = json.Unmarshal(raw, &st)
+	refusal := ""
+	switch {
+	case len(raw) > f.maxBytes:
+		refusal = "invalid status"
+	case f.refuseSetup && st.Setup != nil:
+		refusal = cmp.Or(f.setupRefusal, "invalid status")
+	case len(st.Libraries) > f.maxLibs:
+		refusal = "invalid: too many libraries"
+	}
 	code := http.StatusOK
-	if len(raw) > f.maxBytes || len(st.Libraries) > f.maxLibs {
+	if refusal != "" {
 		code = http.StatusBadRequest
 	}
 	f.mu.Lock()
 	f.sizes = append(f.sizes, len(st.Libraries))
 	f.codes = append(f.codes, code)
 	f.mu.Unlock()
-	if code != http.StatusOK {
+	if refusal != "" {
 		w.WriteHeader(code)
-		_, _ = io.WriteString(w, `{"error":"invalid status"}`)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": refusal})
 		return
 	}
-	_ = json.NewEncoder(w).Encode(link.StatusReply{ServerTime: "now", Libraries: f.libs})
+	reply := link.StatusReply{ServerTime: "now", Libraries: f.libs}
+	if f.refuseSetup {
+		reply.Accepts = []string{link.AcceptSetup}
+	}
+	_ = json.NewEncoder(w).Encode(reply)
 }
 
 func (f *boundedServer) beats() (sizes, codes []int) {
@@ -192,5 +213,46 @@ func TestHeartbeatRefusedNotForSizeIsNotResent(t *testing.T) {
 	b.mu.Unlock()
 	if beatErr == "" || !fitAt.IsZero() {
 		t.Fatalf("beatErr %q, libsFitAt %v", beatErr, fitAt)
+	}
+}
+
+// A 400 that names something other than the size takes the setup path though
+// the list is over an older server's bounds: the whole list goes again
+// without the setup block, nothing is cut, and the warning names the setup
+// block (a server that takes 2 MiB and 4096 libraries).
+func TestHeartbeatRefusedForABadSetupBlockKeepsTheWholeList(t *testing.T) {
+	f := &boundedServer{maxBytes: 2 << 20, maxLibs: 4096, refuseSetup: true, setupRefusal: "invalid: setup"}
+	b, ctx, logs := boundedBridge(t, f, 600)
+	b.beat(ctx) // the whole list, no setup yet: accepts listed
+	drainKick(b)
+	b.beat(ctx) // with setup: refused, then taken whole without it
+	sizes, codes := f.beats()
+	if len(codes) != 3 || codes[1] != http.StatusBadRequest || codes[2] != http.StatusOK || sizes[1] != 600 || sizes[2] != 600 {
+		t.Fatalf("sizes %v, codes %v, want the whole list refused with setup, then taken without", sizes, codes)
+	}
+	b.mu.Lock()
+	fitAt, refusedAt := b.libsFitAt, b.setupRefusedAt
+	b.mu.Unlock()
+	if !fitAt.IsZero() || refusedAt.IsZero() || logs.count(fitLog) != 0 || logs.count("refused the heartbeat's setup block") != 1 {
+		t.Fatalf("libsFitAt %v, setupRefusedAt %v, cut logged %d times", fitAt, refusedAt, logs.count(fitLog))
+	}
+}
+
+// An older server's answer to a list over its count ("too many libraries",
+// its body read) is the size's too: the list goes again cut to fit.
+func TestHeartbeatRefusedForTooManyLibraries(t *testing.T) {
+	f := &boundedServer{maxBytes: 2 << 20, maxLibs: link.LegacyStatusLibraries}
+	b, ctx, logs := boundedBridge(t, f, 600)
+	b.beat(ctx)
+	sizes, codes := f.beats()
+	if len(codes) != 2 || codes[0] != http.StatusBadRequest || codes[1] != http.StatusOK ||
+		sizes[1] == 0 || sizes[1] > link.LegacyStatusLibraries {
+		t.Fatalf("sizes %v, codes %v, want the list refused, then cut and taken", sizes, codes)
+	}
+	b.mu.Lock()
+	fitAt := b.libsFitAt
+	b.mu.Unlock()
+	if fitAt.IsZero() || logs.count(fitLog) != 1 {
+		t.Fatalf("libsFitAt %v, cut logged %d times", fitAt, logs.count(fitLog))
 	}
 }

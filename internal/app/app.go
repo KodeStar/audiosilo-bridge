@@ -469,11 +469,12 @@ func (b *Bridge) beat(ctx context.Context) {
 	// A list refused for its size (an older server's 64 KiB or 512 libraries,
 	// a newer one's 2 MiB, a proxy's 413) would be refused on every beat: the
 	// Bridge only learns the server's libraries from a reply. The beat goes
-	// again at once with a list cut to fit (server#445).
+	// again at once with a list cut to fit (server#445). Only a refusal that
+	// says it is the size's (link.SizeRefusal): any other 400 leaves the list
+	// whole, and the setup block is what goes next.
 	fitNow := false
 	var apiErr *link.APIError
-	if err != nil && cut == 0 && errors.As(err, &apiErr) &&
-		(apiErr.Status == http.StatusBadRequest || apiErr.Status == http.StatusRequestEntityTooLarge) {
+	if err != nil && cut == 0 && link.SizeRefusal(err, st) {
 		if fitted, n := link.FitLibraries(st, link.LegacyStatusBytes, link.LegacyStatusLibraries); n > 0 {
 			st, cut, fitNow = fitted, n, true
 			reply, err = cl.Heartbeat(ctx, st)

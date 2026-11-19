@@ -2,7 +2,9 @@ package link
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"testing"
 )
@@ -82,5 +84,40 @@ func TestFitLibrariesLeavesAListNoCutCanFit(t *testing.T) {
 	got, cut := FitLibraries(st, LegacyStatusBytes, LegacyStatusLibraries)
 	if cut != 0 || len(got.Libraries) != 600 {
 		t.Fatalf("cut %d, kept %d, want the list left whole", cut, len(got.Libraries))
+	}
+}
+
+// A refusal is the size's only when its answer says so: a 413, the server's
+// too_large code, an older server's "too many libraries", or "invalid status"
+// (a body the server couldn't read) for a body over the smallest byte bound.
+func TestSizeRefusal(t *testing.T) {
+	big, small := statusWith(600), statusWith(3)
+	if bodySize(t, big) <= LegacyStatusBytes || bodySize(t, small) > LegacyStatusBytes {
+		t.Fatal("the fixtures are on the wrong side of the byte bound")
+	}
+	bad := func(code, msg string) error {
+		return fmt.Errorf("beat: %w", &APIError{Status: http.StatusBadRequest, Code: code, Message: msg})
+	}
+	for _, c := range []struct {
+		name string
+		err  error
+		st   Status
+		want bool
+	}{
+		{"a 413", &APIError{Status: http.StatusRequestEntityTooLarge, Message: "Request Entity Too Large"}, small, true},
+		{"the too_large code", bad("too_large", "the status is too large"), small, true},
+		{"too many libraries", bad("", "invalid: too many libraries"), small, true},
+		{"an unreadable body over the byte bound", bad("", "invalid status"), big, true},
+		{"an unreadable body within it", bad("", "invalid status"), small, false},
+		{"a bad ui_url on a long list", bad("", "invalid: ui_url must be an http(s) URL"), big, false},
+		{"a bad setup block on a long list", bad("", "invalid: setup"), big, false},
+		{"another code on a long list", bad("invalid_request", "invalid status"), big, false},
+		{"a 503 on a long list", &APIError{Status: http.StatusServiceUnavailable, Message: "invalid status"}, big, false},
+		{"no answer at all", errors.New("dial tcp: refused"), big, false},
+		{"unauthorized", ErrUnauthorized, big, false},
+	} {
+		if got := SizeRefusal(c.err, c.st); got != c.want {
+			t.Errorf("%s: SizeRefusal = %v, want %v", c.name, got, c.want)
+		}
 	}
 }

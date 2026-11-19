@@ -2055,11 +2055,18 @@ internal/
             server would refuse an unknown field); app kicks a beat when it first
             appears, resends once without it on a 400, then ignores accepts for an
             hour, and resets that on every pair or unpair.
-            FitLibraries (server#445): a heartbeat refused (400 or 413) whose
+            FitLibraries (server#445): a heartbeat refused for its size whose
             library list doesn't fit an older server's bounds (LegacyStatusBytes
             64 KiB, LegacyStatusLibraries 512) goes again at once cut to fit, the
             writable then mapped mappings kept first, so the reply still teaches
             the Bridge the server's libraries (it only learns them from a reply);
+            SizeRefusal says which refusals are the size's, by
+            the answer: a 413, a 400 with code too_large (no server sends it on
+            this route yet), a 400 "too many libraries" (the older server's list
+            bound, no code), or a 400 "invalid status" (a body the server couldn't
+            read: over its byte bound, but also an unknown field, so it counts
+            only for a body over 64 KiB); any other 400 leaves the list whole and
+            takes the setup path.
             app sends the cut list for an hour, then the whole list again, logs
             the cut once per link, and resets on every pair or unpair. Tried
             before the setup block is dropped.
