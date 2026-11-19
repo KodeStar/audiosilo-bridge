@@ -731,15 +731,25 @@ func (h *Handler) cantContribute(ctx context.Context, r *run) error {
 // ends here anyway (the reads kept failing, or it was cancelled meanwhile)
 // releases that book as Abandon does (when Abandon's own read of the mapping
 // works by then), unless it resumes later; a book nothing can stop is kept
-// local by its contributing stage all the same (ShareOff: no_share_job).
+// local by its contributing stage all the same (ShareOff: no_share_job). A
+// mapped book in another library is that earlier job's, whose own end leaves
+// it to this claim (store.StopGuard: the row is this claim's now), so it is
+// stopped here, as runEngineBook stops one in this library that isn't the
+// job's book: this job's own book replaces it in the mapping, and it would run
+// on with nothing to follow or stop it.
 func (h *Handler) resumeMapping(ctx context.Context, job jobs.Job) (store.GenerateBook, bool, error) {
 	for i := 1; ; i++ {
 		mapped, err := h.mappingOf(ctx, job.ID)
 		switch {
 		case errors.Is(err, store.ErrNotFound):
 			return store.GenerateBook{}, false, nil
+		case err == nil && mapped.BookID != nil && mapped.LibraryID != *job.LibraryID:
+			h.o.Log.Warn("generate: the job's id maps to another library's run; this job starts its own",
+				"job", job.ID, "mapped_library", mapped.LibraryID, "library", *job.LibraryID)
+			h.stopBook(context.WithoutCancel(ctx), stopGuard(job, false), *mapped.BookID, false)
+			return mapped, false, nil
 		case err == nil:
-			return mapped, mapped.BookID != nil && mapped.LibraryID == *job.LibraryID, nil
+			return mapped, mapped.BookID != nil, nil
 		}
 		if i < stopTries {
 			h.o.Log.Warn("generate: reading the job's earlier run failed; trying again", "job", job.ID, "err", err)

@@ -1100,6 +1100,40 @@ func TestReleaseLeavesAnotherServersClaimOfTheSameJob(t *testing.T) {
 			t.Fatal("the dropped claim's mapping wasn't ended")
 		}
 	})
+	// Allowed: another server's claim of an engine kind in another library
+	// stops the dropped claim's book its id maps to, which that claim's own
+	// book replaces in the mapping (denied: left to run on unmapped, as the
+	// dropped claim's release leaves it to that claim). Its own library's book
+	// is resumed, not stopped.
+	t.Run("another server's claim in another library", func(t *testing.T) {
+		t.Parallel()
+		db := open(t)
+		sched := scheduler.New(db, events.NewHub(8), scheduler.NewStubExecutor(0, 0), 1, "", false)
+		h := New(Options{DB: db, RetentionDays: 30, Poll: time.Millisecond, Engine: func() Engine { return sched }})
+		b := claim(t, db, "a", "p1", "ours")
+		for _, kind := range []string{Kind, ChaptersKind, ReadalongKind} {
+			theirs := store.ServerJob{ID: 5, Kind: kind, Attempt: 1, ServerID: "b", Pairing: "p2"}
+			if err := db.RecordClaim(ctx, theirs); err != nil {
+				t.Fatal(err)
+			}
+			if other, err := db.OtherClaim(ctx, stopGuard(dropped, false)); err != nil || !other {
+				t.Fatalf("%s: OtherClaim = %v %v; want the engine kind's claim to follow the book", kind, other, err)
+			}
+		}
+		same, other := int64(1), int64(2)
+		job := jobs.ClaimedUnder(jobs.Job{ID: 5, Kind: ReadalongKind, Attempt: 1, LibraryID: &same}, "b", "p2")
+		if _, resumed, err := h.resumeMapping(ctx, job); err != nil || !resumed {
+			t.Fatalf("its own library: resumed %v, %v", resumed, err)
+		}
+		running(t, db, b)
+		job.LibraryID = &other
+		if _, resumed, err := h.resumeMapping(ctx, job); err != nil || resumed {
+			t.Fatalf("another library: resumed %v, %v", resumed, err)
+		}
+		if got, _ := db.GetBook(ctx, b.ID); !scheduler.IsCancelled(got) {
+			t.Fatalf("another library's book its id maps to wasn't stopped: status %q", got.Status)
+		}
+	})
 }
 
 // failFirstEngine is the engine with a stage failing the book just after the
