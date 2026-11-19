@@ -1527,7 +1527,26 @@ func TestAFetchFollowsItsShowCopiedAndDeletedMidDownload(t *testing.T) {
 	for _, to := range []string{"Renamed Show", "Fixture Show"} {
 		requireProbe(t)
 		h, job := audioHarness(t)
-		h.scan.knows = func(p string) bool { return strings.HasPrefix(p, "Fixture Show/") }
+		moved := to + "/" + strings.TrimPrefix(*job.Path, "Fixture Show/")
+		lockFile := filepath.Join(h.mount, podcast.AttachmentPath(moved, ".fetch.lock"))
+		var checked atomic.Bool
+		h.scan.knows = func(p string) bool {
+			// The episode's rescan, after the publication: the fetch holds the
+			// lock in the folder it followed, taken anew there (a copy of the
+			// file it held) at the same path as at a new one.
+			if p == moved {
+				checked.Store(true)
+				if f, err := os.OpenFile(lockFile, os.O_RDWR, 0); err != nil {
+					t.Error(to, "no lock file where the show is now", err)
+				} else {
+					if free, err := tryLock(f); err != nil || free {
+						t.Error(to, "the fetch published holding no lock where the show is now", err)
+					}
+					f.Close()
+				}
+			}
+			return strings.HasPrefix(p, "Fixture Show/")
+		}
 		audio := data(t, "chap-v24-reverse.mp3")
 		show := filepath.Join(h.mount, "Fixture Show")
 		var calls atomic.Int32
@@ -1551,10 +1570,9 @@ func TestAFetchFollowsItsShowCopiedAndDeletedMidDownload(t *testing.T) {
 			w.Write(audio[2000:])
 		})
 		res, err := h.handler.FetchJob().Run(context.Background(), job, jobs.LocalReporter())
-		moved := to + "/" + strings.TrimPrefix(*job.Path, "Fixture Show/")
 		got, ok := res.(fetchResult)
-		if err != nil || !ok || got.Path != moved || got.Fetch.Bytes != int64(len(audio)) || calls.Load() != 1 {
-			t.Fatal(to, res, err, calls.Load())
+		if err != nil || !ok || got.Path != moved || got.Fetch.Bytes != int64(len(audio)) || calls.Load() != 1 || !checked.Load() {
+			t.Fatal(to, res, err, calls.Load(), checked.Load())
 		}
 		root, err := os.OpenRoot(h.mount)
 		if err != nil {
