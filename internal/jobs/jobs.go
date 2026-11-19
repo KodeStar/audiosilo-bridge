@@ -710,15 +710,17 @@ func (r *Runner) execute(ctx, base context.Context, srv Server, h Handler, ru *r
 	// write failed, or that a refused token stopped, has it stored again.
 	rep := &Reporter{r: r, ru: ru, srv: srv, job: ru.job, cancel: ru.cancel, ctx: ctx, nudge: make(chan struct{}, 1),
 		shareOff: ru.job.shareOff}
-	r.mu.Lock()
-	ru.rep = rep
-	r.mu.Unlock()
 	if ru.parked != "" {
 		rep.parked, rep.parkMsg = true, ru.parked
 		// The server hears a park whose code changes as a new park (a bell
 		// event): the first report sends the stored progress, park and all.
 		rep.progress = decodeProgress(ru.progress)
 	}
+	// Published once its park is set: Runner.ShareOff can Refresh it from now on,
+	// and a report without the park would be heard as an unpark.
+	r.mu.Lock()
+	ru.rep = rep
+	r.mu.Unlock()
 	if !rep.send() {
 		// Ended before its handler ran: a cancel or a lost claim ends it for good,
 		// so what an earlier run of it left (an engine book) is released.
