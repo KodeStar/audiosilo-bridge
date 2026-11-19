@@ -3826,17 +3826,26 @@ internal/
             whole or a subpath, is mounted by a credential file's name (at its
             point or from its source), or holds a credential's file or the
             agent home's marker .audiosilo-agent-home (markHome writes it into
-            the agent container's home at the start) at its point or one dir
-            (or link: a run follows one) below (a tmpfs at its point only; the
+            the agent container's home at the start) anywhere within
+            maxMountDepth (8) folders (or links: a run follows one; a folder
+            already walked, by device and inode, is not walked again) below its
+            point, breadth first, matched by name from the listings
+            (credentialRel), a folder another mount is mounted at left to that
+            one's walk (Unraid's /mnt/user mounted whole: the vault at
+            appdata/audiosilo-bridge/secret.key); a tmpfs at its point only and
+            the container's own root at its point and one dir below (the
             rules and the file list are in mounts.go), the Bridge's vault
             (secret.key, secrets/<name>.enc, or those names mounted alone) and a
             container runtime's socket (docker.sock, podman.sock,
             containerd.sock: every container's files) included. BR-OPENAI-2: the
-            walk fails closed: a mount point it can enter but not list, one with
-            more than maxMountChildren (1024) entries (read up to one past it,
-            never whole), a look past lookTimeout (5 s, through
-            fsutil.LstatWithin/ReadDirNWithin: a hung NFS or SMB mount) or the
-            walk past walkBudget (20 s) each count as holding. The walk runs once
+            walk fails closed: a folder it can enter but not list, one deeper
+            than maxMountDepth, more than maxWalkEntries (100,000) entries over
+            the whole walk (each folder read up to one past it, never whole; a
+            library mounted by mistake: the compose example mounts only the
+            staging volume), the root with more than maxMountChildren (1024), a
+            look past lookTimeout (5 s, through fsutil.StatWithin/LstatWithin/
+            ReadDirNWithin: a hung NFS or SMB mount) or the walk past walkBudget
+            (20 s) each count as holding, saying to mount narrower folders. The walk runs once
             per status tick (refreshMounts) and again before each endpoint run
             starts (execute: a credential that appeared since the tick refuses
             the run); every other call takes the last answer (mountProblem,

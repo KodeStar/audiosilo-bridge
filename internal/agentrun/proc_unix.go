@@ -84,3 +84,16 @@ func ownerUID(info fs.FileInfo) (uid int, ok bool) {
 	}
 	return int(st.Uid), true
 }
+
+// fileKey is a file's device and inode: the deep mount walk's mark of a
+// folder it has been in (a link back to it is a loop).
+type fileKey struct{ dev, ino uint64 }
+
+// fileKeyOf is info's fileKey, false when the system gives none.
+func fileKeyOf(info fs.FileInfo) (fileKey, bool) {
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return fileKey{}, false
+	}
+	return fileKey{dev: uint64(st.Dev), ino: st.Ino}, true // Dev is an int32 on darwin
+}

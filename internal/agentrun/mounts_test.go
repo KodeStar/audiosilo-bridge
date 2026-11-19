@@ -193,16 +193,34 @@ func TestEndpointRunRefusedBesideCredentialMounts(t *testing.T) {
 			},
 			why: "by a credential's name",
 		},
-		"a mount with more entries than the check looks through": {
+		"Unraid's /mnt/user mounted whole, the vault three folders down": {
 			mounts: func(t *testing.T, dir string) ([]mount, error) {
-				for i := range maxMountChildren + 1 {
-					if err := os.WriteFile(filepath.Join(dir, strconv.Itoa(i)), nil, 0o600); err != nil {
-						t.Fatal(err)
-					}
+				mkfile(t, filepath.Join(dir, "media", "Audiobooks", "Author", "Book", "01.mp3"))
+				mkfile(t, filepath.Join(dir, "appdata", "plex", "Preferences.xml"))
+				mkfile(t, filepath.Join(dir, "appdata", "audiosilo-bridge", "secret.key"))
+				return []mount{{root: "/mnt/user", point: dir, fstype: "shfs"}}, nil
+			},
+			why: filepath.Join("appdata", "audiosilo-bridge", "secret.key"),
+		},
+		"a parent of the agent volume, its home five folders down": {
+			mounts: func(t *testing.T, dir string) ([]mount, error) {
+				mkfile(t, filepath.Join(dir, "lib", "docker", "volumes", "stack_agent", "_data", agentHomeMarker))
+				return []mount{at(dir)}, nil
+			},
+			why: agentHomeMarker,
+		},
+		"a mount deeper than the check looks": {
+			mounts: func(t *testing.T, dir string) ([]mount, error) {
+				deep := dir
+				for i := range maxMountDepth + 1 {
+					deep = filepath.Join(deep, "d"+strconv.Itoa(i))
+				}
+				if err := os.MkdirAll(deep, 0o700); err != nil {
+					t.Fatal(err)
 				}
 				return []mount{at(dir)}, nil
 			},
-			why: "more than 1024 entries",
+			why: "deeper than the check looks; mount narrower folders",
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -321,6 +339,7 @@ func TestMountCheckFailsClosed(t *testing.T) {
 		lstat, readDir func(string) error
 		dir            func(t *testing.T, dir string)
 		budgetSpent    bool
+		maxEntries     int
 		why            string
 	}{
 		"a listing that fails": {
@@ -346,6 +365,51 @@ func TestMountCheckFailsClosed(t *testing.T) {
 			},
 			why: "can't be listed",
 		},
+		"a subfolder entered but not listed": {
+			dir: func(t *testing.T, dir string) {
+				if os.Geteuid() == 0 {
+					t.Skip("root lists every dir")
+				}
+				sub := filepath.Join(dir, "a", "b")
+				mkfile(t, filepath.Join(sub, "file"))
+				if err := os.Chmod(sub, 0o100); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = os.Chmod(sub, 0o700) })
+			},
+			why: "can't be listed",
+		},
+		"a hung subfolder": {
+			dir: func(t *testing.T, dir string) { mkfile(t, filepath.Join(dir, "share", "nfs", "file")) },
+			readDir: func(p string) error {
+				if filepath.Base(p) == "nfs" {
+					return &fs.PathError{Op: "readdir", Path: p, Err: fsutil.ErrStatTimeout}
+				}
+				return nil
+			},
+			why: "nfs didn't answer within",
+		},
+		"a hung subfolder's stat": {
+			dir: func(t *testing.T, dir string) { mkfile(t, filepath.Join(dir, "share", "nfs", "file")) },
+			lstat: func(p string) error {
+				if filepath.Base(p) == "nfs" {
+					return &fs.PathError{Op: "stat", Path: p, Err: fsutil.ErrStatTimeout}
+				}
+				return nil
+			},
+			why: "nfs didn't answer within",
+		},
+		"more entries than the walk's budget": {
+			dir: func(t *testing.T, dir string) {
+				for i := range 3 {
+					for j := range 20 {
+						mkfile(t, filepath.Join(dir, "book"+strconv.Itoa(i), strconv.Itoa(j)+".mp3"))
+					}
+				}
+			},
+			maxEntries: 50,
+			why:        "more than 50 entries, more than the check looks through; mount narrower folders",
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -353,15 +417,36 @@ func TestMountCheckFailsClosed(t *testing.T) {
 			if tc.dir != nil {
 				tc.dir(t, dir)
 			}
-			w := &mountWalk{looks: boundedLooks, deadline: time.Now().Add(time.Minute)}
+			w := newMountWalk(boundedLooks)
 			if tc.budgetSpent {
 				w.deadline = time.Now().Add(-time.Second)
 			}
+			if tc.maxEntries > 0 {
+				w.maxEntries = tc.maxEntries
+			}
+			// An injected look's error stands for both stats (the deep walk
+			// follows links, the shallow one doesn't); nil looks for real.
 			if tc.lstat != nil {
-				w.lstat = func(p string) (fs.FileInfo, error) { return nil, tc.lstat(p) }
+				w.lstat = func(p string) (fs.FileInfo, error) {
+					if err := tc.lstat(p); err != nil {
+						return nil, err
+					}
+					return boundedLooks.lstat(p)
+				}
+				w.stat = func(p string) (fs.FileInfo, error) {
+					if err := tc.lstat(p); err != nil {
+						return nil, err
+					}
+					return boundedLooks.stat(p)
+				}
 			}
 			if tc.readDir != nil {
-				w.readDir = func(p string) ([]fs.DirEntry, error) { return nil, tc.readDir(p) }
+				w.readDir = func(p string) ([]fs.DirEntry, error) {
+					if err := tc.readDir(p); err != nil {
+						return nil, err
+					}
+					return boundedLooks.readDir(p)
+				}
 			}
 			why := w.credentialMount([]mount{at(dir)})
 			if !strings.Contains(why, tc.why) || !strings.Contains(why, "can't be checked") {
@@ -369,10 +454,19 @@ func TestMountCheckFailsClosed(t *testing.T) {
 			}
 		})
 	}
-	// The same mount, answering, passes (allowed).
-	w := &mountWalk{looks: boundedLooks, deadline: time.Now().Add(time.Minute)}
-	if why := w.credentialMount([]mount{at(t.TempDir())}); why != "" {
+	// The same mount, answering, passes (allowed), and so does one within the
+	// budget.
+	if why := newMountWalk(boundedLooks).credentialMount([]mount{at(t.TempDir())}); why != "" {
 		t.Fatalf("an empty mount = %q, want none", why)
+	}
+	within := t.TempDir()
+	for j := range 20 {
+		mkfile(t, filepath.Join(within, "book", strconv.Itoa(j)+".mp3"))
+	}
+	w := newMountWalk(boundedLooks)
+	w.maxEntries = 50
+	if why := w.credentialMount([]mount{at(within)}); why != "" {
+		t.Fatalf("a mount within the budget = %q, want none", why)
 	}
 }
 
@@ -445,7 +539,7 @@ func TestCredentialSinceTheLastWalkRefusesTheRun(t *testing.T) {
 func TestMountCheckFollowsLinksAndFindsSockets(t *testing.T) {
 	t.Parallel()
 	walk := func(ms ...mount) string {
-		return (&mountWalk{looks: boundedLooks, deadline: time.Now().Add(time.Minute)}).credentialMount(ms)
+		return newMountWalk(boundedLooks).credentialMount(ms)
 	}
 	dir := t.TempDir()
 	mkfile(t, filepath.Join(dir, "appdata", "audiosilo-bridge", "secret.key"))
@@ -587,5 +681,86 @@ func TestVaultNamesMatchTheVault(t *testing.T) {
 		if !slices.Contains(vaultSealed, n) {
 			t.Errorf("vaultSealed lacks %s", n)
 		}
+	}
+}
+
+// A deep tree with nothing of the subscriptions or the vault in it passes
+// (allowed): a library to maxMountDepth folders down, files at the bottom, and
+// a tmpfs mounted inside it, left to its own look (its point alone), with a
+// run's files one folder down.
+func TestDeepCleanMountAllowed(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	deep := dir
+	for i := range maxMountDepth {
+		deep = filepath.Join(deep, "d"+strconv.Itoa(i))
+	}
+	mkfile(t, filepath.Join(deep, "01.mp3"))
+	mkfile(t, filepath.Join(dir, "Author", "Series", "Book", "cover.jpg"))
+	tmp := filepath.Join(dir, "tmp")
+	mkfile(t, filepath.Join(tmp, "run-1", "codex", "auth.json"))
+	ms := []mount{at(dir), {root: "/", point: tmp, fstype: "tmpfs"}}
+	if why := newMountWalk(boundedLooks).credentialMount(ms); why != "" {
+		t.Fatalf("a deep clean tree = %q, want none", why)
+	}
+	// The same tree with the vault at its bottom is refused (denied).
+	mkfile(t, filepath.Join(deep, vaultKeyFile))
+	if why := newMountWalk(boundedLooks).credentialMount(ms); !strings.Contains(why, filepath.Join(deep, vaultKeyFile)) {
+		t.Fatalf("the vault at the bottom = %q, want it found", why)
+	}
+}
+
+// Links that lead back up the tree are walked once, never round and round
+// (allowed: no loop is a credential, nor runs into the depth bound), while a
+// credential reached only through a link deep down is still found (denied).
+func TestDeepWalkLinkLoops(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	mkfile(t, filepath.Join(dir, "a", "b", "c", "file"))
+	for link, target := range map[string]string{
+		filepath.Join(dir, "a", "b", "c", "up"):   filepath.Join("..", ".."),
+		filepath.Join(dir, "a", "b", "self"):      ".",
+		filepath.Join(dir, "a", "top"):            dir,
+		filepath.Join(dir, "a", "b", "c", "loop"): "loop",
+	} {
+		if err := os.Symlink(target, link); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if why := newMountWalk(boundedLooks).credentialMount([]mount{at(dir)}); why != "" {
+		t.Fatalf("links back up the tree = %q, want none", why)
+	}
+	elsewhere := t.TempDir()
+	mkfile(t, filepath.Join(elsewhere, "bridge-data", "secrets", "server_token.enc"))
+	if err := os.Symlink(elsewhere, filepath.Join(dir, "a", "b", "c", "out")); err != nil {
+		t.Fatal(err)
+	}
+	if why := newMountWalk(boundedLooks).credentialMount([]mount{at(dir)}); !strings.Contains(why, "server_token.enc") {
+		t.Fatalf("a link out to the vault = %q, want it found", why)
+	}
+}
+
+// The container's own root is looked at shallow, as before the deep walk: its
+// point and one folder below (allowed: the image's trees are deeper than
+// maxMountDepth), still finding a login there (denied).
+func TestRootMountShallow(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	deep := root
+	for i := range maxMountDepth + 2 {
+		deep = filepath.Join(deep, "usr"+strconv.Itoa(i))
+	}
+	mkfile(t, filepath.Join(deep, "lib.so"))
+	walk := func() string {
+		w := newMountWalk(boundedLooks)
+		w.rootPoint = root
+		return w.credentialMount([]mount{{root: "/", point: root, fstype: "overlay"}})
+	}
+	if why := walk(); why != "" {
+		t.Fatalf("the image's deep root = %q, want none", why)
+	}
+	mkfile(t, filepath.Join(root, "home", ".codex", "auth.json"))
+	if why := walk(); !strings.Contains(why, "auth.json") {
+		t.Fatalf("a login in the root = %q, want it found", why)
 	}
 }

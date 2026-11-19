@@ -31,18 +31,27 @@ import (
 //   - holds a credential's file, the agent home's marker (agentHomeMarker,
 //     which the agent container's runner writes into its home), the
 //     Bridge's own vault (its secret.key, a sealed secret) or a container
-//     runtime's socket (runtimeSockets: every container's files) at the mount
-//     point or one directory (or link) below it (a tmpfs at its point only):
-//     that finds the agent volume under any name or path, a bind mount of a
-//     CLI's login or of the Bridge's data, and a parent folder holding
-//     either. Where the service's user can't enter a directory, neither can a
-//     run's commands (the same uid, no capability), so a closed one counts as
-//     holding nothing.
+//     runtime's socket (runtimeSockets: every container's files) anywhere
+//     within maxMountDepth folders (or links) below its point: that finds the
+//     agent volume under any name or path, a bind mount of a CLI's login or of
+//     the Bridge's data, and a parent folder holding either however far up
+//     (Unraid's /mnt/user mounted whole holds the vault at
+//     appdata/audiosilo-bridge/secret.key). Where the service's user can't
+//     enter a directory, neither can a run's commands (the same uid, no
+//     capability), so a closed one counts as holding nothing.
 //
-// The check fails closed: a mount point it can enter but not list, one with
-// more than maxMountChildren entries, or a look that doesn't answer within
-// lookTimeout (a hung NFS or SMB mount) or past walkBudget refuses the runs as
-// a credential found would, rather than pass what it couldn't look at.
+// Two kinds of mount are looked at shallower: a tmpfs at its point alone
+// (pseudoFS says why), and the container's own root at its point and one
+// folder (or link) below, as before the deep walk: it holds the image's files
+// and its writable layer (deeper than maxMountDepth in places), and the host's
+// files reach the container only through a mount, each walked on its own.
+//
+// The check fails closed: a folder it can enter but not list, a mount deeper
+// than maxMountDepth, more than maxWalkEntries entries over the whole walk (a
+// library mounted by mistake), a look that doesn't answer within lookTimeout
+// (a hung NFS or SMB mount) or the walk past walkBudget each refuse the runs
+// as a credential found would, saying to mount narrower folders, rather than
+// pass what it couldn't look at.
 //
 // Every mount is looked at wherever it is, /dev included: only the kernel's
 // own filesystems (pseudoFS) are passed over, by type, never by path.
@@ -76,10 +85,24 @@ var pseudoFS = map[string]bool{
 	"binfmt_misc": true, "nsfs": true, "autofs": true,
 }
 
-// maxMountChildren bounds the entries of one mount point the check looks
-// through: one with more (a large library folder mounted by mistake) refuses
-// the runs rather than be walked whole or in part.
+// maxMountChildren bounds the entries of the container's root the check
+// looks through (its shallow walk lists the root alone): more refuses the runs.
 const maxMountChildren = 1024
+
+// maxMountDepth is how many folders below a mount's point the check lists,
+// so it sees the files one further down: Unraid's /mnt/user mounted whole
+// holds the vault three down (appdata/audiosilo-bridge/secret.key) and a
+// host's /var the agent volume's secrets seven down
+// (lib/docker/volumes/<name>/_data/secrets/<file>). A folder deeper than that
+// refuses the runs.
+const maxMountDepth = 8
+
+// maxWalkEntries bounds the entries the deep walk lists over all the mounts
+// at one check (each status tick and each endpoint run's start). The compose
+// example's agent-endpoint mounts its staging volume alone, a few run folders;
+// a mount with more (a library of a few thousand books, a host's whole share)
+// refuses the runs rather than be walked every tick or passed half looked at.
+const maxWalkEntries = 100_000
 
 // lookTimeout bounds each look of the check (a stat, a folder read), and
 // walkBudget the whole walk: a hung network mount refuses the runs rather than
@@ -155,6 +178,16 @@ var credentialPaths = func() []string {
 	return out
 }()
 
+// credentialRel is credentialPaths as a set: the deep walk matches a folder's
+// entries by their name, or their folder's name and theirs (codex/config.toml).
+var credentialRel = func() map[string]bool {
+	out := map[string]bool{}
+	for _, rel := range credentialPaths {
+		out[rel] = true
+	}
+	return out
+}()
+
 // parseMountinfo reads /proc/self/mountinfo's lines: "id parent major:minor
 // root point options [optional...] - fstype source superoptions", the paths
 // with space, tab, newline and backslash escaped as octal (\040). The fields
@@ -217,32 +250,57 @@ func isAgentVolume(root string) bool {
 // lookTimeout (a test injects its own).
 type looks struct {
 	lstat   func(string) (fs.FileInfo, error)
+	stat    func(string) (fs.FileInfo, error)
 	readDir func(string) ([]fs.DirEntry, error)
 }
 
 // boundedLooks are the real calls, each bounded by lookTimeout
-// (fsutil.LstatWithin, fsutil.ReadDirNWithin: one look in flight per path, so
-// a check every tick over a hung mount never piles up blocked ones). A folder
-// is read up to one entry past maxMountChildren, never whole: that one says it
-// holds more than the check looks through.
+// (fsutil.LstatWithin, StatWithin, ReadDirNWithin: one look in flight per
+// path, so a check every tick over a hung mount never piles up blocked ones).
+// A folder is read up to one entry past maxWalkEntries, never whole, and every
+// read asks that same n (ReadDirNWithin answers a read in flight whatever its
+// n).
 var boundedLooks = looks{
 	lstat: func(p string) (fs.FileInfo, error) { return fsutil.LstatWithin(p, lookTimeout) },
+	stat:  func(p string) (fs.FileInfo, error) { return fsutil.StatWithin(p, lookTimeout) },
 	readDir: func(p string) ([]fs.DirEntry, error) {
-		return fsutil.ReadDirNWithin(p, maxMountChildren+1, lookTimeout)
+		return fsutil.ReadDirNWithin(p, maxWalkEntries+1, lookTimeout)
 	},
 }
 
-// mountWalk is one run of the check over the mounts: its looks, and the
-// deadline the whole walk must end by.
+// mountWalk is one run of the check over the mounts: its looks, the deadline
+// the whole walk must end by, and the entries the deep walk may list.
 type mountWalk struct {
 	looks
 	deadline time.Time
+	// listed and maxEntries are the entries the deep walk has listed so far
+	// and may list in all.
+	listed, maxEntries int
+	// rootPoint is the container's own root's mount point, walked shallow ("/";
+	// a test sets its own).
+	rootPoint string
+	// points are the mounts' points: the deep walk of one mount leaves another
+	// mounted in it to that one's own walk.
+	points map[string]bool
 }
+
+// newMountWalk is a check over the mounts starting now, with the walk's
+// bounds (walkBudget, maxWalkEntries).
+func newMountWalk(l looks) *mountWalk {
+	return &mountWalk{looks: l, deadline: time.Now().Add(walkBudget), maxEntries: maxWalkEntries, rootPoint: "/"}
+}
+
+// narrower ends the error of a bound the walk ran into: what the admin can do.
+const narrower = "; mount narrower folders into this service"
 
 // credentialMount names the first of mounts that is the agent volume or holds
 // a credential's file (the rules above), "" when none does. A mount it can't
 // look through is named too, with why (the check fails closed).
 func (w *mountWalk) credentialMount(mounts []mount) string {
+	w.points = make(map[string]bool, len(mounts))
+	for _, m := range mounts {
+		w.points[m.point] = true
+	}
 	for _, m := range mounts {
 		switch {
 		case isAgentVolume(m.root):
@@ -263,9 +321,13 @@ func (w *mountWalk) credentialMount(mounts []mount) string {
 	return ""
 }
 
-// credentialIn is the first credential's file in m, at its point or one
-// directory below it (a tmpfs at its point only), "" when none is.
+// credentialIn is the first credential's file in m, "" when none is: the deep
+// walk's, or for a tmpfs (at its point) and the container's root (at its point
+// and one directory below) the shallow look's.
 func (w *mountWalk) credentialIn(m mount) (string, error) {
+	if m.fstype != "tmpfs" && m.point != w.rootPoint {
+		return w.deepCredentialIn(m.point)
+	}
 	dirs, err := w.dirsOf(m.point, m.fstype != "tmpfs")
 	if err != nil {
 		return "", err
@@ -276,6 +338,97 @@ func (w *mountWalk) credentialIn(m mount) (string, error) {
 		}
 	}
 	return "", nil
+}
+
+// walkDir is a folder the deep walk is to list: its path as walked (through
+// links) and how many folders below the mount's point it is.
+type walkDir struct {
+	path  string
+	depth int
+}
+
+// deepCredentialIn walks the mount at point breadth first, its folders and the
+// links in them to maxMountDepth (a run follows a link as readily as it enters
+// a folder; one to a file, nowhere or itself holds nothing, and one to a folder
+// the walk has been in, by device and inode, is not walked again: no loop),
+// and returns the first entry that is a credential's file (credentialRel),
+// "" when none is. A folder another mount is mounted at is left to that one's
+// walk. Breadth first, a credential near the top is found before a large
+// folder further down spends the budget.
+func (w *mountWalk) deepCredentialIn(point string) (string, error) {
+	queue := []walkDir{{path: point}}
+	seen := map[fileKey]bool{}
+	for len(queue) > 0 {
+		d := queue[0]
+		queue = queue[1:]
+		entries, err := w.listDir(d, seen)
+		if err != nil {
+			return "", err
+		}
+		parent := filepath.Base(d.path)
+		for _, e := range entries {
+			if credentialRel[e.Name()] || credentialRel[parent+"/"+e.Name()] {
+				return filepath.Join(d.path, e.Name()), nil
+			}
+		}
+		for _, e := range entries {
+			p := filepath.Join(d.path, e.Name())
+			if (e.IsDir() || e.Type()&fs.ModeSymlink != 0) && !w.points[p] {
+				queue = append(queue, walkDir{path: p, depth: d.depth + 1})
+			}
+		}
+	}
+	return "", nil
+}
+
+// listDir is the entries of d for the deep walk, none when it holds nothing a
+// run could reach: missing, not a folder (a file, a link to one or to
+// nowhere), a link loop, closed to the runner, or a folder already walked. A
+// folder deeper than maxMountDepth, entries past the walk's budget, one the
+// runner can enter but not list, a look that didn't answer and the walk past
+// its deadline are errors (fail closed).
+func (w *mountWalk) listDir(d walkDir, seen map[fileKey]bool) ([]fs.DirEntry, error) {
+	if err := w.inTime(); err != nil {
+		return nil, err
+	}
+	info, err := w.stat(d.path)
+	switch {
+	case errors.Is(err, fsutil.ErrStatTimeout):
+		return nil, timedOut(d.path)
+	case errors.Is(err, fs.ErrNotExist), errors.Is(err, fs.ErrPermission), errors.Is(err, syscall.ENOTDIR),
+		errors.Is(err, syscall.ELOOP):
+		return nil, nil
+	case err != nil:
+		return nil, fmt.Errorf("%s can't be looked at (%w)", d.path, err)
+	case !info.IsDir():
+		return nil, nil
+	}
+	if k, ok := fileKeyOf(info); ok {
+		if seen[k] {
+			return nil, nil
+		}
+		seen[k] = true
+	}
+	if d.depth > maxMountDepth {
+		return nil, fmt.Errorf("%s is more than %d folders down, deeper than the check looks%s", d.path, maxMountDepth,
+			narrower)
+	}
+	entries, err := w.readDir(d.path)
+	switch {
+	case err == nil:
+	case errors.Is(err, fsutil.ErrStatTimeout):
+		return nil, timedOut(d.path)
+	case errors.Is(err, fs.ErrPermission) && !enterable(d.path):
+		return nil, nil
+	default:
+		return nil, fmt.Errorf("%s can't be listed (%w)", d.path, err)
+	}
+	w.listed += len(entries)
+	if w.listed > w.maxEntries {
+		return nil, fmt.Errorf("by %s the mounts hold more than %d entries, more than the check looks through%s",
+			d.path, w.maxEntries, narrower)
+	}
+	return entries, nil
 }
 
 // credentialUnder is the first of credentialPaths present under dir, "" when
@@ -352,7 +505,8 @@ func (w *mountWalk) dirsOf(dir string, below bool) ([]string, error) {
 		return nil, fmt.Errorf("its folders can't be listed (%w)", err)
 	}
 	if len(entries) > maxMountChildren {
-		return nil, fmt.Errorf("it holds more than %d entries, more than the check looks through", maxMountChildren)
+		return nil, fmt.Errorf("it holds more than %d entries, more than the check looks through%s", maxMountChildren,
+			narrower)
 	}
 	out := []string{dir}
 	for _, e := range entries {

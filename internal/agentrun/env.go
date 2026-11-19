@@ -217,7 +217,7 @@ func (r *Runner) walkMountsLocked() {
 	if ms, err := r.mounts(); err != nil {
 		why = "the mounts can't be read: " + err.Error()
 	} else {
-		why = (&mountWalk{looks: r.looks, deadline: time.Now().Add(walkBudget)}).credentialMount(ms)
+		why = newMountWalk(r.looks).credentialMount(ms)
 	}
 	r.mountLast.Store(&why)
 }
