@@ -2041,7 +2041,11 @@ internal/
             ErrNoBook, ErrNotIndexable (a rescan's 404 not_indexable), else *APIError
             (an HTML proxy page never becomes a message; RetryAfter carries a 429's
             Retry-After, seconds or an HTTP date, clamped at a day; RetryAfterSet
-            distinguishes a valid zero wait from a missing or invalid header);
+            distinguishes a valid zero wait from a missing or invalid header;
+            RateLimited picks a 429 out, Backoff.Wait is the shared wait-out rule:
+            Retry-After, else First doubling, Tries asks, each wait at most Max;
+            the doubling stops at the first wait over Max, so no count of 429s
+            overflows it, and a count below 1 is the first);
             a 2xx it can't use (not the JSON expected, a pairing with no token)
             is ErrUnusableAnswer (bridge#28), worded as its cause, which the
             page's pairing error keys on rather than on what's left over.
@@ -2398,8 +2402,17 @@ internal/
             renamed by hand still names its episodes under the old folder, which
             Read refuses: ReadMoved answers the old name (a folder whose old name
             still holds the same show id is a copy and is refused, as is one
-            whose old name has a feed.json it cannot read; an old name holding
-            another show, names swapped by hand, or none is a rename) and Adopt
+            whose old name has a feed.json it cannot read, or none but still
+            holds an audio file or an owned temp, a partial (ErrHeld, an
+            ErrInvalidFile): the show's own folder that lost its feed.json, so
+            a backup copy of it is never taken in. Any audio file counts, not
+            only the episodes the copy's feed.json names: a backup older than
+            an episode does not name it, and a normalising filesystem spells a
+            name otherwise. No sweep reads a folder with no feed.json, so the
+            refusal stands until those files go by hand, and podcastjob says so
+            in the log, naming the folder ReadMoved answers with it
+            (warnHeld). An old name holding another show, names
+            swapped by hand, or no audio (a new empty folder) is a rename) and Adopt
             moves the paths of the pending journals, the committed trash
             manifests and then feed.json, so a stop part way through adopts
             again (a manifest it could not rewrite stops it before feed.json).
@@ -2447,13 +2460,42 @@ internal/
             partial. A fetch whose folder lockShow takes in where it is (renamed
             back by hand after a take-in) reads its episode again there rather
             than failing as not found. A fetch whose folder is renamed while it
-            downloads finds the show again after the download (episodeAt) and
-            publishes there from its partial, its record and lock following
-            (heldLock.follow), never downloading again; one the Bridge stops
+            downloads finds the show again (episodeAt) whenever its partial is
+            no longer at its path, or with no partial yet its folder is gone
+            (settle: before each host attempt, before a retry's clear and at a
+            failure's exit, so a host retry resumes from the partial there, or
+            makes its first one there, and a failure clears it there) and after the
+            download, and publishes there from its partial, its record and lock
+            following (heldLock.follow), never downloading again. A folder
+            "renamed" by a copy and a delete (a move across filesystems) leaves
+            a copy of the lock file, not the one held: the fetch takes the lock
+            there anew before it moves (followLock, one ceiling's wait for a
+            holder, then write_failed where it was) rather than go on with
+            none. The exit's settle is bounded by one ceiling. Under the
+            episode's lock its own record moves even when a duplicate claim's
+            open row names it (adoptOwn, also after a relocation before the
+            download); one of the episode at the new path already wins and
+            the old one is cleared with its partial, never the partial the
+            download is writing. A record there that is not the episode's
+            (another show's, names swapped by hand, or one that cannot be
+            read) costs the fetch nothing of its own, nor does a records
+            folder that could not say whether one is there: the start asks
+            again once dropStaleCheckpoint cleared another identity's, so
+            the fetch resumes from its own partial, and the end once more,
+            so no record stays under a folder that is gone, where nothing
+            would clear it or sweep its partial. One the Bridge stops
             meanwhile keeps its record (read, not loaded, at the stop), and
             the resumed job goes on from the partial there. An episode path the
             server answers not_indexable (its show folder renamed since the
-            server read it) is indexed by rescanning the show folder. A saved feed.json over
+            server read it) is indexed by rescanning the show folder. The
+            server's 429 to any rescan is waited out (askRescan, link.Backoff:
+            its Retry-After, else 2 s doubling; 3 asks, each wait at most 30 s,
+            as audiblejob's enrichment). One an episode's rescan could not wait
+            out leaves the saved episode for the show's next poll's rescan
+            (isIndexed) and the fetch succeeds, never index_failed (a retain
+            then leaves its other deletions' rescans to that poll too, rather
+            than wait again for each); a subscribe's or poll's fails
+            write_failed, the rescan still owed. A saved feed.json over
             the read cap fails as too_large, not write_failed. A new show never
             takes the old name of a renamed folder not taken in yet (find
             answers those names): the server indexes that name as the renamed
@@ -2925,7 +2967,7 @@ internal/
             a permission refusal is not_writable), rescan (the placed file; the
             server answers the book path, retried 3 times; failing says the book is
             placed), enrich (the ASIN; asin_set is enriched false, no failure; 429s
-            waited out as the poll's enrichment does, limitWait, then enriched
+            waited out as the poll's enrichment does, enrichLimit, then enriched
             false). The books of the library the file could join (joinedBooks: at
             its own path, its folder or a disc set's folder above it) each get a
             verdict, the BookMatcher picking that book for the title, not

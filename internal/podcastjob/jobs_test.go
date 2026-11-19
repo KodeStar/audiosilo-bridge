@@ -51,8 +51,12 @@ type scanServer struct {
 	// knows, when set, is whether the server has indexed an episode path: like
 	// the server, an episode it has not is refused (not_indexable).
 	knows func(episode string) bool
-	mu    sync.Mutex
-	asked []string
+	// limited, while above 0, answers that many rescans 429 with limit as
+	// their Retry-After (none when limit is nil).
+	limited atomic.Int32
+	limit   *time.Duration
+	mu      sync.Mutex
+	asked   []string
 }
 
 func (s *scanServer) RescanPodcast(_ context.Context, _ int64, show string) (*link.PodcastRescan, error) {
@@ -62,6 +66,13 @@ func (s *scanServer) RescanPodcast(_ context.Context, _ int64, show string) (*li
 	s.mu.Unlock()
 	if s.fail.Load() {
 		return nil, errors.New("server unavailable")
+	}
+	if s.limited.Add(-1) >= 0 {
+		e := &link.APIError{Status: http.StatusTooManyRequests, Code: "rate_limited"}
+		if s.limit != nil {
+			e.RetryAfter, e.RetryAfterSet = *s.limit, true
+		}
+		return nil, e
 	}
 	if strings.Contains(show, "/") && s.knows != nil && !s.knows(show) {
 		return nil, link.ErrNotIndexable
@@ -514,6 +525,51 @@ func TestPollRescansWhatAFailedJobLeftOwed(t *testing.T) {
 	}
 	if _, err := h.handler.PollJob().Run(context.Background(), poll, jobs.LocalReporter()); err != nil || h.scan.calls.Load() != scans+1 {
 		t.Fatal("an indexed show was rescanned again", err)
+	}
+}
+
+// The poll's own rescan waits out the server's 429 (askRescan) rather than
+// fail write_failed at once; one still limited past the bounds fails as
+// before and leaves the rescan owed to the next poll.
+func TestPollRescanWaitsOutTheServersLimit(t *testing.T) {
+	t.Parallel()
+	second := time.Second
+	for _, tc := range []struct {
+		name    string
+		limited int32
+		asks    int32
+		waits   []time.Duration
+		fails   bool
+	}{
+		{"waited out", 2, 3, []time.Duration{time.Second, time.Second}, false},
+		{"still limited", 100, rescanTries, []time.Duration{time.Second, time.Second}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := newHarness(t)
+			job := h.claim(h.http.URL+"/feed", false)
+			if _, err := h.handler.Run(context.Background(), job, jobs.LocalReporter()); err != nil {
+				t.Fatal(err)
+			}
+			var waits []time.Duration
+			h.handler.s.o.Wait = func(_ context.Context, d time.Duration) error { waits = append(waits, d); return nil }
+			show := "Example Show"
+			poll := jobs.Job{ID: 10, Kind: PollKind, LibraryID: job.LibraryID, Path: &show, Params: json.RawMessage(`{"etag":"\"abc\""}`)}
+			h.newEpisode.Store(true)
+			h.scan.limit = &second
+			h.scan.limited.Store(tc.limited)
+			scans := h.scan.calls.Load()
+			res, err := h.handler.PollJob().Run(context.Background(), poll, jobs.LocalReporter())
+			if got := h.scan.calls.Load() - scans; got != tc.asks || !slices.Equal(waits, tc.waits) {
+				t.Fatal("asks", got, "waits", waits)
+			}
+			if tc.fails != (err != nil) || tc.fails && fields(t, res)["code"] != "write_failed" {
+				t.Fatal("a limited poll rescan", res, err)
+			}
+			if h.handler.s.isIndexed(3, show) == tc.fails {
+				t.Fatal("indexed", !tc.fails)
+			}
+		})
 	}
 }
 

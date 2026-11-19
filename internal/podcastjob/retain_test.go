@@ -399,3 +399,61 @@ func TestRetainServerOutOfReachIsBridgeLost(t *testing.T) {
 		t.Fatal(result, err)
 	}
 }
+
+// A retain deleting several episodes while the server keeps answering its
+// rescans 429: the first deletion's rescan waits the limit out (askRescan's
+// bounds) and leaves the show to its next poll, and the other deletions leave
+// theirs to it too rather than wait again for each one. Every deletion still
+// goes through.
+func TestRetainWaitsOutTheServersLimitOnce(t *testing.T) {
+	requireProbe(t)
+	h, first := audioHarness(t)
+	audio := data(t, "chap-v24-reverse.mp3")
+	setAudio(h, func(w http.ResponseWriter, _ *http.Request) { w.Write(audio) })
+	f := h.read("Fixture Show")
+	f.Episodes[2].Enclosure.URL = h.http.URL + "/audio"
+	root, err := os.OpenRoot(h.mount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	if _, err := podcast.Write(root, "Fixture Show", f, h.handler.s.o.Now()); err != nil {
+		t.Fatal(err)
+	}
+	second := f.Episodes[2].Path
+	params, _ := json.Marshal(fetchParams{f.ShowID, f.Episodes[2].ID})
+	for _, job := range []jobs.Job{first, {ID: 83, Kind: FetchKind, LibraryID: first.LibraryID, Path: &second, Params: params, Attempt: 1}} {
+		if _, err := h.handler.FetchJob().Run(context.Background(), job, jobs.LocalReporter()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	now := h.handler.s.o.Now()
+	clock := time.Now()
+	h.handler.s.o.BudgetNow = func() time.Time { return clock }
+	keep := link.PodcastPolicy{Mode: "keep", Keep: 3, Days: 0}
+	server := &retainServer{scanServer: h.scan, policy: keep}
+	server.check = func(r link.PodcastRetentionRequest) *link.PodcastRetentionCheck { return eligibleCheck(r, keep, now) }
+	h.handler.s.o.Server = func() Server { return server }
+	var waits []time.Duration
+	h.handler.s.o.Wait = func(_ context.Context, d time.Duration) error { waits = append(waits, d); return nil }
+	limit := time.Second
+	h.scan.limit = &limit
+	h.scan.limited.Store(100)
+	scans := h.scan.calls.Load()
+	show := "Fixture Show"
+	retain, _ := json.Marshal(map[string]string{"show_id": "a1b2c3d4e5f60718"})
+	job := jobs.Job{ID: 84, Kind: RetainKind, LibraryID: first.LibraryID, Path: &show, Params: retain, Attempt: 1}
+	result, err := h.handler.RetainJob().Run(context.Background(), job, jobs.LocalReporter())
+	if err != nil {
+		t.Fatal(result, err)
+	}
+	if got := result.(retainResult); got.Deleted != 2 {
+		t.Fatal("deleted", got)
+	}
+	if got := h.scan.calls.Load() - scans; got != rescanTries || len(waits) != rescanTries-1 {
+		t.Fatal("asks", got, "waits", waits)
+	}
+	if h.handler.s.isIndexed(3, show) {
+		t.Fatal("the show was marked indexed")
+	}
+}

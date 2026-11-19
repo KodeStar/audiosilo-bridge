@@ -111,8 +111,14 @@ func (s *service) readCheckpoint(job jobs.Job) (checkpoint, bool) {
 		return checkpoint{}, false
 	}
 	defer func() { _ = dir.Close() }()
-	saved, err := readRecord(dir, s.checkpointName(job))
-	ok := err == nil && saved.ServerHash == s.pairHash() && saved.LibraryID == *job.LibraryID && saved.Path == *job.Path && podcast.OwnedTemp(saved.Temp) && strings.HasPrefix(saved.Validator, secrets.PodcastETagPrefix)
+	return s.readOwnRecord(dir, *job.LibraryID, *job.Path)
+}
+
+// readOwnRecord is readCheckpoint's record of library lib's episode p, read
+// from the open records folder dir.
+func (s *service) readOwnRecord(dir *os.Root, lib int64, p string) (checkpoint, bool) {
+	saved, err := readRecord(dir, recordName(lib, p))
+	ok := err == nil && saved.ServerHash == s.pairHash() && saved.LibraryID == lib && saved.Path == p && podcast.OwnedTemp(saved.Temp) && strings.HasPrefix(saved.Validator, secrets.PodcastETagPrefix)
 	return saved, ok
 }
 
@@ -250,7 +256,8 @@ func (s *service) clearCheckpoint(job jobs.Job, root *os.Root, c *checkpoint) {
 // (podcast.Adopt's journals alike). A record whose download is still running
 // (a fetch claimed at its path, or one of its episode that found the show
 // elsewhere since its claim), other than self's, stays: that job moves it when
-// it finds the folder (Fetch's relocation) or drops it as it ends. A record of
+// it finds the folder (Fetch's relocation; adoptOwn, under the episode's lock,
+// past another open row of its episode) or drops it as it ends. A record of
 // another show (names swapped by hand) stays too. An error means the records
 // could not be listed (or the open jobs read); one that could not be read or
 // moved is left as it was.
@@ -284,21 +291,89 @@ func (s *service) adoptCheckpoints(ctx context.Context, root *os.Root, lib link.
 		if running(c) {
 			continue
 		}
-		old := recordName(lib.ID, c.Path)
-		c.Path = show + "/" + path.Base(c.Path)
-		name := recordName(lib.ID, c.Path)
-		if _, err := dir.Lstat(name); !errors.Is(err, os.ErrNotExist) {
-			continue // never over a record a download at the new path already made
-		}
-		b, err := json.Marshal(c)
-		if err != nil {
-			continue
-		}
-		if fsutil.WriteRootAtomic(dir, ".", name, b, 0o600, nil) == nil {
-			_ = dir.Remove(old)
-		}
+		moveRecord(dir, lib.ID, c, show+"/"+path.Base(c.Path))
 	}
 	return nil
+}
+
+// moveRecord moves download record c of library lib to episode path to: its
+// record there first, then the old one removed. Nothing moves when a record
+// is at to already (one a download at the new path made, never overwritten)
+// or the new one could not be written.
+func moveRecord(dir *os.Root, lib int64, c checkpoint, to string) {
+	old := recordName(lib, c.Path)
+	c.Path = to
+	name := recordName(lib, to)
+	if _, err := dir.Lstat(name); !errors.Is(err, os.ErrNotExist) {
+		return
+	}
+	b, err := json.Marshal(c)
+	if err != nil || fsutil.WriteRootAtomic(dir, ".", name, b, 0o600, nil) != nil {
+		return
+	}
+	_ = dir.Remove(old)
+}
+
+// adoptOwn takes the download record of a fetch's episode left at from, its
+// path before a show folder renamed by hand (the episode's partial moved
+// with the folder), to the job's path where the show holds the episode now.
+// The fetch holds the episode's lock there, so no other download of it runs
+// and the record is its own, though adoptCheckpoints leaves it to any open
+// row naming it (a duplicate claim of the episode): left at from, the fetch
+// would download again from byte 0 and the record would stay for a day. A
+// record of this episode at the new path already wins (adoptCheckpoints'),
+// and the one at from is cleared with its partial, rather than left; never
+// live, the partial the fetch is writing (follow's), whose next checkpoint
+// records it there (saveCheckpoint). Its partial is dropped for no other
+// record there: a stale one, another show's (names swapped by hand, an
+// episode file name both shows use) or one that cannot be read leaves the
+// fetch's own record and partial as they were, as does a records folder that
+// cannot say whether one is there. A fetch's start calls it again once the
+// record of another identity at its path is cleared (dropStaleCheckpoint), so
+// its own then moves in and the download resumes; its end calls it for a
+// record still at from, as nothing else reads one under a folder that is
+// gone (cleanOwned goes by a show's folder) and its partial, a recorded one,
+// would never be swept.
+func (s *service) adoptOwn(job jobs.Job, root *os.Root, from string, p fetchParams, live string) {
+	lib, to := *job.LibraryID, *job.Path
+	if from == to {
+		return
+	}
+	dir, err := s.checkpointRoot()
+	if err != nil {
+		return
+	}
+	defer func() { _ = dir.Close() }()
+	saved, ok := s.readOwnRecord(dir, lib, from)
+	if !ok || saved.ShowID != p.ShowID || saved.EpisodeID != p.EpisodeID || path.Base(from) != path.Base(to) {
+		return
+	}
+	if _, err := dir.Lstat(recordName(lib, to)); errors.Is(err, os.ErrNotExist) {
+		moveRecord(dir, lib, saved, to)
+		return
+	} else if err != nil {
+		// Not known to be there: the record and its partial stay as they are
+		// (the fetch's end tries again), rather than go for a records folder
+		// that could not be read just now.
+		return
+	}
+	there, ok := s.readOwnRecord(dir, lib, to)
+	saved.Path = to // its partial is in the episode's folder now
+	switch {
+	case ok && there.Temp == saved.Temp, live != "" && saved.Temp == live:
+		// The partial stays: for the record at the new path naming it too (a
+		// move that wrote there and could not remove this one), or for the
+		// download writing it. Only the record goes.
+	case ok && there.ShowID == p.ShowID && there.EpisodeID == p.EpisodeID:
+		if !s.dropPartial(root, &saved) {
+			return
+		}
+	default:
+		// Not this episode's record there: nothing of the fetch's own goes
+		// for it.
+		return
+	}
+	_ = dir.Remove(recordName(lib, from))
 }
 
 // runningRecords reports, by the open job rows, whether a download record of
@@ -383,11 +458,50 @@ func (l *heldLock) release() { releaseLock(l.root, l.p, l.f) }
 
 // follow points l at episode's lock when the file there is the one held: a
 // show folder renamed by hand took the lock with it, and letting go removes
-// it there rather than leave it in the folder.
-func (l *heldLock) follow(episode string) {
-	if p := podcast.AttachmentPath(episode, ".fetch.lock"); lockedAt(l.root, p, l.f) {
-		l.p = p
+// it there rather than leave it in the folder. false when the file there is
+// not the one held (followLock).
+func (l *heldLock) follow(episode string) bool {
+	p := podcast.AttachmentPath(episode, ".fetch.lock")
+	if !lockedAt(l.root, p, l.f) {
+		return false
 	}
+	l.p = p
+	return true
+}
+
+// followLock moves l, the lock a fetch holds on its episode, to episode, the
+// path a show folder renamed by hand has it at now: the lock file moved with
+// the folder (follow), or, when the file there is not the one held (a folder
+// "renamed" by a copy and a delete, as a move across filesystems or a file
+// manager's is, or a lock file removed by hand), the lock there is taken
+// anew and the old one let go. Without it the fetch would go on, checkpoint,
+// clear and publish at the new path holding no lock there, beside a second
+// fetch of the episode or an Abandon clearing the partial it writes. It waits
+// one ceiling for a holder there (another download of the episode, which this
+// one would only repeat), then fails write_failed; l is unchanged on an error
+// (ctx ended, or the lock could not be taken).
+func (s *service) followLock(ctx context.Context, l *heldLock, episode string) error {
+	if l.follow(episode) {
+		return nil
+	}
+	wait, stop := context.WithTimeout(ctx, ceiling)
+	defer stop()
+	next, err := s.lockEpisode(wait, l.root, episode)
+	switch {
+	case err == nil:
+		l.release()
+		*l = *next
+		return nil
+	case ctx.Err() != nil:
+		return ctx.Err()
+	case l.follow(episode):
+		// The file there was the one held after all (a check the library
+		// failed just then): waited on, it could never be taken.
+		return nil
+	case wait.Err() != nil:
+		return fail("write_failed", "The episode could not be locked where its show folder is now.")
+	}
+	return err
 }
 
 // lockEpisode takes episode's .fetch.lock (fileLock), as a heldLock a fetch

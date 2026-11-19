@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path"
@@ -104,7 +105,12 @@ func episodesIn(f *Feed, show string) bool {
 // ErrInvalidFile, as is a feed whose episodes name no single folder. An old
 // name that now holds another show (two folders' names swapped by hand, or
 // another show moved there) or no show at all is a rename. An old-name folder
-// whose own feed.json cannot be read refuses too: it may be the show's.
+// whose own feed.json cannot be read refuses too: it may be the show's. So
+// does one still there without a feed.json that holds audio or a partial of
+// the Bridge's (stillHolds, ErrHeld): that is the show's own folder that lost
+// its feed.json, so a copy of it (a backup) is never taken in, which would
+// leave the audio and the downloads behind. A new empty folder made at the
+// old name after a rename by hand holds neither.
 func ReadMoved(root *os.Root, show string) (*Feed, string, error) {
 	f, err := readFile(root, show)
 	if err != nil {
@@ -117,10 +123,47 @@ func ReadMoved(root *os.Root, show string) (*Feed, string, error) {
 	if from == show || !ValidShow(from) || !episodesIn(f, from) {
 		return nil, "", ErrInvalidFile
 	}
-	if held, err := readFile(root, from); err == nil && held.ShowID == f.ShowID || err != nil && !errors.Is(err, os.ErrNotExist) {
+	held, err := readFile(root, from)
+	switch {
+	case err == nil:
+		if held.ShowID == f.ShowID {
+			return nil, "", ErrInvalidFile
+		}
+	case !errors.Is(err, os.ErrNotExist):
 		return nil, "", ErrInvalidFile
+	case stillHolds(root, from):
+		return nil, from, ErrHeld
 	}
 	return f, from, nil
+}
+
+// ErrHeld is ReadMoved's refusal of a folder whose old name is still there
+// without a feed.json, holding audio or an owned temp (stillHolds). It is an
+// ErrInvalidFile. Nothing lifts it but those files (or the copy) going by
+// hand, as no sweep reads a folder with no feed.json, so the job that meets
+// it says so in the log: ReadMoved answers the old name with it, the one
+// refusal that names a folder.
+var ErrHeld = fmt.Errorf("%w: the folder its episodes name still holds audio or a partial", ErrInvalidFile)
+
+// stillHolds reports whether from, the old name of a folder whose feed.json
+// names its episodes there, is still there holding an audio file or an owned
+// temp (a download's partial, an install's staged audio), or cannot be listed
+// to tell (listFolder: a link or a file there refuses too). Any audio file
+// counts, not only the episodes the feed.json read names: a backup made
+// before an episode joined the feed does not name it, and a filesystem that
+// normalises names spells an episode's otherwise. A folder that is gone holds
+// nothing.
+func stillHolds(root *os.Root, from string) bool {
+	entries, err := listFolder(root, from)
+	if err != nil {
+		return true
+	}
+	for _, e := range entries {
+		if OwnedTemp(e.Name()) || IsAudioExtension(strings.TrimPrefix(strings.ToLower(path.Ext(e.Name())), ".")) {
+			return true
+		}
+	}
+	return false
 }
 
 // Write changes updated_at only when another field changed. Removed episode

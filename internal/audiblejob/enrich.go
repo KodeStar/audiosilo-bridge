@@ -3,7 +3,6 @@ package audiblejob
 import (
 	"context"
 	"errors"
-	"net/http"
 	"time"
 
 	"github.com/kodestar/audiosilo-bridge/internal/jobs"
@@ -61,9 +60,9 @@ func (h *Handler) enrich(ctx context.Context, srv Server, acct store.AudibleAcco
 			break
 		}
 		err := srv.Enrich(ctx, acct.LibraryID, hits[i].path, hits[i].asin)
-		if retry, ok := rateLimited(err); ok {
+		if retry, ok := link.RateLimited(err); ok {
 			limited++
-			wait, ok := limitWait(retry, limited)
+			wait, ok := enrichLimit.Wait(retry, limited)
 			if !ok {
 				res.EnrichDeferred = len(hits) - i
 				break
@@ -97,29 +96,10 @@ func (h *Handler) enrich(ctx context.Context, srv Server, acct store.AudibleAcco
 	return nil
 }
 
-// limitWait is the wait before an enrichment PUT goes again after its
-// limited-th 429 (e) in a row: the server's Retry-After when it sent one (an
-// explicit zero is an immediate retry), else enrichBackoff doubling. false
-// leaves the PUT: enrichMaxLimited 429s in a row, or a wait over enrichMaxWait.
-func limitWait(e *link.APIError, limited int) (time.Duration, bool) {
-	retry := e.RetryAfter
-	if !e.RetryAfterSet {
-		retry = enrichBackoff << (limited - 1)
-	}
-	if limited >= enrichMaxLimited || retry > enrichMaxWait {
-		return 0, false
-	}
-	return retry, true
-}
-
-// rateLimited reports whether err is the server's 429 (for limitWait).
-func rateLimited(err error) (*link.APIError, bool) {
-	var e *link.APIError
-	if errors.As(err, &e) && e.Status == http.StatusTooManyRequests {
-		return e, true
-	}
-	return nil, false
-}
+// enrichLimit is how an enrichment PUT waits out the server's 429s: its
+// Retry-After, else enrichBackoff doubling; enrichMaxLimited 429s in a row,
+// or a wait over enrichMaxWait, leaves the PUT.
+var enrichLimit = link.Backoff{Tries: enrichMaxLimited, First: enrichBackoff, Max: enrichMaxWait}
 
 // sleepCtx waits d, or until ctx ends. An ended ctx always wins, so a zero
 // wait (an explicit Retry-After: 0) never lets a cancelled job go on.

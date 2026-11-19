@@ -579,12 +579,14 @@ func (s *service) persist(ctx context.Context, root *os.Root, lib link.Library, 
 	}
 	return added, changed, nil
 }
+
+// rescan asks the server to index show, waiting out its 429s (askRescan).
 func (s *service) rescan(ctx context.Context, id int64, show string) error {
 	srv := s.o.Server()
 	if srv == nil {
 		return fail("write_failed", "The server is unavailable for indexing. Check the feed again.")
 	}
-	if _, err := srv.RescanPodcast(ctx, id, show); err != nil {
+	if err := s.askRescan(ctx, srv, id, show); err != nil {
 		return fail("write_failed", "The server could not index the podcast show. Check the feed again.")
 	}
 	s.setIndexed(id, show, true)
@@ -691,6 +693,7 @@ func (s *service) find(root *os.Root, entries []os.DirEntry, rows []store.Podcas
 			return nil
 		}
 		f, from, err := podcast.ReadMoved(root, name)
+		warnHeld(name, from, err)
 		if err == nil && from != "" {
 			renamed = append(renamed, from)
 		}
@@ -803,8 +806,20 @@ func (s *service) lockShow(ctx context.Context, root *os.Root, lib link.Library,
 // holds reports whether show's feed.json, read as a folder that may have been
 // renamed by hand (podcast.ReadMoved), names show id.
 func holds(root *os.Root, show, id string) bool {
-	f, _, err := podcast.ReadMoved(root, show)
+	f, from, err := podcast.ReadMoved(root, show)
+	warnHeld(show, from, err)
 	return err == nil && f.ShowID == id
+}
+
+// warnHeld logs a show folder podcast.ReadMoved refused because held, the
+// folder its feed.json names, is still there with no feed.json, holding audio
+// or a partial (podcast.ErrHeld). Nothing sweeps a folder with no feed.json,
+// so the refusal stands until someone acts on it: without the log a rename by
+// hand that left such a file behind would never be taken in, with no word why.
+func warnHeld(show, held string, err error) {
+	if errors.Is(err, podcast.ErrHeld) {
+		slog.Warn("podcasts: a show folder names an old folder that is still there without a feed.json, holding audio or a download's partial; it is not taken in until those files are removed or that folder has its feed.json again", "show", show, "holds", held)
+	}
 }
 
 // relocate is the folder holding show id, for a job whose show folder is gone,
@@ -869,6 +884,7 @@ func (s *service) readShow(ctx context.Context, root *os.Root, lib link.Library,
 // folder.
 func (s *service) adopt(ctx context.Context, root *os.Root, lib link.Library, mount, show string) (bool, error) {
 	f, from, err := podcast.ReadMoved(root, show)
+	warnHeld(show, from, err)
 	if err != nil || from == "" {
 		return false, nil
 	}

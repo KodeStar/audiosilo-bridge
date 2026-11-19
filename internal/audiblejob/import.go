@@ -608,15 +608,15 @@ func (h *Importer) finish(ctx context.Context, rep *jobs.Reporter, srv ImportSer
 }
 
 // enrichPlaced gives the imported book its title's ASIN, waiting out the
-// server's 429s as the poll's enrichment does (limitWait); a 429 it gives up
+// server's 429s as the poll's enrichment does (enrichLimit); a 429 it gives up
 // on, an ASIN set meanwhile or a moved book is no failure, only no ASIN.
 func (h *Importer) enrichPlaced(ctx context.Context, rep *jobs.Reporter, srv ImportServer, account string, libraryID int64,
 	bookPath, asin string) (bool, error) {
 	for limited := 0; ; {
 		err := srv.Enrich(ctx, libraryID, bookPath, asin)
-		if retry, ok := rateLimited(err); ok {
+		if retry, ok := link.RateLimited(err); ok {
 			limited++
-			wait, ok := limitWait(retry, limited)
+			wait, ok := enrichLimit.Wait(retry, limited)
 			if !ok {
 				h.o.Log.Info("audible: the server kept refusing an imported book's ASIN (429): the book is placed without it",
 					"account", account, "library", libraryID, "path", bookPath)
