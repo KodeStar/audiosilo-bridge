@@ -539,20 +539,23 @@ func (b *Bridge) beat(ctx context.Context) {
 	if accepts && !withSetup {
 		b.Kick() // the server takes the checklist: send it now, not in 30 s
 	}
+	// Due runs every beat, a changed list or not, and a failed heartbeat too: it
+	// takes the interval that caps a kept mapping state, and ends the states
+	// kept past it (a server rate-limiting the checks limits the heartbeat as
+	// well, and those states must still end).
+	interval := time.Duration(cfg.Mapping.CheckMinutes) * time.Minute
 	switch {
 	case errors.Is(err, link.ErrUnauthorized):
 		b.conn.Refuse(ctx, cl, refusedReason)
 		return
 	case err != nil:
 		b.log.Warn("bridge: heartbeat failed", "err", err)
+		b.libs.Due(time.Now(), interval) // no check while the server fails it
 		return
 	}
 	// The dispatcher compares eligibility, so an unchanged heartbeat leaves
 	// outstanding claims alone while capability changes refresh them now.
 	b.runner.Wake()
-	interval := time.Duration(cfg.Mapping.CheckMinutes) * time.Minute
-	// Due runs every beat, a changed list or not: it takes the interval that
-	// caps a kept mapping state, and ends the states kept past it.
 	if due := b.libs.Due(time.Now(), interval); changed || due {
 		b.CheckMappings(ctx)
 	}
