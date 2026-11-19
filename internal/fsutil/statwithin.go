@@ -136,17 +136,16 @@ func ReadDirNWithin(path string, n int, d time.Duration) ([]fs.DirEntry, error) 
 	})
 }
 
-// change is one ChangeWithin call out: done is closed once val and err hold
-// its answer (finished). waiting counts the callers still waiting for it; one
+// change is one ChangeWithin call out: done is closed (under changesMu) once
+// val and err hold its answer. waiting counts the callers still waiting for it; one
 // that gives up leaves the count, so a change that finishes with none left has
 // nobody to hand its answer to.
 type change struct {
-	done     chan struct{}
-	started  time.Time
-	waiting  int
-	finished bool
-	val      any
-	err      error
+	done    chan struct{}
+	started time.Time
+	waiting int
+	val     any
+	err     error
 }
 
 var (
@@ -161,7 +160,7 @@ var (
 // something behind, so its answer is handed to every caller still waiting when
 // it finishes, and when none is (every caller gave up past d, so nobody will
 // ever clean up after it), undo gets it in the change's own goroutine.
-func ChangeWithin[T any](op, path string, d time.Duration, do func(string) (T, error), undo func(T, error)) (T, error) {
+func ChangeWithin[T any](op, path string, d time.Duration, do func(string) (T, error), undo func(T)) (T, error) {
 	key := op + "\x00" + path
 	changesMu.Lock()
 	c, ok := changes[key]
@@ -171,13 +170,13 @@ func ChangeWithin[T any](op, path string, d time.Duration, do func(string) (T, e
 		go func() {
 			val, err := do(path)
 			changesMu.Lock()
-			c.val, c.err, c.finished = val, err, true
+			c.val, c.err = val, err
 			delete(changes, key)
 			orphan := c.waiting == 0
 			close(c.done)
 			changesMu.Unlock()
 			if orphan && undo != nil {
-				undo(val, err)
+				undo(val)
 			}
 		}()
 	}
@@ -196,10 +195,12 @@ func ChangeWithin[T any](op, path string, d time.Duration, do func(string) (T, e
 	}
 	changesMu.Lock()
 	defer changesMu.Unlock()
-	if c.finished {
+	select {
+	case <-c.done:
 		// It finished as the bound ran out: this caller still counted, so the
 		// change handed its answer here rather than to undo.
 		return answer()
+	default:
 	}
 	c.waiting--
 	var zero T

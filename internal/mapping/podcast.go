@@ -114,7 +114,7 @@ type podcastFound struct {
 // nobody to clean up.
 func podcastWithin(d time.Duration) func(op, mount string, look func(string) (podcastFound, error)) (podcastFound, error) {
 	return func(op, mount string, look func(string) (podcastFound, error)) (podcastFound, error) {
-		return fsutil.ChangeWithin(op, mount, d, look, func(f podcastFound, _ error) { f.undo(mount) })
+		return fsutil.ChangeWithin(op, mount, d, look, func(f podcastFound) { f.undo(mount) })
 	}
 }
 
@@ -129,6 +129,11 @@ func (f podcastFound) undo(mount string) {
 		return
 	}
 	defer func() { _ = root.Close() }()
+	f.undoIn(root)
+}
+
+// undoIn is undo in the mount's root, already open.
+func (f podcastFound) undoIn(root *os.Root) {
 	if f.createdMarker {
 		if current, err := readMarker(root); err == nil && current.Nonce == f.marker.Nonce {
 			_ = root.Remove(MarkerPath)
@@ -151,7 +156,7 @@ func lookPodcast(mount string, id int64, current func(int64) bool) (f podcastFou
 	}
 	defer func() { _ = root.Close() }()
 	fail := func(problem string) podcastFound {
-		f.undo(mount)
+		f.undoIn(root)
 		return podcastFound{problem: problem}
 	}
 	info, err := root.Lstat(".audiosilo")

@@ -194,7 +194,7 @@ func TestChangeWithin(t *testing.T) {
 	t.Parallel()
 	const path = "/hung/mount/podcasts"
 	undone := make(chan int, 2)
-	undo := func(n int, _ error) { undone <- n }
+	undo := func(n int) { undone <- n }
 	if n, err := ChangeWithin("answers", path, 5*time.Second, func(string) (int, error) { return 7, nil }, undo); n != 7 || err != nil {
 		t.Fatalf("an answered change = %v, %v", n, err)
 	}
