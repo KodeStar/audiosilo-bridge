@@ -920,14 +920,18 @@ func (r *Runner) report(ctx context.Context, srv Server, sj store.ServerJob) {
 	// The error goes out even when empty: it clears the message a park left.
 	e := sj.Error
 	u.Error = &e
-	_, err := srv.UpdateJob(ctx, sj.ID, u)
+	got, err := srv.UpdateJob(ctx, sj.ID, u)
 	switch {
 	case err == nil, errors.Is(err, link.ErrNotHeld):
-		if sj.State == store.JobFailed && errors.Is(err, link.ErrCancelledHere) {
-			// The server ended it cancelled first (a cancel the job never
-			// heard): a failure is recorded cancelled, as the server has it.
-			// A job that got its work done stays done here.
-			// Its error, which only the Bridge held, is logged here.
+		// The server ends a failure it had asked to stop as cancelled: its
+		// answer is the job as it stored it (a cancel heldCancel missed, or
+		// got no answer about), and its 409 cancelled a job it had ended
+		// first (a retried report among them).
+		cancelled := errors.Is(err, link.ErrCancelledHere) || (err == nil && got != nil && got.State == link.StateCancelled)
+		if sj.State == store.JobFailed && cancelled {
+			// A failure is recorded cancelled, as the server has it. A job
+			// that got its work done stays done here. Its error stays in the
+			// log here.
 			r.log.Info("bridge: the server had cancelled a job that failed; it is recorded cancelled", "job", sj.ID, "err", sj.Error)
 			if ferr := r.store.FinishServerJob(ctx, sj.ID, sj.Attempt, store.JobCancelled, sj.Result, ""); ferr != nil {
 				r.log.Warn("bridge: recording a job failed", "job", sj.ID, "err", ferr)
@@ -1849,7 +1853,8 @@ const heldCancelWait = 5 * time.Second
 // which a failure, the stop itself perhaps, beat to the next keepalive). It
 // returns the cancel's cause, which says by whom as a keepalive's would, or nil:
 // no cancel, or no answer within heldCancelWait (the failure stands; a cancel
-// the server ends it with meanwhile is its end report's 409, which report reads).
+// the server holds or ends it with all the same is in its end report's answer,
+// stored cancelled or a 409 cancelled, which report reads).
 func (p *Reporter) heldCancel(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, heldCancelWait)
 	defer cancel()

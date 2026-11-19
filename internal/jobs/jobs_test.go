@@ -111,6 +111,9 @@ func (f *fakeServer) UpdateJob(ctx context.Context, id int64, u link.Update) (*l
 	if u.State != nil {
 		state = *u.State
 	}
+	if state == link.StateFailed && f.cancel[id] {
+		state = link.StateCancelled // a failure after a cancel was asked is stored cancelled
+	}
 	j := &link.Job{ID: id, State: state, CancelRequested: f.cancel[id], ShareOff: f.shareOff[id], Error: f.reason[id]}
 	if p, ok := f.paths[id]; ok {
 		j.Path = &p

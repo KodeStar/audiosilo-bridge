@@ -394,34 +394,48 @@ func TestHeldCancelWaitsBriefly(t *testing.T) {
 	}
 }
 
-// A failure whose report didn't get through, which the server ended cancelled
-// meanwhile (its 409 cancelled to the retried report), is recorded cancelled:
-// the Bridge's page reads what the server's does.
+// A failure whose report didn't get through, which the server cancelled
+// meanwhile, is recorded cancelled: the Bridge's page reads what the server's
+// does. The server says so in its answer to the retried report: the job as it
+// stored it, cancelled (a cancel it held, which the cancel check got no answer
+// about), or its 409 cancelled (it had ended the job).
 func TestRetriedFailureTheServerCancelled(t *testing.T) {
 	t.Parallel()
-	db, srv := openStore(t), newFakeServer()
-	srv.add(&link.Job{ID: 23, Kind: "k.retry", Attempts: 1})
-	opts := testOpts()
-	opts.Keepalive, opts.ReportRetry = time.Hour, time.Hour
-	r := New(db, func() Server { return srv }, nil, opts, handler{kind: "k.retry", lane: LaneLight,
-		fn: func(context.Context, Job, *Reporter) (any, error) {
-			srv.setFailing(true)
-			return nil, errors.New("the download was interrupted")
-		}})
-	var flipped bool
-	runFor(t, r, func() bool {
-		if !flipped {
-			sj, err := db.GetServerJob(context.Background(), 23)
-			if err != nil || sj.State != store.JobFailed || srv.triesOf(23) < 3 { // first report, probe, failed end
-				return false
+	for name, gone := range map[string]bool{"a cancel held": false, "ended cancelled": true} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			db, srv := openStore(t), newFakeServer()
+			srv.add(&link.Job{ID: 23, Kind: "k.retry", Attempts: 1})
+			opts := testOpts()
+			opts.Keepalive, opts.ReportRetry = time.Hour, time.Hour
+			r := New(db, func() Server { return srv }, nil, opts, handler{kind: "k.retry", lane: LaneLight,
+				fn: func(context.Context, Job, *Reporter) (any, error) {
+					srv.setFailing(true)
+					return nil, errors.New("the download was interrupted")
+				}})
+			var flipped bool
+			runFor(t, r, func() bool {
+				if !flipped {
+					sj, err := db.GetServerJob(context.Background(), 23)
+					if err != nil || sj.State != store.JobFailed || srv.triesOf(23) < 3 { // first report, probe, failed end
+						return false
+					}
+					srv.mu.Lock()
+					srv.cancel[23], srv.gone[23], srv.failing = !gone, gone, false
+					srv.mu.Unlock()
+					flipped = true
+				}
+				return storedAs(db, 23, store.JobCancelled)
+			})
+			// The retried report was the failure: the answer alone made it a cancel.
+			if state, _ := srv.finalState(23); state != link.StateFailed {
+				t.Fatalf("reported %q, want the failure sent again", state)
 			}
-			srv.mu.Lock()
-			srv.gone[23], srv.failing = true, false
-			srv.mu.Unlock()
-			flipped = true
-		}
-		return storedAs(db, 23, store.JobCancelled)
-	})
+			if sj, err := db.GetServerJob(context.Background(), 23); err != nil || sj.Error != "" {
+				t.Fatalf("stored = %+v, %v; want no error on a cancelled job", sj, err)
+			}
+		})
+	}
 }
 
 // A Bridge that stops while a failed job asks for a held cancel leaves the job
