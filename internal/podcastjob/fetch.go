@@ -316,6 +316,10 @@ func (h *Fetch) run(parent context.Context, claimed *jobs.Job, rep *jobs.Reporte
 		return follow(ctx)
 	}
 	committed := false
+	// unresolved: the episode's enclosure could not be resolved for a failure
+	// that may pass (resolve), before any GET of this attempt touched the
+	// partial it loaded.
+	unresolved := false
 	defer func() {
 		if s.writable(lib, mount) != nil || pairing != s.pairHash() {
 			return
@@ -324,11 +328,13 @@ func (h *Fetch) run(parent context.Context, claimed *jobs.Job, rep *jobs.Reporte
 		switch {
 		case committed || c.Temp == "" || parent.Err() != nil && !jobs.Resumes(parent):
 			// Published, nothing held, or cancelled (its claim lost): cleared.
-		case c.complete(), errors.Is(err, errPartialUnreadable):
-			// A whole download whose read-back failed (resume-at-total), or a
-			// partial that could not be read to tell whether it changed: kept
-			// for the next attempt, which verifies it (or resumes it) where its
-			// record is now. One proven gone or another size goes.
+		case c.complete(), errors.Is(err, errPartialUnreadable), unresolved:
+			// A whole download whose read-back failed (resume-at-total), a
+			// partial that could not be read to tell whether it changed, or
+			// one whose enclosure a private feed that did not answer just now
+			// could not give (unresolved): kept for the next attempt, which
+			// verifies it (or resumes it) where its record is now. One proven
+			// gone or another size goes.
 			keep = s.keepsPartial(job, root, &c)
 		case parent.Err() != nil:
 			// Read, not loaded: loadCheckpoint drops a record whose partial is
@@ -364,7 +370,11 @@ func (h *Fetch) run(parent context.Context, claimed *jobs.Job, rep *jobs.Reporte
 	rep.Progress(jobs.Progress{Step: "resolving", Message: "Resolving the episode"})
 	// The episode's enclosure, resolved once per job (a private feed's is
 	// fetched): before the loop for a kept partial its record names the
-	// source of, else when a download needs it.
+	// source of, else when a download needs it. A failure that may pass (the
+	// private feed's fetch: DNS, the network, a timeout, a 429 or 5xx) says
+	// nothing of the partial the attempt loaded, which the exit keeps for the
+	// next attempt to resume (unresolved); any other (the feed gone, no
+	// enclosure for the episode in it) leaves nothing to resume it from.
 	var enc podcast.Enclosure
 	resolve := func() error {
 		if enc.URL != "" {
@@ -372,11 +382,13 @@ func (h *Fetch) run(parent context.Context, claimed *jobs.Job, rep *jobs.Reporte
 		}
 		got, err := s.enclosure(ctx, f, e)
 		enc = got
+		var failure *netguard.Error
+		unresolved = errors.As(err, &failure) && netguard.Retryable(failure)
 		return err
 	}
 	if c.Temp != "" && c.Source != "" {
 		if err := resolve(); err != nil {
-			return nil, err // a whole download is kept (the exit) for the next attempt; a partial goes, as before any GET
+			return nil, err // a whole download is kept (the exit) for the next attempt, and a partial when the failure may pass
 		}
 		// The feed changed the episode's audio under the same episode id
 		// since it was downloaded (another enclosure URL or length): the old

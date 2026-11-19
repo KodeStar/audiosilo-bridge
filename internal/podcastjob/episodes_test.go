@@ -1744,6 +1744,118 @@ func TestARetryFromZeroThatCannotClearItsPartialFails(t *testing.T) {
 	}
 }
 
+// A private feed that does not answer just now (DNS, the network, a timeout,
+// a 429 or 5xx) says nothing of the partial a fetch kept: it stays, record
+// and all, with no request to the episode's host, and the next attempt
+// resumes it. So it does when the Bridge stops while the feed is asked. A
+// feed that answers the episode is not there (a 404, a page that is no feed)
+// leaves nothing to resume it from, and a job cancelled for good keeps
+// nothing: the partial and its record go.
+func TestAKeptPartialOutlivesAPrivateFeedThatDidNotAnswer(t *testing.T) {
+	requireProbe(t)
+	for _, scenario := range []string{"http_503", "http_429", "network", "dns", "timeout", "stop", "http_404", "not_a_feed", "cancel", "lost"} {
+		t.Run(scenario, func(t *testing.T) {
+			h, job := audioHarness(t)
+			s := h.handler.s
+			root, err := os.OpenRoot(h.mount)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer root.Close()
+			audio := data(t, "chap-v24-reverse.mp3")
+			f := h.read("Fixture Show")
+			f.Private = true
+			f.Episodes[0].GUID = "sha256:" + podcast.FeedURLHash("https://private.example/guid/1")
+			f.Episodes[0].Enclosure.URL = ""
+			if _, err := podcast.Write(root, "Fixture Show", f, s.o.Now()); err != nil {
+				t.Fatal(err)
+			}
+			s.o.Vault.Set(secrets.PodcastFeedName(f.ShowID), h.http.URL+"/private?token=1")
+			c := checkpoint{ServerHash: s.pairHash(), LibraryID: 3, ShowID: f.ShowID, EpisodeID: f.Episodes[0].ID, Path: *job.Path, Temp: ".audiosilo-tmp-kept", Offset: 1000, Total: int64(len(audio))}
+			c.setSource(podcast.Enclosure{URL: h.http.URL + "/audio.mp3"})
+			if err := root.WriteFile("Fixture Show/"+c.Temp, audio[:1000], 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.saveCheckpoint(job, root, &c, `"one"`); err != nil {
+				t.Fatal(err)
+			}
+			feed := &netguard.Response{Status: 200, URL: h.http.URL, Body: []byte(`<rss version="2.0"><channel><title>Private</title><item><guid>https://private.example/guid/1</guid><title>Episode</title><enclosure url="` + h.http.URL + `/audio.mp3" type="audio/mpeg" /></item></channel></rss>`)}
+			var ctx context.Context
+			var cancel func()
+			switch scenario {
+			case "cancel":
+				ctx, cancel = jobs.CancelContext(context.Background())
+			case "lost":
+				ctx, cancel = jobs.LoseContext(context.Background())
+			default:
+				ctx, cancel = context.WithCancel(context.Background())
+			}
+			defer cancel()
+			s.o.Fetcher = feedFetcher(func(ctx context.Context, _ netguard.Request) (*netguard.Response, error) {
+				switch scenario {
+				case "http_503", "http_429", "http_404":
+					status, _ := strconv.Atoi(strings.TrimPrefix(scenario, "http_"))
+					return nil, netguard.StatusError("feed", status, 0)
+				case "network", "dns":
+					return nil, &netguard.Error{Code: scenario, Message: "The feed could not be reached."}
+				case "not_a_feed":
+					return &netguard.Response{Status: 200, URL: h.http.URL, Body: []byte("<html>busy</html>")}, nil
+				case "stop", "cancel", "lost":
+					cancel()
+				}
+				return nil, netguard.Classify(ctx, context.DeadlineExceeded)
+			})
+			var calls atomic.Int32
+			setAudio(h, func(w http.ResponseWriter, r *http.Request) {
+				calls.Add(1)
+				if r.Header.Get("Range") != "bytes=1000-" || r.Header.Get("If-Range") != `"one"` {
+					t.Error("the kept partial was not resumed", r.Header)
+				}
+				w.Header().Set("ETag", `"one"`)
+				w.Header().Set("Content-Range", fmt.Sprintf("bytes 1000-%d/%d", len(audio)-1, len(audio)))
+				w.Header().Set("Content-Length", strconv.Itoa(len(audio)-1000))
+				w.WriteHeader(206)
+				w.Write(audio[1000:])
+			})
+			_, err = h.handler.FetchJob().Run(ctx, job, jobs.LocalReporter())
+			want := scenario
+			if scenario == "stop" || scenario == "cancel" || scenario == "lost" {
+				want = "timeout"
+			}
+			if got := code(t, err); got != want || calls.Load() != 0 {
+				t.Fatalf("a private feed that failed %s: %q after %d episode requests, want %s after none", scenario, got, calls.Load(), want)
+			}
+			show := filepath.Join(h.mount, "Fixture Show")
+			if scenario == "http_404" || scenario == "not_a_feed" || scenario == "cancel" || scenario == "lost" {
+				if left := partials(show); len(left) != 0 {
+					t.Fatal("a partial nothing resumes was kept:", left)
+				}
+				noRecords(t, s)
+				return
+			}
+			saved, ok := s.readCheckpoint(job, f.ShowID)
+			if !ok || saved.Temp != c.Temp || saved.Offset != 1000 || !partialAt(show, 1000) {
+				t.Fatalf("the kept partial went for a feed that did not answer: %+v %v", saved, partials(show))
+			}
+			if v, _ := s.o.Vault.Get(saved.Validator); v != `"one"` {
+				t.Fatal("the kept partial lost its validator:", v)
+			}
+			s.o.Fetcher = feedFetcher(func(context.Context, netguard.Request) (*netguard.Response, error) { return feed, nil })
+			res, err := h.handler.FetchJob().Run(context.Background(), job, jobs.LocalReporter())
+			if _, isResult := res.(fetchResult); err != nil || !isResult || calls.Load() != 1 {
+				t.Fatal(res, err, calls.Load())
+			}
+			if b, err := os.ReadFile(filepath.Join(h.mount, *job.Path)); err != nil || !bytes.Equal(b, audio) {
+				t.Fatal("the published episode is not the host's audio", err)
+			}
+			if left := partials(show); len(left) != 0 {
+				t.Fatal("a partial was left behind", left)
+			}
+			noRecords(t, s)
+		})
+	}
+}
+
 // Another episode's partial left at the path (the feed replaced the episode
 // there) that the start cannot remove (a show folder the Bridge may not
 // write) fails the attempt write_failed with no GET, its record kept for a

@@ -2717,7 +2717,13 @@ internal/
             podcast.EnclosureBase: a path naming no audio file keeps its query),
             the strong ETag still proving the
             bytes; a whole download, published with no GET, never takes that
-            leeway; a record from before Source resumes on its ETag alone. A cancel (the runner's Abandon) or
+            leeway; a record from before Source resumes on its ETag alone. A
+            private feed that does not answer just now (its fetch's dns,
+            network, timeout, 429 or 5xx: netguard.Retryable) says nothing of
+            a kept partial: run's exit keeps it with its record (unresolved,
+            keepsPartial) and the next attempt resumes it; any other failure
+            to resolve the enclosure (the feed gone, no enclosure for the
+            episode) clears it. A cancel (the runner's Abandon) or
             invalid_audio still clears it, as does the day-old cleanup. Never downloaded again either when its
             folder no longer holds the show (a
             folder deleted outright, another show's at its name: the partial is
