@@ -45,11 +45,13 @@ type fakeServer struct {
 	paths map[int64]string
 	// shareOff is a job's share_off in the answers to its reports (server#218).
 	shareOff map[int64]bool
+	// down answers a job's reports 503, as a server that can't be reached.
+	down map[int64]bool
 }
 
 func newFakeServer() *fakeServer {
 	return &fakeServer{updates: map[int64][]link.Update{}, cancel: map[int64]bool{}, notHeld: map[int64]bool{}, books: map[string]link.Book{},
-		shareOff: map[int64]bool{}}
+		shareOff: map[int64]bool{}, down: map[int64]bool{}}
 }
 
 func (f *fakeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -71,6 +73,10 @@ func (f *fakeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		id, _ := strconv.ParseInt(strings.TrimPrefix(r.URL.Path, "/api/v1/bridge/jobs/"), 10, 64)
 		var u link.Update
 		_ = json.NewDecoder(r.Body).Decode(&u)
+		if f.down[id] {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
 		f.updates[id] = append(f.updates[id], u)
 		if f.notHeld[id] {
 			w.WriteHeader(http.StatusConflict)
@@ -1247,6 +1253,94 @@ func TestGenerateShareOffTurnsAResumedBookLocalBeforePrepare(t *testing.T) {
 	}
 	hr.libs.writable.Store(true)
 	hr.waitFor("done", func() bool { s, _ := hr.srv.final(73); return s == link.StateDone })
+}
+
+// The contributing stage asks the server before it files (ShareOff, v2.7.0
+// verify): share_off turned on at the server after the job's last report,
+// while its keepalive and its next look are far off, is heard by the ask
+// itself, and the book turns local before anything is filed. Denied first: a
+// server that can't be reached is an error (the stage parks, files nothing)
+// and leaves the book as it was.
+func TestGenerateShareOffAskedBeforeFiling(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	hr := newHarness(t)
+	contributing := hr.exec.gate("contributing")
+	h := hr.handler()
+	h.o.IdlePoll = time.Hour
+	hr.srv.add(74, "Author/Book", `{"contribute":"issue"}`)
+	stop := hr.runnerKeepalive(time.Hour, h)
+	defer stop()
+	// The run's first look found its book queued, so it waits the idle poll:
+	// no report goes out while the engine takes the book to contributing.
+	var b store.Book
+	hr.waitFor("contributing", func() bool {
+		m, err := hr.db.GetGenerateBook(ctx, 74)
+		if err != nil || m.BookID == nil {
+			return false
+		}
+		b, err = hr.db.GetBook(ctx, *m.BookID)
+		return err == nil && b.State == string(state.Contributing)
+	})
+	hr.srv.set(func() { hr.srv.shareOff[74], hr.srv.down[74] = true, true })
+	if off, err := h.ShareOff(ctx, b.ID); err == nil {
+		t.Fatalf("ShareOff with the server down = %v, want an error", off)
+	}
+	if got := hr.engineBook(74); got.ContribMode != store.ContribModeIssue {
+		t.Fatalf("engine book mode with the server down = %q, want issue", got.ContribMode)
+	}
+	hr.srv.set(func() { hr.srv.down[74] = false })
+	if off, err := h.ShareOff(ctx, b.ID); err != nil || !off {
+		t.Fatalf("ShareOff = %v %v, want true", off, err)
+	}
+	if got := hr.engineBook(74); got.ContribMode != store.ContribModeLocal {
+		t.Fatalf("engine book mode after the ask = %q, want local", got.ContribMode)
+	}
+	close(contributing)
+	hr.waitFor("done", func() bool { s, _ := hr.srv.final(74); return s == link.StateDone })
+	var r Result
+	hr.result(74, &r)
+	if r.ShareSkipped != ShareSkippedContributionsOff {
+		t.Fatalf("result = %+v", r)
+	}
+}
+
+// ShareOff asks only the open generate-and-share jobs that follow the book: a
+// contribute=local one is not asked (false); a share job with no run here to
+// ask (a resumed one waiting for its lane slot) is an error, so the stage
+// waits; one that stored share_off is off without asking.
+func TestGenerateShareOffAsksOnlyShareJobs(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	hr := newHarness(t)
+	b, err := hr.db.CreateBook(ctx, store.NewBook{Title: "B", SourcePath: "/src/b", WorkDir: t.TempDir(),
+		ContribMode: store.ContribModeIssue})
+	if err != nil {
+		t.Fatal(err)
+	}
+	follow := func(id int64, params string) {
+		t.Helper()
+		if err := hr.db.RecordClaim(ctx, store.ServerJob{ID: id, Kind: Kind, Params: json.RawMessage(params), Attempt: 1}); err != nil {
+			t.Fatal(err)
+		}
+		if err := hr.db.PutGenerateBook(ctx, store.GenerateBook{ServerJobID: id, BookID: &b.ID, LibraryID: 1, RelPath: "B"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	follow(75, `{"contribute":"local"}`)
+	if off, err := hr.h.ShareOff(ctx, b.ID); err != nil || off {
+		t.Fatalf("ShareOff, a local job only = %v %v, want false", off, err)
+	}
+	follow(76, `{"contribute":"issue"}`)
+	if off, err := hr.h.ShareOff(ctx, b.ID); err == nil {
+		t.Fatalf("ShareOff, a share job with no run here = %v, want an error", off)
+	}
+	if err := hr.db.SetServerJobShareOff(ctx, 76, 1); err != nil {
+		t.Fatal(err)
+	}
+	if off, err := hr.h.ShareOff(ctx, b.ID); err != nil || !off {
+		t.Fatalf("ShareOff, share_off stored = %v %v, want true", off, err)
+	}
 }
 
 // queueShare hands generate-and-share job id (Author/Book) out under attempt,

@@ -914,7 +914,13 @@ internal/
             that heard share_off (server_jobs.share_off) turns it local there
             (KeepBookLocal) even when no run of the job is up to guard it (one resumed
             after a restart still waiting for its lane slot); a read that fails stops
-            the filing as a stage error. runAgent's budget preflight gained the
+            the filing as a stage error. The checks before it files and before each
+            gist and issue (askedLocal) then ask the server too (Config.ShareOff,
+            generate.Handler.ShareOff): a job hears share_off only in an answer to
+            a report, which can be a keepalive away, so an admin's turn-off just
+            before filing was missed (v2.7.0 verify). A server that couldn't be
+            asked parks the book contrib_unavailable (ShareUnconfirmedMsg, retry_at
+            ShareUnconfirmedRetry) and nothing is filed. runAgent's budget preflight gained the
             MONTHLY half (checkMonthlyBudget, Config.MonthlyBudgetUSD): this calendar
             month's (UTC, MonthBounds) spend across every book, superseded runs and
             deleted books' runs included (store.SumBudgetCostSince), at or over the cap
@@ -3181,7 +3187,10 @@ internal/
             failed doesn't count, and the look after a lift comes at once); a book done
             already, or a dimension the stage had begun to file, is left as it is (the
             stage reads the book's mode again before each dimension's gist and issue,
-            and keeps the rest local). A later
+            and keeps the rest local, asking the server first: ShareOff has each
+            open generate-and-share job following the book report now
+            (Reporter.Refresh), its answer heard as any other, and errors when one
+            couldn't be asked, its run not up here included). A later
             run of the job that finds its engine book local keeps the share dropped
             (the module on again since). The result says share_skipped
             "contributions_off" for a book kept local unless something was filed (the

@@ -48,7 +48,9 @@ const (
 	// no sign-in on the Accounts tab, no `gh auth token`), or the sign-in couldn't be
 	// refreshed (GitHub couldn't be reached, or didn't answer with a new token). A
 	// sign-in re-admits it; the refresh's park also carries a retry_at, and a
-	// refresh that works again re-admits it at once (bridge#25).
+	// refresh that works again re-admits it at once (bridge#25). It also parks a
+	// book whose generate-and-share job couldn't ask the server, just before
+	// filing, whether its share is still on (server#218), with a retry_at.
 	ParkContribUnavailable ParkCode = "contrib_unavailable"
 	// ParkCoreNeeded: the book's work does not exist upstream, so an add-work (core)
 	// proposal awaits completion/confirmation in the UI before the sidecars can attach.

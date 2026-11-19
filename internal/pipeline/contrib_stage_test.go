@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1358,6 +1359,81 @@ func TestContributeHonoursAShareOffHeardWhileFiling(t *testing.T) {
 	}
 	if rows := rowsByKind(t, db, b.ID); rows[store.ContribKindRecaps].Status != store.ContribStatusLocal {
 		t.Fatalf("recaps row = %+v, want local", rows[store.ContribKindRecaps])
+	}
+}
+
+// TestContributeAsksTheServerBeforeFiling: the server turned the share off
+// after the book's job last reported (no answer carried it yet, so nothing
+// here knows), and the stage asks it before filing (Config.ShareOff): nothing
+// is filed, and the book turns local and exports. Allowed: a share still on
+// files, the server asked before each issue, so a turn-off between them keeps
+// the rest local (v2.7.0 verify: the book filed 13 s after the turn-off).
+func TestContributeAsksTheServerBeforeFiling(t *testing.T) {
+	ctx := context.Background()
+	db := openContribDB(t)
+	gh := newFakeGitHub(t)
+	export := t.TempDir()
+	var asked atomic.Int32
+	offFrom := int32(1) // the ask from which the server says share_off
+	cfg := contribConfig(t, db, contribModeIssue, gh.srv.URL, "", export, fakeTokenResolver{token: "ghp_x"})
+	cfg.ShareOff = func(context.Context, int64) (bool, error) { return asked.Add(1) >= offFrom, nil }
+	exe := NewExecutor(cfg)
+
+	b := contribBook(t, db, store.NewBook{WorkID: "reacher-01", ContribMode: store.ContribModeIssue}, baseChars("x"), baseRecaps("x"))
+	if _, err := exe.Execute(ctx, b, state.Contributing, scheduler.StageReport{}); err != nil {
+		t.Fatalf("contribute: %v", err)
+	}
+	if n := gh.issueCount(); n != 0 || asked.Load() == 0 {
+		t.Fatalf("issues filed = %d (server asked %d times), want none", n, asked.Load())
+	}
+	if got, err := db.GetBook(ctx, b.ID); err != nil || got.ContribMode != store.ContribModeLocal {
+		t.Fatalf("book after the stage = %+v %v, want local", got, err)
+	}
+	if _, err := os.Stat(filepath.Join(export, "reacher-01", charactersFileName)); err != nil {
+		t.Fatalf("local export: %v", err)
+	}
+
+	// On for the check before filing and the first issue, off before the second.
+	asked.Store(0)
+	offFrom = 3
+	shared := contribBook(t, db, store.NewBook{WorkID: "reacher-02", ContribMode: store.ContribModeIssue}, baseChars("y"), baseRecaps("y"))
+	if _, err := exe.Execute(ctx, shared, state.Contributing, scheduler.StageReport{}); err != nil {
+		t.Fatalf("contribute (share on): %v", err)
+	}
+	rows := rowsByKind(t, db, shared.ID)
+	if c, r := rows[store.ContribKindCharacters], rows[store.ContribKindRecaps]; gh.issueCount() != 1 ||
+		c.Status != store.ContribStatusSubmitted || r.Status != store.ContribStatusLocal {
+		t.Fatalf("issues %d, rows: characters %+v, recaps %+v", gh.issueCount(), c, r)
+	}
+}
+
+// TestContributeWaitsWhenTheServerCantBeAsked: a server that can't be asked
+// before filing (unreachable) files nothing: the book parks contrib_unavailable
+// and looks again by itself, still in issue mode. Allowed: sidecars.contribute's
+// explicit Share doesn't ask, and files.
+func TestContributeWaitsWhenTheServerCantBeAsked(t *testing.T) {
+	ctx := context.Background()
+	db := openContribDB(t)
+	gh := newFakeGitHub(t)
+	cfg := contribConfig(t, db, contribModeIssue, gh.srv.URL, "", t.TempDir(), fakeTokenResolver{token: "ghp_x"})
+	cfg.ShareOff = func(context.Context, int64) (bool, error) { return false, errors.New("dial tcp: connection refused") }
+	exe := NewExecutor(cfg)
+	b := contribBook(t, db, store.NewBook{WorkID: "reacher-01", ContribMode: store.ContribModeIssue}, baseChars("x"), baseRecaps("x"))
+	_, err := exe.Execute(ctx, b, state.Contributing, scheduler.StageReport{})
+	var park *scheduler.ParkError
+	if !errors.As(err, &park) || park.Code != state.ParkContribUnavailable || park.Reason != ShareUnconfirmedMsg ||
+		park.RetryAfter.IsZero() {
+		t.Fatalf("contribute = %v, want a contrib_unavailable park that looks again", err)
+	}
+	if n := gh.issueCount(); n != 0 {
+		t.Fatalf("issues filed = %d, want none", n)
+	}
+	if got, err := db.GetBook(ctx, b.ID); err != nil || got.ContribMode != store.ContribModeIssue {
+		t.Fatalf("book = %+v %v, want still issue", got, err)
+	}
+
+	if _, err := exe.Share(ctx, b.ID, "", nil); err != nil || gh.issueCount() != 2 {
+		t.Fatalf("share of the book: %v, issues %d, want 2", err, gh.issueCount())
 	}
 }
 

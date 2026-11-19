@@ -86,9 +86,10 @@ var parkHints = map[string]string{
 	string(state.ParkASRWorkerWaiting): "Speech recognition waits for an ASR worker: the Bridge's ASR fallback is wait, or " +
 		"the Bridge has no speech recognition of its own. Start a worker (see Workers on the Bridge's page), or, when " +
 		"the Bridge has its own, set the fallback to local there. The book goes on by itself once a worker connects.",
-	string(state.ParkContribUnavailable): "The Bridge isn't signed in to GitHub, or its sign-in couldn't be " +
-		"refreshed: sign in on the Bridge's Accounts tab; a sign-in that only couldn't be refreshed goes on by itself " +
-		"once GitHub answers. The characters and recaps are already saved with the book.",
+	string(state.ParkContribUnavailable): "The Bridge isn't signed in to GitHub, its sign-in couldn't be " +
+		"refreshed, or the server couldn't be asked whether the book is still to be shared: sign in on the Bridge's " +
+		"Accounts tab; the other two go on by themselves once GitHub or the server answers. The characters and " +
+		"recaps are already saved with the book.",
 	string(state.ParkCoreNeeded): "The book isn't in the community database yet, so its recaps can't be contributed. " +
 		"They are saved with the book; propose the book to the database, or cancel this job and generate it again " +
 		"with contribute set to local.",
