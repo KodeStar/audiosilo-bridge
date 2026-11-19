@@ -4086,7 +4086,11 @@ internal/
             id holding its row (claimMoved: a later attempt running here, or,
             BR-LINK-RULE-2, another server's or pairing's claim of the same id and
             attempt, of a kind that follows an engine book: a podcast.fetch under
-            the id follows none, so the book is still this claim's to stop) is
+            the id follows none, so the book is still this claim's to stop; only
+            a live one, still running here, or a later attempt of the claim's own
+            server and pairing: a finished row of another server, left under the
+            id when this claim's RecordClaim failed, never keeps it from stopping
+            its own book) is
             left alone: the cancel and the end are
             guarded writes (store.StopGuard, the claim's id, attempt, server and
             pairing: SetBookStatusUnlessFollowed through the engine's

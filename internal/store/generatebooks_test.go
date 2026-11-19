@@ -771,3 +771,69 @@ func TestStopGuardIgnoresAClaimThatFollowsNoEngineBook(t *testing.T) {
 		t.Fatal("the earlier claim's end wasn't recorded")
 	}
 }
+
+// Only a live claim of another server or pairing follows the book: a finished
+// row of one, left under the job's id when the guard's own claim could not be
+// recorded (RecordClaim failed), never keeps that claim from stopping and
+// ending its own book (allowed: a guard of a server's claim, and one no runner
+// made, whatever the old row's attempt). The same row still running refuses
+// them (denied), and a later attempt of the guard's own server and pairing
+// counts finished or not (denied).
+func TestStopGuardIgnoresAFinishedClaimOfAnotherServer(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	b, _ := db.CreateBook(ctx, NewBook{SourcePath: "/s", WorkDir: "/w", Title: "S"})
+	if err := db.PutGenerateBook(ctx, GenerateBook{ServerJobID: 1, BookID: &b.ID, LibraryID: 1, RelPath: "S"}); err != nil {
+		t.Fatal(err)
+	}
+	row := func(j ServerJob, finished bool) {
+		t.Helper()
+		j.ID, j.Kind = 1, "sidecars.generate"
+		if err := db.RecordClaim(ctx, j); err != nil {
+			t.Fatal(err)
+		}
+		if finished {
+			if err := db.FinishServerJob(ctx, 1, j.Attempt, JobDone, nil, ""); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	guards := map[string]StopGuard{
+		"a server's claim": {JobID: 1, Attempt: 1, ServerID: "a", Pairing: "p1"},
+		"no runner's":      {JobID: 1, Attempt: 1},
+	}
+	other := func(g StopGuard) bool {
+		t.Helper()
+		got, err := db.OtherClaim(ctx, g)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	for _, attempt := range []int{1, 3} {
+		row(ServerJob{Attempt: attempt, ServerID: "b", Pairing: "p2"}, true)
+		for name, g := range guards {
+			if other(g) {
+				t.Fatalf("%s: another server's finished row (attempt %d) is taken for a claim that follows the book", name, attempt)
+			}
+		}
+	}
+	g := guards["a server's claim"]
+	_ = db.SetBookStatus(ctx, b.ID, "", "", "")
+	if err := db.SetBookStatusUnlessFollowed(ctx, b.ID, "", "", "failed", "cancelled by user", g); err != nil {
+		t.Fatalf("the claim's own cancel = %v", err)
+	}
+	if err := db.EndGenerateBook(ctx, g, time.Now()); err != nil {
+		t.Fatalf("the claim's own end = %v", err)
+	}
+	row(ServerJob{Attempt: 3, ServerID: "b", Pairing: "p2"}, false)
+	for name, g := range guards {
+		if !other(g) {
+			t.Fatalf("%s: another server's running claim is not taken for one that follows the book", name)
+		}
+	}
+	row(ServerJob{Attempt: 2, ServerID: "a", Pairing: "p1"}, true)
+	if !other(g) {
+		t.Fatal("a later attempt of the claim's own server and pairing, finished, is not taken for another claim")
+	}
+}

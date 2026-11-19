@@ -215,10 +215,16 @@ const engineKindsSQL = `('sidecars.generate', 'chapters.detect', 'readalong.alig
 
 // otherClaimSQL is true while the row of server job ?1 is another claim than
 // the guard's (StopGuard.args), of a kind that follows an engine book
-// (engineKindsSQL): a later attempt than ?2, or, for a claim of a server (?4,
-// its pairing ?5), a claim of another server or pairing.
+// (engineKindsSQL): a later attempt than ?2 of the guard's own server and
+// pairing (?4, ?5), or a live one (still running here) of any: a later
+// attempt, or, for a claim of a server, a claim of another server or pairing.
+// A finished row of another server or pairing is no claim that follows the
+// book: left under the id when the guard's own claim could not be recorded
+// (RecordClaim failed), it would otherwise keep that claim from ever stopping
+// or ending its own book.
 const otherClaimSQL = `EXISTS (SELECT 1 FROM server_jobs WHERE id = ?1 AND kind IN ` + engineKindsSQL + `
-		    AND (attempt > ?2 OR (?4 != '' AND (server_id != ?4 OR pairing != ?5))))`
+		    AND (attempt > ?2 AND server_id = ?4 AND pairing = ?5
+		         OR state = 'running' AND (attempt > ?2 OR (?4 != '' AND (server_id != ?4 OR pairing != ?5)))))`
 
 // openJobsSQL is the open server jobs' mappings (g): the job still running here,
 // its mapping not ended. Callers add the book and the job to leave out.
