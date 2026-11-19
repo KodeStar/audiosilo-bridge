@@ -493,7 +493,10 @@ func (r *Runner) dropLost(ctx context.Context, job Job) {
 // now that a link works again (the refusal ended, or the Bridge was paired
 // again), as a restart would: when the server took one back meanwhile, its
 // first report is a 409 and it is lost. One a later claim already runs here is
-// left to that claim.
+// left to that claim. One whose row can't be read now stays stranded for the
+// next look (a heartbeat wakes the runner): dropped, nothing would resume it
+// before a restart, and the book of a share job would wait on it until then
+// (ShareOff answers for a stranded job, never for one no run here knows).
 func (r *Runner) resumeStranded(ctx context.Context, srv Server, wg *sync.WaitGroup) {
 	r.mu.Lock()
 	stranded := r.stranded
@@ -504,9 +507,19 @@ func (r *Runner) resumeStranded(ctx context.Context, srv Server, wg *sync.WaitGr
 		r.mu.Lock()
 		_, running := r.running[job.ID]
 		r.mu.Unlock()
+		if running {
+			continue // a later claim of it runs here under its id
+		}
 		sj, err := r.store.GetServerJob(ctx, job.ID)
-		if running || err != nil || sj.State != store.JobRunning || sj.Attempt != job.Attempt {
-			continue // a later claim took its row, or it ended
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			r.log.Warn("bridge: reading a job its refused token stopped failed; it is tried again", "job", job.ID, "err", err)
+			r.mu.Lock()
+			r.stranded = append(r.stranded, s)
+			r.mu.Unlock()
+			continue
+		}
+		if err != nil || sj.State != store.JobRunning || sj.Attempt != job.Attempt {
+			continue // its row is gone, a later claim took it, or it ended
 		}
 		if !sameServer(s.srv, srv) || r.otherServer(*sj) {
 			// Paired with another server since: its job ids are another

@@ -2270,7 +2270,11 @@ internal/
             stopped is left running too and resumed under its claim as soon as a
             link to its server (the same address) works again, a refusal ending or
             a re-pair (resumeStranded; another server's link records it lost, its
-            ids being the old server's). If the lease ran out meanwhile, the first
+            ids being the old server's; one whose row can't be read then stays
+            stranded for the next look, a heartbeat away, and is dropped only
+            when its row is gone, ended or a later attempt's: dropped on a read
+            error it waited for a restart, its share book parked
+            share_unconfirmed meanwhile). If the lease ran out meanwhile, the first
             report gets 409 and the row is lost, and the claim loop takes the job
             again as the next attempt (the kill test in the handoff log). release
             frees only its own run (a later claim of the job may run under its id).

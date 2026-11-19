@@ -872,6 +872,86 @@ func TestRunnerShareOffStrandedOnlyWithoutALaterClaim(t *testing.T) {
 	}
 }
 
+// getFailStore fails GetServerJob while fail is set.
+type getFailStore struct {
+	*store.DB
+	fail atomic.Bool
+}
+
+func (s *getFailStore) GetServerJob(ctx context.Context, id int64) (*store.ServerJob, error) {
+	if s.fail.Load() {
+		return nil, errors.New("database is locked")
+	}
+	return s.DB.GetServerJob(ctx, id)
+}
+
+// A stranded job whose row can't be read when the link works again stays
+// stranded and is resumed at a later look: dropped (as it was), nothing
+// resumed it before a restart, and Runner.ShareOff no longer knew it, so a
+// share job's book waited share_unconfirmed until then. Denied: one whose row
+// says it ended, or has none, is dropped for good.
+func TestStrandedJobWaitsOutAnUnreadableRow(t *testing.T) {
+	t.Parallel()
+	db, srv := openStore(t), newFakeServer()
+	st := &getFailStore{DB: db}
+	ctx := context.Background()
+	for _, id := range []int64{4, 5} {
+		if err := db.RecordClaim(ctx, store.ServerJob{ID: id, Kind: "k.v", Attempt: 1}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.FinishServerJob(ctx, 5, 1, store.JobLost, nil, "taken back"); err != nil {
+		t.Fatal(err)
+	}
+	ran := make(chan int64, 3)
+	h := handler{kind: "k.v", lane: LaneLight, fn: func(_ context.Context, j Job, _ *Reporter) (any, error) {
+		ran <- j.ID
+		return nil, nil
+	}}
+	r := New(st, func() Server { return srv }, nil, testOpts(), h)
+	r.mu.Lock()
+	for _, id := range []int64{4, 5, 6} { // 6 has no row
+		r.stranded = append(r.stranded, strandedJob{job: Job{ID: id, Kind: "k.v", Attempt: 1}, srv: srv})
+	}
+	r.mu.Unlock()
+	strandedIDs := func() (ids []int64) {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		for _, s := range r.stranded {
+			ids = append(ids, s.job.ID)
+		}
+		return ids
+	}
+	var wg sync.WaitGroup
+	st.fail.Store(true)
+	r.resumeStranded(ctx, srv, &wg)
+	if got := strandedIDs(); !slices.Equal(got, []int64{4, 5, 6}) {
+		t.Fatalf("stranded after a look that could read no row = %v, want all three kept", got)
+	}
+	// Still stranded, it answers the contributing stage as one (nothing heard:
+	// it can't be asked), not as a job no run here knows.
+	if _, err := r.ShareOff(ctx, 4, false); !errors.Is(err, ErrShareOffLink) {
+		t.Fatalf("ShareOff of the job kept stranded = %v, want ErrShareOffLink", err)
+	}
+	st.fail.Store(false)
+	r.resumeStranded(ctx, srv, &wg)
+	wg.Wait()
+	if got := strandedIDs(); len(got) != 0 {
+		t.Fatalf("stranded after a look that read the rows = %v, want none", got)
+	}
+	close(ran)
+	var got []int64
+	for id := range ran {
+		got = append(got, id)
+	}
+	if !slices.Equal(got, []int64{4}) {
+		t.Fatalf("resumed %v, want only job 4 (5 ended, 6 has no row)", got)
+	}
+	if s, _ := srv.finalState(4); s != link.StateDone {
+		t.Fatalf("job 4 ended %q, want done", s)
+	}
+}
+
 // An answer that carries share_off and a cancel runs the handler's OnShareOff
 // before the cancel ends the job's context: its act (keeping the book local)
 // writes the store with that context.
