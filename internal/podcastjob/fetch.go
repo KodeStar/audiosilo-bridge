@@ -248,7 +248,7 @@ func (h *Fetch) run(parent context.Context, claimed *jobs.Job, rep *jobs.Reporte
 	s.adoptOwn(job, root, claimedAt, params, "")
 	c, tag, err := s.loadCheckpoint(job, root, f.ShowID, e.ID)
 	if errors.Is(err, errPartialStuck) {
-		return nil, stuckPartial(err)
+		return nil, stuckPartial("", err)
 	}
 	if err != nil {
 		// Not known to have changed: the partial and its record stay for the
@@ -931,10 +931,11 @@ func (s *service) download(ctx context.Context, b *budget, job *jobs.Job, root *
 				}
 				continue
 			}
-			// A local file failure (a full disk) is not a network interruption:
-			// never retried or reported as one.
+			// A local file failure (a full disk, a partial the restart from
+			// byte 0 could not remove) is not a network interruption: never
+			// retried or reported as one.
 			var guard *netguard.Error
-			if !errors.As(err, &guard) && ctx.Err() == nil {
+			if errors.Is(err, errPartialStuck) || !errors.As(err, &guard) && ctx.Err() == nil {
 				return podcast.Fetch{}, err
 			}
 		}
@@ -1255,19 +1256,24 @@ func keptPartial(c *checkpoint, err error) error {
 }
 
 // restartPartial clears c's partial for a download from byte 0, or answers
-// stuckPartial(cause) when the clear cannot remove it: never a download
+// stuckPartial when the clear cannot remove it: never a download
 // beside it, its record left for the next attempt or the day-old cleanup.
 func (s *service) restartPartial(job jobs.Job, root *os.Root, c *checkpoint, cause error) error {
+	partial := ""
+	if c.Temp != "" {
+		partial = c.partialName() // the clear resets c, removed or not
+	}
 	if !s.clearCheckpoint(job, root, c) {
-		return stuckPartial(cause)
+		return stuckPartial(partial, cause)
 	}
 	return nil
 }
 
 // stuckPartial is the job's failure for a partial the restart from zero could
-// not remove (err wraps the clear's cause).
-func stuckPartial(err error) error {
-	slog.Warn("podcasts: an episode's partial could not be removed to download it again", "err", err)
+// not remove (partial, its name when known, logged so it can be found; err
+// wraps the clear's cause).
+func stuckPartial(partial string, err error) error {
+	slog.Warn("podcasts: an episode's partial could not be removed to download it again", "partial", partial, "err", err)
 	return fmt.Errorf("%w: %w", errPartialStuck, fail("write_failed", "The episode's partial download could not be removed."))
 }
 
