@@ -519,6 +519,10 @@ type heldLock struct {
 
 func (l *heldLock) release() { releaseLock(l.root, l.p, l.f) }
 
+// held reports whether the file at l's path is still the one held: a show
+// folder deleted and put back from a copy has a copy of the lock file there.
+func (l *heldLock) held() bool { return lockedAt(l.root, l.p, l.f) }
+
 // follow points l at episode's lock when the file there is the one held: a
 // show folder renamed by hand took the lock with it, and letting go removes
 // it there rather than leave it in the folder. false when the file there is
@@ -543,17 +547,25 @@ func (l *heldLock) follow(episode string) bool {
 // one ceiling for a holder there (another download of the episode, which this
 // one would only repeat), then fails write_failed; l is unchanged on an error
 // (ctx ended, or the lock could not be taken).
+//
+// A re-take never makes the episode's .audiosilo folder, and at the path it
+// holds already (a folder put back there from a copy) never the lock file
+// either: the caller saw the file there, so one gone now is a folder being
+// deleted (an rm -rf would find the folder made again and fail to remove the
+// show folder). Nothing is made there and l is left as it is.
 func (s *service) followLock(ctx context.Context, l *heldLock, episode string) error {
 	if l.follow(episode) {
 		return nil
 	}
 	wait, stop := context.WithTimeout(ctx, ceiling)
 	defer stop()
-	next, err := s.lockEpisode(wait, l.root, episode)
+	next, err := s.takeLock(wait, l.root, episode, podcast.AttachmentPath(episode, ".fetch.lock") != l.p)
 	switch {
 	case err == nil:
 		l.release()
 		*l = *next
+		return nil
+	case errors.Is(err, os.ErrNotExist):
 		return nil
 	case ctx.Err() != nil:
 		return ctx.Err()
@@ -573,7 +585,18 @@ func (s *service) lockEpisode(ctx context.Context, root *os.Root, episode string
 	if err := podcast.EnsureDir(root, path.Dir(episode)+"/.audiosilo"); err != nil {
 		return nil, err
 	}
+	return s.takeLock(ctx, root, episode, true)
+}
+
+// takeLock takes episode's .fetch.lock in its .audiosilo folder, making the
+// file only when create says so (a re-take, followLock, never makes the
+// folder): os.ErrNotExist when the file (or the folder) is not there.
+func (s *service) takeLock(ctx context.Context, root *os.Root, episode string, create bool) (*heldLock, error) {
 	p := podcast.AttachmentPath(episode, ".fetch.lock")
+	flags := os.O_RDWR
+	if create {
+		flags |= os.O_CREATE
+	}
 	if st, err := root.Lstat(p); err == nil && !st.Mode().IsRegular() {
 		return nil, podcast.ErrInvalidFile
 	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -581,8 +604,8 @@ func (s *service) lockEpisode(ctx context.Context, root *os.Root, episode string
 	}
 	raced := 0
 	for {
-		f, err := root.OpenFile(p, os.O_CREATE|os.O_RDWR, 0o600)
-		if errors.Is(err, os.ErrNotExist) && raced < 100 {
+		f, err := root.OpenFile(p, flags, 0o600)
+		if errors.Is(err, os.ErrNotExist) && create && raced < 100 && folderThere(root, path.Dir(p)) {
 			// The holder removed the file as we opened it (macOS can say so
 			// for an O_CREATE open): open it again.
 			raced++
@@ -637,6 +660,12 @@ func releaseLock(root *os.Root, p string, f *os.File) {
 	}
 	unlockFile(f)
 	_ = f.Close()
+}
+
+// folderThere reports whether dir is there (a link or a file too).
+func folderThere(root *os.Root, dir string) bool {
+	_, err := root.Lstat(dir)
+	return !errors.Is(err, os.ErrNotExist)
 }
 
 // lockedAt reports whether f is still the file at p.

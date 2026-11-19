@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -2006,4 +2007,49 @@ func TestAFetchDownloadsAgainAPartialOverwrittenInPlace(t *testing.T) {
 		t.Fatal("a partial was left behind", left)
 	}
 	noRecords(t, h.handler.s)
+}
+
+// A re-take of the episode's lock (followLock) at the path it holds already,
+// with the show folder's .audiosilo removed meanwhile (an rm -rf of the show
+// folder under way), makes nothing there: neither the folder (the rm -rf
+// would then fail to remove the show folder) nor the lock file. One whose
+// .audiosilo is there but whose lock file went makes no file either; at a
+// new path the lock is taken, the file made in a .audiosilo there.
+func TestALockRetakeNeverMakesTheFolder(t *testing.T) {
+	h, job := audioHarness(t)
+	s := h.handler.s
+	root, err := os.OpenRoot(h.mount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	ctx := context.Background()
+	for _, gone := range []string{"Fixture Show/.audiosilo", podcast.AttachmentPath(*job.Path, ".fetch.lock")} {
+		l, err := s.lockEpisode(ctx, root, *job.Path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.RemoveAll(filepath.Join(h.mount, gone)); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.followLock(ctx, l, *job.Path); err != nil {
+			t.Fatal(gone, err)
+		}
+		if _, err := root.Lstat(gone); !errors.Is(err, os.ErrNotExist) {
+			t.Fatal("the re-take made", gone, err)
+		}
+		l.release()
+	}
+	l, err := s.lockEpisode(ctx, root, *job.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.release()
+	if err := os.MkdirAll(filepath.Join(h.mount, "Moved Show", ".audiosilo"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	moved := "Moved Show/" + path.Base(*job.Path)
+	if err := s.followLock(ctx, l, moved); err != nil || !l.held() || l.p != podcast.AttachmentPath(moved, ".fetch.lock") {
+		t.Fatal("the lock was not taken at the new path", err)
+	}
 }
