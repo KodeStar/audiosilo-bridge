@@ -14,7 +14,6 @@ import (
 
 	"github.com/kodestar/audiosilo-bridge/internal/agent"
 	"github.com/kodestar/audiosilo-bridge/internal/agentproto"
-	"github.com/kodestar/audiosilo-bridge/internal/fsutil"
 )
 
 // The credential variables. The runner reads each from its own environment, else
@@ -236,8 +235,8 @@ func (r *Runner) walkMountsLocked() (dev string, planted []string) {
 	} else {
 		w := newMountWalk(r.looks)
 		w.own = r.isOwnTmp
-		if r.runFilesPass() {
-			w.selfUID, w.runArea = r.selfUID, r.opts.TmpDir
+		if dev, ok := r.runFilesPass(); ok {
+			w.selfUID, w.runArea, w.runDev = r.selfUID, r.opts.TmpDir, dev
 		}
 		why = w.credentialMount(ms)
 		dev, planted = w.areaDev, w.runFiles
@@ -247,23 +246,48 @@ func (r *Runner) walkMountsLocked() (dev string, planted []string) {
 }
 
 // runFilesPass reports whether a file of a credential's name in TmpDir may
-// pass as a run's own at all (runMade's rules then decide; false: none passes
-// and none is swept). Only when TmpDir held nothing at the service's start
-// (tmpFresh): a host's tmpfs bound whole at TmpDir (/dev/shm, /run/user/<uid>,
-// a shared emptyDir) shows in mountinfo as the container's own would, while
-// the service is its container's first process (Main) and a container's tmpfs
-// starts empty, so one that held nothing then held no host file either. And
-// never as root: uid 0 owns a host's files wherever they come from.
-func (r *Runner) runFilesPass() bool {
-	return r.selfUID > 0 && r.tmpFresh.Load()
+// pass as a run's own at all, with the device TmpDir showed at the service's
+// start (runMade's rules then decide, runAreaMount holding TmpDir's tmpfs to
+// that device; false: none passes and none is swept). Only when TmpDir held
+// nothing at the service's start (tmpFresh): a host's tmpfs bound whole at
+// TmpDir (/dev/shm, /run/user/<uid>, a shared emptyDir) shows in mountinfo as
+// the container's own would, while the service is its container's first
+// process (Main) and a container's tmpfs starts empty, so one that held
+// nothing then held no host file either. And never as root, nor as the
+// kernel's overflow uid (nobody): uid 0 owns a host's files wherever they come
+// from, and in a user namespace every file of an unmapped owner shows as
+// nobody's.
+func (r *Runner) runFilesPass() (dev string, ok bool) {
+	fresh := r.tmpFresh.Load()
+	if r.selfUID <= 0 || r.selfUID == overflowUID || fresh == nil {
+		return "", false
+	}
+	return *fresh, true
 }
 
-// tmpEmpty reports whether TmpDir holds no entry at all (one entry read is
-// enough to say no); a look that fails (missing, closed, past lookTimeout) is
-// a no.
-func (r *Runner) tmpEmpty() bool {
-	entries, err := fsutil.ReadDirNWithin(r.opts.TmpDir, 1, lookTimeout)
-	return err == nil && len(entries) == 0
+// overflowUID is the kernel's default overflowuid, nobody: the owner a user
+// namespace shows for every file whose own owner it doesn't map.
+const overflowUID = 65534
+
+// tmpFreshDev is TmpDir's device (major:minor) when it is a folder (never a
+// link) holding no entry at all, "" otherwise; a look that fails (missing,
+// closed, past lookTimeout) is "". The device is looked at before the folder
+// is read, so a file system mounted over TmpDir between the two shows another
+// device than the one kept (runAreaMount). Both looks are the mount walk's
+// own (each path read with one n: fsutil.ReadDirNWithin).
+func (r *Runner) tmpFreshDev() string {
+	info, err := r.looks.lstat(r.opts.TmpDir)
+	if err != nil || !info.IsDir() {
+		return ""
+	}
+	dev, ok := deviceOf(info)
+	if !ok {
+		return ""
+	}
+	if entries, err := r.looks.readDir(r.opts.TmpDir); err != nil || len(entries) != 0 {
+		return ""
+	}
+	return dev
 }
 
 // holdOwnTmp records the per-run folder dir as one of this runner's own, which

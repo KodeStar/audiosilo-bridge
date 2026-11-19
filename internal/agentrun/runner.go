@@ -136,10 +136,12 @@ type Runner struct {
 	// selfUID is the runner's own uid: a job of its making is a run's
 	// (planted), which the endpoint's service never runs.
 	selfUID int
-	// tmpFresh records that TmpDir held nothing when the endpoint's service
-	// started (Run): only then may a file there pass as a run's own and be
-	// swept (runFilesPass).
-	tmpFresh atomic.Bool
+	// tmpFresh is TmpDir's device (major:minor) when it was a folder holding
+	// nothing as the endpoint's service started (Run), nil otherwise: only
+	// then, and only while mountinfo shows that same device's tmpfs mounted
+	// at TmpDir itself, may a file there pass as a run's own and be swept
+	// (runFilesPass, runAreaMount).
+	tmpFresh atomic.Pointer[string]
 
 	// groups are runner.json's groups, read once: a process with no
 	// capabilities can't change them.
@@ -261,7 +263,9 @@ func (r *Runner) Run(ctx context.Context) error {
 		// that held anything passes nothing as a run's own while the service
 		// runs (runFilesPass says why). This look comes before the runner
 		// makes anything there (detect's version-*).
-		r.tmpFresh.Store(r.tmpEmpty())
+		if dev := r.tmpFreshDev(); dev != "" {
+			r.tmpFresh.Store(&dev)
+		}
 		if why := r.credentialProblem(); why != "" {
 			r.log.Warn("agent runner: "+endpointBlocked, "why", why)
 		}

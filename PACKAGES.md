@@ -3860,15 +3860,18 @@ internal/
             credential's name a run planted to lock the service out (prompt
             injection: `touch /tmp/auth.json`), in its TmpDir alone and only
             while that is a tmpfs of its own (runAreaMount, from mountinfo:
-            the mount holding TmpDir a whole tmpfs, root "/", alone at its
-            point, hidden by no later mount; the compose example's
-            `tmpfs: ["/tmp"]`) that held no entry at all when the service
-            started (Runner.tmpFresh, looked at before detect makes its
-            version-* there), and never while the service runs as uid 0
-            (runFilesPass; mountinfo can't tell the container's own tmpfs from
-            a host's bound whole at TmpDir, /dev/shm, /run/user/<uid>, a shared
-            emptyDir: the service is pid 1 and its tmpfs starts empty, so one
-            that doesn't held a host's files): owned by the service's uid,
+            the mount holding TmpDir a whole tmpfs, root "/", mounted at
+            TmpDir itself, alone at its point, hidden by no later mount; the
+            compose example's `tmpfs: ["/tmp"]`) that held no entry at all
+            when the service started and is still on the device it showed then
+            (Runner.tmpFresh, tmpFreshDev: looked at before detect makes its
+            version-* there), and never while the service runs as uid 0 or as
+            the overflow uid 65534 (runFilesPass; mountinfo can't tell the
+            container's own tmpfs from a host's bound whole at TmpDir,
+            /dev/shm, /run/user/<uid>, a shared emptyDir: the service is pid 1
+            and its tmpfs starts empty, so one that doesn't held a host's
+            files; root owns a host's files, and a user namespace shows every
+            unmapped owner's as nobody's): owned by the service's uid,
             reached from TmpDir through folders alone, never a link nor
             another mount's point, and on the device mountinfo shows for that
             tmpfs (its major:minor, mount.dev: never a file system mounted

@@ -978,18 +978,24 @@ func TestEndpointRunKeepsItsTmpFiles(t *testing.T) {
 func TestRunPlantedCredentialFiles(t *testing.T) {
 	t.Parallel()
 	self := os.Geteuid()
+	if self == 0 {
+		t.Skip("the service passes nothing as root")
+	}
+	// dev is the device TmpDir showed when it was found empty at the start
+	// (Runner.tmpFresh).
 	type setup struct {
-		staging, tmp string
-		ms           []mount
+		staging, tmp, dev string
+		ms                []mount
 	}
 	newSetup := func(t *testing.T) setup {
 		s := setup{staging: t.TempDir(), tmp: t.TempDir()}
 		s.ms = []mount{at(s.staging), tmpfsAt(t, s.tmp)}
+		s.dev = s.ms[1].dev
 		return s
 	}
 	walk := func(s setup, uid int, extra ...mount) (string, []string) {
 		w := newMountWalk(boundedLooks)
-		w.selfUID, w.runArea = uid, s.tmp
+		w.selfUID, w.runArea, w.runDev = uid, s.tmp, s.dev
 		why := w.credentialMount(append(slices.Clone(s.ms), extra...))
 		return why, w.runFiles
 	}
@@ -1031,7 +1037,8 @@ func TestRunPlantedCredentialFiles(t *testing.T) {
 	for _, m := range []mount{at("TMP"), {root: "/", point: "TMP", fstype: "cifs"},
 		{root: "/user/10003", point: "TMP", fstype: "tmpfs"}} {
 		s = setup{staging: t.TempDir(), tmp: t.TempDir()}
-		m.point = s.tmp
+		m.point, s.dev = s.tmp, devOf(t, s.tmp)
+		m.dev = s.dev
 		s.ms = []mount{at(s.staging), m}
 		p := filepath.Join(s.tmp, vaultKeyFile)
 		mkfile(t, p)
@@ -1042,9 +1049,10 @@ func TestRunPlantedCredentialFiles(t *testing.T) {
 
 	// TmpDir's files on another device than mountinfo shows for its tmpfs (a
 	// file system mounted over TmpDir since mountinfo was read, or one a
-	// mount listed out of order hides it under): never a run's own.
+	// mount listed out of order hides it under): never a run's own, though
+	// the start's look showed that device too.
 	s = newSetup(t)
-	s.ms[1].dev = "0:0"
+	s.ms[1].dev, s.dev = "0:0", "0:0"
 	p := filepath.Join(s.tmp, "auth.json")
 	mkfile(t, p)
 	if why, files := walk(s, self); !strings.Contains(why, p) || len(files) != 0 {
@@ -1098,15 +1106,19 @@ func TestRunPlantedCredentialFiles(t *testing.T) {
 }
 
 // runAreaMount takes the TmpDir's mount for the service's own only when it is
-// a whole tmpfs alone at its point and hidden by no later mount (allowed);
-// a TmpDir with no mount shown, under a bind, a host tmpfs's folder, two
-// mounts stacked at its point, or a later mount over a parent passes nothing,
-// nor does any for a service with no uid of its own or running as root
-// (denied).
+// a whole tmpfs mounted at TmpDir itself, on the device TmpDir showed when it
+// was found empty, alone at its point and hidden by no later mount (allowed);
+// a TmpDir with no mount shown, under a bind, a host tmpfs's folder, a folder
+// below a tmpfs's point (one there at the start was made before the service
+// ran), a tmpfs on another device than at the start (mounted there since),
+// two mounts stacked at its point, or a later mount over a parent passes
+// nothing, nor does any for a service with no uid of its own, running as root
+// or with no device kept from the start (denied).
 func TestRunAreaMount(t *testing.T) {
 	t.Parallel()
-	root := mount{root: "/", point: "/", fstype: "overlay"}
-	tmpfs := mount{root: "/", point: "/tmp", fstype: "tmpfs"}
+	const dev = "0:51"
+	root := mount{root: "/", point: "/", fstype: "overlay", dev: "0:50"}
+	tmpfs := mount{root: "/", point: "/tmp", fstype: "tmpfs", dev: dev}
 	cases := []struct {
 		name   string
 		area   string
@@ -1114,7 +1126,8 @@ func TestRunAreaMount(t *testing.T) {
 		want   int
 	}{
 		{"its own tmpfs", "/tmp", []mount{root, tmpfs}, 1},
-		{"a folder of its own tmpfs", "/tmp/runs", []mount{root, tmpfs}, 1},
+		{"a folder of its own tmpfs", "/tmp/runs", []mount{root, tmpfs}, -1},
+		{"another tmpfs than at the start", "/tmp", []mount{root, {root: "/", point: "/tmp", fstype: "tmpfs", dev: "0:52"}}, -1},
 		{"a mount elsewhere after it", "/tmp", []mount{root, tmpfs, {root: "/", point: "/data", fstype: "ext4"}}, 1},
 		{"the container's root", "/tmp", []mount{root}, -1},
 		{"a bind", "/tmp", []mount{root, {root: "/srv/x", point: "/tmp", fstype: "ext4"}}, -1},
@@ -1127,19 +1140,65 @@ func TestRunAreaMount(t *testing.T) {
 	}
 	for _, c := range cases {
 		w := newMountWalk(boundedLooks)
-		w.selfUID, w.runArea = 10003, c.area // the agent image's uid: passes whoever runs the test
+		w.selfUID, w.runArea, w.runDev = 10003, c.area, dev // the agent image's uid: passes whoever runs the test
 		if got := w.runAreaMount(c.mounts); got != c.want {
 			t.Errorf("%s: runAreaMount = %d, want %d", c.name, got, c.want)
 		}
 	}
 	w := newMountWalk(boundedLooks)
-	w.runArea = "/tmp"
+	w.runArea, w.runDev = "/tmp", dev
 	if got := w.runAreaMount([]mount{root, tmpfs}); got != -1 {
 		t.Errorf("no uid of its own: runAreaMount = %d, want -1", got)
 	}
 	w.selfUID = 0
 	if got := w.runAreaMount([]mount{root, tmpfs}); got != -1 {
 		t.Errorf("root: runAreaMount = %d, want -1", got)
+	}
+	w.selfUID, w.runDev = 10003, ""
+	if got := w.runAreaMount([]mount{root, tmpfs}); got != -1 {
+		t.Errorf("no device kept from the start: runAreaMount = %d, want -1", got)
+	}
+}
+
+// tmpFreshDev keeps TmpDir's device only when it is a folder holding nothing
+// (allowed); a folder with an entry, a missing one and a link to an empty
+// folder keep none (denied). runFilesPass passes nothing without it, nor for
+// a service running as root or as the overflow uid (denied).
+func TestTmpFreshDev(t *testing.T) {
+	t.Parallel()
+	te := newTestEnv(t, nil)
+	r := te.r
+	if got, want := r.tmpFreshDev(), devOf(t, te.tmp); got != want {
+		t.Fatalf("an empty TmpDir: tmpFreshDev = %q, want %q", got, want)
+	}
+	empty := t.TempDir()
+	link := filepath.Join(t.TempDir(), "tmp")
+	if err := os.Symlink(empty, link); err != nil {
+		t.Fatal(err)
+	}
+	full := t.TempDir()
+	mkfile(t, filepath.Join(full, "notes.txt"))
+	for name, dir := range map[string]string{"an entry": full, "missing": filepath.Join(empty, "gone"), "a link": link} {
+		r.opts.TmpDir = dir
+		if got := r.tmpFreshDev(); got != "" {
+			t.Errorf("%s: tmpFreshDev = %q, want none", name, got)
+		}
+	}
+
+	dev := "0:51"
+	r.selfUID = 10003
+	if _, ok := r.runFilesPass(); ok {
+		t.Error("runFilesPass with no device kept from the start = true")
+	}
+	r.tmpFresh.Store(&dev)
+	if got, ok := r.runFilesPass(); !ok || got != dev {
+		t.Errorf("runFilesPass = %q, %v, want %q", got, ok, dev)
+	}
+	for _, uid := range []int{0, overflowUID} {
+		r.selfUID = uid
+		if _, ok := r.runFilesPass(); ok {
+			t.Errorf("runFilesPass as uid %d = true", uid)
+		}
 	}
 }
 
@@ -1275,6 +1334,11 @@ func TestEndpointServiceKeepsTmpFilesItCantTell(t *testing.T) {
 				mkfile(t, kept)
 			}
 			te.startAndWait(t)
+			// Fresh only when empty at the start: the root case is kept by
+			// the uid alone.
+			if fresh := te.r.tmpFresh.Load() != nil; fresh != (c.before == "") {
+				t.Fatalf("tmpFresh kept = %v, want %v", fresh, c.before == "")
+			}
 			if c.after != "" {
 				kept = filepath.Join(te.tmp, c.after)
 				mkfile(t, kept)
@@ -1287,18 +1351,46 @@ func TestEndpointServiceKeepsTmpFilesItCantTell(t *testing.T) {
 			if _, err := os.Lstat(kept); err != nil {
 				t.Fatalf("%s after the start and a job: %v, want it kept", kept, err)
 			}
+			if c.before == "" {
+				return
+			}
+			// The TmpDir emptied since (the admin removed what it named):
+			// it passes nothing still, so a file a run could have planted
+			// later refuses the runs and stays too, until a restart.
+			entries, err := os.ReadDir(te.tmp)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, e := range entries {
+				if err := os.RemoveAll(filepath.Join(te.tmp, e.Name())); err != nil {
+					t.Fatal(err)
+				}
+			}
+			later := filepath.Join(te.tmp, "y", "auth.json")
+			mkfile(t, later)
+			waitDone(t, te.submit(t, endpointReq), 30*time.Second)
+			if why := te.r.credentialProblem(); !strings.Contains(why, later) {
+				t.Fatalf("emptied since the start: credentialProblem = %q, want %s named", why, later)
+			}
+			if _, err := os.Lstat(later); err != nil {
+				t.Fatalf("emptied since the start: %s after a job: %v, want it kept", later, err)
+			}
 		})
 	}
 }
 
 // A TmpDir that is a host folder or a share rather than a tmpfs (a bind
 // mount; a CIFS share with uid=10003 or an NFS all_squash one shows the
-// host's files as the service's uid): its file of a credential's name, the
-// service's own uid by the look of it (the Bridge's secret.key on such a
-// share), refuses the runs and is never removed, neither when the service
-// starts nor after a job (denied).
+// host's files as the service's uid), empty when the service started: its
+// file of a credential's name that came since, the service's own uid by the
+// look of it (the Bridge's secret.key on such a share), refuses the runs and
+// is never removed after a job (denied; TestEndpointServiceKeepsTmpFilesItCantTell
+// has one there at the start).
 func TestEndpointServiceKeepsHostFilesInABoundTmpDir(t *testing.T) {
 	t.Parallel()
+	if os.Geteuid() == 0 {
+		t.Skip("the service passes nothing as root")
+	}
 	// A bind shows the host folder's path as its root; a share is mounted
 	// whole (root "/"), so its type alone keeps it from passing.
 	for _, m := range []mount{{root: "/srv/share", fstype: "ext4"}, {root: "/", fstype: "cifs"}} {
@@ -1308,9 +1400,13 @@ func TestEndpointServiceKeepsHostFilesInABoundTmpDir(t *testing.T) {
 		te.r.mounts = func() ([]mount, error) {
 			return []mount{at(te.staging), m}, nil
 		}
+		te.startAndWait(t)
+		// Empty at the start: only the mount's own rules keep the file.
+		if te.r.tmpFresh.Load() == nil {
+			t.Fatalf("%s: the empty TmpDir wasn't taken for fresh at the start", m.fstype)
+		}
 		hostKey := filepath.Join(te.tmp, "bridge", vaultKeyFile)
 		mkfile(t, hostKey)
-		te.start(t)
 		// A job, so the sweep after it runs too (refused either way: its
 		// folder is of the service's uid).
 		waitDone(t, te.submit(t, endpointReq), 30*time.Second)

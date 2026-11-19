@@ -56,9 +56,10 @@ import (
 //     from a book's text could ask for one) to lock the service out, in its
 //     TmpDir alone and only while that is a tmpfs of the service's own
 //     (runAreaMount: the mount holding TmpDir, verified from mountinfo, is a
-//     whole tmpfs, alone at its point, hidden by no later mount) that held
-//     nothing when the service started, and never while the service runs as
-//     root (Runner.runFilesPass: mountinfo shows a host's tmpfs bound whole
+//     whole tmpfs mounted at TmpDir itself, alone at its point, hidden by no
+//     later mount) that held nothing when the service started, still on the
+//     device it showed then, and never while the service runs as root or
+//     nobody (Runner.runFilesPass: mountinfo shows a host's tmpfs bound whole
 //     at TmpDir, /dev/shm or /run/user/<uid>, just as the container's own):
 //     one owned by the service's own uid, reached from TmpDir through folders
 //     alone (no link, no other mount's point) and on the device mountinfo
@@ -325,13 +326,16 @@ type mountWalk struct {
 	// its TmpDir, by its exact path (nil: none).
 	own func(string) bool
 	// selfUID is the service's own uid (-1: none; 0, root, passes nothing),
-	// runArea its TmpDir ("" none), areaHere whether the mount being looked
-	// at is runArea's verified tmpfs (runAreaMount) and areaDev that tmpfs's
-	// device as mountinfo shows it: a file of a credential's name of
-	// selfUID's there, on that device, is a run's own (runMade), which
-	// runFiles collects by its path below runArea.
+	// runArea its TmpDir ("" none), runDev the device runArea showed when it
+	// was found empty at the service's start (Runner.tmpFresh; "" passes
+	// nothing), areaHere whether the mount being looked at is runArea's
+	// verified tmpfs (runAreaMount) and areaDev that tmpfs's device as
+	// mountinfo shows it: a file of a credential's name of selfUID's there,
+	// on that device, is a run's own (runMade), which runFiles collects by its
+	// path below runArea.
 	selfUID  int
 	runArea  string
+	runDev   string
 	areaHere bool
 	areaDev  string
 	runFiles []string
@@ -384,13 +388,16 @@ func (w *mountWalk) credentialMount(mounts []mount) string {
 // a tmpfs of the service's own, -1 when it isn't or the service is root (no
 // file is then a run's own): the mount with the longest point at or above
 // runArea is a tmpfs mounted whole (root "/", never a folder of a host's
-// tmpfs bound in), the only mount at its point (nothing stacked on or under
-// it) and no mount listed after it is at or above its point (one over a
-// parent hides it). A host
-// folder or a share mounted at TmpDir (a bind, CIFS, NFS) never passes, nor
-// does a TmpDir whose path mountinfo doesn't show.
+// tmpfs bound in) at runArea itself (a container's tmpfs starts empty, so a
+// TmpDir folder below its point that was there at the start, Runner.tmpFresh,
+// was made before the service ran: not its own), on the device runArea showed
+// when it was found empty (runDev: never a file system mounted there since),
+// the only mount at its point (nothing stacked on or under it) and no mount
+// listed after it is at or above its point (one over a parent hides it). A
+// host folder or a share mounted at TmpDir (a bind, CIFS, NFS) never passes,
+// nor does a TmpDir whose path mountinfo doesn't show.
 func (w *mountWalk) runAreaMount(mounts []mount) int {
-	if w.runArea == "" || w.selfUID <= 0 {
+	if w.runArea == "" || w.runDev == "" || w.selfUID <= 0 {
 		return -1
 	}
 	held, point := -1, ""
@@ -399,7 +406,8 @@ func (w *mountWalk) runAreaMount(mounts []mount) int {
 			held, point = i, m.point
 		}
 	}
-	if held < 0 || mounts[held].fstype != "tmpfs" || mounts[held].root != "/" {
+	if held < 0 || mounts[held].fstype != "tmpfs" || mounts[held].root != "/" || point != w.runArea ||
+		mounts[held].dev != w.runDev {
 		return -1
 	}
 	for i, m := range mounts {
