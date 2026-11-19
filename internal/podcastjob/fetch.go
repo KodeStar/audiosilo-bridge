@@ -732,7 +732,8 @@ func (w *downloadWriter) progress() {
 // and identities must still match before any owned partial is removed. The
 // runner names the job by the server's path: a record moved with a show folder
 // renamed by hand (the job's own relocation, or a take-in since) is cleared
-// where it is now (recordOf).
+// where it is now (recordOf), and one left under a folder that is gone goes
+// too.
 func (h *Fetch) Abandon(ctx context.Context, job jobs.Job) {
 	if job.Path == nil || job.LibraryID == nil || !podcast.ValidEpisodePath(*job.Path) {
 		return
@@ -759,6 +760,14 @@ func (h *Fetch) Abandon(ctx context.Context, job jobs.Job) {
 	job.Path = &at
 	release, err := s.fileLock(ctx, root, at)
 	if err != nil {
+		// Its folder is gone (renamed by hand while this job's row ran, so the
+		// take-in left its record here): no download works at this path, so
+		// the record goes rather than stay for good. Its partial, moved with
+		// the folder, is unrecorded then, and sweepPartials takes it once old.
+		if _, e := root.Lstat(path.Dir(at)); errors.Is(e, os.ErrNotExist) {
+			c, _ := s.loadCheckpoint(job, root, p.ShowID, p.EpisodeID)
+			s.clearCheckpoint(job, root, &c)
+		}
 		return
 	}
 	defer release()

@@ -608,6 +608,50 @@ func TestAbandonClearsARecordMovedWithItsShow(t *testing.T) {
 	}
 }
 
+// A take-in while a fetch's row runs (the Bridge stopped at a resumable point)
+// leaves that fetch's record at its old path. When the runner then abandons the
+// fetch (its claim answered with a cancel or lost), the record under the gone
+// folder goes rather than stay for good; its partial, moved with the folder,
+// is unrecorded then, for sweepPartials once old.
+func TestAbandonDropsARecordLeftUnderAGoneFolder(t *testing.T) {
+	h, job := audioHarness(t)
+	s := h.handler.s
+	root, err := os.OpenRoot(h.mount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	c := checkpoint{ServerHash: s.pairHash(), LibraryID: 3, ShowID: "a1b2c3d4e5f60718", EpisodeID: "1cc306d831645e2b", Path: *job.Path, Temp: podcast.TempPrefix + strings.Repeat("b", 24), Offset: 6, Total: 100}
+	if err := root.WriteFile("Fixture Show/"+c.Temp, []byte("prefix"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.saveCheckpoint(job, root, &c, `"one"`); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.db.RecordClaim(context.Background(), store.ServerJob{ID: job.ID, Kind: FetchKind, LibraryID: job.LibraryID, Path: job.Path, Params: job.Params, Attempt: 1, ServerID: "server-1"}); err != nil {
+		t.Fatal(err)
+	}
+	renameShow(t, h, "Fixture Show", "Renamed Show")
+	lib := link.Library{ID: 3, Kind: "podcasts", Root: h.mount}
+	if _, err := s.readShow(context.Background(), root, lib, h.mount, "Renamed Show"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := s.readCheckpoint(job); !ok {
+		t.Fatal("the take-in moved a running fetch's record")
+	}
+	h.handler.FetchJob().Abandon(context.Background(), job)
+	if _, ok := s.readCheckpoint(job); ok {
+		t.Fatal("the abandoned fetch's record stayed under the gone folder")
+	}
+	if v, _ := s.o.Vault.Get(c.Validator); v != "" {
+		t.Fatal("the abandoned record's validator was left behind")
+	}
+	recorded, ok := s.recordedPartials()
+	if !ok || recorded[c.Temp] {
+		t.Fatal("the moved partial is still recorded", ok)
+	}
+}
+
 // A poll the server names by a folder it cannot read finds its show where it
 // is now, as it does a folder that is gone: here the folder holds an
 // unreadable feed.json, or a copy of another show renamed by hand (refused,

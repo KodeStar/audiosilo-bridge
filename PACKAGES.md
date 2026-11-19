@@ -2394,14 +2394,17 @@ internal/
             refused once another folder (its cache row's) holds the show.
             The records of the show's interrupted downloads move to the new
             paths with it (adoptCheckpoints, before feed.json, so a stop between
-            takes the folder in again; records it cannot read stop the
-            adoption, and a fetch that cannot read them where it relocates
+            takes the folder in again; records it cannot list stop the
+            adoption, and a fetch that cannot list them where it relocates
             fails write_failed; the show's records under a gone earlier name
             move too; one of another show stays, and one whose download still
             runs, matched by its path or by its fetch's show and episode, stays
-            until that fetch relocates and moves its own), or their partials
-            would stay in the folder for good. A fetch's Abandon, named by the
-            server's old path, clears its record where it moved (recordOf). A job still working under the
+            until that fetch relocates and moves its own; the day-old cleanup
+            matches a running download alike), or their partials would stay in
+            the folder for good. A fetch's Abandon, named by the server's old
+            path, clears its record where it moved (recordOf), and drops one
+            left under a folder that is gone (its partial, unrecorded then, is
+            swept once old). A job still working under the
             old name never saves over, clears or abandons another show's record
             at its path (one moved there when names were swapped), nor its
             partial. A fetch whose folder lockShow takes in where it is (renamed
