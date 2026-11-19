@@ -16,13 +16,25 @@ type Backoff struct {
 }
 
 // Wait is the wait before asking again after the limited-th 429 (e) in a row.
-// false gives the call up: Tries asks made, or a wait over Max.
+// false gives the call up: Tries asks made, or a wait over Max. The doubling
+// stops at the first wait over Max, so no count of 429s overflows it (a
+// shift would, into a zero or negative wait asked again at once), and a
+// limited below 1 counts as the first.
 func (b Backoff) Wait(e *APIError, limited int) (time.Duration, bool) {
+	if limited >= b.Tries {
+		return 0, false
+	}
 	wait := e.RetryAfter
 	if !e.RetryAfterSet {
-		wait = b.First << (limited - 1)
+		wait = b.First
+		for n := 1; n < limited && wait > 0; n++ {
+			if wait > b.Max/2 {
+				return 0, false // the next doubling is over Max
+			}
+			wait *= 2
+		}
 	}
-	if limited >= b.Tries || wait > b.Max {
+	if wait > b.Max {
 		return 0, false
 	}
 	return wait, true

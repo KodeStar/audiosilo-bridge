@@ -2043,7 +2043,9 @@ internal/
             Retry-After, seconds or an HTTP date, clamped at a day; RetryAfterSet
             distinguishes a valid zero wait from a missing or invalid header;
             RateLimited picks a 429 out, Backoff.Wait is the shared wait-out rule:
-            Retry-After, else First doubling, Tries asks, each wait at most Max);
+            Retry-After, else First doubling, Tries asks, each wait at most Max;
+            the doubling stops at the first wait over Max, so no count of 429s
+            overflows it, and a count below 1 is the first);
             a 2xx it can't use (not the JSON expected, a pairing with no token)
             is ErrUnusableAnswer (bridge#28), worded as its cause, which the
             page's pairing error keys on rather than on what's left over.
