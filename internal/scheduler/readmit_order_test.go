@@ -352,3 +352,86 @@ func TestSupersedeRerunWaitsForTheCancelledWorker(t *testing.T) {
 		t.Fatalf("the cancelled %s run's sentinel outlived the rewind: the re-run would replay it", running.State)
 	}
 }
+
+// publishOnCancelExecutor's first stage runs until its ctx ends and then, as a
+// stage whose advance the cancel landed after, publishes the book (taking its
+// publish lock) before it returns. started closes for that first run.
+type publishOnCancelExecutor struct {
+	s       *Scheduler
+	calls   atomic.Int32
+	started chan struct{}
+}
+
+func (e *publishOnCancelExecutor) Execute(ctx context.Context, b store.Book, _ state.State, _ StageReport) (StageResult, error) {
+	first := e.calls.Add(1) == 1
+	if first {
+		close(e.started)
+	}
+	<-ctx.Done()
+	if first {
+		time.Sleep(20 * time.Millisecond) // the supersede has gone on past its cancel
+		e.s.publishStored(context.Background(), b.ID)
+	}
+	return StageResult{}, ctx.Err()
+}
+
+// supersede_rerun waits for the stage worker it cancelled before it takes the
+// book's publish lock, never under it: a worker publishing on its way out returns
+// at once, where one waiting for that lock would hold the rewind to workerExitWait.
+func TestSupersedeRerunAwaitsItsWorkerOutsideThePublishLock(t *testing.T) {
+	h := newHarness(t)
+	db := h.openDB(t)
+	b := h.addBook(t, db, "publish-on-exit", "", "")
+	exec := &publishOnCancelExecutor{started: make(chan struct{})}
+	s := New(db, h.hub, exec, 1, h.workRoot, false)
+	exec.s = s
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { _ = s.Start(ctx); close(done) }()
+	t.Cleanup(func() { cancel(); <-done })
+	s.Notify()
+	select {
+	case <-exec.started:
+	case <-time.After(waitLimit):
+		t.Fatal("the stage never started")
+	}
+	running, err := db.GetBook(context.Background(), b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	outcome, err := s.supervisorSupersedeRerun(context.Background(), running, running.State)
+	if err != nil || outcome == statusChangedOutcome {
+		t.Fatalf("supersede_rerun = %q, %v", outcome, err)
+	}
+	if took := time.Since(start); took >= workerExitWait/2 {
+		t.Fatalf("supersede_rerun took %v: its cancelled worker's last publish waited for the lock it held", took)
+	}
+}
+
+// supersede_rerun reads the book again once its stage is stopped: one the stage
+// advanced to Ready as it was stopped (the supervisor's read was short of it) is
+// refused, as at the read, and never moved back.
+func TestSupersedeRerunRefusesABookThatReachedReadyMeanwhile(t *testing.T) {
+	h := newHarness(t)
+	db := h.openDB(t)
+	ctx := context.Background()
+	s := New(db, h.hub, NewStubExecutor(0, 0), 1, h.workRoot, false)
+	b := h.addBook(t, db, "advanced", "", "")
+	if err := db.SetBookPipelineState(ctx, b.ID, string(state.Auditing)); err != nil {
+		t.Fatal(err)
+	}
+	read, err := db.GetBook(ctx, b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetBookPipelineState(ctx, b.ID, string(state.Ready)); err != nil { // the stage's advance
+		t.Fatal(err)
+	}
+	if outcome, err := s.supervisorSupersedeRerun(ctx, read, string(state.Auditing)); !errors.Is(err, ErrInvalidOp) {
+		t.Fatalf("supersede_rerun of a book at ready = %q, %v, want ErrInvalidOp", outcome, err)
+	}
+	if got, err := db.GetBook(ctx, b.ID); err != nil || got.State != string(state.Ready) {
+		t.Fatalf("the book moved back: %+v, %v", got, err)
+	}
+}

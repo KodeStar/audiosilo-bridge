@@ -1682,7 +1682,8 @@ internal/
             (awaitWorker, at most workerExitWait) before its status write, so a
             sentinel the stage wrote as the cancel landed is dropped too, never
             replayed, and the wait is never under the publish lock the worker's own
-            publish takes. A crash
+            publish takes; it then reads the book again and refuses one the stopped
+            stage moved on to Ready, as at the read. A crash
             between the two writes replays the stage's outcome at the restart (a
             round-cap park parks again). RetryAsRead(b) is Retry for a book the caller
             read (generate's Retry): it re-admits only while the book still has b's

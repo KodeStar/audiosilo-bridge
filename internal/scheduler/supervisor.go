@@ -185,13 +185,18 @@ func (s *Scheduler) supervisorSupersedeRerun(ctx context.Context, b store.Book, 
 	// takes. Then, under that lock to the publish as in readmit (see
 	// restoreStatus), the conditional status write (a deliberate pause is written
 	// back as it is): a Cancel landing since leaves the book as it is (bridge#65),
-	// its worker stopped already, a stage this rewind would discard anyway.
+	// its worker stopped already, a stage this rewind would discard anyway. The
+	// claim matches the read's status alone, so a book the stopped stage advanced
+	// to Ready meanwhile (and maybe purged at done) is refused here, as at the read.
 	release := s.holdDispatch(bookID)
 	defer release()
 	s.cancelInflight(bookID)
 	s.awaitWorker(ctx, bookID)
 	unlock := s.lockPublish(bookID)
 	defer unlock()
+	if now, err := s.db.GetBook(ctx, bookID); err == nil && state.Order(state.State(now.State)) >= state.Order(state.Ready) {
+		return "", ErrInvalidOp
+	}
 	paused := b.Status == string(state.StatusPaused)
 	var claim error
 	if paused {
