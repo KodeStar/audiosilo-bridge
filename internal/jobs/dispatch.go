@@ -50,7 +50,10 @@ type claimRequest struct {
 	lanes       []string
 	capacities  map[string]int
 	held        bool
-	serverID    string
+	// leftOut: the light lane was left out (full, or a job waits there), so
+	// the claim may wait briefly (leftOutWait): the room a quick job frees
+	// there is asked for soon, not after a whole long poll.
+	leftOut bool
 	// fallback keeps the original claim identity but uses ordinary admission
 	// when the server returned a job outside this request's eligibility.
 	fallback bool
@@ -84,10 +87,9 @@ func (r *Runner) request(reserve, hold bool, own *claimRequest) (*claimRequest, 
 	// Otherwise a re-pair between server() and locking could be missed for a
 	// whole long poll. The app changes its pairing before calling Wake.
 	var srv Server
-	var serverID string
 	for {
 		changed := r.wakeChan()
-		srv, serverID = r.server(), r.opts.ServerID()
+		srv = r.server()
 		r.mu.Lock()
 		if changed == r.changed {
 			break
@@ -95,7 +97,7 @@ func (r *Runner) request(reserve, hold bool, own *claimRequest) (*claimRequest, 
 		r.mu.Unlock()
 	}
 	defer r.mu.Unlock()
-	q := &claimRequest{srv: srv, interactive: reserve, capacities: r.capacities(srv), serverID: serverID}
+	q := &claimRequest{srv: srv, interactive: reserve, capacities: r.capacities(srv)}
 	if srv != nil && (!reserve || supportsPriority(srv)) && !r.strayWaitingLocked(reserve) {
 		for kind, h := range r.handlers {
 			lane := h.Lane()
@@ -110,6 +112,8 @@ func (r *Runner) request(reserve, hold bool, own *claimRequest) (*claimRequest, 
 				if !slices.Contains(q.lanes, lane) {
 					q.lanes = append(q.lanes, lane)
 				}
+			} else if lane == LaneLight {
+				q.leftOut = true
 			}
 		}
 	}
@@ -161,9 +165,42 @@ func (r *Runner) unreserve(q *claimRequest) {
 	r.unreserveLocked(q)
 }
 
+// sameRequest reports whether a claim asked now would ask what a asks: the
+// same link (so the same server: a link knows its server's id), the same
+// kinds and capacities. A pause between claims (pauseClaims) ends early when
+// it no longer does.
 func sameRequest(a, b *claimRequest) bool {
-	return a.srv == b.srv && a.serverID == b.serverID && a.interactive == b.interactive && slices.Equal(a.kinds, b.kinds) && maps.Equal(a.capacities, b.capacities)
+	return sameTarget(a, b) && slices.Equal(a.kinds, b.kinds)
 }
+
+// sameTarget reports whether an in-flight claim a still asks the right link
+// for the right pool: the same link and the same capacities (a capability
+// change: the reserve's negotiation withdrawn folds the interactive lane into
+// the download one). b is always asked for a's dispatcher (the same
+// interactive). Its kinds are left out: they change whenever a lane slot frees
+// or fills, and the claim's own reservation keeps a slot for what it may bring
+// in each lane it asks for, so it is let finish rather than cancelled
+// (BR-CLAIM-HOLD); one that left the light lane out waits only briefly
+// (leftOutWait), so a slot freeing there is asked for soon. A cancelled long
+// poll a reverse proxy doesn't pass on as a hang-up still hands the job out,
+// and the answer is lost until the job's 2-minute lease lapses.
+func sameTarget(a, b *claimRequest) bool {
+	return a.srv == b.srv && maps.Equal(a.capacities, b.capacities)
+}
+
+// leftOutWait is the long poll's wait while the claim leaves the light lane
+// out (claimRequest.leftOut). A lane slot freeing doesn't end the claim in
+// flight (sameTarget), so with the whole wait (link.MaxWait, 25 s) a queue of
+// quick jobs, an OPML import's follows, would drain at a lane's worth per
+// long poll. The download and pipeline lanes hold long jobs: a claim leaving
+// them out waits the whole poll. maxShortPolls such short waits in a row that
+// claim nothing go back to the whole wait until the claim asks for something
+// else (a lane's room changed), so a light lane held by slow jobs doesn't
+// keep the server answering a claim every few seconds.
+const (
+	leftOutWait   = 4 * time.Second
+	maxShortPolls = 3
+)
 
 type claimResult struct {
 	job *link.Job
@@ -171,17 +208,21 @@ type claimResult struct {
 }
 
 // poll joins the call before returning, so a refreshed request can never leave
-// a second old claim able to take a job behind the dispatcher's back.
-func (r *Runner) poll(ctx context.Context, q *claimRequest, changed <-chan struct{}) (claimResult, bool) {
+// a second old claim able to take a job behind the dispatcher's back. Only a
+// changed target (sameTarget: the pairing, the negotiation, the capacities)
+// or the runner's stop cancels the call; a lane slot freeing or filling lets
+// it finish, which is soon when the claim left the light lane out (wait:
+// leftOutWait).
+func (r *Runner) poll(ctx context.Context, q *claimRequest, changed <-chan struct{}, wait time.Duration) (claimResult, bool) {
 	pollCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	done := make(chan claimResult, 1)
 	go func() {
 		var result claimResult
 		if q.interactive {
-			result.job, result.err = q.srv.(priorityServer).ClaimMinPriority(pollCtx, q.kinds, r.opts.Wait, InteractivePriority)
+			result.job, result.err = q.srv.(priorityServer).ClaimMinPriority(pollCtx, q.kinds, wait, InteractivePriority)
 		} else {
-			result.job, result.err = q.srv.Claim(pollCtx, q.kinds, r.opts.Wait)
+			result.job, result.err = q.srv.Claim(pollCtx, q.kinds, wait)
 		}
 		done <- result
 	}()
@@ -194,7 +235,7 @@ func (r *Runner) poll(ctx context.Context, q *claimRequest, changed <-chan struc
 			return <-done, true
 		case <-changed:
 			next, wake := r.request(q.interactive, false, q)
-			if !sameRequest(q, next) {
+			if !sameTarget(q, next) {
 				cancel()
 				return <-done, true
 			}
@@ -205,6 +246,11 @@ func (r *Runner) poll(ctx context.Context, q *claimRequest, changed <-chan struc
 
 func (r *Runner) dispatch(ctx context.Context, reserve bool, wg *sync.WaitGroup) {
 	backoff := time.Second
+	// shorts: the short waits in a row (leftOutWait) that claimed nothing for
+	// the request asked last (last); maxShortPolls of them end short waits
+	// until the request changes.
+	var last *claimRequest
+	shorts := 0
 	for ctx.Err() == nil {
 		q, changed := r.request(reserve, true, nil)
 		if len(q.kinds) == 0 {
@@ -214,9 +260,19 @@ func (r *Runner) dispatch(ctx context.Context, reserve bool, wg *sync.WaitGroup)
 			}
 			continue
 		}
+		if last == nil || !sameRequest(last, q) {
+			shorts = 0
+		}
+		last = q
+		wait := r.opts.Wait
+		if q.leftOut && shorts < maxShortPolls {
+			wait = min(wait, leftOutWait)
+			shorts++
+		}
 		start := time.Now()
-		result, refreshed := r.poll(ctx, q, changed)
+		result, refreshed := r.poll(ctx, q, changed, wait)
 		if result.job != nil {
+			shorts = 0
 			if !slices.Contains(q.kinds, result.job.Kind) || (q.interactive && result.job.Priority < int(InteractivePriority)) {
 				// The lease is ours even if the server ignored the filter. Drop
 				// the reserved admission and wait for the kind's ordinary lane.
@@ -285,9 +341,11 @@ func (r *Runner) pauseClaims(ctx context.Context, previous *claimRequest, delay 
 // Recovery, re-pair and out-of-admission claims use the ordinary lane, but a
 // resumed job of interactive priority waits for the reserve while the pairing
 // negotiates it (launch; rows from before the Bridge kept a job's priority read
-// 0). A waiting job renews its lease through execute's reporter (only while its
-// link is the one in use: Reporter.offLink) and takes a slot before any new
-// claims for that lane.
+// 0). A waiting job renews its lease through execute's reporter (only while the
+// Bridge has a link to its server: Reporter.offLink) and takes a slot before any
+// new claims for that lane. It is admitted only on such a link (a pairing with
+// its server again included) and dropped once the Bridge is paired with
+// another server (linkFor).
 func (r *Runner) awaitAdmission(ctx context.Context, ru *run) bool {
 	for ctx.Err() == nil {
 		// The wake channel is taken before the pairing is read (as in request),
@@ -299,13 +357,11 @@ func (r *Runner) awaitAdmission(ctx context.Context, ru *run) bool {
 		}
 		changed := r.changed
 		r.mu.Unlock()
-		srv := r.server()
-		if srv != nil && srv != ru.srv {
-			// Paired again since the job was launched: its claim is the old
-			// link's, so it never runs (nor renews its lease) there. Stranded,
-			// resumeStranded takes it up on the new link (the same server) or
-			// drops it (another), as for a refused token (bridge#13).
-			ru.cancel(errUnpaired)
+		srv, other := r.linkFor(ru.job.serverID)
+		if other {
+			// Paired with another server since the job was launched: its claim
+			// means nothing there, so it never runs (nor renews its lease).
+			ru.cancel(errOtherServer)
 			return false
 		}
 		r.mu.Lock()

@@ -124,7 +124,8 @@ internal/
               0014 audible_push.reasserted_ms, 0015 server_jobs.priority,
               0016 server_jobs.share_off, 0017 audible_accounts.push_at/push_error,
               0018 audible_accounts.push_reread,
-              0019 books.share_skipped, 0020 audible_push.row_read)
+              0019 books.share_skipped, 0020 audible_push.row_read,
+              0021 server_jobs.pairing)
   auth/       the page's single password + hashed sessions + login limiter
   -- Phase 1a --
   generate/   sidecars.generate: server job -> engine book -> .audiosilo/ + rescan;
@@ -248,7 +249,8 @@ in PACKAGES.md.
   only the runner's own uid's runner.json and exit.json can move it off the group, and
   agent.require_group never does, agentbox/trust.go);
   private podcast feed URLs are sealed before a claim reaches server_jobs, as
-  podcast_job_<job id>_<attempt> (each claim its own), then podcast_feed_<show_id>.
+  podcast_job_<server id hash>_<job id>_<attempt> (each claim its own, never another
+  server's of the same id), then podcast_feed_<show_id>.
   The job secret survives a resumable stop and is deleted at any terminal end.
   An Audible account's sign-in (tokens and the device key: full Amazon account
   access) is sealed as audible_<id> and handed only to the audible client; the

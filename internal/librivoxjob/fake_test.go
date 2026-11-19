@@ -193,12 +193,17 @@ func mp3(fill byte, n int) []byte {
 
 // fakeServer is the server link: the library's books and the rescan.
 type fakeServer struct {
+	// id is the server the link reaches (ServerID; "" for a link that names
+	// none, which only a job a runner claimed is checked against).
+	id        string
 	mu        sync.Mutex
 	books     []link.LibraryBook
 	rescanErr []error
 	rescanned []string
 	answer    string // the rescan's book path ("" = the path asked)
 }
+
+func (s *fakeServer) ServerID() string { return s.id }
 
 func (s *fakeServer) LibraryBooks(context.Context, int64, string, int) (*link.LibraryBooks, error) {
 	return &link.LibraryBooks{Books: s.books}, nil
@@ -287,6 +292,8 @@ type harness struct {
 }
 
 const (
+	// testServer is the paired server's id unless a test sets another.
+	testServer = "srv"
 	testID     = 192
 	testWork   = "johnny-crows-garden-brooke"
 	testRec    = "johnny-crows-garden-brooke-librivox-192"
@@ -306,7 +313,7 @@ var jpeg = []byte("\xFF\xD8\xFFcover-bytes")
 
 func newHarness(t *testing.T) *harness {
 	t.Helper()
-	x := &harness{mount: t.TempDir(), stateDir: filepath.Join(t.TempDir(), "librivox"), free: 1 << 40}
+	x := &harness{mount: t.TempDir(), stateDir: filepath.Join(t.TempDir(), "librivox"), free: 1 << 40, serverID: testServer}
 	cover := coverURL
 	x.meta = &fakeMeta{
 		book: metaops.LibrivoxBook{ID: strconv.Itoa(testID), Title: testTitle,

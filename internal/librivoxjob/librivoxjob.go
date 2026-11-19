@@ -223,12 +223,18 @@ func (h *Handler) Lane() string { return jobs.LaneDownload }
 const mappingPoll = time.Second
 
 // Abandon removes the staging folder of a job the runner ended without
-// running it (cancelled before it resumed). A lost claim keeps it: the server
-// hands the job out again and the next claim resumes it. A placed book stays.
-// The state is the job's library's alone, so a fetch of the same project
-// into another library is never touched, and this server's alone: another
-// server's state is never followed into this server's same-numbered library.
-// A fetch of the same project and library running here meanwhile keeps it.
+// running it (cancelled before it resumed, or dropped: its pairing ended). A
+// lost claim keeps it: the server hands the job out again and the next claim
+// resumes it. A placed book stays. It removes only what the state proves is
+// this job's: recorded by the job itself (its server's id and its job id),
+// in its server's library as the Bridge lists it (the pairing's server is the
+// job's, while unpaired too: the libraries listed are still that server's).
+// So a fetch of the same project into another library, another job's fetch
+// of it (a new claim since), a state from before the job was recorded, and
+// another server's state (followed into no same-numbered library of the
+// server the Bridge pairs with now) are never touched; the sweep, reading for
+// the pairing, removes what is abandoned of them. A fetch of the same project
+// and library running here meanwhile keeps it.
 func (h *Handler) Abandon(ctx context.Context, job jobs.Job) {
 	if jobs.Lost(ctx) {
 		return
@@ -242,8 +248,18 @@ func (h *Handler) Abandon(ctx context.Context, job jobs.Job) {
 		return
 	}
 	defer h.end(k)
-	st := h.loadState(p.LibraryID, p.LibrivoxID)
-	if st == nil || st.Placed || h.serverUnknown(st) {
+	// A job of a server the Bridge is no longer paired with (dropped), or of
+	// none known: the libraries listed are another server's (or none's),
+	// which share ids with its own, so its state is followed into none of
+	// them. State and staging stay as they are; the sweep, reading for the
+	// pairing, drops the state.
+	cur := h.o.ServerID()
+	serverID := job.KeyServer(cur) // the job's, never another server's
+	if serverID == "" || serverID != cur {
+		return
+	}
+	st := h.loadState(p.LibraryID, p.LibrivoxID, serverID)
+	if st == nil || st.Placed || st.ServerID != serverID || st.JobID != job.ID {
 		return
 	}
 	// The state goes with the folder it names: while the folder can't be
@@ -342,6 +358,11 @@ type fetch struct {
 	mount string
 	st    *state
 	rep   *jobs.Reporter
+	// serverID is the job's server (jobs.Job.KeyServer): its state is
+	// recorded under it, never under the pairing's now. jobID is the job's id,
+	// recorded with it too (state.JobID).
+	serverID string
+	jobID    int64
 	// renamed: this run renamed the staging folder into place (the result's
 	// adopted is false only then).
 	renamed bool
@@ -362,7 +383,7 @@ func (f *fetch) openRoot() (*os.Root, error) {
 func (h *Handler) run(ctx context.Context, job jobs.Job, p Params, rep *jobs.Reporter) (res *Result, err error) {
 	var srv Server
 	if h.o.Server != nil {
-		srv = h.o.Server()
+		srv = jobs.Link(job, h.o.Server()) // none once paired with another server
 	}
 	if srv == nil {
 		return nil, errors.New("the Bridge isn't paired with a server")
@@ -371,14 +392,17 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, p Params, rep *jobs.Rep
 	if err != nil {
 		return nil, err
 	}
-	f := &fetch{p: p, lib: lib, mount: mount, rep: rep, st: h.loadState(lib.ID, p.LibrivoxID)}
+	serverID := job.KeyServer(h.o.ServerID())
+	f := &fetch{p: p, lib: lib, mount: mount, rep: rep, serverID: serverID, jobID: job.ID, st: h.loadState(lib.ID, p.LibrivoxID, serverID)}
 	if f.st != nil {
-		if !f.st.Unmapped.IsZero() {
+		if !f.st.Unmapped.IsZero() || f.st.JobID != job.ID || f.st.ServerID != serverID {
 			// Mapped again: forgotten now, not at a next save a run may never
 			// make, so a later unmapping counts from its own start (endUnmapped).
-			f.st.Unmapped = time.Time{}
+			// A state an earlier job of the fetch left is this job's from now
+			// (Abandon removes only its own job's staging).
+			f.st.Unmapped, f.st.JobID, f.st.ServerID = time.Time{}, job.ID, serverID
 			if err := h.saveState(p.LibrivoxID, f.st); err != nil {
-				h.o.Log.Warn("librivox: clearing a fetch's unmapped time failed", "library", lib.ID, "librivox_id", p.LibrivoxID, "err", err)
+				h.o.Log.Warn("librivox: recording a fetch's state failed", "library", lib.ID, "librivox_id", p.LibrivoxID, "err", err)
 			}
 		}
 		h.touchState(lib.ID, p.LibrivoxID, time.Now())
@@ -579,7 +603,7 @@ func (h *Handler) plan(ctx context.Context, f *fetch, srv Server, book metaops.L
 			return err
 		}
 	}
-	st := &state{LibraryID: f.lib.ID, ServerID: h.o.ServerID(), Parent: parent}
+	st := &state{LibraryID: f.lib.ID, ServerID: f.serverID, JobID: f.jobID, Parent: parent}
 	dest = path.Join(parent, path.Base(dest)) // under the author folder as spelled on disk
 	fallback := fallbackName(dest, f.p.LibrivoxID)
 	for _, at := range []string{dest, fallback} {

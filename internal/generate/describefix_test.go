@@ -328,6 +328,10 @@ type heldRescan struct {
 	gate chan struct{}
 }
 
+// ServerID is the wrapped link's: the job's handler takes the link only while
+// it reaches the job's server (jobs.Link).
+func (g heldRescan) ServerID() string { return g.Server.(interface{ ServerID() string }).ServerID() }
+
 func (g heldRescan) RescanAttachments(ctx context.Context, libraryID int64, path string) (*link.Attachments, error) {
 	select {
 	case <-g.gate:

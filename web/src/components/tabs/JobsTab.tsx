@@ -67,17 +67,18 @@ export function JobsTab({
   client: ApiClient;
   focusId?: number | null;
 }) {
-  // The libraries' names, read once: a job names its library by them (an id
-  // until they load, or when they can't).
-  const { data: names } = useLoad(
-    async () => libraryNames((await client.libraries()).libraries),
-    null,
-  );
+  // The libraries' names, read once with the paired server they are of: a job
+  // of that server names its library by them (an id until they load, or when
+  // they can't), one of another server its path alone.
+  const { data: names } = useLoad(async () => {
+    const [libs, status] = await Promise.all([client.libraries(), client.status()]);
+    return { names: libraryNames(libs.libraries), serverId: status.pairing.server_id };
+  }, null);
   if (focusId !== null) return <FocusedJob client={client} id={focusId} names={names} />;
   return <JobList client={client} names={names} />;
 }
 
-type Names = ReadonlyMap<number, string> | null;
+type Names = { names: ReadonlyMap<number, string>; serverId: string } | null;
 
 // FocusedJob is one job's detail, polled like the list.
 function FocusedJob({ client, id, names }: { client: ApiClient; id: number; names: Names }) {
@@ -201,8 +202,8 @@ function JobCard({
   const progress = sidecars ? '' : progressText(job.progress);
   const percent = progressPercent(job.progress);
   const report = reportText(job);
-  const hint = stateHint(shown);
-  const target = jobTarget(job, names);
+  const hint = stateHint(shown, job.error);
+  const target = jobTarget(job, names?.names, names?.serverId);
 
   async function retry() {
     setBusy(true);

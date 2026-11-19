@@ -108,7 +108,7 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 		return nil, fmt.Errorf("library %d isn't one the server listed", *job.LibraryID)
 	}
 	mount, _ := h.mount(lib.ID, lib.Root)
-	src := h.books()
+	src := jobs.Link(job, h.books()) // none once paired with another server
 	if src == nil {
 		return nil, errors.New("the Bridge isn't paired")
 	}

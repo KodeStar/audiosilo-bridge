@@ -3,8 +3,10 @@ package jobs
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -17,6 +19,7 @@ import (
 
 type controlledClaim struct {
 	kinds     []string
+	wait      time.Duration
 	min       *int32
 	answer    chan *link.Job
 	cancelled chan struct{}
@@ -41,14 +44,14 @@ func newControlledServer(accept bool) *controlledServer {
 }
 func (s *controlledServer) SupportsClaimMinPriority() bool { return s.accepts.Load() }
 func (s *controlledServer) WithdrawClaimMinPriority()      { s.accepts.Store(false) }
-func (s *controlledServer) Claim(ctx context.Context, kinds []string, _ time.Duration) (*link.Job, error) {
-	return s.claim(ctx, kinds, nil)
+func (s *controlledServer) Claim(ctx context.Context, kinds []string, wait time.Duration) (*link.Job, error) {
+	return s.claim(ctx, kinds, wait, nil)
 }
-func (s *controlledServer) ClaimMinPriority(ctx context.Context, kinds []string, _ time.Duration, priority int32) (*link.Job, error) {
-	return s.claim(ctx, kinds, &priority)
+func (s *controlledServer) ClaimMinPriority(ctx context.Context, kinds []string, wait time.Duration, priority int32) (*link.Job, error) {
+	return s.claim(ctx, kinds, wait, &priority)
 }
-func (s *controlledServer) claim(ctx context.Context, kinds []string, priority *int32) (*link.Job, error) {
-	c := &controlledClaim{kinds: slices.Clone(kinds), min: priority, answer: make(chan *link.Job, 1), cancelled: make(chan struct{}), join: make(chan struct{})}
+func (s *controlledServer) claim(ctx context.Context, kinds []string, wait time.Duration, priority *int32) (*link.Job, error) {
+	c := &controlledClaim{kinds: slices.Clone(kinds), wait: wait, min: priority, answer: make(chan *link.Job, 1), cancelled: make(chan struct{}), join: make(chan struct{})}
 	select {
 	case s.calls <- c:
 	case <-ctx.Done():
@@ -190,7 +193,9 @@ func TestReservedSaturationAndRelease(t *testing.T) {
 	await(t, started)
 	assertPools(t, r, map[int64]string{1: LaneDownload, 2: LaneInteractive})
 	close(gates[1])
-	await(t, narrow.cancelled)
+	// The freed slot leaves the narrow claim in flight (BR-CLAIM-HOLD); the
+	// next claim asks for the download again.
+	narrow.answer <- nil
 	expanded := srv.next(t, false)
 	if !slices.Contains(expanded.kinds, h.Kind()) {
 		t.Fatal(expanded.kinds)
@@ -219,7 +224,7 @@ func TestRefreshJoinsAndOwnsCancelRace(t *testing.T) {
 	// Ensure cleanup can always release the deliberately held old call.
 	var once sync.Once
 	t.Cleanup(func() { once.Do(func() { close(narrow.join) }) })
-	close(gates[1])
+	r.setCapacity(LaneDownload, 2) // a capacity change cancels an in-flight claim
 	await(t, narrow.cancelled)
 	select {
 	case c := <-srv.calls:
@@ -234,6 +239,7 @@ func TestRefreshJoinsAndOwnsCancelRace(t *testing.T) {
 	if !slices.Equal(refreshed.kinds, []string{"download"}) {
 		t.Fatal(refreshed.kinds)
 	}
+	close(gates[1])
 }
 
 func TestLegacyDownloadCapacityAndNegotiationChange(t *testing.T) {
@@ -299,9 +305,8 @@ func TestRollbackBeforeHeartbeatUsesOrdinaryAdmission(t *testing.T) {
 			return block(ctx, j, rep)
 		}
 		h := optedHandler{base}
-		opts := testOpts()
-		opts.ServerID = func() string { return "rollback" }
-		r := New(db, func() Server { return srv }, nil, opts, h)
+		srv.id = "rollback"
+		r := New(db, func() Server { return srv }, nil, testOpts(), h)
 		startControlled(t, r)
 		ordinary, reserve := srv.next(t, false), srv.next(t, true)
 		ordinary.answer <- claimed(1, h.Kind(), 20)
@@ -527,7 +532,7 @@ func TestUnchangedWakeAndCapacityRefresh(t *testing.T) {
 		defer cancel()
 		q, changed := r.request(false, true, nil)
 		done := make(chan bool, 1)
-		go func() { _, refreshed := r.poll(ctx, q, changed); done <- refreshed }()
+		go func() { _, refreshed := r.poll(ctx, q, changed, r.opts.Wait); done <- refreshed }()
 		call := await(t, srv.calls)
 		for range 3 {
 			r.Wake()
@@ -548,42 +553,588 @@ func TestUnchangedWakeAndCapacityRefresh(t *testing.T) {
 	})
 }
 
-func TestRepairRefreshOwnsOldPairingJob(t *testing.T) {
+// A claim the old pairing's link answers once the Bridge is paired with another
+// server is dropped whole (denied): never recorded, so the new server's job of
+// the same id keeps its row, never run nor handed to its handler, and reported
+// to neither link. Its own server's lease lapses it.
+func TestRepairDropsTheOldPairingsAnswer(t *testing.T) {
 	old, next := newControlledServer(true), newControlledServer(true)
+	old.id, next.id = "old", "new"
 	var current atomic.Pointer[controlledServer]
 	current.Store(old)
 	started := make(chan Job, 2)
-	opts := testOpts()
-	opts.ServerID = func() string {
-		if current.Load() == old {
-			return "old"
-		}
-		return "new"
-	}
-	h := optedHandler{blockingHandler("podcast.fetch", LaneDownload, started, nil)}
+	h := &abandoner{handler: blockingHandler("podcast.fetch", LaneDownload, started, nil)}
 	db := openStore(t)
-	r := New(db, func() Server { return current.Load() }, nil, opts, h)
+	r := New(db, func() Server { return current.Load() }, nil, testOpts(), h)
 	startControlled(t, r)
-	ordinary, reserve := old.next(t, false), old.next(t, true)
-	reserve.cancelJob.Store(claimed(7, h.Kind(), wirePriority(t)))
+	ordinary := old.next(t, false)
+	ordinary.cancelJob.Store(claimed(7, h.Kind(), 0)) // answered as the re-pair cancels it
+	// The new server's job of the same id already holds the row (its own
+	// claim, taken by the other dispatcher) when the old answer is read.
+	ctx := context.Background()
+	if err := db.RecordClaim(ctx, store.ServerJob{ID: 7, Kind: h.Kind(), Attempt: 1, ServerID: "new"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetServerJobProgress(ctx, 7, 1, json.RawMessage(`{"step":"downloading"}`)); err != nil {
+		t.Fatal(err)
+	}
 	current.Store(next)
 	r.Wake()
 	await(t, ordinary.cancelled)
-	await(t, reserve.cancelled)
-	if j := await(t, started); j.ID != 7 {
-		t.Fatal(j)
+	next.next(t, false) // the dispatcher has read the old answer and asks the new server
+	sj, err := db.GetServerJob(ctx, 7)
+	if err != nil || sj.ServerID != "new" || sj.State != store.JobRunning || !strings.Contains(string(sj.Progress), "downloading") {
+		t.Fatalf("the new server's row after the old pairing's answer: %+v %v, want it untouched", sj, err)
 	}
-	// The old response remains on its old link and identity after re-pair.
-	sj, err := db.GetServerJob(context.Background(), 7)
-	if err != nil || sj.ServerID != "old" {
-		t.Fatal(sj, err)
+	select {
+	case j := <-started:
+		t.Fatal("another server's job ran", j)
+	default:
 	}
-	next.next(t, false)
-	old.mu.Lock()
-	reported := len(old.updates[7]) != 0
-	old.mu.Unlock()
-	if !reported {
-		t.Fatal("old job used the new link")
+	if got := h.abandoned(); len(got) != 0 {
+		t.Fatal("a claim that was never recorded was handed to its handler", got)
+	}
+	r.mu.Lock()
+	_, running := r.running[7]
+	r.mu.Unlock()
+	if running {
+		t.Fatal("the old pairing's answer is a run here")
+	}
+	for _, s := range []*controlledServer{old, next} {
+		if n := s.triesOf(7); n != 0 {
+			t.Fatal("the dropped job was reported on", s.id, n)
+		}
+	}
+}
+
+// An unpair on the Bridge's own page stops the jobs here (allowed: cancelled
+// locally, for good, their work released) and sends nothing more to that
+// server (denied), a job waiting for its lane slot and one a refused token
+// had stopped included; each is recorded lost, and none is resumed, reported
+// or recorded as failed once the Bridge is paired again, with that server or
+// another.
+func TestUnpairStopsTheJobsAndSendsNothingMore(t *testing.T) {
+	for name, nextID := range map[string]string{"paired again with it": "a", "paired with another": "b"} {
+		t.Run(name, func(t *testing.T) {
+			srv, next := newControlledServer(false), newControlledServer(false)
+			srv.id, next.id = "a", nextID
+			var current atomic.Pointer[controlledServer]
+			current.Store(srv)
+			started := make(chan Job, 4)
+			var resumes atomic.Bool
+			h := &abandoner{handler: handler{kind: "podcast.fetch", lane: LaneDownload, fn: func(ctx context.Context, j Job, _ *Reporter) (any, error) {
+				started <- j
+				<-ctx.Done()
+				resumes.Store(Resumes(ctx))
+				return nil, ctx.Err()
+			}}}
+			db := openStore(t)
+			opts := testOpts()
+			opts.Lanes = map[string]int{LaneDownload: 1}
+			r := New(db, func() Server {
+				if s := current.Load(); s != nil {
+					return s
+				}
+				return nil
+			}, nil, opts, h)
+			ctx := context.Background()
+			startControlled(t, r)
+			var wg sync.WaitGroup
+			defer wg.Wait()
+			runCtx, stop := context.WithCancel(ctx)
+			defer stop()
+			// Job 1 runs, job 2 waits for the lane's one slot (its lease renewed).
+			srv.next(t, false).answer <- claimed(1, h.Kind(), 0)
+			if j := await(t, started); j.ID != 1 {
+				t.Fatal(j)
+			}
+			r.start(runCtx, srv, Job{ID: 2, Kind: h.Kind(), Attempt: 1}, &wg, nil)
+			waitFor(t, func() bool { return srv.triesOf(1) > 0 && srv.triesOf(2) > 0 })
+
+			current.Store(nil) // the app ends the pairing first
+			// Job 3 is one a refused token had stopped (stranded, its row running).
+			if err := db.RecordClaim(ctx, store.ServerJob{ID: 3, Kind: h.Kind(), Attempt: 1, ServerID: "a"}); err != nil {
+				t.Fatal(err)
+			}
+			r.mu.Lock()
+			r.stranded = []Job{{ID: 3, Kind: h.Kind(), Attempt: 1, serverID: "a"}}
+			r.mu.Unlock()
+			r.Unpaired(srv)
+			for _, id := range []int64{1, 2, 3} {
+				waitFor(t, func() bool {
+					sj, err := db.GetServerJob(ctx, id)
+					return err == nil && sj.State == store.JobLost && sj.ServerID == "a"
+				})
+			}
+			if resumes.Load() {
+				t.Fatal("the running job's handler was told it resumes")
+			}
+			if got := h.abandoned(); !slices.Contains(got, 2) || !slices.Contains(got, 3) || slices.Contains(got, 1) {
+				t.Fatal("the jobs that never ran weren't released (or the one that ran was)", got)
+			}
+			waitFor(t, func() bool { r.mu.Lock(); defer r.mu.Unlock(); return len(r.running) == 0 })
+			sent := map[int64]int{1: srv.triesOf(1), 2: srv.triesOf(2), 3: srv.triesOf(3)}
+			if s, _ := srv.finalState(1); s != "" || sent[3] != 0 {
+				t.Fatal("an end was reported to the unpaired server", s, sent)
+			}
+			// A claim the old link answers after the unpair is dropped whole.
+			r.start(runCtx, srv, Job{ID: 4, Kind: h.Kind(), Attempt: 1}, &wg, nil)
+			if _, err := db.GetServerJob(ctx, 4); !errors.Is(err, store.ErrNotFound) {
+				t.Fatal("a claim answered after the unpair was recorded", err)
+			}
+			current.Store(next)
+			r.Wake()
+			time.Sleep(10 * opts.Keepalive) // several keepalives and report retries
+			for id, n := range sent {
+				if got := srv.triesOf(id); got != n {
+					t.Fatalf("job %d: %d more reports went to the unpaired server", id, got-n)
+				}
+				if got := next.triesOf(id); got != 0 {
+					t.Fatalf("job %d: %d reports went to the next pairing's server", id, got)
+				}
+				if sj, err := db.GetServerJob(ctx, id); err != nil || sj.State != store.JobLost || sj.ServerID != "a" {
+					t.Fatalf("job %d after the next pairing: %+v %v, want lost, of server a", id, sj, err)
+				}
+			}
+			select {
+			case j := <-started:
+				t.Fatal("a job the unpair stopped ran again", j)
+			default:
+			}
+		})
+	}
+}
+
+// linkPairing is a test's Options.Pairing over the link cur holds: its
+// PairingID and server, none while cur holds no link (unpaired).
+func linkPairing(cur *atomic.Pointer[controlledServer]) func() Pairing {
+	return func() Pairing {
+		if s := cur.Load(); s != nil {
+			return Pairing{ID: s.pairing, ServerID: s.id}
+		}
+		return Pairing{}
+	}
+}
+
+// linkOf is a test's server func over cur (nil while it holds no link).
+func linkOf(cur *atomic.Pointer[controlledServer]) func() Server {
+	return func() Server {
+		if s := cur.Load(); s != nil {
+			return s
+		}
+		return nil
+	}
+}
+
+// An unpair on the page drops the rows the store still has running that no run
+// here holds (the Bridge unpaired before its first link after a restart): the
+// pairing is gone, so they are another pairing's, released and recorded lost
+// by the claim loop, and a later pairing with their server never resumes them
+// (denied). A finished row waiting for its report is never sent (denied).
+func TestUnpairDropsRowsNoRunHolds(t *testing.T) {
+	srv := newControlledServer(false)
+	srv.pairing = "p1"
+	h := &abandoner{handler: handler{kind: "podcast.fetch", lane: LaneDownload, fn: func(context.Context, Job, *Reporter) (any, error) {
+		return nil, nil
+	}}}
+	db := openStore(t)
+	ctx := context.Background()
+	for _, id := range []int64{5, 6} {
+		if err := db.RecordClaim(ctx, store.ServerJob{ID: id, Kind: h.Kind(), Attempt: 1, ServerID: testServer, Pairing: "p1"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.FinishServerJob(ctx, 6, 1, store.JobDone, nil, ""); err != nil {
+		t.Fatal(err)
+	}
+	var paired, cur atomic.Pointer[controlledServer]
+	cur.Store(srv) // paired, with no link yet since the start
+	opts := testOpts()
+	opts.Pairing = linkPairing(&cur)
+	r := New(db, linkOf(&paired), nil, opts, h)
+	startControlled(t, r)
+	cur.Store(nil)
+	r.Unpaired(srv)
+	waitFor(t, func() bool {
+		sj, err := db.GetServerJob(ctx, 5)
+		return err == nil && sj.State == store.JobLost && sj.Error == errPairingEnded.Error()
+	})
+	if got := h.abandoned(); len(got) != 1 || got[0] != 5 {
+		t.Fatal("the dropped row's work wasn't released once", got)
+	}
+	if sj, err := db.GetServerJob(ctx, 6); err != nil || sj.State != store.JobDone || !sj.Reported {
+		t.Fatalf("a finished row: %+v %v, want done and never to be reported", sj, err)
+	}
+	next := newControlledServer(false) // paired again with the same server: a new pairing
+	next.pairing = "p2"
+	cur.Store(next)
+	paired.Store(next)
+	r.Wake()
+	next.next(t, false) // the runner claims anew
+	time.Sleep(5 * opts.RetryEvery)
+	if h.ran.Load() || next.triesOf(5) != 0 || next.triesOf(6) != 0 || srv.triesOf(6) != 0 {
+		t.Fatal("the earlier pairing's jobs were resumed or reported on the next pairing")
+	}
+}
+
+// Unpaired never waits for a job's work to be released (the unpair page's
+// request is answered at once): an Abandon that blocks runs on the claim
+// loop, and the row is recorded lost once it returns.
+func TestUnpairedDoesNotWaitForAbandon(t *testing.T) {
+	srv := newControlledServer(false)
+	srv.pairing = "p1"
+	release := make(chan struct{})
+	h := &blockingAbandoner{abandoner: abandoner{handler: handler{kind: "podcast.fetch", lane: LaneDownload, fn: func(context.Context, Job, *Reporter) (any, error) {
+		return nil, nil
+	}}}, release: release, entered: make(chan struct{}, 1)}
+	db := openStore(t)
+	ctx := context.Background()
+	if err := db.RecordClaim(ctx, store.ServerJob{ID: 5, Kind: h.Kind(), Attempt: 1, ServerID: testServer, Pairing: "p1"}); err != nil {
+		t.Fatal(err)
+	}
+	var none, cur atomic.Pointer[controlledServer]
+	cur.Store(srv)
+	opts := testOpts()
+	opts.Pairing = linkPairing(&cur)
+	r := New(db, linkOf(&none), nil, opts, h)
+	startControlled(t, r)
+	cur.Store(nil)
+	returned := make(chan struct{})
+	go func() { r.Unpaired(srv); close(returned) }()
+	await(t, returned)
+	await(t, h.entered) // the claim loop releases the row's work, still blocked
+	if sj, err := db.GetServerJob(ctx, 5); err != nil || sj.State != store.JobRunning {
+		t.Fatalf("recorded lost before its work was released: %+v %v", sj, err)
+	}
+	close(release)
+	waitFor(t, func() bool {
+		sj, err := db.GetServerJob(ctx, 5)
+		return err == nil && sj.State == store.JobLost
+	})
+}
+
+// blockingAbandoner's Abandon waits for release.
+type blockingAbandoner struct {
+	abandoner
+	release <-chan struct{}
+	entered chan struct{}
+}
+
+func (a *blockingAbandoner) Abandon(ctx context.Context, j Job) {
+	a.entered <- struct{}{}
+	select {
+	case <-a.release:
+	case <-ctx.Done():
+	}
+	a.abandoner.Abandon(ctx, j)
+}
+
+// A start drops the open rows of an earlier pairing before it resumes
+// anything, as the pairing is the store's, not this process's: unpaired since
+// (the Bridge unpaired, maybe paired again with the same server: a new
+// pairing) or paired with another server, a running row is recorded lost with
+// its drop's reason and released, never resumed (denied), and a finished one
+// is never reported; the pairing's own row resumes (allowed: a plain restart,
+// or an upgrade whose rows the app gave the pairing in place).
+func TestEarlierPairingsRowsAreDroppedAtStart(t *testing.T) {
+	for name, tc := range map[string]struct {
+		pairing, server string // the current pairing (pairing "": unpaired)
+		resumes         bool
+		why             error
+	}{
+		"unpaired since":                {why: errPairingEnded},
+		"paired again with the server":  {pairing: "p2", server: testServer, why: errPairingEnded},
+		"paired with another server":    {pairing: "p2", server: "other", why: errOtherServer},
+		"the same pairing (or upgrade)": {pairing: "p1", server: testServer, resumes: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			started := make(chan Job, 2)
+			h := &abandoner{handler: blockingHandler("podcast.fetch", LaneDownload, started, nil)}
+			db := openStore(t)
+			ctx := context.Background()
+			for _, id := range []int64{5, 6} {
+				if err := db.RecordClaim(ctx, store.ServerJob{ID: id, Kind: h.Kind(), Attempt: 1, ServerID: testServer, Pairing: "p1"}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := db.FinishServerJob(ctx, 6, 1, store.JobDone, nil, ""); err != nil {
+				t.Fatal(err)
+			}
+			var cur atomic.Pointer[controlledServer]
+			var srv *controlledServer
+			if tc.pairing != "" {
+				srv = newControlledServer(false)
+				srv.id, srv.pairing = tc.server, tc.pairing
+				cur.Store(srv)
+			}
+			opts := testOpts()
+			opts.Pairing = linkPairing(&cur)
+			r := New(db, linkOf(&cur), nil, opts, h)
+			startControlled(t, r)
+			if tc.resumes {
+				if j := await(t, started); j.ID != 5 {
+					t.Fatal("resumed", j.ID)
+				}
+				waitFor(t, func() bool { return srv.triesOf(6) > 0 }) // its end is reported
+				return
+			}
+			waitFor(t, func() bool {
+				sj, err := db.GetServerJob(ctx, 5)
+				return err == nil && sj.State == store.JobLost && sj.Error == tc.why.Error()
+			})
+			if got := h.abandoned(); len(got) != 1 || got[0] != 5 {
+				t.Fatal("the dropped row's work wasn't released once", got)
+			}
+			if sj, err := db.GetServerJob(ctx, 6); err != nil || !sj.Reported {
+				t.Fatalf("a finished row of the earlier pairing: %+v %v, want never reported", sj, err)
+			}
+			if srv != nil {
+				srv.next(t, false) // claiming: past the start's look
+				time.Sleep(5 * opts.RetryEvery)
+				if srv.triesOf(5) != 0 || srv.triesOf(6) != 0 {
+					t.Fatal("an earlier pairing's job was reported", srv.triesOf(5), srv.triesOf(6))
+				}
+			}
+			select {
+			case j := <-started:
+				t.Fatal("an earlier pairing's job resumed", j)
+			default:
+			}
+		})
+	}
+}
+
+// A job whose pairing the app has forgotten (an unpair on the page, before
+// Unpaired reaches its run) reports nothing more: its end is dropped, lost
+// and never sent (denied), and a claim its link answers then is never
+// recorded or run.
+func TestRunOfAForgottenPairingIsDropped(t *testing.T) {
+	srv := newControlledServer(false)
+	srv.pairing = "p1"
+	started := make(chan Job, 2)
+	gates := map[int64]chan struct{}{1: make(chan struct{})}
+	h := &abandoner{handler: blockingHandler("podcast.fetch", LaneDownload, started, gates)}
+	db := openStore(t)
+	var cur atomic.Pointer[controlledServer]
+	cur.Store(srv)
+	opts := testOpts()
+	opts.Pairing = linkPairing(&cur)
+	r := New(db, func() Server { return srv }, nil, opts, h)
+	startControlled(t, r)
+	srv.next(t, false).answer <- claimed(1, h.Kind(), 0)
+	await(t, started)
+	waitFor(t, func() bool { return srv.triesOf(1) > 0 })
+	cur.Store(nil)  // the pairing is forgotten; Unpaired hasn't come yet
+	close(gates[1]) // the job ends well
+	ctx := context.Background()
+	waitFor(t, func() bool {
+		sj, err := db.GetServerJob(ctx, 1)
+		return err == nil && sj.State == store.JobLost && sj.Error == errPairingEnded.Error()
+	})
+	if s, _ := srv.finalState(1); s != "" {
+		t.Fatal("the end of a job of a forgotten pairing was reported", s)
+	}
+	var wg sync.WaitGroup
+	r.start(ctx, srv, Job{ID: 2, Kind: h.Kind(), Attempt: 1}, &wg, nil)
+	wg.Wait()
+	if _, err := db.GetServerJob(ctx, 2); !errors.Is(err, store.ErrNotFound) {
+		t.Fatal("a claim answered on a forgotten pairing's link was recorded", err)
+	}
+}
+
+// unreadableStore is a store whose open jobs can't be read while fail is set.
+type unreadableStore struct {
+	*store.DB
+	fail   atomic.Bool
+	failed atomic.Int32 // the reads failed so far
+}
+
+func (s *unreadableStore) OpenServerJobs(ctx context.Context) ([]store.ServerJob, error) {
+	if s.fail.Load() {
+		s.failed.Add(1)
+		return nil, errors.New("database is locked")
+	}
+	return s.DB.OpenServerJobs(ctx)
+}
+
+// The look for an earlier pairing's rows that can't read the store looks again
+// once the store reads, though the Bridge is paired again with the same server
+// meanwhile: the row is dropped, released once and reported to neither link
+// (denied: the look skipped once paired, the row left for the next start to
+// resume). The new pairing's rows are left alone (allowed): its run, and a row
+// no run holds (a run whose end couldn't be recorded), which only a start
+// resumes.
+func TestPairingLookRunsOnceTheStoreReads(t *testing.T) {
+	first, second := newControlledServer(false), newControlledServer(false)
+	first.pairing, second.pairing = "p1", "p2"
+	started := make(chan Job, 4)
+	h := &abandoner{handler: blockingHandler("podcast.fetch", LaneDownload, started, map[int64]chan struct{}{})}
+	db := &unreadableStore{DB: openStore(t)}
+	var cur atomic.Pointer[controlledServer]
+	cur.Store(first)
+	opts := testOpts()
+	opts.Pairing = linkPairing(&cur)
+	r := New(db, linkOf(&cur), nil, opts, h)
+	startControlled(t, r)
+	first.next(t, false) // past recover: the claim loop runs
+	ctx := context.Background()
+	// A row no run holds (its run's end couldn't be recorded).
+	if err := db.RecordClaim(ctx, store.ServerJob{ID: 5, Kind: h.Kind(), Attempt: 1, ServerID: testServer, Pairing: "p1"}); err != nil {
+		t.Fatal(err)
+	}
+	db.fail.Store(true)
+	cur.Store(nil)
+	r.Unpaired(first)
+	waitFor(t, func() bool { return db.failed.Load() > 0 }) // the look tried
+	if sj, err := db.GetServerJob(ctx, 5); err != nil || sj.State != store.JobRunning {
+		t.Fatalf("a row dropped though the store couldn't be read: %+v %v", sj, err)
+	}
+	cur.Store(second) // paired again with the same server, the store still unreadable
+	r.Wake()
+	second.next(t, false).answer <- claimed(7, h.Kind(), 0)
+	await(t, started)
+	if err := db.RecordClaim(ctx, store.ServerJob{ID: 8, Kind: h.Kind(), Attempt: 1, ServerID: testServer, Pairing: "p2"}); err != nil {
+		t.Fatal(err)
+	}
+	db.fail.Store(false)
+	r.Wake()
+	waitFor(t, func() bool {
+		sj, err := db.GetServerJob(ctx, 5)
+		return err == nil && sj.State == store.JobLost
+	})
+	if got := h.abandoned(); len(got) != 1 || got[0] != 5 {
+		t.Fatal("the dropped row's work wasn't released once", got)
+	}
+	for _, id := range []int64{7, 8} {
+		if sj, err := db.GetServerJob(ctx, id); err != nil || sj.State != store.JobRunning {
+			t.Fatalf("the new pairing's row %d: %+v %v, want running", id, sj, err)
+		}
+	}
+	if first.triesOf(5) != 0 || second.triesOf(5) != 0 {
+		t.Fatal("the dropped job was reported")
+	}
+}
+
+// staleListStore lists the open jobs as an earlier read had them (list), while
+// its rows are what claims wrote since; listed counts the lists.
+type staleListStore struct {
+	*store.DB
+	list   []store.ServerJob
+	listed atomic.Int32
+}
+
+func (s *staleListStore) OpenServerJobs(context.Context) ([]store.ServerJob, error) {
+	s.listed.Add(1)
+	return s.list, nil
+}
+
+// The look for an earlier pairing's rows reads each row again before it drops
+// it: a claim of the new pairing (another server's, job ids are each server's
+// own) that took the row under the listed id since the list was read, and ran
+// and ended, is never Abandoned, recorded lost or marked reported for the
+// listed one (denied).
+func TestPairingLookLeavesARowANewClaimTook(t *testing.T) {
+	db := &staleListStore{DB: openStore(t)}
+	h := &abandoner{handler: handler{kind: "podcast.fetch", lane: LaneDownload, fn: func(context.Context, Job, *Reporter) (any, error) {
+		return nil, nil
+	}}}
+	ctx := context.Background()
+	for _, id := range []int64{5, 6} {
+		if err := db.RecordClaim(ctx, store.ServerJob{ID: id, Kind: h.Kind(), Attempt: 1, ServerID: "other", Pairing: "p2"}); err != nil {
+			t.Fatal(err)
+		}
+		db.list = append(db.list, store.ServerJob{ID: id, Kind: h.Kind(), Attempt: 1, ServerID: testServer, Pairing: "p1", State: store.JobRunning})
+	}
+	if err := db.FinishServerJob(ctx, 6, 1, store.JobDone, nil, ""); err != nil {
+		t.Fatal(err)
+	}
+	db.list[1].State = store.JobDone
+	next := newControlledServer(false)
+	next.id, next.pairing = "other", "p2"
+	var cur, none atomic.Pointer[controlledServer]
+	cur.Store(next)
+	opts := testOpts()
+	opts.Pairing = linkPairing(&cur)
+	r := New(db, linkOf(&none), nil, opts, h)
+	startControlled(t, r)
+	waitFor(t, func() bool { return db.listed.Load() > 0 })
+	time.Sleep(5 * opts.RetryEvery)
+	if got := h.abandoned(); len(got) != 0 {
+		t.Fatal("the new claim's work was released for the listed row", got)
+	}
+	if sj, err := db.GetServerJob(ctx, 5); err != nil || sj.State != store.JobRunning || sj.Pairing != "p2" {
+		t.Fatalf("the new claim's running row: %+v %v", sj, err)
+	}
+	if sj, err := db.GetServerJob(ctx, 6); err != nil || sj.State != store.JobDone || sj.Reported {
+		t.Fatalf("the new claim's end: %+v %v, want done and still to be reported", sj, err)
+	}
+}
+
+// A job the Bridge's stop interrupts, its pairing ended on the page before its
+// end is settled, is dropped (lost, its kept work released) rather than left
+// running for the next start to resume (denied); one the stop leaves running
+// with no unpair is kept to resume (allowed: TestStopAndResume's
+// rule).
+func TestUnpairWhileStoppingDropsTheJob(t *testing.T) {
+	srv := newControlledServer(false)
+	stopped, settle := make(chan struct{}), make(chan struct{})
+	h := &abandoner{handler: handler{kind: "podcast.fetch", lane: LaneDownload, fn: func(ctx context.Context, _ Job, _ *Reporter) (any, error) {
+		<-ctx.Done()
+		close(stopped)
+		<-settle // the unpair comes as the stop is under way
+		return nil, ctx.Err()
+	}}}
+	db := openStore(t)
+	r := New(db, func() Server { return srv }, nil, testOpts(), h)
+	ctx, stop := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { r.Run(ctx); close(done) }()
+	srv.next(t, false).answer <- claimed(1, h.Kind(), 0)
+	waitFor(t, func() bool { return h.ran.Load() && srv.triesOf(1) > 0 })
+	stop()
+	await(t, stopped)
+	r.Unpaired(srv)
+	close(settle)
+	await(t, done)
+	if sj, err := db.GetServerJob(context.Background(), 1); err != nil || sj.State != store.JobLost {
+		t.Fatalf("a job unpaired as the Bridge stopped: %+v %v, want lost", sj, err)
+	}
+	if got := h.abandoned(); len(got) != 1 || got[0] != 1 {
+		t.Fatal("the work it kept to resume wasn't released", got)
+	}
+	if s, _ := srv.finalState(1); s != "" {
+		t.Fatal("the unpaired server was sent its end", s)
+	}
+}
+
+// A job on its way here when its pairing is ended on the page (a claim read
+// just before, a resume racing the unpair) is launched already ended: it
+// never runs and reports nothing (denied), and is recorded lost.
+func TestJobLaunchedOnAnUnpairedLinkEndsAtOnce(t *testing.T) {
+	srv := newControlledServer(false)
+	h := &abandoner{handler: handler{kind: "podcast.fetch", lane: LaneDownload, fn: func(context.Context, Job, *Reporter) (any, error) {
+		return nil, nil
+	}}}
+	db := openStore(t)
+	r := New(db, func() Server { return nil }, nil, testOpts(), h)
+	ctx := context.Background()
+	r.Unpaired(srv)
+	// The claim passed start's look before the unpair and is recorded after it
+	// (a row there before it is the claim loop's: TestUnpairDropsRowsNoRunHolds).
+	if err := db.RecordClaim(ctx, store.ServerJob{ID: 5, Kind: h.Kind(), Attempt: 1, ServerID: testServer}); err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	r.launch(ctx, srv, Job{serverID: testServer, ID: 5, Kind: h.Kind(), Attempt: 1, Resumed: true}, &wg, "", nil, nil)
+	wg.Wait()
+	if sj, err := db.GetServerJob(ctx, 5); err != nil || sj.State != store.JobLost {
+		t.Fatalf("the job launched on an unpaired link: %+v %v, want lost", sj, err)
+	}
+	if h.ran.Load() || srv.triesOf(5) != 0 {
+		t.Fatal("a job launched on an unpaired link ran or reported", h.ran.Load(), srv.triesOf(5))
+	}
+	if got := h.abandoned(); len(got) != 1 || got[0] != 5 {
+		t.Fatal("the job that never ran wasn't released", got)
 	}
 }
 
@@ -591,7 +1142,7 @@ func TestRecoveryAdmissionRenewsAndReservesInteractive(t *testing.T) {
 	srv := newControlledServer(true)
 	db := openStore(t)
 	for _, id := range []int64{1, 2, 3} {
-		if err := db.RecordClaim(context.Background(), store.ServerJob{ID: id, Kind: "podcast.fetch", Attempt: 1}); err != nil {
+		if err := db.RecordClaim(context.Background(), store.ServerJob{ServerID: testServer, ID: id, Kind: "podcast.fetch", Attempt: 1}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -633,7 +1184,7 @@ func TestRecoveredInteractiveJobResumesInTheReserve(t *testing.T) {
 			srv := newControlledServer(negotiated)
 			db := openStore(t)
 			for id, priority := range map[int64]int{1: wirePriority(t), 2: 20} {
-				if err := db.RecordClaim(context.Background(), store.ServerJob{ID: id, Kind: "podcast.fetch", Attempt: 1,
+				if err := db.RecordClaim(context.Background(), store.ServerJob{ServerID: testServer, ID: id, Kind: "podcast.fetch", Attempt: 1,
 					Priority: priority}); err != nil {
 					t.Fatal(err)
 				}
@@ -664,7 +1215,7 @@ func TestRecoveredInteractiveJobResumesInTheReserve(t *testing.T) {
 func TestRecoveredInteractiveJobFallsBackWhenTheReserveGoes(t *testing.T) {
 	srv := newControlledServer(true)
 	db := openStore(t)
-	if err := db.RecordClaim(context.Background(), store.ServerJob{ID: 1, Kind: "podcast.fetch", Attempt: 1,
+	if err := db.RecordClaim(context.Background(), store.ServerJob{ServerID: testServer, ID: 1, Kind: "podcast.fetch", Attempt: 1,
 		Priority: wirePriority(t)}); err != nil {
 		t.Fatal(err)
 	}
@@ -677,7 +1228,7 @@ func TestRecoveredInteractiveJobFallsBackWhenTheReserveGoes(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
 	t.Cleanup(func() { cancel(); wg.Wait() })
-	r.launch(ctx, srv, Job{ID: 1, Kind: h.Kind(), Attempt: 1, Priority: wirePriority(t), Resumed: true}, &wg, "", nil, nil)
+	r.launch(ctx, srv, Job{serverID: testServer, ID: 1, Kind: h.Kind(), Attempt: 1, Priority: wirePriority(t), Resumed: true}, &wg, "", nil, nil)
 	await(t, srv.updated)
 	if _, waiting := laneCounts(r, LaneInteractive); waiting != 1 {
 		t.Fatal("the resumed job doesn't wait for the reserve")
@@ -749,7 +1300,7 @@ func TestLiveParkKeepsSlotAndTerminalParkWakesDispatcher(t *testing.T) {
 	}
 	assertPools(t, r, map[int64]string{1: LaneDownload})
 	close(end)
-	await(t, narrow.cancelled)
+	narrow.answer <- nil // the freed slot leaves it in flight (BR-CLAIM-HOLD)
 	expanded := srv.next(t, false)
 	if !slices.Contains(expanded.kinds, h.Kind()) {
 		t.Fatal(expanded.kinds)
@@ -804,7 +1355,7 @@ func TestWaitingRecoveryRunsOrAbandons(t *testing.T) {
 			db, srv := openStore(t), newControlledServer(false)
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
-			if err := db.RecordClaim(ctx, store.ServerJob{ID: 9, Kind: "light", Attempt: 1}); err != nil {
+			if err := db.RecordClaim(ctx, store.ServerJob{ServerID: testServer, ID: 9, Kind: "light", Attempt: 1}); err != nil {
 				t.Fatal(err)
 			}
 			h := &abandoner{handler: handler{kind: "light", lane: LaneLight, fn: func(context.Context, Job, *Reporter) (any, error) { return nil, nil }}}
@@ -813,7 +1364,7 @@ func TestWaitingRecoveryRunsOrAbandons(t *testing.T) {
 			r := New(db, func() Server { return srv }, nil, opts, h)
 			r.use[LaneLight] = 1
 			var wg sync.WaitGroup
-			r.launch(ctx, srv, Job{ID: 9, Kind: h.Kind(), Attempt: 1, Resumed: true}, &wg, "", nil, nil)
+			r.launch(ctx, srv, Job{serverID: testServer, ID: 9, Kind: h.Kind(), Attempt: 1, Resumed: true}, &wg, "", nil, nil)
 			done := make(chan struct{})
 			go func() { wg.Wait(); close(done) }()
 			t.Cleanup(func() { cancel(); await(t, done) })
@@ -836,62 +1387,84 @@ func TestWaitingRecoveryRunsOrAbandons(t *testing.T) {
 	}
 }
 
-// bridge#13: a job waiting for its first slot renews its lease only on the link
-// in use. Unpaired, it stops renewing (the server may hand it out again); paired
-// again, it is stranded for resumeStranded, never run on the old link.
+// bridge#13: a job waiting for its first slot renews its lease only while the
+// Bridge has a link to its server. Unpaired, it stops renewing (the server may
+// hand it out again). Paired again with the same server (a new link), it
+// renews there and runs there once a slot frees (allowed); paired with
+// another server, it is dropped, never reported there (denied).
 func TestWaitingJobLetsGoOfAnOldLink(t *testing.T) {
-	db, old, next := openStore(t), newControlledServer(false), newControlledServer(false)
-	if err := db.RecordClaim(context.Background(), store.ServerJob{ID: 9, Kind: "light", Attempt: 1}); err != nil {
-		t.Fatal(err)
-	}
-	var current atomic.Pointer[controlledServer]
-	current.Store(old)
-	h := &abandoner{handler: handler{kind: "light", lane: LaneLight, fn: func(context.Context, Job, *Reporter) (any, error) { return nil, nil }}}
-	opts := testOpts()
-	opts.Lanes = map[string]int{LaneLight: 1}
-	r := New(db, func() Server {
-		if srv := current.Load(); srv != nil {
-			return srv
-		}
-		return nil
-	}, nil, opts, h)
-	r.use[LaneLight] = 1 // the lane is full: the job waits
-	ctx, cancel := context.WithCancel(context.Background())
-	var wg sync.WaitGroup
-	t.Cleanup(func() { cancel(); wg.Wait() })
-	r.launch(ctx, old, Job{ID: 9, Kind: h.Kind(), Attempt: 1, Resumed: true}, &wg, "", nil, nil)
-	for range 2 {
-		await(t, old.updated) // the first report, then a renewal while it waits
-	}
-	current.Store(nil) // unpaired
-	r.Wake()
-	time.Sleep(5 * opts.Keepalive) // a renewal already under way may still land
-	for drained := false; !drained; {
-		select {
-		case <-old.updated:
-		default:
-			drained = true
-		}
-	}
-	time.Sleep(5 * opts.Keepalive)
-	select {
-	case <-old.updated:
-		t.Fatal("an unpaired Bridge renewed a waiting job's lease")
-	default:
-	}
-	current.Store(next) // paired again
-	r.Wake()
-	wg.Wait()
-	r.mu.Lock()
-	stranded := len(r.stranded) == 1 && r.stranded[0].job.ID == 9
-	r.mu.Unlock()
-	if !stranded || h.ran.Load() || len(h.abandoned()) != 0 {
-		t.Fatal("the waiting job wasn't stranded for the new link", stranded, h.ran.Load(), h.abandoned())
-	}
-	select {
-	case <-next.updated:
-		t.Fatal("the old link's job reported on the new link")
-	default:
+	for name, nextID := range map[string]string{"same server": "a", "another server": "b"} {
+		t.Run(name, func(t *testing.T) {
+			db, old, next := openStore(t), newControlledServer(false), newControlledServer(false)
+			old.id, next.id = "a", nextID
+			if err := db.RecordClaim(context.Background(), store.ServerJob{ID: 9, Kind: "light", Attempt: 1, ServerID: "a"}); err != nil {
+				t.Fatal(err)
+			}
+			var current atomic.Pointer[controlledServer]
+			current.Store(old)
+			h := &abandoner{handler: handler{kind: "light", lane: LaneLight, fn: func(context.Context, Job, *Reporter) (any, error) { return nil, nil }}}
+			opts := testOpts()
+			opts.Lanes = map[string]int{LaneLight: 1}
+			r := New(db, func() Server {
+				if srv := current.Load(); srv != nil {
+					return srv
+				}
+				return nil
+			}, nil, opts, h)
+			r.use[LaneLight] = 1 // the lane is full: the job waits
+			ctx, cancel := context.WithCancel(context.Background())
+			var wg sync.WaitGroup
+			t.Cleanup(func() { cancel(); wg.Wait() })
+			r.launch(ctx, old, Job{ID: 9, Kind: h.Kind(), Attempt: 1, Resumed: true, serverID: "a"}, &wg, "", nil, nil)
+			for range 2 {
+				await(t, old.updated) // the first report, then a renewal while it waits
+			}
+			current.Store(nil) // unpaired
+			r.Wake()
+			time.Sleep(5 * opts.Keepalive) // a renewal already under way may still land
+			for drained := false; !drained; {
+				select {
+				case <-old.updated:
+				default:
+					drained = true
+				}
+			}
+			time.Sleep(5 * opts.Keepalive)
+			select {
+			case <-old.updated:
+				t.Fatal("an unpaired Bridge renewed a waiting job's lease")
+			default:
+			}
+			current.Store(next) // paired again
+			r.Wake()
+			if nextID == "b" {
+				wg.Wait()
+				if sj, _ := db.GetServerJob(context.Background(), 9); sj.State != store.JobLost || h.ran.Load() ||
+					!slices.Equal(h.abandoned(), []int64{9}) {
+					t.Fatal("another server's waiting job wasn't dropped", sj.State, h.ran.Load(), h.abandoned())
+				}
+				select {
+				case <-next.updated:
+					t.Fatal("the old server's job reported on the new server's link")
+				default:
+				}
+				return
+			}
+			await(t, next.updated) // renewed on the new link to its server
+			r.mu.Lock()
+			r.use[LaneLight] = 0
+			r.mu.Unlock()
+			r.Wake()
+			wg.Wait()
+			if state, _ := next.finalState(9); state != link.StateDone || !h.ran.Load() {
+				t.Fatal("the waiting job didn't run on the new link to its server", state, h.ran.Load())
+			}
+			select {
+			case <-old.updated:
+				t.Fatal("the job went on reporting on the old link")
+			default:
+			}
+		})
 	}
 }
 
@@ -916,7 +1489,7 @@ func TestWaitingAdmissionSeesWakeDuringPairingRead(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
 	t.Cleanup(func() { cancel(); wg.Wait() })
-	r.launch(ctx, srv, Job{ID: 4, Kind: h.Kind(), Attempt: 1, Resumed: true}, &wg, "", nil, nil)
+	r.launch(ctx, srv, Job{serverID: testServer, ID: 4, Kind: h.Kind(), Attempt: 1, Resumed: true}, &wg, "", nil, nil)
 	await(t, read)
 	r.mu.Lock()
 	r.use[LaneLight] = 0
@@ -1121,6 +1694,9 @@ func TestYieldFreesSlotAndReclaimWaits(t *testing.T) {
 			// The lane takes another download job meanwhile.
 			var c *controlledClaim
 			for c == nil || !slices.Contains(c.kinds, "lane.other") {
+				if c != nil {
+					c.answer <- nil // the yield leaves a narrow claim in flight (BR-CLAIM-HOLD)
+				}
 				c = srv.next(t, false)
 			}
 			c.answer <- claimed(2, other.Kind(), 0)
@@ -1178,7 +1754,7 @@ func TestYieldedStrayFreesItsDispatcher(t *testing.T) {
 	r := New(openStore(t), func() Server { return srv }, nil, opts)
 	ctx, cancel := context.WithCancelCause(context.Background())
 	defer cancel(nil)
-	ru := &run{job: Job{ID: 1}, srv: srv, lane: LaneDownload, cancel: cancel, stray: true, strayReserve: true}
+	ru := &run{job: Job{serverID: testServer, ID: 1}, lane: LaneDownload, cancel: cancel, stray: true, strayReserve: true}
 	r.mu.Lock()
 	r.running[1] = ru
 	r.waiting[LaneDownload]++
@@ -1233,4 +1809,162 @@ func TestLocalReporterYield(t *testing.T) {
 	if err := rep.Reclaim(context.Background()); err != nil || rep.Yielded() {
 		t.Fatal("Reclaim", err)
 	}
+}
+
+// BR-CLAIM-HOLD: a lane slot freeing or filling leaves the claim in flight
+// alone (cancelled, a reverse proxy that hides the hang-up lets the server
+// hand the job out anyway, its answer lost until the 2-minute lease lapses);
+// the job it brings runs in the slot the claim reserved, and the runner's stop
+// still cancels a claim at once. A claim that leaves a full lane out waits only
+// leftOutWait (denied: the whole long poll, so a queue in that lane drained a
+// slot's worth per 25 s), one that leaves none out the whole wait (allowed).
+func TestLaneChangesLeaveAnInFlightClaim(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		srv, db := newControlledServer(false), openStore(t)
+		started := make(chan Job, 4)
+		gates := map[int64]chan struct{}{1: make(chan struct{}), 2: make(chan struct{}), 5: make(chan struct{})}
+		opts := testOpts()
+		opts.Wait = link.MaxWait
+		opts.Lanes = map[string]int{LaneLight: 1, LaneDownload: 1}
+		r := New(db, func() Server { return srv }, nil, opts,
+			blockingHandler("download", LaneDownload, started, gates), blockingHandler("light", LaneLight, started, gates))
+		ctx, cancel := context.WithCancel(context.Background())
+		var wg sync.WaitGroup
+		done := make(chan struct{})
+		go func() { r.dispatch(ctx, false, &wg); close(done) }()
+		first := srv.next(t, false)
+		if first.wait != link.MaxWait {
+			t.Fatalf("a claim with every lane free waits %v, want %v", first.wait, link.MaxWait)
+		}
+		first.answer <- claimed(1, "light", 0)
+		await(t, started)
+		inFlight := srv.next(t, false)
+		if !slices.Equal(inFlight.kinds, []string{"download"}) {
+			t.Fatal(inFlight.kinds)
+		}
+		if inFlight.wait != leftOutWait {
+			t.Fatalf("a claim leaving the full light lane out waits %v, want %v", inFlight.wait, leftOutWait)
+		}
+		close(gates[1]) // the light slot frees
+		synctest.Wait()
+		// The download slot fills: a resumed job waits behind the claim's reservation.
+		r.launch(ctx, srv, Job{serverID: testServer, ID: 5, Kind: "download", Attempt: 1, Resumed: true}, &wg, "", nil, nil)
+		synctest.Wait()
+		select {
+		case <-inFlight.cancelled:
+			t.Fatal("a lane change cancelled the claim in flight")
+		default:
+		}
+		inFlight.answer <- claimed(2, "download", 0)
+		if j := await(t, started); j.ID != 2 {
+			t.Fatal("the held claim's job didn't run in its reserved slot", j)
+		}
+		if use, waiting := laneCounts(r, LaneDownload); use != 1 || waiting != 1 {
+			t.Fatalf("download use %d waiting %d, want the claimed job running and the resumed one waiting", use, waiting)
+		}
+		stopped := srv.next(t, false)
+		cancel()
+		await(t, stopped.cancelled)
+		await(t, done)
+		wg.Wait()
+	})
+}
+
+// The short wait is the light lane's alone, and bounded: a claim leaving the
+// full download lane out waits the whole long poll (denied: a long download
+// kept the server answering a claim every 4 s for its whole run), and
+// maxShortPolls short waits in a row that claim nothing go back to the whole
+// wait (denied: a light lane held by slow jobs did the same) until the light
+// lane's room changes, which short waits again after its next job (allowed).
+func TestShortClaimWaitsAreTheLightLanesAndCapped(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		srv, db := newControlledServer(false), openStore(t)
+		started := make(chan Job, 4)
+		gates := map[int64]chan struct{}{1: make(chan struct{}), 2: make(chan struct{}), 3: make(chan struct{})}
+		opts := testOpts()
+		opts.Wait = link.MaxWait
+		opts.Lanes = map[string]int{LaneLight: 1, LaneDownload: 1}
+		r := New(db, func() Server { return srv }, nil, opts,
+			blockingHandler("download", LaneDownload, started, gates), blockingHandler("light", LaneLight, started, gates))
+		ctx, cancel := context.WithCancel(context.Background())
+		var wg sync.WaitGroup
+		done := make(chan struct{})
+		go func() { r.dispatch(ctx, false, &wg); close(done) }()
+		srv.next(t, false).answer <- claimed(1, "download", 0)
+		await(t, started)
+		c := srv.next(t, false)
+		if !slices.Equal(c.kinds, []string{"light"}) || c.wait != link.MaxWait {
+			t.Fatalf("a claim leaving the full download lane out asks %v for %v, want the whole wait", c.kinds, c.wait)
+		}
+		c.answer <- claimed(2, "light", 0)
+		await(t, started)
+		close(gates[1]) // the download slot frees; the light lane stays full
+		synctest.Wait()
+		c = srv.next(t, false)
+		if !slices.Equal(c.kinds, []string{"download"}) {
+			t.Fatal(c.kinds)
+		}
+		for i := range maxShortPolls {
+			if c.wait != leftOutWait {
+				t.Fatalf("short poll %d waits %v, want %v", i+1, c.wait, leftOutWait)
+			}
+			c.answer <- nil
+			c = srv.next(t, false)
+		}
+		if c.wait != link.MaxWait {
+			t.Fatalf("after %d empty short polls the claim waits %v, want the whole wait", maxShortPolls, c.wait)
+		}
+		close(gates[2]) // the light slot frees under the claim in flight
+		synctest.Wait()
+		c.answer <- nil
+		c = srv.next(t, false)
+		if !slices.Equal(c.kinds, []string{"download", "light"}) || c.wait != link.MaxWait {
+			t.Fatalf("a claim with every lane free asks %v for %v", c.kinds, c.wait)
+		}
+		c.answer <- claimed(3, "light", 0)
+		await(t, started)
+		c = srv.next(t, false)
+		if c.wait != leftOutWait {
+			t.Fatalf("the light lane full again: the claim waits %v, want %v", c.wait, leftOutWait)
+		}
+		cancel()
+		await(t, c.cancelled)
+		await(t, done)
+		wg.Wait()
+	})
+}
+
+// BR-CLAIM-HOLD: a job that arrives with no room left in its lane (the claim
+// answered as a capacity change cancelled it) is held, its lease renewed while
+// it waits, and runs once a slot frees; it is neither dropped nor run over the
+// lane's capacity.
+func TestClaimedJobWithoutRoomIsHeld(t *testing.T) {
+	srv := newControlledServer(false)
+	started := make(chan Job, 4)
+	gates := map[int64]chan struct{}{2: make(chan struct{})}
+	opts := testOpts()
+	opts.Lanes = map[string]int{LaneLight: 1}
+	r := New(openStore(t), func() Server { return srv }, nil, opts, blockingHandler("light", LaneLight, started, gates))
+	startControlled(t, r)
+	inFlight := srv.next(t, false)
+	inFlight.cancelJob.Store(claimed(2, "light", 0)) // answered as the change cancels it
+	r.setCapacity(LaneLight, 0)
+	await(t, inFlight.cancelled)
+	waitFor(t, func() bool { _, waiting := laneCounts(r, LaneLight); return waiting == 1 })
+	for range 2 {
+		if id := await(t, srv.updated); id != 2 { // its first report, then a renewal
+			t.Fatal("update for", id)
+		}
+	}
+	select {
+	case j := <-started:
+		t.Fatal("ran over the lane's capacity", j)
+	default:
+	}
+	r.setCapacity(LaneLight, 1)
+	if j := await(t, started); j.ID != 2 {
+		t.Fatal(j)
+	}
+	close(gates[2])
+	waitFor(t, func() bool { s, _ := srv.finalState(2); return s == link.StateDone })
 }

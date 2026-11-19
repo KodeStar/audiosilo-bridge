@@ -113,7 +113,8 @@ func TestLibrivoxArchiveID(t *testing.T) {
 
 // A permanent 4xx other than a 404 is ErrRefused (asked once, never retried
 // by a fetch); 408, 425, 429 and 5xx stay ErrUnavailable. The callers that
-// degrade (lookup's cache) still read a refusal as unavailable, never a miss.
+// degrade (lookup's cache) never read a refusal as a miss, and the coverage
+// paths tell it from no answer (Coverage.Refused, CoverageForWork's cause).
 func TestLibrivoxRefusedStatuses(t *testing.T) {
 	status := 0
 	asked := 0
@@ -138,14 +139,32 @@ func TestLibrivoxRefusedStatuses(t *testing.T) {
 			t.Errorf("work, HTTP %d: %v, want %v", code, err, want)
 		}
 	}
-	// lookup: a 403 is unavailable and not cached, so the next call asks again.
+	// lookup: a 403 is a refusal, not a miss, and not cached, so the next call
+	// asks again.
 	status = http.StatusForbidden
-	if _, found, ok := c.lookup(ctx, "asin", "B0"); found || ok {
-		t.Fatalf("a refused lookup: found %v ok %v", found, ok)
+	if _, found, err := c.lookup(ctx, "asin", "B0"); found || !errors.Is(err, ErrRefused) {
+		t.Fatalf("a refused lookup: found %v err %v", found, err)
 	}
 	before := asked
 	_, _, _ = c.lookup(ctx, "asin", "B0")
 	if asked != before+1 {
 		t.Fatal("a refused lookup was cached")
+	}
+	// The coverage paths tell a refusal from no answer: a caller that waits
+	// for the service to answer never waits on a refusal.
+	for code, refused := range map[int]bool{http.StatusForbidden: true, http.StatusBadRequest: true,
+		http.StatusServiceUnavailable: false, http.StatusTooManyRequests: false} {
+		status = code
+		cov, err := c.CoverageFor(ctx, BookIdentity{ASIN: "B0"})
+		if err != nil || cov.Available || cov.Refused != refused {
+			t.Errorf("identifier, HTTP %d: %+v, %v, want unavailable with refused %v", code, cov, err, refused)
+		}
+		want := ErrUnavailable
+		if refused {
+			want = ErrRefused
+		}
+		if _, err := c.CoverageForWork(ctx, "w"); !errors.Is(err, want) || errors.Is(err, ErrWorkNotFound) {
+			t.Errorf("work, HTTP %d: %v, want %v", code, err, want)
+		}
 	}
 }

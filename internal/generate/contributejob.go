@@ -139,7 +139,7 @@ func (c *ContributeJob) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporte
 	case err != nil:
 		return nil, err
 	}
-	rep.Progress(jobs.Progress{Step: stepSharing, Message: "Sharing with the community", Total: 1})
+	rep.Progress(sharingProgress)
 	res, err := h.shareConfirmed(ctx, r, sharer, b.ID, p, nil)
 	if err != nil {
 		// The console gets shareError's words; the log keeps the cause.
@@ -156,9 +156,12 @@ func (c *ContributeJob) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporte
 // stepSharing is a share's step while it files.
 const stepSharing = "sharing"
 
-// sharingParked is a share's progress while it is parked (reportPark adds the
-// park's code and retry_at).
-var sharingParked = jobs.Progress{Step: stepSharing, Message: "Needs attention: Sharing with the community", Total: 1}
+// sharingProgress is a share's progress while it files, sharingParked while
+// it is parked (reportPark adds the park's code and retry_at).
+var (
+	sharingProgress = jobs.Progress{Step: stepSharing, Message: "Sharing with the community", Total: 1}
+	sharingParked   = jobs.Progress{Step: stepSharing, Message: "Needs attention: Sharing with the community", Total: 1}
+)
 
 // shareConfirmed holds the engine book and files its sidecars once the server
 // confirms the share still stands: it is asked (Reporter.AskShareOff) just
@@ -173,10 +176,14 @@ var sharingParked = jobs.Progress{Step: stepSharing, Message: "Needs attention: 
 // owed share asks again before each dimension it files (stoppedBy). An
 // answer that stopped the job, or carried share_off (errShareOffNow), files
 // nothing (the job ends); so does stands (nil: none) answering false
-// (errShareOffNow). A server that couldn't be asked, a link the Bridge no
-// longer uses (an answer from another server's link confirms nothing), or
-// stands that couldn't be read parks the job share_unconfirmed and asks again
-// every Recheck, or at once on Retry, filing nothing meanwhile. A
+// (errShareOffNow). A server that couldn't be asked, no link to the job's
+// server (unpaired or refused; paired with another server, the job is dropped
+// instead: the ask's ErrStopped), or stands that couldn't be read parks the
+// job share_unconfirmed and asks again every Recheck, or at once on Retry,
+// filing nothing meanwhile; so does a
+// sidecars.contribute share whose work the community database didn't answer
+// for (the share step's park, pipeline.ShareLookupMsg), parked through each
+// share asked again until the lookup is answered. A
 // sidecars.contribute park gives the job's light-lane slot back
 // (Reporter.Yield: two such shares would hold both of the lane's) and the job
 // takes one again (Reclaim) once the server confirms, then asks again, as the
@@ -184,7 +191,15 @@ var sharingParked = jobs.Progress{Step: stepSharing, Message: "Needs attention: 
 // slot, as it does through its engine book's parks.
 func (h *Handler) shareConfirmed(ctx context.Context, r *run, sharer Sharer, bookID int64,
 	p ContributeParams, stands func(context.Context) (bool, error)) (pipeline.ShareResult, error) {
-	parked := false
+	// lookupParked: the park is the share step's own (its work lookup got no
+	// answer), which only the share asked again can clear: it stays parked
+	// through that ask, rather than reporting running for it and parked again
+	// once a minute while the community database stays silent.
+	parked, lookupParked := false, false
+	sharing := func() {
+		r.rep.Unpark()
+		r.rep.Progress(sharingProgress)
+	}
 	for {
 		off, err := r.rep.AskShareOff(ctx)
 		if err == nil && !off {
@@ -207,16 +222,25 @@ func (h *Handler) shareConfirmed(ctx context.Context, r *run, sharer Sharer, boo
 				continue
 			}
 			off, err = shareHeld(ctx, r, stands)
-			if err == nil && !off {
-				if parked {
-					r.rep.Unpark()
-					r.rep.Progress(jobs.Progress{Step: stepSharing, Message: "Sharing with the community", Total: 1})
+			shared := err == nil && !off
+			var res pipeline.ShareResult
+			if shared {
+				if parked && !lookupParked {
+					sharing()
 				}
-				res, err := sharer.ShareChecked(ctx, bookID, p.WorkID, p.Dimensions, stoppedBy(ctx, r, stands))
-				release()
-				return res, err
+				res, err = sharer.ShareChecked(ctx, bookID, p.WorkID, p.Dimensions, stoppedBy(ctx, r, stands))
 			}
 			release()
+			// sidecars.contribute's work lookup that got no answer (the community
+			// database past its timeout or down) waits below as a share the
+			// server couldn't confirm does. A sidecars.generate run's owed share
+			// waits on the park itself (shareOwedParked).
+			if shared && (r.kind != ContributeKind || !unconfirmedPark(err) || ctx.Err() != nil) {
+				if lookupParked {
+					sharing()
+				}
+				return res, err
+			}
 		}
 		if ctx.Err() != nil || errors.Is(err, jobs.ErrStopped) {
 			// The answer stopped the job (a cancel, the module off): its context
@@ -234,7 +258,7 @@ func (h *Handler) shareConfirmed(ctx context.Context, r *run, sharer Sharer, boo
 		}
 		h.o.Log.Warn("generate: whether the share still stands couldn't be confirmed; it waits",
 			"job", r.job.ID, "err", err)
-		parked = true
+		parked, lookupParked = true, unconfirmedPark(err)
 		at := time.Now().Add(h.o.Recheck)
 		reportPark(r, sharingParked, state.ParkShareUnconfirmed, unconfirmedMsg(err), at)
 		if r.kind == ContributeKind {
@@ -249,7 +273,7 @@ func (h *Handler) shareConfirmed(ctx context.Context, r *run, sharer Sharer, boo
 // shareHeld is shareConfirmed's look under the engine's hold, after the
 // server's answer: what changed since, read here with no request. off for a
 // share_off heard since or stands (nil: none) answering false; an error for a
-// stop since (the job's context ended), a pairing changed since
+// stop since (the job's context ended), no link to the job's server since
 // (jobs.ErrShareOffLink) or stands that couldn't be read (errShareUnread): the
 // share isn't confirmed.
 func shareHeld(ctx context.Context, r *run, stands func(context.Context) (bool, error)) (bool, error) {
@@ -274,12 +298,24 @@ func shareHeld(ctx context.Context, r *run, stands func(context.Context) (bool, 
 var errShareUnread = errors.New("whether the share stands couldn't be read")
 
 // unconfirmedMsg is a share_unconfirmed park's message over err, as the
-// contributing stage words it.
+// contributing stage words it (a park's own, the share step's
+// pipeline.ShareLookupMsg among them).
 func unconfirmedMsg(err error) string {
-	if errors.Is(err, errShareUnread) {
+	var park *scheduler.ParkError
+	switch {
+	case errors.As(err, &park):
+		return park.Reason
+	case errors.Is(err, errShareUnread):
 		return pipeline.ShareUnreadMsg
 	}
 	return pipeline.ShareUnconfirmedMsg
+}
+
+// unconfirmedPark reports whether err is the share step's share_unconfirmed
+// park (pipeline.ShareUnconfirmedPark).
+func unconfirmedPark(err error) bool {
+	var park *scheduler.ParkError
+	return errors.As(err, &park) && park.Code == state.ParkShareUnconfirmed
 }
 
 // stoppedBy is shareConfirmed's check before each dimension it files when

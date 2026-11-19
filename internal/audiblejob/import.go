@@ -296,19 +296,30 @@ func (h *Importer) partPaths(account, asin string) (part, decrypted string) {
 }
 
 // Abandon removes the temp files of a job the runner ended without running it
-// (cancelled before it resumed, or another server's). A job whose claim was
-// lost keeps its partial: the server hands the job out again (a lease that
-// lapsed while the Bridge was down), and the next claim resumes it; one that
-// never comes back is the start-up sweep's (PartialMaxAge).
+// (cancelled before it resumed, or dropped: another server's, or its pairing
+// ended). A job whose claim was lost keeps its partial: the server hands the
+// job out again (a lease that lapsed while the Bridge was down), and the next
+// claim resumes it; one that never comes back is the start-up sweep's
+// (PartialMaxAge). The title's temp files are an import's only while it holds
+// the account's gate (run): while another import of the account holds it (a
+// later claim of the same title among them), they are left to it, and to the
+// sweep. Abandon never waits for the gate.
 func (h *Importer) Abandon(ctx context.Context, job jobs.Job) {
 	if jobs.Lost(ctx) {
 		return
 	}
-	if p, err := ParseImportParams(job.Params); err == nil {
-		part, decrypted := h.partPaths(p.Account, p.ASIN)
-		audible.RemovePartial(part)
-		_ = os.Remove(decrypted)
+	p, err := ParseImportParams(job.Params)
+	if err != nil {
+		return
 	}
+	release, ok := h.tryGate(p.Account)
+	if !ok {
+		return
+	}
+	defer release()
+	part, decrypted := h.partPaths(p.Account, p.ASIN)
+	audible.RemovePartial(part)
+	_ = os.Remove(decrypted)
 }
 
 // Run imports the title: license, download, decrypt, place, rescan, enrich.
@@ -334,15 +345,15 @@ func (h *Importer) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (a
 }
 
 // importable checks an account read of p's import (acct and its error): the
-// account is this Bridge's, mapped on this server, with p's library its books
-// library.
-func (h *Importer) importable(acct store.AudibleAccount, err error, p ImportParams) error {
+// account is this Bridge's, mapped on serverID (the job's server), with p's
+// library its books library.
+func (h *Importer) importable(acct store.AudibleAccount, err error, serverID string, p ImportParams) error {
 	switch {
 	case errors.Is(err, audibleacct.ErrNotFound):
 		return fail(CodeUnknownAccount, "This Bridge has no Audible account %s: it was removed here, or signed in on another Bridge.", p.Account)
 	case err != nil:
 		return err
-	case acct.OnOtherServer(h.o.ServerID()):
+	case acct.OnOtherServer(serverID):
 		return fail(CodeUnknownAccount, "The Audible account is mapped on another server: map it again on the Bridge's Accounts tab.")
 	case acct.LibraryID != p.LibraryID:
 		return fail(CodeNotWritable, "Library %d isn't the Audible account's books library: map the account again or queue the import again.", p.LibraryID)
@@ -371,20 +382,21 @@ func (h *Importer) run(ctx context.Context, job jobs.Job, p ImportParams, rep *j
 		audible.RemovePartial(part)
 	}()
 
+	serverID := job.KeyServer(h.o.ServerID()) // the job's, as the poll's
 	acct, err := h.o.Accounts.Account(ctx, p.Account)
 	// As the poll's read: a sign-in or a mapping the server recorded, and
 	// queued this import for, may still be storing itself here (no account
 	// yet, another server's or another library's). Read again past it before
 	// failing for that; an account that passes never waits.
-	if audibleacct.NotHere(acct, err, h.o.ServerID()) || (err == nil && acct.LibraryID != p.LibraryID) {
+	if audibleacct.NotHere(acct, err, serverID) || (err == nil && acct.LibraryID != p.LibraryID) {
 		acct, err = h.o.Accounts.AwaitedAccount(ctx, p.Account)
 	}
-	if err := h.importable(acct, err, p); err != nil {
+	if err := h.importable(acct, err, serverID, p); err != nil {
 		return nil, err
 	}
 	var srv ImportServer
 	if h.o.Server != nil {
-		srv = h.o.Server()
+		srv = jobs.Link(job, h.o.Server())
 	}
 	if srv == nil {
 		return nil, errors.New("the Bridge isn't paired with a server")
@@ -422,7 +434,7 @@ func (h *Importer) run(ctx context.Context, job jobs.Job, p ImportParams, rep *j
 	// mapped it elsewhere.
 	if acct.RefusedAt != "" {
 		acct, err = h.o.Accounts.SettledAccount(ctx, acct.ID)
-		if err := h.importable(acct, err, p); err != nil {
+		if err := h.importable(acct, err, serverID, p); err != nil {
 			return nil, err
 		}
 	}
@@ -761,24 +773,40 @@ func (h *Importer) report(rep *jobs.Reporter, pr jobs.Progress) {
 // gate waits until no other import of the account runs: one download per
 // account (Audible's limits are per account).
 func (h *Importer) gate(ctx context.Context, account string, rep *jobs.Reporter) (func(), error) {
-	h.mu.Lock()
-	g, ok := h.gates[account]
-	if !ok {
-		g = make(chan struct{}, 1)
-		h.gates[account] = g
+	if release, ok := h.tryGate(account); ok {
+		return release, nil
 	}
-	h.mu.Unlock()
-	select {
-	case g <- struct{}{}:
-		return func() { <-g }, nil
-	default:
-	}
+	g := h.gateOf(account)
 	h.report(rep, jobs.Progress{Step: StepLicense, Message: "Waiting for this account's other backup to finish"})
 	select {
 	case g <- struct{}{}:
 		return func() { <-g }, nil
 	case <-ctx.Done():
 		return nil, ctx.Err()
+	}
+}
+
+// gateOf is the account's gate (gate), made on first use.
+func (h *Importer) gateOf(account string) chan struct{} {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	g, ok := h.gates[account]
+	if !ok {
+		g = make(chan struct{}, 1)
+		h.gates[account] = g
+	}
+	return g
+}
+
+// tryGate takes the account's gate when no import of it holds it (false,
+// without waiting, when one does).
+func (h *Importer) tryGate(account string) (func(), bool) {
+	g := h.gateOf(account)
+	select {
+	case g <- struct{}{}:
+		return func() { <-g }, true
+	default:
+		return nil, false
 	}
 }
 

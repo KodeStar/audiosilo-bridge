@@ -1,6 +1,7 @@
 package audiblesync
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -145,6 +146,7 @@ func (s *stubAccounts) SetPosition(_ context.Context, _, asin, acr string, posit
 // place applied and one not ahead behind (furthest only), and serves a feed of
 // rows with an opaque cursor (the index past the last row read).
 type stubServer struct {
+	id        string // the server's id ("" reads as srv-1)
 	mu        sync.Mutex
 	server    map[string]float64 // path -> the server's place
 	posted    []link.AudibleListening
@@ -190,6 +192,8 @@ func (s *stubServer) PostAudibleListening(_ context.Context, account string, in 
 	}
 	return ans, nil
 }
+
+func (s *stubServer) ServerID() string { return cmp.Or(s.id, "srv-1") }
 
 func (s *stubServer) AudibleProgress(_ context.Context, account, since string, limit int) (*link.AudibleProgress, error) {
 	s.mu.Lock()

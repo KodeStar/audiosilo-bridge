@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -20,6 +21,7 @@ import (
 	"github.com/kodestar/audiosilo-bridge/internal/pipeline"
 	"github.com/kodestar/audiosilo-bridge/internal/scheduler"
 	"github.com/kodestar/audiosilo-bridge/internal/state"
+	"github.com/kodestar/audiosilo-bridge/internal/store"
 )
 
 // fakeSharer is the engine's share step.
@@ -82,7 +84,7 @@ func (hr *harness) shareRunnerOn(s Sharer, cred func(context.Context) error, rec
 		Poll: 10 * time.Millisecond, IdlePoll: 10 * time.Millisecond, Recheck: recheck, Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
 	r := jobs.New(hr.db, server, nil, jobs.Options{Keepalive: 30 * time.Millisecond,
 		ProgressEvery: 5 * time.Millisecond, Wait: 10 * time.Millisecond, RetryEvery: 20 * time.Millisecond,
-		ServerID: func() string { return "srv" }, Log: slog.New(slog.NewTextHandler(io.Discard, nil))}, h, h.ContributeJob())
+		Log: slog.New(slog.NewTextHandler(io.Discard, nil))}, h, h.ContributeJob())
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { defer close(done); r.Run(ctx) }()
@@ -335,49 +337,109 @@ func TestContributeParksGiveTheLightLaneBack(t *testing.T) {
 	}
 }
 
-// A link the Bridge no longer uses (paired with another server as the job
-// reports its sharing step: before its ask, or while the answer is on its way,
-// whichever report comes first) confirms no share: the job parks
-// share_unconfirmed and files nothing (denied), and files once the Bridge is
-// back on the job's server (allowed). jobs' TestAskShareOffOnlyOnTheCurrentLink
+// A pairing that changes as the job reports its sharing step (before its ask,
+// or while the answer is on its way, whichever report comes first), by the one
+// rule, the server's id (BR-LINK-RULE): paired again with the job's own server
+// at a new address, the job goes on over the new link and files once
+// (allowed); paired with another server, the job is dropped (lost here,
+// reported nowhere) and files nothing, rather than parking again at every
+// recheck on the old link (denied). jobs' TestAskShareOffOnlyOnTheJobsServer
 // pins the pairing that changes while the answer is on its way.
-func TestContributeJobConfirmsOnlyOnTheCurrentLink(t *testing.T) {
+func TestContributeJobConfirmsOnlyOnTheJobsServer(t *testing.T) {
+	t.Parallel()
+	for name, sameServer := range map[string]bool{"same server, new address": true, "another server": false} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			hr := newHarness(t)
+			hr.generated(121)
+			addr, id := "http://127.0.0.1:1", "srv-2"
+			if sameServer {
+				addr, id = strings.Replace(hr.cl.BaseURL(), "127.0.0.1", "localhost", 1), "srv"
+			}
+			next, err := link.New(addr, "tok", "0.2.0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			next = next.WithServerID(id)
+			var paired atomic.Bool
+			hr.srv.set(func() {
+				hr.srv.atStep[122] = func(_ *fakeServer, step string) {
+					if step == stepSharing {
+						paired.Store(true) // paired anew from this report on
+					}
+				}
+			})
+			s := &fakeSharer{}
+			hr.srv.addContribute(122, "Author/Book", `{}`)
+			stop := hr.shareRunnerOn(s, func(context.Context) error { return nil }, 20*time.Millisecond, func() jobs.Server {
+				if paired.Load() {
+					return next
+				}
+				return hr.cl
+			})
+			defer stop()
+			if sameServer {
+				hr.waitFor("done", func() bool { st, _ := hr.srv.final(122); return st == link.StateDone })
+				if calls := s.count(); calls != 1 {
+					t.Fatalf("share calls = %d, want one", calls)
+				}
+				return
+			}
+			hr.waitFor("dropped", func() bool {
+				sj, err := hr.db.GetServerJob(context.Background(), 122)
+				return err == nil && sj.State == store.JobLost
+			})
+			time.Sleep(100 * time.Millisecond) // a few rechecks' worth
+			if calls := s.count(); calls != 0 {
+				t.Fatalf("share calls = %d for another server's job, want none", calls)
+			}
+			if st, _ := hr.srv.final(122); st != "" {
+				t.Fatalf("the dropped job reported its end (%s)", st)
+			}
+		})
+	}
+}
+
+// A sidecars.contribute share whose work lookup the community database didn't
+// answer (the share step's share_unconfirmed park, pipeline.ShareLookupMsg)
+// parks and asks again (denied: before BR-LINK-RULE it failed the job), staying
+// parked through each ask (denied: reported running for it, and parked again,
+// once a recheck), and files once the database answers (allowed).
+func TestContributeJobWaitsOnAnUnansweredLookup(t *testing.T) {
 	t.Parallel()
 	hr := newHarness(t)
-	hr.generated(121)
-	other, err := link.New("http://127.0.0.1:1", "tok", "0.2.0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var onOther atomic.Bool
-	hr.srv.set(func() {
-		hr.srv.atStep[122] = func(_ *fakeServer, step string) {
-			if step == stepSharing {
-				onOther.Store(true) // paired with another server from this report on
-			}
-		}
-	})
-	s := &fakeSharer{}
-	hr.srv.addContribute(122, "Author/Book", `{}`)
-	stop := hr.shareRunnerOn(s, func(context.Context) error { return nil }, 20*time.Millisecond, func() jobs.Server {
-		if onOther.Load() {
-			return other
-		}
-		return hr.cl
-	})
+	hr.generated(141)
+	s := &fakeSharer{err: pipeline.ShareUnconfirmedPark(pipeline.ShareLookupMsg, errors.New("work lookup failed")),
+		filing: func() { time.Sleep(30 * time.Millisecond) }} // long enough for a report to go out
+	hr.srv.addContribute(142, "Author/Book", `{}`)
+	stop := hr.shareRunnerRecheck(s, func(context.Context) error { return nil }, 20*time.Millisecond)
 	defer stop()
 	hr.waitFor("the park", func() bool {
-		return hr.srv.saw(122, func(u link.Update, _ map[string]any) bool {
-			return u.State != nil && *u.State == link.StateNeedsAttention
+		return hr.srv.saw(142, func(u link.Update, _ map[string]any) bool {
+			return u.State != nil && *u.State == link.StateNeedsAttention && u.Error != nil &&
+				*u.Error == pipeline.ShareLookupMsg
 		})
 	})
-	time.Sleep(100 * time.Millisecond) // a few rechecks
-	if calls := s.count(); calls != 0 {
-		t.Fatalf("share calls = %d on another server's link, want none", calls)
+	hr.waitFor("two rechecks", func() bool { return s.count() >= 3 })
+	if st, _ := hr.srv.final(142); st != "" {
+		t.Fatalf("the job ended %s while the lookup had no answer", st)
 	}
-	hr.srv.set(func() { delete(hr.srv.atStep, 122) })
-	onOther.Store(false)
-	hr.waitFor("done", func() bool { st, _ := hr.srv.final(122); return st == link.StateDone })
+	parkedYet, flapped := false, false
+	hr.srv.saw(142, func(u link.Update, _ map[string]any) bool {
+		if u.State != nil && *u.State == link.StateNeedsAttention {
+			parkedYet = true
+		} else if parkedYet && u.State != nil && *u.State == link.StateRunning {
+			flapped = true
+		}
+		return false
+	})
+	if flapped {
+		t.Fatal("the parked job reported running again while the lookup had no answer")
+	}
+	s.mu.Lock()
+	s.err = nil // the database answers again
+	s.mu.Unlock()
+	hr.waitFor("done", func() bool { st, _ := hr.srv.final(142); return st == link.StateDone })
 }
 
 func TestContributeJobRefusals(t *testing.T) {
@@ -450,7 +512,7 @@ func TestStoppedByAsksBeforeTheFirstDimension(t *testing.T) {
 	// No report but the job's first and the asks.
 	runner := jobs.New(hr.db, func() jobs.Server { return hr.cl }, nil, jobs.Options{Keepalive: time.Hour,
 		ProgressEvery: time.Hour, Wait: 10 * time.Millisecond, RetryEvery: 20 * time.Millisecond,
-		ServerID: func() string { return "srv" }, Log: slog.New(slog.DiscardHandler)}, repHandler{reps})
+		Log: slog.New(slog.DiscardHandler)}, repHandler{reps})
 	hr.srv.set(func() {
 		hr.srv.queue = append(hr.srv.queue, link.Job{ID: 141, Kind: "test.share", Attempts: 1, State: "claimed"})
 	})

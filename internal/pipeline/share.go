@@ -122,7 +122,10 @@ func shareSettled(rows []store.Contribution, kind string) bool {
 // shareWork is the work a share files for: the job's (verified, a retired slug
 // followed to its survivor, and recorded on the book), else the book's match,
 // else its exact identifiers. Unmatched is ErrNotMatched: a share never proposes
-// a new work.
+// a new work. A lookup the community database didn't answer (past its timeout,
+// the service down) parks share_unconfirmed (ShareLookupMsg), as the
+// contributing stage's does: no answer is no miss. One it refused for good
+// (metaops.ErrRefused) fails the share: there is no answer to wait for.
 func (e *Executor) shareWork(ctx context.Context, book store.Book, workID string) (string, error) {
 	id := workID
 	if id == "" {
@@ -136,10 +139,19 @@ func (e *Executor) shareWork(ctx context.Context, book store.Book, workID string
 		case errors.Is(err, metaops.ErrDisabled):
 		case errors.Is(err, metaops.ErrWorkNotFound):
 			return "", fmt.Errorf("%w: the community database has no work %q", ErrNotMatched, id)
-		default:
+		case errors.Is(err, metaops.ErrRefused):
 			return "", fmt.Errorf("share: verify work %q: %w", id, err)
+		default:
+			return "", e.shareUnconfirmed(ctx, book.ID, ShareLookupMsg, fmt.Errorf("verify work %q: %w", id, err))
 		}
-	} else if wid, ok := e.lookupByIdentifier(ctx, book); ok {
+	} else {
+		wid, err := e.lookupByIdentifier(ctx, book)
+		switch {
+		case errors.Is(err, metaops.ErrRefused):
+			return "", fmt.Errorf("share: %w", err)
+		case err != nil:
+			return "", e.shareUnconfirmed(ctx, book.ID, ShareLookupMsg, err)
+		}
 		id = wid
 	}
 	if id == "" {

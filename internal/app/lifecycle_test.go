@@ -23,6 +23,7 @@ import (
 	"github.com/kodestar/audiosilo-bridge/internal/api"
 	"github.com/kodestar/audiosilo-bridge/internal/link"
 	"github.com/kodestar/audiosilo-bridge/internal/secrets"
+	"github.com/kodestar/audiosilo-bridge/internal/store"
 )
 
 // jobServer is a fuller fake server: every pairing mints a new token and
@@ -41,6 +42,10 @@ type jobServer struct {
 	handed  bool
 	beats   int
 	updates []link.Update
+	// gate, while set, holds each job report it takes (counted in held) until
+	// it closes or the Bridge gives the report up.
+	gate chan struct{}
+	held int
 }
 
 func (f *jobServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -94,7 +99,18 @@ func (f *jobServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewDecoder(r.Body).Decode(&u)
 		f.mu.Lock()
 		f.updates = append(f.updates, u)
+		gate := f.gate
+		if gate != nil {
+			f.held++
+		}
 		f.mu.Unlock()
+		if gate != nil {
+			select {
+			case <-gate:
+			case <-r.Context().Done():
+				return
+			}
+		}
 		_ = json.NewEncoder(w).Encode(link.Job{ID: 9, State: "running", Attempts: 1})
 	default:
 		http.NotFound(w, r)
@@ -239,6 +255,171 @@ func TestOnlyTheCurrentLinkIsRefused(t *testing.T) {
 	b.conn.accept(context.Background(), current)
 	if p := b.conn.Pairing(); p.Paired {
 		t.Fatalf("a late retry marked an unpaired Bridge paired: %+v", p)
+	}
+}
+
+// An unpair on the Bridge's page stops the job running here (allowed) and
+// sends its server nothing more, no end either (denied): the row is lost, and
+// the server's lease lapses the job.
+func TestUnpairStopsTheRunningJob(t *testing.T) {
+	fs := &jobServer{root: bookRoot(t), hold: 60}
+	srv := httptest.NewServer(fs)
+	defer srv.Close()
+	b := start(t, t.TempDir())
+	ctx := context.Background()
+	if err := b.Pair(ctx, srv.URL, "code"); err != nil {
+		t.Fatal(err)
+	}
+	reports := func() int { fs.mu.Lock(); defer fs.mu.Unlock(); return len(fs.updates) }
+	waitFor(t, "the job's first report", func() bool { return reports() > 0 })
+	// The next report is held at the server, so the unpair finds exactly one on
+	// its way: a job reports one at a time, and that one is already counted.
+	gate := make(chan struct{})
+	defer close(gate) // before srv.Close, which waits for the held report
+	fs.mu.Lock()
+	fs.gate = gate
+	fs.mu.Unlock()
+	waitFor(t, "a report held on its way", func() bool { fs.mu.Lock(); defer fs.mu.Unlock(); return fs.held > 0 })
+	sent := reports()
+	if err := b.Unpair(ctx); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the job's end here", func() bool {
+		sj, err := b.db.GetServerJob(ctx, 9)
+		return err == nil && sj.State == store.JobLost
+	})
+	// The row is lost once the job's reports have stopped and its end was
+	// settled: an end or another report would have been sent by now.
+	if s, e := fs.final(); s != "" || reports() != sent {
+		t.Fatalf("the unpaired server was sent an end %q (%q), or %d more reports", s, e, reports()-sent)
+	}
+}
+
+// seedPairing stores, in data, a pairing with srv (its live token, server id
+// "s", pairing identity id: "" for one stored before the Bridge kept it) and
+// the job rows, as an earlier run left them; no token or URL: unpaired.
+func seedPairing(t *testing.T, data string, fs *jobServer, url, id string, rows ...store.ServerJob) {
+	t.Helper()
+	ctx := context.Background()
+	db, err := store.Open(ctx, filepath.Join(data, store.FileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	for _, sj := range rows {
+		if err := db.RecordClaim(ctx, sj); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if url == "" {
+		return
+	}
+	vault, _, err := secrets.Open(data, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fs.mu.Lock()
+	fs.tokens, fs.live = 1, "tok-1"
+	fs.mu.Unlock()
+	if err := vault.Set(secrets.ServerToken, "tok-1"); err != nil {
+		t.Fatal(err)
+	}
+	settings := map[string]string{keyServerURL: url, keyServerID: "s", keyServerName: "Home", keyPairedAt: "2026-11-01T00:00:00Z"}
+	if id != "" {
+		settings[keyPairingID] = id
+	}
+	for k, v := range settings {
+		if err := db.SetSetting(ctx, k, v); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// verifyRow is the row of the jobServer's job 9 as an earlier run left it
+// running, claimed from server and under pairing.
+func verifyRow(server, pairing string) store.ServerJob {
+	lib, p := int64(1), "A"
+	return store.ServerJob{ID: 9, Kind: "bridge.verify", LibraryID: &lib, Path: &p, Params: json.RawMessage(`{"hold_seconds":60}`),
+		Attempt: 1, ServerID: server, Pairing: pairing}
+}
+
+// A job of a pairing that ended before a restart is dropped at the start, and
+// is never resumed or reported (denied), though the Bridge is paired again with
+// the same server: unpaired at the restart (paired again after it), or paired
+// again before it (a new pairing). One of another server is dropped the same
+// way. Each is lost with its drop's reason.
+func TestRestartDropsAnEarlierPairingsJob(t *testing.T) {
+	for name, tc := range map[string]struct {
+		paired      bool // the Bridge starts paired with the jobServer (else pairs after the start)
+		server, why string
+	}{
+		"unpaired, paired again after the restart":  {server: "s", why: "the Bridge was unpaired on its page"},
+		"unpaired, paired again before the restart": {paired: true, server: "s", why: "the Bridge was unpaired on its page"},
+		"paired with another server since":          {paired: true, server: "x", why: "the Bridge was paired with another server"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fs := &jobServer{root: bookRoot(t), hold: -1}
+			srv := httptest.NewServer(fs)
+			defer srv.Close()
+			data := t.TempDir()
+			url := ""
+			if tc.paired {
+				url = srv.URL
+			}
+			seedPairing(t, data, fs, url, "now", verifyRow(tc.server, "before"))
+			b := start(t, data)
+			ctx := context.Background()
+			if !tc.paired {
+				if err := b.Pair(ctx, srv.URL, "code"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			waitFor(t, "the job dropped", func() bool {
+				sj, err := b.db.GetServerJob(ctx, 9)
+				return err == nil && sj.State == store.JobLost && sj.Error == tc.why
+			})
+			waitFor(t, "a heartbeat", func() bool { return fs.beatCount() > 0 })
+			time.Sleep(100 * time.Millisecond)
+			fs.mu.Lock()
+			n := len(fs.updates)
+			fs.mu.Unlock()
+			if n != 0 {
+				t.Fatalf("the earlier pairing's job was reported %d times", n)
+			}
+		})
+	}
+}
+
+// An upgrade from a Bridge that didn't keep a job's pairing gives the jobs
+// recorded then to the pairing in place: the job running at the upgrade
+// resumes and reports (allowed), and the pairing now has an identity, its row
+// too. A row of another server recorded then never joins it (denied): dropped
+// at the start as another server's.
+func TestUpgradeResumesTheRunningJob(t *testing.T) {
+	fs := &jobServer{root: bookRoot(t), hold: -1}
+	srv := httptest.NewServer(fs)
+	defer srv.Close()
+	data := t.TempDir()
+	other := verifyRow("x", "")
+	other.ID = 10
+	seedPairing(t, data, fs, srv.URL, "", verifyRow("s", ""), other)
+	b := start(t, data)
+	ctx := context.Background()
+	waitFor(t, "another server's row dropped", func() bool {
+		sj, err := b.db.GetServerJob(ctx, 10)
+		return err == nil && sj.State == store.JobLost && sj.Error == "the Bridge was paired with another server"
+	})
+	waitFor(t, "the resumed job's report", func() bool {
+		fs.mu.Lock()
+		defer fs.mu.Unlock()
+		return len(fs.updates) > 0
+	})
+	id, _, err := b.db.GetSetting(ctx, keyPairingID)
+	if err != nil || id == "" {
+		t.Fatalf("the pairing's identity after the upgrade: %q %v", id, err)
+	}
+	if sj, err := b.db.GetServerJob(ctx, 9); err != nil || sj.State != store.JobRunning || sj.Pairing != id {
+		t.Fatalf("the upgraded job: %+v %v, want running under %q", sj, err, id)
 	}
 }
 

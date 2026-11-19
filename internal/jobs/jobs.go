@@ -19,6 +19,7 @@ import (
 	"log/slog"
 	"maps"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -50,6 +51,64 @@ type Job struct {
 	// (store.ServerJob.ShareOff, or the stopped run's Reporter): Reporter.ShareOff.
 	// Its Reporter writes it to the store at its first report (keepShareOff).
 	shareOff bool
+	// serverID is the id of the server that handed the job out (the claim's
+	// link's, or the recorded row's): the one rule for which link the job
+	// reports on (Runner.linkFor), and what a handler keys its durable state
+	// and filings by (ServerID, Link).
+	serverID string
+	// pairing is the Bridge's pairing the job was claimed under (the claim's
+	// link's PairingID, or the recorded row's): a job of another pairing is
+	// dropped, never resumed or reported (Runner.sweepPairings, pairingGone).
+	pairing string
+}
+
+// ServerID is the id of the server that handed the job out, never "" for a job
+// the runner claimed or resumed. A handler keys the job's durable state and
+// its filings by it, not by the Bridge's pairing now: a job of a server the
+// Bridge is no longer paired with must never write under, or file for, the new
+// one (BR-LINK-RULE). "" only for a job no runner claimed (a test's, a local
+// run's), which keys by the pairing (KeyServer).
+func (j Job) ServerID() string { return j.serverID }
+
+// ClaimedFrom is job as server serverID handed it out (its ServerID), as the
+// runner sets it on every job it claims: for a handler's tests.
+func ClaimedFrom(job Job, serverID string) Job {
+	job.serverID = serverID
+	return job
+}
+
+// KeyServer is the server id the job's durable state and filings are keyed by:
+// its own (ServerID), or current (the pairing's) for a job no runner claimed.
+func (j Job) KeyServer(current string) string {
+	if j.serverID != "" {
+		return j.serverID
+	}
+	return current
+}
+
+// Link returns srv when it may carry job's work: srv reaches the job's server
+// (its ServerID() is the job's) and was made for the job's pairing (its
+// PairingID(), when the job was claimed under one), or the job is no runner's.
+// Otherwise (the Bridge paired with another server, unpaired and paired again
+// with the job's server, or a link that names no server) it returns S's zero
+// value, as for no link at all, so nothing of the job's reaches another server
+// or pairing.
+func Link[S any](job Job, srv S) S {
+	if job.serverID == "" {
+		return srv
+	}
+	l, ok := any(srv).(interface{ ServerID() string })
+	if !ok || l.ServerID() != job.serverID {
+		var none S
+		return none
+	}
+	if job.pairing != "" {
+		if p, ok := any(srv).(interface{ PairingID() string }); !ok || p.PairingID() != job.pairing {
+			var none S
+			return none
+		}
+	}
+	return srv
 }
 
 // Handler runs one job kind.
@@ -126,10 +185,16 @@ type ParkError struct {
 
 func (e *ParkError) Error() string { return e.Code + ": " + e.Message }
 
-// Server is the part of the server link the runner calls.
+// Server is the part of the server link the runner calls. ServerID is the id
+// of the server the link reaches (the pairing's server_id, "" when unknown),
+// and PairingID the Bridge's pairing the link was made for (recorded with
+// every job claimed on it): read with the link itself, so neither ever comes
+// from another pairing.
 type Server interface {
 	Claim(ctx context.Context, kinds []string, wait time.Duration) (*link.Job, error)
 	UpdateJob(ctx context.Context, id int64, u link.Update) (*link.Job, error)
+	ServerID() string
+	PairingID() string
 }
 
 // Store is the part of the store the runner writes.
@@ -139,6 +204,7 @@ type Store interface {
 	SetServerJobReport(ctx context.Context, id int64, attempt int, progress json.RawMessage, parkMsg string) error
 	SetServerJobShareOff(ctx context.Context, id int64, attempt int) error
 	FinishServerJob(ctx context.Context, id int64, attempt int, state string, result json.RawMessage, errText string) error
+	LoseServerJob(ctx context.Context, j store.ServerJob, errText string) (bool, error)
 	MarkServerJobReported(ctx context.Context, id int64, attempt int) error
 	OpenServerJobs(ctx context.Context) ([]store.ServerJob, error)
 	GetServerJob(ctx context.Context, id int64) (*store.ServerJob, error)
@@ -154,6 +220,21 @@ var (
 	errLost            = errors.New("the server no longer holds the job for this claim")
 	errStopping        = errors.New("the Bridge is stopping")
 	errUnpaired        = errors.New("the server refused the Bridge's token")
+	// errOtherServer ends a job of a server the Bridge is no longer paired with
+	// (Runner.linkFor): it is dropped here, recorded lost and reported nowhere,
+	// and its own server's lease lapses it.
+	errOtherServer = errors.New("the Bridge was paired with another server")
+	// errPairingEnded ends a job whose pairing was ended on the Bridge's own
+	// page (Runner.Unpaired): it stops here, recorded lost, and nothing more is
+	// sent to its server, whose lease lapses it. The page names the reason by
+	// these two errors' text (web/src/lib/jobs.ts DROPPED): change both together.
+	errPairingEnded = errors.New("the Bridge was unpaired on its page")
+	// errRelinked stops a running job whose server the Bridge was paired with
+	// again (a new link: a new token, often a new address): its handler may
+	// hold the old link, which the server revoked. It is left running and
+	// resumed under its claim on the new link (resumeStranded), with a fresh
+	// handler run, as a refused token's job is.
+	errRelinked = errors.New("the Bridge was paired with the job's server again")
 
 	// errCancelledOnPage is a cancel on the Bridge's own page (Runner.Cancel);
 	// not link.ErrCancelledHere, the server's 409 for a job cancelled there.
@@ -175,8 +256,8 @@ func cancelCause(reason string) error {
 // Abandoner is a Handler whose jobs hold work beyond Run (sidecars.generate: an
 // engine book). The runner calls Abandon when it ends such a job without running
 // the handler (the first report of a resumed job answered with a cancel or a lost
-// claim, or another server's job dropped), so the work is released as the
-// handler's own end would.
+// claim, or a job dropped for another server's pairing or an unpair), so the
+// work is released as the handler's own end would.
 type Abandoner interface {
 	Abandon(ctx context.Context, job Job)
 }
@@ -215,11 +296,26 @@ func Lost(ctx context.Context) bool {
 // Resumes reports whether a job whose context ended will run again under its
 // claim: the Bridge is stopping (the next start resumes it) or the server refused
 // the token (resumed once a link works again). False when it was cancelled (by
-// an admin or the server itself) or the server took it back, which end it here
-// for good.
+// an admin or the server itself), the server took it back, or the Bridge was
+// paired with another server or unpaired on its page, which end it here for
+// good.
 func Resumes(ctx context.Context) bool {
-	cause := context.Cause(ctx)
-	return !errors.Is(cause, errCancelRequested) && !errors.Is(cause, errLost)
+	return !endsForGood(context.Cause(ctx))
+}
+
+// endsForGood reports whether a job's context ended with a cause that ends it
+// here for good (Resumes is false): a cancel, a lost claim, or a drop (a
+// pairing with another server, an unpair on the Bridge's page). Such a job's
+// handler, when it never ran, is told (abandon).
+func endsForGood(cause error) bool {
+	return errors.Is(cause, errCancelRequested) || errors.Is(cause, errLost) || dropped(cause)
+}
+
+// dropped reports whether cause drops a job: it ends here, recorded lost and
+// reported to no server (the Bridge was paired with another one, or unpaired
+// on its own page).
+func dropped(cause error) bool {
+	return errors.Is(cause, errOtherServer) || errors.Is(cause, errPairingEnded)
 }
 
 // DefaultKeepalive is how often a running job with no new progress reports by
@@ -256,10 +352,22 @@ type Options struct {
 	RetryEvery time.Duration
 	// Keep is how many finished jobs the store keeps.
 	Keep int
-	// ServerID is the paired server's id ("" when unknown), recorded on every
-	// claim: a start treats an open job of another server as lost.
-	ServerID func() string
-	Log      *slog.Logger
+	// Pairing is the Bridge's pairing as the app keeps it, its link or none
+	// (a refused token, before the first heartbeat). A row recorded under
+	// another pairing is dropped (sweepPairings). nil is always the zero
+	// Pairing (tests whose links name no pairing).
+	Pairing func() Pairing
+	Log     *slog.Logger
+}
+
+// Pairing names the Bridge's pairing. ID is its identity (the app's
+// pairing.id setting, recorded with every job claimed under it, Server's
+// PairingID): "" while the Bridge is unpaired, new after an unpair on its
+// page or a pairing with another server, kept while the token is refused and
+// when it is paired again with the same server without an unpair. ServerID is
+// the id of the server it reaches ("" when unknown).
+type Pairing struct {
+	ID, ServerID string
 }
 
 // Runner claims and runs jobs.
@@ -282,9 +390,20 @@ type Runner struct {
 	// stranded are the jobs a refused token stopped (errUnpaired): the claim
 	// loop resumes them under their claim once a link to their server works
 	// again.
-	stranded []strandedJob
+	stranded []Job
+	// ended are the links whose pairing was ended on the Bridge's own page
+	// (Unpaired): nothing is launched on one, and a claim one answers late is
+	// dropped. unpaired are the jobs a refused token had stopped when their
+	// pairing was ended, which the claim loop drops (dropUnpaired).
+	ended    map[Server]struct{}
+	unpaired []Job
+	// starting are the claims start is recording, from before their row is
+	// written until launch holds them in running: the look for another
+	// pairing's rows (sweepPairings) never takes such a row.
+	starting map[int64]int
 	// changed is closed and replaced when admission or pairing may have
-	// changed. Dispatchers compare eligibility before refreshing a claim.
+	// changed. Dispatchers compare a claim's target before refreshing it
+	// (sameTarget), and eligibility before ending a pause (sameRequest).
 	changed chan struct{}
 	// retry is set when a final report didn't reach the server (or a start
 	// found unreported ones), so retryReports looks again.
@@ -321,14 +440,15 @@ func New(st Store, server func() Server, onUnauthorized func(Server), opts Optio
 	if opts.Log == nil {
 		opts.Log = slog.Default()
 	}
-	if opts.ServerID == nil {
-		opts.ServerID = func() string { return "" }
+	if opts.Pairing == nil {
+		opts.Pairing = func() Pairing { return Pairing{} }
 	}
 	if onUnauthorized == nil {
 		onUnauthorized = func(Server) {}
 	}
 	r := &Runner{opts: opts, store: st, handlers: map[string]Handler{}, server: server, onUnauthorized: onUnauthorized,
-		log: opts.Log, running: map[int64]*run{}, use: map[string]int{}, reserved: map[string]int{}, waiting: map[string]int{}, changed: make(chan struct{})}
+		log: opts.Log, running: map[int64]*run{}, use: map[string]int{}, reserved: map[string]int{}, waiting: map[string]int{},
+		ended: map[Server]struct{}{}, starting: map[int64]int{}, changed: make(chan struct{})}
 	for _, h := range handlers {
 		r.handlers[h.Kind()] = h
 	}
@@ -399,9 +519,30 @@ func (r *Runner) Run(ctx context.Context) {
 	defer stop(errStopping)
 	wg.Add(1)
 	go func() { defer wg.Done(); r.retryReports(ctx) }()
+	// swept is the pairing whose look for the other pairings' rows went
+	// through (sweepPairings): the claim loop looks again whenever the pairing
+	// changes, and until a look can read the store.
+	var swept string
+	var sweptOK bool
+	sweep := func() bool {
+		cur := r.opts.Pairing().ID
+		if sweptOK && swept == cur {
+			return true
+		}
+		if !r.sweepPairings(ctx) {
+			return false
+		}
+		swept, sweptOK = cur, true
+		return true
+	}
 	for ctx.Err() == nil {
 		changed := r.wakeChan()
-		srv := r.server()
+		if !sweep() {
+			// Nothing of an earlier pairing is resumed before it is dropped.
+			sleep(ctx, 5*time.Second)
+			continue
+		}
+		srv, id := r.paired()
 		if srv == nil {
 			select {
 			case <-changed:
@@ -410,7 +551,7 @@ func (r *Runner) Run(ctx context.Context) {
 			}
 			continue
 		}
-		if r.recover(ctx, srv, &wg) {
+		if r.recover(ctx, srv, id, &wg) {
 			break
 		}
 	}
@@ -419,20 +560,30 @@ func (r *Runner) Run(ctx context.Context) {
 	go func() { defer wg.Done(); r.dispatch(ctx, true, &wg) }()
 	for ctx.Err() == nil {
 		changed := r.wakeChan()
-		if srv := r.server(); srv != nil {
-			r.resumeStranded(ctx, srv, &wg)
+		r.dropUnpaired(ctx)
+		// Paired again or not: a new pairing's claims and runs are held
+		// (holdsLocked) or its own, and its stranded jobs resume only below.
+		var retry <-chan time.Time
+		if !sweep() {
+			retry = time.After(5 * time.Second)
+		}
+		if srv, id := r.paired(); srv != nil {
+			r.dropOtherServers(id)
+			r.resumeStranded(ctx, srv, id, &wg)
 		}
 		select {
 		case <-ctx.Done():
 		case <-changed:
+		case <-retry:
 		}
 	}
 }
 
 // recover picks up what the last run left: jobs still running are resumed
 // under their claim (a kind this Bridge no longer runs is failed), finished
-// jobs wait for retryReports. It reports whether it could read them.
-func (r *Runner) recover(ctx context.Context, srv Server, wg *sync.WaitGroup) bool {
+// jobs wait for retryReports. srv is the current link, id its server's. It
+// reports whether it could read them.
+func (r *Runner) recover(ctx context.Context, srv Server, id string, wg *sync.WaitGroup) bool {
 	open, err := r.store.OpenServerJobs(ctx)
 	if err != nil {
 		r.log.Warn("bridge: reading the open jobs failed", "err", err)
@@ -440,10 +591,11 @@ func (r *Runner) recover(ctx context.Context, srv Server, wg *sync.WaitGroup) bo
 		return false
 	}
 	for _, sj := range open {
-		if r.otherServer(sj) {
+		if !sameServer(sj.ServerID, id) || sj.Pairing != srv.PairingID() {
 			// Another server's job (the Bridge was paired with this one since):
-			// its id means nothing here, so nothing is reported for it.
-			r.dropOtherServers(ctx, sj)
+			// its id means nothing here, so nothing is reported for it. Or an
+			// earlier pairing's, one the sweep couldn't record: the same.
+			r.dropRecorded(ctx, sj)
 			continue
 		}
 		if sj.State != store.JobRunning {
@@ -466,43 +618,101 @@ func (r *Runner) recover(ctx context.Context, srv Server, wg *sync.WaitGroup) bo
 	return true
 }
 
-// dropOtherServers ends what a start found open for another server: a running
-// job is lost (dropLost), an unreported end is never sent.
-func (r *Runner) dropOtherServers(ctx context.Context, sj store.ServerJob) {
-	r.log.Info("bridge: a job of another server is dropped", "job", sj.ID, "server", sj.ServerID)
+// dropRecorded ends what a start found open for another server or an earlier
+// pairing (dropCause): a running job is lost (dropLost), an unreported end is
+// never sent.
+func (r *Runner) dropRecorded(ctx context.Context, sj store.ServerJob) {
+	why := r.dropCause(sj.ServerID)
+	r.log.Info("bridge: a job of another pairing is dropped", "job", sj.ID, "server", sj.ServerID, "why", why)
 	if sj.State == store.JobRunning {
-		r.dropLost(ctx, storedJob(sj))
+		r.dropLost(ctx, storedJob(sj), why)
 	} else if err := r.store.MarkServerJobReported(ctx, sj.ID, sj.Attempt); err != nil {
 		r.log.Warn("bridge: recording a job failed", "job", sj.ID, "err", err)
 	}
 }
 
-// dropLost ends a running job of a server the Bridge is no longer paired with:
-// its work is released (Abandon) before it is recorded lost, so a job waiting for
-// it to end (generate's awaitOpenJobEnd reads the row's running state) starts only
-// once the engine book is stopped, as the runner's own ends order it (bridge#37).
-func (r *Runner) dropLost(ctx context.Context, job Job) {
-	r.abandon(ctx, job)
-	if err := r.store.FinishServerJob(ctx, job.ID, job.Attempt, store.JobLost, nil, "the Bridge was paired with another server"); err != nil {
+// dropCause is why a job of server serverID that isn't the current pairing's
+// is dropped: the Bridge is paired with another server now (errOtherServer),
+// else its pairing was ended on the Bridge's page (errPairingEnded: unpaired,
+// or paired again with the same server since).
+func (r *Runner) dropCause(serverID string) error {
+	if _, other := r.linkFor(serverID); other {
+		return errOtherServer
+	}
+	if p := r.opts.Pairing(); p.ID != "" && !sameServer(serverID, p.ServerID) {
+		return errOtherServer
+	}
+	return errPairingEnded
+}
+
+// abandonTimeout bounds a dropped job's Abandon (abandonDropped): a handler's
+// release may wait on a lock its own run holds (podcast.fetch's file lock), and
+// the claim loop, or the run's goroutine the Bridge's stop waits for, must go
+// on.
+const abandonTimeout = 2 * time.Minute
+
+// abandonDropped releases the work of a job dropped for why (abandonFor), for
+// at most abandonTimeout, and logs a slow release.
+func (r *Runner) abandonDropped(ctx context.Context, job Job, why error) {
+	actx, cancel := context.WithTimeout(ctx, abandonTimeout)
+	defer cancel()
+	start := time.Now()
+	r.abandonFor(actx, job, why)
+	if d := time.Since(start); d > abandonTimeout/4 {
+		r.log.Warn("bridge: releasing a dropped job's work was slow", "job", job.ID, "kind", job.Kind, "took", d.Round(time.Second))
+	}
+}
+
+// dropLost ends a running job no run here holds, dropped for why (a server the
+// Bridge is no longer paired with, or a pairing ended on its page): its work is
+// released (Abandon, for at most abandonTimeout) before it is recorded lost,
+// so a job waiting for it to end (generate's awaitOpenJobEnd reads the row's
+// running state) starts only once the engine book is stopped, as the runner's
+// own ends order it (bridge#37).
+func (r *Runner) dropLost(ctx context.Context, job Job, why error) {
+	r.abandonDropped(ctx, job, why)
+	r.recordLost(ctx, job, nil, why)
+}
+
+// recordLost records a job lost for why (its claim taken back, or the job
+// dropped), with its result so far. Job ids are each server's own and the row
+// is keyed by id and attempt only: once the Bridge works for another server or
+// pairing, a claim of that one's may already hold the row under the same id
+// and attempt (it claims as the old pairing's runs end), and is left alone
+// (store.LoseServerJob checks it in the write).
+func (r *Runner) recordLost(ctx context.Context, job Job, raw json.RawMessage, why error) {
+	if dropped(why) {
+		own, err := r.store.LoseServerJob(ctx, store.ServerJob{ID: job.ID, Attempt: job.Attempt, ServerID: job.serverID,
+			Pairing: job.pairing, Result: raw}, why.Error())
+		switch {
+		case err != nil:
+			r.log.Warn("bridge: recording a job failed", "job", job.ID, "err", err)
+		case !own:
+			r.log.Info("bridge: a dropped job's row is another pairing's claim now; it is left alone", "job", job.ID)
+		}
+		return
+	}
+	if err := r.store.FinishServerJob(ctx, job.ID, job.Attempt, store.JobLost, raw, why.Error()); err != nil {
 		r.log.Warn("bridge: recording a job failed", "job", job.ID, "err", err)
 	}
 }
 
 // resumeStranded resumes, under their claim, the jobs a refused token stopped,
 // now that a link works again (the refusal ended, or the Bridge was paired
-// again), as a restart would: when the server took one back meanwhile, its
-// first report is a 409 and it is lost. One a later claim already runs here is
-// left to that claim. One whose row can't be read now stays stranded for the
-// next look (a heartbeat wakes the runner): dropped, nothing would resume it
-// before a restart, and the book of a share job would wait on it until then
-// (ShareOff answers for a stranded job, never for one no run here knows).
-func (r *Runner) resumeStranded(ctx context.Context, srv Server, wg *sync.WaitGroup) {
+// again with their server), as a restart would: when the server took one back
+// meanwhile, its first report is a 409 and it is lost. srv is the current
+// link, id its server's: a job of another server is dropped (linkFor's rule).
+// One a later claim already runs here is left to that claim. One whose row
+// can't be read now stays stranded for the next look (a heartbeat wakes the
+// runner): dropped, nothing would resume it before a restart, and the book of a
+// share job would wait on it until then (ShareOff answers for a stranded job,
+// never for one no run here knows).
+func (r *Runner) resumeStranded(ctx context.Context, srv Server, id string, wg *sync.WaitGroup) {
 	r.mu.Lock()
 	stranded := r.stranded
 	r.stranded = nil
 	r.mu.Unlock()
-	for _, s := range stranded {
-		job := s.job
+	for _, job := range stranded {
 		r.mu.Lock()
 		_, running := r.running[job.ID]
 		r.mu.Unlock()
@@ -513,17 +723,21 @@ func (r *Runner) resumeStranded(ctx context.Context, srv Server, wg *sync.WaitGr
 		if err != nil && !errors.Is(err, store.ErrNotFound) {
 			r.log.Warn("bridge: reading a job its refused token stopped failed; it is tried again", "job", job.ID, "err", err)
 			r.mu.Lock()
-			r.stranded = append(r.stranded, s)
+			r.stranded = append(r.stranded, job)
 			r.mu.Unlock()
 			continue
 		}
-		if err != nil || sj.State != store.JobRunning || sj.Attempt != job.Attempt {
-			continue // its row is gone, a later claim took it, or it ended
+		if err != nil || sj.State != store.JobRunning || sj.Attempt != job.Attempt || sj.ServerID != job.serverID || sj.Pairing != job.pairing {
+			// Its row is gone, a later claim took it (another server's or
+			// pairing's claim of the same id included: its state isn't this
+			// job's), or it ended.
+			continue
 		}
-		if !sameServer(s.srv, srv) || r.otherServer(*sj) {
-			// Paired with another server since: its job ids are another
-			// server's, and the claim can't be reported anywhere now.
-			r.dropLost(ctx, job)
+		if !sameServer(job.serverID, id) || job.pairing != srv.PairingID() {
+			// Paired with another server since (its job ids are another
+			// server's), or the pairing was ended and made again: the claim
+			// can't be reported anywhere now.
+			r.dropLost(ctx, job, r.dropCause(job.serverID))
 			continue
 		}
 		r.log.Info("bridge: resuming a job its refused token stopped", "job", job.ID, "kind", job.Kind, "attempt", job.Attempt)
@@ -536,22 +750,202 @@ func (r *Runner) resumeStranded(ctx context.Context, srv Server, wg *sync.WaitGr
 	}
 }
 
-// otherServer reports whether a recorded job came from a server other than the
-// one the Bridge is paired with now (unknown on either side counts as the same).
-func (r *Runner) otherServer(sj store.ServerJob) bool {
-	cur := r.opts.ServerID()
-	return sj.ServerID != "" && cur != "" && sj.ServerID != cur
+// Unpaired tells the runner that the pairing was ended on the Bridge's own
+// page; srv is the link it had (nil for none). Every job here stops: cancelled
+// locally and recorded lost (errPairingEnded), with nothing more sent to that
+// server, whose leases lapse them, and none of them is ever recorded or
+// reported for a server the Bridge pairs with next. A claim srv answers after
+// this is dropped (start) and nothing is launched on srv again. The caller
+// ends the pairing first (server returns nil and Pairing names none from then
+// on: the rows the store still has of it, that no run here holds, are another
+// pairing's, which the claim loop drops, sweepPairings), then calls this. It
+// doesn't wait: the runs end, and their work is released, on their own
+// goroutines and the claim loop's, never on the caller's (the unpair page's
+// request).
+func (r *Runner) Unpaired(srv Server) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if srv != nil {
+		r.ended[srv] = struct{}{}
+	}
+	for _, ru := range r.running {
+		ru.ended.Store(true)
+		ru.cancel(errPairingEnded)
+	}
+	r.unpaired = append(r.unpaired, r.stranded...)
+	r.stranded = nil
+	r.wakeLocked()
 }
 
-// sameServer reports whether two links reach one server: the same link, or
-// links to one address (a new pairing with the same server makes a new link).
-func sameServer(a, b Server) bool {
-	if a == b {
+// holdsLocked reports whether job id is one the runner ends through a path of
+// its own: a run (settle, or release for one a stop left running), a job a
+// refused token stopped (dropUnpaired, or resumeStranded for a later
+// pairing's) or a claim start is recording (launch).
+func (r *Runner) holdsLocked(id int64) bool {
+	_, running := r.running[id]
+	has := func(job Job) bool { return job.ID == id }
+	return running || r.starting[id] > 0 || slices.ContainsFunc(r.stranded, has) || slices.ContainsFunc(r.unpaired, has)
+}
+
+// sweepPairings drops the open rows of a pairing other than the current one
+// (Options.Pairing): the jobs of a pairing ended on the Bridge's page (a
+// restart since included: the pairing is the store's, never only this
+// process's) or of a server the Bridge is no longer paired with. A running
+// one no run here holds (holdsLocked: a run, a claim being recorded, a job a
+// refused token stopped) is released and recorded lost (dropLost), so a later
+// pairing, with its server or another, never resumes it; a finished one's end
+// is never reported. A held one is ended by its own path (settle,
+// dropUnpaired, resumeStranded). Each row is read again before it is dropped:
+// the list is read once while the new pairing claims beside the look (whose
+// Abandons may take minutes), and job ids are each server's own, so a claim of
+// the new pairing may hold the row under the listed id by then, run and
+// ended (no longer held): that claim's row is never dropped, nor its end
+// marked reported, for the one listed. It reports whether it could read the
+// store, and stops once ctx ends (a stop leaves the rows for the next start's
+// look).
+func (r *Runner) sweepPairings(ctx context.Context) bool {
+	open, err := r.store.OpenServerJobs(ctx)
+	if err != nil {
+		r.log.Warn("bridge: reading the jobs of an earlier pairing failed; it is tried again", "err", err)
+		return false
+	}
+	read := true
+	for _, sj := range open {
+		if ctx.Err() != nil {
+			return false
+		}
+		if sj.Pairing == r.opts.Pairing().ID { // read again: a pairing made since keeps its rows
+			continue
+		}
+		r.mu.Lock()
+		held := r.holdsLocked(sj.ID)
+		r.mu.Unlock()
+		if held {
+			continue
+		}
+		now, err := r.store.GetServerJob(ctx, sj.ID)
+		switch {
+		case errors.Is(err, store.ErrNotFound):
+		case err != nil:
+			r.log.Warn("bridge: reading a job of an earlier pairing failed; it is tried again", "job", sj.ID, "err", err)
+			read = false
+		case now.Pairing != sj.Pairing || now.ServerID != sj.ServerID || now.Attempt != sj.Attempt:
+			// Another claim's row now (the current pairing's).
+		case now.State == store.JobRunning || !now.Reported:
+			r.dropRecorded(ctx, *now)
+		}
+	}
+	return read && ctx.Err() == nil
+}
+
+// dropUnpaired drops the jobs a refused token had stopped when their pairing
+// was ended on the Bridge's page (Unpaired): released and recorded lost,
+// reported nowhere. As in resumeStranded, one a later claim runs or holds the
+// row of (or that ended) is left to it, and one whose row can't be read now
+// waits for the next look.
+func (r *Runner) dropUnpaired(ctx context.Context) {
+	r.mu.Lock()
+	unpaired := r.unpaired
+	r.unpaired = nil
+	r.mu.Unlock()
+	for _, job := range unpaired {
+		r.mu.Lock()
+		_, running := r.running[job.ID]
+		r.mu.Unlock()
+		if running {
+			continue
+		}
+		sj, err := r.store.GetServerJob(ctx, job.ID)
+		switch {
+		case errors.Is(err, store.ErrNotFound):
+		case err != nil:
+			r.log.Warn("bridge: reading a job the unpair stopped failed; it is tried again", "job", job.ID, "err", err)
+			r.mu.Lock()
+			r.unpaired = append(r.unpaired, job)
+			r.mu.Unlock()
+		case sj.State == store.JobRunning && sj.Attempt == job.Attempt && sj.ServerID == job.serverID && sj.Pairing == job.pairing:
+			r.dropLost(ctx, job, errPairingEnded)
+		}
+	}
+}
+
+// stale reports whether srv, a link that just answered a claim, is no longer
+// the Bridge's to run a job on: its pairing was ended on the Bridge's page
+// (Unpaired), or the Bridge is paired with another server now. Such an answer
+// is dropped whole (start): job ids are each server's own, so recording it
+// could overwrite the row of the new server's job of the same id, and running
+// it would report to a server the Bridge has left. That server's lease lapses
+// the claim.
+func (r *Runner) stale(srv Server) bool {
+	r.mu.Lock()
+	_, ended := r.ended[srv]
+	r.mu.Unlock()
+	if ended || srv.PairingID() != r.opts.Pairing().ID {
 		return true
 	}
-	ab, aok := a.(interface{ BaseURL() string })
-	bb, bok := b.(interface{ BaseURL() string })
-	return aok && bok && ab.BaseURL() == bb.BaseURL()
+	_, other := r.linkFor(srv.ServerID())
+	return other
+}
+
+// pairingGone reports whether job's pairing is no longer the Bridge's
+// (Options.Pairing): unpaired on its page (before Unpaired has reached the
+// job's run, too: the app forgets the pairing first) or paired with another
+// server. Its run reports nothing more and is dropped however it ends.
+func (r *Runner) pairingGone(job Job) bool { return job.pairing != r.opts.Pairing().ID }
+
+// sameServer reports whether server ids a and b are one server. Unknown ("")
+// on either side is never the same: nothing of a job whose server isn't known
+// is reported, shared or filed on a link, nor a job run on a link whose server
+// isn't known (the app learns a stored pairing's id before its link counts).
+func sameServer(a, b string) bool { return a != "" && a == b }
+
+// paired is the Bridge's current link and the id of the server it reaches
+// (nil, "" while it has none).
+func (r *Runner) paired() (Server, string) {
+	srv := r.server()
+	if srv == nil {
+		return nil, ""
+	}
+	return srv, srv.ServerID()
+}
+
+// linkFor is THE ONE RULE for whether a job belongs to the Bridge's current
+// link: the id of the server that handed it out (serverID: the claim's link's,
+// recorded on its row) against the id of the server the current link reaches.
+// It returns the current link while it reaches that server; other while it
+// reaches another one; neither while the Bridge has no link (unpaired, the
+// token refused, or before a new link's first heartbeat: nothing is decided
+// yet). A pairing with the same server, at a new address or with a new token,
+// keeps its jobs (the server holds a claim by its job id and attempt, not by
+// the token), and they report on the new link; a pairing with another server
+// drops them here, recorded lost and reported nowhere (errOtherServer), and
+// their own server's lease lapses them. Unknown on either side (a row from
+// before the Bridge recorded it, or a link whose pairing answer named none) is
+// never the same (sameServer): such a job is dropped.
+func (r *Runner) linkFor(serverID string) (cur Server, other bool) {
+	srv, id := r.paired()
+	switch {
+	case srv == nil:
+		return nil, false
+	case !sameServer(serverID, id):
+		return nil, true
+	}
+	return srv, false
+}
+
+// dropOtherServers ends every run of a server other than id's (the current
+// link's), waiting for its slot or running: each is dropped (errOtherServer),
+// never reported to the server the Bridge is paired with now. A run's own
+// reports drop it too, at its next look; this does it as soon as a pairing
+// with another server is up.
+func (r *Runner) dropOtherServers(id string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, ru := range r.running {
+		if !sameServer(ru.job.serverID, id) {
+			ru.cancel(errOtherServer)
+		}
+	}
 }
 
 // jobOf is a claimed job as a Handler sees it.
@@ -563,15 +957,15 @@ func jobOf(j *link.Job) Job {
 // storedJob is a job the store recorded, as a Handler sees it.
 func storedJob(sj store.ServerJob) Job {
 	return Job{ID: sj.ID, Kind: sj.Kind, LibraryID: sj.LibraryID, Path: sj.Path, Params: sj.Params, Attempt: sj.Attempt,
-		Priority: sj.Priority, shareOff: sj.ShareOff}
+		Priority: sj.Priority, shareOff: sj.ShareOff, serverID: sj.ServerID, pairing: sj.Pairing}
 }
 
-// run is one running job, and the link it runs on. parked is the park message a
-// resumed job had (its first report keeps it parked), progress the progress it
-// last recorded (a parked one's first report keeps its park's code too).
+// run is one running job. parked is the park message a resumed job had (its
+// first report keeps it parked), progress the progress it last recorded (a
+// parked one's first report keeps its park's code too). The link it reports on
+// is its Reporter's (linkFor).
 type run struct {
 	job      Job
-	srv      Server
 	lane     string
 	cancel   context.CancelCauseFunc
 	parked   string
@@ -588,21 +982,40 @@ type run struct {
 	// rep is the run's Reporter (nil until execute makes it): ShareOff asks
 	// through it, a job waiting for its slot included. Written under r.mu.
 	rep *Reporter
-}
-
-// strandedJob is a job a refused token stopped, with the link it ran on.
-type strandedJob struct {
-	job Job
-	srv Server
+	// ended: the job's pairing was ended on the Bridge's page (Unpaired, set
+	// under r.mu): it reports nothing more (Reporter.link) and is recorded lost
+	// however it ends (settle), never kept to resume (release).
+	ended atomic.Bool
+	// left: settle left the job's row running for the next start (the Bridge
+	// stopping). Set and read on the run's own goroutine (settle, release).
+	left bool
 }
 
 // start records a claimed job and runs it. claim is the dispatcher's request
-// that took it (nil in tests that start a job directly).
+// that took it (nil in tests that start a job directly). A claim answered on a
+// link the Bridge has left since (stale) is dropped instead.
 func (r *Runner) start(ctx context.Context, srv Server, job Job, wg *sync.WaitGroup, claim *claimRequest) {
-	serverID := r.opts.ServerID()
-	if claim != nil {
-		serverID = claim.serverID
+	// The claim's link's: its server handed the job out, under its pairing.
+	job.serverID, job.pairing = srv.ServerID(), srv.PairingID()
+	if r.stale(srv) {
+		// An answer from a pairing the Bridge has left: neither recorded (the
+		// row of its id may be the new server's job) nor run nor reported.
+		r.log.Info("bridge: a claim answered after its pairing ended is dropped", "job", job.ID, "kind", job.Kind, "server", job.serverID)
+		return
 	}
+	// Held (starting) from before its row is written until launch holds it in
+	// running: a look for the rows an unpair left never drops it meanwhile, as
+	// a new pairing's claim or as one launch ends at once (its link ended).
+	r.mu.Lock()
+	r.starting[job.ID]++
+	r.mu.Unlock()
+	defer func() {
+		r.mu.Lock()
+		if r.starting[job.ID]--; r.starting[job.ID] <= 0 {
+			delete(r.starting, job.ID)
+		}
+		r.mu.Unlock()
+	}()
 	var sealErr error
 	sealer, sealing := r.handlers[job.Kind].(ParamSealer)
 	if sealing {
@@ -614,7 +1027,7 @@ func (r *Runner) start(ctx context.Context, srv Server, job Job, wg *sync.WaitGr
 	// Recorded even when the runner is stopping: a claim that raced the stop
 	// is then resumed under its lease at the next start, not left to lapse.
 	if err := r.recordClaim(context.WithoutCancel(ctx), store.ServerJob{ID: job.ID, Kind: job.Kind, LibraryID: job.LibraryID, Path: job.Path,
-		Params: job.Params, Attempt: job.Attempt, ServerID: serverID, Priority: job.Priority, ShareOff: job.shareOff}); err != nil {
+		Params: job.Params, Attempt: job.Attempt, ServerID: job.serverID, Pairing: job.pairing, Priority: job.Priority, ShareOff: job.shareOff}); err != nil {
 		r.log.Warn("bridge: recording a claim failed", "job", job.ID, "err", err)
 		if needer, ok := r.handlers[job.Kind].(ClaimRowNeeder); sealing || ok && needer.NeedsClaimRow(job) {
 			// Fail closed: without its row the sealed secret could be neither
@@ -669,7 +1082,9 @@ func (r *Runner) recordClaim(ctx context.Context, sj store.ServerJob) error {
 // interactive priority, its kind opts in and the pairing negotiated the reserve
 // (as it was claimed, bridge#13); a claimed job takes its reservation unless the
 // server ignored the requested filter, in which case it waits for ordinary
-// admission.
+// admission. A claimed job whose lane has no room for it even so (the claim
+// answered as a capacity change cancelled it) is held, waiting for a slot with
+// its lease renewed, never dropped (BR-CLAIM-HOLD).
 func (r *Runner) launch(ctx context.Context, srv Server, job Job, wg *sync.WaitGroup, parked string, progress json.RawMessage, claim *claimRequest) {
 	h, ok := r.handlers[job.Kind]
 	if !ok {
@@ -677,23 +1092,28 @@ func (r *Runner) launch(ctx context.Context, srv Server, job Job, wg *sync.WaitG
 		return
 	}
 	rctx, cancel := context.WithCancelCause(ctx)
-	ru := &run{job: job, srv: srv, lane: h.Lane(), cancel: cancel, parked: parked, progress: progress}
+	ru := &run{job: job, lane: h.Lane(), cancel: cancel, parked: parked, progress: progress}
 	r.mu.Lock()
 	if claim != nil {
 		r.unreserveLocked(claim)
 		ru.stray, ru.strayReserve = claim.fallback, claim.fallback && claim.interactive
 	}
-	if claim != nil && !claim.fallback {
-		if claim.interactive {
-			ru.lane = LaneInteractive
-		}
-		ru.admitted = true
-	} else {
-		if claim == nil && job.Priority >= int(InteractivePriority) && interactive(h) && supportsPriority(srv) {
-			ru.lane = LaneInteractive
-		}
-		// Behind any job already waiting in the lane (first come, first admitted).
-		ru.admitted = r.waiting[ru.lane] == 0 && r.roomLocked(r.capacities(srv), ru.lane, nil)
+	reserved := claim != nil && !claim.fallback
+	switch {
+	case reserved && claim.interactive:
+		ru.lane = LaneInteractive
+	case claim == nil && job.Priority >= int(InteractivePriority) && interactive(h) && supportsPriority(srv):
+		ru.lane = LaneInteractive
+	}
+	// A claim's reservation, just let go, is its slot: ahead of any job that
+	// started waiting in the lane since the claim went out. Anything else waits
+	// behind any job already waiting there (first come, first admitted).
+	ru.admitted = (reserved || r.waiting[ru.lane] == 0) && r.roomLocked(r.capacities(srv), ru.lane, nil)
+	if _, ended := r.ended[srv]; ended {
+		// Unpaired on the page while the job was on its way here: it ends
+		// before its first report, as the jobs Unpaired found running.
+		ru.ended.Store(true)
+		cancel(errPairingEnded)
 	}
 	r.running[job.ID] = ru
 	if ru.admitted {
@@ -718,7 +1138,20 @@ func (r *Runner) release(ru *run, stranded bool) {
 	ru.cancel(nil)
 	heard := ru.rep != nil && ru.rep.ShareOff() // set on this goroutine (execute)
 	r.mu.Lock()
-	defer r.mu.Unlock()
+	drop := r.releaseLocked(ru, stranded, heard)
+	r.mu.Unlock()
+	if drop {
+		// Left running by a stop or a refused token as the pairing was ended
+		// on the page (after settle looked, while it was held): dropped now,
+		// as the claim loop drops an earlier pairing's row (sweepPairings).
+		r.dropUnpaired(context.Background())
+	}
+}
+
+// releaseLocked is release under r.mu. It reports whether the job, left
+// running by a stop or a refused token, was unpaired since and waits in
+// unpaired to be dropped.
+func (r *Runner) releaseLocked(ru *run, stranded, heard bool) bool {
 	if r.running[ru.job.ID] == ru { // a later claim of the same job may run under its id
 		delete(r.running, ru.job.ID)
 	}
@@ -728,12 +1161,25 @@ func (r *Runner) release(ru *run, stranded bool) {
 	case !ru.yielded:
 		r.waiting[ru.lane]--
 	}
-	if stranded {
+	drop := false
+	switch {
+	case stranded:
 		job := ru.job
 		job.shareOff = job.shareOff || heard // carried to resumeStranded
-		r.stranded = append(r.stranded, strandedJob{job: job, srv: ru.srv})
+		if ru.ended.Load() {
+			// Unpaired on the page since it stopped: dropped now, not resumed
+			// (the claim loop may have stopped already, as the Bridge does).
+			r.unpaired = append(r.unpaired, job)
+			drop = true
+		} else {
+			r.stranded = append(r.stranded, job)
+		}
+	case ru.left && ru.ended.Load():
+		r.unpaired = append(r.unpaired, ru.job)
+		drop = true
 	}
 	r.wakeLocked()
+	return drop
 }
 
 // execute runs the handler, keeps the lease alive beside it, and records and
@@ -762,10 +1208,10 @@ func (r *Runner) execute(ctx, base context.Context, srv Server, h Handler, ru *r
 		// Ended before its handler ran: a cancel or a lost claim ends it for good,
 		// so what an earlier run of it left (an engine book) is released.
 		cause := context.Cause(ctx)
-		if errors.Is(cause, errCancelRequested) || errors.Is(cause, errLost) {
+		if endsForGood(cause) {
 			r.abandonFor(base, ru.job, cause)
 		}
-		return r.settle(base, srv, ru, rep, nil, cause)
+		return r.settle(base, ru, rep, nil, cause)
 	}
 	done := make(chan struct{})
 	reporting := make(chan struct{})
@@ -776,15 +1222,17 @@ func (r *Runner) execute(ctx, base context.Context, srv Server, h Handler, ru *r
 	var result any
 	var err error
 	if r.awaitAdmission(ctx, ru) {
+		rep.started.Store(true)
 		result, err = h.Run(ctx, ru.job, rep)
-	} else if cause := context.Cause(ctx); errors.Is(cause, errCancelRequested) || errors.Is(cause, errLost) {
-		// A recovered job can lose its claim while waiting for a slot, after
-		// its first report succeeded but before its handler ever ran.
+	} else if cause := context.Cause(ctx); endsForGood(cause) {
+		// A recovered job can lose its claim (or be dropped for another
+		// server's pairing) while waiting for a slot, after its first report
+		// succeeded but before its handler ever ran.
 		r.abandonFor(base, ru.job, cause)
 	}
 	close(done)
 	<-reporting
-	return r.settle(base, srv, ru, rep, result, firstErr(context.Cause(ctx), err))
+	return r.settle(base, ru, rep, result, firstErr(context.Cause(ctx), err))
 }
 
 // firstErr prefers why the job's context ended over the handler's error (a
@@ -796,9 +1244,10 @@ func firstErr(cause, err error) error {
 	return err
 }
 
-// settle records and reports a job's end. It reports whether a refused token
-// stopped the job (left running, for resumeStranded).
-func (r *Runner) settle(base context.Context, srv Server, ru *run, rep *Reporter, result any, err error) (stranded bool) {
+// settle records and reports a job's end, on the link its Reporter reports on
+// now (linkFor). It reports whether a refused token stopped the job (left
+// running, for resumeStranded).
+func (r *Runner) settle(base context.Context, ru *run, rep *Reporter, result any, err error) (stranded bool) {
 	job := ru.job
 	var raw json.RawMessage
 	if result != nil {
@@ -825,22 +1274,43 @@ func (r *Runner) settle(base context.Context, srv Server, ru *run, rep *Reporter
 	if last := rep.Last(); last.Step != "" {
 		progress, _ = json.Marshal(last)
 	}
+	// nil once the Bridge is paired with another server or was unpaired on its
+	// page: the end is reported nowhere.
+	srv, _ := rep.link()
 	var park *ParkError
 	switch {
+	case ru.ended.Load(), r.pairingGone(job):
+		// Unpaired on the Bridge's page (or paired with another server since),
+		// however the job ended (done, failed, cancelled, its token refused,
+		// the Bridge stopping): nothing more goes to its server, and it is no
+		// job of the server the Bridge pairs with next. One that stopped to
+		// resume kept its work for that: released.
+		why := errPairingEnded
+		if !ru.ended.Load() {
+			why = r.dropCause(job.serverID)
+		}
+		r.log.Info("bridge: a job of an ended pairing is dropped", "job", job.ID, "kind", job.Kind, "why", why)
+		end := context.WithoutCancel(base)
+		if cause := context.Cause(rep.ctx); cause != nil && !endsForGood(cause) {
+			r.abandonDropped(end, job, why)
+		}
+		r.recordLost(end, job, raw, why)
 	case base.Err() != nil, errors.Is(err, errStopping):
-		r.interrupted(rep, job, err)
-	case errors.Is(err, errUnpaired):
+		r.interrupted(rep, ru, err)
+	case errors.Is(err, errUnpaired), errors.Is(err, errRelinked):
 		// Left running: resumed under its claim once a link works again (or at
-		// the next start), with the share_off it heard (release carries it to
-		// resumeStranded, whose run writes it again if this write fails too).
+		// the next start; a relinked job's link already does), with the
+		// share_off it heard (release carries it to resumeStranded, whose run
+		// writes it again if this write fails too).
 		rep.keepShareOff()
-		r.log.Info("bridge: the server refused a job's token; it resumes once the link works again", "job", job.ID)
+		r.log.Info("bridge: a job's link ended; it resumes under its claim on the next one", "job", job.ID, "why", err)
 		return true
+	case srv == nil, errors.Is(err, errOtherServer):
+		r.log.Info("bridge: a job of another server is dropped", "job", job.ID, "kind", job.Kind)
+		r.recordLost(base, job, raw, errOtherServer)
 	case errors.Is(err, errLost):
 		r.log.Info("bridge: the server took a job back", "job", job.ID, "kind", job.Kind)
-		if ferr := r.store.FinishServerJob(base, job.ID, job.Attempt, store.JobLost, raw, err.Error()); ferr != nil {
-			r.log.Warn("bridge: recording a job failed", "job", job.ID, "err", ferr)
-		}
+		r.recordLost(base, job, raw, err)
 	case errors.Is(err, errCancelRequested):
 		r.log.Info("bridge: a job was cancelled", "job", job.ID, "kind", job.Kind, "why", err)
 		r.finish(base, srv, job, store.JobCancelled, progress, raw, "")
@@ -857,7 +1327,7 @@ func (r *Runner) settle(base context.Context, srv Server, ru *run, rep *Reporter
 		cause := rep.heldCancel(base)
 		switch {
 		case base.Err() != nil:
-			r.interrupted(rep, job, err)
+			r.interrupted(rep, ru, err)
 		case cause != nil:
 			r.log.Info("bridge: a job was cancelled", "job", job.ID, "kind", job.Kind, "why", cause, "err", err)
 			r.finish(base, srv, job, store.JobCancelled, progress, raw, "")
@@ -870,10 +1340,11 @@ func (r *Runner) settle(base context.Context, srv Server, ru *run, rep *Reporter
 
 // interrupted leaves a job the stopping Bridge ended running: the next start
 // resumes it under its claim, with the share_off it heard if the store takes it
-// now.
-func (r *Runner) interrupted(rep *Reporter, job Job, why error) {
+// now (unless the pairing is ended on the page meanwhile: release).
+func (r *Runner) interrupted(rep *Reporter, ru *run, why error) {
 	rep.keepShareOff()
-	r.log.Info("bridge: a job was interrupted; it resumes at the next start", "job", job.ID, "why", why)
+	ru.left = true
+	r.log.Info("bridge: a job was interrupted; it resumes at the next start", "job", ru.job.ID, "why", why)
 }
 
 // Bounds on what the Bridge reports, inside the server's (its error limit is
@@ -977,7 +1448,7 @@ func (r *Runner) retryReports(ctx context.Context) {
 				r.log.Warn("bridge: pruning old jobs failed", "err", err)
 			}
 		}
-		srv := r.server()
+		srv, id := r.paired()
 		if srv == nil || !r.retry.Swap(false) {
 			continue
 		}
@@ -987,9 +1458,10 @@ func (r *Runner) retryReports(ctx context.Context) {
 			continue
 		}
 		for _, sj := range open {
-			// Another server's end is never sent here (recover drops it; it may
-			// not have yet when this looks).
-			if sj.State != store.JobRunning && !sj.Reported && !r.otherServer(sj) {
+			// Another server's or an earlier pairing's end is never sent here
+			// (recover and sweepPairings drop it; they may not have yet when
+			// this looks).
+			if sj.State != store.JobRunning && !sj.Reported && sameServer(sj.ServerID, id) && sj.Pairing == srv.PairingID() {
 				r.report(ctx, srv, sj)
 			}
 		}
@@ -1041,8 +1513,8 @@ func (r *Runner) ShareOff(ctx context.Context, id int64, ask bool) (bool, error)
 		// A run of the job up here is a later claim (resumeStranded takes a
 		// stranded job off the list before it launches it): what the stranded
 		// attempt heard isn't that claim's.
-		if s.job.ID == id && !running {
-			stranded, heard = true, s.job.shareOff
+		if s.ID == id && !running {
+			stranded, heard = true, s.shareOff
 		}
 	}
 	r.mu.Unlock()
@@ -1065,32 +1537,33 @@ func (r *Runner) ShareOff(ctx context.Context, id int64, ask bool) (bool, error)
 	return false, nil
 }
 
-// OnCurrentLink reports whether the job's link reaches the server the Bridge
-// is linked to now: the same link, or a new pairing with the same address.
-// After an unpairing, a refused token or a pairing with another server, the
-// job's link answers for a server the Bridge no longer works for, so nothing
-// it says confirms a share. True for a LocalReporter.
+// OnCurrentLink reports whether the Bridge's current link reaches the job's
+// server (linkFor: a new pairing with it, at a new address or with a new
+// token, included). Unpaired, refused, or paired with another server, nothing
+// the job's server says confirms a share here. True for a LocalReporter.
 func (p *Reporter) OnCurrentLink() bool {
 	if p.r == nil {
 		return true
 	}
-	srv := p.r.server()
-	return srv != nil && sameServer(srv, p.srv)
+	cur, _ := p.r.linkFor(p.job.serverID)
+	return cur != nil
 }
 
 // AskShareOff asks the server now whether the job's share is off (Refresh),
 // for a handler about to file it to the community: true once the job heard
-// share_off (an answer that stopped the job counts when it carried it). An
-// answer from a link that isn't the Bridge's current one confirms nothing
-// (ErrShareOffLink, asked before the report and again after the answer, as a
-// pairing can change while it is on its way); a report that didn't get
-// through is its error (ErrStopped for an answer that stopped the job).
+// share_off (an answer that stopped the job counts when it carried it). It asks
+// only while the Bridge's current link reaches the job's server, and looks
+// again once the answer is in, as a pairing can change while it is on its way:
+// with no link then it confirms nothing (ErrShareOffLink), and paired with
+// another server the job is dropped (ErrStopped, its context ended). A report
+// that didn't get through is its error (ErrStopped for an answer that stopped
+// the job).
 func (p *Reporter) AskShareOff(ctx context.Context) (bool, error) {
 	if p.ShareOff() {
 		return true, nil
 	}
-	if !p.OnCurrentLink() {
-		return false, ErrShareOffLink
+	if err := p.onLink(); err != nil {
+		return false, err
 	}
 	err := p.Refresh(ctx)
 	switch {
@@ -1098,10 +1571,26 @@ func (p *Reporter) AskShareOff(ctx context.Context) (bool, error) {
 		return true, nil
 	case err != nil:
 		return false, err
-	case !p.OnCurrentLink():
-		return false, ErrShareOffLink
 	}
-	return false, nil
+	return false, p.onLink()
+}
+
+// onLink is AskShareOff's look at the link (link): nil while the current link
+// reaches the job's server, ErrShareOffLink while the Bridge has none, and
+// ErrStopped once link dropped the job (paired with another server, or
+// unpaired on the Bridge's page).
+func (p *Reporter) onLink() error {
+	if p.r == nil {
+		return nil
+	}
+	srv, current := p.link()
+	switch {
+	case srv == nil:
+		return ErrStopped
+	case !current:
+		return ErrShareOffLink
+	}
+	return nil
 }
 
 // Progress is a job's progress as the server shows it: a step, a sentence, and
@@ -1174,7 +1663,6 @@ type Reporter struct {
 	// ru is the job's run (nil for a LocalReporter): Yield and Reclaim move its
 	// lane slot.
 	ru     *run
-	srv    Server
 	job    Job
 	cancel context.CancelCauseFunc
 	ctx    context.Context //nolint:containedctx // the job's own context, for its sends
@@ -1185,7 +1673,14 @@ type Reporter struct {
 	// job asked for never lands after a newer report (a park lifted since).
 	sendMu sync.Mutex
 
-	mu       sync.Mutex
+	// started: the handler runs (or ran): it may hold the link it started on,
+	// so a new link to its server restarts it there (link, errRelinked).
+	started atomic.Bool
+
+	mu sync.Mutex
+	// srv is the link the job last reported on (link): the one it was
+	// launched on until the Bridge has another link to its server.
+	srv      Server
 	progress Progress
 	// dirty: progress changed since it was last sent (and stored).
 	dirty  bool
@@ -1410,8 +1905,9 @@ func (p *Reporter) Yield() {
 }
 
 // Reclaim takes a lane slot again after Yield before the job goes on: it
-// queues first in line (no new claim for the lane meanwhile) and waits for the
-// job holding the slot to end. The context's error when it ended first; nil at
+// queues first in line (no new claim asks for the lane meanwhile, though a
+// claim already in flight keeps the slot it reserved: BR-CLAIM-HOLD) and waits
+// for the job holding the slot to end. The context's error when it ended first; nil at
 // once when the job didn't yield.
 func (p *Reporter) Reclaim(ctx context.Context) error {
 	if p.ru == nil {
@@ -1511,35 +2007,85 @@ func (p *Reporter) loop(done <-chan struct{}) {
 	}
 }
 
-// offLink reports whether the job still waits for its first slot on a link the
-// Bridge no longer uses (unpaired, refused, or paired again since the job was
-// launched): its lease isn't renewed there, so the server can hand the job out
-// again rather than wait on a claim nothing here will run (bridge#13). A new
-// pairing strands it (awaitAdmission); the same link back renews it again.
+// link is the link the job reports on now, by the one rule (Runner.linkFor):
+// the Bridge's current link while it reaches the job's server (a new pairing
+// with it included: the job moves onto it), with current true; while the
+// Bridge has no link (unpaired, refused, before a new link's first heartbeat),
+// the one it last reported on, as nothing says yet that the job is another
+// server's (a running job goes on renewing its lease there). nil once the
+// Bridge is paired with another server: the job is dropped (errOtherServer
+// ends its context) and reports nothing more. A job whose handler started on
+// another link to its server is stopped (errRelinked) to run again on the new
+// one: the handler's own calls may still use the old link, which the server
+// revoked. nil too once the job's pairing was ended on the Bridge's page
+// (Runner.Unpaired, or the app's pairing forgotten before that reaches the
+// run: pairingGone, which ends its context): nothing more is sent to its
+// server, a new pairing with it included. Not for a LocalReporter.
+func (p *Reporter) link() (srv Server, current bool) {
+	if p.ended() {
+		return nil, false
+	}
+	if p.ru != nil && p.r.pairingGone(p.job) {
+		// The app forgot the job's pairing (Unpaired reaches the run next),
+		// or the Bridge was paired with another server since.
+		p.cancel(p.r.dropCause(p.job.serverID))
+		return nil, false
+	}
+	cur, other := p.r.linkFor(p.job.serverID)
+	if other {
+		p.cancel(errOtherServer)
+		return nil, false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if cur != nil {
+		if p.srv != cur && p.srv != nil && p.started.Load() {
+			p.cancel(errRelinked)
+		}
+		p.srv = cur
+	}
+	return p.srv, cur != nil
+}
+
+// ended reports whether the job's pairing was ended on the Bridge's page
+// (Runner.Unpaired).
+func (p *Reporter) ended() bool { return p.ru != nil && p.ru.ended.Load() }
+
+// offLink reports whether the job still waits for its first slot while the
+// Bridge has no link to its server (unpaired, refused, or paired with another
+// server, which drops it): its lease isn't renewed, so the server can hand the
+// job out again rather than wait on a claim nothing here will run (bridge#13).
+// A link to its server again (a new pairing with it included) renews it.
 func (p *Reporter) offLink() bool {
 	p.r.mu.Lock()
 	waiting := !p.ru.admitted && !p.ru.yielded
 	p.r.mu.Unlock()
-	return waiting && p.r.server() != p.srv
+	return waiting && !p.OnCurrentLink()
 }
 
 // send reports the job's state (running, renewing the lease, or needs_attention
 // while parked, which has none) with its current progress and acts on the
 // answer: a cancel request or a lost claim ends the job's context. It reports
-// whether the job goes on.
+// whether the job goes on (false too for one link dropped).
 func (p *Reporter) send() bool {
-	goOn, got, stop, err := p.sendLocked()
-	p.acted(got, stop, err)
+	goOn, srv, got, stop, err := p.sendLocked()
+	if srv != nil {
+		p.acted(srv, got, stop, err)
+	}
 	return goOn
 }
 
-// sendLocked is send under sendMu; it returns the answer and the cause that
-// stops the job (answer) too, for acted (which runs after it, outside sendMu:
-// heard writes the store).
-func (p *Reporter) sendLocked() (goOn bool, got *link.Job, stop, err error) {
+// sendLocked is send under sendMu; it returns the link it reported on (nil for
+// a job link dropped: nothing was sent), the answer and the cause that stops
+// the job (answer) too, for acted (which runs after it, outside sendMu: heard
+// writes the store).
+func (p *Reporter) sendLocked() (goOn bool, srv Server, got *link.Job, stop, err error) {
 	ctx := p.ctx
 	p.sendMu.Lock()
 	defer p.sendMu.Unlock()
+	if srv, _ = p.link(); srv == nil {
+		return false, nil, nil, nil, nil
+	}
 	p.mu.Lock()
 	pr, dirty := p.progress, p.dirty
 	parked, parkMsg := p.parked, p.parkMsg
@@ -1551,19 +2097,19 @@ func (p *Reporter) sendLocked() (goOn bool, got *link.Job, stop, err error) {
 			p.r.log.Warn("bridge: recording progress failed", "job", p.job.ID, "err", err)
 		}
 	}
-	got, err = p.srv.UpdateJob(ctx, p.job.ID, u)
+	got, err = srv.UpdateJob(ctx, p.job.ID, u)
 	if stop = p.answer(got, err, parked); stop != nil {
-		return false, got, stop, err
+		return false, srv, got, stop, err
 	}
 	switch {
 	case err == nil:
 		p.reached()
-		return true, got, nil, nil
+		return true, srv, got, nil, nil
 	case ctx.Err() != nil:
-		return false, got, nil, err
+		return false, srv, got, nil, err
 	default:
 		p.failed(err)
-		return true, got, nil, err
+		return true, srv, got, nil, err
 	}
 }
 
@@ -1697,19 +2243,20 @@ func (p *Reporter) answer(got *link.Job, err error, parked bool) (stop error) {
 	return nil
 }
 
-// acted acts on an answer once answer has read it, outside sendMu: heard first,
-// then stop (answer's cause, nil for none) ends the job's context, so a handler's
-// OnShareOff runs for an answer that carries share_off and a cancel while the
-// job's context still works (the Reporter's own write, keepShareOff, doesn't
-// need it). It reports whether the answer stopped the job.
-func (p *Reporter) acted(got *link.Job, stop, err error) bool {
+// acted acts on an answer srv gave once answer has read it, outside sendMu:
+// heard first, then stop (answer's cause, nil for none) ends the job's
+// context, so a handler's OnShareOff runs for an answer that carries share_off
+// and a cancel while the job's context still works (the Reporter's own write,
+// keepShareOff, doesn't need it). A refused token is srv's (onUnauthorized).
+// It reports whether the answer stopped the job.
+func (p *Reporter) acted(srv Server, got *link.Job, stop, err error) bool {
 	p.heard(got, err)
 	if stop == nil {
 		return false
 	}
 	p.cancel(stop)
 	if errors.Is(stop, errUnpaired) {
-		p.r.onUnauthorized(p.srv)
+		p.r.onUnauthorized(srv)
 	}
 	return true
 }
@@ -1770,11 +2317,19 @@ func (p *Reporter) ConfirmLease(ctx context.Context) error {
 	if p.r == nil {
 		return nil
 	}
+	srv, _ := p.link()
+	if srv == nil {
+		// Dropped: nothing is published for it.
+		if p.ended() {
+			return errPairingEnded
+		}
+		return errOtherServer
+	}
 	state := link.StateRunning
-	got, err := p.srv.UpdateJob(ctx, p.job.ID, link.Update{Attempt: p.job.Attempt, State: &state})
+	got, err := srv.UpdateJob(ctx, p.job.ID, link.Update{Attempt: p.job.Attempt, State: &state})
 	// It sends no error, so a parked job's stays its park's message.
 	parked, _ := p.parkState()
-	if p.acted(got, p.answer(got, err, parked), err) {
+	if p.acted(srv, got, p.answer(got, err, parked), err) {
 		if err != nil {
 			return err
 		}
@@ -1809,14 +2364,18 @@ func (p *Reporter) Refresh(ctx context.Context) error {
 	if p.r == nil {
 		return nil
 	}
-	got, stop, err := func() (*link.Job, error, error) {
+	srv, got, stop, err := func() (Server, *link.Job, error, error) {
 		p.sendMu.Lock()
 		defer p.sendMu.Unlock()
+		srv, _ := p.link()
+		if srv == nil {
+			return nil, nil, nil, nil
+		}
 		p.mu.Lock()
 		pr, parked, parkMsg := p.progress, p.parked, p.parkMsg
 		p.mu.Unlock()
 		u, _ := p.updateOf(pr, parked, parkMsg)
-		got, err := p.srv.UpdateJob(ctx, p.job.ID, u)
+		got, err := srv.UpdateJob(ctx, p.job.ID, u)
 		stop := p.answer(got, err, parked)
 		// Noted under sendMu, as send does, so an older report's outcome never
 		// lands over a newer one's.
@@ -1827,10 +2386,10 @@ func (p *Reporter) Refresh(ctx context.Context) error {
 		case ctx.Err() == nil:
 			p.failed(err)
 		}
-		return got, stop, err
+		return srv, got, stop, err
 	}()
-	if p.acted(got, stop, err) {
-		return ErrStopped
+	if srv == nil || p.acted(srv, got, stop, err) {
+		return ErrStopped // srv nil: link dropped the job (another server, an unpair)
 	}
 	return err
 }

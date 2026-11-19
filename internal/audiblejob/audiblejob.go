@@ -187,12 +187,15 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 	if err != nil {
 		return nil, err
 	}
+	// The job's own server, never the pairing's now (another server's, once
+	// the Bridge was paired with it): the account must be mapped there.
+	serverID := job.KeyServer(h.o.ServerID())
 	acct, err := h.o.Accounts.Account(ctx, p.Account)
 	// A sign-in and a mapping record themselves on the server before they
 	// store themselves here: a poll the server queued in between reads no
 	// account yet, or the mapping being replaced. Read again past one in
 	// flight before failing for either (a poll that fails waits poll_hours).
-	if audibleacct.NotHere(acct, err, h.o.ServerID()) {
+	if audibleacct.NotHere(acct, err, serverID) {
 		acct, err = h.o.Accounts.AwaitedAccount(ctx, p.Account)
 	}
 	if errors.Is(err, audibleacct.ErrNotFound) {
@@ -201,12 +204,12 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 	if err != nil {
 		return nil, err
 	}
-	if acct.OnOtherServer(h.o.ServerID()) {
+	if acct.OnOtherServer(serverID) {
 		return nil, h.fail(ctx, acct.ID, "the account is mapped on another server: map it again on the Bridge's Accounts tab")
 	}
 	var srv Server
 	if h.o.Server != nil {
-		srv = h.o.Server()
+		srv = jobs.Link(job, h.o.Server()) // none once paired with another server
 	}
 	if srv == nil {
 		return nil, errors.New("the Bridge isn't paired with a server")

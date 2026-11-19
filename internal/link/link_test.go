@@ -382,3 +382,35 @@ func TestLibraryBooksDecode(t *testing.T) {
 		t.Fatalf("next = %q, %v", page.Next, err)
 	}
 }
+
+// WithServerID is a copy that knows its server: the original is left as it was,
+// and the two share the claim negotiation (a withdrawal on one is the other's).
+func TestWithServerID(t *testing.T) {
+	c, err := New("http://127.0.0.1:1", "tok", "0.1.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.claimMinPriority.accepted = true
+	d := c.WithServerID("srv-1")
+	if d.ServerID() != "srv-1" || c.ServerID() != "" || d.BaseURL() != c.BaseURL() {
+		t.Fatalf("copy %q, original %q", d.ServerID(), c.ServerID())
+	}
+	d.WithdrawClaimMinPriority()
+	if c.SupportsClaimMinPriority() {
+		t.Fatal("the copy's withdrawal didn't reach the original's negotiation")
+	}
+}
+
+// WithPairing is a copy made for a pairing, which a later WithServerID keeps
+// (the app learns a stored pairing's server id on its link): the original is
+// left as it was.
+func TestWithPairing(t *testing.T) {
+	c, err := New("http://127.0.0.1:1", "tok", "0.1.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := c.WithPairing("p1").WithServerID("srv-1")
+	if d.PairingID() != "p1" || d.ServerID() != "srv-1" || c.PairingID() != "" {
+		t.Fatalf("copy %q %q, original %q", d.PairingID(), d.ServerID(), c.PairingID())
+	}
+}

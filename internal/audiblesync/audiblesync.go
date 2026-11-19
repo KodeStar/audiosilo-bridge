@@ -169,13 +169,17 @@ type Store interface {
 type Server interface {
 	PostAudibleListening(ctx context.Context, account string, in link.AudibleListening) (*link.SyncAnswer, error)
 	AudibleProgress(ctx context.Context, account, since string, limit int) (*link.AudibleProgress, error)
+	// ServerID is the id of the server the link reaches ("" when unknown): the
+	// push loop reads it off the link it pushes on, never apart from it.
+	ServerID() string
 }
 
 // Options wire the job and the push loop.
 type Options struct {
 	Accounts Accounts
 	DB       Store
-	// Server is the link (nil while unpaired); ServerID the pairing's server.
+	// Server is the link (nil while unpaired); ServerID the pairing's server,
+	// which a job no runner claimed keys by (the push loop takes the link's).
 	Server   func() Server
 	ServerID func() string
 	Log      *slog.Logger
@@ -427,8 +431,11 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (*R
 	// the account refused again. And, as the poll's read, past a sign-in or a
 	// mapping the server recorded (and queued this sync for) still storing
 	// itself here before failing unknown_account.
+	// The job's own server, never the pairing's now: the account must be
+	// mapped there, and nothing of it goes to another server.
+	serverID := job.KeyServer(h.o.ServerID())
 	acct, err := h.o.Accounts.SettledAccount(ctx, p.Account)
-	if audibleacct.NotHere(acct, err, h.o.ServerID()) {
+	if audibleacct.NotHere(acct, err, serverID) {
 		acct, err = h.o.Accounts.AwaitedAccount(ctx, p.Account)
 	}
 	if errors.Is(err, audibleacct.ErrNotFound) {
@@ -437,7 +444,7 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (*R
 	if err != nil {
 		return nil, err
 	}
-	if acct.OnOtherServer(h.o.ServerID()) {
+	if acct.OnOtherServer(serverID) {
 		return nil, fail(CodeUnknownAccount, "The Audible account is mapped on another server: map it again on the Bridge's Accounts tab.")
 	}
 	if audibleacct.Throttled(acct) {
@@ -446,7 +453,7 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (*R
 	if acct.RefusedAt != "" {
 		return nil, fail(CodeSignIn, "Audible refused the account's sign-in: its places sync again once Audible accepts it, or after signing in again on the Bridge (Accounts).")
 	}
-	srv := h.o.server()
+	srv := jobs.Link(job, h.o.server())
 	if srv == nil {
 		return nil, errors.New("the Bridge isn't paired with a server")
 	}

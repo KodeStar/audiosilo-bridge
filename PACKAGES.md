@@ -926,7 +926,17 @@ internal/
             couldn't be read, parks the book share_unconfirmed (its own code: the
             server doesn't word it as a missing GitHub sign-in, nor announce a
             blip; ShareUnconfirmedMsg or ShareUnreadMsg, retry_at
-            ShareUnconfirmedRetry) and nothing is filed. Config.ShareOff answers
+            ShareUnconfirmedRetry) and nothing is filed. So does a work lookup the
+            community database doesn't answer while a share is owed (issue mode;
+            BR-LINK-RULE, ShareLookupMsg): verifying the book's work past the meta
+            client's 15 s timeout or with the service down failed the book, and an
+            identifier lookup with no answer (CoverageFor's Available false while
+            MetaCoverage.Enabled) parked core_needed and wrote a proposal; no
+            answer is no miss. A permanent refusal (metaops.ErrRefused: a 400, 403
+            or 410, CoverageForWork's cause or Coverage.Refused) is an answer
+            asking again won't change: it fails the book rather than park it to
+            ask every minute for good, and writes no proposal either. Local mode
+            keeps its placeholder. Config.ShareOff answers
             why a book stays local ("" while it shares): contributions_off, or
             no_share_job for an issue-mode book no open generate-and-share job
             follows (fail closed: a fault left it running alone, so nothing can
@@ -1127,7 +1137,8 @@ internal/
             shareWork verifies the job's work id (a retired slug followed to its
             survivor and recorded on the book), else the book's match, else its exact
             identifiers; unmatched is ErrNotMatched (a share never proposes a new
-            work). shareSettled: only submitted, pr_open or merged rows count as
+            work), and a lookup with no answer is the stage's share_unconfirmed
+            park (ShareLookupMsg; one refused for good fails the share). shareSettled: only submitted, pr_open or merged rows count as
             filed (a local export, a covered verdict or a closed issue is filed
             again); a dimension already filed is kept and reported. Missing sidecars
             is ErrNoSidecars. Config.MonthlyBudget (a func) is read live, so a budget
@@ -1462,9 +1473,13 @@ internal/
             ErrWrongKey, which the start reports in words. No OS keychain: the
             Bridge runs headless in a container. Names are ^[a-z][a-z0-9_]{0,63}$ (a
             name is a file name); Get hands a secret to the code that uses it, and
-            nothing echoes one. Phase 2c-1: PodcastJobName(id, attempt) (each
-            claim its own: an earlier attempt's end never deletes a later one's)
-            and PodcastFeedName(show_id) name sealed podcast credentials; they
+            nothing echoes one. Phase 2c-1: PodcastJobName(server, id, attempt)
+            (each claim its own: an earlier attempt's end never deletes a later
+            one's, nor another server's job of the same id and attempt; the
+            server id hashed into the name) and PodcastFeedName(show_id) name
+            sealed podcast credentials (PodcastLegacyJobName(id, attempt), an
+            earlier Bridge's name, is read and deleted only by the job whose URL
+            it holds, by the sealed feed_url_sha256); they
             are omitted from the operator-managed Names() list. Phase 4a:
             AudibleName(id) (audible_<id>) seals an Audible account's sign-in,
             also never in Names().
@@ -1654,6 +1669,14 @@ internal/
             RearmAudiblePush; what a read from the start compares a row's updated_at
             with. Rows from before 0020 start with '' (row_seen is the Bridge's clock,
             so the baseline's line alone applies until the title is read again).
+            0021 (BR-LINK-RULE) adds server_jobs.pairing: the Bridge's pairing a
+            claim was recorded under (jobs.Pairing.ID, the app's pairing.id; never
+            in the JSON). LoseServerJob records a dropped job lost only while the
+            row is still that claim (id, attempt, server_id and pairing in the
+            write); AdoptServerJobs gives the rows from before it ('') a
+            pairing (app.openConn, at an upgrade): the paired server's rows the
+            one in place, every other row (another server's, none known, all
+            while unpaired) one no pairing has.
   state/    per-book pipeline state machine: table-driven states/lanes/transitions,
             CanStart/NextState guards, the audit fix-loop cap. Pure, no I/O. M6 added
             ParkCode (typed park reasons - M7 added contrib_unavailable, core_needed,
@@ -2001,7 +2024,11 @@ internal/
             with ErrDisabled / ErrNotFound / ErrUnavailable apart, and (bridge#69)
             ErrRefused for a permanent 4xx (any but 404, 408, 425, 429) from
             readJSON; getJSON's other callers still read a refusal as
-            unavailable (ok=false, never cached as a miss). glossary.go adds
+            unavailable (ok=false, never cached as a miss). The coverage paths
+            tell the two apart for a caller that waits on no answer (the
+            contributing stage's lookup park): CoverageForWork's error wraps its
+            cause (ErrUnavailable or ErrRefused), and CoverageFor sets
+            Coverage.Refused beside Available false. glossary.go adds
             SeriesGlossary (work -> its series -> the OTHER volumes' contributed
             character names/aliases, <= 12 siblings, own TTL caches), the canonical
             spelling evidence the spelling stage checks a transcript against; it
@@ -2065,7 +2092,9 @@ internal/
             share_off=1 (this Bridge honours a job's share_off, so the server hands it
             a generate-and-share job while its Contributions module is off; an older
             server ignores it; Job.ShareOff on the claim and update answers), job updates,
-            a book's files, targeted rescan). Phase 2c-1: Library.Kind (missing
+            a book's files, targeted rescan). Client.WithServerID: a copy that knows
+            the id of the server it reaches (ServerID; the app's Conn sets it from
+            the pairing), which the job runner's one rule reads. Phase 2c-1: Library.Kind (missing
             means books), Marker (no_marker -> ErrNoMarker), RescanPodcast
             (path and episode count). Every request sends X-AudioSilo-Client:
             "AudioSilo Bridge/<version> (<os>)", inside the server's auth.ParseClient
@@ -2294,9 +2323,23 @@ internal/
             The reserve never borrows background work; ordinary workers accept
             every priority. Each outstanding claim reserves admission in all
             requested lanes and transfers its selected slot atomically to its run.
-            Eligibility changes (kinds, pairing, capability or capacity) cancel
-            and join a long poll before reissue; unchanged wakes leave it alone.
-            A job racing cancellation runs under the original link and admission;
+            BR-CLAIM-HOLD: only a changed target (sameTarget: the link, the
+            reserve's negotiation, the capacities) or the runner's stop cancels
+            and joins a long poll before reissue; a lane slot freeing or filling
+            (the kinds with room) lets it finish, as a cancelled poll a reverse
+            proxy doesn't pass on as a hang-up still hands the job out, its answer
+            lost until the 2-minute lease lapsed (seen live as ~95 s stalls). A
+            claim that leaves the light lane out (full, or a job waiting there)
+            waits only leftOutWait (4 s), not the whole 25 s, so a slot freeing
+            there is asked for soon (an OPML import's follows); the download and
+            pipeline lanes' long jobs don't shorten it. maxShortPolls (3) short
+            waits in a row that claim nothing go back to the whole wait until
+            the request changes (a lane's room), bounding the claim rate. The
+            claim's reservation keeps a slot for what it brings; a pause between
+            claims (pauseClaims) still ends at any eligibility change. A job
+            racing cancellation is started under the original claim and takes its
+            reserved slot, or, with no room left (a capacity change), waits for
+            one with its lease renewed, never dropped nor run over capacity;
             one racing the runner's stop is still recorded, so the next start
             resumes it. An answer outside the requested admission is owned under
             its original claim and waits for its kind's ordinary lane, never the
@@ -2316,11 +2359,13 @@ internal/
             while the pairing negotiates it, and moves to its kind's lane if the
             negotiation is withdrawn while it waits (bridge#13).
             Both recovery and out-of-admission jobs renew leases while waiting
-            for room, but only on the link in use: unpaired or refused, a waiting
-            job stops renewing (Reporter.offLink), so the server can hand it out
-            again, and paired again it is stranded for resumeStranded, never run on
-            the old link (bridge#13). They queue behind jobs already waiting, and
-            take precedence over fresh claims in that lane. Live parks hold
+            for room, but only while the Bridge has a link to their server:
+            unpaired or refused, a waiting job stops renewing (Reporter.offLink),
+            so the server can hand it out again; paired again with its server it
+            renews and runs on the new link, and paired with another server it is
+            dropped (bridge#13, BR-LINK-RULE). They queue behind jobs already waiting, and
+            take precedence over claims asked after they began waiting (one
+            already in flight keeps its reserved slot, BR-CLAIM-HOLD). Live parks hold
             admission; terminal parks and releases wake the dispatcher.
             Phase 2c-2a adds the strict Reporter.ConfirmLease publication check
             (network errors deny commit). Phase 2c-1: optional ParamSealer.SealParams runs
@@ -2386,8 +2431,8 @@ internal/
             a new pairing). A stopping Bridge (base context ended) leaves the row
             RUNNING, so the next start resumes it under the same claim; a job a 401
             stopped is left running too and resumed under its claim as soon as a
-            link to its server (the same address) works again, a refusal ending or
-            a re-pair (resumeStranded; another server's link records it lost, its
+            link to its server works again, a refusal ending or a re-pair with it
+            (resumeStranded; paired with another server it is recorded lost, its
             ids being the old server's; one whose row can't be read then stays
             stranded for the next look, a heartbeat away, and is dropped only
             when its row is gone, ended or a later attempt's: dropped on a read
@@ -2417,14 +2462,15 @@ internal/
             contributing stage for a job through its run's Reporter (one waiting for
             its lane slot included; a stranded one says what it heard): ask reports
             now (Reporter.AskShareOff), else only what is known here, an error with
-            no request for a job not running here (ErrShareNotRunning), off the
-            Bridge's current link (ErrShareOffLink) or whose reports fail
+            no request for a job not running here (ErrShareNotRunning), with no
+            link to its server now (ErrShareOffLink) or whose reports fail
             (ErrShareNotReachable). Reporter.AskShareOff is the one ask a handler
-            files on (generate's shareConfirmed too): Refresh, with the job's link
-            checked against the current one (OnCurrentLink: the same link, or a
-            new pairing with the same address) before the report and again after
-            the answer, so an answer from the old link after a pairing with
-            another server confirms no share (ErrShareOffLink).
+            files on (generate's shareConfirmed too): Refresh, with the link looked
+            at (Reporter.link, the one rule) before the report and again after the
+            answer: no link then confirms nothing (ErrShareOffLink), and a pairing
+            with another server drops the job (ErrStopped), so a share parked
+            share_unconfirmed no longer parks again at every recheck on the old
+            link until someone cancels it there (BR-LINK-RULE).
             Recovery runs once the link is up: a kind no longer run is failed.
             Nothing is sent that the server refuses for good: a result that isn't a
             JSON object of at most 64 KiB fails the job (errUnreportable) and
@@ -2455,20 +2501,88 @@ internal/
             win over an Extra key of the same name); an object over the server's 16
             KiB is sent without Extra rather than refused for good. Reporter.Path()
             is the job's path as the server's last answer gave it ("" until one did):
-            the server moves an open job with its book. SERVER IDENTITY:
-            Options.ServerID (the pairing's server_id) is recorded on every claim, and
-            a recorded job of ANOTHER server (unknown on either side counts as the
-            same) is dropped at recovery (a running one lost, an unreported end never
-            sent) and never retried by retryReports. ABANDONER: a handler whose jobs
+            the server moves an open job with its book. SERVER IDENTITY, THE ONE
+            RULE (BR-LINK-RULE; it replaced three: AskShareOff by address,
+            awaitAdmission and offLink by the link object, recovery by id): a link
+            knows the id of the server it reaches (Server.ServerID, the pairing's
+            server_id, read with the link so the two never come from different
+            pairings; link.Client.WithServerID). Every claim records its link's id
+            (Job.serverID, server_jobs.server_id), and Runner.linkFor compares it
+            with the current link's (unknown, "", on either side is NEVER the
+            same: a row from before ids were recorded is dropped, and the app runs
+            no job on a link whose id it doesn't know, Bridge.server, until the
+            heartbeat learns it, Conn.learnServerID over GET /api/v1/server): the
+            same server, at a new address or with a new token, keeps its jobs,
+            which move onto the new link (Reporter.link; the server holds a claim
+            by job id and attempt, not by token), a job whose handler already ran
+            stopped to run again there under its claim (errRelinked, stranded and
+            resumed: its handler may hold the old, revoked link); another server's
+            job is dropped
+            (errOtherServer: Resumes false, Lost false, recorded lost, its end
+            reported nowhere, its handler Abandoned when it never ran, its own
+            server's lease lapsing it), at recovery, in resumeStranded, at every
+            wake (dropOtherServers) and at any report or ask of its own; with no
+            link at all nothing is decided (a running job goes on renewing on
+            the link it last used). A CLAIM a link answers once the Bridge has
+            left it (Runner.stale: paired with another server, or its pairing
+            ended on the page) is dropped whole in start: never recorded
+            (RecordClaim upserts by job id, which would overwrite the new
+            server's job of the same id), never run, not Abandoned, reported
+            nowhere. THE PAIRING is the store's, not this process's
+            (Options.Pairing, jobs.Pairing{ID, ServerID}: the app's pairing.id,
+            "" while unpaired, new after an unpair or a pairing with another
+            server, kept while the token is refused and by a pairing with the same
+            server then). Every claim records its link's PairingID
+            (server_jobs.pairing, 0021), and a row of another pairing is dropped,
+            never resumed or reported: the claim loop looks (sweepPairings) at its
+            start, before recover, and whenever the pairing changes, again every 5
+            s until the store reads; a running row no run holds (holdsLocked: a
+            run, a claim start is recording, a stranded or unpaired job) is
+            Abandoned and recorded lost (dropLost, dropCause: errOtherServer for
+            another server's, else errPairingEnded), a finished one's end marked
+            reported, never sent; each row is read again first, so one a new
+            pairing's claim took under the listed id (and ended) since the list
+            was read is left to that claim. A run whose pairing the app forgot reports
+            nothing more and is dropped however it ends (pairingGone in
+            Reporter.link and settle), and a claim answered on its link is stale.
+            So a restart after an unpair, a pairing with the same server
+            included, resumes nothing of the old pairing, and a new pairing's row
+            (one whose end couldn't be recorded) is never taken for an old one.
+            AN UNPAIR ON THE PAGE stops the jobs here
+            (Runner.Unpaired(link), called by Conn.Unpair through onUnpair once
+            the link, the token and the pairing's id are gone, a refused
+            pairing's too; it never waits, so the page's request is answered at
+            once): every run is cancelled
+            (errPairingEnded: Resumes false, Lost false) and recorded lost
+            however it ends (run.ended; one the Bridge's stop interrupted
+            too, its kept work Abandoned), Reporter.link answers nil so nothing
+            more goes to that server (no report, no end; its leases lapse the
+            jobs), stranded jobs are dropped by the claim loop (dropUnpaired),
+            the rows still running that no run holds are the claim loop's look
+            (sweepPairings: each Abandon bounded by abandonTimeout, 2 min, a slow
+            one logged), and nothing is launched on the ended link again; a new
+            pairing, with that server or another, resumes and reports none of
+            them.
+            retryReports sends only the current server's and pairing's
+            ends. HANDLERS key a job's durable state and filings by its own server,
+            never the pairing's now (Job.ServerID, Job.KeyServer: correct's result
+            and filing keys, podcastjob's show rows, artwork, locks and records
+            through service.forJob, librivox's state, audible's account checks),
+            and take the server's link only while it reaches that server under
+            the job's pairing (jobs.Link: generate, verify, podcastjob, librivox,
+            audible), so a job of a server the Bridge is no longer paired with,
+            or of a pairing ended since, writes nothing under, files nothing for
+            and sends nothing to the new one. ABANDONER: a handler whose jobs
             hold work beyond Run (generate's engine book) implements Abandon(ctx,
             job), which the runner calls when it ends a job WITHOUT running the
             handler (a resumed job's first report answered with a cancel or a lost
-            claim, another server's job dropped), so that work is released as the
+            claim, another server's job dropped, one an unpair stopped), so that work is released as the
             handler's own end would; dropLost records the job lost only once
             Abandon returned, so Abandon releases before it returns (generate does
             even with no engine yet, bridge#65). Resumes(ctx) tells a handler whether its ended
             context will run again under the claim (the Bridge stopping, a refused
-            token) or ended for good (errCancelRequested, errLost).
+            token) or ended for good (errCancelRequested, errLost, a drop:
+            errOtherServer, errPairingEnded).
   verify/   bridge.verify: params {hold_seconds 0-600}; resolves the library from the
             registry, asks the server for the book's files (path "" = the sample
             book; no answer, a refused token, a 408, a 429 or a 5xx asked again
@@ -3292,7 +3406,9 @@ internal/
             all). Cleanup (from the gate on): a stop (jobs.Resumes) or a lost claim
             (jobs.Lost: the server hands the job out again) keeps the partial and
             its state for the next run; a cancel or a failure deletes it; Abandon
-            deletes it for a job the runner ends unrun, unless its claim was lost;
+            deletes it for a job the runner ends unrun, unless its claim was lost
+            or another import of the account holds the gate (tryGate: never
+            waited for; the temp files are then that import's, and the sweep's);
             the decrypted copy always goes. After the install a placement marker
             (<tmp>/<acct>-<asin>.placed.json: library_id, the request's dest_path
             and template, path, size, mtime_ns, the joins' verdicts) is written:
@@ -3338,7 +3454,8 @@ internal/
             ends it quietly, user_unavailable fails coded; a rejected duration_mismatch (the book's length
             disagrees with the title's runtime) is counted (Mismatched), sent once a job, never retried
             in it. Pusher (not a job): every PushEvery (1 min)
-            per account mapped here, not refused, not waiting, not paused (in memory: sync_off 5 min,
+            per account mapped on the server of the link it pushes on (the id read off that link,
+            never apart from it), not refused, not waiting, not paused (in memory: sync_off 5 min,
             user_unavailable or unknown 15 min, the server's 429/503 its Retry-After, at least 2 min,
             a feed 404 for a missing route (not_found or no code: a server before 2.6.0) 1 h with a sync_error saying to
             update, bridge#50, but only the second in a row, 2 min apart: the first is asked again with nothing
@@ -3566,9 +3683,11 @@ internal/
             library, the paired server's id (bridge#69: a state of another
             server is dropped by loadState, so a run plans afresh and Abandon
             and the sweep never follow it into this server's same-numbered
-            library; none recorded counts as this server's, and one recorded
-            while the paired server's id isn't known now is left alone by
-            Abandon and the sweep, bridge#71, serverUnknown), parent and whether
+            library; none recorded counts as this server's for a run and the
+            sweep, and one recorded while the paired server's id isn't known now
+            is left alone by the sweep, bridge#71, serverUnknown), the id of the
+            job that last planned or resumed it (job_id: a resumed run of another
+            job takes the state over), parent and whether
             the fetch made it, destination (staging is
             <parent>/.audiosilo-librivox-<id>, never stored),
             the partials' validators, then placed + count + bytes): a resumed run
@@ -3580,8 +3699,11 @@ internal/
             gone and the folder or its fallback holding this project is placed
             (adopt), never fetched again. A stop or a lost claim keeps staging
             and state; a cancel, a
-            failure or Abandon (not on a lost claim; only the abandoned job's own
-            library's state) removes
+            failure or Abandon (not on a lost claim; only a state proven the
+            abandoned job's own: its server's id and job id recorded, in its own
+            library, and the pairing's server the job's, so the libraries listed
+            are its server's, while unpaired too; a state of another job, of none
+            recorded, or a job of another server is left to the sweep) removes
             the staging folder, the author folder it made when empty, and the
             state (removeStaging reports whether the folder went: one that
             can't be removed now, a cancel while the mount is away or a library
@@ -4064,9 +4186,12 @@ internal/
             module was turned off only in an answer to the job's next report, a
             keepalive away): an answer that stopped the job files nothing, a server
             that couldn't be asked parks the job share_unconfirmed (ShareUnconfirmedMsg)
-            and asks again every Recheck or on Retry. The ask
-            (jobs.Reporter.AskShareOff: an answer on a link the Bridge no longer
-            uses confirms nothing) comes BEFORE the engine's hold, not under it
+            and asks again every Recheck or on Retry, and so does a share step
+            whose work lookup the community database didn't answer (its
+            share_unconfirmed park, ShareLookupMsg, BR-LINK-RULE: it failed the
+            job). The ask (jobs.Reporter.AskShareOff: with no link to the job's
+            server it confirms nothing; paired with another server the job is
+            dropped) comes BEFORE the engine's hold, not under it
             (an answer can take the request's 30 s, and another job wanting the
             book gives up as busy after holdTries polls); a busy book is waited
             for, let go and asked about again, so it is held only right after an
@@ -4809,7 +4934,20 @@ internal/
             before the server's libraries are known. A 401 on the CURRENT link
             refuses it with a reason the page shows (Conn.Refuse(cl) and accept(cl)
             ignore any other link: one a re-pair or an unpair replaced, still in use
-            by a job or a call that started before). Refusal, unpairing and
+            by a job or a call that started before). The pairing's identity
+            (pairing.id, jobs.Options.Pairing = Conn.jobsPairing, carried by the
+            link: link.Client.WithPairing) is made by Pair (kept by a pairing with
+            the same server while the token is refused), deleted by Unpair, and
+            made at the first start of a paired Bridge that has none (an
+            upgrade: openConn gives the job rows from before 0021 of its server
+            to it, so a job running then resumes; another server's, or all while
+            unpaired, to an id no pairing has). Pair's save and Unpair are
+            serialized (Conn.pairMu), so an unpair is never undone by a refused
+            pairing's re-pair that read the id it keeps. An
+            unpair on the page forgets the token and the id, then stops the
+            pairing's jobs (Conn.onUnpair -> jobs.Runner.Unpaired, which doesn't
+            wait: the claim loop releases their work), a failed forget
+            included. Refusal, unpairing and
             replacing a pairing withdraw claim_min_priority from the old link;
             each new link negotiates on its own heartbeat. A 401 does NOT drop the token:
             Conn.Refuse keeps it and the heartbeat retries it every RefusedRetry (5

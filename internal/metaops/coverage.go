@@ -62,6 +62,11 @@ type Coverage struct {
 	// unreachable; the UI then shows "coverage unavailable" and the book stays
 	// selectable. Known/HasCharacters/HasRecaps are meaningful only when true.
 	Available bool `json:"available"`
+	// Refused is set, with Available false, when the service answered the
+	// identifier lookup with a permanent refusal (ErrRefused: a 400, 403 or
+	// 410, which asking again won't change) rather than not at all. Never
+	// stored or sent.
+	Refused bool `json:"-"`
 	// Known is true when the book resolved to a work in the DB. False means no
 	// identity, a lookup miss, or a fuzzy-match miss - the UI shows "unknown".
 	Known bool `json:"known"`
@@ -366,8 +371,9 @@ func (c *Client) Enabled() bool { return c.baseURL != "" }
 // CoverageFor resolves a book identity to a coverage verdict, trying in
 // descending confidence: ASIN lookup, then ISBN lookup, then a fuzzy title
 // search. It never returns an error for a network/upstream problem - those
-// degrade to Available=false so the caller (the scan) proceeds. An error is
-// returned only for a cancelled context.
+// degrade to Available=false so the caller (the scan) proceeds, with Refused
+// set when an identifier lookup was refused for good. An error is returned
+// only for a cancelled context.
 func (c *Client) CoverageFor(ctx context.Context, id BookIdentity) (Coverage, error) {
 	if !c.Enabled() {
 		return Coverage{Available: false}, nil
@@ -382,12 +388,12 @@ func (c *Client) CoverageFor(ctx context.Context, id BookIdentity) (Coverage, er
 		if idr.value == "" {
 			continue
 		}
-		workID, found, ok := c.lookup(ctx, idr.kind, idr.value)
+		workID, found, lerr := c.lookup(ctx, idr.kind, idr.value)
 		if err := ctx.Err(); err != nil {
 			return Coverage{}, err
 		}
-		if !ok {
-			return Coverage{Available: false}, nil
+		if lerr != nil {
+			return Coverage{Available: false, Refused: errors.Is(lerr, ErrRefused)}, nil
 		}
 		if found {
 			return c.workCoverage(ctx, workID, idr.kind, ""), nil
@@ -415,7 +421,10 @@ func (c *Client) CoverageFor(ctx context.Context, id BookIdentity) (Coverage, er
 // CoverageForWork resolves a work id directly (a human's manual match). Unlike
 // the coverage path it distinguishes a clean miss (ErrWorkNotFound) from a
 // transport failure, so the API can map a stale id to a 4xx and a down upstream
-// to a 502. The verdict carries MatchedBy "manual" and the work title.
+// to a 502. Any other failure wraps its cause: ErrUnavailable for no answer (a
+// transport failure, a timeout, a 5xx), ErrRefused for a permanent 4xx, so a
+// caller that waits for an answer never waits on a refusal. The verdict carries
+// MatchedBy "manual" and the work title.
 //
 // WorkID is the LIVE slug: a slug a data-quality merge has retired is answered
 // with a 301 to its survivor, and the verdict names the survivor so a caller
@@ -424,12 +433,12 @@ func (c *Client) CoverageForWork(ctx context.Context, workID string) (Coverage, 
 	if !c.Enabled() {
 		return Coverage{}, ErrDisabled
 	}
-	v, found, ok := c.workDetail(ctx, workID)
-	if !ok {
-		return Coverage{}, fmt.Errorf("work lookup failed for %q", workID)
-	}
-	if !found {
+	v, err := c.readWorkDetail(ctx, workID)
+	switch {
+	case errors.Is(err, ErrNotFound):
 		return Coverage{}, ErrWorkNotFound
+	case err != nil:
+		return Coverage{}, fmt.Errorf("work lookup failed for %q: %w", workID, err)
 	}
 	return Coverage{
 		Available: true, Known: true, WorkID: liveWorkID(workID, v.id),
@@ -567,13 +576,14 @@ func (c *Client) readJSON(ctx context.Context, path string, v any) error {
 	return nil
 }
 
-// lookup resolves an identifier to a work id, cached per identifier. ok=false
-// means the upstream was unreachable; found=false means a clean miss (no such
-// work). kind is "asin" or "isbn".
-func (c *Client) lookup(ctx context.Context, kind, value string) (workID string, found, ok bool) {
+// lookup resolves an identifier to a work id, cached per identifier. An error
+// means the upstream gave no usable answer (readJSON's ErrUnavailable, or
+// ErrRefused for a permanent 4xx; neither is cached); found=false with none
+// means a clean miss (no such work). kind is "asin" or "isbn".
+func (c *Client) lookup(ctx context.Context, kind, value string) (workID string, found bool, err error) {
 	key := kind + ":" + value
 	if v, hit := c.lookups.get(key); hit {
-		return v.workID, v.found, true
+		return v.workID, v.found, nil
 	}
 	q := url.Values{}
 	q.Set(kind, value)
@@ -582,17 +592,17 @@ func (c *Client) lookup(ctx context.Context, kind, value string) (workID string,
 			ID string `json:"id"`
 		} `json:"work"`
 	}
-	f, okc := c.getJSON(ctx, "/api/v1/lookup?"+q.Encode(), &res)
-	if !okc {
-		return "", false, false
+	err = c.readJSON(ctx, "/api/v1/lookup?"+q.Encode(), &res)
+	if err != nil && !errors.Is(err, ErrNotFound) {
+		return "", false, err
 	}
 	v := lookupVal{}
-	if f && res.Work != nil {
+	if err == nil && res.Work != nil {
 		v.workID = res.Work.ID
 		v.found = true
 	}
 	c.lookups.put(key, v)
-	return v.workID, v.found, true
+	return v.workID, v.found, nil
 }
 
 // workPayload is the works/{id} payload, the fields this package reads: its
@@ -638,17 +648,28 @@ func (c *Client) fetchWork(ctx context.Context, workID string) (res workPayload,
 // carries that sidecar. found=false is a clean 404; ok=false is a transport
 // failure (the two are distinguished so a manual match can 404 vs 502).
 func (c *Client) workDetail(ctx context.Context, workID string) (v workVal, found, ok bool) {
-	if cached, hit := c.works.get(workID); hit {
-		return cached, true, true
-	}
-	res, err := c.fetchWork(ctx, workID)
+	v, err := c.readWorkDetail(ctx, workID)
 	switch {
 	case errors.Is(err, ErrNotFound):
 		return workVal{}, false, true
 	case err != nil:
 		return workVal{}, false, false // a refusal too, as getJSON's
 	}
-	v = workVal{id: res.ID, title: res.Title, hasChars: len(res.Characters) > 0, hasRecap: len(res.Recaps) > 0}
+	return v, true, true
+}
+
+// readWorkDetail is workDetail's outcome as an error (readJSON's: ErrNotFound,
+// ErrRefused, ErrUnavailable), for a caller that tells no answer from a
+// refusal (CoverageForWork).
+func (c *Client) readWorkDetail(ctx context.Context, workID string) (workVal, error) {
+	if cached, hit := c.works.get(workID); hit {
+		return cached, nil
+	}
+	res, err := c.fetchWork(ctx, workID)
+	if err != nil {
+		return workVal{}, err
+	}
+	v := workVal{id: res.ID, title: res.Title, hasChars: len(res.Characters) > 0, hasRecap: len(res.Recaps) > 0}
 	v.series = readingSeries(res.Series)
 	for _, ch := range res.Characters {
 		v.charNames = append(v.charNames, ch.Name)
@@ -662,7 +683,7 @@ func (c *Client) workDetail(ctx context.Context, workID string) (v workVal, foun
 		v.recordings = append(v.recordings, r)
 	}
 	c.works.put(workID, v)
-	return v, true, true
+	return v, nil
 }
 
 // searchMatch runs (and caches) the fuzzy-match fallback: it walks the retrieval

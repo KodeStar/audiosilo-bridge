@@ -34,7 +34,7 @@ type retainResult struct {
 }
 
 func (h *Retain) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (any, error) {
-	return outcome(h.run(ctx, job, rep))
+	return outcome((&Retain{s: h.s.forJob(job)}).run(ctx, job, rep))
 }
 func (h *Retain) run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (any, error) {
 	s := h.s

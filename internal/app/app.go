@@ -253,13 +253,16 @@ func New(ctx context.Context, opts Options) (*Bridge, string, error) {
 	b.audible, audiblePoll, audibleImport = b.newAudible(vault, db, opts.Logger, b.conn.Client, serverID)
 	var audibleSync *audiblesync.Handler
 	audibleSync, b.audiblePush = b.newAudibleSync(db, opts.Logger, serverID)
-	b.runner = jobs.New(db, b.server, b.tokenRefused, jobs.Options{Log: opts.Logger, ServerID: serverID},
+	b.runner = jobs.New(db, b.server, b.tokenRefused, jobs.Options{Log: opts.Logger, Pairing: conn.jobsPairing},
 		verifier, b.gen, b.gen.DescribeJob(), b.gen.ChaptersJob(), b.gen.ReadalongJob(), b.gen.ContributeJob(), corrector, b.podcasts, b.podcasts.PollJob(), b.podcasts.FetchJob(), b.podcasts.RetainJob(),
 		audiblePoll, audibleImport, audibleSync, b.newLibrivox(meta, opts.Logger, serverID))
 	// The contributing stage asks a share job's run about its share through the
 	// runner, which finds a job still waiting for its lane slot too.
 	b.gen.AskThrough(b.runner)
 	conn.onChange = b.linkChanged
+	// An unpair on the page stops the pairing's jobs: cancelled here, with
+	// nothing more sent to that server (its leases lapse them).
+	conn.onUnpair = func(cl *link.Client) { b.runner.Unpaired(cl) }
 	return b, oneTime, nil
 }
 
@@ -279,7 +282,9 @@ func (b *Bridge) server() jobs.Server {
 	if !ready {
 		return nil
 	}
-	if cl := b.conn.Client(); cl != nil {
+	// A link whose server's id isn't known yet runs nothing: a job's server is
+	// told by its id (jobs.Runner.linkFor). beat learns it first.
+	if cl := b.conn.Client(); cl != nil && cl.ServerID() != "" {
 		return cl
 	}
 	return nil
@@ -450,6 +455,11 @@ func (b *Bridge) beat(ctx context.Context) {
 	if cl == nil {
 		b.retryRefused(ctx)
 		return
+	}
+	if cl.ServerID() == "" {
+		// A pairing stored without its server's id (or a pairing answer that
+		// named none): the id is asked for before the link counts (server).
+		cl = b.conn.learnServerID(ctx, cl)
 	}
 	// A hand-off's fallback from the Bridge's group ends without a restart once
 	// the agent container takes the group's file again (bridge#79).
