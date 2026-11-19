@@ -3,6 +3,7 @@ package scheduler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -12,7 +13,7 @@ import (
 	"github.com/kodestar/audiosilo-bridge/internal/store"
 )
 
-// frame is a book.state frame's fields a page reads.
+// frame is the fields of a book.state event.
 type frame struct {
 	State    string `json:"state"`
 	Status   string `json:"status"`
@@ -52,8 +53,8 @@ func storedFrame(t *testing.T, db *store.DB, id int64) frame {
 
 // A Pause landing as a stage finishes (after its sentinel, before the advance)
 // is the book's last frame: the advance publishes the book as stored, never the
-// StatusNone it was dispatched under, so the page doesn't show a paused book
-// running.
+// StatusNone it was dispatched under, so the last event never shows a paused
+// book running.
 func TestAdvanceNeverPublishesOverAPauseThatLandedFirst(t *testing.T) {
 	h := newHarness(t)
 	db := h.openDB(t)
@@ -214,8 +215,8 @@ func TestPublishStoredSkipsADeletedBook(t *testing.T) {
 }
 
 // A change written outside the scheduler (generate's continue clearing a run's
-// cancel) is published as stored through PublishStored: the page leaves the
-// cancelled frame.
+// cancel) is published as stored through PublishStored: the book's last event
+// is no longer the cancel.
 func TestPublishStoredAfterAContinueClearsTheCancel(t *testing.T) {
 	h := newHarness(t)
 	db := h.openDB(t)
@@ -262,5 +263,46 @@ func TestSupervisorRequeuePublishesTheClearedStatus(t *testing.T) {
 	f, ok := lastFrame(t, h.hub, b.ID)
 	if !ok || f.Status != "" || f.State != string(state.ASR) {
 		t.Fatalf("last frame %+v (%v), want asr running", f, ok)
+	}
+}
+
+// Two Pauses racing on one book: the one whose write loses (it read the book
+// running, the other paused it first) is a no-op, as Pause promises for a book
+// already paused, not store.ErrStatusChanged. A Cancel landing after the read
+// instead is kept and reported.
+func TestPauseLosingToAPauseIsANoOpAndToACancelAnError(t *testing.T) {
+	h := newHarness(t)
+	db := h.openDB(t)
+	ctx := context.Background()
+	s := New(db, h.hub, NewStubExecutor(0, 0), 1, h.workRoot, false)
+
+	b := h.addBook(t, db, "paused twice", "", "")
+	read, err := db.GetBook(ctx, b.ID) // the losing Pause's read: running
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Pause(ctx, b.ID); err != nil { // the winning Pause
+		t.Fatal(err)
+	}
+	if err := s.pauseAsRead(ctx, read); err != nil {
+		t.Fatalf("a Pause losing to a Pause = %v, want nil (the book is paused)", err)
+	}
+	if got := storedFrame(t, db, b.ID); got.Status != string(state.StatusPaused) {
+		t.Fatalf("status %q, want paused", got.Status)
+	}
+
+	c := h.addBook(t, db, "cancelled", "", "")
+	read, err = db.GetBook(ctx, c.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Cancel(ctx, c.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.pauseAsRead(ctx, read); !errors.Is(err, store.ErrStatusChanged) {
+		t.Fatalf("a Pause losing to a Cancel = %v, want ErrStatusChanged", err)
+	}
+	if got, _ := db.GetBook(ctx, c.ID); !IsCancelled(got) {
+		t.Fatalf("the Pause wrote over the cancel: %+v", got)
 	}
 }

@@ -60,21 +60,35 @@ func (s *Scheduler) awaitWorker(ctx context.Context, id int64) {
 
 // Pause parks a running or queued book: it stops being dispatched. A stage
 // already executing is allowed to finish (its result is kept), after which the
-// book waits in its next state. Pausing an already-paused book is a no-op. The
-// pause is written only while the book still has the status read
-// (store.ErrStatusChanged otherwise), so a Cancel landing in between stays.
+// book waits in its next state. Pausing a book that is already paused is a
+// no-op (nil), a Pause racing it included. The pause is written only while the
+// book still has the status read, so a Cancel landing in between stays:
+// store.ErrStatusChanged when the status moved to anything but paused.
 func (s *Scheduler) Pause(ctx context.Context, id int64) error {
 	b, err := s.db.GetBook(ctx, id)
 	if err != nil {
 		return err
 	}
+	return s.pauseAsRead(ctx, b)
+}
+
+// pauseAsRead is Pause for book b as the caller read it.
+func (s *Scheduler) pauseAsRead(ctx context.Context, b store.Book) error {
+	id := b.ID
 	switch state.Status(b.Status) {
 	case state.StatusPaused:
 		return nil
 	case state.StatusNone:
 		// Preserve error/park_code (a pause is not a status clear); a pausable book
 		// has no park code anyway, but mirror b.Error's preservation.
-		if err := s.db.SetBookStatusIf(ctx, id, b.Status, b.Error, string(state.StatusPaused), b.Error, b.ParkCode, ""); err != nil {
+		err := s.db.SetBookStatusIf(ctx, id, b.Status, b.Error, string(state.StatusPaused), b.Error, b.ParkCode, "")
+		if errors.Is(err, store.ErrStatusChanged) {
+			// Another Pause won the write (and published it): the book is paused.
+			if now, rerr := s.db.GetBook(ctx, id); rerr == nil && state.Status(now.Status) == state.StatusPaused {
+				return nil
+			}
+		}
+		if err != nil {
 			return err
 		}
 		s.publishStored(ctx, id)
