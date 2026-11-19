@@ -241,7 +241,12 @@ func (h *Fetch) run(parent context.Context, claimed *jobs.Job, rep *jobs.Reporte
 	ctx, b := s.budget(parent)
 	defer b.close()
 	defer func() { err = b.failure(ctx, err) }()
-	s.dropStaleCheckpoint(job, root, f.ShowID, e.ID)
+	// Another episode's partial at the path that cannot be removed fails the
+	// attempt as the fetch's own would (errPartialStuck): never a download
+	// beside it, unrecorded.
+	if err := s.dropStaleCheckpoint(job, root, f.ShowID, e.ID); err != nil {
+		return nil, err
+	}
 	// Again now that a stale record at the new path (another episode's) is
 	// gone: the fetch's own, left at the old path for it, moves in and the
 	// download resumes from its partial.

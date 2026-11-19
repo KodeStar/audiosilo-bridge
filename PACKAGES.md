@@ -2836,7 +2836,8 @@ internal/
             size, shorter than its prefix: partialLost, errPartialChanged)
             restarts the episode from zero once per job first, checked before
             the ranged GET so no request is spent on it; one the restart (or
-            the start's clear of a partial of another size or source, a host
+            the start's clear of a partial of another size or source, or of
+            another episode's left at the path (dropStaleCheckpoint), a host
             retry from zero, a resume the host did not prove or answered from byte 0, or the restart
             of a partial changed on disk while it downloaded) cannot remove fails
             the attempt write_failed (errPartialStuck), never a download

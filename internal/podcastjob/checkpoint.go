@@ -362,11 +362,15 @@ func (s *service) recordsOf(job jobs.Job, p fetchParams) []string {
 // dropStaleCheckpoint removes this path's owned partial when it was made for
 // an episode the show's feed no longer has there (an episode replaced at the
 // same path): its record is about to be overwritten, which would orphan it.
-// The caller holds the path's file lock and passes the feed's current IDs.
-func (s *service) dropStaleCheckpoint(job jobs.Job, root *os.Root, showID, episodeID string) {
+// One the clear cannot remove is the job's failure (restartPartial,
+// errPartialStuck), its record kept: the episode there now is never
+// downloaded beside it, unrecorded. The caller holds the path's file lock and
+// passes the feed's current IDs.
+func (s *service) dropStaleCheckpoint(job jobs.Job, root *os.Root, showID, episodeID string) error {
 	if saved, ok := s.readCheckpoint(job, showID); ok && saved.EpisodeID != episodeID {
-		s.clearCheckpoint(job, root, &saved)
+		return s.restartPartial(job, root, &saved, errors.New("the partial at the path is another episode's"))
 	}
+	return nil
 }
 
 // loadCheckpoint is the job's saved record of its episode, with the sealed

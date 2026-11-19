@@ -1744,6 +1744,44 @@ func TestARetryFromZeroThatCannotClearItsPartialFails(t *testing.T) {
 	}
 }
 
+// Another episode's partial left at the path (the feed replaced the episode
+// there) that the start cannot remove (a show folder the Bridge may not
+// write) fails the attempt write_failed with no GET, its record kept for a
+// later clear, never a download started beside it unrecorded.
+func TestFetchStartFailsOnAnotherEpisodesPartialItCannotRemove(t *testing.T) {
+	requireNonRoot(t)
+	h, job := audioHarness(t)
+	s := h.handler.s
+	root, _ := os.OpenRoot(h.mount)
+	defer root.Close()
+	var calls atomic.Int32
+	setAudio(h, func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(500)
+	})
+	c := checkpoint{ServerHash: s.pairHash(), LibraryID: 3, ShowID: fixtureShowID, EpisodeID: strings.Repeat("2", 16), Path: *job.Path, Temp: ".audiosilo-tmp-stale", Offset: 6, Total: 100}
+	if err := root.WriteFile("Fixture Show/"+c.Temp, []byte("prefix"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.saveCheckpoint(job, root, &c, `"one"`); err != nil {
+		t.Fatal(err)
+	}
+	// Barred once the fetch's own write check has passed: its budget starts
+	// just before it looks for a stale record.
+	show, bar := barShow(t, h)
+	s.o.BudgetNow = func() time.Time { bar(); return time.Now() }
+	_, err := h.handler.FetchJob().Run(context.Background(), job, jobs.LocalReporter())
+	if code(t, err) != "write_failed" || !strings.Contains(err.Error(), "could not be removed") || calls.Load() != 0 {
+		t.Fatalf("another episode's partial the start cannot remove: %v after %d calls, want write_failed after none", err, calls.Load())
+	}
+	if saved, ok := s.readCheckpoint(job, fixtureShowID); !ok || saved.Temp != c.Temp {
+		t.Fatalf("the record of the partial still on disk was dropped: %+v", saved)
+	}
+	if left := partials(show); len(left) != 1 {
+		t.Fatal("a download was started beside the partial:", left)
+	}
+}
+
 // barShowAtLoad makes the fixture show's folder one the Bridge may not write
 // once a fetch's own write check has passed (at its record's load), and
 // answers the folder's path.
