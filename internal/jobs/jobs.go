@@ -401,6 +401,15 @@ type Runner struct {
 	// written until launch holds them in running: the look for another
 	// pairing's rows (sweepPairings) never takes such a row.
 	starting map[int64]int
+	// dropping are the dropped jobs whose work is being released, until each
+	// is recorded lost (releaseDropped), and the jobs dropUnpaired is looking
+	// at: no look drops one twice.
+	dropping map[int64]int
+	// dropDeadline bounds one batch of dropped jobs' releases, and a run's own
+	// (abandonTimeout; tests shorten it).
+	dropDeadline time.Duration
+	// drops are the batches releaseDropped runs; Run waits for them.
+	drops sync.WaitGroup
 	// changed is closed and replaced when admission or pairing may have
 	// changed. Dispatchers compare a claim's target before refreshing it
 	// (sameTarget), and eligibility before ending a pause (sameRequest).
@@ -448,7 +457,8 @@ func New(st Store, server func() Server, onUnauthorized func(Server), opts Optio
 	}
 	r := &Runner{opts: opts, store: st, handlers: map[string]Handler{}, server: server, onUnauthorized: onUnauthorized,
 		log: opts.Log, running: map[int64]*run{}, use: map[string]int{}, reserved: map[string]int{}, waiting: map[string]int{},
-		ended: map[Server]struct{}{}, starting: map[int64]int{}, changed: make(chan struct{})}
+		ended: map[Server]struct{}{}, starting: map[int64]int{}, dropping: map[int64]int{}, dropDeadline: abandonTimeout,
+		changed: make(chan struct{})}
 	for _, h := range handlers {
 		r.handlers[h.Kind()] = h
 	}
@@ -514,6 +524,8 @@ func (r *Runner) wakeLocked() {
 // started has stopped.
 func (r *Runner) Run(ctx context.Context) {
 	var wg sync.WaitGroup
+	// Then the dropped jobs' releases, the runs' ends' included (release).
+	defer r.drops.Wait()
 	defer wg.Wait()
 	ctx, stop := context.WithCancelCause(ctx)
 	defer stop(errStopping)
@@ -590,12 +602,20 @@ func (r *Runner) recover(ctx context.Context, srv Server, id string, wg *sync.Wa
 		sleep(ctx, 5*time.Second)
 		return false
 	}
+	var drops []drop
+	defer func() { r.releaseDropped(ctx, drops) }()
 	for _, sj := range open {
 		if !sameServer(sj.ServerID, id) || sj.Pairing != srv.PairingID() {
 			// Another server's job (the Bridge was paired with this one since):
 			// its id means nothing here, so nothing is reported for it. Or an
-			// earlier pairing's, one the sweep couldn't record: the same.
-			r.dropRecorded(ctx, sj)
+			// earlier pairing's, one the sweep couldn't record: the same. One
+			// the sweep is releasing already is left to it.
+			if r.holds(sj.ID) {
+				continue
+			}
+			if d, ok := r.dropRecorded(ctx, sj); ok {
+				drops = append(drops, d)
+			}
 			continue
 		}
 		if sj.State != store.JobRunning {
@@ -619,16 +639,18 @@ func (r *Runner) recover(ctx context.Context, srv Server, id string, wg *sync.Wa
 }
 
 // dropRecorded ends what a start found open for another server or an earlier
-// pairing (dropCause): a running job is lost (dropLost), an unreported end is
-// never sent.
-func (r *Runner) dropRecorded(ctx context.Context, sj store.ServerJob) {
+// pairing (dropCause): an unreported end is never sent, and a running job is
+// returned (ok), for the caller to release and record lost (releaseDropped).
+func (r *Runner) dropRecorded(ctx context.Context, sj store.ServerJob) (d drop, ok bool) {
 	why := r.dropCause(sj.ServerID)
 	r.log.Info("bridge: a job of another pairing is dropped", "job", sj.ID, "server", sj.ServerID, "why", why)
 	if sj.State == store.JobRunning {
-		r.dropLost(ctx, storedJob(sj), why)
-	} else if err := r.store.MarkServerJobReported(ctx, sj.ID, sj.Attempt); err != nil {
+		return drop{job: storedJob(sj), why: why}, true
+	}
+	if err := r.store.MarkServerJobReported(ctx, sj.ID, sj.Attempt); err != nil {
 		r.log.Warn("bridge: recording a job failed", "job", sj.ID, "err", err)
 	}
+	return drop{}, false
 }
 
 // dropCause is why a job of server serverID that isn't the current pairing's
@@ -645,33 +667,106 @@ func (r *Runner) dropCause(serverID string) error {
 	return errPairingEnded
 }
 
-// abandonTimeout bounds a dropped job's Abandon (abandonDropped): a handler's
-// release may wait on a lock its own run holds (podcast.fetch's file lock), and
-// the claim loop, or the run's goroutine the Bridge's stop waits for, must go
-// on.
+// abandonTimeout bounds the release of dropped jobs' work: a run's own
+// (abandonDropped), and one batch of jobs no run holds (releaseDropped), all
+// of them together. A handler's release may wait on a lock its own run holds
+// (podcast.fetch's file lock), and the run's goroutine the Bridge's stop waits
+// for must go on.
 const abandonTimeout = 2 * time.Minute
 
+// dropConcurrency is how many of a batch's dropped jobs release their work at
+// once (releaseDropped).
+const dropConcurrency = 4
+
+// drop is a running job no run here holds, dropped for why (a server the
+// Bridge is no longer paired with, or a pairing ended on its page).
+type drop struct {
+	job Job
+	why error
+}
+
 // abandonDropped releases the work of a job dropped for why (abandonFor), for
-// at most abandonTimeout, and logs a slow release.
+// at most the drop deadline (abandonTimeout).
 func (r *Runner) abandonDropped(ctx context.Context, job Job, why error) {
-	actx, cancel := context.WithTimeout(ctx, abandonTimeout)
+	actx, cancel := context.WithTimeout(ctx, r.dropDeadline)
 	defer cancel()
+	r.abandonWithin(actx, job, why)
+}
+
+// abandonWithin releases the work of a job dropped for why under actx, a
+// deadline's context, and logs a slow release and one that gave up at the
+// deadline (one never started once it passed). A job whose handler holds no
+// work (not an Abandoner) has nothing to release.
+func (r *Runner) abandonWithin(actx context.Context, job Job, why error) {
+	if _, ok := r.handlers[job.Kind].(Abandoner); !ok {
+		return
+	}
 	start := time.Now()
-	r.abandonFor(actx, job, why)
-	if d := time.Since(start); d > abandonTimeout/4 {
-		r.log.Warn("bridge: releasing a dropped job's work was slow", "job", job.ID, "kind", job.Kind, "took", d.Round(time.Second))
+	if actx.Err() == nil {
+		r.abandonFor(actx, job, why)
+	}
+	switch took := time.Since(start); {
+	case errors.Is(actx.Err(), context.DeadlineExceeded):
+		r.log.Warn("bridge: releasing a dropped job's work gave up at its deadline", "job", job.ID, "kind", job.Kind,
+			"took", took.Round(time.Second))
+	case took > r.dropDeadline/4:
+		r.log.Warn("bridge: releasing a dropped job's work was slow", "job", job.ID, "kind", job.Kind, "took", took.Round(time.Second))
 	}
 }
 
-// dropLost ends a running job no run here holds, dropped for why (a server the
-// Bridge is no longer paired with, or a pairing ended on its page): its work is
-// released (Abandon, for at most abandonTimeout) before it is recorded lost,
-// so a job waiting for it to end (generate's awaitOpenJobEnd reads the row's
-// running state) starts only once the engine book is stopped, as the runner's
-// own ends order it (bridge#37).
-func (r *Runner) dropLost(ctx context.Context, job Job, why error) {
-	r.abandonDropped(ctx, job, why)
-	r.recordLost(ctx, job, nil, why)
+// releaseDropped releases the work of drops (Abandon) and then records each
+// lost, so a job waiting for one to end (generate's awaitOpenJobEnd reads the
+// row's running state) starts only once its engine book is stopped, as the
+// runner's own ends order it (bridge#37). It runs off the caller's goroutine
+// (a start's look, the claim loop, a run's end), dropConcurrency at a time,
+// all under one deadline (the drop deadline from the call), so N slow releases
+// hold up neither the start nor the claiming, nor take N deadlines. One that
+// gives up at the deadline is recorded lost all the same (abandonWithin logs
+// it); one the Bridge's stop cuts short is left running for the next start's
+// look (sweepPairings). Each job is held (holdsLocked) until it is recorded,
+// so no look drops it twice. Run waits for the batch.
+func (r *Runner) releaseDropped(ctx context.Context, drops []drop) {
+	if len(drops) == 0 {
+		return
+	}
+	r.mu.Lock()
+	for _, d := range drops {
+		r.dropping[d.job.ID]++
+	}
+	r.mu.Unlock()
+	queue := make(chan drop, len(drops))
+	for _, d := range drops {
+		queue <- d
+	}
+	close(queue)
+	r.drops.Add(1)
+	go func() {
+		defer r.drops.Done()
+		actx, cancel := context.WithTimeout(ctx, r.dropDeadline)
+		defer cancel()
+		var workers sync.WaitGroup
+		for range min(dropConcurrency, len(drops)) {
+			workers.Go(func() {
+				for d := range queue {
+					r.abandonWithin(actx, d.job, d.why)
+					if ctx.Err() == nil {
+						r.recordLost(ctx, d.job, nil, d.why)
+					}
+					r.mu.Lock()
+					r.unholdDroppingLocked(d.job.ID)
+					r.mu.Unlock()
+				}
+			})
+		}
+		workers.Wait()
+	}()
+}
+
+// unholdDroppingLocked ends one hold of job id as dropping.
+func (r *Runner) unholdDroppingLocked(id int64) {
+	if r.dropping[id]--; r.dropping[id] <= 0 {
+		delete(r.dropping, id)
+	}
 }
 
 // recordLost records a job lost for why (its claim taken back, or the job
@@ -712,6 +807,8 @@ func (r *Runner) resumeStranded(ctx context.Context, srv Server, id string, wg *
 	stranded := r.stranded
 	r.stranded = nil
 	r.mu.Unlock()
+	var drops []drop
+	defer func() { r.releaseDropped(ctx, drops) }()
 	for _, job := range stranded {
 		r.mu.Lock()
 		_, running := r.running[job.ID]
@@ -737,7 +834,7 @@ func (r *Runner) resumeStranded(ctx context.Context, srv Server, id string, wg *
 			// Paired with another server since (its job ids are another
 			// server's), or the pairing was ended and made again: the claim
 			// can't be reported anywhere now.
-			r.dropLost(ctx, job, r.dropCause(job.serverID))
+			drops = append(drops, drop{job: job, why: r.dropCause(job.serverID)})
 			continue
 		}
 		r.log.Info("bridge: resuming a job its refused token stopped", "job", job.ID, "kind", job.Kind, "attempt", job.Attempt)
@@ -760,7 +857,7 @@ func (r *Runner) resumeStranded(ctx context.Context, srv Server, id string, wg *
 // on: the rows the store still has of it, that no run here holds, are another
 // pairing's, which the claim loop drops, sweepPairings), then calls this. It
 // doesn't wait: the runs end, and their work is released, on their own
-// goroutines and the claim loop's, never on the caller's (the unpair page's
+// goroutines and releaseDropped's, never on the caller's (the unpair page's
 // request).
 func (r *Runner) Unpaired(srv Server) {
 	r.mu.Lock()
@@ -780,11 +877,19 @@ func (r *Runner) Unpaired(srv Server) {
 // holdsLocked reports whether job id is one the runner ends through a path of
 // its own: a run (settle, or release for one a stop left running), a job a
 // refused token stopped (dropUnpaired, or resumeStranded for a later
-// pairing's) or a claim start is recording (launch).
+// pairing's), a claim start is recording (launch) or a dropped job whose work
+// is being released (releaseDropped).
 func (r *Runner) holdsLocked(id int64) bool {
 	_, running := r.running[id]
 	has := func(job Job) bool { return job.ID == id }
-	return running || r.starting[id] > 0 || slices.ContainsFunc(r.stranded, has) || slices.ContainsFunc(r.unpaired, has)
+	return running || r.starting[id] > 0 || r.dropping[id] > 0 || slices.ContainsFunc(r.stranded, has) || slices.ContainsFunc(r.unpaired, has)
+}
+
+// holds is holdsLocked under r.mu.
+func (r *Runner) holds(id int64) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.holdsLocked(id)
 }
 
 // sweepPairings drops the open rows of a pairing other than the current one
@@ -792,7 +897,8 @@ func (r *Runner) holdsLocked(id int64) bool {
 // restart since included: the pairing is the store's, never only this
 // process's) or of a server the Bridge is no longer paired with. A running
 // one no run here holds (holdsLocked: a run, a claim being recorded, a job a
-// refused token stopped) is released and recorded lost (dropLost), so a later
+// refused token stopped, one being released) is released and recorded lost
+// (releaseDropped, off the claim loop), so a later
 // pairing, with its server or another, never resumes it; a finished one's end
 // is never reported. A held one is ended by its own path (settle,
 // dropUnpaired, resumeStranded). Each row is read again before it is dropped:
@@ -810,6 +916,8 @@ func (r *Runner) sweepPairings(ctx context.Context) bool {
 		return false
 	}
 	read := true
+	var drops []drop
+	defer func() { r.releaseDropped(ctx, drops) }()
 	for _, sj := range open {
 		if ctx.Err() != nil {
 			return false
@@ -832,22 +940,41 @@ func (r *Runner) sweepPairings(ctx context.Context) bool {
 		case now.Pairing != sj.Pairing || now.ServerID != sj.ServerID || now.Attempt != sj.Attempt:
 			// Another claim's row now (the current pairing's).
 		case now.State == store.JobRunning || !now.Reported:
-			r.dropRecorded(ctx, *now)
+			if d, ok := r.dropRecorded(ctx, *now); ok {
+				drops = append(drops, d)
+			}
 		}
 	}
 	return read && ctx.Err() == nil
 }
 
 // dropUnpaired drops the jobs a refused token had stopped when their pairing
-// was ended on the Bridge's page (Unpaired): released and recorded lost,
-// reported nowhere. As in resumeStranded, one a later claim runs or holds the
-// row of (or that ended) is left to it, and one whose row can't be read now
-// waits for the next look.
+// was ended on the Bridge's page (Unpaired): released and recorded lost
+// (releaseDropped), reported nowhere. As in resumeStranded, one a later claim
+// runs or holds the row of (or that ended) is left to it, and one whose row
+// can't be read now waits for the next look. ctx is the runner's: once the
+// Bridge stops they wait for the next start's look (sweepPairings), their
+// pairing gone from the store.
 func (r *Runner) dropUnpaired(ctx context.Context) {
+	if ctx.Err() != nil {
+		return
+	}
 	r.mu.Lock()
 	unpaired := r.unpaired
 	r.unpaired = nil
+	for _, job := range unpaired {
+		r.dropping[job.ID]++ // held while their rows are read: no look drops one beside this
+	}
 	r.mu.Unlock()
+	var drops []drop
+	defer func() {
+		r.releaseDropped(ctx, drops) // holds them again before these holds end
+		r.mu.Lock()
+		for _, job := range unpaired {
+			r.unholdDroppingLocked(job.ID)
+		}
+		r.mu.Unlock()
+	}()
 	for _, job := range unpaired {
 		r.mu.Lock()
 		_, running := r.running[job.ID]
@@ -864,7 +991,7 @@ func (r *Runner) dropUnpaired(ctx context.Context) {
 			r.unpaired = append(r.unpaired, job)
 			r.mu.Unlock()
 		case sj.State == store.JobRunning && sj.Attempt == job.Attempt && sj.ServerID == job.serverID && sj.Pairing == job.pairing:
-			r.dropLost(ctx, job, errPairingEnded)
+			drops = append(drops, drop{job: job, why: errPairingEnded})
 		}
 	}
 }
@@ -1127,14 +1254,14 @@ func (r *Runner) launch(ctx context.Context, srv Server, job Job, wg *sync.WaitG
 	go func() {
 		defer wg.Done()
 		stranded := false
-		defer func() { r.release(ru, stranded) }()
+		defer func() { r.release(ctx, ru, stranded) }()
 		stranded = r.execute(rctx, ctx, srv, h, ru)
 	}()
 }
 
 // release frees a job's lane slot, keeps a job a refused token stopped for
-// resumeStranded, and wakes the claim loop.
-func (r *Runner) release(ru *run, stranded bool) {
+// resumeStranded, and wakes the claim loop. ctx is the runner's.
+func (r *Runner) release(ctx context.Context, ru *run, stranded bool) {
 	ru.cancel(nil)
 	heard := ru.rep != nil && ru.rep.ShareOff() // set on this goroutine (execute)
 	r.mu.Lock()
@@ -1144,7 +1271,9 @@ func (r *Runner) release(ru *run, stranded bool) {
 		// Left running by a stop or a refused token as the pairing was ended
 		// on the page (after settle looked, while it was held): dropped now,
 		// as the claim loop drops an earlier pairing's row (sweepPairings).
-		r.dropUnpaired(context.Background())
+		// Under the runner's context: one a stop left running waits for the
+		// next start's look, never holding up the stop.
+		r.dropUnpaired(ctx)
 	}
 }
 

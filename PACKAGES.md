@@ -2590,9 +2590,10 @@ internal/
             never resumed or reported: the claim loop looks (sweepPairings) at its
             start, before recover, and whenever the pairing changes, again every 5
             s until the store reads; a running row no run holds (holdsLocked: a
-            run, a claim start is recording, a stranded or unpaired job) is
-            Abandoned and recorded lost (dropLost, dropCause: errOtherServer for
-            another server's, else errPairingEnded), a finished one's end marked
+            run, a claim start is recording, a stranded or unpaired job, one
+            being released) is Abandoned and recorded lost (releaseDropped,
+            dropCause: errOtherServer for another server's, else
+            errPairingEnded), a finished one's end marked
             reported, never sent; each row is read again first, so one a new
             pairing's claim took under the listed id (and ended) since the list
             was read is left to that claim. A run whose pairing the app forgot reports
@@ -2612,10 +2613,23 @@ internal/
             more goes to that server (no report, no end; its leases lapse the
             jobs), stranded jobs are dropped by the claim loop (dropUnpaired),
             the rows still running that no run holds are the claim loop's look
-            (sweepPairings: each Abandon bounded by abandonTimeout, 2 min, a slow
-            one logged), and nothing is launched on the ended link again; a new
-            pairing, with that server or another, resumes and reports none of
-            them.
+            (sweepPairings), and nothing is launched on the ended link again; a
+            new pairing, with that server or another, resumes and reports none
+            of them. RELEASING DROPPED JOBS (BR-LINK-RULE-2): every drop of a job
+            no run holds (the look, recover, resumeStranded, dropUnpaired) goes
+            to releaseDropped, which Abandons them off the caller's goroutine,
+            4 at a time (dropConcurrency), all under ONE deadline per batch
+            (abandonTimeout, 2 min), then records each lost; so N slow releases
+            hold up neither a start's resumes nor the claiming, nor take N x 2
+            min. A release that gives up at the deadline (or never started by
+            then) is logged and recorded lost all the same; the jobs are held
+            (Runner.dropping, holdsLocked) until recorded, so recover and a later
+            look skip them. A run's own drop (settle) still releases on its
+            goroutine under its own deadline. Everything runs under the runner's
+            context: a stop cuts a batch short and the rows it left running are
+            the next start's look (release's dropUnpaired, for a job the stop
+            interrupted as the pairing was ended, included: before, on
+            context.Background, it could hold the stop up to 2 min).
             retryReports sends only the current server's and pairing's
             ends. HANDLERS key a job's durable state and filings by its own server,
             never the pairing's now (Job.ServerID, Job.KeyServer: correct's result
@@ -2630,7 +2644,7 @@ internal/
             job), which the runner calls when it ends a job WITHOUT running the
             handler (a resumed job's first report answered with a cancel or a lost
             claim, another server's job dropped, one an unpair stopped), so that work is released as the
-            handler's own end would; dropLost records the job lost only once
+            handler's own end would; releaseDropped records the job lost only once
             Abandon returned, so Abandon releases before it returns (generate does
             even with no engine yet, bridge#65). Resumes(ctx) tells a handler whether its ended
             context will run again under the claim (the Bridge stopping, a refused
@@ -5033,7 +5047,7 @@ internal/
             pairing's re-pair that read the id it keeps. An
             unpair on the page forgets the token and the id, then stops the
             pairing's jobs (Conn.onUnpair -> jobs.Runner.Unpaired, which doesn't
-            wait: the claim loop releases their work), a failed forget
+            wait: the runner releases their work, releaseDropped), a failed forget
             included. Refusal, unpairing and
             replacing a pairing withdraw claim_min_priority from the old link;
             each new link negotiates on its own heartbeat. A 401 does NOT drop the token:

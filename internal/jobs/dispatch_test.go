@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"os"
 	"slices"
 	"strings"
@@ -779,8 +780,8 @@ func TestUnpairDropsRowsNoRunHolds(t *testing.T) {
 }
 
 // Unpaired never waits for a job's work to be released (the unpair page's
-// request is answered at once): an Abandon that blocks runs on the claim
-// loop, and the row is recorded lost once it returns.
+// request is answered at once): an Abandon that blocks runs off the claim
+// loop (releaseDropped), and the row is recorded lost once it returns.
 func TestUnpairedDoesNotWaitForAbandon(t *testing.T) {
 	srv := newControlledServer(false)
 	srv.pairing = "p1"
@@ -813,6 +814,188 @@ func TestUnpairedDoesNotWaitForAbandon(t *testing.T) {
 		return err == nil && sj.State == store.JobLost
 	})
 }
+
+// countingAbandoner's Abandon waits for release (nil: for its context to end)
+// and counts how many wait at once.
+type countingAbandoner struct {
+	abandoner
+	release          <-chan struct{}
+	entered          chan int64
+	inFlight, maxers atomic.Int32
+}
+
+func (a *countingAbandoner) Abandon(ctx context.Context, j Job) {
+	n := a.inFlight.Add(1)
+	for m := a.maxers.Load(); n > m && !a.maxers.CompareAndSwap(m, n); m = a.maxers.Load() {
+	}
+	a.entered <- j.ID
+	select {
+	case <-a.release:
+	case <-ctx.Done():
+	}
+	a.inFlight.Add(-1)
+	a.abandoner.Abandon(ctx, j)
+}
+
+// droppedRows records running rows 1..n of pairing p1 for a podcast.fetch
+// handler, a pairing the Bridge no longer has.
+func droppedRows(t *testing.T, db *store.DB, kind string, n int64) {
+	t.Helper()
+	for id := int64(1); id <= n; id++ {
+		if err := db.RecordClaim(context.Background(), store.ServerJob{ID: id, Kind: kind, Attempt: 1, ServerID: testServer, Pairing: "p1"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// rowsLost reports whether rows 1..n are all recorded lost.
+func rowsLost(db *store.DB, n int64) bool {
+	for id := int64(1); id <= n; id++ {
+		if sj, err := db.GetServerJob(context.Background(), id); err != nil || sj.State != store.JobLost {
+			return false
+		}
+	}
+	return true
+}
+
+// A start that drops several jobs of an earlier pairing whose work takes long
+// to release holds up neither its own resumes nor the claiming (denied: the
+// releases one after another on the claim loop, each up to 2 minutes): they
+// are released dropConcurrency at a time beside the claims, and each row is
+// recorded lost once its release is done, never before.
+func TestDroppedJobsReleaseOffTheClaimLoop(t *testing.T) {
+	const n = 6
+	release := make(chan struct{})
+	h := &countingAbandoner{abandoner: abandoner{handler: handler{kind: "podcast.fetch", lane: LaneDownload, fn: func(context.Context, Job, *Reporter) (any, error) {
+		return nil, nil
+	}}}, release: release, entered: make(chan int64, n)}
+	db := openStore(t)
+	droppedRows(t, db, h.Kind(), n)
+	srv := newControlledServer(false)
+	srv.pairing = "p2" // paired again with the same server: a new pairing
+	var cur atomic.Pointer[controlledServer]
+	cur.Store(srv)
+	opts := testOpts()
+	opts.Pairing = linkPairing(&cur)
+	r := New(db, linkOf(&cur), nil, opts, h)
+	startControlled(t, r)
+	for range dropConcurrency {
+		await(t, h.entered)
+	}
+	srv.next(t, false) // claiming while every release waits
+	if got := h.inFlight.Load(); got != dropConcurrency {
+		t.Fatal("releases at once:", got)
+	}
+	for id := int64(1); id <= n; id++ {
+		if sj, err := db.GetServerJob(context.Background(), id); err != nil || sj.State != store.JobRunning {
+			t.Fatalf("row %d recorded before its work was released: %+v %v", id, sj, err)
+		}
+	}
+	close(release)
+	waitFor(t, func() bool { return rowsLost(db, n) })
+	if got := h.abandoned(); len(got) != n {
+		t.Fatal("released:", got)
+	}
+	if got := h.maxers.Load(); got != dropConcurrency {
+		t.Fatal("most releases at once:", got)
+	}
+}
+
+// A batch of dropped jobs shares one deadline: releases still waiting at it
+// give up together, and those that never started go without one (denied: a
+// deadline each, the batch taking one per round of dropConcurrency). Every
+// row is recorded lost all the same, and each give-up is logged.
+func TestDroppedJobsShareOneDeadline(t *testing.T) {
+	const n = 6
+	h := &countingAbandoner{abandoner: abandoner{handler: handler{kind: "podcast.fetch", lane: LaneDownload, fn: func(context.Context, Job, *Reporter) (any, error) {
+		return nil, nil
+	}}}, entered: make(chan int64, n)} // waits for its deadline
+	db := openStore(t)
+	droppedRows(t, db, h.Kind(), n)
+	logs := &logCounter{n: map[string]int{}}
+	opts := testOpts()
+	opts.Log = slog.New(logs)
+	r := New(db, func() Server { return nil }, nil, opts, h) // unpaired since
+	r.dropDeadline = 200 * time.Millisecond
+	startControlled(t, r)
+	waitFor(t, func() bool { return rowsLost(db, n) })
+	if got := len(h.abandoned()); got != dropConcurrency {
+		t.Fatal("releases started:", got)
+	}
+	if got := logs.count("WARN bridge: releasing a dropped job's work gave up at its deadline"); got != n {
+		t.Fatal("give-ups logged:", got)
+	}
+}
+
+// A stop interrupts a job whose pairing is ended on the page just after its
+// end was settled (left running to resume): the stop never waits for its work
+// to be released (denied: a release on a context the stop doesn't end, up to
+// 2 minutes), and the next start, its pairing gone from the store, drops it
+// (released, recorded lost) rather than resuming it.
+func TestStopNeverWaitsForAnUnpairedJobsRelease(t *testing.T) {
+	srv := newControlledServer(false)
+	srv.pairing = "p1"
+	h := &countingAbandoner{abandoner: abandoner{handler: handler{kind: "podcast.fetch", lane: LaneDownload, fn: func(ctx context.Context, _ Job, _ *Reporter) (any, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}}}, entered: make(chan int64, 1)} // waits for its context to end
+	db := openStore(t)
+	var cur atomic.Pointer[controlledServer]
+	cur.Store(srv)
+	var r *Runner
+	// The unpair lands as settle leaves the job running (its log line), before
+	// release.
+	hook := &hookLog{on: "bridge: a job was interrupted; it resumes at the next start", fn: func() {
+		cur.Store(nil)
+		r.Unpaired(srv)
+	}}
+	opts := testOpts()
+	opts.Pairing = linkPairing(&cur)
+	opts.Log = slog.New(hook)
+	r = New(db, linkOf(&cur), nil, opts, h)
+	ctx, stop := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { r.Run(ctx); close(done) }()
+	srv.next(t, false).answer <- claimed(1, h.Kind(), 0)
+	waitFor(t, func() bool { return h.ran.Load() && srv.triesOf(1) > 0 })
+	stop()
+	await(t, done)
+	if !hook.fired.Load() {
+		t.Fatal("the job wasn't interrupted")
+	}
+	if sj, err := db.GetServerJob(context.Background(), 1); err != nil || sj.State != store.JobRunning {
+		t.Fatalf("a job the stop interrupted: %+v %v, want left running for the next start", sj, err)
+	}
+	// The next start: unpaired, the row of the ended pairing is dropped.
+	next := &abandoner{handler: h.handler}
+	runFor(t, New(db, func() Server { return nil }, nil, testOpts(), next), func() bool {
+		sj, err := db.GetServerJob(context.Background(), 1)
+		return err == nil && sj.State == store.JobLost && sj.Error == errPairingEnded.Error()
+	})
+	if got := next.abandoned(); len(got) != 1 || got[0] != 1 {
+		t.Fatal("the next start didn't release its work once", got)
+	}
+	if s, _ := srv.finalState(1); s != "" {
+		t.Fatal("the unpaired server was sent its end", s)
+	}
+}
+
+// hookLog calls fn, once, when message on is logged.
+type hookLog struct {
+	on    string
+	fn    func()
+	fired atomic.Bool
+}
+
+func (h *hookLog) Enabled(context.Context, slog.Level) bool { return true }
+func (h *hookLog) Handle(_ context.Context, r slog.Record) error {
+	if r.Message == h.on && h.fired.CompareAndSwap(false, true) {
+		h.fn()
+	}
+	return nil
+}
+func (h *hookLog) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *hookLog) WithGroup(string) slog.Handler      { return h }
 
 // blockingAbandoner's Abandon waits for release.
 type blockingAbandoner struct {
@@ -1019,15 +1202,24 @@ func TestPairingLookRunsOnceTheStoreReads(t *testing.T) {
 }
 
 // staleListStore lists the open jobs as an earlier read had them (list), while
-// its rows are what claims wrote since; listed counts the lists.
+// its rows are what claims wrote since: the first list only (the start's
+// look), none after it. listed hears each list.
 type staleListStore struct {
 	*store.DB
 	list   []store.ServerJob
-	listed atomic.Int32
+	n      atomic.Int32
+	listed chan int32
 }
 
 func (s *staleListStore) OpenServerJobs(context.Context) ([]store.ServerJob, error) {
-	s.listed.Add(1)
+	n := s.n.Add(1)
+	select {
+	case s.listed <- n:
+	default:
+	}
+	if n > 1 {
+		return nil, nil
+	}
 	return s.list, nil
 }
 
@@ -1037,7 +1229,7 @@ func (s *staleListStore) OpenServerJobs(context.Context) ([]store.ServerJob, err
 // and ended, is never Abandoned, recorded lost or marked reported for the
 // listed one (denied).
 func TestPairingLookLeavesARowANewClaimTook(t *testing.T) {
-	db := &staleListStore{DB: openStore(t)}
+	db := &staleListStore{DB: openStore(t), listed: make(chan int32, 8)}
 	h := &abandoner{handler: handler{kind: "podcast.fetch", lane: LaneDownload, fn: func(context.Context, Job, *Reporter) (any, error) {
 		return nil, nil
 	}}}
@@ -1054,16 +1246,21 @@ func TestPairingLookLeavesARowANewClaimTook(t *testing.T) {
 	db.list[1].State = store.JobDone
 	next := newControlledServer(false)
 	next.id, next.pairing = "other", "p2"
-	var cur, none atomic.Pointer[controlledServer]
+	var cur atomic.Pointer[controlledServer]
 	cur.Store(next)
 	opts := testOpts()
 	opts.Pairing = linkPairing(&cur)
-	r := New(db, linkOf(&none), nil, opts, h)
+	opts.RetryEvery = time.Hour // retryReports never lists the rows
+	r := New(db, linkOf(&cur), nil, opts, h)
 	startControlled(t, r)
-	waitFor(t, func() bool { return db.listed.Load() > 0 })
-	time.Sleep(5 * opts.RetryEvery)
-	if got := h.abandoned(); len(got) != 0 {
-		t.Fatal("the new claim's work was released for the listed row", got)
+	// The handshake: the claim loop lists the rows again to resume them (recover)
+	// only once the start's look is done, a drop it decided held (holdsLocked).
+	if n := await(t, db.listed); n != 1 {
+		t.Fatal("the first list was", n)
+	}
+	await(t, db.listed)
+	if got := h.abandoned(); len(got) != 0 || r.holds(5) {
+		t.Fatal("the new claim's work was released, or is being released, for the listed row", got)
 	}
 	if sj, err := db.GetServerJob(ctx, 5); err != nil || sj.State != store.JobRunning || sj.Pairing != "p2" {
 		t.Fatalf("the new claim's running row: %+v %v", sj, err)
@@ -1793,7 +1990,7 @@ func TestYieldedStrayFreesItsDispatcher(t *testing.T) {
 	if err := await(t, reclaimed); err == nil {
 		t.Fatal("a cancelled reclaim succeeded")
 	}
-	r.release(ru, false)
+	r.release(context.Background(), ru, false)
 	if use, waiting := laneCounts(r, LaneDownload); use != 1 || waiting != 0 {
 		t.Fatalf("released: use %d waiting %d", use, waiting)
 	}

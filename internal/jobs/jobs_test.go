@@ -574,11 +574,11 @@ func TestReleaseKeepsALaterRun(t *testing.T) {
 	r.mu.Lock()
 	r.running[5], r.use[LaneLight] = later, 2
 	r.mu.Unlock()
-	r.release(old, false)
+	r.release(context.Background(), old, false)
 	if !r.Cancel(5) {
 		t.Fatal("the later run lost its entry")
 	}
-	r.release(later, false)
+	r.release(context.Background(), later, false)
 	if r.Cancel(5) {
 		t.Fatal("a released run is still listed")
 	}
