@@ -95,6 +95,7 @@ func (h *Retain) run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (
 		}
 		return check, sent, err
 	}
+	owed := false
 	for _, candidate := range feed.Episodes {
 		if candidate.Fetch == nil || candidate.Fetch.DeletedAt != "" {
 			continue
@@ -207,8 +208,14 @@ func (h *Retain) run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (
 		}
 		result.Deleted++
 		s.setIndexed(lib.ID, show, false)
-		if err := s.episodeRescan(ctx, lib.ID, candidate.Path); err != nil {
-			return nil, err
+		// A rescan the server's 429 left to the show's next poll (episodeRescan
+		// leaves the show not indexed) leaves this run's other deletions to it
+		// too, rather than wait out the limit again for each one.
+		if !owed {
+			if err := s.episodeRescan(ctx, lib.ID, candidate.Path); err != nil {
+				return nil, err
+			}
+			owed = !s.isIndexed(lib.ID, show)
 		}
 		if err := podcast.CleanupTrash(root, transaction); err != nil {
 			return nil, err

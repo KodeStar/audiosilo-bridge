@@ -2473,8 +2473,10 @@ internal/
             its Retry-After, else 2 s doubling; 3 asks, each wait at most 30 s,
             as audiblejob's enrichment). One an episode's rescan could not wait
             out leaves the saved episode for the show's next poll's rescan
-            (isIndexed) and the fetch succeeds, never index_failed; a
-            subscribe's or poll's fails write_failed, the rescan still owed. A saved feed.json over
+            (isIndexed) and the fetch succeeds, never index_failed (a retain
+            then leaves its other deletions' rescans to that poll too, rather
+            than wait again for each); a subscribe's or poll's fails
+            write_failed, the rescan still owed. A saved feed.json over
             the read cap fails as too_large, not write_failed. A new show never
             takes the old name of a renamed folder not taken in yet (find
             answers those names): the server indexes that name as the renamed
