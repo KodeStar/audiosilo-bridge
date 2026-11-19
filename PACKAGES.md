@@ -185,7 +185,9 @@ internal/
             LookWithin for a look that writes (a podcast check's marker): its
             answer goes to every caller still waiting, and when every caller gave
             up past d, undo gets it in the change's goroutine, so nothing it made
-            is left with nobody to clean it up.
+            is left with nobody to clean it up; the change stays out until the
+            undo is done (a call meanwhile is ErrStatTimeout, never a change of
+            its own racing the undo).
   execfile/ writes files the process will exec at once with syscall.ForkLock
             held for reading from open to close, so a concurrent fork can't hold
             the write descriptor and make the exec fail with ETXTBSY (WriteFile).
@@ -2283,7 +2285,9 @@ internal/
             and a podcast check's whole look before the server's read (open,
             marker read, a stale marker's removal, write probe, marker write:
             lookPodcast) as ONE change (fsutil.ChangeWithin, one per library and
-            mount; a marker it wrote after every caller gave up is undone). A
+            mount; a marker it wrote after every caller gave up is undone, and a
+            failed check's own undo of its marker is that change too, so a look
+            meanwhile is slow rather than read a marker about to go). A
             look past LookTimeout is UNKNOWN, never a definite answer (an Unraid
             array disk spinning up takes about 8 s): the check returns folderSlow
             as its unanswered error, and the Registry keeps the last state as

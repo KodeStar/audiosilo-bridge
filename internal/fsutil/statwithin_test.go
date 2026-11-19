@@ -236,3 +236,43 @@ func TestChangeWithin(t *testing.T) {
 	case <-time.After(50 * time.Millisecond):
 	}
 }
+
+// A change nobody waits for any more stays out while its undo runs: a later
+// call meanwhile waits on it and gets ErrStatTimeout, never starting a change
+// of its own beside the undo (it would see what the undo is about to remove)
+// nor taking the undone answer; once the undo is done the next call changes
+// again.
+func TestChangeWithinHoldsTheChangeWhileUndoing(t *testing.T) {
+	t.Parallel()
+	const path = "/hung/mount/undoing"
+	release, undoing, undone := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	undo := func(int) { close(undoing); <-undone }
+	if _, err := ChangeWithin("marker", path, 10*time.Millisecond, func(string) (int, error) { <-release; return 1, nil }, undo); !errors.Is(err, ErrStatTimeout) {
+		t.Fatalf("a hung change = %v", err)
+	}
+	close(release)
+	<-undoing
+	var started atomic.Int32
+	again := func(string) (int, error) { started.Add(1); return 2, nil }
+	if n, err := ChangeWithin("marker", path, 10*time.Millisecond, again, nil); !errors.Is(err, ErrStatTimeout) || n != 0 {
+		t.Fatalf("a change asked for while the undo runs = %v, %v; want ErrStatTimeout", n, err)
+	}
+	if started.Load() != 0 {
+		t.Fatal("a change started beside the undo")
+	}
+	close(undone)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		n, err := ChangeWithin("marker", path, time.Second, again, nil)
+		if err == nil {
+			if n != 2 {
+				t.Fatalf("the change after the undo = %d, want its own answer", n)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no change once the undo was done: %v", err)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}

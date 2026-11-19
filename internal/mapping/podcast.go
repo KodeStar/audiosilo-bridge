@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"io/fs"
 	"os"
 	"regexp"
 	"strconv"
@@ -63,11 +64,14 @@ func (l looks) checkPodcast(ctx context.Context, src MarkerSource, lib link.Libr
 	}
 	defer func() {
 		if !st.Mapped && (found.createdMarker || found.createdDir) {
-			// Bounded too, its answer unneeded: one a hung mount holds goes on
-			// in the background (a later one waits on it).
-			_, _ = fsutil.LookWithin(op+" undo", mount, LookTimeout, func(m string) (struct{}, error) {
+			// Bounded as the look is, and as the look's own change (one out per
+			// library and mount): one a hung mount holds goes on in the
+			// background, and a later look meanwhile waits on it and is slow,
+			// rather than read the marker it is about to remove (and have the
+			// server's read of it fail, a definite "not mapped").
+			_, _ = l.podcast(op, mount, func(m string) (podcastFound, error) {
 				found.undo(m)
-				return struct{}{}, nil
+				return podcastFound{}, &fs.PathError{Op: op, Path: m, Err: fsutil.ErrStatTimeout}
 			})
 		}
 	}()

@@ -159,7 +159,10 @@ var (
 // waiting on it for what is left of d. Unlike a look, a change may leave
 // something behind, so its answer is handed to every caller still waiting when
 // it finishes, and when none is (every caller gave up past d, so nobody will
-// ever clean up after it), undo gets it in the change's own goroutine.
+// ever clean up after it), undo gets it in the change's own goroutine. The
+// change stays out until its undo is done: a later call meanwhile waits on it
+// and gets ErrStatTimeout, never a change of its own racing the undo (it would
+// see what the undo is about to remove) nor the undone answer.
 func ChangeWithin[T any](op, path string, d time.Duration, do func(string) (T, error), undo func(T)) (T, error) {
 	key := op + "\x00" + path
 	changesMu.Lock()
@@ -170,14 +173,16 @@ func ChangeWithin[T any](op, path string, d time.Duration, do func(string) (T, e
 		go func() {
 			val, err := do(path)
 			changesMu.Lock()
+			if c.waiting == 0 && undo != nil {
+				changesMu.Unlock()
+				undo(val)
+				changesMu.Lock()
+				val, err = *new(T), &fs.PathError{Op: op, Path: path, Err: ErrStatTimeout}
+			}
 			c.val, c.err = val, err
 			delete(changes, key)
-			orphan := c.waiting == 0
 			close(c.done)
 			changesMu.Unlock()
-			if orphan && undo != nil {
-				undo(val)
-			}
 		}()
 	}
 	c.waiting++
