@@ -813,6 +813,69 @@ func TestUnpairedDoesNotWaitForAbandon(t *testing.T) {
 	})
 }
 
+// A run dropped by an unpair before its handler ran (it waited for the lane's
+// one slot) whose work takes long to release gives its place in the lane back
+// at once: a new pairing's claim starts there while the release still waits
+// (denied: released on the run's goroutine, the run first in line for the
+// slot until it returns, which a release tried again round after round may
+// never do), and its row stays running and held until the release returns,
+// then is recorded lost (allowed).
+func TestDroppedRunFreesItsLaneWhileItsReleaseWaits(t *testing.T) {
+	srv := newControlledServer(false)
+	srv.pairing = "p1"
+	var cur atomic.Pointer[controlledServer]
+	cur.Store(srv)
+	started := make(chan Job, 4)
+	release := make(chan struct{})
+	h := newCountingAbandoner(func(ctx context.Context, j Job, _ *Reporter) (any, error) {
+		started <- j
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}, release, 4)
+	db := openStore(t)
+	opts := testOpts()
+	opts.Lanes = map[string]int{LaneDownload: 1}
+	opts.Pairing = linkPairing(&cur)
+	r := New(db, linkOf(&cur), nil, opts, h)
+	startControlled(t, r)
+	var wg sync.WaitGroup
+	defer wg.Wait()
+	runCtx, stop := context.WithCancel(context.Background())
+	defer stop()
+	// Job 1 runs in the lane's one slot; job 2 waits for it.
+	srv.next(t, false).answer <- claimed(1, h.Kind(), 0)
+	if j := await(t, started); j.ID != 1 {
+		t.Fatal(j)
+	}
+	r.start(runCtx, srv, Job{ID: 2, Kind: h.Kind(), Attempt: 1}, &wg, nil)
+	waitFor(t, func() bool { _, waiting := laneCounts(r, LaneDownload); return waiting == 1 })
+	cur.Store(nil) // the app ends the pairing first
+	r.Unpaired(srv)
+	if id := await(t, h.entered); id != 2 {
+		t.Fatal("released:", id)
+	}
+	next := newControlledServer(false) // paired again with the same server: a new pairing
+	next.pairing = "p2"
+	cur.Store(next)
+	r.Wake()
+	next.next(t, false).answer <- claimed(10, h.Kind(), 0)
+	if j := await(t, started); j.ID != 10 {
+		t.Fatal("the new pairing's claim didn't run", j)
+	}
+	ctx := context.Background()
+	if sj, err := db.GetServerJob(ctx, 2); err != nil || sj.State != store.JobRunning || !r.holds(2) || h.inFlight.Load() != 1 {
+		t.Fatalf("the dropped run whose release waits: %+v %v, held %v; want running and held", sj, err, r.holds(2))
+	}
+	close(release)
+	waitFor(t, func() bool {
+		sj, err := db.GetServerJob(ctx, 2)
+		return err == nil && sj.State == store.JobLost && sj.Error == errPairingEnded.Error() && !r.holds(2)
+	})
+	if got := h.abandoned(); !slices.Equal(got, []int64{2}) {
+		t.Fatal("released:", got)
+	}
+}
+
 // countingAbandoner's Abandon sends the job's id on entered, waits for release
 // (nil: for its context to end) and counts how many wait at once, and how many
 // were told under a context that had ended already (toldEnded).
@@ -1444,6 +1507,7 @@ func TestJobLaunchedOnAnUnpairedLinkEndsAtOnce(t *testing.T) {
 	var wg sync.WaitGroup
 	r.launch(ctx, srv, Job{serverID: testServer, ID: 5, Kind: h.Kind(), Attempt: 1, Resumed: true}, &wg, "", nil, nil)
 	wg.Wait()
+	r.drops.Wait() // its release, off its run's goroutine
 	if sj, err := db.GetServerJob(ctx, 5); err != nil || sj.State != store.JobLost {
 		t.Fatalf("the job launched on an unpaired link: %+v %v, want lost", sj, err)
 	}
@@ -1756,6 +1820,7 @@ func TestWaitingJobLetsGoOfAnOldLink(t *testing.T) {
 			r.Wake()
 			if nextID == "b" {
 				wg.Wait()
+				r.drops.Wait() // its release, off its run's goroutine
 				if sj, _ := db.GetServerJob(context.Background(), 9); sj.State != store.JobLost || h.ran.Load() ||
 					!slices.Equal(h.abandoned(), []int64{9}) {
 					t.Fatal("another server's waiting job wasn't dropped", sj.State, h.ran.Load(), h.abandoned())

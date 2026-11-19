@@ -432,8 +432,8 @@ type Runner struct {
 	// dropping are the dropped jobs whose work is being released, until each
 	// is recorded lost (releaseDropped): no look drops one twice.
 	dropping map[int64]int
-	// dropDeadline bounds one round of dropped jobs' releases, and a run's own
-	// (abandonTimeout; tests shorten it).
+	// dropDeadline bounds one round of dropped jobs' releases (abandonTimeout;
+	// tests shorten it).
 	dropDeadline time.Duration
 	// drops are the batches releaseDropped runs; Run waits for them.
 	drops sync.WaitGroup
@@ -551,8 +551,8 @@ func (r *Runner) wakeLocked() {
 // started has stopped.
 func (r *Runner) Run(ctx context.Context) {
 	var wg sync.WaitGroup
-	// Then the dropped jobs' releases (releaseDropped, started only on this
-	// goroutine, so none starts once this waits).
+	// Then the dropped jobs' releases (releaseDropped, started on this goroutine
+	// or on a run's, before the run is done: none starts once this waits).
 	defer r.drops.Wait()
 	defer wg.Wait()
 	ctx, stop := context.WithCancelCause(ctx)
@@ -698,30 +698,23 @@ func (r *Runner) dropCause(serverID string) error {
 	return errPairingEnded
 }
 
-// abandonTimeout bounds the release of dropped jobs' work: a run's own
-// (abandonDropped), and one round of the jobs no run holds (releaseDropped),
-// all of them together. A handler's release may wait on a lock its own run
-// holds (podcast.fetch's file lock), and the run's goroutine the Bridge's stop
-// waits for must go on.
+// abandonTimeout bounds one round of the release of dropped jobs' work
+// (releaseDropped), all of the round's jobs together. A handler's release may
+// wait on a lock its own run holds (podcast.fetch's file lock).
 const abandonTimeout = 2 * time.Minute
 
 // dropConcurrency is how many of a batch's dropped jobs release their work at
 // once (releaseDropped).
 const dropConcurrency = 4
 
-// drop is a running job no run here holds, dropped for why (a server the
-// Bridge is no longer paired with, or a pairing ended on its page).
+// drop is a running job no run here holds (or a run handing its release over,
+// releaseRun), dropped for why (a server the Bridge is no longer paired with,
+// or a pairing ended on its page). raw is the result its run had, recorded
+// with it.
 type drop struct {
 	job Job
 	why error
-}
-
-// abandonDropped releases the work of a job dropped for why (abandonFor), for
-// at most the drop deadline (abandonTimeout).
-func (r *Runner) abandonDropped(ctx context.Context, job Job, why error) {
-	actx, cancel := context.WithTimeout(ctx, r.dropDeadline)
-	defer cancel()
-	r.abandonWithin(actx, job, why)
+	raw json.RawMessage
 }
 
 // abandonWithin releases the work of a job dropped for why under actx, a
@@ -754,7 +747,8 @@ func (r *Runner) holdsWork(job Job) bool {
 // lost, so a job waiting for one to end (generate's awaitOpenJobEnd reads the
 // row's running state) starts only once its engine book is stopped, as the
 // runner's own ends order it (bridge#37). It runs off the caller's goroutine
-// (a start's look or recover, the claim loop), dropConcurrency at a time, in
+// (a start's look or recover, the claim loop, a dropped run's: releaseRun),
+// dropConcurrency at a time, in
 // rounds of one deadline each (the drop deadline, releaseRound), so N slow
 // releases hold up neither the start nor the claiming, nor take N deadlines.
 // A job is recorded lost only once its release returned inside its round's
@@ -860,7 +854,7 @@ func (r *Runner) releaseTurn(ctx, actx context.Context, d drop) turn {
 			return turnCut
 		}
 	}
-	r.recordLost(ctx, d.job, nil, d.why)
+	r.recordLost(ctx, d.job, d.raw, d.why)
 	return turnDone
 }
 
@@ -1233,6 +1227,10 @@ type run struct {
 	// under r.mu): it reports nothing more (Reporter.link) and is recorded lost
 	// however it ends (settle), never kept to resume (release).
 	ended atomic.Bool
+	// abandonOwed: the job was dropped before its handler ran (abandonEnded),
+	// so the work an earlier run of it left is still to be released, by
+	// releaseDropped (settle, releaseRun). Its run's goroutine only.
+	abandonOwed bool
 }
 
 // start records a claimed job and runs it. claim is the dispatcher's request
@@ -1436,12 +1434,11 @@ func (r *Runner) execute(ctx, base context.Context, srv Server, h Handler, ru *r
 	ru.rep = rep
 	r.mu.Unlock()
 	if !rep.send() {
-		// Ended before its handler ran: a cancel or a lost claim ends it for good,
-		// so what an earlier run of it left (an engine book) is released.
+		// Ended before its handler ran: a cancel, a lost claim or a drop ends it
+		// for good, so what an earlier run of it left (an engine book) is
+		// released.
 		cause := context.Cause(ctx)
-		if endsForGood(cause) {
-			r.abandonFor(base, ru.job, cause)
-		}
+		r.abandonEnded(base, ru, cause)
 		return r.settle(base, ru, rep, nil, cause)
 	}
 	done := make(chan struct{})
@@ -1455,15 +1452,29 @@ func (r *Runner) execute(ctx, base context.Context, srv Server, h Handler, ru *r
 	if r.awaitAdmission(ctx, ru) {
 		rep.started.Store(true)
 		result, err = h.Run(ctx, ru.job, rep)
-	} else if cause := context.Cause(ctx); endsForGood(cause) {
+	} else {
 		// A recovered job can lose its claim (or be dropped for another
 		// server's pairing) while waiting for a slot, after its first report
 		// succeeded but before its handler ever ran.
-		r.abandonFor(base, ru.job, cause)
+		r.abandonEnded(base, ru, context.Cause(ctx))
 	}
 	close(done)
 	<-reporting
 	return r.settle(base, ru, rep, result, firstErr(context.Cause(ctx), err))
+}
+
+// abandonEnded tells the handler of a job that ended for good (cause) before
+// its handler ran: a cancel or a lost claim at once; a drop only owes it
+// (run.abandonOwed), for settle to hand to releaseDropped (releaseRun), so a
+// release that blocks never keeps the job's lane slot, or its place first in
+// line for one, from a new pairing's work.
+func (r *Runner) abandonEnded(base context.Context, ru *run, cause error) {
+	switch {
+	case dropped(cause):
+		ru.abandonOwed = true
+	case endsForGood(cause):
+		r.abandonFor(base, ru.job, cause)
+	}
 }
 
 // firstErr prefers why the job's context ended over the handler's error (a
@@ -1515,22 +1526,17 @@ func (r *Runner) settle(base context.Context, ru *run, rep *Reporter, result any
 		// however the job ended (done, failed, cancelled, its token refused,
 		// the Bridge stopping): nothing more goes to its server, and it is no
 		// job of the server the Bridge pairs with next. One that stopped to
-		// resume kept its work for that: released, but never past a stop (the
-		// Bridge's stop waits for this goroutine): one the stop ended, or whose
-		// release it cut short, is left running for the next start's look
-		// (sweepPairings), its pairing gone from the store.
+		// resume kept its work for that, and one dropped before its handler ran
+		// holds what an earlier run left: released off this goroutine
+		// (releaseRun), never past a stop.
 		why := errPairingEnded
 		if !ru.ended.Load() {
 			why = r.dropCause(job.serverID)
 		}
-		if cause := context.Cause(rep.ctx); cause != nil && !endsForGood(cause) {
-			if base.Err() == nil {
-				r.abandonDropped(base, job, why)
-			}
-			if base.Err() != nil {
-				r.log.Info("bridge: a job of an ended pairing is left for the next start to drop", "job", job.ID, "kind", job.Kind, "why", why)
-				return false
-			}
+		cause := context.Cause(rep.ctx)
+		if (ru.abandonOwed || cause != nil && !endsForGood(cause)) && r.holdsWork(job) {
+			r.releaseRun(base, job, raw, why)
+			return false
 		}
 		r.log.Info("bridge: a job of an ended pairing is dropped", "job", job.ID, "kind", job.Kind, "why", why)
 		r.recordLost(context.WithoutCancel(base), job, raw, why)
@@ -1545,6 +1551,10 @@ func (r *Runner) settle(base context.Context, ru *run, rep *Reporter, result any
 		r.log.Info("bridge: a job's link ended; it resumes under its claim on the next one", "job", job.ID, "why", err)
 		return true
 	case srv == nil, errors.Is(err, errOtherServer):
+		if ru.abandonOwed && r.holdsWork(job) {
+			r.releaseRun(base, job, raw, errOtherServer)
+			return false
+		}
 		r.log.Info("bridge: a job of another server is dropped", "job", job.ID, "kind", job.Kind)
 		r.recordLost(base, job, raw, errOtherServer)
 	case errors.Is(err, errLost):
@@ -1575,6 +1585,24 @@ func (r *Runner) settle(base context.Context, ru *run, rep *Reporter, result any
 		}
 	}
 	return false
+}
+
+// releaseRun drops a run whose handler still holds work (it stopped to resume,
+// or never ran: run.abandonOwed), for why: the release goes to releaseDropped,
+// which records the job lost once it is done, the row running and held
+// (dropping, taken before release lets go of the run) until then. So the run
+// frees its lane slot as it returns, and a release that blocks, tried again
+// round after round, never keeps a new pairing's claims out of the lane. Never
+// past a stop (the Bridge's stop waits for this goroutine): a job the stop
+// ended, or whose release it cuts short, is left running for the next start's
+// look (sweepPairings), its pairing gone from the store.
+func (r *Runner) releaseRun(base context.Context, job Job, raw json.RawMessage, why error) {
+	if base.Err() != nil {
+		r.log.Info("bridge: a job of an ended pairing is left for the next start to drop", "job", job.ID, "kind", job.Kind, "why", why)
+		return
+	}
+	r.log.Info("bridge: a dropped job's work is released before it is recorded lost", "job", job.ID, "kind", job.Kind, "why", why)
+	r.releaseDropped(base, []drop{{job: job, why: why, raw: raw}})
 }
 
 // interrupted leaves a job the stopping Bridge ended running: the next start

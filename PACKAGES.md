@@ -2639,10 +2639,13 @@ internal/
             recorded. The jobs are held (Runner.dropping, holdsLocked) until
             recorded, so recover and a later look skip them (one the look
             recorded lost after recover listed it running is found ended at
-            its turn). A run's own drop
-            (settle) still releases on its goroutine under its own deadline
-            (one that gives up there is recorded lost all the same),
-            but never past a stop. Everything runs under the runner's context:
+            its turn). A run's own drop whose handler still holds work (it
+            stopped to resume, or was dropped before it ran: run.abandonOwed)
+            goes there too (settle, releaseRun), held (dropping) before the run
+            lets go, so the run frees its lane slot, or its place first in line
+            for one, as it returns: a release that blocks, tried again round
+            after round, never keeps a new pairing's claims out of the lane.
+            Never past a stop. Everything runs under the runner's context:
             a stop cuts a round short (or finds it unstarted) and the rows it
             left running are the next start's look (a job the stop interrupted
             as the pairing was ended included, before settle looked or after:
