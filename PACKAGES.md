@@ -2225,7 +2225,9 @@ internal/
             a *SealFailure is reported as its code and message, any other error
             only as a generic write_failed (its text may hold the secret). A claim
             the store can't record is abandoned (the server hands it out again)
-            only when its handler seals; other kinds run anyway, as before.
+            only when its handler seals, or is a ClaimRowNeeder that needs the row
+            for that job (generate's share jobs: their share_off lives on it);
+            other kinds run anyway, as before.
             Handlers declare a kind and a lane (lanes: light=2,
             and Phase 1a's pipeline=25 for the jobs that follow an engine book: the
             engine's scheduler does the throttling, so such a job sits in its lane
