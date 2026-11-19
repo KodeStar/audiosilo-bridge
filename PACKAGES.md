@@ -2563,7 +2563,10 @@ internal/
             never find each other's record at their path, and both move with
             their shows; a record an older Bridge named by library and path
             (legacyRecordName) is renamed once per pairing and start at the
-            first open of the records folder (migrateRecords). A fetch's
+            first open of the records folder (migrateRecords); the pairing is
+            done only once every such record moved, so a pass that could not
+            read, write or remove one is run again by the next open, repeating
+            nothing it did. A fetch's
             Abandon, named by the server's old path, clears every record of
             its episode: at its path and where one moved (recordsOf), and drops
             one left under a folder that is gone (its partial, unrecorded then,

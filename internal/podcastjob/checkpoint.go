@@ -94,7 +94,14 @@ func (s *service) checkpointRoot() (*os.Root, error) {
 // upgrade and its record still moves with its show. A legacy record whose new
 // name is taken already goes, with its validator when that is not the new
 // record's: its partial, unrecorded then, is swept once old (sweepPartials).
-// A listing that fails is tried again by the next caller.
+//
+// The pairing is done only once every legacy record moved (or went): a
+// listing or a record that could not be read, a record that could not be
+// written at its new name or an old name that could not be removed leaves it
+// for the next caller, which goes through the folder again. Nothing a pass
+// did is done twice: a record moved is no longer under a legacy name, and one
+// written at its new name whose old name stayed is that taken name, with the
+// same validator, so only the old name goes.
 func (s *service) migrateRecords(dir *os.Root, pairing string) {
 	s.recMu.Lock()
 	defer s.recMu.Unlock()
@@ -105,30 +112,44 @@ func (s *service) migrateRecords(dir *os.Root, pairing string) {
 	if err != nil {
 		return
 	}
+	done := true
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
 			continue
 		}
 		c, err := readRecord(dir, entry.Name())
-		if err != nil || c.ServerHash != pairing || !podcast.ValidEpisodePath(c.Path) || entry.Name() != legacyRecordName(c.LibraryID, c.Path) {
+		if err != nil {
+			// Gone since the listing, or no record at all (malformed, not a
+			// regular file): nothing to move. Any other failure may hide one.
+			if !errors.Is(err, os.ErrNotExist) && !errors.Is(err, errBadRecord) && !errors.Is(err, podcast.ErrInvalidFile) {
+				done = false
+			}
+			continue
+		}
+		if c.ServerHash != pairing || !podcast.ValidEpisodePath(c.Path) || entry.Name() != legacyRecordName(c.LibraryID, c.Path) {
 			continue
 		}
 		name := recordName(c.LibraryID, c.ShowID, c.Path)
-		if there, err := readRecord(dir, name); err == nil {
-			if there.Validator != c.Validator {
+		there, err := readRecord(dir, name)
+		switch {
+		case err == nil:
+			if dir.Remove(entry.Name()) != nil {
+				done = false
+			} else if there.Validator != c.Validator {
 				s.dropValidator(c.Validator)
 			}
-			_ = dir.Remove(entry.Name())
 			continue
-		} else if !errors.Is(err, os.ErrNotExist) {
-			continue
-		}
-		if writeRecord(dir, name, c) != nil {
+		case !errors.Is(err, os.ErrNotExist):
+			done = false // not known to be free: never written over
 			continue
 		}
-		_ = dir.Remove(entry.Name())
+		if writeRecord(dir, name, c) != nil || dir.Remove(entry.Name()) != nil {
+			done = false
+		}
 	}
-	s.migrated[pairing] = true
+	if done {
+		s.migrated[pairing] = true
+	}
 }
 
 // writeRecord writes download record c under name in the records folder dir.

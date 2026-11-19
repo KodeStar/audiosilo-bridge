@@ -2524,3 +2524,98 @@ func TestAbandonLeavesTheRecordOfARunningFetchOfItsEpisode(t *testing.T) {
 		})
 	}
 }
+
+// The migration of the records an older Bridge named by path alone is done
+// only once every one of them moved. A pass that could not move one (its new
+// name not free to write) leaves the pairing for the next read of the
+// records, which moves what is left, touching nothing the first pass moved;
+// marked done after the failure, that download would never resume and its
+// partial, a recorded one, would never be swept.
+func TestAMigrationThatCouldNotMoveARecordIsTriedAgain(t *testing.T) {
+	h, job := audioHarness(t)
+	s := h.handler.s
+	dir := filepath.Join(s.o.DataDir, "podcast-fetch", s.pairHash())
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	legacy := func(p string) checkpoint {
+		c := checkpoint{ServerHash: s.pairHash(), LibraryID: 3, ShowID: fixtureShowID, EpisodeID: "1cc306d831645e2b", Path: p, Temp: podcast.TempPrefix + nonce(), Offset: 6, Total: 100, Validator: secrets.PodcastETagPrefix + nonce()}
+		if err := s.o.Vault.Set(c.Validator, `"one"`); err != nil {
+			t.Fatal(err)
+		}
+		b, _ := json.Marshal(c)
+		if err := os.WriteFile(filepath.Join(dir, legacyRecordName(3, p)), b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return c
+	}
+	moved, stuck := legacy(*job.Path), legacy("Fixture Show/other.mp3")
+	// Something in the way of the second record's new name.
+	block := filepath.Join(dir, recordName(3, stuck.ShowID, stuck.Path))
+	if err := os.Mkdir(block, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	at := func(c checkpoint) (legacyThere, there bool) {
+		t.Helper()
+		records, err := s.checkpointRoot() // a read of the records: one pass
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer records.Close()
+		_, err = os.Lstat(filepath.Join(dir, legacyRecordName(3, c.Path)))
+		saved, ok := s.readOwnRecord(records, 3, c.ShowID, c.Path)
+		v, _ := s.o.Vault.Get(c.Validator)
+		return err == nil, ok && saved.Temp == c.Temp && v == `"one"`
+	}
+	if old, ok := at(moved); old || !ok {
+		t.Fatal("the record that could move did not", old, ok)
+	}
+	if old, ok := at(stuck); !old || ok {
+		t.Fatal("the record in the way moved", old, ok)
+	}
+	if err := os.Remove(block); err != nil {
+		t.Fatal(err)
+	}
+	if old, ok := at(stuck); old || !ok {
+		t.Fatal("the migration was not tried again", old, ok)
+	}
+	if old, ok := at(moved); old || !ok {
+		t.Fatal("the second pass undid the first", old, ok)
+	}
+}
+
+// A pass that wrote a record at its new name and could not remove the old one
+// (a stop between the two) is finished by the next: the old name goes, the
+// record and the validator both names share stay.
+func TestAMigrationStoppedBetweenItsWriteAndItsRemoveIsFinished(t *testing.T) {
+	h, job := audioHarness(t)
+	s := h.handler.s
+	dir := filepath.Join(s.o.DataDir, "podcast-fetch", s.pairHash())
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	c := checkpoint{ServerHash: s.pairHash(), LibraryID: 3, ShowID: fixtureShowID, EpisodeID: "1cc306d831645e2b", Path: *job.Path, Temp: podcast.TempPrefix + nonce(), Offset: 6, Total: 100, Validator: secrets.PodcastETagPrefix + nonce()}
+	if err := s.o.Vault.Set(c.Validator, `"one"`); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := json.Marshal(c)
+	for _, name := range []string{legacyRecordName(3, c.Path), recordName(3, c.ShowID, c.Path)} {
+		if err := os.WriteFile(filepath.Join(dir, name), b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	records, err := s.checkpointRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer records.Close()
+	if _, err := os.Lstat(filepath.Join(dir, legacyRecordName(3, c.Path))); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("the old name was left", err)
+	}
+	if saved, ok := s.readOwnRecord(records, 3, c.ShowID, c.Path); !ok || saved.Temp != c.Temp {
+		t.Fatal("the moved record went", saved, ok)
+	}
+	if v, _ := s.o.Vault.Get(c.Validator); v != `"one"` {
+		t.Fatal("the validator both names shared was dropped")
+	}
+}
