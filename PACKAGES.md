@@ -3839,7 +3839,9 @@ internal/
             rules and the file list are in mounts.go), the Bridge's vault
             (secret.key, secrets/<name>.enc, or those names mounted alone) and a
             container runtime's socket (docker.sock, podman.sock,
-            containerd.sock: every container's files) included. BR-OPENAI-2: the
+            containerd.sock: every container's files; runtimeSocketPaths names
+            them where a host's /run, a tmpfs, keeps them a folder or two down:
+            podman/, containerd/, docker/containerd/) included. BR-OPENAI-2: the
             walk fails closed: a folder it can enter but not list, one deeper
             than maxMountDepth, more than maxWalkEntries (100,000) entries over
             the whole walk (each folder read up to one past it, never whole; a

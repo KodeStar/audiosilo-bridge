@@ -137,6 +137,12 @@ var vaultSealed = []string{"server_token", "claude_oauth_token", "anthropic_api_
 // of whoever can open it, so it counts as a credential's file, by name.
 var runtimeSockets = []string{"docker.sock", "podman.sock", "containerd.sock"}
 
+// runtimeSocketPaths are where a host's run folder keeps those sockets a
+// folder or two down: /run is a tmpfs, looked at its point alone (pseudoFS),
+// so mounted whole it shows them only by these paths.
+var runtimeSocketPaths = []string{"podman/podman.sock", "containerd/containerd.sock",
+	"docker/containerd/containerd.sock"}
+
 // credentialNames are the files that hold a subscription's credential or the
 // agent home's marker, by the name a mount carries itself, at its point or
 // from its source (a compose secret, a single file mounted).
@@ -161,11 +167,13 @@ var credentialNames = func() map[string]bool {
 // CODEX_HOME or CLAUDE_CONFIG_DIR mounted alone, a user's home with the CLIs'
 // own dirs, the Bridge's data folder (secret.key, secrets/<name>.enc) or its
 // vault's folder mounted alone, and a host's run folder with a container
-// runtime's socket.
+// runtime's socket (at its top, or where podman, containerd and docker's own
+// containerd keep theirs: runtimeSocketPaths).
 var credentialPaths = func() []string {
 	out := []string{agentHomeMarker, "auth.json", ".credentials.json", ".claude.json", ".claude/.credentials.json",
 		".codex/auth.json", vaultKeyFile}
 	out = append(out, runtimeSockets...)
+	out = append(out, runtimeSocketPaths...)
 	for _, f := range slices.Sorted(maps.Keys(codexKeep)) {
 		out = append(out, path.Join(codexDir, f))
 	}

@@ -602,6 +602,21 @@ func TestMountCheckFollowsLinksAndFindsSockets(t *testing.T) {
 	if why := walk(at(run)); !strings.Contains(why, "podman.sock") {
 		t.Fatalf("a host's run folder with podman's socket = %q", why)
 	}
+	// A host's /run is a tmpfs, looked at its point alone: the sockets a
+	// folder or two down are still found, by their paths (denied), and a run
+	// folder with none passes (allowed).
+	for _, sock := range runtimeSocketPaths {
+		tmpfs := t.TempDir()
+		mkfile(t, filepath.Join(tmpfs, "user", "1000", "bus"))
+		m := mount{root: "/", point: tmpfs, fstype: "tmpfs"}
+		if why := walk(m); why != "" {
+			t.Fatalf("a tmpfs run folder with no socket = %q, want none", why)
+		}
+		mkfile(t, filepath.Join(tmpfs, filepath.FromSlash(sock)))
+		if why := walk(m); !strings.Contains(why, filepath.Join(tmpfs, filepath.FromSlash(sock))) {
+			t.Fatalf("a tmpfs run folder with %s = %q, want it found", sock, why)
+		}
+	}
 }
 
 // A credential that comes within reach while an endpoint run is in progress
