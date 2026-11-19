@@ -718,7 +718,7 @@ func TestDescribeWaitsForTheEnginesCancel(t *testing.T) {
 	case <-time.After(testwait.Scaled(10 * time.Second)):
 		t.Fatal("the engine was never asked to cancel the book")
 	}
-	time.Sleep(100 * time.Millisecond) // ten polls of the description's wait
+	time.Sleep(testwait.Scaled(100 * time.Millisecond)) // ten polls of the description's wait (Scaled: still ten under -race)
 	if s, u := hr.srv.final(312); s != "" || len(d.calls()) != calls {
 		t.Fatalf("while the engine cancels the book: the description ended %q (%q), describe calls %d (was %d)",
 			s, errOf(u), len(d.calls()), calls)
