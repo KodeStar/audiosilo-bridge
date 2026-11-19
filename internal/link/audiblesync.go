@@ -204,7 +204,12 @@ func (c *Client) AudibleProgress(ctx context.Context, account, since string, lim
 	if limit <= 0 {
 		limit = MaxAudibleProgress
 	}
-	q := url.Values{"account": {account}, "limit": {strconv.Itoa(limit)}}
+	// refuse_stale=1: this Bridge reads the feed again from its start when the
+	// server refuses a cursor from another feed or past its end (ErrBadCursor),
+	// so the server may refuse it. Without the flag a 2.7.0 server answers such
+	// a cursor as before (a v0.6.0 Bridge would retry the refusal for ever); an
+	// older server ignores it.
+	q := url.Values{"account": {account}, "limit": {strconv.Itoa(limit)}, "refuse_stale": {"1"}}
 	if since != "" {
 		q.Set("since", since)
 	}

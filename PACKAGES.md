@@ -2165,8 +2165,10 @@ internal/
             the Wire block's fields. Phase 4c, audiblesync.go: AudibleSyncParams/Title (audible.sync's
             server-built params), PostAudibleListening (POST .../listening {sent_at, events}: a listen of
             no length or a finish, answered {server_time, results, progress}) and AudibleProgress (GET
-            /bridge/progress?account=&since=&limit= -> {rows, next, more, server_time}: next opaque and kept between
-            polls, server_time absent before server 2.7.0); 403 sync_off -> ErrSyncOff, 403 user_unavailable -> ErrUserUnavailable, a 400
+            /bridge/progress?account=&since=&limit=&refuse_stale=1 -> {rows, next, more, server_time}: next opaque
+            and kept between polls, server_time absent before server 2.7.0; refuse_stale=1 says this Bridge
+            handles a refused stale cursor, so a 2.7.0 server refuses one from another feed or past the end,
+            answering it as before 2.7.0 to a Bridge without the flag, v0.6.0, which would retry it for ever); 403 sync_off -> ErrSyncOff, 403 user_unavailable -> ErrUserUnavailable, a 400
             invalid_cursor on a sent since -> ErrBadCursor (a server before 2.7.0: invalid_request with
             the message "...: bad cursor"; any other 400 stays the APIError, bridge#50), a 404 for a missing route (code not_found,
             or none) -> ErrNoAudibleSync (a server before 2.6.0; a 404 with any other code stays
