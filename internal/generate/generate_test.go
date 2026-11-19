@@ -1036,3 +1036,99 @@ func TestGenerateShareOffLiftsASharePark(t *testing.T) {
 		t.Fatalf("result = %+v", r)
 	}
 }
+
+// queueShare hands generate-and-share job id (Author/Book) out under attempt,
+// its claim saying shareOff.
+func (hr *harness) queueShare(id int64, attempt int, shareOff bool) {
+	hr.srv.set(func() {
+		lib, path := int64(1), "Author/Book"
+		hr.srv.queue = append(hr.srv.queue, link.Job{ID: id, Kind: Kind, LibraryID: &lib, Path: &path,
+			Params: json.RawMessage(`{"contribute":"issue"}`), Attempts: attempt, State: "claimed", ShareOff: shareOff})
+	})
+}
+
+// takeBack has the server take job id back at asr (its engine book stopped),
+// clearing its reports, with the stage's gate opened.
+func (hr *harness) takeBack(id int64, asr chan struct{}) {
+	hr.waitFor("asr", func() bool {
+		return hr.srv.saw(id, func(_ link.Update, p map[string]any) bool { return p["stage"] == "asr" })
+	})
+	hr.srv.set(func() { hr.srv.notHeld[id] = true })
+	hr.waitFor("the engine book stopped", func() bool { return scheduler.IsCancelled(hr.engineBook(id)) })
+	close(asr)
+	hr.srv.set(func() { hr.srv.notHeld[id], hr.srv.updates[id] = false, nil })
+}
+
+// A generate-and-share job the server takes back and hands out again with
+// share_off follows its engine book again, made in issue mode, and turns it
+// local: denied, the share of a book the job resumes.
+func TestGenerateShareOffReclaimTurnsTheBookLocal(t *testing.T) {
+	t.Parallel()
+	hr := newHarness(t)
+	asr := hr.exec.gate("asr")
+	hr.queueShare(65, 1, false)
+	stop := hr.runner(hr.h)
+	defer stop()
+	hr.takeBack(65, asr)
+	before := hr.engineBook(65)
+	if before.ContribMode != store.ContribModeIssue {
+		t.Fatalf("engine book mode before = %q, want issue", before.ContribMode)
+	}
+	hr.queueShare(65, 2, true)
+	hr.waitFor("done", func() bool { s, _ := hr.srv.final(65); return s == link.StateDone })
+	if b := hr.engineBook(65); b.ID != before.ID || b.ContribMode != store.ContribModeLocal {
+		t.Fatalf("engine book = %d %q, want %d local", b.ID, b.ContribMode, before.ID)
+	}
+	var r Result
+	hr.result(65, &r)
+	if r.ShareSkipped != ShareSkippedContributionsOff {
+		t.Fatalf("result = %+v", r)
+	}
+}
+
+// A share dropped stays dropped, and said: a later attempt of the job whose
+// claim says no share_off (the module on again) finds its engine book kept
+// local and reports the share skipped.
+func TestGenerateShareOffSaidByALaterAttempt(t *testing.T) {
+	t.Parallel()
+	hr := newHarness(t)
+	asr := hr.exec.gate("asr")
+	hr.queueShare(66, 1, true)
+	stop := hr.runner(hr.h)
+	defer stop()
+	hr.takeBack(66, asr)
+	hr.queueShare(66, 2, false)
+	hr.waitFor("done", func() bool { s, _ := hr.srv.final(66); return s == link.StateDone })
+	if b := hr.engineBook(66); b.ContribMode != store.ContribModeLocal {
+		t.Fatalf("engine book mode = %q, want local", b.ContribMode)
+	}
+	var r Result
+	hr.result(66, &r)
+	if r.ShareSkipped != ShareSkippedContributionsOff {
+		t.Fatalf("result = %+v", r)
+	}
+}
+
+// A contributing stage that was running in issue mode when share_off came, and
+// parks over the share after it (core_needed), runs again in local mode.
+func TestGenerateShareOffLiftsAParkAfterIt(t *testing.T) {
+	t.Parallel()
+	hr := newHarness(t)
+	contributing := hr.exec.gate("contributing")
+	hr.exec.parks["contributing"] = 1
+	hr.srv.add(67, "Author/Book", `{"contribute":"issue"}`)
+	stop := hr.runner(hr.h)
+	defer stop()
+	hr.waitFor("contributing", func() bool {
+		return hr.srv.saw(67, func(_ link.Update, p map[string]any) bool { return p["stage"] == "contributing" })
+	})
+	hr.srv.set(func() { hr.srv.shareOff[67] = true })
+	hr.waitFor("the engine book kept local", func() bool { return hr.engineBook(67).ContribMode == store.ContribModeLocal })
+	close(contributing)
+	hr.waitFor("done", func() bool { s, _ := hr.srv.final(67); return s == link.StateDone })
+	var r Result
+	hr.result(67, &r)
+	if r.ShareSkipped != ShareSkippedContributionsOff {
+		t.Fatalf("result = %+v", r)
+	}
+}
