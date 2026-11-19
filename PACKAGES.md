@@ -2206,7 +2206,17 @@ internal/
             asking again and beating again was a tight loop of heartbeats. A mapping
             edit re-checks only its library (each check stats files and writes a
             probe). Status(id) is one library's last check (a write job needs it
-            mapped AND writable at the mount it uses now).
+            mapped AND writable at the mount it uses now). A run asks for one
+            library at a time, CheckSpacing (250 ms) apart. Check and CheckPodcast
+            also return the server's failure when it gave no definite answer (not
+            BookReadSettled's settled: a 429, a 5xx, a 408, a refused token, a
+            timeout, no answer); the Registry then keeps the library's last state
+            at the same mount (a first check, or one at a moved mount, records the
+            failure) and flags it due again, and a 429 ends the run (the rest, and
+            checks queued meanwhile, are flagged too). Due waits out a hold after
+            such a run: the answer's Retry-After, else RetryFirst (1 min) doubling
+            per such run in a row, at most RetryMax (30 min); an answered run ends
+            it. A check cut short by its context records nothing and holds nothing.
   jobs/     the generic runner. Phase 4b: CancelContext(parent) is a context
             whose cancel reads as an admin's cancel (Resumes false), for handler
             tests; Lost(ctx) says a job ended because the server no longer holds

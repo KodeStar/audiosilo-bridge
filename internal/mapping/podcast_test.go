@@ -39,12 +39,12 @@ func TestPodcastMarkerRoundTripAndRegistry(t *testing.T) {
 		}
 		return marker.Nonce, nil
 	})
-	st := CheckPodcast(context.Background(), source, lib, mount, func(id int64) bool { return id == 4 })
-	if !st.Mapped || !st.Writable || st.CheckedPath != MarkerPath {
+	st, unanswered := CheckPodcast(context.Background(), source, lib, mount, func(id int64) bool { return id == 4 })
+	if !st.Mapped || !st.Writable || st.CheckedPath != MarkerPath || unanswered != nil {
 		t.Fatalf("check: %+v", st)
 	}
 	b, _ := os.ReadFile(filepath.Join(mount, MarkerPath))
-	st = CheckPodcast(context.Background(), source, lib, mount, func(id int64) bool { return id == 4 })
+	st, _ = CheckPodcast(context.Background(), source, lib, mount, func(id int64) bool { return id == 4 })
 	after, _ := os.ReadFile(filepath.Join(mount, MarkerPath))
 	if !st.Mapped || string(b) != string(after) {
 		t.Fatal("changed an existing marker")
@@ -88,8 +88,8 @@ func TestPodcastMarkerRefusalsAndCleanup(t *testing.T) {
 					}
 				}
 			}
-			st := CheckPodcast(context.Background(), source, lib, mount, func(id int64) bool { return id == 4 })
-			if st.Mapped || st.Writable || st.Error == "" {
+			st, unanswered := CheckPodcast(context.Background(), source, lib, mount, func(id int64) bool { return id == 4 })
+			if st.Mapped || st.Writable || st.Error == "" || unanswered != nil {
 				t.Fatalf("allowed %s: %+v", scenario, st)
 			}
 			_, err := os.Lstat(filepath.Join(mount, ".audiosilo"))
@@ -142,15 +142,17 @@ func TestPodcastMarkerOfARemovedLibraryIsReplaced(t *testing.T) {
 func TestPodcastMarkerErrorSplit(t *testing.T) {
 	for _, preexisting := range []bool{false, true} {
 		for _, tc := range []struct {
-			name    string
-			err     error
-			message string
+			name       string
+			err        error
+			message    string
+			unanswered bool // the server gave no definite answer
 		}{
-			{"absent", link.ErrNoMarker, "this folder isn't the library the server sees"},
-			{"removed", &link.APIError{Status: 404, Code: "library_not_found"}, "the library was removed from the server"},
-			{"unauthorized", link.ErrUnauthorized, "could not verify this folder with the server"},
-			{"unavailable", &link.APIError{Status: 503}, "could not verify this folder with the server"},
-			{"network", errors.New("https://PRIVATE_CANARY/token"), "could not verify this folder with the server"},
+			{"absent", link.ErrNoMarker, "this folder isn't the library the server sees", false},
+			{"removed", &link.APIError{Status: 404, Code: "library_not_found"}, "the library was removed from the server", false},
+			{"unauthorized", link.ErrUnauthorized, "could not verify this folder with the server", true},
+			{"unavailable", &link.APIError{Status: 503}, "could not verify this folder with the server", true},
+			{"limited", &link.APIError{Status: 429}, "could not verify this folder with the server", true},
+			{"network", errors.New("https://PRIVATE_CANARY/token"), "could not verify this folder with the server", true},
 		} {
 			t.Run(fmt.Sprintf("%s/%t", tc.name, preexisting), func(t *testing.T) {
 				mount := t.TempDir()
@@ -160,9 +162,9 @@ func TestPodcastMarkerErrorSplit(t *testing.T) {
 					os.WriteFile(filepath.Join(mount, MarkerPath), marker, 0644)
 				}
 				source := markerSourceFunc(func(context.Context, int64) (string, error) { return "", tc.err })
-				st := CheckPodcast(context.Background(), source, link.Library{ID: 3, Kind: "podcasts"}, mount, func(int64) bool { return true })
-				if st.Mapped || st.Writable || st.Error != tc.message {
-					t.Fatal(st)
+				st, unanswered := CheckPodcast(context.Background(), source, link.Library{ID: 3, Kind: "podcasts"}, mount, func(int64) bool { return true })
+				if st.Mapped || st.Writable || st.Error != tc.message || (unanswered != nil) != tc.unanswered {
+					t.Fatal(st, unanswered)
 				}
 				b, err := os.ReadFile(filepath.Join(mount, MarkerPath))
 				if preexisting {

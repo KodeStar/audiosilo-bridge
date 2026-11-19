@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -71,9 +73,9 @@ func TestCheck(t *testing.T) {
 	src := books{book: &link.Book{LibraryID: 1, Path: "Author/Book", Files: files}}
 	lib := link.Library{ID: 1, Name: "Books", Root: "/books"}
 
-	st := Check(context.Background(), src, lib, root)
-	if !st.Mapped || !st.Writable || st.CheckedPath != "Author/Book" || st.Error != "" || st.MountPath != root {
-		t.Fatalf("the right mapping = %+v", st)
+	st, unanswered := Check(context.Background(), src, lib, root)
+	if !st.Mapped || !st.Writable || st.CheckedPath != "Author/Book" || st.Error != "" || st.MountPath != root || unanswered != nil {
+		t.Fatalf("the right mapping = %+v, %v", st, unanswered)
 	}
 	if left, _ := filepath.Glob(filepath.Join(root, ProbePrefix+"*")); len(left) != 0 {
 		t.Fatalf("the probe was left behind: %v", left)
@@ -95,28 +97,31 @@ func TestCheck(t *testing.T) {
 		"missing":             filepath.Join(root, "nope"),
 		"a file":              filepath.Join(root, "Author", "Book", "01.mp3"),
 	} {
-		st := Check(context.Background(), src, lib, mount)
-		if st.Mapped || st.Writable || st.Error == "" {
-			t.Errorf("%s: %+v, want not mapped with a reason", name, st)
+		st, unanswered := Check(context.Background(), src, lib, mount)
+		if st.Mapped || st.Writable || st.Error == "" || unanswered != nil {
+			t.Errorf("%s: %+v, %v; want not mapped with a reason", name, st, unanswered)
 		}
 		if left, _ := filepath.Glob(filepath.Join(mount, ProbePrefix+"*")); len(left) != 0 {
 			t.Errorf("%s: probed a folder that isn't the library", name)
 		}
 	}
-	if st := Check(context.Background(), src, lib, stale); !strings.Contains(st.Error, "size differs") {
+	if st, _ := Check(context.Background(), src, lib, stale); !strings.Contains(st.Error, "size differs") {
 		t.Errorf("a stale copy's reason = %q", st.Error)
 	}
 
 	// No book to compare: never mapped.
-	if st := Check(context.Background(), books{err: link.ErrNoBook}, lib, root); st.Mapped || !strings.Contains(st.Error, "no indexed book") {
-		t.Errorf("no book = %+v", st)
+	if st, unanswered := Check(context.Background(), books{err: link.ErrNoBook}, lib, root); st.Mapped || !strings.Contains(st.Error, "no indexed book") || unanswered != nil {
+		t.Errorf("no book = %+v, %v", st, unanswered)
 	}
-	if st := Check(context.Background(), books{err: errors.New("boom")}, lib, root); st.Mapped || !strings.Contains(st.Error, "boom") {
-		t.Errorf("server error = %+v", st)
+	// No answer: said in the status, and returned so the Registry keeps the
+	// last known state.
+	boom := errors.New("boom")
+	if st, unanswered := Check(context.Background(), books{err: boom}, lib, root); st.Mapped || !strings.Contains(st.Error, "boom") || unanswered != boom {
+		t.Errorf("server error = %+v, %v", st, unanswered)
 	}
 	// A server path that leaves the library is a mismatch, never a stat outside.
 	evil := books{book: &link.Book{Path: "x", Files: []link.BookFile{{Path: "../../etc/passwd", Size: 1}}}}
-	if st := Check(context.Background(), evil, lib, root); st.Mapped || !strings.Contains(st.Error, "leaves the library") {
+	if st, _ := Check(context.Background(), evil, lib, root); st.Mapped || !strings.Contains(st.Error, "leaves the library") {
 		t.Errorf("a path out of the library = %+v", st)
 	}
 }
@@ -132,7 +137,7 @@ func TestCheckReadOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chmod(root, 0o755) })
-	st := Check(context.Background(), books{book: &link.Book{Path: "Author/Book", Files: files}}, link.Library{ID: 1}, root)
+	st, _ := Check(context.Background(), books{book: &link.Book{Path: "Author/Book", Files: files}}, link.Library{ID: 1}, root)
 	if !st.Mapped || st.Writable || !strings.Contains(st.Error, "not writable") {
 		t.Fatalf("read-only = %+v", st)
 	}
@@ -352,4 +357,267 @@ func (b slowBooks) Book(context.Context, int64, string) (*link.Book, error) {
 	b.before()
 	defer b.after()
 	return b.book, nil
+}
+
+// scripted answers each library's book lookup with err when set, else book,
+// and counts the lookups (with when each was made).
+type scripted struct {
+	mu    sync.Mutex
+	book  *link.Book
+	err   map[int64]error
+	calls []int64
+	times []time.Time
+}
+
+func (s *scripted) Book(_ context.Context, id int64, _ string) (*link.Book, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.calls = append(s.calls, id)
+	s.times = append(s.times, time.Now())
+	if err := s.err[id]; err != nil {
+		return nil, err
+	}
+	return s.book, nil
+}
+
+func (s *scripted) answer(id int64, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.err[id] = err
+}
+
+// A check the server didn't answer (a 429, a timeout, a 503, a refused token)
+// keeps the library's last known state and makes it due again once the hold
+// ends; a definite answer (a 404, no indexed book) still changes it.
+func TestUnansweredCheckKeepsLastState(t *testing.T) {
+	t.Parallel()
+	root, files := library(t)
+	mount := func(int64, string) (string, bool) { return root, true }
+	at := time.Date(2026, 11, 19, 10, 0, 0, 0, time.UTC)
+	timeout := &url.Error{Op: "Get", URL: "https://server/api", Err: context.DeadlineExceeded}
+	for name, tc := range map[string]struct {
+		err  error
+		hold time.Duration
+	}{
+		"a 429 with Retry-After": {&link.APIError{Status: http.StatusTooManyRequests, RetryAfter: 90 * time.Second, RetryAfterSet: true}, 90 * time.Second},
+		"a 429 without":          {&link.APIError{Status: http.StatusTooManyRequests}, RetryFirst},
+		"a timeout":              {timeout, RetryFirst},
+		"a 503":                  {&link.APIError{Status: http.StatusServiceUnavailable}, RetryFirst},
+		"a refused token":        {link.ErrUnauthorized, RetryFirst},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			r := NewRegistry()
+			r.SetLibraries([]link.Library{{ID: 1, Root: root}})
+			src := &scripted{book: &link.Book{Path: "Author/Book", Files: files}, err: map[int64]error{}}
+			r.Check(context.Background(), src, mount, func() time.Time { return at })
+			src.answer(1, tc.err)
+			later := at.Add(time.Hour)
+			r.Check(context.Background(), src, mount, func() time.Time { return later })
+			st, ok := r.Status(1)
+			if !ok || !st.Mapped || !st.Writable || st.Error != "" {
+				t.Fatalf("the last state was replaced: %+v", st)
+			}
+			if e := r.Entries(mount); *e[0].CheckedAt != at {
+				t.Fatalf("checked at %v, want the kept state's %v", *e[0].CheckedAt, at)
+			}
+			if r.Due(later.Add(tc.hold-time.Second), 24*time.Hour) {
+				t.Fatal("due again before the hold ends")
+			}
+			if !r.Due(later.Add(tc.hold), 24*time.Hour) {
+				t.Fatal("not due again once the hold ends")
+			}
+		})
+	}
+	for name, err := range map[string]error{
+		"a 404":            &link.APIError{Status: http.StatusNotFound, Code: "library_not_found"},
+		"no indexed book":  link.ErrNoBook,
+		"a 403 (definite)": &link.APIError{Status: http.StatusForbidden},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			r := NewRegistry()
+			r.SetLibraries([]link.Library{{ID: 1, Root: root}})
+			src := &scripted{book: &link.Book{Path: "Author/Book", Files: files}, err: map[int64]error{}}
+			r.Check(context.Background(), src, mount, func() time.Time { return at })
+			src.answer(1, err)
+			later := at.Add(time.Hour)
+			r.Check(context.Background(), src, mount, func() time.Time { return later })
+			if st, _ := r.Status(1); st.Mapped || st.Error == "" {
+				t.Fatalf("a definite answer kept the old state: %+v", st)
+			}
+			if r.Due(later, 24*time.Hour) {
+				t.Fatal("a definite answer is due again at once")
+			}
+		})
+	}
+}
+
+// With no state yet at the mount (a first check, or a mapping moved to another
+// folder), an unanswered check is recorded, so the page says why, and is due
+// again after the hold.
+func TestUnansweredCheckWithoutAState(t *testing.T) {
+	t.Parallel()
+	root, files := library(t)
+	other, _ := library(t)
+	mounts := map[string]string{"": root}
+	var mu sync.Mutex
+	mount := func(int64, string) (string, bool) { mu.Lock(); defer mu.Unlock(); return mounts[""], true }
+	at := time.Date(2026, 11, 19, 10, 0, 0, 0, time.UTC)
+	r := NewRegistry()
+	r.SetLibraries([]link.Library{{ID: 1, Root: root}})
+	src := &scripted{book: &link.Book{Path: "Author/Book", Files: files}, err: map[int64]error{1: &link.APIError{Status: http.StatusBadGateway}}}
+	r.Check(context.Background(), src, mount, func() time.Time { return at })
+	if st, ok := r.Status(1); !ok || st.Mapped || !strings.Contains(st.Error, "could not ask the server") {
+		t.Fatalf("a first unanswered check = %+v, %v", st, ok)
+	}
+	if !r.Due(at.Add(RetryFirst), 24*time.Hour) {
+		t.Fatal("a first unanswered check is not due again after the hold")
+	}
+
+	src.answer(1, nil)
+	r.Check(context.Background(), src, mount, func() time.Time { return at })
+	mu.Lock()
+	mounts[""] = other
+	mu.Unlock()
+	src.answer(1, &link.APIError{Status: http.StatusBadGateway})
+	r.Check(context.Background(), src, mount, func() time.Time { return at }, 1)
+	if st, _ := r.Status(1); st.Mapped || st.MountPath != other {
+		t.Fatalf("the old mount's state stood for the new mount: %+v", st)
+	}
+}
+
+// A 429 ends the run: the libraries after it (and checks queued meanwhile)
+// aren't asked, keep their state and are due again after the Retry-After.
+func TestRateLimitEndsTheRun(t *testing.T) {
+	t.Parallel()
+	root, files := library(t)
+	mount := func(int64, string) (string, bool) { return root, true }
+	at := time.Date(2026, 11, 19, 10, 0, 0, 0, time.UTC)
+	r := NewRegistry()
+	r.spacing = time.Millisecond
+	r.SetLibraries([]link.Library{{ID: 1, Root: root}, {ID: 2, Root: root}, {ID: 3, Root: root}})
+	src := &scripted{book: &link.Book{Path: "Author/Book", Files: files}, err: map[int64]error{}}
+	r.Check(context.Background(), src, mount, func() time.Time { return at })
+	src.mu.Lock()
+	src.calls = nil
+	src.mu.Unlock()
+	src.answer(2, &link.APIError{Status: http.StatusTooManyRequests, RetryAfter: 2 * time.Minute, RetryAfterSet: true})
+	later := at.Add(time.Hour)
+	r.Check(context.Background(), src, mount, func() time.Time { return later })
+	if !slices.Equal(src.calls, []int64{1, 2}) {
+		t.Fatalf("asked for %v after the 429, want 1 and 2 only", src.calls)
+	}
+	for _, st := range r.Statuses() {
+		if !st.Mapped {
+			t.Fatalf("library %d lost its state: %+v", st.LibraryID, st)
+		}
+	}
+	if r.Due(later.Add(time.Minute), 24*time.Hour) || !r.Due(later.Add(2*time.Minute), 24*time.Hour) {
+		t.Fatal("the hold isn't the Retry-After")
+	}
+	src.answer(2, nil)
+	r.Check(context.Background(), src, mount, func() time.Time { return later.Add(2 * time.Minute) })
+	if r.Due(later.Add(2*time.Minute), 24*time.Hour) {
+		t.Fatal("still due after a run the server answered")
+	}
+}
+
+// The hold without a Retry-After doubles with each unanswered run in a row, at
+// most RetryMax, and a run the server answers ends it.
+func TestHoldBacksOff(t *testing.T) {
+	t.Parallel()
+	r := NewRegistry()
+	at := time.Date(2026, 11, 19, 10, 0, 0, 0, time.UTC)
+	for _, want := range []time.Duration{time.Minute, 2 * time.Minute, 4 * time.Minute, 8 * time.Minute, 16 * time.Minute, RetryMax, RetryMax} {
+		r.holdAfter(errors.New("no answer"), at)
+		if got := r.holdUntil.Sub(at); got != want {
+			t.Fatalf("hold %d = %v, want %v", r.held, got, want)
+		}
+	}
+	r.holdAfter(&link.APIError{Status: http.StatusTooManyRequests, RetryAfter: 24 * time.Hour, RetryAfterSet: true}, at)
+	if got := r.holdUntil.Sub(at); got != RetryMax {
+		t.Fatalf("a day's Retry-After held %v, want RetryMax", got)
+	}
+	r.holdAfter(nil, at)
+	if r.held != 0 || !r.holdUntil.IsZero() {
+		t.Fatal("an answered run left the hold")
+	}
+}
+
+// A run asks for one library at a time, at least spacing apart (pacing a run
+// of many mappings under the server's rate limit), and stops waiting at once
+// when ctx ends.
+func TestChecksArePaced(t *testing.T) {
+	t.Parallel()
+	root, files := library(t)
+	mount := func(int64, string) (string, bool) { return root, true }
+	r := NewRegistry()
+	r.spacing = 40 * time.Millisecond
+	r.SetLibraries([]link.Library{{ID: 1, Root: root}, {ID: 2, Root: root}, {ID: 3, Root: root}})
+	src := &scripted{book: &link.Book{Path: "Author/Book", Files: files}, err: map[int64]error{}}
+	r.Check(context.Background(), src, mount, time.Now)
+	if len(src.times) != 3 {
+		t.Fatalf("asked %d times, want 3", len(src.times))
+	}
+	for i := 1; i < len(src.times); i++ {
+		if gap := src.times[i].Sub(src.times[i-1]); gap < r.spacing {
+			t.Fatalf("checks %d and %d were %v apart, want at least %v", i-1, i, gap, r.spacing)
+		}
+	}
+
+	r.spacing = time.Hour
+	ctx, cancel := context.WithCancel(context.Background())
+	src.times = nil
+	done := make(chan struct{})
+	go func() { r.Check(ctx, src, mount, time.Now); close(done) }()
+	for {
+		src.mu.Lock()
+		n := len(src.times)
+		src.mu.Unlock()
+		if n == 1 {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the run kept waiting after ctx ended")
+	}
+}
+
+// ctxBooks answers once ctx ends, with its error (a check cut short by shutdown
+// or a re-pair).
+type ctxBooks struct{ started chan struct{} }
+
+func (b ctxBooks) Book(ctx context.Context, _ int64, _ string) (*link.Book, error) {
+	close(b.started)
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+// A check cut short by its context records nothing and sets no hold: it says
+// nothing about the library or the server.
+func TestCutShortCheckRecordsNothing(t *testing.T) {
+	t.Parallel()
+	root, _ := library(t)
+	mount := func(int64, string) (string, bool) { return root, true }
+	at := time.Date(2026, 11, 19, 10, 0, 0, 0, time.UTC)
+	r := NewRegistry()
+	r.SetLibraries([]link.Library{{ID: 1, Root: root}})
+	ctx, cancel := context.WithCancel(context.Background())
+	src := ctxBooks{started: make(chan struct{})}
+	done := make(chan struct{})
+	go func() { r.Check(ctx, src, mount, func() time.Time { return at }); close(done) }()
+	<-src.started
+	cancel()
+	<-done
+	if _, ok := r.Status(1); ok {
+		t.Fatal("a cut-short check was recorded")
+	}
+	if !r.Due(at, time.Hour) {
+		t.Fatal("a cut-short check held the next run")
+	}
 }

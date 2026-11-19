@@ -5,7 +5,9 @@
 // write there. Only the size comparison catches a stale copy of a library
 // (spike 3), so a library with no indexed book is never reported mapped. A
 // podcast library has no books: a marker the server reads back proves it
-// instead (CheckPodcast).
+// instead (CheckPodcast). A check the server doesn't answer (a 429, a 5xx, a
+// timeout) says nothing about the folder, so the Registry keeps the library's
+// last known state and asks again later, pacing its checks.
 package mapping
 
 import (
@@ -160,49 +162,67 @@ const BookReadBudget = 2 * time.Minute
 // again won't change. No answer at all, a refused token the job runner is
 // dealing with, a 408, a 429 (the server's request rate) and a 5xx may change,
 // so a job's read asks again.
-func BookReadSettled(err error) bool {
-	if errors.Is(err, link.ErrNoBook) {
+func BookReadSettled(err error) bool { return settled(err) }
+
+// settled reports whether a failed server read is a definite answer: no such
+// book or marker, or an APIError that isn't Transient. Anything else (a 408, a
+// 429, a 5xx, a refused token, a timeout, no answer at all) may change if
+// asked again.
+func settled(err error) bool {
+	if errors.Is(err, link.ErrNoBook) || errors.Is(err, link.ErrNoMarker) {
 		return true
 	}
 	var apiErr *link.APIError
 	return errors.As(err, &apiErr) && !apiErr.Transient()
 }
 
+// unsettled is err when it is a server failure that may change if asked again,
+// else nil: a check's second result.
+func unsettled(err error) error {
+	if err == nil || settled(err) {
+		return nil
+	}
+	return err
+}
+
 // Check checks one library's mapping: mount must hold the server's sample book
 // with the server's sizes, and only then is the folder probed for writing.
-func Check(ctx context.Context, src BookSource, lib link.Library, mount string) link.LibraryStatus {
-	st := link.LibraryStatus{LibraryID: lib.ID, MountPath: mount}
+// unanswered is the server's failure when it gave no definite answer (a 429, a
+// 5xx, a timeout, no answer at all): the status says so too, and the Registry
+// keeps the library's last known state instead of it.
+func Check(ctx context.Context, src BookSource, lib link.Library, mount string) (st link.LibraryStatus, unanswered error) {
+	st = link.LibraryStatus{LibraryID: lib.ID, MountPath: mount}
 	info, err := os.Stat(mount)
 	switch {
 	case err != nil:
 		st.Error = "the folder " + mount + " is " + describeStatError(err)
-		return st
+		return st, nil
 	case !info.IsDir():
 		st.Error = mount + " is not a folder"
-		return st
+		return st, nil
 	}
 	book, err := src.Book(ctx, lib.ID, "")
 	switch {
 	case errors.Is(err, link.ErrNoBook):
 		st.Error = "the library has no indexed book to compare against yet"
-		return st
+		return st, nil
 	case err != nil:
 		st.Error = "could not ask the server for a book: " + err.Error()
-		return st
+		return st, unsettled(err)
 	}
 	st.CheckedPath = book.Path
 	_, ok, problem := CompareFiles(mount, book.Files)
 	if !ok {
 		st.Error = "this folder doesn't hold the server's copy of the library (" + problem + ")"
-		return st
+		return st, nil
 	}
 	st.Mapped = true
 	if err := ProbeWritable(mount); err != nil {
 		st.Error = "mapped, but not writable here: " + describeStatError(err)
-		return st
+		return st, nil
 	}
 	st.Writable = true
-	return st
+	return st, nil
 }
 
 // Entry is one server library with its mount and its last check.
@@ -217,12 +237,32 @@ type Entry struct {
 // MountFunc says where the Bridge sees a library (config.Config.MountFor).
 type MountFunc func(libraryID int64, serverRoot string) (path string, configured bool)
 
+// CheckSpacing is the least time between two libraries' checks in a run: each
+// asks the server, and a run of many mappings asking at once could meet its
+// rate limit.
+const CheckSpacing = 250 * time.Millisecond
+
+// After a run in which the server gave no definite answer for a library (a
+// 429, a 5xx, a timeout, no answer), Due holds the next run for the answer's
+// Retry-After, else RetryFirst doubling with each such run in a row; either at
+// most RetryMax.
+const (
+	RetryFirst = time.Minute
+	RetryMax   = 30 * time.Minute
+)
+
 // Registry holds the server's libraries (from the last heartbeat) and each
 // one's last check. It is safe for concurrent use.
 type Registry struct {
 	mu      sync.Mutex
 	libs    []link.Library
 	results map[int64]result
+	// spacing is CheckSpacing (shorter in tests). holdUntil is when Due may
+	// next start a run after one the server didn't answer; held counts such
+	// runs in a row.
+	spacing   time.Duration
+	holdUntil time.Time
+	held      int
 	// checking: a Check is running; pendAll/pend are what was asked for
 	// meanwhile, which it checks right after, with pendSrc, the newest caller's
 	// link (a check asked for after a re-pair must not use the old one).
@@ -232,13 +272,20 @@ type Registry struct {
 	pendSrc  BookSource
 }
 
+// result is a library's last known state. retry: a check since then got no
+// definite answer from the server, so the library is due again once the hold
+// ends (status and at are still the state before it, or that failure when the
+// library had none at its mount).
 type result struct {
 	status link.LibraryStatus
 	at     time.Time
+	retry  bool
 }
 
 // NewRegistry returns an empty Registry.
-func NewRegistry() *Registry { return &Registry{results: map[int64]result{}, pend: map[int64]bool{}} }
+func NewRegistry() *Registry {
+	return &Registry{results: map[int64]result{}, pend: map[int64]bool{}, spacing: CheckSpacing}
+}
 
 // SetLibraries records the server's libraries and reports whether they differ
 // from the last list (a library added, removed, renamed or moved). Checks of
@@ -326,30 +373,34 @@ func (r *Registry) Entries(mount MountFunc) []Entry {
 	return out
 }
 
-// Due reports whether a check is due: a library with none, or one older than
-// interval, and no check running (it refreshes them, so asking again would
-// only queue a second pass).
+// Due reports whether a check is due: a library with none, one older than
+// interval or one the server last left unanswered, with no check running (it
+// refreshes them, so asking again would only queue a second pass) and no hold
+// after an unanswered run (asking again at once would meet the same 429).
 func (r *Registry) Due(now time.Time, interval time.Duration) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.checking {
+	if r.checking || now.Before(r.holdUntil) {
 		return false
 	}
 	for _, l := range r.libs {
 		res, ok := r.results[l.ID]
-		if !ok || now.Sub(res.at) >= interval {
+		if !ok || res.retry || now.Sub(res.at) >= interval {
 			return true
 		}
 	}
 	return false
 }
 
-// Check checks the libraries ids (every library with none) now, one at a time,
-// and records the results. Checks never overlap: one asked for while another
-// runs is done right after it (by that call, with this call's src), so a
-// mapping changed mid-check is never missed. It returns once there is nothing
-// left to check, or ctx ends, and reports whether it checked (false: queued
-// behind the running check).
+// Check checks the libraries ids (every library with none) now, one at a time
+// and at least spacing apart, and records the results. Checks never overlap:
+// one asked for while another runs is done right after it (by that call, with
+// this call's src), so a mapping changed mid-check is never missed. A check the
+// server didn't answer keeps the library's last known state at the same mount
+// (a 429 or a 503 says nothing about the folder), and a 429 ends the run: the
+// libraries it hadn't reached yet, and those queued meanwhile, are due again
+// after the hold. It returns once there is nothing left to check, or ctx ends,
+// and reports whether it checked (false: queued behind the running check).
 func (r *Registry) Check(ctx context.Context, src BookSource, mount MountFunc, now func() time.Time, ids ...int64) bool {
 	r.mu.Lock()
 	if r.checking {
@@ -364,6 +415,10 @@ func (r *Registry) Check(ctx context.Context, src BookSource, mount MountFunc, n
 		return false
 	}
 	r.checking = true
+	// last is when the run's previous library was checked (spacing);
+	// unanswered is its last failure the server didn't answer (the hold).
+	var last time.Time
+	var unanswered error
 	for {
 		var libs []link.Library
 		listed := map[int64]bool{}
@@ -374,28 +429,45 @@ func (r *Registry) Check(ctx context.Context, src BookSource, mount MountFunc, n
 			}
 		}
 		r.mu.Unlock()
-		for _, l := range libs {
-			if ctx.Err() != nil {
+		limited := false
+		for i, l := range libs {
+			if ctx.Err() != nil || (!last.IsZero() && !sleep(ctx, time.Until(last.Add(r.spacing)))) {
 				break
 			}
+			last = time.Now()
 			path, _ := mount(l.ID, l.Root)
-			var st link.LibraryStatus
-			if l.LibraryKind() == "podcasts" {
-				marker, ok := src.(MarkerSource)
-				if ok {
-					st = CheckPodcast(ctx, marker, l, path, func(id int64) bool { return listed[id] })
-				} else {
-					st = link.LibraryStatus{LibraryID: l.ID, MountPath: path, Error: "the server link cannot check a library marker"}
-				}
-			} else {
-				st = Check(ctx, src, l, path)
+			st, err := checkOne(ctx, src, l, path, listed)
+			if ctx.Err() != nil {
+				break // cut short: it says nothing about the library or the server
 			}
 			r.mu.Lock()
-			r.results[l.ID] = result{status: st, at: now()}
+			r.record(st, err, now())
+			if err != nil {
+				unanswered = err
+				if _, limited = link.RateLimited(err); limited {
+					for _, rest := range libs[i+1:] {
+						r.markRetry(rest.ID)
+					}
+				}
+			}
 			r.mu.Unlock()
+			if limited {
+				break
+			}
 		}
 		r.mu.Lock()
-		if ctx.Err() != nil || (!r.pendAll && len(r.pend) == 0) {
+		if limited {
+			// Asking for the queued checks now would meet the same 429.
+			for _, l := range r.libs {
+				if r.pendAll || r.pend[l.ID] {
+					r.markRetry(l.ID)
+				}
+			}
+		}
+		if limited || ctx.Err() != nil || (!r.pendAll && len(r.pend) == 0) {
+			if ctx.Err() == nil {
+				r.holdAfter(unanswered, now())
+			}
 			r.checking, r.pendAll, r.pendSrc = false, false, nil
 			clear(r.pend)
 			r.mu.Unlock()
@@ -412,5 +484,75 @@ func (r *Registry) Check(ctx context.Context, src BookSource, mount MountFunc, n
 		}
 		r.pendAll, r.pendSrc = false, nil
 		clear(r.pend)
+	}
+}
+
+// checkOne checks one library by its kind (Check, or CheckPodcast).
+func checkOne(ctx context.Context, src BookSource, l link.Library, path string, listed map[int64]bool) (link.LibraryStatus, error) {
+	if l.LibraryKind() != "podcasts" {
+		return Check(ctx, src, l, path)
+	}
+	marker, ok := src.(MarkerSource)
+	if !ok {
+		return link.LibraryStatus{LibraryID: l.ID, MountPath: path, Error: "the server link cannot check a library marker"}, nil
+	}
+	return CheckPodcast(ctx, marker, l, path, func(id int64) bool { return listed[id] })
+}
+
+// record keeps a library's check (r.mu held). One the server didn't answer
+// (unanswered) leaves the last known state at the same mount in place, due
+// again after the hold; with none there it is recorded, so the page says why.
+func (r *Registry) record(st link.LibraryStatus, unanswered error, at time.Time) {
+	prev, ok := r.results[st.LibraryID]
+	if unanswered != nil && ok && prev.status.MountPath == st.MountPath {
+		prev.retry = true
+		r.results[st.LibraryID] = prev
+		return
+	}
+	r.results[st.LibraryID] = result{status: st, at: at, retry: unanswered != nil}
+}
+
+// markRetry makes a checked library due again after the hold (r.mu held); one
+// with no check yet is due anyway.
+func (r *Registry) markRetry(id int64) {
+	if res, ok := r.results[id]; ok {
+		res.retry = true
+		r.results[id] = res
+	}
+}
+
+// holdAfter sets when Due may next start a run (r.mu held): nothing to wait
+// for after a run the server answered throughout; after one it didn't
+// (unanswered), the answer's Retry-After, else RetryFirst doubling with each
+// such run in a row, at most RetryMax.
+func (r *Registry) holdAfter(unanswered error, now time.Time) {
+	if unanswered == nil {
+		r.held, r.holdUntil = 0, time.Time{}
+		return
+	}
+	r.held++
+	wait := RetryFirst
+	for n := 1; n < r.held && wait < RetryMax; n++ {
+		wait *= 2
+	}
+	var apiErr *link.APIError
+	if errors.As(unanswered, &apiErr) && apiErr.RetryAfterSet {
+		wait = apiErr.RetryAfter
+	}
+	r.holdUntil = now.Add(min(wait, RetryMax))
+}
+
+// sleep waits d, false when ctx ends first.
+func sleep(ctx context.Context, d time.Duration) bool {
+	if d <= 0 {
+		return ctx.Err() == nil
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-t.C:
+		return true
 	}
 }
