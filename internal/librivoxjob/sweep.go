@@ -114,8 +114,9 @@ func (h *Handler) sweepOne(k key, now time.Time) {
 	if info, err := os.Stat(h.statePath(k.lib, k.id)); err != nil || now.Sub(info.ModTime()) < StagingMaxAge {
 		return
 	}
-	st := h.loadState(k.lib, k.id) // gone already when invalid or another server's
-	if st == nil || h.serverUnknown(st) {
+	serverID := h.o.ServerID()               // no job's: the pairing's
+	st := h.loadState(k.lib, k.id, serverID) // gone already when invalid or another server's
+	if st == nil || serverUnknown(st, serverID) {
 		return
 	}
 	if !st.Placed {

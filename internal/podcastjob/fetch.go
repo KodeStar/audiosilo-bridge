@@ -134,7 +134,7 @@ func (b *budget) failure(ctx context.Context, err error) error {
 
 func (h *Fetch) Run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (any, error) {
 	kept := ""
-	result, err := h.run(parent, &job, rep, &kept)
+	result, err := (&Fetch{s: h.s.forJob(job)}).run(parent, &job, rep, &kept)
 	if err != nil && (parent.Err() == nil || !jobs.Resumes(parent)) {
 		h.abandon(parent, job, kept)
 	}
@@ -1395,7 +1395,7 @@ func (h *Fetch) abandon(ctx context.Context, job jobs.Job, kept string) {
 	if json.Unmarshal(job.Params, &p) != nil {
 		return
 	}
-	s := h.s
+	s := h.s.forJob(job)
 	lib, ok := s.o.Libraries.Library(*job.LibraryID)
 	if !ok {
 		return

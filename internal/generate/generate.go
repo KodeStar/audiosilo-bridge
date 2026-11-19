@@ -642,7 +642,7 @@ func (h *Handler) shareOwed(ctx context.Context, r *run, b store.Book) (bool, er
 		return false, nil
 	}
 	h.o.Log.Info("generate: the job follows its engine book again, so it files the share", "job", r.job.ID, "book", b.ID)
-	r.rep.Progress(jobs.Progress{Step: stepSharing, Message: "Sharing with the community", Total: 1})
+	r.rep.Progress(sharingProgress)
 	// Asked again under the hold, after the server's answer: a share_off stored
 	// since the look above (another job's on the book) still wins.
 	stands := func(ctx context.Context) (bool, error) {
@@ -1108,7 +1108,7 @@ func (h *Handler) prepare(ctx context.Context, r *run, strict bool) error {
 // serverLibrary sets the run's server and the job's library as the server
 // listed it.
 func (h *Handler) serverLibrary(r *run) error {
-	srv := h.o.Server()
+	srv := jobs.Link(r.job, h.o.Server()) // none once paired with another server
 	if srv == nil {
 		return errors.New("the Bridge isn't paired")
 	}

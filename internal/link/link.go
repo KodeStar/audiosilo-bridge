@@ -421,6 +421,12 @@ type Client struct {
 	httpc            *http.Client
 	timeout          time.Duration
 	claimMinPriority *negotiation
+	// serverID is the id of the server the pairing reached (Paired.ServerID),
+	// "" until WithServerID sets it.
+	serverID string
+	// pairing is the Bridge's pairing identity the link was made for
+	// (WithPairing), recorded with every job claimed on it.
+	pairing string
 }
 
 // negotiation is a pairing's claim_min_priority: accepted by its last
@@ -770,3 +776,42 @@ func answerError(status int, raw []byte) error {
 // BaseURL is the server address the client calls (normalised: no trailing
 // slash).
 func (c *Client) BaseURL() string { return c.base.String() }
+
+// WithServerID returns a copy of the client that knows the id of the server it
+// reaches (the pairing's server_id), so the link and its server's identity are
+// read together (the job runner's one rule for which jobs are this link's).
+// The copy shares the client's transport and claim negotiation.
+func (c *Client) WithServerID(id string) *Client {
+	cp := *c
+	cp.serverID = id
+	return &cp
+}
+
+// ServerID is the id of the server the client reaches ("" when unknown).
+func (c *Client) ServerID() string { return c.serverID }
+
+// WithPairing returns a copy of the client made for the Bridge's pairing id
+// (the app's pairing.id setting), so a job claimed on the link is recorded
+// under the pairing that claimed it, never under one a re-pair made since. The
+// copy shares the client's transport and claim negotiation, as WithServerID's.
+func (c *Client) WithPairing(id string) *Client {
+	cp := *c
+	cp.pairing = id
+	return &cp
+}
+
+// PairingID is the Bridge's pairing the client was made for ("" for none).
+func (c *Client) PairingID() string { return c.pairing }
+
+// FetchServerID asks the server for its id (GET /api/v1/server, the public
+// server info, where every server sends the id its pairing answer carries): a
+// pairing stored without one learns it here before its link counts.
+func (c *Client) FetchServerID(ctx context.Context) (string, error) {
+	var out struct {
+		ServerID string `json:"server_id"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/api/v1/server", nil, nil, &out); err != nil {
+		return "", err
+	}
+	return out.ServerID, nil
+}

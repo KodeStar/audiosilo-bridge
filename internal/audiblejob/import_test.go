@@ -1542,3 +1542,36 @@ func TestImportFollowsTheLibrarysSpelling(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// Abandon leaves the title's temp files to an import of the account that holds
+// its gate (denied: a later claim of the same title may be downloading into
+// them), without waiting for it, and removes them once no import holds the
+// gate (allowed).
+func TestImportAbandonKeepsTheAccountGate(t *testing.T) {
+	e := newImportEnv(t)
+	part := filepath.Join(e.tmp, "acct0001-B0FAKE0002.aaxc.part")
+	if err := os.MkdirAll(e.tmp, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{part, audible.StatePath(part)} {
+		if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h := NewImport(e.opts)
+	release, ok := h.tryGate("acct0001") // an import of the account runs
+	if !ok {
+		t.Fatal("the gate was taken")
+	}
+	job := jobs.Job{ID: 7, Kind: ImportKind, Params: e.params(nil), Attempt: 1}
+	h.Abandon(jobs.AbandonContext(context.Background(), false), job)
+	kept(t, part)
+	release()
+	h.Abandon(jobs.AbandonContext(context.Background(), false), job)
+	e.tmpEmpty(t)
+	if release, ok := h.tryGate("acct0001"); !ok {
+		t.Fatal("Abandon kept the account's gate")
+	} else {
+		release()
+	}
+}

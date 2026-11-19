@@ -327,6 +327,12 @@ type fakeMeta struct {
 	redirects map[string]string
 	// onWork, when set, runs at each request for a work.
 	onWork func()
+	// down answers every request 503 while set (a service down, or a lookup
+	// past the client's timeout: the client hears no answer either way).
+	down atomic.Bool
+	// refuse answers every request 403 while set (a permanent refusal: asking
+	// again won't change it).
+	refuse atomic.Bool
 }
 
 type metaWorkFixture struct {
@@ -344,6 +350,14 @@ func newFakeMeta(t *testing.T, lookups map[string]string, works map[string]metaW
 }
 
 func (m *fakeMeta) handle(w http.ResponseWriter, r *http.Request) {
+	if m.down.Load() {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		return
+	}
+	if m.refuse.Load() {
+		w.WriteHeader(http.StatusForbidden)
+		return
+	}
 	switch {
 	case r.URL.Path == "/api/v1/lookup":
 		id := ""
@@ -1512,6 +1526,97 @@ func TestContributeWaitsWhenTheServerCantBeAsked(t *testing.T) {
 
 	if _, err := exe.Share(ctx, b.ID, "", nil); err != nil || gh.issueCount() != 2 {
 		t.Fatalf("share of the book: %v, issues %d, want 2", err, gh.issueCount())
+	}
+}
+
+// A work lookup the community database doesn't answer (past the client's
+// timeout, or the service down) while a share is owed parks the book
+// share_unconfirmed and files nothing, whether it was verifying the book's
+// work or looking its identifiers up (denied: before BR-LINK-RULE the first
+// failed the book and the second parked core_needed with a proposal written);
+// once the database answers, the book files (allowed). In local mode no share
+// is owed, and an identifier lookup with no answer goes on to the placeholder
+// as before.
+func TestContributeWaitsWhenTheWorkLookupHasNoAnswer(t *testing.T) {
+	ctx := context.Background()
+	for name, nb := range map[string]store.NewBook{
+		"verify":     {WorkID: "reacher-01", ContribMode: store.ContribModeIssue},
+		"identifier": {ASIN: "B01", ContribMode: store.ContribModeIssue, SourcePath: "/src/asin"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			db := openContribDB(t)
+			gh := newFakeGitHub(t)
+			meta := newFakeMeta(t, map[string]string{"asin:B01": "reacher-01"},
+				map[string]metaWorkFixture{"reacher-01": {title: "Killing Floor"}})
+			exe := NewExecutor(contribConfig(t, db, contribModeIssue, gh.srv.URL, meta.srv.URL, t.TempDir(), fakeTokenResolver{token: "ghp_x"}))
+			b := contribBook(t, db, nb, baseChars("x"), baseRecaps("x"))
+			meta.down.Store(true)
+			_, err := exe.Execute(ctx, b, state.Contributing, scheduler.StageReport{})
+			park := assertPark(t, err, state.ParkShareUnconfirmed)
+			if park.Reason != ShareLookupMsg || park.RetryAfter.IsZero() {
+				t.Fatalf("park = %+v, want the lookup's message and a retry", park)
+			}
+			if n := gh.issueCount(); n != 0 {
+				t.Fatalf("issues filed = %d, want none", n)
+			}
+			if _, err := os.Stat(filepath.Join(b.WorkDir, contribDir, coreProposalName)); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("a core proposal was written for a lookup with no answer (%v)", err)
+			}
+			if _, err := exe.Share(ctx, b.ID, "", nil); !errors.As(err, &park) || park.Code != state.ParkShareUnconfirmed {
+				t.Fatalf("a share with no answer = %v, want a share_unconfirmed park", err)
+			}
+			meta.down.Store(false)
+			if _, err := exe.Execute(ctx, b, state.Contributing, scheduler.StageReport{}); err != nil || gh.issueCount() != 2 {
+				t.Fatalf("once the database answers: %v, issues %d, want 2", err, gh.issueCount())
+			}
+		})
+	}
+	t.Run("local mode", func(t *testing.T) {
+		db := openContribDB(t)
+		meta := newFakeMeta(t, map[string]string{"asin:B01": "reacher-01"}, nil)
+		exe := NewExecutor(contribConfig(t, db, contribModeLocal, "", meta.srv.URL, t.TempDir(), fakeTokenResolver{token: "ghp_x"}))
+		b := contribBook(t, db, store.NewBook{Title: "Killing Floor", ASIN: "B01"}, baseChars("x"), baseRecaps("x"))
+		meta.down.Store(true)
+		if _, err := exe.Execute(ctx, b, state.Contributing, scheduler.StageReport{}); err != nil {
+			t.Fatalf("local mode with no answer: %v, want the placeholder export", err)
+		}
+	})
+}
+
+// A work lookup the community database refuses for good (a 403: asking again
+// won't change it) is no lookup without an answer: the book fails with it
+// rather than park share_unconfirmed to ask every minute for good (denied),
+// nothing is filed and no core proposal is written, verifying the book's work
+// or looking its identifiers up, in the stage and in a share alike.
+func TestContributeFailsWhenTheWorkLookupIsRefused(t *testing.T) {
+	ctx := context.Background()
+	for name, nb := range map[string]store.NewBook{
+		"verify":     {WorkID: "reacher-01", ContribMode: store.ContribModeIssue},
+		"identifier": {ASIN: "B01", ContribMode: store.ContribModeIssue, SourcePath: "/src/asin"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			db := openContribDB(t)
+			gh := newFakeGitHub(t)
+			meta := newFakeMeta(t, map[string]string{"asin:B01": "reacher-01"},
+				map[string]metaWorkFixture{"reacher-01": {title: "Killing Floor"}})
+			exe := NewExecutor(contribConfig(t, db, contribModeIssue, gh.srv.URL, meta.srv.URL, t.TempDir(), fakeTokenResolver{token: "ghp_x"}))
+			b := contribBook(t, db, nb, baseChars("x"), baseRecaps("x"))
+			meta.refuse.Store(true)
+			var park *scheduler.ParkError
+			_, err := exe.Execute(ctx, b, state.Contributing, scheduler.StageReport{})
+			if err == nil || errors.As(err, &park) || !errors.Is(err, metaops.ErrRefused) {
+				t.Fatalf("a refused lookup = %v, want the refusal as the stage's failure, not a park", err)
+			}
+			if _, err := exe.Share(ctx, b.ID, "", nil); err == nil || errors.As(err, &park) || !errors.Is(err, metaops.ErrRefused) {
+				t.Fatalf("a share with a refused lookup = %v, want the refusal, not a park", err)
+			}
+			if n := gh.issueCount(); n != 0 {
+				t.Fatalf("issues filed = %d, want none", n)
+			}
+			if _, err := os.Stat(filepath.Join(b.WorkDir, contribDir, coreProposalName)); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("a core proposal was written for a refused lookup (%v)", err)
+			}
+		})
 	}
 }
 

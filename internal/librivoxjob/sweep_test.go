@@ -249,16 +249,93 @@ func TestOtherServersStateNeverActedOn(t *testing.T) {
 		t.Fatal("the sweep acted on another server's state, or kept it")
 	}
 
-	// Allowed: this server's state, and one with no server id.
-	for _, recorded := range []string{"server-b", ""} {
+	// Allowed: this server's state. Denied: one with no server id, which
+	// Abandon can't prove is this job's (the sweep's, once abandoned).
+	for recorded, removed := range map[string]bool{"server-b": true, "": false} {
 		x = newHarness(t)
 		x.serverID = recorded
 		x.stageAndStop(t)
 		x.serverID = "server-b"
 		x.h.Abandon(jobs.AbandonContext(context.Background(), false), x.job(true))
-		if x.exists(stagingDir) || x.hasState() {
-			t.Fatalf("recorded %q: Abandon left this server's staging", recorded)
+		if gone := !x.exists(stagingDir) && !x.hasState(); gone != removed {
+			t.Fatalf("recorded %q: Abandon removed the staging %v, want %v", recorded, gone, removed)
 		}
+	}
+}
+
+// Abandon removes only the staging its own job recorded (allowed: its server
+// and job id in the state, the libraries listed its server's, while the Bridge
+// is unpaired too). Another job's fetch of the same project and library (a
+// new claim since), a state from before the job id was kept, and a job of a
+// server the Bridge was paired with before the last pairing are left (denied).
+func TestAbandonRemovesOnlyItsOwnJobsStaging(t *testing.T) {
+	ctx := jobs.AbandonContext(context.Background(), false)
+	x := newHarness(t)
+	x.stageAndStop(t)
+	other := jobs.ClaimedFrom(x.job(true), testServer)
+	other.ID = 42
+	x.h.Abandon(ctx, other)
+	if !x.exists(stagingDir) || !x.hasState() {
+		t.Fatal("Abandon of another job removed this job's staging")
+	}
+	x.serverID = "server-b" // paired with server-b since, unpaired now: its libraries listed
+	x.h.Abandon(ctx, jobs.ClaimedFrom(x.job(true), testServer))
+	if !x.exists(stagingDir) || !x.hasState() {
+		t.Fatal("Abandon followed its state into another server's library")
+	}
+	x.serverID = testServer
+	x.srv = nil // unpaired: the libraries listed are still its server's
+	x.h.Abandon(ctx, jobs.ClaimedFrom(x.job(true), testServer))
+	if x.exists(stagingDir) || x.hasState() {
+		t.Fatal("Abandon left its own job's staging")
+	}
+
+	x = newHarness(t)
+	x.stageAndStop(t)
+	st := x.h.loadState(3, testID, testServer)
+	st.JobID = 0 // recorded before the job id was kept
+	if err := x.h.saveState(testID, st); err != nil {
+		t.Fatal(err)
+	}
+	x.h.Abandon(ctx, jobs.ClaimedFrom(x.job(true), testServer))
+	if !x.exists(stagingDir) || !x.hasState() {
+		t.Fatal("Abandon removed a staging its job can't be proven to own")
+	}
+	// A run of the job takes the state over, and its Abandon removes it.
+	x.fetch.files[sectionURL(3)].cut = []int{0, 0, 0}
+	if _, err := x.run(context.Background(), true); err == nil {
+		t.Fatal("the outage didn't fail the run")
+	}
+	if st := x.h.loadState(3, testID, testServer); st == nil || st.JobID != 41 {
+		t.Fatalf("the resumed run's state: %+v", st)
+	}
+	x.h.Abandon(ctx, jobs.ClaimedFrom(x.job(true), testServer))
+	if x.exists(stagingDir) || x.hasState() {
+		t.Fatal("Abandon left the staging its job took over")
+	}
+}
+
+// A job of a server the Bridge is no longer paired with (dropped by the
+// runner) follows its state into no library of the new pairing, whose
+// libraries share ids with its own: Abandon removes nothing there (denied).
+// Paired with its own server, its staging goes (allowed).
+func TestAbandonOfADroppedJobLeavesTheNewPairingsLibrary(t *testing.T) {
+	x := newHarness(t)
+	x.serverID, x.srv.id = "server-a", "server-a"
+	x.stageAndStop(t)
+	job := jobs.ClaimedFrom(x.job(true), "server-a")
+	x.serverID, x.srv.id = "server-b", "server-b"
+	x.h.Abandon(jobs.AbandonContext(context.Background(), false), job)
+	if !x.exists(stagingDir) {
+		t.Fatal("Abandon of another server's job removed a folder in the new pairing's library")
+	}
+	if !x.hasState() {
+		t.Fatal("Abandon of another server's job dropped its state")
+	}
+	x.serverID, x.srv.id = "server-a", "server-a"
+	x.h.Abandon(jobs.AbandonContext(context.Background(), false), job)
+	if x.exists(stagingDir) || x.hasState() {
+		t.Fatal("Abandon left the staging of a job of the paired server")
 	}
 }
 

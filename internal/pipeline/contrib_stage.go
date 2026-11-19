@@ -34,6 +34,10 @@ type MetaCoverage interface {
 	CoverageForWork(context.Context, string) (metaops.Coverage, error)
 	// FreshCoverageForWork bypasses the work cache, for deciding which slug is live.
 	FreshCoverageForWork(context.Context, string) (metaops.Coverage, error)
+	// Enabled reports whether the client has a metadata service to ask:
+	// CoverageFor answers Available false both when it has none and when the
+	// service didn't answer, and only the second is a lookup that failed.
+	Enabled() bool
 	// SeriesGlossary feeds the spelling stage's canonical-name evidence. It lives on
 	// this interface rather than a separately type-asserted one so the compiler
 	// holds the dependency: this feature exists because silent degradation let a
@@ -91,6 +95,14 @@ const (
 	// be read just before filing: nothing is filed for a book whose share can't be
 	// confirmed, and the park looks again by itself after ShareUnconfirmedRetry.
 	ShareUnreadMsg = "the Bridge couldn't read whether this book is still to be shared - " +
+		"the book tries again by itself in a minute"
+	// ShareLookupMsg parks a book to be shared (same code) whose work the
+	// community database didn't answer for (a lookup past its timeout, the
+	// service down or failing): nothing is filed without the work, and the park
+	// looks again by itself after ShareUnconfirmedRetry, as for a server that
+	// couldn't be asked. A clean miss is not this (core_needed), nor a
+	// permanent refusal (metaops.ErrRefused), which fails the book.
+	ShareLookupMsg = "the community database couldn't be asked which work this book is - " +
 		"the book tries again by itself in a minute"
 	// CoreNeededMsg parks a book whose work does not exist upstream: a core add-work
 	// proposal has been prefilled and awaits completion/confirmation in the UI.
@@ -279,9 +291,12 @@ func (e *Executor) contribute(ctx context.Context, book store.Book, r scheduler.
 // placeholderNote is set only when local mode proceeds on a title-derived placeholder
 // (no upstream match), so the recorded rows carry that provenance.
 func (e *Executor) resolveWorkSlug(ctx context.Context, book store.Book) (slug, placeholderNote string, park, err error) {
+	// Anything but local mode owes a share: it files to the community.
+	owed := e.contribModeFor(book) != contribModeLocal
 	// (a) A manual/enqueue-time match: verify it still resolves upstream. A clean 404
 	// is a stale match (fall through to lookup); a disabled service can't verify, so
-	// trust the recorded match; any other error is transient.
+	// trust the recorded match; no answer waits when a share is owed; any other
+	// error (a permanent refusal among them) is the stage's.
 	if id := strings.TrimSpace(book.WorkID); id != "" {
 		// Fresh: a slug retired inside the cache's hour must be seen as retired.
 		cov, verr := e.metaCoverageForWork(ctx, id, true)
@@ -298,7 +313,7 @@ func (e *Executor) resolveWorkSlug(ctx context.Context, book store.Book) (slug, 
 			// exists but no data release holds it yet, and the community intake would
 			// refuse its sidecars: wait (the release gate; the poller re-admits).
 			if e.hasMergedCoreRow(ctx, book.ID) {
-				if e.contribModeFor(book) == contribModeLocal {
+				if !owed {
 					// Nothing is filed, so there is no intake to wait for: a book
 					// turned local after its work merged (a sidecars.generate job
 					// whose share the server turned off) keeps the merged slug.
@@ -309,6 +324,13 @@ func (e *Executor) resolveWorkSlug(ctx context.Context, book store.Book) (slug, 
 			// stale manual match - fall through to identifier lookup
 		case errors.Is(verr, metaops.ErrDisabled):
 			return id, "", nil, nil
+		case owed && !errors.Is(verr, metaops.ErrRefused):
+			// A share is owed: a lookup with no answer (past its timeout, the
+			// service down) waits as a server that couldn't be asked does,
+			// rather than failing the book. A permanent refusal (a 400, 403 or
+			// 410) is an answer that asking again won't change: it fails the
+			// book below rather than park it to ask every minute for good.
+			return "", "", e.shareUnconfirmed(ctx, book.ID, ShareLookupMsg, fmt.Errorf("verify work %q: %w", id, verr)), nil
 		default:
 			return "", "", nil, fmt.Errorf("contributing: verify work %q: %w", id, verr)
 		}
@@ -317,16 +339,26 @@ func (e *Executor) resolveWorkSlug(ctx context.Context, book store.Book) (slug, 
 	// (b) Exact-identifier lookup (ASIN then ISBN). NEVER a fuzzy title search here:
 	// the identity is passed without a title so metaops cannot auto-adopt a fuzzy
 	// match (wrong-work attachment is a spoiler hazard - the human paths own that).
-	if wid, ok := e.lookupByIdentifier(ctx, book); ok {
+	wid, lerr := e.lookupByIdentifier(ctx, book)
+	switch {
+	case wid != "":
 		if e.db != nil {
 			_ = e.db.SetBookWorkID(context.WithoutCancel(ctx), book.ID, wid)
 		}
 		return wid, "", nil, nil
+	case errors.Is(lerr, metaops.ErrRefused) && owed:
+		// Refused for good: neither a miss (no core proposal) nor an answer to
+		// wait for (as in (a)).
+		return "", "", nil, fmt.Errorf("contributing: %w", lerr)
+	case lerr != nil && owed:
+		// No answer is no miss: a core proposal for a work that may well exist
+		// would be wrong, and a share is owed (as in (a)).
+		return "", "", e.shareUnconfirmed(ctx, book.ID, ShareLookupMsg, lerr), nil
 	}
 
 	// (c) No upstream match. Local mode proceeds on a placeholder; issue mode needs
 	// a core add-work proposal first.
-	if e.contribModeFor(book) == contribModeLocal {
+	if !owed {
 		return ExportSlug(book), placeholderExportNote, nil, nil
 	}
 	park, err = e.needsCore(ctx, book)
@@ -360,16 +392,19 @@ func (e *Executor) metaCoverageForWork(ctx context.Context, workID string, fresh
 
 // lookupByIdentifier resolves the book's ASIN/ISBN to a work id, accepting ONLY an
 // exact identifier match (matched_by asin|isbn) - a fuzzy "search" verdict is
-// rejected. It returns ("", false) when the metadata service is disabled/unreachable,
-// there is no identifier, or nothing matched.
-func (e *Executor) lookupByIdentifier(ctx context.Context, book store.Book) (string, bool) {
-	if e.meta == nil {
-		return "", false
+// rejected. It returns "" when the metadata service is disabled, there is no
+// identifier, or nothing matched, and with errLookupUnanswered when the service
+// didn't answer (a timeout, the service down: not a miss), errLookupRefused
+// when it refused the lookup for good (not a miss either, and nothing to wait
+// for), or the context's error.
+func (e *Executor) lookupByIdentifier(ctx context.Context, book store.Book) (string, error) {
+	if e.meta == nil || !e.meta.Enabled() {
+		return "", nil
 	}
 	asin := strings.TrimSpace(book.ASIN)
 	isbn := strings.TrimSpace(book.ISBN)
 	if asin == "" && isbn == "" {
-		return "", false
+		return "", nil
 	}
 	// No Title: metaops.CoverageFor skips its fuzzy title-search step, so the verdict
 	// can only be an exact asin/isbn match or a clean miss.
@@ -377,14 +412,27 @@ func (e *Executor) lookupByIdentifier(ctx context.Context, book store.Book) (str
 	// either is present, and a fuzzy verdict must never decide which work these
 	// sidecars attach to - the wrong work here publishes another book's spoilers.
 	cov, err := e.meta.CoverageFor(ctx, metaops.BookIdentity{ASIN: asin, ISBN: isbn})
-	if err != nil {
-		return "", false
+	switch {
+	case err != nil:
+		return "", err
+	case !cov.Available && cov.Refused:
+		return "", errLookupRefused
+	case !cov.Available:
+		return "", errLookupUnanswered
+	case cov.Known && cov.WorkID != "" && (cov.MatchedBy == "asin" || cov.MatchedBy == "isbn"):
+		return cov.WorkID, nil
 	}
-	if cov.Known && cov.WorkID != "" && (cov.MatchedBy == "asin" || cov.MatchedBy == "isbn") {
-		return cov.WorkID, true
-	}
-	return "", false
+	return "", nil
 }
+
+// errLookupUnanswered is lookupByIdentifier's lookup that got no answer: the
+// service unavailable (metaops.ErrUnavailable).
+var errLookupUnanswered = fmt.Errorf("%w: the identifier lookup got no answer", metaops.ErrUnavailable)
+
+// errLookupRefused is lookupByIdentifier's lookup the service refused for good
+// (metaops.ErrRefused: a 400, 403 or 410): asking again won't change it, so it
+// never parks to look again.
+var errLookupRefused = fmt.Errorf("%w: the identifier lookup", metaops.ErrRefused)
 
 // needsCore handles an issue/pr book whose work does not exist upstream. When a core
 // proposal is already in flight (a core contribution row submitted/pr_open/merged) it

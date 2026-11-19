@@ -205,8 +205,10 @@ func (f filing) same(g filing) bool {
 	return f.Since.Equal(g.Since) && f.Sum == g.Sum && f.Job == g.Job
 }
 
+// resultKey is the job's, under the server that handed it out (job ids repeat
+// across servers): never the pairing's now, which may be another server's.
 func (h *Handler) resultKey(job jobs.Job) string {
-	return "meta.correct/" + h.o.ServerID() + "/" + strconv.FormatInt(job.ID, 10)
+	return "meta.correct/" + job.KeyServer(h.o.ServerID()) + "/" + strconv.FormatInt(job.ID, 10)
 }
 
 // filingKey is the request's: what the admin asked to change, nothing more.
@@ -219,8 +221,9 @@ func (h *Handler) resultKey(job jobs.Job) string {
 // book (which can move) nor the composed issue (whose title is the work's live
 // title). So the same corrections suggested again, reworded or reordered, or
 // this job resumed, find the marker, and other corrections never share or
-// overwrite it. p is as ParseParams gives it, its ids in one form.
-func (h *Handler) filingKey(p Params) string {
+// overwrite it. Under the job's own server (resultKey). p is as ParseParams
+// gives it, its ids in one form.
+func (h *Handler) filingKey(job jobs.Job, p Params) string {
 	// Its own type, not contrib.Correction: a field the wire gains later must not
 	// change every request's key.
 	type change struct {
@@ -247,7 +250,7 @@ func (h *Handler) filingKey(p Params) string {
 		Changes     []change `json:"changes"`
 	}{p.WorkID, p.RecordingID, asin, isbn, region, changes})
 	sum := sha256.Sum256(raw)
-	return "meta.correct.filing/" + h.o.ServerID() + "/" + hex.EncodeToString(sum[:])
+	return "meta.correct.filing/" + job.KeyServer(h.o.ServerID()) + "/" + hex.EncodeToString(sum[:])
 }
 
 func (h *Handler) readFiling(ctx context.Context, key string) (f filing, ok bool, err error) {
@@ -293,7 +296,7 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 			return r, nil
 		}
 	}
-	fkey := h.filingKey(p)
+	fkey := h.filingKey(job, p)
 	marker, interrupted, err := h.readFiling(ctx, fkey)
 	if err != nil {
 		return nil, err

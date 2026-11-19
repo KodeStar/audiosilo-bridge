@@ -664,7 +664,7 @@ func TestStateValid(t *testing.T) {
 	x := newHarness(t)
 	_ = os.MkdirAll(x.stateDir, 0o700)
 	_ = os.WriteFile(x.h.statePath(3, 192), []byte(`{"library_id":3,"parent":"..","dest":"../T"}`), 0o600)
-	if x.h.loadState(3, 192) != nil {
+	if x.h.loadState(3, 192, x.h.o.ServerID()) != nil {
 		t.Fatal("an invalid state loaded")
 	}
 	if _, err := os.Stat(x.h.statePath(3, 192)); err == nil {
@@ -672,7 +672,7 @@ func TestStateValid(t *testing.T) {
 	}
 	// A state file naming another library than its own is never followed.
 	_ = os.WriteFile(x.h.statePath(3, 192), []byte(`{"library_id":4,"parent":"A","dest":"A/T"}`), 0o600)
-	if x.h.loadState(3, 192) != nil {
+	if x.h.loadState(3, 192, x.h.o.ServerID()) != nil {
 		t.Fatal("another library's state loaded")
 	}
 }
@@ -998,7 +998,7 @@ func TestFetchAdoptsUnrecordedPlacement(t *testing.T) {
 	if _, err := x.run(context.Background(), false); err == nil {
 		t.Fatal("the first run's rescan didn't fail")
 	}
-	st := x.h.loadState(3, testID)
+	st := x.h.loadState(3, testID, x.h.o.ServerID())
 	if st == nil || !st.Placed {
 		t.Fatalf("state %+v", st)
 	}
@@ -1081,7 +1081,7 @@ func TestFetchMetaUnavailableKeepsStaging(t *testing.T) {
 			if code := failureCode(t, out, err); code != "" {
 				t.Fatalf("meta unavailable was coded %q", code)
 			}
-			if !x.exists(stagingDir+"/01 - Johnny Crow's Garden.mp3") || x.h.loadState(3, testID) == nil {
+			if !x.exists(stagingDir+"/01 - Johnny Crow's Garden.mp3") || x.h.loadState(3, testID, x.h.o.ServerID()) == nil {
 				t.Fatal("meta unavailable removed the staging folder or the state")
 			}
 			x.meta.bookErr, x.meta.workErr = nil, nil
@@ -1106,7 +1106,7 @@ func TestFetchMetaUnavailableKeepsStaging(t *testing.T) {
 	if code := failureCode(t, out, err); code != CodeNotFound {
 		t.Fatalf("code %q (%v)", code, err)
 	}
-	if x.exists(stagingDir) || x.h.loadState(3, testID) != nil {
+	if x.exists(stagingDir) || x.h.loadState(3, testID, x.h.o.ServerID()) != nil {
 		t.Fatal("not_found kept the staging folder")
 	}
 }
@@ -1190,7 +1190,7 @@ func TestFetchTwoLibrariesIndependent(t *testing.T) {
 	if _, err := os.Stat(path.Join(other, bookDir, "01 - Johnny Crow's Garden.mp3")); err != nil {
 		t.Fatal("library 4's book isn't there")
 	}
-	if !x.exists(stagingDir+"/01 - Johnny Crow's Garden.mp3") || x.h.loadState(3, testID) == nil {
+	if !x.exists(stagingDir+"/01 - Johnny Crow's Garden.mp3") || x.h.loadState(3, testID, x.h.o.ServerID()) == nil {
 		t.Fatal("library 4's fetch discarded library 3's staging")
 	}
 	// Library 4 stops mid-download too; Abandon of library 3's job leaves it.
@@ -1209,7 +1209,7 @@ func TestFetchTwoLibrariesIndependent(t *testing.T) {
 	if x.exists(stagingDir) {
 		t.Fatal("Abandon left library 3's staging")
 	}
-	if _, err := os.Stat(staging4); err != nil || x.h.loadState(4, testID) == nil {
+	if _, err := os.Stat(staging4); err != nil || x.h.loadState(4, testID, x.h.o.ServerID()) == nil {
 		t.Fatal("Abandon of library 3's job removed library 4's fetch")
 	}
 	// Library 3 resumes from scratch independently and finishes.

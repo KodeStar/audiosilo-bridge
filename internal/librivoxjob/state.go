@@ -28,6 +28,10 @@ type state struct {
 	// was unknown, or a state from before it was kept): LibraryID is that
 	// server's library. A state of another server is never acted on.
 	ServerID string `json:"server_id,omitempty"`
+	// JobID is the id of the server's job whose run last planned or resumed
+	// the fetch (0 on a state from before it was kept): Abandon removes the
+	// staging of its own job only.
+	JobID int64 `json:"job_id,omitempty"`
 	// Parent is the folder the book goes in ("" for the library's root), and
 	// MadeParent whether this fetch created it (removed again, when empty, with
 	// the staging folder).
@@ -75,8 +79,9 @@ func (h *Handler) statePath(lib int64, id int) string {
 // paths aren't clean library paths, goes: the run plans afresh. So does one of
 // another server (the Bridge was paired with this one since): its library id
 // means nothing here, so its staging folder is left where it is, never looked
-// for in this server's same-numbered library.
-func (h *Handler) loadState(lib int64, id int) *state {
+// for in this server's same-numbered library. serverID is the server the
+// reader works for: a job's own (jobs.Job.KeyServer), else the pairing's.
+func (h *Handler) loadState(lib int64, id int, serverID string) *state {
 	p := h.statePath(lib, id)
 	b, err := os.ReadFile(p) //nolint:gosec // G304: the job's own state in the Bridge's data
 	if err != nil {
@@ -87,7 +92,7 @@ func (h *Handler) loadState(lib int64, id int) *state {
 		_ = os.Remove(p)
 		return nil
 	}
-	if cur := h.o.ServerID(); st.ServerID != "" && cur != "" && st.ServerID != cur {
+	if cur := serverID; st.ServerID != "" && cur != "" && st.ServerID != cur {
 		h.o.Log.Warn("librivox: a fetch's state is another server's; its staging folder is left as it is",
 			"library", lib, "librivox_id", id, "server", st.ServerID, "path", st.staging(id))
 		_ = os.Remove(p)
@@ -96,12 +101,13 @@ func (h *Handler) loadState(lib int64, id int) *state {
 	return &st
 }
 
-// serverUnknown reports whether st names a server while the paired server's
-// id isn't known now: Abandon and the sweep, which remove things, leave such a
-// state alone, as they can't tell it is this server's (bridge#71). A run still
-// resumes from it (loadState's lenient read).
-func (h *Handler) serverUnknown(st *state) bool {
-	return st.ServerID != "" && h.o.ServerID() == ""
+// serverUnknown reports whether st names a server while serverID (the server
+// the reader works for, as loadState's) isn't known: the sweep, which removes
+// things, leaves such a state alone (Abandon asks more: the state's server
+// and job are the job's own), as they can't tell it is this
+// server's (bridge#71). A run still resumes from it (loadState's lenient read).
+func serverUnknown(st *state, serverID string) bool {
+	return st.ServerID != "" && serverID == ""
 }
 
 // touchState marks the state of the project's fetch into library lib as in

@@ -310,7 +310,7 @@ func keyOf(t *testing.T, raw string) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return New(Options{ServerID: func() string { return "srv-1" }}).filingKey(p)
+	return New(Options{ServerID: func() string { return "srv-1" }}).filingKey(jobs.Job{}, p)
 }
 
 // The filing marker is the request's: the record and the changes. The same
@@ -829,5 +829,21 @@ func TestRecordingFor(t *testing.T) {
 		if got := recordingFor(tc.p, c); got != tc.want {
 			t.Errorf("%+v = %q, want %q", tc.p, got, tc.want)
 		}
+	}
+}
+
+// A job's result and its filing are kept under the server that handed it out,
+// never the pairing's now: a job of server a still running once the Bridge is
+// paired with b can't leave its GitHub issue where b's job of the same id
+// would read it as its own (BR-LINK-RULE).
+func TestCorrectKeysByTheJobsServer(t *testing.T) {
+	h := New(Options{ServerID: func() string { return "b" }})
+	job := jobs.ClaimedFrom(jobs.Job{ID: 4}, "a")
+	if got := h.resultKey(job); got != "meta.correct/a/4" {
+		t.Fatalf("result key = %q, want the job's server a", got)
+	}
+	p := Params{WorkID: "w"}
+	if a, b := h.filingKey(job, p), h.filingKey(jobs.ClaimedFrom(jobs.Job{ID: 4}, "b"), p); a == b || !strings.Contains(a, "/a/") {
+		t.Fatalf("filing keys a %q, b %q: want each under its own server", a, b)
 	}
 }

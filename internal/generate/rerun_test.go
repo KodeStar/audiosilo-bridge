@@ -26,11 +26,14 @@ import (
 // id another server reuses, a job ended before its handler ran, a book whose
 // transcripts went with an earlier end, and a park that survives a restart.
 
-// runnerAs runs h's jobs as a Bridge paired with the server whose id is sid.
+// runnerAs runs h's jobs as a Bridge paired with the server whose id is sid:
+// the runner's link and the handlers' (hr.cl) both reach it.
 func (hr *harness) runnerAs(h *Handler, sid string) (stop func()) {
-	r := jobs.New(hr.db, func() jobs.Server { return hr.cl }, nil, jobs.Options{Keepalive: 30 * time.Millisecond,
+	cl := hr.cl.WithServerID(sid)
+	hr.cl = cl
+	r := jobs.New(hr.db, func() jobs.Server { return cl }, nil, jobs.Options{Keepalive: 30 * time.Millisecond,
 		ProgressEvery: 5 * time.Millisecond, Wait: 10 * time.Millisecond, RetryEvery: 20 * time.Millisecond,
-		ServerID: func() string { return sid }, Log: slog.New(slog.NewTextHandler(io.Discard, nil))}, h)
+		Log: slog.New(slog.NewTextHandler(io.Discard, nil))}, h)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { defer close(done); r.Run(ctx) }()
@@ -197,7 +200,7 @@ func TestGenerateLaterAttemptKeepsTheBook(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	hr.cl = cl
+	hr.cl = cl.WithServerID("srv")
 	gate := hr.exec.gate("asr")
 	hr.srv.add(40, "Author/Book", `{}`)
 	stop := hr.runner(hr.handler())

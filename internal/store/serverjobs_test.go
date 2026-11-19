@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"testing"
@@ -206,5 +207,85 @@ func TestServerJobShareOff(t *testing.T) {
 	}
 	if err := db.SetServerJobShareOff(ctx, 42, 4); err != nil || !shareOff() {
 		t.Fatalf("a finished attempt's share_off: %v, kept %v", err, shareOff())
+	}
+}
+
+// A claim keeps the pairing it was recorded under (0021). A dropped job is
+// recorded lost only while its row is still that claim (allowed); a claim of
+// another pairing or server holding the row under the same id and attempt is
+// left alone (denied). Rows from before the pairing was kept are given one,
+// and only they.
+func TestServerJobPairing(t *testing.T) {
+	db := open(t)
+	ctx := context.Background()
+	if err := db.RecordClaim(ctx, ServerJob{ID: 5, Kind: "podcast.fetch", Attempt: 1, ServerID: "s", Pairing: "p2"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, dropped := range []ServerJob{
+		{ID: 5, Attempt: 1, ServerID: "s", Pairing: "p1"},
+		{ID: 5, Attempt: 1, ServerID: "x", Pairing: "p2"},
+		{ID: 5, Attempt: 2, ServerID: "s", Pairing: "p2"},
+	} {
+		if own, err := db.LoseServerJob(ctx, dropped, "dropped"); err != nil || own {
+			t.Fatalf("%+v: own %v, %v", dropped, own, err)
+		}
+	}
+	if sj, err := db.GetServerJob(ctx, 5); err != nil || sj.State != JobRunning || sj.Pairing != "p2" {
+		t.Fatalf("another claim's row: %+v %v", sj, err)
+	}
+	if own, err := db.LoseServerJob(ctx, ServerJob{ID: 5, Attempt: 1, ServerID: "s", Pairing: "p2", Result: json.RawMessage(`{"n":1}`)}, "dropped"); err != nil || !own {
+		t.Fatalf("own %v, %v", own, err)
+	}
+	if sj, err := db.GetServerJob(ctx, 5); err != nil || sj.State != JobLost || !sj.Reported || sj.Error != "dropped" || string(sj.Result) != `{"n":1}` {
+		t.Fatalf("the dropped row: %+v %v", sj, err)
+	}
+
+	// Rows from before the pairing was kept: the paired server's join the
+	// pairing in place (allowed); another server's, and one whose server isn't
+	// known, get the orphan id no pairing has (denied).
+	for id, server := range map[int64]string{6: "s", 7: "x", 8: ""} {
+		if err := db.RecordClaim(ctx, ServerJob{ID: id, Kind: "podcast.fetch", Attempt: 1, ServerID: server}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.AdoptServerJobs(ctx, "s", "p3", "orphan"); err != nil {
+		t.Fatal(err)
+	}
+	for id, want := range map[int64]string{5: "p2", 6: "p3", 7: "orphan", 8: "orphan"} {
+		if sj, err := db.GetServerJob(ctx, id); err != nil || sj.Pairing != want {
+			t.Fatalf("job %d: %+v %v, want pairing %q", id, sj, err, want)
+		}
+	}
+}
+
+// Migration 0021 on a Bridge with jobs: an existing row reads no pairing and
+// only an adoption gives it one; unpaired (no server), every row is orphaned.
+func TestMigrationServerJobsPairing(t *testing.T) {
+	ctx := context.Background()
+	sqldb, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sqldb.SetMaxOpenConns(1)
+	db := &DB{sql: sqldb}
+	t.Cleanup(func() { _ = db.Close() })
+	if err := db.migrateTo(ctx, "0019_books_share_skipped.sql"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sqldb.ExecContext(ctx, `INSERT INTO server_jobs (id, kind, params, attempt, server_id, state, claimed_at, updated_at)
+		VALUES (9, 'bridge.verify', '{}', 1, 's', 'running', '2026-11-01T00:00:00Z', '2026-11-01T00:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if sj, err := db.GetServerJob(ctx, 9); err != nil || sj.Pairing != "" || sj.State != JobRunning {
+		t.Fatalf("migrated row = %+v, %v", sj, err)
+	}
+	if err := db.AdoptServerJobs(ctx, "", "", "orphan"); err != nil {
+		t.Fatal(err)
+	}
+	if sj, err := db.GetServerJob(ctx, 9); err != nil || sj.Pairing != "orphan" {
+		t.Fatalf("a row adopted while unpaired = %+v, %v", sj, err)
 	}
 }

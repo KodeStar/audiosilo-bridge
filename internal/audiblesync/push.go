@@ -94,11 +94,16 @@ func (p *Pusher) Run(ctx context.Context) {
 
 // Tick is one pass over the accounts: each account mapped on the paired
 // server, not refused and not waiting reads its feed and writes the places
-// that are due.
+// that are due. The link is read once and the server's id taken off it: read
+// apart, a pairing with another server in between would push one server's
+// accounts on the other's link.
 func (p *Pusher) Tick(ctx context.Context) {
 	srv := p.o.server()
-	serverID := p.o.ServerID()
-	if srv == nil || serverID == "" {
+	if srv == nil {
+		return
+	}
+	serverID := srv.ServerID()
+	if serverID == "" {
 		return
 	}
 	accts, err := p.o.Accounts.Accounts(ctx)

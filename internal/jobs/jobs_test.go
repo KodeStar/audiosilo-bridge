@@ -36,12 +36,28 @@ type fakeServer struct {
 	paths    map[int64]string // the job's path in an update's answer (a book that moved)
 	shareOff map[int64]bool   // share_off in an update's answer (server#218)
 	tries    map[int64]int    // every update asked, failed ones included
+	// id is the server's id (ServerID; testServer unless a test sets it, ""
+	// for unknown), set before the runner starts.
+	id string
+	// pairing is the Bridge's pairing the fake link was made for (PairingID;
+	// "" unless a test sets it, before the runner starts).
+	pairing string
 }
+
+// ServerID is the id of the server the fake stands for.
+func (f *fakeServer) ServerID() string { return f.id }
+
+// PairingID is the Bridge's pairing the fake link was made for.
+func (f *fakeServer) PairingID() string { return f.pairing }
 
 func newFakeServer() *fakeServer {
 	return &fakeServer{updates: map[int64][]link.Update{}, cancel: map[int64]bool{}, notHeld: map[int64]bool{},
-		gone: map[int64]bool{}, reason: map[int64]string{}, tries: map[int64]int{}, changed: make(chan struct{})}
+		gone: map[int64]bool{}, reason: map[int64]string{}, tries: map[int64]int{}, changed: make(chan struct{}), id: testServer}
 }
+
+// testServer is a fake server's id unless a test sets another: a row a test
+// records for a job of the runner's server names it (sameServer).
+const testServer = "srv"
 
 // setShareOff sets the jobs whose updates the server answers with share_off.
 func (f *fakeServer) setShareOff(m map[int64]bool) {
@@ -359,7 +375,7 @@ func TestStopAndResume(t *testing.T) {
 func TestResumeOfAnUnknownKindFails(t *testing.T) {
 	t.Parallel()
 	db, srv := openStore(t), newFakeServer()
-	if err := db.RecordClaim(context.Background(), store.ServerJob{ID: 3, Kind: "gone.kind", Attempt: 1}); err != nil {
+	if err := db.RecordClaim(context.Background(), store.ServerJob{ServerID: testServer, ID: 3, Kind: "gone.kind", Attempt: 1}); err != nil {
 		t.Fatal(err)
 	}
 	r := New(db, func() Server { return srv }, nil, testOpts(), handler{kind: "k.v", lane: LaneLight})
@@ -504,6 +520,7 @@ func TestRefusedJobResumes(t *testing.T) {
 func TestRefusedJobOfAnotherServerIsLost(t *testing.T) {
 	t.Parallel()
 	db, a, b := openStore(t), newFakeServer(), newFakeServer()
+	a.id, b.id = "a", "b"
 	a.add(&link.Job{ID: 6, Kind: "k.v", Attempts: 1})
 	var mu sync.Mutex
 	current := Server(a)
@@ -545,8 +562,8 @@ func TestReleaseKeepsALaterRun(t *testing.T) {
 	r := New(openStore(t), func() Server { return nil }, nil, testOpts())
 	_, c1 := context.WithCancelCause(context.Background())
 	_, c2 := context.WithCancelCause(context.Background())
-	old := &run{job: Job{ID: 5, Attempt: 1}, lane: LaneLight, cancel: c1, admitted: true}
-	later := &run{job: Job{ID: 5, Attempt: 2}, lane: LaneLight, cancel: c2, admitted: true}
+	old := &run{job: Job{serverID: testServer, ID: 5, Attempt: 1}, lane: LaneLight, cancel: c1, admitted: true}
+	later := &run{job: Job{serverID: testServer, ID: 5, Attempt: 2}, lane: LaneLight, cancel: c2, admitted: true}
 	r.mu.Lock()
 	r.running[5], r.use[LaneLight] = later, 2
 	r.mu.Unlock()

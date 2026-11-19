@@ -349,7 +349,7 @@ func TestPrivateSealingNoLeakResumeAndMissingSecret(t *testing.T) {
 	if strings.Contains(string(job.Params), "SECRET123") {
 		t.Fatal("params were not sealed")
 	}
-	if got, _ := h.vault.Get(secrets.PodcastJobName(job.ID, job.Attempt)); got != privateURL {
+	if got, _ := h.vault.Get(h.handler.s.jobSecret(job)); got != privateURL {
 		t.Fatal("missing sealed job URL")
 	}
 	// A new handler resumes using only the persisted params and the vault.
@@ -367,7 +367,7 @@ func TestPrivateSealingNoLeakResumeAndMissingSecret(t *testing.T) {
 	if got, _ := h.vault.Get(secrets.PodcastFeedName(f.ShowID)); got != privateURL {
 		t.Fatal("feed URL was not resealed")
 	}
-	if present, _ := h.vault.Present(secrets.PodcastJobName(job.ID, job.Attempt)); present {
+	if present, _ := h.vault.Present(h.handler.s.jobSecret(job)); present {
 		t.Fatal("ended job secret remains")
 	}
 	rows, _ := h.db.ListServerJobs(context.Background(), 0, 200)
@@ -460,7 +460,7 @@ func TestMovesRefusalsAndCacheRebuild(t *testing.T) {
 		if r["code"] != want || strings.Contains(err.Error(), "SECRET123") {
 			t.Fatal(r, err)
 		}
-		if present, _ := h.vault.Present(secrets.PodcastJobName(job.ID, job.Attempt)); present {
+		if present, _ := h.vault.Present(h.handler.s.jobSecret(job)); present {
 			t.Fatal("failed job secret remains")
 		}
 	}
@@ -727,19 +727,77 @@ func TestSubscribeLockAndTerminalSecretCleanup(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	h.handler.Run(ctx, job, jobs.LocalReporter())
-	if present, _ := h.vault.Present(secrets.PodcastJobName(job.ID, job.Attempt)); !present {
+	if present, _ := h.vault.Present(h.handler.s.jobSecret(job)); !present {
 		t.Fatal("restart lost resumable secret")
 	}
 	h.handler.Abandon(context.Background(), job)
-	if present, _ := h.vault.Present(secrets.PodcastJobName(job.ID, job.Attempt)); present {
+	if present, _ := h.vault.Present(h.handler.s.jobSecret(job)); present {
 		t.Fatal("abandoned secret remains")
 	}
 	job = h.claim(h.http.URL+"/feed?auth=SECRET123", true)
-	h.vault.Delete(secrets.PodcastJobName(job.ID, job.Attempt))
+	h.vault.Delete(h.handler.s.jobSecret(job))
 	res, err := h.handler.Run(context.Background(), job, jobs.LocalReporter())
 	var failure *netguard.Error
 	if !errors.As(err, &failure) || fields(t, res)["code"] != "feed_secret_missing" {
 		t.Fatal(res, err)
+	}
+}
+
+// A private feed's sealed URL is keyed by the job's own server as well as its
+// id and attempt: a dropped job of server a never deletes server b's sealed
+// URL of the same id and attempt, and b's follow then runs (denied: the name
+// was the id and attempt only). A claim sealed by an earlier Bridge under the
+// legacy name is read, and deleted, only by the job whose URL it is (allowed),
+// never by another server's job of the same id and attempt (denied).
+func TestPrivateFeedSecretIsTheJobsServers(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	urlA, urlB := h.http.URL+"/feed?auth=SECRET_A", h.http.URL+"/feed?auth=SECRET_B"
+	claim := func(server, url string) jobs.Job {
+		raw, _ := json.Marshal(subscribeParams{FeedURL: url, Private: true})
+		lib := int64(3)
+		job := jobs.ClaimedFrom(jobs.Job{ID: 50, Kind: SubscribeKind, LibraryID: &lib, Params: raw, Attempt: 1}, server)
+		sealed, err := h.handler.SealParams(job)
+		if err != nil {
+			t.Fatal(err)
+		}
+		job.Params = sealed
+		return job
+	}
+	a, b := claim("server-a", urlA), claim("server-b", urlB)
+	if h.handler.s.jobSecret(a) == h.handler.s.jobSecret(b) {
+		t.Fatal("two servers' jobs of one id and attempt share a sealed name")
+	}
+	h.handler.Abandon(context.Background(), a)
+	if got, _ := h.vault.Get(h.handler.s.jobSecret(b)); got != urlB {
+		t.Fatalf("server a's dropped job deleted server b's sealed URL (%q)", got)
+	}
+	if present, _ := h.vault.Present(h.handler.s.jobSecret(a)); present {
+		t.Fatal("the dropped job's own sealed URL remains")
+	}
+	if _, err := h.handler.s.feedURL("", true, h.handler.s.sealedJobSecret(b, podcast.FeedURLHash(urlB)), "invalid"); err != nil {
+		t.Fatal("server b's follow lost its feed URL:", err)
+	}
+
+	// The legacy name, holding b's URL: a's job neither reads nor deletes it.
+	legacy := secrets.PodcastLegacyJobName(50, 1)
+	h.vault.Delete(h.handler.s.jobSecret(b))
+	if err := h.vault.Set(legacy, urlB); err != nil {
+		t.Fatal(err)
+	}
+	if got := h.handler.s.sealedJobSecret(a, podcast.FeedURLHash(urlA)); got == legacy {
+		t.Fatal("server a's job read the legacy name holding another job's URL")
+	}
+	h.handler.Abandon(context.Background(), a)
+	if got, _ := h.vault.Get(legacy); got != urlB {
+		t.Fatal("server a's job deleted the legacy name holding another job's URL")
+	}
+	if got := h.handler.s.sealedJobSecret(b, podcast.FeedURLHash(urlB)); got != legacy {
+		t.Fatalf("server b's job didn't fall back to its own legacy sealed URL (%q)", got)
+	}
+	h.handler.Abandon(context.Background(), b)
+	if present, _ := h.vault.Present(legacy); present {
+		t.Fatal("the job's own legacy sealed URL remains after its end")
 	}
 }
 

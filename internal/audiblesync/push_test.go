@@ -391,6 +391,26 @@ func TestPushUnpaired(t *testing.T) {
 	}
 }
 
+// The push loop takes the server's id off the link it pushes on: a pairing
+// with another server between reading the link and the pairing's id never
+// pushes one server's accounts on the other's link (denied), and the link's
+// own server's accounts are pushed (allowed).
+func TestPushReadsTheServerOffItsLink(t *testing.T) {
+	e := newEnv(t)
+	e.srv.id = "srv-2"                              // the link reaches srv-2 ...
+	e.o.ServerID = func() string { return "srv-1" } // ... read apart, the pairing said srv-1
+	NewPusher(e.o).Tick(context.Background())
+	if len(e.srv.feedAsks) != 0 {
+		t.Fatal("srv-1's account was pushed on srv-2's link")
+	}
+	e.srv.id = "srv-1"
+	e.o.ServerID = func() string { return "srv-2" }
+	NewPusher(e.o).Tick(context.Background())
+	if len(e.srv.feedAsks) == 0 {
+		t.Fatal("the link's own server's account wasn't pushed")
+	}
+}
+
 // Furthest wins both ways: a place Audible moved further on since the Bridge
 // last wrote or heard it (listening in the Audible app no sync has brought in
 // yet, here during a sync off) isn't overwritten by an older AudioSilo place:

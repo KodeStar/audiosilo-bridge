@@ -27,6 +27,17 @@ describe('state labels', () => {
     expect(stateTone('failed')).toBe('bad');
     expect(stateTone('done')).toBe('good');
   });
+  it('says why this Bridge dropped a lost job', () => {
+    expect(stateHint('lost', 'the Bridge was paired with another server')).toBe(
+      'Paired with another server',
+    );
+    expect(stateHint('lost', 'the Bridge was unpaired on its page')).toBe('Unpaired on its page');
+    expect(stateHint('lost', 'the server no longer holds the job for this claim')).toBe(
+      'The server took it back',
+    );
+    // Only a lost job is told by its error.
+    expect(stateHint('failed', 'the Bridge was unpaired on its page')).toBe('');
+  });
   it('shows an unknown state as it is', () => {
     expect(stateLabel('paused')).toBe('paused');
     expect(stateTone('paused')).toBe('muted');
@@ -93,6 +104,15 @@ describe('jobTarget', () => {
     expect(jobTarget(jobFixture({ library_id: 3 }), names)).toBe('library 3: Author/Book');
     expect(jobTarget(jobFixture({ library_id: 9 }), names)).toBe('library 9: Author/Book');
     expect(libraryNames(null).size).toBe(0);
+  });
+
+  it("names no library of another server's job", () => {
+    const names = libraryNames([libraryFixture()]);
+    expect(jobTarget(jobFixture(), names, 'srv-1')).toBe('Audiobooks · Author/Book');
+    // Its library 1 is the other server's, not this one's Audiobooks.
+    expect(jobTarget(jobFixture({ server_id: 'srv-0' }), names, 'srv-1')).toBe('Author/Book');
+    expect(jobTarget(jobFixture({ server_id: 'srv-0' }), names, '')).toBe('Author/Book');
+    expect(jobTarget(jobFixture({ server_id: 'srv-0', path: null }), names, 'srv-1')).toBe('');
   });
 });
 

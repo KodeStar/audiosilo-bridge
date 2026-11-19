@@ -38,7 +38,11 @@ type ServerJob struct {
 	// claim's answer or one since, link.Job.ShareOff; false on rows from before
 	// migration 0016), so a resumed job has it before any answer. While it is
 	// set the job's engine books are local (keepSharedOffLocal).
-	ShareOff bool            `json:"-"`
+	ShareOff bool `json:"-"`
+	// Pairing is the Bridge's pairing the claim was recorded under (migration
+	// 0021; a random id, never shown): a row of another pairing is dropped,
+	// never resumed or reported (jobs.Runner).
+	Pairing  string          `json:"-"`
 	State    string          `json:"state"`
 	Progress json.RawMessage `json:"progress"`
 	Result   json.RawMessage `json:"result"`
@@ -51,7 +55,7 @@ type ServerJob struct {
 	FinishedAt *string `json:"finished_at"`
 }
 
-const serverJobColumns = `id, kind, library_id, path, params, attempt, server_id, priority, share_off, state, progress, result, error,
+const serverJobColumns = `id, kind, library_id, path, params, attempt, server_id, priority, share_off, pairing, state, progress, result, error,
 	reported, claimed_at, updated_at, finished_at`
 
 func scanServerJob(row interface{ Scan(...any) error }) (*ServerJob, error) {
@@ -61,7 +65,7 @@ func scanServerJob(row interface{ Scan(...any) error }) (*ServerJob, error) {
 		path, finished           sql.NullString
 		params, progress, result string
 	)
-	if err := row.Scan(&j.ID, &j.Kind, &lib, &path, &params, &j.Attempt, &j.ServerID, &j.Priority, &j.ShareOff, &j.State, &progress, &result,
+	if err := row.Scan(&j.ID, &j.Kind, &lib, &path, &params, &j.Attempt, &j.ServerID, &j.Priority, &j.ShareOff, &j.Pairing, &j.State, &progress, &result,
 		&j.Error, &j.Reported, &j.ClaimedAt, &j.UpdatedAt, &finished); err != nil {
 		return nil, err
 	}
@@ -87,7 +91,7 @@ func jsonOr(raw json.RawMessage) string {
 }
 
 // RecordClaim records a claimed job as running under attempt (from the server
-// j.ServerID), replacing the row of an earlier attempt of the same job. A claim
+// j.ServerID, under the pairing j.Pairing), replacing the row of an earlier attempt of the same job. A claim
 // with share_off has the job's engine book local in the same write
 // (keepSharedOffLocal): a resumed job's mapping names it already.
 func (db *DB) RecordClaim(ctx context.Context, j ServerJob) error {
@@ -98,15 +102,15 @@ func (db *DB) RecordClaim(ctx context.Context, j ServerJob) error {
 	}
 	defer func() { _ = tx.Rollback() }()
 	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO server_jobs (id, kind, library_id, path, params, attempt, server_id, priority, share_off, state,
+		`INSERT INTO server_jobs (id, kind, library_id, path, params, attempt, server_id, priority, share_off, pairing, state,
 		     claimed_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?)
 		 ON CONFLICT(id) DO UPDATE SET kind = excluded.kind, library_id = excluded.library_id, path = excluded.path,
 		     params = excluded.params, attempt = excluded.attempt, server_id = excluded.server_id,
-		     priority = excluded.priority, share_off = excluded.share_off, state = 'running',
+		     priority = excluded.priority, share_off = excluded.share_off, pairing = excluded.pairing, state = 'running',
 		     progress = '{}', result = '{}', error = '', reported = 0, claimed_at = excluded.claimed_at,
 		     updated_at = excluded.updated_at, finished_at = NULL`,
-		j.ID, j.Kind, j.LibraryID, j.Path, jsonOr(j.Params), j.Attempt, j.ServerID, j.Priority, j.ShareOff, now, now); err != nil {
+		j.ID, j.Kind, j.LibraryID, j.Path, jsonOr(j.Params), j.Attempt, j.ServerID, j.Priority, j.ShareOff, j.Pairing, now, now); err != nil {
 		return err
 	}
 	if j.ShareOff {
@@ -165,15 +169,49 @@ func (db *DB) SetServerJobProgress(ctx context.Context, id int64, attempt int, p
 // FinishServerJob records a job's end (state one of the finished states,
 // JobLost included, which needs no report), not yet reported unless lost.
 func (db *DB) FinishServerJob(ctx context.Context, id int64, attempt int, state string, result json.RawMessage, errText string) error {
+	_, err := db.finishServerJob(ctx, state, result, errText, ServerJob{ID: id, Attempt: attempt}, false)
+	return err
+}
+
+// finishServerJob records the end of j's row (its id and attempt, and with
+// claim its server and pairing too), and reports whether it did.
+func (db *DB) finishServerJob(ctx context.Context, state string, result json.RawMessage, errText string, j ServerJob, claim bool) (bool, error) {
 	now := timestamp(nowFn())
 	reported := 0
 	if state == JobLost {
 		reported = 1
 	}
-	_, err := db.sql.ExecContext(ctx,
+	res, err := db.sql.ExecContext(ctx,
 		`UPDATE server_jobs SET state = ?, result = ?, error = ?, reported = ?, updated_at = ?, finished_at = ?
-		  WHERE id = ? AND attempt = ?`,
-		state, jsonOr(result), errText, reported, now, now, id, attempt)
+		  WHERE id = ? AND attempt = ? AND (NOT ? OR (server_id = ? AND pairing = ?))`,
+		state, jsonOr(result), errText, reported, now, now, j.ID, j.Attempt, claim, j.ServerID, j.Pairing)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
+// LoseServerJob records a dropped job lost (FinishServerJob's JobLost) only
+// while its row is still the claim it was dropped for: the same attempt,
+// server and pairing. Job ids are each server's own, so a claim of another
+// server or pairing may hold the row under the same id and attempt by now, and
+// is left alone. It reports whether the row was the job's.
+func (db *DB) LoseServerJob(ctx context.Context, j ServerJob, errText string) (bool, error) {
+	return db.finishServerJob(ctx, JobLost, j.Result, errText, j, true)
+}
+
+// AdoptServerJobs gives the rows recorded before the Bridge kept a job's
+// pairing (migration 0021: none recorded) a pairing at the first start since (an
+// upgrade): those of server serverID (the stored pairing's, never "") to
+// pairing, the one in place, so a job running then resumes under it; every
+// other one (another server's, one whose server isn't known, or all of them
+// while unpaired: serverID "") to orphan, an id no pairing has, so the runner
+// drops it at its first look rather than hold it for the current pairing.
+func (db *DB) AdoptServerJobs(ctx context.Context, serverID, pairing, orphan string) error {
+	_, err := db.sql.ExecContext(ctx,
+		`UPDATE server_jobs SET pairing = CASE WHEN ? <> '' AND server_id = ? THEN ? ELSE ? END WHERE pairing = ''`,
+		serverID, serverID, pairing, orphan)
 	return err
 }
 

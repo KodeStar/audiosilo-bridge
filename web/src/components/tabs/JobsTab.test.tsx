@@ -9,6 +9,7 @@ import {
   generateJobFixture,
   jobFixture,
   libraryFixture,
+  pairedStatus,
 } from '@/test/fixtures';
 
 const api = () => new ApiClient({ getToken: () => 't', onSignedOut: vi.fn() });
@@ -48,10 +49,48 @@ describe('JobsTab', () => {
     mockFetch({
       'GET /api/jobs': { body: { jobs: [jobFixture()] } },
       'GET /api/libraries': { body: { libraries: [libraryFixture()] } },
+      'GET /api/status': { body: pairedStatus() },
     });
     render(<JobsTab client={api()} />);
     const card = await screen.findByRole('article', { name: 'Job 7' });
     expect(await within(card).findByText('Audiobooks · Author/Book')).toBeInTheDocument();
+  });
+
+  it("names no library of an earlier pairing's job, and says why it was dropped", async () => {
+    mockFetch({
+      'GET /api/jobs': {
+        body: {
+          jobs: [
+            jobFixture({ id: 8 }),
+            jobFixture({
+              id: 7,
+              server_id: 'srv-0',
+              state: 'lost',
+              error: 'the Bridge was paired with another server',
+              finished_at: '2026-10-15T10:00:05Z',
+            }),
+            jobFixture({
+              id: 6,
+              state: 'lost',
+              error: 'the Bridge was unpaired on its page',
+              finished_at: '2026-10-15T10:00:05Z',
+            }),
+          ],
+        },
+      },
+      'GET /api/libraries': { body: { libraries: [libraryFixture()] } },
+      'GET /api/status': { body: pairedStatus() },
+    });
+    render(<JobsTab client={api()} />);
+    const current = await screen.findByRole('article', { name: 'Job 8' });
+    expect(await within(current).findByText('Audiobooks · Author/Book')).toBeInTheDocument();
+    const other = screen.getByRole('article', { name: 'Job 7' });
+    expect(within(other).getByText('Author/Book')).toBeInTheDocument();
+    expect(within(other).queryByText(/Audiobooks/)).toBeNull();
+    expect(within(other).getAllByText('Paired with another server').length).toBeGreaterThan(0);
+    expect(within(other).queryByText('The server took it back')).toBeNull();
+    const unpaired = screen.getByRole('article', { name: 'Job 6' });
+    expect(within(unpaired).getAllByText('Unpaired on its page').length).toBeGreaterThan(0);
   });
 
   it('says so when the job is no longer running here', async () => {

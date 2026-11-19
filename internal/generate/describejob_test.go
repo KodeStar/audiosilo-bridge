@@ -93,7 +93,7 @@ func (hr *harness) describeHandler(d Describer) *Handler {
 func (hr *harness) runAll(h *Handler) (stop func()) {
 	r := jobs.New(hr.db, func() jobs.Server { return hr.cl }, nil, jobs.Options{Keepalive: 30 * time.Millisecond,
 		ProgressEvery: 5 * time.Millisecond, Wait: 10 * time.Millisecond, RetryEvery: 20 * time.Millisecond,
-		ServerID: func() string { return "srv" }, Log: slog.New(slog.NewTextHandler(io.Discard, nil))}, h, h.DescribeJob())
+		Log: slog.New(slog.NewTextHandler(io.Discard, nil))}, h, h.DescribeJob())
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { defer close(done); r.Run(ctx) }()

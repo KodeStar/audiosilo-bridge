@@ -21,8 +21,21 @@ export function stateTone(state: string): Tone {
   return STATES[state]?.tone ?? 'muted';
 }
 
-// stateHint explains a state that needs it ("" otherwise).
-export function stateHint(state: string): string {
+// The errors the Bridge records on a job it dropped (jobs.errOtherServer and
+// jobs.errPairingEnded), each with the hint a lost job shows for it.
+const DROPPED: { error: string; hint: string }[] = [
+  { error: 'the Bridge was paired with another server', hint: 'Paired with another server' },
+  { error: 'the Bridge was unpaired on its page', hint: 'Unpaired on its page' },
+];
+
+// stateHint explains a state that needs it ("" otherwise). A lost job says why
+// from its error: dropped by this Bridge (its pairing ended), else the server
+// took it back.
+export function stateHint(state: string, error = ''): string {
+  if (state === 'lost') {
+    const dropped = DROPPED.find((d) => error.startsWith(d.error));
+    if (dropped) return dropped.hint;
+  }
   return STATES[state]?.hint ?? '';
 }
 
@@ -70,8 +83,15 @@ export function libraryNames(libs: Library[] | null | undefined): Map<number, st
 
 // jobTarget is "Books · Author/Book" with the library's name from names (as the
 // server's console shows a job), else "library 2: Author/Book"; without a path
-// the library alone ("Books", "library 2"), or "".
-export function jobTarget(job: ServerJob, names?: ReadonlyMap<number, string> | null): string {
+// the library alone ("Books", "library 2"), or "". serverId is the paired
+// server's (the one names are of, when known): a job another server handed out
+// names its path alone, as its library ids are that server's.
+export function jobTarget(
+  job: ServerJob,
+  names?: ReadonlyMap<number, string> | null,
+  serverId?: string,
+): string {
+  if (serverId !== undefined && job.server_id !== serverId) return job.path ?? '';
   const name = job.library_id != null ? names?.get(job.library_id) : undefined;
   if (name) return job.path ? `${name} · ${job.path}` : name;
   const lib = job.library_id != null ? `library ${job.library_id}` : '';

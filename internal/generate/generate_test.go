@@ -335,6 +335,7 @@ func newHarness(t *testing.T) *harness {
 	if err != nil {
 		t.Fatal(err)
 	}
+	cl = cl.WithServerID("srv") // the server the runner's claims record
 	libs := &libraries{root: root}
 	libs.writable.Store(true)
 	exec := &hooks{t: t, stub: scheduler.NewStubExecutor(time.Millisecond, 2*time.Millisecond), db: db, parks: map[string]int{}, block: map[string]chan struct{}{}}
@@ -419,7 +420,7 @@ func (hr *harness) runnerOf(handlers ...jobs.Handler) (stop func()) {
 func (hr *harness) runnerKeepalive(keepalive time.Duration, handlers ...jobs.Handler) (stop func()) {
 	r := jobs.New(hr.db, func() jobs.Server { return hr.cl }, nil, jobs.Options{Keepalive: keepalive,
 		ProgressEvery: 5 * time.Millisecond, Wait: 10 * time.Millisecond, RetryEvery: 20 * time.Millisecond,
-		ServerID: func() string { return "srv" }, Log: slog.New(slog.NewTextHandler(io.Discard, nil))}, handlers...)
+		Log: slog.New(slog.NewTextHandler(io.Discard, nil))}, handlers...)
 	for _, h := range handlers {
 		if gh, ok := h.(*Handler); ok {
 			gh.AskThrough(r) // as the app wires it

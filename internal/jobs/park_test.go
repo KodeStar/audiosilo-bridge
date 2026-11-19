@@ -313,8 +313,8 @@ func TestServerIdentity(t *testing.T) {
 	db, srv := openStore(t), newFakeServer()
 	ctx := context.Background()
 	srv.add(&link.Job{ID: 4, Kind: "k.v", Attempts: 1})
+	srv.id = "srv-a"
 	opts := testOpts()
-	opts.ServerID = func() string { return "srv-a" }
 	r := New(db, func() Server { return srv }, nil, opts, handler{kind: "k.v", lane: LaneLight,
 		fn: func(context.Context, Job, *Reporter) (any, error) { return nil, nil }})
 	runFor(t, r, func() bool { s, _ := srv.finalState(4); return s == link.StateDone })
@@ -452,9 +452,8 @@ func TestAbandonedJobs(t *testing.T) {
 			tc.setup(srv)
 			h := &abandoner{handler: handler{kind: "k.v", lane: LaneLight,
 				fn: func(context.Context, Job, *Reporter) (any, error) { return nil, nil }}}
-			opts := testOpts()
-			opts.ServerID = func() string { return tc.serverID }
-			r := New(db, func() Server { return srv }, nil, opts, h)
+			srv.id = tc.serverID
+			r := New(db, func() Server { return srv }, nil, testOpts(), h)
 			runFor(t, r, func() bool {
 				sj, err := db.GetServerJob(ctx, 9)
 				return err == nil && sj.State != store.JobRunning
@@ -479,7 +478,7 @@ func TestReportsClearTheErrorWhenNotParked(t *testing.T) {
 	t.Parallel()
 	db, srv := openStore(t), newFakeServer()
 	ctx := context.Background()
-	if err := db.RecordClaim(ctx, store.ServerJob{ID: 11, Kind: "k.v", Attempt: 1}); err != nil {
+	if err := db.RecordClaim(ctx, store.ServerJob{ServerID: testServer, ID: 11, Kind: "k.v", Attempt: 1}); err != nil {
 		t.Fatal(err)
 	}
 	h := handler{kind: "k.v", lane: LaneLight, fn: func(_ context.Context, _ Job, rep *Reporter) (any, error) {
@@ -785,7 +784,7 @@ func TestRunnerShareOff(t *testing.T) {
 	db, srv := openStore(t), newFakeServer()
 	ctx := context.Background()
 	for _, id := range []int64{1, 2} {
-		if err := db.RecordClaim(ctx, store.ServerJob{ID: id, Kind: "k.v", Attempt: 1}); err != nil {
+		if err := db.RecordClaim(ctx, store.ServerJob{ServerID: testServer, ID: id, Kind: "k.v", Attempt: 1}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -858,8 +857,8 @@ func TestRunnerShareOffStrandedOnlyWithoutALaterClaim(t *testing.T) {
 	srv := newFakeServer()
 	r := New(openStore(t), func() Server { return srv }, nil, testOpts())
 	r.mu.Lock()
-	r.stranded = append(r.stranded, strandedJob{job: Job{ID: 4, Attempt: 1, shareOff: true}, srv: srv})
-	r.running[4] = &run{job: Job{ID: 4, Attempt: 2}, srv: srv} // launched, its Reporter not made yet
+	r.stranded = append(r.stranded, Job{ID: 4, Attempt: 1, shareOff: true})
+	r.running[4] = &run{job: Job{serverID: testServer, ID: 4, Attempt: 2}} // launched, its Reporter not made yet
 	r.mu.Unlock()
 	if off, err := r.ShareOff(context.Background(), 4, false); off || !errors.Is(err, ErrShareNotRunning) {
 		t.Fatalf("a later claim running: %v %v, want ErrShareNotRunning", off, err)
@@ -896,7 +895,7 @@ func TestStrandedJobWaitsOutAnUnreadableRow(t *testing.T) {
 	st := &getFailStore{DB: db}
 	ctx := context.Background()
 	for _, id := range []int64{4, 5} {
-		if err := db.RecordClaim(ctx, store.ServerJob{ID: id, Kind: "k.v", Attempt: 1}); err != nil {
+		if err := db.RecordClaim(ctx, store.ServerJob{ServerID: testServer, ID: id, Kind: "k.v", Attempt: 1}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -911,20 +910,20 @@ func TestStrandedJobWaitsOutAnUnreadableRow(t *testing.T) {
 	r := New(st, func() Server { return srv }, nil, testOpts(), h)
 	r.mu.Lock()
 	for _, id := range []int64{4, 5, 6} { // 6 has no row
-		r.stranded = append(r.stranded, strandedJob{job: Job{ID: id, Kind: "k.v", Attempt: 1}, srv: srv})
+		r.stranded = append(r.stranded, Job{serverID: testServer, ID: id, Kind: "k.v", Attempt: 1})
 	}
 	r.mu.Unlock()
 	strandedIDs := func() (ids []int64) {
 		r.mu.Lock()
 		defer r.mu.Unlock()
 		for _, s := range r.stranded {
-			ids = append(ids, s.job.ID)
+			ids = append(ids, s.ID)
 		}
 		return ids
 	}
 	var wg sync.WaitGroup
 	st.fail.Store(true)
-	r.resumeStranded(ctx, srv, &wg)
+	r.resumeStranded(ctx, srv, srv.id, &wg)
 	if got := strandedIDs(); !slices.Equal(got, []int64{4, 5, 6}) {
 		t.Fatalf("stranded after a look that could read no row = %v, want all three kept", got)
 	}
@@ -934,7 +933,7 @@ func TestStrandedJobWaitsOutAnUnreadableRow(t *testing.T) {
 		t.Fatalf("ShareOff of the job kept stranded = %v, want ErrShareOffLink", err)
 	}
 	st.fail.Store(false)
-	r.resumeStranded(ctx, srv, &wg)
+	r.resumeStranded(ctx, srv, srv.id, &wg)
 	wg.Wait()
 	if got := strandedIDs(); len(got) != 0 {
 		t.Fatalf("stranded after a look that read the rows = %v, want none", got)
@@ -1035,7 +1034,7 @@ func TestPublicationRequiresSuccessfulLease(t *testing.T) {
 			jobCtx, cancel := context.WithCancelCause(context.Background())
 			defer cancel(nil)
 			unpaired := false
-			rep := &Reporter{r: &Runner{onUnauthorized: func(Server) { unpaired = true }}, srv: srv, job: Job{ID: 81, Attempt: 2}, cancel: cancel}
+			rep := &Reporter{r: &Runner{server: func() Server { return srv }, onUnauthorized: func(Server) { unpaired = true }}, srv: srv, job: Job{serverID: testServer, ID: 81, Attempt: 2}, cancel: cancel}
 			err := rep.ConfirmLease(context.Background())
 			if (err == nil) != (mode == "allowed") {
 				t.Fatal(mode, err)
@@ -1253,9 +1252,8 @@ func TestDroppedJobIsReleasedBeforeItIsLost(t *testing.T) {
 	}
 	h := &releaseFirst{db: db, handler: handler{kind: "k.v", lane: LaneLight,
 		fn: func(context.Context, Job, *Reporter) (any, error) { return nil, nil }}}
-	opts := testOpts()
-	opts.ServerID = func() string { return "srv-new" }
-	r := New(db, func() Server { return srv }, nil, opts, h)
+	srv.id = "srv-new"
+	r := New(db, func() Server { return srv }, nil, testOpts(), h)
 	runFor(t, r, func() bool {
 		sj, err := db.GetServerJob(ctx, 9)
 		return err == nil && sj.State == store.JobLost
@@ -1270,6 +1268,7 @@ func TestDroppedJobIsReleasedBeforeItIsLost(t *testing.T) {
 func TestStrandedJobOfAnotherServerIsReleasedBeforeItIsLost(t *testing.T) {
 	t.Parallel()
 	db, a, b := openStore(t), newFakeServer(), newFakeServer()
+	a.id, b.id = "a", "b"
 	a.add(&link.Job{ID: 6, Kind: "k.v", Attempts: 1})
 	var mu sync.Mutex
 	current := Server(a)
@@ -1317,19 +1316,24 @@ func (s *switchingServer) UpdateJob(ctx context.Context, id int64, u link.Update
 	return s.fakeServer.UpdateJob(ctx, id, u)
 }
 
-// A handler's ask before it files (Reporter.AskShareOff) is answered on the
-// Bridge's current link (allowed), and confirms nothing on a link it no
-// longer uses (denied): paired with another server before the ask, or while
-// its answer was on its way. Runner.ShareOff asks the same way.
-func TestAskShareOffOnlyOnTheCurrentLink(t *testing.T) {
+// A handler's ask before it files (Reporter.AskShareOff) is answered while the
+// Bridge's current link reaches the job's server, a new pairing with it
+// included (allowed: the ask goes over the new link, and the run is stopped to
+// run again there, errRelinked); unpaired it confirms nothing (denied); and
+// paired with another server, before the ask or while its answer was on its
+// way, the job is dropped: stopped, recorded lost and reported to no other
+// server (denied). Runner.ShareOff asks the same way.
+func TestAskShareOffOnlyOnTheJobsServer(t *testing.T) {
 	t.Parallel()
 	db, other := openStore(t), newFakeServer()
-	srv := &switchingServer{fakeServer: newFakeServer()}
+	srv := newFakeServer()
+	again := &switchingServer{fakeServer: newFakeServer()}
+	srv.id, again.id, other.id = "a", "a", "b"
 	var cur atomic.Pointer[Server]
 	setCur := func(s Server) { cur.Store(&s) }
 	setCur(srv)
-	srv.onUpdate = func() { setCur(other) }
-	reps := make(chan *Reporter, 1)
+	again.onUpdate = func() { setCur(other) }
+	reps := make(chan *Reporter, 2)
 	h := handler{kind: "k.v", lane: LaneLight, fn: func(ctx context.Context, _ Job, rep *Reporter) (any, error) {
 		reps <- rep
 		<-ctx.Done()
@@ -1337,7 +1341,12 @@ func TestAskShareOffOnlyOnTheCurrentLink(t *testing.T) {
 	}}
 	opts := testOpts()
 	opts.Keepalive = time.Hour // only the asks report
-	r := New(db, func() Server { return *cur.Load() }, nil, opts, h)
+	r := New(db, func() Server {
+		if s := cur.Load(); s != nil {
+			return *s
+		}
+		return nil
+	}, nil, opts, h)
 	srv.add(&link.Job{ID: 1, Kind: "k.v", Attempts: 1, State: "claimed"})
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -1348,19 +1357,251 @@ func TestAskShareOffOnlyOnTheCurrentLink(t *testing.T) {
 	if off, err := rep.AskShareOff(ctx); off || err != nil {
 		t.Fatalf("on the job's link: %v %v, want false, nil", off, err)
 	}
-	srv.armed.Store(true)
+	cur.Store(nil) // unpaired
 	if _, err := rep.AskShareOff(ctx); !errors.Is(err, ErrShareOffLink) {
-		t.Fatalf("paired with another server while the answer came: %v, want ErrShareOffLink", err)
+		t.Fatalf("unpaired: %v, want ErrShareOffLink", err)
 	}
-	if rep.OnCurrentLink() {
-		t.Fatal("the job's link counts as the current one after a pairing with another server")
+	if _, err := r.ShareOff(ctx, 1, false); !errors.Is(err, ErrShareOffLink) {
+		t.Fatalf("Runner.ShareOff unpaired: %v, want ErrShareOffLink", err)
 	}
-	if _, err := r.ShareOff(ctx, 1, true); !errors.Is(err, ErrShareOffLink) {
-		t.Fatalf("Runner.ShareOff on another server's link: %v, want ErrShareOffLink", err)
+	// Paired again with the same server: a new link, which the ask uses.
+	setCur(again)
+	if off, err := rep.AskShareOff(ctx); off || err != nil {
+		t.Fatalf("on a new link to the job's server: %v %v, want false, nil", off, err)
 	}
-	setCur(srv)
-	srv.setShareOff(map[int64]bool{1: true})
-	if off, err := rep.AskShareOff(ctx); !off || err != nil {
-		t.Fatalf("back on the job's link, share_off: %v %v, want true", off, err)
+	if again.triesOf(1) == 0 {
+		t.Fatal("the ask didn't go over the new link to the job's server")
+	}
+	if !errors.Is(context.Cause(rep.ctx), errRelinked) {
+		t.Fatalf("the run on the old link ended %v, want stopped to run again on the new one", context.Cause(rep.ctx))
+	}
+	rep = <-reps // resumed under its claim on the new link
+	again.armed.Store(true)
+	if _, err := r.ShareOff(ctx, 1, true); err == nil {
+		t.Fatal("paired with another server while the answer came: nil, want an error")
+	}
+	if !errors.Is(context.Cause(rep.ctx), errOtherServer) {
+		t.Fatalf("the job's end = %v, want dropped for another server", context.Cause(rep.ctx))
+	}
+	waitFor(t, func() bool {
+		sj, err := db.GetServerJob(ctx, 1)
+		return err == nil && sj.State == store.JobLost
+	})
+	if n := other.triesOf(1); n != 0 {
+		t.Fatalf("another server got %d of the job's reports", n)
+	}
+}
+
+// The share job stuck on the old link (BR-LINK-RULE): a job parked on a
+// pairing that has since moved to another server is dropped by its next ask,
+// once and for good, rather than parking again at every recheck on the old
+// link; and a job waiting with no link at all keeps saying it can't confirm.
+func TestAskShareOffDropsAJobOfAnotherServer(t *testing.T) {
+	t.Parallel()
+	db, srv, other := openStore(t), newFakeServer(), newFakeServer()
+	srv.id, other.id = "a", "b"
+	var cur atomic.Pointer[fakeServer]
+	cur.Store(srv)
+	reps := make(chan *Reporter, 1)
+	h := handler{kind: "k.v", lane: LaneLight, fn: func(ctx context.Context, _ Job, rep *Reporter) (any, error) {
+		rep.Park("share_unconfirmed", "waiting")
+		reps <- rep
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}}
+	opts := testOpts()
+	opts.Keepalive = time.Hour
+	r := New(db, func() Server {
+		if s := cur.Load(); s != nil {
+			return s
+		}
+		return nil
+	}, nil, opts, h)
+	srv.add(&link.Job{ID: 2, Kind: "k.v", Attempts: 1, State: "claimed"})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { r.Run(ctx); close(done) }()
+	defer func() { cancel(); <-done }()
+	rep := <-reps
+	cur.Store(nil) // unpaired: nothing confirms the share, nothing is dropped
+	for range 2 {
+		if _, err := rep.AskShareOff(ctx); !errors.Is(err, ErrShareOffLink) {
+			t.Fatalf("unpaired: %v, want ErrShareOffLink", err)
+		}
+	}
+	cur.Store(other) // paired with another server (no wake: the ask finds it)
+	if _, err := rep.AskShareOff(ctx); !errors.Is(err, ErrStopped) {
+		t.Fatalf("paired with another server: %v, want ErrStopped", err)
+	}
+	waitFor(t, func() bool {
+		sj, err := db.GetServerJob(ctx, 2)
+		return err == nil && sj.State == store.JobLost && sj.ServerID == "a"
+	})
+	if n := other.triesOf(2); n != 0 {
+		t.Fatalf("the new server heard of the old server's job %d times", n)
+	}
+}
+
+// A running job's Bridge paired with another server is dropped as soon as the
+// runner wakes (dropOtherServers), not left reporting on the old link; one
+// paired again with its own server at a new address is stopped and run again
+// under its claim on the new link (errRelinked: its handler may hold the old,
+// revoked link), and ends there (allowed and denied re-pairs).
+func TestRepairWithARunningJob(t *testing.T) {
+	for name, nextID := range map[string]string{"same server": "a", "another server": "b"} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			db, srv, next := openStore(t), newFakeServer(), newFakeServer()
+			srv.id, next.id = "a", nextID
+			var cur atomic.Pointer[fakeServer]
+			cur.Store(srv)
+			running, finish := make(chan struct{}), make(chan struct{})
+			var runs atomic.Int32
+			h := handler{kind: "k.v", lane: LaneLight, fn: func(ctx context.Context, j Job, _ *Reporter) (any, error) {
+				if runs.Add(1) == 1 {
+					close(running)
+				} else if !j.Resumed {
+					t.Error("the run again on the new link isn't its claim resumed")
+				}
+				select {
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				case <-finish:
+					return nil, nil
+				}
+			}}
+			opts := testOpts()
+			opts.Keepalive = 20 * time.Millisecond
+			r := New(db, func() Server { return cur.Load() }, nil, opts, h)
+			srv.add(&link.Job{ID: 3, Kind: "k.v", Attempts: 1, State: "claimed"})
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan struct{})
+			go func() { r.Run(ctx); close(done) }()
+			defer func() { cancel(); <-done }()
+			<-running
+			cur.Store(next)
+			r.Wake()
+			if nextID == "b" {
+				waitFor(t, func() bool {
+					sj, err := db.GetServerJob(ctx, 3)
+					return err == nil && sj.State == store.JobLost
+				})
+				if n := next.triesOf(3); n != 0 {
+					t.Fatalf("another server got %d of the job's reports", n)
+				}
+				return
+			}
+			waitFor(t, func() bool { return runs.Load() == 2 })
+			close(finish)
+			waitFor(t, func() bool { s, _ := next.finalState(3); return s == link.StateDone })
+			if s, _ := srv.finalState(3); s == link.StateDone {
+				t.Fatal("the end went to the old link")
+			}
+		})
+	}
+}
+
+// A job of the server the Bridge no longer works for is recorded lost on its
+// own row only: once the new server's claim of the same id and attempt holds
+// the row (it claims as the old server's runs end), the drop leaves it alone
+// (denied), and a row still the old server's is recorded lost (allowed).
+func TestDroppedJobLeavesTheNewServersRow(t *testing.T) {
+	t.Parallel()
+	db, ctx := openStore(t), context.Background()
+	if err := db.RecordClaim(ctx, store.ServerJob{ID: 5, Kind: "k.v", Attempt: 1, ServerID: "b"}); err != nil {
+		t.Fatal(err)
+	}
+	r := New(db, func() Server { return nil }, nil, testOpts())
+	r.recordLost(ctx, Job{ID: 5, Attempt: 1, serverID: "a"}, nil, errOtherServer)
+	if sj, err := db.GetServerJob(ctx, 5); err != nil || sj.State != store.JobRunning || sj.ServerID != "b" {
+		t.Fatalf("the new server's row after the old one's drop: %+v %v, want it running", sj, err)
+	}
+	if err := db.RecordClaim(ctx, store.ServerJob{ID: 6, Kind: "k.v", Attempt: 1, ServerID: "a"}); err != nil {
+		t.Fatal(err)
+	}
+	r.recordLost(ctx, Job{ID: 6, Attempt: 1, serverID: "a"}, nil, errOtherServer)
+	if sj, err := db.GetServerJob(ctx, 6); err != nil || sj.State != store.JobLost {
+		t.Fatalf("the old server's own row: %+v %v, want lost", sj, err)
+	}
+}
+
+// A row from before the Bridge recorded its server (or a server that named
+// none) is no known server's job: a start drops it, recorded lost, never run
+// and reporting nothing on the current link (denied), rather than taking it as
+// that server's (BR-LINK-RULE: unknown is never the same). The server's own
+// lease lapses it, and it is handed out again.
+func TestRecoveredUnknownServerJobIsDropped(t *testing.T) {
+	t.Parallel()
+	db, srv := openStore(t), newFakeServer()
+	if err := db.RecordClaim(context.Background(), store.ServerJob{ID: 3, Kind: "k.v", Attempt: 1}); err != nil {
+		t.Fatal(err)
+	}
+	var ran atomic.Bool
+	h := handler{kind: "k.v", lane: LaneLight, fn: func(context.Context, Job, *Reporter) (any, error) {
+		ran.Store(true)
+		return nil, nil
+	}}
+	r := New(db, func() Server { return srv }, nil, testOpts(), h)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { r.Run(ctx); close(done) }()
+	defer func() { cancel(); <-done }()
+	waitFor(t, func() bool {
+		sj, err := db.GetServerJob(ctx, 3)
+		return err == nil && sj.State == store.JobLost
+	})
+	if ran.Load() {
+		t.Fatal("a job of no known server ran")
+	}
+	if n := srv.triesOf(3); n != 0 {
+		t.Fatalf("the current server got %d of an unknown server's job's reports", n)
+	}
+}
+
+// The one rule's unknown: an id that isn't known is never the same server, on
+// either side, and a job no runner claimed keys by the pairing.
+func TestUnknownServerIsNeverTheSame(t *testing.T) {
+	for _, c := range []struct {
+		a, b string
+		same bool
+	}{{"a", "a", true}, {"a", "b", false}, {"", "a", false}, {"a", "", false}, {"", "", false}} {
+		if got := sameServer(c.a, c.b); got != c.same {
+			t.Errorf("sameServer(%q, %q) = %v, want %v", c.a, c.b, got, c.same)
+		}
+	}
+	if got := (Job{serverID: "a"}).KeyServer("b"); got != "a" {
+		t.Errorf("a claimed job's key server = %q, want its own", got)
+	}
+	if got := (Job{}).KeyServer("b"); got != "b" {
+		t.Errorf("an unclaimed job's key server = %q, want the pairing's", got)
+	}
+}
+
+// Link hands a job's handler the link only while it reaches the job's server:
+// another server's link, or one that names no server, is no link at all.
+func TestLinkOnlyReachesTheJobsServer(t *testing.T) {
+	a, b, unknown := newFakeServer(), newFakeServer(), newFakeServer()
+	a.id, b.id, unknown.id = "a", "b", ""
+	job := Job{serverID: "a"}
+	if Link[Server](job, a) == nil {
+		t.Fatal("the job's own server's link was withheld")
+	}
+	if Link[Server](job, b) != nil || Link[Server](job, unknown) != nil || Link[Server](job, nil) != nil {
+		t.Fatal("another (or an unknown) server's link was handed to the job")
+	}
+	if Link[Server](Job{}, b) == nil {
+		t.Fatal("a job no runner claimed lost its link")
+	}
+	// A job claimed under a pairing: its own pairing's link to its server
+	// carries it (allowed); a new pairing's with the same server (an unpair,
+	// then a pairing again) carries nothing of it (denied).
+	own, again := newFakeServer(), newFakeServer()
+	own.id, own.pairing, again.id, again.pairing = "a", "p1", "a", "p2"
+	paired := Job{serverID: "a", pairing: "p1"}
+	if Link[Server](paired, own) == nil {
+		t.Fatal("the job's own pairing's link was withheld")
+	}
+	if Link[Server](paired, again) != nil {
+		t.Fatal("a new pairing's link was handed to an earlier pairing's job")
 	}
 }

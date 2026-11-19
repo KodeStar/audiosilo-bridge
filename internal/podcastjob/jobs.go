@@ -62,8 +62,14 @@ type Options struct {
 	// looks for the result (default 1 s).
 	CheckPoll time.Duration
 }
+
+// service is the podcast jobs' shared work: o, and the state every run shares
+// (shared). A job's run works through its own view (forJob).
 type service struct {
-	o     Options
+	o Options
+	*shared
+}
+type shared struct {
 	mu    sync.Mutex
 	locks map[string]*lock
 	// indexed holds the shows whose current feed.json the server indexed since
@@ -81,6 +87,62 @@ type service struct {
 	// without searching the whole library again.
 	unfound map[string]time.Time
 }
+
+// forJob is the service as job's run sees it: its show rows, artwork, locks
+// and download records keyed by the job's own server (jobs.Job.KeyServer),
+// never the pairing's now, and the server's link and libraries only while the
+// link reaches that server (jobs.Link). A job of a server the Bridge is no
+// longer paired with writes nothing under the new pairing, nor sends it
+// anything (BR-LINK-RULE). The service itself for a job no runner claimed.
+func (s *service) forJob(job jobs.Job) *service {
+	id := job.ServerID()
+	if id == "" {
+		return s
+	}
+	o := s.o
+	o.ServerID = func() string { return id }
+	server := s.o.Server
+	reaches := func() bool { return server != nil && jobs.Link(job, server()) != nil }
+	if server != nil {
+		// The link is read once: checked and then read again, a pairing with
+		// another server in between would hand the job that server's link.
+		o.Server = func() Server { return jobs.Link(job, server()) }
+	}
+	if s.o.Libraries != nil {
+		o.Libraries = jobLibraries{s.o.Libraries, reaches}
+	}
+	return &service{o: o, shared: s.shared}
+}
+
+// jobLibraries are a job's view of the server's libraries: none while the
+// link doesn't reach the job's server (another server's libraries share ids
+// with its own).
+type jobLibraries struct {
+	Libraries
+	reaches func() bool
+}
+
+func (l jobLibraries) Library(id int64) (link.Library, bool) {
+	if !l.reaches() {
+		return link.Library{}, false
+	}
+	return l.Libraries.Library(id)
+}
+
+func (l jobLibraries) Status(id int64) (link.LibraryStatus, bool) {
+	if !l.reaches() {
+		return link.LibraryStatus{}, false
+	}
+	return l.Libraries.Status(id)
+}
+
+func (l jobLibraries) Statuses() []link.LibraryStatus {
+	if !l.reaches() {
+		return nil
+	}
+	return l.Libraries.Statuses()
+}
+
 type lock struct {
 	gate  chan struct{}
 	users int
@@ -119,7 +181,7 @@ func New(o Options) *Subscribe {
 	if o.CheckPoll <= 0 {
 		o.CheckPoll = time.Second
 	}
-	return &Subscribe{s: &service{o: o, locks: map[string]*lock{}, indexed: map[string]bool{}, migrated: map[string]bool{}, unfound: map[string]time.Time{}}}
+	return &Subscribe{s: &service{o: o, shared: &shared{locks: map[string]*lock{}, indexed: map[string]bool{}, migrated: map[string]bool{}, unfound: map[string]time.Time{}}}}
 }
 func (h *Subscribe) PollJob() *Poll { return &Poll{s: h.s} }
 func (h *Subscribe) Kind() string   { return SubscribeKind }
@@ -151,15 +213,61 @@ func (h *Subscribe) SealParams(job jobs.Job) (json.RawMessage, error) {
 	p.FeedURLSHA256 = podcast.FeedURLHash(norm)
 	p.FeedHost = podcast.FeedHost(norm)
 	if p.Private {
-		if err := h.s.o.Vault.Set(secrets.PodcastJobName(job.ID, job.Attempt), norm); err != nil {
+		if err := h.s.o.Vault.Set(h.s.jobSecret(job), norm); err != nil {
 			return nil, &jobs.SealFailure{Code: "write_failed", Message: "The private feed credentials could not be sealed."}
 		}
 		p.FeedURL = ""
 	}
 	return json.Marshal(p)
 }
+
+// Abandon deletes the job's sealed feed URL: its own server's, and the
+// legacy name's only when the URL sealed there is the job's own (a public
+// feed's job sealed none there).
 func (h *Subscribe) Abandon(_ context.Context, job jobs.Job) {
-	_ = h.s.o.Vault.Delete(secrets.PodcastJobName(job.ID, job.Attempt))
+	_ = h.s.o.Vault.Delete(h.s.jobSecret(job))
+	var p subscribeParams
+	if json.Unmarshal(job.Params, &p) == nil && p.Private {
+		if legacy := h.s.legacyJobSecret(job, p.FeedURLSHA256); legacy != "" {
+			_ = h.s.o.Vault.Delete(legacy)
+		}
+	}
+}
+
+// jobSecret names job's sealed feed URL, keyed by the job's own server
+// (KeyServer): another server's job of the same id and attempt seals, reads
+// and deletes its own.
+func (s *service) jobSecret(job jobs.Job) string {
+	return secrets.PodcastJobName(job.KeyServer(s.o.ServerID()), job.ID, job.Attempt)
+}
+
+// legacyJobSecret is the name an earlier Bridge sealed job's feed URL under
+// (its id and attempt, no server), when the URL sealed there is job's own:
+// hash, the sealed params' feed_url_sha256, is that URL's. Only then is it
+// read (a claim sealed before an upgrade, resumed after it) or deleted for
+// job: another server's job of the same id and attempt sealed its own URL
+// there. "" when it isn't job's, or is jobSecret.
+func (s *service) legacyJobSecret(job jobs.Job, hash string) string {
+	name := secrets.PodcastLegacyJobName(job.ID, job.Attempt)
+	if hash == "" || name == s.jobSecret(job) {
+		return ""
+	}
+	if v, err := s.o.Vault.Get(name); err != nil || v == "" || podcast.FeedURLHash(v) != hash {
+		return ""
+	}
+	return name
+}
+
+// sealedJobSecret is where job's private feed URL is sealed: jobSecret, or,
+// with nothing there, the legacy name when it holds the job's own URL.
+func (s *service) sealedJobSecret(job jobs.Job, hash string) string {
+	name := s.jobSecret(job)
+	if v, err := s.o.Vault.Get(name); err == nil && v == "" {
+		if legacy := s.legacyJobSecret(job, hash); legacy != "" {
+			return legacy
+		}
+	}
+	return name
 }
 
 func (h *Subscribe) Run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (any, error) {
@@ -168,10 +276,10 @@ func (h *Subscribe) Run(parent context.Context, job jobs.Job, rep *jobs.Reporter
 			h.Abandon(parent, job)
 		}
 	}()
-	return outcome(h.run(parent, job, rep))
+	return outcome((&Subscribe{s: h.s.forJob(job)}).run(parent, job, rep))
 }
 func (h *Poll) Run(parent context.Context, job jobs.Job, rep *jobs.Reporter) (any, error) {
-	return outcome(h.run(parent, job, rep))
+	return outcome((&Poll{s: h.s.forJob(job)}).run(parent, job, rep))
 }
 
 // ceiling bounds a subscribe's or a poll's work, which starts once it holds its
@@ -299,7 +407,11 @@ func (h *Subscribe) run(parent context.Context, job jobs.Job, rep *jobs.Reporter
 	if json.Unmarshal(job.Params, &p) != nil {
 		return nil, fail("invalid_feed_url", "The feed request is invalid.")
 	}
-	feedURL, err := s.feedURL(p.FeedURL, p.Private, secrets.PodcastJobName(job.ID, job.Attempt), "The feed URL is invalid.")
+	secret := ""
+	if p.Private {
+		secret = s.sealedJobSecret(job, p.FeedURLSHA256)
+	}
+	feedURL, err := s.feedURL(p.FeedURL, p.Private, secret, "The feed URL is invalid.")
 	if err != nil {
 		return nil, err
 	}
