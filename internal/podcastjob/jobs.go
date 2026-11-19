@@ -311,7 +311,7 @@ func (h *Subscribe) run(parent context.Context, job jobs.Job, rep *jobs.Reporter
 	if err != nil {
 		return nil, fail("write_failed", "The podcast cache could not be rebuilt.")
 	}
-	show, f, err := s.find(root, entries, rows, p, feedURL)
+	show, f, renamed, err := s.find(root, entries, rows, p, feedURL)
 	if err != nil {
 		return nil, err
 	}
@@ -343,7 +343,11 @@ func (h *Subscribe) run(parent context.Context, job jobs.Job, rep *jobs.Reporter
 		return nil, err
 	}
 	if created {
-		var names []string
+		// The names a new show cannot take: every entry's, and the old name of
+		// every folder renamed by hand and not taken in yet. A show made at
+		// that old name would leave the renamed folder a copy (ReadMoved),
+		// never taken in.
+		names := renamed
 		for _, e := range entries {
 			names = append(names, e.Name())
 		}
@@ -675,7 +679,11 @@ func (s *service) cache(ctx context.Context, root *os.Root, lib link.Library, en
 // a new show. A follow naming its show (p.ShowPath: a private feed's secret
 // entered again) joins that folder, or the one holding its id when that folder
 // was renamed.
-func (s *service) find(root *os.Root, entries []os.DirEntry, rows []store.PodcastShow, p subscribeParams, feedURL string) (string, *podcast.Feed, error) {
+//
+// It also answers the old names of the folders it read that were renamed by
+// hand and are not taken in yet: for a new show every show folder was read, so
+// these are all the names it must not take.
+func (s *service) find(root *os.Root, entries []os.DirEntry, rows []store.PodcastShow, p subscribeParams, feedURL string) (string, *podcast.Feed, []string, error) {
 	hash := podcast.FeedURLHash(feedURL)
 	missing := fail("feed_secret_missing", "The show no longer matches this private feed. Follow the feed again.")
 	gone := false
@@ -683,14 +691,18 @@ func (s *service) find(root *os.Root, entries []os.DirEntry, rows []store.Podcas
 		_, err := root.Lstat(p.ShowPath)
 		gone = errors.Is(err, os.ErrNotExist)
 		if gone && p.ShowID == "" {
-			return "", nil, missing // no id to find the renamed folder by
+			return "", nil, nil, missing // no id to find the renamed folder by
 		}
 	}
+	var renamed []string
 	match := func(name string) *podcast.Feed {
 		if !podcast.ValidShow(name) {
 			return nil
 		}
-		f, _, err := podcast.ReadMoved(root, name)
+		f, from, err := podcast.ReadMoved(root, name)
+		if err == nil && from != "" {
+			renamed = append(renamed, from)
+		}
 		if err != nil || f.FeedURLSHA256 != hash && !slices.Contains(f.PreviousFeedURLSHA256, hash) {
 			return nil
 		}
@@ -701,30 +713,30 @@ func (s *service) find(root *os.Root, entries []os.DirEntry, rows []store.Podcas
 	}
 	if p.ShowPath != "" && !gone {
 		if f := match(p.ShowPath); f != nil {
-			return p.ShowPath, f, nil
+			return p.ShowPath, f, nil, nil
 		}
-		return "", nil, missing
+		return "", nil, nil, missing
 	}
 	tried := map[string]bool{}
 	for _, r := range rows {
 		if r.FeedURLSHA256 == hash || p.ShowID != "" && r.ShowID == p.ShowID {
 			tried[r.ShowPath] = true
 			if f := match(r.ShowPath); f != nil {
-				return r.ShowPath, f, nil
+				return r.ShowPath, f, nil, nil
 			}
 		}
 	}
 	for _, e := range entries {
 		if e.IsDir() && !tried[e.Name()] {
 			if f := match(e.Name()); f != nil {
-				return e.Name(), f, nil
+				return e.Name(), f, nil, nil
 			}
 		}
 	}
 	if p.ShowPath != "" {
-		return "", nil, missing
+		return "", nil, nil, missing
 	}
-	return "", nil, nil
+	return "", nil, renamed, nil
 }
 
 // relocate is the folder holding show id, for a job whose show folder is gone:

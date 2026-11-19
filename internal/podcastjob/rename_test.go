@@ -175,3 +175,32 @@ func TestACopyOfARenamedShowFolderIsNotTakenIn(t *testing.T) {
 		t.Fatal("cache row", row, ok, err)
 	}
 }
+
+// A new show never takes the name a folder renamed by hand came from while
+// that folder is not taken in yet: a show made there would leave the renamed
+// folder a copy (its feed.json names a folder that exists), refused for good.
+// The renamed show is still found by its id afterwards.
+func TestANewShowNeverTakesTheNameARenamedFolderCameFrom(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	show, id := followed(t, h)
+	renameShow(t, h, show, "Renamed Show")
+	// Another feed of the same title (the harness answers every path alike).
+	res, err := h.handler.Run(context.Background(), h.claim(h.http.URL+"/another", false), jobs.LocalReporter())
+	if err != nil {
+		t.Fatal(res, err)
+	}
+	r := fields(t, res)
+	if r["created"] != true || r["show_path"] == show || r["show_path"] == "Renamed Show" || r["show_id"] == id {
+		t.Fatal("the new show took the renamed folder's old name, or joined it", r)
+	}
+	if _, err := os.Lstat(filepath.Join(h.mount, show)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("a folder was made at the old name", err)
+	}
+	params, _ := json.Marshal(map[string]string{"show_id": id, "etag": `"abc"`})
+	lib := int64(3)
+	poll := jobs.Job{ID: 20, Kind: PollKind, LibraryID: &lib, Path: &show, Params: params}
+	if res, err := h.handler.PollJob().Run(context.Background(), poll, jobs.LocalReporter()); err != nil || fields(t, res)["show_path"] != "Renamed Show" {
+		t.Fatal("the renamed show was not taken in", res, err)
+	}
+}
