@@ -52,7 +52,7 @@ func TestAudibleSyncWireMirror(t *testing.T) {
 				_, _ = w.Write([]byte(`{"error":"x","code":"unknown_account"}`))
 			case "badbad00": // a server from 2.7.0 on
 				w.WriteHeader(http.StatusBadRequest)
-				_, _ = w.Write([]byte(`{"error":"the progress cursor can't be read","code":"invalid_cursor"}`))
+				_, _ = w.Write([]byte(`{"error":"the cursor can't be read: read from the start","code":"invalid_cursor"}`))
 			case "oldbad00": // a server before 2.7.0
 				w.WriteHeader(http.StatusBadRequest)
 				_, _ = w.Write([]byte(`{"error":"invalid audible request: bad cursor","code":"invalid_request"}`))
