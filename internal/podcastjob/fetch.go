@@ -87,10 +87,11 @@ var errPartialUnreadable = errors.New("the episode partial could not be read")
 var errPartialChanged = errors.New("the episode partial changed on disk")
 
 // errPartialStuck is a partial that must be cleared for the episode to start
-// again from zero (partialLost) but that the clear could not remove (a show
-// folder the Bridge may not write): the attempt fails write_failed rather
-// than restart beside it, and the record stays for the next attempt or the
-// day-old cleanup (cleanOwned).
+// again from zero (partialLost, another size, another enclosure) but that the
+// clear could not remove (a show folder the Bridge may not write): the
+// attempt fails write_failed rather than restart beside it, and the record
+// stays for the next attempt or the day-old cleanup (cleanOwned,
+// sweepRecords), which drops it then even when the partial stays.
 var errPartialStuck = errors.New("the episode partial could not be removed")
 
 func (s *service) budget(parent context.Context) (context.Context, *budget) {
@@ -356,6 +357,34 @@ func (h *Fetch) run(parent context.Context, claimed *jobs.Job, rep *jobs.Reporte
 		s.adoptOwn(job, root, claimedAt, params, c.Temp)
 	}()
 	rep.Progress(jobs.Progress{Step: "resolving", Message: "Resolving the episode"})
+	// The episode's enclosure, resolved once per job (a private feed's is
+	// fetched): before the loop only for a kept whole download its record
+	// names the source of, else when a download needs it.
+	var enc podcast.Enclosure
+	resolve := func() error {
+		if enc.URL != "" {
+			return nil
+		}
+		got, err := s.enclosure(ctx, f, e)
+		enc = got
+		return err
+	}
+	if c.complete() && c.Source != "" {
+		if err := resolve(); err != nil {
+			return nil, err // the whole download is kept (the exit), for the next attempt
+		}
+		// The feed changed the episode's audio under the same episode id
+		// since it was downloaded (another enclosure URL or length): the old
+		// download is never published, and the episode is downloaded again
+		// from byte 0.
+		if !c.sameSource(enc) {
+			slog.Info("podcasts: an episode's enclosure changed since its download was kept; it is downloaded again", "partial", c.partialName())
+			if !s.clearCheckpoint(job, root, &c) {
+				return nil, stuckPartial(errors.New("the episode's enclosure changed"))
+			}
+			tag = ""
+		}
+	}
 	var received podcast.Fetch
 	for again := false; ; again = true {
 		if c.complete() {
@@ -363,7 +392,9 @@ func (h *Fetch) run(parent context.Context, claimed *jobs.Job, rep *jobs.Reporte
 			// against the hash it was written with, and published with no GET.
 			// One proven changed is downloaded again from byte 0, once.
 			received = podcast.Fetch{Bytes: c.Offset, SHA256: c.SHA256}
-		} else if received, err = s.download(ctx, b, &job, root, f, e, &c, tag, settle, follow, rep); err != nil {
+		} else if err = resolve(); err != nil {
+			return nil, err
+		} else if received, err = s.download(ctx, b, &job, root, enc, &c, tag, settle, follow, rep); err != nil {
 			return nil, err
 		}
 		// A show folder renamed by hand while the episode downloaded took the
@@ -749,24 +780,26 @@ func (s *service) episodeRescan(ctx context.Context, id int64, p string) error {
 	return nil
 }
 
-func (s *service) enclosure(ctx context.Context, f *podcast.Feed, e podcast.Episode) (string, error) {
+// enclosure is episode e's enclosure: from feed.json, or for a private feed
+// (whose feed.json keeps no URL) from the feed itself, fetched again.
+func (s *service) enclosure(ctx context.Context, f *podcast.Feed, e podcast.Episode) (podcast.Enclosure, error) {
 	if !f.Private {
 		if e.Enclosure.URL == "" {
-			return "", fail("enclosure_missing", "The episode has no available enclosure.")
+			return podcast.Enclosure{}, fail("enclosure_missing", "The episode has no available enclosure.")
 		}
-		return e.Enclosure.URL, nil
+		return e.Enclosure, nil
 	}
 	raw, err := s.feedURL("", true, secrets.PodcastFeedName(f.ShowID), "The private feed address is invalid.")
 	if err != nil {
-		return "", err
+		return podcast.Enclosure{}, err
 	}
 	resp, err := s.o.Fetcher.Fetch(ctx, netguard.Request{URL: raw, MaxBytes: s.o.MaxFeedBytes})
 	if err != nil {
-		return "", err
+		return podcast.Enclosure{}, err
 	}
 	parsed, err := podcast.ParseExisting(resp.Body, resp.URL)
 	if err != nil {
-		return "", err
+		return podcast.Enclosure{}, err
 	}
 	var exact, weak []podcast.Episode
 	for _, candidate := range parsed.Episodes {
@@ -782,28 +815,29 @@ func (s *service) enclosure(ctx context.Context, f *podcast.Feed, e podcast.Epis
 		}
 	}
 	if len(exact) == 1 && exact[0].Enclosure.URL != "" {
-		return exact[0].Enclosure.URL, nil
+		return exact[0].Enclosure, nil
 	}
 	if len(exact) == 0 && len(weak) == 1 && weak[0].Enclosure.URL != "" {
-		return weak[0].Enclosure.URL, nil
+		return weak[0].Enclosure, nil
 	}
-	return "", fail("enclosure_missing", "The episode enclosure could not be identified.")
+	return podcast.Enclosure{}, fail("enclosure_missing", "The episode enclosure could not be identified.")
 }
 
-// download fetches episode e into its partial (c), retrying the host. settle
+// download fetches the episode's enclosure enc (run's, resolved once per job
+// and held in memory only) into its partial (c), retrying the host. settle
 // (run's) follows the fetch, job and c, to a show folder renamed by hand that
 // took the partial: checked before each attempt and before a retry's clear.
 // follow (run's) is consume's, for a partial no longer at its path while it
 // is written (keepHome).
-func (s *service) download(ctx context.Context, b *budget, job *jobs.Job, root *os.Root, f *podcast.Feed, e podcast.Episode, c *checkpoint, tag string, settle, follow func(context.Context) error, rep *jobs.Reporter) (podcast.Fetch, error) {
+func (s *service) download(ctx context.Context, b *budget, job *jobs.Job, root *os.Root, enc podcast.Enclosure, c *checkpoint, tag string, settle, follow func(context.Context) error, rep *jobs.Reporter) (podcast.Fetch, error) {
 	if s.o.Streamer == nil {
 		return podcast.Fetch{}, fail("write_failed", "The episode download is unavailable.")
 	}
-	// Resolved once per job and held in memory only; every attempt GETs the same enclosure.
-	raw, err := s.enclosure(ctx, f, e)
-	if err != nil {
-		return podcast.Fetch{}, err
-	}
+	// Every attempt GETs the same enclosure, and the record names it, so a
+	// whole download kept for the next attempt is published only while the
+	// feed still has it (sameSource).
+	raw := enc.URL
+	c.setSource(enc)
 	var last error
 	// A partial proven changed (gone, not a regular file, another size) is
 	// started again from zero, once per job: the episode may well be fine,

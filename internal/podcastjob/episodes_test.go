@@ -318,15 +318,16 @@ func TestPrivateEnclosureIdentityAndNoPlaintextCheckpoint(t *testing.T) {
 	s.o.Fetcher = feedFetcher(func(context.Context, netguard.Request) (*netguard.Response, error) {
 		return &netguard.Response{Status: 200, URL: h.http.URL, Body: []byte(`<rss version="2.0"><channel><title>Private</title><item><guid>https://private.example/guid/TOKEN_CANARY</guid><title>Current generation</title><enclosure url="` + h.http.URL + `/audio?secret=TOKEN_CANARY" type="audio/mpeg" /></item></channel></rss>`)}, nil
 	})
-	url, err := s.enclosure(context.Background(), f, f.Episodes[0])
-	if err != nil || !strings.Contains(url, "secret=TOKEN_CANARY") {
-		t.Fatal(url, err)
+	enc, err := s.enclosure(context.Background(), f, f.Episodes[0])
+	if err != nil || !strings.Contains(enc.URL, "secret=TOKEN_CANARY") {
+		t.Fatal(enc, err)
 	}
 	root, _ := os.OpenRoot(h.mount)
 	defer root.Close()
 	temp := ".audiosilo-tmp-private"
 	root.WriteFile("Fixture Show/"+temp, []byte("prefix"), 0600)
 	c := checkpoint{ServerHash: s.pairHash(), LibraryID: 3, ShowID: f.ShowID, EpisodeID: f.Episodes[0].ID, Path: *job.Path, Temp: temp, Offset: 6, Total: 100}
+	c.setSource(enc) // a hash only: the private enclosure URL is never written
 	if err := s.saveCheckpoint(job, root, &c, `"https://private.example/ETAG_CANARY"`); err != nil {
 		t.Fatal(err)
 	}
@@ -1149,6 +1150,52 @@ func TestFetchKeepsTheRecordOfAPartialTheRestartCouldNotRemove(t *testing.T) {
 	}
 }
 
+// A partial of another size than its record says, that the start's clear
+// cannot remove (a show folder the Bridge may not write), fails the attempt
+// write_failed with no GET, its record kept for a later clear, never a
+// download started beside it unrecorded.
+func TestFetchStartFailsOnAWrongSizePartialItCannotRemove(t *testing.T) {
+	requireNonRoot(t)
+	h, job := audioHarness(t)
+	s := h.handler.s
+	root, _ := os.OpenRoot(h.mount)
+	defer root.Close()
+	var calls atomic.Int32
+	setAudio(h, func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(500)
+	})
+	c := checkpoint{ServerHash: s.pairHash(), LibraryID: 3, ShowID: fixtureShowID, EpisodeID: "1cc306d831645e2b", Path: *job.Path, Temp: ".audiosilo-tmp-wrongsize", Offset: 5, Total: 100}
+	partial := "Fixture Show/" + c.Temp
+	if err := root.WriteFile(partial, []byte("prefix"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.saveCheckpoint(job, root, &c, `"one"`); err != nil {
+		t.Fatal(err)
+	}
+	show := filepath.Join(h.mount, "Fixture Show")
+	t.Cleanup(func() { os.Chmod(show, 0o755) })
+	// Barred once the fetch's own write check has passed.
+	s.o.Fault = func(at string) error {
+		if at == "load" {
+			if err := os.Chmod(show, 0o500); err != nil {
+				t.Error(err)
+			}
+		}
+		return nil
+	}
+	_, err := h.handler.FetchJob().Run(context.Background(), job, jobs.LocalReporter())
+	if code(t, err) != "write_failed" || !strings.Contains(err.Error(), "could not be removed") || calls.Load() != 0 {
+		t.Fatalf("a wrong-size partial the start cannot remove: %v after %d calls, want write_failed after none", err, calls.Load())
+	}
+	if saved, ok := s.readCheckpoint(job, fixtureShowID); !ok || saved.Temp != c.Temp {
+		t.Fatalf("the record of the partial still on disk was dropped: %+v", saved)
+	}
+	if left := partials(show); len(left) != 1 {
+		t.Fatal("a download was started beside the partial:", left)
+	}
+}
+
 // A Publish that fails once its journal is written leaves the staged audio to
 // the journal: the job's exit drops the record of the resumed partial without
 // removing the file, and so does any later clear of a record naming it
@@ -1356,5 +1403,29 @@ func TestClearKeepsAPartialAJournalStagesUnderAnotherName(t *testing.T) {
 	}
 	if _, ok := s.readCheckpoint(job, fixtureShowID); ok {
 		t.Fatal("the record was kept")
+	}
+}
+
+// sameSource tells another enclosure by its URL, and by its length only when
+// both the record and the feed give one; a record with no source cannot tell.
+func TestCheckpointSameSource(t *testing.T) {
+	var c checkpoint
+	if !c.sameSource(podcast.Enclosure{URL: "https://a.example/1.mp3"}) {
+		t.Fatal("a record with no source refused an enclosure")
+	}
+	c.setSource(podcast.Enclosure{URL: "https://a.example/1.mp3", Length: 100})
+	for enc, want := range map[podcast.Enclosure]bool{
+		{URL: "https://a.example/1.mp3", Length: 100}: true,
+		{URL: "https://a.example/1.mp3"}:              true,
+		{URL: "https://a.example/1.mp3", Length: 99}:  false,
+		{URL: "https://a.example/2.mp3", Length: 100}: false,
+	} {
+		if c.sameSource(enc) != want {
+			t.Error(enc, "want", want)
+		}
+	}
+	c.setSource(podcast.Enclosure{URL: "https://a.example/1.mp3", Length: -1})
+	if c.SourceLength != 0 || !c.sameSource(podcast.Enclosure{URL: "https://a.example/1.mp3", Length: 5}) {
+		t.Fatal("an unknown length was recorded as one", c.SourceLength)
 	}
 }

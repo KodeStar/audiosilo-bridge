@@ -2,6 +2,8 @@ package podcastjob
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"os"
@@ -596,5 +598,139 @@ func TestSweepRecordsLeavesARecordAwaitingItsTakeIn(t *testing.T) {
 	s.sweepRecords(context.Background(), root, lib, h.mount, shows)
 	if kept() {
 		t.Fatal("the record a take-in left behind was kept")
+	}
+}
+
+// A day-old record no job can resume or clear where it is goes with the
+// hourly sweep, as an orphan's does, its partial left on disk unrecorded
+// (sweepPartials' once old and removable) and a published episode beside it
+// untouched: one under a show folder the Bridge may not search, one whose
+// partial cannot be opened, and a whole download never read back. A day-old
+// resumable record whose partial and folder read fine, and a fresh one under
+// a barred folder, stay.
+func TestSweepRecordsDropsDayOldRecordsNoJobCanClear(t *testing.T) {
+	requireNonRoot(t)
+	h, job := audioHarness(t)
+	s := h.handler.s
+	root, err := os.OpenRoot(h.mount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	if err := root.Mkdir("Barred Show", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	show := path.Dir(*job.Path)
+	published := show + "/published.mp3"
+	if err := root.WriteFile(published, []byte("episode"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	type record struct {
+		c     checkpoint
+		fresh bool
+		swept bool
+	}
+	whole := sha256.Sum256([]byte("abcdef"))
+	records := map[string]*record{
+		"barred folder":  {c: checkpoint{Path: "Barred Show/one.mp3"}, swept: true},
+		"barred partial": {c: checkpoint{Path: show + "/two.mp3"}, swept: true},
+		"whole":          {c: checkpoint{Path: published, Offset: 6, SHA256: hex.EncodeToString(whole[:])}, swept: true},
+		"resumable":      {c: checkpoint{Path: show + "/four.mp3"}},
+		"fresh barred":   {c: checkpoint{Path: "Barred Show/five.mp3"}, fresh: true},
+	}
+	dir, err := s.checkpointRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dir.Close()
+	old := s.o.Now().Add(-25 * time.Hour)
+	for name, r := range records {
+		r.c.ServerHash, r.c.LibraryID, r.c.ShowID, r.c.EpisodeID = s.pairHash(), 3, fixtureShowID, "2cc306d831645e2b"
+		r.c.Temp, r.c.Validator = podcast.TempPrefix+nonce(), secrets.PodcastETagPrefix+nonce()
+		if r.c.Offset == 0 {
+			r.c.Offset, r.c.Total = 6, 100
+		} else {
+			r.c.Total = r.c.Offset
+		}
+		r.c.UpdatedAt = old.Format(time.RFC3339)
+		if r.fresh {
+			r.c.UpdatedAt = s.o.Now().Format(time.RFC3339)
+		}
+		if err := root.WriteFile(r.c.partialName(), []byte("abcdef"), 0o600); err != nil {
+			t.Fatal(name, err)
+		}
+		if err := s.o.Vault.Set(r.c.Validator, `"one"`); err != nil {
+			t.Fatal(err)
+		}
+		if err := writeRecord(dir, recordName(3, r.c.ShowID, r.c.Path), r.c); err != nil {
+			t.Fatal(name, err)
+		}
+	}
+	barredPartial := filepath.Join(h.mount, records["barred partial"].c.partialName())
+	barred := filepath.Join(h.mount, "Barred Show")
+	for p, mode := range map[string]os.FileMode{barredPartial: 0, barred: 0o600} {
+		if err := os.Chmod(p, mode); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() { os.Chmod(barred, 0o755) })
+	s.sweepRecords(context.Background(), root, link.Library{ID: 3, Kind: "podcasts", Root: h.mount}, h.mount, []string{show, "Barred Show"})
+	os.Chmod(barred, 0o755)
+	for name, r := range records {
+		_, err := dir.Lstat(recordName(3, r.c.ShowID, r.c.Path))
+		v, _ := s.o.Vault.Get(r.c.Validator)
+		if r.swept != errors.Is(err, os.ErrNotExist) || r.swept != (v == "") {
+			t.Fatal(name, ": swept", r.swept, "record", err, "validator", v)
+		}
+		if _, err := root.Lstat(r.c.partialName()); err != nil {
+			t.Fatal(name, ": the partial was removed with its record", err)
+		}
+	}
+	if b, err := root.ReadFile(published); err != nil || string(b) != "episode" {
+		t.Fatal("a published episode was touched", err)
+	}
+}
+
+// cleanOwned drops a day-old record whose partial it cannot remove (a show
+// folder the Bridge may not write, its .audiosilo folder still writable for
+// the episode's lock) with its validator, rather than keep it for good, and
+// leaves the partial on disk, unrecorded.
+func TestOwnedCleanupDropsADayOldRecordWhosePartialItCannotRemove(t *testing.T) {
+	requireNonRoot(t)
+	h, job := audioHarness(t)
+	s := h.handler.s
+	root, _ := os.OpenRoot(h.mount)
+	defer root.Close()
+	c := checkpoint{ServerHash: s.pairHash(), LibraryID: 3, ShowID: fixtureShowID, EpisodeID: "1cc306d831645e2b", Path: *job.Path, Temp: ".audiosilo-tmp-stuck", Offset: 6, Total: 100}
+	partial := "Fixture Show/" + c.Temp
+	if err := root.WriteFile(partial, []byte("prefix"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.saveCheckpoint(job, root, &c, `"one"`); err != nil {
+		t.Fatal(err)
+	}
+	c.UpdatedAt = s.o.Now().Add(-25 * time.Hour).Format(time.RFC3339)
+	dir, _ := s.checkpointRoot()
+	defer dir.Close()
+	if err := writeRecord(dir, s.checkpointName(job, c.ShowID), c); err != nil {
+		t.Fatal(err)
+	}
+	if err := podcast.EnsureDir(root, "Fixture Show/.audiosilo"); err != nil {
+		t.Fatal(err)
+	}
+	show := filepath.Join(h.mount, "Fixture Show")
+	if err := os.Chmod(show, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(show, 0o755) })
+	s.cleanOwned(context.Background(), root, link.Library{ID: 3, Kind: "podcasts", Root: h.mount}, h.mount, "Fixture Show", 82)
+	if _, ok := s.readCheckpoint(job, fixtureShowID); ok {
+		t.Fatal("the day-old record of a partial that cannot be removed was kept")
+	}
+	if v, _ := s.o.Vault.Get(c.Validator); v != "" {
+		t.Fatal("its validator was kept")
+	}
+	if _, err := root.Lstat(partial); err != nil {
+		t.Fatal("the partial is gone", err)
 	}
 }

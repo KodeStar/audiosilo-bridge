@@ -2638,7 +2638,14 @@ internal/
             checkpoint.complete; run's exit and Run's Abandon leave it). The
             next attempt verifies it and publishes it with no GET; one proven
             changed by then is downloaded again from byte 0, once; it is never
-            published unverified. A cancel (the runner's Abandon) or
+            published unverified. The record names the enclosure it came from
+            (Source, the URL's hash, never the URL, and SourceLength when the
+            feed gave one): a feed that has since moved the episode's audio
+            (another URL) or remade it (another length, both known) under the
+            same episode id has it cleared and downloaded again from byte 0,
+            or failed write_failed (errPartialStuck) when the clear cannot
+            remove it; a record from before Source is verified by its hash
+            alone. A cancel (the runner's Abandon) or
             invalid_audio still clears it, as does the day-old cleanup. Never downloaded again either when its
             folder no longer holds the show (a
             folder deleted outright, another show's at its name: the partial is
@@ -2661,8 +2668,12 @@ internal/
             stays under a folder that is gone. The hourly sweep (SweepPartials)
             first drops the day-old records of no running download whose
             folder is gone, holds another show or holds the show taken in
-            under another spelling (sweepRecords; a folder that cannot be read
-            keeps them, as does a record whose partial is in a folder of its
+            under another spelling, and those no job could resume or clear
+            where they are (outlived: a show folder the Bridge may not search,
+            a partial that cannot be opened, EIO/ESTALE/EACCES, a whole
+            download never read back), their partials left on disk
+            unrecorded and logged (sweepRecords; a folder that cannot be read
+            for any other cause keeps them, as does a record whose partial is in a folder of its
             show renamed by hand and not taken in yet, which that take-in
             moves, and nothing goes while the library's marker is not there),
             with their validators (one a moved record still names stays,
@@ -2745,9 +2756,12 @@ internal/
             (gone, not a regular file, EACCES/EPERM as a lasting fault, another
             size, shorter than its prefix: partialLost, errPartialChanged)
             restarts the episode from zero once per job first, checked before
-            the ranged GET so no request is spent on it; one the restart cannot
-            remove fails the attempt write_failed (errPartialStuck), its record
-            left for the next attempt or cleanOwned. One that could not be
+            the ranged GET so no request is spent on it; one the restart (or
+            the start's clear of a partial of another size) cannot remove fails
+            the attempt write_failed (errPartialStuck), never a download
+            beside it, its record left for the next attempt or the day-old
+            cleanup, which drops the record then even when the partial stays
+            (cleanOwned, sweepRecords). One that could not be
             opened or read to tell (a share's hiccup: errPartialUnreadable) is
             never cleared: at the start
             (loadCheckpoint) the job fails write_failed with no GET, in the

@@ -2553,6 +2553,128 @@ func TestAKeptWholeDownloadStillUnreadKeepsItsRecordsAge(t *testing.T) {
 	}
 }
 
+// A kept whole download (resume-at-total) is published with no GET only while
+// the feed still has the enclosure it was downloaded from. One the feed moved
+// (another URL) or remade (another length) under the same episode id since is
+// cleared and the episode downloaded again from byte 0, the old audio never
+// published; one whose partial the clear cannot remove fails write_failed
+// with no GET, never a download beside it. A record from before the source
+// was kept has none, and is still verified by its hash alone.
+func TestAKeptWholeDownloadIsDownloadedAgainWhenItsEnclosureChanged(t *testing.T) {
+	requireProbe(t)
+	for _, scenario := range []string{"same", "url", "length", "legacy", "stuck"} {
+		t.Run(scenario, func(t *testing.T) {
+			if scenario == "stuck" {
+				requireNonRoot(t)
+			}
+			h, job := audioHarness(t)
+			s := h.handler.s
+			root, err := os.OpenRoot(h.mount)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer root.Close()
+			old, remade := data(t, "chap-v24-reverse.mp3"), data(t, "chap-v23.mp3")
+			setLength := func(f *podcast.Feed) {
+				if _, err := podcast.Write(root, "Fixture Show", f, s.o.Now()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			f := h.read("Fixture Show")
+			f.Episodes[0].Enclosure.Length = int64(len(old))
+			setLength(f)
+			var calls atomic.Int32
+			serving := old
+			setAudio(h, func(w http.ResponseWriter, r *http.Request) {
+				calls.Add(1)
+				body := serving
+				if r.URL.Query().Get("v") == "2" {
+					body = remade
+				}
+				w.Header().Set("ETag", `"one"`)
+				w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+				w.WriteHeader(200)
+				w.Write(body)
+			})
+			s.o.Fault = func(at string) error {
+				if at == "rehash" {
+					return syscall.EIO
+				}
+				return nil
+			}
+			if _, err := h.handler.FetchJob().Run(context.Background(), job, jobs.LocalReporter()); code(t, err) != "write_failed" || calls.Load() != 1 {
+				t.Fatal(err, calls.Load())
+			}
+			s.o.Fault = nil
+			saved, ok := s.readCheckpoint(job, fixtureShowID)
+			if !ok || !saved.complete() || saved.Source == "" || saved.SourceLength != int64(len(old)) {
+				t.Fatalf("the kept whole download does not name its enclosure: %+v", saved)
+			}
+			f = h.read("Fixture Show")
+			switch scenario {
+			case "url", "legacy", "stuck":
+				f.Episodes[0].Enclosure.URL += "?v=2"
+			case "length":
+				f.Episodes[0].Enclosure.Length = int64(len(remade))
+				serving = remade
+			}
+			setLength(f)
+			if scenario == "legacy" {
+				saved.Source, saved.SourceLength = "", 0
+				dir, err := s.checkpointRoot()
+				if err != nil {
+					t.Fatal(err)
+				}
+				b, _ := json.Marshal(saved)
+				if err := dir.WriteFile(s.checkpointName(job, fixtureShowID), b, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				dir.Close()
+			}
+			if scenario == "stuck" {
+				// Barred once the fetch's own write check has passed: the
+				// folder the Bridge may not write.
+				show := filepath.Join(h.mount, "Fixture Show")
+				t.Cleanup(func() { os.Chmod(show, 0o755) })
+				s.o.Fault = func(at string) error {
+					if at == "load" {
+						if err := os.Chmod(show, 0o500); err != nil {
+							t.Error(err)
+						}
+					}
+					return nil
+				}
+				_, err := h.handler.FetchJob().Run(context.Background(), job, jobs.LocalReporter())
+				if code(t, err) != "write_failed" || !strings.Contains(err.Error(), "could not be removed") || calls.Load() != 1 {
+					t.Fatal(err, calls.Load())
+				}
+				if again, ok := s.readCheckpoint(job, fixtureShowID); !ok || again != saved {
+					t.Fatalf("the record of the partial still on disk was dropped: %+v", again)
+				}
+				if _, err := os.Lstat(filepath.Join(h.mount, *job.Path)); !errors.Is(err, os.ErrNotExist) {
+					t.Fatal("the old download was published", err)
+				}
+				return
+			}
+			res, err := h.handler.FetchJob().Run(context.Background(), job, jobs.LocalReporter())
+			if _, isResult := res.(fetchResult); err != nil || !isResult {
+				t.Fatal(res, err)
+			}
+			want, published := int32(2), remade
+			if scenario == "same" || scenario == "legacy" {
+				want, published = 1, old
+			}
+			if calls.Load() != want {
+				t.Fatalf("%d requests, want %d", calls.Load(), want)
+			}
+			if b, err := os.ReadFile(filepath.Join(h.mount, *job.Path)); err != nil || !bytes.Equal(b, published) {
+				t.Fatal("the published episode is not the feed's current audio", err)
+			}
+			noRecords(t, s)
+		})
+	}
+}
+
 // A show folder renamed by hand between the fetch's last follow and the read
 // of its download leaves no partial at the path read: not a changed download.
 // The fetch follows the show and reads the partial there, publishing it from
