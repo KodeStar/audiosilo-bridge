@@ -1124,20 +1124,20 @@ func (h *Handler) compareFiles(ctx context.Context, r *run, files []link.BookFil
 		case timeout == nil:
 			return errors.New("the Bridge's copy of the book doesn't match the server's: " + problem)
 		}
-		h.folderWait(r, "Waiting for the library's folder to answer")
-		if err := h.recheckWait(ctx, r, time.Now().Add(h.o.Poll)); err != nil {
+		if err := h.folderWait(ctx, r, "Waiting for the library's folder to answer"); err != nil {
 			return err
 		}
 	}
 }
 
-// folderWait reports a wait for a folder that didn't answer a look in time,
-// unless the job is parked on a reason of the Bridge's own (its message
-// stays).
-func (h *Handler) folderWait(r *run, msg string) {
+// folderWait waits Poll (or for a Retry) before looking again at a folder that
+// didn't answer a look in time, reporting the wait as msg unless the job is
+// parked on a reason of the Bridge's own (its message stays).
+func (h *Handler) folderWait(ctx context.Context, r *run, msg string) error {
 	if !r.ownPark {
 		r.rep.Progress(jobs.Progress{Step: stepWaiting, Message: msg})
 	}
+	return h.recheckWait(ctx, r, time.Now().Add(h.o.Poll))
 }
 
 // serverLibrary sets the run's server and the job's library as the server
@@ -1251,8 +1251,7 @@ func (h *Handler) waitWritable(ctx context.Context, r *run) error {
 			return nil
 		}
 		if errors.Is(err, fsutil.ErrStatTimeout) {
-			h.folderWait(r, "Waiting for the book's folder to answer")
-			if err := h.recheckWait(ctx, r, time.Now().Add(h.o.Poll)); err != nil {
+			if err := h.folderWait(ctx, r, "Waiting for the book's folder to answer"); err != nil {
 				return err
 			}
 			continue
