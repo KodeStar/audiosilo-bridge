@@ -1709,7 +1709,7 @@ internal/
             its status back (restoreStatus) before any later status clear (a Retry, a
             Resume, the supervisor's terminate_requeue, or generate's continue of the
             stopped run, ContinueStored: each clear written and published under the
-            lock) clears anything. A
+            lock, the scheduler's own through clearStatusAsRead) clears anything. A
             publish whose read fails logs nothing for a deleted book or a closed store
             (store.DB.Closed, the shutdown) and warns only for the first other
             failure, Debug after, until a read succeeds again. No page reads

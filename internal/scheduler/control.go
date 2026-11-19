@@ -114,15 +114,8 @@ func (s *Scheduler) resumeAsRead(ctx context.Context, b store.Book) error {
 	if state.Status(b.Status) != state.StatusPaused {
 		return ErrInvalidOp
 	}
-	// Clearing the status clears the error and the typed park_code together,
-	// under the book's publish lock as every status clear (see restoreStatus).
-	unlock := s.lockPublish(b.ID)
-	err := s.db.ClearBookStatusIf(ctx, b.ID, b.Status, b.Error)
-	if err == nil {
-		s.publishLocked(ctx, b.ID)
-	}
-	unlock()
-	if err != nil {
+	// Clearing the status clears the error and the typed park_code together.
+	if err := s.clearStatusAsRead(ctx, b); err != nil {
 		return err
 	}
 	s.notify()

@@ -1369,9 +1369,10 @@ func logPublishReadFailed(log *slog.Logger, warned *atomic.Bool, closed bool, id
 // scheduler (contrib's park-message write).
 func (s *Scheduler) PublishStored(ctx context.Context, id int64) { s.publishStored(ctx, id) }
 
-// ContinueStored runs write, a change outside the scheduler that clears book id's
-// status (generate's continue of a stopped run, which clears its cancel), under
-// the book's publish lock, and publishes the book as stored once write succeeded.
+// ContinueStored runs write, a change that clears book id's status (outside the
+// scheduler, generate's continue of a stopped run, which clears its cancel;
+// inside it, clearStatusAsRead), under the book's publish lock, and publishes the
+// book as stored once write succeeded.
 // readmit and supersede_rerun hold that lock from their status clear to their
 // publish, so a failed one puts its status back before this clear, never over it
 // (restoreStatus cannot tell this clear from its own). write only writes the
@@ -1384,6 +1385,14 @@ func (s *Scheduler) ContinueStored(ctx context.Context, id int64, write func() e
 	}
 	s.publishLocked(ctx, id)
 	return nil
+}
+
+// clearStatusAsRead clears b's status, error, park code and retry_at while the
+// book still has the status and error read into b (store.ErrStatusChanged
+// otherwise), under its publish lock as every status clear (see restoreStatus),
+// and publishes the book as stored.
+func (s *Scheduler) clearStatusAsRead(ctx context.Context, b store.Book) error {
+	return s.ContinueStored(ctx, b.ID, func() error { return s.db.ClearBookStatusIf(ctx, b.ID, b.Status, b.Error) })
 }
 
 // lockPublish takes book id's publish lock and returns its unlock. Books publish

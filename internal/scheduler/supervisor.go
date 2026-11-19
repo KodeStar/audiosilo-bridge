@@ -147,14 +147,7 @@ func (s *Scheduler) supervisorTerminateRequeue(ctx context.Context, b store.Book
 		}
 	}
 	if b.Status != "" {
-		// A status clear, under the book's publish lock (see restoreStatus).
-		unlock := s.lockPublish(bookID)
-		err := s.db.ClearBookStatusIf(ctx, b.ID, b.Status, b.Error)
-		if err == nil {
-			s.publishLocked(ctx, bookID)
-		}
-		unlock()
-		if errors.Is(err, store.ErrStatusChanged) {
+		if err := s.clearStatusAsRead(ctx, b); errors.Is(err, store.ErrStatusChanged) {
 			return statusChangedOutcome, nil
 		} else if err != nil {
 			return "", err
