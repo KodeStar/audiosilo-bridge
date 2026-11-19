@@ -5081,7 +5081,15 @@ internal/
             unpair on the page forgets the token and the id, then stops the
             pairing's jobs (Conn.onUnpair -> jobs.Runner.Unpaired, which doesn't
             wait: the runner releases their work, releaseDropped), a failed forget
-            included. Refusal, unpairing and
+            included. A forget that failed (the token's or the id's: the data
+            couldn't be written just then) is tried again at every heartbeat's
+            time and as the Bridge stops (Conn.unforgotten, finishUnpair; never
+            once a pairing was made since, whose token and id are the stored
+            ones): left in the stores, the next start would read the pairing
+            back under the same id, and a job of it a stop left running (its
+            release cut short, jobs' rule) would be resumed and reported to a
+            server the page showed as unpaired. With the id gone such a row is
+            another pairing's at any start, paired or not, and dropped. Refusal, unpairing and
             replacing a pairing withdraw claim_min_priority from the old link;
             each new link negotiates on its own heartbeat. A 401 does NOT drop the token:
             Conn.Refuse keeps it and the heartbeat retries it every RefusedRetry (5

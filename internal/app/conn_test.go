@@ -226,6 +226,70 @@ func TestUnpairHandsOverTheLinkItEnded(t *testing.T) {
 	}
 }
 
+// An unpair whose forget failed is finished later (finishUnpair): the token
+// and the identity it left in the stores go (allowed), so a restart doesn't
+// read the pairing back. A pairing made since the failed forget stored its own
+// token and identity, which the retry never touches (denied), and an unpair
+// that forgot everything leaves nothing to finish.
+func TestFinishUnpairForgetsOnlyTheUnpairsLeftovers(t *testing.T) {
+	ctx := context.Background()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		_, _ = io.WriteString(w, `{"token":"tok","server_id":"srv-9","server_name":"Home"}`)
+	}))
+	defer srv.Close()
+	data := t.TempDir()
+	db, err := store.Open(ctx, filepath.Join(data, store.FileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	opened, _, err := secrets.Open(data, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	vault := &stuckVault{Store: opened}
+	c, err := openConn(ctx, db, vault, "0.1.0", slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatal(err)
+	}
+	failedUnpair := func() {
+		t.Helper()
+		if err := c.Pair(ctx, srv.URL, "CODE"); err != nil {
+			t.Fatal(err)
+		}
+		vault.stuck.Store(true)
+		if err := c.Unpair(ctx, "unpaired on the page"); err == nil {
+			t.Fatal("an unpair that couldn't forget the token said nothing")
+		}
+		vault.stuck.Store(false)
+		if tok, _ := vault.Get(secrets.ServerToken); tok == "" {
+			t.Fatal("the token went though its forget failed")
+		}
+	}
+	failedUnpair()
+	c.finishUnpair(ctx)
+	if tok, _ := vault.Get(secrets.ServerToken); tok != "" {
+		t.Fatal("the unpair's token was left in the vault")
+	}
+	if again, err := openConn(ctx, db, vault, "0.1.0", slog.New(slog.DiscardHandler)); err != nil || again.Client() != nil {
+		t.Fatalf("a restart after the finished unpair: paired %v, %v", again != nil && again.Client() != nil, err)
+	}
+
+	failedUnpair()
+	if err := c.Pair(ctx, srv.URL, "CODE"); err != nil {
+		t.Fatal(err)
+	}
+	id := c.jobsPairing().ID
+	c.finishUnpair(ctx)
+	if tok, _ := vault.Get(secrets.ServerToken); tok == "" {
+		t.Fatal("the retry forgot the token of a pairing made since")
+	}
+	if stored, _, _ := db.GetSetting(ctx, keyPairingID); stored == "" || stored != id || c.Client() == nil {
+		t.Fatalf("the retry touched the pairing made since: identity %q, want %q", stored, id)
+	}
+}
+
 // A pairing's identity (recorded with every job claimed under it) is new for
 // every pairing after an unpair, the same server's included (denied: kept, the
 // earlier pairing's jobs would resume under it), and for a pairing with
