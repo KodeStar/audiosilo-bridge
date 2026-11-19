@@ -528,7 +528,12 @@ func TestSweepRecordsLeavesARecordAwaitingItsTakeIn(t *testing.T) {
 		t.Fatal(err)
 	}
 	lib := link.Library{ID: 3, Kind: "podcasts", Root: h.mount}
-	shows := []string{"Away New", path.Dir(*job.Path)}
+	// A copy of the partial in another show's folder, read first, never
+	// answers for the folder awaiting its take-in.
+	if err := root.WriteFile(path.Dir(*job.Path)+"/"+c.Temp, []byte("abcdef"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	shows := []string{path.Dir(*job.Path), "Away New"}
 	kept := func() bool {
 		_, err := dir.Lstat(recordName(3, id, c.Path))
 		v, _ := s.o.Vault.Get(c.Validator)

@@ -221,8 +221,11 @@ func awaitsTakeIn(root *os.Root, shows []string, c checkpoint, read func(string)
 		if _, err := podcast.LstatRegular(root, show+"/"+c.Temp); err != nil {
 			continue
 		}
-		f, from, err := read(show)
-		return err != nil || f.ShowID == c.ShowID && from != ""
+		// Every folder holding a file of the partial's name is asked: a copy
+		// of the folder (taken in, or another show's) may hold one too.
+		if f, from, err := read(show); err != nil || f.ShowID == c.ShowID && from != "" {
+			return true
+		}
 	}
 	return false
 }
