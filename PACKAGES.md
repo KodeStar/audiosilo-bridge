@@ -1201,7 +1201,8 @@ internal/
             attachment allowlist accepts), CoreProposal (+Validate: title/authors/
             language/narrators/sources required; an ASIN without a region is rejected,
             never silently dropped), Service (SubmitCore: per-book mutex, reuses an
-            already-recorded core issue, persists the row BEFORE the park flip;
+            already-recorded core issue, persists the row BEFORE the park flip,
+            refuses a book turned local (server#218: ErrNotAwaitingCore);
             SetWork validates the slug upstream), and the poller. Where things live:
               poller.go  row lifecycle (FindIntakePR -> pr_open -> merged/closed),
                          intake verdicts as the note's last segment (re-checked at

@@ -185,8 +185,10 @@ func (s *Service) SubmitCore(ctx context.Context, book store.Book, p CoreProposa
 
 	// No reusable row: only open an issue while the book is still awaiting a work
 	// (core_needed). If it has moved on with no recorded issue, refuse rather than open a
-	// stray issue for a book that no longer needs one.
-	if !state.IsParkedWith(fresh.Status, fresh.ParkCode, state.ParkCoreNeeded) {
+	// stray issue for a book that no longer needs one. A book turned local files nothing
+	// (store.KeepBookLocal: a sidecars.generate job whose share the server turned off), so
+	// it needs no work either, though its park waits for the job's next look to lift.
+	if !state.IsParkedWith(fresh.Status, fresh.ParkCode, state.ParkCoreNeeded) || fresh.ContribMode == store.ContribModeLocal {
 		return store.Contribution{}, ErrNotAwaitingCore
 	}
 
