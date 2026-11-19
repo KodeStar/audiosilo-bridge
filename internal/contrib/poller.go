@@ -169,7 +169,7 @@ func (s *Service) coreVerdictFollowUp(ctx context.Context, row store.Contributio
 		return
 	}
 	msg := fmt.Sprintf(CoreVerdictMsgFormat, verdictWord(v.note), row.URL)
-	if err := s.deps.DB.SetBookStatus(ctx, b.ID, string(state.StatusNeedsAttention), msg, string(state.ParkCorePending)); err != nil {
+	if err := s.parkCorePending(ctx, b, msg); err != nil {
 		s.logf("contrib poller: note core verdict for book %d: %v", b.ID, err)
 	}
 }
@@ -447,9 +447,8 @@ func (s *Service) resolveCorePending(ctx context.Context, client func() *Client)
 			// resume it now, so say what the human has to do (a merged row is not an
 			// attention-flagged row, so the note alone would go unseen).
 			if state.IsParkedWith(b.Status, b.ParkCode, state.ParkCorePending) {
-				if err := s.deps.DB.SetBookStatus(ctx, b.ID, string(state.StatusNeedsAttention),
-					fmt.Sprintf(CoreSlugUnresolvedMsgFormat, why, prURLOr(core.PRURL, core.URL)),
-					string(state.ParkCorePending)); err != nil {
+				if err := s.parkCorePending(ctx, b,
+					fmt.Sprintf(CoreSlugUnresolvedMsgFormat, why, prURLOr(core.PRURL, core.URL))); err != nil {
 					s.logf("contrib poller: note unresolved core slug on book %d: %v", b.ID, err)
 				}
 			}
@@ -496,8 +495,7 @@ func (s *Service) admitWhenLive(ctx context.Context, b store.Book) {
 			}
 		case errors.Is(err, ErrWorkNotFound):
 			if pending && b.Error != ReleaseWaitMsg {
-				if err := s.deps.DB.SetBookStatus(ctx, b.ID, string(state.StatusNeedsAttention),
-					ReleaseWaitMsg, string(state.ParkCorePending)); err != nil {
+				if err := s.parkCorePending(ctx, b, ReleaseWaitMsg); err != nil {
 					s.logf("contrib poller: note release wait for book %d: %v", b.ID, err)
 				}
 			}
