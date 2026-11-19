@@ -1219,6 +1219,36 @@ func TestGenerateShareOffActsBeforeTheNextLook(t *testing.T) {
 	}
 }
 
+// A resumed job's engine book runs on while prepare waits (here for its
+// library), so the job turns it local the moment it has share_off, not once
+// prepare is through: a re-admit meanwhile would file in issue mode.
+func TestGenerateShareOffTurnsAResumedBookLocalBeforePrepare(t *testing.T) {
+	t.Parallel()
+	hr := newHarness(t)
+	asr := hr.exec.gate("asr")
+	hr.queueShare(73, 1, false)
+	stop := hr.runner(hr.h)
+	defer stop()
+	hr.takeBack(73, asr)
+	before := hr.engineBook(73)
+	if before.ContribMode != store.ContribModeIssue {
+		t.Fatalf("engine book mode before = %q, want issue", before.ContribMode)
+	}
+	hr.libs.writable.Store(false)
+	hr.queueShare(73, 2, true)
+	hr.waitFor("the library park", func() bool {
+		return hr.srv.saw(73, func(_ link.Update, p map[string]any) bool {
+			park, _ := p["park"].(map[string]any)
+			return park["code"] == parkLibraryNotWritable
+		})
+	})
+	if b := hr.engineBook(73); b.ID != before.ID || b.ContribMode != store.ContribModeLocal {
+		t.Fatalf("engine book while prepare waits = %d %q, want %d local", b.ID, b.ContribMode, before.ID)
+	}
+	hr.libs.writable.Store(true)
+	hr.waitFor("done", func() bool { s, _ := hr.srv.final(73); return s == link.StateDone })
+}
+
 // queueShare hands generate-and-share job id (Author/Book) out under attempt,
 // its claim saying shareOff.
 func (hr *harness) queueShare(id int64, attempt int, shareOff bool) {

@@ -458,7 +458,7 @@ func (h *Handler) reuseForReadalong(ctx context.Context, eng Engine, r *run, old
 		return false, err
 	}
 	job := r.generateBook()
-	if ok, err := takeUp(ctx, eng, r, old.ID, func() error {
+	if ok, err := h.takeUp(ctx, eng, r, old.ID, func() error {
 		return h.o.DB.ContinueReadalong(ctx, old.ID, old.State, string(to), goal, job)
 	}); !ok || err != nil {
 		return ok, err
@@ -515,7 +515,7 @@ func (h *Handler) continueReadalongRun(ctx context.Context, eng Engine, r *run, 
 		return false, fmt.Errorf("could not ready the book's read-along run: %w", err)
 	}
 	nb, job := h.newBook(r, old.AudioSource(), ""), r.generateBook()
-	if ok, err := takeUp(ctx, eng, r, old.ID, func() error {
+	if ok, err := h.takeUp(ctx, eng, r, old.ID, func() error {
 		return h.o.DB.ContinueChapters(ctx, old.ID, string(state.Done), string(state.QASweep), nb, job)
 	}); !ok || err != nil {
 		return ok, err

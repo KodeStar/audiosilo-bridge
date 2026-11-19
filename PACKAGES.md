@@ -3153,13 +3153,16 @@ internal/
             Reporter.OnShareOff: a re-admit at a contributing park before the run's
             next look, an idle poll away, would otherwise file in issue mode)
             store.KeepBookLocal turns the book local (a book the run takes up later
-            too, as it takes it up: a resumed or re-claimed job's, before attach
-            re-admits it), the guard waking the run, and a book parked
+            too, as it takes it up: a resumed or re-claimed job's before prepare,
+            which can wait while the engine runs it, and attach; a chapters or
+            read-along run it continues), the guard waking the run, and a book parked
             at contributing over the share (contrib_unavailable, core_needed,
             core_pending) runs the stage again, once a run, whenever it parks (a stage
             running in issue mode when the answer came parks after it; a lift that
             failed doesn't count, and the look after a lift comes at once); a book done
-            already, or a filing the stage had under way, is left as it is. A later
+            already, or a dimension the stage had begun to file, is left as it is (the
+            stage reads the book's mode again before each dimension's gist and issue,
+            and keeps the rest local). A later
             run of the job that finds its engine book local keeps the share dropped
             (the module on again since). The result says share_skipped
             "contributions_off" for a book kept local unless something was filed (the

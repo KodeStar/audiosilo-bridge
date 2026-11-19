@@ -584,6 +584,13 @@ func (h *Handler) runEngineBook(ctx context.Context, eng Engine, r *run, mapped 
 	// moved the job with its book since).
 	ownBook := func() bool { return mapped.RelPath == r.rel || mapped.RelPath == *r.job.Path }
 	r.resuming = resumed
+	if resumed && ownBook() {
+		// The engine runs a resumed job's book while prepare waits (the server
+		// unreachable, the mapping not checked yet), so its share guard has it
+		// first: a share_off heard already (server_jobs.share_off after a
+		// restart) or meanwhile turns it local before a re-admit can file.
+		h.shareBook(ctx, r, *mapped.BookID)
+	}
 	if err := h.prepare(ctx, r, !resumed); err != nil {
 		if resumed && ownBook() {
 			r.bookID = *mapped.BookID // its own book: end() stops it
@@ -604,7 +611,7 @@ func (h *Handler) runEngineBook(ctx context.Context, eng Engine, r *run, mapped 
 	}
 	if resumed {
 		r.bookID = *mapped.BookID
-		h.shareBook(ctx, r, r.bookID) // before attach re-admits it
+		h.shareBook(ctx, r, r.bookID) // before attach re-admits it (nothing new when it had it before prepare)
 		if err := h.attach(ctx, eng, r, mapped); err != nil {
 			return h.end(ctx, r, nil, err)
 		}
