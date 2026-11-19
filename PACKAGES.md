@@ -3030,8 +3030,9 @@ internal/
             series, siblings by tolerant author + series in list order (the one
             sibling rule; bridge#47 removed SiblingsFromBooks and the batch Plan,
             which only tests used); Expect(recs) names a batch, so the records
-            of a series the library has none of are planned beside each other,
-            the first by position as its series' first, bridge#43; a template
+            of a series the library has none of (one author by the sibling
+            rule) are planned beside each other, the first by position as its
+            series' first, each placed once, bridge#43; a template
             error keeps the item's Kind and Siblings; AuthorFolders reusing an
             existing author folder spelling; the name is match.CleanTitle with
             the series as the title opens it, article included (seriesAsTitled:

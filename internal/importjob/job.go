@@ -36,9 +36,9 @@ type Planner struct {
 	books         []link.LibraryBook
 	authorFolders map[string]string
 	bySeries      map[string][]int // match.NormalizeSeries(name) -> books in it, in order
-	// batch is what Expect named, by series the library has no book of
-	// (batchKey), in position order.
-	batch map[string][]source.Record
+	// batch is what Expect named: the series the library has no book of,
+	// each with its records in position order.
+	batch []*batchGroup
 }
 
 // NewPlanner indexes books (nil is an empty library).
@@ -78,24 +78,33 @@ func (p *Planner) siblings(author, series string) []link.LibraryBook {
 // titles): the ones of a series the library has no book of are planned beside
 // each other (bridge#43), so only the first (by position, then as given) is
 // the first of its series and the others join it, as they will once it is
-// backed up. A record needs an ASIN to be one of them.
+// backed up. A record needs an ASIN to be one of them; a group is one series
+// by one author under the sibling rule (sameAuthor), as the library's books
+// would be once backed up.
 func (p *Planner) Expect(recs []source.Record) {
-	p.batch = map[string][]source.Record{}
+	var groups []*batchGroup
 	for _, rec := range recs {
 		if rec.ASIN == "" || strings.TrimSpace(rec.Series) == "" || len(p.siblings(rec.Author, rec.Series)) > 0 {
 			continue
 		}
-		k := batchKey(rec)
-		if !slices.ContainsFunc(p.batch[k], func(o source.Record) bool { return strings.EqualFold(o.ASIN, rec.ASIN) }) {
-			p.batch[k] = append(p.batch[k], rec)
+		series := match.NormalizeSeries(rec.Series)
+		i := slices.IndexFunc(groups, func(g *batchGroup) bool {
+			return g.series == series && sameAuthor(g.recs[0].Author, rec.Author)
+		})
+		if i < 0 {
+			groups = append(groups, &batchGroup{series: series})
+			i = len(groups) - 1
+		}
+		if g := groups[i]; !slices.ContainsFunc(g.recs, sameASIN(rec.ASIN)) {
+			g.recs = append(g.recs, rec)
 		}
 	}
-	for k, group := range p.batch {
-		if len(group) < 2 {
-			delete(p.batch, k)
+	p.batch = nil
+	for _, g := range groups {
+		if len(g.recs) < 2 {
 			continue
 		}
-		slices.SortStableFunc(group, func(a, b source.Record) int {
+		slices.SortStableFunc(g.recs, func(a, b source.Record) int {
 			switch {
 			case a.HasSequence && b.HasSequence:
 				return cmp.Compare(a.Sequence, b.Sequence)
@@ -106,33 +115,60 @@ func (p *Planner) Expect(recs []source.Record) {
 			}
 			return 0
 		})
+		p.batch = append(p.batch, g)
 	}
 }
 
-// batchKey groups records of one author's series.
-func batchKey(rec source.Record) string {
-	return match.Normalize(rec.Author) + "\x00" + match.NormalizeSeries(rec.Series)
+// batchGroup is one series Expect named: its records in position order and,
+// once asked for in a mode and template, the folder each is planned in alone
+// ("" for none), so a group's records are each placed once.
+type batchGroup struct {
+	series   string // match.NormalizeSeries
+	recs     []source.Record
+	placed   bool
+	mode     placement.Mode
+	template string
+	dirs     []string
+}
+
+// sameASIN matches a record by its ASIN, in any case.
+func sameASIN(asin string) func(source.Record) bool {
+	return func(o source.Record) bool { return strings.EqualFold(o.ASIN, asin) }
 }
 
 // batchSiblings are the folders the other records of rec's group (Expect) are
 // planned in, when rec is not its group's first.
 func (p *Planner) batchSiblings(rec source.Record, mode placement.Mode, template string) []placement.Sibling {
-	group := p.batch[batchKey(rec)]
-	same := func(o source.Record) bool { return strings.EqualFold(o.ASIN, rec.ASIN) }
-	if rec.ASIN == "" || len(group) == 0 || same(group[0]) || !slices.ContainsFunc(group, same) {
+	if rec.ASIN == "" {
 		return nil
 	}
-	var out []placement.Sibling
-	for _, o := range group {
-		if same(o) {
+	series := match.NormalizeSeries(rec.Series)
+	for _, g := range p.batch {
+		at := slices.IndexFunc(g.recs, sameASIN(rec.ASIN))
+		if at < 0 || g.series != series {
 			continue
 		}
-		item, err := p.place(o, mode, template, nil)
-		if dir := path.Dir(item.RelPath); err == nil && item.RelPath != "" && dir != "." {
-			out = append(out, placement.Sibling{RelPath: dir, SeriesIndex: o.Sequence})
+		if at == 0 {
+			return nil
 		}
+		if !g.placed || g.mode != mode || g.template != template {
+			g.placed, g.mode, g.template, g.dirs = true, mode, template, make([]string, len(g.recs))
+			for i, o := range g.recs {
+				item, err := p.place(o, mode, template, nil)
+				if dir := path.Dir(item.RelPath); err == nil && item.RelPath != "" && dir != "." {
+					g.dirs[i] = dir
+				}
+			}
+		}
+		var out []placement.Sibling
+		for i, o := range g.recs {
+			if i != at && g.dirs[i] != "" {
+				out = append(out, placement.Sibling{RelPath: g.dirs[i], SeriesIndex: o.Sequence})
+			}
+		}
+		return out
 	}
-	return out
+	return nil
 }
 
 // Plan is rec's destination in mode (with template for ModeTemplate). A

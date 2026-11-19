@@ -266,3 +266,28 @@ func TestPlannerExpectPlansANewSeriesTogether(t *testing.T) {
 		t.Errorf("outside the batch: %+v", item)
 	}
 }
+
+// A batch groups by the sibling rule (sameAuthor): a title credited "New
+// Writer, Co Author" joins "New Writer"'s new series, as it would once the
+// first is backed up; another author's series of the same name stays apart.
+func TestPlannerExpectGroupsByTheSiblingAuthorRule(t *testing.T) {
+	rec := func(asin, author string, seq float64) source.Record {
+		return source.Record{ASIN: asin, FileName: asin + ".m4b", Title: "Dawn " + asin, Author: author, Series: "Dawn Road", Sequence: seq, HasSequence: true}
+	}
+	recs := []source.Record{
+		rec("B1", "New Writer", 1),
+		rec("B2", "New Writer, Co Author", 2),
+		rec("B3", "Someone Else", 3),
+	}
+	p := NewPlanner(nil)
+	p.Expect(recs)
+	for i, want := range []struct {
+		kind     placement.Kind
+		siblings int
+	}{{placement.SeriesNew, 0}, {placement.SeriesExisting, 1}, {placement.SeriesNew, 0}} {
+		item, err := p.Plan(recs[i], placement.ModeAuto, "")
+		if err != nil || item.Kind != want.kind || item.Siblings != want.siblings {
+			t.Errorf("%s: %+v, %v; want %v with %d siblings", recs[i].ASIN, item, err, want.kind, want.siblings)
+		}
+	}
+}
