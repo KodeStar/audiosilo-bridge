@@ -281,7 +281,11 @@ func (s *Service) parkCorePending(ctx context.Context, b store.Book, msg string)
 	err := s.deps.DB.SetBookStatusIf(ctx, b.ID, b.Status, b.Error,
 		string(state.StatusNeedsAttention), msg, string(state.ParkCorePending), "")
 	if errors.Is(err, store.ErrStatusChanged) {
-		s.logf("contrib: book %d changed since it was read; its park message is left as it is", b.ID)
+		// Nothing went wrong, so at Debug, as the scheduler logs a re-admit that
+		// met a changed status (logReadmitFailed, bridge#65).
+		if s.deps.Log != nil {
+			s.deps.Log.Debug("contrib: the book's status changed since it was read; its park message is left as it is", "book_id", b.ID)
+		}
 		return nil
 	}
 	if err != nil {

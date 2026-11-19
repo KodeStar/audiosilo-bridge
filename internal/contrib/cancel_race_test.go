@@ -1,8 +1,10 @@
 package contrib
 
 import (
+	"bytes"
 	"context"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -76,11 +78,17 @@ func TestReleaseWaitNeverWritesOverACancel(t *testing.T) {
 	svc := newService(t, db, "http://127.0.0.1:0", fakeTokenResolver{err: ErrNoCredential}, &capture{}, spy, resolve)
 	pub := &publishSpy{}
 	svc.deps.PublishStored = pub.publish
+	var logged bytes.Buffer
+	svc.deps.Log = slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 	svc.Poll(context.Background())
 	requireCancelled(t, db, b.ID)
 	if pub.count() != 0 {
 		t.Fatalf("published %d times for a write that never happened", pub.count())
+	}
+	// The cancel winning is not a fault: it is logged at Debug, never as a warning.
+	if out := logged.String(); strings.Contains(out, "level=WARN") || !strings.Contains(out, "level=DEBUG") {
+		t.Fatalf("a park message losing to a cancel logged %q, want Debug only", out)
 	}
 	live = true
 	svc.Poll(context.Background())
