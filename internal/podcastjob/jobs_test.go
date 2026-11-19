@@ -64,7 +64,7 @@ func (s *scanServer) RescanPodcast(_ context.Context, _ int64, show string) (*li
 		return nil, errors.New("server unavailable")
 	}
 	if strings.Contains(show, "/") && s.knows != nil && !s.knows(show) {
-		return nil, &link.APIError{Status: 404, Code: "not_indexable"}
+		return nil, link.ErrNotIndexable
 	}
 	root, err := os.OpenRoot(s.mount)
 	if err != nil {

@@ -2412,9 +2412,9 @@ internal/
             than failing as not found. A fetch whose folder is renamed while it
             downloads finds the show again after the download (episodeAt) and
             publishes there from its partial, its record and lock following
-            (heldLock.follow), never downloading again. A relocated fetch asks
-            the server to rescan the show folder, not the episode's new path,
-            which it answers not_indexable until then. A saved feed.json over
+            (heldLock.follow), never downloading again. An episode path the
+            server answers not_indexable (its show folder renamed since the
+            server read it) is indexed by rescanning the show folder. A saved feed.json over
             the read cap fails as too_large, not write_failed. A new show never
             takes the old name of a renamed folder not taken in yet (find
             answers those names): the server indexes that name as the renamed

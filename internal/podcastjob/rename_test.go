@@ -835,7 +835,7 @@ func TestAFetchFollowsItsShowRenamedMidDownload(t *testing.T) {
 	// written waits until the partial in the show folder holds n bytes.
 	written := func(n int64) bool {
 		for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
-			matches, _ := filepath.Glob(filepath.Join(h.mount, "Fixture Show", podcast.TempPrefix+"*"))
+			matches := partials(filepath.Join(h.mount, "Fixture Show"))
 			if len(matches) == 1 {
 				if st, err := os.Stat(matches[0]); err == nil && st.Size() >= n {
 					return true
@@ -894,7 +894,7 @@ func TestAFetchFollowsItsShowRenamedMidDownload(t *testing.T) {
 	if _, err := os.Lstat(filepath.Join(h.mount, "Fixture Show")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("the old folder came back", err)
 	}
-	if left, _ := filepath.Glob(filepath.Join(h.mount, "Renamed Show", podcast.TempPrefix+"*")); len(left) != 0 {
+	if left := partials(filepath.Join(h.mount, "Renamed Show")); len(left) != 0 {
 		t.Fatal("a partial was left behind", left)
 	}
 	if _, err := root.Lstat(podcast.AttachmentPath(moved, ".fetch.lock")); !errors.Is(err, os.ErrNotExist) {
