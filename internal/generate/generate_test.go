@@ -1080,6 +1080,90 @@ func TestGenerateShareOffTriesAFailedLiftAgain(t *testing.T) {
 	}
 }
 
+// heardShareOff has the server answer job id's reports with share_off and
+// waits until the job heard one (a report after the first so answered).
+func (hr *harness) heardShareOff(id int64) {
+	hr.t.Helper()
+	n := 0
+	hr.srv.set(func() { hr.srv.shareOff[id], n = true, len(hr.srv.updates[id]) })
+	hr.waitFor("share_off heard", func() bool {
+		heard := false
+		hr.srv.set(func() { heard = len(hr.srv.updates[id]) >= n+2 })
+		return heard
+	})
+}
+
+// A share_off that comes while a new job waits for the engine is heard before
+// the GitHub check: the job runs in local mode on a Bridge with no sign-in,
+// rather than failing over a share the server turned off.
+func TestGenerateShareOffWhileWaitingForTheEngine(t *testing.T) {
+	t.Parallel()
+	hr := newHarness(t)
+	up := &atomic.Bool{}
+	h := hr.handlerWith(func() Engine {
+		if !up.Load() {
+			return nil
+		}
+		return hr.sched
+	})
+	h.o.ContribCredential = func(context.Context) error { return contrib.ErrNoCredential }
+	hr.queueShare(69, 1, false)
+	stop := hr.runner(h)
+	defer stop()
+	hr.waitFor("the wait for the engine", func() bool {
+		return hr.srv.saw(69, func(_ link.Update, p map[string]any) bool { return p["message"] == "Waiting for the engine to start" })
+	})
+	hr.heardShareOff(69)
+	up.Store(true)
+	hr.waitFor("done", func() bool { s, _ := hr.srv.final(69); return s == link.StateDone || s == link.StateFailed })
+	if s, final := hr.srv.final(69); s != link.StateDone {
+		t.Fatalf("state = %s, result = %s", s, final.Result)
+	}
+	var r Result
+	hr.result(69, &r)
+	if b := hr.engineBook(69); b.ContribMode != store.ContribModeLocal || r.ShareSkipped != ShareSkippedContributionsOff {
+		t.Fatalf("engine book mode = %q, result = %+v", b.ContribMode, r)
+	}
+}
+
+// A share_off that comes while a resumed job waits for its library is heard
+// before the job makes a new engine book after all (its id reused): no GitHub
+// sign-in is asked for, and the book is made in local mode.
+func TestGenerateShareOffBeforeAResumedJobsNewBook(t *testing.T) {
+	t.Parallel()
+	hr := newHarness(t)
+	hr.srv.add(70, "Loose.m4b", `{}`)
+	stop := hr.runnerAs(hr.h, "server-a")
+	hr.waitFor("server A's job done", func() bool { s, _ := hr.srv.final(70); return s == link.StateDone })
+	stop()
+	first := hr.engineBook(70)
+
+	hr.srv.set(func() { hr.srv.updates[70] = nil })
+	hr.libs.writable.Store(false)
+	hr.queueShare(70, 1, false)
+	h := hr.handler()
+	h.o.ContribCredential = func(context.Context) error { return contrib.ErrNoCredential }
+	stop2 := hr.runnerAs(h, "server-b")
+	defer stop2()
+	hr.waitFor("the library park", func() bool {
+		return hr.srv.saw(70, func(_ link.Update, p map[string]any) bool {
+			park, _ := p["park"].(map[string]any)
+			return park["code"] == parkLibraryNotWritable
+		})
+	})
+	hr.heardShareOff(70)
+	hr.libs.writable.Store(true)
+	hr.waitFor("done", func() bool { s, _ := hr.srv.final(70); return s == link.StateDone || s == link.StateFailed })
+	if s, final := hr.srv.final(70); s != link.StateDone {
+		t.Fatalf("state = %s, result = %s", s, final.Result)
+	}
+	var r Result
+	hr.result(70, &r)
+	if b := hr.engineBook(70); b.ID == first.ID || b.ContribMode != store.ContribModeLocal || r.ShareSkipped != ShareSkippedContributionsOff {
+		t.Fatalf("engine book = %d %q (the first was %d), result = %+v", b.ID, b.ContribMode, first.ID, r)
+	}
+}
+
 // The look after a lifted share park comes at once: the job doesn't sit out an
 // idle poll (the look that lifted the park read the book parked) before it
 // sees the stage it ran again finish.

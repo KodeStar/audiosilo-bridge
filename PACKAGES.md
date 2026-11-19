@@ -3135,7 +3135,9 @@ internal/
             any report answer: its Contributions module is off, server#218), a
             contribute=issue job keeps its results local instead (keepShareLocal):
             before its engine book exists the book is made in local mode (no GitHub
-            check), after, store.SetBookContribMode turns the book local (a book the
+            check; Run asks once the engine is up, and create again, as prepare
+            can wait), after,
+            store.SetBookContribMode turns the book local (a book the
             run takes up later too: a resumed or re-claimed job's), and a book parked
             at contributing over the share (contrib_unavailable, core_needed,
             core_pending) runs the stage again, once a run, whenever it parks (a stage

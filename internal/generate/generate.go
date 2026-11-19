@@ -395,7 +395,6 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 	}
 	defer stop()
 	r.params = params
-	h.keepShareLocal(ctx, nil, r, nil)
 	eng, err := h.waitEngine(ctx, r)
 	if err != nil {
 		return nil, err
@@ -404,6 +403,9 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 	if err != nil {
 		return nil, err
 	}
+	// Asked after the wait for the engine, which a share_off can come during: a
+	// share the server turned off needs no GitHub sign-in.
+	h.keepShareLocal(ctx, nil, r, nil)
 	if !resumed {
 		// A new job before prepare can wait on its library; a resumed one that
 		// makes a new engine book after all is checked by create.
@@ -999,6 +1001,10 @@ func (h *Handler) create(ctx context.Context, eng Engine, r *run) error {
 	case ReadalongKind:
 		return h.createReadalong(ctx, eng, r)
 	}
+	// The server may have said share_off since Run asked (prepare can wait a long
+	// time, and a resumed job's first report may not have got through): the book
+	// is then made in local mode, with no GitHub check.
+	h.keepShareLocal(ctx, nil, r, nil)
 	if r.resuming {
 		// A resumed job whose book is another job's (an id reused) or gone (deleted,
 		// or swept since it was cancelled) starts over: a new spend, which Run's
