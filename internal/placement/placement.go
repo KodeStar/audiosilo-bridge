@@ -451,7 +451,7 @@ var stopwords = map[string]bool{
 // (NUL among them, which neither stores either) and the runs of spaces a drop
 // leaves are one space. A leading dot goes too ("...And Ladies of the Club", ".hack"): a
 // hidden name is never indexed by the server's scan. A name Windows reserves for
-// a device (CON, NUL, COM1, "aux.m4b": Reserved) gets an underscore after its
+// a device (CON, NUL, COM1, CONIN$, "aux.m4b": Reserved) gets an underscore after its
 // stem ("CON_", "aux_.m4b"), as it can't be created there (bridge#80).
 // librivox.fetch names its section files with it too, so a book's folder and
 // its files follow one rule.
@@ -470,17 +470,18 @@ func Sanitize(s string) string {
 }
 
 // Reserved reports whether name is one Windows reserves for a device: CON,
-// PRN, AUX, NUL, COM0-9 or LPT0-9 (with the superscript digits too), in any
-// case, alone or before an extension ("nul.txt", "COM1 .m4b").
+// PRN, AUX, NUL, COM0-9 or LPT0-9 (with the superscript digits too), or the
+// console's CONIN$ and CONOUT$, in any case, alone or before an extension
+// ("nul.txt", "COM1 .m4b").
 func Reserved(name string) bool {
 	stem, _, _ := strings.Cut(name, ".")
 	stem = strings.TrimRight(stem, " ")
-	if len(stem) < 3 || len(stem) > 5 {
-		return false // a reserved stem is 3 to 5 bytes ("CON", "COM1", "COM" and a superscript digit)
+	if len(stem) < 3 || len(stem) > 7 {
+		return false // a reserved stem is 3 to 7 bytes ("CON" to "CONOUT$")
 	}
 	stem = strings.ToUpper(stem)
 	switch stem {
-	case "CON", "PRN", "AUX", "NUL":
+	case "CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$":
 		return true
 	}
 	if rest, ok := strings.CutPrefix(stem, "COM"); ok {

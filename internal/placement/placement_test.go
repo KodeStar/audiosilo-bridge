@@ -371,18 +371,23 @@ func TestSuggestNamelessTitle(t *testing.T) {
 // that only starts with one is left alone.
 func TestSanitizeReservedNames(t *testing.T) {
 	for in, want := range map[string]string{
-		"CON":      "CON_",
-		"con":      "con_",
-		"Nul.m4b":  "Nul_.m4b",
-		"aux .m4b": "aux_.m4b",
-		"COM1":     "COM1_",
-		"lpt9.txt": "lpt9_.txt",
-		"COM¹":     "COM¹_",
-		"PRN?":     "PRN_",
-		"Console":  "Console",
-		"COM10":    "COM10",
-		"Conan":    "Conan",
-		"Lpt":      "Lpt",
+		"CON":        "CON_",
+		"con":        "con_",
+		"Nul.m4b":    "Nul_.m4b",
+		"aux .m4b":   "aux_.m4b",
+		"COM1":       "COM1_",
+		"lpt9.txt":   "lpt9_.txt",
+		"COM¹":       "COM¹_",
+		"PRN?":       "PRN_",
+		"CONIN$":     "CONIN$_",
+		"conout$":    "conout$_",
+		"ConIn$.m4b": "ConIn$_.m4b",
+		"CONIN":      "CONIN",
+		"CONOUT$S":   "CONOUT$S",
+		"Console":    "Console",
+		"COM10":      "COM10",
+		"Conan":      "Conan",
+		"Lpt":        "Lpt",
 	} {
 		if got := Sanitize(in); got != want {
 			t.Errorf("Sanitize(%q) = %q, want %q", in, got, want)

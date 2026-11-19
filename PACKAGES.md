@@ -3064,7 +3064,8 @@ internal/
             store (? * < > dropped, " as ', | as -, control characters as a
             space, the spaces a drop leaves closed up).
             bridge#80: a name Windows reserves (Reserved: CON, PRN, AUX, NUL,
-            COM0-9, LPT0-9, alone or before an extension, any case) gets an
+            COM0-9, LPT0-9, CONIN$, CONOUT$, alone or before an extension, any
+            case) gets an
             underscore after its stem; a standalone title Sanitize leaves empty
             ("???") is named by its ASIN (named); Suggest drops the book's own
             leading position from its titles as SuggestWith does (bridge#47).
