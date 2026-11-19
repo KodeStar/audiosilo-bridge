@@ -88,7 +88,7 @@ func (l looks) checkPodcast(ctx context.Context, src MarkerSource, lib link.Libr
 	}
 	if errors.Is(err, os.ErrNotExist) {
 		if err := l.probe(mount); err != nil {
-			st.Error = "the library is not writable here"
+			st.Error = "the library is not writable here: " + describeStatError(err)
 			return st, nil
 		}
 		if info == nil {
