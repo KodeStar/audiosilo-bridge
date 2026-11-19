@@ -15,7 +15,6 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/kodestar/audiosilo-bridge/internal/agent"
 	"github.com/kodestar/audiosilo-bridge/internal/jobs"
 	"github.com/kodestar/audiosilo-bridge/internal/link"
 	"github.com/kodestar/audiosilo-bridge/internal/mapping"
@@ -164,8 +163,10 @@ func (h *Handler) fetchBook(ctx context.Context, rep *jobs.Reporter, src mapping
 		if err == nil || mapping.BookReadSettled(err) || left <= 0 {
 			return book, err
 		}
-		if err := agent.SleepCtx(ctx, min(wait, left)); err != nil {
-			return nil, err
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(min(wait, left)):
 		}
 		wait = min(wait*2, bookRetryMax)
 	}
