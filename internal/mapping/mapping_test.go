@@ -484,8 +484,8 @@ func TestUnansweredCheckWithoutAState(t *testing.T) {
 	}
 }
 
-// A 429 ends the run: the libraries after it (and checks queued meanwhile)
-// aren't asked, keep their state and are due again after the Retry-After.
+// A 429 ends the pass: the libraries after it aren't asked, keep their state
+// and are due again after the Retry-After.
 func TestRateLimitEndsTheRun(t *testing.T) {
 	t.Parallel()
 	root, files := library(t)
@@ -517,6 +517,72 @@ func TestRateLimitEndsTheRun(t *testing.T) {
 	r.Check(context.Background(), src, mount, func() time.Time { return later.Add(2 * time.Minute) })
 	if r.Due(later.Add(2*time.Minute), 24*time.Hour) {
 		t.Fatal("still due after a run the server answered")
+	}
+}
+
+// queueing asks for library 2's check (an admin's mapping edit) while library
+// 1's read is out, then answers that read with err.
+type queueing struct {
+	*scripted
+	r     *Registry
+	mount MountFunc
+	err   error
+	once  sync.Once
+}
+
+func (s *queueing) Book(ctx context.Context, id int64, path string) (*link.Book, error) {
+	book, err := s.scripted.Book(ctx, id, path)
+	if id != 1 {
+		return book, err
+	}
+	s.once.Do(func() {
+		if s.r.Check(ctx, s, s.mount, time.Now, 2) {
+			panic("the queued check ran beside the running one")
+		}
+	})
+	return nil, s.err
+}
+
+// A mapping edit queued behind a pass a 429 ended is still checked right after
+// it, as an edit made after the run is: left to the hold, the library would
+// show its old folder's state at the new one for up to RetryMax.
+func TestQueuedCheckFollowsARateLimitedPass(t *testing.T) {
+	t.Parallel()
+	root, files := library(t)
+	moved, _ := library(t)
+	mounts := map[int64]string{1: root, 2: root, 3: root}
+	var mu sync.Mutex
+	mount := func(id int64, _ string) (string, bool) {
+		mu.Lock()
+		defer mu.Unlock()
+		return mounts[id], true
+	}
+	at := time.Date(2026, 11, 19, 10, 0, 0, 0, time.UTC)
+	r := NewRegistry()
+	r.spacing = time.Millisecond
+	r.SetLibraries([]link.Library{{ID: 1, Root: root}, {ID: 2, Root: root}, {ID: 3, Root: root}})
+	src := &scripted{book: &link.Book{Path: "Author/Book", Files: files}, err: map[int64]error{}}
+	r.Check(context.Background(), src, mount, func() time.Time { return at })
+	src.mu.Lock()
+	src.calls = nil
+	src.mu.Unlock()
+	mu.Lock()
+	mounts[2] = moved
+	mu.Unlock()
+	limited := &link.APIError{Status: http.StatusTooManyRequests, RetryAfter: 2 * time.Minute, RetryAfterSet: true}
+	later := at.Add(time.Hour)
+	r.Check(context.Background(), &queueing{scripted: src, r: r, mount: mount, err: limited}, mount, func() time.Time { return later })
+	if !slices.Equal(src.calls, []int64{1, 2}) {
+		t.Fatalf("asked for %v, want 1 (the 429) then the queued 2, never 3", src.calls)
+	}
+	if st, _ := r.Status(2); !st.Mapped || st.MountPath != moved {
+		t.Fatalf("the edited library kept its old folder's state: %+v", st)
+	}
+	if st, _ := r.Status(3); !st.Mapped {
+		t.Fatalf("library 3 lost its state: %+v", st)
+	}
+	if r.Due(later.Add(time.Minute), 24*time.Hour) || !r.Due(later.Add(2*time.Minute), 24*time.Hour) {
+		t.Fatal("the 429's libraries aren't held for its Retry-After")
 	}
 }
 

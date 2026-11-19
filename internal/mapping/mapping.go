@@ -414,10 +414,12 @@ func (r *Registry) Due(now time.Time, interval time.Duration) bool {
 // one asked for while another runs is done right after it (by that call, with
 // this call's src), so a mapping changed mid-check is never missed. A check the
 // server didn't answer keeps the library's last known state at the same mount
-// (a 429 or a 503 says nothing about the folder), and a 429 ends the run: the
-// libraries it hadn't reached yet, and those queued meanwhile, are due again
-// after the hold. It returns once there is nothing left to check, or ctx ends,
-// and reports whether it checked (false: queued behind the running check).
+// (a 429 or a 503 says nothing about the folder), and a 429 ends the
+// pass: the libraries it hadn't reached yet are due again after the hold. The checks queued meanwhile are still made (an admin's mapping edit,
+// Check now, a changed library list: they skip the hold, as they do when asked
+// for after the run), ending at their first 429 too. It returns once there is
+// nothing left to check, or ctx ends, and reports whether it checked (false:
+// queued behind the running check).
 func (r *Registry) Check(ctx context.Context, src BookSource, mount MountFunc, now func() time.Time, ids ...int64) bool {
 	r.mu.Lock()
 	if r.checking {
@@ -447,7 +449,8 @@ func (r *Registry) Check(ctx context.Context, src BookSource, mount MountFunc, n
 			}
 		}
 		r.mu.Unlock()
-		limited := false
+		// ended: a 429, which the rest of the pass would meet too.
+		ended := false
 		for i, l := range libs {
 			if ctx.Err() != nil {
 				break
@@ -465,32 +468,25 @@ func (r *Registry) Check(ctx context.Context, src BookSource, mount MountFunc, n
 			r.record(st, err, now())
 			if err != nil {
 				unanswered = err
-				if _, limited = link.RateLimited(err); limited {
+				if _, limited := link.RateLimited(err); limited {
+					ended = true
 					for _, rest := range libs[i+1:] {
 						r.markRetry(rest.ID)
 					}
 				}
 			}
 			r.mu.Unlock()
-			if limited {
+			if ended {
 				break
 			}
 		}
 		r.mu.Lock()
 		if r.gen != gen {
-			// The old link's 429 or failures say nothing about the new one: its
-			// queued checks run now, and only their answers set the hold.
-			limited, unanswered, pace.asked = false, nil, false
+			// The old link's failures say nothing about the new one: its queued
+			// checks run now, and only their answers set the hold.
+			unanswered, pace.asked = nil, false
 		}
-		if limited {
-			// Asking for the queued checks now would meet the same 429.
-			for _, l := range r.libs {
-				if r.pendAll || r.pend[l.ID] {
-					r.markRetry(l.ID)
-				}
-			}
-		}
-		if limited || ctx.Err() != nil || (!r.pendAll && len(r.pend) == 0) {
+		if ctx.Err() != nil || (!r.pendAll && len(r.pend) == 0) {
 			// A run that asked the server nothing (every folder missing) says
 			// nothing about it either: the hold stands.
 			if ctx.Err() == nil && r.gen == gen && (unanswered != nil || pace.asked) {

@@ -2216,8 +2216,9 @@ internal/
             moved mount, records the failure; so does a podcast check that found
             the folder without the library's marker, unproven: the marker was
             what proved that state, and the share may not be mounted) and flags
-            it due again, and a 429 ends the run (the rest, and checks queued
-            meanwhile, are flagged too).
+            it due again, and a 429 ends the pass (the rest
+            are flagged too; checks queued meanwhile are still made, as an edit
+            after the run is, and end at their first 429).
             Due waits out a hold after such a run: the answer's Retry-After (a zero
             one, or a past date, counts as none), else
             RetryFirst (1 min) doubling per such run in a row, at most RetryMax
