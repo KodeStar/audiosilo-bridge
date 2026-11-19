@@ -2567,7 +2567,12 @@ internal/
             Abandon, named by the server's old path, clears every record of
             its episode: at its path and where one moved (recordsOf), and drops
             one left under a folder that is gone (its partial, unrecorded then,
-            is swept once old). A job still working under the old name never
+            is swept once old). It never clears the record of a download still
+            running (a duplicate claim's, which shares it): one another running
+            row names stays (runningRecords, as a take-in and the day-old
+            cleanup leave it), and the episode's lock is waited on for
+            abandonWait (10 s) at most, a record whose lock is still held
+            staying too. A job still working under the old name never
             saves over, clears or abandons another show's record at its path
             (one moved there when names were swapped), nor its partial. Every
             job resolves its show folder's spelling on disk (podcast.RealName:

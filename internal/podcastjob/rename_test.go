@@ -2405,3 +2405,122 @@ func TestAFetchFollowsAShowRenamedWhileItsDownloadIsReadBack(t *testing.T) {
 	}
 	noRecords(t, s)
 }
+
+// abandonRecord saves a download record and its partial for job's episode and
+// answers the record.
+func abandonRecord(t *testing.T, s *service, root *os.Root, job jobs.Job) checkpoint {
+	t.Helper()
+	var p fetchParams
+	if err := json.Unmarshal(job.Params, &p); err != nil {
+		t.Fatal(err)
+	}
+	c := checkpoint{ServerHash: s.pairHash(), LibraryID: *job.LibraryID, ShowID: p.ShowID, EpisodeID: p.EpisodeID, Path: *job.Path, Temp: podcast.TempPrefix + nonce(), Offset: 6, Total: 100}
+	if err := root.WriteFile(c.partialName(), []byte("prefix"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.saveCheckpoint(job, root, &c, `"one"`); err != nil {
+		t.Fatal(err)
+	}
+	return c
+}
+
+// Abandon's wait for the episode's lock is bounded: a running download of the
+// episode (a duplicate claim's) holds it for as long as it runs, and the
+// abandoned job would keep its runner slot until then. The lock still held
+// after the wait, the record and the partial are that download's, and stay.
+func TestAbandonNeverWaitsOutARunningFetchOfItsEpisode(t *testing.T) {
+	h, job := audioHarness(t)
+	s := h.handler.s
+	root, err := os.OpenRoot(h.mount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	c := abandonRecord(t, s, root, job)
+	held, err := s.lockEpisode(context.Background(), root, *job.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.release()
+	was := abandonWait
+	abandonWait = 50 * time.Millisecond
+	defer func() { abandonWait = was }()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		h.handler.FetchJob().Abandon(context.Background(), job)
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Abandon waited on the lock of a running download")
+	}
+	if saved, ok := s.readCheckpoint(job, c.ShowID); !ok || saved.Temp != c.Temp {
+		t.Fatal("the running download's record was cleared", saved, ok)
+	}
+	if _, err := root.Lstat(c.partialName()); err != nil {
+		t.Fatal("the running download's partial was removed", err)
+	}
+	if v, _ := s.o.Vault.Get(c.Validator); v == "" {
+		t.Fatal("the running download's validator was dropped")
+	}
+}
+
+// Another open row of the episode (a duplicate claim) shares the abandoned
+// job's download record. While that fetch's row runs, the record is its own
+// to resume from, whoever holds the lock: stopped at a resumable point it
+// holds none, and neither does one whose show folder was renamed by hand
+// before it followed. Abandon leaves the record, its partial and its
+// validator; alone, the abandoned job's record goes.
+func TestAbandonLeavesTheRecordOfARunningFetchOfItsEpisode(t *testing.T) {
+	for _, c := range []struct {
+		name      string
+		duplicate bool
+		gone      bool
+	}{
+		{"lock free", true, false},
+		{"folder gone", true, true},
+		{"no other fetch", false, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			h, job := audioHarness(t)
+			s := h.handler.s
+			root, err := os.OpenRoot(h.mount)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer root.Close()
+			ids := []int64{job.ID}
+			if c.duplicate {
+				ids = append(ids, job.ID+1)
+			}
+			for _, id := range ids {
+				if err := h.db.RecordClaim(context.Background(), store.ServerJob{ID: id, Kind: FetchKind, LibraryID: job.LibraryID, Path: job.Path, Params: job.Params, Attempt: 1, ServerID: "server-1"}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			rec := abandonRecord(t, s, root, job)
+			partial := rec.partialName()
+			if c.gone {
+				renameShow(t, h, "Fixture Show", "Renamed Show")
+				partial = "Renamed Show/" + rec.Temp
+			}
+			// Ended already, as a cancelled job's own Run calls it.
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			h.handler.FetchJob().Abandon(ctx, job)
+			saved, ok := s.readCheckpoint(job, rec.ShowID)
+			v, _ := s.o.Vault.Get(rec.Validator)
+			_, perr := root.Lstat(partial)
+			if !c.duplicate {
+				if ok || v != "" || !errors.Is(perr, os.ErrNotExist) {
+					t.Fatal("the abandoned job's own record was left", ok, v, perr)
+				}
+				return
+			}
+			if !ok || saved.Temp != rec.Temp || v == "" || perr != nil {
+				t.Fatal("the record of a fetch still running was cleared", ok, v, perr)
+			}
+		})
+	}
+}

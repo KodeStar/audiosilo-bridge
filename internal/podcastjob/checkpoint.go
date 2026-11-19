@@ -660,6 +660,10 @@ func (s *service) takeLock(ctx context.Context, root *os.Root, episode string, c
 		if err := s.o.Wait(ctx, 100*time.Millisecond); err != nil {
 			return nil, err
 		}
+		// A wait that does not watch ctx itself still ends with it.
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 	}
 }
 

@@ -1121,12 +1121,25 @@ func (w *downloadWriter) progress() {
 	w.last = time.Now()
 }
 
+// abandonWait is how long Abandon waits for an episode's lock another job
+// holds: long enough for a holder that lets go at once (a cleanup, a clear),
+// never a download's length.
+var abandonWait = 10 * time.Second
+
 // Abandon handles a terminal cancel/lost claim after a resumable stop. Mapping
 // and identities must still match before any owned partial is removed. The
 // runner names the job by the server's path: a record moved with a show folder
 // renamed by hand (the job's own relocation, or a take-in since) is cleared
 // where it is now (recordsOf), as is one still at the job's path beside it,
 // and one left under a folder that is gone goes too.
+//
+// The record of a download still running is never cleared: another open row
+// of the episode (a duplicate claim) shares this job's record, and that fetch
+// resumes from it. Its lock, held for the whole download, is waited on for
+// abandonWait at most (the failed job holds its runner slot meanwhile), and a
+// record another running row names stays whoever holds the lock (running: a
+// fetch stopped at a resumable point holds none, and neither does one whose
+// folder is gone). The fetch's own end clears it, or the day-old cleanup.
 func (h *Fetch) Abandon(ctx context.Context, job jobs.Job) {
 	if job.Path == nil || job.LibraryID == nil || !podcast.ValidEpisodePath(*job.Path) {
 		return
@@ -1149,15 +1162,30 @@ func (h *Fetch) Abandon(ctx context.Context, job jobs.Job) {
 		return
 	}
 	defer func() { _ = root.Close() }()
+	running := func(checkpoint) bool { return false }
+	if s.o.DB != nil {
+		// Read even when ctx has ended (a cancelled job's own Run calls this).
+		rows, err := s.o.DB.OpenServerJobs(context.WithoutCancel(ctx))
+		if err != nil {
+			return // not known: nothing is cleared (the day-old cleanup's then)
+		}
+		running = s.runningRecords(rows, lib.ID, job.ID)
+	}
 	for _, at := range s.recordsOf(job, p) {
 		job.Path = &at
-		release, err := s.fileLock(ctx, root, at)
+		if running(checkpoint{ShowID: p.ShowID, EpisodeID: p.EpisodeID, Path: at}) {
+			continue
+		}
+		wait, stop := context.WithTimeout(ctx, abandonWait)
+		release, err := s.fileLock(wait, root, at)
+		stop()
 		if err != nil {
 			// Its folder is gone (renamed by hand while this job's row ran, so
 			// the take-in left its record here): no download works at this
 			// path, so the record goes rather than stay for good. Its partial,
 			// moved with the folder, is unrecorded then, and sweepPartials takes
-			// it once old.
+			// it once old. A lock still held after the wait is a download's,
+			// and so is the record.
 			if folderThere(root, path.Dir(at)) {
 				continue
 			}
