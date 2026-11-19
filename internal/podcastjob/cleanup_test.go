@@ -605,7 +605,9 @@ func TestSweepRecordsLeavesARecordAwaitingItsTakeIn(t *testing.T) {
 // hourly sweep, as an orphan's does, its partial left on disk unrecorded
 // (sweepPartials' once old and removable) and a published episode beside it
 // untouched: one under a show folder the Bridge may not search, one whose
-// partial cannot be opened, and a whole download never read back. A day-old
+// partial cannot be opened, a whole download never read back, and a partial
+// of another size than its record's (a fetch's clear of it may keep failing
+// where retain never runs). A day-old
 // resumable record whose partial and folder read fine, and a fresh one under
 // a barred folder, stay.
 func TestSweepRecordsDropsDayOldRecordsNoJobCanClear(t *testing.T) {
@@ -635,6 +637,7 @@ func TestSweepRecordsDropsDayOldRecordsNoJobCanClear(t *testing.T) {
 		"barred folder":  {c: checkpoint{Path: "Barred Show/one.mp3"}, swept: true},
 		"barred partial": {c: checkpoint{Path: show + "/two.mp3"}, swept: true},
 		"whole":          {c: checkpoint{Path: published, Offset: 6, SHA256: hex.EncodeToString(whole[:])}, swept: true},
+		"wrong size":     {c: checkpoint{Path: show + "/six.mp3", Offset: 5, Total: 100}, swept: true},
 		"resumable":      {c: checkpoint{Path: show + "/four.mp3"}},
 		"fresh barred":   {c: checkpoint{Path: "Barred Show/five.mp3"}, fresh: true},
 	}
@@ -649,7 +652,7 @@ func TestSweepRecordsDropsDayOldRecordsNoJobCanClear(t *testing.T) {
 		r.c.Temp, r.c.Validator = podcast.TempPrefix+nonce(), secrets.PodcastETagPrefix+nonce()
 		if r.c.Offset == 0 {
 			r.c.Offset, r.c.Total = 6, 100
-		} else {
+		} else if r.c.Total == 0 {
 			r.c.Total = r.c.Offset
 		}
 		r.c.UpdatedAt = old.Format(time.RFC3339)
@@ -691,10 +694,12 @@ func TestSweepRecordsDropsDayOldRecordsNoJobCanClear(t *testing.T) {
 	}
 }
 
-// cleanOwned drops a day-old record whose partial it cannot remove (a show
-// folder the Bridge may not write, its .audiosilo folder still writable for
-// the episode's lock) with its validator, rather than keep it for good, and
-// leaves the partial on disk, unrecorded.
+// cleanOwned drops a day-old record whose partial it cannot remove with its
+// validator, rather than keep it for good, and leaves the partial on disk,
+// unrecorded. A show folder the Bridge may not write (its .audiosilo folder
+// still writable for the episode's lock) stands in here for a partial a
+// share's lock or a file flag keeps: retain's own write check refuses such a
+// folder before it calls cleanOwned.
 func TestOwnedCleanupDropsADayOldRecordWhosePartialItCannotRemove(t *testing.T) {
 	requireNonRoot(t)
 	h, job := audioHarness(t)
@@ -776,5 +781,20 @@ func TestSweepRecordsKeepsTheRecordOfAFetchClaimedMidSweep(t *testing.T) {
 	}
 	if now, err := readRecord(dir, name); err != nil || now != c {
 		t.Fatal("the record of a fetch claimed mid-sweep was dropped", err)
+	}
+}
+
+// RealName lists the library's own folder: its failure, a permission refused
+// included, says nothing of the show folder, and no record outlives its jobs
+// for it (a share going away mid-sweep would otherwise cost every day-old
+// record of the library its resume).
+func TestOutlivedIgnoresTheLibraryFoldersOwnFailure(t *testing.T) {
+	c := checkpoint{Path: "Show/one.mp3", Temp: podcast.TempPrefix + nonce(), Offset: 6, Total: 100}
+	read := func(string) (*podcast.Feed, string, error) {
+		t.Fatal("the show folder was read")
+		return nil, "", nil
+	}
+	if outlived(nil, c, "Show", &os.PathError{Op: "lstat", Path: "Show", Err: syscall.EACCES}, read) {
+		t.Fatal("a record outlived its jobs for the library folder's own failure")
 	}
 }

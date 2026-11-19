@@ -2670,11 +2670,13 @@ internal/
             folder is gone, holds another show or holds the show taken in
             under another spelling, and those no job could resume or clear
             where they are (outlived: a show folder the Bridge may not search,
-            a partial that cannot be opened, EIO/ESTALE/EACCES, a whole
-            download never read back), their partials left on disk
+            a partial that cannot be opened, EIO/ESTALE/EACCES, or of
+            another size than the record's, a whole download never read
+            back), their partials left on disk
             unrecorded and logged (sweepRecords, which takes no episode lock
-            and so reads the open jobs again just before each drop; a folder
-            that cannot be read
+            and so reads the open jobs again just before each drop; a failure
+            of the library folder's own listing (RealName) tells nothing; a
+            folder that cannot be read
             for any other cause keeps them, as does a record whose partial is in a folder of its
             show renamed by hand and not taken in yet, which that take-in
             moves, and nothing goes while the library's marker is not there),
@@ -2763,7 +2765,9 @@ internal/
             the attempt write_failed (errPartialStuck), never a download
             beside it, its record left for the next attempt or the day-old
             cleanup, which drops the record then even when the partial stays
-            (cleanOwned, sweepRecords). One that could not be
+            (cleanOwned, sweepRecords; cleanOwned runs only in a show folder
+            retain may write, so a folder the Bridge may not write keeps its
+            records until it may again). One that could not be
             opened or read to tell (a share's hiccup: errPartialUnreadable) is
             never cleared: at the start
             (loadCheckpoint) the job fails write_failed with no GET, in the

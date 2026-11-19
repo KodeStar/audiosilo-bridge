@@ -17,10 +17,12 @@ import (
 
 // cleanOwned considers named checkpoint records and committed trash manifests
 // older than a day, then sweeps the show's unrecorded partials
-// (sweepPartials). A day-old record whose partial cannot be removed (a show
-// folder the Bridge may not write, a partial whose check keeps failing) goes
-// all the same, its partial left unrecorded and logged: kept, it would stay
-// for good. self is the calling job, whose own running row (at the
+// (sweepPartials). A day-old record whose partial cannot be removed (one a
+// share's lock or a file flag keeps, or whose check keeps failing) goes all
+// the same, its partial left unrecorded and logged: kept, it would stay for
+// good. A show folder the Bridge may not write never gets here: retain's own
+// write check (lockShow's beforeWrite) refuses it first, and its records stay
+// until the folder may be written again. self is the calling job, whose own running row (at the
 // show's path) is not a live writer of these records. A record a running
 // fetch relocated to the show (runningRecords) stays too.
 func (s *service) cleanOwned(ctx context.Context, root *os.Root, lib link.Library, mount, show string, self int64) {
@@ -206,22 +208,30 @@ func (s *service) forgetRecord(dir *os.Root, records []checkpoint, c checkpoint)
 // resume or clear it where it is: a whole download kept because it could not
 // be read back (complete: a day on, still not published), a show folder the
 // Bridge may not search (no job reads its feed.json or takes the episode's
-// lock there), or a partial that cannot be opened to tell (EIO, ESTALE, no
+// lock there), a partial that cannot be opened to tell (EIO, ESTALE, no
 // permission: loadCheckpoint keeps the first two for good, and dropPartial
-// cannot check them). A partial proven gone is not: the next fetch clears
-// its record. real and err are podcast.RealName's answer for c's folder.
+// cannot check them), or one of another size than the record's (no fetch
+// resumes it, and one whose clear keeps failing, a share's lock or a file
+// flag, fails every fetch errPartialStuck; retain's cleanOwned may never run
+// for the show). A partial proven gone is not: the next fetch clears its
+// record. real and err are podcast.RealName's answer for c's folder: an
+// error there is the library folder's own (RealName lists it), never the
+// show folder's, so it tells nothing, a permission refused included.
 func outlived(root *os.Root, c checkpoint, real string, err error, read func(string) (*podcast.Feed, string, error)) bool {
 	if c.complete() {
 		return true
 	}
-	if err == nil {
-		_, _, err = read(real)
-	}
 	if err != nil {
+		return false
+	}
+	if _, _, err := read(real); err != nil {
 		return errors.Is(err, os.ErrPermission)
 	}
-	_, err = partialSize(root, c.partialName())
-	return err != nil && !partialGone(err)
+	size, err := partialSize(root, c.partialName())
+	if err != nil {
+		return !partialGone(err)
+	}
+	return size != c.Offset
 }
 
 // validatorNamed reports whether another of records (as listed, read again
