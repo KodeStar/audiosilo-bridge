@@ -273,14 +273,19 @@ func prepare(show string, f *Feed) error {
 	return nil
 }
 
-// save writes f, already scrubbed, as show's feed.json updated at now.
+// save writes f, already scrubbed, as show's feed.json updated at now. The
+// cap, MaxFileBytes, is measured without the folder's name: every episode's
+// path repeats it, so a show folder renamed by hand to a longer name would
+// push a feed near the cap over it, and the take-in (Adopt) and every write
+// after it would fail for good (sizeLimit).
 func save(root *os.Root, show string, f *Feed, now time.Time) error {
 	f.UpdatedAt = now.UTC().Format(time.RFC3339)
 	b, err := json.MarshalIndent(f, "", "  ")
 	if err != nil {
 		return err
 	}
-	if len(b)+1 > MaxFileBytes {
+	limit := sizeLimit(show, len(f.Episodes))
+	if len(b)+1 > limit {
 		for i := range f.Episodes {
 			if f.Episodes[i].RemovedAt != "" {
 				f.Episodes[i].Description = ""
@@ -291,10 +296,18 @@ func save(root *os.Root, show string, f *Feed, now time.Time) error {
 			return err
 		}
 	}
-	if len(b)+1 > MaxFileBytes {
+	if len(b)+1 > limit {
 		return ErrTooLarge
 	}
 	return WriteAtomic(root, show, "feed.json", append(b, '\n'))
+}
+
+// sizeLimit is the most a feed.json of n episodes in show may hold:
+// MaxFileBytes plus the folder's name (as JSON spells it) once per episode
+// path, never more than a reader takes (maxReadBytes, the server's too).
+func sizeLimit(show string, n int) int {
+	name, _ := json.Marshal(show)
+	return min(MaxFileBytes+n*(len(name)-2), maxReadBytes)
 }
 
 // WriteAtomic is rooted at the checked mount, with exclusive hidden temporary

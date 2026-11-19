@@ -1,6 +1,7 @@
 package podcast
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"reflect"
@@ -504,5 +505,49 @@ func TestRealNameKeepsAnExactName(t *testing.T) {
 	}
 	if _, err := RealName(root, "Gone Show"); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal(err)
+	}
+}
+
+// A feed.json just under the cap in a folder renamed by hand to a longer
+// name: every episode path grows with the name, but the cap is measured
+// without it, so the take-in still writes it (it used to fail ErrTooLarge
+// for good) and so does the next write. Past the reader's own cap it is
+// still too large.
+func TestALongerNameNeverMakesAShowUnadoptable(t *testing.T) {
+	now := time.Date(2026, 10, 21, 8, 0, 0, 0, time.UTC)
+	root, _ := journalFixture(t)
+	f, err := Read(root, "Fixture Show")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Show.Description = strings.Repeat("x", MaxFileBytes)
+	b, _ := json.MarshalIndent(f, "", "  ")
+	f.Show.Description = f.Show.Description[:MaxFileBytes-(len(b)+1-MaxFileBytes)-8]
+	if _, err := Write(root, "Fixture Show", f, now); err != nil {
+		t.Fatal(err)
+	}
+	long := "Fixture Show With A Much Longer Name Given By Hand"
+	rename(t, root, long)
+	moved, from, err := ReadMoved(root, long)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Adopt(root, long, from, moved, now); err != nil {
+		t.Fatal("a longer name made the show unadoptable:", err)
+	}
+	after, err := Read(root, long)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := root.Stat(long + "/feed.json"); st.Size() <= MaxFileBytes {
+		t.Fatal("the test did not cross the cap", st.Size())
+	}
+	after.Episodes[0].Title += " (edited)"
+	if _, err := Write(root, long, after, now.Add(time.Hour)); err != nil {
+		t.Fatal("the next write failed:", err)
+	}
+	after.Show.Description = strings.Repeat("x", maxReadBytes)
+	if _, err := Write(root, long, after, now.Add(2*time.Hour)); !errors.Is(err, ErrTooLarge) {
+		t.Fatal("past the reader's cap:", err)
 	}
 }
