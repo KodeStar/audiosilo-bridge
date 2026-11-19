@@ -941,17 +941,6 @@ func TestGenerateIssueNeedsAGitHubToken(t *testing.T) {
 	})
 }
 
-// result is the done report's result for id.
-func (f *fakeServer) result(t *testing.T, id int64) Result {
-	t.Helper()
-	_, final := f.final(id)
-	var r Result
-	if err := json.Unmarshal(final.Result, &r); err != nil {
-		t.Fatalf("result %s: %v", final.Result, err)
-	}
-	return r
-}
-
 // A generate-and-share job whose claim says share_off (the server's
 // Contributions module is off, server#218) runs in local mode from the start:
 // no GitHub sign-in is asked for, its engine book keeps the results local, and
@@ -972,7 +961,9 @@ func TestGenerateShareOffAtTheClaim(t *testing.T) {
 	if b := hr.engineBook(61); b.ContribMode != store.ContribModeLocal {
 		t.Fatalf("engine book mode = %q, want local", b.ContribMode)
 	}
-	if r := hr.srv.result(t, 61); r.ShareSkipped != ShareSkippedContributionsOff || len(r.Contributed) != 0 || r.Characters == 0 {
+	var r Result
+	hr.result(61, &r)
+	if r.ShareSkipped != ShareSkippedContributionsOff || len(r.Contributed) != 0 || r.Characters == 0 {
 		t.Fatalf("result = %+v", r)
 	}
 }
@@ -999,7 +990,9 @@ func TestGenerateShareOffMidRun(t *testing.T) {
 	hr.waitFor("the engine book kept local", func() bool { return hr.engineBook(62).ContribMode == store.ContribModeLocal })
 	close(asr)
 	hr.waitFor("done", func() bool { s, _ := hr.srv.final(62); return s == link.StateDone })
-	if r := hr.srv.result(t, 62); r.ShareSkipped != ShareSkippedContributionsOff || len(r.Contributed) != 0 {
+	var r Result
+	hr.result(62, &r)
+	if r.ShareSkipped != ShareSkippedContributionsOff || len(r.Contributed) != 0 {
 		t.Fatalf("result = %+v", r)
 	}
 
@@ -1008,7 +1001,9 @@ func TestGenerateShareOffMidRun(t *testing.T) {
 	if b := hr.engineBook(63); b.ContribMode != store.ContribModeIssue {
 		t.Fatalf("engine book mode, never told = %q, want issue", b.ContribMode)
 	}
-	if r := hr.srv.result(t, 63); r.ShareSkipped != "" {
+	r = Result{}
+	hr.result(63, &r)
+	if r.ShareSkipped != "" {
 		t.Fatalf("result, never told = %+v", r)
 	}
 }
@@ -1035,7 +1030,9 @@ func TestGenerateShareOffLiftsASharePark(t *testing.T) {
 	if b := hr.engineBook(64); b.ContribMode != store.ContribModeLocal {
 		t.Fatalf("engine book mode = %q, want local", b.ContribMode)
 	}
-	if r := hr.srv.result(t, 64); r.ShareSkipped != ShareSkippedContributionsOff {
+	var r Result
+	hr.result(64, &r)
+	if r.ShareSkipped != ShareSkippedContributionsOff {
 		t.Fatalf("result = %+v", r)
 	}
 }

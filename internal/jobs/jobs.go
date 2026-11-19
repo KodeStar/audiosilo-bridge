@@ -44,10 +44,8 @@ type Job struct {
 	// once a refused token works again) instead of claiming it now, so an earlier
 	// run of it may have spent already.
 	Resumed bool
-	// ShareOff: the claim's answer told the job to keep its results local
-	// (link.Job.ShareOff); a resumed job hears it at its first report
-	// (Reporter.ShareOff).
-	ShareOff bool
+	// shareOff: the claim's answer said share_off (Reporter.ShareOff).
+	shareOff bool
 }
 
 // Handler runs one job kind.
@@ -506,7 +504,7 @@ func sameServer(a, b Server) bool {
 // jobOf is a claimed job as a Handler sees it.
 func jobOf(j *link.Job) Job {
 	return Job{ID: j.ID, Kind: j.Kind, LibraryID: j.LibraryID, Path: j.Path, Params: j.Params, Attempt: j.Attempts, Priority: j.Priority,
-		ShareOff: j.ShareOff}
+		shareOff: j.ShareOff}
 }
 
 // storedJob is a job the store recorded, as a Handler sees it.
@@ -658,7 +656,8 @@ func (r *Runner) release(ru *run, stranded bool) {
 // which must go out after the job's own context ended). It reports whether a
 // refused token stopped the job (left running, to resume under its claim).
 func (r *Runner) execute(ctx, base context.Context, srv Server, h Handler, ru *run) (stranded bool) {
-	rep := &Reporter{r: r, ru: ru, srv: srv, job: ru.job, cancel: ru.cancel, ctx: ctx, nudge: make(chan struct{}, 1)}
+	rep := &Reporter{r: r, ru: ru, srv: srv, job: ru.job, cancel: ru.cancel, ctx: ctx, nudge: make(chan struct{}, 1),
+		shareOff: ru.job.shareOff}
 	if ru.parked != "" {
 		rep.parked, rep.parkMsg = true, ru.parked
 		// The server hears a park whose code changes as a new park (a bell
@@ -978,9 +977,7 @@ type Reporter struct {
 	// one did): the server moves an open job with its book (a rename the scan
 	// noticed), and the job hears it here.
 	path string
-	// shareOff: an answer told the job to keep its results local
-	// (link.Job.ShareOff). It stays heard for the run: a share dropped is not
-	// taken up again if the server's module is turned back on.
+	// shareOff: the claim or an answer since said share_off (ShareOff).
 	shareOff bool
 	// localYielded is a LocalReporter's Yield, for Yielded (a handler's tests).
 	localYielded bool
@@ -1023,12 +1020,13 @@ func (p *Reporter) Path() string {
 }
 
 // ShareOff reports whether the server told the job to keep its results local,
-// filing nothing to the community: its claim's answer said so (Job.ShareOff),
-// or any answer to its reports since.
+// filing nothing to the community (link.Job.ShareOff): its claim's answer or
+// any answer to its reports since. It stays heard for the run: a share dropped
+// is not taken up again if the server's module is turned back on.
 func (p *Reporter) ShareOff() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.job.ShareOff || p.shareOff
+	return p.shareOff
 }
 
 // Last is the progress last recorded.

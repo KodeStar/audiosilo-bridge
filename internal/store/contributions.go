@@ -257,11 +257,12 @@ func (db *DB) TouchContribution(ctx context.Context, id int64, issueSeenAt strin
 // SetBookContribMode sets a book's own contribution mode (ContribModeLocal,
 // ContribModeIssue), which the contributing stage reads when it runs: a
 // sidecars.generate job whose share the server turned off keeps its results
-// local (server#218). It bumps updated_at.
+// local (server#218). Like SetBookChapters it deliberately does NOT bump
+// updated_at: the mode is not a change of pipeline position, and a bump would
+// reorder the Running list.
 func (db *DB) SetBookContribMode(ctx context.Context, id int64, mode string) error {
 	res, err := db.sql.ExecContext(ctx,
-		`UPDATE books SET contrib_mode=?, updated_at=? WHERE id=?`,
-		mode, timestamp(nowFn()), id)
+		`UPDATE books SET contrib_mode=? WHERE id=?`, mode, id)
 	return checkAffected(res, err)
 }
 

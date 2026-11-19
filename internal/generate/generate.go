@@ -18,7 +18,6 @@ import (
 	"io/fs"
 	"log/slog"
 	"path/filepath"
-	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -424,10 +423,13 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 // when the answer came is not taken back (finish reports what was filed). A
 // failed write is tried again at the next look.
 func (h *Handler) keepShareLocal(ctx context.Context, eng Engine, r *run, b *store.Book) {
-	if r.params.Contribute != ContributeIssue || !r.rep.ShareOff() || b != nil && state.State(b.State) == state.Done {
+	if r.params.Contribute != ContributeIssue || !r.rep.ShareOff() {
 		return
 	}
 	if b != nil {
+		if state.State(b.State) == state.Done {
+			return
+		}
 		if err := h.o.DB.SetBookContribMode(ctx, b.ID, store.ContribModeLocal); err != nil {
 			h.o.Log.Warn("generate: keeping the results local failed", "job", r.job.ID, "book", b.ID, "err", err)
 			return
@@ -435,8 +437,7 @@ func (h *Handler) keepShareLocal(ctx context.Context, eng Engine, r *run, b *sto
 	}
 	r.params.Contribute, r.shareSkipped = ContributeLocal, ShareSkippedContributionsOff
 	h.o.Log.Info("generate: the server turned this job's share off; its results stay local", "job", r.job.ID)
-	if b == nil || state.State(b.State) != state.Contributing || state.Status(b.Status) != state.StatusNeedsAttention ||
-		!slices.Contains(shareParks, state.ParkCode(b.ParkCode)) {
+	if b == nil || !state.IsParkedWith(b.Status, b.ParkCode, shareParks...) {
 		return
 	}
 	if err := eng.RetryAsRead(ctx, *b); err != nil && !errors.Is(err, store.ErrStatusChanged) {

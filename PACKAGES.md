@@ -2194,9 +2194,9 @@ internal/
             Job.Resumed (Phase 1c) tells a handler the runner resumed the job under
             its claim (a restart's recovery, resumeStranded) rather than claimed it
             now, so an earlier run of it may have spent already. Reporter.ShareOff
-            (server#218) is the server's share_off: the claim's (Job.ShareOff) or
-            any report answer's since, kept for the run once heard (a share
-            dropped is not taken up again).
+            (server#218) is the server's share_off: the claim answer's
+            (link.Job.ShareOff) or any report answer's since, kept for the run
+            once heard (a share dropped is not taken up again).
             Recovery runs once the link is up: a kind no longer run is failed.
             Nothing is sent that the server refuses for good: a result that isn't a
             JSON object of at most 64 KiB fails the job (errUnreportable) and

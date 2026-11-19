@@ -537,7 +537,7 @@ func TestReporterShareOff(t *testing.T) {
 	got := map[int64][]bool{}
 	var mu sync.Mutex
 	h := handler{kind: "k.v", lane: LaneLight, fn: func(ctx context.Context, j Job, rep *Reporter) (any, error) {
-		seen := []bool{j.ShareOff, rep.ShareOff()}
+		seen := []bool{j.shareOff, rep.ShareOff()}
 		switch j.ID {
 		case 2:
 			srv.mu.Lock()
@@ -546,15 +546,13 @@ func TestReporterShareOff(t *testing.T) {
 			waitFor(t, rep.ShareOff)
 			srv.mu.Lock()
 			srv.shareOff = nil
-			n := len(srv.updates[2])
 			srv.mu.Unlock()
-			waitFor(t, func() bool { srv.mu.Lock(); defer srv.mu.Unlock(); return len(srv.updates[2]) > n+1 })
+			n := srv.triesOf(2)
+			waitFor(t, func() bool { return srv.triesOf(2) > n+1 })
 			seen = append(seen, rep.ShareOff())
 		case 3:
-			srv.mu.Lock()
-			n := len(srv.updates[3])
-			srv.mu.Unlock()
-			waitFor(t, func() bool { srv.mu.Lock(); defer srv.mu.Unlock(); return len(srv.updates[3]) > n+1 })
+			n := srv.triesOf(3)
+			waitFor(t, func() bool { return srv.triesOf(3) > n+1 })
 			seen = append(seen, rep.ShareOff())
 		}
 		mu.Lock()
