@@ -74,16 +74,24 @@ var errOverBudget = errors.New("the episode download ran past its ceiling")
 
 // errPartialUnreadable is loadCheckpoint's, download's and consume's when the
 // proven partial a resume appends to could not be opened or read back to
-// tell whether it is still the one recorded (a network share's hiccup, a
-// permission): it is kept, record and all, and the attempt fails or is tried
-// again, never restarted from zero.
+// tell whether it is still the one recorded (a network share's hiccup): it is
+// kept, record and all, and the attempt fails or is tried again, never
+// restarted from zero. A permission the Bridge lacks is not one
+// (partialLost).
 var errPartialUnreadable = errors.New("the episode partial could not be read")
 
 // errPartialChanged is a partial proven no longer the one a resume appends
-// to (partialGone): gone, not a regular file, another size, or shorter than
-// its prefix when read back. download starts the episode again from zero,
-// once.
+// to, or one the Bridge may no longer open (partialLost): gone, not a
+// regular file, no permission, another size, or shorter than its prefix when
+// read back. download starts the episode again from zero, once.
 var errPartialChanged = errors.New("the episode partial changed on disk")
+
+// errPartialStuck is a partial that must be cleared for the episode to start
+// again from zero (partialLost) but that the clear could not remove (a show
+// folder the Bridge may not write): the attempt fails write_failed rather
+// than restart beside it, and the record stays for the next attempt or the
+// day-old cleanup (cleanOwned).
+var errPartialStuck = errors.New("the episode partial could not be removed")
 
 func (s *service) budget(parent context.Context) (context.Context, *budget) {
 	ctx, cancel := context.WithCancelCause(parent)
@@ -238,6 +246,9 @@ func (h *Fetch) run(parent context.Context, claimed *jobs.Job, rep *jobs.Reporte
 	// download resumes from its partial.
 	s.adoptOwn(job, root, claimedAt, params, "")
 	c, tag, err := s.loadCheckpoint(job, root, f.ShowID, e.ID)
+	if errors.Is(err, errPartialStuck) {
+		return nil, stuckPartial(err)
+	}
 	if err != nil {
 		// Not known to have changed: the partial and its record stay for the
 		// next attempt (a share's hiccup passes), and no GET is spent.
@@ -565,8 +576,9 @@ func realPath(root *os.Root, p string) string {
 
 // keepsPartial reports whether a failed fetch's exit keeps c's partial and
 // record for the next attempt: the record at the job's path still names c's
-// partial (a whole one with c's hash), and the partial is not proven gone or
-// another size (a check that cannot tell keeps it, partialGone).
+// partial (a whole one with c's hash), and the partial is not proven gone,
+// barred to the Bridge or another size (a check that cannot tell keeps it,
+// partialLost).
 func (s *service) keepsPartial(job jobs.Job, root *os.Root, c *checkpoint) bool {
 	saved, ok := s.readCheckpoint(job, c.ShowID)
 	if !ok || saved.EpisodeID != c.EpisodeID || saved.Temp != c.Temp || saved.SHA256 != c.SHA256 {
@@ -574,7 +586,7 @@ func (s *service) keepsPartial(job jobs.Job, root *os.Root, c *checkpoint) bool 
 	}
 	st, err := podcast.LstatRegular(root, c.partialName())
 	if err != nil {
-		return !partialGone(err)
+		return !partialLost(err)
 	}
 	return st.Size() == saved.Offset
 }
@@ -804,7 +816,9 @@ func (s *service) download(ctx context.Context, b *budget, job *jobs.Job, root *
 				return fail("write_failed", "The episode partial is incomplete.")
 			}
 			restarted = true
-			s.clearCheckpoint(*job, root, c)
+			if !s.clearCheckpoint(*job, root, c) {
+				return stuckPartial(err)
+			}
 			tag = ""
 			return nil
 		}
@@ -932,7 +946,11 @@ func (s *service) consume(ctx context.Context, b *budget, job *jobs.Job, root *o
 	var file *os.File
 	var err error
 	if appending {
-		file, err = openPartial(root, name, c.Offset)
+		if err = s.o.Fault.Hit("append"); err != nil {
+			err = partialError(err)
+		} else {
+			file, err = openPartial(root, name, c.Offset)
+		}
 	} else {
 		file, err = root.OpenFile(name, os.O_RDWR|os.O_EXCL|os.O_CREATE, 0o600)
 	}
@@ -952,7 +970,7 @@ func (s *service) consume(ctx context.Context, b *budget, job *jobs.Job, root *o
 			if errors.Is(err, io.EOF) {
 				return podcast.Fetch{}, tag, errPartialChanged
 			}
-			return podcast.Fetch{}, tag, fmt.Errorf("%w: %w", errPartialUnreadable, err)
+			return podcast.Fetch{}, tag, partialError(err)
 		}
 	}
 	c.Total = total
@@ -1152,10 +1170,10 @@ func (s *service) keepHome(ctx context.Context, root *os.Root, c *checkpoint, fi
 }
 
 // openPartial opens the proven partial at name for the append. A partial
-// proven gone, replaced by a link or another file, or of another size since
-// it was proven is errPartialChanged; any other failure (a share's hiccup, no
-// permission) errPartialUnreadable. Neither is a reason to write to whatever
-// is there.
+// proven gone, replaced by a link or another file, barred to the Bridge (no
+// permission) or of another size since it was proven is errPartialChanged;
+// any other failure (a share's hiccup) errPartialUnreadable. Neither is a
+// reason to write to whatever is there.
 func openPartial(root *os.Root, name string, size int64) (*os.File, error) {
 	file, err := podcast.OpenRegularFile(root, name, os.O_RDWR)
 	if err != nil {
@@ -1180,10 +1198,18 @@ func keptPartial(c *checkpoint, err error) error {
 	return fmt.Errorf("%w: %w", err, fail("write_failed", "The episode's partial download could not be read."))
 }
 
-// partialError is err, a partial's open or check, as errPartialChanged when it
-// proves the partial gone or replaced (partialGone), else errPartialUnreadable.
+// stuckPartial is the job's failure for a partial the restart from zero could
+// not remove (err wraps the clear's cause).
+func stuckPartial(err error) error {
+	slog.Warn("podcasts: an episode's partial could not be removed to download it again", "err", err)
+	return fmt.Errorf("%w: %w", errPartialStuck, fail("write_failed", "The episode's partial download could not be removed."))
+}
+
+// partialError is err, a partial's open, check or read, as errPartialChanged
+// when it proves the partial gone, replaced or not the Bridge's to open any
+// more (partialLost), else errPartialUnreadable.
 func partialError(err error) error {
-	if partialGone(err) {
+	if partialLost(err) {
 		return fmt.Errorf("%w: %w", errPartialChanged, err)
 	}
 	return fmt.Errorf("%w: %w", errPartialUnreadable, err)

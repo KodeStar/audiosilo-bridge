@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -248,9 +249,10 @@ func TestStaleIdentityCheckpointIsDropped(t *testing.T) {
 }
 
 // A proven partial swapped for a link after its check is never appended to:
-// like one of another size or one gone, it is proven changed
-// (errPartialChanged), which restarts the episode. Only a partial that could
-// not be opened to tell is errPartialUnreadable, kept.
+// like one of another size, one gone or one barred to the Bridge (EACCES,
+// EPERM: lasting faults), it is proven changed (errPartialChanged), which
+// restarts the episode. Only a partial that could not be opened to tell (an
+// I/O error) is errPartialUnreadable, kept.
 func TestOpenPartialRefusesSwappedPartial(t *testing.T) {
 	dir := t.TempDir()
 	root, _ := os.OpenRoot(dir)
@@ -267,10 +269,18 @@ func TestOpenPartialRefusesSwappedPartial(t *testing.T) {
 	}
 	if os.Geteuid() != 0 {
 		os.Chmod(filepath.Join(dir, "partial"), 0)
-		if _, err := openPartial(root, "partial", 6); !errors.Is(err, errPartialUnreadable) || errors.Is(err, errPartialChanged) {
-			t.Fatal("a partial that could not be opened taken for a changed one", err)
+		if _, err := openPartial(root, "partial", 6); !errors.Is(err, errPartialChanged) {
+			t.Fatal("a partial barred to the Bridge not taken for a lost one", err)
 		}
 		os.Chmod(filepath.Join(dir, "partial"), 0o600)
+	}
+	for _, lasting := range []error{syscall.EACCES, syscall.EPERM} {
+		if err := partialError(&os.PathError{Op: "open", Path: "partial", Err: lasting}); !errors.Is(err, errPartialChanged) {
+			t.Fatal("a lasting fault kept the partial", lasting, err)
+		}
+	}
+	if err := partialError(&os.PathError{Op: "read", Path: "partial", Err: syscall.EIO}); !errors.Is(err, errPartialUnreadable) || errors.Is(err, errPartialChanged) {
+		t.Fatal("a partial that could not be read taken for a changed one", err)
 	}
 	root.Remove("partial")
 	if _, err := openPartial(root, "partial", 6); !errors.Is(err, errPartialChanged) {

@@ -316,11 +316,14 @@ func (s *service) dropStaleCheckpoint(job jobs.Job, root *os.Root, showID, episo
 // loadCheckpoint is the job's saved record of its episode, with the sealed
 // ETag a resume sends, when its partial is still the one it records: a
 // resumable prefix (Offset < Total, a strong ETag) or a whole download
-// (complete). A record whose partial is proven gone or changed (partialGone:
-// not there, not a regular file, another size) is cleared, and a new record
-// answered. One whose partial could not be opened to tell (a network share's
-// hiccup) is kept, partial and all, with errPartialUnreadable: only a
-// definite absence or mismatch may cost a download its bytes.
+// (complete). A record whose partial is proven gone or changed, or that the
+// Bridge may not open (partialLost: not there, not a regular file, no
+// permission, another size), is cleared, and a new record answered; a
+// partial lost so that the clear cannot remove either fails the attempt
+// write_failed (errPartialStuck), its record left for the next attempt or
+// cleanOwned. One whose partial could not be opened to tell (a network
+// share's hiccup) is kept, partial and all, with errPartialUnreadable: only a
+// definite absence, mismatch or lasting fault may cost a download its bytes.
 func (s *service) loadCheckpoint(job jobs.Job, root *os.Root, showID, episodeID string) (checkpoint, string, error) {
 	c := checkpoint{ServerHash: s.pairHash(), LibraryID: *job.LibraryID, ShowID: showID, EpisodeID: episodeID, Path: *job.Path}
 	saved, ok := s.readCheckpoint(job, showID)
@@ -328,15 +331,20 @@ func (s *service) loadCheckpoint(job jobs.Job, root *os.Root, showID, episodeID 
 		return c, "", nil
 	}
 	tag, _ := s.o.Vault.Get(saved.Validator)
-	size, err := partialSize(root, saved.partialName())
-	if err != nil && !partialGone(err) {
+	size, err := int64(0), s.o.Fault.Hit("load")
+	if err == nil {
+		size, err = partialSize(root, saved.partialName())
+	}
+	if err != nil && !partialLost(err) {
 		return saved, "", fmt.Errorf("%w: %w", errPartialUnreadable, err)
 	}
 	resumable := saved.Offset > 0 && saved.Offset < saved.Total && netguard.StrongETag(tag)
 	if err == nil && size == saved.Offset && saved.Total <= s.o.MaxEpisodeBytes && (saved.complete() || resumable) {
 		return saved, tag, nil
 	}
-	s.clearCheckpoint(job, root, &saved)
+	if !s.clearCheckpoint(job, root, &saved) && err != nil {
+		return c, "", fmt.Errorf("%w: %w", errPartialStuck, err)
+	}
 	return c, "", nil
 }
 
@@ -358,33 +366,46 @@ func partialSize(root *os.Root, name string) (int64, error) {
 
 // partialGone reports whether err, a partial's open or check, proves it gone
 // or not the Bridge's file any more: not there (ENOENT), or not a regular
-// file (a link, a folder, a file swapped in since its check). Any other error
-// (a share's hiccup, a permission) does not tell, and keeps it.
+// file (a link, a folder, a file swapped in since its check).
 func partialGone(err error) bool {
-	return errors.Is(err, os.ErrNotExist) || errors.Is(err, podcast.ErrInvalidFile) || errors.Is(err, errPartialChanged)
+	return errors.Is(err, os.ErrNotExist) || errors.Is(err, podcast.ErrInvalidFile)
+}
+
+// partialLost reports whether err, a partial's open or check, means its bytes
+// cannot be resumed: gone (partialGone), or a permission the Bridge lacks on
+// its own file (EACCES, EPERM), a lasting fault as the server's share-fault
+// rule has it, not a hiccup that passes. The partial is cleared and the
+// episode downloaded from 0. Any other error (a share's hiccup) does not
+// tell, and keeps it.
+func partialLost(err error) bool {
+	return partialGone(err) || errors.Is(err, os.ErrPermission)
 }
 
 // clearCheckpoint removes the owned partial, its sealed validator and the
 // record of c's show at the job's path (only under the pairing that made
 // them), then resets c to no partial. A partial it cannot remove keeps its
-// validator and the record, for cleanOwned once it is a day old; an earlier
-// such partial the record still names is tried again first, so no later clear
-// in the job drops its record. A record of another show at the path (one
+// validator and the record, for cleanOwned once it is a day old, and the
+// answer is false; an earlier such partial the record still names is tried
+// again first, so no later clear in the job drops its record. A record of another show at the path (one
 // adoptCheckpoints moved there for a show folder renamed by hand to this
 // job's folder name, an episode file name both shows use) is another record,
 // named by its own show (recordName), and never read here.
-func (s *service) clearCheckpoint(job jobs.Job, root *os.Root, c *checkpoint) {
+func (s *service) clearCheckpoint(job jobs.Job, root *os.Root, c *checkpoint) bool {
 	defer func() { c.Temp, c.Offset, c.Total, c.Validator, c.SHA256 = "", 0, 0, "", "" }()
-	if c.ServerHash != s.pairHash() || !s.dropPartial(root, c) {
-		return
+	if c.ServerHash != s.pairHash() {
+		return true
+	}
+	if !s.dropPartial(root, c) {
+		return false
 	}
 	if saved, ok := s.readCheckpoint(job, c.ShowID); ok && saved.Temp != c.Temp && !s.dropPartial(root, &saved) {
-		return
+		return false
 	}
 	if dir, err := s.checkpointRoot(); err == nil {
 		_ = dir.Remove(s.checkpointName(job, c.ShowID))
 		_ = dir.Close()
 	}
+	return true
 }
 
 // adoptCheckpoints moves this pairing's download records for the episodes of

@@ -2738,12 +2738,15 @@ internal/
             error, not invalid_audio, and a lease check it cuts is no lost claim,
             identity_changed), a retry wait it cuts ends on the host's
             last answer, and its own faults (no streamer, its partial) are
-            write_failed. A partial proven changed (gone, not a regular file,
-            another size, shorter than its prefix: partialGone,
-            errPartialChanged) restarts the episode from zero once per job
-            first, checked before the ranged GET so no request is spent on it.
-            One that could not be opened or read to tell (a share's hiccup, a
-            permission: errPartialUnreadable) is never cleared: at the start
+            write_failed. A partial proven changed or barred to the Bridge
+            (gone, not a regular file, EACCES/EPERM as a lasting fault, another
+            size, shorter than its prefix: partialLost, errPartialChanged)
+            restarts the episode from zero once per job first, checked before
+            the ranged GET so no request is spent on it; one the restart cannot
+            remove fails the attempt write_failed (errPartialStuck), its record
+            left for the next attempt or cleanOwned. One that could not be
+            opened or read to tell (a share's hiccup: errPartialUnreadable) is
+            never cleared: at the start
             (loadCheckpoint) the job fails write_failed with no GET, in the
             download the attempt is tried again as a host's failure is, and a
             job that ends so keeps the partial and its record (run's exit,
